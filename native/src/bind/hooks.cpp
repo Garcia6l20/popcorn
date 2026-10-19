@@ -160,11 +160,11 @@ auto machine_handle::add_intercept(address at, nb::object handler, bool once) ->
   return hook{std::move(handle), slot_};
 }
 
-auto machine_handle::add_probe(address at) -> probe_hook
+auto machine_handle::add_probe(address at, std::optional<bool> secure) -> probe_hook
 {
   auto made = std::make_shared<std::optional<probe_hook>>();
-  at_boundary([made, at, slot = slot_](core::machine& target) {
-    made->emplace(target.add_probe(at), slot);
+  at_boundary([made, at, secure, slot = slot_](core::machine& target) {
+    made->emplace(target.add_probe(at, secure), slot);
   });
   return std::move(**made);
 }

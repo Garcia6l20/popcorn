@@ -12,7 +12,7 @@ import popcorn
 import pytest
 from popcorn.arm import Reg
 
-from .conftest import M33_JSON, Machines
+from .conftest import M33_JSON, Machines, StorageModel
 
 SRAM = 0x2000_8000
 
@@ -107,8 +107,11 @@ def test_registers_read_back_by_attribute_and_by_enum(machines: Machines) -> Non
 
 
 def test_the_generated_enum_is_the_arch_module_register_list(machines: Machines) -> None:
+    """The enum ends with the registers only a machine with TrustZone enabled lists."""
     m = machines()
-    assert [r.value for r in Reg] == list(m.reg.names())
+    names = list(m.reg.names())
+    assert [r.value for r in Reg][: len(names)] == names
+    assert [r.value for r in Reg][len(names) :][:3] == ["secure", "msp_s", "msp_ns"]
 
 
 def test_symbols_resolve_across_images(machines: Machines, driver: popcorn.Image) -> None:
@@ -123,7 +126,7 @@ def test_symbols_resolve_across_images(machines: Machines, driver: popcorn.Image
 def test_views_refuse_access_from_another_task_during_a_run_and_refs_reach_it(
     machines: Machines,
 ) -> None:
-    m = machines()
+    m = machines(models={"TESTDEV": StorageModel})
     word, r0, rw = m.ref.mem.u32[SRAM], m.ref.reg.r0, m.ref.periph.TESTDEV.RW
 
     async def scenario() -> None:

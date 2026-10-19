@@ -118,4 +118,9 @@ void model_context::request_stop(stop_reason reason, std::string detail)
 {
   services.request_stop(reason, std::move(detail));
 }
+
+void model_context::install_firewall(bus_firewall& firewall)
+{
+  services.install_firewall(firewall);
+}
 }

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from popcorn_build.firmware import add_firmware
+from popcorn_build.firmware import add_firmware, add_trustzone_firmware
 
 here = Path(__file__).resolve().parent
 
@@ -119,3 +119,13 @@ if consts is not None:
 _, isr = add_firmware("api", "isr", [here / "isr.c"])
 if isr is not None:
     isr.private.link_flags.append(SECTION_BOUNDS)
+
+tz_pair = here / "tz_pair"
+add_trustzone_firmware(
+    "api",
+    "tz_pair",
+    [tz_pair / "tz_pair_s.c"],
+    [tz_pair / "tz_pair.c"],
+    tz_pair / "tz_pair_s.ld",
+    tz_pair / "tz_pair.ld",
+)

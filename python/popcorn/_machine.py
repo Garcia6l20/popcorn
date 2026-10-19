@@ -15,7 +15,7 @@ import warnings
 import weakref
 from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Protocol, cast, overload, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, overload, runtime_checkable
 
 from popcorn import _core
 from popcorn._arena import Arena
@@ -75,7 +75,7 @@ from popcorn._hooks import (
 )
 from popcorn._host import awaited, watch_logs
 from popcorn._image import Image, Location, Symbol, location_of
-from popcorn._image_view import ImageView, debug_infos, find_variable
+from popcorn._image_view import ImageView, debug_infos, find_variable, selected_images
 from popcorn._model_build import build_model
 from popcorn._nvic import Irqs, Nvic
 from popcorn._observe import (
@@ -86,6 +86,7 @@ from popcorn._observe import (
     TraceRecording,
     open_trace,
 )
+from popcorn._option_bytes import OptionBytes
 from popcorn._part_description import PartDescription, load_description
 from popcorn._rcc import RccOptions
 from popcorn._refs import (
@@ -315,7 +316,8 @@ def error_prefix(machine: Machine) -> str:
 
 def stack_access(machine: Machine) -> tuple[Read32, Functions]:
     """A word reader for the unwinder, None outside the regions of `machine`'s description or
-    on an access error, and the function symbols of its loaded images."""
+    on an access error, and the function symbols of its loaded images, every image's own
+    where two define one name."""
     regions = [(r.start, r.start + r.size) for r in machine.description.regions]
 
     def read32(address: int) -> int | None:
@@ -326,7 +328,9 @@ def stack_access(machine: Machine) -> tuple[Read32, Functions]:
         except EmulationError:
             return None
 
-    functions = Functions((s.name, s.value, s.size) for s in machine.symbols.values() if s.function)
+    functions = Functions(
+        (s.name, s.value, s.size) for image in machine.images for s in image.symbols if s.function
+    )
     return read32, functions
 
 
@@ -486,6 +490,36 @@ class _Linked(Protocol):
     def reset(self, member: str, kind: ResetKind = ResetKind.POWER_ON) -> None: ...
 
 
+def _check_image_names(images: Sequence[Image]) -> None:
+    seen: set[str] = set()
+    for index, image in enumerate(images):
+        if image.name is None:
+            continue
+        if image.name in seen:
+            raise ConfigError(
+                f"two images are named {image.name}",
+                file="images",
+                key=f"images[{index}].name",
+                expected="a name no other image has",
+            )
+        seen.add(image.name)
+
+
+def _probe_state(state: object, registers: Sequence[str]) -> bool | None:
+    if state is None:
+        return None
+    if state not in ("secure", "nonsecure"):
+        raise ValueError(f'a probe state is "secure", "nonsecure" or None, not {state!r}')
+    if "secure" not in registers:
+        raise ConfigError(
+            "a probe state needs a machine with TrustZone enabled",
+            file="probe",
+            key="state",
+            expected="no state on a machine without TrustZone enabled",
+        )
+    return state == "secure"
+
+
 class Machine:
     """One emulated MCU: a description, the images loaded into it and its run state.
 
@@ -625,6 +659,7 @@ class Machine:
         trace_capacity: int = 4096,
         spin_threshold: int = 0,
         strict_peripherals: bool = False,
+        faults: Literal["stop", "handler"] = "stop",
         vector_table: int | None = None,
         slice_instructions: int = 1_000_000,
         slice_wall_budget: float = 1e-3,
@@ -637,6 +672,7 @@ class Machine:
         audio: Mapping[str, Mapping[Block, AudioOptions]] | None = None,
         usb: Mapping[str, UsbHostOptions] | None = None,
         supply: SupplyOptions | None = None,
+        option_bytes: OptionBytes | None = None,
         name: str | None = None,
         _plugin_models: Mapping[str, tuple[Loaded, str]] | None = None,
     ) -> None:
@@ -649,7 +685,17 @@ class Machine:
             cpi: Core cycles per instruction, above 0.
             trace_capacity: Records the always-on trace ring keeps, above 0.
             spin_threshold: Iterations of a loop making no progress before a SPIN stop, 0 off.
-            strict_peripherals: Whether an unmodelled register access raises ModelError.
+            strict_peripherals: Whether a firmware or DMA access to an unmodelled register raises
+                ModelError, an access to an STM32U5 or STM32H5 debug block without a model too,
+                such as the CTI. A host access through `m.mem`, `m.ref.mem` or a register's
+                bus `read()` and writes raises ModelError for both whatever this flag says.
+            faults: What a processor fault does. "stop" ends the run with a FAULT stop at the
+                faulting instruction. "handler" enters the firmware's handler as the core
+                does, HardFault, MemManage, BusFault, UsageFault or SecureFault, and the run
+                goes on. Lockup and an INVSTATE fault stop under both. With TrustZone, a STKOF
+                of the additional state context alone and a fault while taking a derived
+                exception stop too. Without TrustZone, the INVPC, UNSTKERR, STKERR, STKOF on
+                entry and VECTTBL faults stop too.
             vector_table: Address of the vector table reset reads, None for the default.
             slice_instructions: Instructions after which a slice of the machine's thread serves
                 its requests and checks its waiters.
@@ -679,6 +725,10 @@ class Machine:
                 not listed has no host: it sees no VBUS and never enumerates.
             supply: Supply voltages of the board, None for its defaults, a 3.0 V VDDA. VDDA is
                 the reference of every conversion of the built-in ADC model.
+            option_bytes: User option bytes the built-in FLASH model encodes into its option
+                registers, None for the description's registers. With `tzen` the core boots
+                from the secure boot address and the machine has TrustZone, without it from the
+                non-secure one. `vector_table` wins over both.
             name: Name of the machine in its log records and errors, the description's part
                 when None. Not part of any configuration digest or snapshot.
             _plugin_models: Private, set by `MachineDescription.machine`: the loaded plugin and
@@ -689,7 +739,8 @@ class Machine:
                 models key names no peripheral, a model is refused, or devices are refused:
                 a peripheral that is not a built-in bus of their kind or has a board model,
                 a chip select pin the description lacks, a device already serving a live
-                machine or listed twice, an `SpiController` next to another device on its SPI.
+                machine or listed twice, an `SpiController` next to another device on its SPI,
+                or two images share a name.
                 With `rcc`: an HSE outside 4 to 50 MHz, an LSE of 0 Hz or above 1 MHz, an RCC
                 with a Python model or one no built-in model serves.
                 With `audio`: a key that is not an SAI with the built-in model, two keys naming
@@ -698,10 +749,20 @@ class Machine:
                 `audio.<SAI>.<block>`. With `usb`: a key that is not a USB device
                 controller with the built-in model, two keys naming one controller, a bus reset
                 or a timeout not above 0, named as `usb.<NAME>`. With `supply`: a VDDA outside 1620
-                to 3600 mV.
+                to 3600 mV. With `option_bytes`, before anything is built: `tzen` on a part
+                without a security extension or whose family has no IDAU table, as
+                `option_bytes.tzen`, a part whose FLASH has no built-in model encoding option
+                bytes or has a Python or plugin model, as `option_bytes`, a value the family
+                refuses, as `option_bytes.<field>`: a page past the bank, an HDP area that does
+                not start at its secure area's first page or ends past its last, a boot address
+                not aligned to 128 bytes, `dualbank=False`.
             ImageError: An image does not fit the memory map.
-            ValueError: `name` is empty or holds whitespace or a dot.
+            TypeError: `option_bytes` is not an `OptionBytes`.
+            ValueError: `name` is empty or holds whitespace or a dot, or `faults` is neither
+                "stop" nor "handler".
         """
+        if faults not in ("stop", "handler"):
+            raise ValueError(f'faults is "stop" or "handler", not {faults!r}')
         if slice_instructions <= 0 or not slice_wall_budget > 0:
             raise ValueError("slice_instructions and slice_wall_budget must be above 0")
         check_machine_name(name)
@@ -713,6 +774,7 @@ class Machine:
         config.trace_capacity = trace_capacity
         config.spin_threshold = spin_threshold
         config.strict_peripherals = strict_peripherals
+        config.fault_handlers = faults == "handler"
         config.vector_table = vector_table
         config.config_digest = config_digest
         config.arena_start = arena_base
@@ -727,6 +789,8 @@ class Machine:
             config.rcc_lse_hz = rcc.lse_hz
         if supply is not None:
             config.vdda_mv = supply.vdda_mv
+        if option_bytes is not None:
+            config.option_bytes = _option_bytes_config(option_bytes)
         aliases = {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None}
         config.usb_hosts = checked_usb(usb or {}, aliases)
         config.slice_instructions = slice_instructions
@@ -738,6 +802,8 @@ class Machine:
         self._config_digest = config_digest
         self._model_context = _ContextCell(contextvars.copy_context())
         config.models_context = self._model_context
+        images = (image,) if isinstance(image, Image) else tuple(image)
+        _check_image_names(images)
         self._handle = _core.MachineHandle(description, config)
         self._images: list[Image] = []
         self._refs: Refs | None = None
@@ -816,7 +882,7 @@ class Machine:
         self._sentinel = (
             self._arena.sentinel if self._arena is not None else _free_sentinel(description)
         )
-        for one in (image,) if isinstance(image, Image) else image:
+        for one in images:
             self.load(one)
 
     def __del__(self) -> None:
@@ -942,6 +1008,23 @@ class Machine:
         return self._handle.pc()
 
     @property
+    def security_state(self) -> Literal["secure", "nonsecure"] | None:
+        """The core's security state, None on a machine without TrustZone enabled: a core
+        without the Security Extension, or option bytes with TZEN=0. Writing `m.reg.secure`
+        at a stop switches it, as BXNS does. A handler cannot write `secure`, `control_s`,
+        `control_ns` or `control`: code the core already translated would keep the old state
+        for the rest of the run, so the write raises MachineRunning. Without TrustZone a handler
+        still writes `control`.
+
+        Raises:
+            MachineRunning: The machine is busy, read outside its callbacks: use
+                `m.read(m.ref.reg.secure)`.
+        """
+        if "secure" not in self._registers.names():
+            return None
+        return "secure" if self._registers.secure else "nonsecure"
+
+    @property
     def pending_events(self) -> int:
         """Events waiting in the event queue, model and core events alike.
 
@@ -955,14 +1038,23 @@ class Machine:
         return self._handle.pending_events()
 
     def load(self, image: Image) -> None:
-        """Load one more image over memory, such as an application after a bootloader.
+        """Load one more image over memory, such as an application after a bootloader. A
+        symbols-only image, `Image.elf(path, load=False)`, writes nothing: it only adds its
+        symbols and DWARF, and coverage and trace see it after every loaded image.
 
         Raises:
+            ConfigError: The image's name is already the name of a loaded image.
             ImageError: A segment falls outside the description's memory regions.
             MachineRunning: The machine is busy, outside its handlers.
+            MachineBusy: A `trace` selecting call records is open. Close it first: the trace
+                names call symbols by the ids it was opened with.
         """
         self._require_stopped()
-        self._handle.load(image.native)
+        _check_image_names((*self._images, image))
+        if image.loaded:
+            self._handle.load(image.native)
+        else:
+            self._handle.add_symbols(image.native)
         self._images.append(image)
 
     def model(self, peripheral: str) -> Model | None:
@@ -1030,7 +1122,12 @@ class Machine:
         """Guest memory, typed accessors included: `m.mem.u32[addr] = 5`.
 
         Reads and writes raise MachineRunning while the machine is busy, outside its callbacks:
-        `m.read(m.ref.mem.u32[addr])` and `m.write` access it then.
+        `m.read(m.ref.mem.u32[addr])` and `m.write` access it then. An access that touches a
+        register of a peripheral without a model, an offset of a peripheral no register
+        covers, or a debug block without a model such as the STM32U5 CTI, raises ModelError
+        naming it, strict_peripherals or not, and logs nothing: Python does not read or write
+        unmodelled data. `m.periph.<name>.<reg>.value`, the field getters and `poke()` stay the
+        way to the stored registers of a peripheral without a model.
         """
         return self._memory
 
@@ -1399,12 +1496,15 @@ class Machine:
         every kind.
 
         `ranges` and `functions` limit the trace to records caused by that code, everywhere
-        when both are None. Block and memory records cost a native hook while traced, nothing
-        crosses to Python per record. Leaving the block removes the sink, then closes the file.
+        when both are None. Call records name the symbols of the loaded images, then of the
+        symbols-only images, as they were when the trace opened, so `load` is refused while
+        a trace with call records is open. Block and memory records cost a native hook while
+        traced, nothing crosses to Python per record. Leaving the block removes the sink, then
+        closes the file.
 
         Raises:
             ConfigError: A kind is not selectable, or a range is invalid.
-            SymbolError: No loaded image has a function name.
+            SymbolError: No loaded or symbols-only image has a function name.
             FormatError: The file cannot be created, written or closed, from `popcorn._obs`.
             MachineRunning: The machine is busy, outside its handlers.
         """
@@ -1451,16 +1551,19 @@ class Machine:
         """
         return self._peripherals
 
-    def sym(self, name: str) -> int:
-        """Address of a symbol of the loaded images, the last loaded first. A function's address
-        has bit 0 clear, `fn_ptr` gives the value a function pointer holds.
+    def sym(self, name: str, image: str | None = None) -> int:
+        """Address of a symbol of the loaded images, the last loaded first, or of the image
+        named `image` alone, for a name such as `main` both images of a secure and Non-secure
+        pair define. A function's address has bit 0 clear, `fn_ptr` gives the value a function
+        pointer holds.
 
         Raises:
-            SymbolError: No loaded image has the name, with close matches.
+            SymbolError: No loaded image has the name, with close matches, or no image is named
+                `image`, with the image names.
         """
-        return self.address_of(name)
+        return self._symbol(name, image).value
 
-    def fn_ptr(self, function: str | Symbol) -> int:
+    def fn_ptr(self, function: str | Symbol, image: str | None = None) -> int:
         """The value a C function pointer to `function` holds: its address with bit 0 set, the
         Thumb state bit every Cortex-M function pointer carries. Pass it to `call` where the
         firmware expects a callback, or write it to a function-pointer variable.
@@ -1468,14 +1571,16 @@ class Machine:
             await m.call("HAL_DMA_RegisterCallback", handle, 0, m.fn_ptr("on_done"))
 
         Reads the loaded images only, never the machine: works parked or running, from any
-        thread. A name is looked up as `sym` does, the last loaded image first.
+        thread. A name is looked up as `sym` does, the last loaded image first, or in the image
+        named `image`.
 
         A routine defined in assembly without `.type name, %function` is STT_NOTYPE and raises
         TypeError here. The loader leaves such a symbol's value as written, often already odd:
         use `m.sym(name)` for it, with bit 0 as the assembler set it.
 
         Raises:
-            SymbolError: No loaded image has the name, with close matches.
+            SymbolError: No loaded image has the name, with close matches, or no image is named
+                `image`.
             TypeError: The symbol is not a function, STT_FUNC, or `function` is an address.
         """
         if not isinstance(cast(object, function), str | Symbol):
@@ -1483,7 +1588,7 @@ class Machine:
                 f"fn_ptr takes a function name or Symbol, not {function!r}: an address carries"
                 " no symbol type"
             )
-        symbol = function if isinstance(function, Symbol) else self._symbol(function)
+        symbol = function if isinstance(function, Symbol) else self._symbol(function, image)
         if not symbol.function:
             raise TypeError(
                 f"{symbol.name} is not a function symbol: for a routine without"
@@ -1491,14 +1596,17 @@ class Machine:
             )
         return symbol.value | 1
 
-    def _symbol(self, name: str) -> Symbol:
+    def _symbol(self, name: str, image: str | None = None) -> Symbol:
         missing: SymbolError | None = None
-        for image in reversed(self._images):
+        for one in reversed(self._selected(image)):
             try:
-                return image.lookup(name)
+                return one.lookup(name)
             except SymbolError as error:
                 missing = missing or error
         raise missing or SymbolError(f"no image loaded to look up {name}", name=name)
+
+    def _selected(self, image: str | None) -> list[Image]:
+        return selected_images(self._images, image)
 
     @property
     def symbols(self) -> dict[str, Symbol]:
@@ -1508,16 +1616,18 @@ class Machine:
             merged.update((s.name, s) for s in image.symbols)
         return merged
 
-    def var(self, name: str) -> Var:
-        """A module-scope variable of the loaded ELF images, typed from their DWARF.
+    def var(self, name: str, image: str | None = None) -> Var:
+        """A module-scope variable of the loaded ELF images, typed from their DWARF, the last
+        loaded first, or of the image named `image` alone.
 
         Its reads and writes follow `mem`: parked or from a callback, and through
-        `m.ref.var(name)` while the machine is busy.
+        `m.ref.var(name, image)` while the machine is busy.
 
         Raises:
-            SymbolError: No loaded image declares the variable, with close matches.
+            SymbolError: No loaded image declares the variable, with close matches, or no
+                image is named `image`.
         """
-        _, info, variable = find_variable(self._images, name)
+        _, info, variable = find_variable(self._selected(image), name)
         return Var(self._memory, info, variable.type, variable.address, name)
 
     @property
@@ -1629,7 +1739,9 @@ class Machine:
                 unbegun, `began` False, its stop in the result. Thread mode is IPSR 0: a return
                 to thread mode with other exceptions still active counts, and so does a thread
                 put to sleep on exit, SCR.SLEEPONEXIT. A ConfigError for a stack that does not
-                fit can come after the wait ran, the ABI and sentinel are checked before.
+                fit can come after the wait ran, the ABI and sentinel are checked before. So
+                can one for the security state of a TrustZone core, checked before only when
+                the core is in thread mode.
                 Cancelling the task during the wait parks the machine where the wait reached,
                 no call begun. False calls at once wherever the core is. None calls at once and
                 warns with `HandlerCallWarning` when a handler is active.
@@ -1647,7 +1759,11 @@ class Machine:
             NotImplementedError: A parameter is a struct passed by value.
             MachineBusy: A run, step, wait or call is active.
             ModelError: A model failed during the call, or the call touched an unmodelled
-                register under strict_peripherals.
+                register or debug block under strict_peripherals.
+            ConfigError: On a TrustZone core, the function is in memory of the other security
+                state than the core's current one, key `entry`, or a Non-secure call's arena
+                has Secure parts, key `arena`. A call never switches state. A Secure call may
+                use a Non-secure arena, and returns to its sentinel in either state.
 
         Warns:
             HandlerCallWarning: `from_thread` is None and the call began with a handler active.
@@ -1957,7 +2073,9 @@ class Machine:
         watch = self._keep(Watch(hook, self._callback_table, keys[0]))
         return watch
 
-    def probe(self, target: int | str | Symbol) -> Probe:
+    def probe(
+        self, target: int | str | Symbol, state: Literal["secure", "nonsecure"] | None = None
+    ) -> Probe:
         """Count the core's arrivals at an address or symbol, natively, with no handler and no
         GIL: `Probe.count`, `Probe.first_at`, `await Probe.hit(within=)`. It never stops the
         run.
@@ -1977,18 +2095,25 @@ class Machine:
         exact at the instruction, also inside a translated block, and kept across `restore()`
         like every hook. `remove_hooks()` removes it.
 
+        With `state`, "secure" or "nonsecure", an arrival counts only when the core runs in
+        that security state, read at the arrival, so a function both states run counts the
+        arrivals of one. Without it every arrival counts and no state is read.
+
         On a member of a linked system, add it before the system's `running()` or `start()`.
         While the system runs, the member counts and `wait_until` or `wait_for(Reached)` on the
         member wait for an arrival, but `hit()` cannot read its start.
 
         Raises:
+            ValueError: `state` is neither None, "secure" nor "nonsecure".
+            ConfigError: `state` on a machine without TrustZone enabled.
             SymbolError: `target` names no symbol.
             MachineRunning: Called from a handler of this machine during a slice, or the machine
                 is a member of a linked system that runs.
             RuntimeError: Called from a callback of another machine.
         """
+        secure = _probe_state(state, self._registers.names())
         address = self.address_of(target)
-        hook = self._handle.add_probe(address)
+        hook = self._handle.add_probe(address, secure)
         return self._keep(Probe(hook, address, self._probe_hit, self._handle.remove_probe))
 
     async def _probe_hit(self, hook: _core.ProbeHook, within: VirtualDuration) -> bool:
@@ -2683,7 +2808,7 @@ class Machine:
     async def _reached_free(
         self, address: int, for_: VirtualDuration | None, deadline: VirtualTime | None
     ) -> Stop:
-        hook = self._handle.add_probe(address)
+        hook = self._handle.add_probe(address, None)
         try:
             return await self._waited(
                 _Native(self._handle.predicate_probe_hit(hook)), for_, deadline
@@ -3132,6 +3257,26 @@ def _pty_opener(handle: _core.MachineHandle) -> PtyOpener:
         return handle.open_uart_pty(name, link)
 
     return opened
+
+
+def _option_bytes_config(option_bytes: OptionBytes) -> _core.OptionBytesConfig:
+    if not isinstance(cast(object, option_bytes), OptionBytes):
+        raise TypeError(
+            f"option_bytes: expected an OptionBytes, not {type(option_bytes).__qualname__}"
+        )
+    config = _core.OptionBytesConfig()
+    config.tzen = option_bytes.tzen
+    config.secwm1_all = option_bytes.secwm1 == "all"
+    config.secwm1 = option_bytes.secwm1 if isinstance(option_bytes.secwm1, tuple) else None
+    config.secwm2_all = option_bytes.secwm2 == "all"
+    config.secwm2 = option_bytes.secwm2 if isinstance(option_bytes.secwm2, tuple) else None
+    config.hdp1 = option_bytes.hdp1
+    config.hdp2 = option_bytes.hdp2
+    config.secboot = option_bytes.secboot
+    config.nsboot = option_bytes.nsboot
+    config.swap_bank = option_bytes.swap_bank
+    config.dualbank = option_bytes.dualbank
+    return config
 
 
 def _model_makers(

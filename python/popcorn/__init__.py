@@ -12,6 +12,7 @@ from popcorn._dwarf_views import Var
 from popcorn._enums import FaultKind, FloatAbi, ResetKind, StopReason, ValueKind
 from popcorn._errors import (
     BudgetExceeded,
+    BusAccessError,
     ConfigError,
     EmulationError,
     FaultError,
@@ -57,6 +58,7 @@ from popcorn._machine_description import (
     Use,
 )
 from popcorn._observe import MachineCoverage, Ring, TraceRecording
+from popcorn._option_bytes import OptionBytes
 from popcorn._part_description import (
     PartDescription,
     description_digest,
@@ -92,6 +94,7 @@ __all__ = [
     "Bin",
     "Boot",
     "BudgetExceeded",
+    "BusAccessError",
     "Call",
     "CallResult",
     "Condition",
@@ -127,6 +130,7 @@ __all__ = [
     "MemoryRef",
     "MissingInput",
     "ModelError",
+    "OptionBytes",
     "Param",
     "PartDescription",
     "Periph",

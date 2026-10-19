@@ -75,19 +75,41 @@ struct machine_options
    * are dispatched at one instruction count, detail 'events repeat without time passing: <owner>
    * kind <n>'. */
   std::uint32_t spin_threshold{};
-  /** @brief Whether every access to a register of an unmodelled peripheral fails the run. The
-   * log keeps one record per register. */
+  /** @brief Whether every CPU or DMA access to a register of an unmodelled peripheral, or to a
+   * raz_wi range, fails the run with model_error. The arch module's and the models' own debugger
+   * accesses are neither refused nor logged. A memory_view access to either throws model_error
+   * whatever this flag says. The log keeps one record per register and per range. */
   bool strict_peripherals{};
   /** @brief Address of the vector table the arch module's reset reads. Empty: the start of the
    * region containing address 0, otherwise of the first region in description order with execute
    * access. */
   std::optional<address> vector_table{};
+  /** @brief Whether the part boots with its security extension enabled, TZEN = 1 on an STM32.
+   * Passed to the arch module in `arch::arch_context::trustzone`. The machine refuses it with
+   * config_error keyed `trustzone` on a core without `core_desc::trustzone`. */
+  bool trustzone{};
+  /** @brief IDAU of the part, used while trustzone is set. Passed to the arch module in
+   * `arch::arch_context::idau`. The machine refuses with config_error keyed `idau` ranges
+   * without trustzone, and keyed `idau[i]` a range whose start is not below its end or below
+   * the end of the range before it. */
+  std::vector<idau_region> idau{};
   /** @brief RAM region mapped read-write and not executable outside the description, such as a
    * call argument arena. Part of snapshot memory, so a restore resets it. Named by its `name`,
    * `scratch` when empty. Must stay clear of the description's regions and peripherals, which
    * the machine refuses with config_error, and of the arch module's system space, which the arch
    * module's attach refuses. A description alias never targets it. */
   std::optional<address_range> scratch{};
+  /** @brief Ranges outside the description that read as zero and ignore writes, such as debug
+   * blocks a part has and no model serves. No storage, nothing in snapshots. The first access to
+   * each range is logged as log_kind::model_warning, once per machine life. Under
+   * strict_peripherals every CPU or DMA access to a range raises model_error naming the range,
+   * with an empty register, and an arch or model debugger access reads zero unlogged. A
+   * memory_view access raises model_error, strict or not. Each range must be
+   * non-empty, start and size multiples of the engine page, and stay clear of the description's
+   * regions and peripherals, of scratch and of the other ranges, which the machine refuses with
+   * config_error keyed `raz_wi[i]`. The engine refuses a range over the arch module's system
+   * space with emulation_error. */
+  std::vector<address_range> raz_wi{};
   /** @brief Digest of the configuration the machine was built from, such as a project digest,
    * stored in every snapshot as `snapshot_data::config_digest`. Opaque to the core. */
   std::string config_digest{};
@@ -228,9 +250,11 @@ struct call_result
  *
  * Construction order: the arch module from the factory, the engine it asks for with
  * `arch::engine()`, memory map, `arch_context{engine, description, clock, arch events, *this,
- * options.faults}` then `arch::attach`, then one model_context and model per peripheral, then
- * the engine hooks. Events of owner `arch::arch_event_owner` go to `arch::on_event`, other
- * owners to the model of that peripheral index.
+ * options.faults, options.trustzone, options.idau}` then `arch::attach`, then one model_context,
+ * with options.strict_peripherals and options.trustzone, and model per peripheral, the bus
+ * firewall a model installs included, then the engine hooks. Events of owner
+ * `arch::arch_event_owner` go to `arch::on_event`, other owners to the model of that peripheral
+ * index.
  *
  * Running. Only run_slice(), call() and the slices of a call begun by begin_call() execute guest
  * code. While a slice runs, running() is true and a second run_slice() throws machine_busy. The
@@ -260,6 +284,8 @@ public:
    *         peripheral.
    * @throws config_error when options.vector_table is empty and the description has no region
    *         with execute access.
+   * @throws config_error when options.trustzone or options.idau is refused, as their
+   *         documentation states, before the engine opens.
    * @throws emulation_error when the engine cannot be opened, or is not the pinned dev build.
    */
   machine(part_description description, arch::arch_factory factory, machine_options options)
@@ -322,13 +348,33 @@ public:
    * @param loaded Image to load, copied for symbols, lines and digest.
    * @throws image_error naming the segment and region when a segment falls outside every
    *         region.
+   * @throws machine_busy while a trace sink selecting call records is attached.
    * @throws machine_running while a slice runs, handlers included.
    */
   void load(popcorn::image::image const& loaded);
 
-  /** @brief Images loaded so far, in load order. Their symbols concatenated in this order are the
-   * symbol table call trace records index. */
+  /**
+   * @brief Adds a symbols-only image, such as the ELF of a secure part embedded as raw bytes in
+   *        a loaded image: nothing is written to memory and it adds no image digest. Coverage
+   *        and trace see it as a loaded image, after every loaded one: its executable segments
+   *        are default coverage ranges and its symbols take trace symbol ids after the loaded
+   *        images' ones, see observed_images(). locate() falls back to its symbols where the
+   *        loaded images give no symbol, and to its lines where they give no line, the last
+   *        added first.
+   * @param symbols Image whose symbols and lines are kept, copied.
+   * @throws machine_busy while a trace sink selecting call records is attached.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  void add_symbols(popcorn::image::image const& symbols);
+
+  /** @brief Images loaded so far, in load order, the symbols-only images left out. */
   [[nodiscard]] auto loaded_images() const noexcept -> std::span<popcorn::image::image const>;
+
+  /** @brief The loaded images in load order, then the symbols-only images in the order
+   * add_symbols() added them: the images coverage and trace see. Their symbols concatenated in
+   * this order are the symbol table call trace records index, so a later load moves the ids of
+   * symbols-only images, never those of loaded images. */
+  [[nodiscard]] auto observed_images() const noexcept -> std::span<popcorn::image::image const>;
 
   /**
    * @brief Locates an address the way a stop's `where` does: the function or object containing
@@ -425,7 +471,8 @@ public:
    * @brief Begins a guest function call: saves the engine registers of `arch::arch::registers()`
    *        and the `arch::arch::save()` bytes, then `arch::arch::prepare_call()`. The slices that
    *        follow run the call. Reaching `frame.return_sentinel` stops with
-   *        stop_reason::returned.
+   *        stop_reason::returned, also when the engine faults the fetch there, as a security
+   *        lookup does for a sentinel of the other security state.
    * @param frame Call to make, its entry and sentinel set.
    * @throws machine_busy when a call is already in progress, or the core is held, see
    *         hold_core().
@@ -490,6 +537,13 @@ public:
 
   /** @brief Guest memory view, valid while the machine lives. */
   [[nodiscard]] auto mem() noexcept -> memory_view;
+
+  /**
+   * @brief Guest memory view filtered as DAP accesses of one security state, see memory_view.
+   * @param secure Whether the view requests Secure accesses.
+   * @return The view, valid while the machine lives.
+   */
+  [[nodiscard]] auto mem(bool secure) noexcept -> memory_view;
 
   /** @brief CPU register view, valid while the machine lives. */
   [[nodiscard]] auto regs() noexcept -> register_view;
@@ -557,7 +611,8 @@ public:
    * @throws emulation_error when @p saved was taken by another machine.
    * @throws config_error when a snapshot read back from bytes names another description, other
    *         images or another `machine_options::config_digest`, or has another format, or when its
-   * memory regions, the scratch region included, are not this machine's.
+   * memory regions, the scratch region included, are not this machine's, and keyed
+   *         `trustzone` when its `machine_options::trustzone` or `machine_options::idau` differs.
    */
   void restore(core::snapshot const& saved);
 
@@ -582,11 +637,16 @@ public:
    *        An arrival counts once, before the instruction executes and before every intercept
    *        of the address, whatever their add order, also when an intercept then skips the
    *        function or stops the run: resuming from that stop does not count it again.
+   *        With @p secure, an arrival counts only when the core runs in that security state,
+   *        read from the engine at the arrival. Without it no state is read.
    * @param at Code address, any instruction, not only a block start.
+   * @param secure Security state an arrival must run in, empty for any.
    * @return The handle removing the probe, and the counts, which outlive it.
    * @throws machine_running while a slice runs, handlers included.
+   * @throws config_error for @p secure on a machine without TrustZone enabled.
    */
-  [[nodiscard]] auto add_probe(address at) -> probe_handle;
+  [[nodiscard]] auto add_probe(address at, std::optional<bool> secure = std::nullopt)
+      -> probe_handle;
 
   /**
    * @brief Calls a handler when a function returns: captures the arguments at entry and the
@@ -746,17 +806,36 @@ private:
   void do_request_reset(reset_kind kind) override;
   void do_end_slice() override;
   void do_end_after_instruction() override;
-  auto do_read(address addr, std::uint8_t size, initiator by)
+  auto do_read(address addr, std::uint8_t size, bus_attrs attrs)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto do_write(address addr, std::uint8_t size, std::uint32_t value, initiator by)
+  auto do_write(address addr, std::uint8_t size, std::uint32_t value, bus_attrs attrs)
       -> std::expected<void, bus_error> override;
-  auto do_read_block(address addr, std::span<std::byte> out, initiator by)
+  auto do_read_granted(address addr, std::uint8_t size, bus_attrs attrs, memory_grant& grant)
+      -> std::expected<std::uint32_t, bus_error> override;
+  auto do_write_granted(
+      address       addr,
+      std::uint8_t  size,
+      std::uint32_t value,
+      bus_attrs     attrs,
+      memory_grant& grant) -> std::expected<void, bus_error> override;
+  auto read_memory(mapped_region const& region, address addr, std::uint8_t size, bus_attrs attrs)
+      -> std::uint32_t;
+  auto write_memory(
+      mapped_region const& region,
+      address              addr,
+      std::uint8_t         size,
+      std::uint32_t        value,
+      bus_attrs            attrs) -> std::expected<void, bus_error>;
+  auto do_read_block(address addr, std::span<std::byte> out, bus_attrs attrs)
       -> std::expected<void, block_error> override;
-  auto do_write_block(address addr, std::span<std::byte const> in, initiator by)
+  auto do_write_block(address addr, std::span<std::byte const> in, bus_attrs attrs)
       -> std::expected<void, block_error> override;
   void do_trace(trace_record const& record) override;
   void do_log(log_record record) override;
   void do_watch_reads(address at, std::uint32_t size, bool on) override;
+  void do_install_firewall(periph::bus_firewall& firewall) override;
+  void do_memory_policy_changed() override;
+  auto do_emulated_instruction(address at) -> emulated_arrival override;
 
   friend class memory_view;
   friend class register_view;
@@ -775,6 +854,7 @@ private:
   std::unique_ptr<arch::arch>                   arch_;
   std::vector<std::unique_ptr<peripheral_slot>> peripherals_{};
   std::vector<popcorn::image::image>            images_{};
+  std::size_t                                   loaded_count_{};
   trace_ring                                    trace_;
   std::shared_ptr<hook_registry>                hooks_;
   std::unique_ptr<run_state>                    run_;

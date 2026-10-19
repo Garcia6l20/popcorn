@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <type_traits>
 
@@ -27,6 +28,25 @@ concept guest_scalar =
  * `machine_services::read` and its siblings: MMIO dispatch and watches see it, a model may treat a
  * debugger access as free of side effects. Bus errors are values.
  *
+ * An access touching data no model serves throws model_error before any byte moves, whatever
+ * machine_options::strict_peripherals says, and logs nothing: a register of a peripheral
+ * without a model, named with its register, an offset of any peripheral no register covers,
+ * with an empty register, and a machine_options::raz_wi range, named by the range with an empty
+ * register. The arch module's and the models' own debugger accesses, through machine_services,
+ * are not refused. Peripheral storage stays reachable without the bus, as the Python register
+ * views' peek and poke do.
+ *
+ * A filtered view, `machine::mem(bool)`, makes each access a privileged DAP access of one
+ * security state, DDI0553B.z B13.3.4 RWMRR, on a machine with TrustZone enabled. The core's SAU
+ * and IDAU attribute it first, `arch::debug_attrs`: a Non-secure access to a Secure or
+ * Non-secure callable address fails with bus_error::denied, a Secure access to a Non-secure
+ * address goes out Non-secure, and an exempt address keeps the requested state. The bus firewall
+ * then decides it as a CPU access with those attributes: a read it refuses reads 0, a write it
+ * refuses is dropped, a bus_error verdict fails. A write to flash follows the rule of a read
+ * there. No illegal access event is raised. Block accesses are split into the accesses of
+ * `machine_services::read_block`, each attributed on its own. On a machine without TrustZone a
+ * filtered view acts as the unfiltered one.
+ *
  * Valid while its machine lives. Every function throws machine_running while a slice runs,
  * except from a handler of that slice: handlers run while the core is paused at an instruction
  * boundary.
@@ -42,11 +62,27 @@ public:
   {}
 
   /**
+   * @brief Creates a view whose accesses are filtered as DAP accesses of one security state,
+   *        as `machine::mem(bool)` does. See the class.
+   * @param target Machine whose memory the view reads and writes.
+   * @param secure Whether the view requests Secure accesses.
+   */
+  memory_view(machine& target, bool secure) noexcept : machine_{&target}, secure_{secure}
+  {}
+
+  /** @brief Security state the view requests, empty for the unfiltered debugger view. */
+  [[nodiscard]] auto security() const noexcept -> std::optional<bool>
+  {
+    return secure_;
+  }
+
+  /**
    * @brief Reads one naturally aligned access.
    * @param addr Guest address, aligned to @p size.
    * @param size Access size in bytes, 1, 2 or 4.
    * @return Value right-aligned to @p size, or why the bus refused the access.
    * @throws machine_running while a slice runs, outside its handlers.
+   * @throws model_error for an access to data no model serves, see the class.
    */
   [[nodiscard]] auto read(address addr, std::uint8_t size) const
       -> std::expected<std::uint32_t, bus_error> pre(size == 1 or size == 2 or size == 4)
@@ -59,6 +95,7 @@ public:
    * @param value Value right-aligned to @p size.
    * @return Nothing, or why the bus refused the access.
    * @throws machine_running while a slice runs, outside its handlers.
+   * @throws model_error for an access to data no model serves, see the class.
    */
   auto write(address addr, std::uint8_t size, std::uint32_t value) const
       -> std::expected<void, bus_error> pre(size == 1 or size == 2 or size == 4)
@@ -70,6 +107,7 @@ public:
    * @param out Bytes read, in address order.
    * @return Nothing, or the failing access. The bytes of @p out before `at` are valid.
    * @throws machine_running while a slice runs, outside its handlers.
+   * @throws model_error for an access to data no model serves, see the class.
    */
   auto read_block(address addr, std::span<std::byte> out) const
       -> std::expected<void, block_error> pre(fits_address_space(addr, out.size()));
@@ -80,6 +118,7 @@ public:
    * @param in Bytes to write, in address order.
    * @return Nothing, or the failing access. The bytes before `at` were written.
    * @throws machine_running while a slice runs, outside its handlers.
+   * @throws model_error for an access to data no model serves, see the class.
    */
   auto write_block(address addr, std::span<std::byte const> in) const
       -> std::expected<void, block_error> pre(fits_address_space(addr, in.size()));
@@ -100,6 +139,7 @@ public:
    * @param addr First guest address, unaligned allowed.
    * @return The value, or the failing access.
    * @throws machine_running while a slice runs, outside its handlers.
+   * @throws model_error for an access to data no model serves, see the class.
    */
   template <guest_scalar T>
   [[nodiscard]] auto load(address addr) const
@@ -117,6 +157,7 @@ public:
    * @param value Value to write.
    * @return Nothing, or the failing access.
    * @throws machine_running while a slice runs, outside its handlers.
+   * @throws model_error for an access to data no model serves, see the class.
    */
   template <guest_scalar T>
   auto store(address addr, T value) const
@@ -144,6 +185,14 @@ private:
     }
   }
 
-  machine* machine_;
+  [[nodiscard]] auto filtered() const noexcept -> bool;
+  [[nodiscard]] auto filtered_attrs(address addr) const -> std::optional<bus_attrs>;
+  [[nodiscard]] auto read_filtered(address addr, std::span<std::byte> out) const
+      -> std::expected<void, block_error>;
+  [[nodiscard]] auto write_filtered(address addr, std::span<std::byte const> in) const
+      -> std::expected<void, block_error>;
+
+  machine*            machine_;
+  std::optional<bool> secure_;
 };
 }

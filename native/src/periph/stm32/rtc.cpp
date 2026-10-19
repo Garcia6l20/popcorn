@@ -1,5 +1,6 @@
 #include "backup_domain.hpp"
 #include "factories.hpp"
+#include "gtzc.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -175,12 +176,16 @@ auto date_of(std::uint64_t days) -> std::chrono::year_month_day
  *        stays held, a brown-out, releases the RTC, and a backup domain reset keeps it frozen
  *        while the bit is set. The bit is read at the hold: without a
  *        DBGMCU model or field the RTC runs on, a warning logged once, a model_error under
- *        strict_peripherals.
+ *        strict_peripherals. `RTC_SECCFGR` and `RTC_PRIVCR` are storage: under TrustZone the
+ *        first write to either logs one warning, the security and privilege they select are not
+ *        modelled. Under TrustZone a security bit set in `RTC_SECCFGR` is a secure function of
+ *        the RTC, RM0456 11.5.1: it makes `RCC_BDCR.BDRST` and the RTC's RCC bits Secure.
  */
 class rtc final : public dispatch_model<rtc, rtc_state>,
                   public clock_listener,
                   public backup_domain,
-                  public core_hold_listener
+                  public core_hold_listener,
+                  public trustzone_aware
 {
 public:
   rtc(model_context&                          ctx,
@@ -202,18 +207,21 @@ public:
   void backup_reset() override;
   void on_core_hold(bool held) override;
 
-  void time_written(std::uint32_t old, std::uint32_t now);
-  void date_written(std::uint32_t old, std::uint32_t now);
-  void status_written(std::uint32_t old, std::uint32_t now);
-  void prescaler_written(std::uint32_t old, std::uint32_t now);
-  void wakeup_written(std::uint32_t old, std::uint32_t now);
-  void control_written(std::uint32_t old, std::uint32_t now);
-  void key_written(std::uint32_t old, std::uint32_t now);
-  void calibration_written(std::uint32_t old, std::uint32_t now);
-  void shift_written(std::uint32_t old, std::uint32_t now);
-  void alarm_written(std::uint32_t old, std::uint32_t now);
-  void clear_written(std::uint32_t old, std::uint32_t now);
-  void plain_written(std::uint32_t old, std::uint32_t now);
+  void               time_written(std::uint32_t old, std::uint32_t now);
+  void               date_written(std::uint32_t old, std::uint32_t now);
+  void               status_written(std::uint32_t old, std::uint32_t now);
+  void               prescaler_written(std::uint32_t old, std::uint32_t now);
+  void               wakeup_written(std::uint32_t old, std::uint32_t now);
+  void               control_written(std::uint32_t old, std::uint32_t now);
+  void               key_written(std::uint32_t old, std::uint32_t now);
+  void               calibration_written(std::uint32_t old, std::uint32_t now);
+  void               shift_written(std::uint32_t old, std::uint32_t now);
+  void               alarm_written(std::uint32_t old, std::uint32_t now);
+  void               clear_written(std::uint32_t old, std::uint32_t now);
+  void               plain_written(std::uint32_t old, std::uint32_t now);
+  void               security_written(std::uint32_t old, std::uint32_t now);
+  [[nodiscard]] auto secure_function() const -> bool override;
+  [[nodiscard]] auto secure_word() const -> std::uint32_t override;
 
 private:
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
@@ -291,6 +299,9 @@ private:
   irq_line&                                    line_;
   std::array<bool, 6>                          logged_{};
   bool                                         freeze_logged_ = false;
+  bool                                         security_logged_{};
+  reg_ref                                      security_;
+  std::uint32_t                                security_bits_{};
 };
 
 constexpr std::array<write_entry<rtc>, 24> rtc_writes{
@@ -303,8 +314,8 @@ constexpr std::array<write_entry<rtc>, 24> rtc_writes{
      {"ALRMAR", &rtc::alarm_written},     {"ALRMASSR", &rtc::alarm_written},
      {"ALRMBR", &rtc::alarm_written},     {"ALRMBSSR", &rtc::alarm_written},
      {"SR", &rtc::plain_written},         {"MISR", &rtc::plain_written},
-     {"SCR", &rtc::clear_written},        {"PRIVCR", &rtc::plain_written},
-     {"SECCFGR", &rtc::plain_written},    {"ALRABINR", &rtc::plain_written},
+     {"SCR", &rtc::clear_written},        {"PRIVCR", &rtc::security_written},
+     {"SECCFGR", &rtc::security_written}, {"ALRABINR", &rtc::plain_written},
      {"ALRBBINR", &rtc::plain_written},   {"TSTR", &rtc::plain_written},
      {"TSDR", &rtc::plain_written},       {"TSSSR", &rtc::plain_written},
      }
@@ -327,8 +338,12 @@ rtc::rtc(
       wakeup_interrupt_{field("CR", "WUTIE")}, wakeup_flag_{field("SR", "WUTF")},
       bypass_{field("CR", "BYPSHAD")}, format_{field("CR", "FMT")}, add_hour_{field("CR", "ADD1H")},
       sub_hour_{field("CR", "SUB1H")}, reference_{field("CR", "REFCKON")},
-      domain_{ctx.clock.domain("rtc")}, line_{irq("RTC_IRQn")}
+      domain_{ctx.clock.domain("rtc")}, line_{irq("RTC_IRQn")}, security_{reg("SECCFGR")}
 {
+  for(auto const& bits : describe("SECCFGR").fields)
+  {
+    security_bits_ |= field("SECCFGR", bits.name).mask();
+  }
   for(auto const& [index, name] : std::views::enumerate(
           std::array<std::string_view, 7>{"PM", "HT", "HU", "MNT", "MNU", "ST", "SU"}))
   {
@@ -1189,11 +1204,36 @@ void rtc::clear_written(std::uint32_t, std::uint32_t now)
 void rtc::plain_written(std::uint32_t, std::uint32_t)
 {}
 
+auto rtc::secure_word() const -> std::uint32_t
+{
+  return ctx_.trustzone ? regs_.peek(security_.offset) & security_bits_ : 0;
+}
+
+auto rtc::secure_function() const -> bool
+{
+  return secure_word() != 0;
+}
+
+void rtc::security_written(std::uint32_t, std::uint32_t)
+{
+  if(ctx_.trustzone and not std::exchange(security_logged_, true))
+  {
+    warn(
+        "RTC_SECCFGR", "RTC_SECCFGR and RTC_PRIVCR are storage: the RTC security and privilege "
+                       "they select are not modelled");
+  }
+}
+
 /**
  * @brief TAMP of the STM32U5, RM0456 section 64 "Tamper and backup registers (TAMP)", as backup
  *        domain storage: every register keeps its value on every reset but power-on and a backup
  *        domain reset, the backup registers TAMP_BKP0R to TAMP_BKP31R included. Tamper
  *        detection and the monotonic counter are not modelled, their registers are plain storage.
+ *        `TAMP_SECCFGR` and `TAMP_PRIVCR` are storage: under TrustZone the first write to either
+ *        logs one warning, the security and privilege they select are not modelled. Under
+ *        TrustZone TAMPSEC, CNT1SEC, a BKPRWSEC above 0 or a BKPWSEC above BKPRWSEC, a Secure
+ *        backup register zone, is a secure function of the TAMP, RM0456 11.5.1 and 64.7.9: it
+ *        makes `RCC_BDCR.BDRST` Secure.
  */
 struct tamp_state
 {
@@ -1202,7 +1242,9 @@ struct tamp_state
   friend auto operator==(tamp_state const&, tamp_state const&) -> bool = default;
 };
 
-class tamp final : public dispatch_model<tamp, tamp_state>, public backup_domain
+class tamp final : public dispatch_model<tamp, tamp_state>,
+                   public backup_domain,
+                   public trustzone_aware
 {
 public:
   tamp(model_context& ctx, peripheral_desc const& desc);
@@ -1211,10 +1253,20 @@ public:
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   void backup_reset() override;
 
-  void plain_written(std::uint32_t old, std::uint32_t now);
+  void               plain_written(std::uint32_t old, std::uint32_t now);
+  void               security_written(std::uint32_t old, std::uint32_t now);
+  [[nodiscard]] auto secure_function() const -> bool override;
+  [[nodiscard]] auto secure_word() const -> std::uint32_t override;
 
 private:
   void clear(register_file& regs);
+
+  bool                     security_logged_{};
+  std::optional<reg_ref>   security_;
+  std::optional<field_ref> tamper_;
+  std::optional<field_ref> counter_;
+  std::optional<field_ref> read_write_;
+  std::optional<field_ref> write_;
 };
 
 auto tamp_writes(peripheral_desc const& desc) -> std::vector<write_entry<tamp>>
@@ -1222,14 +1274,42 @@ auto tamp_writes(peripheral_desc const& desc) -> std::vector<write_entry<tamp>>
   std::vector<write_entry<tamp>> out;
   for(auto const& described : desc.registers)
   {
-    out.push_back({described.name, &tamp::plain_written});
+    auto const security = described.name == "SECCFGR" or described.name == "PRIVCR";
+    out.push_back({described.name, security ? &tamp::security_written : &tamp::plain_written});
   }
   return out;
 }
 
 tamp::tamp(model_context& ctx, peripheral_desc const& desc)
     : dispatch_model{ctx, desc, "TAMP", tamp_writes(desc)}
-{}
+{
+  if(has_register("SECCFGR"))
+  {
+    security_   = reg("SECCFGR");
+    tamper_     = field("SECCFGR", "TAMPSEC");
+    counter_    = field("SECCFGR", "CNT1SEC");
+    read_write_ = field("SECCFGR", "BKPRWSEC");
+    write_      = field("SECCFGR", "BKPWSEC");
+  }
+}
+
+auto tamp::secure_word() const -> std::uint32_t
+{
+  return ctx_.trustzone and security_ ? ctx_.regs.peek(security_->offset) : 0;
+}
+
+auto tamp::secure_function() const -> bool
+{
+  auto const word = secure_word();
+  if(not security_ or word == 0)
+  {
+    return false;
+  }
+  return tamper_->of(word) != 0
+      or counter_->of(word) != 0
+      or read_write_->of(word) != 0
+      or write_->of(word) > read_write_->of(word);
+}
 
 void tamp::clear(register_file& regs)
 {
@@ -1257,6 +1337,16 @@ void tamp::on_event(std::uint32_t, std::uint64_t)
 
 void tamp::plain_written(std::uint32_t, std::uint32_t)
 {}
+
+void tamp::security_written(std::uint32_t, std::uint32_t)
+{
+  if(ctx_.trustzone and not std::exchange(security_logged_, true))
+  {
+    warn(
+        "TAMP_SECCFGR", "TAMP_SECCFGR and TAMP_PRIVCR are storage: the TAMP security and privilege "
+                        "they select are not modelled");
+  }
+}
 }
 
 auto rtc_factory(std::optional<std::chrono::sys_seconds> initial) -> model_factory

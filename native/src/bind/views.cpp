@@ -41,7 +41,7 @@ void require_in_space(address at, std::size_t size)
       std::format(
           "bus error at {:#010x}: {}", failed.at,
           failed.error == bus_error::unmapped ? "unmapped" : "denied"),
-      failed.at);
+      failed.at, failed.error == bus_error::denied);
 }
 
 auto register_at(core::machine& target, std::uint32_t index) -> arch::cpu_register
@@ -89,12 +89,26 @@ auto slot_of(
   };
 }
 
-auto read_memory_body(address at, std::uint32_t size)
+auto view_of(core::machine& target, memory_space space) -> core::memory_view
+{
+  switch(space)
+  {
+    case memory_space::secure:
+      return target.mem(true);
+    case memory_space::nonsecure:
+      return target.mem(false);
+    case memory_space::debugger:
+      break;
+  }
+  return target.mem();
+}
+
+auto read_memory_body(address at, std::uint32_t size, memory_space space)
 {
   require_in_space(at, size);
-  return [at, size](core::machine& target) {
+  return [at, size, space](core::machine& target) {
     std::vector<std::byte> bytes(size);
-    if(auto const read = target.mem().read_block(at, bytes); not read)
+    if(auto const read = view_of(target, space).read_block(at, bytes); not read)
     {
       bus_failure(read.error());
     }
@@ -102,18 +116,22 @@ auto read_memory_body(address at, std::uint32_t size)
   };
 }
 
-auto write_memory_body(address at, std::vector<std::byte> data)
+auto write_memory_body(address at, std::vector<std::byte> data, memory_space space)
 {
   require_in_space(at, data.size());
-  return [at, data = std::move(data)](core::machine& target) {
-    if(auto const written = target.mem().write_block(at, data); not written)
+  return [at, data = std::move(data), space](core::machine& target) {
+    if(auto const written = view_of(target, space).write_block(at, data); not written)
     {
       bus_failure(written.error());
     }
   };
 }
 
-auto memory_masked_body(address at, std::vector<std::byte> mask, std::vector<std::byte> value)
+auto memory_masked_body(
+    address                at,
+    std::vector<std::byte> mask,
+    std::vector<std::byte> value,
+    memory_space           space)
 {
   if(mask.size() != value.size())
   {
@@ -121,9 +139,10 @@ auto memory_masked_body(address at, std::vector<std::byte> mask, std::vector<std
         "memory", 0, std::format("{:#010x}", at), "a mask and a value of the same length");
   }
   require_in_space(at, mask.size());
-  return [at, mask = std::move(mask), value = std::move(value)](core::machine& target) {
+  return [at, mask = std::move(mask), value = std::move(value), space](core::machine& target) {
+    auto const             view = view_of(target, space);
     std::vector<std::byte> word(mask.size());
-    if(auto const read = target.mem().read_block(at, word); not read)
+    if(auto const read = view.read_block(at, word); not read)
     {
       bus_failure(read.error());
     }
@@ -132,7 +151,7 @@ auto memory_masked_body(address at, std::vector<std::byte> mask, std::vector<std
       byte = (byte & ~mask[static_cast<std::size_t>(index)])
            | (value[static_cast<std::size_t>(index)] & mask[static_cast<std::size_t>(index)]);
     }
-    if(auto const written = target.mem().write_block(at, word); not written)
+    if(auto const written = view.write_block(at, word); not written)
     {
       bus_failure(written.error());
     }
@@ -141,9 +160,10 @@ auto memory_masked_body(address at, std::vector<std::byte> mask, std::vector<std
 
 constexpr std::uint32_t cstring_block = 64;
 
-auto cstring_body(address at, std::uint32_t limit)
+auto cstring_body(address at, std::uint32_t limit, memory_space space)
 {
-  return [at, limit](core::machine& target) {
+  return [at, limit, space](core::machine& target) {
+    auto const             view = view_of(target, space);
     std::vector<std::byte> text;
     auto const             nul = std::byte{0};
     while(text.size() < limit)
@@ -159,13 +179,13 @@ auto cstring_body(address at, std::uint32_t limit)
       }
       auto const             from = static_cast<address>(next);
       std::vector<std::byte> chunk(size);
-      if(not target.mem().read_block(from, chunk))
+      if(not view.read_block(from, chunk))
       {
         chunk.clear();
         for(address byte_at = from; byte_at < from + size; ++byte_at)
         {
           std::array<std::byte, 1> byte{};
-          if(auto const read = target.mem().read_block(byte_at, byte); not read)
+          if(auto const read = view.read_block(byte_at, byte); not read)
           {
             bus_failure(read.error());
           }
@@ -355,27 +375,33 @@ auto python_bytes(std::vector<std::byte> const& data) -> reflex::py::nb::bytes
 }
 }
 
-auto machine_handle::read_memory(address at, std::uint32_t size) const -> reflex::py::nb::bytes
+auto machine_handle::read_memory(address at, std::uint32_t size, memory_space space) const
+    -> reflex::py::nb::bytes
 {
-  return python_bytes(access(read_memory_body(at, size)));
+  return python_bytes(access(read_memory_body(at, size, space)));
 }
 
-void machine_handle::write_memory(address at, reflex::py::nb::bytes const& bytes)
+void machine_handle::write_memory(
+    address                      at,
+    reflex::py::nb::bytes const& bytes,
+    memory_space                 space)
 {
-  access(write_memory_body(at, bytes_of(bytes)));
+  access(write_memory_body(at, bytes_of(bytes), space));
 }
 
 void machine_handle::write_memory_masked(
     address                      at,
     reflex::py::nb::bytes const& mask,
-    reflex::py::nb::bytes const& value)
+    reflex::py::nb::bytes const& value,
+    memory_space                 space)
 {
-  access(memory_masked_body(at, bytes_of(mask), bytes_of(value)));
+  access(memory_masked_body(at, bytes_of(mask), bytes_of(value), space));
 }
 
-auto machine_handle::cstring(address at, std::uint32_t limit) const -> reflex::py::nb::bytes
+auto machine_handle::cstring(address at, std::uint32_t limit, memory_space space) const
+    -> reflex::py::nb::bytes
 {
-  return python_bytes(access(cstring_body(at, limit)));
+  return python_bytes(access(cstring_body(at, limit, space)));
 }
 
 auto machine_handle::register_names() const -> std::vector<std::string>
@@ -438,28 +464,33 @@ void machine_handle::write_field(
   access([&](core::machine& target) { body(target); });
 }
 
-auto machine_handle::op_read_memory(address at, std::uint32_t size) const -> access_op
-{
-  return detail::machine_op(read_memory_body(at, size));
-}
-
-auto machine_handle::op_write_memory(address at, reflex::py::nb::bytes const& bytes) const
+auto machine_handle::op_read_memory(address at, std::uint32_t size, memory_space space) const
     -> access_op
 {
-  return detail::machine_op(write_memory_body(at, bytes_of(bytes)));
+  return detail::machine_op(read_memory_body(at, size, space));
+}
+
+auto machine_handle::op_write_memory(
+    address                      at,
+    reflex::py::nb::bytes const& bytes,
+    memory_space                 space) const -> access_op
+{
+  return detail::machine_op(write_memory_body(at, bytes_of(bytes), space));
 }
 
 auto machine_handle::op_memory_masked(
     address                      at,
     reflex::py::nb::bytes const& mask,
-    reflex::py::nb::bytes const& value) const -> access_op
+    reflex::py::nb::bytes const& value,
+    memory_space                 space) const -> access_op
 {
-  return detail::machine_op(memory_masked_body(at, bytes_of(mask), bytes_of(value)));
+  return detail::machine_op(memory_masked_body(at, bytes_of(mask), bytes_of(value), space));
 }
 
-auto machine_handle::op_cstring(address at, std::uint32_t limit) const -> access_op
+auto machine_handle::op_cstring(address at, std::uint32_t limit, memory_space space) const
+    -> access_op
 {
-  return detail::machine_op(cstring_body(at, limit));
+  return detail::machine_op(cstring_body(at, limit, space));
 }
 
 auto machine_handle::op_read_register(std::uint32_t index) const -> access_op

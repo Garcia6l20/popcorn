@@ -14,6 +14,7 @@ type Read32 = Callable[[int], int | None]
 MAX_FRAMES = 64
 SCAN_BYTES = 1024
 _EXC_RETURN = 0xFF00_0000
+_FNC_RETURN = 0xFEFF_FFFE
 _BASIC_FRAME = 32
 _EXTENDED_FRAME = 104
 
@@ -33,6 +34,9 @@ class Via(Enum):
     """The live or stacked lr of a pc outside every function, such as a call through NULL.
     Exact as a leaf frame's lr is: after a jump rather than a call, lr is the last call's return
     and the line is that call's."""
+    SECURE_CALL = "secure call"
+    """The return address of a Secure BLXNS call, from the frame it pushed on the Secure
+    stack, reached through a Non-secure function returning to FNC_RETURN."""
 
     @property
     def exact(self) -> bool:
@@ -178,10 +182,18 @@ def _is_exc_return(value: int) -> bool:
     return value & _EXC_RETURN == _EXC_RETURN and not value & 0b10
 
 
+def _is_fnc_return(value: int) -> bool:
+    """FNC_RETURN, DDI0553B.z B3.16: the lr of a Non-secure function a Secure BLXNS called,
+    0xFEFFFFFE or 0xFEFFFFFF."""
+    return value & ~1 == _FNC_RETURN
+
+
 def _foreign_frame(value: int) -> bool:
     """Whether an EXC_RETURN names a frame this walk does not follow: one on the Non-secure
-    stack (S = 0) or with additional state context (DCRS = 0). ES has no effect: popcorn runs
-    the core in the Secure state and stacks S, DCRS and ES set."""
+    stack (S = 0) or with additional state context (DCRS = 0). Without TrustZone ES has no
+    effect: popcorn runs the core in the Secure state and stacks S, DCRS and ES set. With
+    TrustZone a Secure exception taken from Non-secure state, or a Non-secure one, stacks a
+    frame this walk leaves to the stack scan."""
     return not value >> 5 & 1 or not value >> 6 & 1
 
 
@@ -323,7 +335,7 @@ def _pop_frame(
     if function is None:
         if not lr_valid:
             return _Popped("end", sp)
-        if _is_exc_return(lr):
+        if _is_exc_return(lr) or _is_fnc_return(lr):
             return _Popped("return", sp, lr, Via.LR)
         if not _returns_into(functions, lr):
             return _Popped("end", sp)
@@ -350,7 +362,7 @@ def _pop_frame(
     else:
         return _Popped("scan", sp)
     sp += size
-    if _is_exc_return(ret):
+    if _is_exc_return(ret) or _is_fnc_return(ret):
         return _Popped("return", sp, ret)
     if not _returns_into(functions, ret):
         return _Popped("end", sp)
@@ -406,10 +418,11 @@ def return_point(
             epilogue or prologue it cannot follow, a return address outside every function or
             not after a call. None too when pc is not on an epilogue and the code from the
             function's start to pc holds a return or a stack pointer write the prologue walk
-            does not decode, where the walk's depth is a guess.
+            does not decode, where the walk's depth is a guess. None for a Non-secure function
+            a Secure BLXNS called, which returns to FNC_RETURN.
     """
     popped = _pop_frame(read32, functions, pc, lr, sp, True, False)
-    if popped.outcome != "return":
+    if popped.outcome != "return" or _is_fnc_return(popped.ret):
         return None
     function = functions.at(pc)
     if (
@@ -429,6 +442,7 @@ def unwind(
     lr: int,
     sp: int,
     psp: int,
+    secure_sp: int | None = None,
 ) -> list[RawFrame]:
     """The call stack from a stopped core, innermost first.
 
@@ -436,9 +450,12 @@ def unwind(
     goes through exception frames recognized by an EXC_RETURN return value, until a return
     address leaves every function. A pc outside every function, a call through NULL or a bad
     pointer, goes on from lr when lr still holds the return address: innermost, or right after
-    an exception frame. When an epilogue or prologue cannot be followed, a return
-    address does not follow a call, or an exception frame is on the Non-secure stack or has
-    additional state context, the rest is a stack scan, marked SCAN.
+    an exception frame. A Non-secure function returning to FNC_RETURN ends the Non-secure
+    walk: with `secure_sp`, the Secure stack pointer of the core's mode, the walk goes on in
+    the Secure caller from the return address BLXNS pushed there, DDI0553B.z B3.16, marked
+    SECURE_CALL. When an epilogue or prologue cannot be followed, a return address does not
+    follow a call, or an exception frame is on the Non-secure stack or has additional state
+    context, the rest is a stack scan, marked SCAN.
     """
     frames = [RawFrame(pc, Via.PC)]
     lr_valid = True
@@ -462,6 +479,18 @@ def unwind(
         frames.append(RawFrame(pc, Via.EXCEPTION))
         return True
 
+    def secure_call() -> bool:
+        nonlocal sp, pc, lr_valid, returned, secure_sp
+        if secure_sp is None:
+            return False
+        address = read32(secure_sp)
+        if address is None or read32(secure_sp + 4) is None:
+            return False
+        sp, secure_sp = secure_sp + 8, None
+        pc, lr_valid, returned = address & ~1, False, True
+        frames.append(RawFrame(pc, Via.SECURE_CALL))
+        return True
+
     while len(frames) < MAX_FRAMES:
         popped = _pop_frame(read32, functions, pc, lr, sp, lr_valid, returned)
         sp = popped.sp
@@ -469,6 +498,10 @@ def unwind(
             break
         if popped.outcome == "scan":
             return rest()
+        if _is_fnc_return(popped.ret):
+            if not secure_call():
+                break
+            continue
         if _is_exc_return(popped.ret):
             taken = exception_frame(popped.ret)
             if isinstance(taken, list):
@@ -482,9 +515,10 @@ def unwind(
 
 
 def source_address(read32: Read32, frame: RawFrame) -> int:
-    """The address whose source line a frame shows: the call for a return address, the SVC
-    for an exception frame that returns after one, the frame's pc otherwise."""
-    if frame.via in (Via.PROLOGUE, Via.SCAN, Via.LR):
+    """The address whose source line a frame shows: the call for a return address, a BLXNS's
+    included, the SVC for an exception frame that returns after one, the frame's pc
+    otherwise."""
+    if frame.via in (Via.PROLOGUE, Via.SCAN, Via.LR, Via.SECURE_CALL):
         return frame.pc - 2
     if frame.via is Via.EXCEPTION:
         before = _read16(read32, frame.pc - 2)

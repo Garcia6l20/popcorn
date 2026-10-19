@@ -239,6 +239,14 @@ struct arch_context
   /** @brief Whether a fault stops the run, trap_result::fault(), or enters the firmware
    * handler, trap_result::resume() after entry. */
   fault_policy faults{fault_policy::stop};
+  /** @brief Whether the security extension is enabled, `core::machine_options::trustzone`. */
+  bool trustzone{};
+  /** @brief IDAU of the part, `core::machine_options::idau`, valid while the module is
+   * attached. */
+  std::span<idau_region const> idau{};
+  /** @brief The machine's scratch region, `core::machine_options::scratch`, such as the call
+   * arena. */
+  std::optional<address_range> scratch{};
 };
 
 /**
@@ -393,8 +401,10 @@ public:
    * @brief Handles a slice that ended on an unmapped or protected access, pc at the faulting
    *        instruction. Also called for a bus error a peripheral model returned on a CPU access:
    *        that access completed, the call comes at the next block boundary with the pc there, an
-   *        imprecise bus fault, and @p addr lies in a described peripheral. Called between
-   *        slices, never from the hook.
+   *        imprecise bus fault, and @p addr lies in a described peripheral. A CPU access the bus
+   *        firewall refuses with periph::bus_verdict::bus_error never reaches it: the engine
+   *        fails that access, the module sees the engine's precise data abort with the access
+   *        address. Called between slices, never from the hook.
    * @param addr Address of the access.
    * @param op Kind of the access.
    * @return Resume after fault entry, or a stop.
@@ -465,13 +475,17 @@ public:
    *        registers() and save() bytes, and restores both afterwards.
    * @param frame Call to set up.
    * @throws config_error when the core has no such floating-point convention, privilege or stack
-   *         pointer.
+   *         pointer, or on an Arm core with TrustZone when the entry is in memory of the other
+   *         security state than the core's, or a Non-secure call's scratch region has Secure
+   *         parts.
    */
   virtual void prepare_call(call_frame const& frame) = 0;
 
   /**
    * @brief Refuses a call frame for what prepare_call() checks before touching any state: the
-   *        floating-point convention and the return sentinel. The default refuses nothing.
+   *        floating-point convention and the return sentinel, and on an Arm core with TrustZone
+   *        in thread mode the security state of the entry and of a Non-secure call's scratch
+   *        region. The default refuses nothing.
    * @param frame Call to check.
    * @throws config_error when prepare_call() would refuse the frame for those.
    */
@@ -502,6 +516,58 @@ public:
       -> std::uint64_t
   {
     return value;
+  }
+
+  /**
+   * @brief Whether a host write of the register changes state the engine bakes into code it
+   *        translated, so a write from a handler of a running slice would reach only blocks
+   *        translated after it. core::register_view refuses such a write from a handler. The
+   *        default is none.
+   * @param reg Register written.
+   */
+  [[nodiscard]] virtual auto translation_register([[maybe_unused]] cpu_register const& reg) const
+      -> bool
+  {
+    return false;
+  }
+
+  /**
+   * @brief Bus attributes of a data access the core makes now at @p at, for an access the
+   *        engine reports without them: a store into a region that only its controller
+   *        writes, such as flash. Called on the machine thread under TrustZone only. The
+   *        default is a Secure privileged access.
+   * @param at Address of the access.
+   * @return Attributes of the access, Secure privileged when the core has no security extension.
+   */
+  [[nodiscard]] virtual auto data_attrs([[maybe_unused]] address at) const -> bus_attrs
+  {
+    return {};
+  }
+
+  /**
+   * @brief The core's security state now, read from the engine. Called on the machine thread.
+   * @return True Secure, false Non-secure, empty on a core without the security extension or
+   *         with TrustZone disabled.
+   */
+  [[nodiscard]] virtual auto security_state() const -> std::optional<bool>
+  {
+    return std::nullopt;
+  }
+
+  /**
+   * @brief Bus attributes of a privileged debugger access that requests security @p secure
+   *        at @p at, after the core's security attribution, DDI0553B.z B13.3.4 RWMRR and
+   *        B10.2 RXSPQ. Called by a filtered core::memory_view on a machine with TrustZone
+   *        enabled. The default, for a core without the security extension, keeps @p secure.
+   * @param at Address of the access.
+   * @param secure Whether the access requests the Secure state.
+   * @return Attributes with initiator::debugger and `filtered` set, or empty when the core
+   *         refuses the access, a Non-secure request to a Secure or Non-secure callable address.
+   */
+  [[nodiscard]] virtual auto debug_attrs([[maybe_unused]] address at, bool secure) const
+      -> std::optional<bus_attrs>
+  {
+    return bus_attrs{.by = initiator::debugger, .secure = secure, .filtered = true};
   }
 
   /**
@@ -536,7 +602,8 @@ public:
   /**
    * @brief Engine exception that completes a return_to_caller() whose return address is an
    *        exception return, which the engine takes only from a branch instruction and never
-   *        from a pc write: on Arm, a 0xFF-prefixed value in handler mode, valid or not. The
+   *        from a pc write: on Arm, a 0xFF-prefixed value in handler mode, valid or not, and
+   *        with TrustZone a FNC_RETURN value, 0xFEFFFFFE or 0xFEFFFFFF, in either mode. The
    *        machine calls it right after return_to_caller() and handles the result as if the
    *        engine had raised it, through on_interrupt(), so the handler's exception is left, or
    *        an invalid value faults, as a return in its body would.

@@ -28,6 +28,36 @@ inline auto m33_with(auto&& edit) -> part_description
 }
 
 /**
+ * @brief The core test description with the Security Extension: 8 SAU regions, 8 Non-secure
+ *        and @p secure_mpu Secure MPU regions.
+ */
+inline auto m33_trustzone(std::uint8_t secure_mpu = 8) -> part_description
+{
+  return m33_with([&](part_description& desc) {
+    desc.core.trustzone          = true;
+    desc.core.sau_regions        = 8;
+    desc.core.mpu_regions_secure = secure_mpu;
+  });
+}
+
+/** @brief Machine options with TrustZone on and an IDAU shaped as the STM32U5's, RM0456 2.2. */
+inline auto trustzone_options() -> core::machine_options
+{
+  core::machine_options options;
+  options.trustzone = true;
+  options.idau      = {
+      {.start = 0x0000'0000, .end = 0x0C00'0000, .nsc = false, .exempt = false},
+      {.start = 0x0C00'0000, .end = 0x1000'0000, .nsc = true,  .exempt = false},
+      {.start = 0x1000'0000, .end = 0x3000'0000, .nsc = false, .exempt = false},
+      {.start = 0x3000'0000, .end = 0x4000'0000, .nsc = true,  .exempt = false},
+      {.start = 0x4000'0000, .end = 0x5000'0000, .nsc = false, .exempt = false},
+      {.start = 0x5000'0000, .end = 0x6000'0000, .nsc = true,  .exempt = false},
+      {.start = 0x6000'0000, .end = 0xE000'0000, .nsc = false, .exempt = false},
+  };
+  return options;
+}
+
+/**
  * @brief Words of a firmware array read through the debugger view.
  * @param target Machine to read.
  * @param at First word.

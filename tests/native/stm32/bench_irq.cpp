@@ -11,6 +11,8 @@
 
 #include <sched.h>
 
+#include <unicorn/unicorn.h>
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -97,14 +99,52 @@ public:
   }
 };
 
+struct ns_region
+{
+  popcorn::address base{};
+  popcorn::address limit{};
+};
+
+struct store_loop
+{
+  popcorn::address                code{};
+  popcorn::address                store{};
+  bool                            nonsecure{};
+  std::uint32_t                   seccfgr0 = 0xffff'ffffu;
+  std::optional<ns_region>        sau{};
+  std::optional<popcorn::address> hop{};
+};
+
+struct dma_copy
+{
+  popcorn::address source{};
+  popcorn::address destination{};
+  std::uint32_t    bytes{};
+};
+
 struct row
 {
-  std::string   name;
-  std::string   entry;
-  std::uint32_t rate{};
-  std::uint32_t stores{};
-  std::int64_t  divisor = 1;
+  std::string               name;
+  std::string               entry;
+  std::uint32_t             rate{};
+  std::uint32_t             stores{};
+  std::int64_t              divisor = 1;
+  bool                      trustzone{};
+  std::optional<store_loop> loop{};
+  std::optional<dma_copy>   dma{};
 };
+
+constexpr std::array<std::uint16_t, 3> store_loop_code{0x6001, 0x3101, 0xe7fc};
+constexpr popcorn::address             sau_ctrl  = 0xe000'edd0;
+constexpr popcorn::address             sau_rnr   = 0xe000'edd8;
+constexpr popcorn::address             sau_rbar  = 0xe000'eddc;
+constexpr popcorn::address             sau_rlar  = 0xe000'ede0;
+constexpr std::uint32_t                sau_allns = 2;
+
+constexpr auto thumb_branch(popcorn::address from, popcorn::address to) -> std::uint16_t
+{
+  return static_cast<std::uint16_t>(0xe000u | (((to - (from + 4)) >> 1) & 0x7ffu));
+}
 
 struct options
 {
@@ -115,11 +155,18 @@ struct options
   std::optional<std::string> dump_dir;
 };
 
+struct translation_counts
+{
+  std::uint64_t translations{};
+  std::uint64_t flushes{};
+};
+
 struct sample
 {
   double                 wall{};
   double                 virtual_s{};
   core::run_counters     counters{};
+  translation_counts     translated{};
   std::string            dump;
   std::vector<std::byte> snapshot;
 };
@@ -144,7 +191,74 @@ auto rows() -> std::vector<row>
     }
   }
   out.push_back({.name = "uart_tx", .entry = "uart_tx"});
+  auto const dma = dma_copy{.source = 0x2000'3000, .destination = 0x2000'3100, .bytes = 256};
+  out.push_back({.name = "dma_copy", .entry = "irq_rate", .dma = dma});
+  out.push_back({.name = "dma_copy/tz", .entry = "irq_rate", .trustzone = true, .dma = dma});
+  out.push_back({.name = "poll/100k", .entry = "irq_unmask", .rate = 100'000u});
+  out.push_back(
+      {.name = "poll/100k/tz", .entry = "irq_unmask", .rate = 100'000u, .trustzone = true});
+  auto const loop = [&out](std::string name, bool trustzone, store_loop how) {
+    out.push_back(
+        {.name      = std::move(name),
+         .entry     = "main",
+         .divisor   = 4,
+         .trustzone = trustzone,
+         .loop      = how});
+  };
+  loop("store/off", false, {.code = 0x2000'0400, .store = 0x2000'1000});
+  loop("store/tz-secure", true, {.code = 0x3000'0400, .store = 0x3000'1000});
+  loop(
+      "store/tz-nonsecure", true,
+      {.code = 0x2000'0400, .store = 0x2000'1000, .nonsecure = true, .seccfgr0 = 0});
+  loop(
+      "store/tz-mixed", true,
+      {.code = 0x2000'0400, .store = 0x2000'1000, .nonsecure = true, .seccfgr0 = 1u << 9});
+  loop(
+      "store/tz-subpage", true,
+      {
+          .code  = 0x3000'0400,
+          .store = 0x3000'1000,
+          .sau   = ns_region{.base = 0x3000'1200, .limit = 0x3000'121f}
+  });
+  loop(
+      "store/tz-subpage-code", true,
+      {
+          .code  = 0x3000'0400,
+          .store = 0x3000'2000,
+          .sau   = ns_region{.base = 0x3000'0780, .limit = 0x3000'079f}
+  });
+  loop(
+      "store/tz-mixed-code", true,
+      {.code = 0x2000'0400, .store = 0x2000'1000, .nonsecure = true, .seccfgr0 = 1u << 3});
+  loop(
+      "store/tz-mixed-code-high", true,
+      {.code = 0x2000'0600, .store = 0x2000'1000, .nonsecure = true, .seccfgr0 = 1u << 2});
+  loop(
+      "store/tz-subpage-hop", true,
+      {
+          .code  = 0x3000'0400,
+          .store = 0x3000'2000,
+          .sau   = ns_region{.base = 0x3000'0780, .limit = 0x3000'079f},
+          .hop   = 0x3000'07c0
+  });
   return out;
+}
+
+auto register_address(std::string_view peripheral, std::string_view name) -> popcorn::address
+{
+  auto const& desc = u575();
+  auto const  found =
+      std::ranges::find(desc.peripherals, peripheral, &popcorn::peripheral_desc::name);
+  if(found == desc.peripherals.end())
+  {
+    throw std::runtime_error{std::format("no peripheral {}", peripheral)};
+  }
+  auto const* reg = popcorn::find_register(*found, name);
+  if(reg == nullptr)
+  {
+    throw std::runtime_error{std::format("no register {}.{}", peripheral, name)};
+  }
+  return found->base + reg->offset;
 }
 
 struct lone
@@ -164,7 +278,15 @@ struct lone
     options.faults         = popcorn::arch::fault_policy::stop;
     options.spin_threshold = 0;
     options.models         = stm32::factories(board, u575());
-    target                 = std::make_unique<core::machine>(
+    if(r.trustzone)
+    {
+      options.models.erase("FLASH");
+      if(not stm32::configure_option_bytes(u575(), {.tzen = true}, options))
+      {
+        throw std::runtime_error{"the U575 refused TZEN=1"};
+      }
+    }
+    target = std::make_unique<core::machine>(
         u575(), popcorn::arch::armv8m::factory(), std::move(options));
     target->load(firmware());
     target->reset();
@@ -182,8 +304,88 @@ struct lone
     {
       throw std::runtime_error{"the bench variables are not writable"};
     }
-    target->regs().write(*target->regs().find("pc"), symbol(r.entry));
+    if(r.loop)
+    {
+      enter_loop(*r.loop, r.trustzone);
+    }
+    else
+    {
+      target->regs().write(*target->regs().find("pc"), symbol(r.entry));
+    }
+    if(r.dma)
+    {
+      start_copy(*r.dma, r.trustzone);
+    }
     origin = target->virtual_clock().time().ps;
+  }
+
+  void write(popcorn::address at, std::uint32_t value, std::uint8_t size = 4) const
+  {
+    if(not target->mem().write(at, size, value))
+    {
+      throw std::runtime_error{std::format("the bench cannot write {:#010x}", at)};
+    }
+  }
+
+  void start_copy(dma_copy const& how, bool trustzone) const
+  {
+    auto const at = [](std::string_view name) { return register_address("GPDMA1", name); };
+    if(trustzone)
+    {
+      write(at("SECCFGR"), 1);
+      write(at("PRIVCFGR"), 1);
+    }
+    auto const word_size          = 2u;
+    auto const secure_source      = trustzone ? 1u << 15 : 0u;
+    auto const secure_destination = trustzone ? 1u << 31 : 0u;
+    write(at("C0TR1"), word_size | word_size << 16 | secure_source | secure_destination);
+    write(at("C0TR2"), 1u << 9);
+    write(at("C0BR1"), how.bytes);
+    write(at("C0SAR"), how.source);
+    write(at("C0DAR"), how.destination);
+    write(at("C0LBAR"), how.source & 0xffff'0000u);
+    write(at("C0LLR"), how.source & 0xfffcu);
+    write(at("C0CR"), 1);
+  }
+
+  void enter_loop(store_loop const& how, bool trustzone) const
+  {
+    for(auto const& [index, insn] : std::views::enumerate(store_loop_code))
+    {
+      write(how.code + 2 * static_cast<popcorn::address>(index), insn, 2);
+    }
+    if(how.hop)
+    {
+      write(how.code + 4, thumb_branch(how.code + 4, *how.hop), 2);
+      write(*how.hop, thumb_branch(*how.hop, how.code), 2);
+    }
+    auto regs = target->regs();
+    regs.write(*regs.find("primask"), 1);
+    regs.write(*regs.find("r0"), how.store);
+    regs.write(*regs.find("r1"), 0);
+    regs.write(*regs.find("pc"), how.code | 1u);
+    if(not trustzone)
+    {
+      return;
+    }
+    write(register_address("GTZC1_MPCBB1", "SECCFGR0"), how.seccfgr0);
+    if(how.sau)
+    {
+      write(sau_rnr, 0);
+      write(sau_rbar, how.sau->base);
+      write(sau_rlar, (how.sau->limit & ~0x1fu) | 1u);
+      write(sau_ctrl, 1);
+    }
+    if(how.nonsecure)
+    {
+      write(sau_ctrl, sau_allns);
+      std::uint32_t value = 0;
+      if(uc_reg_write(core::machine_internals::engine(*target), UC_ARM_REG_SECURE, &value)
+         != UC_ERR_OK)
+      {
+        throw std::runtime_error{"the engine refused the Non-secure state"};
+      }
+    }
   }
 
   void run_to(std::int64_t until) const
@@ -206,6 +408,19 @@ struct lone
       }
       return;
     }
+  }
+
+  [[nodiscard]] auto translated() const -> translation_counts
+  {
+    auto*              engine = core::machine_internals::engine(*target);
+    translation_counts out;
+    std::uint64_t      live{};
+    if(uc_ctl_tb_translations(engine, &out.translations, &live) != UC_ERR_OK
+       or uc_ctl_tb_flushes(engine, &out.flushes) != UC_ERR_OK)
+    {
+      throw std::runtime_error{"the engine refused the translation counts"};
+    }
+    return out;
   }
 
   [[nodiscard]] auto word(popcorn::address at) const -> std::uint64_t
@@ -277,18 +492,24 @@ auto measure(options const& how, row const& r) -> sample
   auto const warmup = how.warmup_ms * ms_ps;
   auto const span   = how.virtual_ms * ms_ps / r.divisor;
   m.run_to(warmup);
-  auto const before = core::machine_internals::counters(*m.target);
-  auto const from   = clock_type::now();
+  auto const before            = core::machine_internals::counters(*m.target);
+  auto const translated_before = m.translated();
+  auto const from              = clock_type::now();
   m.run_to(warmup + span);
-  auto const wall  = std::chrono::duration<double>(clock_type::now() - from).count();
-  auto const after = core::machine_internals::counters(*m.target);
+  auto const wall             = std::chrono::duration<double>(clock_type::now() - from).count();
+  auto const after            = core::machine_internals::counters(*m.target);
+  auto const translated_after = m.translated();
   return {
       .wall      = wall,
       .virtual_s = static_cast<double>(span) / 1e12,
       .counters  = difference(after, before),
-      .dump      = m.dump(),
-      .snapshot  = how.dump_dir ? core::encode_snapshot(m.target->snapshot().data())
-                                : std::vector<std::byte>{}};
+      .translated =
+          {.translations = translated_after.translations - translated_before.translations,
+                       .flushes      = translated_after.flushes - translated_before.flushes},
+      .dump     = m.dump(),
+      .snapshot = how.dump_dir ? core::encode_snapshot(m.target->snapshot().data())
+                               : std::vector<std::byte>{}
+  };
 }
 
 auto parse_number(std::string_view text) -> std::int64_t
@@ -395,8 +616,19 @@ struct collected
 {
   std::vector<double>             per_vs;
   std::vector<core::run_counters> counters;
+  std::vector<translation_counts> translated;
   double                          virtual_s{};
 };
+
+auto translated_per_vs(collected const& c, std::uint64_t translation_counts::* field) -> double
+{
+  std::vector<double> values;
+  for(auto const& one : c.translated)
+  {
+    values.push_back(static_cast<double>(one.*field) / c.virtual_s);
+  }
+  return median(values);
+}
 
 auto per_vs(collected const& c, auto field) -> double
 {
@@ -447,9 +679,10 @@ void summary(std::vector<row> const& chosen, std::map<std::string, collected> co
 {
   std::println(
       "\n| row | median wall s/vs | min | max | spread % | entries/vs | runs/vs | runs/entry | "
-      "hooked stores/vs | stores/entry | ctl calls/vs | ctl/entry | ctl/store |{}",
+      "hooked stores/vs | stores/entry | ctl calls/vs | ctl/entry | ctl/store | translations/vs | "
+      "buffer flushes/vs |{}",
       end_names());
-  std::println("|---|---|---|---|---|---|---|---|---|---|---|---|---|{}", [] {
+  std::println("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|{}", [] {
     std::string bars;
     for(std::size_t index = 0; index < core::engine_end_count; ++index)
     {
@@ -476,9 +709,11 @@ void summary(std::vector<row> const& chosen, std::map<std::string, collected> co
     }
     std::println(
         "| {} | {:.4f} | {:.4f} | {:.4f} | {:.1f} | {:.0f} | {:.0f} | {:.2f} | {:.0f} | {:.2f} | "
-        "{:.0f} | {:.2f} | {:.2f} |{}",
+        "{:.0f} | {:.2f} | {:.2f} | {:.0f} | {:.1f} |{}",
         r.name, md, lo, hi, (hi - lo) / md * 100, entries, runs, ratio(runs, entries), stores,
-        ratio(stores, entries), calls, ratio(calls, entries), ratio(calls, stores), ends);
+        ratio(stores, entries), calls, ratio(calls, entries), ratio(calls, stores),
+        translated_per_vs(c, &translation_counts::translations),
+        translated_per_vs(c, &translation_counts::flushes), ends);
   }
   std::println(
       "\n| slope over | us/entry | intercept s/vs | slope error us/entry | error % | "
@@ -510,6 +745,42 @@ void summary(std::vector<row> const& chosen, std::map<std::string, collected> co
   std::fflush(stdout);
 }
 
+constexpr std::size_t snapshot_cycles = 200;
+constexpr auto        snapshot_row    = std::string_view{"snapshot"};
+
+auto measure_snapshot(options const& how) -> double
+{
+  lone m{
+      {.name = std::string{snapshot_row}, .entry = "irq_rate"}
+  };
+  m.run_to(how.warmup_ms * ms_ps);
+  auto const from = clock_type::now();
+  for(std::size_t cycle = 0; cycle < snapshot_cycles; ++cycle)
+  {
+    auto const bytes = core::encode_snapshot(m.target->snapshot().data());
+    m.target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  }
+  auto const wall = std::chrono::duration<double, std::micro>(clock_type::now() - from).count();
+  return wall / static_cast<double>(snapshot_cycles);
+}
+
+void bench_snapshot(options const& how)
+{
+  std::vector<double> samples;
+  for(std::int64_t run = 0; run < how.runs; ++run)
+  {
+    samples.push_back(measure_snapshot(how));
+    std::println("run={} row={} us_per_cycle={:.3f}", run, snapshot_row, samples.back());
+    std::fflush(stdout);
+  }
+  std::println(
+      "\n| row | median us/cycle | min | max |\n|---|---|---|---|\n| {} | {:.3f} | {:.3f} | {:.3f} "
+      "|",
+      snapshot_row, median(samples), *std::ranges::min_element(samples),
+      *std::ranges::max_element(samples));
+  std::fflush(stdout);
+}
+
 auto bench(options const& how) -> int
 {
   std::println(
@@ -521,18 +792,30 @@ auto bench(options const& how) -> int
   {
     std::filesystem::create_directories(*how.dump_dir);
   }
+  auto const named = [&](std::string_view name) {
+    return how.only
+       and std::ranges::contains(
+               std::views::split(*how.only, ',') | std::views::transform([](auto part) {
+                 return std::string_view{part.begin(), part.end()};
+               }),
+               name);
+  };
+  if(named(snapshot_row))
+  {
+    bench_snapshot(how);
+  }
   std::vector<row> chosen;
   for(auto const& r : rows())
   {
-    if(not how.only
-       or std::ranges::contains(
-           std::views::split(*how.only, ',') | std::views::transform([](auto part) {
-             return std::string_view{part.begin(), part.end()};
-           }),
-           std::string_view{r.name}))
+    if(not how.only or named(r.name))
     {
       chosen.push_back(r);
     }
+  }
+  if(chosen.empty())
+  {
+    env_line();
+    return 0;
   }
   std::map<std::string, collected>   results;
   std::map<std::string, std::string> references;
@@ -565,12 +848,13 @@ auto bench(options const& how) -> int
       c.virtual_s = out.virtual_s;
       c.per_vs.push_back(out.wall / out.virtual_s);
       c.counters.push_back(out.counters);
+      c.translated.push_back(out.translated);
       std::println(
           "run={} row={} wall_s={:.4f} wall_per_vs={:.4f} entries={} engine_runs={} "
-          "hooked_stores={} dump={:016x} same={}",
+          "hooked_stores={} translations={} buffer_flushes={} dump={:016x} same={}",
           run, r.name, out.wall, out.wall / out.virtual_s, out.counters.entries,
-          out.counters.engine_runs, out.counters.guest_stores_hooked, hash.value,
-          same ? "yes" : "NO");
+          out.counters.engine_runs, out.counters.guest_stores_hooked, out.translated.translations,
+          out.translated.flushes, hash.value, same ? "yes" : "NO");
       std::fflush(stdout);
     }
   }

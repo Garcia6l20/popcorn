@@ -28,9 +28,12 @@ constexpr std::uint32_t excp_swi            = 2;
 constexpr std::uint32_t excp_bkpt           = 7;
 constexpr std::uint32_t excp_exception_exit = 8;
 constexpr std::uint32_t reset_lr            = 0xffff'ffff;
+constexpr std::uint32_t fnc_return          = 0xfeff'ffff;
 constexpr std::uint32_t xpsr_thumb          = 0x0100'0000;
 constexpr std::uint32_t ccr_reset           = 0x0000'0201;
 constexpr std::uint32_t fpccr_reset         = 0xc000'0000;
+constexpr std::uint32_t fpccr_aspen         = 0x8000'0000;
+constexpr std::uint32_t fpccr_s             = 0x0000'0004;
 
 auto profile_of(core_desc const& core) -> profile
 {
@@ -84,10 +87,15 @@ auto bit_words(std::uint32_t count) -> std::vector<std::uint32_t>
 
 }
 
-auto cortex_m::mmio_read(uc_struct*, std::uint64_t offset, unsigned size, void* user) noexcept
-    -> std::uint64_t
+auto cortex_m::mmio_read(
+    uc_struct*,
+    std::uint64_t offset,
+    unsigned      size,
+    uc_mem_attrs  attrs,
+    void*         user) noexcept -> std::uint64_t
 {
-  auto const& access = *static_cast<window_user const*>(user);
+  auto const& access   = *static_cast<window_user const*>(user);
+  access.self->access_ = attrs;
   try
   {
     return access.self->space_.read(access.which, static_cast<std::uint32_t>(offset), size);
@@ -104,9 +112,11 @@ void cortex_m::mmio_write(
     std::uint64_t offset,
     unsigned      size,
     std::uint64_t value,
+    uc_mem_attrs  attrs,
     void*         user) noexcept
 {
-  auto const& access = *static_cast<window_user const*>(user);
+  auto const& access   = *static_cast<window_user const*>(user);
+  access.self->access_ = attrs;
   try
   {
     auto&      self = *access.self;
@@ -164,13 +174,22 @@ void cortex_m::attach(arch_context const& ctx)
     }
   }
   context_.emplace(ctx);
+  trustzone_     = ctx.trustzone;
+  auto const map = [&](window which, address base) {
+    auto& user = windows_[static_cast<std::size_t>(which)];
+    user       = {.self = this, .which = which};
+    require(
+        uc_mmio_map_attrs(ctx.engine, base, window_size, &mmio_read, &user, &mmio_write, &user),
+        std::format("mapping the system space at {:#010x}", base));
+  };
   for(auto const [index, base] : std::views::enumerate(window_bases))
   {
-    auto& user = windows_[static_cast<std::size_t>(index)];
-    user       = {.self = this, .which = static_cast<window>(index)};
-    require(
-        uc_mmio_map(ctx.engine, base, window_size, &mmio_read, &user, &mmio_write, &user),
-        std::format("mapping the system space at {:#010x}", base));
+    map(static_cast<window>(index), base);
+  }
+  if(trustzone())
+  {
+    map(window::scs_nonsecure, scs_nonsecure_base);
+    attach_security();
   }
   uc_hook wfi = 0;
   require(
@@ -198,8 +217,19 @@ auto cortex_m::reset_state(address vector_table) const -> state
   fresh.scs.vtor     = vector_table;
   fresh.scs.ccr      = v7() ? ccr_stkalign : ccr_reset;
   fresh.scs.fpccr    = core_.fpu ? fpccr_reset : 0;
-  fresh.scs.mpu_rbar = std::vector<std::uint32_t>(core_.mpu_regions, 0);
-  fresh.scs.mpu_rlar = std::vector<std::uint32_t>(core_.mpu_regions, 0);
+  fresh.scs.mpu_rbar = std::vector<std::uint32_t>(mpu_regions_of(security::secure), 0);
+  fresh.scs.mpu_rlar = std::vector<std::uint32_t>(mpu_regions_of(security::secure), 0);
+  if(trustzone())
+  {
+    auto& ns                           = fresh.scs.nonsecure;
+    ns.ccr                             = ccr_reset;
+    ns.fpccr                           = core_.fpu ? fpccr_aspen : 0;
+    ns.mpu_rbar                        = std::vector<std::uint32_t>(core_.mpu_regions, 0);
+    ns.mpu_rlar                        = std::vector<std::uint32_t>(core_.mpu_regions, 0);
+    fresh.scs.sau_rbar                 = std::vector<std::uint32_t>(core_.sau_regions, 0);
+    fresh.scs.sau_rlar                 = std::vector<std::uint32_t>(core_.sau_regions, 0);
+    fresh.exceptions.targets_nonsecure = bit_words(count);
+  }
   return fresh;
 }
 
@@ -228,7 +258,14 @@ void cortex_m::reset(address reset_vector)
   write(UC_ARM_REG_XPSR_NZCVQG, (*entry & 1u) != 0 ? xpsr_thumb : 0u);
   write(UC_ARM_REG_PC, *entry);
   state_.special = {.msp = *sp & ~3u};
-  set_context(engine, state_.special, stack_limits());
+  if(trustzone())
+  {
+    apply_security(false);
+  }
+  else
+  {
+    set_context(engine, state_.special, stack_limits());
+  }
   set_pending(false);
 }
 
@@ -236,18 +273,30 @@ auto cortex_m::deliver_pending() -> trap_result
 {
   rethrow_failure();
   wake_if_due();
-  auto const best = best_pending(state_.exceptions, state_.call_masked);
-  if(not best or not preempts(*best))
+  if(trustzone())
+  {
+    return deliver_banked();
+  }
+  auto const best = best_pending_number(state_.exceptions, state_.call_masked);
+  if(best == 0
+     or group_priority(priority_of(state_.exceptions, best), state_.scs.prigroup)
+            >= one_bank_priority(false))
   {
     return trap_result::resume();
   }
-  return enter(*best);
+  return enter_as<false>(best, security::secure);
 }
 
 auto cortex_m::deliverable_now() const -> bool
 {
-  auto const best = best_pending(state_.exceptions, state_.call_masked);
-  return best and preempts(*best);
+  if(trustzone())
+  {
+    return banked_deliverable();
+  }
+  auto const best = best_pending_number(state_.exceptions, state_.call_masked);
+  return best != 0
+     and group_priority(priority_of(state_.exceptions, best), state_.scs.prigroup)
+             < one_bank_priority(false);
 }
 
 auto cortex_m::would_preempt(std::uint32_t number) const -> bool
@@ -256,6 +305,11 @@ auto cortex_m::would_preempt(std::uint32_t number) const -> bool
 }
 
 auto cortex_m::current_priority(bool ignore_primask) const -> int
+{
+  return trustzone() ? banked_priority(ignore_primask) : one_bank_priority(ignore_primask);
+}
+
+[[gnu::aligned(64)]] auto cortex_m::one_bank_priority(bool ignore_primask) const -> int
 {
   std::array<int, 3>           ids{UC_ARM_REG_PRIMASK, UC_ARM_REG_BASEPRI, UC_ARM_REG_FAULTMASK};
   std::array<std::uint32_t, 3> held{};
@@ -282,22 +336,36 @@ auto cortex_m::privileged() const -> bool
 
 auto cortex_m::preempts(std::uint32_t number) const -> bool
 {
+  if(trustzone())
+  {
+    return preempts(
+        number, exception_target(state_.exceptions, priority_config(), number, current_security()));
+  }
   return group_priority(priority_of(state_.exceptions, number), state_.scs.prigroup)
+       < one_bank_priority(false);
+}
+
+auto cortex_m::preempts(std::uint32_t number, security state) const -> bool
+{
+  return exception_priority(state_.exceptions, priority_config(), number, state, true)
        < current_priority();
 }
 
-auto cortex_m::raise(std::uint32_t number, address at) -> trap_result
+[[gnu::noinline]] auto cortex_m::raise(std::uint32_t number, address at) -> trap_result
 {
+  auto const config  = priority_config();
   auto const current = current_priority();
-  if(group_priority(priority_of(state_.exceptions, number), state_.scs.prigroup) < current)
+  auto const state   = exception_target(state_.exceptions, config, number, current_security());
+  if(exception_priority(state_.exceptions, config, number, state, true) < current)
   {
-    set_exception_pending(number, true);
+    pend(number, state);
     return trap_result::resume();
   }
-  if(group_priority(priority_of(state_.exceptions, exc_hardfault), state_.scs.prigroup) < current)
+  auto const escalated = exception_target(state_.exceptions, config, exc_hardfault, state);
+  if(exception_priority(state_.exceptions, config, exc_hardfault, escalated, true) < current)
   {
     state_.scs.hfsr |= hfsr_forced;
-    set_exception_pending(exc_hardfault, true);
+    pend(exc_hardfault, escalated);
     return trap_result::resume();
   }
   write(UC_ARM_REG_PC, at | 1u);
@@ -353,7 +421,12 @@ auto cortex_m::on_interrupt(std::uint32_t intno) -> trap_result
 
 auto cortex_m::return_interrupt() const -> std::optional<std::uint32_t>
 {
-  if(thread_mode() or (read(UC_ARM_REG_PC) & 0xff00'0000u) != 0xff00'0000u)
+  auto const value = read(UC_ARM_REG_PC);
+  if(trustzone() and (value | 1u) == fnc_return)
+  {
+    return excp_exception_exit;
+  }
+  if(thread_mode() or (value & 0xff00'0000u) != 0xff00'0000u)
   {
     return std::nullopt;
   }
@@ -383,20 +456,20 @@ auto cortex_m::pc() const -> address
 }
 
 auto cortex_m::halfwords(address from, address to) const
-    -> std::optional<std::vector<std::uint16_t>>
+    -> std::optional<std::span<std::uint16_t const>>
 {
   if(to < from or (to - from) % 2 != 0)
   {
     return std::nullopt;
   }
-  std::vector<std::uint16_t> code((to - from) / 2);
-  if(not code.empty()
+  halfwords_.resize((to - from) / 2);
+  if(not halfwords_.empty()
      and not context_->services.read_block(
-         from, std::as_writable_bytes(std::span{code}), initiator::debugger))
+         from, std::as_writable_bytes(std::span{halfwords_}), initiator::debugger))
   {
     return std::nullopt;
   }
-  return code;
+  return std::span<std::uint16_t const>{halfwords_};
 }
 
 auto cortex_m::instructions_between(address from, address to) const -> std::optional<std::uint32_t>
@@ -446,9 +519,22 @@ auto cortex_m::host_register_value(cpu_register const& reg, std::uint64_t value)
   return (value & ~std::uint64_t{1}) | thumb;
 }
 
+auto cortex_m::translation_register(cpu_register const& reg) const -> bool
+{
+  return reg.engine_id == UC_ARM_REG_SECURE
+      or reg.engine_id == UC_ARM_REG_CONTROL_S
+      or reg.engine_id == UC_ARM_REG_CONTROL_NS
+      or (reg.engine_id == UC_ARM_REG_CONTROL and trustzone());
+}
+
 auto cortex_m::registers() const -> std::span<cpu_register const>
 {
-  return core_.fpu ? std::span<cpu_register const>{fpu_registers} : integer_registers;
+  if(trustzone())
+  {
+    return core_.fpu ? std::span<cpu_register const>{fpu_trustzone_registers}
+                     : std::span<cpu_register const>{integer_trustzone_registers};
+  }
+  return core_.fpu ? fpu_registers : integer_registers;
 }
 
 void cortex_m::save(std::vector<std::byte>& out) const
@@ -456,6 +542,17 @@ void cortex_m::save(std::vector<std::byte>& out) const
   auto saved                     = state_;
   saved.special                  = read_special(engine_handle(), stack_limits());
   saved.systick.generation_floor = generation_;
+  if(trustzone())
+  {
+    saved.current = read_security(engine_handle());
+    saved.other   = read_bank(
+        engine_handle(),
+        saved.current == security::secure ? security::nonsecure : security::secure);
+    if(core_.fpu)
+    {
+      saved.scs.fpccr = (saved.scs.fpccr & ~fpccr_s) | (engine_fpccr_s() ? fpccr_s : 0u);
+    }
+  }
   std::vector<std::byte> bytes;
   reflex::serde::bson::serializer{bytes}.dump(saved);
   out.insert(out.end(), bytes.begin(), bytes.end());
@@ -465,7 +562,11 @@ void cortex_m::load(std::span<std::byte const> in)
 {
   auto live = state_;
   state_    = reflex::serde::bson::deserializer{in}.load<state>();
-  set_context(engine_handle(), state_.special, stack_limits());
+  if(not trustzone())
+  {
+    set_context(engine_handle(), state_.special, stack_limits());
+  }
+  auto const restored = not in_call_;
   if(in_call_)
   {
     in_call_ = false;
@@ -476,11 +577,12 @@ void cortex_m::load(std::span<std::byte const> in)
         put_bit(live.exceptions.pending, number, test_bit(state_.exceptions.pending, number));
       }
     }
-    live.exceptions.active = std::move(state_.exceptions.active);
-    state_.exceptions      = std::move(live.exceptions);
-    state_.scs             = std::move(live.scs);
-    state_.systick         = live.systick;
-    state_.cyccnt          = live.cyccnt;
+    live.exceptions.active   = std::move(state_.exceptions.active);
+    state_.exceptions        = std::move(live.exceptions);
+    state_.scs               = std::move(live.scs);
+    state_.systick           = live.systick;
+    state_.systick_nonsecure = live.systick_nonsecure;
+    state_.cyccnt            = live.cyccnt;
     for(auto number = exc_nmi; number < exception_count(); ++number)
     {
       if(level_sensitive(number) and test_bit(state_.exceptions.level, number))
@@ -493,6 +595,10 @@ void cortex_m::load(std::span<std::byte const> in)
   {
     generation_ = state_.systick.generation_floor;
   }
+  if(trustzone())
+  {
+    apply_security(restored);
+  }
   refresh_pending();
 }
 
@@ -504,6 +610,11 @@ auto cortex_m::stack_limits() const noexcept -> bool
 auto cortex_m::v7() const noexcept -> bool
 {
   return profile_.arch == architecture::v7m;
+}
+
+auto cortex_m::access_attrs() const noexcept -> uc_mem_attrs
+{
+  return access_;
 }
 
 auto cortex_m::cpuid() const noexcept -> std::uint32_t
@@ -578,7 +689,9 @@ void cortex_m::write(int engine_id, std::uint32_t value) const
 
 void cortex_m::refresh_pending() noexcept
 {
-  set_pending(any_pending(state_.exceptions, exception_count(), state_.call_masked));
+  set_pending(
+      any_pending(state_.exceptions, exception_count(), state_.call_masked)
+      or any_nonsecure_pending(state_.exceptions, state_.call_masked));
 }
 
 void cortex_m::rethrow_failure() const

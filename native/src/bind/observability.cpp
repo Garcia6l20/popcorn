@@ -163,7 +163,7 @@ auto machine_handle::function_ranges(std::vector<std::string> const& names) cons
     -> std::vector<detail::range_row>
 {
   return access([&](core::machine& target) {
-    return obs::function_ranges(target.loaded_images(), names)
+    return obs::function_ranges(target.observed_images(), names)
          | std::views::transform([](address_range const& range) {
              return detail::range_row{range.name, range.start, range.size};
            })
@@ -202,11 +202,12 @@ auto machine_handle::coverage_pcov(std::vector<std::string> const& elf_paths) ->
         })
       | std::ranges::to<std::vector>();
   auto const bytes = access([&](core::machine& target) {
-    auto const loaded = target.loaded_images().size();
-    if(sources.size() != loaded)
+    auto const observed = target.observed_images().size();
+    if(sources.size() != observed)
     {
       throw config_error(
-          "coverage", 0, "sources", std::format("one source per loaded image, {}", loaded));
+          "coverage", 0, "sources",
+          std::format("one source per loaded or symbols-only image, {}", observed));
     }
     nb::gil_scoped_release released;
     return obs::encode_pcov(obs::collect(target, sources));

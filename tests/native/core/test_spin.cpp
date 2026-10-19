@@ -86,7 +86,9 @@ TEST_CASE("a poll of a flag set later stops only when the threshold is below the
     {
       return first.stopped->reason;
     }
-    REQUIRE(f.target->mem().write(flag, 4, 1));
+    REQUIRE(
+        core::machine_internals::services(*f.target).write(
+            flag, 4, 1, popcorn::initiator::debugger));
     return f.run_to_stop(long_request()).reason;
   };
   CHECK(wait(50'000) == stop_reason::user);

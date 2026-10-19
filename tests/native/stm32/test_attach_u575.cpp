@@ -7,6 +7,7 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 namespace
@@ -25,14 +26,23 @@ TEST_CASE("every built-in model attaches to the full description, cross rules in
   stm32::board const board{};
   CHECK(stm32::factories(board, u575()).contains("RCC"));
   CHECK(target.model("RCC") != nullptr);
+  auto const trustzone_only = [](std::string_view name) { return name.starts_with("GTZC"); };
   for(auto const& [name, factory] : stm32::factories(board, u575()))
   {
     CAPTURE(name);
-    CHECK(target.model(name) != nullptr);
+    CHECK((target.model(name) != nullptr) != trustzone_only(name));
   }
   core::machine_options wired = popcorn::testing::stm32_options();
   wired.models                = stm32::factories(board, u575());
   CHECK_NOTHROW(core::machine{u575(), popcorn::arch::armv8m::factory(), std::move(wired)});
+  auto secured = popcorn::testing::stm32_options();
+  REQUIRE(stm32::configure_option_bytes(u575(), {.tzen = true}, secured).has_value());
+  core::machine trustzone{u575(), popcorn::arch::armv8m::factory(), std::move(secured)};
+  for(auto const& [name, factory] : stm32::factories(board, u575()))
+  {
+    CAPTURE(name);
+    CHECK(trustzone.model(name) != nullptr);
+  }
 }
 
 TEST_CASE("an LL firmware boots on the CMSIS startup and reads the reset clock tree")

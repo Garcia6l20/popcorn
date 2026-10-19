@@ -8,6 +8,12 @@ namespace popcorn::arch::armv8m
 inline constexpr std::uint32_t basic_frame_size = 0x20;
 /** @brief Bytes of an extended frame: the basic words, s0-s15, FPSCR and a reserved word. */
 inline constexpr std::uint32_t extended_frame_size = 0x68;
+/** @brief Bytes of s16-s31 that an extended frame of a Secure background holds after its
+ *         basic and FP words when FPCCR_S.TS is set, PushStack(). */
+inline constexpr std::uint32_t fp_callee_frame_size = 0x40;
+/** @brief Bytes of the additional state context: the integrity signature, a reserved word and
+ *         r4-r11, B3.19. */
+inline constexpr std::uint32_t callee_frame_size = 0x28;
 /** @brief xPSR bit 9 of a stacked xPSR: the frame was aligned down by 4 bytes. */
 inline constexpr std::uint32_t stacked_align_bit = 1u << 9;
 /** @brief xPSR bit 20 of a stacked xPSR on a Secure core: CONTROL.SFPA at entry. */
@@ -27,21 +33,57 @@ struct exc_return
   friend constexpr auto operator==(exc_return, exc_return) -> bool = default;
 };
 
+/** @brief The security fields of an EXC_RETURN value, B3.19. The defaults are the values of a
+ *         Secure exception taken from Secure state, the only ones without TrustZone. */
+struct exc_return_security
+{
+  /** @brief The background state was Secure, S bit 6. */
+  bool secure_background{true};
+  /** @brief The default rules for the callee registers were followed, DCRS bit 5. */
+  bool default_callee{true};
+  /** @brief The exception is Secure, ES bit 0. */
+  bool secure_exception{true};
+
+  /** @brief Member-wise equality. */
+  friend constexpr auto operator==(exc_return_security, exc_return_security) -> bool = default;
+};
+
 /**
  * @brief EXC_RETURN value of an entry.
  * @param frame What the return selects.
- *        Bits 6 and 5 are set on every profile: S and DCRS on the Secure M33 engine, ones on
- *        armv7m. ES, bit 0, is set.
+ * @param security S, DCRS and ES. The defaults set all three, as the Secure M33 engine without
+ *        TrustZone and armv7m, whose bits 6, 5 and 0 read as ones, need.
  */
-constexpr auto encode_exc_return(exc_return frame) noexcept -> std::uint32_t
+constexpr auto encode_exc_return(exc_return frame, exc_return_security security = {}) noexcept
+    -> std::uint32_t
 {
   return 0xffff'ff80u
-       | 1u << 6
-       | 1u << 5
+       | (security.secure_background ? 1u << 6 : 0u)
+       | (security.default_callee ? 1u << 5 : 0u)
        | (frame.basic_frame ? 1u << 4 : 0u)
        | (frame.thread ? 1u << 3 : 0u)
        | (frame.process_stack ? 1u << 2 : 0u)
-       | 1u;
+       | (security.secure_exception ? 1u : 0u);
+}
+
+/** @brief The S, DCRS and ES fields of an EXC_RETURN value. */
+constexpr auto decode_exc_security(std::uint32_t value) noexcept -> exc_return_security
+{
+  return {
+      .secure_background = (value & (1u << 6)) != 0,
+      .default_callee    = (value & (1u << 5)) != 0,
+      .secure_exception  = (value & 1u) != 0,
+  };
+}
+
+/**
+ * @brief Integrity signature at the base of the additional state context, PushCalleeStack():
+ *        0xFEFA125A with the FType bit as bit 0 on a core with the FP extension, 0xFEFA125B
+ *        without one.
+ */
+constexpr auto integrity_signature(bool fpu, bool basic_frame) noexcept -> std::uint32_t
+{
+  return not fpu or basic_frame ? 0xFEFA'125Bu : 0xFEFA'125Au;
 }
 
 /** @brief Whether @p value is an EXC_RETURN value the core can return through. */
@@ -72,8 +114,9 @@ constexpr auto valid_v7_exc_return(std::uint32_t value) noexcept -> bool
 }
 
 /**
- * @brief What an EXC_RETURN value selects. S, DCRS and ES are ignored: the M33 engine runs
- *        Secure, so firmware built for Non-secure values returns.
+ * @brief What an EXC_RETURN value selects. S, DCRS and ES are left to decode_exc_security(): the
+ *        M33 engine runs Secure without TrustZone, so firmware built for Non-secure values
+ *        returns there.
  */
 constexpr auto decode_exc_return(std::uint32_t value) noexcept -> exc_return
 {

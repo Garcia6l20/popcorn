@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstddef>
+#include <initializer_list>
 #include <span>
 #include <string>
 #include <string_view>
@@ -37,22 +38,45 @@ consteval auto engine_register(std::string_view name) -> int
   return reflex::to_enum_value<uc_arm_reg>(upper).value();
 }
 
-/** @brief Register list of a core with an FPU: core registers then floating-point ones. */
-inline constexpr auto fpu_registers = [] consteval {
-  std::array<cpu_register, core_register_names.size() + fp_register_names.size()> out{};
-  std::size_t                                                                     at = 0;
-  for(auto const name : core_register_names)
+/** @brief Registers a TrustZone machine appends: the security state, then the banked special
+ * registers of both states. */
+inline constexpr std::array<std::string_view, 17> trustzone_register_names{
+    "secure",       "msp_s",     "msp_ns",     "psp_s",     "psp_ns",     "control_s",
+    "control_ns",   "primask_s", "primask_ns", "basepri_s", "basepri_ns", "faultmask_s",
+    "faultmask_ns", "msplim_s",  "msplim_ns",  "psplim_s",  "psplim_ns"};
+
+/** @brief Register list made of @p lists in order, every register 32 bits. */
+template <std::size_t N>
+consteval auto register_list(std::initializer_list<std::span<std::string_view const>> lists)
+    -> std::array<cpu_register, N>
+{
+  std::array<cpu_register, N> out{};
+  std::size_t                 at = 0;
+  for(auto const list : lists)
   {
-    out[at++] = {.name = name, .engine_id = engine_register(name), .bits = 32};
-  }
-  for(auto const name : fp_register_names)
-  {
-    out[at++] = {.name = name, .engine_id = engine_register(name), .bits = 32};
+    for(auto const name : list)
+    {
+      out[at++] = {.name = name, .engine_id = engine_register(name), .bits = 32};
+    }
   }
   return out;
-}();
+}
+
+/** @brief Register list of a TrustZone core with an FPU: core, floating-point, then TrustZone. */
+inline constexpr auto fpu_trustzone_registers = register_list<
+    core_register_names.size() + fp_register_names.size() + trustzone_register_names.size()>(
+    {core_register_names, fp_register_names, trustzone_register_names});
+
+/** @brief Register list of a TrustZone core without an FPU: core, then TrustZone. */
+inline constexpr auto integer_trustzone_registers =
+    register_list<core_register_names.size() + trustzone_register_names.size()>(
+        {core_register_names, trustzone_register_names});
+
+/** @brief Register list of a core with an FPU: core registers then floating-point ones. */
+inline constexpr auto fpu_registers = std::span<cpu_register const>{fpu_trustzone_registers}.first(
+    core_register_names.size() + fp_register_names.size());
 
 /** @brief Register list of a core without an FPU. */
 inline constexpr auto integer_registers =
-    std::span<cpu_register const>{fpu_registers}.first(core_register_names.size());
+    std::span<cpu_register const>{integer_trustzone_registers}.first(core_register_names.size());
 }

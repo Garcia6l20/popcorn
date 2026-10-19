@@ -20,6 +20,9 @@
 
 namespace popcorn::periph
 {
+/** @brief Bus firewall of a machine, defined in `popcorn/periph/firewall.hpp`. */
+struct bus_firewall;
+
 /** @brief Where, when and by whom a guest register access happened. */
 struct access_ctx
 {
@@ -33,9 +36,17 @@ struct access_ctx
   icount now;
   /** @brief Bus master that made the access. */
   initiator by{initiator::cpu};
-  /** @brief Whether the access came through a secure alias window, a peripheral description
-   * with `secure` set. */
+  /** @brief Security attribute of the transaction, AHB HNONSEC inverted, whatever window it
+   * came through. False for every access, CPU, DMA or debugger, on a machine without TrustZone,
+   * `core::machine_options::trustzone` unset. */
   bool secure{};
+  /** @brief Whether the transaction is privileged, AHB HPROT[1]: an unprivileged CPU access
+   * reads false. Debugger and DMA accesses are privileged unless their master says otherwise. */
+  bool privileged{true};
+  /** @brief Whether the access came through a secure alias window, a `SEC_` peripheral
+   * description with `alias_of` set, or for a memory region access a region with `secure`
+   * set. Independent of TrustZone. */
+  bool via_secure_alias{};
 };
 
 /**
@@ -202,6 +213,31 @@ public:
    * @param in Bytes of one save() call.
    */
   virtual void load(std::span<std::byte const> in) = 0;
+
+  /**
+   * @brief Whether the model keeps no state beyond its register storage. A snapshot holds no
+   *        bytes for such a model, so save() and load() are never called for it, and it restores
+   *        from the register storage alone. A save made by a machine with no model for the
+   *        peripheral then loads too. A snapshot missing the bytes of any other model is refused.
+   * @return False by default.
+   */
+  [[nodiscard]] virtual auto stateless() const -> bool
+  {
+    return false;
+  }
+
+  /**
+   * @brief Whether a register the model claims is storage it does not model. A host view,
+   *        core::memory_view and the peripheral views built on it, refuses such a register with
+   *        model_error, as a register of a peripheral without a model. peek and poke still reach
+   *        it.
+   * @param offset Byte offset of the register's word in the peripheral, a multiple of 4.
+   * @return False by default.
+   */
+  [[nodiscard]] virtual auto storage_only([[maybe_unused]] std::uint32_t offset) const -> bool
+  {
+    return false;
+  }
 };
 
 /**
@@ -251,7 +287,8 @@ struct POPCORN_API model_context
 {
   /** @brief Storage of the peripheral. */
   register_file& regs;
-  /** @brief IRQ lines of the peripheral, in description order. */
+  /** @brief IRQ lines of the peripheral, in the order of popcorn::irq_sources(): its own, then
+   * under TrustZone those of its Secure aliases. */
   std::span<irq_line> irqs;
   /** @brief Line to the core's non-maskable interrupt, level-sensitive and shared by every
    * model: the input is active while any model holds its line active. An NMI still active when
@@ -273,6 +310,20 @@ struct POPCORN_API model_context
    * the machine's life, so a model may cache it: a model may raise model_error where it would
    * only warn. */
   bool strict_peripherals{};
+  /** @brief Whether the machine runs with `core::machine_options::trustzone`, TZEN=1 on an STM32,
+   * fixed for the machine's life. */
+  bool trustzone{};
+
+  /**
+   * @brief Installs the machine's bus firewall, forwarding to services. Only from the model's
+   *        factory or constructor: the machine asks it before every access to a peripheral
+   *        window from then on.
+   * @param firewall Firewall, which must live as long as the model.
+   * @throws model_error naming the peripheral being built when the machine already has a
+   *         firewall, or when the machine no longer builds its models. The machine also raises
+   *         it, naming the peripheral, when a factory installs a firewall and returns no model.
+   */
+  void install_firewall(bus_firewall& firewall);
 
   /**
    * @brief Asks the run loop to stop, forwarding to services. Deferred: it only records the

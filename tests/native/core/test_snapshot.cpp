@@ -162,6 +162,8 @@ TEST_CASE(
   CHECK(back.format == core::snapshot_format_version);
   CHECK_FALSE(back.core_held);
   CHECK(back.peripherals.front().nmi_level == 0);
+  CHECK_FALSE(back.trustzone);
+  CHECK(back.idau.empty());
   CHECK(back == filled());
 }
 

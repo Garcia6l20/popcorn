@@ -97,6 +97,26 @@ def debug_infos(images: Sequence[Image]) -> list[tuple[Image, DebugInfo]]:
     return infos
 
 
+def selected_images(images: Sequence[Image], name: str | None) -> list[Image]:
+    """`images`, or the one named `name`.
+
+    Raises:
+        SymbolError: No image has the name, naming the images that have one.
+    """
+    if name is None:
+        return list(images)
+    chosen = [image for image in images if image.name == name]
+    if not chosen:
+        names = [image.name for image in images if image.name is not None]
+        listed = ", ".join(names) if names else "none"
+        raise SymbolError(
+            f"no image named {name}, the image names are: {listed}",
+            name=name,
+            close_matches=names,
+        )
+    return chosen
+
+
 def find_variable(images: Sequence[Image], name: str) -> tuple[Image, DebugInfo, Variable]:
     """The module-scope variable `name`, the last loaded image first.
 
@@ -134,19 +154,21 @@ class ImageView:
         """View `images`. Use `Machine.image` instead."""
         self._images = tuple(images)
 
-    def var(self, name: str) -> Var:
+    def var(self, name: str, image: str | None = None) -> Var:
         """A module-scope variable of the loaded ELF images as their files hold it, the last
-        loaded image first, as `Machine.var` looks it up. The file is read now: a file rebuilt
-        since the load gives its new bytes.
+        loaded image first, or of the image named `image` alone, as `Machine.var` looks it up.
+        The file is read now: a file rebuilt since the load gives its new bytes.
 
         Raises:
-            SymbolError: No loaded image declares the variable, with close matches.
+            SymbolError: No loaded image declares the variable, with close matches, or no
+                image is named `image`.
             ImageError: The file cannot be read, or, from a read, the variable lies in no
                 loadable segment of its file.
         """
-        image, info, variable = find_variable(self._images, name)
-        assert image.path is not None
-        return Var(_ElfBytes(image.path), info, variable.type, variable.address, name)
+        found, info, variable = find_variable(selected_images(self._images, image), name)
+        image_path = found.path
+        assert image_path is not None
+        return Var(_ElfBytes(image_path), info, variable.type, variable.address, name)
 
     @property
     def constants(self) -> Constants:

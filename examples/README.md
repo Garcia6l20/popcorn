@@ -23,6 +23,7 @@ Copy one, build it, run its tests, then read its `test_*.py` to see how a test d
 | [stm32u575/spi](stm32u575/spi) | FreeRTOS, HAL init, LL driver | AT25SF NOR flash on the hardware SS output, an interrupt-driven transfer from a task, an application linked behind a bootloader offset |
 | [stm32u575/spi_mock](stm32u575/spi_mock) | HAL | a two-channel ADC written in Python as a `SpiTarget` on a software chip select: samples from a function of virtual time, chip select framing, `machine_factory.booted(description, devices=)` |
 | [stm32u575/tim](stm32u575/tim) | LL | TIM2 1 kHz update interrupt toggling PA5, TIM16 one-pulse after 50 ms, update period in virtual time |
+| [stm32u575/trustzone](stm32u575/trustzone) | CMSIS, CMSE | a secure and Non-secure pair with TZEN=1: the secure binary embedded in the Non-secure ELF, a symbols-only `Elf(loaded=False)`, `OptionBytes`, SG veneers probed by `state=`, SecureFault AUVIOL and INVEP and the BFHFNMINS HardFault targets with `faults="handler"`, a Secure MPCBB block, both SysTick timers, the FP context across BLXNS, a snapshot inside a Non-secure callback |
 | [stm32u575/uart_mock](stm32u575/uart_mock) | HAL IT | an AT modem written in Python on the host end of USART2: replies in virtual time from the test's coroutine, an ERROR reply, a reply that never comes and the firmware's timeout |
 | [stm32u575/usart](stm32u575/usart) | HAL IT | a printf banner and a receive-to-idle line echo, frame timing at the BRR rate |
 | [stm32u575/usb_audio](stm32u575/usb_audio) | HAL, TinyUSB | a UAC2 headset on `Periph(host=UsbHostOptions())`: the Linux snd-usb-audio probe sequence, a 16 kHz mono sine looped from `host.audio().speaker` to `mic.read_frames` with frame times, `drain`, `stop`, a snapshot taken mid-stream |
@@ -86,6 +87,7 @@ boot snapshot. The plugin owns the boot, the restore, the teardown, the failure 
 traces. The machine is named after the fixture in logs and errors.
 
 - `strict=True` fails the run on a register access no model serves, as in `crc`.
+- `faults="handler"` makes a processor fault enter the firmware's fault handler instead of stopping the run, as in `trustzone`.
 - `Periph(devices=[Device(cls, address=0x50, **params)])` attaches a bus device, `Periph(model=Use(cls, **params))` replaces a peripheral model, as in `i2c_mock` and `python_model`.
 - `rcc=RccOptions(...)` and `supply=SupplyOptions(...)` set the board clock and supply, as in `rcc` and `adc_watchdog`.
 

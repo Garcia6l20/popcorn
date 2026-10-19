@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <bit>
-#include <limits>
 #include <ranges>
 #include <utility>
 
@@ -14,49 +13,6 @@ namespace popcorn::core
 namespace
 {
 constexpr std::size_t first_edge_slots = 1024;
-
-auto edge_hash(std::uint64_t key) noexcept -> std::uint64_t
-{
-  return key * 0x9e37'79b9'7f4a'7c15;
-}
-
-auto holds(address_range const& range, address addr) noexcept -> bool
-{
-  return range.start <= addr and std::uint64_t{addr} < std::uint64_t{range.start} + range.size;
-}
-
-void bump(block_counters& counters, address addr) noexcept
-{
-  auto& hits = counters.hits[(addr - counters.range.start) >> 1];
-  if(hits != std::numeric_limits<std::uint32_t>::max())
-  {
-    ++hits;
-  }
-}
-}
-
-void flat_edge_table::count(std::uint64_t key)
-{
-  if(2 * (used_ + 1) > slots_.size())
-  {
-    grow();
-  }
-  auto const mask = slots_.size() - 1;
-  for(auto at = edge_hash(key) >> 32 & mask;; at = (at + 1) & mask)
-  {
-    auto& held = slots_[at];
-    if(held.hits == 0)
-    {
-      held = {.key = key, .hits = 1};
-      ++used_;
-      return;
-    }
-    if(held.key == key)
-    {
-      ++held.hits;
-      return;
-    }
-  }
 }
 
 void flat_edge_table::grow()
@@ -71,7 +27,7 @@ void flat_edge_table::grow()
     {
       continue;
     }
-    auto at = edge_hash(held.key) >> 32 & mask;
+    auto at = hash(held.key) >> 32 & mask;
     while(slots_[at].hits != 0)
     {
       at = (at + 1) & mask;
@@ -101,45 +57,6 @@ void flat_edge_table::clear() noexcept
 {
   slots_.clear();
   used_ = 0;
-}
-
-void coverage_state::count(address addr, std::uint32_t insns)
-{
-  auto inside = false;
-  if(last_range < blocks.size() and holds(blocks[last_range].range, addr) and not overlapping)
-  {
-    bump(blocks[last_range], addr);
-    inside = true;
-  }
-  else
-  {
-    for(auto const& [index, counters] : std::views::enumerate(blocks))
-    {
-      if(holds(counters.range, addr))
-      {
-        bump(counters, addr);
-        last_range = static_cast<std::size_t>(index);
-        inside     = true;
-        if(not overlapping)
-        {
-          break;
-        }
-      }
-    }
-  }
-  if(not inside)
-  {
-    has_previous = false;
-    open_insns   = 0;
-    return;
-  }
-  if(has_previous)
-  {
-    edges.count(previous << 32 | addr);
-  }
-  previous     = addr;
-  has_previous = true;
-  open_insns   = insns;
 }
 
 void coverage_state::leave(arch::arch const& core, address pc, bool at_exit)

@@ -3,6 +3,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/services.hpp>
 
+#include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 #include "../support/test_model.hpp"
@@ -217,8 +218,9 @@ TEST_CASE("an access to an offset without register reads 0 and warns once")
   std::vector<core::log_record> records;
   auto const                    sink =
       f.target->add_log_sink([&](core::log_record const& r) { records.push_back(r); });
-  CHECK(f.target->mem().read(testdev + 0x100, 4) == 0u);
-  CHECK(f.target->mem().read(testdev + 0x100, 4) == 0u);
+  auto& bus = core::machine_internals::services(*f.target);
+  CHECK(bus.read(testdev + 0x100, 4, popcorn::initiator::debugger) == 0u);
+  CHECK(bus.read(testdev + 0x100, 4, popcorn::initiator::debugger) == 0u);
   REQUIRE(records.size() == 1);
   CHECK(records[0].kind == core::log_kind::model_warning);
 }
@@ -345,7 +347,9 @@ TEST_CASE("an event a model schedules from an MMIO write fires on time inside th
   CHECK(m.fired_at->value <= due + 2);
 }
 
-TEST_CASE("an access through the SEC_ alias window is secure, through the peripheral's own not")
+TEST_CASE(
+    "an access through the SEC_ alias window is via_secure_alias, neither is secure without "
+    "TrustZone")
 {
   auto  f = booted();
   auto& m = model(f);
@@ -354,8 +358,10 @@ TEST_CASE("an access through the SEC_ alias window is secure, through the periph
   REQUIRE(services.read(testdev + test_model::data_offset, 4, initiator::cpu));
   REQUIRE(services.read(0x5001'0000 + test_model::data_offset, 4, initiator::cpu));
   REQUIRE(m.accesses.size() == 2);
+  CHECK_FALSE(m.accesses[0].ctx.via_secure_alias);
+  CHECK(m.accesses[1].ctx.via_secure_alias);
   CHECK_FALSE(m.accesses[0].ctx.secure);
-  CHECK(m.accesses[1].ctx.secure);
+  CHECK_FALSE(m.accesses[1].ctx.secure);
 }
 
 TEST_CASE("a model bus error reaches every services caller, the CPU initiator included")
@@ -377,17 +383,74 @@ TEST_CASE("a model bus error reaches every services caller, the CPU initiator in
   }
 }
 
-TEST_CASE("under strict_peripherals the debugger reads unmodelled registers freely")
+TEST_CASE(
+    "under strict_peripherals the arch and model debugger path reads unmodelled registers "
+    "freely")
 {
   auto                          f = booted(true);
   std::vector<core::log_record> records;
   auto const                    sink =
       f.target->add_log_sink([&](core::log_record const& r) { records.push_back(r); });
-  CHECK(f.target->mem().read(unmodelled + 4, 4) == 1u);
+  CHECK(
+      core::machine_internals::services(*f.target).read(
+          unmodelled + 4, 4, popcorn::initiator::debugger)
+      == 1u);
   CHECK(records.empty());
   enter(f, "unmodelled_reads");
   CHECK_THROWS_AS(std::ignore = f.run(), popcorn::model_error);
   CHECK(records.size() == 1);
+}
+
+TEST_CASE(
+    "a host view access to a peripheral without a model or to an offset without register is a "
+    "model_error, strict or not, logs nothing and leaves the firmware's first access logged")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    auto                          f = booted(strict);
+    std::vector<core::log_record> records;
+    auto const                    sink =
+        f.target->add_log_sink([&](core::log_record const& r) { records.push_back(r); });
+    auto const refused = [](auto&& access, std::string_view peripheral, std::string_view reg,
+                            address offset) {
+      try
+      {
+        std::ignore = access();
+        FAIL("no model_error");
+      }
+      catch(popcorn::model_error const& error)
+      {
+        CHECK(error.peripheral() == peripheral);
+        CHECK(error.reg() == reg);
+        CHECK(error.offset() == offset);
+      }
+    };
+    auto const               view = f.target->mem();
+    std::array<std::byte, 8> bytes{};
+    refused([&] { return view.read(unmodelled + 4, 4); }, "UNMODELLED", "STAT", 4);
+    refused([&] { return view.write(unmodelled, 4, 1); }, "UNMODELLED", "DATA", 0);
+    refused([&] { return view.read_block(unmodelled, bytes); }, "UNMODELLED", "DATA", 0);
+    refused([&] { return view.write_block(unmodelled + 2, bytes); }, "UNMODELLED", "DATA", 0);
+    refused([&] { return view.read(unmodelled + 0x100, 4); }, "UNMODELLED", "", 0x100);
+    refused([&] { return view.read_block(unmodelled + 2, bytes); }, "UNMODELLED", "DATA", 0);
+    refused([&] { return view.read(testdev + 0x100, 4); }, "TESTDEV", "", 0x100);
+    refused([&] { return view.read_block(testdev + 0x5c, bytes); }, "TESTDEV", "", 0x60);
+    CHECK(view.read(testdev + 8, 4).has_value());
+    CHECK(records.empty());
+    enter(f, "unmodelled_reads");
+    if(strict)
+    {
+      CHECK_THROWS_AS(std::ignore = f.run(), popcorn::model_error);
+    }
+    else
+    {
+      std::ignore = f.run();
+    }
+    CHECK(
+        std::ranges::count(records, core::log_kind::unmodelled_access, &core::log_record::kind)
+        >= 1);
+  }
 }
 
 TEST_CASE("a model logs through its services to the machine's log sinks")

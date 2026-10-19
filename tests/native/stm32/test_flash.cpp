@@ -1,3 +1,4 @@
+#include "../../../native/src/core/machine_impl.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -11,12 +12,15 @@
 #include <doctest/doctest.h>
 #include <reflex/serde/bson.hpp>
 
+#include <unicorn/unicorn.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <format>
 #include <initializer_list>
 #include <memory>
 #include <optional>
@@ -121,6 +125,21 @@ struct new_flash_state
   friend auto operator==(new_flash_state const&, new_flash_state const&) -> bool = default;
 };
 
+struct secure_flash_state
+{
+  bool                      first_key{};
+  bool                      locked_up{};
+  bool                      buffer_secure{};
+  bool                      running_secure{};
+  std::vector<std::uint8_t> held_attrs{};
+};
+
+struct trustzone_flash_state
+{
+  new_flash_state    flash{};
+  secure_flash_state secure{};
+};
+
 class services_probe final : public periph::model
 {
 public:
@@ -160,6 +179,11 @@ public:
     return ctx_.services;
   }
 
+  [[nodiscard]] auto trustzone() const -> bool
+  {
+    return ctx_.trustzone;
+  }
+
 private:
   periph::model_context& ctx_;
 };
@@ -171,6 +195,13 @@ auto board_options(
 {
   auto options               = popcorn::testing::stm32_options();
   options.strict_peripherals = strict;
+  options.trustzone          = board.flash.option_bytes and board.flash.option_bytes->tzen;
+  if(options.trustzone)
+  {
+    auto const idau = periph::stm32::idau_map(u575());
+    REQUIRE(idau.has_value());
+    options.idau.assign(idau->begin(), idau->end());
+  }
   for(auto& [name, factory] : periph::stm32::factories(board, u575()))
   {
     options.models.emplace(name, std::move(factory));
@@ -195,15 +226,28 @@ struct flash_rig
   std::vector<core::log_record>   logged{};
   core::hook_handle               sink{};
 
+  bool secure_set{};
+
   explicit flash_rig(periph::stm32::board const& board = {}, bool strict = false)
-      : f{u575(), "flash_ll", board_options(board, strict, &probe)}
+      : f{u575(), "flash_ll", board_options(board, strict, &probe)},
+        secure_set{board.flash.option_bytes and board.flash.option_bytes->tzen}
   {
     sink = f.target->add_log_sink(
         [this](core::log_record const& record) { logged.push_back(record); });
     REQUIRE(f.run_to_stop().reason == stop_reason::user);
-    write("FLASH_NSKEYR", 0x4567'0123u);
-    write("FLASH_NSKEYR", 0xcdef'89abu);
-    REQUIRE(field("FLASH_NSCR", "LOCK") == 0);
+    unlock();
+  }
+
+  [[nodiscard]] auto set(std::string_view reg) const -> std::string
+  {
+    return std::format("FLASH_{}{}", secure_set ? "SEC" : "NS", reg);
+  }
+
+  void unlock() const
+  {
+    write(set("KEYR"), 0x4567'0123u);
+    write(set("KEYR"), 0xcdef'89abu);
+    REQUIRE(field(set("CR"), "LOCK") == 0);
   }
 
   [[nodiscard]] auto at(std::string_view reg, std::string_view peripheral = "FLASH") const
@@ -273,17 +317,17 @@ struct flash_rig
 
   [[nodiscard]] auto status(std::string_view name) const -> std::uint32_t
   {
-    return field("FLASH_NSSR", name);
+    return field(set("SR"), name);
   }
 
   void clear_errors() const
   {
-    write("FLASH_NSSR", all_errors);
+    write(set("SR"), all_errors);
   }
 
   void control(std::uint32_t value) const
   {
-    write("FLASH_NSCR", value);
+    write(set("CR"), value);
   }
 
   void call(std::string_view entry, std::initializer_list<std::uint32_t> args) const
@@ -349,10 +393,19 @@ struct flash_rig
   {
     std::vector<std::byte> saved;
     f.target->model("FLASH")->save(saved);
+    std::vector<std::byte> redumped;
+    if(secure_set)
+    {
+      auto const state = reflex::serde::bson::deserializer{
+          std::span<std::byte const>{
+              saved}}.load<trustzone_flash_state>();
+      reflex::serde::bson::serializer{redumped}.dump(state);
+      REQUIRE(redumped == saved);
+      return state.flash;
+    }
     auto const state = reflex::serde::bson::deserializer{
         std::span<std::byte const>{
             saved}}.load<new_flash_state>();
-    std::vector<std::byte> redumped;
     reflex::serde::bson::serializer{redumped}.dump(state);
     REQUIRE(redumped == saved);
     return state;
@@ -366,9 +419,7 @@ struct flash_rig
   void cycle() const
   {
     f.target->power_cycle();
-    write("FLASH_NSKEYR", 0x4567'0123u);
-    write("FLASH_NSKEYR", 0xcdef'89abu);
-    REQUIRE(field("FLASH_NSCR", "LOCK") == 0);
+    unlock();
   }
 
   void run_sliced(icount slice, std::optional<popcorn::vtime> until, stop_reason reason) const
@@ -1819,4 +1870,340 @@ TEST_CASE("a torn load in one slice or in small slices reports the same")
     CHECK(running->eccr() == parked->eccr());
     CHECK(running->state() == parked->state());
   }
+}
+
+auto option_board(periph::stm32::option_bytes const& wanted) -> periph::stm32::board
+{
+  periph::stm32::board board;
+  board.flash.option_bytes = wanted;
+  board.flash.bank_erase   = std::chrono::microseconds{200};
+  return board;
+}
+
+constexpr std::array<std::string_view, 8> option_registers{
+    "FLASH_OPTR",     "FLASH_NSBOOTADD0R", "FLASH_NSBOOTADD1R", "FLASH_SECBOOTADD0R",
+    "FLASH_SECWM1R1", "FLASH_SECWM1R2",    "FLASH_SECWM2R1",    "FLASH_SECWM2R2",
+};
+
+auto option_readback(flash_rig const& rig) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(auto const name : option_registers)
+  {
+    out.push_back(rig.read(name));
+  }
+  return out;
+}
+
+TEST_CASE("option bytes load into the option registers at each reset, RM0456 7.9.13 to 7.9.22")
+{
+  flash_rig const rig{
+      option_board({
+                    .tzen    = true,
+                    .secwm1  = periph::stm32::page_range{.first = 0, .last = 9},
+                    .secwm2  = periph::stm32::no_area{},
+                    .hdp1    = periph::stm32::page_range{.first = 0, .last = 5},
+                    .secboot = 0x3000'0000,
+                    .nsboot  = 0x2000'0000,
+                    }
+      )
+  };
+  std::vector<std::uint32_t> const expected{
+      0x9fef'f8aa, 0x2000'007f, 0x0bf9'007f, 0x3000'007c,
+      0xff89'ff80, 0xff85'7f80, 0xff80'ffff, 0x7f80'7f80,
+  };
+  CHECK(option_readback(rig) == expected);
+  for(auto const name : option_registers)
+  {
+    CAPTURE(name);
+    rig.write(name, 0);
+    REQUIRE(rig.f.target->mem().write(rig.at(name) + 2, 1, 0x55).has_value());
+  }
+  CHECK(option_readback(rig) == expected);
+  rig.f.target->reset(popcorn::reset_kind::software);
+  CHECK(option_readback(rig) == expected);
+}
+
+namespace
+{
+constexpr address       sau_ctrl  = 0xe000'edd0;
+constexpr std::uint32_t sau_allns = 2;
+
+void engine_secure(flash_rig const& rig, bool secure)
+{
+  std::uint32_t value = secure ? 1 : 0;
+  REQUIRE(
+      uc_reg_write(core::machine_internals::engine(*rig.f.target), UC_ARM_REG_SECURE, &value)
+      == UC_ERR_OK);
+}
+}
+
+TEST_CASE(
+    "a torn Secure program through SECCR: Non-secure DMA and CPU reads are RAZ with no ECC "
+    "report, a Secure load through either alias reports the same ADDR_ECC")
+{
+  flash_rig rig{option_board({.tzen = true})};
+  rig.tear(torn_line);
+  rig.handle_nmi();
+  auto const nonsecure = popcorn::bus_attrs{.by = initiator::dma, .secure = false};
+  auto const flagged   = [&rig] {
+    auto const* sr4 = popcorn::find_register(
+        *std::ranges::find(
+            u575().peripherals, std::string_view{"GTZC1_TZIC"}, &popcorn::peripheral_desc::name),
+        "SR4");
+    auto const flash =
+        std::ranges::find(sr4->fields, std::string_view{"FLASHF"}, &popcorn::field_desc::name);
+    return (rig.word(rig.at("SR4", "GTZC1_TZIC")) >> flash->lsb & 1u) != 0;
+  };
+  CHECK(rig.probe->services().read(torn_line + 16, 4, nonsecure) == 0u);
+  CHECK(flagged());
+  CHECK(rig.eccr() == 0);
+
+  constexpr address code = 0x2002'0000;
+  rig.write("GTZC1_TZIC", "FCR4", ~0u);
+  REQUIRE_FALSE(flagged());
+  rig.write(
+      "GTZC1_MPCBB1", "SECCFGR8", rig.read_reg("GTZC1_MPCBB1", "SECCFGR8") & ~std::uint32_t{1});
+  REQUIRE(rig.f.target->mem().write(code, 2, 0x6802).has_value());
+  REQUIRE(rig.f.target->mem().write(code + 2, 2, 0xbe01).has_value());
+  REQUIRE(rig.f.target->mem().write(sau_ctrl, 4, sau_allns).has_value());
+  engine_secure(rig, false);
+  rig.f.set("r0", torn_line);
+  rig.f.set("r2", 0xdead'beef);
+  rig.f.set("pc", code | 1u);
+  auto const loaded = rig.f.target->run_slice({.max_instructions = icount{2}});
+  REQUIRE(loaded.stopped.has_value());
+  CHECK(loaded.stopped->reason == stop_reason::user);
+  CHECK(rig.f.target->regs().read(*rig.f.target->regs().find("r2")) == 0);
+  CHECK(flagged());
+  CHECK(rig.eccr() == 0);
+  CHECK_FALSE(rig.nmi_level());
+  CHECK(rig.nmi_eccr.empty());
+  engine_secure(rig, true);
+  REQUIRE(rig.f.target->mem().write(sau_ctrl, 4, 0).has_value());
+
+  rig.load(torn_line);
+  CHECK(rig.nmi_eccr == std::vector<std::uint32_t>{reported(torn_line)});
+  CHECK(rig.word(sym("flash_ll", "words")) == 1);
+  rig.load(torn_line + secure);
+  CHECK(rig.nmi_eccr == std::vector<std::uint32_t>(2, reported(torn_line)));
+}
+
+TEST_CASE("with TZEN = 0 the secure option registers read as zero, RM0456 7.5.1")
+{
+  flash_rig const rig{
+      option_board({.secwm1 = periph::stm32::page_range{.first = 1, .last = 3}}
+      )
+  };
+  CHECK(
+      option_readback(rig)
+      == std::vector<std::uint32_t>{0x1fef'f8aa, 0x0800'007f, 0x0bf9'007f, 0, 0, 0, 0, 0});
+}
+
+TEST_CASE("without option bytes the option registers are the description's storage")
+{
+  flash_rig const rig;
+  CHECK(rig.read("FLASH_OPTR") == 0);
+  rig.write("FLASH_SECWM1R1", 0x0005'0003);
+  CHECK(rig.read("FLASH_SECWM1R1") == 0x0005'0003);
+}
+
+TEST_CASE("SWAP_BANK puts bank 1 at half the flash for BKER, MER1, MER2 and BK_ECC, RM0456 7.9.13")
+{
+  flash_rig         rig{option_board({.swap_bank = true})};
+  constexpr address low_page = 0x0800'0000 + 63 * page_bytes;
+  rig.program(bank2, {1, 2, 3, 4});
+  rig.control(0);
+  rig.program(low_page, {5, 6, 7, 8});
+  rig.control(0);
+  rig.control(per | pnb(0) | strt);
+  rig.wait_idle();
+  rig.control(0);
+  CHECK(rig.words(bank2, 4) == erased(4));
+  CHECK(rig.words(low_page, 4) == std::vector<std::uint32_t>{5, 6, 7, 8});
+  rig.control(per | bker | pnb(63) | strt);
+  rig.wait_idle();
+  rig.control(0);
+  CHECK(rig.words(low_page, 4) == erased(4));
+  rig.program(bank2, {1, 2, 3, 4});
+  rig.control(0);
+  rig.program(low_page, {5, 6, 7, 8});
+  rig.control(0);
+  rig.control(mer1 | strt);
+  rig.wait_idle();
+  rig.control(0);
+  CHECK(rig.words(bank2, 4) == erased(4));
+  CHECK(rig.words(low_page, 4) == std::vector<std::uint32_t>{5, 6, 7, 8});
+  rig.tear(torn_line);
+  REQUIRE(rig.dma_load(torn_line));
+  CHECK(rig.eccr() == (eccd | static_cast<std::uint32_t>(torn_line - bank2)));
+  rig.control(mer2 | strt);
+  CHECK(rig.status("BSY") == 1);
+  CHECK(rig.state().target == 0x0800'0000);
+  CHECK(rig.state().length == bank2 - 0x0800'0000);
+}
+
+TEST_CASE("a FLASH model given option bytes its family refuses throws config_error")
+{
+  periph::stm32::register_builtin_models();
+  for(auto const& wanted : std::vector<periph::stm32::option_bytes>{
+          {.secwm2 = periph::stm32::page_range{.first = 0, .last = 64}},
+          {.hdp1 = periph::stm32::page_range{.first = 1, .last = 2}},
+          {.secboot = 0x0c00'0001},
+          {.dualbank = false},
+      })
+  {
+    CHECK_THROWS_AS(
+        core::machine(
+            u575(), popcorn::arch::armv8m::factory(), board_options(option_board(wanted), false)),
+        popcorn::config_error);
+  }
+}
+
+TEST_CASE(
+    "model_context::trustzone follows machine_options::trustzone, FLASH refuses a TZEN that "
+    "differs")
+{
+  periph::stm32::register_builtin_models();
+  CHECK(flash_rig{option_board({.tzen = true})}.probe->trustzone());
+  CHECK_FALSE(flash_rig{option_board({})}.probe->trustzone());
+  CHECK_FALSE(flash_rig{}.probe->trustzone());
+  auto const refusal = [](bool tzen, bool trustzone) -> std::string {
+    auto options      = board_options(option_board({.tzen = tzen}), false);
+    options.trustzone = trustzone;
+    if(not trustzone)
+    {
+      options.idau.clear();
+    }
+    try
+    {
+      core::machine const built{u575(), popcorn::arch::armv8m::factory(), std::move(options)};
+    }
+    catch(popcorn::config_error const& error)
+    {
+      return error.key();
+    }
+    return {};
+  };
+  CHECK(refusal(true, false) == "option_bytes.tzen");
+  CHECK(refusal(false, true) == "option_bytes.tzen");
+  CHECK(refusal(true, true).empty());
+}
+
+TEST_CASE("check_option_bytes returns the boot address and the refusal of each field")
+{
+  using periph::stm32::check_option_bytes;
+  CHECK(check_option_bytes(u575(), {}) == address{0x0800'0000});
+  CHECK(check_option_bytes(u575(), {.tzen = true}) == address{0x0c00'0000});
+  CHECK(check_option_bytes(u575(), {.tzen = true, .secboot = 0x0c00'0080}) == address{0x0c00'0080});
+  CHECK(check_option_bytes(u575(), {.nsboot = 0x0800'4000}) == address{0x0800'4000});
+  auto const refused = [](periph::stm32::option_bytes const& wanted) {
+    auto const result = check_option_bytes(u575(), wanted);
+    REQUIRE_FALSE(result.has_value());
+    return result.error().key;
+  };
+  CHECK(
+      refused({
+          .secwm1 = periph::stm32::page_range{.first = 0, .last = 0x80}
+  })
+      == "option_bytes.secwm1");
+  CHECK(
+      refused({
+          .secwm1 = periph::stm32::page_range{.first = 3, .last = 2}
+  })
+      == "option_bytes.secwm1");
+  CHECK(
+      refused({.secwm1 = periph::stm32::no_area{}, .hdp1 = periph::stm32::page_range{}})
+      == "option_bytes.hdp1");
+  CHECK(
+      refused({
+          .secwm2 = periph::stm32::page_range{.first = 2, .last = 9 },
+          .hdp2   = periph::stm32::page_range{.first = 2, .last = 10}
+  })
+      == "option_bytes.hdp2");
+  CHECK(refused({.nsboot = 0x0800'0040}) == "option_bytes.nsboot");
+  CHECK(refused({.dualbank = false}) == "option_bytes.dualbank");
+  CHECK(check_option_bytes(u575(), {.dualbank = true}).has_value());
+  auto other        = u575();
+  other.part        = "STM32H573IIKx";
+  auto const result = check_option_bytes(other, {});
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().key == "option_bytes");
+}
+
+TEST_CASE("the U5 IDAU map is RM0456 2.2 Table 3, other families have none")
+{
+  auto const map = periph::stm32::idau_map(u575());
+  REQUIRE(map.has_value());
+  std::vector<popcorn::idau_region> const expected{
+      {.start = 0x0000'0000, .end = 0x0c00'0000,   .nsc = false, .exempt = false},
+      {.start = 0x0c00'0000, .end = 0x1000'0000,   .nsc = true,  .exempt = false},
+      {.start = 0x1000'0000, .end = 0x3000'0000,   .nsc = false, .exempt = false},
+      {.start = 0x3000'0000, .end = 0x4000'0000,   .nsc = true,  .exempt = false},
+      {.start = 0x4000'0000, .end = 0x5000'0000,   .nsc = false, .exempt = false},
+      {.start = 0x5000'0000, .end = 0x6000'0000,   .nsc = true,  .exempt = false},
+      {.start = 0x6000'0000, .end = 0xe000'0000,   .nsc = false, .exempt = false},
+      {.start = 0xe000'0000, .end = 0xe004'0000,   .nsc = false, .exempt = false},
+      {.start = 0xe004'0000, .end = 0xe010'0000,   .nsc = false, .exempt = true },
+      {.start = 0xe010'0000, .end = 0x1'0000'0000, .nsc = false, .exempt = false},
+  };
+  CHECK(std::ranges::equal(*map, expected));
+  auto other = u575();
+  other.part = "STM32H573IIKx";
+  CHECK_FALSE(periph::stm32::idau_map(other).has_value());
+}
+
+TEST_CASE("configure_option_bytes wires the FLASH model, the boot address and TrustZone")
+{
+  using periph::stm32::configure_option_bytes;
+  core::machine_options options;
+  REQUIRE(configure_option_bytes(u575(), {.tzen = true}, options).has_value());
+  CHECK(options.models.contains("FLASH"));
+  CHECK(options.vector_table == address{0x0c00'0000});
+  CHECK(options.trustzone);
+  CHECK(std::ranges::equal(options.idau, *periph::stm32::idau_map(u575())));
+  core::machine_options given;
+  given.vector_table = 0x0800'4000;
+  REQUIRE(configure_option_bytes(u575(), {.nsboot = 0x0800'2000}, given).has_value());
+  CHECK(given.vector_table == address{0x0800'4000});
+  CHECK_FALSE(given.trustzone);
+  CHECK(given.idau.empty());
+}
+
+TEST_CASE("configure_option_bytes refuses before it changes the options")
+{
+  using periph::stm32::configure_option_bytes;
+  auto const refused = [](popcorn::part_description const&   part,
+                          periph::stm32::option_bytes const& wanted,
+                          core::machine_options&             options) {
+    auto const result = configure_option_bytes(part, wanted, options);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(options.models.size() <= 1);
+    CHECK_FALSE(options.trustzone);
+    CHECK(options.idau.empty());
+    return result.error().key;
+  };
+  core::machine_options options;
+  auto                  no_extension = u575();
+  no_extension.core.trustzone        = false;
+  CHECK(refused(no_extension, {.tzen = true}, options) == "option_bytes.tzen");
+  CHECK(options.models.empty());
+  CHECK_FALSE(options.vector_table);
+  auto other_family = u575();
+  other_family.part = "STM32H573IIKx";
+  CHECK(refused(other_family, {.tzen = true}, options) == "option_bytes.tzen");
+  CHECK(refused(other_family, {}, options) == "option_bytes");
+  CHECK(
+      refused(
+          u575(),
+          {
+              .secwm1 = periph::stm32::page_range{.first = 0, .last = 64}
+  },
+          options)
+      == "option_bytes.secwm1");
+  CHECK(options.models.empty());
+  options.models.emplace("FLASH", periph::model_factory{});
+  CHECK(refused(u575(), {.tzen = true}, options) == "option_bytes");
+  CHECK_FALSE(options.vector_table);
+  CHECK(configure_option_bytes(no_extension, {}, (options = {})).has_value());
 }

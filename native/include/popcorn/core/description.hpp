@@ -243,6 +243,29 @@ struct irq_desc
   friend auto operator==(irq_desc const&, irq_desc const&) -> bool = default;
 };
 
+/**
+ * @brief One range of the implementation defined attribution unit, IDAU, of a part with a
+ *        security extension, ARMv8-M ARM B10.4. Addresses from start up to end, end excluded,
+ *        are Non-secure, or Secure and Non-secure callable when nsc is set, or exempt from
+ *        attribution when exempt is set, B10.4 RMVCM. An address no range covers is Secure.
+ *        Ranges are sorted by start and do not overlap.
+ */
+struct idau_region
+{
+  /** @brief First address. */
+  address start{};
+  /** @brief Address past the last one, up to 0x100000000 for a range ending at the top of the
+   * address space. */
+  std::uint64_t end{};
+  /** @brief Secure and Non-secure callable, instead of Non-secure. */
+  bool nsc{};
+  /** @brief Exempt from attribution: an access there takes the security of its requester. */
+  bool exempt{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(idau_region const&, idau_region const&) -> bool = default;
+};
+
 /** @brief Processor core. */
 struct core_desc
 {
@@ -390,4 +413,18 @@ POPCORN_API auto register_at(part_description const& description, std::uint32_t 
  */
 [[nodiscard]] POPCORN_API auto
     find_register(peripheral_desc const& peripheral, std::string_view name) -> register_desc const*;
+
+/**
+ * @brief IRQ sources a peripheral's model drives: its own in description order, then under
+ *        TrustZone those of the peripherals that alias it, in description order, such as
+ *        `FLASH_S_IRQn` of `SEC_FLASH`. Without TrustZone a Secure alias raises nothing.
+ * @param description Part the peripheral belongs to.
+ * @param peripheral Peripheral that is no alias.
+ * @param trustzone Whether the machine runs with TrustZone.
+ * @return IRQ numbers, own first, in the order of periph::model_context::irqs.
+ */
+[[nodiscard]] POPCORN_API auto irq_sources(
+    part_description const& description,
+    peripheral_desc const&  peripheral,
+    bool                    trustzone) -> std::vector<std::uint16_t>;
 }

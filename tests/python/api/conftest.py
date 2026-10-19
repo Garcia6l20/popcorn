@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import struct
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import popcorn
 import pytest
+from popcorn._refs import Pending
+from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime, ms
 
 ROOT = Path(__file__).parents[3]
@@ -92,6 +96,11 @@ def driver() -> popcorn.Image:
     return popcorn.Image.elf(DRIVER_ELF)
 
 
+class StorageModel(Model):
+    """A model with no handler. Its peripheral keeps the described storage semantics and
+    counts as modelled, so the host views reach it."""
+
+
 class Machines:
     """Builds reset machines over the driver firmware, one scenario each."""
 
@@ -106,12 +115,14 @@ class Machines:
         spin_threshold: int = 0,
         slice_instructions: int = 1_000_000,
         slice_wall_budget: float = 1e-3,
+        models: Mapping[str, Callable[[], Model]] | None = None,
     ) -> popcorn.Machine:
         """A machine reset into `scenario`, the vector table `vt_<scenario>`, or the ALU loop."""
         table = None if scenario is None else self.image.lookup(f"vt_{scenario}").value
         m = popcorn.Machine(
             self.description,
             image=self.image,
+            models=models,
             vector_table=table,
             spin_threshold=spin_threshold,
             slice_instructions=slice_instructions,
@@ -206,17 +217,21 @@ def requests_inside(
 REQUESTS_INSIDE = ("read", "sample", "wait_until", "run", "step", "wait_for")
 
 
-async def stalled[T](
-    m: popcorn.Machine,
-    post: Callable[[VirtualTime], Coroutine[object, object, T]],
-    at: VirtualTime | None = None,
-) -> tuple[VirtualTime, T]:
-    """Inside `running()`, hold the machine's thread in a sample, start `post(boundary)` with
-    the sample's boundary time, and release the machine once `post` has run ten loop turns.
-    What it posts registers at that boundary, and times it derives from the boundary hold
-    however loaded the host is. Return the boundary and the result of `post`.
+@dataclass
+class Stall:
+    """A sample that holds the machine's thread at one boundary until `release` is set."""
 
-    `at` stamps the sample: the hold comes at the first boundary at or after it."""
+    reached: threading.Event
+    release: threading.Event
+    boundary: list[VirtualTime]
+    holding: Pending[None]
+
+
+def stall(m: popcorn.Machine, at: VirtualTime | None = None) -> Stall:
+    """Post a sample that holds the machine's thread at the first boundary at or after `at`.
+    Posted while the machine is parked, with `at` after `m.time`, it waits for the free run, so
+    the hold comes at a boundary fixed in virtual time however loaded the host is. Posted
+    inside `running()`, the hold comes wherever the free run has got to."""
     reached = threading.Event()
     release = threading.Event()
     boundary: list[VirtualTime] = []
@@ -226,15 +241,32 @@ async def stalled[T](
         reached.set()
         release.wait(10.0)
 
-    holding = m.sample(held, at=at)
-    while not reached.is_set():
+    return Stall(reached, release, boundary, m.sample(held, at=at))
+
+
+async def stalled[T](
+    m: popcorn.Machine,
+    post: Callable[[VirtualTime], Coroutine[object, object, T]],
+    at: VirtualTime | None = None,
+    held: Stall | None = None,
+) -> tuple[VirtualTime, T]:
+    """Inside `running()`, hold the machine's thread in a sample, start `post(boundary)` with
+    the sample's boundary time, and release the machine once `post` has run ten loop turns.
+    What it posts registers at that boundary, and times it derives from the boundary hold
+    however loaded the host is. Return the boundary and the result of `post`.
+
+    `at` stamps the sample: the hold comes at the first boundary at or after it. `held` is a
+    `stall` posted before `running()`, used in place of a new sample."""
+    if held is None:
+        held = stall(m, at)
+    while not held.reached.is_set():
         await asyncio.sleep(0.001)
-    task = asyncio.create_task(post(boundary[0]))
+    task = asyncio.create_task(post(held.boundary[0]))
     for _ in range(10):
         await asyncio.sleep(0)
-    release.set()
-    await holding
-    return boundary[0], await task
+    held.release.set()
+    await held.holding
+    return held.boundary[0], await task
 
 
 async def stalled_until_posted[T](
@@ -290,3 +322,37 @@ async def late_drained_read[T](
     await stamped
     await holding
     return boundary[0], await task
+
+
+LOOP_CODE = 0x2008_0000
+LOAD_EACH = (0xF850, 0x2B04, 0x7813, 0x3901, 0xD1FA, 0xBE01)
+
+
+def load_each(m: popcorn.Machine, addresses: Sequence[int]) -> int:
+    """Put a firmware loop in SRAM that loads one byte from each of `addresses` and stops at its
+    bkpt, and point the core at it. A firmware access to an offset without register logs one
+    record, where a host access raises ModelError. Returns the instructions the loop runs."""
+    table = LOOP_CODE + 0x10
+    m.mem.write(LOOP_CODE, struct.pack(f"<{len(LOAD_EACH)}H", *LOAD_EACH))
+    m.mem.write(table, struct.pack(f"<{len(addresses)}I", *addresses))
+    m.reg.r0 = table
+    m.reg.r1 = len(addresses)
+    m.reg.pc = LOOP_CODE
+    return 4 * len(addresses) + 1
+
+
+def load_each_unforwarded(m: popcorn.Machine, addresses: Sequence[int]) -> None:
+    """Run `load_each` in a free run no event loop awaits, so every record it logs stays queued
+    until the `halt` that ends it flushes them, as a parked access's records do."""
+    load_each(m, addresses)
+    ended = threading.Event()
+
+    def stop(call: popcorn.Call) -> popcorn.Return:
+        ended.set()
+        return call.stop()
+
+    with m.intercepted(LOOP_CODE + 2 * (len(LOAD_EACH) - 1), stop):
+        m.start()
+        assert ended.wait(10)
+        with contextlib.suppress(popcorn.EmulationError):
+            m.halt()

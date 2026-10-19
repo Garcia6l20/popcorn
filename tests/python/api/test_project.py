@@ -166,11 +166,11 @@ def test_the_description_package_imports_without_the_native_extension() -> None:
 def test_memory_writes_stay_in_the_32_bit_address_space(m33: popcorn.PartDescription) -> None:
     handle = _core.MachineHandle(m33, _core.MachineConfig())
     with pytest.raises(popcorn.ConfigError) as caught:
-        handle.write_memory(0xFFFF_FFFF, b"\x00\x00")
+        handle.write_memory(0xFFFF_FFFF, b"\x00\x00", _core.MemorySpace.debugger)
     assert caught.value.key == "0xffffffff"
     assert "32-bit address space" in caught.value.expected
     with pytest.raises(popcorn.EmulationError, match="0x30000000"):
-        handle.write_memory(0x3000_0000, b"\x00")
+        handle.write_memory(0x3000_0000, b"\x00", _core.MemorySpace.debugger)
 
 
 def test_boot_arena_keys_set_or_disable_the_arena() -> None:

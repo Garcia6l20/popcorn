@@ -53,16 +53,22 @@ class ViewAccess:
 class ScalarView[T: (int, float)]:
     """Little-endian scalars of one type, indexed by guest address: `m.mem.u32[addr] = 5`."""
 
-    __slots__ = ("_access", "_format", "_size")
+    __slots__ = ("_access", "_format", "_size", "_space")
 
-    def __init__(self, access: ViewAccess, fmt: str) -> None:
+    def __init__(
+        self,
+        access: ViewAccess,
+        fmt: str,
+        space: _core.MemorySpace = _core.MemorySpace.debugger,
+    ) -> None:
         self._access = access
         self._format = "<" + fmt
         self._size = struct.calcsize(self._format)
+        self._space = space
 
     def __getitem__(self, address: int) -> T:
         value: T = struct.unpack(
-            self._format, self._access.handle.read_memory(address, self._size)
+            self._format, self._access.handle.read_memory(address, self._size, self._space)
         )[0]
         return value
 
@@ -71,41 +77,111 @@ class ScalarView[T: (int, float)]:
             data = struct.pack(self._format, value)
         except (struct.error, OverflowError) as error:
             raise ValueError(f"{value!r} does not fit {self._format[1:]}: {error}") from error
-        self._access.handle.write_memory(address, data)
+        self._access.handle.write_memory(address, data, self._space)
+
+
+def space_of[T: (int, float)](view: ScalarView[T] | Memory) -> _core.MemorySpace:
+    """The view an accessor reads through: the unfiltered debugger view or a filtered one."""
+    return view._space  # pyright: ignore[reportPrivateUsage]
 
 
 class Memory:
     """Guest memory as the debugger sees it: flash writable, MMIO through the models.
 
-    A bus error raises EmulationError naming the failing address.
+    `secure` and `nonsecure` are the same memory seen through the core's security
+    attribution and the bus firewall, as a privileged debug access of that state. A bus error
+    raises BusAccessError, an EmulationError, naming the failing address and whether the bus
+    denied the access or nothing is mapped there.
     """
 
-    __slots__ = ("_access", "f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
+    __slots__ = (
+        "_access",
+        "_filtered",
+        "_space",
+        "f32",
+        "f64",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+    )
 
-    def __init__(self, access: ViewAccess) -> None:
+    def __init__(
+        self,
+        access: ViewAccess,
+        space: _core.MemorySpace = _core.MemorySpace.debugger,
+    ) -> None:
         self._access = access
-        self.u8 = ScalarView[int](access, "B")
-        self.u16 = ScalarView[int](access, "H")
-        self.u32 = ScalarView[int](access, "I")
-        self.u64 = ScalarView[int](access, "Q")
-        self.i8 = ScalarView[int](access, "b")
-        self.i16 = ScalarView[int](access, "h")
-        self.i32 = ScalarView[int](access, "i")
-        self.i64 = ScalarView[int](access, "q")
-        self.f32 = ScalarView[float](access, "f")
-        self.f64 = ScalarView[float](access, "d")
+        self._space = space
+        self._filtered: tuple[Memory, Memory] | None = None
+        self.u8 = ScalarView[int](access, "B", space)
+        self.u16 = ScalarView[int](access, "H", space)
+        self.u32 = ScalarView[int](access, "I", space)
+        self.u64 = ScalarView[int](access, "Q", space)
+        self.i8 = ScalarView[int](access, "b", space)
+        self.i16 = ScalarView[int](access, "h", space)
+        self.i32 = ScalarView[int](access, "i", space)
+        self.i64 = ScalarView[int](access, "q", space)
+        self.f32 = ScalarView[float](access, "f", space)
+        self.f64 = ScalarView[float](access, "d", space)
+
+    def _views(self) -> tuple[Memory, Memory]:
+        if self._space != _core.MemorySpace.debugger:
+            raise AttributeError("a filtered memory view has no secure or nonsecure view")
+        if self._filtered is None:
+            self._filtered = (
+                Memory(self._access, _core.MemorySpace.secure),
+                Memory(self._access, _core.MemorySpace.nonsecure),
+            )
+        return self._filtered
+
+    @property
+    def secure(self) -> Memory:
+        """Memory as a privileged Secure debug access sees it, DDI0553B.z B13.3.4.
+
+        Each access is attributed by the SAU and the IDAU first: at a Non-secure address it
+        goes out as a Non-secure access. The bus firewall then decides it as a CPU access with
+        those attributes, the GTZC TZSC, MPCBB and MPCWM, the FLASH SECBB, PRIVBB and HDP, and
+        the TrustZone-aware peripherals: a refused read reads 0, a refused write is dropped. A
+        write to flash follows the rule of a read there. No illegal access event is raised,
+        the TZIC flags and GTZC_IRQn stay as they are. Unmodelled data raises ModelError as
+        through `m.mem`. On a machine without TrustZone enabled it acts as `m.mem`.
+        """
+        return self._views()[0]
+
+    @property
+    def nonsecure(self) -> Memory:
+        """Memory as a privileged Non-secure debug access sees it, DDI0553B.z B13.3.4.
+
+        An access to an address the SAU or the IDAU makes Secure or Non-secure callable raises
+        BusAccessError with `denied` True, "bus error at <address>: denied", the debug access
+        error of RWMRR.
+        Every other access goes through the bus firewall as `secure` describes, so Secure
+        data never reads through this view. On a machine without TrustZone enabled it acts as
+        `m.mem`.
+        """
+        return self._views()[1]
 
     def read(self, address: int, size: int) -> bytes:
         """`size` bytes from `address`."""
-        return self._access.handle.read_memory(address, size)
+        return self._access.handle.read_memory(address, size, self._space)
 
     def write(self, address: int, data: bytes) -> None:
-        """Write `data` at `address`."""
-        self._access.handle.write_memory(address, data)
+        """Write `data` at `address`.
+
+        Through `secure` or `nonsecure` the bytes go out one access at a time, as a debug
+        access port does: when an access raises BusAccessError, the bytes before it are
+        written and the rest are not.
+        """
+        self._access.handle.write_memory(address, data, self._space)
 
     def write_masked(self, address: int, mask: bytes, data: bytes) -> None:
         """Write the bits of `data` that `mask` selects at `address`, in one access."""
-        self._access.handle.write_memory_masked(address, mask, data)
+        self._access.handle.write_memory_masked(address, mask, data, self._space)
 
     def cstring(self, address: int, limit: int = 256) -> str:
         """The NUL-terminated string at `address`, at most `limit` bytes, UTF-8 with
@@ -114,7 +190,9 @@ class Memory:
         Reads up to the end of each 64-byte block at once, byte by byte where a block read
         meets a bus error, so a string ending just before unmapped memory still reads.
         """
-        return self._access.handle.cstring(address, limit).decode("utf-8", errors="replace")
+        return self._access.handle.cstring(address, limit, self._space).decode(
+            "utf-8", errors="replace"
+        )
 
 
 class RegisterBank[R: enum.Enum]:
@@ -170,7 +248,9 @@ class RegisterView:
     description's write effects act: `.value = v` writes the word, `.FIELD = v` writes the word
     with the field's bits and every sibling field at the value its write effect ignores. Reads
     are storage peeks, so `.value` and a field getter never fire a read effect such as
-    clear-on-read: `read()` is the bus read. `poke()` stores without any effect. Every access
+    clear-on-read: `read()` is the bus read. `poke()` stores without any effect. On a
+    peripheral without a model, `read()` and every write raise ModelError, as `m.mem` does,
+    while `.value`, the field getters and `poke()` still reach the storage. Every access
     raises MachineRunning while the machine is busy, outside its callbacks: `m.ref` refs reach
     the register then.
     """

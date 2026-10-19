@@ -23,6 +23,33 @@ auto next_machine_id() -> std::uint64_t
   return ++last;
 }
 
+void check_trustzone(part_description const& description, machine_options const& options)
+{
+  if(options.trustzone and not description.core.trustzone)
+  {
+    throw config_error(
+        description.part, 0, "trustzone",
+        std::format("a core with a security extension, {} has none", description.core.cpu));
+  }
+  if(not options.trustzone and not options.idau.empty())
+  {
+    throw config_error(description.part, 0, "idau", "no IDAU ranges without trustzone");
+  }
+  std::uint64_t after = 0;
+  for(auto const& [index, range] : std::views::enumerate(options.idau))
+  {
+    if(range.start >= range.end or range.end > std::uint64_t{1} << 32 or range.start < after)
+    {
+      throw config_error(
+          description.part, 0, std::format("idau[{}]", index),
+          std::format(
+              "a range with start below end, sorted and not overlapping, not {:#010x} to {:#010x}",
+              range.start, range.end));
+    }
+    after = range.end;
+  }
+}
+
 auto reset_vector_of(part_description const& description, machine_options const& options) -> address
 {
   if(options.vector_table)
@@ -74,6 +101,7 @@ machine::machine(part_description description, arch::arch_factory factory, machi
       arch_events_{scheduler_, arch::arch_event_owner}, trace_{options_.trace_capacity},
       hooks_{std::make_shared<hook_registry>()}, run_{std::make_unique<run_state>(*this)}
 {
+  check_trustzone(description_, options_);
   run_->reset_vector       = reset_vector_of(description_, options_);
   run_->description_digest = description_digest(description_);
   run_->spin_on            = options_.spin_threshold != 0;
@@ -94,7 +122,7 @@ machine::machine(part_description description, arch::arch_factory factory, machi
   {
     arch_->attach(run_->arch_context.emplace(
         engine_.get(), description_, clock_, arch_events_, static_cast<machine_services&>(*this),
-        options_.faults));
+        options_.faults, options_.trustzone, options_.idau, options_.scratch));
     run_->attach_peripherals();
     run_->map_peripherals();
     run_->install_hooks();
@@ -163,9 +191,23 @@ auto machine::virtual_clock() const noexcept -> core::clock const&
   return clock_;
 }
 
+namespace
+{
+void refuse_during_call_trace(bool traced)
+{
+  if(traced)
+  {
+    throw machine_busy(
+        "a call trace is open and names symbols by the ids it was opened with: close the trace "
+        "first");
+  }
+}
+}
+
 void machine::load(popcorn::image::image const& loaded)
 {
   require_stopped(*this);
+  refuse_during_call_trace(run_->traces_calls());
   std::vector<mapped_region*> targets;
   targets.reserve(loaded.segments.size());
   for(auto const& seg : loaded.segments)
@@ -205,11 +247,35 @@ void machine::load(popcorn::image::image const& loaded)
     std::ranges::fill_n(out, seg.memory_size - seg.bytes.size(), std::byte{0});
     region->host_wrote(*run_, seg.start, seg.memory_size);
   }
-  images_.push_back(loaded);
+  std::size_t moved = 0;
+  for(auto const& before : loaded_images())
+  {
+    moved += before.symbols.size();
+  }
+  images_.insert(images_.begin() + static_cast<std::ptrdiff_t>(loaded_count_), loaded);
+  ++loaded_count_;
+  run_->build_symbol_index();
+  if(loaded_count_ < images_.size())
+  {
+    trace_.shift_call_symbols(
+        static_cast<std::uint32_t>(moved), static_cast<std::uint32_t>(loaded.symbols.size()));
+  }
+}
+
+void machine::add_symbols(popcorn::image::image const& symbols)
+{
+  require_stopped(*this);
+  refuse_during_call_trace(run_->traces_calls());
+  images_.push_back(symbols);
   run_->build_symbol_index();
 }
 
 auto machine::loaded_images() const noexcept -> std::span<popcorn::image::image const>
+{
+  return std::span{images_}.first(loaded_count_);
+}
+
+auto machine::observed_images() const noexcept -> std::span<popcorn::image::image const>
 {
   return images_;
 }
@@ -299,6 +365,11 @@ auto machine::mem() noexcept -> memory_view
   return memory_view{*this};
 }
 
+auto machine::mem(bool secure) noexcept -> memory_view
+{
+  return memory_view{*this, secure};
+}
+
 auto machine::regs() noexcept -> register_view
 {
   return register_view{*this};
@@ -327,6 +398,11 @@ void machine::do_end_after_instruction()
   {
     run_->request_precise_exit();
   }
+}
+
+auto machine::do_emulated_instruction(address at) -> emulated_arrival
+{
+  return run_->in_engine ? run_->arrive_emulated(at) : emulated_arrival::proceed;
 }
 
 void machine::do_trace(trace_record const& record)

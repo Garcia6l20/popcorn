@@ -336,4 +336,23 @@ auto find_register(peripheral_desc const& peripheral, std::string_view name) -> 
   });
   return aliased == registers.end() ? nullptr : &*aliased;
 }
+
+auto irq_sources(
+    part_description const& description,
+    peripheral_desc const&  peripheral,
+    bool                    trustzone) -> std::vector<std::uint16_t>
+{
+  auto sources = peripheral.irqs;
+  if(trustzone)
+  {
+    for(auto const& other : description.peripherals)
+    {
+      if(other.alias_of == peripheral.name)
+      {
+        sources.append_range(other.irqs);
+      }
+    }
+  }
+  return sources;
+}
 }

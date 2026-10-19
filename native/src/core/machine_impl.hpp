@@ -8,6 +8,7 @@
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/trace.hpp>
+#include <popcorn/periph/firewall.hpp>
 
 #include <unicorn/unicorn.h>
 
@@ -20,10 +21,12 @@
 #include <exception>
 #include <expected>
 #include <functional>
+#include <limits>
 #include <map>
 #include <meta>
 #include <mutex>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <span>
 #include <string>
@@ -234,7 +237,7 @@ class flat_edge_table
 {
 public:
   /** @brief Adds one to the count of an edge. @p key is `from << 32 | to`. */
-  void count(std::uint64_t key);
+  [[gnu::always_inline]] inline void count(std::uint64_t key);
 
   /** @brief Edges with a non-zero count, ordered by from then to. */
   [[nodiscard]] auto edges() const -> std::vector<edge_counter>;
@@ -249,11 +252,40 @@ private:
     std::uint64_t hits{};
   };
 
+  static auto hash(std::uint64_t key) noexcept -> std::uint64_t
+  {
+    return key * 0x9e37'79b9'7f4a'7c15;
+  }
+
   void grow();
 
   std::vector<slot> slots_{};
   std::size_t       used_ = 0;
 };
+
+void flat_edge_table::count(std::uint64_t key)
+{
+  if(2 * (used_ + 1) > slots_.size())
+  {
+    grow();
+  }
+  auto const mask = slots_.size() - 1;
+  for(auto at = hash(key) >> 32 & mask;; at = (at + 1) & mask)
+  {
+    auto& held = slots_[at];
+    if(held.hits == 0)
+    {
+      held = {.key = key, .hits = 1};
+      ++used_;
+      return;
+    }
+    if(held.key == key)
+    {
+      ++held.hits;
+      return;
+    }
+  }
+}
 
 /** @brief Largest instruction of the supported cores in bytes, the bound of every decode from
  * a block start: a block of n instructions spans at most n times this. */
@@ -288,7 +320,7 @@ struct coverage_state
    * @param addr Block start.
    * @param insns Instructions of the block, as the engine translated it.
    */
-  void count(address addr, std::uint32_t insns);
+  [[gnu::always_inline]] inline void count(address addr, std::uint32_t insns);
 
   /**
    * @brief Closes the block counted last as execution leaves it: a cut at @p pc when @p pc is one
@@ -301,7 +333,61 @@ struct coverage_state
    * @param at_exit Whether the engine stopped at @p pc because it is one of its exits.
    */
   void leave(arch::arch const& core, address pc, bool at_exit);
+
+private:
+  static auto holds(address_range const& range, address addr) noexcept -> bool
+  {
+    return range.start <= addr and std::uint64_t{addr} < std::uint64_t{range.start} + range.size;
+  }
+
+  static void bump(block_counters& counters, address addr) noexcept
+  {
+    auto& hits = counters.hits[(addr - counters.range.start) >> 1];
+    if(hits != std::numeric_limits<std::uint32_t>::max())
+    {
+      ++hits;
+    }
+  }
 };
+
+void coverage_state::count(address addr, std::uint32_t insns)
+{
+  auto inside = false;
+  if(last_range < blocks.size() and holds(blocks[last_range].range, addr) and not overlapping)
+  {
+    bump(blocks[last_range], addr);
+    inside = true;
+  }
+  else
+  {
+    for(auto const& [index, counters] : std::views::enumerate(blocks))
+    {
+      if(holds(counters.range, addr))
+      {
+        bump(counters, addr);
+        last_range = static_cast<std::size_t>(index);
+        inside     = true;
+        if(not overlapping)
+        {
+          break;
+        }
+      }
+    }
+  }
+  if(not inside)
+  {
+    has_previous = false;
+    open_insns   = 0;
+    return;
+  }
+  if(has_previous)
+  {
+    edges.count(previous << 32 | addr);
+  }
+  previous     = addr;
+  has_previous = true;
+  open_insns   = insns;
+}
 
 /** @brief Loop tracking of spin detection, active while machine_options::spin_threshold is set.
  * One loop is tracked per exception depth, so a handler's loops never restart the tracking of
@@ -604,9 +690,12 @@ struct machine::run_state
      * page, or in a page shared with other windows, up to the next window's base or the end of
      * the shared pages. */
     std::uint32_t size{};
-    /** @brief Whether accesses through the window are secure: an alias window, a `SEC_`
-     * instance of the peripheral it aliases. */
-    bool secure{};
+    /** @brief Whether the window is a secure alias window, a `SEC_` instance of the
+     * peripheral it aliases. */
+    bool secure_alias{};
+    /** @brief Index in the description of the peripheral the window reaches, the aliased one
+     * for an alias window. */
+    std::size_t serving{};
   };
 
   /** @brief An intercept added with machine::add_intercept(). */
@@ -651,6 +740,8 @@ struct machine::run_state
     /** @brief Arrivals counted, shared with the handle, so a probe left in its site after
      * removal still counts through a live object. */
     std::shared_ptr<probe_hits> hits{};
+    /** @brief Security state an arrival must run in to count, empty for any. */
+    std::optional<bool> secure{};
   };
 
   /** @brief A watch added with machine::add_watch(). */
@@ -807,6 +898,15 @@ struct machine::run_state
     std::uint32_t index{};
   };
 
+  /** @brief Function and object symbols of some images by address. */
+  struct symbol_lookup
+  {
+    /** @brief Entries sorted by address. */
+    std::vector<symbol_entry> entries{};
+    /** @brief Largest end of entries up to each position, which bounds the scan back. */
+    std::vector<std::uint64_t> max_end{};
+  };
+
   /** @brief Records a sink collects before its batch is delivered. */
   static constexpr std::size_t sink_batch = 4096;
 
@@ -940,6 +1040,15 @@ struct machine::run_state
   controller_reentry controller_guard{};
   /** @brief Trace sinks by handle id. */
   std::map<std::uint64_t, std::unique_ptr<sink_entry>> sinks{};
+
+  /** @brief Whether an attached trace sink selects call records, whose symbol ids follow the
+   * symbol index of when it was attached. */
+  [[nodiscard]] auto traces_calls() const -> bool
+  {
+    return std::ranges::any_of(sinks | std::views::values, [](auto const& entry) {
+      return entry->kinds.contains(trace_kind::call);
+    });
+  }
   /** @brief Address of the block the engine runs, the pc MMIO callbacks see without the exact
    * pc hook, read by mmio records instead of the engine register. */
   address block_pc{};
@@ -948,9 +1057,17 @@ struct machine::run_state
   /** @brief Whether the MMIO write being served comes from the CPU through a window whose model
    * drives the core clock, so that pc is exact. */
   bool exact_write = false;
+  /** @brief Bus attributes of the CPU access the MMIO callbacks serve, kept after it. */
+  uc_mem_attrs access{};
+  /** @brief Whether the firewall refused the CPU access being dispatched, until its MMIO
+   * callback reads it or the host access that dispatched it returns. */
+  bool firewall_refused = false;
   /** @brief Whether the last engine run ended at a block boundary through the block hook, so
    * the next run resumes the block the edge chain expects. */
   bool boundary_stop = false;
+  /** @brief Whether arrive_emulated() in the running trap ended the run before the emulated
+   * instruction, so on_interrupt stops the engine once the arch resumes. */
+  bool arrival_stopped = false;
   /** @brief slice_request::until_thread of the running slice: an exception return to thread
    * mode ends the engine run. Cleared with the slice. */
   bool until_thread = false;
@@ -990,12 +1107,13 @@ struct machine::run_state
   bool sink_mem_active = false;
   /** @brief Memory hooks feeding mem records while some sink selects them. */
   std::vector<uc_hook> sink_mem_hooks{};
-  /** @brief Symbols of the loaded images, concatenated in load order. */
+  /** @brief Symbols of machine::observed_images(), concatenated in that order. */
   std::vector<popcorn::image::symbol const*> symbols{};
-  /** @brief Function and object symbols by address. */
-  std::vector<symbol_entry> symbol_index{};
-  /** @brief Largest end of symbol_index up to each position, which bounds the scan back. */
-  std::vector<std::uint64_t> symbol_max_end{};
+  /** @brief Symbols of the loaded images by address. */
+  symbol_lookup symbol_index{};
+  /** @brief Symbols of the symbols-only images by address, asked where the loaded ones give
+   * none. */
+  symbol_lookup extra_symbol_index{};
   /** @brief Code hook sites by address. */
   std::map<address, std::unique_ptr<code_site>> sites{};
   /** @brief Calls in flight, innermost last. */
@@ -1061,6 +1179,86 @@ struct machine::run_state
   std::vector<std::pair<std::string_view, std::uint32_t>> peripheral_index{};
   /** @brief Models of the machine for model contexts, empty until attach_peripherals ends. */
   machine_peers peers{};
+  /** @brief Bus firewall a model installed, asked before every peripheral window access, null
+   * when none. Set only while attach_peripherals runs. */
+  periph::bus_firewall* firewall{};
+  /** @brief Peripheral whose model attach_peripherals is building, the only time a firewall may
+   * be installed, null otherwise. */
+  peripheral_desc const* building{};
+  /** @brief Whether the firewall filters memory, its engine filter installed by install_hooks. */
+  bool memory_filter{};
+  /** @brief Whether the arch reset runs, before the models reset: its vector reads are not
+   * filtered, since the firewall still holds the policy from before the reset. */
+  bool resetting_arch{};
+  /** @brief Engine page size in bytes, read when the memory filter is installed. */
+  std::uint32_t filter_page_bytes{};
+  /** @brief Generation of the memory policy, which memory_grant holders compare: bumped by
+   * every memory_policy_changed, restore and reset. */
+  std::uint64_t memory_generation{1};
+
+  /** @brief Whether @p grant is current and holds every byte of the access. */
+  [[nodiscard]] auto
+      granted(memory_grant const& grant, address addr, std::uint8_t size) const noexcept -> bool
+  {
+    return grant.generation == memory_generation
+       and addr >= grant.first
+       and std::uint64_t{addr} + size - 1u <= grant.last;
+  }
+
+  /**
+   * @brief A grant for an access check_memory() just allowed: the region, or the part of it the
+   *        firewall's bus_firewall::allowed_extent gives when it filters the access.
+   * @param region Region of the access.
+   */
+  [[nodiscard]] auto grant(
+      region_desc const& region,
+      address            addr,
+      std::uint8_t       size,
+      bus_attrs          attrs,
+      arch::memory_op    op) -> memory_grant;
+
+  /** @brief Installs the engine's bus filter when the firewall filters memory. */
+  void install_memory_filter();
+
+  /**
+   * @brief Asks the firewall about a host memory access, when it filters memory and @p attrs
+   *        is not an unfiltered debugger access.
+   * @return The verdict, `allow` when nothing filters the access.
+   */
+  [[nodiscard]] auto
+      check_memory(address addr, std::uint8_t size, bus_attrs attrs, arch::memory_op op)
+          -> periph::bus_verdict;
+
+  /** @brief Whether host accesses with @p attrs go through check_memory one at a time: CPU
+   * and DMA accesses, and filtered debugger accesses. */
+  [[nodiscard]] auto filters_host(bus_attrs attrs) const noexcept -> bool
+  {
+    return memory_filter
+       and not resetting_arch
+       and (attrs.by != initiator::debugger or attrs.filtered);
+  }
+
+  /**
+   * @brief Installs the machine's bus firewall.
+   * @param installed Firewall.
+   * @throws model_error naming the peripheral being built when a firewall is installed already,
+   *         and naming no peripheral outside attach_peripherals.
+   */
+  void install_firewall(periph::bus_firewall& installed);
+
+  /**
+   * @brief Attributes of an access as models and the firewall see them: not Secure on a machine
+   *        without TrustZone, unchanged otherwise.
+   * @param attrs Attributes the master gave.
+   */
+  [[nodiscard]] auto seen(bus_attrs attrs) const noexcept -> bus_attrs;
+
+  /**
+   * @brief Context a model sees for an access.
+   * @param attrs Attributes of the access, as seen() returns them.
+   * @param via_secure_alias Whether the access came through a secure alias.
+   */
+  [[nodiscard]] auto context_of(bus_attrs attrs, bool via_secure_alias) const -> periph::access_ctx;
 
   /**
    * @brief Builds one slot per peripheral of the description, aliases excepted, its lines, its
@@ -1090,16 +1288,16 @@ struct machine::run_state
    * @param window Window accessed.
    * @param offset Byte offset in the window, aligned to @p size.
    * @param size Access size in bytes, 1, 2 or 4.
-   * @param by Bus master.
-   * @return Value right-aligned to @p size, or the model's bus error for a DMA or debugger
-   *         access. A CPU access records the error and reads 0.
+   * @param attrs Bus master and attributes of the access, as the master gave them.
+   * @return Value right-aligned to @p size, or the firewall's or the model's bus error for a DMA
+   *         or debugger access. A CPU access records the error and reads 0.
    * @throws model_error on every unmodelled access under strict_peripherals.
    */
   auto dispatch_read(
       mmio_window const& window,
       std::uint32_t      offset,
       std::uint8_t       size,
-      initiator          by) -> std::expected<std::uint32_t, bus_error>;
+      bus_attrs          attrs) -> std::expected<std::uint32_t, bus_error>;
 
   /**
    * @brief Serves a write of a peripheral window, as dispatch_read().
@@ -1110,7 +1308,7 @@ struct machine::run_state
       std::uint32_t      offset,
       std::uint8_t       size,
       std::uint32_t      value,
-      initiator          by) -> std::expected<void, bus_error>;
+      bus_attrs          attrs) -> std::expected<void, bus_error>;
 
   /**
    * @brief Hands a store into a read-only region to the model of its controller, a 64-bit store
@@ -1121,15 +1319,15 @@ struct machine::run_state
    * @param addr Address of the store.
    * @param size Store size in bytes, 1, 2, 4 or 8.
    * @param value Value stored, right-aligned to @p size.
-   * @param by Bus master of the store, never the debugger.
+   * @param attrs Bus master and attributes of the store, never the debugger.
    */
   auto dispatch_controller_write(
       mapped_region const& region,
       address              addr,
       std::uint8_t         size,
       std::uint64_t        value,
-      initiator            by) -> std::expected<void, bus_error> pre(region.controller != nullptr)
-      pre(by != initiator::debugger) pre(size == 1 or size == 2 or size == 4 or size == 8);
+      bus_attrs attrs) -> std::expected<void, bus_error> pre(region.controller != nullptr)
+      pre(attrs.by != initiator::debugger) pre(size == 1 or size == 2 or size == 4 or size == 8);
 
   /** @brief Lowers the engine deadline to the earliest event after a model call, and ends the
    * engine run when the call changed the instruction rate. */
@@ -1151,9 +1349,18 @@ struct machine::run_state
   void record_bus_fault(address addr, arch::memory_op op) noexcept;
 
   /**
+   * @brief Answers a CPU access a dispatch failed, from its engine MMIO callback: a firewall
+   *        refusal refuses the engine access, which faults precisely at the instruction, any
+   *        other bus error is recorded with record_bus_fault().
+   * @param addr Address of the access.
+   * @param op Kind of the access.
+   */
+  void cpu_bus_error(address addr, arch::memory_op op);
+
+  /**
    * @brief Logs the first access to a register of a peripheral without model, once per machine
-   *        life, restore included. A debugger access under strict_peripherals is neither logged
-   *        nor refused.
+   *        life, restore included. An arch or model debugger access under strict_peripherals is
+   *        neither logged nor refused.
    * @throws model_error under strict_peripherals, on every CPU or DMA access.
    */
   void note_unmodelled(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
@@ -1161,14 +1368,31 @@ struct machine::run_state
   /** @brief Logs the first access to an offset without register. */
   void warn_unregistered(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
 
-  static auto
-      on_mmio_read(uc_struct* engine, std::uint64_t offset, unsigned size, void* user) noexcept
-      -> std::uint64_t;
+  /**
+   * @brief Refuses a host view access, memory_view, to data no model serves: a register of a
+   *        peripheral without a model, a claimed register its model calls storage only, an offset
+   *        no register covers, a raz_wi range. Logs
+   *        nothing. Scans up to the first byte outside every region, window and range, where the
+   *        access itself fails.
+   * @param addr First guest address of the access.
+   * @param size Bytes of the access.
+   * @throws model_error naming the peripheral, the register when there is one, and the offset,
+   *         or the range with an empty register.
+   */
+  void refuse_unmodelled(address addr, std::size_t size) const;
+
+  static auto on_mmio_read(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      uc_mem_attrs  attrs,
+      void*         user) noexcept -> std::uint64_t;
   static void on_mmio_write(
       uc_struct*    engine,
       std::uint64_t offset,
       unsigned      size,
       std::uint64_t value,
+      uc_mem_attrs  attrs,
       void*         user) noexcept;
 
   /** @brief Engine pages several windows share, mapped once and dispatched by address. */
@@ -1188,14 +1412,65 @@ struct machine::run_state
   /** @brief Shared pages, each mapped once. */
   std::vector<std::unique_ptr<mmio_page>> shared_pages{};
 
-  static auto
-      on_shared_read(uc_struct* engine, std::uint64_t offset, unsigned size, void* user) noexcept
-      -> std::uint64_t;
+  /** @brief A machine_options::raz_wi range, mapped as engine MMIO. */
+  struct raz_window
+  {
+    /** @brief Run state serving the accesses. */
+    run_state* run{};
+    /** @brief The range. */
+    address_range const* range{};
+    /** @brief Whether its first access was logged. */
+    bool warned{};
+  };
+
+  /** @brief The machine_options::raz_wi windows, in option order. */
+  std::vector<std::unique_ptr<raz_window>> raz_windows{};
+
+  /**
+   * @brief Maps every machine_options::raz_wi range as engine MMIO.
+   * @return The ranges, first and last address each, for the exact pc hook.
+   * @throws config_error keyed `raz_wi[i]` for a range machine_options::raz_wi refuses.
+   * @throws emulation_error when the engine refuses a mapping.
+   */
+  auto map_raz_wi(std::uint32_t page) -> std::vector<std::pair<std::uint64_t, std::uint64_t>>;
+
+  /**
+   * @brief Logs the first access to @p window, once per machine life, restore included. A
+   *        debugger access under strict_peripherals is neither logged nor refused.
+   * @throws model_error naming the range under strict_peripherals, on every CPU or DMA access.
+   */
+  void note_raz(raz_window& window, std::uint32_t offset, bool write, initiator by);
+
+  /** @brief The machine_options::raz_wi window holding [@p addr, @p addr + @p size), null when
+   * none. */
+  [[nodiscard]] auto raz_at(address addr, std::uint8_t size) const noexcept -> raz_window*;
+
+  static auto on_raz_read(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      uc_mem_attrs  attrs,
+      void*         user) noexcept -> std::uint64_t;
+  static void on_raz_write(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      std::uint64_t value,
+      uc_mem_attrs  attrs,
+      void*         user) noexcept;
+
+  static auto on_shared_read(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      uc_mem_attrs  attrs,
+      void*         user) noexcept -> std::uint64_t;
   static void on_shared_write(
       uc_struct*    engine,
       std::uint64_t offset,
       unsigned      size,
       std::uint64_t value,
+      uc_mem_attrs  attrs,
       void*         user) noexcept;
 
   /**
@@ -1217,6 +1492,28 @@ struct machine::run_state
    * @throws emulation_error when the engine refuses the hook.
    */
   auto site_at(address at) -> code_site&;
+
+  /** @brief How a visit of a code site ended: on to the instruction, returned by an intercept,
+   * or stopped by one. */
+  enum class site_visit : std::uint8_t
+  {
+    proceed,
+    returned,
+    stopped,
+  };
+
+  /**
+   * @brief Runs the probes, intercepts and return hooks of @p site, arrived at @p addr, as its
+   *        code hook does. An intercept return calls arch::return_to_caller() and leaves
+   *        arch::return_interrupt() to the caller. A stop records the trap and the resume point.
+   * @param site Site of @p addr.
+   * @param addr Address reached.
+   * @param in_block Whether a counted block holds @p addr, so a return closes its coverage.
+   */
+  auto visit_site(code_site& site, address addr, bool in_block) -> site_visit;
+
+  /** @brief machine_services::emulated_instruction() during a run. */
+  auto arrive_emulated(address at) -> emulated_arrival;
 
   /** @brief Whether the stepping hook ends the engine run before the instruction it sees at
    * instruction count @p now. */
@@ -1337,10 +1634,14 @@ struct machine::run_state
   /** @brief Removes a sink, delivering its batch first, its failure dropped. */
   void remove_sink(std::uint64_t id) noexcept;
 
-  /** @brief Rebuilds the symbol table and its address index from the loaded images. */
+  /** @brief Rebuilds the symbol table and its address indexes from the observed images. */
   void build_symbol_index();
 
-  /** @brief Symbol index and offset of the symbol holding @p pc, empty when none does. */
+  /** @brief Address index of @p images, whose symbols are appended to the symbol table. */
+  [[nodiscard]] auto index_symbols(std::span<popcorn::image::image const> images) -> symbol_lookup;
+
+  /** @brief Symbol index and offset of the symbol holding @p pc, empty when none does: the
+   * loaded images first, then the symbols-only images. */
   [[nodiscard]] auto symbol_at(address pc) const noexcept
       -> std::optional<std::pair<std::uint32_t, std::uint32_t>>;
 
@@ -1377,13 +1678,13 @@ struct machine::run_state
    * @param region Region holding every byte of the load.
    * @param addr Address loaded.
    * @param size Load size in bytes.
-   * @param by Bus master making the load.
+   * @param attrs Bus master and attributes of the load.
    */
   void note_controller_read(
       mapped_region const& region,
       address              addr,
       std::uint8_t         size,
-      initiator            by);
+      bus_attrs            attrs);
 
   /**
    * @brief Rebuilds the runs of @p buffer from controller_ranges, hooks every engine page a
@@ -1549,6 +1850,10 @@ struct machine::run_state
    * @p cause. Off the block hook's hot path. */
   [[gnu::noinline]] void stop_at_block(uc_struct* engine, engine_end cause) noexcept;
 
+  /** @brief stop_at_block for the boundary_cause of clock @p now. Off the block hook's hot path,
+   * so the hook keeps no register across a call. */
+  [[gnu::noinline]] void stop_at_boundary(uc_struct* engine, icount now) noexcept;
+
   /** @brief Completes the watched returns at block_pc and stops the engine when the until
    * return is reached there. Off the block hook's hot path.
    * @return Whether the engine was stopped. */
@@ -1591,6 +1896,21 @@ struct machine::run_state
       int           size,
       std::int64_t  value,
       void*         user) noexcept;
+  static auto on_bus_page(
+      uc_struct*    engine,
+      std::uint64_t page,
+      std::uint64_t addr,
+      uc_mem_attrs  attrs,
+      uc_mem_type   type,
+      void*         user) noexcept -> unsigned;
+  static auto on_bus_access(
+      uc_struct*     engine,
+      std::uint64_t  addr,
+      unsigned       size,
+      uc_mem_attrs   attrs,
+      uc_mem_type    type,
+      std::uint64_t* value,
+      void*          user) noexcept -> int;
 
   void               clear_slice() noexcept;
   void               set_exits(std::vector<address> list);
@@ -1657,6 +1977,31 @@ struct machine_internals
   [[nodiscard]] static auto engine(machine const& target) noexcept -> uc_struct*
   {
     return target.engine_.get();
+  }
+
+  /** @brief Bus attributes of the last CPU access to a peripheral window of @p target. */
+  [[nodiscard]] static auto access(machine const& target) noexcept -> uc_mem_attrs
+  {
+    return target.run_->access;
+  }
+
+  /** @brief The services of @p target, whose debugger accesses are the arch module's and the
+   * models' own, not a host view's. */
+  [[nodiscard]] static auto services(machine& target) noexcept -> machine_services&
+  {
+    return target;
+  }
+
+  /** @brief The arch module of @p target. */
+  [[nodiscard]] static auto arch(machine const& target) noexcept -> arch::arch const&
+  {
+    return *target.arch_;
+  }
+
+  /** @brief The bus firewall a model of @p target installed, or null. */
+  [[nodiscard]] static auto firewall(machine const& target) noexcept -> periph::bus_firewall*
+  {
+    return target.run_->firewall;
   }
 };
 

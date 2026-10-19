@@ -5,6 +5,7 @@
 #include <reflex/serde/json.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -199,6 +200,27 @@ TEST_CASE("find_register resolves a name, then an alias, and null for neither")
   CHECK(popcorn::find_register(timer, "SR") == &timer.registers[1]);
   CHECK(popcorn::find_register(timer, "TIM1_SR") == nullptr);
   CHECK(popcorn::find_register(timer, "") == nullptr);
+}
+
+TEST_CASE("irq_sources lists a peripheral's IRQs, then under TrustZone its aliases' in order")
+{
+  popcorn::part_description part;
+  popcorn::peripheral_desc  flash;
+  flash.name = "FLASH";
+  flash.irqs = {6};
+  popcorn::peripheral_desc secure_flash;
+  secure_flash.name     = "SEC_FLASH";
+  secure_flash.alias_of = "FLASH";
+  secure_flash.irqs     = {7, 9};
+  popcorn::peripheral_desc other;
+  other.name       = "SEC_RCC";
+  other.alias_of   = "RCC";
+  other.irqs       = {8};
+  part.peripherals = {secure_flash, flash, other};
+
+  CHECK(popcorn::irq_sources(part, part.peripherals[1], false) == std::vector<std::uint16_t>{6});
+  CHECK(
+      popcorn::irq_sources(part, part.peripherals[1], true) == std::vector<std::uint16_t>{6, 7, 9});
 }
 
 TEST_CASE("absent optional members are omitted from the output")

@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import functools
 import gc
 import logging
 import pathlib
@@ -28,7 +27,7 @@ from popcorn._stop import Stop, stop_of
 from popcorn.model import Model, on_read
 from popcorn.units import VirtualTime, s, us
 
-from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, Machines, stalled
+from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, Machines, load_each_unforwarded, stalled
 from .devices_example import Eeprom24
 from .projects import MODEL_ELF, MODEL_JSON
 
@@ -337,6 +336,16 @@ def test_a_kept_log_error_is_reported_when_its_machine_is_collected(
     assert reported == ["RuntimeError('filter failed')"]
 
 
+def latency_warnings(m: popcorn.Machine) -> popcorn.RegisterView:
+    """FLASH_ACR of an STM32U575 at HCLK 48 MHz, MSIS range 0, logged once and flushed. Each
+    write of a LATENCY from 1 to 15 not written before then logs one model warning, a record a
+    parked access makes now that a host access to a register hole raises ModelError."""
+    icscr1 = m.periph.RCC.RCC_ICSCR1
+    icscr1.value = (icscr1.value & ~(0xF << 28)) | (1 << 23)
+    m._flush_logs()  # pyright: ignore[reportPrivateUsage]
+    return m.periph.FLASH.FLASH_ACR
+
+
 def gpio_holes(description: popcorn.PartDescription, count: int) -> list[int]:
     """Byte addresses of GPIO windows that no register covers, each logged once when read."""
     holes: list[int] = []
@@ -359,14 +368,14 @@ def test_a_parked_access_sends_a_log_error_to_the_unraisable_hook(
         reported.append(raised.exc_value)
 
     monkeypatch.setattr(sys, "unraisablehook", report)
-    description = mcu("STM32U575QGIx")
-    m = popcorn.Machine(description)
-    (hole,) = gpio_holes(description, 1)
+    m = popcorn.Machine(mcu("STM32U575QGIx"), image=popcorn.Image.elf(BOARD_ELF))
+    m.reset()
+    acr = latency_warnings(m)
     failing = FailOnce()
     logger = logging.getLogger("popcorn")
     logger.addFilter(failing)
     try:
-        assert m.mem.u8[hole] == 0
+        acr.LATENCY = 1
     finally:
         logger.removeFilter(failing)
     assert len(reported) == 1 and "filter failed" in str(reported[0])
@@ -377,28 +386,32 @@ def test_a_flush_forwards_only_the_records_queued_when_it_began(
 ) -> None:
     from popcorn.stm32 import mcu
 
-    description = mcu("STM32U575QGIx")
-    m = popcorn.Machine(description)
-    holes = gpio_holes(description, 50)
-    reads = iter(holes[1:])
+    m = popcorn.Machine(mcu("STM32U575QGIx"), image=popcorn.Image.elf(BOARD_ELF))
+    m.reset()
+    acr = latency_warnings(m)
+    latencies = iter(range(2, 16))
 
-    class Reading(logging.Handler):
+    class Writing(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
-            following = next(reads, None)
+            following = next(latencies, None)
             if following is not None:
-                m.mem.u8[following]
+                acr.LATENCY = following
 
-    reading = Reading()
+    def write_one() -> None:
+        acr.LATENCY = 1
+
+    caplog.clear()
+    writing = Writing()
     logger = logging.getLogger("popcorn")
-    logger.addHandler(reading)
+    logger.addHandler(writing)
     try:
         with caplog.at_level(logging.WARNING, logger="popcorn"):
-            m._handle.parked(lambda: m.mem.u8[holes[0]])  # pyright: ignore[reportPrivateUsage]
+            m._handle.parked(write_one)  # pyright: ignore[reportPrivateUsage]
             first = len(caplog.records)
             m._flush_logs()  # pyright: ignore[reportPrivateUsage]
             second = len(caplog.records)
     finally:
-        logger.removeHandler(reading)
+        logger.removeHandler(writing)
         m._flush_logs()  # pyright: ignore[reportPrivateUsage]
     assert (first, second) == (1, 2)
 
@@ -409,20 +422,11 @@ def test_past_4096_queued_log_records_the_rest_are_counted_in_one_warning(
     from popcorn.stm32 import mcu
 
     description = mcu("STM32U575QGIx")
-    m = popcorn.Machine(description)
-    holes: list[int] = []
-    for port in "ABCDEFGHI":
-        found = next(p for p in description.peripherals if p.name == f"GPIO{port}")
-        taken = {r.offset + k for r in found.registers for k in range(4)}
-        holes.extend(found.base + offset for offset in range(found.size) if offset not in taken)
-    assert len(holes) >= 5000
-
-    def touch() -> None:
-        for address in holes[:5000]:
-            m.mem.u8[address]
-
+    m = popcorn.Machine(description, image=popcorn.Image.elf(BOARD_ELF))
+    m.reset()
+    holes = gpio_holes(description, 5000)
     with caplog.at_level(logging.WARNING, logger="popcorn"):
-        m._handle.parked(touch)  # pyright: ignore[reportPrivateUsage]
+        load_each_unforwarded(m, holes)
     messages = [r.getMessage() for r in caplog.records if r.name == "popcorn"]
     assert len(messages) == 4097
     assert messages[0].endswith(f"at offset {holes[0] - 0x4202_0000:#x}, no register there")
@@ -1814,7 +1818,7 @@ def test_a_late_command_failure_is_reported_without_the_gil_on_the_machine_threa
     assert reported == [
         (
             "a command its awaiter cancelled failed later",
-            popcorn.EmulationError,
+            popcorn.BusAccessError,
             ["reading the probe"],
         )
     ]
@@ -2713,10 +2717,6 @@ def test_an_always_raising_filter_sees_the_dropped_count_a_bounded_number_of_tim
                 calls["dropped"] += 1
             raise RuntimeError("filter")
 
-    def touch(machine: popcorn.Machine) -> None:
-        for hole in holes:
-            machine.mem.u8[hole]
-
     raising = Raising()
     logger = logging.getLogger("popcorn")
     logger.addFilter(raising)
@@ -2730,7 +2730,8 @@ def test_an_always_raising_filter_sees_the_dropped_count_a_bounded_number_of_tim
             await asyncio.sleep(0.1)
 
     try:
-        m._handle.parked(functools.partial(touch, m))  # pyright: ignore[reportPrivateUsage]
+        with contextlib.suppress(RuntimeError):
+            load_each_unforwarded(m, holes)
         asyncio.run(asyncio.wait_for(scenario(m), 20))
     finally:
         logger.removeFilter(raising)

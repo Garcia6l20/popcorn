@@ -1,5 +1,6 @@
 #include "backup_domain.hpp"
 #include "factories.hpp"
+#include "gtzc.hpp"
 #include "hsi16_source.hpp"
 #include "lsi_source.hpp"
 #include "model_base.hpp"
@@ -17,6 +18,7 @@
 #include <cstdint>
 #include <format>
 #include <memory>
+#include <optional>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -253,6 +255,107 @@ auto lower(std::string_view name) -> std::string
   return out;
 }
 
+struct secured_group
+{
+  std::string_view bit;
+  std::string_view reg;
+  std::string_view fields;
+};
+
+constexpr auto rcc_secured = std::to_array<secured_group>({
+    {"HSISEC",    "RCC_CR",        "HSION HSIKERON HSIRDY"                                               },
+    {"HSISEC",    "RCC_ICSCR3",    "HSICAL HSITRIM"                                                      },
+    {"HSISEC",    "RCC_CIER",      "HSIRDYIE"                                                            },
+    {"HSISEC",    "RCC_CIFR",      "HSIRDYF"                                                             },
+    {"HSISEC",    "RCC_CICR",      "HSIRDYC"                                                             },
+    {"HSESEC",    "RCC_CR",        "HSEON HSERDY HSEBYP CSSON HSEEXT"                                    },
+    {"HSESEC",    "RCC_CIER",      "HSERDYIE"                                                            },
+    {"HSESEC",    "RCC_CIFR",      "HSERDYF CSSF"                                                        },
+    {"HSESEC",    "RCC_CICR",      "HSERDYC CSSC"                                                        },
+    {"MSISEC",    "RCC_CR",        "MSISON MSIKERON MSISRDY MSIPLLEN MSIKON MSIKRDY MSIPLLSEL MSIPLLFAST"},
+    {"MSISEC",    "RCC_ICSCR1",
+     "MSISRANGE MSIKRANGE MSIRGSEL MSIBIAS MSICAL0 MSICAL1 MSICAL2 MSICAL3"                              },
+    {"MSISEC",    "RCC_ICSCR2",    "MSITRIM0 MSITRIM1 MSITRIM2 MSITRIM3"                                 },
+    {"MSISEC",    "RCC_CIER",      "MSISRDYIE MSIKRDYIE"                                                 },
+    {"MSISEC",    "RCC_CIFR",      "MSISRDYF MSIKRDYF"                                                   },
+    {"MSISEC",    "RCC_CICR",      "MSISRDYC MSIKRDYC"                                                   },
+    {"MSISEC",    "RCC_CSR",       "MSISSRANGE MSIKSRANGE"                                               },
+    {"LSISEC",    "RCC_BDCR",      "LSION LSIRDY LSIPREDIV LSCOSEL LSCOEN"                               },
+    {"LSISEC",    "RCC_CIER",      "LSIRDYIE"                                                            },
+    {"LSISEC",    "RCC_CIFR",      "LSIRDYF"                                                             },
+    {"LSISEC",    "RCC_CICR",      "LSIRDYC"                                                             },
+    {"LSESEC",    "RCC_BDCR",
+     "LSECSSON LSECSSD LSEDRV LSEBYP LSERDY LSEON LSEGFON LSESYSRDY LSESYSEN LSCOSEL LSCOEN"             },
+    {"LSESEC",    "RCC_CIER",      "LSERDYIE"                                                            },
+    {"LSESEC",    "RCC_CIFR",      "LSERDYF"                                                             },
+    {"LSESEC",    "RCC_CICR",      "LSERDYC"                                                             },
+    {"SYSCLKSEC", "RCC_CFGR1",     "SW SWS STOPWUCK STOPKERWUCK MCOSEL MCOPRE"                           },
+    {"SYSCLKSEC", "RCC_CCIPR1",    "SYSTICKSEL"                                                          },
+    {"PRESCSEC",  "RCC_CFGR2",     "HPRE PPRE1 PPRE2"                                                    },
+    {"PRESCSEC",  "RCC_CFGR3",     "PPRE3"                                                               },
+    {"PLL1SEC",   "RCC_PLL1CFGR",
+     "PLL1SRC PLL1RGE PLL1FRACEN PLL1M PLL1MBOOST PLL1PEN PLL1QEN PLL1REN"                               },
+    {"PLL1SEC",   "RCC_PLL1DIVR",  "PLL1N PLL1P PLL1Q PLL1R"                                             },
+    {"PLL1SEC",   "RCC_PLL1FRACR", "PLL1FRACN"                                                           },
+    {"PLL1SEC",   "RCC_CR",        "PLL1RDY PLL1ON"                                                      },
+    {"PLL1SEC",   "RCC_CIER",      "PLL1RDYIE"                                                           },
+    {"PLL1SEC",   "RCC_CIFR",      "PLL1RDYF"                                                            },
+    {"PLL1SEC",   "RCC_CICR",      "PLL1RDYC"                                                            },
+    {"PLL2SEC",   "RCC_PLL2CFGR",  "PLL2SRC PLL2RGE PLL2FRACEN PLL2M PLL2PEN PLL2QEN PLL2REN"            },
+    {"PLL2SEC",   "RCC_PLL2DIVR",  "PLL2N PLL2P PLL2Q PLL2R"                                             },
+    {"PLL2SEC",   "RCC_PLL2FRACR", "PLL2FRACN"                                                           },
+    {"PLL2SEC",   "RCC_CR",        "PLL2RDY PLL2ON"                                                      },
+    {"PLL2SEC",   "RCC_CIER",      "PLL2RDYIE"                                                           },
+    {"PLL2SEC",   "RCC_CIFR",      "PLL2RDYF"                                                            },
+    {"PLL2SEC",   "RCC_CICR",      "PLL2RDYC"                                                            },
+    {"PLL3SEC",   "RCC_PLL3CFGR",  "PLL3SRC PLL3RGE PLL3FRACEN PLL3M PLL3PEN PLL3QEN PLL3REN"            },
+    {"PLL3SEC",   "RCC_PLL3DIVR",  "PLL3N PLL3P PLL3Q PLL3R"                                             },
+    {"PLL3SEC",   "RCC_PLL3FRACR", "PLL3FRACN"                                                           },
+    {"PLL3SEC",   "RCC_CR",        "PLL3RDY PLL3ON"                                                      },
+    {"PLL3SEC",   "RCC_CIER",      "PLL3RDYIE"                                                           },
+    {"PLL3SEC",   "RCC_CIFR",      "PLL3RDYF"                                                            },
+    {"PLL3SEC",   "RCC_CICR",      "PLL3RDYC"                                                            },
+    {"HSI48SEC",  "RCC_CR",        "HSI48ON HSI48RDY"                                                    },
+    {"HSI48SEC",  "RCC_CRRCR",     "HSI48CAL"                                                            },
+    {"HSI48SEC",  "RCC_CIER",      "HSI48RDYIE"                                                          },
+    {"HSI48SEC",  "RCC_CIFR",      "HSI48RDYF"                                                           },
+    {"HSI48SEC",  "RCC_CICR",      "HSI48RDYC"                                                           },
+    {"ICLKSEC",   "RCC_CCIPR1",    "ICLKSEL"                                                             },
+    {"RMVFSEC",   "RCC_CSR",       "RMVF"                                                                },
+});
+
+constexpr auto rcc_unit_registers = std::to_array<std::string_view>({
+    "RCC_AHB1RSTR",   "RCC_AHB2RSTR1",  "RCC_AHB2RSTR2",  "RCC_AHB3RSTR",   "RCC_APB1RSTR1",
+    "RCC_APB1RSTR2",  "RCC_APB2RSTR",   "RCC_APB3RSTR",   "RCC_AHB1ENR",    "RCC_AHB2ENR1",
+    "RCC_AHB2ENR2",   "RCC_AHB3ENR",    "RCC_APB1ENR1",   "RCC_APB1ENR2",   "RCC_APB2ENR",
+    "RCC_APB3ENR",    "RCC_AHB1SMENR",  "RCC_AHB2SMENR1", "RCC_AHB2SMENR2", "RCC_AHB3SMENR",
+    "RCC_APB1SMENR1", "RCC_APB1SMENR2", "RCC_APB2SMENR",  "RCC_APB3SMENR",  "RCC_SRDAMR",
+    "RCC_CCIPR1",     "RCC_CCIPR2",     "RCC_CCIPR3",
+});
+
+constexpr auto rcc_unit_suffixes =
+    std::to_array<std::string_view>({"SMEN", "AMEN", "RST", "EN", "SEL"});
+
+using unit_alias = std::pair<std::string_view, std::string_view>;
+
+constexpr auto rcc_unit_aliases = std::to_array<unit_alias>({
+    {"DCMI_PSSI", "DCMI"   },
+    {"FSMC",      "FMC"    },
+    {"OTG",       "OTG_FS" },
+    {"ICACHE",    "ICache" },
+    {"DCACHE1",   "DCACHE" },
+    {"VREF",      "VREFBUF"},
+    {"RTCAPB",    "RTC"    },
+});
+
+struct unit_bits
+{
+  std::uint32_t          offset{};
+  std::uint32_t          bits{};
+  std::size_t            unit{};
+  trustzone_aware const* aware{};
+};
+
 struct rcc_state
 {
   std::array<std::uint32_t, source_count + 1> generation{};
@@ -308,8 +411,28 @@ struct timer
  *        warning per machine life. A started IWDG keeps the LSI on until the next reset, RM0456
  *        section 11.4.16. FLASH programming or erase keeps HSI16 on while it runs, RM0456
  *        sections 7.3.6 and 7.3.7.
+ *
+ *        TrustZone, RM0456 11.5 and Table 117: the bits each `RCC_SECCFGR` bit secures, and the
+ *        reset, enable, sleep enable, autonomous enable and kernel clock selection bits of a
+ *        Secure peripheral, are RAZ/WI to a Non-secure access, with no event. A peripheral is
+ *        Secure by its TZSC bit, or for a TrustZone-aware model by its own security bits, the
+ *        FLASH by RM0456 Table 62. A bit whose name gives no peripheral of the part stays
+ *        Non-secure, such as the GTZCn and shared kernel clock selections. Deviation: SRAMnEN
+ *        and SRAMnSMEN stay Non-secure, the MPCBB and INVSECSTATE rule of RM0456 5.4 is not
+ *        modelled. `BDRST` is
+ *        Secure while the RTC or the TAMP has a secure function, RM0456 11.5.1. `SPRIV` makes
+ *        the Secure bits privileged, `NSPRIV` the others, RAZ/WI to an unprivileged access.
+ *        `RCC_SECCFGR` reads for every transaction and takes Secure writes, privileged with SPRIV
+ *        set. A Non-secure write to it is ignored with an illegal access event. `RCC_PRIVCFGR`
+ *        takes privileged writes, SPRIV Secure ones only. A write of `RCC_CICR` clears the
+ *        `RCC_CIFR` flags of the description's cross rules, the flags of a Secure oscillator only
+ *        for a Secure write. Under TZEN=0 `RCC_SECCFGR` is RAZ/WI, RM0456 11.8.51, and
+ *        `RCC_PRIVCFGR` is storage.
  */
-class rcc final : public dispatch_model<rcc, rcc_state>, public lsi_source, public hsi16_source
+class rcc final : public dispatch_model<rcc, rcc_state>,
+                  public lsi_source,
+                  public hsi16_source,
+                  public trustzone_aware
 {
 public:
   rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& options);
@@ -330,8 +453,16 @@ public:
   template <std::size_t Pll> void pll_dividers_written(std::uint32_t old, std::uint32_t now);
   void                            bdcr_written(std::uint32_t old, std::uint32_t now);
   void                            csr_written(std::uint32_t old, std::uint32_t now);
+  void                            cicr_written(std::uint32_t old, std::uint32_t now);
+  [[nodiscard]] auto              secure_function() const -> bool override;
+  [[nodiscard]] auto              secure_word() const -> std::uint32_t override;
+  [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
 
 private:
+  void               add_security_rules();
+  void               resolve_units();
+  [[nodiscard]] auto unit_is_secure(unit_bits const& rule) const -> bool;
+
   [[nodiscard]] auto is_ready(source which) const -> bool;
   [[nodiscard]] auto is_on(source which) const -> bool;
   [[nodiscard]] auto pll_input(std::size_t pll) const -> source;
@@ -354,33 +485,46 @@ private:
   void publish(bool notify);
   void refuse_core_stop(std::string_view reg, std::string_view what);
 
-  bool                                               core_stop_logged_{};
-  rcc_options                                        options_;
-  register_file&                                     regs_;
-  std::array<oscillator, source_count>               osc_{};
-  std::array<pll_fields, 3>                          pll_{};
-  field_ref                                          css_on_;
-  field_ref                                          msi_select_;
-  field_ref                                          msis_range_;
-  field_ref                                          msik_range_;
-  field_ref                                          msis_standby_range_;
-  field_ref                                          msik_standby_range_;
-  field_ref                                          sw_;
-  field_ref                                          sws_;
-  field_ref                                          hpre_;
-  std::array<field_ref, 3>                           ppre_{};
-  field_ref                                          iclk_select_;
-  field_ref                                          rtc_select_;
-  field_ref                                          rtc_enable_;
-  field_ref                                          lsi_prediv_;
-  field_ref                                          backup_reset_;
-  field_ref                                          remove_flags_;
-  std::array<field_ref, reset_flags.size()>          flags_{};
-  reg_ref                                            bdcr_;
-  reg_ref                                            csr_;
-  std::vector<std::pair<core::clock_domain, signal>> signals_;
-  std::vector<kernel>                                kernels_;
-  std::vector<timer>                                 timers_;
+  bool                                                 core_stop_logged_{};
+  rcc_options                                          options_;
+  register_file&                                       regs_;
+  std::array<oscillator, source_count>                 osc_{};
+  std::array<pll_fields, 3>                            pll_{};
+  field_ref                                            css_on_;
+  field_ref                                            msi_select_;
+  field_ref                                            msis_range_;
+  field_ref                                            msik_range_;
+  field_ref                                            msis_standby_range_;
+  field_ref                                            msik_standby_range_;
+  field_ref                                            sw_;
+  field_ref                                            sws_;
+  field_ref                                            hpre_;
+  std::array<field_ref, 3>                             ppre_{};
+  field_ref                                            iclk_select_;
+  field_ref                                            rtc_select_;
+  field_ref                                            rtc_enable_;
+  field_ref                                            lsi_prediv_;
+  field_ref                                            backup_reset_;
+  field_ref                                            remove_flags_;
+  std::array<field_ref, reset_flags.size()>            flags_{};
+  reg_ref                                              bdcr_;
+  reg_ref                                              csr_;
+  std::vector<std::pair<core::clock_domain, signal>>   signals_;
+  std::vector<kernel>                                  kernels_;
+  std::vector<timer>                                   timers_;
+  std::optional<reg_ref>                               secure_;
+  reg_ref                                              privilege_;
+  field_ref                                            secure_privileged_;
+  field_ref                                            nonsecure_privileged_;
+  std::vector<std::pair<field_ref, field_ref>>         secured_;
+  std::vector<unit_bits>                               units_;
+  std::vector<cross_ref>                               flag_clears_;
+  std::array<trustzone_aware const*, 2>                backup_units_{};
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> words_;
+  peripheral_security*                                 firewall_{};
+  bool                                                 units_resolved_{};
+  std::optional<std::size_t>                           unit_;
+  illegal_event                                        illegal_;
 };
 
 constexpr std::array<write_entry<rcc>, 27> rcc_writes{
@@ -415,10 +559,44 @@ constexpr std::array<write_entry<rcc>, 27> rcc_writes{
      }
 };
 
+constexpr std::array<write_entry<rcc>, 1> rcc_secure_writes{
+    {
+     {"RCC_SECCFGR", nullptr},
+     }
+};
+
+constexpr auto rcc_trustzone_writes = std::to_array<write_entry<rcc>>({
+    {"RCC_ICSCR2",     nullptr           },
+    {"RCC_ICSCR3",     nullptr           },
+    {"RCC_CRRCR",      nullptr           },
+    {"RCC_CIER",       nullptr           },
+    {"RCC_CIFR",       nullptr           },
+    {"RCC_CICR",       &rcc::cicr_written},
+    {"RCC_AHB1RSTR",   nullptr           },
+    {"RCC_AHB2RSTR1",  nullptr           },
+    {"RCC_AHB2RSTR2",  nullptr           },
+    {"RCC_AHB3RSTR",   nullptr           },
+    {"RCC_APB1RSTR1",  nullptr           },
+    {"RCC_APB1RSTR2",  nullptr           },
+    {"RCC_APB2RSTR",   nullptr           },
+    {"RCC_APB3RSTR",   nullptr           },
+    {"RCC_AHB1SMENR",  nullptr           },
+    {"RCC_AHB2SMENR1", nullptr           },
+    {"RCC_AHB2SMENR2", nullptr           },
+    {"RCC_AHB3SMENR",  nullptr           },
+    {"RCC_APB1SMENR1", nullptr           },
+    {"RCC_APB1SMENR2", nullptr           },
+    {"RCC_APB2SMENR",  nullptr           },
+    {"RCC_APB3SMENR",  nullptr           },
+    {"RCC_SRDAMR",     nullptr           },
+    {"RCC_PRIVCFGR",   nullptr           },
+});
+
 rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& options)
-    : dispatch_model{ctx, desc, "RCC", rcc_writes}, options_{options}, regs_{ctx.regs},
-      css_on_{field("RCC_CR", "CSSON")}, msi_select_{field("RCC_ICSCR1", "MSIRGSEL")},
-      msis_range_{field("RCC_ICSCR1", "MSISRANGE")}, msik_range_{field("RCC_ICSCR1", "MSIKRANGE")},
+    : dispatch_model{ctx, desc, "RCC", rcc_writes, rcc_trustzone_writes}, options_{options},
+      regs_{ctx.regs}, css_on_{field("RCC_CR", "CSSON")},
+      msi_select_{field("RCC_ICSCR1", "MSIRGSEL")}, msis_range_{field("RCC_ICSCR1", "MSISRANGE")},
+      msik_range_{field("RCC_ICSCR1", "MSIKRANGE")},
       msis_standby_range_{field("RCC_CSR", "MSISSRANGE")},
       msik_standby_range_{field("RCC_CSR", "MSIKSRANGE")}, sw_{field("RCC_CFGR1", "SW")},
       sws_{field("RCC_CFGR1", "SWS")}, hpre_{field("RCC_CFGR2", "HPRE")},
@@ -426,8 +604,17 @@ rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& opt
       iclk_select_{field("RCC_CCIPR1", "ICLKSEL")}, rtc_select_{field("RCC_BDCR", "RTCSEL")},
       rtc_enable_{field("RCC_BDCR", "RTCEN")}, lsi_prediv_{field("RCC_BDCR", "LSIPREDIV")},
       backup_reset_{field("RCC_BDCR", "BDRST")}, remove_flags_{field("RCC_CSR", "RMVF")},
-      bdcr_{reg("RCC_BDCR")}, csr_{reg("RCC_CSR")}
+      bdcr_{reg("RCC_BDCR")}, csr_{reg("RCC_CSR")}, unit_{unit_named(ctx.part, desc.name)}
 {
+  if(has_register("RCC_SECCFGR"))
+  {
+    bind(rcc_secure_writes);
+    secure_ = reg("RCC_SECCFGR");
+  }
+  if(ctx.trustzone)
+  {
+    add_security_rules();
+  }
   for(auto const& [index, names] : std::views::enumerate(oscillators))
   {
     osc_[index] = {
@@ -935,6 +1122,174 @@ void rcc::reset(register_file& regs, reset_kind kind)
     update(regs_, osc_[std::to_underlying(source::lsi)].ready, 0);
   }
   publish(false);
+}
+
+void rcc::cicr_written(std::uint32_t, std::uint32_t now)
+{
+  apply_crosses(flag_clears_, now);
+  regs_.poke(reg("RCC_CICR").offset, 0);
+}
+
+void rcc::add_security_rules()
+{
+  flag_clears_          = crosses_from("RCC_CICR");
+  privilege_            = reg("RCC_PRIVCFGR");
+  secure_privileged_    = field("RCC_PRIVCFGR", "SPRIV");
+  nonsecure_privileged_ = field("RCC_PRIVCFGR", "NSPRIV");
+  for(auto const& group : rcc_secured)
+  {
+    auto const& described = describe(group.reg);
+    for(auto const name : std::views::split(group.fields, ' '))
+    {
+      auto const wanted = std::string_view{name};
+      if(std::ranges::contains(described.fields, wanted, &field_desc::name))
+      {
+        secured_.emplace_back(field("RCC_SECCFGR", group.bit), field(group.reg, wanted));
+      }
+    }
+  }
+  for(auto const name : rcc_unit_registers)
+  {
+    for(auto const& bits : describe(name).fields)
+    {
+      auto const suffix = std::ranges::find_if(
+          rcc_unit_suffixes, [&](std::string_view s) { return bits.name.ends_with(s); });
+      if(suffix == rcc_unit_suffixes.end())
+      {
+        continue;
+      }
+      auto stem = std::string_view{bits.name}.substr(0, bits.name.size() - suffix->size());
+      if(auto const alias = std::ranges::find(rcc_unit_aliases, stem, &unit_alias::first);
+         alias != rcc_unit_aliases.end())
+      {
+        stem = alias->second;
+      }
+      if(auto const unit = unit_named(ctx_.part, stem))
+      {
+        units_.push_back(
+            {.offset = reg(name).offset, .bits = field(name, bits.name).mask(), .unit = *unit});
+      }
+    }
+  }
+  for(auto const& name : claims())
+  {
+    std::uint32_t mask = 0;
+    for(auto const& bits : describe(name).fields)
+    {
+      mask |= field(name, bits.name).mask();
+    }
+    words_.emplace_back(reg(name).offset, mask);
+  }
+}
+
+void rcc::resolve_units()
+{
+  if(units_resolved_ or ctx_.peers.all().empty())
+  {
+    return;
+  }
+  units_resolved_ = true;
+  for(auto* const peer : ctx_.peers.all())
+  {
+    auto* const firewall = dynamic_cast<peripheral_security*>(peer);
+    if(firewall != nullptr and firewall_ == nullptr)
+    {
+      firewall_ = firewall;
+    }
+  }
+  for(auto& rule : units_)
+  {
+    rule.aware = dynamic_cast<trustzone_aware const*>(
+        ctx_.peers.find(ctx_.part.peripherals[rule.unit].name));
+  }
+  backup_units_ = {
+      dynamic_cast<trustzone_aware const*>(ctx_.peers.find("RTC")),
+      dynamic_cast<trustzone_aware const*>(ctx_.peers.find("TAMP"))};
+}
+
+auto rcc::unit_is_secure(unit_bits const& rule) const -> bool
+{
+  if(firewall_ != nullptr)
+  {
+    if(auto const secure = firewall_->peripheral_secure(rule.unit))
+    {
+      return *secure;
+    }
+  }
+  return rule.aware != nullptr and rule.aware->secure_function();
+}
+
+auto rcc::secure_word() const -> std::uint32_t
+{
+  return ctx_.trustzone and secure_ ? regs_.peek(secure_->offset) : 0;
+}
+
+auto rcc::secure_function() const -> bool
+{
+  return secure_word() != 0;
+}
+
+auto rcc::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
+{
+  auto const all = ~std::uint32_t{};
+  if(secure_ and word == secure_->offset)
+  {
+    if(not ctx_.trustzone)
+    {
+      return bus_guard::both(all);
+    }
+    if(not ctx.secure)
+    {
+      if(write and unit_)
+      {
+        illegal_.raise(ctx_.peers, *unit_, ctx.by);
+      }
+      return {.wi = all};
+    }
+    auto const spriv = secure_privileged_.of(regs_.peek(privilege_.offset)) != 0;
+    return {.wi = not ctx.privileged and spriv ? all : 0};
+  }
+  if(not ctx_.trustzone)
+  {
+    return {};
+  }
+  auto const privilege = regs_.peek(privilege_.offset);
+  if(word == privilege_.offset)
+  {
+    if(not ctx.privileged)
+    {
+      return {.wi = all};
+    }
+    return {.wi = ctx.secure ? 0 : secure_privileged_.mask()};
+  }
+  resolve_units();
+  auto const    seccfgr = secure_word();
+  std::uint32_t secured = 0;
+  for(auto const& [bit, bits] : secured_)
+  {
+    if(bits.offset == word and bit.of(seccfgr) != 0)
+    {
+      secured |= bits.mask();
+    }
+  }
+  for(auto const& rule : units_)
+  {
+    if(rule.offset == word and unit_is_secure(rule))
+    {
+      secured |= rule.bits;
+    }
+  }
+  if(word == bdcr_.offset and std::ranges::any_of(backup_units_, [](trustzone_aware const* unit) {
+       return unit != nullptr and unit->secure_function();
+     }))
+  {
+    secured |= backup_reset_.mask();
+  }
+  auto const known =
+      std::ranges::find(words_, word, &std::pair<std::uint32_t, std::uint32_t>::first);
+  auto const whole = known != words_.end() ? known->second : all;
+  return guard_of(secured, true, secure_privileged_.of(privilege) != 0, ctx)
+       | guard_of(whole & ~secured, false, nonsecure_privileged_.of(privilege) != 0, ctx);
 }
 
 void rcc::force_lsi()

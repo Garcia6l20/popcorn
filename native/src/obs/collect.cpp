@@ -16,7 +16,7 @@ namespace popcorn::obs
 {
 auto collect(core::machine& target, std::span<image_source const> sources) -> coverage_set
 {
-  auto const images = target.loaded_images();
+  auto const images = target.observed_images();
   for(auto const& [index, source] : std::views::enumerate(sources))
   {
     auto const key = std::format("sources[{}].path", index);
@@ -39,7 +39,7 @@ auto collect(core::machine& target, std::span<image_source const> sources) -> co
   auto const data = target.coverage();
 
   code_bytes code{
-      images,
+      target.loaded_images(),
       [&target](address at, std::span<std::byte> out) -> std::size_t {
         auto const read = target.mem().read_block(at, out);
         return read ? out.size() : read.error().at - at;

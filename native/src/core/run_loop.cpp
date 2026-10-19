@@ -176,10 +176,12 @@ void machine::run_state::install_hooks()
             watched.window.start, watched.window.start + watched.window.size - 1),
         std::format("adding the guest store hook at {:#010x}", watched.window.start));
   }
+  install_memory_filter();
 }
 
 void machine::run_state::reset_machine(reset_kind kind)
 {
+  ++memory_generation;
   owner.scheduler_.restore({}, 0);
   held_through.reset();
   auto fresh            = owner.clock_driver_.state();
@@ -204,7 +206,10 @@ void machine::run_state::reset_machine(reset_kind kind)
   spin.clear();
   instant_events = 0;
   remove_step_hook();
-  owner.arch_->reset(reset_vector);
+  {
+    handler_scope const resetting{resetting_arch};
+    owner.arch_->reset(reset_vector);
+  }
   std::ranges::fill(lines.active, 0u);
   lines.nmi_active = 0;
   for(auto const& slot : owner.peripherals_)
@@ -367,7 +372,7 @@ auto machine::run_state::deliverable() noexcept -> bool
   return guarded([this] { return arch->deliverable_now(); });
 }
 
-void machine::run_state::on_block(
+[[gnu::hot]] void machine::run_state::on_block(
     uc_struct*    engine,
     std::uint64_t addr,
     std::uint32_t size,
@@ -382,7 +387,7 @@ void machine::run_state::on_block(
      or (--run.wall_countdown == 0 and run.wall_expired_now())
      or (run.arch->pending() and run.deliverable()))
   {
-    run.stop_at_block(engine, run.boundary_cause(now));
+    run.stop_at_boundary(engine, now);
     return;
   }
   if(run.block_watch and run.watch_block(engine)) [[unlikely]]
@@ -406,6 +411,11 @@ void machine::run_state::on_block(
   {
     run.record_block();
   }
+}
+
+void machine::run_state::stop_at_boundary(uc_struct* engine, icount now) noexcept
+{
+  stop_at_block(engine, boundary_cause(now));
 }
 
 void machine::run_state::stop_at_block(uc_struct* engine, engine_end cause) noexcept
@@ -493,25 +503,32 @@ void machine::run_state::on_interrupt(uc_struct* engine, std::uint32_t intno, vo
   auto& run                 = *static_cast<run_state*>(user);
   run.coverage.has_previous = false;
   run.spin.previous         = {};
-  auto const failed         = run.return_watch != 0 and run.guarded([&run, intno] {
+  if(run.call
+     and run.guarded([&run] { return run.owner.arch_->pc() == run.call->frame.return_sentinel; }))
+  {
+    uc_emu_stop(engine);
+    return;
+  }
+  auto const failed = run.return_watch != 0 and run.guarded([&run, intno] {
     if(run.arch->interrupt_returns(intno, run.return_watch))
     {
       run.on_exception_return(intno);
     }
     return false;
   });
-  auto const target         = run.until_return;
-  auto       met            = false;
-  auto const stops          = run.guarded([&] {
+  auto const target = run.until_return;
+  auto       met    = false;
+  auto const stops  = run.guarded([&] {
     met = target
       and run.arch->interrupt_returns(intno, target->ret)
       and run.stack_pointer() == target->sp;
-    auto const result = run.owner.arch_->on_interrupt(intno);
-    run.deadline      = std::min(run.deadline, run.owner.scheduler_.earliest());
+    auto const result  = run.owner.arch_->on_interrupt(intno);
+    auto const arrived = std::exchange(run.arrival_stopped, false);
+    run.deadline       = std::min(run.deadline, run.owner.scheduler_.earliest());
     if(result.resumes())
     {
       run.spin.leave();
-      if(failed)
+      if(failed or arrived)
       {
         return true;
       }
@@ -594,7 +611,10 @@ auto machine::run_state::on_bad_access(
       run.guarded([&] {
         auto const done = run.dispatch_controller_write(
             *region, static_cast<address>(addr), static_cast<std::uint8_t>(size),
-            static_cast<std::uint64_t>(value), initiator::cpu);
+            static_cast<std::uint64_t>(value),
+            run.owner.options_.trustzone
+                ? run.arch->data_attrs(static_cast<address>(addr))
+                : bus_attrs{.by = initiator::cpu, .secure = region->desc->secure});
         if(not done)
         {
           run.record_bus_fault(static_cast<address>(addr), arch::memory_op::write);
@@ -1190,6 +1210,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
       spin.previous         = {};
     }
     boundary_stop      = false;
+    arrival_stopped    = false;
     auto const leaving = leaving_until(request);
     if(leaving)
     {

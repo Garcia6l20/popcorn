@@ -15,6 +15,8 @@
 #include <format>
 #include <ranges>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace popcorn::arch::armv8m
@@ -52,6 +54,13 @@ auto floating(value_kind kind) noexcept -> bool
 {
   return kind == value_kind::f32 or kind == value_kind::f64;
 }
+
+constexpr address sau_granule = 32;
+
+auto state_name(security state) noexcept -> std::string_view
+{
+  return state == security::secure ? "Secure" : "Non-secure";
+}
 }
 
 void cortex_m::check_call(call_frame const& frame) const
@@ -63,12 +72,62 @@ void cortex_m::check_call(call_frame const& frame) const
         "call", 0, "return_sentinel",
         "an address below 0xE0000000, the core's execute-never system region");
   }
+  if(trustzone() and thread_mode())
+  {
+    check_call_state(frame);
+  }
+}
+
+void cortex_m::check_call_state(call_frame const& frame) const
+{
+  auto const current  = read_security(engine_handle());
+  auto const state_at = [&](address at) {
+    return attribution_of(at).ns ? security::nonsecure : security::secure;
+  };
+  auto const refuse = [&](std::string_view key, std::string_view what, address at) {
+    throw config_error(
+        "call", 0, std::string{key},
+        std::format(
+            "{} in {} memory, the core's current state, not {:#010x} in {} memory", what,
+            state_name(current), at, state_name(state_at(at))));
+  };
+  if(state_at(frame.entry) != current)
+  {
+    refuse("entry", "a function", frame.entry);
+  }
+  if(auto const& arena = context_->scratch; arena and current == security::nonsecure)
+  {
+    auto const                 end = std::uint64_t{arena->start} + arena->size;
+    std::vector<std::uint64_t> edges{arena->start};
+    for(auto const [base, limit] : std::views::zip(state_.scs.sau_rbar, state_.scs.sau_rlar))
+    {
+      edges.push_back(base & ~(sau_granule - 1));
+      edges.push_back(std::uint64_t{limit | (sau_granule - 1)} + 1);
+    }
+    for(auto const& range : context_->idau)
+    {
+      edges.push_back(range.start);
+      edges.push_back(range.end);
+    }
+    std::ranges::sort(edges);
+    for(auto const at : edges)
+    {
+      if(at >= arena->start and at < end and state_at(static_cast<address>(at)) != current)
+      {
+        refuse(arena->name, "a scratch region", static_cast<address>(at));
+      }
+    }
+  }
 }
 
 void cortex_m::prepare_call(call_frame const& frame)
 {
   rethrow_failure();
   check_call(frame);
+  if(trustzone())
+  {
+    check_call_state(frame);
+  }
   auto* const engine  = engine_handle();
   auto&       bus     = context_->services;
   auto const  layout  = aapcs::allocate(frame.args, frame.abi == float_abi::hard_double);
@@ -123,7 +182,9 @@ void cortex_m::prepare_call(call_frame const& frame)
     throw config_error(
         "call", 0, "stack", std::format("writable memory below {:#010x}", from + below));
   }
-  if(not stack.empty() and not bus.write_block(sp, std::as_bytes(std::span{stack}), initiator::cpu))
+  auto const stacking = bus_attrs{
+      .by = initiator::cpu, .secure = not trustzone() or read_security(engine) == security::secure};
+  if(not stack.empty() and not bus.write_block(sp, std::as_bytes(std::span{stack}), stacking))
   {
     throw config_error("call", 0, "stack", std::format("writable memory at {:#010x}", sp));
   }

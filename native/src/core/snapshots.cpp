@@ -68,9 +68,11 @@ auto machine::snapshot() const -> core::snapshot
       .popcorn_version    = std::string{version()},
       .unicorn_commit     = POPCORN_UNICORN_COMMIT,
       .description_digest = run.description_digest,
-      .image_digests      = digests(images_),
+      .image_digests      = digests(loaded_images()),
       .config_digest      = options_.config_digest,
       .generation         = generation_,
+      .trustzone          = options_.trustzone,
+      .idau               = options_.idau,
   };
   for(auto const& region : memory_)
   {
@@ -111,7 +113,7 @@ auto machine::snapshot() const -> core::snapshot
       image.words.push_back(slot->regs.peek(offset));
     }
     data.peripherals.push_back(std::move(image));
-    if(slot->model)
+    if(slot->model and not slot->model->stateless())
     {
       snapshot_part part{.owner = slot->desc.name, .data = {}};
       slot->model->save(part.data);
@@ -181,7 +183,7 @@ void machine::restore(core::snapshot const& saved)
           "description_digest",
           std::format("the digest of {}, {}", description_.part, run_->description_digest));
     }
-    auto const loaded = digests(images_);
+    auto const loaded = digests(loaded_images());
     if(data.image_digests != loaded)
     {
       refuse("image_digests", std::format("the digests of the loaded images, {}", loaded));
@@ -192,6 +194,13 @@ void machine::restore(core::snapshot const& saved)
           "config_digest",
           std::format("the config digest of this machine, {}", options_.config_digest));
     }
+  }
+  if(data.trustzone != options_.trustzone or data.idau != options_.idau)
+  {
+    refuse(
+        "trustzone", std::format(
+                         "a snapshot of a machine with trustzone {} and the same IDAU ranges",
+                         options_.trustzone));
   }
 
   auto const holds = [](memory_image const* image, region_desc const& region) {
@@ -297,7 +306,7 @@ void machine::restore(core::snapshot const& saved)
     if(slot->model)
     {
       part = named(data.models, slot->desc.name, &snapshot_part::owner);
-      if(part == nullptr)
+      if(part == nullptr and not slot->model->stateless())
       {
         refuse(std::format("models.{}", slot->desc.name), "the bytes of its model");
       }
@@ -369,12 +378,13 @@ void machine::restore(core::snapshot const& saved)
     {
       continue;
     }
-    if(auto const* const bytes = *part++; bytes != nullptr)
+    if(auto const* const bytes = *part++; bytes != nullptr and not slot->model->stateless())
     {
       slot->model->load(bytes->data);
     }
   }
 
+  ++run.memory_generation;
   run.restore_hook_state(data.intercepts, data.return_hooks);
   run.core_held    = data.core_held;
   run.held_through = data.held_through;

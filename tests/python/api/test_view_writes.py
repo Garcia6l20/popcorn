@@ -11,7 +11,7 @@ import popcorn
 import pytest
 from popcorn.units import us
 
-from .conftest import DRIVER_ELF, M33_JSON
+from .conftest import DRIVER_ELF, M33_JSON, StorageModel
 
 EXTI_SWIER1 = 0x08
 
@@ -106,7 +106,11 @@ def _described(tmp_path: Path, register: dict[str, object], cross: list[object])
     device["cross_rules"].extend(cross)
     path = tmp_path / "described.json"
     path.write_text(json.dumps(description), encoding="utf-8")
-    m = popcorn.Machine(popcorn.load_description(path), image=popcorn.Image.elf(DRIVER_ELF))
+    m = popcorn.Machine(
+        popcorn.load_description(path),
+        image=popcorn.Image.elf(DRIVER_ELF),
+        models={"TESTDEV": StorageModel},
+    )
     m.reset()
     return m
 

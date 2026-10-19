@@ -73,6 +73,7 @@ u575_programs = [
         ("stm32-caches", "test_caches.cpp"),
         ("stm32-power", "test_power.cpp"),
         ("stm32-flash", "test_flash.cpp"),
+        ("stm32-flash-secure", "test_flash_secure.cpp"),
         ("stm32-gpio", "test_gpio.cpp"),
         ("stm32-gpdma", "test_gpdma.cpp"),
         ("stm32-lpdma", "test_lpdma.cpp"),
@@ -91,6 +92,8 @@ u575_programs = [
         ("stm32-dbgmcu", "test_dbgmcu.cpp"),
         ("stm32-crc", "test_crc.cpp"),
         ("stm32-hash", "test_hash.cpp"),
+        ("stm32-gtzc", "test_gtzc.cpp"),
+        ("stm32-tz-aware", "test_tz_aware.cpp"),
         ("stm32-smc", "test_smc.cpp"),
         ("stm32-engine-counters", "test_engine_counters.cpp"),
     )

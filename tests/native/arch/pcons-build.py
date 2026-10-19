@@ -19,10 +19,11 @@ add_doctest("arch-interface", [here / "test_interface.cpp"], [armv8m, core])
 add_doctest("arch-thumb", [here / "test_thumb.cpp"], [armv8m, core])
 add_doctest("arch-registry", [here / "test_registry.cpp"], [armv8m, core])
 add_doctest("arch-code-analysis", [here / "test_code_analysis.cpp"], [armv8m, core])
+add_doctest("arch-unicorn-security", [here / "test_unicorn_security.cpp"], [core])
 
 arch_firmware = {
     name: firmware("arch", name)
-    for name in ("scs", "exceptions", "svc", "timers", "faults", "rtos")
+    for name in ("scs", "exceptions", "svc", "timers", "faults", "rtos", "cmse")
 }
 arch_firmware["abi"] = firmware("abi", "abi")
 arch_firmware["rom_store"] = firmware("core", "rom_store")
@@ -58,7 +59,11 @@ arch_tests = [
         ("arch-rtos", "test_rtos.cpp"),
         ("arch-store-controller", "test_store_controller.cpp"),
         ("arch-scs-exit", "test_scs_exit.cpp"),
+        ("arch-scs-security", "test_scs_security.cpp"),
         ("arch-pending-scan", "test_pending_scan.cpp"),
+        ("arch-bus-attrs", "test_bus_attrs.cpp"),
+        ("arch-exceptions-security", "test_exceptions_security.cpp"),
+        ("arch-sg", "test_sg.cpp"),
     )
 ]
 for test in arch_tests:

@@ -11,6 +11,7 @@ _ISER = 0xE000_E100
 _ICER = 0xE000_E180
 _ISPR = 0xE000_E200
 _ICPR = 0xE000_E280
+_ITNS = 0xE000_E380
 
 
 class Nvic:
@@ -50,6 +51,19 @@ class Nvic:
     def enabled(self, irq: int) -> bool:
         """Whether interrupt `irq` is enabled."""
         return self._bit(_ISER, irq)
+
+    def target_nonsecure(self, irq: int) -> bool:
+        """Whether interrupt `irq` targets the Non-secure state, its NVIC_ITNS bit, DDI0553B.z
+        D1.2.188. False on a machine without TrustZone enabled, where ITNS reads as zero."""
+        return self._bit(_ITNS, irq)
+
+    def set_target(self, irq: int, nonsecure: bool) -> None:
+        """Make interrupt `irq` target the Non-secure state or the Secure one, through the
+        Secure view of NVIC_ITNS. Ignored on a machine without TrustZone enabled."""
+        word = self._word(_ITNS, irq)
+        bit = 1 << (irq % 32)
+        value = self._memory.u32[word]
+        self._memory.u32[word] = value | bit if nonsecure else value & ~bit
 
     def _set(self, base: int, irq: int) -> None:
         self._memory.u32[self._word(base, irq)] = 1 << (irq % 32)

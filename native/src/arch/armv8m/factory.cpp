@@ -1,4 +1,5 @@
 #include "cortex_m.hpp"
+#include "registers.hpp"
 
 #include <popcorn/arch/armv8m/armv8m.hpp>
 
@@ -12,6 +13,12 @@ namespace popcorn::arch::armv8m
 auto implements(core_desc const& core) -> bool
 {
   return find_profile(core.cpu).has_value();
+}
+
+auto trustzone_registers() noexcept -> std::span<cpu_register const>
+{
+  return std::span<cpu_register const>{integer_trustzone_registers}.subspan(
+      core_register_names.size());
 }
 
 auto factory() -> arch_factory

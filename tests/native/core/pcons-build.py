@@ -107,6 +107,9 @@ test_intercepts = add_doctest(
 test_watches = add_doctest(
     "core-watches", [here / "test_watches.cpp"], [test_support, core], env=m33_env
 )
+test_memory_grant = add_doctest(
+    "core-memory-grant", [here / "test_memory_grant.cpp"], [test_support, core], env=m33_env
+)
 bench_run_loop = project.Program(
     "bench-run-loop", project.default_environment, sources=[here / "bench_run_loop.cpp"]
 )
@@ -123,6 +126,7 @@ for _, target in core_firmware.values():
         test_calls.depends(target)
         test_intercepts.depends(target)
         test_watches.depends(target)
+        test_memory_grant.depends(target)
         bench_run_loop.depends(target)
 
 bench_mmio = project.Program(

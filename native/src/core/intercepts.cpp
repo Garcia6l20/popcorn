@@ -182,7 +182,7 @@ void machine::run_state::remove_hook(std::uint64_t id) noexcept
 
 auto machine::run_state::abi_at(address at) const -> arch::float_abi
 {
-  for(auto const& loaded : owner.images_)
+  for(auto const& loaded : owner.loaded_images())
   {
     auto const holds = std::ranges::any_of(loaded.segments, [at](image::segment const& seg) {
       return seg.start <= at and at < std::uint64_t{seg.start} + seg.memory_size;
@@ -288,6 +288,90 @@ void machine::run_state::complete_returns(std::function_ref<bool(address) const>
   refresh_return_watch();
 }
 
+auto machine::run_state::visit_site(code_site& site, address addr, bool in_block) -> site_visit
+{
+  auto const        resumed = resume_past and resume_past->first == site.at;
+  std::size_t const first   = resumed ? std::exchange(resume_past, std::nullopt)->second : 0;
+  if(not resumed and not site.probes.empty())
+  {
+    auto const          at = arrival_time(addr);
+    std::optional<bool> secure;
+    for(auto const& probe : site.probes)
+    {
+      if(probe.secure)
+      {
+        if(not secure)
+        {
+          secure = arch->security_state();
+        }
+        if(secure != probe.secure)
+        {
+          continue;
+        }
+      }
+      probe.hits->record(at);
+    }
+  }
+  for(auto index = first; index < site.entries.size(); ++index)
+  {
+    auto const held = site.entries[index];
+    if(auto* const hook = std::get_if<return_entry*>(&held))
+    {
+      auto&            entry = **hook;
+      arch::call_frame frame{.entry = entry.at, .abi = abi_at(entry.at)};
+      for(auto const kind : entry.args)
+      {
+        frame.args.push_back({.kind = kind, .bits = 0});
+      }
+      arch->read_args(frame);
+      frames.push_back({
+          .entry   = &entry,
+          .ret     = arch->return_address(),
+          .sp      = stack_pointer(),
+          .args    = frame.args
+                   | std::views::transform(&arch::call_arg::bits)
+                   | std::ranges::to<std::vector>(),
+          .entered = owner.clock_driver_.exact_now(),
+      });
+      refresh_return_watch();
+      continue;
+    }
+    auto& entry = *std::get<intercept_entry*>(held);
+    if(entry.spent)
+    {
+      continue;
+    }
+    trace_call(entry.at);
+    intercept_result result = intercept_result::proceed();
+    {
+      handler_scope const  scope{in_handler};
+      intercept_call const call{owner, entry.at, arch->return_address(), entry.calls};
+      ++entry.calls;
+      entry.spent = entry.mode == intercept_mode::once;
+      result      = entry.handler(call);
+    }
+    switch(result.action())
+    {
+      case intercept_action::proceed:
+        continue;
+      case intercept_action::returns:
+        if(coverage_on and in_block)
+        {
+          coverage.leave(*arch, addr, false);
+        }
+        arch->return_to_caller(result.value(), result.abi().value_or(abi_at(entry.at)));
+        coverage.has_previous = false;
+        return site_visit::returned;
+      case intercept_action::stop:
+        trap        = arch::trap_result::stop(*result.reason());
+        resume_past = std::pair{addr, index + 1};
+        raise_stop();
+        return site_visit::stopped;
+    }
+  }
+  return site_visit::proceed;
+}
+
 void machine::run_state::on_code_site(
     uc_struct*    engine,
     std::uint64_t addr,
@@ -300,77 +384,14 @@ void machine::run_state::on_code_site(
   {
     return;
   }
-  auto const        resumed = run.resume_past and run.resume_past->first == site.at;
-  std::size_t const first   = resumed ? std::exchange(run.resume_past, std::nullopt)->second : 0;
   std::optional<std::uint32_t> exit;
   auto const                   stops = run.guarded([&] {
-    if(not resumed and not site.probes.empty())
+    auto const visit = run.visit_site(site, static_cast<address>(addr), true);
+    if(visit == site_visit::returned)
     {
-      auto const at = run.arrival_time(static_cast<address>(addr));
-      for(auto const& probe : site.probes)
-      {
-        probe.hits->record(at);
-      }
+      exit = run.arch->return_interrupt();
     }
-    for(auto index = first; index < site.entries.size(); ++index)
-    {
-      auto const held = site.entries[index];
-      if(auto* const hook = std::get_if<return_entry*>(&held))
-      {
-        auto&            entry = **hook;
-        arch::call_frame frame{.entry = entry.at, .abi = run.abi_at(entry.at)};
-        for(auto const kind : entry.args)
-        {
-          frame.args.push_back({.kind = kind, .bits = 0});
-        }
-        run.arch->read_args(frame);
-        run.frames.push_back({
-            .entry   = &entry,
-            .ret     = run.arch->return_address(),
-            .sp      = run.stack_pointer(),
-            .args    = frame.args
-                     | std::views::transform(&arch::call_arg::bits)
-                     | std::ranges::to<std::vector>(),
-            .entered = run.owner.clock_driver_.exact_now(),
-        });
-        run.refresh_return_watch();
-        continue;
-      }
-      auto& entry = *std::get<intercept_entry*>(held);
-      if(entry.spent)
-      {
-        continue;
-      }
-      run.trace_call(entry.at);
-      intercept_result result = intercept_result::proceed();
-      {
-        handler_scope const  scope{run.in_handler};
-        intercept_call const call{run.owner, entry.at, run.arch->return_address(), entry.calls};
-        ++entry.calls;
-        entry.spent = entry.mode == intercept_mode::once;
-        result      = entry.handler(call);
-      }
-      switch(result.action())
-      {
-        case intercept_action::proceed:
-          continue;
-        case intercept_action::returns:
-          if(run.coverage_on)
-          {
-            run.coverage.leave(*run.arch, static_cast<address>(addr), false);
-          }
-          run.arch->return_to_caller(result.value(), result.abi().value_or(run.abi_at(entry.at)));
-          run.coverage.has_previous = false;
-          exit                      = run.arch->return_interrupt();
-          return false;
-        case intercept_action::stop:
-          run.trap        = arch::trap_result::stop(*result.reason());
-          run.resume_past = std::pair{static_cast<address>(addr), index + 1};
-          run.raise_stop();
-          return true;
-      }
-    }
-    return false;
+    return visit == site_visit::stopped;
   });
   if(stops)
   {
@@ -381,6 +402,46 @@ void machine::run_state::on_code_site(
   {
     on_interrupt(engine, *exit, &run);
   }
+}
+
+auto machine::run_state::arrive_emulated(address at) -> emulated_arrival
+{
+  auto const now = owner.clock_driver_.exact_now();
+  if(step_ends(now) or (arch->pending() and deliverable()))
+  {
+    end_cause           = boundary_cause(now);
+    boundary_stop       = true;
+    coverage.open_insns = 0;
+    arrival_stopped     = true;
+    return emulated_arrival::stopped;
+  }
+  if(auto const found = sites.find(at); found != sites.end())
+  {
+    auto       visit = site_visit::proceed;
+    auto const stops = guarded([&] {
+      visit = visit_site(*found->second, at, false);
+      return visit == site_visit::stopped;
+    });
+    if(stops)
+    {
+      end_cause       = engine_end::other;
+      arrival_stopped = true;
+      return emulated_arrival::stopped;
+    }
+    if(visit == site_visit::returned)
+    {
+      return emulated_arrival::returned;
+    }
+  }
+  owner.clock_driver_.advance(icount{1});
+  if(coverage_on)
+  {
+    guarded([&] {
+      coverage.count(at, 1);
+      return false;
+    });
+  }
+  return emulated_arrival::proceed;
 }
 
 auto machine::run_state::watch_spans(address at, std::uint64_t last) const
@@ -538,12 +599,17 @@ auto machine::add_intercept(address at, intercept_handler handler, intercept_mod
   return hook_handle{hooks_, id};
 }
 
-auto machine::add_probe(address at) -> probe_handle
+auto machine::add_probe(address at, std::optional<bool> secure) -> probe_handle
 {
   require_stopped(*this);
+  if(secure and not arch_->security_state())
+  {
+    throw config_error(
+        "probe", 0, "state", "no security state on a machine without TrustZone enabled");
+  }
   auto const id   = ++hooks_->last_id;
   auto       hits = std::make_shared<probe_hits>();
-  run_->add_probe_to_site(at, {.id = id, .hits = hits});
+  run_->add_probe_to_site(at, {.id = id, .hits = hits, .secure = secure});
   run_->probes.emplace(id, at);
   return {
       .hook = hook_handle{hooks_, id},

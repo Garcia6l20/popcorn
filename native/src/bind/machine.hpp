@@ -40,6 +40,33 @@ namespace py = reflex::py;
 /** @brief Bit set in every log token, so it never equals a request token. */
 inline constexpr std::uint64_t log_token_bit = std::uint64_t{1} << 63;
 
+/** @brief Option bytes of the built-in FLASH model, the fields of `popcorn.OptionBytes`. */
+struct[[= py::rename{"OptionBytesConfig"}]] option_bytes_config
+{
+  /** @brief Global TrustZone enable. */
+  bool tzen{};
+  /** @brief Whether the secure area of bank 1 is the whole bank, secwm1 then ignored. */
+  bool secwm1_all{true};
+  /** @brief First and last page of the secure area of bank 1, empty for none. */
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> secwm1{};
+  /** @brief Whether the secure area of bank 2 is the whole bank, secwm2 then ignored. */
+  bool secwm2_all{true};
+  /** @brief First and last page of the secure area of bank 2, empty for none. */
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> secwm2{};
+  /** @brief First and last page of the hide-protection area of bank 1, empty for none. */
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> hdp1{};
+  /** @brief First and last page of the hide-protection area of bank 2, empty for none. */
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> hdp2{};
+  /** @brief Secure boot address, empty for the family default. */
+  std::optional<std::uint32_t> secboot{};
+  /** @brief Non-secure boot address, empty for the family default. */
+  std::optional<std::uint32_t> nsboot{};
+  /** @brief Bank 1 and bank 2 addresses swapped. */
+  bool swap_bank{};
+  /** @brief Dual-bank organization, empty for the family default. */
+  std::optional<bool> dualbank{};
+};
+
 /** @brief Machine options the facade exposes, the subset of core::machine_options Python sets. */
 struct[[= py::rename{"MachineConfig"}]] machine_config
 {
@@ -53,6 +80,8 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   std::uint32_t spin_threshold{};
   /** @brief Whether an unmodelled register access fails the run. */
   bool strict_peripherals{};
+  /** @brief Whether a processor fault enters the firmware's handler rather than stopping. */
+  bool fault_handlers{};
   /** @brief Address of the vector table reset reads, empty for the description's default. */
   std::optional<address> vector_table{};
   /** @brief Digest of the configuration, recorded in snapshots. */
@@ -77,6 +106,9 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   /** @brief VDDA in millivolts the board gives the ADC model, from 1620 to 3600, empty for the
    * model's default of 3000. */
   std::optional<std::uint32_t> vdda_mv{};
+  /** @brief Option bytes the built-in FLASH model encodes, which also give the boot address
+   * and TrustZone, empty for the description's option registers and today's boot. */
+  std::optional<option_bytes_config> option_bytes{};
   /** @brief Python bus targets per peripheral name, `popcorn.board.I2CTarget` or `SpiTarget`
    * instances in attachment order, served by the built-in bus model of that peripheral. */
   std::map<std::string, std::vector<reflex::py::nb::object>> python_devices{};
@@ -147,6 +179,18 @@ struct[[= py::rename{"CallOutcome"}]] call_outcome
   /** @brief The other exceptions pending and enabled at that stop, which the firmware's
    * PRIMASK, BASEPRI, FAULTMASK or an active exception holds back too. */
   [[= py::readonly]] std::vector<std::uint32_t> held_exceptions{};
+};
+
+/**
+ * @brief Which memory view an access goes through: the unfiltered debugger view, or a DAP
+ *        access of one security state filtered by the SAU, the IDAU and the bus firewall, see
+ *        core::memory_view.
+ */
+enum class[[= py::rename{"MemorySpace"}]] memory_space : std::uint8_t
+{
+  debugger,
+  secure,
+  nonsecure,
 };
 
 namespace detail
@@ -250,6 +294,13 @@ public:
    */
   [[= py::doc{"Load one more image, ImageError when a segment falls outside memory."}]] void
       load(image const& loaded);
+
+  /**
+   * @brief Adds a symbols-only image, as core::machine::add_symbols.
+   * @param symbols Image.
+   */
+  [[= py::doc{"Add a symbols-only image: stops locate in it, nothing is written."}]] void
+      add_symbols(image const& symbols);
 
   /**
    * @brief Resets the machine.
@@ -603,23 +654,26 @@ public:
    * @brief Writes bytes into guest memory, as the debugger.
    * @param at First guest address.
    * @param bytes Bytes to write.
+   * @param space View the access goes through.
    * @throws config_error naming the address when the range leaves the 32-bit address space.
    * @throws emulation_error naming the failing address on a bus error.
    * @throws machine_running while a slice runs, outside its handlers.
    */
   [[= py::doc{"Write bytes into guest memory as the debugger."}]] void
-      write_memory(address at, reflex::py::nb::bytes const& bytes);
+      write_memory(address at, reflex::py::nb::bytes const& bytes, memory_space space);
 
   /**
    * @brief Reads bytes of guest memory, as the debugger.
    * @param at First guest address.
    * @param size Byte count.
+   * @param space View the access goes through.
    * @throws config_error naming the address when the range leaves the 32-bit address space.
    * @throws emulation_error naming the failing address on a bus error.
    * @throws machine_running while a slice runs, outside its handlers.
    */
   [[= py::doc{"Read bytes of guest memory as the debugger."}]] [[nodiscard]] auto
-      read_memory(address at, std::uint32_t size) const -> reflex::py::nb::bytes;
+      read_memory(address at, std::uint32_t size, memory_space space) const
+      -> reflex::py::nb::bytes;
 
   /**
    * @brief Writes the bits of @p value that @p mask selects into guest memory, reading and
@@ -628,6 +682,7 @@ public:
    * @param at First guest address.
    * @param mask Bits written, one byte per byte of memory.
    * @param value Bytes whose masked bits are written, as long as @p mask.
+   * @param space View the access goes through.
    * @throws config_error for lengths that differ or a range outside the 32-bit address space.
    * @throws emulation_error naming the failing address on a bus error.
    * @throws machine_running while a slice runs, outside its handlers.
@@ -636,17 +691,19 @@ public:
       write_memory_masked(
           address                      at,
           reflex::py::nb::bytes const& mask,
-          reflex::py::nb::bytes const& value);
+          reflex::py::nb::bytes const& value,
+          memory_space                 space);
 
   /**
    * @brief The bytes of the NUL-terminated string at @p at, without the NUL, at most @p limit
-   *        bytes, read 64-byte block by block and byte by byte where a block meets a bus error.
+   *        bytes, read 64-byte block by block and byte by byte where a block meets a bus error,
+   *        through the view @p space.
    * @throws emulation_error when the bytes before a NUL meet a bus error.
    * @throws machine_running while a slice runs, outside its handlers.
    */
   [[= py::doc{
       "Bytes of the NUL-terminated string at an address, at most limit."}]] [[nodiscard]] auto
-      cstring(address at, std::uint32_t limit) const -> reflex::py::nb::bytes;
+      cstring(address at, std::uint32_t limit, memory_space space) const -> reflex::py::nb::bytes;
 
   /** @brief Names of the core registers, in the arch module's order. */
   [[= py::doc{"Names of the core registers, in the arch module's order."}]] [[nodiscard]] auto
@@ -741,18 +798,20 @@ public:
 
   /** @brief read_memory() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of read_memory."}]] [[nodiscard]] auto
-      op_read_memory(address at, std::uint32_t size) const -> access_op;
+      op_read_memory(address at, std::uint32_t size, memory_space space) const -> access_op;
   /** @brief write_memory() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of write_memory."}]] [[nodiscard]] auto
-      op_write_memory(address at, reflex::py::nb::bytes const& bytes) const -> access_op;
+      op_write_memory(address at, reflex::py::nb::bytes const& bytes, memory_space space) const
+      -> access_op;
   /** @brief write_memory_masked() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of write_memory_masked."}]] [[nodiscard]] auto op_memory_masked(
       address                      at,
       reflex::py::nb::bytes const& mask,
-      reflex::py::nb::bytes const& value) const -> access_op;
+      reflex::py::nb::bytes const& value,
+      memory_space                 space) const -> access_op;
   /** @brief cstring() as an op of submit_ops(). */
   [[= py::doc{"Op of cstring."}]] [[nodiscard]] auto
-      op_cstring(address at, std::uint32_t limit) const -> access_op;
+      op_cstring(address at, std::uint32_t limit, memory_space space) const -> access_op;
   /** @brief read_register() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of read_register."}]] [[nodiscard]] auto
       op_read_register(std::uint32_t index) const -> access_op;
@@ -941,11 +1000,13 @@ public:
    *        the machine runs, it is added on the machine's thread at the next block boundary and
    *        this call waits for it, without the GIL.
    * @param at Code address.
+   * @param secure Security state an arrival must run in, None for any.
+   * @throws config_error for @p secure on a machine without TrustZone enabled.
    * @throws machine_running from a handler of this machine during a slice.
    * @throws std::runtime_error from a callback of another machine.
    */
   [[= py::doc{"Count arrivals at an address, added at the next boundary while running."}]] auto
-      add_probe(address at) -> probe_hook;
+      add_probe(address at, std::optional<bool> secure) -> probe_hook;
 
   /**
    * @brief Removes a probe as add_probe() adds one: at once while parked, at the next block

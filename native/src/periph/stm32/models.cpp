@@ -1,12 +1,20 @@
 #include "factories.hpp"
 
+#include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/builtin.hpp>
 
 #include <array>
+#include <expected>
+#include <format>
 #include <mutex>
+#include <optional>
+#include <ranges>
+#include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace popcorn::periph::stm32
 {
@@ -20,7 +28,7 @@ struct builtin
   std::string_view instance_glob = "*";
 };
 
-constexpr std::array<builtin, 26> builtins{
+constexpr std::array<builtin, 28> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"ICACHE", "Icache_v1_0_0*", [](board const& b) { return icache_factory(b.caches); }},
@@ -48,6 +56,115 @@ constexpr std::array<builtin, 26> builtins{
      {"DBGMCU", "", [](board const&) { return dbgmcu_factory(); }},
      {"CRC", "integtest1_v2_0", [](board const&) { return crc_factory(); }},
      {"HASH", "hash1_v2_2*", [](board const&) { return hash_factory(); }},
+     {"SYS", "STM32U5x_sys_*", [](board const&) { return syscfg_factory(); }},
+     {"GTZC", "tzsc1_v2_2*", [](board const&) { return gtzc_factory(); }},
+     }
+};
+
+constexpr auto u5_idau = std::to_array<idau_region>({
+    // Code area, Non-secure flash and SRAM aliases, RM0456 2.2 Table 3.
+    {.start = 0x0000'0000, .end = 0x0c00'0000,   .nsc = false, .exempt = false},
+    // Code area, Secure flash alias, Non-secure callable, RM0456 2.2 Table 3.
+    {.start = 0x0c00'0000, .end = 0x1000'0000,   .nsc = true,  .exempt = false},
+    // SRAM area, Non-secure SRAM aliases, RM0456 2.2 Table 3.
+    {.start = 0x1000'0000, .end = 0x3000'0000,   .nsc = false, .exempt = false},
+    // SRAM area, Secure SRAM aliases, Non-secure callable, RM0456 2.2 Table 3.
+    {.start = 0x3000'0000, .end = 0x4000'0000,   .nsc = true,  .exempt = false},
+    // Peripherals, Non-secure aliases, RM0456 2.2 Table 3.
+    {.start = 0x4000'0000, .end = 0x5000'0000,   .nsc = false, .exempt = false},
+    // Peripherals, Secure aliases, Non-secure callable, RM0456 2.2 Table 3.
+    {.start = 0x5000'0000, .end = 0x6000'0000,   .nsc = true,  .exempt = false},
+    // External memories, Non-secure, RM0456 2.2 Table 3.
+    {.start = 0x6000'0000, .end = 0xe000'0000,   .nsc = false, .exempt = false},
+    // Cortex-M33 private peripheral bus, Non-secure, RM0456 2.2 Figures 3 to 6.
+    {.start = 0xe000'0000, .end = 0xe004'0000,   .nsc = false, .exempt = false},
+    // External PPB, exempt: a board's Non-secure access to the CTI at 0xE0042000 with no SAU
+    // region works, QEMU's SSE-200 IDAU exempts the same range, ARMv8-M B10.2 exempts only
+    // TPIU, ETM and the ROM table.
+    {.start = 0xe004'0000, .end = 0xe010'0000,   .nsc = false, .exempt = true },
+    // System area up to the top of the address space, Non-secure, RM0456 2.2 Figures 3 to 6.
+    {.start = 0xe010'0000, .end = 0x1'0000'0000, .nsc = false, .exempt = false},
+});
+
+struct idau_family
+{
+  std::string_view             part_glob;
+  std::span<idau_region const> ranges;
+};
+
+constexpr std::array<idau_family, 1> idau_maps{
+    {
+     {"STM32U5*", u5_idau},
+     }
+};
+
+struct debug_block
+{
+  std::string_view name;
+  address          start{};
+  std::uint32_t    size{};
+};
+
+// External PPB CoreSight blocks without a model, RM0456 75.5 Tables 797 and 798, 4 KB each.
+// DBGMCU at 0xE0044000 has its own model. 0xE0043000 is reserved and stays unmapped.
+constexpr auto u5_debug_blocks = std::to_array<debug_block>({
+    {.name = "TPIU",          .start = 0xe004'0000, .size = 0x1000},
+    {.name = "ETM",           .start = 0xe004'1000, .size = 0x1000},
+    {.name = "CTI",           .start = 0xe004'2000, .size = 0x1000},
+    {.name = "MCU_ROM_TABLE", .start = 0xe00f'e000, .size = 0x1000},
+    {.name = "CPU_ROM_TABLE", .start = 0xe00f'f000, .size = 0x1000},
+});
+
+struct debug_family
+{
+  std::string_view             part_glob;
+  std::span<debug_block const> blocks;
+};
+
+// The H5 has the same blocks at the same addresses, RM0481 66.5 Tables 870 and 871. Its DBGMCU
+// sits at 0xE00E4000 for the debugger and 0x44024000 for the CPU, outside these ranges.
+constexpr std::array<debug_family, 2> debug_maps{
+    {
+     {"STM32U5*", u5_debug_blocks},
+     {"STM32H5*", u5_debug_blocks},
+     }
+};
+
+constexpr std::array<sram_blocks, 4> u575_mpcbb{
+    {
+     {.controller        = "GTZC1_MPCBB1",
+         .start             = 0x2000'0000,
+         .size              = 0x3'0000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     {.controller        = "GTZC1_MPCBB2",
+         .start             = 0x2003'0000,
+         .size              = 0x1'0000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     {.controller        = "GTZC1_MPCBB3",
+         .start             = 0x2004'0000,
+         .size              = 0x8'0000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     {.controller        = "GTZC2_MPCBB4",
+         .start             = 0x2800'0000,
+         .size              = 0x4000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     }
+};
+
+struct mpcbb_family
+{
+  std::string_view             part_glob;
+  std::span<sram_blocks const> controllers;
+};
+
+constexpr std::array<mpcbb_family, 2> mpcbb_maps{
+    {
+     {"STM32U575*", u575_mpcbb},
+     {"STM32U585*", u575_mpcbb},
      }
 };
 
@@ -91,5 +208,107 @@ auto factories(board const& b, part_description const& part)
     }
   }
   return out;
+}
+
+auto idau_map(part_description const& part) -> std::optional<std::span<idau_region const>>
+{
+  for(auto const& family : idau_maps)
+  {
+    if(glob_match(family.part_glob, part.part))
+    {
+      return family.ranges;
+    }
+  }
+  return std::nullopt;
+}
+
+auto raz_wi_map(part_description const& part) -> std::vector<address_range>
+{
+  auto const family = std::ranges::find_if(
+      debug_maps, [&](debug_family const& f) { return glob_match(f.part_glob, part.part); });
+  if(family == debug_maps.end())
+  {
+    return {};
+  }
+  return family->blocks
+       | std::views::transform([](debug_block const& block) {
+           return address_range{
+               .name = std::string{block.name}, .start = block.start, .size = block.size};
+         })
+       | std::ranges::to<std::vector>();
+}
+
+auto mpcbb_geometry(part_description const& part, std::string_view controller)
+    -> std::optional<sram_blocks>
+{
+  for(auto const& family : mpcbb_maps)
+  {
+    if(glob_match(family.part_glob, part.part))
+    {
+      auto const found =
+          std::ranges::find(family.controllers, controller, &sram_blocks::controller);
+      if(found != family.controllers.end())
+      {
+        return *found;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+auto configure_option_bytes(
+    part_description const& part,
+    option_bytes const&     wanted,
+    core::machine_options&  options) -> std::expected<void, option_refusal>
+{
+  auto const refuse = [](std::string key, std::string expected) {
+    return std::unexpected{
+        option_refusal{.key = std::move(key), .expected = std::move(expected)}
+    };
+  };
+  if(wanted.tzen and not part.core.trustzone)
+  {
+    return refuse(
+        "option_bytes.tzen",
+        std::format("a part with a security extension, {} has none", part.part));
+  }
+  auto const map = idau_map(part);
+  if(wanted.tzen and not map)
+  {
+    return refuse(
+        "option_bytes.tzen",
+        std::format("a part whose family has an IDAU table, {} has none", part.part));
+  }
+  auto const boot = check_option_bytes(part, wanted);
+  if(not boot)
+  {
+    return std::unexpected{boot.error()};
+  }
+  auto const unit = std::ranges::find_if(part.peripherals, [](peripheral_desc const& p) {
+    return p.ip == "flash" and not p.alias_of;
+  });
+  if(options.models.contains(unit->name))
+  {
+    return refuse(
+        "option_bytes",
+        std::format(
+            "the built-in model of {}, not a model of machine_options::models", unit->name));
+  }
+  board with_options;
+  with_options.flash.option_bytes = wanted;
+  auto all                        = factories(with_options, part);
+  auto found                      = all.find(unit->name);
+  if(found == all.end())
+  {
+    return refuse("option_bytes", std::format("a {} the built-in FLASH model serves", unit->name));
+  }
+  options.models.emplace(unit->name, std::move(found->second));
+  if(not options.vector_table)
+  {
+    options.vector_table = *boot;
+  }
+  options.trustzone = wanted.tzen;
+  options.idau = wanted.tzen ? *map | std::ranges::to<std::vector>() : std::vector<idau_region>{};
+  return {};
 }
 }

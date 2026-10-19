@@ -131,6 +131,125 @@ def add_firmware(area: str, name: str, sources: Sequence[str | Path]) -> tuple[P
     return elf_path, elf
 
 
+def trustzone_pair(
+    target_prefix: str,
+    name: str,
+    secure_env: Environment,
+    nonsecure_env: Environment,
+    secure_sources: Sequence[str | Path],
+    nonsecure_sources: Sequence[str | Path],
+    secure_ld: Path,
+    nonsecure_ld: Path,
+    prebuilt: Path,
+) -> tuple[Path, Target, Path, Target]:
+    """Link a secure and Non-secure pair: @p name_s.elf with @p secure_env, compiled with -mcmse
+    and linked with its CMSE import library, and @p name.elf with @p nonsecure_env, linked
+    against that library with the secure ELF's `objcopy -O binary` image in its `.secure_image`
+    section.
+
+    @return The secure ELF path and target, then the Non-secure ones. Each ELF has a
+    firmware-check target against its copy in @p prebuilt, and a third one fails when the
+    Non-secure ELF's `.secure_image` differs from the secure ELF's binary.
+    """
+    project = context.current_project
+    secure_path, secure = checked_program(
+        f"{target_prefix}_s",
+        f"{name}_s",
+        secure_env,
+        secure_sources,
+        PathToken(prefix="-T", path=secure_ld, path_type="absolute"),
+        secure_ld,
+        prebuilt / f"{name}_s.elf",
+    )
+    implib = secure_path.with_name(f"{name}_s_implib.o")
+    secure.private.compile_flags.append("-mcmse")
+    secure.private.link_flags.append(f"-Wl,--cmse-implib,--out-implib={implib}")
+    secure.private.link_libs.append("gcc")
+    image = secure_path.with_name(f"{name}_s_image.o")
+    script = Path(__file__).with_name("secure_image.py")
+    embedded = nonsecure_env.Command(
+        target=image,
+        source=[secure, script],
+        command=[
+            sys.executable,
+            str(script),
+            "arm-none-eabi-objcopy",
+            str(secure_path),
+            str(image),
+            *CPU_FLAGS,
+        ],
+    )
+    nonsecure_path, nonsecure = checked_program(
+        target_prefix,
+        name,
+        nonsecure_env,
+        nonsecure_sources,
+        PathToken(prefix="-T", path=nonsecure_ld, path_type="absolute"),
+        nonsecure_ld,
+        prebuilt / f"{name}.elf",
+    )
+    nonsecure.private.link_flags.extend([str(implib), str(image)])
+    nonsecure.depends(secure)
+    nonsecure.depends(embedded)
+    stamp = nonsecure_path.with_name(f"{name}_image.check")
+    check = nonsecure_env.Command(
+        target=stamp,
+        source=[secure, nonsecure, script],
+        command=[
+            sys.executable,
+            str(script),
+            "--check",
+            "arm-none-eabi-objcopy",
+            str(secure_path),
+            str(nonsecure_path),
+            str(stamp),
+        ],
+    )
+    project.Alias("firmware-check", check)
+    project.Alias(f"{target_prefix}-pair", secure, nonsecure)
+    return secure_path, secure, nonsecure_path, nonsecure
+
+
+def add_trustzone_firmware(
+    area: str,
+    name: str,
+    secure_sources: Sequence[str | Path],
+    nonsecure_sources: Sequence[str | Path],
+    secure_ld: Path,
+    nonsecure_ld: Path,
+) -> tuple[Path, Path, Target | None]:
+    """Build the trustzone_pair tests/firmware/@p area/@p name_s.elf and @p name.elf with the
+    test firmware flags. Without the cross toolchain both come from their committed prebuilt
+    copies.
+
+    @return The secure and the Non-secure ELF paths, and the Non-secure target, None when the
+    prebuilt copies are used.
+    """
+    prebuilt = project_dir / "tests" / "firmware" / area / "prebuilt"
+    env = firmware_env()
+    if env is None:
+        secure_path = prebuilt_only(prebuilt / f"{name}_s.elf")
+        nonsecure_path = prebuilt_only(prebuilt / f"{name}.elf")
+        _declared[area, f"{name}_s"] = (secure_path, None)
+        _declared[area, name] = (nonsecure_path, None)
+        return secure_path, nonsecure_path, None
+
+    secure_path, secure, nonsecure_path, nonsecure = trustzone_pair(
+        f"firmware-{area}-{name}",
+        name,
+        env,
+        env,
+        secure_sources,
+        nonsecure_sources,
+        secure_ld,
+        nonsecure_ld,
+        prebuilt,
+    )
+    _declared[area, f"{name}_s"] = (secure_path, secure)
+    _declared[area, name] = (nonsecure_path, nonsecure)
+    return secure_path, nonsecure_path, nonsecure
+
+
 def firmware(area: str, name: str) -> tuple[Path, Target | None]:
     """The ELF path and target add_firmware returned for @p area/@p name.
 

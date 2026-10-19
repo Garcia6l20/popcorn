@@ -20,7 +20,12 @@ Limits:
   that saves registers only on some paths after its entry, can be misread while pc is on a path
   that skipped the save.
 - Exception frames on the Non-secure stack or with additional state context are scanned: the
-  exact walk stops there and the stack scan takes over.
+  exact walk stops there and the stack scan takes over. Without TrustZone popcorn runs the
+  core Secure, so these frames never occur. With TrustZone they are the frames of an exception
+  taken across the security states.
+- A Non-secure function a Secure BLXNS called returns to FNC_RETURN: the walk goes on in the
+  Secure caller from the frame BLXNS pushed on the Secure stack. The other way, a Secure
+  function an SG veneer entered returning to its Non-secure caller, ends the walk.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from popcorn import _core
+from popcorn._enums import FaultKind
 from popcorn._image import Location
 from popcorn._machine import Machine, stack_access
 from popcorn._stop import Stop
@@ -55,6 +61,11 @@ _CORE_REGISTERS = (
 )
 
 
+_CFSR = 0xE000_ED28
+_SFAR = 0xE000_EDE8
+_SFARVALID = 6
+
+
 def _group(bit: int) -> str:
     if bit < 8:
         return "MMFSR"
@@ -63,8 +74,9 @@ def _group(bit: int) -> str:
     return "UFSR"
 
 
-def fault_bits(cfsr: int, hfsr: int) -> dict[str, tuple[str, ...]]:
-    """Names of the bits set in CFSR, split into MMFSR, BFSR and UFSR, and in HFSR.
+def fault_bits(cfsr: int, hfsr: int, sfsr: int = 0) -> dict[str, tuple[str, ...]]:
+    """Names of the bits set in CFSR, split into MMFSR, BFSR and UFSR, in HFSR, and in the
+    SFSR of a core with TrustZone enabled.
 
     Only registers with a named bit set appear. Names are the Armv8-M ARM's.
     """
@@ -75,6 +87,9 @@ def fault_bits(cfsr: int, hfsr: int) -> dict[str, tuple[str, ...]]:
     for bit in _core.HfsrBit:
         if hfsr >> bit.value & 1:
             groups.setdefault("HFSR", []).append(bit.name.upper())
+    for bit in _core.SfsrBit:
+        if sfsr >> bit.value & 1:
+            groups.setdefault("SFSR", []).append(bit.name.upper())
     return {name: tuple(bits) for name, bits in groups.items()}
 
 
@@ -116,9 +131,12 @@ class Report:
         stop: The stop.
         registers: Core registers when the report was taken, or those the stop carries for a
             fault inside a `Machine.call`.
-        fault_bits: Fault status bits set, by register, when the stop is a fault.
+        fault_bits: Fault status bits set, by register, when the stop is a fault. SFSR only for
+            a SecureFault, whose CFSR is read from the SCS: SFSR and CFSR are sticky, so for a
+            SecureFault the CFSR may hold bits of an earlier fault the handler did not clear.
         frames: The call stack, innermost first.
         ring: The trace ring's last records, or why it could not be read.
+        sfar: SFAR when the fault is a SecureFault whose SFSR has SFARVALID set, else None.
     """
 
     stop: Stop
@@ -126,6 +144,7 @@ class Report:
     fault_bits: Mapping[str, tuple[str, ...]] = field(default_factory=dict[str, tuple[str, ...]])
     frames: tuple[StackFrame, ...] = ()
     ring: str = ""
+    sfar: int | None = None
 
     def text(self) -> str:
         """The report as lines of text."""
@@ -138,11 +157,14 @@ class Report:
             lines.append(f"  detail: {stop.detail}")
         if stop.fault is not None:
             fault = stop.fault
+            status = "SFSR" if fault.kind is FaultKind.SECURE else "CFSR"
             lines.append(
                 f"fault: {fault.kind.name} address {fault.address:#010x} "
-                f"CFSR {fault.cfsr:#010x} HFSR {fault.hfsr:#010x}"
+                f"{status} {fault.cfsr:#010x} HFSR {fault.hfsr:#010x}"
             )
             lines.extend(f"  {name}: {' '.join(bits)}" for name, bits in self.fault_bits.items())
+            if self.sfar is not None:
+                lines.append(f"  SFAR: {self.sfar:#010x}")
         lines.append("registers:")
         names = list(self.registers)
         for row in range(0, len(names), 4):
@@ -196,16 +218,36 @@ def stop_report(
         registers["lr"],
         registers["sp"],
         psp,
+        _secure_sp(machine, registers["xpsr"]),
     )
     frames = tuple(_frame(machine, read32, f) for f in raw)
-    bits = {} if stop.fault is None else fault_bits(stop.fault.cfsr, stop.fault.hfsr)
+    bits: dict[str, tuple[str, ...]] = {}
+    sfar = None
+    if stop.fault is not None:
+        fault = stop.fault
+        secure = fault.kind is FaultKind.SECURE
+        sfsr = fault.cfsr if secure else 0
+        cfsr = machine.mem.u32[_CFSR] if secure else fault.cfsr
+        bits = fault_bits(cfsr, fault.hfsr, sfsr)
+        if sfsr >> _SFARVALID & 1:
+            sfar = machine.mem.u32[_SFAR]
     text = ""
     if ring:
         try:
             text = machine.ring.dump(last=ring_last, collapse=collapse)
         except OSError as error:
             text = f"ring unavailable: {error}"
-    return Report(stop, registers, bits, frames, text)
+    return Report(stop, registers, bits, frames, text, sfar)
+
+
+def _secure_sp(machine: Machine, xpsr: int) -> int | None:
+    """The Secure stack pointer of the core's mode while it runs Non-secure, where a BLXNS
+    pushed its return frame, DDI0553B.z B3.16."""
+    if machine.security_state != "nonsecure":
+        return None
+    regs = machine.reg
+    thread = xpsr & 0x1FF == 0
+    return int(regs.psp_s) if thread and int(regs.control_s) >> 1 & 1 else int(regs.msp_s)
 
 
 def _frame(machine: Machine, read32: Read32, raw: RawFrame) -> StackFrame:

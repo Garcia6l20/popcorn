@@ -21,6 +21,9 @@ class machine_services;
 /** @brief Emulated MCU, defined in `popcorn/core/machine.hpp`. */
 class machine;
 
+/** @brief Options a machine is built with, defined in `popcorn/core/machine.hpp`. */
+struct machine_options;
+
 /** @brief One record of the trace ring, defined in `popcorn/core/trace.hpp`. */
 struct trace_record;
 }

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <iterator>
 #include <print>
 #include <string>
 #include <string_view>
@@ -67,6 +68,7 @@ auto main(int argc, char** argv) -> int
       }
     }
   }
+  std::ranges::copy(popcorn::arch::armv8m::trustzone_registers(), std::back_inserter(registers));
 
   std::ofstream out{argv[1]};
   std::println(
@@ -89,7 +91,11 @@ auto main(int argc, char** argv) -> int
   std::println(out, "class Registers(RegisterBank[Reg]):");
   std::println(
       out, "    \"\"\"Core registers as typed attributes. A core without an FPU has no s0-s31, "
-           "fpscr.\"\"\"");
+           "fpscr. Only a machine with TrustZone enabled has secure and the _s and _ns "
+           "registers. secure, control_s and control_ns, and control with TrustZone enabled, "
+           "are written from a stop only: a "
+           "handler's write raises MachineRunning, since code already translated would keep "
+           "the old value.\"\"\"");
   for(auto const& reg : registers)
   {
     std::println(out);

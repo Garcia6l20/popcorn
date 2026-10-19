@@ -12,8 +12,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <memory>
 #include <optional>
+#include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -474,4 +479,125 @@ TEST_CASE("a serialized snapshot with a foreign event owner or clock domain is r
   CHECK_THROWS_AS(other.target->restore(core::snapshot{data}), popcorn::config_error);
   CHECK_NOTHROW(std::ignore = other.target->snapshot());
   CHECK_NOTHROW(std::ignore = other.run());
+}
+
+namespace
+{
+class storage_model final : public popcorn::periph::model
+{
+public:
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+
+  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
+  {}
+
+  auto on_read(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0;
+  }
+
+  auto on_write(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+
+  void save(std::vector<std::byte>&) const override
+  {
+    ++saves;
+  }
+
+  void load(std::span<std::byte const>) override
+  {
+    ++loads;
+  }
+
+  [[nodiscard]] auto stateless() const -> bool override
+  {
+    return true;
+  }
+
+  mutable int saves{};
+  int         loads{};
+};
+
+auto with_storage_model() -> core::machine_options
+{
+  core::machine_options options;
+  options.models.emplace(
+      "TESTDEV", [](popcorn::periph::model_context&, popcorn::peripheral_desc const&) {
+        return std::make_shared<storage_model>();
+      });
+  return options;
+}
+
+auto without_model_bytes(core::snapshot_data data) -> core::snapshot
+{
+  auto const removed = std::erase_if(
+      data.models, [](core::snapshot_part const& part) { return part.owner == "TESTDEV"; });
+  REQUIRE(removed == 1);
+  return core::snapshot{std::move(data)};
+}
+}
+
+TEST_CASE("a snapshot holds no bytes for a stateless model, restored from its register storage")
+{
+  auto f = fixture{m33(), "snapshot", with_storage_model()};
+  f.target->peripheral("TESTDEV").poke(test_model::data_offset, 0x1234'5678);
+  auto const taken = f.target->snapshot();
+  CHECK(std::ranges::none_of(taken.data().models, [](core::snapshot_part const& part) {
+    return part.owner == "TESTDEV";
+  }));
+  f.target->peripheral("TESTDEV").poke(test_model::data_offset, 0);
+  REQUIRE_NOTHROW(f.target->restore(taken));
+  CHECK(f.target->peripheral("TESTDEV").peek(test_model::data_offset) == 0x1234'5678);
+  auto const& made = dynamic_cast<storage_model&>(*f.target->model("TESTDEV"));
+  CHECK(made.saves == 0);
+  CHECK(made.loads == 0);
+  CHECK_NOTHROW(std::ignore = f.target->snapshot());
+}
+
+TEST_CASE("a save that carries bytes for a stateless model restores without loading them")
+{
+  auto       source = booted();
+  auto const taken  = source.target->snapshot();
+  REQUIRE(std::ranges::any_of(taken.data().models, [](core::snapshot_part const& part) {
+    return part.owner == "TESTDEV";
+  }));
+  auto f = fixture{m33(), "snapshot", with_storage_model()};
+  REQUIRE_NOTHROW(f.target->restore(core::snapshot{taken.data()}));
+  auto const& made = dynamic_cast<storage_model&>(*f.target->model("TESTDEV"));
+  CHECK(made.loads == 0);
+  CHECK_NOTHROW(std::ignore = f.target->snapshot());
+}
+
+TEST_CASE("a save with no bytes for a model with state is refused")
+{
+  auto       f     = booted();
+  auto const taken = without_model_bytes(f.target->snapshot().data());
+  try
+  {
+    f.target->restore(taken);
+    FAIL("restored a model with state from storage alone");
+  }
+  catch(popcorn::config_error const& refused)
+  {
+    CHECK(refused.key() == "models.TESTDEV");
+  }
+  CHECK_NOTHROW(std::ignore = f.target->snapshot());
 }

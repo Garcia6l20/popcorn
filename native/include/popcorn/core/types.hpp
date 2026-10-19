@@ -81,7 +81,8 @@ enum class[[= reflex::derive{reflex::Format}]] stop_reason
   contract,
 };
 
-/** @brief Class of processor fault, arch-neutral (no security-state or FP-frame notions). */
+/** @brief Class of processor fault, arch-neutral but for secure: an Arm SecureFault, raised only
+ *         by a core with TrustZone on. */
 enum class[[= reflex::derive{reflex::Format}]] fault_kind
 {
   hard,
@@ -90,6 +91,7 @@ enum class[[= reflex::derive{reflex::Format}]] fault_kind
   usage,
   unmapped,
   invalid,
+  secure,
 };
 
 /** @brief Bus master that initiated a memory or register access. */
@@ -98,6 +100,28 @@ enum class[[= reflex::derive{reflex::Format}]] initiator
   cpu,
   dma,
   debugger,
+};
+
+/**
+ * @brief Attributes of one bus transaction: the master that made it, its security attribute,
+ *        AHB HNONSEC inverted, and its privilege, AHB HPROT[1]. The defaults are what every
+ *        access means when the master names no attribute: Secure and privileged.
+ */
+struct bus_attrs
+{
+  /** @brief Bus master that made the access. */
+  initiator by{initiator::cpu};
+  /** @brief Whether the transaction is Secure. */
+  bool secure{true};
+  /** @brief Whether the transaction is privileged. */
+  bool privileged{true};
+  /** @brief For an initiator::debugger access: whether the bus firewall filters it as a DAP
+   * access with these attributes. Clear, a debugger access is never filtered. Ignored for the
+   * other initiators, which are always filtered. */
+  bool filtered{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(bus_attrs, bus_attrs) -> bool = default;
 };
 
 /**
@@ -193,7 +217,7 @@ struct fault_info
   fault_kind kind{};
   /** @brief Faulting data or instruction address, 0 when the fault has none. */
   address fault_address{};
-  /** @brief Primary fault status register: Arm CFSR, RISC-V mcause. */
+  /** @brief Primary fault status register: Arm CFSR, SFSR for a SecureFault, RISC-V mcause. */
   std::uint32_t status{};
   /** @brief Secondary fault register: Arm HFSR, RISC-V mtval. */
   std::uint32_t detail{};

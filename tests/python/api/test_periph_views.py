@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import popcorn
 import pytest
 from popcorn import _core
 
-from .conftest import Machines
+from .conftest import Machines, StorageModel
 
 TESTDEV = 0x4001_0000
 
 
 def test_fields_read_and_write_as_bit_slices(machines: Machines) -> None:
-    m = machines()
+    m = machines(models={"TESTDEV": StorageModel})
     register = m.periph.TESTDEV.W_MODIFY
     register.F = 0x5A
     assert register.F == 0x5A
@@ -25,7 +27,7 @@ def test_fields_read_and_write_as_bit_slices(machines: Machines) -> None:
 
 
 def test_writes_land_in_the_register_file(machines: Machines) -> None:
-    m = machines()
+    m = machines(models={"TESTDEV": StorageModel})
     m.periph.TESTDEV.RW.VAL = 0xCAFE_F00D
     assert m.periph.TESTDEV.RW.value == 0xCAFE_F00D
     m.periph.TESTDEV.ALT_B.LOW = 0xBEEF
@@ -54,7 +56,7 @@ def test_unknown_names_and_wide_values_are_refused(machines: Machines) -> None:
 
 
 def test_sub_word_registers_keep_their_neighbours(machines: Machines) -> None:
-    m = machines()
+    m = machines(models={"TESTDEV": StorageModel})
     m.periph.TESTDEV.RW.value = 0x1122_3344
     handle = _core.MachineHandle(m.description, _core.MachineConfig())
     handle.poke("TESTDEV", 8, 32, 0x1122_3344)
@@ -69,7 +71,7 @@ def test_sub_word_registers_keep_their_neighbours(machines: Machines) -> None:
 
 
 def test_bus_reads_and_writes_apply_the_register_effects(machines: Machines) -> None:
-    m = machines()
+    m = machines(models={"TESTDEV": StorageModel})
     clear = m.periph.TESTDEV.W_ONE_TO_CLEAR
     clear.poke(0xFF)
     clear.write(0x0F)
@@ -80,3 +82,42 @@ def test_bus_reads_and_writes_apply_the_register_effects(machines: Machines) -> 
     assert on_read.value == 0x55
     assert on_read.read() == 0x55
     assert on_read.value == 0
+
+
+def test_a_host_access_to_an_unmodelled_register_is_a_model_error_and_poke_still_stores(
+    machines: Machines,
+) -> None:
+    """TESTDEV has no model: every bus access of a host view raises ModelError naming the
+    register, strict or not, while the storage peeks and pokes still reach it."""
+    m = machines()
+    device = m.periph.TESTDEV
+    rw = device.RW.offset
+
+    def store() -> None:
+        m.mem.u32[TESTDEV + rw] = 1
+
+    def assign() -> None:
+        device.RW.value = 1
+
+    def field() -> None:
+        device.RW.VAL = 1
+
+    accesses: list[Callable[[], object]] = [
+        lambda: m.mem.u32[TESTDEV + rw],
+        lambda: m.mem.read(TESTDEV, 16),
+        lambda: m.mem.write(TESTDEV + rw, b"\0" * 4),
+        lambda: device.RW.read(),
+        lambda: device.RW.write(1),
+        store,
+        assign,
+        field,
+    ]
+    for access in accesses:
+        with pytest.raises(popcorn.ModelError) as caught:
+            access()
+        assert caught.value.peripheral == "TESTDEV"
+    with pytest.raises(popcorn.ModelError) as caught:
+        _ = m.mem.u32[TESTDEV + rw]
+    assert (caught.value.register, caught.value.offset) == ("RW", rw)
+    device.RW.poke(0x55)
+    assert device.RW.value == 0x55

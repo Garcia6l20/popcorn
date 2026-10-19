@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace
@@ -185,4 +186,56 @@ TEST_CASE("every reset kind restarts the clock at instruction 0 and time 0 and k
     CHECK(target.virtual_clock().core_hz() == 4'000'000);
     CHECK(target.mem().read(0x2000'1000, 4) == 0x600d'f00du);
   }
+}
+
+namespace
+{
+auto refused_key(popcorn::part_description const& description, core::machine_options options)
+    -> std::string
+{
+  try
+  {
+    core::machine const built{
+        description, popcorn::testing::test_arch_factory(), std::move(options)};
+  }
+  catch(popcorn::config_error const& error)
+  {
+    return error.key();
+  }
+  return {};
+}
+}
+
+TEST_CASE("machine_options::trustzone needs a core with a security extension")
+{
+  auto description = m33();
+  REQUIRE_FALSE(description.core.trustzone);
+  core::machine_options options;
+  options.trustzone = true;
+  CHECK(refused_key(description, options) == "trustzone");
+  description.core.trustzone = true;
+  CHECK(refused_key(description, options).empty());
+}
+
+TEST_CASE("machine_options::idau needs trustzone and sorted ranges that do not overlap")
+{
+  auto description           = m33();
+  description.core.trustzone = true;
+  core::machine_options options;
+  options.idau = {
+      {.start = 0x0000'0000, .end = 0x1000'0000, .nsc = false, .exempt = false},
+      {.start = 0x1000'0000, .end = 0x2000'0000, .nsc = true,  .exempt = false},
+  };
+  CHECK(refused_key(description, options) == "idau");
+  options.trustzone = true;
+  CHECK(refused_key(description, options).empty());
+  auto unsorted = options;
+  std::swap(unsorted.idau[0], unsorted.idau[1]);
+  CHECK(refused_key(description, unsorted) == "idau[1]");
+  auto overlapping          = options;
+  overlapping.idau[1].start = 0x0fff'0000;
+  CHECK(refused_key(description, overlapping) == "idau[1]");
+  auto empty        = options;
+  empty.idau[0].end = 0;
+  CHECK(refused_key(description, empty) == "idau[0]");
 }

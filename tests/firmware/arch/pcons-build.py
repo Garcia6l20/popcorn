@@ -152,6 +152,12 @@ ENTRIES = {
         "log_buf",
         "log_len",
     ),
+    "cmse": (
+        "cmse_call",
+        "cmse_callee",
+        "log_buf",
+        "log_len",
+    ),
     "rtos": (
         "rtos_run",
         "rtos_crit",
@@ -196,6 +202,9 @@ for name, entries in ENTRIES.items():
     if target is not None:
         target.private.link_flags.append(SECTION_BOUNDS)
         target.private.link_flags.extend(f"-Wl,--undefined={entry}" for entry in entries)
+        if name == "cmse":
+            target.private.compile_flags.append("-mcmse")
+            target.private.link_flags.extend(("-Wl,--undefined=__gnu_cmse_nonsecure_call", "-lgcc"))
 
 VARIANT_FLAGS = {
     "m4": ("-mcpu=cortex-m4", "-mfpu=fpv4-sp-d16"),

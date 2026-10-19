@@ -70,8 +70,9 @@ void machine::run_state::attach_peripherals()
     }
     auto slot = std::make_unique<peripheral_slot>(unit, owner.scheduler_, at);
     fill_trace_ids(*slot, owner.description_, at);
-    slot->irqs.reserve(unit.irqs.size());
-    for(auto const source : unit.irqs)
+    auto const sources = irq_sources(owner.description_, unit, owner.options_.trustzone);
+    slot->irqs.reserve(sources.size());
+    for(auto const source : sources)
     {
       slot->irqs.push_back(periph::irq_line{lines, source});
     }
@@ -88,13 +89,22 @@ void machine::run_state::attach_peripherals()
             .peers              = peers,
             .part               = owner.description_,
             .strict_peripherals = owner.options_.strict_peripherals,
+            .trustzone          = owner.options_.trustzone,
         });
     auto const configured = owner.options_.models.find(unit.name);
     auto const factory =
         configured != owner.options_.models.end() ? configured->second : periph::find_model(unit);
     if(factory)
     {
-      slot->model = factory(*slot->context, unit);
+      auto* const installed = firewall;
+      building              = &unit;
+      slot->model           = factory(*slot->context, unit);
+      building              = nullptr;
+      if(not slot->model and firewall != installed)
+      {
+        firewall = installed;
+        throw model_error(unit.name, "firewall", 0);
+      }
     }
     if(slot->model)
     {

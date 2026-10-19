@@ -1,5 +1,6 @@
 #include "arch_fixture.hpp"
 
+#include "../../../native/src/core/machine_impl.hpp"
 #include "cortex_m.hpp"
 #include "state.hpp"
 
@@ -15,6 +16,7 @@
 
 #include <unicorn/unicorn.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <exception>
@@ -514,6 +516,10 @@ TEST_CASE("instructions_between counts Thumb instructions of 16 and 32 bits")
   CHECK_FALSE(f.module->instructions_between(at + 2, at).has_value());
   CHECK_FALSE(f.module->instructions_between(at, at + 3).has_value());
   CHECK_FALSE(f.module->instructions_between(0xF000'0000, 0xF000'0004).has_value());
+  CHECK(f.module->instructions_between(at, at + 2) == 1u);
+  CHECK(f.module->instructions_between(at, at + 8) == 3u);
+  CHECK(f.module->instructions_between(at, at + 6) == 2u);
+  CHECK(f.module->instructions_between(at, at) == 0u);
 }
 
 TEST_CASE("ends_block_before tells a block-ending instruction from one the block runs past")
@@ -545,4 +551,103 @@ TEST_CASE("ends_block_before tells a block-ending instruction from one the block
   CHECK_FALSE(ends(at + 2, at).has_value());
   CHECK_FALSE(ends(at, at + 3).has_value());
   CHECK_FALSE(ends(0xF000'0000, 0xF000'0004).has_value());
+}
+
+namespace
+{
+constexpr address testdev = 0x4001'0000;
+
+auto shared_testdev() -> popcorn::part_description
+{
+  return m33_with([](popcorn::part_description& desc) {
+    auto own = std::ranges::find(
+        desc.peripherals, std::string_view{"TESTDEV"}, &popcorn::peripheral_desc::name);
+    own->size = 0x100;
+    auto next = *std::ranges::find(
+        desc.peripherals, std::string_view{"UNMODELLED"}, &popcorn::peripheral_desc::name);
+    next.name = "NEIGHBOUR";
+    next.base = testdev + 0x100;
+    next.size = 0x100;
+    desc.peripherals.push_back(std::move(next));
+  });
+}
+
+struct seen_attrs
+{
+  bool secure{};
+  bool privileged{};
+
+  friend auto operator==(seen_attrs const&, seen_attrs const&) -> bool = default;
+};
+
+auto seen(uc_mem_attrs attrs) -> seen_attrs
+{
+  return {.secure = attrs.secure, .privileged = attrs.privileged};
+}
+
+void check_access_attrs(popcorn::part_description desc)
+{
+  arch_fixture      f{std::move(desc), "scs", {}};
+  constexpr address at = 0x2008'0000;
+  for(auto const& [offset, half] : std::initializer_list<std::pair<address, std::uint32_t>>{
+          {0x00, 0x6011},
+          {0x02, 0x6818},
+          {0x04, 0xbe01},
+          {0x10, 0x6810},
+          {0x12, 0x6021},
+          {0x14, 0xbe01},
+  })
+  {
+    REQUIRE(f.target->mem().write(at + offset, 2, half));
+  }
+  f.set("r1", 0);
+  f.set("r2", testdev);
+  f.set("r3", 0xE000'ED00);
+  f.set("r4", 0xE000'E400);
+  for(auto const entry : {at, at + 0x10})
+  {
+    for(auto const control : {0u, 1u})
+    {
+      CAPTURE(entry);
+      CAPTURE(control);
+      f.set("control", control);
+      seen_attrs const expected{.secure = true, .privileged = control == 0};
+      f.set("pc", entry | 1);
+      REQUIRE(f.run_to_stop({.max_instructions = popcorn::icount{3}}).reason == stop_reason::user);
+      CHECK(seen(core::machine_internals::access(*f.target)) == expected);
+      CHECK(seen(f.module->access_attrs()) == expected);
+    }
+  }
+}
+}
+
+TEST_CASE("MMIO callbacks keep the bus attributes of the CPU access, privilege from CONTROL.nPRIV")
+{
+  SUBCASE("own window")
+  {
+    check_access_attrs(m33());
+  }
+  SUBCASE("shared page")
+  {
+    check_access_attrs(shared_testdev());
+  }
+}
+
+TEST_CASE("a host read and write of the system space carry Secure privileged attributes")
+{
+  arch_fixture      f{m33(), "scs", {}};
+  constexpr address at = 0x2008'0000;
+  REQUIRE(f.target->mem().write(at, 2, 0x6818));
+  REQUIRE(f.target->mem().write(at + 2, 2, 0xbe01));
+  f.set("r3", 0xE000'ED00);
+  f.set("control", 1);
+  f.set("pc", at | 1);
+  REQUIRE(f.run_to_stop({.max_instructions = popcorn::icount{2}}).reason == stop_reason::user);
+  REQUIRE(seen(f.module->access_attrs()) == seen_attrs{.secure = true, .privileged = false});
+  REQUIRE(f.target->mem().read(0xE000'ED00, 4).has_value());
+  CHECK(seen(f.module->access_attrs()) == seen_attrs{.secure = true, .privileged = true});
+  f.set("pc", at | 1);
+  REQUIRE(f.run_to_stop({.max_instructions = popcorn::icount{2}}).reason == stop_reason::user);
+  REQUIRE(f.target->mem().write(0xE000'E400, 4, 0));
+  CHECK(seen(f.module->access_attrs()) == seen_attrs{.secure = true, .privileged = true});
 }

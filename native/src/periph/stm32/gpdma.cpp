@@ -2,6 +2,7 @@
 #include "dma_data.hpp"
 #include "factories.hpp"
 #include "gpdma_requests.hpp"
+#include "gtzc.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -115,6 +116,8 @@ struct channel_fields
   std::array<field_ref, 7>    clear;
   std::array<field_ref, 7>    interrupt_enable;
   field_ref                   packing;
+  std::optional<field_ref>    source_secure;
+  std::optional<field_ref>    destination_secure;
   std::optional<field_ref>    source_exchange;
   std::optional<field_ref>    byte_exchange;
   std::optional<field_ref>    half_exchange;
@@ -198,6 +201,19 @@ enum class reach_kind : std::uint8_t
 class gpdma;
 
 /**
+ * @brief What a channel keeps for one transfer under TrustZone, never saved: the attributes of
+ *        its source and destination beats and the firewall grant of each side.
+ */
+struct transfer_cache
+{
+  bool               valid{};
+  popcorn::bus_attrs source{};
+  popcorn::bus_attrs destination{};
+  core::memory_grant source_grant{};
+  core::memory_grant destination_grant{};
+};
+
+/**
  * @brief GPDMA1 and LPDMA1 of the STM32U5. GPDMA1, RM0456 section 17: 16 channels, software or
  *        hardware requested, 1D transfers in bursts, block and linked-list transfers, half and
  *        complete transfer, error, suspend and reset. Each burst is an event a transfer latency
@@ -250,10 +266,37 @@ class gpdma;
  *        the SRD SRAM regions of the description and the AHB3 and APB3 windows with their
  *        secure aliases, and raises a model_error under strict_peripherals. No DTEF or ULEF is
  *        set.
+ *
+ *        TrustZone, RM0456 17.4.14, 17.4.15, 17.8.1 to 17.8.5 and 18.8: `SECCFGR.SECx` makes
+ *        channel x Secure, `PRIVCFGR.PRIVx` privileged. A Non-secure access to a register of a
+ *        Secure channel, or to `SMISR`, is RAZ/WI with an illegal access event, an unprivileged
+ *        access to a register of a privileged channel RAZ/WI. `SECCFGR` takes Secure privileged
+ *        writes, a Non-secure one ignored with the event, `PRIVCFGR` privileged writes, a PRIVx of
+ *        a Secure channel Secure ones only. Both read for every transaction, ignore the bits of
+ *        a channel locked by `RCFGLOCKR` or enabled. `RCFGLOCKR` bits are set-only by a Secure
+ *        privileged write until a reset. `MISR` shows the Non-secure channels, `SMISR` the
+ *        Secure ones, each hiding privileged channels from an unprivileged read. Every transfer
+ *        of a Non-secure channel, data and linked-list item, is a Non-secure transaction. A
+ *        Secure channel reads its source with `CxTR1.SSEC`, writes its destination with
+ *        `CxTR1.DSEC` and loads its linked-list items Secure. SSEC and DSEC take Secure writes
+ *        to a Secure channel only, a linked-list load of a Non-secure channel keeps them, and
+ *        they clear when the channel turns Non-secure. A transfer is
+ *        privileged when its channel is. A refused transfer is what the bus firewall decides:
+ *        a Non-secure read of Secure SRAM returns 0 and a write to it is dropped, with the
+ *        firewall's event and no DTEF. A channel derives its beat attributes once per transfer
+ *        and keeps a core::memory_grant per side, so beats inside an allowed MPCBB block or
+ *        page skip the firewall. Both drop at the channel's start, a CxTR1 write or load, a
+ *        SECCFGR or PRIVCFGR write, a reset and a restore, and the machine voids the grants at
+ *        every memory policy change. A peek or poke of `SECCFGR`, `PRIVCFGR` or `CxTR1` runs
+ *        no handler, so it reaches the channel at its next transfer. A deviation: `CxTR1` takes
+ *        writes while its channel is enabled, where RM0456 17.8.10 makes it read-only. Under
+ *        TZEN=0 `SECCFGR`, `PRIVCFGR` and `SMISR` are storage, `RCFGLOCKR` ignores writes,
+ *        RM0456 17.8.3, and transfers keep the attributes of a machine without TrustZone.
  */
 class gpdma final : public dispatch_model<gpdma, gpdma_state>,
                     public dma_controller,
-                    public core_hold_listener
+                    public core_hold_listener,
+                    public trustzone_aware
 {
 public:
   gpdma(
@@ -266,12 +309,20 @@ public:
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   void               on_request(std::uint32_t request, bool level) override;
   void               on_core_hold(bool held) override;
+  void               load(std::span<std::byte const> in) override;
   [[nodiscard]] auto request_of(std::string_view signal) const
       -> std::optional<std::uint32_t> override;
 
   template <std::size_t Ch> void control_written(std::uint32_t old, std::uint32_t now);
   template <std::size_t Ch> void clear_written(std::uint32_t old, std::uint32_t now);
+  template <std::size_t Ch> void attributes_written(std::uint32_t old, std::uint32_t now);
   void                           plain_written(std::uint32_t old, std::uint32_t now);
+  void                           security_written(std::uint32_t old, std::uint32_t now);
+  void                           privilege_written(std::uint32_t old, std::uint32_t now);
+  void                           lock_written(std::uint32_t old, std::uint32_t now);
+  [[nodiscard]] auto             secure_function() const -> bool override;
+  [[nodiscard]] auto             secure_word() const -> std::uint32_t override;
+  [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
 
 private:
   [[nodiscard]] auto active(std::size_t ch) const -> bool;
@@ -297,20 +348,37 @@ private:
   auto               requesters() -> std::span<dma_requester* const>;
   [[nodiscard]] auto or_zero(std::optional<field_ref> field) const -> std::uint32_t;
   [[nodiscard]] auto channel_reg(std::size_t ch, std::string_view reg) const -> std::string;
+  [[nodiscard]] auto channel_secure(std::size_t ch) const -> bool;
+  [[nodiscard]] auto channel_privileged(std::size_t ch) const -> bool;
+  [[nodiscard]] auto transfer(std::size_t ch, std::optional<field_ref> secure) const
+      -> popcorn::bus_attrs;
+  [[nodiscard]] auto cached(std::size_t ch) -> transfer_cache&;
+  void               drop_caches();
+  [[nodiscard]] auto busy_channels() const -> std::uint32_t;
+  void               raise_illegal(bool raise, initiator by);
 
-  dma_layout const&                        layout_;
-  register_file&                           regs_;
-  std::array<channel_fields, max_channels> ch_{};
-  reg_ref                                  misr_;
-  std::array<field_ref, max_channels>      masked_{};
-  core::clock_domain                       hclk_;
-  std::array<bool, 1>                      unsupported_logged_{};
-  bool                                     stopped_clock_logged_{};
-  std::vector<dma_requester*>              requesters_;
-  bool                                     requesters_resolved_{};
-  bool                                     freeze_logged_{};
-  std::vector<address_range>               reach_;
-  std::array<std::uint8_t, max_channels>   reach_logged_{};
+  dma_layout const&                                   layout_;
+  register_file&                                      regs_;
+  std::array<channel_fields, max_channels>            ch_{};
+  reg_ref                                             misr_;
+  std::array<field_ref, max_channels>                 masked_{};
+  core::clock_domain                                  hclk_;
+  std::array<bool, 1>                                 unsupported_logged_{};
+  bool                                                stopped_clock_logged_{};
+  std::vector<dma_requester*>                         requesters_;
+  bool                                                requesters_resolved_{};
+  bool                                                freeze_logged_{};
+  std::vector<address_range>                          reach_;
+  std::array<std::uint8_t, max_channels>              reach_logged_{};
+  reg_ref                                             lock_;
+  reg_ref                                             secure_;
+  reg_ref                                             privilege_;
+  reg_ref                                             secure_misr_;
+  std::array<field_ref, max_channels>                 secure_masked_{};
+  std::vector<std::pair<std::uint32_t, std::uint8_t>> channel_words_;
+  std::optional<std::size_t>                          unit_;
+  illegal_event                                       illegal_;
+  std::array<transfer_cache, max_channels>            cache_{};
 };
 
 template <std::size_t... Ch>
@@ -335,7 +403,7 @@ auto channel_entries(
         add(prefix + "FCR", &gpdma::clear_written<Ch>);
         add(prefix + "SR", &gpdma::plain_written);
         add(prefix + "CR", &gpdma::control_written<Ch>);
-        add(prefix + "TR1", &gpdma::plain_written);
+        add(prefix + "TR1", &gpdma::attributes_written<Ch>);
         add(prefix + "TR2", &gpdma::plain_written);
         add(prefix + "BR1", &gpdma::plain_written);
         add(prefix + "SAR", &gpdma::plain_written);
@@ -367,8 +435,29 @@ gpdma::gpdma(
     dma_layout const&                   layout,
     std::span<write_entry<gpdma> const> table)
     : dispatch_model{ctx, desc, layout.ip, table}, layout_{layout}, regs_{ctx.regs},
-      misr_{reg(std::format("{}_MISR", layout.ip))}, hclk_{ctx.clock.domain("hclk")}
+      misr_{reg(std::format("{}_MISR", layout.ip))}, hclk_{ctx.clock.domain("hclk")},
+      lock_{reg(std::format("{}_RCFGLOCKR", layout.ip))},
+      secure_{reg(std::format("{}_SECCFGR", layout.ip))},
+      privilege_{reg(std::format("{}_PRIVCFGR", layout.ip))},
+      secure_misr_{reg(std::format("{}_SMISR", layout.ip))}, unit_{unit_named(ctx.part, desc.name)}
 {
+  {
+    auto const lock_name = std::format("{}_RCFGLOCKR", layout.ip);
+    auto const always    = std::array<write_entry<gpdma>, 1>{{{lock_name, &gpdma::lock_written}}};
+    bind(always);
+  }
+  if(ctx.trustzone)
+  {
+    auto const secure_name    = std::format("{}_SECCFGR", layout.ip);
+    auto const privilege_name = std::format("{}_PRIVCFGR", layout.ip);
+    auto const masked_name    = std::format("{}_SMISR", layout.ip);
+    auto const extra          = std::array<write_entry<gpdma>, 3>{
+        {{secure_name, &gpdma::security_written},
+         {privilege_name, &gpdma::privilege_written},
+         {masked_name, &gpdma::plain_written}}
+    };
+    bind(extra);
+  }
   if(layout_.srd_only)
   {
     for(auto const& region : ctx.part.regions)
@@ -428,6 +517,11 @@ gpdma::gpdma(
     c.source_exchange       = optional(p + "TR1", "SBX");
     c.byte_exchange         = optional(p + "TR1", "DBX");
     c.half_exchange         = optional(p + "TR1", "DHX");
+    if(ctx.trustzone)
+    {
+      c.source_secure      = field(p + "TR1", "SSEC");
+      c.destination_secure = field(p + "TR1", "DSEC");
+    }
     for(std::size_t f = 0; f < flag_names.size(); ++f)
     {
       c.flag[f]             = field(p + "SR", flag_names[f]);
@@ -453,13 +547,25 @@ gpdma::gpdma(
           .destination_burst           = field(p + "TR1", "DBL_1"),
       };
     }
-    c.line      = &irq(std::format("{}_Channel{}_IRQn", desc.name, ch));
-    masked_[ch] = field(std::format("{}_MISR", layout_.ip), std::format("MIS{}", ch));
+    c.line             = &irq(std::format("{}_Channel{}_IRQn", desc.name, ch));
+    masked_[ch]        = field(std::format("{}_MISR", layout_.ip), std::format("MIS{}", ch));
+    secure_masked_[ch] = field(std::format("{}_SMISR", layout_.ip), std::format("MIS{}", ch));
+    for(auto const* const at :
+        {&c.lbar, &c.fcr, &c.sr, &c.cr, &c.tr1, &c.tr2, &c.br1, &c.sar, &c.dar, &c.llr})
+    {
+      channel_words_.emplace_back(at->offset, static_cast<std::uint8_t>(ch));
+    }
+    if(c.two_d)
+    {
+      channel_words_.emplace_back(c.two_d->tr3.offset, static_cast<std::uint8_t>(ch));
+      channel_words_.emplace_back(c.two_d->br2.offset, static_cast<std::uint8_t>(ch));
+    }
   }
 }
 
 void gpdma::reset(register_file& regs, reset_kind)
 {
+  drop_caches();
   for(auto const& name : claims())
   {
     regs.poke(reg(name).offset, describe(name).reset);
@@ -487,6 +593,176 @@ void gpdma::reset(register_file& regs, reset_kind)
 
 void gpdma::plain_written(std::uint32_t, std::uint32_t)
 {}
+
+template <std::size_t Ch> void gpdma::attributes_written(std::uint32_t, std::uint32_t)
+{
+  cache_[Ch] = {};
+}
+
+void gpdma::drop_caches()
+{
+  cache_ = {};
+}
+
+void gpdma::load(std::span<std::byte const> in)
+{
+  dispatch_model::load(in);
+  drop_caches();
+}
+
+auto gpdma::cached(std::size_t ch) -> transfer_cache&
+{
+  auto& cache = cache_[ch];
+  if(not cache.valid)
+  {
+    cache = {
+        .valid       = true,
+        .source      = transfer(ch, ch_[ch].source_secure),
+        .destination = transfer(ch, ch_[ch].destination_secure)};
+  }
+  return cache;
+}
+
+void gpdma::security_written(std::uint32_t old, std::uint32_t)
+{
+  drop_caches();
+  for(std::size_t ch = 0; ch < layout_.channels; ++ch)
+  {
+    auto const& c = ch_[ch];
+    if(c.source_secure and (old >> ch & 1u) != 0 and not channel_secure(ch))
+    {
+      update(regs_, *c.source_secure, 0);
+      update(regs_, *c.destination_secure, 0);
+    }
+    interrupts(ch);
+  }
+}
+
+void gpdma::privilege_written(std::uint32_t, std::uint32_t)
+{
+  drop_caches();
+  for(std::size_t ch = 0; ch < layout_.channels; ++ch)
+  {
+    interrupts(ch);
+  }
+}
+
+void gpdma::lock_written(std::uint32_t old, std::uint32_t now)
+{
+  regs_.poke(lock_.offset, old | now);
+}
+
+auto gpdma::secure_word() const -> std::uint32_t
+{
+  return ctx_.trustzone ? regs_.peek(secure_.offset) : 0;
+}
+
+auto gpdma::secure_function() const -> bool
+{
+  return secure_word() != 0;
+}
+
+auto gpdma::channel_secure(std::size_t ch) const -> bool
+{
+  return (secure_word() >> ch & 1u) != 0;
+}
+
+auto gpdma::channel_privileged(std::size_t ch) const -> bool
+{
+  return (regs_.peek(privilege_.offset) >> ch & 1u) != 0;
+}
+
+auto gpdma::transfer(std::size_t ch, std::optional<field_ref> secure) const -> popcorn::bus_attrs
+{
+  if(not ctx_.trustzone)
+  {
+    return {.by = initiator::dma};
+  }
+  auto const in_secure = channel_secure(ch);
+  return {
+      .by         = initiator::dma,
+      .secure     = in_secure and (not secure or get(regs_, *secure) != 0),
+      .privileged = channel_privileged(ch)};
+}
+
+auto gpdma::busy_channels() const -> std::uint32_t
+{
+  std::uint32_t busy = 0;
+  for(std::size_t ch = 0; ch < layout_.channels; ++ch)
+  {
+    if(get(regs_, ch_[ch].enable) != 0)
+    {
+      busy |= std::uint32_t{1} << ch;
+    }
+  }
+  return busy;
+}
+
+void gpdma::raise_illegal(bool raise, initiator by)
+{
+  if(raise and unit_)
+  {
+    illegal_.raise(ctx_.peers, *unit_, by);
+  }
+}
+
+auto gpdma::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
+{
+  auto const all = ~std::uint32_t{};
+  if(not ctx_.trustzone)
+  {
+    return word == lock_.offset ? bus_guard::both(all) : bus_guard{};
+  }
+  auto const secure     = regs_.peek(secure_.offset);
+  auto const privileged = regs_.peek(privilege_.offset);
+  auto const frozen     = regs_.peek(lock_.offset) | busy_channels();
+  if(word == secure_.offset)
+  {
+    raise_illegal(write and not ctx.secure, ctx.by);
+    return {.wi = not ctx.secure or not ctx.privileged ? all : frozen};
+  }
+  if(word == privilege_.offset)
+  {
+    return {.wi = not ctx.privileged ? all : frozen | (ctx.secure ? 0 : secure)};
+  }
+  if(word == lock_.offset)
+  {
+    raise_illegal(write and not ctx.secure, ctx.by);
+    return {.wi = ctx.secure and ctx.privileged ? 0 : all};
+  }
+  auto const hidden_privileged = ctx.privileged ? 0 : privileged;
+  if(word == misr_.offset)
+  {
+    return bus_guard::both(hidden_privileged);
+  }
+  if(word == secure_misr_.offset)
+  {
+    raise_illegal(not ctx.secure, ctx.by);
+    return bus_guard::both(ctx.secure ? hidden_privileged : all);
+  }
+  auto const found =
+      std::ranges::find(channel_words_, word, &std::pair<std::uint32_t, std::uint8_t>::first);
+  if(found == channel_words_.end())
+  {
+    return {};
+  }
+  auto const ch = found->second;
+  if(not ctx.secure and (secure >> ch & 1u) != 0)
+  {
+    raise_illegal(true, ctx.by);
+    return bus_guard::both(all);
+  }
+  if(not ctx.privileged and (privileged >> ch & 1u) != 0)
+  {
+    return bus_guard::both(all);
+  }
+  auto const& c = ch_[ch];
+  if(c.source_secure and word == c.tr1.offset and ((secure >> ch & 1u) == 0 or not ctx.secure))
+  {
+    return bus_guard::both(c.source_secure->mask() | c.destination_secure->mask());
+  }
+  return {};
+}
 
 auto gpdma::or_zero(std::optional<field_ref> field) const -> std::uint32_t
 {
@@ -590,6 +866,7 @@ void gpdma::start(std::size_t ch)
     warn_once(ch, unsupported::link_step);
   }
   update(regs_, c.idle, 0);
+  cache_[ch] = {};
   if(get(regs_, c.bytes) == 0)
   {
     auto const mode = get(regs_, c.event_mode);
@@ -660,7 +937,15 @@ auto gpdma::deliver(std::size_t ch, std::uint32_t value) -> bool
   auto const bytes  = or_zero(c.byte_exchange) != 0;
   auto const halves = or_zero(c.half_exchange) != 0;
   auto const data   = exchange_destination(value, dw, bytes, halves);
-  if(not ctx_.services.write(destination, dw, data, initiator::dma))
+  if(ctx_.trustzone)
+  {
+    auto& cache = cached(ch);
+    if(not ctx_.services.write(destination, dw, data, cache.destination, cache.destination_grant))
+    {
+      return false;
+    }
+  }
+  else if(not ctx_.services.write(destination, dw, data, transfer(ch, c.destination_secure)))
   {
     return false;
   }
@@ -726,7 +1011,9 @@ void gpdma::burst(std::size_t ch)
   {
     auto const source = regs_.peek(c.sar.offset);
     check_reach(ch, reach_kind::source, source);
-    auto const value = ctx_.services.read(source, sw, initiator::dma);
+    auto const value =
+        ctx_.trustzone ? ctx_.services.read(source, sw, cached(ch).source, cached(ch).source_grant)
+                       : ctx_.services.read(source, sw, transfer(ch, c.source_secure));
     if(not value or not convert(ch, *value))
     {
       finish(ch, data_error);
@@ -869,12 +1156,18 @@ auto gpdma::link(std::size_t ch) -> bool
       return true;
     }
     check_reach(ch, reach_kind::link, at);
-    auto const word = ctx_.services.read(at, 4, initiator::dma);
+    auto const word = ctx_.services.read(at, 4, transfer(ch, std::nullopt));
     if(not word)
     {
       return false;
     }
-    regs_.poke(target.offset, *word);
+    auto stored = *word;
+    if(&target == &c.tr1 and c.source_secure and not channel_secure(ch))
+    {
+      auto const kept = c.source_secure->mask() | c.destination_secure->mask();
+      stored          = (stored & ~kept) | (regs_.peek(c.tr1.offset) & kept);
+    }
+    regs_.poke(target.offset, stored);
     at += 4;
     return true;
   };
@@ -889,6 +1182,10 @@ auto gpdma::link(std::size_t ch) -> bool
                   and load(c.update_destination, c.dar)
                   and two_d()
                   and load(c.update_link, c.llr);
+  if(c.update_tr1.of(llr) != 0)
+  {
+    cache_[ch] = {};
+  }
   if(not loaded)
   {
     finish(ch, link_error);
@@ -960,7 +1257,12 @@ void gpdma::interrupts(std::size_t ch)
   {
     level = level or (get(regs_, c.flag[f]) != 0 and get(regs_, c.interrupt_enable[f]) != 0);
   }
-  update(regs_, masked_[ch], level ? 1 : 0);
+  auto const secure = channel_secure(ch);
+  update(regs_, masked_[ch], level and not secure ? 1 : 0);
+  if(ctx_.trustzone)
+  {
+    update(regs_, secure_masked_[ch], level and secure ? 1 : 0);
+  }
   if(level)
   {
     c.line->raise();

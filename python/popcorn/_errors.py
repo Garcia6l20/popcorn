@@ -129,6 +129,21 @@ class EmulationError(PopcornError):
         self.address = address
 
 
+class BusAccessError(EmulationError):
+    """A host memory view access the bus refused, through `m.mem`, `m.mem.secure` or
+    `m.mem.nonsecure`.
+
+    Attributes:
+        address: The guest address the refused access started at.
+        denied: True when the bus denied the access, such as a Non-secure view access to a
+            Secure address, False when nothing is mapped there.
+    """
+
+    def __init__(self, message: str, *, address: int, denied: bool) -> None:
+        super().__init__(message, address=address)
+        self.denied = denied
+
+
 class FaultError(EmulationError):
     """A processor fault stopped the emulation.
 
@@ -230,4 +245,5 @@ class MachineRunning(PopcornError):
 
 
 class MachineBusy(PopcornError):
-    """A run, step, call, wait or free run is already active on the machine."""
+    """A run, step, call, wait or free run is already active on the machine, or a call trace is
+    open during a load."""

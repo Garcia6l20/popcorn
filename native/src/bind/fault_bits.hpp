@@ -41,4 +41,18 @@ enum class[[= reflex::py::rename{"HfsrBit"}]] hfsr_bit : std::uint8_t
   forced   = 30,
   debugevt = 31,
 };
+
+/** @brief Bits of the Arm Secure fault status register, SFSR, Armv8-M ARM D1.2.232. Each value
+ *        is the bit position. */
+enum class[[= reflex::py::rename{"SfsrBit"}]] sfsr_bit : std::uint8_t
+{
+  invep     = 0,
+  invis     = 1,
+  inver     = 2,
+  auviol    = 3,
+  invtran   = 4,
+  lsperr    = 5,
+  sfarvalid = 6,
+  lserr     = 7,
+};
 }

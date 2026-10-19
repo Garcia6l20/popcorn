@@ -65,13 +65,23 @@ def symbol_of(native: _core.SymbolInfo) -> Symbol:
 class Image:
     """A firmware image, immutable, loadable into any number of machines."""
 
-    __slots__ = ("_elf", "_native", "_path")
+    __slots__ = ("_elf", "_loaded", "_name", "_native", "_path")
 
-    def __init__(self, native: _core.Image, path: Path | None = None, *, elf: bool = False) -> None:
+    def __init__(
+        self,
+        native: _core.Image,
+        path: Path | None = None,
+        *,
+        elf: bool = False,
+        name: str | None = None,
+        loaded: bool = True,
+    ) -> None:
         """Wrap a native image. Use Image.elf, Image.bin or Image.hex instead."""
         self._native = native
         self._path = path
         self._elf = elf
+        self._name = name
+        self._loaded = loaded
 
     @property
     def native(self) -> _core.Image:
@@ -79,9 +89,23 @@ class Image:
         return self._native
 
     @classmethod
-    def elf(cls, path: str | os.PathLike[str]) -> Image:
-        """Load an ELF32 file: segments, symbols, line table, entry and float ABI."""
-        return cls(_core.load_elf(os.fspath(path)), Path(path), elf=True)
+    def elf(
+        cls, path: str | os.PathLike[str], *, name: str | None = None, load: bool = True
+    ) -> Image:
+        """Load an ELF32 file: segments, symbols, line table, entry and float ABI.
+
+        Args:
+            path: The file.
+            name: Name that `image=` of the symbol lookups selects it by, None for none.
+            load: False for a symbols-only image: a machine never writes its segments to
+                memory and its snapshots hold no digest of it, while its symbols and DWARF
+                feed `sym`, `fn_ptr`, `var`, `image`, the unwinder, coverage and trace as a
+                loaded image's do. A symbol clash goes by image order, as between loaded
+                images. Coverage and trace list it after every loaded image. For a part
+                embedded as raw bytes in another image, such as a secure binary placed by
+                `.incbin` in the Non-secure ELF.
+        """
+        return cls(_core.load_elf(os.fspath(path)), Path(path), elf=True, name=name, loaded=load)
 
     @classmethod
     def bin(cls, path: str | os.PathLike[str], at: int) -> Image:
@@ -97,6 +121,17 @@ class Image:
     def path(self) -> Path | None:
         """File the image was loaded from."""
         return self._path
+
+    @property
+    def name(self) -> str | None:
+        """Name `image=` of the symbol lookups selects this image by, None for none."""
+        return self._name
+
+    @property
+    def loaded(self) -> bool:
+        """Whether a machine writes the image's segments to memory, False for a symbols-only
+        image."""
+        return self._loaded
 
     @property
     def is_elf(self) -> bool:
@@ -140,4 +175,6 @@ class Image:
         return location_of(self._native.locate(address))
 
     def __repr__(self) -> str:
-        return f"Image({self._path!s}, digest={self.digest[:12]})"
+        named = "" if self._name is None else f", name={self._name!r}"
+        symbols_only = "" if self._loaded else ", load=False"
+        return f"Image({self._path!s}, digest={self.digest[:12]}{named}{symbols_only})"

@@ -9,7 +9,39 @@
 
 namespace popcorn::arch::armv8m
 {
-/** @brief Special registers the engine drops or mixes up in a register-list write. */
+/** @brief Security state of the core or of an access, the bank index of banked state. */
+enum class security : std::uint8_t
+{
+  nonsecure = 0,
+  secure    = 1,
+};
+
+/** @brief Special registers of the security state the core is not in, B3.7. */
+struct special_bank
+{
+  /** @brief CONTROL, nPRIV and SPSEL. */
+  std::uint32_t control{};
+  /** @brief PRIMASK. */
+  std::uint32_t primask{};
+  /** @brief BASEPRI. */
+  std::uint32_t basepri{};
+  /** @brief FAULTMASK. */
+  std::uint32_t faultmask{};
+  /** @brief Main stack pointer. */
+  std::uint32_t msp{};
+  /** @brief Process stack pointer. */
+  std::uint32_t psp{};
+  /** @brief MSPLIM. */
+  std::uint32_t msplim{};
+  /** @brief PSPLIM. */
+  std::uint32_t psplim{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(special_bank const&, special_bank const&) -> bool = default;
+};
+
+/** @brief Special registers the engine drops or mixes up in a register-list write, of the
+ *         current security state. */
 struct special_registers
 {
   /** @brief CONTROL. */
@@ -50,12 +82,66 @@ struct exception_state
   std::vector<std::uint32_t> active{};
   /** @brief IRQ line level per exception number. */
   std::vector<std::uint32_t> level{};
+  /** @brief NVIC_ITNS bit per exception number, set for an IRQ that targets Non-secure state.
+   * Empty in a save from before TrustZone, which loads every IRQ as Secure. */
+  std::vector<std::uint32_t> targets_nonsecure{};
+  /** @brief Pending bits of the Non-secure HardFault, MemManage, UsageFault, SVCall, PendSV and
+   * SysTick, by exception number. Selection reads the Secure bank only. */
+  std::uint32_t nonsecure_pending{};
+  /** @brief Active bits of the same Non-secure exceptions. */
+  std::uint32_t nonsecure_active{};
+  /** @brief Priority bytes of the Non-secure MemManage, UsageFault, SVCall, PendSV and SysTick,
+   * by exception number. */
+  std::array<std::uint8_t, 16> nonsecure_priority{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(exception_state const&, exception_state const&) -> bool = default;
 };
 
-/** @brief Stored registers of the system space. */
+/** @brief Non-secure copy of the system space registers ARMv8-M banks, B3.7 and D1.2. */
+struct scs_nonsecure
+{
+  /** @brief VTOR_NS. */
+  address vtor{};
+  /** @brief AIRCR_NS.PRIGROUP. */
+  std::uint32_t prigroup{};
+  /** @brief SCR_NS, its banked bits. */
+  std::uint32_t scr{};
+  /** @brief CCR_NS, its banked bits. */
+  std::uint32_t ccr{};
+  /** @brief SHCSR_NS MEMFAULTENA and USGFAULTENA. */
+  std::uint32_t shcsr_enables{};
+  /** @brief CFSR_NS MMFSR and UFSR. */
+  std::uint32_t cfsr{};
+  /** @brief MMFAR_NS. */
+  std::uint32_t mmfar{};
+  /** @brief CPACR_NS. */
+  std::uint32_t cpacr{};
+  /** @brief FPCCR bits banked between the states, FPCCR_NS's own. */
+  std::uint32_t fpccr{};
+  /** @brief FPCAR_NS. */
+  std::uint32_t fpcar{};
+  /** @brief FPDSCR_NS. */
+  std::uint32_t fpdscr{};
+  /** @brief MPU_CTRL_NS. */
+  std::uint32_t mpu_ctrl{};
+  /** @brief MPU_RNR_NS. */
+  std::uint32_t mpu_rnr{};
+  /** @brief MPU_MAIR0_NS. */
+  std::uint32_t mair0{};
+  /** @brief MPU_MAIR1_NS. */
+  std::uint32_t mair1{};
+  /** @brief MPU_RBAR_NS per region of the Non-secure MPU. */
+  std::vector<std::uint32_t> mpu_rbar{};
+  /** @brief MPU_RLAR_NS per region of the Non-secure MPU. */
+  std::vector<std::uint32_t> mpu_rlar{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(scs_nonsecure const&, scs_nonsecure const&) -> bool = default;
+};
+
+/** @brief Stored registers of the system space. The registers ARMv8-M banks hold their Secure
+ *         copy, the only one without TrustZone, and `nonsecure` the other. */
 struct scs_state
 {
   /** @brief VTOR. */
@@ -116,6 +202,28 @@ struct scs_state
   std::uint32_t itm_tpr{};
   /** @brief ITM_TCR. */
   std::uint32_t itm_tcr{};
+  /** @brief Non-secure copy of the banked registers, used with TrustZone only. */
+  scs_nonsecure nonsecure{};
+  /** @brief SAU_CTRL. */
+  std::uint32_t sau_ctrl{};
+  /** @brief SAU_RNR. */
+  std::uint32_t sau_rnr{};
+  /** @brief SAU_RBAR per region. */
+  std::vector<std::uint32_t> sau_rbar{};
+  /** @brief SAU_RLAR per region. */
+  std::vector<std::uint32_t> sau_rlar{};
+  /** @brief SFSR. */
+  std::uint32_t sfsr{};
+  /** @brief SFAR. */
+  std::uint32_t sfar{};
+  /** @brief NSACR. */
+  std::uint32_t nsacr{};
+  /** @brief AIRCR.BFHFNMINS. */
+  bool aircr_bfhfnmins{};
+  /** @brief AIRCR.PRIS. */
+  bool aircr_pris{};
+  /** @brief AIRCR.SYSRESETREQS. */
+  bool aircr_sysresetreqs{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(scs_state const&, scs_state const&) -> bool = default;
@@ -191,8 +299,15 @@ struct state
   scs_state scs{};
   /** @brief Special registers, read from the engine by save() and re-applied by load(). */
   special_registers special{};
-  /** @brief SysTick. */
+  /** @brief Security state of the core, read from the engine by save(). Secure without
+   * TrustZone and in a save from before it. */
+  security current{security::secure};
+  /** @brief Special registers of the other security state, with TrustZone only. */
+  special_bank other{};
+  /** @brief SysTick, the Secure one with TrustZone. */
   systick_state systick{};
+  /** @brief Non-secure SysTick, with TrustZone only. */
+  systick_state systick_nonsecure{};
   /** @brief DWT CYCCNT. */
   cyccnt_state cyccnt{};
   /** @brief Set while the core sleeps. */

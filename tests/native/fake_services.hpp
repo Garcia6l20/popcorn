@@ -35,6 +35,8 @@ public:
   std::uint32_t instruction_ends{};
   /** @brief Bus master of the last access. */
   std::optional<initiator> last_by;
+  /** @brief Attributes of the last access. */
+  std::optional<bus_attrs> last_attrs;
   /** @brief Records passed to log(), in order. */
   std::vector<core::log_record> logged;
 
@@ -72,10 +74,11 @@ private:
     ++instruction_ends;
   }
 
-  auto do_read(address addr, std::uint8_t size, initiator by)
+  auto do_read(address addr, std::uint8_t size, bus_attrs attrs)
       -> std::expected<std::uint32_t, bus_error> override
   {
-    last_by             = by;
+    last_by             = attrs.by;
+    last_attrs          = attrs;
     std::uint32_t value = 0;
     for(std::uint32_t index = 0; index < size; ++index)
     {
@@ -89,10 +92,11 @@ private:
     return value;
   }
 
-  auto do_write(address addr, std::uint8_t size, std::uint32_t value, initiator by)
+  auto do_write(address addr, std::uint8_t size, std::uint32_t value, bus_attrs attrs)
       -> std::expected<void, bus_error> override
   {
-    last_by = by;
+    last_by    = attrs.by;
+    last_attrs = attrs;
     if(addr < read_only_below)
     {
       return std::unexpected{bus_error::denied};
@@ -104,14 +108,14 @@ private:
     return {};
   }
 
-  auto do_read_block(address addr, std::span<std::byte> out, initiator by)
+  auto do_read_block(address addr, std::span<std::byte> out, bus_attrs attrs)
       -> std::expected<void, core::block_error> override
   {
     for(std::size_t done = 0; done < out.size();)
     {
       auto const at   = addr + static_cast<address>(done);
       auto const size = core::block_access_size(at, out.size() - done);
-      auto const word = do_read(at, size, by);
+      auto const word = do_read(at, size, attrs);
       if(not word)
       {
         return std::unexpected{
@@ -127,7 +131,7 @@ private:
     return {};
   }
 
-  auto do_write_block(address addr, std::span<std::byte const> in, initiator by)
+  auto do_write_block(address addr, std::span<std::byte const> in, bus_attrs attrs)
       -> std::expected<void, core::block_error> override
   {
     for(std::size_t done = 0; done < in.size();)
@@ -139,7 +143,7 @@ private:
       {
         word |= std::to_integer<std::uint32_t>(in[done + index]) << (8 * index);
       }
-      auto const written = do_write(at, size, word, by);
+      auto const written = do_write(at, size, word, attrs);
       if(not written)
       {
         return std::unexpected{

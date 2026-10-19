@@ -21,6 +21,8 @@ inline constexpr std::uint32_t exc_memmanage = 4;
 inline constexpr std::uint32_t exc_busfault = 5;
 /** @brief Exception number of UsageFault. */
 inline constexpr std::uint32_t exc_usagefault = 6;
+/** @brief Exception number of SecureFault, with the Security Extension only. */
+inline constexpr std::uint32_t exc_securefault = 7;
 /** @brief Exception number of SVCall. */
 inline constexpr std::uint32_t exc_svcall = 11;
 /** @brief Exception number of DebugMonitor. */
@@ -78,21 +80,46 @@ inline constexpr std::uint32_t unaligned = 1u << 24;
 inline constexpr std::uint32_t divbyzero = 1u << 25;
 }
 
+/** @brief SFSR bits, D1.2.232. */
+namespace sfsr
+{
+/** @brief SFSR.INVEP, a Non-secure branch to a Secure address that is not an entry point. */
+inline constexpr std::uint32_t invep = 1u << 0;
+/** @brief SFSR.INVIS, an exception return found a bad integrity signature. */
+inline constexpr std::uint32_t invis = 1u << 1;
+/** @brief SFSR.INVER, an invalid exception return from Non-secure state. */
+inline constexpr std::uint32_t inver = 1u << 2;
+/** @brief SFSR.AUVIOL, a Non-secure access to Secure memory. */
+inline constexpr std::uint32_t auviol = 1u << 3;
+/** @brief SFSR.INVTRAN, a branch from Secure to Non-secure memory not flagged as such. */
+inline constexpr std::uint32_t invtran = 1u << 4;
+/** @brief SFSR.LSPERR, a fault of the lazy FP state preservation. */
+inline constexpr std::uint32_t lsperr = 1u << 5;
+/** @brief SFSR.SFARVALID. */
+inline constexpr std::uint32_t sfarvalid = 1u << 6;
+/** @brief SFSR.LSERR, VLSTM, VLLDM or an exception found LSPACT set with FP state active. */
+inline constexpr std::uint32_t lserr = 1u << 7;
+}
+
 /** @brief A configurable fault to raise: its class, target handler and status. */
 struct fault_cause
 {
   /** @brief Class reported when the fault stops the run. */
   fault_kind kind{};
-  /** @brief MemManage, BusFault or UsageFault. */
+  /** @brief MemManage, BusFault, UsageFault or SecureFault. */
   std::uint32_t target{};
-  /** @brief CFSR bits the fault sets. */
+  /** @brief CFSR bits the fault sets, SFSR bits for a SecureFault. */
   std::uint32_t cfsr_bits{};
   /** @brief Address reported when the fault stops the run. */
   address reported{};
-  /** @brief Faulting data address, recorded in BFAR or MMFAR by target. */
+  /** @brief Faulting data address, recorded in BFAR, MMFAR or SFAR by target. */
   std::optional<address> data_address{};
   /** @brief Whether the fault is synchronous: it escalates when it cannot preempt. */
   bool synchronous{true};
+  /** @brief State the fault is raised from, which picks the bank of a banked fault and of its
+   * HardFault escalation, the current state when empty. Secure for the integrity faults the
+   * ARMv8-M ARM raises with `CreateException(..., TRUE, TRUE)`. */
+  std::optional<security> origin{};
 };
 
 /** @brief HFSR.FORCED, a configurable fault or SVC escalated to HardFault. */
@@ -123,6 +150,49 @@ struct masks
   bool faultmask{};
 };
 
+/**
+ * @brief How AIRCR and DEMCR route and rank exceptions between the security states, ARMv8-M ARM
+ *        ExceptionTargetsSecure() and ExceptionPriority(). Without TrustZone every exception
+ *        targets the one bank, Secure in popcorn, and the other fields are not read.
+ */
+struct security_config
+{
+  /** @brief Whether the core has TrustZone on. */
+  bool trustzone{};
+  /** @brief AIRCR.BFHFNMINS. */
+  bool bfhfnmins{};
+  /** @brief AIRCR.PRIS. */
+  bool pris{};
+  /** @brief DEMCR.SDME. */
+  bool sdme{};
+  /** @brief AIRCR_S.PRIGROUP, the only one without TrustZone. */
+  std::uint32_t prigroup{};
+  /** @brief AIRCR_NS.PRIGROUP. */
+  std::uint32_t prigroup_nonsecure{};
+};
+
+/** @brief Mask of the exceptions 0-15 with a copy per security state: HardFault, MemManage,
+ *         UsageFault, SVCall, PendSV and SysTick, B3.11 RJQMQ. */
+inline constexpr std::uint32_t banked_exceptions = 0x0000'c858u;
+
+/** @brief Whether exception @p number has a copy per security state. */
+[[nodiscard]] constexpr auto banked(std::uint32_t number) noexcept -> bool
+{
+  return number < 16 and ((banked_exceptions >> number) & 1u) != 0;
+}
+
+/** @brief An exception with the security state it targets. */
+struct pending_exception
+{
+  /** @brief Exception number, 0 for none. */
+  std::uint32_t number{};
+  /** @brief Security state the exception targets. */
+  security state{security::secure};
+
+  /** @brief Member-wise equality. */
+  friend constexpr auto operator==(pending_exception, pending_exception) -> bool = default;
+};
+
 /** @brief Whether bit @p number of a bit vector is set. */
 [[nodiscard]] auto test_bit(std::vector<std::uint32_t> const& bits, std::uint32_t number) noexcept
     -> bool;
@@ -143,6 +213,55 @@ void put_bit(std::vector<std::uint32_t>& bits, std::uint32_t number, bool value)
     exception_state const& exceptions,
     std::uint32_t          prigroup,
     masks                  held) noexcept -> int;
+
+/**
+ * @brief ExceptionTargetsSecure() of the ARMv8-M ARM: the security state exception @p number
+ *        targets, B3.11 RJQMQ. NMI, HardFault and BusFault follow AIRCR.BFHFNMINS, SecureFault
+ *        targets Secure, DebugMonitor DEMCR.SDME, an IRQ NVIC_ITNS. MemManage, UsageFault,
+ *        SVCall, PendSV and SysTick target @p origin, as does a HardFault when @p origin is
+ *        Secure. Secure for every exception without TrustZone.
+ * @param origin The state the exception is raised from for a banked exception, the state of
+ *        the original exception for a HardFault escalated from it, RDXYK.
+ */
+[[nodiscard]] auto exception_target(
+    exception_state const& exceptions,
+    security_config const& config,
+    std::uint32_t          number,
+    security               origin) noexcept -> security;
+
+/**
+ * @brief ExceptionPriority() of the ARMv8-M ARM: the priority of exception @p number in the
+ *        bank of @p state. HardFault is -3 in the Secure bank with AIRCR.BFHFNMINS set. A
+ *        Non-secure priority p is (p >> 1) + 0x80 with AIRCR.PRIS set, B3.13.
+ * @param group Whether the subpriority bits are cleared, by the PRIGROUP of @p state.
+ */
+[[nodiscard]] auto exception_priority(
+    exception_state const& exceptions,
+    security_config const& config,
+    std::uint32_t          number,
+    security               state,
+    bool                   group) noexcept -> int;
+
+/**
+ * @brief ExecutionPriority() of the ARMv8-M ARM with both security states: the active
+ *        exceptions of both banks and each bank's masks. Without TrustZone it equals
+ *        execution_priority() over the Secure bank and @p secure.
+ */
+[[nodiscard]] auto execution_priority(
+    exception_state const& exceptions,
+    security_config const& config,
+    masks                  secure,
+    masks                  nonsecure) noexcept -> int;
+
+/**
+ * @brief best_pending() over both banks: the pending and enabled exception with the lowest
+ *        priority value of its target bank, subpriority included, then the lowest number, then
+ *        Secure. Number 0 when none is pending.
+ */
+[[nodiscard]] auto best_pending(
+    exception_state const& exceptions,
+    security_config const& config,
+    bool                   synchronous_only = false) noexcept -> pending_exception;
 
 /** @brief Whether exception @p number is synchronous: HardFault, the configurable faults, SVCall.
  */
@@ -173,6 +292,14 @@ void put_bit(std::vector<std::uint32_t>& bits, std::uint32_t number, bool value)
     -> std::optional<std::uint32_t>;
 
 /**
+ * @brief best_pending() as a plain number, 0 when nothing is pending, exception 0 never being
+ *        one. The hot path of delivery: no optional crosses the call.
+ */
+[[nodiscard]] auto
+    best_pending_number(exception_state const& exceptions, bool synchronous_only = false) noexcept
+    -> std::uint32_t;
+
+/**
  * @brief Whether any exception from 2 below @p count is pending and enabled, as best_pending
  *        counts them.
  * @param exceptions Exception state.
@@ -183,6 +310,11 @@ void put_bit(std::vector<std::uint32_t>& bits, std::uint32_t number, bool value)
     exception_state const& exceptions,
     std::uint32_t          count,
     bool                   synchronous_only = false) noexcept -> bool;
+
+/** @brief Whether a Non-secure banked exception is pending, as best_pending counts them. */
+[[nodiscard]] auto
+    any_nonsecure_pending(exception_state const& exceptions, bool synchronous_only = false) noexcept
+    -> bool;
 
 /**
  * @brief Writes the special registers in the one order the engine accepts from any privilege:
@@ -204,4 +336,31 @@ void set_context(uc_struct* engine, special_registers const& target, bool stack_
  * @throws emulation_error when the engine refuses a read or write.
  */
 [[nodiscard]] auto read_special(uc_struct* engine, bool stack_limits) -> special_registers;
+
+/**
+ * @brief Reads the security state of a core with the Security Extension.
+ * @throws emulation_error when the engine refuses the read.
+ */
+[[nodiscard]] auto read_security(uc_struct* engine) -> security;
+
+/**
+ * @brief Switches the security state as BXNS does, the stack pointers moving between the banks.
+ *        Called only while the engine is stopped.
+ * @throws emulation_error when the engine refuses the write.
+ */
+void write_security(uc_struct* engine, security state);
+
+/**
+ * @brief Reads the special registers of one security state, in any state and mode.
+ * @throws emulation_error when the engine refuses a read.
+ */
+[[nodiscard]] auto read_bank(uc_struct* engine, security bank) -> special_bank;
+
+/**
+ * @brief Writes the special registers of the security state the core is not in. Written after
+ *        set_context() of the current state: a CONTROL_S write then restores SFPA and FPCA, which
+ *        a Non-secure CONTROL write cannot reach.
+ * @throws emulation_error when the engine refuses a write.
+ */
+void write_bank(uc_struct* engine, security bank, special_bank const& values);
 }

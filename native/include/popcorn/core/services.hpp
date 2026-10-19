@@ -12,6 +12,12 @@
 #include <string>
 #include <utility>
 
+namespace popcorn::periph
+{
+/** @brief Bus firewall of a machine, defined in `popcorn/periph/firewall.hpp`. */
+struct bus_firewall;
+}
+
 namespace popcorn::core
 {
 /**
@@ -68,6 +74,41 @@ struct block_error
 };
 
 /**
+ * @brief Firewall decision a host bus master keeps across its accesses, such as a DMA channel
+ *        during one transfer: the addresses [first, last] of one memory region where the bus
+ *        firewall allows every access with the attributes and operation the grant was made for.
+ *        The machine fills it on an allowed access and skips the firewall for a later access
+ *        whose bytes, address to address plus size, all lie inside it, until a memory policy
+ *        change, a restore or a reset makes it stale. The holder drops it, `grant = {}`, when
+ *        its attributes change. Default constructed it grants nothing.
+ */
+struct memory_grant
+{
+  /** @brief Policy generation the grant was made in, 0 for none. */
+  std::uint64_t generation{};
+  /** @brief First granted address. */
+  address first{};
+  /** @brief Last granted address, included. */
+  address last{};
+};
+
+/**
+ * @brief What the machine decided at an instruction the arch module emulates,
+ *        machine_services::emulated_instruction(). `proceed`: counted, probed and covered, the
+ *        module applies the instruction. `returned`: an intercept returned to the caller
+ *        through arch::return_to_caller(), the module skips the instruction and completes
+ *        arch::return_interrupt() itself, nothing counted. `stopped`: the run ends before the
+ *        instruction, at a slice boundary or an intercept stop, the module leaves the core at
+ *        it and resumes, then the trap hook ends the engine run, nothing counted.
+ */
+enum class emulated_arrival : std::uint8_t
+{
+  proceed,
+  returned,
+  stopped,
+};
+
+/**
  * @brief What the machine offers the arch module and every peripheral model beyond the clock and
  *        their event port: deferred stop, reset and slice end, guest bus access and the trace
  *        ring. Implemented by the machine, and by fakes in tests. Callers reach it through
@@ -75,11 +116,11 @@ struct block_error
  *
  * The public functions check their contracts and forward to the private virtual ones, which an
  * implementation overrides: a virtual function cannot carry a contract. Every request but
- * watch_reads() is deferred: it only records, the next block hook ends the slice at an
- * instruction boundary, and nothing calls `uc_emu_stop` from the caller's callback, so every
- * function is safe from MMIO, memory, instruction and interrupt hooks. watch_reads() takes
- * effect at once and is safe from the same callbacks. Neither copyable nor movable, contexts
- * hold references to it.
+ * watch_reads() and emulated_instruction() is deferred: it only records, the next block hook
+ * ends the slice at an instruction boundary, and nothing calls `uc_emu_stop` from the caller's
+ * callback, so every function is safe from MMIO, memory, instruction and interrupt hooks.
+ * watch_reads() takes effect at once and is safe from the same callbacks. Neither copyable nor
+ * movable, contexts hold references to it.
  */
 class POPCORN_API machine_services
 {
@@ -144,23 +185,91 @@ public:
   }
 
   /**
-   * @brief Reads guest memory or a peripheral register as a bus master. Memory, MMIO dispatch
-   *        and watches see the access as made by @p by, exactly as a guest access.
+   * @brief Reads guest memory or a peripheral register as a bus master. Memory, MMIO dispatch,
+   *        the bus firewall and watches see the access with @p attrs, exactly as a guest access.
+   * @param addr Guest address, aligned to @p size.
+   * @param size Access size in bytes, 1, 2 or 4.
+   * @param attrs Bus master and transaction attributes of the access.
+   * @return Value right-aligned to @p size, or why the bus refused the access.
+   */
+  auto read(address addr, std::uint8_t const size, bus_attrs attrs)
+      -> std::expected<std::uint32_t, bus_error> pre(size == 1 or size == 2 or size == 4)
+          pre(addr % size == 0) post(result : not result.has_value() or fits_access(*result, size))
+  {
+    return do_read(addr, size, attrs);
+  }
+
+  /**
+   * @brief Reads as read() with attributes, through a grant: an access inside a current
+   *        @p grant skips the bus firewall, another access asks it and refills or drops the
+   *        grant. The result is what read() gives.
+   * @param addr Guest address, aligned to @p size.
+   * @param size Access size in bytes, 1, 2 or 4.
+   * @param attrs Bus master and transaction attributes of the access, those the grant was made
+   *        for.
+   * @param grant Grant of the caller, kept for these attributes and reads only.
+   * @return Value right-aligned to @p size, or why the bus refused the access.
+   */
+  auto read(address addr, std::uint8_t const size, bus_attrs attrs, memory_grant& grant)
+      -> std::expected<std::uint32_t, bus_error> pre(size == 1 or size == 2 or size == 4)
+          pre(addr % size == 0) post(result : not result.has_value() or fits_access(*result, size))
+  {
+    return do_read_granted(addr, size, attrs, grant);
+  }
+
+  /**
+   * @brief Reads as read() with attributes, as a Secure privileged access made by @p by.
    * @param addr Guest address, aligned to @p size.
    * @param size Access size in bytes, 1, 2 or 4.
    * @param by Bus master making the access.
    * @return Value right-aligned to @p size, or why the bus refused the access.
    */
   auto read(address addr, std::uint8_t const size, initiator by)
-      -> std::expected<std::uint32_t, bus_error> pre(size == 1 or size == 2 or size == 4)
-          pre(addr % size == 0) post(result : not result.has_value() or fits_access(*result, size))
+      -> std::expected<std::uint32_t, bus_error>
   {
-    return do_read(addr, size, by);
+    return read(addr, size, bus_attrs{.by = by});
   }
 
   /**
    * @brief Writes guest memory or a peripheral register as a bus master, seen by memory, MMIO
-   *        dispatch and watches as made by @p by.
+   *        dispatch, the bus firewall and watches with @p attrs.
+   * @param addr Guest address, aligned to @p size.
+   * @param size Access size in bytes, 1, 2 or 4.
+   * @param value Value right-aligned to @p size.
+   * @param attrs Bus master and transaction attributes of the access.
+   * @return Nothing, or why the bus refused the access.
+   */
+  auto write(address addr, std::uint8_t size, std::uint32_t value, bus_attrs attrs)
+      -> std::expected<void, bus_error> pre(size == 1 or size == 2 or size == 4)
+          pre(addr % size == 0) pre(fits_access(value, size))
+  {
+    return do_write(addr, size, value, attrs);
+  }
+
+  /**
+   * @brief Writes as write() with attributes, through a grant, as read() with a grant does.
+   * @param addr Guest address, aligned to @p size.
+   * @param size Access size in bytes, 1, 2 or 4.
+   * @param value Value right-aligned to @p size.
+   * @param attrs Bus master and transaction attributes of the access, those the grant was made
+   *        for.
+   * @param grant Grant of the caller, kept for these attributes and writes only.
+   * @return Nothing, or why the bus refused the access.
+   */
+  auto write(
+      address       addr,
+      std::uint8_t  size,
+      std::uint32_t value,
+      bus_attrs     attrs,
+      memory_grant& grant)
+      -> std::expected<void, bus_error> pre(size == 1 or size == 2 or size == 4)
+          pre(addr % size == 0) pre(fits_access(value, size))
+  {
+    return do_write_granted(addr, size, value, attrs, grant);
+  }
+
+  /**
+   * @brief Writes as write() with attributes, as a Secure privileged access made by @p by.
    * @param addr Guest address, aligned to @p size.
    * @param size Access size in bytes, 1, 2 or 4.
    * @param value Value right-aligned to @p size.
@@ -168,29 +277,43 @@ public:
    * @return Nothing, or why the bus refused the access.
    */
   auto write(address addr, std::uint8_t size, std::uint32_t value, initiator by)
-      -> std::expected<void, bus_error> pre(size == 1 or size == 2 or size == 4)
-          pre(addr % size == 0) pre(fits_access(value, size))
+      -> std::expected<void, bus_error>
   {
-    return do_write(addr, size, value, by);
+    return write(addr, size, value, bus_attrs{.by = by});
   }
 
   /**
    * @brief Reads a block of guest bytes as a bus master, for DMA and debugger copies of memory.
    *        Unaligned addresses and sizes are allowed. The machine splits the block into bus
    *        accesses in ascending address order, each of block_access_size(), so MMIO dispatch and
-   *        watches see each access. A FIFO or other register with read side effects is read with
-   *        read(), never as a block, since the split decides how many accesses it sees.
+   *        watches see each access with @p attrs. A FIFO or other register with read side
+   *        effects is read with read(), never as a block, since the split decides how many
+   *        accesses it sees.
+   * @param addr First guest address.
+   * @param out Bytes read, in address order.
+   * @param attrs Bus master and transaction attributes of every access.
+   * @return Nothing, or the failing access. The bytes of @p out before `at` are valid.
+   */
+  auto read_block(address const addr, std::span<std::byte> const out, bus_attrs attrs)
+      -> std::expected<void, block_error> pre(fits_address_space(addr, out.size())) post(
+          result : result.has_value()
+          or (result.error().at >= addr and result.error().at - addr < out.size()))
+  {
+    return do_read_block(addr, out, attrs);
+  }
+
+  /**
+   * @brief Reads a block as read_block() with attributes, as Secure privileged accesses made
+   *        by @p by.
    * @param addr First guest address.
    * @param out Bytes read, in address order.
    * @param by Bus master making the accesses.
    * @return Nothing, or the failing access. The bytes of @p out before `at` are valid.
    */
   auto read_block(address const addr, std::span<std::byte> const out, initiator by)
-      -> std::expected<void, block_error> pre(fits_address_space(addr, out.size())) post(
-          result : result.has_value()
-          or (result.error().at >= addr and result.error().at - addr < out.size()))
+      -> std::expected<void, block_error>
   {
-    return do_read_block(addr, out, by);
+    return read_block(addr, out, bus_attrs{.by = by});
   }
 
   /**
@@ -199,15 +322,58 @@ public:
    *        register with write side effects is written with write(), never as a block.
    * @param addr First guest address.
    * @param in Bytes to write, in address order.
-   * @param by Bus master making the accesses.
+   * @param attrs Bus master and transaction attributes of every access.
    * @return Nothing, or the failing access. The bytes before `at` were written.
    */
-  auto write_block(address const addr, std::span<std::byte const> const in, initiator by)
+  auto write_block(address const addr, std::span<std::byte const> const in, bus_attrs attrs)
       -> std::expected<void, block_error> pre(fits_address_space(addr, in.size())) post(
           result : result.has_value()
           or (result.error().at >= addr and result.error().at - addr < in.size()))
   {
-    return do_write_block(addr, in, by);
+    return do_write_block(addr, in, attrs);
+  }
+
+  /**
+   * @brief Writes a block as write_block() with attributes, as Secure privileged accesses made
+   *        by @p by.
+   * @param addr First guest address.
+   * @param in Bytes to write, in address order.
+   * @param by Bus master making the accesses.
+   * @return Nothing, or the failing access. The bytes before `at` were written.
+   */
+  auto write_block(address const addr, std::span<std::byte const> const in, initiator by)
+      -> std::expected<void, block_error>
+  {
+    return write_block(addr, in, bus_attrs{.by = by});
+  }
+
+  /**
+   * @brief Installs the machine's bus firewall, which MMIO dispatch asks before every access to
+   *        a peripheral window. Called through periph::model_context::install_firewall.
+   * @param firewall Firewall, which must outlive every access of the machine.
+   * @throws model_error when the machine already has a firewall or no longer builds its
+   *         models, and config_error from an implementation without a firewall.
+   */
+  void install_firewall(periph::bus_firewall& firewall)
+  {
+    do_install_firewall(firewall);
+  }
+
+  /**
+   * @brief From the model that owns the bus firewall, after a change of its memory policy, a
+   *        periph::bus_firewall::memory_page verdict: drops every page verdict the engine keeps,
+   *        so the next access of each page asks the firewall again. A data verdict then holds
+   *        from the next access. Code already running inside a page whose fetch verdict changed
+   *        runs on until the engine run ends, so the owner also calls end_after_instruction()
+   *        after a fetch-verdict change. It also retires the code the engine translated in pages
+   *        whose fetch verdict is per fetch window, page_verdict::fetch_window_shift: without it
+   *        such code keeps running under the old verdicts. Every page refills after it, so call
+   *        it only when a verdict changes. Safe from a register access during a run and between
+   *        slices.
+   */
+  void memory_policy_changed()
+  {
+    do_memory_policy_changed();
   }
 
   /**
@@ -255,21 +421,48 @@ public:
     do_log(std::move(record));
   }
 
+  /**
+   * @brief From the arch module's trap callback, for an instruction it emulates with no engine
+   *        block, such as the Arm SG of a Non-secure call: first ends the run there when the
+   *        block hook would end it before an instruction, then runs the probes, intercepts and
+   *        return hooks of @p at as the engine code hook would, then counts one instruction and
+   *        its coverage. Not deferred. Call it once per arrival, with the pc at @p at.
+   * @param at Address of the instruction.
+   * @return What the module does with the instruction. The default counts nothing and
+   *         proceeds.
+   */
+  auto emulated_instruction(address at) -> emulated_arrival
+  {
+    return do_emulated_instruction(at);
+  }
+
 private:
   virtual void do_request_stop(stop_reason reason, std::string detail) = 0;
   virtual void do_request_reset(reset_kind kind)                       = 0;
   virtual void do_end_slice()                                          = 0;
   virtual void do_end_after_instruction()                              = 0;
-  virtual auto do_read(address addr, std::uint8_t size, initiator by)
+  virtual auto do_read(address addr, std::uint8_t size, bus_attrs attrs)
       -> std::expected<std::uint32_t, bus_error> = 0;
-  virtual auto do_write(address addr, std::uint8_t size, std::uint32_t value, initiator by)
+  virtual auto do_write(address addr, std::uint8_t size, std::uint32_t value, bus_attrs attrs)
       -> std::expected<void, bus_error> = 0;
-  virtual auto do_read_block(address addr, std::span<std::byte> out, initiator by)
+  virtual auto
+      do_read_granted(address addr, std::uint8_t size, bus_attrs attrs, memory_grant& grant)
+          -> std::expected<std::uint32_t, bus_error>;
+  virtual auto do_write_granted(
+      address       addr,
+      std::uint8_t  size,
+      std::uint32_t value,
+      bus_attrs     attrs,
+      memory_grant& grant) -> std::expected<void, bus_error>;
+  virtual auto do_read_block(address addr, std::span<std::byte> out, bus_attrs attrs)
       -> std::expected<void, block_error> = 0;
-  virtual auto do_write_block(address addr, std::span<std::byte const> in, initiator by)
+  virtual auto do_write_block(address addr, std::span<std::byte const> in, bus_attrs attrs)
       -> std::expected<void, block_error>           = 0;
   virtual void do_trace(trace_record const& record) = 0;
   virtual void do_log(log_record record)            = 0;
   virtual void do_watch_reads(address at, std::uint32_t size, bool on);
+  virtual void do_install_firewall(periph::bus_firewall& firewall);
+  virtual void do_memory_policy_changed();
+  virtual auto do_emulated_instruction(address at) -> emulated_arrival;
 };
 }

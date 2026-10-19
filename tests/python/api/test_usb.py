@@ -1404,35 +1404,30 @@ def test_a_cdc_pty_overflow_warning_reaches_a_raising_filter_off_the_machine_thr
     assert [str(error) for error in raised] == ["filter failed"]
 
 
-def gpio_hole(description: popcorn.PartDescription) -> int:
-    """A byte of GPIOA's window no register covers: a read of it logs one record."""
-    found = next(p for p in description.peripherals if p.name == "GPIOA")
-    taken = {r.offset + k for r in found.registers for k in range(4)}
-    return found.base + next(o for o in range(found.size) if o not in taken)
-
-
 def test_a_log_error_at_a_consuming_await_keeps_its_result(
     u575: popcorn.PartDescription,
 ) -> None:
     m, host = configured(u575)
-    hole = gpio_hole(u575)
+    icscr1 = m.periph.RCC.RCC_ICSCR1.value
+    msis_48mhz = (icscr1 & ~(0xF << 28)) | (1 << 23)
     failing = FailOnce()
     logger = logging.getLogger("popcorn")
 
     async def scenario() -> int:
         async with m.running():
             logger.addFilter(failing)
-            (value,) = await m.read(m.ref.mem.u8[hole])
+            await m.write((m.ref.periph.RCC.RCC_ICSCR1, msis_48mhz))
             assert failing.failed
             with pytest.raises(RuntimeError, match="filter failed"):
                 m.read()
             await m.read()
             reply = await host.control(0x80, GET_DESCRIPTOR, 0x0100, 0, 18)
             assert len(reply) == 18
+            (value,) = await m.read(m.ref.periph.RCC.RCC_ICSCR1)
             return value
 
     try:
-        assert run_bounded(scenario(), HANG) == 0
+        assert run_bounded(scenario(), HANG) == msis_48mhz
     finally:
         logger.removeFilter(failing)
 

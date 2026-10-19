@@ -12,6 +12,7 @@
 #include <ranges>
 #include <span>
 #include <string>
+#include <utility>
 
 namespace popcorn::core
 {
@@ -20,6 +21,11 @@ namespace
 constexpr auto size_mask(std::uint32_t size) noexcept -> std::uint32_t
 {
   return size >= 4 ? 0xffff'ffffu : (std::uint32_t{1} << (8 * size)) - 1;
+}
+
+constexpr auto cpu_attrs(uc_mem_attrs attrs) noexcept -> bus_attrs
+{
+  return {.by = initiator::cpu, .secure = attrs.secure, .privileged = attrs.privileged};
 }
 
 auto register_name(peripheral_desc const& unit, std::uint32_t word) -> std::string
@@ -48,11 +54,12 @@ void machine::run_state::map_peripherals()
     }
     windows.push_back(
         std::make_unique<mmio_window>(mmio_window{
-            .run    = this,
-            .slot   = owner.peripherals_[serving].get(),
-            .unit   = &unit,
-            .base   = unit.base,
-            .secure = unit.alias_of.has_value(),
+            .run          = this,
+            .slot         = owner.peripherals_[serving].get(),
+            .unit         = &unit,
+            .base         = unit.base,
+            .secure_alias = unit.alias_of.has_value(),
+            .serving      = serving,
         }));
   }
   std::ranges::sort(windows, {}, [](auto const& window) { return window->base; });
@@ -96,7 +103,8 @@ void machine::run_state::map_peripherals()
     if(group.size() == 1)
     {
       check(
-          uc_mmio_map(engine, lead.base, lead.size, &on_mmio_read, &lead, &on_mmio_write, &lead),
+          uc_mmio_map_attrs(
+              engine, lead.base, lead.size, &on_mmio_read, &lead, &on_mmio_write, &lead),
           std::format("mapping peripheral {}", lead.unit->name));
     }
     else
@@ -119,7 +127,7 @@ void machine::run_state::map_peripherals()
                    | std::ranges::to<std::vector>(),
       });
       check(
-          uc_mmio_map(
+          uc_mmio_map_attrs(
               engine, lead.base, end - lead.base, &on_shared_read, shared.get(), &on_shared_write,
               shared.get()),
           std::format("mapping peripherals {} to {}", lead.unit->name, group.back()->unit->name));
@@ -132,6 +140,8 @@ void machine::run_state::map_peripherals()
   {
     contract_assert(std::uint64_t{before->base} + before->size <= after->base);
   }
+  ranges.append_range(map_raz_wi(page));
+  std::ranges::sort(ranges);
   if(not ranges.empty())
   {
     auto const first        = ranges.front().first;
@@ -163,6 +173,133 @@ void machine::run_state::map_peripherals()
   }
 }
 
+auto machine::run_state::map_raz_wi(std::uint32_t page)
+    -> std::vector<std::pair<std::uint64_t, std::uint64_t>>
+{
+  auto const& options     = owner.options_;
+  auto const& description = owner.description_;
+  auto const  overlaps    = [](std::uint64_t start, std::uint64_t end, address other,
+                               std::uint64_t size) { return start < other + size and other < end; };
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> mapped;
+  for(auto const& [index, range] : std::views::enumerate(options.raz_wi))
+  {
+    auto const refuse = [&](std::string expected) {
+      throw config_error(
+          "machine_options", 0, std::format("raz_wi[{}]", index), std::move(expected));
+    };
+    auto const start = std::uint64_t{range.start};
+    auto const end   = start + range.size;
+    if(range.size == 0 or start % page != 0 or range.size % page != 0)
+    {
+      refuse(std::format("a non-empty range, start and size multiples of {} bytes", page));
+    }
+    for(auto const& region : description.regions)
+    {
+      if(overlaps(start, end, region.start, region.size))
+      {
+        refuse(std::format("a range outside region {}", region.name));
+      }
+    }
+    for(auto const& unit : description.peripherals)
+    {
+      if(overlaps(start, end, unit.base, unit.size))
+      {
+        refuse(std::format("a range outside peripheral {}", unit.name));
+      }
+    }
+    if(options.scratch and overlaps(start, end, options.scratch->start, options.scratch->size))
+    {
+      refuse("a range outside the scratch region");
+    }
+    for(auto const& [other, before] :
+        std::views::enumerate(options.raz_wi | std::views::take(index)))
+    {
+      if(overlaps(start, end, before.start, before.size))
+      {
+        refuse(std::format("a range outside raz_wi[{}]", other));
+      }
+    }
+    auto& window = *raz_windows.emplace_back(
+        std::make_unique<raz_window>(raz_window{.run = this, .range = &range}));
+    check(
+        uc_mmio_map_attrs(
+            engine, range.start, range.size, &on_raz_read, &window, &on_raz_write, &window),
+        std::format("mapping the read-as-zero range {}", range.name));
+    mapped.emplace_back(start, end - 1);
+  }
+  return mapped;
+}
+
+void machine::run_state::note_raz(
+    raz_window&   window,
+    std::uint32_t offset,
+    bool          write,
+    initiator     by)
+{
+  auto const strict = owner.options_.strict_peripherals;
+  if(by == initiator::debugger and strict)
+  {
+    return;
+  }
+  auto const& name = window.range->name;
+  if(not std::exchange(window.warned, true))
+  {
+    owner.hooks_->log(
+        {.kind       = log_kind::model_warning,
+         .pc         = arch->pc(),
+         .peripheral = name,
+         .reg        = {},
+         .offset     = offset,
+         .write      = write,
+         .message    = std::format(
+             "{} of {} at offset {:#x}, no model: it reads as zero and ignores writes",
+             write ? "write" : "read", name, offset)});
+  }
+  if(strict)
+  {
+    throw model_error(name, "", offset);
+  }
+}
+
+auto machine::run_state::raz_at(address addr, std::uint8_t size) const noexcept -> raz_window*
+{
+  auto const found = std::ranges::find_if(raz_windows, [&](auto const& window) {
+    auto const start = std::uint64_t{window->range->start};
+    return addr >= start and std::uint64_t{addr} + size <= start + window->range->size;
+  });
+  return found == raz_windows.end() ? nullptr : found->get();
+}
+
+auto machine::run_state::on_raz_read(
+    uc_struct*,
+    std::uint64_t offset,
+    unsigned,
+    uc_mem_attrs,
+    void* user) noexcept -> std::uint64_t
+{
+  auto& window = *static_cast<raz_window*>(user);
+  window.run->guarded([&] {
+    window.run->note_raz(window, static_cast<std::uint32_t>(offset), false, initiator::cpu);
+    return false;
+  });
+  return 0;
+}
+
+void machine::run_state::on_raz_write(
+    uc_struct*,
+    std::uint64_t offset,
+    unsigned,
+    std::uint64_t,
+    uc_mem_attrs,
+    void* user) noexcept
+{
+  auto& window = *static_cast<raz_window*>(user);
+  window.run->guarded([&] {
+    window.run->note_raz(window, static_cast<std::uint32_t>(offset), true, initiator::cpu);
+    return false;
+  });
+}
+
 auto machine::run_state::window_at(address addr, std::uint8_t size) const noexcept -> mmio_window*
 {
   auto const after =
@@ -176,14 +313,201 @@ auto machine::run_state::window_at(address addr, std::uint8_t size) const noexce
                                                                                   : nullptr;
 }
 
+auto machine::run_state::seen(bus_attrs attrs) const noexcept -> bus_attrs
+{
+  attrs.secure = attrs.secure and owner.options_.trustzone;
+  return attrs;
+}
+
+auto machine::run_state::context_of(bus_attrs attrs, bool via_secure_alias) const
+    -> periph::access_ctx
+{
+  return {
+      .pc               = arch->pc(),
+      .now              = owner.clock_.now(),
+      .by               = attrs.by,
+      .secure           = attrs.secure,
+      .privileged       = attrs.privileged,
+      .via_secure_alias = via_secure_alias,
+  };
+}
+
+void machine::run_state::install_firewall(periph::bus_firewall& installed)
+{
+  if(building == nullptr)
+  {
+    throw model_error({}, "firewall", 0);
+  }
+  if(firewall != nullptr)
+  {
+    throw model_error(building->name, "firewall", 0);
+  }
+  firewall = &installed;
+}
+
+void machine::do_install_firewall(periph::bus_firewall& firewall)
+{
+  run_->install_firewall(firewall);
+}
+
+void machine::do_memory_policy_changed()
+{
+  ++run_->memory_generation;
+  if(run_->memory_filter)
+  {
+    check(uc_ctl_flush_tlb(engine_.get()), "flushing the TLB after a memory policy change");
+  }
+}
+
+void machine::run_state::install_memory_filter()
+{
+  if(firewall == nullptr or not firewall->filters_memory())
+  {
+    return;
+  }
+  std::uint32_t page = 0;
+  check(uc_ctl_get_page_size(engine, &page), "reading the engine page size");
+  filter_page_bytes = page;
+  check(uc_ctl_bus_filter(engine, &on_bus_page, &on_bus_access, this), "installing the bus filter");
+  memory_filter = true;
+}
+
+auto machine::run_state::check_memory(
+    address         addr,
+    std::uint8_t    size,
+    bus_attrs       attrs,
+    arch::memory_op op) -> periph::bus_verdict
+{
+  if(not filters_host(attrs))
+  {
+    return periph::bus_verdict::allow;
+  }
+  handler_scope const scope{in_handler};
+  return firewall->check_memory(addr, size, seen(attrs), op);
+}
+
+auto machine::run_state::grant(
+    region_desc const& region,
+    address            addr,
+    std::uint8_t       size,
+    bus_attrs          attrs,
+    arch::memory_op    op) -> memory_grant
+{
+  auto first = region.start;
+  auto last  = static_cast<address>(region.start + (region.size - 1u));
+  if(filters_host(attrs))
+  {
+    handler_scope const scope{in_handler};
+    auto const          allowed = firewall->allowed_extent(addr, size, seen(attrs), op);
+    first                       = std::max(first, allowed.first);
+    last                        = std::min(last, allowed.last);
+  }
+  return {.generation = memory_generation, .first = first, .last = last};
+}
+
+[[gnu::hot]] auto machine::run_state::on_bus_page(
+    uc_struct*,
+    std::uint64_t page,
+    std::uint64_t addr,
+    uc_mem_attrs  attrs,
+    uc_mem_type   type,
+    void*         user) noexcept -> unsigned
+{
+  auto&    run  = *static_cast<run_state*>(user);
+  unsigned bits = 0;
+  run.guarded([&] {
+    auto const           op = type == UC_MEM_FETCH ? arch::memory_op::fetch
+                            : type == UC_MEM_WRITE ? arch::memory_op::write
+                                                   : arch::memory_op::read;
+    periph::page_verdict verdict;
+    {
+      handler_scope const scope{run.in_handler};
+      verdict = run.firewall->memory_page(
+          static_cast<address>(page), run.filter_page_bytes, static_cast<address>(addr),
+          cpu_attrs(attrs), op);
+    }
+    auto const window = std::min<unsigned>(verdict.fetch_window_shift, 31);
+    bits = (verdict.filter_data ? unsigned{UC_BUS_FILTER_DATA} : 0u)
+         | (verdict.deny_fetch ? unsigned{UC_BUS_DENY_FETCH} : 0u)
+         | (verdict.fetch_each ? unsigned{UC_BUS_FETCH_EACH} | UC_BUS_FETCH_WINDOW(window) : 0u);
+    return false;
+  });
+  return bits;
+}
+
+auto machine::run_state::on_bus_access(
+    uc_struct*,
+    std::uint64_t  addr,
+    unsigned       size,
+    uc_mem_attrs   attrs,
+    uc_mem_type    type,
+    std::uint64_t* value,
+    void*          user) noexcept -> int
+{
+  auto& run     = *static_cast<run_state*>(user);
+  auto  verdict = periph::bus_verdict::allow;
+  run.guarded([&] {
+    auto const op = type == UC_MEM_WRITE ? arch::memory_op::write : arch::memory_op::read;
+    verdict       = run.raising_access([&] {
+      handler_scope const scope{run.in_handler};
+      return run.firewall->check_memory(
+          static_cast<address>(addr), static_cast<std::uint8_t>(size), cpu_attrs(attrs), op);
+    });
+    return false;
+  });
+  if(verdict == periph::bus_verdict::read_zero_write_ignore and type != UC_MEM_WRITE)
+  {
+    *value = 0;
+    run.guarded([&] {
+      run.note_watched(
+          static_cast<address>(addr), static_cast<std::uint8_t>(size), 0, false, initiator::cpu);
+      return false;
+    });
+  }
+  switch(verdict)
+  {
+    case periph::bus_verdict::allow:
+      return UC_BUS_ALLOW;
+    case periph::bus_verdict::read_zero_write_ignore:
+      return UC_BUS_RAZ_WI;
+    case periph::bus_verdict::bus_error:
+      return UC_BUS_FAULT;
+  }
+  return UC_BUS_ALLOW;
+}
+
 auto machine::run_state::dispatch_read(
     mmio_window const& window,
     std::uint32_t      offset,
     std::uint8_t       size,
-    initiator          by) -> std::expected<std::uint32_t, bus_error>
+    bus_attrs          attrs) -> std::expected<std::uint32_t, bus_error>
 {
+  attrs           = seen(attrs);
+  auto const by   = attrs.by;
   auto&      slot = *window.slot;
   auto const word = offset / 4;
+  if(firewall != nullptr) [[unlikely]]
+  {
+    auto verdict = periph::bus_verdict::allow;
+    {
+      handler_scope const scope{in_handler};
+      verdict = firewall->check_peripheral(window.serving, attrs, arch::memory_op::read);
+    }
+    if(verdict == periph::bus_verdict::bus_error)
+    {
+      firewall_refused = by == initiator::cpu;
+      return std::unexpected(bus_error::denied);
+    }
+    if(verdict == periph::bus_verdict::read_zero_write_ignore)
+    {
+      if(word < slot.layout.words())
+      {
+        trace_mmio(slot, window.base + offset, offset, size, 0, false, by);
+      }
+      note_watched(window.base + offset, size, 0, false, by);
+      return 0u;
+    }
+  }
   if(word >= slot.layout.words())
   {
     warn_unregistered(window, offset, false, by);
@@ -196,9 +520,7 @@ auto machine::run_state::dispatch_read(
     std::expected<std::uint32_t, bus_error> value{};
     {
       handler_scope const scope{in_handler};
-      value = slot.model->on_read(
-          slot.regs, offset, size,
-          {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = window.secure});
+      value = slot.model->on_read(slot.regs, offset, size, context_of(attrs, window.secure_alias));
     }
     after_model(hz);
     if(value)
@@ -238,10 +560,34 @@ auto machine::run_state::dispatch_write(
     std::uint32_t      offset,
     std::uint8_t       size,
     std::uint32_t      value,
-    initiator          by) -> std::expected<void, bus_error>
+    bus_attrs          attrs) -> std::expected<void, bus_error>
 {
+  attrs           = seen(attrs);
+  auto const by   = attrs.by;
   auto&      slot = *window.slot;
   auto const word = offset / 4;
+  if(firewall != nullptr) [[unlikely]]
+  {
+    auto verdict = periph::bus_verdict::allow;
+    {
+      handler_scope const scope{in_handler};
+      verdict = firewall->check_peripheral(window.serving, attrs, arch::memory_op::write);
+    }
+    if(verdict == periph::bus_verdict::bus_error)
+    {
+      firewall_refused = by == initiator::cpu;
+      return std::unexpected(bus_error::denied);
+    }
+    if(verdict == periph::bus_verdict::read_zero_write_ignore)
+    {
+      if(word < slot.layout.words())
+      {
+        trace_mmio(slot, window.base + offset, offset, size, value & size_mask(size), true, by);
+      }
+      note_watched(window.base + offset, size, value, true, by);
+      return {};
+    }
+  }
   if(word >= slot.layout.words())
   {
     warn_unregistered(window, offset, true, by);
@@ -258,7 +604,7 @@ auto machine::run_state::dispatch_write(
       exact_write = by == initiator::cpu and slot.model->drives_core_clock();
       done        = slot.model->on_write(
           slot.regs, offset, size, old, value & size_mask(size),
-          {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = window.secure});
+          context_of(attrs, window.secure_alias));
       exact_write = false;
     }
     after_model(hz);
@@ -291,14 +637,15 @@ auto machine::run_state::dispatch_controller_write(
     address              addr,
     std::uint8_t         size,
     std::uint64_t        value,
-    initiator            by) -> std::expected<void, bus_error>
+    bus_attrs            attrs) -> std::expected<void, bus_error>
 {
+  attrs           = seen(attrs);
+  auto const by   = attrs.by;
   auto const hz   = owner.clock_.instruction_hz();
   auto const word = [&](address at, std::uint8_t bytes, std::uint32_t data) {
     handler_scope const scope{in_handler};
     return region.controller->on_memory_write(
-        *region.desc, at, bytes, data,
-        {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = region.desc->secure});
+        *region.desc, at, bytes, data, context_of(attrs, region.desc->secure));
   };
   auto done = size == 8 ? word(addr, 4, static_cast<std::uint32_t>(value))
                         : word(addr, size, static_cast<std::uint32_t>(value) & size_mask(size));
@@ -318,7 +665,7 @@ void machine::run_state::note_controller_read(
     mapped_region const& region,
     address              addr,
     std::uint8_t         size,
-    initiator            by)
+    bus_attrs            attrs)
 {
   auto const  first      = region.offset + (addr - region.desc->start);
   auto* const controller = controller_read_hit(region.buffer.get(), first, first + size - 1);
@@ -330,8 +677,7 @@ void machine::run_state::note_controller_read(
   {
     handler_scope const scope{in_handler};
     controller->on_memory_read(
-        *region.desc, addr, size,
-        {.pc = arch->pc(), .now = owner.clock_.now(), .by = by, .secure = region.desc->secure});
+        *region.desc, addr, size, context_of(seen(attrs), region.desc->secure));
   }
   after_model(hz);
 }
@@ -375,10 +721,8 @@ void machine::run_state::on_controller_read(
         handler_scope const scope{run.in_handler};
         controller->on_memory_read(
             region, at, bytes,
-            {.pc     = run.arch->pc(),
-             .now    = run.owner.clock_.now(),
-             .by     = initiator::cpu,
-             .secure = region.secure});
+            run.context_of(
+                run.seen({.by = initiator::cpu, .secure = region.secure}), region.secure));
       }
       if(run.controller_hook_serial != before)
       {
@@ -454,6 +798,16 @@ auto machine::run_state::raising_access(Access access) -> decltype(access())
   return result;
 }
 
+void machine::run_state::cpu_bus_error(address addr, arch::memory_op op)
+{
+  if(std::exchange(firewall_refused, false))
+  {
+    check(uc_ctl_refuse_mmio(engine), "refusing the engine access");
+    return;
+  }
+  record_bus_fault(addr, op);
+}
+
 void machine::run_state::record_bus_fault(address addr, arch::memory_op op) noexcept
 {
   if(not bus_fault)
@@ -496,6 +850,42 @@ void machine::run_state::note_unmodelled(
   }
 }
 
+void machine::run_state::refuse_unmodelled(address addr, std::size_t size) const
+{
+  auto       at  = std::uint64_t{addr};
+  auto const end = at + size;
+  while(at < end)
+  {
+    auto const here = static_cast<address>(at);
+    if(auto const* const region = mapped_region::find(owner.memory_, here, 1))
+    {
+      at += region->remaining(here);
+      continue;
+    }
+    if(auto const* const window = window_at(here, 1))
+    {
+      auto const  offset = here - window->base;
+      auto const& slot   = *window->slot;
+      auto const  word   = offset / 4;
+      auto const* rules  = word < slot.layout.words() ? slot.layout.find(word) : nullptr;
+      auto const  served = word < slot.layout.words() and slot.claimed[word] != 0;
+      if(served ? slot.model->storage_only(word * 4) : (rules == nullptr or not slot.model))
+      {
+        throw model_error(
+            window->unit->name, rules == nullptr ? std::string{} : register_name(slot.desc, word),
+            offset & ~3u);
+      }
+      at = (at & ~std::uint64_t{3}) + 4;
+      continue;
+    }
+    if(auto const* const raz = raz_at(here, 1))
+    {
+      throw model_error(raz->range->name, "", here - raz->range->start);
+    }
+    return;
+  }
+}
+
 void machine::run_state::warn_unregistered(
     mmio_window const& window,
     std::uint32_t      offset,
@@ -522,16 +912,18 @@ auto machine::run_state::on_mmio_read(
     uc_struct*,
     std::uint64_t offset,
     unsigned      size,
+    uc_mem_attrs  attrs,
     void*         user) noexcept -> std::uint64_t
 {
-  auto const&   window = *static_cast<mmio_window const*>(user);
-  auto&         run    = *window.run;
-  std::uint32_t value  = 0;
+  auto const& window  = *static_cast<mmio_window const*>(user);
+  auto&       run     = *window.run;
+  run.access          = attrs;
+  std::uint32_t value = 0;
   run.guarded([&] {
     auto const read = run.raising_access([&] {
       return run.dispatch_read(
           window, static_cast<std::uint32_t>(offset), static_cast<std::uint8_t>(size),
-          initiator::cpu);
+          cpu_attrs(attrs));
     });
     if(read)
     {
@@ -539,7 +931,7 @@ auto machine::run_state::on_mmio_read(
     }
     else
     {
-      run.record_bus_fault(window.base + static_cast<address>(offset), arch::memory_op::read);
+      run.cpu_bus_error(window.base + static_cast<address>(offset), arch::memory_op::read);
     }
     return false;
   });
@@ -551,19 +943,21 @@ void machine::run_state::on_mmio_write(
     std::uint64_t offset,
     unsigned      size,
     std::uint64_t value,
+    uc_mem_attrs  attrs,
     void*         user) noexcept
 {
   auto const& window = *static_cast<mmio_window const*>(user);
   auto&       run    = *window.run;
+  run.access         = attrs;
   run.guarded([&] {
     auto const done = run.raising_access([&] {
       return run.dispatch_write(
           window, static_cast<std::uint32_t>(offset), static_cast<std::uint8_t>(size),
-          static_cast<std::uint32_t>(value), initiator::cpu);
+          static_cast<std::uint32_t>(value), cpu_attrs(attrs));
     });
     if(not done)
     {
-      run.record_bus_fault(window.base + static_cast<address>(offset), arch::memory_op::write);
+      run.cpu_bus_error(window.base + static_cast<address>(offset), arch::memory_op::write);
     }
     return false;
   });
@@ -580,17 +974,19 @@ auto machine::run_state::on_shared_read(
     uc_struct*,
     std::uint64_t offset,
     unsigned      size,
+    uc_mem_attrs  attrs,
     void*         user) noexcept -> std::uint64_t
 {
-  auto const&   shared = *static_cast<mmio_page const*>(user);
-  auto&         run    = *shared.run;
+  auto const& shared   = *static_cast<mmio_page const*>(user);
+  auto&       run      = *shared.run;
+  run.access           = attrs;
   auto const    addr   = static_cast<address>(shared.base + offset);
   auto const&   window = shared.member_at(addr);
   std::uint32_t value  = 0;
   run.guarded([&] {
     auto const read = run.raising_access([&] {
       return run.dispatch_read(
-          window, addr - window.base, static_cast<std::uint8_t>(size), initiator::cpu);
+          window, addr - window.base, static_cast<std::uint8_t>(size), cpu_attrs(attrs));
     });
     if(read)
     {
@@ -598,7 +994,7 @@ auto machine::run_state::on_shared_read(
     }
     else
     {
-      run.record_bus_fault(addr, arch::memory_op::read);
+      run.cpu_bus_error(addr, arch::memory_op::read);
     }
     return false;
   });
@@ -610,21 +1006,23 @@ void machine::run_state::on_shared_write(
     std::uint64_t offset,
     unsigned      size,
     std::uint64_t value,
+    uc_mem_attrs  attrs,
     void*         user) noexcept
 {
   auto const& shared = *static_cast<mmio_page const*>(user);
   auto&       run    = *shared.run;
+  run.access         = attrs;
   auto const  addr   = static_cast<address>(shared.base + offset);
   auto const& window = shared.member_at(addr);
   run.guarded([&] {
     auto const done = run.raising_access([&] {
       return run.dispatch_write(
           window, addr - window.base, static_cast<std::uint8_t>(size),
-          static_cast<std::uint32_t>(value), initiator::cpu);
+          static_cast<std::uint32_t>(value), cpu_attrs(attrs));
     });
     if(not done)
     {
-      run.record_bus_fault(addr, arch::memory_op::write);
+      run.cpu_bus_error(addr, arch::memory_op::write);
     }
     return false;
   });

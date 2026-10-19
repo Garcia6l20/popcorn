@@ -39,6 +39,7 @@ from popcorn._machine import (
     check_machine_name,
     error_prefix,
 )
+from popcorn._option_bytes import OptionBytes
 from popcorn._part_description import PartDescription, load_description
 from popcorn._rcc import RccOptions
 from popcorn._stop import Stop
@@ -96,13 +97,20 @@ class Elf:
 
     Attributes:
         path: The file, an absolute path. It is read by `MachineDescription.machine`.
+        name: Name `image=` of `Machine.sym`, `fn_ptr`, `var`, `image.var` and `Boot` selects
+            the image by, None for none. Unique among the images.
+        loaded: False for a symbols-only image, see `Image.elf`: its sections are never
+            written to memory, while its symbols and DWARF serve the lookups, the unwinder and
+            coverage.
     """
 
     path: Path
+    name: str | None = None
+    loaded: bool = True
 
     def load(self) -> Image:
         """Read the file."""
-        return Image.elf(self.path)
+        return Image.elf(self.path, name=self.name, load=self.loaded)
 
     @property
     def constants(self) -> Constants:
@@ -306,6 +314,8 @@ class Boot:
     Attributes:
         vtor: Vector table reset reads, None for the description's default.
         until: Symbol boot runs to, None to only reset.
+        image: Name of the image `until` is looked up in, as `Machine.sym(image=)`, None for
+            the last image defining it.
         budget: Instructions boot may take, None for no limit.
         memory_init: Memory written after the images load.
         arena_base: First address of the call arena, None for the default, False for none.
@@ -318,6 +328,7 @@ class Boot:
     memory_init: Sequence[MemoryInit] = ()
     arena_base: int | Literal[False] | None = None
     arena_size: int | None = None
+    image: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "memory_init", tuple(self.memory_init))
@@ -364,6 +375,10 @@ class MachineDescription:
         cpi: Core cycles per instruction, above 0.
         rcc: Clock sources of the built-in RCC model, None for its defaults.
         supply: Supply voltages, None for the defaults.
+        option_bytes: User option bytes the built-in FLASH model encodes, None for the
+            description's option registers. With `tzen` the core boots from the secure boot
+            address, without it from the non-secure one, and `boot.vtor` wins over both. In
+            `digest`, left out when None.
         board: What the board does with each peripheral, by name.
         plugins: The native plugins the board's models and devices come from, at most one per
             name. A `PluginModel` on the board and a device class of a plugin's bindings module,
@@ -372,6 +387,9 @@ class MachineDescription:
             installed one by the SHA-256 of its library and bindings module, never by path, and
             left out when empty.
         strict: Whether an unmodelled peripheral access raises ModelError. Not in `digest`.
+        faults: What a processor fault does, as `Machine(faults=)`: "stop" ends the run with a
+            FAULT stop, "handler" enters the firmware's handler. In `digest`, left out when
+            "stop".
         missing: What the pytest plugin does with a test whose machine description raises
             MissingInput: "fail" it, or "skip" it with the missing path as the reason. Not in
             `digest`.
@@ -390,9 +408,11 @@ class MachineDescription:
     cpi: float = 1.0
     rcc: RccOptions | None = None
     supply: SupplyOptions | None = None
+    option_bytes: OptionBytes | None = None
     board: Mapping[str, Periph] = field(default_factory=_FrozenMap[str, Periph])
     plugins: Sequence[Plugin] = ()
     strict: bool = False
+    faults: Literal["stop", "handler"] = "stop"
     missing: Literal["fail", "skip"] = "fail"
     configs: Mapping[str, MachineDescription] = field(
         default_factory=_FrozenMap[str, "MachineDescription"]
@@ -407,10 +427,17 @@ class MachineDescription:
         self._check_plugins()
         if self.missing not in ("fail", "skip"):
             raise _plain_error("missing", f'"fail" or "skip", not {self.missing!r}')
+        if self.faults not in ("stop", "handler"):
+            raise _plain_error("faults", f'"stop" or "handler", not {self.faults!r}')
         if not (math.isfinite(self.cpi) and self.cpi > 0.0):
             raise _plain_error("cpi", "a finite number of cycles per instruction above 0")
         if self.core_hz is not None and self.core_hz <= 0:
             raise _plain_error("core_hz", "a core clock above 0 Hz")
+        option_bytes = cast(object, self.option_bytes)
+        if option_bytes is not None and not isinstance(option_bytes, OptionBytes):
+            raise _plain_error(
+                "option_bytes", f"an OptionBytes or None, not {type(option_bytes).__qualname__}"
+            )
         for name, periph in self.board.items():
             key = f"board.{name}"
             if periph.model is not None and periph.devices:
@@ -440,6 +467,13 @@ class MachineDescription:
                     f"images[{index}]", f"an Elf, Bin or Hex, not {type(image).__qualname__}"
                 )
             self._check_path(f"images[{index}].path", image.path)
+        names: set[str] = set()
+        for index, image in enumerate(self.images):
+            if not isinstance(image, Elf) or image.name is None:
+                continue
+            if image.name in names:
+                raise _plain_error(f"images[{index}].name", "a name no other image has")
+            names.add(image.name)
         self._check_path("svd", self.svd)
         self._check_path("description", self.description)
         for name, periph in cast(Mapping[object, object], self.board).items():
@@ -547,7 +581,8 @@ class MachineDescription:
     @property
     def digest(self) -> str:
         """SHA-256 of the canonical content, without `name`, `strict`, `missing` and `configs`,
-        and without `plugins` when it is empty.
+        without `plugins` when it is empty, without `option_bytes` when it is None and without
+        `faults` when it is "stop".
 
         Equal across processes: classes as `module:qualname`, paths absolute in POSIX form,
         mappings with sorted keys, plugins by name and code, never by path. It is what
@@ -614,7 +649,8 @@ class MachineDescription:
                 an SPI controller has an address or a cs, two `devices` keys name
                 one peripheral, `Machine(devices=)` refuses them, `audio` is on a peripheral
                 that is not an SAI with the built-in model, or `host` on one that is not a USB
-                device controller with the built-in model.
+                device controller with the built-in model. `Machine(option_bytes=)` refuses
+                `option_bytes`.
             MissingInput: An image, `svd` or `description` file, a plugin's source directory
                 or library does not exist, or the ST install the description is built from.
             ImageError: An image cannot be read or does not fit the memory map.
@@ -683,6 +719,7 @@ class MachineDescription:
             core_hz=self.core_hz or 0,
             cpi=self.cpi,
             strict_peripherals=self.strict if strict_peripherals is None else strict_peripherals,
+            faults=self.faults,
             vector_table=boot.vtor,
             config_digest=self.digest,
             arena_base=_arena_base(boot.arena_base),
@@ -694,6 +731,7 @@ class MachineDescription:
             audio=audio,
             usb=usb,
             supply=self.supply,
+            option_bytes=self.option_bytes,
             name=name,
         )
         for periph_name, periph in self.board.items():
@@ -721,7 +759,8 @@ class MachineDescription:
             The ADDRESS stop at `until`.
 
         Raises:
-            ConfigError: `boot.until` is not set or names no symbol.
+            ConfigError: `boot.until` is not set or names no symbol, or `boot.image` names no
+                loaded image.
             FaultError: The firmware faulted before reaching `until`.
             BudgetExceeded: The budget ran out before `until`.
             EmulationError: Any other stop before `until`.
@@ -730,8 +769,10 @@ class MachineDescription:
         if boot.until is None:
             raise _plain_error("boot.until", "a symbol boot runs to")
         try:
-            target = machine.address_of(boot.until)
+            target = machine.sym(boot.until, image=boot.image)
         except SymbolError as error:
+            if boot.image is not None and boot.image not in {i.name for i in machine.images}:
+                raise _plain_error("boot.image", "the name of a loaded image") from error
             raise _plain_error("boot.until", "a symbol of the loaded images") from error
         machine.reset()
         stop = await machine.run(until=target, budget=boot.budget)
@@ -1062,6 +1103,10 @@ def _canonical(value: object) -> object:
         skipped = {"name", "strict", "missing", "configs"}
         if not value.plugins:
             skipped.add("plugins")
+        if value.option_bytes is None:
+            skipped.add("option_bytes")
+        if value.faults == "stop":
+            skipped.add("faults")
         fields = {
             f.name: _canonical(getattr(value, f.name))
             for f in dataclasses.fields(value)
@@ -1072,6 +1117,20 @@ def _canonical(value: object) -> object:
         return _plugin_identity(value)
     if isinstance(value, PluginModel):
         return {"$": "PluginModel", "plugin": value.plugin.name, "model": value.name}
+    if isinstance(value, Boot):
+        boot = {
+            f.name: _canonical(getattr(value, f.name))
+            for f in dataclasses.fields(value)
+            if f.name != "image" or value.image is not None
+        }
+        return {"$": "Boot", **boot}
+    if isinstance(value, Elf):
+        elf: dict[str, object] = {"$": "Elf", "path": _canonical(value.path)}
+        if value.name is not None:
+            elf["name"] = value.name
+        if not value.loaded:
+            elf["loaded"] = False
+        return elf
     if dataclasses.is_dataclass(value):
         fields = {f.name: _canonical(getattr(value, f.name)) for f in dataclasses.fields(value)}
         return {"$": type(value).__qualname__, **fields}
