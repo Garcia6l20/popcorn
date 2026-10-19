@@ -35,6 +35,10 @@ class SearchPaths:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class Sources:
+    """Files a description is built from. The memory map and core values come from `rzone`
+    when set, else from `rzone_facts`, and the source digests record only the one read. Neither
+    set is a DescriptionError at build time."""
+
     part: str
     svd: Path
     mcu_db: Path
@@ -296,15 +300,16 @@ def _sha256_bytes(data: bytes) -> str:
 
 
 def compute_source_digests(sources: Sources) -> dict[str, str]:
-    """SHA-256 hex digest of each of @p sources's files, keyed svd and mcu_db, rzone, rzone_facts,
-    cmsis_header and gpio_modes when present, and patch:<file name> per patch file."""
+    """SHA-256 hex digest of each of @p sources's files, keyed svd and mcu_db, rzone when set
+    or else rzone_facts when set, cmsis_header and gpio_modes when present, and patch:<file
+    name> per patch file."""
     digests = {
         "svd": _sha256_bytes(sources.svd.read_bytes()),
         "mcu_db": _sha256_bytes(sources.mcu_db.read_bytes()),
     }
     if sources.rzone is not None:
         digests["rzone"] = _sha256_bytes(sources.rzone.read_bytes())
-    if sources.rzone_facts is not None:
+    elif sources.rzone_facts is not None:
         digests["rzone_facts"] = _sha256_bytes(sources.rzone_facts.read_bytes())
     if sources.cmsis_header is not None:
         digests["cmsis_header"] = _sha256_bytes(sources.cmsis_header.read_bytes())

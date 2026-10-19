@@ -479,6 +479,7 @@ def test_rzone_facts_read_as_the_rzone_the_builder_reads() -> None:
         ('source = "a manual table"', 'source = " "', "regions[1].source"),
         ('source = "a manual section"', 'source = ""', "core.source"),
         ("format = 1", "format = 2", "format"),
+        ("start = 0x30000000", "start = 0xFFFFE000", "regions[1].size"),
         ("mpu_regions_secure = 4", "mpu_regions_secure = true", "core.mpu_regions_secure"),
         ("secure = true\n", "secure = true\ncontroller = 'FLASH'\n", "regions[1]"),
     ],

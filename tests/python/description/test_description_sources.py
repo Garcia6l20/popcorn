@@ -2,16 +2,18 @@ from pathlib import Path
 
 import pytest
 from popcorn import MissingInput
+from popcorn.stm32.description import _sources
 from popcorn.stm32.description._cubemx import read_part
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._sources import (
     SearchPaths,
     Sources,
+    builder_digest,
     compute_source_digests,
     default_svd_dirs,
     facts_path,
-    match_refname,
     find_sources,
+    match_refname,
     resolve_part,
     resolve_svd_stem,
 )
@@ -214,3 +216,15 @@ def test_match_refname_returns_none_or_the_one_match() -> None:
     with pytest.raises(DescriptionError) as excinfo:
         match_refname("STM32T001ABC6", ["STM32T001ABCx", "STM32T001ABxx"], file="list")
     assert "exactly one match expected" in excinfo.value.expected
+
+
+def test_the_builder_digest_covers_the_rzone_facts_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    part = read_part(
+        (DATA_DIR / "db" / "mcu" / "STM32T001ABCx.xml").read_bytes(), file="STM32T001ABCx.xml"
+    )
+    assert list(facts_path(part).parent.glob("*.toml"))
+    with_facts = builder_digest()
+    monkeypatch.setattr(
+        _sources, "_RZONE_FACTS_DIR", Path(_sources.__file__).parent / "no_such_dir"
+    )
+    assert builder_digest() != with_facts

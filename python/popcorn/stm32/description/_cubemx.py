@@ -372,6 +372,8 @@ def read_rzone_facts(data: bytes, *, file: str) -> Rzone:
     for index, region in enumerate(facts.regions):
         if not region.source.strip():
             raise DescriptionError(file, 0, f"regions[{index}].source", "a non-empty source")
+        if region.start + region.size > 1 << 32:
+            raise DescriptionError(file, 0, f"regions[{index}].size", "an end at most 1 << 32")
     core = facts.core
     processor = RzoneProcessor(
         fpu="DP_FPU" if core.fpu_double else None,

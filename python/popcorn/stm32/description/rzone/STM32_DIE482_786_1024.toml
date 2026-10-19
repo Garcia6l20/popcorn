@@ -9,7 +9,7 @@ mpu_regions = 8
 mpu_regions_secure = 8
 sau_regions = 8
 num_interrupts = 126
-source = "DS13737 rev 10, 2 and 3.1: Cortex-M33 with a single-precision FPU, a set of DSP instructions and Arm TrustZone. RM0456 rev 7, 3.7.1: secure and nonsecure MPUs of up to eight regions each, so 8 nonsecure and 8 secure, DS13737 3.1: up to 16 regions for secure and nonsecure. RM0456 2.2: up to eight SAU regions. RM0456 22.3 table 186: vector positions 0 to 125 for STM32U575/585, LSECSS and MSI_PLL_UNLOCK sharing 125, so 126 lines. DS13737 3.20.1 counts 125 maskable channels"
+source = "DS13737 rev 10, 2 and 3.1: Cortex-M33 with a single-precision FPU, a set of DSP instructions and Arm TrustZone. RM0456 rev 7, 3.7.1: secure and nonsecure MPUs of up to eight regions each, so 8 nonsecure and 8 secure, DS13737 3.1: up to 16 regions for secure and nonsecure. RM0456 2.2: up to eight SAU regions. RM0456 22.3 table 186: vector positions 0 to 125 for STM32U575/585, LSECSS and MSI_PLL_UNLOCK sharing 125, so 126 lines. Table 186 note 2: position 125 is reserved on STM32U575/585 rev. X and present on every other revision, so DS13737 3.20.1 counts 125 maskable channels"
 
 [[regions]]
 name = "Flash_NS"
