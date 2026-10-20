@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../periph/stm32/sigma_delta.hpp"
+#include "link_queues.hpp"
 
 #include <popcorn/core/link_guard.hpp>
 #include <popcorn/core/types.hpp>
@@ -35,6 +36,8 @@ struct queued_pdm_sample
   bool captured{};
   /** @brief Virtual time of the write, in picoseconds since reset. */
   std::uint64_t at_ps{};
+  /** @brief The machine's reset count when it was written. */
+  std::uint64_t resets{};
 };
 
 /**
@@ -239,6 +242,14 @@ private:
 class pdm_queue_tap final : public periph::stm32::pdm_tap
 {
 public:
+  /**
+   * @brief Creates an empty tap.
+   * @param resets The machine's reset count, which tags each sample: a sample from before the
+   *        last reset is taken whatever the time bound of take().
+   */
+  explicit pdm_queue_tap(reset_count resets = {}) : resets_{std::move(resets)}
+  {}
+
   /** @brief Takes the link lock, blocking. */
   [[nodiscard]] auto lock() const -> core::link_guard
   {
@@ -255,7 +266,12 @@ public:
   {
     auto const held = lock();
     trim(held, limit_ - 1);
-    samples_.push_back({.pcm = pcm, .overrun = dropped, .captured = captured, .at_ps = at.ps});
+    samples_.push_back(
+        {.pcm      = pcm,
+         .overrun  = dropped,
+         .captured = captured,
+         .at_ps    = at.ps,
+         .resets   = resets_of(resets_)});
   }
 
   /** @brief Samples kept and not taken yet. */
@@ -273,10 +289,11 @@ public:
   }
 
   /**
-   * @brief Takes the oldest samples, up to the first written after @p until_ps.
+   * @brief Takes the oldest samples, up to the first written after @p until_ps since the last
+   *        reset. Samples from before it are taken whatever their time.
    * @param held The queue's lock.
    * @param count Most samples taken.
-   * @param until_ps Latest write time taken, in picoseconds.
+   * @param until_ps Latest write time taken, in picoseconds since the last reset.
    * @return The samples, oldest first.
    */
   auto take(
@@ -288,7 +305,9 @@ public:
     auto const first = samples_.begin();
     auto const last  = std::find_if(
         first, first + static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(count, samples_.size())),
-        [until_ps](queued_pdm_sample const& sample) { return sample.at_ps > until_ps; });
+        [until_ps, now = resets_of(resets_)](queued_pdm_sample const& sample) {
+          return sample.resets == now and sample.at_ps > until_ps;
+        });
     std::vector<queued_pdm_sample> out(first, last);
     samples_.erase(first, last);
     return out;
@@ -324,6 +343,7 @@ private:
   }
 
   mutable std::mutex            mutex_;
+  reset_count                   resets_;
   std::deque<queued_pdm_sample> samples_;
   std::uint64_t                 limit_ = pdm_sample_limit;
   std::uint64_t                 dropped_{};

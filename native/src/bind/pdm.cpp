@@ -132,9 +132,10 @@ void pdm_link::discard()
 pdm_tap_link::pdm_tap_link(
     periph::stm32::pdm_port& port,
     std::size_t              filter,
+    detail::reset_count      resets,
     detail::alive_flag       alive,
     detail::host_ref         host)
-    : tap_{std::make_shared<detail::pdm_queue_tap>()}, alive_{std::move(alive)},
+    : tap_{std::make_shared<detail::pdm_queue_tap>(std::move(resets))}, alive_{std::move(alive)},
       host_{std::move(host)}
 {
   port.attach_tap(filter, tap_);
@@ -301,6 +302,8 @@ auto machine_handle::attach_pdm_tap(std::string const& peripheral, std::size_t f
 {
   auto& port = pdm_port_of(engine(), peripheral);
   check_index(port, peripheral, "filter", filter);
-  return access([&](core::machine&) { return pdm_tap_link{port, filter, alive_, slot_}; });
+  return access([&](core::machine& target) {
+    return pdm_tap_link{port, filter, target.reset_counter(), alive_, slot_};
+  });
 }
 }

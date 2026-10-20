@@ -112,12 +112,14 @@ public:
    * @brief Wires a queue tap to a filter, replacing the board's attachment.
    * @param port The MDF or ADF.
    * @param filter Digital filter index, below port.sitfs().
+   * @param resets The machine's reset count, which tags each kept sample.
    * @param alive Cleared when the machine is destroyed.
    * @param host The machine's host, which predicates run on.
    */
   [[= py::skip]] pdm_tap_link(
       periph::stm32::pdm_port& port,
       std::size_t              filter,
+      detail::reset_count      resets,
       detail::alive_flag       alive,
       detail::host_ref         host);
 
@@ -139,8 +141,8 @@ public:
   [[= py::doc{"Take at most count of the oldest samples."}]] auto drain(std::uint64_t count)
       -> std::vector<pdm_sample_record>;
   /**
-   * @brief Takes the oldest kept samples written by @p until_ps, in one hold of the link lock:
-   *        later samples stay queued.
+   * @brief Takes the oldest kept samples written by @p until_ps, or before the last reset, in
+   *        one hold of the link lock: later samples stay queued.
    * @param count Most samples taken.
    * @param until_ps Latest write time taken, in picoseconds since reset.
    */

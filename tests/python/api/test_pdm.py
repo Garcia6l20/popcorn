@@ -131,7 +131,7 @@ def read(tap: FilterTap, n: int) -> list[FilterSample]:
     return samples
 
 
-def test_raw_bits_through_the_peer_chain_give_the_vector_at_the_closed_form_times(
+def test_raw_bits_give_the_vector_at_closed_form_times_overrunning_popcorns_4_entry_rxfifo(
     u575: popcorn.PartDescription,
 ) -> None:
     m = machine(u575)
@@ -193,6 +193,18 @@ def test_a_write_takes_the_edges_after_its_time_and_silence_fills_those_before(
     got = read(m.periph.MDF1.output(0), 64)
     assert [s.pcm for s in got] == run_chain(bits[skipped:], PEER).pcm[:64]
     assert mic.queued_bits == count - skipped - 64 * BITS_PER_SAMPLE
+
+
+def test_a_pcm_write_settles_the_interface_to_its_time_first(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = machine(u575)
+    mic = m.periph.MDF1.mic(0, "rising")
+    anchor = cck(m)
+    sitf(m)
+    asyncio.run(m.run(for_=us(100)))
+    at = asyncio.run(mic.write_pcm([1000] * 3, hz=48_000))
+    assert (mic.idle_bits, mic.queued_samples) == (edges_by(anchor, at), 3)
 
 
 def test_a_write_while_the_filter_runs_lands_at_the_first_edge_after_its_time(
@@ -285,6 +297,9 @@ def test_a_reset_of_any_kind_keeps_queued_input_and_kept_samples(
     asyncio.run(m.run(for_=us(50)))
     m.reset(kind)
     assert (mic.queued_bits, kept.available) == (count, before)
+    kept_samples = asyncio.run(kept.read(before + 1, for_=us(10)))
+    assert len(kept_samples) == before
+    assert kept_samples[-1].at > m.time
     clocked(m)
     anchor = cck(m)
     assert anchor < VirtualTime(0) + ms(1)
@@ -419,6 +434,8 @@ def test_bad_arguments_raise_at_the_call(u575: popcorn.PartDescription, running:
             mic.write_pcm([0], hz=True)
         with pytest.raises(ValueError, match="bits is 0 to 8"):
             mic.write_pdm(b"\x01", bits=9)
+        with pytest.raises(TypeError, match="data is bytes"):
+            mic.write_pdm(5)  # pyright: ignore[reportArgumentType]
         with pytest.raises(TypeError, match="bits is an int"):
             mic.write_pdm(b"\x01", bits=False)
         with pytest.raises(popcorn.ConfigError, match="from 0 to 5"):

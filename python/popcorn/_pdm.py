@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from popcorn import _core
 from popcorn._errors import ConfigError, ModelError
@@ -80,18 +80,19 @@ class PdmMic:
 
     @property
     def queued_samples(self) -> int:
-        """PCM samples written and not reached yet, the one being sent included."""
+        """PCM samples written and not reached yet by the model's last pull, the one being
+        sent included. See the class doc on the lag."""
         return self._link.queued_samples()
 
     @property
     def queued_bits(self) -> int:
-        """Raw bits written and not sent yet."""
+        """Raw bits written and not pulled by the model yet. See the class doc on the lag."""
         return self._link.queued_bits()
 
     @property
     def idle_bits(self) -> int:
-        """Bits of silence sent from an empty queue, since power-on or the last
-        `Machine.restore`."""
+        """Bits of silence the model pulled from an empty queue, since power-on or the last
+        `Machine.restore`. See the class doc on the lag."""
         return self._link.idle_bits()
 
     def write_pcm(
@@ -124,7 +125,11 @@ class PdmMic:
         return written(self._post(self._link.command_write_pcm(values, hz), at))
 
     def write_pdm(
-        self, data: bytes, *, bits: int | None = None, at: VirtualTime | None = None
+        self,
+        data: bytes | bytearray | memoryview,
+        *,
+        bits: int | None = None,
+        at: VirtualTime | None = None,
     ) -> Pending[VirtualTime]:
         """Queue raw bits, one per clock edge of this kind, the MSB of `data[0]` first, 1 for a
         high data line. Posted as `write_pcm` is.
@@ -134,12 +139,16 @@ class PdmMic:
             bits: Bits taken from `data`, `8 x len(data)` by default.
 
         Raises:
-            TypeError: `bits` is a bool or no int.
+            TypeError: `data` is not `bytes`, `bytearray` or `memoryview`, or `bits` is a bool
+                or no int.
             ValueError: `bits` is negative or above `8 x len(data)`, or `at` as for
                 `UartStream.write`.
             RuntimeError: Called from a handler or a model.
         """
-        packed = bytes(data)
+        raw = cast(object, data)
+        if not isinstance(raw, bytes | bytearray | memoryview):
+            raise TypeError(f"data is bytes, not {type(raw).__name__}")
+        packed = bytes(cast(bytes, raw))
         count = 8 * len(packed) if bits is None else bits
         _check_int(count, "bits")
         if not 0 <= count <= 8 * len(packed):
@@ -160,7 +169,9 @@ class FilterTap:
 
     Every sample the filter completes is kept, those that found the RXFIFO full with `overrun`
     set, and those the ADF's sound activity detector kept out with `captured` False. A reset
-    keeps them. `Machine.restore` drops the samples not read yet and resets `dropped`.
+    keeps them: a sample from before it keeps its `at` in the old base, and every read takes it
+    whatever its time or deadline. `Machine.restore` drops the samples not read yet and resets
+    `dropped`.
 
     The model's RXFIFO overruns one sample earlier than silicon, see `FilterSample.overrun`.
     With RFOVRF set the model keeps delivering exact samples, where silicon gives invalid ones,

@@ -507,3 +507,21 @@ TEST_CASE("an SAI frame from before a reset is taken whatever the time bound aft
   CHECK(taken[1].at_ps == 0);
   CHECK(queue.available(queue.lock()) == 1);
 }
+
+TEST_CASE("a kernel change mid-sample keeps the fraction of the PCM sample already sent")
+{
+  constexpr popcorn::periph::stm32::bit_rate slow{.kernel_hz = 20'480'000, .divider = 10};
+  constexpr popcorn::periph::stm32::bit_rate fast{.kernel_hz = 40'960'000, .divider = 10};
+  detail::pdm_queue_source                   source;
+  std::array<std::int16_t, 4> const          pcm{100, 200, 300, 400};
+  source.write_pcm(source.lock(), pcm, 16'000);
+  std::array<std::uint8_t, 64> half{};
+  source.clock(half, slow);
+  CHECK(source.queued_samples(source.lock()) == 4);
+  std::array<std::uint8_t, 127> rest{};
+  source.clock(rest, fast);
+  CHECK(source.queued_samples(source.lock()) == 4);
+  std::array<std::uint8_t, 1> last{};
+  source.clock(last, fast);
+  CHECK(source.queued_samples(source.lock()) == 3);
+}
