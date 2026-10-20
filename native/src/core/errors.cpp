@@ -9,17 +9,18 @@
 
 namespace popcorn
 {
-error::~error()                     = default;
-config_error::~config_error()       = default;
-image_error::~image_error()         = default;
-symbol_error::~symbol_error()       = default;
-emulation_error::~emulation_error() = default;
-fault_error::~fault_error()         = default;
-budget_exceeded::~budget_exceeded() = default;
-model_error::~model_error()         = default;
-machine_running::~machine_running() = default;
-machine_busy::~machine_busy()       = default;
-not_implemented::~not_implemented() = default;
+error::~error()                         = default;
+config_error::~config_error()           = default;
+image_error::~image_error()             = default;
+symbol_error::~symbol_error()           = default;
+emulation_error::~emulation_error()     = default;
+fault_error::~fault_error()             = default;
+budget_exceeded::~budget_exceeded()     = default;
+model_error::~model_error()             = default;
+unmodelled_config::~unmodelled_config() = default;
+machine_running::~machine_running()     = default;
+machine_busy::~machine_busy()           = default;
+not_implemented::~not_implemented()     = default;
 
 namespace
 {
@@ -195,5 +196,38 @@ auto model_error::reg() const noexcept -> std::string const&
 auto model_error::offset() const noexcept -> address
 {
   return offset_;
+}
+
+model_error::model_error(
+    std::string const& message,
+    std::string const& peripheral,
+    std::string const& reg,
+    address            offset)
+    : error(message), peripheral_(peripheral), reg_(reg), offset_(offset)
+{}
+
+unmodelled_config::unmodelled_config(
+    std::string const& peripheral,
+    std::string const& reg,
+    address            offset,
+    std::string        field,
+    std::uint32_t      value,
+    std::string const& what)
+    : model_error(
+          std::format("{}.{}.{} = {} not modelled: {}", peripheral, reg, field, value, what),
+          peripheral,
+          reg,
+          offset),
+      field_(std::move(field)), value_(value)
+{}
+
+auto unmodelled_config::field() const noexcept -> std::string const&
+{
+  return field_;
+}
+
+auto unmodelled_config::value() const noexcept -> std::uint32_t
+{
+  return value_;
 }
 }

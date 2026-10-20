@@ -234,6 +234,30 @@ class ModelError(PopcornError):
         self.offset = offset
 
 
+class UnmodelledConfig(ModelError):
+    """A built-in model met a register setting it does not implement. Raised by the MDF and ADF
+    models when the setting takes effect, such as an enable bit set with an unmodelled mode.
+
+    Attributes:
+        field: Field name, such as `SITFMOD`.
+        value: Value the field held.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        peripheral: str = "",
+        register: str = "",
+        offset: int = 0,
+        field: str = "",
+        value: int = 0,
+    ) -> None:
+        super().__init__(message, peripheral=peripheral, register=register, offset=offset)
+        self.field = field
+        self.value = value
+
+
 class MachineRunning(PopcornError):
     """The machine is busy, a goal active or a free run started: sync access is refused outside
     its handlers. `snapshot`, `restore`, `remove_hooks` and `Ring.clear` refuse handlers too.

@@ -65,12 +65,22 @@ def test_missing_description_file_is_a_config_error(tmp_path: Path) -> None:
         popcorn.FaultError,
         popcorn.BudgetExceeded,
         popcorn.ModelError,
+        popcorn.UnmodelledConfig,
         popcorn.MachineRunning,
         popcorn.MachineBusy,
     ],
 )
 def test_every_error_is_a_popcorn_error(error: type[Exception]) -> None:
     assert issubclass(error, popcorn.PopcornError)
+
+
+def test_unmodelled_config_is_a_model_error_with_field_and_value() -> None:
+    error = popcorn.UnmodelledConfig(
+        "m", peripheral="MDF1", register="SITF0CR", offset=0x80, field="SITFMOD", value=2
+    )
+    assert isinstance(error, popcorn.ModelError)
+    assert (error.peripheral, error.register, error.offset) == ("MDF1", "SITF0CR", 0x80)
+    assert (error.field, error.value) == ("SITFMOD", 2)
 
 
 def test_fault_and_budget_errors_are_emulation_errors() -> None:

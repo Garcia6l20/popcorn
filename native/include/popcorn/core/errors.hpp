@@ -185,10 +185,58 @@ public:
   /** @brief Destroys the error. Declared out-of-line: the key function pins the vtable. */
   ~model_error() override;
 
+protected:
+  /**
+   * @brief Constructs a model_error with a message of the subclass.
+   * @param message Full message.
+   * @param peripheral Name of the peripheral.
+   * @param reg Name of the register, empty when not register-specific.
+   * @param offset Offset within the peripheral.
+   */
+  model_error(
+      std::string const& message,
+      std::string const& peripheral,
+      std::string const& reg,
+      address            offset);
+
 private:
   std::string peripheral_;
   std::string reg_;
   address     offset_;
+};
+
+/** @brief A model met a register setting it does not implement, at the moment it takes effect. */
+class POPCORN_API unmodelled_config : public model_error
+{
+public:
+  /**
+   * @brief Constructs an unmodelled_config.
+   * @param peripheral Name of the peripheral.
+   * @param reg Name of the register holding the field.
+   * @param offset Offset of that register within the peripheral.
+   * @param field Name of the field.
+   * @param value Value the field holds.
+   * @param what What the value selects, such as "Manchester mode".
+   */
+  unmodelled_config(
+      std::string const& peripheral,
+      std::string const& reg,
+      address            offset,
+      std::string        field,
+      std::uint32_t      value,
+      std::string const& what);
+
+  /** @brief Name of the field. */
+  [[nodiscard]] auto field() const noexcept -> std::string const&;
+  /** @brief Value the field holds. */
+  [[nodiscard]] auto value() const noexcept -> std::uint32_t;
+
+  /** @brief Destroys the error. Declared out-of-line: the key function pins the vtable. */
+  ~unmodelled_config() override;
+
+private:
+  std::string   field_;
+  std::uint32_t value_;
 };
 
 /** @brief The requested operation needs the machine stopped, but it is running. */

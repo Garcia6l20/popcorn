@@ -1,5 +1,6 @@
 #include "kit.hpp"
 
+#include <popcorn/core/errors.hpp>
 #include <popcorn/plugin/plugin.hpp>
 
 #include <cstring>
@@ -66,8 +67,8 @@ void counter_model::load(std::span<std::byte const> in)
 }
 
 line_model::line_model(popcorn::peripheral_desc const& desc, popcorn::core::clock const& clock)
-    : transmit_{popcorn::find_register(desc, "TDR")}, receive_{popcorn::find_register(desc, "RDR")},
-      clock_{&clock}
+    : name_{desc.name}, transmit_{popcorn::find_register(desc, "TDR")},
+      receive_{popcorn::find_register(desc, "RDR")}, clock_{&clock}
 {}
 
 auto line_model::claims() const -> std::vector<std::string>
@@ -111,6 +112,11 @@ auto line_model::on_write(
     std::uint32_t value,
     popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error>
 {
+  if(transmit_ != nullptr and offset == transmit_->offset and value == unmodelled_frame)
+  {
+    throw popcorn::unmodelled_config{name_, transmit_->name, offset,
+                                     "TDR", value,           "a frame the kit refuses"};
+  }
   if(transmit_ != nullptr and offset == transmit_->offset and far_ != nullptr)
   {
     far_->transmitted(static_cast<std::uint16_t>(value & frame_mask), clock_->time(), false);

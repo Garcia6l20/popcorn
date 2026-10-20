@@ -255,5 +255,5 @@ def test_every_error_class_is_covered() -> None:
         and issubclass(cls, popcorn.PopcornError)
         and cls is not popcorn.PopcornError
     }
-    assert public <= covered | {popcorn.EmulationError}
+    assert public <= covered | {popcorn.EmulationError, popcorn.UnmodelledConfig}
     assert popcorn.BusAccessError in covered
