@@ -574,12 +574,15 @@ public:
   /**
    * @brief Takes a full copy of the machine state: every RAM and flash region, the engine CPU
    *        context and register list, the arch bytes, register storage and line levels, model
-   *        bytes, event queue, clock, intercept and return hook state. Cost is a copy of the
-   *        mapped memory, about 15 us for 784 KB.
+   *        bytes, event queue, clock, intercept and return hook state. Every
+   *        periph::snapshot_listener's `before_snapshot` runs first, so models that compute
+   *        lazily save their state at the machine's time. Cost is a copy of the mapped memory,
+   *        about 15 us for 784 KB.
    * @return The snapshot, restorable any number of times.
    * @throws machine_running while a slice runs, handlers included.
    * @throws machine_busy during a call begun by begin_call() and not ended.
    * @throws emulation_error when the machine was left invalid by a failed restore().
+   * @throws Any exception a snapshot listener threw, with nothing captured.
    */
   [[nodiscard]] auto snapshot() const -> core::snapshot;
 

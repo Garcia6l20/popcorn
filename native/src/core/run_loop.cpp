@@ -6,6 +6,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/core_hold.hpp>
 #include <popcorn/periph/reset_listener.hpp>
+#include <popcorn/periph/snapshot_listener.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -190,6 +191,21 @@ void machine::run_state::notify_before_reset(reset_kind kind)
       if(auto* const listener = dynamic_cast<periph::reset_listener*>(slot->model.get()))
       {
         listener->before_reset(kind);
+      }
+    }
+  }
+}
+
+void machine::run_state::notify_before_snapshot()
+{
+  handler_scope const scope{in_handler};
+  for(auto const& slot : owner.peripherals_)
+  {
+    if(slot)
+    {
+      if(auto* const listener = dynamic_cast<periph::snapshot_listener*>(slot->model.get()))
+      {
+        listener->before_snapshot();
       }
     }
   }

@@ -2359,6 +2359,9 @@ class Machine:
     def snapshot(self) -> Snapshot:
         """The whole machine state, restorable with `restore`, saved with `Snapshot.save`.
 
+        Models that compute lazily bring their state to the machine's time first: an MDF or
+        ADF takes the input bits clocked up to it, see `PdmMic`.
+
         Raises:
             MachineRunning: The machine is busy, from its handlers too.
             MachineBusy: The machine is a member of a linked system: its state is taken with

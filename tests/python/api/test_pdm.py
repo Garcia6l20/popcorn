@@ -343,6 +343,38 @@ def test_a_reset_between_two_samples_takes_exactly_the_bits_clocked_before_it(
     assert [s.pcm for s in got] == run_chain(bits[consumed:], PEER).pcm[:32]
 
 
+def pack(bits: list[int]) -> bytes:
+    data = bytearray((len(bits) + 7) // 8)
+    for k, bit in enumerate(bits):
+        data[k // 8] |= bit << (7 - k % 8)
+    return bytes(data)
+
+
+def test_a_snapshot_between_two_samples_keeps_the_bits_clocked_before_it(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = machine(u575)
+    data, count, pcm = pdm_16k()
+    bits = bits_of(data, count)
+    mic = m.periph.MDF1.mic(0, "rising")
+    tap = m.periph.MDF1.output(0)
+    asyncio.run(mic.write_pdm(data, bits=count))
+    anchor = cck(m)
+    sitf(m)
+    peer_filter(m)
+    asyncio.run(m.run(for_=us(62.5 * 7 + 40)))
+    consumed = edges_by(anchor, m.time)
+    assert consumed % BITS_PER_SAMPLE != 0
+    saved = m.snapshot()
+    assert mic.queued_bits == count - consumed
+    first = consumed // BITS_PER_SAMPLE
+    m.restore(saved)
+    asyncio.run(mic.write_pdm(pack(bits[consumed:]), bits=count - consumed))
+    got = read(tap, 33)
+    assert [s.pcm for s in got] == pcm[first : first + 33]
+    assert [s.at for s in got] == [sample_at(anchor, k) for k in range(first, first + 33)]
+
+
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 def test_a_reset_after_a_reads_stop_leaves_the_samples_past_the_stop_queued(
     u575: popcorn.PartDescription, running: bool

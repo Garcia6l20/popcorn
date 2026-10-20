@@ -1168,6 +1168,38 @@ TEST_CASE("the peer's chain on SITF0 reproduces chain_pdm_16k.json at 128-bit ed
   }
 }
 
+TEST_CASE("a snapshot between two samples pulls every bit clocked before it into the saved chain")
+{
+  stream_rig const r;
+  auto [bits, pcm] = pdm_16k();
+  r.mic[0]->bits   = bits;
+  r.write("BSMX0CR", 0);
+  r.write("DFLT0CICR", (0x2Cu << 20) | (31u << 8) | (5u << 4));
+  r.write("DFLT0RSFR", 2u << 8);
+  r.write("DFLT0CR", 1);
+  auto const at = edge_at(r.anchor, 2 + 2 * (128 * 7 + 80));
+  r.run_until(at);
+  REQUIRE(r.taps[0]->samples.size() == 7);
+  auto const saved = r.target->snapshot();
+  CHECK(r.mic[0]->next == 128 * 7 + 81);
+  auto const end = edge_at(r.anchor, 2 + 2 * (128 * 40 - 1)) + us;
+  r.run_until(end);
+  auto const first = r.taps[0]->samples;
+  r.target->restore(saved);
+  r.mic[0]->next = 128 * 7 + 81;
+  r.taps[0]->samples.clear();
+  r.run_until(end);
+  auto const& again = r.taps[0]->samples;
+  REQUIRE(first.size() == 40);
+  REQUIRE(again.size() == 33);
+  for(std::size_t k = 0; k < again.size(); ++k)
+  {
+    CAPTURE(k);
+    CHECK(again[k].pcm == pcm[k + 7]);
+    CHECK(again[k].at == first[k + 7].at);
+  }
+}
+
 TEST_CASE("bs0_r and bs0_f reach their filters, two filters on one stream share the pull")
 {
   stream_rig const r;

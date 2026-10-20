@@ -1801,6 +1801,13 @@ struct machine::run_state
   void notify_before_reset(reset_kind kind);
 
   /**
+   * @brief Calls every periph::snapshot_listener's `before_snapshot` in description order,
+   *        inside a handler scope.
+   * @throws Any exception a listener threw, before any later listener runs.
+   */
+  void notify_before_snapshot();
+
+  /**
    * @brief notify_before_reset(), then reset_notified(): a throw from a listener leaves the
    *        machine unreset.
    */

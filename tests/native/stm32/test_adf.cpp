@@ -824,10 +824,8 @@ TEST_CASE(
   REQUIRE(want.frames[1].phase == stm32::sad_phase::monitor);
   REQUIRE(want.frames[2].phase == stm32::sad_phase::detect);
   auto const at          = dry.tap->samples[want.ends[2]].at;
-  auto const due_pending = [at](stream_rig const& r) {
-    auto const snap = r.target->snapshot();
-    return std::ranges::any_of(
-        snap.data().events.pending, [at](core::event const& e) { return e.due_ps == at; });
+  auto const due_pending = [&want](stream_rig const& r) {
+    return r.tap->samples.size() == want.ends[2];
   };
   {
     stream_rig const r;

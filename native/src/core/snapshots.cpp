@@ -52,7 +52,7 @@ auto machine::snapshot() const -> core::snapshot
   {
     throw machine_busy("a call is in progress");
   }
-  auto const& run = *run_;
+  auto& run = *run_;
   if(run.invalid)
   {
     throw emulation_error("the machine was left invalid by a failed restore");
@@ -62,6 +62,7 @@ auto machine::snapshot() const -> core::snapshot
   contract_assert(not run.trap.has_value());
   contract_assert(not run.unmapped.has_value());
   contract_assert(not run.bus_fault.has_value());
+  run.notify_before_snapshot();
 
   snapshot_data data{
       .format             = snapshot_format_version,

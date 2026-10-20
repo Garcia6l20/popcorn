@@ -3,6 +3,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/services.hpp>
 #include <popcorn/core/snapshot.hpp>
+#include <popcorn/periph/snapshot_listener.hpp>
 
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
@@ -600,4 +601,97 @@ TEST_CASE("a save with no bytes for a model with state is refused")
     CHECK(refused.key() == "models.TESTDEV");
   }
   CHECK_NOTHROW(std::ignore = f.target->snapshot());
+}
+
+namespace
+{
+class settling_model final : public popcorn::periph::model,
+                             public popcorn::periph::snapshot_listener
+{
+public:
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+
+  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
+  {}
+
+  auto on_read(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0;
+  }
+
+  auto on_write(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+
+  void before_snapshot() override
+  {
+    if(throws)
+    {
+      throw popcorn::model_error("TESTDEV", "SETTLE", 0);
+    }
+    ++settled;
+  }
+
+  void save(std::vector<std::byte>& out) const override
+  {
+    out.push_back(static_cast<std::byte>(settled));
+  }
+
+  void load(std::span<std::byte const> in) override
+  {
+    settled = static_cast<int>(in.front());
+  }
+
+  int  settled{};
+  bool throws{};
+};
+
+auto with_settling_model() -> core::machine_options
+{
+  core::machine_options options;
+  options.models.emplace(
+      "TESTDEV", [](popcorn::periph::model_context&, popcorn::peripheral_desc const&) {
+        return std::make_shared<settling_model>();
+      });
+  return options;
+}
+
+auto saved_byte(core::snapshot const& taken) -> std::byte
+{
+  auto const found =
+      std::ranges::find(taken.data().models, std::string{"TESTDEV"}, &core::snapshot_part::owner);
+  REQUIRE(found != taken.data().models.end());
+  REQUIRE(found->data.size() == 1);
+  return found->data.front();
+}
+}
+
+TEST_CASE("a snapshot listener settles before its model is saved, a throw captures nothing")
+{
+  auto  f    = fixture{m33(), "snapshot", with_settling_model()};
+  auto& made = dynamic_cast<settling_model&>(*f.target->model("TESTDEV"));
+  CHECK(saved_byte(f.target->snapshot()) == std::byte{1});
+  CHECK(saved_byte(f.target->snapshot()) == std::byte{2});
+  made.throws = true;
+  CHECK_THROWS_AS(std::ignore = f.target->snapshot(), popcorn::model_error);
+  CHECK(made.settled == 2);
+  made.throws = false;
+  CHECK(saved_byte(f.target->snapshot()) == std::byte{3});
 }
