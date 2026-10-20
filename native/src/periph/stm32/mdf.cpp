@@ -202,98 +202,97 @@ class mdf;
 using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
 
 /**
- * @brief MDF1 and ADF1 of the STM32U5, RM0456 chapter 39 "Multi-function digital filter (MDF)"
- *        and chapter 40 "Audio digital filter (ADF)", one model for both through a layout read
- *        from the description: the filter count from the `DFLT<n>CR` registers, the motor
- *        control blocks of RM0456 Table 367 with `OEC0CR`, the sound activity detector with
- *        `SADCR`. One IRQ line per filter, `<instance>_FLT<n>_IRQn`, with the motor blocks, one
- *        `<instance>_IRQn` otherwise.
+ * @brief MDF1 and ADF1 of the STM32U5, RM0456 chapter 39 "Multi-function digital filter (MDF)" and
+ *        chapter 40 "Audio digital filter (ADF)", one model for both through a layout read from the
+ *        description: the filter count from the `DFLT<n>CR` registers, the motor control blocks of
+ *        RM0456 Table 367 with `OEC0CR`, the sound activity detector with `SADCR`. One IRQ line per
+ *        filter, `<instance>_FLT<n>_IRQn`, with the motor blocks, one `<instance>_IRQn` otherwise.
  *
- *        Registers, RM0456 39.8 and 40.8. Every enable has its ACTIVE flag follow it at once,
- *        a popcorn choice: the resynchronization latency of 39.4.15 is not modelled, polling
- *        firmware sees the same end states. GCR.TRGO reads 0 after any write. BSMXACTIVE is the
- *        OR of DFLTACTIVE, OLDACTIVE and SCDACTIVE of its index, 39.8.4. SKPBF and SNPSxDR read
- *        0. DFLTEN is write-only, 39.8.5 and 40.8.5, so it reads 0 on both, although the ADF1
- *        description marks it read_write: a read-modify-write of a running DFLTxCR that does not
- *        set DFLTEN stops the filter. The ADF1 description lacks DFLT0CR.TRGSENS, 40.8.5 bit 8,
- *        so the bit reads 0 and ignores writes, which no modelled setting reads: TRGO forces its
- *        sensitivity and every other trigger raises. DFLTxISR flags are write-1-to-clear, OLDF also
- * clears THHF and THLF, 39.8.16. The IRQ of a filter is the OR of its flags with their
- * enables, 39.6.
+ *        Registers, RM0456 39.8 and 40.8. Every enable has its ACTIVE flag follow it at once, a
+ *        popcorn choice: the resynchronization latency of 39.4.15 is not modelled, polling firmware
+ *        sees the same end states. GCR.TRGO reads 0 after any write. BSMXACTIVE is the OR of
+ *        DFLTACTIVE, OLDACTIVE and SCDACTIVE of its index, 39.8.4. SNPSxDR reads 0. DFLTEN is
+ *        write-only, 39.8.5 and 40.8.5, so it reads 0 on both, although the ADF1 description marks
+ *        it read_write: a read-modify-write of a running DFLTxCR that does not set DFLTEN stops the
+ *        filter. The ADF1 description lacks DFLT0CR.TRGSENS, 40.8.5 bit 8, so the bit reads 0 and
+ *        ignores writes, which no modelled setting reads: TRGO forces its sensitivity and every
+ *        other trigger raises. DFLTxISR flags are write-1-to-clear, OLDF also clears THHF and THLF,
+ *        39.8.16. The IRQ of a filter is the OR of its flags with their enables, 39.6.
  *
  *        Data path, 39.4.3 to 39.4.13. CCKy runs while CKGDEN, CCKyEN and CCKyDIR are set, one
  *        period every (PROCDIV + 1) x (CCKDIV + 1) kernel cycles. Each edge time is computed from
- *        its index since the clock started, never accumulated, and a kernel clock change keeps
- *        the edges up to the change and restarts the count at the next edge at the new rate.
- *        CCK0 and CCK1 share the divider, each starts at the write that enables it. An enabled
- *        SITF takes a bit from its rising-edge sensor at each rising edge of its CCKy, bs_r,
- *        and from its falling-edge sensor at each falling edge, bs_f, open question 6. An edge
- *        without a sensor carries a modulator held at 0, silence. A SITF, a clock or a filter
- *        enabled by a write starts at the first edge after the write, a popcorn choice. Bits
- *        are pulled lazily, at a sample time, at a register access that needs them and at
- *        settle(), and each edge is pulled once, whatever filters use its stream. The filters
- *        run the chain of `dfilter_chain.hpp` from a reset state at their start, 39.4.11, and
- *        write each sample to their 4-deep RXFIFO at the edge of the bit that completed it,
- *        39.4.13, an event of that exact picosecond. ACQMOD 000 runs continuously, 001 writes one
- *        sample, sets DFLTRUN 0 and restarts at the next write of DFLTEN 1, 39.4.10. ACQMOD 010
- *        and 011 wait with DFLTRUN 0 for a GCR write of TRGO 1, which starts every enabled filter
- *        of those modes that is not running at the next edge of its own stream, so filters on
- *        both edges of one clock start half a bit apart. 011 re-arms after its sample. A trigger
- *        reaching a running or disabled filter is ignored. DFLTEN 0 stops at once, resets the
- *        chain and flushes the RXFIFO. Each start loads NBDIS: that many samples leaving the
- *        HPF are dropped before INT, their saturation carried to the first kept sample, 39.4.10
- *        "Discarded samples". INTVAL not 0 sums INTVAL + 1 samples, divided by INTDIV, one
- *        RXFIFO write per sum, 39.4.8. A SKPDLY write with SKPBF 0 sets SKPBF and skips that
- *        many input bits of the filter while it runs, the CIC frozen, SKPBF back to 0 at the last
- *        skipped edge, 39.8.12. A popcorn choice: a filter waiting for its trigger skips
- *        nothing yet. DLYxCR reads catch up first.
- *        A full RXFIFO drops the sample and sets DOVRF. Silicon has DFLTxDR as a fifth stage,
- *        39.4.13 "Data resynchronization", so the model overruns one sample earlier. A read of
- *        DFLTxDR of any size pops one sample, PCM[23:0] in bits 31:8, an empty RXFIFO reads 0.
- *        A debugger read returns the same value and pops nothing.
- *        RXNEF follows the level, FTHF the level against FTH, 1 or 2 samples. SATF follows the
- *        chain's saturation. Each filter's tap sees every sample written, dropped ones marked.
- *        With DMAEN the filter drives `<instance>_flt<n>_dma`: with FTH 0 while the RXFIFO is not
- *        empty, with FTH 1 from the second sample until the RXFIFO empties, 39.4.13. ILVNB k
- *        interleaves filters 0 to k: DFLT0DR reads take one sample of each RXFIFO in turn, a
- *        round, DFLT0's request rises when every interleaved RXFIFO holds a sample and holds
- *        until the round ends, FTHF0 follows the same condition at a round's start, FTH, DMAEN
- *        and FTHF of filters 1 to k are ignored, and stopping any of them ends the round,
- *        39.4.13. Enabling an interleaved filter whose ACQMOD is not 01x, or whose ACQMOD,
- *        trigger, NBDIS, CICR, RSFR or INTR differ from another enabled one, logs once and
- *        raises model_error under `strict_peripherals`. RFOVRF is set at each RSFLT input sample
- * but the first since the start while mdf_proc_ck is below 24 times their rate, (MCICD + 1) x
- * (CCKDIV + 1) below 24: the input arrives while the previous one is still processed, 39.4.8. With
- * RFOVRIE the model wakes at that input so the IRQ rises on time. Silicon then gives invalid
- *        samples, the model still delivers exact ones, a popcorn choice.
+ *        its index since the clock started, never accumulated, and a kernel clock change keeps the
+ *        edges up to the change and restarts the count at the next edge at the new rate. CCK0 and
+ *        CCK1 share the divider, each starts at the write that enables it. An enabled SITF takes a
+ *        bit from its rising-edge sensor at each rising edge of its CCKy, bs_r, and from its
+ *        falling-edge sensor at each falling edge, bs_f, open question 6. An edge without a sensor
+ *        carries a modulator held at 0, silence. A SITF, a clock or a filter enabled by a write
+ *        starts at the first edge after the write, a popcorn choice. Bits are pulled lazily, at a
+ *        sample time, at a register access that needs them and at settle(), and each edge is pulled
+ *        once, whatever filters use its stream. The filters run the chain of `dfilter_chain.hpp`
+ *        from a reset state at their start, 39.4.11, and write each sample to their 4-deep RXFIFO
+ *        at the edge of the bit that completed it, 39.4.13, an event of that exact picosecond.
+ *        ACQMOD 000 runs continuously, 001 writes one sample, sets DFLTRUN 0 and restarts at the
+ *        next write of DFLTEN 1, 39.4.10. ACQMOD 010 and 011 wait with DFLTRUN 0 for a GCR write of
+ *        TRGO 1, which starts every enabled filter of those modes that is not running at the next
+ *        edge of its own stream, so filters on both edges of one clock start half a bit apart. 011
+ *        re-arms after its sample. A trigger reaching a running or disabled filter is ignored.
+ *        DFLTEN 0 stops at once, resets the chain and flushes the RXFIFO. Each start loads NBDIS:
+ *        that many samples leaving the HPF are dropped before INT, their saturation carried to the
+ *        first kept sample, 39.4.10 "Discarded samples". INTVAL not 0 sums INTVAL + 1 samples,
+ *        divided by INTDIV, one RXFIFO write per sum, 39.4.8. A SKPDLY write with SKPBF 0 sets
+ *        SKPBF and skips that many input bits of the filter while it runs, the CIC frozen, SKPBF
+ *        back to 0 at the last skipped edge, 39.8.12. A popcorn choice: a filter waiting for its
+ *        trigger skips nothing yet, where RM0456 39.4.8 read literally starts the skip at once with
+ *        DFLTEN 1. The 39.4.13 rule that interleaved filters' SKPDLY differ by less than the RXFIFO
+ *        depth is not checked. DLYxCR reads catch up first. A full RXFIFO drops the sample and sets
+ *        DOVRF. Silicon has DFLTxDR as a fifth stage, 39.4.13 "Data resynchronization", so the
+ *        model overruns one sample earlier. A read of DFLTxDR of any size pops one sample,
+ *        PCM[23:0] in bits 31:8, an empty RXFIFO reads 0. A debugger read returns the same value
+ *        and pops nothing. RXNEF follows the level, FTHF the level against FTH, 1 or 2 samples.
+ *        SATF follows the chain's saturation. Each filter's tap sees every sample written, dropped
+ *        ones marked. With DMAEN the filter drives `<instance>_flt<n>_dma`: with FTH 0 while the
+ *        RXFIFO is not empty, with FTH 1 from the second sample until the RXFIFO empties, 39.4.13.
+ *        ILVNB k interleaves filters 0 to k: DFLT0DR reads take one sample of each RXFIFO in turn,
+ *        a round, DFLT0's request rises when every interleaved RXFIFO holds a sample and holds
+ *        until the round ends, FTHF0 follows the same condition at a round's start, FTH, DMAEN and
+ *        FTHF of filters 1 to k are ignored, and stopping any of them ends the round, 39.4.13. A
+ *        popcorn choice: a DFLT0DR read of an empty RXFIFO still moves to the next one. The round
+ *        restarts at filter 0 at each DFLTEN 0 to 1 of an interleaved filter and at each ILVNB
+ *        change. Enabling an interleaved filter whose ACQMOD is not 01x, or whose ACQMOD, trigger,
+ *        NBDIS, CICR, RSFR or INTR differ from another enabled one, logs once and raises
+ *        model_error under `strict_peripherals`. RFOVRF is set at each RSFLT input sample but the
+ *        first since the start while mdf_proc_ck is below 24 times their rate, (MCICD + 1) x
+ *        (CCKDIV + 1) below 24: the input arrives while the previous one is still processed,
+ *        39.4.8. With RFOVRIE the model wakes at that input so the IRQ rises on time. Silicon then
+ *        gives invalid samples, the model still delivers exact ones, a popcorn choice.
  *
- *        Write protection, 39.4.15 Table 381: a write changing a protected field while its
- *        ACTIVE flag is set keeps the old field value, logs once per register and raises
- *        model_error under `strict_peripherals`. The clock rules of Table 374 are checked at
- *        SITFEN and DFLTEN 0 to 1 with ">" read as ">=": normal SPI needs mdf_proc_ck at least 4
- *        x CCK, LF_MASTER 2 x CCK, with RSFLT 24 x CCK / (MCICD + 1), hclk at least mdf_proc_ck,
- *        CCK at most 25 MHz, 5 MHz in LF_MASTER. STH below 4 breaks 39.8.3. Each rule logs once
- *        per instance and raises model_error under `strict_peripherals`. Checks with no kernel
- *        clock are skipped.
+ *        Write protection, 39.4.15 Table 381: a write changing a protected field while its ACTIVE
+ *        flag is set keeps the old field value, logs once per register and raises model_error under
+ *        `strict_peripherals`. The clock rules of Table 374 are checked at SITFEN and DFLTEN 0 to 1
+ *        with ">" read as ">=": normal SPI needs mdf_proc_ck at least 4 x CCK, LF_MASTER 2 x CCK,
+ *        with RSFLT 24 x CCK / (MCICD + 1), hclk at least mdf_proc_ck, CCK at most 25 MHz, 5 MHz in
+ *        LF_MASTER. STH below 4 breaks 39.8.3. Each rule logs once per instance and raises
+ *        model_error under `strict_peripherals`. Checks with no kernel clock are skipped.
  *
- *        Unmodelled settings raise unmodelled_config naming the register and the field when
- *        they take effect, never at a write that leaves them insignificant: CKGMOD 1 at CKGDEN 0
- *        to 1, an input-direction CCKy used by an enabled SITF with CKGDEN 1, Manchester modes
- *        and MDF_CKIx clocks at SITFEN 0 to 1, the ADCITF sources, the window and snapshot modes,
- *        triggers other than TRGO, a reserved SCALE code, an ADF CICMOD other than Sinc4 and
- *        Sinc5 and ILVNB above the last filter at DFLTEN 0 to 1, a reserved SCALE written while
- *        the filter runs, OLDEN and SCDEN 0 to 1. Every throw from a write restores the written
+ *        Unmodelled settings raise unmodelled_config naming the register and the field when they
+ *        take effect, never at a write that leaves them insignificant: CKGMOD 1 at CKGDEN 0 to 1,
+ *        an input-direction CCKy used by an enabled SITF with CKGDEN 1, Manchester modes and
+ *        MDF_CKIx clocks at SITFEN 0 to 1, the ADCITF sources, the window and snapshot modes,
+ *        triggers other than TRGO, a reserved SCALE code, an ADF CICMOD other than Sinc4 and Sinc5
+ *        and ILVNB above the last filter at DFLTEN 0 to 1, a reserved SCALE written while the
+ *        filter runs, OLDEN and SCDEN 0 to 1. Every throw from a write restores the written
  *        register first. ACQMOD 110 and 111 run as 000, MDF CICMOD 110 and 111 as Sinc5.
  *
- *        Clock absence, 39.4.3: CKABF is set at SITFEN 0 to 1 in normal SPI mode when the
- *        selected CCKy does not toggle, CKGDEN 0, or CCKyEN 0 with CCKyDIR 1, and again at once
- *        when written 1 while the clock is still absent. A CCKy that stops while the SITF runs
- *        sets CKABF STH mdf_proc_ck cycles later, never without a kernel clock. The SITF index
- *        names the DFLTxISR it flags. Never in LF_MASTER mode. Popcorn choices: with a generated
- *        CCK, CKABF stays 0 at SITFEN, where silicon holds it until the first clock transition,
- *        the zero latency of open question 11. CKGDEN 0 also stops mdf_proc_ck, RM0456 39.8.2,
- *        and the RM does not say what CKABF does then: the model sets it at SITFEN with CKGDEN
- *        0, and STH cycles at the PROCDIV rate after CKGDEN goes to 0.
+ *        Clock absence, 39.4.3: CKABF is set at SITFEN 0 to 1 in normal SPI mode when the selected
+ *        CCKy does not toggle, CKGDEN 0, or CCKyEN 0 with CCKyDIR 1, and again at once when written
+ *        1 while the clock is still absent. A CCKy that stops while the SITF runs sets CKABF STH
+ *        mdf_proc_ck cycles later, never without a kernel clock. The SITF index names the DFLTxISR
+ *        it flags. Never in LF_MASTER mode. Popcorn choices: with a generated CCK, CKABF stays 0 at
+ *        SITFEN, where silicon holds it until the first clock transition, the zero latency of open
+ *        question 11. CKGDEN 0 also stops mdf_proc_ck, RM0456 39.8.2, and the RM does not say what
+ *        CKABF does then: the model sets it at SITFEN with CKGDEN 0, and STH cycles at the PROCDIV
+ *        rate after CKGDEN goes to 0.
  */
 class mdf final : public dispatch_model<mdf, mdf_state>, public pdm_port, public clock_listener
 {
@@ -894,6 +893,7 @@ void mdf::global_written(std::uint32_t old, std::uint32_t now)
   regs_.poke(gcr_.offset, trgo_.with(now, 0));
   if(interleave_ and interleave_->of(old) != interleave_->of(now))
   {
+    state_.round = 0;
     for(std::size_t f = 0; f < layout_.filters; ++f)
     {
       refresh_fifo(f);
@@ -1187,7 +1187,7 @@ void mdf::check_interleave(std::size_t f, std::uint32_t old)
   if(mode != 2 and mode != 3)
   {
     rule(
-        "interleave", filter.cr, old, cr,
+        "interleave mode", filter.cr, old, cr,
         std::format(
             "{} {}: an interleaved filter needs ACQMOD 010 or 011, RM0456 39.4.13, ACQMOD is {}",
             desc_.name, cr, mode));
@@ -1218,7 +1218,7 @@ void mdf::check_interleave(std::size_t f, std::uint32_t old)
     if(differs)
     {
       rule(
-          "interleave", filter.cr, old, cr,
+          "interleave config", filter.cr, old, cr,
           std::format(
               "{} {}: interleaved filters need the same ACQMOD, trigger, NBDIS and filter "
               "configuration, RM0456 39.4.13, DFLT{} and DFLT{} differ",
@@ -1249,6 +1249,11 @@ void mdf::filter_written(std::size_t f, std::uint32_t old, std::uint32_t now)
     settle();
     if(filter.enable.of(now) != 0)
     {
+      if(filter.enable.of(old) == 0 and interleaved(f))
+      {
+        state_.round = 0;
+        refresh_fifo(f);
+      }
       start_filter(f);
     }
     else
@@ -1315,10 +1320,11 @@ void mdf::scd_written(std::size_t f, std::uint32_t old, std::uint32_t now)
 void mdf::dly_written(std::size_t f, std::uint32_t old, std::uint32_t now)
 {
   auto const& filter = filter_[f];
+  settle();
+  old = filter.skip_busy.with(old, state_.filter[f].skip != 0 ? 1 : 0);
   now = protect(filter.dly, old, now, ~filter.skip_busy.mask(), filter.skip_busy.of(old) != 0);
   if(filter.skip_busy.of(old) == 0 and filter.skip_delay.of(now) != 0)
   {
-    settle();
     state_.filter[f].skip = static_cast<std::uint8_t>(filter.skip_delay.of(now));
     regs_.poke(filter.dly.offset, filter.skip_busy.with(now, 1));
     reschedule();

@@ -1913,5 +1913,90 @@ TEST_CASE("the peer's two filters interleaved on TRGO, read through DFLT0DR, and
       r.write(std::format("SITF{}CR", f), 0x1F10);
       r.write(std::format("DFLT{}CR", f), sync_continuous);
     }
+    static_cast<void>(r.pop());
   }
+}
+
+TEST_CASE("a SKPDLY write after the last skipped edge is taken with no read of DLYxCR in between")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.write("DFLT0CICR", (15u << 8) | (1u << 4));
+  r.write("DFLT0RSFR", 1u | (1u << 7));
+  r.write("DFLT0CR", 1);
+  r.run_until(edge_at(r.anchor, 64) + us / 4);
+  REQUIRE(r.taps[0]->samples.size() == 2);
+  r.write("DLY0CR", 3);
+  r.run_until(r.now() + 3 * us);
+  r.write("DLY0CR", 2);
+  CHECK(r.warned("DLY0CR") == 0);
+  r.run_until(r.anchor + 60 * us);
+  auto const& got = r.taps[0]->samples;
+  REQUIRE(got.size() > 4);
+  for(std::uint64_t k = 2; k < got.size(); ++k)
+  {
+    CAPTURE(k);
+    CHECK(got[k].at == edge_at(r.anchor, 32 * k + 32 + 10));
+  }
+}
+
+namespace
+{
+auto next_sample_due(stream_rig const& r) -> std::uint64_t
+{
+  auto const                          snap = r.target->snapshot();
+  std::optional<popcorn::core::event> latest;
+  for(auto const& event : snap.data().events.pending)
+  {
+    if(event.id.kind == 2 and (not latest or event.seq > latest->seq))
+    {
+      latest = event;
+    }
+  }
+  REQUIRE(latest.has_value());
+  return latest->due_ps;
+}
+}
+
+TEST_CASE("the sample event is due at the closed form with a skip, a discard or an INT sum pending")
+{
+  SUBCASE("SKPDLY 3")
+  {
+    stream_rig const r;
+    r.mic[0]->fill = 1;
+    r.write("DLY0CR", 3);
+    r.sinc1(0, 0);
+    CHECK(next_sample_due(r) == edge_at(r.anchor, 2 + 2 * (3 + 2 - 1)));
+  }
+  SUBCASE("NBDIS 2")
+  {
+    stream_rig const r;
+    r.mic[0]->fill = 1;
+    r.sinc1(0, 0, 0, 0, 2u << 20);
+    CHECK(next_sample_due(r) == edge_at(r.anchor, 2 + 2 * (3 * 2 - 1)));
+  }
+  SUBCASE("INT 8 after 3 of its samples")
+  {
+    stream_rig const r;
+    r.mic[0]->fill = 1;
+    r.write("DFLT0INTR", (7u << 4) | 3u);
+    r.sinc1(0, 0);
+    r.run_until(edge_at(r.anchor, 12) + us / 4);
+    r.write("DFLT0IER", 0);
+    CHECK(next_sample_due(r) == edge_at(r.anchor, 2 + 2 * (8 * 2 - 1)));
+  }
+}
+
+TEST_CASE("an ACQMOD break and a SCALE break of interleaved filters log one warning each")
+{
+  rig const r;
+  r.write("GCR", 2u << 4);
+  r.write("DFLT0CICR", (1u << 8) | (1u << 4));
+  r.write("DFLT1CICR", (1u << 8) | (1u << 4));
+  r.write("DFLT2CICR", (2u << 20) | (1u << 8) | (1u << 4));
+  r.write("DFLT0CR", sync_continuous | 1u);
+  r.write("DFLT1CR", 1u);
+  r.write("DFLT2CR", sync_continuous | 1u);
+  CHECK(r.warned("an interleaved filter needs ACQMOD") == 1);
+  CHECK(r.warned("interleaved filters need the same") == 1);
 }
