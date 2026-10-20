@@ -56,6 +56,14 @@ base = add_doctest(
 )
 base.private.include_dirs.append(private_dir)
 
+dfilter_chain = add_doctest(
+    "stm32-dfilter-chain",
+    [here / "test_dfilter_chain.cpp"],
+    static,
+    env={"POPCORN_MDF_VECTORS": str(periph_data / "mdf")},
+)
+dfilter_chain.private.include_dirs.append(private_dir)
+
 add_doctest("stm32-at25sf", [here / "test_at25sf.cpp"], with_devices)
 add_doctest("stm32-i2c-devices", [here / "test_i2c_devices.cpp"], with_devices)
 
