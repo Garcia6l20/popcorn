@@ -4,6 +4,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/pdm.hpp>
 
@@ -1026,6 +1027,18 @@ struct stream_rig : rig
     write(std::format("DFLT{}CR", f), extra | (mode << 4) | 1u);
   }
 
+  [[nodiscard]] auto pop(std::uint32_t lane = 0, std::uint8_t size = 4) const -> std::uint32_t
+  {
+    auto&       regs  = target->peripheral("MDF1");
+    auto const* found = popcorn::find_register(regs.description(), "DFLT0DR");
+    REQUIRE(found != nullptr);
+    auto const value = target->model("MDF1")->on_read(
+        regs, found->offset + lane, size,
+        {.pc = 0, .now = icount{0}, .by = popcorn::initiator::cpu});
+    REQUIRE(value.has_value());
+    return *value;
+  }
+
   [[nodiscard]] auto requested() const -> std::vector<bool>
   {
     auto* const probe = model_of<request_probe>("GPDMA1");
@@ -1126,14 +1139,12 @@ TEST_CASE("DFLTxDR pops one sample per read of any size, PCM in bits 31:8, empty
   r.sinc1(0, 0, 0x18);
   r.run_until(edge_at(r.anchor, 4 * 2 + 4) + 1);
   REQUIRE(r.taps[0]->samples.size() >= 2);
-  CHECK(r.read("DFLT0DR") == 0x0020'0000u);
-  auto const half = r.target->mem().read(r.at("MDF1", "DFLT0DR") + 2, 2);
-  REQUIRE(half.has_value());
-  CHECK(*half == 0x20u);
+  CHECK(r.pop() == 0x0020'0000u);
+  CHECK(r.pop(2, 2) == 0x20u);
   CHECK(r.bits("DFLT0ISR", "RXNEF") == 1);
-  CHECK(r.read("DFLT0DR") == 0x0020'0000u);
+  CHECK(r.pop() == 0x0020'0000u);
   CHECK(r.bits("DFLT0ISR", "RXNEF") == 0);
-  CHECK(r.read("DFLT0DR") == 0);
+  CHECK(r.pop() == 0);
 }
 
 TEST_CASE("single-shot writes one sample, DFLTRUN 0, a DFLTEN write restarts from reset taps")
@@ -1154,15 +1165,16 @@ TEST_CASE("single-shot writes one sample, DFLTRUN 0, a DFLTEN write restarts fro
   CHECK(r.taps[0]->samples[1].at > again);
 }
 
-TEST_CASE("settle clocks the edges before a source change: later edges see the new content")
+TEST_CASE(
+    "settle clocks the edges before a source change: later edges, 100 ms on, see the new content")
 {
   stream_rig const r;
   r.mic[0]->fill = 1;
   r.run_until(r.anchor + 1000 * us);
   auto const t1 = r.now();
-  r.port().settle(vtime{t1});
+  r.port().settle();
   r.mic[0]->switched = true;
-  r.run_until(t1 + 500 * us);
+  r.run_until(t1 + 100'000 * us);
   auto const t2 = r.now();
   r.sinc1(0, 0);
   r.run_until(t2 + 100 * us);
@@ -1260,7 +1272,7 @@ TEST_CASE("with DMAEN and FTH 0 the DMA request follows RXNEF, without DMAEN it 
     CHECK_FALSE(r.requesting());
     r.run_until(edge_at(r.anchor, 4) + us / 4);
     CHECK(r.requesting());
-    static_cast<void>(r.read("DFLT0DR"));
+    static_cast<void>(r.pop());
     CHECK_FALSE(r.requesting());
     r.run_until(edge_at(r.anchor, 12) + us / 4);
     CHECK(r.requesting());
@@ -1288,10 +1300,10 @@ TEST_CASE("with FTH 1 the request rises at the second sample and holds until the
   r.run_until(edge_at(r.anchor, 8) + us / 4);
   CHECK(r.bits("DFLT0ISR", "FTHF") == 1);
   CHECK(r.requesting());
-  static_cast<void>(r.read("DFLT0DR"));
+  static_cast<void>(r.pop());
   CHECK(r.bits("DFLT0ISR", "FTHF") == 0);
   CHECK(r.requesting());
-  static_cast<void>(r.read("DFLT0DR"));
+  static_cast<void>(r.pop());
   CHECK_FALSE(r.requesting());
   r.run_until(edge_at(r.anchor, 12) + us / 4);
   CHECK(r.bits("DFLT0ISR", "RXNEF") == 1);
@@ -1300,26 +1312,31 @@ TEST_CASE("with FTH 1 the request rises at the second sample and holds until the
   CHECK(r.requesting());
 }
 
-TEST_CASE("RFOVRF and its IRQ rise at each RSFLT input while (MCICD + 1) x (CCKDIV + 1) < 24")
+TEST_CASE(
+    "RFOVRF and its IRQ rise at each RSFLT input after the first while (MCICD + 1) x "
+    "(CCKDIV + 1) < 24")
 {
   {
     stream_rig const r;
     r.mic[0]->fill = 1;
     rsflt_at(r, 10);
     CHECK(r.warned("RSFLT needs") == 1);
-    r.run_until(edge_at(r.anchor, 22) - us / 2);
-    CHECK_FALSE(r.pending(mdf_irq));
-    CHECK(r.bits("DFLT0ISR", "RFOVRF") == 0);
     r.run_until(edge_at(r.anchor, 22) + us / 4);
+    CHECK_FALSE(r.pending(mdf_irq));
+    CHECK((r.read("DFLT0ISR") & rfovrf) == 0);
+    r.run_until(edge_at(r.anchor, 44) - us / 2);
+    CHECK_FALSE(r.pending(mdf_irq));
+    CHECK((r.read("DFLT0ISR") & rfovrf) == 0);
+    r.run_until(edge_at(r.anchor, 44) + us / 4);
     CHECK(r.pending(mdf_irq));
-    CHECK(r.bits("DFLT0ISR", "RFOVRF") == 1);
+    CHECK((r.read("DFLT0ISR") & rfovrf) != 0);
     CHECK(r.taps[0]->samples.empty());
     r.write("DFLT0ISR", rfovrf);
-    CHECK(r.bits("DFLT0ISR", "RFOVRF") == 0);
-    r.run_until(edge_at(r.anchor, 44) - us / 2);
-    CHECK(r.bits("DFLT0ISR", "RFOVRF") == 0);
-    r.run_until(edge_at(r.anchor, 44) + us / 4);
-    CHECK(r.bits("DFLT0ISR", "RFOVRF") == 1);
+    CHECK((r.read("DFLT0ISR") & rfovrf) == 0);
+    r.run_until(edge_at(r.anchor, 66) - us / 2);
+    CHECK((r.read("DFLT0ISR") & rfovrf) == 0);
+    r.run_until(edge_at(r.anchor, 66) + us / 4);
+    CHECK((r.read("DFLT0ISR") & rfovrf) != 0);
     r.run_until(edge_at(r.anchor, 88) + us / 4);
     CHECK(r.taps[0]->samples.size() == 1);
   }
@@ -1329,7 +1346,7 @@ TEST_CASE("RFOVRF and its IRQ rise at each RSFLT input while (MCICD + 1) x (CCKD
   CHECK(r.warned("RSFLT needs") == 0);
   r.run_until(r.anchor + 200 * us);
   CHECK(r.taps[0]->samples.size() > 5);
-  CHECK(r.bits("DFLT0ISR", "RFOVRF") == 0);
+  CHECK((r.read("DFLT0ISR") & rfovrf) == 0);
   CHECK_FALSE(r.pending(mdf_irq));
 }
 
@@ -1398,4 +1415,48 @@ TEST_CASE("bench: one virtual second of the peer's two filters on silent sensors
       std::format(
           "wall s per virtual s: median {:.3f} min {:.3f} max {:.3f}", walls[2], walls[0],
           walls[4]));
+}
+
+TEST_CASE("a debugger read of DFLTxDR returns the head and pops nothing, a CPU read pops it")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.sinc1(0, 0, 0x18);
+  r.run_until(edge_at(r.anchor, 4) + us / 4);
+  CHECK(r.read("DFLT0DR") == 0x0020'0000u);
+  CHECK(r.read("DFLT0DR") == 0x0020'0000u);
+  CHECK(r.bits("DFLT0ISR", "RXNEF") == 1);
+  CHECK(r.pop() == 0x0020'0000u);
+  CHECK(r.bits("DFLT0ISR", "RXNEF") == 0);
+  CHECK(r.read("DFLT0DR") == 0);
+}
+
+TEST_CASE("the sample event is due at the closed-form edge for a start on either edge parity")
+{
+  for(std::uint64_t const parity : {0u, 1u})
+  {
+    CAPTURE(parity);
+    stream_rig const r;
+    r.mic[0]->fill     = 1;
+    auto const settled = [&r] {
+      auto const num = static_cast<unsigned __int128>(r.now() - r.anchor + 1) * 2u * peer_kernel;
+      auto const den = static_cast<unsigned __int128>(peer_divider) * 1'000'000'000'000u;
+      return static_cast<std::uint64_t>((num + den - 1) / den);
+    };
+    r.run_until(r.anchor + 10 * us);
+    while(settled() % 2 != parity)
+    {
+      r.run_until(r.now() + 100'000);
+    }
+    auto const next = settled();
+    r.sinc1(0, 0);
+    auto const due  = edge_at(r.anchor, next + (next & 1u) + 2);
+    auto const snap = r.target->snapshot();
+    CHECK(std::ranges::any_of(snap.data().events.pending, [due](core::event const& e) {
+      return e.due_ps == due;
+    }));
+    r.run_until(due + us / 4);
+    REQUIRE(r.taps[0]->samples.size() == 1);
+    CHECK(r.taps[0]->samples[0].at == due);
+  }
 }

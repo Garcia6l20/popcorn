@@ -73,6 +73,7 @@ struct filter_state
   bool                      running{};
   bool                      single{};
   bool                      dma{};
+  bool                      rsflt_fed{};
   chain_config              config{};
   chain_state               chain{};
   std::vector<std::int32_t> fifo;
@@ -146,6 +147,7 @@ struct filter_fields
   field_ref                                    threshold;
   field_ref                                    dma;
   field_ref                                    rsflt_overrun;
+  field_ref                                    rsflt_overrun_enable;
   reg_ref                                      dr;
   field_ref                                    rxne;
   field_ref                                    fifo_threshold;
@@ -202,13 +204,13 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        a popcorn choice: the resynchronization latency of 39.4.15 is not modelled, polling
  *        firmware sees the same end states. GCR.TRGO reads 0 after any write. BSMXACTIVE is the
  *        OR of DFLTACTIVE, OLDACTIVE and SCDACTIVE of its index, 39.8.4. SKPBF and SNPSxDR read
- *        0. DFLTEN is write-only, 39.8.5 and
- *        40.8.5, so it reads 0 on both, although the ADF1 description marks it read_write: a
- *        read-modify-write of a running DFLTxCR that does not set DFLTEN stops the filter. The
- *        ADF1 description lacks DFLT0CR.TRGSENS, 40.8.5 bit 8, so the bit reads 0 and ignores
- *        writes, which no modelled setting reads: TRGO forces its sensitivity and every other
- *        trigger raises. DFLTxISR flags are write-1-to-clear, OLDF also clears THHF and
- *        THLF, 39.8.16. The IRQ of a filter is the OR of its flags with their enables, 39.6.
+ *        0. DFLTEN is write-only, 39.8.5 and 40.8.5, so it reads 0 on both, although the ADF1
+ *        description marks it read_write: a read-modify-write of a running DFLTxCR that does not
+ *        set DFLTEN stops the filter. The ADF1 description lacks DFLT0CR.TRGSENS, 40.8.5 bit 8,
+ *        so the bit reads 0 and ignores writes, which no modelled setting reads: TRGO forces its
+ *        sensitivity and every other trigger raises. DFLTxISR flags are write-1-to-clear, OLDF also
+ * clears THHF and THLF, 39.8.16. The IRQ of a filter is the OR of its flags with their
+ * enables, 39.6.
  *
  *        Data path, 39.4.3 to 39.4.13. CCKy runs while CKGDEN, CCKyEN and CCKyDIR are set, one
  *        period every (PROCDIV + 1) x (CCKDIV + 1) kernel cycles. Each edge time is computed from
@@ -229,12 +231,15 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        A full RXFIFO drops the sample and sets DOVRF. Silicon has DFLTxDR as a fifth stage,
  *        39.4.13 "Data resynchronization", so the model overruns one sample earlier. A read of
  *        DFLTxDR of any size pops one sample, PCM[23:0] in bits 31:8, an empty RXFIFO reads 0.
+ *        A debugger read returns the same value and pops nothing.
  *        RXNEF follows the level, FTHF the level against FTH, 1 or 2 samples. SATF follows the
  *        chain's saturation. Each filter's tap sees every sample written, dropped ones marked.
  *        With DMAEN the filter drives `<instance>_flt<n>_dma`: with FTH 0 while the RXFIFO is not
  *        empty, with FTH 1 from the second sample until the RXFIFO empties, 39.4.13. Independent
- *        transfers only. RFOVRF is set at each RSFLT input sample while mdf_proc_ck is below 24
- *        times its rate, (MCICD + 1) x (CCKDIV + 1) below 24, 39.4.8. Silicon then gives invalid
+ *        transfers only. RFOVRF is set at each RSFLT input sample but the first since the start
+ *        while mdf_proc_ck is below 24 times their rate, (MCICD + 1) x (CCKDIV + 1) below 24: the
+ *        input arrives while the previous one is still processed, 39.4.8. With RFOVRIE the
+ *        model wakes at that input so the IRQ rises on time. Silicon then gives invalid
  *        samples, the model still delivers exact ones, a popcorn choice.
  *
  *        Write protection, 39.4.15 Table 381: a write changing a protected field while its
@@ -286,7 +291,7 @@ public:
   void attach(std::size_t sitf, pdm_edge edge, std::shared_ptr<pdm_source> source) override;
   void attach_tap(std::size_t filter, std::shared_ptr<pdm_tap> tap) override;
   [[nodiscard]] auto sitfs() const -> std::size_t override;
-  void               settle(vtime at) override;
+  void               settle() override;
 
   template <bank B, std::size_t F> void written(std::uint32_t old, std::uint32_t now)
   {
@@ -367,6 +372,7 @@ private:
   void               refresh_fifo(std::size_t f);
   void               refresh_dma(std::size_t f);
   [[nodiscard]] auto rsflt_overruns(std::size_t f) const -> bool;
+  [[nodiscard]] auto rsflt_wakes(std::size_t f) const -> bool;
   void               reschedule();
   [[nodiscard]] auto pop(std::size_t f) -> std::uint32_t;
 
@@ -513,46 +519,47 @@ auto mdf::filter_of(std::size_t f) const -> filter_fields
   auto const    ier  = std::format("DFLT{}IER", f);
   auto const    isr  = std::format("DFLT{}ISR", f);
   filter_fields out{
-      .bsmx             = reg(bsmx),
-      .select           = field(bsmx, "BSSEL"),
-      .bsmx_active      = field(bsmx, "BSMXACTIVE"),
-      .cr               = reg(cr),
-      .enable           = field(cr, "DFLTEN"),
-      .run              = field(cr, "DFLTRUN"),
-      .active           = field(cr, "DFLTACTIVE"),
-      .acquisition      = field(cr, "ACQMOD"),
-      .trigger          = field(cr, "TRGSRC"),
-      .cicr             = reg(cicr),
-      .source           = field(cicr, "DATSRC"),
-      .cic_mode         = field(cicr, "CICMOD"),
-      .decimation       = field(cicr, "MCICD"),
-      .scale            = field(cicr, "SCALE"),
-      .rsfr             = reg(rsfr),
-      .rsflt_bypass     = field(rsfr, "RSFLTBYP"),
-      .rsflt_decimation = field(rsfr, "RSFLTD"),
-      .hpf_bypass       = field(rsfr, "HPFBYP"),
-      .hpf_cutoff       = field(rsfr, "HPFC"),
-      .offset           = std::nullopt,
-      .threshold        = field(cr, "FTH"),
-      .dma              = field(cr, "DMAEN"),
-      .rsflt_overrun    = field(isr, "RFOVRF"),
-      .dr               = reg(std::format("DFLT{}DR", f)),
-      .rxne             = field(isr, "RXNEF"),
-      .fifo_threshold   = field(isr, "FTHF"),
-      .overrun          = field(isr, "DOVRF"),
-      .saturation       = field(isr, "SATF"),
-      .dly              = reg(dly),
-      .skip_busy        = field(dly, "SKPBF"),
-      .old_enable       = std::nullopt,
-      .old_active       = std::nullopt,
-      .scd_enable       = std::nullopt,
-      .scd_active       = std::nullopt,
-      .ier              = reg(ier),
-      .isr              = reg(isr),
-      .ckab             = field(isr, "CKABF"),
-      .isr_clear        = 0,
-      .isr_old_clear    = 0,
-      .interrupts       = {}};
+      .bsmx                 = reg(bsmx),
+      .select               = field(bsmx, "BSSEL"),
+      .bsmx_active          = field(bsmx, "BSMXACTIVE"),
+      .cr                   = reg(cr),
+      .enable               = field(cr, "DFLTEN"),
+      .run                  = field(cr, "DFLTRUN"),
+      .active               = field(cr, "DFLTACTIVE"),
+      .acquisition          = field(cr, "ACQMOD"),
+      .trigger              = field(cr, "TRGSRC"),
+      .cicr                 = reg(cicr),
+      .source               = field(cicr, "DATSRC"),
+      .cic_mode             = field(cicr, "CICMOD"),
+      .decimation           = field(cicr, "MCICD"),
+      .scale                = field(cicr, "SCALE"),
+      .rsfr                 = reg(rsfr),
+      .rsflt_bypass         = field(rsfr, "RSFLTBYP"),
+      .rsflt_decimation     = field(rsfr, "RSFLTD"),
+      .hpf_bypass           = field(rsfr, "HPFBYP"),
+      .hpf_cutoff           = field(rsfr, "HPFC"),
+      .offset               = std::nullopt,
+      .threshold            = field(cr, "FTH"),
+      .dma                  = field(cr, "DMAEN"),
+      .rsflt_overrun        = field(isr, "RFOVRF"),
+      .rsflt_overrun_enable = field(ier, "RFOVRIE"),
+      .dr                   = reg(std::format("DFLT{}DR", f)),
+      .rxne                 = field(isr, "RXNEF"),
+      .fifo_threshold       = field(isr, "FTHF"),
+      .overrun              = field(isr, "DOVRF"),
+      .saturation           = field(isr, "SATF"),
+      .dly                  = reg(dly),
+      .skip_busy            = field(dly, "SKPBF"),
+      .old_enable           = std::nullopt,
+      .old_active           = std::nullopt,
+      .scd_enable           = std::nullopt,
+      .scd_active           = std::nullopt,
+      .ier                  = reg(ier),
+      .isr                  = reg(isr),
+      .ckab                 = field(isr, "CKABF"),
+      .isr_clear            = 0,
+      .isr_old_clear        = 0,
+      .interrupts           = {}};
   if(layout_.motor)
   {
     out.old_enable    = field(std::format("OLD{}CR", f), "OLDEN");
@@ -647,7 +654,7 @@ void mdf::on_event(std::uint32_t kind, std::uint64_t payload)
     if(payload == state_.sample_generation)
     {
       state_.scheduled_ps.reset();
-      settle(vtime{now_ps()});
+      settle();
       reschedule();
     }
     return;
@@ -674,12 +681,18 @@ auto mdf::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
     auto const& filter = filter_[f];
     if(filter.dr.offset == word)
     {
-      settle(vtime{now_ps()});
+      settle();
+      if(ctx.by == initiator::debugger)
+      {
+        auto const& fifo = state_.filter[f].fifo;
+        return read_lanes(
+            fifo.empty() ? 0u : static_cast<std::uint32_t>(fifo.front()) << 8, offset, size);
+      }
       return read_lanes(pop(f), offset, size);
     }
     if(filter.isr.offset == word)
     {
-      settle(vtime{now_ps()});
+      settle();
     }
     if(filter.cr.offset == word)
     {
@@ -753,12 +766,14 @@ void mdf::write(bank which, std::size_t f, std::uint32_t old, std::uint32_t now)
       scd_written(f, old, now);
       return;
     case bank::ier:
+      settle();
       update_irq();
+      reschedule();
       return;
     case bank::oec:
       if(state_.filter[f].running and old != now)
       {
-        settle(vtime{now_ps()});
+        settle();
         state_.filter[f].config.offset = config_of(f).offset;
       }
       return;
@@ -878,7 +893,7 @@ void mdf::clock_written(std::uint32_t old, std::uint32_t now)
     }
   }
   regs_.poke(ckgcr_.offset, ckg_active_.with(now, ckg_enable_.of(now)));
-  settle(vtime{now_ps()});
+  settle();
   refresh_clocks(now_ps());
   reschedule();
   for(std::size_t s = 0; s < layout_.filters; ++s)
@@ -1017,7 +1032,7 @@ void mdf::sitf_written(std::size_t s, std::uint32_t old, std::uint32_t now)
   if(sitf.enable.of(old) != sitf.enable.of(now))
   {
     ++state_.filter[s].ckab_generation;
-    settle(vtime{now_ps()});
+    settle();
     refresh_clocks(now_ps());
     reschedule();
   }
@@ -1110,7 +1125,7 @@ void mdf::filter_written(std::size_t f, std::uint32_t old, std::uint32_t now)
   }
   if(filter.enable.of(old) != filter.enable.of(now) or restart)
   {
-    settle(vtime{now_ps()});
+    settle();
     if(filter.enable.of(now) != 0)
     {
       start_filter(f);
@@ -1140,7 +1155,7 @@ void mdf::cic_written(std::size_t f, std::uint32_t old, std::uint32_t now)
   }
   if(state_.filter[f].running and filter.scale.of(old) != filter.scale.of(now))
   {
-    settle(vtime{now_ps()});
+    settle();
     state_.filter[f].config.scale = static_cast<std::uint8_t>(filter.scale.of(now));
   }
 }
@@ -1191,6 +1206,7 @@ void mdf::sad_written(std::uint32_t, std::uint32_t now)
 
 void mdf::isr_written(std::size_t f, std::uint32_t lanes, std::uint32_t value)
 {
+  settle();
   auto const& filter  = filter_[f];
   auto const  cleared = value & lanes & filter.isr_clear;
   auto        word    = regs_.peek(filter.isr.offset) & ~cleared;
@@ -1206,6 +1222,7 @@ void mdf::isr_written(std::size_t f, std::uint32_t lanes, std::uint32_t value)
     update(regs_, filter.ckab, 1);
   }
   update_irq();
+  reschedule();
 }
 
 void mdf::update_irq()
@@ -1374,7 +1391,7 @@ void mdf::refresh_clocks(std::uint64_t t)
 void mdf::on_clock_change()
 {
   auto const t = now_ps();
-  settle(vtime{t});
+  settle();
   auto const kernel = ctx_.clock.hz(kernel_);
   for(std::size_t y = 0; y < 2; ++y)
   {
@@ -1412,11 +1429,12 @@ auto mdf::sitfs() const -> std::size_t
   return layout_.filters;
 }
 
-void mdf::settle(vtime at)
+void mdf::settle()
 {
+  auto const t = now_ps();
   for(std::size_t s = 0; s < layout_.filters; ++s)
   {
-    catch_up(s, at.ps);
+    catch_up(s, t);
   }
 }
 
@@ -1465,8 +1483,12 @@ void mdf::catch_up(std::size_t s, std::uint64_t t)
         auto const sample = feed(filter.chain, filter.config, bits_[e][j] != 0 ? 1 : -1);
         if(overrun and filter.chain.cic.count == 0)
         {
-          update(regs_, filter_[f].rsflt_overrun, 1);
-          update_irq();
+          if(filter.rsflt_fed)
+          {
+            update(regs_, filter_[f].rsflt_overrun, 1);
+            update_irq();
+          }
+          filter.rsflt_fed = true;
         }
         if(sample)
         {
@@ -1538,6 +1560,14 @@ auto mdf::rsflt_overruns(std::size_t f) const -> bool
   return config.rsflt and std::uint32_t{config.decimation} * (bits(cck_div_) + 1u) < 24u;
 }
 
+auto mdf::rsflt_wakes(std::size_t f) const -> bool
+{
+  auto const& filter = filter_[f];
+  return rsflt_overruns(f)
+     and bits(filter.rsflt_overrun_enable) != 0
+     and bits(filter.rsflt_overrun) == 0;
+}
+
 auto mdf::pop(std::size_t f) -> std::uint32_t
 {
   auto& fifo = state_.filter[f].fifo;
@@ -1556,6 +1586,7 @@ void mdf::start_filter(std::size_t f)
   auto&      filter = state_.filter[f];
   auto const mode   = bits(filter_[f].acquisition);
   filter.chain      = {};
+  filter.rsflt_fed  = false;
   filter.config     = config_of(f);
   filter.single     = mode == 1;
   filter.running    = mode != 2 and mode != 3;
@@ -1564,10 +1595,11 @@ void mdf::start_filter(std::size_t f)
 
 void mdf::stop_filter(std::size_t f)
 {
-  auto& filter   = state_.filter[f];
-  filter.running = false;
-  filter.single  = false;
-  filter.chain   = {};
+  auto& filter     = state_.filter[f];
+  filter.running   = false;
+  filter.single    = false;
+  filter.chain     = {};
+  filter.rsflt_fed = false;
   filter.fifo.clear();
   update(regs_, filter_[f].run, 0);
   refresh_fifo(f);
@@ -1587,11 +1619,14 @@ void mdf::reschedule()
     }
     auto const e     = parity_of(f);
     auto const first = sitf.next + ((sitf.next ^ e) & 1u);
-    auto const need  = rsflt_overruns(f)
-                         ? std::uint64_t{filter.config.decimation} - filter.chain.cic.count
-                         : bits_needed(f);
-    auto const at    = edge_ps(cck_of(s), first + 2 * (need - 1));
-    earliest         = earliest ? std::min(*earliest, at) : at;
+    auto       need  = bits_needed(f);
+    if(rsflt_wakes(f))
+    {
+      auto const d = std::uint64_t{filter.config.decimation};
+      need         = std::min(need, d - filter.chain.cic.count + (filter.rsflt_fed ? 0 : d));
+    }
+    auto const at = edge_ps(cck_of(s), first + 2 * (need - 1));
+    earliest      = earliest ? std::min(*earliest, at) : at;
   }
   if(earliest == state_.scheduled_ps)
   {

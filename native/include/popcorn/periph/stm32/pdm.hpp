@@ -86,7 +86,8 @@ public:
   /**
    * @brief The filter wrote a sample, or tried to.
    * @param pcm Signed 24-bit sample, PCM[23:0] as DFLTxDR bits 31:8 hold it.
-   * @param at Virtual time of the write: the clock edge of the bit that completed it.
+   * @param at Virtual time of the write since the last reset, the base of `m.time`: the clock
+   *        edge of the bit that completed it.
    * @param dropped The RXFIFO was full: DOVRF set and the sample lost.
    * @param captured Always true for the MDF. False when the ADF's sound activity detector kept
    *        the sample out of the RXFIFO.
@@ -119,6 +120,7 @@ public:
    * @param edge Clock edge the sensor drives.
    * @param source Sensor, empty for none: the edge then carries the bits of a modulator held
    *        at 0, silence.
+   * @throws std::out_of_range When @p sitf is not below sitfs().
    */
   virtual void attach(std::size_t sitf, pdm_edge edge, std::shared_ptr<pdm_source> source) = 0;
 
@@ -126,19 +128,21 @@ public:
    * @brief Wires a sink to the samples a filter writes, replacing the previous one. Not saved.
    * @param filter Digital filter index, below sitfs().
    * @param tap Sink, empty for none.
+   * @throws std::out_of_range When @p filter is not below sitfs().
    */
   virtual void attach_tap(std::size_t filter, std::shared_ptr<pdm_tap> tap) = 0;
 
-  /** @brief Number of serial interfaces, equal to the number of digital filters. */
+  /** @brief Number of serial interfaces, equal to the number of digital filters, so it bounds
+   *  both the interface and the filter indices. */
   [[nodiscard]] virtual auto sitfs() const -> std::size_t = 0;
 
   /**
-   * @brief Clocks every serial interface up to @p at, pulling from the sources every bit whose
-   *        edge is at or before it. Called on the machine thread before a source's content
-   *        changes, so edges before the change see the old content and later edges the new.
-   * @param at Virtual time, not before the last settled time.
+   * @brief Clocks every serial interface up to the model's current virtual time, pulling from
+   *        the sources every bit whose edge is at or before it. Called on the machine thread
+   *        before a source's content changes, so edges before the change see the old content
+   *        and later edges the new.
    */
-  virtual void settle(vtime at) = 0;
+  virtual void settle() = 0;
 
 protected:
   /** @brief Destroys the interface, only through its model. */
