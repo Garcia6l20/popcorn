@@ -2,9 +2,10 @@
 rule, the digest and the boot cache.
 
 The `kit` fixture plugin registers `rng`, a counter on DR, and `uart`, a UART implementing only
-`periph::uart_port` on TDR and RDR, and binds the SPI target `KitTargetBase`. A loaded plugin is
-never unloaded, so the in-process cases share one build of the fixture directory per module,
-and the cases that must start without it run in their own interpreter.
+`periph::uart_port` on TDR and RDR and refusing a TDR write of 0x1A5 with `unmodelled_config`,
+and binds the SPI target `KitTargetBase`. A loaded plugin is never unloaded, so the in-process
+cases share one build of the fixture directory per module, and the cases that must start without
+it run in their own interpreter.
 """
 
 from __future__ import annotations

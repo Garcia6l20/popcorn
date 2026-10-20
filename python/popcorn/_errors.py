@@ -235,8 +235,8 @@ class ModelError(PopcornError):
 
 
 class UnmodelledConfig(ModelError):
-    """A built-in model met a register setting it does not implement. Raised by the MDF and ADF
-    models when the setting takes effect, such as an enable bit set with an unmodelled mode.
+    """A model met a register setting it does not implement. Raised by the MDF and ADF models
+    when the setting takes effect, such as an enable bit set with an unmodelled mode.
 
     Attributes:
         field: Field name, such as `SITFMOD`.
