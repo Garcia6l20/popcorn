@@ -457,15 +457,18 @@ class System:
     A member whose goal stops waits exactly at its stop, parked, and the system waits with it.
     The task that posted the goal holds it. `gather`, `TaskGroup`, `shield` and `ensure_future`
     post from a child task of their own, which releases the member as soon as it ends. The
-    member is released, halted from its stop on, when its holder finishes, or awaits a popcorn
-    future of another machine, or calls `member.halt()`. A new goal on it
-    before that starts exactly at its stop, also after unrelated awaits such as
-    `asyncio.sleep`. Members without a goal are halted: their cores execute nothing, their clocks,
-    peripherals and DMA follow system time, their DBGMCU freeze bits apply. A task that keeps a
+    member is released when its holder finishes, or awaits a popcorn future of another machine,
+    or at the next system `run`, `wait_for`, `snapshot` or `restore`. A new goal on it before
+    that starts exactly at its stop, also after unrelated awaits such as `asyncio.sleep`. A
+    released member runs its core from its stop in the next system `run`. While member goals
+    run, members without a goal are halted: their cores execute nothing, their clocks,
+    peripherals and DMA follow system time, their DBGMCU freeze bits apply. `member.halt()`
+    halts a member where it stands, released from its goal's stop: its core executes nothing in
+    system runs either, until its next goal or reset. A task that keeps a
     member parked while it awaits something only a peer's goal can complete waits forever, and
     so does one that awaits its own member's future that needs time to pass, such as a write at
     a later time: nothing runs while the member is parked. After 5 s a warning names the member
-    and the task, `member.halt()` releases it. Cancelling a goal's
+    and the task, `member.halt()` releases it, halted. Cancelling a goal's
     task withdraws the goal at the next pause, where the member then stands, a point that
     depends on wall timing. A goal posted while other goals run is admitted at the next pause,
     also wall-dependent. An error a member raises, from a handler or a model, stops the system:
@@ -497,7 +500,7 @@ class System:
     A member while the system exists: sync reads and writes raise MachineRunning while the system
     runs, and while the member has a pending goal, since its position at a pause depends on the
     quantum. They are allowed on a halted member while the system is stopped. `start`,
-    `snapshot` and `restore` of a member raise MachineBusy, `halt` releases it, and `reset` goes
+    `snapshot` and `restore` of a member raise MachineBusy, `halt` halts it, and `reset` goes
     through `System.reset`. `snapshot` and `restore` take and give back the whole
     system's state, every member included, while it is stopped. Its
     Python callbacks run on its own thread, concurrently with other members' callbacks: Python
@@ -522,6 +525,7 @@ class System:
         "_goals",
         "_halt_task",
         "_halting",
+        "_halts",
         "_handle",
         "_index",
         "_kicking",
@@ -647,6 +651,7 @@ class System:
         self._run_ends: dict[int, Stop] = {}
         self._undecided: dict[int, asyncio.Task[object] | None] = {}
         self._withdrawals: set[int] = set()
+        self._halts: set[int] = set()
         self._warned: set[tuple[int, int]] = set()
         self._system_run = False
         self._kicking = False
@@ -878,8 +883,9 @@ class System:
         depends on the quantum. Each member stops
         at the first block boundary at or after the target, an idle or halted one exactly at it.
         A member stop on the way, FAULT, a breakpoint or a reset under `on_member_reset="stop"`,
-        ends the run there: the member waits at its stop, the others where the run left them,
-        and the next `run` releases it.
+        ends the run there: the member waits at its stop, the others where the run left them.
+        The next `run` releases it halted: its core executes nothing in system runs until its
+        next goal or reset. A member released from its own goal's stop runs on from that stop.
 
         Each member's `last_stop` becomes its stop in the result's `stops`, None for a member a
         member stop left where it stood, and None for every member when the run ends without a
@@ -1173,7 +1179,7 @@ class System:
             return
         for index in self._handle.undecided():
             if index not in self._undecided:
-                self._handle.release(index)
+                self._handle.release(index, False)
 
     def _raise_ends(self) -> None:
         error, self._free_error = self._free_error, None
@@ -1227,8 +1233,9 @@ class System:
         """The whole system's state while it is stopped: every member's snapshot and the
         system's own state, links included, frames in flight too.
 
-        A member still held at its goal's stop is released first, halted from that stop on,
-        as the next `run` does: a goal posted on it then starts at the same point.
+        A member still held at a stop is released first, as the next `run` releases it: halted
+        when the stop is a member stop the last run found, else a goal posted on it starts at
+        that stop and a later `run` runs its core from there. The snapshot keeps which.
 
         Raises:
             MachineRunning: The system runs, runs freely, a member has a goal pending or runs in
@@ -1339,8 +1346,10 @@ class System:
             raise MachineRunning(f"a goal of {name} is pending: no {what} before it ends")
 
     def _release_undecided(self) -> None:
-        for index in sorted(self._undecided):
-            self._handle.release(index)
+        """Release every member held at a stop: a member stop a system run found halts its member,
+        a goal's holder lets it run on from its stop."""
+        for index, holder in sorted(self._undecided.items()):
+            self._handle.release(index, holder is None)
         self._undecided.clear()
 
     def _refuse_run(self) -> None:
@@ -1418,7 +1427,7 @@ class System:
             if ended is not None and self._opens.get(pause.member) is ended:
                 self._run_stopped(pause.member, ended)
             elif ended is not None and (ended.releases or ended.withdrawn):
-                self._handle.release(pause.member)
+                self._handle.release(pause.member, False)
             elif ended is None:
                 self._undecided.setdefault(pause.member, None)
         elif pause.reason is _core.PauseReason.error:
@@ -1439,11 +1448,16 @@ class System:
                     del self._goals[index]
             for index in sorted(self._rebuilds):
                 self._repost(index)
+            for index in sorted(self._halts):
+                if index not in self._goals:
+                    self._undecided.pop(index, None)
+                    self._handle.release(index, True)
         else:
             for index in sorted(self._waits):
                 self._fail_waits(index)
         self._withdrawals.clear()
         self._rebuilds.clear()
+        self._halts.clear()
         self._schedule_kick()
 
     def _run_stopped(self, index: int, goal: _Goal) -> None:
@@ -1459,7 +1473,7 @@ class System:
             self._run_ends[index] = stop
             reached = waits
             waits = []
-            self._handle.release(index)
+            self._handle.release(index, self._free)
             if self._free:
                 self._ends.append((index, stop))
                 stopper = self._machines[self._names[index]]
@@ -1858,12 +1872,12 @@ class System:
             if not goal.done():
                 self._handle.withdraw(index)
         if goal.done() and index not in self._undecided and index in self._handle.undecided():
-            self._handle.release(index)
+            self._handle.release(index, False)
         self._schedule_kick()
 
     def _release(self, index: int, owner: asyncio.Task[object] | None) -> None:
         """Release member `index`, parked at its goal's stop, when `owner` still holds it, None
-        for any holder."""
+        for any holder. It runs on from its stop in later system runs."""
         if index not in self._undecided:
             return
         if owner is not None and self._undecided[index] is not owner:
@@ -1872,7 +1886,7 @@ class System:
         if self._closed or self._failed is not None:
             return
         if index in self._handle.undecided():
-            self._handle.release(index)
+            self._handle.release(index, False)
         self._schedule_kick()
 
     def _before_await(self, future: _core.HostFuture) -> None:
@@ -1887,14 +1901,23 @@ class System:
                 self._release(index, task)
 
     def _halt_member(self, machine: Machine) -> None:
-        """`Machine.halt()` on a member: release it from its goal's stop."""
+        """`Machine.halt()` on a member: halt it where it stands, released from its goal's stop."""
         index = self._index[machine.name]
         if self._free:
             raise MachineBusy(f"the linked system runs freely: halt the system, not {machine.name}")
+        if self._system_run:
+            raise MachineBusy(f"the linked system runs a system run: halt {machine.name} after it")
         if index in self._goals:
             raise MachineBusy(f"{machine.name} has a goal pending: cancel its task")
-        if index in self._undecided:
-            self._release(index, self._undecided[index])
+        if self._closed or self._failed is not None:
+            self._undecided.pop(index, None)
+            return
+        if self._flight is not None:
+            self._halts.add(index)
+            return
+        self._undecided.pop(index, None)
+        self._handle.release(index, True)
+        self._schedule_kick()
 
     def _watchdog(self, index: int, task: asyncio.Task[object], stop: Stop) -> None:
         if self._closed or self._undecided.get(index) is not task:

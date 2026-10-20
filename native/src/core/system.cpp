@@ -1334,17 +1334,21 @@ void system::withdraw(held_system const&, std::size_t member)
       withdrawn.fail(std::make_exception_ptr(operation_cancelled("the goal was withdrawn")));
 }
 
-void system::release(held_system const&, std::size_t member)
+void system::release(held_system const&, std::size_t member, bool halt)
 {
   auto& self = *impl_;
   self.require_paused();
   auto& one = self.slots[member];
-  if(not one.undecided)
+  if(one.goal)
+  {
+    throw std::logic_error(std::format("member {} has a goal pending", one.ref.name));
+  }
+  if(not halt and not one.undecided)
   {
     throw std::logic_error(std::format("member {} is not undecided", one.ref.name));
   }
   one.undecided = false;
-  one.released  = true;
+  one.released  = halt;
 }
 
 auto system::undecided(held_system const&) const -> std::vector<std::size_t>

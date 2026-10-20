@@ -93,7 +93,7 @@ def run_to(linked: Linked, until_ps: int) -> list[tuple[str, int | None, int]]:
         pauses.append((paused.name, cast(int | None, member_index), cast(int, at_ps)))
         if paused is not _core.PauseReason.delivered:
             return pauses
-        linked.handle.release(cast(int, member_index))
+        linked.handle.release(cast(int, member_index), True)
 
 
 @pytest.fixture
@@ -217,7 +217,7 @@ def test_member_indices_are_checked_before_anything_is_posted(
     calls: list[Callable[[], object]] = [
         lambda: linked.handle.post_goal(9, None, None, None, None, None, None, False, None, None),
         lambda: linked.handle.withdraw(9),
-        lambda: linked.handle.release(9),
+        lambda: linked.handle.release(9, True),
         lambda: linked.handle.reset(9, _core.ResetKind.power_on),
         lambda: linked.handle.time_of_ps(9),
     ]

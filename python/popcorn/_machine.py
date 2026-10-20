@@ -3042,8 +3042,13 @@ class Machine:
         instead goes on. The ends parks took and kept, such as the pytest report's park of a
         failed test, are raised by the next `halt()` calls, oldest first, each once.
 
+        On a member of a `System`, it halts the member where it stands, released from its goal's
+        stop: its core executes nothing in system runs until its next goal or reset. Called
+        while another member's goal runs, it takes effect at the next pause.
+
         Raises:
-            MachineBusy: A run, step or call is active instead, cancel its task.
+            MachineBusy: A run, step or call is active instead, cancel its task. On a member, its
+                goal is pending, or the system runs freely or runs a system run.
             RuntimeError: Called from a handler.
             EmulationError: The free run stopped by itself: FaultError for FAULT,
                 BudgetExceeded for BUDGET, EmulationError otherwise, carrying the stop.

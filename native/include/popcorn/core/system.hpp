@@ -216,18 +216,17 @@ public:
   /**
    * @brief Runs the system until the next pause, every member on its own host. Without
    *        @p system_until the members are halted. With it every member runs its core to that
-   *        system time, and the pause comes when the last one reached it, at the latest stop
-   *        point, unless an earlier entry comes first: a goal's stop or an error. Members with a
-   *        goal run it, the others are halted, or with @p system_until run their core as a system
-   *        TIME goal unless released. When every member sleeps with nothing due, the system
+   *        system time, and the pause comes when the last one reached it, at the latest stop point,
+   *        unless an earlier entry comes first: a goal's stop or an error. Members with a goal run
+   *        it, the others are halted, or with @p system_until run their core as a system TIME goal
+   *        unless release() halted them. When every member sleeps with nothing due, the system
    *        pauses as pause_reason::idle at the latest quiescent point and every goal that is not
    *        open resolves there with stop_reason::idle. When every goal left is open, the system
-   *        sleeps instead: each host waits as an idle free run does, and the first member woken,
-   *        by a command, a stamp, a watched descriptor or wake(), wakes the others. Where the
-   *        run resumes then depends on wall time. Every pause drains the wires up to its
-   *        point before it is decided, so an error a wire dates before the delivered entry
-   *        comes first. A member stop delivered without a member goal leaves it undecided as a
-   *        goal's stop does.
+   *        sleeps instead: each host waits as an idle free run does, and the first member woken, by
+   *        a command, a stamp, a watched descriptor or wake(), wakes the others. Where the run
+   *        resumes then depends on wall time. Every pause drains the wires up to its point before
+   *        it is decided, so an error a wire dates before the delivered entry comes first. A member
+   *        stop delivered without a member goal leaves it undecided as a goal's stop does.
    * @return Completes once every member parked, from the last host thread to park.
    * @throws std::logic_error before start(), while a resume is in flight, with an undecided
    *         member, after finish(), or after an error pause stopped the system.
@@ -264,11 +263,14 @@ public:
       pre(member < members());
 
   /**
-   * @brief Releases member @p member, undecided after its goal was delivered: it is halted from
-   *        its stop on, and runs no system TIME goal until it gets a goal again.
-   * @throws std::logic_error while a resume is in flight or when the member is not undecided.
+   * @brief Releases member @p member, undecided after its goal was delivered. With @p halt false
+   *        the next resume with a system_until runs its core from its stop as a system TIME goal.
+   *        With @p halt true it is halted from where it stands, and runs no system TIME goal until
+   *        it gets a goal again or is reset. Halting also takes a member that is not undecided.
+   * @throws std::logic_error while a resume is in flight, when the member has a goal pending,
+   *         or when @p halt is false and the member is not undecided.
    */
-  void release(held_system const& held, std::size_t member) pre(held.holds(*this))
+  void release(held_system const& held, std::size_t member, bool halt) pre(held.holds(*this))
       pre(member < members());
 
   /** @brief Members whose goal was delivered and which are neither re-issued nor released. */
