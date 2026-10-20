@@ -26,6 +26,7 @@ import popcorn
 import pytest
 from popcorn import StopReason, _core
 from popcorn._refs import Pending
+from popcorn._streams import Waited
 from popcorn.board import (
     CdcLineCoding,
     CdcPacket,
@@ -1190,7 +1191,7 @@ def test_concurrent_control_requests_each_take_their_own_result(
     first_waited = False
     takes = 0
 
-    async def wait_second_after_first_took(ready: Any, for_: Any, deadline: Any) -> VirtualTime:
+    async def wait_second_after_first_took(ready: Any, for_: Any, deadline: Any) -> Waited:
         nonlocal waits, first_waited
         waits += 1
         if waits == 1:
@@ -1267,11 +1268,11 @@ def test_a_cancelled_control_request_gives_its_result_up(
 
         return held()
 
-    async def hang_instead(ready: Any, for_: Any, deadline: Any) -> VirtualTime:
+    async def hang_instead(ready: Any, for_: Any, deadline: Any) -> Waited:
         await hang()
         raise AssertionError
 
-    async def wait_then_hang(ready: Any, for_: Any, deadline: Any) -> VirtualTime:
+    async def wait_then_hang(ready: Any, for_: Any, deadline: Any) -> Waited:
         await wait(ready, for_, deadline)
         await hang()
         raise AssertionError
@@ -1308,7 +1309,7 @@ def test_a_stale_control_forget_after_a_restore_leaves_the_new_request(
     saved = m.snapshot()
     reached = asyncio.Event()
 
-    async def hang_instead(ready: Any, for_: Any, deadline: Any) -> VirtualTime:
+    async def hang_instead(ready: Any, for_: Any, deadline: Any) -> Waited:
         reached.set()
         await asyncio.Event().wait()
         raise AssertionError
@@ -1320,7 +1321,7 @@ def test_a_stale_control_forget_after_a_restore_leaves_the_new_request(
             await reached.wait()
         m.restore(saved)
 
-        async def cancel_first_then_wait(ready: Any, for_: Any, deadline: Any) -> VirtualTime:
+        async def cancel_first_then_wait(ready: Any, for_: Any, deadline: Any) -> Waited:
             first.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await first
@@ -1338,8 +1339,8 @@ def test_a_control_wait_ended_before_its_result_gives_the_result_up(
     m, host = configured(u575)
     now = m.time
 
-    async def idle(ready: Any, for_: Any, deadline: Any) -> VirtualTime:
-        return now
+    async def idle(ready: Any, for_: Any, deadline: Any) -> Waited:
+        return Waited(now, None)
 
     host._wait = idle  # pyright: ignore[reportPrivateUsage]
 
