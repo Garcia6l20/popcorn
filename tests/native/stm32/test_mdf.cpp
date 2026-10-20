@@ -952,6 +952,83 @@ auto vectors() -> std::filesystem::path
   return value;
 }
 
+struct vector_run
+{
+  std::uint32_t                order{};
+  std::uint32_t                decimation{};
+  std::uint32_t                scale{};
+  bool                         rsflt{};
+  bool                         rsflt_decimate{};
+  std::optional<std::uint32_t> hpf;
+  std::optional<std::uint32_t> int_value;
+  std::uint32_t                int_div{};
+  std::uint32_t                discard{};
+  std::uint32_t                skip{};
+  std::vector<std::uint8_t>    bits;
+  std::vector<std::int32_t>    pcm;
+  std::vector<bool>            saturated;
+};
+
+auto vector_runs(std::string_view name) -> std::vector<vector_run>
+{
+  namespace json = reflex::serde::json;
+  std::ifstream input(vectors() / std::format("chain_{}.json", name), std::ios::binary);
+  REQUIRE(input);
+  std::ostringstream text;
+  text << input.rdbuf();
+  auto document = json::deserializer{std::move(text).str()}.load<json::value>();
+  auto number   = [](json::value const& value) {
+    return static_cast<std::uint32_t>(value.as<json::number>());
+  };
+  auto optional = [&](json::value const& value) -> std::optional<std::uint32_t> {
+    if(value.is_null())
+    {
+      return std::nullopt;
+    }
+    return number(value);
+  };
+  std::vector<vector_run> out;
+  for(auto& run : document["runs"].as_array())
+  {
+    auto&      config = run["config"];
+    vector_run got{
+        .order =
+            static_cast<std::uint32_t>(std::stoul(std::string{config["order"].as<json::string>()})),
+        .decimation     = number(config["decimation"]),
+        .scale          = number(config["scale"]),
+        .rsflt          = config["rsflt"].as<json::boolean>(),
+        .rsflt_decimate = config["rsflt_decimate"].as<json::boolean>(),
+        .hpf            = optional(config["hpf"]),
+        .int_value      = optional(config["int_value"]),
+        .int_div        = number(config["int_div"]),
+        .discard        = number(config["discard"]),
+        .skip           = number(config["skip"]),
+        .bits           = {},
+        .pcm            = {},
+        .saturated      = {}};
+    auto const& hex   = run["bits"]["hex"].as<json::string>();
+    auto const  count = static_cast<std::size_t>(run["bits"]["count"].as<json::number>());
+    for(std::size_t i = 0; i < count; ++i)
+    {
+      got.bits.push_back((std::stoul(hex.substr(i / 8 * 2, 2), nullptr, 16) >> (7 - i % 8)) & 1u);
+    }
+    for(auto const& pair : run["pcm"].as_array())
+    {
+      got.pcm.insert(
+          got.pcm.end(), static_cast<std::size_t>(pair[1].as<json::number>()),
+          static_cast<std::int32_t>(pair[0].as<json::number>()));
+    }
+    for(auto const& pair : run["saturated"].as_array())
+    {
+      got.saturated.insert(
+          got.saturated.end(), static_cast<std::size_t>(pair[1].as<json::number>()),
+          pair[0].as<json::number>() != 0);
+    }
+    out.push_back(std::move(got));
+  }
+  return out;
+}
+
 auto pdm_16k() -> std::pair<std::vector<std::uint8_t>, std::vector<std::int32_t>>
 {
   namespace json = reflex::serde::json;
@@ -986,8 +1063,8 @@ auto edge_at(std::uint64_t anchor, std::uint64_t h) -> std::uint64_t
 
 struct stream_rig : rig
 {
-  std::array<std::shared_ptr<scripted>, 2> mic{
-      std::make_shared<scripted>(), std::make_shared<scripted>()};
+  std::array<std::shared_ptr<scripted>, 3> mic{
+      std::make_shared<scripted>(), std::make_shared<scripted>(), std::make_shared<scripted>()};
   std::array<std::shared_ptr<recorder>, 6> taps{};
   std::uint64_t                            anchor{};
 
@@ -996,6 +1073,7 @@ struct stream_rig : rig
     pll3_kernel(5, 64, 10);
     port().attach(0, stm32::pdm_edge::rising, mic[0]);
     port().attach(0, stm32::pdm_edge::falling, mic[1]);
+    port().attach(1, stm32::pdm_edge::rising, mic[2]);
     for(std::size_t f = 0; f < taps.size(); ++f)
     {
       taps[f] = std::make_shared<recorder>();
@@ -1395,6 +1473,7 @@ TEST_CASE("bench: one virtual second of the peer's two filters on silent sensors
     stream_rig const r;
     r.port().attach(0, stm32::pdm_edge::rising, nullptr);
     r.port().attach(0, stm32::pdm_edge::falling, nullptr);
+    r.port().attach(1, stm32::pdm_edge::rising, nullptr);
     r.write("SITF1CR", 0x1F11);
     for(std::uint32_t f = 0; f < 2; ++f)
     {
@@ -1458,5 +1537,381 @@ TEST_CASE("the sample event is due at the closed-form edge for a start on either
     r.run_until(due + us / 4);
     REQUIRE(r.taps[0]->samples.size() == 1);
     CHECK(r.taps[0]->samples[0].at == due);
+  }
+}
+
+namespace
+{
+constexpr std::uint32_t satf            = 1u << 9;
+constexpr std::uint32_t rxnef           = 1u << 3;
+constexpr std::uint32_t sync_continuous = 2u << 4;
+constexpr std::uint32_t sync_single     = 3u << 4;
+constexpr std::uint32_t trgo            = 1u;
+constexpr std::uint32_t ilvnb1          = 1u << 4;
+
+auto int_code(std::uint32_t ratio) -> std::uint32_t
+{
+  switch(ratio)
+  {
+    case 32:
+      return 1;
+    case 4:
+      return 2;
+    case 1:
+      return 3;
+    default:
+      return 0;
+  }
+}
+
+void program(stream_rig const& r, vector_run const& v, std::size_t f = 0, std::uint32_t cr = 0)
+{
+  r.write(
+      std::format("DFLT{}CICR", f), (v.scale << 20) | ((v.decimation - 1) << 8) | (v.order << 4));
+  r.write(
+      std::format("DFLT{}RSFR", f),
+      (v.rsflt ? 0u : 1u) | (v.rsflt_decimate ? 0u : 1u << 4) | (v.hpf ? *v.hpf << 8 : 1u << 7));
+  r.write(
+      std::format("DFLT{}INTR", f),
+      (v.int_value ? (*v.int_value - 1) << 4 : 0u) | int_code(v.int_div));
+  if(v.skip != 0)
+  {
+    r.write(std::format("DLY{}CR", f), v.skip);
+  }
+  r.write(std::format("DFLT{}CR", f), (v.discard << 20) | cr | 1u);
+}
+
+auto step_of(vector_run const& v) -> std::uint64_t
+{
+  auto const bits =
+      v.decimation * (v.rsflt and v.rsflt_decimate ? 4u : 1u) * v.int_value.value_or(1u) / 2u;
+  return edge_at(0, 2 * std::uint64_t{bits});
+}
+
+auto end_of(stream_rig const& r, vector_run const& v) -> std::uint64_t
+{
+  return r.anchor + edge_at(0, 2 * v.bits.size() + 2) + us;
+}
+
+void step_until(
+    stream_rig const&  r,
+    std::uint64_t      end,
+    std::uint64_t      step,
+    std::vector<bool>& saturated)
+{
+  while(r.now() < end)
+  {
+    r.run_until(std::min(end, r.now() + step));
+    auto const isr  = r.read("DFLT0ISR");
+    auto const seen = r.taps[0]->samples.size();
+    if(seen == saturated.size())
+    {
+      continue;
+    }
+    REQUIRE(seen == saturated.size() + 1);
+    saturated.push_back((isr & satf) != 0);
+    if((isr & satf) != 0)
+    {
+      r.write("DFLT0ISR", satf);
+    }
+  }
+}
+
+auto edges_now(stream_rig const& r) -> std::uint64_t
+{
+  auto const num = static_cast<unsigned __int128>(r.now() - r.anchor + 1) * 2u * peer_kernel;
+  auto const den = static_cast<unsigned __int128>(peer_divider) * 1'000'000'000'000u;
+  return static_cast<std::uint64_t>((num + den - 1) / den);
+}
+
+auto pcm_of(std::uint32_t word) -> std::int32_t
+{
+  return static_cast<std::int32_t>(word) >> 8;
+}
+}
+
+TEST_CASE("discard_skip, int and int_bypass through DFLT0: every PCM and its SATF")
+{
+  for(auto const* const name : {"discard_skip", "int", "int_bypass"})
+  {
+    std::size_t index = 0;
+    for(auto const& v : vector_runs(name))
+    {
+      CAPTURE(name);
+      CAPTURE(index);
+      ++index;
+      stream_rig const r;
+      r.mic[0]->bits = v.bits;
+      program(r, v);
+      std::vector<bool> saturated;
+      step_until(r, end_of(r, v), step_of(v), saturated);
+      auto const& got = r.taps[0]->samples;
+      REQUIRE(got.size() >= v.pcm.size());
+      for(std::size_t k = 0; k < v.pcm.size(); ++k)
+      {
+        CAPTURE(k);
+        CHECK(got[k].pcm == v.pcm[k]);
+        CHECK(saturated[k] == v.saturated[k]);
+      }
+    }
+  }
+}
+
+TEST_CASE("a snapshot taken after the discards, before the first kept sample, keeps its SATF carry")
+{
+  auto const       v = vector_runs("discard_skip").at(3);
+  stream_rig const r;
+  r.mic[0]->bits = v.bits;
+  program(r, v);
+  auto const end  = end_of(r, v);
+  auto const step = step_of(v);
+  r.run_until(r.anchor + edge_at(0, 2 * (32 * 32 + 16)));
+  r.port().settle();
+  REQUIRE(r.taps[0]->samples.empty());
+  auto const        saved = r.target->snapshot();
+  auto const        next  = r.mic[0]->next;
+  std::vector<bool> first;
+  step_until(r, end, step, first);
+  auto const first_pcm = r.taps[0]->samples;
+  r.target->restore(saved);
+  r.mic[0]->next = next;
+  r.taps[0]->samples.clear();
+  std::vector<bool> second;
+  step_until(r, end, step, second);
+  REQUIRE(first.size() >= v.pcm.size());
+  REQUIRE(second.size() == first.size());
+  for(std::size_t k = 0; k < v.pcm.size(); ++k)
+  {
+    CAPTURE(k);
+    CHECK(r.taps[0]->samples[k].pcm == first_pcm[k].pcm);
+    CHECK(second[k] == v.saturated[k]);
+    CHECK(first[k] == v.saturated[k]);
+  }
+}
+
+TEST_CASE("SKPDLY delays the samples by that many bits, SKPBF reads 1 until the last skipped edge")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.write("DLY0CR", 3);
+  CHECK(r.read("DLY0CR") == ((1u << 31) | 3u));
+  r.sinc1(0, 0);
+  r.run_until(edge_at(r.anchor, 6) - us / 2);
+  CHECK((r.read("DLY0CR") >> 31) == 1);
+  r.run_until(edge_at(r.anchor, 6) + us / 4);
+  CHECK((r.read("DLY0CR") >> 31) == 0);
+  r.run_until(r.anchor + 10 * us);
+  auto const& got = r.taps[0]->samples;
+  REQUIRE(got.size() >= 4);
+  for(std::uint64_t k = 0; k < 4; ++k)
+  {
+    CAPTURE(k);
+    CHECK(got[k].at == edge_at(r.anchor, 10 + 4 * k));
+  }
+  auto const written = r.now();
+  auto const before  = got.size();
+  r.write("DLY0CR", 2);
+  r.write("DLY0CR", 5);
+  CHECK(r.warned("DLY0CR") == 1);
+  r.run_until(written + 10 * us);
+  REQUIRE(got.size() > before + 4);
+  for(auto k = before; k < got.size(); ++k)
+  {
+    CAPTURE(k);
+    CHECK(got[k].at == edge_at(r.anchor, 10 + 4 * k + 4));
+  }
+}
+
+TEST_CASE("TRGO starts the armed sync filters at the next edge of their stream, half a bit apart")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.write("GCR", trgo);
+  r.sinc1(0, 0, 0, 2);
+  r.sinc1(1, 1, 0, 2);
+  r.run_until(r.anchor + 20 * us);
+  CHECK(r.taps[0]->samples.empty());
+  CHECK(r.taps[1]->samples.empty());
+  CHECK(r.bits("DFLT0CR", "DFLTRUN") == 0);
+  auto const next = edges_now(r);
+  r.write("GCR", trgo);
+  CHECK(r.bits("GCR", "TRGO") == 0);
+  CHECK(r.bits("DFLT0CR", "DFLTRUN") == 1);
+  CHECK(r.bits("DFLT1CR", "DFLTRUN") == 1);
+  auto const rising  = next + (next & 1u);
+  auto const falling = next + ((next ^ 1u) & 1u);
+  r.run_until(r.now() + 20 * us);
+  r.write("GCR", trgo);
+  r.run_until(r.now() + 20 * us);
+  auto const& on_rising  = r.taps[0]->samples;
+  auto const& on_falling = r.taps[1]->samples;
+  REQUIRE(on_rising.size() > 30);
+  REQUIRE(on_falling.size() > 30);
+  CHECK(on_rising[0].pcm == 2);
+  CHECK(on_falling[0].pcm == -2);
+  for(std::uint64_t k = 0; k < 30; ++k)
+  {
+    CAPTURE(k);
+    CHECK(on_rising[k].at == edge_at(r.anchor, rising + 2 + 4 * k));
+    CHECK(on_falling[k].at == edge_at(r.anchor, falling + 2 + 4 * k));
+  }
+}
+
+TEST_CASE("sync single-shot: each TRGO gives one sample after NBDIS discarded ones")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.sinc1(0, 0, 0, 3, 2u << 20);
+  r.run_until(r.anchor + 5 * us);
+  CHECK(r.taps[0]->samples.empty());
+  for(std::size_t shot = 0; shot < 2; ++shot)
+  {
+    CAPTURE(shot);
+    auto const next = edges_now(r);
+    r.write("GCR", trgo);
+    r.run_until(r.now() + 20 * us);
+    REQUIRE(r.taps[0]->samples.size() == shot + 1);
+    CHECK(r.taps[0]->samples[shot].at == edge_at(r.anchor, next + (next & 1u) + 2 + 4 * 2));
+    CHECK(r.bits("DFLT0CR", "DFLTRUN") == 0);
+  }
+}
+
+TEST_CASE("interleaved DMA: DFLT0's request waits for both RXFIFOs and holds for a round of reads")
+{
+  stream_rig const r{true};
+  r.mic[0]->fill = 1;
+  r.write("GCR", ilvnb1);
+  r.sinc1(0, 0, 0, 2, dmaen);
+  r.sinc1(1, 1, 0, 2, dmaen);
+  r.run_until(r.anchor + 5 * us);
+  CHECK_FALSE(r.requesting());
+  auto const next = edges_now(r);
+  r.write("GCR", ilvnb1 | trgo);
+  r.run_until(edge_at(r.anchor, next + 3) + us / 4);
+  CHECK(r.bits("DFLT0ISR", "RXNEF") == 1);
+  CHECK(r.bits("DFLT1ISR", "RXNEF") == 1);
+  CHECK(r.bits("DFLT0ISR", "FTHF") == 1);
+  CHECK(r.bits("DFLT1ISR", "FTHF") == 0);
+  CHECK(r.requesting());
+  CHECK(pcm_of(r.pop()) == 2);
+  CHECK(r.bits("DFLT0ISR", "FTHF") == 0);
+  CHECK(r.requesting());
+  CHECK(pcm_of(r.pop()) == -2);
+  CHECK_FALSE(r.requesting());
+  CHECK(r.requested() == std::vector<bool>{false, true, false});
+  r.run_until(edge_at(r.anchor, next + 3 + 8) + us / 4);
+  CHECK(r.bits("DFLT0ISR", "FTHF") == 1);
+  static_cast<void>(r.pop());
+  CHECK(r.bits("DFLT0ISR", "RXNEF") == 1);
+  CHECK(r.bits("DFLT0ISR", "FTHF") == 0);
+  CHECK(r.requesting());
+  static_cast<void>(r.pop());
+  CHECK(r.bits("DFLT0ISR", "FTHF") == 1);
+  CHECK(r.requesting());
+  r.write("DFLT1CR", sync_continuous);
+  r.run_until(r.now() + 5 * us);
+  CHECK(r.bits("DFLT0ISR", "RXNEF") == 1);
+  CHECK_FALSE(r.requesting());
+}
+
+TEST_CASE("interleaved filters with different SCALE: one warning, strict raises and keeps DFLT1CR")
+{
+  for(bool const strict : {false, true})
+  {
+    CAPTURE(strict);
+    rig const r{strict};
+    r.write("GCR", ilvnb1);
+    r.write("DFLT0CICR", (1u << 8) | (1u << 4));
+    r.write("DFLT1CICR", (2u << 20) | (1u << 8) | (1u << 4));
+    r.write("DFLT0CR", sync_continuous | 1u);
+    if(strict)
+    {
+      CHECK_THROWS_AS(
+          static_cast<void>(
+              r.target->mem().write(r.at("MDF1", "DFLT1CR"), 4, sync_continuous | 1u)),
+          popcorn::model_error);
+      CHECK(r.bits("DFLT1CR", "DFLTACTIVE") == 0);
+      r.write("DFLT1CICR", (1u << 8) | (1u << 4));
+      r.write("DFLT1CR", sync_continuous | 1u);
+      CHECK(r.bits("DFLT1CR", "DFLTACTIVE") == 1);
+    }
+    else
+    {
+      r.write("DFLT1CR", sync_continuous | 1u);
+      r.write("DFLT1CR", sync_continuous);
+      r.write("DFLT1CR", sync_continuous | 1u);
+      CHECK(r.warned("interleaved filters need") == 1);
+      CHECK(r.bits("DFLT1CR", "DFLTACTIVE") == 1);
+    }
+  }
+}
+
+namespace
+{
+void start_peer(stream_rig const& r, vector_run const& first, vector_run const& second)
+{
+  r.write("SITF0CR", 0x1F11);
+  r.write("SITF1CR", 0x1F11);
+  r.write("DFLT0CR", sync_continuous | dmaen | 1u);
+  r.write("DFLT1CR", sync_continuous | dmaen | 1u);
+  r.port().settle();
+  r.mic[1]->bits = first.bits;
+  r.mic[1]->next = 0;
+  r.mic[2]->bits = second.bits;
+  r.mic[2]->next = 0;
+  r.write("GCR", ilvnb1 | trgo);
+}
+
+auto drain_pairs(stream_rig const& r, std::size_t pairs)
+    -> std::pair<std::vector<std::int32_t>, std::vector<std::int32_t>>
+{
+  std::pair<std::vector<std::int32_t>, std::vector<std::int32_t>> out;
+  while(out.first.size() < pairs)
+  {
+    r.run_until(r.now() + 30 * us);
+    while((r.read("DFLT0ISR") & rxnef) != 0 and (r.read("DFLT1ISR") & rxnef) != 0)
+    {
+      out.first.push_back(pcm_of(r.pop()));
+      out.second.push_back(pcm_of(r.pop()));
+    }
+    REQUIRE(r.bits("DFLT0ISR", "DOVRF") == 0);
+  }
+  return out;
+}
+}
+
+TEST_CASE("the peer's two filters interleaved on TRGO, read through DFLT0DR, and restarted")
+{
+  auto const       quiet = vector_runs("pdm_16k").at(0);
+  auto const       loud  = vector_runs("pdm_16k_loud").at(0);
+  stream_rig const r;
+  r.write("GCR", ilvnb1);
+  r.write("SITF1CR", 0x1F11);
+  r.write("BSMX0CR", 1);
+  r.write("BSMX1CR", 2);
+  program(r, quiet, 0, sync_continuous | dmaen);
+  program(r, loud, 1, sync_continuous | dmaen);
+  r.run_until(r.now() + 100 * us);
+  CHECK(r.taps[0]->samples.empty());
+  CHECK(r.taps[1]->samples.empty());
+  for(int run = 0; run < 2; ++run)
+  {
+    CAPTURE(run);
+    start_peer(r, quiet, loud);
+    auto const [first, second] = drain_pairs(r, 64);
+    for(std::size_t k = 0; k < 64; ++k)
+    {
+      CAPTURE(k);
+      CHECK(first[k] == quiet.pcm[k]);
+      CHECK(second[k] == loud.pcm[k]);
+    }
+    r.run_until(r.now() + 70 * us);
+    REQUIRE((r.read("DFLT0ISR") & rxnef) != 0);
+    static_cast<void>(r.pop());
+    for(std::size_t f = 0; f < 2; ++f)
+    {
+      r.write(std::format("SITF{}CR", f), 0x1F10);
+      r.write(std::format("DFLT{}CR", f), sync_continuous);
+    }
   }
 }

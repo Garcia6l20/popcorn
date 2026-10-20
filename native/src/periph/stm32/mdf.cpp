@@ -74,6 +74,9 @@ struct filter_state
   bool                      single{};
   bool                      dma{};
   bool                      rsflt_fed{};
+  std::uint16_t             discard{};
+  bool                      carried{};
+  std::uint8_t              skip{};
   chain_config              config{};
   chain_state               chain{};
   std::vector<std::int32_t> fifo;
@@ -88,6 +91,7 @@ struct mdf_state
   std::array<cck_state, 2>     cck{};
   std::uint32_t                sample_generation{};
   std::optional<std::uint64_t> scheduled_ps;
+  std::uint8_t                 round{};
 
   friend auto operator==(mdf_state const&, mdf_state const&) -> bool = default;
 };
@@ -155,6 +159,11 @@ struct filter_fields
   field_ref                                    saturation;
   reg_ref                                      dly;
   field_ref                                    skip_busy;
+  field_ref                                    skip_delay;
+  field_ref                                    discard;
+  std::optional<reg_ref>                       intr;
+  std::optional<field_ref>                     int_value;
+  std::optional<field_ref>                     int_div;
   std::optional<field_ref>                     old_enable;
   std::optional<field_ref>                     old_active;
   std::optional<field_ref>                     scd_enable;
@@ -226,8 +235,18 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        run the chain of `dfilter_chain.hpp` from a reset state at their start, 39.4.11, and
  *        write each sample to their 4-deep RXFIFO at the edge of the bit that completed it,
  *        39.4.13, an event of that exact picosecond. ACQMOD 000 runs continuously, 001 writes one
- *        sample, sets DFLTRUN 0 and restarts at the next write of DFLTEN 1, 39.4.10. ACQMOD 01x
- *        waits for its trigger. DFLTEN 0 stops at once, resets the chain and flushes the RXFIFO.
+ *        sample, sets DFLTRUN 0 and restarts at the next write of DFLTEN 1, 39.4.10. ACQMOD 010
+ *        and 011 wait with DFLTRUN 0 for a GCR write of TRGO 1, which starts every enabled filter
+ *        of those modes that is not running at the next edge of its own stream, so filters on
+ *        both edges of one clock start half a bit apart. 011 re-arms after its sample. A trigger
+ *        reaching a running or disabled filter is ignored. DFLTEN 0 stops at once, resets the
+ *        chain and flushes the RXFIFO. Each start loads NBDIS: that many samples leaving the
+ *        HPF are dropped before INT, their saturation carried to the first kept sample, 39.4.10
+ *        "Discarded samples". INTVAL not 0 sums INTVAL + 1 samples, divided by INTDIV, one
+ *        RXFIFO write per sum, 39.4.8. A SKPDLY write with SKPBF 0 sets SKPBF and skips that
+ *        many input bits of the filter while it runs, the CIC frozen, SKPBF back to 0 at the last
+ *        skipped edge, 39.8.12. A popcorn choice: a filter waiting for its trigger skips
+ *        nothing yet. DLYxCR reads catch up first.
  *        A full RXFIFO drops the sample and sets DOVRF. Silicon has DFLTxDR as a fifth stage,
  *        39.4.13 "Data resynchronization", so the model overruns one sample earlier. A read of
  *        DFLTxDR of any size pops one sample, PCM[23:0] in bits 31:8, an empty RXFIFO reads 0.
@@ -235,11 +254,17 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        RXNEF follows the level, FTHF the level against FTH, 1 or 2 samples. SATF follows the
  *        chain's saturation. Each filter's tap sees every sample written, dropped ones marked.
  *        With DMAEN the filter drives `<instance>_flt<n>_dma`: with FTH 0 while the RXFIFO is not
- *        empty, with FTH 1 from the second sample until the RXFIFO empties, 39.4.13. Independent
- *        transfers only. RFOVRF is set at each RSFLT input sample but the first since the start
- *        while mdf_proc_ck is below 24 times their rate, (MCICD + 1) x (CCKDIV + 1) below 24: the
- *        input arrives while the previous one is still processed, 39.4.8. With RFOVRIE the
- *        model wakes at that input so the IRQ rises on time. Silicon then gives invalid
+ *        empty, with FTH 1 from the second sample until the RXFIFO empties, 39.4.13. ILVNB k
+ *        interleaves filters 0 to k: DFLT0DR reads take one sample of each RXFIFO in turn, a
+ *        round, DFLT0's request rises when every interleaved RXFIFO holds a sample and holds
+ *        until the round ends, FTHF0 follows the same condition at a round's start, FTH, DMAEN
+ *        and FTHF of filters 1 to k are ignored, and stopping any of them ends the round,
+ *        39.4.13. Enabling an interleaved filter whose ACQMOD is not 01x, or whose ACQMOD,
+ *        trigger, NBDIS, CICR, RSFR or INTR differ from another enabled one, logs once and
+ *        raises model_error under `strict_peripherals`. RFOVRF is set at each RSFLT input sample
+ * but the first since the start while mdf_proc_ck is below 24 times their rate, (MCICD + 1) x
+ * (CCKDIV + 1) below 24: the input arrives while the previous one is still processed, 39.4.8. With
+ * RFOVRIE the model wakes at that input so the IRQ rises on time. Silicon then gives invalid
  *        samples, the model still delivers exact ones, a popcorn choice.
  *
  *        Write protection, 39.4.15 Table 381: a write changing a protected field while its
@@ -368,6 +393,13 @@ private:
   void               catch_up(std::size_t s, std::uint64_t t);
   void               write_sample(std::size_t f, produced sample, std::uint64_t at);
   void               start_filter(std::size_t f);
+  void               begin(std::size_t f);
+  [[nodiscard]] auto mode_of(std::size_t f) const -> std::uint32_t;
+  [[nodiscard]] auto interleaved(std::size_t f) const -> bool;
+  [[nodiscard]] auto interleave_last() const -> std::size_t;
+  void               refresh_interleave();
+  [[nodiscard]] auto source_of(std::size_t f) const -> std::size_t;
+  void               check_interleave(std::size_t f, std::uint32_t old);
   void               stop_filter(std::size_t f);
   void               refresh_fifo(std::size_t f);
   void               refresh_dma(std::size_t f);
@@ -550,6 +582,11 @@ auto mdf::filter_of(std::size_t f) const -> filter_fields
       .saturation           = field(isr, "SATF"),
       .dly                  = reg(dly),
       .skip_busy            = field(dly, "SKPBF"),
+      .skip_delay           = field(dly, "SKPDLY"),
+      .discard              = field(cr, "NBDIS"),
+      .intr                 = std::nullopt,
+      .int_value            = std::nullopt,
+      .int_div              = std::nullopt,
       .old_enable           = std::nullopt,
       .old_active           = std::nullopt,
       .scd_enable           = std::nullopt,
@@ -560,6 +597,12 @@ auto mdf::filter_of(std::size_t f) const -> filter_fields
       .isr_clear            = 0,
       .isr_old_clear        = 0,
       .interrupts           = {}};
+  if(auto const intr = std::format("DFLT{}INTR", f); find_register(desc_, intr) != nullptr)
+  {
+    out.intr      = reg(intr);
+    out.int_value = field(intr, "INTVAL");
+    out.int_div   = field(intr, "INTDIV");
+  }
   if(layout_.motor)
   {
     out.old_enable    = field(std::format("OLD{}CR", f), "OLDEN");
@@ -636,7 +679,8 @@ void mdf::reset(register_file& regs, reset_kind)
   {
     sitf = {};
   }
-  state_.cck = {};
+  state_.cck   = {};
+  state_.round = 0;
   ++state_.sample_generation;
   state_.scheduled_ps.reset();
   for(auto& request : requests_)
@@ -684,13 +728,13 @@ auto mdf::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
       settle();
       if(ctx.by == initiator::debugger)
       {
-        auto const& fifo = state_.filter[f].fifo;
+        auto const& fifo = state_.filter[source_of(f)].fifo;
         return read_lanes(
             fifo.empty() ? 0u : static_cast<std::uint32_t>(fifo.front()) << 8, offset, size);
       }
       return read_lanes(pop(f), offset, size);
     }
-    if(filter.isr.offset == word)
+    if(filter.isr.offset == word or filter.dly.offset == word)
     {
       settle();
     }
@@ -848,6 +892,30 @@ void mdf::global_written(std::uint32_t old, std::uint32_t now)
     now = protect(gcr_, old, now, interleave_->mask(), bits(filter_[0].active) != 0);
   }
   regs_.poke(gcr_.offset, trgo_.with(now, 0));
+  if(interleave_ and interleave_->of(old) != interleave_->of(now))
+  {
+    for(std::size_t f = 0; f < layout_.filters; ++f)
+    {
+      refresh_fifo(f);
+    }
+  }
+  if(trgo_.of(now) == 0)
+  {
+    return;
+  }
+  settle();
+  for(std::size_t f = 0; f < layout_.filters; ++f)
+  {
+    auto const mode = mode_of(f);
+    if(bits(filter_[f].enable) != 0
+       and (mode == 2 or mode == 3)
+       and bits(filter_[f].trigger) == 0
+       and not state_.filter[f].running)
+    {
+      begin(f);
+    }
+  }
+  reschedule();
 }
 
 auto mdf::proc_hz() const -> std::uint64_t
@@ -1105,6 +1173,59 @@ void mdf::check_filter_start(std::size_t f, std::uint32_t old)
   {
     check_clocks(s, filter.cr, old);
   }
+  if(interleaved(f))
+  {
+    check_interleave(f, old);
+  }
+}
+
+void mdf::check_interleave(std::size_t f, std::uint32_t old)
+{
+  auto const& filter = filter_[f];
+  auto const  mode   = mode_of(f);
+  auto const  cr     = name_of(filter.cr);
+  if(mode != 2 and mode != 3)
+  {
+    rule(
+        "interleave", filter.cr, old, cr,
+        std::format(
+            "{} {}: an interleaved filter needs ACQMOD 010 or 011, RM0456 39.4.13, ACQMOD is {}",
+            desc_.name, cr, mode));
+    return;
+  }
+  for(std::size_t g = 0; g < layout_.filters; ++g)
+  {
+    if(g == f or not interleaved(g) or bits(filter_[g].enable) == 0)
+    {
+      continue;
+    }
+    auto const&                              other = filter_[g];
+    std::vector<std::pair<reg_ref, reg_ref>> same{
+        {filter.cicr, other.cicr},
+        {filter.rsfr, other.rsfr}
+    };
+    if(filter.intr)
+    {
+      same.emplace_back(*filter.intr, *other.intr);
+    }
+    auto differs = mode != mode_of(g)
+                or bits(filter.trigger) != bits(other.trigger)
+                or bits(filter.discard) != bits(other.discard);
+    for(auto const& [mine, theirs] : same)
+    {
+      differs = differs or regs_.peek(mine.offset) != regs_.peek(theirs.offset);
+    }
+    if(differs)
+    {
+      rule(
+          "interleave", filter.cr, old, cr,
+          std::format(
+              "{} {}: interleaved filters need the same ACQMOD, trigger, NBDIS and filter "
+              "configuration, RM0456 39.4.13, DFLT{} and DFLT{} differ",
+              desc_.name, cr, f, g));
+      return;
+    }
+  }
 }
 
 void mdf::filter_written(std::size_t f, std::uint32_t old, std::uint32_t now)
@@ -1117,7 +1238,7 @@ void mdf::filter_written(std::size_t f, std::uint32_t old, std::uint32_t now)
   regs_.poke(filter.cr.offset, now);
   auto const restart = filter.enable.of(now) != 0
                    and filter.enable.of(old) != 0
-                   and state_.filter[f].single
+                   and mode_of(f) == 1
                    and not state_.filter[f].running;
   if(filter.enable.of(old) == 0 and filter.enable.of(now) != 0)
   {
@@ -1195,6 +1316,14 @@ void mdf::dly_written(std::size_t f, std::uint32_t old, std::uint32_t now)
 {
   auto const& filter = filter_[f];
   now = protect(filter.dly, old, now, ~filter.skip_busy.mask(), filter.skip_busy.of(old) != 0);
+  if(filter.skip_busy.of(old) == 0 and filter.skip_delay.of(now) != 0)
+  {
+    settle();
+    state_.filter[f].skip = static_cast<std::uint8_t>(filter.skip_delay.of(now));
+    regs_.poke(filter.dly.offset, filter.skip_busy.with(now, 1));
+    reschedule();
+    return;
+  }
   regs_.poke(filter.dly.offset, filter.skip_busy.with(now, filter.skip_busy.of(old)));
 }
 
@@ -1328,6 +1457,11 @@ auto mdf::config_of(std::size_t f) const -> chain_config
   {
     out.offset = static_cast<std::int32_t>(bits(*filter.offset) << 6) >> 6;
   }
+  if(filter.int_value and bits(*filter.int_value) != 0)
+  {
+    out.int_value = static_cast<std::uint8_t>(bits(*filter.int_value) + 1u);
+    out.int_div   = static_cast<int_divider>(bits(*filter.int_div));
+  }
   return out;
 }
 
@@ -1336,11 +1470,16 @@ auto mdf::bits_needed(std::size_t f) const -> std::uint64_t
   auto const& filter = state_.filter[f];
   auto const  d      = std::uint64_t{filter.config.decimation};
   auto        need   = d - filter.chain.cic.count;
+  auto        period = d;
   if(filter.config.rsflt and filter.config.rsflt_decimate)
   {
     need += (3u - filter.chain.rsflt.count) * d;
+    period *= 4u;
   }
-  return need;
+  auto const integrated = filter.config.int_value
+                            ? std::uint64_t{*filter.config.int_value} - filter.chain.integ.count
+                            : 1u;
+  return filter.skip + need + (filter.discard + integrated - 1u) * period;
 }
 
 void mdf::refresh_clocks(std::uint64_t t)
@@ -1480,6 +1619,14 @@ void mdf::catch_up(std::size_t s, std::uint64_t t)
       auto const overrun = rsflt_overruns(f);
       for(std::size_t j = 0; j < bits_[e].size() and filter.running; ++j)
       {
+        if(filter.skip != 0)
+        {
+          if(--filter.skip == 0)
+          {
+            update(regs_, filter_[f].skip_busy, 0);
+          }
+          continue;
+        }
         auto const sample = feed(filter.chain, filter.config, bits_[e][j] != 0 ? 1 : -1);
         if(overrun and filter.chain.cic.count == 0)
         {
@@ -1490,9 +1637,23 @@ void mdf::catch_up(std::size_t s, std::uint64_t t)
           }
           filter.rsflt_fed = true;
         }
-        if(sample)
+        if(not sample)
         {
-          write_sample(f, *sample, edge_ps(y, first[e] + 2 * j));
+          continue;
+        }
+        if(filter.discard != 0)
+        {
+          --filter.discard;
+          filter.carried = filter.carried or sample->saturated;
+          continue;
+        }
+        auto const kept = integrate(
+            filter.chain.integ, filter.config,
+            {.pcm       = sample->pcm,
+             .saturated = sample->saturated or std::exchange(filter.carried, false)});
+        if(kept)
+        {
+          write_sample(f, *kept, edge_ps(y, first[e] + 2 * j));
         }
       }
     }
@@ -1534,9 +1695,51 @@ void mdf::refresh_fifo(std::size_t f)
   auto const  level  = state_.filter[f].fifo.size();
   auto const& filter = filter_[f];
   update(regs_, filter.rxne, level != 0 ? 1 : 0);
-  update(regs_, filter.fifo_threshold, level >= (bits(filter.threshold) != 0 ? 2u : 1u) ? 1 : 0);
-  refresh_dma(f);
+  if(interleaved(f))
+  {
+    refresh_interleave();
+  }
+  else
+  {
+    update(regs_, filter.fifo_threshold, level >= (bits(filter.threshold) != 0 ? 2u : 1u) ? 1 : 0);
+    refresh_dma(f);
+  }
   update_irq();
+}
+
+auto mdf::interleave_last() const -> std::size_t
+{
+  return interleave_ ? std::min<std::size_t>(bits(*interleave_), layout_.filters - 1) : 0;
+}
+
+auto mdf::interleaved(std::size_t f) const -> bool
+{
+  auto const last = interleave_last();
+  return last != 0 and f <= last;
+}
+
+void mdf::refresh_interleave()
+{
+  auto const last = interleave_last();
+  auto       all  = true;
+  for(std::size_t f = 0; f <= last; ++f)
+  {
+    all = all and not state_.filter[f].fifo.empty();
+  }
+  for(std::size_t f = 1; f <= last; ++f)
+  {
+    update(regs_, filter_[f].fifo_threshold, 0);
+    state_.filter[f].dma = false;
+    requests_[f].set(false);
+  }
+  update(regs_, filter_[0].fifo_threshold, state_.round == 0 and all ? 1 : 0);
+  state_.filter[0].dma = bits(filter_[0].dma) != 0 and (state_.round != 0 or all);
+  requests_[0].set(state_.filter[0].dma);
+}
+
+auto mdf::source_of(std::size_t f) const -> std::size_t
+{
+  return f == 0 and interleaved(0) ? state_.round : f;
 }
 
 void mdf::refresh_dma(std::size_t f)
@@ -1570,27 +1773,48 @@ auto mdf::rsflt_wakes(std::size_t f) const -> bool
 
 auto mdf::pop(std::size_t f) -> std::uint32_t
 {
-  auto& fifo = state_.filter[f].fifo;
-  if(fifo.empty())
+  auto const source = source_of(f);
+  if(f == 0 and interleaved(0))
   {
-    return 0;
+    state_.round = static_cast<std::uint8_t>((state_.round + 1u) % (interleave_last() + 1u));
   }
-  auto const value = static_cast<std::uint32_t>(fifo.front()) << 8;
-  fifo.erase(fifo.begin());
-  refresh_fifo(f);
+  auto&         fifo  = state_.filter[source].fifo;
+  std::uint32_t value = 0;
+  if(not fifo.empty())
+  {
+    value = static_cast<std::uint32_t>(fifo.front()) << 8;
+    fifo.erase(fifo.begin());
+  }
+  refresh_fifo(source);
   return value;
 }
 
 void mdf::start_filter(std::size_t f)
 {
+  if(mode_of(f) < 2)
+  {
+    begin(f);
+  }
+}
+
+void mdf::begin(std::size_t f)
+{
   auto&      filter = state_.filter[f];
-  auto const mode   = bits(filter_[f].acquisition);
+  auto const mode   = mode_of(f);
   filter.chain      = {};
   filter.rsflt_fed  = false;
   filter.config     = config_of(f);
-  filter.single     = mode == 1;
-  filter.running    = mode != 2 and mode != 3;
-  update(regs_, filter_[f].run, filter.running ? 1 : 0);
+  filter.single     = mode == 1 or mode == 3;
+  filter.discard    = static_cast<std::uint16_t>(bits(filter_[f].discard));
+  filter.carried    = false;
+  filter.running    = true;
+  update(regs_, filter_[f].run, 1);
+}
+
+auto mdf::mode_of(std::size_t f) const -> std::uint32_t
+{
+  auto const mode = bits(filter_[f].acquisition);
+  return mode >= 6 ? 0 : mode;
 }
 
 void mdf::stop_filter(std::size_t f)
@@ -1600,8 +1824,14 @@ void mdf::stop_filter(std::size_t f)
   filter.single    = false;
   filter.chain     = {};
   filter.rsflt_fed = false;
+  filter.discard   = 0;
+  filter.carried   = false;
   filter.fifo.clear();
   update(regs_, filter_[f].run, 0);
+  if(interleaved(f))
+  {
+    state_.round = 0;
+  }
   refresh_fifo(f);
 }
 
@@ -1623,7 +1853,7 @@ void mdf::reschedule()
     if(rsflt_wakes(f))
     {
       auto const d = std::uint64_t{filter.config.decimation};
-      need         = std::min(need, d - filter.chain.cic.count + (filter.rsflt_fed ? 0 : d));
+      need = std::min(need, filter.skip + d - filter.chain.cic.count + (filter.rsflt_fed ? 0 : d));
     }
     auto const at = edge_ps(cck_of(s), first + 2 * (need - 1));
     earliest      = earliest ? std::min(*earliest, at) : at;
