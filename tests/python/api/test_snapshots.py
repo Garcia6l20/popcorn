@@ -272,6 +272,8 @@ def test_a_call_adds_no_state_but_the_instructions_it_ran(
             assert isinstance(now, dict)
             doc["now"] = cast(dict[str, int], now)["value"]
         assert called.pop("now") == cast(int, alone.pop("now")) + ran
+        executed = cast(dict[str, int], called.pop("executed"))["value"]
+        assert executed == cast(dict[str, int], alone.pop("executed"))["value"] + ran
         assert called == alone
         asyncio.run(m.run(for_=ms(5)))
         asyncio.run(twin.run(for_=ms(5)))
@@ -281,7 +283,8 @@ def test_a_format_4_snapshot_mid_reception_restores_and_runs_on(
     u575: popcorn.PartDescription,
 ) -> None:
     """The fixture is the lzma snapshot a format 4 build takes after this case's first half, up to
-    the 5 ms + 40 us run. It binds the U575 description digest: regenerate it when that changes."""
+    the 5 ms + 40 us run. It binds the U575 description digest: regenerate it when that changes.
+    It predates `executed`, which loads as 0."""
     m = usart_at(u575, ms(0))
     port = m.periph.USART1.port
     start = m.time
@@ -296,9 +299,13 @@ def test_a_format_4_snapshot_mid_reception_restores_and_runs_on(
 
     other = usart_at(u575, ms(0))
     other.restore(popcorn.Snapshot.from_bytes(saved))
+    assert other.executed == 0
     asyncio.run(other.run(for_=ms(5)))
     other_port = other.periph.USART1.port
     got = asyncio.run(other_port.read_frames(other_port.available))
     assert [(f.data, f.at) for f in got] == [(f.data, f.at) for f in sent]
     assert b"echo: alpha" in bytes(f.data for f in got)
-    assert without_generation(other)[1] == without_generation(m)[1]
+    restored, ran = without_generation(other)[1], without_generation(m)[1]
+    restored.pop("executed")
+    ran.pop("executed")
+    assert restored == ran

@@ -337,6 +337,14 @@ public:
    */
   [[nodiscard]] auto held_through() const noexcept -> std::optional<icount>;
 
+  /**
+   * @brief Instructions the core executed since reset, counted as virtual_clock().now() counts
+   *        them, without the time the core slept in WFI or WFE or was held: virtual_clock().now()
+   *        minus this is that time in instructions. Zeroed by every reset kind, saved in
+   *        snapshots and restored with them.
+   */
+  [[nodiscard]] auto executed() const noexcept -> icount;
+
   /** @brief Virtual clock, for reading instruction count, time and domain rates. */
   [[nodiscard]] auto virtual_clock() const noexcept -> core::clock const&;
 

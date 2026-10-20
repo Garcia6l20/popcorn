@@ -33,36 +33,44 @@ def ping(u575: popcorn.PartDescription) -> Iterator[System]:
     system.close()
 
 
-def executed(system: System, name: str) -> int:
-    index = list(system.members).index(name)
-    return system._handle.executed_of(index)  # pyright: ignore[reportPrivateUsage]
+Released = Callable[[System, list[int]], Awaitable[SystemStop]]
 
 
-async def holder_ends(system: System) -> SystemStop:
-    await asyncio.create_task(system.members["b"].run(for_=us(100)))
+async def holder_ends(system: System, ran: list[int]) -> SystemStop:
+    b = system.members["b"]
+    await asyncio.create_task(b.run(for_=us(100)))
     await asyncio.sleep(0)
     assert not system._undecided  # pyright: ignore[reportPrivateUsage]
+    ran.append(b.executed)
     return await system.run(for_=ms(3))
 
 
-async def run_releases(system: System) -> SystemStop:
-    await system.members["b"].run(for_=us(100))
+async def run_releases(system: System, ran: list[int]) -> SystemStop:
+    b = system.members["b"]
+    await b.run(for_=us(100))
+    ran.append(b.executed)
     return await system.run(for_=ms(3))
 
 
-async def wait_for_releases(system: System) -> SystemStop:
-    await system.members["b"].run(for_=us(100))
+async def wait_for_releases(system: System, ran: list[int]) -> SystemStop:
+    b = system.members["b"]
+    await b.run(for_=us(100))
+    ran.append(b.executed)
     return await system.wait_for(lambda _: False, every=ms(1), for_=ms(3))
 
 
-async def peer_await_releases(system: System) -> SystemStop:
-    await system.members["b"].run(for_=us(100))
+async def peer_await_releases(system: System, ran: list[int]) -> SystemStop:
+    b = system.members["b"]
+    await b.run(for_=us(100))
+    ran.append(b.executed)
     await system.members["a"].run(for_=us(1))
     return await system.run(for_=ms(3))
 
 
-async def snapshot_releases(system: System) -> SystemStop:
-    await system.members["b"].run(for_=us(100))
+async def snapshot_releases(system: System, ran: list[int]) -> SystemStop:
+    b = system.members["b"]
+    await b.run(for_=us(100))
+    ran.append(b.executed)
     system.snapshot()
     return await system.run(for_=ms(3))
 
@@ -72,14 +80,17 @@ async def snapshot_releases(system: System) -> SystemStop:
     [holder_ends, run_releases, wait_for_releases, peer_await_releases, snapshot_releases],
 )
 def test_a_member_released_from_its_goal_s_stop_runs_its_core_in_the_next_system_run(
-    ping: System, released: Callable[[System], Awaitable[SystemStop]]
+    ping: System, released: Released
 ) -> None:
+    ran: list[int] = []
+
     async def body() -> SystemStop:
-        return await released(ping)
+        return await released(ping, ran)
 
     stop = asyncio.run(body())
     assert (stop.reason, stop.member) == (StopReason.USER, "a")
     assert received(ping.members["a"]) == PINGED
+    assert ping.members["b"].executed > ran[0]
 
 
 def test_a_member_stop_of_its_own_running_leaves_it_to_run_in_the_next_system_run(
@@ -106,27 +117,27 @@ def test_a_member_stop_of_the_system_s_free_run_leaves_the_member_halted(ping: S
             await asyncio.sleep(0)
         with pytest.raises(popcorn.EmulationError, match="USER"):
             ping.halt()
-        parked = executed(ping, "a")
+        parked = ping.members["a"].executed
         return parked, await ping.run(for_=ms(3))
 
     parked, stop = asyncio.run(body())
     assert stop.reason is StopReason.TIME
-    assert executed(ping, "a") == parked
+    assert ping.members["a"].executed == parked
 
 
 def test_a_halted_member_stays_halted_in_system_runs_until_its_next_goal(ping: System) -> None:
     a, b = ping.members["a"], ping.members["b"]
     asyncio.run(b.run(for_=us(100)))
     b.halt()
-    parked = executed(ping, "b"), b.pc
+    parked = ping.members["b"].executed, b.pc
     stop = asyncio.run(ping.run(for_=ms(3)))
     assert stop.reason is StopReason.TIME
-    assert (executed(ping, "b"), b.pc) == parked
+    assert (ping.members["b"].executed, b.pc) == parked
     assert received(a) == []
     asyncio.run(b.run(for_=us(10)))
     stop = asyncio.run(ping.run(for_=ms(3)))
     assert stop.reason is StopReason.TIME
-    assert executed(ping, "b") > parked[0]
+    assert ping.members["b"].executed > parked[0]
 
 
 def test_a_halt_while_a_peer_s_goal_runs_takes_effect_at_the_next_pause(ping: System) -> None:
@@ -140,9 +151,9 @@ def test_a_halt_while_a_peer_s_goal_runs_takes_effect_at_the_next_pause(ping: Sy
             await asyncio.sleep(0)
         b.halt()
         await peer
-        parked = executed(ping, "b")
+        parked = ping.members["b"].executed
         stop = await ping.run(for_=ms(3))
-        assert executed(ping, "b") == parked
+        assert ping.members["b"].executed == parked
         return stop
 
     stop = asyncio.run(body())
@@ -175,10 +186,10 @@ def test_a_member_stop_a_system_run_found_leaves_the_member_halted(
     first = asyncio.run(ping.run(for_=ms(3)))
     reason = StopReason.FAULT if stopper == "fault" else StopReason.USER
     assert (first.reason, first.member) == (reason, "a")
-    parked = executed(ping, "a"), a.pc
+    parked = ping.members["a"].executed, a.pc
     after = asyncio.run(ping.run(for_=ms(3)))
     assert after.reason is StopReason.TIME
-    assert (executed(ping, "a"), a.pc) == parked
+    assert (ping.members["a"].executed, a.pc) == parked
 
 
 def test_a_snapshot_keeps_whether_a_released_member_is_halted(ping: System) -> None:
@@ -198,10 +209,10 @@ def test_a_snapshot_keeps_whether_a_released_member_is_halted(ping: System) -> N
     assert received(a) == PINGED
 
     ping.restore(halted)
-    parked = executed(ping, "b")
+    parked = ping.members["b"].executed
     stop = asyncio.run(ping.run(for_=ms(3)))
     assert stop.reason is StopReason.TIME
-    assert executed(ping, "b") == parked
+    assert ping.members["b"].executed == parked
     assert received(a) == []
 
 
@@ -260,3 +271,23 @@ def test_a_goal_cancelled_after_its_stop_leaves_its_member_to_run_in_the_next_sy
     stop = asyncio.run(body())
     assert (stop.reason, stop.member) == (StopReason.USER, "a")
     assert received(ping.members["a"]) == PINGED
+
+
+def test_executed_leaves_out_sleep_and_is_saved_and_zeroed_by_a_reset(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = member(u575, "idle", "lone")
+    start = m.executed, m.instructions
+    asyncio.run(m.run(for_=ms(1)))
+    slept = m.instructions - start[1]
+    assert slept > 1_000
+    assert m.executed - start[0] < slept // 4
+    saved = m.snapshot()
+    kept = m.executed
+    m.reg.pc = m.sym("link_tx_count")
+    asyncio.run(m.run(for_=us(100)))
+    assert m.executed - kept > 100
+    m.restore(saved)
+    assert m.executed == kept
+    m.reset()
+    assert (m.executed, m.instructions) == (0, 0)

@@ -977,13 +977,25 @@ class Machine:
     @property
     def instructions(self) -> int:
         """Instructions executed since reset. A sleeping core's time counts one per core clock
-        cycle, and so does a linked member's halted time.
+        cycle, and so does a linked member's halted time. `executed` leaves both out.
 
         Raises:
             MachineRunning: The machine is busy, read outside its callbacks: use
                 `m.read(m.ref.instructions)`.
         """
         return self._handle.instructions()
+
+    @property
+    def executed(self) -> int:
+        """Instructions the core executed since reset, without the time it slept in WFI or WFE
+        or was halted: `instructions - executed` is that time, one per core clock cycle. A
+        linked member counts what it executes in its own goals and in system runs, nothing while
+        halted. Every reset kind zeroes it, `snapshot` saves it and `restore` gives it back.
+
+        Raises:
+            MachineRunning: The machine is busy.
+        """
+        return self._handle.executed()
 
     @property
     def time(self) -> VirtualTime:
