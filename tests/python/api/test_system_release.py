@@ -291,3 +291,66 @@ def test_executed_leaves_out_sleep_and_is_saved_and_zeroed_by_a_reset(
     assert m.executed == kept
     m.reset()
     assert (m.executed, m.instructions) == (0, 0)
+
+
+def test_a_goal_task_cancelled_once_its_stop_landed_leaves_its_member_to_run(
+    ping: System, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = ping.members["b"]
+    landed = System._landed  # pyright: ignore[reportPrivateUsage]
+    cancelled: list[bool] = []
+
+    async def cancel_once(system: System) -> None:
+        await landed(system)
+        if not cancelled:
+            cancelled.append(True)
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(System, "_landed", cancel_once)
+
+    async def body() -> SystemStop:
+        with pytest.raises(asyncio.CancelledError):
+            await b.run(for_=us(100))
+        assert not ping._undecided  # pyright: ignore[reportPrivateUsage]
+        ran = b.executed
+        stop = await ping.run(for_=ms(3))
+        assert b.executed > ran
+        return stop
+
+    stop = asyncio.run(body())
+    assert cancelled
+    assert (stop.reason, stop.member) == (StopReason.USER, "a")
+    assert received(ping.members["a"]) == PINGED
+
+
+def test_a_member_a_halted_free_run_left_at_its_stop_runs_in_the_next_system_run(
+    ping: System, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = ping.members["b"]
+    repost = System._repost  # pyright: ignore[reportPrivateUsage]
+
+    def kept_while_halting(system: System, index: int) -> None:
+        if not system._halting:  # pyright: ignore[reportPrivateUsage]
+            repost(system, index)
+
+    monkeypatch.setattr(System, "_repost", kept_while_halting)
+    handle = ping._handle  # pyright: ignore[reportPrivateUsage]
+
+    async def body() -> SystemStop:
+        ping.start()
+        opens = ping._opens  # pyright: ignore[reportPrivateUsage]
+        first = opens[1]
+        waiting = asyncio.create_task(b.elapse(us(30)))
+        while opens.get(1) is first or not opens[1].done():
+            await asyncio.sleep(0)
+        assert handle.undecided() == [1]
+        ping.halt()
+        assert handle.undecided() == []
+        await waiting
+        ran = b.executed
+        stop = await ping.run(for_=ms(3))
+        assert b.executed > ran
+        return stop
+
+    stop = asyncio.run(body())
+    assert (stop.reason, stop.member) == (StopReason.USER, "a")

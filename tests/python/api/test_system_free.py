@@ -208,6 +208,9 @@ def test_a_halt_releases_a_member_its_delivered_wait_left_parked(ping: Build) ->
         system.halt()
         assert clean(system)
         await waiting
+        parked = b.executed
+        await system.run(for_=ms(1))
+        assert b.executed > parked
 
     asyncio.run(body())
     assert clean(system)

@@ -990,7 +990,9 @@ class Machine:
         """Instructions the core executed since reset, without the time it slept in WFI or WFE
         or was halted: `instructions - executed` is that time, one per core clock cycle. A
         linked member counts what it executes in its own goals and in system runs, nothing while
-        halted. Every reset kind zeroes it, `snapshot` saves it and `restore` gives it back.
+        halted. Every reset kind zeroes it, `snapshot` saves it and `restore` gives it back. A
+        snapshot from before it existed restores it as 0, and the difference is then not that
+        time.
 
         Raises:
             MachineRunning: The machine is busy.
@@ -3055,8 +3057,10 @@ class Machine:
         failed test, are raised by the next `halt()` calls, oldest first, each once.
 
         On a member of a `System`, it halts the member where it stands, released from its goal's
-        stop: its core executes nothing in system runs until its next goal or reset. Called
-        while another member's goal runs, it takes effect at the next pause.
+        stop or not, also one that never had a goal or that an implicit release left running:
+        its core executes nothing in system runs until its next goal or reset. Called while
+        another member's goal runs, it takes effect at the next pause. Inside a system run, a
+        `wait_for` predicate included, it raises MachineBusy.
 
         Raises:
             MachineBusy: A run, step or call is active instead, cancel its task. On a member, its

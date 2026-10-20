@@ -454,26 +454,25 @@ class System:
 
         a_stop, b_stop = await asyncio.gather(a.run(until="f_a"), b.run(until="f_b"))
 
-    A member whose goal stops waits exactly at its stop, parked, and the system waits with it.
-    The task that posted the goal holds it. `gather`, `TaskGroup`, `shield` and `ensure_future`
-    post from a child task of their own, which releases the member as soon as it ends. The
-    member is released when its holder finishes, or awaits a popcorn future of another machine,
-    or at the next system `run`, `wait_for`, `snapshot` or `restore`. A new goal on it before
-    that starts exactly at its stop, also after unrelated awaits such as `asyncio.sleep`. A
-    released member runs its core from its stop in the next system `run`. While member goals
-    run, members without a goal are halted: their cores execute nothing, their clocks,
-    peripherals and DMA follow system time, their DBGMCU freeze bits apply. `member.halt()`
-    halts a member where it stands, released from its goal's stop: its core executes nothing in
-    system runs either, until its next goal or reset. A task that keeps a
-    member parked while it awaits something only a peer's goal can complete waits forever, and
-    so does one that awaits its own member's future that needs time to pass, such as a write at
-    a later time: nothing runs while the member is parked. After 5 s a warning names the member
-    and the task, `member.halt()` releases it, halted. Cancelling a goal's
-    task withdraws the goal at the next pause, where the member then stands, a point that
-    depends on wall timing. A goal posted while other goals run is admitted at the next pause,
-    also wall-dependent. An error a member raises, from a handler or a model, stops the system:
-    every pending goal fails with that error, noted with the member and its system time, and a
-    goal stopped before it keeps its stop.
+    A member whose goal stops waits exactly at its stop, parked, and the system waits with it. The
+    task that posted the goal holds it. `gather`, `TaskGroup`, `shield` and `ensure_future` post
+    from a child task of their own, which releases the member as soon as it ends. The member is
+    released when its holder finishes, or awaits a popcorn future of another machine, or at the next
+    system `run`, `wait_for`, `start`, `snapshot` or `restore`. A new goal on it before that starts
+    exactly at its stop, also after unrelated awaits such as `asyncio.sleep`. A released member runs
+    its core from its stop in the next system `run`. While member goals run, members without a goal
+    are halted: their cores execute nothing, their clocks, peripherals and DMA follow system time,
+    their DBGMCU freeze bits apply. `member.halt()` halts a member where it stands, released from
+    its goal's stop or not, one that never had a goal too: its core executes nothing in system runs
+    either, until its next goal or reset. A task that keeps a member parked while it awaits
+    something only a peer's goal can complete waits forever, and so does one that awaits its own
+    member's future that needs time to pass, such as a write at a later time: nothing runs while the
+    member is parked. After 5 s a warning names the member and the task, `member.halt()` releases
+    it, halted. Cancelling a goal's task withdraws the goal at the next pause, where the member then
+    stands, a point that depends on wall timing. A goal posted while other goals run is admitted at
+    the next pause, also wall-dependent. An error a member raises, from a handler or a model, stops
+    the system: every pending goal fails with that error, noted with the member and its system time,
+    and a goal stopped before it keeps its stop.
 
     Inside a member's own `running()`, its `wait_for`, stream reads and `elapse` wait as on a
     lone machine's free run, several at once: the run's goal stops for any of them, each
@@ -875,7 +874,8 @@ class System:
     async def run(
         self, *, for_: VirtualDuration | None = None, until: VirtualTime | None = None
     ) -> SystemStop:
-        """Run every member's core to system time `until`, or `for_` past the last target.
+        """Run every member's core that is not halted to system time `until`, or `for_` past
+        the last target. A member `halt()` froze stays halted until its next goal or reset.
 
         `for_` counts from the target of the previous TIME stop, else from the largest offset,
         the latest member's system time at construction, so ten `run(for_=ms(10))` equal one
@@ -933,7 +933,8 @@ class System:
         every: VirtualDuration,
         for_: VirtualDuration | None = None,
     ) -> SystemStop:
-        """Run every member's core until `predicate(system)` holds at a check point.
+        """Run every member's core that is not halted until `predicate(system)` holds at a
+        check point.
 
         The check points are system times `base + k * every`, k from 1, where `base` is the
         target of the previous TIME stop, else the largest offset, as for `run(for_=)`. At each
@@ -1450,8 +1451,8 @@ class System:
                 self._repost(index)
             for index in sorted(self._halts):
                 if index not in self._goals:
-                    self._undecided.pop(index, None)
                     self._handle.release(index, True)
+                    self._undecided.pop(index, None)
         else:
             for index in sorted(self._waits):
                 self._fail_waits(index)
@@ -1915,8 +1916,8 @@ class System:
         if self._flight is not None:
             self._halts.add(index)
             return
-        self._undecided.pop(index, None)
         self._handle.release(index, True)
+        self._undecided.pop(index, None)
         self._schedule_kick()
 
     def _watchdog(self, index: int, task: asyncio.Task[object], stop: Stop) -> None:

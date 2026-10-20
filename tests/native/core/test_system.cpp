@@ -2189,71 +2189,85 @@ TEST_CASE("a release halts its member only when asked, and load restores which i
 
 TEST_CASE("executed counts what a core ran, not its sleep or halt, is saved and zeroed by a reset")
 {
-  rig r{
-      .members = {member("idle", "idle_forever"), member("alu", "alu_entry")}
-  };
-  r.build(variants()[0]);
-  struct counts
+  std::optional<std::vector<std::uint64_t>> reference;
+  for(auto const& how : variants())
   {
-    std::uint64_t executed{};
-    std::uint64_t now{};
-    std::uint64_t system{};
-  };
-  auto const read = [&r](std::size_t index) {
-    auto const held = r.sys->lock();
-    return core::access(*r.members[index].on, 0, [&](core::machine& m) {
-      return counts{
-          .executed = m.executed().value,
-          .now      = m.virtual_clock().now().value,
-          .system   = r.sys->executed_of(held, index).value};
-    });
-  };
-  REQUIRE(r.run(200 * us_ps).reason == core::pause_reason::system_time);
-  auto const sleeper = read(0);
-  auto const runner  = read(1);
-  CHECK(sleeper.executed == sleeper.system);
-  CHECK(sleeper.executed < sleeper.now / 4);
-  CHECK(runner.executed == runner.system);
-  CHECK(runner.executed > runner.now / 2);
-
-  std::vector<core::snapshot> saved;
-  for(auto const& one : r.members)
-  {
-    saved.push_back(core::access(*one.on, 0, [](core::machine& m) { return m.snapshot(); }));
-  }
-  std::vector<std::byte> state;
-  {
-    auto const held = r.sys->lock();
-    r.sys->save(held, state);
-  }
-  auto goal = r.goal(1, {.budget = icount{100}});
-  REQUIRE(r.run({}).member == 1);
-  r.release(1, true);
-  auto const halted = read(1);
-  CHECK(halted.executed > runner.executed);
-  REQUIRE(r.run(400 * us_ps).reason == core::pause_reason::system_time);
-  auto const after = read(1);
-  CHECK(after.executed == halted.executed);
-  CHECK(after.now > halted.now);
-  {
-    auto const held = r.sys->lock();
-    for(std::size_t index = 0; index < 2; ++index)
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    rig          r{
+        .members = {member("idle", "idle_forever"), member("alu", "alu_entry")}
+    };
+    r.build(how);
+    struct counts
     {
-      core::access(*r.members[index].on, 0, [&](core::machine& m) {
-        m.restore(core::snapshot{saved[index].data()});
+      std::uint64_t executed{};
+      std::uint64_t now{};
+      std::uint64_t system{};
+    };
+    auto const read = [&r](std::size_t index) {
+      auto const held = r.sys->lock();
+      return core::access(*r.members[index].on, 0, [&](core::machine& m) {
+        return counts{
+            .executed = m.executed().value,
+            .now      = m.virtual_clock().now().value,
+            .system   = r.sys->executed_of(held, index).value};
       });
+    };
+    REQUIRE(r.run(200 * us_ps).reason == core::pause_reason::system_time);
+    auto const sleeper = read(0);
+    auto const runner  = read(1);
+    CHECK(sleeper.executed == sleeper.system);
+    CHECK(sleeper.executed < sleeper.now / 4);
+    CHECK(runner.executed == runner.system);
+    CHECK(runner.executed > runner.now / 2);
+
+    std::vector<core::snapshot> saved;
+    for(auto const& one : r.members)
+    {
+      saved.push_back(core::access(*one.on, 0, [](core::machine& m) { return m.snapshot(); }));
     }
-    r.sys->load(held, state);
+    std::vector<std::byte> state;
+    {
+      auto const held = r.sys->lock();
+      r.sys->save(held, state);
+    }
+    auto goal = r.goal(1, {.budget = icount{100}});
+    REQUIRE(r.run({}).member == 1);
+    r.release(1, true);
+    auto const halted = read(1);
+    CHECK(halted.executed > runner.executed);
+    REQUIRE(r.run(400 * us_ps).reason == core::pause_reason::system_time);
+    auto const after = read(1);
+    CHECK(after.executed == halted.executed);
+    CHECK(after.now > halted.now);
+    std::vector<std::uint64_t> seen{
+        sleeper.executed, runner.executed, halted.executed, after.executed};
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+    {
+      auto const held = r.sys->lock();
+      for(std::size_t index = 0; index < 2; ++index)
+      {
+        core::access(*r.members[index].on, 0, [&](core::machine& m) {
+          m.restore(core::snapshot{saved[index].data()});
+        });
+      }
+      r.sys->load(held, state);
+    }
+    CHECK(
+        core::access(*r.members[1].on, 0, [](core::machine& m) { return m.executed().value; })
+        == runner.executed);
+    {
+      auto const held = r.sys->lock();
+      r.sys->reset(held, 1, popcorn::reset_kind::software);
+    }
+    CHECK(
+        core::access(*r.members[1].on, 0, [](core::machine& m) { return m.executed().value; })
+        == 0);
   }
-  CHECK(
-      core::access(*r.members[1].on, 0, [](core::machine& m) { return m.executed().value; })
-      == runner.executed);
-  {
-    auto const held = r.sys->lock();
-    r.sys->reset(held, 1, popcorn::reset_kind::software);
-  }
-  CHECK(
-      core::access(*r.members[1].on, 0, [](core::machine& m) { return m.executed().value; }) == 0);
 }
 
 TEST_CASE("a load after an error pause clears the error and the system resumes")
