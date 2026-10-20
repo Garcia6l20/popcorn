@@ -980,6 +980,11 @@ auto machine_handle::time_ps() const -> std::uint64_t
   return access([](core::machine& target) { return target.virtual_clock().time().ps; });
 }
 
+auto machine_handle::resets() const -> std::uint64_t
+{
+  return access([](core::machine& target) { return target.resets(); });
+}
+
 auto machine_handle::result_bits(arch::value_kind returns, arch::float_abi abi) const
     -> std::uint64_t
 {

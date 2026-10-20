@@ -190,6 +190,44 @@ def cutoff(stop: Waited | None, deadline: VirtualTime | None) -> int:
     return bound if deadline is None else min(bound, max(0, deadline.ps))
 
 
+class TaggedLink[T](Protocol):
+    """A native stream queue whose records carry the reset count they were queued under."""
+
+    def available_tagged(self) -> tuple[int, int]:
+        """The records queued and not drained yet, and the machine's reset count, read
+        together: no counted record carries a later count."""
+        ...
+
+    def predicate_available(self, count: int) -> _core.Predicate:
+        """A predicate true once the queued records reach `count`."""
+        ...
+
+    def drain_until(self, count: int, until_ps: int, resets: int | None) -> list[T]:
+        """Take at most `count` of the oldest records at or before `until_ps` of reset `resets`,
+        or queued before that reset."""
+        ...
+
+
+async def read_tagged[T](
+    link: TaggedLink[T],
+    n: int,
+    wait: Waiter,
+    for_: VirtualDuration | None,
+    deadline: VirtualTime | None,
+) -> list[T]:
+    """Take `n` records of `link` once queued, waiting with `wait` when fewer are, bounded by
+    where the read fixed its reference: the reset count read with the first check for a read
+    that does not wait, the wait's stop for one that does, and `deadline`. A reset the machine
+    runs between two native calls then changes nothing the read takes."""
+    available, resets = link.available_tagged()
+    if available >= n:
+        return link.drain_until(n, cutoff(None, deadline), resets)
+    stop = await wait(link.predicate_available(n), for_, deadline)
+    return link.drain_until(
+        n, cutoff(stop, deadline), resets if stop.resets is None else stop.resets
+    )
+
+
 class Poster(Protocol):
     """Runs a native command as one command on the machine, with no GIL: at once while it is
     parked, at a block boundary on its thread while it runs. The result is the command's value
@@ -428,8 +466,8 @@ class UartStream:
         boundary or slice end, or past `for_` by the bound `Machine.run` gives for its `for_`.
 
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
-        what the read takes: no frame past it, even one queued at the call. Already past, the
-        read ends at once with the frames ready by it.
+        what the read takes: no frame of the current reset past it, even one queued at the
+        call. Already past, the read ends at once with the frames ready by it.
 
         A read that waits takes only the frames whose stop bit ended by the time its wait
         stopped, since the last reset before that stop, in one native step: frames that end
@@ -464,8 +502,8 @@ class UartStream:
         kept from before that reset are taken whatever their time.
 
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
-        what the read takes: no frame past it, even one queued at the call. Already past, the
-        read ends at once with the frames ready by it.
+        what the read takes: no frame of the current reset past it, even one queued at the
+        call. Already past, the read ends at once with the frames ready by it.
 
         Raises:
             TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
@@ -474,10 +512,7 @@ class UartStream:
         self._check_unbridged()
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
-        if self._link.available() >= n:
-            return _frames(self._link.drain_until(n, cutoff(None, deadline), None))
-        stop = await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _frames(self._link.drain_until(n, cutoff(stop, deadline), stop.resets))
+        return _frames(await read_tagged(self._link, n, self._wait, for_, deadline))
 
     async def read_until(
         self,

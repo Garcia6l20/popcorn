@@ -13,12 +13,13 @@ import json
 import math
 import threading
 import weakref
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
 import popcorn
 import pytest
-from popcorn import ResetKind, System, UartLink
+from popcorn import ResetKind, System, UartLink, _core
 from popcorn.board import FilterSample, FilterTap, PdmMic
 from popcorn.units import VirtualTime, ms, us
 
@@ -396,6 +397,90 @@ def test_a_reset_after_a_reads_stop_leaves_the_samples_past_the_stop_queued(
         m.reset(ResetKind.SOFTWARE)
     assert [s.at for s in got] == [sample_at(anchor, k) for k in range(first + 4)]
     assert [s.at for s in tap.take()] == [sample_at(anchor, k) for k in range(first + 4, first + 7)]
+
+
+class Racing:
+    """A tap link that runs `between` right after its count, where a free run's machine thread
+    can run between two native calls."""
+
+    def __init__(self, link: _core.PdmTapLink, between: Callable[[], None]) -> None:
+        self.link = link
+        self.between = between
+        self.counts = 0
+
+    def available_tagged(self) -> tuple[int, int]:
+        got = self.link.available_tagged()
+        self.counts += 1
+        self.between()
+        return got
+
+    def predicate_available(self, count: int) -> _core.Predicate:
+        return self.link.predicate_available(count)
+
+    def drain_until(
+        self, count: int, until_ps: int, resets: int | None
+    ) -> list[_core.PdmSampleRecord]:
+        return self.link.drain_until(count, until_ps, resets)
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_a_reset_after_a_no_wait_reads_count_leaves_the_samples_past_its_deadline_queued(
+    u575: popcorn.PartDescription, running: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machine(u575)
+    data, count, _ = pdm_16k()
+    asyncio.run(m.periph.MDF1.mic(0, "rising").write_pdm(data, bits=count))
+    tap = m.periph.MDF1.output(0)
+    anchor = cck(m)
+    sitf(m)
+    peer_filter(m)
+    asyncio.run(m.run(for_=sample_at(anchor, 8) + us(30) - m.time))
+    first = sum(sample_at(anchor, k) <= m.time for k in range(100))
+    deadline = sample_at(anchor, first - 3) + us(1)
+    real = tap._link  # pyright: ignore[reportPrivateUsage]
+    if running:
+        stalled = threading.Event()
+        resume = threading.Event()
+        cut_done = threading.Event()
+        seen: list[VirtualTime] = []
+
+        def stall() -> None:
+            seen.append(m.time)
+            stalled.set()
+            resume.wait()
+
+        def cut() -> None:
+            m.reset(ResetKind.SOFTWARE)
+            cut_done.set()
+
+        def between() -> None:
+            resume.set()
+            assert cut_done.wait(20)
+
+        racing = Racing(real, between)
+        monkeypatch.setattr(tap, "_link", racing)
+
+        async def free() -> list[FilterSample]:
+            async with m.running():
+                held = m.sample(stall)
+                assert stalled.wait(20)
+                reset = m.sample(cut, at=seen[0] + us(5))
+                got = await tap.read(first, deadline=deadline)
+                await held
+                await reset
+                return got
+
+        got = run_bounded(free(), 20)
+        assert cut_done.is_set()
+    else:
+        racing = Racing(real, lambda: None)
+        monkeypatch.setattr(tap, "_link", racing)
+        got = asyncio.run(tap.read(first, deadline=deadline))
+    assert racing.counts == 1
+    assert [s.at for s in got] == [sample_at(anchor, k) for k in range(first - 2)]
+    monkeypatch.undo()
+    kept = [s.at for s in tap.take()]
+    assert kept[:2] == [sample_at(anchor, k) for k in range(first - 2, first)]
 
 
 def test_a_full_tap_drops_its_oldest_samples_and_cycles_keep_every_queue_bounded(

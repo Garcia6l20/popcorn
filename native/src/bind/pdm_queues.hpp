@@ -251,6 +251,12 @@ public:
   explicit pdm_queue_tap(core::reset_counter resets = {}) : resets_{std::move(resets)}
   {}
 
+  /** @brief The machine's reset count now, the tag a sample queued next takes. */
+  [[nodiscard]] auto resets() const noexcept -> std::uint64_t
+  {
+    return resets_.load();
+  }
+
   /** @brief Takes the link lock, blocking. */
   [[nodiscard]] auto lock() const -> core::link_guard
   {

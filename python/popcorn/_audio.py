@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 from popcorn import _core
 from popcorn._errors import ConfigError, ModelError
-from popcorn._streams import Poster, Waiter, check_wait, cutoff, written
+from popcorn._streams import Poster, Waiter, check_wait, read_tagged, written
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
@@ -205,8 +205,8 @@ class AudioStream:
         Inside `running()`, this awaits the background run instead of driving the machine.
 
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
-        what the read takes: no frame that ended past it, even one queued at the call. Already
-        past, the read ends at once with the frames that ended by it.
+        what the read takes: no frame of the current reset that ended past it, even one queued
+        at the call. Already past, the read ends at once with the frames that ended by it.
 
         A read that waits takes only the frames that ended by the time its wait stopped, since
         the last reset before that stop, in one native step: later frames stay queued for the
@@ -229,10 +229,7 @@ class AudioStream:
         check_wait(for_, deadline)
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
-        if self._link.available() >= n:
-            return _audio_frames(self._link.drain_until(n, cutoff(None, deadline), None))
-        stop = await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _audio_frames(self._link.drain_until(n, cutoff(stop, deadline), stop.resets))
+        return _audio_frames(await read_tagged(self._link, n, self._wait, for_, deadline))
 
     def take_frames(self) -> list[AudioFrame]:
         """Every frame the block transmitted and not read yet, at once, never running the

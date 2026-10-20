@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from popcorn import _core
 from popcorn._errors import ConfigError, ModelError
-from popcorn._streams import Poster, Waiter, check_wait, cutoff, written
+from popcorn._streams import Poster, Waiter, check_wait, read_tagged, written
 from popcorn.units import VirtualDuration, VirtualTime
 
 if TYPE_CHECKING:
@@ -210,8 +210,8 @@ class FilterTap:
         Inside `running()`, this awaits the background run instead of driving the machine.
 
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
-        what the read takes: no sample written past it, even one queued at the call. Already
-        past, the read ends at once with the samples written by it.
+        what the read takes: no sample of the current reset written past it, even one queued
+        at the call. Already past, the read ends at once with the samples written by it.
 
         A read that waits takes only the samples written by the time its wait stopped, since
         the last reset before that stop, in one native step: later samples stay queued for the
@@ -234,10 +234,7 @@ class FilterTap:
         check_wait(for_, deadline)
         if n < 0:
             raise ValueError(f"cannot read {n} samples")
-        if self._link.available() >= n:
-            return _samples(self._link.drain_until(n, cutoff(None, deadline), None))
-        stop = await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _samples(self._link.drain_until(n, cutoff(stop, deadline), stop.resets))
+        return _samples(await read_tagged(self._link, n, self._wait, for_, deadline))
 
     def take(self) -> list[FilterSample]:
         """Every sample the filter wrote and not read yet, at once, never running the machine.

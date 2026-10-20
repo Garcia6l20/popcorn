@@ -576,6 +576,41 @@ def test_waits_inside_a_member_s_running_equal_a_lone_machine_s(
             assert asyncio.run(waits_in_running(system.members["a"])) == lone
 
 
+async def read_for(m: popcorn.Machine) -> tuple[object, ...]:
+    """Every frame `m`'s USART1 sends in 500 us, a read that ends on its duration, and the
+    reason of the member stop it ended at."""
+    got = await m.periph.USART1.port.read_frames(100, for_=us(500))
+    assert m.last_stop is not None
+    return bytes(f.data for f in got), m.last_stop.reason
+
+
+def test_a_member_read_that_ends_on_its_duration_takes_the_frames_sent_by_then(
+    u575: popcorn.PartDescription,
+) -> None:
+    lone = member(u575, "tx_irq", "a", slice_wall_budget=60)
+    want = asyncio.run(read_for(lone))
+    assert want[0] == b"hello"
+    for slice_instructions, third in VARIANTS:
+        a = member(u575, "tx_irq", "a", slice_instructions)
+        b = member(u575, "idle", "b", slice_instructions)
+        links = [UartLink("a.USART1", "b.USART1", latency=L, baud=460_800)]
+        if third is not None:
+            links.append(UartLink("a.USART2", "b.USART2", latency=third, baud=460_800))
+        with System({"a": a, "b": b}, links, slice_instructions=slice_instructions):
+            assert asyncio.run(read_for(a)) == (want[0], StopReason.TIME)
+
+
+def test_a_system_time_stop_gives_each_member_stop_its_reset_count(ping: Build) -> None:
+    system = ping()
+    before = asyncio.run(system.run(for_=us(100)))
+    system.reset("a", popcorn.ResetKind.SOFTWARE)
+    after = asyncio.run(system.run(for_=us(100)))
+    assert before.reason is after.reason is StopReason.TIME
+    assert before.stops["a"].resets >= 1
+    assert after.stops["a"].resets == before.stops["a"].resets + 1
+    assert after.stops["b"].resets == before.stops["b"].resets >= 1
+
+
 async def stopped_in_running(
     m: popcorn.Machine, peer: popcorn.Machine | None = None
 ) -> list[tuple[object, ...]]:

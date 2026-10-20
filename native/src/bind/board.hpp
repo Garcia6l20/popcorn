@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace popcorn::bind
@@ -113,6 +114,15 @@ public:
   /** @brief The UART's RTS output as ready to receive, see uart_port::ready_to_receive. */
   [[= py::doc{"Whether the UART's RTS output says ready to receive."}]] [[nodiscard]] auto
       rts_ready() const -> bool;
+
+  /**
+   * @brief available() and the machine's reset count, read in one hold of the link lock, so
+   *        every frame counted carries a reset count at most the one returned. Passed to
+   *        drain_until(), that count keeps a reset run after this call from widening the drain.
+   */
+  [[= py::doc{"available() and the reset count, read together: no counted frame has a later "
+              "reset count."}]] [[nodiscard]] auto available_tagged() const
+      -> std::pair<std::uint64_t, std::uint64_t>;
 
   /** @brief Frames transmitted by the firmware and not drained yet. */
   [[= py::doc{"Frames transmitted by the firmware and not drained yet."}]] [[nodiscard]] auto
@@ -241,6 +251,15 @@ public:
       core::reset_counter        resets,
       detail::alive_flag         alive,
       detail::host_ref           host);
+
+  /**
+   * @brief available() and the machine's reset count, read in one hold of the link lock, so
+   *        every frame counted carries a reset count at most the one returned. Passed to
+   *        drain_until(), that count keeps a reset run after this call from widening the drain.
+   */
+  [[= py::doc{"available() and the reset count, read together: no counted frame has a later "
+              "reset count."}]] [[nodiscard]] auto available_tagged() const
+      -> std::pair<std::uint64_t, std::uint64_t>;
 
   /** @brief Frames transmitted and not drained yet. */
   [[= py::doc{"Frames transmitted and not drained yet."}]] [[nodiscard]] auto available() const

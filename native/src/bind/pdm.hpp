@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace popcorn::bind
@@ -123,6 +124,15 @@ public:
       core::reset_counter      resets,
       detail::alive_flag       alive,
       detail::host_ref         host);
+
+  /**
+   * @brief available() and the machine's reset count, read in one hold of the link lock, so
+   *        every sample counted carries a reset count at most the one returned. Passed to
+   *        drain_until(), that count keeps a reset run after this call from widening the drain.
+   */
+  [[= py::doc{"available() and the reset count, read together: no counted sample has a later "
+              "reset count."}]] [[nodiscard]] auto available_tagged() const
+      -> std::pair<std::uint64_t, std::uint64_t>;
 
   /** @brief Samples kept and not drained yet. */
   [[= py::doc{"Samples kept and not drained yet."}]] [[nodiscard]] auto available() const

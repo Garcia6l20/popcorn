@@ -1971,6 +1971,7 @@ class System:
                 location=machine.locate(pc),
                 instructions=machine.instructions,
                 time=machine.time,
+                resets=machine._handle.resets(),  # pyright: ignore[reportPrivateUsage]
             )
         return stops
 

@@ -1379,6 +1379,11 @@ public:
   [[= py::doc{"Virtual time since reset, in picoseconds."}]] [[nodiscard]] auto time_ps() const
       -> std::uint64_t;
 
+  /** @brief core::machine::resets(), which names the reset time_ps() counts from. */
+  [[= py::doc{
+      "Resets of any kind so far, which name the reset time_ps counts from."}]] [[nodiscard]] auto
+      resets() const -> std::uint64_t;
+
   /**
    * @brief The value a function returning now leaves in its result registers,
    *        core::machine::returned_value().

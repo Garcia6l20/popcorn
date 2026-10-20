@@ -135,6 +135,14 @@ auto uart_queue::op_queued() const -> access_op
       [uart = &port(), alive = alive_] { return live_port(uart, alive, "uart").queued(); });
 }
 
+auto uart_queue::available_tagged() const -> std::pair<std::uint64_t, std::uint64_t>
+{
+  auto& queue = *endpoint_;
+  return detail::link_locked(queue, [&](core::link_guard const& held) {
+    return std::pair{queue.available(held), queue.resets()};
+  });
+}
+
 auto uart_queue::available() const -> std::uint64_t
 {
   return detail::link_locked(
@@ -260,6 +268,14 @@ auto audio_link::op_set_external_frame_hz(std::uint32_t frame_hz) const -> acces
 {
   return detail::link_op([sai = &port(), alive = alive_, block = block_, frame_hz] {
     live_port(sai, alive, "audio").set_external_clock(block, frame_hz);
+  });
+}
+
+auto audio_link::available_tagged() const -> std::pair<std::uint64_t, std::uint64_t>
+{
+  auto& queue = endpoint();
+  return detail::link_locked(queue, [&](core::link_guard const& held) {
+    return std::pair{queue.available(held), queue.resets()};
   });
 }
 

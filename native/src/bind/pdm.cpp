@@ -146,6 +146,14 @@ auto pdm_tap_link::tap() const -> detail::pdm_queue_tap&
   return live(tap_, alive_);
 }
 
+auto pdm_tap_link::available_tagged() const -> std::pair<std::uint64_t, std::uint64_t>
+{
+  auto& queue = tap();
+  return detail::link_locked(queue, [&](core::link_guard const& held) {
+    return std::pair{queue.available(held), queue.resets()};
+  });
+}
+
 auto pdm_tap_link::available() const -> std::uint64_t
 {
   auto& queue = tap();
