@@ -4,14 +4,24 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/pdm.hpp>
 
 #include <doctest/doctest.h>
+#include <reflex/serde/json.hpp>
 
+#include <array>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <initializer_list>
+#include <memory>
+#include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -151,11 +161,11 @@ struct rig : stm32_fixture
     return out;
   }
 
-  void pll3_kernel(std::uint32_t n, std::uint32_t q) const
+  void pll3_kernel(std::uint32_t m, std::uint32_t n, std::uint32_t q) const
   {
     put("RCC", "RCC_CR", "HSION", 1);
     run_until(now() + 200 * us);
-    write("RCC", "RCC_PLL3CFGR", (2u << 0) | (3u << 2) | (1u << 17));
+    write("RCC", "RCC_PLL3CFGR", (2u << 0) | (3u << 2) | ((m - 1) << 8) | (1u << 17));
     write("RCC", "RCC_PLL3DIVR", (n - 1) | ((q - 1) << 16));
     put("RCC", "RCC_CR", "PLL3ON", 1);
     run_until(now() + 200 * us);
@@ -239,7 +249,7 @@ TEST_CASE("ACTIVE flags follow their enables, BSMXACTIVE follows DFLTACTIVE, DFL
   r.write("DFLT2CR", 1);
   CHECK(r.bits("DFLT2CR", "DFLTACTIVE") == 1);
   CHECK(r.bits("BSMX2CR", "BSMXACTIVE") == 1);
-  CHECK(r.bits("DFLT2CR", "DFLTRUN") == 0);
+  CHECK(r.bits("DFLT2CR", "DFLTRUN") == 1);
   CHECK((r.read("DFLT2CR") & 1u) == 0);
   r.write("DFLT2CR", 0);
   CHECK(r.bits("DFLT2CR", "DFLTACTIVE") == 0);
@@ -726,7 +736,7 @@ TEST_CASE(
 {
   {
     rig const r;
-    r.pll3_kernel(25, 10);
+    r.pll3_kernel(1, 25, 10);
     r.clocks(0, 7);
     r.write("SITF0CR", 0x1F01);
     CHECK(r.warned("above the") == 0);
@@ -734,20 +744,20 @@ TEST_CASE(
   }
   {
     rig const r;
-    r.pll3_kernel(25, 10);
+    r.pll3_kernel(1, 25, 10);
     r.clocks(0, 6);
     r.write("SITF0CR", 0x1F01);
     CHECK(r.warned("above the 5000000 Hz") == 1);
   }
   {
     rig const r;
-    r.pll3_kernel(25, 4);
+    r.pll3_kernel(1, 25, 4);
     r.clocks(0, 3);
     r.write("SITF0CR", 0x1F11);
     CHECK(r.warned("above the") == 0);
   }
   rig const r;
-  r.pll3_kernel(25, 4);
+  r.pll3_kernel(1, 25, 4);
   r.clocks(0, 2);
   r.write("SITF0CR", 0x1F11);
   CHECK(r.warned("above the 25000000 Hz") == 1);
@@ -808,4 +818,331 @@ TEST_CASE("CKABIE on filters 4 and 5 pends IRQ 121 and 122, a cleared flag lower
   CHECK_FALSE(r.pending(122));
   REQUIRE(r.target->mem().write(0xe000'e280u + 4 * (121 / 32), 4, 1u << (121 % 32)).has_value());
   CHECK(r.pending(121));
+}
+
+namespace
+{
+constexpr std::uint64_t peer_divider = 10;
+constexpr std::uint64_t peer_kernel  = 20'480'000;
+
+class scripted final : public stm32::pdm_source
+{
+public:
+  std::vector<std::uint8_t> bits;
+  std::uint8_t              fill{};
+  std::size_t               next{};
+  std::uint64_t             pulled{};
+  bool                      switched{};
+  std::uint64_t             since{};
+
+  void clock(std::span<std::uint8_t> out, stm32::bit_rate rate) override
+  {
+    CHECK(rate.divider == peer_divider);
+    for(auto& bit : out)
+    {
+      if(switched)
+      {
+        bit = since++ % 3 == 0 ? 1 : 0;
+      }
+      else
+      {
+        bit = next < bits.size() ? bits[next] : fill;
+        ++next;
+      }
+    }
+    pulled += out.size();
+  }
+};
+
+struct tapped
+{
+  std::int32_t  pcm;
+  std::uint64_t at;
+  bool          dropped;
+};
+
+class recorder final : public stm32::pdm_tap
+{
+public:
+  std::vector<tapped> samples;
+
+  void wrote(std::int32_t pcm, vtime at, bool dropped, bool captured) override
+  {
+    CHECK(captured);
+    samples.push_back({.pcm = pcm, .at = at.ps, .dropped = dropped});
+  }
+};
+
+auto vectors() -> std::filesystem::path
+{
+  char const* const value = std::getenv("POPCORN_MDF_VECTORS");
+  REQUIRE(value != nullptr);
+  return value;
+}
+
+auto pdm_16k() -> std::pair<std::vector<std::uint8_t>, std::vector<std::int32_t>>
+{
+  namespace json = reflex::serde::json;
+  std::ifstream input(vectors() / "chain_pdm_16k.json", std::ios::binary);
+  REQUIRE(input);
+  std::ostringstream text;
+  text << input.rdbuf();
+  auto        document = json::deserializer{std::move(text).str()}.load<json::value>();
+  auto&       run      = document["runs"][0];
+  auto const& hex      = run["bits"]["hex"].as<json::string>();
+  auto const  count    = static_cast<std::size_t>(run["bits"]["count"].as<json::number>());
+  std::vector<std::uint8_t> bits(count);
+  for(std::size_t i = 0; i < count; ++i)
+  {
+    bits[i] = (std::stoul(hex.substr(i / 8 * 2, 2), nullptr, 16) >> (7 - i % 8)) & 1u;
+  }
+  std::vector<std::int32_t> pcm;
+  for(auto const& pair : run["pcm"].as_array())
+  {
+    pcm.insert(
+        pcm.end(), static_cast<std::size_t>(pair[1].as<json::number>()),
+        static_cast<std::int32_t>(pair[0].as<json::number>()));
+  }
+  return {bits, pcm};
+}
+
+auto edge_at(std::uint64_t anchor, std::uint64_t h) -> std::uint64_t
+{
+  auto const num = static_cast<unsigned __int128>(h) * peer_divider * 1'000'000'000'000u;
+  return anchor + static_cast<std::uint64_t>(num / (2u * peer_kernel));
+}
+
+struct stream_rig : rig
+{
+  std::array<std::shared_ptr<scripted>, 2> mic{
+      std::make_shared<scripted>(), std::make_shared<scripted>()};
+  std::array<std::shared_ptr<recorder>, 6> taps{};
+  std::uint64_t                            anchor{};
+
+  stream_rig()
+  {
+    pll3_kernel(5, 64, 10);
+    port().attach(0, stm32::pdm_edge::rising, mic[0]);
+    port().attach(0, stm32::pdm_edge::falling, mic[1]);
+    for(std::size_t f = 0; f < taps.size(); ++f)
+    {
+      taps[f] = std::make_shared<recorder>();
+      port().attach_tap(f, taps[f]);
+    }
+    write("CKGCR", (4u << 24) | (1u << 16) | (1u << 5) | (1u << 1));
+    put("CKGCR", "CKGDEN", 1);
+    anchor = now();
+    write("SITF0CR", 0x1F11);
+  }
+
+  [[nodiscard]] auto port() const -> stm32::pdm_port&
+  {
+    auto* const found = dynamic_cast<stm32::pdm_port*>(target->model("MDF1"));
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  void sinc1(std::size_t f, std::uint32_t stream, std::uint32_t scale = 0, std::uint32_t mode = 0)
+      const
+  {
+    write(std::format("BSMX{}CR", f), stream);
+    write(std::format("DFLT{}CICR", f), (scale << 20) | (1u << 8) | (1u << 4));
+    write(std::format("DFLT{}RSFR", f), 1u | (1u << 7));
+    write(std::format("DFLT{}CR", f), (mode << 4) | 1u);
+  }
+};
+}
+
+TEST_CASE("bit edges follow the closed form of the peer clock, 244140.625 ps half periods")
+{
+  stream_rig const r;
+  r.sinc1(0, 0);
+  r.run_until(r.anchor + 1100 * us);
+  auto const& got = r.taps[0]->samples;
+  REQUIRE(got.size() > 1024);
+  for(auto const k : {0u, 1u, 1023u, 1024u})
+  {
+    CAPTURE(k);
+    CHECK(got[k].at == edge_at(r.anchor, 4 * std::uint64_t{k} + 4));
+  }
+  CHECK(edge_at(r.anchor, 1) - r.anchor == 244'140);
+  CHECK(edge_at(r.anchor, 8) - r.anchor == 1'953'125);
+}
+
+TEST_CASE("the peer's chain on SITF0 reproduces chain_pdm_16k.json at 128-bit edges")
+{
+  stream_rig const r;
+  auto [bits, pcm] = pdm_16k();
+  r.mic[0]->bits   = bits;
+  r.write("BSMX0CR", 0);
+  r.write("DFLT0CICR", (0x2Cu << 20) | (31u << 8) | (5u << 4));
+  r.write("DFLT0RSFR", 2u << 8);
+  r.write("DFLT0CR", 1);
+  r.run_until(edge_at(r.anchor, 2 + 2 * (bits.size() - 1)) + us);
+  auto const& got = r.taps[0]->samples;
+  REQUIRE(got.size() >= pcm.size());
+  for(std::size_t k = 0; k < pcm.size(); ++k)
+  {
+    CAPTURE(k);
+    CHECK(got[k].pcm == pcm[k]);
+    CHECK(got[k].at == edge_at(r.anchor, 2 + 2 * (128 * (k + 1) - 1)));
+  }
+}
+
+TEST_CASE("bs0_r and bs0_f reach their filters, two filters on one stream share the pull")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.mic[1]->fill = 0;
+  r.sinc1(0, 0);
+  r.sinc1(1, 1);
+  r.sinc1(2, 0);
+  r.run_until(r.anchor + 100 * us);
+  auto const& rising  = r.taps[0]->samples;
+  auto const& falling = r.taps[1]->samples;
+  REQUIRE(rising.size() > 10);
+  CHECK(rising[0].pcm == 2);
+  CHECK(falling[0].pcm == -2);
+  REQUIRE(r.taps[2]->samples.size() == rising.size());
+  for(std::size_t k = 0; k < rising.size(); ++k)
+  {
+    CHECK(r.taps[2]->samples[k].pcm == rising[k].pcm);
+    CHECK(r.taps[2]->samples[k].at == rising[k].at);
+  }
+  CHECK(r.mic[0]->pulled <= r.mic[1]->pulled + 1);
+  CHECK(r.mic[1]->pulled <= r.mic[0]->pulled + 1);
+}
+
+TEST_CASE("a fifth sample with no read overruns: DOVRF, the sample dropped, the tap marks it")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.sinc1(0, 0);
+  r.run_until(edge_at(r.anchor, 4 * 4 + 4) - us / 2);
+  REQUIRE(r.taps[0]->samples.size() == 4);
+  CHECK(r.bits("DFLT0ISR", "DOVRF") == 0);
+  r.run_until(edge_at(r.anchor, 4 * 4 + 4) + us / 4);
+  auto const& got = r.taps[0]->samples;
+  REQUIRE(got.size() >= 5);
+  CHECK_FALSE(got[3].dropped);
+  CHECK(got[4].dropped);
+  CHECK(r.bits("DFLT0ISR", "DOVRF") == 1);
+  CHECK(r.bits("DFLT0ISR", "RXNEF") == 1);
+  CHECK(r.bits("DFLT0ISR", "FTHF") == 1);
+}
+
+TEST_CASE("DFLTxDR pops one sample per read of any size, PCM in bits 31:8, empty reads 0")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.sinc1(0, 0, 0x18);
+  r.run_until(edge_at(r.anchor, 4 * 2 + 4) + 1);
+  REQUIRE(r.taps[0]->samples.size() >= 2);
+  CHECK(r.read("DFLT0DR") == 0x0020'0000u);
+  auto const half = r.target->mem().read(r.at("MDF1", "DFLT0DR") + 2, 2);
+  REQUIRE(half.has_value());
+  CHECK(*half == 0x20u);
+  CHECK(r.bits("DFLT0ISR", "RXNEF") == 1);
+  CHECK(r.read("DFLT0DR") == 0x0020'0000u);
+  CHECK(r.bits("DFLT0ISR", "RXNEF") == 0);
+  CHECK(r.read("DFLT0DR") == 0);
+}
+
+TEST_CASE("single-shot writes one sample, DFLTRUN 0, a DFLTEN write restarts from reset taps")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.sinc1(0, 0, 0, 1);
+  CHECK(r.bits("DFLT0CR", "DFLTRUN") == 1);
+  r.run_until(r.anchor + 50 * us);
+  CHECK(r.taps[0]->samples.size() == 1);
+  CHECK(r.bits("DFLT0CR", "DFLTRUN") == 0);
+  CHECK(r.bits("DFLT0CR", "DFLTACTIVE") == 1);
+  auto const again = r.now();
+  r.write("DFLT0CR", (1u << 4) | 1u);
+  r.run_until(again + 50 * us);
+  REQUIRE(r.taps[0]->samples.size() == 2);
+  CHECK(r.taps[0]->samples[1].pcm == 2);
+  CHECK(r.taps[0]->samples[1].at > again);
+}
+
+TEST_CASE("settle clocks the edges before a source change: later edges see the new content")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.run_until(r.anchor + 1000 * us);
+  auto const t1 = r.now();
+  r.port().settle(vtime{t1});
+  r.mic[0]->switched = true;
+  r.run_until(t1 + 500 * us);
+  auto const t2 = r.now();
+  r.sinc1(0, 0);
+  r.run_until(t2 + 100 * us);
+  auto const before = [&](std::uint64_t t) {
+    auto const num = static_cast<unsigned __int128>(t - r.anchor + 1) * 2u * peer_kernel;
+    auto const den = static_cast<unsigned __int128>(peer_divider) * 1'000'000'000'000u;
+    auto const end = static_cast<std::uint64_t>((num + den - 1) / den);
+    return (end - 1) / 2;
+  };
+  auto const  skipped = before(t2) - before(t1);
+  auto const  bit     = [&](std::uint64_t k) { return (skipped + k) % 3 == 0 ? 1 : -1; };
+  auto const& got     = r.taps[0]->samples;
+  REQUIRE(got.size() > 8);
+  for(std::uint64_t k = 0; k < 8; ++k)
+  {
+    CAPTURE(k);
+    CHECK(got[k].pcm == bit(2 * k) + bit(2 * k + 1));
+  }
+}
+
+TEST_CASE("CCK0EN 0 then 1 with CKGDEN 1 restarts the bit clock at the write, new anchor")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.run_until(r.anchor + 10 * us);
+  r.put("CKGCR", "CCK0EN", 0);
+  r.run_until(r.now() + 3 * us);
+  auto const restart = r.now();
+  r.put("CKGCR", "CCK0EN", 1);
+  r.sinc1(0, 0);
+  r.run_until(restart + 20 * us);
+  auto const& got = r.taps[0]->samples;
+  REQUIRE(got.size() >= 4);
+  for(std::uint64_t k = 0; k < 4; ++k)
+  {
+    CAPTURE(k);
+    CHECK(got[k].at == edge_at(restart, 4 * k + 4));
+  }
+}
+
+TEST_CASE("a kernel clock change re-anchors at the next edge: no bit skipped or doubled")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.sinc1(0, 0);
+  r.run_until(r.anchor + 100 * us + 77'000);
+  auto const changed = r.now();
+  r.put("RCC", "RCC_CCIPR2", "MDF1SEL", 0);
+  r.run_until(changed + 100 * us);
+  std::uint64_t next = 0;
+  while(edge_at(r.anchor, next) <= changed)
+  {
+    ++next;
+  }
+  auto const rebased  = edge_at(r.anchor, next);
+  auto const expected = [&](std::uint64_t h) {
+    if(h < next)
+    {
+      return edge_at(r.anchor, h);
+    }
+    auto const num = static_cast<unsigned __int128>(h - next) * peer_divider * 1'000'000'000'000u;
+    return rebased + static_cast<std::uint64_t>(num / (2u * 4'000'000u));
+  };
+  auto const& got = r.taps[0]->samples;
+  REQUIRE(got.size() > next / 4 + 10);
+  for(std::size_t k = 0; k < got.size(); ++k)
+  {
+    CAPTURE(k);
+    CHECK(got[k].at == expected(4 * k + 4));
+  }
 }

@@ -1,9 +1,11 @@
 #include "dfilter_chain.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
+#include "sigma_delta.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/stm32/pdm.hpp>
 
 #include <algorithm>
 #include <array>
@@ -28,7 +30,10 @@ namespace
 {
 constexpr std::size_t   max_filters   = 6;
 constexpr std::uint32_t ckab_event    = 1;
+constexpr std::uint32_t sample_event  = 2;
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
+constexpr std::size_t   fifo_depth    = 4;
+constexpr std::uint64_t chunk_edges   = 1u << 16;
 
 /**
  * @brief What the description gives one MDF or ADF instance, RM0456 39.3 and 40.3: the
@@ -41,17 +46,45 @@ struct dfilter_layout
   bool        sad{};
 };
 
+struct cck_state
+{
+  bool          running{};
+  std::uint64_t anchor_ps{};
+  std::uint64_t base{};
+  std::uint64_t kernel_hz{};
+  std::uint64_t divider{};
+
+  friend auto operator==(cck_state const&, cck_state const&) -> bool = default;
+};
+
+struct sitf_state
+{
+  bool                           clocking{};
+  std::uint64_t                  next{};
+  std::array<modulator_state, 2> silence{};
+
+  friend auto operator==(sitf_state const&, sitf_state const&) -> bool = default;
+};
+
 struct filter_state
 {
-  std::uint32_t ckab_generation{};
-  chain_state   chain{};
+  std::uint32_t             ckab_generation{};
+  bool                      running{};
+  bool                      single{};
+  chain_config              config{};
+  chain_state               chain{};
+  std::vector<std::int32_t> fifo;
 
   friend auto operator==(filter_state const&, filter_state const&) -> bool = default;
 };
 
 struct mdf_state
 {
-  std::vector<filter_state> filter;
+  std::vector<filter_state>    filter;
+  std::vector<sitf_state>      sitf;
+  std::array<cck_state, 2>     cck{};
+  std::uint32_t                sample_generation{};
+  std::optional<std::uint64_t> scheduled_ps;
 
   friend auto operator==(mdf_state const&, mdf_state const&) -> bool = default;
 };
@@ -104,6 +137,16 @@ struct filter_fields
   field_ref                                    scale;
   reg_ref                                      rsfr;
   field_ref                                    rsflt_bypass;
+  field_ref                                    rsflt_decimation;
+  field_ref                                    hpf_bypass;
+  field_ref                                    hpf_cutoff;
+  std::optional<field_ref>                     offset;
+  field_ref                                    threshold;
+  reg_ref                                      dr;
+  field_ref                                    rxne;
+  field_ref                                    fifo_threshold;
+  field_ref                                    overrun;
+  field_ref                                    saturation;
   reg_ref                                      dly;
   field_ref                                    skip_busy;
   std::optional<field_ref>                     old_enable;
@@ -154,14 +197,36 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        Registers, RM0456 39.8 and 40.8. Every enable has its ACTIVE flag follow it at once,
  *        a popcorn choice: the resynchronization latency of 39.4.15 is not modelled, polling
  *        firmware sees the same end states. GCR.TRGO reads 0 after any write. BSMXACTIVE is the
- *        OR of DFLTACTIVE, OLDACTIVE and SCDACTIVE of its index, 39.8.4. DFLTRUN, SKPBF and the
- *        data registers read 0: no sample is produced yet. DFLTEN is write-only, 39.8.5 and
+ *        OR of DFLTACTIVE, OLDACTIVE and SCDACTIVE of its index, 39.8.4. SKPBF and SNPSxDR read
+ *        0. DFLTEN is write-only, 39.8.5 and
  *        40.8.5, so it reads 0 on both, although the ADF1 description marks it read_write: a
  *        read-modify-write of a running DFLTxCR that does not set DFLTEN stops the filter. The
  *        ADF1 description lacks DFLT0CR.TRGSENS, 40.8.5 bit 8, so the bit reads 0 and ignores
  *        writes, which no modelled setting reads: TRGO forces its sensitivity and every other
  *        trigger raises. DFLTxISR flags are write-1-to-clear, OLDF also clears THHF and
- * THLF, 39.8.16. The IRQ of a filter is the OR of its flags with their enables, 39.6.
+ *        THLF, 39.8.16. The IRQ of a filter is the OR of its flags with their enables, 39.6.
+ *
+ *        Data path, 39.4.3 to 39.4.13. CCKy runs while CKGDEN, CCKyEN and CCKyDIR are set, one
+ *        period every (PROCDIV + 1) x (CCKDIV + 1) kernel cycles. Each edge time is computed from
+ *        its index since the clock started, never accumulated, and a kernel clock change keeps
+ *        the edges up to the change and restarts the count at the next edge at the new rate.
+ *        CCK0 and CCK1 share the divider, each starts at the write that enables it. An enabled
+ *        SITF takes a bit from its rising-edge sensor at each rising edge of its CCKy, bs_r,
+ *        and from its falling-edge sensor at each falling edge, bs_f, open question 6. An edge
+ *        without a sensor carries a modulator held at 0, silence. A SITF, a clock or a filter
+ *        enabled by a write starts at the first edge after the write, a popcorn choice. Bits
+ *        are pulled lazily, at a sample time, at a register access that needs them and at
+ *        settle(), and each edge is pulled once, whatever filters use its stream. The filters
+ *        run the chain of `dfilter_chain.hpp` from a reset state at their start, 39.4.11, and
+ *        write each sample to their 4-deep RXFIFO at the edge of the bit that completed it,
+ *        39.4.13, an event of that exact picosecond. ACQMOD 000 runs continuously, 001 writes one
+ *        sample, sets DFLTRUN 0 and restarts at the next write of DFLTEN 1, 39.4.10. ACQMOD 01x
+ *        waits for its trigger. DFLTEN 0 stops at once, resets the chain and flushes the RXFIFO.
+ *        A full RXFIFO drops the sample and sets DOVRF. Silicon has DFLTxDR as a fifth stage,
+ *        39.4.13 "Data resynchronization", so the model overruns one sample earlier. A read of
+ *        DFLTxDR of any size pops one sample, PCM[23:0] in bits 31:8, an empty RXFIFO reads 0.
+ *        RXNEF follows the level, FTHF the level against FTH, 1 or 2 samples. SATF follows the
+ *        chain's saturation. Each filter's tap sees every sample written, dropped ones marked.
  *
  *        Write protection, 39.4.15 Table 381: a write changing a protected field while its
  *        ACTIVE flag is set keeps the old field value, logs once per register and raises
@@ -191,7 +256,7 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        and the RM does not say what CKABF does then: the model sets it at SITFEN with CKGDEN
  *        0, and STH cycles at the PROCDIV rate after CKGDEN goes to 0.
  */
-class mdf final : public dispatch_model<mdf, mdf_state>
+class mdf final : public dispatch_model<mdf, mdf_state>, public pdm_port, public clock_listener
 {
 public:
   mdf(model_context& ctx, peripheral_desc const& desc, dfilter_layout layout);
@@ -207,6 +272,12 @@ public:
       std::uint32_t  old,
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
+
+  void on_clock_change() override;
+  void attach(std::size_t sitf, pdm_edge edge, std::shared_ptr<pdm_source> source) override;
+  void attach_tap(std::size_t filter, std::shared_ptr<pdm_tap> tap) override;
+  [[nodiscard]] auto sitfs() const -> std::size_t override;
+  void               settle(vtime at) override;
 
   template <bank B, std::size_t F> void written(std::uint32_t old, std::uint32_t now)
   {
@@ -271,28 +342,47 @@ private:
   void               flag_absence(std::size_t s);
   void               update_bsmx(std::size_t f);
   void               update_irq();
+  [[nodiscard]] auto now_ps() const -> std::uint64_t;
+  [[nodiscard]] auto edge_ps(std::size_t y, std::uint64_t h) const -> std::uint64_t;
+  [[nodiscard]] auto edges_until(std::size_t y, std::uint64_t t) const -> std::uint64_t;
+  [[nodiscard]] auto cck_of(std::size_t s) const -> std::size_t;
+  [[nodiscard]] auto parity_of(std::size_t f) const -> std::uint64_t;
+  [[nodiscard]] auto config_of(std::size_t f) const -> chain_config;
+  [[nodiscard]] auto bits_needed(std::size_t f) const -> std::uint64_t;
+  [[nodiscard]] auto rate_of(std::size_t y) const -> bit_rate;
+  void               refresh_clocks(std::uint64_t t);
+  void               catch_up(std::size_t s, std::uint64_t t);
+  void               write_sample(std::size_t f, produced sample, std::uint64_t at);
+  void               start_filter(std::size_t f);
+  void               stop_filter(std::size_t f);
+  void               refresh_fifo(std::size_t f);
+  void               reschedule();
+  [[nodiscard]] auto pop(std::size_t f) -> std::uint32_t;
 
-  register_file&             regs_;
-  dfilter_layout             layout_;
-  reg_ref                    gcr_;
-  field_ref                  trgo_;
-  std::optional<field_ref>   interleave_;
-  reg_ref                    ckgcr_;
-  field_ref                  ckg_enable_;
-  field_ref                  ckg_mode_;
-  field_ref                  ckg_active_;
-  field_ref                  proc_div_;
-  field_ref                  cck_div_;
-  std::array<field_ref, 2>   cck_enable_;
-  std::array<field_ref, 2>   cck_direction_;
-  std::uint32_t              ckgcr_protected_{};
-  std::vector<sitf_fields>   sitf_;
-  std::vector<filter_fields> filter_;
-  std::optional<reg_ref>     sadcr_;
-  core::clock_domain         kernel_;
-  core::clock_domain         hclk_;
-  std::vector<irq_line*>     lines_;
-  std::set<std::string>      warned_;
+  register_file&                                          regs_;
+  dfilter_layout                                          layout_;
+  reg_ref                                                 gcr_;
+  field_ref                                               trgo_;
+  std::optional<field_ref>                                interleave_;
+  reg_ref                                                 ckgcr_;
+  field_ref                                               ckg_enable_;
+  field_ref                                               ckg_mode_;
+  field_ref                                               ckg_active_;
+  field_ref                                               proc_div_;
+  field_ref                                               cck_div_;
+  std::array<field_ref, 2>                                cck_enable_;
+  std::array<field_ref, 2>                                cck_direction_;
+  std::uint32_t                                           ckgcr_protected_{};
+  std::vector<sitf_fields>                                sitf_;
+  std::vector<filter_fields>                              filter_;
+  std::optional<reg_ref>                                  sadcr_;
+  core::clock_domain                                      kernel_;
+  core::clock_domain                                      hclk_;
+  std::vector<irq_line*>                                  lines_;
+  std::set<std::string>                                   warned_;
+  std::vector<std::array<std::shared_ptr<pdm_source>, 2>> sources_;
+  std::vector<std::shared_ptr<pdm_tap>>                   taps_;
+  std::array<std::vector<std::uint8_t>, 2>                bits_;
 };
 
 auto mdf::writes(peripheral_desc const& desc, dfilter_layout const& layout)
@@ -380,6 +470,9 @@ mdf::mdf(model_context& ctx, peripheral_desc const& desc, dfilter_layout layout)
     lines_.push_back(&irq(std::format("{}_IRQn", desc.name)));
   }
   state_.filter.resize(layout_.filters);
+  state_.sitf.resize(layout_.filters);
+  sources_.resize(layout_.filters);
+  taps_.resize(layout_.filters);
 }
 
 auto mdf::sitf_of(std::size_t f) const -> sitf_fields
@@ -404,34 +497,44 @@ auto mdf::filter_of(std::size_t f) const -> filter_fields
   auto const    ier  = std::format("DFLT{}IER", f);
   auto const    isr  = std::format("DFLT{}ISR", f);
   filter_fields out{
-      .bsmx          = reg(bsmx),
-      .select        = field(bsmx, "BSSEL"),
-      .bsmx_active   = field(bsmx, "BSMXACTIVE"),
-      .cr            = reg(cr),
-      .enable        = field(cr, "DFLTEN"),
-      .run           = field(cr, "DFLTRUN"),
-      .active        = field(cr, "DFLTACTIVE"),
-      .acquisition   = field(cr, "ACQMOD"),
-      .trigger       = field(cr, "TRGSRC"),
-      .cicr          = reg(cicr),
-      .source        = field(cicr, "DATSRC"),
-      .cic_mode      = field(cicr, "CICMOD"),
-      .decimation    = field(cicr, "MCICD"),
-      .scale         = field(cicr, "SCALE"),
-      .rsfr          = reg(rsfr),
-      .rsflt_bypass  = field(rsfr, "RSFLTBYP"),
-      .dly           = reg(dly),
-      .skip_busy     = field(dly, "SKPBF"),
-      .old_enable    = std::nullopt,
-      .old_active    = std::nullopt,
-      .scd_enable    = std::nullopt,
-      .scd_active    = std::nullopt,
-      .ier           = reg(ier),
-      .isr           = reg(isr),
-      .ckab          = field(isr, "CKABF"),
-      .isr_clear     = 0,
-      .isr_old_clear = 0,
-      .interrupts    = {}};
+      .bsmx             = reg(bsmx),
+      .select           = field(bsmx, "BSSEL"),
+      .bsmx_active      = field(bsmx, "BSMXACTIVE"),
+      .cr               = reg(cr),
+      .enable           = field(cr, "DFLTEN"),
+      .run              = field(cr, "DFLTRUN"),
+      .active           = field(cr, "DFLTACTIVE"),
+      .acquisition      = field(cr, "ACQMOD"),
+      .trigger          = field(cr, "TRGSRC"),
+      .cicr             = reg(cicr),
+      .source           = field(cicr, "DATSRC"),
+      .cic_mode         = field(cicr, "CICMOD"),
+      .decimation       = field(cicr, "MCICD"),
+      .scale            = field(cicr, "SCALE"),
+      .rsfr             = reg(rsfr),
+      .rsflt_bypass     = field(rsfr, "RSFLTBYP"),
+      .rsflt_decimation = field(rsfr, "RSFLTD"),
+      .hpf_bypass       = field(rsfr, "HPFBYP"),
+      .hpf_cutoff       = field(rsfr, "HPFC"),
+      .offset           = std::nullopt,
+      .threshold        = field(cr, "FTH"),
+      .dr               = reg(std::format("DFLT{}DR", f)),
+      .rxne             = field(isr, "RXNEF"),
+      .fifo_threshold   = field(isr, "FTHF"),
+      .overrun          = field(isr, "DOVRF"),
+      .saturation       = field(isr, "SATF"),
+      .dly              = reg(dly),
+      .skip_busy        = field(dly, "SKPBF"),
+      .old_enable       = std::nullopt,
+      .old_active       = std::nullopt,
+      .scd_enable       = std::nullopt,
+      .scd_active       = std::nullopt,
+      .ier              = reg(ier),
+      .isr              = reg(isr),
+      .ckab             = field(isr, "CKABF"),
+      .isr_clear        = 0,
+      .isr_old_clear    = 0,
+      .interrupts       = {}};
   if(layout_.motor)
   {
     out.old_enable    = field(std::format("OLD{}CR", f), "OLDEN");
@@ -439,6 +542,7 @@ auto mdf::filter_of(std::size_t f) const -> filter_fields
     out.scd_enable    = field(std::format("SCD{}CR", f), "SCDEN");
     out.scd_active    = field(std::format("SCD{}CR", f), "SCDACTIVE");
     out.isr_old_clear = mask_of(isr, {"THHF", "THLF"});
+    out.offset        = field(std::format("OEC{}CR", f), "OFFSET");
   }
   for(auto const& flag : describe(isr).fields)
   {
@@ -499,14 +603,32 @@ void mdf::reset(register_file& regs, reset_kind)
   }
   for(auto& filter : state_.filter)
   {
-    filter.chain = {};
-    ++filter.ckab_generation;
+    auto const generation  = filter.ckab_generation + 1;
+    filter                 = {};
+    filter.ckab_generation = generation;
   }
+  for(auto& sitf : state_.sitf)
+  {
+    sitf = {};
+  }
+  state_.cck = {};
+  ++state_.sample_generation;
+  state_.scheduled_ps.reset();
   update_irq();
 }
 
 void mdf::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == sample_event)
+  {
+    if(payload == state_.sample_generation)
+    {
+      state_.scheduled_ps.reset();
+      settle(vtime{now_ps()});
+      reschedule();
+    }
+    return;
+  }
   auto const s = static_cast<std::size_t>(payload & 0xFF);
   if(kind != ckab_event
      or s >= layout_.filters
@@ -524,8 +646,18 @@ auto mdf::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
     -> std::expected<std::uint32_t, bus_error>
 {
   auto const word = offset & ~3u;
-  for(auto const& filter : filter_)
+  for(std::size_t f = 0; f < layout_.filters; ++f)
   {
+    auto const& filter = filter_[f];
+    if(filter.dr.offset == word)
+    {
+      settle(vtime{now_ps()});
+      return read_lanes(pop(f), offset, size);
+    }
+    if(filter.isr.offset == word)
+    {
+      settle(vtime{now_ps()});
+    }
     if(filter.cr.offset == word)
     {
       auto const hidden = read_lanes(filter.enable.mask(), offset, size);
@@ -601,6 +733,12 @@ void mdf::write(bank which, std::size_t f, std::uint32_t old, std::uint32_t now)
       update_irq();
       return;
     case bank::oec:
+      if(state_.filter[f].running and old != now)
+      {
+        settle(vtime{now_ps()});
+        state_.filter[f].config.offset = config_of(f).offset;
+      }
+      return;
     case bank::plain:
       return;
     case bank::sadcr:
@@ -717,6 +855,9 @@ void mdf::clock_written(std::uint32_t old, std::uint32_t now)
     }
   }
   regs_.poke(ckgcr_.offset, ckg_active_.with(now, ckg_enable_.of(now)));
+  settle(vtime{now_ps()});
+  refresh_clocks(now_ps());
+  reschedule();
   for(std::size_t s = 0; s < layout_.filters; ++s)
   {
     if(not watched(s))
@@ -853,6 +994,9 @@ void mdf::sitf_written(std::size_t s, std::uint32_t old, std::uint32_t now)
   if(sitf.enable.of(old) != sitf.enable.of(now))
   {
     ++state_.filter[s].ckab_generation;
+    settle(vtime{now_ps()});
+    refresh_clocks(now_ps());
+    reschedule();
   }
   if(started and watched(s) and not clock_present(s, regs_.peek(ckgcr_.offset)))
   {
@@ -931,11 +1075,28 @@ void mdf::filter_written(std::size_t f, std::uint32_t old, std::uint32_t now)
   auto const  mask   = mask_of(
       name_of(filter.cr), {"NBDIS", "TRGSRC", "TRGSENS", "FTH", "DMAEN", "SNPSFMT", "ACQMOD"});
   now = protect(filter.cr, old, now, mask, filter.active.of(old) != 0);
-  now = filter.run.with(filter.active.with(now, filter.enable.of(now)), 0);
+  now = filter.run.with(filter.active.with(now, filter.enable.of(now)), filter.run.of(old));
   regs_.poke(filter.cr.offset, now);
+  auto const restart = filter.enable.of(now) != 0
+                   and filter.enable.of(old) != 0
+                   and state_.filter[f].single
+                   and not state_.filter[f].running;
   if(filter.enable.of(old) == 0 and filter.enable.of(now) != 0)
   {
     check_filter_start(f, old);
+  }
+  if(filter.enable.of(old) != filter.enable.of(now) or restart)
+  {
+    settle(vtime{now_ps()});
+    if(filter.enable.of(now) != 0)
+    {
+      start_filter(f);
+    }
+    else
+    {
+      stop_filter(f);
+    }
+    reschedule();
   }
   update_bsmx(f);
 }
@@ -953,6 +1114,11 @@ void mdf::cic_written(std::size_t f, std::uint32_t old, std::uint32_t now)
      and not scale_of(static_cast<std::uint8_t>(filter.scale.of(now))))
   {
     refuse(filter.cicr, old, filter.scale, "SCALE", "a reserved SCALE code");
+  }
+  if(state_.filter[f].running and filter.scale.of(old) != filter.scale.of(now))
+  {
+    settle(vtime{now_ps()});
+    state_.filter[f].config.scale = static_cast<std::uint8_t>(filter.scale.of(now));
   }
 }
 
@@ -1046,10 +1212,342 @@ void mdf::update_irq()
 }
 }
 
+pdm_source::~pdm_source() = default;
+pdm_tap::~pdm_tap()       = default;
+
 auto mdf_factory() -> model_factory
 {
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<mdf>(ctx, desc, layout_of(desc));
   };
+}
+}
+
+namespace popcorn::periph::stm32
+{
+namespace
+{
+auto mdf::now_ps() const -> std::uint64_t
+{
+  return ctx_.clock.time().ps;
+}
+
+auto mdf::edge_ps(std::size_t y, std::uint64_t h) const -> std::uint64_t
+{
+  auto const& cck = state_.cck[y];
+  auto const  num = static_cast<unsigned __int128>(h - cck.base) * cck.divider * ps_per_second;
+  return cck.anchor_ps + static_cast<std::uint64_t>(num / (2u * cck.kernel_hz));
+}
+
+auto mdf::edges_until(std::size_t y, std::uint64_t t) const -> std::uint64_t
+{
+  auto const& cck = state_.cck[y];
+  if(t < cck.anchor_ps)
+  {
+    return cck.base;
+  }
+  auto const num = static_cast<unsigned __int128>(t - cck.anchor_ps + 1) * 2u * cck.kernel_hz;
+  auto const den = static_cast<unsigned __int128>(cck.divider) * ps_per_second;
+  return cck.base + static_cast<std::uint64_t>((num + den - 1) / den);
+}
+
+auto mdf::cck_of(std::size_t s) const -> std::size_t
+{
+  return bits(sitf_[s].source) & 1u;
+}
+
+auto mdf::parity_of(std::size_t f) const -> std::uint64_t
+{
+  auto const stream = bits(filter_[f].select);
+  return stream / 2u >= layout_.filters ? 1u : stream & 1u;
+}
+
+auto mdf::rate_of(std::size_t y) const -> bit_rate
+{
+  return {.kernel_hz = state_.cck[y].kernel_hz, .divider = state_.cck[y].divider};
+}
+
+auto mdf::config_of(std::size_t f) const -> chain_config
+{
+  auto const&  filter = filter_[f];
+  chain_config out{
+      .order          = cic_order_of(static_cast<std::uint8_t>(bits(filter.cic_mode))),
+      .decimation     = static_cast<std::uint16_t>(std::max(bits(filter.decimation), 1u) + 1u),
+      .offset         = 0,
+      .scale          = static_cast<std::uint8_t>(bits(filter.scale)),
+      .rsflt          = bits(filter.rsflt_bypass) == 0,
+      .rsflt_decimate = bits(filter.rsflt_decimation) == 0,
+      .hpf            = std::nullopt,
+      .int_value      = std::nullopt,
+      .int_div        = int_divider::by_128};
+  if(bits(filter.hpf_bypass) == 0)
+  {
+    out.hpf = static_cast<std::uint8_t>(bits(filter.hpf_cutoff));
+  }
+  if(filter.offset)
+  {
+    out.offset = static_cast<std::int32_t>(bits(*filter.offset) << 6) >> 6;
+  }
+  return out;
+}
+
+auto mdf::bits_needed(std::size_t f) const -> std::uint64_t
+{
+  auto const& filter = state_.filter[f];
+  auto const  d      = std::uint64_t{filter.config.decimation};
+  auto        need   = d - filter.chain.cic.count;
+  if(filter.config.rsflt and filter.config.rsflt_decimate)
+  {
+    need += (3u - filter.chain.rsflt.count) * d;
+  }
+  return need;
+}
+
+void mdf::refresh_clocks(std::uint64_t t)
+{
+  auto const ckgcr  = regs_.peek(ckgcr_.offset);
+  auto const kernel = ctx_.clock.hz(kernel_);
+  auto const div    = std::uint64_t{proc_div_.of(ckgcr) + 1u} * (cck_div_.of(ckgcr) + 1u);
+  for(std::size_t y = 0; y < 2; ++y)
+  {
+    auto const should = ckg_enable_.of(ckgcr) != 0
+                    and cck_enable_[y].of(ckgcr) != 0
+                    and cck_direction_[y].of(ckgcr) != 0
+                    and kernel != 0;
+    auto&      cck = state_.cck[y];
+    if(should and not cck.running)
+    {
+      cck = {.running = true, .anchor_ps = t, .base = 0, .kernel_hz = kernel, .divider = div};
+      for(std::size_t s = 0; s < layout_.filters; ++s)
+      {
+        if(cck_of(s) == y)
+        {
+          state_.sitf[s].clocking = false;
+        }
+      }
+    }
+    else if(not should)
+    {
+      cck.running = false;
+    }
+  }
+  for(std::size_t s = 0; s < layout_.filters; ++s)
+  {
+    auto&      sitf   = state_.sitf[s];
+    auto const y      = cck_of(s);
+    auto const should = bits(sitf_[s].enable) != 0 and state_.cck[y].running;
+    if(should and not sitf.clocking)
+    {
+      sitf.clocking = true;
+      sitf.next     = edges_until(y, t);
+    }
+    else if(not should)
+    {
+      sitf.clocking = false;
+    }
+  }
+}
+
+void mdf::on_clock_change()
+{
+  auto const t = now_ps();
+  settle(vtime{t});
+  auto const kernel = ctx_.clock.hz(kernel_);
+  for(std::size_t y = 0; y < 2; ++y)
+  {
+    auto& cck = state_.cck[y];
+    if(not cck.running or cck.kernel_hz == kernel)
+    {
+      continue;
+    }
+    if(kernel == 0)
+    {
+      cck.running = false;
+      continue;
+    }
+    auto const next = edges_until(y, t);
+    cck.anchor_ps   = edge_ps(y, next);
+    cck.base        = next;
+    cck.kernel_hz   = kernel;
+  }
+  refresh_clocks(t);
+  reschedule();
+}
+
+void mdf::attach(std::size_t sitf, pdm_edge edge, std::shared_ptr<pdm_source> source)
+{
+  sources_.at(sitf)[edge == pdm_edge::rising ? 0 : 1] = std::move(source);
+}
+
+void mdf::attach_tap(std::size_t filter, std::shared_ptr<pdm_tap> tap)
+{
+  taps_.at(filter) = std::move(tap);
+}
+
+auto mdf::sitfs() const -> std::size_t
+{
+  return layout_.filters;
+}
+
+void mdf::settle(vtime at)
+{
+  for(std::size_t s = 0; s < layout_.filters; ++s)
+  {
+    catch_up(s, at.ps);
+  }
+}
+
+void mdf::catch_up(std::size_t s, std::uint64_t t)
+{
+  auto& sitf = state_.sitf[s];
+  if(not sitf.clocking)
+  {
+    return;
+  }
+  auto const y   = cck_of(s);
+  auto const end = edges_until(y, t);
+  while(sitf.next < end)
+  {
+    auto const                   from = sitf.next;
+    auto const                   to   = std::min(end, from + 2 * chunk_edges);
+    std::array<std::uint64_t, 2> first{};
+    for(std::uint64_t e = 0; e < 2; ++e)
+    {
+      first[e]     = from + ((from ^ e) & 1u);
+      auto const n = first[e] < to ? (to - first[e] + 1) / 2 : 0;
+      bits_[e].resize(n);
+      if(auto const& source = sources_[s][e])
+      {
+        source->clock(bits_[e], rate_of(y));
+      }
+      else
+      {
+        for(auto& bit : bits_[e])
+        {
+          bit = modulate(sitf.silence[e], 0) ? 1 : 0;
+        }
+      }
+    }
+    for(std::size_t f = 0; f < layout_.filters; ++f)
+    {
+      auto& filter = state_.filter[f];
+      if(not filter.running or sitf_selected(f) != s)
+      {
+        continue;
+      }
+      auto const e = parity_of(f);
+      for(std::size_t j = 0; j < bits_[e].size() and filter.running; ++j)
+      {
+        if(auto const sample = feed(filter.chain, filter.config, bits_[e][j] != 0 ? 1 : -1))
+        {
+          write_sample(f, *sample, edge_ps(y, first[e] + 2 * j));
+        }
+      }
+    }
+    sitf.next = to;
+  }
+}
+
+void mdf::write_sample(std::size_t f, produced sample, std::uint64_t at)
+{
+  auto&      filter  = state_.filter[f];
+  auto const dropped = filter.fifo.size() >= fifo_depth;
+  if(dropped)
+  {
+    update(regs_, filter_[f].overrun, 1);
+  }
+  else
+  {
+    filter.fifo.push_back(sample.pcm);
+  }
+  if(sample.saturated)
+  {
+    update(regs_, filter_[f].saturation, 1);
+  }
+  if(filter.single)
+  {
+    filter.running = false;
+    filter.chain   = {};
+    update(regs_, filter_[f].run, 0);
+  }
+  refresh_fifo(f);
+  if(auto const& tap = taps_[f])
+  {
+    tap->wrote(sample.pcm, vtime{at}, dropped, true);
+  }
+}
+
+void mdf::refresh_fifo(std::size_t f)
+{
+  auto const  level  = state_.filter[f].fifo.size();
+  auto const& filter = filter_[f];
+  update(regs_, filter.rxne, level != 0 ? 1 : 0);
+  update(regs_, filter.fifo_threshold, level >= (bits(filter.threshold) != 0 ? 2u : 1u) ? 1 : 0);
+  update_irq();
+}
+
+auto mdf::pop(std::size_t f) -> std::uint32_t
+{
+  auto& fifo = state_.filter[f].fifo;
+  if(fifo.empty())
+  {
+    return 0;
+  }
+  auto const value = static_cast<std::uint32_t>(fifo.front()) << 8;
+  fifo.erase(fifo.begin());
+  refresh_fifo(f);
+  return value;
+}
+
+void mdf::start_filter(std::size_t f)
+{
+  auto&      filter = state_.filter[f];
+  auto const mode   = bits(filter_[f].acquisition);
+  filter.chain      = {};
+  filter.config     = config_of(f);
+  filter.single     = mode == 1;
+  filter.running    = mode != 2 and mode != 3;
+  update(regs_, filter_[f].run, filter.running ? 1 : 0);
+}
+
+void mdf::stop_filter(std::size_t f)
+{
+  auto& filter   = state_.filter[f];
+  filter.running = false;
+  filter.single  = false;
+  filter.chain   = {};
+  filter.fifo.clear();
+  update(regs_, filter_[f].run, 0);
+  refresh_fifo(f);
+}
+
+void mdf::reschedule()
+{
+  std::optional<std::uint64_t> earliest;
+  for(std::size_t f = 0; f < layout_.filters; ++f)
+  {
+    auto const& filter = state_.filter[f];
+    auto const  s      = sitf_selected(f);
+    auto const& sitf   = state_.sitf[s];
+    if(not filter.running or not sitf.clocking)
+    {
+      continue;
+    }
+    auto const e     = parity_of(f);
+    auto const first = sitf.next + ((sitf.next ^ e) & 1u);
+    auto const at    = edge_ps(cck_of(s), first + 2 * (bits_needed(f) - 1));
+    earliest         = earliest ? std::min(*earliest, at) : at;
+  }
+  if(earliest == state_.scheduled_ps)
+  {
+    return;
+  }
+  ++state_.sample_generation;
+  state_.scheduled_ps = earliest;
+  if(earliest)
+  {
+    ctx_.events.schedule_at(vtime{*earliest}, sample_event, state_.sample_generation, ctx_.clock);
+  }
+}
 }
 }

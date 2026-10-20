@@ -43,6 +43,7 @@ firmwares = {
 u575_env = {
     "POPCORN_U575_DESC": str(u575),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in firmwares.items()},
+    "POPCORN_MDF_VECTORS": str(periph_data / "mdf"),
     "POPCORN_FW_USB_CDC": str(
         project_dir / "examples" / "stm32u575" / "usb_cdc" / "prebuilt" / "usb_cdc.elf"
     ),
