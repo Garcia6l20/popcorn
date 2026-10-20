@@ -1,4 +1,5 @@
 #include "link_queues.hpp"
+#include "pdm_queues.hpp"
 
 #include <popcorn/core/link_guard.hpp>
 #include <popcorn/periph/usb_cdc_acm.hpp>
@@ -7,6 +8,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -382,4 +384,95 @@ TEST_CASE("HID reports and microphone frames are taken by the time the host queu
   CHECK(frames.front().at == vtime{30});
   CHECK(mic.take(8, vtime{49}).empty());
   CHECK(mic.in.size() == 1);
+}
+
+TEST_CASE("a PDM source written on one thread and clocked on another loses and repeats no bit")
+{
+  constexpr std::size_t                      segments = 20'000;
+  constexpr std::size_t                      chunk    = 61;
+  constexpr popcorn::periph::stm32::bit_rate rate{.kernel_hz = 20'480'000, .divider = 10};
+  detail::pdm_queue_source                   source;
+  std::atomic<bool>                          done{false};
+  std::uint64_t                              written_ones = 0;
+  std::uint64_t                              written_bits = 0;
+  std::thread                                writer{[&] {
+    for(std::size_t k = 0; k < segments; ++k)
+    {
+      std::array<std::uint8_t, 2> const data{
+          static_cast<std::uint8_t>(k), static_cast<std::uint8_t>(k >> 8)};
+      auto const bits = 1 + k % 16;
+      for(std::size_t b = 0; b < bits; ++b)
+      {
+        written_ones += (data[b / 8] >> (7 - b % 8)) & 1u;
+      }
+      written_bits += bits;
+      source.write_pdm(source.lock(), data, bits);
+    }
+    done.store(true, std::memory_order_release);
+  }};
+  std::uint64_t                              clocked = 0;
+  std::uint64_t                              ones    = 0;
+  std::array<std::uint8_t, chunk>            out{};
+  for(;;)
+  {
+    auto const finished = done.load(std::memory_order_acquire);
+    source.clock(out, rate);
+    clocked += chunk;
+    ones += static_cast<std::uint64_t>(std::ranges::count(out, std::uint8_t{1}));
+    if(finished and source.queued_bits(source.lock()) == 0)
+    {
+      break;
+    }
+  }
+  writer.join();
+  auto const held = source.lock();
+  CHECK(source.idle_bits(held) + written_bits == clocked);
+  popcorn::periph::stm32::modulator_state silence{};
+  std::uint64_t                           idle_ones = 0;
+  for(std::uint64_t k = 0; k < source.idle_bits(held); ++k)
+  {
+    idle_ones += popcorn::periph::stm32::modulate(silence, 0) ? 1 : 0;
+  }
+  CHECK(ones == written_ones + idle_ones);
+}
+
+TEST_CASE("a PDM tap filled on one thread and drained on another keeps order and counts drops")
+{
+  constexpr std::uint64_t sent = 1'000'000;
+  detail::pdm_queue_tap   tap;
+  tap.set_limit(tap.lock(), 1000);
+  std::atomic<bool>          done{false};
+  std::vector<std::uint64_t> times;
+  std::thread                drainer{[&] {
+    for(;;)
+    {
+      auto const finished = done.load(std::memory_order_acquire);
+      auto const batch    = [&] {
+        auto const held = tap.lock();
+        return tap.take(held, 257);
+      }();
+      for(auto const& sample : batch)
+      {
+        CHECK(sample.pcm == static_cast<std::int32_t>(sample.at_ps & 0x7fffff));
+        times.push_back(sample.at_ps);
+      }
+      if(finished and batch.empty())
+      {
+        return;
+      }
+    }
+  }};
+  for(std::uint64_t at = 0; at < sent; ++at)
+  {
+    tap.wrote(static_cast<std::int32_t>(at & 0x7fffff), vtime{at}, at % 7 == 0, at % 3 != 0);
+  }
+  done.store(true, std::memory_order_release);
+  drainer.join();
+  auto const held = tap.lock();
+  CHECK(tap.available(held) == 0);
+  CHECK(times.size() + tap.dropped(held) == sent);
+  CHECK(std::ranges::is_sorted(times));
+  CHECK(std::ranges::adjacent_find(times) == times.end());
+  REQUIRE_FALSE(times.empty());
+  CHECK(times.back() == sent - 1);
 }
