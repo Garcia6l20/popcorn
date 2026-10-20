@@ -120,7 +120,7 @@ public:
   [[= py::skip]] pdm_tap_link(
       periph::stm32::pdm_port& port,
       std::size_t              filter,
-      detail::reset_count      resets,
+      core::reset_counter      resets,
       detail::alive_flag       alive,
       detail::host_ref         host);
 

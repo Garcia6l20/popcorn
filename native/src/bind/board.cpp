@@ -23,7 +23,7 @@ namespace popcorn::bind
 {
 uart_queue::uart_queue(
     periph::uart_port&  port,
-    detail::reset_count resets,
+    core::reset_counter resets,
     detail::alive_flag  alive,
     detail::host_ref    host)
     : port_{&port}, endpoint_{std::make_shared<detail::queue_endpoint>(std::move(resets))},
@@ -206,7 +206,7 @@ audio_link::audio_link(
     std::uint32_t              decimation,
     std::uint32_t              external_frame_hz,
     bool                       clock_wired,
-    detail::reset_count        resets,
+    core::reset_counter        resets,
     detail::alive_flag         alive,
     detail::host_ref           host)
     : endpoint_{std::make_shared<detail::audio_queue_endpoint>(std::move(resets))}, port_{&port},

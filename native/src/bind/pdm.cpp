@@ -132,7 +132,7 @@ void pdm_link::discard()
 pdm_tap_link::pdm_tap_link(
     periph::stm32::pdm_port& port,
     std::size_t              filter,
-    detail::reset_count      resets,
+    core::reset_counter      resets,
     detail::alive_flag       alive,
     detail::host_ref         host)
     : tap_{std::make_shared<detail::pdm_queue_tap>(std::move(resets))}, alive_{std::move(alive)},

@@ -51,7 +51,7 @@ public:
    */
   [[= py::skip]] uart_queue(
       periph::uart_port&  port,
-      detail::reset_count resets,
+      core::reset_counter resets,
       detail::alive_flag  alive,
       detail::host_ref    host);
 
@@ -238,7 +238,7 @@ public:
       std::uint32_t              decimation,
       std::uint32_t              external_frame_hz,
       bool                       clock_wired,
-      detail::reset_count        resets,
+      core::reset_counter        resets,
       detail::alive_flag         alive,
       detail::host_ref           host);
 

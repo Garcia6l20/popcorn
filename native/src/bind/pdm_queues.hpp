@@ -248,7 +248,7 @@ public:
    * @param resets The machine's reset count, which tags each sample: a sample from before the
    *        last reset is taken whatever the time bound of take().
    */
-  explicit pdm_queue_tap(reset_count resets = {}) : resets_{std::move(resets)}
+  explicit pdm_queue_tap(core::reset_counter resets = {}) : resets_{std::move(resets)}
   {}
 
   /** @brief Takes the link lock, blocking. */
@@ -272,7 +272,7 @@ public:
          .overrun  = dropped,
          .captured = captured,
          .at_ps    = at.ps,
-         .resets   = resets_of(resets_)});
+         .resets   = resets_.load()});
   }
 
   /** @brief Samples kept and not taken yet. */
@@ -307,7 +307,7 @@ public:
     auto const first = samples_.begin();
     auto const last  = std::find_if(
         first, first + static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(count, samples_.size())),
-        [until_ps, bound = resets.value_or(resets_of(resets_))](queued_pdm_sample const& sample) {
+        [until_ps, bound = resets.value_or(resets_.load())](queued_pdm_sample const& sample) {
           return past_bound(sample.resets, sample.at_ps, until_ps, bound);
         });
     std::vector<queued_pdm_sample> out(first, last);
@@ -345,7 +345,7 @@ private:
   }
 
   mutable std::mutex            mutex_;
-  reset_count                   resets_;
+  core::reset_counter           resets_;
   std::deque<queued_pdm_sample> samples_;
   std::uint64_t                 limit_ = pdm_sample_limit;
   std::uint64_t                 dropped_{};

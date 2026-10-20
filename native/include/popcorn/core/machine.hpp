@@ -8,6 +8,7 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/memory_view.hpp>
 #include <popcorn/core/register_view.hpp>
+#include <popcorn/core/reset_counter.hpp>
 #include <popcorn/core/scheduler.hpp>
 #include <popcorn/core/services.hpp>
 #include <popcorn/core/snapshot.hpp>
@@ -322,7 +323,7 @@ public:
    *        reset's models have reset. It outlives the machine: a host-side queue tags what it
    *        keeps with it, so a record from before a reset is told from a later one.
    */
-  [[nodiscard]] auto reset_counter() const -> std::shared_ptr<std::atomic<std::uint64_t> const>;
+  [[nodiscard]] auto reset_counter() const -> core::reset_counter;
 
   /** @brief Whether a slice is running, true inside handlers too. */
   [[nodiscard]] auto running() const noexcept -> bool;

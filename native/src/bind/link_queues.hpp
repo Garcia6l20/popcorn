@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/link_guard.hpp>
+#include <popcorn/core/reset_counter.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/periph/stm32/audio.hpp>
 #include <popcorn/periph/uart.hpp>
@@ -19,18 +20,6 @@
 
 namespace popcorn::bind::detail
 {
-/** @brief The machine's reset count, core::machine::reset_counter(), none for a test queue. */
-using reset_count = std::shared_ptr<std::atomic<std::uint64_t> const>;
-
-/**
- * @brief The reset count now, 0 without a counter.
- * @param count The counter.
- */
-[[nodiscard]] inline auto resets_of(reset_count const& count) noexcept -> std::uint64_t
-{
-  return count ? count->load(std::memory_order_acquire) : 0;
-}
-
 /**
  * @brief Whether a take bounded by @p until_ps leaves a record queued: one from a later reset
  *        than the bound's, or from the same reset and later than the bound. A record from an
@@ -78,7 +67,7 @@ public:
    * @param resets The machine's reset count, which tags each frame: a frame from before the
    *        last reset is taken whatever the time bound of take().
    */
-  explicit queue_endpoint(reset_count resets = {}) : resets_{std::move(resets)}
+  explicit queue_endpoint(core::reset_counter resets = {}) : resets_{std::move(resets)}
   {}
 
   /** @brief Takes the link lock, blocking. */
@@ -97,7 +86,7 @@ public:
   {
     auto const held = lock();
     trim(held, limit_ - 1);
-    frames_.push_back({.data = data, .at_ps = at.ps, .brk = brk, .resets = resets_of(resets_)});
+    frames_.push_back({.data = data, .at_ps = at.ps, .brk = brk, .resets = resets_.load()});
   }
 
   /** @brief Frames not drained yet. */
@@ -124,7 +113,7 @@ public:
     auto const first = frames_.begin();
     auto const last  = std::find_if(
         first, first + static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(count, frames_.size())),
-        [until_ps, bound = resets.value_or(resets_of(resets_))](queued_uart_frame const& frame) {
+        [until_ps, bound = resets.value_or(resets_.load())](queued_uart_frame const& frame) {
           return past_bound(frame.resets, frame.at_ps, until_ps, bound);
         });
     std::vector<queued_uart_frame> out(first, last);
@@ -184,7 +173,7 @@ private:
   }
 
   mutable std::mutex            mutex_;
-  reset_count                   resets_;
+  core::reset_counter           resets_;
   std::deque<queued_uart_frame> frames_;
   std::uint64_t                 limit_ = uart_frame_limit;
   std::uint64_t                 dropped_{};
@@ -234,7 +223,7 @@ public:
    * @param resets The machine's reset count, which tags each frame: a frame from before the
    *        last reset is taken whatever the time bound of take().
    */
-  explicit audio_queue_endpoint(reset_count resets = {}) : resets_{std::move(resets)}
+  explicit audio_queue_endpoint(core::reset_counter resets = {}) : resets_{std::move(resets)}
   {}
 
   /** @brief Takes the link lock, blocking. */
@@ -266,7 +255,7 @@ public:
     words_.insert(words_.end(), slots.begin(), slots.end());
     starts_.push_back(at.ps);
     ends_.push_back(end.ps);
-    tags_.push_back(resets_of(resets_));
+    tags_.push_back(resets_.load());
   }
 
   void
@@ -332,7 +321,7 @@ public:
   {
     std::vector<queued_audio_frame> out;
     out.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(count, starts_.size())));
-    auto const bound = resets.value_or(resets_of(resets_));
+    auto const bound = resets.value_or(resets_.load());
     while(out.size() < count
           and not starts_.empty()
           and not past_bound(tags_.front(), ends_.front(), until_ps, bound))
@@ -409,7 +398,7 @@ private:
   }
 
   mutable std::mutex                mutex_;
-  reset_count                       resets_;
+  core::reset_counter               resets_;
   std::deque<std::uint32_t>         words_;
   std::deque<std::uint64_t>         starts_;
   std::deque<std::uint64_t>         ends_;

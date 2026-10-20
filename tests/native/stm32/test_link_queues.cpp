@@ -2,6 +2,7 @@
 #include "pdm_queues.hpp"
 
 #include <popcorn/core/link_guard.hpp>
+#include <popcorn/core/reset_counter.hpp>
 #include <popcorn/periph/usb_cdc_acm.hpp>
 #include <popcorn/periph/usb_hid.hpp>
 #include <popcorn/periph/usb_uac2.hpp>
@@ -482,7 +483,7 @@ TEST_CASE("a PDM tap filled on one thread and drained on another keeps order and
 TEST_CASE("a UART frame from before a reset is taken whatever the time bound after it")
 {
   auto const             resets = std::make_shared<std::atomic<std::uint64_t>>(1);
-  detail::queue_endpoint queue{resets};
+  detail::queue_endpoint queue{popcorn::core::reset_counter{resets}};
   queue.transmitted(0x41, vtime{9'000}, false);
   resets->store(2);
   queue.transmitted(0x42, vtime{100}, false);
@@ -497,7 +498,7 @@ TEST_CASE("a UART frame from before a reset is taken whatever the time bound aft
 TEST_CASE("an SAI frame from before a reset is taken whatever the time bound after it")
 {
   auto const                         resets = std::make_shared<std::atomic<std::uint64_t>>(1);
-  detail::audio_queue_endpoint       queue{resets};
+  detail::audio_queue_endpoint       queue{popcorn::core::reset_counter{resets}};
   std::array<std::uint32_t, 2> const slots{1, 2};
   queue.transmitted(slots, stereo, vtime{8'000}, vtime{9'000});
   resets->store(2);
@@ -514,7 +515,7 @@ TEST_CASE("a UART take bounds frames by the reset count of its stop, not the cou
 {
   constexpr auto         never  = std::numeric_limits<std::uint64_t>::max();
   auto const             resets = std::make_shared<std::atomic<std::uint64_t>>(1);
-  detail::queue_endpoint queue{resets};
+  detail::queue_endpoint queue{popcorn::core::reset_counter{resets}};
   queue.transmitted(0x41, vtime{100}, false);
   queue.transmitted(0x42, vtime{9'000}, false);
   resets->store(2);
@@ -535,7 +536,7 @@ TEST_CASE("an SAI take bounds frames by the reset count of its stop, not the cou
 {
   constexpr auto                     never  = std::numeric_limits<std::uint64_t>::max();
   auto const                         resets = std::make_shared<std::atomic<std::uint64_t>>(1);
-  detail::audio_queue_endpoint       queue{resets};
+  detail::audio_queue_endpoint       queue{popcorn::core::reset_counter{resets}};
   std::array<std::uint32_t, 2> const slots{1, 2};
   queue.transmitted(slots, stereo, vtime{0}, vtime{100});
   queue.transmitted(slots, stereo, vtime{8'000}, vtime{9'000});
@@ -555,7 +556,7 @@ TEST_CASE("a PDM tap take bounds samples by the reset count of its stop, not the
 {
   constexpr auto        never  = std::numeric_limits<std::uint64_t>::max();
   auto const            resets = std::make_shared<std::atomic<std::uint64_t>>(1);
-  detail::pdm_queue_tap tap{resets};
+  detail::pdm_queue_tap tap{popcorn::core::reset_counter{resets}};
   tap.wrote(1, vtime{100}, false, true);
   tap.wrote(2, vtime{9'000}, false, true);
   resets->store(2);
