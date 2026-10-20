@@ -213,6 +213,16 @@ struct rig : stm32_fixture
         == stop_reason::time);
   }
 
+  void run_before_events_at(std::uint64_t ps) const
+  {
+    REQUIRE(
+        run_to_stop({.max_instructions = icount{100'000'000},
+                     .until_time       = vtime{ps},
+                     .hold_from_until  = true})
+            .reason
+        == stop_reason::time);
+  }
+
   [[nodiscard]] auto pending(std::uint32_t irq) const -> bool
   {
     auto const word = target->mem().read(0xe000'e200u + 4 * (irq / 32), 4);
@@ -2031,4 +2041,99 @@ TEST_CASE("an ACQMOD break and a SCALE break of interleaved filters log one warn
   r.write("DFLT2CR", sync_continuous | 1u);
   CHECK(r.warned("an interleaved filter needs ACQMOD") == 1);
   CHECK(r.warned("interleaved filters need the same") == 1);
+}
+
+namespace
+{
+constexpr popcorn::address mdf_ring   = 0x2001'0000;
+constexpr std::uint32_t    ring_words = 64;
+
+void peer_chain_to_gpdma(stream_rig const& r, std::vector<std::uint8_t> const& bits)
+{
+  r.mic[0]->bits = bits;
+  r.write(
+      "GPDMA1", "C0TR1",
+      r.shifted("GPDMA1", "C0TR1", "SDW_LOG2", 2)
+          | r.shifted("GPDMA1", "C0TR1", "DDW_LOG2", 2)
+          | r.shifted("GPDMA1", "C0TR1", "DINC", 1));
+  r.write("GPDMA1", "C0TR2", r.shifted("GPDMA1", "C0TR2", "REQSEL", flt0_request));
+  r.write("GPDMA1", "C0BR1", 4 * ring_words);
+  r.write("GPDMA1", "C0SAR", r.at("MDF1", "DFLT0DR"));
+  r.write("GPDMA1", "C0DAR", mdf_ring);
+  r.write("GPDMA1", "C0CR", r.shifted("GPDMA1", "C0CR", "EN", 1));
+  r.write("BSMX0CR", 0);
+  r.write("DFLT0CICR", (0x2Cu << 20) | (31u << 8) | (5u << 4));
+  r.write("DFLT0RSFR", 2u << 8);
+  r.put("DFLT0IER", "FTHIE", 1);
+  r.write("DFLT0CR", dmaen | 1u);
+}
+
+auto ring_of(stream_rig const& r) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(std::uint32_t k = 0; k < ring_words; ++k)
+  {
+    auto const word = r.target->mem().read(mdf_ring + 4 * k, 4);
+    REQUIRE(word.has_value());
+    out.push_back(*word);
+  }
+  out.push_back(r.field("GPDMA1", "C0BR1", "BNDT"));
+  return out;
+}
+
+auto peer_sample_at(stream_rig const& r, std::uint64_t k) -> std::uint64_t
+{
+  return edge_at(r.anchor, 2 + 2 * (128 * (k + 1) - 1));
+}
+}
+
+TEST_CASE("a snapshot before the events at a sample's time saves the flags and request it raises")
+{
+  auto const [bits, pcm] = pdm_16k();
+  stream_rig const plain;
+  peer_chain_to_gpdma(plain, bits);
+  auto const at   = peer_sample_at(plain, 7);
+  auto const soon = at + us;
+  auto const end  = peer_sample_at(plain, 40) + us;
+  plain.run_until(soon);
+  auto const ring_soon = ring_of(plain);
+  REQUIRE(ring_soon[7] != 0);
+  plain.run_until(end);
+  auto const ring_end = ring_of(plain);
+  auto const samples  = plain.taps[0]->samples;
+  REQUIRE(samples.size() == 41);
+
+  stream_rig const r;
+  peer_chain_to_gpdma(r, bits);
+  REQUIRE(r.anchor == plain.anchor);
+  r.run_before_events_at(at);
+  REQUIRE(r.taps[0]->samples.size() == 7);
+  auto const saved = r.target->snapshot();
+  REQUIRE(r.taps[0]->samples.size() == 8);
+  auto const consumed = r.mic[0]->next;
+  CHECK(consumed == 128 * 8);
+  auto const& images = saved.data().peripherals;
+  auto const  image =
+      std::ranges::find(images, std::string{"MDF1"}, &core::peripheral_image::peripheral);
+  REQUIRE(image != images.end());
+  auto const* isr = popcorn::find_register(r.target->peripheral("MDF1").description(), "DFLT0ISR");
+  REQUIRE(isr != nullptr);
+  CHECK((image->words.at(isr->offset / 4) & rxnef) != 0);
+  CHECK(image->irq_levels.at(0) == 1);
+
+  r.target->restore(saved);
+  r.mic[0]->next = consumed;
+  r.taps[0]->samples.clear();
+  r.run_until(soon);
+  CHECK(ring_of(r) == ring_soon);
+  r.run_until(end);
+  CHECK(ring_of(r) == ring_end);
+  auto const& again = r.taps[0]->samples;
+  REQUIRE(again.size() == 33);
+  for(std::size_t k = 0; k < again.size(); ++k)
+  {
+    CAPTURE(k);
+    CHECK(again[k].pcm == samples[k + 8].pcm);
+    CHECK(again[k].at == samples[k + 8].at);
+  }
 }

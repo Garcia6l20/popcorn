@@ -609,6 +609,9 @@ class settling_model final : public popcorn::periph::model,
                              public popcorn::periph::snapshot_listener
 {
 public:
+  explicit settling_model(popcorn::periph::model_context& ctx) noexcept : context{ctx}
+  {}
+
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
   {
     return {};
@@ -647,6 +650,9 @@ public:
       throw popcorn::model_error("TESTDEV", "SETTLE", 0);
     }
     ++settled;
+    context.regs.poke(
+        popcorn::testing::test_model::data_offset, static_cast<std::uint32_t>(settled));
+    context.irqs.front().raise();
   }
 
   void save(std::vector<std::byte>& out) const override
@@ -659,16 +665,17 @@ public:
     settled = static_cast<int>(in.front());
   }
 
-  int  settled{};
-  bool throws{};
+  popcorn::periph::model_context& context;
+  int                             settled{};
+  bool                            throws{};
 };
 
 auto with_settling_model() -> core::machine_options
 {
   core::machine_options options;
   options.models.emplace(
-      "TESTDEV", [](popcorn::periph::model_context&, popcorn::peripheral_desc const&) {
-        return std::make_shared<settling_model>();
+      "TESTDEV", [](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
+        return std::make_shared<settling_model>(ctx);
       });
   return options;
 }
@@ -681,13 +688,25 @@ auto saved_byte(core::snapshot const& taken) -> std::byte
   REQUIRE(found->data.size() == 1);
   return found->data.front();
 }
+
+auto testdev_image(core::snapshot const& taken) -> core::peripheral_image const&
+{
+  auto const found = std::ranges::find(
+      taken.data().peripherals, std::string{"TESTDEV"}, &core::peripheral_image::peripheral);
+  REQUIRE(found != taken.data().peripherals.end());
+  return *found;
+}
 }
 
-TEST_CASE("a snapshot listener settles before its model is saved, a throw captures nothing")
+TEST_CASE("a snapshot listener settles before anything is saved, a throw captures nothing")
 {
   auto  f    = fixture{m33(), "snapshot", with_settling_model()};
   auto& made = dynamic_cast<settling_model&>(*f.target->model("TESTDEV"));
-  CHECK(saved_byte(f.target->snapshot()) == std::byte{1});
+  REQUIRE_FALSE(made.context.irqs.front().level());
+  auto const first = f.target->snapshot();
+  CHECK(saved_byte(first) == std::byte{1});
+  CHECK(testdev_image(first).words.at(popcorn::testing::test_model::data_offset / 4) == 1);
+  CHECK(testdev_image(first).irq_levels.at(0) == 1);
   CHECK(saved_byte(f.target->snapshot()) == std::byte{2});
   made.throws = true;
   CHECK_THROWS_AS(std::ignore = f.target->snapshot(), popcorn::model_error);

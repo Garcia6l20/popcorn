@@ -16,7 +16,7 @@ import math
 import struct
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
 import popcorn
 import pytest
@@ -31,7 +31,19 @@ from .mdf_reference import ChainConfig, modulate, run_chain
 from .mdf_state import MdfState, decode, encode
 from .sad_reference import SadConfig, SadState, sad
 from .snapshot_doc import bson
-from .test_pdm import bits_of, cck, clocked, edge_at, held_bits, machine, pack, pdm_16k
+from .test_pdm import (
+    Edge,
+    bits_of,
+    cck,
+    clocked,
+    edge_at,
+    edges_by,
+    held_bits,
+    machine,
+    pack,
+    pdm_16k,
+    sitf,
+)
 
 DATA = Path(__file__).parents[2] / "data" / "periph" / "mdf"
 MDF1 = 0x4002_5000
@@ -47,8 +59,6 @@ SYNC_CONTINUOUS = 2 << 4
 PEER = ChainConfig(order=5, decimation=32, scale=0x2C, rsflt=True, hpf=2)
 INT_CODES = {128: 0, 32: 1, 4: 2, 1: 3}
 LOWER_EDGE: dict[str, int] = {"rising": 2, "falling": 1}
-
-type Edge = Literal["rising", "falling"]
 
 
 def dr(base: int, f: int) -> int:
@@ -125,11 +135,6 @@ def words(m: popcorn.Machine, address: int, count: int) -> list[int]:
 
 def halves(m: popcorn.Machine, address: int, count: int) -> list[int]:
     return list(struct.unpack(f"<{count}h", m.mem.read(address, 2 * count)))
-
-
-def sitf(m: popcorn.Machine, index: int, unit: str = "MDF1") -> None:
-    """SITF `index` in normal SPI on CCK0, STH 0x1F."""
-    m.periph[unit][f"SITF{index}CR"].write(0x1F11)
 
 
 def program(
@@ -524,7 +529,7 @@ def snapshot_leg(
     asyncio.run(m.run(for_=us(20)))
     at = m.time
     assert at < sample_time(anchor, PEER, 8)
-    consumed = rising_edges_by(anchor, at)
+    consumed = edges_by(anchor, at)
     assert consumed % 128
     saved = m.snapshot()
     data = model_state(saved)
@@ -547,14 +552,6 @@ def test_a_snapshot_mid_sample_restores_the_chain_and_a_fresh_modulator_parked_o
     u575: popcorn.PartDescription,
 ) -> None:
     assert snapshot_leg(u575, running=True) == snapshot_leg(u575, running=False)
-
-
-def rising_edges_by(anchor: VirtualTime, t: VirtualTime) -> int:
-    """Bits of a rising-edge stream clocked at or before `t`."""
-    count = 0
-    while edge_at(anchor, 2 + 2 * count) <= t:
-        count += 1
-    return count
 
 
 def start_capture(m: popcorn.Machine, unit: str, bits: list[int]) -> VirtualTime:
@@ -598,7 +595,7 @@ def test_two_system_members_capture_on_mdf1_and_adf1_as_lone_machines_and_restor
         assert anchors["b"] == anchor
         a = members["a"]
         asyncio.run(system.run(for_=anchor + us(62.5 * 9 + 20) - a.time))
-        consumed = {name: rising_edges_by(anchor, m.time) for name, m in members.items()}
+        consumed = {name: edges_by(anchor, m.time) for name, m in members.items()}
         assert all(c % 128 for c in consumed.values())
         before = {name: m.periph[UNITS[name]].output(0).take() for name, m in members.items()}
         taken = system.snapshot()
@@ -619,7 +616,7 @@ def test_two_system_members_capture_on_mdf1_and_adf1_as_lone_machines_and_restor
         system.close()
 
 
-def test_a_system_reset_then_a_power_on_reset_keeps_input_and_restarts_in_the_new_base(
+def test_a_system_reset_then_a_power_on_reset_keeps_input_and_restarts_the_chain(
     u575: popcorn.PartDescription,
 ) -> None:
     data, count, _ = pdm_16k()
@@ -633,7 +630,7 @@ def test_a_system_reset_then_a_power_on_reset_keeps_input_and_restarts_in_the_ne
     sitf(m, 0)
     program(m, 0, PEER, stream=0, cr=DFLTEN)
     run_to(m, sample_time(anchor, PEER, 3) + us(20))
-    consumed = rising_edges_by(anchor, m.time)
+    consumed = edges_by(anchor, m.time)
     assert len(m.periph.MDF1.output(0).take()) == 4
     m.reset(ResetKind.SOFTWARE)
     assert {name: m.periph.MDF1[name].read() for name in registers} == fresh
@@ -647,7 +644,6 @@ def test_a_system_reset_then_a_power_on_reset_keeps_input_and_restarts_in_the_ne
     clock_dma(m)
     dma(m, "GPDMA1", 0, MDF1_REQUEST, dr(MDF1, 0), BUFFER, 32)
     anchor = cck(m)
-    assert anchor < VirtualTime(0) + us(1000)
     sitf(m, 0)
     program(m, 0, PEER, stream=0, cr=DMAEN | DFLTEN)
     want = run_chain(bits_of(data, count)[consumed:], PEER).pcm[:32]
