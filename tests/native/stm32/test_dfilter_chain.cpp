@@ -511,22 +511,22 @@ TEST_CASE("modulator overload")
   check_modulator("overload");
 }
 
-TEST_CASE("sad noise: SADMOD 00 bursts over noise, with and without hysteresis")
+TEST_CASE("sad noise, popcorn's fixed point: SADMOD 00 bursts over noise, hysteresis on and off")
 {
   check_sad("noise");
 }
 
-TEST_CASE("sad fixed: SADMOD 01, a full-scale negative burst saturates SDLVL")
+TEST_CASE("sad fixed, popcorn's fixed point: SADMOD 01, a full-scale negative burst saturates")
 {
   check_sad("fixed");
 }
 
-TEST_CASE("sad ambient: SADMOD 10 and 11 on a rising then falling ambient level")
+TEST_CASE("sad ambient, popcorn's fixed point: SADMOD 10 and 11 on a rising then falling level")
 {
   check_sad("ambient");
 }
 
-TEST_CASE("ANLVL saturates below 2^15, a fraction of one LSB still falls")
+TEST_CASE("popcorn's ANLVL saturates below 2^15, and a fraction of one LSB still falls")
 {
   stm32::sad_config const setup{.mode = 2, .slope = 7, .floor = 8191};
   stm32::sad_state        state{.phase = stm32::sad_phase::monitor, .noise = (1u << 27) - 2};
@@ -546,7 +546,7 @@ TEST_CASE("ANLVL saturates below 2^15, a fraction of one LSB still falls")
   CHECK(state.noise == 4);
 }
 
-TEST_CASE("FRSIZE 11x frames 512 samples, LFRNB 1xx learns over 32 frames, HGOVR 7 is 512 frames")
+TEST_CASE("FRSIZE 11x frames 512 samples, LFRNB 1xx learns 32 frames, popcorn's HGOVR 7 hangover")
 {
   stm32::sad_config const setup{
       .mode = 1, .frame = 7, .learn = 5, .hangover = 7, .threshold = 0, .floor = 100};

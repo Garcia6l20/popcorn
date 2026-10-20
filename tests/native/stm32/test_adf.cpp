@@ -487,8 +487,8 @@ TEST_CASE("ADF1's DMA request reaches GPDMA1 request 98 and LPDMA1 request 10")
 }
 
 TEST_CASE(
-    "SADMOD 01 with DATCAP 01 and DETCFG 1: SDDETF at entry and exit, the RXFIFO gets the "
-    "frames after the entry through the frame that leaves")
+    "SADMOD 01 with DATCAP 01 and DETCFG 1: SDDETF at entry and exit, the RXFIFO gets "
+    "popcorn's capture window, the frame after the entry through the frame that leaves")
 {
   stream_rig const r;
   r.loud(bursts(
@@ -570,7 +570,7 @@ TEST_CASE("DATCAP 00 keeps every sample out with no DOVRF, SADEN 0 lets them thr
 
 TEST_CASE(
     "with DATCAP 00, SDLVLF and SDDETF raise ADF1_IRQn at the edge of the frame's last sample, "
-    "no read")
+    "popcorn's zero latency, no read")
 {
   sad_setup const setup{.sadcr = 1u << 12, .sadcfgr = 100u << 16};
   auto const      run = [&setup](stream_rig const& r, std::uint32_t enable) {
