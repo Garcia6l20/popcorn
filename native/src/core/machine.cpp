@@ -166,6 +166,11 @@ auto machine::resets() const noexcept -> std::uint64_t
   return run_->resets;
 }
 
+auto machine::reset_counter() const -> std::shared_ptr<std::atomic<std::uint64_t> const>
+{
+  return run_->reset_count;
+}
+
 auto machine::running() const noexcept -> bool
 {
   return run_->running;

@@ -234,7 +234,8 @@ class UartStream:
     in the queue. An alias, such as a secure address window of the same USART, shares the
     stream of the peripheral serving it. The queue grows by one frame per transmitted character
     until read, about 16 bytes each, up to 1 Mi frames, about 16 MiB. A full queue drops its
-    oldest frame and counts it in `dropped`.
+    oldest frame and counts it in `dropped`. A reset keeps the queue: a frame from before it
+    keeps its time in the old base, and every read takes it whatever its time or deadline.
 
     `Machine.restore` empties the queue of transmitted frames not read yet, since they came
     from a run the restore undoes. Bytes written and not yet delivered are part of the UART

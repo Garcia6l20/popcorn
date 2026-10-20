@@ -20,6 +20,7 @@
 
 #include <reflex/enum.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -315,6 +316,13 @@ public:
   /** @brief Resets done since construction, every kind, whether reset() or a firmware request
    * under reset_request_policy::reset_and_continue, so a new timeline is recognised. */
   [[nodiscard]] auto resets() const noexcept -> std::uint64_t;
+
+  /**
+   * @brief resets() as a counter any thread may read while the machine runs, raised once each
+   *        reset's models have reset. It outlives the machine: a host-side queue tags what it
+   *        keeps with it, so a record from before a reset is told from a later one.
+   */
+  [[nodiscard]] auto reset_counter() const -> std::shared_ptr<std::atomic<std::uint64_t> const>;
 
   /** @brief Whether a slice is running, true inside handlers too. */
   [[nodiscard]] auto running() const noexcept -> bool;

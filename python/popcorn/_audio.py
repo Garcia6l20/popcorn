@@ -110,7 +110,9 @@ class AudioStream:
     SAI is connected when the machine is built. Frames are kept natively, 8 bytes plus 4 per
     slot each, 16 bytes for 16-bit stereo, up to 262 144 frames per block, 5.4 s at 48 kHz.
     A full queue drops its oldest frame and counts it in `dropped`. The STM32U575 has four
-    blocks: left unread, they hold at most 16 MiB of stereo, 72 MiB of 16-slot TDM.
+    blocks: left unread, they hold at most 16 MiB of stereo, 72 MiB of 16-slot TDM. A reset
+    keeps the frames: a frame from before it keeps its `at` in the old base, and every read
+    takes it whatever its time or deadline.
 
     `Machine.restore` drops the frames not read yet, resets `dropped` and clears
     `receive_layout`. It also drops the words written and not served yet. Unlike the bytes

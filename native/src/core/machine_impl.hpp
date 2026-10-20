@@ -23,6 +23,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <meta>
 #include <mutex>
 #include <optional>
@@ -943,6 +944,9 @@ struct machine::run_state
   std::optional<saved_call> call{};
   /** @brief Resets done so far, which tells the loop a reset superseded an engine result. */
   std::uint64_t resets{};
+  /** @brief resets, readable from any thread, see machine::reset_counter(). */
+  std::shared_ptr<std::atomic<std::uint64_t>> reset_count =
+      std::make_shared<std::atomic<std::uint64_t>>(0);
   /** @brief Whether a failed restore left the machine unusable. */
   bool invalid = false;
   /** @brief Owners of the stop bits. Each side clears only its own bit, so no clear erases a set

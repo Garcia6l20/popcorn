@@ -45,13 +45,15 @@ public:
   /**
    * @brief Connects a queue to a port, replacing its far end.
    * @param port The UART.
+   * @param resets The machine's reset count, which tags each kept frame.
    * @param alive Cleared when the machine is destroyed.
    * @param host The machine's host, through which send() and queued() reach the UART.
    */
   [[= py::skip]] uart_queue(
-      periph::uart_port& port,
-      detail::alive_flag alive,
-      detail::host_ref   host);
+      periph::uart_port&  port,
+      detail::reset_count resets,
+      detail::alive_flag  alive,
+      detail::host_ref    host);
 
   /**
    * @brief Queues frames towards the firmware, one frame time apart.
@@ -133,8 +135,8 @@ public:
       drain(std::uint64_t count) -> std::vector<uart_frame>;
 
   /**
-   * @brief Takes the oldest transmitted frames whose stop bit ended by @p until_ps, in one
-   *        hold of the link lock: later frames stay queued.
+   * @brief Takes the oldest transmitted frames whose stop bit ended by @p until_ps, or before
+   *        the last reset, in one hold of the link lock: later frames stay queued.
    * @param count Most frames taken.
    * @param until_ps Latest stop bit end taken, in picoseconds since reset.
    */
@@ -223,6 +225,7 @@ public:
    * @param decimation Frame time multiplier, 0 or 1 for the configured rate.
    * @param external_frame_hz Frame rate of an external clock master, 0 for none.
    * @param clock_wired A bus device drives the external clock at run time.
+   * @param resets The machine's reset count, which tags each kept frame.
    * @param alive Cleared when the machine is destroyed.
    * @param host The machine's host, through which the clock methods reach the SAI.
    */
@@ -232,6 +235,7 @@ public:
       std::uint32_t              decimation,
       std::uint32_t              external_frame_hz,
       bool                       clock_wired,
+      detail::reset_count        resets,
       detail::alive_flag         alive,
       detail::host_ref           host);
 
@@ -258,8 +262,8 @@ public:
   [[= py::doc{"Take at most count of the oldest transmitted frames."}]] auto
       drain(std::uint64_t count) -> std::vector<audio_record>;
   /**
-   * @brief Takes the oldest transmitted frames that ended by @p until_ps, in one hold of the
-   *        link lock: later frames stay queued.
+   * @brief Takes the oldest transmitted frames that ended by @p until_ps, or before the last
+   *        reset, in one hold of the link lock: later frames stay queued.
    * @param count Most frames taken.
    * @param until_ps Latest frame end taken, in picoseconds since reset.
    */

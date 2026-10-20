@@ -256,6 +256,7 @@ void machine::run_state::reset_machine(reset_kind kind)
   owner.trace_.rebase(icount{0});
   rebase_sinks(icount{0});
   ++resets;
+  reset_count->fetch_add(1, std::memory_order_release);
   if(core_held)
   {
     notify_core_hold(true);

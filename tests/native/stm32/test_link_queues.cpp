@@ -476,3 +476,34 @@ TEST_CASE("a PDM tap filled on one thread and drained on another keeps order and
   REQUIRE_FALSE(times.empty());
   CHECK(times.back() == sent - 1);
 }
+
+TEST_CASE("a UART frame from before a reset is taken whatever the time bound after it")
+{
+  auto const             resets = std::make_shared<std::atomic<std::uint64_t>>(1);
+  detail::queue_endpoint queue{resets};
+  queue.transmitted(0x41, vtime{9'000}, false);
+  resets->store(2);
+  queue.transmitted(0x42, vtime{100}, false);
+  queue.transmitted(0x43, vtime{900}, false);
+  auto const taken = queue.take(queue.lock(), 8, 500);
+  REQUIRE(taken.size() == 2);
+  CHECK(taken[0].data == 0x41);
+  CHECK(taken[1].data == 0x42);
+  CHECK(queue.available(queue.lock()) == 1);
+}
+
+TEST_CASE("an SAI frame from before a reset is taken whatever the time bound after it")
+{
+  auto const                         resets = std::make_shared<std::atomic<std::uint64_t>>(1);
+  detail::audio_queue_endpoint       queue{resets};
+  std::array<std::uint32_t, 2> const slots{1, 2};
+  queue.transmitted(slots, stereo, vtime{8'000}, vtime{9'000});
+  resets->store(2);
+  queue.transmitted(slots, stereo, vtime{0}, vtime{100});
+  queue.transmitted(slots, stereo, vtime{100}, vtime{900});
+  auto const taken = queue.take(queue.lock(), 8, 500);
+  REQUIRE(taken.size() == 2);
+  CHECK(taken[0].at_ps == 8'000);
+  CHECK(taken[1].at_ps == 0);
+  CHECK(queue.available(queue.lock()) == 1);
+}

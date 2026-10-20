@@ -21,9 +21,13 @@
 
 namespace popcorn::bind
 {
-uart_queue::uart_queue(periph::uart_port& port, detail::alive_flag alive, detail::host_ref host)
-    : port_{&port}, endpoint_{std::make_shared<detail::queue_endpoint>()}, alive_{std::move(alive)},
-      host_{std::move(host)}
+uart_queue::uart_queue(
+    periph::uart_port&  port,
+    detail::reset_count resets,
+    detail::alive_flag  alive,
+    detail::host_ref    host)
+    : port_{&port}, endpoint_{std::make_shared<detail::queue_endpoint>(std::move(resets))},
+      alive_{std::move(alive)}, host_{std::move(host)}
 {
   port.attach(endpoint_);
 }
@@ -199,10 +203,11 @@ audio_link::audio_link(
     std::uint32_t              decimation,
     std::uint32_t              external_frame_hz,
     bool                       clock_wired,
+    detail::reset_count        resets,
     detail::alive_flag         alive,
     detail::host_ref           host)
-    : endpoint_{std::make_shared<detail::audio_queue_endpoint>()}, port_{&port}, block_{block},
-      alive_{std::move(alive)}, host_{std::move(host)}
+    : endpoint_{std::make_shared<detail::audio_queue_endpoint>(std::move(resets))}, port_{&port},
+      block_{block}, alive_{std::move(alive)}, host_{std::move(host)}
 {
   port.attach(
       block, {.endpoint          = endpoint_,
@@ -390,8 +395,10 @@ auto machine_handle::attach_audio(
     throw config_error(peripheral, 0, "block", std::format("an audio block A or B, not {}", block));
   }
   auto const which = block == "A" ? periph::stm32::audio_block::a : periph::stm32::audio_block::b;
-  return access([&](core::machine&) {
-    return audio_link{*port, which, decimation, external_frame_hz, clock_wired, alive_, slot_};
+  return access([&](core::machine& target) {
+    return audio_link{
+        *port,  which, decimation, external_frame_hz, clock_wired, target.reset_counter(),
+        alive_, slot_};
   });
 }
 
@@ -415,7 +422,9 @@ auto machine_handle::attach_uart(std::string const& peripheral) -> uart_queue
   {
     throw model_error(peripheral, "", 0);
   }
-  return access([&](core::machine&) { return uart_queue{*port, alive_, slot_}; });
+  return access([&](core::machine& target) {
+    return uart_queue{*port, target.reset_counter(), alive_, slot_};
+  });
 }
 
 auto machine_handle::gpio(std::string const& peripheral, std::uint8_t pin) const
