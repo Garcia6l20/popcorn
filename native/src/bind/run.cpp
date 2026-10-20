@@ -969,6 +969,11 @@ auto machine_handle::instructions() const -> std::uint64_t
   return access([](core::machine& target) { return target.virtual_clock().now().value; });
 }
 
+auto machine_handle::executed() const -> std::uint64_t
+{
+  return access([](core::machine& target) { return target.executed().value; });
+}
+
 auto machine_handle::time_ps() const -> std::uint64_t
 {
   return access([](core::machine& target) { return target.virtual_clock().time().ps; });

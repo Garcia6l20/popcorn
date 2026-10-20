@@ -1143,6 +1143,8 @@ struct machine::run_state
   icount deadline{};
   /** @brief Instructions executed in the slice. */
   icount executed{};
+  /** @brief Instructions executed since reset, machine::executed(). */
+  icount retired{};
   /** @brief Instructions the clock moved by idle jumps in the slice. */
   icount jumped{};
   /** @brief Blocks left before the next wall clock read. */

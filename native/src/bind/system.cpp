@@ -733,11 +733,12 @@ void system_handle::withdraw(std::size_t member)
   locked(sys, [&](core::held_system const& held) { sys.withdraw(held, member_index(member)); });
 }
 
-void system_handle::release(std::size_t member)
+void system_handle::release(std::size_t member, bool halt)
 {
   system_ref const ref{system()};
   auto&            sys = *ref;
-  locked(sys, [&](core::held_system const& held) { sys.release(held, member_index(member)); });
+  locked(
+      sys, [&](core::held_system const& held) { sys.release(held, member_index(member), halt); });
 }
 
 auto system_handle::undecided() -> std::vector<std::size_t>

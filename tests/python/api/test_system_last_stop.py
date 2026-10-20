@@ -40,6 +40,7 @@ def test_a_system_run_replaces_each_member_stop(ping: System) -> None:
     asyncio.run(ping.run(until=VirtualTime(ms(3).ps)))
     own = asyncio.run(a.run(budget=1_000))
     assert a.last_stop == own
+    a.halt()
     done = asyncio.run(ping.run(for_=ms(1)))
     assert done.reason is StopReason.TIME
     for name, machine in ping.members.items():

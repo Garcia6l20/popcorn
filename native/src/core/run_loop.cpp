@@ -182,6 +182,7 @@ void machine::run_state::install_hooks()
 void machine::run_state::reset_machine(reset_kind kind)
 {
   ++memory_generation;
+  retired = {};
   owner.scheduler_.restore({}, 0);
   held_through.reset();
   auto fresh            = owner.clock_driver_.state();
@@ -1229,6 +1230,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
       coverage.leave(*arch, pc, std::ranges::contains(exit_list(request), pc));
     }
     executed.value += ran;
+    retired.value += ran;
     if(leaving)
     {
       set_exits(exit_list(request));

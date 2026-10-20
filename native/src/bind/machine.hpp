@@ -1326,6 +1326,10 @@ public:
   [[= py::doc{"Instructions executed since reset."}]] [[nodiscard]] auto instructions() const
       -> std::uint64_t;
 
+  /** @brief core::machine::executed(). */
+  [[= py::doc{"Instructions the core executed since reset, sleep and held time excluded."}]]
+      [[nodiscard]] auto executed() const -> std::uint64_t;
+
   /** @brief Virtual time since reset, in picoseconds. */
   [[= py::doc{"Virtual time since reset, in picoseconds."}]] [[nodiscard]] auto time_ps() const
       -> std::uint64_t;

@@ -334,7 +334,7 @@ struct world
         return stopped;
       }
       auto const held = sys->lock();
-      sys->release(held, *stopped.member);
+      sys->release(held, *stopped.member, true);
     }
   }
 
@@ -934,7 +934,7 @@ TEST_CASE(
     std::int64_t local = 0;
     {
       auto const held = w.sys->lock();
-      w.sys->release(held, 0);
+      w.sys->release(held, 0, true);
       local = stamp_at
             - w.sys->time_of(held, 0).ps
             + static_cast<std::int64_t>(core::access(
@@ -990,7 +990,7 @@ TEST_CASE("a halted receiver's USART overruns while its core is held, the same i
     auto const before = entries(w.nodes[1]->log()).size();
     {
       auto const held = w.sys->lock();
-      w.sys->release(held, 1);
+      w.sys->release(held, 1, true);
     }
     REQUIRE(w.resume(1200 * us_ps).reason == core::pause_reason::system_time);
     CHECK(entries(w.nodes[1]->log()).size() == before);
@@ -1266,7 +1266,7 @@ TEST_CASE("a halted receiver's RX DMA ring fills, or stops with its GPDMA channe
       REQUIRE(w.resume(script_end).reason == core::pause_reason::delivered);
       {
         auto const held = w.sys->lock();
-        w.sys->release(held, 1);
+        w.sys->release(held, 1, true);
       }
       REQUIRE(w.run_to(script_end).reason == core::pause_reason::system_time);
       auto const ring =
@@ -1351,7 +1351,7 @@ TEST_CASE("a halted sender's watchdog bites unless DBG_IWDG_STOP freezes it")
           core::access(*w.members[0].on, 0, [](core::machine& m) { return m.resets(); });
       {
         auto const held = w.sys->lock();
-        w.sys->release(held, 0);
+        w.sys->release(held, 0, true);
       }
       REQUIRE(w.run_to(10 * ms_ps).reason == core::pause_reason::system_time);
       auto const after =

@@ -214,7 +214,9 @@ public:
   [[= py::doc{"Withdraw a member's pending goal while paused."}]] void withdraw(std::size_t member);
 
   /** @brief core::system::release(). */
-  [[= py::doc{"Release an undecided member while paused."}]] void release(std::size_t member);
+  [[= py::doc{
+      "Release an undecided member while paused, halted from where it stands when halt."}]] void
+      release(std::size_t member, bool halt);
 
   /** @brief core::system::undecided(). */
   [[= py::doc{"Members whose goal was delivered, neither re-issued nor released."}]] auto

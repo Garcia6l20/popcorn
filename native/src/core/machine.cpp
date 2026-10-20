@@ -186,6 +186,11 @@ auto machine::held_through() const noexcept -> std::optional<icount>
   return run_->held_through;
 }
 
+auto machine::executed() const noexcept -> icount
+{
+  return run_->retired;
+}
+
 auto machine::virtual_clock() const noexcept -> core::clock const&
 {
   return clock_;

@@ -977,13 +977,27 @@ class Machine:
     @property
     def instructions(self) -> int:
         """Instructions executed since reset. A sleeping core's time counts one per core clock
-        cycle, and so does a linked member's halted time.
+        cycle, and so does a linked member's halted time. `executed` leaves both out.
 
         Raises:
             MachineRunning: The machine is busy, read outside its callbacks: use
                 `m.read(m.ref.instructions)`.
         """
         return self._handle.instructions()
+
+    @property
+    def executed(self) -> int:
+        """Instructions the core executed since reset, without the time it slept in WFI or WFE
+        or was halted: `instructions - executed` is that time, one per core clock cycle. A
+        linked member counts what it executes in its own goals and in system runs, nothing while
+        halted. Every reset kind zeroes it, `snapshot` saves it and `restore` gives it back. A
+        snapshot from before it existed restores it as 0, and the difference is then not that
+        time.
+
+        Raises:
+            MachineRunning: The machine is busy.
+        """
+        return self._handle.executed()
 
     @property
     def time(self) -> VirtualTime:
@@ -3042,8 +3056,15 @@ class Machine:
         instead goes on. The ends parks took and kept, such as the pytest report's park of a
         failed test, are raised by the next `halt()` calls, oldest first, each once.
 
+        On a member of a `System`, it halts the member where it stands, released from its goal's
+        stop or not, also one that never had a goal or that an implicit release left running:
+        its core executes nothing in system runs until its next goal or reset. Called while
+        another member's goal runs, it takes effect at the next pause. Inside a system run, a
+        `wait_for` predicate included, it raises MachineBusy.
+
         Raises:
-            MachineBusy: A run, step or call is active instead, cancel its task.
+            MachineBusy: A run, step or call is active instead, cancel its task. On a member, its
+                goal is pending, or the system runs freely or runs a system run.
             RuntimeError: Called from a handler.
             EmulationError: The free run stopped by itself: FaultError for FAULT,
                 BudgetExceeded for BUDGET, EmulationError otherwise, carrying the stop.
