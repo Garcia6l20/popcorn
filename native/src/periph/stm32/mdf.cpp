@@ -92,6 +92,8 @@ struct mdf_state
   std::uint32_t                sample_generation{};
   std::optional<std::uint64_t> scheduled_ps;
   std::uint8_t                 round{};
+  sad_config                   sad_setup{};
+  sad_state                    sad{};
 
   friend auto operator==(mdf_state const&, mdf_state const&) -> bool = default;
 };
@@ -113,6 +115,7 @@ enum class bank : std::uint8_t
   ier,
   oec,
   sadcr,
+  sadcfgr,
   plain,
 };
 
@@ -174,6 +177,32 @@ struct filter_fields
   std::uint32_t                                isr_clear{};
   std::uint32_t                                isr_old_clear{};
   std::vector<std::pair<field_ref, field_ref>> interrupts;
+};
+
+struct sad_fields
+{
+  reg_ref       cr;
+  field_ref     enable;
+  field_ref     active;
+  field_ref     mode;
+  field_ref     frame;
+  field_ref     hysteresis;
+  field_ref     phase;
+  field_ref     detection;
+  field_ref     capture;
+  reg_ref       cfgr;
+  field_ref     floor;
+  field_ref     hangover;
+  field_ref     learn;
+  field_ref     slope;
+  field_ref     threshold;
+  reg_ref       level;
+  field_ref     level_value;
+  reg_ref       noise;
+  field_ref     noise_value;
+  field_ref     level_flag;
+  field_ref     detect_flag;
+  std::uint32_t cr_protected{};
 };
 
 auto lower(std::string_view name) -> std::string
@@ -293,6 +322,24 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        question 11. CKGDEN 0 also stops mdf_proc_ck, RM0456 39.8.2, and the RM does not say what
  *        CKABF does then: the model sets it at SITFEN with CKGDEN 0, and STH cycles at the PROCDIV
  *        rate after CKGDEN goes to 0.
+ *
+ *        ADF layout, RM0456 40.8: SCKSRC 1x, BSSEL above 1, CICMOD other than 100 and 101 and
+ *        TRGSRC other than 0000 are reserved and raise unmodelled_config when they take effect.
+ *        ACQMOD 101 runs as 000, 40.8.5, 100 is the window mode and raises.
+ *
+ *        Sound activity detector, ADF only, 40.4.10, with the arithmetic of sad_feed(). Each
+ *        DFLT0 output sample feeds it while SADEN is 1, at the sample's edge time. SADEN 0 to 1
+ *        resets it to LEARN with the SADCR and SADCFGR values of that write, SADEN 0 resets it and
+ *        SADST reads 0. A frame end sets SDLVLF and, while SDLVLF is 0, loads SADSDLVR and
+ *        SADANLVR, which keep their values otherwise, 40.8.13. SADST follows the state. SDDETF is
+ *        set when the SAD enters DETECT, and when it leaves with DETCFG 1. The 40.4.10 text is
+ *        followed where 40.8.11 says DETCFG 0 signals the entry into MONITOR. DATCAP decides from
+ *        the state before each sample whether it reaches the RXFIFO: 00 never, 01 in DETECT, so
+ *        from the frame after the entry through the frame that leaves, 1x always. A sample kept
+ *        out sets no DOVRF and reaches the tap with `captured` false. SADEN 0 lets every sample
+ *        through, 40.4.10. SADCR FRSIZE, DETCFG, SADMOD, HYSTEN, DATCAP and every SADCFGR field are
+ *        protected while SADACTIVE, Table 401. A reserved SNTHR raises unmodelled_config at SADEN 0
+ *        to 1, HYSTEN with SADMOD 1x logs once and raises model_error under `strict_peripherals`.
  */
 class mdf final : public dispatch_model<mdf, mdf_state>, public pdm_port, public clock_listener
 {
@@ -345,10 +392,14 @@ private:
   void dly_written(std::size_t f, std::uint32_t old, std::uint32_t now);
   void scd_written(std::size_t f, std::uint32_t old, std::uint32_t now);
   void sad_written(std::uint32_t old, std::uint32_t now);
+  void check_sad_start(std::uint32_t old);
+  void sad_frame_done(sad_frame frame);
   void isr_written(std::size_t f, std::uint32_t lanes, std::uint32_t value);
 
   [[nodiscard]] auto sitf_of(std::size_t f) const -> sitf_fields;
   [[nodiscard]] auto filter_of(std::size_t f) const -> filter_fields;
+  [[nodiscard]] auto sad_of() const -> sad_fields;
+  [[nodiscard]] auto sad_setup_of() const -> sad_config;
   [[nodiscard]] auto
       mask_of(std::string_view reg, std::initializer_list<std::string_view> names) const
       -> std::uint32_t;
@@ -423,7 +474,7 @@ private:
   std::uint32_t                                           ckgcr_protected_{};
   std::vector<sitf_fields>                                sitf_;
   std::vector<filter_fields>                              filter_;
-  std::optional<reg_ref>                                  sadcr_;
+  std::optional<sad_fields>                               sad_;
   core::clock_domain                                      kernel_;
   core::clock_domain                                      hclk_;
   std::vector<irq_line*>                                  lines_;
@@ -470,7 +521,7 @@ auto mdf::writes(peripheral_desc const& desc, dfilter_layout const& layout)
   if(layout.sad)
   {
     add("SADCR", &mdf::written<bank::sadcr, 0>);
-    add("SADCFGR", &mdf::written<bank::plain, 0>);
+    add("SADCFGR", &mdf::written<bank::sadcfgr, 0>);
     add("SADSDLVR", nullptr);
     add("SADANLVR", nullptr);
   }
@@ -505,7 +556,7 @@ mdf::mdf(model_context& ctx, peripheral_desc const& desc, dfilter_layout layout)
   }
   if(layout_.sad)
   {
-    sadcr_ = reg("SADCR");
+    sad_ = sad_of();
   }
   if(layout_.motor)
   {
@@ -631,6 +682,47 @@ auto mdf::filter_of(std::size_t f) const -> filter_fields
   return out;
 }
 
+auto mdf::sad_of() const -> sad_fields
+{
+  return {
+      .cr           = reg("SADCR"),
+      .enable       = field("SADCR", "SADEN"),
+      .active       = field("SADCR", "SADACTIVE"),
+      .mode         = field("SADCR", "SADMOD"),
+      .frame        = field("SADCR", "FRSIZE"),
+      .hysteresis   = field("SADCR", "HYSTEN"),
+      .phase        = field("SADCR", "SADST"),
+      .detection    = field("SADCR", "DETCFG"),
+      .capture      = field("SADCR", "DATCAP"),
+      .cfgr         = reg("SADCFGR"),
+      .floor        = field("SADCFGR", "ANMIN"),
+      .hangover     = field("SADCFGR", "HGOVR"),
+      .learn        = field("SADCFGR", "LFRNB"),
+      .slope        = field("SADCFGR", "ANSLP"),
+      .threshold    = field("SADCFGR", "SNTHR"),
+      .level        = reg("SADSDLVR"),
+      .level_value  = field("SADSDLVR", "SDLVL"),
+      .noise        = reg("SADANLVR"),
+      .noise_value  = field("SADANLVR", "ANLVL"),
+      .level_flag   = field("DFLT0ISR", "SDLVLF"),
+      .detect_flag  = field("DFLT0ISR", "SDDETF"),
+      .cr_protected = mask_of("SADCR", {"FRSIZE", "DETCFG", "SADMOD", "HYSTEN", "DATCAP"})};
+}
+
+auto mdf::sad_setup_of() const -> sad_config
+{
+  auto const& sad = *sad_;
+  return {
+      .mode       = static_cast<std::uint8_t>(bits(sad.mode)),
+      .frame      = static_cast<std::uint8_t>(bits(sad.frame)),
+      .learn      = static_cast<std::uint8_t>(bits(sad.learn)),
+      .hangover   = static_cast<std::uint8_t>(bits(sad.hangover)),
+      .slope      = static_cast<std::uint8_t>(bits(sad.slope)),
+      .threshold  = static_cast<std::uint8_t>(bits(sad.threshold)),
+      .hysteresis = bits(sad.hysteresis) != 0,
+      .floor      = static_cast<std::uint16_t>(bits(sad.floor))};
+}
+
 auto mdf::mask_of(std::string_view reg, std::initializer_list<std::string_view> names) const
     -> std::uint32_t
 {
@@ -678,8 +770,10 @@ void mdf::reset(register_file& regs, reset_kind)
   {
     sitf = {};
   }
-  state_.cck   = {};
-  state_.round = 0;
+  state_.cck       = {};
+  state_.round     = 0;
+  state_.sad_setup = {};
+  state_.sad       = {};
   ++state_.sample_generation;
   state_.scheduled_ps.reset();
   for(auto& request : requests_)
@@ -719,6 +813,10 @@ auto mdf::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
     -> std::expected<std::uint32_t, bus_error>
 {
   auto const word = offset & ~3u;
+  if(sad_ and (word == sad_->cr.offset or word == sad_->level.offset or word == sad_->noise.offset))
+  {
+    settle();
+  }
   for(std::size_t f = 0; f < layout_.filters; ++f)
   {
     auto const& filter = filter_[f];
@@ -825,6 +923,11 @@ void mdf::write(bank which, std::size_t f, std::uint32_t old, std::uint32_t now)
     case bank::sadcr:
       sad_written(old, now);
       return;
+    case bank::sadcfgr:
+      regs_.poke(
+          sad_->cfgr.offset,
+          protect(sad_->cfgr, old, now, ~std::uint32_t{}, bits(sad_->active) != 0));
+      return;
   }
 }
 
@@ -841,8 +944,8 @@ auto mdf::protect(reg_ref at, std::uint32_t old, std::uint32_t now, std::uint32_
     warn(
         name, std::format(
                   "{} {}: a write-protected field changed while its ACTIVE flag is set, the "
-                  "old value is kept, RM0456 Table 381",
-                  desc_.name, name));
+                  "old value is kept, RM0456 Table {}",
+                  desc_.name, name, layout_.motor ? 381 : 401));
   }
   if(ctx_.strict_peripherals)
   {
@@ -1072,7 +1175,9 @@ void mdf::check_sitf_start(std::size_t s, std::uint32_t old)
   }
   if(bits(sitf.source) >= 2)
   {
-    refuse(sitf.cr, old, sitf.source, "SCKSRC", "the MDF_CKIx clock input");
+    refuse(
+        sitf.cr, old, sitf.source, "SCKSRC",
+        layout_.motor ? "the MDF_CKIx clock input" : "a reserved ADF SCKSRC code");
   }
   check_direction(s, sitf.cr, old);
   check_clocks(s, sitf.cr, old);
@@ -1142,7 +1247,7 @@ void mdf::check_filter_start(std::size_t f, std::uint32_t old)
     refuse(filter.cr, old, filter.source, "DATSRC", "the ADCITF parallel input");
   }
   auto const mode = bits(filter.acquisition);
-  if(mode == 4 or mode == 5)
+  if(mode == 4 or (mode == 5 and layout_.motor))
   {
     refuse(
         filter.cr, old, filter.acquisition, "ACQMOD",
@@ -1162,6 +1267,10 @@ void mdf::check_filter_start(std::size_t f, std::uint32_t old)
     if(cic != 4 and cic != 5)
     {
       refuse(filter.cr, old, filter.cic_mode, "CICMOD", "a reserved ADF CICMOD code");
+    }
+    if(bits(filter.select) >= 2)
+    {
+      refuse(filter.cr, old, filter.select, "BSSEL", "a reserved ADF BSSEL code");
     }
   }
   if(f == 0 and interleave_ and bits(*interleave_) >= layout_.filters)
@@ -1333,10 +1442,59 @@ void mdf::dly_written(std::size_t f, std::uint32_t old, std::uint32_t now)
   regs_.poke(filter.dly.offset, filter.skip_busy.with(now, filter.skip_busy.of(old)));
 }
 
-void mdf::sad_written(std::uint32_t, std::uint32_t now)
+void mdf::sad_written(std::uint32_t old, std::uint32_t now)
 {
-  auto const enable = field("SADCR", "SADEN");
-  regs_.poke(sadcr_->offset, field("SADCR", "SADACTIVE").with(now, enable.of(now)));
+  auto const& sad = *sad_;
+  now             = protect(sad.cr, old, now, sad.cr_protected, sad.active.of(old) != 0);
+  regs_.poke(sad.cr.offset, old);
+  settle();
+  regs_.poke(sad.cr.offset, now);
+  if(sad.enable.of(old) == 0 and sad.enable.of(now) != 0)
+  {
+    check_sad_start(old);
+  }
+  if(sad.enable.of(old) != sad.enable.of(now))
+  {
+    state_.sad       = {};
+    state_.sad_setup = sad_setup_of();
+    now              = sad.phase.with(now, 0);
+  }
+  regs_.poke(sad.cr.offset, sad.active.with(now, sad.enable.of(now)));
+}
+
+void mdf::check_sad_start(std::uint32_t old)
+{
+  auto const& sad = *sad_;
+  if(bits(sad.threshold) > 9)
+  {
+    refuse(sad.cr, old, sad.threshold, "SNTHR", "a reserved SNTHR code");
+  }
+  if(bits(sad.hysteresis) != 0 and bits(sad.mode) >= 2)
+  {
+    rule(
+        "sad hysteresis", sad.cr, old, "SADCR",
+        std::format(
+            "{} SADCR: HYSTEN must be 0 with SADMOD {}, RM0456 40.8.11, the hysteresis is "
+            "ignored",
+            desc_.name, bits(sad.mode)));
+  }
+}
+
+void mdf::sad_frame_done(sad_frame frame)
+{
+  auto const& sad = *sad_;
+  if(bits(sad.level_flag) == 0)
+  {
+    update(regs_, sad.level_value, frame.level);
+    update(regs_, sad.noise_value, frame.noise);
+    update(regs_, sad.level_flag, 1);
+  }
+  update(regs_, sad.phase, static_cast<std::uint32_t>(frame.phase));
+  if(frame.changed and (frame.phase == sad_phase::detect or bits(sad.detection) != 0))
+  {
+    update(regs_, sad.detect_flag, 1);
+  }
+  update_irq();
 }
 
 void mdf::isr_written(std::size_t f, std::uint32_t lanes, std::uint32_t value)
@@ -1669,13 +1827,23 @@ void mdf::catch_up(std::size_t s, std::uint64_t t)
 
 void mdf::write_sample(std::size_t f, produced sample, std::uint64_t at)
 {
-  auto&      filter  = state_.filter[f];
-  auto const dropped = filter.fifo.size() >= fifo_depth;
+  auto& filter   = state_.filter[f];
+  auto  captured = true;
+  if(f == 0 and sad_ and bits(sad_->enable) != 0)
+  {
+    auto const capture = bits(sad_->capture);
+    captured           = capture >= 2 or (capture == 1 and state_.sad.phase == sad_phase::detect);
+    if(auto const frame = sad_feed(state_.sad, state_.sad_setup, sample.pcm))
+    {
+      sad_frame_done(*frame);
+    }
+  }
+  auto const dropped = captured and filter.fifo.size() >= fifo_depth;
   if(dropped)
   {
     update(regs_, filter_[f].overrun, 1);
   }
-  else
+  else if(captured)
   {
     filter.fifo.push_back(sample.pcm);
   }
@@ -1692,7 +1860,7 @@ void mdf::write_sample(std::size_t f, produced sample, std::uint64_t at)
   refresh_fifo(f);
   if(auto const& tap = taps_[f])
   {
-    tap->wrote(sample.pcm, vtime{at}, dropped, true);
+    tap->wrote(sample.pcm, vtime{at}, dropped, captured);
   }
 }
 
@@ -1820,7 +1988,7 @@ void mdf::begin(std::size_t f)
 auto mdf::mode_of(std::size_t f) const -> std::uint32_t
 {
   auto const mode = bits(filter_[f].acquisition);
-  return mode >= 6 ? 0 : mode;
+  return mode >= 6 or (mode == 5 and not layout_.motor) ? 0 : mode;
 }
 
 void mdf::stop_filter(std::size_t f)
