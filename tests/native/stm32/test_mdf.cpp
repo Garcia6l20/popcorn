@@ -1,3 +1,4 @@
+#include "dma.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -9,14 +10,18 @@
 #include <doctest/doctest.h>
 #include <reflex/serde/json.hpp>
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <initializer_list>
+#include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <string>
@@ -35,17 +40,83 @@ using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 using popcorn::testing::u575;
 
-constexpr std::uint64_t us         = 1'000'000;
-constexpr std::uint32_t mdf_irq    = 102;
-constexpr std::uint32_t adf_irq    = 112;
-constexpr std::uint32_t sec_offset = 0x1000'0000;
+constexpr std::uint64_t us           = 1'000'000;
+constexpr std::uint32_t mdf_irq      = 102;
+constexpr std::uint32_t adf_irq      = 112;
+constexpr std::uint32_t sec_offset   = 0x1000'0000;
+constexpr std::uint32_t flt0_request = 92;
 
-auto options_for(bool strict) -> core::machine_options
+class request_probe final : public popcorn::periph::model, public stm32::dma_controller
+{
+public:
+  std::map<std::uint32_t, std::vector<bool>> levels;
+
+  void on_request(std::uint32_t request, bool level) override
+  {
+    auto& seen = levels[request];
+    if(seen.empty() or seen.back() != level)
+    {
+      seen.push_back(level);
+    }
+  }
+
+  [[nodiscard]] auto request_of(std::string_view signal) const
+      -> std::optional<std::uint32_t> override
+  {
+    if(signal == "mdf1_flt0_dma")
+    {
+      return flt0_request;
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+
+auto options_for(bool strict, bool probe = false) -> core::machine_options
 {
   stm32::board board{};
   auto         options       = popcorn::testing::stm32_options();
   options.models             = stm32::factories(board, u575());
   options.strict_peripherals = strict;
+  if(probe)
+  {
+    options.models.insert_or_assign(
+        "GPDMA1",
+        [](popcorn::periph::model_context&,
+           popcorn::peripheral_desc const&) -> std::shared_ptr<popcorn::periph::model> {
+          return std::make_shared<request_probe>();
+        });
+  }
   return options;
 }
 
@@ -54,8 +125,8 @@ struct rig : stm32_fixture
   std::vector<core::log_record> logged;
   core::hook_handle             sink;
 
-  explicit rig(bool strict = false)
-      : stm32_fixture{u575(), "rcc_ll", options_for(strict)},
+  explicit rig(bool strict = false, bool probe = false)
+      : stm32_fixture{u575(), "rcc_ll", options_for(strict, probe)},
         sink{target->add_log_sink(
             [this](core::log_record const& record) { logged.push_back(record); })}
   {
@@ -919,7 +990,7 @@ struct stream_rig : rig
   std::array<std::shared_ptr<recorder>, 6> taps{};
   std::uint64_t                            anchor{};
 
-  stream_rig()
+  explicit stream_rig(bool probe = false) : rig{false, probe}
   {
     pll3_kernel(5, 64, 10);
     port().attach(0, stm32::pdm_edge::rising, mic[0]);
@@ -942,13 +1013,30 @@ struct stream_rig : rig
     return *found;
   }
 
-  void sinc1(std::size_t f, std::uint32_t stream, std::uint32_t scale = 0, std::uint32_t mode = 0)
-      const
+  void sinc1(
+      std::size_t   f,
+      std::uint32_t stream,
+      std::uint32_t scale = 0,
+      std::uint32_t mode  = 0,
+      std::uint32_t extra = 0) const
   {
     write(std::format("BSMX{}CR", f), stream);
     write(std::format("DFLT{}CICR", f), (scale << 20) | (1u << 8) | (1u << 4));
     write(std::format("DFLT{}RSFR", f), 1u | (1u << 7));
-    write(std::format("DFLT{}CR", f), (mode << 4) | 1u);
+    write(std::format("DFLT{}CR", f), extra | (mode << 4) | 1u);
+  }
+
+  [[nodiscard]] auto requested() const -> std::vector<bool>
+  {
+    auto* const probe = model_of<request_probe>("GPDMA1");
+    REQUIRE(probe != nullptr);
+    return probe->levels[flt0_request];
+  }
+
+  [[nodiscard]] auto requesting() const -> bool
+  {
+    auto const seen = requested();
+    return not seen.empty() and seen.back();
   }
 };
 }
@@ -1145,4 +1233,169 @@ TEST_CASE("a kernel clock change re-anchors at the next edge: no bit skipped or 
     CAPTURE(k);
     CHECK(got[k].at == expected(4 * k + 4));
   }
+}
+
+namespace
+{
+constexpr std::uint32_t dmaen  = 1u << 1;
+constexpr std::uint32_t fth    = 1u << 2;
+constexpr std::uint32_t rfovrf = 1u << 11;
+
+void rsflt_at(stream_rig const& r, std::uint32_t mcicd)
+{
+  r.write("DFLT0IER", rfovrf);
+  r.write("DFLT0CICR", (mcicd << 8) | (5u << 4));
+  r.write("DFLT0RSFR", 1u << 7);
+  r.write("DFLT0CR", 1);
+}
+}
+
+TEST_CASE("with DMAEN and FTH 0 the DMA request follows RXNEF, without DMAEN it stays low")
+{
+  {
+    stream_rig const r{true};
+    r.mic[0]->fill = 1;
+    r.sinc1(0, 0, 0, 0, dmaen);
+    r.run_until(edge_at(r.anchor, 4) - us / 2);
+    CHECK_FALSE(r.requesting());
+    r.run_until(edge_at(r.anchor, 4) + us / 4);
+    CHECK(r.requesting());
+    static_cast<void>(r.read("DFLT0DR"));
+    CHECK_FALSE(r.requesting());
+    r.run_until(edge_at(r.anchor, 12) + us / 4);
+    CHECK(r.requesting());
+    r.write("DFLT0CR", 0);
+    CHECK_FALSE(r.requesting());
+    CHECK(r.requested() == std::vector<bool>{false, true, false, true, false});
+  }
+  stream_rig const r{true};
+  r.mic[0]->fill = 1;
+  r.sinc1(0, 0);
+  r.run_until(edge_at(r.anchor, 12) + us / 4);
+  CHECK(r.bits("DFLT0ISR", "RXNEF") == 1);
+  CHECK_FALSE(std::ranges::contains(r.requested(), true));
+}
+
+TEST_CASE("with FTH 1 the request rises at the second sample and holds until the RXFIFO empties")
+{
+  stream_rig const r{true};
+  r.mic[0]->fill = 1;
+  r.sinc1(0, 0, 0, 0, dmaen | fth);
+  r.run_until(edge_at(r.anchor, 4) + us / 4);
+  CHECK(r.bits("DFLT0ISR", "RXNEF") == 1);
+  CHECK(r.bits("DFLT0ISR", "FTHF") == 0);
+  CHECK_FALSE(r.requesting());
+  r.run_until(edge_at(r.anchor, 8) + us / 4);
+  CHECK(r.bits("DFLT0ISR", "FTHF") == 1);
+  CHECK(r.requesting());
+  static_cast<void>(r.read("DFLT0DR"));
+  CHECK(r.bits("DFLT0ISR", "FTHF") == 0);
+  CHECK(r.requesting());
+  static_cast<void>(r.read("DFLT0DR"));
+  CHECK_FALSE(r.requesting());
+  r.run_until(edge_at(r.anchor, 12) + us / 4);
+  CHECK(r.bits("DFLT0ISR", "RXNEF") == 1);
+  CHECK_FALSE(r.requesting());
+  r.run_until(edge_at(r.anchor, 16) + us / 4);
+  CHECK(r.requesting());
+}
+
+TEST_CASE("RFOVRF and its IRQ rise at each RSFLT input while (MCICD + 1) x (CCKDIV + 1) < 24")
+{
+  {
+    stream_rig const r;
+    r.mic[0]->fill = 1;
+    rsflt_at(r, 10);
+    CHECK(r.warned("RSFLT needs") == 1);
+    r.run_until(edge_at(r.anchor, 22) - us / 2);
+    CHECK_FALSE(r.pending(mdf_irq));
+    CHECK(r.bits("DFLT0ISR", "RFOVRF") == 0);
+    r.run_until(edge_at(r.anchor, 22) + us / 4);
+    CHECK(r.pending(mdf_irq));
+    CHECK(r.bits("DFLT0ISR", "RFOVRF") == 1);
+    CHECK(r.taps[0]->samples.empty());
+    r.write("DFLT0ISR", rfovrf);
+    CHECK(r.bits("DFLT0ISR", "RFOVRF") == 0);
+    r.run_until(edge_at(r.anchor, 44) - us / 2);
+    CHECK(r.bits("DFLT0ISR", "RFOVRF") == 0);
+    r.run_until(edge_at(r.anchor, 44) + us / 4);
+    CHECK(r.bits("DFLT0ISR", "RFOVRF") == 1);
+    r.run_until(edge_at(r.anchor, 88) + us / 4);
+    CHECK(r.taps[0]->samples.size() == 1);
+  }
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  rsflt_at(r, 11);
+  CHECK(r.warned("RSFLT needs") == 0);
+  r.run_until(r.anchor + 200 * us);
+  CHECK(r.taps[0]->samples.size() > 5);
+  CHECK(r.bits("DFLT0ISR", "RFOVRF") == 0);
+  CHECK_FALSE(r.pending(mdf_irq));
+}
+
+TEST_CASE("the peer's chain read between slices of three lengths gives the same samples and times")
+{
+  auto const [bits, pcm] = pdm_16k();
+  std::vector<std::vector<tapped>> runs;
+  for(std::uint64_t const step : {1'234'567u, 7'777'777u, 100'000'000u})
+  {
+    stream_rig const r;
+    r.mic[0]->bits = bits;
+    r.write("DFLT0CICR", (0x2Cu << 20) | (31u << 8) | (5u << 4));
+    r.write("DFLT0RSFR", 2u << 8);
+    r.write("DFLT0CR", 1);
+    auto const end = r.anchor + 3'990 * us;
+    while(r.now() < end)
+    {
+      r.run_until(std::min(end, r.now() + step));
+      static_cast<void>(r.read("DFLT0ISR"));
+    }
+    auto got = r.taps[0]->samples;
+    for(auto& sample : got)
+    {
+      sample.at -= r.anchor;
+    }
+    runs.push_back(std::move(got));
+  }
+  for(auto const& run : runs)
+  {
+    REQUIRE(run.size() == 63);
+    for(std::size_t k = 0; k < run.size(); ++k)
+    {
+      CAPTURE(k);
+      CHECK(run[k].pcm == pcm[k]);
+      CHECK(run[k].at == edge_at(0, 2 + 2 * (128 * (k + 1) - 1)));
+      CHECK(run[k].dropped == (k >= 4));
+    }
+  }
+}
+
+TEST_CASE("bench: one virtual second of the peer's two filters on silent sensors" * doctest::skip())
+{
+  std::vector<double> walls;
+  for(int run = 0; run < 5; ++run)
+  {
+    stream_rig const r;
+    r.port().attach(0, stm32::pdm_edge::rising, nullptr);
+    r.port().attach(0, stm32::pdm_edge::falling, nullptr);
+    r.write("SITF1CR", 0x1F11);
+    for(std::uint32_t f = 0; f < 2; ++f)
+    {
+      r.write(std::format("BSMX{}CR", f), f == 0 ? 1u : 2u);
+      r.write(std::format("DFLT{}CICR", f), (0x2Cu << 20) | (31u << 8) | (5u << 4));
+      r.write(std::format("DFLT{}RSFR", f), 2u << 8);
+      r.write(std::format("DFLT{}CR", f), dmaen | 1u);
+    }
+    auto const start = std::chrono::steady_clock::now();
+    r.run_until(r.anchor + 1'000'000 * us);
+    walls.push_back(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+    CHECK(r.taps[0]->samples.size() == 16'000);
+    CHECK(r.taps[1]->samples.size() == 16'000);
+  }
+  std::ranges::sort(walls);
+  MESSAGE(
+      std::format(
+          "wall s per virtual s: median {:.3f} min {:.3f} max {:.3f}", walls[2], walls[0],
+          walls[4]));
 }

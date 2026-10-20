@@ -1,4 +1,5 @@
 #include "dfilter_chain.hpp"
+#include "dma_signal.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
 #include "sigma_delta.hpp"
@@ -71,6 +72,7 @@ struct filter_state
   std::uint32_t             ckab_generation{};
   bool                      running{};
   bool                      single{};
+  bool                      dma{};
   chain_config              config{};
   chain_state               chain{};
   std::vector<std::int32_t> fifo;
@@ -142,6 +144,8 @@ struct filter_fields
   field_ref                                    hpf_cutoff;
   std::optional<field_ref>                     offset;
   field_ref                                    threshold;
+  field_ref                                    dma;
+  field_ref                                    rsflt_overrun;
   reg_ref                                      dr;
   field_ref                                    rxne;
   field_ref                                    fifo_threshold;
@@ -227,6 +231,11 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        DFLTxDR of any size pops one sample, PCM[23:0] in bits 31:8, an empty RXFIFO reads 0.
  *        RXNEF follows the level, FTHF the level against FTH, 1 or 2 samples. SATF follows the
  *        chain's saturation. Each filter's tap sees every sample written, dropped ones marked.
+ *        With DMAEN the filter drives `<instance>_flt<n>_dma`: with FTH 0 while the RXFIFO is not
+ *        empty, with FTH 1 from the second sample until the RXFIFO empties, 39.4.13. Independent
+ *        transfers only. RFOVRF is set at each RSFLT input sample while mdf_proc_ck is below 24
+ *        times its rate, (MCICD + 1) x (CCKDIV + 1) below 24, 39.4.8. Silicon then gives invalid
+ *        samples, the model still delivers exact ones, a popcorn choice.
  *
  *        Write protection, 39.4.15 Table 381: a write changing a protected field while its
  *        ACTIVE flag is set keeps the old field value, logs once per register and raises
@@ -356,6 +365,8 @@ private:
   void               start_filter(std::size_t f);
   void               stop_filter(std::size_t f);
   void               refresh_fifo(std::size_t f);
+  void               refresh_dma(std::size_t f);
+  [[nodiscard]] auto rsflt_overruns(std::size_t f) const -> bool;
   void               reschedule();
   [[nodiscard]] auto pop(std::size_t f) -> std::uint32_t;
 
@@ -383,6 +394,7 @@ private:
   std::vector<std::array<std::shared_ptr<pdm_source>, 2>> sources_;
   std::vector<std::shared_ptr<pdm_tap>>                   taps_;
   std::array<std::vector<std::uint8_t>, 2>                bits_;
+  std::vector<dma_signal>                                 requests_;
 };
 
 auto mdf::writes(peripheral_desc const& desc, dfilter_layout const& layout)
@@ -473,6 +485,10 @@ mdf::mdf(model_context& ctx, peripheral_desc const& desc, dfilter_layout layout)
   state_.sitf.resize(layout_.filters);
   sources_.resize(layout_.filters);
   taps_.resize(layout_.filters);
+  for(std::size_t f = 0; f < layout_.filters; ++f)
+  {
+    requests_.emplace_back(ctx.peers, std::format("{}_flt{}_dma", lower(desc.name), f));
+  }
 }
 
 auto mdf::sitf_of(std::size_t f) const -> sitf_fields
@@ -518,6 +534,8 @@ auto mdf::filter_of(std::size_t f) const -> filter_fields
       .hpf_cutoff       = field(rsfr, "HPFC"),
       .offset           = std::nullopt,
       .threshold        = field(cr, "FTH"),
+      .dma              = field(cr, "DMAEN"),
+      .rsflt_overrun    = field(isr, "RFOVRF"),
       .dr               = reg(std::format("DFLT{}DR", f)),
       .rxne             = field(isr, "RXNEF"),
       .fifo_threshold   = field(isr, "FTHF"),
@@ -614,6 +632,11 @@ void mdf::reset(register_file& regs, reset_kind)
   state_.cck = {};
   ++state_.sample_generation;
   state_.scheduled_ps.reset();
+  for(auto& request : requests_)
+  {
+    request.resolve();
+    request.set(false);
+  }
   update_irq();
 }
 
@@ -1435,10 +1458,17 @@ void mdf::catch_up(std::size_t s, std::uint64_t t)
       {
         continue;
       }
-      auto const e = parity_of(f);
+      auto const e       = parity_of(f);
+      auto const overrun = rsflt_overruns(f);
       for(std::size_t j = 0; j < bits_[e].size() and filter.running; ++j)
       {
-        if(auto const sample = feed(filter.chain, filter.config, bits_[e][j] != 0 ? 1 : -1))
+        auto const sample = feed(filter.chain, filter.config, bits_[e][j] != 0 ? 1 : -1);
+        if(overrun and filter.chain.cic.count == 0)
+        {
+          update(regs_, filter_[f].rsflt_overrun, 1);
+          update_irq();
+        }
+        if(sample)
         {
           write_sample(f, *sample, edge_ps(y, first[e] + 2 * j));
         }
@@ -1483,7 +1513,29 @@ void mdf::refresh_fifo(std::size_t f)
   auto const& filter = filter_[f];
   update(regs_, filter.rxne, level != 0 ? 1 : 0);
   update(regs_, filter.fifo_threshold, level >= (bits(filter.threshold) != 0 ? 2u : 1u) ? 1 : 0);
+  refresh_dma(f);
   update_irq();
+}
+
+void mdf::refresh_dma(std::size_t f)
+{
+  auto&      filter = state_.filter[f];
+  auto const level  = filter.fifo.size();
+  if(bits(filter_[f].dma) == 0 or level == 0)
+  {
+    filter.dma = false;
+  }
+  else if(bits(filter_[f].threshold) == 0 or level >= fifo_depth / 2)
+  {
+    filter.dma = true;
+  }
+  requests_[f].set(filter.dma);
+}
+
+auto mdf::rsflt_overruns(std::size_t f) const -> bool
+{
+  auto const& config = state_.filter[f].config;
+  return config.rsflt and std::uint32_t{config.decimation} * (bits(cck_div_) + 1u) < 24u;
 }
 
 auto mdf::pop(std::size_t f) -> std::uint32_t
@@ -1535,7 +1587,10 @@ void mdf::reschedule()
     }
     auto const e     = parity_of(f);
     auto const first = sitf.next + ((sitf.next ^ e) & 1u);
-    auto const at    = edge_ps(cck_of(s), first + 2 * (bits_needed(f) - 1));
+    auto const need  = rsflt_overruns(f)
+                         ? std::uint64_t{filter.config.decimation} - filter.chain.cic.count
+                         : bits_needed(f);
+    auto const at    = edge_ps(cck_of(s), first + 2 * (need - 1));
     earliest         = earliest ? std::min(*earliest, at) : at;
   }
   if(earliest == state_.scheduled_ps)
