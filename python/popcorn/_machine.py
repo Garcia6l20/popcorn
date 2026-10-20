@@ -88,6 +88,7 @@ from popcorn._observe import (
 )
 from popcorn._option_bytes import OptionBytes
 from popcorn._part_description import PartDescription, load_description
+from popcorn._pdm import PdmPorts
 from popcorn._rcc import RccOptions
 from popcorn._refs import (
     Condition,
@@ -636,6 +637,7 @@ class Machine:
         "_name",
         "_nvic",
         "_parked_ends",
+        "_pdm",
         "_peripherals",
         "_ports",
         "_posted_bodies",
@@ -826,6 +828,14 @@ class Machine:
             self._wait_until,
             self._post,
         )
+        self._pdm = PdmPorts(
+            self._handle.attach_pdm,
+            self._handle.attach_pdm_tap,
+            {name: self._handle.pdm_sitfs(name) for name in self._handle.pdm_names()},
+            aliases,
+            self._wait_until,
+            self._post,
+        )
         self._usb = UsbHosts(
             self._handle.attach_usb,
             self._handle.usb_names(),
@@ -853,7 +863,13 @@ class Machine:
             peripherals=(p.name for p in description.peripherals),
         )
         access = ViewAccess(
-            self._handle, self._ports.stream, self._audio.stream, self._usb.host, self._post
+            self._handle,
+            self._ports.stream,
+            self._audio.stream,
+            self._usb.host,
+            self._post,
+            self._pdm.mic,
+            self._pdm.output,
         )
         self._memory = Memory(access)
         self._registers = Registers(access, self._handle.register_names())
@@ -2373,7 +2389,9 @@ class Machine:
         the device as the snapshot had them. A HID stream likewise drops the input reports not
         read yet and gets back the output reports not yet taken by the device. A USB audio
         function drops the microphone frames not read yet and gets back the speaker samples not
-        yet sent, and its streams run or not as the snapshot had them.
+        yet sent, and its streams run or not as the snapshot had them. A `PdmMic` drops its
+        queued input, resets its modulator and clears `idle_bits`, a `FilterTap` drops the
+        samples not read yet and `dropped` restarts at 0.
         """
         self._refuse_member("restore")
         self._check_snapshot(snapshot)
@@ -2397,6 +2415,7 @@ class Machine:
         self._last_stop = None
         self._ports.discard()
         self._audio.discard()
+        self._pdm.discard()
         self._usb.discard()
         if self._arena is not None:
             self._arena.reset(snapshot.arena_offset)

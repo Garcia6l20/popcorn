@@ -18,6 +18,7 @@ from popcorn.units import VirtualTime
 
 if TYPE_CHECKING:
     from popcorn._dwarf_views import ScalarLayout, Var
+    from popcorn._pdm import FilterTap, PdmMic
     from popcorn._streams import UartStream
     from popcorn._usb import UsbHost, UsbRequest, UsbState
     from popcorn._views import (
@@ -1096,6 +1097,85 @@ class AudioRefs:
         )
 
 
+class MicRefs:
+    """References to one PDM sensor, `m.ref.periph.MDF1.mic(0, "falling")`. Read-only."""
+
+    __slots__ = ("_label", "_mic", "_owner")
+
+    def __init__(self, owner: object, label: str, mic: PdmMic) -> None:
+        """Wrap a sensor. Use `m.ref.periph.<MDF|ADF>.mic(sitf, edge)` instead."""
+        self._owner = owner
+        self._label = label
+        self._mic = mic
+
+    @property
+    def queued_samples(self) -> Ref[int]:
+        """PCM samples written and not reached yet, `PdmMic.queued_samples`."""
+        mic = self._mic
+        return Ref(
+            self._owner,
+            f"{self._label}.queued_samples",
+            lambda: mic.queued_samples,
+            read=mic._link.op_queued_samples,  # pyright: ignore[reportPrivateUsage]
+        )
+
+    @property
+    def queued_bits(self) -> Ref[int]:
+        """Raw bits written and not sent yet, `PdmMic.queued_bits`."""
+        mic = self._mic
+        return Ref(
+            self._owner,
+            f"{self._label}.queued_bits",
+            lambda: mic.queued_bits,
+            read=mic._link.op_queued_bits,  # pyright: ignore[reportPrivateUsage]
+        )
+
+    @property
+    def idle_bits(self) -> Ref[int]:
+        """Bits of silence sent from an empty queue, `PdmMic.idle_bits`."""
+        mic = self._mic
+        return Ref(
+            self._owner,
+            f"{self._label}.idle_bits",
+            lambda: mic.idle_bits,
+            read=mic._link.op_idle_bits,  # pyright: ignore[reportPrivateUsage]
+        )
+
+
+class TapRefs:
+    """References to one digital filter's output, `m.ref.periph.MDF1.output(0)`. Read-only."""
+
+    __slots__ = ("_label", "_owner", "_tap")
+
+    def __init__(self, owner: object, label: str, tap: FilterTap) -> None:
+        """Wrap a tap. Use `m.ref.periph.<MDF|ADF>.output(filter)` instead."""
+        self._owner = owner
+        self._label = label
+        self._tap = tap
+
+    @property
+    def available(self) -> Ref[int]:
+        """Samples the filter wrote, not read yet, `FilterTap.available`."""
+        tap = self._tap
+        return Ref(
+            self._owner,
+            f"{self._label}.available",
+            lambda: tap.available,
+            read=tap._link.op_available,  # pyright: ignore[reportPrivateUsage]
+        )
+
+    @property
+    def dropped(self) -> Ref[int]:
+        """Samples dropped because the queue held its limit, `FilterTap.dropped`."""
+        tap = self._tap
+        return Ref(
+            self._owner,
+            f"{self._label}.dropped",
+            lambda: tap.dropped,
+            read=tap._link.op_dropped,  # pyright: ignore[reportPrivateUsage]
+        )
+
+
 class PortRefs:
     """References to one UART stream, `m.ref.periph.USART1.port`."""
 
@@ -1224,6 +1304,29 @@ class PeripheralRef:
         """Audio block `block` of this SAI."""
         return AudioRefs(
             self._owner, f"periph.{self._name}.audio({block!r})", self._view.audio(block)
+        )
+
+    def mic(self, sitf: int, edge: Literal["rising", "falling"]) -> MicRefs:
+        """The sensor on clock edge `edge` of serial interface `sitf` of this MDF or ADF.
+
+        Raises:
+            ModelError: The peripheral's model is not the built-in MDF or ADF.
+            ConfigError: `sitf` is past the last serial interface, or `edge` is neither
+                "rising" nor "falling".
+        """
+        return MicRefs(
+            self._owner, f"periph.{self._name}.mic({sitf!r}, {edge!r})", self._view.mic(sitf, edge)
+        )
+
+    def output(self, filter: int) -> TapRefs:
+        """The samples digital filter `filter` of this MDF or ADF writes.
+
+        Raises:
+            ModelError: The peripheral's model is not the built-in MDF or ADF.
+            ConfigError: `filter` is past the last digital filter.
+        """
+        return TapRefs(
+            self._owner, f"periph.{self._name}.output({filter!r})", self._view.output(filter)
         )
 
     @property

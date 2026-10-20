@@ -16,6 +16,7 @@ from popcorn.units import VirtualTime
 if TYPE_CHECKING:
     from popcorn._audio import AudioStream
     from popcorn._part_description import PartDescription
+    from popcorn._pdm import FilterTap, PdmMic
     from popcorn._refs import Pending
     from popcorn._streams import UartStream
     from popcorn._usb import UsbHost
@@ -31,9 +32,10 @@ _MAX_PS = (1 << 64) - 1
 
 class ViewAccess:
     """What a view needs from its machine: the native handle, which refuses an access while the
-    machine is busy outside its callbacks, its UART and audio streams and its USB hosts."""
+    machine is busy outside its callbacks, its UART and audio streams, its USB hosts and its PDM
+    microphones and filter outputs."""
 
-    __slots__ = ("audio", "handle", "ports", "post", "usb")
+    __slots__ = ("audio", "handle", "mic", "output", "ports", "post", "usb")
 
     def __init__(
         self,
@@ -42,12 +44,16 @@ class ViewAccess:
         audio: Callable[[str, str], AudioStream] | None = None,
         usb: Callable[[str], UsbHost] | None = None,
         post: Poster | None = None,
+        mic: Callable[[str, int, str], PdmMic] | None = None,
+        output: Callable[[str, int], FilterTap] | None = None,
     ) -> None:
         self.handle = handle
         self.ports = ports
         self.audio = audio
         self.usb = usb
         self.post = post
+        self.mic = mic
+        self.output = output
 
 
 class ScalarView[T: (int, float)]:
@@ -426,6 +432,33 @@ class PeripheralView:
         if self._access.audio is None:
             raise AttributeError(f"{self._name} has no audio blocks in this machine")
         return self._access.audio(self._name, block)
+
+    def mic(self, sitf: int, edge: Literal["rising", "falling"]) -> PdmMic:
+        """The sensor on clock edge `edge` of serial interface `sitf` of this MDF or ADF,
+        connected at machine build.
+
+        Raises:
+            AttributeError: The machine has no PDM microphones.
+            ModelError: The peripheral's model is not the built-in MDF or ADF.
+            ConfigError: `sitf` is past the last serial interface, or `edge` is neither
+                "rising" nor "falling".
+        """
+        if self._access.mic is None:
+            raise AttributeError(f"{self._name} has no microphones in this machine")
+        return self._access.mic(self._name, sitf, edge)
+
+    def output(self, filter: int) -> FilterTap:
+        """The samples digital filter `filter` of this MDF or ADF writes, connected at machine
+        build.
+
+        Raises:
+            AttributeError: The machine has no filter outputs.
+            ModelError: The peripheral's model is not the built-in MDF or ADF.
+            ConfigError: `filter` is past the last digital filter.
+        """
+        if self._access.output is None:
+            raise AttributeError(f"{self._name} has no filter outputs in this machine")
+        return self._access.output(self._name, filter)
 
     @property
     def host(self) -> UsbHost:
