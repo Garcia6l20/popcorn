@@ -151,6 +151,28 @@ struct rig : stm32_fixture
     return out;
   }
 
+  void pll3_kernel(std::uint32_t n, std::uint32_t q) const
+  {
+    put("RCC", "RCC_CR", "HSION", 1);
+    run_until(now() + 200 * us);
+    write("RCC", "RCC_PLL3CFGR", (2u << 0) | (3u << 2) | (1u << 17));
+    write("RCC", "RCC_PLL3DIVR", (n - 1) | ((q - 1) << 16));
+    put("RCC", "RCC_CR", "PLL3ON", 1);
+    run_until(now() + 200 * us);
+    REQUIRE(field("RCC", "RCC_CR", "PLL3RDY") == 1);
+    put("RCC", "RCC_CCIPR2", "MDF1SEL", 2);
+  }
+
+  [[nodiscard]] auto warned(std::string_view text) const -> std::size_t
+  {
+    std::size_t count = 0;
+    for(auto const& record : warnings())
+    {
+      count += record.message.contains(text) ? 1 : 0;
+    }
+    return count;
+  }
+
   void clocks(std::uint32_t procdiv, std::uint32_t cckdiv) const
   {
     write("CKGCR", (procdiv << 24) | (cckdiv << 16) | (1u << 5) | (1u << 1));
@@ -335,44 +357,131 @@ TEST_CASE("CKGCR |= CKGDEN after programming keeps every field and logs nothing"
 
 namespace
 {
+using writes = std::vector<std::pair<std::string_view, std::uint32_t>>;
+
 struct unmodelled_row
 {
-  std::string_view                                        peripheral;
-  std::vector<std::pair<std::string_view, std::uint32_t>> setup;
-  std::string_view                                        reg;
-  std::uint32_t                                           value;
-  std::string_view                                        error_reg;
-  std::string_view                                        field;
-  std::uint32_t                                           field_value;
-  std::uint32_t                                           valid;
+  std::string_view peripheral;
+  writes           setup;
+  std::string_view reg;
+  std::uint32_t    value;
+  std::string_view error_reg;
+  std::string_view field;
+  std::uint32_t    field_value;
+  writes           fixup;
+  std::uint32_t    retry;
+  std::string_view check_reg;
+  std::string_view check_field;
+  std::uint32_t    check_value;
 };
 
 auto unmodelled_rows() -> std::vector<unmodelled_row>
 {
+  constexpr std::uint32_t cck0_in  = 0x0100'0003u;
+  constexpr std::uint32_t cck0_out = 0x0100'0023u;
   return {
-      {"MDF1", {},                           "CKGCR",     (1u << 4) | 1u, "CKGCR",     "CKGMOD",  1,    1           },
-      {"MDF1", {{"CKGCR", 0x0100'0003u}},    "SITF0CR",   0x1F11,         "CKGCR",     "CCK0DIR", 0,    0x1F10      },
-      {"MDF1", {{"SITF0CR", 0x1F11}},        "CKGCR",     0x0100'0003u,   "CKGCR",     "CCK0DIR", 0,    0x0100'0002u},
-      {"MDF1", {},                           "SITF0CR",   0x1F21,         "SITF0CR",   "SITFMOD", 2,    0x1F11      },
-      {"MDF1", {},                           "SITF0CR",   0x1F35,         "SITF0CR",   "SITFMOD", 3,    0x1F11      },
-      {"MDF1", {},                           "SITF0CR",   0x1F15,         "SITF0CR",   "SCKSRC",  2,    0x1F13      },
-      {"MDF1", {{"DFLT0CICR", 2}},           "DFLT0CR",   1,              "DFLT0CICR", "DATSRC",  2,    0           },
-      {"MDF1", {},                           "DFLT0CR",   0x41,           "DFLT0CR",   "ACQMOD",  4,    0x61        },
-      {"MDF1", {},                           "DFLT0CR",   0x51,           "DFLT0CR",   "ACQMOD",  5,    0x01        },
-      {"MDF1", {},                           "DFLT0CR",   0x2021,         "DFLT0CR",   "TRGSRC",  2,    0x0021      },
-      {"MDF1", {},                           "DFLT0CR",   0x1031,         "DFLT0CR",   "TRGSRC",  1,    0x0031      },
-      {"MDF1", {{"DFLT0CICR", 0x19u << 20}}, "DFLT0CR",   1,              "DFLT0CICR", "SCALE",   0x19, 0           },
-      {"ADF1", {},                           "DFLT0CR",   1,              "DFLT0CICR", "CICMOD",  0,    0           },
-      {"ADF1", {{"DFLT0CICR", 3u << 4}},     "DFLT0CR",   1,              "DFLT0CICR", "CICMOD",  3,    0           },
-      {"MDF1", {{"DFLT0CR", 1}},             "DFLT0CICR", 0x30u << 20,    "DFLT0CICR", "SCALE",   0x30, 0x2Cu << 20 },
-      {"MDF1", {},                           "OLD0CR",    1,              "OLD0CR",    "OLDEN",   1,    0x2         },
-      {"MDF1", {},                           "SCD0CR",    1,              "SCD0CR",    "SCDEN",   1,    0x10        },
-      {"MDF1", {{"GCR", 6u << 4}},           "DFLT0CR",   1,              "GCR",       "ILVNB",   6,    0           },
+      {"MDF1", {},                   "CKGCR",   (1u << 4) | 1u, "CKGCR",   "CKGMOD",  1, {},                                  1,    "CKGCR",   "CKGACTIVE",  1},
+      {"MDF1",
+       {{"CKGCR", cck0_in}},
+       "SITF0CR",                               0x1F11,
+       "CKGCR",                                                            "CCK0DIR",
+       0,                                                                                {{"CKGCR", 0}, {"CKGCR", cck0_out}},
+       0x1F11,                                                                                                                      "SITF0CR",
+       "SITFACTIVE",                                                                                                                                         1},
+      {"MDF1",
+       {{"SITF0CR", 0x1F11}},
+       "CKGCR",                                 cck0_in,
+       "CKGCR",                                                            "CCK0DIR",
+       0,                                                                                {},
+       cck0_out,                                                                                                                    "CKGCR",
+       "CKGACTIVE",                                                                                                                                          1},
+      {"MDF1",
+       {},
+       "SITF0CR",                               0x1F21,
+       "SITF0CR",                                                          "SITFMOD",
+       2,                                                                                {},
+       0x1F11,                                                                                                                      "SITF0CR",
+       "SITFACTIVE",                                                                                                                                         1},
+      {"MDF1",
+       {},
+       "SITF0CR",                               0x1F35,
+       "SITF0CR",                                                          "SITFMOD",
+       3,                                                                                {},
+       0x1F11,                                                                                                                      "SITF0CR",
+       "SITFACTIVE",                                                                                                                                         1},
+      {"MDF1",
+       {},
+       "SITF0CR",                               0x1F15,
+       "SITF0CR",                                                          "SCKSRC",
+       2,                                                                                {},
+       0x1F13,                                                                                                                      "SITF0CR",
+       "SITFACTIVE",                                                                                                                                         1},
+      {"MDF1",
+       {{"DFLT0CICR", 2}},
+       "DFLT0CR",                               1,
+       "DFLT0CICR",                                                        "DATSRC",
+       2,                                                                                {{"DFLT0CICR", 0}},
+       1,                                                                                                                           "DFLT0CR",
+       "DFLTACTIVE",                                                                                                                                         1},
+      {"MDF1", {},                   "DFLT0CR", 0x41,           "DFLT0CR", "ACQMOD",  4, {},                                  0x61, "DFLT0CR", "DFLTACTIVE", 1},
+      {"MDF1", {},                   "DFLT0CR", 0x51,           "DFLT0CR", "ACQMOD",  5, {},                                  0x01, "DFLT0CR", "DFLTACTIVE", 1},
+      {"MDF1",
+       {},
+       "DFLT0CR",                               0x2021,
+       "DFLT0CR",                                                          "TRGSRC",
+       2,                                                                                {},
+       0x0021,                                                                                                                      "DFLT0CR",
+       "DFLTACTIVE",                                                                                                                                         1},
+      {"MDF1",
+       {},
+       "DFLT0CR",                               0x1031,
+       "DFLT0CR",                                                          "TRGSRC",
+       1,                                                                                {},
+       0x0031,                                                                                                                      "DFLT0CR",
+       "DFLTACTIVE",                                                                                                                                         1},
+      {"MDF1",
+       {{"DFLT0CICR", 0x19u << 20}},
+       "DFLT0CR",                               1,
+       "DFLT0CICR",                                                        "SCALE",
+       0x19,                                                                             {{"DFLT0CICR", 0}},
+       1,                                                                                                                           "DFLT0CR",
+       "DFLTACTIVE",                                                                                                                                         1},
+      {"ADF1",
+       {},
+       "DFLT0CR",                               1,
+       "DFLT0CICR",                                                        "CICMOD",
+       0,                                                                                {{"DFLT0CICR", 5u << 4}},
+       1,                                                                                                                           "DFLT0CR",
+       "DFLTACTIVE",                                                                                                                                         1},
+      {"ADF1",
+       {{"DFLT0CICR", 3u << 4}},
+       "DFLT0CR",                               1,
+       "DFLT0CICR",                                                        "CICMOD",
+       3,                                                                                {{"DFLT0CICR", 4u << 4}},
+       1,                                                                                                                           "DFLT0CR",
+       "DFLTACTIVE",                                                                                                                                         1},
+      {"MDF1",
+       {{"DFLT0CR", 1}},
+       "DFLT0CICR",                             0x30u << 20,
+       "DFLT0CICR",                                                        "SCALE",
+       0x30,                                                                             {},
+       0x2Cu << 20,
+       "DFLT0CICR",                                                                                                                            "SCALE",
+       0x2C                                                                                                                                                   },
+      {"MDF1", {},                   "OLD0CR",  1,              "OLD0CR",  "OLDEN",   1, {},                                  0x2,  "OLD0CR",  "THINB",      1},
+      {"MDF1", {},                   "SCD0CR",  1,              "SCD0CR",  "SCDEN",   1, {},                                  0x10, "SCD0CR",  "BKSCD",      1},
+      {"MDF1",
+       {{"GCR", 6u << 4}},
+       "DFLT0CR",                               1,
+       "GCR",                                                              "ILVNB",
+       6,                                                                                {{"GCR", 5u << 4}},
+       1,                                                                                                                           "DFLT0CR",
+       "DFLTACTIVE",                                                                                                                                         1},
   };
 }
 }
 
-TEST_CASE("each unmodelled setting raises naming its field and restores the written register")
+TEST_CASE("each unmodelled setting raises naming its field, restores the register, a retry works")
 {
   for(auto const& row : unmodelled_rows())
   {
@@ -392,9 +501,12 @@ TEST_CASE("each unmodelled setting raises naming its field and restores the writ
         },
         row.error_reg, row.field, row.field_value);
     CHECK(r.read(row.peripheral, row.reg) == before);
-    r.write(row.peripheral, row.reg, row.valid);
-    auto const masked = row.valid & ~std::uint32_t{1};
-    CHECK((r.read(row.peripheral, row.reg) & masked) == masked);
+    for(auto const& [reg, value] : row.fixup)
+    {
+      r.write(row.peripheral, reg, value);
+    }
+    r.write(row.peripheral, row.reg, row.retry);
+    CHECK(r.field(row.peripheral, row.check_reg, row.check_field) == row.check_value);
   }
 }
 
@@ -560,7 +672,9 @@ TEST_CASE("CKABF is set at SITFEN without a CCK, again after a clear, and DFLTxI
   CHECK(r.bits("DFLT1ISR", "CKABF") == 0);
 }
 
-TEST_CASE("CKABF is not set with the CCK generated, rises STH proc cycles after the CCK stops")
+TEST_CASE(
+    "CKABF is not set with the CCK generated, popcorn's zero latency, rises STH proc cycles "
+    "after the CCK stops")
 {
   rig const r;
   r.clocks(4, 3);
@@ -594,4 +708,104 @@ TEST_CASE("CKABIE with CKABF raises MDF1_FLT0_IRQn, ADF1's raises ADF1_IRQn")
   CHECK_FALSE(r.pending(adf_irq));
   r.write("ADF1", "DFLT0IER", 1u << 10);
   CHECK(r.pending(adf_irq));
+}
+
+TEST_CASE("ADF1 DFLTEN reads 0 as RM0456 40.8.5 says, a read-modify-write stops the filter")
+{
+  rig const r;
+  r.write("ADF1", "DFLT0CICR", 5u << 4);
+  r.write("ADF1", "DFLT0CR", 1);
+  CHECK(r.field("ADF1", "DFLT0CR", "DFLTACTIVE") == 1);
+  CHECK((r.read("ADF1", "DFLT0CR") & 1u) == 0);
+  r.write("ADF1", "DFLT0CR", r.read("ADF1", "DFLT0CR") | (1u << 1));
+  CHECK(r.field("ADF1", "DFLT0CR", "DFLTACTIVE") == 0);
+}
+
+TEST_CASE(
+    "the CCK limits of Table 374: 5 MHz in LF_MASTER, 25 MHz in normal SPI, hclk at least proc")
+{
+  {
+    rig const r;
+    r.pll3_kernel(25, 10);
+    r.clocks(0, 7);
+    r.write("SITF0CR", 0x1F01);
+    CHECK(r.warned("above the") == 0);
+    CHECK(r.warned("hclk") == 1);
+  }
+  {
+    rig const r;
+    r.pll3_kernel(25, 10);
+    r.clocks(0, 6);
+    r.write("SITF0CR", 0x1F01);
+    CHECK(r.warned("above the 5000000 Hz") == 1);
+  }
+  {
+    rig const r;
+    r.pll3_kernel(25, 4);
+    r.clocks(0, 3);
+    r.write("SITF0CR", 0x1F11);
+    CHECK(r.warned("above the") == 0);
+  }
+  rig const r;
+  r.pll3_kernel(25, 4);
+  r.clocks(0, 2);
+  r.write("SITF0CR", 0x1F11);
+  CHECK(r.warned("above the 25000000 Hz") == 1);
+}
+
+TEST_CASE("a byte write of 0x04 to DFLTxISR byte 1 clears CKABF only")
+{
+  rig const r;
+  r.write("CKGCR", (1u << 5) | 1u);
+  r.write("SITF0CR", 0x1F11);
+  r.put("CKGCR", "CCK0EN", 1);
+  REQUIRE(r.bits("DFLT0ISR", "CKABF") == 1);
+  REQUIRE(r.target->mem().write(r.at("MDF1", "DFLT0ISR"), 1, 0xFF).has_value());
+  CHECK(r.bits("DFLT0ISR", "CKABF") == 1);
+  REQUIRE(r.target->mem().write(r.at("MDF1", "DFLT0ISR") + 1, 1, 0x04).has_value());
+  CHECK(r.bits("DFLT0ISR", "CKABF") == 0);
+}
+
+TEST_CASE("CKGDEN 1 to 0 under a running normal SPI SITF sets CKABF STH proc cycles later")
+{
+  rig const r;
+  r.clocks(4, 3);
+  r.write("SITF0CR", 0x1F11);
+  r.put("CKGCR", "CKGDEN", 0);
+  auto const stopped = r.now();
+  r.run_until(stopped + 31 * 1'250'000ull - us);
+  CHECK(r.bits("DFLT0ISR", "CKABF") == 0);
+  r.run_until(stopped + 31 * 1'250'000ull);
+  CHECK(r.bits("DFLT0ISR", "CKABF") == 1);
+}
+
+TEST_CASE("BSSEL past the last SITF selects SITF5: its clocks are checked at DFLT0 DFLTEN")
+{
+  rig const r;
+  r.clocks(0, 3);
+  r.write("SITF5CR", 0x1F11);
+  r.write("BSMX0CR", 31);
+  r.write("DFLT0CICR", 3u << 8);
+  r.write("DFLT0CR", 1);
+  CHECK(r.warned("RSFLT") == 1);
+}
+
+TEST_CASE("CKABIE on filters 4 and 5 pends IRQ 121 and 122, a cleared flag lowers the line")
+{
+  rig const r;
+  r.write("CKGCR", (1u << 5) | 1u);
+  for(auto const f : {4, 5})
+  {
+    r.write(std::format("SITF{}CR", f), 0x1F11);
+    r.write(std::format("DFLT{}IER", f), 1u << 10);
+  }
+  CHECK(r.pending(121));
+  CHECK(r.pending(122));
+  CHECK_FALSE(r.pending(mdf_irq));
+  r.put("CKGCR", "CCK0EN", 1);
+  r.write("DFLT5ISR", 1u << 10);
+  REQUIRE(r.target->mem().write(0xe000'e280u + 4 * (122 / 32), 4, 1u << (122 % 32)).has_value());
+  CHECK_FALSE(r.pending(122));
+  REQUIRE(r.target->mem().write(0xe000'e280u + 4 * (121 / 32), 4, 1u << (121 % 32)).has_value());
+  CHECK(r.pending(121));
 }

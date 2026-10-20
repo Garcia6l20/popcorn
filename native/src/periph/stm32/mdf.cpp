@@ -71,7 +71,6 @@ enum class bank : std::uint8_t
   dly,
   scd,
   ier,
-  isr,
   oec,
   sadcr,
   plain,
@@ -156,9 +155,13 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        a popcorn choice: the resynchronization latency of 39.4.15 is not modelled, polling
  *        firmware sees the same end states. GCR.TRGO reads 0 after any write. BSMXACTIVE is the
  *        OR of DFLTACTIVE, OLDACTIVE and SCDACTIVE of its index, 39.8.4. DFLTRUN, SKPBF and the
- *        data registers read 0: no sample is produced yet. DFLTEN is write-only, 39.8.5, so it
- *        reads 0. DFLTxISR flags are write-1-to-clear, OLDF also clears THHF and THLF, 39.8.16.
- *        The IRQ of a filter is the OR of its flags with their enables, 39.6.
+ *        data registers read 0: no sample is produced yet. DFLTEN is write-only, 39.8.5 and
+ *        40.8.5, so it reads 0 on both, although the ADF1 description marks it read_write: a
+ *        read-modify-write of a running DFLTxCR that does not set DFLTEN stops the filter. The
+ *        ADF1 description lacks DFLT0CR.TRGSENS, 40.8.5 bit 8, so the bit reads 0 and ignores
+ *        writes, which no modelled setting reads: TRGO forces its sensitivity and every other
+ *        trigger raises. DFLTxISR flags are write-1-to-clear, OLDF also clears THHF and
+ * THLF, 39.8.16. The IRQ of a filter is the OR of its flags with their enables, 39.6.
  *
  *        Write protection, 39.4.15 Table 381: a write changing a protected field while its
  *        ACTIVE flag is set keeps the old field value, logs once per register and raises
@@ -182,7 +185,11 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        selected CCKy does not toggle, CKGDEN 0, or CCKyEN 0 with CCKyDIR 1, and again at once
  *        when written 1 while the clock is still absent. A CCKy that stops while the SITF runs
  *        sets CKABF STH mdf_proc_ck cycles later, never without a kernel clock. The SITF index
- *        names the DFLTxISR it flags. Never in LF_MASTER mode.
+ *        names the DFLTxISR it flags. Never in LF_MASTER mode. Popcorn choices: with a generated
+ *        CCK, CKABF stays 0 at SITFEN, where silicon holds it until the first clock transition,
+ *        the zero latency of open question 11. CKGDEN 0 also stops mdf_proc_ck, RM0456 39.8.2,
+ *        and the RM does not say what CKABF does then: the model sets it at SITFEN with CKGDEN
+ *        0, and STH cycles at the PROCDIV rate after CKGDEN goes to 0.
  */
 class mdf final : public dispatch_model<mdf, mdf_state>
 {
@@ -191,6 +198,8 @@ public:
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
+  auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
+      -> std::expected<std::uint32_t, bus_error> override;
   auto on_write(
       register_file& regs,
       std::uint32_t  offset,
@@ -314,7 +323,7 @@ auto mdf::writes(peripheral_desc const& desc, dfilter_layout const& layout)
     add(std::format("DLY{}CR", f), row.operator()<bank::dly>()[f]);
     add(std::format("SCD{}CR", f), row.operator()<bank::scd>()[f]);
     add(std::format("DFLT{}IER", f), row.operator()<bank::ier>()[f]);
-    add(std::format("DFLT{}ISR", f), row.operator()<bank::isr>()[f]);
+    add(std::format("DFLT{}ISR", f), nullptr);
     add(std::format("OEC{}CR", f), row.operator()<bank::oec>()[f]);
     add(std::format("SNPS{}DR", f), nullptr);
     add(std::format("DFLT{}DR", f), nullptr);
@@ -346,7 +355,7 @@ mdf::mdf(model_context& ctx, peripheral_desc const& desc, dfilter_layout layout)
   {
     missing(std::format("DFLT{}CR", layout_.filters == 0 ? 0 : max_filters));
   }
-  if(describe("GCR").fields.size() > 1)
+  if(std::ranges::contains(describe("GCR").fields, std::string_view{"ILVNB"}, &field_desc::name))
   {
     interleave_ = field("GCR", "ILVNB");
   }
@@ -511,6 +520,22 @@ void mdf::on_event(std::uint32_t kind, std::uint64_t payload)
   }
 }
 
+auto mdf::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
+    -> std::expected<std::uint32_t, bus_error>
+{
+  auto const word = offset & ~3u;
+  for(auto const& filter : filter_)
+  {
+    if(filter.cr.offset == word)
+    {
+      auto const hidden = read_lanes(filter.enable.mask(), offset, size);
+      return dispatch_model::on_read(regs, offset, size, ctx)
+          .transform([hidden](std::uint32_t value) { return value & ~hidden; });
+    }
+  }
+  return dispatch_model::on_read(regs, offset, size, ctx);
+}
+
 auto mdf::on_write(
     register_file& regs,
     std::uint32_t  offset,
@@ -575,7 +600,6 @@ void mdf::write(bank which, std::size_t f, std::uint32_t old, std::uint32_t now)
     case bank::ier:
       update_irq();
       return;
-    case bank::isr:
     case bank::oec:
     case bank::plain:
       return;

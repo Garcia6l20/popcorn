@@ -99,6 +99,7 @@ namespace popcorn::periph::stm32
  *        description of each instance.
  */
 [[nodiscard]] auto mdf_factory() -> model_factory;
+
 /**
  * @brief Factory of the USB OTG_FS device core model, RM0456 section 72.
  * @param b Board whose `usb_hosts` gives each instance its virtual host, copied.
