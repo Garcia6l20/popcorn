@@ -13,6 +13,8 @@ struct modulator_state
 {
   std::int64_t i1{};
   std::int64_t i2{};
+
+  friend auto operator==(modulator_state const&, modulator_state const&) -> bool = default;
 };
 
 /**
@@ -22,7 +24,7 @@ struct modulator_state
  * @param pcm16 Input sample, -32768 to 32767.
  * @return the bit, true for 1.
  */
-constexpr auto modulate(modulator_state& state, std::int32_t pcm16) -> bool
+[[nodiscard]] constexpr auto modulate(modulator_state& state, std::int32_t pcm16) -> bool
 {
   constexpr std::int64_t full     = std::int64_t{1} << 15;
   constexpr std::int64_t i1_limit = std::int64_t{1} << 20;

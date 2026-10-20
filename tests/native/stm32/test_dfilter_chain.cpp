@@ -5,6 +5,7 @@
 #include <reflex/serde/json.hpp>
 
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -143,9 +144,13 @@ struct chain_output
   std::vector<std::int64_t> saturated;
 };
 
-auto run_chain(json::value const& config, std::vector<bool> const& bits) -> chain_output
+auto run_chain(
+    json::value const&              config,
+    std::vector<bool> const&        bits,
+    std::optional<stm32::cic_order> order) -> chain_output
 {
-  auto const         chain   = config_of(config);
+  auto chain                 = config_of(config);
+  chain.order                = order.value_or(chain.order);
   auto const         skip    = static_cast<std::size_t>(integer(member(config, "skip")));
   auto               discard = integer(member(config, "discard"));
   bool               carried = false;
@@ -174,31 +179,40 @@ auto run_chain(json::value const& config, std::vector<bool> const& bits) -> chai
   return out;
 }
 
-auto first_difference(std::vector<std::int64_t> const& got, std::vector<std::int64_t> const& want)
-    -> std::size_t
+template <typename T>
+void check_same(std::string_view what, std::vector<T> const& got, std::vector<T> const& want)
 {
-  auto const [at, _] = std::ranges::mismatch(got, want);
-  return static_cast<std::size_t>(at - got.begin());
+  CAPTURE(what);
+  CHECK(got.size() == want.size());
+  auto const [at, expected] = std::ranges::mismatch(got, want);
+  if(at != got.end() and expected != want.end())
+  {
+    auto const sample = at - got.begin();
+    auto const value  = static_cast<std::int64_t>(*at);
+    auto const wanted = static_cast<std::int64_t>(*expected);
+    CAPTURE(sample);
+    CAPTURE(value);
+    CAPTURE(wanted);
+    FAIL_CHECK("first mismatch");
+  }
 }
 
-void check_chain(std::string_view name)
+void check_chain(std::string_view name, std::optional<stm32::cic_order> order = std::nullopt)
 {
   auto const document = load(std::string{"chain_"} + std::string{name} + ".json");
   CHECK(member(document, "name").as<json::string>() == name);
-  std::size_t index = 0;
+  std::size_t run_number = 0;
   for(auto const& run : member(document, "runs").as_array())
   {
-    CAPTURE(index);
-    auto const got  = run_chain(member(run, "config"), bits_of(member(run, "bits")));
+    CAPTURE(run_number);
+    auto const got  = run_chain(member(run, "config"), bits_of(member(run, "bits")), order);
     auto const pcm  = run_length(member(run, "pcm"));
     auto const sats = run_length(member(run, "saturated"));
-    CHECK(got.pcm.size() == pcm.size());
-    CHECK(first_difference(got.pcm, pcm) == pcm.size());
-    CHECK(got.saturated.size() == sats.size());
-    CHECK(first_difference(got.saturated, sats) == sats.size());
-    ++index;
+    check_same("pcm", got.pcm, pcm);
+    check_same("saturated", got.saturated, sats);
+    ++run_number;
   }
-  CHECK(index > 0);
+  CHECK(run_number > 0);
 }
 
 void check_modulator(std::string_view name)
@@ -217,10 +231,7 @@ void check_modulator(std::string_view name)
       got.push_back(stm32::modulate(state, static_cast<std::int32_t>(integer(pcm16[i]))));
     }
   }
-  auto const want    = bits_of(member(modulator, "bits"));
-  auto const [at, _] = std::ranges::mismatch(got, want);
-  CHECK(got.size() == want.size());
-  CHECK(static_cast<std::size_t>(at - got.begin()) == want.size());
+  check_same("bits", got, bits_of(member(modulator, "bits")));
 }
 
 constexpr std::string_view chain_vectors[]{
@@ -271,6 +282,50 @@ TEST_CASE("SCALE codes give the gains of RM0456 Table 377")
     CAPTURE(reserved);
     CHECK_FALSE(stm32::scale_of(static_cast<std::uint8_t>(reserved)).has_value());
   }
+}
+
+static_assert(std::equality_comparable<stm32::chain_state>);
+static_assert(std::equality_comparable<stm32::chain_config>);
+static_assert(std::equality_comparable<stm32::produced>);
+static_assert(std::equality_comparable<stm32::modulator_state>);
+
+TEST_CASE("CICMOD codes decode to their order, 110 and 111 to Sinc5")
+{
+  CHECK(stm32::cic_order_of(0) == stm32::cic_order::fastsinc);
+  CHECK(stm32::cic_order_of(1) == stm32::cic_order::sinc1);
+  CHECK(stm32::cic_order_of(4) == stm32::cic_order::sinc4);
+  CHECK(stm32::cic_order_of(5) == stm32::cic_order::sinc5);
+  CHECK(stm32::cic_order_of(6) == stm32::cic_order::sinc5);
+  CHECK(stm32::cic_order_of(7) == stm32::cic_order::sinc5);
+}
+
+TEST_CASE("chain sinc5 with an order of 7 runs as Sinc5")
+{
+  check_chain("sinc5", static_cast<stm32::cic_order>(7));
+}
+
+TEST_CASE("chain and modulator states compare equal after the same input")
+{
+  stm32::chain_config const config{
+      .order = stm32::cic_order::sinc5, .decimation = 4, .scale = 0x02, .rsflt = true, .hpf = 1};
+  stm32::chain_state     one{};
+  stm32::chain_state     two{};
+  stm32::modulator_state first{};
+  stm32::modulator_state second{};
+  for(int i = 0; i < 64; ++i)
+  {
+    auto const bit = (i * 7) % 3 == 0 ? 1 : -1;
+    CHECK(stm32::feed(one, config, bit) == stm32::feed(two, config, bit));
+    CHECK(stm32::modulate(first, i * 100) == stm32::modulate(second, i * 100));
+  }
+  CHECK(one == two);
+  CHECK(first == second);
+  static_cast<void>(stm32::feed(one, config, 1));
+  static_cast<void>(stm32::modulate(first, 0));
+  CHECK_FALSE(one == two);
+  CHECK_FALSE(first == second);
+  CHECK(config == stm32::chain_config{config});
+  CHECK_FALSE(config == stm32::chain_config{.order = stm32::cic_order::sinc4});
 }
 
 TEST_CASE("chain d2")

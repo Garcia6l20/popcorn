@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +10,8 @@
 namespace popcorn::periph::stm32
 {
 /**
- * @brief CIC filter order, valued as the DFLTxCICR.CICMOD codes of RM0456 39.8.18.
+ * @brief CIC filter order, valued as the DFLTxCICR.CICMOD codes of RM0456 39.8.6.
+ *        Build it with cic_order_of(), which maps the codes above 5 to Sinc5.
  */
 enum class cic_order : std::uint8_t
 {
@@ -22,7 +24,7 @@ enum class cic_order : std::uint8_t
 };
 
 /**
- * @brief INT division ratio, valued as the DFLTxINTR.INTDIV codes of RM0456 39.8.23.
+ * @brief INT division ratio, valued as the DFLTxINTR.INTDIV codes of RM0456 39.8.8.
  */
 enum class int_divider : std::uint8_t
 {
@@ -39,14 +41,26 @@ struct scale_gain
 {
   std::int64_t mult;
   int          shift;
+
+  friend auto operator==(scale_gain const&, scale_gain const&) -> bool = default;
 };
+
+/**
+ * @brief CIC order of a DFLTxCICR.CICMOD code, RM0456 39.8.6: 110 and 111 are Sinc5.
+ * @param cicmod CICMOD field value, 0 to 7.
+ * @return the order.
+ */
+[[nodiscard]] constexpr auto cic_order_of(std::uint8_t cicmod) -> cic_order
+{
+  return static_cast<cic_order>(std::min<std::uint8_t>(cicmod, 5));
+}
 
 /**
  * @brief Gain of a SCALE code: even steps are pure shifts, odd steps x1.5 times a shift.
  * @param code SCALE field value, 0x00 to 0x18 or 0x20 to 0x2F.
  * @return the gain, empty for a reserved code.
  */
-constexpr auto scale_of(std::uint8_t code) -> std::optional<scale_gain>
+[[nodiscard]] constexpr auto scale_of(std::uint8_t code) -> std::optional<scale_gain>
 {
   int step = 0;
   int base = 0;
@@ -73,20 +87,22 @@ constexpr auto scale_of(std::uint8_t code) -> std::optional<scale_gain>
 /**
  * @brief Filter chain settings of one digital filter, as its registers give them.
  *
- * `decimation` is MCICD + 1. `hpf` holds HPFC when the high-pass filter is on. `int_value`
- * holds INTVAL + 1, empty for INTVAL 0, which bypasses INT and ignores `int_div`.
+ * `decimation` is the CIC decimation ratio, 2 to 512. `hpf` holds HPFC when the high-pass filter is
+ * on. `int_value` holds INTVAL + 1, empty for INTVAL 0, which bypasses INT and ignores `int_div`.
  */
 struct chain_config
 {
   cic_order                   order{cic_order::fastsinc};
-  std::uint16_t               decimation{1};
+  std::uint16_t               decimation{2};
   std::int32_t                offset{};
   std::uint8_t                scale{};
   bool                        rsflt{};
   bool                        rsflt_decimate{true};
-  std::optional<std::uint8_t> hpf;
-  std::optional<std::uint8_t> int_value;
+  std::optional<std::uint8_t> hpf{};
+  std::optional<std::uint8_t> int_value{};
   int_divider                 int_div{int_divider::by_128};
+
+  friend auto operator==(chain_config const&, chain_config const&) -> bool = default;
 };
 
 /**
@@ -100,6 +116,8 @@ struct cic_state
   std::array<std::uint64_t, 5> comb{};
   std::array<std::uint64_t, 2> fast{};
   std::uint16_t                count{};
+
+  friend auto operator==(cic_state const&, cic_state const&) -> bool = default;
 };
 
 /**
@@ -109,6 +127,8 @@ struct biquad_state
 {
   std::array<std::int64_t, 2> x{};
   std::array<std::int64_t, 2> y{};
+
+  friend auto operator==(biquad_state const&, biquad_state const&) -> bool = default;
 };
 
 /**
@@ -118,6 +138,8 @@ struct rsflt_state
 {
   std::array<biquad_state, 2> stage{};
   std::uint8_t                count{};
+
+  friend auto operator==(rsflt_state const&, rsflt_state const&) -> bool = default;
 };
 
 /**
@@ -127,6 +149,8 @@ struct hpf_state
 {
   std::int64_t x1{};
   std::int64_t y1{};
+
+  friend auto operator==(hpf_state const&, hpf_state const&) -> bool = default;
 };
 
 /**
@@ -137,6 +161,8 @@ struct int_state
   std::int64_t sum{};
   std::uint8_t count{};
   bool         saturated{};
+
+  friend auto operator==(int_state const&, int_state const&) -> bool = default;
 };
 
 /**
@@ -150,6 +176,8 @@ struct chain_state
   hpf_state   hpf;
   int_state   integ;
   bool        saturated{};
+
+  friend auto operator==(chain_state const&, chain_state const&) -> bool = default;
 };
 
 /**
@@ -159,6 +187,8 @@ struct produced
 {
   std::int32_t pcm;
   bool         saturated;
+
+  friend auto operator==(produced const&, produced const&) -> bool = default;
 };
 
 namespace dfilter_detail
@@ -208,9 +238,10 @@ constexpr auto sign_extend(std::uint64_t value, int bits) -> std::int64_t
 constexpr auto cic(cic_state& state, chain_config const& config, std::int32_t in)
     -> std::optional<std::int64_t>
 {
-  auto const fast  = config.order == cic_order::fastsinc;
-  auto const order = fast ? std::size_t{2} : static_cast<std::size_t>(config.order);
-  auto       carry = static_cast<std::uint64_t>(static_cast<std::int64_t>(in));
+  auto const fast = config.order == cic_order::fastsinc;
+  auto const order =
+      fast ? std::size_t{2} : std::min<std::size_t>(static_cast<std::size_t>(config.order), 5);
+  auto carry = static_cast<std::uint64_t>(static_cast<std::int64_t>(in));
   for(std::size_t k = 0; k < order; ++k)
   {
     state.integ[k] += carry;
@@ -286,12 +317,12 @@ constexpr auto hpf(hpf_state& state, std::uint8_t hpfc, std::int64_t x, bool& sa
  * @brief Feeds one remapped input bit through CIC, OEC, SCALE, SAT, RSFLT and HPF, the order
  *        of RM0456 39.4.8 Figure 335. Discard, INT and skip are the caller's.
  * @param state Chain state, zero at the filter enable.
- * @param config Chain settings, SCALE a valid code.
+ * @param config Chain settings, SCALE a valid code. An order above Sinc5 runs as Sinc5.
  * @param in +1 for a bit 1, -1 for a bit 0.
  * @return the HPF output when the chain produced a sample, with every saturation since the
  *         previous one.
  */
-constexpr auto feed(chain_state& state, chain_config const& config, std::int32_t in)
+[[nodiscard]] constexpr auto feed(chain_state& state, chain_config const& config, std::int32_t in)
     -> std::optional<produced>
 {
   auto const cic = dfilter_detail::cic(state.cic, config, in);
@@ -328,7 +359,7 @@ constexpr auto feed(chain_state& state, chain_config const& config, std::int32_t
  * @param in Sample from feed() that the discard kept.
  * @return the INT output once `int_value` samples are summed, with their saturations ORed.
  */
-constexpr auto integrate(int_state& state, chain_config const& config, produced in)
+[[nodiscard]] constexpr auto integrate(int_state& state, chain_config const& config, produced in)
     -> std::optional<produced>
 {
   if(not config.int_value)
