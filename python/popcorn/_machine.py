@@ -103,7 +103,15 @@ from popcorn._refs import (
 )
 from popcorn._snapshot import Snapshot
 from popcorn._stop import FrameReturn, Stop, stop_of
-from popcorn._streams import Board, Gated, PtyOpener, UartPorts, check_wait, deadline_ps
+from popcorn._streams import (
+    Board,
+    Gated,
+    PtyOpener,
+    UartPorts,
+    Waited,
+    check_wait,
+    deadline_ps,
+)
 from popcorn._supply import SupplyOptions
 from popcorn._unwind import Functions, Read32, return_point
 from popcorn._usb import UsbHostOptions, UsbHosts, checked_usb
@@ -2674,13 +2682,13 @@ class Machine:
         ready: _core.Predicate | Gated,
         for_: VirtualDuration | None,
         deadline: VirtualTime | None = None,
-    ) -> VirtualTime:
+    ) -> Waited:
         if isinstance(ready, Gated):
             return await self._wait_gated(ready, for_, deadline)
         if not self.busy:
             with contextlib.suppress(MachineRunning):
                 if ready.holds():
-                    return self.time
+                    return Waited(self.time, None)
         if self._handle.session_open():
             raw, ended = cast(
                 tuple[_core.StopInfo, bool],
@@ -2694,22 +2702,22 @@ class Machine:
                 raise _stop_error(
                     stop, f"the free run, while waiting for {ready.what()}", error_prefix(self)
                 )
-            return stop.time
+            return Waited(stop.time, stop.resets)
         stop = await self.wait_for(_Native(ready), for_=for_, deadline=deadline)
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
             raise _stop_error(stop, f"the run waiting for {ready.what()}", error_prefix(self))
-        return stop.time
+        return Waited(stop.time, stop.resets)
 
     async def _wait_gated(
         self,
         gated: Gated,
         for_: VirtualDuration | None,
         deadline: VirtualTime | None,
-    ) -> VirtualTime:
+    ) -> Waited:
         ready = gated.ready
         event = _Ready(lambda _: ready(), gate=gated.gate)
         if not self.busy and self._handler(event.ready)():
-            return self.time
+            return Waited(self.time, None)
         stop = await self.wait_for(event, for_=for_, deadline=deadline)
         if stop.reason is StopReason.USER and not event.fired:
             raise _stop_error(
@@ -2717,7 +2725,7 @@ class Machine:
             )
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
             raise _stop_error(stop, "the run waiting for a Python predicate", error_prefix(self))
-        return stop.time
+        return Waited(stop.time, stop.resets)
 
     async def wait_until(
         self,

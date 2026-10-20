@@ -180,21 +180,29 @@ void machine::run_state::install_hooks()
   install_memory_filter();
 }
 
-void machine::run_state::reset_machine(reset_kind kind)
+void machine::run_state::notify_before_reset(reset_kind kind)
 {
+  handler_scope const scope{in_handler};
+  for(auto const& slot : owner.peripherals_)
   {
-    handler_scope const scope{in_handler};
-    for(auto const& slot : owner.peripherals_)
+    if(slot)
     {
-      if(slot)
+      if(auto* const listener = dynamic_cast<periph::reset_listener*>(slot->model.get()))
       {
-        if(auto* const listener = dynamic_cast<periph::reset_listener*>(slot->model.get()))
-        {
-          listener->before_reset(kind);
-        }
+        listener->before_reset(kind);
       }
     }
   }
+}
+
+void machine::run_state::reset_machine(reset_kind kind)
+{
+  notify_before_reset(kind);
+  reset_notified(kind);
+}
+
+void machine::run_state::reset_notified(reset_kind kind)
+{
   ++memory_generation;
   retired = {};
   owner.scheduler_.restore({}, 0);
@@ -1065,6 +1073,7 @@ auto machine::run_state::make_stop(
       .where        = {.pc = owner.arch_->pc()},
       .instructions = owner.clock_.now(),
       .time         = owner.clock_.time(),
+      .resets       = resets,
       .fault        = fault,
       .detail       = std::move(detail),
   };

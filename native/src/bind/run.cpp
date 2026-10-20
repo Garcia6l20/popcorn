@@ -49,6 +49,7 @@ auto record(stop const& stopped) -> stop_record
       .where        = owned(stopped.where),
       .instructions = stopped.instructions.value,
       .time_ps      = stopped.time.ps,
+      .resets       = stopped.resets,
       .fault        = std::nullopt,
       .detail       = stopped.detail,
   };

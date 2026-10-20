@@ -136,12 +136,15 @@ public:
 
   /**
    * @brief Takes the oldest transmitted frames whose stop bit ended by @p until_ps, or before
-   *        the last reset, in one hold of the link lock: later frames stay queued.
+   *        the reset it counts from, in one hold of the link lock: later frames stay queued.
    * @param count Most frames taken.
-   * @param until_ps Latest stop bit end taken, in picoseconds since reset.
+   * @param until_ps Latest stop bit end taken, in picoseconds since the reset @p resets names.
+   * @param resets The machine's reset count @p until_ps belongs to, the count now when none.
    */
-  [[= py::doc{"Take at most count of the oldest frames whose at_ps is at most until_ps."}]] auto
-      drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<uart_frame>;
+  [[= py::doc{"Take at most count of the oldest frames whose at_ps is at most until_ps, or "
+              "queued before the reset resets counts from."}]] auto
+      drain_until(std::uint64_t count, std::uint64_t until_ps, std::optional<std::uint64_t> resets)
+          -> std::vector<uart_frame>;
 
   /** @brief Transmitted frames dropped because the queue held its limit. */
   [[= py::doc{"Transmitted frames dropped because the queue was full."}]] [[nodiscard]] auto
@@ -262,13 +265,16 @@ public:
   [[= py::doc{"Take at most count of the oldest transmitted frames."}]] auto
       drain(std::uint64_t count) -> std::vector<audio_record>;
   /**
-   * @brief Takes the oldest transmitted frames that ended by @p until_ps, or before the last
-   *        reset, in one hold of the link lock: later frames stay queued.
+   * @brief Takes the oldest transmitted frames that ended by @p until_ps, or before the reset
+   *        it counts from, in one hold of the link lock: later frames stay queued.
    * @param count Most frames taken.
-   * @param until_ps Latest frame end taken, in picoseconds since reset.
+   * @param until_ps Latest frame end taken, in picoseconds since the reset @p resets names.
+   * @param resets The machine's reset count @p until_ps belongs to, the count now when none.
    */
-  [[= py::doc{"Take at most count of the oldest frames that ended by until_ps."}]] auto
-      drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<audio_record>;
+  [[= py::doc{"Take at most count of the oldest frames that ended by until_ps, or before the "
+              "reset resets counts from."}]] auto
+      drain_until(std::uint64_t count, std::uint64_t until_ps, std::optional<std::uint64_t> resets)
+          -> std::vector<audio_record>;
   /**
    * @brief Queues words for a receiving block, one per slot in slot order.
    * @param words Words, inactive slots included.

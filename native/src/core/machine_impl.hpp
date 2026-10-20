@@ -1794,10 +1794,24 @@ struct machine::run_state
   void code_changed(host_buffer const& buffer, std::size_t first, std::size_t last);
 
   /**
-   * @brief Resets the machine as @p kind in the W5a order, and drops the per-run state of the
-   *        execution the reset discards: refused access, trap, stepping.
+   * @brief Calls every periph::reset_listener's `before_reset` in description order, inside a
+   *        handler scope, with the clock at the reset's time.
+   * @throws Any exception a listener threw, before any later listener runs.
+   */
+  void notify_before_reset(reset_kind kind);
+
+  /**
+   * @brief notify_before_reset(), then reset_notified(): a throw from a listener leaves the
+   *        machine unreset.
    */
   void reset_machine(reset_kind kind);
+
+  /**
+   * @brief Resets the machine as @p kind in the W5a order, and drops the per-run state of the
+   *        execution the reset discards: refused access, trap, stepping. The listeners were
+   *        told already.
+   */
+  void reset_notified(reset_kind kind);
 
   /**
    * @brief Calls every model's `power_cut()` in description order, inside a handler scope,

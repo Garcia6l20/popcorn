@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace popcorn::bind
@@ -141,13 +142,16 @@ public:
   [[= py::doc{"Take at most count of the oldest samples."}]] auto drain(std::uint64_t count)
       -> std::vector<pdm_sample_record>;
   /**
-   * @brief Takes the oldest kept samples written by @p until_ps, or before the last reset, in
-   *        one hold of the link lock: later samples stay queued.
+   * @brief Takes the oldest kept samples written by @p until_ps, or before the reset it counts
+   *        from, in one hold of the link lock: later samples stay queued.
    * @param count Most samples taken.
-   * @param until_ps Latest write time taken, in picoseconds since reset.
+   * @param until_ps Latest write time taken, in picoseconds since the reset @p resets names.
+   * @param resets The machine's reset count @p until_ps belongs to, the count now when none.
    */
-  [[= py::doc{"Take at most count of the oldest samples written by until_ps."}]] auto
-      drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<pdm_sample_record>;
+  [[= py::doc{"Take at most count of the oldest samples written by until_ps, or before the "
+              "reset resets counts from."}]] auto
+      drain_until(std::uint64_t count, std::uint64_t until_ps, std::optional<std::uint64_t> resets)
+          -> std::vector<pdm_sample_record>;
 
   /** @brief A predicate true once available() reaches @p count. */
   [[= py::doc{"Predicate: available() reaches count."}]] [[nodiscard]] auto

@@ -290,6 +290,7 @@ auto stop_here(machine& target, stop_reason reason) -> stop
       .where        = target.locate(pc),
       .instructions = target.virtual_clock().now(),
       .time         = target.virtual_clock().time(),
+      .resets       = target.resets(),
   };
 }
 

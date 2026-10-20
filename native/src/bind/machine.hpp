@@ -151,6 +151,9 @@ struct[[= py::rename{"StopInfo"}]] stop_record
   [[= py::readonly]] std::uint64_t instructions{};
   /** @brief Virtual time since reset, in picoseconds. */
   [[= py::readonly]] std::uint64_t time_ps{};
+  /** @brief The machine's resets of any kind at the stop, which names the reset time_ps counts
+   * from. */
+  [[= py::readonly]] std::uint64_t resets{};
   /** @brief Decoded fault, set exactly when reason is fault. */
   [[= py::readonly]] std::optional<fault_record> fault{};
   /** @brief What caused the stop beyond its reason. */

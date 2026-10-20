@@ -31,6 +31,24 @@ using reset_count = std::shared_ptr<std::atomic<std::uint64_t> const>;
   return count ? count->load(std::memory_order_acquire) : 0;
 }
 
+/**
+ * @brief Whether a take bounded by @p until_ps leaves a record queued: one from a later reset
+ *        than the bound's, or from the same reset and later than the bound. A record from an
+ *        earlier reset is taken whatever its time.
+ * @param tag The machine's reset count when the record was queued.
+ * @param at_ps The record's time, in picoseconds since the reset @p tag names.
+ * @param until_ps The bound, in picoseconds since the reset @p resets names.
+ * @param resets The reset count the bound belongs to.
+ */
+[[nodiscard]] constexpr auto past_bound(
+    std::uint64_t tag,
+    std::uint64_t at_ps,
+    std::uint64_t until_ps,
+    std::uint64_t resets) noexcept -> bool
+{
+  return tag > resets or (tag == resets and at_ps > until_ps);
+}
+
 /** @brief Transmitted frames a UART link keeps before dropping the oldest, about 16 MiB. */
 inline constexpr std::uint64_t uart_frame_limit = std::uint64_t{1} << 20;
 
@@ -90,23 +108,24 @@ public:
   }
 
   /**
-   * @brief Takes the oldest frames, up to the first whose stop bit ended after @p until_ps since
-   *        the last reset. Frames from before it are taken whatever their time.
+   * @brief Takes the oldest frames, up to the first past_bound() leaves queued.
    * @param count Most frames taken.
-   * @param until_ps Latest stop bit end taken, in picoseconds since the last reset.
+   * @param until_ps Latest stop bit end taken, in picoseconds since the reset @p resets names.
+   * @param resets The reset count @p until_ps belongs to, the count now when none.
    * @return The frames, oldest first.
    */
   auto take(
-      core::link_guard const& held,
-      std::uint64_t           count,
-      std::uint64_t           until_ps = std::numeric_limits<std::uint64_t>::max())
+      core::link_guard const&      held,
+      std::uint64_t                count,
+      std::uint64_t                until_ps = std::numeric_limits<std::uint64_t>::max(),
+      std::optional<std::uint64_t> resets   = std::nullopt)
       -> std::vector<queued_uart_frame> pre(held.guards(mutex_))
   {
     auto const first = frames_.begin();
     auto const last  = std::find_if(
         first, first + static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(count, frames_.size())),
-        [until_ps, now = resets_of(resets_)](queued_uart_frame const& frame) {
-          return frame.resets == now and frame.at_ps > until_ps;
+        [until_ps, bound = resets.value_or(resets_of(resets_))](queued_uart_frame const& frame) {
+          return past_bound(frame.resets, frame.at_ps, until_ps, bound);
         });
     std::vector<queued_uart_frame> out(first, last);
     frames_.erase(first, last);
@@ -296,25 +315,27 @@ public:
   }
 
   /**
-   * @brief Takes the oldest kept frames, up to the first that ended after @p until_ps since the
-   *        last reset. Frames from before it are taken whatever their time.
+   * @brief Takes the oldest kept frames, up to the first past_bound() leaves queued, by the
+   *        frame's end.
    * @param held The queue's lock.
    * @param count Most frames taken.
-   * @param until_ps Latest frame end taken, in picoseconds since the last reset.
+   * @param until_ps Latest frame end taken, in picoseconds since the reset @p resets names.
+   * @param resets The reset count @p until_ps belongs to, the count now when none.
    * @return The frames, oldest first.
    */
   auto take(
-      core::link_guard const& held,
-      std::uint64_t           count,
-      std::uint64_t           until_ps = std::numeric_limits<std::uint64_t>::max())
+      core::link_guard const&      held,
+      std::uint64_t                count,
+      std::uint64_t                until_ps = std::numeric_limits<std::uint64_t>::max(),
+      std::optional<std::uint64_t> resets   = std::nullopt)
       -> std::vector<queued_audio_frame> pre(held.guards(mutex_))
   {
     std::vector<queued_audio_frame> out;
     out.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(count, starts_.size())));
-    auto const now = resets_of(resets_);
+    auto const bound = resets.value_or(resets_of(resets_));
     while(out.size() < count
           and not starts_.empty()
-          and (tags_.front() != now or ends_.front() <= until_ps))
+          and not past_bound(tags_.front(), ends_.front(), until_ps, bound))
     {
       auto const& run = runs_.front();
       out.push_back({

@@ -312,6 +312,7 @@ void machine::power_cycle()
   {
     throw machine_busy("a power cycle would lose the frame of the call in progress");
   }
+  run_->notify_before_reset(reset_kind::power_on);
   auto       failure = run_->power_cut_models();
   auto const keep    = [&failure] {
     if(not failure)
@@ -329,7 +330,7 @@ void machine::power_cycle()
   }
   try
   {
-    run_->reset_machine(reset_kind::power_on);
+    run_->reset_notified(reset_kind::power_on);
   }
   catch(...)
   {

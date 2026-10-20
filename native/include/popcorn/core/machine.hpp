@@ -404,7 +404,9 @@ public:
   [[nodiscard]] auto locate(address pc) const -> location;
 
   /**
-   * @brief Resets the machine as @p kind, in this order: event queue cleared, clock restarted at
+   * @brief Resets the machine as @p kind, in this order: every periph::reset_listener's
+   *        `before_reset` in description order, with the clock at the reset's time, where a
+   *        throw leaves the machine unreset, then event queue cleared, clock restarted at
    *        instruction 0 and time 0 at the power-on core clock, for every kind, the arch module's
    *        `reset` at the reset vector, see machine_options::vector_table, then per peripheral in
    *        description order its register storage to reset values and the model's `reset`, then
@@ -420,18 +422,21 @@ public:
   void reset(reset_kind kind = reset_kind::power_on) pre(is_enumerator(kind));
 
   /**
-   * @brief Cuts the supply and powers the machine again: every model's `power_cut()` in
-   *        description order, at the time of the cut, then every RAM region without
-   *        `physical` zeroed with its translated code dropped, then reset(reset_kind::power_on).
-   *        Flash, OTP and every other rom region keep their bytes, the scratch region of
+   * @brief Cuts the supply and powers the machine again: every periph::reset_listener's
+   *        `before_reset(reset_kind::power_on)` first, where a throw refuses the cycle before
+   *        any change, then every model's `power_cut()` in description order, at the time of
+   *        the cut, then every RAM region without `physical` zeroed with its translated code
+   *        dropped, then reset(reset_kind::power_on) without a second `before_reset`. Flash,
+   *        OTP and every other rom region keep their bytes, the scratch region of
    *        machine_options::scratch too. Hooks, probes, watches and host bridges stay, as across
-   *        a reset. A cut cannot be refused once begun: when a model's `power_cut()` throws,
-   *        every later model's still runs, RAM is zeroed, the reset runs, then the first
-   *        exception is rethrown. An exception from the zeroing or from a model's reset is
-   *        kept the same way: the reset still runs after a zeroing failure, and the first
-   *        exception of the whole cycle is the one rethrown.
+   *        a reset. A cut cannot be refused once a `power_cut()` began: when one throws, every
+   *        later model's still runs, RAM is zeroed, the reset runs, then the first exception is
+   *        rethrown. An exception from the zeroing or from a model's reset is kept the same way:
+   *        the reset still runs after a zeroing failure, and the first exception of the whole
+   *        cycle is the one rethrown.
    * @throws machine_running while a slice runs, handlers included.
    * @throws machine_busy while a call begun by begin_call() is in progress.
+   * @throws Any exception a `before_reset` threw, with nothing cut, zeroed or reset.
    * @throws Any exception the first failing `power_cut()`, zeroing or model reset threw, such
    *         as model_error under machine_options::strict_peripherals, after the cycle ran to
    *         its end.

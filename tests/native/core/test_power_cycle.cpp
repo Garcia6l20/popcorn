@@ -2,6 +2,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
+#include <popcorn/periph/reset_listener.hpp>
 
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
@@ -57,7 +58,7 @@ struct supply_event
 
 using journal = std::vector<supply_event>;
 
-class supply_model final : public periph::model
+class supply_model : public periph::model
 {
 public:
   supply_model(
@@ -149,6 +150,48 @@ auto options_for(
   return options;
 }
 
+class listening_model final : public supply_model, public periph::reset_listener
+{
+public:
+  listening_model(
+      periph::model_context& ctx,
+      std::string            name,
+      journal&               events,
+      bool const*            before_throws)
+      : supply_model{ctx, name, events, false, nullptr}, ctx_{ctx}, name_{std::move(name)},
+        events_{events}, before_throws_{before_throws}
+  {}
+
+  void before_reset(reset_kind kind) override
+  {
+    events_.push_back(
+        {.name = name_, .what = 'b', .kind = kind, .at = ctx_.clock.since_power_on()});
+    if(before_throws_ != nullptr and *before_throws_)
+    {
+      throw popcorn::model_error(name_, "BEFORE", 0);
+    }
+  }
+
+private:
+  periph::model_context& ctx_;
+  std::string            name_;
+  journal&               events_;
+  bool const*            before_throws_;
+};
+
+auto listening_options(journal& events, bool const* before_throws = nullptr)
+    -> core::machine_options
+{
+  auto options = options_for(events);
+  options.models.insert_or_assign(
+      "TESTDEV",
+      [&events, before_throws](periph::model_context& ctx, popcorn::peripheral_desc const&)
+          -> std::shared_ptr<periph::model> {
+        return std::make_shared<listening_model>(ctx, "TESTDEV", events, before_throws);
+      });
+  return options;
+}
+
 auto call_at(fixture const& f, address entry) -> core::call_result
 {
   return f.target->call(
@@ -204,6 +247,48 @@ TEST_CASE("a power cycle cuts every model in description order, then resets each
   events.clear();
   f.target->reset();
   CHECK(cuts_of(events) == 0);
+}
+
+TEST_CASE("a power cycle tells a reset listener once, first, before any cut or RAM zeroing")
+{
+  journal events;
+  fixture f{m33(), "calls", listening_options(events)};
+  write_word(f, stub, returns_42);
+  REQUIRE(call_at(f, stub).value == 42);
+  auto const at = f.target->virtual_clock().since_power_on();
+  REQUIRE(at > vtime{});
+  events.clear();
+  f.target->power_cycle();
+  CHECK(
+      events
+      == journal{
+          {.name = "TESTDEV", .what = 'b', .kind = reset_kind::power_on, .at = at},
+          cut("TESTDEV", at),
+          cut("UNMODELLED", at),
+          powered("TESTDEV"),
+          powered("UNMODELLED"),
+  });
+}
+
+TEST_CASE("a reset listener that throws in a power cycle refuses it before any change")
+{
+  journal events;
+  bool    before_throws = false;
+  fixture f{m33(), "calls", listening_options(events, &before_throws)};
+  write_word(f, stub, returns_42);
+  REQUIRE(call_at(f, stub).value == 42);
+  write_word(f, tag, 0xa5a5'5a5a);
+  auto const time = f.target->virtual_clock().time();
+  REQUIRE(time > vtime{});
+  events.clear();
+  before_throws = true;
+  CHECK_THROWS_AS(f.target->power_cycle(), popcorn::model_error);
+  before_throws = false;
+  REQUIRE(events.size() == 1);
+  CHECK(events[0].what == 'b');
+  CHECK(f.word(tag) == 0xa5a5'5a5a);
+  CHECK(f.target->virtual_clock().time() == time);
+  CHECK(call_at(f, stub).value == 42);
 }
 
 TEST_CASE("a power cycle zeroes RAM through every alias and keeps flash and the scratch region")

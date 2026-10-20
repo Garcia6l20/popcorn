@@ -11,6 +11,7 @@ import asyncio
 import gc
 import json
 import math
+import threading
 import weakref
 from pathlib import Path
 from typing import Literal
@@ -31,6 +32,7 @@ KERNEL = 20_480_000
 DIVIDER = 10
 PEER = ChainConfig(order=5, decimation=32, scale=0x2C, rsflt=True, hpf=2)
 BITS_PER_SAMPLE = 128
+RXNEF = 1 << 3
 
 type Edge = Literal["rising", "falling"]
 
@@ -326,7 +328,7 @@ def test_a_reset_between_two_samples_takes_exactly_the_bits_clocked_before_it(
     at = m.time
     assert sample_at(anchor, 6) < at < sample_at(anchor, 7)
     if read_first:
-        assert m.periph.MDF1.DFLT0ISR.RXNEF == 1
+        assert m.periph.MDF1.DFLT0ISR.read() & RXNEF
     m.reset(ResetKind.SOFTWARE)
     consumed = edges_by(anchor, at)
     assert consumed % BITS_PER_SAMPLE != 0
@@ -338,6 +340,62 @@ def test_a_reset_between_two_samples_takes_exactly_the_bits_clocked_before_it(
     peer_filter(m)
     got = read(m.periph.MDF1.output(0), 32)
     assert [s.pcm for s in got] == run_chain(bits[consumed:], PEER).pcm[:32]
+
+
+@pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
+def test_a_reset_after_a_reads_stop_leaves_the_samples_past_the_stop_queued(
+    u575: popcorn.PartDescription, running: bool
+) -> None:
+    m = machine(u575)
+    data, count, _ = pdm_16k()
+    asyncio.run(m.periph.MDF1.mic(0, "rising").write_pdm(data, bits=count))
+    tap = m.periph.MDF1.output(0)
+    anchor = cck(m)
+    sitf(m)
+    peer_filter(m)
+
+    def bounds(t0: VirtualTime) -> tuple[int, VirtualTime, VirtualTime]:
+        first = sum(sample_at(anchor, k) <= t0 for k in range(100))
+        return first, sample_at(anchor, first + 3) + us(30), sample_at(anchor, first + 6) + us(30)
+
+    if running:
+        stalled = threading.Event()
+        resume = threading.Event()
+        cut_done = threading.Event()
+        seen: list[VirtualTime] = []
+
+        def stall() -> None:
+            seen.append(m.time)
+            stalled.set()
+            resume.wait()
+
+        def cut() -> None:
+            m.reset(ResetKind.SOFTWARE)
+            cut_done.set()
+
+        async def free() -> tuple[int, list[FilterSample]]:
+            async with m.running():
+                held = m.sample(stall)
+                assert stalled.wait(20)
+                first, stop, end = bounds(seen[0])
+                reader = asyncio.ensure_future(tap.read(100, deadline=stop))
+                await asyncio.sleep(0)
+                reset = m.sample(cut, at=end)
+                resume.set()
+                assert cut_done.wait(20)
+                got = await reader
+                await held
+                await reset
+                return first, got
+
+        first, got = run_bounded(free(), 20)
+    else:
+        first, stop, end = bounds(m.time)
+        got = asyncio.run(tap.read(100, deadline=stop))
+        asyncio.run(m.run(for_=end - m.time))
+        m.reset(ResetKind.SOFTWARE)
+    assert [s.at for s in got] == [sample_at(anchor, k) for k in range(first + 4)]
+    assert [s.at for s in tap.take()] == [sample_at(anchor, k) for k in range(first + 4, first + 7)]
 
 
 def test_a_full_tap_drops_its_oldest_samples_and_cycles_keep_every_queue_bounded(

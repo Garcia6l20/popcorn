@@ -473,6 +473,7 @@ private:
         .where        = target.locate(target.regs().pc()),
         .instructions = target.virtual_clock().now(),
         .time         = target.virtual_clock().time(),
+        .resets       = target.resets(),
         .detail       = std::move(detail),
     };
   }

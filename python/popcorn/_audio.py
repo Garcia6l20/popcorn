@@ -208,12 +208,13 @@ class AudioStream:
         what the read takes: no frame that ended past it, even one queued at the call. Already
         past, the read ends at once with the frames that ended by it.
 
-        A read that waits takes only the frames that ended by the time its wait stopped, in one
-        native step: later frames stay queued for the next read, even those a free run sent
-        before this read resumed. So with `deadline` or neither, the frames depend only on what
-        the block sent, the same parked and running. Inside a free run `for_` counts from the
-        boundary where the wait registered, which wall time sets. A frame's `at` is its start,
-        one frame time before its end.
+        A read that waits takes only the frames that ended by the time its wait stopped, since
+        the last reset before that stop, in one native step: later frames stay queued for the
+        next read, even those a free run sent before this read resumed, across a reset too.
+        Frames kept from before that reset are taken whatever their time. So with `deadline`
+        or neither, the frames depend only on what the block sent, the same parked and running.
+        Inside a free run `for_` counts from the boundary where the wait registered, which wall
+        time sets. A frame's `at` is its start, one frame time before its end.
 
         Returns:
             Up to `n` frames, fewer when `for_` elapsed, `deadline` passed or the core went
@@ -229,9 +230,9 @@ class AudioStream:
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() >= n:
-            return _audio_frames(self._link.drain_until(n, cutoff(None, deadline)))
+            return _audio_frames(self._link.drain_until(n, cutoff(None, deadline), None))
         stop = await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _audio_frames(self._link.drain_until(n, cutoff(stop, deadline)))
+        return _audio_frames(self._link.drain_until(n, cutoff(stop, deadline), stop.resets))
 
     def take_frames(self) -> list[AudioFrame]:
         """Every frame the block transmitted and not read yet, at once, never running the

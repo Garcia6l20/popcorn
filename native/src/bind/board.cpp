@@ -151,13 +151,16 @@ auto uart_queue::peek(std::uint64_t start, std::uint64_t count) const -> reflex:
 
 auto uart_queue::drain(std::uint64_t count) -> std::vector<uart_frame>
 {
-  return drain_until(count, std::numeric_limits<std::uint64_t>::max());
+  return drain_until(count, std::numeric_limits<std::uint64_t>::max(), std::nullopt);
 }
 
-auto uart_queue::drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<uart_frame>
+auto uart_queue::drain_until(
+    std::uint64_t                count,
+    std::uint64_t                until_ps,
+    std::optional<std::uint64_t> resets) -> std::vector<uart_frame>
 {
   auto const taken = detail::link_locked(*endpoint_, [&](core::link_guard const& held) {
-    return endpoint_->take(held, count, until_ps);
+    return endpoint_->take(held, count, until_ps, resets);
   });
   return taken
        | std::views::transform([](detail::queued_uart_frame const& frame) {
@@ -316,15 +319,18 @@ auto audio_link::receive_layout() const -> std::optional<audio_record>
 
 auto audio_link::drain(std::uint64_t count) -> std::vector<audio_record>
 {
-  return drain_until(count, std::numeric_limits<std::uint64_t>::max());
+  return drain_until(count, std::numeric_limits<std::uint64_t>::max(), std::nullopt);
 }
 
-auto audio_link::drain_until(std::uint64_t count, std::uint64_t until_ps)
-    -> std::vector<audio_record>
+auto audio_link::drain_until(
+    std::uint64_t                count,
+    std::uint64_t                until_ps,
+    std::optional<std::uint64_t> resets) -> std::vector<audio_record>
 {
   auto& queue = endpoint();
-  auto  taken = detail::link_locked(
-      queue, [&](core::link_guard const& held) { return queue.take(held, count, until_ps); });
+  auto  taken = detail::link_locked(queue, [&](core::link_guard const& held) {
+    return queue.take(held, count, until_ps, resets);
+  });
   return taken
        | std::views::as_rvalue
        | std::views::transform(record_of)

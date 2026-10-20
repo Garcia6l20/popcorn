@@ -180,15 +180,18 @@ auto pdm_tap_link::op_dropped() const -> access_op
 
 auto pdm_tap_link::drain(std::uint64_t count) -> std::vector<pdm_sample_record>
 {
-  return drain_until(count, std::numeric_limits<std::uint64_t>::max());
+  return drain_until(count, std::numeric_limits<std::uint64_t>::max(), std::nullopt);
 }
 
-auto pdm_tap_link::drain_until(std::uint64_t count, std::uint64_t until_ps)
-    -> std::vector<pdm_sample_record>
+auto pdm_tap_link::drain_until(
+    std::uint64_t                count,
+    std::uint64_t                until_ps,
+    std::optional<std::uint64_t> resets) -> std::vector<pdm_sample_record>
 {
   auto&      queue = tap();
-  auto const taken = detail::link_locked(
-      queue, [&](core::link_guard const& held) { return queue.take(held, count, until_ps); });
+  auto const taken = detail::link_locked(queue, [&](core::link_guard const& held) {
+    return queue.take(held, count, until_ps, resets);
+  });
   return taken
        | std::views::transform([](detail::queued_pdm_sample const& sample) {
            return pdm_sample_record{

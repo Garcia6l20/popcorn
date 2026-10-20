@@ -248,6 +248,8 @@ struct stop
   icount instructions{};
   /** @brief Virtual time since reset. */
   vtime time{};
+  /** @brief machine::resets() at the stop, which names the reset @ref time counts from. */
+  std::uint64_t resets{};
   /** @brief Decoded fault, set exactly when reason is stop_reason::fault. */
   std::optional<fault_info> fault{};
   /** @brief What caused the stop, beyond the reason: the text of a stop request, the loop and

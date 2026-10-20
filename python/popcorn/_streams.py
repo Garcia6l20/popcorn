@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
 from popcorn import _core
 from popcorn._devices import BusDevice
@@ -31,13 +31,22 @@ class Gated:
     ready: Callable[[], bool]
 
 
+class Waited(NamedTuple):
+    """Where a wait stopped: its virtual time, and the machine's resets of any kind there,
+    which name the reset `time` counts from. `resets` is None for a wait that ended at once on
+    a parked machine, where the count when the caller drains is the count at the stop."""
+
+    time: VirtualTime
+    resets: int | None
+
+
 type Waiter = Callable[
     [_core.Predicate | Gated, VirtualDuration | None, VirtualTime | None],
-    Awaitable[VirtualTime],
+    Awaitable[Waited],
 ]
 """Runs the machine until a predicate holds, a virtual duration elapses or a deadline passes,
-and returns the virtual time it stopped waiting at. A native predicate runs on the machine's
-thread with no GIL, the Python predicate of a `Gated` on that thread holding the GIL, as
+and returns where it stopped waiting. A native predicate runs on the machine's thread with no
+GIL, the Python predicate of a `Gated` on that thread holding the GIL, as
 `Machine.wait_until`'s, where its gate holds."""
 
 
@@ -174,10 +183,10 @@ def deadline_ps(deadline: VirtualTime | None) -> int | None:
     return None if deadline is None else min(max(0, deadline.ps), 2**64 - 1)
 
 
-def cutoff(stop: VirtualTime | None, deadline: VirtualTime | None) -> int:
+def cutoff(stop: Waited | None, deadline: VirtualTime | None) -> int:
     """The latest ready time a stream read takes, in picoseconds: the time its wait stopped,
     or none without a wait, capped at `deadline`."""
-    bound = 2**64 - 1 if stop is None else stop.ps
+    bound = 2**64 - 1 if stop is None else stop.time.ps
     return bound if deadline is None else min(bound, max(0, deadline.ps))
 
 
@@ -423,10 +432,12 @@ class UartStream:
         read ends at once with the frames ready by it.
 
         A read that waits takes only the frames whose stop bit ended by the time its wait
-        stopped, in one native step: frames that end later stay queued for the next read, even
-        those a free run queued before this read resumed. So with `deadline` or neither, the
-        bytes depend only on what the firmware sent, the same parked and running. Inside a free
-        run `for_` counts from the boundary where the wait registered, which wall time sets.
+        stopped, since the last reset before that stop, in one native step: frames that end
+        later stay queued for the next read, even those a free run queued before this read
+        resumed, across a reset too. Frames kept from before that reset are taken whatever
+        their time. So with `deadline` or neither, the bytes depend only on what the firmware
+        sent, the same parked and running. Inside a free run `for_` counts from the boundary
+        where the wait registered, which wall time sets.
 
         Returns:
             Up to `n` bytes, fewer when `for_` elapsed, `deadline` passed or the core went
@@ -449,7 +460,8 @@ class UartStream:
         deadline: VirtualTime | None = None,
     ) -> list[Frame]:
         """As `read`, the frames with their times. A read that waits returns no frame with an
-        `at` past the time its wait stopped.
+        `at` past the time its wait stopped, since the last reset before that stop. Frames
+        kept from before that reset are taken whatever their time.
 
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
         what the read takes: no frame past it, even one queued at the call. Already past, the
@@ -463,9 +475,9 @@ class UartStream:
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
         if self._link.available() >= n:
-            return _frames(self._link.drain_until(n, cutoff(None, deadline)))
+            return _frames(self._link.drain_until(n, cutoff(None, deadline), None))
         stop = await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _frames(self._link.drain_until(n, cutoff(stop, deadline)))
+        return _frames(self._link.drain_until(n, cutoff(stop, deadline), stop.resets))
 
     async def read_until(
         self,

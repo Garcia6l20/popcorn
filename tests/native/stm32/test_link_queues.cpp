@@ -13,6 +13,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <memory>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -506,6 +508,68 @@ TEST_CASE("an SAI frame from before a reset is taken whatever the time bound aft
   CHECK(taken[0].at_ps == 8'000);
   CHECK(taken[1].at_ps == 0);
   CHECK(queue.available(queue.lock()) == 1);
+}
+
+TEST_CASE("a UART take bounds frames by the reset count of its stop, not the count at the take")
+{
+  constexpr auto         never  = std::numeric_limits<std::uint64_t>::max();
+  auto const             resets = std::make_shared<std::atomic<std::uint64_t>>(1);
+  detail::queue_endpoint queue{resets};
+  queue.transmitted(0x41, vtime{100}, false);
+  queue.transmitted(0x42, vtime{9'000}, false);
+  resets->store(2);
+  queue.transmitted(0x43, vtime{50}, false);
+  auto const first = queue.take(queue.lock(), 8, 5'000, 1);
+  REQUIRE(first.size() == 1);
+  CHECK(first[0].data == 0x41);
+  auto const second = queue.take(queue.lock(), 8, never, 1);
+  REQUIRE(second.size() == 1);
+  CHECK(second[0].data == 0x42);
+  CHECK(queue.take(queue.lock(), 8, 0, 2).empty());
+  auto const last = queue.take(queue.lock(), 8, 50, 2);
+  REQUIRE(last.size() == 1);
+  CHECK(last[0].data == 0x43);
+}
+
+TEST_CASE("an SAI take bounds frames by the reset count of its stop, not the count at the take")
+{
+  constexpr auto                     never  = std::numeric_limits<std::uint64_t>::max();
+  auto const                         resets = std::make_shared<std::atomic<std::uint64_t>>(1);
+  detail::audio_queue_endpoint       queue{resets};
+  std::array<std::uint32_t, 2> const slots{1, 2};
+  queue.transmitted(slots, stereo, vtime{0}, vtime{100});
+  queue.transmitted(slots, stereo, vtime{8'000}, vtime{9'000});
+  resets->store(2);
+  queue.transmitted(slots, stereo, vtime{0}, vtime{50});
+  auto const first = queue.take(queue.lock(), 8, 5'000, 1);
+  REQUIRE(first.size() == 1);
+  CHECK(first[0].at_ps == 0);
+  auto const second = queue.take(queue.lock(), 8, never, 1);
+  REQUIRE(second.size() == 1);
+  CHECK(second[0].at_ps == 8'000);
+  CHECK(queue.take(queue.lock(), 8, 0, 2).empty());
+  CHECK(queue.take(queue.lock(), 8, 50, 2).size() == 1);
+}
+
+TEST_CASE("a PDM tap take bounds samples by the reset count of its stop, not the count at the take")
+{
+  constexpr auto        never  = std::numeric_limits<std::uint64_t>::max();
+  auto const            resets = std::make_shared<std::atomic<std::uint64_t>>(1);
+  detail::pdm_queue_tap tap{resets};
+  tap.wrote(1, vtime{100}, false, true);
+  tap.wrote(2, vtime{9'000}, false, true);
+  resets->store(2);
+  tap.wrote(3, vtime{50}, false, true);
+  auto const first = tap.take(tap.lock(), 8, 5'000, 1);
+  REQUIRE(first.size() == 1);
+  CHECK(first[0].pcm == 1);
+  auto const second = tap.take(tap.lock(), 8, never, 1);
+  REQUIRE(second.size() == 1);
+  CHECK(second[0].pcm == 2);
+  CHECK(tap.take(tap.lock(), 8, 0, 2).empty());
+  auto const last = tap.take(tap.lock(), 8, 50, 2);
+  REQUIRE(last.size() == 1);
+  CHECK(last[0].pcm == 3);
 }
 
 TEST_CASE("a kernel change mid-sample keeps the fraction of the PCM sample already sent")

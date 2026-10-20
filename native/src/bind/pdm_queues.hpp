@@ -13,6 +13,7 @@
 #include <deque>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -289,24 +290,25 @@ public:
   }
 
   /**
-   * @brief Takes the oldest samples, up to the first written after @p until_ps since the last
-   *        reset. Samples from before it are taken whatever their time.
+   * @brief Takes the oldest samples, up to the first past_bound() leaves queued.
    * @param held The queue's lock.
    * @param count Most samples taken.
-   * @param until_ps Latest write time taken, in picoseconds since the last reset.
+   * @param until_ps Latest write time taken, in picoseconds since the reset @p resets names.
+   * @param resets The reset count @p until_ps belongs to, the count now when none.
    * @return The samples, oldest first.
    */
   auto take(
-      core::link_guard const& held,
-      std::uint64_t           count,
-      std::uint64_t           until_ps = std::numeric_limits<std::uint64_t>::max())
+      core::link_guard const&      held,
+      std::uint64_t                count,
+      std::uint64_t                until_ps = std::numeric_limits<std::uint64_t>::max(),
+      std::optional<std::uint64_t> resets   = std::nullopt)
       -> std::vector<queued_pdm_sample> pre(held.guards(mutex_))
   {
     auto const first = samples_.begin();
     auto const last  = std::find_if(
         first, first + static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(count, samples_.size())),
-        [until_ps, now = resets_of(resets_)](queued_pdm_sample const& sample) {
-          return sample.resets == now and sample.at_ps > until_ps;
+        [until_ps, bound = resets.value_or(resets_of(resets_))](queued_pdm_sample const& sample) {
+          return past_bound(sample.resets, sample.at_ps, until_ps, bound);
         });
     std::vector<queued_pdm_sample> out(first, last);
     samples_.erase(first, last);

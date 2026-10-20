@@ -213,11 +213,13 @@ class FilterTap:
         what the read takes: no sample written past it, even one queued at the call. Already
         past, the read ends at once with the samples written by it.
 
-        A read that waits takes only the samples written by the time its wait stopped, in one
-        native step: later samples stay queued for the next read, even those a free run wrote
-        before this read resumed. So with `deadline` or neither, the samples depend only on
-        the input and the firmware, the same parked and running. Inside a free run `for_`
-        counts from the boundary where the wait registered, which wall time sets.
+        A read that waits takes only the samples written by the time its wait stopped, since
+        the last reset before that stop, in one native step: later samples stay queued for the
+        next read, even those a free run wrote before this read resumed, across a reset too.
+        Samples kept from before that reset are taken whatever their time. So with `deadline`
+        or neither, the samples depend only on the input and the firmware, the same parked and
+        running. Inside a free run `for_` counts from the boundary where the wait registered,
+        which wall time sets.
 
         Returns:
             Up to `n` samples, fewer when `for_` elapsed, `deadline` passed or the core went
@@ -233,9 +235,9 @@ class FilterTap:
         if n < 0:
             raise ValueError(f"cannot read {n} samples")
         if self._link.available() >= n:
-            return _samples(self._link.drain_until(n, cutoff(None, deadline)))
+            return _samples(self._link.drain_until(n, cutoff(None, deadline), None))
         stop = await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _samples(self._link.drain_until(n, cutoff(stop, deadline)))
+        return _samples(self._link.drain_until(n, cutoff(stop, deadline), stop.resets))
 
     def take(self) -> list[FilterSample]:
         """Every sample the filter wrote and not read yet, at once, never running the machine.
