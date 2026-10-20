@@ -264,6 +264,16 @@ struct rig : stm32_fixture
         == stop_reason::time);
   }
 
+  void run_before_events_at(std::uint64_t ps) const
+  {
+    REQUIRE(
+        run_to_stop({.max_instructions = icount{100'000'000},
+                     .until_time       = vtime{ps},
+                     .hold_from_until  = true})
+            .reason
+        == stop_reason::time);
+  }
+
   [[nodiscard]] auto pending(std::uint32_t irq) const -> bool
   {
     auto const word = target->mem().read(0xe000'e200u + 4 * (irq / 32), 4);
@@ -549,7 +559,9 @@ TEST_CASE(
   CHECK((r.read("DFLT0ISR") & (1u << 1)) == 0);
 }
 
-TEST_CASE("DATCAP 00 keeps every sample out with no DOVRF, SADEN 0 lets them through again")
+TEST_CASE(
+    "DATCAP 00 keeps every sample out with no DOVRF, SADEN 0 lets them through again, "
+    "popcorn's SADST 0 while disabled")
 {
   stream_rig const r;
   r.loud(bursts(8, {}));
@@ -606,7 +618,9 @@ TEST_CASE(
   }
 }
 
-TEST_CASE("SADSDLVR and SADANLVR keep the frame that set SDLVLF until SDLVLF is cleared")
+TEST_CASE(
+    "popcorn's SDLVLF latch: SADSDLVR and SADANLVR keep the frame that set SDLVLF until it "
+    "is cleared")
 {
   stream_rig const r;
   r.loud(bursts(
@@ -632,7 +646,9 @@ TEST_CASE("SADSDLVR and SADANLVR keep the frame that set SDLVLF until SDLVLF is 
   CHECK(r.read("SADANLVR") == later.frames[2].noise);
 }
 
-TEST_CASE("SADEN 0 then 1 restarts LEARN: frames count from the enable, the old ones are dropped")
+TEST_CASE(
+    "SADEN 0 then 1 restarts LEARN: frames count from the enable, the old ones are dropped, "
+    "popcorn's SADST 0 while disabled")
 {
   stream_rig const r;
   r.loud(bursts(
@@ -785,4 +801,51 @@ TEST_CASE("SNTHR 10 raises at SADEN naming SADCFGR, HYSTEN with SADMOD 10 logs o
   CHECK(r.read("SADCR") == 0);
   r.write("SADCR", (2u << 12) | 1u);
   CHECK(r.bits("SADCR", "SADACTIVE") == 1);
+}
+
+TEST_CASE(
+    "at a frame end's exact time with its sample event pending, a SADCR write keeps the SADST "
+    "of the frame it catches up, and SAD reads see that frame")
+{
+  sad_setup const setup{.sadcr = (1u << 12) | (2u << 1), .sadcfgr = 100u << 16};
+  auto const      start = [&setup](stream_rig const& r) {
+    r.loud(bursts(
+        6, {
+               {2, 4}
+    }));
+    r.sad(setup);
+    r.sinc4();
+  };
+  stream_rig const dry;
+  start(dry);
+  dry.run_until(dry.now() + 4 * 8 * sample_ps);
+  auto const want = expect(dry.tap->samples, setup, 2);
+  REQUIRE(want.frames.size() >= 3);
+  REQUIRE(want.frames[1].phase == stm32::sad_phase::monitor);
+  REQUIRE(want.frames[2].phase == stm32::sad_phase::detect);
+  auto const at          = dry.tap->samples[want.ends[2]].at;
+  auto const due_pending = [at](stream_rig const& r) {
+    auto const snap = r.target->snapshot();
+    return std::ranges::any_of(
+        snap.data().events.pending, [at](core::event const& e) { return e.due_ps == at; });
+  };
+  {
+    stream_rig const r;
+    start(r);
+    r.run_before_events_at(at);
+    REQUIRE(r.now() == at);
+    REQUIRE(due_pending(r));
+    REQUIRE(r.bits("SADCR", "SADST") == 1);
+    r.write("SADCR", setup.sadcr | 1u);
+    CHECK(r.bits("SADCR", "SADST") == 3);
+  }
+  stream_rig const r;
+  start(r);
+  r.run_until(at - 4 * sample_ps);
+  r.write("DFLT0ISR", sad_level_flag);
+  r.run_before_events_at(at);
+  REQUIRE(due_pending(r));
+  CHECK(r.read("SADSDLVR") == want.frames[2].level);
+  CHECK(r.read("SADANLVR") == want.frames[2].noise);
+  CHECK(r.phase() == 3);
 }

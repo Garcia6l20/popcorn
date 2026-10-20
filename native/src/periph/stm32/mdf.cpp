@@ -337,9 +337,13 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        the state before each sample whether it reaches the RXFIFO: 00 never, 01 in DETECT, so
  *        from the frame after the entry through the frame that leaves, 1x always. A sample kept
  *        out sets no DOVRF and reaches the tap with `captured` false. SADEN 0 lets every sample
- *        through, 40.4.10. SADCR FRSIZE, DETCFG, SADMOD, HYSTEN, DATCAP and every SADCFGR field are
- *        protected while SADACTIVE, Table 401. A reserved SNTHR raises unmodelled_config at SADEN 0
- *        to 1, HYSTEN with SADMOD 1x logs once and raises model_error under `strict_peripherals`.
+ *        through, 40.4.10. Popcorn choices: the SAD sees only the samples NBDIS keeps, where
+ *        Figure 379 taps it at the DFLT0 output and 40.4.9 says NBDIS only keeps samples out of the
+ *        RXFIFO, and a partial SAD frame carries across a DFLT0 stop and start. SADCR writes catch
+ *        up first and keep the SADST the catch-up set. SADCR FRSIZE, DETCFG, SADMOD, HYSTEN, DATCAP
+ *        and every SADCFGR field are protected while SADACTIVE, Table 401. A reserved SNTHR raises
+ *        unmodelled_config at SADEN 0 to 1, HYSTEN with SADMOD 1x logs once and raises model_error
+ *        under `strict_peripherals`.
  */
 class mdf final : public dispatch_model<mdf, mdf_state>, public pdm_port, public clock_listener
 {
@@ -1448,6 +1452,9 @@ void mdf::sad_written(std::uint32_t old, std::uint32_t now)
   now             = protect(sad.cr, old, now, sad.cr_protected, sad.active.of(old) != 0);
   regs_.poke(sad.cr.offset, old);
   settle();
+  auto const phase = sad.phase.of(regs_.peek(sad.cr.offset));
+  old              = sad.phase.with(old, phase);
+  now              = sad.phase.with(now, phase);
   regs_.poke(sad.cr.offset, now);
   if(sad.enable.of(old) == 0 and sad.enable.of(now) != 0)
   {
