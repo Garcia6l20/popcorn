@@ -295,6 +295,36 @@ def test_a_reset_of_any_kind_keeps_queued_input_and_kept_samples(
     assert [s.at for s in got] == [sample_at(anchor, k) for k in range(32)]
 
 
+@pytest.mark.parametrize("read_first", [False, True], ids=["unread", "isr_read"])
+def test_a_reset_between_two_samples_takes_exactly_the_bits_clocked_before_it(
+    u575: popcorn.PartDescription, read_first: bool
+) -> None:
+    m = machine(u575)
+    data, count, _ = pdm_16k()
+    bits = bits_of(data, count)
+    mic = m.periph.MDF1.mic(0, "rising")
+    asyncio.run(mic.write_pdm(data, bits=count))
+    anchor = cck(m)
+    sitf(m)
+    peer_filter(m)
+    asyncio.run(m.run(for_=us(62.5 * 7 + 40)))
+    at = m.time
+    assert sample_at(anchor, 6) < at < sample_at(anchor, 7)
+    if read_first:
+        assert m.periph.MDF1.DFLT0ISR.RXNEF == 1
+    m.reset(ResetKind.SOFTWARE)
+    consumed = edges_by(anchor, at)
+    assert consumed % BITS_PER_SAMPLE != 0
+    assert mic.queued_bits == count - consumed
+    assert len(m.periph.MDF1.output(0).take()) == 7
+    clocked(m)
+    cck(m)
+    sitf(m)
+    peer_filter(m)
+    got = read(m.periph.MDF1.output(0), 32)
+    assert [s.pcm for s in got] == run_chain(bits[consumed:], PEER).pcm[:32]
+
+
 def test_a_full_tap_drops_its_oldest_samples_and_cycles_keep_every_queue_bounded(
     u575: popcorn.PartDescription,
 ) -> None:

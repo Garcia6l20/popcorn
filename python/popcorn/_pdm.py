@@ -61,8 +61,8 @@ class PdmMic:
     The model pulls bits lazily: at each sample a filter completes, at each register access
     whose result depends on them and at each write. `queued_samples`, `queued_bits` and
     `idle_bits` count what it pulled so far, so with no filter running they can lag the clock.
-    A reset stops the clock: the bits after the model's last pull stay queued and are sent
-    once the firmware enables the interface again.
+    A reset stops the clock: the bits clocked up to its time are taken, the rest stay queued
+    and are sent once the firmware enables the interface again.
 
     With RFOVRF set the model keeps delivering exact samples, where silicon gives invalid ones,
     RM0456 39.4.8.

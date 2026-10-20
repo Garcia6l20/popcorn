@@ -5,6 +5,7 @@
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/core_hold.hpp>
+#include <popcorn/periph/reset_listener.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -181,6 +182,19 @@ void machine::run_state::install_hooks()
 
 void machine::run_state::reset_machine(reset_kind kind)
 {
+  {
+    handler_scope const scope{in_handler};
+    for(auto const& slot : owner.peripherals_)
+    {
+      if(slot)
+      {
+        if(auto* const listener = dynamic_cast<periph::reset_listener*>(slot->model.get()))
+        {
+          listener->before_reset(kind);
+        }
+      }
+    }
+  }
   ++memory_generation;
   retired = {};
   owner.scheduler_.restore({}, 0);

@@ -6,6 +6,7 @@
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/reset_listener.hpp>
 #include <popcorn/periph/stm32/pdm.hpp>
 
 #include <algorithm>
@@ -344,13 +345,20 @@ using handler = void (mdf::*)(std::uint32_t old, std::uint32_t now);
  *        and every SADCFGR field are protected while SADACTIVE, Table 401. A reserved SNTHR raises
  *        unmodelled_config at SADEN 0 to 1, HYSTEN with SADMOD 1x logs once and raises model_error
  *        under `strict_peripherals`.
+ *
+ *        A reset of any kind first settles every serial interface to the reset's time, through
+ *        periph::reset_listener, so each source gives exactly the bits clocked before it.
  */
-class mdf final : public dispatch_model<mdf, mdf_state>, public pdm_port, public clock_listener
+class mdf final : public dispatch_model<mdf, mdf_state>,
+                  public pdm_port,
+                  public clock_listener,
+                  public reset_listener
 {
 public:
   mdf(model_context& ctx, peripheral_desc const& desc, dfilter_layout layout);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void before_reset(reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
@@ -786,6 +794,11 @@ void mdf::reset(register_file& regs, reset_kind)
     request.set(false);
   }
   update_irq();
+}
+
+void mdf::before_reset(reset_kind)
+{
+  settle();
 }
 
 void mdf::on_event(std::uint32_t kind, std::uint64_t payload)

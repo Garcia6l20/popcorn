@@ -2,10 +2,12 @@
 
 #include <popcorn/periph/core_hold.hpp>
 #include <popcorn/periph/lines.hpp>
+#include <popcorn/periph/reset_listener.hpp>
 
 namespace popcorn::periph
 {
 core_hold_listener::~core_hold_listener() = default;
+reset_listener::~reset_listener()         = default;
 
 irq_line::irq_line(line_bus& bus, std::uint32_t source) noexcept : bus_{&bus}, source_{source}
 {}
