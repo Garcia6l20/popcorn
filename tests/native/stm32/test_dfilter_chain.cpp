@@ -242,6 +242,50 @@ constexpr std::string_view chain_vectors[]{
 };
 
 constexpr std::string_view modulator_vectors[]{"16k", "32k", "44k1", "64k", "overload"};
+constexpr std::string_view sad_vectors[]{"noise", "fixed", "ambient"};
+
+void check_sad(std::string_view name)
+{
+  auto const document = load(std::string{"sad_"} + std::string{name} + ".json");
+  for(auto const& run : member(document, "runs").as_array())
+  {
+    auto const& config = member(run, "config");
+    auto const  code   = [&](std::string_view key) {
+      return static_cast<std::uint8_t>(integer(member(config, key)));
+    };
+    stm32::sad_config const setup{
+        .mode       = code("sadmod"),
+        .frame      = code("frsize"),
+        .learn      = code("lfrnb"),
+        .hangover   = code("hgovr"),
+        .slope      = code("anslp"),
+        .threshold  = code("snthr"),
+        .hysteresis = member(config, "hysten").as<json::boolean>(),
+        .floor      = static_cast<std::uint16_t>(integer(member(config, "anmin")))};
+    auto const& hex = member(run, "pcm").as<json::string>();
+    REQUIRE(hex.size() % 6 == 0);
+    stm32::sad_state              state;
+    std::vector<stm32::sad_frame> got;
+    for(std::size_t i = 0; i < hex.size(); i += 6)
+    {
+      auto const word = static_cast<std::int32_t>(std::stoul(hex.substr(i, 6), nullptr, 16));
+      if(auto const frame = stm32::sad_feed(state, setup, (word << 8) >> 8))
+      {
+        got.push_back(*frame);
+      }
+    }
+    auto const& frames = member(run, "frames").as_array();
+    REQUIRE(got.size() == frames.size());
+    for(std::size_t i = 0; i < got.size(); ++i)
+    {
+      INFO("frame " << i);
+      CHECK(got[i].level == integer(frames[i][0]));
+      CHECK(got[i].noise == integer(frames[i][1]));
+      CHECK(static_cast<std::int64_t>(got[i].phase) == integer(frames[i][2]));
+      CHECK(got[i].changed == (integer(frames[i][3]) != 0));
+    }
+  }
+}
 }
 
 TEST_CASE("every committed MDF vector has a case here")
@@ -254,6 +298,10 @@ TEST_CASE("every committed MDF vector has a case here")
   for(auto const name : modulator_vectors)
   {
     expected.insert(std::string{"modulator_"} + std::string{name} + ".json");
+  }
+  for(auto const name : sad_vectors)
+  {
+    expected.insert(std::string{"sad_"} + std::string{name} + ".json");
   }
   std::set<std::string> found;
   for(auto const& entry : std::filesystem::directory_iterator(vector_dir()))
@@ -461,4 +509,71 @@ TEST_CASE("modulator 64k")
 TEST_CASE("modulator overload")
 {
   check_modulator("overload");
+}
+
+TEST_CASE("sad noise: SADMOD 00 bursts over noise, with and without hysteresis")
+{
+  check_sad("noise");
+}
+
+TEST_CASE("sad fixed: SADMOD 01, a full-scale negative burst saturates SDLVL")
+{
+  check_sad("fixed");
+}
+
+TEST_CASE("sad ambient: SADMOD 10 and 11 on a rising then falling ambient level")
+{
+  check_sad("ambient");
+}
+
+TEST_CASE("ANLVL saturates below 2^15, a fraction of one LSB still falls")
+{
+  stm32::sad_config const setup{.mode = 2, .slope = 7, .floor = 8191};
+  stm32::sad_state        state{.phase = stm32::sad_phase::monitor, .noise = (1u << 27) - 2};
+  std::optional<stm32::sad_frame> frame;
+  for(int i = 0; i < 8; ++i)
+  {
+    frame = stm32::sad_feed(state, setup, 0x7FFF00);
+  }
+  REQUIRE(frame);
+  CHECK(state.noise == (1u << 27) - 1);
+  CHECK(frame->noise == 0x7FFF);
+  state = {.phase = stm32::sad_phase::monitor, .noise = 5};
+  for(int i = 0; i < 8; ++i)
+  {
+    frame = stm32::sad_feed(state, setup, 0);
+  }
+  CHECK(state.noise == 4);
+}
+
+TEST_CASE("FRSIZE 11x frames 512 samples, LFRNB 1xx learns over 32 frames, HGOVR 7 is 512 frames")
+{
+  stm32::sad_config const setup{
+      .mode = 1, .frame = 7, .learn = 5, .hangover = 7, .threshold = 0, .floor = 100};
+  stm32::sad_state              state;
+  std::size_t                   samples = 0;
+  std::vector<stm32::sad_frame> frames;
+  auto const                    feed = [&](std::int32_t pcm, std::size_t count) {
+    for(std::size_t k = 0; k < count; ++k)
+    {
+      ++samples;
+      if(auto const frame = stm32::sad_feed(state, setup, pcm))
+      {
+        CHECK(samples % 512 == 0);
+        frames.push_back(*frame);
+      }
+    }
+  };
+  feed(1000 << 8, 32 * 512);
+  REQUIRE(frames.size() == 32);
+  CHECK(frames[30].phase == stm32::sad_phase::learn);
+  CHECK(frames[31].phase == stm32::sad_phase::monitor);
+  CHECK(frames[31].noise == 1000);
+  feed(1000 << 8, 512);
+  CHECK(frames.back().phase == stm32::sad_phase::detect);
+  feed(0, 512 * 512);
+  CHECK(frames.back().phase == stm32::sad_phase::detect);
+  feed(0, 512);
+  CHECK(frames.back().phase == stm32::sad_phase::monitor);
+  CHECK(frames.back().changed);
 }

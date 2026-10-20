@@ -379,4 +379,191 @@ constexpr auto hpf(hpf_state& state, std::uint8_t hpfc, std::int64_t x, bool& sa
   state = {};
   return out;
 }
+
+/**
+ * @brief SADCR.SADST codes of the sound activity detector, RM0456 40.8.11.
+ */
+enum class sad_phase : std::uint8_t
+{
+  learn   = 0,
+  monitor = 1,
+  detect  = 3,
+};
+
+/**
+ * @brief Sound activity detector settings, the SADCR and SADCFGR field codes of RM0456 40.8.11
+ *        and 40.8.12. `threshold` is SNTHR, 0 to 9.
+ */
+struct sad_config
+{
+  std::uint8_t  mode{};
+  std::uint8_t  frame{};
+  std::uint8_t  learn{};
+  std::uint8_t  hangover{};
+  std::uint8_t  slope{};
+  std::uint8_t  threshold{};
+  bool          hysteresis{};
+  std::uint16_t floor{};
+
+  friend auto operator==(sad_config const&, sad_config const&) -> bool = default;
+};
+
+/**
+ * @brief Sound activity detector state, reset at each SADEN 0 to 1. `noise` is ANLVL with 12
+ *        fractional bits.
+ */
+struct sad_state
+{
+  sad_phase     phase{sad_phase::learn};
+  std::uint32_t sum{};
+  std::uint16_t count{};
+  std::uint8_t  learned{};
+  std::uint32_t learn_sum{};
+  std::uint32_t noise{};
+  std::uint16_t hang{};
+
+  friend auto operator==(sad_state const&, sad_state const&) -> bool = default;
+};
+
+/**
+ * @brief One frame of the sound activity detector: SDLVL, ANLVL's integer part, the state
+ *        after the frame and whether the frame entered or left DETECT.
+ */
+struct sad_frame
+{
+  std::uint16_t level;
+  std::uint16_t noise;
+  sad_phase     phase;
+  bool          changed;
+
+  friend auto operator==(sad_frame const&, sad_frame const&) -> bool = default;
+};
+
+namespace dfilter_detail
+{
+constexpr int                           noise_fraction = 12;
+constexpr std::uint32_t                 noise_max      = (std::uint32_t{1} << 27) - 1;
+constexpr std::uint32_t                 level_max      = 0x7FFF;
+constexpr std::array<std::uint64_t, 10> sad_halves{3, 4, 6, 8, 12, 16, 24, 32, 48, 64};
+
+constexpr auto sad_rise(std::uint32_t noise, std::uint8_t slope) -> std::uint32_t
+{
+  return std::min(noise + (noise >> (12 - slope)), noise_max);
+}
+
+constexpr auto sad_fall(std::uint32_t noise, std::uint8_t slope) -> std::uint32_t
+{
+  auto const shift = 10 - slope;
+  return noise - ((noise + (std::uint32_t{1} << shift) - 1) >> shift);
+}
+
+constexpr auto sad_track(std::uint32_t noise, std::uint32_t level, std::uint8_t slope)
+    -> std::uint32_t
+{
+  auto const down = sad_fall(noise, slope);
+  return std::uint64_t{level} << noise_fraction < down ? down : sad_rise(noise, slope);
+}
+
+constexpr auto sad_above(std::uint64_t signal, std::uint64_t base, std::size_t code) -> bool
+{
+  return 2 * signal > base * sad_halves[code];
+}
+}
+
+/**
+ * @brief Runs the sound activity detector over one DFLT0 output sample, RM0456 40.4.10.
+ *
+ *        The detector takes PCM[23:8]. SDLVL is the mean of its absolute value over the frame,
+ *        rounded down by a shift, saturated to 15 bits. The rest is popcorn's fixed point, the
+ *        RM gives none: ANLVL keeps 12 fractional bits, ANLVL_UP adds the value shifted right by
+ *        12 - ANSLP, ANLVL_DN subtracts it shifted right by 10 - ANSLP rounded up, so the
+ *        product is rounded down and a level of 1 can still fall, and every value saturates below
+ *        2^15. Thresholds compare exactly against the Table 400 gains. With SADMOD 00 a frame that
+ *        does not trigger against the ANLVL before it updates ANLVL, floored at ANMIN, SADMOD 1x
+ *        updates first and compares the new ANLVL x gain against 4 x ANMIN, SADMOD 01 compares
+ *        SDLVL against ANMIN x gain and keeps the LEARN mean. Every mode starts with LEARN frames,
+ *        which never trigger, Figure 380. A frame under the threshold in DETECT returns to MONITOR
+ *        when the hangover counter is 0, else decrements it, Figure 380. HYSTEN is ignored with
+ *        SADMOD 1x, where RM0456 forbids it.
+ * @param state Detector state, default at the enable.
+ * @param config Field codes, `threshold` 0 to 9.
+ * @param pcm Signed 24-bit DFLT0 output sample.
+ * @return the frame this sample completes.
+ */
+[[nodiscard]] constexpr auto sad_feed(sad_state& state, sad_config const& config, std::int32_t pcm)
+    -> std::optional<sad_frame>
+{
+  using namespace dfilter_detail;
+  auto const msb = pcm >> 8;
+  state.sum += static_cast<std::uint32_t>(msb < 0 ? -msb : msb);
+  auto const frame_bits = 3 + std::min<int>(config.frame, 6);
+  if(++state.count < (1u << frame_bits))
+  {
+    return std::nullopt;
+  }
+  auto const level = std::min(state.sum >> frame_bits, level_max);
+  state.sum        = 0;
+  state.count      = 0;
+  auto changed     = false;
+  if(state.phase == sad_phase::learn)
+  {
+    state.learn_sum += level;
+    auto const learn_bits = 1 + std::min<int>(config.learn, 4);
+    if(++state.learned == (1u << learn_bits))
+    {
+      state.noise = state.learn_sum << (noise_fraction - learn_bits);
+      state.phase = sad_phase::monitor;
+    }
+    return sad_frame{
+        static_cast<std::uint16_t>(level),
+        static_cast<std::uint16_t>(state.noise >> noise_fraction), state.phase, changed};
+  }
+  std::size_t code = config.threshold;
+  if(config.hysteresis and config.mode < 2 and state.phase == sad_phase::detect and code != 0)
+  {
+    --code;
+  }
+  auto const shifted_level = std::uint64_t{level} << noise_fraction;
+  auto const floor         = std::uint64_t{config.floor} << noise_fraction;
+  auto       triggered     = false;
+  if(config.mode == 0)
+  {
+    triggered = sad_above(shifted_level, state.noise, code);
+    if(not triggered)
+    {
+      state.noise = std::max<std::uint32_t>(
+          sad_track(state.noise, level, config.slope), static_cast<std::uint32_t>(floor));
+    }
+  }
+  else if(config.mode == 1)
+  {
+    triggered = sad_above(level, config.floor, code);
+  }
+  else
+  {
+    state.noise = sad_track(state.noise, level, config.slope);
+    triggered   = std::uint64_t{state.noise} * sad_halves[code] > 8 * floor;
+  }
+  if(triggered)
+  {
+    changed     = state.phase == sad_phase::monitor;
+    state.phase = sad_phase::detect;
+    state.hang  = static_cast<std::uint16_t>(4u << config.hangover);
+  }
+  else if(state.phase == sad_phase::detect)
+  {
+    if(state.hang == 0)
+    {
+      state.phase = sad_phase::monitor;
+      changed     = true;
+    }
+    else
+    {
+      --state.hang;
+    }
+  }
+  return sad_frame{
+      static_cast<std::uint16_t>(level), static_cast<std::uint16_t>(state.noise >> noise_fraction),
+      state.phase, changed};
+}
 }

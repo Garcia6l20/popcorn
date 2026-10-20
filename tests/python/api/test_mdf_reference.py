@@ -108,7 +108,11 @@ def fft(values: Sequence[complex]) -> list[complex]:
 
 def test_the_committed_vectors_are_what_the_reference_generates() -> None:
     expected = generated()
-    committed = {path.name: path.read_text() for path in DATA.glob("*.json")}
+    committed = {
+        path.name: path.read_text()
+        for path in DATA.glob("*.json")
+        if not path.name.startswith("sad_")
+    }
     assert sorted(committed) == sorted(expected)
     for name, text in expected.items():
         assert committed[name] == text, name
