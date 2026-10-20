@@ -11,7 +11,23 @@ from typing import Literal
 
 import pytest
 
-from .mdf_golden import DATA, HOLD, PEER_BIT_RATE, expand, generated, prbs7, tone, unpack
+from .mdf_golden import (
+    BIT_RATE,
+    DATA,
+    DISCARD_CARRY,
+    HOLD,
+    INT_CARRY,
+    OVERLOAD,
+    SATURATING,
+    decode_config,
+    expand,
+    generated,
+    prbs7,
+    sine_bits,
+    step_bits,
+    tone,
+    unpack,
+)
 from .mdf_reference import (
     PCM_MAX,
     PCM_MIN,
@@ -244,9 +260,9 @@ def test_discard_runs_before_the_int() -> None:
     assert out == [sum(plain[i : i + 4]) for i in range(0, len(plain) - 3, 4)]
 
 
-def test_the_loud_peer_vector_saturates_on_its_peaks_and_the_quiet_one_never() -> None:
-    for name, expect in (("chain_peer_loud.json", True), ("chain_peer.json", False)):
-        run = generated_run(name)
+def test_the_loud_pdm_16k_vector_saturates_on_its_peaks_and_the_quiet_one_never() -> None:
+    for name, expect in (("chain_pdm_16k_loud.json", True), ("chain_pdm_16k.json", False)):
+        run = committed_run(name)
         flags = [bool(f) for f in expand([(int(f), int(c)) for f, c in run["saturated"]])]
         pcm = expand([(int(v), int(c)) for v, c in run["pcm"]])
         assert any(flags) == expect
@@ -255,22 +271,22 @@ def test_the_loud_peer_vector_saturates_on_its_peaks_and_the_quiet_one_never() -
             assert all(abs(v) >= peak // 2 for v, f in zip(pcm, flags, strict=True) if f)
 
 
-def generated_run(name: str) -> dict[str, list[list[int]]]:
+def committed_run(name: str) -> dict[str, list[list[int]]]:
     return json.loads((DATA / name).read_text())["runs"][0]
 
 
 def test_the_vectors_decode_to_the_reference_output() -> None:
     run = json.loads((DATA / "chain_discard_skip.json").read_text())["runs"][0]
-    config = ChainConfig(**run["config"])
+    config = decode_config(run["config"])
     out = run_chain(unpack(run["bits"]), config)
     assert out.pcm == expand([(int(v), int(c)) for v, c in run["pcm"]])
 
 
-def test_the_modulator_reaches_80_db_snr_through_the_peer_chain() -> None:
+def test_the_modulator_reaches_80_db_snr_through_cic5_d32_and_rsflt() -> None:
     size = 4096
     settle = 256
     bin_ = 257
-    pcm_rate = PEER_BIT_RATE // HOLD
+    pcm_rate = BIT_RATE // HOLD
     count = (size + settle) * 128 // HOLD
     pcm = tone(-12, bin_ * 16_000 / size, pcm_rate, count)
     bits = modulate(pcm, [HOLD] * count)
@@ -293,6 +309,45 @@ def test_the_modulator_tracks_dc_at_0_9_full_scale(level: int) -> None:
 def test_the_modulator_overload_stays_bounded() -> None:
     bits = modulate([32767] * 64, [1024] * 64)
     assert sum(bits[4096:]) / len(bits[4096:]) > 0.99
+
+
+def unclamped(pcm16: Sequence[int], bits_per_sample: Sequence[int]) -> list[int]:
+    i1 = 0
+    i2 = 0
+    bits: list[int] = []
+    for x, count in zip(pcm16, bits_per_sample, strict=True):
+        for _ in range(count):
+            fb = 32768 if i2 >= 0 else -32768
+            i2 += i1 - 2 * fb
+            i1 += x - fb
+            bits.append(1 if fb > 0 else 0)
+    return bits
+
+
+def test_the_clamps_shape_the_recovery_after_an_overload() -> None:
+    clamped = modulate(*OVERLOAD)
+    loose = unclamped(*OVERLOAD)
+    assert sum(a != b for a, b in zip(clamped, loose, strict=True)) > 1000
+
+
+def test_the_int_keeps_its_low_24_bits() -> None:
+    bits = step_bits(2048 * 16)
+    base = ChainConfig(order=4, decimation=16, scale=0x04)
+    plain = run_chain(bits, base).pcm
+    out = run_chain(bits, dataclasses.replace(base, int_value=128, int_div=1)).pcm
+    sums = [sum(plain[i : i + 128]) for i in range(0, len(plain) - 127, 128)]
+    assert out == [wrap(total, 24) for total in sums]
+    assert any(total > PCM_MAX for total in sums)
+
+
+def test_satf_carries_through_discard_and_int() -> None:
+    loud = sine_bits(-6, 1000, BIT_RATE, 16384)
+    flags = run_chain(loud, SATURATING).saturated
+    assert any(flags[:32])
+    assert not flags[32]
+    assert run_chain(loud, DISCARD_CARRY).saturated[0]
+    assert flags[30] and not flags[32]
+    assert run_chain(loud, INT_CARRY).saturated[10]
 
 
 @pytest.mark.parametrize(

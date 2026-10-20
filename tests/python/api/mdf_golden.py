@@ -5,8 +5,10 @@ Run `uv run python -m tests.python.api.mdf_golden` from the repository root to r
 the expected PCM and SATF flags. Each `modulator_<name>.json` holds PCM input, bit counts per
 sample and the expected bits.
 
-Encodings: `bits` is `{"hex": ..., "count": n}`, bit i in byte i / 8 at weight 0x80 >> i % 8,
-or `{"runs": [[bit, count], ...]}`. `pcm` and `saturated` are run-length `[[value, count], ...]`.
+Encodings: `config` holds the `ChainConfig` fields, `order` as a string, "fastsinc" or "1" to
+"5", `hpf` and `int_value` null when off. `bits` is `{"hex": ..., "count": n}`, bit i in byte
+i / 8 at weight 0x80 >> i % 8, or `{"runs": [[bit, count], ...]}`. `pcm` and `saturated` are
+run-length `[[value, count], ...]`, `saturated` values 0 or 1.
 """
 
 from __future__ import annotations
@@ -21,8 +23,12 @@ from typing import Any
 from .mdf_reference import ChainConfig, modulate, run_chain
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "periph" / "mdf"
-PEER_BIT_RATE = 2_048_000
+BIT_RATE = 2_048_000
 HOLD = 16
+SATURATING = ChainConfig(order=5, decimation=32, scale=0x02)
+DISCARD_CARRY = ChainConfig(order=5, decimation=32, scale=0x02, discard=32)
+OVERLOAD = ([32767] * 8 + [0] * 8, [1024] * 16)
+INT_CARRY = ChainConfig(order=5, decimation=32, scale=0x02, int_value=3, int_div=4)
 
 type Json = dict[str, Any]
 
@@ -91,12 +97,20 @@ def unpack(encoded: Json) -> list[int]:
     return [(data[i // 8] >> (7 - i % 8)) & 1 for i in range(int(encoded["count"]))]
 
 
+def decode_config(encoded: Json) -> ChainConfig:
+    """The ChainConfig of a vector's `config`, whose `order` is a string."""
+    fields: dict[str, Any] = dict(encoded)
+    order = fields["order"]
+    fields["order"] = order if order == "fastsinc" else int(order)
+    return ChainConfig(**fields)
+
+
 def chain_run(config: ChainConfig, bits: Sequence[int], *, as_runs: bool = False) -> Json:
     """One run of a chain vector."""
     output = run_chain(bits, config)
     encoded: Json = {"runs": [list(r) for r in runs_of(bits)]} if as_runs else pack(bits)
     return {
-        "config": dataclasses.asdict(config),
+        "config": dataclasses.asdict(config) | {"order": str(config.order)},
         "bits": encoded,
         "pcm": [list(r) for r in runs_of(output.pcm)],
         "saturated": [[int(flag), count] for flag, count in runs_of(output.saturated)],
@@ -105,14 +119,15 @@ def chain_run(config: ChainConfig, bits: Sequence[int], *, as_runs: bool = False
 
 def chain_cases() -> dict[str, list[Json]]:
     """Every chain vector, by name."""
-    peer = ChainConfig(order=5, decimation=32, scale=0x2C, rsflt=True, hpf=2)
-    quiet = sine_bits(-12, 1000, PEER_BIT_RATE, 512 * 128)
-    loud = sine_bits(-6, 1000, PEER_BIT_RATE, 512 * 128)
-    half = sine_bits(-6, 1000, PEER_BIT_RATE // 2, 16384)
+    pdm_16k = ChainConfig(order=5, decimation=32, scale=0x2C, rsflt=True, hpf=2)
+    quiet = sine_bits(-12, 1000, BIT_RATE, 512 * 128)
+    loud = sine_bits(-6, 1000, BIT_RATE, 512 * 128)
+    half = sine_bits(-6, 1000, BIT_RATE // 2, 16384)
     noise = prbs7(4096)
+    step = step_bits(2048 * 16)
     cases: dict[str, list[Json]] = {
-        "peer": [chain_run(peer, quiet)],
-        "peer_loud": [chain_run(peer, loud)],
+        "pdm_16k": [chain_run(pdm_16k, quiet)],
+        "pdm_16k_loud": [chain_run(pdm_16k, loud)],
         "int_bypass": [chain_run(ChainConfig(order=4, decimation=8, int_div=128), noise)],
         "fastsinc": [chain_run(ChainConfig(order="fastsinc", decimation=16), noise)],
         "d2": [chain_run(ChainConfig(order=1, decimation=2), prbs7(1024))],
@@ -120,7 +135,7 @@ def chain_cases() -> dict[str, list[Json]]:
         "wrap": [
             chain_run(
                 ChainConfig(order=5, decimation=32, scale=0x20),
-                [1] * PEER_BIT_RATE,
+                [1] * BIT_RATE,
                 as_runs=True,
             )
         ],
@@ -141,6 +156,12 @@ def chain_cases() -> dict[str, list[Json]]:
                 ChainConfig(order=3, decimation=16, scale=0x04, int_value=8, int_div=div), half
             )
             for div in (128, 32, 4, 1)
+        ]
+        + [
+            chain_run(
+                ChainConfig(order=4, decimation=16, scale=0x04, int_value=128, int_div=1), step
+            ),
+            chain_run(INT_CARRY, loud[:16384]),
         ],
         "discard_skip": [
             chain_run(ChainConfig(order=4, decimation=8, discard=5, skip=3), noise),
@@ -151,11 +172,11 @@ def chain_cases() -> dict[str, list[Json]]:
                 ChainConfig(order=3, decimation=16, scale=0x04, discard=5, int_value=4, int_div=1),
                 noise,
             ),
+            chain_run(DISCARD_CARRY, loud[:16384]),
         ],
     }
     for order in (1, 2, 3, 4, 5):
         cases[f"sinc{order}"] = [chain_run(ChainConfig(order=order, decimation=16), noise)]
-    step = step_bits(2048 * 16)
     for hpfc in range(4):
         cases[f"hpf{hpfc}"] = [
             chain_run(ChainConfig(order=4, decimation=16, scale=0x02, hpf=hpfc), step)
@@ -164,19 +185,24 @@ def chain_cases() -> dict[str, list[Json]]:
 
 
 def modulator_cases() -> dict[str, Json]:
-    """Every modulator vector, by name: a sine then a ramp at four sample rates."""
+    """Every modulator vector, by name: a sine then a ramp at four sample rates, and an
+    overload then silence, whose recovery depends on the integrator clamps."""
     ramp = [-30000 + i * 60000 // 127 for i in range(128)]
     cases: dict[str, Json] = {}
     for name, rate in (("16k", 16_000), ("32k", 32_000), ("44k1", 44_100), ("64k", 64_000)):
         pcm = tone(-6, 1000, rate, 128) + ramp
-        counts = [
-            (i + 1) * PEER_BIT_RATE // rate - i * PEER_BIT_RATE // rate for i in range(len(pcm))
-        ]
+        counts = [(i + 1) * BIT_RATE // rate - i * BIT_RATE // rate for i in range(len(pcm))]
         cases[name] = {
             "pcm16": pcm,
             "bits_per_sample": counts,
             "bits": pack(modulate(pcm, counts)),
         }
+    pcm, counts = OVERLOAD
+    cases["overload"] = {
+        "pcm16": pcm,
+        "bits_per_sample": counts,
+        "bits": pack(modulate(pcm, counts)),
+    }
     return cases
 
 
