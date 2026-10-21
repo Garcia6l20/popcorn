@@ -380,7 +380,11 @@ struct wire_state
  *        handed, nor is its release. quiet() is false while a low cut waits for its hold or,
  *        closed, for its release: a sleeping system keeps its time frozen and would never reach
  *        them. So a break cut ahead delays an idle pause until its release is handed, an open
- *        one whose hold was handed does not. A low cut is erased only after its release.
+ *        one whose hold was handed does not. A receiver reset after the hold was handed ends it
+ *        at the receiver, which then ignores the release. The release is still handed, so
+ *        quiet() stays false until the first drain past t1: idle attempts before it are
+ *        abandoned, but the pause lands at the point where every member was quiescent, which
+ *        no drain moves. A low cut is erased only after its release.
  *
  *        Cuts never change errors: the shape and overlap checks run on every post as without
  *        cuts, against a record of the receiver's line that keeps every frame's extent, a cut

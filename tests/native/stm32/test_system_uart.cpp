@@ -1677,6 +1677,77 @@ auto break_ahead(variant const& how, bool closed) -> break_run
 }
 }
 
+namespace
+{
+auto break_reset(variant const& how) -> break_run
+{
+  constexpr std::int64_t t0 = 700 * us_ps;
+  constexpr std::int64_t t1 = 900 * us_ps;
+  pinned const           pin{how.one_cpu};
+  auto                   w = paired_world("link_rx", "link_rx", latency_20);
+  w.host(how);
+  REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+  {
+    auto const held = w.sys->lock();
+    auto const now  = std::max(w.sys->time_of(held, 0), w.sys->time_of(held, 1));
+    REQUIRE(
+        stm32::cut_link(*w.wires[0], *w.wires[1], core::sys_time{t0}, core::sys_time{t1}, true, now)
+        == core::sys_time{t0});
+  }
+  REQUIRE(w.resume(800 * us_ps).reason == core::pause_reason::system_time);
+  {
+    auto const held = w.sys->lock();
+    for(std::size_t index = 0; index < 2; ++index)
+    {
+      w.sys->reset(held, index, popcorn::reset_kind::software);
+      auto& target = *w.nodes[index]->target;
+      target.regs().write(*target.regs().find("pc"), sym("usart_ll", "idle"));
+    }
+  }
+  std::array<core::host_future<core::goal_reached>, 2> goals;
+  {
+    auto const held = w.sys->lock();
+    goals[0]        = w.sys->post_goal(held, 0, {.until = popcorn::address{0x0800'0001}});
+    goals[1] = w.sys->post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
+  }
+  core::host_future<core::pause> pending;
+  {
+    auto const held = w.sys->lock();
+    pending         = w.sys->resume(held);
+  }
+  auto const stopped = pending.get();
+  CHECK(goals[0].get().stopped.reason == stop_reason::idle);
+  {
+    auto const held = w.sys->lock();
+    w.sys->withdraw(held, 1);
+  }
+  w.collect();
+  return {.dump = w.dump(), .stopped = stopped, .seen = entries(w.nodes[1]->log())};
+}
+}
+
+TEST_CASE("an idle pause after receiver resets inside a break cut falls at the same point at any Q")
+{
+  std::optional<break_run> reference;
+  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  {
+    CAPTURE(how.name);
+    auto const seen = break_reset(how);
+    CHECK(seen.stopped.reason == core::pause_reason::idle);
+    MESSAGE("idle pause at ", seen.stopped.at.ps);
+    CHECK(seen.stopped.at.ps < 900 * us_ps);
+    if(reference)
+    {
+      CHECK(seen.stopped.at == reference->stopped.at);
+      CHECK(seen.dump == reference->dump);
+    }
+    else
+    {
+      reference = seen;
+    }
+  }
+}
+
 TEST_CASE("an idle pause waits for a break cut's hold and release, then the IDLE after it")
 {
   constexpr std::uint32_t link_idle  = 2;
