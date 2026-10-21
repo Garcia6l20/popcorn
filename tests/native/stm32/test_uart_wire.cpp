@@ -3424,3 +3424,36 @@ TEST_CASE("an abort past the barrier of a frame a cut truncates is final at its 
     }
   }
 }
+
+TEST_CASE("a carried abort of a handed frame a later recorded reset drops is final at a pause")
+{
+  constexpr std::int64_t  us   = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t  l    = 50 * us;
+  stm32::line_shape const slow = {.baud = 9600};
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    for(auto const reset : {true, false})
+    {
+      CAPTURE(reset);
+      stub_link  link{l, slow};
+      auto const s = q - 10 * us;
+      auto const a = q + 5 * us;
+      REQUIRE(a < s + static_cast<std::int64_t>(slow.frame_ps()));
+      link.window(0, q, {});
+      link.forth->started(link.frame(s));
+      link.forth->aborted(vtime{static_cast<std::uint64_t>(a)});
+      link.drain(0, q);
+      CHECK(received_starts(link.forth_port) == std::vector<std::int64_t>{s + l});
+      CHECK(saved_state(*link.forth).carried.size() == 1);
+      if(reset)
+      {
+        link.forth->receiver_reset(core::sys_time{q + us});
+      }
+      link.window(1, q, {});
+      CHECK_FALSE(pause_drain(link, 1, q + 2 * us).has_value());
+      CHECK(link.forth->quiet() == reset);
+      CHECK(saved_state(*link.forth).carried.size() == (reset ? 0U : 1U));
+    }
+  }
+}
