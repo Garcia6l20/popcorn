@@ -88,6 +88,7 @@ from popcorn._observe import (
 )
 from popcorn._option_bytes import OptionBytes
 from popcorn._part_description import PartDescription, load_description
+from popcorn._pdm import PdmPorts
 from popcorn._rcc import RccOptions
 from popcorn._refs import (
     Condition,
@@ -102,7 +103,15 @@ from popcorn._refs import (
 )
 from popcorn._snapshot import Snapshot
 from popcorn._stop import FrameReturn, Stop, stop_of
-from popcorn._streams import Board, Gated, PtyOpener, UartPorts, check_wait, deadline_ps
+from popcorn._streams import (
+    Board,
+    Gated,
+    PtyOpener,
+    UartPorts,
+    Waited,
+    check_wait,
+    deadline_ps,
+)
 from popcorn._supply import SupplyOptions
 from popcorn._unwind import Functions, Read32, return_point
 from popcorn._usb import UsbHostOptions, UsbHosts, checked_usb
@@ -636,6 +645,7 @@ class Machine:
         "_name",
         "_nvic",
         "_parked_ends",
+        "_pdm",
         "_peripherals",
         "_ports",
         "_posted_bodies",
@@ -826,6 +836,14 @@ class Machine:
             self._wait_until,
             self._post,
         )
+        self._pdm = PdmPorts(
+            self._handle.attach_pdm,
+            self._handle.attach_pdm_tap,
+            {name: self._handle.pdm_sitfs(name) for name in self._handle.pdm_names()},
+            aliases,
+            self._wait_until,
+            self._post,
+        )
         self._usb = UsbHosts(
             self._handle.attach_usb,
             self._handle.usb_names(),
@@ -853,7 +871,13 @@ class Machine:
             peripherals=(p.name for p in description.peripherals),
         )
         access = ViewAccess(
-            self._handle, self._ports.stream, self._audio.stream, self._usb.host, self._post
+            self._handle,
+            self._ports.stream,
+            self._audio.stream,
+            self._usb.host,
+            self._post,
+            self._pdm.mic,
+            self._pdm.output,
         )
         self._memory = Memory(access)
         self._registers = Registers(access, self._handle.register_names())
@@ -2335,6 +2359,9 @@ class Machine:
     def snapshot(self) -> Snapshot:
         """The whole machine state, restorable with `restore`, saved with `Snapshot.save`.
 
+        Models that compute lazily bring their state to the machine's time first: an MDF or
+        ADF takes the input bits clocked up to it, see `PdmMic`.
+
         Raises:
             MachineRunning: The machine is busy, from its handlers too.
             MachineBusy: The machine is a member of a linked system: its state is taken with
@@ -2373,7 +2400,9 @@ class Machine:
         the device as the snapshot had them. A HID stream likewise drops the input reports not
         read yet and gets back the output reports not yet taken by the device. A USB audio
         function drops the microphone frames not read yet and gets back the speaker samples not
-        yet sent, and its streams run or not as the snapshot had them.
+        yet sent, and its streams run or not as the snapshot had them. A `PdmMic` drops its
+        queued input, resets its modulator and clears `idle_bits`, a `FilterTap` drops the
+        samples not read yet and `dropped` restarts at 0.
         """
         self._refuse_member("restore")
         self._check_snapshot(snapshot)
@@ -2397,6 +2426,7 @@ class Machine:
         self._last_stop = None
         self._ports.discard()
         self._audio.discard()
+        self._pdm.discard()
         self._usb.discard()
         if self._arena is not None:
             self._arena.reset(snapshot.arena_offset)
@@ -2655,13 +2685,13 @@ class Machine:
         ready: _core.Predicate | Gated,
         for_: VirtualDuration | None,
         deadline: VirtualTime | None = None,
-    ) -> VirtualTime:
+    ) -> Waited:
         if isinstance(ready, Gated):
             return await self._wait_gated(ready, for_, deadline)
         if not self.busy:
             with contextlib.suppress(MachineRunning):
                 if ready.holds():
-                    return self.time
+                    return Waited(self.time, None)
         if self._handle.session_open():
             raw, ended = cast(
                 tuple[_core.StopInfo, bool],
@@ -2675,22 +2705,22 @@ class Machine:
                 raise _stop_error(
                     stop, f"the free run, while waiting for {ready.what()}", error_prefix(self)
                 )
-            return stop.time
+            return Waited(stop.time, stop.resets)
         stop = await self.wait_for(_Native(ready), for_=for_, deadline=deadline)
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
             raise _stop_error(stop, f"the run waiting for {ready.what()}", error_prefix(self))
-        return stop.time
+        return Waited(stop.time, stop.resets)
 
     async def _wait_gated(
         self,
         gated: Gated,
         for_: VirtualDuration | None,
         deadline: VirtualTime | None,
-    ) -> VirtualTime:
+    ) -> Waited:
         ready = gated.ready
         event = _Ready(lambda _: ready(), gate=gated.gate)
         if not self.busy and self._handler(event.ready)():
-            return self.time
+            return Waited(self.time, None)
         stop = await self.wait_for(event, for_=for_, deadline=deadline)
         if stop.reason is StopReason.USER and not event.fired:
             raise _stop_error(
@@ -2698,7 +2728,7 @@ class Machine:
             )
         if stop.reason not in (StopReason.USER, StopReason.TIME, StopReason.IDLE):
             raise _stop_error(stop, "the run waiting for a Python predicate", error_prefix(self))
-        return stop.time
+        return Waited(stop.time, stop.resets)
 
     async def wait_until(
         self,

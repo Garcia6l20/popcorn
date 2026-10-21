@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace popcorn::bind
@@ -45,13 +46,15 @@ public:
   /**
    * @brief Connects a queue to a port, replacing its far end.
    * @param port The UART.
+   * @param resets The machine's reset count, which tags each kept frame.
    * @param alive Cleared when the machine is destroyed.
    * @param host The machine's host, through which send() and queued() reach the UART.
    */
   [[= py::skip]] uart_queue(
-      periph::uart_port& port,
-      detail::alive_flag alive,
-      detail::host_ref   host);
+      periph::uart_port&  port,
+      core::reset_counter resets,
+      detail::alive_flag  alive,
+      detail::host_ref    host);
 
   /**
    * @brief Queues frames towards the firmware, one frame time apart.
@@ -112,6 +115,15 @@ public:
   [[= py::doc{"Whether the UART's RTS output says ready to receive."}]] [[nodiscard]] auto
       rts_ready() const -> bool;
 
+  /**
+   * @brief available() and the machine's reset count, read in one hold of the link lock, so
+   *        every frame counted carries a reset count at most the one returned. Passed to
+   *        drain_until(), that count keeps a reset run after this call from widening the drain.
+   */
+  [[= py::doc{"available() and the reset count, read together: no counted frame has a later "
+              "reset count."}]] [[nodiscard]] auto available_tagged() const
+      -> std::pair<std::uint64_t, std::uint64_t>;
+
   /** @brief Frames transmitted by the firmware and not drained yet. */
   [[= py::doc{"Frames transmitted by the firmware and not drained yet."}]] [[nodiscard]] auto
       available() const -> std::uint64_t;
@@ -133,13 +145,16 @@ public:
       drain(std::uint64_t count) -> std::vector<uart_frame>;
 
   /**
-   * @brief Takes the oldest transmitted frames whose stop bit ended by @p until_ps, in one
-   *        hold of the link lock: later frames stay queued.
+   * @brief Takes the oldest transmitted frames whose stop bit ended by @p until_ps, or before
+   *        the reset it counts from, in one hold of the link lock: later frames stay queued.
    * @param count Most frames taken.
-   * @param until_ps Latest stop bit end taken, in picoseconds since reset.
+   * @param until_ps Latest stop bit end taken, in picoseconds since the reset @p resets names.
+   * @param resets The machine's reset count @p until_ps belongs to, the count now when none.
    */
-  [[= py::doc{"Take at most count of the oldest frames whose at_ps is at most until_ps."}]] auto
-      drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<uart_frame>;
+  [[= py::doc{"Take at most count of the oldest frames whose at_ps is at most until_ps, or "
+              "queued before the reset resets counts from."}]] auto
+      drain_until(std::uint64_t count, std::uint64_t until_ps, std::optional<std::uint64_t> resets)
+          -> std::vector<uart_frame>;
 
   /** @brief Transmitted frames dropped because the queue held its limit. */
   [[= py::doc{"Transmitted frames dropped because the queue was full."}]] [[nodiscard]] auto
@@ -223,6 +238,7 @@ public:
    * @param decimation Frame time multiplier, 0 or 1 for the configured rate.
    * @param external_frame_hz Frame rate of an external clock master, 0 for none.
    * @param clock_wired A bus device drives the external clock at run time.
+   * @param resets The machine's reset count, which tags each kept frame.
    * @param alive Cleared when the machine is destroyed.
    * @param host The machine's host, through which the clock methods reach the SAI.
    */
@@ -232,8 +248,18 @@ public:
       std::uint32_t              decimation,
       std::uint32_t              external_frame_hz,
       bool                       clock_wired,
+      core::reset_counter        resets,
       detail::alive_flag         alive,
       detail::host_ref           host);
+
+  /**
+   * @brief available() and the machine's reset count, read in one hold of the link lock, so
+   *        every frame counted carries a reset count at most the one returned. Passed to
+   *        drain_until(), that count keeps a reset run after this call from widening the drain.
+   */
+  [[= py::doc{"available() and the reset count, read together: no counted frame has a later "
+              "reset count."}]] [[nodiscard]] auto available_tagged() const
+      -> std::pair<std::uint64_t, std::uint64_t>;
 
   /** @brief Frames transmitted and not drained yet. */
   [[= py::doc{"Frames transmitted and not drained yet."}]] [[nodiscard]] auto available() const
@@ -258,13 +284,16 @@ public:
   [[= py::doc{"Take at most count of the oldest transmitted frames."}]] auto
       drain(std::uint64_t count) -> std::vector<audio_record>;
   /**
-   * @brief Takes the oldest transmitted frames that ended by @p until_ps, in one hold of the
-   *        link lock: later frames stay queued.
+   * @brief Takes the oldest transmitted frames that ended by @p until_ps, or before the reset
+   *        it counts from, in one hold of the link lock: later frames stay queued.
    * @param count Most frames taken.
-   * @param until_ps Latest frame end taken, in picoseconds since reset.
+   * @param until_ps Latest frame end taken, in picoseconds since the reset @p resets names.
+   * @param resets The machine's reset count @p until_ps belongs to, the count now when none.
    */
-  [[= py::doc{"Take at most count of the oldest frames that ended by until_ps."}]] auto
-      drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<audio_record>;
+  [[= py::doc{"Take at most count of the oldest frames that ended by until_ps, or before the "
+              "reset resets counts from."}]] auto
+      drain_until(std::uint64_t count, std::uint64_t until_ps, std::optional<std::uint64_t> resets)
+          -> std::vector<audio_record>;
   /**
    * @brief Queues words for a receiving block, one per slot in slot order.
    * @param words Words, inactive slots included.

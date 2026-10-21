@@ -43,6 +43,7 @@ firmwares = {
 u575_env = {
     "POPCORN_U575_DESC": str(u575),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in firmwares.items()},
+    "POPCORN_MDF_VECTORS": str(periph_data / "mdf"),
     "POPCORN_FW_USB_CDC": str(
         project_dir / "examples" / "stm32u575" / "usb_cdc" / "prebuilt" / "usb_cdc.elf"
     ),
@@ -55,6 +56,14 @@ base = add_doctest(
     env={"POPCORN_STM32_BASE_DESC": str(periph_data / "stm32_base.json")},
 )
 base.private.include_dirs.append(private_dir)
+
+dfilter_chain = add_doctest(
+    "stm32-dfilter-chain",
+    [here / "test_dfilter_chain.cpp"],
+    static,
+    env={"POPCORN_MDF_VECTORS": str(periph_data / "mdf")},
+)
+dfilter_chain.private.include_dirs.append(private_dir)
 
 add_doctest("stm32-at25sf", [here / "test_at25sf.cpp"], with_devices)
 add_doctest("stm32-i2c-devices", [here / "test_i2c_devices.cpp"], with_devices)
@@ -85,6 +94,8 @@ u575_programs = [
         ("stm32-spi", "test_spi.cpp"),
         ("stm32-i2c", "test_i2c.cpp"),
         ("stm32-sai", "test_sai.cpp"),
+        ("stm32-mdf", "test_mdf.cpp"),
+        ("stm32-adf", "test_adf.cpp"),
         ("stm32-otg-fs", "test_otg_fs.cpp"),
         ("stm32-otg-fs-device", "test_otg_fs_device.cpp"),
         ("stm32-otg-fs-host", "test_otg_fs_host.cpp"),

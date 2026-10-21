@@ -18,9 +18,10 @@
 
 namespace kit
 {
-inline constexpr std::uint32_t rng_base   = 0xC0DE'0000;
-inline constexpr std::uint32_t rdr_empty  = 0xDEAD;
-inline constexpr std::uint32_t frame_mask = 0x1FF;
+inline constexpr std::uint32_t rng_base         = 0xC0DE'0000;
+inline constexpr std::uint32_t rdr_empty        = 0xDEAD;
+inline constexpr std::uint32_t frame_mask       = 0x1FF;
+inline constexpr std::uint32_t unmodelled_frame = 0x1A5;
 
 class counter_model : public popcorn::periph::model
 {
@@ -82,6 +83,7 @@ public:
   void               attach(std::shared_ptr<popcorn::periph::uart_endpoint> far_end) override;
 
 private:
+  std::string                                     name_;
   popcorn::register_desc const*                   transmit_;
   popcorn::register_desc const*                   receive_;
   popcorn::core::clock const*                     clock_;

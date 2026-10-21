@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import struct
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,7 @@ from .models_example import Timer
 MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
 MODEL_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "model.elf"
 USB_ELF = ROOT / "examples" / "stm32u575" / "usb_cdc" / "prebuilt" / "usb_cdc.elf"
+MDF1_SITF0CR = 0x4002_5080
 ENGINE_TEXT = re.compile(r"\bUC_ERR|\buc_[a-z_]+\(|unicorn", re.IGNORECASE)
 
 
@@ -92,6 +94,24 @@ def strict_unmodelled(_: Path, __: Machines) -> object:
     m.reset()
     asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
     return asyncio.run(m.call("touch_unmodelled"))
+
+
+def mdf_manchester(_: Path, __: Machines) -> object:
+    from popcorn.stm32 import mcu
+
+    m = popcorn.Machine(mcu("STM32U575QGIx"))
+    m.reset()
+    m.mem.write(MDF1_SITF0CR, struct.pack("<I", 0x1F21))
+    return None
+
+
+def _unmodelled(error: popcorn.PopcornError) -> bool:
+    return isinstance(error, popcorn.UnmodelledConfig) and (
+        error.peripheral,
+        error.register,
+        error.field,
+        error.value,
+    ) == ("MDF1", "SITF0CR", "SITFMOD", 2)
 
 
 def fault_in_running(_: Path, machines: Machines) -> object:
@@ -215,6 +235,7 @@ CASES = [
         lambda e: isinstance(e, popcorn.ModelError)
         and (e.peripheral, e.register) == ("UNMODELLED", "DATA"),
     ),
+    Case("unmodelled config", mdf_manchester, popcorn.UnmodelledConfig, _unmodelled),
     Case(
         "fault",
         fault_in_running,

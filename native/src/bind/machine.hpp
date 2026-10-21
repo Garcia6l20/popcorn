@@ -8,6 +8,7 @@
 #include "host_future.hpp"
 #include "image.hpp"
 #include "observability.hpp"
+#include "pdm.hpp"
 #include "pty.hpp"
 #include "snapshot.hpp"
 #include "usb.hpp"
@@ -150,6 +151,9 @@ struct[[= py::rename{"StopInfo"}]] stop_record
   [[= py::readonly]] std::uint64_t instructions{};
   /** @brief Virtual time since reset, in picoseconds. */
   [[= py::readonly]] std::uint64_t time_ps{};
+  /** @brief The machine's resets of any kind at the stop, which names the reset time_ps counts
+   * from. */
+  [[= py::readonly]] std::uint64_t resets{};
   /** @brief Decoded fault, set exactly when reason is fault. */
   [[= py::readonly]] std::optional<fault_record> fault{};
   /** @brief What caused the stop beyond its reason. */
@@ -1120,6 +1124,47 @@ public:
           bool               clock_wired) -> audio_link;
 
   /**
+   * @brief Names of the peripherals whose model is a built-in MDF or ADF, in description order.
+   */
+  [[= py::doc{"Names of the peripherals whose model is a built-in MDF or ADF."}]] [[nodiscard]] auto
+      pdm_names() const -> std::vector<std::string>;
+
+  /**
+   * @brief Serial interfaces of a built-in MDF or ADF, equal to its digital filters.
+   * @param peripheral MDF or ADF instance name.
+   * @throws config_error when the description has no such peripheral.
+   * @throws model_error when the peripheral's model is not a built-in MDF or ADF.
+   */
+  [[= py::doc{
+      "Serial interfaces, equal to digital filters, of a built-in MDF or ADF."}]] [[nodiscard]] auto
+      pdm_sitfs(std::string const& peripheral) const -> std::size_t;
+
+  /**
+   * @brief Connects one clock edge of an MDF or ADF serial interface to Python, replacing its
+   *        sensor.
+   * @param peripheral MDF or ADF instance name.
+   * @param sitf Serial interface index.
+   * @param edge `rising` or `falling`.
+   * @throws config_error when the description has no such peripheral, @p sitf is past the
+   *         last interface or @p edge is neither `rising` nor `falling`.
+   * @throws model_error when the peripheral's model is not a built-in MDF or ADF.
+   */
+  [[= py::doc{"Connect a serial interface edge of an MDF or ADF to Python."}]] [[nodiscard]] auto
+      attach_pdm(std::string const& peripheral, std::size_t sitf, std::string const& edge)
+          -> pdm_link;
+
+  /**
+   * @brief Connects the samples of an MDF or ADF digital filter to Python, replacing its tap.
+   * @param peripheral MDF or ADF instance name.
+   * @param filter Digital filter index.
+   * @throws config_error when the description has no such peripheral or @p filter is past the
+   *         last filter.
+   * @throws model_error when the peripheral's model is not a built-in MDF or ADF.
+   */
+  [[= py::doc{"Connect the samples of an MDF or ADF digital filter to Python."}]] [[nodiscard]] auto
+      attach_pdm_tap(std::string const& peripheral, std::size_t filter) -> pdm_tap_link;
+
+  /**
    * @brief Names of the peripherals whose built-in model has a virtual USB host, in description
    *        order.
    */
@@ -1333,6 +1378,11 @@ public:
   /** @brief Virtual time since reset, in picoseconds. */
   [[= py::doc{"Virtual time since reset, in picoseconds."}]] [[nodiscard]] auto time_ps() const
       -> std::uint64_t;
+
+  /** @brief core::machine::resets(), which names the reset time_ps() counts from. */
+  [[= py::doc{
+      "Resets of any kind so far, which name the reset time_ps counts from."}]] [[nodiscard]] auto
+      resets() const -> std::uint64_t;
 
   /**
    * @brief The value a function returning now leaves in its result registers,

@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
 from popcorn import _core
 from popcorn._devices import BusDevice
@@ -31,13 +31,22 @@ class Gated:
     ready: Callable[[], bool]
 
 
+class Waited(NamedTuple):
+    """Where a wait stopped: its virtual time, and the machine's resets of any kind there,
+    which name the reset `time` counts from. `resets` is None for a wait that ended at once on
+    a parked machine, where the count when the caller drains is the count at the stop."""
+
+    time: VirtualTime
+    resets: int | None
+
+
 type Waiter = Callable[
     [_core.Predicate | Gated, VirtualDuration | None, VirtualTime | None],
-    Awaitable[VirtualTime],
+    Awaitable[Waited],
 ]
 """Runs the machine until a predicate holds, a virtual duration elapses or a deadline passes,
-and returns the virtual time it stopped waiting at. A native predicate runs on the machine's
-thread with no GIL, the Python predicate of a `Gated` on that thread holding the GIL, as
+and returns where it stopped waiting. A native predicate runs on the machine's thread with no
+GIL, the Python predicate of a `Gated` on that thread holding the GIL, as
 `Machine.wait_until`'s, where its gate holds."""
 
 
@@ -174,11 +183,49 @@ def deadline_ps(deadline: VirtualTime | None) -> int | None:
     return None if deadline is None else min(max(0, deadline.ps), 2**64 - 1)
 
 
-def cutoff(stop: VirtualTime | None, deadline: VirtualTime | None) -> int:
+def cutoff(stop: Waited | None, deadline: VirtualTime | None) -> int:
     """The latest ready time a stream read takes, in picoseconds: the time its wait stopped,
     or none without a wait, capped at `deadline`."""
-    bound = 2**64 - 1 if stop is None else stop.ps
+    bound = 2**64 - 1 if stop is None else stop.time.ps
     return bound if deadline is None else min(bound, max(0, deadline.ps))
+
+
+class TaggedLink[T](Protocol):
+    """A native stream queue whose records carry the reset count they were queued under."""
+
+    def available_tagged(self) -> tuple[int, int]:
+        """The records queued and not drained yet, and the machine's reset count, read
+        together: no counted record carries a later count."""
+        ...
+
+    def predicate_available(self, count: int) -> _core.Predicate:
+        """A predicate true once the queued records reach `count`."""
+        ...
+
+    def drain_until(self, count: int, until_ps: int, resets: int | None) -> list[T]:
+        """Take at most `count` of the oldest records at or before `until_ps` of reset `resets`,
+        or queued before that reset."""
+        ...
+
+
+async def read_tagged[T](
+    link: TaggedLink[T],
+    n: int,
+    wait: Waiter,
+    for_: VirtualDuration | None,
+    deadline: VirtualTime | None,
+) -> list[T]:
+    """Take `n` records of `link` once queued, waiting with `wait` when fewer are, bounded by
+    where the read fixed its reference: the reset count read with the first check for a read
+    that does not wait, the wait's stop for one that does, and `deadline`. A reset the machine
+    runs between two native calls then changes nothing the read takes."""
+    available, resets = link.available_tagged()
+    if available >= n:
+        return link.drain_until(n, cutoff(None, deadline), resets)
+    stop = await wait(link.predicate_available(n), for_, deadline)
+    return link.drain_until(
+        n, cutoff(stop, deadline), resets if stop.resets is None else stop.resets
+    )
 
 
 class Poster(Protocol):
@@ -234,7 +281,8 @@ class UartStream:
     in the queue. An alias, such as a secure address window of the same USART, shares the
     stream of the peripheral serving it. The queue grows by one frame per transmitted character
     until read, about 16 bytes each, up to 1 Mi frames, about 16 MiB. A full queue drops its
-    oldest frame and counts it in `dropped`.
+    oldest frame and counts it in `dropped`. A reset keeps the queue: a frame from before it
+    keeps its time in the old base, and every read takes it whatever its time or deadline.
 
     `Machine.restore` empties the queue of transmitted frames not read yet, since they came
     from a run the restore undoes. Bytes written and not yet delivered are part of the UART
@@ -418,14 +466,16 @@ class UartStream:
         boundary or slice end, or past `for_` by the bound `Machine.run` gives for its `for_`.
 
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
-        what the read takes: no frame past it, even one queued at the call. Already past, the
-        read ends at once with the frames ready by it.
+        what the read takes: no frame of the current reset past it, even one queued at the
+        call. Already past, the read ends at once with the frames ready by it.
 
         A read that waits takes only the frames whose stop bit ended by the time its wait
-        stopped, in one native step: frames that end later stay queued for the next read, even
-        those a free run queued before this read resumed. So with `deadline` or neither, the
-        bytes depend only on what the firmware sent, the same parked and running. Inside a free
-        run `for_` counts from the boundary where the wait registered, which wall time sets.
+        stopped, since the last reset before that stop, in one native step: frames that end
+        later stay queued for the next read, even those a free run queued before this read
+        resumed, across a reset too. Frames kept from before that reset are taken whatever
+        their time. So with `deadline` or neither, the bytes depend only on what the firmware
+        sent, the same parked and running. Inside a free run `for_` counts from the boundary
+        where the wait registered, which wall time sets.
 
         Returns:
             Up to `n` bytes, fewer when `for_` elapsed, `deadline` passed or the core went
@@ -448,11 +498,12 @@ class UartStream:
         deadline: VirtualTime | None = None,
     ) -> list[Frame]:
         """As `read`, the frames with their times. A read that waits returns no frame with an
-        `at` past the time its wait stopped.
+        `at` past the time its wait stopped, since the last reset before that stop. Frames
+        kept from before that reset are taken whatever their time.
 
         `deadline` stops waiting at this virtual time instead, exclusive with `for_`, and caps
-        what the read takes: no frame past it, even one queued at the call. Already past, the
-        read ends at once with the frames ready by it.
+        what the read takes: no frame of the current reset past it, even one queued at the
+        call. Already past, the read ends at once with the frames ready by it.
 
         Raises:
             TypeError: Both `for_` and `deadline` given, or `deadline` is no `VirtualTime`.
@@ -461,10 +512,7 @@ class UartStream:
         self._check_unbridged()
         if n < 0:
             raise ValueError(f"cannot read {n} frames")
-        if self._link.available() >= n:
-            return _frames(self._link.drain_until(n, cutoff(None, deadline)))
-        stop = await self._wait(self._link.predicate_available(n), for_, deadline)
-        return _frames(self._link.drain_until(n, cutoff(stop, deadline)))
+        return _frames(await read_tagged(self._link, n, self._wait, for_, deadline))
 
     async def read_until(
         self,

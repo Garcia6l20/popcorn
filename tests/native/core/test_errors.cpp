@@ -154,6 +154,20 @@ TEST_CASE("model_error formats peripheral, register and offset")
   CHECK(contains(e, "20"));
 }
 
+TEST_CASE("unmodelled_config names register, field and value and is a model_error")
+{
+  popcorn::unmodelled_config const e{"MDF1", "SITF0CR", 0x80, "SITFMOD", 2, "Manchester mode"};
+  CHECK(e.peripheral() == "MDF1");
+  CHECK(e.reg() == "SITF0CR");
+  CHECK(e.offset() == 0x80);
+  CHECK(e.field() == "SITFMOD");
+  CHECK(e.value() == 2);
+  CHECK(std::string_view{e.what()} == "MDF1.SITF0CR.SITFMOD = 2 not modelled: Manchester mode");
+  auto const* const base = dynamic_cast<popcorn::model_error const*>(&e);
+  REQUIRE(base != nullptr);
+  CHECK(base->reg() == "SITF0CR");
+}
+
 TEST_CASE("machine_running, machine_busy and not_implemented carry a plain message")
 {
   CHECK(contains(popcorn::machine_running{"machine is running"}, "machine is running"));
@@ -170,6 +184,7 @@ TEST_CASE("the hierarchy derives every error from popcorn::error")
   CHECK(std::is_base_of_v<popcorn::emulation_error, popcorn::fault_error>);
   CHECK(std::is_base_of_v<popcorn::emulation_error, popcorn::budget_exceeded>);
   CHECK(std::is_base_of_v<popcorn::error, popcorn::model_error>);
+  CHECK(std::is_base_of_v<popcorn::model_error, popcorn::unmodelled_config>);
   CHECK(std::is_base_of_v<popcorn::error, popcorn::machine_running>);
   CHECK(std::is_base_of_v<popcorn::error, popcorn::machine_busy>);
   CHECK(std::is_base_of_v<popcorn::error, popcorn::not_implemented>);

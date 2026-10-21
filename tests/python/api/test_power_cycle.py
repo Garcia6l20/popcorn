@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import struct
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import popcorn
@@ -41,6 +42,24 @@ def power_on_reset(m: popcorn.Machine) -> None:
 
 def power_cycle(m: popcorn.Machine) -> None:
     m.power_cycle()
+
+
+@pytest.mark.parametrize("reset", [power_on_reset, power_cycle], ids=["power_on", "cycle"])
+def test_a_stop_counts_the_resets_before_it_outside_its_equality_hash_and_repr(
+    board: popcorn.Machine, reset: Callable[[popcorn.Machine], None]
+) -> None:
+    board.reset(ResetKind.SOFTWARE)
+    first = asyncio.run(board.run(for_=us(20)))
+    reset(board)
+    stop = asyncio.run(board.run(for_=us(20)))
+    assert first.resets >= 1
+    assert stop.resets == first.resets + 1
+    other = replace(stop, resets=stop.resets + 1)
+    assert other.resets == stop.resets + 1
+    assert other == stop
+    assert hash(other) == hash(stop)
+    assert repr(other) == repr(stop)
+    assert "resets" not in repr(stop)
 
 
 def test_ram_reads_0_flash_keeps_its_bytes_and_the_clock_restarts(board: popcorn.Machine) -> None:

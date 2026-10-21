@@ -49,6 +49,7 @@ auto record(stop const& stopped) -> stop_record
       .where        = owned(stopped.where),
       .instructions = stopped.instructions.value,
       .time_ps      = stopped.time.ps,
+      .resets       = stopped.resets,
       .fault        = std::nullopt,
       .detail       = stopped.detail,
   };
@@ -977,6 +978,11 @@ auto machine_handle::executed() const -> std::uint64_t
 auto machine_handle::time_ps() const -> std::uint64_t
 {
   return access([](core::machine& target) { return target.virtual_clock().time().ps; });
+}
+
+auto machine_handle::resets() const -> std::uint64_t
+{
+  return access([](core::machine& target) { return target.resets(); });
 }
 
 auto machine_handle::result_bits(arch::value_kind returns, arch::float_abi abi) const

@@ -26,9 +26,9 @@ namespace
 namespace nb = reflex::py::nb;
 
 constexpr std::array translated{
-    ^^config_error,    ^^image_error,     ^^symbol_error, ^^fault_error,
-    ^^budget_exceeded, ^^emulation_error, ^^model_error,  ^^machine_running,
-    ^^machine_busy,    ^^not_implemented, ^^error,
+    ^^config_error,    ^^image_error,     ^^symbol_error,      ^^fault_error,
+    ^^budget_exceeded, ^^emulation_error, ^^unmodelled_config, ^^model_error,
+    ^^machine_running, ^^machine_busy,    ^^not_implemented,   ^^error,
 };
 
 consteval auto untranslated_errors() -> std::size_t
@@ -134,6 +134,13 @@ void translate(std::exception_ptr const& thrown)
   catch(emulation_error const& e)
   {
     raise("EmulationError", e);
+  }
+  catch(unmodelled_config const& e)
+  {
+    raise(
+        "UnmodelledConfig", e, nb::arg("peripheral") = e.peripheral(),
+        nb::arg("register") = e.reg(), nb::arg("offset") = e.offset(), nb::arg("field") = e.field(),
+        nb::arg("value") = e.value());
   }
   catch(model_error const& e)
   {

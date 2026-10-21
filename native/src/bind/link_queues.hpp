@@ -1,15 +1,18 @@
 #pragma once
 
 #include <popcorn/core/link_guard.hpp>
+#include <popcorn/core/reset_counter.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/periph/stm32/audio.hpp>
 #include <popcorn/periph/uart.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -17,6 +20,24 @@
 
 namespace popcorn::bind::detail
 {
+/**
+ * @brief Whether a take bounded by @p until_ps leaves a record queued: one from a later reset
+ *        than the bound's, or from the same reset and later than the bound. A record from an
+ *        earlier reset is taken whatever its time.
+ * @param tag The machine's reset count when the record was queued.
+ * @param at_ps The record's time, in picoseconds since the reset @p tag names.
+ * @param until_ps The bound, in picoseconds since the reset @p resets names.
+ * @param resets The reset count the bound belongs to.
+ */
+[[nodiscard]] constexpr auto past_bound(
+    std::uint64_t tag,
+    std::uint64_t at_ps,
+    std::uint64_t until_ps,
+    std::uint64_t resets) noexcept -> bool
+{
+  return tag > resets or (tag == resets and at_ps > until_ps);
+}
+
 /** @brief Transmitted frames a UART link keeps before dropping the oldest, about 16 MiB. */
 inline constexpr std::uint64_t uart_frame_limit = std::uint64_t{1} << 20;
 
@@ -29,6 +50,8 @@ struct queued_uart_frame
   std::uint64_t at_ps{};
   /** @brief Whether it was a break. */
   bool brk{};
+  /** @brief The machine's reset count when it was queued. */
+  std::uint64_t resets{};
 };
 
 /**
@@ -39,6 +62,20 @@ struct queued_uart_frame
 class queue_endpoint final : public periph::uart_endpoint
 {
 public:
+  /**
+   * @brief Creates an empty queue.
+   * @param resets The machine's reset count, which tags each frame: a frame from before the
+   *        last reset is taken whatever the time bound of take().
+   */
+  explicit queue_endpoint(core::reset_counter resets = {}) : resets_{std::move(resets)}
+  {}
+
+  /** @brief The machine's reset count now, the tag a frame queued next takes. */
+  [[nodiscard]] auto resets() const noexcept -> std::uint64_t
+  {
+    return resets_.load();
+  }
+
   /** @brief Takes the link lock, blocking. */
   [[nodiscard]] auto lock() const -> core::link_guard
   {
@@ -55,7 +92,7 @@ public:
   {
     auto const held = lock();
     trim(held, limit_ - 1);
-    frames_.push_back({.data = data, .at_ps = at.ps, .brk = brk});
+    frames_.push_back({.data = data, .at_ps = at.ps, .brk = brk, .resets = resets_.load()});
   }
 
   /** @brief Frames not drained yet. */
@@ -66,21 +103,25 @@ public:
   }
 
   /**
-   * @brief Takes the oldest frames, up to the first whose stop bit ended after @p until_ps.
+   * @brief Takes the oldest frames, up to the first past_bound() leaves queued.
    * @param count Most frames taken.
-   * @param until_ps Latest stop bit end taken, in picoseconds.
+   * @param until_ps Latest stop bit end taken, in picoseconds since the reset @p resets names.
+   * @param resets The reset count @p until_ps belongs to, the count now when none.
    * @return The frames, oldest first.
    */
   auto take(
-      core::link_guard const& held,
-      std::uint64_t           count,
-      std::uint64_t           until_ps = std::numeric_limits<std::uint64_t>::max())
+      core::link_guard const&      held,
+      std::uint64_t                count,
+      std::uint64_t                until_ps = std::numeric_limits<std::uint64_t>::max(),
+      std::optional<std::uint64_t> resets   = std::nullopt)
       -> std::vector<queued_uart_frame> pre(held.guards(mutex_))
   {
     auto const first = frames_.begin();
     auto const last  = std::find_if(
         first, first + static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(count, frames_.size())),
-        [until_ps](queued_uart_frame const& frame) { return frame.at_ps > until_ps; });
+        [until_ps, bound = resets.value_or(resets_.load())](queued_uart_frame const& frame) {
+          return past_bound(frame.resets, frame.at_ps, until_ps, bound);
+        });
     std::vector<queued_uart_frame> out(first, last);
     frames_.erase(first, last);
     return out;
@@ -138,6 +179,7 @@ private:
   }
 
   mutable std::mutex            mutex_;
+  core::reset_counter           resets_;
   std::deque<queued_uart_frame> frames_;
   std::uint64_t                 limit_ = uart_frame_limit;
   std::uint64_t                 dropped_{};
@@ -182,6 +224,20 @@ struct queued_audio_frame
 class audio_queue_endpoint final : public periph::stm32::audio_endpoint
 {
 public:
+  /**
+   * @brief Creates an empty queue.
+   * @param resets The machine's reset count, which tags each frame: a frame from before the
+   *        last reset is taken whatever the time bound of take().
+   */
+  explicit audio_queue_endpoint(core::reset_counter resets = {}) : resets_{std::move(resets)}
+  {}
+
+  /** @brief The machine's reset count now, the tag a frame queued next takes. */
+  [[nodiscard]] auto resets() const noexcept -> std::uint64_t
+  {
+    return resets_.load();
+  }
+
   /** @brief Takes the link lock, blocking. */
   [[nodiscard]] auto lock() const -> core::link_guard
   {
@@ -211,6 +267,7 @@ public:
     words_.insert(words_.end(), slots.begin(), slots.end());
     starts_.push_back(at.ps);
     ends_.push_back(end.ps);
+    tags_.push_back(resets_.load());
   }
 
   void
@@ -259,21 +316,27 @@ public:
   }
 
   /**
-   * @brief Takes the oldest kept frames, up to the first that ended after @p until_ps.
+   * @brief Takes the oldest kept frames, up to the first past_bound() leaves queued, by the
+   *        frame's end.
    * @param held The queue's lock.
    * @param count Most frames taken.
-   * @param until_ps Latest frame end taken, in picoseconds.
+   * @param until_ps Latest frame end taken, in picoseconds since the reset @p resets names.
+   * @param resets The reset count @p until_ps belongs to, the count now when none.
    * @return The frames, oldest first.
    */
   auto take(
-      core::link_guard const& held,
-      std::uint64_t           count,
-      std::uint64_t           until_ps = std::numeric_limits<std::uint64_t>::max())
+      core::link_guard const&      held,
+      std::uint64_t                count,
+      std::uint64_t                until_ps = std::numeric_limits<std::uint64_t>::max(),
+      std::optional<std::uint64_t> resets   = std::nullopt)
       -> std::vector<queued_audio_frame> pre(held.guards(mutex_))
   {
     std::vector<queued_audio_frame> out;
     out.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(count, starts_.size())));
-    while(out.size() < count and not starts_.empty() and ends_.front() <= until_ps)
+    auto const bound = resets.value_or(resets_.load());
+    while(out.size() < count
+          and not starts_.empty()
+          and not past_bound(tags_.front(), ends_.front(), until_ps, bound))
     {
       auto const& run = runs_.front();
       out.push_back({
@@ -306,6 +369,7 @@ public:
     words_.clear();
     starts_.clear();
     ends_.clear();
+    tags_.clear();
     runs_.clear();
     pending_.clear();
     dropped_ = 0;
@@ -329,6 +393,7 @@ private:
     words_.erase(words_.begin(), words_.begin() + run.slots);
     starts_.pop_front();
     ends_.pop_front();
+    tags_.pop_front();
     if(--run.frames == 0)
     {
       runs_.pop_front();
@@ -345,9 +410,11 @@ private:
   }
 
   mutable std::mutex                mutex_;
+  core::reset_counter               resets_;
   std::deque<std::uint32_t>         words_;
   std::deque<std::uint64_t>         starts_;
   std::deque<std::uint64_t>         ends_;
+  std::deque<std::uint64_t>         tags_;
   std::deque<format_run>            runs_;
   std::deque<std::uint32_t>         pending_;
   std::optional<queued_audio_frame> received_;

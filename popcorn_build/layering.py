@@ -41,6 +41,8 @@ FRAMEWORK_HEADERS = {
     "lines.hpp",
     "register_file.hpp",
     "core_hold.hpp",
+    "reset_listener.hpp",
+    "snapshot_listener.hpp",
     "spi.hpp",
     "i2c.hpp",
     "uart.hpp",

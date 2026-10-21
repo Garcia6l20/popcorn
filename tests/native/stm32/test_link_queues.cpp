@@ -1,16 +1,21 @@
 #include "link_queues.hpp"
+#include "pdm_queues.hpp"
 
 #include <popcorn/core/link_guard.hpp>
+#include <popcorn/core/reset_counter.hpp>
 #include <popcorn/periph/usb_cdc_acm.hpp>
 #include <popcorn/periph/usb_hid.hpp>
 #include <popcorn/periph/usb_uac2.hpp>
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <memory>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -382,4 +387,206 @@ TEST_CASE("HID reports and microphone frames are taken by the time the host queu
   CHECK(frames.front().at == vtime{30});
   CHECK(mic.take(8, vtime{49}).empty());
   CHECK(mic.in.size() == 1);
+}
+
+TEST_CASE("a PDM source written on one thread and clocked on another loses and repeats no bit")
+{
+  constexpr std::size_t                      segments = 20'000;
+  constexpr std::size_t                      chunk    = 61;
+  constexpr popcorn::periph::stm32::bit_rate rate{.kernel_hz = 20'480'000, .divider = 10};
+  detail::pdm_queue_source                   source;
+  std::atomic<bool>                          done{false};
+  std::uint64_t                              written_ones = 0;
+  std::uint64_t                              written_bits = 0;
+  std::thread                                writer{[&] {
+    for(std::size_t k = 0; k < segments; ++k)
+    {
+      std::array<std::uint8_t, 2> const data{
+          static_cast<std::uint8_t>(k), static_cast<std::uint8_t>(k >> 8)};
+      auto const bits = 1 + k % 16;
+      for(std::size_t b = 0; b < bits; ++b)
+      {
+        written_ones += (data[b / 8] >> (7 - b % 8)) & 1u;
+      }
+      written_bits += bits;
+      source.write_pdm(source.lock(), data, bits);
+    }
+    done.store(true, std::memory_order_release);
+  }};
+  std::uint64_t                              clocked = 0;
+  std::uint64_t                              ones    = 0;
+  std::array<std::uint8_t, chunk>            out{};
+  for(;;)
+  {
+    auto const finished = done.load(std::memory_order_acquire);
+    source.clock(out, rate);
+    clocked += chunk;
+    ones += static_cast<std::uint64_t>(std::ranges::count(out, std::uint8_t{1}));
+    if(finished and source.queued_bits(source.lock()) == 0)
+    {
+      break;
+    }
+  }
+  writer.join();
+  auto const held = source.lock();
+  CHECK(source.idle_bits(held) + written_bits == clocked);
+  popcorn::periph::stm32::modulator_state silence{};
+  std::uint64_t                           idle_ones = 0;
+  for(std::uint64_t k = 0; k < source.idle_bits(held); ++k)
+  {
+    idle_ones += popcorn::periph::stm32::modulate(silence, 0) ? 1 : 0;
+  }
+  CHECK(ones == written_ones + idle_ones);
+}
+
+TEST_CASE("a PDM tap filled on one thread and drained on another keeps order and counts drops")
+{
+  constexpr std::uint64_t sent = 1'000'000;
+  detail::pdm_queue_tap   tap;
+  tap.set_limit(tap.lock(), 1000);
+  std::atomic<bool>          done{false};
+  std::vector<std::uint64_t> times;
+  std::thread                drainer{[&] {
+    for(;;)
+    {
+      auto const finished = done.load(std::memory_order_acquire);
+      auto const batch    = [&] {
+        auto const held = tap.lock();
+        return tap.take(held, 257);
+      }();
+      for(auto const& sample : batch)
+      {
+        CHECK(sample.pcm == static_cast<std::int32_t>(sample.at_ps & 0x7fffff));
+        times.push_back(sample.at_ps);
+      }
+      if(finished and batch.empty())
+      {
+        return;
+      }
+    }
+  }};
+  for(std::uint64_t at = 0; at < sent; ++at)
+  {
+    tap.wrote(static_cast<std::int32_t>(at & 0x7fffff), vtime{at}, at % 7 == 0, at % 3 != 0);
+  }
+  done.store(true, std::memory_order_release);
+  drainer.join();
+  auto const held = tap.lock();
+  CHECK(tap.available(held) == 0);
+  CHECK(times.size() + tap.dropped(held) == sent);
+  CHECK(std::ranges::is_sorted(times));
+  CHECK(std::ranges::adjacent_find(times) == times.end());
+  REQUIRE_FALSE(times.empty());
+  CHECK(times.back() == sent - 1);
+}
+
+TEST_CASE("a UART frame from before a reset is taken whatever the time bound after it")
+{
+  auto const             resets = std::make_shared<std::atomic<std::uint64_t>>(1);
+  detail::queue_endpoint queue{popcorn::core::reset_counter{resets}};
+  queue.transmitted(0x41, vtime{9'000}, false);
+  resets->store(2);
+  queue.transmitted(0x42, vtime{100}, false);
+  queue.transmitted(0x43, vtime{900}, false);
+  auto const taken = queue.take(queue.lock(), 8, 500);
+  REQUIRE(taken.size() == 2);
+  CHECK(taken[0].data == 0x41);
+  CHECK(taken[1].data == 0x42);
+  CHECK(queue.available(queue.lock()) == 1);
+}
+
+TEST_CASE("an SAI frame from before a reset is taken whatever the time bound after it")
+{
+  auto const                         resets = std::make_shared<std::atomic<std::uint64_t>>(1);
+  detail::audio_queue_endpoint       queue{popcorn::core::reset_counter{resets}};
+  std::array<std::uint32_t, 2> const slots{1, 2};
+  queue.transmitted(slots, stereo, vtime{8'000}, vtime{9'000});
+  resets->store(2);
+  queue.transmitted(slots, stereo, vtime{0}, vtime{100});
+  queue.transmitted(slots, stereo, vtime{100}, vtime{900});
+  auto const taken = queue.take(queue.lock(), 8, 500);
+  REQUIRE(taken.size() == 2);
+  CHECK(taken[0].at_ps == 8'000);
+  CHECK(taken[1].at_ps == 0);
+  CHECK(queue.available(queue.lock()) == 1);
+}
+
+TEST_CASE("a UART take bounds frames by the reset count of its stop, not the count at the take")
+{
+  constexpr auto         never  = std::numeric_limits<std::uint64_t>::max();
+  auto const             resets = std::make_shared<std::atomic<std::uint64_t>>(1);
+  detail::queue_endpoint queue{popcorn::core::reset_counter{resets}};
+  queue.transmitted(0x41, vtime{100}, false);
+  queue.transmitted(0x42, vtime{9'000}, false);
+  resets->store(2);
+  queue.transmitted(0x43, vtime{50}, false);
+  auto const first = queue.take(queue.lock(), 8, 5'000, 1);
+  REQUIRE(first.size() == 1);
+  CHECK(first[0].data == 0x41);
+  auto const second = queue.take(queue.lock(), 8, never, 1);
+  REQUIRE(second.size() == 1);
+  CHECK(second[0].data == 0x42);
+  CHECK(queue.take(queue.lock(), 8, 0, 2).empty());
+  auto const last = queue.take(queue.lock(), 8, 50, 2);
+  REQUIRE(last.size() == 1);
+  CHECK(last[0].data == 0x43);
+}
+
+TEST_CASE("an SAI take bounds frames by the reset count of its stop, not the count at the take")
+{
+  constexpr auto                     never  = std::numeric_limits<std::uint64_t>::max();
+  auto const                         resets = std::make_shared<std::atomic<std::uint64_t>>(1);
+  detail::audio_queue_endpoint       queue{popcorn::core::reset_counter{resets}};
+  std::array<std::uint32_t, 2> const slots{1, 2};
+  queue.transmitted(slots, stereo, vtime{0}, vtime{100});
+  queue.transmitted(slots, stereo, vtime{8'000}, vtime{9'000});
+  resets->store(2);
+  queue.transmitted(slots, stereo, vtime{0}, vtime{50});
+  auto const first = queue.take(queue.lock(), 8, 5'000, 1);
+  REQUIRE(first.size() == 1);
+  CHECK(first[0].at_ps == 0);
+  auto const second = queue.take(queue.lock(), 8, never, 1);
+  REQUIRE(second.size() == 1);
+  CHECK(second[0].at_ps == 8'000);
+  CHECK(queue.take(queue.lock(), 8, 0, 2).empty());
+  CHECK(queue.take(queue.lock(), 8, 50, 2).size() == 1);
+}
+
+TEST_CASE("a PDM tap take bounds samples by the reset count of its stop, not the count at the take")
+{
+  constexpr auto        never  = std::numeric_limits<std::uint64_t>::max();
+  auto const            resets = std::make_shared<std::atomic<std::uint64_t>>(1);
+  detail::pdm_queue_tap tap{popcorn::core::reset_counter{resets}};
+  tap.wrote(1, vtime{100}, false, true);
+  tap.wrote(2, vtime{9'000}, false, true);
+  resets->store(2);
+  tap.wrote(3, vtime{50}, false, true);
+  auto const first = tap.take(tap.lock(), 8, 5'000, 1);
+  REQUIRE(first.size() == 1);
+  CHECK(first[0].pcm == 1);
+  auto const second = tap.take(tap.lock(), 8, never, 1);
+  REQUIRE(second.size() == 1);
+  CHECK(second[0].pcm == 2);
+  CHECK(tap.take(tap.lock(), 8, 0, 2).empty());
+  auto const last = tap.take(tap.lock(), 8, 50, 2);
+  REQUIRE(last.size() == 1);
+  CHECK(last[0].pcm == 3);
+}
+
+TEST_CASE("a kernel change mid-sample keeps the fraction of the PCM sample already sent")
+{
+  constexpr popcorn::periph::stm32::bit_rate slow{.kernel_hz = 20'480'000, .divider = 10};
+  constexpr popcorn::periph::stm32::bit_rate fast{.kernel_hz = 40'960'000, .divider = 10};
+  detail::pdm_queue_source                   source;
+  std::array<std::int16_t, 4> const          pcm{100, 200, 300, 400};
+  source.write_pcm(source.lock(), pcm, 16'000);
+  std::array<std::uint8_t, 64> half{};
+  source.clock(half, slow);
+  CHECK(source.queued_samples(source.lock()) == 4);
+  std::array<std::uint8_t, 127> rest{};
+  source.clock(rest, fast);
+  CHECK(source.queued_samples(source.lock()) == 4);
+  std::array<std::uint8_t, 1> last{};
+  source.clock(last, fast);
+  CHECK(source.queued_samples(source.lock()) == 3);
 }

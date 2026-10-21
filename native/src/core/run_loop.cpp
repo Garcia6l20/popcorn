@@ -5,6 +5,8 @@
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/core_hold.hpp>
+#include <popcorn/periph/reset_listener.hpp>
+#include <popcorn/periph/snapshot_listener.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -179,7 +181,43 @@ void machine::run_state::install_hooks()
   install_memory_filter();
 }
 
+void machine::run_state::notify_before_reset(reset_kind kind)
+{
+  handler_scope const scope{in_handler};
+  for(auto const& slot : owner.peripherals_)
+  {
+    if(slot)
+    {
+      if(auto* const listener = dynamic_cast<periph::reset_listener*>(slot->model.get()))
+      {
+        listener->before_reset(kind);
+      }
+    }
+  }
+}
+
+void machine::run_state::notify_before_snapshot()
+{
+  handler_scope const scope{in_handler};
+  for(auto const& slot : owner.peripherals_)
+  {
+    if(slot)
+    {
+      if(auto* const listener = dynamic_cast<periph::snapshot_listener*>(slot->model.get()))
+      {
+        listener->before_snapshot();
+      }
+    }
+  }
+}
+
 void machine::run_state::reset_machine(reset_kind kind)
+{
+  notify_before_reset(kind);
+  reset_notified(kind);
+}
+
+void machine::run_state::reset_notified(reset_kind kind)
 {
   ++memory_generation;
   retired = {};
@@ -242,6 +280,7 @@ void machine::run_state::reset_machine(reset_kind kind)
   owner.trace_.rebase(icount{0});
   rebase_sinks(icount{0});
   ++resets;
+  reset_count->fetch_add(1, std::memory_order_release);
   if(core_held)
   {
     notify_core_hold(true);
@@ -1050,6 +1089,7 @@ auto machine::run_state::make_stop(
       .where        = {.pc = owner.arch_->pc()},
       .instructions = owner.clock_.now(),
       .time         = owner.clock_.time(),
+      .resets       = resets,
       .fault        = fault,
       .detail       = std::move(detail),
   };

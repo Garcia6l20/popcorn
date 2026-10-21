@@ -648,7 +648,7 @@ class CdcStream:
         done_at = posted_at
         try:
             if not ended():
-                done_at = await self._wait(self._link.predicate_ended(transfer), None, None)
+                done_at = (await self._wait(self._link.predicate_ended(transfer), None, None)).time
                 ended()
         finally:
             self._pending.discard(transfer)
@@ -1016,7 +1016,7 @@ class HidStream:
         done_at = posted_at
         try:
             if not ended():
-                done_at = await self._wait(self._link.predicate_ended(transfer), None, None)
+                done_at = (await self._wait(self._link.predicate_ended(transfer), None, None)).time
                 ended()
         finally:
             self._pending.discard(transfer)
@@ -1218,7 +1218,7 @@ class UacStream:
         done_at = posted_at
         try:
             if not ended():
-                done_at = await self._wait(self._link.predicate_ended(operation), None, None)
+                done_at = (await self._wait(self._link.predicate_ended(operation), None, None)).time
                 ended()
         finally:
             self._pending.discard(operation)
@@ -1642,7 +1642,7 @@ class UacFunction:
         done_at = posted_at
         try:
             if not ended():
-                done_at = await self._wait(self._link.predicate_ended(operation), None, None)
+                done_at = (await self._wait(self._link.predicate_ended(operation), None, None)).time
                 ended()
         finally:
             self._pending.discard(operation)

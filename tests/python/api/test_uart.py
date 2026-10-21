@@ -1153,3 +1153,18 @@ def test_a_cts_change_pending_across_a_reset_applies_at_its_instant(
     asyncio.run(board.run(for_=ms(6)))
     assert asyncio.run(settled(before_it)) == 0
     assert asyncio.run(settled(past_it)) == 1
+
+
+def test_a_reset_during_a_waiting_read_takes_the_frames_of_both_resets_to_reach_n(
+    u575: popcorn.PartDescription,
+) -> None:
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(PERIPH_USART_ELF))
+    m.reset()
+    uart = m.periph.USART1.port
+    asyncio.run(m.run(for_=us(700)))
+    sent = uart.available
+    assert sent == 2
+    pending = m.sample(lambda: m.reset(), at=m.time + us(5))
+    frames = asyncio.run(uart.read_frames(sent + 3, for_=ms(10)))
+    asyncio.run(pending)
+    assert bytes(f.data for f in frames) == b"hehel"

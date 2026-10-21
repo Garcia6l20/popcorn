@@ -54,6 +54,8 @@ class Stop:
             the boundary that ended it, in the order given. Empty for any other wait, for a
             TIME stop, and for a USER stop that did not come from the conditions, such as a
             handler's `stop()`. Not part of the hash, the equality or the repr.
+        resets: The machine's resets of any kind at the stop, which names the reset `time`
+            counts from. Not part of the hash, the equality or the repr.
     """
 
     reason: StopReason
@@ -65,6 +67,7 @@ class Stop:
     detail: str = ""
     registers: Mapping[str, int] | None = field(default=None, hash=False, repr=False)
     fired: tuple[Condition, ...] = field(default=(), hash=False, compare=False, repr=False)
+    resets: int = field(default=0, hash=False, compare=False, repr=False)
 
     def __str__(self) -> str:
         text = f"{self.reason.name} at {self.location}"
@@ -115,4 +118,5 @@ def stop_of(native: _core.StopInfo) -> Stop:
         time=VirtualTime(native.time_ps),
         fault=fault,
         detail=native.detail,
+        resets=native.resets,
     )

@@ -13,6 +13,7 @@ sources = [
     here / "image.cpp",
     here / "errors.cpp",
     here / "board.cpp",
+    here / "pdm.cpp",
     here / "usb.cpp",
     here / "model_context.cpp",
     here / "model_trampoline.cpp",

@@ -2,9 +2,10 @@
 rule, the digest and the boot cache.
 
 The `kit` fixture plugin registers `rng`, a counter on DR, and `uart`, a UART implementing only
-`periph::uart_port` on TDR and RDR, and binds the SPI target `KitTargetBase`. A loaded plugin is
-never unloaded, so the in-process cases share one build of the fixture directory per module,
-and the cases that must start without it run in their own interpreter.
+`periph::uart_port` on TDR and RDR and refusing a TDR write of 0x1A5 with `unmodelled_config`,
+and binds the SPI target `KitTargetBase`. A loaded plugin is never unloaded, so the in-process
+cases share one build of the fixture directory per module, and the cases that must start without
+it run in their own interpreter.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from typing import assert_type, cast
 
 import popcorn
 import pytest
-from popcorn import ConfigError, ModelError, _core
+from popcorn import ConfigError, ModelError, UnmodelledConfig, _core
 from popcorn import _machine_description as machine_description
 from popcorn.board import AudioOptions, RccOptions, SpiTarget, UsbHostOptions
 from popcorn.devices import chip_select
@@ -39,6 +40,7 @@ BOARD_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "board.elf"
 PART = "STM32U575QGIx"
 RNG_BASE = 0xC0DE_0000
 RDR_EMPTY = 0xDEAD
+UNMODELLED_FRAME = 0x1A5
 
 BEFORE_PLUGINS_DIGEST = "7f7722f5eb5fb97ebe085f6810a7310c132a087943a3bc68c34e8e36e537ed3c"
 
@@ -394,6 +396,19 @@ def test_a_plugin_uart_attaches_and_sends(kit: Plugin) -> None:
     assert port.take() == b"A"
     asyncio.run(port.write(b"hi"))
     assert [m.periph.USART2.RDR.read() for _ in range(3)] == [ord("h"), ord("i"), RDR_EMPTY]
+
+
+def test_an_unmodelled_config_thrown_by_a_plugin_model_is_typed_with_its_field(kit: Plugin) -> None:
+    m = described(kit, USART2=popcorn.Periph(model=kit.model("uart"))).machine()
+    with pytest.raises(UnmodelledConfig) as caught:
+        m.periph.USART2.TDR.write(UNMODELLED_FRAME)
+    error = caught.value
+    assert isinstance(error, ModelError)
+    assert isinstance(error, popcorn.PopcornError)
+    offset = m.periph.USART2.TDR.offset
+    assert (error.peripheral, error.register, error.offset) == ("USART2", "TDR", offset)
+    assert (error.field, error.value) == ("TDR", UNMODELLED_FRAME)
+    assert str(error) == "USART2.TDR.TDR = 421 not modelled: a frame the kit refuses"
 
 
 @pytest.mark.parametrize(("a", "b", "side"), [("USART1", "USART2", "b"), ("USART2", "USART1", "a")])

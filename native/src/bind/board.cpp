@@ -21,9 +21,13 @@
 
 namespace popcorn::bind
 {
-uart_queue::uart_queue(periph::uart_port& port, detail::alive_flag alive, detail::host_ref host)
-    : port_{&port}, endpoint_{std::make_shared<detail::queue_endpoint>()}, alive_{std::move(alive)},
-      host_{std::move(host)}
+uart_queue::uart_queue(
+    periph::uart_port&  port,
+    core::reset_counter resets,
+    detail::alive_flag  alive,
+    detail::host_ref    host)
+    : port_{&port}, endpoint_{std::make_shared<detail::queue_endpoint>(std::move(resets))},
+      alive_{std::move(alive)}, host_{std::move(host)}
 {
   port.attach(endpoint_);
 }
@@ -131,6 +135,14 @@ auto uart_queue::op_queued() const -> access_op
       [uart = &port(), alive = alive_] { return live_port(uart, alive, "uart").queued(); });
 }
 
+auto uart_queue::available_tagged() const -> std::pair<std::uint64_t, std::uint64_t>
+{
+  auto& queue = *endpoint_;
+  return detail::link_locked(queue, [&](core::link_guard const& held) {
+    return std::pair{queue.available(held), queue.resets()};
+  });
+}
+
 auto uart_queue::available() const -> std::uint64_t
 {
   return detail::link_locked(
@@ -147,13 +159,16 @@ auto uart_queue::peek(std::uint64_t start, std::uint64_t count) const -> reflex:
 
 auto uart_queue::drain(std::uint64_t count) -> std::vector<uart_frame>
 {
-  return drain_until(count, std::numeric_limits<std::uint64_t>::max());
+  return drain_until(count, std::numeric_limits<std::uint64_t>::max(), std::nullopt);
 }
 
-auto uart_queue::drain_until(std::uint64_t count, std::uint64_t until_ps) -> std::vector<uart_frame>
+auto uart_queue::drain_until(
+    std::uint64_t                count,
+    std::uint64_t                until_ps,
+    std::optional<std::uint64_t> resets) -> std::vector<uart_frame>
 {
   auto const taken = detail::link_locked(*endpoint_, [&](core::link_guard const& held) {
-    return endpoint_->take(held, count, until_ps);
+    return endpoint_->take(held, count, until_ps, resets);
   });
   return taken
        | std::views::transform([](detail::queued_uart_frame const& frame) {
@@ -199,10 +214,11 @@ audio_link::audio_link(
     std::uint32_t              decimation,
     std::uint32_t              external_frame_hz,
     bool                       clock_wired,
+    core::reset_counter        resets,
     detail::alive_flag         alive,
     detail::host_ref           host)
-    : endpoint_{std::make_shared<detail::audio_queue_endpoint>()}, port_{&port}, block_{block},
-      alive_{std::move(alive)}, host_{std::move(host)}
+    : endpoint_{std::make_shared<detail::audio_queue_endpoint>(std::move(resets))}, port_{&port},
+      block_{block}, alive_{std::move(alive)}, host_{std::move(host)}
 {
   port.attach(
       block, {.endpoint          = endpoint_,
@@ -252,6 +268,14 @@ auto audio_link::op_set_external_frame_hz(std::uint32_t frame_hz) const -> acces
 {
   return detail::link_op([sai = &port(), alive = alive_, block = block_, frame_hz] {
     live_port(sai, alive, "audio").set_external_clock(block, frame_hz);
+  });
+}
+
+auto audio_link::available_tagged() const -> std::pair<std::uint64_t, std::uint64_t>
+{
+  auto& queue = endpoint();
+  return detail::link_locked(queue, [&](core::link_guard const& held) {
+    return std::pair{queue.available(held), queue.resets()};
   });
 }
 
@@ -311,15 +335,18 @@ auto audio_link::receive_layout() const -> std::optional<audio_record>
 
 auto audio_link::drain(std::uint64_t count) -> std::vector<audio_record>
 {
-  return drain_until(count, std::numeric_limits<std::uint64_t>::max());
+  return drain_until(count, std::numeric_limits<std::uint64_t>::max(), std::nullopt);
 }
 
-auto audio_link::drain_until(std::uint64_t count, std::uint64_t until_ps)
-    -> std::vector<audio_record>
+auto audio_link::drain_until(
+    std::uint64_t                count,
+    std::uint64_t                until_ps,
+    std::optional<std::uint64_t> resets) -> std::vector<audio_record>
 {
   auto& queue = endpoint();
-  auto  taken = detail::link_locked(
-      queue, [&](core::link_guard const& held) { return queue.take(held, count, until_ps); });
+  auto  taken = detail::link_locked(queue, [&](core::link_guard const& held) {
+    return queue.take(held, count, until_ps, resets);
+  });
   return taken
        | std::views::as_rvalue
        | std::views::transform(record_of)
@@ -390,8 +417,10 @@ auto machine_handle::attach_audio(
     throw config_error(peripheral, 0, "block", std::format("an audio block A or B, not {}", block));
   }
   auto const which = block == "A" ? periph::stm32::audio_block::a : periph::stm32::audio_block::b;
-  return access([&](core::machine&) {
-    return audio_link{*port, which, decimation, external_frame_hz, clock_wired, alive_, slot_};
+  return access([&](core::machine& target) {
+    return audio_link{
+        *port,  which, decimation, external_frame_hz, clock_wired, target.reset_counter(),
+        alive_, slot_};
   });
 }
 
@@ -415,7 +444,9 @@ auto machine_handle::attach_uart(std::string const& peripheral) -> uart_queue
   {
     throw model_error(peripheral, "", 0);
   }
-  return access([&](core::machine&) { return uart_queue{*port, alive_, slot_}; });
+  return access([&](core::machine& target) {
+    return uart_queue{*port, target.reset_counter(), alive_, slot_};
+  });
 }
 
 auto machine_handle::gpio(std::string const& peripheral, std::uint8_t pin) const

@@ -302,6 +302,44 @@ TEST_CASE("a request held high across a machine reset starts nothing afterwards"
   CHECK(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 0);
 }
 
+TEST_CASE("EN written again on a running channel continues its block with no second half transfer")
+{
+  auto        f = idle_machine();
+  auto* const controller =
+      dynamic_cast<popcorn::periph::stm32::dma_controller*>(f.target->model("GPDMA1"));
+  REQUIRE(controller != nullptr);
+  write(f, "GPDMA_C0TR1", bit("GPDMA_C0TR1", "SINC") | bit("GPDMA_C0TR1", "DINC"));
+  write(f, "GPDMA_C0TR2", 25u * bit("GPDMA_C0TR2", "REQSEL"));
+  write(f, "GPDMA_C0BR1", 16);
+  write(f, "GPDMA_C0SAR", copy_from);
+  write(f, "GPDMA_C0DAR", copy_to);
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+  controller->on_request(25, true);
+  for(int step = 0; step < 200 and f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") > 6; ++step)
+  {
+    idle_for(f, std::chrono::nanoseconds{250});
+  }
+  controller->on_request(25, false);
+  idle_for(f, std::chrono::microseconds{1});
+  REQUIRE(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 6);
+  REQUIRE(f.field("GPDMA1", "GPDMA_C0SR", "HTF") == 1);
+  write(f, "GPDMA_C0FCR", bit("GPDMA_C0FCR", "HTF"));
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+  idle_for(f, std::chrono::microseconds{50});
+  CHECK(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 6);
+  CHECK(f.field("GPDMA1", "GPDMA_C0DAR", "DA") == copy_to + 10);
+  CHECK(f.field("GPDMA1", "GPDMA_C0SAR", "SA") == copy_from + 10);
+  controller->on_request(25, true);
+  idle_for(f, std::chrono::microseconds{50});
+  CHECK(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 0);
+  CHECK(f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 1);
+  CHECK(f.field("GPDMA1", "GPDMA_C0SR", "HTF") == 0);
+  CHECK(copied(f, 16));
+  auto const past = f.target->mem().read(copy_to + 16, 1);
+  REQUIRE(past.has_value());
+  CHECK(*past == 0);
+}
+
 TEST_CASE("the data handling functions follow RM0456 Table 141 for one item")
 {
   using namespace popcorn::periph::stm32;
