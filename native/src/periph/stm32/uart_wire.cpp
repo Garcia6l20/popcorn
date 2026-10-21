@@ -481,21 +481,30 @@ auto uart_wire::quiet() const -> bool
      and state_.carried.empty();
 }
 
+auto uart_wire::truncating(
+    detail::line_span const&          span,
+    std::span<detail::line_cut const> cuts,
+    core::sys_time                    before) const -> detail::line_cut const*
+{
+  if(span.suppressed or span.truncated)
+  {
+    return nullptr;
+  }
+  auto const crossed = std::ranges::find_if(cuts, [&](detail::line_cut const& cut) {
+    auto const at = shifted(cut.start, latency_);
+    return not cut.low and cut.start < before and span.start < at and at < span.end;
+  });
+  return crossed == cuts.end() ? nullptr : &*crossed;
+}
+
 void uart_wire::truncate(
     detail::line_span&                span,
     std::span<detail::line_cut const> cuts,
     core::sys_time                    before,
     core::time_map                    receiver)
 {
-  if(span.suppressed or span.truncated)
-  {
-    return;
-  }
-  auto const crossed = std::ranges::find_if(cuts, [&](detail::line_cut const& cut) {
-    auto const at = shifted(cut.start, latency_);
-    return not cut.low and cut.start < before and span.start < at and at < span.end;
-  });
-  if(crossed == cuts.end())
+  auto const* const crossed = truncating(span, cuts, before);
+  if(crossed == nullptr)
   {
     return;
   }
@@ -554,7 +563,9 @@ auto uart_wire::drain(
          and not span.suppressed
          and span.start < at
          and at <= span.end
-         and not reset_drops(span);
+         and not span.truncated
+         and not reset_drops(span)
+         and truncating(span, cuts, post.start) == nullptr;
     });
   };
   auto const hand_abort = [&](detail::wire_post const& post) {

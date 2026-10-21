@@ -3384,3 +3384,43 @@ TEST_CASE("a frame past the barrier inside a closed cut is final at its drain, n
     }
   }
 }
+
+TEST_CASE("an abort past the barrier of a frame a cut truncates is final at its drain")
+{
+  constexpr std::int64_t  us   = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t  l    = 50 * us;
+  stm32::line_shape const slow = {.baud = 9600};
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    auto const f = q - 10 * us;
+    auto const a = 2 * q + 1;
+    REQUIRE(a < f + static_cast<std::int64_t>(slow.frame_ps()));
+    for(auto const when : {0, 1, 2})
+    {
+      CAPTURE(when);
+      stub_link link{l, slow};
+      if(when == 0)
+      {
+        REQUIRE(link.cut(q - 5 * us, q + 20 * us, 0).has_value());
+      }
+      link.window(0, q, {});
+      link.forth->started(link.frame(f));
+      link.drain(0, q);
+      if(when == 1)
+      {
+        REQUIRE(link.cut(q, q + 20 * us, q).has_value());
+      }
+      link.window(1, q, {});
+      link.forth->aborted(vtime{static_cast<std::uint64_t>(a)});
+      link.drain(1, q);
+      auto const cut_at = when == 0 ? q - 5 * us + l : q + l;
+      CHECK(link.forth->quiet() == (when != 2));
+      CHECK(saved_state(*link.forth).carried.size() == (when == 2 ? 1U : 0U));
+      run_windows(link, 2, 10, q);
+      CHECK(
+          link.forth_port.cancels
+          == (when == 2 ? std::vector<std::int64_t>{a + l} : std::vector<std::int64_t>{cut_at}));
+    }
+  }
+}

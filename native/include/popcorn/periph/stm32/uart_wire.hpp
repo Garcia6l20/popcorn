@@ -350,14 +350,14 @@ struct wire_state
  *        receiver start lies at or after the next barrier. The shape and overlap checks and an
  *        abort's edit of the record run when a post leaves its mailbox, carried or not, so errors
  *        keep their date and the drain that reports them. A dropped or clashing post is final
- *        there, never carried. So is a frame a receiver reset recorded so far drops, and an
- *        abort with no frame left to cancel: one crossing it, handed or carried, not dropped by
- *        a reset. A carried post that a later drain finds so is final there. A cut, a receiver
- *        reset and an abort's cancel act on a carried post at the drain that hands it, so a
- *        carry holds only posts with an effect left. quiet() is false while a post is carried.
- *        At most one
- *        window plus one slice's overshoot of posts is carried after a pause, one overshoot
- *        after a run's barrier.
+ *        there, never carried. So is a frame a receiver reset recorded so far drops, a frame
+ *        starting inside a closed cut, and an abort with no frame left to cancel: none crosses
+ *        it, handed or carried, not dropped by a reset, not truncated by a cut and not due to
+ *        be truncated by one starting before it. A carried post that a later drain finds so is
+ *        final there. A cut, a receiver reset and an abort's cancel act on a carried post at
+ *        the drain that hands it, so a carry holds only posts with an effect left. quiet() is
+ *        false while a post is carried. At most one window plus one slice's overshoot of posts
+ *        is carried after a pause, one overshoot after a run's barrier.
  *
  *        Line cuts, cut_link() and restore_link(), apply to both wires of a link over [t0, t1)
  *        in sender system time, so the receiver's line is cut over [t0 + L, t1 + L). A peer
@@ -568,6 +568,10 @@ private:
       std::span<detail::line_cut const> cuts,
       core::sys_time                    before,
       core::time_map                    receiver);
+  [[nodiscard]] auto truncating(
+      detail::line_span const&          span,
+      std::span<detail::line_cut const> cuts,
+      core::sys_time                    before) const -> detail::line_cut const*;
   [[nodiscard]] auto cuts_before(core::sys_time reach) const -> std::vector<detail::line_cut>;
 
   wire_ends                          ends_;
