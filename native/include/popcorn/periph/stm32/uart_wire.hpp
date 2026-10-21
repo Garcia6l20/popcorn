@@ -190,7 +190,12 @@ struct cut_refusal
   core::sys_time end{};
 };
 
-/** @brief Most cuts a wire keeps registered at once. */
+/**
+ * @brief Most cuts a wire keeps registered at once. The count includes passed cuts not erased
+ *        yet. At exactly this count, a cut from a member's callback is refused full or accepted
+ *        depending on whether the other member's drain erased a passed cut first, so the
+ *        refusal can depend on wall timing there.
+ */
 inline constexpr std::size_t max_waiting_cuts = 65536;
 
 /**
@@ -230,8 +235,9 @@ struct line_span
   bool           injected{};
   core::sys_time post{};
   std::uint64_t  index{};
-  bool           suppressed{};
-  bool           truncated{};
+  /** @brief Never handed to the port: inside a cut, dropped by a receiver reset, or clashing. */
+  bool suppressed{};
+  bool truncated{};
 
   friend auto operator==(line_span const&, line_span const&) -> bool = default;
 };
@@ -277,7 +283,6 @@ struct line_cut
   core::sys_time end{};
   bool           open{};
   bool           low{};
-  bool           truncated{};
   bool           held{};
   bool           released{};
 
@@ -362,9 +367,11 @@ struct wire_state
  *
  *        Locks: the link's registration, then one wire's inject lock at a time. A cut change
  *        checks both wires and commits on both in one hold of the registration. A drain holds
- *        it for a start section, which copies the cuts and sets the drains' reach, and an end
- *        section, which writes back what it did to each cut by its start, erases cuts and sets
- *        the last barrier, never across a port call.
+ *        it for a start section, which copies the cuts starting before the drain's reach and
+ *        sets that reach, and an end section, which erases passed cuts among those starting
+ *        before the barrier and sets the last barrier, never across a port call. Both work on
+ *        that prefix of the list, sorted by start, so a drain's cost does not grow with cuts
+ *        registered ahead.
  */
 class POPCORN_API uart_wire;
 
@@ -454,7 +461,7 @@ public:
    * @param registration The link's registration.
    */
   void share_registration(std::shared_ptr<link_registration> registration)
-      pre(registration != nullptr);
+      pre(registration != nullptr) pre(state_.started == 0 and state_.window == 0);
 
   /** @brief Whether this wire and @p other share one registration. */
   [[nodiscard]] auto shares_registration(uart_wire const& other) const noexcept -> bool;
@@ -523,7 +530,10 @@ private:
 
   auto mailbox(std::uint64_t window) -> std::vector<detail::wire_post>&;
   void collect(std::vector<detail::wire_post> const& posts, std::vector<tap_frame>& into) const;
-  void emit(std::vector<tap_frame>& from, core::sys_time through);
+  void emit(
+      std::vector<tap_frame>&           from,
+      core::sys_time                    through,
+      std::span<detail::line_cut const> cuts);
   auto check_shape(detail::wire_post const& post) -> std::optional<core::link_fault>;
   auto arm(detail::armed_edit edit) -> bool;
   auto overlap(detail::line_span const& span) const -> std::optional<core::link_fault>;
@@ -539,7 +549,7 @@ private:
       std::span<detail::line_cut const> cuts,
       core::sys_time                    before,
       core::time_map                    receiver);
-  [[nodiscard]] auto cut_list() const -> std::vector<detail::line_cut>;
+  [[nodiscard]] auto cuts_before(core::sys_time reach) const -> std::vector<detail::line_cut>;
 
   wire_ends                          ends_;
   wire_lanes                         lanes_;

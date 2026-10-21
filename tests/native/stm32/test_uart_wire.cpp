@@ -384,7 +384,7 @@ struct rig
         }
         for(std::size_t member = 0; member < nodes.size(); ++member)
         {
-          drain(member, window, barrier(window), barrier(window + 1));
+          drain(member, window, barrier(window), (window + 2) * plan.window);
         }
         if(plan.after_drain)
         {
@@ -414,7 +414,7 @@ struct rig
             meet.arrive_and_wait([]() noexcept {});
             if(window + 1 < windows)
             {
-              drain(member, window, barrier(window), barrier(window + 1));
+              drain(member, window, barrier(window), (window + 2) * plan.window);
             }
           }
         });
@@ -2347,6 +2347,119 @@ TEST_CASE("a stopped injection reaches the port by its start, queued or delivere
       CHECK(at <= start);
     }
   }
+}
+
+TEST_CASE("a stopped injection crossing t0 plus L of a passed cut is truncated at its delivery")
+{
+  constexpr std::int64_t  us      = static_cast<std::int64_t>(us_ps);
+  constexpr std::uint64_t latency = 60 * us_ps;
+  constexpr std::int64_t  t0      = 2'530 * us;
+  constexpr std::int64_t  t1      = t0 + 100 * us;
+  constexpr std::uint64_t S       = 2'582 * us_ps;
+  auto const              ends    = static_cast<std::int64_t>(declared().frame_ps());
+  for(auto const window : {latency, latency / 2})
+  {
+    CAPTURE(window);
+    auto stopped = paired("link_tx", "link_rx", latency);
+    REQUIRE(cut_rig(stopped, t0, t1, 0).has_value());
+    stopped.run({.window = window, .end = S});
+    auto const now  = receiver_now(stopped);
+    auto const next = static_cast<std::int64_t>(S - S % window + window);
+    REQUIRE(now.now.ps < t0 + static_cast<std::int64_t>(latency));
+    REQUIRE(now.now.ps + ends > t0 + static_cast<std::int64_t>(latency));
+    REQUIRE(now.now.ps + ends < next);
+    REQUIRE(injected_byte(*stopped.wires[0], 0x77, now.now.ps, now).has_value());
+    stopped.run({.window = window, .first = (S - 1) / window});
+
+    auto running = paired("link_tx", "link_rx", latency);
+    REQUIRE(cut_rig(running, t0, t1, 0).has_value());
+    REQUIRE(injected_byte(*running.wires[0], 0x77, now.now.ps, std::nullopt).has_value());
+    running.run({.window = window});
+
+    CHECK(std::ranges::count(bytes_of(running.nodes[1]->f->log()), 0x77u) == 0);
+    auto const injected = std::ranges::find_if(running.taps[0], &stm32::tap_frame::injected);
+    REQUIRE(injected != running.taps[0].end());
+    CHECK(injected->cut);
+    CHECK(injected->lost);
+    CHECK(stopped.nodes[1]->f->log() == running.nodes[1]->f->log());
+    CHECK(stopped.taps[0] == running.taps[0]);
+  }
+}
+
+TEST_CASE("an open cut restored at its own start is withdrawn, the frame across it arrives")
+{
+  auto const all = oracle_tap("link_tx", "link_rx", latency_20);
+  auto const T   = static_cast<std::uint64_t>(all[8].start.ps) + 5 * us_ps;
+  REQUIRE(static_cast<std::int64_t>(T) + static_cast<std::int64_t>(us_ps) < all[8].end.ps);
+  for(auto const window : {latency_20, latency_20 / 4})
+  {
+    CAPTURE(window);
+    auto plain = paired("link_tx", "link_rx", latency_20);
+    plain.run({.window = window, .end = T});
+    plain.run({.window = window, .first = (T - 1) / window});
+
+    auto r = paired("link_tx", "link_rx", latency_20);
+    r.run({.window = window, .end = T});
+    auto const t = stopped_now(r);
+    REQUIRE(t < all[8].end.ps);
+    REQUIRE(cut_rig(r, t, std::nullopt, t) == core::sys_time{t});
+    REQUIRE(stm32::restore_link(*r.wires[0], *r.wires[1], core::sys_time{t}) == core::sys_time{t});
+    CHECK(saved_state(*r.wires[0]).cuts.empty());
+    CHECK(saved_state(*r.wires[1]).cuts.empty());
+    r.run({.window = window, .first = (T - 1) / window});
+
+    CHECK(bytes_of(r.nodes[1]->f->log()) == bytes_of(plain.nodes[1]->f->log()));
+    CHECK(r.dump() == plain.dump());
+    CHECK(std::ranges::none_of(r.taps[0], &stm32::tap_frame::cut));
+    CHECK(std::ranges::none_of(r.taps[1], &stm32::tap_frame::cut));
+  }
+}
+
+TEST_CASE("a frame never handed to the port is never truncated: an overlap clash")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 50 * us;
+  constexpr std::int64_t t0 = 33 * us;
+  stub_link              link{l, declared()};
+  auto const             frame_ps = static_cast<std::int64_t>(declared().frame_ps());
+  REQUIRE(10 * us + frame_ps < t0);
+  REQUIRE(t0 < 15 * us + frame_ps);
+  REQUIRE(link.cut(t0, t0 + 100 * us, 0).has_value());
+  std::vector<std::int64_t> const starts{10 * us, 15 * us};
+  link.window(0, l, starts);
+  auto const fault = link.forth->drain(0, core::sys_time{l}, core::sys_time{2 * l}, {});
+  REQUIRE(fault.has_value());
+  CHECK(fault->at.ps == 15 * us);
+  CHECK(link.forth_port.received.size() == 1);
+  CHECK(link.forth_port.cancels.empty());
+}
+
+TEST_CASE("drains stay cheap with the most cuts waiting ahead")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 20 * us;
+  stub_link              link{l, declared()};
+  auto const             first = 1'000'000 * us;
+  bool                   all   = true;
+  for(std::size_t index = 0; index < stm32::max_waiting_cuts; ++index)
+  {
+    auto const start = first + static_cast<std::int64_t>(index) * 10 * us;
+    all              = all and link.cut(start, start + 5 * us, 0).has_value();
+  }
+  REQUIRE(all);
+  auto const last    = first + static_cast<std::int64_t>(stm32::max_waiting_cuts) * 10 * us;
+  auto const refused = link.cut(last, last + 5 * us, 0);
+  REQUIRE_FALSE(refused.has_value());
+  CHECK(refused.error().reason == stm32::cut_refusal_reason::full);
+  auto const    begin = std::chrono::steady_clock::now();
+  std::uint64_t k     = 0;
+  for(; k < 100 and std::chrono::steady_clock::now() - begin < std::chrono::seconds{1}; ++k)
+  {
+    link.window(k, l, {});
+    link.drain(k, l);
+  }
+  CHECK(k == 100);
+  CHECK(saved_state(*link.forth).cuts.size() == stm32::max_waiting_cuts);
 }
 
 TEST_CASE("a dropped frame inside a cut shows dropped only")
