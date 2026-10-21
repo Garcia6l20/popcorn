@@ -446,7 +446,7 @@ public:
   }
 
 private:
-  void fail(machine& target, std::exception_ptr error) noexcept
+  void fail(machine const& target, std::exception_ptr error) noexcept
   {
     auto& one  = sys_.slots[index_];
     one.failed = true;
@@ -692,9 +692,16 @@ private:
     {
       one.busy = std::chrono::steady_clock::now() - left_;
     }
-    if(sys_.before_arrival)
+    if(sys_.before_arrival and not one.failed)
     {
-      sys_.before_arrival(index_);
+      try
+      {
+        sys_.before_arrival(index_);
+      }
+      catch(...)
+      {
+        fail(target, std::current_exception());
+      }
     }
     auto const passed = sys_.barrier.arrive_and_wait(complete);
     if(sys_.measuring)

@@ -2096,6 +2096,88 @@ TEST_CASE("a wake that lands between the sleep decision and the host's wait is n
   CHECK(slices(true) > quiet);
 }
 
+TEST_CASE("an arrival hook that throws pauses the system on that error once")
+{
+  for(auto const& how : variants())
+  {
+    if(how.seed)
+    {
+      continue;
+    }
+    for(bool const with_goal : {false, true})
+    {
+      CAPTURE(how.name);
+      CAPTURE(with_goal);
+      pinned const             pin{how.one_cpu};
+      std::atomic<std::size_t> thrown{0};
+      rig                      r{.members = sleeper_and_runner()};
+      r.arrival = [&thrown](std::size_t index) {
+        if(index == 1)
+        {
+          ++thrown;
+          throw test_failure("arrival hook");
+        }
+      };
+      r.build(how);
+      std::optional<core::host_future<core::goal_reached>> goal;
+      if(with_goal)
+      {
+        goal = r.goal(1, {.budget = icount{1'000'000'000}});
+      }
+      auto const stopped = r.run(2 * ms_ps);
+      REQUIRE(stopped.reason == core::pause_reason::error);
+      CHECK(stopped.member == 1);
+      CHECK_THROWS_AS(std::rethrow_exception(stopped.error), test_failure);
+      CHECK(thrown.load() == 1);
+      if(goal)
+      {
+        CHECK_THROWS_AS(std::ignore = goal->get(), test_failure);
+      }
+      CHECK(parked(r.members[0]));
+      CHECK(parked(r.members[1]));
+    }
+  }
+}
+
+TEST_CASE("a sleep hook that throws pauses the system on that error once")
+{
+  rig r{
+      .members = {sleeper_with_event(400), sleeper_with_event(900)}
+  };
+  r.links.push_back(std::make_shared<fake_link>(0, 1, 20 * us_ps));
+  std::atomic<std::size_t> thrown{0};
+  r.sys = std::make_unique<core::system>(
+      r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]},
+      core::default_wait_policy(2), core::slice_bounds{},
+      std::move_only_function<void(std::size_t)>{}, [&thrown](std::size_t index) {
+        if(index == 1)
+        {
+          ++thrown;
+          throw test_failure("sleep hook");
+        }
+      });
+  {
+    auto const                  held = r.sys->lock();
+    std::vector<core::sys_time> offsets(2);
+    r.sys->start(held, offsets);
+  }
+  auto a = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+  auto b = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+  core::host_future<core::pause> pending;
+  {
+    auto const held = r.sys->lock();
+    pending         = r.sys->resume(held);
+  }
+  auto const stopped = pending.get();
+  REQUIRE(stopped.reason == core::pause_reason::error);
+  CHECK(stopped.member == 1);
+  CHECK_THROWS_AS(std::rethrow_exception(stopped.error), test_failure);
+  CHECK(thrown.load() == 1);
+  CHECK_THROWS_AS(std::ignore = b.get(), test_failure);
+  CHECK(parked(r.members[0]));
+  CHECK(parked(r.members[1]));
+}
+
 TEST_CASE("save refuses a pending goal and an undecided member")
 {
   rig r{

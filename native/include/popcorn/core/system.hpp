@@ -171,10 +171,13 @@ public:
    * @param wait How members wait at the barrier.
    * @param bounds Bounds of every slice a member runs.
    * @param before_arrival Called on a member's host thread before each of its barrier
-   *        arrivals with its index, holding nothing, for tests that perturb thread timing.
+   *        arrivals with its index, holding nothing, for tests that perturb thread timing. A
+   *        throw fails the member with that error at that arrival, the system pauses on it, and
+   *        the hook is not called again for the failed member.
    * @param before_sleep Called on a member's host thread with its index right before it asks
    *        its host to sleep on IDLE inside open goals, holding nothing, for tests that wake it
-   *        in that window.
+   *        in that window. A throw fails the member with that error, the member wakes the
+   *        others and the system pauses on it.
    * @throws machine_busy when a member is busy.
    */
   system(
