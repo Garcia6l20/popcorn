@@ -20,7 +20,7 @@ from pathlib import Path
 
 import popcorn
 import pytest
-from popcorn import Call, Machine, Return, StopReason, System, TapFrame, UartLink
+from popcorn import Call, LineState, Machine, Return, StopReason, System, TapFrame, UartLink
 from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
 RESPONDERS = ("responder1", "responder2")
@@ -33,6 +33,9 @@ REPLACE_AHEAD = 10_000
 CYCLE_PS = 6250
 WAKE_CYCLES = 4
 LSI_HZ = 32_000
+CUT = s(4)
+CUT_AHEAD = ms(15)
+REPOLL = ms(1500)
 
 Frames = dict[str, tuple[TapFrame, ...]]
 Idles = dict[str, tuple[tuple[VirtualTime, int], ...]]
@@ -334,6 +337,67 @@ async def test_a_starved_responder_resets_and_comes_back(system: System) -> None
     ]
     assert max(b - a for a, b in itertools.pairwise(starts)) < ms(20).ps
     assert controller.var("responders")[0].sums_bad.value == 0
+
+
+@pytest.mark.parametrize("line", ["idle", "break"])
+async def test_a_pulled_cable_loses_the_responder_and_it_rejoins(
+    system: System, line: LineState
+) -> None:
+    controller = system.members["controller"]
+    responder = system.members["responder1"]
+    tap = system.tap("controller.UART4")
+    events: list[tuple[str, VirtualTime]] = []
+
+    def reported(what: str) -> Callable[[Call], Return]:
+        def report(call: Call) -> Return:
+            if call.arg(0) == 1:
+                events.append((what, system.to_system(controller, controller.time)))
+            return call.proceed()
+
+        return report
+
+    controller.intercept("responder_lost", reported("lost"))
+    controller.intercept("responder_found", reported("found"))
+    await run_for(system, ms(500))
+    events.clear()
+    responder.periph.USART1.port.take()
+    controller.periph.USART1.port.take()
+    now = max(system.time_of(end.partition(".")[0]) for end in tap.ends)
+    start = VirtualTime(now.ps + CUT_AHEAD.ps)
+    end = VirtualTime(start.ps + CUT.ps)
+    tap.cut(start, end, line=line)
+
+    await run_for(system, s(6))
+    (_, lost_at), (_, found_at) = events
+    assert [what for what, _ in events] == ["lost", "found"]
+    answers = tap.frames(towards="controller.UART4")
+    last = [m for m in messages(answers) if m[-1].end <= start][-1][-1]
+    answered = last.arrival.ps + last.end.ps - last.start.ps
+    assert s(3).ps - ms(1).ps < lost_at.ps - answered <= s(3).ps
+    assert end < found_at
+    assert REPOLL.ps < found_at.ps - lost_at.ps < REPOLL.ps + ms(5).ps
+
+    sent = tap.frames(towards="responder1.USART3")
+    for frames in (answers, sent):
+        assert any(f.cut and start <= f.start for f in frames)
+        assert any(f.lost for f in frames)
+        for frame in frames:
+            crossing = frame.start < start < frame.end or frame.start < end < frame.end
+            assert frame.lost == crossing
+            assert frame.cut == (crossing or start <= frame.start < end)
+
+    shown = controller.periph.USART1.port.take()
+    assert shown == b"controller: responder 1 lost\r\ncontroller: responder 1 back\r\n"
+    assert responder.periph.USART1.port.take() == b"responder: node id 1\r\n"
+    errors = 1 if line == "break" else 0
+    assert controller.var("responders")[0].link.errors.value == errors
+    assert responder.var("uplink").errors.value == errors
+    for index in range(len(RESPONDERS)):
+        state = controller.var("responders")[index]
+        assert state.sums_bad.value == 0
+        assert state.times_lost.value == (1 if index == 0 else 0)
+    after = [m for m in messages(sent) if m[0].start > found_at and len(m) == BLOCK_BYTES]
+    assert len(after) >= 30
 
 
 async def test_a_replaced_frame_changes_the_checksum_of_its_block(system: System) -> None:

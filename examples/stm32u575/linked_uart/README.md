@@ -127,6 +127,40 @@ bits it set apply. Both images set `DBG_IWDG_STOP`, so a halted member's watchdo
 bite. Halted time counts in `Stop.instructions` and `Machine.instructions`, as a sleeping core's
 time does. A goal's `budget` counts executed instructions only, halted time excluded.
 
+## A pulled cable
+
+A link's tap cuts the line over a window of system time, both directions, as a cable pulled
+and plugged back:
+
+```python
+tap = system.tap("controller.UART4")
+now = max(system.time_of(end.partition(".")[0]) for end in tap.ends)
+start = VirtualTime(now.ps + ms(15).ps)
+tap.cut(start, VirtualTime(start.ps + s(4).ps), line="break")
+```
+
+- `tap.cut(start, end)` schedules the window. `tap.break_line()` opens a cut now and
+  `tap.restore_line()` closes it: stopped, or from a callback of the link's `tap.owner`, by
+  default the member of `UartLink.a`, while the system runs.
+- Times are system times at the senders, the base of `TapFrame.start`. Each receiver's line is
+  cut over `[start + L, end + L)`.
+- "Now" when stopped is the later end's `system.time_of`, never `system.time`: after a run a
+  member stop ended, the members stand where the run left them, which depends on the quantum.
+- A frame starting inside the cut never reaches the receiver, tapped `cut`. A frame crossing
+  `start` or `end` is tapped `cut` and `lost`. A frame crossing `start` reaches the receiver up
+  to `start + L` only.
+- `line="idle"`, the default, keeps the line high: the frame crossing `start + L` puts
+  nothing in RDR, and IDLE follows one frame later. `line="break"` holds it low: the receiver
+  gets one break character with FE, then nothing until the line rises. Here FE ends the DMA
+  reception in the HAL, and `HAL_UART_ErrorCallback` in `firmware/link.c` starts it again.
+
+`test_a_pulled_cable_loses_the_responder_and_it_rejoins` cuts the controller's link to
+responder 1 for 4 s, starting inside a block and its answer, with an idle line and with a
+break. The controller marks the responder lost 3 s after its last answer, sends its node id
+again every 1.5 s and finds it back after the restore, then blocks run again. Responder 1 never
+reports the controller lost, 4 s being under its 5 s. Responder 2 is never lost, and no
+checksum is wrong on either link.
+
 ## Run
 
 From the repository root:
@@ -148,6 +182,9 @@ uv run pytest -q examples/stm32u575/linked_uart
   - a starved responder's IWDG bites 500 ms after its last refresh, to the picosecond. Its
     frame in flight shows `lost` in the tap. It reboots, the controller marks it lost 3 s
     after its last answer and assigns it again, and responder 1 never misses a block.
+  - a cable pulled for 4 s, the line idle or held low: the frames cut and lost at the cut's
+    edges, the controller marking responder 1 lost 3 s after its last answer and finding it
+    back after the restore, one FE on each side with a break.
   - a frame replaced from inside `system.running()` changes the checksum of its block.
   - a poll injected towards responder 2 is answered.
   - a snapshot restored replays the same frames.
