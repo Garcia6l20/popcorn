@@ -3,7 +3,7 @@ from pathlib import Path
 
 from pcons import Target, context, write_file
 
-from popcorn_build.config import build_dir, project_dir
+from popcorn_build.config import VARIANT, build_dir, project_dir
 from popcorn_build.core_links import both_flavours, reached
 from popcorn_build.requirements import package
 
@@ -12,6 +12,14 @@ _doctest_main: Target | None = None
 DEFAULT_CASE_TIMEOUT = 300.0
 """Seconds a native test case may run before it is killed and failed, unless its suite sets
 another limit. The longest case under the full gate takes about 15 s."""
+
+TSAN_TIMEOUT_FACTOR = 3.0
+"""Scale of every case limit in the tsan variant. The receiver band case of stm32-usart takes
+200 s alone under TSAN and times out at 300 s at 10 jobs."""
+
+TSAN_LONGJMP = project_dir / "tests" / "native" / "tsan_longjmp.cpp"
+"""Bypass of the siglongjmp interceptor, linked into every doctest program of the tsan variant.
+Without it each case that runs the engine aborts on "can't find longjmp buf" under glibc 2.44."""
 
 
 def _doctest_with_main() -> Target:
@@ -60,10 +68,14 @@ def add_doctest(
 
     With @p register false the program is built but no test is registered, for tests whose
     inputs this machine lacks. @p timeout, in seconds, kills a case that runs longer and fails
-    it, so a deadlock fails the gate instead of hanging it. None for no limit.
+    it, so a deadlock fails the gate instead of hanging it. None for no limit. The tsan variant
+    links TSAN_LONGJMP in and scales @p timeout by TSAN_TIMEOUT_FACTOR.
     """
     project = context.current_project
-    program = project.Program(f"test-{name}", project.default_environment, sources=list(sources))
+    sources = [*sources, TSAN_LONGJMP] if VARIANT == "tsan" else list(sources)
+    if VARIANT == "tsan" and timeout is not None:
+        timeout *= TSAN_TIMEOUT_FACTOR
+    program = project.Program(f"test-{name}", project.default_environment, sources=sources)
     for dep in [*deps, package("doctest"), _doctest_with_main()]:
         program.link(dep)
     if register:

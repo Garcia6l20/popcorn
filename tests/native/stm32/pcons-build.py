@@ -115,15 +115,12 @@ for program in u575_programs:
         if target is not None:
             program.depends(target)
 
-tsan_sources = [project_dir / "tests" / "native" / "tsan_longjmp.cpp"] if VARIANT == "tsan" else []
-link_queues = add_doctest(
-    "stm32-link-queues", [here / "test_link_queues.cpp", *tsan_sources], static
-)
+link_queues = add_doctest("stm32-link-queues", [here / "test_link_queues.cpp"], static)
 link_queues.private.include_dirs.append(project_dir / "native" / "src" / "bind")
 
 pty = add_doctest(
     "stm32-pty",
-    [here / "test_pty.cpp", project_dir / "native" / "src" / "bind" / "pty.cpp", *tsan_sources],
+    [here / "test_pty.cpp", project_dir / "native" / "src" / "bind" / "pty.cpp"],
     static,
 )
 pty.private.include_dirs.append(project_dir / "native" / "src" / "bind")
@@ -146,7 +143,7 @@ if u575 is not None:
 
 uart_wire = add_doctest(
     "stm32-uart-wire",
-    [here / "test_uart_wire.cpp", *tsan_sources],
+    [here / "test_uart_wire.cpp"],
     static,
     env=u575_env,
     register=u575 is not None,
@@ -158,7 +155,7 @@ for _, target in firmwares.values():
 
 system_uart = add_doctest(
     "stm32-system",
-    [here / "test_system_uart.cpp", *tsan_sources],
+    [here / "test_system_uart.cpp"],
     static,
     env=u575_env,
     register=u575 is not None,
