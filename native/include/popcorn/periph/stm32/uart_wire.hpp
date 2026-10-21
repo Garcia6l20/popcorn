@@ -6,6 +6,7 @@
 #include <popcorn/export.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -102,12 +103,16 @@ struct tap_frame
   core::sys_time arrival{};
   /** @brief Whether the frame is a break. */
   bool brk{};
-  /** @brief Whether the sender aborted the frame, UE cleared while it was in flight. */
+  /** @brief Whether the sender aborted the frame, UE cleared while it was in flight, or a line
+   * cut made it cross the cut's start or end, see uart_wire. */
   bool lost{};
   /** @brief Whether an armed drop kept the frame off the line: the receiver saw it idle. */
   bool dropped{};
   /** @brief Whether the frame was injected, uart_wire::inject, rather than sent by the sender. */
   bool injected{};
+  /** @brief Whether a line cut touched the frame: it starts inside a cut, or crosses its start
+   * or end. A frame crossing a boundary is also lost. Never set on a dropped frame. */
+  bool cut{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(tap_frame const&, tap_frame const&) -> bool = default;
@@ -159,6 +164,58 @@ struct inject_refusal
   core::sys_time bound{};
 };
 
+/** @brief Why cut_link() or restore_link() refused. */
+enum class[[= reflex::derive{reflex::Format}]] cut_refusal_reason
+{
+  /** @brief The cut starts before the earliest time accepted. */
+  before_bound,
+  /** @brief The cut overlaps a cut already registered, touching allowed. */
+  overlaps,
+  /** @brief restore_link() with no open cut. */
+  none_open,
+  /** @brief An open cut asked while another is open. */
+  already_open,
+  /** @brief max_waiting_cuts are registered already. */
+  full,
+};
+
+/** @brief A refusal of cut_link() or restore_link(). */
+struct cut_refusal
+{
+  /** @brief Why. */
+  cut_refusal_reason reason{};
+  /** @brief The earliest start accepted, or the start of the cut overlapped or open. */
+  core::sys_time bound{};
+  /** @brief The end of the cut overlapped, the largest system time for an open one. */
+  core::sys_time end{};
+};
+
+/**
+ * @brief Most cuts a wire keeps registered at once. The count includes passed cuts not erased
+ *        yet. At exactly this count, a cut from a member's callback is refused full or accepted
+ *        depending on whether the other member's drain erased a passed cut first, so the
+ *        refusal can depend on wall timing there.
+ */
+inline constexpr std::size_t max_waiting_cuts = 65536;
+
+/**
+ * @brief The registration lock of a link: both wires of a link share one. Cut changes hold it
+ *        for their checks and their commit together, drains hold it for their start and end
+ *        sections, so no drain passes a bound between a cut's check and its commit. It is not a
+ *        link lock: its holder takes link locks after it, never a GIL, a host mutex or the
+ *        system lock, and no link-lock holder takes it. A thread never takes it twice.
+ */
+struct POPCORN_API link_registration
+{
+  /** @brief The lock. */
+  std::mutex mutex;
+  /** @brief Threads waiting for the lock, for tests that wait on that state. */
+  std::atomic<std::uint32_t> contenders{};
+  /** @brief Test seam: when set, cut_link() calls it between its checks and its commit, with
+   * the lock held. */
+  std::move_only_function<void()> between_checks_and_commit;
+};
+
 /** @brief The receiver as a stopped system shows it to uart_wire::inject. */
 struct stopped_receiver
 {
@@ -178,6 +235,12 @@ struct line_span
   bool           injected{};
   core::sys_time post{};
   std::uint64_t  index{};
+  /** @brief Never handed to the port: inside a cut, dropped by a receiver reset, or clashing. */
+  bool suppressed{};
+  bool truncated{};
+  /** @brief Checked and recorded, not handed yet: it starts at or after the last drain's
+   * barrier. */
+  bool carried{};
 
   friend auto operator==(line_span const&, line_span const&) -> bool = default;
 };
@@ -216,6 +279,19 @@ struct armed_edit
   friend auto operator==(armed_edit const&, armed_edit const&) -> bool = default;
 };
 
+/** @brief A cut of the line over [start, end) in sender system time. */
+struct line_cut
+{
+  core::sys_time start{};
+  core::sys_time end{};
+  bool           open{};
+  bool           low{};
+  bool           held{};
+  bool           released{};
+
+  friend auto operator==(line_cut const&, line_cut const&) -> bool = default;
+};
+
 /** @brief Everything a wire saves. */
 struct wire_state
 {
@@ -239,6 +315,8 @@ struct wire_state
   core::sys_time                flight_start{};
   core::sys_time                flight_end{};
   std::vector<core::sys_time>   resets;
+  std::vector<line_cut>         cuts;
+  std::vector<wire_post>        carried;
 
   friend auto operator==(wire_state const&, wire_state const&) -> bool = default;
 };
@@ -265,7 +343,105 @@ struct wire_state
  *        windows. A sender reset aborts the frame in flight. After a receiver reset at r, frames
  *        on the line at r or starting before r plus L never reach the receiver, the tap still
  *        shows them.
+ *
+ *        A drain hands the port only posts starting before its barrier, the pause point at a
+ *        pause. It carries the rest it would hand, aborts included, in order, and the next drain
+ *        takes them first. A carried frame is on time: it starts at or after the barrier, so its
+ *        receiver start lies at or after the next barrier. The shape and overlap checks and an
+ *        abort's edit of the record run when a post leaves its mailbox, carried or not, so errors
+ *        keep their date and the drain that reports them. A dropped or clashing post is final
+ *        there, never carried. So is a frame a receiver reset recorded so far drops, a frame
+ *        starting inside a closed cut, and an abort with no frame left to cancel: none crosses
+ *        it, handed or carried, not dropped by a reset, not truncated by a cut and not due to
+ *        be truncated by one starting before it. A carried post that a later drain finds so is
+ *        final there. A cut, a receiver reset and an abort's cancel act on a carried post at
+ *        the drain that hands it, so a carry holds only posts with an effect left. quiet() is
+ *        false while a post is carried. At most one window plus one slice's overshoot of posts
+ *        is carried after a pause, one overshoot after a run's barrier.
+ *
+ *        Line cuts, cut_link() and restore_link(), apply to both wires of a link over [t0, t1)
+ *        in sender system time, so the receiver's line is cut over [t0 + L, t1 + L). A peer
+ *        frame starting inside the cut never reaches the receiver, the tap marks it cut, and
+ *        lost too when it ends after t1. A frame starting before t0 and ending after it is
+ *        always delivered, and truncated at t0 + L by the first drain whose barrier lies after
+ *        t0, or at its delivery when that drain has passed: the receiver sees an aborted frame,
+ *        nothing in RDR, and the tap marks it cut and lost with its stop-bit end. A frame both
+ *        aborted and cut keeps the abort's end, and the receiver sees the earlier of the two.
+ *        An injected frame is classified the same way on its receiver times against
+ *        [t0 + L, t1 + L). A dropped frame is never marked. Marks are set when the tap gets a
+ *        frame, so a restore of an open cut decides them.
+ *
+ *        A cut held low classifies and marks frames the same way, but never truncates one: the
+ *        receiver's port gets uart_link_port::hold_line() at t0 + L from the first drain whose
+ *        barrier lies after t0, and uart_link_port::release_line() at t1 + L from the first
+ *        drain whose barrier lies after t1, both on the peer lane. The receiver turns a frame
+ *        crossing t0 + L into the break character. A hold the receiver's reset drops, one
+ *        starting before a recorded reset plus L, within a frame after the reset, is never
+ *        handed, nor is its release. quiet() is false while a low cut waits for its hold or,
+ *        closed, for its release: a sleeping system keeps its time frozen and would never reach
+ *        them. So a break cut ahead delays an idle pause until its release is handed, an open
+ *        one whose hold was handed does not. A receiver reset after the hold was handed ends it
+ *        at the receiver, which then ignores the release. The release is still handed, so
+ *        quiet() stays false until the first drain past t1: idle attempts before it are
+ *        abandoned, but the pause lands at the point where every member was quiescent, which
+ *        no drain moves. A low cut is erased only after its release.
+ *
+ *        Cuts never change errors: the shape and overlap checks run on every post as without
+ *        cuts, against a record of the receiver's line that keeps every frame's extent, a cut
+ *        frame included. Only an abort, what the sender did, shortens it. So an injected frame
+ *        overlapping a peer frame is a system error even when a cut keeps both off the line,
+ *        and inject() refuses the same frames with the cut as without it.
+ *
+ *        A closed cut is erased at the first drain whose barrier is at or after t1 + L once no
+ *        frame the tap has not shown starts before t1, or before t1 + L for an injected one: a
+ *        peer frame touching it ends by t1 + F, an injected one by t1 + L + F, F the longest
+ *        frame on the link, so a cut is gone one window after t1 + L + F. At most
+ *        max_waiting_cuts cuts are registered at once.
+ *
+ *        Locks: the link's registration, then one wire's inject lock at a time. A cut change
+ *        checks both wires and commits on both in one hold of the registration. A drain holds
+ *        it for a start section, which copies the cuts starting before the drain's reach and
+ *        sets that reach, and an end section, which erases passed cuts among those starting
+ *        before the barrier and sets the last barrier, never across a port call. Both work on
+ *        that prefix of the list, sorted by start, so a drain's cost does not grow with cuts
+ *        registered ahead.
  */
+class POPCORN_API uart_wire;
+
+/**
+ * @brief Registers a cut of a link over [@p start, @p end), both directions, on its two wires.
+ *        Every refusal is checked on both wires before either changes.
+ * @param forth One wire of the link.
+ * @param back The other wire, sharing @p forth's registration.
+ * @param start Cut start, sender system time.
+ * @param end Cut end, above @p start, or none for a cut open until restore_link().
+ * @param low Whether the line is held low during the cut rather than idle.
+ * @param now The stopped system's time, or the cut owner's system time in its callback. The
+ *        bound is then @p now. None for a cut while the system runs, from any other thread: the
+ *        bound is then the larger reach of the two wires' drains, and acceptance depends on wall
+ *        timing, the effect only on @p start and @p end.
+ * @return The cut's start, or why it was refused.
+ */
+POPCORN_API auto cut_link(
+    uart_wire&                    forth,
+    uart_wire&                    back,
+    core::sys_time                start,
+    std::optional<core::sys_time> end,
+    bool                          low,
+    std::optional<core::sys_time> now)
+    -> std::expected<core::sys_time, cut_refusal> pre(not end or *end > start) pre(end or now);
+
+/**
+ * @brief Ends the open cut of a link at @p now, on both wires. An open cut starting at or after
+ *        @p now is withdrawn whole.
+ * @param forth One wire of the link.
+ * @param back The other wire, sharing @p forth's registration.
+ * @param now As cut_link().
+ * @return The cut's end, @p now, or why it was refused.
+ */
+POPCORN_API auto restore_link(uart_wire& forth, uart_wire& back, core::sys_time now)
+    -> std::expected<core::sys_time, cut_refusal>;
+
 class POPCORN_API uart_wire final : public uart_endpoint, public core::member_link
 {
 public:
@@ -313,6 +489,17 @@ public:
   [[nodiscard]] auto tap() noexcept -> tap_queue&;
 
   /**
+   * @brief Shares @p registration with the other wire of the link, before the system starts. A
+   *        wire never paired keeps its own.
+   * @param registration The link's registration.
+   */
+  void share_registration(std::shared_ptr<link_registration> registration)
+      pre(registration != nullptr) pre(state_.started == 0 and state_.window == 0);
+
+  /** @brief Whether this wire and @p other share one registration. */
+  [[nodiscard]] auto shares_registration(uart_wire const& other) const noexcept -> bool;
+
+  /**
    * @brief Arms new data for the frames numbered @p index on, one per element, any thread. The
    *        sender reads armed edits under the same lock as it numbers a frame, so an edit armed
    *        before the frame starts applies and one armed after is refused. Which of the two
@@ -343,7 +530,10 @@ public:
    * @brief Puts frames on the receiver's line back to back at the declared shape, as if a
    *        device on the line sent them, on the injected lane. With the system stopped or
    *        paused, called with the receiver's host access: accepted when @p at is at or after
-   *        the receiver's time and no frame overlaps one delivered, posted or queued, then
+   *        the receiver's time and no frame overlaps one delivered, posted or queued. A frame
+   *        starting at or after the reach of the drains so far, and at or after L, is then
+   *        queued and delivered at the next drain, on time, as a running injection is, so a
+   *        cut registered after the call still keeps it off the line. An earlier frame is
    *        delivered at once. While the system runs, any thread: accepted when @p at is at or
    *        after the reach of the drains so far, then delivered by the drain whose reach covers
    *        it. Acceptance then depends on wall timing. No overlap check at the call: an overlap
@@ -361,28 +551,53 @@ public:
       -> std::expected<void, inject_refusal> pre(not data.empty());
 
 private:
+  friend auto cut_link(
+      uart_wire&                    forth,
+      uart_wire&                    back,
+      core::sys_time                start,
+      std::optional<core::sys_time> end,
+      bool                          low,
+      std::optional<core::sys_time> now) -> std::expected<core::sys_time, cut_refusal>;
+  friend auto restore_link(uart_wire& forth, uart_wire& back, core::sys_time now)
+      -> std::expected<core::sys_time, cut_refusal>;
+
   auto mailbox(std::uint64_t window) -> std::vector<detail::wire_post>&;
   void collect(std::vector<detail::wire_post> const& posts, std::vector<tap_frame>& into) const;
-  void emit(std::vector<tap_frame>& from, core::sys_time through);
+  void emit(
+      std::vector<tap_frame>&           from,
+      core::sys_time                    through,
+      std::span<detail::line_cut const> cuts);
   auto check_shape(detail::wire_post const& post) -> std::optional<core::link_fault>;
   auto arm(detail::armed_edit edit) -> bool;
   auto overlap(detail::line_span const& span) const -> std::optional<core::link_fault>;
   [[nodiscard]] auto reset_drops(detail::line_span const& span) const -> bool;
   auto               fault_of(detail::line_span const& span) const -> core::link_fault;
   void               deliver_injection(
-      detail::queued_injection const& frame,
-      core::time_map                  receiver,
-      bool                            dropped);
+      detail::queued_injection const&   frame,
+      core::time_map                    receiver,
+      bool                              dropped,
+      std::span<detail::line_cut const> cuts);
+  void truncate(
+      detail::line_span&                span,
+      std::span<detail::line_cut const> cuts,
+      core::sys_time                    before,
+      core::time_map                    receiver);
+  [[nodiscard]] auto truncating(
+      detail::line_span const&          span,
+      std::span<detail::line_cut const> cuts,
+      core::sys_time                    before) const -> detail::line_cut const*;
+  [[nodiscard]] auto cuts_before(core::sys_time reach) const -> std::vector<detail::line_cut>;
 
-  wire_ends                      ends_;
-  wire_lanes                     lanes_;
-  core::sys_time                 latency_;
-  line_shape                     declared_;
-  wire_receiver                  into_;
-  std::shared_ptr<uart_endpoint> forward_;
-  tap_queue                      tap_;
-  mutable std::mutex             edit_mutex_;
-  mutable std::mutex             inject_mutex_;
-  detail::wire_state             state_;
+  wire_ends                          ends_;
+  wire_lanes                         lanes_;
+  core::sys_time                     latency_;
+  line_shape                         declared_;
+  wire_receiver                      into_;
+  std::shared_ptr<uart_endpoint>     forward_;
+  tap_queue                          tap_;
+  std::shared_ptr<link_registration> registration_;
+  mutable std::mutex                 edit_mutex_;
+  mutable std::mutex                 inject_mutex_;
+  detail::wire_state                 state_;
 };
 }

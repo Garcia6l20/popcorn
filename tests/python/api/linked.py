@@ -8,7 +8,9 @@ from pathlib import Path
 
 import popcorn
 import popcorn.model
-from popcorn.units import us
+import pytest
+from popcorn import StopReason, System, UartLink
+from popcorn.units import VirtualDuration, VirtualTime, us
 
 USART_LL = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt" / "usart_ll.elf"
 LINK_BYTE = 1
@@ -78,3 +80,53 @@ def ticker(m: popcorn.Machine) -> Ticker:
     model = m.model("TIM6")
     assert isinstance(model, Ticker)
     return model
+
+
+L = us(20)
+VARIANT_VALUES: list[tuple[int, VirtualDuration | None]] = [
+    (1_000_000, None),
+    (997, None),
+    (1_000_000, us(3)),
+    (997, us(3)),
+]
+VARIANTS = [
+    pytest.param(*values, id=name)
+    for values, name in zip(VARIANT_VALUES, ("plain", "997", "q=3us", "997 q=3us"), strict=True)
+]
+TX_BYTES = [0x20 + index for index in range(64)]
+FIRMWARE_BAUD = 461_095
+
+Build = Callable[..., System]
+
+
+def links(third: VirtualDuration | None, baud: int = 460_800) -> list[UartLink]:
+    made = [UartLink("a.USART1", "b.USART1", latency=L, baud=baud)]
+    if third is not None:
+        made.append(UartLink("a.USART2", "b.USART2", latency=third, baud=460_800))
+    return made
+
+
+async def to(system: System, until: VirtualTime) -> None:
+    """Run to `until`, again after each member stop."""
+    while (await system.run(until=until)).reason is not StopReason.TIME:
+        pass
+
+
+def past_done(system: System) -> None:
+    """Move a, parked on link_tx's final breakpoint, to the idle loop, so a free run goes on."""
+    a = system.members["a"]
+    assert a.mem.u16[a.pc - 2] == 0xBE01
+    a.reg.pc = a.sym("idle")
+
+
+def at(micros: float) -> VirtualTime:
+    return VirtualTime(us(micros).ps)
+
+
+async def in_flight(system: System) -> None:
+    """Let the event loop turn until the system's free run resumes after a member wait."""
+    for _ in range(100):
+        if system._flight is not None:  # pyright: ignore[reportPrivateUsage]
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("the free run did not resume")

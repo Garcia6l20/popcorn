@@ -448,6 +448,35 @@ auto system_handle::add_wire(
   return index;
 }
 
+auto system_handle::add_link(std::size_t forth, std::size_t back) -> std::size_t
+{
+  if(system_ != nullptr or closed_)
+  {
+    throw std::logic_error("links are added before start()");
+  }
+  if(forth >= wires_.size() or back >= wires_.size())
+  {
+    throw std::invalid_argument("a link names a wire the system does not have");
+  }
+  auto& one   = wires_[forth];
+  auto& other = wires_[back];
+  if(forth == back or one.sender != other.wire->receiver() or other.sender != one.wire->receiver())
+  {
+    throw std::invalid_argument("a link pairs the two directions between two members");
+  }
+  if(one.linked or other.linked)
+  {
+    throw std::invalid_argument("a wire is in a link already");
+  }
+  auto registration = std::make_shared<periph::stm32::link_registration>();
+  one.wire->share_registration(registration);
+  other.wire->share_registration(std::move(registration));
+  one.linked   = true;
+  other.linked = true;
+  links_.emplace_back(forth, back, one.sender);
+  return links_.size() - 1;
+}
+
 void system_handle::start(std::vector<std::int64_t> const& offsets_ps)
 {
   if(system_ != nullptr or closed_)
@@ -537,6 +566,15 @@ auto system_handle::wire(std::size_t index) const -> periph::stm32::uart_wire&
     throw std::out_of_range("no such wire");
   }
   return *wires_[index].wire;
+}
+
+auto system_handle::link(std::size_t index) const -> link_entry const&
+{
+  if(index >= links_.size())
+  {
+    throw std::out_of_range("no such link");
+  }
+  return links_[index];
 }
 
 auto system_handle::native() const noexcept -> core::system*
@@ -919,7 +957,8 @@ auto system_handle::tap_take(std::size_t index) -> std::vector<tap_record>
          .brk        = frame.brk,
          .lost       = frame.lost,
          .dropped    = frame.dropped,
-         .injected   = frame.injected});
+         .injected   = frame.injected,
+         .cut        = frame.cut});
   }
   return out;
 }
@@ -982,6 +1021,149 @@ auto system_handle::inject(
     return std::nullopt;
   }
   return std::tuple{std::format("{}", outcome.error().reason), outcome.error().bound.ps};
+}
+
+auto system_handle::change_cut(
+    std::size_t      index,
+    std::string_view what,
+    bool             stopped,
+    bool             from_body,
+    cut_change       change) -> cut_outcome
+{
+  auto const& entry = link(index);
+  auto&       forth = wire(entry.forth);
+  auto&       back  = wire(entry.back);
+  auto const  owner = entry.owner.load(std::memory_order_relaxed);
+  auto const  refused =
+      [](std::expected<core::sys_time, periph::stm32::cut_refusal> const& outcome) -> cut_outcome {
+    if(outcome)
+    {
+      return {outcome->ps, std::nullopt};
+    }
+    return {
+        std::nullopt, std::tuple{
+                                 std::format("{}", outcome.error().reason), outcome.error().bound.ps,
+                                 outcome.error().end.ps}
+    };
+  };
+  if(core::detail::host_locks_held != 0)
+  {
+    throw popcorn::machine_running("a linked system is not driven from inside a parked section");
+  }
+  if(core::detail::on_host_thread)
+  {
+    if(closed_)
+    {
+      throw core::machine_closed("the linked system was closed");
+    }
+    if(system_ == nullptr)
+    {
+      throw std::logic_error("the linked system is not started");
+    }
+    auto const caller = std::ranges::find_if(
+        members_, [](member_entry const& one) { return one.host->owns_engine(); });
+    if(caller == members_.end())
+    {
+      throw std::runtime_error(
+          std::format(
+              "{} from a callback of a machine outside this system: only callbacks of {}, the "
+              "link's cut owner, change its cuts",
+              what, members_[owner].name));
+    }
+    if(static_cast<std::size_t>(caller - members_.begin()) != owner)
+    {
+      throw std::runtime_error(
+          std::format(
+              "{} from a callback: only callbacks of {}, the link's cut owner, change its cuts",
+              what, members_[owner].name));
+    }
+    auto const local = caller->host->member_inline(core::member_id{}).virtual_clock().time();
+    auto const now   = system_->base_of(owner).ps + static_cast<std::int64_t>(local.ps);
+    return refused(change(forth, back, core::sys_time{now}));
+  }
+  system_ref const ref{system()};
+  auto&            sys = *ref;
+  if(stopped)
+  {
+    return refused(locked(sys, [&](core::held_system const& held) {
+      auto const now = std::max(
+          sys.time_of(held, wires_[entry.forth].sender),
+          sys.time_of(held, wires_[entry.back].sender));
+      return change(forth, back, now);
+    }));
+  }
+  if(not from_body)
+  {
+    throw std::runtime_error(
+        std::format(
+            "{} while the system runs: call it from a callback of {}, the link's cut owner, "
+            "or call cut(start, end) from here",
+            what, members_[owner].name));
+  }
+  refuse_caller(sys);
+  nb::gil_scoped_release const released;
+  auto const                   outcome = change(forth, back, std::nullopt);
+  if(outcome)
+  {
+    sys.wake();
+  }
+  return refused(outcome);
+}
+
+auto system_handle::cut(
+    std::size_t  index,
+    std::int64_t start_ps,
+    std::int64_t end_ps,
+    bool         low,
+    bool         stopped) -> cut_outcome
+{
+  if(end_ps <= start_ps)
+  {
+    throw std::invalid_argument("a cut ends after its start");
+  }
+  return change_cut(
+      index, "cut", stopped, true,
+      [&](periph::stm32::uart_wire& forth, periph::stm32::uart_wire& back,
+          std::optional<core::sys_time> now) {
+        return periph::stm32::cut_link(
+            forth, back, core::sys_time{start_ps}, core::sys_time{end_ps}, low, now);
+      });
+}
+
+auto system_handle::break_line(std::size_t index, bool low, bool stopped) -> cut_outcome
+{
+  return change_cut(
+      index, "break_line", stopped, false,
+      [&](periph::stm32::uart_wire& forth, periph::stm32::uart_wire& back,
+          std::optional<core::sys_time> now) {
+        return periph::stm32::cut_link(forth, back, *now, std::nullopt, low, now);
+      });
+}
+
+auto system_handle::restore(std::size_t index, bool stopped) -> cut_outcome
+{
+  return change_cut(
+      index, "restore_line", stopped, false,
+      [](periph::stm32::uart_wire& forth, periph::stm32::uart_wire& back,
+         std::optional<core::sys_time> now) {
+        return periph::stm32::restore_link(forth, back, *now);
+      });
+}
+
+auto system_handle::link_owner(std::size_t index) const -> std::size_t
+{
+  return link(index).owner.load(std::memory_order_relaxed);
+}
+
+auto system_handle::max_waiting_cuts() const -> std::size_t
+{
+  return periph::stm32::max_waiting_cuts;
+}
+
+void system_handle::set_link_owner(std::size_t index, std::size_t member)
+{
+  std::ignore = link(index);
+  links_[index].owner.store(member_index(member), std::memory_order_relaxed);
 }
 
 auto system_handle::replace(

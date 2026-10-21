@@ -70,6 +70,7 @@ from popcorn._refs import Condition, Conditions, MemoryRef, Readout, all_of, any
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Fault, FrameReturn, Stop
 from popcorn._system import (
+    LineState,
     System,
     SystemDescription,
     SystemSnapshot,
@@ -119,6 +120,7 @@ __all__ = [
     "ImageView",
     "Initiator",
     "Intercept",
+    "LineState",
     "Location",
     "LogEntry",
     "Machine",

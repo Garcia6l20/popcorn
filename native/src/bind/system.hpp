@@ -12,9 +12,13 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <expected>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -70,6 +74,8 @@ struct[[= py::rename{"TapRecord"}]] tap_record
   [[= py::readonly]] bool dropped{};
   /** @brief Whether it was injected. */
   [[= py::readonly]] bool injected{};
+  /** @brief Whether a line cut touched it. */
+  [[= py::readonly]] bool cut{};
 };
 
 /**
@@ -83,6 +89,10 @@ struct[[= py::rename{"TapRecord"}]] tap_record
  */
 class[[= py::rename{"SystemHandle"}]] system_handle
 {
+  using cut_outcome = std::tuple<
+      std::optional<std::int64_t>,
+      std::optional<std::tuple<std::string, std::int64_t, std::int64_t>>>;
+
 public:
   /**
    * @param slice_instructions Instructions after which a member's slice ends, above 0.
@@ -130,6 +140,17 @@ public:
   [[= py::doc{"Add a wire before start(), return its index."}]] auto
       add_wire(wire_spec const& spec, uart_queue const& sender, uart_queue const& receiver)
           -> std::size_t;
+
+  /**
+   * @brief Pairs the wires @p forth and @p back as one link before start(): they share one
+   *        periph::stm32::link_registration, and the link's cut owner is @p forth's sender.
+   * @return The link's index.
+   * @throws std::logic_error after start().
+   * @throws std::invalid_argument for a wire out of range, wires that are not the two
+   *         directions between the same members, or a wire in a link already.
+   */
+  [[= py::doc{"Pair two wires as one link before start(), return its index."}]] auto
+      add_link(std::size_t forth, std::size_t back) -> std::size_t;
 
   /**
    * @brief Attaches the wires, builds the system and fixes each member's base: member i's local
@@ -304,6 +325,49 @@ public:
           std::int64_t                      at_ps,
           bool paused) -> std::optional<std::tuple<std::string, std::int64_t>>;
 
+  /**
+   * @brief periph::stm32::cut_link() over [@p start_ps, @p end_ps) on link @p link. The
+   *        caller decides the bound: inside a parked section MachineRunning. On a machine's
+   *        thread, from a callback of the link's cut owner, its system time, from any other
+   *        callback RuntimeError. With @p stopped, the later of the two ends' system times,
+   *        under the system mutex. Else, while it runs, the reach of the link's drains, and an
+   *        accepted cut wakes a system asleep on IDLE.
+   * @return (start_ps, None), or (None, (reason name, bound_ps, end_ps)) for a refusal.
+   */
+  [[= py::doc{"Cut a link over [start_ps, end_ps), the line low when low."}]] auto
+      cut(std::size_t link, std::int64_t start_ps, std::int64_t end_ps, bool low, bool stopped)
+          -> cut_outcome;
+
+  /**
+   * @brief periph::stm32::cut_link() of a cut of link @p link open from now. Now is the cut
+   *        owner's system time in its callback, or with @p stopped the later of the two ends'
+   *        system times. Callers as cut(), except that a caller off a machine's thread
+   *        without @p stopped gets RuntimeError.
+   * @return (start_ps, None), or (None, (reason name, bound_ps, end_ps)) for a refusal.
+   */
+  [[= py::doc{"Open a cut of a link from now."}]] auto
+      break_line(std::size_t link, bool low, bool stopped) -> cut_outcome;
+
+  /**
+   * @brief periph::stm32::restore_link() of link @p link at now, as break_line() takes it.
+   * @return (end_ps, None), or (None, (reason name, bound_ps, end_ps)) for a refusal.
+   */
+  [[= py::doc{"End a link's open cut now."}]] auto restore(std::size_t link, bool stopped)
+      -> cut_outcome;
+
+  /** @brief The member whose callbacks may change link @p link's cuts while it runs. */
+  [[= py::doc{"A link's cut owner, a member index."}]] [[nodiscard]] auto
+      link_owner(std::size_t link) const -> std::size_t;
+
+  /** @brief periph::stm32::max_waiting_cuts, the most cuts one link holds at once. */
+  [[= py::doc{"The most cuts one link holds at once."}]] [[nodiscard]] auto max_waiting_cuts() const
+      -> std::size_t;
+
+  /** @brief Sets link @p link's cut owner, while the system is stopped.
+   * @throws IndexError for no such link or member. */
+  [[= py::doc{"Set a link's cut owner while stopped."}]] void
+      set_link_owner(std::size_t link, std::size_t member);
+
   /** @brief periph::stm32::uart_wire::replace(), any thread. */
   [[= py::doc{"Arm new data for frames from index on, whether armed."}]] auto
       replace(std::size_t wire, std::uint64_t index, std::vector<std::uint16_t> const& data)
@@ -358,17 +422,38 @@ private:
     periph::uart_port*                        sender_port{};
     std::shared_ptr<periph::uart_endpoint>    own;
     std::size_t                               sender{};
+    bool                                      linked{};
   };
+
+  struct link_entry
+  {
+    std::size_t              forth{};
+    std::size_t              back{};
+    std::atomic<std::size_t> owner{};
+  };
+
+  using cut_change = std::function_ref<std::expected<core::sys_time, periph::stm32::cut_refusal>(
+      periph::stm32::uart_wire&,
+      periph::stm32::uart_wire&,
+      std::optional<core::sys_time>)>;
 
   [[nodiscard]] auto system() const -> std::shared_ptr<core::system>;
   [[nodiscard]] auto member_index(std::size_t member) const -> std::size_t;
   [[nodiscard]] auto wire(std::size_t index) const -> periph::stm32::uart_wire&;
-  void               give_back() noexcept;
+  [[nodiscard]] auto link(std::size_t index) const -> link_entry const&;
+  auto               change_cut(
+      std::size_t      index,
+      std::string_view what,
+      bool             stopped,
+      bool             from_body,
+      cut_change       change) -> cut_outcome;
+  void give_back() noexcept;
 
   core::slice_bounds                          bounds_;
   std::size_t                                 tap_capacity_ = std::size_t{1} << 20;
   std::vector<member_entry>                   members_;
   std::vector<wire_entry>                     wires_;
+  std::deque<link_entry>                      links_;
   std::vector<reflex::py::nb::object>         handles_;
   std::shared_ptr<core::system>               system_;
   std::shared_ptr<std::atomic<std::uint64_t>> sleeps_ =

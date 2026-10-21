@@ -128,8 +128,10 @@ public:
   virtual void receiver_reset(sys_time at) = 0;
 
   /**
-   * @brief Hands the posts of a window to the receiver. Called on the receiver's host thread
-   *        after the barrier closing @p window, before the receiver runs on.
+   * @brief Hands the posts of a window it delivers to the receiver. A link may keep some for a
+   *        later drain, as long as each still reaches the receiver on time. Called on the
+   *        receiver's host thread after the barrier closing @p window, before the receiver runs
+   *        on.
    * @param window Index of the window whose mailbox is drained.
    * @param barrier System time of that barrier.
    * @param next System time of the barrier after it: what the link's drains reach so far.
@@ -144,9 +146,9 @@ public:
           -> std::optional<link_fault> = 0;
 
   /**
-   * @brief Whether the link holds nothing for its receiver: no post in either mailbox and no
-   *        injection queued. Called on the receiver's host thread after its drain, with every
-   *        sender stopped at a barrier.
+   * @brief Whether the link holds nothing for its receiver: nothing posted, queued or kept
+   *        that a later drain would hand. Called on the receiver's host thread after its drain,
+   *        with every sender stopped at a barrier.
    */
   [[nodiscard]] virtual auto quiet() const -> bool = 0;
 

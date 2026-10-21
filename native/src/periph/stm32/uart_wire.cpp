@@ -4,6 +4,7 @@
 #include <reflex/serde/bson.hpp>
 
 #include <algorithm>
+#include <array>
 #include <format>
 #include <limits>
 #include <stdexcept>
@@ -24,6 +25,45 @@ auto half_bits(std::uint32_t word, std::uint32_t half_stops) -> std::uint64_t
 auto shifted(core::sys_time const& at, core::sys_time const& by) -> core::sys_time
 {
   return {at.ps + by.ps};
+}
+
+constinit thread_local int registrations_held = 0;
+
+class registration_hold
+{
+public:
+  explicit registration_hold(link_registration& registration) : registration_{registration}
+  {
+    contract_assert(registrations_held == 0);
+    registration_.contenders.fetch_add(1);
+    registration_.mutex.lock();
+    registration_.contenders.fetch_sub(1);
+    ++registrations_held;
+  }
+
+  registration_hold(registration_hold const&)                    = delete;
+  auto operator=(registration_hold const&) -> registration_hold& = delete;
+  registration_hold(registration_hold&&)                         = delete;
+  auto operator=(registration_hold&&) -> registration_hold&      = delete;
+
+  ~registration_hold()
+  {
+    --registrations_held;
+    registration_.mutex.unlock();
+  }
+
+private:
+  link_registration& registration_;
+};
+
+auto overlaps(detail::line_cut const& cut, core::sys_time start, core::sys_time end) -> bool
+{
+  return cut.start < end and start < cut.end;
+}
+
+auto inside(detail::line_cut const& cut, core::sys_time at) -> bool
+{
+  return cut.start <= at and at < cut.end;
 }
 
 auto earliest(std::optional<core::link_fault> kept, std::optional<core::link_fault> found)
@@ -91,8 +131,27 @@ uart_wire::uart_wire(
     std::shared_ptr<uart_endpoint> forward,
     std::size_t                    tap_capacity)
     : ends_{ends}, lanes_{lanes}, latency_{latency}, declared_{declared}, into_{std::move(into)},
-      forward_{std::move(forward)}, tap_{tap_capacity}
+      forward_{std::move(forward)}, tap_{tap_capacity},
+      registration_{std::make_shared<link_registration>()}
 {}
+
+void uart_wire::share_registration(std::shared_ptr<link_registration> registration)
+{
+  registration_ = std::move(registration);
+}
+
+auto uart_wire::shares_registration(uart_wire const& other) const noexcept -> bool
+{
+  return registration_ == other.registration_;
+}
+
+auto uart_wire::cuts_before(core::sys_time reach) const -> std::vector<detail::line_cut>
+{
+  core::link_guard const held{inject_mutex_};
+  return {
+      state_.cuts.begin(),
+      std::ranges::lower_bound(state_.cuts, reach, {}, &detail::line_cut::start)};
+}
 
 auto uart_wire::mailbox(std::uint64_t window) -> std::vector<detail::wire_post>&
 {
@@ -294,7 +353,10 @@ void uart_wire::collect(std::vector<detail::wire_post> const& posts, std::vector
   }
 }
 
-void uart_wire::emit(std::vector<tap_frame>& from, core::sys_time through)
+void uart_wire::emit(
+    std::vector<tap_frame>&           from,
+    core::sys_time                    through,
+    std::span<detail::line_cut const> cuts)
 {
   auto const key = [](tap_frame const& frame) {
     return std::tuple{frame.end.ps, frame.injected, frame.index};
@@ -304,6 +366,28 @@ void uart_wire::emit(std::vector<tap_frame>& from, core::sys_time through)
   std::vector<tap_frame> settled(from.begin(), ready.begin());
   from.erase(from.begin(), ready.begin());
   std::ranges::sort(settled, {}, key);
+  for(auto& frame : settled)
+  {
+    if(frame.dropped)
+    {
+      continue;
+    }
+    auto const shift = frame.injected ? latency_ : core::sys_time{0};
+    auto const start = core::sys_time{frame.start.ps - shift.ps};
+    auto const end   = core::sys_time{frame.end.ps - shift.ps};
+    for(auto const& one : cuts)
+    {
+      if(not overlaps(one, start, end))
+      {
+        continue;
+      }
+      frame.cut = true;
+      if(start < one.start or one.end < end)
+      {
+        frame.lost = true;
+      }
+    }
+  }
   auto const cursor = std::tuple{state_.tapped_end.ps, state_.tapped_injected, state_.tapped_index};
   for(auto const& frame : settled)
   {
@@ -349,11 +433,15 @@ auto uart_wire::overlap(detail::line_span const& span) const -> std::optional<co
 }
 
 void uart_wire::deliver_injection(
-    detail::queued_injection const& frame,
-    core::time_map                  receiver,
-    bool                            dropped)
+    detail::queued_injection const&   frame,
+    core::time_map                    receiver,
+    bool                              dropped,
+    std::span<detail::line_cut const> cuts)
 {
-  if(not dropped)
+  auto const sent = core::sys_time{frame.start.ps - latency_.ps};
+  auto const suppressed =
+      std::ranges::any_of(cuts, [&](detail::line_cut const& cut) { return inside(cut, sent); });
+  if(not dropped and not suppressed)
   {
     into_.port->receive_at(
         {.data       = with_parity(frame.data, declared_.word_bits, declared_.parity),
@@ -367,11 +455,12 @@ void uart_wire::deliver_injection(
         lanes_.injected);
   }
   state_.delivered.push_back(
-      {.start    = frame.start,
-       .end      = frame.end,
-       .injected = true,
-       .post     = frame.start,
-       .index    = frame.index});
+      {.start      = frame.start,
+       .end        = frame.end,
+       .injected   = true,
+       .post       = frame.start,
+       .index      = frame.index,
+       .suppressed = suppressed or dropped});
   state_.untapped.push_back(
       {.from     = ends_.sender,
        .to       = ends_.receiver,
@@ -386,7 +475,46 @@ void uart_wire::deliver_injection(
 auto uart_wire::quiet() const -> bool
 {
   core::link_guard const held{inject_mutex_};
-  return state_.mail_even.empty() and state_.mail_odd.empty() and state_.injections.empty();
+  return state_.mail_even.empty()
+     and state_.mail_odd.empty()
+     and state_.injections.empty()
+     and state_.carried.empty()
+     and std::ranges::none_of(state_.cuts, [](detail::line_cut const& cut) {
+           return cut.low and (not cut.held or (not cut.open and not cut.released));
+         });
+}
+
+auto uart_wire::truncating(
+    detail::line_span const&          span,
+    std::span<detail::line_cut const> cuts,
+    core::sys_time                    before) const -> detail::line_cut const*
+{
+  if(span.suppressed or span.truncated)
+  {
+    return nullptr;
+  }
+  auto const crossed = std::ranges::find_if(cuts, [&](detail::line_cut const& cut) {
+    auto const at = shifted(cut.start, latency_);
+    return not cut.low and cut.start < before and span.start < at and at < span.end;
+  });
+  return crossed == cuts.end() ? nullptr : &*crossed;
+}
+
+void uart_wire::truncate(
+    detail::line_span&                span,
+    std::span<detail::line_cut const> cuts,
+    core::sys_time                    before,
+    core::time_map                    receiver)
+{
+  auto const* const crossed = truncating(span, cuts, before);
+  if(crossed == nullptr)
+  {
+    return;
+  }
+  into_.port->cancel_in_flight(
+      receiver.to_local(shifted(crossed->start, latency_)),
+      span.injected ? lanes_.injected : lanes_.peer);
+  span.truncated = true;
 }
 
 auto uart_wire::drain(
@@ -395,12 +523,113 @@ auto uart_wire::drain(
     core::sys_time const& next,
     core::time_map        receiver) -> std::optional<core::link_fault>
 {
+  std::vector<detail::line_cut>         cuts;
+  std::vector<detail::queued_injection> due;
+  std::vector<detail::wire_post>        held_over;
+  {
+    registration_hold const registered{*registration_};
+    core::link_guard const  held{inject_mutex_};
+    cuts.assign(
+        state_.cuts.begin(),
+        std::ranges::lower_bound(state_.cuts, next, {}, &detail::line_cut::start));
+    auto const later = std::ranges::stable_partition(
+        state_.injections,
+        [&](detail::queued_injection const& frame) { return frame.start < next; });
+    due.assign(state_.injections.begin(), later.begin());
+    state_.injections.erase(state_.injections.begin(), later.begin());
+    state_.drained_through = std::max(state_.drained_through, next);
+    held_over              = std::exchange(state_.carried, {});
+  }
   std::erase_if(state_.delivered, [&](detail::line_span const& span) {
     return span.end <= state_.last_barrier;
   });
   std::erase_if(state_.resets, [&](core::sys_time const& reset) {
     return shifted(reset, latency_) <= state_.last_barrier;
   });
+  std::vector<detail::wire_post> carry;
+  auto const                     sent_of = [&](detail::wire_post const& post) {
+    return detail::line_span{
+        .start = shifted(post.start, latency_),
+        .end   = shifted(post.end, latency_),
+        .post  = post.start,
+        .index = post.index};
+  };
+  auto const closed_over = [&](detail::wire_post const& post) {
+    return std::ranges::any_of(cuts, [&](detail::line_cut const& cut) {
+      return not cut.open and inside(cut, post.start);
+    });
+  };
+  auto const cancels_any = [&](detail::wire_post const& post) {
+    auto const at = shifted(post.start, latency_);
+    return std::ranges::any_of(state_.delivered, [&](detail::line_span const& span) {
+      return not span.injected
+         and not span.suppressed
+         and span.start < at
+         and at <= span.end
+         and not span.truncated
+         and not reset_drops(span)
+         and truncating(span, cuts, post.start) == nullptr;
+    });
+  };
+  auto const hand_abort = [&](detail::wire_post const& post) {
+    auto const at = shifted(post.start, latency_);
+    for(auto& span : state_.delivered)
+    {
+      if(not span.injected and span.start < at and at <= span.end)
+      {
+        truncate(span, cuts, post.start, receiver);
+      }
+    }
+    into_.port->cancel_in_flight(receiver.to_local(at), lanes_.peer);
+  };
+  auto const hand_frame = [&](detail::wire_post const& post, detail::line_span& span) {
+    auto const sent = sent_of(post);
+    span.carried    = false;
+    span.suppressed =
+        reset_drops(sent) or std::ranges::any_of(cuts, [&](detail::line_cut const& cut) {
+          return inside(cut, post.start);
+        });
+    if(span.suppressed)
+    {
+      return;
+    }
+    auto frame  = post.frame;
+    frame.start = receiver.to_local(sent.start);
+    frame.end   = receiver.to_local(sent.end);
+    into_.port->receive_at(frame, lanes_.peer);
+  };
+  for(auto const& post : held_over)
+  {
+    if(post.abort)
+    {
+      if(post.start < barrier)
+      {
+        hand_abort(post);
+      }
+      else if(cancels_any(post))
+      {
+        carry.push_back(post);
+      }
+      continue;
+    }
+    auto const span = std::ranges::find_if(state_.delivered, [&](detail::line_span const& one) {
+      return one.carried and not one.injected and one.index == post.index;
+    });
+    contract_assert(span != state_.delivered.end());
+    if(post.start < barrier)
+    {
+      hand_frame(post, *span);
+    }
+    else if(reset_drops(sent_of(post)) or closed_over(post))
+    {
+      span->carried    = false;
+      span->suppressed = true;
+    }
+    else
+    {
+      carry.push_back(post);
+    }
+  }
   auto&                           posts = mailbox(window);
   std::optional<core::link_fault> fault;
   for(auto const& post : posts)
@@ -408,7 +637,6 @@ auto uart_wire::drain(
     if(post.abort)
     {
       auto const at = shifted(post.start, latency_);
-      into_.port->cancel_in_flight(receiver.to_local(at), lanes_.peer);
       for(auto& span : state_.delivered)
       {
         if(not span.injected and span.start < at and at < span.end)
@@ -416,52 +644,52 @@ auto uart_wire::drain(
           span.end = at;
         }
       }
+      if(post.start < barrier)
+      {
+        hand_abort(post);
+      }
+      else if(cancels_any(post))
+      {
+        carry.push_back(post);
+      }
       continue;
     }
     if(post.dropped)
     {
       continue;
     }
-    fault = earliest(fault, check_shape(post));
-    detail::line_span const span{
-        .start = shifted(post.start, latency_),
-        .end   = shifted(post.end, latency_),
-        .post  = post.start,
-        .index = post.index};
+    fault     = earliest(fault, check_shape(post));
+    auto span = sent_of(post);
     if(auto clash = overlap(span))
     {
-      fault = earliest(fault, std::move(clash));
+      fault           = earliest(fault, std::move(clash));
+      span.suppressed = true;
       state_.delivered.push_back(span);
       continue;
     }
-    state_.delivered.push_back(span);
-    if(reset_drops(span))
+    if(post.start >= barrier and (reset_drops(span) or closed_over(post)))
     {
+      span.suppressed = true;
+      state_.delivered.push_back(span);
       continue;
     }
-    auto frame  = post.frame;
-    frame.start = receiver.to_local(span.start);
-    frame.end   = receiver.to_local(span.end);
-    into_.port->receive_at(frame, lanes_.peer);
+    span.carried = post.start >= barrier;
+    state_.delivered.push_back(span);
+    if(span.carried)
+    {
+      carry.push_back(post);
+      continue;
+    }
+    hand_frame(post, state_.delivered.back());
   }
   collect(posts, state_.untapped);
   posts.clear();
-  std::vector<detail::queued_injection> due;
-  {
-    core::link_guard const held{inject_mutex_};
-    auto const             later = std::ranges::stable_partition(
-        state_.injections,
-        [&](detail::queued_injection const& frame) { return frame.start < next; });
-    due.assign(state_.injections.begin(), later.begin());
-    state_.injections.erase(state_.injections.begin(), later.begin());
-    state_.drained_through = std::max(state_.drained_through, next);
-  }
   std::ranges::sort(due, {}, [](detail::queued_injection const& frame) {
     return std::pair{frame.start.ps, frame.index};
   });
   for(auto const& frame : due)
   {
-    detail::line_span const span{
+    detail::line_span span{
         .start    = frame.start,
         .end      = frame.end,
         .injected = true,
@@ -469,14 +697,80 @@ auto uart_wire::drain(
         .index    = frame.index};
     if(auto clash = overlap(span))
     {
-      fault = earliest(fault, std::move(clash));
+      fault           = earliest(fault, std::move(clash));
+      span.suppressed = true;
       state_.delivered.push_back(span);
       continue;
     }
-    deliver_injection(frame, receiver, reset_drops(span));
+    deliver_injection(frame, receiver, reset_drops(span), cuts);
   }
-  emit(state_.untapped, barrier);
-  state_.last_barrier = barrier;
+  if(not cuts.empty())
+  {
+    for(auto& span : state_.delivered)
+    {
+      truncate(span, cuts, barrier, receiver);
+    }
+  }
+  for(auto& cut : cuts)
+  {
+    if(not cut.low)
+    {
+      continue;
+    }
+    auto const from = shifted(cut.start, latency_);
+    if(not cut.held and cut.start < barrier)
+    {
+      cut.held = true;
+      if(reset_drops(
+             {.start = from,
+              .end   = core::sys_time{from.ps + static_cast<std::int64_t>(declared_.frame_ps())}}))
+      {
+        cut.released = true;
+      }
+      else
+      {
+        into_.port->hold_line(receiver.to_local(from), lanes_.peer);
+      }
+    }
+    if(cut.held and not cut.open and not cut.released and cut.end < barrier)
+    {
+      cut.released = true;
+      into_.port->release_line(receiver.to_local(shifted(cut.end, latency_)), lanes_.peer);
+    }
+  }
+  emit(state_.untapped, barrier, cuts);
+  {
+    registration_hold const registered{*registration_};
+    core::link_guard const  held{inject_mutex_};
+    auto&                   live = state_.cuts;
+    auto const ahead = std::ranges::lower_bound(live, barrier, {}, &detail::line_cut::start);
+    for(auto const& done : cuts)
+    {
+      if(not done.low or not done.held)
+      {
+        continue;
+      }
+      auto const found =
+          std::ranges::lower_bound(live.begin(), ahead, done.start, {}, &detail::line_cut::start);
+      if(found != ahead and found->start == done.start)
+      {
+        found->held     = true;
+        found->released = found->released or done.released;
+      }
+    }
+    auto const kept = std::remove_if(live.begin(), ahead, [&](detail::line_cut const& cut) {
+      return not cut.open
+         and (not cut.low or cut.released)
+         and shifted(cut.end, latency_) <= barrier
+         and std::ranges::none_of(state_.untapped, [&](tap_frame const& frame) {
+               return frame.injected ? frame.start < shifted(cut.end, latency_)
+                                     : frame.start < cut.end;
+             });
+    });
+    live.erase(kept, ahead);
+    state_.carried      = std::move(carry);
+    state_.last_barrier = barrier;
+  }
   return fault;
 }
 
@@ -556,13 +850,25 @@ auto uart_wire::inject(
       };
     }
   }
+  core::sys_time reach{};
+  {
+    core::link_guard const held{inject_mutex_};
+    reach = std::max(state_.drained_through, latency_);
+  }
+  auto const cuts = cuts_before(reach);
   for(auto& frame : frames)
   {
     {
       core::link_guard const held{inject_mutex_};
       frame.index = state_.injected++;
+      if(frame.start >= reach)
+      {
+        state_.injections.push_back(frame);
+        continue;
+      }
     }
-    deliver_injection(frame, stopped->map, false);
+    deliver_injection(frame, stopped->map, false, cuts);
+    truncate(state_.delivered.back(), cuts, state_.last_barrier, stopped->map);
   }
   return {};
 }
@@ -572,13 +878,23 @@ void uart_wire::finish(core::sys_time at)
   auto pending = state_.untapped;
   collect(mailbox(state_.window + 1), pending);
   collect(mailbox(state_.window), pending);
-  emit(pending, at);
+  emit(pending, at, cuts_before(at));
 }
 
 void uart_wire::save(std::vector<std::byte>& out) const
 {
+  std::vector<detail::line_cut>  cuts;
+  std::vector<detail::wire_post> carried;
+  {
+    core::link_guard const held{inject_mutex_};
+    cuts    = state_.cuts;
+    carried = state_.carried;
+  }
   core::link_guard const held{edit_mutex_};
-  reflex::serde::bson::serializer{out}.dump(state_);
+  auto                   state = state_;
+  state.cuts                   = std::move(cuts);
+  state.carried                = std::move(carried);
+  reflex::serde::bson::serializer{out}.dump(state);
 }
 
 void uart_wire::load(std::span<std::byte const> in)
@@ -601,5 +917,112 @@ void uart_wire::load(std::span<std::byte const> in)
 auto uart_wire::tap() noexcept -> tap_queue&
 {
   return tap_;
+}
+
+auto cut_link(
+    uart_wire&                    forth,
+    uart_wire&                    back,
+    core::sys_time                start,
+    std::optional<core::sys_time> end,
+    bool                          low,
+    std::optional<core::sys_time> now) -> std::expected<core::sys_time, cut_refusal>
+{
+  contract_assert(&forth != &back);
+  contract_assert(forth.shares_registration(back));
+  registration_hold const registered{*forth.registration_};
+  detail::line_cut const  cut{
+      .start = start,
+      .end   = end.value_or(core::sys_time{std::numeric_limits<std::int64_t>::max()}),
+      .open  = not end,
+      .low   = low};
+  auto const wires = std::array{&forth, &back};
+  auto       bound = now.value_or(core::sys_time{std::numeric_limits<std::int64_t>::min()});
+  for(auto* wire : wires)
+  {
+    core::link_guard const held{wire->inject_mutex_};
+    if(now)
+    {
+      contract_assert(*now >= wire->state_.last_barrier);
+    }
+    else
+    {
+      bound = std::max(bound, wire->state_.drained_through);
+    }
+  }
+  if(start < bound)
+  {
+    return std::unexpected{
+        cut_refusal{.reason = cut_refusal_reason::before_bound, .bound = bound}
+    };
+  }
+  for(auto* wire : wires)
+  {
+    core::link_guard const held{wire->inject_mutex_};
+    auto const&            cuts = wire->state_.cuts;
+    if(not end and not cuts.empty() and cuts.back().open)
+    {
+      return std::unexpected{
+          cut_refusal{
+                      .reason = cut_refusal_reason::already_open,
+                      .bound  = cuts.back().start,
+                      .end    = cuts.back().end}
+      };
+    }
+    if(auto const hit = std::ranges::upper_bound(cuts, cut.start, {}, &detail::line_cut::end);
+       hit != cuts.end() and overlaps(*hit, cut.start, cut.end))
+    {
+      return std::unexpected{
+          cut_refusal{
+                      .reason = cut_refusal_reason::overlaps, .bound = hit->start, .end = hit->end}
+      };
+    }
+    if(cuts.size() >= max_waiting_cuts)
+    {
+      return std::unexpected{cut_refusal{.reason = cut_refusal_reason::full}};
+    }
+  }
+  if(forth.registration_->between_checks_and_commit)
+  {
+    forth.registration_->between_checks_and_commit();
+  }
+  for(auto* wire : wires)
+  {
+    core::link_guard const held{wire->inject_mutex_};
+    auto&                  cuts = wire->state_.cuts;
+    cuts.insert(std::ranges::upper_bound(cuts, start, {}, &detail::line_cut::start), cut);
+  }
+  return start;
+}
+
+auto restore_link(uart_wire& forth, uart_wire& back, core::sys_time now)
+    -> std::expected<core::sys_time, cut_refusal>
+{
+  contract_assert(&forth != &back);
+  contract_assert(forth.shares_registration(back));
+  registration_hold const registered{*forth.registration_};
+  auto const              wires = std::array{&forth, &back};
+  for(auto* wire : wires)
+  {
+    core::link_guard const held{wire->inject_mutex_};
+    contract_assert(now >= wire->state_.last_barrier);
+    if(wire->state_.cuts.empty() or not wire->state_.cuts.back().open)
+    {
+      return std::unexpected{cut_refusal{.reason = cut_refusal_reason::none_open}};
+    }
+  }
+  for(auto* wire : wires)
+  {
+    core::link_guard const held{wire->inject_mutex_};
+    auto&                  cuts = wire->state_.cuts;
+    auto&                  open = cuts.back();
+    if(now <= open.start)
+    {
+      cuts.pop_back();
+      continue;
+    }
+    open.end  = now;
+    open.open = false;
+  }
+  return now;
 }
 }
