@@ -535,7 +535,24 @@ auto uart_wire::drain(
     return shifted(reset, latency_) <= state_.last_barrier;
   });
   std::vector<detail::wire_post> carry;
-  auto const                     hand_abort = [&](detail::wire_post const& post) {
+  auto const                     sent_of = [&](detail::wire_post const& post) {
+    return detail::line_span{
+        .start = shifted(post.start, latency_),
+        .end   = shifted(post.end, latency_),
+        .post  = post.start,
+        .index = post.index};
+  };
+  auto const cancels_any = [&](detail::wire_post const& post) {
+    auto const at = shifted(post.start, latency_);
+    return std::ranges::any_of(state_.delivered, [&](detail::line_span const& span) {
+      return not span.injected
+         and not span.suppressed
+         and span.start < at
+         and at <= span.end
+         and not reset_drops(span);
+    });
+  };
+  auto const hand_abort = [&](detail::wire_post const& post) {
     auto const at = shifted(post.start, latency_);
     for(auto& span : state_.delivered)
     {
@@ -547,12 +564,8 @@ auto uart_wire::drain(
     into_.port->cancel_in_flight(receiver.to_local(at), lanes_.peer);
   };
   auto const hand_frame = [&](detail::wire_post const& post, detail::line_span& span) {
-    detail::line_span const sent{
-        .start = shifted(post.start, latency_),
-        .end   = shifted(post.end, latency_),
-        .post  = post.start,
-        .index = post.index};
-    span.carried = false;
+    auto const sent = sent_of(post);
+    span.carried    = false;
     span.suppressed =
         reset_drops(sent) or std::ranges::any_of(cuts, [&](detail::line_cut const& cut) {
           return inside(cut, post.start);
@@ -568,21 +581,35 @@ auto uart_wire::drain(
   };
   for(auto const& post : held_over)
   {
-    if(post.start >= barrier)
-    {
-      carry.push_back(post);
-      continue;
-    }
     if(post.abort)
     {
-      hand_abort(post);
+      if(post.start < barrier)
+      {
+        hand_abort(post);
+      }
+      else if(cancels_any(post))
+      {
+        carry.push_back(post);
+      }
       continue;
     }
     auto const span = std::ranges::find_if(state_.delivered, [&](detail::line_span const& one) {
       return one.carried and not one.injected and one.index == post.index;
     });
     contract_assert(span != state_.delivered.end());
-    hand_frame(post, *span);
+    if(post.start < barrier)
+    {
+      hand_frame(post, *span);
+    }
+    else if(reset_drops(sent_of(post)))
+    {
+      span->carried    = false;
+      span->suppressed = true;
+    }
+    else
+    {
+      carry.push_back(post);
+    }
   }
   auto&                           posts = mailbox(window);
   std::optional<core::link_fault> fault;
@@ -598,27 +625,31 @@ auto uart_wire::drain(
           span.end = at;
         }
       }
-      if(post.start >= barrier)
+      if(post.start < barrier)
+      {
+        hand_abort(post);
+      }
+      else if(cancels_any(post))
       {
         carry.push_back(post);
-        continue;
       }
-      hand_abort(post);
       continue;
     }
     if(post.dropped)
     {
       continue;
     }
-    fault = earliest(fault, check_shape(post));
-    detail::line_span span{
-        .start = shifted(post.start, latency_),
-        .end   = shifted(post.end, latency_),
-        .post  = post.start,
-        .index = post.index};
+    fault     = earliest(fault, check_shape(post));
+    auto span = sent_of(post);
     if(auto clash = overlap(span))
     {
       fault           = earliest(fault, std::move(clash));
+      span.suppressed = true;
+      state_.delivered.push_back(span);
+      continue;
+    }
+    if(post.start >= barrier and reset_drops(span))
+    {
       span.suppressed = true;
       state_.delivered.push_back(span);
       continue;

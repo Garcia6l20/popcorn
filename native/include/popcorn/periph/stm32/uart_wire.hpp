@@ -350,8 +350,12 @@ struct wire_state
  *        receiver start lies at or after the next barrier. The shape and overlap checks and an
  *        abort's edit of the record run when a post leaves its mailbox, carried or not, so errors
  *        keep their date and the drain that reports them. A dropped or clashing post is final
- *        there, never carried. A cut, a receiver reset and an abort's cancel act on a carried
- *        post at the drain that hands it. quiet() is false while a post is carried. At most one
+ *        there, never carried. So is a frame a receiver reset recorded so far drops, and an
+ *        abort with no frame left to cancel: one crossing it, handed or carried, not dropped by
+ *        a reset. A carried post that a later drain finds so is final there. A cut, a receiver
+ *        reset and an abort's cancel act on a carried post at the drain that hands it, so a
+ *        carry holds only posts with an effect left. quiet() is false while a post is carried.
+ *        At most one
  *        window plus one slice's overshoot of posts is carried after a pause, one overshoot
  *        after a run's barrier.
  *

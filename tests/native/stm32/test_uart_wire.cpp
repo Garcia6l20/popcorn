@@ -3104,3 +3104,67 @@ TEST_CASE("a wire saved with an open cut and posts carried by a pause loads with
   CHECK(loaded->forth_port.cancels == reference->forth_port.cancels);
   CHECK(loaded->tap == reference->tap);
 }
+
+TEST_CASE("a frame a recorded receiver reset drops is final at its drain, never carried")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 50 * us;
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    auto const quiet_after = [&](std::int64_t reset_from_start, bool aborted) {
+      stub_link  link{l, declared()};
+      auto const s = q + 1;
+      link.window(0, q, {});
+      link.forth->started(link.frame(s));
+      if(aborted)
+      {
+        link.forth->aborted(vtime{static_cast<std::uint64_t>(s + 5 * us)});
+      }
+      link.forth->receiver_reset(core::sys_time{s + reset_from_start});
+      std::ignore      = link.forth->drain(0, core::sys_time{q}, core::sys_time{2 * q}, {});
+      auto const quiet = link.forth->quiet();
+      CHECK(saved_state(*link.forth).carried.size() == (quiet ? 0U : (aborted ? 2U : 1U)));
+      run_windows(link, 1, 10, q);
+      CHECK(link.forth_port.received.size() == (quiet ? 0U : 1U));
+      CHECK(link.forth_port.cancels.size() == (quiet or not aborted ? 0U : 1U));
+      return quiet;
+    };
+    CHECK(quiet_after(2 * us, false));
+    CHECK(quiet_after(2 * us, true));
+    CHECK_FALSE(quiet_after(-us, false));
+    CHECK_FALSE(quiet_after(-us, true));
+  }
+}
+
+TEST_CASE("a carried frame a receiver reset recorded later drops is final at the next pause")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 50 * us;
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    for(auto const aborted : {false, true})
+    {
+      CAPTURE(aborted);
+      stub_link  link{l, declared()};
+      auto const c = q - 5 * us;
+      auto const s = c + 2 * us;
+      link.window(0, q, {});
+      link.forth->started(link.frame(s));
+      if(aborted)
+      {
+        link.forth->aborted(vtime{static_cast<std::uint64_t>(s + 5 * us)});
+      }
+      CHECK_FALSE(pause_drain(link, 0, c).has_value());
+      CHECK_FALSE(link.forth->quiet());
+      link.forth->receiver_reset(core::sys_time{s + us});
+      CHECK_FALSE(pause_drain(link, 0, c).has_value());
+      CHECK(link.forth->quiet());
+      CHECK(saved_state(*link.forth).carried.empty());
+      run_windows(link, 0, 10, q);
+      CHECK(link.forth_port.received.empty());
+      CHECK(link.forth_port.cancels.empty());
+    }
+  }
+}
