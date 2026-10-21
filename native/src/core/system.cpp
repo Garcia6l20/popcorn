@@ -704,7 +704,7 @@ private:
     return passed;
   }
 
-  void drain(std::uint64_t window, sys_time barrier, sys_time next)
+  void drain(std::uint64_t window, sys_time const& barrier, sys_time const& next)
   {
     auto& one = sys_.slots[index_];
     if(not sys_.measuring)
@@ -717,7 +717,7 @@ private:
     one.drained += std::chrono::steady_clock::now() - from;
   }
 
-  void drain_inbound(slot& one, std::uint64_t window, sys_time barrier, sys_time next)
+  void drain_inbound(slot& one, std::uint64_t window, sys_time const& barrier, sys_time const& next)
   {
     for(auto* link : one.inbound)
     {

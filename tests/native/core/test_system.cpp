@@ -114,8 +114,11 @@ public:
     receiver_resets.push_back(at.ps);
   }
 
-  auto drain(std::uint64_t window, core::sys_time barrier, core::sys_time next, core::time_map)
-      -> std::optional<core::link_fault> override
+  auto drain(
+      std::uint64_t         window,
+      core::sys_time const& barrier,
+      core::sys_time const& next,
+      core::time_map) -> std::optional<core::link_fault> override
   {
     if(drains.size() < kept_drains)
     {

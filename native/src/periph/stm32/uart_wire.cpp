@@ -390,10 +390,10 @@ auto uart_wire::quiet() const -> bool
 }
 
 auto uart_wire::drain(
-    std::uint64_t  window,
-    core::sys_time barrier,
-    core::sys_time next,
-    core::time_map receiver) -> std::optional<core::link_fault>
+    std::uint64_t         window,
+    core::sys_time const& barrier,
+    core::sys_time const& next,
+    core::time_map        receiver) -> std::optional<core::link_fault>
 {
   std::erase_if(state_.delivered, [&](detail::line_span const& span) {
     return span.end <= state_.last_barrier;
