@@ -165,17 +165,17 @@ public:
     state = in[0];
   }
 
-  std::uint64_t                     entered{};
-  std::vector<drained>              drains;
-  std::vector<std::int64_t>         sender_resets;
-  std::vector<std::int64_t>         receiver_resets;
-  std::optional<std::int64_t>       fault_at{};
-  std::function<void(std::int64_t)> on_drain{};
-  bool                              busy{};
-  std::byte                         state{};
-  bool                              fail_load{};
-  std::vector<std::int64_t>         finished{};
-  bool                              reported{};
+  std::uint64_t                               entered{};
+  std::vector<drained>                        drains;
+  std::vector<std::int64_t>                   sender_resets;
+  std::vector<std::int64_t>                   receiver_resets;
+  std::optional<std::int64_t>                 fault_at{};
+  std::move_only_function<void(std::int64_t)> on_drain{};
+  bool                                        busy{};
+  std::byte                                   state{};
+  bool                                        fail_load{};
+  std::vector<std::int64_t>                   finished{};
+  bool                                        reported{};
 
 private:
   std::size_t  from_;
@@ -185,17 +185,15 @@ private:
 
 template <typename Arch = popcorn::testing::test_arch>
 auto member(
-    std::string_view                                              firmware,
-    std::string_view                                              entry,
-    std::function<void(popcorn::testing::machine_fixture<Arch>&)> prepare = {}) -> core::member_ref
+    std::string_view                                                  firmware,
+    std::string_view                                                  entry,
+    std::function_ref<void(popcorn::testing::machine_fixture<Arch>&)> prepare =
+        [](popcorn::testing::machine_fixture<Arch>&) {}) -> core::member_ref
 {
   popcorn::testing::machine_fixture<Arch> f{m33(), firmware, core::machine_options{}};
   f.set("pc", sym(firmware, entry));
   f.set("r0", 0);
-  if(prepare)
-  {
-    prepare(f);
-  }
+  prepare(f);
   std::vector<std::unique_ptr<core::machine>> machines;
   machines.push_back(std::move(f.target));
   return {.on = std::make_shared<core::host>(std::move(machines)), .name = std::string{entry}};
@@ -267,10 +265,10 @@ private:
 
 struct rig
 {
-  std::vector<core::member_ref>           members;
-  std::vector<std::shared_ptr<fake_link>> links{};
-  std::unique_ptr<core::system>           sys{};
-  std::function<void(std::size_t)>        arrival{};
+  std::vector<core::member_ref>              members;
+  std::vector<std::shared_ptr<fake_link>>    links{};
+  std::unique_ptr<core::system>              sys{};
+  std::move_only_function<void(std::size_t)> arrival{};
 
   void build(variant const& how, std::int64_t latency = 20 * us_ps)
   {
@@ -299,7 +297,7 @@ struct rig
     }
     if(not hook and arrival)
     {
-      hook = arrival;
+      hook = std::move(arrival);
     }
     auto const wait = how.one_cpu ? core::wait_policy{.spin = std::chrono::nanoseconds{0}}
                                   : core::default_wait_policy(members.size());

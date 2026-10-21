@@ -45,10 +45,10 @@ struct measured
 
 struct scenario
 {
-  std::string               name;
-  std::function<measured()> run;
-  std::vector<double>       samples{};
-  std::uint64_t             executed{};
+  std::string                        name;
+  std::copyable_function<measured()> run;
+  std::vector<double>                samples{};
+  std::uint64_t                      executed{};
 };
 
 auto rtos_image() -> popcorn::image::image const&

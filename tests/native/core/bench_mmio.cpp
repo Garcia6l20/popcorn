@@ -48,9 +48,9 @@ struct measured
 
 struct scenario
 {
-  std::string               name;
-  std::function<measured()> run;
-  std::vector<double>       samples{};
+  std::string                        name;
+  std::copyable_function<measured()> run;
+  std::vector<double>                samples{};
 };
 
 auto image() -> popcorn::image::image const&
@@ -105,11 +105,12 @@ auto raw_engine() -> core::engine_handle
 }
 
 auto raw_loop(
-    std::string_view                                      entry,
-    std::string_view                                      done,
-    address                                               target,
-    std::function<void(uc_engine*, core::exact_pc_hook&)> prepare = {},
-    bool                                                  warm    = false) -> measured
+    std::string_view                                          entry,
+    std::string_view                                          done,
+    address                                                   target,
+    std::function_ref<void(uc_engine*, core::exact_pc_hook&)> prepare = [](uc_engine*,
+                                                                           core::exact_pc_hook&) {},
+    bool                                                      warm    = false) -> measured
 {
   auto const          handle = raw_engine();
   core::exact_pc_hook exact;
@@ -117,10 +118,7 @@ auto raw_loop(
       handle.get(), {
                         {mmio_base, mmio_base + 0x3ff}
   });
-  if(prepare)
-  {
-    prepare(handle.get(), exact);
-  }
+  prepare(handle.get(), exact);
   if(warm)
   {
     std::uint32_t one = 1;
@@ -205,17 +203,14 @@ struct bench_machine
 };
 
 auto machine_loop(
-    std::string_view                    entry,
-    std::string_view                    done,
-    address                             target,
-    std::uint32_t                       count,
-    std::function<void(bench_machine&)> prepare = {}) -> measured
+    std::string_view                        entry,
+    std::string_view                        done,
+    address                                 target,
+    std::uint32_t                           count,
+    std::function_ref<void(bench_machine&)> prepare = [](bench_machine&) {}) -> measured
 {
   bench_machine m{popcorn::load_description(POPCORN_M33_DESC)};
-  if(prepare)
-  {
-    prepare(m);
-  }
+  prepare(m);
   m.set("pc", symbol(entry));
   m.set("r0", count);
   m.set("r2", target);
@@ -350,7 +345,10 @@ auto main(int argc, char** argv) -> int
       {"store-released",
        [cycle] { return raw_loop("store_entry", "store_done", sram_data, cycle); }                      },
       {"store-no-hook-warm",
-       [] { return raw_loop("store_entry", "store_done", sram_data, {}, true); }                        },
+       [] {
+         return raw_loop(
+             "store_entry", "store_done", sram_data, [](uc_engine*, core::exact_pc_hook&) {}, true);
+       }                                                                                                },
       {"store-exact-pc-warm",
        [acquire] { return raw_loop("store_entry", "store_done", sram_data, acquire, true); }            },
       {"store-released-warm",

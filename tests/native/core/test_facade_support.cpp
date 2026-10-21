@@ -35,7 +35,7 @@ using popcorn::testing::m33;
 using popcorn::testing::sym;
 using fixture = popcorn::testing::machine_fixture<>;
 
-auto config_key(std::function<void()> const& action) -> std::string
+auto config_key(std::function_ref<void()> action) -> std::string
 {
   try
   {

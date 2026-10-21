@@ -170,16 +170,16 @@ struct member_call
 
 struct run_plan
 {
-  std::uint64_t                      window{latency_20};
-  std::uint64_t                      first{};
-  std::uint64_t                      end{script_end_ps};
-  std::uint64_t                      slice{coarse};
-  bool                               threaded{};
-  std::optional<std::uint32_t>       seed{};
-  std::optional<host_byte>           host{};
-  std::optional<member_reset>        reset{};
-  std::function<void(std::uint64_t)> after_drain{};
-  std::vector<member_call>           calls{};
+  std::uint64_t                                     window{latency_20};
+  std::uint64_t                                     first{};
+  std::uint64_t                                     end{script_end_ps};
+  std::uint64_t                                     slice{coarse};
+  bool                                              threaded{};
+  std::optional<std::uint32_t>                      seed{};
+  std::optional<host_byte>                          host{};
+  std::optional<member_reset>                       reset{};
+  std::copyable_function<void(std::uint64_t) const> after_drain{};
+  std::vector<member_call>                          calls{};
 };
 
 struct rig
@@ -1033,7 +1033,7 @@ TEST_CASE("a wire frame landing on the count of a host frame orders the same at 
 
 namespace
 {
-auto edited_run(run_plan const& plan, std::function<void(stm32::uart_wire&)> const& arm) -> rig
+auto edited_run(run_plan const& plan, std::function_ref<void(stm32::uart_wire&)> arm) -> rig
 {
   auto r = one_way("link_tx", "link_rx", latency_20);
   arm(*r.wires[0]);

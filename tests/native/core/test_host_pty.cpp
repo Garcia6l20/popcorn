@@ -57,7 +57,7 @@ auto idle_forever() -> std::unique_ptr<core::machine>
   return std::move(f.target);
 }
 
-auto settles(std::function<bool()> const& reached) -> bool
+auto settles(std::function_ref<bool()> reached) -> bool
 {
   auto const until = std::chrono::steady_clock::now() + 5s;
   while(not reached())

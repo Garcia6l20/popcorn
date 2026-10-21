@@ -43,10 +43,10 @@ struct measured
 
 struct scenario
 {
-  std::string               name;
-  std::uint64_t             expected{};
-  std::function<measured()> run;
-  std::vector<double>       samples{};
+  std::string                        name;
+  std::uint64_t                      expected{};
+  std::copyable_function<measured()> run;
+  std::vector<double>                samples{};
 };
 
 void check(uc_err err, std::string_view what)

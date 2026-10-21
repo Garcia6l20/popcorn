@@ -1423,7 +1423,7 @@ void service(rig const& r, scripted_firmware& fw)
   }
 }
 
-void run_firmware(rig const& r, scripted_firmware& fw, std::function<bool()> const& done)
+void run_firmware(rig const& r, scripted_firmware& fw, std::function_ref<bool()> done)
 {
   for(std::size_t slice = 0; slice < 20'000 and not done(); ++slice)
   {

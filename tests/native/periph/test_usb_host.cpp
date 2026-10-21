@@ -445,16 +445,17 @@ private:
 
 struct probe final : usb::class_driver
 {
-  std::function<void(usb::host_context&, probe&)>                on_configured{};
-  std::function<void(usb::host_context&, probe&, std::uint16_t)> on_frame{};
-  std::function<void(usb::host_context&, probe&, usb::pipe_id, usb::transfer_result const&)>
+  std::copyable_function<void(usb::host_context&, probe&)>                 on_configured{};
+  std::move_only_function<void(usb::host_context&, probe&, std::uint16_t)> on_frame{};
+  std::move_only_function<
+      void(usb::host_context&, probe&, usb::pipe_id, usb::transfer_result const&)>
                                                              on_transfer{};
   std::vector<usb::transfer_result>                          controls{};
   std::vector<std::pair<usb::pipe_id, usb::transfer_result>> transfers{};
   std::vector<usb::pipe_id>                                  pipes{};
   std::vector<std::byte>                                     memory{};
   std::size_t                                                loads{};
-  std::function<void()>                                      on_destroy{};
+  std::move_only_function<void()>                            on_destroy{};
 
   ~probe() override
   {
@@ -508,9 +509,10 @@ struct probe final : usb::class_driver
 };
 
 auto probe_factory(
-    std::string                                     name,
-    std::uint8_t                                    class_code,
-    std::function<void(usb::host_context&, probe&)> on_configured = {}) -> usb::driver_factory
+    std::string                                              name,
+    std::uint8_t                                             class_code,
+    std::copyable_function<void(usb::host_context&, probe&)> on_configured = {})
+    -> usb::driver_factory
 {
   return {
       .name  = std::move(name),

@@ -259,7 +259,7 @@ struct hosted
   }
 };
 
-auto settles(std::function<bool()> const& reached, std::chrono::milliseconds limit = 5s) -> bool
+auto settles(std::function_ref<bool()> reached, std::chrono::milliseconds limit = 5s) -> bool
 {
   auto const until = std::chrono::steady_clock::now() + limit;
   while(not reached())
@@ -3026,7 +3026,7 @@ namespace
 class test_driver final : public core::member_driver
 {
 public:
-  using planner = std::function<std::optional<
+  using planner = std::move_only_function<std::optional<
       core::slice_request>(test_driver&, core::machine&, core::member_driver::earliest_stamp)>;
 
   explicit test_driver(planner how) : how_{std::move(how)}
@@ -3087,14 +3087,14 @@ public:
     entered.wait(false);
   }
 
-  std::function<void(core::machine&, core::slice_result const&)> on_ran{};
-  std::atomic<bool>                                              aborted{false};
-  std::atomic<bool>                                              entered{false};
-  std::atomic<bool>                                              gate{false};
-  std::atomic<int>                                               plans{0};
-  std::uint64_t                                                  executed = 0;
-  int                                                            stops    = 0;
-  std::vector<std::exception_ptr>                                failures{};
+  std::move_only_function<void(core::machine&, core::slice_result const&)> on_ran{};
+  std::atomic<bool>                                                        aborted{false};
+  std::atomic<bool>                                                        entered{false};
+  std::atomic<bool>                                                        gate{false};
+  std::atomic<int>                                                         plans{0};
+  std::uint64_t                                                            executed = 0;
+  int                                                                      stops    = 0;
+  std::vector<std::exception_ptr>                                          failures{};
 
 private:
   planner how_;
