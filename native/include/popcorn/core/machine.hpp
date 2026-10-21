@@ -171,7 +171,7 @@ struct slice_request
   bool hold_from_until{};
   /** @brief Stop predicate, evaluated after every dispatched event and at the slice end, never
    * per instruction. Stops with stop_reason::user when it returns true. */
-  std::function<bool()> stop_when{};
+  std::move_only_function<bool() const> stop_when{};
   /** @brief Stop with stop_reason::returned at this return. A slice that starts at it stops at
    * once, 0 instructions executed. */
   std::optional<frame_return> until_return{};

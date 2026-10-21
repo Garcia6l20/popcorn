@@ -418,15 +418,15 @@ TEST_CASE_TEMPLATE(
 {
   struct workload
   {
-    std::string_view    name;
-    core::slice_request request;
-    std::uint32_t       r0;
-    std::string_view    entry;
+    std::string_view               name;
+    std::optional<popcorn::icount> budget_left;
+    std::uint32_t                  r0;
+    std::string_view               entry;
   };
   std::array const workloads{
-      workload{"branches", {},                                          10,   "branches" },
-      workload{"alu",      {.budget_left = popcorn::icount{50'000}},    1000, "alu_entry"},
-      workload{"fnv",      {.budget_left = popcorn::icount{2'000'000}}, 0,    "fnv_entry"},
+      workload{"branches", {},                         10,   "branches" },
+      workload{"alu",      popcorn::icount{50'000},    1000, "alu_entry"},
+      workload{"fnv",      popcorn::icount{2'000'000}, 0,    "fnv_entry"},
   };
   for(auto const& load : workloads)
   {
@@ -438,7 +438,7 @@ TEST_CASE_TEMPLATE(
     auto const sink = f.target->add_trace_sink({core::trace_kind::block}, seen.sink());
     f.set("pc", sym(load.name, load.entry) | 1);
     f.set("r0", load.r0);
-    auto request        = load.request;
+    core::slice_request request{.budget_left = load.budget_left};
     request.wall_budget = std::chrono::seconds{60};
     static_cast<void>(f.run(request));
     auto const set = obs::collect(*f.target, sources_of(load.name));

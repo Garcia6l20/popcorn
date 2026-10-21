@@ -1055,11 +1055,12 @@ struct host_core
         .budget_left        = goal.remaining,
         .exact_instructions = goal.left,
         .until_time         = goal.goal.until_time,
-        .stop_when    = goal.goal.stop_when ? std::function<bool()>{std::ref(goal.goal.stop_when)}
-                                            : std::function<bool()>{},
-        .until_return = goal.goal.until_return,
-        .leave_until  = once ? once->leave_until : goal.executed.value == 0,
-        .until_thread = goal.goal.until_thread,
+        .stop_when          = goal.goal.stop_when
+                                ? decltype(slice_request::stop_when){std::ref(goal.goal.stop_when)}
+                                : decltype(slice_request::stop_when){},
+        .until_return       = goal.goal.until_return,
+        .leave_until        = once ? once->leave_until : goal.executed.value == 0,
+        .until_thread       = goal.goal.until_thread,
     };
     add_stamp(request, next_stamp(slot));
     slice_result result;

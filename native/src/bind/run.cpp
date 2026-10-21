@@ -73,7 +73,7 @@ auto held_predicate(std::shared_ptr<detail::python_callable> held) -> std::funct
   };
 }
 
-auto predicate_of(std::optional<nb::object> callable) -> std::function<bool()>
+auto predicate_of(std::optional<nb::object> callable) -> std::move_only_function<bool()>
 {
   if(not callable or callable->is_none())
   {

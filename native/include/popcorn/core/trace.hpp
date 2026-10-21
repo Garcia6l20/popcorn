@@ -221,7 +221,7 @@ private:
  *        machine's instruction count when the sink was added, with time records as in the ring.
  *        Runs on the thread that runs the slice.
  */
-using trace_sink = std::function<void(std::span<trace_record const> records)>;
+using trace_sink = std::move_only_function<void(std::span<trace_record const> records)>;
 
 /**
  * @brief Fixed-size ring of the most recent trace records, always on. The

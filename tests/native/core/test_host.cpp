@@ -360,11 +360,11 @@ TEST_CASE("parked access runs on the caller thread and starts no host thread")
 TEST_CASE("a goal to an address equals a run_slice loop on a twin machine")
 {
   core::slice_bounds const bounds{.max_instructions = icount{10'000}};
-  core::run_goal const     goal{.until = sym("alu", "alu_done")};
+  core::run_goal           goal{.until = sym("alu", "alu_done")};
   auto                     twin     = alu(100'000);
   auto const               expected = drive(*twin, goal, bounds);
   hosted                   h{alu(100'000), bounds};
-  auto const               got = h.run(goal).get();
+  auto const               got = h.run(std::move(goal)).get();
   CHECK(got.stopped.reason == stop_reason::address);
   CHECK(got.stopped.reason == expected.stopped.reason);
   CHECK(got.stopped.instructions == expected.stopped.instructions);
@@ -415,7 +415,7 @@ TEST_CASE("a goal of budget 0 stops at once and a goal at its until address leav
 TEST_CASE("read commands while running land at boundaries and leave the goal unchanged")
 {
   constexpr std::uint32_t loops = 2'000'000;
-  core::run_goal const    goal{.until = sym("alu", "alu_done")};
+  core::run_goal          goal{.until = sym("alu", "alu_done")};
   auto                    twin       = alu(loops);
   auto const              expected   = drive(*twin, goal, {});
   auto const              twin_regs  = alu_regs(*twin);
@@ -423,7 +423,7 @@ TEST_CASE("read commands while running land at boundaries and leave the goal unc
 
   hosted                                h{alu(loops)};
   auto const                            start = h.now();
-  auto const                            done  = h.run(goal);
+  auto const                            done  = h.run(std::move(goal));
   std::vector<core::host_future<vtime>> reads;
   std::atomic<std::uint64_t>            seen{0};
   for(int i = 0; i < 1000; ++i)
@@ -1230,11 +1230,11 @@ TEST_CASE("interrupts from another thread leave a held member's run unchanged")
 
 TEST_CASE("two members on one host each equal the same goal on its own host")
 {
-  core::run_goal const goal{.until = sym("alu", "alu_done")};
-  hosted               first{alu(30'000)};
-  hosted               second{alu(70'000)};
-  auto const           a = first.run(goal).get();
-  auto const           b = second.run(goal).get();
+  auto const goal = [] { return core::run_goal{.until = sym("alu", "alu_done")}; };
+  hosted     first{alu(30'000)};
+  hosted     second{alu(70'000)};
+  auto const a = first.run(goal()).get();
+  auto const b = second.run(goal()).get();
 
   std::vector<std::unique_ptr<core::machine>> members;
   members.push_back(alu(30'000));
@@ -1245,8 +1245,8 @@ TEST_CASE("two members on one host each equal the same goal on its own host")
   core::host_future<core::goal_result> fb;
   {
     auto held = shared.lock();
-    fa        = shared.run(held, 0, goal);
-    fb        = shared.run(held, 1, goal);
+    fa        = shared.run(held, 0, goal());
+    fb        = shared.run(held, 1, goal());
   }
   auto const ga = fa.get();
   auto const gb = fb.get();
@@ -1587,7 +1587,8 @@ constexpr core::slice_bounds huge_slices{
     .wall_budget      = long_wall,
 };
 
-auto start_waiting(hosted const& h, std::vector<core::waiter_spec> specs)
+template <std::size_t N>
+auto start_waiting(hosted const& h, core::waiter_spec (&&specs)[N])
     -> std::vector<core::waiter_handle>
 {
   auto held = h.on->lock();
@@ -2025,14 +2026,14 @@ TEST_CASE("an idle host destroyed on another host's thread destroys its machine 
 
 TEST_CASE("no-op stamps leave a goal's results unchanged")
 {
-  core::run_goal const goal{.budget = icount{2'000'000}};
-  auto const           observe = [](hosted const& h) {
+  auto const goal    = [] { return core::run_goal{.budget = icount{2'000'000}}; };
+  auto const observe = [](hosted const& h) {
     return core::access(*h.on, 0, [](core::machine& m) {
       return std::tuple{alu_regs(m), sram(m), m.trace().records()};
     });
   };
   hosted     plain{alu(0)};
-  auto const expected       = plain.run(goal).get();
+  auto const expected       = plain.run(goal()).get();
   auto const expected_state = observe(plain);
 
   hosted                                h{alu(0)};
@@ -2042,7 +2043,7 @@ TEST_CASE("no-op stamps leave a goal's results unchanged")
     stamps.push_back(h.post([](core::machine&) {}, at_instruction(150'000 * k + 7)));
     CHECK_FALSE(stamps.back().done());
   }
-  auto const got = h.run(goal).get();
+  auto const got = h.run(goal()).get();
   CHECK(got.stopped.reason == expected.stopped.reason);
   CHECK(got.stopped.instructions == expected.stopped.instructions);
   CHECK(got.stopped.time == expected.stopped.time);

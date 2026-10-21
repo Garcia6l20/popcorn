@@ -59,7 +59,7 @@ struct member_goal
   std::optional<icount> exact{};
   /** @brief Stop predicate, asked on the member's host thread after each dispatched event,
    * never at a barrier or a slice end. */
-  std::function<bool()> stop_when{};
+  std::move_only_function<bool()> stop_when{};
   /** @brief A goal a system IDLE does not resolve. */
   bool open{};
   /** @brief Virtual time the goal may run from its start: a stop_reason::time stop with detail
@@ -178,12 +178,12 @@ public:
    * @throws machine_busy when a member is busy.
    */
   system(
-      std::vector<member_ref>                   members,
-      std::vector<std::shared_ptr<member_link>> links,
-      wait_policy                               wait,
-      slice_bounds                              bounds         = {},
-      std::function<void(std::size_t)>          before_arrival = {},
-      std::function<void(std::size_t)>          before_sleep   = {}) pre(not members.empty())
+      std::vector<member_ref>                    members,
+      std::vector<std::shared_ptr<member_link>>  links,
+      wait_policy                                wait,
+      slice_bounds                               bounds         = {},
+      std::move_only_function<void(std::size_t)> before_arrival = {},
+      std::move_only_function<void(std::size_t)> before_sleep   = {}) pre(not members.empty())
       pre(not links.empty());
 
   /** @brief Closes, waits for every member to park, then unlinks the hosts. Not on a host

@@ -42,5 +42,5 @@ struct log_record
 };
 
 /** @brief Receives machine log records, on the thread that runs the slice. */
-using log_sink = std::function<void(log_record const& record)>;
+using log_sink = std::copyable_function<void(log_record const& record)>;
 }

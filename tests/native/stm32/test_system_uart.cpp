@@ -290,7 +290,7 @@ struct world
           {.on   = std::make_shared<core::host>(std::move(machines)),
            .name = std::format("m{}", index)});
     }
-    std::function<void(std::size_t)> hook;
+    std::move_only_function<void(std::size_t)> hook;
     if(how.seed)
     {
       auto engines = std::make_shared<std::vector<std::mt19937>>();
@@ -306,7 +306,8 @@ struct world
     std::vector<std::shared_ptr<core::member_link>> links{wires.begin(), wires.end()};
     auto const wait = how.one_cpu ? core::wait_policy{.spin = std::chrono::nanoseconds{0}}
                                   : core::default_wait_policy(nodes.size());
-    sys = std::make_unique<core::system>(members, std::move(links), wait, how.bounds, hook);
+    sys             = std::make_unique<core::system>(
+        members, std::move(links), wait, how.bounds, std::move(hook));
     if(offsets.empty())
     {
       offsets.resize(nodes.size());

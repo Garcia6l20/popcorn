@@ -512,10 +512,8 @@ void system_handle::start(std::vector<std::int64_t> const& offsets_ps)
       nb::gil_scoped_release const released;
       return std::make_shared<core::system>(
           std::move(refs), std::move(links), core::default_wait_policy(members_.size()), bounds_,
-          std::function<void(std::size_t)>{},
-          std::function<void(std::size_t)>{[sleeps = sleeps_](std::size_t) {
-            sleeps->fetch_add(1, std::memory_order_relaxed);
-          }});
+          std::move_only_function<void(std::size_t)>{},
+          [sleeps = sleeps_](std::size_t) { sleeps->fetch_add(1, std::memory_order_relaxed); });
     }();
   }
   catch(...)
@@ -646,7 +644,7 @@ auto system_handle::post_goal(
   }
   if(gate)
   {
-    goal.stop_when = [test = gate->test(), then = std::move(goal.stop_when)] {
+    goal.stop_when = [test = gate->test(), then = std::move(goal.stop_when)] mutable {
       return test() and (not then or then());
     };
   }

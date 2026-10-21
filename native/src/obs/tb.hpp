@@ -33,7 +33,7 @@ struct tb_extent
  * @brief Reads guest bytes for code outside every image segment.
  * @return How many bytes from the start of the span were read.
  */
-using memory_reader = std::function<std::size_t(address at, std::span<std::byte> out)>;
+using memory_reader = std::move_only_function<std::size_t(address at, std::span<std::byte> out)>;
 
 /** @brief Code bytes a translated block is decoded from, one page at a time. */
 class code_bytes

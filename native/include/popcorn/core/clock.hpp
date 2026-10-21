@@ -244,9 +244,9 @@ private:
     }
   }
 
-  clock_state                    state_;
-  std::function<void()>          on_epoch_;
-  std::function<std::uint64_t()> charged_ahead_;
+  clock_state                              state_;
+  std::move_only_function<void()>          on_epoch_;
+  std::move_only_function<std::uint64_t()> charged_ahead_;
 };
 
 /**
@@ -355,7 +355,7 @@ public:
    *        has started. The machine re-keys its time-keyed events there.
    * @param hook Called with no argument, empty to remove.
    */
-  void on_rate_change(std::function<void()> hook);
+  void on_rate_change(std::move_only_function<void()> hook);
 
   /**
    * @brief Installs the function a rate change asks for the instructions already charged to the
@@ -363,7 +363,7 @@ public:
    *        whole. The new epoch starts before them, so they run at the new rate.
    * @param ahead Returns the count, 0 when none or unknown, empty to remove.
    */
-  void on_charged_ahead(std::function<std::uint64_t()> ahead);
+  void on_charged_ahead(std::move_only_function<std::uint64_t()> ahead);
 
 private:
   clock& clock_;
