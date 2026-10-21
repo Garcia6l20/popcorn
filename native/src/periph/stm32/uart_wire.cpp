@@ -478,7 +478,10 @@ auto uart_wire::quiet() const -> bool
   return state_.mail_even.empty()
      and state_.mail_odd.empty()
      and state_.injections.empty()
-     and state_.carried.empty();
+     and state_.carried.empty()
+     and std::ranges::none_of(state_.cuts, [](detail::line_cut const& cut) {
+           return cut.low and (not cut.held or (not cut.open and not cut.released));
+         });
 }
 
 auto uart_wire::truncating(
@@ -708,14 +711,56 @@ auto uart_wire::drain(
       truncate(span, cuts, barrier, receiver);
     }
   }
+  for(auto& cut : cuts)
+  {
+    if(not cut.low)
+    {
+      continue;
+    }
+    auto const from = shifted(cut.start, latency_);
+    if(not cut.held and cut.start < barrier)
+    {
+      cut.held = true;
+      if(reset_drops(
+             {.start = from,
+              .end   = core::sys_time{from.ps + static_cast<std::int64_t>(declared_.frame_ps())}}))
+      {
+        cut.released = true;
+      }
+      else
+      {
+        into_.port->hold_line(receiver.to_local(from), lanes_.peer);
+      }
+    }
+    if(cut.held and not cut.open and not cut.released and cut.end < barrier)
+    {
+      cut.released = true;
+      into_.port->release_line(receiver.to_local(shifted(cut.end, latency_)), lanes_.peer);
+    }
+  }
   emit(state_.untapped, barrier, cuts);
   {
     registration_hold const registered{*registration_};
     core::link_guard const  held{inject_mutex_};
     auto&                   live = state_.cuts;
     auto const ahead = std::ranges::lower_bound(live, barrier, {}, &detail::line_cut::start);
-    auto const kept  = std::remove_if(live.begin(), ahead, [&](detail::line_cut const& cut) {
+    for(auto const& done : cuts)
+    {
+      if(not done.low or not done.held)
+      {
+        continue;
+      }
+      auto const found =
+          std::ranges::lower_bound(live.begin(), ahead, done.start, {}, &detail::line_cut::start);
+      if(found != ahead and found->start == done.start)
+      {
+        found->held     = true;
+        found->released = found->released or done.released;
+      }
+    }
+    auto const kept = std::remove_if(live.begin(), ahead, [&](detail::line_cut const& cut) {
       return not cut.open
+         and (not cut.low or cut.released)
          and shifted(cut.end, latency_) <= barrier
          and std::ranges::none_of(state_.untapped, [&](tap_frame const& frame) {
                return frame.injected ? frame.start < shifted(cut.end, latency_)

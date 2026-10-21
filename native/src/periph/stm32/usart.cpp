@@ -38,6 +38,8 @@ constexpr std::uint32_t receive_due   = 1;
 constexpr std::uint32_t idle_due      = 2;
 constexpr std::uint32_t linked_due    = 3;
 constexpr std::uint32_t cts_due       = 4;
+constexpr std::uint32_t hold_due      = 5;
+constexpr std::uint32_t release_due   = 6;
 constexpr std::size_t   fifo_depth    = 8;
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 
@@ -73,9 +75,14 @@ auto sample_at(rx_shape const& rx, std::uint64_t start, std::uint32_t bit, std::
   return start + 2 * rx.frame_ps * (16 * std::uint64_t{bit} + sixteenths) / (16 * halves);
 }
 
+auto stop_sample(rx_shape const& rx, std::uint64_t start) -> std::uint64_t
+{
+  return sample_at(rx, start, rx.word_bits + 1, rx.offsets[rx.samples - 1]);
+}
+
 auto last_sample(line_frame const& sent, rx_shape const& rx) -> std::uint64_t
 {
-  return sample_at(rx, sent.start.ps, rx.word_bits + 1, rx.offsets[rx.samples - 1]);
+  return stop_sample(rx, sent.start.ps);
 }
 
 auto level(line_frame const& sent, std::optional<std::uint64_t> next_start, std::uint64_t at)
@@ -140,6 +147,22 @@ struct linked_frame
   friend auto operator==(linked_frame const&, linked_frame const&) -> bool = default;
 };
 
+struct line_hold
+{
+  std::uint64_t from_ps{};
+  std::uint64_t until_ps{};
+  std::uint64_t start_ps{};
+  std::uint64_t due_event{};
+  std::uint64_t release_event{};
+  std::uint32_t lane{};
+  bool          open{};
+  bool          sampled{};
+  bool          received{};
+  bool          released{};
+
+  friend auto operator==(line_hold const&, line_hold const&) -> bool = default;
+};
+
 struct cts_change
 {
   std::uint64_t board_ps{};
@@ -185,6 +208,8 @@ struct usart_state
   std::vector<cts_change>                                        cts_changes;
   std::uint64_t                                                  next_cts{};
   std::uint32_t                                                  cts_fired{};
+  std::vector<line_hold>                                         holds;
+  std::uint64_t                                                  hold_events{};
 
   friend auto operator==(usart_state const&, usart_state const&) -> bool = default;
 };
@@ -289,6 +314,27 @@ struct lock
  *        overrun. With DEM the pin carries DE and the host is not held. Frames from another
  *        machine are not held: the wire carries no flow control and they overrun as without
  *        RTSE. At most max_pending_cts CTS changes wait at once.
+ *
+ *        A line held low by a link, `hold_line` to `release_line`, RM0456 66.5.4, 66.5.7 "Break
+ *        character" and "Framing error", and the same for the LPUART, 67.4.4 and 67.4.7: the
+ *        falling edge at the hold's start begins a character, sampled as a frame at the
+ *        receiver's shape. Held at its stop-bit sample, the last of the stop bit, it is the break
+ *        character: 0 with FE and RXFNE, never PE, LBDF never, LIN not being modelled. Released
+ *        before that, each data and stop bit reads 0 when its sample lies before the release,
+ *        majority of three as for a sampled frame: NE on a split, FE when the stop bit reads 0,
+ *        PE per the receiver's check, the sampled word in RDR. Released before the start bit's
+ *        middle sample, nothing is received. No new character until the release: no falling
+ *        edge. IDLE one receiver frame after the later of the release and the character's end,
+ *        unless the line is busy before. A hold cancels an IDLE due after its start. A frame
+ *        from another machine still sampled at the hold's start, its start before and its
+ *        stop-bit sample at or after it, or an aborted frame in flight then, becomes that break
+ *        character at its own stop-bit sample, data 0: deviation, silicon keeps the bits before
+ *        the hold. A frame whose stop bit was sampled before the hold starts is received as sent
+ *        and the hold starts its own character. Every hold event goes on the lane the hold came
+ *        on. A hold starting where the last one ends continues it, no new character. Holds less
+ *        than a frame apart are each sampled alone. A reset ends every hold: nothing after it,
+ *        and a later release is ignored. Host frames keep their own path during a hold, a linked
+ *        UART takes none.
  */
 class usart final : public dispatch_model<usart, usart_state>, public uart_link_port
 {
@@ -317,6 +363,8 @@ public:
   void               attach(std::shared_ptr<uart_endpoint> far_end) override;
   void               receive_at(line_frame const& frame, std::uint32_t lane) override;
   void               cancel_in_flight(vtime at, std::uint32_t lane) override;
+  void               hold_line(vtime from, std::uint32_t lane) override;
+  void               release_line(vtime at, std::uint32_t lane) override;
 
   void control_written(std::uint32_t old, std::uint32_t now);
   void clear_written(std::uint32_t old, std::uint32_t now);
@@ -348,6 +396,9 @@ private:
   void               schedule_linked();
   void               idle_at(std::uint64_t due_ps);
   [[nodiscard]] auto linked_before(std::uint64_t due_ps) const -> bool;
+  void               schedule_hold(line_hold& hold, std::uint64_t due_ps);
+  void               sample_hold(line_hold& hold);
+  void               end_hold(std::vector<line_hold>::iterator hold);
   void               flags();
   void               interrupts();
   void               warn_unsupported();
@@ -643,6 +694,7 @@ void usart::reset(register_file& regs, reset_kind)
   state_.rx_fifo.clear();
   state_.host.clear();
   state_.linked.clear();
+  state_.holds.clear();
   state_.break_pending    = false;
   state_.break_shifting   = false;
   state_.shifting         = false;
@@ -1064,6 +1116,31 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     }
     return;
   }
+  if(kind == hold_due or kind == release_due)
+  {
+    auto const found = std::ranges::find_if(state_.holds, [&](line_hold const& hold) {
+      return kind == hold_due ? hold.due_event == payload and not hold.sampled
+                              : hold.release_event == payload and not hold.open;
+    });
+    if(found == state_.holds.end())
+    {
+      return;
+    }
+    if(kind == hold_due)
+    {
+      sample_hold(*found);
+    }
+    else
+    {
+      found->released = true;
+    }
+    if(found->sampled and found->released)
+    {
+      end_hold(found);
+    }
+    flags();
+    return;
+  }
   if(kind > idle_due or payload != state_.generation[kind])
   {
     return;
@@ -1135,9 +1212,129 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
 
 auto usart::linked_before(std::uint64_t due_ps) const -> bool
 {
-  return std::ranges::any_of(state_.linked, [due_ps](linked_frame const& queued) {
-    return queued.frame.start.ps < due_ps;
+  return std::ranges::any_of(
+             state_.linked,
+             [due_ps](linked_frame const& queued) { return queued.frame.start.ps < due_ps; })
+      or std::ranges::any_of(
+             state_.holds, [due_ps](line_hold const& hold) { return hold.from_ps < due_ps; });
+}
+
+void usart::schedule_hold(line_hold& hold, std::uint64_t due_ps)
+{
+  hold.due_event = ++state_.hold_events;
+  ctx_.events.schedule_at(vtime{due_ps}, hold_due, hold.due_event, hold.lane, ctx_.clock);
+}
+
+void usart::sample_hold(line_hold& hold)
+{
+  hold.sampled   = true;
+  auto const rx  = shape();
+  auto const low = [&](std::uint64_t at) { return hold.open or at < hold.until_ps; };
+  if(rx.frame_ps == 0)
+  {
+    hold.received = true;
+    deliver({.framing = true});
+    return;
+  }
+  if(not low(sample_at(rx, hold.start_ps, 0, 8)))
+  {
+    return;
+  }
+  hold.received = true;
+  sampled out{};
+  auto    all_low = true;
+  for(std::uint32_t bit = 1; bit <= rx.word_bits + 1; ++bit)
+  {
+    std::uint32_t ones = 0;
+    for(std::size_t index = 0; index < rx.samples; ++index)
+    {
+      ones += low(sample_at(rx, hold.start_ps, bit, rx.offsets[index])) ? 0u : 1u;
+    }
+    all_low          = all_low and ones == 0;
+    auto const value = 2 * ones > rx.samples ? 1u : 0u;
+    out.noise        = out.noise or (ones != 0 and ones != rx.samples);
+    if(bit <= rx.word_bits)
+    {
+      out.data = static_cast<std::uint16_t>(out.data | (value << (bit - 1)));
+    }
+    else
+    {
+      out.framing = value == 0;
+    }
+  }
+  if(all_low)
+  {
+    deliver({.framing = true});
+    return;
+  }
+  auto const word = static_cast<std::uint16_t>(out.data & word_mask());
+  deliver(
+      {.data    = word,
+       .framing = out.framing,
+       .noise   = out.noise,
+       .parity  = not parity_ok(word, rx.word_bits, parity())});
+}
+
+void usart::end_hold(std::vector<line_hold>::iterator hold)
+{
+  auto const ps       = frame_ps();
+  auto const char_end = hold->received ? hold->start_ps + ps : 0;
+  auto const due      = std::max(hold->until_ps, char_end) + ps;
+  state_.holds.erase(hold);
+  if(ps != 0 and not linked_before(due) and not state_.receiving)
+  {
+    idle_at(due);
+  }
+}
+
+void usart::hold_line(vtime from, std::uint32_t lane)
+{
+  if(not state_.holds.empty())
+  {
+    auto& last = state_.holds.back();
+    if(not last.open and not last.released and last.until_ps == from.ps)
+    {
+      last.open = true;
+      return;
+    }
+  }
+  auto const rx = shape();
+  if(state_.idle_pending and from.ps < state_.idle_due_ps)
+  {
+    state_.idle_pending = false;
+    ++state_.generation[idle_due];
+  }
+  line_hold  hold{.from_ps = from.ps, .start_ps = from.ps, .lane = lane, .open = true};
+  auto const crossing = std::ranges::find_if(state_.linked, [&](linked_frame const& queued) {
+    return queued.frame.start.ps < from.ps
+       and (queued.cut ? from.ps < queued.frame.end.ps
+                       : rx.frame_ps != 0 and from.ps <= last_sample(queued.frame, rx));
   });
+  if(crossing != state_.linked.end())
+  {
+    hold.start_ps       = crossing->frame.start.ps;
+    auto const was_head = crossing == state_.linked.begin();
+    state_.linked.erase(crossing);
+    if(was_head)
+    {
+      schedule_linked();
+    }
+  }
+  auto const due = rx.frame_ps != 0 ? stop_sample(rx, hold.start_ps) : from.ps;
+  schedule_hold(state_.holds.emplace_back(hold), due);
+}
+
+void usart::release_line(vtime at, std::uint32_t)
+{
+  if(state_.holds.empty() or not state_.holds.back().open)
+  {
+    return;
+  }
+  auto& hold         = state_.holds.back();
+  hold.open          = false;
+  hold.until_ps      = at.ps;
+  hold.release_event = ++state_.hold_events;
+  ctx_.events.schedule_at(at, release_due, hold.release_event, hold.lane, ctx_.clock);
 }
 
 void usart::deliver(rx_entry entry)
@@ -1244,6 +1441,25 @@ void usart::idle_at(std::uint64_t due_ps)
 
 void usart::receive_at(line_frame const& frame, std::uint32_t lane)
 {
+  if(state_.idle_pending and frame.start.ps < state_.idle_due_ps)
+  {
+    state_.idle_pending = false;
+    ++state_.generation[idle_due];
+  }
+  auto const rx   = shape();
+  auto const over = std::ranges::find_if(state_.holds, [&](line_hold const& hold) {
+    return not hold.sampled
+       and hold.start_ps == hold.from_ps
+       and frame.start.ps < hold.from_ps
+       and rx.frame_ps != 0
+       and hold.from_ps <= last_sample(frame, rx);
+  });
+  if(over != state_.holds.end())
+  {
+    over->start_ps = frame.start.ps;
+    schedule_hold(*over, stop_sample(rx, frame.start.ps));
+    return;
+  }
   auto const key = std::pair{frame.end.ps, lane};
   auto const where =
       std::ranges::upper_bound(state_.linked, key, {}, [](linked_frame const& queued) {
@@ -1251,11 +1467,6 @@ void usart::receive_at(line_frame const& frame, std::uint32_t lane)
       });
   auto const head = where == state_.linked.begin();
   state_.linked.insert(where, {.frame = frame, .lane = lane});
-  if(state_.idle_pending and frame.start.ps < state_.idle_due_ps)
-  {
-    state_.idle_pending = false;
-    ++state_.generation[idle_due];
-  }
   if(head)
   {
     schedule_linked();

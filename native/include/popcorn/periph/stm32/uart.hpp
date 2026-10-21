@@ -43,6 +43,22 @@ public:
    */
   virtual void cancel_in_flight(vtime at, std::uint32_t lane) = 0;
 
+  /**
+   * @brief The line goes low at @p from and stays low until release_line(). Called as
+   *        receive_at(), with @p from at or after this machine's time.
+   * @param from Virtual time the line falls, in this machine's time.
+   * @param lane Lane of the wire, which the hold's events go on.
+   */
+  virtual void hold_line(vtime from, std::uint32_t lane) = 0;
+
+  /**
+   * @brief The line held by hold_line() goes high at @p at. Called as receive_at(). Ignored when
+   *        no hold is open, as after a reset.
+   * @param at Virtual time the line rises, in this machine's time, at or after the hold's start.
+   * @param lane Lane of the wire.
+   */
+  virtual void release_line(vtime at, std::uint32_t lane) = 0;
+
 protected:
   /** @brief Destroys the interface, only through its model. */
   ~uart_link_port() override;

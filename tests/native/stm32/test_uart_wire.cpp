@@ -1693,12 +1693,16 @@ auto paired(std::string_view a, std::string_view b, std::uint64_t latency) -> ri
   return r;
 }
 
-auto cut_rig(rig& r, std::int64_t start, std::optional<std::int64_t> end, std::int64_t now)
-    -> cut_result
+auto cut_rig(
+    rig&                        r,
+    std::int64_t                start,
+    std::optional<std::int64_t> end,
+    std::int64_t                now,
+    bool                        low = false) -> cut_result
 {
   return stm32::cut_link(
       *r.wires[0], *r.wires[1], core::sys_time{start},
-      end ? std::optional{core::sys_time{*end}} : std::nullopt, false, core::sys_time{now});
+      end ? std::optional{core::sys_time{*end}} : std::nullopt, low, core::sys_time{now});
 }
 
 auto stopped_now(rig const& r) -> std::int64_t
@@ -1778,6 +1782,18 @@ struct stub_port final : stm32::uart_link_port
   {
     cancels.push_back(static_cast<std::int64_t>(at.ps));
     calls.emplace_back('c', static_cast<std::int64_t>(at.ps));
+  }
+
+  void hold_line(vtime from, std::uint32_t lane) override
+  {
+    CHECK(lane == 1);
+    calls.emplace_back('h', static_cast<std::int64_t>(from.ps));
+  }
+
+  void release_line(vtime at, std::uint32_t lane) override
+  {
+    CHECK(lane == 1);
+    calls.emplace_back('l', static_cast<std::int64_t>(at.ps));
   }
 
   void receive_frames(std::span<periph::host_frame const>) override
@@ -1885,12 +1901,15 @@ struct stub_link
     }
   }
 
-  auto cut(std::int64_t start, std::optional<std::int64_t> end, std::optional<std::int64_t> now)
-      -> cut_result
+  auto
+      cut(std::int64_t                start,
+          std::optional<std::int64_t> end,
+          std::optional<std::int64_t> now,
+          bool                        low = false) -> cut_result
   {
     return stm32::cut_link(
         *forth, *back, core::sys_time{start},
-        end ? std::optional{core::sys_time{*end}} : std::nullopt, false,
+        end ? std::optional{core::sys_time{*end}} : std::nullopt, low,
         now ? std::optional{core::sys_time{*now}} : std::nullopt);
   }
 };
@@ -3454,6 +3473,228 @@ TEST_CASE("a carried abort of a handed frame a later recorded reset drops is fin
       CHECK_FALSE(pause_drain(link, 1, q + 2 * us).has_value());
       CHECK(link.forth->quiet() == reset);
       CHECK(saved_state(*link.forth).carried.size() == (reset ? 0U : 1U));
+    }
+  }
+}
+
+namespace
+{
+constexpr std::uint32_t link_error = 4;
+
+auto stop_offset(rig const& r) -> std::int64_t
+{
+  auto const brr   = r.nodes[1]->f->field("USART1", "BRR", "BRR");
+  auto const baud  = std::uint64_t{160'000'000} / brr;
+  auto const frame = 20 * std::uint64_t{1'000'000'000'000} / (2 * baud);
+  return static_cast<std::int64_t>(2 * frame * (16 * 9 + 9) / (16 * 20));
+}
+
+auto received_with_errors(std::vector<std::uint32_t> const& log) -> std::vector<entry>
+{
+  std::vector<entry> out;
+  for(auto const& one : entries(log))
+  {
+    if(one.kind == link_byte or one.kind == link_error)
+    {
+      out.push_back(one);
+    }
+  }
+  return out;
+}
+}
+
+TEST_CASE(
+    "a break cut turns the frame crossing t0 plus L into one break character at its stop sample")
+{
+  auto const all = oracle_tap("link_tx", "link_rx", latency_20);
+  REQUIRE(all.size() == 64);
+  auto const t0  = all[10].start.ps + static_cast<std::int64_t>(5 * us_ps);
+  auto const t1  = all[14].start.ps + static_cast<std::int64_t>(5 * us_ps);
+  auto const run = [&](run_plan const& plan) {
+    auto r = paired("link_tx", "link_rx", latency_20);
+    REQUIRE(cut_rig(r, t0, t1, 0, true).has_value());
+    r.run(plan);
+    return r;
+  };
+  auto       reference = run({.window = latency_20});
+  auto const got       = received_with_errors(reference.nodes[1]->f->log());
+  auto       expected  = without(all, 10, 14);
+  expected.insert(expected.begin() + 10, 0);
+  std::vector<std::uint32_t> bytes;
+  std::vector<std::size_t>   errors;
+  for(std::size_t index = 0; index < got.size(); ++index)
+  {
+    if(got[index].kind == link_byte)
+    {
+      bytes.push_back(got[index].data);
+    }
+    else
+    {
+      errors.push_back(index);
+      CHECK(got[index].data == 1);
+    }
+  }
+  CHECK(bytes == expected);
+  REQUIRE(errors.size() == 1);
+  REQUIRE(errors[0] == 10);
+  REQUIRE(got[9].kind == link_byte);
+  auto const gap      = all[10].start.ps + stop_offset(reference) - all[9].end.ps;
+  auto const measured = static_cast<std::int64_t>(got[10].cycles - got[9].cycles);
+  CAPTURE(gap);
+  CHECK(measured >= gap / static_cast<std::int64_t>(cycle_ps) - 20);
+  CHECK(measured <= gap / static_cast<std::int64_t>(cycle_ps) + 20);
+  auto const& tap = reference.taps[0];
+  for(std::size_t index = 0; index < tap.size(); ++index)
+  {
+    CAPTURE(index);
+    CHECK(tap[index].cut == (index >= 10 and index <= 14));
+    CHECK(tap[index].lost == (index == 10 or index == 14));
+  }
+  auto const dump = reference.dump();
+  for(auto const& plan : variants_of(latency_20))
+  {
+    CAPTURE(plan.window);
+    CAPTURE(plan.threaded);
+    CHECK(run(plan).dump() == dump);
+  }
+}
+
+TEST_CASE("a break cut from a frame's end gives its byte, then the break character, at two windows")
+{
+  auto const all = oracle_tap("link_tx", "link_rx", latency_20);
+  REQUIRE(all.size() == 64);
+  auto const                 t0 = all[10].end.ps;
+  auto const                 t1 = all[14].start.ps + static_cast<std::int64_t>(5 * us_ps);
+  std::optional<std::string> reference;
+  for(auto const window : {latency_20, latency_20 / 3})
+  {
+    CAPTURE(window);
+    auto r = paired("link_tx", "link_rx", latency_20);
+    REQUIRE(cut_rig(r, t0, t1, 0, true).has_value());
+    r.run({.window = window});
+    auto const got = received_with_errors(r.nodes[1]->f->log());
+    REQUIRE(got.size() > 12);
+    CHECK(got[10].kind == link_byte);
+    CHECK(got[10].data == all[10].data);
+    CHECK(got[11].kind == link_error);
+    CHECK(got[12].kind == link_byte);
+    CHECK(got[12].data == 0);
+    auto const gap      = stop_offset(r);
+    auto const measured = static_cast<std::int64_t>(got[11].cycles - got[10].cycles);
+    CHECK(measured >= gap / static_cast<std::int64_t>(cycle_ps) - 20);
+    CHECK(measured <= gap / static_cast<std::int64_t>(cycle_ps) + 20);
+    if(reference)
+    {
+      CHECK(r.dump() == *reference);
+    }
+    reference = r.dump();
+  }
+}
+
+TEST_CASE("a receiver reset during a break cut or before its hold is handed leaves nothing of it")
+{
+  for(auto const during : {true, false})
+  {
+    CAPTURE(during);
+    auto const latency = during ? latency_20 : 2 * ms_ps;
+    auto const all     = oracle_tap("link_tx", "link_rx", latency);
+    REQUIRE(all.size() == 64);
+    auto const t0    = all[10].start.ps + static_cast<std::int64_t>(5 * us_ps);
+    auto const t1    = all[14].start.ps + static_cast<std::int64_t>(5 * us_ps);
+    auto const reset = during ? t0 + static_cast<std::int64_t>(latency + 2 * us_ps) : t0 + 1;
+    auto const run   = [&](bool low, std::uint64_t window) {
+      auto r = paired("link_tx", "link_rx", latency);
+      REQUIRE(cut_rig(r, t0, t1, 0, low).has_value());
+      r.run({
+          .window = window,
+          .end    = script_end_ps + latency,
+          .reset  = member_reset{
+                                 .member = 1, .at = static_cast<std::uint64_t>(reset), .entry = "link_rx"}
+      });
+      return r;
+    };
+    for(auto const window : {latency, latency / 4})
+    {
+      CAPTURE(window);
+      auto const q = static_cast<std::int64_t>(window);
+      if(not during)
+      {
+        REQUIRE(reset < (t0 / q + 1) * q);
+      }
+      auto const held = run(true, window);
+      auto const idle = run(false, window);
+      CHECK(held.nodes[1]->f->log() == idle.nodes[1]->f->log());
+      CHECK(std::ranges::none_of(entries(held.nodes[1]->f->log()), [](entry const& one) {
+        return one.kind == link_error;
+      }));
+    }
+  }
+}
+
+TEST_CASE("a break cut hands its hold and release once, quiet only once each is handed")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 50 * us;
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    for(auto const closed : {true, false})
+    {
+      CAPTURE(closed);
+      stub_link  link{l, declared()};
+      auto const t0 = q / 2;
+      auto const t1 = 3 * q + 5 * us;
+      REQUIRE(link.cut(t0, closed ? std::optional{t1} : std::nullopt, 0, true).has_value());
+      CHECK_FALSE(link.forth->quiet());
+      CHECK_FALSE(link.back->quiet());
+      link.window(0, q, {});
+      link.drain(0, q);
+      using call = std::pair<char, std::int64_t>;
+      CHECK(
+          link.forth_port.calls
+          == std::vector<call>{
+              {'h', t0 + l}
+      });
+      CHECK(
+          link.back_port.calls
+          == std::vector<call>{
+              {'h', t0 + l}
+      });
+      CHECK(link.forth->quiet() == not closed);
+      run_windows(link, 1, 3, q);
+      CHECK(link.forth->quiet() == not closed);
+      run_windows(link, 3, 10, q);
+      CHECK(link.forth->quiet());
+      if(closed)
+      {
+        CHECK(
+            link.forth_port.calls
+            == std::vector<call>{
+                {'h', t0 + l},
+                {'l', t1 + l}
+        });
+        CHECK(saved_state(*link.forth).cuts.empty());
+      }
+      else
+      {
+        CHECK(
+            link.forth_port.calls
+            == std::vector<call>{
+                {'h', t0 + l}
+        });
+        REQUIRE(
+            stm32::restore_link(*link.forth, *link.back, core::sys_time{10 * q})
+            == core::sys_time{10 * q});
+        CHECK_FALSE(link.forth->quiet());
+        run_windows(link, 10, 14, q);
+        CHECK(link.forth->quiet());
+        CHECK(
+            link.forth_port.calls
+            == std::vector<call>{
+                {'h', t0 + l    },
+                {'l', 10 * q + l}
+        });
+      }
     }
   }
 }

@@ -369,8 +369,18 @@ struct wire_state
  *        aborted and cut keeps the abort's end, and the receiver sees the earlier of the two.
  *        An injected frame is classified the same way on its receiver times against
  *        [t0 + L, t1 + L). A dropped frame is never marked. Marks are set when the tap gets a
- *        frame, so a restore of an open cut decides them. A cut held low is never
- *        truncated here.
+ *        frame, so a restore of an open cut decides them.
+ *
+ *        A cut held low classifies and marks frames the same way, but never truncates one: the
+ *        receiver's port gets uart_link_port::hold_line() at t0 + L from the first drain whose
+ *        barrier lies after t0, and uart_link_port::release_line() at t1 + L from the first
+ *        drain whose barrier lies after t1, both on the peer lane. The receiver turns a frame
+ *        crossing t0 + L into the break character. A hold the receiver's reset drops, one
+ *        starting before a recorded reset plus L, within a frame after the reset, is never
+ *        handed, nor is its release. quiet() is false while a low cut waits for its hold or,
+ *        closed, for its release: a sleeping system keeps its time frozen and would never reach
+ *        them. So a break cut ahead delays an idle pause until its release is handed, an open
+ *        one whose hold was handed does not. A low cut is erased only after its release.
  *
  *        Cuts never change errors: the shape and overlap checks run on every post as without
  *        cuts, against a record of the receiver's line that keeps every frame's extent, a cut

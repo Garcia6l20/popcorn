@@ -20,6 +20,7 @@
 #include <sched.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -1617,6 +1618,98 @@ TEST_CASE("an idle attempt over a dropped frame past its pause point pauses wher
       auto const seen = send_while_receiver_sleeps(how, stamp_at, true);
       CHECK(seen.stopped.reason == core::pause_reason::idle);
       CHECK(seen.bytes.empty());
+      if(reference)
+      {
+        CHECK(seen.stopped.at == reference->stopped.at);
+        CHECK(seen.dump == reference->dump);
+      }
+      else
+      {
+        reference = seen;
+      }
+    }
+  }
+}
+
+namespace
+{
+struct break_run
+{
+  std::string        dump;
+  core::pause        stopped;
+  std::vector<entry> seen;
+};
+
+auto break_ahead(variant const& how, bool closed) -> break_run
+{
+  constexpr std::int64_t t0 = 700 * us_ps;
+  constexpr std::int64_t t1 = 900 * us_ps;
+  pinned const           pin{how.one_cpu};
+  auto                   w = paired_world("link_rx", "link_rx", latency_20);
+  w.host(how);
+  REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+  std::array<core::host_future<core::goal_reached>, 2> goals;
+  {
+    auto const held = w.sys->lock();
+    auto const now  = std::max(w.sys->time_of(held, 0), w.sys->time_of(held, 1));
+    REQUIRE(now.ps < t0);
+    REQUIRE(
+        stm32::cut_link(
+            *w.wires[0], *w.wires[1], core::sys_time{t0},
+            closed ? std::optional{core::sys_time{t1}} : std::nullopt, true, now)
+        == core::sys_time{t0});
+    goals[0] = w.sys->post_goal(held, 0, {.until = popcorn::address{0x0800'0001}});
+    goals[1] = w.sys->post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
+  }
+  core::host_future<core::pause> pending;
+  {
+    auto const held = w.sys->lock();
+    pending         = w.sys->resume(held);
+  }
+  auto const stopped = pending.get();
+  CHECK(goals[0].get().stopped.reason == stop_reason::idle);
+  {
+    auto const held = w.sys->lock();
+    w.sys->withdraw(held, 1);
+  }
+  w.collect();
+  return {.dump = w.dump(), .stopped = stopped, .seen = entries(w.nodes[1]->log())};
+}
+}
+
+TEST_CASE("an idle pause waits for a break cut's hold and release, then the IDLE after it")
+{
+  constexpr std::uint32_t link_idle  = 2;
+  constexpr std::uint32_t link_error = 4;
+  for(auto const closed : {true, false})
+  {
+    CAPTURE(closed);
+    std::optional<break_run> reference;
+    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    {
+      CAPTURE(how.name);
+      auto const seen = break_ahead(how, closed);
+      CHECK(seen.stopped.reason == core::pause_reason::idle);
+      MESSAGE("idle pause at ", seen.stopped.at.ps);
+      auto const error = std::ranges::find(seen.seen, link_error, &entry::kind);
+      REQUIRE(error != seen.seen.end());
+      CHECK(error->data == 1);
+      REQUIRE(std::next(error) != seen.seen.end());
+      CHECK(std::next(error)->kind == link_byte);
+      CHECK(std::next(error)->data == 0);
+      auto const idles = std::ranges::count(seen.seen, link_idle, &entry::kind);
+      if(closed)
+      {
+        CHECK(seen.stopped.at.ps >= 900 * us_ps + static_cast<std::int64_t>(latency_20));
+        REQUIRE(seen.seen.back().kind == link_idle);
+        CHECK(idles >= 1);
+      }
+      else
+      {
+        CHECK(
+            seen.stopped.at.ps < 700 * us_ps + static_cast<std::int64_t>(latency_20 + 50 * us_ps));
+        CHECK(seen.seen.back().kind == link_byte);
+      }
       if(reference)
       {
         CHECK(seen.stopped.at == reference->stopped.at);

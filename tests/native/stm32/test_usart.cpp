@@ -3074,3 +3074,204 @@ TEST_CASE("a TDR write, a break request or a control write during a break's 2-bi
     CHECK(p->box->posts[1].frame.start.ps == start + frame + frame / 5);
   }
 }
+
+namespace
+{
+constexpr std::uint64_t hold_slack  = 200'000;
+constexpr std::uint32_t cr1_over8   = 1u << 15;
+constexpr std::uint32_t icr_idlecf  = 1u << 4;
+constexpr std::uint64_t usart1_baud = 4'000'000 / 35;
+
+auto frame_at(std::uint64_t baud) -> std::uint64_t
+{
+  return 20 * ps_per_second / (2 * baud);
+}
+
+auto sample_of(std::uint64_t frame, std::uint32_t bit, std::uint32_t sixteenths) -> std::uint64_t
+{
+  return 2 * frame * (16 * std::uint64_t{bit} + sixteenths) / (16 * 20);
+}
+
+void run_until(stm32_fixture const& f, std::uint64_t until)
+{
+  for(;;)
+  {
+    auto const result = f.run(
+        {.max_instructions = icount{1'000'000'000},
+         .wall_budget      = std::chrono::seconds{60},
+         .until_time       = vtime{until}});
+    if(result.stopped)
+    {
+      REQUIRE(result.stopped->reason == stop_reason::time);
+      return;
+    }
+  }
+}
+
+auto usart_dues(stm32_fixture const& f, std::uint32_t kind, std::optional<std::uint32_t> owner = {})
+    -> std::vector<std::pair<std::uint32_t, std::uint64_t>>
+{
+  std::vector<std::pair<std::uint32_t, std::uint64_t>> out;
+  for(auto const& one : f.target->snapshot().data().events.pending)
+  {
+    if(one.id.kind == kind and (owner ? one.id.owner == *owner : one.lane == 1))
+    {
+      out.emplace_back(one.id.owner, one.due_ps);
+    }
+  }
+  return out;
+}
+
+auto has_due(stm32_fixture const& f, std::uint32_t owner, std::uint32_t kind, std::uint64_t due)
+    -> bool
+{
+  return std::ranges::contains(usart_dues(f, kind, owner), std::pair{owner, due});
+}
+
+struct held_view
+{
+  std::vector<rx_view> rx;
+  bool                 idle_early{};
+  bool                 idle{};
+
+  friend auto operator==(held_view const&, held_view const&) -> bool = default;
+};
+}
+
+TEST_CASE("a line held three frames gives one break character at its stop-bit sample")
+{
+  for(auto const over8 : {false, true})
+  {
+    CAPTURE(over8);
+    parity_rig p{{}, 35, over8 ? cr1_over8 : 0u};
+    p.t.cpu("USART1", "ICR", icr_idlecf);
+    auto const frame = frame_at(over8 ? 2 * 4'000'000 / 38 : usart1_baud);
+    auto const from  = p.now() + 10 * us_ps;
+    auto const until = from + 3 * frame;
+    auto const stop  = from + sample_of(frame, 9, over8 ? 10 : 9);
+    p.t.r.port("USART1").hold_line(vtime{from}, 1);
+    p.t.r.port("USART1").release_line(vtime{until}, 1);
+    auto const held = usart_dues(*p.t.r.f, 5);
+    REQUIRE(held.size() == 1);
+    CHECK(held[0].second == stop);
+    p.advance(stop + hold_slack - p.now());
+    CHECK((p.isr() & (isr_rxfne | isr_fe)) == (isr_rxfne | isr_fe));
+    CHECK(p.rdr() == 0);
+    CHECK((p.isr() & isr_idle) == 0);
+    p.advance(until - p.now());
+    CHECK(has_due(*p.t.r.f, held[0].first, 2, until + frame));
+    CHECK((p.isr() & isr_idle) == 0);
+    p.advance(until + frame + hold_slack - p.now());
+    CHECK((p.isr() & isr_idle) != 0);
+    CHECK(
+        drain_rx(p)
+        == std::vector<rx_view>{
+            {.word = 0, .errors = isr_fe}
+    });
+  }
+}
+
+TEST_CASE("an LPUART line held three frames gives one break character at its middle stop sample")
+{
+  locked_rig t;
+  lpuart_flow(t, 0);
+  t.cpu("LPUART1", "ICR", icr_idlecf);
+  auto const frame = frame_of(*t.r.f, "LPUART1", 4'000'000, true);
+  auto const from  = t.r.f->target->virtual_clock().time().ps + 10 * us_ps;
+  auto const until = from + 3 * frame;
+  auto const stop  = from + sample_of(frame, 9, 8);
+  auto&      port  = t.r.port("LPUART1");
+  port.hold_line(vtime{from}, 1);
+  port.release_line(vtime{until}, 1);
+  auto const held = usart_dues(*t.r.f, 5);
+  REQUIRE(held.size() == 1);
+  CHECK(held[0].second == stop);
+  run_until(*t.r.f, stop + hold_slack);
+  CHECK((t.read("LPUART1", "ISR") & (isr_rxfne | isr_fe)) == (isr_rxfne | isr_fe));
+  CHECK(t.read("LPUART1", "RDR") == 0);
+  run_until(*t.r.f, until);
+  CHECK(has_due(*t.r.f, held[0].first, 2, until + frame));
+  CHECK((t.read("LPUART1", "ISR") & isr_idle) == 0);
+  run_until(*t.r.f, until + frame + hold_slack);
+  CHECK((t.read("LPUART1", "ISR") & isr_idle) != 0);
+  CHECK(lpuart_pop(t) == 0);
+  CHECK((t.read("LPUART1", "ISR") & isr_rxfne) == 0);
+}
+
+TEST_CASE("a hold shorter than a frame gives the sampled byte, or nothing before the start sample")
+{
+  struct short_case
+  {
+    std::uint64_t        until{};
+    std::vector<rx_view> expected;
+  };
+  auto const frame = frame_at(usart1_baud);
+  for(auto const& one : std::array<short_case, 3>{
+          {
+           {.until = 3 * frame / 10, .expected = {{.word = 0xfc}}},
+           {.until = sample_of(frame, 2, 8), .expected = {{.word = 0xfe, .errors = isr_ne}}},
+           {.until = 3 * frame / 100, .expected = {}},
+           }
+  })
+  {
+    CAPTURE(one.until);
+    parity_rig p{{}};
+    p.t.cpu("USART1", "ICR", icr_idlecf);
+    auto const from = p.now() + 10 * us_ps;
+    p.t.r.port("USART1").hold_line(vtime{from}, 1);
+    p.t.r.port("USART1").release_line(vtime{from + one.until}, 1);
+    auto const held = usart_dues(*p.t.r.f, 5);
+    REQUIRE(held.size() == 1);
+    CHECK(held[0].second == from + sample_of(frame, 9, 9));
+    p.advance(held[0].second + hold_slack - p.now());
+    CHECK(((p.isr() & isr_rxfne) != 0) == not one.expected.empty());
+    CHECK(has_due(
+        *p.t.r.f, held[0].first, 2, from + (one.expected.empty() ? one.until : frame) + frame));
+    CHECK(drain_rx(p) == one.expected);
+  }
+}
+
+TEST_CASE("a USART saved during a hold and restored ends the hold the same")
+{
+  parity_rig p{{}};
+  p.t.cpu("USART1", "ICR", icr_idlecf);
+  auto const frame = frame_at(usart1_baud);
+  auto const from  = p.now() + 10 * us_ps;
+  auto const until = from + 3 * frame;
+  p.t.r.port("USART1").hold_line(vtime{from}, 1);
+  p.advance(20 * us_ps);
+  auto const bytes = core::encode_snapshot(p.t.r.f->target->snapshot().data());
+  auto const rest  = [&] {
+    p.t.r.port("USART1").release_line(vtime{until}, 1);
+    p.advance(until + frame - hold_slack - p.now());
+    held_view out{.rx = {}, .idle_early = (p.isr() & isr_idle) != 0};
+    p.advance(2 * hold_slack);
+    out.idle = (p.isr() & isr_idle) != 0;
+    out.rx   = drain_rx(p);
+    return out;
+  };
+  auto const first = rest();
+  CHECK(first == held_view{.rx = {{.word = 0, .errors = isr_fe}}, .idle = true});
+  p.t.r.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(rest() == first);
+}
+
+TEST_CASE("a break character tying with a local delivery comes after it, on the hold's lane")
+{
+  parity_rig p{{}, 35, cr1_fifoen};
+  auto const frame = frame_at(usart1_baud);
+  auto const now   = p.now();
+  auto const from  = now + frame - sample_of(frame, 9, 9);
+  REQUIRE(from >= now);
+  p.t.r.port("USART1").hold_line(vtime{from}, 1);
+  p.t.r.port("USART1").release_line(vtime{from + 3 * frame}, 1);
+  std::vector<std::uint16_t> const one{'A'};
+  p.t.r.port("USART1").receive(one);
+  p.advance(5 * frame);
+  CHECK(
+      drain_rx(p)
+      == std::vector<rx_view>{
+          {.word = 'A'},
+          {.word = 0, .errors = isr_fe}
+  });
+}
