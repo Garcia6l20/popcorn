@@ -238,6 +238,9 @@ struct line_span
   /** @brief Never handed to the port: inside a cut, dropped by a receiver reset, or clashing. */
   bool suppressed{};
   bool truncated{};
+  /** @brief Checked and recorded, not handed yet: it starts at or after the last drain's
+   * barrier. */
+  bool carried{};
 
   friend auto operator==(line_span const&, line_span const&) -> bool = default;
 };
@@ -313,6 +316,7 @@ struct wire_state
   core::sys_time                flight_end{};
   std::vector<core::sys_time>   resets;
   std::vector<line_cut>         cuts;
+  std::vector<wire_post>        carried;
 
   friend auto operator==(wire_state const&, wire_state const&) -> bool = default;
 };
@@ -339,6 +343,17 @@ struct wire_state
  *        windows. A sender reset aborts the frame in flight. After a receiver reset at r, frames
  *        on the line at r or starting before r plus L never reach the receiver, the tap still
  *        shows them.
+ *
+ *        A drain hands the port only posts starting before its barrier, the pause point at a
+ *        pause. It carries the rest it would hand, aborts included, in order, and the next drain
+ *        takes them first. A carried frame is on time: it starts at or after the barrier, so its
+ *        receiver start lies at or after the next barrier. The shape and overlap checks and an
+ *        abort's edit of the record run when a post leaves its mailbox, carried or not, so errors
+ *        keep their date and the drain that reports them. A dropped or clashing post is final
+ *        there, never carried. A cut, a receiver reset and an abort's cancel act on a carried
+ *        post at the drain that hands it. quiet() is false while a post is carried. At most one
+ *        window plus one slice's overshoot of posts is carried after a pause, one overshoot
+ *        after a run's barrier.
  *
  *        Line cuts, cut_link() and restore_link(), apply to both wires of a link over [t0, t1)
  *        in sender system time, so the receiver's line is cut over [t0 + L, t1 + L). A peer

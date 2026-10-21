@@ -2845,3 +2845,262 @@ TEST_CASE("the receiver gets the earlier of an abort and a cut of the same frame
     CHECK(link.tap[0].cut == (t0 < abort));
   }
 }
+
+namespace
+{
+auto received_starts(stub_port const& port) -> std::vector<std::int64_t>
+{
+  std::vector<std::int64_t> out;
+  for(auto const& frame : port.received)
+  {
+    out.push_back(static_cast<std::int64_t>(frame.start.ps));
+  }
+  return out;
+}
+
+void run_windows(stub_link& link, std::uint64_t from, std::uint64_t to, std::int64_t q)
+{
+  for(auto k = from; k < to; ++k)
+  {
+    link.window(k, q, {});
+    link.drain(k, q);
+  }
+}
+
+auto pause_drain(stub_link& link, std::uint64_t k, std::int64_t at)
+    -> std::optional<core::link_fault>
+{
+  auto fault  = link.forth->drain(k, core::sys_time{at}, core::sys_time{at}, {});
+  std::ignore = link.back->drain(k, core::sys_time{at}, core::sys_time{at}, {});
+  return fault;
+}
+}
+
+TEST_CASE("an overshoot post past the barrier is carried, so a cut from the barrier keeps it off")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 50 * us;
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    stub_link link{l, declared()};
+    link.window(0, q, {});
+    link.forth->started(link.frame(q + 1));
+    link.drain(0, q);
+    CHECK(link.forth_port.received.empty());
+    CHECK(saved_state(*link.forth).carried.size() == 1);
+    REQUIRE(link.cut(q, std::nullopt, q) == core::sys_time{q});
+    run_windows(link, 1, 10, q);
+    CHECK(link.forth_port.received.empty());
+    CHECK(saved_state(*link.forth).carried.empty());
+    REQUIRE(link.tap.size() == 1);
+    CHECK(link.tap[0].cut);
+    CHECK_FALSE(link.tap[0].lost);
+  }
+}
+
+TEST_CASE("an overshoot post carried inside an open cut restored before its start arrives")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 50 * us;
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    auto const start = q + 5 * us;
+    auto const run   = [&](bool with_cut) {
+      auto link = std::make_unique<stub_link>(l, declared());
+      if(with_cut)
+      {
+        REQUIRE(link->cut(q / 2, std::nullopt, 0).has_value());
+      }
+      link->window(0, q, {});
+      link->forth->started(link->frame(start));
+      link->drain(0, q);
+      CHECK(link->forth_port.received.empty());
+      if(with_cut)
+      {
+        CHECK(saved_state(*link->forth).carried.size() == 1);
+        REQUIRE(
+            stm32::restore_link(*link->forth, *link->back, core::sys_time{q + us})
+            == core::sys_time{q + us});
+      }
+      run_windows(*link, 1, 10, q);
+      return link;
+    };
+    auto const plain = run(false);
+    auto const cut   = run(true);
+    CHECK(received_starts(cut->forth_port) == std::vector<std::int64_t>{start + l});
+    CHECK(received_starts(cut->forth_port) == received_starts(plain->forth_port));
+    CHECK(cut->forth_port.cancels == plain->forth_port.cancels);
+    REQUIRE(cut->tap.size() == 1);
+    CHECK_FALSE(cut->tap[0].cut);
+    CHECK_FALSE(cut->tap[0].lost);
+  }
+}
+
+TEST_CASE("a pause drain carries posts past its point, so a running cut after the resume holds")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 50 * us;
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    stub_link  link{l, declared()};
+    auto const p     = 2 * q;
+    auto const start = p + 3 * us;
+    run_windows(link, 0, 1, q);
+    link.window(1, q, {});
+    link.forth->started(link.frame(start));
+    CHECK_FALSE(pause_drain(link, 1, p - 10 * us).has_value());
+    CHECK(link.forth_port.received.empty());
+    CHECK(saved_state(*link.forth).carried.size() == 1);
+    REQUIRE(link.cut(p, p + 50 * us, std::nullopt) == core::sys_time{p});
+    link.drain(1, q);
+    run_windows(link, 2, 12, q);
+    CHECK(link.forth_port.received.empty());
+    REQUIRE(link.tap.size() == 1);
+    CHECK(link.tap[0].cut);
+  }
+}
+
+TEST_CASE("a pause drain reports an overlap of a post it carries, dated at the post's start")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 10 * us;
+  constexpr std::int64_t q  = 20 * us;
+  constexpr std::int64_t c  = 41 * us;
+  stub_link              link{l, declared()};
+  REQUIRE(c + l < 35 * us + static_cast<std::int64_t>(declared().frame_ps()));
+  REQUIRE(injected_byte(*link.forth, 0x5a, 35 * us, std::nullopt).has_value());
+  link.window(0, q, {});
+  CHECK_FALSE(link.forth->drain(0, core::sys_time{q}, core::sys_time{2 * q}, {}).has_value());
+  REQUIRE(link.forth_port.received.size() == 1);
+  link.window(1, q, {});
+  link.forth->started(link.frame(c));
+  auto const fault = pause_drain(link, 1, c);
+  REQUIRE(fault.has_value());
+  CHECK(fault->at.ps == c);
+  CHECK(fault->member == 0);
+  CHECK(link.forth_port.received.size() == 1);
+}
+
+TEST_CASE("an abort after the barrier edits the record at once and cancels at its delivery")
+{
+  constexpr std::int64_t us       = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l        = 50 * us;
+  auto const             frame_ps = static_cast<std::int64_t>(declared().frame_ps());
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    SUBCASE("running: the frame crosses the barrier, the abort and the next frame overshoot")
+    {
+      stub_link  link{l, declared()};
+      auto const f = q - 10 * us;
+      auto const a = q + 2 * us;
+      auto const g = q + 3 * us;
+      REQUIRE(g < f + frame_ps);
+      link.window(0, q, {});
+      link.forth->started(link.frame(f));
+      link.forth->aborted(vtime{static_cast<std::uint64_t>(a)});
+      link.forth->started(link.frame(g));
+      auto fault = link.forth->drain(0, core::sys_time{q}, core::sys_time{2 * q}, {});
+      CHECK_FALSE(fault.has_value());
+      CHECK(received_starts(link.forth_port) == std::vector<std::int64_t>{f + l});
+      CHECK(link.forth_port.cancels.empty());
+      CHECK(saved_state(*link.forth).carried.size() == 2);
+      link.window(1, q, {});
+      fault = link.forth->drain(1, core::sys_time{2 * q}, core::sys_time{3 * q}, {});
+      CHECK_FALSE(fault.has_value());
+      CHECK(received_starts(link.forth_port) == std::vector<std::int64_t>{f + l, g + l});
+      CHECK(link.forth_port.cancels == std::vector<std::int64_t>{a + l});
+    }
+    SUBCASE("pause: the frame crosses the pause point, the abort and the next frame after it")
+    {
+      stub_link  link{l, declared()};
+      auto const c = q - 5 * us;
+      auto const f = c - 10 * us;
+      auto const a = c + 2 * us;
+      auto const g = c + 3 * us;
+      link.window(0, q, {});
+      link.forth->started(link.frame(f));
+      link.forth->aborted(vtime{static_cast<std::uint64_t>(a)});
+      link.forth->started(link.frame(g));
+      CHECK_FALSE(pause_drain(link, 0, c).has_value());
+      CHECK(received_starts(link.forth_port) == std::vector<std::int64_t>{f + l});
+      CHECK(saved_state(*link.forth).carried.size() == 2);
+      CHECK_FALSE(link.forth->drain(0, core::sys_time{q}, core::sys_time{2 * q}, {}).has_value());
+      CHECK(received_starts(link.forth_port) == std::vector<std::int64_t>{f + l, g + l});
+      CHECK(link.forth_port.cancels == std::vector<std::int64_t>{a + l});
+    }
+    SUBCASE("pause: a stopped injection after the abort fits in the aborted frame's rest")
+    {
+      stub_link  link{l, declared()};
+      auto const c = q - 5 * us;
+      auto const f = c - 10 * us;
+      auto const a = c + 2 * us;
+      REQUIRE(a + l + us < f + l + frame_ps);
+      link.window(0, q, {});
+      link.forth->started(link.frame(f));
+      link.forth->aborted(vtime{static_cast<std::uint64_t>(a)});
+      CHECK_FALSE(pause_drain(link, 0, c).has_value());
+      CHECK(saved_state(*link.forth).carried.size() == 1);
+      CHECK(injected_byte(
+                *link.forth, 0x5a, a + l + us,
+                stm32::stopped_receiver{.now = core::sys_time{c}, .map = {}})
+                .has_value());
+    }
+  }
+}
+
+TEST_CASE("a wire saved with an open cut and posts carried by a pause loads with the same result")
+{
+  constexpr std::int64_t us  = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l   = 50 * us;
+  constexpr std::int64_t q   = l;
+  constexpr std::int64_t c   = q + us;
+  auto const             run = [&](bool reload) {
+    auto link = std::make_unique<stub_link>(l, declared());
+    run_windows(*link, 0, 1, q);
+    link->window(1, q, {});
+    link->forth->started(link->frame(q + 5 * us));
+    link->forth->started(link->frame(q + 30 * us));
+    CHECK_FALSE(pause_drain(*link, 1, c).has_value());
+    REQUIRE(link->cut(q + 20 * us, std::nullopt, c) == core::sys_time{q + 20 * us});
+    if(reload)
+    {
+      auto const state = saved_state(*link->forth);
+      CHECK(state.carried.size() == 2);
+      CHECK(state.cuts.size() == 1);
+      for(auto* wire : {&link->forth, &link->back})
+      {
+        std::vector<std::byte> bytes;
+        (*wire)->save(bytes);
+        auto const forth = wire == &link->forth;
+        auto       fresh = std::make_shared<stm32::uart_wire>(
+            stm32::wire_ends{.sender = forth ? 0U : 1U, .receiver = forth ? 1U : 0U},
+            stm32::wire_lanes{.peer = 1, .injected = 2}, core::sys_time{l}, declared(),
+            stm32::wire_receiver{
+                .port   = forth ? &link->forth_port : &link->back_port,
+                .unit   = "USART1",
+                .log    = {},
+                .strict = false},
+            nullptr);
+        fresh->share_registration(link->shared);
+        fresh->load(bytes);
+        *wire = fresh;
+      }
+    }
+    link->drain(1, q);
+    run_windows(*link, 2, 4, q);
+    REQUIRE(stm32::restore_link(*link->forth, *link->back, core::sys_time{5 * q}).has_value());
+    run_windows(*link, 4, 10, q);
+    return link;
+  };
+  auto const reference = run(false);
+  auto const loaded    = run(true);
+  CHECK(received_starts(reference->forth_port) == std::vector<std::int64_t>{q + 5 * us + l});
+  CHECK(reference->forth_port.cancels == std::vector<std::int64_t>{q + 20 * us + l});
+  CHECK(received_starts(loaded->forth_port) == received_starts(reference->forth_port));
+  CHECK(loaded->forth_port.cancels == reference->forth_port.cancels);
+  CHECK(loaded->tap == reference->tap);
+}

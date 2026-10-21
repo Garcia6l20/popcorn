@@ -13,6 +13,8 @@
 #include <popcorn/periph/stm32/uart_wire.hpp>
 #include <popcorn/periph/uart.hpp>
 
+#include <reflex/serde/bson.hpp>
+
 #include <doctest/doctest.h>
 
 #include <sched.h>
@@ -27,6 +29,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -1368,6 +1371,260 @@ TEST_CASE("a halted sender's watchdog bites unless DBG_IWDG_STOP freezes it")
         CHECK(seen == *reference);
       }
       reference = seen;
+    }
+  }
+}
+
+namespace
+{
+auto paired_world(std::string_view a, std::string_view b, std::int64_t latency) -> world
+{
+  world w;
+  w.add(a);
+  w.add(b);
+  w.link(0, 1, latency);
+  w.link(1, 0, latency);
+  auto const shared = std::make_shared<stm32::link_registration>();
+  w.wires[0]->share_registration(shared);
+  w.wires[1]->share_registration(shared);
+  return w;
+}
+
+auto carried_now(stm32::uart_wire const& wire) -> std::size_t
+{
+  std::vector<std::byte> bytes;
+  wire.save(bytes);
+  return reflex::serde::bson::deserializer{std::span<std::byte const>{bytes}}
+      .load<stm32::detail::wire_state>()
+      .carried.size();
+}
+
+auto link_bytes(std::vector<std::uint32_t> const& log) -> std::vector<std::uint32_t>
+{
+  std::vector<std::uint32_t> out;
+  for(auto const& one : entries(log))
+  {
+    if(one.kind == link_byte)
+    {
+      out.push_back(one.data);
+    }
+  }
+  return out;
+}
+
+struct stamped_send
+{
+  std::string                dump;
+  core::pause                stopped;
+  std::vector<std::uint32_t> bytes;
+};
+
+auto send_while_receiver_sleeps(variant const& how, std::int64_t stamp_at, bool drop)
+    -> stamped_send
+{
+  constexpr std::int64_t latency = 100 * us_ps;
+  pinned const           pin{how.one_cpu};
+  world                  w;
+  w.add("link_rx");
+  w.add("link_rx");
+  w.link(0, 1, latency);
+  w.link(1, 0, latency);
+  w.host(how);
+  REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+  if(drop)
+  {
+    REQUIRE(w.wires[0]->drop(0, 1));
+  }
+  core::host_future<core::goal_reached> sending;
+  core::host_future<core::goal_reached> listening;
+  std::int64_t                          local = 0;
+  {
+    auto const held = w.sys->lock();
+    sending         = w.sys->post_goal(held, 0, {.until = popcorn::address{0x0800'0001}});
+    listening = w.sys->post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    local     = stamp_at
+              - w.sys->time_of(held, 0).ps
+              + static_cast<std::int64_t>(core::access(
+                  *w.members[0].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; }));
+  }
+  core::host_future<vtime> written;
+  {
+    auto const held_host = w.members[0].on->lock();
+    written              = w.members[0].on->post(
+        held_host, 0,
+        [](core::machine& m) {
+          auto&      usart = m.peripheral("USART1");
+          auto const found = popcorn::find_register(usart.description(), std::string_view{"TDR"});
+          REQUIRE(found != nullptr);
+          REQUIRE(m.mem().write(usart.description().base + found->offset, 4, 0x5a));
+        },
+        vtime{static_cast<std::uint64_t>(local)});
+  }
+  core::host_future<core::pause> pending;
+  {
+    auto const held = w.sys->lock();
+    pending         = w.sys->resume(held);
+  }
+  auto const stopped = pending.get();
+  CHECK(written.get().ps == static_cast<std::uint64_t>(local));
+  CHECK(sending.get().stopped.reason == stop_reason::idle);
+  {
+    auto const held = w.sys->lock();
+    w.sys->withdraw(held, 1);
+  }
+  w.collect();
+  return {.dump = w.dump(), .stopped = stopped, .bytes = link_bytes(w.nodes[1]->log())};
+}
+}
+
+TEST_CASE("a frame a pause carries is suppressed by a cut its receiver makes after the resume")
+{
+  world oracle;
+  oracle.add("link_tx");
+  oracle.add("link_rx");
+  oracle.link(0, 1, latency_20);
+  oracle.oracle(script_end);
+  auto const& all = oracle.taps[0];
+  REQUIRE(all.size() == 64);
+  constexpr std::int64_t q = latency_20;
+  auto const             k = static_cast<std::size_t>(
+      std::ranges::find_if(
+          all,
+          [](auto const& frame) { return frame.index > 0 and frame.start.ps % q > 12 * us_ps; })
+      - all.begin());
+  REQUIRE(k < all.size());
+  auto const x = all[k].start.ps / q * q + us_ps;
+
+  std::optional<std::string> reference;
+  std::vector<std::size_t>   carried;
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    auto w = paired_world("link_tx", "link_rx", latency_20);
+    w.host(how);
+    core::host_future<core::goal_reached> stop;
+    {
+      auto const held = w.sys->lock();
+      stop            = w.sys->post_goal(held, 1, {.until_time = core::sys_time{x}});
+    }
+    REQUIRE(w.resume(script_end).reason == core::pause_reason::delivered);
+    {
+      auto const held = w.sys->lock();
+      auto const t    = w.sys->time_of(held, 1).ps + 1;
+      REQUIRE(t < all[k].start.ps);
+      carried.push_back(carried_now(*w.wires[0]));
+      REQUIRE(
+          stm32::cut_link(
+              *w.wires[0], *w.wires[1], core::sys_time{t}, std::nullopt, false, core::sys_time{t})
+          == core::sys_time{t});
+      w.sys->release(held, 1, false);
+    }
+    REQUIRE(w.run_to(script_end).reason == core::pause_reason::system_time);
+    auto const got = link_bytes(w.nodes[1]->log());
+    CHECK(got.size() <= k);
+    CHECK(std::ranges::none_of(got, [&](std::uint32_t data) { return data == all[k].data; }));
+    for(auto index = k; index < w.taps[0].size(); ++index)
+    {
+      CAPTURE(index);
+      CHECK(w.taps[0][index].cut);
+    }
+    auto const seen = w.dump();
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+  CHECK(carried == std::vector<std::size_t>{1, 0});
+}
+
+TEST_CASE("a strict shape fault a pause carries is the pause, before the goal stop behind it")
+{
+  world oracle;
+  oracle.strict = true;
+  oracle.add("link_tx_switch");
+  oracle.add("link_rx");
+  oracle.link(0, 1, latency_20);
+  oracle.oracle(script_end);
+  auto const& shaped = oracle.taps[0];
+  REQUIRE(shaped.size() == 8);
+  auto const s = shaped[4].start.ps;
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    world w;
+    w.strict = true;
+    w.add("link_tx_switch");
+    w.add("link_rx");
+    w.link(0, 1, latency_20);
+    w.host(how);
+    core::host_future<core::goal_reached> sending;
+    core::host_future<core::goal_reached> listening;
+    {
+      auto const held = w.sys->lock();
+      sending         = w.sys->post_goal(held, 0, {.until_time = core::sys_time{s + 3 * us_ps}});
+      listening = w.sys->post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    }
+    core::host_future<core::pause> pending;
+    {
+      auto const held = w.sys->lock();
+      pending         = w.sys->resume(held);
+    }
+    auto const stopped = pending.get();
+    REQUIRE(stopped.reason == core::pause_reason::error);
+    CHECK(stopped.at.ps == s);
+    CHECK(stopped.member == 1);
+    CHECK_THROWS_AS(std::rethrow_exception(stopped.error), popcorn::model_error);
+  }
+}
+
+TEST_CASE("an idle attempt whose pause carries a frame is abandoned, the frame arrives on time")
+{
+  for(auto const stamp_at : {610 * us_ps, 670 * us_ps})
+  {
+    CAPTURE(stamp_at);
+    std::optional<stamped_send> reference;
+    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    {
+      CAPTURE(how.name);
+      auto const seen = send_while_receiver_sleeps(how, stamp_at, false);
+      CHECK(seen.stopped.reason == core::pause_reason::idle);
+      CHECK(seen.bytes == std::vector<std::uint32_t>{0x5a});
+      if(reference)
+      {
+        CHECK(seen.stopped.at == reference->stopped.at);
+        CHECK(seen.stopped.member == reference->stopped.member);
+        CHECK(seen.dump == reference->dump);
+      }
+      else
+      {
+        reference = seen;
+      }
+    }
+  }
+}
+
+TEST_CASE("an idle attempt over a dropped frame past its pause point pauses where it did")
+{
+  for(auto const stamp_at : {610 * us_ps, 670 * us_ps})
+  {
+    CAPTURE(stamp_at);
+    std::optional<stamped_send> reference;
+    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    {
+      CAPTURE(how.name);
+      auto const seen = send_while_receiver_sleeps(how, stamp_at, true);
+      CHECK(seen.stopped.reason == core::pause_reason::idle);
+      CHECK(seen.bytes.empty());
+      if(reference)
+      {
+        CHECK(seen.stopped.at == reference->stopped.at);
+        CHECK(seen.dump == reference->dump);
+      }
+      else
+      {
+        reference = seen;
+      }
     }
   }
 }
