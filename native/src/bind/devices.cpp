@@ -483,8 +483,8 @@ auto stopping(periph::model_factory inner, std::vector<std::shared_ptr<callback_
   {
     return inner;
   }
-  return [inner = std::move(inner),
-          cells = std::move(cells)](periph::model_context& ctx, peripheral_desc const& desc) {
+  return [inner = std::move(inner), cells = std::move(cells)](
+             periph::model_context& ctx, peripheral_desc const& desc) mutable {
     for(auto const& cell : cells)
     {
       cell->stop_through(ctx.services);

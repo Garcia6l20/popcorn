@@ -92,7 +92,7 @@ void machine::run_state::attach_peripherals()
             .trustzone          = owner.options_.trustzone,
         });
     auto const configured = owner.options_.models.find(unit.name);
-    auto const factory =
+    auto       factory =
         configured != owner.options_.models.end() ? configured->second : periph::find_model(unit);
     if(factory)
     {

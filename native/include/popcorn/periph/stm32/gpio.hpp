@@ -37,7 +37,7 @@ public:
    * @brief Creates a handle that calls @p cancel once, when destroyed or reset.
    * @param cancel Removes the listener.
    */
-  explicit subscription(std::function<void()> cancel) : cancel_{std::move(cancel)}
+  explicit subscription(std::move_only_function<void()> cancel) : cancel_{std::move(cancel)}
   {}
 
   /** @brief Not copyable. */
@@ -46,8 +46,10 @@ public:
   auto operator=(subscription const&) -> subscription& = delete;
 
   /** @brief Takes over @p other's listener, leaving @p other empty. */
-  subscription(subscription&& other) noexcept : cancel_{std::exchange(other.cancel_, {})}
-  {}
+  subscription(subscription&& other) noexcept : cancel_{std::move(other.cancel_)}
+  {
+    other.cancel_ = nullptr;
+  }
 
   /** @brief Removes the current listener, then takes over @p other's. */
   auto operator=(subscription&& other) noexcept -> subscription&
@@ -55,7 +57,8 @@ public:
     if(this != &other)
     {
       reset();
-      cancel_ = std::exchange(other.cancel_, {});
+      cancel_       = std::move(other.cancel_);
+      other.cancel_ = nullptr;
     }
     return *this;
   }
@@ -69,14 +72,17 @@ public:
   /** @brief Removes the listener now, leaving the handle empty. */
   void reset()
   {
-    if(auto cancel = std::exchange(cancel_, {}))
+    if(not cancel_)
     {
-      cancel();
+      return;
     }
+    auto cancel = std::move(cancel_);
+    cancel_     = nullptr;
+    cancel();
   }
 
 private:
-  std::function<void()> cancel_;
+  std::move_only_function<void()> cancel_;
 };
 
 /** @brief Most edges a GPIO port keeps pending, gpio_port::drive_at. */
@@ -162,8 +168,9 @@ public:
    * @param listener Called with the pin and its new level.
    * @return Handle whose destruction removes the listener.
    */
-  [[nodiscard]] virtual auto on_change(std::function<void(std::uint8_t pin, bool level)> listener)
-      -> subscription = 0;
+  [[nodiscard]] virtual auto
+      on_change(std::copyable_function<void(std::uint8_t pin, bool level)> listener)
+          -> subscription = 0;
 
 protected:
   /** @brief Destroys the interface, only through its model. */

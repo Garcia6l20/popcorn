@@ -883,7 +883,7 @@ struct host::impl
 
   void load_factories()
   {
-    for(auto const& factory : options.drivers)
+    for(auto& factory : options.drivers)
     {
       if(not factory.load)
       {
@@ -910,7 +910,7 @@ struct host::impl
       {
         continue;
       }
-      for(auto const& factory : options.drivers)
+      for(auto& factory : options.drivers)
       {
         if(not factory.claim or not factory.make)
         {
@@ -1453,8 +1453,8 @@ deferred_warnings::~deferred_warnings() noexcept(false)
 }
 
 auto deferred_warnings::hold(
-    std::function<void(std::string const&)> const& sink,
-    std::string const&                             message) -> bool
+    std::copyable_function<void(std::string const&) const> const& sink,
+    std::string const&                                            message) -> bool
 {
   if(innermost_deferral == nullptr)
   {

@@ -72,7 +72,7 @@ struct wire_receiver
   /** @brief The receiver machine's log, called on its host thread between slices. Decision
    * 11: nothing reports on a host thread, so this must queue into the machine's own log, flushed
    * later as model warnings are, never call a Python sink. */
-  std::function<void(core::log_record)> log;
+  std::move_only_function<void(core::log_record)> log;
   /** @brief The receiver machine's machine_options::strict_peripherals. */
   bool strict{};
 };

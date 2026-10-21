@@ -340,7 +340,7 @@ struct POPCORN_API model_context
  *        alive through its Python instance for as long as the machine holds it.
  */
 using model_factory =
-    std::function<std::shared_ptr<model>(model_context& ctx, peripheral_desc const& desc)>;
+    std::copyable_function<std::shared_ptr<model>(model_context& ctx, peripheral_desc const& desc)>;
 
 /**
  * @brief Registers a model factory for every peripheral of an IP.
