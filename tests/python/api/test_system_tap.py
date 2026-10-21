@@ -7,82 +7,30 @@ import asyncio
 import gc
 import threading
 import weakref
-from collections.abc import Callable, Iterator
 from typing import cast
 
 import popcorn
 import pytest
-from popcorn import EmulationError, StopReason, System, TapFrame, UartLink, UartTap, _core
+from popcorn import EmulationError, System, TapFrame, UartTap, _core
 from popcorn._refs import Pending
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
-from .linked import LINK_BYTE, logged, member
-
-L = us(20)
-VARIANTS = [
-    pytest.param(1_000_000, None, id="plain"),
-    pytest.param(997, None, id="997"),
-    pytest.param(1_000_000, us(3), id="q=3us"),
-    pytest.param(997, us(3), id="997 q=3us"),
-]
-VARIANT_VALUES: list[tuple[int, VirtualDuration | None]] = [
-    (1_000_000, None),
-    (997, None),
-    (1_000_000, us(3)),
-    (997, us(3)),
-]
-TX_BYTES = [0x20 + index for index in range(64)]
-FIRMWARE_BAUD = 461_095
-
-Build = Callable[..., System]
-
-
-def links(third: VirtualDuration | None, baud: int = 460_800) -> list[UartLink]:
-    made = [UartLink("a.USART1", "b.USART1", latency=L, baud=baud)]
-    if third is not None:
-        made.append(UartLink("a.USART2", "b.USART2", latency=third, baud=460_800))
-    return made
-
-
-@pytest.fixture
-def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
-    """Builds `a` running `a_entry` linked USART1 to USART1 with `b` running `b_entry`."""
-    made: list[System] = []
-
-    def build(
-        slice_instructions: int = 1_000_000,
-        third: VirtualDuration | None = None,
-        *,
-        a_entry: str = "link_tx",
-        b_entry: str = "link_rx",
-        baud: int = 460_800,
-    ) -> System:
-        a = member(u575, a_entry, "a", slice_instructions)
-        b = member(u575, b_entry, "b", slice_instructions)
-        system = System({"a": a, "b": b}, links(third, baud), slice_instructions=slice_instructions)
-        made.append(system)
-        return system
-
-    yield build
-    for one in made:
-        one.close()
-
-
-async def to(system: System, until: VirtualTime) -> None:
-    """Run to `until`, again after each member stop."""
-    while (await system.run(until=until)).reason is not StopReason.TIME:
-        pass
-
-
-def past_done(system: System) -> None:
-    """Move a, parked on link_tx's final breakpoint, to the idle loop, so a free run goes on."""
-    a = system.members["a"]
-    assert a.mem.u16[a.pc - 2] == 0xBE01
-    a.reg.pc = a.sym("idle")
-
-
-def at(micros: float) -> VirtualTime:
-    return VirtualTime(us(micros).ps)
+from .linked import (
+    FIRMWARE_BAUD,
+    LINK_BYTE,
+    TX_BYTES,
+    VARIANT_VALUES,
+    VARIANTS,
+    Build,
+    L,
+    at,
+    in_flight,
+    links,
+    logged,
+    member,
+    past_done,
+    to,
+)
 
 
 def tap_pauses(system: System) -> list[list[TapFrame]]:
@@ -119,15 +67,6 @@ def test_the_tap_at_each_pause_holds_the_frames_ended_by_it_at_any_quantum(
         (f.data, f.at.ps - boot.ps) for f in lone.periph.USART1.port.take_frames()
     ]
     assert [word & 0xFFFF for word in results[0][1][::2] if word >> 16 == LINK_BYTE] == TX_BYTES
-
-
-async def in_flight(system: System) -> None:
-    """Let the event loop turn until the system's free run resumes after a member wait."""
-    for _ in range(100):
-        if system._flight is not None:  # pyright: ignore[reportPrivateUsage]
-            return
-        await asyncio.sleep(0)
-    raise AssertionError("the free run did not resume")
 
 
 def injected_run(system: System, running: bool) -> tuple[tuple[int, ...], tuple[TapFrame, ...]]:

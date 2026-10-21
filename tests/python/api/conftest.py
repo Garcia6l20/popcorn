@@ -7,7 +7,7 @@ import contextlib
 import os
 import struct
 import threading
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +16,8 @@ import pytest
 from popcorn._refs import Pending
 from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime, ms
+
+from .linked import Build, links, member
 
 ROOT = Path(__file__).parents[3]
 M33_JSON = ROOT / "tests" / "data" / "core" / "m33.json"
@@ -356,3 +358,29 @@ def load_each_unforwarded(m: popcorn.Machine, addresses: Sequence[int]) -> None:
         assert ended.wait(10)
         with contextlib.suppress(popcorn.EmulationError):
             m.halt()
+
+
+@pytest.fixture
+def pair(u575: popcorn.PartDescription) -> Iterator[Build]:
+    """Builds `a` running `a_entry` linked USART1 to USART1 with `b` running `b_entry`."""
+    made: list[popcorn.System] = []
+
+    def build(
+        slice_instructions: int = 1_000_000,
+        third: VirtualDuration | None = None,
+        *,
+        a_entry: str = "link_tx",
+        b_entry: str = "link_rx",
+        baud: int = 460_800,
+    ) -> popcorn.System:
+        a = member(u575, a_entry, "a", slice_instructions)
+        b = member(u575, b_entry, "b", slice_instructions)
+        system = popcorn.System(
+            {"a": a, "b": b}, links(third, baud), slice_instructions=slice_instructions
+        )
+        made.append(system)
+        return system
+
+    yield build
+    for one in made:
+        one.close()
