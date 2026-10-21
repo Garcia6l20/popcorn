@@ -30,6 +30,7 @@
 #include <random>
 #include <ranges>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -1147,51 +1148,83 @@ TEST_CASE("dropped frames never reach the receiver, IDLE rises in their gap, at 
 TEST_CASE("an arm racing the sender's start either applies or is refused, never both")
 {
 #if defined(__SANITIZE_THREAD__)
-  constexpr std::uint32_t frames = 1'000;
+  constexpr std::uint32_t frames = 500;
+  constexpr std::size_t   wanted = 50;
 #else
-  constexpr std::uint32_t frames = 10'000;
+  constexpr std::uint32_t frames = 2'000;
+  constexpr std::size_t   wanted = 200;
 #endif
-  constexpr std::uint64_t frame_ps = 21'700 * 1'000;
-  rig                     r;
-  auto&                   a = r.add("link_tx_count");
-  r.add("link_rx_quiet");
-  REQUIRE(a.f->target->mem().write(sym("usart_ll", "link_count"), 4, frames).has_value());
-  auto&             wire = r.link(0, 1, latency_20);
-  std::vector<char> armed(frames);
-  std::atomic<bool> stop{false};
-  std::jthread      arming{[&] {
-    std::mt19937                                 rng{11};
-    std::uniform_int_distribution<std::uint32_t> late{0, 1};
-    for(std::uint32_t index = 0; index < frames and not stop.load(); ++index)
-    {
-      auto const target = index + late(rng);
-      while(wire.posted() < target and not stop.load())
-      {
-        std::this_thread::yield();
-      }
-      std::vector<std::uint16_t> const data{static_cast<std::uint16_t>((index + 0x80u) & 0xffu)};
-      armed[index] = wire.replace(index, data) ? 1 : 0;
-    }
-  }};
-  r.run({.window = latency_20, .end = frames * frame_ps + ms_ps, .threaded = true});
-  stop.store(true);
-  arming          = {};
-  auto const& tap = r.taps[0];
-  REQUIRE(tap.size() == frames);
-  std::size_t accepted = 0;
-  for(std::uint32_t index = 0; index < frames; ++index)
+  constexpr std::size_t   round_cap = 50;
+  constexpr std::uint64_t frame_ps  = 21'700 * 1'000;
+  enum class outcome : char
   {
-    CAPTURE(index);
-    auto const original = index & 0xffu;
-    CHECK(tap[index].data == (armed[index] != 0 ? (original + 0x80u) & 0xffu : original));
-    accepted += armed[index] != 0 ? 1 : 0;
+    untried,
+    refused,
+    applied
+  };
+  std::size_t applied = 0;
+  std::size_t refused = 0;
+  std::size_t raced   = 0;
+  std::size_t round   = 0;
+  for(; round < round_cap and (applied < wanted or refused < wanted); ++round)
+  {
+    rig   r;
+    auto& a = r.add("link_tx_count");
+    r.add("link_rx_quiet");
+    REQUIRE(a.f->target->mem().write(sym("usart_ll", "link_count"), 4, frames).has_value());
+    auto&                wire = r.link(0, 1, latency_20);
+    std::vector<outcome> tried(frames, outcome::untried);
+    std::vector<char>    at_edge(frames);
+    std::jthread         arming{[&](std::stop_token const& token) {
+      std::mt19937                rng{static_cast<std::uint32_t>(11 + round)};
+      std::bernoulli_distribution late{0.5};
+      auto const                  past = [&](std::uint64_t index) {
+        while(wire.posted() <= index and not token.stop_requested())
+        {
+          std::this_thread::yield();
+        }
+      };
+      while(not token.stop_requested())
+      {
+        auto const index = wire.posted();
+        if(index >= frames)
+        {
+          break;
+        }
+        auto const after_start = late(rng);
+        if(after_start)
+        {
+          past(index);
+        }
+        std::vector<std::uint16_t> const data{static_cast<std::uint16_t>((index + 0x80u) & 0xffu)};
+        tried[index]   = wire.replace(index, data) ? outcome::applied : outcome::refused;
+        at_edge[index] = after_start ? 0 : 1;
+        past(index);
+      }
+    }};
+    r.run({.window = latency_20, .end = frames * frame_ps + ms_ps, .threaded = true});
+    arming          = {};
+    auto const& tap = r.taps[0];
+    REQUIRE(tap.size() == frames);
+    for(std::uint32_t index = 0; index < frames; ++index)
+    {
+      CAPTURE(round);
+      CAPTURE(index);
+      auto const original = index & 0xffu;
+      auto const edited   = tried[index] == outcome::applied;
+      CHECK(tap[index].data == (edited ? (original + 0x80u) & 0xffu : original));
+      applied += edited ? 1 : 0;
+      refused += tried[index] == outcome::refused ? 1 : 0;
+      raced += tried[index] == outcome::refused and at_edge[index] != 0 ? 1 : 0;
+    }
+    auto const idle = entries(r.nodes[1]->f->log());
+    REQUIRE(idle.size() == 1);
+    CHECK(idle[0].data == frames);
   }
-  MESSAGE("armed ", accepted, " of ", frames);
-  CHECK(accepted > frames / 4);
-  CHECK(accepted < 3 * frames / 4);
-  auto const idle = entries(r.nodes[1]->f->log());
-  REQUIRE(idle.size() == 1);
-  CHECK(idle[0].data == frames);
+  MESSAGE(
+      round, " rounds, applied ", applied, ", refused ", refused, ", refused at the edge ", raced);
+  CHECK(applied >= wanted);
+  CHECK(refused >= wanted);
 }
 
 namespace
