@@ -3342,3 +3342,45 @@ TEST_CASE("a wire state saved before the carry loads with nothing carried and ca
   link.drain(2, q);
   CHECK(received_starts(link.forth_port) == std::vector<std::int64_t>{2 * q + l});
 }
+
+TEST_CASE("a frame past the barrier inside a closed cut is final at its drain, never carried")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 50 * us;
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    auto const s = q + 1;
+    for(auto const closed : {true, false})
+    {
+      CAPTURE(closed);
+      std::optional<std::int64_t> const end =
+          closed ? std::optional{q + 20 * us} : std::optional<std::int64_t>{};
+      {
+        stub_link link{l, declared()};
+        REQUIRE(link.cut(q - 5 * us, end, 0).has_value());
+        link.window(0, q, {});
+        link.forth->started(link.frame(s));
+        link.drain(0, q);
+        CHECK(link.forth->quiet() == closed);
+        CHECK(saved_state(*link.forth).carried.size() == (closed ? 0U : 1U));
+        run_windows(link, 1, 10, q);
+        CHECK(link.forth_port.received.empty());
+      }
+      {
+        stub_link  link{l, declared()};
+        auto const c = q - 2 * us;
+        link.window(0, q, {});
+        link.forth->started(link.frame(s));
+        CHECK_FALSE(pause_drain(link, 0, c).has_value());
+        CHECK(saved_state(*link.forth).carried.size() == 1);
+        REQUIRE(link.cut(c, end, c).has_value());
+        link.drain(0, q);
+        CHECK(link.forth->quiet() == closed);
+        CHECK(saved_state(*link.forth).carried.size() == (closed ? 0U : 1U));
+        run_windows(link, 1, 10, q);
+        CHECK(link.forth_port.received.empty());
+      }
+    }
+  }
+}

@@ -542,6 +542,11 @@ auto uart_wire::drain(
         .post  = post.start,
         .index = post.index};
   };
+  auto const closed_over = [&](detail::wire_post const& post) {
+    return std::ranges::any_of(cuts, [&](detail::line_cut const& cut) {
+      return not cut.open and inside(cut, post.start);
+    });
+  };
   auto const cancels_any = [&](detail::wire_post const& post) {
     auto const at = shifted(post.start, latency_);
     return std::ranges::any_of(state_.delivered, [&](detail::line_span const& span) {
@@ -601,7 +606,7 @@ auto uart_wire::drain(
     {
       hand_frame(post, *span);
     }
-    else if(reset_drops(sent_of(post)))
+    else if(reset_drops(sent_of(post)) or closed_over(post))
     {
       span->carried    = false;
       span->suppressed = true;
@@ -648,7 +653,7 @@ auto uart_wire::drain(
       state_.delivered.push_back(span);
       continue;
     }
-    if(post.start >= barrier and reset_drops(span))
+    if(post.start >= barrier and (reset_drops(span) or closed_over(post)))
     {
       span.suppressed = true;
       state_.delivered.push_back(span);
