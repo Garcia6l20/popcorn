@@ -322,8 +322,8 @@ async def test_a_starved_responder_resets_and_comes_back(system: System) -> None
     assert [frame.end.ps for frame in lost] == [bite]
     last = [m for m in messages(answers) if m[-1].end < lost[0].start][-1][-1]
     answered = last.arrival.ps + last.end.ps - last.start.ps
-    (_, lost_at), (_, found_at) = events
     assert [what for what, _ in events] == ["lost", "found"]
+    (_, lost_at), (_, found_at) = events
     assert s(3).ps - ms(1).ps < lost_at.ps - answered <= s(3).ps
     assert lost_at < found_at < VirtualTime(lost_at.ps + ms(10).ps)
     assert b"responder: up, watchdog reset\r\n" in responder.periph.USART1.port.take()
@@ -368,8 +368,8 @@ async def test_a_pulled_cable_loses_the_responder_and_it_rejoins(
     tap.cut(start, end, line=line)
 
     await run_for(system, s(6))
-    (_, lost_at), (_, found_at) = events
     assert [what for what, _ in events] == ["lost", "found"]
+    (_, lost_at), (_, found_at) = events
     answers = tap.frames(towards="controller.UART4")
     last = [m for m in messages(answers) if m[-1].end <= start][-1][-1]
     answered = last.arrival.ps + last.end.ps - last.start.ps
