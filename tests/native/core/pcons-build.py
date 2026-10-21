@@ -2,7 +2,7 @@ from pathlib import Path
 
 from pcons import context
 
-from popcorn_build.config import VARIANT, project_dir
+from popcorn_build.config import project_dir
 from popcorn_build.firmware import firmware
 from popcorn_build.testing import add_doctest, alias_bare_name
 
@@ -181,10 +181,7 @@ for _, target in core_firmware.values():
     if target is not None:
         test_spin.depends(target)
 
-tsan_sources = [project_dir / "tests" / "native" / "tsan_longjmp.cpp"] if VARIANT == "tsan" else []
-test_host = add_doctest(
-    "core-host", [here / "test_host.cpp", *tsan_sources], [test_support, core], env=m33_env
-)
+test_host = add_doctest("core-host", [here / "test_host.cpp"], [test_support, core], env=m33_env)
 for _, target in core_firmware.values():
     if target is not None:
         test_host.depends(target)
@@ -198,7 +195,7 @@ for _, target in core_firmware.values():
 
 test_host_concurrent = add_doctest(
     "core-host-concurrent",
-    [here / "test_host_concurrent.cpp", *tsan_sources],
+    [here / "test_host_concurrent.cpp"],
     [test_support, core],
     env=m33_env,
 )
@@ -206,10 +203,10 @@ for _, target in core_firmware.values():
     if target is not None:
         test_host_concurrent.depends(target)
 
-add_doctest("core-window-barrier", [here / "test_window_barrier.cpp", *tsan_sources], [core])
+add_doctest("core-window-barrier", [here / "test_window_barrier.cpp"], [core])
 test_system = add_doctest(
     "core-system",
-    [here / "test_system.cpp", *tsan_sources],
+    [here / "test_system.cpp"],
     [test_support, core],
     env=m33_env,
 )
@@ -233,14 +230,14 @@ for _, target in core_firmware.values():
 
 test_loop_waker = add_doctest(
     "core-loop-waker",
-    [here / "test_loop_waker.cpp", *tsan_sources],
+    [here / "test_loop_waker.cpp"],
     [test_support_static, core_static],
 )
 test_loop_waker.private.include_dirs.append(project_dir / "native" / "src" / "core")
 
 test_log_queue = add_doctest(
     "core-log-queue",
-    [here / "test_log_queue.cpp", *tsan_sources],
+    [here / "test_log_queue.cpp"],
     [test_support_static, core_static],
 )
 test_log_queue.private.include_dirs.append(project_dir / "native" / "src" / "core")
@@ -264,7 +261,6 @@ test_host_pty = add_doctest(
     [
         here / "test_host_pty.cpp",
         project_dir / "native" / "src" / "bind" / "pty.cpp",
-        *tsan_sources,
     ],
     [test_support_static, project.get_target("popcorn_usb_static"), core_static],
     env=m33_env,

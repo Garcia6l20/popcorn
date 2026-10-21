@@ -13,6 +13,8 @@
 #include <doctest/doctest.h>
 
 #include <sched.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -20,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <latch>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -113,8 +116,11 @@ public:
     receiver_resets.push_back(at.ps);
   }
 
-  auto drain(std::uint64_t window, core::sys_time barrier, core::sys_time next, core::time_map)
-      -> std::optional<core::link_fault> override
+  auto drain(
+      std::uint64_t         window,
+      core::sys_time const& barrier,
+      core::sys_time const& next,
+      core::time_map) -> std::optional<core::link_fault> override
   {
     if(drains.size() < kept_drains)
     {
@@ -2631,3 +2637,98 @@ TEST_CASE("a dispatch cut short after one held event keeps a stamp behind the ne
   std::ignore = landed.get();
   CHECK(seen == std::vector<std::uint64_t>{1, 2});
 }
+
+TEST_CASE_TEMPLATE(
+    "a time compared under its lock is read through an instrumented operator",
+    T,
+    core::sys_time,
+    vtime,
+    icount)
+{
+  constexpr std::uint32_t stores = 20'000;
+  std::mutex              guard;
+  T                       shared{0U};
+  std::latch              start{2};
+  std::thread             writer{[&] {
+    start.arrive_and_wait();
+    for(std::uint32_t n = 1; n <= stores; ++n)
+    {
+      std::scoped_lock const held{guard};
+      shared = T{n};
+    }
+  }};
+  start.arrive_and_wait();
+  std::uint32_t seen      = 0;
+  std::uint32_t backwards = 0;
+  while(seen < stores)
+  {
+    std::scoped_lock const held{guard};
+    if(shared < T{seen})
+    {
+      ++backwards;
+    }
+    while(T{seen} < shared)
+    {
+      ++seen;
+    }
+  }
+  writer.join();
+  CHECK(backwards == 0);
+  CHECK(seen == stores);
+}
+
+#if defined(__SANITIZE_THREAD__)
+extern "C"
+{
+  void __sanitizer_set_report_path(char const* path);
+  void __tsan_on_report(void* report);
+}
+
+namespace
+{
+std::atomic<std::uint32_t> tsan_reports{0};
+}
+
+extern "C" void __tsan_on_report(void*)
+{
+  tsan_reports.fetch_add(1, std::memory_order_relaxed);
+}
+
+TEST_CASE_TEMPLATE(
+    "an unlocked time comparison racing a store is reported by TSAN",
+    T,
+    core::sys_time,
+    vtime,
+    icount)
+{
+  auto const child = fork();
+  REQUIRE(child >= 0);
+  if(child == 0)
+  {
+    __sanitizer_set_report_path("/dev/null");
+    constexpr std::uint32_t stores = 20'000;
+    T                       shared{0U};
+    std::latch              start{2};
+    std::thread             writer{[&] {
+      start.arrive_and_wait();
+      for(std::uint32_t n = 1; n <= stores; ++n)
+      {
+        shared = T{n};
+      }
+    }};
+    start.arrive_and_wait();
+    std::uint32_t backwards = 0;
+    for(std::uint32_t n = 0; n < stores; ++n)
+    {
+      backwards += shared < T{n} ? 1U : 0U;
+    }
+    writer.join();
+    std::ignore = backwards;
+    _exit(tsan_reports.load() == 0 ? 0 : 66);
+  }
+  int status = 0;
+  REQUIRE(waitpid(child, &status, 0) == child);
+  REQUIRE(WIFEXITED(status));
+  CHECK(WEXITSTATUS(status) == 66);
+}
+#endif

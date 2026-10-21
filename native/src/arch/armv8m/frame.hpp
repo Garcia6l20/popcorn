@@ -30,7 +30,7 @@ struct exc_return
   bool basic_frame{};
 
   /** @brief Member-wise equality. */
-  friend constexpr auto operator==(exc_return, exc_return) -> bool = default;
+  friend constexpr auto operator==(exc_return const&, exc_return const&) -> bool = default;
 };
 
 /** @brief The security fields of an EXC_RETURN value, B3.19. The defaults are the values of a
@@ -45,7 +45,8 @@ struct exc_return_security
   bool secure_exception{true};
 
   /** @brief Member-wise equality. */
-  friend constexpr auto operator==(exc_return_security, exc_return_security) -> bool = default;
+  friend constexpr auto operator==(exc_return_security const&, exc_return_security const&)
+      -> bool = default;
 };
 
 /**

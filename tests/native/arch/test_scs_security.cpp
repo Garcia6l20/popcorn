@@ -15,6 +15,7 @@
 #include <unicorn/unicorn.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <initializer_list>
 #include <utility>
@@ -160,7 +161,8 @@ auto run_vlstm(arch_fixture const& f) -> popcorn::stop
 
 void step(arch_fixture const& f, std::uint64_t count)
 {
-  auto const result = f.run({.exact_instructions = icount{count}});
+  auto const result =
+      f.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{count}});
   REQUIRE(result.stopped.has_value());
   REQUIRE(result.stopped->reason == stop_reason::budget);
 }

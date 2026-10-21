@@ -204,7 +204,7 @@ public:
   }
 
   /** @brief Member-wise equality. */
-  friend constexpr auto operator==(trace_kinds, trace_kinds) -> bool = default;
+  friend constexpr auto operator==(trace_kinds const&, trace_kinds const&) -> bool = default;
 
 private:
   static constexpr auto bit(trace_kind kind) noexcept -> std::uint32_t

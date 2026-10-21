@@ -300,10 +300,10 @@ public:
   void               sender_reset(core::sys_time at) override;
   void               receiver_reset(core::sys_time at) override;
   auto               drain(
-      std::uint64_t  window,
-      core::sys_time barrier,
-      core::sys_time next,
-      core::time_map receiver) -> std::optional<core::link_fault> override;
+      std::uint64_t         window,
+      core::sys_time const& barrier,
+      core::sys_time const& next,
+      core::time_map        receiver) -> std::optional<core::link_fault> override;
   [[nodiscard]] auto quiet() const -> bool override;
   void               finish(core::sys_time at) override;
   void               save(std::vector<std::byte>& out) const override;

@@ -43,12 +43,12 @@ auto earlier(entry const& a, entry const& b) noexcept -> bool
   return std::pair{a.at, a.member} < std::pair{b.at, b.member};
 }
 
-auto earlier_of(sys_time a, sys_time b) noexcept -> sys_time
+auto earlier_of(sys_time const& a, sys_time const& b) noexcept -> sys_time
 {
   return b < a ? b : a;
 }
 
-auto left(std::optional<icount> total, std::uint64_t done) -> std::optional<icount>
+auto left(std::optional<icount> const& total, std::uint64_t done) -> std::optional<icount>
 {
   if(not total)
   {
@@ -682,7 +682,7 @@ private:
     one.rep.done       = sys_.until and one.rep.position >= *sys_.until;
     auto const next    = target.next_event();
     auto const stamped = stamp_of(stamp);
-    auto const due_by  = [&](sys_time bound) {
+    auto const due_by  = [&](sys_time const& bound) {
       return (next and *next <= target.virtual_clock().to_icount(one.map.to_local(bound)))
           or (stamped and *stamped <= bound);
     };
@@ -704,7 +704,7 @@ private:
     return passed;
   }
 
-  void drain(std::uint64_t window, sys_time barrier, sys_time next)
+  void drain(std::uint64_t window, sys_time const& barrier, sys_time const& next)
   {
     auto& one = sys_.slots[index_];
     if(not sys_.measuring)
@@ -717,7 +717,7 @@ private:
     one.drained += std::chrono::steady_clock::now() - from;
   }
 
-  void drain_inbound(slot& one, std::uint64_t window, sys_time barrier, sys_time next)
+  void drain_inbound(slot& one, std::uint64_t window, sys_time const& barrier, sys_time const& next)
   {
     for(auto* link : one.inbound)
     {

@@ -21,7 +21,7 @@ struct clock_domain
   std::uint32_t index;
 
   /** @brief Member-wise equality. */
-  friend auto operator==(clock_domain, clock_domain) -> bool = default;
+  friend auto operator==(clock_domain const&, clock_domain const&) -> bool = default;
 };
 
 /**

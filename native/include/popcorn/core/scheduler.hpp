@@ -24,7 +24,7 @@ struct event_id
   std::uint32_t kind;
 
   /** @brief Member-wise equality. */
-  friend auto operator==(event_id, event_id) -> bool = default;
+  friend auto operator==(event_id const&, event_id const&) -> bool = default;
 };
 
 /** @brief What an event's deadline counts. */

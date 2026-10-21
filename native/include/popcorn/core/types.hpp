@@ -21,7 +21,7 @@ struct icount
   std::uint64_t value;
 
   /** @brief Member-wise ordering and equality. */
-  friend auto operator<=>(icount, icount) = default;
+  friend auto operator<=>(icount const&, icount const&) = default;
 };
 
 /** @brief Virtual time elapsed in the guest, in picoseconds. */
@@ -30,7 +30,7 @@ struct vtime
   std::uint64_t ps;
 
   /** @brief Member-wise ordering and equality. */
-  friend auto operator<=>(vtime, vtime) = default;
+  friend auto operator<=>(vtime const&, vtime const&) = default;
 };
 
 /**
@@ -121,7 +121,7 @@ struct bus_attrs
   bool filtered{};
 
   /** @brief Member-wise equality. */
-  friend auto operator==(bus_attrs, bus_attrs) -> bool = default;
+  friend auto operator==(bus_attrs const&, bus_attrs const&) -> bool = default;
 };
 
 /**

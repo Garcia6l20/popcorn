@@ -21,7 +21,7 @@ auto half_bits(std::uint32_t word, std::uint32_t half_stops) -> std::uint64_t
   return 2 * (1 + std::uint64_t{word}) + half_stops;
 }
 
-auto shifted(core::sys_time at, core::sys_time by) -> core::sys_time
+auto shifted(core::sys_time const& at, core::sys_time const& by) -> core::sys_time
 {
   return {at.ps + by.ps};
 }
@@ -191,7 +191,7 @@ void uart_wire::receiver_reset(core::sys_time at)
 
 auto uart_wire::reset_drops(detail::line_span const& span) const -> bool
 {
-  return std::ranges::any_of(state_.resets, [&](core::sys_time reset) {
+  return std::ranges::any_of(state_.resets, [&](core::sys_time const& reset) {
     return reset < span.end and span.start < shifted(reset, latency_);
   });
 }
@@ -390,15 +390,15 @@ auto uart_wire::quiet() const -> bool
 }
 
 auto uart_wire::drain(
-    std::uint64_t  window,
-    core::sys_time barrier,
-    core::sys_time next,
-    core::time_map receiver) -> std::optional<core::link_fault>
+    std::uint64_t         window,
+    core::sys_time const& barrier,
+    core::sys_time const& next,
+    core::time_map        receiver) -> std::optional<core::link_fault>
 {
   std::erase_if(state_.delivered, [&](detail::line_span const& span) {
     return span.end <= state_.last_barrier;
   });
-  std::erase_if(state_.resets, [&](core::sys_time reset) {
+  std::erase_if(state_.resets, [&](core::sys_time const& reset) {
     return shifted(reset, latency_) <= state_.last_barrier;
   });
   auto&                           posts = mailbox(window);

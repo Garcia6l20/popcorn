@@ -19,7 +19,7 @@ struct sys_time
   std::int64_t ps;
 
   /** @brief Member-wise ordering and equality. */
-  friend auto operator<=>(sys_time, sys_time) = default;
+  friend auto operator<=>(sys_time const&, sys_time const&) = default;
 };
 
 /**
@@ -139,8 +139,9 @@ public:
    *         before the barrier whose drain reports it. Order errors by link_fault::at, not by
    *         the drain that found them.
    */
-  virtual auto drain(std::uint64_t window, sys_time barrier, sys_time next, time_map receiver)
-      -> std::optional<link_fault> = 0;
+  virtual auto
+      drain(std::uint64_t window, sys_time const& barrier, sys_time const& next, time_map receiver)
+          -> std::optional<link_fault> = 0;
 
   /**
    * @brief Whether the link holds nothing for its receiver: no post in either mailbox and no
