@@ -490,7 +490,10 @@ public:
    * @brief Puts frames on the receiver's line back to back at the declared shape, as if a
    *        device on the line sent them, on the injected lane. With the system stopped or
    *        paused, called with the receiver's host access: accepted when @p at is at or after
-   *        the receiver's time and no frame overlaps one delivered, posted or queued, then
+   *        the receiver's time and no frame overlaps one delivered, posted or queued. A frame
+   *        starting at or after the reach of the drains so far, and at or after L, is then
+   *        queued and delivered at the next drain, on time, as a running injection is, so a
+   *        cut registered after the call still keeps it off the line. An earlier frame is
    *        delivered at once. While the system runs, any thread: accepted when @p at is at or
    *        after the reach of the drains so far, then delivered by the drain whose reach covers
    *        it. Acceptance then depends on wall timing. No overlap check at the call: an overlap

@@ -711,6 +711,11 @@ auto uart_wire::inject(
     {
       core::link_guard const held{inject_mutex_};
       frame.index = state_.injected++;
+      if(frame.start >= std::max(state_.drained_through, latency_))
+      {
+        state_.injections.push_back(frame);
+        continue;
+      }
     }
     deliver_injection(frame, stopped->map, false, cuts);
     truncate(state_.delivered.back(), cuts, state_.last_barrier, stopped->map);

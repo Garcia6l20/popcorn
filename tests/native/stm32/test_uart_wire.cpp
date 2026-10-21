@@ -2255,6 +2255,100 @@ TEST_CASE("injected frames are cut on their receiver times, stopped and running 
   CHECK(stopped.taps[0] == running.taps[0]);
 }
 
+TEST_CASE("a stopped cut over a stopped injection acts as when cut first, at two windows")
+{
+  constexpr std::int64_t          us     = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t          t0     = 2'600 * us;
+  constexpr std::int64_t          t1     = 2'700 * us;
+  constexpr std::uint64_t         stop   = 2'550 * us_ps;
+  auto const                      l      = static_cast<std::int64_t>(latency_20);
+  std::vector<std::int64_t> const starts = {
+      t0 + l - 10 * us, t0 + l + 30 * us, t1 + l - 15 * us, t1 + l + 10 * us};
+
+  auto running = paired("link_tx", "link_rx", latency_20);
+  REQUIRE(cut_rig(running, t0, t1, 0).has_value());
+  for(auto const at : starts)
+  {
+    REQUIRE(injected_byte(*running.wires[0], 0x77, at, std::nullopt).has_value());
+  }
+  running.run({.window = latency_20});
+  CHECK(std::ranges::count(bytes_of(running.nodes[1]->f->log()), 0x77u) == 1);
+  auto const inside =
+      std::ranges::find(running.taps[0], core::sys_time{starts[1]}, &stm32::tap_frame::start);
+  REQUIRE(inside != running.taps[0].end());
+  CHECK(inside->injected);
+  CHECK(inside->cut);
+  CHECK_FALSE(inside->lost);
+
+  for(auto const window : {latency_20, latency_20 / 4})
+  {
+    for(auto const cut_first : {false, true})
+    {
+      CAPTURE(window);
+      CAPTURE(cut_first);
+      auto stopped = paired("link_tx", "link_rx", latency_20);
+      stopped.run({.window = window, .end = stop});
+      auto const now = receiver_now(stopped);
+      if(cut_first)
+      {
+        REQUIRE(cut_rig(stopped, t0, t1, stopped_now(stopped)).has_value());
+      }
+      for(auto const at : starts)
+      {
+        REQUIRE(injected_byte(*stopped.wires[0], 0x77, at, now).has_value());
+      }
+      if(not cut_first)
+      {
+        REQUIRE(cut_rig(stopped, t0, t1, stopped_now(stopped)).has_value());
+      }
+      CHECK(saved_state(*stopped.wires[0]).injections.size() == starts.size());
+      std::vector<std::byte> bytes;
+      stopped.wires[0]->save(bytes);
+      stopped.wires[0]->load(bytes);
+      stopped.run({.window = window, .first = (stop - 1) / window});
+      CHECK(stopped.nodes[1]->f->log() == running.nodes[1]->f->log());
+      CHECK(stopped.taps[0] == running.taps[0]);
+    }
+  }
+}
+
+TEST_CASE("a stopped injection reaches the port by its start, queued or delivered at once")
+{
+  constexpr std::int64_t us       = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l        = 20 * us;
+  auto const             frame_ps = static_cast<std::int64_t>(declared().frame_ps());
+  for(auto const stop : {std::int64_t{0}, std::int64_t{3}})
+  {
+    CAPTURE(stop);
+    stub_link                                          link{l, declared()};
+    std::int64_t                                       receiver = stop * l;
+    std::vector<std::pair<std::int64_t, std::int64_t>> seen;
+    link.forth_port.on_receive = [&](periph::line_frame const& frame) {
+      seen.emplace_back(receiver, static_cast<std::int64_t>(frame.start.ps));
+    };
+    link.run({}, l, stop * l);
+    std::vector<std::uint16_t> const data{0x11, 0x22};
+    REQUIRE(link.forth
+                ->inject(
+                    data, core::sys_time{receiver + 5 * us},
+                    stm32::stopped_receiver{.now = core::sys_time{receiver}, .map = {}})
+                .has_value());
+    for(auto k = static_cast<std::uint64_t>(stop); k < static_cast<std::uint64_t>(stop) + 3; ++k)
+    {
+      receiver = (static_cast<std::int64_t>(k) + 1) * l;
+      link.window(k, l, {});
+      link.drain(k, l);
+    }
+    REQUIRE(seen.size() == 2);
+    CHECK(seen[0].second == stop * l + 5 * us);
+    CHECK(seen[1].second == stop * l + 5 * us + frame_ps);
+    for(auto const& [at, start] : seen)
+    {
+      CHECK(at <= start);
+    }
+  }
+}
+
 TEST_CASE("a dropped frame inside a cut shows dropped only")
 {
   auto const all = oracle_tap("link_tx", "link_rx", latency_20);
