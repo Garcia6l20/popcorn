@@ -211,6 +211,14 @@ TEST_CASE("a plugin without its own name function is refused, not served by a li
   CHECK(message.contains("itself, not through a library it links"));
 }
 
+TEST_CASE("a plugin whose name function returns null is refused under popcorn_plugin_name")
+{
+  copies     files;
+  auto const message = refusal(files.of("null_name"));
+  CHECK(message.contains("popcorn_plugin_name"));
+  CHECK(message.contains("a name function returning a name"));
+}
+
 TEST_CASE("a stripped plugin keeps its tag and loads")
 {
   copies      files;

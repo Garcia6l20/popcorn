@@ -74,7 +74,7 @@ def test_only_the_builtin_libraries_define_the_plugin_entry() -> None:
     assert {name: count for name, count in counts.items() if count} == dict.fromkeys(BUILTINS, 1)
 
 
-def test_the_builtin_plugins_export_no_data_object_two_of_them_would_share() -> None:
+def test_the_builtin_plugins_share_no_instrumented_data_object() -> None:
     libraries = {path.name: path for path in native_libraries()}
     for name in sorted(BUILTINS):
         assert plugin_symbols(libraries[name]) == {

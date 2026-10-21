@@ -239,9 +239,15 @@ auto open_checked(plugins& table, std::filesystem::path const& path, file_id id,
     throw refusal(path, "static constructors", std::move(expected));
   }
   check_tag(path, static_cast<char const*>(own_symbol(handle, path, "popcorn_plugin_abi_tag")));
+  char const* const name =
+      reinterpret_cast<name_function>(own_symbol(handle, path, "popcorn_plugin_name"))();
+  if(name == nullptr)
+  {
+    throw refusal(path, "popcorn_plugin_name", "a name function returning a name");
+  }
   return {
       .handle = handle,
-      .name   = reinterpret_cast<name_function>(own_symbol(handle, path, "popcorn_plugin_name"))(),
+      .name   = name,
       .init   = reinterpret_cast<init_function>(own_symbol(handle, path, "popcorn_plugin_init")),
   };
 }

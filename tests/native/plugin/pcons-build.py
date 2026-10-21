@@ -53,6 +53,7 @@ core_fixtures = [
             "sdk_mismatch",
             "ctor_aborts",
             "no_init",
+            "null_name",
             "throws",
             "dup_name",
             "writes_global",

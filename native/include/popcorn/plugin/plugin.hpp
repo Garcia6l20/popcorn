@@ -56,7 +56,8 @@ struct loaded;
  *         popcorn, or naming `link` when the library has no `DT_NEEDED` on libpopcorn_core.so
  *         or defines periph::registered_glob or periph::register_model itself, a copy of core,
  *         both checked before `dlopen`, or naming the missing entry symbol, such as
- *         `popcorn_plugin_init`, when the library is not a popcorn plugin, or naming `dlopen`
+ *         `popcorn_plugin_init`, when the library is not a popcorn plugin, or naming
+ *         `popcorn_plugin_name` when its name function returns null, or naming `dlopen`
  *         with the dlerror text when it cannot be opened, or, for scope::declared, when the
  *         library was mapped into the process other than by a declared load, or naming `scope`
  *         when it was loaded before with the other scope, or when a declared plugin calls a
@@ -139,8 +140,10 @@ struct loaded
  *
  * The plugin exports three symbols: the tag `popcorn_plugin_abi_tag` in the `.popcorn_abi`
  * section, `popcorn_plugin_name`, a function returning the name, and `popcorn_plugin_init`.
- * The name is a function, not an array: every plugin exports the same symbols, and a program
- * linking two plugins would otherwise hold two definitions of one global.
+ * Every plugin exports the same symbols, so a program linking two plugins holds two definitions
+ * of each, which ASan reports as an ODR violation for an instrumented data global. The name is a
+ * function for that reason. The tag stays a data global in every plugin, and ASan leaves it alone
+ * only because it sits in a user section.
  *
  * @code
  * POPCORN_PLUGIN(my_plugin, r)
