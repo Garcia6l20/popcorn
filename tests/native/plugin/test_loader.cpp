@@ -203,6 +203,14 @@ TEST_CASE("a plugin without its own init is refused, not served by a library it 
   CHECK(refusal(files.of("no_init")).contains("popcorn_plugin_init"));
 }
 
+TEST_CASE("a plugin without its own name function is refused, not served by a library it links")
+{
+  copies     files;
+  auto const message = refusal(files.of("no_name_stm32"));
+  CHECK(message.contains("popcorn_plugin_name"));
+  CHECK(message.contains("itself, not through a library it links"));
+}
+
 TEST_CASE("a stripped plugin keeps its tag and loads")
 {
   copies      files;

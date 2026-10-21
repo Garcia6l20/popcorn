@@ -134,8 +134,13 @@ struct loaded
 }
 
 /**
- * @brief Defines a plugin's ABI tag, its name @p NAME and its entry point, whose body follows
- *        the macro and receives the registrar as @p REGISTRAR.
+ * @brief Defines a plugin's ABI tag, its name function returning @p NAME and its entry point,
+ *        whose body follows the macro and receives the registrar as @p REGISTRAR.
+ *
+ * The plugin exports three symbols: the tag `popcorn_plugin_abi_tag` in the `.popcorn_abi`
+ * section, `popcorn_plugin_name`, a function returning the name, and `popcorn_plugin_init`.
+ * The name is a function, not an array: every plugin exports the same symbols, and a program
+ * linking two plugins would otherwise hold two definitions of one global.
  *
  * @code
  * POPCORN_PLUGIN(my_plugin, r)
@@ -144,9 +149,12 @@ struct loaded
  * }
  * @endcode
  */
-#define POPCORN_PLUGIN(NAME, REGISTRAR)                                               \
-  extern "C" [[gnu::visibility("default"), gnu::used, gnu::section(".popcorn_abi")]]  \
-  char const popcorn_plugin_abi_tag[] = POPCORN_ABI_TAG_LITERAL;                      \
-  extern "C" [[gnu::visibility("default")]] char const popcorn_plugin_name[] = #NAME; \
-  extern "C" [[gnu::visibility("default")]] void       popcorn_plugin_init(           \
+#define POPCORN_PLUGIN(NAME, REGISTRAR)                                                              \
+  extern "C" [[gnu::visibility("default"), gnu::used, gnu::section(".popcorn_abi")]]                 \
+  char const                                     popcorn_plugin_abi_tag[] = POPCORN_ABI_TAG_LITERAL; \
+  extern "C" [[gnu::visibility("default")]] auto popcorn_plugin_name() noexcept -> char const*       \
+  {                                                                                                  \
+    return #NAME;                                                                                    \
+  }                                                                                                  \
+  extern "C" [[gnu::visibility("default")]] void popcorn_plugin_init(                                \
       ::popcorn::plugin::registrar& REGISTRAR)

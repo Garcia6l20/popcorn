@@ -30,6 +30,22 @@ def defined_entries(path: Path) -> int:
         )
 
 
+def plugin_symbols(path: Path) -> dict[str, tuple[str, str]]:
+    """The defined `popcorn_plugin_*` dynamic symbols of @p path, as type and section name."""
+    with path.open("rb") as stream:
+        elf = ELFFile(stream)
+        section = elf.get_section_by_name(".dynsym")
+        assert isinstance(section, SymbolTableSection)
+        return {
+            symbol.name: (
+                symbol["st_info"]["type"],
+                elf.get_section(symbol["st_shndx"]).name,
+            )
+            for symbol in section.iter_symbols()
+            if symbol.name.startswith("popcorn_plugin_") and symbol["st_shndx"] != "SHN_UNDEF"
+        }
+
+
 def needed(path: Path) -> list[str]:
     """The `DT_NEEDED` entries of @p path."""
     with path.open("rb") as stream:
@@ -56,6 +72,16 @@ def test_only_the_builtin_libraries_define_the_plugin_entry() -> None:
     counts = {path.name: defined_entries(path) for path in native_libraries()}
     assert counts.keys() >= BUILTINS
     assert {name: count for name, count in counts.items() if count} == dict.fromkeys(BUILTINS, 1)
+
+
+def test_the_builtin_plugins_export_no_data_object_two_of_them_would_share() -> None:
+    libraries = {path.name: path for path in native_libraries()}
+    for name in sorted(BUILTINS):
+        assert plugin_symbols(libraries[name]) == {
+            "popcorn_plugin_abi_tag": ("STT_OBJECT", ".popcorn_abi"),
+            "popcorn_plugin_name": ("STT_FUNC", ".text"),
+            "popcorn_plugin_init": ("STT_FUNC", ".text"),
+        }, name
 
 
 def test_no_static_archive_defines_the_plugin_entry() -> None:

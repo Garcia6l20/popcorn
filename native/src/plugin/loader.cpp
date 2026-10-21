@@ -50,6 +50,7 @@ auto plugins_table() -> plugins&
 }
 
 using init_function = void (*)(registrar&);
+using name_function = auto (*)() noexcept -> char const*;
 
 char const anchor{};
 
@@ -240,7 +241,7 @@ auto open_checked(plugins& table, std::filesystem::path const& path, file_id id,
   check_tag(path, static_cast<char const*>(own_symbol(handle, path, "popcorn_plugin_abi_tag")));
   return {
       .handle = handle,
-      .name   = static_cast<char const*>(own_symbol(handle, path, "popcorn_plugin_name")),
+      .name   = reinterpret_cast<name_function>(own_symbol(handle, path, "popcorn_plugin_name"))(),
       .init   = reinterpret_cast<init_function>(own_symbol(handle, path, "popcorn_plugin_init")),
   };
 }

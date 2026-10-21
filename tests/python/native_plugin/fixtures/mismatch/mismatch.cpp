@@ -5,7 +5,10 @@
 
 extern "C" [[gnu::visibility("default"), gnu::used, gnu::section(".popcorn_abi")]]
 char const popcorn_plugin_abi_tag[] = "popcorn 0.0.0;gcc edited";
-extern "C" [[gnu::visibility("default")]] char const popcorn_plugin_name[] = "mismatch";
+extern "C" [[gnu::visibility("default")]] auto popcorn_plugin_name() noexcept -> char const*
+{
+  return "mismatch";
+}
 
 extern "C" [[gnu::visibility("default")]] void popcorn_plugin_init(popcorn::plugin::registrar&)
 {}
