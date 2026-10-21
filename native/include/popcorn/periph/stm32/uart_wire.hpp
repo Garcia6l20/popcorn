@@ -213,7 +213,7 @@ struct POPCORN_API link_registration
   std::atomic<std::uint32_t> contenders{};
   /** @brief Test seam: when set, cut_link() calls it between its checks and its commit, with
    * the lock held. */
-  std::function<void()> between_checks_and_commit;
+  std::move_only_function<void()> between_checks_and_commit;
 };
 
 /** @brief The receiver as a stopped system shows it to uart_wire::inject. */

@@ -162,9 +162,9 @@ struct member_reset
 
 struct member_call
 {
-  std::size_t                        member{};
-  std::uint64_t                      at{};
-  std::function<void(std::uint64_t)> call{};
+  std::size_t                                       member{};
+  std::uint64_t                                     at{};
+  std::copyable_function<void(std::uint64_t) const> call{};
 };
 
 struct run_plan
@@ -1763,10 +1763,10 @@ auto variants_of(std::uint64_t latency) -> std::vector<run_plan>
 
 struct stub_port final : stm32::uart_link_port
 {
-  std::vector<periph::line_frame>                received;
-  std::vector<std::int64_t>                      cancels;
-  std::function<void(periph::line_frame const&)> on_receive;
-  std::vector<std::pair<char, std::int64_t>>     calls;
+  std::vector<periph::line_frame>                          received;
+  std::vector<std::int64_t>                                cancels;
+  std::move_only_function<void(periph::line_frame const&)> on_receive;
+  std::vector<std::pair<char, std::int64_t>>               calls;
 
   void receive_at(periph::line_frame const& frame, std::uint32_t) override
   {
@@ -1836,7 +1836,7 @@ struct stub_link
   std::shared_ptr<stm32::uart_wire>         forth;
   std::shared_ptr<stm32::uart_wire>         back;
   std::vector<stm32::tap_frame>             tap;
-  std::function<void(std::uint64_t, std::int64_t)> after;
+  std::move_only_function<void(std::uint64_t, std::int64_t)> after;
 
   stub_link(std::int64_t latency_ps, stm32::line_shape line) : latency{latency_ps}, shape{line}
   {
