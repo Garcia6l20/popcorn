@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <latch>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -2630,4 +2631,43 @@ TEST_CASE("a dispatch cut short after one held event keeps a stamp behind the ne
   std::ignore = plain.get();
   std::ignore = landed.get();
   CHECK(seen == std::vector<std::uint64_t>{1, 2});
+}
+
+TEST_CASE_TEMPLATE(
+    "a time compared under its lock while another thread stores it is seen in order",
+    T,
+    core::sys_time,
+    vtime,
+    icount)
+{
+  constexpr std::uint32_t stores = 20'000;
+  std::mutex              guard;
+  T                       shared{0U};
+  std::latch              start{2};
+  std::thread             writer{[&] {
+    start.arrive_and_wait();
+    for(std::uint32_t n = 1; n <= stores; ++n)
+    {
+      std::scoped_lock const held{guard};
+      shared = T{n};
+    }
+  }};
+  start.arrive_and_wait();
+  std::uint32_t seen      = 0;
+  std::uint32_t backwards = 0;
+  while(seen < stores)
+  {
+    std::scoped_lock const held{guard};
+    if(shared < T{seen})
+    {
+      ++backwards;
+    }
+    while(T{seen} < shared)
+    {
+      ++seen;
+    }
+  }
+  writer.join();
+  CHECK(backwards == 0);
+  CHECK(seen == stores);
 }

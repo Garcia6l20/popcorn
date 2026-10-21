@@ -91,7 +91,7 @@ struct call_arg
   std::uint64_t bits{};
 
   /** @brief Member-wise equality. */
-  friend auto operator==(call_arg, call_arg) -> bool = default;
+  friend auto operator==(call_arg const&, call_arg const&) -> bool = default;
 };
 
 /**
@@ -202,7 +202,7 @@ struct cpu_register
   std::uint8_t bits{};
 
   /** @brief Member-wise equality. */
-  friend auto operator==(cpu_register, cpu_register) -> bool = default;
+  friend auto operator==(cpu_register const&, cpu_register const&) -> bool = default;
 };
 
 /** @brief Unicorn engine parameters of a core, as the Unicorn constants' integer values. */

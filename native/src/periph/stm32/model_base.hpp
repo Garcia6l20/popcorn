@@ -403,7 +403,7 @@ struct bus_guard
   }
 
   /** @brief Member-wise equality. */
-  friend auto operator==(bus_guard, bus_guard) -> bool = default;
+  friend auto operator==(bus_guard const&, bus_guard const&) -> bool = default;
 };
 
 /**

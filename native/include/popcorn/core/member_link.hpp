@@ -19,7 +19,7 @@ struct sys_time
   std::int64_t ps;
 
   /** @brief Member-wise ordering and equality. */
-  friend auto operator<=>(sys_time, sys_time) = default;
+  friend auto operator<=>(sys_time const&, sys_time const&) = default;
 };
 
 /**

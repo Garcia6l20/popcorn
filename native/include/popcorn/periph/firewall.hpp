@@ -52,7 +52,7 @@ struct page_verdict
   std::uint8_t fetch_window_shift{};
 
   /** @brief Member-wise equality. */
-  friend auto operator==(page_verdict, page_verdict) -> bool = default;
+  friend auto operator==(page_verdict const&, page_verdict const&) -> bool = default;
 };
 
 /** @brief Bus addresses from @p first to @p last, both included. */
@@ -64,7 +64,7 @@ struct memory_extent
   address last{};
 
   /** @brief Member-wise equality. */
-  friend auto operator==(memory_extent, memory_extent) -> bool = default;
+  friend auto operator==(memory_extent const&, memory_extent const&) -> bool = default;
 };
 
 /**

@@ -70,7 +70,7 @@ struct block_error
   address at{};
 
   /** @brief Member-wise equality. */
-  friend auto operator==(block_error, block_error) -> bool = default;
+  friend auto operator==(block_error const&, block_error const&) -> bool = default;
 };
 
 /**

@@ -391,7 +391,7 @@ struct register_ref
   std::uint32_t reg{};
 
   /** @brief Member-wise equality. */
-  friend auto operator==(register_ref, register_ref) -> bool = default;
+  friend auto operator==(register_ref const&, register_ref const&) -> bool = default;
 };
 
 /**

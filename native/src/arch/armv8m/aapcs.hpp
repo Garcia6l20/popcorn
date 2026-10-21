@@ -28,7 +28,7 @@ struct slot
   std::uint32_t words{};
 
   /** @brief Member-wise equality. */
-  friend auto operator==(slot, slot) -> bool = default;
+  friend auto operator==(slot const&, slot const&) -> bool = default;
 };
 
 /** @brief Locations of every argument of a call. */

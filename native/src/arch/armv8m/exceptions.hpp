@@ -190,7 +190,8 @@ struct pending_exception
   security state{security::secure};
 
   /** @brief Member-wise equality. */
-  friend constexpr auto operator==(pending_exception, pending_exception) -> bool = default;
+  friend constexpr auto operator==(pending_exception const&, pending_exception const&)
+      -> bool = default;
 };
 
 /** @brief Whether bit @p number of a bit vector is set. */
