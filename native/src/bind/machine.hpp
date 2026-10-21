@@ -1429,11 +1429,11 @@ private:
   void at_boundary(std::move_only_function<void(core::machine&)> body);
 
   auto run_test(
-      std::function<bool()>        test,
-      std::optional<std::uint64_t> budget,
-      std::optional<std::uint64_t> for_ps,
-      std::optional<std::uint64_t> deadline_ps,
-      std::shared_ptr<void const>  keep = {}) -> host_future_handle;
+      std::move_only_function<bool()> test,
+      std::optional<std::uint64_t>    budget,
+      std::optional<std::uint64_t>    for_ps,
+      std::optional<std::uint64_t>    deadline_ps,
+      std::shared_ptr<void const>     keep = {}) -> host_future_handle;
 
   auto waiting_on(
       core::waiter_spec            spec,

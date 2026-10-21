@@ -282,7 +282,7 @@ struct log_forwarding
   /** @brief Token the queue wakes a loop with, distinct from every request token. */
   std::uint64_t token{};
   /** @brief Forwards one batch of records to Python in order, empty until installed. */
-  std::function<void()> flush{};
+  std::move_only_function<void()> flush{};
   /** @brief The first error a deferred flush met, raised by the next raising flush. */
   std::exception_ptr deferred{};
 };

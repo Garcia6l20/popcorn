@@ -1321,7 +1321,7 @@ auto usb_link::op_requests() const -> access_op
 {
   std::ignore = port();
   return detail::link_op([port = port_, alive = alive_] {
-    return std::function<reflex::py::nb::object()>{
+    return std::move_only_function<reflex::py::nb::object() const>{
         [found = requests_of(board_host(port, alive))] { return reflex::py::nb::cast(found); }};
   });
 }
@@ -1583,7 +1583,7 @@ auto usb_link::op_settled() const -> access_op
     {
       step = std::string{reflex::enum_value_name(*failed)};
     }
-    return std::function<reflex::py::nb::object()>{
+    return std::move_only_function<reflex::py::nb::object() const>{
         [state, step] { return reflex::py::nb::object{reflex::py::nb::make_tuple(state, step)}; }};
   });
 }
@@ -1610,7 +1610,7 @@ auto usb_link::op_take_result(usb_control_ticket const& ticket) const -> access_
           .at_ps  = taken->at.ps,
       };
     }
-    return std::function<reflex::py::nb::object()>{
+    return std::move_only_function<reflex::py::nb::object() const>{
         [found = std::move(found)] { return reflex::py::nb::cast(found); }};
   });
 }

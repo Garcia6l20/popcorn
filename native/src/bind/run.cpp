@@ -65,7 +65,8 @@ auto record(stop const& stopped) -> stop_record
   return out;
 }
 
-auto held_predicate(std::shared_ptr<detail::python_callable> held) -> std::function<bool()>
+auto held_predicate(std::shared_ptr<detail::python_callable> held)
+    -> std::move_only_function<bool()>
 {
   return [held = std::move(held)] {
     detail::gil_entry const gil;
@@ -83,10 +84,11 @@ auto predicate_of(std::optional<nb::object> callable) -> std::move_only_function
 }
 
 auto gated(native_predicate const& gate, std::shared_ptr<detail::python_callable> ready)
-    -> std::function<bool()>
+    -> std::move_only_function<bool()>
 {
-  return
-      [gate = gate.test(), ready = held_predicate(std::move(ready))] { return gate() and ready(); };
+  return [gate = gate.test(), ready = held_predicate(std::move(ready))] mutable {
+    return gate() and ready();
+  };
 }
 
 auto exception_number(core::machine& target) -> std::uint32_t
@@ -572,11 +574,11 @@ auto machine_handle::run_gated(
 }
 
 auto machine_handle::run_test(
-    std::function<bool()>        test,
-    std::optional<std::uint64_t> budget,
-    std::optional<std::uint64_t> for_ps,
-    std::optional<std::uint64_t> deadline_ps,
-    std::shared_ptr<void const>  keep) -> host_future_handle
+    std::move_only_function<bool()> test,
+    std::optional<std::uint64_t>    budget,
+    std::optional<std::uint64_t>    for_ps,
+    std::optional<std::uint64_t>    deadline_ps,
+    std::shared_ptr<void const>     keep) -> host_future_handle
 {
   refuse_both(for_ps, deadline_ps);
   core::run_goal goal{.stop_when = std::move(test)};
@@ -867,7 +869,7 @@ auto machine_handle::submit_ops(
     std::exception_ptr    error;
   };
   auto ran     = std::make_shared<outcome>();
-  auto command = [ops = std::move(ops), ran](core::machine& target) {
+  auto command = [ops = std::move(ops), ran](core::machine& target) mutable {
     for(auto const& [index, op] : std::views::enumerate(ops))
     {
       op_value value;
@@ -936,7 +938,8 @@ auto machine_handle::submit_ops(
                     {
                       return nb::bytes(held.data(), held.size());
                     }
-                    else if constexpr(std::same_as<kind, std::function<nb::object()>>)
+                    else if constexpr(
+                        std::same_as<kind, std::move_only_function<nb::object() const>>)
                     {
                       return held();
                     }

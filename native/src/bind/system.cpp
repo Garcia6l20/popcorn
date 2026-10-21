@@ -225,10 +225,10 @@ class goal_request final : public detail::pending_request
 {
 public:
   goal_request(
-      core::host_future<core::goal_reached>                future,
-      std::function<nb::object(core::goal_reached const&)> convert,
-      std::move_only_function<bool()>                      cancel,
-      std::weak_ptr<detail::host_slot const>               slot)
+      core::host_future<core::goal_reached>                                future,
+      std::move_only_function<nb::object(core::goal_reached const&) const> convert,
+      std::move_only_function<bool()>                                      cancel,
+      std::weak_ptr<detail::host_slot const>                               slot)
       : inner_{future, std::move(convert), std::move(cancel)}
   {
     future.on_done([chain = chain_, slot = std::move(slot)]() noexcept {
@@ -696,7 +696,7 @@ auto system_handle::post_waits(
   }
   struct wait_test
   {
-    std::function<bool()>                    gate;
+    native_predicate::test_type              gate;
     std::shared_ptr<detail::python_callable> python;
   };
   auto tests  = std::make_shared<std::vector<wait_test>>();
