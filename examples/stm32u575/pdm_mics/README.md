@@ -28,7 +28,7 @@ filter through `m.periph.MDF1`:
 ```python
 await m.periph.MDF1.mic(0, "falling").write_pcm(samples, hz=16_000)
 await m.periph.MDF1.mic(1, "rising").write_pcm(other, hz=16_000)
-stop = await m.run(until="captured", budget=9_100, for_=us(21_000))
+stop = await m.run(until="captured", budget=10_300, for_=us(21_300))
 first = m.periph.MDF1.output(0).take()
 ```
 
@@ -47,11 +47,13 @@ uv run pytest -q examples/stm32u575/pdm_mics
 ## Read first
 
 - `test_pdm_mics.py`: writes a 1 kHz sine to the SITF0 falling-edge microphone and a 3 kHz sine
-  to the SITF1 rising-edge one, 16 kHz PCM at -12 dBFS, runs to `captured` and checks:
+  to the SITF1 rising-edge one, 16 kHz PCM at -12 dBFS plus a DC offset of 2048, runs to
+  `captured` and checks:
   - 256 samples per filter, none overrun, and `ring` holds the last 128 words of the two
     outputs interleaved, filter 0 first, each `pcm >> 8`.
   - each filter carries its own tone at -2 to -3.5 dBFS of a 24-bit full scale and the other
-    tone below -70 dBFS.
+    tone below -50 dBFS, and the high-pass filter removes the DC offset: the settled mean is
+    under 0.05 of full scale.
   - four half and four complete callbacks, each the same delay after the 32nd and 64th sample
     pair of its ring pass, samples 62.5 us apart, no error callback.
   - the registers the HAL wrote: PROCDIV 4, CCKDIV 1, SITFMOD 0, BSSEL 1 and 2, ILVNB 1, ACQMOD
