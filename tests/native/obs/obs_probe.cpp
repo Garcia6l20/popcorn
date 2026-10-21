@@ -31,7 +31,7 @@ namespace core  = popcorn::core;
 namespace image = popcorn::image;
 namespace obs   = popcorn::obs;
 
-auto median_ms(int reps, std::function<void()> const& work) -> double
+auto median_ms(int reps, std::function_ref<void()> work) -> double
 {
   std::vector<double> times;
   for(int rep = 0; rep < reps; ++rep)

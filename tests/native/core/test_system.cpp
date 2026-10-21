@@ -165,17 +165,17 @@ public:
     state = in[0];
   }
 
-  std::uint64_t                     entered{};
-  std::vector<drained>              drains;
-  std::vector<std::int64_t>         sender_resets;
-  std::vector<std::int64_t>         receiver_resets;
-  std::optional<std::int64_t>       fault_at{};
-  std::function<void(std::int64_t)> on_drain{};
-  bool                              busy{};
-  std::byte                         state{};
-  bool                              fail_load{};
-  std::vector<std::int64_t>         finished{};
-  bool                              reported{};
+  std::uint64_t                               entered{};
+  std::vector<drained>                        drains;
+  std::vector<std::int64_t>                   sender_resets;
+  std::vector<std::int64_t>                   receiver_resets;
+  std::optional<std::int64_t>                 fault_at{};
+  std::move_only_function<void(std::int64_t)> on_drain{};
+  bool                                        busy{};
+  std::byte                                   state{};
+  bool                                        fail_load{};
+  std::vector<std::int64_t>                   finished{};
+  bool                                        reported{};
 
 private:
   std::size_t  from_;
@@ -185,17 +185,15 @@ private:
 
 template <typename Arch = popcorn::testing::test_arch>
 auto member(
-    std::string_view                                              firmware,
-    std::string_view                                              entry,
-    std::function<void(popcorn::testing::machine_fixture<Arch>&)> prepare = {}) -> core::member_ref
+    std::string_view                                                  firmware,
+    std::string_view                                                  entry,
+    std::function_ref<void(popcorn::testing::machine_fixture<Arch>&)> prepare =
+        [](popcorn::testing::machine_fixture<Arch>&) {}) -> core::member_ref
 {
   popcorn::testing::machine_fixture<Arch> f{m33(), firmware, core::machine_options{}};
   f.set("pc", sym(firmware, entry));
   f.set("r0", 0);
-  if(prepare)
-  {
-    prepare(f);
-  }
+  prepare(f);
   std::vector<std::unique_ptr<core::machine>> machines;
   machines.push_back(std::move(f.target));
   return {.on = std::make_shared<core::host>(std::move(machines)), .name = std::string{entry}};
@@ -267,10 +265,10 @@ private:
 
 struct rig
 {
-  std::vector<core::member_ref>           members;
-  std::vector<std::shared_ptr<fake_link>> links{};
-  std::unique_ptr<core::system>           sys{};
-  std::function<void(std::size_t)>        arrival{};
+  std::vector<core::member_ref>              members;
+  std::vector<std::shared_ptr<fake_link>>    links{};
+  std::unique_ptr<core::system>              sys{};
+  std::move_only_function<void(std::size_t)> arrival{};
 
   void build(variant const& how, std::int64_t latency = 20 * us_ps)
   {
@@ -284,7 +282,7 @@ struct rig
     {
       wires.push_back(link);
     }
-    std::function<void(std::size_t)> hook;
+    std::move_only_function<void(std::size_t)> hook;
     if(how.seed)
     {
       auto engines = std::make_shared<std::vector<std::mt19937>>();
@@ -297,13 +295,14 @@ struct rig
         std::this_thread::sleep_for(std::chrono::microseconds{pause((*engines)[index])});
       };
     }
-    if(not hook)
+    if(not hook and arrival)
     {
-      hook = arrival;
+      hook = std::move(arrival);
     }
     auto const wait = how.one_cpu ? core::wait_policy{.spin = std::chrono::nanoseconds{0}}
                                   : core::default_wait_policy(members.size());
-    sys = std::make_unique<core::system>(members, std::move(wires), wait, how.bounds, hook);
+    sys             = std::make_unique<core::system>(
+        members, std::move(wires), wait, how.bounds, std::move(hook));
     auto const                  held = sys->lock();
     std::vector<core::sys_time> offsets(members.size());
     sys->start(held, offsets);
@@ -1031,6 +1030,25 @@ TEST_CASE("a system that fails to link a member leaves the members it linked fre
   CHECK(own.get().stopped.reason == stop_reason::budget);
 }
 
+TEST_CASE("a system with no arrival hook runs the same windows as one with a counting hook")
+{
+  std::atomic<std::uint64_t> arrivals{0};
+  rig                        plain{.members = sleeper_and_runner()};
+  rig                        counted{
+      .members = sleeper_and_runner(),
+      .arrival = [&arrivals](std::size_t) { arrivals.fetch_add(1); },
+  };
+  plain.build(variants()[0]);
+  counted.build(variants()[0]);
+  auto const bare   = plain.run(1 * ms_ps);
+  auto const hooked = counted.run(1 * ms_ps);
+  CHECK(bare.reason == hooked.reason);
+  CHECK(bare.at == hooked.at);
+  CHECK(bare.windows == hooked.windows);
+  CHECK(bare.windows > 0);
+  CHECK(arrivals.load() >= 2 * hooked.windows);
+}
+
 auto holding_rig(std::atomic<bool>& held) -> rig
 {
   return rig{
@@ -1190,13 +1208,15 @@ TEST_CASE("a member goal with several until addresses stops at the first one rea
         .members = {member("alu", "alu_entry"), long_block_member(made)}
     };
     r.build(how);
-    core::member_goal const both{
-        .until = far, .until_also = {near}, .until_time = core::sys_time{1 * ms_ps}};
-    auto first = r.goal(1, both);
+    auto const both = [&] {
+      return core::member_goal{
+          .until = far, .until_also = {near}, .until_time = core::sys_time{1 * ms_ps}};
+    };
+    auto first = r.goal(1, both());
     REQUIRE(r.run({}).member == 1);
     CHECK(first.get().stopped.reason == stop_reason::address);
     CHECK(pc_of(r) == near);
-    auto second = r.goal(1, both);
+    auto second = r.goal(1, both());
     REQUIRE(r.run({}).member == 1);
     CHECK(second.get().stopped.reason == stop_reason::address);
     CHECK(pc_of(r) == far);
@@ -1237,14 +1257,16 @@ TEST_CASE("goal stops past a barrier dispatch the lane event before them at any 
 {
   struct shape
   {
-    std::string_view  name;
-    core::member_goal goal;
-    stop_reason       reason;
+    std::string_view name;
+    core::member_goal (*goal)();
+    stop_reason reason;
   };
   std::vector<shape> const shapes{
-      {"budget",  {.budget = icount{300}},                    stop_reason::budget },
-      {"address", {.until = scratch_code + 2 * 400},          stop_reason::address},
-      {"time",    {.until_time = core::sys_time{60 * us_ps}}, stop_reason::time   },
+      {"budget",  [] { return core::member_goal{.budget = icount{300}}; },                    stop_reason::budget},
+      {"address", [] { return core::member_goal{.until = scratch_code + 2 * 400}; },
+       stop_reason::address                                                                                      },
+      {"time",    [] { return core::member_goal{.until_time = core::sys_time{60 * us_ps}}; },
+       stop_reason::time                                                                                         },
   };
   constexpr std::int64_t arrival = 200 * 250'000;
   for(auto const& [name, wanted, reason] : shapes)
@@ -1281,7 +1303,7 @@ TEST_CASE("goal stops past a barrier dispatch the lane event before them at any 
           });
           r.links[0]->on_drain = {};
         }
-        auto       goal    = r.goal(1, wanted);
+        auto       goal    = r.goal(1, wanted());
         auto const stopped = r.run({});
         REQUIRE(stopped.member == 1);
         CHECK(goal.get().stopped.reason == reason);
@@ -2033,9 +2055,9 @@ TEST_CASE("a wake that lands between the sleep decision and the host's wait is n
         .members = {sleeper_with_event(400), sleeper_with_event(900)}
     };
     r.links.push_back(std::make_shared<fake_link>(0, 1, 20 * us_ps));
-    std::atomic<bool>                woken{false};
-    core::system*                    owner = nullptr;
-    std::function<void(std::size_t)> hook;
+    std::atomic<bool>                          woken{false};
+    core::system*                              owner = nullptr;
+    std::move_only_function<void(std::size_t)> hook;
     if(hooked)
     {
       hook = [&woken, &owner](std::size_t) {
@@ -2047,8 +2069,8 @@ TEST_CASE("a wake that lands between the sleep decision and the host's wait is n
     }
     r.sys = std::make_unique<core::system>(
         r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]},
-        core::default_wait_policy(2), core::slice_bounds{}, std::function<void(std::size_t)>{},
-        hook);
+        core::default_wait_policy(2), core::slice_bounds{},
+        std::move_only_function<void(std::size_t)>{}, std::move(hook));
     owner = r.sys.get();
     {
       auto const                  held = r.sys->lock();
@@ -2070,6 +2092,95 @@ TEST_CASE("a wake that lands between the sleep decision and the host's wait is n
   };
   auto const quiet = slices(false);
   CHECK(slices(true) > quiet);
+}
+
+TEST_CASE("an arrival hook that throws pauses the system on that error once")
+{
+  for(auto const& how : variants())
+  {
+    if(how.seed)
+    {
+      continue;
+    }
+    for(bool const with_goal : {false, true})
+    {
+      CAPTURE(how.name);
+      CAPTURE(with_goal);
+      pinned const             pin{how.one_cpu};
+      std::atomic<std::size_t> thrown{0};
+      rig                      r{.members = sleeper_and_runner()};
+      r.arrival = [&thrown](std::size_t index) {
+        if(index == 1)
+        {
+          ++thrown;
+          throw test_failure("arrival hook");
+        }
+      };
+      r.build(how);
+      std::optional<core::host_future<core::goal_reached>> goal;
+      if(with_goal)
+      {
+        goal = r.goal(1, {.budget = icount{1'000'000'000}});
+      }
+      auto const stopped = r.run(2 * ms_ps);
+      REQUIRE(stopped.reason == core::pause_reason::error);
+      CHECK(stopped.member == 1);
+      CHECK_THROWS_AS(std::rethrow_exception(stopped.error), test_failure);
+      CHECK(thrown.load() == 1);
+      auto const quantum = how.lowered != 0 ? 20 * us_ps / how.lowered : 20 * us_ps;
+      CHECK(stopped.at.ps >= quantum);
+      CHECK(stopped.at.ps < 2 * quantum);
+      {
+        auto const held = r.sys->lock();
+        CHECK(r.sys->time_of(held, 1) == stopped.at);
+      }
+      if(goal)
+      {
+        CHECK_THROWS_AS(std::ignore = goal->get(), test_failure);
+      }
+      CHECK(parked(r.members[0]));
+      CHECK(parked(r.members[1]));
+    }
+  }
+}
+
+TEST_CASE("a sleep hook that throws pauses the system on that error once")
+{
+  rig r{
+      .members = {sleeper_with_event(400), sleeper_with_event(900)}
+  };
+  r.links.push_back(std::make_shared<fake_link>(0, 1, 20 * us_ps));
+  std::atomic<std::size_t> thrown{0};
+  r.sys = std::make_unique<core::system>(
+      r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]},
+      core::default_wait_policy(2), core::slice_bounds{},
+      std::move_only_function<void(std::size_t)>{}, [&thrown](std::size_t index) {
+        if(index == 1)
+        {
+          ++thrown;
+          throw test_failure("sleep hook");
+        }
+      });
+  {
+    auto const                  held = r.sys->lock();
+    std::vector<core::sys_time> offsets(2);
+    r.sys->start(held, offsets);
+  }
+  auto a = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+  auto b = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+  core::host_future<core::pause> pending;
+  {
+    auto const held = r.sys->lock();
+    pending         = r.sys->resume(held);
+  }
+  auto const stopped = pending.get();
+  REQUIRE(stopped.reason == core::pause_reason::error);
+  CHECK(stopped.member == 1);
+  CHECK_THROWS_AS(std::rethrow_exception(stopped.error), test_failure);
+  CHECK(thrown.load() == 1);
+  CHECK_THROWS_AS(std::ignore = b.get(), test_failure);
+  CHECK(parked(r.members[0]));
+  CHECK(parked(r.members[1]));
 }
 
 TEST_CASE("save refuses a pending goal and an undecided member")

@@ -21,7 +21,7 @@ namespace core = popcorn::core;
 using popcorn::icount;
 using popcorn::testing::m33;
 
-auto fnv_goal(std::function<bool()> stop_when) -> core::run_goal
+auto fnv_goal(std::move_only_function<bool()> stop_when) -> core::run_goal
 {
   return {.budget = icount{1'000'000}, .stop_when = std::move(stop_when)};
 }

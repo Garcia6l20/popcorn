@@ -197,8 +197,8 @@ public:
 
   std::vector<seen_store>                        stores{};
   std::vector<seen_read>                         reads{};
-  std::function<void(store_model&)>              on_load{};
-  std::function<void(store_model&)>              on_store{};
+  std::move_only_function<void(store_model&)>    on_load{};
+  std::move_only_function<void(store_model&)>    on_store{};
   std::vector<std::pair<address, std::uint32_t>> watched{};
   bool                                           refuse          = false;
   bool                                           write_through   = false;
@@ -683,9 +683,9 @@ TEST_CASE("a model that changes its watches inside on_memory_read gets one call 
 {
   struct change
   {
-    std::string_view                  name;
-    std::function<void(store_model&)> first;
-    std::function<void(store_model&)> in_call;
+    std::string_view name;
+    void (*first)(store_model&);
+    void (*in_call)(store_model&);
   };
   std::vector<change> const changes{
       {"stop and watch again the range that fired",
@@ -710,9 +710,10 @@ TEST_CASE("a model that changes its watches inside on_memory_read gets one call 
     CAPTURE(entry.name);
     auto m = booted();
     entry.first(*m.model);
-    m.model->on_load = [&entry](store_model& self) {
-      self.on_load = {};
-      entry.in_call(self);
+    m.model->on_load = [in_call = entry.in_call](store_model& self) {
+      auto const call = in_call;
+      self.on_load    = {};
+      call(self);
     };
     CHECK(loads(m, watched_at) == std::vector{cpu_read(watched_at)});
     CHECK(loads(m, watched_at) == std::vector{cpu_read(watched_at)});

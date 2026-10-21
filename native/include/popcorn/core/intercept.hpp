@@ -263,7 +263,7 @@ private:
  * @brief Handles a call to an intercepted address. Runs synchronously on the thread that runs
  *        the slice. An exception is stored, the slice stops and `machine::run_slice` rethrows it.
  */
-using intercept_handler = std::function<intercept_result(intercept_call const& call)>;
+using intercept_handler = std::move_only_function<intercept_result(intercept_call const& call)>;
 
 /** @brief A call that returned, as a return hook sees it. */
 struct returned_call
@@ -284,7 +284,7 @@ struct returned_call
  * @brief Handles the return of an intercepted function. May read memory and registers, cannot
  *        change the return. An exception is stored and rethrown as for intercept_handler.
  */
-using return_handler = std::function<void(returned_call const& call)>;
+using return_handler = std::move_only_function<void(returned_call const& call)>;
 
 /** @brief How often an intercept fires. */
 enum class[[= reflex::derive{reflex::Format}]] intercept_mode
@@ -333,5 +333,5 @@ enum class[[= reflex::derive{reflex::Format}]] watch_action
  *        stop_reason::watchpoint. An exception is stored and rethrown as for
  *        intercept_handler.
  */
-using watch_handler = std::function<watch_action(watch_hit const& hit)>;
+using watch_handler = std::move_only_function<watch_action(watch_hit const& hit)>;
 }

@@ -73,7 +73,7 @@ void report(std::string const& name, std::vector<double> samples)
   std::println("{:<14} median {:8.1f} us  p95 {:8.1f} us", name, median, p95);
 }
 
-auto time_us(std::function<void()> const& body) -> double
+auto time_us(std::function_ref<void()> body) -> double
 {
   auto const start = clock_type::now();
   body();
@@ -109,7 +109,7 @@ auto main() -> int
   }
   report("snapshot", snapshots);
 
-  auto const scenario = [&](std::string const& name, std::function<void()> const& before,
+  auto const scenario = [&](std::string const& name, std::function_ref<void()> before,
                             core::snapshot const& from) {
     std::vector<double> samples;
     for(int round = 0; round < iterations; ++round)

@@ -196,7 +196,7 @@ struct run_goal
   /** @brief slice_request::until_time of every slice. */
   std::optional<vtime> until_time{};
   /** @brief slice_request::stop_when of every slice, called on the host thread. */
-  std::function<bool()> stop_when{};
+  std::move_only_function<bool()> stop_when{};
   /** @brief slice_request::until_return of every slice. */
   std::optional<frame_return> until_return{};
   /** @brief Run one slice only, the goal completing when it ends, with or without a stop. Empty
@@ -207,7 +207,7 @@ struct run_goal
    * one, by an error, a cancel or a yield. An exception it throws fails a goal that ended on a
    * stop. After an error or a cancel the goal fails with chained_error of both. A close of the
    * host fails the goal with machine_closed and skips it. Empty for none. */
-  std::function<void(machine&, stop const*)> finish{};
+  std::move_only_function<void(machine&, stop const*)> finish{};
   /** @brief Run first until the machine is machine::thread_ready(), then call then_thread on the
    * host thread as the engine owner and go on as the rest of the goal. The budget covers both
    * parts. A stop before thread mode ends the goal with then_thread never called. Never with
@@ -215,7 +215,7 @@ struct run_goal
   bool until_thread{};
   /** @brief Called once when until_thread is met, before the next slice. An exception it throws
    * fails the goal. Empty for none. */
-  std::function<void(machine&)> then_thread{};
+  std::move_only_function<void(machine&)> then_thread{};
   /** @brief Slices the goal in place of every field above, which stay empty. The goal never ends
    * on a stop by itself: it yields when plan() returns empty, and never fails by a throw of a
    * slice, plan() or ran(), which goes to member_driver::failed(). Empty for a goal the host
@@ -328,7 +328,7 @@ struct waiter_spec
    * registered the waiter, except one that ended where it began without idling, holding the GIL
    * when it wraps Python. The waiter completes with a stop_reason::user stop of that slice end
    * when it returns true. */
-  std::function<bool()> ready{};
+  std::move_only_function<bool()> ready{};
   /** @brief Virtual time at which the waiter completes with a stop_reason::time stop. */
   std::optional<vtime> deadline{};
   /** @brief Virtual time after the boundary that registers the waiter at which it completes with

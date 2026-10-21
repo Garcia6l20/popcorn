@@ -176,13 +176,13 @@ struct system::impl
   };
 
   impl(
-      system const*                             owner,
-      std::vector<member_ref>                   members,
-      std::vector<std::shared_ptr<member_link>> wires,
-      wait_policy                               wait,
-      slice_bounds                              slicing,
-      std::function<void(std::size_t)>          hook,
-      std::function<void(std::size_t)>          sleep_hook);
+      system const*                              owner,
+      std::vector<member_ref>                    members,
+      std::vector<std::shared_ptr<member_link>>  wires,
+      wait_policy                                wait,
+      slice_bounds                               slicing,
+      std::move_only_function<void(std::size_t)> hook,
+      std::move_only_function<void(std::size_t)> sleep_hook);
 
   [[nodiscard]] auto deliverable(entry const& head) const noexcept -> bool;
   [[nodiscard]] auto best_entry() const -> std::optional<entry>;
@@ -204,37 +204,37 @@ struct system::impl
   void               wake_all(std::optional<std::size_t> except = {}) noexcept;
   [[nodiscard]] auto in_flight() const noexcept -> bool;
 
-  system const*                             owner;
-  std::vector<slot>                         slots;
-  std::vector<std::shared_ptr<member_link>> links;
-  sys_time                                  q{};
-  window_barrier                            barrier;
-  slice_bounds                              bounds;
-  std::function<void(std::size_t)>          before_arrival;
-  std::function<void(std::size_t)>          before_sleep;
-  std::mutex                                mutex;
-  std::uint64_t                             window{};
-  sys_time                                  pending{};
-  std::optional<sys_time>                   until{};
-  std::vector<entry>                        held{};
-  decision                                  chosen{};
-  pause                                     result{};
-  std::optional<sys_time>                   last_point{};
-  std::atomic<bool>                         pause_requested{false};
-  std::atomic<bool>                         closed{false};
-  bool                                      started{};
-  bool                                      stopped{};
-  bool                                      finished{};
-  detail::host_promise<pause>               promise{};
-  host_future<pause>                        future{};
-  std::atomic<std::size_t>                  outstanding{0};
-  std::atomic<bool>                         host_closed{false};
-  std::atomic<bool>                         members_released{false};
-  std::atomic<bool>                         woke{false};
-  bool                                      measuring{};
-  completion                                on_a{this, &impl::complete_a};
-  completion                                on_b{this, &impl::complete_b};
-  completion                                on_c{this, &impl::complete_c};
+  system const*                              owner;
+  std::vector<slot>                          slots;
+  std::vector<std::shared_ptr<member_link>>  links;
+  sys_time                                   q{};
+  window_barrier                             barrier;
+  slice_bounds                               bounds;
+  std::move_only_function<void(std::size_t)> before_arrival;
+  std::move_only_function<void(std::size_t)> before_sleep;
+  std::mutex                                 mutex;
+  std::uint64_t                              window{};
+  sys_time                                   pending{};
+  std::optional<sys_time>                    until{};
+  std::vector<entry>                         held{};
+  decision                                   chosen{};
+  pause                                      result{};
+  std::optional<sys_time>                    last_point{};
+  std::atomic<bool>                          pause_requested{false};
+  std::atomic<bool>                          closed{false};
+  bool                                       started{};
+  bool                                       stopped{};
+  bool                                       finished{};
+  detail::host_promise<pause>                promise{};
+  host_future<pause>                         future{};
+  std::atomic<std::size_t>                   outstanding{0};
+  std::atomic<bool>                          host_closed{false};
+  std::atomic<bool>                          members_released{false};
+  std::atomic<bool>                          woke{false};
+  bool                                       measuring{};
+  completion                                 on_a{this, &impl::complete_a};
+  completion                                 on_b{this, &impl::complete_b};
+  completion                                 on_c{this, &impl::complete_c};
 };
 
 class system::impl::runner final : public member_driver
@@ -446,7 +446,7 @@ public:
   }
 
 private:
-  void fail(machine& target, std::exception_ptr error) noexcept
+  void fail(machine const& target, std::exception_ptr error) noexcept
   {
     auto& one  = sys_.slots[index_];
     one.failed = true;
@@ -584,7 +584,7 @@ private:
       request.leave_until        = one.goal->executed == 0;
       if(goal.stop_when)
       {
-        request.stop_when = std::function<bool()>{std::ref(one.goal->goal.stop_when)};
+        request.stop_when = std::ref(one.goal->goal.stop_when);
       }
     }
     return request;
@@ -615,7 +615,7 @@ private:
     auto const at = stamp_of(stamp);
     if(auto due = due_stamp(target, at))
     {
-      return *due;
+      return std::move(*due);
     }
     auto bound = sys_.pending;
     if(not sys_.held.empty())
@@ -661,7 +661,7 @@ private:
     auto const at = stamp_of(stamp);
     if(auto due = due_stamp(target, at))
     {
-      return *due;
+      return std::move(*due);
     }
     auto       bound     = sys_.chosen.target;
     auto const quiescent = not sys_.chosen.pause and not(at and *at <= bound);
@@ -692,9 +692,16 @@ private:
     {
       one.busy = std::chrono::steady_clock::now() - left_;
     }
-    if(sys_.before_arrival)
+    if(sys_.before_arrival and not one.failed)
     {
-      sys_.before_arrival(index_);
+      try
+      {
+        sys_.before_arrival(index_);
+      }
+      catch(...)
+      {
+        fail(target, std::current_exception());
+      }
     }
     auto const passed = sys_.barrier.arrive_and_wait(complete);
     if(sys_.measuring)
@@ -745,13 +752,13 @@ private:
 };
 
 system::impl::impl(
-    system const*                             owner,
-    std::vector<member_ref>                   members,
-    std::vector<std::shared_ptr<member_link>> wires,
-    wait_policy                               wait,
-    slice_bounds                              slicing,
-    std::function<void(std::size_t)>          hook,
-    std::function<void(std::size_t)>          sleep_hook)
+    system const*                              owner,
+    std::vector<member_ref>                    members,
+    std::vector<std::shared_ptr<member_link>>  wires,
+    wait_policy                                wait,
+    slice_bounds                               slicing,
+    std::move_only_function<void(std::size_t)> hook,
+    std::move_only_function<void(std::size_t)> sleep_hook)
     : owner{owner}, links{std::move(wires)}, barrier{members.size(), wait}, bounds{slicing},
       before_arrival{std::move(hook)}, before_sleep{std::move(sleep_hook)}
 {
@@ -1232,12 +1239,12 @@ auto held_system::holds(system const& of) const noexcept -> bool
 }
 
 system::system(
-    std::vector<member_ref>                   members,
-    std::vector<std::shared_ptr<member_link>> links,
-    wait_policy                               wait,
-    slice_bounds                              bounds,
-    std::function<void(std::size_t)>          before_arrival,
-    std::function<void(std::size_t)>          before_sleep)
+    std::vector<member_ref>                    members,
+    std::vector<std::shared_ptr<member_link>>  links,
+    wait_policy                                wait,
+    slice_bounds                               bounds,
+    std::move_only_function<void(std::size_t)> before_arrival,
+    std::move_only_function<void(std::size_t)> before_sleep)
     : impl_{std::in_place, this,   std::move(members),        std::move(links),
             wait,          bounds, std::move(before_arrival), std::move(before_sleep)}
 {}

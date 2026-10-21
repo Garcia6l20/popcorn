@@ -95,8 +95,14 @@ struct stm32_fixture
   }
 
   /** @brief Runs one slice with a 60 s wall budget and requires a stop. */
-  auto run_to_stop(core::slice_request request = {.max_instructions = icount{100'000'000}}) const
+  auto run_to_stop(core::slice_request&& request = {.max_instructions = icount{100'000'000}}) const
       -> stop
+  {
+    return run_to_stop(request);
+  }
+
+  /** @brief Runs one slice with a 60 s wall budget, set in @p request, and requires a stop. */
+  auto run_to_stop(core::slice_request& request) const -> stop
   {
     request.wall_budget = std::chrono::seconds{60};
     auto const result   = target->run_slice(request);

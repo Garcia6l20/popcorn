@@ -59,7 +59,7 @@ struct member_goal
   std::optional<icount> exact{};
   /** @brief Stop predicate, asked on the member's host thread after each dispatched event,
    * never at a barrier or a slice end. */
-  std::function<bool()> stop_when{};
+  std::move_only_function<bool()> stop_when{};
   /** @brief A goal a system IDLE does not resolve. */
   bool open{};
   /** @brief Virtual time the goal may run from its start: a stop_reason::time stop with detail
@@ -171,19 +171,23 @@ public:
    * @param wait How members wait at the barrier.
    * @param bounds Bounds of every slice a member runs.
    * @param before_arrival Called on a member's host thread before each of its barrier
-   *        arrivals with its index, holding nothing, for tests that perturb thread timing.
+   *        arrivals with its index, holding nothing, for tests that perturb thread timing. A
+   *        throw fails the member with that error at that arrival, the system pauses on it, and
+   *        the hook is not called again for the failed member. The pause is at the member's
+   *        position at that barrier, which depends on the quantum and on pause requests.
    * @param before_sleep Called on a member's host thread with its index right before it asks
    *        its host to sleep on IDLE inside open goals, holding nothing, for tests that wake it
-   *        in that window.
+   *        in that window. A throw fails the member with that error, the member wakes the
+   *        others and the system pauses on it.
    * @throws machine_busy when a member is busy.
    */
   system(
-      std::vector<member_ref>                   members,
-      std::vector<std::shared_ptr<member_link>> links,
-      wait_policy                               wait,
-      slice_bounds                              bounds         = {},
-      std::function<void(std::size_t)>          before_arrival = {},
-      std::function<void(std::size_t)>          before_sleep   = {}) pre(not members.empty())
+      std::vector<member_ref>                    members,
+      std::vector<std::shared_ptr<member_link>>  links,
+      wait_policy                                wait,
+      slice_bounds                               bounds         = {},
+      std::move_only_function<void(std::size_t)> before_arrival = {},
+      std::move_only_function<void(std::size_t)> before_sleep   = {}) pre(not members.empty())
       pre(not links.empty());
 
   /** @brief Closes, waits for every member to park, then unlinks the hosts. Not on a host

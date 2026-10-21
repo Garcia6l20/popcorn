@@ -85,10 +85,10 @@ public:
    *        none, called with the GIL held.
    */
   future_request(
-      core::host_future<T>                            future,
-      std::function<reflex::py::nb::object(T const&)> convert,
-      std::move_only_function<bool()>                 cancel,
-      std::function<void(std::exception_ptr const&)>  failed = {})
+      core::host_future<T>                                            future,
+      std::move_only_function<reflex::py::nb::object(T const&) const> convert,
+      std::move_only_function<bool()>                                 cancel,
+      std::move_only_function<void(std::exception_ptr const&) const>  failed = {})
       : future_{std::move(future)}, convert_{std::move(convert)}, cancel_{std::move(cancel)},
         failed_{std::move(failed)}
   {}
@@ -171,7 +171,8 @@ public:
    * @brief Sets how failure() finds a failure that a successful future carries in its value,
    *        read without the GIL, such as an op batch that stopped at a failed op, with its note.
    */
-  void value_error(std::function<std::pair<std::exception_ptr, std::string>()> probe)
+  void
+      value_error(std::move_only_function<std::pair<std::exception_ptr, std::string>() const> probe)
   {
     value_error_ = std::move(probe);
   }
@@ -191,11 +192,11 @@ private:
     }
   }
 
-  core::host_future<T>                                        future_;
-  std::function<reflex::py::nb::object(T const&)>             convert_;
-  std::move_only_function<bool()>                             cancel_;
-  std::function<void(std::exception_ptr const&)>              failed_;
-  std::function<std::pair<std::exception_ptr, std::string>()> value_error_;
+  core::host_future<T>                                                        future_;
+  std::move_only_function<reflex::py::nb::object(T const&) const>             convert_;
+  std::move_only_function<bool()>                                             cancel_;
+  std::move_only_function<void(std::exception_ptr const&) const>              failed_;
+  std::move_only_function<std::pair<std::exception_ptr, std::string>() const> value_error_;
 };
 
 /**

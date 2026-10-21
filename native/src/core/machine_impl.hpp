@@ -54,7 +54,7 @@ public:
   /** @brief Ids whose removal waits for the end of the running slice. */
   std::vector<std::uint64_t> pending_removal{};
   /** @brief Removes the engine side of a hook, set by the machine. */
-  std::function<void(std::uint64_t)> remover{};
+  std::move_only_function<void(std::uint64_t)> remover{};
 
   /** @brief Removes a hook by id, at the end of the slice when one runs. */
   void remove(std::uint64_t id) noexcept
@@ -90,8 +90,8 @@ public:
    * first, so a sink may add or remove sinks. */
   void log(log_record const& record) const
   {
-    auto const sinks = log_sinks;
-    for(auto const& [id, sink] : sinks)
+    auto sinks = log_sinks;
+    for(auto& [id, sink] : sinks)
     {
       sink(record);
     }

@@ -108,12 +108,12 @@ void clock_driver::restore(clock_state const& saved)
   current = std::move(next);
 }
 
-void clock_driver::on_rate_change(std::function<void()> hook)
+void clock_driver::on_rate_change(std::move_only_function<void()> hook)
 {
   clock_.on_epoch_ = std::move(hook);
 }
 
-void clock_driver::on_charged_ahead(std::function<std::uint64_t()> ahead)
+void clock_driver::on_charged_ahead(std::move_only_function<std::uint64_t()> ahead)
 {
   clock_.charged_ahead_ = std::move(ahead);
 }

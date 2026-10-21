@@ -31,7 +31,7 @@ using op_value = std::variant<
     std::uint64_t,
     bool,
     std::vector<std::byte>,
-    std::function<reflex::py::nb::object()>>;
+    std::move_only_function<reflex::py::nb::object() const>>;
 
 /**
  * @brief One read or write of `Machine.read` and `Machine.write`, the body a sync accessor runs,
@@ -41,17 +41,21 @@ class[[= py::rename{"AccessOp"}]] access_op
 {
 public:
   /** @brief The body. */
-  using body_type = std::function<op_value(core::machine&)>;
+  using body_type = std::copyable_function<op_value(core::machine&)>;
 
   /**
    * @brief Wraps @p body.
    * @param body Called with the machine, Python-free.
    */
-  [[= py::skip]] explicit access_op(body_type body) : body_{std::move(body)}
+  template <typename Body>
+    requires(
+        not std::same_as<std::remove_cvref_t<Body>, access_op>
+        and std::constructible_from<body_type, Body>)
+  [[= py::skip]] explicit access_op(Body&& body) : body_{std::forward<Body>(body)}
   {}
 
   /** @brief Runs the op on @p target, as engine owner. */
-  [[= py::skip]] auto run(core::machine& target) const -> op_value
+  [[= py::skip]] auto run(core::machine& target) -> op_value
   {
     return body_(target);
   }
@@ -68,12 +72,15 @@ private:
 class[[= py::rename{"Predicate"}]] native_predicate
 {
 public:
+  /** @brief The test, copied into every waiter and goal that uses the predicate. */
+  using test_type = std::copyable_function<bool() const>;
+
   /**
    * @brief Wraps @p test.
    * @param test Reads engine or link state as engine owner, Python-free.
    * @param machine The machine's slot, through which holds() reaches the engine.
    */
-  [[= py::skip]] native_predicate(std::function<bool()> test, detail::host_ref machine)
+  [[= py::skip]] native_predicate(test_type test, detail::host_ref machine)
       : test_{std::move(test)}, machine_{std::move(machine)}
   {}
 
@@ -88,7 +95,7 @@ public:
   }
 
   /** @brief The test, for a waiter or a goal. */
-  [[= py::skip]] [[nodiscard]] auto test() const -> std::function<bool()> const&
+  [[= py::skip]] [[nodiscard]] auto test() const -> test_type const&
   {
     return test_;
   }
@@ -108,9 +115,9 @@ public:
   }
 
 private:
-  std::function<bool()> test_;
-  detail::host_ref      machine_;
-  std::string           what_ = "a condition";
+  test_type        test_;
+  detail::host_ref machine_;
+  std::string      what_ = "a condition";
 };
 
 /**

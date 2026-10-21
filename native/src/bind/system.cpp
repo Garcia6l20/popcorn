@@ -225,10 +225,10 @@ class goal_request final : public detail::pending_request
 {
 public:
   goal_request(
-      core::host_future<core::goal_reached>                future,
-      std::function<nb::object(core::goal_reached const&)> convert,
-      std::move_only_function<bool()>                      cancel,
-      std::weak_ptr<detail::host_slot const>               slot)
+      core::host_future<core::goal_reached>                                future,
+      std::move_only_function<nb::object(core::goal_reached const&) const> convert,
+      std::move_only_function<bool()>                                      cancel,
+      std::weak_ptr<detail::host_slot const>                               slot)
       : inner_{future, std::move(convert), std::move(cancel)}
   {
     future.on_done([chain = chain_, slot = std::move(slot)]() noexcept {
@@ -512,10 +512,8 @@ void system_handle::start(std::vector<std::int64_t> const& offsets_ps)
       nb::gil_scoped_release const released;
       return std::make_shared<core::system>(
           std::move(refs), std::move(links), core::default_wait_policy(members_.size()), bounds_,
-          std::function<void(std::size_t)>{},
-          std::function<void(std::size_t)>{[sleeps = sleeps_](std::size_t) {
-            sleeps->fetch_add(1, std::memory_order_relaxed);
-          }});
+          std::move_only_function<void(std::size_t)>{},
+          [sleeps = sleeps_](std::size_t) { sleeps->fetch_add(1, std::memory_order_relaxed); });
     }();
   }
   catch(...)
@@ -646,7 +644,7 @@ auto system_handle::post_goal(
   }
   if(gate)
   {
-    goal.stop_when = [test = gate->test(), then = std::move(goal.stop_when)] {
+    goal.stop_when = [test = gate->test(), then = std::move(goal.stop_when)] mutable {
       return test() and (not then or then());
     };
   }
@@ -698,7 +696,7 @@ auto system_handle::post_waits(
   }
   struct wait_test
   {
-    std::function<bool()>                    gate;
+    std::move_only_function<bool() const>    gate;
     std::shared_ptr<detail::python_callable> python;
   };
   auto tests  = std::make_shared<std::vector<wait_test>>();

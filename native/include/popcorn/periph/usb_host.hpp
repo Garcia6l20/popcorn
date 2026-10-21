@@ -381,21 +381,22 @@ struct driver_factory
    *        names an interface the configuration lacks, or one already taken, binds nothing: the
    *        host warns and tries the next factory.
    */
-  std::function<std::vector<std::uint8_t>(configuration_info const&, interface_info const&)>
+  std::copyable_function<
+      std::vector<std::uint8_t>(configuration_info const&, interface_info const&)>
       claim{};
   /** @brief Builds a driver. */
-  std::function<std::unique_ptr<class_driver>()> make{};
+  std::copyable_function<std::unique_ptr<class_driver>()> make{};
   /**
    * @brief Appends the state of this driver kind that lives outside its drivers and drives the
    *        bus once a driver binds, bytes queued for a function not bound yet for instance. Saved
    *        with the host, whatever the device state. Optional.
    */
-  std::function<void(std::vector<std::byte>&)> save{};
+  std::copyable_function<void(std::vector<std::byte>&) const> save{};
   /**
    * @brief Restores what save() wrote, or a state with nothing pending from empty bytes. A
    *        host load() calls it before it keeps, rebuilds or loads any driver. Optional.
    */
-  std::function<void(std::span<std::byte const>)> load{};
+  std::copyable_function<void(std::span<std::byte const>)> load{};
 };
 
 /** @brief One step of the enumeration sequence. */
@@ -460,7 +461,7 @@ struct host_options
   /** @brief Class driver kinds, tried in order on each interface. */
   std::vector<driver_factory> drivers{};
   /** @brief Receives the host's warnings: a request timed out, a malformed descriptor. */
-  std::function<void(std::string const&)> warn{};
+  std::copyable_function<void(std::string const&) const> warn{};
 };
 
 /** @brief A class driver bound by the host. */
@@ -592,14 +593,15 @@ public:
    * @param message The warning.
    * @return Whether it was held. When not, the caller passes it on itself.
    */
-  static auto hold(std::function<void(std::string const&)> const& sink, std::string const& message)
-      -> bool;
+  static auto hold(
+      std::copyable_function<void(std::string const&) const> const& sink,
+      std::string const&                                            message) -> bool;
 
 private:
   struct held_warning
   {
-    std::function<void(std::string const&)> const* sink;
-    std::string                                    message;
+    std::copyable_function<void(std::string const&) const> const* sink;
+    std::string                                                   message;
   };
 
   std::vector<held_warning> held_{};

@@ -616,7 +616,7 @@ auto in_loop_six() -> fixture
 
 auto loop_to_end(fixture const& f, core::slice_request request = {}) -> popcorn::stop
 {
-  auto const [stop, executed] = run_out(f, request);
+  auto const [stop, executed] = run_out(f, std::move(request));
   REQUIRE(stop.reason == stop_reason::user);
   return stop;
 }
