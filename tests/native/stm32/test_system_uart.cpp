@@ -1575,6 +1575,7 @@ TEST_CASE("a strict shape fault a pause carries is the pause, before the goal st
     CHECK(stopped.at.ps == s);
     CHECK(stopped.member == 1);
     CHECK_THROWS_AS(std::rethrow_exception(stopped.error), popcorn::model_error);
+    CHECK(carried_now(*w.wires[0]) == 1);
   }
 }
 

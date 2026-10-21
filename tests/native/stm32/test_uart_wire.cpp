@@ -33,6 +33,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace
@@ -1761,10 +1762,12 @@ struct stub_port final : stm32::uart_link_port
   std::vector<periph::line_frame>                received;
   std::vector<std::int64_t>                      cancels;
   std::function<void(periph::line_frame const&)> on_receive;
+  std::vector<std::pair<char, std::int64_t>>     calls;
 
   void receive_at(periph::line_frame const& frame, std::uint32_t) override
   {
     received.push_back(frame);
+    calls.emplace_back('r', static_cast<std::int64_t>(frame.start.ps));
     if(on_receive)
     {
       on_receive(frame);
@@ -1774,6 +1777,7 @@ struct stub_port final : stm32::uart_link_port
   void cancel_in_flight(vtime at, std::uint32_t) override
   {
     cancels.push_back(static_cast<std::int64_t>(at.ps));
+    calls.emplace_back('c', static_cast<std::int64_t>(at.ps));
   }
 
   void receive_frames(std::span<periph::host_frame const>) override
@@ -3167,4 +3171,174 @@ TEST_CASE("a carried frame a receiver reset recorded later drops is final at the
       CHECK(link.forth_port.cancels.empty());
     }
   }
+}
+
+TEST_CASE("posts starting exactly at a drain's barrier are carried, from the mailbox or held over")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 50 * us;
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    for(auto const held_over : {false, true})
+    {
+      CAPTURE(held_over);
+      {
+        stub_link link{l, declared()};
+        link.window(0, q, {});
+        link.forth->started(link.frame(q));
+        if(held_over)
+        {
+          CHECK_FALSE(pause_drain(link, 0, q - 5 * us).has_value());
+        }
+        link.drain(0, q);
+        CHECK(link.forth_port.received.empty());
+        CHECK(saved_state(*link.forth).carried.size() == 1);
+        REQUIRE(link.cut(q, std::nullopt, q) == core::sys_time{q});
+        run_windows(link, 1, 10, q);
+        CHECK(link.forth_port.received.empty());
+      }
+      {
+        stub_link  link{l, declared()};
+        auto const f = q - 10 * us;
+        link.window(0, q, {});
+        link.forth->started(link.frame(f));
+        link.forth->aborted(vtime{static_cast<std::uint64_t>(q)});
+        if(held_over)
+        {
+          CHECK_FALSE(pause_drain(link, 0, f - us).has_value());
+          CHECK(link.forth_port.received.empty());
+        }
+        link.drain(0, q);
+        CHECK(received_starts(link.forth_port) == std::vector<std::int64_t>{f + l});
+        CHECK(link.forth_port.cancels.empty());
+        CHECK(saved_state(*link.forth).carried.size() == 1);
+        link.drain(1, q);
+        CHECK(link.forth_port.cancels == std::vector<std::int64_t>{q + l});
+      }
+    }
+  }
+}
+
+TEST_CASE("a carried frame reaches the port before the abort of it from the next mailbox")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 50 * us;
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    stub_link  link{l, declared()};
+    auto const f = q + 1;
+    auto const a = q + 5 * us;
+    REQUIRE(a < 2 * q);
+    REQUIRE(a < f + static_cast<std::int64_t>(declared().frame_ps()));
+    link.window(0, q, {});
+    link.forth->started(link.frame(f));
+    link.drain(0, q);
+    CHECK(saved_state(*link.forth).carried.size() == 1);
+    link.window(1, q, {});
+    link.forth->aborted(vtime{static_cast<std::uint64_t>(a)});
+    link.drain(1, q);
+    CHECK(
+        link.forth_port.calls
+        == std::vector<std::pair<char, std::int64_t>>{
+            {'r', f + l},
+            {'c', a + l}
+    });
+  }
+}
+
+TEST_CASE("a carried frame meets a receiver reset recorded after its carry at its handing")
+{
+  constexpr std::int64_t us       = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l        = 50 * us;
+  auto const             frame_ps = static_cast<std::int64_t>(declared().frame_ps());
+  for(auto const q : {l, l / 2})
+  {
+    CAPTURE(q);
+    auto const f   = q + 1;
+    auto const a   = q + 5 * us;
+    auto const run = [&](std::int64_t reset, bool aborted) {
+      auto link = std::make_unique<stub_link>(l, declared());
+      link->window(0, q, {});
+      link->forth->started(link->frame(f));
+      if(aborted)
+      {
+        link->forth->aborted(vtime{static_cast<std::uint64_t>(a)});
+      }
+      link->drain(0, q);
+      CHECK(saved_state(*link->forth).carried.size() == (aborted ? 2U : 1U));
+      link->forth->receiver_reset(core::sys_time{reset});
+      run_windows(*link, 1, 10, q);
+      return link;
+    };
+    CHECK(run(q + 2 * us, false)->forth_port.received.empty());
+    CHECK(received_starts(run(q - us, false)->forth_port) == std::vector<std::int64_t>{f + l});
+    REQUIRE(a + l < f + l + frame_ps);
+    auto const shortened = run(a + l, true);
+    CHECK(shortened->forth_port.received.empty());
+    CHECK(shortened->forth_port.cancels == std::vector<std::int64_t>{a + l});
+  }
+}
+
+namespace
+{
+struct span_before_carry
+{
+  core::sys_time start{};
+  core::sys_time end{};
+  bool           injected{};
+  core::sys_time post{};
+  std::uint64_t  index{};
+};
+
+struct state_before_carry
+{
+  std::uint64_t                  window{};
+  std::uint64_t                  started{};
+  core::sys_time                 drained_through{};
+  std::vector<span_before_carry> delivered;
+  core::sys_time                 last_barrier{};
+};
+}
+
+TEST_CASE("a wire state saved before the carry loads with nothing carried and carries by the rule")
+{
+  constexpr std::int64_t us       = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l        = 50 * us;
+  constexpr std::int64_t q        = l;
+  auto const             frame_ps = static_cast<std::int64_t>(declared().frame_ps());
+  auto const             s        = q - 10 * us;
+  auto const             g        = q + 5 * us;
+  REQUIRE(g + l < s + l + frame_ps);
+  state_before_carry const old{
+      .window          = 1,
+      .started         = 1,
+      .drained_through = core::sys_time{2 * q},
+      .delivered =
+          {{.start = core::sys_time{s + l},
+            .end   = core::sys_time{s + l + frame_ps},
+            .post  = core::sys_time{s}}},
+      .last_barrier = core::sys_time{q}};
+  std::vector<std::byte> bytes;
+  reflex::serde::bson::serializer{bytes}.dump(old);
+  stub_link link{l, declared()};
+  link.forth->load(bytes);
+  auto const loaded = saved_state(*link.forth);
+  CHECK(loaded.carried.empty());
+  CHECK(loaded.cuts.empty());
+  REQUIRE(loaded.delivered.size() == 1);
+  CHECK_FALSE(loaded.delivered[0].carried);
+  CHECK_FALSE(loaded.delivered[0].suppressed);
+  CHECK_FALSE(loaded.delivered[0].truncated);
+  link.window(1, q, {});
+  link.forth->started(link.frame(g));
+  link.forth->started(link.frame(2 * q));
+  auto const fault = link.forth->drain(1, core::sys_time{2 * q}, core::sys_time{3 * q}, {});
+  REQUIRE(fault.has_value());
+  CHECK(fault->at.ps == g);
+  CHECK(link.forth_port.received.empty());
+  CHECK(saved_state(*link.forth).carried.size() == 1);
+  link.drain(2, q);
+  CHECK(received_starts(link.forth_port) == std::vector<std::int64_t>{2 * q + l});
 }
