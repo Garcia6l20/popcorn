@@ -3,8 +3,8 @@
 An STM32U575 application records two PDM microphones with the multi-function digital filter,
 MDF1, through ST's HAL:
 
-- The kernel clock is PLL3 Q at 20.48 MHz: HSI16, M 4, N 128, Q 25. SYSCLK is HSI16 at voltage
-  range 2, so hclk stays above mdf_proc_ck.
+- The kernel clock is PLL3 Q at 20.48 MHz: HSI16, M 4, N 128, Q 25. SYSCLK is HSI16, so hclk at
+  16 MHz stays above mdf_proc_ck. Voltage range 2 allows PLL3, which range 4 does not.
 - `HAL_MDF_Init` on filter 0 sets the common parameters: two interleaved filters, ILVNB 1,
   processing clock divider 5 for mdf_proc_ck 4.096 MHz, CCK0 as an output at divider 2,
   2.048 MHz. Each `HAL_MDF_Init` then enables its serial interface in LF_MASTER SPI mode on

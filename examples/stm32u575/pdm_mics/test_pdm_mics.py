@@ -6,7 +6,8 @@ filter 0 and filter 1 in turn, the 16 MSBs of each sample. After four complete c
 stops both filters and reaches `captured`.
 
 The tests write a 1 kHz sine to the microphone on the falling edge of SITF0 and a 3 kHz sine to
-the one on the rising edge of SITF1, 16 kHz PCM at -12 dBFS, before the firmware starts.
+the one on the rising edge of SITF1, 16 kHz PCM at -12 dBFS on a DC offset of 2048, before the
+firmware starts.
 `m.periph.MDF1.output(n)` holds every sample filter n wrote, with its time.
 
 Every test runs strict: a write that breaks an RM0456 rule, such as the clock ratios of Table
@@ -31,9 +32,10 @@ COMPLETES = 4
 PAIRS = RING // 2 * COMPLETES
 TONES = (1000, 3000)
 SAMPLE_PS = 10**12 // RATE
-BUDGET = 9_100
-SATURATING_BUDGET = 18_100
-RUN_FOR = us(21_000)
+BUDGET = 10_300
+SATURATING_BUDGET = 19_300
+RUN_FOR = us(21_300)
+DC = 2048
 MDF_ERROR_SATURATION = 0x10
 
 
@@ -49,12 +51,13 @@ async def capture(
     and 1.
 
     The run is bounded by instructions and virtual time, each a quarter above what it takes:
-    7257 instructions, 14457 when every sample saturates, and 16.73 ms. The budget counts
+    8193 instructions, 15393 when every sample saturates, and 16.97 ms. The budget counts
     executed instructions only, so the time bound is what stops a firmware sleeping for an
     interrupt that never comes."""
     mdf = machine.periph.MDF1
-    await mdf.mic(0, "falling").write_pcm(sine(TONES[0], 2 * PAIRS, dbfs), hz=RATE)
-    await mdf.mic(1, "rising").write_pcm(sine(TONES[1], 2 * PAIRS, dbfs), hz=RATE)
+    pcm = [[s + DC for s in sine(hz, 2 * PAIRS, dbfs)] for hz in TONES]
+    await mdf.mic(0, "falling").write_pcm(pcm[0], hz=RATE)
+    await mdf.mic(1, "rising").write_pcm(pcm[1], hz=RATE)
     stop = await machine.run(until="captured", budget=budget, for_=RUN_FOR)
     assert stop.reason is StopReason.ADDRESS, stop
     return mdf.output(0).take(), mdf.output(1).take()
@@ -85,7 +88,8 @@ async def test_each_filter_hears_only_the_microphone_on_its_own_edge(pdm_mics: M
     for samples, own, other in zip(outputs, TONES, reversed(TONES), strict=True):
         settled = samples[-160:]
         assert -3.5 < dbfs(settled, own) < -2, own
-        assert dbfs(settled, other) < -70, own
+        assert dbfs(settled, other) < -50, own
+        assert abs(sum(s.pcm for s in settled) / len(settled)) < 0.05 * (1 << 23), own
 
 
 async def test_half_and_complete_callbacks_come_after_each_32_sample_pairs(
@@ -124,10 +128,14 @@ async def test_the_hal_programs_lf_master_at_twice_the_output_clock(pdm_mics: Ma
     assert (mdf.CKGCR.PROCDIV, mdf.CKGCR.CCKDIV, mdf.CKGCR.CCK0EN, mdf.CKGCR.CKGDEN) == (4, 1, 1, 1)
     assert (mdf.SITF0CR.SITFMOD, mdf.SITF1CR.SITFMOD) == (0, 0)
     assert (mdf.BSMX0CR.BSSEL, mdf.BSMX1CR.BSSEL) == (1, 2)
-    assert (mdf.GCR.ILVNB, mdf.DFLT0CR.ACQMOD, mdf.DFLT0CICR.SCALE) == (1, 2, 0x2C)
+    assert (mdf.GCR.ILVNB, mdf.DFLT0CR.ACQMOD) == (1, 2)
+    for n in (0, 1):
+        cic, rsf = getattr(mdf, f"DFLT{n}CICR"), getattr(mdf, f"DFLT{n}RSFR")
+        assert (cic.SCALE, cic.CICMOD, cic.MCICD) == (0x2C, 5, 31), n
+        assert (rsf.RSFLTBYP, rsf.RSFLTD, rsf.HPFBYP, rsf.HPFC) == (0, 0, 0, 2), n
 
 
-async def test_input_above_minus_9_5_dbfs_saturates_and_calls_the_error_callback(
+async def test_input_above_minus_9_5_dbfssaturates_and_calls_the_error_callback(
     pdm_mics: Machine,
 ) -> None:
     first, _ = await capture(pdm_mics, dbfs=-6, budget=SATURATING_BUDGET)

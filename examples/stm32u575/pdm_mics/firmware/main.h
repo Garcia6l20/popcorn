@@ -3,7 +3,6 @@
 
 #include "stm32u5xx_hal.h"
 
-#define MICS      2u
 #define RING      128u
 #define COMPLETES 4u
 
