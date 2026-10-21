@@ -3275,3 +3275,36 @@ TEST_CASE("a break character tying with a local delivery comes after it, on the 
           {.word = 0, .errors = isr_fe}
   });
 }
+
+namespace
+{
+auto linked_frame_at(std::uint64_t start, std::uint64_t frame, std::uint16_t data)
+    -> periph::line_frame
+{
+  return {.data = data, .frame_ps = frame, .start = vtime{start}, .end = vtime{start + frame}};
+}
+}
+
+TEST_CASE("an aborted frame whose stop bit was sampled before the line fell is left alone")
+{
+  parity_rig p{{}, 35, cr1_fifoen};
+  auto const frame = frame_at(usart1_baud);
+  auto const tail  = frame - sample_of(frame, 9, 9);
+  auto const start = p.now() + 10 * us_ps;
+  auto const stop  = start + sample_of(frame, 9, 9);
+  auto const from  = stop + tail / 3;
+  auto&      port  = p.t.r.port("USART1");
+  port.receive_at(linked_frame_at(start, frame, 'x'), 1);
+  port.cancel_in_flight(vtime{stop + 2 * tail / 3}, 1);
+  port.hold_line(vtime{from}, 1);
+  port.release_line(vtime{from + 3 * frame}, 1);
+  auto const held = usart_dues(*p.t.r.f, 5);
+  REQUIRE(held.size() == 1);
+  CHECK(held[0].second == from + sample_of(frame, 9, 9));
+  p.advance(from + 5 * frame - p.now());
+  CHECK(
+      drain_rx(p)
+      == std::vector<rx_view>{
+          {.word = 0, .errors = isr_fe}
+  });
+}

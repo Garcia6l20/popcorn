@@ -325,16 +325,19 @@ struct lock
  *        PE per the receiver's check, the sampled word in RDR. Released before the start bit's
  *        middle sample, nothing is received. No new character until the release: no falling
  *        edge. IDLE one receiver frame after the later of the release and the character's end,
- *        unless the line is busy before. A hold cancels an IDLE due after its start. A frame
- *        from another machine still sampled at the hold's start, its start before and its
- *        stop-bit sample at or after it, or an aborted frame in flight then, becomes that break
- *        character at its own stop-bit sample, data 0: deviation, silicon keeps the bits before
- *        the hold. A frame whose stop bit was sampled before the hold starts is received as sent
- *        and the hold starts its own character. Every hold event goes on the lane the hold came
- *        on. A hold starting where the last one ends continues it, no new character. Holds less
- *        than a frame apart are each sampled alone. A reset ends every hold: nothing after it,
- *        and a later release is ignored. Host frames keep their own path during a hold, a linked
- *        UART takes none.
+ *        unless the line is busy before, also after a hold that received nothing: the model
+ *        never gates IDLE on RXFNE, which RM0456 66.8.10 does. A hold cancels an IDLE due after
+ *        its start. A frame from another machine still sampled at the hold's start, its start
+ *        before and its stop-bit sample at or after it, becomes that break character at its own
+ *        stop-bit sample, data 0: deviation, silicon keeps the bits before the hold. An aborted
+ *        frame does too while its abort also lies after the hold's start. A frame whose stop
+ *        bit was sampled before the hold starts is received as sent, or stays aborted, and the
+ *        hold starts its own character. Every hold event goes on the lane the hold came on. A
+ *        hold starting where the last one ends continues it, no new character. Holds less than
+ *        a frame apart are each sampled alone, and so is a frame starting after a short hold
+ *        while the hold's character is still sampled: silicon reads one garbled character. A
+ *        reset ends every hold: nothing after it, and a later release is ignored. Host frames
+ *        keep their own path during a hold, a linked UART takes none.
  */
 class usart final : public dispatch_model<usart, usart_state>, public uart_link_port
 {
@@ -1307,8 +1310,9 @@ void usart::hold_line(vtime from, std::uint32_t lane)
   line_hold  hold{.from_ps = from.ps, .start_ps = from.ps, .lane = lane, .open = true};
   auto const crossing = std::ranges::find_if(state_.linked, [&](linked_frame const& queued) {
     return queued.frame.start.ps < from.ps
-       and (queued.cut ? from.ps < queued.frame.end.ps
-                       : rx.frame_ps != 0 and from.ps <= last_sample(queued.frame, rx));
+       and rx.frame_ps != 0
+       and from.ps <= last_sample(queued.frame, rx)
+       and (not queued.cut or from.ps < queued.frame.end.ps);
   });
   if(crossing != state_.linked.end())
   {
