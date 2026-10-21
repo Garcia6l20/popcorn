@@ -83,17 +83,15 @@ def ticker(m: popcorn.Machine) -> Ticker:
 
 
 L = us(20)
-VARIANTS = [
-    pytest.param(1_000_000, None, id="plain"),
-    pytest.param(997, None, id="997"),
-    pytest.param(1_000_000, us(3), id="q=3us"),
-    pytest.param(997, us(3), id="997 q=3us"),
-]
 VARIANT_VALUES: list[tuple[int, VirtualDuration | None]] = [
     (1_000_000, None),
     (997, None),
     (1_000_000, us(3)),
     (997, us(3)),
+]
+VARIANTS = [
+    pytest.param(*values, id=name)
+    for values, name in zip(VARIANT_VALUES, ("plain", "997", "q=3us", "997 q=3us"), strict=True)
 ]
 TX_BYTES = [0x20 + index for index in range(64)]
 FIRMWARE_BAUD = 461_095

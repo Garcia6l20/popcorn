@@ -674,16 +674,25 @@ def test_a_full_link_refusal_names_the_native_limit(pair: Build) -> None:
 def test_a_run_with_cuts_and_no_callback_enters_python_on_no_machine_thread(
     pair: Build,
 ) -> None:
-    system = pair()
-    tap = system.tap("a.USART1")
-    tap.cut(*WINDOW)
-    tap.cut(at(1100), at(1500), line="break")
-    members = list(system.members.values())
-    before = [m._handle.gil_entries() for m in members]  # pyright: ignore[reportPrivateUsage]
-    asyncio.run(to(system, at(3000)))
-    after = [m._handle.gil_entries() for m in members]  # pyright: ignore[reportPrivateUsage]
+    def entries(intercepted: bool) -> tuple[list[int], list[int]]:
+        system = pair()
+        tap = system.tap("a.USART1")
+        tap.cut(*WINDOW)
+        tap.cut(at(1100), at(1500), line="break")
+        if intercepted:
+            system.members["b"].intercept("USART1_IRQHandler", lambda call: call.proceed())
+        members = list(system.members.values())
+        before = [m._handle.gil_entries() for m in members]  # pyright: ignore[reportPrivateUsage]
+        asyncio.run(to(system, at(3000)))
+        after = [m._handle.gil_entries() for m in members]  # pyright: ignore[reportPrivateUsage]
+        assert any(f.cut for f in tap.frames())
+        return before, after
+
+    before, after = entries(intercepted=False)
     assert after == before
-    assert any(f.cut for f in tap.frames())
+    before, after = entries(intercepted=True)
+    assert after[0] == before[0]
+    assert after[1] > before[1]
 
 
 def injected_cut_run(system: System, running: bool) -> Outcome:
