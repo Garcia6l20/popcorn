@@ -696,7 +696,7 @@ auto system_handle::post_waits(
   }
   struct wait_test
   {
-    native_predicate::test_type              gate;
+    std::move_only_function<bool() const>    gate;
     std::shared_ptr<detail::python_callable> python;
   };
   auto tests  = std::make_shared<std::vector<wait_test>>();

@@ -445,7 +445,7 @@ private:
 
 struct probe final : usb::class_driver
 {
-  std::copyable_function<void(usb::host_context&, probe&)>                 on_configured{};
+  std::move_only_function<void(usb::host_context&, probe&)>                on_configured{};
   std::move_only_function<void(usb::host_context&, probe&, std::uint16_t)> on_frame{};
   std::move_only_function<
       void(usb::host_context&, probe&, usb::pipe_id, usb::transfer_result const&)>
