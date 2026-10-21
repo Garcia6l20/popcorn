@@ -256,6 +256,48 @@ TEST_CASE("a listener removed or added during a notification is not called for t
   CHECK_FALSE(c_called);
 }
 
+struct death_flag
+{
+  explicit death_flag(bool& dead) : dead_{&dead}
+  {}
+
+  death_flag(death_flag const&)                    = delete;
+  auto operator=(death_flag const&) -> death_flag& = delete;
+
+  death_flag(death_flag&& other) noexcept : dead_{std::exchange(other.dead_, nullptr)}
+  {}
+
+  auto operator=(death_flag&&) -> death_flag& = delete;
+
+  ~death_flag()
+  {
+    if(dead_ != nullptr)
+    {
+      *dead_ = true;
+    }
+  }
+
+private:
+  bool* dead_;
+};
+
+TEST_CASE("a move-only listener that cancels itself lives to the end of its call")
+{
+  auto                f    = at_breakpoint();
+  auto&               pc   = port(f, "GPIOC");
+  bool                dead = false;
+  std::vector<bool>   dead_in_call;
+  stm32::subscription self;
+  self = pc.on_change([&, flag = death_flag{dead}](std::uint8_t, bool) {
+    self.reset();
+    dead_in_call.push_back(dead);
+  });
+  pc.drive(13, false);
+  pc.drive(13, true);
+  CHECK(dead_in_call == std::vector<bool>{false});
+  CHECK(dead);
+}
+
 TEST_CASE("a listener that drives a pin the same change moved reports each final level once")
 {
   auto       f     = at_breakpoint();

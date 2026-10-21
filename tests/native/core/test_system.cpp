@@ -2129,6 +2129,13 @@ TEST_CASE("an arrival hook that throws pauses the system on that error once")
       CHECK(stopped.member == 1);
       CHECK_THROWS_AS(std::rethrow_exception(stopped.error), test_failure);
       CHECK(thrown.load() == 1);
+      auto const quantum = how.lowered != 0 ? 20 * us_ps / how.lowered : 20 * us_ps;
+      CHECK(stopped.at.ps >= quantum);
+      CHECK(stopped.at.ps < 2 * quantum);
+      {
+        auto const held = r.sys->lock();
+        CHECK(r.sys->time_of(held, 1) == stopped.at);
+      }
       if(goal)
       {
         CHECK_THROWS_AS(std::ignore = goal->get(), test_failure);

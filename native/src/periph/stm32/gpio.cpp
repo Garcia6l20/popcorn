@@ -58,7 +58,8 @@ struct gpio_state
   friend auto operator==(gpio_state const&, gpio_state const&) -> bool = default;
 };
 
-using listener_entry = std::pair<std::uint64_t, std::copyable_function<void(std::uint8_t, bool)>>;
+using listener_entry =
+    std::pair<std::uint64_t, std::shared_ptr<std::move_only_function<void(std::uint8_t, bool)>>>;
 
 struct listener_table
 {
@@ -106,7 +107,7 @@ public:
   [[nodiscard]] auto level(std::uint8_t pin) const -> bool override;
   [[nodiscard]] auto mode(std::uint8_t pin) const -> pin_mode override;
   [[nodiscard]] auto alternate(std::uint8_t pin) const -> std::uint8_t override;
-  [[nodiscard]] auto on_change(std::copyable_function<void(std::uint8_t pin, bool level)> listener)
+  [[nodiscard]] auto on_change(std::move_only_function<void(std::uint8_t pin, bool level)> listener)
       -> subscription override;
   [[nodiscard]] auto signal_level(std::string_view signal) const -> std::optional<bool> override;
   void               load(std::span<std::byte const> in) override;
@@ -582,8 +583,8 @@ void gpio::settle(bool notify)
       auto const found = std::ranges::find(listeners_->entries, id, &listener_entry::first);
       if(found != listeners_->entries.end())
       {
-        auto listener = found->second;
-        listener(pin, high);
+        auto const listener = found->second;
+        (*listener)(pin, high);
       }
     }
     if(exti != nullptr)
@@ -754,11 +755,12 @@ void gpio::apply(std::uint8_t pin, std::optional<bool> level)
   settle(true);
 }
 
-auto gpio::on_change(std::copyable_function<void(std::uint8_t pin, bool level)> listener)
+auto gpio::on_change(std::move_only_function<void(std::uint8_t pin, bool level)> listener)
     -> subscription
 {
   auto const id = listeners_->next++;
-  listeners_->entries.emplace_back(id, std::move(listener));
+  listeners_->entries.emplace_back(
+      id, std::make_shared<std::move_only_function<void(std::uint8_t, bool)>>(std::move(listener)));
   return subscription{[table = std::weak_ptr<listener_table>{listeners_}, id] {
     if(auto const live = table.lock())
     {

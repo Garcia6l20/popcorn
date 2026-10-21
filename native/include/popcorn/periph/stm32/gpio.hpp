@@ -169,7 +169,7 @@ public:
    * @return Handle whose destruction removes the listener.
    */
   [[nodiscard]] virtual auto
-      on_change(std::copyable_function<void(std::uint8_t pin, bool level)> listener)
+      on_change(std::move_only_function<void(std::uint8_t pin, bool level)> listener)
           -> subscription = 0;
 
 protected:
