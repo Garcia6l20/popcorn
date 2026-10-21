@@ -62,7 +62,8 @@ if get_var("POPCORN_ENABLE_CCACHE", False):
 
 if VARIANT == "asan":
     env.set_variant("debug")
-    env.apply_preset("sanitize")
+    env.cxx.flags.extend(["-fsanitize=address", "-fno-omit-frame-pointer"])
+    env.link.flags.append("-fsanitize=address")
 elif VARIANT == "tsan":
     env.set_variant("debug")
     env.cxx.flags.append("-fsanitize=thread")
