@@ -359,6 +359,10 @@ public:
   [[= py::doc{"A link's cut owner, a member index."}]] [[nodiscard]] auto
       link_owner(std::size_t link) const -> std::size_t;
 
+  /** @brief periph::stm32::max_waiting_cuts, the most cuts one link holds at once. */
+  [[= py::doc{"The most cuts one link holds at once."}]] [[nodiscard]] auto max_waiting_cuts() const
+      -> std::size_t;
+
   /** @brief Sets link @p link's cut owner, while the system is stopped.
    * @throws IndexError for no such link or member. */
   [[= py::doc{"Set a link's cut owner while stopped."}]] void

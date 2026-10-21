@@ -329,7 +329,10 @@ def test_a_callback_of_another_system_s_machine_is_refused(pair: Build) -> None:
     other.members["a"].intercept("wait_complete", on_other)
     finish(other)
     assert [line.split(":")[0] for line in tried] == ["RuntimeError", "RuntimeError"]
-    assert all("only callbacks of a, the link's cut owner" in line for line in tried)
+    assert all("from a callback of a machine outside this system" in line for line in tried)
+    assert all(
+        "only callbacks of a, the link's cut owner, change its cuts" in line for line in tried
+    )
     with pytest.raises(ValueError, match="no cut is open"):
         tap.restore_line()
     assert tap.break_line() == at(0)
@@ -656,6 +659,16 @@ def test_refused_changes_leave_the_link_usable(pair: Build) -> None:
     for towards in ("a.USART1", "b.USART1"):
         mine = [f for f in frames if f.towards == towards]
         assert [f.index for f in mine if f.cut] == [*range(12, 21), *range(24, 30), *range(61, 64)]
+
+
+def test_a_full_link_refusal_names_the_native_limit(pair: Build) -> None:
+    system = pair()
+    tap = system.tap("a.USART1")
+    first = at(1000).ps
+    for index in range(65536):
+        tap.cut(VirtualTime(first + 2000 * index), VirtualTime(first + 2000 * index + 1000))
+    with pytest.raises(ValueError, match=r"^cut \[.*\): 65536 cuts wait on the link already$"):
+        tap.cut(at(500), at(600))
 
 
 def test_a_run_with_cuts_and_no_callback_enters_python_on_no_machine_thread(

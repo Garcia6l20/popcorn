@@ -1062,13 +1062,19 @@ auto system_handle::change_cut(
     }
     auto const caller = std::ranges::find_if(
         members_, [](member_entry const& one) { return one.host->owns_engine(); });
-    if(caller == members_.end() or static_cast<std::size_t>(caller - members_.begin()) != owner)
+    if(caller == members_.end())
     {
       throw std::runtime_error(
           std::format(
-              "{} from a callback: only callbacks of {}, the link's cut owner, change its cuts "
-              "while "
-              "the system runs",
+              "{} from a callback of a machine outside this system: only callbacks of {}, the "
+              "link's cut owner, change its cuts",
+              what, members_[owner].name));
+    }
+    if(static_cast<std::size_t>(caller - members_.begin()) != owner)
+    {
+      throw std::runtime_error(
+          std::format(
+              "{} from a callback: only callbacks of {}, the link's cut owner, change its cuts",
               what, members_[owner].name));
     }
     auto const local = caller->host->member_inline(core::member_id{}).virtual_clock().time();
@@ -1090,9 +1096,8 @@ auto system_handle::change_cut(
   {
     throw std::runtime_error(
         std::format(
-            "{} while the system runs: call it from a callback of {}, the link's cut owner, or "
-            "call "
-            "cut(start, end) from here",
+            "{} while the system runs: call it from a callback of {}, the link's cut owner, "
+            "or call cut(start, end) from here",
             what, members_[owner].name));
   }
   refuse_caller(sys);
@@ -1148,6 +1153,11 @@ auto system_handle::restore(std::size_t index, bool stopped) -> cut_outcome
 auto system_handle::link_owner(std::size_t index) const -> std::size_t
 {
   return link(index).owner.load(std::memory_order_relaxed);
+}
+
+auto system_handle::max_waiting_cuts() const -> std::size_t
+{
+  return periph::stm32::max_waiting_cuts;
 }
 
 void system_handle::set_link_owner(std::size_t index, std::size_t member)

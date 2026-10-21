@@ -37,7 +37,6 @@ _TAP_KEEP = 1 << 20
 _LOG = logging.getLogger("popcorn")
 _UNDELIVERED = "a member stop the last run found is not delivered yet: run the system on first"
 _OPEN_END = (1 << 63) - 1
-_MAX_CUTS = 65536
 
 type LineState = Literal["idle", "break"]
 
@@ -2113,21 +2112,25 @@ class UartTap:
 
     Who changes cuts, and the time "now" that `break_line` and `restore_line` take:
 
-    - Stopped: no run, no free run, no member goal and no member `running()` pending. Anyone.
-      Now is the later of the two ends' system times, `System.time_of`. After a run a member
-      stop ended, the other members stand where the run left them, a position that depends on
-      the quantum, and so does now. `cut` accepts a start from now on.
+    - Stopped: no run, no free run, no member goal and no member `running()` pending. Anyone
+      but a callback of another machine, see the last item. Now is the later of the two ends'
+      system times, `System.time_of`. After a run a member stop ended, the other members stand
+      where the run left them, a position that depends on the quantum, and so does now. `cut`
+      accepts a start from now on.
     - While the system runs, between two pauses of `running()` too, or with a member goal
       pending: a callback of the link's cut owner, `owner`, such as an intercept or a model
       method on that member. Now is the owner's system time at the callback, so the result is
       the same in every run, at any quantum and slicing. `cut` there accepts a start from that
-      time on. A callback of any other machine raises RuntimeError, before any change.
+      time on.
     - From the `running()` body or another thread while the system runs, or a member goal is
       pending: `break_line` and `restore_line` raise RuntimeError. `cut` accepts a start at or
       after the reach of the link's deliveries so far, or from now when it finds the system
       paused: its acceptance depends on wall timing, its effect only on `start` and `end`. A
       body `cut` while the owner's callbacks also change cuts runs in wall order with them, so
       which call a refusal hits depends on wall timing.
+    - A callback of any machine other than `owner`, a member or a machine outside this system:
+      `cut`, `break_line` and `restore_line` raise RuntimeError, stopped or running, before any
+      change.
 
     Cuts never overlap, touching allowed, and at most 65536 wait per link, passed ones
     included until they are erased, about one quantum after their end plus L and the end of
@@ -2275,8 +2278,8 @@ class UartTap:
                 before the earliest start accepted now, the cut overlaps a cut registered
                 before, or 65536 cuts wait. The message names the bound or the cut overlapped.
             EmulationError: The system was closed, or stopped on an error before.
-            RuntimeError: Called from a callback of a machine other than `owner` while the
-                system runs.
+            RuntimeError: Called from a callback of a machine other than `owner`, stopped or
+                running.
             MachineRunning: Called from inside a parked section.
         """
         _check_time("start", start)
@@ -2308,9 +2311,10 @@ class UartTap:
             ValueError: `line` neither "idle" nor "break", a cut is open already, a cut
                 registered before lies after now, or 65536 cuts wait.
             EmulationError: The system was closed, or stopped on an error before.
-            RuntimeError: Called while the system runs, or a member goal is pending, from
-                anywhere but a callback of `owner`: the `running()` body, another thread or a
-                callback of another machine. Use a callback of `owner`, or `cut(start, end)`.
+            RuntimeError: Called from a callback of a machine other than `owner`, stopped or
+                running. Called while the system runs, or a member goal is pending, from the
+                `running()` body or another thread. Use a callback of `owner`, or
+                `cut(start, end)`.
             MachineRunning: Called from inside a parked section.
         """
         low = _line_low(line)
@@ -2385,7 +2389,7 @@ class UartTap:
             raise ValueError(f"{what}: the cut from {bound} is open, restore_line() it first")
         if reason == "none_open":
             raise ValueError(f"{what}: no cut is open")
-        raise ValueError(f"{what}: {_MAX_CUTS} cuts wait on the link already")
+        raise ValueError(f"{what}: {self._native.max_waiting_cuts()} cuts wait on the link already")
 
     def replace(self, index: int, data: bytes, *, towards: str) -> None:
         """Give the sender's frames numbered `index` on, one per byte, new data before they
