@@ -799,7 +799,7 @@ auto cut_link(
     core::link_guard const held{wire->inject_mutex_};
     if(now)
     {
-      contract_assert(now->ps >= wire->state_.last_barrier.ps);
+      contract_assert(*now >= wire->state_.last_barrier);
     }
     else
     {
@@ -861,7 +861,7 @@ auto restore_link(uart_wire& forth, uart_wire& back, core::sys_time now)
   for(auto* wire : wires)
   {
     core::link_guard const held{wire->inject_mutex_};
-    contract_assert(now.ps >= wire->state_.last_barrier.ps);
+    contract_assert(now >= wire->state_.last_barrier);
     if(wire->state_.cuts.empty() or not wire->state_.cuts.back().open)
     {
       return std::unexpected{cut_refusal{.reason = cut_refusal_reason::none_open}};
