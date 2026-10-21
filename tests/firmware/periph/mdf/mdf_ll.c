@@ -81,9 +81,10 @@ static struct ring_node node;
 
 static MDF_Filter_TypeDef* const mics[MICS] = {MDF1_Filter0, MDF1_Filter1};
 
-void idle(void);
+[[noreturn]] void idle(void);
+[[noreturn]] void finish(void);
+
 void starting(void);
-void finish(void);
 void two_mics(void);
 void two_mics_lf(void);
 void two_mics_restart(void);
@@ -124,6 +125,12 @@ static void kernel_clock(void)
   FLASH->ACR = (FLASH->ACR & ~FLASH_ACR_LATENCY) | FLASH_ACR_LATENCY_1WS;
   RCC->CFGR1 = (RCC->CFGR1 & ~RCC_CFGR1_SW) | RCC_CFGR1_SW_0;
   while((RCC->CFGR1 & RCC_CFGR1_SWS) != RCC_CFGR1_SWS_0)
+  {
+  }
+  RCC->AHB3ENR |= RCC_AHB3ENR_PWREN;
+  (void)RCC->AHB3ENR;
+  PWR->VOSR = (PWR->VOSR & ~PWR_VOSR_VOS) | PWR_VOSR_VOS_1;
+  while((PWR->VOSR & PWR_VOSR_VOSRDY) == 0)
   {
   }
   RCC->PLL3CFGR =

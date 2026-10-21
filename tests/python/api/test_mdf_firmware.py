@@ -31,7 +31,7 @@ from popcorn.board import FilterSample
 from popcorn.units import VirtualDuration, VirtualTime, us
 
 from .conftest import run_bounded
-from .mdf_reference import ChainConfig, modulate, run_chain
+from .mdf_reference import ChainConfig, Output, modulate, run_chain
 from .sad_reference import SadConfig, SadState, sad
 from .test_pdm import BITS_PER_SAMPLE, DIVIDER, KERNEL, Edge, pack
 
@@ -45,8 +45,10 @@ HALVES = 8
 LOGGED = 4
 SATF = 1 << 9
 ROUNDING = 2
-"""Edge times are floored to the picosecond, so an edge within this many ps of a stop is the
-stop's own edge, which the stop's settle took."""
+"""Edge times are floored to the picosecond and the settle takes every edge whose floored time is
+at or before the stop. A stop on a floored edge whose exact time lies a fraction of a ps later,
+as after a WFI wake on an event time, has taken that edge, so a span within this many ps above a
+whole number of periods counts it as taken. Distinct edges are 488 ns apart."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,13 +62,13 @@ class Bound:
 
 BOOT = Bound(2_800, us(700))
 BOUNDS = {
-    "two_mics": Bound(4_000, us(20_500)),
-    "two_mics_lf": Bound(4_000, us(20_500)),
-    "two_mics_restart": Bound(4_100, us(20_500)),
-    "independent_irq": Bound(4_500, us(5_400)),
-    "single_shot": Bound(7_000, us(630)),
-    "manchester": Bound(3_100, us(390)),
-    "adf_sad": Bound(4_500, us(38_000)),
+    "two_mics": Bound(5_000, us(20_500)),
+    "two_mics_lf": Bound(5_000, us(20_500)),
+    "two_mics_restart": Bound(5_100, us(20_500)),
+    "independent_irq": Bound(5_500, us(5_500)),
+    "single_shot": Bound(8_000, us(700)),
+    "manchester": Bound(4_200, us(460)),
+    "adf_sad": Bound(5_500, us(38_000)),
 }
 
 
@@ -116,12 +118,18 @@ class Start:
         assert span > 0
         return self.taken[sitf, edge] + math.ceil(span - ROUNDING / PERIOD) - 1
 
-    def first(self, sitf: int, edge: Edge, samples: list[FilterSample]) -> int:
-        """Stream index of the filter's first bit, every sample's time checked against it."""
+    def first(
+        self, sitf: int, edge: Edge, samples: list[FilterSample], bits: int = BITS_PER_SAMPLE
+    ) -> int:
+        """Stream index of the filter's first bit, every sample's time checked against it.
+
+        The stop at `starting` lies less than one bit period before the write that starts the
+        filter, so at most one edge of each kind falls in between and the first bit is the one
+        at `taken` or the next."""
         last = [self.index(sitf, edge, s.at) for s in samples]
-        start = last[0] - (BITS_PER_SAMPLE - 1)
-        assert last == [start + BITS_PER_SAMPLE * (k + 1) - 1 for k in range(len(samples))]
-        assert 0 <= start - self.taken[sitf, edge] < 8
+        start = last[0] - (bits - 1)
+        assert last == [start + bits * (k + 1) - 1 for k in range(len(samples))]
+        assert 0 <= start - self.taken[sitf, edge] < 2
         return start
 
 
@@ -158,9 +166,9 @@ def mic_bits(dbfs: float, count: int) -> dict[tuple[int, Edge], list[int]]:
     }
 
 
-def interleaved(pcm: list[list[int]]) -> list[int]:
+def interleaved(outputs: list[Output]) -> list[int]:
     """The 16-bit ring words of two interleaved filters: PCM[23:8], filter 0 first."""
-    return [values[k] >> 8 for k in range(len(pcm[0])) for values in pcm]
+    return [o.pcm[k] >> 8 for k in range(len(outputs[0].pcm)) for o in outputs]
 
 
 def halves_logged(sent: list[int]) -> list[int]:
@@ -182,9 +190,10 @@ def check_table_374(caplog: pytest.LogCaptureFixture) -> None:
 
 def chain_output(
     m: popcorn.Machine, start: Start, fed: dict[tuple[int, Edge], list[int]], count: int
-) -> list[list[int]]:
-    """Each filter's tap PCM, checked against the reference from its first bit."""
-    pcm: list[list[int]] = []
+) -> list[Output]:
+    """Each filter's reference output from its first bit for `count` samples, checked against
+    its tap."""
+    outputs: list[Output] = []
     for f, key in enumerate(MICS):
         got = m.periph.MDF1.output(f).take()
         assert len(got) == count, (f, len(got))
@@ -192,8 +201,8 @@ def chain_output(
         first = start.first(*key, got)
         want = run_chain(fed[key][first:], CHAIN)
         assert [s.pcm for s in got] == want.pcm[:count], f
-        pcm.append(want.pcm[:count])
-    return pcm
+        outputs.append(Output(want.pcm[:count], want.saturated[:count]))
+    return outputs
 
 
 @pytest.mark.parametrize(
@@ -219,12 +228,12 @@ def test_two_interleaved_mics_fill_the_16_bit_ring_with_the_reference(
     with caplog.at_level(logging.WARNING, logger="popcorn"):
         start = started(fx, fed)
         fx.reach("finish")
-    pcm = chain_output(m, start, fed, count)
-    sent = interleaved(pcm)
+    outputs = chain_output(m, start, fed, count)
+    sent = interleaved(outputs)
     assert ring(m) == sent[-RING:]
     assert log(m) == halves_logged(sent)
     assert m.mem.u32[m.sym("halves")] == HALVES
-    saturated = [any(run_chain(fed[key], CHAIN).saturated) for key in MICS]
+    saturated = [any(o.saturated) for o in outputs]
     assert saturated == [dbfs > -9.5] * 2
     assert [bool(flags & SATF) for flags in u32s(m, "flags", 2)] == saturated
     if table_374:
@@ -268,7 +277,7 @@ def test_a_restart_runs_a_fresh_chain_from_filter_0_with_no_new_warning(
         second = settled(m, fed, "MDF1")
         fx.reach("finish")
     after = chain_output(m, second, fed, count)
-    assert [second.taken[key] - first.taken[key] for key in MICS] >= [count * BITS_PER_SAMPLE] * 2
+    assert all(second.taken[k] - first.taken[k] >= count * BITS_PER_SAMPLE for k in MICS)
     sent = interleaved(after)
     assert ring(m) == sent[-RING:]
     assert log(m) == halves_logged(interleaved(before)) + halves_logged(sent)
@@ -363,9 +372,7 @@ def test_the_adf_detector_lets_lpdma1_fill_its_ring_only_in_detect(
     samples = SAD_FRAMES * frame
     got = m.periph.ADF1.output(0).take()
     assert len(got) == samples
-    last = [start.index(0, "rising", s.at) for s in got]
-    first = last[0] - 63
-    assert last == [first + 64 * (k + 1) - 1 for k in range(samples)]
+    first = start.first(0, "rising", got, 64)
     pcm = run_chain(bits[first:], ADF_CHAIN).pcm[:samples]
     assert [s.pcm for s in got] == pcm
     frames = sad(pcm, SAD)
