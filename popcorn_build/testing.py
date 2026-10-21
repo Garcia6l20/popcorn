@@ -19,7 +19,14 @@ takes 200 s alone under TSAN, 136 s alone under ASan, and times out at 300 s at 
 
 TSAN_SUPPRESSIONS = project_dir / "tests" / "native" / "tsan.supp"
 """TSAN suppressions of every doctest program in the tsan variant: races TSAN reports on
-exception objects whose reference count lives in uninstrumented libstdc++."""
+exception objects whose reference count lives in uninstrumented libstdc++. The
+`exception_ptr::_M_release` and `destroy_at<exception_ptr>` entries match a frame in either stack,
+so in every tsan case they also hide a race on an `exception_ptr` object itself, one thread
+destroying it while another assigns it."""
+
+TSAN_OPTIONS = project_dir / "tests" / "native" / "tsan_options.cpp"
+"""`__tsan_default_options`, linked into every doctest program of the tsan variant with
+TSAN_SUPPRESSIONS as its suppression file. A `TSAN_OPTIONS` from the shell still applies on top."""
 
 TSAN_LONGJMP = project_dir / "tests" / "native" / "tsan_longjmp.cpp"
 """Bypass of the siglongjmp interceptor, linked into every doctest program of the tsan variant.
@@ -73,17 +80,16 @@ def add_doctest(
     With @p register false the program is built but no test is registered, for tests whose
     inputs this machine lacks. @p timeout, in seconds, kills a case that runs longer and fails
     it, so a deadlock fails the gate instead of hanging it. None for no limit. The asan and tsan
-    variants scale @p timeout by SANITIZER_TIMEOUT_FACTOR. The tsan variant links TSAN_LONGJMP in
-    and runs the cases under TSAN_SUPPRESSIONS.
+    variants scale @p timeout by SANITIZER_TIMEOUT_FACTOR. The tsan variant links TSAN_LONGJMP and
+    TSAN_OPTIONS in.
     """
     project = context.current_project
-    sources = [*sources, TSAN_LONGJMP] if VARIANT == "tsan" else list(sources)
+    sources = [*sources, TSAN_LONGJMP, TSAN_OPTIONS] if VARIANT == "tsan" else list(sources)
     if VARIANT in ("asan", "tsan") and timeout is not None:
         timeout *= SANITIZER_TIMEOUT_FACTOR
-    env = dict(env or {})
-    if VARIANT == "tsan":
-        env.setdefault("TSAN_OPTIONS", f"suppressions={TSAN_SUPPRESSIONS}")
     program = project.Program(f"test-{name}", project.default_environment, sources=sources)
+    if VARIANT == "tsan":
+        program.private.defines.append(f'POPCORN_TSAN_SUPPRESSIONS="{TSAN_SUPPRESSIONS}"')
     for dep in [*deps, package("doctest"), _doctest_with_main()]:
         program.link(dep)
     if register:
@@ -92,7 +98,7 @@ def add_doctest(
             program,
             discover="doctest",
             labels=[group],
-            env=env,
+            env=dict(env or {}),
             timeout=timeout,
         )
     project.Alias(f"test-{group}", program)
