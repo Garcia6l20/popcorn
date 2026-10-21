@@ -22,6 +22,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -3154,6 +3155,7 @@ TEST_CASE("a line held three frames gives one break character at its stop-bit sa
     auto const held = usart_dues(*p.t.r.f, 5);
     REQUIRE(held.size() == 1);
     CHECK(held[0].second == stop);
+    CHECK(usart_dues(*p.t.r.f, 2, held[0].first).empty());
     p.advance(stop + hold_slack - p.now());
     CHECK((p.isr() & (isr_rxfne | isr_fe)) == (isr_rxfne | isr_fe));
     CHECK(p.rdr() == 0);
@@ -3305,6 +3307,116 @@ TEST_CASE("an aborted frame whose stop bit was sampled before the line fell is l
   CHECK(
       drain_rx(p)
       == std::vector<rx_view>{
+          {.word = 0, .errors = isr_fe}
+  });
+}
+
+TEST_CASE("a frame is turned into the break up to its stop-bit sample, received as sent after it")
+{
+  for(auto const after : {std::uint64_t{0}, std::uint64_t{1}})
+  {
+    CAPTURE(after);
+    parity_rig p{{}, 35, cr1_fifoen};
+    auto const frame = frame_at(usart1_baud);
+    auto const start = p.now() + 10 * us_ps;
+    auto const stop  = start + sample_of(frame, 9, 9);
+    auto const from  = stop + after;
+    auto&      port  = p.t.r.port("USART1");
+    port.receive_at(linked_frame_at(start, frame, 'x'), 1);
+    port.hold_line(vtime{from}, 1);
+    port.release_line(vtime{from + 3 * frame}, 1);
+    auto const held = usart_dues(*p.t.r.f, 5);
+    REQUIRE(held.size() == 1);
+    CHECK(held[0].second == (after == 0 ? stop : from + sample_of(frame, 9, 9)));
+    p.advance(from + 5 * frame - p.now());
+    std::vector<rx_view> expected;
+    if(after != 0)
+    {
+      expected.push_back({.word = 'x'});
+    }
+    expected.push_back({.word = 0, .errors = isr_fe});
+    CHECK(drain_rx(p) == expected);
+  }
+}
+
+TEST_CASE("a frame handed after a hold it crosses becomes the break at its own stop sample")
+{
+  parity_rig p{{}, 35, cr1_fifoen};
+  auto const frame = frame_at(usart1_baud);
+  auto const start = p.now() + 10 * us_ps;
+  auto const from  = start + frame / 2;
+  auto&      port  = p.t.r.port("USART1");
+  port.hold_line(vtime{from}, 1);
+  port.release_line(vtime{from + 3 * frame}, 1);
+  port.receive_at(linked_frame_at(start, frame, 'x'), 1);
+  CHECK(
+      std::ranges::contains(
+          std::views::values(usart_dues(*p.t.r.f, 5)), start + sample_of(frame, 9, 9)));
+  p.advance(from + 5 * frame - p.now());
+  CHECK(
+      drain_rx(p)
+      == std::vector<rx_view>{
+          {.word = 0, .errors = isr_fe}
+  });
+}
+
+TEST_CASE("a hold starting where the last one is released continues it, no new character")
+{
+  parity_rig p{{}, 35, cr1_fifoen};
+  p.t.cpu("USART1", "ICR", icr_idlecf);
+  auto const frame = frame_at(usart1_baud);
+  auto const from  = p.now() + 10 * us_ps;
+  auto const join  = from + 2 * frame;
+  auto const until = join + 2 * frame;
+  auto&      port  = p.t.r.port("USART1");
+  port.hold_line(vtime{from}, 1);
+  port.release_line(vtime{join}, 1);
+  port.hold_line(vtime{join}, 1);
+  port.release_line(vtime{until}, 1);
+  auto const held = usart_dues(*p.t.r.f, 5);
+  REQUIRE(held.size() == 1);
+  CHECK(held[0].second == from + sample_of(frame, 9, 9));
+  p.advance(until + frame - hold_slack - p.now());
+  CHECK((p.isr() & isr_idle) == 0);
+  p.advance(2 * hold_slack);
+  CHECK((p.isr() & isr_idle) != 0);
+  CHECK(
+      drain_rx(p)
+      == std::vector<rx_view>{
+          {.word = 0, .errors = isr_fe}
+  });
+}
+
+TEST_CASE("two holds handed before either is sampled are each released at their own end")
+{
+  parity_rig p{{}, 35, cr1_fifoen};
+  p.t.cpu("USART1", "ICR", icr_idlecf);
+  auto const frame  = frame_at(usart1_baud);
+  auto const first  = p.now() + 10 * us_ps;
+  auto const second = first + 6 * frame;
+  auto&      port   = p.t.r.port("USART1");
+  port.hold_line(vtime{first}, 1);
+  port.release_line(vtime{first + 2 * frame}, 1);
+  port.hold_line(vtime{second}, 1);
+  port.release_line(vtime{second + 2 * frame}, 1);
+  auto const released = usart_dues(*p.t.r.f, 6);
+  auto const ends     = std::views::values(released);
+  CHECK(
+      std::vector<std::uint64_t>{ends.begin(), ends.end()}
+      == std::vector<std::uint64_t>{first + 2 * frame, second + 2 * frame});
+  for(auto const end : {first + 3 * frame, second + 3 * frame})
+  {
+    CAPTURE(end);
+    p.advance(end - hold_slack - p.now());
+    CHECK((p.isr() & isr_idle) == 0);
+    p.advance(2 * hold_slack);
+    CHECK((p.isr() & isr_idle) != 0);
+    p.t.cpu("USART1", "ICR", icr_idlecf);
+  }
+  CHECK(
+      drain_rx(p)
+      == std::vector<rx_view>{
+          {.word = 0, .errors = isr_fe},
           {.word = 0, .errors = isr_fe}
   });
 }
