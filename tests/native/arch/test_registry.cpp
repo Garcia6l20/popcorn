@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace
@@ -16,15 +17,34 @@ using popcorn::core_desc;
 using popcorn::part_description;
 namespace arch = popcorn::arch;
 
+constexpr int no_tag = -1;
+
+int called_tag = no_tag;
+
 struct fake_factory
 {
   int tag;
 
   auto operator()(core_desc const&) const -> std::unique_ptr<arch::arch>
   {
+    called_tag = tag;
     return nullptr;
   }
 };
+
+auto called_with(arch::arch_factory factory, core_desc const& core) -> int
+{
+  called_tag = no_tag;
+  try
+  {
+    std::ignore = factory(core);
+  }
+  catch(...)
+  {
+    return no_tag;
+  }
+  return called_tag;
+}
 
 auto part_with(std::string cpu) -> part_description
 {
@@ -44,10 +64,10 @@ void register_fake(std::string name, std::string cpu, int tag)
 
 auto tag_of(std::string cpu) -> int
 {
-  auto const        factory = arch::find_arch(part_with(std::move(cpu)));
-  auto const* const fake    = factory.target<fake_factory>();
-  REQUIRE(fake != nullptr);
-  return fake->tag;
+  auto const part = part_with(std::move(cpu));
+  auto const tag  = called_with(arch::find_arch(part), part.core);
+  REQUIRE(tag != no_tag);
+  return tag;
 }
 
 auto refused(std::string cpu) -> bool
@@ -113,9 +133,10 @@ TEST_CASE("a replaced module counts as the latest registered")
 TEST_CASE("register_builtin registers armv8m once")
 {
   arch::armv8m::register_builtin();
-  auto const builtin = arch::find_arch(part_with("CM33"));
+  auto const cm33    = part_with("CM33");
+  auto       builtin = arch::find_arch(cm33);
   CHECK(static_cast<bool>(builtin));
-  CHECK(builtin.target<fake_factory>() == nullptr);
+  CHECK(called_with(std::move(builtin), cm33.core) == no_tag);
   CHECK(refused("CM0"));
   register_fake("shadow-cm33", "CM33", 5);
   arch::armv8m::register_builtin();

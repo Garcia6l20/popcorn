@@ -60,7 +60,7 @@ auto find_arch(part_description const& description) -> arch_factory
   auto& entries = table();
   {
     std::lock_guard const lock{entries.guard};
-    for(auto const& module : entries.modules | std::views::reverse)
+    for(auto& module : entries.modules | std::views::reverse)
     {
       if(module.implements(description.core))
       {
@@ -77,7 +77,7 @@ auto find_code_analysis(core_desc const& core) -> code_analysis const*
 {
   auto&                 entries = table();
   std::lock_guard const lock{entries.guard};
-  for(auto const& module : entries.modules | std::views::reverse)
+  for(auto& module : entries.modules | std::views::reverse)
   {
     if(module.implements(core))
     {

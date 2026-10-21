@@ -281,7 +281,7 @@ static_assert(std::is_trivially_copyable_v<popcorn::arch::call_arg>);
 
 TEST_CASE("a dummy arch links and is created through a factory")
 {
-  popcorn::arch::arch_factory const factory =
+  popcorn::arch::arch_factory factory =
       [](popcorn::core_desc const&) -> std::unique_ptr<popcorn::arch::arch> {
     return std::make_unique<toy_arch>();
   };

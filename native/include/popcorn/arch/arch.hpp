@@ -759,7 +759,7 @@ public:
 /**
  * @brief Creates the arch module for a core, chosen by the core name and features.
  */
-using arch_factory = std::function<std::unique_ptr<arch>(core_desc const& core)>;
+using arch_factory = std::copyable_function<std::unique_ptr<arch>(core_desc const& core)>;
 
 /** @brief One arch module: the cores it implements and how to build its arch for one. */
 struct arch_module
@@ -768,7 +768,7 @@ struct arch_module
   std::string name;
   /** @brief Whether the module implements a core. Runs under the registry lock, so it must not
    *         call the arch registry. */
-  std::function<bool(core_desc const& core)> implements;
+  std::move_only_function<bool(core_desc const& core)> implements;
   /** @brief The factory, called once per machine. */
   arch_factory factory;
   /** @brief Decoder of the module's code for coverage reports, null for none. It must outlive
