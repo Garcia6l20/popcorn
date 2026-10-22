@@ -97,7 +97,8 @@ compiler changes.
   ```
 
 - `test_native_plugin.py`: the python_model and spi_mock tests against the C++ plugin.
-  - a machine built without the plugin, strict, raises ModelError naming RNG
+  - a machine built without the plugin, strict, gets the built-in RNG model's words,
+    `rng_words(0, 8)`
   - the words the firmware received equal the xorshift32 sequence from seed 1
   - `HAL_RNG_Init` writes RNG_NSCR, which the description adds, so no unmodelled-register
     warning is logged

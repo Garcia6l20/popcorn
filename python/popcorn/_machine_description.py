@@ -42,6 +42,7 @@ from popcorn._machine import (
 from popcorn._option_bytes import OptionBytes
 from popcorn._part_description import PartDescription, load_description
 from popcorn._rcc import RccOptions
+from popcorn._rng import RngOptions
 from popcorn._stop import Stop
 from popcorn._supply import SupplyOptions
 from popcorn._usb import UsbHostOptions
@@ -397,6 +398,9 @@ class MachineDescription:
             description's option registers. With `tzen` the core boots from the secure boot
             address, without it from the non-secure one, and `boot.vtor` wins over both. In
             `digest`, left out when None.
+        rng: Word source of the built-in RNG model, None for its default, seed 0. It puts the
+            built-in model on RNG, over a class registered with `popcorn.model.register`. In
+            `digest`, left out when None.
         board: What the board does with each peripheral, by name.
         plugins: The native plugins the board's models and devices come from, at most one per
             name. A `PluginModel` on the board and a device class of a plugin's bindings module,
@@ -427,6 +431,7 @@ class MachineDescription:
     rcc: RccOptions | None = None
     supply: SupplyOptions | None = None
     option_bytes: OptionBytes | None = None
+    rng: RngOptions | None = None
     board: Mapping[str, Periph] = field(default_factory=_FrozenMap[str, Periph])
     plugins: Sequence[Plugin] = ()
     strict: bool = False
@@ -456,6 +461,9 @@ class MachineDescription:
             raise _plain_error(
                 "option_bytes", f"an OptionBytes or None, not {type(option_bytes).__qualname__}"
             )
+        rng = cast(object, self.rng)
+        if rng is not None and not isinstance(rng, RngOptions):
+            raise _plain_error("rng", f"an RngOptions or None, not {type(rng).__qualname__}")
         for name, periph in self.board.items():
             key = f"board.{name}"
             if periph.model is not None and periph.devices:
@@ -599,8 +607,8 @@ class MachineDescription:
     @property
     def digest(self) -> str:
         """SHA-256 of the canonical content, without `name`, `strict`, `missing` and `configs`,
-        without `plugins` when it is empty, without `option_bytes` when it is None and without
-        `faults` when it is "stop".
+        without `plugins` when it is empty, without `option_bytes` and `rng` when they are None
+        and without `faults` when it is "stop".
 
         Equal across processes: classes as `module:qualname`, paths absolute in POSIX form,
         mappings with sorted keys, plugins by name and code, never by path. It is what
@@ -668,7 +676,7 @@ class MachineDescription:
                 one peripheral, `Machine(devices=)` refuses them, `audio` is on a peripheral
                 that is not an SAI with the built-in model, or `host` on one that is not a USB
                 device controller with the built-in model. `Machine(option_bytes=)` refuses
-                `option_bytes`.
+                `option_bytes`, `Machine(rng=)` refuses `rng`.
             MissingInput: An image, `svd` or `description` file, a plugin's source directory
                 or library does not exist, or the ST install the description is built from.
             ImageError: An image cannot be read or does not fit the memory map.
@@ -750,6 +758,7 @@ class MachineDescription:
             usb=usb,
             supply=self.supply,
             option_bytes=self.option_bytes,
+            rng=self.rng,
             name=name,
         )
         for periph_name, periph in self.board.items():
@@ -1128,6 +1137,8 @@ def _canonical(value: object) -> object:
             skipped.add("plugins")
         if value.option_bytes is None:
             skipped.add("option_bytes")
+        if value.rng is None:
+            skipped.add("rng")
         if value.faults == "stop":
             skipped.add("faults")
         fields = {

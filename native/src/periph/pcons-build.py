@@ -30,6 +30,7 @@ stm32 = [
         "dbgmcu.cpp",
         "crc.cpp",
         "hash.cpp",
+        "rng.cpp",
         "gtzc.cpp",
         "syscfg.cpp",
     )
