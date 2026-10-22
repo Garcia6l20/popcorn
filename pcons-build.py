@@ -19,7 +19,7 @@ from popcorn_build.python import (
     interpreter,
     nanobind_runtime,
 )
-from popcorn_build.requirements import package, prefixes, unicorn_commit
+from popcorn_build.requirements import package, prefixes, unicorn_archive, unicorn_commit
 from popcorn_build.sdk import reflex_include_dirs, sdk_inputs
 from popcorn_build.testing import add_header_check, check_core_links
 
@@ -179,11 +179,11 @@ core_objects, core, core_static = area_library(
 core_objects.private.defines.extend(
     [f'POPCORN_VERSION="{POPCORN_VERSION}"', f'POPCORN_UNICORN_COMMIT="{unicorn_commit}"']
 )
-core.link_private(package("unicorn"))
+core.link_private(package("unicorn")).depends(unicorn_archive)
 core_version_script = project_dir / "native" / "src" / "core" / "popcorn_core.map"
 core.private.link_flags.append(f"-Wl,--version-script={core_version_script}")
 core.depends(core_version_script)
-core_static.link(package("unicorn"))
+core_static.link(package("unicorn")).depends(unicorn_archive)
 
 _, armv8m, armv8m_static = area_library(
     "armv8m", arch.armv8m, [(core, core_static)], arch.armv8m_entry

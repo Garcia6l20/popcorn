@@ -123,6 +123,7 @@ prefixes["unicorn"], unicorn_commit = _submodule_cmake_package(
     "unicorn", unicorn_cmake_options, "libunicorn.a"
 )
 prefixes["unicorn-headers"] = prefixes["unicorn"]
+unicorn_archive = prefixes["unicorn"] / "lib" / "libunicorn.a"
 
 
 def _describe(name: str) -> PackageDescription:
