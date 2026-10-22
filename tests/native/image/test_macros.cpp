@@ -96,6 +96,87 @@ TEST_CASE("an import runs in place and a second import of the same unit adds not
   CHECK(scan.index.entries.size() == 2);
 }
 
+TEST_CASE("a diamond of imports runs the shared unit once per path, with no cycle")
+{
+  macro_section macros;
+  auto const    root = macros.unit();
+  macros.define("ROOT 1");
+  macros.end();
+  auto const bottom = macros.unit();
+  macros.define("BOTTOM 1");
+  macros.end();
+  auto const left = macros.unit();
+  macros.import(bottom);
+  macros.define("LEFT 1");
+  macros.end();
+  auto const right = macros.unit();
+  macros.import(bottom);
+  macros.define("RIGHT 1");
+  macros.end();
+  auto const top = macros.unit();
+  macros.import(left);
+  macros.import(right);
+  macros.end();
+
+  synthetic_info const info{
+      {{.name = "root.c", .macros = root}, {.name = "top.c", .macros = top}}
+  };
+  auto const index = read_macros(info.sections(), macros.bytes()).index;
+  for(auto const* name : {"BOTTOM", "LEFT", "RIGHT"})
+  {
+    auto const found = entries_of(index, name);
+    REQUIRE(found.size() == 1);
+    CHECK(found.front().units == std::vector<std::uint32_t>{1});
+  }
+}
+
+TEST_CASE("an import of offset 0 is skipped when a compile unit's own macros start there")
+{
+  macro_section macros;
+  auto const    first = macros.unit(5, false, true);
+  REQUIRE(first == 0);
+  macros.define("FIRST_ONLY 1");
+  macros.import(0);
+  macros.end();
+  auto const shared = macros.unit();
+  macros.define("SHARED 1");
+  macros.end();
+  auto const second = macros.unit(5, false, true);
+  macros.import(0);
+  macros.import(shared);
+  macros.define("SECOND_ONLY 1");
+  macros.end();
+
+  synthetic_info const info{
+      {{.name = "first.c", .macros = first}, {.name = "second.c", .macros = second}}
+  };
+  auto const index = read_macros(info.sections(), macros.bytes()).index;
+  CHECK(index.units == std::vector<std::string>{"first.c", "second.c"});
+  auto const first_only = entries_of(index, "FIRST_ONLY");
+  REQUIRE(first_only.size() == 1);
+  CHECK(first_only.front().units == std::vector<std::uint32_t>{0});
+  auto const second_only = entries_of(index, "SECOND_ONLY");
+  REQUIRE(second_only.size() == 1);
+  CHECK(second_only.front().units == std::vector<std::uint32_t>{1});
+  CHECK(entries_of(index, "SHARED").size() == 1);
+  CHECK(index.entries.size() == 3);
+}
+
+TEST_CASE("an import of offset 0 runs when no compile unit's own macros start there")
+{
+  macro_section macros;
+  auto const    shared = macros.unit();
+  REQUIRE(shared == 0);
+  macros.define("AT_ZERO 1");
+  macros.end();
+  auto const root = macros.unit();
+  macros.import(0);
+  macros.end();
+  auto const found = entries_of(one_unit(macros, root), "AT_ZERO");
+  REQUIRE(found.size() == 1);
+  CHECK(found.front().units == std::vector<std::uint32_t>{0});
+}
+
 TEST_CASE("define_strp reads its text from .debug_str")
 {
   dwarf_bytes str;

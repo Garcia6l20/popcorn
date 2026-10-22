@@ -408,10 +408,48 @@ TEST_CASE("a hostile .debug_macro raises image_error")
   SUBCASE("import cycle")
   {
     macro_section macros;
-    auto const    at = macros.unit();
+    macros.unit();
+    macros.end();
+    auto const at = macros.unit();
     macros.import(at);
     macros.end();
     CHECK_THROWS_WITH_AS(macros_of(macros, at), doctest::Contains("cycle"), image_error);
+  }
+  SUBCASE("import cycle through two units below a root at offset 0")
+  {
+    macro_section macros;
+    auto const    root = macros.unit();
+    macros.import(0x10);
+    macros.end();
+    while(macros.bytes().size() < 0x10)
+    {
+      macros.end();
+    }
+    auto const first = macros.unit();
+    REQUIRE(first == 0x10);
+    macros.import(0x20);
+    macros.end();
+    while(macros.bytes().size() < 0x20)
+    {
+      macros.end();
+    }
+    auto const second = macros.unit();
+    REQUIRE(second == 0x20);
+    macros.import(first);
+    macros.end();
+    CHECK_THROWS_WITH_AS(macros_of(macros, root), doctest::Contains("cycle"), image_error);
+  }
+  SUBCASE("import cycle through offset 0 when no compile unit's macros start there")
+  {
+    macro_section macros;
+    auto const    zero = macros.unit();
+    REQUIRE(zero == 0);
+    macros.import(0);
+    macros.end();
+    auto const root = macros.unit();
+    macros.import(0);
+    macros.end();
+    CHECK_THROWS_WITH_AS(macros_of(macros, root), doctest::Contains("cycle"), image_error);
   }
   SUBCASE("unknown opcode without a table entry")
   {

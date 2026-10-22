@@ -84,7 +84,8 @@ struct entry_key_hash
 auto decode_unit(
     debug_sections const&      sections,
     std::span<std::byte const> macro,
-    std::uint64_t              offset) -> macro_unit
+    std::uint64_t              offset,
+    bool                       zero_is_root) -> macro_unit
 {
   if(offset >= macro.size())
   {
@@ -156,8 +157,14 @@ auto decode_unit(
         break;
       }
       case dw_macro_import:
-        ops.push_back({.kind = op_kind::import, .value = read_offset(cursor, is64)});
+      {
+        auto const target = read_offset(cursor, is64);
+        if(target != 0 or not zero_is_root)
+        {
+          ops.push_back({.kind = op_kind::import, .value = target});
+        }
         break;
+      }
       case dw_macro_define_strx:
       case dw_macro_undef_strx:
         std::ignore = cursor.uleb();
@@ -194,8 +201,8 @@ auto name_end(std::string_view text) -> std::size_t
 class unit_runner
 {
 public:
-  unit_runner(debug_sections const& sections, std::span<std::byte const> macro)
-      : sections_{sections}, macro_{macro}
+  unit_runner(debug_sections const& sections, std::span<std::byte const> macro, bool zero_is_root)
+      : sections_{sections}, macro_{macro}, zero_is_root_{zero_is_root}
   {}
 
   [[nodiscard]] auto decoded() const -> std::size_t
@@ -233,7 +240,8 @@ private:
       return found->second;
     }
     ++decodes_;
-    return decoded_.emplace(offset, decode_unit(sections_, macro_, offset)).first->second;
+    return decoded_.emplace(offset, decode_unit(sections_, macro_, offset, zero_is_root_))
+        .first->second;
   }
 
   void enter(std::uint64_t offset)
@@ -324,6 +332,7 @@ private:
 
   debug_sections const&                            sections_;
   std::span<std::byte const>                       macro_;
+  bool                                             zero_is_root_{};
   std::unordered_map<std::uint64_t, macro_unit>    decoded_;
   std::unordered_map<std::string_view, definition> defined_;
   std::unordered_map<std::uint64_t, std::uint64_t> expanded_;
@@ -337,9 +346,11 @@ auto read_macros(debug_sections const& sections, std::span<std::byte const> macr
 {
   macro_index                                                               index;
   std::unordered_map<entry_key, std::vector<std::uint32_t>, entry_key_hash> merged;
-  unit_runner                                                               runner{sections, macro};
   auto heads = unit_heads(sections);
   std::erase_if(heads, [](unit_head const& head) { return not head.macros; });
+  auto const zero_is_root = std::ranges::contains(
+      heads, std::optional<std::uint64_t>{0}, [](unit_head const& head) { return head.macros; });
+  unit_runner   runner{sections, macro, zero_is_root};
   std::uint64_t operations = 0;
   for(auto const& head : heads)
   {

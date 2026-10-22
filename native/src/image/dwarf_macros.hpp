@@ -31,7 +31,10 @@ struct macro_scan
  *        each define replaces the name's definition, each undef removes it, imports run in
  *        place. Then merges the units' end states into distinct entries. Each macro unit is
  *        decoded once, whatever its import count, and its operation count with imports
- *        expanded is computed once.
+ *        expanded is computed once. When offset 0 holds a compile unit's own macro unit, an
+ *        import of offset 0 is skipped: a linker writes 0 for an import whose target section
+ *        it discarded, as GNU ld does for the `wm4.*` groups an LTO link drops, and a compile
+ *        unit's own macro unit is never imported.
  * @param sections The DWARF sections, for the unit heads and the strings.
  * @param macro The `.debug_macro` section.
  * @throws image_error on a truncated or malformed program, an unknown opcode without an
