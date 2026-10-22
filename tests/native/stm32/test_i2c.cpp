@@ -2047,7 +2047,7 @@ TEST_CASE("I2C1RST moves the phase generation past every event queued before it,
     b.run_until(b.now() + period_ps);
     auto const before = popcorn::testing::saved_integer(*r.f, "I2C1", "generation");
     REQUIRE(before.has_value());
-    REQUIRE(popcorn::testing::queued_event(*r.f, 0, static_cast<std::uint64_t>(*before)));
+    REQUIRE(popcorn::testing::queued_event(*r.f, "I2C1", 0, static_cast<std::uint64_t>(*before)));
     seen.push_back(*before);
     rcc_reset_pulse(*r.f, "RCC_APB1RSTR1", "I2C1RST");
     auto const after = popcorn::testing::saved_integer(*r.f, "I2C1", "generation");

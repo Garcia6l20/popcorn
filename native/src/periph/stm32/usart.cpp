@@ -380,7 +380,7 @@ public:
   void plain_written(std::uint32_t old, std::uint32_t now);
 
 private:
-  void               restore_reset_values();
+  void               restore_reset_values(bool keep_host);
   [[nodiscard]] auto name_of(std::string_view with_views, std::string_view plain) const
       -> std::string_view;
   [[nodiscard]] auto enabled() const -> bool;
@@ -690,7 +690,7 @@ auto usart::name_of(std::string_view with_views, std::string_view plain) const -
 
 void usart::reset(register_file&, reset_kind)
 {
-  restore_reset_values();
+  restore_reset_values(false);
   auto const base = board_base();
   for(auto const& change : std::span{state_.cts_changes}.subspan(state_.cts_fired))
   {
@@ -706,10 +706,10 @@ void usart::on_bus_reset()
     far_end_->aborted(ctx_.clock.time());
   }
   restore_unclaimed_storage();
-  restore_reset_values();
+  restore_reset_values(true);
 }
 
-void usart::restore_reset_values()
+void usart::restore_reset_values(bool keep_host)
 {
   for(auto const& name : claims())
   {
@@ -721,7 +721,10 @@ void usart::restore_reset_values()
   }
   state_.tx_fifo.clear();
   state_.rx_fifo.clear();
-  state_.host.clear();
+  if(not keep_host)
+  {
+    state_.host.clear();
+  }
   state_.linked.clear();
   state_.holds.clear();
   state_.break_pending    = false;

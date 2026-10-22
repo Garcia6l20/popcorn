@@ -2518,7 +2518,7 @@ TEST_CASE("SAI1RST moves block A's generation past every event queued before it,
     b.run_until(b.now() + 100 * us);
     auto const before = popcorn::testing::saved_integer(*r.f, "SAI1", "block.0.generation");
     REQUIRE(before.has_value());
-    REQUIRE(popcorn::testing::queued_event(*r.f, 0, static_cast<std::uint64_t>(*before)));
+    REQUIRE(popcorn::testing::queued_event(*r.f, "SAI1", 0, static_cast<std::uint64_t>(*before)));
     seen.push_back(*before);
     rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SAI1RST");
     auto const after = popcorn::testing::saved_integer(*r.f, "SAI1", "block.0.generation");

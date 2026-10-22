@@ -1524,18 +1524,15 @@ TEST_CASE("OTGRST moves every event generation past the events queued before it,
     r.connect();
     r.port().bus_reset(r.now());
     std::array<std::int64_t, 4> before{};
-    bool                        queued = false;
     for(std::size_t kind = 0; kind < before.size(); ++kind)
     {
       auto const value =
           popcorn::testing::saved_integer(*r.f, "OTG_FS", std::format("generation.{}", kind));
       REQUIRE(value.has_value());
       before[kind] = *value;
-      queued       = queued
-                  or popcorn::testing::queued_event(
-                         *r.f, static_cast<std::uint32_t>(kind), static_cast<std::uint64_t>(*value));
     }
-    REQUIRE(queued);
+    REQUIRE(
+        popcorn::testing::queued_event(*r.f, "OTG_FS", 0, static_cast<std::uint64_t>(before[0])));
     seen.push_back(before[0]);
     rcc_reset_pulse(*r.f, "RCC_AHB2RSTR1", "OTGRST");
     for(std::size_t kind = 0; kind < before.size(); ++kind)

@@ -3458,31 +3458,85 @@ TEST_CASE("USART1RST keeps a board CTS change already queued, once")
   REQUIRE(queued() == 1);
   rcc_reset_pulse(*p->t.r.f, "RCC_APB2RSTR", "USART1RST");
   CHECK(queued() == 1);
+  p->t.cpu("USART1", "CR3", cr3_ctse);
+  p->t.cpu("USART1", "BRR", 35);
+  p->t.cpu("USART1", "CR1_enabled", cr1_of({}));
+  p->advance(due + us_ps - p->now());
+  p->t.cpu("USART1", "TDR", 'a');
+  p->advance(3 * usart1_frame(*p));
+  CHECK(p->box->posts.empty());
 }
 
-TEST_CASE("USART1RST moves the frame generation past the frame queued before it, twice")
+TEST_CASE("each USART, UART and LPUART reset moves its frame generation past the queued frame")
 {
-  parity_rig                p{line_config{}};
-  std::vector<std::int64_t> seen;
-  for(int pulse = 0; pulse < 2; ++pulse)
+  struct unit
   {
-    p.configure(line_config{});
-    p.t.cpu("USART1", "TDR", 'a');
-    auto const before = popcorn::testing::saved_integer(*p.t.r.f, "USART1", "generation.0");
-    REQUIRE(before.has_value());
-    REQUIRE(popcorn::testing::queued_event(*p.t.r.f, 0, static_cast<std::uint64_t>(*before)));
-    seen.push_back(*before);
-    rcc_reset_pulse(*p.t.r.f, "RCC_APB2RSTR", "USART1RST");
-    for(std::size_t kind = 0; kind < 3; ++kind)
+    std::string_view instance;
+    std::string_view cr1;
+    std::string_view enable_reg;
+    std::string_view enable;
+    std::string_view reset_reg;
+    std::string_view reset;
+  };
+  for(auto const& u : {
+          unit{"USART1",  "CR1_enabled", "RCC_APB2ENR",  "USART1EN",  "RCC_APB2RSTR",  "USART1RST" },
+          unit{"UART4",   "CR1_enabled", "RCC_APB1ENR1", "UART4EN",   "RCC_APB1RSTR1", "UART4RST"  },
+          unit{"LPUART1", "CR1",         "RCC_APB3ENR",  "LPUART1EN", "RCC_APB3RSTR",  "LPUART1RST"},
+  })
+  {
+    CAPTURE(u.instance);
+    parity_rig  p{line_config{}};
+    auto const& f      = *p.t.r.f;
+    auto const& rcc    = f.target->peripheral("RCC").description();
+    auto const* enable = popcorn::find_register(rcc, u.enable_reg);
+    REQUIRE(enable != nullptr);
+    auto const bit = std::ranges::find(enable->fields, u.enable, &popcorn::field_desc::name);
+    REQUIRE(bit != enable->fields.end());
+    p.t.cpu(
+        "RCC", u.enable_reg,
+        f.target->peripheral("RCC").peek(enable->offset) | (std::uint32_t{1} << bit->lsb));
+    std::vector<std::int64_t> seen;
+    for(int pulse = 0; pulse < 2; ++pulse)
     {
-      CAPTURE(kind);
-      auto const after =
-          popcorn::testing::saved_integer(*p.t.r.f, "USART1", std::format("generation.{}", kind));
-      REQUIRE(after.has_value());
-      CHECK(*after > 0);
+      p.t.cpu(u.instance, u.cr1, 0);
+      p.t.cpu(u.instance, "BRR", 0x300);
+      p.t.cpu(u.instance, u.cr1, cr1_of(line_config{}));
+      p.t.cpu(u.instance, "TDR", 'a');
+      auto const before = popcorn::testing::saved_integer(f, u.instance, "generation.0");
+      REQUIRE(before.has_value());
+      REQUIRE(
+          popcorn::testing::queued_event(f, u.instance, 0, static_cast<std::uint64_t>(*before)));
+      seen.push_back(*before);
+      rcc_reset_pulse(f, u.reset_reg, u.reset);
+      for(std::size_t kind = 0; kind < 3; ++kind)
+      {
+        CAPTURE(kind);
+        auto const after =
+            popcorn::testing::saved_integer(f, u.instance, std::format("generation.{}", kind));
+        REQUIRE(after.has_value());
+        CHECK(*after > 0);
+      }
+      auto const after = popcorn::testing::saved_integer(f, u.instance, "generation.0");
+      CHECK(*after > *before);
     }
-    auto const after = popcorn::testing::saved_integer(*p.t.r.f, "USART1", "generation.0");
-    CHECK(*after > *before);
+    CHECK(seen[1] > seen[0]);
   }
-  CHECK(seen[1] > seen[0]);
+}
+
+TEST_CASE(
+    "USART1RST keeps the frames the host queued, delivery resumes once the receiver is enabled")
+{
+  parity_rig                       p{line_config{}};
+  auto&                            port = p.t.r.port("USART1");
+  std::vector<std::uint16_t> const five{1, 2, 3, 4, 5};
+  port.receive(five);
+  REQUIRE(port.queued() == 5);
+  rcc_reset_pulse(*p.t.r.f, "RCC_APB2RSTR", "USART1RST");
+  CHECK(port.queued() == 5);
+  p.advance(100 * us_ps);
+  CHECK(port.queued() == 5);
+  p.configure(line_config{});
+  p.advance(100 * us_ps);
+  CHECK(port.queued() < 5);
+  CHECK(p.t.r.f->field("USART1", "ISR_enabled", "RXFNE") == 1);
 }

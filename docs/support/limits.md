@@ -202,12 +202,16 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - A peripheral reset bit in an `RCC_xxxRSTR` register, written from 0 to 1, resets the model of
   that instance when the model supports it: RNG, CRC, HASH, SYSCFG, ADC1 and ADC12 through
   ADC12RST, GPDMA1, LPDMA1, the timers, GPIOA to GPIOI, SPI, I2C, SAI, MDF1, ADF1, the USARTs,
-  UARTs and LPUART1, and OTG_FS. Other bits are storage. A USART reset mid-frame aborts the
-  frame on its UartLink, as clearing UE does. An OTG_FS reset releases the pull-up, so the
-  board's USB host sees a detach and enumerates the device again once firmware reconnects. Board state survives: a pin's board drive, SPI devices and I2C targets, which an
-  RCC reset of their controller does not reset, PDM sources and SAI external clocks. A GPIO
-  reset returns its pins to their reset modes, analog except PA13 to PA15, PB3 and PB4, so
-  outputs drop and listeners see the edges. A pin in analog mode reads low whatever the board
+  UARTs and LPUART1, and OTG_FS. Other bits are storage.
+- Board state survives such a reset: a pin's board drive, SPI devices and I2C targets, which an
+  RCC reset of their controller does not reset, PDM sources, SAI external clocks and the frames
+  a test queued for a USART receiver.
+- A USART reset mid-frame aborts the frame on its UartLink, as clearing UE does. Frames the host
+  queued wait until firmware enables the receiver again.
+- An OTG_FS reset releases the pull-up, so the board's USB host sees a detach and enumerates the
+  device again once firmware reconnects. The cable stays plugged or unplugged as it was.
+- A GPIO reset returns its pins to their reset modes, analog except PA13 to PA15, PB3 and PB4,
+  so outputs drop and listeners see the edges. A pin in analog mode reads low whatever the board
   drives, so an active-low SPI chip select on a reset port selects its device until firmware
   configures the pin again.
 - SYSCFGRST keeps `SYSCFG_CSLCKR`, `SYSCFG_CNSLCKR` and `SYSCFG_CFGR2`, whose bits RM0456 15.3

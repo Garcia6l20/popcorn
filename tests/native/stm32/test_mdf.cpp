@@ -2187,7 +2187,7 @@ TEST_CASE("MDF1RST moves the clock-absence generation past the event queued befo
     r.put("CKGCR", "CKGDEN", 0);
     auto const before = popcorn::testing::saved_integer(r, "MDF1", "filter.0.ckab_generation");
     REQUIRE(before.has_value());
-    REQUIRE(popcorn::testing::queued_event(r, 1, static_cast<std::uint64_t>(*before) << 8));
+    REQUIRE(popcorn::testing::queued_event(r, "MDF1", 1, static_cast<std::uint64_t>(*before) << 8));
     seen.push_back(*before);
     rcc_reset_pulse(r, "RCC_AHB1RSTR", "MDF1RST");
     auto const after = popcorn::testing::saved_integer(r, "MDF1", "filter.0.ckab_generation");

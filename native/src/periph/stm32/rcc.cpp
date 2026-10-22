@@ -643,12 +643,22 @@ rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& opt
     {
       continue;
     }
-    if(auto const found = reset_bit_of(desc, peripheral.name))
+    auto const found = reset_bit_of(desc, peripheral.name);
+    if(not found)
     {
+      continue;
+    }
+    auto const* const described = find_register(desc, found->reg);
+    auto const        index     = std::ranges::find_if(reset_registers, [&](std::string_view name) {
+      return find_register(desc, name) == described;
+    });
+    if(index != reset_registers.end())
+    {
+      auto const reg = static_cast<std::size_t>(index - reset_registers.begin());
       resets_.push_back(
           {.instance = peripheral.name,
-           .reg      = found->reg,
-           .bit      = field(reset_registers[found->reg], found->field)});
+           .reg      = reg,
+           .bit      = field(reset_registers[reg], found->field)});
     }
   }
   if(has_register("RCC_SECCFGR"))

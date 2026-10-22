@@ -489,3 +489,21 @@ TEST_CASE("a pin the test drives makes the firmware send one HID report on the i
   CHECK(*r.logged == std::vector<std::string>{});
 }
 }
+
+TEST_CASE("OTGRST detaches a configured device from the board host and keeps the cable as it is")
+{
+  {
+    rig const r{false};
+    r.run_for(300 * ms);
+    REQUIRE(r.host().state() == usb::device_state::configured);
+    rcc_reset_pulse(*r.f, "RCC_AHB2RSTR1", "OTGRST");
+    CHECK(r.host().state() == usb::device_state::detached);
+    CHECK(r.port().plugged());
+  }
+  rig const r{false};
+  r.run_for(300 * ms);
+  r.port().plug(false);
+  rcc_reset_pulse(*r.f, "RCC_AHB2RSTR1", "OTGRST");
+  CHECK_FALSE(r.port().plugged());
+  CHECK(r.host().state() == usb::device_state::detached);
+}

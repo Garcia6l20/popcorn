@@ -581,7 +581,7 @@ TEST_CASE("every U575 instance with an RCC reset bit resolves it, the renamed on
   }
   auto const rng = stm32::reset_bit_of(rcc, "RNG");
   REQUIRE(rng.has_value());
-  CHECK(stm32::reset_registers[rng->reg] == "RCC_AHB2RSTR1");
+  CHECK(rng->reg == popcorn::find_register(rcc, "RCC_AHB2RSTR1")->name);
 }
 
 TEST_CASE("each RSTR register notifies its instance's model on a 0 to 1 write only")

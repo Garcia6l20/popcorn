@@ -326,15 +326,25 @@ inline auto saved_integer(stm32_fixture const& f, std::string_view instance, std
 }
 
 /**
- * @brief Whether the event queue holds an event of @p kind and @p payload.
+ * @brief Whether the event queue holds an event of @p instance's model with @p kind and
+ *        @p payload.
  * @param f Machine.
+ * @param instance Peripheral whose model scheduled the event.
  * @param kind Event kind as the model schedules it.
  * @param payload Event payload.
  */
-inline auto queued_event(stm32_fixture const& f, std::uint32_t kind, std::uint64_t payload) -> bool
+inline auto queued_event(
+    stm32_fixture const& f,
+    std::string_view     instance,
+    std::uint32_t        kind,
+    std::uint64_t        payload) -> bool
 {
+  auto const& units = f.target->description().peripherals;
+  auto const  found = std::ranges::find(units, instance, &peripheral_desc::name);
+  REQUIRE(found != units.end());
+  auto const owner = static_cast<std::uint32_t>(found - units.begin());
   return std::ranges::any_of(f.target->snapshot().data().events.pending, [&](auto const& event) {
-    return event.id.kind == kind and event.payload == payload;
+    return event.id.owner == owner and event.id.kind == kind and event.payload == payload;
   });
 }
 }

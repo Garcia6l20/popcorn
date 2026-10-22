@@ -2235,7 +2235,7 @@ TEST_CASE("SPI1RST moves the frame generation past every event queued before it,
     b.run_until(b.now() + frame_ps);
     auto const before = popcorn::testing::saved_integer(*r.f, "SPI1", "generation");
     REQUIRE(before.has_value());
-    REQUIRE(popcorn::testing::queued_event(*r.f, 0, static_cast<std::uint64_t>(*before)));
+    REQUIRE(popcorn::testing::queued_event(*r.f, "SPI1", 0, static_cast<std::uint64_t>(*before)));
     seen.push_back(*before);
     rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
     auto const after = popcorn::testing::saved_integer(*r.f, "SPI1", "generation");
@@ -2245,14 +2245,21 @@ TEST_CASE("SPI1RST moves the frame generation past every event queued before it,
   CHECK(seen[1] > seen[0]);
 }
 
-TEST_CASE("SPI1RST moves the host generation past a host transfer queued before it")
+TEST_CASE("SPI1RST moves the host generation past a host transfer queued before it, twice")
 {
-  target_rig r;
-  bus        b{*r.f};
-  target(b, 7, 0);
-  r.transfer(b.now() + 10 * mhz_frame, {1, 2});
-  auto const before = popcorn::testing::saved_integer(*r.f, "SPI1", "host_generation").value_or(0);
-  REQUIRE(popcorn::testing::queued_event(*r.f, 1, static_cast<std::uint64_t>(before)));
-  rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
-  CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "host_generation").value_or(0) > before);
+  target_rig                r;
+  bus                       b{*r.f};
+  std::vector<std::int64_t> seen;
+  for(int pulse = 0; pulse < 2; ++pulse)
+  {
+    target(b, 7, 0);
+    r.transfer(b.now() + 10 * mhz_frame, {1, 2});
+    auto const before =
+        popcorn::testing::saved_integer(*r.f, "SPI1", "host_generation").value_or(0);
+    REQUIRE(popcorn::testing::queued_event(*r.f, "SPI1", 1, static_cast<std::uint64_t>(before)));
+    seen.push_back(before);
+    rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+    CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "host_generation").value_or(0) > before);
+  }
+  CHECK(seen[1] > seen[0]);
 }

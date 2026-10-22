@@ -18,7 +18,7 @@ inline constexpr std::array<std::string_view, 8> reset_registers{
     "RCC_APB1RSTR1", "RCC_APB1RSTR2", "RCC_APB2RSTR",  "RCC_APB3RSTR"};
 
 /** @brief Instances whose reset bit is not named `<instance>RST`. */
-inline constexpr std::array<std::pair<std::string_view, std::string_view>, 7> reset_bit_names{
+inline constexpr std::array<std::pair<std::string_view, std::string_view>, 8> reset_bit_names{
     {
      {"ADC1", "ADC12RST"},
      {"ADC12", "ADC12RST"},
@@ -27,14 +27,15 @@ inline constexpr std::array<std::pair<std::string_view, std::string_view>, 7> re
      {"PSSI", "DCMI_PSSIRST"},
      {"VREFBUF", "VREFRST"},
      {"FMC", "FSMCRST"},
+     {"LPUART", "LPUART1RST"},
      }
 };
 
 /** @brief Where an instance's reset bit lives in the RCC description. */
 struct reset_bit
 {
-  /** @brief Index of the register in reset_registers. */
-  std::size_t reg;
+  /** @brief Name of the register, as the description spells it. */
+  std::string reg;
   /** @brief Field name of the bit. */
   std::string field;
 };
@@ -53,21 +54,24 @@ struct reset_bit
 }
 
 /**
- * @brief The RCC reset bit of @p instance.
+ * @brief The RCC reset bit of @p instance, searched in every register of @p rcc whose name
+ *        holds `RSTR`, so a family with other reset register names, such as the STM32H5
+ *        RCC_APB1LRSTR, resolves too.
  * @param rcc Description of the RCC peripheral.
  * @param instance Instance name as the description spells it.
- * @return The register index and field, nullopt when no reset register of @p rcc has it.
+ * @return The register name and field, nullopt when no reset register of @p rcc has it.
  */
 [[nodiscard]] inline auto reset_bit_of(peripheral_desc const& rcc, std::string_view instance)
     -> std::optional<reset_bit>
 {
   auto const name = reset_bit_name(instance);
-  for(std::size_t index = 0; index < reset_registers.size(); ++index)
+  for(auto const& reg : rcc.registers)
   {
-    auto const* const reg = find_register(rcc, reset_registers[index]);
-    if(reg != nullptr and std::ranges::contains(reg->fields, name, &field_desc::name))
+    if(not reg.alternate_of
+       and reg.name.contains("RSTR")
+       and std::ranges::contains(reg.fields, name, &field_desc::name))
     {
-      return reset_bit{.reg = index, .field = name};
+      return reset_bit{.reg = reg.name, .field = name};
     }
   }
   return std::nullopt;
