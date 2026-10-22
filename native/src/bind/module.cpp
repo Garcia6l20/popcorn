@@ -16,6 +16,7 @@
 #include <popcorn/core/types.hpp>
 #include <popcorn/core/version.hpp>
 #include <popcorn/periph/i2c.hpp>
+#include <popcorn/periph/stm32/rng.hpp>
 
 #include <reflex/py.hpp>
 
@@ -26,6 +27,7 @@
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
+#include <cstdint>
 #include <format>
 #include <string>
 
@@ -37,6 +39,12 @@ namespace popcorn::bind
 [[= py::doc{"Version of popcorn and of the linked Unicorn commit."}]] auto version() -> std::string
 {
   return std::string{core::version()};
+}
+
+[[= py::doc{"Most words the queue of the built-in RNG model holds."}]] auto rng_max_queued()
+    -> std::uint64_t
+{
+  return periph::stm32::rng_max_queued;
 }
 }
 

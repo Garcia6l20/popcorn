@@ -38,6 +38,7 @@ firmwares = {
         "sai_ll",
         "irq_ll",
         "hash_ll",
+        "rng_ll",
     )
 }
 u575_env = {
@@ -103,6 +104,7 @@ u575_programs = [
         ("stm32-dbgmcu", "test_dbgmcu.cpp"),
         ("stm32-crc", "test_crc.cpp"),
         ("stm32-hash", "test_hash.cpp"),
+        ("stm32-rng", "test_rng.cpp"),
         ("stm32-gtzc", "test_gtzc.cpp"),
         ("stm32-tz-aware", "test_tz_aware.cpp"),
         ("stm32-smc", "test_smc.cpp"),

@@ -2,6 +2,7 @@
 #include "factories.hpp"
 #include "gtzc.hpp"
 #include "hsi16_source.hpp"
+#include "kernel_gate.hpp"
 #include "lsi_source.hpp"
 #include "model_base.hpp"
 
@@ -20,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -432,6 +434,7 @@ struct timer
 class rcc final : public dispatch_model<rcc, rcc_state>,
                   public lsi_source,
                   public hsi16_source,
+                  public kernel_gate,
                   public trustzone_aware
 {
 public:
@@ -443,8 +446,9 @@ public:
   {
     return true;
   }
-  void force_lsi() override;
-  void hold_hsi16(bool held) override;
+  void               force_lsi() override;
+  void               hold_hsi16(bool held) override;
+  [[nodiscard]] auto bus_enabled(core::clock_domain kernel) const -> bool override;
 
   void                            cr_written(std::uint32_t old, std::uint32_t now);
   void                            icscr1_written(std::uint32_t old, std::uint32_t now);
@@ -483,6 +487,7 @@ private:
   void cancel(std::uint32_t kind);
   void settle(bool notify);
   void publish(bool notify);
+  void load(std::span<std::byte const> in) override;
   void refuse_core_stop(std::string_view reg, std::string_view what);
 
   bool                                                 core_stop_logged_{};
@@ -511,6 +516,7 @@ private:
   reg_ref                                              csr_;
   std::vector<std::pair<core::clock_domain, signal>>   signals_;
   std::vector<kernel>                                  kernels_;
+  std::vector<std::uint8_t>                            kernel_enables_;
   std::vector<timer>                                   timers_;
   std::optional<reg_ref>                               secure_;
   reg_ref                                              privilege_;
@@ -1047,11 +1053,16 @@ void rcc::publish(bool notify)
   {
     set(domain, hz[std::to_underlying(which)]);
   }
-  for(auto const& entry : kernels_)
+  auto const known = kernel_enables_.size() == kernels_.size();
+  kernel_enables_.resize(kernels_.size());
+  for(auto const& [entry, published] : std::views::zip(kernels_, kernel_enables_))
   {
-    auto const code = get(regs_, entry.select);
-    auto const from = code < entry.inputs->size() ? (*entry.inputs)[code] : none;
-    set(entry.domain, get(regs_, entry.enable) != 0 ? hz[std::to_underlying(from)] : 0);
+    auto const code    = get(regs_, entry.select);
+    auto const from    = code < entry.inputs->size() ? (*entry.inputs)[code] : none;
+    auto const enabled = get(regs_, entry.enable) != 0 ? std::uint8_t{1} : std::uint8_t{0};
+    set(entry.domain, enabled != 0 ? hz[std::to_underlying(from)] : 0);
+    changed   = changed or (known and published != enabled);
+    published = enabled;
   }
   for(auto const& entry : timers_)
   {
@@ -1301,6 +1312,22 @@ void rcc::force_lsi()
   {
     start(lsi);
   }
+}
+
+void rcc::load(std::span<std::byte const> in)
+{
+  dispatch_model::load(in);
+  kernel_enables_.clear();
+  for(auto const& entry : kernels_)
+  {
+    kernel_enables_.push_back(get(regs_, entry.enable) != 0 ? 1 : 0);
+  }
+}
+
+auto rcc::bus_enabled(core::clock_domain kernel) const -> bool
+{
+  auto const found = std::ranges::find(kernels_, kernel, &kernel::domain);
+  return found == kernels_.end() or get(regs_, found->enable) != 0;
 }
 
 void rcc::hold_hsi16(bool held)

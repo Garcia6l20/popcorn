@@ -220,7 +220,7 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     _, report = u575_target_and_report
     assert report.ip_renamed == 26
     assert report.aliased == 98
-    assert report.fields_touched == 218
+    assert report.fields_touched == 220
     assert report.cross_rules_added == 570
     assert report.irqs_dropped == 0
     assert report.irqs_added == 1
@@ -302,6 +302,31 @@ def test_rng_has_the_nscr_register_st_svd_omits(
         assert [(f.name, f.lsb, f.width) for f in nscr.fields] == [
             (f"EN_OSC{n}", 3 * (n - 1), 3) for n in range(6, 0, -1)
         ]
+
+
+def test_rng_cr_and_htcr_reset_to_the_rm0456_values(
+    u575_target_and_report: _TargetAndReport,
+) -> None:
+    target, _ = u575_target_and_report
+    for name in ("RNG", "SEC_RNG"):
+        registers = {r.name: r for r in target_peripheral(target, name).registers}
+        assert registers["CR"].reset == 0x0080_0D00
+        assert registers["HTCR"].reset == 0x0000_72AC
+
+
+def test_rng_seis_and_ceis_clear_on_a_write_of_0(
+    u575_target_and_report: _TargetAndReport,
+) -> None:
+    target, _ = u575_target_and_report
+    sr = next(r for r in target_peripheral(target, "RNG").registers if r.name == "SR")
+    effects = {f.name: f.on_write for f in sr.fields}
+    assert effects == {
+        "SEIS": WriteEffect.ZERO_TO_CLEAR,
+        "CEIS": WriteEffect.ZERO_TO_CLEAR,
+        "SECS": WriteEffect.MODIFY,
+        "CECS": WriteEffect.MODIFY,
+        "DRDY": WriteEffect.MODIFY,
+    }
 
 
 def test_otg_fs_has_the_core_id_and_hardware_configuration_words(
