@@ -32,9 +32,10 @@ struct macro_scan
  *        place. Then merges the units' end states into distinct entries. Each macro unit is
  *        decoded once, whatever its import count, and its operation count with imports
  *        expanded is computed once. When offset 0 holds a compile unit's own macro unit, an
- *        import of offset 0 is skipped: a linker writes 0 for an import whose target section
- *        it discarded, as GNU ld does for the `wm4.*` groups an LTO link drops, and a compile
- *        unit's own macro unit is never imported.
+ *        import of offset 0 is skipped and counted in macro_index::discarded_imports: GNU ld
+ *        writes 0 for an import whose target section it discarded, such as a `wm4.*` group an
+ *        LTO link drops, and GCC never imports a compile unit's own macro unit. When no compile
+ *        unit's macros start at 0, an import of 0 runs.
  * @param sections The DWARF sections, for the unit heads and the strings.
  * @param macro The `.debug_macro` section.
  * @throws image_error on a truncated or malformed program, an unknown opcode without an

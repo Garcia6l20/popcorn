@@ -85,7 +85,8 @@ auto decode_unit(
     debug_sections const&      sections,
     std::span<std::byte const> macro,
     std::uint64_t              offset,
-    bool                       zero_is_root) -> macro_unit
+    bool                       zero_is_root,
+    std::uint64_t&             discarded) -> macro_unit
 {
   if(offset >= macro.size())
   {
@@ -163,6 +164,10 @@ auto decode_unit(
         {
           ops.push_back({.kind = op_kind::import, .value = target});
         }
+        else
+        {
+          ++discarded;
+        }
         break;
       }
       case dw_macro_define_strx:
@@ -210,6 +215,11 @@ public:
     return decodes_;
   }
 
+  [[nodiscard]] auto discarded() const -> std::uint64_t
+  {
+    return discarded_;
+  }
+
   auto count(unit_head const& head) -> std::uint64_t
   {
     importing_.clear();
@@ -240,7 +250,8 @@ private:
       return found->second;
     }
     ++decodes_;
-    return decoded_.emplace(offset, decode_unit(sections_, macro_, offset, zero_is_root_))
+    return decoded_
+        .emplace(offset, decode_unit(sections_, macro_, offset, zero_is_root_, discarded_))
         .first->second;
   }
 
@@ -339,6 +350,7 @@ private:
   std::vector<std::uint64_t>                       importing_;
   unit_head const*                                 head_{};
   std::size_t                                      decodes_{};
+  std::uint64_t                                    discarded_{};
 };
 }
 
@@ -382,6 +394,7 @@ auto read_macros(debug_sections const& sections, std::span<std::byte const> macr
   std::ranges::sort(index.entries, {}, [](macro_entry const& entry) {
     return std::tie(entry.name, entry.text, entry.function_like);
   });
+  index.discarded_imports = runner.discarded();
   return {.index = std::move(index), .units_decoded = runner.decoded()};
 }
 }

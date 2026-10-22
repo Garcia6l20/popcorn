@@ -188,6 +188,11 @@ public:
   /** @brief The number of distinct entries. */
   [[= py::doc{"The number of distinct entries."}]] [[nodiscard]] auto count() const -> std::size_t;
 
+  /** @brief Imports skipped because the linker discarded their target. */
+  [[= py::doc{"Imports of offset 0 skipped because the linker discarded their target: the "
+              "macros of those headers are missing."}]] [[nodiscard]] auto discarded_imports() const
+      -> std::uint64_t;
+
 private:
   popcorn::image::macro_index index_;
 };

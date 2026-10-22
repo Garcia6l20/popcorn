@@ -187,6 +187,9 @@ struct macro_index
   /** @brief Distinct (name, text, function_like) entries, sorted by name, text, then
    * function_like. */
   std::vector<macro_entry> entries{};
+  /** @brief Imports of offset 0 skipped as left by a linker that discarded their target, see
+   * read_macros(). The macros of those targets are missing from entries. */
+  std::uint64_t discarded_imports{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(macro_index const&, macro_index const&) -> bool = default;
@@ -197,7 +200,11 @@ struct macro_index
  *        definitions in effect at the end of each compile unit's macro program, merged into
  *        distinct entries. Not part of image: macros do not belong to the loaded content.
  * @param file Path of the ELF.
- * @return The index, empty when the file has no `.debug_macro` or no DWARF.
+ * @return The index, empty when the file has no `.debug_macro` or no DWARF. When offset 0
+ *         holds a compile unit's own macro unit, an import of offset 0 is skipped and counted
+ *         in macro_index::discarded_imports: GNU ld writes 0 for an import whose target section
+ *         it discarded, and GCC never imports a compile unit's own macro unit. When no compile
+ *         unit's macros start at 0, an import of 0 runs.
  * @throws image_error when the file is not an ELF32 or its DWARF or macro program is malformed,
  *         holds an import cycle, more than 64 nested imports, more than 2^24 operations for one
  *         compile unit or 2^26 for the file, or an operation of a supplementary file.

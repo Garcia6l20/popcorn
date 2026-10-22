@@ -206,8 +206,9 @@ class Constants:
             unit: A compile unit, as `enumerator` takes it. Needed only when units disagree.
 
         Raises:
-            SymbolError: No unit defines the macro, with close matches, or no file holds
-                macros. Or the units give different texts and `unit` is None, every unit and
+            SymbolError: No unit defines the macro, with close matches and, per file, the
+                count of `.debug_macro` imports whose section the linker discarded, or no file
+                holds macros. Or the units give different texts and `unit` is None, every unit and
                 its text in the message. Or `unit` matches no unit, or several, or that unit
                 does not define it.
             ValueError: The text is not such an expression: a function-like macro, a string,
@@ -243,8 +244,14 @@ class Constants:
                 name=name,
             )
         close = difflib.get_close_matches(name, known, n=5)
+        discarded = "".join(
+            f"; {file.path}: {index.discarded_imports()} .debug_macro imports name a section"
+            " the linker discarded, the macros of their headers are missing"
+            for file in self._loaded()
+            if (index := _macro_index(file)) is not None and index.discarded_imports()
+        )
         raise SymbolError(
-            f"no macro {name} in the files, close matches: {', '.join(close)}",
+            f"no macro {name} in the files, close matches: {', '.join(close)}{discarded}",
             name=name,
             close_matches=close,
         )
