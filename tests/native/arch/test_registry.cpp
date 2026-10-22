@@ -5,6 +5,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -141,4 +142,17 @@ TEST_CASE("register_builtin registers armv8m once")
   register_fake("shadow-cm33", "CM33", 5);
   arch::armv8m::register_builtin();
   CHECK(tag_of("CM33") == 5);
+}
+
+TEST_CASE("module_names lists each module once, a replaced one last")
+{
+  register_fake("names-a", "FAKE-NAMES", 1);
+  register_fake("names-b", "FAKE-NAMES", 2);
+  register_fake("names-a", "FAKE-NAMES", 3);
+  auto const names = arch::module_names();
+  REQUIRE(names.size() >= 2);
+  CHECK(std::ranges::count(names, std::string{"names-a"}) == 1);
+  CHECK(std::ranges::count(names, std::string{"names-b"}) == 1);
+  CHECK(names[names.size() - 2] == "names-b");
+  CHECK(names.back() == "names-a");
 }

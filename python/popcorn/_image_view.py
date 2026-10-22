@@ -159,6 +159,10 @@ class ImageView:
         loaded image first, or of the image named `image` alone, as `Machine.var` looks it up.
         The file is read now: a file rebuilt since the load gives its new bytes.
 
+        Args:
+            name: The variable name.
+            image: The image to look in, all loaded images by default.
+
         Raises:
             SymbolError: No loaded image declares the variable, with close matches, or no
                 image is named `image`.

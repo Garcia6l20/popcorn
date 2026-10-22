@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file
+ * @brief The interface for a model that brings lazily computed state up to date before a snapshot.
+ */
+
 #include <popcorn/export.hpp>
 
 namespace popcorn::periph

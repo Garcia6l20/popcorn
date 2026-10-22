@@ -23,4 +23,5 @@ sources = [
     here / "pty.cpp",
     here / "system.cpp",
     here / "plugins.cpp",
+    here / "support.cpp",
 ]

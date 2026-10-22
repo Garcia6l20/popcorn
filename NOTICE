@@ -113,6 +113,11 @@ doctest
   https://github.com/doctest/doctest
   License: MIT. Used by native test programs only, not part of the extension.
 
+doxygen-awesome-css
+  https://github.com/jothepro/doxygen-awesome-css
+  License: MIT, see LICENSES/doxygen-awesome-css-LICENSE. Fetched at docs build time
+  for the style of the C++ SDK reference, not part of the package.
+
 STM32 part descriptions. Each file under python/popcorn/stm32/data is built by
 popcorn's description builder from the files below, which it parses and
 transforms into popcorn's part description format. Memory regions and core

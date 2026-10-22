@@ -2,7 +2,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from popcorn_build.manifest import is_firmware_only, packages_to_fetch
+from popcorn_build.manifest import is_docs_only, is_firmware_only, packages_to_fetch
 
 MANIFEST: dict[str, dict[str, Any]] = {
     "doctest": {"url": "u", "build": "none"},
@@ -36,3 +36,11 @@ def test_the_repository_manifest_marks_the_firmware_packages_firmware_only() -> 
         "tinyusb",
     }
     assert set(packages_to_fetch(manifest, with_firmware=False)).isdisjoint(firmware)
+
+
+def test_docs_only_packages_are_never_fetched_by_a_configure() -> None:
+    manifest = {**MANIFEST, "theme": {"url": "u", "build": "none", "docs": True}}
+    assert "theme" not in packages_to_fetch(manifest, with_firmware=True)
+    assert "theme" not in packages_to_fetch(manifest, with_firmware=False)
+    assert is_docs_only(manifest["theme"])
+    assert not is_docs_only({"docs": "yes"})

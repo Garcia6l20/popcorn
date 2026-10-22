@@ -80,7 +80,11 @@ class ArenaBlock:
         return self._memory.read(self.address, self.size)
 
     def write(self, data: bytes | Sequence[int] | Sequence[float]) -> None:
-        """Write bytes, or the values of an array block, from the start of the block."""
+        """Write bytes, or the values of an array block, from the start of the block.
+
+        Args:
+            data: Bytes, or the values of an array block.
+        """
         raw = data if isinstance(data, bytes) else self._pack(data)
         if len(raw) > self.size:
             raise ValueError(f"{len(raw)} bytes do not fit the {self.size}-byte block")
@@ -160,6 +164,10 @@ class Arena:
         type name such as `"struct point"`, or a variable whose type to take, with a `var`
         view of the block.
 
+        Args:
+            what: The size in bytes, a DWARF type, a type name or a variable.
+            align: Alignment of the block in bytes.
+
         Raises:
             TypeError: The type belongs to no loaded image's DWARF.
             ConfigError: The arena is full.
@@ -184,7 +192,12 @@ class Arena:
         return block
 
     def alloc_array(self, ctype: CScalar, count: int) -> ArenaBlock:
-        """A zero-filled array of `count` ctypes scalars, written and read as values."""
+        """A zero-filled array of `count` ctypes scalars, written and read as values.
+
+        Args:
+            ctype: The scalar type of the elements.
+            count: Number of elements.
+        """
         fmt = _FORMATS.get(ctype)
         if fmt is None:
             raise TypeError(f"{ctype.__name__} is not a ctypes scalar type")
@@ -194,7 +207,12 @@ class Arena:
         return ArenaBlock(self._memory, address, size, fmt=fmt)
 
     def bytes(self, data: bytes, align: int = 8) -> ArenaBlock:
-        """A block holding `data`."""
+        """A block holding `data`.
+
+        Args:
+            data: The bytes the block holds.
+            align: Alignment of the block in bytes.
+        """
         block = self.alloc(len(data), align)
         block.write(data)
         return block

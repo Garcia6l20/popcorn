@@ -182,6 +182,9 @@ class Call:
     def args_typed(self, abi: FloatAbi | None = None) -> tuple[int | float, ...]:
         """Arguments read with the function's DWARF signature, each at its C type.
 
+        Args:
+            abi: Calling convention to read floats with, the image's by default.
+
         Raises:
             TypeError: The function has no DWARF signature.
         """
@@ -431,7 +434,11 @@ class Event(Protocol):
     """
 
     def ready(self, machine: Machine) -> bool:
-        """Whether the event happened."""
+        """Whether the event happened.
+
+        Args:
+            machine: The machine to test.
+        """
         ...
 
 
@@ -449,7 +456,11 @@ class Reached:
     target: int | str | Symbol
 
     def ready(self, machine: Machine) -> bool:
-        """Whether pc is at the target."""
+        """Whether pc is at the target.
+
+        Args:
+            machine: The machine to test.
+        """
         return machine.pc == machine.address_of(self.target)
 
 
@@ -1120,6 +1131,9 @@ class Machine:
         Memory is kept. `power_cycle` is the supply cut that loses RAM. A member of a linked
         system resets through `System.reset`, its system time running on unchanged.
 
+        Args:
+            kind: The kind of reset, a power-on reset by default.
+
         Raises:
             MachineRunning: The machine is busy, outside its handlers. For a member: the system
                 runs, or the member has a goal pending.
@@ -1296,6 +1310,10 @@ class Machine:
         `at`, the batch runs at the first block boundary at or after it, exactly at it when the
         core is idle there: on a parked machine it waits for a run that reaches it.
 
+        Args:
+            refs: The references to read.
+            at: Virtual time to read at, the next block boundary by default.
+
         Returns:
             The values in argument order, with the virtual time they were read at.
 
@@ -1349,6 +1367,10 @@ class Machine:
         so does everything the member does after them. With `at`, whether the member already
         stands past `at`, and the writes are refused, depends on the quantum too. Write a halted
         member for an exact point: after its goal's stop, or with the goal withdrawn.
+
+        Args:
+            pairs: `(reference, value)` pairs, written in order.
+            at: Virtual time to write at, the next block boundary by default.
 
         Raises:
             RuntimeError: Called from a handler or a model, of any machine.
@@ -1549,6 +1571,12 @@ class Machine:
         a trace with call records is open. Block and memory records cost a native hook while
         traced, nothing crosses to Python per record. Leaving the block removes the sink, then
         closes the file.
+
+        Args:
+            kinds: The kinds of record to write.
+            path: The `.pctr` file to create.
+            ranges: Address ranges to trace, all by default.
+            functions: Names of functions to trace, all by default.
 
         Raises:
             ConfigError: A kind is not selectable, or a range is invalid.
@@ -1977,7 +2005,12 @@ class Machine:
     def intercepted(
         self, fn: int | str | Symbol, handler: InterceptHandler
     ) -> Generator[Intercept]:
-        """Intercept `fn` for the body of the `with` block only."""
+        """Intercept `fn` for the body of the `with` block only.
+
+        Args:
+            fn: The function to intercept.
+            handler: Called with the `Call` of each arrival.
+        """
         installed = self._install_intercept(fn, handler, False)
         try:
             yield installed
@@ -2096,6 +2129,12 @@ class Machine:
         Without a handler every hit stops the run with WATCHPOINT. A handler returns
         `WatchAction.STOP` or `RESUME`, None meaning RESUME. Every hit goes to `Watch.hits`.
         An address inside a peripheral window that no register covers is not watched yet.
+
+        Args:
+            target: Address or symbol to watch.
+            size: Bytes to watch.
+            kind: Which accesses to watch.
+            handler: Called with each `WatchHit`, a hit stops the run when omitted.
 
         Raises:
             ConfigError: The range is empty or reaches no memory and no peripheral.
@@ -2443,6 +2482,9 @@ class Machine:
 
     def load_snapshot(self, path: str | os.PathLike[str]) -> Snapshot:
         """Read a saved snapshot and restore it.
+
+        Args:
+            path: The saved snapshot file.
 
         Raises:
             ConfigError: The file is malformed, or names another description, images or

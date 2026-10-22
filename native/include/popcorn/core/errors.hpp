@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file
+ * @brief The error hierarchy that every popcorn call raises.
+ */
+
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
 

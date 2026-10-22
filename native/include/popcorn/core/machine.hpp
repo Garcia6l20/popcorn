@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @brief The machine: its options, the bounds and results of a run, and the class that owns one
+ * emulated MCU.
+ */
+
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/coverage.hpp>
@@ -74,8 +80,8 @@ struct machine_options
    * interrupts, so the threshold should stay well above the iterations between interrupts,
    * 1e5 to 1e6: a stuck loop repeats forever, so a large threshold only delays the stop.
    * Independently of spin_threshold, the run also stops with stop_reason::spin when 65536 events
-   * are dispatched at one instruction count, detail 'events repeat without time passing: <owner>
-   * kind <n>'. */
+   * are dispatched at one instruction count, detail `events repeat without time passing: <owner>
+   * kind <n>`. */
   std::uint32_t spin_threshold{};
   /** @brief Whether every CPU or DMA access to a register of an unmodelled peripheral, or to a
    * raz_wi range, fails the run with model_error. The arch module's and the models' own debugger
@@ -130,6 +136,7 @@ struct frame_return
   /** @brief Stack pointer at the function's entry, the same at its return under AAPCS. */
   std::uint64_t sp{};
 
+  /** @brief Member-wise equality. */
   friend auto operator==(frame_return const&, frame_return const&) -> bool = default;
 };
 

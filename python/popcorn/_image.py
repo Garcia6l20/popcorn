@@ -109,12 +109,21 @@ class Image:
 
     @classmethod
     def bin(cls, path: str | os.PathLike[str], at: int) -> Image:
-        """Load a raw binary whose first byte goes at guest address `at`."""
+        """Load a raw binary whose first byte goes at guest address `at`.
+
+        Args:
+            path: The binary file.
+            at: Guest address of the first byte.
+        """
         return cls(_core.load_bin(os.fspath(path), at), Path(path))
 
     @classmethod
     def hex(cls, path: str | os.PathLike[str]) -> Image:
-        """Load an Intel HEX file."""
+        """Load an Intel HEX file.
+
+        Args:
+            path: The Intel HEX file.
+        """
         return cls(_core.load_hex(os.fspath(path)), Path(path))
 
     @property

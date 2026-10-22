@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @brief Fundamental types of the C++ API: addresses, instruction and virtual time counts, stop and
+ * fault records, and the enums that describe them.
+ */
+
 #include <reflex/enum.hpp>
 
 #include <compare>
@@ -18,6 +24,7 @@ using address = std::uint32_t;
 /** @brief Count of guest instructions executed. */
 struct icount
 {
+  /** @brief The count. */
   std::uint64_t value;
 
   /** @brief Member-wise ordering and equality. */
@@ -27,6 +34,7 @@ struct icount
 /** @brief Virtual time elapsed in the guest, in picoseconds. */
 struct vtime
 {
+  /** @brief Picoseconds. */
   std::uint64_t ps;
 
   /** @brief Member-wise ordering and equality. */

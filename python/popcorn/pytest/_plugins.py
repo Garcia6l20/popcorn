@@ -18,7 +18,7 @@ from popcorn.plugin._records import constructed
 
 
 def declared_by(directory: Path) -> list[Plugin]:
-    """The dev plugins the `conftest.py` of @p directory constructed, in order."""
+    """The dev plugins the `conftest.py` of `directory` constructed, in order."""
     conftest = (directory / "conftest.py").resolve()
     return [plugin for plugin, origin in constructed() if origin == conftest]
 

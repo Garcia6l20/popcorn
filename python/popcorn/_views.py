@@ -305,7 +305,11 @@ class RegisterView:
         return self._bus().__getitem__(self._base + self._offset)
 
     def write(self, value: int) -> None:
-        """Write the register over the bus as the debugger, so a model reacts."""
+        """Write the register over the bus as the debugger, so a model reacts.
+
+        Args:
+            value: The value to write.
+        """
         self._bus()[self._base + self._offset] = value
 
     def _bus(self) -> ScalarView[int]:
@@ -562,7 +566,11 @@ class Pin:
         """Drive the pin to `level` at exactly `at`, as `drive_edges([(at, level)])` does.
 
         Raises:
-            As `drive_edges`.
+            TypeError: As `drive_edges`.
+            ValueError: As `drive_edges`.
+            ConfigError: As `drive_edges`.
+            ModelError: As `drive_edges`.
+            RuntimeError: As `drive_edges`.
         """
         return self.drive_edges([(at, level)])
 

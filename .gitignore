@@ -7,3 +7,6 @@ __pycache__/
 .ruff_cache/
 compile_commands.json
 .cache/
+site/
+docs/support/generated/
+docs/reference/sdk/api/

@@ -9,5 +9,7 @@
  *        so link-time optimization may inline them.
  */
 
-#define POPCORN_API    [[gnu::visibility("default")]]
+/** @brief Gives a class or function default symbol visibility, so a plugin library exports it. */
+#define POPCORN_API [[gnu::visibility("default")]]
+/** @brief Gives a class or function hidden symbol visibility. */
 #define POPCORN_HIDDEN [[gnu::visibility("hidden")]]

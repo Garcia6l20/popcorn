@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file
+ * @brief The virtual clock of a machine and the driver that advances it.
+ */
+
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>

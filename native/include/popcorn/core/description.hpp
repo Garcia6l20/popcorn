@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @brief Part description data: peripherals, registers, memory regions and interrupts, and the
+ * functions that read, dump and digest them.
+ */
+
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
 

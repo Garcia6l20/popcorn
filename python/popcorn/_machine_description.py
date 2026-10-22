@@ -1046,7 +1046,7 @@ _NANOBIND_FUNCTION = type(_core.version)
 
 
 def _bound_natively(cls: type) -> bool:
-    """Whether a nanobind module of popcorn's domain bound @p cls, not a Python class deriving
+    """Whether a nanobind module of popcorn's domain bound `cls`, not a Python class deriving
     from one.
 
     nanobind gives every type it binds a `__new__` of its own: the slot wrapper, or an nb_func
@@ -1062,9 +1062,9 @@ def _bound_natively(cls: type) -> bool:
 
 
 def _device_plugin_refusal(cls: type, plugins: Sequence[Plugin]) -> str | None:
-    """What a device of class @p cls needs and lacks, None when every class of its MRO that a
+    """What a device of class `cls` needs and lacks, None when every class of its MRO that a
     nanobind module bound comes from popcorn or from a bindings module `Plugin.module()`
-    imported, or a submodule of one, of a plugin of @p plugins.
+    imported, or a submodule of one, of a plugin of `plugins`.
 
     A natively bound class from any other module is refused, whatever the module is called:
     its library was mapped without the loader's checks."""
@@ -1113,7 +1113,7 @@ def _plugin_identity(plugin: Plugin) -> dict[str, object]:
 
 
 def _bindings_file(module_name: str) -> Path | None:
-    """The file `import` @p module_name would load, None when it finds none. The parent package
+    """The file `import module_name` would load, None when it finds none. The parent package
     is imported, an installed plugin's package loads nothing native."""
     try:
         spec = importlib.util.find_spec(module_name)

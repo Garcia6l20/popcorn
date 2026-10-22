@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @brief The peripheral model interface, the context a model is built with, and the registry that
+ * selects a model for a peripheral.
+ */
+
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
