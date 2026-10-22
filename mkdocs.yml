@@ -26,6 +26,7 @@ markdown_extensions:
   - pymdownx.snippets:
       base_path: [tests/docs, examples]
       check_paths: true
+      dedent_subsections: true
   - pymdownx.tabbed:
       alternate_style: true
 
@@ -62,7 +63,8 @@ nav:
       - guide/examples.md
   - Support:
       - support/index.md
-      - support/cores.md
+      - support/generated/parts.md
+      - support/generated/cores.md
       - support/limits.md
   - Reference:
       - Python:

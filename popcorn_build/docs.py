@@ -1,10 +1,12 @@
 import re
+import shutil
 import subprocess
 import sys
 
 from popcorn_build.config import project_dir
 
 PACKAGE = project_dir / "build" / "popcorn" / "__init__.py"
+GENERATED = project_dir / "docs" / "support" / "generated"
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -30,16 +32,32 @@ def flagged(line: str) -> bool:
     return plain.startswith("griffe:") or "WARNING" in plain.upper()
 
 
-def run() -> int:
-    """Run the build, stream its output, and return 1 on a warning line or a failed build.
+def generate() -> int:
+    """Regenerate the support pages into docs/support/generated, in an interpreter of its own so
+    only the built-in models count. The return code of that interpreter."""
+    shutil.rmtree(GENERATED, ignore_errors=True)
+    return subprocess.run(
+        [sys.executable, "-m", "popcorn_build.support_pages", str(GENERATED)],
+        cwd=project_dir,
+        check=False,
+    ).returncode
 
-    mkdocstrings reads the package from build/popcorn, so the native build comes first."""
+
+def run() -> int:
+    """Generate the support pages, run the build, stream its output, and return 1 on a warning
+    line or a failed step.
+
+    mkdocstrings and the support pages read the package from build/popcorn, so the native build
+    comes first."""
     if not PACKAGE.is_file():
         print(
             f"popcorn docs: {PACKAGE.parent} is missing, run `uv run pcons -B build` first",
             file=sys.stderr,
         )
         return 1
+    generated = generate()
+    if generated != 0:
+        return generated
     warnings: list[str] = []
     with subprocess.Popen(
         build_command(),
