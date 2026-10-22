@@ -13,13 +13,14 @@ flowchart LR
 
 ## A first test
 
-The test below boots the gpio example firmware to `main`, runs it for 1 ms and checks the LED pin.
+The test below boots the gpio example firmware to `main`. It presses the button on PC13 once, then
+checks that the LED on PA5 is on and that the firmware counted one press.
 
 ```python
 --8<-- "test_quickstart.py:boot"
 ```
 
-Run it with pytest:
+The file is tests/docs/test_quickstart.py in the popcorn repository. Run it from the repository root:
 
 === "uv"
 
@@ -27,7 +28,7 @@ Run it with pytest:
     uv run pytest tests/docs/test_quickstart.py
     ```
 
-=== "pip"
+=== "venv"
 
     ```sh
     python -m pytest tests/docs/test_quickstart.py

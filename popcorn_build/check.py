@@ -6,7 +6,6 @@ import time
 import click
 from pcons import cli_command
 
-from popcorn_build import docs
 from popcorn_build.config import project_dir
 
 Stage = tuple[str, list[str]]
@@ -89,7 +88,7 @@ def stages(asan: bool, jobs: int | None = None) -> list[Stage]:
             "examples",
             _python_tool("pytest", "-q", *_xdist(jobs, EXAMPLE_WORKERS), "examples"),
         ),
-        ("docs", docs.build_command()),
+        ("docs", _python_tool("popcorn_build.docs")),
         ("pyright", _python_tool("pyright")),
         ("ruff", _python_tool("ruff", "check", ".")),
         ("black", _python_tool("black", "--check", "-q", ".")),
