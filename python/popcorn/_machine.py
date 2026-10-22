@@ -741,7 +741,9 @@ class Machine:
                 registers, None for the description's registers. With `tzen` the core boots
                 from the secure boot address and the machine has TrustZone, without it from the
                 non-secure one. `vector_table` wins over both.
-            rng: Word source of the built-in RNG model, None for its default, seed 0.
+            rng: Word source of the built-in RNG model, None for its default, seed 0. It puts
+                the built-in model on RNG, over a class registered with
+                `popcorn.model.register`.
             name: Name of the machine in its log records and errors, the description's part
                 when None. Not part of any configuration digest or snapshot.
             _plugin_models: Private, set by `MachineDescription.machine`: the loaded plugin and

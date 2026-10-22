@@ -398,8 +398,9 @@ class MachineDescription:
             description's option registers. With `tzen` the core boots from the secure boot
             address, without it from the non-secure one, and `boot.vtor` wins over both. In
             `digest`, left out when None.
-        rng: Word source of the built-in RNG model, None for its default, seed 0. In `digest`,
-            left out when None.
+        rng: Word source of the built-in RNG model, None for its default, seed 0. It puts the
+            built-in model on RNG, over a class registered with `popcorn.model.register`. In
+            `digest`, left out when None.
         board: What the board does with each peripheral, by name.
         plugins: The native plugins the board's models and devices come from, at most one per
             name. A `PluginModel` on the board and a device class of a plugin's bindings module,

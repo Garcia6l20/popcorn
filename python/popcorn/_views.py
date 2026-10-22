@@ -670,10 +670,11 @@ class AnalogInput:
 class RngEntropy:
     """The word source of the built-in RNG model, `m.periph.RNG.entropy`.
 
-    Every value is board state: kept across every reset kind and restored by snapshots. A
-    conditioning round takes its four words from `stuck` while it is set, else from the queue,
-    else from the generator. While the machine is busy, every access raises MachineRunning
-    outside its callbacks.
+    Every value but `seed` is board state: kept across every reset kind and restored by
+    snapshots. `seed` is configuration, checked through the config digest. A conditioning round
+    takes its four words from `stuck` while it is set, else from the queue, else from the
+    generator. While the machine is busy, every access raises MachineRunning outside its
+    callbacks.
 
     Raises:
         ModelError: On any access, when the peripheral's model is not the built-in RNG.
@@ -694,7 +695,9 @@ class RngEntropy:
     @property
     def drawn(self) -> int:
         """Generator position: generator words produced since the machine was built, skipped
-        zeros included. Queued and stuck words do not move it."""
+        zeros included. Queued and stuck words do not move it. A word counts when the RNG
+        produces it into its FIFO or conditioning register, up to 8 of them not yet read, so
+        the generator words after the ones the RNG holds start at this position."""
         return self._access.handle.rng_drawn(self.rng)
 
     @property

@@ -56,7 +56,8 @@ inline constexpr std::size_t rng_max_queued = std::size_t{1} << 16;
 /**
  * @brief The word source of the RNG model as a test sees it, implemented by the built-in RNG
  *        model. Reach it with `dynamic_cast<entropy_source*>(machine.model("RNG"))`. Every value
- *        is board state: kept across every reset kind and restored by a snapshot. A conditioning
+ *        but the seed is board state: kept across every reset kind and restored by a snapshot.
+ *        The seed is configuration, checked through the config digest. A conditioning
  *        round or init takes its four words, in order, from the stuck word while one is set,
  *        else from the queue, else from the generator.
  */
@@ -79,7 +80,10 @@ public:
 
   /**
    * @brief Generator position: the generator words produced since the machine was built, zeros
-   *        skipped included. Queued and stuck words do not move it.
+   *        skipped included. Queued and stuck words do not move it. A word counts when init or a
+   *        round produces it into the FIFO or the conditioning register, so up to 8 counted
+   *        words may not be read yet: the generator words after the ones the RNG holds start
+   *        at this position.
    */
   [[nodiscard]] virtual auto drawn() const -> std::uint64_t = 0;
 

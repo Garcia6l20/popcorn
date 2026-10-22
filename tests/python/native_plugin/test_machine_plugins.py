@@ -26,7 +26,7 @@ import popcorn
 import pytest
 from popcorn import ConfigError, ModelError, UnmodelledConfig, _core
 from popcorn import _machine_description as machine_description
-from popcorn.board import AudioOptions, RccOptions, SpiTarget, UsbHostOptions
+from popcorn.board import AudioOptions, RccOptions, RngOptions, SpiTarget, UsbHostOptions
 from popcorn.devices import chip_select
 from popcorn.model import Model, on_read
 from popcorn.plugin import Plugin, PluginModel, _records
@@ -156,6 +156,14 @@ def test_a_plugin_model_serves_only_the_peripheral_the_board_names(kit: Plugin) 
         assert rng_reads(m, 2) == [0, 0]
         assert m.periph.RNG.DR.value == 0
     assert rng_reads(named, 1) == [RNG_BASE + 3]
+
+
+def test_rng_options_next_to_a_plugin_model_on_rng_are_refused(kit: Plugin) -> None:
+    board = described(kit, RNG=popcorn.Periph(model=kit.model("rng")))
+    with pytest.raises(ConfigError) as refused:
+        board.replace(rng=RngOptions(1)).machine()
+    assert refused.value.key == "rng"
+    assert refused.value.expected == "the built-in model of RNG, not a plugin model"
 
 
 def test_a_plugin_model_on_one_instance_leaves_the_others_built_in(kit: Plugin) -> None:

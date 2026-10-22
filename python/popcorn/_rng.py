@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import cast
 
+from popcorn import _core
+
 _MASK64 = (1 << 64) - 1
 _GAMMA = 0x9E37_79B9_7F4A_7C15
 _MAX_COUNT = 1 << 20
-MAX_QUEUED = 1 << 16
-"""Most words an RNG word queue holds."""
+MAX_QUEUED = _core.rng_max_queued()
+"""Most words an RNG word queue holds, the native model's bound."""
 
 
 def checked_int(name: str, value: object, top: int) -> int:
@@ -57,7 +59,9 @@ def rng_words(seed: int, count: int, start: int = 0) -> list[int]:
     Word `k` is the upper 32 bits of the SplitMix64 finalizer of
     `seed + (k + 1) * 0x9E3779B97F4A7C15`, modulo 2**64. A word of 0 is skipped, RM0456 reading
     a DR of 0 as a seed error, and still moves the position: `start` counts positions, as
-    `RngEntropy.drawn` does.
+    `RngEntropy.drawn` does. `drawn` counts words when the RNG produces them into its FIFO and
+    conditioning register, up to 8 of them not yet read, so `rng_words(seed, n,
+    start=entropy.drawn)` gives the words after the ones the RNG already holds.
 
     Raises:
         TypeError: An argument is a bool or not an int.

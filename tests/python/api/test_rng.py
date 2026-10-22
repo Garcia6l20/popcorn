@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import struct
+from collections.abc import Callable
 from pathlib import Path
 
 import popcorn
 import pytest
+from popcorn._rng import MAX_QUEUED
 from popcorn.board import RngEntropy, RngOptions, rng_words
 from popcorn.units import ms
 
@@ -90,6 +92,26 @@ def test_the_firmware_reads_rng_words_parked_and_running(
     expected = rng_words(seed, WORDS)
     assert parked(entered(u575, "enable_read_idle", options)) == expected
     assert running(entered(u575, "enable_read_idle", options)) == expected
+
+
+def second_read(m: popcorn.Machine) -> None:
+    m.mem.u32[m.sym("log_len")] = 0
+    m.reg.pc = m.sym("enable_read_idle")
+
+
+@pytest.mark.parametrize("read", [parked, running])
+def test_drawn_after_a_16_word_read_is_where_the_next_read_starts(
+    u575: popcorn.PartDescription, read: Callable[[popcorn.Machine], list[int]]
+) -> None:
+    m = entered(u575, "enable_read_idle")
+    assert read(m) == rng_words(0, WORDS)
+    assert m.periph.RNG.entropy.drawn == WORDS
+    second_read(m)
+    assert read(m) == rng_words(0, WORDS, start=WORDS)
+
+
+def test_the_python_queue_bound_is_the_native_one() -> None:
+    assert MAX_QUEUED == 1 << 16
 
 
 def test_a_machine_description_seed_gives_the_words_of_machine_rng(
@@ -185,10 +207,10 @@ def test_refusals_change_nothing(u575: popcorn.PartDescription) -> None:
             entropy.queue(words)
         assert (entropy.queued, entropy.drawn) == (2, 0)
     with pytest.raises(ValueError):
-        entropy.queue([0] * ((1 << 16) - 1))
+        entropy.queue([0] * (MAX_QUEUED - 1))
     assert entropy.queued == 2
-    entropy.queue([0] * ((1 << 16) - 2))
-    assert entropy.queued == 1 << 16
+    entropy.queue([0] * (MAX_QUEUED - 2))
+    assert entropy.queued == MAX_QUEUED
     for stuck, error in [(True, TypeError), (1 << 32, ValueError), (-1, ValueError)]:
         with pytest.raises(error):
             entropy.stuck = stuck
