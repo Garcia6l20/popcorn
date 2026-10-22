@@ -166,6 +166,22 @@ auto machine::resets() const noexcept -> std::uint64_t
   return run_->resets;
 }
 
+auto machine::reset_pending() const noexcept -> std::optional<reset_kind>
+{
+  return run_->reset_pending;
+}
+
+auto machine::apply_reset_request() -> bool
+{
+  auto const kind = run_->reset_pending;
+  if(not kind)
+  {
+    return false;
+  }
+  reset(*kind);
+  return true;
+}
+
 auto machine::reset_counter() const -> core::reset_counter
 {
   return core::reset_counter{run_->reset_count};

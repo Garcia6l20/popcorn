@@ -220,7 +220,8 @@ void machine::run_state::reset_machine(reset_kind kind)
 void machine::run_state::reset_notified(reset_kind kind)
 {
   ++memory_generation;
-  retired = {};
+  retired       = {};
+  reset_pending = std::nullopt;
   owner.scheduler_.restore({}, 0);
   held_through.reset();
   auto fresh            = owner.clock_driver_.state();
@@ -797,6 +798,7 @@ auto machine::run_state::handle_requests() -> std::optional<slice_end>
     auto const kind = *std::exchange(reset_requested, std::nullopt);
     if(call or until_thread or owner.options_.on_reset_request == reset_request_policy::stop)
     {
+      reset_pending = kind;
       return slice_end{make_stop(
           stop_reason::reset_request, std::string{reflex::enum_value_name(kind)}, std::nullopt)};
     }

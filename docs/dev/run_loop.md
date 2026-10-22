@@ -17,8 +17,9 @@ the next deadline, which is why a sleeping firmware runs fast. The slice keeps t
 counts both.
 
 A core in a branch to itself, a one-instruction block that `arch::self_branch` names, such as
-Arm `b .` outside an IT block, executes instructions. The block hook sees the block run twice
-in a row, and when nothing is deliverable it advances the clock to the deadline or the next
+Arm `b .` outside an IT block, executes instructions. When the last block hook saw the same
+one-instruction block, the arch decodes it from its bytes and the core state. When nothing is
+deliverable the hook then advances the clock to the deadline or the next
 event, whichever comes first, then stops the engine before the block. The skipped iterations
 count as executed, as if they had run, so every output equals the slow path. The skip is off
 while a per-block observer is on: stepping, coverage, block trace records, spin detection, a
@@ -57,6 +58,10 @@ In order, one turn of the loop:
 1. Handles requests. A model or handler may have asked for a stop, a reset or the end of the
    slice. A requested reset becomes a RESET_REQUEST stop when a call is running or the machine
    is configured to stop on it. A run that waits for thread mode stops the same way. Otherwise the machine resets and the run goes on.
+   A RESET_REQUEST stop keeps its kind as `reset_pending` until a reset or a restore, saved in
+   snapshots. The Python binding applies it with `machine::apply_reset_request` before the next
+   run, step or free run of a lone machine starts, so `for_` counts from the reset. A call never
+   applies it. A system handles its members' requests itself.
 2. Dispatches the events due at the current instruction count.
 3. Checks the bounds, in this order: the call return sentinel, `budget_left`,
    `exact_instructions`, `until_time`, the `until` addresses, `until_return`, and last

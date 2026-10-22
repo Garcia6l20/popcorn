@@ -326,6 +326,21 @@ public:
   [[nodiscard]] auto resets() const noexcept -> std::uint64_t;
 
   /**
+   * @brief Kind of the reset the last RESET_REQUEST stop reported, while no reset or restore
+   *        came after it. A call keeps it. Saved in snapshots.
+   */
+  [[nodiscard]] auto reset_pending() const noexcept -> std::optional<reset_kind>;
+
+  /**
+   * @brief Resets as reset() with the kind of reset_pending(), when one is pending. A lone
+   *        machine's run, step and free run apply it before they start.
+   * @return Whether a reset ran.
+   * @throws machine_running while a slice runs, handlers included.
+   * @throws machine_busy while a call begun by begin_call() is in progress.
+   */
+  auto apply_reset_request() -> bool;
+
+  /**
    * @brief resets() as a counter any thread may read while the machine runs, raised once each
    *        reset's models have reset. It outlives the machine: a host-side queue tags what it
    *        keeps with it, so a record from before a reset is told from a later one.

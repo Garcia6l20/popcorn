@@ -285,6 +285,23 @@ auto machine_handle::lock_releasing() const -> core::held_lock
   return detail::lock_releasing_gil(*host_);
 }
 
+void machine_handle::apply_reset_request(core::held_lock const& held)
+{
+  if(not host_->parked(held, core::member_id{}) or slot_->refused.load(std::memory_order_acquire))
+  {
+    return;
+  }
+  core::owner_scope const owning{*host_, held};
+  auto&                   target = host_->member(held, core::member_id{});
+  if(not target.reset_pending() or target.in_call())
+  {
+    return;
+  }
+  detail::run_retired(*slot_);
+  detail::superseding const ending{*host_, held};
+  std::ignore = target.apply_reset_request();
+}
+
 auto machine_handle::run_goal(
     std::optional<address>                            until,
     std::optional<std::uint64_t>                      budget,
@@ -312,6 +329,7 @@ auto machine_handle::run_goal(
   }
   auto future = [&] {
     auto const held = lock_for_request();
+    apply_reset_request(held);
     if(for_ps or deadline_ps)
     {
       auto const now  = host_->member(held, core::member_id{}).virtual_clock().time();
@@ -430,6 +448,7 @@ auto machine_handle::failing_finish_goal(std::uint64_t budget) -> host_future_ha
 void machine_handle::start()
 {
   auto const held = lock_for_request();
+  apply_reset_request(held);
   host_->start(held, core::member_id{});
   delivered_->reset();
 }
@@ -589,6 +608,7 @@ auto machine_handle::run_test(
   }
   auto future = [&] {
     auto const held = lock_for_request();
+    apply_reset_request(held);
     if(for_ps or deadline_ps)
     {
       auto const now  = host_->member(held, core::member_id{}).virtual_clock().time();

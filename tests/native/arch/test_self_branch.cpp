@@ -28,6 +28,7 @@ using popcorn::testing::sym;
 
 constexpr address       narrow_loop  = 0x2004'0000;
 constexpr address       wide_loop    = 0x2004'0010;
+constexpr address       beq_loop     = 0x2004'0020;
 constexpr address       icsr         = 0xE000'ED04;
 constexpr address       syst_csr     = 0xE000'E010;
 constexpr address       syst_rvr     = 0xE000'E014;
@@ -93,6 +94,7 @@ auto spinning_at(address loop, leg how) -> spinning
   put(f, narrow_loop, 0xe7fe, 2);
   put(f, wide_loop, 0xf7ff, 2);
   put(f, wide_loop + 2, 0xbffe, 2);
+  put(f, beq_loop, 0xd0fe, 2);
   put(f, demcr, 1u << 24);
   put(f, dwt_ctrl, 1);
   put(f, syst_rvr, 3999);
@@ -330,6 +332,22 @@ TEST_CASE("a b . that an IT block makes conditional and fails falls through, res
     auto const before = skips(s.f);
     auto const out    = run_once(s.f, {.budget_left = icount{1}});
     CHECK(out.pc == narrow_loop + 2);
+    CHECK(skips(s.f) == before);
+  }
+}
+
+TEST_CASE("a beq . taken until Z clears falls through, resumed there")
+{
+  constexpr std::uint64_t z = 1u << 30;
+  for(auto const how : {leg::fast, leg::coverage})
+  {
+    auto s = spinning_at(beq_loop, how);
+    s.f.set("xpsr", s.f.reg("xpsr") | z);
+    REQUIRE(run_once(s.f, {.budget_left = icount{100}}).pc == beq_loop);
+    auto const before = skips(s.f);
+    s.f.set("xpsr", s.f.reg("xpsr") & ~z);
+    auto const out = run_once(s.f, {.budget_left = icount{1}});
+    CHECK(out.pc == beq_loop + 2);
     CHECK(skips(s.f) == before);
   }
 }

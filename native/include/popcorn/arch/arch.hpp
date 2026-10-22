@@ -430,8 +430,11 @@ public:
    * @brief Whether the instruction at @p at is an unconditional branch to itself that no
    *        predication makes conditional, such as Arm `b .`. The run loop then moves the clock
    *        over its iterations up to the next event or bound while nothing is deliverable,
-   *        counting them as executed. The default, false, keeps every iteration.
-   * @param at Address of a block of one instruction that ran twice in a row.
+   *        counting them as executed. The default, false, keeps every iteration. The arch
+   *        decides from the code bytes and the core state alone: the block need not have run
+   *        before.
+   * @param at Address of a block of one instruction that the last block hook also saw.
+   * @return Whether the instruction branches to itself on every execution.
    */
   [[nodiscard]] virtual auto self_branch([[maybe_unused]] address at) const -> bool
   {

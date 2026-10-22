@@ -96,7 +96,7 @@ plugin sets it per test, see [Testing with pytest](testing.md).
 | `IDLE` | The core sleeps in WFI with nothing that can wake it and no `for_` deadline. |
 | `RETURNED` | The function a `call` or `run(until=popcorn.FrameReturn())` waits on returned. |
 | `FAULT` | A processor fault under `faults="stop"`. |
-| `RESET_REQUEST` | The firmware requested a system reset. |
+| `RESET_REQUEST` | The firmware requested a system reset. `detail` names its kind, such as `software` or `watchdog`. The next `run`, `step` or free run applies that reset first, unless `reset()` or `restore()` came between. A `call` leaves it pending. |
 | `SPIN` | A loop made no progress for `spin_threshold` iterations. |
 | `WATCHPOINT` | A watch on a memory access stopped the run. |
 | `USER` | A `stop_when` predicate returned True, a handler stopped the run, or a BKPT ran. |

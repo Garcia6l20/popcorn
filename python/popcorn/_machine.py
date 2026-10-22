@@ -1788,6 +1788,9 @@ class Machine:
         status registers stay set as on hardware: CFSR bits are sticky, so a later fault of the
         caller reports them OR'ed with its own until the firmware clears them.
 
+        A reset a RESET_REQUEST stop reported stays pending: the call runs on the core as that
+        stop left it, and the next `run`, `step` or free run applies the reset.
+
         Args:
             fn: Function address, symbol or name.
             args: Arguments in declaration order.
@@ -2564,11 +2567,16 @@ class Machine:
 
         Cancelling the awaiting task halts the run at the next block boundary.
 
+        After a RESET_REQUEST stop the run first applies the reset that stop reported, of the
+        kind its `detail` names, unless `reset()` or `restore()` came between. `for_` then
+        counts from that reset and `FrameReturn()` names the function the reset core runs. A
+        member of a linked system leaves this to its system.
+
         Raises:
             MachineBusy: Another run, step, call, wait or free run is active, the member's own
                 `running()` of a linked system included.
             EmulationError: `until` is `FrameReturn()` and the unwinder cannot find where the
-                function running now returns. Nothing ran.
+                function running now returns. Nothing ran, a pending reset was applied.
             Exception: A kept log filter or handler error, as for `read`.
         """
         _check_duration(for_)
@@ -2672,6 +2680,8 @@ class Machine:
     async def step(self, n: int = 1) -> Stop:
         """Execute exactly `n` instructions, a BUDGET stop, or an earlier stop.
 
+        After a RESET_REQUEST stop it first applies that reset, as `run` does.
+
         Raises:
             MachineBusy: Another run, step, call, wait or free run is active.
         """
@@ -2715,6 +2725,7 @@ class Machine:
         if returning is not None:
             if self.busy:
                 raise MachineBusy("the machine already runs a goal or a free run")
+            self._handle.apply_pending_reset()
             until_return = returning()
         stop = await awaited(
             self._handle.run_goal(
@@ -3119,6 +3130,8 @@ class Machine:
         the test, 100 us brings a dense callback from 0.3 to 0.7 ms to 12 us. A loop spinning
         on `asyncio.sleep(0)` starves them, see the class: the machine itself and its waits need
         no GIL.
+
+        After a RESET_REQUEST stop it first applies the reset that stop reported, as `run` does.
 
         Raises:
             MachineBusy: A run, step, call, wait or free run is active.

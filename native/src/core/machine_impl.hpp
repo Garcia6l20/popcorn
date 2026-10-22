@@ -1016,6 +1016,9 @@ struct machine::run_state
   }
   /** @brief Reset requested through machine_services. */
   std::optional<reset_kind> reset_requested{};
+  /** @brief Kind of the last RESET_REQUEST stop, until a reset or a restore,
+   * machine::reset_pending(). */
+  std::optional<reset_kind> reset_pending{};
   /** @brief Slice end requested through machine_services. */
   bool end_requested = false;
   /** @brief Stop an arch trap handler returned from inside the engine. */
@@ -1897,6 +1900,8 @@ struct machine::run_state
    * observer is on, moves the clock from @p now to the deadline or the next event, whichever
    * comes first, and stops the engine before the block. The skipped iterations count as
    * executed, as if they had run. Off the hot path.
+   * @param engine Engine the block hook runs in.
+   * @param now Clock at the block hook.
    * @return Whether it skipped. */
   [[gnu::noinline]] auto skip_self_branch(uc_struct* engine, icount now) noexcept -> bool;
 

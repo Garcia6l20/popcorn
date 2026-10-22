@@ -315,6 +315,17 @@ public:
    */
   [[= py::doc{"Reset the machine as kind."}]] void reset(reset_kind kind);
 
+  /**
+   * @brief Applies the reset of the last RESET_REQUEST stop, core::machine::apply_reset_request().
+   * @return Whether a reset ran.
+   */
+  [[= py::doc{"Apply the reset the last RESET_REQUEST stop reported, if still pending."}]] auto
+      apply_pending_reset() -> bool;
+
+  /** @brief Kind of the pending reset, core::machine::reset_pending(). */
+  [[= py::doc{"Kind of the reset the last RESET_REQUEST stop reported, if still pending."}]] auto
+      reset_pending() const -> std::optional<reset_kind>;
+
   /** @brief Cuts the supply and powers the machine again, core::machine::power_cycle(). */
   [[= py::doc{"Cut the supply and power the machine again."}]] void power_cycle();
 
@@ -1584,6 +1595,7 @@ private:
   [[nodiscard]] auto entropy(std::string const& peripheral) const -> periph::stm32::entropy_source&;
   [[nodiscard]] auto lock_for_request() const -> core::held_lock;
   [[nodiscard]] auto lock_releasing() const -> core::held_lock;
+  void               apply_reset_request(core::held_lock const& held);
   [[nodiscard]] auto engine() const -> core::machine&;
   [[nodiscard]] auto abandoner() const -> detail::host_abandon;
   void               flush_logs_unraisable() const noexcept;

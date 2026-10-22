@@ -17,7 +17,7 @@
 namespace popcorn::core
 {
 /** @brief Version of the snapshot_data layout, stamped by the machine and checked on restore. */
-inline constexpr std::uint32_t snapshot_format_version = 6;
+inline constexpr std::uint32_t snapshot_format_version = 7;
 
 /** @brief Opaque state saved by one owner: the arch module or one peripheral model. */
 struct snapshot_part
@@ -202,6 +202,8 @@ struct snapshot_data
   std::optional<icount> held_through{};
   /** @brief machine::executed(), absent from saves before it existed, which load as 0. */
   icount executed{};
+  /** @brief machine::reset_pending(), absent from saves before it existed, which load as none. */
+  std::optional<reset_kind> reset_pending{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(snapshot_data const&, snapshot_data const&) -> bool = default;
@@ -259,15 +261,16 @@ POPCORN_API auto encode_snapshot(snapshot_data const& data) -> std::vector<std::
 /**
  * @brief Reads back bytes encode_snapshot() wrote.
  * @param bytes Serialized content.
- * @return The content, format snapshot_format_version. Formats 2, 3, 4 and 5 are also read.
+ * @return The content, format snapshot_format_version. Formats 2 to 6 are also read.
  *         Format 2, the layout before virtual-time events: its events load as
  *         deadline::instructions, their meaning then. Format 3, the layout before the clock
  *         hold: its clock loads with nothing held, clock_state::held and held_time 0, as every
  *         format 3 machine ran. Format 4, the layout before event lanes: its events load in
  *         lane 0, the only lane then, with no lane sequence number handed out. Format 5, the
- *         layout before bus resets: its peripherals load with none held in reset.
+ *         layout before bus resets: its peripherals load with none held in reset. Format 6,
+ *         the layout before the pending reset request: it loads with none pending.
  * @throws config_error when @p bytes is malformed or its format is not
- *         snapshot_format_version, 5, 4, 3 or 2.
+ *         snapshot_format_version or 2 to 6.
  */
 POPCORN_API auto decode_snapshot(std::span<std::byte const> bytes) -> snapshot_data;
 }

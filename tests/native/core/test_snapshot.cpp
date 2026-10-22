@@ -256,3 +256,33 @@ TEST_CASE("a peripheral held in reset survives the saved form")
   CHECK(back.peripherals.front().held_in_reset == 1);
   CHECK(back == data);
 }
+
+TEST_CASE("a format 6 snapshot reads back as the current format with no reset pending")
+{
+  auto data   = filled();
+  data.format = 6;
+  auto back   = core::decode_snapshot(core::encode_snapshot(data));
+  CHECK(back.format == core::snapshot_format_version);
+  CHECK_FALSE(back.reset_pending.has_value());
+}
+
+TEST_CASE("the format 4 file written before format 7 has no reset_pending key and loads none")
+{
+  char const* const path = std::getenv("POPCORN_SNAPSHOT_V4");
+  REQUIRE(path != nullptr);
+  std::ifstream           file{path, std::ios::binary};
+  std::vector<char> const raw{std::istreambuf_iterator<char>{file}, {}};
+  REQUIRE_FALSE(raw.empty());
+  CHECK(std::ranges::search(raw, std::string_view{"reset_pending"}).empty());
+  CHECK_FALSE(core::decode_snapshot(std::as_bytes(std::span{raw})).reset_pending.has_value());
+}
+
+TEST_CASE("a pending reset request survives the saved form")
+{
+  auto data          = filled();
+  data.reset_pending = popcorn::reset_kind::watchdog;
+  auto const back    = core::decode_snapshot(core::encode_snapshot(data));
+  CHECK(back.reset_pending == popcorn::reset_kind::watchdog);
+  CHECK(back == data);
+  CHECK(back != filled());
+}
