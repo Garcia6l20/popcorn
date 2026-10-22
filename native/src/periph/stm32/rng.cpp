@@ -519,6 +519,10 @@ auto rng::seed_fault() const -> bool
 
 void rng::set_seed_fault(bool fault)
 {
+  if(fault)
+  {
+    withdraw(auto_reset);
+  }
   state_.source.seed_fault = fault ? 1 : 0;
   schedule_auto_reset();
   refresh(now_ps());

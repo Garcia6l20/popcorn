@@ -27,7 +27,7 @@ public:
    * @brief Whether the bus enable of the peripheral clocked by @p kernel is set, such as
    *        RCC_AHB2ENR1.RNGEN for the `rng` domain.
    * @param kernel Kernel clock domain of the peripheral.
-   * @return The enable bit, true for a domain RCC does not gate.
+   * @return The enable bit, true for a domain without a kernel clock mux, such as a timer.
    */
   [[nodiscard]] virtual auto bus_enabled(core::clock_domain kernel) const -> bool = 0;
 

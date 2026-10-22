@@ -1058,12 +1058,25 @@ TEST_CASE("every reset kind keeps the queue, the stuck word and the generator po
     std::vector<std::uint32_t> const queued{1, 2, 3, 4, 5};
     r.source().queue(queued);
     r.source().set_stuck(0x77);
+    r.source().set_seed_fault_after(5);
+    r.source().set_clock_fault_after(7);
+    r.source().set_clock_fault(true);
+    r.source().set_seed_fault(true);
     r.f.target->reset(kind);
     r.f.set("pc", sym("rng_ll", "idle"));
     CHECK(r.source().queued() == 5);
     CHECK(r.source().stuck() == 0x77);
     CHECK(r.source().drawn() == 4);
+    CHECK(r.source().seed_fault_after() == 5u);
+    CHECK(r.source().clock_fault_after() == 7u);
+    CHECK(r.source().clock_fault());
+    CHECK(r.source().seed_fault());
+    CHECK(r.read(sr) == 0);
     r.source().set_stuck(std::nullopt);
+    r.source().set_seed_fault(false);
+    r.source().set_clock_fault(false);
+    r.source().set_seed_fault_after(std::nullopt);
+    r.source().set_clock_fault_after(std::nullopt);
     auto const again = enabled_at_4mhz(r);
     r.run_until(again + init_4mhz);
     std::vector<std::uint32_t> got;
@@ -1514,5 +1527,126 @@ TEST_CASE("ARDIS 0: a fault released while CONDRST is held clears SECS at the en
   CHECK(r.read(sr) == secs);
   r.run_until(done);
   CHECK(r.read(sr) == 0);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a snapshot keeps armed fault counters and held fault levels")
+{
+  SUBCASE("armed counters and a held clock fault")
+  {
+    rig const  r;
+    auto const start = enabled_at_4mhz(r);
+    r.source().set_seed_fault_after(5);
+    r.source().set_clock_fault_after(7);
+    r.source().set_clock_fault(true);
+    auto const saved = r.f.target->snapshot();
+    rig const  other;
+    other.f.target->restore(
+        core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+    CHECK(other.source().seed_fault_after() == 5u);
+    CHECK(other.source().clock_fault_after() == 7u);
+    CHECK(other.source().clock_fault());
+    CHECK(other.read(sr) == (cecs | ceis));
+    other.run_until(start + init_4mhz + round_4mhz);
+    for(int read = 0; read < 4; ++read)
+    {
+      static_cast<void>(other.cpu_dr());
+    }
+    CHECK((other.read(sr) & secs) == 0);
+    CHECK(other.cpu_dr() == rng_word_at(0, 4));
+    CHECK((other.read(sr) & (secs | seis)) == (secs | seis));
+    CHECK(other.logged.empty());
+  }
+  SUBCASE("a held seed fault")
+  {
+    rig const r;
+    r.clocks();
+    r.source().set_seed_fault(true);
+    r.write(cr, cr_reset | rngen);
+    REQUIRE(r.read(sr) == (secs | seis));
+    auto const saved = r.f.target->snapshot();
+    rig const  other;
+    other.f.target->restore(
+        core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+    CHECK(other.source().seed_fault());
+    CHECK(other.read(sr) == (secs | seis));
+    other.write(cr, cr_reset | rngen | condrst);
+    other.write(cr, cr_reset | rngen);
+    other.run_for(10 * us);
+    CHECK(other.read(sr) == (secs | seis));
+    CHECK(other.logged.empty());
+  }
+}
+
+TEST_CASE("an AHB enable set while HSI48 is off raises the clock error at once")
+{
+  rig const r;
+  r.clocks();
+  r.write(cr, cr_reset | rngen);
+  r.set_field("RCC", "RCC_AHB2ENR1", "RNGEN", 0);
+  r.set_field("RCC", "RCC_CR", "HSI48ON", 0);
+  r.run_for(us);
+  CHECK(r.read(sr) == 0);
+  r.set_field("RCC", "RCC_AHB2ENR1", "RNGEN", 1);
+  CHECK(r.read(sr) == (cecs | ceis));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("ARDIS 1: a released seed fault keeps SECS until a CONDRST cycle")
+{
+  rig const r;
+  r.clocks();
+  r.write(cr, cr_reset | ardis | condrst);
+  r.write(cr, cr_reset | ardis);
+  r.run_for(us);
+  r.source().set_seed_fault(true);
+  r.write(cr, cr_reset | ardis | rngen);
+  REQUIRE(r.read(sr) == (secs | seis));
+  r.source().set_seed_fault(false);
+  CHECK_FALSE(r.due(r.now() + clear_4mhz));
+  r.run_for(10 * us);
+  CHECK(r.read(sr) == (secs | seis));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("ARDIS 0: a kernel clock stop holds the auto-reset until the clock is back")
+{
+  rig const r;
+  r.clocks();
+  r.source().set_seed_fault(true);
+  r.write(cr, cr_reset | rngen);
+  REQUIRE(r.read(sr) == (secs | seis));
+  r.source().set_seed_fault(false);
+  auto const due = r.now() + clear_4mhz;
+  REQUIRE(r.due(due));
+  r.set_field("RCC", "RCC_CR", "HSI48ON", 0);
+  CHECK_FALSE(r.due(due));
+  r.run_for(1000 * us);
+  CHECK((r.read(sr) & secs) == secs);
+  auto const ready = r.hsi48(true);
+  CHECK(r.due(ready + clear_4mhz));
+  r.run_until(ready + clear_4mhz);
+  CHECK((r.read(sr) & secs) == 0);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a seed fault set again before the auto-reset waits for its own release")
+{
+  rig const r;
+  r.clocks();
+  r.source().set_seed_fault(true);
+  r.write(cr, cr_reset | rngen);
+  r.source().set_seed_fault(false);
+  auto const first = r.now() + clear_4mhz;
+  REQUIRE(r.due(first));
+  r.source().set_seed_fault(true);
+  CHECK_FALSE(r.due(first));
+  r.run_for(10 * us);
+  CHECK(r.read(sr) == (secs | seis));
+  r.source().set_seed_fault(false);
+  auto const second = r.now() + clear_4mhz;
+  CHECK(r.due(second));
+  r.run_until(second);
+  CHECK((r.read(sr) & secs) == 0);
   CHECK(r.logged.empty());
 }

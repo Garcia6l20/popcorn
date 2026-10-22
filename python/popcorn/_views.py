@@ -744,7 +744,7 @@ class RngEntropy:
         empty and generation stops, RM0456 48.3.7. Setting it acts at once. SECS stays across
         every recovery while True. Set back to False, SECS clears after a CONDRST cycle with
         ARDIS 1, or 2 AHB plus 2 RNG cycles later with ARDIS 0, an assumption: RM0456 gives no
-        auto-reset time. SEIS stays until firmware writes 0.
+        auto-reset time. SEIS stays until firmware writes 0 or writes CONDRST 1.
 
         Raises:
             TypeError: Set to anything but a bool.
@@ -821,10 +821,11 @@ def _checked_bool(name: str, value: object) -> bool:
 def _checked_count(name: str, value: object) -> int | None:
     if value is None:
         return None
-    count = checked_int(name, value, (1 << 64) - 1)
-    if count == 0:
-        raise ValueError(f"{name}: expected 1 to {(1 << 64) - 1}, not 0")
-    return count
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name}: expected an int or None, not {type(value).__qualname__}")
+    if not 1 <= value <= (1 << 64) - 1:
+        raise ValueError(f"{name}: expected 1 to {(1 << 64) - 1}, not {value}")
+    return value
 
 
 def microvolts_of(volts: float) -> int:
