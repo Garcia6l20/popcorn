@@ -29,6 +29,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -462,17 +463,6 @@ concept guarded_model = requires(Derived& d, std::uint32_t word, access_ctx cons
 };
 
 /**
- * @brief Model serving its claimed registers through one write handler each. Reads return the
- *        stored word. A write merges the access into the stored word, keeps the bits the
- *        description marks read-only, stores the result, then calls the register's handler.
- *        A guarded_model Derived gives per access the bits the transaction cannot reach: a read
- *        returns them as 0, a write keeps their stored value, or the value that writes nothing
- *        for a field whose write is an action, such as 0 for a write-1-to-clear flag, so the
- *        handler sees no write to them.
- * @tparam Derived Model class.
- * @tparam State Serializable state, as for stm32_model.
- */
-/**
  * @brief Whether @p type itself declares a member named @p name.
  * @param type Reflection of a class.
  * @param name Member name.
@@ -489,6 +479,17 @@ consteval auto declares_member(std::meta::info type, std::string_view name) -> b
   return false;
 }
 
+/**
+ * @brief Model serving its claimed registers through one write handler each. Reads return the
+ *        stored word. A write merges the access into the stored word, keeps the bits the
+ *        description marks read-only, stores the result, then calls the register's handler.
+ *        A guarded_model Derived gives per access the bits the transaction cannot reach: a read
+ *        returns them as 0, a write keeps their stored value, or the value that writes nothing
+ *        for a field whose write is an action, such as 0 for a write-1-to-clear flag, so the
+ *        handler sees no write to them.
+ * @tparam Derived Model class.
+ * @tparam State Serializable state, as for stm32_model.
+ */
 template <typename Derived, typename State> class dispatch_model : public stm32_model<State>
 {
 public:
@@ -614,8 +615,16 @@ protected:
     if constexpr(std::derived_from<Derived, bus_reset_listener>)
     {
       static_assert(
+          std::is_final_v<Derived>, "a bus_reset_listener is final, so no subclass skips the hold");
+      static_assert(
           not declares_member(^^Derived, "on_write"),
           "a bus_reset_listener serves writes through unheld_write(), not on_write()");
+      static_assert(
+          not declares_member(^^Derived, "unheld_write")
+              or requires(
+                  Derived& d, register_file& regs, std::uint32_t word, std::uint8_t size,
+                  access_ctx access) { d.unheld_write(regs, word, size, word, word, access); },
+          "a bus_reset_listener's unheld_write() is public and takes on_write()'s arguments");
       auto const rcc =
           std::ranges::find(ctx.part.peripherals, std::string_view{"RCC"}, &peripheral_desc::name);
       if(rcc != ctx.part.peripherals.end() and not reset_bit_of(*rcc, desc.name))

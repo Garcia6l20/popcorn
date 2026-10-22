@@ -2197,3 +2197,15 @@ TEST_CASE("GPDMA1RST during a DBG_GPDMA0_STOP hold keeps channel 0 frozen until 
   REQUIRE(later(f, ps_per_ms, 1'000'000'000).reason == stop_reason::time);
   CHECK(f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 1);
 }
+
+TEST_CASE("GPDMA1RST mid-copy stops the channel, its pending burst moves no byte")
+{
+  auto       f      = mid_copy(false);
+  auto const before = destination(f);
+  gpdma_reset_pulse(f);
+  CHECK(f.field("GPDMA1", "GPDMA_C0CR", "EN") == 0);
+  CHECK(reg_value(f, "GPDMA_C0SR") == 1);
+  REQUIRE(later(f, ps_per_ms, 1'000'000'000).reason == stop_reason::time);
+  CHECK(destination(f) == before);
+  CHECK(reg_value(f, "GPDMA_C0SR") == 1);
+}

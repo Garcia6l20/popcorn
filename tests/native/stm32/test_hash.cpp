@@ -2196,3 +2196,20 @@ TEST_CASE("HASHRST held ignores DIN and CSR writes, the digest after release is 
       r.digest(sha256)
       == unhex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
 }
+
+TEST_CASE("HASHRST with a digest busy and DINIS raised drops the busy event and the line")
+{
+  hash_rig const r{false};
+  r.write(imr, imr_dinie | imr_dcie);
+  r.begin(sha256);
+  r.feed(text("abc"));
+  r.finish(24);
+  REQUIRE((r.read(sr) & sr_busy) != 0);
+  rcc_reset(r.f, 1);
+  rcc_reset(r.f, 0);
+  CHECK(r.read(sr) == 0x1);
+  CHECK(r.read(imr) == 0);
+  r.settle();
+  CHECK((r.read(sr) & sr_dcis) == 0);
+  CHECK(r.read(hr0) == 0);
+}
