@@ -232,10 +232,10 @@ inline void rcc_reset_pulse(stm32_fixture const& f, std::string_view reg, std::s
  * @param instance Peripheral whose model saves the state.
  * @param path Dot-separated keys, an array index being its decimal key, such as
  *        `block.0.generation`.
- * @return The integer, 0 when the save omits the key as an empty value.
+ * @return The integer, nullopt when the save has no such key.
  */
 inline auto saved_integer(stm32_fixture const& f, std::string_view instance, std::string_view path)
-    -> std::int64_t
+    -> std::optional<std::int64_t>
 {
   auto* const model = f.target->model(instance);
   REQUIRE(model != nullptr);
@@ -307,14 +307,14 @@ inline auto saved_integer(stm32_fixture const& f, std::string_view instance, std
     }
     if(not hit)
     {
-      return 0;
+      return std::nullopt;
     }
     if(dot == std::string_view::npos)
     {
       auto const [type, value] = *hit;
       if(type == 0x10)
       {
-        return static_cast<std::int32_t>(read(value, 4));
+        return std::int64_t{static_cast<std::int32_t>(read(value, 4))};
       }
       REQUIRE((type == 0x12 or type == 0x11));
       return static_cast<std::int64_t>(read(value, 8));
@@ -323,5 +323,18 @@ inline auto saved_integer(stm32_fixture const& f, std::string_view instance, std
     document = hit->second;
     path     = path.substr(dot + 1);
   }
+}
+
+/**
+ * @brief Whether the event queue holds an event of @p kind and @p payload.
+ * @param f Machine.
+ * @param kind Event kind as the model schedules it.
+ * @param payload Event payload.
+ */
+inline auto queued_event(stm32_fixture const& f, std::uint32_t kind, std::uint64_t payload) -> bool
+{
+  return std::ranges::any_of(f.target->snapshot().data().events.pending, [&](auto const& event) {
+    return event.id.kind == kind and event.payload == payload;
+  });
 }
 }

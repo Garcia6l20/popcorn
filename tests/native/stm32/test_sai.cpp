@@ -2506,15 +2506,24 @@ TEST_CASE("SAI1RST keeps an external clock the board set, a power-on reset reloa
   CHECK(port.external_clock(clock_a) == 0);
 }
 
-TEST_CASE("SAI1RST moves each block's generation past every event queued before it")
+TEST_CASE("SAI1RST moves block A's generation past every event queued before it, twice")
 {
   rig r{"idle"};
   bus b{*r.f};
-  slave_a(b);
-  b.run_until(b.now() + 100 * us);
-  auto const a = popcorn::testing::saved_integer(*r.f, "SAI1", "block.0.generation");
-  auto const c = popcorn::testing::saved_integer(*r.f, "SAI1", "block.1.generation");
-  rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SAI1RST");
-  CHECK(popcorn::testing::saved_integer(*r.f, "SAI1", "block.0.generation") > a);
-  CHECK(popcorn::testing::saved_integer(*r.f, "SAI1", "block.1.generation") > c);
+  port_of(r).set_external_clock(clock_a, 16'000);
+  std::vector<std::int64_t> seen;
+  for(int pulse = 0; pulse < 2; ++pulse)
+  {
+    slave_a(b);
+    b.run_until(b.now() + 100 * us);
+    auto const before = popcorn::testing::saved_integer(*r.f, "SAI1", "block.0.generation");
+    REQUIRE(before.has_value());
+    REQUIRE(popcorn::testing::queued_event(*r.f, 0, static_cast<std::uint64_t>(*before)));
+    seen.push_back(*before);
+    rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SAI1RST");
+    auto const after = popcorn::testing::saved_integer(*r.f, "SAI1", "block.0.generation");
+    REQUIRE(after.has_value());
+    CHECK(*after > *before);
+  }
+  CHECK(seen[1] > seen[0]);
 }

@@ -2035,15 +2035,24 @@ TEST_CASE("I2C1RST lowers the TX request on the controller and ignores CR1 while
   CHECK(b.get("CR1", "PE") == 0);
 }
 
-TEST_CASE("I2C1RST moves the phase generation past every event queued before it")
+TEST_CASE("I2C1RST moves the phase generation past every event queued before it, twice")
 {
-  rig r{"idle", true};
-  bus b{*r.f};
-  b.controller();
-  b.command(0x38, 2, false, false);
-  b.run_until(b.now() + period_ps);
-  auto const before = popcorn::testing::saved_integer(*r.f, "I2C1", "generation");
-  REQUIRE(before > 0);
-  rcc_reset_pulse(*r.f, "RCC_APB1RSTR1", "I2C1RST");
-  CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "generation") > before);
+  rig                       r{"idle", true};
+  bus                       b{*r.f};
+  std::vector<std::int64_t> seen;
+  for(int pulse = 0; pulse < 2; ++pulse)
+  {
+    b.controller();
+    b.command(0x38, 2, false, false);
+    b.run_until(b.now() + period_ps);
+    auto const before = popcorn::testing::saved_integer(*r.f, "I2C1", "generation");
+    REQUIRE(before.has_value());
+    REQUIRE(popcorn::testing::queued_event(*r.f, 0, static_cast<std::uint64_t>(*before)));
+    seen.push_back(*before);
+    rcc_reset_pulse(*r.f, "RCC_APB1RSTR1", "I2C1RST");
+    auto const after = popcorn::testing::saved_integer(*r.f, "I2C1", "generation");
+    REQUIRE(after.has_value());
+    CHECK(*after > *before);
+  }
+  CHECK(seen[1] > seen[0]);
 }

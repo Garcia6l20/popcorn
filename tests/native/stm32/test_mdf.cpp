@@ -2176,13 +2176,23 @@ TEST_CASE("MDF1RST lowers the filter's DMA request and its IRQ line")
   CHECK_FALSE(r.pending(mdf_irq));
 }
 
-TEST_CASE("MDF1RST moves the sample generation past every event queued before it")
+TEST_CASE("MDF1RST moves the clock-absence generation past the event queued before it, twice")
 {
-  stream_rig const r;
-  r.mic[0]->fill = 1;
-  r.sinc1(0, 0);
-  r.run_until(edge_at(r.anchor, 4));
-  auto const before = popcorn::testing::saved_integer(r, "MDF1", "sample_generation");
-  rcc_reset_pulse(r, "RCC_AHB1RSTR", "MDF1RST");
-  CHECK(popcorn::testing::saved_integer(r, "MDF1", "sample_generation") > before);
+  rig const                 r;
+  std::vector<std::int64_t> seen;
+  for(int pulse = 0; pulse < 2; ++pulse)
+  {
+    r.clocks(4, 3);
+    r.write("SITF0CR", 0x1F11);
+    r.put("CKGCR", "CKGDEN", 0);
+    auto const before = popcorn::testing::saved_integer(r, "MDF1", "filter.0.ckab_generation");
+    REQUIRE(before.has_value());
+    REQUIRE(popcorn::testing::queued_event(r, 1, static_cast<std::uint64_t>(*before) << 8));
+    seen.push_back(*before);
+    rcc_reset_pulse(r, "RCC_AHB1RSTR", "MDF1RST");
+    auto const after = popcorn::testing::saved_integer(r, "MDF1", "filter.0.ckab_generation");
+    REQUIRE(after.has_value());
+    CHECK(*after > *before);
+  }
+  CHECK(seen[1] > seen[0]);
 }
