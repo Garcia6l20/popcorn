@@ -866,6 +866,17 @@ TEST_CASE("RM0456 17.4.14: a Secure channel with DSEC clear writes Non-secure, S
   CHECK(r.peek("GTZC1_TZIC", "SR4") == 0);
 }
 
+TEST_CASE("RM0456 17.8.1: GPDMA1 held by GPDMA1RST still raises the event of a Non-secure write")
+{
+  rig const  r{true};
+  auto const event = bit("GTZC1_TZIC", "SR4", "GPDMA1F");
+  r.write("RCC", "AHB1RSTR", bit("RCC", "AHB1RSTR", "GPDMA1RST"), secure_priv);
+  REQUIRE(r.peek("GTZC1_TZIC", "SR4") == 0);
+  r.write("GPDMA1", "SECCFGR", 1, nonsecure_priv);
+  CHECK(r.peek("GPDMA1", "SECCFGR") == 0);
+  CHECK(r.peek("GTZC1_TZIC", "SR4") == event);
+}
+
 TEST_CASE("RM0456 17.8.1 to 17.8.3: GPDMA channel registers, SECCFGR, PRIVCFGR and RCFGLOCKR")
 {
   rig const r{true};

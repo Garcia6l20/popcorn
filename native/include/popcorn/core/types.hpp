@@ -134,7 +134,8 @@ struct bus_attrs
 
 /**
  * @brief Cause of a reset. Backup-domain state, such as an RTC and its backup registers,
- *        survives every kind except power_on.
+ *        survives every kind except power_on. `peripheral` is the reset of one peripheral by its
+ *        bus reset bit, core::machine_services::hold_in_reset(), never of the machine.
  */
 enum class[[= reflex::derive{reflex::Format}]] reset_kind
 {
@@ -146,6 +147,7 @@ enum class[[= reflex::derive{reflex::Format}]] reset_kind
   window_watchdog,
   low_power,
   option_load,
+  peripheral,
 };
 
 /** @brief Why a guest bus access failed. */

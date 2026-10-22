@@ -34,7 +34,9 @@ class FaultKind(enum.Enum):
 
 
 class ResetKind(enum.Enum):
-    """Cause of a reset."""
+    """Cause of a reset. `PERIPHERAL` resets one peripheral through its bus reset bit, such as an
+    STM32 RCC reset bit, and is what the default `Model.on_bus_reset()` passes to `reset()`.
+    `Machine.reset()` refuses it."""
 
     POWER_ON = 0
     BROWN_OUT = 1
@@ -44,6 +46,7 @@ class ResetKind(enum.Enum):
     WINDOW_WATCHDOG = 5
     LOW_POWER = 6
     OPTION_LOAD = 7
+    PERIPHERAL = 8
 
 
 class FloatAbi(enum.Enum):

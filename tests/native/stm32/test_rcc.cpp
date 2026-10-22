@@ -174,6 +174,44 @@ public:
   {}
 };
 
+class kind_recorder final : public periph::model
+{
+public:
+  std::vector<reset_kind> kinds;
+  int                     writes{};
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {"POL"};
+  }
+  void reset(periph::register_file&, reset_kind kind) override
+  {
+    kinds.push_back(kind);
+  }
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    ++writes;
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+
 struct reset_target
 {
   std::string_view instance;
@@ -377,12 +415,20 @@ TEST_CASE("machines built from factories outlive the board they were made from")
   CHECK(probe(f).hz("sysclk") == 160 * mhz);
 }
 
-TEST_CASE("every reset kind leaves its own flag in RCC_CSR, RMVF clears them")
+TEST_CASE("every machine reset kind leaves its own flag in RCC_CSR, a peripheral reset none")
 {
   template for(constexpr auto kind :
                std::define_static_array(std::meta::enumerators_of(^^popcorn::reset_kind)))
   {
     auto f = idle_fixture();
+    if constexpr([:kind:] == reset_kind::peripheral)
+    {
+      auto const before = peek(f, "RCC_CSR");
+      CHECK_THROWS_AS(f.target->reset([:kind:]), popcorn::config_error);
+      popcorn::testing::rcc_reset_pulse(f, "RCC_AHB2RSTR1", "RNGRST");
+      CHECK(peek(f, "RCC_CSR") == before);
+      continue;
+    }
     f.target->reset([:kind:]);
     CAPTURE(std::meta::identifier_of(kind));
     auto const csr    = peek(f, "RCC_CSR");
@@ -412,6 +458,8 @@ TEST_CASE("every reset kind leaves its own flag in RCC_CSR, RMVF clears them")
         break;
       case reset_kind::option_load:
         expect = bit_of("RCC_CSR", "OBLRSTF") | bor | pin;
+        break;
+      case reset_kind::peripheral:
         break;
     }
     CHECK((csr & 0xfe00'0000u) == expect);
@@ -944,4 +992,27 @@ TEST_CASE("a plain model held in reset gets on_held_write instead of on_write, o
   popcorn::testing::rcc_reset_write(f, "RCC_AHB1RSTR", "CRCRST", 0);
   store();
   CHECK(counter->writes == 2);
+}
+
+TEST_CASE("a model that is no bus reset listener gets reset with the peripheral kind, writes held")
+{
+  auto options = popcorn::testing::stm32_options();
+  options.models.insert_or_assign(
+      "CRC",
+      [](periph::model_context&, popcorn::peripheral_desc const&)
+          -> std::shared_ptr<periph::model> { return std::make_shared<kind_recorder>(); });
+  stm32_fixture const f{u575(), "rcc_ll", std::move(options)};
+  auto* const         model = f.model_of<kind_recorder>("CRC");
+  REQUIRE(model != nullptr);
+  model->kinds.clear();
+  auto const& desc = f.target->peripheral("CRC").description();
+  auto const* pol  = popcorn::find_register(desc, "POL");
+  REQUIRE(pol != nullptr);
+  popcorn::testing::rcc_reset_write(f, "RCC_AHB1RSTR", "CRCRST", 1);
+  CHECK(model->kinds == std::vector{reset_kind::peripheral});
+  REQUIRE(f.target->mem().write(desc.base + pol->offset, 4, 0x1021).has_value());
+  CHECK(model->writes == 0);
+  popcorn::testing::rcc_reset_write(f, "RCC_AHB1RSTR", "CRCRST", 0);
+  REQUIRE(f.target->mem().write(desc.base + pol->offset, 4, 0x1021).has_value());
+  CHECK(model->writes == 1);
 }

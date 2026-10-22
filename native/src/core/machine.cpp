@@ -302,6 +302,11 @@ void machine::reset(reset_kind kind)
   {
     throw machine_busy("a reset would lose the frame of the call in progress");
   }
+  if(kind == reset_kind::peripheral)
+  {
+    throw config_error(
+        "reset", 0, "kind", "a machine reset kind, reset_kind::peripheral resets one peripheral");
+  }
   run_->reset_machine(kind);
 }
 

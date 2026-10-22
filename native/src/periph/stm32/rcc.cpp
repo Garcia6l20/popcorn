@@ -243,6 +243,8 @@ constexpr auto flags_of(reset_kind kind) noexcept -> std::array<std::string_view
       return {"LPWRRSTF", {}};
     case reset_kind::option_load:
       return {"OBLRSTF", {}};
+    case reset_kind::peripheral:
+      return {};
   }
   return {};
 }
@@ -1402,14 +1404,28 @@ auto rcc::held_in_reset(std::size_t line) const -> bool
 
 template <std::size_t Reg> void rcc::resets_written(std::uint32_t old, std::uint32_t now)
 {
+  std::exception_ptr first;
   for(auto const& entry : resets_)
   {
     if(entry.reg != Reg or entry.bit.of(old) == entry.bit.of(now))
     {
       continue;
     }
-    auto const held = entry.bit.of(now) != 0;
-    ctx_.services.hold_in_reset(entry.instance, held);
+    try
+    {
+      ctx_.services.hold_in_reset(entry.instance, entry.bit.of(now) != 0);
+    }
+    catch(...)
+    {
+      if(not first)
+      {
+        first = std::current_exception();
+      }
+    }
+  }
+  if(first)
+  {
+    std::rethrow_exception(first);
   }
 }
 

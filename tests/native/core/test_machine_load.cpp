@@ -180,6 +180,11 @@ TEST_CASE("every reset kind restarts the clock at instruction 0 and time 0 and k
     popcorn::reset_kind const value = [:kind:];
     std::string const         name  = std::format("{}", value);
     INFO(name);
+    if(value == popcorn::reset_kind::peripheral)
+    {
+      CHECK_THROWS_AS(target.reset(value), popcorn::config_error);
+      continue;
+    }
     target.reset(value);
     CHECK(target.virtual_clock().now() == popcorn::icount{0});
     CHECK(target.virtual_clock().time() == popcorn::vtime{0});

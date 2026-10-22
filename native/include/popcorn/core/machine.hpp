@@ -424,6 +424,7 @@ public:
    *        effect at the next block boundary, the reset runs there, the trace rebases at 0, and
    *        the slice continues.
    * @param kind Cause of the reset, passed to every model.
+   * @throws config_error for reset_kind::peripheral, which resets one peripheral only.
    * @throws machine_running while a slice runs, handlers included.
    * @throws machine_busy while a call begun by begin_call() is in progress.
    */

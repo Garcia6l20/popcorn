@@ -280,7 +280,9 @@ def test_a_restore_drops_queued_input_unread_samples_and_the_modulator(
     assert capture() == first
 
 
-@pytest.mark.parametrize("kind", list(ResetKind), ids=lambda kind: kind.name)
+@pytest.mark.parametrize(
+    "kind", [k for k in ResetKind if k is not ResetKind.PERIPHERAL], ids=lambda kind: kind.name
+)
 def test_a_reset_of_any_kind_keeps_queued_input_and_kept_samples(
     u575: popcorn.PartDescription, kind: ResetKind
 ) -> None:

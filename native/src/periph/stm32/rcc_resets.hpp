@@ -12,7 +12,8 @@
 
 namespace popcorn::periph::stm32
 {
-/** @brief The RCC peripheral reset registers, RM0456 11.8.21 to 11.8.28. */
+/** @brief The STM32U5 RCC peripheral reset registers, RM0456 11.8.21 to 11.8.28, in that order.
+ *         RCC finds its reset registers in its description, only the tests read this list. */
 inline constexpr std::array<std::string_view, 8> reset_registers{
     "RCC_AHB1RSTR",  "RCC_AHB2RSTR1", "RCC_AHB2RSTR2", "RCC_AHB3RSTR",
     "RCC_APB1RSTR1", "RCC_APB1RSTR2", "RCC_APB2RSTR",  "RCC_APB3RSTR"};

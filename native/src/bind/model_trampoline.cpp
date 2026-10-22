@@ -36,18 +36,19 @@ auto register_name(peripheral_desc const& desc, std::uint32_t offset) -> std::st
 }
 
 /**
- * @brief nanobind trampoline letting a Python class implement periph::model through the private
- *        methods `_claims`, `_reset`, `_on_bus_reset`, `_read`, `_write`, `_event`, `_save` and
- *        `_load` that
- *        `popcorn.model.Model` defines. Every call takes the GIL. A bus error crosses as a
- *        return value: None from `_read` and False from `_write` become bus_error::denied.
- *        Once its machine's Python side is collected no method is called: the run is asked to
- *        stop, a read returns 0, `claims` and `save` nothing, the others have no effect.
+ * @brief nanobind trampoline letting a Python class implement periph::model and
+ *        periph::bus_reset_listener through the private methods `_claims`, `_reset`,
+ *        `_on_bus_reset`, `_read`, `_write`, `_event`, `_save` and `_load` that
+ *        `popcorn.model.Model` defines. NB_TRAMPOLINE reserves one slot per distinct method name
+ *        `call()` looks up, 8. Every call takes the GIL. A bus error crosses as a return value:
+ *        None from `_read` and False from `_write` become bus_error::denied. Once its machine's
+ *        Python side is collected no method is called: the run is asked to stop, a read returns
+ *        0, `claims` and `save` nothing, the others have no effect.
  */
 class python_model final : public periph::model, public periph::bus_reset_listener
 {
 public:
-  NB_TRAMPOLINE(periph::model, 7);
+  NB_TRAMPOLINE(periph::model, 8);
 
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
   {

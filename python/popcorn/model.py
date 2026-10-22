@@ -109,6 +109,7 @@ class _Register:
     first: int
     end: int
     fields: dict[str, int]
+    reset: int
 
 
 def _registers(description: _core.PeripheralDesc) -> dict[str, _Register]:
@@ -124,6 +125,7 @@ def _registers(description: _core.PeripheralDesc) -> dict[str, _Register]:
             first=reg.offset,
             end=reg.offset + width // 8,
             fields={f.name: ((1 << f.width) - 1) << f.lsb for f in reg.fields},
+            reset=reg.reset & reg.reset_mask & ((1 << width) - 1),
         )
         aliases |= dict.fromkeys(reg.aliases or (), out[reg.name])
     return aliases | out
@@ -326,6 +328,7 @@ class Model(_core.ModelBase):
         self.peripheral = description.name
         self.regs = RegisterStore(context, registers)
         self.fields = FieldMasks(registers)
+        self._claimed = tuple(registers[name] for name in self._claims() if name in registers)
         self.irqs = tuple(IrqLine(context, i) for i in range(context.irq_count()))
         if len(spec.irqs) > len(self.irqs):
             raise ConfigError(
@@ -421,24 +424,26 @@ class Model(_core.ModelBase):
     def reset(self, kind: ResetKind) -> None:
         """Bring the model to its reset state: by default the state after construction.
 
-        The machine has already put every register of the peripheral to its reset value.
+        The machine has already put every register of the peripheral to its reset value: the
+        registers no handler claims through the register layer, the claimed ones through this
+        model's base class before it calls `reset`.
         """
         if self._initial is not None:
             self.restore(self._initial)
 
     def on_bus_reset(self) -> None:
         """The peripheral entered a reset its bus reset bit holds, such as its STM32 RCC reset
-        bit written 1. By default it calls `reset(ResetKind.SOFTWARE)`, as the built-in models
-        reset the same way for both.
+        bit written 1. By default it calls `reset(ResetKind.PERIPHERAL)`.
 
         Called on the machine thread, inside the firmware or host access that set the bit, at
-        its virtual time. The machine has already put every register this model does not claim
-        to its reset value. Until the bit is cleared, the machine ignores every write to the
-        peripheral, from the CPU, DMA and debugger alike, and calls no write handler of this
-        model. Reads are served as usual. Events this model scheduled stay queued: cancel them
-        here when the reset must drop them. Never called from a machine reset.
+        its virtual time. The machine has already put every register of the peripheral to its
+        reset value, the claimed ones through this model's base class. Until the bit is
+        cleared, the machine ignores every write to the peripheral, from the CPU, DMA and
+        debugger alike, and calls no write handler of this model. Reads are served as usual.
+        Events this model scheduled stay queued: cancel them here when the reset must drop
+        them. Never called from a machine reset.
         """
-        self.reset(ResetKind.SOFTWARE)
+        self.reset(ResetKind.PERIPHERAL)
 
     def snapshot(self) -> bytes:
         """The model state as bytes: the declared state fields, in declaration order."""
@@ -496,10 +501,19 @@ class Model(_core.ModelBase):
     def _claims(self) -> list[str]:
         return sorted({*type(self)._reads, *type(self)._writes})
 
+    def _restore_claimed(self) -> None:
+        for reg in self._claimed:
+            word = self._context.peek(reg.word)
+            self._context.poke(
+                reg.word, (word & ~(reg.mask << reg.shift)) | (reg.reset << reg.shift)
+            )
+
     def _reset(self, kind: _core.ResetKind) -> None:
+        self._restore_claimed()
         self.reset(ResetKind(kind.value))
 
     def _on_bus_reset(self) -> None:
+        self._restore_claimed()
         self.on_bus_reset()
 
     def _read(self, offset: int, size: int) -> int | None:

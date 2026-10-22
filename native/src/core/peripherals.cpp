@@ -207,7 +207,9 @@ auto machine::run_state::slot(std::string_view name) const -> peripheral_slot&
 {
   auto const found = std::ranges::lower_bound(
       peripheral_index, name, {}, &std::pair<std::string_view, std::uint32_t>::first);
-  if(found == peripheral_index.end() or found->first != name)
+  if(found == peripheral_index.end()
+     or found->first != name
+     or owner.peripherals_[found->second] == nullptr)
   {
     throw config_error(
         owner.description_.part, 0, "peripherals",
@@ -229,6 +231,10 @@ void machine::do_hold_in_reset(std::string_view peripheral, bool held)
   if(auto* const listener = dynamic_cast<periph::bus_reset_listener*>(slot.model.get()))
   {
     listener->on_bus_reset();
+  }
+  else if(slot.model)
+  {
+    slot.model->reset(slot.regs, reset_kind::peripheral);
   }
 }
 

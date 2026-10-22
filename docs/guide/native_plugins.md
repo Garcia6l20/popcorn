@@ -49,11 +49,16 @@ A device is a C++ class bound with nanobind. The bindings module declares it:
 
 `claims()` of a model names its registers, `on_read` and `on_write` serve them, and
 `ctx.events.schedule_at` schedules work in virtual time. `save` and `load` carry the state a
-snapshot keeps. A model that also derives from `popcorn::periph::bus_reset_listener` hears an
-RCC peripheral reset in `on_bus_reset()`, as the example's RNG does on RNGRST. While the reset
-bit is 1 the machine passes it no write, and calls `on_held_write()` instead. A plugin built
-against an older SDK is refused by its digest, so rebuild every plugin after a popcorn update. `plugin/saved.hpp` holds the helpers both models of the example use. The C++ API is documented in the
-[Plugin SDK reference](../reference/sdk/index.md).
+snapshot keeps. `plugin/saved.hpp` holds the helpers both models of the example use. The C++
+API is documented in the [Plugin SDK reference](../reference/sdk/index.md).
+
+An RCC peripheral reset bit written 1 resets the peripheral. A model that derives from
+`popcorn::periph::bus_reset_listener` hears it in `on_bus_reset()`, as the example's RNG does on
+RNGRST. A model that does not gets `reset()` with `popcorn::reset_kind::peripheral`. While the
+bit is 1 the machine passes the model no write. It calls a listener's `on_held_write()` instead.
+
+A plugin built against another SDK is refused by its digest. Rebuild every plugin after a popcorn
+update.
 
 ## Cost
 

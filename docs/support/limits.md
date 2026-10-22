@@ -203,8 +203,10 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   register of that instance that no model claims, for any instance, modelled or not, such as
   LPTIM1. It also resets the instance's model when the model supports it: RNG, CRC, HASH,
   SYSCFG, ADC1 and ADC12 through ADC12RST, GPDMA1, LPDMA1, the timers, GPIOA to GPIOI, SPI, I2C,
-  SAI, MDF1, ADF1, the USARTs, UARTs and LPUART1, and OTG_FS. A native plugin or Python model
-  hears it through `on_bus_reset()`.
+  SAI, MDF1, ADF1, the USARTs, UARTs and LPUART1, and OTG_FS. A native plugin model that derives
+  from `periph::bus_reset_listener`, and every Python model, hears it through `on_bus_reset()`.
+  Any other model gets `reset()` with `reset_kind::peripheral`. A peripheral reset sets no
+  RCC_CSR reset flag.
 - Board state survives such a reset: a pin's board drive, SPI devices and I2C targets, which an
   RCC reset of their controller does not reset, PDM sources, SAI external clocks and the frames
   a test queued for a USART receiver.

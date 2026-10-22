@@ -1328,6 +1328,12 @@ void machine::do_request_stop(stop_reason reason, std::string detail)
 
 void machine::do_request_reset(reset_kind kind)
 {
+  if(kind == reset_kind::peripheral)
+  {
+    throw config_error(
+        "request_reset", 0, "kind",
+        "a machine reset kind, reset_kind::peripheral resets one peripheral");
+  }
   if(not run_->reset_requested)
   {
     run_->reset_requested = kind;
