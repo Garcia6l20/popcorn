@@ -58,6 +58,8 @@ nav = [
 
 [project.theme]
 features = ["content.code.copy", "navigation.sections"]
+logo = "assets/logo.svg"
+favicon = "assets/favicon.svg"
 
 [project.markdown_extensions]
 admonition = {}

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+<defs>
+<mask id="m">
+<rect width="256" height="256" fill="white"/>
+<g fill="black">
+<circle cx="128.0" cy="136.1" r="49.3"/>
+<circle cx="100.3" cy="105.8" r="40.5"/>
+<circle cx="140.6" cy="93.2" r="41.8"/>
+<circle cx="170.8" cy="123.5" r="32.9"/>
+<circle cx="158.2" cy="163.8" r="30.4"/>
+<circle cx="90.2" cy="153.7" r="30.4"/>
+</g>
+</mask>
+</defs>
+<g mask="url(#m)" fill="#f0900c">
+<rect x="32.0" y="32.0" width="72" height="72" rx="16"/>
+<rect x="152.0" y="32.0" width="72" height="72" rx="16"/>
+<rect x="32.0" y="152.0" width="72" height="72" rx="16"/>
+<rect x="152.0" y="152.0" width="72" height="72" rx="16"/>
+</g>
+<g fill="#ffc83d">
+<circle cx="128.0" cy="136.1" r="40.3"/>
+<circle cx="100.3" cy="105.8" r="31.5"/>
+<circle cx="140.6" cy="93.2" r="32.8"/>
+<circle cx="170.8" cy="123.5" r="23.9"/>
+<circle cx="158.2" cy="163.8" r="21.4"/>
+<circle cx="90.2" cy="153.7" r="21.4"/>
+</g>
+</svg>

@@ -29,6 +29,7 @@ FULL_SIDEBAR           = NO
 HTML_COLORSTYLE        = LIGHT
 HAVE_DOT               = NO
 PROJECT_BRIEF          = "C++ API for native plugins"
+PROJECT_LOGO           = docs/assets/logo.svg
 EXTRACT_ALL            = NO
 EXTRACT_PRIVATE        = NO
 WARN_IF_UNDOCUMENTED   = YES
