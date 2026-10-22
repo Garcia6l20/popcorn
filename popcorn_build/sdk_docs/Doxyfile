@@ -1,0 +1,35 @@
+PROJECT_NAME           = "popcorn plugin SDK"
+OUTPUT_DIRECTORY       = docs/reference/sdk/api
+INPUT                  = native/include/popcorn/export.hpp \
+                         native/include/popcorn/plugin \
+                         native/include/popcorn/core/types.hpp \
+                         native/include/popcorn/core/errors.hpp \
+                         native/include/popcorn/core/fwd.hpp \
+                         native/include/popcorn/core/services.hpp \
+                         native/include/popcorn/core/machine.hpp \
+                         native/include/popcorn/periph/model.hpp \
+                         native/include/popcorn/periph/register_file.hpp \
+                         native/include/popcorn/periph/lines.hpp \
+                         native/include/popcorn/periph/reset_listener.hpp \
+                         native/include/popcorn/periph/snapshot_listener.hpp
+FILE_PATTERNS          = *.hpp
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+HTML_OUTPUT            = .
+SEARCHENGINE           = NO
+GENERATE_TREEVIEW      = NO
+HAVE_DOT               = NO
+PROJECT_BRIEF          = "C++ API for native plugins"
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+WARN_AS_ERROR          = YES
+QUIET                  = YES
+JAVADOC_AUTOBRIEF      = NO
+MARKDOWN_SUPPORT       = YES
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+INPUT_FILTER           = "sed -E -f popcorn_build/sdk_docs/strip_attributes.sed"
+PREDEFINED             = "pre(x)=" "post(x)="

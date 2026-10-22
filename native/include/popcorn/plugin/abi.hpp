@@ -35,6 +35,7 @@
 /** @brief The libstdc++ debug mode field of the tag, it changes the layout of std containers. */
 #define POPCORN_ABI_GLIBCXX_DEBUG "1"
 #else
+/** @brief The libstdc++ debug mode field of the tag, it changes the layout of std containers. */
 #define POPCORN_ABI_GLIBCXX_DEBUG "0"
 #endif
 
@@ -42,6 +43,7 @@
 /** @brief The nanobind domain field of the tag, this unit's own `NB_DOMAIN`, empty without one. */
 #define POPCORN_ABI_NB_DOMAIN POPCORN_ABI_STR(NB_DOMAIN)
 #else
+/** @brief The nanobind domain field of the tag, this unit's own `NB_DOMAIN`, empty without one. */
 #define POPCORN_ABI_NB_DOMAIN ""
 #endif
 
@@ -49,8 +51,10 @@
 /** @brief The sanitizer field of the tag, empty without one. */
 #define POPCORN_ABI_SANITIZER ";asan"
 #elif defined(__SANITIZE_THREAD__)
+/** @brief The sanitizer field of the tag, empty without one. */
 #define POPCORN_ABI_SANITIZER ";tsan"
 #else
+/** @brief The sanitizer field of the tag, empty without one. */
 #define POPCORN_ABI_SANITIZER ""
 #endif
 

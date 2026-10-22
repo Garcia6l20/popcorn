@@ -18,6 +18,7 @@ using address = std::uint32_t;
 /** @brief Count of guest instructions executed. */
 struct icount
 {
+  /** @brief The count. */
   std::uint64_t value;
 
   /** @brief Member-wise ordering and equality. */
@@ -27,6 +28,7 @@ struct icount
 /** @brief Virtual time elapsed in the guest, in picoseconds. */
 struct vtime
 {
+  /** @brief Picoseconds. */
   std::uint64_t ps;
 
   /** @brief Member-wise ordering and equality. */
