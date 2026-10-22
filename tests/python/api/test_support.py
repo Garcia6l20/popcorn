@@ -35,6 +35,7 @@ U575_BUILTIN = [
     "IWDG",
     "PWR",
     "RCC",
+    "RNG",
     "RTC",
     "SAI1",
     "SAI2",
@@ -83,7 +84,7 @@ U575_TRUSTZONE_ONLY = [
 ]
 
 
-class Rng(Model):
+class Stub(Model):
     pass
 
 
@@ -115,12 +116,12 @@ def supported() -> dict[bool, dict[str, PeripheralSupport]]:
 
 
 @pytest.fixture
-def registered_rng() -> Iterator[None]:
-    popcorn.model.register("RNG")(Rng)
+def registered_wwdg() -> Iterator[None]:
+    popcorn.model.register("WWDG")(Stub)
     try:
         yield
     finally:
-        popcorn.model.unregister("RNG")
+        popcorn.model.unregister("WWDG")
 
 
 def test_the_u575_ships() -> None:
@@ -160,18 +161,18 @@ def test_support_agrees_with_a_machine(
     assert (found.model is not None) == modelled(machines[trustzone], name)
 
 
-@pytest.mark.usefixtures("registered_rng")
+@pytest.mark.usefixtures("registered_wwdg")
 def test_a_registered_python_model_shows_as_python() -> None:
     found = {s.name: s.model for s in support(U575)}
-    assert found["RNG"] == "python"
-    assert isinstance(popcorn.Machine(U575).model("RNG"), Rng)
+    assert found["WWDG"] == "python"
+    assert isinstance(popcorn.Machine(U575).model("WWDG"), Stub)
 
 
 def test_a_python_model_over_a_builtin_ip_wins_until_unregistered() -> None:
-    popcorn.model.register("CRC")(Rng)
+    popcorn.model.register("CRC")(Stub)
     try:
         assert {s.name: s.model for s in support(U575)}["CRC"] == "python"
-        assert isinstance(popcorn.Machine(U575).model("CRC"), Rng)
+        assert isinstance(popcorn.Machine(U575).model("CRC"), Stub)
     finally:
         popcorn.model.unregister("CRC")
     assert {s.name: s.model for s in support(U575)}["CRC"] == "builtin"
@@ -179,8 +180,8 @@ def test_a_python_model_over_a_builtin_ip_wins_until_unregistered() -> None:
     assert modelled(popcorn.Machine(U575), "CRC")
 
 
-def test_without_a_registration_rng_has_no_model() -> None:
-    assert {s.name: s.model for s in support(U575)}["RNG"] is None
+def test_without_a_registration_wwdg_has_no_model() -> None:
+    assert {s.name: s.model for s in support(U575)}["WWDG"] is None
 
 
 def test_trustzone_on_a_part_without_it_is_refused(m33: popcorn.PartDescription) -> None:
