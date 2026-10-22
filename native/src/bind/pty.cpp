@@ -2,6 +2,7 @@
 
 #include <fcntl.h>
 #include <pty.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -116,6 +117,10 @@ auto pty_bridge::take_input() -> std::vector<std::uint8_t>
 
 auto pty_bridge::flush() -> std::optional<std::string>
 {
+  if(link_->device_changed())
+  {
+    ::ioctl(slave_.get(), TIOCNXCL);
+  }
   link_->drain(outgoing_);
   std::size_t written = 0;
   while(written < outgoing_.size())
@@ -239,14 +244,24 @@ void uart_pty_link::drain(std::vector<std::uint8_t>& out)
                    }));
 }
 
-cdc_pty_link::cdc_pty_link(std::shared_ptr<periph::usb::cdc_hub> hub, std::size_t function) noexcept
+cdc_pty_link::cdc_pty_link(std::shared_ptr<periph::usb::cdc_hub> hub, std::size_t function)
     : hub_{std::move(hub)}, function_{function}
-{}
+{
+  auto const held = hub_->lock();
+  seen_           = hub_->channel(held, function_).attachments;
+}
 
 void cdc_pty_link::send(std::span<std::uint8_t const> bytes)
 {
   auto const held = hub_->lock();
   hub_->channel(held, function_).out.append_range(bytes);
+}
+
+auto cdc_pty_link::device_changed() -> bool
+{
+  auto const held     = hub_->lock();
+  auto const attached = hub_->channel(held, function_).attachments;
+  return std::exchange(seen_, attached) != attached;
 }
 
 void cdc_pty_link::drain(std::vector<std::uint8_t>& out)

@@ -46,6 +46,15 @@ public:
    * @param out Receives them, appended oldest first.
    */
   virtual void drain(std::vector<std::uint8_t>& out) = 0;
+
+  /**
+   * @brief Whether the device behind the link detached or attached since the last call.
+   * @return False for a link with no such event.
+   */
+  [[nodiscard]] virtual auto device_changed() -> bool
+  {
+    return false;
+  }
 };
 
 /** @brief A file descriptor owned alone, closed on destruction. */
@@ -81,8 +90,9 @@ private:
 /**
  * @brief A host pty bridged to a byte link: host tools open path() like a serial port. Owns both
  *        ends of the pty and keeps the slave open, so the master never reads EIO or polls
- *        POLLHUP while no tool has the pty open. pump() and discard() run on the thread that
- *        owns the engine, the others on any thread.
+ *        POLLHUP while no tool has the pty open. Through that slave it clears TIOCEXCL when the
+ *        link's device detaches or attaches, as a re-enumerated device is a fresh port. pump() and
+ * discard() run on the thread that owns the engine, the others on any thread.
  */
 class pty_bridge
 {
@@ -187,14 +197,16 @@ public:
    * @param hub The channels of the controller's host.
    * @param function Function index.
    */
-  cdc_pty_link(std::shared_ptr<periph::usb::cdc_hub> hub, std::size_t function) noexcept;
+  cdc_pty_link(std::shared_ptr<periph::usb::cdc_hub> hub, std::size_t function);
 
-  void send(std::span<std::uint8_t const> bytes) override;
-  void drain(std::vector<std::uint8_t>& out) override;
+  void               send(std::span<std::uint8_t const> bytes) override;
+  void               drain(std::vector<std::uint8_t>& out) override;
+  [[nodiscard]] auto device_changed() -> bool override;
 
 private:
   std::shared_ptr<periph::usb::cdc_hub> hub_;
   std::size_t                           function_;
+  std::uint64_t                         seen_{};
 };
 /** @brief A warning of a bridge, for the machine's log. */
 struct pty_warning

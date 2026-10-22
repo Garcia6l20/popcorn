@@ -95,6 +95,9 @@ struct POPCORN_API cdc_channel
   /** @brief Whether the bound driver's SET_CONTROL_LINE_STATE of configuration has ended,
    * whatever its status: OUT bytes go out from then on. False while no driver is bound. */
   bool ready{};
+  /** @brief Drivers bound to this channel and unbound from it, ever. Never reset, so a detach
+   * and re-attach between two looks still differ. */
+  std::uint64_t attachments{};
   /** @brief Control transfers submitted for the binding whose result is not in yet. */
   std::set<transfer_id> awaited{};
   /** @brief Results of awaited control transfers not collected yet. */
