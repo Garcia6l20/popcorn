@@ -592,6 +592,52 @@ void machine_handle::rng_set_stuck(std::string const& peripheral, std::optional<
   access([&](core::machine&) { entropy(peripheral).set_stuck(word); });
 }
 
+auto machine_handle::rng_seed_fault(std::string const& peripheral) const -> bool
+{
+  return access([&](core::machine&) { return entropy(peripheral).seed_fault(); });
+}
+
+void machine_handle::rng_set_seed_fault(std::string const& peripheral, bool fault)
+{
+  access([&](core::machine&) { entropy(peripheral).set_seed_fault(fault); });
+}
+
+auto machine_handle::rng_seed_fault_after(std::string const& peripheral) const
+    -> std::optional<std::uint64_t>
+{
+  return access([&](core::machine&) { return entropy(peripheral).seed_fault_after(); });
+}
+
+void machine_handle::rng_set_seed_fault_after(
+    std::string const&           peripheral,
+    std::optional<std::uint64_t> words)
+{
+  access([&](core::machine&) { entropy(peripheral).set_seed_fault_after(words); });
+}
+
+auto machine_handle::rng_clock_fault(std::string const& peripheral) const -> bool
+{
+  return access([&](core::machine&) { return entropy(peripheral).clock_fault(); });
+}
+
+void machine_handle::rng_set_clock_fault(std::string const& peripheral, bool fault)
+{
+  access([&](core::machine&) { entropy(peripheral).set_clock_fault(fault); });
+}
+
+auto machine_handle::rng_clock_fault_after(std::string const& peripheral) const
+    -> std::optional<std::uint64_t>
+{
+  return access([&](core::machine&) { return entropy(peripheral).clock_fault_after(); });
+}
+
+void machine_handle::rng_set_clock_fault_after(
+    std::string const&           peripheral,
+    std::optional<std::uint64_t> words)
+{
+  access([&](core::machine&) { entropy(peripheral).set_clock_fault_after(words); });
+}
+
 auto machine_handle::gpio_alternate(std::string const& peripheral, std::uint8_t pin) const
     -> std::uint8_t
 {

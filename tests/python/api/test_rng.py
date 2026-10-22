@@ -266,3 +266,80 @@ def test_1000_queue_and_restart_cycles_keep_the_queue_empty(
         assert entropy.queued == 0
         assert rng.DR.value == cycle + 1
     assert entropy.drawn == 3 * 1000
+
+
+def keygen_parked(m: popcorn.Machine) -> int:
+    assert asyncio.run(m.run(for_=ms(10), budget=500_000)).reason is popcorn.StopReason.TIME
+    assert m.mem.u32[m.sym("keygen_done")] == 1
+    return m.mem.u32[m.sym("keygen_status")]
+
+
+def keygen_running(m: popcorn.Machine) -> int:
+    async def body() -> popcorn.Stop:
+        async with m.running():
+            return await m.wait_for(m.ref.var("keygen_done").ge(1))
+
+    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    return m.mem.u32[m.sym("keygen_status")]
+
+
+@pytest.mark.parametrize("run", [keygen_parked, keygen_running])
+def test_keygen_reports_each_injected_failure(
+    u575: popcorn.PartDescription, run: Callable[[popcorn.Machine], int]
+) -> None:
+    m = entered(u575, "keygen")
+    assert run(m) == 0
+    key = [m.mem.u32[m.sym("keygen_key") + 4 * word] for word in range(WORDS)]
+    assert key == rng_words(0, WORDS)
+    for name, status in [("seed_fault", 1), ("clock_fault", 2)]:
+        m = entered(u575, "keygen")
+        setattr(m.periph.RNG.entropy, name, True)
+        assert run(m) == status
+    m = entered(u575, "keygen")
+    m.periph.RNG.entropy.stuck = 0x1234_5678
+    assert run(m) == 3
+
+
+@pytest.mark.parametrize("run", [keygen_parked, keygen_running])
+def test_a_fault_after_n_words_fires_at_the_round_drawing_the_nth(
+    u575: popcorn.PartDescription, run: Callable[[popcorn.Machine], int]
+) -> None:
+    m = entered(u575, "keygen")
+    entropy = m.periph.RNG.entropy
+    entropy.seed_fault_after = 8
+    assert entropy.seed_fault_after == 8
+    assert run(m) == 1
+    assert entropy.seed_fault
+    assert entropy.seed_fault_after is None
+    assert entropy.drawn == 8
+    m = entered(u575, "keygen")
+    entropy = m.periph.RNG.entropy
+    entropy.clock_fault_after = 6
+    assert run(m) == 2
+    assert entropy.clock_fault
+    assert entropy.clock_fault_after is None
+    assert m.periph.RNG.SR.CECS == 0
+    assert m.periph.RNG.SR.CEIS == 1
+
+
+def test_fault_refusals_change_nothing(u575: popcorn.PartDescription) -> None:
+    entropy = entered(u575, "idle").periph.RNG.entropy
+    for name in ("seed_fault", "clock_fault"):
+        for value in (1, None, "yes"):
+            with pytest.raises(TypeError):
+                setattr(entropy, name, value)
+            assert getattr(entropy, name) is False
+    for name in ("seed_fault_after", "clock_fault_after"):
+        for value, error in [
+            (0, ValueError),
+            (-1, ValueError),
+            (1 << 64, ValueError),
+            (True, TypeError),
+        ]:
+            with pytest.raises(error):
+                setattr(entropy, name, value)
+            assert getattr(entropy, name) is None
+        setattr(entropy, name, 3)
+        assert getattr(entropy, name) == 3
+        setattr(entropy, name, None)
+        assert getattr(entropy, name) is None

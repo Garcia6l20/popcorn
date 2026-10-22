@@ -108,6 +108,53 @@ public:
    */
   virtual void set_stuck(std::optional<std::uint32_t> word) = 0;
 
+  /** @brief Whether the noise source is failing, seed_fault set. */
+  [[nodiscard]] virtual auto seed_fault() const -> bool = 0;
+
+  /**
+   * @brief Sets or releases the noise source failure. While set and the noise source runs, CR.RNGEN
+   *        1, CONDRST 0 and the kernel clock running, SECS and SEIS set, the FIFO and the
+   *        conditioning register empty and generation stops, RM0456 48.3.7. SECS stays across
+   *        every recovery while set. Released with ARDIS 0, SECS clears 2 AHB plus 2 RNG cycles
+   *        later, an assumption: RM0456 gives no auto-reset time. With ARDIS 1 it clears at the
+   *        end of a CONDRST cycle.
+   * @param fault Whether the noise source fails.
+   */
+  virtual void set_seed_fault(bool fault) = 0;
+
+  /** @brief Whether the clock checker sees a slow RNG clock, clock_fault set. */
+  [[nodiscard]] virtual auto clock_fault() const -> bool = 0;
+
+  /**
+   * @brief Sets or releases a slow RNG clock as the clock checker sees it. While set, CED 0,
+   *        RNGEN 1 and the bus enable set, CECS is 1 and its rise sets CEIS. Generation goes on,
+   *        RM0456 48.3.7.
+   * @param fault Whether the clock checker sees a slow clock.
+   */
+  virtual void set_clock_fault(bool fault) = 0;
+
+  /** @brief Words left before seed_fault sets, empty when none is armed. */
+  [[nodiscard]] virtual auto seed_fault_after() const -> std::optional<std::uint64_t> = 0;
+
+  /**
+   * @brief Arms seed_fault to set once @p words more words are drawn from the source, stuck,
+   *        queued or generated, then disarms.
+   * @param words Words to draw first, empty to disarm.
+   * @throws config_error for 0 words, before any change.
+   */
+  virtual void set_seed_fault_after(std::optional<std::uint64_t> words) = 0;
+
+  /** @brief Words left before clock_fault sets, empty when none is armed. */
+  [[nodiscard]] virtual auto clock_fault_after() const -> std::optional<std::uint64_t> = 0;
+
+  /**
+   * @brief Arms clock_fault to set once @p words more words are drawn from the source, then
+   *        disarms.
+   * @param words Words to draw first, empty to disarm.
+   * @throws config_error for 0 words, before any change.
+   */
+  virtual void set_clock_fault_after(std::optional<std::uint64_t> words) = 0;
+
 protected:
   /** @brief Destroys the interface, only through its model. */
   virtual ~entropy_source();

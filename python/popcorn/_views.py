@@ -737,8 +737,92 @@ class RngEntropy:
         checked = None if word is None else checked_int("stuck", word, 0xFFFF_FFFF)
         self._access.handle.rng_set_stuck(self.rng, checked)
 
+    @property
+    def seed_fault(self) -> bool:
+        """Whether the noise source fails. While True and the RNG runs, CR.RNGEN 1, CONDRST 0
+        and its kernel clock running, SECS and SEIS set, the FIFO and the conditioning register
+        empty and generation stops, RM0456 48.3.7. Setting it acts at once. SECS stays across
+        every recovery while True. Set back to False, SECS clears after a CONDRST cycle with
+        ARDIS 1, or 2 AHB plus 2 RNG cycles later with ARDIS 0, an assumption: RM0456 gives no
+        auto-reset time. SEIS stays until firmware writes 0.
+
+        Raises:
+            TypeError: Set to anything but a bool.
+        """
+        return self._access.handle.rng_seed_fault(self.rng)
+
+    @seed_fault.setter
+    def seed_fault(self, fault: bool) -> None:
+        self._access.handle.rng_set_seed_fault(self.rng, _checked_bool("seed_fault", fault))
+
+    @property
+    def clock_fault(self) -> bool:
+        """Whether the clock checker sees a slow RNG clock. While True, CED 0, RNGEN 1 and the
+        RNG bus clock enabled, CECS is 1, and each rise of CECS sets CEIS. Generation goes on,
+        RM0456 48.3.7. CECS clears by itself when it is set back to False, CEIS stays until
+        firmware writes 0.
+
+        Raises:
+            TypeError: Set to anything but a bool.
+        """
+        return self._access.handle.rng_clock_fault(self.rng)
+
+    @clock_fault.setter
+    def clock_fault(self, fault: bool) -> None:
+        self._access.handle.rng_set_clock_fault(self.rng, _checked_bool("clock_fault", fault))
+
+    @property
+    def seed_fault_after(self) -> int | None:
+        """Words left to draw before `seed_fault` becomes True, None when not armed. Every word
+        a round produces counts, stuck, queued or generated. At 0 the fault is set and this
+        goes back to None.
+
+        Raises:
+            TypeError: Set to a bool, or to neither an int nor None.
+            ValueError: Set outside 1 to 2**64 - 1.
+        """
+        return self._access.handle.rng_seed_fault_after(self.rng)
+
+    @seed_fault_after.setter
+    def seed_fault_after(self, words: int | None) -> None:
+        self._access.handle.rng_set_seed_fault_after(
+            self.rng, _checked_count("seed_fault_after", words)
+        )
+
+    @property
+    def clock_fault_after(self) -> int | None:
+        """Words left to draw before `clock_fault` becomes True, None when not armed, counted
+        as `seed_fault_after` counts.
+
+        Raises:
+            TypeError: Set to a bool, or to neither an int nor None.
+            ValueError: Set outside 1 to 2**64 - 1.
+        """
+        return self._access.handle.rng_clock_fault_after(self.rng)
+
+    @clock_fault_after.setter
+    def clock_fault_after(self, words: int | None) -> None:
+        self._access.handle.rng_set_clock_fault_after(
+            self.rng, _checked_count("clock_fault_after", words)
+        )
+
     def __repr__(self) -> str:
         return f"RngEntropy({self.rng})"
+
+
+def _checked_bool(name: str, value: object) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(f"{name}: expected a bool, not {type(value).__qualname__}")
+    return value
+
+
+def _checked_count(name: str, value: object) -> int | None:
+    if value is None:
+        return None
+    count = checked_int(name, value, (1 << 64) - 1)
+    if count == 0:
+        raise ValueError(f"{name}: expected 1 to {(1 << 64) - 1}, not 0")
+    return count
 
 
 def microvolts_of(volts: float) -> int:

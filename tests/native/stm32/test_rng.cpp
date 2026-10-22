@@ -1,3 +1,4 @@
+#include "model_base.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -15,7 +16,10 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -49,6 +53,11 @@ constexpr std::uint32_t ced        = 1u << 5;
 constexpr std::uint32_t ie         = 1u << 3;
 constexpr std::uint32_t rngen      = 1u << 2;
 constexpr std::uint32_t drdy       = 1u << 0;
+constexpr std::uint32_t cecs       = 1u << 1;
+constexpr std::uint32_t secs       = 1u << 2;
+constexpr std::uint32_t ceis       = 1u << 5;
+constexpr std::uint32_t seis       = 1u << 6;
+constexpr std::uint32_t ardis      = 1u << 7;
 constexpr std::uint32_t nist_htcr  = 0xA2B0;
 constexpr std::uint32_t nist_nscr  = 0x1'7CBB;
 
@@ -86,10 +95,56 @@ auto words_from(std::uint64_t start, std::uint64_t count, std::uint64_t seed = 0
   return out;
 }
 
-auto entered(std::string_view entry, std::uint64_t seed = 0) -> stm32_fixture
+class clock_probe final : public popcorn::periph::model
+{
+public:
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+
+auto entered(std::string_view entry, std::uint64_t seed = 0, core::clock** probe = nullptr)
+    -> stm32_fixture
 {
   auto options               = popcorn::testing::stm32_options();
   options.strict_peripherals = true;
+  if(probe != nullptr)
+  {
+    options.models.insert_or_assign(
+        "CORDIC",
+        [probe](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&)
+            -> std::shared_ptr<popcorn::periph::model> {
+          *probe = &ctx.clock;
+          return std::make_shared<clock_probe>();
+        });
+  }
   if(seed != 0)
   {
     popcorn::periph::stm32::board board{};
@@ -107,8 +162,20 @@ auto entered(std::string_view entry, std::uint64_t seed = 0) -> stm32_fixture
 
 struct rig
 {
-  explicit rig(std::string_view entry = "idle", std::uint64_t seed = 0) : f{entered(entry, seed)}
+  explicit rig(
+      std::string_view entry = "idle",
+      std::uint64_t    seed  = 0,
+      core::clock**    probe = nullptr)
+      : f{entered(entry, seed, probe)}
   {}
+
+  void until(std::string_view symbol, std::uint64_t instructions) const
+  {
+    REQUIRE(
+        f.run_to_stop({.max_instructions = icount{instructions}, .until = sym("rng_ll", symbol)})
+            .reason
+        == stop_reason::address);
+  }
 
   [[nodiscard]] auto source() const -> popcorn::periph::stm32::entropy_source&
   {
@@ -515,7 +582,7 @@ TEST_CASE("no data without the AHB enable, the kernel clock source or RNGEN")
   {
     rig const r{"no_kernel_clock"};
     REQUIRE(r.finish(100'000).reason == stop_reason::user);
-    CHECK(r.log() == std::vector<std::uint32_t>{2000, 0, 0});
+    CHECK(r.log() == std::vector<std::uint32_t>{2000, ceis | cecs, 0});
     CHECK(r.logged.empty());
   }
   SUBCASE("firmware on HSI16")
@@ -1050,6 +1117,386 @@ TEST_CASE("1000 queue and drain cycles leave the queue storage bounded")
   }
   std::vector<std::byte> saved;
   r.f.target->model("RNG")->save(saved);
-  CHECK(saved.size() < 512);
+  CHECK(saved.size() < 1024);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a seed error while producing empties the pipeline and stops generation")
+{
+  rig const r;
+  full_pipeline(r);
+  r.write(cr, cr_reset | rngen | ie);
+  REQUIRE(r.ready());
+  r.source().set_seed_fault(true);
+  CHECK(r.source().seed_fault());
+  CHECK(r.read(sr) == (secs | seis));
+  CHECK(r.read(dr) == 0);
+  CHECK(r.cpu_dr() == 0);
+  CHECK(r.line() == 1);
+  auto const now = r.now();
+  CHECK_FALSE(std::ranges::any_of(r.pending(), [&](std::uint64_t ps) { return ps > now; }));
+  r.run_for(10 * init_4mhz);
+  CHECK(r.read(sr) == (secs | seis));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a seed fault set with RNGEN 0 is detected at the RNGEN write")
+{
+  rig const r;
+  r.clocks();
+  r.source().set_seed_fault(true);
+  CHECK(r.read(sr) == 0);
+  r.run_for(us);
+  CHECK(r.read(sr) == 0);
+  r.write(cr, cr_reset | rngen);
+  CHECK(r.read(sr) == (secs | seis));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("ARDIS 1: a CONDRST cycle recovers a released seed error, a held one comes back")
+{
+  SUBCASE("released before the CONDRST cycle")
+  {
+    rig const r{"seed_recover_condrst"};
+    r.source().set_seed_fault(true);
+    r.until("checkpoint", 100'000);
+    auto log = r.log();
+    REQUIRE(log.size() == 3);
+    CHECK(log[1] == 0);
+    CHECK(log[2] == (secs | seis));
+    r.source().set_seed_fault(false);
+    CHECK(r.read(sr) == (secs | seis));
+    REQUIRE(r.finish(200'000).reason == stop_reason::user);
+    log = r.log();
+    REQUIRE(log.size() == 16);
+    CHECK(log[3] >= 1);
+    CHECK(log[4] == 0);
+    CHECK(log[5] == 0);
+    CHECK(log[6] == 0);
+    for(std::size_t word = 0; word < 4; ++word)
+    {
+      CHECK(log[7 + 2 * word] < 2000);
+      CHECK(log[8 + 2 * word] == rng_word_at(0, word));
+    }
+    CHECK(r.logged.empty());
+  }
+  SUBCASE("held")
+  {
+    rig const r{"seed_recover_condrst"};
+    r.source().set_seed_fault(true);
+    REQUIRE(r.finish(400'000).reason == stop_reason::user);
+    auto const log = r.log();
+    REQUIRE(log.size() == 16);
+    CHECK(log[4] == secs);
+    CHECK(log[5] == 2000);
+    CHECK(log[6] == secs);
+    for(std::size_t word = 0; word < 4; ++word)
+    {
+      CHECK(log[7 + 2 * word] == 2000);
+      CHECK(log[8 + 2 * word] == 0);
+    }
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE("ARDIS 0: SECS clears 2 AHB plus 2 RNG cycles after the fault is released")
+{
+  rig const r{"seed_recover_auto"};
+  r.source().set_seed_fault(true);
+  r.until("checkpoint", 100'000);
+  auto log = r.log();
+  REQUIRE(log.size() == 2);
+  CHECK(log[1] == (secs | seis));
+  r.source().set_seed_fault(false);
+  auto const due = r.now() + clear_4mhz;
+  CHECK(r.due(due));
+  r.f.set("pc", sym("rng_ll", "idle"));
+  r.run_until(due - cycle);
+  CHECK(r.read(sr) == (secs | seis));
+  r.run_until(due);
+  CHECK(r.read(sr) == seis);
+  CHECK(r.due(due + init_4mhz));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("ARDIS 0: the LL flow recovers once the fault is released")
+{
+  rig const r{"seed_recover_auto"};
+  r.source().set_seed_fault(true);
+  r.until("checkpoint", 100'000);
+  r.source().set_seed_fault(false);
+  REQUIRE(r.finish(200'000).reason == stop_reason::user);
+  auto const log = r.log();
+  REQUIRE(log.size() == 13);
+  CHECK(log[3] == 0);
+  for(std::size_t word = 0; word < 4; ++word)
+  {
+    CHECK(log[4 + 2 * word] < 2000);
+    CHECK(log[5 + 2 * word] == rng_word_at(0, word));
+  }
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("CONDRST clears SEIS and CEIS and keeps SECS until the clear ends")
+{
+  rig const r;
+  r.clocks();
+  r.source().set_seed_fault(true);
+  r.source().set_clock_fault(true);
+  r.write(cr, cr_reset | rngen | ardis | condrst);
+  r.write(cr, cr_reset | rngen | ardis);
+  r.run_for(us);
+  REQUIRE(r.read(sr) == (secs | seis | cecs | ceis));
+  r.write(cr, cr_reset | rngen | ardis | condrst);
+  CHECK(r.read(sr) == (secs | cecs));
+  r.source().set_seed_fault(false);
+  r.run_for(10 * us);
+  CHECK(r.read(sr) == (secs | cecs));
+  r.write(cr, cr_reset | rngen | ardis);
+  auto const done = r.now() + clear_4mhz;
+  r.run_until(done - cycle);
+  CHECK(r.read(sr) == (secs | cecs));
+  r.run_until(done);
+  CHECK(r.read(sr) == cecs);
+  CHECK(r.due(done + init_4mhz));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("HSI48 stopped with RNGEN 1 sets CECS and CEIS, CECS clears when it is back")
+{
+  rig const r{"clock_error"};
+  REQUIRE(r.finish(200'000).reason == stop_reason::user);
+  auto const log = r.log();
+  REQUIRE(log.size() == 7);
+  CHECK(log[1] == rng_word_at(0, 0));
+  CHECK(log[2] == 0);
+  CHECK((log[3] & (cecs | ceis)) == (cecs | ceis));
+  CHECK((log[5] & (cecs | ceis)) == ceis);
+  CHECK((log[6] & (cecs | ceis | secs | seis)) == 0);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("CED 1 keeps CECS clear with HSI48 stopped")
+{
+  rig const r{"clock_error_ced_off"};
+  REQUIRE(r.finish(200'000).reason == stop_reason::user);
+  auto const log = r.log();
+  REQUIRE(log.size() == 5);
+  CHECK(log[0] < 2000);
+  CHECK(log[3] == 2000);
+  CHECK((log[4] & (cecs | ceis)) == 0);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("the AHB enable cleared with RNGEN 1 freezes the RNG with no clock error")
+{
+  rig const r;
+  r.clocks();
+  r.write(cr, cr_reset | rngen);
+  r.set_field("RCC", "RCC_AHB2ENR1", "RNGEN", 0);
+  r.run_for(us);
+  CHECK(r.read(sr) == 0);
+  r.set_field("RCC", "RCC_AHB2ENR1", "RNGEN", 1);
+  r.set_field("RCC", "RCC_CR", "HSI48ON", 0);
+  r.run_for(us);
+  CHECK(r.read(sr) == (cecs | ceis));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("CECS follows 32 x fRNG < fHCLK, equality being a correct clock")
+{
+  core::clock* clock = nullptr;
+  rig const    r{"idle", 0, &clock};
+  REQUIRE(clock != nullptr);
+  r.clocks();
+  r.write(cr, cr_reset | rngen);
+  REQUIRE(r.read(sr) == 0);
+  auto const domain = clock->domain("rng");
+  auto const hclk   = clock->hz(clock->domain("hclk"));
+  auto* listener = dynamic_cast<popcorn::periph::stm32::clock_listener*>(r.f.target->model("RNG"));
+  REQUIRE(listener != nullptr);
+  clock->set_hz(domain, hclk / 32 - 1);
+  listener->on_clock_change();
+  CHECK(r.read(sr) == (cecs | ceis));
+  clock->set_hz(domain, hclk / 32);
+  listener->on_clock_change();
+  CHECK(r.read(sr) == ceis);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a clock fault sets CECS and CEIS and generation goes on")
+{
+  rig const  r;
+  auto const start = enabled_at_4mhz(r);
+  r.source().set_clock_fault(true);
+  CHECK(r.read(sr) == (cecs | ceis));
+  r.run_until(start + init_4mhz);
+  CHECK(r.read(sr) == (cecs | ceis | drdy));
+  CHECK(r.cpu_dr() == rng_word_at(0, 0));
+  r.run_until(start + init_4mhz + round_4mhz);
+  for(std::uint64_t word = 1; word < 8; ++word)
+  {
+    CHECK(r.cpu_dr() == rng_word_at(0, word));
+  }
+  r.run_for(round_4mhz);
+  CHECK(r.read(sr) == (cecs | ceis | drdy));
+  r.source().set_clock_fault(false);
+  CHECK(r.read(sr) == (ceis | drdy));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("SEIS and CEIS keep a write of 1 and clear on a write of 0")
+{
+  rig const r;
+  r.clocks();
+  r.source().set_clock_fault(true);
+  r.source().set_seed_fault(true);
+  r.write(cr, cr_reset | rngen);
+  REQUIRE(r.read(sr) == (secs | seis | cecs | ceis));
+  r.write(sr, 0xFFFF'FFFF);
+  CHECK(r.read(sr) == (secs | seis | cecs | ceis));
+  r.write(sr, ~seis);
+  CHECK(r.read(sr) == (secs | cecs | ceis));
+  r.write(sr, ~ceis);
+  CHECK(r.read(sr) == (secs | cecs));
+  r.write(sr, 0);
+  CHECK(r.read(sr) == (secs | cecs));
+  r.write(sr, seis | ceis);
+  CHECK(r.read(sr) == (secs | cecs));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a snapshot with SECS held and an auto-reset pending recovers at the same time")
+{
+  rig const r;
+  r.clocks();
+  r.source().set_seed_fault(true);
+  r.write(cr, cr_reset | rngen);
+  REQUIRE(r.read(sr) == (secs | seis));
+  r.source().set_seed_fault(false);
+  auto const due   = r.now() + clear_4mhz;
+  auto const saved = r.f.target->snapshot();
+  rig const  other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  for(auto const* on : {&r, &other})
+  {
+    CHECK(on->due(due));
+    CHECK_FALSE(on->source().seed_fault());
+    on->run_until(due);
+    CHECK(on->read(sr) == seis);
+    CHECK(on->due(due + init_4mhz));
+    on->run_until(due + init_4mhz);
+    CHECK(on->cpu_dr() == rng_word_at(0, 0));
+  }
+  CHECK(r.logged.empty());
+  CHECK(other.logged.empty());
+}
+
+TEST_CASE("a system reset clears SECS and keeps the seed fault, detected again at RNGEN 1")
+{
+  rig const r;
+  r.clocks();
+  r.source().set_seed_fault(true);
+  r.write(cr, cr_reset | rngen);
+  REQUIRE(r.read(sr) == (secs | seis));
+  r.f.target->reset(popcorn::reset_kind::software);
+  r.f.set("pc", sym("rng_ll", "idle"));
+  CHECK(r.read(sr) == 0);
+  CHECK(r.source().seed_fault());
+  r.clocks();
+  r.write(cr, cr_reset | rngen);
+  CHECK(r.read(sr) == (secs | seis));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("seed_fault_after sets the seed fault once that many words are drawn")
+{
+  rig const r{"keygen"};
+  r.source().set_seed_fault_after(8);
+  CHECK(r.source().seed_fault_after() == 8u);
+  r.run_for(5 * init_4mhz);
+  auto const status = r.f.target->mem().read(sym("rng_ll", "keygen_status"), 4);
+  REQUIRE(status.has_value());
+  CHECK(*status == 1);
+  CHECK(r.source().seed_fault());
+  CHECK_FALSE(r.source().seed_fault_after().has_value());
+  CHECK(r.source().drawn() == 8);
+  CHECK_THROWS_AS(r.source().set_seed_fault_after(0), popcorn::config_error);
+  CHECK_FALSE(r.source().seed_fault_after().has_value());
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("clock_fault_after sets the clock fault at the round that draws the n-th word")
+{
+  rig const r;
+  r.source().set_clock_fault_after(6);
+  auto const start = enabled_at_4mhz(r);
+  r.run_until(start + init_4mhz);
+  CHECK(r.read(sr) == drdy);
+  CHECK(r.source().clock_fault_after() == 2u);
+  r.run_until(start + init_4mhz + round_4mhz);
+  CHECK(r.read(sr) == (drdy | cecs | ceis));
+  CHECK(r.source().clock_fault());
+  CHECK_FALSE(r.source().clock_fault_after().has_value());
+  CHECK_THROWS_AS(r.source().set_clock_fault_after(0), popcorn::config_error);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("keygen reports a good key, a seed error, a clock error and a repeated word")
+{
+  auto const status_of = [](rig const& r) {
+    r.run_for(5 * init_4mhz);
+    auto const done = r.f.target->mem().read(sym("rng_ll", "keygen_done"), 4);
+    REQUIRE(done.has_value());
+    REQUIRE(*done == 1);
+    auto const status = r.f.target->mem().read(sym("rng_ll", "keygen_status"), 4);
+    REQUIRE(status.has_value());
+    return *status;
+  };
+  {
+    rig const r{"keygen"};
+    CHECK(status_of(r) == 0);
+    for(std::uint32_t word = 0; word < 16; ++word)
+    {
+      auto const got = r.f.target->mem().read(sym("rng_ll", "keygen_key") + 4 * word, 4);
+      REQUIRE(got.has_value());
+      CHECK(*got == rng_word_at(0, word));
+    }
+  }
+  {
+    rig const r{"keygen"};
+    r.source().set_seed_fault(true);
+    CHECK(status_of(r) == 1);
+  }
+  {
+    rig const r{"keygen"};
+    r.source().set_clock_fault(true);
+    CHECK(status_of(r) == 2);
+  }
+  {
+    rig const r{"keygen"};
+    r.source().set_stuck(0x1234'5678);
+    CHECK(status_of(r) == 3);
+  }
+}
+
+TEST_CASE("ARDIS 0: a fault released while CONDRST is held clears SECS at the end of the clear")
+{
+  rig const r;
+  r.clocks();
+  r.source().set_seed_fault(true);
+  r.write(cr, cr_reset | rngen);
+  REQUIRE(r.read(sr) == (secs | seis));
+  r.write(cr, cr_reset | rngen | condrst);
+  r.source().set_seed_fault(false);
+  r.run_for(10 * us);
+  CHECK(r.read(sr) == secs);
+  r.write(cr, cr_reset | rngen);
+  auto const done = r.now() + clear_4mhz;
+  r.run_until(done - cycle);
+  CHECK(r.read(sr) == secs);
+  r.run_until(done);
+  CHECK(r.read(sr) == 0);
   CHECK(r.logged.empty());
 }

@@ -2,6 +2,7 @@
 #include "factories.hpp"
 #include "gtzc.hpp"
 #include "hsi16_source.hpp"
+#include "kernel_gate.hpp"
 #include "lsi_source.hpp"
 #include "model_base.hpp"
 
@@ -432,6 +433,7 @@ struct timer
 class rcc final : public dispatch_model<rcc, rcc_state>,
                   public lsi_source,
                   public hsi16_source,
+                  public kernel_gate,
                   public trustzone_aware
 {
 public:
@@ -443,8 +445,9 @@ public:
   {
     return true;
   }
-  void force_lsi() override;
-  void hold_hsi16(bool held) override;
+  void               force_lsi() override;
+  void               hold_hsi16(bool held) override;
+  [[nodiscard]] auto bus_enabled(core::clock_domain kernel) const -> bool override;
 
   void                            cr_written(std::uint32_t old, std::uint32_t now);
   void                            icscr1_written(std::uint32_t old, std::uint32_t now);
@@ -1301,6 +1304,12 @@ void rcc::force_lsi()
   {
     start(lsi);
   }
+}
+
+auto rcc::bus_enabled(core::clock_domain kernel) const -> bool
+{
+  auto const found = std::ranges::find(kernels_, kernel, &kernel::domain);
+  return found == kernels_.end() or get(regs_, found->enable) != 0;
 }
 
 void rcc::hold_hsi16(bool held)

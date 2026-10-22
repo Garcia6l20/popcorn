@@ -1,4 +1,5 @@
 #include "factories.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -26,7 +27,9 @@ using wide = unsigned __int128;
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 constexpr std::uint32_t work_done     = 0;
 constexpr std::uint32_t condrst_done  = 1;
-constexpr std::size_t   event_kinds   = 2;
+constexpr std::uint32_t auto_reset    = 2;
+constexpr std::size_t   event_kinds   = 3;
+constexpr std::uint64_t clock_ratio   = 32;
 constexpr std::size_t   fifo_words    = 4;
 constexpr std::uint64_t ahb_round     = 203;
 constexpr std::uint64_t rng_round     = 128;
@@ -50,6 +53,12 @@ struct rng_source
   std::uint64_t              pending_at{};
   std::uint32_t              stuck_word{};
   std::uint8_t               stuck_set{};
+  std::uint8_t               seed_fault{};
+  std::uint8_t               clock_fault{};
+  std::uint8_t               seed_after_set{};
+  std::uint8_t               clock_after_set{};
+  std::uint64_t              seed_after{};
+  std::uint64_t              clock_after{};
 
   friend auto operator==(rng_source const&, rng_source const&) -> bool = default;
 };
@@ -62,6 +71,7 @@ struct rng_state
   std::uint64_t                          remaining_ps{};
   std::uint64_t                          due_ps{};
   std::uint64_t                          clear_due_ps{};
+  std::uint64_t                          auto_due_ps{};
   std::array<std::uint64_t, event_kinds> generation{};
   std::array<std::uint64_t, event_kinds> queued{};
   std::uint8_t                           fifo_count{};
@@ -69,6 +79,8 @@ struct rng_state
   std::uint8_t                           phase{};
   std::uint8_t                           initialised{};
   std::uint8_t                           clearing{};
+  std::uint8_t                           secs{};
+  std::uint8_t                           cecs{};
 
   friend auto operator==(rng_state const&, rng_state const&) -> bool = default;
 };
@@ -84,29 +96,40 @@ struct rng_state
  *        from the entropy_source: the stuck word while one is set, else the queue, else a
  *        counter SplitMix64 generator, rng_next_word(). The source is board state, kept across
  *        every reset kind.
- *        Generation runs while CR.RNGEN is 1, CONDRST reads 0 and the `rng` kernel clock runs,
- *        which RCC stops for RCC_AHB2ENR1.RNGEN 0 or a stopped RNGSEL source. Otherwise init and
- *        rounds pause with their remaining time and resume from it, 48.3.8, and the FIFO and the
- *        register still deliver what they hold.
+ *        Generation runs while CR.RNGEN is 1, CONDRST reads 0, SECS is 0 and the `rng` kernel
+ *        clock runs, which RCC stops for RCC_AHB2ENR1.RNGEN 0 or a stopped RNGSEL source.
+ *        Otherwise init and rounds pause with their remaining time and resume from it, 48.3.8,
+ *        and the FIFO and the register still deliver what they hold.
  *        Timing, 48.5, from the HCLK and kernel rates when a phase starts: init per Table 463,
  *        column "Configuration A or C, reset value", with CLKDIV read as the divider ratio
- *        2^CLKDIV, as the 48.5 example of configuration C at CLKDIV 0 reads it, and wait_noise 16
- * while RNG_CONFIG1, RNG_CONFIG2, RNG_CONFIG3 and NISTC hold their reset values, else 192. A round
- * takes 203 x N AHB cycles when fAHB < 1.6 x fRNG / 2^CLKDIV, else 128 x N divided RNG cycles, N 2
- * for NISTC 0, else RNG_CONFIG3[1:0] + 1, Table 464. CR bits 29:4 are written only with CONDRST 1
- * in the same access and CONFIGLOCK 0, CLKDIV and CED also only with RNGEN 0 before or in the
- * write, as the 48.3.4 software reset sequence writes them. CONFIGLOCK is set-once. NSCR and HTCR
- * are written only while CONDRST reads 1 and CONFIGLOCK is 0, 48.7.4 and 48.7.5. CONDRST written 1
- * empties the FIFO and the register, stops init and the round and clears SR. Written back to 0 it
- * reads 1 for 2 AHB plus 2 RNG cycles, 48.7.1, the time counted from the write, or from the kernel
- * clock start when it is stopped or stops before the end. Then init restarts. SEIS and CEIS are
- * cleared by writing 0. The RNG_IRQn line is IE and RNGEN and any of DRDY, SEIS and CEIS, 48.4.
- * Only 32-bit accesses are served, others are a bus error and a write is ignored, 48.2. Deviations:
- * register accesses are served with RCC_AHB2ENR1.RNGEN 0. RCC_AHB2RSTR1.RNGRST is not modelled, so
- * CONFIGLOCK clears only on a system reset. There is no noise source: NSCR and HTCR are storage.
- * Configuration B timing is not modelled, the configuration A and C column applies to every
- * configuration. A rate change does not rescale a phase already started. The tamper output to TAMP
- * is not modelled.
+ *        2^CLKDIV, as the 48.5 example of configuration C at CLKDIV 0 reads it, and wait_noise
+ *        16 while RNG_CONFIG1, RNG_CONFIG2, RNG_CONFIG3 and NISTC hold their reset values, else
+ *        192. A round takes 203 x N AHB cycles when fAHB < 1.6 x fRNG / 2^CLKDIV, else 128 x N
+ *        divided RNG cycles, N 2 for NISTC 0, else RNG_CONFIG3[1:0] + 1, Table 464.
+ *        CR bits 29:4 are written only with CONDRST 1 in the same access and CONFIGLOCK 0,
+ *        CLKDIV and CED also only with RNGEN 0 before or in the write, as the 48.3.4 software
+ *        reset sequence writes them. CONFIGLOCK is set-once. NSCR and HTCR are written only
+ *        while CONDRST reads 1 and CONFIGLOCK is 0, 48.7.4 and 48.7.5. CONDRST written 1
+ *        empties the FIFO and the register, stops init and the round and clears SEIS, CEIS and
+ *        DRDY. Written back to 0 it reads 1 for 2 AHB plus 2 RNG cycles, 48.7.1, the time
+ *        counted from the write, or from the kernel clock start when it is stopped or stops
+ *        before the end. Then SECS clears and init restarts. SEIS and CEIS are cleared by
+ *        writing 0.
+ *        Seed error, 48.3.7: while the entropy_source seed fault is set and the noise source
+ *        runs, SECS and SEIS set, the FIFO and the register empty and generation stops. With
+ *        ARDIS 1, SECS clears at the end of a CONDRST cycle and sets again with SEIS if the
+ *        fault is still set. With ARDIS 0, SECS clears 2 AHB plus 2 RNG cycles after the fault
+ *        is released, an assumption: RM0456 gives no auto-reset time.
+ *        Clock error, 48.3.6 and 48.3.7: with CED 0, RNGEN 1 and the bus enable set, read from
+ *        RCC through kernel_gate, CECS is 1 while the clock fault is set or 32 x fRNG < fHCLK,
+ *        a stopped kernel clock included, and its rise sets CEIS. Generation goes on.
+ *        The RNG_IRQn line is IE and RNGEN and any of DRDY, SEIS and CEIS, 48.4. Only 32-bit
+ *        accesses are served, others are a bus error and a write is ignored, 48.2.
+ *        Deviations: register accesses are served with RCC_AHB2ENR1.RNGEN 0. RCC_AHB2RSTR1.RNGRST
+ *        is not modelled, so CONFIGLOCK clears only on a system reset. There is no noise source:
+ *        NSCR and HTCR are storage. Configuration B timing is not modelled, the configuration A
+ *        and C column applies to every configuration. A rate change does not rescale a phase
+ *        already started. The tamper output to TAMP is not modelled.
  */
 class rng final : public dispatch_model<rng, rng_state>,
                   public clock_listener,
@@ -134,6 +157,14 @@ public:
   void               queue(std::span<std::uint32_t const> words) override;
   [[nodiscard]] auto stuck() const -> std::optional<std::uint32_t> override;
   void               set_stuck(std::optional<std::uint32_t> word) override;
+  [[nodiscard]] auto seed_fault() const -> bool override;
+  void               set_seed_fault(bool fault) override;
+  [[nodiscard]] auto clock_fault() const -> bool override;
+  void               set_clock_fault(bool fault) override;
+  [[nodiscard]] auto seed_fault_after() const -> std::optional<std::uint64_t> override;
+  void               set_seed_fault_after(std::optional<std::uint64_t> words) override;
+  [[nodiscard]] auto clock_fault_after() const -> std::optional<std::uint64_t> override;
+  void               set_clock_fault_after(std::optional<std::uint64_t> words) override;
 
   void control_written(std::uint32_t old, std::uint32_t now);
   void status_written(std::uint32_t old, std::uint32_t now);
@@ -142,7 +173,9 @@ public:
 
 private:
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
+  [[nodiscard]] auto noise_running() const -> bool;
   [[nodiscard]] auto producing() const -> bool;
+  [[nodiscard]] auto bus_enabled() -> bool;
   [[nodiscard]] auto loops() const -> std::uint64_t;
   [[nodiscard]] auto init_ps() const -> std::uint64_t;
   [[nodiscard]] auto round_ps() const -> std::uint64_t;
@@ -160,7 +193,12 @@ private:
   void interrupt();
   void fresh_state();
   auto next_word() -> std::uint32_t;
+  void count_fault_words();
   void keep_unless_open(reg_ref target, std::uint32_t old);
+  void detect_seed_error();
+  void check_clock();
+  void schedule_auto_reset();
+  void show_status();
 
   register_file&     regs_;
   rng_options        options_;
@@ -182,11 +220,16 @@ private:
   field_ref          seis_;
   field_ref          ceis_;
   field_ref          drdy_;
+  field_ref          secs_;
+  field_ref          cecs_;
+  field_ref          ardis_;
   std::uint32_t      config_bits_;
   std::uint32_t      live_bits_;
   core::clock_domain kernel_;
   core::clock_domain hclk_;
   irq_line&          line_;
+  kernel_gate const* gate_       = nullptr;
+  bool               gate_found_ = false;
 };
 
 constexpr std::array<write_entry<rng>, 5> rng_writes{
@@ -207,14 +250,15 @@ rng::rng(model_context& ctx, peripheral_desc const& desc, rng_options options)
       config2_{field("CR", "RNG_CONFIG2")}, nistc_{field("CR", "NISTC")},
       config3_{field("CR", "RNG_CONFIG3")}, ced_{field("CR", "CED")}, ie_{field("CR", "IE")},
       rngen_{field("CR", "RNGEN")}, seis_{field("SR", "SEIS")}, ceis_{field("SR", "CEIS")},
-      drdy_{field("SR", "DRDY")},
+      drdy_{field("SR", "DRDY")}, secs_{field("SR", "SECS")}, cecs_{field("SR", "CECS")},
+      ardis_{field("CR", "ARDIS")},
       config_bits_{
           config1_.mask()
           | clkdiv_.mask()
           | config2_.mask()
           | nistc_.mask()
           | config3_.mask()
-          | field("CR", "ARDIS").mask()
+          | ardis_.mask()
           | ced_.mask()},
       live_bits_{clkdiv_.mask() | ced_.mask()}, kernel_{ctx.clock.domain("rng")},
       hclk_{ctx.clock.domain("hclk")}, line_{irq("RNG_IRQn")}
@@ -225,9 +269,31 @@ auto rng::now_ps() const -> std::uint64_t
   return ctx_.clock.time().ps;
 }
 
-auto rng::producing() const -> bool
+auto rng::noise_running() const -> bool
 {
   return get(regs_, rngen_) != 0 and get(regs_, condrst_) == 0 and ctx_.clock.hz(kernel_) != 0;
+}
+
+auto rng::producing() const -> bool
+{
+  return noise_running() and state_.secs == 0;
+}
+
+auto rng::bus_enabled() -> bool
+{
+  if(not gate_found_)
+  {
+    gate_found_ = true;
+    for(auto* const peer : ctx_.peers.all())
+    {
+      if(auto const* const gate = dynamic_cast<kernel_gate const*>(peer))
+      {
+        gate_ = gate;
+        break;
+      }
+    }
+  }
+  return gate_ == nullptr or gate_->bus_enabled(kernel_);
 }
 
 auto rng::loops() const -> std::uint64_t
@@ -300,6 +366,7 @@ void rng::start(phase which, std::uint64_t at, std::uint64_t duration)
 
 void rng::refresh(std::uint64_t at)
 {
+  detect_seed_error();
   auto const on = producing();
   if(state_.phase != idle)
   {
@@ -324,15 +391,78 @@ void rng::refresh(std::uint64_t at)
   {
     start(round, at, round_ps());
   }
+  check_clock();
   interrupt();
+}
+
+void rng::show_status()
+{
+  update(regs_, secs_, state_.secs);
+  update(regs_, cecs_, state_.cecs);
+}
+
+void rng::detect_seed_error()
+{
+  if(state_.secs != 0 or state_.source.seed_fault == 0 or not noise_running())
+  {
+    return;
+  }
+  withdraw(work_done);
+  state_.fifo         = {};
+  state_.fifo_count   = 0;
+  state_.staged       = {};
+  state_.staged_full  = 0;
+  state_.phase        = idle;
+  state_.initialised  = 0;
+  state_.remaining_ps = 0;
+  state_.due_ps       = 0;
+  state_.secs         = 1;
+  update(regs_, seis_, 1);
+  show_status();
+  expose();
+}
+
+void rng::check_clock()
+{
+  auto const active = get(regs_, ced_) == 0 and get(regs_, rngen_) != 0 and bus_enabled();
+  auto const slow =
+      state_.source.clock_fault != 0 or clock_ratio * ctx_.clock.hz(kernel_) < ctx_.clock.hz(hclk_);
+  auto const now = active and slow ? std::uint8_t{1} : std::uint8_t{0};
+  if(now != 0 and state_.cecs == 0)
+  {
+    update(regs_, ceis_, 1);
+  }
+  state_.cecs = now;
+  show_status();
+}
+
+void rng::schedule_auto_reset()
+{
+  if(state_.secs == 0
+     or get(regs_, ardis_) != 0
+     or get(regs_, condrst_) != 0
+     or state_.source.seed_fault != 0
+     or state_.queued[auto_reset] != 0
+     or ctx_.clock.hz(kernel_) == 0)
+  {
+    return;
+  }
+  state_.auto_due_ps = now_ps() + clear_ps();
+  post(auto_reset, state_.auto_due_ps);
 }
 
 void rng::restart_conditioning()
 {
   withdraw(work_done);
   withdraw(condrst_done);
+  withdraw(auto_reset);
+  auto const secs = state_.secs;
+  auto const cecs = state_.cecs;
   fresh_state();
+  state_.secs = secs;
+  state_.cecs = cecs;
   regs_.poke(sr_.offset, 0);
+  show_status();
   expose();
 }
 
@@ -365,6 +495,75 @@ auto rng::next_word() -> std::uint32_t
     return word;
   }
   return rng_next_word(options_.seed, source.drawn);
+}
+
+void rng::count_fault_words()
+{
+  auto& source = state_.source;
+  if(source.seed_after_set != 0 and --source.seed_after == 0)
+  {
+    source.seed_after_set = 0;
+    source.seed_fault     = 1;
+  }
+  if(source.clock_after_set != 0 and --source.clock_after == 0)
+  {
+    source.clock_after_set = 0;
+    source.clock_fault     = 1;
+  }
+}
+
+auto rng::seed_fault() const -> bool
+{
+  return state_.source.seed_fault != 0;
+}
+
+void rng::set_seed_fault(bool fault)
+{
+  state_.source.seed_fault = fault ? 1 : 0;
+  schedule_auto_reset();
+  refresh(now_ps());
+}
+
+auto rng::clock_fault() const -> bool
+{
+  return state_.source.clock_fault != 0;
+}
+
+void rng::set_clock_fault(bool fault)
+{
+  state_.source.clock_fault = fault ? 1 : 0;
+  refresh(now_ps());
+}
+
+auto rng::seed_fault_after() const -> std::optional<std::uint64_t>
+{
+  return state_.source.seed_after_set != 0 ? std::optional{state_.source.seed_after} : std::nullopt;
+}
+
+void rng::set_seed_fault_after(std::optional<std::uint64_t> words)
+{
+  if(words == 0u)
+  {
+    throw config_error(desc_.name, 0, "entropy.seed_fault_after", "a word count above 0");
+  }
+  state_.source.seed_after_set = words ? 1 : 0;
+  state_.source.seed_after     = words.value_or(0);
+}
+
+auto rng::clock_fault_after() const -> std::optional<std::uint64_t>
+{
+  return state_.source.clock_after_set != 0 ? std::optional{state_.source.clock_after}
+                                            : std::nullopt;
+}
+
+void rng::set_clock_fault_after(std::optional<std::uint64_t> words)
+{
+  if(words == 0u)
+  {
+    throw config_error(desc_.name, 0, "entropy.clock_fault_after", "a word count above 0");
+  }
+  state_.source.clock_after_set = words ? 1 : 0;
+  state_.source.clock_after     = words.value_or(0);
 }
 
 auto rng::seed() const -> std::uint64_t
@@ -420,6 +619,7 @@ void rng::finish_phase()
   for(auto& word : words)
   {
     word = next_word();
+    count_fault_words();
   }
   if(state_.phase == init)
   {
@@ -587,7 +787,19 @@ void rng::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     at              = std::exchange(state_.clear_due_ps, 0);
     state_.clearing = 0;
+    state_.secs     = 0;
     update(regs_, condrst_, 0);
+    show_status();
+  }
+  else if(kind == auto_reset)
+  {
+    at = std::exchange(state_.auto_due_ps, 0);
+    if(state_.source.seed_fault != 0)
+    {
+      return;
+    }
+    state_.secs = 0;
+    show_status();
   }
   else
   {
@@ -606,6 +818,11 @@ void rng::on_clock_change()
   {
     schedule_clear();
   }
+  if(state_.queued[auto_reset] != 0 and ctx_.clock.hz(kernel_) == 0)
+  {
+    withdraw(auto_reset);
+  }
+  schedule_auto_reset();
   refresh(now_ps());
 }
 }
