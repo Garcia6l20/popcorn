@@ -1,6 +1,11 @@
 #pragma once
 
+#include <popcorn/export.hpp>
+
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
 
 namespace popcorn::periph::stm32
 {
@@ -44,4 +49,63 @@ struct rng_options
     }
   }
 }
+
+/** @brief Most words an RNG word queue holds. */
+inline constexpr std::size_t rng_max_queued = std::size_t{1} << 16;
+
+/**
+ * @brief The word source of the RNG model as a test sees it, implemented by the built-in RNG
+ *        model. Reach it with `dynamic_cast<entropy_source*>(machine.model("RNG"))`. Every value
+ *        is board state: kept across every reset kind and restored by a snapshot. A conditioning
+ *        round or init takes its four words, in order, from the stuck word while one is set,
+ *        else from the queue, else from the generator.
+ */
+class POPCORN_API entropy_source
+{
+public:
+  /** @brief Creates the interface. */
+  entropy_source() = default;
+  /** @brief Not copyable. */
+  entropy_source(entropy_source const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(entropy_source const&) -> entropy_source& = delete;
+  /** @brief Not movable. */
+  entropy_source(entropy_source&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(entropy_source&&) -> entropy_source& = delete;
+
+  /** @brief Seed of the generator, rng_options::seed. */
+  [[nodiscard]] virtual auto seed() const -> std::uint64_t = 0;
+
+  /**
+   * @brief Generator position: the generator words produced since the machine was built, zeros
+   *        skipped included. Queued and stuck words do not move it.
+   */
+  [[nodiscard]] virtual auto drawn() const -> std::uint64_t = 0;
+
+  /** @brief Queued words not yet produced. */
+  [[nodiscard]] virtual auto queued() const -> std::size_t = 0;
+
+  /**
+   * @brief Appends words served before the generator, in order, 0 included.
+   * @param words Words to append.
+   * @throws config_error when the queue would hold more than rng_max_queued words, before any
+   *         change.
+   */
+  virtual void queue(std::span<std::uint32_t const> words) = 0;
+
+  /** @brief The word every new word takes, empty when none is set. */
+  [[nodiscard]] virtual auto stuck() const -> std::optional<std::uint32_t> = 0;
+
+  /**
+   * @brief Sets or clears the stuck word. Words already in the FIFO and the conditioning
+   *        register keep their values.
+   * @param word The word every new word takes, empty to produce from the queue and generator.
+   */
+  virtual void set_stuck(std::optional<std::uint32_t> word) = 0;
+
+protected:
+  /** @brief Destroys the interface, only through its model. */
+  virtual ~entropy_source();
+};
 }

@@ -12,6 +12,7 @@
 #include <popcorn/periph/stm32/i2c.hpp>
 #include <popcorn/periph/stm32/pwr.hpp>
 #include <popcorn/periph/stm32/rcc.hpp>
+#include <popcorn/periph/stm32/rng.hpp>
 #include <popcorn/periph/stm32/spi.hpp>
 #include <popcorn/periph/stm32/supply.hpp>
 #include <popcorn/periph/stm32/usb.hpp>
@@ -48,6 +49,8 @@ struct board
   flash_options flash{};
   /** @brief Supply voltages, VDDA for the ADC model. */
   supply_options supply{};
+  /** @brief Seed of the RNG model's word generator. */
+  rng_options rng{};
   /** @brief Far end of each UART by instance name, such as `USART1`. A UART without one drops
    * what it transmits. */
   std::map<std::string, std::shared_ptr<uart_endpoint>, std::less<>> uarts{};

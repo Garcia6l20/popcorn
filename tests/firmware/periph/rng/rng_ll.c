@@ -12,6 +12,7 @@
 
 void idle(void);
 void enable_read(void);
+void enable_read_idle(void);
 void nist_init(void);
 void locked(void);
 void no_kernel_clock(void);
@@ -65,6 +66,15 @@ void enable_read(void)
   LL_RCC_HSI48_Disable();
   LOG(RNG->CR);
   DONE();
+}
+
+void enable_read_idle(void)
+{
+  hsi48_on();
+  read_words();
+  LL_RCC_HSI48_Disable();
+  LOG(RNG->CR);
+  idle();
 }
 
 void nist_init(void)

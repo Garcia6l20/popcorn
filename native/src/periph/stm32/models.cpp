@@ -57,7 +57,7 @@ constexpr std::array<builtin, 30> builtins{
      {"DBGMCU", "", [](board const&) { return dbgmcu_factory(); }},
      {"CRC", "integtest1_v2_0", [](board const&) { return crc_factory(); }},
      {"HASH", "hash1_v2_2*", [](board const&) { return hash_factory(); }},
-     {"RNG", "rng1_v4_1", [](board const&) { return rng_factory({}); }},
+     {"RNG", "rng1_v4_1", [](board const& b) { return rng_factory(b.rng); }},
      {"SYS", "STM32U5x_sys_*", [](board const&) { return syscfg_factory(); }},
      {"GTZC", "tzsc1_v2_2*", [](board const&) { return gtzc_factory(); }},
      }

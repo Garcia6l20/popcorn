@@ -5,12 +5,13 @@ from __future__ import annotations
 import enum
 import math
 import struct
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from popcorn import _core
 from popcorn._enums import PinMode
 from popcorn._errors import ConfigError
+from popcorn._rng import MAX_QUEUED, checked_int
 from popcorn.units import VirtualTime
 
 if TYPE_CHECKING:
@@ -499,6 +500,13 @@ class PeripheralView:
             )
         return AnalogInput(self._access, self._name, channel)
 
+    @property
+    def entropy(self) -> RngEntropy:
+        """The word source of this RNG: seed, generator position, queued and stuck words.
+        Built without a native call: a peripheral whose model is not the built-in RNG raises
+        ModelError at the first access of the view."""
+        return RngEntropy(self._access, self._name)
+
     def __getattr__(self, name: str) -> RegisterView:
         register = self._registers.get(name)
         if register is None:
@@ -657,6 +665,77 @@ class AnalogInput:
 
     def __repr__(self) -> str:
         return f"AnalogInput({self.adc}, {self.channel})"
+
+
+class RngEntropy:
+    """The word source of the built-in RNG model, `m.periph.RNG.entropy`.
+
+    Every value is board state: kept across every reset kind and restored by snapshots. A
+    conditioning round takes its four words from `stuck` while it is set, else from the queue,
+    else from the generator. While the machine is busy, every access raises MachineRunning
+    outside its callbacks.
+
+    Raises:
+        ModelError: On any access, when the peripheral's model is not the built-in RNG.
+    """
+
+    __slots__ = ("_access", "rng")
+
+    def __init__(self, access: ViewAccess, rng: str) -> None:
+        """View a source. Use `m.periph.RNG.entropy` instead."""
+        self._access = access
+        self.rng = rng
+
+    @property
+    def seed(self) -> int:
+        """Seed of the generator, `RngOptions.seed`."""
+        return self._access.handle.rng_seed(self.rng)
+
+    @property
+    def drawn(self) -> int:
+        """Generator position: generator words produced since the machine was built, skipped
+        zeros included. Queued and stuck words do not move it."""
+        return self._access.handle.rng_drawn(self.rng)
+
+    @property
+    def queued(self) -> int:
+        """Queued words not yet produced."""
+        return self._access.handle.rng_queued(self.rng)
+
+    def queue(self, words: Iterable[int]) -> None:
+        """Append words produced before the generator, in order, 0 included.
+
+        Raises:
+            TypeError: A word is a bool or not an int.
+            ValueError: A word is outside 0 to 2**32 - 1, or the queue would hold more than
+                2**16 words. Nothing is queued then.
+        """
+        checked = [checked_int("words", word, 0xFFFF_FFFF) for word in words]
+        if len(checked) > MAX_QUEUED - self.queued:
+            raise ValueError(
+                f"words: at most {MAX_QUEUED} queued words, not {len(checked)} more on "
+                f"{self.queued}"
+            )
+        self._access.handle.rng_queue(self.rng, checked)
+
+    @property
+    def stuck(self) -> int | None:
+        """The word every new word takes, None when none is set. Words already in the FIFO
+        and the conditioning register keep their values.
+
+        Raises:
+            TypeError: Set to a bool, or to neither an int nor None.
+            ValueError: Set outside 0 to 2**32 - 1.
+        """
+        return self._access.handle.rng_stuck(self.rng)
+
+    @stuck.setter
+    def stuck(self, word: int | None) -> None:
+        checked = None if word is None else checked_int("stuck", word, 0xFFFF_FFFF)
+        self._access.handle.rng_set_stuck(self.rng, checked)
+
+    def __repr__(self) -> str:
+        return f"RngEntropy({self.rng})"
 
 
 def microvolts_of(volts: float) -> int:

@@ -92,6 +92,35 @@ auto supply_factories(part_description const& description, std::uint32_t vdda_mv
   return out;
 }
 
+auto rng_factories(part_description const& description, machine_config const& config)
+    -> std::map<std::string, periph::model_factory, std::less<>>
+{
+  periph::stm32::board board;
+  board.rng.seed = *config.rng_seed;
+  auto all       = periph::stm32::factories(board, description);
+  std::map<std::string, periph::model_factory, std::less<>> out;
+  for(auto const& unit : description.peripherals)
+  {
+    if(unit.ip != "RNG" or unit.alias_of)
+    {
+      continue;
+    }
+    if(config.python_models.contains(unit.name) or config.plugin_models.contains(unit.name))
+    {
+      throw config_error(
+          "rng", 0, "rng",
+          std::format(
+              "the built-in model of {}, not a {} model", unit.name,
+              config.plugin_models.contains(unit.name) ? "plugin" : "Python"));
+    }
+    if(auto found = all.find(unit.name); found != all.end())
+    {
+      out.emplace(unit.name, std::move(found->second));
+    }
+  }
+  return out;
+}
+
 auto option_bytes_of(option_bytes_config const& config) -> periph::stm32::option_bytes
 {
   using periph::stm32::no_area;
@@ -299,6 +328,13 @@ auto options_of(
       throw config_error(
           "usb", 0, key_of(name),
           std::format("a USB device controller without a {} model", kind(name)));
+    }
+  }
+  if(config.rng_seed)
+  {
+    for(auto& [name, factory] : rng_factories(description, config))
+    {
+      options.models.emplace(name, std::move(factory));
     }
   }
   if(config.vdda_mv)

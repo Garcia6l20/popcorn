@@ -107,6 +107,9 @@ struct[[= py::rename{"MachineConfig"}]] machine_config
   /** @brief VDDA in millivolts the board gives the ADC model, from 1620 to 3600, empty for the
    * model's default of 3000. */
   std::optional<std::uint32_t> vdda_mv{};
+  /** @brief Seed of the built-in RNG model's word generator, empty for the model's default of 0.
+   * Refused with a board model on RNG. */
+  std::optional<std::uint64_t> rng_seed{};
   /** @brief Option bytes the built-in FLASH model encodes, which also give the boot address
    * and TrustZone, empty for the description's option registers and today's boot. */
   std::optional<option_bytes_config> option_bytes{};
@@ -1245,6 +1248,59 @@ public:
       adc_input(std::string const& peripheral, std::uint8_t channel) const -> std::uint32_t;
 
   /**
+   * @brief Seed of the RNG word generator.
+   * @param peripheral RNG name.
+   * @throws model_error when the peripheral's model is not the built-in RNG.
+   */
+  [[= py::doc{"Seed of the built-in RNG word generator."}]] [[nodiscard]] auto
+      rng_seed(std::string const& peripheral) const -> std::uint64_t;
+
+  /**
+   * @brief Generator position of the RNG, the generator words produced since the build.
+   * @param peripheral RNG name.
+   * @throws model_error when the peripheral's model is not the built-in RNG.
+   */
+  [[= py::doc{
+      "Generator words the built-in RNG produced since the machine was built."}]] [[nodiscard]] auto
+      rng_drawn(std::string const& peripheral) const -> std::uint64_t;
+
+  /**
+   * @brief Queued RNG words not yet produced.
+   * @param peripheral RNG name.
+   * @throws model_error when the peripheral's model is not the built-in RNG.
+   */
+  [[= py::doc{"Queued words the built-in RNG has not produced yet."}]] [[nodiscard]] auto
+      rng_queued(std::string const& peripheral) const -> std::uint64_t;
+
+  /**
+   * @brief Appends words the RNG produces before its generator.
+   * @param peripheral RNG name.
+   * @param words Words, in order.
+   * @throws config_error past periph::stm32::rng_max_queued queued words, before any change.
+   * @throws model_error when the peripheral's model is not the built-in RNG.
+   */
+  [[= py::doc{"Queue words the built-in RNG produces before its generator."}]] void
+      rng_queue(std::string const& peripheral, std::vector<std::uint32_t> const& words);
+
+  /**
+   * @brief The word every new RNG word takes, empty when none is set.
+   * @param peripheral RNG name.
+   * @throws model_error when the peripheral's model is not the built-in RNG.
+   */
+  [[= py::doc{
+      "The word every new built-in RNG word takes, None when none is set."}]] [[nodiscard]] auto
+      rng_stuck(std::string const& peripheral) const -> std::optional<std::uint32_t>;
+
+  /**
+   * @brief Sets or clears the word every new RNG word takes.
+   * @param peripheral RNG name.
+   * @param word The stuck word, empty to clear it.
+   * @throws model_error when the peripheral's model is not the built-in RNG.
+   */
+  [[= py::doc{"Set or clear the word every new built-in RNG word takes."}]] void
+      rng_set_stuck(std::string const& peripheral, std::optional<std::uint32_t> word);
+
+  /**
    * @brief Code ranges of functions, for coverage and traces.
    * @param names Function names.
    * @throws symbol_error when no loaded image has a name.
@@ -1445,6 +1501,7 @@ private:
   [[nodiscard]] auto gpio(std::string const& peripheral, std::uint8_t pin) const
       -> periph::stm32::gpio_port&;
   [[nodiscard]] auto analog(std::string const& peripheral) const -> periph::stm32::analog_port&;
+  [[nodiscard]] auto entropy(std::string const& peripheral) const -> periph::stm32::entropy_source&;
   [[nodiscard]] auto lock_for_request() const -> core::held_lock;
   [[nodiscard]] auto lock_releasing() const -> core::held_lock;
   [[nodiscard]] auto engine() const -> core::machine&;

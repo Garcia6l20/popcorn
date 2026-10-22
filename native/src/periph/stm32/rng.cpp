@@ -10,8 +10,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <format>
 #include <memory>
+#include <optional>
+#include <span>
 #include <utility>
+#include <vector>
 
 namespace popcorn::periph::stm32
 {
@@ -39,11 +43,22 @@ enum phase : std::uint8_t
   round,
 };
 
+struct rng_source
+{
+  std::uint64_t              drawn{};
+  std::vector<std::uint32_t> pending{};
+  std::uint64_t              pending_at{};
+  std::uint32_t              stuck_word{};
+  std::uint8_t               stuck_set{};
+
+  friend auto operator==(rng_source const&, rng_source const&) -> bool = default;
+};
+
 struct rng_state
 {
+  rng_source                             source{};
   std::array<std::uint32_t, fifo_words>  fifo{};
   std::array<std::uint32_t, fifo_words>  staged{};
-  std::uint64_t                          drawn{};
   std::uint64_t                          remaining_ps{};
   std::uint64_t                          due_ps{};
   std::uint64_t                          clear_due_ps{};
@@ -65,8 +80,10 @@ struct rng_state
  *        it is empty, else into the register, and a new round starts only while the register is
  *        empty. The fourth DR read of the FIFO moves the register in and starts a round. DRDY
  *        is 1 while the FIFO holds a word. A CPU or DMA read of DR pops the FIFO, 0 when it is
- *        empty, a debugger read shows the head and pops nothing. The words come from a counter
- *        SplitMix64 generator, rng_next_word(), its position kept across every reset kind.
+ *        empty, a debugger read shows the head and pops nothing. A phase end takes its words
+ *        from the entropy_source: the stuck word while one is set, else the queue, else a
+ *        counter SplitMix64 generator, rng_next_word(). The source is board state, kept across
+ *        every reset kind.
  *        Generation runs while CR.RNGEN is 1, CONDRST reads 0 and the `rng` kernel clock runs,
  *        which RCC stops for RCC_AHB2ENR1.RNGEN 0 or a stopped RNGSEL source. Otherwise init and
  *        rounds pause with their remaining time and resume from it, 48.3.8, and the FIFO and the
@@ -91,7 +108,9 @@ struct rng_state
  * configuration. A rate change does not rescale a phase already started. The tamper output to TAMP
  * is not modelled.
  */
-class rng final : public dispatch_model<rng, rng_state>, public clock_listener
+class rng final : public dispatch_model<rng, rng_state>,
+                  public clock_listener,
+                  public entropy_source
 {
 public:
   rng(model_context& ctx, peripheral_desc const& desc, rng_options options);
@@ -108,6 +127,13 @@ public:
       access_ctx     ctx) -> std::expected<void, bus_error> override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   void on_clock_change() override;
+
+  [[nodiscard]] auto seed() const -> std::uint64_t override;
+  [[nodiscard]] auto drawn() const -> std::uint64_t override;
+  [[nodiscard]] auto queued() const -> std::size_t override;
+  void               queue(std::span<std::uint32_t const> words) override;
+  [[nodiscard]] auto stuck() const -> std::optional<std::uint32_t> override;
+  void               set_stuck(std::optional<std::uint32_t> word) override;
 
   void control_written(std::uint32_t old, std::uint32_t now);
   void status_written(std::uint32_t old, std::uint32_t now);
@@ -132,6 +158,8 @@ private:
   auto pop() -> std::uint32_t;
   void expose();
   void interrupt();
+  void fresh_state();
+  auto next_word() -> std::uint32_t;
   void keep_unless_open(reg_ref target, std::uint32_t old);
 
   register_file&     regs_;
@@ -303,13 +331,78 @@ void rng::restart_conditioning()
 {
   withdraw(work_done);
   withdraw(condrst_done);
-  auto const drawn  = state_.drawn;
-  auto const gens   = state_.generation;
-  state_            = {};
-  state_.drawn      = drawn;
-  state_.generation = gens;
+  fresh_state();
   regs_.poke(sr_.offset, 0);
   expose();
+}
+
+void rng::fresh_state()
+{
+  auto source       = std::move(state_.source);
+  auto generation   = state_.generation;
+  state_            = {};
+  state_.source     = std::move(source);
+  state_.generation = generation;
+}
+
+auto rng::next_word() -> std::uint32_t
+{
+  auto& source = state_.source;
+  if(source.stuck_set != 0)
+  {
+    return source.stuck_word;
+  }
+  if(source.pending_at < source.pending.size())
+  {
+    auto const word = source.pending[source.pending_at++];
+    if(2 * source.pending_at >= source.pending.size())
+    {
+      source.pending.erase(
+          source.pending.begin(),
+          source.pending.begin() + static_cast<std::ptrdiff_t>(source.pending_at));
+      source.pending_at = 0;
+    }
+    return word;
+  }
+  return rng_next_word(options_.seed, source.drawn);
+}
+
+auto rng::seed() const -> std::uint64_t
+{
+  return options_.seed;
+}
+
+auto rng::drawn() const -> std::uint64_t
+{
+  return state_.source.drawn;
+}
+
+auto rng::queued() const -> std::size_t
+{
+  return state_.source.pending.size() - state_.source.pending_at;
+}
+
+void rng::queue(std::span<std::uint32_t const> words)
+{
+  if(words.size() > rng_max_queued - queued())
+  {
+    throw config_error(
+        desc_.name, 0, "entropy.queue",
+        std::format(
+            "at most {} queued words, not {} more on {}", rng_max_queued, words.size(), queued()));
+  }
+  state_.source.pending.insert(state_.source.pending.end(), words.begin(), words.end());
+}
+
+auto rng::stuck() const -> std::optional<std::uint32_t>
+{
+  return state_.source.stuck_set != 0 ? std::optional{state_.source.stuck_word} : std::nullopt;
+}
+
+void rng::set_stuck(std::optional<std::uint32_t> word)
+{
+  state_.source.stuck_set  = word ? 1 : 0;
+  state_.source.stuck_word = word.value_or(0);
 }
 
 void rng::schedule_clear()
@@ -326,7 +419,7 @@ void rng::finish_phase()
   std::array<std::uint32_t, fifo_words> words{};
   for(auto& word : words)
   {
-    word = rng_next_word(options_.seed, state_.drawn);
+    word = next_word();
   }
   if(state_.phase == init)
   {
@@ -390,15 +483,11 @@ void rng::reset(register_file& regs, reset_kind)
   {
     regs.poke(reg(name).offset, describe(name).reset);
   }
-  auto generation = state_.generation;
-  for(auto& value : generation)
+  for(auto& value : state_.generation)
   {
     ++value;
   }
-  auto const drawn  = state_.drawn;
-  state_            = {};
-  state_.generation = generation;
-  state_.drawn      = drawn;
+  fresh_state();
   line_.lower();
 }
 
@@ -520,6 +609,8 @@ void rng::on_clock_change()
   refresh(now_ps());
 }
 }
+
+entropy_source::~entropy_source() = default;
 
 auto rng_factory(rng_options options) -> model_factory
 {

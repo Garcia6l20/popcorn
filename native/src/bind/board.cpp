@@ -549,6 +549,49 @@ auto machine_handle::adc_input(std::string const& peripheral, std::uint8_t chann
       [&](core::machine& target) { return adc_input_body(analog(peripheral), channel)(target); });
 }
 
+auto machine_handle::entropy(std::string const& peripheral) const -> periph::stm32::entropy_source&
+{
+  auto* const source = dynamic_cast<periph::stm32::entropy_source*>(engine().model(peripheral));
+  if(source == nullptr)
+  {
+    throw model_error(peripheral, "", 0);
+  }
+  return *source;
+}
+
+auto machine_handle::rng_seed(std::string const& peripheral) const -> std::uint64_t
+{
+  return access([&](core::machine&) { return entropy(peripheral).seed(); });
+}
+
+auto machine_handle::rng_drawn(std::string const& peripheral) const -> std::uint64_t
+{
+  return access([&](core::machine&) { return entropy(peripheral).drawn(); });
+}
+
+auto machine_handle::rng_queued(std::string const& peripheral) const -> std::uint64_t
+{
+  return access(
+      [&](core::machine&) { return static_cast<std::uint64_t>(entropy(peripheral).queued()); });
+}
+
+void machine_handle::rng_queue(
+    std::string const&                peripheral,
+    std::vector<std::uint32_t> const& words)
+{
+  access([&](core::machine&) { entropy(peripheral).queue(words); });
+}
+
+auto machine_handle::rng_stuck(std::string const& peripheral) const -> std::optional<std::uint32_t>
+{
+  return access([&](core::machine&) { return entropy(peripheral).stuck(); });
+}
+
+void machine_handle::rng_set_stuck(std::string const& peripheral, std::optional<std::uint32_t> word)
+{
+  access([&](core::machine&) { entropy(peripheral).set_stuck(word); });
+}
+
 auto machine_handle::gpio_alternate(std::string const& peripheral, std::uint8_t pin) const
     -> std::uint8_t
 {

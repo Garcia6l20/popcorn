@@ -8,5 +8,14 @@ add_ll_firmware(
     "rng_ll",
     [here / "rng_ll.c"],
     ["rcc", "rng"],
-    ["idle", "enable_read", "nist_init", "locked", "no_kernel_clock", "hsi16_source", "pll_160"],
+    [
+        "idle",
+        "enable_read",
+        "enable_read_idle",
+        "nist_init",
+        "locked",
+        "no_kernel_clock",
+        "hsi16_source",
+        "pll_160",
+    ],
 )

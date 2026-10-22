@@ -101,6 +101,7 @@ from popcorn._refs import (
     native_set,
     owner_of,
 )
+from popcorn._rng import RngOptions
 from popcorn._snapshot import Snapshot
 from popcorn._stop import FrameReturn, Stop, stop_of
 from popcorn._streams import (
@@ -683,6 +684,7 @@ class Machine:
         usb: Mapping[str, UsbHostOptions] | None = None,
         supply: SupplyOptions | None = None,
         option_bytes: OptionBytes | None = None,
+        rng: RngOptions | None = None,
         name: str | None = None,
         _plugin_models: Mapping[str, tuple[Loaded, str]] | None = None,
     ) -> None:
@@ -739,6 +741,7 @@ class Machine:
                 registers, None for the description's registers. With `tzen` the core boots
                 from the secure boot address and the machine has TrustZone, without it from the
                 non-secure one. `vector_table` wins over both.
+            rng: Word source of the built-in RNG model, None for its default, seed 0.
             name: Name of the machine in its log records and errors, the description's part
                 when None. Not part of any configuration digest or snapshot.
             _plugin_models: Private, set by `MachineDescription.machine`: the loaded plugin and
@@ -765,9 +768,10 @@ class Machine:
                 bytes or has a Python or plugin model, as `option_bytes`, a value the family
                 refuses, as `option_bytes.<field>`: a page past the bank, an HDP area that does
                 not start at its secure area's first page or ends past its last, a boot address
-                not aligned to 128 bytes, `dualbank=False`.
+                not aligned to 128 bytes, `dualbank=False`. With `rng`, before anything is
+                built: an RNG with a Python or plugin model, as `rng`.
             ImageError: An image does not fit the memory map.
-            TypeError: `option_bytes` is not an `OptionBytes`.
+            TypeError: `option_bytes` is not an `OptionBytes`, or `rng` not an `RngOptions`.
             ValueError: `name` is empty or holds whitespace or a dot, or `faults` is neither
                 "stop" nor "handler".
         """
@@ -801,6 +805,10 @@ class Machine:
             config.vdda_mv = supply.vdda_mv
         if option_bytes is not None:
             config.option_bytes = _option_bytes_config(option_bytes)
+        if rng is not None:
+            if not isinstance(cast(object, rng), RngOptions):
+                raise TypeError(f"rng: expected an RngOptions, not {type(rng).__qualname__}")
+            config.rng_seed = rng.seed
         aliases = {p.name: p.alias_of for p in description.peripherals if p.alias_of is not None}
         config.usb_hosts = checked_usb(usb or {}, aliases)
         config.slice_instructions = slice_instructions

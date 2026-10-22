@@ -5,6 +5,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/model.hpp>
+#include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/rng.hpp>
 
 #include <doctest/doctest.h>
@@ -12,9 +13,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -71,20 +75,28 @@ constexpr std::uint64_t init_config_c_d1 = 74'831'250;
 constexpr std::array<std::uint32_t, 4> seed_0_words{
     0xE220'A839, 0x6E78'9E6A, 0x06C4'5D18, 0xF88B'B8A8};
 
-auto words_from(std::uint64_t start, std::uint64_t count) -> std::vector<std::uint32_t>
+auto words_from(std::uint64_t start, std::uint64_t count, std::uint64_t seed = 0)
+    -> std::vector<std::uint32_t>
 {
   std::vector<std::uint32_t> out;
   for(auto position = start; position < start + count; ++position)
   {
-    out.push_back(rng_word_at(0, position));
+    out.push_back(rng_word_at(seed, position));
   }
   return out;
 }
 
-auto entered(std::string_view entry) -> stm32_fixture
+auto entered(std::string_view entry, std::uint64_t seed = 0) -> stm32_fixture
 {
   auto options               = popcorn::testing::stm32_options();
   options.strict_peripherals = true;
+  if(seed != 0)
+  {
+    popcorn::periph::stm32::board board{};
+    board.rng.seed = seed;
+    options.models.insert_or_assign(
+        "RNG", popcorn::periph::stm32::factories(board, u575()).at("RNG"));
+  }
   stm32_fixture f{u575(), "rng_ll", std::move(options)};
   REQUIRE(
       f.run_to_stop({.max_instructions = icount{100'000}, .until = sym("rng_ll", "main")}).reason
@@ -95,8 +107,29 @@ auto entered(std::string_view entry) -> stm32_fixture
 
 struct rig
 {
-  explicit rig(std::string_view entry = "idle") : f{entered(entry)}
+  explicit rig(std::string_view entry = "idle", std::uint64_t seed = 0) : f{entered(entry, seed)}
   {}
+
+  [[nodiscard]] auto source() const -> popcorn::periph::stm32::entropy_source&
+  {
+    auto* const found =
+        dynamic_cast<popcorn::periph::stm32::entropy_source*>(f.target->model("RNG"));
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  [[nodiscard]] auto fw_words() const -> std::vector<std::uint32_t>
+  {
+    auto const log = f.log();
+    REQUIRE(log.size() == 49);
+    std::vector<std::uint32_t> out;
+    for(std::size_t word = 0; word < 16; ++word)
+    {
+      CHECK(log[3 * word] == drdy);
+      out.push_back(log[3 * word + 2]);
+    }
+    return out;
+  }
 
   [[nodiscard]] auto at(std::string_view peripheral, std::string_view reg) const -> address
   {
@@ -826,5 +859,197 @@ TEST_CASE("the LL flow reads 16 words of seed 0, polls DRDY and leaves CR at res
   }
   CHECK(log[1] > 100);
   CHECK(log[48] == cr_reset);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a board seed gives the firmware the words of that seed")
+{
+  rig const r{"enable_read", 0x5EED};
+  CHECK(r.source().seed() == 0x5EED);
+  REQUIRE(r.finish(200'000).reason == stop_reason::user);
+  CHECK(r.fw_words() == words_from(0, 16, 0x5EED));
+  CHECK(r.fw_words() != words_from(0, 16));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("queued words come before the generator and do not move its position")
+{
+  rig const                        r{"enable_read"};
+  std::vector<std::uint32_t> const queued{
+      0x0000'0000, 0x0000'0001, 0xFFFF'FFFF, 0x1234'5678, 0x0BAD'F00D, 0xDEAD'BEEF, 0x5555'AAAA,
+      0xAAAA'5555, 0x0101'0101, 0x8000'0000, 0x7FFF'FFFF, 0xCAFE'BABE, 0x1111'1111, 0x2222'2222};
+  r.source().queue(queued);
+  CHECK(r.source().queued() == 14);
+  REQUIRE(r.finish(200'000).reason == stop_reason::user);
+  auto expected = queued;
+  expected.push_back(rng_word_at(0, 0));
+  expected.push_back(rng_word_at(0, 1));
+  auto const log = r.f.log();
+  REQUIRE(log.size() == 49);
+  std::vector<std::uint32_t> got;
+  for(std::size_t word = 0; word < 16; ++word)
+  {
+    got.push_back(log[3 * word + 2]);
+  }
+  CHECK(got == expected);
+  CHECK(r.source().queued() == 0);
+  CHECK(r.source().drawn() == 2);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a stuck word fills every new word, the words already produced keep theirs")
+{
+  SUBCASE("set before the LL flow")
+  {
+    rig const r{"enable_read"};
+    r.source().set_stuck(0xA5A5'A5A5);
+    CHECK(r.source().stuck() == 0xA5A5'A5A5);
+    REQUIRE(r.finish(200'000).reason == stop_reason::user);
+    CHECK(r.fw_words() == std::vector<std::uint32_t>(16, 0xA5A5'A5A5));
+    CHECK(r.source().drawn() == 0);
+    CHECK(r.logged.empty());
+  }
+  SUBCASE("cleared with the FIFO and the register full")
+  {
+    rig const r;
+    r.source().set_stuck(0xA5A5'A5A5);
+    full_pipeline(r);
+    r.source().set_stuck(std::nullopt);
+    CHECK_FALSE(r.source().stuck().has_value());
+    std::vector<std::uint32_t> got;
+    for(int read = 0; read < 8; ++read)
+    {
+      got.push_back(r.cpu_dr());
+    }
+    CHECK(got == std::vector<std::uint32_t>(8, 0xA5A5'A5A5));
+    r.run_for(round_4mhz);
+    got.clear();
+    for(int read = 0; read < 4; ++read)
+    {
+      got.push_back(r.cpu_dr());
+    }
+    CHECK(got == words_from(0, 4));
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE("a snapshot keeps the queue, the stuck word and the generator position")
+{
+  rig const                        r;
+  std::vector<std::uint32_t> const queued{11, 22, 33, 44, 55, 66};
+  r.source().queue(queued);
+  r.source().set_stuck(0x0F0F'0F0F);
+  auto const start = enabled_at_4mhz(r);
+  r.run_until(start + init_4mhz);
+  r.source().set_stuck(std::nullopt);
+  for(int read = 0; read < 4; ++read)
+  {
+    static_cast<void>(r.cpu_dr());
+  }
+  r.source().set_stuck(0x0F0F'0F0F);
+  auto const saved  = r.f.target->snapshot();
+  auto const replay = [](rig const& on) {
+    std::vector<std::uint32_t> got;
+    on.run_for(round_4mhz);
+    on.source().set_stuck(std::nullopt);
+    for(int round = 0; round < 3; ++round)
+    {
+      for(int read = 0; read < 4; ++read)
+      {
+        got.push_back(on.cpu_dr());
+      }
+      on.run_for(round_4mhz);
+    }
+    return std::tuple{got, on.source().drawn(), on.source().queued()};
+  };
+  CHECK(r.source().queued() == 6);
+  auto const first = replay(r);
+  rig const  other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.source().queued() == 6);
+  CHECK(other.source().stuck() == 0x0F0F'0F0F);
+  CHECK(replay(other) == first);
+  auto expected = std::vector<std::uint32_t>(4, 0x0F0F'0F0F);
+  expected.insert(expected.end(), queued.begin(), queued.end());
+  expected.push_back(rng_word_at(0, 0));
+  expected.push_back(rng_word_at(0, 1));
+  CHECK(std::get<0>(first) == expected);
+  CHECK(r.logged.empty());
+  CHECK(other.logged.empty());
+}
+
+TEST_CASE("every reset kind keeps the queue, the stuck word and the generator position")
+{
+  for(auto const kind :
+      {popcorn::reset_kind::software, popcorn::reset_kind::power_on, popcorn::reset_kind::watchdog})
+  {
+    CAPTURE(static_cast<int>(kind));
+    rig const  r;
+    auto const start = enabled_at_4mhz(r);
+    r.run_until(start + init_4mhz);
+    std::vector<std::uint32_t> const queued{1, 2, 3, 4, 5};
+    r.source().queue(queued);
+    r.source().set_stuck(0x77);
+    r.f.target->reset(kind);
+    r.f.set("pc", sym("rng_ll", "idle"));
+    CHECK(r.source().queued() == 5);
+    CHECK(r.source().stuck() == 0x77);
+    CHECK(r.source().drawn() == 4);
+    r.source().set_stuck(std::nullopt);
+    auto const again = enabled_at_4mhz(r);
+    r.run_until(again + init_4mhz);
+    std::vector<std::uint32_t> got;
+    for(int read = 0; read < 4; ++read)
+    {
+      got.push_back(r.cpu_dr());
+    }
+    CHECK(got == std::vector<std::uint32_t>{1, 2, 3, 4});
+    CHECK(r.source().queued() == 1);
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE("a queue past its bound is refused before any change")
+{
+  rig const                        r;
+  std::vector<std::uint32_t> const half(popcorn::periph::stm32::rng_max_queued / 2, 9);
+  r.source().queue(half);
+  r.source().queue(half);
+  CHECK(r.source().queued() == popcorn::periph::stm32::rng_max_queued);
+  std::vector<std::uint32_t> const one{1};
+  CHECK_THROWS_AS(r.source().queue(one), popcorn::config_error);
+  CHECK(r.source().queued() == popcorn::periph::stm32::rng_max_queued);
+  auto const start = enabled_at_4mhz(r);
+  r.run_until(start + init_4mhz);
+  for(int read = 0; read < 4; ++read)
+  {
+    static_cast<void>(r.cpu_dr());
+  }
+  CHECK(r.source().queued() == popcorn::periph::stm32::rng_max_queued - 4);
+  r.source().queue(std::vector<std::uint32_t>(4, 7));
+  CHECK(r.source().queued() == popcorn::periph::stm32::rng_max_queued);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("1000 queue and drain cycles leave the queue storage bounded")
+{
+  rig const  r;
+  auto const start = enabled_at_4mhz(r);
+  r.run_until(start + init_4mhz);
+  for(std::uint32_t cycle = 0; cycle < 1000; ++cycle)
+  {
+    std::vector<std::uint32_t> const words{cycle, cycle + 1, cycle + 2, cycle + 3};
+    r.source().queue(words);
+    for(int read = 0; read < 4; ++read)
+    {
+      static_cast<void>(r.cpu_dr());
+    }
+    r.run_for(round_4mhz);
+    REQUIRE(r.source().queued() == 0);
+  }
+  std::vector<std::byte> saved;
+  r.f.target->model("RNG")->save(saved);
+  CHECK(saved.size() < 512);
   CHECK(r.logged.empty());
 }
