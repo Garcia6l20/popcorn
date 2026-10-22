@@ -3636,6 +3636,39 @@ TEST_CASE("a snapshot with a filtered edge pending restores it")
   CHECK(t.read("TIM3", "CCR1") == captured);
 }
 
+TEST_CASE("TIM3RST drops a pending filtered edge and takes the held pin level with no capture")
+{
+  auto t = capturing(0x0001 | (3u << 4));
+  t.edge(6, true);
+  auto const rise = t.next;
+  REQUIRE(
+      t.f.run_to_stop(
+             {.max_instructions = icount{1'000'000'000}, .until_time = vtime{rise + tick_ps}})
+          .reason
+      == stop_reason::time);
+  auto const filtering = [&] {
+    std::vector<std::uint64_t> out;
+    for(auto const& event : t.f.target->snapshot().data().events.pending)
+    {
+      if(event.due_ps > rise and event.due_ps <= rise + 8 * tick_ps)
+      {
+        out.push_back(event.due_ps);
+      }
+    }
+    return out;
+  };
+  REQUIRE_FALSE(filtering().empty());
+  t.b.set("RCC", "RCC_APB1RSTR1", "TIM3RST", 1);
+  t.b.set("RCC", "RCC_APB1RSTR1", "TIM3RST", 0);
+  CHECK(filtering().empty());
+  CHECK(t.read("TIM3", "CCER") == 0);
+  t.write("TIM3", "CCMR1_Input", 0x0001);
+  t.write("TIM3", "CCER", 0b0001);
+  t.enable("TIM3");
+  t.settle();
+  CHECK(t.bits("TIM3", "SR", "CC1IF") == 0);
+}
+
 TEST_CASE("a CCxP write that flips the polarised input is an edge")
 {
   SUBCASE("encoder")

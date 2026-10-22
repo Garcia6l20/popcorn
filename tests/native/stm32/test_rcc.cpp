@@ -691,3 +691,92 @@ TEST_CASE("RCC claims each RSTR register once, with and without TrustZone")
     }
   }
 }
+
+TEST_CASE("an RCC reset returns a modelled register to its reset value and holds writes off")
+{
+  struct target
+  {
+    std::string_view instance;
+    std::string_view reg;
+    std::string_view reset_reg;
+    std::string_view reset_bit;
+    std::uint32_t    value;
+    std::uint32_t    reset;
+    bool             storage = false;
+  };
+  constexpr std::array<target, 12> targets{
+      {
+       {"CRC", "POL", "RCC_AHB1RSTR", "CRCRST", 0x1021, 0x04C1'1DB7},
+       {"HASH", "IMR", "RCC_AHB2RSTR1", "HASHRST", 0x1, 0},
+       {"SYSCFG", "SYSCFG_FPUIMR", "RCC_APB3RSTR", "SYSCFGRST", 0, 0x1F, true},
+       {"SYSCFG", "SYSCFG_CSLCKR", "RCC_APB3RSTR", "SYSCFGRST", 0x1, 0x1, true},
+       {"ADC1", "ADC_IER", "RCC_AHB2RSTR1", "ADC12RST", 0x1, 0},
+       {"ADC1", "ADC_SMPR1", "RCC_AHB2RSTR1", "ADC12RST", 0x7, 0, true},
+       {"GPDMA1", "GPDMA_PRIVCFGR", "RCC_AHB1RSTR", "GPDMA1RST", 0x1, 0, true},
+       {"TIM2", "AF2", "RCC_APB1RSTR1", "TIM2RST", 0x1, 0, true},
+       {"ADC12", "ADC12_CCR", "RCC_AHB2RSTR1", "ADC12RST", 0x0004'0000, 0},
+       {"GPDMA1", "GPDMA_C0LLR", "RCC_AHB1RSTR", "GPDMA1RST", 0x4, 0},
+       {"LPDMA1", "LPDMA_C0LLR", "RCC_AHB3RSTR", "LPDMA1RST", 0x4, 0},
+       {"TIM2", "ARR", "RCC_APB1RSTR1", "TIM2RST", 0x100, 0xFFFF'FFFF},
+       }
+  };
+  auto const f = idle_fixture();
+  for(auto const& t : targets)
+  {
+    CAPTURE(t.instance);
+    CAPTURE(t.reg);
+    auto const& desc  = f.target->peripheral(t.instance).description();
+    auto const* found = popcorn::find_register(desc, t.reg);
+    REQUIRE(found != nullptr);
+    auto const at    = desc.base + found->offset;
+    auto&      regs  = f.target->peripheral(t.instance);
+    auto const store = [&](std::uint32_t value) {
+      if(t.storage)
+      {
+        regs.poke(found->offset, value);
+        return;
+      }
+      REQUIRE(f.target->mem().write(at, 4, value).has_value());
+    };
+    auto const load = [&] {
+      if(t.storage)
+      {
+        return regs.peek(found->offset);
+      }
+      auto const value = f.target->mem().read(at, 4);
+      REQUIRE(value.has_value());
+      return static_cast<std::uint32_t>(*value);
+    };
+    store(t.value);
+    REQUIRE(load() == t.value);
+    write(f, t.reset_reg, bit_of(t.reset_reg, t.reset_bit));
+    CHECK(load() == t.reset);
+    if(not t.storage)
+    {
+      store(t.value);
+      CHECK(load() == t.reset);
+    }
+    write(f, t.reset_reg, 0);
+    store(t.value);
+    CHECK(load() == t.value);
+  }
+}
+
+TEST_CASE("a part whose RCC lacks ADC12RST is a config_error naming that bit")
+{
+  auto       description = u575();
+  auto const rcc         = std::ranges::find(
+      description.peripherals, std::string{"RCC"}, &popcorn::peripheral_desc::name);
+  REQUIRE(rcc != description.peripherals.end());
+  auto const resets =
+      std::ranges::find(rcc->registers, std::string{"AHB2RSTR1"}, &popcorn::register_desc::name);
+  REQUIRE(resets != rcc->registers.end());
+  REQUIRE(
+      std::erase_if(
+          resets->fields, [](popcorn::field_desc const& field) { return field.name == "ADC12RST"; })
+      == 1);
+  CHECK_THROWS_WITH_AS(
+      (stm32_fixture{description, "rcc_ll"}),
+      doctest::Contains("peripherals.RCC.registers.RCC_xxxRSTR.fields.ADC12RST"),
+      popcorn::config_error);
+}

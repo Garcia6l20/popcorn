@@ -1,4 +1,5 @@
 #include "factories.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <algorithm>
@@ -83,12 +84,14 @@ struct crc_state
  *        narrow read of another register logs once, raises model_error under
  *        strict_peripherals, and returns the stored bits.
  */
-class crc final : public dispatch_model<crc, crc_state>
+class crc final : public dispatch_model<crc, crc_state>, public bus_reset_listener
 {
 public:
   crc(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
+  void restore_reset_values();
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
   auto on_write(
@@ -220,11 +223,22 @@ void crc::init_written(std::uint32_t, std::uint32_t now)
   set_crc(now);
 }
 
-void crc::reset(register_file& regs, reset_kind)
+void crc::reset(register_file&, reset_kind)
+{
+  restore_reset_values();
+}
+
+void crc::on_bus_reset()
+{
+  restore_unclaimed_storage();
+  restore_reset_values();
+}
+
+void crc::restore_reset_values()
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
 }
 

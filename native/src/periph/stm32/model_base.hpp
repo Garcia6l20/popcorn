@@ -583,6 +583,41 @@ protected:
   }
 
   /**
+   * @brief Brings every register word the model does not claim to its description reset
+   *        value, as a machine reset does for the register layer. For an RCC peripheral reset.
+   */
+  void restore_unclaimed_storage()
+  {
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> words;
+    for(auto const& described : this->desc_.registers)
+    {
+      auto const word = described.offset & ~3u;
+      if(described.alternate_of or std::ranges::contains(bound_, word, &bound::offset))
+      {
+        continue;
+      }
+      auto const width =
+          described.width >= 32 ? ~std::uint32_t{0} : (std::uint32_t{1} << described.width) - 1u;
+      auto const value = (described.reset & described.reset_mask & width)
+                      << ((described.offset & 3u) * 8);
+      if(auto const found =
+             std::ranges::find(words, word, &std::pair<std::uint32_t, std::uint32_t>::first);
+         found != words.end())
+      {
+        found->second |= value;
+      }
+      else
+      {
+        words.emplace_back(word, value);
+      }
+    }
+    for(auto const& [word, value] : words)
+    {
+      this->ctx_.regs.poke(word, value);
+    }
+  }
+
+  /**
    * @brief Whether RCC holds the peripheral in reset, its RCC_xxxRSTR bit 1.
    * @return The bit, false without an RCC model.
    */

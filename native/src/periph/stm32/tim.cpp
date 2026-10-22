@@ -1,5 +1,6 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -329,12 +330,15 @@ class tim final : public dispatch_model<tim, tim_state>,
                   public trigger_source,
                   public trigger_sink,
                   public dma_requester,
-                  public core_hold_listener
+                  public core_hold_listener,
+                  public bus_reset_listener
 {
 public:
   tim(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
+  void restore_reset_values();
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
@@ -2190,19 +2194,37 @@ void tim::warn_selects()
   }
 }
 
-void tim::reset(register_file& regs, reset_kind)
+void tim::reset(register_file&, reset_kind)
+{
+  restore_reset_values();
+}
+
+void tim::on_bus_reset()
+{
+  for(std::size_t input = 0; input < inputs_count; ++input)
+  {
+    if(state_.input_due_ps[input] != 0)
+    {
+      ctx_.events.cancel(state_.input_due_seq[input]);
+    }
+  }
+  restore_unclaimed_storage();
+  restore_reset_values();
+}
+
+void tim::restore_reset_values()
 {
   for(auto const& claimed : claims())
   {
-    regs.poke(reg(claimed).offset, describe(claimed).reset);
+    regs_.poke(reg(claimed).offset, describe(claimed).reset);
   }
   auto const generation = state_.generation + 1;
   state_                = {};
   state_.generation     = generation;
-  state_.reload         = regs.peek(reload_.offset) & mask_;
+  state_.reload         = regs_.peek(reload_.offset) & mask_;
   for(std::size_t ch = 0; ch < channels_.size(); ++ch)
   {
-    state_.compare[ch] = regs.peek(channels_[ch].ccr.offset) & mask_;
+    state_.compare[ch] = regs_.peek(channels_[ch].ccr.offset) & mask_;
     if(channels_[ch].signal)
     {
       channels_[ch].signal->resolve();

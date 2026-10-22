@@ -1,6 +1,7 @@
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <algorithm>
@@ -389,12 +390,16 @@ struct hash_state
  *        above 16 or a phase out of range: without strict_peripherals the CSR writes that follow
  *        are dropped up to the next INIT or CSR0 tag write. The RCC clock gate is not modelled.
  */
-class hash final : public dispatch_model<hash, hash_state>, public dma_requester
+class hash final : public dispatch_model<hash, hash_state>,
+                   public dma_requester,
+                   public bus_reset_listener
 {
 public:
   hash(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
+  void restore_reset_values();
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
   auto on_write(
@@ -532,11 +537,22 @@ hash::hash(model_context& ctx, peripheral_desc const& desc)
   }
 }
 
-void hash::reset(register_file& regs, reset_kind)
+void hash::reset(register_file&, reset_kind)
+{
+  restore_reset_values();
+}
+
+void hash::on_bus_reset()
+{
+  restore_unclaimed_storage();
+  restore_reset_values();
+}
+
+void hash::restore_reset_values()
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
   withdraw();
   state_ = {};

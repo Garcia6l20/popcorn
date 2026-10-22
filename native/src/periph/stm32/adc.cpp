@@ -1,6 +1,7 @@
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -172,12 +173,15 @@ auto lower(std::string_view name) -> std::string
  *        VREFINT with VREFEN and the temperature sensor with VSENSESEL to the ADC1 internal
  *        channels, and divides the ADC kernel clock by PRESC. Storage otherwise.
  */
-class adc_common final : public dispatch_model<adc_common, adc_common_state>
+class adc_common final : public dispatch_model<adc_common, adc_common_state>,
+                         public bus_reset_listener
 {
 public:
   adc_common(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
+  void restore_reset_values();
   void on_event(std::uint32_t, std::uint64_t) override
   {}
 
@@ -233,11 +237,22 @@ adc_common::adc_common(model_context& ctx, peripheral_desc const& desc)
       prescaler_{field("ADC12_CCR", "PRESC")}
 {}
 
-void adc_common::reset(register_file& regs, reset_kind)
+void adc_common::reset(register_file&, reset_kind)
+{
+  restore_reset_values();
+}
+
+void adc_common::on_bus_reset()
+{
+  restore_unclaimed_storage();
+  restore_reset_values();
+}
+
+void adc_common::restore_reset_values()
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
 }
 
@@ -342,12 +357,15 @@ class adc final : public dispatch_model<adc, adc_state>,
                   public analog_port,
                   public clock_listener,
                   public dma_requester,
-                  public trigger_sink
+                  public trigger_sink,
+                  public bus_reset_listener
 {
 public:
   adc(model_context& ctx, peripheral_desc const& desc, supply_options supply);
 
   void               reset(register_file& regs, reset_kind kind) override;
+  void               on_bus_reset() override;
+  void               restore_reset_values();
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   void               on_clock_change() override;
   void               transfer_completed(dma_controller const& by, std::uint32_t request) override;
@@ -695,11 +713,22 @@ auto adc::calibration(address at, std::string_view name) const -> std::uint16_t
   return *word;
 }
 
-void adc::reset(register_file& regs, reset_kind)
+void adc::reset(register_file&, reset_kind)
+{
+  restore_reset_values();
+}
+
+void adc::on_bus_reset()
+{
+  restore_unclaimed_storage();
+  restore_reset_values();
+}
+
+void adc::restore_reset_values()
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
   abort();
   state_.data.clear();

@@ -200,10 +200,15 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - SRAMnEN and SRAMnSMEN stay Non-secure. The MPCBB and INVSECSTATE rule of RM0456 5.4 does not
   apply to them.
 - A peripheral reset bit in an `RCC_xxxRSTR` register, written from 0 to 1, resets the model of
-  that instance when the model supports it, today the RNG only. Other bits are storage.
-- While a reset bit is 1, register writes to that peripheral's model are ignored, debugger
-  writes included. The TrustZone filter still runs first, so an illegal access still raises its
-  event. Reads are not blocked. RM0456 gives no access rule for a peripheral held in reset.
+  that instance when the model supports it: RNG, CRC, HASH, SYSCFG, ADC1 and ADC12 through
+  ADC12RST, GPDMA1, LPDMA1 and the timers. Other bits are storage.
+- SYSCFGRST keeps `SYSCFG_CSLCKR`, `SYSCFG_CNSLCKR` and `SYSCFG_CFGR2`, whose bits RM0456 15.3
+  clears only on a system reset.
+- While a reset bit is 1, writes to the registers that peripheral's model serves are ignored,
+  debugger writes included. The TrustZone filter still runs first, so an illegal access still
+  raises its event. Reads are not blocked. A register the model leaves to plain storage, such as
+  ADC_SMPR1, still takes a write while held. RM0456 gives no access rule for a peripheral held
+  in reset.
 
 ## RNG
 

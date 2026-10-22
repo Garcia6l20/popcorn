@@ -1,5 +1,6 @@
 #include "factories.hpp"
 #include "gtzc.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace popcorn::periph::stm32
@@ -48,12 +50,16 @@ static_assert(std::is_empty_v<syscfg_state>);
  *        `SYSCFG_SECCFGR` only. The model is stateless: a save made by a machine without it
  *        restores it from the register storage.
  */
-class syscfg final : public dispatch_model<syscfg, syscfg_state>, public trustzone_aware
+class syscfg final : public dispatch_model<syscfg, syscfg_state>,
+                     public trustzone_aware,
+                     public bus_reset_listener
 {
 public:
   syscfg(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
+  void restore_reset_values();
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
 
   [[nodiscard]] auto secure_function() const -> bool override;
@@ -87,6 +93,9 @@ private:
   illegal_event                illegal_;
   std::vector<std::uint32_t>   logged_;
 };
+
+constexpr std::array<std::string_view, 3> system_reset_only{
+    "SYSCFG_CFGR2", "SYSCFG_CSLCKR", "SYSCFG_CNSLCKR"};
 
 auto syscfg_writes(peripheral_desc const& desc) -> std::vector<write_entry<syscfg>>
 {
@@ -127,11 +136,35 @@ syscfg::syscfg(model_context& ctx, peripheral_desc const& desc)
   analog_ = field("SYSCFG_CFGR1", "BOOSTEN").mask() | field("SYSCFG_CFGR1", "ANASWVDD").mask();
 }
 
-void syscfg::reset(register_file& regs, reset_kind)
+void syscfg::reset(register_file&, reset_kind)
+{
+  restore_reset_values();
+}
+
+void syscfg::on_bus_reset()
+{
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> kept;
+  for(auto const name : system_reset_only)
+  {
+    if(has_register(name))
+    {
+      auto const at = reg(name).offset;
+      kept.emplace_back(at, regs_.peek(at));
+    }
+  }
+  restore_unclaimed_storage();
+  restore_reset_values();
+  for(auto const& [at, value] : kept)
+  {
+    regs_.poke(at, value);
+  }
+}
+
+void syscfg::restore_reset_values()
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
 }
 
