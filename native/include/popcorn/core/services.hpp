@@ -161,6 +161,8 @@ public:
    *        ends, then the machine resets the arch module and passes @p kind to every model's
    *        `periph::model::reset`.
    * @param kind Cause of the reset.
+   * @throws config_error for `reset_kind::peripheral`, which resets one peripheral through
+   *         `hold_in_reset`.
    */
   void request_reset(reset_kind kind) pre(is_enumerator(kind))
   {
@@ -171,9 +173,13 @@ public:
    * @brief Holds a peripheral in a reset a bus reset bit drives, such as an STM32 RCC_xxxRSTR
    *        bit, or releases it. Applies at once. Entering the hold returns every register no
    *        model claims to its reset value and opens its write-once locks, as a machine reset
-   *        does for that peripheral. While held, a bus write to such a register is ignored,
-   *        from every bus initiator, after the bus firewall, and leaves a trace record as a
-   *        firewall-ignored write does. `periph::register_file::poke` is not a bus access and
+   *        does for that peripheral. Entering it then calls `periph::bus_reset_listener::
+   *        on_bus_reset` on a model that implements the listener, or `periph::model::reset`
+   *        with `reset_kind::peripheral` on any other model. Releasing the hold calls neither.
+   *        While held, every bus write to the peripheral is ignored, from every bus initiator,
+   *        after the bus firewall, and leaves a trace record as a firewall-ignored write does.
+   *        A listener sees an ignored write to a register it claims through
+   *        `periph::bus_reset_listener::on_held_write`. `periph::register_file::poke` is not a bus access and
    *        bypasses the hold. A snapshot keeps the hold. A machine reset releases it.
    * @param peripheral Instance name as the description spells it.
    * @param held True while the reset bit is 1.

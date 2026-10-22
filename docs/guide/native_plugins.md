@@ -56,6 +56,8 @@ An RCC peripheral reset bit written 1 resets the peripheral. A model that derive
 `popcorn::periph::bus_reset_listener` hears it in `on_bus_reset()`, as the example's RNG does on
 RNGRST. A model that does not gets `reset()` with `popcorn::reset_kind::peripheral`. While the
 bit is 1 the machine passes the model no write. It calls a listener's `on_held_write()` instead.
+Events the model scheduled stay queued through the reset, so a model that is not a listener
+cancels them in `reset()` or guards them with a generation count when the reset must drop them.
 
 A plugin built against another SDK is refused by its digest. Rebuild every plugin after a popcorn
 update.

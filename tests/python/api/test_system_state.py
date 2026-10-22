@@ -327,6 +327,31 @@ def test_a_reset_member_runs_as_a_lone_machine_reset_at_the_same_point(
     assert seen[1:] == seen[:1] * 3
 
 
+def test_a_peripheral_reset_kind_is_refused_before_the_link_drops_a_frame(pair: Build) -> None:
+    reset_at = VirtualTime(us(500).ps)
+    end = VirtualTime(ms(1.5).ps)
+
+    def run(refused: bool) -> tuple[object, ...]:
+        system = pair(a_entry="link_tx_count", b_entry="link_rx")
+        a = system.members["a"]
+        assert asyncio.run(system.run(until=reset_at)).reason is StopReason.TIME
+        paused = system.time_of("a").ps
+        if refused:
+            kept = (a.time, system.time_of("a"))
+            with pytest.raises(popcorn.ConfigError):
+                system.reset("a", ResetKind.PERIPHERAL)
+            with pytest.raises(popcorn.ConfigError):
+                a.reset(ResetKind.PERIPHERAL)
+            assert (a.time, system.time_of("a")) == kept
+        assert asyncio.run(system.run(until=end)).reason is StopReason.TIME
+        frames = system.tap("a.USART1").frames(towards="b.USART1")
+        assert not any(one.lost for one in frames)
+        assert any(one.start.ps < paused <= one.end.ps for one in frames)
+        return frames, tuple(logged(a)), tuple(received(system.members["b"]))
+
+    assert run(True) == run(False)
+
+
 def test_a_member_held_at_its_goal_s_stop_resets_and_goes_on(pair: Build) -> None:
     seen: list[tuple[object, ...]] = []
     for slice_instructions, third in VARIANTS:

@@ -1612,6 +1612,11 @@ void system::request_pause() noexcept
 
 void system::reset(held_system const&, std::size_t member, reset_kind kind)
 {
+  if(kind == reset_kind::peripheral)
+  {
+    throw config_error(
+        "reset", 0, "kind", "a machine reset kind, reset_kind::peripheral resets one peripheral");
+  }
   auto& self = *impl_;
   self.require_paused();
   auto&      one       = self.slots[member];

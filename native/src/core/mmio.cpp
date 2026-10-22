@@ -616,11 +616,10 @@ auto machine::run_state::dispatch_write(
     std::expected<void, bus_error> done{};
     {
       handler_scope const scope{in_handler};
-      exact_write = by == initiator::cpu and slot.model->drives_core_clock();
-      done        = slot.model->on_write(
+      flag_scope const exact{exact_write, by == initiator::cpu and slot.model->drives_core_clock()};
+      done = slot.model->on_write(
           slot.regs, offset, size, old, value & size_mask(size),
           context_of(attrs, window.secure_alias));
-      exact_write = false;
     }
     after_model(hz);
     if(done)

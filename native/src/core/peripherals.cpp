@@ -207,9 +207,7 @@ auto machine::run_state::slot(std::string_view name) const -> peripheral_slot&
 {
   auto const found = std::ranges::lower_bound(
       peripheral_index, name, {}, &std::pair<std::string_view, std::uint32_t>::first);
-  if(found == peripheral_index.end()
-     or found->first != name
-     or owner.peripherals_[found->second] == nullptr)
+  if(found == peripheral_index.end() or found->first != name)
   {
     throw config_error(
         owner.description_.part, 0, "peripherals",

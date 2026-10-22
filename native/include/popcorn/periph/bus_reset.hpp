@@ -23,7 +23,9 @@ namespace popcorn::periph
  *        set the bit and at its virtual time. While the hold lasts, the machine serves reads as
  *        usual and passes no write to the model, from any initiator. It calls on_held_write()
  *        instead, after the bus firewall, so a model can still raise what its own bus filter
- *        raises, such as an illegal-access event.
+ *        raises, such as an illegal-access event. A model without this interface gets
+ *        model::reset() with reset_kind::peripheral instead of on_bus_reset(), and no call for
+ *        a held write.
  */
 class POPCORN_API bus_reset_listener
 {

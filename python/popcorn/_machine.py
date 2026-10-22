@@ -1135,6 +1135,7 @@ class Machine:
             kind: The kind of reset, a power-on reset by default.
 
         Raises:
+            ConfigError: `kind` is `ResetKind.PERIPHERAL`, which only an RCC reset bit applies.
             MachineRunning: The machine is busy, outside its handlers. For a member: the system
                 runs, or the member has a goal pending.
             RuntimeError: For a member, called from a callback of a machine.

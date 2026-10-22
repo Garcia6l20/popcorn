@@ -1235,6 +1235,7 @@ class System:
         Raises:
             KeyError: No such member.
             TypeError: `kind` is no ResetKind.
+            ConfigError: `kind` is `ResetKind.PERIPHERAL`, which only an RCC reset bit applies.
             MachineRunning: The system runs, runs freely, or the member has a goal pending.
             EmulationError: The system was closed, or stopped on an error before.
             RuntimeError: Called from a callback of a machine.

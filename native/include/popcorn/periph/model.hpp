@@ -105,7 +105,9 @@ public:
    *        registers.
    * @param regs Storage of the peripheral.
    * @param kind Cause of the reset, as the machine received it through
-   *        `core::machine_services::request_reset` or chose it at power-up.
+   *        `core::machine_services::request_reset` or chose it at power-up, or
+   *        `reset_kind::peripheral` when `core::machine_services::hold_in_reset` puts the
+   *        peripheral of a model without `bus_reset_listener` in reset.
    */
   virtual void reset(register_file& regs, reset_kind kind) = 0;
 

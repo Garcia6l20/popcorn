@@ -27,4 +27,27 @@ private:
   bool& in_handler_;
   bool  outer_;
 };
+
+/** @brief Sets a flag for the scope's lifetime and restores its outer value after, even when the
+ * scope unwinds. */
+class flag_scope
+{
+public:
+  /** @brief Sets @p flag to @p value. @param flag The flag. @param value Its value in the scope. */
+  flag_scope(bool& flag, bool value) noexcept : flag_{flag}, outer_{std::exchange(flag, value)}
+  {}
+  /** @brief Not copyable. */
+  flag_scope(flag_scope const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(flag_scope const&) -> flag_scope& = delete;
+  /** @brief Restores the outer value. */
+  ~flag_scope()
+  {
+    flag_ = outer_;
+  }
+
+private:
+  bool& flag_;
+  bool  outer_;
+};
 }

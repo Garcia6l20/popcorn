@@ -44,8 +44,8 @@ This model replaces the RNG of the STM32U575 with a counter. The pieces:
   machine thread at that access's virtual time. By default it calls
   `reset(ResetKind.PERIPHERAL)`. The registers the model claims are back at their reset values
   before it runs, as for a machine reset. Until the bit is cleared, no write handler runs and
-  writes are ignored. Events the model
-  scheduled stay queued, so cancel them there when the reset must drop them.
+  writes are ignored. Events the model scheduled stay queued, so cancel them there when the
+  reset must drop them.
   `machine.periph.RNG.held_in_reset` tells whether the bit holds the peripheral.
 
 ## Put it on the board
