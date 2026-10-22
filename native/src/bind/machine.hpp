@@ -243,7 +243,7 @@ public:
       std::shared_ptr<detail::pty_bridge> const& bridge,
       std::weak_ptr<core::host>                  host,
       core::watch_id                             watched,
-      core::watch_id                             watched_clients);
+      std::optional<core::watch_id>              watched_clients);
 
   /** @brief Path of the pty, /dev/pts/N, also after close(). */
   [[= py::doc{"Path of the pty, /dev/pts/N."}]] [[nodiscard]] auto path() const -> std::string;
@@ -257,7 +257,7 @@ private:
   std::weak_ptr<detail::pty_bridge>  bridge_;
   std::weak_ptr<core::host>          host_;
   core::watch_id                     watched_;
-  core::watch_id                     watched_clients_;
+  std::optional<core::watch_id>      watched_clients_;
   std::string                        path_;
 };
 

@@ -4,6 +4,7 @@
 #include <pty.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -91,12 +92,21 @@ pty_bridge::pty_bridge(std::string name, std::unique_ptr<pty_link> link)
   if(clients_watch_.get() < 0
      or ::inotify_add_watch(clients_watch_.get(), path_.c_str(), IN_CLOSE) < 0)
   {
-    fail("inotify");
+    auto const cause = std::generic_category().message(errno);
+    clients_watch_   = unique_fd{};
+    clients_warning_ = std::format(
+        "{}: cannot watch {} for closes ({}), a tool's TIOCEXCL stays set until the device "
+        "detaches or attaches",
+        name_, path_, cause);
   }
 }
 
 void pty_bridge::release_exclusive_after_last_close()
 {
+  if(clients_watch_.get() < 0)
+  {
+    return;
+  }
   std::array<char, 4096> buffer{};
   bool                   closed = false;
   for(;;)
@@ -111,7 +121,13 @@ void pty_bridge::release_exclusive_after_last_close()
       break;
     }
   }
-  if(closed and not held_by_a_client())
+  int exclusive = 0;
+  if(not closed or ::ioctl(slave_.get(), TIOCGEXCL, &exclusive) != 0 or exclusive == 0)
+  {
+    return;
+  }
+  ++scans_;
+  if(not held_by_a_client())
   {
     (void)::ioctl(slave_.get(), TIOCNXCL);
   }
@@ -120,10 +136,14 @@ void pty_bridge::release_exclusive_after_last_close()
 auto pty_bridge::held_by_a_client() const -> bool
 {
   namespace fs              = std::filesystem;
-  auto const      own_pid   = std::to_string(::getpid());
   auto const      own_slave = std::to_string(slave_.get());
   auto const      skip      = fs::directory_options::skip_permission_denied;
   std::error_code failed;
+  struct stat     node{};
+  if(::stat(path_.c_str(), &node) != 0)
+  {
+    return false;
+  }
   for(fs::directory_iterator process{"/proc", skip, failed};
       not failed and process != fs::directory_iterator{}; process.increment(failed))
   {
@@ -137,11 +157,17 @@ auto pty_bridge::held_by_a_client() const -> bool
         not unreadable and fd != fs::directory_iterator{}; fd.increment(unreadable))
     {
       std::error_code gone;
-      if(fs::read_symlink(fd->path(), gone) != path_ or gone)
+      struct stat     seen{};
+      if(fs::read_symlink(fd->path(), gone) != path_
+         or gone
+         or ::stat(fd->path().c_str(), &seen) != 0
+         or seen.st_dev != node.st_dev
+         or seen.st_ino != node.st_ino)
       {
         continue;
       }
-      if(pid != own_pid or fd->path().filename().string() != own_slave)
+      if(fd->path().filename().string() != own_slave
+         or not fs::equivalent(process->path(), "/proc/self", gone))
       {
         return true;
       }
@@ -213,6 +239,10 @@ auto pty_bridge::flush() -> std::optional<std::string>
     }
   }
   wants_write_->store(not outgoing_.empty(), std::memory_order_relaxed);
+  if(not warning and not clients_warning_.empty())
+  {
+    warning = std::exchange(clients_warning_, std::string{});
+  }
   return warning;
 }
 

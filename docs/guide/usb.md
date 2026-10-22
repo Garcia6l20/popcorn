@@ -59,8 +59,12 @@ set `TIOCEXCL` on the pty frees it by closing it: once the last tool closed the 
 too, also while a tool still holds the pty open. The bridge clears the flag at the next slice
 boundary. A close or a re-enumeration the firmware drives happens inside a run and is cleared
 before the machine parks. A close, `detach()` or `attach()` on a parked machine is cleared on the
-next run, so run the machine before the reopen. The bridge finds the tools that still hold the pty
-by scanning `/proc/*/fd`, so a tool of another user it cannot see does not keep the flag.
+next run, so run the machine before the reopen. The bridge finds the tools that still hold the pty by scanning `/proc/*/fd`, once per close of
+an exclusive pty. A tool of another user, another pid namespace, a `hidepid` mount or a
+non-dumpable process is invisible to the scan and does not keep the flag. A child forked with the
+pty open holds it as on a real port, so the flag stays until the child closes it or exits. If the
+kernel refuses the inotify watch the bridge needs, `machine.board.pty()` still works, logs one
+warning and clears the flag only at a detach or attach. UART ptys behave the same way.
 
 ## HID
 

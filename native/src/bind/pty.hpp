@@ -95,8 +95,10 @@ private:
  *        link's device detaches or attaches, as a re-enumerated device is a fresh port. The
  *        kernel keeps the flag on a pty while the master is open, and refuses the slave open the
  *        clearing needs once it is set, so the bridge watches the closes of path() through
- *        inotify and scans /proc for another tool holding it. pump() and discard() run on the
- * thread that owns the engine, the others on any thread.
+ *        inotify and scans /proc for another tool holding the pty, only while it is exclusive. A
+ * child forked with the pty open holds it too. A kernel refusing the watch leaves only the clear at
+ * a device change, with one warning. pump() and discard() run on the thread that owns the engine,
+ * the others on any thread.
  */
 class pty_bridge
 {
@@ -125,7 +127,14 @@ public:
     return master_.get();
   }
 
-  /** @brief The descriptor that turns readable when a tool closes the pty, for a poller. */
+  /** @brief How many times a close of an exclusive pty made the bridge scan /proc. */
+  [[nodiscard]] auto scans() const noexcept -> std::size_t
+  {
+    return scans_;
+  }
+
+  /** @brief The descriptor that turns readable when a tool closes the pty, for a poller, -1 when
+   * the kernel refused the watch. */
   [[nodiscard]] auto clients_watch() const noexcept -> int
   {
     return clients_watch_.get();
@@ -173,6 +182,8 @@ private:
   unique_fd                          master_;
   unique_fd                          slave_;
   unique_fd                          clients_watch_;
+  std::string                        clients_warning_;
+  std::size_t                        scans_ = 0;
   std::string                        path_;
   std::shared_ptr<pty_link>          link_;
   std::vector<std::uint8_t>          outgoing_;

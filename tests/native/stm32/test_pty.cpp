@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -62,6 +63,17 @@ auto open_client(std::string const& path) -> int
   auto const fd = ::open(path.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
   REQUIRE(fd >= 0);
   return fd;
+}
+
+auto open_error(std::string const& path) -> int
+{
+  auto const fd = ::open(path.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
+  if(fd >= 0)
+  {
+    ::close(fd);
+    return 0;
+  }
+  return errno;
 }
 
 auto read_ready(int fd, int wait_ms) -> std::vector<std::uint8_t>
@@ -208,8 +220,7 @@ TEST_CASE("a pty opens again once the last client closed it")
   auto const first = open_client(bridge.path());
   REQUIRE(::ioctl(first, TIOCEXCL) == 0);
   std::ignore = bridge.pump();
-  CHECK(::open(bridge.path().c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC) == -1);
-  CHECK(errno == EBUSY);
+  CHECK(open_error(bridge.path()) == EBUSY);
 
   ::close(first);
   std::ignore      = bridge.pump();
@@ -228,10 +239,61 @@ TEST_CASE("a pty stays exclusive until every client closed it")
   REQUIRE(::ioctl(late, TIOCEXCL) == 0);
   ::close(late);
   std::ignore = bridge.pump();
-  CHECK(::open(bridge.path().c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC) == -1);
-  CHECK(errno == EBUSY);
+  CHECK(open_error(bridge.path()) == EBUSY);
 
   ::close(early);
   std::ignore = bridge.pump();
   ::close(open_client(bridge.path()));
+}
+
+TEST_CASE("a client that never set TIOCEXCL costs no scan of /proc")
+{
+  std::vector<std::uint8_t> pending;
+  std::vector<std::uint8_t> received;
+  pty_bridge                bridge{"USART1", std::make_unique<fake_link>(pending, received)};
+
+  for(int round = 0; round < 8; ++round)
+  {
+    ::close(open_client(bridge.path()));
+    std::ignore = bridge.pump();
+  }
+  CHECK(bridge.scans() == 0);
+
+  auto const exclusive = open_client(bridge.path());
+  REQUIRE(::ioctl(exclusive, TIOCEXCL) == 0);
+  ::close(exclusive);
+  std::ignore = bridge.pump();
+  CHECK(bridge.scans() == 1);
+  CHECK(open_error(bridge.path()) == 0);
+}
+
+TEST_CASE("a forked child holding the pty keeps it exclusive until it exits")
+{
+  std::vector<std::uint8_t> pending;
+  std::vector<std::uint8_t> received;
+  pty_bridge                bridge{"USART1", std::make_unique<fake_link>(pending, received)};
+
+  std::array<int, 2> gate{};
+  REQUIRE(::pipe(gate.data()) == 0);
+  auto const client = open_client(bridge.path());
+  REQUIRE(::ioctl(client, TIOCEXCL) == 0);
+  auto const child = ::fork();
+  REQUIRE(child >= 0);
+  if(child == 0)
+  {
+    ::close(gate[1]);
+    char byte   = 0;
+    std::ignore = ::read(gate[0], &byte, 1);
+    ::_exit(0);
+  }
+  ::close(gate[0]);
+  ::close(client);
+  std::ignore = bridge.pump();
+  CHECK(open_error(bridge.path()) == EBUSY);
+
+  ::close(gate[1]);
+  int status = 0;
+  REQUIRE(::waitpid(child, &status, 0) == child);
+  std::ignore = bridge.pump();
+  CHECK(open_error(bridge.path()) == 0);
 }
