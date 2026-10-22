@@ -16,6 +16,7 @@
 #include <expected>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace popcorn::periph
@@ -164,6 +165,22 @@ public:
   void request_reset(reset_kind kind) pre(is_enumerator(kind))
   {
     do_request_reset(kind);
+  }
+
+  /**
+   * @brief Holds a peripheral in a reset a bus reset bit drives, such as an STM32 RCC_xxxRSTR
+   *        bit, or releases it. Applies at once. Entering the hold returns every register no
+   *        model claims to its reset value and opens its write-once locks, as a machine reset
+   *        does for that peripheral. While held, a write to such a register is ignored, from
+   *        every initiator. A snapshot keeps the hold. A machine reset releases it.
+   * @param peripheral Instance name as the description spells it.
+   * @param held True while the reset bit is 1.
+   * @throws config_error for a name the description lacks, or from an implementation without
+   *         peripherals.
+   */
+  void hold_in_reset(std::string_view peripheral, bool held)
+  {
+    do_hold_in_reset(peripheral, held);
   }
 
   /**
@@ -467,6 +484,7 @@ private:
   virtual void do_trace(trace_record const& record) = 0;
   virtual void do_log(log_record record)            = 0;
   virtual void do_watch_reads(address at, std::uint32_t size, bool on);
+  virtual void do_hold_in_reset(std::string_view peripheral, bool held);
   virtual void do_install_firewall(periph::bus_firewall& firewall);
   virtual void do_memory_policy_changed();
   virtual auto do_emulated_instruction(address at) -> emulated_arrival;

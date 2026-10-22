@@ -7,6 +7,13 @@ namespace popcorn::core
 {
 machine_services::~machine_services() = default;
 
+void machine_services::do_hold_in_reset(std::string_view peripheral, bool)
+{
+  throw config_error(
+      "machine_services", 0, std::format("hold_in_reset of {}", peripheral),
+      "an implementation with peripherals");
+}
+
 void machine_services::do_watch_reads(address at, std::uint32_t size, bool)
 {
   throw config_error(

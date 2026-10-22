@@ -713,9 +713,9 @@ TEST_CASE("an RCC reset returns a modelled register to its reset value and holds
        {"SYSCFG", "SYSCFG_CNSLCKR", "RCC_APB3RSTR", "SYSCFGRST", 0x1, 0x1, true},
        {"SYSCFG", "SYSCFG_CFGR2", "RCC_APB3RSTR", "SYSCFGRST", 0x1, 0x1, true},
        {"ADC1", "ADC_IER", "RCC_AHB2RSTR1", "ADC12RST", 0x1, 0},
-       {"ADC1", "ADC_SMPR1", "RCC_AHB2RSTR1", "ADC12RST", 0x7, 0, true},
-       {"GPDMA1", "GPDMA_PRIVCFGR", "RCC_AHB1RSTR", "GPDMA1RST", 0x1, 0, true},
-       {"TIM2", "AF2", "RCC_APB1RSTR1", "TIM2RST", 0x1, 0, true},
+       {"ADC1", "ADC_SMPR1", "RCC_AHB2RSTR1", "ADC12RST", 0x7, 0},
+       {"GPDMA1", "GPDMA_PRIVCFGR", "RCC_AHB1RSTR", "GPDMA1RST", 0x1, 0},
+       {"TIM2", "AF2", "RCC_APB1RSTR1", "TIM2RST", 0x1, 0},
        {"SAI1", "ACR2", "RCC_APB2RSTR", "SAI1RST", 0x1, 0},
        {"MDF1", "BSMX0CR", "RCC_AHB1RSTR", "MDF1RST", 0x1, 0},
        {"ADF1", "ADF_BSMX0CR", "RCC_AHB3RSTR", "ADF1RST", 0x1, 0},
@@ -784,4 +784,37 @@ TEST_CASE("a part whose RCC lacks ADC12RST is a config_error naming that bit")
       (stm32_fixture{description, "rcc_ll"}),
       doctest::Contains("peripherals.RCC.registers.RCC_xxxRSTR.fields.ADC12RST"),
       popcorn::config_error);
+}
+
+TEST_CASE("LPTIM1RST resets an unmodelled peripheral's storage and holds its writes")
+{
+  auto const  f    = idle_fixture();
+  auto const& desc = f.target->peripheral("LPTIM1").description();
+  auto const* cfgr = popcorn::find_register(desc, "CFGR");
+  REQUIRE(cfgr != nullptr);
+  auto const store = [&](std::uint32_t value) {
+    REQUIRE(probe(f)
+                .context.services.write(desc.base + cfgr->offset, 4, value, popcorn::initiator::cpu)
+                .has_value());
+  };
+  auto const load = [&] { return f.target->peripheral("LPTIM1").peek(cfgr->offset); };
+  store(0x10);
+  REQUIRE(load() == 0x10);
+  popcorn::testing::rcc_reset_write(f, "RCC_APB3RSTR", "LPTIM1RST", 1);
+  CHECK(load() == 0);
+  store(0x10);
+  CHECK(load() == 0);
+  popcorn::testing::rcc_reset_write(f, "RCC_APB3RSTR", "LPTIM1RST", 0);
+  store(0x10);
+  CHECK(load() == 0x10);
+
+  popcorn::testing::rcc_reset_write(f, "RCC_APB3RSTR", "LPTIM1RST", 1);
+  auto const saved = f.target->snapshot();
+  f.target->reset(reset_kind::software);
+  f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
+  store(0x20);
+  CHECK(load() == 0x20);
+  f.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  store(0x30);
+  CHECK(load() == 0);
 }

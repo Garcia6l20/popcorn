@@ -622,6 +622,11 @@ auto machine::run_state::dispatch_write(
     note_watched(window.base + offset, size, value, true, by);
     return {};
   }
+  if(slot.held_in_reset)
+  {
+    note_watched(window.base + offset, size, value, true, by);
+    return {};
+  }
   if(not slot.model and (slot.logged[word] == 0 or owner.options_.strict_peripherals))
   {
     note_unmodelled(window, offset, true, by);

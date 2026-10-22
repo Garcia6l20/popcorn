@@ -215,6 +215,16 @@ auto machine::run_state::slot(std::string_view name) const -> peripheral_slot&
   return *owner.peripherals_[found->second];
 }
 
+void machine::do_hold_in_reset(std::string_view peripheral, bool held)
+{
+  auto& slot = run_->slot(peripheral);
+  if(held and not slot.held_in_reset)
+  {
+    periph::layer_reset(slot.layout, slot.regs, slot.layer, slot.claimed);
+  }
+  slot.held_in_reset = held;
+}
+
 auto machine::peripheral(std::string_view name) -> periph::register_file&
 {
   return run_->slot(name).regs;

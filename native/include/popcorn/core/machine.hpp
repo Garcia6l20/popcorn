@@ -837,6 +837,7 @@ private:
 
   void do_request_stop(stop_reason reason, std::string detail) override;
   void do_request_reset(reset_kind kind) override;
+  void do_hold_in_reset(std::string_view peripheral, bool held) override;
   void do_end_slice() override;
   void do_end_after_instruction() override;
   auto do_read(address addr, std::uint8_t size, bus_attrs attrs)

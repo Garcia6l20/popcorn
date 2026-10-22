@@ -271,6 +271,7 @@ void machine::run_state::reset_notified(reset_kind kind)
     if(slot)
     {
       periph::layer_reset(slot->layout, slot->regs, slot->layer, slot->claimed);
+      slot->held_in_reset = false;
       if(slot->model)
       {
         slot->model->reset(slot->regs, kind);

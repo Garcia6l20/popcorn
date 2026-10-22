@@ -1398,7 +1398,13 @@ template <std::size_t Reg> void rcc::resets_written(std::uint32_t old, std::uint
 {
   for(auto const& entry : resets_)
   {
-    if(entry.reg != Reg or entry.bit.of(old) != 0 or entry.bit.of(now) == 0)
+    if(entry.reg != Reg or entry.bit.of(old) == entry.bit.of(now))
+    {
+      continue;
+    }
+    auto const held = entry.bit.of(now) != 0;
+    ctx_.services.hold_in_reset(entry.instance, held);
+    if(not held)
     {
       continue;
     }

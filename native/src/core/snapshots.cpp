@@ -102,12 +102,13 @@ auto machine::snapshot() const -> core::snapshot
       continue;
     }
     peripheral_image image{
-        .peripheral   = slot->desc.name,
-        .words        = {},
-        .irq_levels   = levels(slot->irqs),
-        .dma_levels   = levels(slot->dma),
-        .nmi_level    = slot->nmi.level_ ? std::uint8_t{1} : std::uint8_t{0},
-        .write_locked = slot->layer.write_locked,
+        .peripheral    = slot->desc.name,
+        .words         = {},
+        .irq_levels    = levels(slot->irqs),
+        .dma_levels    = levels(slot->dma),
+        .nmi_level     = slot->nmi.level_ ? std::uint8_t{1} : std::uint8_t{0},
+        .write_locked  = slot->layer.write_locked,
+        .held_in_reset = slot->held_in_reset ? std::uint8_t{1} : std::uint8_t{0},
     };
     for(std::uint32_t offset = 0; offset < slot->desc.size; offset += 4)
     {
@@ -366,7 +367,8 @@ void machine::restore(core::snapshot const& saved)
         ++run.lines.active[line.source_];
       }
     }
-    slot->nmi.level_ = image.nmi_level != 0;
+    slot->nmi.level_    = image.nmi_level != 0;
+    slot->held_in_reset = image.held_in_reset != 0;
     run.lines.nmi_active += slot->nmi.level_ ? 1u : 0u;
     for(auto const& [line, level] : std::views::zip(slot->dma, image.dma_levels))
     {

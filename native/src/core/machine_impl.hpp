@@ -206,6 +206,8 @@ struct machine::peripheral_slot
   std::shared_ptr<periph::model> model{};
   /** @brief Non-zero for each storage word the model claims. */
   std::vector<std::uint8_t> claimed;
+  /** @brief Whether a bus reset holds the peripheral, machine_services::hold_in_reset(). */
+  bool held_in_reset{};
   /** @brief Non-zero for each word whose unmodelled access was logged, once per machine life. */
   std::vector<std::uint8_t> logged = std::vector<std::uint8_t>(claimed.size(), 0);
   /** @brief Offsets without a register whose access was logged. */

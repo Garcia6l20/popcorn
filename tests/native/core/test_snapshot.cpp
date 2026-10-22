@@ -223,3 +223,21 @@ TEST_CASE("a snapshot read back from bytes has no engine context")
   core::snapshot const copy = read_back;
   CHECK(copy.data().generation == 3);
 }
+
+TEST_CASE("a format 5 snapshot reads back as the current format, no peripheral held in reset")
+{
+  auto data   = filled();
+  data.format = 5;
+  auto back   = core::decode_snapshot(core::encode_snapshot(data));
+  CHECK(back.format == core::snapshot_format_version);
+  CHECK(back.peripherals.front().held_in_reset == 0);
+}
+
+TEST_CASE("a peripheral held in reset survives the saved form")
+{
+  auto data                              = filled();
+  data.peripherals.front().held_in_reset = 1;
+  auto const back                        = core::decode_snapshot(core::encode_snapshot(data));
+  CHECK(back.peripherals.front().held_in_reset == 1);
+  CHECK(back == data);
+}
