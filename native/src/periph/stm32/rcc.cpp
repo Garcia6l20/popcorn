@@ -533,6 +533,7 @@ private:
   std::vector<std::pair<core::clock_domain, signal>>   signals_;
   std::vector<kernel>                                  kernels_;
   std::vector<reset_entry>                             resets_;
+  std::vector<std::string>                             reset_registers_;
   std::vector<std::uint8_t>                            kernel_enables_;
   std::vector<timer>                                   timers_;
   std::optional<reg_ref>                               secure_;
@@ -582,14 +583,16 @@ constexpr std::array<write_entry<rcc>, 27> rcc_writes{
      }
 };
 
+constexpr std::size_t max_reset_registers = 16;
+
 template <std::size_t... Reg>
-constexpr auto reset_writes(std::index_sequence<Reg...>)
-    -> std::array<write_entry<rcc>, sizeof...(Reg)>
+constexpr auto reset_handlers(std::index_sequence<Reg...>)
+    -> std::array<void (rcc::*)(std::uint32_t, std::uint32_t), sizeof...(Reg)>
 {
-  return {{{reset_registers[Reg], &rcc::resets_written<Reg>}...}};
+  return {&rcc::resets_written<Reg>...};
 }
 
-constexpr auto rcc_reset_writes = reset_writes(std::make_index_sequence<reset_registers.size()>{});
+constexpr auto rcc_reset_handlers = reset_handlers(std::make_index_sequence<max_reset_registers>{});
 
 constexpr std::array<write_entry<rcc>, 1> rcc_secure_writes{
     {
@@ -630,35 +633,38 @@ rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& opt
       backup_reset_{field("RCC_BDCR", "BDRST")}, remove_flags_{field("RCC_CSR", "RMVF")},
       bdcr_{reg("RCC_BDCR")}, csr_{reg("RCC_CSR")}, unit_{unit_named(ctx.part, desc.name)}
 {
-  for(auto const& entry : rcc_reset_writes)
+  for(auto const& described : desc.registers)
   {
-    if(has_register(entry.reg))
+    if(not described.alternate_of and described.name.contains("RSTR"))
     {
-      bind(std::span{&entry, 1});
+      reset_registers_.push_back(described.name);
     }
   }
+  if(reset_registers_.size() > max_reset_registers)
+  {
+    throw config_error(
+        ctx.part.part, 0, "peripherals.RCC.registers",
+        std::format("at most {} registers named RSTR", max_reset_registers));
+  }
+  std::vector<write_entry<rcc>> reset_writes;
+  for(std::size_t index = 0; index < reset_registers_.size(); ++index)
+  {
+    reset_writes.push_back({reset_registers_[index], rcc_reset_handlers[index]});
+  }
+  bind(reset_writes);
   for(auto const& peripheral : ctx.part.peripherals)
   {
     if(peripheral.alias_of)
     {
       continue;
     }
-    auto const found = reset_bit_of(desc, peripheral.name);
-    if(not found)
+    if(auto const found = reset_bit_of(desc, peripheral.name))
     {
-      continue;
-    }
-    auto const* const described = find_register(desc, found->reg);
-    auto const        index     = std::ranges::find_if(reset_registers, [&](std::string_view name) {
-      return find_register(desc, name) == described;
-    });
-    if(index != reset_registers.end())
-    {
-      auto const reg = static_cast<std::size_t>(index - reset_registers.begin());
+      auto const index = std::ranges::find(reset_registers_, found->reg);
       resets_.push_back(
           {.instance = peripheral.name,
-           .reg      = reg,
-           .bit      = field(reset_registers[reg], found->field)});
+           .reg      = static_cast<std::size_t>(index - reset_registers_.begin()),
+           .bit      = field(found->reg, found->field)});
     }
   }
   if(has_register("RCC_SECCFGR"))

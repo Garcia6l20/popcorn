@@ -224,13 +224,28 @@ TEST_CASE("a snapshot read back from bytes has no engine context")
   CHECK(copy.data().generation == 3);
 }
 
-TEST_CASE("a format 5 snapshot reads back as the current format, no peripheral held in reset")
+TEST_CASE("the format 4 file written before format 6 has no held key and loads with none held")
+{
+  char const* const path = std::getenv("POPCORN_SNAPSHOT_V4");
+  REQUIRE(path != nullptr);
+  std::ifstream           file{path, std::ios::binary};
+  std::vector<char> const raw{std::istreambuf_iterator<char>{file}, {}};
+  REQUIRE_FALSE(raw.empty());
+  auto const key = std::string_view{"held_in_reset"};
+  CHECK(std::ranges::search(raw, key).empty());
+  auto const back = core::decode_snapshot(std::as_bytes(std::span{raw}));
+  REQUIRE_FALSE(back.peripherals.empty());
+  for(auto const& image : back.peripherals)
+  {
+    CHECK(image.held_in_reset == 0);
+  }
+}
+
+TEST_CASE("a format 5 snapshot reads back as the current format")
 {
   auto data   = filled();
   data.format = 5;
-  auto back   = core::decode_snapshot(core::encode_snapshot(data));
-  CHECK(back.format == core::snapshot_format_version);
-  CHECK(back.peripherals.front().held_in_reset == 0);
+  CHECK(core::decode_snapshot(core::encode_snapshot(data)).format == core::snapshot_format_version);
 }
 
 TEST_CASE("a peripheral held in reset survives the saved form")

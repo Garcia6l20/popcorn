@@ -432,6 +432,19 @@ TEST_CASE("RM0456 11.5.1: every RSTR register ignores a Non-secure write of a Se
   }
 }
 
+TEST_CASE("RM0456 5.4: a Non-secure write to a Secure LPTIM1 held in reset still raises its event")
+{
+  rig const  r{true};
+  auto const sec   = bit("GTZC2_TZSC", "SECCFGR1", "LPTIM1SEC");
+  auto const event = bit("GTZC2_TZIC", "SR1", "LPTIM1F");
+  r.write("GTZC2_TZSC", "SECCFGR1", sec, secure_priv);
+  r.write("RCC", "APB3RSTR", bit("RCC", "APB3RSTR", "LPTIM1RST"), secure_priv);
+  REQUIRE(r.peek("GTZC2_TZIC", "SR1") == 0);
+  r.write("LPTIM1", "CFGR", 0x10, nonsecure_priv);
+  CHECK(r.peek("LPTIM1", "CFGR") == 0);
+  CHECK((r.peek("GTZC2_TZIC", "SR1") & event) == event);
+}
+
 TEST_CASE("RM0456 11.5.2: RCC SPRIV and NSPRIV make the RCC bits privileged")
 {
   rig const  r{true};

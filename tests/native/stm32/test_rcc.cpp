@@ -788,33 +788,80 @@ TEST_CASE("a part whose RCC lacks ADC12RST is a config_error naming that bit")
 
 TEST_CASE("LPTIM1RST resets an unmodelled peripheral's storage and holds its writes")
 {
-  auto const  f    = idle_fixture();
-  auto const& desc = f.target->peripheral("LPTIM1").description();
-  auto const* cfgr = popcorn::find_register(desc, "CFGR");
+  auto const  f        = idle_fixture();
+  auto const& desc     = f.target->peripheral("LPTIM1").description();
+  auto const* cfgr     = popcorn::find_register(desc, "CFGR");
+  auto&       services = probe(f).context.services;
   REQUIRE(cfgr != nullptr);
-  auto const store = [&](std::uint32_t value) {
-    REQUIRE(probe(f)
-                .context.services.write(desc.base + cfgr->offset, 4, value, popcorn::initiator::cpu)
-                .has_value());
+  auto const store = [&](std::uint32_t value, popcorn::initiator by = popcorn::initiator::cpu) {
+    REQUIRE(services.write(desc.base + cfgr->offset, 4, value, by).has_value());
   };
   auto const load = [&] { return f.target->peripheral("LPTIM1").peek(cfgr->offset); };
   store(0x10);
   REQUIRE(load() == 0x10);
   popcorn::testing::rcc_reset_write(f, "RCC_APB3RSTR", "LPTIM1RST", 1);
   CHECK(load() == 0);
-  store(0x10);
-  CHECK(load() == 0);
+  for(auto const by :
+      {popcorn::initiator::cpu, popcorn::initiator::debugger, popcorn::initiator::dma})
+  {
+    CAPTURE(static_cast<int>(by));
+    store(0x10, by);
+    CHECK(load() == 0);
+  }
+  auto const read = services.read(desc.base + cfgr->offset, 4, popcorn::initiator::cpu);
+  REQUIRE(read.has_value());
+  CHECK(*read == 0);
+  f.target->peripheral("LPTIM1").poke(cfgr->offset, 0x5);
+  services.hold_in_reset("LPTIM1", true);
+  CHECK(load() == 0x5);
   popcorn::testing::rcc_reset_write(f, "RCC_APB3RSTR", "LPTIM1RST", 0);
   store(0x10);
   CHECK(load() == 0x10);
 
   popcorn::testing::rcc_reset_write(f, "RCC_APB3RSTR", "LPTIM1RST", 1);
+  f.target->peripheral("LPTIM1").poke(cfgr->offset, 0x5);
   auto const saved = f.target->snapshot();
   f.target->reset(reset_kind::software);
   f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
   store(0x20);
   CHECK(load() == 0x20);
   f.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(load() == 0x5);
   store(0x30);
-  CHECK(load() == 0);
+  CHECK(load() == 0x5);
+}
+
+TEST_CASE("an RCC whose reset register has another family's name binds it and resets its bits")
+{
+  auto       description = u575();
+  auto const rcc         = std::ranges::find(
+      description.peripherals, std::string{"RCC"}, &popcorn::peripheral_desc::name);
+  REQUIRE(rcc != description.peripherals.end());
+  auto const reg =
+      std::ranges::find(rcc->registers, std::string{"APB1RSTR1"}, &popcorn::register_desc::name);
+  REQUIRE(reg != rcc->registers.end());
+  reg->name    = "APB1LRSTR";
+  reg->aliases = std::vector<std::string>{"RCC_APB1LRSTR"};
+  stm32_fixture const f{description, "rcc_ll"};
+  f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
+  auto const& tim2 = f.target->peripheral("TIM2").description();
+  auto const* arr  = popcorn::find_register(tim2, "ARR");
+  REQUIRE(arr != nullptr);
+  REQUIRE(f.target->mem().write(tim2.base + arr->offset, 4, 0x100).has_value());
+  REQUIRE(f.target->peripheral("TIM2").peek(arr->offset) == 0x100);
+  popcorn::testing::rcc_reset_pulse(f, "RCC_APB1LRSTR", "TIM2RST");
+  CHECK(f.target->peripheral("TIM2").peek(arr->offset) == 0xFFFF'FFFF);
+}
+
+TEST_CASE("a peripheral held in reset before the machine has its peripherals is a config_error")
+{
+  auto options = with_listener();
+  options.models.insert_or_assign(
+      "CORDIC",
+      [](periph::model_context& ctx,
+         popcorn::peripheral_desc const&) -> std::shared_ptr<periph::model> {
+        ctx.services.hold_in_reset("LPTIM1", true);
+        return std::make_shared<reset_counter>();
+      });
+  CHECK_THROWS_AS((stm32_fixture{u575(), "rcc_ll", std::move(options)}), popcorn::config_error);
 }

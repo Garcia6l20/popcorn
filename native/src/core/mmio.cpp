@@ -624,6 +624,7 @@ auto machine::run_state::dispatch_write(
   }
   if(slot.held_in_reset)
   {
+    trace_mmio(slot, window.base + offset, offset, size, value & size_mask(size), true, by);
     note_watched(window.base + offset, size, value, true, by);
     return {};
   }

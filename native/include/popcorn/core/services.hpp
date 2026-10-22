@@ -171,8 +171,10 @@ public:
    * @brief Holds a peripheral in a reset a bus reset bit drives, such as an STM32 RCC_xxxRSTR
    *        bit, or releases it. Applies at once. Entering the hold returns every register no
    *        model claims to its reset value and opens its write-once locks, as a machine reset
-   *        does for that peripheral. While held, a write to such a register is ignored, from
-   *        every initiator. A snapshot keeps the hold. A machine reset releases it.
+   *        does for that peripheral. While held, a bus write to such a register is ignored,
+   *        from every bus initiator, after the bus firewall, and leaves a trace record as a
+   *        firewall-ignored write does. `periph::register_file::poke` is not a bus access and
+   *        bypasses the hold. A snapshot keeps the hold. A machine reset releases it.
    * @param peripheral Instance name as the description spells it.
    * @param held True while the reset bit is 1.
    * @throws config_error for a name the description lacks, or from an implementation without
