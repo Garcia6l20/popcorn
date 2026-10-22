@@ -623,8 +623,13 @@ protected:
           not declares_member(^^Derived, "unheld_write")
               or requires(
                   Derived& d, register_file& regs, std::uint32_t word, std::uint8_t size,
-                  access_ctx access) { d.unheld_write(regs, word, size, word, word, access); },
-          "a bus_reset_listener's unheld_write() is public and takes on_write()'s arguments");
+                  access_ctx access) {
+                {
+                  d.unheld_write(regs, word, size, word, word, access)
+                } -> std::same_as<std::expected<void, bus_error>>;
+              },
+          "a bus_reset_listener's unheld_write() is public, takes on_write()'s arguments and "
+          "returns its result type");
       auto const rcc =
           std::ranges::find(ctx.part.peripherals, std::string_view{"RCC"}, &peripheral_desc::name);
       if(rcc != ctx.part.peripherals.end() and not reset_bit_of(*rcc, desc.name))

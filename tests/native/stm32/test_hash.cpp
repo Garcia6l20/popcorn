@@ -2205,11 +2205,15 @@ TEST_CASE("HASHRST with a digest busy and DINIS raised drops the busy event and 
   r.feed(text("abc"));
   r.finish(24);
   REQUIRE((r.read(sr) & sr_busy) != 0);
+  REQUIRE(r.pending());
+  r.unpend();
   rcc_reset(r.f, 1);
   rcc_reset(r.f, 0);
   CHECK(r.read(sr) == 0x1);
   CHECK(r.read(imr) == 0);
+  r.write(imr, imr_dcie);
   r.settle();
-  CHECK((r.read(sr) & sr_dcis) == 0);
+  CHECK(r.read(sr) == 0x1);
   CHECK(r.read(hr0) == 0);
+  CHECK_FALSE(r.pending());
 }

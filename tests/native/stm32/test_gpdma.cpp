@@ -2209,3 +2209,54 @@ TEST_CASE("GPDMA1RST mid-copy stops the channel, its pending burst moves no byte
   CHECK(destination(f) == before);
   CHECK(reg_value(f, "GPDMA_C0SR") == 1);
 }
+
+namespace
+{
+void program_copy(stm32_fixture const& f)
+{
+  load_source(f);
+  write(f, "GPDMA_C0TR1", tr1(0, 0, 0) | bit("GPDMA_C0TR1", "SINC") | bit("GPDMA_C0TR1", "DINC"));
+  write(f, "GPDMA_C0TR2", bit("GPDMA_C0TR2", "SWREQ"));
+  write(f, "GPDMA_C0BR1", 32);
+  write(f, "GPDMA_C0SAR", copy_from);
+  write(f, "GPDMA_C0DAR", copy_to);
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+}
+
+auto copy_span(stm32_fixture const& f) -> std::uint64_t
+{
+  auto const start = f.target->virtual_clock().time().ps;
+  for(int step = 0; step < 2000 and f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 0; ++step)
+  {
+    idle_for(f, std::chrono::nanoseconds{10});
+  }
+  REQUIRE(f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 1);
+  return f.target->virtual_clock().time().ps - start;
+}
+}
+
+TEST_CASE(
+    "a channel re-enabled after GPDMA1RST, before the stale burst's due time, runs on its own")
+{
+  auto const reset_mid_copy = [](bool wait) {
+    auto       f   = mid_copy(false);
+    auto const now = f.target->virtual_clock().time().ps;
+    auto const stale =
+        std::ranges::count_if(f.target->snapshot().data().events.pending, [&](auto const& event) {
+          return event.id.kind == 0 and (event.payload >> 32) == 0 and event.due_ps > now;
+        });
+    REQUIRE(stale > 0);
+    gpdma_reset_pulse(f);
+    if(wait)
+    {
+      idle_for(f, std::chrono::microseconds{5});
+    }
+    program_copy(f);
+    auto const span = copy_span(f);
+    return std::pair{span, copied_bytes(f, 32)};
+  };
+  auto const [early, early_bytes] = reset_mid_copy(false);
+  auto const [late, late_bytes]   = reset_mid_copy(true);
+  CHECK(early == late);
+  CHECK(early_bytes == late_bytes);
+}
