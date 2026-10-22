@@ -2505,3 +2505,16 @@ TEST_CASE("SAI1RST keeps an external clock the board set, a power-on reset reloa
   r.f->target->reset(popcorn::reset_kind::power_on);
   CHECK(port.external_clock(clock_a) == 0);
 }
+
+TEST_CASE("SAI1RST moves each block's generation past every event queued before it")
+{
+  rig r{"idle"};
+  bus b{*r.f};
+  slave_a(b);
+  b.run_until(b.now() + 100 * us);
+  auto const a = popcorn::testing::saved_integer(*r.f, "SAI1", "block.0.generation");
+  auto const c = popcorn::testing::saved_integer(*r.f, "SAI1", "block.1.generation");
+  rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SAI1RST");
+  CHECK(popcorn::testing::saved_integer(*r.f, "SAI1", "block.0.generation") > a);
+  CHECK(popcorn::testing::saved_integer(*r.f, "SAI1", "block.1.generation") > c);
+}

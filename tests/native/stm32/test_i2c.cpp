@@ -2034,3 +2034,16 @@ TEST_CASE("I2C1RST lowers the TX request on the controller and ignores CR1 while
   REQUIRE(r.f->target->mem().write(desc.base + reset->offset, 4, 0).has_value());
   CHECK(b.get("CR1", "PE") == 0);
 }
+
+TEST_CASE("I2C1RST moves the phase generation past every event queued before it")
+{
+  rig r{"idle", true};
+  bus b{*r.f};
+  b.controller();
+  b.command(0x38, 2, false, false);
+  b.run_until(b.now() + period_ps);
+  auto const before = popcorn::testing::saved_integer(*r.f, "I2C1", "generation");
+  REQUIRE(before > 0);
+  rcc_reset_pulse(*r.f, "RCC_APB1RSTR1", "I2C1RST");
+  CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "generation") > before);
+}

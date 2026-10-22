@@ -2261,3 +2261,17 @@ TEST_CASE("a transfer started after SPI1RST, before the stale frame end, runs on
   CHECK(early.size() == 12);
   CHECK(early == transfer(true));
 }
+
+TEST_CASE("SPI1RST moves the frame generation past every event queued before it")
+{
+  probe_rig r;
+  bus       b{*r.f};
+  b.controller(7, 1, 0, 7);
+  b.send(0x5A);
+  b.set("SPI_CR1", "CSTART", 1);
+  b.run_until(b.now() + frame_ps);
+  auto const before = popcorn::testing::saved_integer(*r.f, "SPI1", "generation");
+  REQUIRE(before > 0);
+  rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "generation") > before);
+}

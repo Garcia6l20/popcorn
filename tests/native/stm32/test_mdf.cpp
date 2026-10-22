@@ -2175,3 +2175,14 @@ TEST_CASE("MDF1RST lowers the filter's DMA request and its IRQ line")
   REQUIRE(r.target->mem().write(0xe000'e280u + 4 * (mdf_irq / 32), 4, 1u << (mdf_irq % 32)));
   CHECK_FALSE(r.pending(mdf_irq));
 }
+
+TEST_CASE("MDF1RST moves the sample generation past every event queued before it")
+{
+  stream_rig const r;
+  r.mic[0]->fill = 1;
+  r.sinc1(0, 0);
+  r.run_until(edge_at(r.anchor, 4));
+  auto const before = popcorn::testing::saved_integer(r, "MDF1", "sample_generation");
+  rcc_reset_pulse(r, "RCC_AHB1RSTR", "MDF1RST");
+  CHECK(popcorn::testing::saved_integer(r, "MDF1", "sample_generation") > before);
+}

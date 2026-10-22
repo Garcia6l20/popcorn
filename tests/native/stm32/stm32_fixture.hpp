@@ -13,6 +13,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -221,5 +223,105 @@ inline void rcc_reset_pulse(stm32_fixture const& f, std::string_view reg, std::s
 {
   rcc_reset_write(f, reg, bit, 1);
   rcc_reset_write(f, reg, bit, 0);
+}
+
+/**
+ * @brief An integer of a model's saved state, found in its bson save by path. Reads the bson
+ *        element layout directly, so any element type the save holds can be skipped.
+ * @param f Machine.
+ * @param instance Peripheral whose model saves the state.
+ * @param path Dot-separated keys, an array index being its decimal key, such as
+ *        `block.0.generation`.
+ * @return The integer, 0 when the save omits the key as an empty value.
+ */
+inline auto saved_integer(stm32_fixture const& f, std::string_view instance, std::string_view path)
+    -> std::int64_t
+{
+  auto* const model = f.target->model(instance);
+  REQUIRE(model != nullptr);
+  std::vector<std::byte> bytes;
+  model->save(bytes);
+  auto const read = [&](std::size_t at, std::size_t size) {
+    REQUIRE(at + size <= bytes.size());
+    std::uint64_t value = 0;
+    for(std::size_t index = 0; index < size; ++index)
+    {
+      value |= std::to_integer<std::uint64_t>(bytes[at + index]) << (8 * index);
+    }
+    return value;
+  };
+  std::size_t document = 0;
+  while(true)
+  {
+    auto const dot = path.find('.');
+    auto const key = path.substr(0, dot);
+    auto const end = document + read(document, 4) - 1;
+    auto       at  = document + 4;
+    auto       hit = std::optional<std::pair<std::uint8_t, std::size_t>>{};
+    while(at < end)
+    {
+      auto const type = static_cast<std::uint8_t>(read(at, 1));
+      auto       name = std::string{};
+      for(at += 1; bytes[at] != std::byte{0}; ++at)
+      {
+        name.push_back(static_cast<char>(bytes[at]));
+      }
+      at += 1;
+      if(name == key)
+      {
+        hit = std::pair{type, at};
+        break;
+      }
+      switch(type)
+      {
+        case 0x01:
+        case 0x09:
+        case 0x11:
+        case 0x12:
+          at += 8;
+          break;
+        case 0x02:
+          at += 4 + read(at, 4);
+          break;
+        case 0x03:
+        case 0x04:
+          at += read(at, 4);
+          break;
+        case 0x05:
+          at += 5 + read(at, 4);
+          break;
+        case 0x08:
+          at += 1;
+          break;
+        case 0x0A:
+          break;
+        case 0x10:
+          at += 4;
+          break;
+        case 0x13:
+          at += 16;
+          break;
+        default:
+          FAIL("an unknown bson element type");
+      }
+    }
+    if(not hit)
+    {
+      return 0;
+    }
+    if(dot == std::string_view::npos)
+    {
+      auto const [type, value] = *hit;
+      if(type == 0x10)
+      {
+        return static_cast<std::int32_t>(read(value, 4));
+      }
+      REQUIRE((type == 0x12 or type == 0x11));
+      return static_cast<std::int64_t>(read(value, 8));
+    }
+    REQUIRE((hit->first == 0x03 or hit->first == 0x04));
+    document = hit->second;
+    path     = path.substr(dot + 1);
+  }
 }
 }
