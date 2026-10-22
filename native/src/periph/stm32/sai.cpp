@@ -1,6 +1,5 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
-#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -218,13 +217,13 @@ public:
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto unheld_write(
+  auto on_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error>;
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
   void               on_clock_change() override;
   void               load(std::span<std::byte const> in) override;
   void               attach(audio_block block, audio_attachment attachment) override;
@@ -560,7 +559,6 @@ void sai::reset(register_file&, reset_kind kind)
 
 void sai::on_bus_reset()
 {
-  restore_unclaimed_storage();
   restore_reset_values(std::nullopt);
 }
 
@@ -1204,7 +1202,7 @@ auto sai::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
 
-auto sai::unheld_write(
+auto sai::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -1225,12 +1223,12 @@ auto sai::unheld_write(
     {
       auto const before  = regs.peek(word);
       auto const written = merge_write(before, offset, size, value);
-      auto const result  = bound_write(regs, offset, size, old, value, ctx);
+      auto const result  = dispatch_model::on_write(regs, offset, size, old, value, ctx);
       update(regs, block_[b].fs_definition, block_[b].fs_definition.of(written));
       return result;
     }
   }
-  return bound_write(regs, offset, size, old, value, ctx);
+  return dispatch_model::on_write(regs, offset, size, old, value, ctx);
 }
 
 void sai::attach(audio_block block, audio_attachment attachment)

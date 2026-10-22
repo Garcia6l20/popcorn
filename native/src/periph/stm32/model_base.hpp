@@ -6,12 +6,12 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/scheduler.hpp>
 #include <popcorn/core/services.hpp>
+#include <popcorn/periph/bus_reset.hpp>
 #include <popcorn/periph/core_hold.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/register_file.hpp>
 
 #include "debug_freeze.hpp"
-#include "kernel_gate.hpp"
 #include "rcc_resets.hpp"
 
 #include <reflex/serde/bson.hpp>
@@ -22,9 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <flat_map>
 #include <format>
-#include <meta>
 #include <optional>
 #include <span>
 #include <string>
@@ -463,23 +461,6 @@ concept guarded_model = requires(Derived& d, std::uint32_t word, access_ctx cons
 };
 
 /**
- * @brief Whether @p type itself declares a member named @p name.
- * @param type Reflection of a class.
- * @param name Member name.
- */
-consteval auto declares_member(std::meta::info type, std::string_view name) -> bool
-{
-  for(auto const member : std::meta::members_of(type, std::meta::access_context::unchecked()))
-  {
-    if(std::meta::has_identifier(member) and std::meta::identifier_of(member) == name)
-    {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
  * @brief Model serving its claimed registers through one write handler each. Reads return the
  *        stored word. A write merges the access into the stored word, keeps the bits the
  *        description marks read-only, stores the result, then calls the register's handler.
@@ -516,53 +497,13 @@ public:
     return read_lanes(regs.peek(word) & mask, offset, size);
   }
 
-  /**
-   * @brief Serves a write. For a bus_reset_listener held in reset by RCC, runs only the bus
-   *        guard of a claimed word and ignores the write. Otherwise calls Derived's
-   *        `unheld_write()` when it has one, else bound_write(). A listener never overrides
-   *        this function, so no write path skips the hold.
-   */
   auto on_write(
-      register_file& regs,
-      std::uint32_t  offset,
-      std::uint8_t   size,
-      std::uint32_t  old,
-      std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error> override
-  {
-    if constexpr(std::derived_from<Derived, bus_reset_listener>)
-    {
-      if(held_in_reset())
-      {
-        if constexpr(guarded_model<Derived>)
-        {
-          auto const word = offset & ~3u;
-          if(std::ranges::contains(bound_, word, &bound::offset))
-          {
-            static_cast<void>(static_cast<Derived&>(*this).guard(word, ctx, true));
-          }
-        }
-        return {};
-      }
-      if constexpr(requires(Derived& d) { d.unheld_write(regs, offset, size, old, value, ctx); })
-      {
-        return static_cast<Derived&>(*this).unheld_write(regs, offset, size, old, value, ctx);
-      }
-    }
-    return bound_write(regs, offset, size, old, value, ctx);
-  }
-
-  /**
-   * @brief Writes a claimed register through its access rules, the bus guard and its handler.
-   *        A write to a word the model does not claim does nothing.
-   */
-  auto bound_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t,
       std::uint32_t value,
-      access_ctx    ctx) -> std::expected<void, bus_error>
+      access_ctx    ctx) -> std::expected<void, bus_error> override
   {
     auto const word  = offset & ~3u;
     auto const found = std::ranges::find(bound_, word, &bound::offset);
@@ -614,22 +555,6 @@ protected:
     }
     if constexpr(std::derived_from<Derived, bus_reset_listener>)
     {
-      static_assert(
-          std::is_final_v<Derived>, "a bus_reset_listener is final, so no subclass skips the hold");
-      static_assert(
-          not declares_member(^^Derived, "on_write"),
-          "a bus_reset_listener serves writes through unheld_write(), not on_write()");
-      static_assert(
-          not declares_member(^^Derived, "unheld_write")
-              or requires(
-                  Derived& d, register_file& regs, std::uint32_t word, std::uint8_t size,
-                  access_ctx access) {
-                {
-                  d.unheld_write(regs, word, size, word, word, access)
-                } -> std::same_as<std::expected<void, bus_error>>;
-              },
-          "a bus_reset_listener's unheld_write() is public, takes on_write()'s arguments and "
-          "returns its result type");
       auto const rcc =
           std::ranges::find(ctx.part.peripherals, std::string_view{"RCC"}, &peripheral_desc::name);
       if(rcc != ctx.part.peripherals.end() and not reset_bit_of(*rcc, desc.name))
@@ -642,53 +567,6 @@ protected:
                 "the RCC reset bit of {}, which the {} model resets", desc.name, model_name));
       }
     }
-  }
-
-  /**
-   * @brief Brings every register word the model does not claim to its description reset
-   *        value, as a machine reset does for the register layer. For an RCC peripheral reset.
-   */
-  void restore_unclaimed_storage()
-  {
-    std::flat_map<std::uint32_t, std::uint32_t> words;
-    for(auto const& described : this->desc_.registers)
-    {
-      auto const word = described.offset & ~3u;
-      if(described.alternate_of or std::ranges::contains(bound_, word, &bound::offset))
-      {
-        continue;
-      }
-      auto const width =
-          described.width >= 32 ? ~std::uint32_t{0} : (std::uint32_t{1} << described.width) - 1u;
-      words[word] |= (described.reset & described.reset_mask & width)
-                  << ((described.offset & 3u) * 8);
-    }
-    for(auto const& [word, value] : words)
-    {
-      this->ctx_.regs.poke(word, value);
-    }
-  }
-
-  /**
-   * @brief Whether RCC holds the peripheral in reset, its RCC_xxxRSTR bit 1.
-   * @return The bit, false without an RCC model.
-   */
-  [[nodiscard]] auto held_in_reset() -> bool
-  {
-    if(not reset_resolved_ and not this->ctx_.peers.all().empty())
-    {
-      reset_resolved_ = true;
-      for(auto* const peer : this->ctx_.peers.all())
-      {
-        if(auto const* const gate = dynamic_cast<kernel_gate const*>(peer))
-        {
-          reset_gate_ = gate;
-          reset_line_ = gate->reset_line(this->desc_.name);
-          break;
-        }
-      }
-    }
-    return reset_gate_ != nullptr and reset_line_ and reset_gate_->held_in_reset(*reset_line_);
   }
 
   /**
@@ -841,9 +719,6 @@ private:
     void (Derived::*handler)(std::uint32_t old, std::uint32_t now);
   };
 
-  std::vector<bound>         bound_;
-  kernel_gate const*         reset_gate_ = nullptr;
-  std::optional<std::size_t> reset_line_;
-  bool                       reset_resolved_ = false;
+  std::vector<bound> bound_;
 };
 }

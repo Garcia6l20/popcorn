@@ -1,7 +1,6 @@
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
-#include "kernel_gate.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -244,7 +243,6 @@ void adc_common::reset(register_file&, reset_kind)
 
 void adc_common::on_bus_reset()
 {
-  restore_unclaimed_storage();
   restore_reset_values();
 }
 
@@ -373,13 +371,13 @@ public:
 
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto unheld_write(
+  auto on_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error>;
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
 
   void               drive(std::uint8_t channel, std::uint32_t microvolts) override;
   [[nodiscard]] auto input(std::uint8_t channel) const -> std::uint32_t override;
@@ -721,7 +719,6 @@ void adc::reset(register_file&, reset_kind)
 void adc::on_bus_reset()
 {
   auto const was = listened();
-  restore_unclaimed_storage();
   restore_reset_values();
   retune(was);
 }
@@ -1171,7 +1168,7 @@ auto adc::trigger_latency_ps() -> std::uint64_t
   return static_cast<std::uint64_t>((wide{cycles} * div * ps_per_second + hz - 1u) / hz);
 }
 
-auto adc::unheld_write(
+auto adc::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -1182,7 +1179,7 @@ auto adc::unheld_write(
   auto const word = offset & ~3u;
   if(word != start_.offset and word != trigger_.offset)
   {
-    return bound_write(regs, offset, size, old, value, access);
+    return dispatch_model::on_write(regs, offset, size, old, value, access);
   }
   auto const config   = regs_.peek(trigger_.offset);
   auto const next     = word == trigger_.offset ? merge_write(config, offset, size, value) : config;
@@ -1197,7 +1194,7 @@ auto adc::unheld_write(
     static_cast<void>(interest_changed(ctx_.peers, trigger_signal(trigger_select_.of(next))));
   }
   auto const was    = listened();
-  auto const result = bound_write(regs, offset, size, old, value, access);
+  auto const result = dispatch_model::on_write(regs, offset, size, old, value, access);
   retune(was);
   return result;
 }

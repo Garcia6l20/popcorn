@@ -3,7 +3,6 @@
 #include "factories.hpp"
 #include "gpdma_requests.hpp"
 #include "gtzc.hpp"
-#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -586,7 +585,6 @@ void gpdma::on_bus_reset()
   {
     held[ch] = state_.channel[ch].held;
   }
-  restore_unclaimed_storage();
   restore_reset_values();
   state_.request = requests;
   for(std::size_t ch = 0; ch < max_channels; ++ch)

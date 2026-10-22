@@ -1,6 +1,5 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
-#include "kernel_gate.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -341,13 +340,13 @@ public:
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto unheld_write(
+  auto on_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error>;
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
   void               on_clock_change() override;
   void               on_core_hold(bool held) override;
   void               interest_changed() override;
@@ -2223,7 +2222,6 @@ void tim::on_bus_reset()
   auto const held    = state_.held;
   auto const held_ps = state_.held_ps;
   auto const slave   = slave_ ? input_of(regs_.peek(slave_->offset)) : std::nullopt;
-  restore_unclaimed_storage();
   restore_reset_values();
   state_.held    = held;
   state_.held_ps = held_ps;
@@ -2317,7 +2315,7 @@ void tim::captured_read(std::uint32_t word, access_ctx access)
   }
 }
 
-auto tim::unheld_write(
+auto tim::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -2371,7 +2369,7 @@ auto tim::unheld_write(
   auto       result         = std::expected<void, bus_error>{};
   {
     reacting_scope const reacting{reacting_};
-    result = bound_write(regs, offset, size, old, value, access);
+    result = dispatch_model::on_write(regs, offset, size, old, value, access);
   }
   if(smcr)
   {

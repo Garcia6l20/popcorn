@@ -1,6 +1,5 @@
 #include "factories.hpp"
 #include "gtzc.hpp"
-#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <algorithm>
@@ -158,7 +157,6 @@ void syscfg::on_bus_reset()
       kept.emplace_back(at, regs_.peek(at));
     }
   }
-  restore_unclaimed_storage();
   restore_reset_values();
   for(auto const& [at, value] : kept)
   {

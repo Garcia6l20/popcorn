@@ -1,5 +1,4 @@
 #include "factories.hpp"
-#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -283,13 +282,13 @@ public:
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto unheld_write(
+  auto on_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error>;
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
 
   void               attach(std::shared_ptr<usb::host_side> host) override;
   [[nodiscard]] auto pulled_up() const -> bool override;
@@ -644,7 +643,6 @@ void otg_fs::reset(register_file&, reset_kind kind)
 
 void otg_fs::on_bus_reset()
 {
-  restore_unclaimed_storage();
   restore_reset_values(std::nullopt);
 }
 
@@ -972,7 +970,7 @@ auto otg_fs::on_read(register_file& regs, std::uint32_t offset, std::uint8_t siz
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
 
-auto otg_fs::unheld_write(
+auto otg_fs::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -982,7 +980,7 @@ auto otg_fs::unheld_write(
 {
   access_offset_ = offset & ~3u;
   written_       = merge_write(0, offset, size, value);
-  return bound_write(regs, offset, size, old, value, ctx);
+  return dispatch_model::on_write(regs, offset, size, old, value, ctx);
 }
 
 void otg_fs::plain_written(std::uint32_t, std::uint32_t)

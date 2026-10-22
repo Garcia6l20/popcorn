@@ -1,6 +1,5 @@
 #include "factories.hpp"
 #include "gtzc.hpp"
-#include "kernel_gate.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -296,7 +295,6 @@ void gpio::restore_reset_values()
 void gpio::on_bus_reset()
 {
   auto const inputs = regs_.peek(input_[0].offset);
-  restore_unclaimed_storage();
   restore_reset_values();
   regs_.poke(input_[0].offset, inputs);
   route_pins();

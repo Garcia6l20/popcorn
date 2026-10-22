@@ -1,11 +1,6 @@
 #pragma once
 
 #include <popcorn/core/clock.hpp>
-#include <popcorn/periph/bus_reset.hpp>
-
-#include <cstddef>
-#include <optional>
-#include <string_view>
 
 namespace popcorn::periph::stm32
 {
@@ -35,21 +30,6 @@ public:
    * @return The enable bit, true for a domain without a kernel clock mux, such as a timer.
    */
   [[nodiscard]] virtual auto bus_enabled(core::clock_domain kernel) const -> bool = 0;
-
-  /**
-   * @brief The reset line of @p instance, its bit in an RCC_xxxRSTR register.
-   * @param instance Instance name as the description spells it.
-   * @return A handle for held_in_reset(), nullopt for an instance with no reset bit.
-   */
-  [[nodiscard]] virtual auto reset_line(std::string_view instance) const
-      -> std::optional<std::size_t> = 0;
-
-  /**
-   * @brief Whether RCC holds a peripheral in reset, its RCC_xxxRSTR bit 1.
-   * @param line Handle from reset_line().
-   * @return The reset bit.
-   */
-  [[nodiscard]] virtual auto held_in_reset(std::size_t line) const -> bool = 0;
 
 protected:
   /** @brief Destroys the interface, only through its model. */

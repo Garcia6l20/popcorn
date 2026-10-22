@@ -1,6 +1,5 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
-#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -353,13 +352,13 @@ public:
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto unheld_write(
+  auto on_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error>;
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
 
   void               receive_frames(std::span<host_frame const> frames) override;
   [[nodiscard]] auto queued() const -> std::size_t override;
@@ -634,7 +633,7 @@ usart::usart(
   }
 }
 
-auto usart::unheld_write(
+auto usart::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -646,13 +645,13 @@ auto usart::unheld_write(
   auto const found = std::ranges::find(locks_, word, &lock::offset);
   if(found == locks_.end() or access.by == initiator::debugger or not enabled())
   {
-    return bound_write(regs, offset, size, old, value, access);
+    return dispatch_model::on_write(regs, offset, size, old, value, access);
   }
   auto const stored = regs.peek(word);
   auto const merged = merge_write(stored, offset, size, value);
   if(word == enable_.offset and enable_.of(merged) == 0)
   {
-    return bound_write(regs, offset, size, old, value, access);
+    return dispatch_model::on_write(regs, offset, size, old, value, access);
   }
   auto mask = found->mask;
   if(auto_baud_mode_ and word == auto_baud_mode_->offset and auto_baud_->of(stored) != 0)
@@ -680,7 +679,7 @@ auto usart::unheld_write(
       throw model_error(desc_.name, found->reg, word);
     }
   }
-  return bound_write(regs, word, 4, old, kept, access);
+  return dispatch_model::on_write(regs, word, 4, old, kept, access);
 }
 
 auto usart::name_of(std::string_view with_views, std::string_view plain) const -> std::string_view
@@ -705,7 +704,6 @@ void usart::on_bus_reset()
   {
     far_end_->aborted(ctx_.clock.time());
   }
-  restore_unclaimed_storage();
   restore_reset_values(true);
 }
 

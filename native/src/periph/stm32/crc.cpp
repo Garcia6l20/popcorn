@@ -1,5 +1,4 @@
 #include "factories.hpp"
-#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <algorithm>
@@ -93,13 +92,13 @@ public:
   void on_bus_reset() override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto unheld_write(
+  auto on_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error>;
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
   void on_event(std::uint32_t, std::uint64_t) override
   {}
 
@@ -149,7 +148,7 @@ crc::crc(model_context& ctx, peripheral_desc const& desc)
       rev_out_{field("CR", "REV_OUT")}
 {}
 
-auto crc::unheld_write(
+auto crc::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -187,7 +186,7 @@ auto crc::unheld_write(
             8 * size, name));
     return {};
   }
-  return bound_write(regs, offset, size, old, value, access);
+  return dispatch_model::on_write(regs, offset, size, old, value, access);
 }
 
 auto crc::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
@@ -230,7 +229,6 @@ void crc::reset(register_file&, reset_kind)
 
 void crc::on_bus_reset()
 {
-  restore_unclaimed_storage();
   restore_reset_values();
 }
 

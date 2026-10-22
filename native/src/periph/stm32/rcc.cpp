@@ -426,7 +426,7 @@ struct timer
  *        RM0456 11.8.21 to 11.8.28, holds or releases the instance through
  *        `core::machine_services::hold_in_reset()`, which resets its storage and calls its
  *        model's `periph::bus_reset_listener::on_bus_reset()`. The bit is `<instance>RST`, or
- *        the name of `reset_bit_names`. `kernel_gate::held_in_reset()` reads the bit.
+ *        the name of `reset_bit_names`.
  *
  *        TrustZone, RM0456 11.5 and Table 117: the bits each `RCC_SECCFGR` bit secures, and the
  *        reset, enable, sleep enable, autonomous enable and kernel clock selection bits of a
@@ -463,9 +463,6 @@ public:
   void               force_lsi() override;
   void               hold_hsi16(bool held) override;
   [[nodiscard]] auto bus_enabled(core::clock_domain kernel) const -> bool override;
-  [[nodiscard]] auto reset_line(std::string_view instance) const
-      -> std::optional<std::size_t> override;
-  [[nodiscard]] auto held_in_reset(std::size_t line) const -> bool override;
 
   void                            cr_written(std::uint32_t old, std::uint32_t now);
   void                            icscr1_written(std::uint32_t old, std::uint32_t now);
@@ -1385,21 +1382,6 @@ auto rcc::bus_enabled(core::clock_domain kernel) const -> bool
 {
   auto const found = std::ranges::find(kernels_, kernel, &kernel::domain);
   return found == kernels_.end() or get(regs_, found->enable) != 0;
-}
-
-auto rcc::reset_line(std::string_view instance) const -> std::optional<std::size_t>
-{
-  auto const found = std::ranges::find(resets_, instance, &reset_entry::instance);
-  if(found == resets_.end())
-  {
-    return std::nullopt;
-  }
-  return static_cast<std::size_t>(found - resets_.begin());
-}
-
-auto rcc::held_in_reset(std::size_t line) const -> bool
-{
-  return line < resets_.size() and get(regs_, resets_[line].bit) != 0;
 }
 
 template <std::size_t Reg> void rcc::resets_written(std::uint32_t old, std::uint32_t now)

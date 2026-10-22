@@ -1,7 +1,6 @@
 #include "dfilter_chain.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
-#include "kernel_gate.hpp"
 #include "model_base.hpp"
 #include "sigma_delta.hpp"
 
@@ -371,13 +370,13 @@ public:
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto unheld_write(
+  auto on_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error>;
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
 
   void on_clock_change() override;
   void attach(std::size_t sitf, pdm_edge edge, std::shared_ptr<pdm_source> source) override;
@@ -784,7 +783,6 @@ void mdf::reset(register_file&, reset_kind)
 void mdf::on_bus_reset()
 {
   settle();
-  restore_unclaimed_storage();
   restore_reset_values();
 }
 
@@ -889,7 +887,7 @@ auto mdf::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
 
-auto mdf::unheld_write(
+auto mdf::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -908,7 +906,7 @@ auto mdf::unheld_write(
       return {};
     }
   }
-  return bound_write(regs, offset, size, old, value, ctx);
+  return dispatch_model::on_write(regs, offset, size, old, value, ctx);
 }
 
 void mdf::write(bank which, std::size_t f, std::uint32_t old, std::uint32_t now)
