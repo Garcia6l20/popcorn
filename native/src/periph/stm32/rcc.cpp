@@ -5,6 +5,7 @@
 #include "kernel_gate.hpp"
 #include "lsi_source.hpp"
 #include "model_base.hpp"
+#include "rcc_resets.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
@@ -203,10 +204,6 @@ constexpr std::array<std::string_view, 8> enable_registers{
     "RCC_AHB1ENR",  "RCC_AHB2ENR1", "RCC_AHB2ENR2", "RCC_AHB3ENR",
     "RCC_APB1ENR1", "RCC_APB1ENR2", "RCC_APB2ENR",  "RCC_APB3ENR"};
 
-constexpr std::string_view peripheral_resets = "RCC_AHB2RSTR1";
-
-constexpr std::array<std::string_view, 1> reset_listeners{"RNG"};
-
 constexpr std::array<std::uint64_t, 16> msi_hz{
     48'000'000, 24'000'000, 16'000'000, 12'000'000, 4'000'000, 2'000'000, 1'330'000, 1'000'000,
     3'072'000,  1'536'000,  1'024'000,  768'000,    400'000,   200'000,   133'000,   100'000};
@@ -398,7 +395,13 @@ struct kernel
   field_ref                    select;
   std::array<signal, 8> const* inputs;
   field_ref                    enable;
-  std::optional<field_ref>     reset;
+};
+
+struct reset_entry
+{
+  std::string instance;
+  std::size_t reg;
+  field_ref   bit;
 };
 
 struct timer
@@ -417,11 +420,11 @@ struct timer
  *        oscillator that drives it or changing PLL1 while it drives it, is refused and logs one
  *        warning per machine life. A started IWDG keeps the LSI on until the next reset, RM0456
  *        section 11.4.16. FLASH programming or erase keeps HSI16 on while it runs, RM0456
- *        sections 7.3.6 and 7.3.7. A 0 to 1 write of a kernel clocked peripheral's bit in
- *        RCC_AHB2RSTR1, RM0456 11.8.22, calls `bus_reset_listener::on_bus_reset()` on every
- *        peer, and `kernel_gate::held_in_reset()` reads the bit. Only the RNG listens, and a
- *        part with an RNG whose RCC_AHB2RSTR1 lacks RNGRST is a config_error. The other reset
- *        registers are storage.
+ *        sections 7.3.6 and 7.3.7. A 0 to 1 write of an instance's bit in an RCC_xxxRSTR
+ *        register, RM0456 11.8.21 to 11.8.28, calls `bus_reset_listener::on_bus_reset()` on
+ *        the instance's model when it listens. The bit is `<instance>RST`, or the name of
+ *        `reset_bit_names`. `kernel_gate::held_in_reset()` reads the bit. A bit of an instance
+ *        with no listening model is storage.
  *
  *        TrustZone, RM0456 11.5 and Table 117: the bits each `RCC_SECCFGR` bit secures, and the
  *        reset, enable, sleep enable, autonomous enable and kernel clock selection bits of a
@@ -458,7 +461,9 @@ public:
   void               force_lsi() override;
   void               hold_hsi16(bool held) override;
   [[nodiscard]] auto bus_enabled(core::clock_domain kernel) const -> bool override;
-  [[nodiscard]] auto held_in_reset(core::clock_domain kernel) const -> bool override;
+  [[nodiscard]] auto reset_line(std::string_view instance) const
+      -> std::optional<std::size_t> override;
+  [[nodiscard]] auto held_in_reset(std::size_t line) const -> bool override;
 
   void                            cr_written(std::uint32_t old, std::uint32_t now);
   void                            icscr1_written(std::uint32_t old, std::uint32_t now);
@@ -468,7 +473,7 @@ public:
   void                            bdcr_written(std::uint32_t old, std::uint32_t now);
   void                            csr_written(std::uint32_t old, std::uint32_t now);
   void                            cicr_written(std::uint32_t old, std::uint32_t now);
-  void                            resets_written(std::uint32_t old, std::uint32_t now);
+  template <std::size_t Reg> void resets_written(std::uint32_t old, std::uint32_t now);
   [[nodiscard]] auto              secure_function() const -> bool override;
   [[nodiscard]] auto              secure_word() const -> std::uint32_t override;
   [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
@@ -486,8 +491,6 @@ private:
   [[nodiscard]] auto locked(std::size_t pll) const -> bool;
   [[nodiscard]] auto rates() const -> std::array<std::uint64_t, signal_count>;
   [[nodiscard]] auto enable_field(std::string_view name) const -> field_ref;
-  [[nodiscard]] auto reset_field(std::string_view instance, std::string_view enable) const
-      -> std::optional<field_ref>;
 
   void oscillators_written(
       std::string_view reg,
@@ -529,6 +532,7 @@ private:
   reg_ref                                              csr_;
   std::vector<std::pair<core::clock_domain, signal>>   signals_;
   std::vector<kernel>                                  kernels_;
+  std::vector<reset_entry>                             resets_;
   std::vector<std::uint8_t>                            kernel_enables_;
   std::vector<timer>                                   timers_;
   std::optional<reg_ref>                               secure_;
@@ -578,9 +582,16 @@ constexpr std::array<write_entry<rcc>, 27> rcc_writes{
      }
 };
 
-constexpr std::array<write_entry<rcc>, 1> rcc_reset_writes{
+constexpr std::array<write_entry<rcc>, 8> rcc_reset_writes{
     {
-     {peripheral_resets, &rcc::resets_written},
+     {reset_registers[0], &rcc::resets_written<0>},
+     {reset_registers[1], &rcc::resets_written<1>},
+     {reset_registers[2], &rcc::resets_written<2>},
+     {reset_registers[3], &rcc::resets_written<3>},
+     {reset_registers[4], &rcc::resets_written<4>},
+     {reset_registers[5], &rcc::resets_written<5>},
+     {reset_registers[6], &rcc::resets_written<6>},
+     {reset_registers[7], &rcc::resets_written<7>},
      }
 };
 
@@ -597,13 +608,6 @@ constexpr auto rcc_trustzone_writes = std::to_array<write_entry<rcc>>({
     {"RCC_CIER",       nullptr           },
     {"RCC_CIFR",       nullptr           },
     {"RCC_CICR",       &rcc::cicr_written},
-    {"RCC_AHB1RSTR",   nullptr           },
-    {"RCC_AHB2RSTR2",  nullptr           },
-    {"RCC_AHB3RSTR",   nullptr           },
-    {"RCC_APB1RSTR1",  nullptr           },
-    {"RCC_APB1RSTR2",  nullptr           },
-    {"RCC_APB2RSTR",   nullptr           },
-    {"RCC_APB3RSTR",   nullptr           },
     {"RCC_AHB1SMENR",  nullptr           },
     {"RCC_AHB2SMENR1", nullptr           },
     {"RCC_AHB2SMENR2", nullptr           },
@@ -630,9 +634,26 @@ rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& opt
       backup_reset_{field("RCC_BDCR", "BDRST")}, remove_flags_{field("RCC_CSR", "RMVF")},
       bdcr_{reg("RCC_BDCR")}, csr_{reg("RCC_CSR")}, unit_{unit_named(ctx.part, desc.name)}
 {
-  if(has_register(peripheral_resets))
+  for(auto const& entry : rcc_reset_writes)
   {
-    bind(rcc_reset_writes);
+    if(has_register(entry.reg))
+    {
+      bind(std::span{&entry, 1});
+    }
+  }
+  for(auto const& peripheral : ctx.part.peripherals)
+  {
+    if(peripheral.alias_of)
+    {
+      continue;
+    }
+    if(auto const found = reset_bit_of(desc, peripheral.name))
+    {
+      resets_.push_back(
+          {.instance = peripheral.name,
+           .reg      = found->reg,
+           .bit      = field(reset_registers[found->reg], found->field)});
+    }
   }
   if(has_register("RCC_SECCFGR"))
   {
@@ -694,8 +715,7 @@ rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& opt
             {.domain = clock.domain(lower(user.instance)),
              .select = field(entry.reg, entry.field),
              .inputs = &entry.inputs,
-             .enable = enable_field(user.enable),
-             .reset  = reset_field(user.instance, user.enable)});
+             .enable = enable_field(user.enable)});
       }
     }
   }
@@ -722,22 +742,6 @@ auto rcc::enable_field(std::string_view name) const -> field_ref
     }
   }
   return field(enable_registers.back(), name);
-}
-
-auto rcc::reset_field(std::string_view instance, std::string_view enable) const
-    -> std::optional<field_ref>
-{
-  auto const name = std::string{enable.substr(0, enable.size() - 2)} + "RST";
-  if(std::ranges::contains(reset_listeners, instance))
-  {
-    return field(peripheral_resets, name);
-  }
-  if(not has_register(peripheral_resets)
-     or not std::ranges::contains(describe(peripheral_resets).fields, name, &field_desc::name))
-  {
-    return std::nullopt;
-  }
-  return field(peripheral_resets, name);
 }
 
 auto rcc::is_ready(source which) const -> bool
@@ -1369,26 +1373,32 @@ auto rcc::bus_enabled(core::clock_domain kernel) const -> bool
   return found == kernels_.end() or get(regs_, found->enable) != 0;
 }
 
-auto rcc::held_in_reset(core::clock_domain kernel) const -> bool
+auto rcc::reset_line(std::string_view instance) const -> std::optional<std::size_t>
 {
-  auto const found = std::ranges::find(kernels_, kernel, &kernel::domain);
-  return found != kernels_.end() and found->reset and get(regs_, *found->reset) != 0;
+  auto const found = std::ranges::find(resets_, instance, &reset_entry::instance);
+  if(found == resets_.end())
+  {
+    return std::nullopt;
+  }
+  return static_cast<std::size_t>(found - resets_.begin());
 }
 
-void rcc::resets_written(std::uint32_t old, std::uint32_t now)
+auto rcc::held_in_reset(std::size_t line) const -> bool
 {
-  for(auto const& entry : kernels_)
+  return line < resets_.size() and get(regs_, resets_[line].bit) != 0;
+}
+
+template <std::size_t Reg> void rcc::resets_written(std::uint32_t old, std::uint32_t now)
+{
+  for(auto const& entry : resets_)
   {
-    if(not entry.reset or entry.reset->of(old) != 0 or entry.reset->of(now) == 0)
+    if(entry.reg != Reg or entry.bit.of(old) != 0 or entry.bit.of(now) == 0)
     {
       continue;
     }
-    for(auto* const peer : ctx_.peers.all())
+    if(auto* const listener = dynamic_cast<bus_reset_listener*>(ctx_.peers.find(entry.instance)))
     {
-      if(auto* const listener = dynamic_cast<bus_reset_listener*>(peer))
-      {
-        listener->on_bus_reset(entry.domain);
-      }
+      listener->on_bus_reset();
     }
   }
 }

@@ -96,21 +96,9 @@ auto words_from(std::uint64_t start, std::uint64_t count, std::uint64_t seed = 0
   return out;
 }
 
-class clock_probe final : public popcorn::periph::model,
-                          public popcorn::periph::stm32::bus_reset_listener
+class clock_probe : public popcorn::periph::model
 {
 public:
-  clock_probe(core::clock_domain rng, std::size_t* resets) : rng_{rng}, resets_{resets}
-  {}
-
-  void on_bus_reset(core::clock_domain kernel) override
-  {
-    if(resets_ != nullptr and kernel == rng_)
-    {
-      ++*resets_;
-    }
-  }
-
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
   {
     return {};
@@ -141,10 +129,21 @@ public:
   {}
   void load(std::span<std::byte const>) override
   {}
+};
+
+class reset_probe final : public clock_probe, public popcorn::periph::stm32::bus_reset_listener
+{
+public:
+  explicit reset_probe(std::size_t& resets) : resets_{resets}
+  {}
+
+  void on_bus_reset() override
+  {
+    ++resets_;
+  }
 
 private:
-  core::clock_domain rng_;
-  std::size_t*       resets_;
+  std::size_t& resets_;
 };
 
 auto entered(
@@ -159,10 +158,19 @@ auto entered(
   {
     options.models.insert_or_assign(
         "CORDIC",
-        [probe, resets](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&)
+        [probe](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&)
             -> std::shared_ptr<popcorn::periph::model> {
           *probe = &ctx.clock;
-          return std::make_shared<clock_probe>(ctx.clock.domain("rng"), resets);
+          return std::make_shared<clock_probe>();
+        });
+  }
+  if(resets != nullptr)
+  {
+    options.models.insert_or_assign(
+        "RNG",
+        [resets](popcorn::periph::model_context&, popcorn::peripheral_desc const&)
+            -> std::shared_ptr<popcorn::periph::model> {
+          return std::make_shared<reset_probe>(*resets);
         });
   }
   if(seed != 0)
@@ -1197,21 +1205,15 @@ TEST_CASE("RNGRST returns the RNG to reset, keeps the entropy controls and holds
   CHECK(r.logged.empty());
 }
 
-TEST_CASE("RNGRST notifies on its 0 to 1 write only, ADC12RST leaves the RNG alone")
+TEST_CASE("RNGRST notifies the RNG model on its 0 to 1 write only, ADC12RST does not")
 {
-  core::clock* clock  = nullptr;
-  std::size_t  resets = 0;
-  rig const    r{"idle", 0, &clock, &resets};
-  r.write(cr, cr_reset | condrst);
-  r.write(htcr, nist_htcr);
-  REQUIRE(r.read(htcr) == nist_htcr);
+  std::size_t resets = 0;
+  rig const   r{"idle", 0, nullptr, &resets};
   r.set_field("RCC", "RCC_AHB2RSTR1", "ADC12RST", 1);
   CHECK(r.f.field("RCC", "RCC_AHB2RSTR1", "ADC12RST") == 1);
-  CHECK(r.read(htcr) == nist_htcr);
   CHECK(resets == 0);
   rng_reset(r, 1);
   CHECK(resets == 1);
-  CHECK(r.read(htcr) == 0x0000'72AC);
   r.set_field("RCC", "RCC_AHB2RSTR1", "ADC12RST", 0);
   CHECK(r.f.field("RCC", "RCC_AHB2RSTR1", "RNGRST") == 1);
   CHECK(resets == 1);

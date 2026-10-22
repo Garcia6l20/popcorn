@@ -11,6 +11,8 @@
 #include <popcorn/periph/register_file.hpp>
 
 #include "debug_freeze.hpp"
+#include "kernel_gate.hpp"
+#include "rcc_resets.hpp"
 
 #include <reflex/serde/bson.hpp>
 
@@ -502,6 +504,13 @@ public:
       std::uint32_t value,
       access_ctx    ctx) -> std::expected<void, bus_error> override
   {
+    if constexpr(std::derived_from<Derived, bus_reset_listener>)
+    {
+      if(held_in_reset())
+      {
+        return {};
+      }
+    }
     auto const word  = offset & ~3u;
     auto const found = std::ranges::find(bound_, word, &bound::offset);
     if(found != bound_.end())
@@ -550,6 +559,40 @@ protected:
     {
       bind(trustzone_table);
     }
+    if constexpr(std::derived_from<Derived, bus_reset_listener>)
+    {
+      auto const rcc =
+          std::ranges::find(ctx.part.peripherals, std::string_view{"RCC"}, &peripheral_desc::name);
+      if(rcc != ctx.part.peripherals.end() and not reset_bit_of(*rcc, desc.name))
+      {
+        throw config_error(
+            ctx.part.part, 0, std::format("peripherals.RCC.registers.{}RST", desc.name),
+            std::format(
+                "an RCC_xxxRSTR bit for {}, which the {} model resets", desc.name, model_name));
+      }
+    }
+  }
+
+  /**
+   * @brief Whether RCC holds the peripheral in reset, its RCC_xxxRSTR bit 1.
+   * @return The bit, false without an RCC model.
+   */
+  [[nodiscard]] auto held_in_reset() -> bool
+  {
+    if(not reset_resolved_ and not this->ctx_.peers.all().empty())
+    {
+      reset_resolved_ = true;
+      for(auto* const peer : this->ctx_.peers.all())
+      {
+        if(auto const* const gate = dynamic_cast<kernel_gate const*>(peer))
+        {
+          reset_gate_ = gate;
+          reset_line_ = gate->reset_line(this->desc_.name);
+          break;
+        }
+      }
+    }
+    return reset_gate_ != nullptr and reset_line_ and reset_gate_->held_in_reset(*reset_line_);
   }
 
   /**
@@ -702,6 +745,9 @@ private:
     void (Derived::*handler)(std::uint32_t old, std::uint32_t now);
   };
 
-  std::vector<bound> bound_;
+  std::vector<bound>         bound_;
+  kernel_gate const*         reset_gate_ = nullptr;
+  std::optional<std::size_t> reset_line_;
+  bool                       reset_resolved_ = false;
 };
 }

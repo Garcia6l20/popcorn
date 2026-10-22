@@ -1,4 +1,6 @@
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
+#include "rcc_resets.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -11,7 +13,9 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -85,6 +89,64 @@ public:
   {}
   void load(std::span<std::byte const>) override
   {}
+};
+
+class reset_counter final : public periph::model, public stm32::bus_reset_listener
+{
+public:
+  int resets{};
+
+  void on_bus_reset() override
+  {
+    ++resets;
+  }
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(periph::register_file&, reset_kind) override
+  {}
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+
+struct reset_target
+{
+  std::string_view instance;
+  std::string_view reg;
+  std::string_view bit;
+};
+
+constexpr std::array<reset_target, 8> reset_targets{
+    {
+     {"CRC", "RCC_AHB1RSTR", "CRCRST"},
+     {"HASH", "RCC_AHB2RSTR1", "HASHRST"},
+     {"OCTOSPI1", "RCC_AHB2RSTR2", "OCTOSPI1RST"},
+     {"ADC4", "RCC_AHB3RSTR", "ADC4RST"},
+     {"TIM2", "RCC_APB1RSTR1", "TIM2RST"},
+     {"I2C4", "RCC_APB1RSTR2", "I2C4RST"},
+     {"TIM1", "RCC_APB2RSTR", "TIM1RST"},
+     {"LPUART1", "RCC_APB3RSTR", "LPUART1RST"},
+     }
 };
 
 auto with_listener(core::machine_options options = popcorn::testing::stm32_options())
@@ -454,4 +516,80 @@ TEST_CASE("a ready delay pending across a core clock change ends at its virtual 
   auto const took = f.target->virtual_clock().time().ps - start;
   CHECK(took >= 100 * mhz);
   CHECK(took < 100 * mhz + 1'000'000 / 24);
+}
+
+TEST_CASE("every U575 instance with an RCC reset bit resolves it, the renamed ones included")
+{
+  auto const& rcc = *std::ranges::find(
+      u575().peripherals, std::string_view{"RCC"}, &popcorn::peripheral_desc::name);
+  std::vector<std::string> unresolved;
+  for(auto const& peripheral : u575().peripherals)
+  {
+    if(not peripheral.alias_of and not stm32::reset_bit_of(rcc, peripheral.name))
+    {
+      unresolved.push_back(peripheral.name);
+    }
+  }
+  std::ranges::sort(unresolved);
+  CHECK(unresolved == std::vector<std::string>{"DBGMCU",       "DCACHE",       "DLYBOS1",
+                                               "DLYBOS2",      "DLYBSD1",      "DLYBSD2",
+                                               "EXTI",         "FDCAN1_RAM",   "FLASH",
+                                               "GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3",
+                                               "GTZC1_TZIC",   "GTZC1_TZSC",   "GTZC2_MPCBB4",
+                                               "GTZC2_TZIC",   "GTZC2_TZSC",   "ICache",
+                                               "IWDG",         "PWR",          "RCC",
+                                               "RTC",          "TAMP",         "WWDG"});
+  for(auto const& [instance, field] : stm32::reset_bit_names)
+  {
+    CAPTURE(instance);
+    auto const found = stm32::reset_bit_of(rcc, instance);
+    REQUIRE(found.has_value());
+    CHECK(found->field == field);
+  }
+  auto const rng = stm32::reset_bit_of(rcc, "RNG");
+  REQUIRE(rng.has_value());
+  CHECK(stm32::reset_registers[rng->reg] == "RCC_AHB2RSTR1");
+}
+
+TEST_CASE("each RSTR register notifies its instance's model on a 0 to 1 write only")
+{
+  auto options = popcorn::testing::stm32_options();
+  for(auto const& target : reset_targets)
+  {
+    options.models.insert_or_assign(
+        std::string{target.instance},
+        [](periph::model_context&, popcorn::peripheral_desc const&)
+            -> std::shared_ptr<periph::model> { return std::make_shared<reset_counter>(); });
+  }
+  stm32_fixture const f{u575(), "rcc_ll", std::move(options)};
+  auto const          counts = [&] {
+    std::vector<int> out;
+    for(auto const& target : reset_targets)
+    {
+      auto* const counter = f.model_of<reset_counter>(target.instance);
+      REQUIRE(counter != nullptr);
+      out.push_back(counter->resets);
+    }
+    return out;
+  };
+  for(std::size_t index = 0; index < reset_targets.size(); ++index)
+  {
+    auto const& target = reset_targets[index];
+    CAPTURE(target.instance);
+    auto const bit = bit_of(target.reg, target.bit);
+    write(f, target.reg, bit);
+    CHECK(peek(f, target.reg) == bit);
+    write(f, target.reg, bit);
+    write(f, target.reg, 0);
+    CHECK(peek(f, target.reg) == 0);
+    std::vector<int> expected(reset_targets.size(), 0);
+    for(std::size_t done = 0; done <= index; ++done)
+    {
+      expected[done] = 1;
+    }
+    CHECK(counts() == expected);
+  }
+  write(f, "RCC_AHB2RSTR1", bit_of("RCC_AHB2RSTR1", "GPIOARST"));
+  CHECK(peek(f, "RCC_AHB2RSTR1") == bit_of("RCC_AHB2RSTR1", "GPIOARST"));
+  CHECK(counts() == std::vector<int>(reset_targets.size(), 1));
 }

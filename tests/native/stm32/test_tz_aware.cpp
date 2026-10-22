@@ -394,6 +394,44 @@ TEST_CASE("RM0456 11.5.1: RNGRST of a Secure RNG ignores a Non-secure write, ADC
   CHECK(r.peek("RNG", "HTCR") == htcr);
 }
 
+TEST_CASE("RM0456 11.5.1: every RSTR register ignores a Non-secure write of a Secure bit")
+{
+  struct secured
+  {
+    std::string_view instance;
+    std::string_view reg;
+    std::string_view tzsc;
+    std::string_view tzsc_reg;
+  };
+  constexpr std::array<secured, 8> targets{
+      {
+       {"CRC", "AHB1RSTR", "GTZC1_TZSC", "SECCFGR3"},
+       {"HASH", "AHB2RSTR1", "GTZC1_TZSC", "SECCFGR3"},
+       {"OCTOSPI1", "AHB2RSTR2", "GTZC1_TZSC", "SECCFGR3"},
+       {"ADC4", "AHB3RSTR", "GTZC2_TZSC", "SECCFGR1"},
+       {"TIM2", "APB1RSTR1", "GTZC1_TZSC", "SECCFGR1"},
+       {"I2C4", "APB1RSTR2", "GTZC1_TZSC", "SECCFGR1"},
+       {"TIM1", "APB2RSTR", "GTZC1_TZSC", "SECCFGR2"},
+       {"LPUART1", "APB3RSTR", "GTZC2_TZSC", "SECCFGR1"},
+       }
+  };
+  for(auto const& target : targets)
+  {
+    CAPTURE(target.instance);
+    rig const r{
+        true, {.tzen = true, .secwm1 = stm32::no_area{}, .secwm2 = stm32::no_area{}}
+    };
+    auto const sec = target.instance == "OCTOSPI1" ? std::string{"OCTOSPI1_REGSEC"}
+                                                   : std::string{target.instance} + "SEC";
+    auto const rst = bit("RCC", target.reg, std::string{target.instance} + "RST");
+    r.write(target.tzsc, target.tzsc_reg, bit(target.tzsc, target.tzsc_reg, sec), secure_priv);
+    r.write("RCC", target.reg, rst, nonsecure_priv);
+    CHECK(r.peek("RCC", target.reg) == 0);
+    r.write("RCC", target.reg, rst, secure_priv);
+    CHECK(r.peek("RCC", target.reg) == rst);
+  }
+}
+
 TEST_CASE("RM0456 11.5.2: RCC SPRIV and NSPRIV make the RCC bits privileged")
 {
   rig const  r{true};

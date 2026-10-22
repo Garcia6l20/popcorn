@@ -2,6 +2,10 @@
 
 #include <popcorn/core/clock.hpp>
 
+#include <cstddef>
+#include <optional>
+#include <string_view>
+
 namespace popcorn::periph::stm32
 {
 /**
@@ -32,12 +36,19 @@ public:
   [[nodiscard]] virtual auto bus_enabled(core::clock_domain kernel) const -> bool = 0;
 
   /**
-   * @brief Whether RCC holds the peripheral clocked by @p kernel in reset, such as
-   *        RCC_AHB2RSTR1.RNGRST 1 for the `rng` domain.
-   * @param kernel Kernel clock domain of the peripheral.
-   * @return The reset bit, false for a domain with no reset bit in RCC_AHB2RSTR1.
+   * @brief The reset line of @p instance, its bit in an RCC_xxxRSTR register.
+   * @param instance Instance name as the description spells it.
+   * @return A handle for held_in_reset(), nullopt for an instance with no reset bit.
    */
-  [[nodiscard]] virtual auto held_in_reset(core::clock_domain kernel) const -> bool = 0;
+  [[nodiscard]] virtual auto reset_line(std::string_view instance) const
+      -> std::optional<std::size_t> = 0;
+
+  /**
+   * @brief Whether RCC holds a peripheral in reset, its RCC_xxxRSTR bit 1.
+   * @param line Handle from reset_line().
+   * @return The reset bit.
+   */
+  [[nodiscard]] virtual auto held_in_reset(std::size_t line) const -> bool = 0;
 
 protected:
   /** @brief Destroys the interface, only through its model. */
@@ -45,8 +56,10 @@ protected:
 };
 
 /**
- * @brief Model told when RCC puts a peripheral in reset through its RCC_xxxRSTR bit. Found by
- *        `dynamic_cast` over the machine's peers. Never called from a model's reset.
+ * @brief Model told when RCC puts its peripheral in reset through its RCC_xxxRSTR bit. RCC finds
+ *        it as the peer model of the instance the bit names. Never called from a model's reset.
+ *        A builtin dispatch_model that listens ignores register writes while the bit is 1, and
+ *        its construction is a config_error when the part's RCC has no reset bit for it.
  */
 class bus_reset_listener
 {
@@ -62,11 +75,8 @@ public:
   /** @brief Not move-assignable. */
   auto operator=(bus_reset_listener&&) -> bus_reset_listener& = delete;
 
-  /**
-   * @brief The reset bit of the peripheral clocked by @p kernel went from 0 to 1.
-   * @param kernel Kernel clock domain of the peripheral put in reset.
-   */
-  virtual void on_bus_reset(core::clock_domain kernel) = 0;
+  /** @brief The peripheral's reset bit went from 0 to 1. */
+  virtual void on_bus_reset() = 0;
 
 protected:
   /** @brief Destroys the listener, only through its model. */

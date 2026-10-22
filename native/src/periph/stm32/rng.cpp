@@ -157,7 +157,7 @@ public:
       access_ctx     ctx) -> std::expected<void, bus_error> override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   void on_clock_change() override;
-  void on_bus_reset(core::clock_domain kernel) override;
+  void on_bus_reset() override;
 
   [[nodiscard]] auto seed() const -> std::uint64_t override;
   [[nodiscard]] auto drawn() const -> std::uint64_t override;
@@ -185,7 +185,6 @@ private:
   [[nodiscard]] auto producing() const -> bool;
   [[nodiscard]] auto gate() -> kernel_gate const*;
   [[nodiscard]] auto bus_enabled() -> bool;
-  [[nodiscard]] auto held_in_reset() -> bool;
   [[nodiscard]] auto loops() const -> std::uint64_t;
   [[nodiscard]] auto init_ps() const -> std::uint64_t;
   [[nodiscard]] auto round_ps() const -> std::uint64_t;
@@ -311,12 +310,6 @@ auto rng::bus_enabled() -> bool
 {
   auto const* const found = gate();
   return found == nullptr or found->bus_enabled(kernel_);
-}
-
-auto rng::held_in_reset() -> bool
-{
-  auto const* const found = gate();
-  return found != nullptr and found->held_in_reset(kernel_);
 }
 
 auto rng::loops() const -> std::uint64_t
@@ -723,12 +716,8 @@ void rng::restore_reset_values()
   line_.lower();
 }
 
-void rng::on_bus_reset(core::clock_domain kernel)
+void rng::on_bus_reset()
 {
-  if(kernel != kernel_)
-  {
-    return;
-  }
   withdraw(work_done);
   withdraw(condrst_done);
   withdraw(auto_reset);
@@ -760,10 +749,6 @@ auto rng::on_write(
   if(size != 4 or offset % 4 != 0)
   {
     return std::unexpected{bus_error::denied};
-  }
-  if(held_in_reset())
-  {
-    return {};
   }
   return dispatch_model::on_write(regs, offset, size, old, value, ctx);
 }
