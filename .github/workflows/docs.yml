@@ -1,0 +1,70 @@
+name: docs
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  POPCORN_ENABLE_CCACHE: "1"
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  CCACHE_NOHASHDIR: "1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: gcc:16
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+      - name: Install the build tools and doxygen
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake ninja-build doxygen ccache python3-pip
+          pip install --break-system-packages uv
+      - name: Cache the fetched sources and the compiler cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            build/deps
+            build/pkg
+            .ccache
+          key: docs-${{ hashFiles('deps.toml', '.gitmodules') }}-${{ github.sha }}
+          restore-keys: |
+            docs-${{ hashFiles('deps.toml', '.gitmodules') }}-
+      - name: Install Python and the docs dependencies
+        run: |
+          uv python install 3.14
+          uv sync --no-install-project --group dev --group docs
+      - name: Build the native package
+        run: uv run --no-sync pcons -B build -j4 POPCORN_BUILD_TESTS=OFF POPCORN_BUILD_EXAMPLES=OFF
+      - name: Build the docs
+        run: uv run --no-sync python -m popcorn_build.docs
+      - name: Upload the site
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.private == false
+        uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.private == false
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5.0.1
