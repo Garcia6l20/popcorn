@@ -346,3 +346,45 @@ def test_fault_refusals_change_nothing(u575: popcorn.PartDescription) -> None:
         assert getattr(entropy, name) == 3
         setattr(entropy, name, None)
         assert getattr(entropy, name) is None
+
+
+NIST_CR = 0x00F0_0D00
+NIST_NSCR = 0x1_7CBB
+NIST_HTCR = 0xA2B0
+CONFIGLOCK = 1 << 31
+DEINIT_LOGGED = 31
+
+
+def deinit_parked(m: popcorn.Machine) -> list[int]:
+    assert asyncio.run(m.run(for_=ms(10), budget=500_000)).reason is popcorn.StopReason.TIME
+    return logged(m)
+
+
+def deinit_running(m: popcorn.Machine) -> list[int]:
+    async def body() -> popcorn.Stop:
+        async with m.running():
+            return await m.wait_for(m.ref.var("log_len").ge(DEINIT_LOGGED))
+
+    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    return logged(m)
+
+
+@pytest.mark.parametrize("run", [deinit_parked, deinit_running])
+def test_ll_rng_deinit_returns_a_locked_rng_to_reset_and_it_works_again(
+    u575: popcorn.PartDescription, run: Callable[[popcorn.Machine], list[int]]
+) -> None:
+    m = entered(u575, "deinit")
+    m.periph.RNG.entropy.seed_fault_after = 50
+    log = run(m)
+    assert len(log) == DEINIT_LOGGED
+    assert log[2:9:2] == rng_words(0, 4)
+    locked = NIST_CR | CONFIGLOCK | RNGEN
+    assert log[9] == locked
+    assert log[11:13] == [NIST_NSCR, NIST_HTCR]
+    assert log[13:18] == [CR_RESET, 0, 0x3_FFFF, 0x72AC, 0]
+    assert 0 < log[18] < 2000
+    assert log[19] == log[1] > 100
+    assert log[20:27:2] == rng_words(0, 4, start=4)
+    assert log[27] == locked
+    assert log[29:31] == [NIST_NSCR, NIST_HTCR]
+    assert m.periph.RNG.entropy.seed_fault_after == 42

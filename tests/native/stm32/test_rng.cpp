@@ -1090,6 +1090,126 @@ TEST_CASE("every reset kind keeps the queue, the stuck word and the generator po
   }
 }
 
+auto nist_locked(rig const& r) -> void
+{
+  r.clocks();
+  r.write(cr, cr_nist | condrst);
+  r.write(htcr, nist_htcr);
+  r.write(nscr, nist_nscr);
+  r.write(cr, cr_nist);
+  r.run_for(clear_4mhz);
+  r.write(cr, cr_nist | rngen | ie | configlock);
+  REQUIRE(r.read(cr) == (cr_nist | rngen | ie | configlock));
+}
+
+auto rng_reset(rig const& r, std::uint32_t held) -> void
+{
+  r.set_field("RCC", "RCC_AHB2RSTR1", "RNGRST", held);
+}
+
+TEST_CASE("RNGRST returns the RNG to reset, keeps the entropy controls and holds writes off")
+{
+  rig const r;
+  nist_locked(r);
+  r.run_for(2 * init_4mhz + 2 * round_4mhz);
+  REQUIRE(r.ready());
+  REQUIRE(r.line() == 1);
+  r.source().set_clock_fault(true);
+  REQUIRE(r.read(sr) == (cecs | ceis | drdy));
+  std::vector<std::uint32_t> const queued{1, 2, 3, 4, 5};
+  r.source().queue(queued);
+  r.source().set_stuck(0x77);
+  r.source().set_seed_fault_after(9);
+  r.source().set_clock_fault_after(11);
+  r.run_for(2 * round_4mhz);
+  for(int read = 0; read < 4; ++read)
+  {
+    REQUIRE(r.cpu_dr() != 0x77);
+  }
+  REQUIRE(r.ready());
+  auto const round_due = r.now() + round_4mhz;
+  REQUIRE(r.due(round_due));
+  auto const drawn = r.source().drawn();
+
+  rng_reset(r, 1);
+  CHECK(r.read(cr) == cr_reset);
+  CHECK(r.read(sr) == 0);
+  CHECK(r.read(dr) == 0);
+  CHECK(r.read(nscr) == 0x0003'FFFF);
+  CHECK(r.read(htcr) == 0x0000'72AC);
+  CHECK(r.line() == 0);
+  CHECK_FALSE(r.due(round_due));
+  r.write(cr, cr_nist | condrst);
+  r.write(nscr, nist_nscr);
+  r.write(htcr, nist_htcr);
+  CHECK(r.read(cr) == cr_reset);
+  CHECK(r.read(nscr) == 0x0003'FFFF);
+  CHECK(r.read(htcr) == 0x0000'72AC);
+  rng_reset(r, 0);
+  CHECK(r.read(cr) == cr_reset);
+  CHECK(r.cpu_dr() == 0);
+  CHECK(r.pending().empty());
+
+  CHECK(r.source().queued() == 5);
+  CHECK(r.source().drawn() == drawn);
+  CHECK(r.source().seed_fault_after() == 5u);
+  CHECK(r.source().clock_fault_after() == 7u);
+  CHECK(r.source().clock_fault());
+  CHECK(r.source().stuck() == 0x77);
+  r.source().set_stuck(std::nullopt);
+  r.source().set_clock_fault(false);
+  r.source().set_seed_fault_after(std::nullopt);
+  r.source().set_clock_fault_after(std::nullopt);
+
+  nist_locked(r);
+  CHECK(r.read(htcr) == nist_htcr);
+  CHECK(r.read(nscr) == nist_nscr);
+  r.run_for(2 * init_4mhz);
+  REQUIRE(r.ready());
+  std::vector<std::uint32_t> got;
+  for(int read = 0; read < 4; ++read)
+  {
+    got.push_back(r.cpu_dr());
+  }
+  CHECK(got == std::vector<std::uint32_t>{1, 2, 3, 4});
+  CHECK((r.read(sr) & ~drdy) == 0);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("RNGRST clears SECS and drops a pending auto-reset, the seed fault level stays")
+{
+  rig const r;
+  nist_locked(r);
+  r.run_for(2 * init_4mhz);
+  r.source().set_seed_fault(true);
+  REQUIRE(r.read(sr) == (secs | seis));
+  r.source().set_seed_fault(false);
+  auto const auto_due = r.now() + clear_4mhz;
+  REQUIRE(r.due(auto_due));
+  r.source().set_seed_fault(true);
+  r.source().set_seed_fault(false);
+  rng_reset(r, 1);
+  rng_reset(r, 0);
+  CHECK(r.read(sr) == 0);
+  CHECK(r.pending().empty());
+  r.source().set_seed_fault(true);
+  r.write(cr, cr_reset | rngen);
+  CHECK(r.read(sr) == (secs | seis));
+  CHECK(r.source().seed_fault());
+  r.source().set_seed_fault(false);
+  r.write(cr, cr_reset | condrst);
+  r.write(cr, cr_reset);
+  auto const clear_due = r.now() + clear_4mhz;
+  REQUIRE(r.due(clear_due));
+  rng_reset(r, 1);
+  rng_reset(r, 0);
+  CHECK(r.read(cr) == cr_reset);
+  CHECK_FALSE(r.due(clear_due));
+  r.write(cr, cr_reset | rngen);
+  CHECK(r.due(r.now() + init_4mhz));
+  CHECK(r.logged.empty());
+}
+
 TEST_CASE("a queue past its bound is refused before any change")
 {
   rig const                        r;

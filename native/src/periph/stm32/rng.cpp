@@ -125,14 +125,20 @@ struct rng_state
  *        a stopped kernel clock included, and its rise sets CEIS. Generation goes on.
  *        The RNG_IRQn line is IE and RNGEN and any of DRDY, SEIS and CEIS, 48.4. Only 32-bit
  *        accesses are served, others are a bus error and a write is ignored, 48.2.
- *        Deviations: register accesses are served with RCC_AHB2ENR1.RNGEN 0. RCC_AHB2RSTR1.RNGRST
- *        is not modelled, so CONFIGLOCK clears only on a system reset. There is no noise source:
- *        NSCR and HTCR are storage. Configuration B timing is not modelled, the configuration A
- *        and C column applies to every configuration. A rate change does not rescale a phase
- *        already started. The tamper output to TAMP is not modelled.
+ *        RCC_AHB2RSTR1.RNGRST, RM0456 11.8.22 and the 48.3.4 note: its 0 to 1 write returns the
+ *        registers to their reset values, CONFIGLOCK included, empties the FIFO and the
+ *        register, ends init, rounds, a CONDRST clear and an auto-reset, and clears SECS, CECS
+ *        and the line. The entropy_source keeps its state, as for every other reset kind. While
+ *        the bit is 1 a register write is ignored, an assumption: RM0456 gives no register
+ *        access rule for a peripheral held in reset.
+ *        Deviations: register accesses are served with RCC_AHB2ENR1.RNGEN 0. There is no noise
+ *        source: NSCR and HTCR are storage. Configuration B timing is not modelled, the
+ *        configuration A and C column applies to every configuration. A rate change does
+ *        not rescale a phase already started. The tamper output to TAMP is not modelled.
  */
 class rng final : public dispatch_model<rng, rng_state>,
                   public clock_listener,
+                  public bus_reset_listener,
                   public entropy_source
 {
 public:
@@ -150,6 +156,7 @@ public:
       access_ctx     ctx) -> std::expected<void, bus_error> override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   void on_clock_change() override;
+  void on_bus_reset(core::clock_domain kernel) override;
 
   [[nodiscard]] auto seed() const -> std::uint64_t override;
   [[nodiscard]] auto drawn() const -> std::uint64_t override;
@@ -175,7 +182,9 @@ private:
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
   [[nodiscard]] auto noise_running() const -> bool;
   [[nodiscard]] auto producing() const -> bool;
+  [[nodiscard]] auto gate() -> kernel_gate const*;
   [[nodiscard]] auto bus_enabled() -> bool;
+  [[nodiscard]] auto held_in_reset() -> bool;
   [[nodiscard]] auto loops() const -> std::uint64_t;
   [[nodiscard]] auto init_ps() const -> std::uint64_t;
   [[nodiscard]] auto round_ps() const -> std::uint64_t;
@@ -192,6 +201,7 @@ private:
   void expose();
   void interrupt();
   void fresh_state();
+  void restore_reset_values();
   auto next_word() -> std::uint32_t;
   void count_fault_words();
   void keep_unless_open(reg_ref target, std::uint32_t old);
@@ -279,7 +289,7 @@ auto rng::producing() const -> bool
   return noise_running() and state_.secs == 0;
 }
 
-auto rng::bus_enabled() -> bool
+auto rng::gate() -> kernel_gate const*
 {
   if(not gate_found_)
   {
@@ -293,7 +303,19 @@ auto rng::bus_enabled() -> bool
       }
     }
   }
-  return gate_ == nullptr or gate_->bus_enabled(kernel_);
+  return gate_;
+}
+
+auto rng::bus_enabled() -> bool
+{
+  auto const* const found = gate();
+  return found == nullptr or found->bus_enabled(kernel_);
+}
+
+auto rng::held_in_reset() -> bool
+{
+  auto const* const found = gate();
+  return found != nullptr and found->held_in_reset(kernel_);
 }
 
 auto rng::loops() const -> std::uint64_t
@@ -681,11 +703,16 @@ void rng::interrupt()
   }
 }
 
-void rng::reset(register_file& regs, reset_kind)
+void rng::reset(register_file&, reset_kind)
+{
+  restore_reset_values();
+}
+
+void rng::restore_reset_values()
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
   for(auto& value : state_.generation)
   {
@@ -693,6 +720,18 @@ void rng::reset(register_file& regs, reset_kind)
   }
   fresh_state();
   line_.lower();
+}
+
+void rng::on_bus_reset(core::clock_domain kernel)
+{
+  if(kernel != kernel_)
+  {
+    return;
+  }
+  withdraw(work_done);
+  withdraw(condrst_done);
+  withdraw(auto_reset);
+  restore_reset_values();
 }
 
 auto rng::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
@@ -720,6 +759,10 @@ auto rng::on_write(
   if(size != 4 or offset % 4 != 0)
   {
     return std::unexpected{bus_error::denied};
+  }
+  if(held_in_reset())
+  {
+    return {};
   }
   return dispatch_model::on_write(regs, offset, size, old, value, ctx);
 }

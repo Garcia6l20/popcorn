@@ -35,6 +35,7 @@ void seed_recover_auto(void);
 void clock_error(void);
 void clock_error_ced_off(void);
 void keygen(void);
+void deinit(void);
 
 void checkpoint(void)
 {
@@ -344,6 +345,43 @@ void keygen(void)
   LL_RCC_HSI48_Disable();
   LOG(keygen_status);
   keygen_done = 1u;
+  idle();
+}
+
+static void nist_configure(void)
+{
+  RNG->CR   = RNG_NIST_CR | RNG_CR_CONDRST;
+  RNG->HTCR = RNG_NIST_HTCR;
+  RNG->NSCR = RNG_NIST_NSCR;
+  RNG->CR   = RNG_NIST_CR;
+  LOG(poll_condrst());
+}
+
+static void log_registers(void)
+{
+  LOG(RNG->CR);
+  LOG(RNG->SR);
+  LOG(RNG->NSCR);
+  LOG(RNG->HTCR);
+}
+
+void deinit(void)
+{
+  hsi48_on();
+  LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_RNG);
+  nist_configure();
+  LL_RNG_Enable(RNG);
+  LL_RNG_ConfigLock(RNG);
+  read_four();
+  log_registers();
+  LL_RNG_DeInit(RNG);
+  log_registers();
+  LOG(RNG->DR);
+  nist_configure();
+  LL_RNG_Enable(RNG);
+  LL_RNG_ConfigLock(RNG);
+  read_four();
+  log_registers();
   idle();
 }
 

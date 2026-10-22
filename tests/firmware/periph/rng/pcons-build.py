@@ -22,6 +22,7 @@ add_ll_firmware(
         "clock_error",
         "clock_error_ced_off",
         "keygen",
+        "deinit",
         "keygen_status",
         "keygen_done",
         "keygen_key",
