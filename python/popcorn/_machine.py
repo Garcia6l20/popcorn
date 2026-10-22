@@ -2569,7 +2569,8 @@ class Machine:
 
         After a RESET_REQUEST stop the run first applies the reset that stop reported, of the
         kind its `detail` names, unless `reset()` or `restore()` came between. `for_` then
-        counts from that reset and `FrameReturn()` names the function the reset core runs. A
+        counts from that reset, a `deadline` of `wait_for` or `wait_until` is a time since it,
+        and `FrameReturn()` names the function the reset core runs. A
         member of a linked system leaves this to its system.
 
         Raises:
@@ -2601,17 +2602,20 @@ class Machine:
         The value has the function's DWARF return type, None for a void function or an
         exception handler, the I32 value of r0 when the image has no DWARF for the function.
         `last_stop` holds the RETURNED stop at the caller's return address, detail
-        `<function> returned`. Refused inside the machine's free run, as `run` is.
+        `<function> returned`. Refused inside the machine's free run, as `run` is. After a
+        RESET_REQUEST stop it first applies that reset, as `run` does, and steps out of the
+        function the reset core runs.
 
         Args:
             budget: Instructions the whole step out may take, `default_budget` when None.
 
         Raises:
             MachineBusy: A run, step, call, wait or free run is active.
-            EmulationError: The return point cannot be found, nothing ran, or another stop
-                ended the run, such as a reset or a handler's USER stop.
+            EmulationError: The return point cannot be found, nothing ran but a pending reset
+                was applied, or another stop ended the run, such as a reset or a handler's USER
+                stop.
             NotImplementedError: The function returns a type popcorn cannot decode, a struct
-                or a union, as `call` refuses it. Nothing ran.
+                or a union, as `call` refuses it. Nothing ran, a pending reset was applied.
             BudgetExceeded: The budget ran out first.
             FaultError: The function faulted.
         """

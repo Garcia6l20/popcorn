@@ -372,6 +372,31 @@ TEST_CASE("a reset request stops under the stop policy and names the kind")
   CHECK(f.word(boots) == 1);
 }
 
+TEST_CASE("a reset request stop stays pending until a reset, a restore or a slice outside a call")
+{
+  auto f = booted("calls");
+  f.set("pc", sym("calls", "reset_now"));
+  REQUIRE(f.run_to_stop().reason == stop_reason::reset_request);
+  auto& target = *f.target;
+  CHECK(target.reset_pending() == popcorn::reset_kind::software);
+  auto const saved = target.snapshot();
+  target.reset();
+  CHECK_FALSE(target.reset_pending().has_value());
+  CHECK_FALSE(target.apply_reset_request());
+  target.restore(saved);
+  CHECK(target.reset_pending() == popcorn::reset_kind::software);
+  auto const resets = target.resets();
+  CHECK(target.apply_reset_request());
+  CHECK(target.resets() == resets + 1);
+  CHECK_FALSE(target.reset_pending().has_value());
+  CHECK_FALSE(target.apply_reset_request());
+  CHECK(target.resets() == resets + 1);
+  target.restore(saved);
+  REQUIRE(target.reset_pending().has_value());
+  std::ignore = f.run({.wall_budget = long_wall, .budget_left = icount{10}});
+  CHECK_FALSE(target.reset_pending().has_value());
+}
+
 TEST_CASE("a reset request under reset_and_continue reboots and the slice continues")
 {
   core::machine_options options;

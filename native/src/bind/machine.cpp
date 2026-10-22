@@ -601,11 +601,6 @@ auto machine_handle::apply_pending_reset() -> bool
   return access([](core::machine& target) { return target.apply_reset_request(); });
 }
 
-auto machine_handle::reset_pending() const -> std::optional<reset_kind>
-{
-  return access([](core::machine& target) { return target.reset_pending(); });
-}
-
 void machine_handle::power_cycle()
 {
   access([](core::machine& target) { target.power_cycle(); });

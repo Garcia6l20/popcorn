@@ -71,7 +71,7 @@ struct machine_options
    * default, or resets the machine as reset_kind::software and continues. A reset request during
    * a call begun by begin_call() always stops with stop_reason::reset_request, whatever the
    * policy: a reset would lose the call frame and its return sentinel. end_call() then restores
-   * the caller's context. */
+   * the caller's context. The stop leaves reset_pending() set, see apply_reset_request(). */
   reset_request_policy on_reset_request{reset_request_policy::stop};
   /** @brief Iterations of a loop that makes no progress, the same pc window and the same machine
    * state, after which the run stops with stop_reason::spin, naming the loop and the polled
@@ -326,14 +326,17 @@ public:
   [[nodiscard]] auto resets() const noexcept -> std::uint64_t;
 
   /**
-   * @brief Kind of the reset the last RESET_REQUEST stop reported, while no reset or restore
-   *        came after it. A call keeps it. Saved in snapshots.
+   * @brief Kind of the reset the last RESET_REQUEST stop reported, while no reset, restore or
+   *        slice outside a call came after it. A call keeps it. Saved in snapshots. Read it only
+   *        while the machine is stopped.
    */
   [[nodiscard]] auto reset_pending() const noexcept -> std::optional<reset_kind>;
 
   /**
-   * @brief Resets as reset() with the kind of reset_pending(), when one is pending. A lone
-   *        machine's run, step and free run apply it before they start.
+   * @brief Resets as reset() with the kind of reset_pending(), when one is pending. The core
+   *        never applies it on its own: run_slice() and host::run resume the old code, and their
+   *        first slice outside a call drops it. The Python binding calls this before each run,
+   *        step and free run of a lone machine.
    * @return Whether a reset ran.
    * @throws machine_running while a slice runs, handlers included.
    * @throws machine_busy while a call begun by begin_call() is in progress.

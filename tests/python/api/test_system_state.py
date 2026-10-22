@@ -549,3 +549,20 @@ def test_a_restore_restarts_what_each_tap_dropped(
     assert (tap.available, tap.dropped) == (0, 0)
     asyncio.run(system.run(until=VirtualTime(ms(1).ps)))
     assert (tap.available, tap.dropped) == first
+
+
+def test_a_member_resumed_past_its_reset_request_keeps_no_reset_after_the_close(
+    u575: popcorn.PartDescription,
+) -> None:
+    a = member(u575, "link_tx_reset", "a")
+    b = member(u575, "link_rx", "b")
+    with System({"a": a, "b": b}, links(None), on_member_reset="stop") as system:
+        stop = asyncio.run(system.run(for_=ms(1)))
+        assert (stop.reason, stop.member) == (StopReason.RESET_REQUEST, "a")
+        requested = a.time
+        resumed = asyncio.run(system.run(until=VirtualTime(ms(1.2).ps)))
+        assert resumed.reason is StopReason.TIME
+    assert stop.stop is not None
+    alone = asyncio.run(a.run(budget=1_000))
+    assert alone.resets == stop.stop.resets
+    assert alone.time >= requested

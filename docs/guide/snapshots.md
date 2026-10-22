@@ -45,9 +45,10 @@ another configuration, and the error names the digest that differs.
 A snapshot restores only into a machine with the same set of peripheral models. One taken by a
 popcorn build that lacked a model the current build has is refused. Take it again.
 
-A saved snapshot carries its format version. popcorn reads formats 2 to 6. Format 6 records the
-peripherals a bus reset holds, such as an STM32 `RCC_xxxRSTR` bit left at 1. A file of an older
-format loads with no peripheral held.
+A saved snapshot carries its format version. popcorn reads formats 2 to 7. Format 7 records the
+reset a RESET_REQUEST stop reported and no run applied yet. A file of an older format loads with
+none pending. Format 6 records the peripherals a bus reset holds, such as an STM32 `RCC_xxxRSTR`
+bit left at 1. A file of an older format loads with no peripheral held.
 
 ## What a restore leaves out
 

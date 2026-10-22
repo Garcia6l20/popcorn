@@ -25,7 +25,7 @@ uv run pytest -q examples/stm32u575/iwdg
   - `machine.reset(kind)` reboots the chip the way that reset does, and the firmware reports
     IWDGRSTF.
   - Without it, the next `run` or `step` applies the reset the stop reported first, as the
-    chip would. A `call` leaves it pending.
+    chip would.
 - `firmware/main.c`: the reset cause, the IWDG setup and the refresh loop.
 
 ## Rebuild the firmware

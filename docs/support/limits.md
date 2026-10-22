@@ -46,6 +46,12 @@ exceptions. They stop the run with a FAULT stop instead:
 
 [Faults and errors](../guide/faults.md) shows both policies.
 
+## Reset requests
+
+- Only a lone Python `Machine` applies the reset a RESET_REQUEST stop reported at its next
+  run, step or free run. A C++ driver of `machine::run_slice` or `host::run` resumes the old code
+  after the stop. A member of a linked system follows `on_member_reset`.
+
 ## ADC
 
 Source: [adc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc.cpp)

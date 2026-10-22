@@ -1183,6 +1183,10 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     returned_at.reset();
   }
   set_exits(exit_list(request));
+  if(not call and not until_thread)
+  {
+    reset_pending.reset();
+  }
   for(;;)
   {
     drain_stale_code();

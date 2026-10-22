@@ -322,10 +322,6 @@ public:
   [[= py::doc{"Apply the reset the last RESET_REQUEST stop reported, if still pending."}]] auto
       apply_pending_reset() -> bool;
 
-  /** @brief Kind of the pending reset, core::machine::reset_pending(). */
-  [[= py::doc{"Kind of the reset the last RESET_REQUEST stop reported, if still pending."}]] auto
-      reset_pending() const -> std::optional<reset_kind>;
-
   /** @brief Cuts the supply and powers the machine again, core::machine::power_cycle(). */
   [[= py::doc{"Cut the supply and power the machine again."}]] void power_cycle();
 

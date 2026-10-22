@@ -6,6 +6,7 @@ import asyncio
 
 import popcorn
 import pytest
+from popcorn._streams import Gated, Waited
 from popcorn.units import ms
 
 from .conftest import Machines
@@ -131,3 +132,20 @@ def test_until_frame_return_after_a_reset_request_resolves_on_the_reset_core(
     stop = asyncio.run(m.run(budget=3_000))
     assert stop.resets == first.resets + 1
     assert same_run(stop, fresh(machines, 3_000))
+
+
+@pytest.mark.parametrize("gated", [False, True])
+def test_a_native_wait_after_a_reset_request_restarts_from_the_reset(
+    machines: Machines, gated: bool
+) -> None:
+    def wait(m: popcorn.Machine) -> Waited:
+        handle = m._handle  # pyright: ignore[reportPrivateUsage]
+        ready = handle.predicate_pc_at(m.address_of("alu_mark") + 2)
+        target = Gated(ready, lambda: False) if gated else ready
+        return asyncio.run(m._wait_until(target, ms(1)))  # pyright: ignore[reportPrivateUsage]
+
+    m, first = requested(machines)
+    waited = wait(m)
+    reference = wait(machines())
+    assert waited.time == reference.time
+    assert asyncio.run(m.run(budget=1)).resets == first.resets + 1
