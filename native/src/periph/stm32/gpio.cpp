@@ -105,6 +105,7 @@ public:
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   void on_bus_reset() override;
+  void on_held_write(std::uint32_t offset, access_ctx ctx) override;
 
   void               drive(std::uint8_t pin, std::optional<bool> level) override;
   void               drive_at(std::uint8_t pin, std::optional<bool> level, vtime at) override;
@@ -291,6 +292,11 @@ void gpio::restore_reset_values()
   }
   state_.lock_step  = 0;
   state_.lock_value = 0;
+}
+
+void gpio::on_held_write(std::uint32_t offset, access_ctx ctx)
+{
+  static_cast<void>(guard(offset & ~3u, ctx, true));
 }
 
 void gpio::on_bus_reset()

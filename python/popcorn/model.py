@@ -426,6 +426,20 @@ class Model(_core.ModelBase):
         if self._initial is not None:
             self.restore(self._initial)
 
+    def on_bus_reset(self) -> None:
+        """The peripheral entered a reset its bus reset bit holds, such as its STM32 RCC reset
+        bit written 1. By default it calls `reset(ResetKind.SOFTWARE)`, as the built-in models
+        reset the same way for both.
+
+        Called on the machine thread, inside the firmware or host access that set the bit, at
+        its virtual time. The machine has already put every register this model does not claim
+        to its reset value. Until the bit is cleared, the machine ignores every write to the
+        peripheral, from the CPU, DMA and debugger alike, and calls no write handler of this
+        model. Reads are served as usual. Events this model scheduled stay queued: cancel them
+        here when the reset must drop them. Never called from a machine reset.
+        """
+        self.reset(ResetKind.SOFTWARE)
+
     def snapshot(self) -> bytes:
         """The model state as bytes: the declared state fields, in declaration order."""
         out = bytearray()
@@ -484,6 +498,9 @@ class Model(_core.ModelBase):
 
     def _reset(self, kind: _core.ResetKind) -> None:
         self.reset(ResetKind(kind.value))
+
+    def _on_bus_reset(self) -> None:
+        self.on_bus_reset()
 
     def _read(self, offset: int, size: int) -> int | None:
         word = self._context.peek(offset & ~3)

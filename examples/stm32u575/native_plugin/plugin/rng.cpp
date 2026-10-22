@@ -68,6 +68,11 @@ auto rng::claims() const -> std::vector<std::string>
   return {cr_->name, dr_->name};
 }
 
+void rng::on_bus_reset()
+{
+  reset(ctx_->regs, popcorn::reset_kind::software);
+}
+
 void rng::reset(popcorn::periph::register_file& regs, popcorn::reset_kind)
 {
   stop();

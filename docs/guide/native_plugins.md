@@ -38,7 +38,7 @@ build script is a pcons script:
 The model registers itself under a name with `POPCORN_PLUGIN`:
 
 ```cpp
---8<-- "stm32u575/native_plugin/plugin/rng.cpp:207:212"
+--8<-- "stm32u575/native_plugin/plugin/rng.cpp:212:217"
 ```
 
 A device is a C++ class bound with nanobind. The bindings module declares it:
@@ -49,7 +49,10 @@ A device is a C++ class bound with nanobind. The bindings module declares it:
 
 `claims()` of a model names its registers, `on_read` and `on_write` serve them, and
 `ctx.events.schedule_at` schedules work in virtual time. `save` and `load` carry the state a
-snapshot keeps. `plugin/saved.hpp` holds the helpers both models of the example use. The C++ API is documented in the
+snapshot keeps. A model that also derives from `popcorn::periph::bus_reset_listener` hears an
+RCC peripheral reset in `on_bus_reset()`, as the example's RNG does on RNGRST. While the reset
+bit is 1 the machine passes it no write, and calls `on_held_write()` instead. A plugin built
+against an older SDK is refused by its digest, so rebuild every plugin after a popcorn update. `plugin/saved.hpp` holds the helpers both models of the example use. The C++ API is documented in the
 [Plugin SDK reference](../reference/sdk/index.md).
 
 ## Cost

@@ -40,6 +40,7 @@ FRAMEWORK_HEADERS = {
     "firewall.hpp",
     "lines.hpp",
     "register_file.hpp",
+    "bus_reset.hpp",
     "core_hold.hpp",
     "reset_listener.hpp",
     "snapshot_listener.hpp",

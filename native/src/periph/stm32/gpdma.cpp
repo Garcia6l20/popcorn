@@ -309,6 +309,7 @@ public:
 
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_bus_reset() override;
+  void               on_held_write(std::uint32_t offset, access_ctx ctx) override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   void               on_request(std::uint32_t request, bool level) override;
   void               on_core_hold(bool held) override;
@@ -570,6 +571,11 @@ gpdma::gpdma(
 void gpdma::reset(register_file&, reset_kind)
 {
   restore_reset_values();
+}
+
+void gpdma::on_held_write(std::uint32_t offset, access_ctx ctx)
+{
+  static_cast<void>(guard(offset & ~3u, ctx, true));
 }
 
 void gpdma::on_bus_reset()

@@ -2,6 +2,7 @@
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/periph/bus_reset.hpp>
 #include <popcorn/periph/model.hpp>
 
 #include <cstddef>
@@ -20,9 +21,9 @@ inline constexpr std::uint64_t conversion_ps = 40'000'000;
  * @brief The STM32U575 RNG of the python_model example's `rngmodel.Rng`, in C++: a seeded
  *        xorshift32 sequence on DR, DRDY one conversion after RNGEN, a DR read or the write
  *        clearing CONDRST, CONDRST cancelling the conversion, the interrupt line following
- *        DRDY while IE is set.
+ *        DRDY while IE is set. RCC_AHB2RSTR1.RNGRST resets it as a machine reset does.
  */
-class rng final : public popcorn::periph::model
+class rng final : public popcorn::periph::model, public popcorn::periph::bus_reset_listener
 {
 public:
   /**
@@ -38,6 +39,7 @@ public:
 
   [[nodiscard]] auto claims() const -> std::vector<std::string> override;
   void               reset(popcorn::periph::register_file& regs, popcorn::reset_kind kind) override;
+  void               on_bus_reset() override;
   auto               on_read(
       popcorn::periph::register_file& regs,
       std::uint32_t                   offset,

@@ -747,6 +747,14 @@ public:
           -> std::uint32_t;
 
   /**
+   * @brief Whether a bus reset holds a peripheral, such as its RCC reset bit at 1.
+   * @param peripheral Peripheral name.
+   * @throws config_error when the peripheral is unknown.
+   */
+  [[= py::doc{"Whether a bus reset holds the peripheral."}]] [[nodiscard]] auto
+      held_in_reset(std::string const& peripheral) -> bool;
+
+  /**
    * @brief Stores a peripheral register value, without write effects.
    * @param peripheral Peripheral name.
    * @param offset Byte offset of the register.

@@ -2,6 +2,7 @@
 #include "python_callable.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/bus_reset.hpp>
 #include <popcorn/periph/model.hpp>
 
 #include <nanobind/nanobind.h>
@@ -36,13 +37,14 @@ auto register_name(peripheral_desc const& desc, std::uint32_t offset) -> std::st
 
 /**
  * @brief nanobind trampoline letting a Python class implement periph::model through the private
- *        methods `_claims`, `_reset`, `_read`, `_write`, `_event`, `_save` and `_load` that
+ *        methods `_claims`, `_reset`, `_on_bus_reset`, `_read`, `_write`, `_event`, `_save` and
+ *        `_load` that
  *        `popcorn.model.Model` defines. Every call takes the GIL. A bus error crosses as a
  *        return value: None from `_read` and False from `_write` become bus_error::denied.
  *        Once its machine's Python side is collected no method is called: the run is asked to
  *        stop, a read returns 0, `claims` and `save` nothing, the others have no effect.
  */
-class python_model final : public periph::model
+class python_model final : public periph::model, public periph::bus_reset_listener
 {
 public:
   NB_TRAMPOLINE(periph::model, 7);
@@ -52,6 +54,12 @@ public:
     gil_entry const gil;
     auto const      result = call("_claims");
     return result ? nb::cast<std::vector<std::string>>(*result) : std::vector<std::string>{};
+  }
+
+  void on_bus_reset() override
+  {
+    gil_entry const gil;
+    call("_on_bus_reset");
   }
 
   void reset(periph::register_file&, reset_kind kind) override

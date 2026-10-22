@@ -1,6 +1,7 @@
 #include "machine_impl.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/bus_reset.hpp>
 
 #include <algorithm>
 #include <format>
@@ -217,12 +218,18 @@ auto machine::run_state::slot(std::string_view name) const -> peripheral_slot&
 
 void machine::do_hold_in_reset(std::string_view peripheral, bool held)
 {
-  auto& slot = run_->slot(peripheral);
-  if(held and not slot.held_in_reset)
+  auto&      slot     = run_->slot(peripheral);
+  auto const entering = held and not slot.held_in_reset;
+  slot.held_in_reset  = held;
+  if(not entering)
   {
-    periph::layer_reset(slot.layout, slot.regs, slot.layer, slot.claimed);
+    return;
   }
-  slot.held_in_reset = held;
+  periph::layer_reset(slot.layout, slot.regs, slot.layer, slot.claimed);
+  if(auto* const listener = dynamic_cast<periph::bus_reset_listener*>(slot.model.get()))
+  {
+    listener->on_bus_reset();
+  }
 }
 
 auto machine::peripheral(std::string_view name) -> periph::register_file&
@@ -233,5 +240,10 @@ auto machine::peripheral(std::string_view name) -> periph::register_file&
 auto machine::model(std::string_view name) -> periph::model*
 {
   return run_->slot(name).model.get();
+}
+
+auto machine::held_in_reset(std::string_view name) const -> bool
+{
+  return run_->slot(name).held_in_reset;
 }
 }

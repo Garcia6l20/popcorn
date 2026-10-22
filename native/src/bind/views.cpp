@@ -421,6 +421,11 @@ void machine_handle::write_register(std::uint32_t index, std::uint64_t value)
   access([&](core::machine& target) { write_register_body(target, index, value)(target); });
 }
 
+auto machine_handle::held_in_reset(std::string const& peripheral) -> bool
+{
+  return access([&](core::machine& target) { return target.held_in_reset(peripheral); });
+}
+
 auto machine_handle::peek(std::string const& peripheral, std::uint32_t offset, std::uint8_t width)
     -> std::uint32_t
 {

@@ -416,6 +416,12 @@ class PeripheralView:
         return self._names
 
     @property
+    def held_in_reset(self) -> bool:
+        """Whether a bus reset bit holds this peripheral in reset, such as its STM32 RCC reset
+        bit at 1. While held, the machine ignores every bus write to the peripheral."""
+        return self._access.handle.held_in_reset(self._name)
+
+    @property
     def port(self) -> UartStream:
         """The host end of this UART, connected on first use, replacing its board endpoint.
 

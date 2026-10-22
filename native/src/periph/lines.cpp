@@ -1,5 +1,6 @@
 #include "line_bus.hpp"
 
+#include <popcorn/periph/bus_reset.hpp>
 #include <popcorn/periph/core_hold.hpp>
 #include <popcorn/periph/lines.hpp>
 #include <popcorn/periph/reset_listener.hpp>
@@ -8,8 +9,12 @@
 namespace popcorn::periph
 {
 core_hold_listener::~core_hold_listener() = default;
-reset_listener::~reset_listener()         = default;
-snapshot_listener::~snapshot_listener()   = default;
+bus_reset_listener::~bus_reset_listener() = default;
+
+void bus_reset_listener::on_held_write(std::uint32_t, access_ctx)
+{}
+reset_listener::~reset_listener()       = default;
+snapshot_listener::~snapshot_listener() = default;
 
 irq_line::irq_line(line_bus& bus, std::uint32_t source) noexcept : bus_{&bus}, source_{source}
 {}

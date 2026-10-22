@@ -5,6 +5,7 @@
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
+#include <popcorn/periph/bus_reset.hpp>
 
 #include <algorithm>
 #include <format>
@@ -594,6 +595,20 @@ auto machine::run_state::dispatch_write(
     note_watched(window.base + offset, size, value, true, by);
     return {};
   }
+  if(slot.held_in_reset)
+  {
+    if(slot.claimed[word] != 0)
+    {
+      if(auto* const listener = dynamic_cast<periph::bus_reset_listener*>(slot.model.get()))
+      {
+        handler_scope const scope{in_handler};
+        listener->on_held_write(offset, context_of(attrs, window.secure_alias));
+      }
+    }
+    trace_mmio(slot, window.base + offset, offset, size, value & size_mask(size), true, by);
+    note_watched(window.base + offset, size, value, true, by);
+    return {};
+  }
   if(slot.claimed[word] != 0)
   {
     auto const old = (slot.regs.peek(word * 4) >> (8 * (offset % 4))) & size_mask(size);
@@ -619,12 +634,6 @@ auto machine::run_state::dispatch_write(
   if(rules == nullptr)
   {
     warn_unregistered(window, offset, true, by);
-    note_watched(window.base + offset, size, value, true, by);
-    return {};
-  }
-  if(slot.held_in_reset)
-  {
-    trace_mmio(slot, window.base + offset, offset, size, value & size_mask(size), true, by);
     note_watched(window.base + offset, size, value, true, by);
     return {};
   }

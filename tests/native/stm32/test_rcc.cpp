@@ -91,7 +91,7 @@ public:
   {}
 };
 
-class reset_counter final : public periph::model, public stm32::bus_reset_listener
+class reset_counter final : public periph::model, public periph::bus_reset_listener
 {
 public:
   int resets{};
@@ -129,6 +129,51 @@ public:
   {}
 };
 
+class write_counter final : public periph::model, public periph::bus_reset_listener
+{
+public:
+  int resets{};
+  int writes{};
+  int held_writes{};
+
+  void on_bus_reset() override
+  {
+    ++resets;
+  }
+  void on_held_write(std::uint32_t, periph::access_ctx) override
+  {
+    ++held_writes;
+  }
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {"POL"};
+  }
+  void reset(periph::register_file&, reset_kind) override
+  {}
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    ++writes;
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+
 struct reset_target
 {
   std::string_view instance;
@@ -155,7 +200,7 @@ struct probe_state
 };
 
 class guarded_probe final : public stm32::dispatch_model<guarded_probe, probe_state>,
-                            public stm32::bus_reset_listener
+                            public periph::bus_reset_listener
 {
 public:
   guarded_probe(periph::model_context& ctx, popcorn::peripheral_desc const& desc);
@@ -168,6 +213,10 @@ public:
   {}
   void on_bus_reset() override
   {}
+  void on_held_write(std::uint32_t offset, periph::access_ctx ctx) override
+  {
+    static_cast<void>(guard(offset & ~3u, ctx, true));
+  }
   auto guard(std::uint32_t, periph::access_ctx const&, bool write) -> stm32::bus_guard
   {
     guarded += write ? 1 : 0;
@@ -864,4 +913,35 @@ TEST_CASE("a peripheral held in reset before the machine has its peripherals is 
         return std::make_shared<reset_counter>();
       });
   CHECK_THROWS_AS((stm32_fixture{u575(), "rcc_ll", std::move(options)}), popcorn::config_error);
+}
+
+TEST_CASE("a plain model held in reset gets on_held_write instead of on_write, once per write")
+{
+  auto options = popcorn::testing::stm32_options();
+  options.models.insert_or_assign(
+      "CRC",
+      [](periph::model_context&, popcorn::peripheral_desc const&)
+          -> std::shared_ptr<periph::model> { return std::make_shared<write_counter>(); });
+  stm32_fixture const f{u575(), "rcc_ll", std::move(options)};
+  auto* const         counter = f.model_of<write_counter>("CRC");
+  REQUIRE(counter != nullptr);
+  auto const& desc = f.target->peripheral("CRC").description();
+  auto const* pol  = popcorn::find_register(desc, "POL");
+  REQUIRE(pol != nullptr);
+  auto const store = [&] {
+    REQUIRE(f.target->mem().write(desc.base + pol->offset, 4, 0x1021).has_value());
+  };
+  store();
+  REQUIRE(counter->writes == 1);
+  popcorn::testing::rcc_reset_write(f, "RCC_AHB1RSTR", "CRCRST", 1);
+  CHECK(counter->resets == 1);
+  store();
+  store();
+  CHECK(counter->writes == 1);
+  CHECK(counter->held_writes == 2);
+  popcorn::testing::rcc_reset_write(f, "RCC_AHB1RSTR", "CRCRST", 1);
+  CHECK(counter->resets == 1);
+  popcorn::testing::rcc_reset_write(f, "RCC_AHB1RSTR", "CRCRST", 0);
+  store();
+  CHECK(counter->writes == 2);
 }

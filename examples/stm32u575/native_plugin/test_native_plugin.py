@@ -331,3 +331,20 @@ def test_an_adc_on_a_gpio_port_the_part_lacks_is_refused(
         )
     assert refused.value.key == "devices.SPI1"
     assert refused.value.expected == "a chip select on a GPIO port of STM32U575QGIx"
+
+
+async def test_rngrst_resets_the_plugin_model_and_holds_its_writes(native_plugin: Machine) -> None:
+    await run_to_done(native_plugin)
+    rng = native_plugin.periph.RNG
+    reset_value = 0x0080_0D00
+    rng.CR.write(1 << RNGEN_BIT)
+    assert rng.CR.value != reset_value
+    native_plugin.periph.RCC.AHB2RSTR1.write(1 << 18)
+    assert rng.held_in_reset
+    assert rng.CR.value == reset_value
+    rng.CR.write(1 << RNGEN_BIT)
+    assert rng.CR.value == reset_value
+    native_plugin.periph.RCC.AHB2RSTR1.write(0)
+    assert not rng.held_in_reset
+    rng.CR.write(1 << RNGEN_BIT)
+    assert rng.CR.value == 1 << RNGEN_BIT

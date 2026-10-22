@@ -824,6 +824,14 @@ public:
    */
   [[nodiscard]] auto model(std::string_view name) -> periph::model*;
 
+  /**
+   * @brief Whether a bus reset holds a peripheral, machine_services::hold_in_reset().
+   * @param name Peripheral name, as the description spells it.
+   * @return True while the hold lasts.
+   * @throws config_error when the description has no such peripheral.
+   */
+  [[nodiscard]] auto held_in_reset(std::string_view name) const -> bool;
+
 private:
   struct engine_closer
   {

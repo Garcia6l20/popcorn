@@ -420,11 +420,11 @@ struct timer
  *        oscillator that drives it or changing PLL1 while it drives it, is refused and logs one
  *        warning per machine life. A started IWDG keeps the LSI on until the next reset, RM0456
  *        section 11.4.16. FLASH programming or erase keeps HSI16 on while it runs, RM0456
- *        sections 7.3.6 and 7.3.7. A 0 to 1 write of an instance's bit in an RCC_xxxRSTR
- *        register, RM0456 11.8.21 to 11.8.28, calls `bus_reset_listener::on_bus_reset()` on
- *        the instance's model when it listens. The bit is `<instance>RST`, or the name of
- *        `reset_bit_names`. `kernel_gate::held_in_reset()` reads the bit. A bit of an instance
- *        with no listening model is storage.
+ *        sections 7.3.6 and 7.3.7. A change of an instance's bit in an RCC_xxxRSTR register,
+ *        RM0456 11.8.21 to 11.8.28, holds or releases the instance through
+ *        `core::machine_services::hold_in_reset()`, which resets its storage and calls its
+ *        model's `periph::bus_reset_listener::on_bus_reset()`. The bit is `<instance>RST`, or
+ *        the name of `reset_bit_names`. `kernel_gate::held_in_reset()` reads the bit.
  *
  *        TrustZone, RM0456 11.5 and Table 117: the bits each `RCC_SECCFGR` bit secures, and the
  *        reset, enable, sleep enable, autonomous enable and kernel clock selection bits of a
@@ -1410,14 +1410,6 @@ template <std::size_t Reg> void rcc::resets_written(std::uint32_t old, std::uint
     }
     auto const held = entry.bit.of(now) != 0;
     ctx_.services.hold_in_reset(entry.instance, held);
-    if(not held)
-    {
-      continue;
-    }
-    if(auto* const listener = dynamic_cast<bus_reset_listener*>(ctx_.peers.find(entry.instance)))
-    {
-      listener->on_bus_reset();
-    }
   }
 }
 

@@ -131,7 +131,7 @@ public:
   {}
 };
 
-class reset_probe final : public clock_probe, public popcorn::periph::stm32::bus_reset_listener
+class reset_probe final : public clock_probe, public popcorn::periph::bus_reset_listener
 {
 public:
   explicit reset_probe(std::size_t& resets) : resets_{resets}

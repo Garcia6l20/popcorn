@@ -59,6 +59,7 @@ public:
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
+  void on_held_write(std::uint32_t offset, access_ctx ctx) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
 
   [[nodiscard]] auto secure_function() const -> bool override;
@@ -139,6 +140,11 @@ syscfg::syscfg(model_context& ctx, peripheral_desc const& desc)
 void syscfg::reset(register_file&, reset_kind)
 {
   restore_reset_values();
+}
+
+void syscfg::on_held_write(std::uint32_t offset, access_ctx ctx)
+{
+  static_cast<void>(guard(offset & ~3u, ctx, true));
 }
 
 void syscfg::on_bus_reset()

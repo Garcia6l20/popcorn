@@ -40,6 +40,11 @@ This model replaces the RNG of the STM32U575 with a counter. The pieces:
   overrides `snapshot()` and `restore()`.
 - The constructor takes the model's own parameters and calls `super().__init__()` first. A model
   never keeps a reference to its `Machine`. Reach other models with `self.peer(name)`.
+- `on_bus_reset()` runs when firmware or a test sets the peripheral's RCC reset bit, on the
+  machine thread at that access's virtual time. By default it calls `reset(ResetKind.SOFTWARE)`.
+  Until the bit is cleared, no write handler runs and writes are ignored. Events the model
+  scheduled stay queued, so cancel them there when the reset must drop them.
+  `machine.periph.RNG.held_in_reset` tells whether the bit holds the peripheral.
 
 ## Put it on the board
 

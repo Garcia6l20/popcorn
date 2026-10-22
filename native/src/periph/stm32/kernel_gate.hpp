@@ -1,6 +1,7 @@
 #pragma once
 
 #include <popcorn/core/clock.hpp>
+#include <popcorn/periph/bus_reset.hpp>
 
 #include <cstddef>
 #include <optional>
@@ -53,33 +54,5 @@ public:
 protected:
   /** @brief Destroys the interface, only through its model. */
   ~kernel_gate() = default;
-};
-
-/**
- * @brief Model told when RCC puts its peripheral in reset through its RCC_xxxRSTR bit. RCC finds
- *        it as the peer model of the instance the bit names. Never called from a model's reset.
- *        A builtin dispatch_model that listens ignores register writes while the bit is 1, and
- *        its construction is a config_error when the part's RCC has no reset bit for it.
- */
-class bus_reset_listener
-{
-public:
-  /** @brief Creates the listener. */
-  bus_reset_listener() = default;
-  /** @brief Not copyable. */
-  bus_reset_listener(bus_reset_listener const&) = delete;
-  /** @brief Not copy-assignable. */
-  auto operator=(bus_reset_listener const&) -> bus_reset_listener& = delete;
-  /** @brief Not movable. */
-  bus_reset_listener(bus_reset_listener&&) = delete;
-  /** @brief Not move-assignable. */
-  auto operator=(bus_reset_listener&&) -> bus_reset_listener& = delete;
-
-  /** @brief The peripheral's reset bit went from 0 to 1. */
-  virtual void on_bus_reset() = 0;
-
-protected:
-  /** @brief Destroys the listener, only through its model. */
-  ~bus_reset_listener() = default;
 };
 }
