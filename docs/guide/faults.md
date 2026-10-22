@@ -50,6 +50,38 @@ A host read or write through `m.mem` that the bus refuses raises `popcorn.BusAcc
 --8<-- "guide/test_faults.py:host"
 ```
 
+## Unmodelled data
+
+A host access over the bus to data no model serves raises `ModelError` and logs nothing,
+whatever `strict` says, with or without TrustZone. The register storage stays reachable:
+
+```python
+--8<-- "guide/test_faults.py:unmodelled"
+```
+
+The WWDG of the STM32U575 has no model, and neither has the CTI at 0xE0042000. `read()` raises,
+`poke()` stores without any model involved, and the `value` getter reads the storage.
+
+Host accesses over the bus are `m.mem` with its `secure` and `nonsecure` views, `m.ref.mem`,
+and a register's `read()`, `write()` and `value` setter. Unmodelled data is:
+
+- every register of a peripheral without a model
+- an offset no register covers inside a modelled peripheral
+- a register a model keeps as storage only, such as every SYSCFG register but `SECCFGR`
+- the STM32U5 and STM32H5 debug blocks without a model: TPIU 0xE0040000, ETM 0xE0041000, CTI
+  0xE0042000, the MCU ROM table 0xE00FE000 and the processor ROM table 0xE00FF000
+
+The `value` getter, the field getters and `poke()` go to the register storage, without the
+model. Firmware and DMA accesses follow other rules:
+
+- A firmware access to a register without a model logs a model warning once per register. Under
+  `strict` it raises `ModelError`.
+- A firmware write to a SYSCFG storage register lands and logs one model warning per register.
+  Under `strict` it raises `ModelError` before the store.
+- A firmware or DMA access to a debug block without a model reads 0 and drops writes, with one
+  model warning per block. Under `strict` it raises `ModelError` naming the block. The ROM tables
+  read 0, not their entries, so a ROM table walk ends at its first entry.
+
 ## Errors
 
 popcorn raises these exceptions, all exported from `popcorn`:

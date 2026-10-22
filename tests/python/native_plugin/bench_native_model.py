@@ -1,5 +1,5 @@
 """The cost of a guest RNG DR read served by a native plugin model and by a Python model, the
-figures of the README's native plugins section.
+figures of the native plugins guide page.
 
 Opt-in, `POPCORN_BENCH=1`, on a quiet host. No pass criterion: the numbers are recorded. The
 plugin is the native_plugin example's, the Python model the python_model example's, both on the

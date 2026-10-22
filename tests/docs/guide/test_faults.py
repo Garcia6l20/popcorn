@@ -61,3 +61,15 @@ def test_a_host_read_at_address_0_raises(stops: popcorn.Machine) -> None:
     with pytest.raises(popcorn.BusAccessError):
         stops.mem.u32[0]
     # --8<-- [end:host]
+
+
+async def test_unmodelled_data_is_reachable_through_the_storage(stops: popcorn.Machine) -> None:
+    # --8<-- [start:unmodelled]
+    cr = stops.periph.WWDG.CR
+    with pytest.raises(popcorn.ModelError):
+        cr.read()
+    cr.poke(0x7F)
+    assert cr.value == 0x7F
+    with pytest.raises(popcorn.ModelError):
+        stops.mem.u32[0xE004_2000]
+    # --8<-- [end:unmodelled]
