@@ -150,7 +150,6 @@ async def test_without_the_board_model_the_built_in_rng_serves_the_firmware(
     await run_to_done(machine)
     got = received(machine)
     assert got == rng_words(0, COUNT)
-    assert got != list(itertools.islice(words(1), COUNT))
 
 
 async def test_the_firmware_gets_the_seeded_sequence(native_plugin: Machine) -> None:

@@ -32,14 +32,15 @@ uv run pytest -q examples/stm32u575/rng
 - `conftest.py`: the description, and a `seeded` config with `rng=RngOptions(seed=0x5EED)`
   served by the `rng_seeded` fixture.
 - `test_rng.py`:
-  - the key equals `rng_words(0, 16)` packed little-endian, run parked and inside
-    `machine.running()`;
-  - the `seeded` config gives `rng_words(0x5EED, 16)`;
-  - `entropy.queue(...)` hands the firmware a chosen key;
-  - `entropy.seed_fault_after = 8`: 8 good words, then SECS, status 1;
-  - `entropy.seed_fault = True` and `entropy.clock_fault = True`: status 1 and 2, no word kept;
-  - `entropy.stuck = 0x12345678`: status 3 at the second word;
-  - `machine.watch(0x420C0808, kind=WatchKind.READ, ...)` sees each word the firmware reads;
+  - the 64 bytes of `rng_key.key`, read with `machine.mem.read`, equal `rng_words(0, 16)`
+    little-endian, run parked and inside `machine.running()`. RNGEN, HSI48ON and HSI48RDY read 0
+    after the run, and `entropy.drawn` stays put
+  - the `seeded` config gives `rng_words(0x5EED, 16)`
+  - `entropy.queue(...)` hands the firmware a chosen key
+  - `entropy.seed_fault_after = 8`: 8 good words, then SECS, status 1
+  - `entropy.seed_fault = True` and `entropy.clock_fault = True`: status 1 and 2, no word kept
+  - `entropy.stuck = 0x12345678`: status 3 at the second word
+  - `machine.watch(0x420C0808, kind=WatchKind.READ, ...)` sees each word the firmware reads
   - `rng_use_hsi48` cleared before the run leaves HSI48 off: the RNG kernel clock is stopped and
     the clock checker sets CECS, status 2.
 - `firmware/main.c`: the LL sequence and the checks.

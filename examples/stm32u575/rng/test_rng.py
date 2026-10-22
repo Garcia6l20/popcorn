@@ -14,9 +14,9 @@ import struct
 from collections.abc import Awaitable, Callable
 
 import pytest
-from popcorn import Machine, MachineDescription, StopReason, WatchKind
+from popcorn import Machine, StopReason, WatchKind
 from popcorn.board import rng_words
-from popcorn.pytest import MachineFactory
+from popcorn.units import ms
 
 pytestmark = pytest.mark.popcorn(budget=1_000_000)
 
@@ -46,17 +46,24 @@ def read_key(machine: Machine) -> tuple[int, list[int]]:
     return int(result.status.value), [int(result.key[index].value) for index in range(count)]
 
 
-def packed(words: list[int]) -> bytes:
-    return struct.pack(f"<{len(words)}I", *words)
+def key_bytes(machine: Machine) -> bytes:
+    return machine.mem.read(machine.var("rng_key").key.address, 4 * WORDS)
 
 
 @pytest.mark.parametrize("run", [generated, generated_running])
 async def test_the_key_is_the_seed_0_words(rng: Machine, run: Run) -> None:
     status, key = await run(rng)
     assert status == OK
+    assert key == rng_words(0, WORDS)
     expected = b"".join(word.to_bytes(4, "little") for word in rng_words(0, WORDS))
-    assert len(expected) == 64
-    assert packed(key) == expected
+    assert key_bytes(rng) == expected
+    rcc = rng.periph.RCC
+    assert rng.periph.RNG.CR.RNGEN == 0
+    assert rcc.RCC_CR.HSI48ON == 0
+    assert rcc.RCC_CR.HSI48RDY == 0
+    drawn = rng.periph.RNG.entropy.drawn
+    await rng.run(for_=ms(1))
+    assert rng.periph.RNG.entropy.drawn == drawn
 
 
 async def test_a_seeded_config_gives_the_words_of_its_seed(rng_seeded: Machine) -> None:
@@ -69,9 +76,9 @@ async def test_a_seeded_config_gives_the_words_of_its_seed(rng_seeded: Machine) 
 async def test_queued_words_become_the_key(rng: Machine) -> None:
     chosen = bytes(range(0x40, 0x80))
     rng.periph.RNG.entropy.queue(struct.unpack("<16I", chosen))
-    status, key = await generated(rng)
+    status, _ = await generated(rng)
     assert status == OK
-    assert packed(key) == chosen
+    assert key_bytes(rng) == chosen
 
 
 @pytest.mark.parametrize("run", [generated, generated_running])
@@ -111,11 +118,8 @@ async def test_a_dr_watch_sees_every_word_of_the_key(rng: Machine) -> None:
     assert [hit.value for hit in watch.hits] == key
 
 
-async def test_hsi48_left_off_is_a_clock_error(
-    machine_factory: MachineFactory, rng_description: MachineDescription
-) -> None:
-    machine = await machine_factory.booted(rng_description)
-    machine.var("rng_use_hsi48").value = 0
-    status, key = await generated(machine)
+async def test_hsi48_left_off_is_a_clock_error(rng: Machine) -> None:
+    rng.var("rng_use_hsi48").value = 0
+    status, key = await generated(rng)
     assert status == CLOCK_ERROR
     assert key == []

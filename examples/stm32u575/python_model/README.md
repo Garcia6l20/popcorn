@@ -5,13 +5,12 @@ for eight random words, one `HAL_RNG_GenerateRandomNumber_IT` at a time. Each wo
 `HAL_RNG_ReadyDataCallback`, which stores it in `rng_result`. The main loop sleeps in WFI
 while it waits.
 
-popcorn has a built-in RNG model, the `rng` example uses it. A board model replaces it:
-`rngmodel.Rng` is a `popcorn.model.Model` written next to the test that serves CR and DR: RNGEN starts a conversion of 40 us of virtual
-time, DRDY and the RNG interrupt follow, and each DR read returns the next word of a seeded
-xorshift32 sequence. A CONDRST write cancels the conversion in progress and clears SR, and
-clearing CONDRST with RNGEN set starts a new one. Clearing RNGEN stops production and keeps
-DRDY. The model docstring lists what it simplifies
-and leaves out.
+popcorn has a built-in RNG model, used by the `rng` example. `rngmodel.Rng` replaces it on the
+board. It is a `popcorn.model.Model` written next to the test that serves CR and DR: RNGEN starts a
+conversion of 40 us of virtual time, DRDY and the RNG interrupt follow, and each DR read returns the
+next word of a seeded xorshift32 sequence. A CONDRST write cancels the conversion in progress and
+clears SR, and clearing CONDRST with RNGEN set starts a new one. Clearing RNGEN stops production and
+keeps DRDY. The model docstring lists what it simplifies and leaves out.
 
 ## Run
 

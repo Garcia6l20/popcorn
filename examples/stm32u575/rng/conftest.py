@@ -4,7 +4,6 @@ from pathlib import Path
 
 import popcorn
 import popcorn.pytest
-import pytest
 from popcorn.board import RngOptions
 
 HERE = Path(__file__).parent
@@ -27,9 +26,4 @@ def rng() -> popcorn.MachineDescription:
 
 @popcorn.pytest.machine(config="seeded")
 def rng_seeded() -> popcorn.MachineDescription:
-    return RNG
-
-
-@pytest.fixture(scope="session")
-def rng_description() -> popcorn.MachineDescription:
     return RNG
