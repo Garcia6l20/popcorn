@@ -26,6 +26,16 @@ pointer does:
 Nothing is mapped at address 0 on the STM32U5, as on silicon. A load or store through a null
 pointer stops the same way, with PRECISERR and BFARVALID set and BFAR 0.
 
+Fault classes and addresses:
+
+- An alignment abort, such as an unaligned LDREX, is a UsageFault with UNALIGNED set in CFSR,
+  not a BusFault.
+- A data abort reports the data address the access faulted at, not the PC.
+- An access the bus firewall refuses with a bus error is a precise BusFault with BFAR set to the
+  address. A Non-secure load from a Secure peripheral, such as GTZC TZSC, is one.
+- A bus error a peripheral model raises is an imprecise BusFault with no BFAR. A Python model
+  raises one by returning `None` from an `on_read` handler.
+
 A failing test's report decodes the fault registers and shows the call stack.
 
 ## The firmware takes the fault
@@ -44,7 +54,8 @@ SHCSR: IPSR reads 3 and HFSR has FORCED set. Some faults stop the run under both
 ## Host accesses
 
 A host read or write through `m.mem` that the bus refuses raises `popcorn.BusAccessError`, a
-`popcorn.EmulationError`. It does not fault the core.
+`popcorn.EmulationError`. It does not fault the core. `denied` is False when nothing is mapped at
+the address, as at address 0, and True when a security attribute refuses the access.
 
 ```python
 --8<-- "guide/test_faults.py:host"

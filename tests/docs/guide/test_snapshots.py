@@ -62,8 +62,9 @@ async def test_another_description_refuses_the_file(
     # --8<-- [start:refused]
     button.snapshot().save(tmp_path / "boot.snap")
     other = await machine_factory.booted(BUTTON.replace(faults="handler"))
-    with pytest.raises(ConfigError):
+    with pytest.raises(ConfigError) as refused:
         other.load_snapshot(tmp_path / "boot.snap")
+    assert "config_digest" in str(refused.value)
     # --8<-- [end:refused]
     assert isinstance(Snapshot.load(tmp_path / "boot.snap"), Snapshot)
 
@@ -71,11 +72,14 @@ async def test_another_description_refuses_the_file(
 async def test_hooks_and_probes_survive_a_restore(button: popcorn.Machine) -> None:
     # --8<-- [start:hooks]
     pressed = button.probe("HAL_GPIO_EXTI_Falling_Callback")
+    button.intercept("HAL_GPIO_TogglePin", lambda call: call.returns(None))
     snapshot = button.snapshot()
     await press(button)
     assert pressed.count == 1
+    assert not button.periph.GPIOA.pin(5).level
 
     button.restore(snapshot)
     await press(button)
     assert pressed.count == 2
+    assert not button.periph.GPIOA.pin(5).level
     # --8<-- [end:hooks]

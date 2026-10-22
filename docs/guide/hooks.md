@@ -56,8 +56,9 @@ the original.
 holds the entry arguments, the return value and the instructions the call took. The function needs a
 DWARF signature.
 
-`machine.record_returns(fn, convert)` records each return with its virtual time and no GIL
-without `convert`:
+`machine.record_returns(fn, convert)` records each return with its virtual time. Without
+`convert`, the machine thread appends the entries natively with no GIL. With `convert`, as
+below, each return takes the GIL:
 
 ```python
 --8<-- "guide/test_hooks.py:record"
@@ -92,7 +93,7 @@ holding the GIL, so prefer a probe or a recording when you only count.
 ```
 
 `machine.probe(target)` counts the core's arrivals at an address natively. It takes no handler and
-never takes the GIL, so it costs nothing on the machine thread. `probe.count` and
+takes no GIL. `probe.count` and
 `probe.first_at` read the result at any time. `await probe.hit(within=)` waits for the first
 arrival. A probe never stops the run.
 
@@ -133,7 +134,8 @@ argument count and types come from DWARF when the image has them. When the call 
 registers and the execution context come back as they were. Writes to memory and to the
 peripherals stay.
 
-`reset=True` or `reset=snapshot` restores a state first. `budget=` bounds the call. An exception
+The call runs with interrupts masked unless you pass `interrupts=True`. `reset=True` or
+`reset=snapshot` restores a state first. `budget=` bounds the call. An exception
 a handler or a model raises during the call ends it and restores the context the same way.
 
 ## Which one to use

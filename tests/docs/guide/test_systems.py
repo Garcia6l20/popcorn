@@ -1,13 +1,15 @@
-# --8<-- [start:describe]
 from pathlib import Path
+from typing import cast
 
 import popcorn
 import popcorn.pytest
-from popcorn import StopReason, System
+import pytest
+from popcorn import LineState, StopReason, System
 from popcorn.units import VirtualTime, ms, us
 
 PREBUILT = Path(__file__).parents[3] / "examples/stm32u575/linked_uart/prebuilt"
 
+# --8<-- [start:describe]
 CONTROLLER = popcorn.MachineDescription(
     part="STM32U575QGIx",
     images=[popcorn.Elf(PREBUILT / "linked_controller.elf")],
@@ -87,3 +89,27 @@ async def test_a_member_waits_while_the_system_runs(system: System) -> None:
         await controller.elapse(ms(1))
     assert system.members["responder1"].var("node_id").value == 1
     # --8<-- [end:running]
+
+
+@pytest.mark.parametrize(("line", "errors"), [("idle", 0), ("break", 1)])
+async def test_a_break_line_ends_the_reception_with_an_error(
+    system: System, line: str, errors: int
+) -> None:
+    await system.run(for_=ms(1))
+    tap = system.tap("controller.UART4")
+    failed = system.members["responder1"].probe("HAL_UART_ErrorCallback")
+    now = max(system.time_of(end.partition(".")[0]) for end in tap.ends)
+    start = VirtualTime(now.ps + ms(15).ps)
+    tap.cut(start, VirtualTime(start.ps + ms(30).ps), line=cast(LineState, line))
+    await system.run(for_=ms(60))
+    assert (failed.count > 0) == bool(errors)
+
+
+async def test_a_script_boots_and_links_in_one_call() -> None:
+    system = await SYSTEM.boot()
+    try:
+        stop = await system.run(for_=ms(1))
+        assert stop.reason is StopReason.TIME
+        assert system.members["responder1"].var("node_id").value == 1
+    finally:
+        system.close()

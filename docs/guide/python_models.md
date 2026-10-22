@@ -21,15 +21,18 @@ sits in a hot loop costs time. A [native plugin](native_plugins.md) is the same 
 This model replaces the RNG of the STM32U575 with a counter. The pieces:
 
 - `@on_write("CR")` and `@on_read("DR")` claim registers by name. A register answers to its bare
-  name and to its SVD name, `CR` and `RNG_CR`. A handler runs with the core paused at an
-  instruction boundary. `on_write` gets the old and the new value, `on_read` returns the value, or
-  `None` for a bus error.
+  name and to its SVD name where the SVD prefixes registers, such as `CR` and `RCC_CR` on RCC.
+  The RNG has no such alias. A handler runs with the core paused at an instruction boundary.
+  `on_write` gets the old and the new value, after the new value is stored, and returns `None`, or
+  `False` for a bus error, which puts the old value back. `on_read` returns the value, or `None`
+  for a bus error.
 - Every register without a handler keeps its storage and its described reset value. No Python
   runs for it.
 - `self.regs.SR` reads and writes stored register values. `self.fields.SR.DRDY` is the mask of a
   field.
 - `self.schedule(delay, callback)` runs `callback` after a virtual delay and returns a handle.
-  `self.cancel(handle)` withdraws it.
+  `callback` must be a method of the model, bound to it, because snapshots save pending events
+  by method name. Anything else raises `TypeError`. `self.cancel(handle)` withdraws the event.
 - An attribute annotated `IrqLine` receives the peripheral's interrupt line. `raise_()` and
   `lower()` drive it.
 - Annotated `int`, `bool`, `float`, `bytes`, `bytearray` and `str` attributes are the state that

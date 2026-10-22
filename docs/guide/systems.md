@@ -17,8 +17,9 @@ other member's UART as the line would carry it, with a latency you choose.
   member boots from the boot snapshot of its own description, the one a machine fixture of that
   description uses, so the system adds no boot.
 
-Without pytest, `SystemDescription.machines()` builds the machines, `boot_machine()` boots each
-one, and `SystemDescription.link(machines)` returns the `System`. Call `system.close()` when done.
+In a script, `await SYSTEM.boot()` builds the machines, boots each one and links them, and
+`system.close()` ends the system. `SystemDescription.machines()`, `boot_machine()` and
+`link(machines)` are the three steps it runs.
 
 ## Run it
 

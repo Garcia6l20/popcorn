@@ -2,6 +2,7 @@ from pathlib import Path
 
 import popcorn
 import popcorn.pytest
+import pytest
 from popcorn import StopReason
 from popcorn.model import IrqLine, Model, on_read, on_write
 from popcorn.units import ms, us
@@ -98,7 +99,18 @@ async def test_the_firmware_reads_the_words_of_the_model(counting: popcorn.Machi
 
 async def test_a_register_answers_to_its_svd_name(counting: popcorn.Machine) -> None:
     # --8<-- [start:names]
-    rcc = next(p for p in counting.description.peripherals if p.name == "RCC")
-    assert rcc.register("RCC_CR").name == "CR"
-    assert counting.periph.RCC.CR.value == counting.periph.RCC.RCC_CR.value
+    peripherals = {p.name: p for p in counting.description.peripherals}
+    assert peripherals["RCC"].register("RCC_CR").name == "CR"
+    assert counting.periph.TIM1.CR1.value == counting.periph.TIM1.TIM1_CR1.value
+    with pytest.raises(KeyError):
+        peripherals["RNG"].register("RNG_CR")
     # --8<-- [end:names]
+
+
+async def test_the_model_sees_the_stored_value_and_schedules_methods(
+    counting: popcorn.Machine,
+) -> None:
+    model = counting.model("RNG")
+    assert isinstance(model, Counter)
+    with pytest.raises(TypeError):
+        model.schedule(us(1), lambda: None)

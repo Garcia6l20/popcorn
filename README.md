@@ -18,7 +18,7 @@ uv pip install "popcorn[pytest] @ git+<repository-url>"
 ## Example
 
 This test boots the gpio example firmware, presses the button on PC13 once and checks the LED on
-PA5 and the press counter:
+PA5 and the press counter. The guide explains it line by line.
 
 ```python
 import popcorn
@@ -41,16 +41,18 @@ async def test_a_press_turns_the_led_on(button: popcorn.Machine) -> None:
     pin = button.periph.GPIOC.pin(13)
     for level in (1, 0, 1):
         pin.level = level
-        await button.run(for_=ms(1))
+        stop = await button.run(for_=ms(1))
+        assert stop.reason is popcorn.StopReason.TIME
     assert button.periph.GPIOA.pin(5).level
     assert button.var("presses").value == 1
 ```
 
 ## Documentation
 
-The guide, the support tables, the API reference and the developer notes are in `docs/`. Build
-them with `uv run python -m popcorn_build.docs`. The examples under `examples/` are complete
-firmware projects with their tests.
+The guide, the support tables, the API reference and the developer notes are published at
+https://garcia6l20.github.io/popcorn/. Their sources are in `docs/`. Build them with
+`uv run pcons -B build`, then `uv run python -m popcorn_build.docs`. The examples under
+`examples/` are complete firmware projects with their tests.
 
 ## License
 

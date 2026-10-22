@@ -1,3 +1,5 @@
+import ast
+import re
 from pathlib import Path
 
 import popcorn
@@ -52,6 +54,33 @@ async def test_the_firmware_reads_the_words_of_the_native_model(native: popcorn.
 def test_an_unknown_model_name_is_refused() -> None:
     # --8<-- [start:unknown]
     broken = NATIVE.replace(board={"RNG": popcorn.Periph(model=PLUGIN.model("nothing"))})
-    with pytest.raises(ConfigError):
+    with pytest.raises(ConfigError) as refused:
         broken.machine()
+    assert "one of rng" in str(refused.value)
     # --8<-- [end:unknown]
+
+
+def test_a_plugin_model_is_not_a_use() -> None:
+    model = NATIVE.board["RNG"].model
+    assert not isinstance(model, popcorn.Use)
+    assert model == PLUGIN.model("rng")
+
+
+def calls(source: str) -> list[str]:
+    tree = ast.parse(source)
+    return [
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    ]
+
+
+def test_the_packaged_script_is_the_dev_script_plus_wheel() -> None:
+    readme = (EXAMPLE / "README.md").read_text()
+    packaged = next(
+        block
+        for block in re.findall(r"```python\n(.*?)```", readme, re.DOTALL)
+        if "PluginProject" in block and "wheel" in block
+    )
+    dev = (EXAMPLE / "plugin/popcorn-plugin.py").read_text()
+    assert calls(packaged) == [*calls(dev), "wheel"]
