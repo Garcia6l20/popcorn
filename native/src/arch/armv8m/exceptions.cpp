@@ -135,6 +135,33 @@ void put_bit(std::vector<std::uint32_t>& bits, std::uint32_t number, bool value)
   bits[number / 32] = value ? bits[number / 32] | mask : bits[number / 32] & ~mask;
 }
 
+namespace
+{
+template <typename Visit> void for_each_active(exception_state const& exceptions, Visit&& visit)
+{
+  auto const count = exceptions.priority.size();
+  auto const words = std::min(exceptions.active.size(), (count + 31) / 32);
+  for(std::size_t word = 0; word < words; ++word)
+  {
+    auto bits = exceptions.active[word];
+    if(word == 0)
+    {
+      bits &= ~1u;
+    }
+    for(; bits != 0; bits &= bits - 1)
+    {
+      auto const number = static_cast<std::uint32_t>(word * 32)
+                        + static_cast<std::uint32_t>(std::countr_zero(bits));
+      if(number >= count)
+      {
+        return;
+      }
+      visit(number);
+    }
+  }
+}
+}
+
 auto priority_of(exception_state const& exceptions, std::uint32_t number) noexcept -> int
 {
   if(number == exc_nmi)
@@ -154,13 +181,9 @@ auto execution_priority(
     masks                  held) noexcept -> int
 {
   auto priority = 256;
-  for(std::uint32_t number = 1; number < exceptions.priority.size(); ++number)
-  {
-    if(test_bit(exceptions.active, number))
-    {
-      priority = std::min(priority, group_priority(priority_of(exceptions, number), prigroup));
-    }
-  }
+  for_each_active(exceptions, [&](std::uint32_t number) {
+    priority = std::min(priority, group_priority(priority_of(exceptions, number), prigroup));
+  });
   if(held.basepri != 0)
   {
     priority = std::min(priority, group_priority(held.basepri, prigroup));
@@ -242,16 +265,12 @@ auto execution_priority(
     masks                  nonsecure) noexcept -> int
 {
   auto raw = 256;
-  for(std::uint32_t number = 1; number < exceptions.priority.size(); ++number)
-  {
-    if(test_bit(exceptions.active, number))
-    {
-      auto const state = banked(number)
-                           ? security::secure
-                           : exception_target(exceptions, config, number, security::secure);
-      raw              = std::min(raw, exception_priority(exceptions, config, number, state, true));
-    }
-  }
+  for_each_active(exceptions, [&](std::uint32_t number) {
+    auto const state = banked(number)
+                         ? security::secure
+                         : exception_target(exceptions, config, number, security::secure);
+    raw              = std::min(raw, exception_priority(exceptions, config, number, state, true));
+  });
   auto boosted = 256;
   if(config.trustzone)
   {

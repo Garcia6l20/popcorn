@@ -382,6 +382,77 @@ TEST_CASE("without TrustZone the banked execution_priority equals the one-bank o
   }
 }
 
+TEST_CASE("execution_priority over active exceptions in every word equals a scan of each number")
+{
+  std::mt19937_64 random{0x1d1e'5b17u};
+  for(int round = 0; round < 2000; ++round)
+  {
+    auto exceptions = exceptions_with(110);
+    for(auto& byte : exceptions.priority)
+    {
+      byte = static_cast<std::uint8_t>(random() & 0xf0u);
+    }
+    for(auto& byte : exceptions.nonsecure_priority)
+    {
+      byte = static_cast<std::uint8_t>(random() & 0xf0u);
+    }
+    for(auto& word : exceptions.targets_nonsecure)
+    {
+      word = static_cast<std::uint32_t>(random());
+    }
+    auto const word_set = static_cast<std::size_t>(random() % exceptions.active.size());
+    exceptions.active[word_set] =
+        static_cast<std::uint32_t>(random()) & static_cast<std::uint32_t>(random());
+    if((random() & 1u) != 0)
+    {
+      exceptions.active[random() % exceptions.active.size()] |=
+          1u << static_cast<std::uint32_t>(random() % 32);
+    }
+    exceptions.nonsecure_active = static_cast<std::uint32_t>(random())
+                                & static_cast<std::uint32_t>(random())
+                                & static_cast<std::uint32_t>(random());
+    auto const config           = with(tz, [&](auto& c) {
+      c.trustzone          = (random() & 3u) != 0;
+      c.bfhfnmins          = (random() & 1u) != 0;
+      c.pris               = (random() & 1u) != 0;
+      c.prigroup           = static_cast<std::uint32_t>(random() % 8);
+      c.prigroup_nonsecure = static_cast<std::uint32_t>(random() % 8);
+    });
+    auto const count            = static_cast<std::uint32_t>(exceptions.priority.size());
+    auto       one              = 256;
+    auto       raw              = 256;
+    for(std::uint32_t number = 1; number < count; ++number)
+    {
+      if(armv8m::test_bit(exceptions.active, number))
+      {
+        one = std::min(
+            one, armv8m::group_priority(armv8m::priority_of(exceptions, number), config.prigroup));
+        auto const state =
+            armv8m::banked(number)
+                ? security::secure
+                : armv8m::exception_target(exceptions, config, number, security::secure);
+        raw = std::min(raw, armv8m::exception_priority(exceptions, config, number, state, true));
+      }
+    }
+    if(config.trustzone)
+    {
+      for(std::uint32_t number = 1; number < 16; ++number)
+      {
+        if(armv8m::banked(number) and ((exceptions.nonsecure_active >> number) & 1u) != 0)
+        {
+          raw = std::min(
+              raw,
+              armv8m::exception_priority(exceptions, config, number, security::nonsecure, true));
+        }
+      }
+    }
+    CAPTURE(round);
+    CAPTURE(word_set);
+    CHECK(armv8m::execution_priority(exceptions, config.prigroup, {}) == one);
+    CHECK(armv8m::execution_priority(exceptions, config, {}, {}) == raw);
+  }
+}
+
 TEST_CASE("without TrustZone EXC_RETURN keeps S, DCRS and ES set for the six entry cases")
 {
   using armv8m::encode_exc_return;
