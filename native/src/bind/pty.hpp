@@ -91,8 +91,12 @@ private:
  * @brief A host pty bridged to a byte link: host tools open path() like a serial port. Owns both
  *        ends of the pty and keeps the slave open, so the master never reads EIO or polls
  *        POLLHUP while no tool has the pty open. Through that slave it clears TIOCEXCL when the
- *        link's device detaches or attaches, as a re-enumerated device is a fresh port. pump() and
- * discard() run on the thread that owns the engine, the others on any thread.
+ *        last tool closes the pty, as the last close of a serial port frees it, and when the
+ *        link's device detaches or attaches, as a re-enumerated device is a fresh port. The
+ *        kernel keeps the flag on a pty while the master is open, and refuses the slave open the
+ *        clearing needs once it is set, so the bridge watches the closes of path() through
+ *        inotify and scans /proc for another tool holding it. pump() and discard() run on the
+ * thread that owns the engine, the others on any thread.
  */
 class pty_bridge
 {
@@ -119,6 +123,12 @@ public:
   [[nodiscard]] auto master() const noexcept -> int
   {
     return master_.get();
+  }
+
+  /** @brief The descriptor that turns readable when a tool closes the pty, for a poller. */
+  [[nodiscard]] auto clients_watch() const noexcept -> int
+  {
+    return clients_watch_.get();
   }
 
   /** @brief Whether bytes for the host wait for room in the pty. Lock-free, any thread. */
@@ -162,11 +172,15 @@ private:
   std::string                        name_;
   unique_fd                          master_;
   unique_fd                          slave_;
+  unique_fd                          clients_watch_;
   std::string                        path_;
   std::shared_ptr<pty_link>          link_;
   std::vector<std::uint8_t>          outgoing_;
   std::shared_ptr<std::atomic<bool>> wants_write_ = std::make_shared<std::atomic<bool>>(false);
   bool                               overflowed_  = false;
+
+  void               release_exclusive_after_last_close();
+  [[nodiscard]] auto held_by_a_client() const -> bool;
 };
 
 /** @brief A UART as a pty link: host bytes enter its receiver, the low 8 bits of each frame out. */

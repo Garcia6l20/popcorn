@@ -2,6 +2,7 @@
 
 #include <fcntl.h>
 #include <pty.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -10,6 +11,7 @@
 #include <array>
 #include <cerrno>
 #include <climits>
+#include <filesystem>
 #include <format>
 #include <ranges>
 #include <system_error>
@@ -84,7 +86,68 @@ pty_bridge::pty_bridge(std::string name, std::unique_ptr<pty_link> link)
     errno = failed;
     fail("ttyname_r");
   }
-  path_ = found.data();
+  path_          = found.data();
+  clients_watch_ = unique_fd{::inotify_init1(IN_NONBLOCK | IN_CLOEXEC)};
+  if(clients_watch_.get() < 0
+     or ::inotify_add_watch(clients_watch_.get(), path_.c_str(), IN_CLOSE) < 0)
+  {
+    fail("inotify");
+  }
+}
+
+void pty_bridge::release_exclusive_after_last_close()
+{
+  std::array<char, 4096> buffer{};
+  bool                   closed = false;
+  for(;;)
+  {
+    auto const got = ::read(clients_watch_.get(), buffer.data(), buffer.size());
+    if(got > 0 or (got < 0 and errno == EINTR))
+    {
+      closed = closed or got > 0;
+    }
+    else
+    {
+      break;
+    }
+  }
+  if(closed and not held_by_a_client())
+  {
+    (void)::ioctl(slave_.get(), TIOCNXCL);
+  }
+}
+
+auto pty_bridge::held_by_a_client() const -> bool
+{
+  namespace fs              = std::filesystem;
+  auto const      own_pid   = std::to_string(::getpid());
+  auto const      own_slave = std::to_string(slave_.get());
+  auto const      skip      = fs::directory_options::skip_permission_denied;
+  std::error_code failed;
+  for(fs::directory_iterator process{"/proc", skip, failed};
+      not failed and process != fs::directory_iterator{}; process.increment(failed))
+  {
+    auto const pid = process->path().filename().string();
+    if(pid.empty() or not std::ranges::all_of(pid, [](char c) { return c >= '0' and c <= '9'; }))
+    {
+      continue;
+    }
+    std::error_code unreadable;
+    for(fs::directory_iterator fd{process->path() / "fd", skip, unreadable};
+        not unreadable and fd != fs::directory_iterator{}; fd.increment(unreadable))
+    {
+      std::error_code gone;
+      if(fs::read_symlink(fd->path(), gone) != path_ or gone)
+      {
+        continue;
+      }
+      if(pid != own_pid or fd->path().filename().string() != own_slave)
+      {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 auto pty_bridge::pump() -> std::optional<std::string>
@@ -117,6 +180,7 @@ auto pty_bridge::take_input() -> std::vector<std::uint8_t>
 
 auto pty_bridge::flush() -> std::optional<std::string>
 {
+  release_exclusive_after_last_close();
   if(link_->device_changed())
   {
     (void)::ioctl(slave_.get(), TIOCNXCL);

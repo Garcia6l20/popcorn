@@ -3,10 +3,13 @@
 #include <doctest/doctest.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -194,4 +197,41 @@ TEST_CASE("destruction closes both ends of the pty")
     std::ignore = bridge.pump();
   }
   CHECK_FALSE(holds_pty(path));
+}
+
+TEST_CASE("a pty opens again once the last client closed it")
+{
+  std::vector<std::uint8_t> pending;
+  std::vector<std::uint8_t> received;
+  pty_bridge                bridge{"USART1", std::make_unique<fake_link>(pending, received)};
+
+  auto const first = open_client(bridge.path());
+  REQUIRE(::ioctl(first, TIOCEXCL) == 0);
+  std::ignore = bridge.pump();
+  CHECK(::open(bridge.path().c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC) == -1);
+  CHECK(errno == EBUSY);
+
+  ::close(first);
+  std::ignore      = bridge.pump();
+  auto const again = open_client(bridge.path());
+  ::close(again);
+}
+
+TEST_CASE("a pty stays exclusive until every client closed it")
+{
+  std::vector<std::uint8_t> pending;
+  std::vector<std::uint8_t> received;
+  pty_bridge                bridge{"USART1", std::make_unique<fake_link>(pending, received)};
+
+  auto const early = open_client(bridge.path());
+  auto const late  = open_client(bridge.path());
+  REQUIRE(::ioctl(late, TIOCEXCL) == 0);
+  ::close(late);
+  std::ignore = bridge.pump();
+  CHECK(::open(bridge.path().c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC) == -1);
+  CHECK(errno == EBUSY);
+
+  ::close(early);
+  std::ignore = bridge.pump();
+  ::close(open_client(bridge.path()));
 }

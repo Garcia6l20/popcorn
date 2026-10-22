@@ -669,7 +669,9 @@ auto machine_handle::open_pty(std::string name, std::unique_ptr<detail::pty_link
       host_->watch(core::member_id{}, bridge->master(), [wants = bridge->wants_write_flag()] {
         return wants->load(std::memory_order_relaxed);
       });
-  return pty_handle{ptys_, bridge, host_, watched};
+  auto const watched_clients =
+      host_->watch(core::member_id{}, bridge->clients_watch(), [] { return false; });
+  return pty_handle{ptys_, bridge, host_, watched, watched_clients};
 }
 
 auto detail::lock_ptys(pty_bridges& ptys) -> std::unique_lock<std::mutex>
@@ -692,9 +694,10 @@ pty_handle::pty_handle(
     std::weak_ptr<detail::pty_bridges>         owner,
     std::shared_ptr<detail::pty_bridge> const& bridge,
     std::weak_ptr<core::host>                  host,
-    core::watch_id                             watched)
+    core::watch_id                             watched,
+    core::watch_id                             watched_clients)
     : owner_{std::move(owner)}, bridge_{bridge}, host_{std::move(host)}, watched_{watched},
-      path_{bridge->path()}
+      watched_clients_{watched_clients}, path_{bridge->path()}
 {}
 
 auto pty_handle::path() const -> std::string
@@ -711,6 +714,7 @@ void pty_handle::close()
       return;
     }
     on->unwatch(watched_);
+    on->unwatch(watched_clients_);
   }
   auto const owner  = owner_.lock();
   auto const target = bridge_.lock();

@@ -1414,31 +1414,52 @@ def test_a_cdc_pty_loses_its_exclusive_flag_when_the_device_detaches_or_attaches
     m, host = configured(u575)
     path = m.board.pty("OTG_FS")
 
-    def hold_exclusively() -> None:
+    def hold_exclusively() -> int:
         fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
         fcntl.ioctl(fd, termios.TIOCEXCL)
-        os.close(fd)
         asyncio.run(m.run(for_=ms(1)))
         with pytest.raises(OSError) as busy:
             os.close(os.open(path, os.O_RDWR | os.O_NOCTTY))
         assert busy.value.errno == errno.EBUSY
+        return fd
 
-    def reopens() -> None:
+    def reopens(held: int) -> None:
         asyncio.run(m.run(for_=ms(1)))
         os.close(os.open(path, os.O_RDWR | os.O_NOCTTY))
+        os.close(held)
 
-    hold_exclusively()
+    held = hold_exclusively()
     asyncio.run(host.detach())
-    reopens()
-    hold_exclusively()
+    reopens(held)
+    held = hold_exclusively()
     asyncio.run(host.attach())
     asyncio.run(host.wait_configured(for_=s(2)))
-    reopens()
-    hold_exclusively()
+    reopens(held)
+    held = hold_exclusively()
     asyncio.run(host.detach())
     asyncio.run(host.attach())
     asyncio.run(host.wait_configured(for_=s(2)))
-    reopens()
+    reopens(held)
+
+
+def test_a_cdc_pty_opens_again_once_the_last_client_closed_it(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, _ = configured(u575)
+    path = m.board.pty("OTG_FS")
+
+    def open_client() -> int:
+        return os.open(path, os.O_RDWR | os.O_NOCTTY)
+
+    first = open_client()
+    fcntl.ioctl(first, termios.TIOCEXCL)
+    asyncio.run(m.run(for_=ms(1)))
+    with pytest.raises(OSError) as busy:
+        open_client()
+    assert busy.value.errno == errno.EBUSY
+    os.close(first)
+    asyncio.run(m.run(for_=ms(1)))
+    os.close(open_client())
 
 
 def test_a_log_error_at_a_consuming_await_keeps_its_result(
