@@ -4,12 +4,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-from popcorn_build.config import project_dir
+from pcons import PackageDescription
+from pcons.packages.fetch.cli import fetch_package, load_deps_file
+
+from popcorn_build.config import build_dir, project_dir
 
 PACKAGE = project_dir / "build" / "popcorn" / "__init__.py"
 GENERATED = project_dir / "docs" / "support" / "generated"
 SDK_API = project_dir / "docs" / "reference" / "sdk" / "api"
 DOXYFILE = project_dir / "popcorn_build" / "sdk_docs" / "Doxyfile"
+THEME = "doxygen-awesome-css"
+THEME_STYLESHEETS = ("doxygen-awesome.css", "doxygen-awesome-sidebar-only.css")
 
 STUB = """<!doctype html>
 <meta charset="utf-8">
@@ -53,6 +58,32 @@ def generate() -> int:
     ).returncode
 
 
+def theme_stylesheets() -> list[Path] | None:
+    """The doxygen-awesome-css stylesheets of the SDK reference, fetched from deps.toml into the
+    build directory on first use. None, after one warning, when the fetch fails or a file is
+    missing: the reference then keeps doxygen's default style."""
+    deps = build_dir / "deps"
+    packages = build_dir / "pkg"
+    description = packages / f"{THEME}.pcons-pkg.toml"
+    if not description.exists():
+        manifest = load_deps_file(project_dir / "deps.toml")["packages"]
+        if not fetch_package(THEME, manifest[THEME], deps, packages):
+            print(
+                f"popcorn docs: fetching {THEME} failed, the SDK API reference uses the default style",
+                file=sys.stderr,
+            )
+            return None
+    prefix = Path(PackageDescription.from_toml(description).prefix)
+    files = [prefix / name for name in THEME_STYLESHEETS]
+    if not all(file.is_file() for file in files):
+        print(
+            f"popcorn docs: {THEME} files are missing, the SDK API reference uses the default style",
+            file=sys.stderr,
+        )
+        return None
+    return files
+
+
 def build_sdk_reference(output: Path = SDK_API) -> int:
     """Generate the C++ plugin SDK reference with doxygen into `output`, the HTML files of the
     SDK header set. Without doxygen on PATH, print one warning and write a stub page so the links
@@ -65,6 +96,9 @@ def build_sdk_reference(output: Path = SDK_API) -> int:
         (output / "index.html").write_text(STUB)
         return 0
     config = DOXYFILE.read_text() + f"\nOUTPUT_DIRECTORY = {output}\n"
+    theme = theme_stylesheets()
+    if theme is not None:
+        config += f"HTML_EXTRA_STYLESHEET = {' '.join(str(file) for file in theme)}\n"
     done = subprocess.run(["doxygen", "-"], input=config, text=True, cwd=project_dir, check=False)
     return done.returncode
 

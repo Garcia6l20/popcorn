@@ -64,3 +64,26 @@ def test_namespace_scope_declarations_are_rendered(tmp_path: Path) -> None:
     assert "glob_match(" in text
     assert "vtime_from_instructions(" in text
     assert "fits_access(" in text
+
+
+def test_without_the_theme_files_the_build_warns_once_and_keeps_the_default_style(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def failing(*_args: object) -> bool:
+        return False
+
+    monkeypatch.setattr(docs, "build_dir", tmp_path)
+    monkeypatch.setattr(docs, "fetch_package", failing)
+    assert docs.theme_stylesheets() is None
+    assert capsys.readouterr().err.count("default style") == 1
+
+
+@pytest.mark.skipif(shutil.which("doxygen") is None, reason="doxygen is not installed")
+def test_the_reference_pages_load_the_theme(tmp_path: Path) -> None:
+    if docs.theme_stylesheets() is None:
+        pytest.skip("the theme could not be fetched")
+    assert docs.build_sdk_reference(tmp_path / "api") == 0
+    for name in ("index.html", "classpopcorn_1_1periph_1_1model.html"):
+        page = (tmp_path / "api" / name).read_text()
+        assert "doxygen-awesome.css" in page
+        assert "doxygen-awesome-sidebar-only.css" in page

@@ -49,3 +49,10 @@ url = "https://github.com/hathach/tinyusb.git@dae3f9a366bfcddbf9dcf1b48d7500286a
 version = "0.21.0"
 build = "none"
 firmware = true
+
+[packages.doxygen-awesome-css]
+url = "https://github.com/jothepro/doxygen-awesome-css/archive/refs/tags/v2.5.0.tar.gz"
+sha256 = "959b6e9369a0f5c7c0a9beba34b18a02bc5e788e68f6733975908f133a784dd5"
+version = "2.5.0"
+build = "none"
+docs = true
