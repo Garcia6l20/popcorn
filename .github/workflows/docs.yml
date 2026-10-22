@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: docs-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   POPCORN_ENABLE_CCACHE: "1"
@@ -21,6 +21,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     container: gcc:16
     steps:
       - uses: actions/checkout@v7.0.1

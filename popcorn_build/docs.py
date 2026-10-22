@@ -69,7 +69,8 @@ def theme_stylesheets() -> list[Path] | None:
         manifest = load_deps_file(project_dir / "deps.toml")["packages"]
         if not fetch_package(THEME, manifest[THEME], deps, packages):
             print(
-                f"popcorn docs: fetching {THEME} failed, the SDK API reference uses the default style",
+                f"popcorn docs: fetching {THEME} failed,"
+                " the SDK API reference uses the default style",
                 file=sys.stderr,
             )
             return None
@@ -77,7 +78,8 @@ def theme_stylesheets() -> list[Path] | None:
     files = [prefix / name for name in THEME_STYLESHEETS]
     if not all(file.is_file() for file in files):
         print(
-            f"popcorn docs: {THEME} files are missing, the SDK API reference uses the default style",
+            f"popcorn docs: {THEME} files are missing,"
+            " the SDK API reference uses the default style",
             file=sys.stderr,
         )
         return None
