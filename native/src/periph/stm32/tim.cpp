@@ -4,6 +4,7 @@
 #include "trigger_signal.hpp"
 
 #include <popcorn/core/clock.hpp>
+#include <popcorn/core/divisor.hpp>
 #include <popcorn/periph/core_hold.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
 
@@ -414,6 +415,7 @@ private:
   [[nodiscard]] auto master_mode_of(std::uint32_t cr2) const -> std::uint32_t;
   [[nodiscard]] auto trgo_wanted(std::uint32_t mode) -> bool;
   [[nodiscard]] auto at_ps(wide at) const -> std::uint64_t;
+  [[nodiscard]] auto ticks_in(wide span) const -> std::uint64_t;
 
   void start_at(std::uint64_t ps);
   void rebase(std::uint64_t ps, std::uint64_t hz);
@@ -486,6 +488,8 @@ private:
   reg_ref                                      counter_;
   std::optional<field_ref>                     copy_;
   field_ref                                    prescaler_;
+  mutable core::divisor                        hz_divisor_;
+  mutable core::divisor                        unit_divisor_;
   reg_ref                                      reload_;
   std::optional<field_ref>                     repetition_;
   std::optional<dma_signal>                    update_signal_;
@@ -1115,7 +1119,21 @@ auto tim::ticks_until(std::uint64_t ps) const -> std::uint64_t
 {
   auto const at    = wide{ps} * state_.hz;
   auto const start = anchor();
-  return at > start ? static_cast<std::uint64_t>((at - start) / tick_unit()) : 0;
+  return at > start ? ticks_in(at - start) : 0;
+}
+
+auto tim::ticks_in(wide span) const -> std::uint64_t
+{
+  auto const unit = tick_unit();
+  if(unit >> 64 != 0)
+  {
+    return static_cast<std::uint64_t>(span / unit);
+  }
+  if(unit_divisor_.value() != static_cast<std::uint64_t>(unit))
+  {
+    unit_divisor_ = core::divisor{static_cast<std::uint64_t>(unit)};
+  }
+  return unit_divisor_.quotient(span);
 }
 
 auto tim::ticks_to_wrap() const -> std::uint64_t
@@ -1267,7 +1285,15 @@ auto tim::trgo_wanted(std::uint32_t mode) -> bool
 
 auto tim::at_ps(wide at) const -> std::uint64_t
 {
-  return static_cast<std::uint64_t>((at + state_.hz - 1) / state_.hz);
+  if(state_.hz == 0) [[unlikely]]
+  {
+    return static_cast<std::uint64_t>((at + state_.hz - 1) / state_.hz);
+  }
+  if(hz_divisor_.value() != state_.hz)
+  {
+    hz_divisor_ = core::divisor{state_.hz};
+  }
+  return hz_divisor_.quotient(at + state_.hz - 1);
 }
 
 void tim::start_at(std::uint64_t ps)

@@ -2,6 +2,7 @@
 #include <popcorn/core/scheduler.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <iterator>
 #include <limits>
@@ -39,6 +40,14 @@ clock::clock(std::uint64_t core_hz, double cpi)
 {
   state_.core_hz = core_hz;
   state_.cpi     = cpi;
+  refresh_rate();
+}
+
+void clock::refresh_rate()
+{
+  instruction_hz_ =
+      static_cast<std::uint64_t>(std::llround(static_cast<double>(state_.core_hz) / state_.cpi));
+  instruction_div_ = instruction_hz_ != 0 ? divisor{instruction_hz_} : divisor{};
 }
 
 clock::~clock() = default;
@@ -56,6 +65,7 @@ void clock::set_core_hz(std::uint64_t hz)
 {
   start_epoch();
   state_.core_hz = hz;
+  refresh_rate();
   if(on_epoch_)
   {
     on_epoch_();
@@ -66,6 +76,7 @@ void clock::set_cpi(double cpi)
 {
   start_epoch();
   state_.cpi = cpi;
+  refresh_rate();
   if(on_epoch_)
   {
     on_epoch_();
@@ -106,6 +117,7 @@ void clock_driver::restore(clock_state const& saved)
     next.domain_hz.push_back(0);
   }
   current = std::move(next);
+  clock_.refresh_rate();
 }
 
 void clock_driver::on_rate_change(std::move_only_function<void()> hook)

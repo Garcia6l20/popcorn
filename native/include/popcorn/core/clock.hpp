@@ -5,6 +5,7 @@
  * @brief The virtual clock of a machine and the driver that advances it.
  */
 
+#include <popcorn/core/divisor.hpp>
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
@@ -128,8 +129,7 @@ public:
    */
   [[nodiscard]] auto instruction_hz() const noexcept -> std::uint64_t
   {
-    return static_cast<std::uint64_t>(
-        std::llround(static_cast<double>(state_.core_hz) / state_.cpi));
+    return instruction_hz_;
   }
 
   /**
@@ -233,11 +233,14 @@ private:
 
   void start_epoch();
 
+  void refresh_rate();
+
   [[nodiscard]] auto time_at(icount count) const -> vtime
   {
+    constexpr unsigned __int128 ps_per_second = 1'000'000'000'000ull;
     return vtime{
         state_.epoch_time.ps
-        + vtime_from_instructions(count.value - state_.epoch_icount.value, instruction_hz()).ps};
+        + instruction_div_.quotient(ps_per_second * (count.value - state_.epoch_icount.value))};
   }
 
   void release_passed_hold()
@@ -250,6 +253,8 @@ private:
   }
 
   clock_state                              state_;
+  std::uint64_t                            instruction_hz_{};
+  divisor                                  instruction_div_;
   std::move_only_function<void()>          on_epoch_;
   std::move_only_function<std::uint64_t()> charged_ahead_;
 };
