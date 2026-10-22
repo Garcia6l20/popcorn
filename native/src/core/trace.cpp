@@ -23,7 +23,7 @@ void trace_ring::push(trace_record const& stamped)
     ++size_;
   }
   slots_[next_] = stamped;
-  next_         = (next_ + 1) % slots_.size();
+  next_         = next_ + 1 == slots_.size() ? 0 : next_ + 1;
   ++appended_;
 }
 

@@ -170,3 +170,43 @@ TEST_CASE("trace ring shift moves ids from the insertion point on, across a wrap
   CHECK(records[2].aux == from + 5);
   CHECK(records[3].aux == from + 2);
 }
+
+TEST_CASE("a trace ring keeps the newest records of the full history at every capacity")
+{
+  constexpr std::uint32_t total = 70;
+  auto const              when  = [](std::uint32_t i) {
+    return popcorn::icount{std::uint64_t{i} * 3 + (i % 7 == 0 ? 5'000'000'000ull : 0)};
+  };
+  core::trace_ring full{total * 2};
+  for(std::uint32_t i = 0; i < total; ++i)
+  {
+    full.append(block(i), when(i));
+  }
+  auto const history = full.records();
+  REQUIRE(full.origin().value == 0);
+  for(std::size_t const capacity : {1u, 2u, 3u, 4u, 5u, 7u, 8u, 9u, 16u, 31u, 32u, 33u, 69u, 70u})
+  {
+    core::trace_ring ring{capacity};
+    for(std::uint32_t i = 0; i < total; ++i)
+    {
+      ring.append(block(i), when(i));
+    }
+    REQUIRE(ring.appended() == history.size());
+    auto const kept    = ring.records();
+    auto const dropped = history.size() - capacity;
+    REQUIRE(kept.size() == capacity);
+    auto origin = popcorn::icount{0};
+    for(std::size_t i = 0; i < dropped; ++i)
+    {
+      auto const& gone = history[i];
+      origin           = gone.kind == core::trace_kind::time
+                           ? popcorn::icount{gone.payload[0] | std::uint64_t{gone.payload[1]} << 32}
+                           : popcorn::icount{origin.value + gone.dt};
+    }
+    CHECK(ring.origin() == origin);
+    for(std::size_t i = 0; i < capacity; ++i)
+    {
+      CHECK(kept[i] == history[dropped + i]);
+    }
+  }
+}

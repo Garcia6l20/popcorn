@@ -27,7 +27,7 @@ public:
    * @brief Computes the reciprocal, one 128-bit division.
    * @param d The divisor, not 0.
    */
-  explicit constexpr divisor(std::uint64_t d) noexcept
+  explicit constexpr divisor(std::uint64_t d) noexcept pre(d != 0)
       : d_{d}, shift_{static_cast<unsigned>(std::countl_zero(d))}
   {
     auto const normal = d << shift_;
