@@ -133,24 +133,26 @@ public:
    */
   virtual void set_clock_fault(bool fault) = 0;
 
-  /** @brief Words left before seed_fault sets, empty when none is armed. */
+  /** @brief DR reads left before seed_fault sets, empty when none is armed. */
   [[nodiscard]] virtual auto seed_fault_after() const -> std::optional<std::uint64_t> = 0;
 
   /**
-   * @brief Arms seed_fault to set once @p words more words are drawn from the source, stuck,
-   *        queued or generated, then disarms.
-   * @param words Words to draw first, empty to disarm.
+   * @brief Arms seed_fault to set at the @p words-th CPU or DMA read of DR that returns a
+   *        word, then disarms. A read of an empty FIFO returns 0 and does not count, nor does a
+   *        debugger read. The read that reaches 0 returns its word, the error then empties the
+   *        FIFO before the next access.
+   * @param words Reads to count, empty to disarm.
    * @throws config_error for 0 words, before any change.
    */
   virtual void set_seed_fault_after(std::optional<std::uint64_t> words) = 0;
 
-  /** @brief Words left before clock_fault sets, empty when none is armed. */
+  /** @brief DR reads left before clock_fault sets, empty when none is armed. */
   [[nodiscard]] virtual auto clock_fault_after() const -> std::optional<std::uint64_t> = 0;
 
   /**
-   * @brief Arms clock_fault to set once @p words more words are drawn from the source, then
-   *        disarms.
-   * @param words Words to draw first, empty to disarm.
+   * @brief Arms clock_fault to set at the @p words-th CPU or DMA read of DR that returns a
+   *        word, counted as set_seed_fault_after() counts, then disarms.
+   * @param words Reads to count, empty to disarm.
    * @throws config_error for 0 words, before any change.
    */
   virtual void set_clock_fault_after(std::optional<std::uint64_t> words) = 0;

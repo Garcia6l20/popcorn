@@ -773,9 +773,11 @@ class RngEntropy:
 
     @property
     def seed_fault_after(self) -> int | None:
-        """Words left to draw before `seed_fault` becomes True, None when not armed. Every word
-        a round produces counts, stuck, queued or generated. At 0 the fault is set and this
-        goes back to None.
+        """Firmware reads of DR left before `seed_fault` becomes True, None when not armed.
+        Only a CPU or DMA read that returns a word counts: a read of an empty FIFO returns 0
+        and does not, nor does a host read. The read that reaches 0 returns its word, then the
+        fault is set and this goes back to None: with 8, the firmware reads 8 good words and
+        sees SECS next.
 
         Raises:
             TypeError: Set to a bool, or to neither an int nor None.
@@ -791,8 +793,8 @@ class RngEntropy:
 
     @property
     def clock_fault_after(self) -> int | None:
-        """Words left to draw before `clock_fault` becomes True, None when not armed, counted
-        as `seed_fault_after` counts.
+        """Firmware reads of DR left before `clock_fault` becomes True, None when not armed,
+        counted as `seed_fault_after` counts.
 
         Raises:
             TypeError: Set to a bool, or to neither an int nor None.

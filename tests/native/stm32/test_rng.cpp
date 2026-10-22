@@ -1410,32 +1410,48 @@ TEST_CASE("a system reset clears SECS and keeps the seed fault, detected again a
   CHECK(r.logged.empty());
 }
 
-TEST_CASE("seed_fault_after sets the seed fault once that many words are drawn")
+TEST_CASE("seed_fault_after sets the seed fault at the n-th DR read that returns a word")
 {
   rig const r{"keygen"};
   r.source().set_seed_fault_after(8);
   CHECK(r.source().seed_fault_after() == 8u);
   r.run_for(5 * init_4mhz);
+  auto const word_at = [&](std::uint32_t index) {
+    auto const got = r.f.target->mem().read(sym("rng_ll", "keygen_key") + 4 * index, 4);
+    REQUIRE(got.has_value());
+    return static_cast<std::uint32_t>(*got);
+  };
   auto const status = r.f.target->mem().read(sym("rng_ll", "keygen_status"), 4);
   REQUIRE(status.has_value());
   CHECK(*status == 1);
+  for(std::uint32_t word = 0; word < 8; ++word)
+  {
+    CHECK(word_at(word) == rng_word_at(0, word));
+  }
+  CHECK(word_at(8) == 0);
   CHECK(r.source().seed_fault());
   CHECK_FALSE(r.source().seed_fault_after().has_value());
-  CHECK(r.source().drawn() == 8);
   CHECK_THROWS_AS(r.source().set_seed_fault_after(0), popcorn::config_error);
   CHECK_FALSE(r.source().seed_fault_after().has_value());
   CHECK(r.logged.empty());
 }
 
-TEST_CASE("clock_fault_after sets the clock fault at the round that draws the n-th word")
+TEST_CASE("clock_fault_after counts CPU reads that return a word, not empty or host reads")
 {
   rig const r;
   r.source().set_clock_fault_after(6);
   auto const start = enabled_at_4mhz(r);
-  r.run_until(start + init_4mhz);
-  CHECK(r.read(sr) == drdy);
-  CHECK(r.source().clock_fault_after() == 2u);
+  CHECK(r.cpu_dr() == 0);
   r.run_until(start + init_4mhz + round_4mhz);
+  REQUIRE(r.read(sr) == drdy);
+  for(int read = 0; read < 5; ++read)
+  {
+    static_cast<void>(r.read(dr));
+    static_cast<void>(r.cpu_dr());
+  }
+  CHECK(r.source().clock_fault_after() == 1u);
+  CHECK(r.read(sr) == drdy);
+  CHECK(r.cpu_dr() == rng_word_at(0, 5));
   CHECK(r.read(sr) == (drdy | cecs | ceis));
   CHECK(r.source().clock_fault());
   CHECK_FALSE(r.source().clock_fault_after().has_value());

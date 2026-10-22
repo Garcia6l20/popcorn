@@ -619,7 +619,6 @@ void rng::finish_phase()
   for(auto& word : words)
   {
     word = next_word();
-    count_fault_words();
   }
   if(state_.phase == init)
   {
@@ -643,6 +642,7 @@ void rng::finish_phase()
 auto rng::pop() -> std::uint32_t
 {
   auto const word = state_.fifo[0];
+  count_fault_words();
   std::ranges::shift_left(state_.fifo, 1);
   state_.fifo.back() = 0;
   --state_.fifo_count;

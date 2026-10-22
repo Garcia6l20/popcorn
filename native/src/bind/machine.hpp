@@ -1318,23 +1318,22 @@ public:
       rng_set_seed_fault(std::string const& peripheral, bool fault);
 
   /**
-   * @brief Words left before the noise source failure of the RNG sets, empty when none is armed.
+   * @brief DR reads left before the noise source failure of the RNG sets, empty when none is armed.
    * @param peripheral RNG name.
    * @throws model_error when the peripheral's model is not the built-in RNG.
    */
-  [[= py::doc{
-      "Words left before the noise source failure of the built-in RNG sets."}]] [[nodiscard]] auto
-      rng_seed_fault_after(std::string const& peripheral) const -> std::optional<std::uint64_t>;
+  [[= py::doc{"DR reads left before the noise source failure of the built-in RNG sets."}]]
+      [[nodiscard]] auto rng_seed_fault_after(std::string const& peripheral) const
+      -> std::optional<std::uint64_t>;
 
   /**
-   * @brief Arms the noise source failure of the RNG to set after a number of drawn words.
+   * @brief Arms the noise source failure of the RNG to set after a number of DR reads.
    * @param peripheral RNG name.
-   * @param words Words to draw first, empty to disarm.
+   * @param words DR reads that return a word, empty to disarm.
    * @throws config_error for 0 words.
    * @throws model_error when the peripheral's model is not the built-in RNG.
    */
-  [[= py::doc{
-      "Arm the noise source failure of the built-in RNG after a number of drawn words."}]] void
+  [[= py::doc{"Arm the noise source failure of the built-in RNG after a number of DR reads."}]] void
       rng_set_seed_fault_after(std::string const& peripheral, std::optional<std::uint64_t> words);
 
   /**
@@ -1355,23 +1354,22 @@ public:
       rng_set_clock_fault(std::string const& peripheral, bool fault);
 
   /**
-   * @brief Words left before the slow RNG clock fault of the RNG sets, empty when none is armed.
+   * @brief DR reads left before the slow RNG clock fault of the RNG sets, empty when none is armed.
    * @param peripheral RNG name.
    * @throws model_error when the peripheral's model is not the built-in RNG.
    */
-  [[= py::doc{
-      "Words left before the slow RNG clock fault of the built-in RNG sets."}]] [[nodiscard]] auto
-      rng_clock_fault_after(std::string const& peripheral) const -> std::optional<std::uint64_t>;
+  [[= py::doc{"DR reads left before the slow RNG clock fault of the built-in RNG sets."}]]
+      [[nodiscard]] auto rng_clock_fault_after(std::string const& peripheral) const
+      -> std::optional<std::uint64_t>;
 
   /**
-   * @brief Arms the slow RNG clock fault of the RNG to set after a number of drawn words.
+   * @brief Arms the slow RNG clock fault of the RNG to set after a number of DR reads.
    * @param peripheral RNG name.
-   * @param words Words to draw first, empty to disarm.
+   * @param words DR reads that return a word, empty to disarm.
    * @throws config_error for 0 words.
    * @throws model_error when the peripheral's model is not the built-in RNG.
    */
-  [[= py::doc{
-      "Arm the slow RNG clock fault of the built-in RNG after a number of drawn words."}]] void
+  [[= py::doc{"Arm the slow RNG clock fault of the built-in RNG after a number of DR reads."}]] void
       rng_set_clock_fault_after(std::string const& peripheral, std::optional<std::uint64_t> words);
 
   /**

@@ -301,7 +301,7 @@ def test_keygen_reports_each_injected_failure(
 
 
 @pytest.mark.parametrize("run", [keygen_parked, keygen_running])
-def test_a_fault_after_n_words_fires_at_the_round_drawing_the_nth(
+def test_a_fault_after_n_reads_shows_after_n_good_words(
     u575: popcorn.PartDescription, run: Callable[[popcorn.Machine], int]
 ) -> None:
     m = entered(u575, "keygen")
@@ -311,11 +311,14 @@ def test_a_fault_after_n_words_fires_at_the_round_drawing_the_nth(
     assert run(m) == 1
     assert entropy.seed_fault
     assert entropy.seed_fault_after is None
-    assert entropy.drawn == 8
+    key = [m.mem.u32[m.sym("keygen_key") + 4 * word] for word in range(WORDS)]
+    assert key == [*rng_words(0, 8), *[0] * 8]
     m = entered(u575, "keygen")
     entropy = m.periph.RNG.entropy
     entropy.clock_fault_after = 6
     assert run(m) == 2
+    key = [m.mem.u32[m.sym("keygen_key") + 4 * word] for word in range(WORDS)]
+    assert key == [*rng_words(0, 6), *[0] * 10]
     assert entropy.clock_fault
     assert entropy.clock_fault_after is None
     assert m.periph.RNG.SR.CECS == 0
