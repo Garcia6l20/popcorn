@@ -179,8 +179,8 @@ public:
    *        While held, every bus write to the peripheral is ignored, from every bus initiator,
    *        after the bus firewall, and leaves a trace record as a firewall-ignored write does.
    *        A listener sees an ignored write to a register it claims through
-   *        `periph::bus_reset_listener::on_held_write`. `periph::register_file::poke` is not a bus access and
-   *        bypasses the hold. A snapshot keeps the hold. A machine reset releases it.
+   *        `periph::bus_reset_listener::on_held_write`. `periph::register_file::poke` is not a bus
+   * access and bypasses the hold. A snapshot keeps the hold. A machine reset releases it.
    * @param peripheral Instance name as the description spells it.
    * @param held True while the reset bit is 1.
    * @throws config_error for a name the description lacks, or from an implementation without
