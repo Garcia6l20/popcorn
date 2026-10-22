@@ -1,5 +1,6 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -16,6 +17,7 @@
 #include <exception>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -134,7 +136,7 @@ auto lower(std::string_view name) -> std::string
  *        the model. Not modelled, logged once: target mode, 10-bit addressing, SMBus and PEC, the
  *        autonomous trigger.
  */
-class i2c final : public dispatch_model<i2c, i2c_state>, public i2c_bus
+class i2c final : public dispatch_model<i2c, i2c_state>, public i2c_bus, public bus_reset_listener
 {
 public:
   i2c(model_context&                           ctx,
@@ -142,17 +144,18 @@ public:
       std::vector<std::shared_ptr<i2c_target>> targets);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
   void power_cut() override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto on_write(
+  auto unheld_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error> override;
+      access_ctx     ctx) -> std::expected<void, bus_error>;
   void save(std::vector<std::byte>& out) const override;
   void load(std::span<std::byte const> in) override;
   void hold(vtime from, vtime until) override;
@@ -165,6 +168,7 @@ public:
   void trigger_written(std::uint32_t old, std::uint32_t now);
 
 private:
+  void               restore_reset_values(std::optional<reset_kind> kind);
   [[nodiscard]] auto step() const -> phase;
   [[nodiscard]] auto enabled() const -> bool;
   [[nodiscard]] auto to_load() const -> std::uint32_t;
@@ -701,11 +705,22 @@ void i2c::abort()
   }
 }
 
-void i2c::reset(register_file& regs, reset_kind kind)
+void i2c::reset(register_file&, reset_kind kind)
+{
+  restore_reset_values(kind);
+}
+
+void i2c::on_bus_reset()
+{
+  restore_unclaimed_storage();
+  restore_reset_values(std::nullopt);
+}
+
+void i2c::restore_reset_values(std::optional<reset_kind> kind)
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
   auto const generation = state_.generation + 1;
   auto const holds      = state_.holds;
@@ -715,9 +730,12 @@ void i2c::reset(register_file& regs, reset_kind kind)
   tx_dma_.resolve();
   rx_dma_.resolve();
   event_dma_.resolve();
-  for(auto const& target : targets_)
+  if(kind)
   {
-    target->reset(kind);
+    for(auto const& target : targets_)
+    {
+      target->reset(*kind);
+    }
   }
   flags();
 }
@@ -923,7 +941,7 @@ auto i2c::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
   return value;
 }
 
-auto i2c::on_write(
+auto i2c::unheld_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -947,7 +965,7 @@ auto i2c::on_write(
     flags();
     return {};
   }
-  auto const result = dispatch_model::on_write(regs, offset, size, old, value, access);
+  auto const result = bound_write(regs, offset, size, old, value, access);
   flags();
   return result;
 }

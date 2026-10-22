@@ -1,5 +1,6 @@
 #include "factories.hpp"
 #include "gtzc.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -93,13 +94,17 @@ struct listener_table
  *        keeps the description's reset. A `GPIOx_SECCFGR` write with the port clock off lands,
  *        the model has no RCC clock gating.
  */
-class gpio final : public dispatch_model<gpio, gpio_state>, public gpio_port, public trustzone_aware
+class gpio final : public dispatch_model<gpio, gpio_state>,
+                   public gpio_port,
+                   public trustzone_aware,
+                   public bus_reset_listener
 {
 public:
   gpio(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
+  void on_bus_reset() override;
 
   void               drive(std::uint8_t pin, std::optional<bool> level) override;
   void               drive_at(std::uint8_t pin, std::optional<bool> level, vtime at) override;
@@ -129,6 +134,7 @@ private:
   [[nodiscard]] auto pending() const -> std::span<pending_edge const>;
   void               apply(std::uint8_t pin, std::optional<bool> level);
   void               settle(bool notify);
+  void               restore_reset_values();
   [[nodiscard]] auto routed() const -> std::vector<std::uint8_t>;
   void               route_pins();
   void               forward();
@@ -273,18 +279,32 @@ gpio::gpio(model_context& ctx, peripheral_desc const& desc)
   forwarded_.assign(signals_.size(), 0);
 }
 
-void gpio::reset(register_file& regs, reset_kind)
+void gpio::restore_reset_values()
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
   if(ctx_.trustzone)
   {
-    regs.poke(secure_pins_.offset, secure_reset_);
+    regs_.poke(secure_pins_.offset, secure_reset_);
   }
   state_.lock_step  = 0;
   state_.lock_value = 0;
+}
+
+void gpio::on_bus_reset()
+{
+  auto const inputs = regs_.peek(input_[0].offset);
+  restore_unclaimed_storage();
+  restore_reset_values();
+  regs_.poke(input_[0].offset, inputs);
+  settle(true);
+}
+
+void gpio::reset(register_file&, reset_kind)
+{
+  restore_reset_values();
   settle(false);
   auto const base = board_base();
   for(auto const& edge : pending())

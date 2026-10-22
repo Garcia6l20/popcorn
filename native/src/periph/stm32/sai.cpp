@@ -1,5 +1,6 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -204,22 +205,26 @@ auto sai_writes() -> std::span<write_entry<sai> const>;
  *        their interrupt enables log nothing. A state saved before the external clock existed loads
  *        with the clocks of the machine loading it, their phase taken again at the next enable.
  */
-class sai final : public dispatch_model<sai, sai_state>, public audio_port, public clock_listener
+class sai final : public dispatch_model<sai, sai_state>,
+                  public audio_port,
+                  public clock_listener,
+                  public bus_reset_listener
 {
 public:
   sai(model_context& ctx, peripheral_desc const& desc, std::array<audio_attachment, blocks> wired);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto on_write(
+  auto unheld_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error> override;
+      access_ctx     ctx) -> std::expected<void, bus_error>;
   void               on_clock_change() override;
   void               load(std::span<std::byte const> in) override;
   void               attach(audio_block block, audio_attachment attachment) override;
@@ -233,6 +238,7 @@ public:
   void                          plain_written(std::uint32_t old, std::uint32_t now);
 
 private:
+  void               restore_reset_values(std::optional<reset_kind> kind);
   [[nodiscard]] auto fields_of(char prefix) const -> block_fields;
   [[nodiscard]] auto on(field_ref field) const -> bool;
   [[nodiscard]] auto enabled(std::size_t b) const -> bool;
@@ -547,11 +553,22 @@ auto sai::clock_valid(std::size_t b) const -> bool
   return not checked or (power_of_two and bits >= 8);
 }
 
-void sai::reset(register_file& regs, reset_kind kind)
+void sai::reset(register_file&, reset_kind kind)
+{
+  restore_reset_values(kind);
+}
+
+void sai::on_bus_reset()
+{
+  restore_unclaimed_storage();
+  restore_reset_values(std::nullopt);
+}
+
+void sai::restore_reset_values(std::optional<reset_kind> kind)
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
   for(auto& block : state_.block)
   {
@@ -1187,7 +1204,7 @@ auto sai::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
 
-auto sai::on_write(
+auto sai::unheld_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -1208,12 +1225,12 @@ auto sai::on_write(
     {
       auto const before  = regs.peek(word);
       auto const written = merge_write(before, offset, size, value);
-      auto const result  = dispatch_model::on_write(regs, offset, size, old, value, ctx);
+      auto const result  = bound_write(regs, offset, size, old, value, ctx);
       update(regs, block_[b].fs_definition, block_[b].fs_definition.of(written));
       return result;
     }
   }
-  return dispatch_model::on_write(regs, offset, size, old, value, ctx);
+  return bound_write(regs, offset, size, old, value, ctx);
 }
 
 void sai::attach(audio_block block, audio_attachment attachment)

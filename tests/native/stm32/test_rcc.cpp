@@ -704,7 +704,7 @@ TEST_CASE("an RCC reset returns a modelled register to its reset value and holds
     std::uint32_t    reset;
     bool             storage = false;
   };
-  constexpr std::array<target, 14> targets{
+  constexpr std::array<target, 17> targets{
       {
        {"CRC", "POL", "RCC_AHB1RSTR", "CRCRST", 0x1021, 0x04C1'1DB7},
        {"HASH", "IMR", "RCC_AHB2RSTR1", "HASHRST", 0x1, 0},
@@ -716,6 +716,9 @@ TEST_CASE("an RCC reset returns a modelled register to its reset value and holds
        {"ADC1", "ADC_SMPR1", "RCC_AHB2RSTR1", "ADC12RST", 0x7, 0, true},
        {"GPDMA1", "GPDMA_PRIVCFGR", "RCC_AHB1RSTR", "GPDMA1RST", 0x1, 0, true},
        {"TIM2", "AF2", "RCC_APB1RSTR1", "TIM2RST", 0x1, 0, true},
+       {"SAI1", "ACR2", "RCC_APB2RSTR", "SAI1RST", 0x1, 0},
+       {"MDF1", "BSMX0CR", "RCC_AHB1RSTR", "MDF1RST", 0x1, 0},
+       {"ADF1", "ADF_BSMX0CR", "RCC_AHB3RSTR", "ADF1RST", 0x1, 0},
        {"ADC12", "ADC12_CCR", "RCC_AHB2RSTR1", "ADC12RST", 0x0004'0000, 0},
        {"GPDMA1", "GPDMA_C0LLR", "RCC_AHB1RSTR", "GPDMA1RST", 0x4, 0},
        {"LPDMA1", "LPDMA_C0LLR", "RCC_AHB3RSTR", "LPDMA1RST", 0x4, 0},

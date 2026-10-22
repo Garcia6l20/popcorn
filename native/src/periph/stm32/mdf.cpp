@@ -1,6 +1,7 @@
 #include "dfilter_chain.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 #include "sigma_delta.hpp"
 
@@ -357,24 +358,26 @@ class mdf final : public dispatch_model<mdf, mdf_state>,
                   public pdm_port,
                   public clock_listener,
                   public reset_listener,
-                  public snapshot_listener
+                  public snapshot_listener,
+                  public bus_reset_listener
 {
 public:
   mdf(model_context& ctx, peripheral_desc const& desc, dfilter_layout layout);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
   void before_reset(reset_kind kind) override;
   void before_snapshot() override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto on_write(
+  auto unheld_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error> override;
+      access_ctx     ctx) -> std::expected<void, bus_error>;
 
   void on_clock_change() override;
   void attach(std::size_t sitf, pdm_edge edge, std::shared_ptr<pdm_source> source) override;
@@ -397,6 +400,7 @@ public:
       -> std::vector<write_entry<mdf>>;
 
 private:
+  void restore_reset_values();
   void write(bank which, std::size_t f, std::uint32_t old, std::uint32_t now);
   void global_written(std::uint32_t old, std::uint32_t now);
   void clock_written(std::uint32_t old, std::uint32_t now);
@@ -772,11 +776,23 @@ auto mdf::name_of(reg_ref at) const -> std::string
   return {};
 }
 
-void mdf::reset(register_file& regs, reset_kind)
+void mdf::reset(register_file&, reset_kind)
+{
+  restore_reset_values();
+}
+
+void mdf::on_bus_reset()
+{
+  settle();
+  restore_unclaimed_storage();
+  restore_reset_values();
+}
+
+void mdf::restore_reset_values()
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
   for(auto& filter : state_.filter)
   {
@@ -873,7 +889,7 @@ auto mdf::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
 
-auto mdf::on_write(
+auto mdf::unheld_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -892,7 +908,7 @@ auto mdf::on_write(
       return {};
     }
   }
-  return dispatch_model::on_write(regs, offset, size, old, value, ctx);
+  return bound_write(regs, offset, size, old, value, ctx);
 }
 
 void mdf::write(bank which, std::size_t f, std::uint32_t old, std::uint32_t now)

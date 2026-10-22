@@ -1252,6 +1252,30 @@ TEST_CASE("a fifth sample with no read overruns: DOVRF, the sample dropped, the 
   CHECK(r.bits("DFLT0ISR", "FTHF") == 1);
 }
 
+TEST_CASE("MDF1RST pulls every bit clocked before it, then stops the stream")
+{
+  stream_rig const r;
+  auto [bits, pcm] = pdm_16k();
+  r.mic[0]->bits   = bits;
+  r.write("BSMX0CR", 0);
+  r.write("DFLT0CICR", (0x2Cu << 20) | (31u << 8) | (5u << 4));
+  r.write("DFLT0RSFR", 2u << 8);
+  r.write("DFLT0CR", 1);
+  r.run_until(edge_at(r.anchor, 2 + 2 * (128 * 7 + 80)));
+  auto const& rcc   = r.target->peripheral("RCC").description();
+  auto const* reset = popcorn::find_register(rcc, "RCC_AHB1RSTR");
+  REQUIRE(reset != nullptr);
+  auto const bit =
+      std::ranges::find(reset->fields, std::string_view{"MDF1RST"}, &popcorn::field_desc::name);
+  REQUIRE(bit != reset->fields.end());
+  REQUIRE(r.target->mem().write(rcc.base + reset->offset, 4, 1u << bit->lsb).has_value());
+  REQUIRE(r.target->mem().write(rcc.base + reset->offset, 4, 0).has_value());
+  CHECK(r.mic[0]->next == 128 * 7 + 81);
+  r.run_until(edge_at(r.anchor, 2 + 2 * (128 * 20)));
+  CHECK(r.mic[0]->next == 128 * 7 + 81);
+  CHECK(r.taps[0]->samples.size() == 7);
+}
+
 TEST_CASE("DFLTxDR pops one sample per read of any size, PCM in bits 31:8, empty reads 0")
 {
   stream_rig const r;

@@ -377,6 +377,38 @@ TEST_CASE("every machine reset reaches the device once with its kind")
   CHECK(r.device->cuts.empty());
 }
 
+namespace
+{
+void rcc_reset_pulse(stm32_fixture const& f, std::string_view reg, std::string_view bit)
+{
+  auto const& desc  = f.target->peripheral("RCC").description();
+  auto const* found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
+  auto const field = std::ranges::find(found->fields, bit, &popcorn::field_desc::name);
+  REQUIRE(field != found->fields.end());
+  for(std::uint32_t const value : {std::uint32_t{1} << field->lsb, std::uint32_t{0}})
+  {
+    REQUIRE(f.target->mem().write(desc.base + found->offset, 4, value).has_value());
+  }
+}
+}
+
+TEST_CASE("SPI1RST resets the controller and leaves its board device alone")
+{
+  using popcorn::reset_kind;
+  rig         r{"poll"};
+  auto const  before = r.device->resets;
+  auto&       regs   = r.f->target->peripheral("SPI1");
+  auto const* at     = popcorn::find_register(regs.description(), "SPI_CFG1");
+  REQUIRE(at != nullptr);
+  regs.poke(at->offset, 0x0007'0003);
+  rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  CHECK(regs.peek(at->offset) == 0x0007'0007);
+  CHECK(r.device->resets == before);
+  r.f->target->reset(reset_kind::software);
+  CHECK(r.device->resets.size() == before.size() + 1);
+}
+
 TEST_CASE("a power cycle cuts the device at the time since power-on, then resets it at power-on")
 {
   using popcorn::reset_kind;
@@ -2177,4 +2209,15 @@ TEST_CASE("a controller transfer the target ignores reads no mode")
   r.transfer(start, {1, 2});
   CHECK(refusal(b, start + 2 * mhz_frame).empty());
   CHECK(r.sink->mode_calls == 0);
+}
+
+TEST_CASE("SPI1RST lowers the TX request on the controller")
+{
+  probe_rig r;
+  bus       b{*r.f};
+  b.controller(7, 5, 3);
+  b.set("SPI_CFG1", "TXDMAEN", 1);
+  REQUIRE(r.level(tx_request));
+  rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  CHECK_FALSE(r.level(tx_request));
 }

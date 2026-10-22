@@ -552,6 +552,26 @@ TEST_CASE(
   CHECK(r.peek("GPDMA1", "SECCFGR") == 0);
 }
 
+TEST_CASE("RM0456 15.2.2: SYSCFG held by SYSCFGRST still raises the event of a Non-secure write")
+{
+  rig const  r{true};
+  auto const rst   = bit("RCC", "APB3RSTR", "SYSCFGRST");
+  auto const event = bit("GTZC2_TZIC", "SR2", "SYSCFGF");
+  auto const lock  = bit("SYSCFG", "SECCFGR", "CLASSBSEC");
+  r.write("RCC", "APB3RSTR", rst, secure_priv);
+  REQUIRE(r.peek("RCC", "APB3RSTR") == rst);
+  r.write("SYSCFG", "SECCFGR", lock, nonsecure_priv);
+  CHECK(r.peek("SYSCFG", "SECCFGR") == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == event);
+  r.write("GTZC2_TZIC", "FCR2", event, secure_priv);
+  r.write("SYSCFG", "SECCFGR", lock, secure_priv);
+  CHECK(r.peek("SYSCFG", "SECCFGR") == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == 0);
+  r.write("RCC", "APB3RSTR", 0, secure_priv);
+  r.write("SYSCFG", "SECCFGR", lock, secure_priv);
+  CHECK(r.peek("SYSCFG", "SECCFGR") == lock);
+}
+
 TEST_CASE("RM0456 15.2.2 Table 131: SYSCFG Secure registers, events and CFGR1 bits")
 {
   rig const r{true};

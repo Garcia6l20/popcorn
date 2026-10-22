@@ -2484,3 +2484,29 @@ TEST_CASE("a 2D circular GPDMA list runs an SAI2 master pair on channels 14 and 
   REQUIRE(stopped.reason == stop_reason::user);
   check_stereo(r, 0x0E00'0000, 0x0F00'0000, "15", frame_ps);
 }
+
+namespace
+{
+void reset_pulse(stm32_fixture const& f, std::string_view reg, std::string_view bit)
+{
+  auto const& desc  = f.target->peripheral("RCC").description();
+  auto const* found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
+  auto const field = std::ranges::find(found->fields, bit, &popcorn::field_desc::name);
+  REQUIRE(field != found->fields.end());
+  for(std::uint32_t const value : {std::uint32_t{1} << field->lsb, std::uint32_t{0}})
+  {
+    REQUIRE(f.target->mem().write(desc.base + found->offset, 4, value).has_value());
+  }
+}
+}
+
+TEST_CASE("SAI1RST lowers the block A DMA request on the controller")
+{
+  rig r{"idle", source_words(64), {}, true};
+  bus b{*r.f};
+  b.set("ACR1", "DMAEN", 1);
+  REQUIRE(r.level(a_request));
+  reset_pulse(*r.f, "RCC_APB2RSTR", "SAI1RST");
+  CHECK_FALSE(r.level(a_request));
+}

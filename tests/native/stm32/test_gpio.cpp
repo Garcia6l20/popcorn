@@ -532,3 +532,44 @@ TEST_CASE("edges of one instant keep their order across a reset")
   CHECK(heard == std::vector<bool>{true, false});
   CHECK_FALSE(pc.level(13));
 }
+
+namespace
+{
+void rcc_reset_pulse(stm32_fixture const& f, std::string_view reg, std::string_view bit)
+{
+  auto const& desc  = f.target->peripheral("RCC").description();
+  auto const* found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
+  auto const field = std::ranges::find(found->fields, bit, &popcorn::field_desc::name);
+  REQUIRE(field != found->fields.end());
+  for(std::uint32_t const value : {std::uint32_t{1} << field->lsb, std::uint32_t{0}})
+  {
+    REQUIRE(f.target->mem().write(desc.base + found->offset, 4, value).has_value());
+  }
+}
+}
+
+TEST_CASE("GPIOCRST returns pins to analog with their edges, the board drive comes back as input")
+{
+  auto  f  = idling();
+  auto& pc = port(f, "GPIOC");
+  pc.drive(13, true);
+  auto const moder = f.target->peripheral("GPIOC").peek(0);
+  write_port(f, "GPIOC", "GPIO_MODER", (moder & ~(3u << 14)) | (1u << 14));
+  write_port(f, "GPIOC", "GPIO_ODR", 1u << 7);
+  REQUIRE(pc.level(7));
+  std::vector<std::pair<std::uint8_t, bool>> heard;
+  auto sub = pc.on_change([&](std::uint8_t pin, bool level) { heard.emplace_back(pin, level); });
+  rcc_reset_pulse(f, "RCC_AHB2RSTR1", "GPIOCRST");
+  CHECK(f.target->peripheral("GPIOC").peek(0) == 0xFFFF'FFFF);
+  CHECK_FALSE(pc.level(7));
+  CHECK_FALSE(pc.level(13));
+  CHECK(
+      heard
+      == std::vector<std::pair<std::uint8_t, bool>>{
+          {7,  false},
+          {13, false}
+  });
+  write_port(f, "GPIOC", "GPIO_MODER", 0xFFFF'FFFF & ~(3u << 26));
+  CHECK(pc.level(13));
+}

@@ -487,6 +487,38 @@ TEST_CASE("every machine reset reaches each target once, in attachment order, wi
   CHECK(r.cuts->empty());
 }
 
+namespace
+{
+void rcc_reset_pulse(stm32_fixture const& f, std::string_view reg, std::string_view bit)
+{
+  auto const& desc  = f.target->peripheral("RCC").description();
+  auto const* found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
+  auto const field = std::ranges::find(found->fields, bit, &popcorn::field_desc::name);
+  REQUIRE(field != found->fields.end());
+  for(std::uint32_t const value : {std::uint32_t{1} << field->lsb, std::uint32_t{0}})
+  {
+    REQUIRE(f.target->mem().write(desc.base + found->offset, 4, value).has_value());
+  }
+}
+}
+
+TEST_CASE("I2C1RST resets the controller and leaves its board targets alone")
+{
+  rig r{"eeprom_rw"};
+  r.resets->clear();
+  auto&       regs = r.f->target->peripheral("I2C1");
+  auto const* at   = popcorn::find_register(regs.description(), "TIMINGR");
+  REQUIRE(at != nullptr);
+  regs.poke(at->offset, 0x1234);
+  rcc_reset_pulse(*r.f, "RCC_APB1RSTR1", "I2C1RST");
+  CHECK(regs.peek(at->offset) == 0);
+  CHECK(r.resets->empty());
+  CHECK(r.cuts->empty());
+  r.f->target->reset(popcorn::reset_kind::software);
+  CHECK(r.resets->size() == 3);
+}
+
 TEST_CASE("a power cycle cuts each target in attachment order, then resets each at power-on")
 {
   using popcorn::reset_kind;
@@ -1995,4 +2027,26 @@ TEST_CASE("a hold due inside a lost arbitration starts at the other controller's
   b.run_until(end + hold_ps + address_ps + 2 * period_ps);
   REQUIRE(r.table->events.size() == 2);
   CHECK(r.table->events[0].at == end + hold_ps + address_ps);
+}
+
+TEST_CASE("I2C1RST lowers the TX request on the controller and ignores CR1 while held")
+{
+  constexpr std::uint32_t tx_request = 13;
+  rig                     r{"idle", true};
+  bus                     b{*r.f};
+  b.controller();
+  b.command(0x38, 2, false, false);
+  b.run_until(b.now() + address_ps + period_ps / 2);
+  b.set("CR1", "TXDMAEN", 1);
+  REQUIRE(r.level(tx_request));
+  rcc_reset_pulse(*r.f, "RCC_APB1RSTR1", "I2C1RST");
+  CHECK_FALSE(r.level(tx_request));
+  auto const& desc  = r.f->target->peripheral("RCC").description();
+  auto const* reset = popcorn::find_register(desc, "RCC_APB1RSTR1");
+  REQUIRE(reset != nullptr);
+  auto const held = std::uint32_t{1} << 21;
+  REQUIRE(r.f->target->mem().write(desc.base + reset->offset, 4, held).has_value());
+  b.set("CR1", "PE", 1);
+  REQUIRE(r.f->target->mem().write(desc.base + reset->offset, 4, 0).has_value());
+  CHECK(b.get("CR1", "PE") == 0);
 }

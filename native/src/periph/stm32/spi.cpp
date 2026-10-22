@@ -1,5 +1,6 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -190,7 +191,9 @@ auto lower(std::string_view name) -> std::string
  *        Not modelled, logged once: half duplex, CRC, TI mode, the autonomous trigger, the SS pulse
  *        and timing options.
  */
-class spi final : public dispatch_model<spi, spi_state>, public spi_controller_port
+class spi final : public dispatch_model<spi, spi_state>,
+                  public spi_controller_port,
+                  public bus_reset_listener
 {
 public:
   spi(model_context&                       ctx,
@@ -199,17 +202,18 @@ public:
       std::shared_ptr<spi_controller_sink> controller);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
   void power_cut() override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto on_write(
+  auto unheld_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error> override;
+      access_ctx     ctx) -> std::expected<void, bus_error>;
   void save(std::vector<std::byte>& out) const override;
   void load(std::span<std::byte const> in) override;
   auto transfer(
@@ -224,6 +228,7 @@ public:
   void plain_written(std::uint32_t old, std::uint32_t now);
 
 private:
+  void               restore_reset_values(std::optional<reset_kind> kind);
   [[nodiscard]] auto frame_bits() const -> std::uint32_t;
   [[nodiscard]] auto frame_bytes() const -> std::uint32_t;
   [[nodiscard]] auto frame_occupancy() const -> std::uint32_t;
@@ -582,11 +587,22 @@ void spi::hardware_select(bool selected)
   }
 }
 
-void spi::reset(register_file& regs, reset_kind kind)
+void spi::reset(register_file&, reset_kind kind)
+{
+  restore_reset_values(kind);
+}
+
+void spi::on_bus_reset()
+{
+  restore_unclaimed_storage();
+  restore_reset_values(std::nullopt);
+}
+
+void spi::restore_reset_values(std::optional<reset_kind> kind)
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
   auto const generation      = state_.generation + 1;
   auto const host_generation = state_.host_generation + (state_.host.empty() ? 0u : 1u);
@@ -597,9 +613,12 @@ void spi::reset(register_file& regs, reset_kind kind)
   selected.resize(attachments_.size());
   state_.selected = selected;
   state_.mode_checked.resize(attachments_.size());
-  for(auto const& attached : attachments_)
+  if(kind)
   {
-    attached.device->reset(kind);
+    for(auto const& attached : attachments_)
+    {
+      attached.device->reset(*kind);
+    }
   }
   for(std::size_t index = 0; index < attachments_.size(); ++index)
   {
@@ -927,7 +946,7 @@ auto spi::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
   return size >= 4 ? value : value & ((std::uint32_t{1} << (8u * size)) - 1u);
 }
 
-auto spi::on_write(
+auto spi::unheld_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -954,7 +973,7 @@ auto spi::on_write(
     flags();
     return {};
   }
-  auto const result = dispatch_model::on_write(regs, offset, size, old, value, access);
+  auto const result = bound_write(regs, offset, size, old, value, access);
   flags();
   return result;
 }
