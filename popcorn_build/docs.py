@@ -22,7 +22,7 @@ def build_command() -> list[str]:
         "build",
         "--strict",
         "--config-file",
-        str(project_dir / "mkdocs.yml"),
+        str(project_dir / "zensical.toml"),
     ]
 
 
