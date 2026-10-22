@@ -17,8 +17,9 @@ Copy one, build it, run its tests, then read its `test_*.py` to see how a test d
 | [stm32u575/native_plugin](stm32u575/native_plugin) | HAL IT | a native plugin: the RNG served by a C++ model selected with `PLUGIN.model("rng")`, a C++ SPI ADC from `PLUGIN.module()` on a software chip select, the dev-mode build and cache |
 | [stm32u575/pdm_mics](stm32u575/pdm_mics) | HAL DMA | two PDM microphones on MDF1 through `HAL_MDF_Init`, `HAL_MDF_AcqStart_DMA` and `HAL_MDF_GenerateTrgo`: sines fed with `m.periph.MDF1.mic(sitf, edge).write_pcm`, two interleaved filters in one circular GPDMA ring of 16-bit MSBs, the filter outputs with their times from `output(n)`, LF_MASTER at exactly 2 x CCK against RM0456 Table 374, a strict run, saturation reaching the error callback |
 | [stm32u575/pwr_flash](stm32u575/pwr_flash) | LL | voltage range 1 and 4 wait states before 160 MHz, a page erase and a quad-word program read back through `machine.mem`, PGSERR from a store without PG, a too low wait-state count failing a strict run |
-| [stm32u575/python_model](stm32u575/python_model) | HAL IT | the RNG, which popcorn does not model, served by a `popcorn.model.Model` written in Python: register handlers, a scheduled DRDY, the interrupt line, a seed from the description |
+| [stm32u575/python_model](stm32u575/python_model) | HAL IT | the RNG served by a `popcorn.model.Model` written in Python in place of the built-in model: register handlers, a scheduled DRDY, the interrupt line, a seed from the description |
 | [stm32u575/rcc](stm32u575/rcc) | LL | HSE bypass to a 160 MHz PLL1, voltage range, flash latency, SysTick period in virtual time |
+| [stm32u575/rng](stm32u575/rng) | LL | a 64-byte key from the built-in RNG: words predicted with `rng_words`, a `seeded` config with `RngOptions`, chosen words queued, a seed error after 8 words, a clock error, a stuck word, HSI48 left off |
 | [stm32u575/sai](stm32u575/sai) | HAL DMA | a 48 kHz I2S sine on SAI1 block A from a circular GPDMA linked list, frames captured from Python with their start times, half and complete callbacks |
 | [stm32u575/sai_codec](stm32u575/sai_codec) | HAL DMA | an I2C codec written in Python clocking a slave SAI1 pair through `DeviceBoard.set_audio_clock` and `AudioOptions(clocked_by=...)`, two 2D circular GPDMA nodes interleaving and splitting an `int16_t[2][64]`, per-2D-block callbacks, a snapshot mid-stream |
 | [stm32u575/spi](stm32u575/spi) | FreeRTOS, HAL init, LL driver | AT25SF NOR flash on the hardware SS output, an interrupt-driven transfer from a task, an application linked behind a bootloader offset |
@@ -91,6 +92,7 @@ traces. The machine is named after the fixture in logs and errors.
 - `faults="handler"` makes a processor fault enter the firmware's fault handler instead of stopping the run, as in `trustzone`.
 - `Periph(devices=[Device(cls, address=0x50, **params)])` attaches a bus device, `Periph(model=Use(cls, **params))` replaces a peripheral model, as in `i2c_mock` and `python_model`.
 - `rcc=RccOptions(...)` and `supply=SupplyOptions(...)` set the board clock and supply, as in `rcc` and `adc_watchdog`.
+- `rng=RngOptions(seed=...)` sets the words of the built-in RNG, as in `rng`.
 
 Registers go by their bare names, `m.periph.GPIOA.MODER`. The SVD names, `GPIO_MODER`, answer as
 aliases, so examples written either way run.

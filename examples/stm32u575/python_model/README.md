@@ -1,13 +1,12 @@
-# An unmodelled peripheral served by a Python model: the RNG, HAL IT
+# A built-in model replaced by a Python model: the RNG, HAL IT
 
 An STM32U575 application turns HSI48 on, initialises the RNG with `HAL_RNG_Init`, then asks
 for eight random words, one `HAL_RNG_GenerateRandomNumber_IT` at a time. Each word arrives in
 `HAL_RNG_ReadyDataCallback`, which stores it in `rng_result`. The main loop sleeps in WFI
 while it waits.
 
-popcorn has no RNG model. Without one, the RNG registers are plain storage: DRDY never sets,
-and a strict machine stops on the first RNG access. `rngmodel.Rng` is a `popcorn.model.Model`
-written next to the test that serves CR and DR: RNGEN starts a conversion of 40 us of virtual
+popcorn has a built-in RNG model, the `rng` example uses it. A board model replaces it:
+`rngmodel.Rng` is a `popcorn.model.Model` written next to the test that serves CR and DR: RNGEN starts a conversion of 40 us of virtual
 time, DRDY and the RNG interrupt follow, and each DR read returns the next word of a seeded
 xorshift32 sequence. A CONDRST write cancels the conversion in progress and clears SR, and
 clearing CONDRST with RNGEN set starts a new one. Clearing RNGEN stops production and keeps
@@ -32,7 +31,8 @@ uv run pytest -q examples/stm32u575/python_model
 - `conftest.py`: `board={"RNG": Periph(model=Use(Rng))}` puts the model in the RNG slot.
   `with_configs(seeded=...)` passes `seed=7` to its constructor.
 - `test_python_model.py`:
-  - a machine built without the model, strict, raises ModelError naming RNG;
+  - a machine built without the board model, strict, gets its words from the built-in model,
+    `rng_words(0, 8)`, not the board model's sequence;
   - the words the firmware received equal the seeded sequence, computed in the test from
     `rngmodel.words`, and `machine.model("RNG")` returns the model;
   - `HAL_RNG_Init` writes RNG_NSCR, a register ST's SVD omits and popcorn's description

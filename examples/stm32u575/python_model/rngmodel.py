@@ -1,9 +1,9 @@
 """The RNG of the STM32U575 as a peripheral model written in Python, `popcorn.model.Model`.
 
-popcorn has no native RNG model. This one serves the two registers a driver needs, CR and DR,
-after RM0456 Rev 6 section 48. Setting RNGEN starts a conversion, which sets SR.DRDY one
-`CONVERSION` later. A DR read while DRDY is set returns the next word of a seeded xorshift32
-sequence, clears DRDY and starts the next conversion. Clearing RNGEN stops production and
+It replaces popcorn's built-in RNG model on the board. It serves the two registers a driver
+needs, CR and DR, after RM0456 Rev 6 section 48. Setting RNGEN starts a conversion, which sets
+SR.DRDY one `CONVERSION` later. A DR read while DRDY is set returns the next word of a seeded
+xorshift32 sequence, clears DRDY and starts the next conversion. Clearing RNGEN stops production and
 keeps DRDY and DR valid (48.7.2, 48.7.3). A CR write with CONDRST set cancels the conversion
 in progress and clears SR. The write that clears CONDRST with RNGEN set starts a conversion,
 as the seed error recovery of 48.3.7 expects (48.7.1). The RNG interrupt line follows DRDY

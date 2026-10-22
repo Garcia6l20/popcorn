@@ -21,7 +21,7 @@ from popcorn import (
     Snapshot,
     StopReason,
 )
-from popcorn.board import AudioOptions, SpiTarget
+from popcorn.board import AudioOptions, SpiTarget, rng_words
 from popcorn.devices import SpiTargetBase
 from popcorn.units import VirtualTime, ms, us
 
@@ -149,8 +149,8 @@ async def test_without_the_board_model_the_built_in_rng_serves_the_firmware(
     await native_plugin_description.boot_machine(machine)
     await run_to_done(machine)
     got = received(machine)
-    assert len(got) == COUNT
-    assert all(word != 0 for word in got)
+    assert got == rng_words(0, COUNT)
+    assert got != list(itertools.islice(words(1), COUNT))
 
 
 async def test_the_firmware_gets_the_seeded_sequence(native_plugin: Machine) -> None:
