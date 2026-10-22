@@ -147,14 +147,15 @@ def test_two_plugins_of_one_name_are_refused(kit: Plugin) -> None:
     assert error.key == "plugins[1]"
 
 
-def test_a_plugin_model_serves_only_the_peripheral_the_board_names(kit: Plugin) -> None:
+def test_a_plugin_model_serves_only_the_peripheral_the_board_names_the_rest_built_in(
+    kit: Plugin,
+) -> None:
     named = described(kit, RNG=popcorn.Periph(model=kit.model("rng"))).machine()
     declared = described(kit).machine()
     plain = described().machine()
     assert rng_reads(named, 3) == [RNG_BASE, RNG_BASE + 1, RNG_BASE + 2]
     for m in (declared, plain):
-        with pytest.raises(popcorn.ModelError):
-            rng_reads(m, 1)
+        assert rng_reads(m, 2) == [0, 0]
         assert m.periph.RNG.DR.value == 0
     assert rng_reads(named, 1) == [RNG_BASE + 3]
 

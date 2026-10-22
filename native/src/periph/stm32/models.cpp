@@ -28,7 +28,7 @@ struct builtin
   std::string_view instance_glob = "*";
 };
 
-constexpr std::array<builtin, 29> builtins{
+constexpr std::array<builtin, 30> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"ICACHE", "Icache_v1_0_0*", [](board const& b) { return icache_factory(b.caches); }},
@@ -57,6 +57,7 @@ constexpr std::array<builtin, 29> builtins{
      {"DBGMCU", "", [](board const&) { return dbgmcu_factory(); }},
      {"CRC", "integtest1_v2_0", [](board const&) { return crc_factory(); }},
      {"HASH", "hash1_v2_2*", [](board const&) { return hash_factory(); }},
+     {"RNG", "rng1_v4_1", [](board const&) { return rng_factory({}); }},
      {"SYS", "STM32U5x_sys_*", [](board const&) { return syscfg_factory(); }},
      {"GTZC", "tzsc1_v2_2*", [](board const&) { return gtzc_factory(); }},
      }

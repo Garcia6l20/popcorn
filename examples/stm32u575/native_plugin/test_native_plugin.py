@@ -17,7 +17,6 @@ from popcorn import (
     ConfigError,
     Machine,
     MachineDescription,
-    ModelError,
     Return,
     Snapshot,
     StopReason,
@@ -139,7 +138,7 @@ def received(machine: Machine) -> list[int]:
     return [int(result.words[index].value) for index in range(COUNT)]
 
 
-async def test_without_the_plugin_a_strict_run_names_the_rng(
+async def test_without_the_board_model_the_built_in_rng_serves_the_firmware(
     native_plugin_description: MachineDescription,
 ) -> None:
     machine = Machine(
@@ -148,8 +147,10 @@ async def test_without_the_plugin_a_strict_run_names_the_rng(
         strict_peripherals=True,
     )
     await native_plugin_description.boot_machine(machine)
-    with pytest.raises(ModelError, match="RNG"):
-        await machine.run(for_=ms(20), budget=BUDGET)
+    await run_to_done(machine)
+    got = received(machine)
+    assert len(got) == COUNT
+    assert all(word != 0 for word in got)
 
 
 async def test_the_firmware_gets_the_seeded_sequence(native_plugin: Machine) -> None:
@@ -282,7 +283,7 @@ async def test_a_reset_restarts_the_sequence_from_the_seed(
     await run_to_done(native_plugin)
     native_plugin.reset()
     rng = native_plugin.periph.RNG
-    assert rng.CR.value == 0
+    assert rng.CR.value == 0x0080_0D00
     assert rng.DR.value == 0
     await native_plugin_description.boot_machine(native_plugin)
     await run_to_done(native_plugin)

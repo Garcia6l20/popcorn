@@ -18,7 +18,7 @@ covers the `python_model` fixture, not that machine.
 import itertools
 
 import pytest
-from popcorn import Call, Machine, MachineDescription, ModelError, Return, StopReason
+from popcorn import Call, Machine, MachineDescription, Return, StopReason
 from popcorn.units import VirtualTime, ms
 from rngmodel import CONVERSION, Rng, words
 
@@ -42,7 +42,7 @@ def received(machine: Machine) -> list[int]:
     return [int(result.words[index].value) for index in range(COUNT)]
 
 
-async def test_without_a_model_a_strict_run_names_the_rng(
+async def test_without_the_board_model_the_built_in_rng_serves_the_firmware(
     python_model_description: MachineDescription,
 ) -> None:
     machine = Machine(
@@ -51,8 +51,10 @@ async def test_without_a_model_a_strict_run_names_the_rng(
         strict_peripherals=True,
     )
     await python_model_description.boot_machine(machine)
-    with pytest.raises(ModelError, match="RNG"):
-        await machine.run(for_=ms(20), budget=BUDGET)
+    await run_to_done(machine)
+    got = received(machine)
+    assert len(got) == COUNT
+    assert all(word != 0 for word in got)
 
 
 async def test_the_firmware_gets_the_seeded_sequence(python_model: Machine) -> None:

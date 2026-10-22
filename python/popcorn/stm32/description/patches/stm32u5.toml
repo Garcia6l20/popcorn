@@ -102,6 +102,13 @@ on_write = "zero_to_clear"
 source = "RM0456 rev 6, 56.7.5 TIM15 status register (TIM15_SR): every field rc_w0, all 8 SVD fields listed. Same HAL SR = ~flag concern as the TIM1/TIM8 rule above"
 
 [[fields]]
+instances = ["RNG"]
+registers = ["SR"]
+fields = ["SEIS", "CEIS"]
+on_write = "zero_to_clear"
+source = "RM0456 Rev 7, 48.7.2 RNG status register (RNG_SR): SEIS and CEIS are rc_w0, writing 1 has no effect. ST's STM32U575 SVD gives plain read-write"
+
+[[fields]]
 instances = ["TIM15"]
 registers = ["CR2"]
 fields = ["MMS"]
@@ -219,7 +226,7 @@ fields = [
   { name = "EN_OSC2", lsb = 3, width = 3 },
   { name = "EN_OSC1", lsb = 0, width = 3 },
 ]
-source = "RM0456 rev 6, 48.7.4 RNG noise source control register (RNG_NSCR): offset 0x00C, reset 0x0003FFFF, EN_OSC1 to EN_OSC6 rw in bits 17:0, bits 31:18 reserved. ST's STM32U575 SVD omits it, and HAL_RNG_Init writes it. Plain storage: the CONDRST and CONFIGLOCK write gating is not modelled"
+source = "RM0456 rev 6, 48.7.4 RNG noise source control register (RNG_NSCR): offset 0x00C, reset 0x0003FFFF, EN_OSC1 to EN_OSC6 rw in bits 17:0, bits 31:18 reserved. ST's STM32U575 SVD omits it, and HAL_RNG_Init writes it. The RNG model applies the CONDRST and CONFIGLOCK write gating"
 
 [[registers]]
 peripheral = "OTG_FS"
@@ -370,6 +377,18 @@ content = [
   { offset = 0x3A5, data = [0xEB, 0x19] },
 ]
 packages = { "LQFP64" = 0x00, "WLCSP72 SMPS" = 0x01, "LQFP100" = 0x02, "UFBGA132" = 0x03, "LQFP144" = 0x04, "LQFP48" = 0x05, "UFBGA169" = 0x07, "TFBGA169" = 0x07, "LQFP64 SMPS" = 0x08, "WLCSP90 SMPS" = 0x09, "LQFP100 SMPS" = 0x0A, "UFBGA132 SMPS" = 0x0B, "LQFP144 SMPS" = 0x0C, "LQFP48 SMPS" = 0x0D, "UFBGA169 SMPS" = 0x0F, "TFBGA169 SMPS" = 0x0F, "UFBGA64" = 0x12, "UFBGA100" = 0x13, "LQFP100 DSI SMPS" = 0x14, "LQFP144 DSI SMPS" = 0x15, "UFBGA144 DSI SMPS" = 0x19, "WLCSP208 DSI SMPS" = 0x1B, "TFBGA216 DSI SMPS" = 0x1C, "UFBGA100 SMPS" = 0x1D, "WLCSP56 SMPS" = 0x1E, "WLCSP150 SMPS" = 0x1F, "WLCSP150 DSI SMPS" = 0x1F }
+
+[[resets]]
+peripheral = "RNG"
+register = "CR"
+reset = 0x00800D00
+source = "RM0456 Rev 7, 48.7.1 RNG control register (RNG_CR) and Table 466: reset value 0x0080 0D00, RNG_CONFIG1 0x08 and RNG_CONFIG3 0xD. ST's STM32U575 SVD gives 0"
+
+[[resets]]
+peripheral = "RNG"
+register = "HTCR"
+reset = 0x000072AC
+source = "RM0456 Rev 7, 48.7.5 RNG health test control register (RNG_HTCR): reset value 0x0000 72AC. ST's STM32U575 SVD gives 0x6274"
 
 [[resets]]
 peripheral = "TIM16"

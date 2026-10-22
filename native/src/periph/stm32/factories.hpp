@@ -6,6 +6,7 @@
 #include <popcorn/periph/stm32/flash.hpp>
 #include <popcorn/periph/stm32/pwr.hpp>
 #include <popcorn/periph/stm32/rcc.hpp>
+#include <popcorn/periph/stm32/rng.hpp>
 
 #include <chrono>
 #include <optional>
@@ -123,6 +124,12 @@ namespace popcorn::periph::stm32
 
 /** @brief Factory of the SYSCFG model, RM0456 section 15. */
 [[nodiscard]] auto syscfg_factory() -> model_factory;
+
+/**
+ * @brief Factory of the RNG model, RM0456 section 48.
+ * @param options Board configuration, copied into every model made.
+ */
+[[nodiscard]] auto rng_factory(rng_options options) -> model_factory;
 
 /** @brief Factory of the HASH model, RM0456 section 51. */
 [[nodiscard]] auto hash_factory() -> model_factory;
