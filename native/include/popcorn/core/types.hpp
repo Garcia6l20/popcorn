@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @brief Fundamental types of the C++ API: addresses, instruction and virtual time counts, stop and
+ * fault records, and the enums that describe them.
+ */
+
 #include <reflex/enum.hpp>
 
 #include <compare>

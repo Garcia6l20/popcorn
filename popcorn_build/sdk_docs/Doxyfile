@@ -1,18 +1,24 @@
 PROJECT_NAME           = "popcorn plugin SDK"
 OUTPUT_DIRECTORY       = docs/reference/sdk/api
-INPUT                  = native/include/popcorn/export.hpp \
+INPUT                  = popcorn_build/sdk_docs/mainpage.md \
+                         native/include/popcorn/export.hpp \
                          native/include/popcorn/plugin \
                          native/include/popcorn/core/types.hpp \
                          native/include/popcorn/core/errors.hpp \
                          native/include/popcorn/core/fwd.hpp \
                          native/include/popcorn/core/services.hpp \
                          native/include/popcorn/core/machine.hpp \
+                         native/include/popcorn/core/clock.hpp \
+                         native/include/popcorn/core/scheduler.hpp \
+                         native/include/popcorn/core/description.hpp \
                          native/include/popcorn/periph/model.hpp \
                          native/include/popcorn/periph/register_file.hpp \
                          native/include/popcorn/periph/lines.hpp \
+                         native/include/popcorn/periph/spi.hpp \
                          native/include/popcorn/periph/reset_listener.hpp \
                          native/include/popcorn/periph/snapshot_listener.hpp
-FILE_PATTERNS          = *.hpp
+FILE_PATTERNS          = *.hpp *.md
+USE_MDFILE_AS_MAINPAGE = popcorn_build/sdk_docs/mainpage.md
 GENERATE_HTML          = YES
 GENERATE_LATEX         = NO
 HTML_OUTPUT            = .

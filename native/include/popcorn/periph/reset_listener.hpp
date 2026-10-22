@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file
+ * @brief The interface for a model that must finish work due before a reset.
+ */
+
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
 

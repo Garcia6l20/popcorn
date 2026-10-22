@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file
+ * @brief The event queue of a machine and the port through which a model schedules events.
+ */
+
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>

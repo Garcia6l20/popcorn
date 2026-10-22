@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file
+ * @brief The register storage of one peripheral instance.
+ */
+
 #include <popcorn/core/description.hpp>
 #include <popcorn/export.hpp>
 

@@ -32,10 +32,12 @@
 #define POPCORN_ABI_STR_SPELL(x) #x
 
 #if defined(_GLIBCXX_DEBUG)
-/** @brief The libstdc++ debug mode field of the tag, it changes the layout of std containers. */
+/** @brief The libstdc++ debug mode field of the tag, "1" with `_GLIBCXX_DEBUG` and "0" without it.
+ * The mode changes the layout of std containers. */
 #define POPCORN_ABI_GLIBCXX_DEBUG "1"
 #else
-/** @brief The libstdc++ debug mode field of the tag, it changes the layout of std containers. */
+/** @brief The libstdc++ debug mode field of the tag, "1" with `_GLIBCXX_DEBUG` and "0" without it.
+ * The mode changes the layout of std containers. */
 #define POPCORN_ABI_GLIBCXX_DEBUG "0"
 #endif
 

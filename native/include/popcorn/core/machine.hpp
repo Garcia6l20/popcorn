@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @brief The machine: its options, the bounds and results of a run, and the class that owns one
+ * emulated MCU.
+ */
+
 #include <popcorn/arch/arch.hpp>
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/coverage.hpp>

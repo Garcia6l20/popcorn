@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file
+ * @brief Forward declarations of the core classes that model and plugin headers name.
+ */
+
 namespace popcorn::core
 {
 /** @brief Virtual clock of a machine, defined in `popcorn/core/clock.hpp`. */

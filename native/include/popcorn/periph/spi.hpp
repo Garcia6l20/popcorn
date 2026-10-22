@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file
+ * @brief The interfaces of a device on an SPI bus and of a controller that drives one.
+ */
+
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
 

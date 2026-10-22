@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @brief The services a machine offers to its architecture module and models: guest bus access,
+ * deferred stops and resets, and the helpers that check an access.
+ */
+
 #include <popcorn/core/fwd.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/types.hpp>

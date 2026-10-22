@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file
+ * @brief Interrupt request and DMA request lines between peripherals and the core.
+ */
+
 #include <popcorn/export.hpp>
 
 #include <cstdint>
