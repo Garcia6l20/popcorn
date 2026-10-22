@@ -147,9 +147,7 @@ def test_two_plugins_of_one_name_are_refused(kit: Plugin) -> None:
     assert error.key == "plugins[1]"
 
 
-def test_a_plugin_model_serves_only_the_peripheral_the_board_names_the_rest_built_in(
-    kit: Plugin,
-) -> None:
+def test_a_plugin_model_serves_only_the_peripheral_the_board_names(kit: Plugin) -> None:
     named = described(kit, RNG=popcorn.Periph(model=kit.model("rng"))).machine()
     declared = described(kit).machine()
     plain = described().machine()

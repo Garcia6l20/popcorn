@@ -72,24 +72,24 @@ struct rng_state
  *        rounds pause with their remaining time and resume from it, 48.3.8, and the FIFO and the
  *        register still deliver what they hold.
  *        Timing, 48.5, from the HCLK and kernel rates when a phase starts: init per Table 463,
- *        column "Configuration A or C, reset value", with CLKDIV read as the field value and
- *        wait_noise 16 while RNG_CONFIG1, RNG_CONFIG2, RNG_CONFIG3 and NISTC hold their reset
- *        values, else 192. A round takes 203 x N AHB cycles when fAHB < 1.6 x fRNG / 2^CLKDIV,
- *        else 128 x N divided RNG cycles, N 2 for NISTC 0, else RNG_CONFIG3[1:0] + 1, Table 464.
- *        CR bits 29:4 are written only with CONDRST 1 in the same access and CONFIGLOCK 0,
- *        CLKDIV and CED also only with RNGEN 0 before the write. CONFIGLOCK is set-once. NSCR and
- *        HTCR are written only while CONDRST reads 1 and CONFIGLOCK is 0, 48.7.4 and 48.7.5.
- *        CONDRST written 1 empties the FIFO and the register, stops init and the round and clears
- *        SR. Written back to 0 it reads 1 for 2 AHB plus 2 RNG cycles, 48.7.1, the time counted
- *        from the write, or from the kernel clock start when it is stopped. Then init restarts.
- *        SEIS and CEIS are cleared by writing 0. The RNG_IRQn line is IE and RNGEN and any of
- *        DRDY, SEIS and CEIS, 48.4. Only 32-bit accesses are served, others are a bus error and
- *        a write is ignored, 48.2.
- *        Deviations: register accesses are served with RCC_AHB2ENR1.RNGEN 0. RCC_AHB2RSTR1.RNGRST
- *        is not modelled, so CONFIGLOCK clears only on a system reset. There is no noise source:
- *        NSCR and HTCR are storage. Configuration B timing is not modelled, the configuration A
- *        and C column applies to every configuration. A rate change does not rescale a phase
- *        already started. The tamper output to TAMP is not modelled.
+ *        column "Configuration A or C, reset value", with CLKDIV read as the divider ratio
+ *        2^CLKDIV, as the 48.5 example of configuration C at CLKDIV 0 reads it, and wait_noise 16
+ * while RNG_CONFIG1, RNG_CONFIG2, RNG_CONFIG3 and NISTC hold their reset values, else 192. A round
+ * takes 203 x N AHB cycles when fAHB < 1.6 x fRNG / 2^CLKDIV, else 128 x N divided RNG cycles, N 2
+ * for NISTC 0, else RNG_CONFIG3[1:0] + 1, Table 464. CR bits 29:4 are written only with CONDRST 1
+ * in the same access and CONFIGLOCK 0, CLKDIV and CED also only with RNGEN 0 before or in the
+ * write, as the 48.3.4 software reset sequence writes them. CONFIGLOCK is set-once. NSCR and HTCR
+ * are written only while CONDRST reads 1 and CONFIGLOCK is 0, 48.7.4 and 48.7.5. CONDRST written 1
+ * empties the FIFO and the register, stops init and the round and clears SR. Written back to 0 it
+ * reads 1 for 2 AHB plus 2 RNG cycles, 48.7.1, the time counted from the write, or from the kernel
+ * clock start when it is stopped or stops before the end. Then init restarts. SEIS and CEIS are
+ * cleared by writing 0. The RNG_IRQn line is IE and RNGEN and any of DRDY, SEIS and CEIS, 48.4.
+ * Only 32-bit accesses are served, others are a bus error and a write is ignored, 48.2. Deviations:
+ * register accesses are served with RCC_AHB2ENR1.RNGEN 0. RCC_AHB2RSTR1.RNGRST is not modelled, so
+ * CONFIGLOCK clears only on a system reset. There is no noise source: NSCR and HTCR are storage.
+ * Configuration B timing is not modelled, the configuration A and C column applies to every
+ * configuration. A rate change does not rescale a phase already started. The tamper output to TAMP
+ * is not modelled.
  */
 class rng final : public dispatch_model<rng, rng_state>, public clock_listener
 {
@@ -211,7 +211,7 @@ auto rng::init_ps() const -> std::uint64_t
 {
   auto const fr    = wide{ctx_.clock.hz(kernel_)};
   auto const fa    = wide{std::max<std::uint64_t>(ctx_.clock.hz(hclk_), 1)};
-  auto const d     = wide{get(regs_, clkdiv_)};
+  auto const d     = wide{1} << get(regs_, clkdiv_);
   auto const n     = wide{loops()};
   auto const plain = get(regs_, config1_) == reset_config1
                  and get(regs_, config2_) == 0
@@ -436,7 +436,7 @@ void rng::control_written(std::uint32_t old, std::uint32_t now)
   auto taken = 0u;
   if(condrst_.of(now) != 0 and configlock_.of(old) == 0)
   {
-    taken = rngen_.of(old) == 0 ? config_bits_ : config_bits_ & ~live_bits_;
+    taken = rngen_.of(old) == 0 or rngen_.of(now) == 0 ? config_bits_ : config_bits_ & ~live_bits_;
   }
   auto word       = (now & ~config_bits_) | (now & taken) | (old & config_bits_ & ~taken);
   word            = configlock_.with(word, configlock_.of(old) | configlock_.of(now));
@@ -509,6 +509,10 @@ void rng::on_event(std::uint32_t kind, std::uint64_t payload)
 
 void rng::on_clock_change()
 {
+  if(state_.clearing != 0 and ctx_.clock.hz(kernel_) == 0)
+  {
+    withdraw(condrst_done);
+  }
   if(state_.clearing != 0 and state_.queued[condrst_done] == 0)
   {
     schedule_clear();

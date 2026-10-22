@@ -60,13 +60,13 @@ constexpr auto config1(std::uint32_t value) -> std::uint32_t
 
 constexpr std::uint64_t us               = 1'000'000;
 constexpr std::uint64_t cycle            = 250'000;
-constexpr std::uint64_t init_4mhz        = 964'250'000;
+constexpr std::uint64_t init_4mhz        = 966'916'667;
 constexpr std::uint64_t round_4mhz       = 101'500'000;
 constexpr std::uint64_t clear_4mhz       = 541'667;
-constexpr std::uint64_t init_160mhz      = 24'106'250;
+constexpr std::uint64_t init_160mhz      = 36'497'917;
 constexpr std::uint64_t round_160mhz     = 5'333'334;
-constexpr std::uint64_t init_slow_custom = 525'497'917;
-constexpr std::uint64_t init_slow_reset  = 521'831'250;
+constexpr std::uint64_t init_config_c    = 40'164'584;
+constexpr std::uint64_t init_config_c_d1 = 74'831'250;
 
 constexpr std::array<std::uint32_t, 4> seed_0_words{
     0xE220'A839, 0x6E78'9E6A, 0x06C4'5D18, 0xF88B'B8A8};
@@ -305,6 +305,12 @@ TEST_CASE("CR configuration bits are taken only with CONDRST in the same write")
   r.write(cr, config1(0x10) | 0xD00 | condrst);
   r.write(cr, config1(0x10) | 0xD00 | condrst | ced | clkdiv(3));
   CHECK(r.read(cr) == (config1(0x10) | 0xD00 | condrst | ced | clkdiv(3)));
+  r.write(cr, cr_nist | condrst | rngen);
+  REQUIRE(r.read(cr) == (cr_nist | condrst | rngen));
+  r.write(cr, cr_nist | clkdiv(2) | ced | condrst);
+  CHECK(r.read(cr) == (cr_nist | clkdiv(2) | ced | condrst));
+  r.write(cr, cr_nist | clkdiv(2) | ced | rngen);
+  CHECK(r.read(cr) == (cr_nist | clkdiv(2) | ced | rngen | condrst));
   CHECK(r.logged.empty());
 }
 
@@ -371,6 +377,43 @@ TEST_CASE("CONDRST written back to 0 reads 1 for 2 AHB plus 2 RNG cycles")
     r.run_until(done - cycle);
     CHECK(r.read(cr) == (cr_reset | condrst));
     r.run_until(done);
+    CHECK(r.read(cr) == cr_reset);
+    CHECK(r.logged.empty());
+  }
+  SUBCASE("written 1 again while the clear runs")
+  {
+    rig const r;
+    r.clocks();
+    r.write(cr, cr_reset | condrst);
+    r.write(cr, cr_reset);
+    auto const done = r.now() + clear_4mhz;
+    REQUIRE(r.due(done));
+    r.write(cr, cr_reset | condrst);
+    CHECK_FALSE(r.due(done));
+    r.run_until(done + 10 * cycle);
+    CHECK(r.read(cr) == (cr_reset | condrst));
+    r.write(cr, cr_reset);
+    auto const again = r.now() + clear_4mhz;
+    CHECK(r.due(again));
+    r.run_until(again);
+    CHECK(r.read(cr) == cr_reset);
+    CHECK(r.logged.empty());
+  }
+  SUBCASE("kernel clock stopped while the clear runs")
+  {
+    rig const r;
+    r.clocks();
+    r.write(cr, cr_reset | condrst);
+    r.write(cr, cr_reset);
+    auto const done = r.now() + clear_4mhz;
+    REQUIRE(r.due(done));
+    r.set_field("RCC", "RCC_CR", "HSI48ON", 0);
+    CHECK_FALSE(r.due(done));
+    r.run_for(1000 * us);
+    CHECK(r.read(cr) == (cr_reset | condrst));
+    auto const ready = r.hsi48(true);
+    CHECK(r.due(ready + clear_4mhz));
+    r.run_until(ready + clear_4mhz);
     CHECK(r.read(cr) == cr_reset);
     CHECK(r.logged.empty());
   }
@@ -489,19 +532,19 @@ TEST_CASE("init ends after the Table 463 time from the clocks at its start")
     CHECK(r.logged.empty());
   }
   for(auto const& [config, expected] : {
-          std::pair{cr_nist,  init_slow_custom},
-          std::pair{cr_reset, init_slow_reset }
+          std::pair{cr_nist,             init_config_c   },
+          std::pair{cr_nist | clkdiv(1), init_config_c_d1}
   })
   {
     CAPTURE(config);
     rig const r{"pll_160"};
     REQUIRE(r.finish(100'000).reason == stop_reason::user);
     r.f.set("pc", sym("rng_ll", "idle"));
-    r.write(cr, config | clkdiv(15) | condrst);
-    r.write(cr, config | clkdiv(15));
+    r.write(cr, config | condrst);
+    r.write(cr, config);
     r.run_for(us);
-    REQUIRE(r.read(cr) == (config | clkdiv(15)));
-    r.write(cr, config | clkdiv(15) | rngen);
+    REQUIRE(r.read(cr) == config);
+    r.write(cr, config | rngen);
     auto const start = r.now();
     CHECK(r.due(start + expected));
     CHECK(r.logged.empty());
@@ -603,11 +646,12 @@ TEST_CASE("HSI48 stopped mid-round pauses it, restarted resumes with the remaini
   }
   auto const due = ended + round_4mhz;
   r.run_until(due - 50 * us);
+  auto const left = due - r.now();
   r.set_field("RCC", "RCC_CR", "HSI48ON", 0);
   CHECK_FALSE(r.due(due));
   r.run_for(300 * us);
   CHECK_FALSE(r.ready());
-  auto const resumed = r.hsi48(true) + 50 * us;
+  auto const resumed = r.hsi48(true) + left;
   CHECK(r.due(resumed));
   r.run_until(resumed - cycle);
   CHECK_FALSE(r.ready());
@@ -737,10 +781,12 @@ TEST_CASE("a snapshot mid-init, paused, mid-round or mid-CONDRST restores the sa
   }
 }
 
-TEST_CASE("a system reset clears the FIFO and flags and keeps the generator position")
+TEST_CASE("a system reset clears the FIFO, flags and CONFIGLOCK and keeps the generator position")
 {
   rig const  r;
   auto const start = enabled_at_4mhz(r);
+  r.write(cr, cr_reset | rngen | configlock);
+  REQUIRE(r.read(cr) == (cr_reset | rngen | configlock));
   r.run_until(start + init_4mhz);
   for(int read = 0; read < 2; ++read)
   {
@@ -760,6 +806,8 @@ TEST_CASE("a system reset clears the FIFO and flags and keeps the generator posi
     got.push_back(r.cpu_dr());
   }
   CHECK(got == words_from(4, 4));
+  r.write(cr, cr_nist | condrst | rngen);
+  CHECK(r.read(cr) == (cr_nist | condrst | rngen));
   CHECK(r.logged.empty());
 }
 
