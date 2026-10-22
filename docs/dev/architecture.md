@@ -55,8 +55,9 @@ drives it, see [Threads](threads.md).
   compiles it with CMake as a static library and reads its commit from git.
 - reflex is the submodule `third_party/reflex`. popcorn uses its C++26 reflection helpers for
   enum formatting, serialization and Python binding.
-- nanobind, robin-map and doctest come from `deps.toml`, fetched at configure time with a
-  checksum. The test firmware sources are fetched only when the cross toolchain is present.
+- nanobind, robin-map, doctest and the other packages of `deps.toml` are fetched with a
+  checksum, see [Build](build.md). The test firmware sources are fetched only when the cross
+  toolchain is present.
 
 ## Where to read next
 

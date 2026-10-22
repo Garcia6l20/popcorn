@@ -94,12 +94,14 @@ The reference reads the package from `build/popcorn`, so the native build comes 
 stage then:
 
 1. Regenerates the support pages into `docs/support/generated`.
-2. Runs doxygen on the SDK headers and writes the HTML to `docs/reference/sdk/api`. Without
-   doxygen it prints one warning and writes a stub page. Any doxygen warning, an undocumented
-   declaration included, fails the stage.
-3. Fetches the doxygen-awesome-css theme on first use, which needs network access. If the fetch
-   fails it prints one warning and doxygen keeps its default style.
-4. Runs `zensical build --strict` and fails on a griffe docstring warning.
+2. Builds the SDK reference. Without doxygen on PATH it prints one warning, writes a stub page
+   and fetches nothing, so it needs no network. With doxygen it first fetches the
+   doxygen-awesome-css theme, which needs network access the first time. The download is kept
+   in `build/deps`, so a later run works offline. If the fetch fails it prints one warning and
+   doxygen keeps its default style. Then it runs doxygen on the SDK headers and writes the HTML
+   to `docs/reference/sdk/api`. Any doxygen warning, an undocumented declaration included, fails
+   the stage.
+3. Runs `zensical build --strict` and fails on a griffe docstring warning.
 
 The documentation dependencies are the `docs` dependency group of `pyproject.toml`.
 
@@ -128,5 +130,4 @@ uv run --no-sync pcons -B build POPCORN_BUILD_TESTS=ON POPCORN_BUILD_EXAMPLES=ON
 `pcons run check` passes both `ON` itself.
 
 The `release` variant, the default, builds Unicorn with `UC_LOAD_HELPER_NO_STACK_PROTECTOR`.
-It drops the stack protector from Unicorn's guest load helper, 7 host instructions fewer per
-MMIO read. The `debug`, `asan` and `tsan` variants and a Unicorn build outside popcorn keep it.
+It drops the stack protector from Unicorn's guest load helper. The `debug`, `asan` and `tsan` variants and a Unicorn build outside popcorn keep it.

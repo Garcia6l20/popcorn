@@ -48,7 +48,7 @@ fail and restore it. Do not bound a test by wall time. See [Testing](testing.md)
 - The subject has under 80 characters, a leading capital and no trailing period. No
   Conventional Commits prefix.
 - The body explains why. List the changes as bullets in the past tense.
-- One commit per step. A review fix is a new commit on top, not a rewrite of an earlier one.
+- Keep each commit buildable and self-contained.
 
 ## Documentation
 

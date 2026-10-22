@@ -57,11 +57,12 @@ flowchart TD
     A[before_reset to every reset_listener] --> B[reset the scheduler and the clock]
     B --> C[reset the architecture module]
     C --> D[lower every line]
-    D --> E[reset the register layers]
-    E --> F[model reset for each model]
-    F --> G[rebase trace and sinks, count the reset]
+    D --> E[for each peripheral in description order:<br/>reset its register layer, then its model]
+    E --> G[rebase trace and sinks, count the reset]
 ```
 
+- Layer reset and model reset run per peripheral in one loop, so a model that reads a peer
+  during its reset sees a peer that is not reset yet when the peer comes later in the order.
 - A model that must finish work due before a reset implements `periph::reset_listener`. The
   machine finds it with `dynamic_cast` and calls it in description order, for every reset kind.
 - A model that computes state lazily implements `periph::snapshot_listener`, called at the

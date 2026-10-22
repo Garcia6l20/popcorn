@@ -31,30 +31,35 @@ flowchart TD
     B --> C[handle requests]
     C --> D{bound reached?}
     D -->|yes| Z[finish the slice]
-    D -->|no| E{core asleep<br/>or held?}
+    D -->|no| E{core held?}
     E -->|yes| F[jump the clock to the<br/>next deadline] --> A
     E -->|no| G[deliver a pending exception]
-    G --> H[set the instruction deadline]
-    H --> I[run the engine]
-    I --> J[count executed instructions]
-    J --> K[handle requests and traps]
-    K --> A
+    G --> H{core asleep?}
+    H -->|yes| F
+    H -->|no| I[set the instruction deadline]
+    I --> J[run the engine]
+    J --> K[count executed instructions]
+    K --> L[handle requests and traps]
+    L --> A
 ```
 
 In order, one turn of the loop:
 
 1. Handles requests. A model or handler may have asked for a stop, a reset or the end of the
    slice. A requested reset becomes a RESET_REQUEST stop when a call is running or the machine
-   is configured to stop on it. Otherwise the machine resets and the run goes on.
+   is configured to stop on it. A run that waits for thread mode stops the same way. Otherwise the machine resets and the run goes on.
 2. Dispatches the events due at the current instruction count.
 3. Checks the bounds, in this order: the call return sentinel, `budget_left`,
    `exact_instructions`, `until_time`, the `until` addresses, `until_return`, and last
    `max_instructions`, which ends the slice without a stop.
-4. When the core sleeps or is held, jumps the clock to the earliest of the next event, the time
-   bound and the instruction bound. With no event and no time bound it stops with IDLE.
-5. Otherwise delivers a pending exception, takes the smallest of the instruction bounds and the
-   next event as the deadline, and starts the engine with `uc_emu_start`.
-6. After the engine returns, adds the executed instructions, handles requests, then turns a bus
+4. When the core is held, as a halted member of a system is, jumps the clock to the earliest of the
+   next event, the time bound and the instruction bound. With no event and no time bound it stops
+   with IDLE.
+5. Otherwise delivers a pending exception. A pending interrupt therefore wakes a core in WFI
+   before any jump. If the core still sleeps after the delivery, it jumps the clock as in step 4.
+6. Otherwise takes the smallest of the instruction bounds and the next event as the deadline and
+   starts the engine with `uc_emu_start`.
+7. After the engine returns, adds the executed instructions, handles requests, then turns a bus
    fault or an unmapped access into a stop or a resume through the architecture module.
 
 The engine stops at the deadline, at an address of the exit list, or when a hook asks it to.
@@ -64,9 +69,9 @@ to the next hit.
 
 ## Bounds of a slice
 
-`slice_request` in `native/include/popcorn/core/machine.hpp` carries the bounds. Only `until`,
-`budget_left`, `exact_instructions`, `until_time` and `stop_when` stop the run. The others, the
-instruction cap of one million and the wall budget of one millisecond read every 256 blocks,
+`slice_request` in `native/include/popcorn/core/machine.hpp` carries the bounds. The bounds
+`until`, `budget_left`, `exact_instructions`, `until_time` and `stop_when` stop the run. The
+instruction cap of one million and the wall budget of one millisecond, read every 256 blocks,
 only end the slice so the caller can yield. `exact_instructions` runs whole blocks up to the
 last block boundary before the count, then single-steps the rest. `stop_when` is evaluated
 after each dispatched event and at the slice end, never per instruction.

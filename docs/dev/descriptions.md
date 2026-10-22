@@ -54,8 +54,14 @@ in `_cache.py`.
 
 A description can ship in the package as `<RefName>[-<core>].json.xz` under
 `python/popcorn/stm32/data`. `_shipped.py` decompresses it on first use, with a hard limit on
-the decompressed size. The lookup order of `popcorn.stm32.mcu(part)` is: a file in a directory
-of `POPCORN_STM32_DESCRIPTION_DIRS`, then the shipped file, then a local build from ST's files.
+the decompressed size. The lookup order of `popcorn.stm32.mcu(part)` is:
+
+1. `<RefName>[-<core>].json`, uncompressed, in a directory of `POPCORN_STM32_DESCRIPTION_DIRS`,
+   searched in order.
+2. The shipped file, skipped when `svd`, `cubemx_db` or `cmsis_header` is passed or
+   `POPCORN_STM32_BUILD` is `local`. Any other value of that variable raises an error.
+3. A local build from ST's files, cached.
+
 The [Install](../guide/install.md) page shows the same order from the user side.
 
 `_golden.py` writes a canonical text dump of a description, one line per item. The dump and its

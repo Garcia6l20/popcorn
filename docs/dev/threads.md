@@ -48,9 +48,11 @@ that variant link two extra files from `tests/native`:
 - `tsan_longjmp.cpp` bypasses the `siglongjmp` interceptor. Without it each case that runs
   the engine aborts under glibc 2.44.
 
-`tsan.supp` suppresses races TSAN reports on exception objects whose reference count lives in
-uninstrumented libstdc++. Two of its entries match a frame in either stack, so in every tsan
-case they also hide a race on an `exception_ptr` object itself.
+`tsan.supp` has three entries. `use_rt_clock`, a clock helper, covers a race on the clock source.
+The other two, `exception_ptr::_M_release` and `destroy_at<exception_ptr>`, cover races on
+exception objects whose reference count lives in uninstrumented libstdc++. Those two match a
+frame in either stack, so in every tsan case they can also hide a race on an `exception_ptr`
+object itself.
 
 Run the tsan variant through `pcons test`, which registers one test per doctest case. Case
 time limits grow by a factor of three in the sanitizer variants. TSAN does not cover the Python
