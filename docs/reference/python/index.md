@@ -9,5 +9,5 @@ private.
 - [Links and taps](links.md): `System`, `UartLink` and `UartTap`.
 - [Hooks](hooks.md): intercepts, probes, watches and conditions.
 - [Errors](errors.md): the exception tree.
-- [Descriptions](descriptions.md): `MachineDescription` and its parts.
+- [Descriptions](descriptions.md): `MachineDescription`, its parts and native plugins.
 - [pytest plugin](pytest.md): fixtures and settings.

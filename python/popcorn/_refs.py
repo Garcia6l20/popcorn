@@ -390,7 +390,7 @@ class Condition:
         """Evaluate it now through the reference's sync view: the parked path.
 
         Args:
-            machine: The machine whose memory the condition reads.
+            machine: Unused. The condition reads through its own reference.
         """
         return self._test(self._ref.get())
 
@@ -460,7 +460,7 @@ class Conditions:
         """Evaluate the members now through their sync views: the parked path.
 
         Args:
-            machine: The machine whose memory the members read.
+            machine: Unused. The members read through their own references.
         """
         combine = all if self.mode == "all" else any
         return combine(member.ready(machine) for member in self.members)

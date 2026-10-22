@@ -290,7 +290,7 @@ def find(name: str) -> Plugin:
     Raises:
         ConfigError: no installed distribution provides `name`, the message listing the names
             installed, two distributions provide it, naming both, one declares it twice, its
-            module does not import, or its value is not a `Plugin` named `name.`
+            module does not import, or its value is not a `Plugin` named `name`.
     """
     if not isinstance(cast(object, name), str) or not name:
         raise ConfigError(
