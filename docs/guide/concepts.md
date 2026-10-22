@@ -26,6 +26,8 @@ flowchart LR
   or SPI bus, a UART bridge.
 - Clocks and options: `rcc`, `supply`, `option_bytes`, `rng`, `core_hz`.
 - Policies: `faults` and `strict`. See [Faults and errors](faults.md).
+- Also: `name`, `core`, `cpi`, `missing`, `plugins` for native plugins and `configs` for named
+  variants of one description that pytest fixtures select.
 
 It compares and hashes by content. Its `digest` names it across processes, and the pytest
 plugin uses it to cache boots.

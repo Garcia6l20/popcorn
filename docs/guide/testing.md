@@ -1,6 +1,6 @@
 # Testing with pytest
 
-The `popcorn.pytest` plugin boots each machine description once per session and restores the
+The `popcorn.pytest` plugin boots each machine description once per process and restores the
 boot snapshot before every test that uses it. A test starts from the same state each time, at
 the cost of a restore, not a boot.
 
@@ -19,7 +19,15 @@ Declare fixtures in a `conftest.py` to share them across test files.
 
 ## Write tests
 
-A helper drives the button through the GPIO pin view:
+Name the file `test_*.py` and run it as usual:
+
+```sh
+uv run pytest tests/
+```
+
+`ELF` in the snippets is the path of your firmware, see [First machine](first_machine.md). A helper drives the
+button through the GPIO pin view. The button has a pull-up, so the pin rests high. Driving it
+to 0 is the falling edge that fires the interrupt, and driving it back to 1 releases it:
 
 ```python
 --8<-- "guide/test_testing.py:press"
@@ -38,7 +46,7 @@ trace ring.
 ## Bound every run with a marker
 
 ```python
---8<-- "guide/test_testing.py:marker"
+--8<-- "guide/test_markers.py:marker"
 ```
 
 `@pytest.mark.popcorn` sets the settings of every popcorn machine a test uses:
@@ -62,7 +70,18 @@ machine_factory.booted(description)` returns a machine restored from the boot sn
 description, shared with its fixtures. Use it from async tests. The sync call
 `machine_factory(description)` does the same once the description has booted.
 `machine_factory(description, booted=False)` returns a machine powered off and not reset, for a
-test that boots it itself.
+test that boots it itself:
+
+```python
+--8<-- "guide/test_testing.py:sync"
+```
+
+A `MachineDescription` with `missing="skip"` skips the tests that use it when its ELF or an ST
+file it needs is missing, instead of failing them. Use it for firmware a contributor may not have
+built.
+
+`@popcorn.pytest.system` declares a fixture for a linked system the same way, see
+[Systems and links](systems.md).
 
 ## When a test fails
 

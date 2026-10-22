@@ -1,7 +1,6 @@
 # Install
 
-popcorn installs from source. The native core compiles on your machine, so the first install
-takes a few minutes.
+popcorn installs from source. The native core compiles on your machine.
 
 ## Prerequisites
 
@@ -16,8 +15,17 @@ On Linux x86_64:
 
 ## Install the package
 
+Create a virtual environment, then install into it:
+
 ```sh
+uv venv
 uv pip install "popcorn[pytest] @ git+https://github.com/Garcia6l20/popcorn"
+```
+
+Check the install:
+
+```sh
+uv run python -c "import popcorn; print(popcorn.version())"
 ```
 
 The extras add optional dependencies:

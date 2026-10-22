@@ -2,7 +2,6 @@ from pathlib import Path
 
 import popcorn
 import popcorn.pytest
-import pytest
 from popcorn import StopReason
 from popcorn.pytest import MachineFactory
 from popcorn.units import ms
@@ -55,16 +54,6 @@ async def test_two_presses(button: popcorn.Machine) -> None:
 # --8<-- [end:restored]
 
 
-# --8<-- [start:marker]
-@pytest.mark.popcorn(budget=500)
-async def test_a_small_budget_bounds_every_run(button: popcorn.Machine) -> None:
-    stop = await button.run()
-    assert stop.reason is StopReason.BUDGET
-
-
-# --8<-- [end:marker]
-
-
 # --8<-- [start:factory]
 async def test_two_machines_of_one_description(machine_factory: MachineFactory) -> None:
     left = await machine_factory.booted(BUTTON)
@@ -75,3 +64,15 @@ async def test_two_machines_of_one_description(machine_factory: MachineFactory) 
 
 
 # --8<-- [end:factory]
+
+
+async def test_the_sync_factory_and_a_powered_off_machine(machine_factory: MachineFactory) -> None:
+    # --8<-- [start:sync]
+    await machine_factory.booted(BUTTON)
+    restored = machine_factory(BUTTON)
+    assert restored.where().symbol == "main"
+    off = machine_factory(BUTTON, booted=False)
+    assert off.where().symbol != "main"
+    stop = await BUTTON.boot_machine(off)
+    assert stop.location.symbol == "main"
+    # --8<-- [end:sync]

@@ -10,7 +10,10 @@ and reads its state. The firmware prints a banner, then echoes each line it rece
 --8<-- "guide/test_first_machine.py:describe"
 ```
 
-The description names the part and the ELF to load. `Boot` resets the core and runs to `main`
+`ELF` is the path of the firmware. This guide uses the prebuilt ELFs of the repository's examples,
+`examples/stm32u575/<name>/prebuilt/<name>.elf` in a checkout, so a pip install does not
+contain them. Point `popcorn.Elf` at your own firmware ELF to follow along. The description
+names the part and the ELF to load. `Boot` resets the core and runs to `main`
 within 1,000,000 instructions, so the C runtime start-up is done when the test begins.
 
 ## Build and boot it
@@ -23,8 +26,14 @@ within 1,000,000 instructions, so the C runtime start-up is done when the test b
 `boot.until`. It returns the ADDRESS stop at `main` and raises when the firmware faults or runs
 out of budget first.
 
-These calls are coroutines. In a script, run them under `asyncio.run()`. Under pytest, the
-popcorn plugin runs async tests on its own loop, see [Testing with pytest](testing.md).
+These calls are coroutines. A script runs them under `asyncio.run()`:
+
+```python
+--8<-- "guide/test_first_machine.py:script"
+```
+
+Under pytest, the popcorn plugin runs async tests on its own loop, see
+[Testing with pytest](testing.md).
 
 ## Talk to the firmware
 
@@ -34,8 +43,9 @@ popcorn plugin runs async tests on its own loop, see [Testing with pytest](testi
 
 `m.periph.USART1.port` is the far end of the USART line. `read(n, for_=...)` runs the machine
 until the firmware has sent `n` bytes, or until `for_` of virtual time has passed, and returns
-what arrived. `write()` queues bytes on the firmware's RX line, one frame time apart at the baud
-rate the firmware set.
+what arrived. Without `for_`, it returns fewer bytes when the core goes idle. `write()` queues
+bytes on the firmware's RX line, one frame time apart at the baud rate the firmware set. It
+returns an awaitable, so the test awaits it.
 
 ## Read its state
 

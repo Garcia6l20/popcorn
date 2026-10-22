@@ -3,6 +3,16 @@
 A machine runs only inside `run`, `step` or `call`. Each one ends with a `popcorn.Stop` that
 says why and where the core stopped. The examples on this page use the gpio example firmware:
 a button on PC13 counts presses in `presses` through an EXTI interrupt, and `main` sleeps in WFI.
+The snippets take a booted `button` machine:
+
+```python
+--8<-- "guide/test_running.py:describe"
+```
+
+`ELF` is the path of `gpio_button.elf`, see [First machine](first_machine.md). The button has a
+pull-up, so the pin rests high and `level = 0` is a falling edge, the edge that fires the
+interrupt. The first `run(for_=ms(1))` lets `main` configure the pin and reach WFI before the
+test presses.
 
 ## Run until an address
 
@@ -13,7 +23,7 @@ a button on PC13 counts presses in `presses` through an EXTI interrupt, and `mai
 `until` takes a symbol or an address. The run stops with ADDRESS before the instruction there
 runs, so `presses` is still 0 when the callback is reached. A run that starts at that address
 executes at least one instruction first, so calling `run(until=...)` again goes on to the next
-hit, as a debugger's continue does.
+hit, as a debugger's continue does. Here the second call finds no new press and ends with TIME.
 
 ## Run for a time
 
@@ -60,7 +70,8 @@ plugin sets it per test, see [Testing with pytest](testing.md).
 
 - `reason`, a `popcorn.StopReason`.
 - `pc`, the next instruction to execute, and `location`, its symbol, offset, file and line.
-- `instructions`, the count executed since reset. Time asleep in WFI is not in it.
+- `instructions`, the count since reset. A core asleep in WFI adds one per core clock cycle.
+  `Machine.executed` leaves that out and is what `budget` counts.
 - `time`, the virtual time since reset.
 - `fault`, set only for a FAULT stop. See [Faults and errors](faults.md).
 - `detail`, what caused the stop beyond its reason.
