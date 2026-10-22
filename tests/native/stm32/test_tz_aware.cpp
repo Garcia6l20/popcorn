@@ -371,6 +371,29 @@ TEST_CASE("RM0456 11.5.1: a peripheral's RCC bits follow its TZSC or own securit
   CHECK((r.peek("RCC", "AHB1ENR") & flash) == 0);
 }
 
+TEST_CASE("RM0456 11.5.1: RNGRST of a Secure RNG ignores a Non-secure write, ADC12RST stores")
+{
+  rig const r{
+      true, {.tzen = true, .secwm1 = stm32::no_area{}, .secwm2 = stm32::no_area{}}
+  };
+  auto const rngrst = bit("RCC", "AHB2RSTR1", "RNGRST");
+  auto const adcrst = bit("RCC", "AHB2RSTR1", "ADC12RST");
+  auto const htcr   = r.peek("RNG", "HTCR");
+  r.write("RNG", "CR", bit("RNG", "CR", "CONDRST"), secure_priv);
+  r.write("RNG", "HTCR", 0xA2B0, secure_priv);
+  REQUIRE(r.peek("RNG", "HTCR") == 0xA2B0);
+  r.write("GTZC1_TZSC", "SECCFGR3", bit("GTZC1_TZSC", "SECCFGR3", "RNGSEC"), secure_priv);
+  r.write("RCC", "AHB2RSTR1", rngrst | adcrst, nonsecure_priv);
+  CHECK(r.peek("RCC", "AHB2RSTR1") == adcrst);
+  CHECK(r.peek("RNG", "HTCR") == 0xA2B0);
+  r.write("RCC", "AHB2RSTR1", 0, nonsecure_priv);
+  CHECK(r.peek("RCC", "AHB2RSTR1") == 0);
+  CHECK(r.peek("RNG", "HTCR") == 0xA2B0);
+  r.write("RCC", "AHB2RSTR1", rngrst, secure_priv);
+  CHECK(r.peek("RCC", "AHB2RSTR1") == rngrst);
+  CHECK(r.peek("RNG", "HTCR") == htcr);
+}
+
 TEST_CASE("RM0456 11.5.2: RCC SPRIV and NSPRIV make the RCC bits privileged")
 {
   rig const  r{true};

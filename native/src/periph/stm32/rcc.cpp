@@ -205,6 +205,8 @@ constexpr std::array<std::string_view, 8> enable_registers{
 
 constexpr std::string_view peripheral_resets = "RCC_AHB2RSTR1";
 
+constexpr std::array<std::string_view, 1> reset_listeners{"RNG"};
+
 constexpr std::array<std::uint64_t, 16> msi_hz{
     48'000'000, 24'000'000, 16'000'000, 12'000'000, 4'000'000, 2'000'000, 1'330'000, 1'000'000,
     3'072'000,  1'536'000,  1'024'000,  768'000,    400'000,   200'000,   133'000,   100'000};
@@ -417,8 +419,9 @@ struct timer
  *        section 11.4.16. FLASH programming or erase keeps HSI16 on while it runs, RM0456
  *        sections 7.3.6 and 7.3.7. A 0 to 1 write of a kernel clocked peripheral's bit in
  *        RCC_AHB2RSTR1, RM0456 11.8.22, calls `bus_reset_listener::on_bus_reset()` on every
- *        peer, and `kernel_gate::held_in_reset()` reads the bit. Only the RNG listens. The other
- *        reset registers are storage.
+ *        peer, and `kernel_gate::held_in_reset()` reads the bit. Only the RNG listens, and a
+ *        part with an RNG whose RCC_AHB2RSTR1 lacks RNGRST is a config_error. The other reset
+ *        registers are storage.
  *
  *        TrustZone, RM0456 11.5 and Table 117: the bits each `RCC_SECCFGR` bit secures, and the
  *        reset, enable, sleep enable, autonomous enable and kernel clock selection bits of a
@@ -483,7 +486,8 @@ private:
   [[nodiscard]] auto locked(std::size_t pll) const -> bool;
   [[nodiscard]] auto rates() const -> std::array<std::uint64_t, signal_count>;
   [[nodiscard]] auto enable_field(std::string_view name) const -> field_ref;
-  [[nodiscard]] auto reset_field(std::string_view enable) const -> std::optional<field_ref>;
+  [[nodiscard]] auto reset_field(std::string_view instance, std::string_view enable) const
+      -> std::optional<field_ref>;
 
   void oscillators_written(
       std::string_view reg,
@@ -691,7 +695,7 @@ rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& opt
              .select = field(entry.reg, entry.field),
              .inputs = &entry.inputs,
              .enable = enable_field(user.enable),
-             .reset  = reset_field(user.enable)});
+             .reset  = reset_field(user.instance, user.enable)});
       }
     }
   }
@@ -720,14 +724,16 @@ auto rcc::enable_field(std::string_view name) const -> field_ref
   return field(enable_registers.back(), name);
 }
 
-auto rcc::reset_field(std::string_view enable) const -> std::optional<field_ref>
+auto rcc::reset_field(std::string_view instance, std::string_view enable) const
+    -> std::optional<field_ref>
 {
-  if(not has_register(peripheral_resets) or not enable.ends_with("EN"))
-  {
-    return std::nullopt;
-  }
   auto const name = std::string{enable.substr(0, enable.size() - 2)} + "RST";
-  if(not std::ranges::contains(describe(peripheral_resets).fields, name, &field_desc::name))
+  if(std::ranges::contains(reset_listeners, instance))
+  {
+    return field(peripheral_resets, name);
+  }
+  if(not has_register(peripheral_resets)
+     or not std::ranges::contains(describe(peripheral_resets).fields, name, &field_desc::name))
   {
     return std::nullopt;
   }

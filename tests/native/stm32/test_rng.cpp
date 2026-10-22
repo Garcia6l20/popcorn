@@ -1,3 +1,4 @@
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 #include "stm32_fixture.hpp"
 
@@ -95,9 +96,21 @@ auto words_from(std::uint64_t start, std::uint64_t count, std::uint64_t seed = 0
   return out;
 }
 
-class clock_probe final : public popcorn::periph::model
+class clock_probe final : public popcorn::periph::model,
+                          public popcorn::periph::stm32::bus_reset_listener
 {
 public:
+  clock_probe(core::clock_domain rng, std::size_t* resets) : rng_{rng}, resets_{resets}
+  {}
+
+  void on_bus_reset(core::clock_domain kernel) override
+  {
+    if(resets_ != nullptr and kernel == rng_)
+    {
+      ++*resets_;
+    }
+  }
+
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
   {
     return {};
@@ -128,10 +141,17 @@ public:
   {}
   void load(std::span<std::byte const>) override
   {}
+
+private:
+  core::clock_domain rng_;
+  std::size_t*       resets_;
 };
 
-auto entered(std::string_view entry, std::uint64_t seed = 0, core::clock** probe = nullptr)
-    -> stm32_fixture
+auto entered(
+    std::string_view entry,
+    std::uint64_t    seed   = 0,
+    core::clock**    probe  = nullptr,
+    std::size_t*     resets = nullptr) -> stm32_fixture
 {
   auto options               = popcorn::testing::stm32_options();
   options.strict_peripherals = true;
@@ -139,10 +159,10 @@ auto entered(std::string_view entry, std::uint64_t seed = 0, core::clock** probe
   {
     options.models.insert_or_assign(
         "CORDIC",
-        [probe](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&)
+        [probe, resets](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&)
             -> std::shared_ptr<popcorn::periph::model> {
           *probe = &ctx.clock;
-          return std::make_shared<clock_probe>();
+          return std::make_shared<clock_probe>(ctx.clock.domain("rng"), resets);
         });
   }
   if(seed != 0)
@@ -163,10 +183,11 @@ auto entered(std::string_view entry, std::uint64_t seed = 0, core::clock** probe
 struct rig
 {
   explicit rig(
-      std::string_view entry = "idle",
-      std::uint64_t    seed  = 0,
-      core::clock**    probe = nullptr)
-      : f{entered(entry, seed, probe)}
+      std::string_view entry  = "idle",
+      std::uint64_t    seed   = 0,
+      core::clock**    probe  = nullptr,
+      std::size_t*     resets = nullptr)
+      : f{entered(entry, seed, probe, resets)}
   {}
 
   void until(std::string_view symbol, std::uint64_t instructions) const
@@ -1174,6 +1195,47 @@ TEST_CASE("RNGRST returns the RNG to reset, keeps the entropy controls and holds
   CHECK(got == std::vector<std::uint32_t>{1, 2, 3, 4});
   CHECK((r.read(sr) & ~drdy) == 0);
   CHECK(r.logged.empty());
+}
+
+TEST_CASE("RNGRST notifies on its 0 to 1 write only, ADC12RST leaves the RNG alone")
+{
+  core::clock* clock  = nullptr;
+  std::size_t  resets = 0;
+  rig const    r{"idle", 0, &clock, &resets};
+  r.write(cr, cr_reset | condrst);
+  r.write(htcr, nist_htcr);
+  REQUIRE(r.read(htcr) == nist_htcr);
+  r.set_field("RCC", "RCC_AHB2RSTR1", "ADC12RST", 1);
+  CHECK(r.f.field("RCC", "RCC_AHB2RSTR1", "ADC12RST") == 1);
+  CHECK(r.read(htcr) == nist_htcr);
+  CHECK(resets == 0);
+  rng_reset(r, 1);
+  CHECK(resets == 1);
+  CHECK(r.read(htcr) == 0x0000'72AC);
+  r.set_field("RCC", "RCC_AHB2RSTR1", "ADC12RST", 0);
+  CHECK(r.f.field("RCC", "RCC_AHB2RSTR1", "RNGRST") == 1);
+  CHECK(resets == 1);
+  rng_reset(r, 0);
+  CHECK(resets == 1);
+  rng_reset(r, 1);
+  CHECK(resets == 2);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("a part with an RNG and no RCC_AHB2RSTR1.RNGRST is a config_error")
+{
+  auto       description = u575();
+  auto const rcc         = std::ranges::find(
+      description.peripherals, std::string{"RCC"}, &popcorn::peripheral_desc::name);
+  REQUIRE(rcc != description.peripherals.end());
+  auto const resets =
+      std::ranges::find(rcc->registers, std::string{"AHB2RSTR1"}, &popcorn::register_desc::name);
+  REQUIRE(resets != rcc->registers.end());
+  REQUIRE(
+      std::erase_if(
+          resets->fields, [](popcorn::field_desc const& field) { return field.name == "RNGRST"; })
+      == 1);
+  CHECK_THROWS_AS((stm32_fixture{description, "rng_ll"}), popcorn::config_error);
 }
 
 TEST_CASE("RNGRST clears SECS and drops a pending auto-reset, the seed fault level stays")

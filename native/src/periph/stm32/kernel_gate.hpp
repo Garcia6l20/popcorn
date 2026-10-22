@@ -35,7 +35,7 @@ public:
    * @brief Whether RCC holds the peripheral clocked by @p kernel in reset, such as
    *        RCC_AHB2RSTR1.RNGRST 1 for the `rng` domain.
    * @param kernel Kernel clock domain of the peripheral.
-   * @return The reset bit, false for a domain whose reset bit is not modelled.
+   * @return The reset bit, false for a domain with no reset bit in RCC_AHB2RSTR1.
    */
   [[nodiscard]] virtual auto held_in_reset(core::clock_domain kernel) const -> bool = 0;
 

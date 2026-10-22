@@ -129,8 +129,9 @@ struct rng_state
  *        registers to their reset values, CONFIGLOCK included, empties the FIFO and the
  *        register, ends init, rounds, a CONDRST clear and an auto-reset, and clears SECS, CECS
  *        and the line. The entropy_source keeps its state, as for every other reset kind. While
- *        the bit is 1 a register write is ignored, an assumption: RM0456 gives no register
- *        access rule for a peripheral held in reset.
+ *        the bit is 1 a register write is ignored, a debugger write included, an assumption:
+ *        RM0456 gives no register access rule for a peripheral held in reset. Reads are not
+ *        blocked: a debugger read of DR shows the empty FIFO, a CPU read pops nothing.
  *        Deviations: register accesses are served with RCC_AHB2ENR1.RNGEN 0. There is no noise
  *        source: NSCR and HTCR are storage. Configuration B timing is not modelled, the
  *        configuration A and C column applies to every configuration. A rate change does
