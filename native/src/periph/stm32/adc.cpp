@@ -181,7 +181,6 @@ public:
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
-  void restore_reset_values();
   void on_event(std::uint32_t, std::uint64_t) override
   {}
 
@@ -218,6 +217,7 @@ public:
   }
 
 private:
+  void           restore_reset_values();
   register_file& regs_;
   field_ref      vrefint_;
   field_ref      sensor_;
@@ -365,7 +365,6 @@ public:
 
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_bus_reset() override;
-  void               restore_reset_values();
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   void               on_clock_change() override;
   void               transfer_completed(dma_controller const& by, std::uint32_t request) override;
@@ -374,13 +373,13 @@ public:
 
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto on_write(
+  auto unheld_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error> override;
+      access_ctx     ctx) -> std::expected<void, bus_error>;
 
   void               drive(std::uint8_t channel, std::uint32_t microvolts) override;
   [[nodiscard]] auto input(std::uint8_t channel) const -> std::uint32_t override;
@@ -396,6 +395,7 @@ public:
   {}
 
 private:
+  void               restore_reset_values();
   [[nodiscard]] auto common() const -> adc_common const*;
   [[nodiscard]] auto divider() -> std::uint32_t;
   [[nodiscard]] auto adc_hz() -> std::uint64_t;
@@ -720,8 +720,10 @@ void adc::reset(register_file&, reset_kind)
 
 void adc::on_bus_reset()
 {
+  auto const was = listened();
   restore_unclaimed_storage();
   restore_reset_values();
+  retune(was);
 }
 
 void adc::restore_reset_values()
@@ -1169,7 +1171,7 @@ auto adc::trigger_latency_ps() -> std::uint64_t
   return static_cast<std::uint64_t>((wide{cycles} * div * ps_per_second + hz - 1u) / hz);
 }
 
-auto adc::on_write(
+auto adc::unheld_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -1180,7 +1182,7 @@ auto adc::on_write(
   auto const word = offset & ~3u;
   if(word != start_.offset and word != trigger_.offset)
   {
-    return dispatch_model::on_write(regs, offset, size, old, value, access);
+    return bound_write(regs, offset, size, old, value, access);
   }
   auto const config   = regs_.peek(trigger_.offset);
   auto const next     = word == trigger_.offset ? merge_write(config, offset, size, value) : config;
@@ -1195,7 +1197,7 @@ auto adc::on_write(
     static_cast<void>(interest_changed(ctx_.peers, trigger_signal(trigger_select_.of(next))));
   }
   auto const was    = listened();
-  auto const result = dispatch_model::on_write(regs, offset, size, old, value, access);
+  auto const result = bound_write(regs, offset, size, old, value, access);
   retune(was);
   return result;
 }

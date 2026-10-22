@@ -1467,6 +1467,68 @@ TEST_CASE(
   CHECK(t.count("TIM3") == 0);
 }
 
+namespace
+{
+void reset_pulse(stm32_fixture const& f, std::string_view reg, std::string_view bit)
+{
+  auto const& rcc   = f.target->peripheral("RCC").description();
+  auto const* found = popcorn::find_register(rcc, reg);
+  REQUIRE(found != nullptr);
+  auto const field = std::ranges::find(found->fields, bit, &popcorn::field_desc::name);
+  REQUIRE(field != found->fields.end());
+  for(std::uint32_t const value : {std::uint32_t{1} << field->lsb, std::uint32_t{0}})
+  {
+    REQUIRE(f.target->mem().write(rcc.base + found->offset, 4, value).has_value());
+  }
+}
+}
+
+TEST_CASE("TIM1RST of an MMS 001 master with CEN 1 drops TRGO and stops a gated slave")
+{
+  slaves t;
+  t.base("TIM1", 0, 0xffff);
+  t.master("TIM1", master_enable);
+  t.base("TIM3", 0, 0xffff);
+  t.write("TIM3", "SMCR", smcr(sms_gated, ts_itr0));
+  t.enable("TIM3");
+  t.enable("TIM1");
+  t.write("TIM3", "SR", 0);
+  t.at(30);
+  REQUIRE(t.count("TIM3") == 30);
+  reset_pulse(t.f, "RCC_APB2RSTR", "TIM1RST");
+  CHECK(t.read("TIM1", "CR1") == 0);
+  CHECK(t.bits("TIM3", "SR", "TIF") == 1);
+  t.at(60);
+  CHECK(t.count("TIM3") == 30);
+}
+
+TEST_CASE("TIM1RST lowers the update and compare DMA requests on the controller")
+{
+  direct      t{with_recorder()};
+  auto* const dma = t.f.model_of<recorder>("GPDMA1");
+  REQUIRE(dma != nullptr);
+  t.b.write("TIM1", "TIM1_ARR", 9);
+  t.b.write("TIM1", "TIM1_CCR1", 3);
+  t.begin();
+  t.b.write("TIM1", "TIM1_DIER", (1u << 9) | (1u << 8));
+  t.at(13);
+  REQUIRE(
+      dma->levels
+      == std::vector<std::pair<std::uint32_t, bool>>{
+          {1, true},
+          {2, true}
+  });
+  reset_pulse(t.f, "RCC_APB2RSTR", "TIM1RST");
+  CHECK(
+      dma->levels
+      == std::vector<std::pair<std::uint32_t, bool>>{
+          {1, true },
+          {2, true },
+          {2, false},
+          {1, false}
+  });
+}
+
 TEST_CASE("gated mode on an MMS 010 master holds, sets no TIF and logs once")
 {
   slaves t;
@@ -2373,6 +2435,22 @@ TEST_CASE("with DBG_TIM1_STOP a held TIM1 keeps its count and resumes on its pha
     return t.block();
   };
   CHECK(run(997) == run(1'000'000'000));
+}
+
+TEST_CASE("TIM1RST during a DBG_TIM1_STOP hold keeps the timer frozen until the hold ends")
+{
+  held_tim t{1'000'000'000};
+  t.d.begin();
+  t.to(1000);
+  popcorn::testing::set_debug_freeze(t.d.f, "DBG_TIM1_STOP", true);
+  t.d.f.target->hold_core(true);
+  reset_pulse(t.d.f, "RCC_APB2RSTR", "TIM1RST");
+  t.d.begin();
+  t.to(3000);
+  CHECK(t.d.count() == 0);
+  t.d.f.target->hold_core(false);
+  t.to(4000);
+  CHECK(t.d.count() == 1000);
 }
 
 TEST_CASE("without DBG_TIM1_STOP a held TIM1 counts on")

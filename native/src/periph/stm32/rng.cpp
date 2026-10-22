@@ -148,13 +148,13 @@ public:
   void reset(register_file& regs, reset_kind kind) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto on_write(
+  auto unheld_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error> override;
+      access_ctx     ctx) -> std::expected<void, bus_error>;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   void on_clock_change() override;
   void on_bus_reset() override;
@@ -738,7 +738,7 @@ auto rng::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
 
-auto rng::on_write(
+auto rng::unheld_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -750,7 +750,7 @@ auto rng::on_write(
   {
     return std::unexpected{bus_error::denied};
   }
-  return dispatch_model::on_write(regs, offset, size, old, value, ctx);
+  return bound_write(regs, offset, size, old, value, ctx);
 }
 
 void rng::control_written(std::uint32_t old, std::uint32_t now)

@@ -413,3 +413,21 @@ TEST_CASE("forbidden CRC accesses raise model_error under strict peripherals")
   CHECK(r.read(dr) == 0xFFFF'FFFF);
   CHECK(r.read(idr) == 0);
 }
+
+TEST_CASE("CRCRST held ignores a DR write, DR reads the reset value after release")
+{
+  crc_rig const r;
+  auto const&   rcc   = r.f.target->peripheral("RCC").description();
+  auto const*   reset = popcorn::find_register(rcc, "RCC_AHB1RSTR");
+  REQUIRE(reset != nullptr);
+  auto const bit =
+      std::ranges::find(reset->fields, std::string_view{"CRCRST"}, &popcorn::field_desc::name);
+  REQUIRE(bit != reset->fields.end());
+  r.write(dr, 0x1234'5678);
+  REQUIRE(r.read(dr) != 0xFFFF'FFFF);
+  REQUIRE(r.f.target->mem().write(rcc.base + reset->offset, 4, 1u << bit->lsb).has_value());
+  CHECK(r.read(dr) == 0xFFFF'FFFF);
+  r.write(dr, 0x1234'5678);
+  REQUIRE(r.f.target->mem().write(rcc.base + reset->offset, 4, 0).has_value());
+  CHECK(r.read(dr) == 0xFFFF'FFFF);
+}

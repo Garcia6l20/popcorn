@@ -22,7 +22,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <flat_map>
 #include <format>
+#include <meta>
 #include <optional>
 #include <span>
 #include <string>
@@ -470,6 +472,23 @@ concept guarded_model = requires(Derived& d, std::uint32_t word, access_ctx cons
  * @tparam Derived Model class.
  * @tparam State Serializable state, as for stm32_model.
  */
+/**
+ * @brief Whether @p type itself declares a member named @p name.
+ * @param type Reflection of a class.
+ * @param name Member name.
+ */
+consteval auto declares_member(std::meta::info type, std::string_view name) -> bool
+{
+  for(auto const member : std::meta::members_of(type, std::meta::access_context::unchecked()))
+  {
+    if(std::meta::has_identifier(member) and std::meta::identifier_of(member) == name)
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
 template <typename Derived, typename State> class dispatch_model : public stm32_model<State>
 {
 public:
@@ -496,30 +515,56 @@ public:
     return read_lanes(regs.peek(word) & mask, offset, size);
   }
 
+  /**
+   * @brief Serves a write. For a bus_reset_listener held in reset by RCC, runs only the bus
+   *        guard of a claimed word and ignores the write. Otherwise calls Derived's
+   *        `unheld_write()` when it has one, else bound_write(). A listener never overrides
+   *        this function, so no write path skips the hold.
+   */
   auto on_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
-      std::uint32_t,
-      std::uint32_t value,
-      access_ctx    ctx) -> std::expected<void, bus_error> override
+      std::uint32_t  old,
+      std::uint32_t  value,
+      access_ctx     ctx) -> std::expected<void, bus_error> override
   {
-    auto const word  = offset & ~3u;
-    auto const found = std::ranges::find(bound_, word, &bound::offset);
     if constexpr(std::derived_from<Derived, bus_reset_listener>)
     {
       if(held_in_reset())
       {
         if constexpr(guarded_model<Derived>)
         {
-          if(found != bound_.end())
+          auto const word = offset & ~3u;
+          if(std::ranges::contains(bound_, word, &bound::offset))
           {
             static_cast<void>(static_cast<Derived&>(*this).guard(word, ctx, true));
           }
         }
         return {};
       }
+      if constexpr(requires(Derived& d) { d.unheld_write(regs, offset, size, old, value, ctx); })
+      {
+        return static_cast<Derived&>(*this).unheld_write(regs, offset, size, old, value, ctx);
+      }
     }
+    return bound_write(regs, offset, size, old, value, ctx);
+  }
+
+  /**
+   * @brief Writes a claimed register through its access rules, the bus guard and its handler.
+   *        A write to a word the model does not claim does nothing.
+   */
+  auto bound_write(
+      register_file& regs,
+      std::uint32_t  offset,
+      std::uint8_t   size,
+      std::uint32_t,
+      std::uint32_t value,
+      access_ctx    ctx) -> std::expected<void, bus_error>
+  {
+    auto const word  = offset & ~3u;
+    auto const found = std::ranges::find(bound_, word, &bound::offset);
     if(found != bound_.end())
     {
       auto const old      = regs.peek(word);
@@ -568,6 +613,9 @@ protected:
     }
     if constexpr(std::derived_from<Derived, bus_reset_listener>)
     {
+      static_assert(
+          not declares_member(^^Derived, "on_write"),
+          "a bus_reset_listener serves writes through unheld_write(), not on_write()");
       auto const rcc =
           std::ranges::find(ctx.part.peripherals, std::string_view{"RCC"}, &peripheral_desc::name);
       if(rcc != ctx.part.peripherals.end() and not reset_bit_of(*rcc, desc.name))
@@ -588,7 +636,7 @@ protected:
    */
   void restore_unclaimed_storage()
   {
-    std::vector<std::pair<std::uint32_t, std::uint32_t>> words;
+    std::flat_map<std::uint32_t, std::uint32_t> words;
     for(auto const& described : this->desc_.registers)
     {
       auto const word = described.offset & ~3u;
@@ -598,18 +646,8 @@ protected:
       }
       auto const width =
           described.width >= 32 ? ~std::uint32_t{0} : (std::uint32_t{1} << described.width) - 1u;
-      auto const value = (described.reset & described.reset_mask & width)
-                      << ((described.offset & 3u) * 8);
-      if(auto const found =
-             std::ranges::find(words, word, &std::pair<std::uint32_t, std::uint32_t>::first);
-         found != words.end())
-      {
-        found->second |= value;
-      }
-      else
-      {
-        words.emplace_back(word, value);
-      }
+      words[word] |= (described.reset & described.reset_mask & width)
+                  << ((described.offset & 3u) * 8);
     }
     for(auto const& [word, value] : words)
     {

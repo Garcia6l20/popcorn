@@ -704,12 +704,14 @@ TEST_CASE("an RCC reset returns a modelled register to its reset value and holds
     std::uint32_t    reset;
     bool             storage = false;
   };
-  constexpr std::array<target, 12> targets{
+  constexpr std::array<target, 14> targets{
       {
        {"CRC", "POL", "RCC_AHB1RSTR", "CRCRST", 0x1021, 0x04C1'1DB7},
        {"HASH", "IMR", "RCC_AHB2RSTR1", "HASHRST", 0x1, 0},
        {"SYSCFG", "SYSCFG_FPUIMR", "RCC_APB3RSTR", "SYSCFGRST", 0, 0x1F, true},
        {"SYSCFG", "SYSCFG_CSLCKR", "RCC_APB3RSTR", "SYSCFGRST", 0x1, 0x1, true},
+       {"SYSCFG", "SYSCFG_CNSLCKR", "RCC_APB3RSTR", "SYSCFGRST", 0x1, 0x1, true},
+       {"SYSCFG", "SYSCFG_CFGR2", "RCC_APB3RSTR", "SYSCFGRST", 0x1, 0x1, true},
        {"ADC1", "ADC_IER", "RCC_AHB2RSTR1", "ADC12RST", 0x1, 0},
        {"ADC1", "ADC_SMPR1", "RCC_AHB2RSTR1", "ADC12RST", 0x7, 0, true},
        {"GPDMA1", "GPDMA_PRIVCFGR", "RCC_AHB1RSTR", "GPDMA1RST", 0x1, 0, true},

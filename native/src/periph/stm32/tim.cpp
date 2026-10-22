@@ -338,17 +338,16 @@ public:
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
-  void restore_reset_values();
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto on_write(
+  auto unheld_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error> override;
+      access_ctx     ctx) -> std::expected<void, bus_error>;
   void               on_clock_change() override;
   void               on_core_hold(bool held) override;
   void               interest_changed() override;
@@ -373,6 +372,7 @@ public:
   void                           plain_written(std::uint32_t old, std::uint32_t now);
 
 private:
+  void               restore_reset_values();
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
   [[nodiscard]] auto output_time(std::uint64_t at) const -> std::uint64_t;
   [[nodiscard]] auto name(std::string_view reg) const -> std::string;
@@ -2208,8 +2208,33 @@ void tim::on_bus_reset()
       ctx_.events.cancel(state_.input_due_seq[input]);
     }
   }
+  auto const trgo_high = trgo_ and master_mode() == master_enable and counter_enabled();
+  if(update_signal_)
+  {
+    update_signal_->set(false);
+  }
+  for(auto& channel : channels_)
+  {
+    if(channel.signal)
+    {
+      channel.signal->set(false);
+    }
+  }
+  auto const held    = state_.held;
+  auto const held_ps = state_.held_ps;
+  auto const slave   = slave_ ? input_of(regs_.peek(slave_->offset)) : std::nullopt;
   restore_unclaimed_storage();
   restore_reset_values();
+  state_.held    = held;
+  state_.held_ps = held_ps;
+  if(trgo_high)
+  {
+    trgo_->edge(trigger_edge::falling, output_time(now_ps()));
+  }
+  if(slave)
+  {
+    static_cast<void>(stm32::interest_changed(ctx_.peers, std::format("{}_trgo", *slave)));
+  }
 }
 
 void tim::restore_reset_values()
@@ -2292,7 +2317,7 @@ void tim::captured_read(std::uint32_t word, access_ctx access)
   }
 }
 
-auto tim::on_write(
+auto tim::unheld_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -2346,7 +2371,7 @@ auto tim::on_write(
   auto       result         = std::expected<void, bus_error>{};
   {
     reacting_scope const reacting{reacting_};
-    result = dispatch_model::on_write(regs, offset, size, old, value, access);
+    result = bound_write(regs, offset, size, old, value, access);
   }
   if(smcr)
   {

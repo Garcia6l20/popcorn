@@ -527,6 +527,31 @@ TEST_CASE("RM0456 10.8.1, P1: PWR_SECCFGR is RAZ/WI under TZEN=0")
   CHECK(r.peek("PWR", "CR2") == 0x1);
 }
 
+TEST_CASE(
+    "RM0456 11.5.1: a Secure SYSCFG or GPDMA1 reset clears SECCFGR, a Non-secure one is ignored")
+{
+  rig const  r{true};
+  auto const sys_rst = bit("RCC", "APB3RSTR", "SYSCFGRST");
+  auto const sys_sec =
+      bit("SYSCFG", "SECCFGR", "SYSCFGSEC") | bit("SYSCFG", "SECCFGR", "CLASSBSEC");
+  r.write("SYSCFG", "SECCFGR", sys_sec, secure_priv);
+  REQUIRE(r.peek("SYSCFG", "SECCFGR") == sys_sec);
+  r.write("RCC", "APB3RSTR", sys_rst, nonsecure_priv);
+  CHECK(r.peek("RCC", "APB3RSTR") == 0);
+  CHECK(r.peek("SYSCFG", "SECCFGR") == sys_sec);
+  r.write("RCC", "APB3RSTR", sys_rst, secure_priv);
+  r.write("RCC", "APB3RSTR", 0, secure_priv);
+  CHECK(r.peek("SYSCFG", "SECCFGR") == 0);
+
+  auto const dma_rst = bit("RCC", "AHB1RSTR", "GPDMA1RST");
+  auto const dma_sec = bit("GPDMA1", "SECCFGR", "SEC0");
+  r.write("GPDMA1", "SECCFGR", dma_sec, secure_priv);
+  REQUIRE(r.peek("GPDMA1", "SECCFGR") == dma_sec);
+  r.write("RCC", "AHB1RSTR", dma_rst, secure_priv);
+  r.write("RCC", "AHB1RSTR", 0, secure_priv);
+  CHECK(r.peek("GPDMA1", "SECCFGR") == 0);
+}
+
 TEST_CASE("RM0456 15.2.2 Table 131: SYSCFG Secure registers, events and CFGR1 bits")
 {
   rig const r{true};

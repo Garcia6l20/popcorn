@@ -59,7 +59,6 @@ public:
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
-  void restore_reset_values();
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
 
   [[nodiscard]] auto secure_function() const -> bool override;
@@ -69,6 +68,7 @@ public:
   [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
 
 private:
+  void               restore_reset_values();
   [[nodiscard]] auto rule(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
   [[nodiscard]] auto register_guard(std::uint32_t word, access_ctx const& ctx) -> bus_guard;
   void               note_storage_write(std::uint32_t word);

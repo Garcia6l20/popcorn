@@ -309,7 +309,6 @@ public:
 
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_bus_reset() override;
-  void               restore_reset_values();
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   void               on_request(std::uint32_t request, bool level) override;
   void               on_core_hold(bool held) override;
@@ -329,6 +328,7 @@ public:
   [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
 
 private:
+  void               restore_reset_values();
   [[nodiscard]] auto active(std::size_t ch) const -> bool;
   [[nodiscard]] auto wants_burst(std::size_t ch) const -> bool;
   [[nodiscard]] auto valid(std::size_t ch) const -> bool;
@@ -574,8 +574,19 @@ void gpdma::reset(register_file&, reset_kind)
 
 void gpdma::on_bus_reset()
 {
+  auto const                             requests = state_.request;
+  std::array<std::uint8_t, max_channels> held{};
+  for(std::size_t ch = 0; ch < max_channels; ++ch)
+  {
+    held[ch] = state_.channel[ch].held;
+  }
   restore_unclaimed_storage();
   restore_reset_values();
+  state_.request = requests;
+  for(std::size_t ch = 0; ch < max_channels; ++ch)
+  {
+    state_.channel[ch].held = held[ch];
+  }
 }
 
 void gpdma::restore_reset_values()
