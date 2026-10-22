@@ -1,0 +1,89 @@
+site_name: popcorn
+site_description: Unit test STM32 firmware from Python on an emulated Cortex-M core.
+repo_url: https://github.com/Garcia6l20/popcorn
+repo_name: Garcia6l20/popcorn
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.snippets:
+      base_path: [tests/docs, examples]
+      check_paths: true
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [build]
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            merge_init_into_class: true
+            separate_signature: true
+            show_signature_annotations: true
+
+nav:
+  - Home: index.md
+  - Guide:
+      - guide/install.md
+      - guide/concepts.md
+      - guide/first_machine.md
+      - guide/running.md
+      - guide/testing.md
+      - guide/faults.md
+      - guide/systems.md
+      - guide/snapshots.md
+      - guide/hooks.md
+      - guide/python_models.md
+      - guide/native_plugins.md
+      - guide/usb.md
+      - guide/trustzone.md
+      - guide/examples.md
+  - Support:
+      - support/index.md
+      - support/cores.md
+      - support/limits.md
+  - Reference:
+      - Python:
+          - reference/python/index.md
+          - reference/python/machines.md
+          - reference/python/images.md
+          - reference/python/peripherals.md
+          - reference/python/links.md
+          - reference/python/hooks.md
+          - reference/python/errors.md
+          - reference/python/descriptions.md
+          - reference/python/pytest.md
+      - Plugin SDK: reference/sdk/index.md
+  - Developers:
+      - dev/architecture.md
+      - dev/run_loop.md
+      - dev/systems.md
+      - dev/threads.md
+      - dev/peripherals.md
+      - dev/descriptions.md
+      - dev/images.md
+      - dev/build.md
+      - dev/testing.md
+      - dev/contributing.md
