@@ -73,6 +73,15 @@ auto find_arch(part_description const& description) -> arch_factory
       std::format("a core an arch module implements, not {}", description.core.cpu));
 }
 
+auto module_names() -> std::vector<std::string>
+{
+  auto&                 entries = table();
+  std::lock_guard const lock{entries.guard};
+  return entries.modules
+       | std::views::transform(&arch_module::name)
+       | std::ranges::to<std::vector>();
+}
+
 auto find_code_analysis(core_desc const& core) -> code_analysis const*
 {
   auto&                 entries = table();

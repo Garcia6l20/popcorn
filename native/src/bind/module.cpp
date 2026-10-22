@@ -9,6 +9,7 @@
 #include "machine.hpp"
 #include "models.hpp"
 #include "plugins.hpp"
+#include "support.hpp"
 #include "system.hpp"
 
 #include <popcorn/arch/arch.hpp>

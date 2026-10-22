@@ -9,6 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from popcorn.stm32._support import PeripheralSupport, shipped_parts, support
+
 if TYPE_CHECKING:
     from popcorn._part_description import PartDescription
 
@@ -35,3 +37,6 @@ def mcu(part: str, *, core: str | None = None, svd: Path | None = None) -> PartD
     from popcorn.stm32.description import description_path
 
     return load_description(description_path(part, core=core, svd=svd))
+
+
+__all__ = ["PeripheralSupport", "mcu", "shipped_parts", "support"]

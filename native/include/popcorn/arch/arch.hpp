@@ -794,6 +794,12 @@ POPCORN_API void register_arch(arch_module module) pre(module.implements and mod
 [[nodiscard]] POPCORN_API auto find_arch(part_description const& description) -> arch_factory;
 
 /**
+ * @brief Names of the registered arch modules, in registration order: a replaced module moves
+ *        to the end, as find_arch() ranks it.
+ */
+[[nodiscard]] POPCORN_API auto module_names() -> std::vector<std::string>;
+
+/**
  * @brief The code analysis of the latest registered module implementing @p core.
  * @param core Core of a machine.
  * @return The analysis, null when no module implements the core or that module has none.

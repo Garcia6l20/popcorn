@@ -69,6 +69,7 @@ from popcorn._part_description import (
 from popcorn._refs import Condition, Conditions, MemoryRef, Readout, all_of, any_of
 from popcorn._snapshot import Snapshot
 from popcorn._stop import Fault, FrameReturn, Stop
+from popcorn._support import arch_modules
 from popcorn._system import (
     LineState,
     System,
@@ -180,6 +181,7 @@ __all__ = [
     "WatchKind",
     "all_of",
     "any_of",
+    "arch_modules",
     "arm",
     "board",
     "coverage",
