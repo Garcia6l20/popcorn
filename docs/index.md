@@ -34,5 +34,11 @@ The file is tests/docs/test_quickstart.py in the popcorn repository. Run it from
     python -m pytest tests/docs/test_quickstart.py
     ```
 
-!!! note
-    This page is a placeholder. Step 04 writes the guide it points to.
+## Next steps
+
+- [Install](guide/install.md) popcorn and the STM32 part data.
+- [Concepts](guide/concepts.md) explains descriptions, machines, runs and virtual time.
+- [First machine](guide/first_machine.md) boots an ELF and reads its output.
+- [Running and stopping](guide/running.md) covers stop reasons and budgets.
+- [Testing with pytest](guide/testing.md) covers the plugin and its fixtures.
+- [Faults and errors](guide/faults.md) covers what the core does on a fault.
