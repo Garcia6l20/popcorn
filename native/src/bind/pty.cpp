@@ -119,7 +119,7 @@ auto pty_bridge::flush() -> std::optional<std::string>
 {
   if(link_->device_changed())
   {
-    ::ioctl(slave_.get(), TIOCNXCL);
+    (void)::ioctl(slave_.get(), TIOCNXCL);
   }
   link_->drain(outgoing_);
   std::size_t written = 0;
@@ -244,12 +244,12 @@ void uart_pty_link::drain(std::vector<std::uint8_t>& out)
                    }));
 }
 
-cdc_pty_link::cdc_pty_link(std::shared_ptr<periph::usb::cdc_hub> hub, std::size_t function)
-    : hub_{std::move(hub)}, function_{function}
-{
-  auto const held = hub_->lock();
-  seen_           = hub_->channel(held, function_).attachments;
-}
+cdc_pty_link::cdc_pty_link(
+    std::shared_ptr<periph::usb::cdc_hub> hub,
+    std::size_t                           function,
+    std::uint64_t                         attachments) noexcept
+    : hub_{std::move(hub)}, function_{function}, seen_{attachments}
+{}
 
 void cdc_pty_link::send(std::span<std::uint8_t const> bytes)
 {

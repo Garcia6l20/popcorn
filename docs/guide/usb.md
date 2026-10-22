@@ -54,8 +54,10 @@ and DTR at configuration. `cdc.bound` turns true at configuration, and `await cd
 runs until DTR and RTS went out. `cdc.read_packets()` returns the packets with their times.
 `machine.board.pty("OTG_FS")` bridges the function to a pty any serial tool opens, on first call.
 The pty path stays the same across a detach and re-attach. As a re-enumerated device is a fresh
-port on hardware, the bridge clears `TIOCEXCL` on the pty at the next slice boundary, so a tool that held it exclusively
-can open it again.
+port on hardware, the bridge clears `TIOCEXCL` on the pty at the next slice boundary, so a tool
+that held it exclusively can open it again. A re-enumeration the firmware drives happens inside a
+run and is cleared before the machine parks. A host-side `detach()` or `attach()` on a parked
+machine is cleared on the next run.
 
 ## HID
 

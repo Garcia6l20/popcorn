@@ -196,8 +196,12 @@ public:
    * @brief Links function @p function of @p hub.
    * @param hub The channels of the controller's host.
    * @param function Function index.
+   * @param attachments The channel's attachment count now, the baseline of device_changed().
    */
-  cdc_pty_link(std::shared_ptr<periph::usb::cdc_hub> hub, std::size_t function);
+  cdc_pty_link(
+      std::shared_ptr<periph::usb::cdc_hub> hub,
+      std::size_t                           function,
+      std::uint64_t                         attachments) noexcept;
 
   void               send(std::span<std::uint8_t const> bytes) override;
   void               drain(std::vector<std::uint8_t>& out) override;

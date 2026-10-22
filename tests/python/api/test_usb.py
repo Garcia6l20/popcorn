@@ -1418,6 +1418,7 @@ def test_a_cdc_pty_loses_its_exclusive_flag_when_the_device_detaches_or_attaches
         fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
         fcntl.ioctl(fd, termios.TIOCEXCL)
         os.close(fd)
+        asyncio.run(m.run(for_=ms(1)))
         with pytest.raises(OSError) as busy:
             os.close(os.open(path, os.O_RDWR | os.O_NOCTTY))
         assert busy.value.errno == errno.EBUSY
@@ -1430,6 +1431,11 @@ def test_a_cdc_pty_loses_its_exclusive_flag_when_the_device_detaches_or_attaches
     asyncio.run(host.detach())
     reopens()
     hold_exclusively()
+    asyncio.run(host.attach())
+    asyncio.run(host.wait_configured(for_=s(2)))
+    reopens()
+    hold_exclusively()
+    asyncio.run(host.detach())
     asyncio.run(host.attach())
     asyncio.run(host.wait_configured(for_=s(2)))
     reopens()
