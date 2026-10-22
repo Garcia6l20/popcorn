@@ -474,14 +474,14 @@ def test_a_stop_predicate_sees_the_context_of_its_run(machines: Machines) -> Non
 
     def predicate(_: popcorn.Machine) -> bool:
         seen.append(VALUE.get())
-        return False
+        return True
 
     async def body() -> popcorn.Stop:
         VALUE.set("in the task")
-        return await m.run(budget=200_000, stop_when=predicate)
+        return await m.run(stop_when=predicate)
 
-    assert asyncio.run(body()).reason is popcorn.StopReason.BUDGET
-    assert seen and set(seen) == {"in the task"}
+    assert asyncio.run(body()).reason is popcorn.StopReason.USER
+    assert seen == ["in the task"]
 
 
 def test_a_python_model_reads_memory_on_the_machine_thread() -> None:
