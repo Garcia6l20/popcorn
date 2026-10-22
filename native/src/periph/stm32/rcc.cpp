@@ -582,18 +582,14 @@ constexpr std::array<write_entry<rcc>, 27> rcc_writes{
      }
 };
 
-constexpr std::array<write_entry<rcc>, 8> rcc_reset_writes{
-    {
-     {reset_registers[0], &rcc::resets_written<0>},
-     {reset_registers[1], &rcc::resets_written<1>},
-     {reset_registers[2], &rcc::resets_written<2>},
-     {reset_registers[3], &rcc::resets_written<3>},
-     {reset_registers[4], &rcc::resets_written<4>},
-     {reset_registers[5], &rcc::resets_written<5>},
-     {reset_registers[6], &rcc::resets_written<6>},
-     {reset_registers[7], &rcc::resets_written<7>},
-     }
-};
+template <std::size_t... Reg>
+constexpr auto reset_writes(std::index_sequence<Reg...>)
+    -> std::array<write_entry<rcc>, sizeof...(Reg)>
+{
+  return {{{reset_registers[Reg], &rcc::resets_written<Reg>}...}};
+}
+
+constexpr auto rcc_reset_writes = reset_writes(std::make_index_sequence<reset_registers.size()>{});
 
 constexpr std::array<write_entry<rcc>, 1> rcc_secure_writes{
     {

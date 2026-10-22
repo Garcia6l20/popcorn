@@ -1237,7 +1237,10 @@ TEST_CASE("a part with an RNG and no RCC_AHB2RSTR1.RNGRST is a config_error")
       std::erase_if(
           resets->fields, [](popcorn::field_desc const& field) { return field.name == "RNGRST"; })
       == 1);
-  CHECK_THROWS_AS((stm32_fixture{description, "rng_ll"}), popcorn::config_error);
+  CHECK_THROWS_WITH_AS(
+      (stm32_fixture{description, "rng_ll"}),
+      doctest::Contains("peripherals.RCC.registers.RCC_xxxRSTR.fields.RNGRST"),
+      popcorn::config_error);
 }
 
 TEST_CASE("RNGRST clears SECS and drops a pending auto-reset, the seed fault level stays")

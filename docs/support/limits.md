@@ -199,8 +199,11 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 
 - SRAMnEN and SRAMnSMEN stay Non-secure. The MPCBB and INVSECSTATE rule of RM0456 5.4 does not
   apply to them.
-- The RSTR registers are storage, except `RCC_AHB2RSTR1.RNGRST`, which resets the RNG. Any
-  other peripheral reset bit written there resets no peripheral.
+- A peripheral reset bit in an `RCC_xxxRSTR` register, written from 0 to 1, resets the model of
+  that instance when the model supports it, today the RNG only. Other bits are storage.
+- While a reset bit is 1, register writes to that peripheral's model are ignored, debugger
+  writes included. The TrustZone filter still runs first, so an illegal access still raises its
+  event. Reads are not blocked. RM0456 gives no access rule for a peripheral held in reset.
 
 ## RNG
 
@@ -211,9 +214,8 @@ noise source. The model differs from RM0456 Rev 7 chapter 48 here:
 
 - Register accesses are served with `RCC_AHB2ENR1.RNGEN` 0. Only generation stops.
 - `RCC_AHB2RSTR1.RNGRST` written from 0 to 1 resets the RNG, CONFIGLOCK included, and keeps
-  the entropy test controls, as every other reset kind does. While the bit is 1, register writes
-  are ignored, debugger writes included. RM0456 gives no access rule for a peripheral held in
-  reset. A debugger read of DR shows the empty FIFO.
+  the entropy test controls, as every other reset kind does. While the bit is 1, writes are
+  ignored as the RCC section says, and a debugger read of DR shows the empty FIFO.
 - There is no noise source. NSCR and HTCR are storage, and SECS comes only from a test's fault
   injection.
 - Configuration B timing is not modelled. The configuration A and C column of Table 463 applies

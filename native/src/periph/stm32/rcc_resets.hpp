@@ -40,6 +40,19 @@ struct reset_bit
 };
 
 /**
+ * @brief Field name of the RCC reset bit of @p instance.
+ * @param instance Instance name as the description spells it.
+ * @return `<instance>RST`, or the name reset_bit_names gives.
+ */
+[[nodiscard]] inline auto reset_bit_name(std::string_view instance) -> std::string
+{
+  auto const renamed = std::ranges::find(
+      reset_bit_names, instance, &std::pair<std::string_view, std::string_view>::first);
+  return renamed != reset_bit_names.end() ? std::string{renamed->second}
+                                          : std::string{instance} + "RST";
+}
+
+/**
  * @brief The RCC reset bit of @p instance.
  * @param rcc Description of the RCC peripheral.
  * @param instance Instance name as the description spells it.
@@ -48,10 +61,7 @@ struct reset_bit
 [[nodiscard]] inline auto reset_bit_of(peripheral_desc const& rcc, std::string_view instance)
     -> std::optional<reset_bit>
 {
-  auto const renamed = std::ranges::find(
-      reset_bit_names, instance, &std::pair<std::string_view, std::string_view>::first);
-  auto const name = renamed != reset_bit_names.end() ? std::string{renamed->second}
-                                                     : std::string{instance} + "RST";
+  auto const name = reset_bit_name(instance);
   for(std::size_t index = 0; index < reset_registers.size(); ++index)
   {
     auto const* const reg = find_register(rcc, reset_registers[index]);

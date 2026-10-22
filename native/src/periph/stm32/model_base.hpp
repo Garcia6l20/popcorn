@@ -504,15 +504,22 @@ public:
       std::uint32_t value,
       access_ctx    ctx) -> std::expected<void, bus_error> override
   {
+    auto const word  = offset & ~3u;
+    auto const found = std::ranges::find(bound_, word, &bound::offset);
     if constexpr(std::derived_from<Derived, bus_reset_listener>)
     {
       if(held_in_reset())
       {
+        if constexpr(guarded_model<Derived>)
+        {
+          if(found != bound_.end())
+          {
+            static_cast<void>(static_cast<Derived&>(*this).guard(word, ctx, true));
+          }
+        }
         return {};
       }
     }
-    auto const word  = offset & ~3u;
-    auto const found = std::ranges::find(bound_, word, &bound::offset);
     if(found != bound_.end())
     {
       auto const old      = regs.peek(word);
@@ -566,9 +573,11 @@ protected:
       if(rcc != ctx.part.peripherals.end() and not reset_bit_of(*rcc, desc.name))
       {
         throw config_error(
-            ctx.part.part, 0, std::format("peripherals.RCC.registers.{}RST", desc.name),
+            ctx.part.part, 0,
             std::format(
-                "an RCC_xxxRSTR bit for {}, which the {} model resets", desc.name, model_name));
+                "peripherals.RCC.registers.RCC_xxxRSTR.fields.{}", reset_bit_name(desc.name)),
+            std::format(
+                "the RCC reset bit of {}, which the {} model resets", desc.name, model_name));
       }
     }
   }

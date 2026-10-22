@@ -149,6 +149,38 @@ constexpr std::array<reset_target, 8> reset_targets{
      }
 };
 
+struct probe_state
+{
+  friend auto operator==(probe_state const&, probe_state const&) -> bool = default;
+};
+
+class guarded_probe final : public stm32::dispatch_model<guarded_probe, probe_state>,
+                            public stm32::bus_reset_listener
+{
+public:
+  guarded_probe(periph::model_context& ctx, popcorn::peripheral_desc const& desc);
+
+  int guarded{};
+
+  void reset(periph::register_file&, reset_kind) override
+  {}
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void on_bus_reset() override
+  {}
+  auto guard(std::uint32_t, periph::access_ctx const&, bool write) -> stm32::bus_guard
+  {
+    guarded += write ? 1 : 0;
+    return {};
+  }
+};
+
+constexpr std::array<stm32::write_entry<guarded_probe>, 1> guarded_writes{{{"POL", nullptr}}};
+
+guarded_probe::guarded_probe(periph::model_context& ctx, popcorn::peripheral_desc const& desc)
+    : dispatch_model{ctx, desc, "probe", guarded_writes}
+{}
+
 auto with_listener(core::machine_options options = popcorn::testing::stm32_options())
     -> core::machine_options
 {
@@ -542,6 +574,7 @@ TEST_CASE("every U575 instance with an RCC reset bit resolves it, the renamed on
   for(auto const& [instance, field] : stm32::reset_bit_names)
   {
     CAPTURE(instance);
+    CHECK(stm32::reset_bit_name(instance) == field);
     auto const found = stm32::reset_bit_of(rcc, instance);
     REQUIRE(found.has_value());
     CHECK(found->field == field);
@@ -592,4 +625,69 @@ TEST_CASE("each RSTR register notifies its instance's model on a 0 to 1 write on
   write(f, "RCC_AHB2RSTR1", bit_of("RCC_AHB2RSTR1", "GPIOARST"));
   CHECK(peek(f, "RCC_AHB2RSTR1") == bit_of("RCC_AHB2RSTR1", "GPIOARST"));
   CHECK(counts() == std::vector<int>(reset_targets.size(), 1));
+}
+
+TEST_CASE("ADC12RST notifies both the ADC1 and the ADC12 models")
+{
+  auto options = popcorn::testing::stm32_options();
+  for(auto const instance : {"ADC1", "ADC12"})
+  {
+    options.models.insert_or_assign(
+        instance,
+        [](periph::model_context&, popcorn::peripheral_desc const&)
+            -> std::shared_ptr<periph::model> { return std::make_shared<reset_counter>(); });
+  }
+  stm32_fixture const f{u575(), "rcc_ll", std::move(options)};
+  write(f, "RCC_AHB2RSTR1", bit_of("RCC_AHB2RSTR1", "ADC12RST"));
+  for(auto const instance : {"ADC1", "ADC12"})
+  {
+    CAPTURE(instance);
+    auto* const counter = f.model_of<reset_counter>(instance);
+    REQUIRE(counter != nullptr);
+    CHECK(counter->resets == 1);
+  }
+}
+
+TEST_CASE("a guarded listener runs its bus guard on a write ignored while held in reset")
+{
+  auto options = popcorn::testing::stm32_options();
+  options.models.insert_or_assign(
+      "CRC",
+      [](periph::model_context& ctx, popcorn::peripheral_desc const& desc)
+          -> std::shared_ptr<periph::model> { return std::make_shared<guarded_probe>(ctx, desc); });
+  stm32_fixture const f{u575(), "rcc_ll", std::move(options)};
+  auto* const         probe = f.model_of<guarded_probe>("CRC");
+  REQUIRE(probe != nullptr);
+  auto const& desc = f.target->peripheral("CRC").description();
+  auto const* pol  = popcorn::find_register(desc, "POL");
+  REQUIRE(pol != nullptr);
+  REQUIRE(f.target->mem().write(desc.base + pol->offset, 4, 0x1021).has_value());
+  CHECK(probe->guarded == 1);
+  write(f, "RCC_AHB1RSTR", bit_of("RCC_AHB1RSTR", "CRCRST"));
+  REQUIRE(f.target->mem().write(desc.base + pol->offset, 4, 0x8005).has_value());
+  CHECK(probe->guarded == 2);
+  CHECK(f.target->peripheral("CRC").peek(pol->offset) == 0x1021);
+}
+
+TEST_CASE("RCC claims each RSTR register once, with and without TrustZone")
+{
+  for(bool const trustzone : {false, true})
+  {
+    CAPTURE(trustzone);
+    auto options = popcorn::testing::stm32_options();
+    if(trustzone)
+    {
+      REQUIRE(stm32::configure_option_bytes(u575(), {.tzen = true}, options).has_value());
+    }
+    stm32_fixture const f{u575(), "rcc_ll", std::move(options)};
+    auto const          claims = f.target->model("RCC")->claims();
+    for(auto const name : stm32::reset_registers)
+    {
+      CAPTURE(name);
+      auto const* const found =
+          popcorn::find_register(f.target->peripheral("RCC").description(), name);
+      REQUIRE(found != nullptr);
+      CHECK(std::ranges::count(claims, found->name) == 1);
+    }
+  }
 }
