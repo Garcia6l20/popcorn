@@ -69,7 +69,7 @@ def test_the_project_declares_the_pytest_extra() -> None:
 
 
 def test_the_project_declares_the_plugin_extra() -> None:
-    assert project()["optional-dependencies"]["plugin"] == ["pcons==0.30.0", "ninja"]
+    assert project()["optional-dependencies"]["plugin"] == ["pcons==0.31.0", "ninja"]
 
 
 def test_pytest_is_required_by_no_extra_but_pytest() -> None:

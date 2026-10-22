@@ -1,6 +1,6 @@
 [build-system]
 requires = [
-    "pcons @ git+https://github.com/Garcia6l20/pcons.git@d5be306ae23109cf0b5729da19ebd265308bd4c1",
+    "pcons==0.31.0",
     "popcorn==0.1.0.dev0",
 ]
 build-backend = "pcons.pyproject"

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["pcons @ git+https://github.com/Garcia6l20/pcons.git@d5be306ae23109cf0b5729da19ebd265308bd4c1"]
+requires = ["pcons==0.31.0"]
 build-backend = "pcons.pyproject"
 
 [project]
@@ -17,7 +17,7 @@ pytest = [
     "pytest>=9.1",
 ]
 plugin = [
-    "pcons==0.30.0",
+    "pcons==0.31.0",
     "ninja",
 ]
 
@@ -66,5 +66,3 @@ executionEnvironments = [
 [tool.uv]
 no-build-isolation-package = ["popcorn"]
 
-[tool.uv.sources]
-pcons = { git = "https://github.com/Garcia6l20/pcons.git", rev = "devel" }
