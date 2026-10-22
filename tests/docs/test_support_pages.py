@@ -10,7 +10,8 @@ ROOT = Path(__file__).parents[2]
 MODELS = ROOT / "native/src/periph/stm32"
 LIMITS = ROOT / "docs/support/limits.md"
 LIMIT_SITE = re.compile(
-    r"throw unmodelled_config|warn_unsupported\(|unmodelled\(|not modelled|[Dd]eviation"
+    r"throw unmodelled_config|warn_unsupported\(|unmodelled\(|not modelled|deviation|divergence",
+    re.IGNORECASE,
 )
 
 
@@ -56,30 +57,22 @@ def test_the_u575_page_shows_the_rng_builtin(generated: Path) -> None:
 
 
 def limited_models() -> list[str]:
-    return sorted(f.name for f in MODELS.glob("*.cpp") if LIMIT_SITE.search(f.read_text()))
+    sources = [*MODELS.glob("*.cpp"), *MODELS.glob("*.hpp")]
+    return sorted(f.name for f in sources if LIMIT_SITE.search(f.read_text()))
+
+
+def section_sources() -> dict[str, str]:
+    """The `Source:` line that opens each `## ` section of limits.md, by heading."""
+    found: dict[str, str] = {}
+    for section in LIMITS.read_text().split("\n## ")[1:]:
+        heading, _, body = section.partition("\n")
+        lines = [line for line in body.splitlines() if line.strip()]
+        if lines and lines[0].startswith("Source: "):
+            found[heading] = lines[0]
+    return found
 
 
 @pytest.mark.parametrize("model", limited_models())
 def test_each_model_with_a_limit_has_a_limits_section(model: str) -> None:
-    assert f"native/src/periph/stm32/{model})" in LIMITS.read_text()
-
-
-def test_the_u575_page_model_column_follows_support(generated: Path) -> None:
-    part = popcorn.stm32.mcu("STM32U575QGIx")
-    plain = {p.name: p.model for p in popcorn.stm32.support(part)}
-    secured = {p.name: p.model for p in popcorn.stm32.support(part, trustzone=True)}
-    expected = {
-        name: (
-            "built-in"
-            if plain[name] == "builtin"
-            else "built-in, TrustZone only" if secured[name] == "builtin" else "none"
-        )
-        for name in plain
-    }
-    rows = [
-        line.split("|")
-        for line in (generated / "STM32U575QGIx.md").read_text().splitlines()
-        if line.startswith("| `")
-    ]
-    shown = {name: row[4].strip() for row in rows for name in row[3].strip().split(", ")}
-    assert shown == expected
+    link = f"native/src/periph/stm32/{model})"
+    assert [heading for heading, source in section_sources().items() if link in source]

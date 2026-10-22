@@ -1,12 +1,14 @@
 # Limits
 
 A built-in model serves the registers and behaviour the firmware of the examples and the tests
-use. It does not serve every field of every register. This page lists what each model leaves
-out and where it differs from the reference manual, RM0456 for the STM32U5.
+use. It does not serve every field of every register. Each section below lists what its model
+leaves out and the deviations from the reference manual, RM0456 for the STM32U5, that its source
+documents. The class doc in the linked source has the detail.
 
 Most models meet an unmodelled setting with one `model_warning` log record per instance, then
-keep running as the section says. The MDF and ADF model raises `UnmodelledConfig` instead. Read
-the log records of a run to see which settings a firmware reached.
+keep running as the section says. Under `strict` each such warning raises `ModelError` instead.
+The MDF and ADF model raises `UnmodelledConfig`. Read the log records of a run to see which
+settings a firmware reached.
 
 ## Peripherals without a model
 
@@ -29,6 +31,20 @@ The [part pages](generated/parts.md) list the instances with no model.
 - The ICACHE remap of external memories onto the code region is not modelled. CRR0 to CRR3 store
   what the firmware writes and map nothing.
 - Parts that alias boot memory at address 0, such as the STM32F4 and STM32L4, are not modelled.
+
+## Core faults
+
+Source: [exceptions.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/arch/armv8m/exceptions.cpp)
+
+Under `faults="handler"`, a fault enters the firmware's handler as the core does, with these
+exceptions. They stop the run with a FAULT stop instead:
+
+- Lockup, and an INVSTATE fault.
+- Without TrustZone: INVPC, UNSTKERR, STKERR, a STKOF on exception entry, and VECTTBL.
+- With TrustZone: a STKOF of the additional state context alone, and a fault while taking a
+  derived exception.
+
+[Faults and errors](../guide/faults.md) shows both policies.
 
 ## ADC
 
@@ -53,6 +69,7 @@ Source: [crc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - An even polynomial, which RM0456 24.3.3 does not support, is computed anyway and logged.
 - A write narrower than 32 bits to any register but `CRC_DR` is ignored and logged. Such a read
   is logged.
+- The RCC clock gate is not modelled. The CRC works with its RCC enable bit clear.
 
 ## DBGMCU
 
@@ -85,6 +102,7 @@ Differs from RM0456:
 Source: [gpdma.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/gpdma.cpp)
 
 - The link step mode is not modelled. A channel that uses it runs to completion.
+- Triggers are not modelled.
 - `CxTR1` takes writes while its channel is enabled. RM0456 17.8.10 makes it read-only then.
 
 ## GTZC
@@ -100,8 +118,14 @@ Source: [gtzc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/hash.cpp)
 
 - An HMAC key longer than 64 bytes with LKEY 0 is hashed as with LKEY 1, and logged.
-- No DMA controller serves `hash_in_dma`. DMAE 1 requests nothing.
-- Some context swaps through the CSR registers are refused and logged as not modelled.
+- DMA input works through GPDMA request 89. A machine with no DMA controller that serves
+  `hash_in_dma` logs DMAE 1 once and requests nothing.
+- The CSR registers hold popcorn's own serialisation of the state, not the silicon layout. CSR0
+  reads 0x48530001, out of reset too, where RM0456 gives 0x00000002.
+- A CSR0 write other than popcorn's tag, or a CSR1 write that does not match the state latched at
+  INIT, is refused and logged.
+- A DIN write while BUSY does not stall the bus. The CPU runs on.
+- The RCC clock gate is not modelled.
 
 ## I2C
 
@@ -121,6 +145,7 @@ Source: [iwdg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
   the old prescaled clock.
 - A refresh reloads at the key write, not one period later.
 - EWIC acknowledges without the 0x5555 key, as `LL_IWDG_ClearFlag_EWIF` expects.
+- The hardware watchdog option is not modelled.
 
 ## MDF and ADF
 
@@ -138,6 +163,15 @@ These settings raise `UnmodelledConfig` naming the register and the field when t
 - A reserved SNTHR at SADEN 0 to 1.
 
 ACQMOD 110 and 111 run as 000, MDF CICMOD 110 and 111 as Sinc5, and ADF ACQMOD 101 as 000.
+
+Choices where RM0456 is silent or the model differs:
+
+- With a generated CCK, CKABF stays 0 at SITFEN. Silicon holds it until the first clock
+  transition.
+- With CKGDEN 0, CKABF sets at SITFEN, and STH cycles at the PROCDIV rate after CKGDEN goes to 0.
+- The sound activity detector sees only the samples NBDIS keeps. RM0456 taps it at the DFLT0
+  output.
+- A partial SAD frame carries across a DFLT0 stop and start.
 
 ## OTG_FS
 
@@ -163,7 +197,7 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 
 Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc.cpp)
 
-- SRAMnEN and SRAMnSMEN stay Non-secure. The MPCBB and INVSECSTATE rule of RM0456 5 does not
+- SRAMnEN and SRAMnSMEN stay Non-secure. The MPCBB and INVSECSTATE rule of RM0456 5.4 does not
   apply to them.
 - The RSTR registers are storage. A peripheral reset bit written there resets no peripheral.
 
@@ -195,6 +229,7 @@ Not modelled, logged:
 - Smooth calibration and the shift register.
 - Timestamps, the RTC outputs, ALRxFCLR and SSRUIE.
 - WUTOCLR. WUTF stays set until SCR clears it.
+- The backup domain write protection. `PWR_DBPR.DBP` does not gate RTC writes.
 - Subsecond alarm comparison. MASKSS reads as 0.
 - The security and privilege `RTC_SECCFGR`, `RTC_PRIVCR`, `TAMP_SECCFGR` and `TAMP_PRIVCR`
   select. They are storage.
@@ -248,7 +283,10 @@ Differs from RM0456:
 Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/usart.cpp)
 
 - Only plain asynchronous mode is modelled. Synchronous, smartcard, IrDA, LIN, half-duplex,
-  driver enable, auto baud and receiver timeout are logged as not modelled.
+  driver enable, auto baud, receiver timeout and wake-up from Stop are logged as not modelled.
+- GTPR and AUTOCR are not served, so the locks on their fields are not enforced.
+- IDLE is never gated on RXFNE, which RM0456 66.8.10 does.
+- BUSY does not follow frames from other machines.
 - An aborted frame delivers nothing and holds the line until the abort. The chip would see a
   truncated frame and FE.
 - A frame from another machine still being sampled when a link holds the line low becomes the

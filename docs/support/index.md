@@ -20,7 +20,8 @@ of the examples and the tests use. [Limits](limits.md) lists the rest.
 
 The model column of a part page reads:
 
-- **built-in**: a native model ships with popcorn and serves the instance in every machine.
+- **built-in**: a native model ships with popcorn and serves the instance, unless a Python
+  model is registered for its IP.
 - **built-in, TrustZone only**: the model serves the instance only when the machine boots with
   TrustZone enabled.
 - **none**: no model ships. A test can still serve the instance with a Python model or a native

@@ -4,6 +4,7 @@ Run in its own interpreter, `python -m popcorn_build.support_pages <out_dir>`, s
 models are registered.
 """
 
+import os
 import sys
 from collections.abc import Iterable
 from pathlib import Path
@@ -11,6 +12,9 @@ from pathlib import Path
 import popcorn
 from popcorn import PartDescription
 from popcorn.stm32 import PeripheralSupport, mcu, shipped_parts, support
+
+LOCAL_SOURCES = ("POPCORN_STM32_DESCRIPTION_DIRS", "POPCORN_STM32_BUILD")
+"""Variables that make `mcu()` read a description other than the shipped one."""
 
 BUILTIN = "built-in"
 TRUSTZONE_ONLY = "built-in, TrustZone only"
@@ -120,7 +124,11 @@ def cores_page(parts: dict[str, PartDescription]) -> str:
             "double" if part.core.fpu_double else "single" if part.core.fpu else "no",
             "yes" if part.core.dsp else "no",
             "yes" if part.core.trustzone else "no",
-            str(part.core.mpu_regions),
+            (
+                f"{part.core.mpu_regions} + {part.core.mpu_regions_secure} Secure"
+                if part.core.trustzone
+                else str(part.core.mpu_regions)
+            ),
             str(part.core.num_irqs),
         ]
         for name, part in parts.items()
@@ -129,7 +137,8 @@ def cores_page(parts: dict[str, PartDescription]) -> str:
         "# Cores",
         "",
         f"popcorn emulates a core through an arch module. Registered modules: {modules}. A machine "
-        "takes the latest registered module that implements its part's core.",
+        "takes the latest registered module that implements its part's core. MPU regions count "
+        "the Non-secure MPU, plus the Secure one on a part with TrustZone.",
         "",
         *_table(["Part", "Core", "FPU", "DSP", "TrustZone", "MPU regions", "IRQs"], rows),
         "",
@@ -138,7 +147,10 @@ def cores_page(parts: dict[str, PartDescription]) -> str:
 
 
 def write(out: Path) -> list[Path]:
-    """Write every generated page into `out` and return their paths."""
+    """Write every generated page into `out` and return their paths. Removes the variables of
+    `LOCAL_SOURCES` from the environment first, so the pages show the shipped descriptions."""
+    for name in LOCAL_SOURCES:
+        os.environ.pop(name, None)
     out.mkdir(parents=True, exist_ok=True)
     parts: dict[str, PartDescription] = {}
     for name in shipped_parts():
