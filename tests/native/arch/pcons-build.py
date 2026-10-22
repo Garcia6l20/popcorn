@@ -53,6 +53,7 @@ arch_tests = [
         ("arch-units", "test_units.cpp"),
         ("arch-svc", "test_svc.cpp"),
         ("arch-timers", "test_timers.cpp"),
+        ("arch-self-branch", "test_self_branch.cpp"),
         ("arch-faults", "test_faults.cpp"),
         ("arch-calls", "test_calls.cpp"),
         ("arch-variants", "test_variants.cpp"),

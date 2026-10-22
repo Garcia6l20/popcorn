@@ -27,6 +27,10 @@ constexpr std::uint32_t sev_narrow      = 0xbf40;
 constexpr std::uint32_t wfe_wide_second = 0x8002;
 constexpr std::uint32_t yield_wide      = 0x8001;
 constexpr std::uint32_t sev_wide_second = 0x8004;
+constexpr std::uint32_t b_self_narrow   = 0xe7fe;
+constexpr std::uint32_t b_self_first    = 0xf7ff;
+constexpr std::uint32_t b_self_second   = 0xbffe;
+constexpr std::uint32_t xpsr_it         = 0x0600'fc00;
 
 void require(uc_err err, std::string_view what)
 {
@@ -148,6 +152,14 @@ void cortex_m::note_pending(std::uint32_t number) noexcept
 auto cortex_m::halfword(address at) const -> std::uint32_t
 {
   return context_->services.read(at, 2, initiator::debugger).value_or(0);
+}
+
+auto cortex_m::self_branch(address at) const -> bool
+{
+  auto const first = halfword(at);
+  auto const loops =
+      first == b_self_narrow or (first == b_self_first and halfword(at + 2) == b_self_second);
+  return loops and (read(UC_ARM_REG_XPSR) & xpsr_it) == 0;
 }
 
 auto cortex_m::hint() -> bool

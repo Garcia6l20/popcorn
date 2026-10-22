@@ -56,6 +56,16 @@ asleep in WFI does not count. A firmware that sleeps between interrupts can ther
 long virtual time inside a small budget: here 1,000 instructions take more than 10 ms. Bound
 time with `for_`, and keep `budget` as a guard against a firmware stuck in a busy loop.
 
+A firmware waiting in a branch to itself, `b .` or an empty `while(1)`, executes instructions,
+and they count toward `budget`. While no exception can be taken, the run moves the clock over
+the iterations to the next event or bound at once. Every output is the same as when they
+execute one by one: the stop, `instructions`, `executed`, `time`, the order of events and the
+counters the core reads, such as SysTick and DWT CYCCNT. A wait for a watchdog reset or a
+timer interrupt in such a loop therefore costs little wall time. The loop executes each
+iteration while coverage, trace block records, `spin_threshold`, a return watch, or an
+intercept or probe on the branch is on. A loop of more than one instruction, such as a poll of
+a flag, always executes.
+
 Without `budget=`, a run uses the machine's `default_budget`, None for no limit. The pytest
 plugin sets it per test, see [Testing with pytest](testing.md).
 

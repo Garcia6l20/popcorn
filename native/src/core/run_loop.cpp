@@ -419,9 +419,9 @@ auto machine::run_state::deliverable() noexcept -> bool
     std::uint32_t size,
     void*         user) noexcept
 {
-  auto&      run = *static_cast<run_state*>(user);
-  auto const now = run.owner.clock_driver_.exact_now();
-  run.block_pc   = static_cast<address>(addr);
+  auto&      run      = *static_cast<run_state*>(user);
+  auto const now      = run.owner.clock_driver_.exact_now();
+  auto const previous = std::exchange(run.block_pc, static_cast<address>(addr));
   if(run.stop_pending()
      or now >= run.deadline
      or now >= run.owner.scheduler_.earliest()
@@ -429,6 +429,10 @@ auto machine::run_state::deliverable() noexcept -> bool
      or (run.arch->pending() and run.deliverable()))
   {
     run.stop_at_boundary(engine, now);
+    return;
+  }
+  if(size == 1 and previous == run.block_pc and run.skip_self_branch(engine, now)) [[unlikely]]
+  {
     return;
   }
   if(run.block_watch and run.watch_block(engine)) [[unlikely]]

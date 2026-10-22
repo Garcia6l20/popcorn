@@ -55,6 +55,7 @@ public:
   auto               on_unmapped(address addr, memory_op op) -> trap_result override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   [[nodiscard]] auto idle() const -> bool override;
+  [[nodiscard]] auto self_branch(address at) const -> bool override;
   void               hold_core(bool held) override;
   [[nodiscard]] auto pc() const -> address override;
   [[nodiscard]] auto instructions_between(address from, address to) const

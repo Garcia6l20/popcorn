@@ -453,6 +453,23 @@ TEST_CASE("execution_priority over active exceptions in every word equals a scan
   }
 }
 
+TEST_CASE("execution_priority skips bit 0 and reads no word past a short active vector")
+{
+  auto exceptions        = exceptions_with(110);
+  exceptions.priority[0] = 0;
+  exceptions.active[0]   = 1;
+  CHECK(armv8m::execution_priority(exceptions, 0, {}) == 256);
+  CHECK(armv8m::execution_priority(exceptions, tz, {}, {}) == 256);
+  exceptions.priority[32] = 0x20;
+  exceptions.active[1]    = 1;
+  CHECK(armv8m::execution_priority(exceptions, 0, {}) == 0x20);
+  CHECK(armv8m::execution_priority(exceptions, tz, {}, {}) == 0x20);
+  exceptions.priority[armv8m::exc_systick] = 0x60;
+  exceptions.active                        = {1u << armv8m::exc_systick};
+  CHECK(armv8m::execution_priority(exceptions, 0, {}) == 0x60);
+  CHECK(armv8m::execution_priority(exceptions, tz, {}, {}) == 0x60);
+}
+
 TEST_CASE("without TrustZone EXC_RETURN keeps S, DCRS and ES set for the six entry cases")
 {
   using armv8m::encode_exc_return;

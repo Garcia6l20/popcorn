@@ -426,6 +426,18 @@ public:
    */
   [[nodiscard]] virtual auto idle() const -> bool = 0;
 
+  /**
+   * @brief Whether the instruction at @p at is an unconditional branch to itself that no
+   *        predication makes conditional, such as Arm `b .`. The run loop then moves the clock
+   *        over its iterations up to the next event or bound while nothing is deliverable,
+   *        counting them as executed. The default, false, keeps every iteration.
+   * @param at Address of a block of one instruction that ran twice in a row.
+   */
+  [[nodiscard]] virtual auto self_branch([[maybe_unused]] address at) const -> bool
+  {
+    return false;
+  }
+
   /** @brief Program counter of the next instruction. */
   [[nodiscard]] virtual auto pc() const -> address = 0;
 

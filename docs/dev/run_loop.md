@@ -16,6 +16,15 @@ the next deadline, which is why a sleeping firmware runs fast. The slice keeps t
 `executed` and `jumped`. A run's `budget` counts `executed` only, and `max_instructions`
 counts both.
 
+A core in a branch to itself, a one-instruction block that `arch::self_branch` names, such as
+Arm `b .` outside an IT block, executes instructions. The block hook sees the block run twice
+in a row, and when nothing is deliverable it advances the clock to the deadline or the next
+event, whichever comes first, then stops the engine before the block. The skipped iterations
+count as executed, as if they had run, so every output equals the slow path. The skip is off
+while a per-block observer is on: stepping, coverage, block trace records, spin detection, a
+return watch, or a code hook site on the block. `self_branch_skips` in the run counters counts
+the skips.
+
 ## Events
 
 Models schedule events on the scheduler. It orders them by due count, then lane, then sequence

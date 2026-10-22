@@ -597,6 +597,8 @@ struct run_counters
   std::uint64_t remove_calls_in_engine{};
   /** @brief `uc_ctl_remove_cache` calls of removes_direct. */
   std::uint64_t remove_calls_direct{};
+  /** @brief Clock moves over a self-branch by skip_self_branch. */
+  std::uint64_t self_branch_skips{};
   /** @brief Engine runs by engine_end. */
   std::array<std::uint64_t, engine_end_count> ends{};
 
@@ -1890,6 +1892,13 @@ struct machine::run_state
 
   /** @brief spin_block for the block at block_pc, under the guard, off the hot path. */
   [[gnu::noinline]] void spin_at_block() noexcept;
+
+  /** @brief When the block at block_pc is a self-branch the arch names and no per-block
+   * observer is on, moves the clock from @p now to the deadline or the next event, whichever
+   * comes first, and stops the engine before the block. The skipped iterations count as
+   * executed, as if they had run. Off the hot path.
+   * @return Whether it skipped. */
+  [[gnu::noinline]] auto skip_self_branch(uc_struct* engine, icount now) noexcept -> bool;
 
   /** @brief Counts the block at block_pc of block_size instructions into coverage, under the
    * guard, off the hot path. */

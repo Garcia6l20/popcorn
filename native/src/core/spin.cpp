@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <format>
+#include <limits>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -34,6 +35,25 @@ auto in_loop(spin_state::loop_state const& loop, address addr) noexcept -> bool
 {
   return loop.head != 0 and loop.head <= addr and addr - loop.head < spin_state::loop_window;
 }
+}
+
+auto machine::run_state::skip_self_branch(uc_struct* engine, icount now) noexcept -> bool
+{
+  if(stepping or spin_on or coverage_on or block_records or block_watch or sites.contains(block_pc))
+  {
+    return false;
+  }
+  auto const target = std::min(deadline, owner.scheduler_.earliest());
+  if(target.value == std::numeric_limits<std::uint64_t>::max()
+     or not guarded([this] { return arch->self_branch(block_pc); })
+     or failure)
+  {
+    return false;
+  }
+  owner.clock_driver_.advance(icount{target.value - now.value});
+  ++counters.self_branch_skips;
+  stop_at_block(engine, engine_end::event);
+  return true;
 }
 
 void machine::run_state::spin_block(address addr)
