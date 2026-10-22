@@ -252,7 +252,11 @@ class Var:
         return size
 
     def decode(self, data: bytes) -> int | float | bool:
-        """The scalar value of the `span()` bytes read at `address`."""
+        """The scalar value of the `span()` bytes read at `address`.
+
+        Args:
+            data: The bytes read at the variable's address.
+        """
         from popcorn.image.dwarf import BaseType, Encoding
 
         fmt, _ = self._scalar()

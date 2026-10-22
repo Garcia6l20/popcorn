@@ -105,6 +105,9 @@ class Snapshot:
     def from_bytes(cls, data: bytes) -> Snapshot:
         """Read a saved form.
 
+        Args:
+            data: The saved form.
+
         Raises:
             ConfigError: The bytes are malformed or of another format version.
         """
@@ -113,6 +116,9 @@ class Snapshot:
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> Snapshot:
         """Read a saved form from a file.
+
+        Args:
+            path: The saved form's file.
 
         Raises:
             ConfigError: The file is malformed or of another format version.

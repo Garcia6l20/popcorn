@@ -1,3 +1,19 @@
 # Links and taps
 
-Written in step 06.
+Linked systems of machines, UART links and taps.
+
+::: popcorn.System
+
+::: popcorn.SystemDescription
+
+::: popcorn.SystemSnapshot
+
+::: popcorn.SystemStop
+
+::: popcorn.UartLink
+
+::: popcorn.UartTap
+
+::: popcorn.TapFrame
+
+::: popcorn.LineState

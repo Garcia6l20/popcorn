@@ -387,7 +387,11 @@ class Condition:
         return self._label
 
     def ready(self, machine: object) -> bool:
-        """Evaluate it now through the reference's sync view: the parked path."""
+        """Evaluate it now through the reference's sync view: the parked path.
+
+        Args:
+            machine: The machine whose memory the condition reads.
+        """
         return self._test(self._ref.get())
 
     @override
@@ -453,7 +457,11 @@ class Conditions:
         raise AttributeError(f"Conditions is immutable, {name} cannot be deleted")
 
     def ready(self, machine: object) -> bool:
-        """Evaluate the members now through their sync views: the parked path."""
+        """Evaluate the members now through their sync views: the parked path.
+
+        Args:
+            machine: The machine whose memory the members read.
+        """
         combine = all if self.mode == "all" else any
         return combine(member.ready(machine) for member in self.members)
 
@@ -480,6 +488,9 @@ def _combined(mode: Literal["any", "all"], conditions: tuple[object, ...]) -> Co
 def any_of(*conditions: Condition) -> Conditions:
     """Ready once at least one member holds.
 
+    Args:
+        conditions: The conditions, one of which must hold.
+
     Raises:
         TypeError: A member is not a `Condition`, a `Conditions` included.
         ValueError: No member, more than 64, or members of different machines.
@@ -488,7 +499,11 @@ def any_of(*conditions: Condition) -> Conditions:
 
 
 def all_of(*conditions: Condition) -> Conditions:
-    """Ready once every member holds at the same boundary. Same errors as `any_of`."""
+    """Ready once every member holds at the same boundary. Same errors as `any_of`.
+
+    Args:
+        conditions: The conditions that must hold together.
+    """
     return _combined("all", conditions)
 
 

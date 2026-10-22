@@ -108,7 +108,7 @@ class Plugin:
 
     @classmethod
     def dev(cls, source: Path | str, name: str | None = None) -> Plugin:
-        """The dev-mode plugin in the directory @p source, named @p name or after the directory.
+        """The dev-mode plugin in the directory `source`, named `name` or after the directory.
 
         It builds on first use, nothing builds here. Under pytest, a plugin constructed by a
         `conftest.py` is built when its directory is collected, and a build failure is that
@@ -124,29 +124,29 @@ class Plugin:
 
     @classmethod
     def installed(cls, name: str, library: Path | str, bindings: str | None = None) -> Plugin:
-        """The installed plugin @p name whose library is @p library, never built.
+        """The installed plugin `name` whose library is `library`, never built.
 
-        A relative @p library is taken from the working directory. @p bindings is the dotted
+        A relative `library` is taken from the working directory. `bindings` is the dotted
         name of its bindings extension module, such as `my_plugin._native`, None for a plugin
         without one. `module()` refuses a name that imports a Python module.
         A wheel's package defines it and names it in the `popcorn.plugins` entry point group,
         `find` returns it.
 
         Raises:
-            ConfigError: @p name is not a Python identifier, or @p bindings is not a dotted
+            ConfigError: `name` is not a Python identifier, or `bindings` is not a dotted
                 module name or is under `popcorn` or `popcorn_plugins`.
         """
         return cls(name=name, library=Path(library).absolute(), bindings=bindings)
 
     def model(self, name: str) -> PluginModel:
-        """The model this plugin registers under @p name, for `Periph(model=)`.
+        """The model this plugin registers under `name`, for `Periph(model=)`.
 
         Nothing builds or loads here: a machine description naming it can be declared before
         the plugin builds. `MachineDescription.machine` checks the name against the models the
         loaded plugin registers.
 
         Raises:
-            ConfigError: @p name is not a non-empty str.
+            ConfigError: `name` is not a non-empty str.
         """
         return PluginModel(self, name)
 
@@ -282,15 +282,15 @@ class PluginModel:
 
 
 def find(name: str) -> Plugin:
-    """The installed plugin the `popcorn.plugins` entry point @p name names.
+    """The installed plugin the `popcorn.plugins` entry point `name` names.
 
     The entry point's value is the `Plugin` a wheel's package defines, such as
     `my_plugin = "my_plugin:PLUGIN"`. Importing it loads nothing native.
 
     Raises:
-        ConfigError: no installed distribution provides @p name, the message listing the names
+        ConfigError: no installed distribution provides `name`, the message listing the names
             installed, two distributions provide it, naming both, one declares it twice, its
-            module does not import, or its value is not a `Plugin` named @p name.
+            module does not import, or its value is not a `Plugin` named `name.`
     """
     if not isinstance(cast(object, name), str) or not name:
         raise ConfigError(

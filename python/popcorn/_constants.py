@@ -226,6 +226,10 @@ class Constants:
         """The definition of the macro `name` as written after its name, for any macro:
         `"16"`, `"(x) ((x) * (x))"` for a function-like one, `""` for `#define X`.
 
+        Args:
+            name: The macro name.
+            unit: The compilation unit to look in, any by default.
+
         Raises:
             SymbolError: As `macro`.
             MissingInput: A file does not exist.

@@ -11,7 +11,11 @@ PartDescription = _core.PartDescription
 
 
 def load_description(path: str | os.PathLike[str]) -> PartDescription:
-    """Read a part description JSON file, ConfigError naming the file and key when invalid."""
+    """Read a part description JSON file, ConfigError naming the file and key when invalid.
+
+    Args:
+        path: The JSON file.
+    """
     return _core.load_description(os.fspath(path))
 
 

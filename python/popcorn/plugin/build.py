@@ -45,7 +45,7 @@ _REQUIREMENT = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?(.*)"
 
 
 def _without_build_rpath(target: Target) -> None:
-    """Keep pcons from adding an rpath to the build's own shared libraries to @p target, on a
+    """Keep pcons from adding an rpath to the build's own shared libraries to `target`, on a
     pcons that adds one: the installed files carry only the rpaths set here. An older pcons,
     which adds none, refuses the option."""
     with contextlib.suppress(ValueError):
@@ -53,7 +53,7 @@ def _without_build_rpath(target: Target) -> None:
 
 
 def _exact_pin(requirement: str, version: str) -> bool | None:
-    """Whether @p requirement pins popcorn to exactly @p version, None when it is not popcorn's."""
+    """Whether `requirement` pins popcorn to exactly `version`, None when it is not popcorn's."""
     match = _REQUIREMENT.fullmatch(requirement)
     if match is None or re.sub(r"[-_.]+", "-", match[1]).lower() != "popcorn":
         return None

@@ -39,6 +39,7 @@ _UNDELIVERED = "a member stop the last run found is not delivered yet: run the s
 _OPEN_END = (1 << 63) - 1
 
 type LineState = Literal["idle", "break"]
+"""The state a cut line is held in: `"idle"` keeps it high, `"break"` holds it low."""
 
 
 @dataclass(frozen=True)

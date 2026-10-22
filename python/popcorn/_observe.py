@@ -91,13 +91,21 @@ class MachineCoverage:
         return Coverage(self._handle.coverage_pcov(sources))
 
     def save(self, path: str | os.PathLike[str]) -> Coverage:
-        """Write the coverage so far to a `.pcov` file and return it."""
+        """Write the coverage so far to a `.pcov` file and return it.
+
+        Args:
+            path: The file to write.
+        """
         coverage = self.collect()
         coverage.save(path)
         return coverage
 
     def merge_into(self, path: str | os.PathLike[str]) -> Coverage:
-        """Add the coverage so far to a `.pcov` file, a worker's file, and return the sum."""
+        """Add the coverage so far to a `.pcov` file, a worker's file, and return the sum.
+
+        Args:
+            path: The file to add to.
+        """
         return self.collect().merge_into(path)
 
 
