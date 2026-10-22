@@ -533,27 +533,12 @@ TEST_CASE("edges of one instant keep their order across a reset")
   CHECK_FALSE(pc.level(13));
 }
 
-namespace
-{
-void rcc_reset_pulse(stm32_fixture const& f, std::string_view reg, std::string_view bit)
-{
-  auto const& desc  = f.target->peripheral("RCC").description();
-  auto const* found = popcorn::find_register(desc, reg);
-  REQUIRE(found != nullptr);
-  auto const field = std::ranges::find(found->fields, bit, &popcorn::field_desc::name);
-  REQUIRE(field != found->fields.end());
-  for(std::uint32_t const value : {std::uint32_t{1} << field->lsb, std::uint32_t{0}})
-  {
-    REQUIRE(f.target->mem().write(desc.base + found->offset, 4, value).has_value());
-  }
-}
-}
-
 TEST_CASE("GPIOCRST returns pins to analog with their edges, the board drive comes back as input")
 {
   auto  f  = idling();
   auto& pc = port(f, "GPIOC");
   pc.drive(13, true);
+  REQUIRE(pc.level(13));
   auto const moder = f.target->peripheral("GPIOC").peek(0);
   write_port(f, "GPIOC", "GPIO_MODER", (moder & ~(3u << 14)) | (1u << 14));
   write_port(f, "GPIOC", "GPIO_ODR", 1u << 7);
@@ -571,5 +556,47 @@ TEST_CASE("GPIOCRST returns pins to analog with their edges, the board drive com
           {13, false}
   });
   write_port(f, "GPIOC", "GPIO_MODER", 0xFFFF'FFFF & ~(3u << 26));
+  CHECK(pc.level(13));
+}
+
+TEST_CASE("GPIOARST and GPIOBRST return the debug pins to AF0 with their pulls, the rest to analog")
+{
+  auto  f  = idling();
+  auto& pa = port(f, "GPIOA");
+  auto& pb = port(f, "GPIOB");
+  write_port(f, "GPIOA", "GPIO_MODER", 0x5555'5555);
+  write_port(f, "GPIOB", "GPIO_MODER", 0x5555'5555);
+  rcc_reset_pulse(f, "RCC_AHB2RSTR1", "GPIOARST");
+  rcc_reset_pulse(f, "RCC_AHB2RSTR1", "GPIOBRST");
+  CHECK(f.target->peripheral("GPIOA").peek(0) == 0xABFF'FFFF);
+  CHECK(f.target->peripheral("GPIOB").peek(0) == 0xFFFF'FEBF);
+  for(std::uint8_t const pin : {13, 14, 15})
+  {
+    CAPTURE(pin);
+    CHECK(pa.mode(pin) == stm32::pin_mode::alternate);
+  }
+  CHECK(pa.level(13));
+  CHECK_FALSE(pa.level(14));
+  CHECK(pa.level(15));
+  CHECK(pb.mode(3) == stm32::pin_mode::alternate);
+  CHECK(pb.mode(4) == stm32::pin_mode::alternate);
+  CHECK(pb.level(4));
+  CHECK(pa.mode(0) == stm32::pin_mode::analog);
+}
+
+TEST_CASE("a board edge queued before GPIOCRST applies at its time after the reset")
+{
+  auto       f   = idling();
+  auto&      pc  = port(f, "GPIOC");
+  auto const due = f.target->virtual_clock().time().ps + 1'000'000;
+  pc.drive_at(13, true, popcorn::vtime{due});
+  rcc_reset_pulse(f, "RCC_AHB2RSTR1", "GPIOCRST");
+  write_port(f, "GPIOC", "GPIO_MODER", 0xFFFF'FFFF & ~(3u << 26));
+  CHECK_FALSE(pc.level(13));
+  REQUIRE(
+      f.run_to_stop(
+           {.max_instructions = icount{100'000'000}, .until_time = popcorn::vtime{due + 1}})
+          .reason
+      == stop_reason::time);
   CHECK(pc.level(13));
 }

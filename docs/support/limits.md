@@ -204,7 +204,10 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   ADC12RST, GPDMA1, LPDMA1, the timers, GPIOA to GPIOI, SPI, I2C, SAI, MDF1 and ADF1. Other bits
   are storage. Board state survives: a pin's board drive, SPI devices and I2C targets, which an
   RCC reset of their controller does not reset, PDM sources and SAI external clocks. A GPIO
-  reset returns its pins to analog, so outputs drop and listeners see the edges.
+  reset returns its pins to their reset modes, analog except PA13 to PA15, PB3 and PB4, so
+  outputs drop and listeners see the edges. A pin without a board pull reads low in analog
+  mode, so an active-low SPI chip select on a reset port selects its device until firmware
+  configures the pin again.
 - SYSCFGRST keeps `SYSCFG_CSLCKR`, `SYSCFG_CNSLCKR` and `SYSCFG_CFGR2`, whose bits RM0456 15.3
   clears only on a system reset.
 - While a reset bit is 1, writes to the registers that peripheral's model serves are ignored,

@@ -2137,20 +2137,6 @@ TEST_CASE("a frozen 2D channel held between two bursts of a block resumes with t
 
 namespace
 {
-void gpdma_reset_pulse(stm32_fixture const& f)
-{
-  auto const& rcc   = f.target->peripheral("RCC").description();
-  auto const* reset = popcorn::find_register(rcc, "RCC_AHB1RSTR");
-  REQUIRE(reset != nullptr);
-  auto const bit =
-      std::ranges::find(reset->fields, std::string_view{"GPDMA1RST"}, &popcorn::field_desc::name);
-  REQUIRE(bit != reset->fields.end());
-  for(std::uint32_t const value : {std::uint32_t{1} << bit->lsb, std::uint32_t{0}})
-  {
-    REQUIRE(f.target->mem().write(rcc.base + reset->offset, 4, value).has_value());
-  }
-}
-
 void program_paced(stm32_fixture const& f)
 {
   write(f, "GPDMA_C0TR1", tr1(0, 2, 2) | bit("GPDMA_C0TR1", "SINC") | bit("GPDMA_C0TR1", "DINC"));
@@ -2167,7 +2153,7 @@ TEST_CASE("GPDMA1RST keeps a request line its requester holds, a machine reset c
   auto f = idle_machine();
   load_source(f);
   pace(f, true);
-  gpdma_reset_pulse(f);
+  rcc_reset_pulse(f, "RCC_AHB1RSTR", "GPDMA1RST");
   CHECK(f.field("GPDMA1", "GPDMA_C0CR", "EN") == 0);
   program_paced(f);
   idle_for(f, std::chrono::microseconds{20});
@@ -2187,7 +2173,7 @@ TEST_CASE("GPDMA1RST during a DBG_GPDMA0_STOP hold keeps channel 0 frozen until 
 {
   auto f = mid_copy(true);
   f.target->hold_core(true);
-  gpdma_reset_pulse(f);
+  rcc_reset_pulse(f, "RCC_AHB1RSTR", "GPDMA1RST");
   load_source(f);
   program_paced(f);
   pace(f, true);
@@ -2202,7 +2188,7 @@ TEST_CASE("GPDMA1RST mid-copy stops the channel, its pending burst moves no byte
 {
   auto       f      = mid_copy(false);
   auto const before = destination(f);
-  gpdma_reset_pulse(f);
+  rcc_reset_pulse(f, "RCC_AHB1RSTR", "GPDMA1RST");
   CHECK(f.field("GPDMA1", "GPDMA_C0CR", "EN") == 0);
   CHECK(reg_value(f, "GPDMA_C0SR") == 1);
   REQUIRE(later(f, ps_per_ms, 1'000'000'000).reason == stop_reason::time);
@@ -2246,7 +2232,7 @@ TEST_CASE(
           return event.id.kind == 0 and (event.payload >> 32) == 0 and event.due_ps > now;
         });
     REQUIRE(stale > 0);
-    gpdma_reset_pulse(f);
+    rcc_reset_pulse(f, "RCC_AHB1RSTR", "GPDMA1RST");
     if(wait)
     {
       idle_for(f, std::chrono::microseconds{5});

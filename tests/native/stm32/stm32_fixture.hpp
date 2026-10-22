@@ -189,4 +189,37 @@ inline auto debug_freeze_set(stm32_fixture const& f, std::string_view name) -> b
   FAIL("no DBGMCU field " << name);
   return false;
 }
+
+/**
+ * @brief Writes one RCC peripheral reset bit, as firmware does.
+ * @param f Machine.
+ * @param reg Reset register, such as `RCC_AHB2RSTR1`.
+ * @param bit Reset field, such as `RNGRST`.
+ * @param level 1 to hold the peripheral in reset, 0 to release it. Other bits of @p reg are 0.
+ */
+inline void rcc_reset_write(
+    stm32_fixture const& f,
+    std::string_view     reg,
+    std::string_view     bit,
+    std::uint32_t        level)
+{
+  auto const& desc  = f.target->peripheral("RCC").description();
+  auto const* found = find_register(desc, reg);
+  REQUIRE(found != nullptr);
+  auto const field = std::ranges::find(found->fields, bit, &field_desc::name);
+  REQUIRE(field != found->fields.end());
+  REQUIRE(f.target->mem().write(desc.base + found->offset, 4, level << field->lsb).has_value());
+}
+
+/**
+ * @brief Sets then clears one RCC peripheral reset bit, as LL_xxx_DeInit does.
+ * @param f Machine.
+ * @param reg Reset register, such as `RCC_AHB2RSTR1`.
+ * @param bit Reset field, such as `RNGRST`.
+ */
+inline void rcc_reset_pulse(stm32_fixture const& f, std::string_view reg, std::string_view bit)
+{
+  rcc_reset_write(f, reg, bit, 1);
+  rcc_reset_write(f, reg, bit, 0);
+}
 }

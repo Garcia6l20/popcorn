@@ -377,22 +377,6 @@ TEST_CASE("every machine reset reaches the device once with its kind")
   CHECK(r.device->cuts.empty());
 }
 
-namespace
-{
-void rcc_reset_pulse(stm32_fixture const& f, std::string_view reg, std::string_view bit)
-{
-  auto const& desc  = f.target->peripheral("RCC").description();
-  auto const* found = popcorn::find_register(desc, reg);
-  REQUIRE(found != nullptr);
-  auto const field = std::ranges::find(found->fields, bit, &popcorn::field_desc::name);
-  REQUIRE(field != found->fields.end());
-  for(std::uint32_t const value : {std::uint32_t{1} << field->lsb, std::uint32_t{0}})
-  {
-    REQUIRE(f.target->mem().write(desc.base + found->offset, 4, value).has_value());
-  }
-}
-}
-
 TEST_CASE("SPI1RST resets the controller and leaves its board device alone")
 {
   using popcorn::reset_kind;
@@ -2220,4 +2204,60 @@ TEST_CASE("SPI1RST lowers the TX request on the controller")
   REQUIRE(r.level(tx_request));
   rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
   CHECK_FALSE(r.level(tx_request));
+}
+
+TEST_CASE("SPI1RST deselects a hardware-SS device that was selected, without resetting it")
+{
+  rig r{"idle", true};
+  bus b{*r.f};
+  b.controller(7, 1, 0, 7);
+  b.send(0x9F);
+  b.set("SPI_CR1", "CSTART", 1);
+  b.run_until(b.now() + us);
+  REQUIRE_FALSE(r.device->selects.empty());
+  REQUIRE(r.device->selects.back().first);
+  auto const resets = r.device->resets;
+  rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  CHECK_FALSE(r.device->selects.back().first);
+  CHECK(r.device->resets == resets);
+}
+
+TEST_CASE("a transfer started after SPI1RST, before the stale frame end, runs on its own")
+{
+  auto const transfer = [](bool wait) {
+    probe_rig r;
+    bus       b{*r.f};
+    b.controller(7, 1, 0, 7);
+    b.send(0x5A);
+    b.set("SPI_CR1", "CSTART", 1);
+    b.run_until(b.now() + frame_ps);
+    auto const now   = b.now();
+    auto const stale = std::ranges::count_if(
+        r.f->target->snapshot().data().events.pending,
+        [&](auto const& event) { return event.due_ps > now + 8 * frame_ps; });
+    REQUIRE(stale > 0);
+    rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+    if(wait)
+    {
+      b.run_until(b.now() + 256 * frame_ps);
+    }
+    auto const start = b.now();
+    auto const first = r.device->frames.size();
+    b.controller(7, 12);
+    for(std::uint32_t index = 0; index < 12; ++index)
+    {
+      b.send(0x40 + index);
+    }
+    b.set("SPI_CR1", "CSTART", 1);
+    b.run_until(start + 256 * frame_ps);
+    std::vector<std::pair<std::uint32_t, std::uint64_t>> out;
+    for(auto const& [value, at] : std::span{r.device->frames}.subspan(first))
+    {
+      out.emplace_back(value, at.ps - start);
+    }
+    return out;
+  };
+  auto const early = transfer(false);
+  CHECK(early.size() == 12);
+  CHECK(early == transfer(true));
 }

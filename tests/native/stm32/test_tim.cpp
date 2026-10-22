@@ -1467,22 +1467,6 @@ TEST_CASE(
   CHECK(t.count("TIM3") == 0);
 }
 
-namespace
-{
-void reset_pulse(stm32_fixture const& f, std::string_view reg, std::string_view bit)
-{
-  auto const& rcc   = f.target->peripheral("RCC").description();
-  auto const* found = popcorn::find_register(rcc, reg);
-  REQUIRE(found != nullptr);
-  auto const field = std::ranges::find(found->fields, bit, &popcorn::field_desc::name);
-  REQUIRE(field != found->fields.end());
-  for(std::uint32_t const value : {std::uint32_t{1} << field->lsb, std::uint32_t{0}})
-  {
-    REQUIRE(f.target->mem().write(rcc.base + found->offset, 4, value).has_value());
-  }
-}
-}
-
 TEST_CASE("TIM1RST of an MMS 001 master with CEN 1 drops TRGO and stops a gated slave")
 {
   slaves t;
@@ -1495,7 +1479,7 @@ TEST_CASE("TIM1RST of an MMS 001 master with CEN 1 drops TRGO and stops a gated 
   t.write("TIM3", "SR", 0);
   t.at(30);
   REQUIRE(t.count("TIM3") == 30);
-  reset_pulse(t.f, "RCC_APB2RSTR", "TIM1RST");
+  rcc_reset_pulse(t.f, "RCC_APB2RSTR", "TIM1RST");
   CHECK(t.read("TIM1", "CR1") == 0);
   CHECK(t.bits("TIM3", "SR", "TIF") == 1);
   t.at(60);
@@ -1518,7 +1502,7 @@ TEST_CASE("TIM1RST lowers the update and compare DMA requests on the controller"
           {1, true},
           {2, true}
   });
-  reset_pulse(t.f, "RCC_APB2RSTR", "TIM1RST");
+  rcc_reset_pulse(t.f, "RCC_APB2RSTR", "TIM1RST");
   CHECK(
       dma->levels
       == std::vector<std::pair<std::uint32_t, bool>>{
@@ -2444,7 +2428,7 @@ TEST_CASE("TIM1RST during a DBG_TIM1_STOP hold keeps the timer frozen until the 
   t.to(1000);
   popcorn::testing::set_debug_freeze(t.d.f, "DBG_TIM1_STOP", true);
   t.d.f.target->hold_core(true);
-  reset_pulse(t.d.f, "RCC_APB2RSTR", "TIM1RST");
+  rcc_reset_pulse(t.d.f, "RCC_APB2RSTR", "TIM1RST");
   t.d.begin();
   t.to(3000);
   CHECK(t.d.count() == 0);

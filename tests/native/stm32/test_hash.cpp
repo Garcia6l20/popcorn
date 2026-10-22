@@ -2152,27 +2152,13 @@ TEST_CASE("a snapshot taken during a restore keeps the words loaded and a refusa
   CHECK(again.save(hash_csrs).csr == saved.csr);
 }
 
-namespace
-{
-void rcc_reset(stm32_fixture const& f, std::uint32_t level)
-{
-  auto const& desc  = f.target->peripheral("RCC").description();
-  auto const* found = popcorn::find_register(desc, "RCC_AHB2RSTR1");
-  REQUIRE(found != nullptr);
-  auto const bit =
-      std::ranges::find(found->fields, std::string_view{"HASHRST"}, &popcorn::field_desc::name);
-  REQUIRE(bit != found->fields.end());
-  REQUIRE(f.target->mem().write(desc.base + found->offset, 4, level << bit->lsb).has_value());
-}
-}
-
 TEST_CASE("HASHRST lowers the hash_in_dma request on the controller")
 {
   hash_rig const r{true, controller::recording};
   r.write(cr, cr_init | cr_dmae | cr_mdmat | (sha256 << 17) | (2u << 4));
   REQUIRE(r.dma().levels.back() == std::pair{hash_request, true});
-  rcc_reset(r.f, 1);
-  rcc_reset(r.f, 0);
+  rcc_reset_write(r.f, "RCC_AHB2RSTR1", "HASHRST", 1);
+  rcc_reset_write(r.f, "RCC_AHB2RSTR1", "HASHRST", 0);
   CHECK(r.dma().levels.back() == std::pair{hash_request, false});
   CHECK(r.read(cr) == 0);
 }
@@ -2180,11 +2166,11 @@ TEST_CASE("HASHRST lowers the hash_in_dma request on the controller")
 TEST_CASE("HASHRST held ignores DIN and CSR writes, the digest after release is the reset one")
 {
   hash_rig const r{false};
-  rcc_reset(r.f, 1);
+  rcc_reset_write(r.f, "RCC_AHB2RSTR1", "HASHRST", 1);
   r.write(cr, cr_init | (sha256 << 17) | (2u << 4));
   r.write(din, 0x6162'6300);
   r.write(csr0, 0x1234'5678);
-  rcc_reset(r.f, 0);
+  rcc_reset_write(r.f, "RCC_AHB2RSTR1", "HASHRST", 0);
   CHECK(r.read(cr) == 0);
   CHECK(r.f.target->peripheral("HASH").peek(csr0) == 0);
   CHECK_FALSE(r.pending());
@@ -2207,8 +2193,8 @@ TEST_CASE("HASHRST with a digest busy and DINIS raised drops the busy event and 
   REQUIRE((r.read(sr) & sr_busy) != 0);
   REQUIRE(r.pending());
   r.unpend();
-  rcc_reset(r.f, 1);
-  rcc_reset(r.f, 0);
+  rcc_reset_write(r.f, "RCC_AHB2RSTR1", "HASHRST", 1);
+  rcc_reset_write(r.f, "RCC_AHB2RSTR1", "HASHRST", 0);
   CHECK(r.read(sr) == 0x1);
   CHECK(r.read(imr) == 0);
   r.write(imr, imr_dcie);

@@ -299,6 +299,7 @@ void gpio::on_bus_reset()
   restore_unclaimed_storage();
   restore_reset_values();
   regs_.poke(input_[0].offset, inputs);
+  route_pins();
   settle(true);
 }
 

@@ -1262,14 +1262,7 @@ TEST_CASE("MDF1RST pulls every bit clocked before it, then stops the stream")
   r.write("DFLT0RSFR", 2u << 8);
   r.write("DFLT0CR", 1);
   r.run_until(edge_at(r.anchor, 2 + 2 * (128 * 7 + 80)));
-  auto const& rcc   = r.target->peripheral("RCC").description();
-  auto const* reset = popcorn::find_register(rcc, "RCC_AHB1RSTR");
-  REQUIRE(reset != nullptr);
-  auto const bit =
-      std::ranges::find(reset->fields, std::string_view{"MDF1RST"}, &popcorn::field_desc::name);
-  REQUIRE(bit != reset->fields.end());
-  REQUIRE(r.target->mem().write(rcc.base + reset->offset, 4, 1u << bit->lsb).has_value());
-  REQUIRE(r.target->mem().write(rcc.base + reset->offset, 4, 0).has_value());
+  rcc_reset_pulse(r, "RCC_AHB1RSTR", "MDF1RST");
   CHECK(r.mic[0]->next == 128 * 7 + 81);
   r.run_until(edge_at(r.anchor, 2 + 2 * (128 * 20)));
   CHECK(r.mic[0]->next == 128 * 7 + 81);
@@ -2160,4 +2153,25 @@ TEST_CASE("a snapshot before the events at a sample's time saves the flags and r
     CHECK(again[k].pcm == samples[k + 8].pcm);
     CHECK(again[k].at == samples[k + 8].at);
   }
+}
+
+TEST_CASE("MDF1RST lowers the filter's DMA request and its IRQ line")
+{
+  {
+    stream_rig const r{true};
+    r.mic[0]->fill = 1;
+    r.sinc1(0, 0, 0, 0, dmaen);
+    r.run_until(edge_at(r.anchor, 4) + us / 4);
+    REQUIRE(r.requesting());
+    rcc_reset_pulse(r, "RCC_AHB1RSTR", "MDF1RST");
+    CHECK_FALSE(r.requesting());
+  }
+  rig const r;
+  r.write("CKGCR", (1u << 5) | 1u);
+  r.write("SITF0CR", 0x1F11);
+  r.write("DFLT0IER", 1u << 10);
+  REQUIRE(r.pending(mdf_irq));
+  rcc_reset_pulse(r, "RCC_AHB1RSTR", "MDF1RST");
+  REQUIRE(r.target->mem().write(0xe000'e280u + 4 * (mdf_irq / 32), 4, 1u << (mdf_irq % 32)));
+  CHECK_FALSE(r.pending(mdf_irq));
 }

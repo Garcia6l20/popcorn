@@ -2219,23 +2219,6 @@ TEST_CASE("an LPTIM1_CH1 pin never reaches the ADC trigger of that name, fresh o
   CHECK_FALSE(pin_high_converts(restored));
 }
 
-namespace
-{
-void adc12_reset_pulse(adc_fixture const& f)
-{
-  auto const& rcc   = f.target->peripheral("RCC").description();
-  auto const* reset = popcorn::find_register(rcc, "RCC_AHB2RSTR1");
-  REQUIRE(reset != nullptr);
-  auto const bit =
-      std::ranges::find(reset->fields, std::string_view{"ADC12RST"}, &popcorn::field_desc::name);
-  REQUIRE(bit != reset->fields.end());
-  for(std::uint32_t const value : {std::uint32_t{1} << bit->lsb, std::uint32_t{0}})
-  {
-    REQUIRE(f.target->mem().write(rcc.base + reset->offset, 4, value).has_value());
-  }
-}
-}
-
 TEST_CASE(
     "ADC12RST mid-conversion drops the end event and the EOC line, the stale end does nothing")
 {
@@ -2251,7 +2234,7 @@ TEST_CASE(
   f.write("ADC1", "ADC_CR", advregen | adstart);
   REQUIRE(f.cr("ADSTART") == 1);
   unpend(f);
-  adc12_reset_pulse(f);
+  rcc_reset_pulse(f, "RCC_AHB2RSTR1", "ADC12RST");
   CHECK(f.read("ADC_CR") == 0x2000'0000);
   CHECK(f.read("ADC_ISR") == 0);
   f.settle();
