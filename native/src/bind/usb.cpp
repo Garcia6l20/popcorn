@@ -86,11 +86,8 @@ template <typename Body> auto cdc_link::locked(Body&& body) const
 
 auto cdc_link::bridged_link() const -> std::unique_ptr<detail::pty_link>
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
-  return std::make_unique<detail::cdc_pty_link>(hub_, function_);
+  auto const attachments = locked([](usb::cdc_channel& channel) { return channel.attachments; });
+  return std::make_unique<detail::cdc_pty_link>(hub_, function_, attachments);
 }
 
 namespace

@@ -149,6 +149,7 @@ public:
       return;
     }
     auto const held = hub_->lock();
+    ++channel_->attachments;
     channel_->comm_interface.reset();
     channel_->ready     = false;
     channel_->in_flight = 0;
@@ -359,6 +360,7 @@ private:
   {
     channel_                 = &hub_->channel(held, static_cast<std::size_t>(s_.function));
     channel_->comm_interface = s_.comm;
+    ++channel_->attachments;
   }
 
   void send(host_context& ctx)

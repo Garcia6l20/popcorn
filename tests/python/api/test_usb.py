@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
+import fcntl
 import gc
 import logging
 import os
 import re
 import sys
+import termios
 import threading
 import time
 import tty
@@ -1403,6 +1406,39 @@ def test_a_cdc_pty_overflow_warning_reaches_a_raising_filter_off_the_machine_thr
         os.close(fd)
     assert failing.failed
     assert [str(error) for error in raised] == ["filter failed"]
+
+
+def test_a_cdc_pty_loses_its_exclusive_flag_when_the_device_detaches_or_attaches(
+    u575: popcorn.PartDescription,
+) -> None:
+    m, host = configured(u575)
+    path = m.board.pty("OTG_FS")
+
+    def hold_exclusively() -> None:
+        fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+        fcntl.ioctl(fd, termios.TIOCEXCL)
+        os.close(fd)
+        asyncio.run(m.run(for_=ms(1)))
+        with pytest.raises(OSError) as busy:
+            os.close(os.open(path, os.O_RDWR | os.O_NOCTTY))
+        assert busy.value.errno == errno.EBUSY
+
+    def reopens() -> None:
+        asyncio.run(m.run(for_=ms(1)))
+        os.close(os.open(path, os.O_RDWR | os.O_NOCTTY))
+
+    hold_exclusively()
+    asyncio.run(host.detach())
+    reopens()
+    hold_exclusively()
+    asyncio.run(host.attach())
+    asyncio.run(host.wait_configured(for_=s(2)))
+    reopens()
+    hold_exclusively()
+    asyncio.run(host.detach())
+    asyncio.run(host.attach())
+    asyncio.run(host.wait_configured(for_=s(2)))
+    reopens()
 
 
 def test_a_log_error_at_a_consuming_await_keeps_its_result(
