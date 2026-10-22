@@ -158,6 +158,11 @@ auto macro_index_handle::count() const -> std::size_t
   return index_.entries.size();
 }
 
+auto macro_index_handle::discarded_imports() const -> std::uint64_t
+{
+  return index_.discarded_imports;
+}
+
 auto read_macros(std::string const& path) -> macro_index_handle
 {
   nb::gil_scoped_release unlocked;

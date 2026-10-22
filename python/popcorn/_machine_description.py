@@ -102,11 +102,17 @@ class Elf:
         loaded: False for a symbols-only image, see `Image.elf`: its sections are never
             written to memory, while its symbols and DWARF serve the lookups, the unwinder and
             coverage.
+
+    Raises:
+        ConfigError: `path` is not a `Path`, such as a str.
     """
 
     path: Path
     name: str | None = None
     loaded: bool = True
+
+    def __post_init__(self) -> None:
+        _check_image_path(self.path)
 
     def load(self) -> Image:
         """Read the file."""
@@ -126,10 +132,16 @@ class Bin:
     Attributes:
         path: The file, an absolute path. It is read by `MachineDescription.machine`.
         at: Guest address of its first byte.
+
+    Raises:
+        ConfigError: `path` is not a `Path`, such as a str.
     """
 
     path: Path
     at: int
+
+    def __post_init__(self) -> None:
+        _check_image_path(self.path)
 
     def load(self) -> Image:
         """Read the file."""
@@ -142,9 +154,15 @@ class Hex:
 
     Attributes:
         path: The file, an absolute path. It is read by `MachineDescription.machine`.
+
+    Raises:
+        ConfigError: `path` is not a `Path`, such as a str.
     """
 
     path: Path
+
+    def __post_init__(self) -> None:
+        _check_image_path(self.path)
 
     def load(self) -> Image:
         """Read the file."""
@@ -950,6 +968,11 @@ def check_inputs(description: MachineDescription) -> None:
 
 def _plain_error(key: str, expected: str) -> ConfigError:
     return ConfigError(f"{key}: expected {expected}", key=key, expected=expected)
+
+
+def _check_image_path(path: object) -> None:
+    if not isinstance(path, Path):
+        raise _plain_error("path", f"a Path, not {type(path).__qualname__}")
 
 
 def _frozen_params(params: Mapping[str, object]) -> _FrozenMap[str, Param]:

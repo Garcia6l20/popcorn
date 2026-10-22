@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import os
 import subprocess
 import sys
@@ -654,19 +655,39 @@ def test_a_python_project_boots_and_checks_against_its_description() -> None:
             lambda: popcorn.MachineDescription(part="X", images=[], description=Path("m.json")),
             "description",
         ),
-        (
-            lambda: popcorn.MachineDescription(
-                part="X", images=[popcorn.Elf(cast(Path, str(DRIVER_ELF)))]
-            ),
-            "images[0].path",
-        ),
     ],
-    ids=["elf", "bin", "hex", "svd", "description", "str"],
+    ids=["elf", "bin", "hex", "svd", "description"],
 )
 def test_a_relative_path_is_refused(make: Callable[[], object], key: str) -> None:
     with pytest.raises(popcorn.ConfigError) as caught:
         make()
     assert caught.value.key == key
+
+
+class _FsPath(os.PathLike[str]):
+    def __fspath__(self) -> str:
+        return str(DRIVER_ELF)
+
+
+def _bin(path: Path) -> popcorn.Bin:
+    return popcorn.Bin(path, 0)
+
+
+def _replaced(path: Path) -> popcorn.Elf:
+    return dataclasses.replace(popcorn.Elf(DRIVER_ELF), path=path)
+
+
+@pytest.mark.parametrize(
+    "make", [popcorn.Elf, _bin, popcorn.Hex, _replaced], ids=["elf", "bin", "hex", "replace"]
+)
+@pytest.mark.parametrize("given", [str(DRIVER_ELF), _FsPath()], ids=["str", "pathlike"])
+def test_an_image_path_that_is_no_path_is_refused_at_construction(
+    make: Callable[[Path], object], given: object
+) -> None:
+    with pytest.raises(popcorn.ConfigError) as caught:
+        make(cast(Path, given))
+    assert caught.value.key == "path"
+    assert caught.value.expected == f"a Path, not {type(given).__qualname__}"
 
 
 def test_paths_are_kept_as_given() -> None:

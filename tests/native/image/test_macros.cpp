@@ -96,6 +96,109 @@ TEST_CASE("an import runs in place and a second import of the same unit adds not
   CHECK(scan.index.entries.size() == 2);
 }
 
+TEST_CASE("a diamond of imports runs the shared unit once per path, with no cycle")
+{
+  macro_section macros;
+  auto const    root = macros.unit();
+  macros.define("ROOT 1");
+  macros.end();
+  auto const bottom = macros.unit();
+  macros.define("BOTTOM 1");
+  macros.end();
+  auto const left = macros.unit();
+  macros.import(bottom);
+  macros.define("LEFT 1");
+  macros.end();
+  auto const right = macros.unit();
+  macros.import(bottom);
+  macros.define("RIGHT 1");
+  macros.end();
+  auto const top = macros.unit();
+  macros.import(left);
+  macros.import(right);
+  macros.end();
+
+  synthetic_info const info{
+      {{.name = "root.c", .macros = root}, {.name = "top.c", .macros = top}}
+  };
+  auto const index = read_macros(info.sections(), macros.bytes()).index;
+  for(auto const* name : {"BOTTOM", "LEFT", "RIGHT"})
+  {
+    auto const found = entries_of(index, name);
+    REQUIRE(found.size() == 1);
+    CHECK(found.front().units == std::vector<std::uint32_t>{1});
+  }
+}
+
+TEST_CASE(
+    "an import of offset 0 is skipped and counted when a compile unit's own macros start "
+    "there")
+{
+  std::uint16_t version = 5;
+  bool          is64    = false;
+  SUBCASE("DWARF 5")
+  {}
+  SUBCASE("GNU version 4")
+  {
+    version = 4;
+  }
+  SUBCASE("64-bit offsets")
+  {
+    is64 = true;
+  }
+  CAPTURE(version);
+  CAPTURE(is64);
+
+  macro_section macros;
+  auto const    first = macros.unit(version, is64, true);
+  REQUIRE(first == 0);
+  macros.define("FIRST_ONLY 1");
+  macros.import(0);
+  macros.end();
+  auto const shared = macros.unit(version, is64);
+  macros.define("SHARED 1");
+  macros.end();
+  auto const second = macros.unit(version, is64, true);
+  macros.import(0);
+  macros.import(shared);
+  macros.define("SECOND_ONLY 1");
+  macros.end();
+
+  auto const           gnu = version == 4;
+  synthetic_info const info{
+      {{.name = "second.c", .macros = second, .gnu_macros = gnu},
+       {.name = "first.c", .macros = first, .gnu_macros = gnu}}
+  };
+  auto const index = read_macros(info.sections(), macros.bytes()).index;
+  CHECK(index.units == std::vector<std::string>{"second.c", "first.c"});
+  CHECK(index.discarded_imports == 2);
+  auto const first_only = entries_of(index, "FIRST_ONLY");
+  REQUIRE(first_only.size() == 1);
+  CHECK(first_only.front().units == std::vector<std::uint32_t>{1});
+  auto const second_only = entries_of(index, "SECOND_ONLY");
+  REQUIRE(second_only.size() == 1);
+  CHECK(second_only.front().units == std::vector<std::uint32_t>{0});
+  CHECK(entries_of(index, "SHARED").size() == 1);
+  CHECK(index.entries.size() == 3);
+}
+
+TEST_CASE("an import of offset 0 runs when no compile unit's own macros start there")
+{
+  macro_section macros;
+  auto const    shared = macros.unit();
+  REQUIRE(shared == 0);
+  macros.define("AT_ZERO 1");
+  macros.end();
+  auto const root = macros.unit();
+  macros.import(0);
+  macros.end();
+  auto const index = one_unit(macros, root);
+  CHECK(index.discarded_imports == 0);
+  auto const found = entries_of(index, "AT_ZERO");
+  REQUIRE(found.size() == 1);
+  CHECK(found.front().units == std::vector<std::uint32_t>{0});
+}
+
 TEST_CASE("define_strp reads its text from .debug_str")
 {
   dwarf_bytes str;
