@@ -53,6 +53,7 @@ core_fixtures = [
             "sdk_mismatch",
             "ctor_aborts",
             "no_init",
+            "null_name",
             "throws",
             "dup_name",
             "writes_global",
@@ -86,7 +87,11 @@ records.depends(good)
 loader = add_doctest(
     "plugin-loader", [here / "test_loader.cpp"], [core], env=fixture_env, timeout=CASE_TIMEOUT
 )
-loader.depends(*core_fixtures, plugin_fixture("no_init_stm32", [stm32, good, core]))
+loader.depends(
+    *core_fixtures,
+    plugin_fixture("no_init_stm32", [stm32, good, core]),
+    plugin_fixture("no_name_stm32", [stm32, core]),
+)
 
 builtin = add_doctest(
     "plugin-builtin", [here / "test_builtin.cpp"], [core], env=fixture_env, timeout=CASE_TIMEOUT

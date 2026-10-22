@@ -21,7 +21,10 @@
                                                                                  POPCORN_ABI_SANITIZER
 
 /** @brief Defines the tag and name symbols of a hand-written fixture. */
-#define FIXTURE_TAG_AND_NAME(TAG, NAME)                                                \
-  extern "C" [[gnu::visibility("default"), gnu::used, gnu::section(".popcorn_abi")]]   \
-  char const                                           popcorn_plugin_abi_tag[] = TAG; \
-  extern "C" [[gnu::visibility("default")]] char const popcorn_plugin_name[]    = NAME
+#define FIXTURE_TAG_AND_NAME(TAG, NAME)                                                        \
+  extern "C" [[gnu::visibility("default"), gnu::used, gnu::section(".popcorn_abi")]]           \
+  char const                                     popcorn_plugin_abi_tag[] = TAG;               \
+  extern "C" [[gnu::visibility("default")]] auto popcorn_plugin_name() noexcept -> char const* \
+  {                                                                                            \
+    return NAME;                                                                               \
+  }
