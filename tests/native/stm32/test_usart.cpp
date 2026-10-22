@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <ctime>
 #include <expected>
+#include <format>
 #include <memory>
 #include <optional>
 #include <random>
@@ -3419,4 +3420,69 @@ TEST_CASE("two holds handed before either is sampled are each released at their 
           {.word = 0, .errors = isr_fe},
           {.word = 0, .errors = isr_fe}
   });
+}
+
+TEST_CASE("USART1RST mid-frame aborts the frame on the link once and sends nothing more")
+{
+  member        a{"link_tx"};
+  std::uint64_t at = 0;
+  while(a.box->posts.empty())
+  {
+    at += us_ps;
+    REQUIRE(a.to(at) == stop_reason::time);
+  }
+  auto const& posts = a.box->posts;
+  REQUIRE(posts.size() == 1);
+  REQUIRE_FALSE(posts[0].abort);
+  auto const now = a.f->target->virtual_clock().time().ps;
+  REQUIRE(now < posts[0].frame.end.ps);
+  rcc_reset_pulse(*a.f, "RCC_APB2RSTR", "USART1RST");
+  REQUIRE(posts.size() == 2);
+  CHECK(posts[1].abort);
+  CHECK(posts[1].at.ps == now);
+  CHECK((a.f->target->peripheral("USART1").peek(0) & 1u) == 0);
+  static_cast<void>(a.to(at + 1000 * us_ps));
+  CHECK(posts.size() == 2);
+  CHECK(a.box->transmissions == 0);
+}
+
+TEST_CASE("USART1RST keeps a board CTS change already queued, once")
+{
+  auto const p   = flow_rig(cr3_ctse);
+  auto const due = p->now() + 50 * us_ps;
+  p->t.r.port("USART1").set_cts(false, vtime{due});
+  auto const queued = [&] {
+    return std::ranges::count(
+        p->t.r.f->target->snapshot().data().events.pending, due, &core::event::due_ps);
+  };
+  REQUIRE(queued() == 1);
+  rcc_reset_pulse(*p->t.r.f, "RCC_APB2RSTR", "USART1RST");
+  CHECK(queued() == 1);
+}
+
+TEST_CASE("USART1RST moves the frame generation past the frame queued before it, twice")
+{
+  parity_rig                p{line_config{}};
+  std::vector<std::int64_t> seen;
+  for(int pulse = 0; pulse < 2; ++pulse)
+  {
+    p.configure(line_config{});
+    p.t.cpu("USART1", "TDR", 'a');
+    auto const before = popcorn::testing::saved_integer(*p.t.r.f, "USART1", "generation.0");
+    REQUIRE(before.has_value());
+    REQUIRE(popcorn::testing::queued_event(*p.t.r.f, 0, static_cast<std::uint64_t>(*before)));
+    seen.push_back(*before);
+    rcc_reset_pulse(*p.t.r.f, "RCC_APB2RSTR", "USART1RST");
+    for(std::size_t kind = 0; kind < 3; ++kind)
+    {
+      CAPTURE(kind);
+      auto const after =
+          popcorn::testing::saved_integer(*p.t.r.f, "USART1", std::format("generation.{}", kind));
+      REQUIRE(after.has_value());
+      CHECK(*after > 0);
+    }
+    auto const after = popcorn::testing::saved_integer(*p.t.r.f, "USART1", "generation.0");
+    CHECK(*after > *before);
+  }
+  CHECK(seen[1] > seen[0]);
 }

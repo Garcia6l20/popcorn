@@ -1,4 +1,5 @@
 #include "factories.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -269,24 +270,26 @@ struct out_fields
  */
 class otg_fs final : public dispatch_model<otg_fs, otg_fs_state>,
                      public usb::device_port,
-                     public usb_host_port
+                     public usb_host_port,
+                     public bus_reset_listener
 {
 public:
   otg_fs(model_context& ctx, peripheral_desc const& desc, std::optional<usb_host_options> wired);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
   void save(std::vector<std::byte>& out) const override;
   void load(std::span<std::byte const> in) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto on_write(
+  auto unheld_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error> override;
+      access_ctx     ctx) -> std::expected<void, bus_error>;
 
   void               attach(std::shared_ptr<usb::host_side> host) override;
   [[nodiscard]] auto pulled_up() const -> bool override;
@@ -325,6 +328,7 @@ public:
   void fifo_written(std::uint32_t old, std::uint32_t now);
 
 private:
+  void               restore_reset_values(std::optional<reset_kind> kind);
   [[nodiscard]] auto in_fields_of(std::size_t n) const -> in_fields;
   [[nodiscard]] auto out_fields_of(std::size_t n) const -> out_fields;
   [[nodiscard]] auto b_valid() const -> bool;
@@ -633,11 +637,22 @@ auto otg_fs::out_fields_of(std::size_t n) const -> out_fields
   };
 }
 
-void otg_fs::reset(register_file& regs, reset_kind kind)
+void otg_fs::reset(register_file&, reset_kind kind)
+{
+  restore_reset_values(kind);
+}
+
+void otg_fs::on_bus_reset()
+{
+  restore_unclaimed_storage();
+  restore_reset_values(std::nullopt);
+}
+
+void otg_fs::restore_reset_values(std::optional<reset_kind> kind)
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
   auto const generation = state_.generation;
   auto const pulled     = state_.pulled_up;
@@ -957,7 +972,7 @@ auto otg_fs::on_read(register_file& regs, std::uint32_t offset, std::uint8_t siz
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
 
-auto otg_fs::on_write(
+auto otg_fs::unheld_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -967,7 +982,7 @@ auto otg_fs::on_write(
 {
   access_offset_ = offset & ~3u;
   written_       = merge_write(0, offset, size, value);
-  return dispatch_model::on_write(regs, offset, size, old, value, ctx);
+  return bound_write(regs, offset, size, old, value, ctx);
 }
 
 void otg_fs::plain_written(std::uint32_t, std::uint32_t)

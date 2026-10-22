@@ -1499,3 +1499,53 @@ TEST_CASE("the virtual host enumerates the OTG_FS model run by a register-level 
   CHECK(results[0].data == firmware_device());
   CHECK(again.requests.size() == 1);
 }
+
+TEST_CASE("OTGRST releases the pull-up, the host sees the detach, and the device enumerates again")
+{
+  rig const r;
+  r.enumerate();
+  REQUIRE(r.port().setup(0, get_device_descriptor, r.now()) == usb::handshake::ack);
+  rcc_reset_pulse(*r.f, "RCC_AHB2RSTR1", "OTGRST");
+  CHECK_FALSE(r.port().pulled_up());
+  REQUIRE(r.host->changes.size() == 2);
+  CHECK_FALSE(r.host->changes[1].first);
+  CHECK(r.get("GINTSTS", "RXFLVL") == 0);
+  r.enumerate();
+  CHECK(r.port().pulled_up());
+  CHECK(r.port().setup(0, get_device_descriptor, r.now()) == usb::handshake::ack);
+}
+
+TEST_CASE("OTGRST moves every event generation past the events queued before it, twice")
+{
+  rig const                 r;
+  std::vector<std::int64_t> seen;
+  for(int pulse = 0; pulse < 2; ++pulse)
+  {
+    r.connect();
+    r.port().bus_reset(r.now());
+    std::array<std::int64_t, 4> before{};
+    bool                        queued = false;
+    for(std::size_t kind = 0; kind < before.size(); ++kind)
+    {
+      auto const value =
+          popcorn::testing::saved_integer(*r.f, "OTG_FS", std::format("generation.{}", kind));
+      REQUIRE(value.has_value());
+      before[kind] = *value;
+      queued       = queued
+                  or popcorn::testing::queued_event(
+                         *r.f, static_cast<std::uint32_t>(kind), static_cast<std::uint64_t>(*value));
+    }
+    REQUIRE(queued);
+    seen.push_back(before[0]);
+    rcc_reset_pulse(*r.f, "RCC_AHB2RSTR1", "OTGRST");
+    for(std::size_t kind = 0; kind < before.size(); ++kind)
+    {
+      CAPTURE(kind);
+      auto const after =
+          popcorn::testing::saved_integer(*r.f, "OTG_FS", std::format("generation.{}", kind));
+      REQUIRE(after.has_value());
+      CHECK(*after > before[kind]);
+    }
+  }
+  CHECK(seen[1] > seen[0]);
+}

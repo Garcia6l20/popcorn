@@ -1,5 +1,6 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
+#include "kernel_gate.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -339,23 +340,26 @@ struct lock
  *        reset ends every hold: nothing after it, and a later release is ignored. Host frames
  *        keep their own path during a hold, a linked UART takes none.
  */
-class usart final : public dispatch_model<usart, usart_state>, public uart_link_port
+class usart final : public dispatch_model<usart, usart_state>,
+                    public uart_link_port,
+                    public bus_reset_listener
 {
 public:
   usart(model_context& ctx, peripheral_desc const& desc, std::shared_ptr<uart_endpoint> far_end);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
   void load(std::span<std::byte const> in) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto on_write(
+  auto unheld_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
       std::uint32_t  old,
       std::uint32_t  value,
-      access_ctx     ctx) -> std::expected<void, bus_error> override;
+      access_ctx     ctx) -> std::expected<void, bus_error>;
 
   void               receive_frames(std::span<host_frame const> frames) override;
   [[nodiscard]] auto queued() const -> std::size_t override;
@@ -376,6 +380,7 @@ public:
   void plain_written(std::uint32_t old, std::uint32_t now);
 
 private:
+  void               restore_reset_values();
   [[nodiscard]] auto name_of(std::string_view with_views, std::string_view plain) const
       -> std::string_view;
   [[nodiscard]] auto enabled() const -> bool;
@@ -629,7 +634,7 @@ usart::usart(
   }
 }
 
-auto usart::on_write(
+auto usart::unheld_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -641,13 +646,13 @@ auto usart::on_write(
   auto const found = std::ranges::find(locks_, word, &lock::offset);
   if(found == locks_.end() or access.by == initiator::debugger or not enabled())
   {
-    return dispatch_model::on_write(regs, offset, size, old, value, access);
+    return bound_write(regs, offset, size, old, value, access);
   }
   auto const stored = regs.peek(word);
   auto const merged = merge_write(stored, offset, size, value);
   if(word == enable_.offset and enable_.of(merged) == 0)
   {
-    return dispatch_model::on_write(regs, offset, size, old, value, access);
+    return bound_write(regs, offset, size, old, value, access);
   }
   auto mask = found->mask;
   if(auto_baud_mode_ and word == auto_baud_mode_->offset and auto_baud_->of(stored) != 0)
@@ -675,7 +680,7 @@ auto usart::on_write(
       throw model_error(desc_.name, found->reg, word);
     }
   }
-  return dispatch_model::on_write(regs, word, 4, old, kept, access);
+  return bound_write(regs, word, 4, old, kept, access);
 }
 
 auto usart::name_of(std::string_view with_views, std::string_view plain) const -> std::string_view
@@ -683,11 +688,32 @@ auto usart::name_of(std::string_view with_views, std::string_view plain) const -
   return has_register(with_views) ? with_views : plain;
 }
 
-void usart::reset(register_file& regs, reset_kind)
+void usart::reset(register_file&, reset_kind)
+{
+  restore_reset_values();
+  auto const base = board_base();
+  for(auto const& change : std::span{state_.cts_changes}.subspan(state_.cts_fired))
+  {
+    auto const due = change.board_ps > base ? change.board_ps - base : 0;
+    ctx_.events.schedule_at(vtime{due}, cts_due, change.id, core::host_lane, ctx_.clock);
+  }
+}
+
+void usart::on_bus_reset()
+{
+  if(state_.shifting and far_end_)
+  {
+    far_end_->aborted(ctx_.clock.time());
+  }
+  restore_unclaimed_storage();
+  restore_reset_values();
+}
+
+void usart::restore_reset_values()
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
   for(auto& generation : state_.generation)
   {
@@ -706,12 +732,6 @@ void usart::reset(register_file& regs, reset_kind)
   state_.tx_end_ps        = 0;
   state_.idle_pending     = false;
   state_.cts_hold_from_ps = 0;
-  auto const base         = board_base();
-  for(auto const& change : std::span{state_.cts_changes}.subspan(state_.cts_fired))
-  {
-    auto const due = change.board_ps > base ? change.board_ps - base : 0;
-    ctx_.events.schedule_at(vtime{due}, cts_due, change.id, core::host_lane, ctx_.clock);
-  }
   tx_dma_.resolve();
   rx_dma_.resolve();
   flags();
