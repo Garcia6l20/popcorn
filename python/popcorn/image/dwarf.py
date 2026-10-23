@@ -15,12 +15,14 @@ parse failure becomes a single `DebugInfoError` naming the path, never a raw exc
 from __future__ import annotations
 
 import bisect
+import contextlib
 import functools
+import gc
 import os
 import posixpath
 import struct
 import threading
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Generator, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -1240,14 +1242,61 @@ def _load(path: Path) -> DebugInfo:
         raise DebugInfoError(f"{path}: malformed DWARF: {exc!r}") from exc
 
 
+class _CollectorPause:
+    """Keeps the cyclic collector off while any thread parses DWARF. A parse allocates close to
+    a million objects that live as long as the cache entry, and with the collector on it ran 3
+    full collections over them, 2 s of a 5.3 s parse of two firmware images. The first thread
+    in records whether the collector ran, the last one out restores that."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._depth = 0
+        self._was_enabled = False
+
+    @contextlib.contextmanager
+    def held(self) -> Generator[None]:
+        with self._lock:
+            if self._depth == 0:
+                self._was_enabled = gc.isenabled()
+                gc.disable()
+            self._depth += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._depth -= 1
+                if self._depth == 0 and self._was_enabled:
+                    gc.enable()
+
+
+_collector_pause = _CollectorPause()
+
+
 @functools.lru_cache(maxsize=4)
 def _load_cached(resolved: str, mtime_ns: int, size: int) -> DebugInfo:
-    return _load(Path(resolved))
+    with _collector_pause.held():
+        return _load(Path(resolved))
+
+
+@functools.lru_cache(maxsize=64)
+def _resolved(path: str, cwd: str, inode: int, mtime_ns: int) -> Path:
+    return Path(cwd, path).resolve()
 
 
 def load_debug_info(elf: Path) -> DebugInfo:
-    resolved = Path(elf).resolve()
+    """The DWARF of the ELF file `elf`, cached by its resolved path, modification time and
+    size. The resolution of `elf` is cached by the path, the working directory for a relative
+    one, and the inode and modification time of `elf` itself, so a symlink retargeted or a file
+    replaced is resolved again. A symlinked directory above it that changes target is not.
+
+    Raises:
+        DebugInfoError: `elf` cannot be read, or holds no DWARF popcorn reads.
+    """
+    path = os.fspath(elf)
     try:
+        link = os.lstat(path)
+        cwd = "" if os.path.isabs(path) else os.getcwd()
+        resolved = _resolved(path, cwd, link.st_ino, link.st_mtime_ns)
         stat = resolved.stat()
     except OSError as exc:
         raise DebugInfoError(f"{elf}: {exc}") from exc

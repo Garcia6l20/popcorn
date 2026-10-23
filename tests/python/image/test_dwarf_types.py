@@ -8,9 +8,11 @@ and `-ex "info address <fn>"` against the same committed ELF.
 
 from __future__ import annotations
 
+import gc
 import posixpath
 import shutil
 import subprocess
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
@@ -31,6 +33,7 @@ from popcorn.image import (
     Qualifier,
     StructType,
     Typedef,
+    dwarf,
     load_debug_info,
 )
 from popcorn.image.dwarf import address_from_ranges
@@ -290,6 +293,97 @@ def test_stripped_elf_raises(tmp_path: Path) -> None:
 
 def test_second_load_returns_same_object() -> None:
     assert load_debug_info(ELF_PATH) is load_debug_info(ELF_PATH)
+
+
+def test_repeated_loads_resolve_the_path_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copy = tmp_path / "copy.elf"
+    shutil.copyfile(ELF_PATH, copy)
+    resolve = Path.resolve
+    calls: list[Path] = []
+
+    def counting(self: Path, strict: bool = False) -> Path:
+        calls.append(self)
+        return resolve(self, strict)
+
+    monkeypatch.setattr(Path, "resolve", counting)
+    first = load_debug_info(copy)
+    for _ in range(100):
+        assert load_debug_info(copy) is first
+    assert len(calls) == 1
+
+
+def test_a_parse_runs_with_the_collector_off_and_restores_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parse = dwarf._load  # pyright: ignore[reportPrivateUsage]
+    seen: list[bool] = []
+
+    def watched(path: Path) -> DebugInfo:
+        seen.append(gc.isenabled())
+        return parse(path)
+
+    monkeypatch.setattr(dwarf, "_load", watched)
+    for index, enabled in enumerate((True, False)):
+        copy = tmp_path / f"collector-{index}.elf"
+        shutil.copyfile(ELF_PATH, copy)
+        if enabled:
+            gc.enable()
+        else:
+            gc.disable()
+        try:
+            load_debug_info(copy)
+            assert gc.isenabled() is enabled
+        finally:
+            gc.enable()
+    assert seen == [False, False]
+
+
+def test_overlapping_parses_restore_the_collector_once_both_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parse = dwarf._load  # pyright: ignore[reportPrivateUsage]
+    inside = threading.Barrier(2)
+    first_done = threading.Event()
+    during_second: list[bool] = []
+
+    def watched(path: Path) -> DebugInfo:
+        inside.wait(timeout=30)
+        if path.name == "first.elf":
+            info = parse(path)
+            first_done.set()
+            return info
+        first_done.wait(timeout=30)
+        during_second.append(gc.isenabled())
+        return parse(path)
+
+    monkeypatch.setattr(dwarf, "_load", watched)
+    paths = [tmp_path / "first.elf", tmp_path / "second.elf"]
+    for path in paths:
+        shutil.copyfile(ELF_PATH, path)
+    assert gc.isenabled()
+    threads = [threading.Thread(target=load_debug_info, args=(path,)) for path in paths]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert during_second == [False]
+    assert gc.isenabled()
+
+
+def test_a_retargeted_symlink_loads_its_new_target(tmp_path: Path) -> None:
+    a = tmp_path / "a.elf"
+    b = tmp_path / "b.elf"
+    shutil.copyfile(ELF_PATH, a)
+    shutil.copyfile(ELF_PATH, b)
+    link = tmp_path / "link.elf"
+    link.symlink_to(a)
+    assert load_debug_info(link) is load_debug_info(a)
+    link.unlink()
+    link.symlink_to(b)
+    assert load_debug_info(link) is load_debug_info(b)
+    assert load_debug_info(b) is not load_debug_info(a)
 
 
 def test_strip_raises_on_cycle() -> None:
