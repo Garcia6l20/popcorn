@@ -982,7 +982,7 @@ auto tim::optional_field(std::string_view reg, std::string_view bits) const
   return field(reg, bits);
 }
 
-auto tim::now_ps() const -> std::uint64_t
+[[gnu::hot]] auto tim::now_ps() const -> std::uint64_t
 {
   return state_.held != 0 ? state_.held_ps : ctx_.clock.time().ps;
 }
@@ -992,7 +992,7 @@ auto tim::center() const -> bool
   return center_mode_ and get(regs_, *center_mode_) != 0;
 }
 
-auto tim::counting_up() const -> bool
+[[gnu::hot]] auto tim::counting_up() const -> bool
 {
   if(center())
   {
@@ -1011,7 +1011,7 @@ auto tim::counting() const -> bool
   return running() and state_.hz != 0;
 }
 
-auto tim::running() const -> bool
+[[gnu::hot]] auto tim::running() const -> bool
 {
   return active() and internally_clocked();
 }
@@ -1136,7 +1136,7 @@ auto tim::ticks_in(wide span) const -> std::uint64_t
   return unit_divisor_.quotient(span);
 }
 
-auto tim::ticks_to_wrap() const -> std::uint64_t
+[[gnu::hot]] auto tim::ticks_to_wrap() const -> std::uint64_t
 {
   std::uint64_t const count  = state_.count;
   std::uint64_t const reload = state_.reload;
@@ -1283,7 +1283,7 @@ auto tim::trgo_wanted(std::uint32_t mode) -> bool
   return trgo_ and master_mode() == mode and trgo_->wanted();
 }
 
-auto tim::at_ps(wide at) const -> std::uint64_t
+[[gnu::hot]] auto tim::at_ps(wide at) const -> std::uint64_t
 {
   if(state_.hz == 0) [[unlikely]]
   {
@@ -1333,7 +1333,7 @@ void tim::advance(std::uint64_t ticks)
   state_.anchor_frac = static_cast<std::uint64_t>(at % state_.hz);
 }
 
-void tim::visit(std::uint64_t ticks, std::optional<std::uint64_t> at)
+[[gnu::hot]] void tim::visit(std::uint64_t ticks, std::optional<std::uint64_t> at)
 {
   if(ticks == 0)
   {
@@ -1445,7 +1445,7 @@ void tim::skip_groups(std::uint64_t groups)
   }
 }
 
-void tim::catch_up(std::uint64_t ps)
+[[gnu::hot]] void tim::catch_up(std::uint64_t ps)
 {
   reacting_scope const reacting{reacting_};
   while(counting())
@@ -1688,7 +1688,7 @@ void tim::transfer_completed(dma_controller const& by, std::uint32_t request)
   static_cast<void>(request);
 }
 
-void tim::settle()
+[[gnu::hot]] void tim::settle()
 {
   auto counter = (regs_.peek(counter_.offset) & ~mask_) | state_.count;
   if(copy_)
@@ -2289,8 +2289,9 @@ void tim::restore_reset_values()
   }
 }
 
-auto tim::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
-    -> std::expected<std::uint32_t, bus_error>
+[[gnu::hot]] auto
+    tim::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
+        -> std::expected<std::uint32_t, bus_error>
 {
   catch_up(now_ps());
   settle();
