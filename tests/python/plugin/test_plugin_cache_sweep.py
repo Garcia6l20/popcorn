@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import json
 import os
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import cast
 
 import pytest
-from popcorn.pytest._cache import Entry, sweep
+from popcorn.pytest._cache import Entry, locked, sweep
 
 from .helpers import write_conftest, write_project
 
@@ -182,9 +184,11 @@ def test_an_xdist_worker_does_not_sweep(pytester: pytest.Pytester) -> None:
     rewrite(entry, native="0" * 64)
     conftest = pytester.path / "conftest.py"
     conftest.write_text(
-        conftest.read_text() + "\n\ndef pytest_configure(config):\n    config.workerinput = {}\n"
+        conftest.read_text()
+        + "\n\ndef pytest_configure(config):\n"
+        + "    config.workerinput = {}\n    config.workeroutput = {}\n"
     )
-    run(pytester)
+    run(pytester).assert_outcomes(passed=1)
     assert survives(entry)
 
 
@@ -195,3 +199,87 @@ def test_the_controller_sweeps_under_xdist(pytester: pytest.Pytester) -> None:
     result = pytester.runpytest_subprocess(*BASE, "-n", "2", timeout=60)
     result.assert_outcomes(passed=1)
     assert not survives(entry)
+
+
+def test_a_corrupt_entry_is_deleted(pytester: pytest.Pytester) -> None:
+    entry = booted(pytester)
+    entry.info.write_text("{not json")
+    assert sweep(entry.info.parent, 7) == 1
+    assert not survives(entry)
+
+
+def test_entries_sharing_an_image_go_together(pytester: pytest.Pytester) -> None:
+    entry = booted(pytester)
+    twin = Entry.of(entry.info.parent, "4" * 64)
+    shutil.copyfile(entry.snapshot, twin.snapshot)
+    shutil.copyfile(entry.info, twin.info)
+    path = json.loads(entry.info.read_text())["inputs"]["images"][0][0]
+    for one in (entry, twin):
+        rewrite(one, images=[[path, "f" * 64]])
+    assert sweep(entry.info.parent, 7) == 2
+    assert not survives(entry) and not survives(twin)
+
+
+def test_orphan_files_expire(pytester: pytest.Pytester) -> None:
+    entry = booted(pytester)
+    directory = entry.info.parent
+    orphans = [directory / f"{'5' * 64}.{suffix}" for suffix in ("snap", "lock", "snap.tmp.1")]
+    for orphan in orphans:
+        orphan.write_bytes(b"x")
+    assert sweep(directory, 7) == 0
+    assert all(orphan.exists() for orphan in orphans)
+    then = time.time() - 8 * DAY
+    for orphan in orphans:
+        os.utime(orphan, (then, then))
+    assert sweep(directory, 7) == 1
+    assert not any(orphan.exists() for orphan in orphans)
+    assert survives(entry)
+
+
+def test_a_session_without_a_cache_directory_creates_none(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    pytester.makepyfile("def test_nothing():\n    pass\n")
+    run(pytester).assert_outcomes(passed=1)
+    assert not (pytester.path / ".pytest_cache" / "d" / "popcorn").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_a_read_only_cache_does_not_fail_the_session(pytester: pytest.Pytester) -> None:
+    entry = booted(pytester)
+    rewrite(entry, native="0" * 64)
+    directory = entry.info.parent
+    directory.chmod(0o555)
+    try:
+        run(pytester).assert_outcomes(passed=1)
+        assert sweep(directory, 7) == 0
+        assert survives(entry)
+    finally:
+        directory.chmod(0o755)
+
+
+def test_a_waiter_on_a_removed_lock_holds_the_new_file(tmp_path: Path) -> None:
+    entry = Entry.of(tmp_path, "6" * 64)
+    holder = os.open(entry.lock, os.O_RDWR | os.O_CREAT)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def wait() -> None:
+        async with locked(entry):
+            entered.set()
+            await asyncio.to_thread(release.wait, 10)
+
+    thread = threading.Thread(target=lambda: asyncio.run(wait()))
+    thread.start()
+    time.sleep(0.3)
+    entry.lock.unlink()
+    os.close(holder)
+    assert entered.wait(5)
+    probe = os.open(entry.lock, os.O_RDWR | os.O_CREAT)
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(probe)
+        release.set()
+        thread.join()

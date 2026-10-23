@@ -26,7 +26,7 @@ from popcorn.pytest._cache import (
     devices_digest,
     locked,
     recorded_inputs,
-    sweep,
+    sweep_directory,
 )
 from popcorn.pytest._loop import OwnedLoop, owned_loop
 from popcorn.pytest._options import SETTINGS, Settings
@@ -566,11 +566,15 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     """Park the machines, collect their coverage, close their pty bridges and hand the counters
     to the xdist controller."""
     config = session.config
-    if not hasattr(config, "workerinput"):
-        directory = cache_directory(config)
-        if directory is not None:
-            sweep(directory, config.stash[SETTINGS].cache_max_age_days)
-    state = config.stash.get(SESSION, None)
+    try:
+        _finish(session)
+    finally:
+        if not hasattr(config, "workerinput"):
+            sweep_directory(config, config.stash[SETTINGS].cache_max_age_days)
+
+
+def _finish(session: pytest.Session) -> None:
+    state = session.config.stash.get(SESSION, None)
     if state is None:
         return
     state.park()

@@ -111,4 +111,5 @@ popcorn_cache_max_age_days = 14
 ```
 
 The default is 7 days and 0 disables the age limit. Under xdist only the controller sweeps, and
-an entry another process is booting or restoring is left for the next session.
+an entry another process is booting or restoring is left for the next session. Files of a key
+without a json, such as partial writes, are deleted once older than the age limit.

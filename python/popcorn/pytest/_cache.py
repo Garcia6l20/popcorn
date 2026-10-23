@@ -56,8 +56,8 @@ def _file_digest(path: Path) -> str:
 
 def recorded_inputs(project: MachineDescription) -> dict[str, object]:
     """The checkable inputs of a boot of `project`: the popcorn version, the native extension
-    digest, and the path and file digest of each image. A sweep compares them to the current
-    values."""
+    digest, and the absolute path and file digest of each image. A sweep compares them to the
+    current values from any working directory."""
     return {
         "version": popcorn.version(),
         "native": _extension_digest(),
@@ -399,12 +399,27 @@ async def locked(entry: Entry) -> AsyncGenerator[None]:
     One process never takes it twice for one key: the session's per-key `asyncio.Lock` orders
     its boots first. `flock` is unreliable on NFS: a cache directory there may boot a key twice.
     """
-    descriptor = os.open(entry.lock, os.O_RDWR | os.O_CREAT, 0o644)
+    while True:
+        descriptor = os.open(entry.lock, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            await asyncio.to_thread(fcntl.flock, descriptor, fcntl.LOCK_EX)
+            if _names_file(descriptor, entry.lock):
+                break
+        except BaseException:
+            os.close(descriptor)
+            raise
+        os.close(descriptor)
     try:
-        await asyncio.to_thread(fcntl.flock, descriptor, fcntl.LOCK_EX)
         yield
     finally:
         os.close(descriptor)
+
+
+def _names_file(descriptor: int, path: Path) -> bool:
+    try:
+        return os.fstat(descriptor).st_ino == os.stat(path).st_ino
+    except FileNotFoundError:
+        return False
 
 
 def cache_directory(config: pytest.Config) -> Path | None:
@@ -424,7 +439,7 @@ def _current_digest(path: str, digests: dict[str, str | None]) -> str | None:
     return digests[path]
 
 
-def _is_stale(info: Path, digests: dict[str, str | None]) -> bool:
+def _is_stale(info: Path, digests: dict[str, str | None], version: str, native: str) -> bool:
     try:
         recorded: object = json.loads(info.read_text()).get("inputs")
     except OSError, ValueError, AttributeError:
@@ -432,7 +447,7 @@ def _is_stale(info: Path, digests: dict[str, str | None]) -> bool:
     if not isinstance(recorded, dict):
         return True
     fields = cast(dict[str, object], recorded)
-    if fields.get("version") != popcorn.version() or fields.get("native") != _extension_digest():
+    if fields.get("version") != version or fields.get("native") != native:
         return True
     images = fields.get("images")
     if not isinstance(images, list):
@@ -447,7 +462,10 @@ def _is_stale(info: Path, digests: dict[str, str | None]) -> bool:
 
 
 def _try_lock(path: Path) -> int | None:
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        return None
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -456,18 +474,69 @@ def _try_lock(path: Path) -> int | None:
     return descriptor
 
 
+def sweep_directory(config: pytest.Config, max_age_days: int) -> int:
+    """Sweep the boot cache of `config` when it exists and return how many entries went.
+
+    A cache directory that cannot be read or written is left as it is.
+    """
+    cache: object = getattr(config, "cache", None)
+    if not isinstance(cache, pytest.Cache):
+        return 0
+    root = Path(cast(str, vars(cache)["_cachedir"]))
+    try:
+        return sweep(root / "d" / "popcorn" / "boot", max_age_days)
+    except OSError:
+        return 0
+
+
+def _sweep_orphans(directory: Path, max_age_days: int, moment: float) -> int:
+    limit = (max_age_days if max_age_days > 0 else 1) * 86400
+    groups: dict[str, list[Path]] = {}
+    for path in directory.iterdir():
+        stem = path.name.split(".", 1)[0]
+        if (directory / f"{stem}.json").exists():
+            continue
+        groups.setdefault(stem, []).append(path)
+    removed = 0
+    for stem, paths in sorted(groups.items()):
+        try:
+            if moment - max(path.stat().st_mtime for path in paths) <= limit:
+                continue
+        except OSError:
+            continue
+        entry = Entry.of(directory, stem)
+        held = _try_lock(entry.lock)
+        if held is None:
+            continue
+        try:
+            if entry.info.exists():
+                continue
+            for path in paths:
+                path.unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            continue
+        finally:
+            os.close(held)
+    return removed
+
+
 def sweep(directory: Path, max_age_days: int, now: float | None = None) -> int:
     """Delete the entries of `directory` that can no longer hit and return how many.
 
     An entry goes when its recorded popcorn version or native extension digest differs from the
     current one, when an image it was booted from is missing or has another digest, when it
     records no inputs, or, with `max_age_days` above 0, when it was last used more than
-    `max_age_days` days before `now`. An entry whose lock another process holds is kept.
+    `max_age_days` days before `now`. Files of a key without a json, partial writes and locks
+    included, go once they are older than the age limit, or one day without a limit. An entry
+    whose lock another process holds is kept, and so is one the process cannot modify.
     """
     if not directory.is_dir():
         return 0
     moment = time.time() if now is None else now
     digests: dict[str, str | None] = {}
+    version = popcorn.version()
+    native = _extension_digest()
     removed = 0
     for info in sorted(directory.glob("*.json")):
         entry = Entry.of(directory, info.stem)
@@ -480,11 +549,13 @@ def sweep(directory: Path, max_age_days: int, now: float | None = None) -> int:
             except OSError:
                 continue
             expired = max_age_days > 0 and age > max_age_days * 86400
-            if expired or _is_stale(info, digests):
+            if expired or _is_stale(info, digests, version, native):
                 entry.drop()
                 entry.info.unlink(missing_ok=True)
                 entry.lock.unlink(missing_ok=True)
                 removed += 1
+        except OSError:
+            continue
         finally:
             os.close(held)
-    return removed
+    return removed + _sweep_orphans(directory, max_age_days, moment)
