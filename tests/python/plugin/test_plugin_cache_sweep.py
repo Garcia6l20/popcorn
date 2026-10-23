@@ -13,8 +13,12 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from popcorn.pytest import _cache
-from popcorn.pytest._cache import Entry, locked, sweep
+from popcorn.pytest._cache import (  # pyright: ignore[reportPrivateUsage]
+    Entry,
+    _try_lock,  # pyright: ignore[reportPrivateUsage]
+    locked,
+    sweep,
+)
 
 from .helpers import write_conftest, write_project
 
@@ -281,8 +285,8 @@ def test_a_sweeper_whose_lock_was_removed_backs_off(
         entry.lock.unlink()
         flock(descriptor, operation)
 
-    monkeypatch.setattr(_cache.fcntl, "flock", unlinking)
-    assert _cache._try_lock(entry.lock) is None  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(fcntl, "flock", unlinking)
+    assert _try_lock(entry.lock) is None
 
 
 def test_a_removed_orphan_group_leaves_no_lock(tmp_path: Path) -> None:
