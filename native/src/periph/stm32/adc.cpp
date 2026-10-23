@@ -176,6 +176,11 @@ class adc_common final : public dispatch_model<adc_common, adc_common_state>,
                          public bus_reset_listener
 {
 public:
+  [[nodiscard]] auto role_in_horizon() const noexcept -> wake_role override
+  {
+    return wake_role::trigger;
+  }
+
   adc_common(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;
@@ -359,6 +364,11 @@ class adc final : public dispatch_model<adc, adc_state>,
                   public bus_reset_listener
 {
 public:
+  [[nodiscard]] auto role_in_horizon() const noexcept -> wake_role override
+  {
+    return wake_role::trigger;
+  }
+
   adc(model_context& ctx, peripheral_desc const& desc, supply_options supply);
 
   void               reset(register_file& regs, reset_kind kind) override;

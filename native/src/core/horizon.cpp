@@ -1,0 +1,333 @@
+#include "machine_impl.hpp"
+
+#include <popcorn/core/errors.hpp>
+
+#include <algorithm>
+#include <cstdint>
+#include <format>
+#include <limits>
+#include <optional>
+#include <ranges>
+#include <string>
+#include <vector>
+
+namespace popcorn::core
+{
+namespace
+{
+void lower(std::optional<vtime>& bound, std::optional<vtime> value)
+{
+  if(value and (not bound or *value < *bound))
+  {
+    bound = value;
+  }
+}
+}
+
+auto machine::horizon(std::optional<icount> instructions_left) const -> core::horizon
+{
+  require_stopped(*this);
+  class horizon_reader final : public periph::quiet_query
+  {
+  public:
+    horizon_reader(machine const& owner, vtime now) : owner_{owner}, now_{now}
+    {
+      auto const& slots = owner_.peripherals_;
+      first_.resize(slots.size());
+      for(auto const& due : owner_.scheduler_.pending())
+      {
+        auto const at = time_of(due);
+        if(due.id.owner == arch::arch_event_owner)
+        {
+          if(not arch_first_ and owner_.arch_->event_pends(due.id.kind, due.payload))
+          {
+            arch_first_ = at;
+          }
+          continue;
+        }
+        lower(any_first_, at);
+        if(due.id.owner < first_.size())
+        {
+          lower(first_[due.id.owner], at);
+        }
+      }
+    }
+
+    [[nodiscard]] auto now() const -> vtime override
+    {
+      return now_;
+    }
+
+    [[nodiscard]] auto next_event(
+        periph::model const&                                        of,
+        std::function_ref<bool(std::uint32_t, std::uint64_t) const> counts) const
+        -> std::optional<vtime> override
+    {
+      auto const index = index_of(of);
+      if(not index)
+      {
+        return std::nullopt;
+      }
+      for(auto const& due : owner_.scheduler_.pending())
+      {
+        if(due.id.owner == *index and counts(due.id.kind, due.payload))
+        {
+          return time_of(due);
+        }
+      }
+      return std::nullopt;
+    }
+
+    [[nodiscard]] auto wakes(periph::irq_line const& line) const -> bool override
+    {
+      for(auto const& slot : owner_.peripherals_)
+      {
+        if(not slot)
+        {
+          continue;
+        }
+        if(&line == &slot->nmi)
+        {
+          return true;
+        }
+        if(auto const* const first = slot->irqs.data();
+           &line >= first and &line < first + slot->irqs.size())
+        {
+          return wakes_source(slot->irq_numbers[static_cast<std::size_t>(&line - first)]);
+        }
+      }
+      return true;
+    }
+
+    [[nodiscard]] auto wakes(periph::model const& of) const -> bool override
+    {
+      auto const index = index_of(of);
+      return index and wakes_slot(*index);
+    }
+
+    [[nodiscard]] auto python_at(address at) const -> bool override
+    {
+      auto const index = unit_at(at);
+      return index and python(*index);
+    }
+
+    [[nodiscard]] auto peripheral_at(address at) const -> bool override
+    {
+      return unit_at(at).has_value();
+    }
+
+    [[nodiscard]] auto wakes_slot(std::size_t index) const -> bool
+    {
+      auto const& slot = *owner_.peripherals_[index];
+      return std::ranges::any_of(
+          slot.irq_numbers, [this](std::uint32_t source) { return wakes_source(source); });
+    }
+
+    [[nodiscard]] auto python(std::size_t index) const -> bool
+    {
+      auto const& slot = owner_.peripherals_[index];
+      return slot
+         and (slot->python_backed
+              or (slot->model and slot->model->role_in_horizon() == periph::wake_role::python));
+    }
+
+    [[nodiscard]] auto first(std::size_t index) const -> std::optional<vtime>
+    {
+      return first_[index];
+    }
+
+    [[nodiscard]] auto arch_first() const -> std::optional<vtime>
+    {
+      return arch_first_;
+    }
+
+    [[nodiscard]] auto any_first() const -> std::optional<vtime>
+    {
+      return any_first_;
+    }
+
+    [[nodiscard]] auto raised(std::optional<vtime> value) const -> std::optional<vtime>
+    {
+      return value ? std::optional{std::max(*value, now_)} : std::nullopt;
+    }
+
+  private:
+    [[nodiscard]] auto time_of(event const& due) const -> vtime
+    {
+      auto const at =
+          due.kind == deadline::time ? vtime{due.due_ps} : owner_.clock_driver_.time_at(due.at);
+      return std::max(at, now_);
+    }
+
+    [[nodiscard]] auto index_of(periph::model const& of) const -> std::optional<std::uint32_t>
+    {
+      for(auto const& [index, slot] : std::views::enumerate(owner_.peripherals_))
+      {
+        if(slot and slot->model.get() == &of)
+        {
+          return static_cast<std::uint32_t>(index);
+        }
+      }
+      return std::nullopt;
+    }
+
+    [[nodiscard]] auto unit_at(address at) const -> std::optional<std::uint32_t>
+    {
+      auto const& units = owner_.description_.peripherals;
+      for(auto const& unit : units)
+      {
+        if(at >= unit.base and std::uint64_t{at} < std::uint64_t{unit.base} + unit.size)
+        {
+          return owner_.run_->serving(unit.name);
+        }
+      }
+      return std::nullopt;
+    }
+
+    [[nodiscard]] auto wakes_source(std::uint32_t source) const -> bool
+    {
+      if(source >= wake_memo_.size())
+      {
+        wake_memo_.resize(source + 1, std::int8_t{-1});
+      }
+      auto& known = wake_memo_[source];
+      if(known < 0)
+      {
+        known = owner_.arch_->may_wake(source) ? 1 : 0;
+      }
+      return known != 0;
+    }
+
+    machine const&                    owner_;
+    vtime                             now_;
+    std::vector<std::optional<vtime>> first_{};
+    std::optional<vtime>              arch_first_{};
+    std::optional<vtime>              any_first_{};
+    mutable std::vector<std::int8_t>  wake_memo_{};
+  };
+
+  auto const           now = clock_driver_.exact_time();
+  horizon_reader const reader{*this, now};
+  core::horizon        out;
+  auto const&          wires   = run_->transmit_wires;
+  auto const           held    = run_->core_held;
+  auto const           idle    = not held and arch_->idle();
+  auto const           looping = not held and not idle and arch_->self_branch(arch_->pc());
+  out.asleep                   = held or ((idle or looping) and not arch_->wake_pending());
+
+  std::optional<vtime>              stop;
+  std::optional<vtime>              wake;
+  std::optional<vtime>              transmit_all;
+  std::vector<std::optional<vtime>> transmit(wires.size());
+  if(not run_->watches.empty())
+  {
+    lower(stop, reader.any_first());
+  }
+  if(out.asleep and looping and instructions_left)
+  {
+    auto const last = icount{clock_driver_.exact_now().value + instructions_left->value};
+    lower(stop, std::max(clock_driver_.time_at(last), now));
+  }
+  if(out.asleep and not held)
+  {
+    lower(wake, reader.arch_first());
+  }
+  for(auto const& [at, slot] : std::views::enumerate(peripherals_))
+  {
+    if(not slot or not slot->model)
+    {
+      continue;
+    }
+    auto const  index = static_cast<std::size_t>(at);
+    auto const& model = *slot->model;
+    auto const  role  = reader.python(index) ? periph::wake_role::python : model.role_in_horizon();
+    auto const  first = reader.first(index);
+    if(role == periph::wake_role::python
+       or role == periph::wake_role::reset_source
+       or role == periph::wake_role::trigger)
+    {
+      lower(stop, first);
+    }
+    if(not out.asleep)
+    {
+      continue;
+    }
+    switch(role)
+    {
+      case periph::wake_role::python:
+      case periph::wake_role::trigger:
+        lower(wake, first);
+        lower(transmit_all, first);
+        break;
+      case periph::wake_role::reset_source:
+        lower(wake, first);
+        break;
+      case periph::wake_role::bus_master:
+      {
+        auto const quiet = reader.raised(model.quiet_until(reader));
+        lower(wake, quiet);
+        lower(transmit_all, quiet);
+        break;
+      }
+      case periph::wake_role::lines:
+      {
+        auto const waking = not held and reader.wakes_slot(index);
+        auto const sends  = std::ranges::any_of(wires, [&](std::vector<std::uint32_t> const& wire) {
+          return std::ranges::contains(wire, index);
+        });
+        if(not waking and not sends)
+        {
+          break;
+        }
+        auto const quiet = reader.raised(model.quiet_until(reader));
+        if(waking)
+        {
+          lower(wake, quiet);
+        }
+        for(auto const& [w, wire] : std::views::enumerate(wires))
+        {
+          if(std::ranges::contains(wire, index))
+          {
+            lower(transmit[static_cast<std::size_t>(w)], quiet);
+          }
+        }
+        break;
+      }
+    }
+  }
+  out.stop = stop;
+  if(out.asleep)
+  {
+    out.wake = held ? std::nullopt : wake;
+    for(auto& one : transmit)
+    {
+      lower(one, transmit_all);
+    }
+    out.transmit = std::move(transmit);
+  }
+  return out;
+}
+
+void machine::set_transmit_sources(std::vector<std::vector<std::string>> const& wires)
+{
+  require_stopped(*this);
+  std::vector<std::vector<std::uint32_t>> resolved;
+  resolved.reserve(wires.size());
+  for(auto const& wire : wires)
+  {
+    auto& indexes = resolved.emplace_back();
+    for(auto const& name : wire)
+    {
+      auto const index = run_->serving(name);
+      if(not index)
+      {
+        throw config_error(
+            description_.part, 0, "transmit_sources",
+            std::format("a peripheral of the description, not {}", name));
+      }
+      indexes.push_back(*index);
+    }
+  }
+  run_->transmit_wires = std::move(resolved);
+}
+}

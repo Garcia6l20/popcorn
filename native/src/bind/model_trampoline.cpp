@@ -50,6 +50,11 @@ class python_model final : public periph::model, public periph::bus_reset_listen
 public:
   NB_TRAMPOLINE(periph::model, 8);
 
+  [[nodiscard]] auto role_in_horizon() const noexcept -> periph::wake_role override
+  {
+    return periph::wake_role::python;
+  }
+
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
   {
     gil_entry const gil;

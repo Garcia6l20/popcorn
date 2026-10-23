@@ -306,8 +306,8 @@ auto options_of(
   auto const rcc = rcc_options_of(config);
   if(not config.python_devices.empty() or rcc)
   {
-    for(auto& [name, factory] :
-        detail::device_factories(description, config.python_devices, rcc, python_owned))
+    for(auto& [name, factory] : detail::device_factories(
+            description, config.python_devices, rcc, python_owned, options.python_backed))
     {
       if(not options.models.emplace(name, std::move(factory)).second)
       {

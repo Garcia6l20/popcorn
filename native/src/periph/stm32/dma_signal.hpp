@@ -99,6 +99,31 @@ public:
            });
   }
 
+  /**
+   * @brief What the channels of every controller serving the signal can still move: the sum of
+   *        their words and the longest answer delay. A controller that is not a dma_supplier
+   *        leaves both unbounded.
+   */
+  [[nodiscard]] auto supply() -> supply_info
+  {
+    supply_info total{.words = 0, .delay_ps = 0};
+    if(not routed())
+    {
+      return total;
+    }
+    for(auto const& route : routes_)
+    {
+      auto const* const supplier = dynamic_cast<dma_supplier const*>(route.controller);
+      auto const one = supplier != nullptr ? supplier->dma_supply(route.request) : supply_info{};
+      total.words =
+          total.words and one.words ? std::optional{*total.words + *one.words} : std::nullopt;
+      total.delay_ps = total.delay_ps and one.delay_ps
+                         ? std::optional{std::max(*total.delay_ps, *one.delay_ps)}
+                         : std::nullopt;
+    }
+    return total;
+  }
+
 private:
   struct route
   {

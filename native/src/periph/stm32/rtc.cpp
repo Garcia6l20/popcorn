@@ -188,6 +188,11 @@ class rtc final : public dispatch_model<rtc, rtc_state>,
                   public trustzone_aware
 {
 public:
+  [[nodiscard]] auto role_in_horizon() const noexcept -> wake_role override
+  {
+    return wake_role::trigger;
+  }
+
   rtc(model_context&                          ctx,
       peripheral_desc const&                  desc,
       std::optional<std::chrono::sys_seconds> initial);

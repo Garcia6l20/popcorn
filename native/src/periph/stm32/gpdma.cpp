@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <array>
+#include <bitset>
+#include <cctype>
 #include <cstdint>
 #include <deque>
 #include <expected>
@@ -27,10 +29,11 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::size_t   max_channels  = 16;
-constexpr std::size_t   requests      = 128;
-constexpr std::uint32_t burst_done    = 0;
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
+constexpr std::size_t   max_channels   = 16;
+constexpr std::size_t   requests       = 128;
+constexpr std::uint32_t burst_done     = 0;
+constexpr std::uint64_t ps_per_second  = 1'000'000'000'000;
+constexpr std::uint64_t latency_cycles = 4;
 
 struct channel_state
 {
@@ -295,6 +298,7 @@ struct transfer_cache
  */
 class gpdma final : public dispatch_model<gpdma, gpdma_state>,
                     public dma_controller,
+                    public dma_supplier,
                     public core_hold_listener,
                     public trustzone_aware,
                     public bus_reset_listener
@@ -315,6 +319,9 @@ public:
   void               load(std::span<std::byte const> in) override;
   [[nodiscard]] auto request_of(std::string_view signal) const
       -> std::optional<std::uint32_t> override;
+  [[nodiscard]] auto quiet_until(quiet_query const& query) const -> std::optional<vtime> override;
+  [[nodiscard]] auto role_in_horizon() const noexcept -> wake_role override;
+  [[nodiscard]] auto dma_supply(std::uint32_t request) const -> supply_info override;
 
   template <std::size_t Ch> void control_written(std::uint32_t old, std::uint32_t now);
   template <std::size_t Ch> void clear_written(std::uint32_t old, std::uint32_t now);
@@ -360,6 +367,19 @@ private:
   void               drop_caches();
   [[nodiscard]] auto busy_channels() const -> std::uint32_t;
   void               raise_illegal(bool raise, initiator by);
+  [[nodiscard]] auto burst_ps() const -> std::optional<std::uint64_t>;
+  [[nodiscard]] auto bursts_to_flag(std::size_t ch, quiet_query const& query, bool loud) const
+      -> std::optional<std::uint64_t>;
+  [[nodiscard]] auto data_valid(std::size_t ch) const -> bool;
+  [[nodiscard]] auto in_memory(std::uint64_t from, std::uint64_t size, bool write) const -> bool;
+  [[nodiscard]] auto feeders() const -> std::span<dma_feeder const* const>;
+  [[nodiscard]] auto quiet_data(popcorn::address at, bool write) const -> bool;
+  [[nodiscard]] auto feed_of(std::uint32_t request, quiet_query const& query) const
+      -> std::optional<feed_info>;
+  [[nodiscard]] auto requester_of(std::uint32_t request) const -> model const*;
+  [[nodiscard]] auto first_burst(std::size_t ch, quiet_query const& query) const
+      -> std::optional<std::uint64_t>;
+  [[nodiscard]] auto illegal_wakes(quiet_query const& query) const -> bool;
 
   dma_layout const&                                   layout_;
   register_file&                                      regs_;
@@ -383,6 +403,12 @@ private:
   std::optional<std::size_t>                          unit_;
   illegal_event                                       illegal_;
   std::array<transfer_cache, max_channels>            cache_{};
+  mutable std::vector<dma_feeder const*>              feeders_{};
+  mutable bool                                        feeders_resolved_{};
+  mutable std::array<model const*, requests>          requester_{};
+  mutable std::bitset<requests>                       requester_resolved_{};
+  mutable model const*                                tzic_{};
+  mutable bool                                        tzic_resolved_{};
 };
 
 template <std::size_t... Ch>
@@ -933,10 +959,9 @@ void gpdma::schedule(std::size_t ch)
     }
     return;
   }
-  constexpr std::uint64_t latency_cycles = 4;
-  auto const              ps             = latency_cycles * ps_per_second / hz;
-  s.scheduled                            = true;
-  s.due_ps                               = ctx_.clock.time().ps + ps;
+  auto const ps = latency_cycles * ps_per_second / hz;
+  s.scheduled   = true;
+  s.due_ps      = ctx_.clock.time().ps + ps;
   ctx_.events.schedule_at(
       vtime{s.due_ps}, burst_done, (static_cast<std::uint64_t>(ch) << 32) | s.generation,
       ctx_.clock);
@@ -1417,6 +1442,309 @@ void gpdma::on_core_hold(bool held)
       schedule(ch);
     }
   }
+}
+
+auto gpdma::role_in_horizon() const noexcept -> wake_role
+{
+  return wake_role::bus_master;
+}
+
+auto gpdma::burst_ps() const -> std::optional<std::uint64_t>
+{
+  auto const hz = ctx_.clock.hz(hclk_);
+  if(hz == 0)
+  {
+    return std::nullopt;
+  }
+  return std::max<std::uint64_t>(1, latency_cycles * ps_per_second / hz);
+}
+
+auto gpdma::dma_supply(std::uint32_t request) const -> supply_info
+{
+  supply_info out{.words = 0, .delay_ps = 0};
+  for(std::size_t ch = 0; ch < layout_.channels; ++ch)
+  {
+    auto const& c = ch_[ch];
+    if(not active(ch) or get(regs_, c.software) != 0 or get(regs_, c.request) != request)
+    {
+      continue;
+    }
+    auto const delay = state_.channel[ch].held != 0 ? std::nullopt : burst_ps();
+    out.delay_ps =
+        out.delay_ps and delay ? std::optional{std::max(*out.delay_ps, *delay)} : std::nullopt;
+    if(regs_.peek(c.llr.offset) != 0)
+    {
+      out.words = std::nullopt;
+    }
+    else if(out.words)
+    {
+      auto const sw   = std::uint64_t{1} << get(regs_, c.source_width);
+      auto const left = c.two_d ? std::uint64_t{get(regs_, c.two_d->repeat)} : 0;
+      *out.words += (get(regs_, c.bytes) + left * state_.channel[ch].block_bytes) / sw;
+    }
+  }
+  return out;
+}
+
+auto gpdma::in_memory(std::uint64_t from, std::uint64_t size, bool write) const -> bool
+{
+  return std::ranges::any_of(ctx_.part.regions, [&](region_desc const& region) {
+    return from >= region.start
+       and from + size <= std::uint64_t{region.start} + region.size
+       and (not write or region.kind == region_kind::ram);
+  });
+}
+
+auto gpdma::feeders() const -> std::span<dma_feeder const* const>
+{
+  if(not feeders_resolved_ and not ctx_.peers.all().empty())
+  {
+    feeders_resolved_ = true;
+    for(auto const* const peer : ctx_.peers.all())
+    {
+      if(auto const* const feeder = dynamic_cast<dma_feeder const*>(peer); feeder != nullptr)
+      {
+        feeders_.push_back(feeder);
+      }
+    }
+  }
+  return feeders_;
+}
+
+auto gpdma::quiet_data(popcorn::address at, bool write) const -> bool
+{
+  return std::ranges::any_of(
+      feeders(), [&](dma_feeder const* feeder) { return feeder->quiet_data(at, write); });
+}
+
+auto gpdma::feed_of(std::uint32_t request, quiet_query const& query) const
+    -> std::optional<feed_info>
+{
+  for(auto const* const feeder : feeders())
+  {
+    if(auto const feed = feeder->dma_feed(*this, request, query))
+    {
+      return feed;
+    }
+  }
+  return std::nullopt;
+}
+
+auto gpdma::requester_of(std::uint32_t request) const -> model const*
+{
+  if(request >= requests)
+  {
+    return nullptr;
+  }
+  if(not requester_resolved_[request] and not ctx_.peers.all().empty())
+  {
+    requester_resolved_[request] = true;
+    auto const found = std::ranges::find(layout_.requests, request, &gpdma_request::request);
+    if(found != layout_.requests.end())
+    {
+      std::string name{found->signal.substr(0, found->signal.find('_'))};
+      std::ranges::transform(
+          name, name.begin(), [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+      requester_[request] = ctx_.peers.find(name);
+    }
+  }
+  return requester_[request];
+}
+
+auto gpdma::illegal_wakes(quiet_query const& query) const -> bool
+{
+  if(not tzic_resolved_ and not ctx_.peers.all().empty())
+  {
+    tzic_resolved_ = true;
+    for(auto const* const peer : ctx_.peers.all())
+    {
+      if(dynamic_cast<illegal_access_controller const*>(peer) != nullptr)
+      {
+        tzic_ = peer;
+      }
+    }
+  }
+  return tzic_ != nullptr and query.wakes(*tzic_);
+}
+
+auto gpdma::data_valid(std::size_t ch) const -> bool
+{
+  auto const& c = ch_[ch];
+  if(c.two_d
+     and (get(regs_, c.two_d->repeat) != 0
+          or get(regs_, c.two_d->source_offset) != 0
+          or get(regs_, c.two_d->destination_offset) != 0
+          or get(regs_, c.two_d->block_source_offset) != 0
+          or get(regs_, c.two_d->block_destination_offset) != 0))
+  {
+    return false;
+  }
+  auto const sw     = std::uint64_t{1} << get(regs_, c.source_width);
+  auto const dw     = std::uint64_t{1} << get(regs_, c.destination_width);
+  auto const bytes  = std::uint64_t{get(regs_, c.bytes)};
+  auto const source = regs_.peek(c.sar.offset);
+  auto const target = regs_.peek(c.dar.offset);
+  auto const read   = get(regs_, c.source_increment) != 0 ? bytes : sw;
+  auto const write  = get(regs_, c.destination_increment) != 0 ? (bytes / sw + 1) * dw : dw;
+  return (in_memory(source, read, false) or quiet_data(source, false))
+     and (in_memory(target, write, true) or quiet_data(target, true));
+}
+
+auto gpdma::bursts_to_flag(std::size_t ch, quiet_query const& query, bool loud) const
+    -> std::optional<std::uint64_t>
+{
+  if(loud)
+  {
+    return 1;
+  }
+  auto const& c       = ch_[ch];
+  auto const& s       = state_.channel[ch];
+  auto const  enabled = [&](flag_index flag) { return get(regs_, c.interrupt_enable[flag]) != 0; };
+  auto const  on      = not c.line->level() and query.wakes(*c.line);
+  if(on and enabled(data_error) and not data_valid(ch))
+  {
+    return 1;
+  }
+  auto const sw     = std::uint64_t{1} << get(regs_, c.source_width);
+  auto const beats  = std::uint64_t{or_zero(c.source_burst)} + 1;
+  auto const burst  = beats * sw;
+  auto const bytes  = std::uint64_t{get(regs_, c.bytes)};
+  auto const block  = std::uint64_t{s.block_bytes};
+  auto const up     = [&](std::uint64_t n) { return n == 0 ? 1 : (n + burst - 1) / burst; };
+  auto const left   = c.two_d ? std::uint64_t{get(regs_, c.two_d->repeat)} : 0;
+  auto const each   = std::max<std::uint64_t>(1, block / burst);
+  auto const to_end = up(bytes);
+  auto const item   = to_end + left * each;
+  auto const last   = regs_.peek(c.llr.offset) == 0;
+  auto const mode   = get(regs_, c.event_mode);
+  std::optional<std::uint64_t> k;
+  auto const                   take = [&](std::uint64_t n) { k = k ? std::min(*k, n) : n; };
+  if(not last)
+  {
+    take(item + 1);
+  }
+  if(not on)
+  {
+    return k;
+  }
+  if(not last and (enabled(link_error) or enabled(user_error)))
+  {
+    take(item);
+  }
+  if(enabled(transfer_complete))
+  {
+    take(c.two_d and mode == 0 ? to_end : item);
+  }
+  if(enabled(half_transfer))
+  {
+    auto const in_block = c.two_d ? mode == 0 : mode < 3 or last;
+    if(not s.half_reported and in_block)
+    {
+      auto const half = block / 2;
+      take(bytes > half ? up(bytes - half) : 1);
+    }
+    else if(c.two_d and not s.half_reported and mode != 0 and (mode != 3 or last))
+    {
+      auto const done = std::uint64_t{s.repeat} - left + 1;
+      auto const goal = (std::uint64_t{s.repeat} + 2) / 2;
+      take(to_end + (goal > done ? goal - done : 0) * each);
+    }
+    else if(not last or left != 0)
+    {
+      take(to_end + 1);
+    }
+  }
+  return k;
+}
+
+auto gpdma::first_burst(std::size_t ch, quiet_query const& query) const
+    -> std::optional<std::uint64_t>
+{
+  auto const& c = ch_[ch];
+  auto const& s = state_.channel[ch];
+  if(s.scheduled)
+  {
+    return s.due_ps;
+  }
+  auto const gap = burst_ps();
+  if(not gap)
+  {
+    return std::nullopt;
+  }
+  auto const now     = query.now().ps;
+  auto const request = get(regs_, c.request);
+  if(get(regs_, c.software) != 0 or (request < requests and state_.request[request] != 0))
+  {
+    return now + *gap;
+  }
+  if(auto const feed = feed_of(request, query))
+  {
+    return feed->next ? std::optional{feed->next->ps} : std::nullopt;
+  }
+  if(auto const* const requester = requester_of(request))
+  {
+    auto const next = query.next_event(*requester);
+    return next ? std::optional{next->ps} : std::nullopt;
+  }
+  return now;
+}
+
+auto gpdma::quiet_until(quiet_query const& query) const -> std::optional<vtime>
+{
+  std::optional<vtime> out;
+  auto const           gap     = burst_ps();
+  auto const           illegal = illegal_wakes(query);
+  for(std::size_t ch = 0; ch < layout_.channels; ++ch)
+  {
+    auto const& c = ch_[ch];
+    if(not active(ch) or get(regs_, c.bytes) == 0 or state_.channel[ch].held != 0)
+    {
+      continue;
+    }
+    auto const source = regs_.peek(c.sar.offset);
+    auto const target = regs_.peek(c.dar.offset);
+    auto const loud   = illegal
+                     or (query.peripheral_at(target) and not quiet_data(target, true))
+                     or query.python_at(source)
+                     or query.python_at(target);
+    auto const k      = bursts_to_flag(ch, query, loud);
+    if(not k)
+    {
+      continue;
+    }
+    auto const first = first_burst(ch, query);
+    if(not first)
+    {
+      continue;
+    }
+    auto floor = *first;
+    if(*k > 1)
+    {
+      if(not gap)
+      {
+        continue;
+      }
+      floor += (*k - 1) * *gap;
+      if(get(regs_, c.software) == 0)
+      {
+        if(auto const feed = feed_of(get(regs_, c.request), query); feed and *k > feed->room)
+        {
+          if(not feed->next)
+          {
+            continue;
+          }
+          auto const per    = std::max<std::uint64_t>(1, feed->per_event);
+          auto const events = (*k - feed->room + per - 1) / per;
+          floor             = std::max(floor, feed->next->ps + (events - 1) * feed->gap_ps + *gap);
+        }
+      }
+    }
+    if(not out or floor < out->ps)
+    {
+      out = vtime{floor};
+    }
+  }
+  return out;
 }
 
 void gpdma::on_request(std::uint32_t request, bool level)

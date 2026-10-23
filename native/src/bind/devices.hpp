@@ -27,6 +27,8 @@ void bind_device_bases(reflex::py::nb::module_ scope);
  * @param rcc Board clock sources of the RCC model, empty for its defaults and no RCC factory.
  * @param python_owned Receives, borrowed, each Python device of @p devices whose reference a
  *        factory now holds, once per reference.
+ * @param python_backed Receives the name of each peripheral with a device implemented in Python,
+ *        whose model then calls Python inside its events.
  * @return One factory per named peripheral, plus one for the RCC with @p rcc.
  * @throws config_error when a named peripheral is not an I2C or SPI peripheral of @p description,
  *         a target is of the other bus kind, an object is not a target, an SpiController shares
@@ -38,6 +40,7 @@ void bind_device_bases(reflex::py::nb::module_ scope);
     part_description const&                                           description,
     std::map<std::string, std::vector<reflex::py::nb::object>> const& devices,
     std::optional<periph::stm32::rcc_options> const&                  rcc,
-    std::vector<reflex::py::nb::handle>&                              python_owned)
+    std::vector<reflex::py::nb::handle>&                              python_owned,
+    std::vector<std::string>&                                         python_backed)
     -> std::map<std::string, periph::model_factory, std::less<>>;
 }

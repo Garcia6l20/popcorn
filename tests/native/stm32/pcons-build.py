@@ -48,6 +48,14 @@ u575_env = {
     "POPCORN_FW_USB_CDC": str(
         project_dir / "examples" / "stm32u575" / "usb_cdc" / "prebuilt" / "usb_cdc.elf"
     ),
+    "POPCORN_FW_LINKED_CONTROLLER": str(
+        project_dir
+        / "examples"
+        / "stm32u575"
+        / "linked_uart"
+        / "prebuilt"
+        / "linked_controller.elf"
+    ),
 }
 
 base = add_doctest(
@@ -109,6 +117,7 @@ u575_programs = [
         ("stm32-tz-aware", "test_tz_aware.cpp"),
         ("stm32-smc", "test_smc.cpp"),
         ("stm32-engine-counters", "test_engine_counters.cpp"),
+        ("stm32-horizon", "test_horizon.cpp"),
     )
 ]
 for program in u575_programs:

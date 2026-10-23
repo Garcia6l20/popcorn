@@ -16,6 +16,11 @@ namespace popcorn::periph
 model::~model()                   = default;
 peer_directory::~peer_directory() = default;
 
+auto model::quiet_until(quiet_query const& query) const -> std::optional<vtime>
+{
+  return query.next_event(*this);
+}
+
 namespace
 {
 struct registration

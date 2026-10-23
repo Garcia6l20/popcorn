@@ -341,6 +341,7 @@ struct lock
  */
 class usart final : public dispatch_model<usart, usart_state>,
                     public uart_link_port,
+                    public dma_feeder,
                     public bus_reset_listener
 {
 public:
@@ -352,7 +353,11 @@ public:
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
-  auto on_write(
+  [[nodiscard]] auto
+      dma_feed(dma_controller const& by, std::uint32_t request, quiet_query const& query) const
+      -> std::optional<feed_info> override;
+  [[nodiscard]] auto quiet_data(popcorn::address at, bool write) const -> bool override;
+  auto               on_write(
       register_file& regs,
       std::uint32_t  offset,
       std::uint8_t   size,
@@ -385,6 +390,7 @@ private:
   [[nodiscard]] auto enabled() const -> bool;
   [[nodiscard]] auto fifo() const -> bool;
   [[nodiscard]] auto frame_ps() -> std::uint64_t;
+  [[nodiscard]] auto frame_time() const -> std::uint64_t;
   [[nodiscard]] auto word_bits() const -> std::uint32_t;
   [[nodiscard]] auto parity() const -> line_parity;
   [[nodiscard]] auto word_mask() const -> std::uint32_t;
@@ -454,8 +460,8 @@ private:
   field_ref                                    tx_threshold_;
   field_ref                                    dma_transmit_;
   field_ref                                    dma_receive_;
-  dma_signal                                   tx_dma_;
-  dma_signal                                   rx_dma_;
+  mutable dma_signal                           tx_dma_;
+  mutable dma_signal                           rx_dma_;
   field_ref                                    rx_threshold_;
   field_ref                                    tx_threshold_ie_;
   field_ref                                    rx_threshold_ie_;
@@ -761,7 +767,45 @@ auto usart::fifo() const -> bool
   return get(regs_, fifo_enable_) != 0;
 }
 
+auto usart::dma_feed(dma_controller const& by, std::uint32_t request, quiet_query const& query)
+    const -> std::optional<feed_info>
+{
+  auto const tx = tx_dma_.carries(by, request);
+  if(not tx and not rx_dma_.carries(by, request))
+  {
+    return std::nullopt;
+  }
+  auto const depth = fifo() ? fifo_depth : std::size_t{1};
+  auto const held  = tx ? state_.tx_fifo.size() : state_.rx_fifo.size();
+  auto const frame = frame_time();
+  return feed_info{
+      .room      = static_cast<std::uint32_t>(tx ? (held < depth ? depth - held : 0) : held),
+      .per_event = 1,
+      .next      = query.next_event(*this),
+      .gap_ps    = frame > 2 ? frame / 2 : 1};
+}
+
+auto usart::quiet_data(popcorn::address at, bool write) const -> bool
+{
+  auto const offset = window_offset(ctx_.part, desc_, at);
+  return not write and offset and (*offset & ~3u) == rdr_.offset;
+}
+
 auto usart::frame_ps() -> std::uint64_t
+{
+  auto const frame = frame_time();
+  if(frame == 0)
+  {
+    auto const in_use = enabled() and (get(regs_, transmit_) != 0 or get(regs_, receive_) != 0);
+    if(in_use and not std::exchange(no_baud_logged_, true))
+    {
+      warn("BRR", "no baud rate from the kernel clock, PRESC and BRR: nothing is transferred");
+    }
+  }
+  return frame;
+}
+
+auto usart::frame_time() const -> std::uint64_t
 {
   auto const    code = get(regs_, prescaler_);
   auto const    hz  = ctx_.clock.hz(kernel_) / (code < prescalers.size() ? prescalers[code] : 256u);
@@ -784,11 +828,6 @@ auto usart::frame_ps() -> std::uint64_t
   }
   if(baud == 0)
   {
-    auto const in_use = enabled() and (get(regs_, transmit_) != 0 or get(regs_, receive_) != 0);
-    if(in_use and not std::exchange(no_baud_logged_, true))
-    {
-      warn("BRR", "no baud rate from the kernel clock, PRESC and BRR: nothing is transferred");
-    }
     return 0;
   }
   auto const                             word = word_bits();

@@ -539,7 +539,8 @@ auto device_factories(
     part_description const&                               description,
     std::map<std::string, std::vector<nb::object>> const& devices,
     std::optional<stm32::rcc_options> const&              rcc,
-    std::vector<nb::handle>&                              python_owned)
+    std::vector<nb::handle>&                              python_owned,
+    std::vector<std::string>&                             python_backed)
     -> std::map<std::string, periph::model_factory, std::less<>>
 {
   stm32::board board;
@@ -611,6 +612,10 @@ auto device_factories(
     if(found == all.end())
     {
       throw refused(peripheral, "a peripheral a built-in I2C or SPI model serves");
+    }
+    if(not cells[peripheral].empty())
+    {
+      python_backed.push_back(peripheral);
     }
     out.emplace(peripheral, stopping(std::move(found->second), std::move(cells[peripheral])));
   }

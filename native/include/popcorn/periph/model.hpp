@@ -55,6 +55,107 @@ struct access_ctx
   bool via_secure_alias{};
 };
 
+class model;
+
+/**
+ * @brief How core::machine::horizon() counts a model's activity while the core sleeps.
+ *
+ * - `lines`: its quiet_until() bounds the wake while one of its IRQ lines would wake the core,
+ *   and the transmit of every wire it is a transmit source of.
+ * - `trigger`: it starts other models' activity, through a trigger output, a DMA request, a pin
+ *   or a clock, such as a timer, an ADC, a GPIO port or the RCC. Its earliest queued event
+ *   bounds the wake, every transmit and the stop.
+ * - `reset_source`: it resets the machine, such as a watchdog. Its earliest queued event bounds
+ *   the wake and the stop.
+ * - `bus_master`: it accesses registers of other peripherals, such as a DMA controller. Its
+ *   quiet_until() bounds the wake and every transmit, whatever its IRQ lines.
+ * - `python`: it runs Python code in its events. Its earliest queued event bounds the wake,
+ *   every transmit and the stop.
+ */
+enum class wake_role
+{
+  lines,
+  trigger,
+  reset_source,
+  bus_master,
+  python,
+};
+
+/**
+ * @brief What a model reads from its machine to answer model::quiet_until(). Valid only during
+ *        that call.
+ */
+class POPCORN_API quiet_query
+{
+public:
+  /** @brief Creates the query. */
+  quiet_query() = default;
+  /** @brief Not copyable. */
+  quiet_query(quiet_query const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(quiet_query const&) -> quiet_query& = delete;
+  /** @brief Not movable. */
+  quiet_query(quiet_query&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(quiet_query&&) -> quiet_query& = delete;
+
+  /** @brief The machine's local time. */
+  [[nodiscard]] virtual auto now() const -> vtime = 0;
+
+  /**
+   * @brief Due time of the earliest queued event of @p of that @p counts accepts, raised to
+   *        now(). Stale events count, the queue does not know them.
+   * @param of A model of the machine.
+   * @param counts Called with the kind and payload of each queued event of @p of in due order,
+   *        until it returns true.
+   * @return The time, empty when no queued event of @p of is accepted.
+   */
+  [[nodiscard]] virtual auto next_event(
+      model const&                                                of,
+      std::function_ref<bool(std::uint32_t, std::uint64_t) const> counts) const
+      -> std::optional<vtime> = 0;
+
+  /**
+   * @brief Due time of the earliest queued event of @p of, raised to now().
+   * @param of A model of the machine.
+   * @return The time, empty when @p of has no queued event.
+   */
+  [[nodiscard]] auto next_event(model const& of) const -> std::optional<vtime>
+  {
+    return next_event(of, [](std::uint32_t, std::uint64_t) { return true; });
+  }
+
+  /**
+   * @brief Whether @p line, raised now, would wake the sleeping core or be taken by it. True for
+   *        the NMI line and for a line the machine does not know.
+   * @param line An IRQ line of a model of the machine.
+   */
+  [[nodiscard]] virtual auto wakes(irq_line const& line) const -> bool = 0;
+
+  /**
+   * @brief Whether any IRQ line of @p of, raised now, would wake the sleeping core or be taken.
+   * @param of A model of the machine.
+   */
+  [[nodiscard]] virtual auto wakes(model const& of) const -> bool = 0;
+
+  /**
+   * @brief Whether a bus access at @p at reaches a peripheral whose model runs Python code,
+   *        see wake_role.
+   * @param at Bus address.
+   */
+  [[nodiscard]] virtual auto python_at(address at) const -> bool = 0;
+
+  /**
+   * @brief Whether @p at lies in a peripheral window, an alias window included.
+   * @param at Bus address.
+   */
+  [[nodiscard]] virtual auto peripheral_at(address at) const -> bool = 0;
+
+protected:
+  /** @brief Destroys the query, only through its implementation. */
+  ~quiet_query() = default;
+};
+
 /**
  * @brief Behaviour model of one peripheral instance. Receives reads and writes of the registers
  *        it claims, the register_file serves the rest. Implemented natively or, through a
@@ -209,6 +310,26 @@ public:
    * @param payload Payload the model passed when scheduling.
    */
   virtual void on_event(std::uint32_t kind, std::uint64_t payload) = 0;
+
+  /**
+   * @brief The earliest local time at which this model can raise an interrupt flag whose enable
+   *        is set, or write a register of another peripheral, with no input from outside the
+   *        machine. Called by core::machine::horizon() on the machine's thread, between slices.
+   *        It changes no state.
+   * @param query What the model reads from its machine.
+   * @return The time, std::nullopt when the state allows neither. The default returns the time
+   *         of the model's earliest queued event.
+   */
+  [[nodiscard]] virtual auto quiet_until(quiet_query const& query) const -> std::optional<vtime>;
+
+  /**
+   * @brief How core::machine::horizon() counts this model.
+   * @return wake_role::lines by default.
+   */
+  [[nodiscard]] virtual auto role_in_horizon() const noexcept -> wake_role
+  {
+    return wake_role::lines;
+  }
 
   /**
    * @brief Appends the model state to a snapshot.

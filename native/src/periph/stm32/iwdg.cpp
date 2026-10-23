@@ -88,6 +88,11 @@ class iwdg final : public dispatch_model<iwdg, iwdg_state>,
                    public core_hold_listener
 {
 public:
+  [[nodiscard]] auto role_in_horizon() const noexcept -> wake_role override
+  {
+    return wake_role::reset_source;
+  }
+
   iwdg(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;

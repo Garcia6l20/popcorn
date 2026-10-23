@@ -44,6 +44,11 @@ struct exti_state
 class exti final : public dispatch_model<exti, exti_state>, public exti_input
 {
 public:
+  [[nodiscard]] auto role_in_horizon() const noexcept -> wake_role override
+  {
+    return wake_role::trigger;
+  }
+
   exti(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;

@@ -203,6 +203,13 @@ for _, target in core_firmware.values():
     if target is not None:
         test_host_concurrent.depends(target)
 
+test_horizon = add_doctest(
+    "core-horizon", [here / "test_horizon.cpp"], [test_support, core], env=m33_env
+)
+for _, target in core_firmware.values():
+    if target is not None:
+        test_horizon.depends(target)
+
 add_doctest("core-window-barrier", [here / "test_window_barrier.cpp"], [core])
 test_system = add_doctest(
     "core-system",

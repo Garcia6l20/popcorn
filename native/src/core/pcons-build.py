@@ -16,6 +16,7 @@ sources = [
         "coverage.cpp",
         "engine.cpp",
         "hooks.cpp",
+        "horizon.cpp",
         "host.cpp",
         "intercepts.cpp",
         "link_guard.cpp",

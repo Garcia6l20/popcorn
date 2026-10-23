@@ -173,6 +173,16 @@ void cortex_m::arm_systick(security bank)
       icount{at}, bank == security::secure ? systick_event : systick_nonsecure_event, generation_);
 }
 
+auto cortex_m::event_pends(std::uint32_t kind, std::uint64_t payload) const -> bool
+{
+  if(kind != systick_event and kind != systick_nonsecure_event)
+  {
+    return true;
+  }
+  auto const& s = kind == systick_event ? state_.systick : state_.systick_nonsecure;
+  return payload == generation_ and systick::interrupting(s);
+}
+
 void cortex_m::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   if((kind != systick_event and kind != systick_nonsecure_event) or payload != generation_)

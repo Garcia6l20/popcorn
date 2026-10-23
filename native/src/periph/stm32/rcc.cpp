@@ -452,6 +452,11 @@ class rcc final : public dispatch_model<rcc, rcc_state>,
                   public trustzone_aware
 {
 public:
+  [[nodiscard]] auto role_in_horizon() const noexcept -> wake_role override
+  {
+    return wake_role::trigger;
+  }
+
   rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& options);
 
   void               reset(register_file& regs, reset_kind kind) override;

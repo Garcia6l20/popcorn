@@ -78,6 +78,7 @@ void machine::run_state::attach_peripherals()
       slot->irqs.push_back(periph::irq_line{lines, source});
     }
     slot->nmi = periph::irq_line{lines, periph::nmi_source};
+    slot->irq_numbers.assign(sources.begin(), sources.end());
     slot->context.emplace(
         periph::model_context{
             .regs               = slot->regs,
@@ -156,6 +157,17 @@ void machine::run_state::attach_peripherals()
     peripheral_index.emplace_back(unit.name, serving);
   }
   std::ranges::sort(peripheral_index);
+  for(auto const& name : owner.options_.python_backed)
+  {
+    auto const index = serving(name);
+    if(not index or not owner.peripherals_[*index])
+    {
+      throw config_error(
+          owner.description_.part, 0, "python_backed",
+          std::format("a peripheral of the description, not {}", name));
+    }
+    owner.peripherals_[*index]->python_backed = true;
+  }
 
   std::vector<std::pair<std::string_view, periph::model*>> by_name;
   for(auto const& [name, serving] : peripheral_index)
@@ -203,17 +215,27 @@ auto machine_peers::all() const noexcept -> std::span<periph::model* const>
   return models_;
 }
 
-auto machine::run_state::slot(std::string_view name) const -> peripheral_slot&
+auto machine::run_state::serving(std::string_view name) const -> std::optional<std::uint32_t>
 {
   auto const found = std::ranges::lower_bound(
       peripheral_index, name, {}, &std::pair<std::string_view, std::uint32_t>::first);
   if(found == peripheral_index.end() or found->first != name)
   {
+    return std::nullopt;
+  }
+  return found->second;
+}
+
+auto machine::run_state::slot(std::string_view name) const -> peripheral_slot&
+{
+  auto const index = serving(name);
+  if(not index)
+  {
     throw config_error(
         owner.description_.part, 0, "peripherals",
         std::format("a peripheral of the description, not {}", name));
   }
-  return *owner.peripherals_[found->second];
+  return *owner.peripherals_[*index];
 }
 
 void machine::do_hold_in_reset(std::string_view peripheral, bool held)

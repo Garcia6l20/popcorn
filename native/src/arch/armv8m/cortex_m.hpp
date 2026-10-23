@@ -56,6 +56,9 @@ public:
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   [[nodiscard]] auto idle() const -> bool override;
   [[nodiscard]] auto self_branch(address at) const -> bool override;
+  [[nodiscard]] auto may_wake(std::uint32_t source) const -> bool override;
+  [[nodiscard]] auto wake_pending() const -> bool override;
+  [[nodiscard]] auto event_pends(std::uint32_t kind, std::uint64_t payload) const -> bool override;
   void               hold_core(bool held) override;
   [[nodiscard]] auto pc() const -> address override;
   [[nodiscard]] auto instructions_between(address from, address to) const

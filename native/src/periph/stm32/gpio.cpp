@@ -99,6 +99,11 @@ class gpio final : public dispatch_model<gpio, gpio_state>,
                    public bus_reset_listener
 {
 public:
+  [[nodiscard]] auto role_in_horizon() const noexcept -> wake_role override
+  {
+    return wake_role::trigger;
+  }
+
   gpio(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;

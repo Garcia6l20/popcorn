@@ -305,6 +305,8 @@ public:
   void suspend(vtime at) override;
   void resume(vtime at) override;
   void wake_at(vtime at) override;
+  [[nodiscard]] auto quiet_until(quiet_query const& query) const -> std::optional<vtime> override;
+  [[nodiscard]] auto event_pends(std::uint32_t kind, std::uint64_t payload) const -> bool;
   [[nodiscard]] auto now() const -> vtime override;
 
   [[nodiscard]] auto board_host() -> usb::host* override;
@@ -1254,6 +1256,68 @@ void otg_fs::on_event(std::uint32_t kind, std::uint64_t payload)
     return;
   }
   refresh();
+}
+
+auto otg_fs::quiet_until(quiet_query const& query) const -> std::optional<vtime>
+{
+  return query.next_event(*this, [this](std::uint32_t kind, std::uint64_t payload) {
+    return event_pends(kind, payload);
+  });
+}
+
+auto otg_fs::event_pends(std::uint32_t kind, std::uint64_t payload) const -> bool
+{
+  if(kind >= state_.generation.size() or payload != state_.generation[kind])
+  {
+    return false;
+  }
+  if(kind == enumeration_done or kind == idle_suspend)
+  {
+    return true;
+  }
+  auto const unmasked = [&](field_ref const& flag) {
+    return get(regs_, global_interrupt_) != 0
+       and (regs_.peek(core_mask_.offset) & flag.mask()) != 0;
+  };
+  if(kind == periodic_end)
+  {
+    return unmasked(end_of_periodic_)
+        or unmasked(incomplete_iso_in_)
+        or unmasked(incomplete_iso_out_);
+  }
+  if(not host_ or not board_host_)
+  {
+    return host_ != nullptr;
+  }
+  auto const work     = board_host_->pending();
+  auto       in_ready = false;
+  auto       out_open = false;
+  for(std::size_t n = 0; n < endpoints; ++n)
+  {
+    auto const& in = in_[n];
+    if(get(regs_, in.enable) != 0 and (n == 0 or get(regs_, in.active) != 0))
+    {
+      if(n != 0 and get(regs_, in.type) == isochronous)
+      {
+        in_ready = true;
+      }
+      else if(
+          get(regs_, in.packets) != 0
+          and get(regs_, in.stall) == 0
+          and get(regs_, in.nak) == 0
+          and get(regs_, in_nak_status_) == 0
+          and (not state_.tx_packets[n].empty() or (state_.tx_fifo[n].empty() and get(regs_, in.size) == 0)))
+      {
+        in_ready = true;
+      }
+    }
+    out_open = out_open or get(regs_, out_[n].enable) != 0;
+  }
+  return work.port
+      or unmasked(start_of_frame_)
+      or work.control
+      or (work.out and out_open)
+      or in_ready;
 }
 
 void otg_fs::wake_at(vtime at)

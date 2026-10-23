@@ -625,6 +625,21 @@ private:
 class POPCORN_API host final : public host_side
 {
 public:
+  /** @brief What the host has scheduled or queued, host::pending(). */
+  struct pending_work
+  {
+    /** @brief A frame start is scheduled. */
+    bool frame{};
+    /** @brief A control or bulk slot is scheduled. */
+    bool slot{};
+    /** @brief A port step is scheduled: a debounce, a bus reset or an enumeration wait ends. */
+    bool port{};
+    /** @brief A control pipe has a transfer queued. */
+    bool control{};
+    /** @brief A non-control OUT pipe has a transfer queued. */
+    bool out{};
+  };
+
   /**
    * @brief Creates a host that sees no device yet.
    * @param port The device, which outlives the host.
@@ -638,6 +653,9 @@ public:
   void on_time(vtime at) override;
   void save(std::vector<std::byte>& out) const override;
   void load(std::span<std::byte const> in) override;
+
+  /** @brief What the host has scheduled or queued now. */
+  [[nodiscard]] auto pending() const -> pending_work;
 
   /** @brief Device state. */
   [[nodiscard]] auto state() const -> device_state;

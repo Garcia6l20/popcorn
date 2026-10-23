@@ -196,6 +196,10 @@ struct machine::peripheral_slot
   std::vector<periph::irq_line> irqs{};
   /** @brief Line to the non-maskable interrupt, model_context::nmi. */
   periph::irq_line nmi{};
+  /** @brief Interrupt source of each line of irqs, in the same order. */
+  std::vector<std::uint32_t> irq_numbers{};
+  /** @brief Whether machine_options::python_backed names the peripheral. */
+  bool python_backed{};
   /** @brief DMA request lines, none until the description names them. */
   std::vector<periph::dma_request> dma{};
   /** @brief The model's event port. */
@@ -1190,6 +1194,9 @@ struct machine::run_state
   /** @brief Peripheral names, aliases included, sorted, to the description index of the
    * peripheral serving them. */
   std::vector<std::pair<std::string_view, std::uint32_t>> peripheral_index{};
+  /** @brief Description indexes of the transmit sources of each wire,
+   * machine::set_transmit_sources(). */
+  std::vector<std::vector<std::uint32_t>> transmit_wires{};
   /** @brief Models of the machine for model contexts, empty until attach_peripherals ends. */
   machine_peers peers{};
   /** @brief Bus firewall a model installed, asked before every peripheral window access, null
@@ -1774,6 +1781,9 @@ struct machine::run_state
    * @throws config_error when the description has no such peripheral.
    */
   [[nodiscard]] auto slot(std::string_view name) const -> peripheral_slot&;
+
+  /** @brief Description index of the peripheral serving a name, empty when none does. */
+  [[nodiscard]] auto serving(std::string_view name) const -> std::optional<std::uint32_t>;
 
   /** @brief Address the arch module's reset reads the vector table at. */
   address reset_vector{};

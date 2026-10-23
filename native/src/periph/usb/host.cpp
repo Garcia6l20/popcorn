@@ -1605,6 +1605,31 @@ void host::on_time(vtime at)
   impl_->on_time(at.ps);
 }
 
+auto host::pending() const -> pending_work
+{
+  auto const&  s = impl_->s;
+  pending_work out{
+      .frame = s.next_frame.has_value(),
+      .slot  = s.next_slot.has_value(),
+      .port  = s.debounce_end or s.reset_end or s.hold_until};
+  for(auto const& pipe : s.pipes)
+  {
+    if(pipe.queue.empty())
+    {
+      continue;
+    }
+    if(pipe.id == default_pipe)
+    {
+      out.control = true;
+    }
+    else if((pipe.endpoint & 0x80) == 0)
+    {
+      out.out = true;
+    }
+  }
+  return out;
+}
+
 void host::save(std::vector<std::byte>& out) const
 {
   auto saved = impl_->s;

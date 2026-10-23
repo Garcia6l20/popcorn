@@ -121,6 +121,33 @@ struct machine_options
   /** @brief Digest of the configuration the machine was built from, such as a project digest,
    * stored in every snapshot as `snapshot_data::config_digest`. Opaque to the core. */
   std::string config_digest{};
+  /** @brief Peripherals whose native model calls Python code inside its events, such as an I2C
+   * or SPI controller with a Python device on its bus. machine::horizon() counts them as
+   * periph::wake_role::python. The machine refuses a name the description lacks with
+   * config_error keyed `python_backed`. */
+  std::vector<std::string> python_backed{};
+};
+
+/**
+ * @brief What a machine can do on its own before an input reaches it, machine::horizon(). Times
+ *        are local, since the last reset, and never before the machine's time.
+ */
+struct horizon
+{
+  /** @brief Whether the core executes no instruction until something wakes it: WFI or WFE
+   * without a wake-up event, a `b .` loop with nothing deliverable, or a held core. */
+  bool asleep{};
+  /** @brief While asleep, the local time before which the core executes no instruction, a `b .`
+   * aside. Empty while asleep when no source of the machine can wake it, and while awake. */
+  std::optional<vtime> wake{};
+  /** @brief While asleep, per wire of machine::set_transmit_sources() in its order, the local time
+   * before which none of its transmit sources can start a frame, empty for none. Empty while
+   * awake. */
+  std::vector<std::optional<vtime>> transmit{};
+  /** @brief Local time before which no resumable stop can happen without an instruction: a
+   * reset source or a trigger that can start one, a Python-backed peripheral, a DMA access while
+   * a watch exists, the instructions left running out in a `b .` loop. Empty for none. */
+  std::optional<vtime> stop{};
 };
 
 /**
@@ -370,6 +397,41 @@ public:
    *        snapshots.
    */
   [[nodiscard]] auto held_through() const noexcept -> std::optional<icount>;
+
+  /**
+   * @brief The machine's horizon at its current time: for a sleeping core, the earliest local
+   *        times at which it can wake, a wire's transmit source can start a frame, or a resumable
+   *        stop can happen, with no input from outside the machine. A pure read: it changes no
+   *        state. Wake takes the earliest of the arch events that can pend an exception, see
+   *        arch::arch::event_pends(), and of every model's answer by its
+   *        periph::model::role_in_horizon(): periph::model::quiet_until() of a `lines` model while
+   *        one of its IRQ lines passes arch::arch::may_wake(), of a `bus_master` model always,
+   *        and the earliest queued event of a `trigger`, `reset_source` or `python` model. A
+   *        transmit takes quiet_until() of the wire's `lines` sources and every `bus_master`,
+   *        and the earliest queued event of every `trigger` and `python` model. Stop takes the
+   *        earliest queued event of every `reset_source`, `trigger` and `python` model, a trigger
+   *        being able to start a reset source, of every model while a watch exists, and the time
+   *        at which @p instructions_left run out in a `b .` loop.
+   * @param instructions_left Instructions the caller's run may still execute, the smaller of
+   *        its budget and its exact count, empty for no bound.
+   * @return The horizon.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  [[nodiscard]] auto horizon(std::optional<icount> instructions_left = std::nullopt) const
+      -> core::horizon;
+
+  /**
+   * @brief Sets the transmit sources of each outbound wire: the peripherals whose activity can
+   *        start a frame on it, such as its UART and the DMA controllers that can write the
+   *        UART's data register. horizon() then reports one transmit time per wire, in this
+   *        order. Machine configuration: kept across reset() and restore().
+   * @param wires Peripheral names per wire, as the description spells them, an alias naming the
+   *        peripheral it aliases.
+   * @throws config_error keyed `transmit_sources` naming a peripheral the description lacks,
+   *         with nothing changed.
+   * @throws machine_running while a slice runs, handlers included.
+   */
+  void set_transmit_sources(std::vector<std::vector<std::string>> const& wires);
 
   /**
    * @brief Instructions the core executed since reset, counted as virtual_clock().now() counts

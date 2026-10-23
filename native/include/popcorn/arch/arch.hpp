@@ -441,6 +441,44 @@ public:
     return false;
   }
 
+  /**
+   * @brief Whether interrupt source @p source, pended now, would make the core run: leave its
+   *        WFI or WFE, or be taken by a core that does not sleep, such as one in a `b .` loop. On
+   *        Arm, from WFI an enabled interrupt whose group priority beats the execution priority
+   *        PRIMASK aside, from WFE the same with PRIMASK, or any interrupt under SCR.SEVONPEND,
+   *        and otherwise an enabled interrupt that preempts now. The default says true.
+   * @param source Interrupt source as the description numbers it, `irq_desc::number`.
+   */
+  [[nodiscard]] virtual auto may_wake([[maybe_unused]] std::uint32_t source) const -> bool
+  {
+    return true;
+  }
+
+  /**
+   * @brief Whether the core runs at the next slice with no new interrupt: a sleeping core holds
+   *        a wake-up event, such as a deliverable pending interrupt or the Arm event register
+   *        under WFE, and a core that does not sleep has an interrupt deliverable now. The
+   *        default says true.
+   */
+  [[nodiscard]] virtual auto wake_pending() const -> bool
+  {
+    return true;
+  }
+
+  /**
+   * @brief Whether an event the module scheduled can pend an exception when it is dispatched in
+   *        the current state. On Arm, a SysTick event pends only while its generation is current
+   *        and TICKINT and ENABLE are set. The default says true.
+   * @param kind Event kind the module chose.
+   * @param payload Payload the module passed.
+   */
+  [[nodiscard]] virtual auto
+      event_pends([[maybe_unused]] std::uint32_t kind, [[maybe_unused]] std::uint64_t payload) const
+      -> bool
+  {
+    return true;
+  }
+
   /** @brief Program counter of the next instruction. */
   [[nodiscard]] virtual auto pc() const -> address = 0;
 

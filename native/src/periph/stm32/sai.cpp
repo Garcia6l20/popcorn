@@ -207,6 +207,7 @@ auto sai_writes() -> std::span<write_entry<sai> const>;
 class sai final : public dispatch_model<sai, sai_state>,
                   public audio_port,
                   public clock_listener,
+                  public dma_feeder,
                   public bus_reset_listener
 {
 public:
@@ -229,6 +230,11 @@ public:
   void               attach(audio_block block, audio_attachment attachment) override;
   void               set_external_clock(audio_block which, std::uint32_t frame_hz) override;
   [[nodiscard]] auto external_clock(audio_block which) const -> std::uint32_t override;
+  [[nodiscard]] auto quiet_until(quiet_query const& query) const -> std::optional<vtime> override;
+  [[nodiscard]] auto
+      dma_feed(dma_controller const& by, std::uint32_t request, quiet_query const& query) const
+      -> std::optional<feed_info> override;
+  [[nodiscard]] auto quiet_data(popcorn::address at, bool write) const -> bool override;
 
   template <std::size_t B> void control_written(std::uint32_t old, std::uint32_t now);
   template <std::size_t B> void fifo_written(std::uint32_t old, std::uint32_t now);
@@ -287,19 +293,20 @@ private:
   void push(std::size_t b, std::uint32_t word);
   void flags();
   void warn_unsupported(std::size_t b);
+  [[nodiscard]] auto block_feed(std::size_t b) const -> feed_info;
 
-  register_file&                       regs_;
-  std::array<audio_attachment, blocks> wired_;
-  std::array<block_fields, blocks>     block_;
-  field_ref                            pdm_enable_;
-  core::clock_domain                   kernel_;
-  irq_line&                            line_;
-  std::array<dma_signal, blocks>       requests_;
-  bool                                 unsupported_logged_{};
-  bool                                 no_clock_logged_{};
-  bool                                 decimation_logged_{};
-  bool                                 short_frame_logged_{};
-  bool                                 slot_rules_logged_{};
+  register_file&                         regs_;
+  std::array<audio_attachment, blocks>   wired_;
+  std::array<block_fields, blocks>       block_;
+  field_ref                              pdm_enable_;
+  core::clock_domain                     kernel_;
+  irq_line&                              line_;
+  mutable std::array<dma_signal, blocks> requests_;
+  bool                                   unsupported_logged_{};
+  bool                                   no_clock_logged_{};
+  bool                                   decimation_logged_{};
+  bool                                   short_frame_logged_{};
+  bool                                   slot_rules_logged_{};
 };
 
 auto sai_writes() -> std::span<write_entry<sai> const>
@@ -1294,6 +1301,151 @@ void sai::load(std::span<std::byte const> in)
     }
     state_.clock = kept;
   }
+}
+
+auto sai::block_feed(std::size_t b) const -> feed_info
+{
+  auto const  source = follows(b, 1 - b) ? 1 - b : b;
+  auto const  count  = state_.block[b].fifo.size();
+  auto const& src    = state_.block[source];
+  feed_info   info{.room = static_cast<std::uint32_t>(receiver(b) ? count : fifo_depth - count)};
+  if(not src.ticking)
+  {
+    return info;
+  }
+  info.next = vtime{src.next_ps};
+  std::vector<std::uint32_t> points;
+  if(state_.block[b].carry_slot != no_slot)
+  {
+    points.push_back(state_.block[b].carry_at);
+  }
+  for(std::size_t slot = 0; slot < slots(b); ++slot)
+  {
+    if(slot_on(b, slot))
+    {
+      points.push_back(
+          std::min(
+              receiver(b) ? slot_end(b, slot, src.bits) : slot_start(b, slot, src.bits), src.bits));
+    }
+  }
+  std::ranges::sort(points);
+  auto          gap_bits = src.bits;
+  std::uint32_t same     = 1;
+  for(std::size_t i = 1; i < points.size(); ++i)
+  {
+    if(points[i] > points[i - 1])
+    {
+      gap_bits = std::min(gap_bits, points[i] - points[i - 1]);
+      same     = 1;
+    }
+    else
+    {
+      info.per_event = std::max(info.per_event, ++same);
+    }
+  }
+  if(not points.empty())
+  {
+    gap_bits =
+        std::min(gap_bits, std::max<std::uint32_t>(1, src.bits - points.back() + points.front()));
+  }
+  auto const span = time_at(source, gap_bits) - time_at(source, 0);
+  info.gap_ps     = span > 1 ? span - 1 : 1;
+  return info;
+}
+
+auto sai::dma_feed(dma_controller const& by, std::uint32_t request, quiet_query const&) const
+    -> std::optional<feed_info>
+{
+  for(std::size_t b = 0; b < blocks; ++b)
+  {
+    if(requests_[b].carries(by, request))
+    {
+      return block_feed(b);
+    }
+  }
+  return std::nullopt;
+}
+
+auto sai::quiet_data(popcorn::address at, bool) const -> bool
+{
+  auto const offset = window_offset(ctx_.part, desc_, at);
+  return offset and std::ranges::any_of(block_, [&](block_fields const& f) {
+           return (*offset & ~3u) == f.data.offset;
+         });
+}
+
+auto sai::quiet_until(quiet_query const& query) const -> std::optional<vtime>
+{
+  if(line_.level() or not query.wakes(line_))
+  {
+    return std::nullopt;
+  }
+  auto const same = [](field_ref const& a, field_ref const& b) {
+    return a.offset == b.offset and a.mask() == b.mask();
+  };
+  std::optional<vtime> out;
+  auto const           lower = [&](std::uint64_t ps) {
+    if(not out or ps < out->ps)
+    {
+      out = vtime{ps};
+    }
+  };
+  for(std::size_t b = 0; b < blocks; ++b)
+  {
+    auto const& f      = block_[b];
+    auto        error  = false;
+    auto        status = false;
+    for(auto const& [flag, enable] : f.interrupts)
+    {
+      if(get(regs_, enable) != 0)
+      {
+        error  = error or same(flag, f.error);
+        status = status or same(flag, f.request);
+      }
+    }
+    if(not error and not status)
+    {
+      continue;
+    }
+    if(state_.block[b].waiting)
+    {
+      lower(query.now().ps);
+      continue;
+    }
+    auto const feed = block_feed(b);
+    if(not feed.next)
+    {
+      continue;
+    }
+    auto const next = feed.next->ps;
+    if(status)
+    {
+      lower(next);
+    }
+    if(not error)
+    {
+      continue;
+    }
+    auto const    count = state_.block[b].fifo.size();
+    std::uint64_t bound = receiver(b) ? fifo_depth - count : count;
+    if(get(regs_, f.dma) != 0)
+    {
+      auto const supply = requests_[b].supply();
+      if(not supply.delay_ps or *supply.delay_ps >= feed.gap_ps)
+      {
+        lower(next);
+        continue;
+      }
+      if(not supply.words)
+      {
+        continue;
+      }
+      bound += *supply.words;
+    }
+    auto const events = bound / feed.per_event + 1;
+    lower(next + (events - 1) * feed.gap_ps);
+  }
+  return out;
 }
 
 void sai::flags()

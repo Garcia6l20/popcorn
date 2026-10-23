@@ -141,6 +141,38 @@ auto cortex_m::wake_event() const -> bool
              < current_priority(not wfe);
 }
 
+auto cortex_m::may_wake(std::uint32_t source) const -> bool
+{
+  auto const number = 16 + source;
+  if(number >= exception_count())
+  {
+    return true;
+  }
+  auto const asleep = sleeping();
+  auto const wfe    = asleep and state_.sleep->kind == sleep_kind::wfe;
+  if(wfe and (state_.scs.scr & scr_sevonpend) != 0)
+  {
+    return true;
+  }
+  if(not is_enabled(number))
+  {
+    return false;
+  }
+  auto const current = current_priority(asleep and not wfe);
+  if(trustzone())
+  {
+    auto const config = priority_config();
+    auto const target = exception_target(state_.exceptions, config, number, current_security());
+    return exception_priority(state_.exceptions, config, number, target, true) < current;
+  }
+  return group_priority(priority_of(state_.exceptions, number), state_.scs.prigroup) < current;
+}
+
+auto cortex_m::wake_pending() const -> bool
+{
+  return sleeping() ? wake_event() : deliverable_now();
+}
+
 void cortex_m::note_pending(std::uint32_t number) noexcept
 {
   if((state_.scs.scr & scr_sevonpend) != 0 and not test_bit(state_.exceptions.pending, number))
