@@ -2280,6 +2280,11 @@ auto host::orphan() const -> std::weak_ptr<void const>
   return running_;
 }
 
+auto host::thread_token() const -> std::weak_ptr<void const>
+{
+  return running_;
+}
+
 auto host::member_owner(member_id who) const -> std::shared_ptr<machine>
 {
   return core_->members[who]->engine;

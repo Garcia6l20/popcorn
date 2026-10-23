@@ -21,6 +21,7 @@ from typing import Any
 import popcorn
 import pytest
 from popcorn import _core
+from popcorn._hooks import Relay
 from popcorn._host import awaited
 from popcorn._refs import Pending
 from popcorn._stop import Stop, stop_of
@@ -630,6 +631,73 @@ def test_a_collection_inside_a_handler_destroys_another_machine(machines: Machin
     del second
     asyncio.run(first.run(budget=1_000_000))
     assert len(collected) == 1 and collected[0] > 0
+    assert settles(lambda: _core.host_threads() == before + 1)
+
+
+class TracedRelay(Relay):
+    """A relay a weak reference can follow."""
+
+    __slots__ = ("__weakref__",)
+
+
+class Cycle:
+    """Holds a machine through a reference cycle, so only a collection frees it."""
+
+    def __init__(self, machine: popcorn.Machine) -> None:
+        self.machine = machine
+        self.itself = self
+
+
+def test_a_collection_on_another_host_thread_defers_the_hook_removals_of_a_held_machine(
+    machines: Machines,
+) -> None:
+    gc.collect()
+    before = _core.host_threads()
+    enabled = gc.isenabled()
+    relays: list[weakref.ref[Relay]] = []
+    hooks: list[_core.Hook] = []
+    collected: list[bool] = []
+    deferred: list[bool] = []
+    first = machines()
+
+    def relay(self: popcorn.Machine, handler: Callable[..., object], keys: list[int]) -> Relay:
+        table = self._callback_table  # pyright: ignore[reportPrivateUsage]
+        keys.append(table.add(handler))
+        made = TracedRelay(table, keys[-1])
+        relays.append(weakref.ref(made))
+        return made
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(popcorn.Machine, "_relay", relay)
+        idle = first.intercept("tick", lambda call: call.proceed())
+    hooks.extend(idle._hooks)  # pyright: ignore[reportPrivateUsage]
+    del idle
+    hold = first._handle.hold_at_boundary()  # pyright: ignore[reportPrivateUsage]
+    gc.disable()
+    try:
+        Cycle(first)
+        first.start()
+        assert hold.wait_held(10)
+        gone = weakref.ref(first)
+        del first
+        second = machines()
+
+        def handler(call: popcorn.Call) -> popcorn.Return:
+            gc.collect()
+            collected.append(gone() is None)
+            hooks.clear()
+            deferred.append(relays[-1]() is not None)
+            return call.proceed()
+
+        second.intercept("alu_mark", handler, once=True)
+        asyncio.run(second.run(budget=1_000_000))
+    finally:
+        hold.release()
+        if enabled:
+            gc.enable()
+    assert collected == [True]
+    assert deferred == [True]
+    assert settles(lambda: relays[-1]() is None)
     assert settles(lambda: _core.host_threads() == before + 1)
 
 
