@@ -310,6 +310,7 @@ def test_unrelated_old_files_survive_the_sweep(tmp_path: Path) -> None:
     assert all(path.exists() for path in stray) and folder.exists()
 
 
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd")
 def test_a_waiter_on_a_removed_lock_holds_the_new_file(tmp_path: Path) -> None:
     entry = Entry.of(tmp_path, "6" * 64)
     holder = os.open(entry.lock, os.O_RDWR | os.O_CREAT)
@@ -324,7 +325,9 @@ def test_a_waiter_on_a_removed_lock_holds_the_new_file(tmp_path: Path) -> None:
 
     thread = threading.Thread(target=lambda: asyncio.run(wait()))
     thread.start()
+    deadline = time.monotonic() + 10
     while len(holders(entry.lock)) < 2:
+        assert thread.is_alive() and time.monotonic() < deadline
         time.sleep(0.01)
     entry.lock.unlink()
     os.close(holder)
