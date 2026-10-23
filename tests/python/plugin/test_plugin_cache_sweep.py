@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from popcorn.pytest import _cache
 from popcorn.pytest._cache import Entry, locked, sweep
 
 from .helpers import write_conftest, write_project
@@ -257,6 +258,54 @@ def test_a_read_only_cache_does_not_fail_the_session(pytester: pytest.Pytester) 
         directory.chmod(0o755)
 
 
+def holders(path: Path) -> list[str]:
+    target = os.stat(path)
+    found: list[str] = []
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            seen = os.stat(f"/proc/self/fd/{name}")
+        except OSError:
+            continue
+        if (seen.st_dev, seen.st_ino) == (target.st_dev, target.st_ino):
+            found.append(name)
+    return found
+
+
+def test_a_sweeper_whose_lock_was_removed_backs_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = Entry.of(tmp_path, "7" * 64)
+    flock = fcntl.flock
+
+    def unlinking(descriptor: int, operation: int) -> None:
+        entry.lock.unlink()
+        flock(descriptor, operation)
+
+    monkeypatch.setattr(_cache.fcntl, "flock", unlinking)
+    assert _cache._try_lock(entry.lock) is None  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_removed_orphan_group_leaves_no_lock(tmp_path: Path) -> None:
+    orphan = tmp_path / f"{'8' * 64}.snap"
+    orphan.write_bytes(b"x")
+    then = time.time() - 8 * DAY
+    os.utime(orphan, (then, then))
+    assert sweep(tmp_path, 7) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_unrelated_old_files_survive_the_sweep(tmp_path: Path) -> None:
+    then = time.time() - 30 * DAY
+    stray = [tmp_path / "README", tmp_path / ".gitignore", tmp_path / f"{'9' * 63}.snap"]
+    for path in stray:
+        path.write_bytes(b"x")
+        os.utime(path, (then, then))
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    assert sweep(tmp_path, 7) == 0
+    assert all(path.exists() for path in stray) and folder.exists()
+
+
 def test_a_waiter_on_a_removed_lock_holds_the_new_file(tmp_path: Path) -> None:
     entry = Entry.of(tmp_path, "6" * 64)
     holder = os.open(entry.lock, os.O_RDWR | os.O_CREAT)
@@ -271,7 +320,8 @@ def test_a_waiter_on_a_removed_lock_holds_the_new_file(tmp_path: Path) -> None:
 
     thread = threading.Thread(target=lambda: asyncio.run(wait()))
     thread.start()
-    time.sleep(0.3)
+    while len(holders(entry.lock)) < 2:
+        time.sleep(0.01)
     entry.lock.unlink()
     os.close(holder)
     assert entered.wait(5)

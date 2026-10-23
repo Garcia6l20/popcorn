@@ -13,6 +13,7 @@ import importlib.util
 import inspect
 import json
 import os
+import re
 import sys
 import time
 import types
@@ -461,6 +462,9 @@ def _is_stale(info: Path, digests: dict[str, str | None], version: str, native: 
     return False
 
 
+_CACHE_FILE = re.compile(r"([0-9a-f]{64})\.(?:snap|json|pcov|lock)(?:\.tmp\..+)?")
+
+
 def _try_lock(path: Path) -> int | None:
     try:
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
@@ -469,6 +473,9 @@ def _try_lock(path: Path) -> int | None:
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
+        os.close(descriptor)
+        return None
+    if not _names_file(descriptor, path):
         os.close(descriptor)
         return None
     return descriptor
@@ -493,10 +500,10 @@ def _sweep_orphans(directory: Path, max_age_days: int, moment: float) -> int:
     limit = (max_age_days if max_age_days > 0 else 1) * 86400
     groups: dict[str, list[Path]] = {}
     for path in directory.iterdir():
-        stem = path.name.split(".", 1)[0]
-        if (directory / f"{stem}.json").exists():
+        named = _CACHE_FILE.fullmatch(path.name)
+        if named is None or (directory / f"{named[1]}.json").exists():
             continue
-        groups.setdefault(stem, []).append(path)
+        groups.setdefault(named[1], []).append(path)
     removed = 0
     for stem, paths in sorted(groups.items()):
         try:
@@ -513,6 +520,7 @@ def _sweep_orphans(directory: Path, max_age_days: int, moment: float) -> int:
                 continue
             for path in paths:
                 path.unlink(missing_ok=True)
+            entry.lock.unlink(missing_ok=True)
             removed += 1
         except OSError:
             continue
