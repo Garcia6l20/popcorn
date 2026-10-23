@@ -100,3 +100,15 @@ fault registers and the call stack.
 Boot snapshots are cached in `.pytest_cache/d/popcorn/boot`. A later session, or another xdist
 worker, restores a boot instead of running it. The cache key covers the popcorn build, the
 description, the images and the model sources. `--cache-clear` drops the cache.
+
+At session end, the plugin deletes the entries that can no longer hit: those booted from another
+popcorn version or native extension, or from an image that changed or no longer exists. It also
+deletes entries unused for `popcorn_cache_max_age_days` days, a cache hit counting as a use:
+
+```ini
+[pytest]
+popcorn_cache_max_age_days = 14
+```
+
+The default is 7 days and 0 disables the age limit. Under xdist only the controller sweeps, and
+an entry another process is booting or restoring is left for the next session.

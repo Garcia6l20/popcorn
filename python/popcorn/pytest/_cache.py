@@ -14,6 +14,7 @@ import inspect
 import json
 import os
 import sys
+import time
 import types
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -41,7 +42,7 @@ from popcorn._native_digest import native_digest
 from popcorn.board import I2CTarget, SpiController, SpiTarget
 from popcorn.units import VirtualTime
 
-FORMAT = "popcorn-boot-cache 1"
+FORMAT = "popcorn-boot-cache 2"
 
 
 @functools.cache
@@ -51,6 +52,20 @@ def _extension_digest() -> str:
 
 def _file_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def recorded_inputs(project: MachineDescription) -> dict[str, object]:
+    """The checkable inputs of a boot of `project`: the popcorn version, the native extension
+    digest, and the path and file digest of each image. A sweep compares them to the current
+    values."""
+    return {
+        "version": popcorn.version(),
+        "native": _extension_digest(),
+        "images": [
+            [str(Path(image.path).absolute()), _file_digest(Path(image.path))]
+            for image in project.images
+        ],
+    }
 
 
 def _class_source(cls: type) -> str:
@@ -339,8 +354,20 @@ class Entry:
             detail=str(fields.get("detail", "")),
         )
 
-    def save(self, snapshot: Snapshot, stop: Stop | None, coverage: bytes | None) -> None:
-        """Write the entry, the snapshot last so that a complete entry has all its files."""
+    def touch(self) -> None:
+        """Mark the entry used now, so that the age limit counts from this use."""
+        with contextlib.suppress(OSError):
+            os.utime(self.info)
+
+    def save(
+        self,
+        snapshot: Snapshot,
+        stop: Stop | None,
+        coverage: bytes | None,
+        inputs: Mapping[str, object],
+    ) -> None:
+        """Write the entry with the `inputs` it was booted from, the snapshot last so that a
+        complete entry has all its files."""
         self.drop()
         if coverage is not None:
             _write_atomic(self.coverage, coverage)
@@ -355,7 +382,7 @@ class Entry:
                 "detail": stop.detail,
             }
         )
-        _write_atomic(self.info, json.dumps({"stop": info}).encode())
+        _write_atomic(self.info, json.dumps({"stop": info, "inputs": inputs}).encode())
         snapshot.save(self.snapshot)
 
 
@@ -386,3 +413,78 @@ def cache_directory(config: pytest.Config) -> Path | None:
     if isinstance(cache, pytest.Cache):
         return cache.mkdir("popcorn") / "boot"
     return None
+
+
+def _current_digest(path: str, digests: dict[str, str | None]) -> str | None:
+    if path not in digests:
+        try:
+            digests[path] = _file_digest(Path(path))
+        except OSError:
+            digests[path] = None
+    return digests[path]
+
+
+def _is_stale(info: Path, digests: dict[str, str | None]) -> bool:
+    try:
+        recorded: object = json.loads(info.read_text()).get("inputs")
+    except OSError, ValueError, AttributeError:
+        return True
+    if not isinstance(recorded, dict):
+        return True
+    fields = cast(dict[str, object], recorded)
+    if fields.get("version") != popcorn.version() or fields.get("native") != _extension_digest():
+        return True
+    images = fields.get("images")
+    if not isinstance(images, list):
+        return True
+    for image in cast(list[object], images):
+        if not isinstance(image, list) or len(cast(list[object], image)) != 2:
+            return True
+        path, digest = cast(list[object], image)
+        if not isinstance(path, str) or _current_digest(path, digests) != digest:
+            return True
+    return False
+
+
+def _try_lock(path: Path) -> int | None:
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(descriptor)
+        return None
+    return descriptor
+
+
+def sweep(directory: Path, max_age_days: int, now: float | None = None) -> int:
+    """Delete the entries of `directory` that can no longer hit and return how many.
+
+    An entry goes when its recorded popcorn version or native extension digest differs from the
+    current one, when an image it was booted from is missing or has another digest, when it
+    records no inputs, or, with `max_age_days` above 0, when it was last used more than
+    `max_age_days` days before `now`. An entry whose lock another process holds is kept.
+    """
+    if not directory.is_dir():
+        return 0
+    moment = time.time() if now is None else now
+    digests: dict[str, str | None] = {}
+    removed = 0
+    for info in sorted(directory.glob("*.json")):
+        entry = Entry.of(directory, info.stem)
+        held = _try_lock(entry.lock)
+        if held is None:
+            continue
+        try:
+            try:
+                age = moment - info.stat().st_mtime
+            except OSError:
+                continue
+            expired = max_age_days > 0 and age > max_age_days * 86400
+            if expired or _is_stale(info, digests):
+                entry.drop()
+                entry.info.unlink(missing_ok=True)
+                entry.lock.unlink(missing_ok=True)
+                removed += 1
+        finally:
+            os.close(held)
+    return removed

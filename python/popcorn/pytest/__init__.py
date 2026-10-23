@@ -130,8 +130,15 @@ description digest, the strictness, the source of every board model and device c
 modules its source file imports outside popcorn, the Python installation and site-packages, the
 files their parameters name, and for each peripheral without a board model the
 `popcorn.model.register()` registration that serves it, with its class source and imports in
-the same way. A module imported only by those modules is not covered, and entries are
-never pruned: `--cache-clear` drops them all. `-p no:cacheprovider` turns the cache off.
+the same way. A module imported only by those modules is not covered: `--cache-clear` drops
+all entries. `-p no:cacheprovider` turns the cache off.
+
+Each entry records the popcorn version, the native extension digest and the path and file digest
+of each image it booted from. At session end the controller, never an xdist worker, deletes the
+entries whose recorded version or digest differs from the current one, whose image file is
+missing, or that no session has used for `popcorn_cache_max_age_days` days, 7 by default and 0
+for no age limit. A cache hit marks its entry used. An entry whose lock another process holds is
+left for the next sweep.
 
 Limits:
 

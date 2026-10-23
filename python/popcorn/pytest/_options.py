@@ -9,6 +9,7 @@ from typing import NoReturn, cast
 
 import pytest
 
+DEFAULT_CACHE_MAX_AGE_DAYS = 7
 MARKER = "popcorn(budget=None, strict=None): popcorn machine settings for this test"
 
 
@@ -27,6 +28,8 @@ class Settings:
             `--popcorn-ring`.
         ring_blocks: Whether every popcorn machine's trace ring keeps BLOCK records,
             `--popcorn-ring-blocks`.
+        cache_max_age_days: Days a boot cache entry may go unused before the session-end sweep
+            deletes it, 0 for no age limit, the `popcorn_cache_max_age_days` ini option.
     """
 
     cov: Path | None
@@ -36,6 +39,7 @@ class Settings:
     budget: int | None
     ring: int = 0
     ring_blocks: bool = False
+    cache_max_age_days: int = DEFAULT_CACHE_MAX_AGE_DAYS
 
     @classmethod
     def from_config(cls, config: pytest.Config) -> Settings:
@@ -53,6 +57,7 @@ class Settings:
             budget=budget if isinstance(budget, int) else None,
             ring=ring if isinstance(ring, int) else 0,
             ring_blocks=config.getoption("popcorn_ring_blocks") is True,
+            cache_max_age_days=_age_days(config.getini("popcorn_cache_max_age_days")),
         )
 
 
@@ -65,8 +70,29 @@ def _path(value: object, base: Path) -> Path | None:
     return base / value
 
 
+def _age_days(value: object) -> int:
+    text = str(value).strip()
+    if not text:
+        return DEFAULT_CACHE_MAX_AGE_DAYS
+    try:
+        days = int(text)
+    except ValueError:
+        days = -1
+    if days < 0:
+        raise pytest.UsageError(
+            f"popcorn_cache_max_age_days must be a whole number of days, 0 or above, not {text!r}"
+        )
+    return days
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
-    """Register the six `--popcorn-*` options."""
+    """Register the six `--popcorn-*` options and the `popcorn_cache_max_age_days` ini option."""
+    parser.addini(
+        "popcorn_cache_max_age_days",
+        help="days a boot cache entry may go unused before the session-end sweep deletes it, "
+        "0 for no age limit, default 7",
+        default=str(DEFAULT_CACHE_MAX_AGE_DAYS),
+    )
     group = parser.getgroup("popcorn", "popcorn firmware emulation")
     group.addoption(
         "--popcorn-cov",

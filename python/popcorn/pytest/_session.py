@@ -19,7 +19,15 @@ from popcorn import ConfigError, Machine, MachineDescription, Snapshot, Stop
 from popcorn._devices import serving
 from popcorn._machine import AttachedDevice
 from popcorn.coverage import Coverage, worker_path
-from popcorn.pytest._cache import Entry, cache_directory, cache_key, devices_digest, locked
+from popcorn.pytest._cache import (
+    Entry,
+    cache_directory,
+    cache_key,
+    devices_digest,
+    locked,
+    recorded_inputs,
+    sweep,
+)
 from popcorn.pytest._loop import OwnedLoop, owned_loop
 from popcorn.pytest._options import SETTINGS, Settings
 from popcorn.pytest._report import park_ended, unclaimed
@@ -423,9 +431,15 @@ class PopcornSession:
             if entry.exists(self.coverage is not None):
                 restored = self._restored_from(key, entry, devices, name)
                 if restored is not None:
+                    entry.touch()
                     return restored
             booted = await self._fresh_boot(key, project, devices, name)
-            entry.save(booted.snapshot, booted.boot_stop, self._boot_coverage_bytes(key, booted))
+            entry.save(
+                booted.snapshot,
+                booted.boot_stop,
+                self._boot_coverage_bytes(key, booted),
+                recorded_inputs(project),
+            )
             return booted
 
     def _restored_from(
@@ -551,7 +565,12 @@ def summary(session: PopcornSession) -> dict[str, object]:
 def pytest_sessionfinish(session: pytest.Session) -> None:
     """Park the machines, collect their coverage, close their pty bridges and hand the counters
     to the xdist controller."""
-    state = session.config.stash.get(SESSION, None)
+    config = session.config
+    if not hasattr(config, "workerinput"):
+        directory = cache_directory(config)
+        if directory is not None:
+            sweep(directory, config.stash[SETTINGS].cache_max_age_days)
+    state = config.stash.get(SESSION, None)
     if state is None:
         return
     state.park()
