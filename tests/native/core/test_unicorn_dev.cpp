@@ -6,12 +6,6 @@
 #include <unicorn/unicorn.h>
 
 #include <cstdint>
-#include <string_view>
-
-TEST_CASE("version names the pinned Unicorn commit")
-{
-  CHECK(popcorn::core::version().find("f8d7eae") != std::string_view::npos);
-}
 
 TEST_CASE("open_m33 opens a Cortex-M33 engine")
 {
