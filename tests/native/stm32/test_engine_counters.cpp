@@ -297,6 +297,20 @@ TEST_CASE("the spin loop's SRAM loads take the TLB fast path while a clock hook 
   CHECK(slow == 0);
 }
 
+TEST_CASE("the spin loop's SRAM stores take the TLB fast path")
+{
+  irq_machine m{"spin_store", 0, 0};
+  m.run_to(2 * ms_ps);
+  auto* const engine     = machine_internals::engine(*m.target);
+  auto const  spins_from = m.word("spins");
+  REQUIRE(uc_ctl_slow_path_count_reset(engine) == UC_ERR_OK);
+  m.run_to(2 * ms_ps + ms_ps / 10);
+  std::uint64_t slow = ~std::uint64_t{};
+  REQUIRE(uc_ctl_slow_path_count(engine, &slow) == UC_ERR_OK);
+  CHECK(m.word("spins") - spins_from >= 1'000);
+  CHECK(slow == 0);
+}
+
 TEST_CASE("a read watch added while parked sees the next loads of translated code, at their pc")
 {
   irq_machine m{"irq_rate", 0, 0};

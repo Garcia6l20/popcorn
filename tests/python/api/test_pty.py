@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import fcntl
 import gc
 import logging
 import os
 import re
 import select
 import selectors
+import struct
+import termios
 import time
 from fractions import Fraction
 from typing import Any, Literal, cast
@@ -19,6 +23,10 @@ from popcorn import _host
 from popcorn.units import ms
 
 from .conftest import BOARD_ELF, holds_pty
+
+SRAM_WFI = 0x2000_0000
+WFI = 0xBF30
+BRANCH_TO_WFI = 0xE7FD
 
 
 def client(path: str, line: bytes) -> bytes:
@@ -169,3 +177,31 @@ def test_other_connections_and_devices_are_refused(u575: popcorn.PartDescription
     with pytest.raises(popcorn.ConfigError) as refused:
         fraction.machine()
     assert refused.value.key == "board.I2C1.devices[0].model"
+
+
+def test_an_idle_free_run_frees_a_pty_when_its_exclusive_client_closes(
+    board: popcorn.Machine,
+) -> None:
+    path = board.board.pty("USART1")
+    board.mem.write(SRAM_WFI, struct.pack("<2H", WFI, BRANCH_TO_WFI))
+    board.reg.pc = SRAM_WFI
+
+    def close_exclusively_then_reopen() -> bool:
+        fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
+        fcntl.ioctl(fd, termios.TIOCEXCL)
+        os.close(fd)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                os.close(os.open(path, os.O_RDWR | os.O_NOCTTY))
+                return True
+            except OSError as busy:
+                assert busy.errno == errno.EBUSY
+                time.sleep(0.01)
+        return False
+
+    async def body() -> bool:
+        async with board.running():
+            return await asyncio.to_thread(close_exclusively_then_reopen)
+
+    assert asyncio.run(body())

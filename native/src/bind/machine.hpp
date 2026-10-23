@@ -236,12 +236,14 @@ struct host_abandon
 class[[= py::rename{"PtyBridge"}]] pty_handle
 {
 public:
-  /** @brief A handle on @p bridge, owned by @p owner, polled by @p host under @p watched. */
+  /** @brief A handle on @p bridge, owned by @p owner, polled by @p host under @p watched and
+   * @p watched_clients. */
   [[= py::skip]] pty_handle(
       std::weak_ptr<detail::pty_bridges>         owner,
       std::shared_ptr<detail::pty_bridge> const& bridge,
       std::weak_ptr<core::host>                  host,
-      core::watch_id                             watched);
+      core::watch_id                             watched,
+      std::optional<core::watch_id>              watched_clients);
 
   /** @brief Path of the pty, /dev/pts/N, also after close(). */
   [[= py::doc{"Path of the pty, /dev/pts/N."}]] [[nodiscard]] auto path() const -> std::string;
@@ -255,6 +257,7 @@ private:
   std::weak_ptr<detail::pty_bridge>  bridge_;
   std::weak_ptr<core::host>          host_;
   core::watch_id                     watched_;
+  std::optional<core::watch_id>      watched_clients_;
   std::string                        path_;
 };
 
