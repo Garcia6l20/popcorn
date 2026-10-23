@@ -2,6 +2,7 @@
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/services.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/builtin.hpp>
@@ -38,23 +39,31 @@ using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 using popcorn::testing::u575;
 
-constexpr std::uint64_t instruction_ps = 250'000;
-constexpr std::uint64_t us             = 1'000'000;
-constexpr std::uint64_t ms             = 1'000 * us;
-constexpr address       stub           = 0x2006'0000;
-constexpr address       source_words   = 0x2006'1000;
-constexpr address       target_words   = 0x2006'2000;
-constexpr address       gpdma          = 0x4002'0000;
-constexpr address       rcc            = 0x4602'0c00;
-constexpr address       usart1         = 0x4001'3800;
-constexpr address       nvic_iser      = 0xe000'e100;
-constexpr address       nvic_ispr      = 0xe000'e200;
-constexpr address       scb_scr        = 0xe000'ed10;
-constexpr address       syst_csr       = 0xe000'e010;
-constexpr address       syst_rvr       = 0xe000'e014;
-constexpr std::uint32_t rng_irq        = 94;
-constexpr std::uint32_t hash_irq       = 96;
-constexpr std::uint32_t gpdma0_irq     = 29;
+constexpr std::uint64_t instruction_ps  = 250'000;
+constexpr std::uint64_t us              = 1'000'000;
+constexpr std::uint64_t ms              = 1'000 * us;
+constexpr address       stub            = 0x2006'0000;
+constexpr address       source_words    = 0x2006'1000;
+constexpr address       target_words    = 0x2006'2000;
+constexpr address       gpdma           = 0x4002'0000;
+constexpr address       rcc             = 0x4602'0c00;
+constexpr address       usart1          = 0x4001'3800;
+constexpr address       nvic_iser       = 0xe000'e100;
+constexpr address       nvic_ispr       = 0xe000'e200;
+constexpr address       scb_scr         = 0xe000'ed10;
+constexpr address       syst_csr        = 0xe000'e010;
+constexpr address       syst_rvr        = 0xe000'e014;
+constexpr std::uint32_t rng_irq         = 94;
+constexpr std::uint32_t hash_irq        = 96;
+constexpr std::uint32_t gpdma0_irq      = 29;
+constexpr std::uint32_t gpdma1_irq      = 30;
+constexpr std::uint32_t gtzc_irq        = 8;
+constexpr std::uint32_t sai1_irq        = 90;
+constexpr address       sai1_a          = 0x4001'5404;
+constexpr address       sai1_b          = 0x4001'5424;
+constexpr std::uint32_t sai_enable      = 1u << 16;
+constexpr std::uint64_t sai_main_bound  = 1'000'000;
+constexpr std::uint64_t sai_setup_bound = 1'000'000;
 
 constexpr std::array<std::uint16_t, 2> wfi_loop{0xbf30, 0xe7fd};
 constexpr std::array<std::uint16_t, 2> wfe_loop{0xbf20, 0xe7fd};
@@ -63,7 +72,7 @@ constexpr std::array<std::uint16_t, 1> self_loop{0xe7fe};
 class pulse_model final : public periph::model
 {
 public:
-  pulse_model(periph::model_context& ctx, periph::wake_role role) noexcept
+  pulse_model(periph::model_context& ctx, std::optional<periph::wake_role> role) noexcept
       : context_{ctx}, role_{role}
   {}
 
@@ -72,6 +81,11 @@ public:
   void arm(vtime at)
   {
     std::ignore = context_.events.schedule_at(at, 0, 0, context_.clock);
+  }
+
+  void watch_reads(address at, std::uint32_t size)
+  {
+    context_.services.watch_reads(at, size, true);
   }
 
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
@@ -122,12 +136,12 @@ public:
 
   [[nodiscard]] auto role_in_horizon() const noexcept -> periph::wake_role override
   {
-    return role_;
+    return role_ ? *role_ : periph::model::role_in_horizon();
   }
 
 private:
-  periph::model_context& context_;
-  periph::wake_role      role_;
+  periph::model_context&           context_;
+  std::optional<periph::wake_role> role_;
 };
 
 class ticking_requester final : public periph::model, public stm32::dma_requester
@@ -198,6 +212,11 @@ public:
     return true;
   }
 
+  [[nodiscard]] auto role_in_horizon() const noexcept -> periph::wake_role override
+  {
+    return periph::wake_role::lines;
+  }
+
 private:
   periph::model_context& context_;
   stm32::dma_signal      signal_;
@@ -254,13 +273,17 @@ auto later(stm32_fixture const& f, std::uint64_t ps) -> vtime
   return vtime{now(f).ps + ps};
 }
 
-void park(stm32_fixture const& f, std::span<std::uint16_t const> code, std::uint64_t steps = 1)
+void park(
+    stm32_fixture const&           f,
+    std::span<std::uint16_t const> code,
+    std::uint64_t                  steps = 1,
+    address                        at    = stub)
 {
   for(auto const [index, half] : std::views::enumerate(code))
   {
-    REQUIRE(f.target->mem().write(stub + 2 * static_cast<address>(index), 2, half).has_value());
+    REQUIRE(f.target->mem().write(at + 2 * static_cast<address>(index), 2, half).has_value());
   }
-  f.set("pc", stub | 1u);
+  f.set("pc", at | 1u);
   auto const result = f.run({.exact_instructions = icount{steps}});
   REQUIRE(
       (not result.stopped
@@ -301,9 +324,10 @@ struct pulses
   slot<pulse_model>              hash;
   std::unique_ptr<stm32_fixture> f;
 
-  explicit pulses(periph::wake_role role = periph::wake_role::lines)
+  explicit pulses(std::optional<periph::wake_role> role = periph::wake_role::lines)
   {
-    auto options = popcorn::testing::stm32_options();
+    auto options           = popcorn::testing::stm32_options();
+    options.spin_threshold = 0;
     options.models.emplace("RNG", [this, role](periph::model_context& ctx, auto const&) {
       auto made = std::make_shared<pulse_model>(ctx, role);
       rng.model = made.get();
@@ -325,6 +349,7 @@ struct sweep_result
   std::uint32_t frames{};
   std::uint32_t late_frames{};
   std::uint32_t transmit_bounds{};
+  std::uint32_t early_stops{};
 };
 
 auto sweep(stm32_fixture const& f, vtime end, std::span<frame_log const* const> wires)
@@ -343,6 +368,10 @@ auto sweep(stm32_fixture const& f, vtime end, std::span<frame_log const* const> 
         ++out.transmit_bounds;
         to = std::min(to, *bound);
       }
+    }
+    if(h.stop)
+    {
+      to = std::min(to, *h.stop);
     }
     to = std::min(to, end);
     if(not h.asleep or to <= t0)
@@ -384,10 +413,43 @@ auto sweep(stm32_fixture const& f, vtime end, std::span<frame_log const* const> 
     }
     if(result.stopped and result.stopped->reason != stop_reason::time)
     {
+      if(now(f) < to)
+      {
+        ++out.early_stops;
+      }
       break;
     }
   }
   return out;
+}
+
+void enter_main(stm32_fixture const& f)
+{
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{sai_main_bound}, .until = sym("sai_ll", "main")})
+          .reason
+      == stop_reason::address);
+}
+
+void channel(
+    stm32_fixture const& f,
+    std::size_t          ch,
+    std::uint32_t        tr1,
+    std::uint32_t        tr2,
+    std::uint32_t        bytes,
+    address              from,
+    address              to,
+    std::uint32_t        cr)
+{
+  auto const base = gpdma + 0x50 + 0x80 * static_cast<address>(ch);
+  set_bits(f, rcc + 0x88, 1u);
+  write32(f, base + 0x40, tr1);
+  write32(f, base + 0x44, tr2);
+  write32(f, base + 0x48, bytes);
+  write32(f, base + 0x4c, static_cast<std::uint32_t>(from));
+  write32(f, base + 0x50, static_cast<std::uint32_t>(to));
+  write32(f, base + 0x7c, 0);
+  write32(f, base + 0x14, cr);
 }
 
 void channel0(
@@ -417,6 +479,64 @@ constexpr std::uint32_t tr1_words = 2u | (2u << 16);
 constexpr std::uint32_t tr1_sinc  = 1u << 3;
 constexpr std::uint32_t tr1_dinc  = 1u << 19;
 constexpr std::uint64_t burst_ps  = 4 * instruction_ps;
+constexpr std::uint64_t frame_ps  = 100 * us;
+
+auto field_at(std::string_view peripheral, std::string_view field)
+    -> std::pair<address, std::uint32_t>
+{
+  auto const& unit =
+      *std::ranges::find(u575().peripherals, peripheral, &popcorn::peripheral_desc::name);
+  for(auto const& reg : unit.registers)
+  {
+    for(auto const& bits : reg.fields)
+    {
+      if(bits.name == field)
+      {
+        return {unit.base + reg.offset, std::uint32_t{1} << bits.lsb};
+      }
+    }
+  }
+  FAIL("no field ", field, " in ", peripheral);
+  return {};
+}
+
+void enter_sai_setup(stm32_fixture const& f)
+{
+  enter_main(f);
+  f.set("pc", sym("sai_ll", "dma"));
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{sai_setup_bound},
+                     .until            = sym("sai_ll", "__NVIC_EnableIRQ.part.0")})
+          .reason
+      == stop_reason::address);
+  write32(f, gpdma + 0x64, 0);
+  write32(f, gpdma + 0xcc, 0);
+}
+
+void usart_rx_dma(stm32_fixture const& f, bool fifo, std::uint32_t bytes)
+{
+  set_bits(f, rcc + 0xa4, 1u << 14);
+  write32(f, usart1 + 0x0c, 40);
+  write32(f, usart1 + 0x08, 1u << 6);
+  write32(f, usart1 + 0x00, 1u | (1u << 2) | (fifo ? 1u << 29 : 0u));
+  auto* const controller = dynamic_cast<stm32::dma_controller*>(f.target->model("GPDMA1"));
+  REQUIRE(controller != nullptr);
+  auto const request = controller->request_of("usart1_rx_dma");
+  REQUIRE(request.has_value());
+  enable_irq(f, gpdma0_irq);
+  channel0(f, tr1_dinc, *request, bytes, usart1 + 0x24, target_words, 0);
+}
+
+void receive_frames(stm32_fixture const& f, std::size_t count)
+{
+  std::vector<std::uint16_t> data(count, 0x5a);
+  dynamic_cast<periph::uart_port*>(f.target->model("USART1"))->receive(data);
+}
+
+void run_one(stm32_fixture const& f)
+{
+  std::ignore = f.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{1}});
+}
 }
 
 TEST_CASE("WFI with an enabled IRQ due at T wakes at T")
@@ -569,9 +689,9 @@ TEST_CASE("b . bounds the stop where the instructions left run out")
   CHECK(now(f) == *h.stop);
 }
 
-TEST_CASE("a Python model's event bounds the stop and the stop happens there")
+TEST_CASE("an opaque model's event bounds the stop and the stop happens there")
 {
-  pulses      p{periph::wake_role::python};
+  pulses      p{periph::wake_role::opaque};
   auto const& f = *p.f;
   park(f, wfi_loop);
   p.rng.model->stop_on_event = true;
@@ -725,10 +845,7 @@ TEST_CASE("a running timer with its IRQ disabled bounds the wake as a trigger so
 TEST_CASE("an SAI underrun with FIFO words left wakes at the closed-form slot")
 {
   stm32_fixture f{u575(), "sai_ll"};
-  REQUIRE(
-      f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("sai_ll", "main")})
-          .reason
-      == stop_reason::address);
+  enter_main(f);
   f.set("pc", sym("sai_ll", "underrun"));
   while(not f.target->horizon().asleep)
   {
@@ -742,10 +859,7 @@ TEST_CASE("an SAI underrun with FIFO words left wakes at the closed-form slot")
 TEST_CASE("an SAI fed by a bounded DMA block wakes at the underrun after its supply")
 {
   stm32_fixture f{u575(), "sai_ll"};
-  REQUIRE(
-      f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("sai_ll", "main")})
-          .reason
-      == stop_reason::address);
+  enter_main(f);
   f.set("pc", sym("sai_ll", "dma16_zero"));
   while(not f.target->horizon().asleep)
   {
@@ -763,10 +877,7 @@ TEST_CASE("an SAI fed by a bounded DMA block wakes at the underrun after its sup
 TEST_CASE("an SAI whose DMA channel does not answer bounds at its next word point")
 {
   stm32_fixture f{u575(), "sai_ll"};
-  REQUIRE(
-      f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("sai_ll", "main")})
-          .reason
-      == stop_reason::address);
+  enter_main(f);
   f.set("pc", sym("sai_ll", "dma16_zero"));
   while(not f.target->horizon().asleep)
   {
@@ -792,14 +903,12 @@ TEST_CASE("an SAI whose DMA channel does not answer bounds at its next word poin
 TEST_CASE("every sleep of the SAI ring with its DMA receiver wakes at or after its horizon")
 {
   stm32_fixture f{u575(), "sai_ll"};
-  REQUIRE(
-      f.run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("sai_ll", "main")})
-          .reason
-      == stop_reason::address);
+  enter_main(f);
   f.set("pc", sym("sai_ll", "dma"));
   auto const result = sweep(f, later(f, 20 * ms), {});
   CHECK(result.sleeps > 20);
   CHECK(result.late_wakes == 0);
+  CHECK(result.early_stops == 0);
 }
 
 TEST_CASE("every sleep of a USB device enumerating wakes at or after its horizon")
@@ -814,6 +923,7 @@ TEST_CASE("every sleep of a USB device enumerating wakes at or after its horizon
   auto const    result = sweep(f, later(f, 300 * ms), {});
   CHECK(result.sleeps > 100);
   CHECK(result.late_wakes == 0);
+  CHECK(result.early_stops == 0);
 }
 
 TEST_CASE("every sleep of the linked controller wakes and transmits at or after its horizon")
@@ -828,6 +938,161 @@ TEST_CASE("every sleep of the linked controller wakes and transmits at or after 
   auto const                      result = sweep(f, later(f, 400 * ms), wires);
   CHECK(result.sleeps > 100);
   CHECK(result.late_wakes == 0);
+  CHECK(result.early_stops == 0);
   CHECK(result.frames > 0);
   CHECK(result.late_frames == 0);
+}
+
+TEST_CASE("a native model with no declared role bounds the stop at its event and stops there")
+{
+  pulses      p{std::nullopt};
+  auto const& f = *p.f;
+  park(f, wfi_loop);
+  p.rng.model->stop_on_event = true;
+  auto const at              = later(f, 25 * us);
+  p.rng.model->arm(at);
+  auto const h = f.target->horizon();
+  CHECK(h.stop == std::optional{at});
+  CHECK(h.wake == std::optional{at});
+  auto const before  = f.target->executed();
+  auto const stopped = f.run_to_stop();
+  CHECK(stopped.reason == stop_reason::user);
+  CHECK(now(f) == at);
+  CHECK(f.target->executed() == before);
+}
+
+TEST_CASE("b . under a code hook is awake and the hook stops it at its next arrival")
+{
+  pulses      p;
+  auto const& f = *p.f;
+  park(f, self_loop);
+  f.set("primask", 1);
+  REQUIRE(f.target->horizon(icount{1'000}).asleep);
+  auto const hook = f.target->add_intercept(stub, [](core::intercept_call const&) {
+    return core::intercept_result::stop(stop_reason::user);
+  });
+  auto const h    = f.target->horizon(icount{1'000});
+  CHECK_FALSE(h.asleep);
+  CHECK_FALSE(h.wake.has_value());
+  auto const before  = f.target->executed();
+  auto const t0      = now(f);
+  auto const stopped = f.run_to_stop({.budget_left = icount{1'000}});
+  CHECK(stopped.reason == stop_reason::user);
+  CHECK(f.target->executed().value <= before.value + 1);
+  CHECK(now(f).ps <= t0.ps + instruction_ps);
+}
+
+TEST_CASE("a synchronous SAI receiver of a waiting master wakes at or before its DMA TC")
+{
+  stm32_fixture f{u575(), "sai_ll"};
+  enter_sai_setup(f);
+  write32(f, gpdma + 0x98, 64);
+  enable_irq(f, gpdma1_irq);
+  channel(f, 1, tr1_words | tr1_dinc, 37, 16, sai1_b + 0x1c, target_words, cr_tcie | cr_enable);
+  set_bits(f, sai1_b, sai_enable);
+  set_bits(f, sai1_a, sai_enable);
+  write32(f, gpdma + 0x64, cr_enable);
+  park(f, wfi_loop);
+  auto const h = f.target->horizon();
+  REQUIRE(h.asleep);
+  REQUIRE(h.wake.has_value());
+  check_asleep_until(f, *h.wake);
+  run_one(f);
+  CHECK(now(f) > *h.wake);
+  CHECK((read32(f, gpdma + 0xe0) & (1u << 8)) != 0);
+}
+
+TEST_CASE("a waiting SAI master with only OVRUDRIE wakes at or before its underrun")
+{
+  stm32_fixture f{u575(), "sai_ll"};
+  enter_sai_setup(f);
+  write32(f, gpdma + 0x98, 4);
+  write32(f, sai1_a + 0x10, 1u);
+  enable_irq(f, sai1_irq);
+  set_bits(f, sai1_a, sai_enable);
+  write32(f, gpdma + 0x64, cr_enable);
+  park(f, wfi_loop);
+  auto const h = f.target->horizon();
+  REQUIRE(h.asleep);
+  REQUIRE(h.wake.has_value());
+  check_asleep_until(f, *h.wake);
+  run_one(f);
+  CHECK(now(f) > *h.wake);
+  CHECK((read32(f, sai1_a + 0x14) & 1u) != 0);
+}
+
+TEST_CASE("under TrustZone a waking TZIC makes an active channel wake at its next burst")
+{
+  auto options           = popcorn::testing::stm32_options();
+  options.spin_threshold = 0;
+  REQUIRE(stm32::configure_option_bytes(u575(), {.tzen = true}, options).has_value());
+  stm32_fixture     f{u575(), "boot_ll", std::move(options)};
+  constexpr address secure_stub = 0x3006'0000;
+  constexpr address handler     = 0x3006'0100;
+  constexpr address table       = 0x3006'4000;
+  for(std::uint32_t entry = 0; entry < 16 + 128; ++entry)
+  {
+    write32(f, table + 4 * entry, static_cast<std::uint32_t>(handler | 1u));
+  }
+  REQUIRE(f.target->mem().write(handler, 2, self_loop[0]).has_value());
+  write32(f, 0xe000'ed08, static_cast<std::uint32_t>(table));
+  park(f, wfi_loop, 1, secure_stub);
+  enable_irq(f, gtzc_irq);
+  auto const [ier, ie]  = field_at("GTZC1_TZIC", "SRAM3IE");
+  auto const [sr, flag] = field_at("GTZC1_TZIC", "SRAM3F");
+  set_bits(f, ier, ie);
+  channel0(f, tr1_words | tr1_sinc | tr1_dinc, tr2_swreq, 4, source_words, target_words, cr_enable);
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, burst_ps));
+  check_wakes_at(f, *h.wake);
+  CHECK((read32(f, sr) & flag) != 0);
+}
+
+TEST_CASE("a GPDMA channel fed by USART frames wakes at the closed form of its feed gap")
+{
+  pulses      p;
+  auto const& f = *p.f;
+  park(f, wfi_loop);
+  usart_rx_dma(f, false, 5);
+  write32(f, gpdma + 0x64, cr_tcie | cr_enable);
+  auto const t0 = now(f);
+  receive_frames(f, 8);
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(h.wake->ps >= t0.ps + 2 * frame_ps + burst_ps);
+  CHECK(h.wake->ps <= t0.ps + 3 * frame_ps + burst_ps);
+  check_asleep_until(f, *h.wake);
+  run_one(f);
+  CHECK(now(f).ps >= t0.ps + 5 * frame_ps);
+  CHECK((read32(f, gpdma + 0x60) & (1u << 8)) != 0);
+}
+
+TEST_CASE("a GPDMA channel draining held USART frames wakes at its fifth burst")
+{
+  pulses      p;
+  auto const& f = *p.f;
+  park(f, wfi_loop);
+  usart_rx_dma(f, true, 5);
+  receive_frames(f, 8);
+  std::ignore = run_until(f, later(f, 10 * frame_ps));
+  write32(f, gpdma + 0x64, cr_tcie | cr_enable);
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, 5 * burst_ps));
+  check_wakes_at(f, *h.wake);
+}
+
+TEST_CASE("a GPDMA channel reading a range a model watches wakes at its next burst")
+{
+  pulses            p;
+  auto const&       f     = *p.f;
+  constexpr address flash = 0x0800'8000;
+  park(f, wfi_loop);
+  channel0(f, tr1_words | tr1_sinc | tr1_dinc, tr2_swreq, 16, flash, target_words, cr_enable);
+  CHECK_FALSE(f.target->horizon().wake.has_value());
+  p.rng.model->watch_reads(flash + 32, 16);
+  CHECK_FALSE(f.target->horizon().wake.has_value());
+  p.rng.model->watch_reads(flash + 8, 16);
+  CHECK(f.target->horizon().wake == std::optional{later(f, burst_ps)});
 }

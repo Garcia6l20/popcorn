@@ -105,10 +105,34 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
       return index and wakes_slot(*index);
     }
 
-    [[nodiscard]] auto python_at(address at) const -> bool override
+    [[nodiscard]] auto opaque_at(address at) const -> bool override
     {
       auto const index = unit_at(at);
-      return index and python(*index);
+      return index and opaque(*index);
+    }
+
+    [[nodiscard]] auto read_watched(address at, std::uint64_t size) const -> bool override
+    {
+      auto const& ranges = owner_.run_->controller_ranges;
+      if(ranges.empty())
+      {
+        return false;
+      }
+      auto const* const region = size == 0 or size > std::numeric_limits<std::uint32_t>::max()
+                                   ? nullptr
+                                   : mapped_region::find(owner_.memory_, at, size);
+      if(region == nullptr)
+      {
+        return true;
+      }
+      auto const* const buffer = region->buffer.get();
+      auto const        first  = region->offset + (at - region->desc->start);
+      auto const        last   = first + size - 1;
+      return std::ranges::any_of(ranges, [&](auto const& entry) {
+        auto const& [key, controller]   = entry;
+        auto const& [watched, from, to] = key;
+        return watched == buffer and from <= last and first <= to;
+      });
     }
 
     [[nodiscard]] auto peripheral_at(address at) const -> bool override
@@ -123,12 +147,12 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
           slot.irq_numbers, [this](std::uint32_t source) { return wakes_source(source); });
     }
 
-    [[nodiscard]] auto python(std::size_t index) const -> bool
+    [[nodiscard]] auto opaque(std::size_t index) const -> bool
     {
       auto const& slot = owner_.peripherals_[index];
       return slot
          and (slot->python_backed
-              or (slot->model and slot->model->role_in_horizon() == periph::wake_role::python));
+              or (slot->model and slot->model->role_in_horizon() == periph::wake_role::opaque));
     }
 
     [[nodiscard]] auto first(std::size_t index) const -> std::optional<vtime>
@@ -209,11 +233,13 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
   auto const           now = clock_driver_.exact_time();
   horizon_reader const reader{*this, now};
   core::horizon        out;
-  auto const&          wires   = run_->transmit_wires;
-  auto const           held    = run_->core_held;
-  auto const           idle    = not held and arch_->idle();
-  auto const           looping = not held and not idle and arch_->self_branch(arch_->pc());
-  out.asleep                   = held or ((idle or looping) and not arch_->wake_pending());
+  auto const&          wires = run_->transmit_wires;
+  auto const           held  = run_->core_held;
+  auto const           idle  = not held and arch_->idle();
+  auto const           pc    = arch_->pc();
+  auto const           looping =
+      not held and not idle and run_->self_branch_skippable(pc) and arch_->self_branch(pc);
+  out.asleep = held or ((idle or looping) and not arch_->wake_pending());
 
   std::optional<vtime>              stop;
   std::optional<vtime>              wake;
@@ -240,9 +266,9 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
     }
     auto const  index = static_cast<std::size_t>(at);
     auto const& model = *slot->model;
-    auto const  role  = reader.python(index) ? periph::wake_role::python : model.role_in_horizon();
+    auto const  role  = reader.opaque(index) ? periph::wake_role::opaque : model.role_in_horizon();
     auto const  first = reader.first(index);
-    if(role == periph::wake_role::python
+    if(role == periph::wake_role::opaque
        or role == periph::wake_role::reset_source
        or role == periph::wake_role::trigger)
     {
@@ -254,7 +280,7 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
     }
     switch(role)
     {
-      case periph::wake_role::python:
+      case periph::wake_role::opaque:
       case periph::wake_role::trigger:
         lower(wake, first);
         lower(transmit_all, first);

@@ -67,6 +67,12 @@ public:
    */
   virtual void illegal_access(illegal_source from) = 0;
 
+  /**
+   * @brief The GTZC_IRQn line this TZIC drives: the line of the GTZC block the description gives
+   *        the IRQ to, null when no block has it.
+   */
+  [[nodiscard]] virtual auto event_line() const -> irq_line const* = 0;
+
 protected:
   /** @brief Destroys the interface, only through its model. */
   ~illegal_access_controller() = default;

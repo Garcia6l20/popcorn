@@ -132,6 +132,13 @@ protected:
 template <typename State> class stm32_model : public model
 {
 public:
+  /** @brief wake_role::lines: a built-in STM32 model requests no stop and no reset and raises no
+   * NMI in its events, unless it overrides this. */
+  [[nodiscard]] auto role_in_horizon() const noexcept -> wake_role override
+  {
+    return wake_role::lines;
+  }
+
   void save(std::vector<std::byte>& out) const override
   {
     reflex::serde::bson::serializer{out}.dump(state_);

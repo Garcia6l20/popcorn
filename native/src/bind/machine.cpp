@@ -494,9 +494,10 @@ machine_handle::machine_handle(part_description const& description, machine_conf
     {
       hubs_.emplace(name, detail::usb_hubs{});
     }
-    built = std::make_unique<core::machine>(
-        description, arch::find_arch(description),
-        options_of(description, config, hubs_, *python_owned_));
+    auto options   = options_of(description, config, hubs_, *python_owned_);
+    python_backed_ = options.python_backed;
+    built          = std::make_unique<core::machine>(
+        description, arch::find_arch(description), std::move(options));
   }
   engine_ = built.get();
   for(auto const& unit : description.peripherals)
@@ -922,6 +923,11 @@ auto machine_handle::hold_at_boundary() -> boundary_hold
     gate_->armed.store(true, std::memory_order_release);
   }
   return boundary_hold{gate_};
+}
+
+auto machine_handle::python_backed() const -> std::vector<std::string>
+{
+  return python_backed_;
 }
 
 void detail::boundary_gate::pass()

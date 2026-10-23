@@ -1561,6 +1561,13 @@ public:
   [[= py::doc{"Block the machine thread at its next slice boundary until released, for tests."}]]
       [[nodiscard]] auto hold_at_boundary() -> boundary_hold;
 
+  /**
+   * @brief The peripherals the machine was built with in core::machine_options::python_backed:
+   *        those whose native model calls a Python device inside its events. For tests.
+   */
+  [[= py::doc{"Peripherals whose native model calls Python devices in its events, for tests."}]]
+      [[nodiscard]] auto python_backed() const -> std::vector<std::string>;
+
   /** @brief Identity of the machine, never 0. */
   [[= py::doc{"Identity of the machine, never 0."}]] [[nodiscard]] auto id() const noexcept
       -> std::uint64_t;
@@ -1682,6 +1689,7 @@ private:
   std::shared_ptr<core::machine>              engine_owner_;
   std::optional<hook>                         log_hook_;
   std::map<std::string, detail::usb_hubs>     hubs_;
+  std::vector<std::string>                    python_backed_;
   core::machine*                              engine_{};
   std::uint64_t                               id_{};
   std::shared_ptr<core::host>                 host_;

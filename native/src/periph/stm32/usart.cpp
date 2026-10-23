@@ -460,8 +460,8 @@ private:
   field_ref                                    tx_threshold_;
   field_ref                                    dma_transmit_;
   field_ref                                    dma_receive_;
-  mutable dma_signal                           tx_dma_;
-  mutable dma_signal                           rx_dma_;
+  dma_signal                                   tx_dma_;
+  dma_signal                                   rx_dma_;
   field_ref                                    rx_threshold_;
   field_ref                                    tx_threshold_ie_;
   field_ref                                    rx_threshold_ie_;

@@ -61,7 +61,8 @@ class model;
  * @brief How core::machine::horizon() counts a model's activity while the core sleeps.
  *
  * - `lines`: its quiet_until() bounds the wake while one of its IRQ lines would wake the core,
- *   and the transmit of every wire it is a transmit source of.
+ *   and the transmit of every wire it is a transmit source of. Such a model requests no stop
+ *   and no reset and raises no NMI in its events.
  * - `trigger`: it starts other models' activity, through a trigger output, a DMA request, a pin
  *   or a clock, such as a timer, an ADC, a GPIO port or the RCC. Its earliest queued event
  *   bounds the wake, every transmit and the stop.
@@ -69,8 +70,9 @@ class model;
  *   the wake and the stop.
  * - `bus_master`: it accesses registers of other peripherals, such as a DMA controller. Its
  *   quiet_until() bounds the wake and every transmit, whatever its IRQ lines.
- * - `python`: it runs Python code in its events. Its earliest queued event bounds the wake,
- *   every transmit and the stop.
+ * - `opaque`: its events may run code the machine cannot classify, such as Python code or a
+ *   native model that requests a stop or a reset or raises NMI. Its earliest queued event bounds
+ *   the wake, every transmit and the stop. The role of a model that declares none.
  */
 enum class wake_role
 {
@@ -78,7 +80,7 @@ enum class wake_role
   trigger,
   reset_source,
   bus_master,
-  python,
+  opaque,
 };
 
 /**
@@ -139,11 +141,19 @@ public:
   [[nodiscard]] virtual auto wakes(model const& of) const -> bool = 0;
 
   /**
-   * @brief Whether a bus access at @p at reaches a peripheral whose model runs Python code,
-   *        see wake_role.
+   * @brief Whether a bus access at @p at reaches a peripheral counted as wake_role::opaque.
    * @param at Bus address.
    */
-  [[nodiscard]] virtual auto python_at(address at) const -> bool = 0;
+  [[nodiscard]] virtual auto opaque_at(address at) const -> bool = 0;
+
+  /**
+   * @brief Whether a read of @p size bytes at @p at reaches a range a model watches through
+   *        core::machine_services::watch_reads, whose periph::model::on_memory_read can raise a
+   *        flag or NMI. True for a range the machine cannot place in one region.
+   * @param at Bus address.
+   * @param size Bytes read from @p at.
+   */
+  [[nodiscard]] virtual auto read_watched(address at, std::uint64_t size) const -> bool = 0;
 
   /**
    * @brief Whether @p at lies in a peripheral window, an alias window included.
@@ -324,11 +334,11 @@ public:
 
   /**
    * @brief How core::machine::horizon() counts this model.
-   * @return wake_role::lines by default.
+   * @return wake_role::opaque by default.
    */
   [[nodiscard]] virtual auto role_in_horizon() const noexcept -> wake_role
   {
-    return wake_role::lines;
+    return wake_role::opaque;
   }
 
   /**

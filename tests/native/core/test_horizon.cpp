@@ -66,7 +66,7 @@ public:
 class probe_model final : public periph::model
 {
 public:
-  probe_model(periph::model_context& ctx, periph::wake_role role) noexcept
+  probe_model(periph::model_context& ctx, std::optional<periph::wake_role> role) noexcept
       : context_{ctx}, role_{role}
   {}
 
@@ -124,12 +124,12 @@ public:
 
   [[nodiscard]] auto role_in_horizon() const noexcept -> periph::wake_role override
   {
-    return role_;
+    return role_ ? *role_ : periph::model::role_in_horizon();
   }
 
 private:
-  periph::model_context& context_;
-  periph::wake_role      role_;
+  periph::model_context&           context_;
+  std::optional<periph::wake_role> role_;
 };
 
 constexpr std::uint32_t first_line = 4;
@@ -153,12 +153,14 @@ auto desc() -> popcorn::part_description
 
 struct rig
 {
-  std::vector<periph::wake_role>                                   roles;
+  std::vector<std::optional<periph::wake_role>>                    roles;
   std::vector<probe_model*>                                        probes;
   popcorn::testing::machine_fixture<horizon_arch>*                 fixture{};
   std::unique_ptr<popcorn::testing::machine_fixture<horizon_arch>> owned;
 
-  explicit rig(std::vector<periph::wake_role> chosen, core::machine_options options = {})
+  explicit rig(
+      std::vector<std::optional<periph::wake_role>> chosen,
+      core::machine_options                         options = {})
       : roles{std::move(chosen)}, probes(roles.size(), nullptr)
   {
     for(std::size_t index = 0; index < roles.size(); ++index)
@@ -251,9 +253,9 @@ TEST_CASE("a bus master's own answer bounds the wake and every transmit whatever
   CHECK(h.transmit[0] == std::optional{r.at(50)});
 }
 
-TEST_CASE("a Python model bounds the wake, every transmit and the stop by its earliest event")
+TEST_CASE("an opaque model bounds the wake, every transmit and the stop by its earliest event")
 {
-  rig r{{role::python}};
+  rig r{{role::opaque}};
   r.machine().set_transmit_sources({{}});
   r.probes[0]->arm(r.at(60));
   r.probes[0]->quiet = std::optional<vtime>{};
@@ -263,7 +265,7 @@ TEST_CASE("a Python model bounds the wake, every transmit and the stop by its ea
   CHECK(h.stop == std::optional{r.at(60)});
 }
 
-TEST_CASE("python_backed counts a lines model as Python")
+TEST_CASE("python_backed counts a lines model as opaque")
 {
   core::machine_options options;
   options.python_backed = {"P0"};
@@ -273,6 +275,20 @@ TEST_CASE("python_backed counts a lines model as Python")
   auto const h       = r.machine().horizon();
   CHECK(h.wake == std::optional{r.at(70)});
   CHECK(h.stop == std::optional{r.at(70)});
+}
+
+TEST_CASE("a model that declares no role counts as opaque")
+{
+  rig r{{std::nullopt}};
+  r.machine().set_transmit_sources({{}});
+  r.probes[0]->arm(r.at(65));
+  r.probes[0]->quiet = std::optional<vtime>{};
+  auto const h       = r.machine().horizon();
+  CHECK(h.wake == std::optional{r.at(65)});
+  CHECK(h.transmit == std::vector{std::optional{r.at(65)}});
+  CHECK(h.stop == std::optional{r.at(65)});
+  r.arch().asleep = false;
+  CHECK(r.machine().horizon().stop == std::optional{r.at(65)});
 }
 
 TEST_CASE("python_backed naming a peripheral the description lacks is refused")
@@ -378,6 +394,22 @@ TEST_CASE("in a b . loop the instructions left bound the stop")
   CHECK(h.stop == std::optional{r.at(40)});
   CHECK_FALSE(r.machine().horizon().stop.has_value());
   r.arch().looping = false;
+  CHECK_FALSE(r.machine().horizon(icount{40}).asleep);
+}
+
+TEST_CASE("a b . loop the run executes, under spin detection or a code site, is awake")
+{
+  core::machine_options spinning;
+  spinning.spin_threshold = 1'000;
+  rig s{{}, spinning};
+  s.arch().asleep  = false;
+  s.arch().looping = true;
+  CHECK_FALSE(s.machine().horizon(icount{40}).asleep);
+  rig r{{}};
+  r.arch().asleep  = false;
+  r.arch().looping = true;
+  REQUIRE(r.machine().horizon().asleep);
+  auto const probe = r.machine().add_probe(r.arch().pc());
   CHECK_FALSE(r.machine().horizon(icount{40}).asleep);
 }
 

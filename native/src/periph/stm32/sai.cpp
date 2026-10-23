@@ -293,20 +293,20 @@ private:
   void push(std::size_t b, std::uint32_t word);
   void flags();
   void warn_unsupported(std::size_t b);
-  [[nodiscard]] auto block_feed(std::size_t b) const -> feed_info;
+  [[nodiscard]] auto block_feed(std::size_t b, vtime now) const -> feed_info;
 
-  register_file&                         regs_;
-  std::array<audio_attachment, blocks>   wired_;
-  std::array<block_fields, blocks>       block_;
-  field_ref                              pdm_enable_;
-  core::clock_domain                     kernel_;
-  irq_line&                              line_;
-  mutable std::array<dma_signal, blocks> requests_;
-  bool                                   unsupported_logged_{};
-  bool                                   no_clock_logged_{};
-  bool                                   decimation_logged_{};
-  bool                                   short_frame_logged_{};
-  bool                                   slot_rules_logged_{};
+  register_file&                       regs_;
+  std::array<audio_attachment, blocks> wired_;
+  std::array<block_fields, blocks>     block_;
+  field_ref                            pdm_enable_;
+  core::clock_domain                   kernel_;
+  irq_line&                            line_;
+  std::array<dma_signal, blocks>       requests_;
+  bool                                 unsupported_logged_{};
+  bool                                 no_clock_logged_{};
+  bool                                 decimation_logged_{};
+  bool                                 short_frame_logged_{};
+  bool                                 slot_rules_logged_{};
 };
 
 auto sai_writes() -> std::span<write_entry<sai> const>
@@ -1303,12 +1303,17 @@ void sai::load(std::span<std::byte const> in)
   }
 }
 
-auto sai::block_feed(std::size_t b) const -> feed_info
+auto sai::block_feed(std::size_t b, vtime now) const -> feed_info
 {
   auto const  source = follows(b, 1 - b) ? 1 - b : b;
   auto const  count  = state_.block[b].fifo.size();
   auto const& src    = state_.block[source];
   feed_info   info{.room = static_cast<std::uint32_t>(receiver(b) ? count : fifo_depth - count)};
+  if(src.waiting)
+  {
+    info.next = now;
+    return info;
+  }
   if(not src.ticking)
   {
     return info;
@@ -1353,14 +1358,14 @@ auto sai::block_feed(std::size_t b) const -> feed_info
   return info;
 }
 
-auto sai::dma_feed(dma_controller const& by, std::uint32_t request, quiet_query const&) const
+auto sai::dma_feed(dma_controller const& by, std::uint32_t request, quiet_query const& query) const
     -> std::optional<feed_info>
 {
   for(std::size_t b = 0; b < blocks; ++b)
   {
     if(requests_[b].carries(by, request))
     {
-      return block_feed(b);
+      return block_feed(b, query.now());
     }
   }
   return std::nullopt;
@@ -1407,12 +1412,7 @@ auto sai::quiet_until(quiet_query const& query) const -> std::optional<vtime>
     {
       continue;
     }
-    if(state_.block[b].waiting)
-    {
-      lower(query.now().ps);
-      continue;
-    }
-    auto const feed = block_feed(b);
+    auto const feed = block_feed(b, query.now());
     if(not feed.next)
     {
       continue;

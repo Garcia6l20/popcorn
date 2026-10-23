@@ -39,7 +39,7 @@ auto in_loop(spin_state::loop_state const& loop, address addr) noexcept -> bool
 
 auto machine::run_state::skip_self_branch(uc_struct* engine, icount now) noexcept -> bool
 {
-  if(stepping or spin_on or coverage_on or block_records or block_watch or sites.contains(block_pc))
+  if(not self_branch_skippable(block_pc))
   {
     return false;
   }

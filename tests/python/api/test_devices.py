@@ -14,6 +14,7 @@ import popcorn
 import pytest
 from popcorn import ConfigError, ModelError, ResetKind, StopReason, _core
 from popcorn.board import AudioOptions, DeviceBoard, I2CError, I2CTarget, SpiTarget
+from popcorn.devices import At25sf
 from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
@@ -1379,3 +1380,14 @@ def test_a_mode_mismatch_on_a_linked_system_member_raises_from_the_system_run(
         with pytest.raises(ConfigError, match=MODE_REFUSED) as raised:
             asyncio.run(system.run(for_=ms(5)))
         assert raised.value.key == "devices.SPI1"
+
+
+def test_only_a_bus_with_a_python_device_is_python_backed(
+    u575: popcorn.PartDescription,
+) -> None:
+    python = popcorn.Machine(u575, devices={"I2C1": [Eeprom24(0x50, 256)]})
+    native = popcorn.Machine(u575, devices={"SPI1": [At25sf("PA4")]})
+    bare = popcorn.Machine(u575)
+    assert python._handle.python_backed() == ["I2C1"]  # pyright: ignore[reportPrivateUsage]
+    assert native._handle.python_backed() == []  # pyright: ignore[reportPrivateUsage]
+    assert bare._handle.python_backed() == []  # pyright: ignore[reportPrivateUsage]

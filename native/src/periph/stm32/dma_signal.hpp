@@ -45,19 +45,7 @@ public:
    */
   auto resolve() -> bool
   {
-    routes_.clear();
-    resolved_ = not peers_->all().empty();
-    for(auto* const peer : peers_->all())
-    {
-      if(auto* const controller = dynamic_cast<dma_controller*>(peer); controller != nullptr)
-      {
-        if(auto const request = controller->request_of(signal_))
-        {
-          routes_.push_back({.controller = controller, .request = *request});
-        }
-      }
-    }
-    return not routes_.empty();
+    return find_routes();
   }
 
   /**
@@ -78,11 +66,11 @@ public:
   }
 
   /** @brief Whether the signal reaches a controller, resolving it first when needed. */
-  [[nodiscard]] auto routed() -> bool
+  [[nodiscard]] auto routed() const -> bool
   {
     if(not resolved_)
     {
-      resolve();
+      find_routes();
     }
     return not routes_.empty();
   }
@@ -92,7 +80,7 @@ public:
    * @param by Controller reporting the request.
    * @param request Request number @p by reports.
    */
-  [[nodiscard]] auto carries(dma_controller const& by, std::uint32_t request) -> bool
+  [[nodiscard]] auto carries(dma_controller const& by, std::uint32_t request) const -> bool
   {
     return routed() and std::ranges::any_of(routes_, [&](route const& known) {
              return known.controller == &by and known.request == request;
@@ -104,7 +92,7 @@ public:
    *        their words and the longest answer delay. A controller that is not a dma_supplier
    *        leaves both unbounded.
    */
-  [[nodiscard]] auto supply() -> supply_info
+  [[nodiscard]] auto supply() const -> supply_info
   {
     supply_info total{.words = 0, .delay_ps = 0};
     if(not routed())
@@ -131,9 +119,26 @@ private:
     std::uint32_t   request;
   };
 
-  peer_directory const* peers_;
-  std::string           signal_;
-  std::vector<route>    routes_;
-  bool                  resolved_{};
+  auto find_routes() const -> bool
+  {
+    routes_.clear();
+    resolved_ = not peers_->all().empty();
+    for(auto* const peer : peers_->all())
+    {
+      if(auto* const controller = dynamic_cast<dma_controller*>(peer); controller != nullptr)
+      {
+        if(auto const request = controller->request_of(signal_))
+        {
+          routes_.push_back({.controller = controller, .request = *request});
+        }
+      }
+    }
+    return not routes_.empty();
+  }
+
+  peer_directory const*      peers_;
+  std::string                signal_;
+  mutable std::vector<route> routes_;
+  mutable bool               resolved_{};
 };
 }

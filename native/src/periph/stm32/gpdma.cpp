@@ -17,6 +17,7 @@
 #include <deque>
 #include <expected>
 #include <format>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -370,6 +371,8 @@ private:
   [[nodiscard]] auto burst_ps() const -> std::optional<std::uint64_t>;
   [[nodiscard]] auto bursts_to_flag(std::size_t ch, quiet_query const& query, bool loud) const
       -> std::optional<std::uint64_t>;
+  [[nodiscard]] auto irregular(std::size_t ch) const -> bool;
+  [[nodiscard]] auto source_bytes(std::size_t ch) const -> std::uint64_t;
   [[nodiscard]] auto data_valid(std::size_t ch) const -> bool;
   [[nodiscard]] auto in_memory(std::uint64_t from, std::uint64_t size, bool write) const -> bool;
   [[nodiscard]] auto feeders() const -> std::span<dma_feeder const* const>;
@@ -407,7 +410,7 @@ private:
   mutable bool                                        feeders_resolved_{};
   mutable std::array<model const*, requests>          requester_{};
   mutable std::bitset<requests>                       requester_resolved_{};
-  mutable model const*                                tzic_{};
+  mutable std::vector<irq_line const*>                tzic_lines_{};
   mutable bool                                        tzic_resolved_{};
 };
 
@@ -1558,35 +1561,48 @@ auto gpdma::illegal_wakes(quiet_query const& query) const -> bool
     tzic_resolved_ = true;
     for(auto const* const peer : ctx_.peers.all())
     {
-      if(dynamic_cast<illegal_access_controller const*>(peer) != nullptr)
+      if(auto const* const tzic = dynamic_cast<illegal_access_controller const*>(peer);
+         tzic != nullptr and tzic->event_line() != nullptr)
       {
-        tzic_ = peer;
+        tzic_lines_.push_back(tzic->event_line());
       }
     }
   }
-  return tzic_ != nullptr and query.wakes(*tzic_);
+  return std::ranges::any_of(tzic_lines_, [&](irq_line const* line) { return query.wakes(*line); });
 }
 
-auto gpdma::data_valid(std::size_t ch) const -> bool
+auto gpdma::irregular(std::size_t ch) const -> bool
 {
   auto const& c = ch_[ch];
-  if(c.two_d
+  return c.two_d
      and (get(regs_, c.two_d->repeat) != 0
           or get(regs_, c.two_d->source_offset) != 0
           or get(regs_, c.two_d->destination_offset) != 0
           or get(regs_, c.two_d->block_source_offset) != 0
-          or get(regs_, c.two_d->block_destination_offset) != 0))
+          or get(regs_, c.two_d->block_destination_offset) != 0);
+}
+
+auto gpdma::source_bytes(std::size_t ch) const -> std::uint64_t
+{
+  auto const& c  = ch_[ch];
+  auto const  sw = std::uint64_t{1} << get(regs_, c.source_width);
+  return get(regs_, c.source_increment) != 0 ? std::uint64_t{get(regs_, c.bytes)} : sw;
+}
+
+auto gpdma::data_valid(std::size_t ch) const -> bool
+{
+  if(irregular(ch))
   {
     return false;
   }
-  auto const sw     = std::uint64_t{1} << get(regs_, c.source_width);
-  auto const dw     = std::uint64_t{1} << get(regs_, c.destination_width);
-  auto const bytes  = std::uint64_t{get(regs_, c.bytes)};
-  auto const source = regs_.peek(c.sar.offset);
-  auto const target = regs_.peek(c.dar.offset);
-  auto const read   = get(regs_, c.source_increment) != 0 ? bytes : sw;
-  auto const write  = get(regs_, c.destination_increment) != 0 ? (bytes / sw + 1) * dw : dw;
-  return (in_memory(source, read, false) or quiet_data(source, false))
+  auto const& c      = ch_[ch];
+  auto const  sw     = std::uint64_t{1} << get(regs_, c.source_width);
+  auto const  dw     = std::uint64_t{1} << get(regs_, c.destination_width);
+  auto const  bytes  = std::uint64_t{get(regs_, c.bytes)};
+  auto const  source = regs_.peek(c.sar.offset);
+  auto const  target = regs_.peek(c.dar.offset);
+  auto const  write  = get(regs_, c.destination_increment) != 0 ? (bytes / sw + 1) * dw : dw;
+  return (in_memory(source, source_bytes(ch), false) or quiet_data(source, false))
      and (in_memory(target, write, true) or quiet_data(target, true));
 }
 
@@ -1703,11 +1719,14 @@ auto gpdma::quiet_until(quiet_query const& query) const -> std::optional<vtime>
     }
     auto const source = regs_.peek(c.sar.offset);
     auto const target = regs_.peek(c.dar.offset);
-    auto const loud   = illegal
-                     or (query.peripheral_at(target) and not quiet_data(target, true))
-                     or query.python_at(source)
-                     or query.python_at(target);
-    auto const k      = bursts_to_flag(ch, query, loud);
+    auto const loud =
+        illegal
+        or (query.peripheral_at(target) and not quiet_data(target, true))
+        or query.opaque_at(source)
+        or query.opaque_at(target)
+        or query.read_watched(
+            source, irregular(ch) ? std::numeric_limits<std::uint64_t>::max() : source_bytes(ch));
+    auto const k = bursts_to_flag(ch, query, loud);
     if(not k)
     {
       continue;

@@ -1190,6 +1190,20 @@ public:
     return found != sources_.end() ? std::optional{found->at} : std::nullopt;
   }
 
+  [[nodiscard]] auto event_line() const -> irq_line const* override
+  {
+    irq_line const* found = nullptr;
+    for(auto const* const peer : ctx_.peers.all())
+    {
+      if(auto const* const block = dynamic_cast<gtzc_block const*>(peer);
+         block != nullptr and block->gtzc_line() != nullptr)
+      {
+        found = block->gtzc_line();
+      }
+    }
+    return found;
+  }
+
   void illegal_access(illegal_source from) override
   {
     if(from.reg >= status_.size())

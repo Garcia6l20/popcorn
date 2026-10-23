@@ -1915,6 +1915,15 @@ struct machine::run_state
    * @return Whether it skipped. */
   [[gnu::noinline]] auto skip_self_branch(uc_struct* engine, icount now) noexcept -> bool;
 
+  /** @brief Whether no per-block observer keeps skip_self_branch from moving the clock over a
+   * self-branch at @p pc: no stepping, spin detection, coverage, block record, return watch or
+   * code site at @p pc. */
+  [[nodiscard]] auto self_branch_skippable(address pc) const noexcept -> bool
+  {
+    return not(
+        stepping or spin_on or coverage_on or block_records or block_watch or sites.contains(pc));
+  }
+
   /** @brief Counts the block at block_pc of block_size instructions into coverage, under the
    * guard, off the hot path. */
   [[gnu::noinline]] void count_block() noexcept;

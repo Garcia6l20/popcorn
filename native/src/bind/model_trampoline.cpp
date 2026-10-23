@@ -52,7 +52,7 @@ public:
 
   [[nodiscard]] auto role_in_horizon() const noexcept -> periph::wake_role override
   {
-    return periph::wake_role::python;
+    return periph::wake_role::opaque;
   }
 
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
