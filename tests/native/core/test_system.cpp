@@ -299,10 +299,7 @@ struct rig
     {
       hook = std::move(arrival);
     }
-    auto const wait = how.one_cpu ? core::wait_policy{.spin = std::chrono::nanoseconds{0}}
-                                  : core::default_wait_policy(members.size());
-    sys             = std::make_unique<core::system>(
-        members, std::move(wires), wait, how.bounds, std::move(hook));
+    sys = std::make_unique<core::system>(members, std::move(wires), how.bounds, std::move(hook));
     auto const                  held = sys->lock();
     std::vector<core::sys_time> offsets(members.size());
     sys->start(held, offsets);
@@ -459,8 +456,7 @@ TEST_CASE("a member linked to itself drains its own wire each window, at its bar
   r.links.push_back(std::make_shared<fake_link>(1, 1, 20 * us_ps));
   r.links.push_back(std::make_shared<fake_link>(0, 1, 50 * us_ps));
   r.sys = std::make_unique<core::system>(
-      r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0], r.links[1]},
-      core::default_wait_policy(2));
+      r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0], r.links[1]});
   {
     auto const                        held = r.sys->lock();
     std::vector<core::sys_time> const offsets(2);
@@ -492,8 +488,7 @@ TEST_CASE("offsets set each member's system time and base, and a reset while pau
   rig r{.members = sleeper_and_runner()};
   r.links.push_back(std::make_shared<fake_link>(0, 1, 20 * us_ps));
   r.sys = std::make_unique<core::system>(
-      r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]},
-      core::default_wait_policy(2));
+      r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]});
   {
     auto const                        held = r.sys->lock();
     std::vector<core::sys_time> const offsets{core::sys_time{0}, core::sys_time{37 * us_ps}};
@@ -725,8 +720,7 @@ TEST_CASE("close while members run and wait parks every member and ends the paus
     };
     r.links.push_back(std::make_shared<fake_link>(0, 1, 20 * us_ps));
     r.sys = std::make_unique<core::system>(
-        r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]},
-        core::default_wait_policy(3));
+        r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]});
     core::host_future<core::pause> pending;
     {
       auto const                  held = r.sys->lock();
@@ -969,8 +963,7 @@ TEST_CASE("a goal re-issued at its delivered point resolves before a later entry
     };
     r.links.push_back(std::make_shared<fake_link>(0, 1, 20 * us_ps / (how.lowered == 0 ? 1 : 3)));
     r.sys = std::make_unique<core::system>(
-        r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]},
-        core::default_wait_policy(3), how.bounds);
+        r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]}, how.bounds);
     {
       auto const                  held = r.sys->lock();
       std::vector<core::sys_time> offsets(3);
@@ -1757,8 +1750,7 @@ TEST_CASE("two stops in one window and in two windows give the same pause sequen
       r.links.push_back(std::make_shared<fake_link>(1, 0, 20 * us_ps / how.lowered));
     }
     std::vector<std::shared_ptr<core::member_link>> wires{r.links.begin(), r.links.end()};
-    r.sys = std::make_unique<core::system>(
-        r.members, std::move(wires), core::default_wait_policy(2), how.bounds);
+    r.sys = std::make_unique<core::system>(r.members, std::move(wires), how.bounds);
     {
       auto const                        held = r.sys->lock();
       std::vector<core::sys_time> const offsets(2);
@@ -1882,8 +1874,7 @@ TEST_CASE("a tie found rounds apart is delivered by member index at any quantum"
       r.links.push_back(std::make_shared<fake_link>(1, 0, 20 * us_ps / how.lowered));
     }
     std::vector<std::shared_ptr<core::member_link>> wires{r.links.begin(), r.links.end()};
-    r.sys = std::make_unique<core::system>(
-        r.members, std::move(wires), core::default_wait_policy(3), how.bounds);
+    r.sys = std::make_unique<core::system>(r.members, std::move(wires), how.bounds);
     {
       auto const                        held = r.sys->lock();
       std::vector<core::sys_time> const offsets(3);
@@ -2069,8 +2060,7 @@ TEST_CASE("a wake that lands between the sleep decision and the host's wait is n
     }
     r.sys = std::make_unique<core::system>(
         r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]},
-        core::default_wait_policy(2), core::slice_bounds{},
-        std::move_only_function<void(std::size_t)>{}, std::move(hook));
+        core::slice_bounds{}, std::move_only_function<void(std::size_t)>{}, std::move(hook));
     owner = r.sys.get();
     {
       auto const                  held = r.sys->lock();
@@ -2152,8 +2142,7 @@ TEST_CASE("a sleep hook that throws pauses the system on that error once")
   r.links.push_back(std::make_shared<fake_link>(0, 1, 20 * us_ps));
   std::atomic<std::size_t> thrown{0};
   r.sys = std::make_unique<core::system>(
-      r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]},
-      core::default_wait_policy(2), core::slice_bounds{},
+      r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0]}, core::slice_bounds{},
       std::move_only_function<void(std::size_t)>{}, [&thrown](std::size_t index) {
         if(index == 1)
         {

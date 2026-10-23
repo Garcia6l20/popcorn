@@ -396,7 +396,7 @@ struct rig
     }
     else
     {
-      core::window_barrier       meet{nodes.size(), core::default_wait_policy(nodes.size())};
+      core::window_barrier       meet{nodes.size()};
       std::vector<std::jthread>  threads;
       std::vector<std::uint64_t> slept(nodes.size());
       for(std::size_t member = 0; member < nodes.size(); ++member)

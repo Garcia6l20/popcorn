@@ -304,10 +304,7 @@ struct world
       };
     }
     std::vector<std::shared_ptr<core::member_link>> links{wires.begin(), wires.end()};
-    auto const wait = how.one_cpu ? core::wait_policy{.spin = std::chrono::nanoseconds{0}}
-                                  : core::default_wait_policy(nodes.size());
-    sys             = std::make_unique<core::system>(
-        members, std::move(links), wait, how.bounds, std::move(hook));
+    sys = std::make_unique<core::system>(members, std::move(links), how.bounds, std::move(hook));
     if(offsets.empty())
     {
       offsets.resize(nodes.size());

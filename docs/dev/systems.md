@@ -40,9 +40,8 @@ sequenceDiagram
   still on the line, so the dropped set depends on the reset time and `L` only.
 
 The barrier is `window_barrier` in `native/src/core/window_barrier.cpp`. The last party to
-arrive runs a completion, then bumps a generation counter and wakes the sleepers. Waiters spin
-for the wait policy's time, then sleep on a futex. When there are more parties than usable
-CPUs, `default_wait_policy` sets the spin to zero.
+arrive runs a completion, then bumps a generation counter and wakes the sleepers. Waiters sleep
+on a futex until that wake.
 
 ## Halted members
 

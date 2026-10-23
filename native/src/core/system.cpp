@@ -179,7 +179,6 @@ struct system::impl
       system const*                              owner,
       std::vector<member_ref>                    members,
       std::vector<std::shared_ptr<member_link>>  wires,
-      wait_policy                                wait,
       slice_bounds                               slicing,
       std::move_only_function<void(std::size_t)> hook,
       std::move_only_function<void(std::size_t)> sleep_hook);
@@ -755,11 +754,10 @@ system::impl::impl(
     system const*                              owner,
     std::vector<member_ref>                    members,
     std::vector<std::shared_ptr<member_link>>  wires,
-    wait_policy                                wait,
     slice_bounds                               slicing,
     std::move_only_function<void(std::size_t)> hook,
     std::move_only_function<void(std::size_t)> sleep_hook)
-    : owner{owner}, links{std::move(wires)}, barrier{members.size(), wait}, bounds{slicing},
+    : owner{owner}, links{std::move(wires)}, barrier{members.size()}, bounds{slicing},
       before_arrival{std::move(hook)}, before_sleep{std::move(sleep_hook)}
 {
   q = sys_time{std::numeric_limits<std::int64_t>::max()};
@@ -1241,12 +1239,12 @@ auto held_system::holds(system const& of) const noexcept -> bool
 system::system(
     std::vector<member_ref>                    members,
     std::vector<std::shared_ptr<member_link>>  links,
-    wait_policy                                wait,
     slice_bounds                               bounds,
     std::move_only_function<void(std::size_t)> before_arrival,
     std::move_only_function<void(std::size_t)> before_sleep)
-    : impl_{std::in_place, this,   std::move(members),        std::move(links),
-            wait,          bounds, std::move(before_arrival), std::move(before_sleep)}
+    : impl_{std::in_place,          this,   std::move(members),
+            std::move(links),       bounds, std::move(before_arrival),
+            std::move(before_sleep)}
 {}
 
 system::~system()

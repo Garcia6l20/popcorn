@@ -12,21 +12,8 @@ namespace popcorn::core
 {
 namespace
 {
-using clock_type = std::chrono::steady_clock;
-
-constexpr int pauses_per_clock_read = 64;
-
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 static_assert(sizeof(std::atomic<std::uint32_t>) == sizeof(std::uint32_t));
-
-inline void cpu_pause() noexcept
-{
-#if defined(__x86_64__) || defined(__i386__)
-  __builtin_ia32_pause();
-#elif defined(__aarch64__)
-  asm volatile("yield" ::: "memory");
-#endif
-}
 
 auto futex_word(std::atomic<std::uint32_t>& word) noexcept -> std::uint32_t*
 {
@@ -55,17 +42,7 @@ auto usable_cpus() noexcept -> std::size_t
   return std::max(1, CPU_COUNT(&allowed));
 }
 
-auto default_wait_policy(std::size_t parties, wait_policy base) noexcept -> wait_policy
-{
-  if(parties > usable_cpus())
-  {
-    return wait_policy{.spin = std::chrono::nanoseconds{0}};
-  }
-  return base;
-}
-
-window_barrier::window_barrier(std::size_t parties, wait_policy policy)
-    : parties_{static_cast<std::uint32_t>(parties)}, spin_ns_{policy.spin.count()}
+window_barrier::window_barrier(std::size_t parties) : parties_{static_cast<std::uint32_t>(parties)}
 {}
 
 auto window_barrier::arrive_and_wait(std::function_ref<void() noexcept> complete) -> bool
@@ -92,26 +69,6 @@ auto window_barrier::arrive_and_wait(std::function_ref<void() noexcept> complete
 
 void window_barrier::wait_past(std::uint32_t seen) noexcept
 {
-  auto const spin = std::chrono::nanoseconds{spin_ns_.load(std::memory_order_relaxed)};
-  if(spin.count() > 0)
-  {
-    auto const deadline = clock_type::now() + spin;
-    for(;;)
-    {
-      for(int i = 0; i < pauses_per_clock_read; ++i)
-      {
-        if(generation_.load(std::memory_order_acquire) != seen)
-        {
-          return;
-        }
-        cpu_pause();
-      }
-      if(clock_type::now() >= deadline)
-      {
-        break;
-      }
-    }
-  }
   while(generation_.load(std::memory_order_seq_cst) == seen)
   {
     sleepers_.fetch_add(1, std::memory_order_seq_cst);
@@ -134,16 +91,6 @@ void window_barrier::abort() noexcept
 auto window_barrier::aborted() const noexcept -> bool
 {
   return aborted_.load(std::memory_order_acquire);
-}
-
-void window_barrier::set_policy(wait_policy policy) noexcept
-{
-  spin_ns_.store(policy.spin.count(), std::memory_order_relaxed);
-}
-
-auto window_barrier::policy() const noexcept -> wait_policy
-{
-  return wait_policy{.spin = std::chrono::nanoseconds{spin_ns_.load(std::memory_order_relaxed)}};
 }
 
 auto window_barrier::parties() const noexcept -> std::size_t

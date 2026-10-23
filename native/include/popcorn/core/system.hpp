@@ -168,7 +168,6 @@ public:
    *        attached to its sender's port by whoever built it.
    * @param members One-member hosts, parked, member index order.
    * @param links Wires between members, at least one.
-   * @param wait How members wait at the barrier.
    * @param bounds Bounds of every slice a member runs.
    * @param before_arrival Called on a member's host thread before each of its barrier
    *        arrivals with its index, holding nothing, for tests that perturb thread timing. A
@@ -184,7 +183,6 @@ public:
   system(
       std::vector<member_ref>                    members,
       std::vector<std::shared_ptr<member_link>>  links,
-      wait_policy                                wait,
       slice_bounds                               bounds         = {},
       std::move_only_function<void(std::size_t)> before_arrival = {},
       std::move_only_function<void(std::size_t)> before_sleep   = {}) pre(not members.empty())

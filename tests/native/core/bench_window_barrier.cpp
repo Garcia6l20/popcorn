@@ -116,9 +116,9 @@ auto run_serial(work_size size, int warmup) -> outcome
   return out;
 }
 
-auto run_barrier(work_size size, int warmup, std::chrono::nanoseconds spin) -> outcome
+auto run_barrier(work_size size, int warmup) -> outcome
 {
-  core::window_barrier        gate{members, core::wait_policy{.spin = spin}};
+  core::window_barrier        gate{members};
   std::array<member, members> group;
   int                         completed = 0;
   clock_type::time_point      start;
@@ -191,15 +191,12 @@ auto bench(int runs, int divisor) -> int
 {
   struct variant
   {
-    std::string              name;
-    bool                     threaded;
-    std::chrono::nanoseconds spin;
+    std::string name;
+    bool        threaded;
   };
   std::vector<variant> const variants{
-      {"serial",       false, std::chrono::nanoseconds{0}  },
-      {"futex-inline", true,  std::chrono::nanoseconds{0}  },
-      {"hybrid-3us",   true,  std::chrono::microseconds{3} },
-      {"hybrid-20us",  true,  std::chrono::microseconds{20}},
+      {"serial",       false},
+      {"futex-inline", true },
   };
   env_line();
   for(auto size : sizes)
@@ -213,7 +210,7 @@ auto bench(int runs, int divisor) -> int
     {
       for(auto const& v : variants)
       {
-        auto const out = v.threaded ? run_barrier(size, warmup, v.spin) : run_serial(size, warmup);
+        auto const out = v.threaded ? run_barrier(size, warmup) : run_serial(size, warmup);
         if(reference.empty())
         {
           reference = out.executed;

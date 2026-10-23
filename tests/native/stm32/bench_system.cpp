@@ -158,7 +158,7 @@ struct measured
 class world
 {
 public:
-  world(std::int64_t latency, core::wait_policy wait, std::uint32_t spin_threshold)
+  world(std::int64_t latency, std::uint32_t spin_threshold)
   {
     stm32::register_builtin_models();
     nodes_.push_back(std::make_unique<node>("link_audio", spin_threshold));
@@ -177,7 +177,7 @@ public:
       members.push_back({.on = hosts_.back(), .name = std::format("m{}", index)});
     }
     std::vector<std::shared_ptr<core::member_link>> links{wires_.begin(), wires_.end()};
-    sys_            = std::make_unique<core::system>(members, std::move(links), wait);
+    sys_            = std::make_unique<core::system>(members, std::move(links));
     auto const held = sys_->lock();
     sys_->start(held, std::vector<core::sys_time>(nodes_.size()));
   }
@@ -292,32 +292,17 @@ private:
 
 struct variant
 {
-  std::string              name;
-  std::chrono::nanoseconds spin;
+  std::string name;
 };
 
 auto variant_named(std::string_view name) -> variant
 {
-  if(name == "solo" or name == "solo-plain" or name == "solo-held")
+  if(name == "B" or name == "solo" or name == "solo-plain" or name == "solo-held")
   {
-    return {.name = std::string{name}, .spin = std::chrono::nanoseconds{0}};
-  }
-  if(name == "B")
-  {
-    return {.name = "B", .spin = std::chrono::nanoseconds{0}};
-  }
-  if(name.size() > 1 and name.front() == 'H')
-  {
-    int        us{};
-    auto const digits       = name.substr(1);
-    auto const [end, error] = std::from_chars(digits.data(), digits.data() + digits.size(), us);
-    if(error == std::errc{} and end == digits.data() + digits.size() and us > 0)
-    {
-      return {.name = std::string{name}, .spin = std::chrono::microseconds{us}};
-    }
+    return {.name = std::string{name}};
   }
   throw std::invalid_argument{
-      std::format("bad variant {}, want B, H<us>, solo, solo-plain or solo-held", name)};
+      std::format("bad variant {}, want B, solo, solo-plain or solo-held", name)};
 }
 
 auto parse_number(std::string_view text) -> std::int64_t
@@ -432,7 +417,7 @@ auto parse(std::vector<std::string_view> const& args) -> options
   }
   if(out.variants.empty())
   {
-    for(auto const* name : {"B", "H1", "H3", "H10", "H20"})
+    for(auto const* name : {"B"})
     {
       out.variants.push_back(variant_named(name));
     }
@@ -520,7 +505,7 @@ auto measure(options const& how, variant const& v) -> measured
   {
     return measure_alone(how, v);
   }
-  world      w{how.latency_us * us_ps, core::wait_policy{.spin = v.spin}, how.spin_threshold};
+  world      w{how.latency_us * us_ps, how.spin_threshold};
   auto const warm_from = clock_type::now();
   std::ignore          = w.run_to(how.warmup_ms * ms_ps);
   auto const warm_wall = std::chrono::duration<double>(clock_type::now() - warm_from).count();
