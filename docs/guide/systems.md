@@ -59,6 +59,30 @@ and `system.quantum` its value. `Q` sets how often they meet, never what happens
 their times and every member's state are the same at any quantum, any slicing and any thread
 timing.
 
+### Latency and wall time
+
+Each window costs a fixed amount of wall time, whatever the link carries: every member ends its
+slice at the barrier, waits for the others, then starts again. On a 16-CPU x86 host that is
+about 2.6 us of wall time and 3.7 us of CPU per window for two members. A small `Q` multiplies
+the windows, 1 / `Q` per virtual second.
+
+Measured on two members, one busy a third of the time and one asleep most of the time, linked at
+460800 baud, over 10 s of virtual time with a check every 10 ms:
+
+| latency `L` | windows per virtual second | wall time |
+|---|---|---|
+| 5 us | 200 000 | 10.3 s |
+| 10 us | 100 000 | 8.4 s |
+| 20 us | 50 000 | 6.6 s |
+| 50 us | 20 000 | 5.9 s |
+| 100 us | 10 000 | 5.7 s |
+| 500 us | 2 000 | 5.3 s |
+
+Past about 100 us the members' own emulation sets the wall time. When the firmware's timing
+does not depend on delays below some value, choose `L` at that value: a request and its answer
+take `2 L`, so a protocol with millisecond timeouts runs the same at 50 us as at 5 us, in
+57 percent of the wall time.
+
 ## Tap a link
 
 ```python

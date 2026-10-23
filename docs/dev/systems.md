@@ -43,6 +43,25 @@ The barrier is `window_barrier` in `native/src/core/window_barrier.cpp`. The las
 arrive runs a completion, then bumps a generation counter and wakes the sleepers. Waiters sleep
 on a futex until that wake.
 
+## Cost of a window
+
+Every window costs the same work whatever the links carry: each member ends its engine run at
+the barrier, the early arrivers sleep on the futex and the last one wakes them, each member
+drains its inbound wires, plans its next slice and starts its engine again. Measured with
+`perf` on two members at 460800 baud, 16-CPU x86 host, the difference between `L` = 5 us and
+`L` = 100 us over 1.9 M windows:
+
+- 2.6 us of wall time and 3.7 us of CPU per window, one voluntary context switch per window per
+  sleeping member.
+- 1.25 us of user CPU: engine exit and entry with block lookup 380 ns, translated code of blocks
+  cut at the barrier 177 ns, memory dispatch 155 ns, barrier, planning and drains 111 ns, host
+  mutex 106 ns, run loop 98 ns, host turn 61 ns, trace 32 ns.
+- The rest in the kernel: one FUTEX_WAIT and one FUTEX_WAKE per window and the wake-up.
+- No Python per window.
+
+The window count is 1 / `Q` per virtual second, so the cost grows as `Q` shrinks, see the table
+in the guide's "Latency and wall time".
+
 ## Halted members
 
 A member with no goal while another member runs one is halted. Its core is held and it advances
