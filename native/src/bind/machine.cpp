@@ -368,9 +368,12 @@ auto bounds_of(machine_config const& config) -> core::slice_bounds
 auto boundary_of(
     std::weak_ptr<detail::host_slot const> slot,
     std::weak_ptr<detail::pty_bridges>     ptys,
+    std::shared_ptr<detail::boundary_gate> gate,
     core::machine&                         engine) -> std::move_only_function<void(core::member_id)>
 {
-  return [slot = std::move(slot), ptys = std::move(ptys), &engine](core::member_id) {
+  return [slot = std::move(slot), ptys = std::move(ptys), gate = std::move(gate),
+          &engine](core::member_id) {
+    gate->pass();
     if(auto const reached = slot.lock())
     {
       detail::run_retired(*reached);
@@ -518,7 +521,7 @@ machine_handle::machine_handle(part_description const& description, machine_conf
   std::vector<std::unique_ptr<core::machine>> members;
   members.push_back(std::move(built));
   auto hooks     = detail::python_thread_hooks(thread_live_, gil_entries_);
-  hooks.boundary = boundary_of(slot_, ptys_, *engine_);
+  hooks.boundary = boundary_of(slot_, ptys_, gate_, *engine_);
   if(cell.is_valid())
   {
     hooks.held = held_in(std::make_shared<detail::python_cell const>(cell));
@@ -573,6 +576,10 @@ machine_handle::~machine_handle()
     {
       report_unclaimed(*ended, *delivered_);
     }
+  }
+  else
+  {
+    detail::give_up(*slot_, host_->thread_token());
   }
   host_.reset();
 }
@@ -904,6 +911,55 @@ auto machine_handle::log_token() const noexcept -> std::uint64_t
 auto machine_handle::gil_entries() const noexcept -> std::uint64_t
 {
   return gil_entries_->load(std::memory_order_relaxed);
+}
+
+auto machine_handle::hold_at_boundary() -> boundary_hold
+{
+  {
+    std::scoped_lock const lock{gate_->mutex};
+    gate_->held     = false;
+    gate_->released = false;
+    gate_->armed.store(true, std::memory_order_release);
+  }
+  return boundary_hold{gate_};
+}
+
+void detail::boundary_gate::pass()
+{
+  if(not armed.load(std::memory_order_acquire))
+  {
+    return;
+  }
+  std::unique_lock lock{mutex};
+  if(not armed.exchange(false, std::memory_order_relaxed))
+  {
+    return;
+  }
+  held = true;
+  changed.notify_all();
+  changed.wait(lock, [this] { return released; });
+  held = false;
+}
+
+boundary_hold::boundary_hold(std::shared_ptr<detail::boundary_gate> gate) : gate_{std::move(gate)}
+{}
+
+auto boundary_hold::wait_held(double seconds) -> bool
+{
+  reflex::py::nb::gil_scoped_release const released;
+  std::unique_lock                         lock{gate_->mutex};
+  return gate_->changed.wait_for(
+      lock, std::chrono::duration<double>{seconds}, [this] { return gate_->held; });
+}
+
+void boundary_hold::release()
+{
+  {
+    std::scoped_lock const lock{gate_->mutex};
+    gate_->armed.store(false, std::memory_order_relaxed);
+    gate_->released = true;
+  }
+  gate_->changed.notify_all();
 }
 
 auto machine_handle::owns_engine() const noexcept -> bool
