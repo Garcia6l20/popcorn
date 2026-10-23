@@ -132,8 +132,13 @@ def test_the_receive_layout_is_the_layout_of_the_frame_the_receiver_took_last(
 
     async def free() -> list[AudioLayout | None]:
         samples = [m.sample(lambda: receiver.receive_layout, at=at) for at in (before, after)]
-        async with m.running():
-            return [await sample for sample in samples]
+        seen: list[AudioLayout | None] = []
+        with pytest.raises(popcorn.EmulationError, match=r"USER at .* duplex_irq") as ended:
+            async with m.running():
+                seen = [await sample for sample in samples]
+                await m.elapse(ms(10))
+        assert ended.value.stop is not None and after < ended.value.stop.time < after + ms(10)
+        return seen
 
     async def parked() -> list[AudioLayout | None]:
         seen: list[AudioLayout | None] = []
