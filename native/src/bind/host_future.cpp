@@ -135,7 +135,8 @@ auto python_exception(std::exception_ptr const& error) -> nb::object
 
 auto python_thread_hooks(
     std::shared_ptr<std::atomic<bool>>          live,
-    std::shared_ptr<std::atomic<std::uint64_t>> gil_entries) -> core::host_hooks
+    std::shared_ptr<std::atomic<std::uint64_t>> gil_entries,
+    std::shared_ptr<exit_removals>              removals) -> core::host_hooks
 {
   return {
       .thread_started =
@@ -145,7 +146,8 @@ auto python_thread_hooks(
             this_host_python().counter = gil_entries.get();
           },
       .thread_stopping =
-          [live, gil_entries] {
+          [live, gil_entries, removals = std::move(removals)] {
+            run_exit_removals(*removals);
             if(auto& state = this_host_python(); state.created)
             {
               PyEval_RestoreThread(state.saved);

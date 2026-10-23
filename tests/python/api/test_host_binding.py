@@ -23,9 +23,11 @@ import pytest
 from popcorn import _core
 from popcorn._hooks import Relay
 from popcorn._host import awaited
+from popcorn._observe import open_trace
 from popcorn._refs import Pending
 from popcorn._stop import Stop, stop_of
 from popcorn.model import Model, on_read
+from popcorn.trace import TraceKind
 from popcorn.units import VirtualTime, s, us
 
 from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, Machines, load_each_unforwarded, stalled
@@ -677,7 +679,7 @@ def test_a_collection_on_another_host_thread_defers_the_hook_removals_of_a_held_
     try:
         Cycle(first)
         first.start()
-        assert hold.wait_held(10)
+        assert hold.wait_held(10), "machine never reached its boundary"
         gone = weakref.ref(first)
         del first
         second = machines()
@@ -699,6 +701,61 @@ def test_a_collection_on_another_host_thread_defers_the_hook_removals_of_a_held_
     assert deferred == [True]
     assert settles(lambda: relays[-1]() is None)
     assert settles(lambda: _core.host_threads() == before + 1)
+
+
+def test_a_trace_of_a_machine_collected_on_another_host_thread_is_closed_as_its_thread_stops(
+    machines: Machines, tmp_path: pathlib.Path
+) -> None:
+    gc.collect()
+    before = _core.host_threads()
+    enabled = gc.isenabled()
+    path = tmp_path / "t.pctr"
+    collected: list[bool] = []
+    first = machines()
+    handle = first._handle  # pyright: ignore[reportPrivateUsage]
+    recordings = [open_trace(handle, {TraceKind.BLOCK}, path, None, None)]
+    asyncio.run(first.run(budget=10_000))
+    size = recordings[0].size
+    hold = handle.hold_at_boundary()
+    del handle
+    gc.disable()
+    try:
+        Cycle(first)
+        first.start()
+        assert hold.wait_held(10), "machine never reached its boundary"
+        gone = weakref.ref(first)
+        del first
+        second = machines()
+
+        def handler(call: popcorn.Call) -> popcorn.Return:
+            gc.collect()
+            collected.append(gone() is None)
+            recordings.clear()
+            return call.proceed()
+
+        second.intercept("alu_mark", handler, once=True)
+        asyncio.run(second.run(budget=1_000_000))
+    finally:
+        hold.release()
+        if enabled:
+            gc.enable()
+    assert collected == [True]
+    assert settles(lambda: _core.host_threads() == before + 1)
+    assert path.stat().st_size == size
+
+
+def test_a_dropped_boundary_hold_lets_its_machine_close(machines: Machines) -> None:
+    m = machines()
+    hold = m._handle.hold_at_boundary()  # pyright: ignore[reportPrivateUsage]
+    m.start()
+    assert hold.wait_held(10), "machine never reached its boundary"
+    del hold
+    started = time.monotonic()
+    gone = weakref.ref(m)
+    del m
+    gc.collect()
+    assert gone() is None
+    assert time.monotonic() - started < 5
 
 
 def test_a_context_copy_runs_while_its_source_is_entered_on_the_loop(machines: Machines) -> None:

@@ -256,6 +256,16 @@ class[[= py::rename{"BoundaryHold"}]] boundary_hold
 public:
   /** @brief The hold of @p gate. */
   [[= py::skip]] explicit boundary_hold(std::shared_ptr<detail::boundary_gate> gate);
+  /** @brief Not copyable, the destructor releases the gate. */
+  boundary_hold(boundary_hold const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(boundary_hold const&) -> boundary_hold& = delete;
+  /** @brief Takes the gate of @p other. */
+  boundary_hold(boundary_hold&& other) noexcept = default;
+  /** @brief Takes the gate of @p other. */
+  auto operator=(boundary_hold&& other) noexcept -> boundary_hold& = default;
+  /** @brief Releases the gate, so a hold dropped unreleased never blocks the thread. */
+  ~boundary_hold();
 
   /**
    * @brief Waits, the GIL released, until the machine's thread blocks in the gate.
@@ -332,12 +342,12 @@ public:
    *        released, then destroys the machine. A free run's end never collected by halt() goes
    *        to sys.unraisablehook. Runs with the GIL: nanobind destroys the handle in instance
    *        deallocation, and no native code owns one. On a host thread or inside a parked
-   *        section it takes the host's orphan path, and every later hook removal waits until
-   *        the host thread has exited. While the interpreter finalizes with the host thread alive
-   * it leaves both alive: the thread needs the GIL to exit, and late command failures still queued
-   * are not reported. An abandoned host is left to its thread, which frees the machine when the
-   * blocked handler returns. It never checks signals: on a live host whose handler blocks it waits
-   * for the handler.
+   *        section it takes the host's orphan path, and every later hook removal runs on the
+   *        host thread's exit or after it. While the interpreter finalizes with the host thread
+   *        alive it leaves both alive: the thread needs the GIL to exit, and late command
+   *        failures still queued are not reported. An abandoned host is left to its thread,
+   *        which frees the machine when the blocked handler returns. It never checks signals: on
+   *        a live host whose handler blocks it waits for the handler.
    */
   ~machine_handle();
 
