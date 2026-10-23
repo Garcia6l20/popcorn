@@ -521,7 +521,7 @@ machine_handle::machine_handle(part_description const& description, machine_conf
       slot_);
   std::vector<std::unique_ptr<core::machine>> members;
   members.push_back(std::move(built));
-  auto hooks     = detail::python_thread_hooks(thread_live_, gil_entries_);
+  auto hooks     = detail::python_thread_hooks(thread_live_, gil_entries_, slot_->on_exit);
   hooks.boundary = boundary_of(slot_, ptys_, gate_, *engine_);
   if(cell.is_valid())
   {
@@ -950,6 +950,14 @@ void detail::boundary_gate::pass()
 boundary_hold::boundary_hold(std::shared_ptr<detail::boundary_gate> gate) : gate_{std::move(gate)}
 {}
 
+boundary_hold::~boundary_hold()
+{
+  if(gate_ != nullptr)
+  {
+    release();
+  }
+}
+
 auto boundary_hold::wait_held(double seconds) -> bool
 {
   reflex::py::nb::gil_scoped_release const released;
@@ -962,7 +970,7 @@ void boundary_hold::release()
 {
   {
     std::scoped_lock const lock{gate_->mutex};
-    gate_->armed.store(false, std::memory_order_relaxed);
+    gate_->armed.store(false, std::memory_order_release);
     gate_->released = true;
   }
   gate_->changed.notify_all();

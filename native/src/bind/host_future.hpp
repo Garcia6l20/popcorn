@@ -222,10 +222,12 @@ auto python_exception(std::exception_ptr const& error) -> reflex::py::nb::object
  *        and the GIL is checked released before every blocking host call.
  * @param live Set while the thread runs.
  * @param gil_entries Incremented by every gil_entry on the thread.
+ * @param removals Run by the thread as it stops, before it releases its thread state.
  */
 auto python_thread_hooks(
     std::shared_ptr<std::atomic<bool>>          live,
-    std::shared_ptr<std::atomic<std::uint64_t>> gil_entries) -> core::host_hooks;
+    std::shared_ptr<std::atomic<std::uint64_t>> gil_entries,
+    std::shared_ptr<exit_removals>              removals) -> core::host_hooks;
 
 /** @brief Adds @p on to the registry shutdown_hosts() closes, with the slot whose log records
  * it forwards then. */
