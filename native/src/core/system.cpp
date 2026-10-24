@@ -27,6 +27,7 @@ member_link::~member_link() = default;
 std::atomic<detail::clock_wait_hook> detail::on_clock_wait{nullptr};
 std::atomic<detail::resume_hook>     detail::before_couple{nullptr};
 std::atomic<detail::barrier_hook>    detail::on_barrier{nullptr};
+std::atomic<detail::progress_hook>   detail::on_progress{nullptr};
 
 namespace
 {
@@ -228,7 +229,8 @@ struct system::impl
       std::move_only_function<void(std::size_t)> hook,
       std::move_only_function<void(std::size_t)> sleep_hook,
       sync_mode                                  how,
-      sys_time                                   ahead);
+      sys_time                                   ahead,
+      sys_time                                   every);
 
   [[nodiscard]] auto clocked() const noexcept -> bool
   {
@@ -320,6 +322,7 @@ struct system::impl
   completion                                  on_clock{this, &impl::complete_clock};
   sync_mode                                   mode{};
   sys_time                                    lookahead{};
+  sys_time                                    progress{};
   std::unique_ptr<member_sync[]>              syncs{};
   std::unique_ptr<std::atomic<std::size_t>[]> owners{};
   alignas(64) std::atomic<std::int64_t> stop_at{never.ps};
@@ -346,7 +349,7 @@ public:
       : sys_{owner}, index_{index}, posts_(owner.slots[index].outbound.size()),
         passed_(owner.slots[index].inbound.size(), earliest),
         wire_eot_(owner.slots[index].inbound.size(), earliest), eot_(owner.slots.size(), earliest),
-        mine_{owner.shaped(index)}, view_{owner.shaped(index)}
+        mine_{owner.shaped(index)}, view_{owner.shaped(index)}, progressed_{owner.shaped(index)}
   {}
 
   void restart() noexcept
@@ -380,8 +383,71 @@ public:
     if(not request)
     {
       in_run_.store(false, std::memory_order_release);
+      return request;
     }
+    arm_progress(target, *request);
     return request;
+  }
+
+  /**
+   * @brief Sets @p request to publish this member's floor every system progress of its virtual
+   *        time inside the slice, for a slice of phase run of a member that is not frozen under
+   *        sync_mode::clocks.
+   */
+  void arm_progress(machine& target, slice_request& request)
+  {
+    if(not sys_.clocked()
+       or sys_.progress.ps <= 0
+       or phase_ != phase::run
+       or system::impl::frozen(sys_.slots[index_]))
+    {
+      return;
+    }
+    progressing_ = &target;
+    request.progress.emplace(std::cw<&runner::progress>, *this);
+    request.progress_every = icount{std::max<std::uint64_t>(
+        icount_from_vtime(
+            vtime{static_cast<std::uint64_t>(sys_.progress.ps)},
+            target.virtual_clock().instruction_hz())
+            .value,
+        1)};
+  }
+
+  /**
+   * @brief Publishes the member's position as its floor from inside a slice armed by
+   *        arm_progress(), when it passed the published floor: the general and wire promises
+   *        rise to at least it, every other field stays as published, and its successors are
+   *        woken. A slice ending there would publish the same floor or a later one.
+   */
+  void progress() noexcept
+  {
+    auto const& one = sys_.slots[index_];
+    if(progressing_ == nullptr or phase_ != phase::run or system::impl::frozen(one))
+    {
+      return;
+    }
+    auto const at = position(*progressing_);
+    sys_.read_record(index_, progressed_);
+    if(at <= progressed_.floor)
+    {
+      return;
+    }
+    progressed_.floor   = at;
+    progressed_.general = std::max(progressed_.general, at);
+    for(auto& wire : progressed_.wires)
+    {
+      wire = std::max(wire, at.ps);
+    }
+    promised_ = std::max(promised_, progressed_.general);
+    sys_.write_record(index_, progressed_);
+    for(auto const next : one.successors)
+    {
+      sys_.bump(next);
+    }
+    if(auto const hook = detail::on_progress.load(std::memory_order_acquire))
+    {
+      hook(index_, at);
+    }
   }
 
   auto next_slice(machine& target, earliest_stamp stamp) -> std::optional<slice_request>
@@ -571,6 +637,7 @@ public:
 
   void ran(machine& target, slice_result const& result) override
   {
+    progressing_   = nullptr;
     auto const now = target.virtual_clock().now().value;
     slept_         = now < mark_ or now - mark_ > result.executed.value;
     settle(target, result);
@@ -582,6 +649,7 @@ public:
 
   void failed(machine& target, std::exception_ptr error) noexcept override
   {
+    progressing_ = nullptr;
     fail(target, std::move(error));
     if(sys_.clocked())
     {
@@ -1645,6 +1713,8 @@ private:
   std::vector<sys_time>             eot_{};
   promise_record                    mine_{};
   promise_record                    view_{};
+  promise_record                    progressed_{};
+  machine const*                    progressing_{};
   vtime                             until_last_{};
   std::atomic<bool>                 aborted_{false};
   std::atomic<bool>                 nudged_{false};
@@ -1661,10 +1731,11 @@ system::impl::impl(
     std::move_only_function<void(std::size_t)> hook,
     std::move_only_function<void(std::size_t)> sleep_hook,
     sync_mode                                  how,
-    sys_time                                   ahead)
+    sys_time                                   ahead,
+    sys_time                                   every)
     : owner{owner}, links{std::move(wires)}, barrier{members.size()}, bounds{slicing},
       before_arrival{std::move(hook)}, before_sleep{std::move(sleep_hook)}, mode{how},
-      lookahead{ahead}, syncs{std::make_unique<member_sync[]>(members.size())},
+      lookahead{ahead}, progress{every}, syncs{std::make_unique<member_sync[]>(members.size())},
       owners{std::make_unique<std::atomic<std::size_t>[]>(links.size())},
       targets(members.size(), never), points(members.size(), never)
 {
@@ -2599,10 +2670,19 @@ system::system(
     std::move_only_function<void(std::size_t)> before_arrival,
     std::move_only_function<void(std::size_t)> before_sleep,
     sync_mode                                  mode,
-    sys_time                                   lookahead)
-    : impl_{std::in_place,           this,   std::move(members),
-            std::move(links),        bounds, std::move(before_arrival),
-            std::move(before_sleep), mode,   lookahead}
+    sys_time                                   lookahead,
+    sys_time                                   progress)
+    : impl_{
+          std::in_place,
+          this,
+          std::move(members),
+          std::move(links),
+          bounds,
+          std::move(before_arrival),
+          std::move(before_sleep),
+          mode,
+          lookahead,
+          progress}
 {}
 
 system::~system()

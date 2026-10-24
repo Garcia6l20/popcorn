@@ -1,5 +1,6 @@
 #pragma once
 
+#include <popcorn/core/member_link.hpp>
 #include <popcorn/export.hpp>
 
 #include <atomic>
@@ -37,4 +38,13 @@ using barrier_hook = void (*)(std::size_t member, bool entering);
 
 /** @brief The process's barrier_hook, empty unless a test sets it. */
 POPCORN_API extern std::atomic<barrier_hook> on_barrier;
+
+/**
+ * @brief Test seam: called on a member's host thread inside a sync_mode::clocks slice right
+ *        after the member published @p floor from inside it and woke its successors.
+ */
+using progress_hook = void (*)(std::size_t member, sys_time floor);
+
+/** @brief The process's progress_hook, empty unless a test sets it. */
+POPCORN_API extern std::atomic<progress_hook> on_progress;
 }

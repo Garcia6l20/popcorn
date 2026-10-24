@@ -258,6 +258,7 @@ struct variant
   std::optional<std::uint32_t> seed{};
   bool                         one_cpu{};
   core::sync_mode              mode{core::sync_mode::barrier};
+  std::int64_t                 progress{core::system::default_progress.ps};
 };
 
 auto variants() -> std::vector<variant>
@@ -280,6 +281,12 @@ auto variants() -> std::vector<variant>
        .mode    = core::sync_mode::clocks},
       {.name = "clocks sleeps 1", .seed = 1, .mode = core::sync_mode::clocks},
       {.name = "clocks one cpu", .one_cpu = true, .mode = core::sync_mode::clocks},
+      {.name = "clocks k=25us", .mode = core::sync_mode::clocks, .progress = 25 * us_ps},
+      {.name     = "clocks k=200us 997",
+       .bounds   = {.max_instructions = icount{997}, .wall_budget = std::chrono::microseconds{10}},
+       .mode     = core::sync_mode::clocks,
+       .progress = 200 * us_ps},
+      {.name = "clocks no progress", .mode = core::sync_mode::clocks, .progress = 0},
   };
 }
 
@@ -360,7 +367,8 @@ struct rig
       hook = std::move(arrival);
     }
     sys = std::make_unique<core::system>(
-        members, std::move(wires), how.bounds, std::move(hook), std::move(slept), how.mode);
+        members, std::move(wires), how.bounds, std::move(hook), std::move(slept), how.mode,
+        core::system::default_lookahead, core::sys_time{how.progress});
     auto const                  held = sys->lock();
     std::vector<core::sys_time> offsets(members.size());
     sys->start(held, offsets);
@@ -3082,8 +3090,15 @@ auto run_aligned(
   {
     wires.push_back(std::make_shared<fake_link>(one.from, one.to, one.latency));
   }
-  core::system sys{members, std::move(wires), how.bounds, jitter(how, members.size()),
-                   {},      how.mode};
+  core::system sys{
+      members,
+      std::move(wires),
+      how.bounds,
+      jitter(how, members.size()),
+      {},
+      how.mode,
+      core::system::default_lookahead,
+      core::sys_time{how.progress}};
   std::vector<core::host_future<core::goal_reached>> goals;
   {
     auto const                  held = sys.lock();
@@ -3295,7 +3310,15 @@ TEST_CASE("a time goal whose slice overshoots a due bound past its time resolves
     inbound->due_at    = cut;
     std::vector<std::shared_ptr<core::member_link>> wires{
         std::make_shared<fake_link>(1, 0, 20 * us_ps), inbound};
-    core::system sys{members, std::move(wires), how.bounds, jitter(how, 2), {}, how.mode};
+    core::system sys{
+        members,
+        std::move(wires),
+        how.bounds,
+        jitter(how, 2),
+        {},
+        how.mode,
+        core::system::default_lookahead,
+        core::sys_time{how.progress}};
     core::host_future<core::goal_reached> goal;
     core::host_future<core::pause>        pending;
     {
@@ -3591,7 +3614,9 @@ auto scripted(
         }
       },
       {},
-      how.mode};
+      how.mode,
+      core::system::default_lookahead,
+      core::sys_time{how.progress}};
   core::host_future<core::pause> pending;
   {
     auto const                  held = sys.lock();
@@ -3929,7 +3954,9 @@ TEST_CASE("a million clock publish and wait rounds between two members lose no w
         }
       },
       {},
-      how.mode};
+      how.mode,
+      core::system::default_lookahead,
+      core::sys_time{how.progress}};
   core::host_future<core::pause> pending;
   {
     auto const                  held = sys.lock();
@@ -4888,7 +4915,8 @@ TEST_CASE("a TIME pause releases a link's tap through its ends' positions")
     wires.push_back(r.links[0]);
     r.sys = std::make_unique<core::system>(
         r.members, std::move(wires), how.bounds, std::move_only_function<void(std::size_t)>{},
-        std::move_only_function<void(std::size_t)>{}, how.mode);
+        std::move_only_function<void(std::size_t)>{}, how.mode, core::system::default_lookahead,
+        core::sys_time{how.progress});
     {
       auto const                  held = r.sys->lock();
       std::vector<core::sys_time> offsets{core::sys_time{0}, core::sys_time{0}};
@@ -5720,4 +5748,163 @@ TEST_CASE("a DMA write a watch stops on inside a sleeper's promise aligns its pe
   CHECK(sys.time_of(held, 1).ps == poke);
   CHECK(sys.time_of(held, 0).ps >= poke + latency);
   CHECK(sys.time_of(held, 0).ps < poke + latency + us_ps);
+}
+
+namespace
+{
+struct follow_state
+{
+  std::atomic<std::uint64_t> sleeper_slices{};
+  std::atomic<bool>          sleeper_waiting{false};
+  std::uint64_t              calls{};
+  std::uint64_t              base{};
+  std::atomic<int>           followed{};
+};
+
+follow_state following;
+
+void note_sleeper_wait(std::size_t member, std::atomic<std::uint32_t> const* epoch, std::uint32_t)
+{
+  if(member == 1)
+  {
+    following.sleeper_waiting.store(epoch != nullptr);
+  }
+}
+
+template <typename Done> auto await_for(Done done) -> bool
+{
+  auto const end = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+  while(not done())
+  {
+    if(std::chrono::steady_clock::now() >= end)
+    {
+      return false;
+    }
+    std::this_thread::yield();
+  }
+  return true;
+}
+
+void follow_awake(std::size_t member, core::sys_time)
+{
+  if(member != 0 or following.followed.load() != 0)
+  {
+    return;
+  }
+  ++following.calls;
+  if(following.calls == 1)
+  {
+    if(not await_for([] { return following.sleeper_waiting.load(); }))
+    {
+      following.followed.store(-1);
+      return;
+    }
+    following.base = following.sleeper_slices.load();
+    return;
+  }
+  if(following.calls == 2)
+  {
+    auto const moved = await_for([] { return following.sleeper_slices.load() > following.base; });
+    following.followed.store(moved ? 1 : -1);
+  }
+}
+
+auto followed_run(std::int64_t progress) -> std::pair<core::pause, std::array<std::int64_t, 2>>
+{
+  constexpr std::int64_t        latency = 20 * us_ps;
+  std::vector<core::member_ref> members{
+      member<popcorn::testing::test_arch>(
+          "alu", "alu_entry", sends_nothing<popcorn::testing::test_arch>),
+      member<sleeping_arch>("idle", "idle_entry", sends_nothing<sleeping_arch>)};
+  core::system sys{
+      members,
+      {std::make_shared<watched_link>(0, 1, latency),
+        std::make_shared<watched_link>(1, 0, latency)},
+      core::slice_bounds{
+        .max_instructions = icount{1'000'000}, .wall_budget = std::chrono::hours{1}},
+      [](std::size_t index) {
+        if(index == 0)
+        {
+          following.calls = 0;
+        }
+        else
+        {
+          following.sleeper_slices.fetch_add(1);
+        }
+        },
+      {},
+      core::sync_mode::clocks,
+      core::system::default_lookahead,
+      core::sys_time{progress}
+  };
+  core::host_future<core::pause> pending;
+  {
+    auto const                  held = sys.lock();
+    std::vector<core::sys_time> offsets(2);
+    sys.start(held, offsets);
+    pending = sys.resume(held, core::sys_time{10 * ms_ps});
+  }
+  auto const stopped = pending.get();
+  auto const held    = sys.lock();
+  return {
+      stopped, {sys.time_of(held, 0).ps, sys.time_of(held, 1).ps}
+  };
+}
+}
+
+TEST_CASE("a sleeper follows an awake peer's floor while the peer's slice still runs")
+{
+  for(std::int64_t const progress : {50 * us_ps, std::int64_t{0}})
+  {
+    CAPTURE(progress);
+    following.sleeper_slices.store(0);
+    following.sleeper_waiting.store(false);
+    following.calls = 0;
+    following.followed.store(0);
+    core::detail::on_clock_wait.store(&note_sleeper_wait);
+    core::detail::on_progress.store(&follow_awake);
+    auto const [stopped, stood] = followed_run(progress);
+    core::detail::on_progress.store(nullptr);
+    core::detail::on_clock_wait.store(nullptr);
+    REQUIRE(stopped.reason == core::pause_reason::system_time);
+    if(progress != 0)
+    {
+      CHECK(following.followed.load() == 1);
+    }
+    else
+    {
+      CHECK(following.followed.load() == 0);
+    }
+    CHECK(stood == promised_windows(core::sync_mode::barrier).second);
+  }
+}
+
+TEST_CASE("a member reset mid-slice gives the same pause and machines at every progress")
+{
+  std::optional<std::pair<core::pause_reason, std::vector<std::uint64_t>>> reference;
+  for(auto const& how : clock_variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    auto         resetting = member("calls", "reset_now");
+    resetting.on_reset     = popcorn::core::reset_request_policy::reset_and_continue;
+    rig r{
+        .members = {member("alu", "alu_entry"), resetting}
+    };
+    r.build(how);
+    auto       goal    = r.goal(1, {.budget = icount{5000}});
+    auto const stopped = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    CHECK(goal.get().stopped.reason == stop_reason::budget);
+    CHECK(r.links[0]->receiver_resets.size() == 1);
+    std::pair seen{stopped.reason, r.dump()};
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    else
+    {
+      reference = std::move(seen);
+    }
+  }
 }

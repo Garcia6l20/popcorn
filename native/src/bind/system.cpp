@@ -532,7 +532,7 @@ void system_handle::start(std::vector<std::int64_t> const& offsets_ps)
       return std::make_shared<core::system>(
           std::move(refs), std::move(links), bounds_, std::move_only_function<void(std::size_t)>{},
           [sleeps = sleeps_](std::size_t) { sleeps->fetch_add(1, std::memory_order_relaxed); },
-          sync_, lookahead_);
+          sync_, lookahead_, progress_);
     }();
   }
   catch(...)
@@ -1241,6 +1241,19 @@ void system_handle::set_lookahead(std::int64_t ps)
     throw std::invalid_argument(std::format("lookahead {} ps is not above 0", ps));
   }
   lookahead_ = core::sys_time{ps};
+}
+
+void system_handle::set_progress(std::int64_t ps)
+{
+  if(system_ != nullptr or closed_)
+  {
+    throw std::logic_error("the progress is set before start()");
+  }
+  if(ps < 0)
+  {
+    throw std::invalid_argument(std::format("progress {} ps is below 0", ps));
+  }
+  progress_ = core::sys_time{ps};
 }
 
 auto system_handle::replace(

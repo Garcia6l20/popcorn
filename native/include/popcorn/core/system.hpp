@@ -224,6 +224,10 @@ public:
    *        lead and promises at most: the host is an inbound wire of that latency, so a stamp at
    *        or after a member's position plus @p lookahead lands exactly. A member with nothing due
    *        moves by a hold slice to its position plus @p lookahead when it leads that far.
+   * @param progress Under sync_mode::clocks, how far a member runs in its own virtual time inside
+   *        a slice between two publishes of its clock, so its peers follow it while the slice
+   *        runs. 0 publishes at slice ends only. The value changes how members overlap, never a
+   *        result.
    * @throws machine_busy when a member is busy.
    */
   system(
@@ -233,11 +237,15 @@ public:
       std::move_only_function<void(std::size_t)> before_arrival = {},
       std::move_only_function<void(std::size_t)> before_sleep   = {},
       sync_mode                                  mode           = sync_mode::barrier,
-      sys_time lookahead = default_lookahead) pre(not members.empty()) pre(not links.empty())
-      pre(lookahead.ps > 0);
+      sys_time                                   lookahead      = default_lookahead,
+      sys_time progress = default_progress) pre(not members.empty()) pre(not links.empty())
+      pre(lookahead.ps > 0) pre(progress.ps >= 0);
 
   /** @brief The default lookahead of a system, 10 ms of system time. */
   static constexpr sys_time default_lookahead{10'000'000'000};
+
+  /** @brief The default progress of a system, 50 us of a member's virtual time. */
+  static constexpr sys_time default_progress{50'000'000};
 
   /** @brief Closes, waits for every member to park, then unlinks the hosts. Not on a host
    * thread, holding no host mutex. */

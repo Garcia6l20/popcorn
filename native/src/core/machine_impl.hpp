@@ -1168,6 +1168,13 @@ struct machine::run_state
   std::chrono::steady_clock::time_point wall_deadline{};
   /** @brief Whether the wall budget ended the engine run. */
   bool wall_expired = false;
+  /** @brief The slice's slice_request::progress, empty outside a slice. */
+  std::optional<std::function_ref<void() noexcept>> progress{};
+  /** @brief The slice's slice_request::progress_every. */
+  icount progress_every{};
+  /** @brief Clock value at or past which the next progress call is due, the largest count
+   * when no progress is set. */
+  icount progress_at{std::numeric_limits<std::uint64_t>::max()};
   /** @brief First exception a callback raised in the slice. */
   std::exception_ptr failure{};
   /** @brief Whether the core is held, machine::hold_core(). */
@@ -1935,6 +1942,8 @@ struct machine::run_state
   /** @brief stop_at_block for the boundary_cause of clock @p now. Off the block hook's hot path,
    * so the hook keeps no register across a call. */
   [[gnu::noinline]] void stop_at_boundary(uc_struct* engine, icount now) noexcept;
+  /** @brief Calls progress and sets the next progress_at from @p now. */
+  [[gnu::noinline]] void call_progress(icount now) noexcept;
 
   /** @brief Completes the watched returns at block_pc and stops the engine when the until
    * return is reached there. Off the block hook's hot path.

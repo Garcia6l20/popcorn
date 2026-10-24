@@ -172,6 +172,7 @@ struct variant
   std::optional<std::uint32_t> seed{};
   bool                         one_cpu{};
   core::sync_mode              mode{core::sync_mode::barrier};
+  std::int64_t                 progress{core::system::default_progress.ps};
 };
 
 auto variants() -> std::vector<variant>
@@ -192,6 +193,12 @@ auto variants() -> std::vector<variant>
       {.name = "clocks q=l/3 997", .lowered = 3, .bounds = fine, .mode = core::sync_mode::clocks},
       {.name = "clocks sleeps 3 997", .bounds = fine, .seed = 3, .mode = core::sync_mode::clocks},
       {.name = "clocks one cpu", .one_cpu = true, .mode = core::sync_mode::clocks},
+      {.name = "clocks k=25us", .mode = core::sync_mode::clocks, .progress = 25 * us_ps},
+      {.name     = "clocks k=200us q=l/3",
+       .lowered  = 3,
+       .mode     = core::sync_mode::clocks,
+       .progress = 200 * us_ps},
+      {.name = "clocks no progress", .mode = core::sync_mode::clocks, .progress = 0},
   };
 }
 
@@ -327,7 +334,8 @@ struct world
     std::vector<std::shared_ptr<core::member_link>> links{wires.begin(), wires.end()};
     sys = std::make_unique<core::system>(
         members, std::move(links), how.bounds, std::move(hook),
-        std::move_only_function<void(std::size_t)>{}, how.mode);
+        std::move_only_function<void(std::size_t)>{}, how.mode, core::system::default_lookahead,
+        core::sys_time{how.progress});
     if(offsets.empty())
     {
       offsets.resize(nodes.size());
@@ -547,6 +555,69 @@ TEST_CASE("an echo over two wires gives the same result in every variant")
     }
     reference = seen;
   }
+}
+
+namespace
+{
+struct floor_seen
+{
+  std::int64_t  floor{};
+  std::uint64_t posted{};
+};
+
+std::array<stm32::uart_wire const*, 2> floor_wires{};
+std::array<std::vector<floor_seen>, 2> floors_seen{};
+
+void note_floor(std::size_t member, core::sys_time floor)
+{
+  if(member < floor_wires.size() and floor_wires.at(member) != nullptr)
+  {
+    floors_seen.at(member).push_back({floor.ps, floor_wires.at(member)->posted_count()});
+  }
+}
+}
+
+TEST_CASE("a frame posted after a floor published inside a slice starts at or after it")
+{
+  std::size_t checked = 0;
+  for(auto const& how : variants())
+  {
+    if(how.mode != core::sync_mode::clocks or how.progress == 0)
+    {
+      continue;
+    }
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    w.add("link_ping");
+    w.add("link_echo");
+    floor_wires = {&w.link(0, 1, latency_20), &w.link(1, 0, latency_20)};
+    for(auto& seen : floors_seen)
+    {
+      seen.clear();
+      seen.reserve(100'000);
+    }
+    w.host(how);
+    core::detail::on_progress.store(&note_floor);
+    auto const stopped = w.run_to(script_end);
+    core::detail::on_progress.store(nullptr);
+    floor_wires = {};
+    CHECK(stopped.reason == core::pause_reason::system_time);
+    for(std::size_t member = 0; member < floors_seen.size(); ++member)
+    {
+      REQUIRE(w.taps[member].size() == 16);
+      for(auto const& [floor, posted] : floors_seen[member])
+      {
+        if(posted < w.taps[member].size())
+        {
+          ++checked;
+          CHECK(w.taps[member][posted].start.ps >= floor);
+        }
+      }
+    }
+  }
+  MESSAGE("floors checked " << checked);
+  CHECK(checked > 0);
 }
 
 namespace

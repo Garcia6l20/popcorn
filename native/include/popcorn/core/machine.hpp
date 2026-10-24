@@ -234,6 +234,16 @@ struct slice_request
   /** @brief Evaluate stop_when only after a dispatched event, never at the slice end, so a slice
    * end set by max_instructions, the wall budget or a bound never decides the user stop. */
   bool stop_when_events_only{};
+  /** @brief Called on the machine's thread inside the slice each time the instruction count
+   * passed progress_every more than at the slice start or the last call: at a block boundary,
+   * after the checks that would end the slice there and before the block's instructions are
+   * counted, or at the top of the event loop once every event due by then has been dispatched.
+   * The machine is in the state a slice ending at that point leaves: every instruction counted
+   * has run, and a model posts nothing dated before clock::time(). It must not throw, run the
+   * machine or change its state. The slice keeps no reference to it once it returns. */
+  std::optional<std::function_ref<void() noexcept>> progress{};
+  /** @brief Instructions between two progress calls, read only when progress is set. */
+  icount progress_every{};
 };
 
 /** @brief Outcome of one native slice. */

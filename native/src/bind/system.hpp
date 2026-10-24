@@ -173,6 +173,16 @@ public:
       set_lookahead(std::int64_t ps);
 
   /**
+   * @brief Sets the progress start() builds the system with, in picoseconds of a member's virtual
+   *        time, 0 to publish at slice ends only. A private seam for tests and probes,
+   *        core::system::default_progress until set.
+   * @throws std::logic_error after start().
+   * @throws std::invalid_argument for a value below 0.
+   */
+  [[= py::doc{"Set the clock-mode progress in picoseconds before start()."}]] void
+      set_progress(std::int64_t ps);
+
+  /**
    * @brief Attaches the wires, builds the system and fixes each member's base: member i's local
    *        time now is system time @p offsets_ps[i].
    * @throws machine_busy when a member is busy.
@@ -476,6 +486,7 @@ private:
   core::slice_bounds                          bounds_;
   core::sync_mode                             sync_{core::sync_mode::barrier};
   core::sys_time                              lookahead_{core::system::default_lookahead};
+  core::sys_time                              progress_{core::system::default_progress};
   std::size_t                                 tap_capacity_ = std::size_t{1} << 20;
   std::vector<member_entry>                   members_;
   std::vector<wire_entry>                     wires_;

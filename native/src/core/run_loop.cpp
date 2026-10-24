@@ -432,6 +432,10 @@ auto machine::run_state::deliverable() noexcept -> bool
     run.stop_at_boundary(engine, now);
     return;
   }
+  if(now >= run.progress_at) [[unlikely]]
+  {
+    run.call_progress(now);
+  }
   if(size == 1 and previous == run.block_pc and run.skip_self_branch(engine, now)) [[unlikely]]
   {
     return;
@@ -457,6 +461,12 @@ auto machine::run_state::deliverable() noexcept -> bool
   {
     run.record_block();
   }
+}
+
+void machine::run_state::call_progress(icount now) noexcept
+{
+  progress_at = icount{now.value + progress_every.value};
+  (*progress)();
 }
 
 void machine::run_state::stop_at_boundary(uc_struct* engine, icount now) noexcept
@@ -719,6 +729,8 @@ void machine::run_state::clear_slice() noexcept
   clear_internal_stop();
   wall_expired = false;
   until_thread = false;
+  progress.reset();
+  progress_at = icount{std::numeric_limits<std::uint64_t>::max()};
 }
 
 void machine::run_state::set_exits(std::vector<address> list)
@@ -1174,6 +1186,10 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
   wall_countdown = wall_check_blocks;
   wall_expired   = false;
   wall_deadline  = std::chrono::steady_clock::now() + request.wall_budget;
+  progress       = request.progress;
+  progress_every = request.progress_every;
+  progress_at    = progress ? icount{owner.clock_driver_.exact_now().value + progress_every.value}
+                            : icount{std::numeric_limits<std::uint64_t>::max()};
   until_thread   = request.until_thread;
   until_return   = request.until_return;
   return_block   = until_return ? until_return->ret : address{};
@@ -1205,6 +1221,10 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     if(auto end = bound_reached(request))
     {
       return finish(request, std::move(*end));
+    }
+    if(auto const now = owner.clock_driver_.exact_now(); now >= progress_at)
+    {
+      call_progress(now);
     }
     if(core_held)
     {
