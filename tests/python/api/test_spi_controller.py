@@ -93,7 +93,6 @@ def test_a_controller_clocks_the_firmware_target_and_hears_its_frames(
     assert m.pending_events == events
 
 
-@pytest.mark.timeout(40)
 def test_a_transfer_is_alike_parked_and_running(u575: popcorn.PartDescription) -> None:
     m, parked = echo_machine(u575)
     at = m.time + START
@@ -114,7 +113,7 @@ def test_a_transfer_is_alike_parked_and_running(u575: popcorn.PartDescription) -
             await m.wait_for(m.ref.var("log_len").ge(5))
 
     with pytest.raises(popcorn.EmulationError, match=r"USER at .* target_echo"):
-        run_bounded(body(), 30)
+        run_bounded(body(), 10)
     assert log(m) == parked_log == ECHO_LOG
     assert cast(Stamped, running).frames == cast(Stamped, parked).frames
     check_frames(cast(Stamped, running), at)

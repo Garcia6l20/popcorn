@@ -64,7 +64,7 @@ def running(m: popcorn.Machine) -> list[int]:
         async with m.running():
             return await m.wait_for(m.ref.var("log_len").ge(LOGGED))
 
-    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    assert run_bounded(body(), 10).reason is popcorn.StopReason.USER
     return fw_words(m)
 
 
@@ -84,7 +84,6 @@ def test_rng_words_of_seed_0_are_fixed() -> None:
     assert rng_words(0, 0) == []
 
 
-@pytest.mark.timeout(40)
 @pytest.mark.parametrize("seed", [0, 0x5EED])
 def test_the_firmware_reads_rng_words_parked_and_running(
     u575: popcorn.PartDescription, seed: int
@@ -280,7 +279,7 @@ def keygen_running(m: popcorn.Machine) -> int:
         async with m.running():
             return await m.wait_for(m.ref.var("keygen_done").ge(1))
 
-    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    assert run_bounded(body(), 10).reason is popcorn.StopReason.USER
     return m.mem.u32[m.sym("keygen_status")]
 
 
@@ -366,7 +365,7 @@ def deinit_running(m: popcorn.Machine) -> list[int]:
         async with m.running():
             return await m.wait_for(m.ref.var("log_len").ge(DEINIT_LOGGED))
 
-    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    assert run_bounded(body(), 10).reason is popcorn.StopReason.USER
     return logged(m)
 
 

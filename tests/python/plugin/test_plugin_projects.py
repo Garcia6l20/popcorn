@@ -78,11 +78,10 @@ def test_workers_boot_each_project(pytester: pytest.Pytester, workers: str) -> N
     result.assert_outcomes(passed=2)
 
 
-@pytest.mark.timeout(70)
 def test_workers_share_one_cold_boot_per_project(pytester: pytest.Pytester) -> None:
     pytest.importorskip("xdist")
     two_projects(pytester)
-    result = pytester.runpytest_subprocess(*NO_ASYNCIO, "-n", "2", "--dist", "each", timeout=60)
+    result = pytester.runpytest_subprocess(*NO_ASYNCIO, "-n", "2", "--dist", "each", timeout=12)
     result.assert_outcomes(passed=4)
     assert summary(result) == "popcorn: 2 key(s), 2 boot(s), 2 from cache"
 
@@ -224,11 +223,10 @@ def test_a_missing_plugin_library_skips_with_missing_skip(pytester: pytest.Pytes
     assert reasons and all(line.endswith(f": missing input: {absent}") for line in reasons)
 
 
-@pytest.mark.timeout(70)
 def test_a_missing_input_skips_under_workers(pytester: pytest.Pytester) -> None:
     pytest.importorskip("xdist")
     missing_project(pytester, 'missing="skip",')
-    result = pytester.runpytest_subprocess(*NO_ASYNCIO, "-n", "2", timeout=60)
+    result = pytester.runpytest_subprocess(*NO_ASYNCIO, "-n", "2", timeout=12)
     result.assert_outcomes(skipped=4)
 
 

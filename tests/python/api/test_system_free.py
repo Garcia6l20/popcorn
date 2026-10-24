@@ -61,7 +61,7 @@ def at_done(m: popcorn.Machine, stop: Stop | None) -> bool:
     )
 
 
-def bounded(main: Coroutine[Any, Any, None], timeout: float = 30) -> None:
+def bounded(main: Coroutine[Any, Any, None], timeout: float = 10) -> None:
     """`asyncio.run(main)` in a daemon thread, failing once it runs past `timeout` seconds, so a
     hang fails the test instead of stalling the session."""
     failed: list[BaseException] = []
@@ -419,7 +419,6 @@ def test_system_wait_refusals(ping: Build) -> None:
     asyncio.run(body())
 
 
-@pytest.mark.timeout(40)
 def test_a_halt_from_another_thread_runs_on_the_free_run_s_loop(ping: Build) -> None:
     system = ping()
     b = system.members["b"]
@@ -517,7 +516,6 @@ def test_two_eager_running_blocks_each_end_their_free_run(ping: Build) -> None:
         assert after.reason is StopReason.TIME
 
 
-@pytest.mark.timeout(40)
 def test_a_halt_from_a_machine_callback_raises_runtime_error(ping: Build) -> None:
     system = ping()
     a = system.members["a"]
@@ -576,7 +574,6 @@ def test_a_halt_from_a_machine_callback_with_no_free_run_keeps_what_it_would_rai
     system.halt()
 
 
-@pytest.mark.timeout(40)
 def test_a_forwarded_halt_falls_back_only_when_its_loop_closed(ping: Build) -> None:
     system = ping()
     closed = asyncio.new_event_loop()

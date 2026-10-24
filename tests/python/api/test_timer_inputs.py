@@ -52,7 +52,6 @@ def drive(m: popcorn.Machine, edges: dict[int, list[tuple[VirtualTime, bool]]]) 
         asyncio.run(m.periph.GPIOA.pin(pin).drive_edges(pin_edges))
 
 
-@pytest.mark.timeout(40)
 def test_an_encoder_counts_a_quadrature_sequence_alike_parked_and_running(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -75,7 +74,7 @@ def test_an_encoder_counts_a_quadrature_sequence_alike_parked_and_running(
             await running.wait_for(running.ref.mem.u32[running.sym("log_len")].ge(3))
 
     with pytest.raises(popcorn.EmulationError, match="USER"):
-        run_bounded(body(), 30)
+        run_bounded(body(), 10)
     assert log(running) == [0, 30, 1]
 
     m = entered(u575, "tim3_encoder")
@@ -96,7 +95,6 @@ def pulse_train(start: VirtualTime, count: int) -> list[tuple[VirtualTime, bool]
     return edges
 
 
-@pytest.mark.timeout(40)
 def test_a_capture_with_icpsc_4_and_a_filter_logs_every_fourth_edge_alike_parked_and_running(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -114,7 +112,7 @@ def test_a_capture_with_icpsc_4_and_a_filter_logs_every_fourth_edge_alike_parked
             await running.wait_for(running.ref.mem.u32[running.sym("log_len")].ge(4))
 
     with pytest.raises(popcorn.EmulationError, match="USER"):
-        run_bounded(body(), 30)
+        run_bounded(body(), 10)
     first, second, third, overcapture = log(running)
     ticks_per_capture = 4 * 2 * EDGE_GAP.ps // 250_000
     assert (second - first, third - second, overcapture) == (ticks_per_capture,) * 2 + (0,)

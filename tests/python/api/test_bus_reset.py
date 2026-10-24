@@ -186,7 +186,7 @@ def deinit_running(m: popcorn.Machine) -> None:
 
     model = rng_of(m)
     before = m._handle.gil_entries()  # pyright: ignore[reportPrivateUsage]
-    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    assert run_bounded(body(), 10).reason is popcorn.StopReason.USER
     calls = model.bus_resets + len(model.writes) + model.reads
     assert m._handle.gil_entries() - before == calls  # pyright: ignore[reportPrivateUsage]
 

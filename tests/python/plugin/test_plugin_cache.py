@@ -191,13 +191,12 @@ def test_without_the_cache_plugin_every_session_boots(pytester: pytest.Pytester)
     assert not (pytester.path / ".pytest_cache").exists()
 
 
-@pytest.mark.timeout(70)
 def test_cold_workers_boot_once(pytester: pytest.Pytester) -> None:
     pytest.importorskip("xdist")
     write_conftest(pytester)
     write_project(pytester)
     pytester.makepyfile("def test_boot(machine):\n    pass\n")
-    result = pytester.runpytest_subprocess(*BASE, "-n", "4", "--dist", "each", timeout=60)
+    result = pytester.runpytest_subprocess(*BASE, "-n", "4", "--dist", "each", timeout=12)
     result.assert_outcomes(passed=4)
     assert summary(result) == "popcorn: 1 key(s), 1 boot(s), 3 from cache"
 

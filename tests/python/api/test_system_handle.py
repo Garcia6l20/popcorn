@@ -68,7 +68,7 @@ def link(
 
 
 def resume(handle: _core.SystemHandle, until_ps: int | None) -> tuple[object, ...]:
-    return cast(tuple[object, ...], handle.resume(until_ps).result(30.0))
+    return cast(tuple[object, ...], handle.resume(until_ps).result(10.0))
 
 
 def taken(box: list[_core.HostFuture]) -> object:
@@ -130,7 +130,6 @@ def outcome(linked: Linked) -> tuple[object, ...]:
     )
 
 
-@pytest.mark.timeout(40)
 def test_two_members_ping_and_echo_with_the_same_result_at_any_slicing_or_quantum(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
@@ -149,7 +148,6 @@ def test_two_members_ping_and_echo_with_the_same_result_at_any_slicing_or_quantu
     assert results[2] == results[0]
 
 
-@pytest.mark.timeout(40)
 def test_a_goal_stops_at_its_point_whatever_the_slicing_or_quantum(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
@@ -174,7 +172,6 @@ def test_a_goal_stops_at_its_point_whatever_the_slicing_or_quantum(
     assert seen[1:] == seen[:1] * 3
 
 
-@pytest.mark.timeout(40)
 def test_a_member_with_a_pending_goal_refuses_sync_access_while_paused(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
@@ -230,7 +227,6 @@ def test_member_indices_are_checked_before_anything_is_posted(
     assert linked.handle.undecided() == []
 
 
-@pytest.mark.timeout(40)
 def test_a_running_system_refuses_member_times_and_paused_injections(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
@@ -243,7 +239,7 @@ def test_a_running_system_refuses_member_times_and_paused_injections(
     with pytest.raises(popcorn.MachineRunning, match="running"):
         linked.handle.inject(0, [1], ms(400).ps, True)
     linked.handle.request_pause()
-    pause = cast(tuple[object, ...], pending.result(30.0))
+    pause = cast(tuple[object, ...], pending.result(10.0))
     assert cast(_core.PauseReason, pause[0]) in (
         _core.PauseReason.requested,
         _core.PauseReason.delivered,
@@ -251,7 +247,6 @@ def test_a_running_system_refuses_member_times_and_paused_injections(
     assert linked.handle.time_of_ps(1) >= 0
 
 
-@pytest.mark.timeout(40)
 def test_a_member_runs_alone_only_once_the_system_is_closed(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
@@ -329,7 +324,6 @@ def test_a_completion_callback_re_entering_the_system_raises_instead_of_deadlock
     assert linked.handle.undecided() == []
 
 
-@pytest.mark.timeout(40)
 def test_a_stop_when_calling_the_system_fails_the_goal(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
@@ -353,7 +347,6 @@ def test_a_stop_when_calling_the_system_fails_the_goal(
         taken(box)
 
 
-@pytest.mark.timeout(40)
 def test_a_stop_when_goal_takes_the_gil_only_for_its_calls(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
@@ -397,7 +390,6 @@ def test_the_handle_holds_its_members_until_closed(u575: popcorn.PartDescription
     assert _core.host_threads() == threads
 
 
-@pytest.mark.timeout(40)
 def test_an_async_resume_completes_through_the_loop(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
@@ -415,7 +407,6 @@ def test_an_async_resume_completes_through_the_loop(
     )
 
 
-@pytest.mark.timeout(40)
 def test_an_injection_while_paused_is_checked_against_the_receiver(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
@@ -435,7 +426,6 @@ def test_an_injection_while_paused_is_checked_against_the_receiver(
     assert linked.handle.tap_dropped(0) == 0
 
 
-@pytest.mark.timeout(40)
 def test_an_injection_while_running_is_refused_before_the_drained_reach(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
@@ -445,7 +435,6 @@ def test_an_injection_while_running_is_refused_before_the_drained_reach(
     assert refused is not None and refused[0] == "before_drained"
 
 
-@pytest.mark.timeout(40)
 def test_a_replaced_frame_reaches_the_receiver_with_its_new_data(
     ping: Callable[[int, int | None], Linked],
 ) -> None:
@@ -465,7 +454,6 @@ def test_a_replaced_frame_reaches_the_receiver_with_its_new_data(
     assert received[0] == 0x99
 
 
-@pytest.mark.timeout(40)
 def test_save_load_reset_and_finish_while_paused(ping: Callable[[int, int | None], Linked]) -> None:
     linked = ping(1_000_000, None)
     run_to(linked, ms(1).ps)
@@ -483,7 +471,6 @@ def test_save_load_reset_and_finish_while_paused(ping: Callable[[int, int | None
         linked.handle.resume(None)
 
 
-@pytest.mark.timeout(40)
 def test_closing_from_another_thread_while_calls_run(u575: popcorn.PartDescription) -> None:
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")
@@ -510,7 +497,7 @@ def test_closing_from_another_thread_while_calls_run(u575: popcorn.PartDescripti
         thread.start()
         started.wait()
         handle.close()
-        thread.join(30)
+        thread.join(10)
         assert not thread.is_alive()
     assert "closed" in outcomes
 
@@ -559,7 +546,6 @@ def settles(reached: Callable[[], bool], seconds: float = 10) -> bool:
     return True
 
 
-@pytest.mark.timeout(40)
 @pytest.mark.parametrize("closer_delay_ms", [None, 50])
 def test_a_running_system_collected_in_a_member_s_callback_closes_off_that_thread(
     u575: popcorn.PartDescription,
@@ -587,7 +573,7 @@ def test_a_running_system_collected_in_a_member_s_callback_closes_off_that_threa
 
     goal = box[0].handle.post_goal(0, None, None, None, ms(50).ps, ask, None, False, None, None)
     pending = box[0].handle.resume(ms(100).ps)
-    pause = cast(tuple[object, ...], pending.result(30.0))
+    pause = cast(tuple[object, ...], pending.result(10.0))
     assert collected and collected[0] > 0
     assert cast(_core.PauseReason, pause[0]) is _core.PauseReason.closed
     assert goal.done()
@@ -708,7 +694,6 @@ time.sleep(0.05)
 """
 
 
-@pytest.mark.timeout(70)
 @pytest.mark.parametrize("body", [COLLECTED, LEFT_OPEN], ids=["collected", "left open"])
 def test_an_interpreter_exits_with_a_system_closing_or_open(
     u575: popcorn.PartDescription, body: str
@@ -717,7 +702,7 @@ def test_an_interpreter_exits_with_a_system_closing_or_open(
         [sys.executable, "-c", CHILD.format(elf=str(USART_LL), body=body)],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=12,
         check=False,
     )
     assert child.returncode == 0, child.stderr
@@ -725,7 +710,6 @@ def test_an_interpreter_exits_with_a_system_closing_or_open(
     assert child.stderr == ""
 
 
-@pytest.mark.timeout(70)
 def test_an_exit_reports_a_closer_stuck_past_the_exit_budget(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -733,7 +717,7 @@ def test_an_exit_reports_a_closer_stuck_past_the_exit_budget(
         [sys.executable, "-c", CHILD.format(elf=str(USART_LL), body=BLOCKED)],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=12,
         check=False,
         env={**os.environ, "POPCORN_TEST_EXIT_WAIT_MS": "1000"},
     )

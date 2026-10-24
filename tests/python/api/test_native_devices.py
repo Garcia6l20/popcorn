@@ -374,7 +374,6 @@ def test_an_eeprom24xx_that_reaches_its_machine_is_collected(
     collected_with_its_device(machine(u575, I2C_ELF, "I2C1", eeprom()), "I2C1")
 
 
-@pytest.mark.timeout(250)
 @pytest.mark.usefixtures("u575")
 def test_a_native_device_subclass_alive_at_exit_leaks_nothing() -> None:
     code = textwrap.dedent("""
@@ -390,7 +389,7 @@ def test_a_native_device_subclass_alive_at_exit_leaks_nothing() -> None:
         print(m.board.devices("SPI1")[0].described())
         """)
     ran = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=False, timeout=240
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False, timeout=12
     )
     assert ran.returncode == 0, ran.stderr
     assert ran.stdout.split() == ["flash"]

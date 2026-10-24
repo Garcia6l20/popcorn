@@ -340,7 +340,6 @@ def test_a_parse_runs_with_the_collector_off_and_restores_it(
     assert seen == [False, False]
 
 
-@pytest.mark.timeout(70)
 def test_overlapping_parses_restore_the_collector_once_both_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -350,12 +349,12 @@ def test_overlapping_parses_restore_the_collector_once_both_end(
     during_second: list[bool] = []
 
     def watched(path: Path) -> DebugInfo:
-        inside.wait(timeout=30)
+        inside.wait(timeout=10)
         if path.name == "first.elf":
             info = parse(path)
             first_done.set()
             return info
-        first_done.wait(timeout=30)
+        first_done.wait(timeout=10)
         during_second.append(gc.isenabled())
         return parse(path)
 
@@ -368,7 +367,7 @@ def test_overlapping_parses_restore_the_collector_once_both_end(
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=60)
+        thread.join(timeout=10)
     assert during_second == [False]
     assert gc.isenabled()
 

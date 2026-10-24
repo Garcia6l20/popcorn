@@ -440,7 +440,6 @@ def test_the_peer_chain_fills_a_16_bit_ring_with_filter_0_then_filter_1(
         ]
 
 
-@pytest.mark.timeout(30)
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 def test_parked_and_running_captures_give_the_same_buffers_and_times(
     u575: popcorn.PartDescription, running: bool
@@ -460,7 +459,7 @@ def test_parked_and_running_captures_give_the_same_buffers_and_times(
                 await taps[0].read(1)
                 return got
 
-        got = run_bounded(free(), 20)
+        got = run_bounded(free(), 10)
     else:
         got = asyncio.run(scenario())
         asyncio.run(taps[0].read(1))
@@ -521,7 +520,7 @@ def snapshot_leg(
                 async with m.running():
                     await tap.read(1000)
 
-        run_bounded(free(), 20)
+        run_bounded(free(), 10)
         assert m.last_stop is not None and m.last_stop.reason is StopReason.WATCHPOINT
     else:
         assert asyncio.run(m.run()).reason is StopReason.WATCHPOINT
@@ -549,7 +548,6 @@ def snapshot_leg(
     return at, data, got
 
 
-@pytest.mark.timeout(30)
 def test_a_snapshot_mid_sample_restores_the_chain_and_a_fresh_modulator_parked_or_running(
     u575: popcorn.PartDescription,
 ) -> None:

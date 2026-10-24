@@ -83,7 +83,6 @@ def point(stop: Stop) -> tuple[object, ...]:
     return (stop.reason, stop.pc, stop.instructions, stop.time)
 
 
-@pytest.mark.timeout(40)
 def test_a_fault_ends_its_member_s_goal_and_the_peer_reaches_its_own(
     u575: popcorn.PartDescription, pair: Build
 ) -> None:
@@ -102,13 +101,12 @@ def test_a_fault_ends_its_member_s_goal_and_the_peer_reaches_its_own(
     assert fault is not None
 
 
-@pytest.mark.timeout(40)
 def test_a_budget_ends_its_member_s_goal_as_on_a_lone_machine(
     u575: popcorn.PartDescription, pair: Build
 ) -> None:
     async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
-        async with asyncio.timeout(30):
+        async with asyncio.timeout(10):
             a_stop, b_stop = await asyncio.gather(
                 a.run(until=NEVER, budget=10_000, for_=ms(1)), b.run(for_=ms(1))
             )
@@ -121,11 +119,10 @@ def test_a_budget_ends_its_member_s_goal_as_on_a_lone_machine(
     assert point(alone)[:3] == a_point[:3]
 
 
-@pytest.mark.timeout(40)
 def test_goals_of_a_sleeping_system_each_resolve_idle(pair: Build) -> None:
     async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
-        async with asyncio.timeout(30):
+        async with asyncio.timeout(10):
             a_stop, b_stop = await asyncio.gather(a.run(until=NEVER), b.run(until=NEVER))
         assert a_stop.reason is StopReason.IDLE and b_stop.reason is StopReason.IDLE
         assert system.time_of("a") == system.time_of("b")
@@ -134,7 +131,6 @@ def test_goals_of_a_sleeping_system_each_resolve_idle(pair: Build) -> None:
     across(pair, body, a_entry="idle", b_entry="idle")
 
 
-@pytest.mark.timeout(40)
 def test_every_pending_goal_fails_with_a_member_s_error_which_names_it(pair: Build) -> None:
     async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
@@ -153,7 +149,6 @@ def test_every_pending_goal_fails_with_a_member_s_error_which_names_it(pair: Bui
     assert notes == ["raised by member a at system time t=100500000 ps"]
 
 
-@pytest.mark.timeout(40)
 def test_a_goal_resolved_before_a_member_s_error_keeps_its_stop(pair: Build) -> None:
     async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
@@ -168,7 +163,6 @@ def test_a_goal_resolved_before_a_member_s_error_keeps_its_stop(pair: Build) -> 
     across(pair, body, a_models={"TIM6": Ticker})
 
 
-@pytest.mark.timeout(40)
 def test_a_task_group_fails_with_a_member_s_error_in_every_goal(pair: Build) -> None:
     async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
@@ -185,7 +179,6 @@ def test_a_task_group_fails_with_a_member_s_error_in_every_goal(pair: Build) -> 
     across(pair, body, a_models={"TIM6": Ticker})
 
 
-@pytest.mark.timeout(40)
 def test_a_halted_member_s_error_fails_the_goal_of_the_next_run(pair: Build) -> None:
     async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
@@ -199,7 +192,6 @@ def test_a_halted_member_s_error_fails_the_goal_of_the_next_run(pair: Build) -> 
     assert notes == ["raised by member a at system time t=1100500000 ps"]
 
 
-@pytest.mark.timeout(40)
 def test_a_member_s_goals_count_only_what_it_executed_not_its_halt(pair: Build) -> None:
     async def body(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
@@ -217,7 +209,6 @@ def test_a_member_s_goals_count_only_what_it_executed_not_its_halt(pair: Build) 
     assert 5_000 <= executed < 5_010
 
 
-@pytest.mark.timeout(40)
 def test_gather_order_lone_goals_and_halted_sequences_are_exact(pair: Build) -> None:
     async def gathered(system: System, reverse: bool) -> object:
         a, b = system.members["a"], system.members["b"]
@@ -248,7 +239,6 @@ def test_gather_order_lone_goals_and_halted_sequences_are_exact(pair: Build) -> 
     across(pair, sequence)
 
 
-@pytest.mark.timeout(40)
 def test_a_halted_receiver_s_usart_overruns_and_takes_its_interrupt_on_its_next_goal(
     pair: Build,
 ) -> None:
@@ -269,7 +259,6 @@ def test_a_halted_receiver_s_usart_overruns_and_takes_its_interrupt_on_its_next_
     across(pair, body, a_entry="link_tx", b_entry="link_rx")
 
 
-@pytest.mark.timeout(40)
 @pytest.mark.parametrize("frozen", [False, True])
 def test_a_halted_receiver_s_dma_ring_fills_unless_its_channel_is_frozen(
     pair: Build, frozen: bool
@@ -289,7 +278,6 @@ def test_a_halted_receiver_s_dma_ring_fills_unless_its_channel_is_frozen(
     assert (ring == bytes(TX_BYTES)) is not frozen
 
 
-@pytest.mark.timeout(40)
 @pytest.mark.parametrize("frozen", [False, True])
 def test_a_halted_sender_s_watchdog_bites_unless_it_is_frozen(
     pair: Build, frozen: bool, caplog: pytest.LogCaptureFixture
@@ -349,7 +337,6 @@ def pty_woken(
         os.close(fd)
 
 
-@pytest.mark.timeout(40)
 def test_a_pty_byte_wakes_a_sleeping_system_at_the_same_point_at_any_slicing(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -360,7 +347,6 @@ def test_a_pty_byte_wakes_a_sleeping_system_at_the_same_point_at_any_slicing(
     assert log[0] == (1 << 16) | ord("Q")
 
 
-@pytest.mark.timeout(40)
 def test_python_models_on_two_members_run_deterministically_one_gil_entry_per_call(
     pair: Build,
 ) -> None:
@@ -409,12 +395,11 @@ def test_python_models_on_two_members_run_deterministically_one_gil_entry_per_ca
 
 async def to(system: System, until: VirtualTime) -> None:
     """Run to `until`, again after each member stop."""
-    async with asyncio.timeout(30):
+    async with asyncio.timeout(10):
         while (await system.run(until=until)).reason is not StopReason.TIME:
             pass
 
 
-@pytest.mark.timeout(40)
 def test_a_watchdog_reset_of_a_running_member_lets_the_system_run_on(pair: Build) -> None:
     async def body(system: System) -> object:
         a = system.members["a"]
@@ -429,7 +414,6 @@ def test_a_watchdog_reset_of_a_running_member_lets_the_system_run_on(pair: Build
     across(pair, body, a_entry="link_iwdg", b_entry="link_rx")
 
 
-@pytest.mark.timeout(40)
 def test_an_armed_replace_taken_in_a_snapshot_applies_again_after_a_restore(pair: Build) -> None:
     async def body(system: System) -> object:
         b = system.members["b"]

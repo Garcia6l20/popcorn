@@ -161,14 +161,14 @@ import popcorn
 import pytest
 
 async def test_option(machine, request):
-    stop = await asyncio.wait_for(machine.run(), 60)
+    stop = await asyncio.wait_for(machine.run(), 10)
     assert stop.reason is popcorn.StopReason.BUDGET
     assert machine.default_budget == request.config.getoption("popcorn_budget")
 
 @pytest.mark.popcorn(budget=500)
 async def test_marker(machine):
     start = machine.instructions
-    stop = await asyncio.wait_for(machine.run(), 60)
+    stop = await asyncio.wait_for(machine.run(), 10)
     assert stop.reason is popcorn.StopReason.BUDGET
     assert 500 <= stop.instructions - start < 600
 

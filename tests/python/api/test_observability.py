@@ -239,7 +239,6 @@ def ring_block_rows(m: popcorn.Machine) -> list[tuple[int, int, int]]:
     return [(r.time, r.pc, r.icount) for r in m.ring.records() if isinstance(r, Block)]
 
 
-@pytest.mark.timeout(40)
 def test_ring_blocks_are_alike_parked_and_running() -> None:
     parked = nested(blocks=True)
     stop = asyncio.run(parked.run(budget=10_000))
@@ -251,7 +250,7 @@ def test_ring_blocks_are_alike_parked_and_running() -> None:
             await running.wait_for(popcorn.Reached("level3"))
 
     with pytest.raises(popcorn.FaultError) as raised:
-        run_bounded(body(), 30)
+        run_bounded(body(), 10)
     ended = raised.value.stop
     assert ended is not None and ended.pc == stop.pc
     assert ring_block_rows(parked)
@@ -274,7 +273,6 @@ def test_ring_blocks_are_checked_and_refused_while_running() -> None:
     assert not m.ring.blocks
 
 
-@pytest.mark.timeout(40)
 def test_ring_blocks_are_refused_from_a_command_of_a_free_run() -> None:
     m = branches(count=1_000_000)
     refused: list[type[BaseException]] = []
@@ -289,12 +287,11 @@ def test_ring_blocks_are_refused_from_a_command_of_a_free_run() -> None:
         async with m.running():
             await m.sample(toggle)
 
-    run_bounded(body(), 30)
+    run_bounded(body(), 10)
     assert refused == [popcorn.MachineRunning]
     assert not m.ring.blocks
 
 
-@pytest.mark.timeout(40)
 def test_ring_blocks_are_refused_from_a_handler_in_a_slice() -> None:
     m = branches(count=2)
     refused: list[type[BaseException]] = []
@@ -313,7 +310,7 @@ def test_ring_blocks_are_refused_from_a_handler_in_a_slice() -> None:
             await m.wait_for(popcorn.Reached("outside"))
 
     with pytest.raises(popcorn.EmulationError):
-        run_bounded(body(), 30)
+        run_bounded(body(), 10)
     assert refused == [popcorn.MachineRunning]
     assert not m.ring.blocks
 

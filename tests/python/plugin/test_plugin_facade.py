@@ -20,7 +20,7 @@ MODEL_ELF = PREBUILT / "model.elf"
 
 async def bounded[T](run: Coroutine[object, object, T]) -> T:
     """`run` with a 60 s wall hang guard, for runs only a default budget bounds."""
-    return await asyncio.wait_for(run, 60)
+    return await asyncio.wait_for(run, 10)
 
 
 def driver(scenario: str | None = None) -> popcorn.Machine:
@@ -178,7 +178,6 @@ def test_a_waiter_inside_running_sets_no_last_stop() -> None:
     assert m.last_stop is None
 
 
-@pytest.mark.timeout(70)
 def test_default_budget_bounds_run_wait_for_and_call() -> None:
     m = driver()
     asyncio.run(m.run(until="alu_mark"))

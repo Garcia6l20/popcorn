@@ -375,14 +375,13 @@ class HeldTake:
         taken = self._handle.tap_take(wire)
         if taken and threading.current_thread().name == "held":
             self.took.set()
-            self.go.wait(30)
+            self.go.wait(10)
         return taken
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._handle, name)
 
 
-@pytest.mark.timeout(40)
 def test_frames_taken_by_two_threads_at_once_keep_each_direction_in_order(pair: Build) -> None:
     system = pair()
     tap = system.tap("a.USART1")
@@ -391,11 +390,11 @@ def test_frames_taken_by_two_threads_at_once_keep_each_direction_in_order(pair: 
     asyncio.run(to(system, at(1001)))
     holding = threading.Thread(target=lambda: tap.available, name="held")
     holding.start()
-    assert held.took.wait(30)
+    assert held.took.wait(10)
     asyncio.run(to(system, at(3000)))
     threading.Timer(0.2, held.go.set).start()
     first = tap.frames(towards="b.USART1")
-    holding.join(30)
+    holding.join(10)
     every = first + tap.frames(towards="b.USART1")
     assert [f.index for f in every] == list(range(64))
 

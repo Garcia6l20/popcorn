@@ -131,7 +131,6 @@ def post_samples(
     return [m.read(pa5, seen, at=at + EDGE_GAP // 2) for at, _ in edges]
 
 
-@pytest.mark.timeout(40)
 def test_timed_edges_give_the_same_samples_parked_and_running(board: popcorn.Machine) -> None:
     rerun = popcorn.Machine(board.description, image=board.images[0])
     rerun.reset()
@@ -153,7 +152,7 @@ def test_timed_edges_give_the_same_samples_parked_and_running(board: popcorn.Mac
             assert ran == boundary
             return [tuple(await read) for read in reads]
 
-    running_samples = run_bounded(running(), 30)
+    running_samples = run_bounded(running(), 10)
     assert running_samples == [(level, int(level)) for _, level in edges]
 
     posted = asyncio.run(board.periph.GPIOA.pin(0).drive_edges(edges))
@@ -164,7 +163,7 @@ def test_timed_edges_give_the_same_samples_parked_and_running(board: popcorn.Mac
         await board.run(for_=edges[-1][0] + EDGE_GAP - board.time)
         return [tuple(await read) for read in reads]
 
-    assert run_bounded(parked(), 30) == running_samples
+    assert run_bounded(parked(), 10) == running_samples
     assert board.periph.GPIOA.pin(0).level is False
 
 

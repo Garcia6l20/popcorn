@@ -476,7 +476,6 @@ def test_a_free_run_deadline_read_ends_at_its_absolute_time(board: popcorn.Machi
     assert len(frames) < 40
 
 
-@pytest.mark.timeout(30)
 def test_a_free_run_deadline_read_takes_the_frames_a_parked_one_takes(
     board: popcorn.Machine,
 ) -> None:
@@ -495,7 +494,7 @@ def test_a_free_run_deadline_read_takes_the_frames_a_parked_one_takes(
         async with board.running():
             return await late_drained_read(board, post, reads, ms(8))
 
-    at, (first, later) = run_bounded(running(), 20)
+    at, (first, later) = run_bounded(running(), 10)
     assert first
     assert later
     assert first[-1].at <= at + ms(4) < later[0].at
@@ -505,7 +504,6 @@ def test_a_free_run_deadline_read_takes_the_frames_a_parked_one_takes(
     assert asyncio.run(reads(at)) == (first, later)
 
 
-@pytest.mark.timeout(30)
 def test_a_read_registered_past_its_deadline_takes_only_the_frames_ready_by_it(
     board: popcorn.Machine,
 ) -> None:
@@ -530,7 +528,7 @@ def test_a_read_registered_past_its_deadline_takes_only_the_frames_ready_by_it(
 
             return await late_drained_read(board, post, late, ms(10))
 
-    at, (waited, fast, later) = run_bounded(running(), 20)
+    at, (waited, fast, later) = run_bounded(running(), 10)
     assert waited
     assert waited[-1].at <= at + ms(2) < fast[0].at
     assert 0 < len(fast) < 30
@@ -542,7 +540,6 @@ def test_a_read_registered_past_its_deadline_takes_only_the_frames_ready_by_it(
     assert asyncio.run(reads(at)) == (waited, fast, later)
 
 
-@pytest.mark.timeout(30)
 @pytest.mark.parametrize(
     ("fields", "sent", "echoed"),
     [
@@ -569,7 +566,7 @@ def test_a_parity_echo_reads_the_data_bits_the_same_parked_and_running(
         async with board.running():
             return await late_drained_read(board, post, reads, ms(8))
 
-    at, frames = run_bounded(running(), 20)
+    at, frames = run_bounded(running(), 10)
     assert bytes(f.data for f in frames) == echoed
     assert board.periph.USART1.ISR_disabled.PE == 0
     board.restore(start)
@@ -611,7 +608,6 @@ ISR_STEPS = (1.5, 2.5, 4.1, 4.5)
 2-bit hold, after the NOISE c."""
 
 
-@pytest.mark.timeout(30)
 def test_tagged_bytes_and_a_break_give_the_same_flags_and_frames_parked_and_running(
     board: popcorn.Machine,
 ) -> None:
@@ -641,7 +637,7 @@ def test_tagged_bytes_and_a_break_give_the_same_flags_and_frames_parked_and_runn
         async with board.running():
             return await late_drained_read(board, post, reads, ms(8))
 
-    at, (frames, seen) = run_bounded(running(), 20)
+    at, (frames, seen) = run_bounded(running(), 10)
     assert [f.data for f in frames] == [ord("a"), ord("b"), 0, ord("c")]
     assert seen == [(0, 0), (1, 0), (1, 0), (1, 1)]
     assert abs(frames[3].at.ps - frames[2].at.ps - (FRAME_PS + FRAME_PS // 5)) < us(1).ps
@@ -754,7 +750,6 @@ def test_read_until_gives_the_same_bytes_and_span_parked_and_running(
     assert first[1].span() == second[1].span()
 
 
-@pytest.mark.timeout(40)
 def test_a_growing_match_is_the_shortest_even_when_one_slice_saw_every_byte(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -775,7 +770,7 @@ def test_a_growing_match_is_the_shortest_even_when_one_slice_saw_every_byte(
             await m.elapse(ms(1))
             return found, uart.take()
 
-    found, rest = run_bounded(running(), 30)
+    found, rest = run_bounded(running(), 10)
     assert found is not None
     assert found[0] == b"1"
     assert found[1].span() == (0, 1)
@@ -1019,7 +1014,6 @@ def frames_after(at: VirtualTime, frames: float) -> VirtualTime:
     return at + VirtualDuration(int(frames * FRAME_PS))
 
 
-@pytest.mark.timeout(30)
 @pytest.mark.parametrize("rtse", [True, False], ids=["rts", "no-rts"])
 def test_cts_holds_the_echo_and_rts_holds_the_host_the_same_parked_and_running(
     board: popcorn.Machine, rtse: bool
@@ -1049,7 +1043,7 @@ def test_cts_holds_the_echo_and_rts_holds_the_host_the_same_parked_and_running(
         async with board.running():
             return await late_drained_read(board, post, reads, ms(8))
 
-    at, (frames, ready) = run_bounded(running(), 20)
+    at, (frames, ready) = run_bounded(running(), 10)
     stop = frames_after(at + ms(1), 2.5)
     go = frames_after(at + ms(1), 12)
     isr = board.periph.USART1.ISR_disabled

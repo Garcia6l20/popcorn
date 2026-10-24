@@ -260,7 +260,6 @@ def _third_link(spec: popcorn.SystemDescription) -> popcorn.SystemDescription:
 PINNABLE = hasattr(os, "sched_setaffinity") and Path("/proc/self/task").is_dir()
 
 
-@pytest.mark.timeout(20)
 @pytest.mark.parametrize("variant", ["slicing", "quantum", "one cpu"])
 async def test_the_run_is_the_same_at_any_slicing_quantum_or_cpu_count(
     system_description: popcorn.SystemDescription, variant: str
@@ -288,7 +287,6 @@ async def test_the_run_is_the_same_at_any_slicing_quantum_or_cpu_count(
         assert observed == reference
 
 
-@pytest.mark.timeout(20)
 async def test_a_starved_responder_resets_and_comes_back(system: System) -> None:
     controller = system.members["controller"]
     responder = system.members["responder2"]

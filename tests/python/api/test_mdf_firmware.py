@@ -409,7 +409,6 @@ def outcome(m: popcorn.Machine) -> Outcome:
     )
 
 
-@pytest.mark.timeout(40)
 def test_two_mics_give_the_same_ring_samples_and_times_parked_and_running(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -426,7 +425,7 @@ def test_two_mics_give_the_same_ring_samples_and_times_parked_and_running(
                 async with m.running():
                     return await m.wait_for(m.ref.var("done").ge(1), for_=bound.time)
 
-            assert run_bounded(body(), 30).reason is StopReason.USER
+            assert run_bounded(body(), 10).reason is StopReason.USER
             assert m._handle.gil_entries() == 0  # pyright: ignore[reportPrivateUsage]
         else:
             fx.reach("finish")

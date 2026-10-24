@@ -136,7 +136,7 @@ def running(u575: popcorn.PartDescription, entry: str) -> Results:
         async with m.running():
             return await m.wait_for(m.ref.var("hash_done").ge(1))
 
-    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    assert run_bounded(body(), 10).reason is popcorn.StopReason.USER
     return results(m)
 
 
@@ -171,7 +171,6 @@ def irq_feeds(length: int) -> int:
     return feeds
 
 
-@pytest.mark.timeout(40)
 @pytest.mark.parametrize("entry", ["hash_poll", "hash_backtoback", "hash_irq"])
 def test_the_firmware_hashes_alike_parked_and_running(
     u575: popcorn.PartDescription, entry: str
@@ -247,7 +246,6 @@ def dma_results(m: popcorn.Machine) -> tuple[tuple[bytes, ...], tuple[int, ...]]
     return digests, words(m, "hash_dma_control", len(DMA_CASES))
 
 
-@pytest.mark.timeout(40)
 def test_dma_input_hashes_alike_parked_and_running(u575: popcorn.PartDescription) -> None:
     m = entered(u575, "hash_dma")
     stop = asyncio.run(m.wait_for(m.ref.var("hash_done").ge(1), for_=ms(2000)))
@@ -265,7 +263,7 @@ def test_dma_input_hashes_alike_parked_and_running(u575: popcorn.PartDescription
         async with other.running():
             return await other.wait_for(other.ref.var("hash_done").ge(1))
 
-    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    assert run_bounded(body(), 10).reason is popcorn.StopReason.USER
     assert dma_results(other) == (digests, controls)
 
 
@@ -375,11 +373,10 @@ def hmac_run(u575: popcorn.PartDescription, entry: str, *, parked: bool) -> Hmac
         async with m.running():
             return await m.wait_for(m.ref.var("hash_done").ge(1))
 
-    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    assert run_bounded(body(), 10).reason is popcorn.StopReason.USER
     return hmac_results(m, entry)
 
 
-@pytest.mark.timeout(40)
 @pytest.mark.parametrize("entry", ["hmac_poll", "hmac_irq", "hmac_dma"])
 def test_the_firmware_computes_hmacs_alike_parked_and_running(
     u575: popcorn.PartDescription, entry: str
@@ -534,7 +531,6 @@ def swap_results(m: popcorn.Machine) -> tuple[bytes, ...]:
     )
 
 
-@pytest.mark.timeout(40)
 def test_the_firmware_swaps_contexts_alike_parked_and_running(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -550,7 +546,7 @@ def test_the_firmware_swaps_contexts_alike_parked_and_running(
         async with other.running():
             return await other.wait_for(other.ref.var("hash_done").ge(1))
 
-    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    assert run_bounded(body(), 10).reason is popcorn.StopReason.USER
     assert swap_results(other) == first
 
 
@@ -584,7 +580,6 @@ def dma_swap_results(
     )
 
 
-@pytest.mark.timeout(40)
 def test_the_firmware_suspends_dma_input_alike_parked_and_running(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -603,5 +598,5 @@ def test_the_firmware_suspends_dma_input_alike_parked_and_running(
         async with other.running():
             return await other.wait_for(other.ref.var("hash_done").ge(1))
 
-    assert run_bounded(body(), 30).reason is popcorn.StopReason.USER
+    assert run_bounded(body(), 10).reason is popcorn.StopReason.USER
     assert dma_swap_results(other) == first

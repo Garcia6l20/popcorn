@@ -13,7 +13,7 @@ pytest_plugins = ["pytester"]
 
 NO_ASYNCIO = ("-p", "no:asyncio")
 HEADER = "*- popcorn -*"
-EXIT_WITHIN = 30
+EXIT_WITHIN = 12
 
 DRIVER_C = ROOT / "tests" / "firmware" / "api" / "driver.c"
 
@@ -264,7 +264,6 @@ def test_factory_machines_left_started_are_parked_and_counted(
     result.stdout.fnmatch_lines(["popcorn: firmware coverage written to *cov.info"])
 
 
-@pytest.mark.timeout(40)
 def test_a_session_ends_with_a_started_machine_in_a_global(pytester: pytest.Pytester) -> None:
     pytester.makepyfile("""
         KEPT = []
@@ -280,7 +279,6 @@ def test_a_session_ends_with_a_started_machine_in_a_global(pytester: pytest.Pyte
     assert result.ret == 0
 
 
-@pytest.mark.timeout(40)
 def test_xdist_workers_park_and_exit(pytester: pytest.Pytester) -> None:
     pytest.importorskip("xdist")
     pytester.makepyfile("""
