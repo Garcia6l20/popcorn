@@ -208,6 +208,102 @@ class gpdma;
  * @brief What a channel keeps for one transfer under TrustZone, never saved: the attributes of
  *        its source and destination beats and the firewall grant of each side.
  */
+struct address_hull
+{
+  std::int64_t low{std::numeric_limits<std::int64_t>::max()};
+  std::int64_t high{std::numeric_limits<std::int64_t>::min()};
+
+  void add(std::int64_t at) noexcept
+  {
+    low  = std::min(low, at);
+    high = std::max(high, at);
+  }
+
+  void add(address_hull const& other, std::int64_t shift) noexcept
+  {
+    if(other.low <= other.high)
+    {
+      add(other.low + shift);
+      add(other.high + shift);
+    }
+  }
+};
+
+struct access_walk
+{
+  std::uint64_t accesses;
+  std::uint64_t head;
+  std::uint64_t group;
+  std::int64_t  step;
+  std::int64_t  jump;
+};
+
+struct walked
+{
+  address_hull hull;
+  std::int64_t end;
+};
+
+auto walk_from(std::int64_t base, access_walk const& w) -> walked
+{
+  walked out{.hull = {}, .end = base};
+  if(w.accesses == 0)
+  {
+    return out;
+  }
+  auto const first = std::min(w.head, w.accesses);
+  auto const n     = [](std::uint64_t v) { return static_cast<std::int64_t>(v); };
+  out.hull.add(base);
+  out.hull.add(base + n(first - 1) * w.step);
+  out.end         = base + n(first) * w.step + (first == w.head ? w.jump : 0);
+  auto const rest = w.accesses - first;
+  if(rest == 0)
+  {
+    return out;
+  }
+  auto const start  = out.end;
+  auto const stride = n(w.group) * w.step + w.jump;
+  auto const full   = rest / w.group;
+  auto const part   = rest % w.group;
+  if(full != 0)
+  {
+    auto const last = start + n(full - 1) * stride;
+    out.hull.add(start);
+    out.hull.add(start + n(w.group - 1) * w.step);
+    out.hull.add(last);
+    out.hull.add(last + n(w.group - 1) * w.step);
+  }
+  auto const tail = start + n(full) * stride;
+  if(part != 0)
+  {
+    out.hull.add(tail);
+    out.hull.add(tail + n(part - 1) * w.step);
+  }
+  out.end = tail + n(part) * w.step;
+  return out;
+}
+
+auto item_hull(
+    std::int64_t  base,
+    access_walk   current,
+    access_walk   block,
+    std::int64_t  block_jump,
+    std::uint64_t blocks) -> address_hull
+{
+  auto const now = walk_from(base, current);
+  auto       out = now.hull;
+  if(blocks != 0)
+  {
+    auto const one     = walk_from(0, block);
+    auto const advance = one.end + block_jump;
+    auto const first   = now.end + block_jump;
+    auto const last    = first + static_cast<std::int64_t>(blocks - 1) * advance;
+    out.add(one.hull, first);
+    out.add(one.hull, last);
+  }
+  return out;
+}
+
 struct transfer_cache
 {
   bool               valid{};
@@ -374,6 +470,9 @@ private:
   [[nodiscard]] auto irregular(std::size_t ch) const -> bool;
   [[nodiscard]] auto source_bytes(std::size_t ch) const -> std::uint64_t;
   [[nodiscard]] auto data_valid(std::size_t ch) const -> bool;
+  [[nodiscard]] auto item_valid(std::size_t ch) const -> bool;
+  [[nodiscard]] auto hull_valid(address_hull const& hull, std::uint64_t width, bool write) const
+      -> bool;
   [[nodiscard]] auto in_memory(std::uint64_t from, std::uint64_t size, bool write) const -> bool;
   [[nodiscard]] auto feeders() const -> std::span<dma_feeder const* const>;
   [[nodiscard]] auto quiet_data(popcorn::address at, bool write) const -> bool;
@@ -1589,11 +1688,68 @@ auto gpdma::source_bytes(std::size_t ch) const -> std::uint64_t
   return get(regs_, c.source_increment) != 0 ? std::uint64_t{get(regs_, c.bytes)} : sw;
 }
 
+auto gpdma::hull_valid(address_hull const& hull, std::uint64_t width, bool write) const -> bool
+{
+  constexpr auto top = std::int64_t{1} << 32;
+  if(hull.low > hull.high or hull.low < 0 or hull.high + static_cast<std::int64_t>(width) > top)
+  {
+    return false;
+  }
+  auto const from = static_cast<std::uint64_t>(hull.low);
+  auto const size = static_cast<std::uint64_t>(hull.high - hull.low) + width;
+  return in_memory(from, size, write)
+      or (hull.low == hull.high and quiet_data(static_cast<popcorn::address>(from), write));
+}
+
+auto gpdma::item_valid(std::size_t ch) const -> bool
+{
+  auto const& c       = ch_[ch];
+  auto const& d       = *c.two_d;
+  auto const& s       = state_.channel[ch];
+  auto const  sw      = std::uint64_t{1} << get(regs_, c.source_width);
+  auto const  dw      = std::uint64_t{1} << get(regs_, c.destination_width);
+  auto const  packing = sw != dw and (get(regs_, c.packing) & 2u) != 0;
+  if(packing and dw > sw)
+  {
+    return false;
+  }
+  auto const signed_of = [&](field_ref amount, field_ref decrement) {
+    auto const value = static_cast<std::int64_t>(get(regs_, amount));
+    return get(regs_, decrement) != 0 ? -value : value;
+  };
+  auto const beats   = std::uint64_t{or_zero(c.source_burst)} + 1;
+  auto const per     = packing ? sw / dw : 1;
+  auto const group   = std::uint64_t{get(regs_, d.destination_burst)} + 1;
+  auto const reads   = std::uint64_t{get(regs_, c.bytes)} / sw;
+  auto const each    = std::uint64_t{s.block_bytes} / sw;
+  auto const blocks  = std::uint64_t{get(regs_, d.repeat)};
+  auto const s_step  = get(regs_, c.source_increment) != 0 ? static_cast<std::int64_t>(sw) : 0;
+  auto const d_step  = get(regs_, c.destination_increment) != 0 ? static_cast<std::int64_t>(dw) : 0;
+  auto const s_jump  = signed_of(d.source_offset, d.source_decrement);
+  auto const d_jump  = signed_of(d.destination_offset, d.destination_decrement);
+  auto const counted = std::min<std::uint64_t>(s.destination_beats, group - 1);
+  auto const source  = item_hull(
+      regs_.peek(c.sar.offset),
+      {.accesses = reads, .head = beats, .group = beats, .step = s_step, .jump = s_jump},
+      {.accesses = each, .head = beats, .group = beats, .step = s_step, .jump = s_jump},
+      signed_of(d.block_source_offset, d.block_source_decrement), blocks);
+  auto const target = item_hull(
+      regs_.peek(c.dar.offset),
+      {.accesses = reads * per,
+       .head     = group - counted,
+       .group    = group,
+       .step     = d_step,
+       .jump     = d_jump},
+      {.accesses = each * per, .head = group, .group = group, .step = d_step, .jump = d_jump},
+      signed_of(d.block_destination_offset, d.block_destination_decrement), blocks);
+  return hull_valid(source, sw, false) and hull_valid(target, dw, true);
+}
+
 auto gpdma::data_valid(std::size_t ch) const -> bool
 {
   if(irregular(ch))
   {
-    return false;
+    return item_valid(ch);
   }
   auto const& c      = ch_[ch];
   auto const  sw     = std::uint64_t{1} << get(regs_, c.source_width);

@@ -58,6 +58,7 @@ constexpr std::uint32_t rng_irq         = 94;
 constexpr std::uint32_t hash_irq        = 96;
 constexpr std::uint32_t gpdma0_irq      = 29;
 constexpr std::uint32_t gpdma1_irq      = 30;
+constexpr std::uint32_t gpdma12_irq     = 84;
 constexpr std::uint32_t gtzc_irq        = 8;
 constexpr std::uint32_t sai1_irq        = 90;
 constexpr address       sai1_a          = 0x4001'5404;
@@ -622,6 +623,55 @@ void run_one(stm32_fixture const& f, vtime end)
        .exact_instructions = icount{1},
        .until_time         = end});
 }
+
+constexpr std::uint32_t cr_htie       = 1u << 9;
+constexpr std::uint32_t cr_uleie      = 1u << 11;
+constexpr std::uint32_t cr_useie      = 1u << 12;
+constexpr std::uint32_t cr_errors     = cr_dteie | cr_uleie | cr_useie;
+constexpr std::uint32_t tr1_planar    = 1u | tr1_sinc | (2u << 16);
+constexpr std::uint32_t tcem_item     = 2u << 30;
+constexpr std::uint32_t br1_brsdec    = 1u << 30;
+constexpr std::uint32_t htf           = 1u << 9;
+constexpr std::size_t   planar_ch     = 12;
+constexpr address       planar_link   = 0x2006'3000;
+constexpr std::uint64_t request_ps    = 20 * us;
+constexpr std::uint32_t planar_blocks = 8;
+
+struct planar_walk
+{
+  std::uint32_t tr1{tr1_planar};
+  std::uint32_t tr2{tr2_swreq | tcem_item};
+  std::uint32_t br1{4u | ((planar_blocks - 1) << 16) | br1_brsdec};
+  address       from{source_words};
+  address       to{target_words};
+  std::uint32_t tr3{1022};
+  std::uint32_t br2{2046};
+  bool          linked{true};
+  std::uint32_t cr{cr_tcie | cr_htie | cr_errors | cr_enable};
+};
+
+auto channel_base(std::size_t ch) -> address
+{
+  return gpdma + 0x50 + 0x80 * static_cast<address>(ch);
+}
+
+void channel_2d(stm32_fixture const& f, std::size_t ch, planar_walk const& w)
+{
+  auto const base = channel_base(ch);
+  set_bits(f, rcc + 0x88, 1u);
+  write32(f, planar_link, 0);
+  write32(f, base + 0x00, 0x2006'0000);
+  write32(f, base + 0x40, w.tr1);
+  write32(f, base + 0x44, w.tr2);
+  write32(f, base + 0x48, w.br1);
+  write32(f, base + 0x4c, static_cast<std::uint32_t>(w.from));
+  write32(f, base + 0x50, static_cast<std::uint32_t>(w.to));
+  write32(f, base + 0x54, w.tr3);
+  write32(f, base + 0x58, w.br2);
+  write32(f, base + 0x7c, w.linked ? (planar_link & 0xfffcu) | (1u << 16) : 0u);
+  write32(f, base + 0x14, w.cr);
+}
+
 }
 
 TEST_CASE("WFI with an enabled IRQ due at T wakes at T")
@@ -1235,4 +1285,63 @@ TEST_CASE("under TrustZone a channel the GTZC filters with its TZIC quiet wakes 
   CHECK(*h.wake == later(f, 4 * burst_ps));
   check_wakes_at(f, *h.wake);
   CHECK((read32(f, gpdma + 0x60) & (1u << 8)) != 0);
+}
+
+TEST_CASE("a 2D channel walking planar buffers with DTEIE wakes at its half transfer")
+{
+  pulses      p;
+  auto const& f = *p.f;
+  park(f, wfi_loop);
+  enable_irq(f, gpdma12_irq);
+  channel_2d(f, planar_ch, {});
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, 8 * burst_ps));
+  check_wakes_at(f, *h.wake);
+  CHECK((read32(f, channel_base(planar_ch) + 0x10) & htf) != 0);
+}
+
+TEST_CASE("a 2D channel whose later blocks leave SRAM wakes at its next burst")
+{
+  pulses            p;
+  auto const&       f     = *p.f;
+  constexpr address start = 0x200b'e800;
+  constexpr address out   = start + 2 * 4094;
+  REQUIRE(f.target->mem().read(start + 4094 + 1024, 2).has_value());
+  REQUIRE_FALSE(f.target->mem().read(out, 2).has_value());
+  park(f, wfi_loop);
+  enable_irq(f, gpdma12_irq);
+  auto const t0 = now(f);
+  channel_2d(f, planar_ch, {.br1 = 4u | ((planar_blocks - 1) << 16), .from = start});
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, burst_ps));
+  check_asleep_until(f, vtime{t0.ps + 4 * burst_ps});
+  std::ignore = run_until(f, vtime{t0.ps + 5 * burst_ps + 2 * instruction_ps});
+  CHECK((read32(f, channel_base(planar_ch) + 0x10) & (1u << 10)) != 0);
+}
+
+TEST_CASE("a 2D channel whose later destination blocks leave SRAM wakes at its next burst")
+{
+  pulses            p;
+  auto const&       f     = *p.f;
+  constexpr address start = 0x200b'e800;
+  REQUIRE_FALSE(f.target->mem().read(start + 2 * 4094, 2).has_value());
+  park(f, wfi_loop);
+  enable_irq(f, gpdma12_irq);
+  auto const t0 = now(f);
+  channel_2d(
+      f, planar_ch,
+      {.tr1  = 2u | (1u << 16) | tr1_dinc,
+       .br1  = 8u | ((planar_blocks - 1) << 16),
+       .from = source_words,
+       .to   = start,
+       .tr3  = 1022u << 16,
+       .br2  = 2046u << 16});
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, burst_ps));
+  check_asleep_until(f, vtime{t0.ps + 4 * burst_ps});
+  std::ignore = run_until(f, vtime{t0.ps + 5 * burst_ps + 2 * instruction_ps});
+  CHECK((read32(f, channel_base(planar_ch) + 0x10) & (1u << 10)) != 0);
 }
