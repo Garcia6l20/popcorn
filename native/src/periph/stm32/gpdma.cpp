@@ -1821,9 +1821,9 @@ auto gpdma::bursts_to_flag(std::size_t ch, quiet_query const& query, bool loud) 
       auto const goal = (std::uint64_t{s.repeat} + 2) / 2;
       take(to_end + (goal > done ? goal - done : 0) * each);
     }
-    else if(not last or left != 0)
+    else if(c.two_d and mode == 0 and left != 0)
     {
-      take(to_end + 1);
+      take(to_end + up(block - block / 2));
     }
   }
   return k;

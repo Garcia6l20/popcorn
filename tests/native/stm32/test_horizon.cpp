@@ -51,6 +51,7 @@ constexpr address       rcc             = 0x4602'0c00;
 constexpr address       usart1          = 0x4001'3800;
 constexpr address       nvic_iser       = 0xe000'e100;
 constexpr address       nvic_ispr       = 0xe000'e200;
+constexpr address       nvic_icpr       = 0xe000'e280;
 constexpr address       scb_scr         = 0xe000'ed10;
 constexpr address       syst_csr        = 0xe000'e010;
 constexpr address       syst_rvr        = 0xe000'e014;
@@ -672,6 +673,35 @@ void channel_2d(stm32_fixture const& f, std::size_t ch, planar_walk const& w)
   write32(f, base + 0x14, w.cr);
 }
 
+auto adc_requester(slot<ticking_requester>& adc) -> core::machine_options
+{
+  auto options           = popcorn::testing::stm32_options();
+  options.spin_threshold = 0;
+  options.models.emplace("ADC1", [&adc](periph::model_context& ctx, auto const&) {
+    auto made = std::make_shared<ticking_requester>(ctx);
+    adc.model = made.get();
+    return std::shared_ptr<periph::model>{made};
+  });
+  return options;
+}
+
+void rearm_line(stm32_fixture const& f, std::size_t ch, std::uint32_t irq)
+{
+  auto const base = channel_base(ch);
+  REQUIRE((read32(f, base + 0x10) & htf) != 0);
+  write32(f, base + 0x0c, htf);
+  write32(f, nvic_icpr + 4 * (irq / 32), std::uint32_t{1} << (irq % 32));
+  enable_irq(f, irq);
+}
+
+auto adc_request(stm32_fixture const& f) -> std::uint32_t
+{
+  auto* const controller = dynamic_cast<stm32::dma_controller*>(f.target->model("GPDMA1"));
+  REQUIRE(controller != nullptr);
+  auto const request = controller->request_of("adc1_dma");
+  REQUIRE(request.has_value());
+  return *request;
+}
 }
 
 TEST_CASE("WFI with an enabled IRQ due at T wakes at T")
@@ -1344,4 +1374,48 @@ TEST_CASE("a 2D channel whose later destination blocks leave SRAM wakes at its n
   check_asleep_until(f, vtime{t0.ps + 4 * burst_ps});
   std::ignore = run_until(f, vtime{t0.ps + 5 * burst_ps + 2 * instruction_ps});
   CHECK((read32(f, channel_base(planar_ch) + 0x10) & (1u << 10)) != 0);
+}
+
+TEST_CASE("a 2D channel past its half transfer wakes at the closed form of its item's TC")
+{
+  slot<ticking_requester> adc;
+  stm32_fixture           f{u575(), "boot_ll", adc_requester(adc)};
+  park(f, wfi_loop);
+  auto const first = later(f, 10 * us);
+  adc.model->arm(first, request_ps, 2 * planar_blocks);
+  channel_2d(f, planar_ch, {.tr2 = adc_request(f) | tcem_item});
+  std::ignore = run_until(f, vtime{first.ps + 8 * request_ps + request_ps / 2});
+  rearm_line(f, planar_ch, gpdma12_irq);
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == vtime{first.ps + 9 * request_ps + 6 * burst_ps});
+  check_asleep_until(f, vtime{first.ps + 15 * request_ps});
+  std::ignore = run_until(f, vtime{first.ps + 15 * request_ps + burst_ps + 2 * instruction_ps});
+  CHECK((read32(f, channel_base(planar_ch) + 0x10) & (1u << 8)) != 0);
+}
+
+TEST_CASE("a 2D channel in block mode past its half transfer wakes at the next block's half")
+{
+  slot<ticking_requester> adc;
+  stm32_fixture           f{u575(), "boot_ll", adc_requester(adc)};
+  park(f, wfi_loop);
+  auto const first = later(f, 10 * us);
+  adc.model->arm(first, request_ps, 16);
+  channel_2d(
+      f, planar_ch,
+      {.tr1    = 1u | tr1_sinc | (1u << 16) | tr1_dinc,
+       .tr2    = adc_request(f),
+       .br1    = 8u | (3u << 16),
+       .tr3    = 0,
+       .br2    = 0,
+       .linked = false,
+       .cr     = cr_htie | cr_enable});
+  std::ignore = run_until(f, vtime{first.ps + 2 * request_ps + request_ps / 2});
+  rearm_line(f, planar_ch, gpdma12_irq);
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == vtime{first.ps + 3 * request_ps + 2 * burst_ps});
+  check_asleep_until(f, vtime{first.ps + 5 * request_ps});
+  std::ignore = run_until(f, vtime{first.ps + 5 * request_ps + burst_ps + 2 * instruction_ps});
+  CHECK((read32(f, channel_base(planar_ch) + 0x10) & htf) != 0);
 }
