@@ -478,7 +478,15 @@ public:
       std::uint64_t         through,
       core::sys_time const& barrier,
       core::sys_time const& next,
-      core::time_map        receiver) -> std::optional<core::link_fault> override;
+      core::time_map        receiver,
+      core::sys_time const& shown) -> std::optional<core::link_fault> override;
+  /** @brief drain() with the tap shown through @p barrier, for a wire driven outside a
+   * system. */
+  auto drain(
+      std::uint64_t         through,
+      core::sys_time const& barrier,
+      core::sys_time const& next,
+      core::time_map        receiver) -> std::optional<core::link_fault>;
   [[nodiscard]] auto due() const -> std::optional<core::sys_time> override;
   [[nodiscard]] auto quiet() const -> bool override;
   void               release_through(core::sys_time at) override;

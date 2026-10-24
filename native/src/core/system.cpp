@@ -166,6 +166,7 @@ struct system::impl
     std::vector<std::uint64_t>                                            sealed{};
     std::vector<coupling>                                                 coupled{};
     std::vector<std::size_t>                                              successors{};
+    std::vector<std::size_t>                                              cut_owners{};
     std::uint64_t                                                         waits{};
     std::optional<goal_run>                                               goal{};
     bool                                                                  undecided{};
@@ -232,6 +233,7 @@ struct system::impl
   }
 
   void               couple();
+  void               note_owners();
   void               bump(std::size_t member) noexcept;
   void               bump_all() noexcept;
   void               found(sys_time at) noexcept;
@@ -305,6 +307,7 @@ struct system::impl
   std::vector<sys_time>    distances{};
   std::vector<sys_time>    targets{};
   std::vector<sys_time>    points{};
+  std::vector<sys_time>    stood{};
   std::optional<sys_time>  requested_at{};
   bool                     aligning{};
 };
@@ -426,9 +429,16 @@ public:
           }
           if(sys_.chosen.pause)
           {
-            for(auto* link : one.inbound)
+            for(std::size_t index = 0; index < one.inbound.size(); ++index)
             {
-              link->release_through(sys_.result.at);
+              auto* const link   = one.inbound[index];
+              auto const  stands = [this](std::size_t member) {
+                return sys_.chosen.idle ? sys_.result.at : sys_.slots[member].rep.position;
+              };
+              link->release_through(
+                  std::min(
+                      {sys_.result.at, stands(link->sender()), stands(index_),
+                       stands(one.cut_owners[index])}));
             }
           }
           if(sys_.chosen.sleep and sys_.clocked())
@@ -921,9 +931,15 @@ private:
   {
     for(std::size_t index = 0; index < one.inbound.size(); ++index)
     {
-      take_fault(
-          *one.inbound[index],
-          one.inbound[index]->drain(one.sealed[index], barrier, next, one.map));
+      auto* const link  = one.inbound[index];
+      auto        shown = barrier;
+      if(sys_.stood.size() == sys_.slots.size())
+      {
+        shown = std::min(
+            {barrier, sys_.stood[link->sender()], sys_.stood[index_],
+             sys_.stood[one.cut_owners[index]]});
+      }
+      take_fault(*link, link->drain(one.sealed[index], barrier, next, one.map, shown));
     }
   }
 
@@ -1028,7 +1044,9 @@ private:
       auto const  barrier = sys_.chosen.idle
                               ? sys_.chosen.confirm
                               : std::min(sys_.points[index_], sys_.points[link->sender()]);
-      take_fault(*link, link->drain(one.sealed[index], barrier, barrier, one.map));
+      auto const  shown =
+          sys_.chosen.idle ? barrier : std::min(barrier, sys_.points[one.cut_owners[index]]);
+      take_fault(*link, link->drain(one.sealed[index], barrier, barrier, one.map, shown));
     }
     if(sys_.measuring)
     {
@@ -1095,8 +1113,12 @@ private:
         one.sealed[index]   = through;
         faulted =
             take_fault(
-                *link,
-                link->drain(through, std::min(ahead, clocks_[link->sender()]), bound, one.map))
+                *link, link->drain(
+                           through, std::min(ahead, clocks_[link->sender()]), bound, one.map,
+                           std::min(
+                               {ahead, clocks_[link->sender()],
+                                one.cut_owners[index] == index_ ? ahead
+                                                                : clocks_[one.cut_owners[index]]})))
             or faulted;
       }
       if(sys_.measuring)
@@ -1258,6 +1280,20 @@ system::impl::impl(
       slots[index].ref.on->link(held_host, 0, false);
     }
     throw;
+  }
+}
+
+void system::impl::note_owners()
+{
+  for(auto& one : slots)
+  {
+    one.cut_owners.clear();
+    for(auto const* inbound : one.inbound)
+    {
+      auto const at = static_cast<std::size_t>(
+          std::ranges::find(links, inbound, &std::shared_ptr<member_link>::get) - links.begin());
+      one.cut_owners.push_back(owners[at].load(std::memory_order_relaxed));
+    }
   }
 }
 
@@ -1768,6 +1804,11 @@ void system::impl::complete_a() noexcept
   account();
   woke.store(false);
   merge_found();
+  stood.resize(slots.size());
+  for(std::size_t index = 0; index < slots.size(); ++index)
+  {
+    stood[index] = slots[index].rep.position;
+  }
   chosen = decision{.barrier = pending, .next = {pending.ps + q.ps}};
   if(auto const head = best_entry())
   {
@@ -2250,6 +2291,7 @@ auto system::resume(held_system const&, std::optional<sys_time> system_until) ->
     one.rep.quiescent = false;
     one.driver->restart();
   }
+  self.note_owners();
   if(self.clocked())
   {
     self.couple();

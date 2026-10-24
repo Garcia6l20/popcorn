@@ -130,7 +130,8 @@ public:
       std::uint64_t         through,
       core::sys_time const& barrier,
       core::sys_time const& next,
-      core::time_map) -> std::optional<core::link_fault> override
+      core::time_map,
+      core::sys_time const&) -> std::optional<core::link_fault> override
   {
     CHECK(through >= last_through);
     last_through = through;
@@ -3413,7 +3414,8 @@ public:
       std::uint64_t,
       core::sys_time const& barrier,
       core::sys_time const& next,
-      core::time_map        receiver) -> std::optional<core::link_fault> override
+      core::time_map        receiver,
+      core::sys_time const&) -> std::optional<core::link_fault> override
   {
     auto const position = receiver.to_system(receiver_->virtual_clock().time()).ps;
     past_position       = std::max(past_position, barrier.ps - position);
@@ -3765,8 +3767,12 @@ public:
   void receiver_reset(core::sys_time) override
   {}
 
-  auto drain(std::uint64_t, core::sys_time const&, core::sys_time const&, core::time_map)
-      -> std::optional<core::link_fault> override
+  auto drain(
+      std::uint64_t,
+      core::sys_time const&,
+      core::sys_time const&,
+      core::time_map,
+      core::sys_time const&) -> std::optional<core::link_fault> override
   {
     return std::nullopt;
   }
@@ -4163,8 +4169,12 @@ public:
   void receiver_reset(core::sys_time) override
   {}
 
-  auto drain(std::uint64_t, core::sys_time const& barrier, core::sys_time const&, core::time_map)
-      -> std::optional<core::link_fault> override
+  auto drain(
+      std::uint64_t,
+      core::sys_time const& barrier,
+      core::sys_time const&,
+      core::time_map,
+      core::sys_time const&) -> std::optional<core::link_fault> override
   {
     if(not state_->armed.exchange(false))
     {
@@ -4420,29 +4430,39 @@ TEST_CASE("a stamp dated inside a leading member's published lead is refused at 
 
 TEST_CASE("an idle attempt hands frames at its earliest member, so a fault past it waits")
 {
-  for(auto const& how : {variants()[0], variants()[1]})
+  for(auto const& how : {variants()[0], variants()[1], variants()[7], variants()[8]})
   {
     CAPTURE(how.name);
-    rig r{
+    auto const clocked = how.mode == core::sync_mode::clocks;
+    rig        r{
         .members = {sleeper_with_event(400), sleeper_with_event(900)}
     };
     r.build(how);
-    r.links[0]->fault_at = 222 * us_ps;
-    auto const drained   = std::make_shared<std::atomic<std::int64_t>>(0);
-    r.links[0]->on_drain = [drained](std::int64_t barrier) {
-      drained->store(std::max(drained->load(), barrier));
-    };
-    auto a = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
-    auto b = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    if(not clocked)
+    {
+      r.links[0]->fault_at = 222 * us_ps;
+    }
+    auto const count     = std::make_shared<std::atomic<std::size_t>>(0);
+    r.links[0]->on_drain = [count](std::int64_t) { count->fetch_add(1); };
+    auto a               = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto b               = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
     core::host_future<core::pause> pending;
     {
       auto const held = r.sys->lock();
       pending         = r.sys->resume(held);
     }
     REQUIRE(both_asleep(r, pending));
-    CHECK(drained->load() < 222 * us_ps);
+    auto const before = count->load();
     r.sys->request_pause();
     CHECK(pending.get().reason != core::pause_reason::closed);
+    auto const& drains = r.links[0]->drains;
+    REQUIRE(drains.size() >= before);
+    auto const confirms = std::ranges::count_if(
+        drains | std::views::take(before), [](auto const& one) { return one.barrier == one.next; });
+    CHECK(confirms >= 1);
+    CHECK(std::ranges::all_of(drains | std::views::take(before), [](auto const& one) {
+      return one.barrier != one.next or one.barrier <= 400 * instruction_ps;
+    }));
   }
 }
 

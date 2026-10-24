@@ -553,6 +553,16 @@ auto uart_wire::drain(
     core::sys_time const& next,
     core::time_map        receiver) -> std::optional<core::link_fault>
 {
+  return drain(through, barrier, next, receiver, barrier);
+}
+
+auto uart_wire::drain(
+    std::uint64_t         through,
+    core::sys_time const& barrier,
+    core::sys_time const& next,
+    core::time_map        receiver,
+    core::sys_time const& shown) -> std::optional<core::link_fault>
+{
   std::vector<detail::wire_post> posts;
   ring_.pop_through(through, posts);
   std::vector<detail::line_cut>         cuts;
@@ -768,7 +778,7 @@ auto uart_wire::drain(
       into_.port->release_line(receiver.to_local(shifted(cut.end, latency_)), lanes_.peer);
     }
   }
-  emit(state_.untapped, barrier, cuts);
+  emit(state_.untapped, std::min(shown, barrier), cuts);
   {
     registration_hold const registered{*registration_};
     core::link_guard const  held{inject_mutex_};

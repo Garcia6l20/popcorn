@@ -2168,9 +2168,9 @@ TEST_CASE("a delivered pause's tap holds every frame ended by its point at any q
           continue;
         }
         CAPTURE(how.name);
-        auto const seen = send_then_stop(how, stamp_at, stamp_at + 40 * us_ps);
+        auto const seen = send_then_stop(how, stamp_at, stamp_at + 200 * us_ps);
         REQUIRE(seen.stopped.reason == core::pause_reason::delivered);
-        CHECK(seen.stopped.at.ps == stamp_at + 40 * us_ps);
+        CHECK(seen.stopped.at.ps == stamp_at + 200 * us_ps);
         CHECK(seen.tapped == std::vector<std::size_t>{1, 0});
         if(reference)
         {
@@ -2227,5 +2227,60 @@ TEST_CASE("a member asleep behind a peer that ran on its lead takes input at the
     CHECK(exact.get().ps == static_cast<std::uint64_t>(reach - base));
     w.sys->request_pause();
     CHECK(pending.get().reason == core::pause_reason::requested);
+  }
+}
+
+TEST_CASE("a frame injected while paused into a receiver behind the pause point is tapped")
+{
+  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    auto         w = paired_world("link_rx", "link_rx", 100 * us_ps);
+    w.host(how);
+    REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+    core::host_future<vtime> written;
+    {
+      auto const held = w.sys->lock();
+      std::ignore     = w.sys->post_goal(held, 0, {.until_time = core::sys_time{800 * us_ps}});
+      std::ignore =
+          w.sys->post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
+      auto const base      = w.sys->base_of(0).ps;
+      auto const held_host = w.members[0].on->lock();
+      written              = w.members[0].on->post(
+          held_host, 0,
+          [](core::machine& m) {
+            auto&      usart = m.peripheral("USART1");
+            auto const found = popcorn::find_register(usart.description(), std::string_view{"TDR"});
+            REQUIRE(m.mem().write(usart.description().base + found->offset, 4, 0x5a));
+          },
+          vtime{static_cast<std::uint64_t>(760 * us_ps - base)});
+    }
+    core::host_future<core::pause> pending;
+    {
+      auto const held = w.sys->lock();
+      pending         = w.sys->resume(held);
+    }
+    REQUIRE(pending.get().reason == core::pause_reason::delivered);
+    std::ignore = written.get();
+    {
+      auto const held = w.sys->lock();
+      auto const now  = w.sys->time_of(held, 1);
+      REQUIRE(now.ps < 650 * us_ps);
+      std::array<std::uint16_t, 1> const data{0x33};
+      REQUIRE(w.wires[0]
+                  ->inject(
+                      data, core::sys_time{650 * us_ps},
+                      stm32::stopped_receiver{.now = now, .map = core::time_map{w.sys->base_of(1)}})
+                  .has_value());
+      w.sys->withdraw(held, 1);
+      w.sys->release(held, 0, true);
+    }
+    REQUIRE(w.run_to(2 * ms_ps).reason == core::pause_reason::system_time);
+    w.collect();
+    CHECK(std::ranges::count_if(w.taps[0], [](auto const& frame) { return frame.injected; }) == 1);
+    CHECK(
+        std::ranges::count_if(w.taps[0], [](auto const& frame) { return not frame.injected; })
+        == 1);
   }
 }
