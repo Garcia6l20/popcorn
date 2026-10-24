@@ -1710,6 +1710,7 @@ auto gpdma::quiet_until(quiet_query const& query) const -> std::optional<vtime>
   std::optional<vtime> out;
   auto const           gap     = burst_ps();
   auto const           illegal = illegal_wakes(query);
+  auto const           faults  = query.firewall_faults_transfers();
   for(std::size_t ch = 0; ch < layout_.channels; ++ch)
   {
     auto const& c = ch_[ch];
@@ -1721,6 +1722,7 @@ auto gpdma::quiet_until(quiet_query const& query) const -> std::optional<vtime>
     auto const target = regs_.peek(c.dar.offset);
     auto const loud =
         illegal
+        or faults
         or (query.peripheral_at(target) and not quiet_data(target, true))
         or query.opaque_at(source)
         or query.opaque_at(target)

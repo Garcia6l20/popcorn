@@ -83,4 +83,4 @@ about 3 us on a machine thread that starts with cold caches. The bench
 
 The rules a plugin follows, from the example README:
 
---8<-- "stm32u575/native_plugin/README.md:118:260"
+--8<-- "stm32u575/native_plugin/README.md:118:271"

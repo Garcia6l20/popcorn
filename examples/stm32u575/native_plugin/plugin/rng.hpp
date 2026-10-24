@@ -53,6 +53,12 @@ public:
       std::uint32_t                   value,
       popcorn::periph::access_ctx     ctx) -> std::expected<void, popcorn::bus_error> override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
+
+  [[nodiscard]] auto role_in_horizon() const noexcept -> popcorn::periph::wake_role override
+  {
+    return popcorn::periph::wake_role::lines;
+  }
+
   void save(std::vector<std::byte>& out) const override;
   void load(std::span<std::byte const> in) override;
 

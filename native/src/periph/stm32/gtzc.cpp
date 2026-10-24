@@ -583,6 +583,11 @@ public:
     return true;
   }
 
+  [[nodiscard]] auto faults_transfers() const -> bool override
+  {
+    return false;
+  }
+
   [[gnu::hot, nodiscard]] auto
       memory_page(address page, std::uint32_t size, address at, bus_attrs attrs, arch::memory_op op)
           -> page_verdict override

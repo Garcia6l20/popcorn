@@ -161,6 +161,12 @@ public:
    */
   [[nodiscard]] virtual auto peripheral_at(address at) const -> bool = 0;
 
+  /**
+   * @brief Whether the machine's bus firewall can fail a DMA access with a transfer error, as
+   *        bus_firewall::faults_transfers() says. False for a machine without a firewall.
+   */
+  [[nodiscard]] virtual auto firewall_faults_transfers() const -> bool = 0;
+
 protected:
   /** @brief Destroys the query, only through its implementation. */
   ~quiet_query() = default;

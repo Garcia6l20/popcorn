@@ -120,6 +120,17 @@ struct POPCORN_API bus_firewall
   }
 
   /**
+   * @brief Whether check_peripheral() or check_memory() can return bus_verdict::bus_error for an
+   *        access of a DMA initiator, which fails the transfer with a transfer error.
+   *        core::machine::horizon() then counts every active DMA channel as able to raise a flag
+   *        at its next burst. True by default.
+   */
+  [[nodiscard]] virtual auto faults_transfers() const -> bool
+  {
+    return true;
+  }
+
+  /**
    * @brief Decides one engine page of memory for one set of transaction attributes, when the
    *        engine maps it for a CPU access. The engine keeps the verdict until the owner calls
    *        core::machine_services::memory_policy_changed. Called only when filters_memory() is

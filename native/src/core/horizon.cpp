@@ -123,7 +123,7 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
                                    : mapped_region::find(owner_.memory_, at, size);
       if(region == nullptr)
       {
-        return true;
+        return not peripheral_holds(at, size);
       }
       auto const* const buffer = region->buffer.get();
       auto const        first  = region->offset + (at - region->desc->start);
@@ -138,6 +138,12 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
     [[nodiscard]] auto peripheral_at(address at) const -> bool override
     {
       return unit_at(at).has_value();
+    }
+
+    [[nodiscard]] auto firewall_faults_transfers() const -> bool override
+    {
+      auto const* const firewall = owner_.run_->firewall;
+      return firewall != nullptr and firewall->faults_transfers();
     }
 
     [[nodiscard]] auto wakes_slot(std::size_t index) const -> bool
@@ -206,6 +212,15 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
         }
       }
       return std::nullopt;
+    }
+
+    [[nodiscard]] auto peripheral_holds(address at, std::uint64_t size) const -> bool
+    {
+      return size != 0
+         and std::ranges::any_of(owner_.description_.peripherals, [&](auto const& unit) {
+               return at >= unit.base
+                  and std::uint64_t{at} + size <= std::uint64_t{unit.base} + unit.size;
+             });
     }
 
     [[nodiscard]] auto wakes_source(std::uint32_t source) const -> bool

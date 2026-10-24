@@ -3,6 +3,7 @@
 
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/services.hpp>
+#include <popcorn/periph/firewall.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/builtin.hpp>
@@ -142,6 +143,87 @@ public:
 private:
   periph::model_context&           context_;
   std::optional<periph::wake_role> role_;
+};
+
+class denying_firewall final : public periph::model, public periph::bus_firewall
+{
+public:
+  denying_firewall(periph::model_context& ctx, address first, address last)
+      : first_{first}, last_{last}
+  {
+    ctx.install_firewall(*this);
+  }
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+
+  void reset(periph::register_file&, reset_kind) override
+  {}
+
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+  [[nodiscard]] auto stateless() const -> bool override
+  {
+    return true;
+  }
+
+  [[nodiscard]] auto role_in_horizon() const noexcept -> periph::wake_role override
+  {
+    return periph::wake_role::lines;
+  }
+
+  [[nodiscard]] auto check_peripheral(std::size_t, popcorn::bus_attrs, popcorn::arch::memory_op)
+      -> periph::bus_verdict override
+  {
+    return periph::bus_verdict::allow;
+  }
+
+  [[nodiscard]] auto filters_memory() const -> bool override
+  {
+    return true;
+  }
+
+  [[nodiscard]] auto
+      check_memory(address at, std::uint8_t, popcorn::bus_attrs attrs, popcorn::arch::memory_op op)
+          -> periph::bus_verdict override
+  {
+    return attrs.by == popcorn::initiator::dma
+               and op == popcorn::arch::memory_op::write
+               and at >= first_
+               and at <= last_
+             ? periph::bus_verdict::bus_error
+             : periph::bus_verdict::allow;
+  }
+
+private:
+  address first_;
+  address last_;
 };
 
 class ticking_requester final : public periph::model, public stm32::dma_requester
@@ -533,9 +615,12 @@ void receive_frames(stm32_fixture const& f, std::size_t count)
   dynamic_cast<periph::uart_port*>(f.target->model("USART1"))->receive(data);
 }
 
-void run_one(stm32_fixture const& f)
+void run_one(stm32_fixture const& f, vtime end)
 {
-  std::ignore = f.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{1}});
+  std::ignore = f.run(
+      {.wall_budget        = std::chrono::seconds{60},
+       .exact_instructions = icount{1},
+       .until_time         = end});
 }
 }
 
@@ -997,7 +1082,7 @@ TEST_CASE("a synchronous SAI receiver of a waiting master wakes at or before its
   REQUIRE(h.asleep);
   REQUIRE(h.wake.has_value());
   check_asleep_until(f, *h.wake);
-  run_one(f);
+  run_one(f, vtime{h.wake->ps + 10 * ms});
   CHECK(now(f) > *h.wake);
   CHECK((read32(f, gpdma + 0xe0) & (1u << 8)) != 0);
 }
@@ -1016,7 +1101,7 @@ TEST_CASE("a waiting SAI master with only OVRUDRIE wakes at or before its underr
   REQUIRE(h.asleep);
   REQUIRE(h.wake.has_value());
   check_asleep_until(f, *h.wake);
-  run_one(f);
+  run_one(f, vtime{h.wake->ps + 10 * ms});
   CHECK(now(f) > *h.wake);
   CHECK((read32(f, sai1_a + 0x14) & 1u) != 0);
 }
@@ -1060,10 +1145,9 @@ TEST_CASE("a GPDMA channel fed by USART frames wakes at the closed form of its f
   receive_frames(f, 8);
   auto const h = f.target->horizon();
   REQUIRE(h.wake.has_value());
-  CHECK(h.wake->ps >= t0.ps + 2 * frame_ps + burst_ps);
-  CHECK(h.wake->ps <= t0.ps + 3 * frame_ps + burst_ps);
+  CHECK(*h.wake == vtime{t0.ps + 3 * frame_ps + burst_ps});
   check_asleep_until(f, *h.wake);
-  run_one(f);
+  run_one(f, vtime{h.wake->ps + 10 * ms});
   CHECK(now(f).ps >= t0.ps + 5 * frame_ps);
   CHECK((read32(f, gpdma + 0x60) & (1u << 8)) != 0);
 }
@@ -1095,4 +1179,60 @@ TEST_CASE("a GPDMA channel reading a range a model watches wakes at its next bur
   CHECK_FALSE(f.target->horizon().wake.has_value());
   p.rng.model->watch_reads(flash + 8, 16);
   CHECK(f.target->horizon().wake == std::optional{later(f, burst_ps)});
+}
+
+TEST_CASE("a GPDMA channel through a firewall that faults transfers wakes at its first burst")
+{
+  auto options           = popcorn::testing::stm32_options();
+  options.spin_threshold = 0;
+  options.models.emplace("GTZC1_TZSC", [](periph::model_context& ctx, auto const&) {
+    return std::shared_ptr<periph::model>{
+        std::make_shared<denying_firewall>(ctx, target_words, target_words + 0xff)};
+  });
+  stm32_fixture f{u575(), "boot_ll", std::move(options)};
+  park(f, wfi_loop);
+  enable_irq(f, gpdma0_irq);
+  channel0(
+      f, tr1_words | tr1_sinc | tr1_dinc, tr2_swreq, 64, source_words, target_words,
+      cr_dteie | cr_tcie | cr_enable);
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, burst_ps));
+  check_wakes_at(f, *h.wake);
+  CHECK((read32(f, gpdma + 0x60) & (1u << 10)) != 0);
+  CHECK((read32(f, gpdma + 0x60) & (1u << 8)) == 0);
+}
+
+TEST_CASE("a GPDMA channel fed by USART frames keeps its feed gap while a model watches reads")
+{
+  pulses      p;
+  auto const& f = *p.f;
+  park(f, wfi_loop);
+  p.rng.model->watch_reads(0x0800'8000, 16);
+  usart_rx_dma(f, false, 5);
+  write32(f, gpdma + 0x64, cr_tcie | cr_enable);
+  auto const t0 = now(f);
+  receive_frames(f, 8);
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == vtime{t0.ps + 3 * frame_ps + burst_ps});
+}
+
+TEST_CASE("under TrustZone a channel the GTZC filters with its TZIC quiet wakes at its TC")
+{
+  auto options           = popcorn::testing::stm32_options();
+  options.spin_threshold = 0;
+  REQUIRE(stm32::configure_option_bytes(u575(), {.tzen = true}, options).has_value());
+  stm32_fixture     f{u575(), "boot_ll", std::move(options)};
+  constexpr address secure_stub = 0x3006'0000;
+  park(f, wfi_loop, 1, secure_stub);
+  enable_irq(f, gpdma0_irq);
+  channel0(
+      f, tr1_words | tr1_sinc | tr1_dinc, tr2_swreq, 16, source_words, target_words,
+      cr_tcie | cr_enable);
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, 4 * burst_ps));
+  check_wakes_at(f, *h.wake);
+  CHECK((read32(f, gpdma + 0x60) & (1u << 8)) != 0);
 }

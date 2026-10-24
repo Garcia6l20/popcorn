@@ -235,6 +235,17 @@ Two `periph::model` members change how the machine treats a model:
   model. A host view access to it raises ModelError, as for a register of a peripheral without
   a model. Peek and poke still reach it.
 
+`role_in_horizon()` tells `core::machine::horizon()`, the bound a linked system uses to let a
+sleeping machine run ahead, how the model's events reach the core. A model that declares no
+role counts as `wake_role::opaque`: its earliest queued event bounds the wake, every transmit
+and the stop. The example's RNG declares `wake_role::lines`, since its events only set DRDY and
+drive its IRQ line, so its events bound the wake only while that line would wake the core. A
+model that requests a stop or a reset, raises NMI or writes another peripheral's registers in
+its events keeps the default or declares the matching role, as `wake_role` documents.
+`quiet_until()` refines the bound for a `lines` or `bus_master` model. A model that installs a
+bus firewall returns false from `bus_firewall::faults_transfers()` only when no DMA access ever
+gets `bus_verdict::bus_error`.
+
 ### Rules
 
 - One C++ namespace per plugin. The plugin library keeps default visibility, and two plugins
