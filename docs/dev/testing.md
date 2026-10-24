@@ -53,6 +53,11 @@ restores a snapshot per test. The suites in `tests/python/api` cover the public 
 run the machine must not depend on host load: a result may depend on the emulated input only,
 never on wall time or on whether the machine was parked or running.
 
+Every test runs under a 15 s pytest-timeout limit, set in `pyproject.toml`. A test that needs
+longer carries `@pytest.mark.timeout(seconds)`, above every wall bound it waits on. The limit uses
+the thread method, so a test that exceeds it dumps every thread's stack and ends its worker
+process: xdist reports the worker as crashed and starts a new one.
+
 ## Example tests
 
 Each example has its own `pytest.ini` and runs from the repository root:
