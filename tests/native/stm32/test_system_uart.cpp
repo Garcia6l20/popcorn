@@ -2033,3 +2033,71 @@ TEST_CASE("an idle pause's tap holds every frame ended by its point at any quant
     }
   }
 }
+
+namespace
+{
+auto cut_from_member(world& w, std::size_t member) -> core::host_future<vtime>
+{
+  auto const held_host = w.members[member].on->lock();
+  return w.members[member].on->post(held_host, 0, [&w, member](core::machine& m) {
+    auto const now = core::sys_time{
+        w.sys->base_of(member).ps + static_cast<std::int64_t>(m.virtual_clock().time().ps)};
+    REQUIRE(
+        stm32::cut_link(
+            *w.wires[0], *w.wires[1], now, core::sys_time{now.ps + 10 * us_ps}, false, now));
+  });
+}
+
+auto asleep(world const& w, core::host_future<core::pause> const& pending) -> bool
+{
+  for(;;)
+  {
+    if(pending.done())
+    {
+      return false;
+    }
+    if(std::ranges::all_of(w.members, [](core::member_ref const& one) {
+         return one.on->state(0) == core::host_state::idle_wait;
+       }))
+    {
+      return true;
+    }
+    std::this_thread::yield();
+  }
+}
+}
+
+TEST_CASE("an owner woken from an idle sleep behind the latest member cuts its link at its time")
+{
+  for(auto const& how : {variants()[0], variants()[1], variants()[9], variants()[10]})
+  {
+    CAPTURE(how.name);
+    auto w = paired_world("link_rx", "link_rx", latency_20);
+    w.host(how);
+    REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+    core::host_future<vtime> busy;
+    {
+      auto const held = w.sys->lock();
+      for(std::size_t member = 0; member < 2; ++member)
+      {
+        std::ignore =
+            w.sys->post_goal(held, member, {.until = popcorn::address{0x0800'0001}, .open = true});
+      }
+      auto const base      = w.sys->base_of(1).ps;
+      auto const held_host = w.members[1].on->lock();
+      busy                 = w.members[1].on->post(
+          held_host, 0, [](core::machine&) {}, vtime{static_cast<std::uint64_t>(5 * ms_ps - base)});
+    }
+    core::host_future<core::pause> pending;
+    {
+      auto const held = w.sys->lock();
+      pending         = w.sys->resume(held);
+    }
+    REQUIRE(asleep(w, pending));
+    CHECK(busy.get().ps + static_cast<std::uint64_t>(w.sys->base_of(1).ps) == 5 * ms_ps);
+    auto const cut = cut_from_member(w, 0);
+    std::ignore    = cut.get();
+    w.sys->request_pause();
+    CHECK(pending.get().reason == core::pause_reason::requested);
+  }
+}

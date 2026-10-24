@@ -246,6 +246,8 @@ struct system::impl
   void               set_pause(entry const& head) noexcept;
   void               reconsider() noexcept;
   void               settle_confirm() noexcept;
+  [[nodiscard]] auto sleeps_at_idle() const noexcept -> bool;
+  [[nodiscard]] auto earliest_position() const noexcept -> sys_time;
   void               seal() noexcept;
   void               complete_a() noexcept;
   void               complete_b() noexcept;
@@ -980,7 +982,9 @@ private:
     for(std::size_t index = 0; index < one.inbound.size(); ++index)
     {
       auto* const link    = one.inbound[index];
-      auto const  barrier = std::min(sys_.points[index_], sys_.points[link->sender()]);
+      auto const  barrier = sys_.chosen.idle
+                              ? sys_.chosen.confirm
+                              : std::min(sys_.points[index_], sys_.points[link->sender()]);
       take_fault(*link, link->drain(one.sealed[index], barrier, barrier, one.map));
     }
     if(sys_.measuring)
@@ -1468,7 +1472,8 @@ void system::impl::complete_clock() noexcept
   {
     set_pause(*idle);
     std::ranges::fill(points, idle->at);
-    pending = idle->at;
+    pending        = idle->at;
+    chosen.confirm = sleeps_at_idle() ? earlier_of(idle->at, earliest_position()) : idle->at;
   }
 }
 
@@ -1657,14 +1662,29 @@ void system::impl::settle_confirm() noexcept
     return;
   }
   auto at = chosen.head ? chosen.head->at : chosen.target;
-  if(not chosen.idle)
+  if(not chosen.idle or sleeps_at_idle())
   {
-    for(auto const& one : slots)
-    {
-      at = earlier_of(at, one.rep.position);
-    }
+    at = earlier_of(at, earliest_position());
   }
   chosen.confirm = at;
+}
+
+auto system::impl::sleeps_at_idle() const noexcept -> bool
+{
+  return chosen.idle
+     and std::ranges::any_of(slots, [](slot const& one) { return one.running(); })
+     and std::ranges::all_of(
+             slots, [](slot const& one) { return not one.running() or one.goal->goal.open; });
+}
+
+auto system::impl::earliest_position() const noexcept -> sys_time
+{
+  auto at = never;
+  for(auto const& one : slots)
+  {
+    at = earlier_of(at, one.rep.position);
+  }
+  return at;
 }
 
 void system::impl::account() noexcept
@@ -1782,10 +1802,7 @@ void system::impl::complete_c() noexcept
     }
     return;
   }
-  if(chosen.idle
-     and std::ranges::any_of(slots, [](slot const& one) { return one.running(); })
-     and std::ranges::all_of(
-         slots, [](slot const& one) { return not one.running() or one.goal->goal.open; }))
+  if(sleeps_at_idle())
   {
     chosen.pause = false;
     chosen.idle  = false;
