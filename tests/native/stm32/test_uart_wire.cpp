@@ -1325,7 +1325,7 @@ TEST_CASE("an injection while stopped arrives at its time and cancels the IDLE d
   CHECK(queued.taps[0] == stopped.taps[0]);
 }
 
-TEST_CASE("an injection while stopped is refused over a frame delivered or still in a mailbox")
+TEST_CASE("an injection while stopped is refused over a frame delivered or still queued")
 {
   auto full = one_way("link_tx", "link_rx", latency_20);
   full.oracle(script_end_ps);
@@ -3290,7 +3290,7 @@ TEST_CASE("a carried frame a receiver reset recorded later drops is final at the
   }
 }
 
-TEST_CASE("posts starting exactly at a drain's barrier are carried, from the mailbox or held over")
+TEST_CASE("posts starting exactly at a drain's barrier are carried, from the queue or held over")
 {
   constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
   constexpr std::int64_t l  = 50 * us;
@@ -3337,7 +3337,7 @@ TEST_CASE("posts starting exactly at a drain's barrier are carried, from the mai
   }
 }
 
-TEST_CASE("a carried frame reaches the port before the abort of it from the next mailbox")
+TEST_CASE("a carried frame reaches the port before the abort of it from a later drain")
 {
   constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
   constexpr std::int64_t l  = 50 * us;

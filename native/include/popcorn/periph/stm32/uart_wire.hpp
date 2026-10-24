@@ -326,20 +326,21 @@ struct wire_state
  * @brief One direction of a UART link between two members of a linked system. Attached as the
  *        sender port's far end, it numbers each frame at its start bit and posts it, in system
  *        time, to the wire's queue. The receiver's drain hands each frame to the receiver's port at
- * its start plus L in the receiver's time, on the wire's peer lane, and each abort as a cancel at
- * its time plus L. A frame whose shape differs from the declared line logs one warning per wire on
- * the receiver, and under strict_peripherals is also a model_error at the frame's sender start. The
- * check compares each sender with the declaration, not with the receiver: two ends just under 3
- * percent off in opposite directions are about 6 percent apart and get no warning, the receiver's
- * FE and NE still show it. Frames the sender transmits still reach the endpoint the wire replaced.
- * Edits armed from any thread replace or drop frames by number. Injected frames go on the wire's
- * injected lane. Two frames overlapping on the receiver's line are a system error at the later
- * one's start, its sender start for a peer frame, its receiver start for an injected one. The tap
- * gets each frame once its end, or its abort for a lost frame, the receiver end for an injected
- * frame, lies at or before a drained barrier or the final stop, in order of that time, so its
- * content at a barrier does not depend on how the run was cut into windows. A sender reset aborts
- * the frame in flight. After a receiver reset at r, frames on the line at r or starting before r
- * plus L never reach the receiver, the tap still shows them.
+ *        its start plus L in the receiver's time, on the wire's peer lane, and each abort as a
+ *        cancel at its time plus L. A frame whose shape differs from the declared line logs one
+ *        warning per wire on the receiver, and under strict_peripherals is also a model_error at
+ *        the frame's sender start. The check compares each sender with the declaration, not with
+ *        the receiver: two ends just under 3 percent off in opposite directions are about 6 percent
+ *        apart and get no warning, the receiver's FE and NE still show it. Frames the sender
+ *        transmits still reach the endpoint the wire replaced. Edits armed from any thread replace
+ *        or drop frames by number. Injected frames go on the wire's injected lane. Two frames
+ *        overlapping on the receiver's line are a system error at the later one's start, its sender
+ *        start for a peer frame, its receiver start for an injected one. The tap gets each frame
+ *        once its end, or its abort for a lost frame, the receiver end for an injected frame, lies
+ *        at or before a drained barrier or the final stop, in order of that time, so its content at
+ *        a barrier does not depend on how the run was cut into windows. A sender reset aborts the
+ *        frame in flight. After a receiver reset at r, frames on the line at r or starting before r
+ *        plus L never reach the receiver, the tap still shows them.
  *
  *        A drain hands the port only posts starting before its barrier, the pause point at a
  *        pause. It carries the rest it would hand, aborts included, in order, and the next drain

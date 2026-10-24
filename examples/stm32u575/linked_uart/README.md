@@ -109,9 +109,9 @@ pinned to one CPU.
 
 - Each member runs on its own native host thread.
 - The members meet at a barrier every Q. Between barriers they run at once.
-- A sender appends each frame to its link's mailbox. After the barrier each receiver's thread
-  drains its own mailboxes into its machine, senders in member order, then links in their
-  order in `links`.
+- A sender pushes each frame to its link's queue. After the barrier each receiver's thread
+  drains its links up to the count sealed at the barrier, senders in member order, then links
+  in their order in `links`.
 - No Python runs on the link path.
 - The Python callbacks of different members, intercepts, models and devices, run at the same
   wall time on their own member's thread, each in the context copied when it was installed.

@@ -402,20 +402,20 @@ public:
   [[nodiscard]] auto held_through() const noexcept -> std::optional<icount>;
 
   /**
-   * @brief The machine's horizon at its current time: for a sleeping core, the earliest local
-   *        times at which it can wake, a wire's transmit source can start a frame, or a resumable
-   *        stop can happen, with no input from outside the machine. It changes no machine
-   *        state, but writes per-machine evaluation buffers, so call it on the machine's thread,
-   *        one call at a time. Wake takes the earliest of the arch events that can pend an
-   * exception, see arch::arch::event_pends(), and of every model's answer by its
+   * @brief The machine's horizon at its current time: for a sleeping core, the earliest local times
+   *        at which it can wake, a wire's transmit source can start a frame, or a resumable stop
+   *        can happen, with no input from outside the machine. It changes no machine state, but
+   *        writes per-machine evaluation buffers, so call it on the machine's thread, one call at a
+   *        time. Wake takes the earliest of the arch events that can pend an exception, see
+   *        arch::arch::event_pends(), and of every model's answer by its
    *        periph::model::role_in_horizon(): periph::model::quiet_until() of a `lines` model while
-   *        one of its IRQ lines passes arch::arch::may_wake(), of a `bus_master` model always,
-   *        and the earliest queued event of a `trigger`, `reset_source` or `opaque` model. A
-   *        transmit takes quiet_until() of the wire's `lines` sources and every `bus_master`,
-   *        and the earliest queued event of every `trigger` and `opaque` model. Stop takes the
-   *        earliest queued event of every `reset_source`, `trigger` and `opaque` model, a trigger
-   *        being able to start a reset source, of every model while a watch exists, and the time
-   *        at which @p instructions_left run out in a `b .` loop.
+   *        one of its IRQ lines passes arch::arch::may_wake(), of a `bus_master` model always, and
+   *        the earliest queued event of a `trigger`, `reset_source` or `opaque` model. A transmit
+   *        takes quiet_until() of the wire's `lines` sources and every `bus_master`, and the
+   *        earliest queued event of every `trigger` and `opaque` model. Stop takes the earliest
+   *        queued event of every `reset_source`, `trigger` and `opaque` model, a trigger being able
+   *        to start a reset source, of every model while a watch exists, and the time at which
+   *        @p instructions_left run out in a `b .` loop.
    * @param instructions_left Instructions the caller's run may still execute, the smaller of
    *        its budget and its exact count, empty for no bound.
    * @return The horizon.

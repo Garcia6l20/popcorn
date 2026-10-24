@@ -2555,7 +2555,8 @@ TEST_CASE("a system state of format 2 loads, one of format 1 is refused")
   state.format = 1;
   std::vector<std::byte> old;
   reflex::serde::bson::serializer{old}.dump(state);
-  CHECK_THROWS_AS(r.sys->load(held, old), popcorn::config_error);
+  CHECK_THROWS_WITH_AS(
+      r.sys->load(held, old), doctest::Contains("this one has format 1"), popcorn::config_error);
 }
 
 namespace

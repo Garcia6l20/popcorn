@@ -1548,9 +1548,14 @@ auto system::impl::load_links(std::span<std::byte const> in, bool keep) -> saved
     throw config_error(
         "system state", 0, "bytes", std::format("a state system::save wrote: {}", failure.what()));
   }
-  if(state.format != saved_system{}.format
-     or state.members.size() != slots.size()
-     or state.links.size() != links.size())
+  if(state.format != saved_system{}.format)
+  {
+    throw config_error(
+        "system state", 0, "format",
+        std::format(
+            "a state of format {}, this one has format {}", saved_system{}.format, state.format));
+  }
+  if(state.members.size() != slots.size() or state.links.size() != links.size())
   {
     throw config_error(
         "system state", 0, "bytes", "a state saved by a system of the same members and links");
