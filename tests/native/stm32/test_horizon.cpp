@@ -1581,3 +1581,31 @@ TEST_CASE("a 2D channel unpacking words to bytes near the end of SRAM wakes at i
   std::ignore = run_until(f, vtime{t0.ps + 4 * burst_ps + 2 * instruction_ps});
   CHECK((read32(f, channel_base(planar_ch) + 0x10) & (1u << 10)) != 0);
 }
+
+TEST_CASE("a 1D channel walking from a quiet register with DINC is loud without DTEIE")
+{
+  pulses      p;
+  auto const& f = *p.f;
+  park(f, wfi_loop);
+  enable_irq(f, gpdma0_irq);
+  channel0(
+      f, tr1_words | tr1_sinc | tr1_dinc, tr2_swreq, 64, source_words, sai1_a + 0x1c,
+      cr_tcie | cr_enable);
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, burst_ps));
+}
+
+TEST_CASE("a 1D channel reading on from a quiet register with SINC and DTEIE wakes at once")
+{
+  pulses      p;
+  auto const& f = *p.f;
+  park(f, wfi_loop);
+  enable_irq(f, gpdma0_irq);
+  channel0(
+      f, tr1_words | tr1_sinc | tr1_dinc, tr2_swreq, 64, sai1_a + 0x1c, target_words,
+      cr_tcie | cr_dteie | cr_enable);
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, burst_ps));
+}

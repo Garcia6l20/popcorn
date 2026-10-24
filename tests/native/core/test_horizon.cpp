@@ -484,13 +484,16 @@ TEST_CASE("a read of a watched region counts as watched")
 
 namespace
 {
-auto units_seen(std::vector<std::optional<periph::wake_role>> roles, popcorn::part_description d)
-    -> std::vector<std::pair<bool, bool>>
+auto units_seen(
+    std::vector<std::optional<periph::wake_role>> roles,
+    popcorn::part_description                     d,
+    std::vector<address>                          extra = {}) -> std::vector<std::pair<bool, bool>>
 {
   rig r{std::move(roles), core::machine_options{}, std::move(d)};
   r.probes[0]->units_at = {0x4002'fffc, 0x4003'0000, 0x4003'03fc, 0x4003'0400,
                            0x4003'07fc, 0x4003'0800, 0x4003'0c00, 0x4003'1000};
-  std::ignore           = r.machine().horizon();
+  r.probes[0]->units_at.insert(r.probes[0]->units_at.end(), extra.begin(), extra.end());
+  std::ignore = r.machine().horizon();
   return r.probes[0]->units;
 }
 }
@@ -509,6 +512,40 @@ TEST_CASE("the horizon finds the unit serving an address at each window's edges"
           {true,  true },
           {true,  true },
           {true,  false},
+          {true,  true },
+          {false, false}
+  });
+}
+
+TEST_CASE("the horizon finds the unit serving an address whatever the description's order")
+{
+  using seen        = std::pair<bool, bool>;
+  auto  description = desc();
+  auto& units       = description.peripherals;
+  std::ranges::reverse(units.end() - 4, units.end());
+  popcorn::peripheral_desc alias;
+  alias.name     = "P1_ALIAS";
+  alias.ip       = "PROBE";
+  alias.base     = 0x5003'0400;
+  alias.size     = 0x400;
+  alias.alias_of = "P1";
+  units.insert(units.begin(), std::move(alias));
+  auto const seen_units = units_seen(
+      {role::bus_master, role::opaque, role::lines, role::opaque}, std::move(description),
+      {0x5003'03fc, 0x5003'0400, 0x5003'07fc, 0x5003'0800});
+  CHECK(
+      seen_units
+      == std::vector<seen>{
+          {false, false},
+          {true,  false},
+          {true,  false},
+          {true,  true },
+          {true,  true },
+          {true,  false},
+          {true,  true },
+          {false, false},
+          {false, false},
+          {true,  true },
           {true,  true },
           {false, false}
   });

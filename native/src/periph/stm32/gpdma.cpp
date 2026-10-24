@@ -322,6 +322,13 @@ struct item_walk
   std::uint64_t target_width;
 };
 
+struct channel_walk
+{
+  bool                     irregular;
+  std::optional<item_walk> item;
+  bool                     target_valid;
+};
+
 struct transfer_cache
 {
   bool               valid{};
@@ -483,14 +490,14 @@ private:
   [[nodiscard]] auto busy_channels() const -> std::uint32_t;
   void               raise_illegal(bool raise, initiator by);
   [[nodiscard]] auto burst_ps() const -> std::optional<std::uint64_t>;
-  [[nodiscard]] auto bursts_to_flag(std::size_t ch, quiet_query const& query, bool loud) const
-      -> std::optional<std::uint64_t>;
+  [[nodiscard]] auto
+      bursts_to_flag(std::size_t ch, quiet_query const& query, bool loud, channel_walk const& walk)
+          const -> std::optional<std::uint64_t>;
   [[nodiscard]] auto irregular(std::size_t ch) const -> bool;
   [[nodiscard]] auto source_bytes(std::size_t ch) const -> std::uint64_t;
-  [[nodiscard]] auto data_valid(std::size_t ch) const -> bool;
+  [[nodiscard]] auto data_valid(std::size_t ch, channel_walk const& walk) const -> bool;
   [[nodiscard]] auto item_hulls(std::size_t ch) const -> std::optional<item_walk>;
-  [[nodiscard]] auto item_valid(std::size_t ch) const -> bool;
-  [[nodiscard]] auto item_target_valid(std::size_t ch) const -> bool;
+  [[nodiscard]] auto walk_of(std::size_t ch) const -> channel_walk;
   [[nodiscard]] auto hull_valid(address_hull const& hull, std::uint64_t width, bool write) const
       -> bool;
   [[nodiscard]] auto in_memory(std::uint64_t from, std::uint64_t size, bool write) const -> bool;
@@ -1646,11 +1653,8 @@ auto gpdma::quiet_data(popcorn::address at, bool write) const -> bool
   }
   auto const quiet = std::ranges::any_of(
       feeders(), [&](dma_feeder const* feeder) { return feeder->quiet_data(at, write); });
-  if(feeders_resolved_)
-  {
-    quiet_memo_[quiet_memo_next_] = {.at = at, .write = write, .quiet = quiet, .known = true};
-    quiet_memo_next_              = (quiet_memo_next_ + 1) % quiet_memo_slots;
-  }
+  quiet_memo_[quiet_memo_next_] = {.at = at, .write = write, .quiet = quiet, .known = true};
+  quiet_memo_next_              = (quiet_memo_next_ + 1) % quiet_memo_slots;
   return quiet;
 }
 
@@ -1780,25 +1784,22 @@ auto gpdma::item_hulls(std::size_t ch) const -> std::optional<item_walk>
   return item_walk{.source = source, .target = target, .source_width = sw, .target_width = dw};
 }
 
-auto gpdma::item_valid(std::size_t ch) const -> bool
+auto gpdma::walk_of(std::size_t ch) const -> channel_walk
 {
-  auto const walk = item_hulls(ch);
-  return walk
-     and hull_valid(walk->source, walk->source_width, false)
-     and hull_valid(walk->target, walk->target_width, true);
-}
-
-auto gpdma::item_target_valid(std::size_t ch) const -> bool
-{
-  auto const walk = item_hulls(ch);
-  return walk and hull_valid(walk->target, walk->target_width, true);
-}
-
-auto gpdma::data_valid(std::size_t ch) const -> bool
-{
-  if(irregular(ch))
+  channel_walk out{.irregular = irregular(ch), .item = std::nullopt, .target_valid = false};
+  if(out.irregular)
   {
-    return item_valid(ch);
+    out.item         = item_hulls(ch);
+    out.target_valid = out.item and hull_valid(out.item->target, out.item->target_width, true);
+  }
+  return out;
+}
+
+auto gpdma::data_valid(std::size_t ch, channel_walk const& walk) const -> bool
+{
+  if(walk.irregular)
+  {
+    return walk.target_valid and hull_valid(walk.item->source, walk.item->source_width, false);
   }
   auto const& c      = ch_[ch];
   auto const  sw     = std::uint64_t{1} << get(regs_, c.source_width);
@@ -1808,12 +1809,18 @@ auto gpdma::data_valid(std::size_t ch) const -> bool
   auto const  target = regs_.peek(c.dar.offset);
   auto const  write =
       get(regs_, c.destination_increment) != 0 ? (bytes / sw + 1) * std::max(sw, dw) : dw;
-  return (in_memory(source, source_bytes(ch), false) or quiet_data(source, false))
-     and (in_memory(target, write, true) or quiet_data(target, true));
+  auto const fixed_source = get(regs_, c.source_increment) == 0;
+  auto const fixed_target = get(regs_, c.destination_increment) == 0;
+  return (in_memory(source, source_bytes(ch), false)
+          or (fixed_source and quiet_data(source, false)))
+     and (in_memory(target, write, true) or (fixed_target and quiet_data(target, true)));
 }
 
-auto gpdma::bursts_to_flag(std::size_t ch, quiet_query const& query, bool loud) const
-    -> std::optional<std::uint64_t>
+auto gpdma::bursts_to_flag(
+    std::size_t         ch,
+    quiet_query const&  query,
+    bool                loud,
+    channel_walk const& walk) const -> std::optional<std::uint64_t>
 {
   if(loud)
   {
@@ -1823,7 +1830,7 @@ auto gpdma::bursts_to_flag(std::size_t ch, quiet_query const& query, bool loud) 
   auto const& s       = state_.channel[ch];
   auto const  enabled = [&](flag_index flag) { return get(regs_, c.interrupt_enable[flag]) != 0; };
   auto const  on      = not c.line->level() and query.wakes(*c.line);
-  if(on and enabled(data_error) and not data_valid(ch))
+  if(on and enabled(data_error) and not data_valid(ch, walk))
   {
     return 1;
   }
@@ -1926,16 +1933,18 @@ auto gpdma::quiet_until(quiet_query const& query) const -> std::optional<vtime>
     }
     auto const source = regs_.peek(c.sar.offset);
     auto const target = regs_.peek(c.dar.offset);
+    auto const walk   = walk_of(ch);
     auto const loud =
         illegal
         or faults
-        or (query.peripheral_at(target) and not quiet_data(target, true))
-        or (irregular(ch) and not item_target_valid(ch))
+        or (query.peripheral_at(target)
+            and (not quiet_data(target, true) or (not walk.irregular and get(regs_, c.destination_increment) != 0)))
+        or (walk.irregular and not walk.target_valid)
         or query.opaque_at(source)
         or query.opaque_at(target)
         or query.read_watched(
-            source, irregular(ch) ? std::numeric_limits<std::uint64_t>::max() : source_bytes(ch));
-    auto const k = bursts_to_flag(ch, query, loud);
+            source, walk.irregular ? std::numeric_limits<std::uint64_t>::max() : source_bytes(ch));
+    auto const k = bursts_to_flag(ch, query, loud, walk);
     if(not k)
     {
       continue;

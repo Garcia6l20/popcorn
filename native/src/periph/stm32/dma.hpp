@@ -165,6 +165,8 @@ public:
    * @brief Whether a DMA access at @p at is to a quiet data register of the feeder.
    * @param at Bus address.
    * @param write Whether the access is a write.
+   * @return The answer, fixed by the description for the life of the machine: a controller
+   *         may remember it.
    */
   [[nodiscard]] virtual auto quiet_data(popcorn::address at, bool write) const -> bool = 0;
 

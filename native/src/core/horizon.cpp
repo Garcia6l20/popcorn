@@ -98,7 +98,7 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
         return true;
       }
       auto const& span = *std::prev(after);
-      if(&line >= span.last)
+      if(not std::less{}(&line, span.last))
       {
         return true;
       }
