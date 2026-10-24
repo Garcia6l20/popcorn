@@ -26,6 +26,7 @@ member_link::~member_link() = default;
 
 std::atomic<detail::clock_wait_hook> detail::on_clock_wait{nullptr};
 std::atomic<detail::resume_hook>     detail::before_couple{nullptr};
+std::atomic<detail::barrier_hook>    detail::on_barrier{nullptr};
 
 namespace
 {
@@ -1085,7 +1086,16 @@ private:
         fail(target, std::current_exception());
       }
     }
+    auto const hook = detail::on_barrier.load(std::memory_order_acquire);
+    if(hook != nullptr)
+    {
+      hook(index_, true);
+    }
     auto const passed = sys_.barrier.arrive_and_wait(complete);
+    if(hook != nullptr)
+    {
+      hook(index_, false);
+    }
     if(sys_.measuring)
     {
       left_ = std::chrono::steady_clock::now();
@@ -1738,7 +1748,13 @@ void system::impl::unwatch() noexcept
 {
   for(auto const& link : links)
   {
-    auto const held_host = slots[link->sender()].ref.on->lock();
+    auto& on = *slots[link->sender()].ref.on;
+    if(on.forked())
+    {
+      link->watch_posts({});
+      continue;
+    }
+    auto const held_host = on.lock();
     link->watch_posts({});
   }
 }

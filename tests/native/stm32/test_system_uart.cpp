@@ -601,6 +601,7 @@ TEST_CASE("an echo from a member asleep past its promise reaches the pinger on t
 namespace
 {
 std::atomic<bool>          pinger_waiting{false};
+std::atomic<bool>          pinger_at_barrier{false};
 stm32::uart_wire const*    echo_gate{};
 std::uint64_t              echo_gated{};
 std::atomic<std::uint64_t> echo_held{};
@@ -617,19 +618,29 @@ void hold_echo(std::size_t member, std::atomic<std::uint32_t> const* epoch, std:
     return;
   }
   auto const posted = echo_gate->posted_count();
-  if(posted == echo_gated or posted >= 16)
+  if(posted == echo_gated)
   {
     return;
   }
   echo_gated     = posted;
   auto const end = std::chrono::steady_clock::now() + std::chrono::seconds{10};
-  while(not pinger_waiting.load() and std::chrono::steady_clock::now() < end)
+  while(not pinger_waiting.load()
+        and not pinger_at_barrier.load()
+        and std::chrono::steady_clock::now() < end)
   {
     std::this_thread::yield();
   }
   if(pinger_waiting.load())
   {
     echo_held.fetch_add(1);
+  }
+}
+
+void note_barrier(std::size_t member, bool entering)
+{
+  if(member == 0)
+  {
+    pinger_at_barrier.store(entering);
   }
 }
 }
@@ -657,9 +668,12 @@ TEST_CASE("an echo slower than L from a sleeper reaches a pinger that drained pa
     echo_gate  = &ping;
     echo_gated = 0;
     echo_held.store(0);
+    pinger_at_barrier.store(false);
+    core::detail::on_barrier.store(&note_barrier);
     core::detail::on_clock_wait.store(&hold_echo);
     auto const stopped = w.run_to(2 * script_end);
     core::detail::on_clock_wait.store(nullptr);
+    core::detail::on_barrier.store(nullptr);
     echo_gate = nullptr;
     CHECK(stopped.reason == core::pause_reason::system_time);
     REQUIRE(w.taps[0].size() == 16);

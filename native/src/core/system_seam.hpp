@@ -28,4 +28,13 @@ using resume_hook = void (*)();
 
 /** @brief The process's resume_hook, empty unless a test sets it. */
 POPCORN_API extern std::atomic<resume_hook> before_couple;
+
+/**
+ * @brief Test seam: called on a member's host thread with its index and true right before it
+ *        arrives at a system barrier, and with false once the barrier released it.
+ */
+using barrier_hook = void (*)(std::size_t member, bool entering);
+
+/** @brief The process's barrier_hook, empty unless a test sets it. */
+POPCORN_API extern std::atomic<barrier_hook> on_barrier;
 }
