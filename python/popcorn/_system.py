@@ -684,7 +684,7 @@ class System:
         word_bits = _check_line(index, link)
         ends = [self._end(index, side, end, used) for side, end in (("a", link.a), ("b", link.b))]
         wires: list[int] = []
-        for side, (sender, sender_link, _), (receiver, receiver_link, unit) in (
+        for side, (sender, sender_link, sender_unit), (receiver, receiver_link, unit) in (
             ("b", ends[0], ends[1]),
             ("a", ends[1], ends[0]),
         ):
@@ -692,6 +692,7 @@ class System:
             spec.sender = sender
             spec.receiver = receiver
             spec.receiver_unit = unit
+            spec.sender_unit = sender_unit
             spec.latency_ps = link.latency.ps
             spec.baud = link.baud
             spec.word_bits = word_bits
@@ -2231,7 +2232,8 @@ class UartTap:
         Stopped or paused, they are checked at the call: `at` must be at or after the
         receiver's system time, and no frame may overlap one already on the receiver's line.
         While the system runs, from a `running()` body or another thread, `at` must be at or
-        after the reach of the deliveries done so far, which depends on wall timing, and an
+        after the reach of the deliveries done so far and the receiver's latest promise to its
+        peers, both of which depend on wall timing, and an
         overlap is found later: the system stops with an error at the later frame's start,
         a time fixed by the frames.
 

@@ -134,8 +134,8 @@ struct pause
 /** @brief How the members of a linked system keep in step. */
 enum class[[= reflex::derive{reflex::Format}]] sync_mode : std::uint8_t
 {
-  /** @brief Each member runs to the earliest clock its peers published plus the latency of the
-   * edge from them, and the members meet only to decide a pause. */
+  /** @brief Each member runs to the earliest effective promise its peers published plus the
+   * latency of the edge from them, and the members meet only to decide a pause. */
   clocks,
   /** @brief Every member meets the others at a barrier every quantum. */
   barrier,
@@ -169,19 +169,33 @@ private:
  *        time whatever Q, the slicing or the thread timing. A member with no goal is halted: its
  *        core is held and it advances to the system's decision after each barrier.
  *
- *        Under sync_mode::clocks every member publishes its clock after each slice and runs to
- *        the earliest clock of its coupling edges plus the edge's latency: every wire, an off-link
- *        cut owner to both ends of its link, a member with a goal to every halted member at
- *        latency 0, and an edge of latency Q between members with no path between them otherwise.
- *        A member with nothing due before that bound publishes it as its lead without running.
- *        A drain hands the posts starting before the earlier of the receiver's reach and the
- *        sender's clock. The members meet at the window_barrier only to decide a pause. After a
- *        member stop or an error every member stands at the stop time plus its coupling distance
- *        from the stopping member, or at its own stop before that point, a position that depends
- *        on neither the slicing nor the thread timing. A requested pause puts every member at the
- *        latest member position. Frames, IDLE times and every member's state at a time pause equal
- *        those of sync_mode::barrier. Under sync_mode::clocks commands, stamps, injections and
- *        cuts reach a member while the system is paused.
+ *        Under sync_mode::clocks every member publishes a record after each slice: a floor, its
+ *        reach, before which it posts nothing, and, while its core sleeps with events queued, a
+ *        promise per outbound wire and one for its other edges: machine::horizon() capped at its
+ *        stop sources, its goal's bounds, the global stop, the earliest stamp, what its inbound
+ *        links hold and its position plus the lookahead. It posts nothing before a promise unless
+ *        an input reaches it first. A reader lowers each promise to the earliest time an input the
+ *        promising member has not consumed can reach it: the barrier of its last drain of each
+ *        inbound link plus the link's latency, the reader's own posts that member has not consumed
+ *        plus the latency, and the soft edges into it. Each member runs to the earliest such
+ *        effective promise of its coupling edges plus the edge's latency: every wire, an off-link
+ *        cut owner to both ends of its link, a member with a goal to every halted member at latency
+ *        0, and an edge of latency Q between members with no path between them otherwise. A post,
+ *        or a cut change of its sender as the link's owner, ends the sender's slice when the
+ *        receiver's reaction can reach the sender before the slice's bound. A member with nothing
+ *        due before its bound publishes it as its lead without running. A member with nothing
+ *        queued publishes no promise, and when it leads it reads only its peers' floors, so leads
+ *        grow as they would without promises. A drain hands the posts starting before the earlier
+ *        of the receiver's reach and the sender's effective promise. The members meet at the
+ *        window_barrier only to decide a pause. After a member stop or an error every member stands
+ *        at the stop time plus its coupling distance from the stopping member, or at its own stop
+ *        before that point, a position that depends on neither the slicing nor the thread timing.
+ *        An error or a spin stop raised while the member's core sleeps and a peer can read its
+ *        promises anchors the alignment at its position plus the lookahead, capped at its goal's
+ *        time bounds and the system's until: the latest promise it can have published. A requested
+ *        pause puts every member at the latest member position. Frames, IDLE times and every
+ *        member's state at a time pause equal those of sync_mode::barrier. Under sync_mode::clocks
+ *        commands, stamps, injections and cuts reach a member while the system is paused.
  *
  *        Lock order: the system mutex first, taken only by threads that are not host threads,
  *        then at most one host mutex at a time. Host threads never take it.
@@ -205,11 +219,11 @@ public:
    *        in that window. A throw fails the member with that error, the member wakes the
    *        others and the system pauses on it.
    * @param mode How the members keep in step. Under sync_mode::clocks before_arrival is also
-   *        called after every slice, before the member publishes its clock.
+   *        called after every slice, before the member publishes its record.
    * @param lookahead Under sync_mode::clocks, how far past its position a member publishes its
-   *        clock at most: the host is an inbound wire of that latency, so a stamp at or after a
-   *        member's position plus @p lookahead lands exactly. A member with nothing due moves by a
-   *        hold slice to its position plus @p lookahead when it leads that far.
+   *        lead and promises at most: the host is an inbound wire of that latency, so a stamp at
+   *        or after a member's position plus @p lookahead lands exactly. A member with nothing due
+   * moves by a hold slice to its position plus @p lookahead when it leads that far.
    * @throws machine_busy when a member is busy.
    */
   system(

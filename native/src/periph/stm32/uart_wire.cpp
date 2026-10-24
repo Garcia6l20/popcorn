@@ -184,6 +184,10 @@ void uart_wire::started(line_frame const& frame)
   state_.flight_start = post.start;
   state_.flight_end   = post.end;
   ring_.push(post);
+  if(watcher_)
+  {
+    watcher_(post.start);
+  }
   if(forward_)
   {
     forward_->started(frame);
@@ -194,6 +198,10 @@ void uart_wire::aborted(vtime at)
 {
   auto const system = core::time_map{state_.sender_base}.to_system(at);
   ring_.push({.abort = true, .start = system, .end = system});
+  if(watcher_)
+  {
+    watcher_(system);
+  }
   if(forward_)
   {
     forward_->aborted(at);
@@ -239,7 +247,34 @@ void uart_wire::sender_reset(core::sys_time at)
   {
     ring_.push({.abort = true, .start = at, .end = at});
     state_.flight_end = at;
+    if(watcher_)
+    {
+      watcher_(at);
+    }
   }
+}
+
+auto uart_wire::watch_posts(std::move_only_function<void(core::sys_time)> watcher) -> bool
+{
+  watcher_ = std::move(watcher);
+  return true;
+}
+
+void uart_wire::cut_changed(core::sys_time at)
+{
+  if(watcher_)
+  {
+    watcher_(at);
+  }
+}
+
+auto uart_wire::hold_inputs_before(core::sys_time at) -> std::optional<core::sys_time>
+{
+  {
+    core::link_guard const held{inject_mutex_};
+    held_before_ = at;
+  }
+  return due();
 }
 
 void uart_wire::receiver_reset(core::sys_time at)
@@ -829,11 +864,10 @@ auto uart_wire::inject(
   if(not stopped)
   {
     core::link_guard const held{inject_mutex_};
-    if(at < state_.drained_through)
+    if(auto const bound = std::max(state_.drained_through, held_before_); at < bound)
     {
       return std::unexpected{
-          inject_refusal{
-                         .reason = inject_refusal_reason::before_drained, .bound = state_.drained_through}
+          inject_refusal{.reason = inject_refusal_reason::before_drained, .bound = bound}
       };
     }
     for(auto& frame : frames)
@@ -992,7 +1026,7 @@ auto cut_link(
     }
     else
     {
-      bound = std::max(bound, wire->state_.drained_through);
+      bound = std::max({bound, wire->state_.drained_through, wire->held_before_});
     }
   }
   if(start < bound)

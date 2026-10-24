@@ -444,7 +444,8 @@ auto system_handle::add_wire(
       {.wire        = std::move(wire),
        .sender_port = &port,
        .own         = sender.endpoint(),
-       .sender      = spec.sender});
+       .sender      = spec.sender,
+       .unit        = spec.sender_unit});
   return index;
 }
 
@@ -507,6 +508,24 @@ void system_handle::start(std::vector<std::int64_t> const& offsets_ps)
     {
       detail::host_access(members_[one.sender].slot, [&one] { one.sender_port->attach(one.wire); });
       links.push_back(one.wire);
+    }
+    for(std::size_t member = 0; member < members_.size(); ++member)
+    {
+      std::vector<std::vector<std::string>> sources;
+      for(auto const& one : wires_)
+      {
+        if(one.sender == member)
+        {
+          sources.push_back({one.unit});
+        }
+      }
+      if(std::ranges::any_of(sources, [](auto const& wire) { return wire.front().empty(); }))
+      {
+        sources.clear();
+      }
+      auto& target = members_[member].handle->native();
+      detail::host_access(
+          members_[member].slot, [&target, &sources] { target.set_transmit_sources(sources); });
     }
     system_ = [&] {
       nb::gil_scoped_release const released;
@@ -1088,6 +1107,13 @@ auto system_handle::change_cut(
     if(outcome and system_->mode() == core::sync_mode::clocks)
     {
       engine.interrupt();
+      for(auto const at : {entry.forth, entry.back})
+      {
+        if(wires_[at].sender == owner)
+        {
+          wire(at).cut_changed(core::sys_time{now});
+        }
+      }
     }
     return refused(outcome);
   }

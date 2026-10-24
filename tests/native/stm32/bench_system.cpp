@@ -158,7 +158,7 @@ struct measured
 class world
 {
 public:
-  world(std::int64_t latency, std::uint32_t spin_threshold, core::sync_mode mode)
+  world(std::int64_t latency, std::uint32_t spin_threshold, core::sync_mode mode, bool sources)
   {
     stm32::register_builtin_models();
     nodes_.push_back(std::make_unique<node>("link_audio", spin_threshold));
@@ -171,6 +171,18 @@ public:
     std::vector<core::member_ref> members;
     for(std::size_t index = 0; index < nodes_.size(); ++index)
     {
+      if(sources)
+      {
+        std::vector<std::vector<std::string>> wires;
+        for(auto const& [from, port] : senders_)
+        {
+          if(from == index)
+          {
+            wires.push_back({port == 0 ? "USART1" : "USART2"});
+          }
+        }
+        nodes_[index]->target->set_transmit_sources(wires);
+      }
       std::vector<std::unique_ptr<core::machine>> owned;
       owned.push_back(std::move(nodes_[index]->target));
       hosts_.push_back(std::make_shared<core::host>(std::move(owned)));
@@ -279,6 +291,7 @@ private:
         sender.ends[from_port], tap_capacity);
     sender.ports[from_port]->attach(wire);
     wires_.push_back(std::move(wire));
+    senders_.emplace_back(from, from_port);
   }
 
   [[nodiscard]] auto sys_member(std::size_t index) const -> core::host*
@@ -286,11 +299,12 @@ private:
     return hosts_[index].get();
   }
 
-  std::vector<std::shared_ptr<core::host>>       hosts_;
-  std::vector<std::unique_ptr<node>>             nodes_;
-  std::vector<std::shared_ptr<stm32::uart_wire>> wires_;
-  std::unique_ptr<core::system>                  sys_;
-  fnv                                            reasons_{};
+  std::vector<std::shared_ptr<core::host>>         hosts_;
+  std::vector<std::unique_ptr<node>>               nodes_;
+  std::vector<std::shared_ptr<stm32::uart_wire>>   wires_;
+  std::vector<std::pair<std::size_t, std::size_t>> senders_;
+  std::unique_ptr<core::system>                    sys_;
+  fnv                                              reasons_{};
 };
 
 struct variant
@@ -300,12 +314,17 @@ struct variant
 
 auto variant_named(std::string_view name) -> variant
 {
-  if(name == "B" or name == "C" or name == "solo" or name == "solo-plain" or name == "solo-held")
+  if(name == "B"
+     or name == "C"
+     or name == "H"
+     or name == "solo"
+     or name == "solo-plain"
+     or name == "solo-held")
   {
     return {.name = std::string{name}};
   }
   throw std::invalid_argument{
-      std::format("bad variant {}, want B, C, solo, solo-plain or solo-held", name)};
+      std::format("bad variant {}, want B, C, H, solo, solo-plain or solo-held", name)};
 }
 
 auto parse_number(std::string_view text) -> std::int64_t
@@ -510,7 +529,7 @@ auto measure(options const& how, variant const& v) -> measured
   }
   world w{
       how.latency_us * us_ps, how.spin_threshold,
-      v.name == "C" ? core::sync_mode::clocks : core::sync_mode::barrier};
+      v.name == "B" ? core::sync_mode::barrier : core::sync_mode::clocks, v.name == "H"};
   auto const warm_from = clock_type::now();
   std::ignore          = w.run_to(how.warmup_ms * ms_ps);
   auto const warm_wall = std::chrono::duration<double>(clock_type::now() - warm_from).count();

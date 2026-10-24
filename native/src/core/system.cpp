@@ -2,6 +2,7 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/system.hpp>
 
+#include "promise_record.hpp"
 #include "system_seam.hpp"
 
 #include <reflex/enum.hpp>
@@ -10,11 +11,13 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <expected>
 #include <format>
 #include <limits>
 #include <ranges>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace popcorn::core
@@ -102,7 +105,8 @@ struct decision
   sys_time             next{};
 };
 
-constexpr auto never = sys_time{std::numeric_limits<std::int64_t>::max()};
+constexpr auto never    = sys_time{std::numeric_limits<std::int64_t>::max()};
+constexpr auto earliest = sys_time{std::numeric_limits<std::int64_t>::min()};
 
 auto later_by(sys_time const& at, std::int64_t by) noexcept -> sys_time
 {
@@ -113,9 +117,11 @@ auto later_by(sys_time const& at, std::int64_t by) noexcept -> sys_time
   return {at.ps + by};
 }
 
+using detail::promise_record;
+
 struct member_sync
 {
-  alignas(64) std::atomic<std::int64_t> clock{};
+  detail::published_record record{};
   alignas(64) std::atomic<std::uint32_t> epoch{};
 };
 
@@ -167,6 +173,7 @@ struct system::impl
     std::uint64_t                                                         resets{};
     std::vector<member_link*>                                             outbound{};
     std::vector<member_link*>                                             inbound{};
+    std::vector<std::size_t>                                              inbound_ids{};
     std::vector<std::uint64_t>                                            sealed{};
     std::vector<coupling>                                                 coupled{};
     std::vector<std::size_t>                                              successors{};
@@ -268,6 +275,11 @@ struct system::impl
   auto               load_links(std::span<std::byte const> in, bool keep) -> saved_system;
   void               wake_all(std::optional<std::size_t> except = {}) noexcept;
   [[nodiscard]] auto in_flight() const noexcept -> bool;
+  void               note_post(std::size_t link, sys_time at);
+  void               write_record(std::size_t member, promise_record const& record) noexcept;
+  void               write_final(std::size_t member, sys_time at) noexcept;
+  void               read_record(std::size_t member, promise_record& out) const noexcept;
+  [[nodiscard]] auto shaped(std::size_t member) const -> promise_record;
 
   system const*                               owner;
   std::vector<slot>                           slots;
@@ -311,6 +323,12 @@ struct system::impl
   std::atomic<bool>        decide{false};
   std::atomic<std::size_t> leading{0};
   std::vector<sys_time>    distances{};
+  std::vector<sys_time>    soft{};
+  std::vector<sys_time>    pseudo{};
+  std::vector<std::size_t> out_pos{};
+  std::vector<std::size_t> in_pos{};
+  std::vector<bool>        watched{};
+  std::vector<bool>        listed{};
   std::vector<sys_time>    targets{};
   std::vector<sys_time>    points{};
   std::vector<sys_time>    stood{};
@@ -322,18 +340,30 @@ class system::impl::runner final : public member_driver
 {
 public:
   runner(system::impl& owner, std::size_t index)
-      : sys_{owner}, index_{index}, clocks_(owner.slots.size(), sys_time{})
+      : sys_{owner}, index_{index}, posts_(owner.slots[index].outbound.size()),
+        passed_(owner.slots[index].inbound.size(), earliest),
+        wire_eot_(owner.slots[index].inbound.size(), earliest), eot_(owner.slots.size(), earliest),
+        mine_{owner.shaped(index)}, view_{owner.shaped(index)}
   {}
 
   void restart() noexcept
   {
-    phase_     = phase::begin;
-    lead_      = sys_time{std::numeric_limits<std::int64_t>::min()};
-    published_ = lead_;
-    counted_   = false;
-    calm_      = false;
+    phase_    = phase::begin;
+    lead_     = earliest;
+    promised_ = earliest;
+    counted_  = false;
+    calm_     = false;
+    slept_    = false;
+    slice_to_ = never;
+    stamped_.reset();
+    if(not system::impl::frozen(sys_.slots[index_]))
+    {
+      frozen_reach_.reset();
+    }
     nudged_.store(false, std::memory_order_relaxed);
-    std::ranges::fill(clocks_, sys_time{});
+    std::ranges::fill(passed_, earliest);
+    std::ranges::fill(wire_eot_, earliest);
+    std::ranges::fill(eot_, earliest);
     if(sys_.measuring)
     {
       left_ = std::chrono::steady_clock::now();
@@ -343,6 +373,11 @@ public:
   auto plan(machine& target, earliest_stamp stamp) -> std::optional<slice_request> override
   {
     auto& one = sys_.slots[index_];
+    mark_     = target.virtual_clock().now().value;
+    if(sys_.clocked())
+    {
+      stamped_ = stamp_of(stamp);
+    }
     for(;;)
     {
       if(aborted_.load(std::memory_order_acquire))
@@ -448,8 +483,8 @@ public:
           }
           if(sys_.chosen.sleep and sys_.clocked())
           {
-            lead_      = sys_.points[index_];
-            published_ = sys_.points[index_];
+            lead_     = sys_.points[index_];
+            promised_ = sys_.points[index_];
             if(position(target) < sys_.points[index_])
             {
               phase_ = phase::sleep_to;
@@ -522,6 +557,8 @@ public:
 
   void ran(machine& target, slice_result const& result) override
   {
+    auto const now = target.virtual_clock().now().value;
+    slept_         = now < mark_ or now - mark_ > result.executed.value;
     settle(target, result);
     if(sys_.clocked())
     {
@@ -535,6 +572,37 @@ public:
     if(sys_.clocked())
     {
       publish(target, false);
+    }
+  }
+
+  /**
+   * @brief Records a post this member made at @p at on its outbound link at @p position, global
+   *        index @p link, and ends the running slice when the receiver's reaction to it can reach
+   *        this member before the slice's bound. On this member's host thread.
+   */
+  void note_post(std::size_t position, std::size_t link, sys_time at)
+  {
+    if(not sys_.clocked())
+    {
+      return;
+    }
+    auto& sent = posts_[position];
+    sent.push_back(at);
+    auto const& one  = sys_.slots[index_];
+    auto const* wire = one.outbound[position];
+    if(not sys_.listed[link])
+    {
+      auto const consumed = sys_.syncs[wire->receiver()].record.consumed(sys_.in_pos[link]);
+      while(not sent.empty() and sent.front() < consumed)
+      {
+        sent.pop_front();
+      }
+      return;
+    }
+    if(later_by(at, wire->latency().ps + sys_.distance(wire->receiver(), index_).ps) < slice_to_
+       and one.target != nullptr)
+    {
+      one.target->interrupt();
     }
   }
 
@@ -568,7 +636,7 @@ public:
     {
       return target.virtual_clock().time();
     }
-    return sys_.slots[index_].map.to_local(reach_at(target));
+    return sys_.slots[index_].map.to_local(landing(target));
   }
 
 private:
@@ -661,9 +729,14 @@ private:
 
   void fail(machine const& target, std::exception_ptr error) noexcept
   {
-    auto&      one = sys_.slots[index_];
-    auto const at  = reach_at(target);
-    one.failed     = true;
+    auto& one = sys_.slots[index_];
+    auto  at  = reach_at(target);
+    if(sys_.clocked() and unseen(target))
+    {
+      at            = std::max(at, unwitnessed(target));
+      frozen_reach_ = at;
+    }
+    one.failed = true;
     one.rep.found.push_back(
         {.at       = position(target),
          .member   = index_,
@@ -679,15 +752,21 @@ private:
 
   void resolve(machine& target, popcorn::stop stopped)
   {
-    auto&      one = sys_.slots[index_];
-    auto const at  = position(target);
-    one.resolved   = true;
+    auto&      one    = sys_.slots[index_];
+    auto const at     = position(target);
+    auto       anchor = at;
+    if(sys_.clocked() and stopped.reason == stop_reason::spin and unseen(target))
+    {
+      anchor        = std::max(reach_at(target), unwitnessed(target));
+      frozen_reach_ = anchor;
+    }
+    one.resolved = true;
     one.rep.found.push_back(
         {.at       = at,
          .member   = index_,
          .kind     = entry_kind::stopped,
          .stopped  = std::move(stopped),
-         .anchor   = at,
+         .anchor   = anchor,
          .anchored = index_});
     if(sys_.clocked())
     {
@@ -706,6 +785,60 @@ private:
         .resets       = target.resets(),
         .detail       = std::move(detail),
     };
+  }
+
+  /**
+   * @brief Whether the member may have published a promise past its position that a peer ran
+   *        on: its core sleeps, and a peer reads its general promise over a soft or owner edge,
+   *        or its wire promises, which need its transmit sources.
+   */
+  [[nodiscard]] auto unseen(machine const& target) const noexcept -> bool
+  {
+    auto const& one = sys_.slots[index_];
+    auto const  n   = sys_.slots.size();
+    try
+    {
+      auto const sleeping = target.horizon();
+      if(not sleeping.asleep)
+      {
+        return false;
+      }
+      if(not one.outbound.empty() and sleeping.transmit.size() == one.outbound.size())
+      {
+        return true;
+      }
+    }
+    catch(...)
+    {
+      return true;
+    }
+    if(sys_.soft.size() != n * n)
+    {
+      return false;
+    }
+    return std::ranges::any_of(std::views::iota(std::size_t{0}, n), [&](std::size_t to) {
+      return to != index_
+         and (sys_.soft[index_ * n + to] < never or sys_.pseudo[index_ * n + to] < never);
+    });
+  }
+
+  /**
+   * @brief The latest promise this member can have published since it last woke: its position
+   *        plus the system's lookahead, capped by the goal's time bounds and the system's until.
+   *        The anchor of a stop or an error no promise was capped at.
+   */
+  [[nodiscard]] auto unwitnessed(machine const& target) const -> sys_time
+  {
+    auto at = later_by(position(target), sys_.lookahead.ps);
+    if(auto const timed = time_bound())
+    {
+      at = std::min(at, timed->first);
+    }
+    if(sys_.until)
+    {
+      at = std::min(at, *sys_.until);
+    }
+    return std::max(at, position(target));
   }
 
   [[nodiscard]] auto time_bound() const -> std::optional<std::pair<sys_time, bool>>
@@ -791,6 +924,7 @@ private:
     auto& one = sys_.slots[index_];
     enter_slice();
     one.held_to = bound;
+    slice_to_   = bound;
     held_last_  = hold;
     until_last_ = one.map.to_local(bound);
     slice_request request{
@@ -992,7 +1126,22 @@ private:
 
   [[nodiscard]] auto reach_at(machine const& target) const noexcept -> sys_time
   {
-    return std::max(position(target), lead_);
+    return std::max({position(target), lead_, frozen_reach_.value_or(earliest)});
+  }
+
+  /**
+   * @brief Whether the member has nothing queued and no stamp: what an IDLE pause needs. Such a
+   *        member publishes no promise, so a peer runs past it no further than without
+   *        promises and an IDLE point never depends on how far a promise let a peer run.
+   */
+  [[nodiscard]] auto eventless(machine const& target) const -> bool
+  {
+    return target.pending_events() == 0 and not stamped_;
+  }
+
+  [[nodiscard]] auto landing(machine const& target) const noexcept -> sys_time
+  {
+    return std::max(reach_at(target), promised_);
   }
 
   void publish(machine const& target, bool hook)
@@ -1009,17 +1158,210 @@ private:
         fail(target, std::current_exception());
       }
     }
-    auto const at = reach_at(target);
-    if(at <= published_ or at.ps <= sys_.syncs[index_].clock.load(std::memory_order_relaxed))
+    mine_.floor   = std::max(reach_at(target), sys_.syncs[index_].record.floor());
+    mine_.general = mine_.floor;
+    std::ranges::fill(mine_.wires, mine_.floor.ps);
+    if(not system::impl::frozen(one)
+       and phase_ == phase::run
+       and (slept_ or one.rep.quiescent)
+       and not eventless(target))
+    {
+      promise(target);
+    }
+    if(nudged_.load(std::memory_order_acquire))
+    {
+      auto const frozen = std::max(promised_, mine_.floor);
+      mine_.general     = std::min(mine_.general, frozen);
+      for(auto& wire : mine_.wires)
+      {
+        wire = std::min(wire, frozen.ps);
+      }
+    }
+    std::ranges::transform(passed_, mine_.consumed.begin(), &sys_time::ps);
+    std::ranges::transform(eot_, mine_.heard.begin(), &sys_time::ps);
+    promised_ = std::max(promised_, mine_.general);
+    sys_.read_record(index_, view_);
+    if(view_.floor == mine_.floor
+       and view_.general == mine_.general
+       and view_.wires == mine_.wires
+       and view_.consumed == mine_.consumed
+       and view_.heard == mine_.heard)
     {
       return;
     }
-    published_ = at;
-    sys_.syncs[index_].clock.store(at.ps, std::memory_order_release);
+    sys_.write_record(index_, mine_);
     for(auto const next : one.successors)
     {
       sys_.bump(next);
     }
+  }
+
+  /**
+   * @brief Raises mine_'s general and wire promises, set to its floor, to what the horizon of a
+   *        sleeping core allows: no post before them unless an input reaches the member first.
+   *        Capped at every stop source the horizon reports, the goal's bounds, the global stop,
+   *        the alignment target, the lookahead, the earliest stamp and what the inbound links
+   *        hold for the member. A goal with a stop_when predicate gets no promise.
+   */
+  void promise(machine const& target)
+  {
+    auto const&           one = sys_.slots[index_];
+    std::optional<icount> left_count;
+    if(one.running())
+    {
+      auto const& goal      = one.goal->goal;
+      auto const  by_budget = left(goal.budget, one.goal->executed);
+      auto const  by_exact  = left(goal.exact, one.goal->executed);
+      left_count            = by_budget;
+      if(by_exact and (not left_count or by_exact->value < left_count->value))
+      {
+        left_count = by_exact;
+      }
+    }
+    if(one.running() and one.goal->goal.stop_when)
+    {
+      return;
+    }
+    auto const sleeping = target.horizon(left_count);
+    if(not sleeping.asleep)
+    {
+      return;
+    }
+    auto const here = position(target);
+    auto       at   = std::min(
+        {sys_time{sys_.stop_at.load(std::memory_order_acquire)}, sys_.targets[index_],
+         later_by(here, sys_.lookahead.ps)});
+    if(sleeping.wake)
+    {
+      at = std::min(at, one.map.to_system(*sleeping.wake));
+    }
+    if(sleeping.stop)
+    {
+      at = std::min(at, one.map.to_system(*sleeping.stop));
+    }
+    if(auto const timed = time_bound())
+    {
+      at = std::min(at, timed->first);
+    }
+    if(sys_.until)
+    {
+      at = std::min(at, *sys_.until);
+    }
+    if(stamped_)
+    {
+      at = std::min(at, *stamped_);
+    }
+    at = std::max(at, mine_.floor);
+    for(auto* link : one.inbound)
+    {
+      if(auto const due = link->hold_inputs_before(std::max(at, promised_)))
+      {
+        at = std::min(at, *due);
+      }
+    }
+    mine_.general = std::max(mine_.floor, at);
+    if(sleeping.transmit.size() != one.outbound.size())
+    {
+      return;
+    }
+    for(std::size_t wire = 0; wire < one.outbound.size(); ++wire)
+    {
+      auto const& sends = sleeping.transmit[wire];
+      auto const until = sends ? std::min(mine_.general, one.map.to_system(*sends)) : mine_.general;
+      mine_.wires[wire] = std::max(mine_.floor, until).ps;
+    }
+  }
+
+  /**
+   * @brief The earliest system time at which member @p from, whose record view_ holds, can act
+   *        on an input it has not consumed, as this member sees it: its unconsumed inputs from
+   *        other members, this member's own posts it has not consumed, and its soft edges.
+   */
+  auto inputs_of(std::size_t from) -> sys_time
+  {
+    auto const& x      = sys_.slots[from];
+    auto        inputs = never;
+    for(std::size_t index = 0; index < x.inbound.size(); ++index)
+    {
+      auto const* link     = x.inbound[index];
+      auto const  consumed = sys_time{view_.consumed[index]};
+      auto const  by       = link->sender();
+      auto const  owner    = x.cut_owners[index];
+      if(by != index_ or (owner != index_ and owner != from))
+      {
+        inputs = std::min(inputs, later_by(consumed, link->latency().ps));
+      }
+      if(by == index_)
+      {
+        inputs = std::min(inputs, own_term(x.inbound_ids[index], consumed, link->latency()));
+      }
+    }
+    auto const n = sys_.slots.size();
+    for(std::size_t source = 0; source < n; ++source)
+    {
+      if(auto const apart = sys_.soft[source * n + from]; source != index_ and apart < never)
+      {
+        inputs = std::min(inputs, later_by(sys_time{view_.heard[source]}, apart.ps));
+      }
+    }
+    return inputs;
+  }
+
+  auto own_term(std::size_t link, sys_time consumed, sys_time latency) -> sys_time
+  {
+    if(not sys_.watched[link])
+    {
+      return later_by(consumed, latency.ps);
+    }
+    auto& sent = posts_[sys_.out_pos[link]];
+    while(not sent.empty() and sent.front() < consumed)
+    {
+      sent.pop_front();
+    }
+    return sent.empty() ? never : later_by(sent.front(), latency.ps);
+  }
+
+  /**
+   * @brief Reads the record of every member this one is coupled to and returns the bounds they
+   *        give it: from each source's effective promise per edge plus the edge's latency, and
+   *        from its floor alone, the bound a lead takes. Fills eot_ with each source's general
+   *        effective promise and wire_eot_ with the effective wire promise of each inbound link.
+   */
+  auto observe() -> std::pair<sys_time, sys_time>
+  {
+    auto const& one    = sys_.slots[index_];
+    auto const  n      = sys_.slots.size();
+    auto        bound  = never;
+    auto        floors = never;
+    for(auto const& edge : one.coupled)
+    {
+      auto const from = edge.source;
+      sys_.read_record(from, view_);
+      auto const inputs  = inputs_of(from);
+      auto const general = std::max(view_.floor, std::min(view_.general, inputs));
+      eot_[from]         = general;
+      for(std::size_t index = 0; index < one.inbound.size(); ++index)
+      {
+        auto const* link = one.inbound[index];
+        if(link->sender() != from)
+        {
+          continue;
+        }
+        auto const wire = std::max(
+            view_.floor,
+            std::min(sys_time{view_.wires[sys_.out_pos[one.inbound_ids[index]]]}, inputs));
+        wire_eot_[index] = wire;
+        bound            = std::min(bound, later_by(wire, link->latency().ps));
+        floors           = std::min(floors, later_by(view_.floor, link->latency().ps));
+      }
+      if(auto const apart = std::min(sys_.soft[from * n + index_], sys_.pseudo[from * n + index_]);
+         apart < never)
+      {
+        bound  = std::min(bound, later_by(general, apart.ps));
+        floors = std::min(floors, later_by(view_.floor, apart.ps));
+      }
+    }
+    return {bound, floors};
   }
 
   void unlead() noexcept
@@ -1108,37 +1450,26 @@ private:
         }
         return std::nullopt;
       }
-      if(nudged_.load(std::memory_order_acquire))
-      {
-        if(lead_ > here)
-        {
-          unlead();
-          return request_to(lead_, false, true);
-        }
-        nudged_.store(false, std::memory_order_relaxed);
-        return request_to(here, false, false);
-      }
       auto const at = stamp_of(stamp);
+      stamped_      = at;
       if(at and *at <= here)
       {
         return request_to(here, false, false);
       }
-      auto const cap   = later_by(here, sys_.lookahead.ps);
-      auto       bound = std::min(goal, cap);
-      for(auto const& edge : one.coupled)
-      {
-        clocks_[edge.source] =
-            sys_time{sys_.syncs[edge.source].clock.load(std::memory_order_acquire)};
-        bound = std::min(bound, later_by(clocks_[edge.source], edge.latency.ps));
-      }
-      auto const timed = one.running() ? time_bound() : std::nullopt;
+      auto const cap                = later_by(here, sys_.lookahead.ps);
+      auto const [sourced, floored] = observe();
+      auto       bound              = std::min({goal, cap, sourced});
+      auto       plain              = std::min({goal, cap, floored});
+      auto const timed              = one.running() ? time_bound() : std::nullopt;
       if(timed)
       {
         bound = std::min(bound, timed->first);
+        plain = std::min(plain, timed->first);
       }
       if(at)
       {
         bound = std::min(bound, *at);
+        plain = std::min(plain, *at);
       }
       auto const from    = sys_.measuring ? std::chrono::steady_clock::now()
                                           : std::chrono::steady_clock::time_point{};
@@ -1147,20 +1478,13 @@ private:
       {
         auto* const link    = one.inbound[index];
         auto const  through = link->posted_count();
+        auto const  owner   = one.cut_owners[index];
         one.sealed[index]   = through;
+        passed_[index]      = std::max(
+            passed_[index],
+            std::min({ahead, wire_eot_[index], owner == index_ ? ahead : eot_[owner]}));
         faulted =
-            take_fault(
-                *link,
-                link->drain(
-                    through,
-                    std::min(
-                        {ahead, clocks_[link->sender()],
-                         one.cut_owners[index] == index_ ? ahead : clocks_[one.cut_owners[index]]}),
-                    bound, one.map,
-                    std::min(
-                        {ahead, clocks_[link->sender()],
-                         one.cut_owners[index] == index_ ? ahead
-                                                         : clocks_[one.cut_owners[index]]})))
+            take_fault(*link, link->drain(through, passed_[index], bound, one.map, passed_[index]))
             or faulted;
       }
       if(sys_.measuring)
@@ -1180,32 +1504,54 @@ private:
           continue;
         }
         bound = std::min(bound, lowered);
+        plain = std::min(plain, lowered);
       }
       for(auto const* link : one.inbound)
       {
         if(auto const due = link->due())
         {
           bound = std::min(bound, *due);
+          plain = std::min(plain, *due);
         }
+      }
+      if(nudged_.load(std::memory_order_acquire))
+      {
+        auto const to = landing(target);
+        if(to <= here)
+        {
+          nudged_.store(false, std::memory_order_relaxed);
+          return request_to(here, false, false);
+        }
+        unlead();
+        bound = std::min(bound, to);
+        if(here < bound or (one.held_to and *one.held_to < bound))
+        {
+          return request_to(bound, false, true);
+        }
+        wait_past(seen);
+        continue;
       }
       auto const allowed = not sys_.until and not timed and not(at and *at <= bound);
       if(one.rep.quiescent)
       {
         auto const next = target.next_event();
         auto const busy =
-            (next and *next < target.virtual_clock().to_icount(one.map.to_local(bound)))
-            or (at and *at < bound);
-        if(allowed and not busy and bound >= cap)
+            (next and *next < target.virtual_clock().to_icount(one.map.to_local(plain)))
+            or (at and *at < plain);
+        if(allowed and not busy and plain >= cap)
         {
           unlead();
           return request_to(cap, false, true);
         }
         if(allowed and not busy)
         {
-          if(bound > lead_)
+          if(plain > lead_)
           {
-            lead_ = bound;
+            lead_ = plain;
             publish(target, false);
+            count_lead();
+            settle_quiet();
+            continue;
           }
           count_lead();
           settle_quiet();
@@ -1250,19 +1596,29 @@ private:
     }
   }
 
-  system::impl&         sys_;
-  std::size_t           index_;
-  phase                 phase_{phase::begin};
-  bool                  held_last_{};
-  bool                  sleeping_{};
-  bool                  counted_{};
-  bool                  calm_{};
-  sys_time              lead_{std::numeric_limits<std::int64_t>::min()};
-  sys_time              published_{std::numeric_limits<std::int64_t>::min()};
-  std::vector<sys_time> clocks_{};
-  vtime                 until_last_{};
-  std::atomic<bool>     aborted_{false};
-  std::atomic<bool>     nudged_{false};
+  system::impl&                     sys_;
+  std::size_t                       index_;
+  phase                             phase_{phase::begin};
+  bool                              held_last_{};
+  bool                              sleeping_{};
+  bool                              counted_{};
+  bool                              calm_{};
+  sys_time                          lead_{earliest};
+  sys_time                          promised_{earliest};
+  sys_time                          slice_to_{never};
+  std::optional<sys_time>           stamped_{};
+  std::optional<sys_time>           frozen_reach_{};
+  bool                              slept_{};
+  std::uint64_t                     mark_{};
+  std::vector<std::deque<sys_time>> posts_{};
+  std::vector<sys_time>             passed_{};
+  std::vector<sys_time>             wire_eot_{};
+  std::vector<sys_time>             eot_{};
+  promise_record                    mine_{};
+  promise_record                    view_{};
+  vtime                             until_last_{};
+  std::atomic<bool>                 aborted_{false};
+  std::atomic<bool>                 nudged_{false};
 
   std::chrono::steady_clock::time_point left_{};
 };
@@ -1304,12 +1660,26 @@ system::impl::impl(
                | std::views::transform([](auto const& link) { return link.get(); })
                | std::ranges::to<std::vector>();
   std::ranges::stable_sort(ordered, {}, [](member_link const* link) { return link->sender(); });
+  out_pos.resize(links.size());
+  in_pos.resize(links.size());
   for(auto* link : ordered)
   {
+    auto const id = static_cast<std::size_t>(
+        std::ranges::find(links, link, &std::shared_ptr<member_link>::get) - links.begin());
+    out_pos[id] = slots[link->sender()].outbound.size();
+    in_pos[id]  = slots[link->receiver()].inbound.size();
     slots[link->sender()].outbound.push_back(link);
     slots[link->receiver()].inbound.push_back(link);
+    slots[link->receiver()].inbound_ids.push_back(id);
     slots[link->receiver()].sealed.push_back(0);
   }
+  for(std::size_t index = 0; index < slots.size(); ++index)
+  {
+    syncs[index].record.shape(
+        slots[index].outbound.size(), slots[index].inbound.size(), slots.size());
+  }
+  watched.resize(links.size());
+  listed.resize(links.size());
   std::size_t linked = 0;
   try
   {
@@ -1317,6 +1687,10 @@ system::impl::impl(
     {
       slots[index].driver = std::make_shared<runner>(*this, index);
       slots[index].rep.found.reserve(slots[index].inbound.size() + 2);
+    }
+    for(std::size_t id = 0; id < links.size(); ++id)
+    {
+      watched[id] = links[id]->watch_posts([this, id](sys_time at) { note_post(id, at); });
     }
     for(auto& one : slots)
     {
@@ -1329,6 +1703,10 @@ system::impl::impl(
   }
   catch(...)
   {
+    for(auto const& link : links)
+    {
+      link->watch_posts({});
+    }
     for(std::size_t index = 0; index < linked; ++index)
     {
       auto const held_host = slots[index].ref.on->lock();
@@ -1336,6 +1714,43 @@ system::impl::impl(
     }
     throw;
   }
+}
+
+void system::impl::note_post(std::size_t link, sys_time at)
+{
+  auto const by = links[link]->sender();
+  slots[by].driver->note_post(out_pos[link], link, at);
+}
+
+auto system::impl::shaped(std::size_t member) const -> promise_record
+{
+  return {
+      .wires    = std::vector<std::int64_t>(slots[member].outbound.size()),
+      .consumed = std::vector<std::int64_t>(slots[member].inbound.size()),
+      .heard    = std::vector<std::int64_t>(slots.size()),
+  };
+}
+
+void system::impl::write_record(std::size_t member, promise_record const& record) noexcept
+{
+  syncs[member].record.write(record);
+}
+
+void system::impl::write_final(std::size_t member, sys_time at) noexcept
+{
+  promise_record record{
+      .floor    = at,
+      .general  = at,
+      .wires    = std::vector<std::int64_t>(slots[member].outbound.size(), at.ps),
+      .consumed = std::vector<std::int64_t>(slots[member].inbound.size(), earliest.ps),
+      .heard    = std::vector<std::int64_t>(slots.size(), earliest.ps),
+  };
+  write_record(member, record);
+}
+
+void system::impl::read_record(std::size_t member, promise_record& out) const noexcept
+{
+  syncs[member].record.read(out);
 }
 
 void system::impl::note_owners()
@@ -1356,19 +1771,27 @@ void system::impl::couple()
 {
   auto const            n = slots.size();
   std::vector<sys_time> direct(n * n, never);
-  auto const            add = [&](std::size_t from, std::size_t to, sys_time latency) {
+  soft.assign(n * n, never);
+  pseudo.assign(n * n, never);
+  auto const add = [&](std::size_t from, std::size_t to, sys_time latency,
+                       std::vector<sys_time>* kind) {
     auto& cell = direct[from * n + to];
     cell       = std::min(cell, latency);
+    if(kind != nullptr)
+    {
+      auto& also = (*kind)[from * n + to];
+      also       = std::min(also, latency);
+    }
   };
   for(std::size_t index = 0; index < links.size(); ++index)
   {
     auto const& link = *links[index];
-    add(link.sender(), link.receiver(), link.latency());
+    add(link.sender(), link.receiver(), link.latency(), nullptr);
     auto const by = owners[index].load(std::memory_order_relaxed);
     if(by != link.sender() and by != link.receiver())
     {
-      add(by, link.sender(), link.latency());
-      add(by, link.receiver(), link.latency());
+      add(by, link.sender(), link.latency(), &pseudo);
+      add(by, link.receiver(), link.latency(), &pseudo);
     }
   }
   for(std::size_t from = 0; from < n; ++from)
@@ -1377,7 +1800,7 @@ void system::impl::couple()
     {
       if(slots[from].goal and not slots[to].goal)
       {
-        add(from, to, sys_time{0});
+        add(from, to, sys_time{0}, &soft);
       }
     }
   }
@@ -1409,11 +1832,15 @@ void system::impl::couple()
     {
       if(not reaches[from * n + to])
       {
-        add(from, to, q);
+        add(from, to, q, &soft);
       }
     }
   }
   distances = direct;
+  for(std::size_t index = 0; index < links.size(); ++index)
+  {
+    listed[index] = direct[links[index]->receiver() * n + links[index]->sender()] < never;
+  }
   for(std::size_t index = 0; index < n; ++index)
   {
     distances[index * n + index] = sys_time{0};
@@ -1554,7 +1981,7 @@ void system::impl::align(entry const* head, std::optional<sys_time> requested) n
         if(slots[index].goal)
         {
           auto const raised = std::max(slots[index].rep.reach, head->at);
-          syncs[index].clock.store(raised.ps, std::memory_order_release);
+          write_final(index, raised);
         }
       }
     }
@@ -1962,7 +2389,7 @@ void system::impl::complete_c() noexcept
           }
         }
         points[index] = at;
-        syncs[index].clock.store(at.ps, std::memory_order_release);
+        write_final(index, at);
       }
     }
     chosen.pause = false;
@@ -2143,6 +2570,10 @@ system::~system()
     std::ignore = impl_->future.wait_for(std::chrono::hours{24 * 365});
   }
   impl_->members_released.store(true, std::memory_order_release);
+  for(auto const& link : impl_->links)
+  {
+    link->watch_posts({});
+  }
   for(auto& one : impl_->slots)
   {
     if(one.goal and not one.goal->system)
@@ -2357,7 +2788,11 @@ auto system::resume(held_system const&, std::optional<sys_time> system_until) ->
       auto&      one       = self.slots[index];
       auto const held_host = one.ref.on->lock();
       auto const at = one.map.to_system(one.ref.on->member(held_host, 0).virtual_clock().time());
-      self.syncs[index].clock.store(at.ps, std::memory_order_relaxed);
+      self.write_final(index, at);
+      for(auto* link : one.inbound)
+      {
+        std::ignore = link->hold_inputs_before(at);
+      }
     }
     self.decide.store(false);
     self.leading.store(0);

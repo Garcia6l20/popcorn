@@ -234,14 +234,15 @@ private:
 
 struct world
 {
-  std::vector<std::unique_ptr<node>>             nodes;
-  std::vector<std::shared_ptr<stm32::uart_wire>> wires;
-  std::vector<std::vector<stm32::tap_frame>>     taps;
-  std::vector<core::member_ref>                  members;
-  std::unique_ptr<core::system>                  sys;
-  std::vector<core::pause>                       pauses;
-  bool                                           strict{};
-  std::size_t                                    real{};
+  std::vector<std::unique_ptr<node>>               nodes;
+  std::vector<std::shared_ptr<stm32::uart_wire>>   wires;
+  std::vector<std::vector<stm32::tap_frame>>       taps;
+  std::vector<core::member_ref>                    members;
+  std::unique_ptr<core::system>                    sys;
+  std::vector<core::pause>                         pauses;
+  std::vector<std::pair<std::size_t, std::string>> senders;
+  bool                                             strict{};
+  std::size_t                                      real{};
 
   auto add(std::string_view entry, std::int64_t start_ps = 0) -> node&
   {
@@ -279,6 +280,7 @@ struct world
         sender.endpoint_of(out));
     sender.port_of(out)->attach(wire);
     wires.push_back(wire);
+    senders.emplace_back(from, std::string{out});
     taps.emplace_back();
     return *wire;
   }
@@ -292,6 +294,15 @@ struct world
     }
     for(std::size_t index = 0; index < nodes.size(); ++index)
     {
+      std::vector<std::vector<std::string>> sources;
+      for(auto const& [from, unit] : senders)
+      {
+        if(from == index)
+        {
+          sources.push_back({unit});
+        }
+      }
+      nodes[index]->f->target->set_transmit_sources(sources);
       std::vector<std::unique_ptr<core::machine>> machines;
       machines.push_back(std::move(nodes[index]->f->target));
       members.push_back(
@@ -533,6 +544,276 @@ TEST_CASE("an echo over two wires gives the same result in every variant")
       CHECK(seen == *reference);
     }
     reference = seen;
+  }
+}
+
+namespace
+{
+void arm_pwm(node& one)
+{
+  auto const mem = one.target->mem();
+  auto const put = [&mem](std::uint32_t at, std::uint32_t value) {
+    REQUIRE(mem.write(popcorn::address{at}, 4, value).has_value());
+  };
+  auto const enabled = mem.read(popcorn::address{0x4602'0C9C}, 4);
+  REQUIRE(enabled.has_value());
+  put(0x4602'0C9C, *enabled | 1u);
+  put(0x4000'002C, 16'000);
+  put(0x4000'0034, 8'000);
+  put(0x4000'0018, 0x60);
+  put(0x4000'0020, 1);
+  put(0x4000'0000, 1);
+}
+}
+
+TEST_CASE("an echo from a member asleep past its promise reaches the pinger on time")
+{
+  std::optional<std::pair<std::string, std::string>> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    w.add("link_ping");
+    arm_pwm(w.add("link_echo"));
+    w.link(0, 1, latency_20);
+    w.link(1, 0, latency_20);
+    w.host(how);
+    CHECK(w.run_to(script_end).reason == core::pause_reason::system_time);
+    REQUIRE(w.taps[0].size() == 16);
+    REQUIRE(w.taps[1].size() == 16);
+    for(std::size_t index = 0; index < 16; ++index)
+    {
+      CHECK(w.taps[1][index].start.ps >= w.taps[0][index].arrival.ps);
+      CHECK(w.taps[1][index].start.ps <= w.taps[0][index].arrival.ps + 2 * us_ps);
+    }
+    std::pair seen{w.dump(), w.pause_dump()};
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE("frames echoed by a member asleep past its promise reach a third member on time")
+{
+  std::optional<std::pair<std::string, std::string>> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    w.add("link_tx");
+    arm_pwm(w.add("link_echo"));
+    w.add("link_rx");
+    w.connect(0, "USART1", 1, "USART1", latency_20);
+    w.connect(1, "USART1", 2, "USART1", latency_20);
+    w.host(how);
+    CHECK(w.run_to(script_end).reason == core::pause_reason::system_time);
+    REQUIRE(not w.taps[0].empty());
+    REQUIRE(w.taps[1].size() == w.taps[0].size());
+    std::pair seen{w.dump(), w.pause_dump()};
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE("a frame queued while paused wakes a member asleep past its promise on time")
+{
+  std::optional<std::pair<std::string, std::string>> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    arm_pwm(w.add("link_rx"));
+    arm_pwm(w.add("link_echo"));
+    w.link(0, 1, latency_20);
+    w.link(1, 0, latency_20);
+    w.host(how);
+    REQUIRE(w.resume(ms_ps).reason == core::pause_reason::system_time);
+    {
+      auto const                       held = w.sys->lock();
+      std::vector<std::uint16_t> const data{0x5a, 0xa5};
+      REQUIRE(w.wires[0]
+                  ->inject(
+                      data, core::sys_time{1730 * us_ps},
+                      stm32::stopped_receiver{
+                          .now = w.sys->time_of(held, 1), .map = core::time_map{w.sys->base_of(1)}})
+                  .has_value());
+    }
+    CHECK(w.run_to(script_end).reason == core::pause_reason::system_time);
+    REQUIRE(w.taps[1].size() == 2);
+    std::pair seen{w.dump(), w.pause_dump()};
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE("a stamped write on a member asleep past its promise lands at its time")
+{
+  constexpr popcorn::address                         usart1_tdr{0x4001'3828};
+  std::optional<std::pair<std::string, std::string>> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    arm_pwm(w.add("link_rx"));
+    arm_pwm(w.add("link_echo"));
+    w.link(0, 1, latency_20);
+    w.link(1, 0, latency_20);
+    w.host(how);
+    REQUIRE(w.resume(ms_ps).reason == core::pause_reason::system_time);
+    core::host_future<vtime> landed;
+    {
+      auto const held_host = w.members[1].on->lock();
+      auto const at = core::time_map{w.sys->base_of(1)}.to_local(core::sys_time{1730 * us_ps});
+      landed        = w.members[1].on->post(
+          held_host, core::member_id{},
+          [usart1_tdr](core::machine& m) { std::ignore = m.mem().write(usart1_tdr, 4, 0x3c); }, at);
+    }
+    CHECK(w.run_to(script_end).reason == core::pause_reason::system_time);
+    CHECK(landed.get() == core::time_map{w.sys->base_of(1)}.to_local(core::sys_time{1730 * us_ps}));
+    REQUIRE(w.taps[1].size() == 1);
+    CHECK(w.taps[1][0].start.ps == 1730 * us_ps);
+    std::pair seen{w.dump(), w.pause_dump()};
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE("a budget running out in a member's self-branch aligns its peer at its stop plus L")
+{
+  constexpr popcorn::address                           spin_at{0x2003'8000};
+  constexpr std::uint64_t                              budget = 4'013;
+  std::optional<std::pair<std::int64_t, std::int64_t>> reference;
+  for(auto const& how : variants())
+  {
+    if(how.mode != core::sync_mode::clocks)
+    {
+      continue;
+    }
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    arm_pwm(w.add("link_rx"));
+    auto& spinner = w.add("idle");
+    arm_pwm(spinner);
+    REQUIRE(spinner.target->mem().write(spin_at, 2, 0xE7FE).has_value());
+    spinner.f->set("pc", spin_at | 1u);
+    w.link(0, 1, latency_20);
+    w.link(1, 0, latency_20);
+    w.host(how);
+    core::host_future<core::goal_reached> spent;
+    {
+      auto const held = w.sys->lock();
+      spent           = w.sys->post_goal(held, 1, {.budget = icount{budget}});
+    }
+    auto const stopped = w.resume(script_end);
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    REQUIRE(stopped.member == 1);
+    CHECK(spent.get().stopped.reason == stop_reason::budget);
+    auto const held = w.sys->lock();
+    CHECK(w.sys->time_of(held, 0).ps == stopped.at.ps + latency_20);
+    std::pair const seen{stopped.at.ps, w.sys->time_of(held, 0).ps};
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE("a halted receiver that leads on a promise takes the frames a sender sent past it")
+{
+  std::optional<std::string> reference;
+  for(auto const& how : variants())
+  {
+    if(how.mode != core::sync_mode::clocks)
+    {
+      continue;
+    }
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    w.add("tx_irq");
+    arm_pwm(w.add("idle"));
+    w.link(0, 1, latency_20);
+    w.link(1, 0, latency_20);
+    w.host(how);
+    auto sending = [&w] {
+      auto const held = w.sys->lock();
+      return w.sys->post_goal(held, 0, {.until_time = core::sys_time{script_end}});
+    }();
+    auto pending = [&w] {
+      auto const held = w.sys->lock();
+      return w.sys->resume(held);
+    }();
+    REQUIRE(pending.wait_for(std::chrono::seconds{10}));
+    CHECK(pending.get().reason == core::pause_reason::delivered);
+    std::ignore = sending.get();
+    w.collect();
+    REQUIRE(not w.taps[0].empty());
+    auto const seen = w.dump();
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE("a halted member's promise bounds its receiver by the goal holder it trails")
+{
+  constexpr std::int64_t stop_at = ms_ps + 3 * us_ps;
+  for(auto const& how : variants())
+  {
+    if(how.mode != core::sync_mode::clocks)
+    {
+      continue;
+    }
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    w.add("link_rx");
+    arm_pwm(w.add("idle"));
+    arm_pwm(w.add("link_rx"));
+    w.link(1, 2, latency_20);
+    w.host(how);
+    auto stopping = [&w] {
+      auto const held = w.sys->lock();
+      return w.sys->post_goal(held, 0, {.until_time = core::sys_time{stop_at}});
+    }();
+    auto listening = [&w] {
+      auto const held = w.sys->lock();
+      return w.sys->post_goal(held, 2, {.until = popcorn::address{0x0800'0001}, .open = true});
+    }();
+    auto pending = [&w] {
+      auto const held = w.sys->lock();
+      return w.sys->resume(held);
+    }();
+    REQUIRE(pending.wait_for(std::chrono::seconds{10}));
+    auto const stopped = pending.get();
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    REQUIRE(stopped.member == 0);
+    CHECK(stopped.at.ps == stop_at);
+    std::ignore     = stopping.get();
+    auto const held = w.sys->lock();
+    CHECK(w.sys->time_of(held, 1).ps == stop_at);
+    CHECK(w.sys->time_of(held, 2).ps == stop_at + latency_20);
+    w.sys->withdraw(held, 2);
+    CHECK_THROWS_AS(std::ignore = listening.get(), core::operation_cancelled);
   }
 }
 

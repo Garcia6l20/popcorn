@@ -7,6 +7,7 @@
 #include <popcorn/core/system.hpp>
 #include <popcorn/core/window_barrier.hpp>
 
+#include "../../../native/src/core/promise_record.hpp"
 #include "../../../native/src/core/system_seam.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
@@ -3817,6 +3818,82 @@ private:
   std::size_t  to_;
   std::int64_t latency_;
 };
+
+class watched_link final : public core::member_link
+{
+public:
+  watched_link(std::size_t from, std::size_t to, std::int64_t latency)
+      : from_{from}, to_{to}, latency_{latency}
+  {}
+
+  auto sender() const noexcept -> std::size_t override
+  {
+    return from_;
+  }
+
+  auto receiver() const noexcept -> std::size_t override
+  {
+    return to_;
+  }
+
+  auto latency() const noexcept -> core::sys_time override
+  {
+    return core::sys_time{latency_};
+  }
+
+  void enter_slice(core::time_map) override
+  {}
+
+  auto posted_count() const noexcept -> std::uint64_t override
+  {
+    return 0;
+  }
+
+  void sender_reset(core::sys_time) override
+  {}
+
+  void receiver_reset(core::sys_time) override
+  {}
+
+  auto drain(
+      std::uint64_t,
+      core::sys_time const&,
+      core::sys_time const&,
+      core::time_map,
+      core::sys_time const&) -> std::optional<core::link_fault> override
+  {
+    return std::nullopt;
+  }
+
+  auto due() const -> std::optional<core::sys_time> override
+  {
+    return std::nullopt;
+  }
+
+  auto quiet() const -> bool override
+  {
+    return true;
+  }
+
+  auto watch_posts(std::move_only_function<void(core::sys_time)>) -> bool override
+  {
+    return true;
+  }
+
+  void finish(core::sys_time) override
+  {}
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+private:
+  std::size_t  from_;
+  std::size_t  to_;
+  std::int64_t latency_;
+};
 }
 
 #if defined(__SANITIZE_THREAD__)
@@ -5210,4 +5287,265 @@ TEST_CASE("a boundary pump on a leading member lands its input at the member's r
     r.sys->request_pause();
     CHECK(pending.get().reason == core::pause_reason::requested);
   }
+}
+
+namespace
+{
+class sleeping_arch : public popcorn::testing::test_arch
+{
+public:
+  using test_arch::test_arch;
+
+  [[nodiscard]] auto wake_pending() const -> bool override
+  {
+    return false;
+  }
+};
+
+class quietly_failing_arch final : public sleeping_arch
+{
+public:
+  using sleeping_arch::sleeping_arch;
+
+  static constexpr std::uint32_t fail_event = 9;
+
+  [[nodiscard]] auto event_pends(std::uint32_t kind, std::uint64_t) const -> bool override
+  {
+    return kind != fail_event;
+  }
+
+  void on_event(std::uint32_t kind, std::uint64_t payload) override
+  {
+    if(kind == fail_event)
+    {
+      throw test_failure("member event inside a promise");
+    }
+    sleeping_arch::on_event(kind, payload);
+  }
+};
+
+class quiet_event_arch final : public sleeping_arch
+{
+public:
+  using sleeping_arch::sleeping_arch;
+
+  static constexpr std::uint32_t quiet_event = 11;
+
+  [[nodiscard]] auto event_pends(std::uint32_t kind, std::uint64_t) const -> bool override
+  {
+    return kind != quiet_event;
+  }
+
+  void on_event(std::uint32_t kind, std::uint64_t payload) override
+  {
+    if(kind == quiet_event)
+    {
+      std::ignore = attached_events().schedule(
+          icount{attached_clock().now().value + 400}, quiet_event, payload);
+      return;
+    }
+    sleeping_arch::on_event(kind, payload);
+  }
+};
+
+template <typename Arch> void sends_nothing(popcorn::testing::machine_fixture<Arch>& f)
+{
+  f.target->set_transmit_sources({{}});
+}
+
+auto promised_windows(core::sync_mode mode) -> std::pair<core::pause, std::array<std::int64_t, 2>>
+{
+  constexpr std::int64_t        latency = 20 * us_ps;
+  std::vector<core::member_ref> members{
+      member<popcorn::testing::test_arch>(
+          "alu", "alu_entry", sends_nothing<popcorn::testing::test_arch>),
+      member<sleeping_arch>("idle", "idle_entry", sends_nothing<sleeping_arch>)};
+  core::system sys{
+      members,
+      {std::make_shared<watched_link>(0, 1, latency),
+        std::make_shared<watched_link>(1, 0, latency)},
+      core::slice_bounds{
+        .max_instructions = icount{1'000'000}, .wall_budget = std::chrono::hours{1}},
+      {},
+      {},
+      mode
+  };
+  core::host_future<core::pause> pending;
+  {
+    auto const                  held = sys.lock();
+    std::vector<core::sys_time> offsets(2);
+    sys.start(held, offsets);
+    pending = sys.resume(held, core::sys_time{10 * ms_ps});
+  }
+  auto const stopped = pending.get();
+  auto const held    = sys.lock();
+  return {
+      stopped, {sys.time_of(held, 0).ps, sys.time_of(held, 1).ps}
+  };
+}
+}
+
+TEST_CASE("a sleeping member's promise lets an awake peer run to the sleeper's next wake")
+{
+  auto const [barrier, stood]  = promised_windows(core::sync_mode::barrier);
+  auto const [clocks, aligned] = promised_windows(core::sync_mode::clocks);
+  REQUIRE(clocks.reason == core::pause_reason::system_time);
+  CHECK(aligned == stood);
+  MESSAGE("windows barrier " << barrier.windows << " clocks " << clocks.windows);
+  CHECK(clocks.windows <= 40);
+}
+
+TEST_CASE("a promise record is read whole while its writer publishes")
+{
+#if defined(__SANITIZE_THREAD__)
+  constexpr std::int64_t rounds = 50'000;
+#else
+  constexpr std::int64_t rounds = 1'000'000;
+#endif
+  constexpr std::size_t          width = 16;
+  core::detail::published_record record;
+  record.shape(width, width, width);
+  std::atomic<bool>            done{false};
+  std::jthread                 writer{[&record, &done] {
+    core::detail::promise_record next{
+        .wires    = std::vector<std::int64_t>(width),
+        .consumed = std::vector<std::int64_t>(width),
+        .heard    = std::vector<std::int64_t>(width)};
+    for(std::int64_t round = 1; round <= rounds; ++round)
+    {
+      next.floor   = core::sys_time{round};
+      next.general = core::sys_time{round};
+      std::ranges::fill(next.wires, round);
+      std::ranges::fill(next.consumed, round);
+      std::ranges::fill(next.heard, round);
+      record.write(next);
+    }
+    done.store(true, std::memory_order_release);
+  }};
+  core::detail::promise_record seen;
+  std::uint64_t                reads     = 0;
+  std::uint64_t                torn      = 0;
+  std::uint64_t                backwards = 0;
+  std::int64_t                 last      = 0;
+  auto const                   whole     = [&seen] {
+    auto const at = seen.floor.ps;
+    auto const is = [at](std::int64_t value) { return value == at; };
+    return seen.general.ps == at
+       and std::ranges::all_of(seen.wires, is)
+       and std::ranges::all_of(seen.consumed, is)
+       and std::ranges::all_of(seen.heard, is);
+  };
+  while(not done.load(std::memory_order_acquire))
+  {
+    record.read(seen);
+    ++reads;
+    torn += whole() ? 0 : 1;
+    backwards += seen.floor.ps < last ? 1 : 0;
+    last = seen.floor.ps;
+  }
+  writer.join();
+  record.read(seen);
+  CHECK(reads > 0);
+  CHECK(torn == 0);
+  CHECK(backwards == 0);
+  CHECK(seen.floor.ps == rounds);
+  CHECK(whole());
+}
+
+TEST_CASE("an error inside a sleeper's promise aligns every member past the latest promise")
+{
+  constexpr std::int64_t      latency   = 20 * us_ps;
+  constexpr std::int64_t      lookahead = 200 * us_ps;
+  constexpr std::int64_t      failing   = 1777 * 250'000;
+  std::optional<std::int64_t> reference;
+  for(std::uint32_t const seed : {0U, 1U, 2U, 3U, 4U})
+  {
+    CAPTURE(seed);
+    std::vector<core::member_ref> members{
+        member<popcorn::testing::test_arch>(
+            "alu", "alu_entry", sends_nothing<popcorn::testing::test_arch>),
+        member<quietly_failing_arch>(
+            "idle", "idle_forever", [](popcorn::testing::machine_fixture<quietly_failing_arch>& f) {
+              f.target->set_transmit_sources({{}});
+              std::ignore = f.module->attached_events().schedule(
+                  icount{1777}, quietly_failing_arch::fail_event, 0);
+            })};
+    auto engines = std::make_shared<std::array<std::mt19937, 2>>(
+        std::array{std::mt19937{seed}, std::mt19937{seed + 7}});
+    core::system sys{
+        members,
+        {std::make_shared<watched_link>(0, 1, latency),
+          std::make_shared<watched_link>(1, 0, latency)},
+        core::slice_bounds{.max_instructions = icount{97}, .wall_budget = std::chrono::hours{1}},
+        [engines](std::size_t index) {
+          std::uniform_int_distribution<int> pause{0, 30};
+          std::this_thread::sleep_for(std::chrono::microseconds{pause(engines->at(index))});
+          },
+        {},
+        core::sync_mode::clocks,
+        core::sys_time{lookahead}
+    };
+    core::host_future<core::pause> pending;
+    {
+      auto const                  held = sys.lock();
+      std::vector<core::sys_time> offsets(2);
+      sys.start(held, offsets);
+      pending = sys.resume(held, core::sys_time{2 * ms_ps});
+    }
+    auto const stopped = pending.get();
+    REQUIRE(stopped.reason == core::pause_reason::error);
+    CHECK(stopped.member == 1);
+    CHECK(stopped.at.ps == failing);
+    auto const held = sys.lock();
+    CHECK(sys.time_of(held, 1).ps == failing);
+    auto const aligned = sys.time_of(held, 0).ps;
+    CHECK(aligned >= failing + lookahead + latency);
+    CHECK(aligned < failing + lookahead + latency + us_ps);
+    if(reference)
+    {
+      CHECK(aligned == *reference);
+    }
+    reference = aligned;
+  }
+}
+
+TEST_CASE("a command on a sleeper whose promise grows lands once its machine reaches it")
+{
+  constexpr std::int64_t        latency = 20 * us_ps;
+  std::vector<core::member_ref> members{
+      member<popcorn::testing::test_arch>(
+          "alu", "alu_entry", sends_nothing<popcorn::testing::test_arch>),
+      member<quiet_event_arch>(
+          "idle", "idle_forever", [](popcorn::testing::machine_fixture<quiet_event_arch>& f) {
+            f.target->set_transmit_sources({{}});
+            std::ignore =
+                f.module->attached_events().schedule(icount{400}, quiet_event_arch::quiet_event, 0);
+          })};
+  core::system sys{
+      members,
+      {std::make_shared<watched_link>(0, 1, latency),
+        std::make_shared<watched_link>(1, 0, latency)},
+      core::slice_bounds{.max_instructions = icount{1'000}, .wall_budget = std::chrono::hours{1}},
+      {},
+      {},
+      core::sync_mode::clocks
+  };
+  core::host_future<core::pause> pending;
+  {
+    auto const                  held = sys.lock();
+    std::vector<core::sys_time> offsets(2);
+    sys.start(held, offsets);
+    std::ignore = sys.post_goal(held, 0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    std::ignore = sys.post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    pending     = sys.resume(held);
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds{5});
+  auto served = [&members] {
+    auto const held_host = members[1].on->lock();
+    return members[1].on->post(held_host, 0, [](core::machine&) {});
+  }();
+  REQUIRE(served.wait_for(std::chrono::seconds{10}));
+  std::ignore = served.get();
+  sys.request_pause();
+  std::ignore = pending.get();
 }

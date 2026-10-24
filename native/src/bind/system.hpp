@@ -35,6 +35,8 @@ struct[[= py::rename{"WireSpec"}]] wire_spec
   std::size_t receiver{};
   /** @brief Name of the receiving UART, for warnings. */
   std::string receiver_unit{};
+  /** @brief Name of the sending UART, the wire's transmit source. */
+  std::string sender_unit{};
   /** @brief Latency L in picoseconds, above 0. */
   std::int64_t latency_ps{};
   /** @brief Declared baud, above 0. */
@@ -444,6 +446,7 @@ private:
     periph::uart_port*                        sender_port{};
     std::shared_ptr<periph::uart_endpoint>    own;
     std::size_t                               sender{};
+    std::string                               unit{};
     bool                                      linked{};
   };
 

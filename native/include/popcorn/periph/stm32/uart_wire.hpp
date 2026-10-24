@@ -150,7 +150,8 @@ enum class[[= reflex::derive{reflex::Format}]] inject_refusal_reason
 {
   /** @brief The first start bit lies before the stopped receiver's time. */
   before_receiver,
-  /** @brief While the system runs, the first start bit lies before the next drain's reach. */
+  /** @brief While the system runs, the first start bit lies before the next drain's reach or
+   * the receiver's hold_inputs_before() time. */
   before_drained,
   /** @brief A frame overlaps a frame already on the receiver's line, delivered or posted. */
   overlaps,
@@ -488,6 +489,8 @@ public:
       core::sys_time const& next,
       core::time_map        receiver) -> std::optional<core::link_fault>;
   [[nodiscard]] auto due() const -> std::optional<core::sys_time> override;
+  auto watch_posts(std::move_only_function<void(core::sys_time)> watcher) -> bool override;
+  auto hold_inputs_before(core::sys_time at) -> std::optional<core::sys_time> override;
   [[nodiscard]] auto quiet() const -> bool override;
   void               release_through(core::sys_time at) override;
   void               finish(core::sys_time at) override;
@@ -496,6 +499,12 @@ public:
 
   /** @brief The wire's tap, any thread. */
   [[nodiscard]] auto tap() noexcept -> tap_queue&;
+
+  /**
+   * @brief Reports a cut change its sender made as the link's cut owner at @p at to the
+   *        watch_posts() watcher, as a post, on the sender's host thread.
+   */
+  void cut_changed(core::sys_time at);
 
   /**
    * @brief Shares @p registration with the other wire of the link, before the system starts. A
@@ -544,8 +553,9 @@ public:
    *        queued and delivered at the next drain, on time, as a running injection is, so a
    *        cut registered after the call still keeps it off the line. An earlier frame is
    *        delivered at once. While the system runs, any thread: accepted when @p at is at or
-   *        after the reach of the drains so far, then delivered by the drain whose reach covers
-   *        it. Acceptance then depends on wall timing. No overlap check at the call: an overlap
+   *        after the reach of the drains so far and the receiver's hold_inputs_before() time,
+   *        then delivered by the drain whose reach covers it. Acceptance then depends on wall
+   *        timing. No overlap check at the call: an overlap
    *        is found at the drain, a system error.
    * @param data Data bits, one frame each, not empty. Each frame gets the declared parity's bit
    *        in place of the MSB of its word.
@@ -596,17 +606,19 @@ private:
       core::sys_time                    before) const -> detail::line_cut const*;
   [[nodiscard]] auto cuts_before(core::sys_time reach) const -> std::vector<detail::line_cut>;
 
-  wire_ends                           ends_;
-  wire_lanes                          lanes_;
-  core::sys_time                      latency_;
-  line_shape                          declared_;
-  wire_receiver                       into_;
-  std::shared_ptr<uart_endpoint>      forward_;
-  tap_queue                           tap_;
-  std::shared_ptr<link_registration>  registration_;
-  mutable std::mutex                  edit_mutex_;
-  mutable std::mutex                  inject_mutex_;
-  detail::wire_state                  state_;
-  core::spsc_queue<detail::wire_post> ring_;
+  wire_ends                                     ends_;
+  wire_lanes                                    lanes_;
+  core::sys_time                                latency_;
+  line_shape                                    declared_;
+  wire_receiver                                 into_;
+  std::shared_ptr<uart_endpoint>                forward_;
+  tap_queue                                     tap_;
+  std::shared_ptr<link_registration>            registration_;
+  mutable std::mutex                            edit_mutex_;
+  mutable std::mutex                            inject_mutex_;
+  detail::wire_state                            state_;
+  core::spsc_queue<detail::wire_post>           ring_;
+  std::move_only_function<void(core::sys_time)> watcher_;
+  core::sys_time                                held_before_{};
 };
 }

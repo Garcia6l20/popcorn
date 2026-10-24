@@ -59,7 +59,7 @@ def test_a_cancelled_system_run_leaves_no_member_stop(ping: System) -> None:
 
     async def cancelled() -> None:
         with pytest.raises(TimeoutError):
-            await asyncio.wait_for(ping.run(for_=s(100)), 0.05)
+            await asyncio.wait_for(ping.run(for_=s(1_000_000)), 0.05)
 
     asyncio.run(cancelled())
     assert all(m.last_stop is None for m in ping.members.values())

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <optional>
 #include <span>
 #include <vector>
@@ -163,6 +164,28 @@ public:
    * @return Empty when the link holds nothing a drain would hand.
    */
   [[nodiscard]] virtual auto due() const -> std::optional<sys_time> = 0;
+
+  /**
+   * @brief Asks the link to call @p watcher with the system time of each post its sender makes,
+   *        a frame start, an abort or a reset abort, on the sender's host thread, once the post
+   *        is counted. Called once, before the system first runs.
+   * @return Whether the link calls @p watcher. The default returns false and never calls it.
+   */
+  virtual auto watch_posts([[maybe_unused]] std::move_only_function<void(sys_time)> watcher) -> bool
+  {
+    return false;
+  }
+
+  /**
+   * @brief Refuses from now on every input that would reach the receiver before @p at, such as
+   *        a running injection, then returns due(). Called on the receiver's host thread before
+   *        the receiver promises its peers to post nothing before @p at unless an input reaches
+   *        it. The default only returns due(), for a link that takes no such input.
+   */
+  virtual auto hold_inputs_before([[maybe_unused]] sys_time at) -> std::optional<sys_time>
+  {
+    return due();
+  }
 
   /**
    * @brief Whether the link holds nothing for its receiver: nothing posted, queued or kept
