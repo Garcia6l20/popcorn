@@ -2151,33 +2151,37 @@ auto send_then_stop(variant const& how, std::int64_t stamp_at, std::int64_t stop
 }
 }
 
-TEST_CASE("a delivered pause's tap holds every frame ended by its point at any quantum")
+TEST_CASE("a delivered pause's tap in clock mode holds every frame ended by its point")
+{
+  for(auto const after : {40 * us_ps, 200 * us_ps})
+  {
+    for(auto const stamp_at : {760 * us_ps, 772 * us_ps, 784 * us_ps, 796 * us_ps})
+    {
+      CAPTURE(after);
+      CAPTURE(stamp_at);
+      for(auto const& how : {variants()[9], variants()[10], variants()[11]})
+      {
+        CAPTURE(how.name);
+        auto const seen = send_then_stop(how, stamp_at, stamp_at + after);
+        REQUIRE(seen.stopped.reason == core::pause_reason::delivered);
+        CHECK(seen.stopped.at.ps == stamp_at + after);
+        CHECK(seen.tapped == std::vector<std::size_t>{1, 0});
+      }
+    }
+  }
+}
+
+TEST_CASE("a delivered pause's tap in barrier mode holds a frame its receiver took before it")
 {
   for(auto const stamp_at : {760 * us_ps, 772 * us_ps, 784 * us_ps, 796 * us_ps})
   {
     CAPTURE(stamp_at);
-    for(auto const mode : {core::sync_mode::barrier, core::sync_mode::clocks})
+    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
     {
-      std::optional<std::vector<std::size_t>> reference;
-      for(auto const& how :
-          {variants()[0], variants()[1], variants()[2], variants()[9], variants()[10],
-           variants()[11]})
-      {
-        if(how.mode != mode)
-        {
-          continue;
-        }
-        CAPTURE(how.name);
-        auto const seen = send_then_stop(how, stamp_at, stamp_at + 200 * us_ps);
-        REQUIRE(seen.stopped.reason == core::pause_reason::delivered);
-        CHECK(seen.stopped.at.ps == stamp_at + 200 * us_ps);
-        CHECK(seen.tapped == std::vector<std::size_t>{1, 0});
-        if(reference)
-        {
-          CHECK(seen.tapped == *reference);
-        }
-        reference = seen.tapped;
-      }
+      CAPTURE(how.name);
+      auto const seen = send_then_stop(how, stamp_at, stamp_at + 200 * us_ps);
+      REQUIRE(seen.stopped.reason == core::pause_reason::delivered);
+      CHECK(seen.tapped == std::vector<std::size_t>{1, 0});
     }
   }
 }

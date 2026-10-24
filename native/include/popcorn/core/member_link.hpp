@@ -172,11 +172,11 @@ public:
   [[nodiscard]] virtual auto quiet() const -> bool = 0;
 
   /**
-   * @brief Shows an observer of the link every frame ended by @p at: the earlier of the pause
-   *        point and the positions of the link's ends and cut owner, the members that can still
-   *        change those frames. Called on the receiver's host thread once the system decided to
-   *        pause, after the pause's last drain, while no member sends. A link with no observer
-   *        keeps the default, which does nothing.
+   * @brief Shows an observer of the link every frame ended by @p at: the earliest pause
+   *        position of the link's ends and cut owner, the members that can still change those
+   *        frames, and under sync_mode::barrier also the pause point. Called on the receiver's host
+   * thread once the system decided to pause, after the pause's last drain, while no member sends. A
+   * link with no observer keeps the default, which does nothing.
    */
   virtual void release_through([[maybe_unused]] sys_time at)
   {}
