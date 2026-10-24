@@ -166,6 +166,15 @@ public:
   [[nodiscard]] virtual auto quiet() const -> bool = 0;
 
   /**
+   * @brief Shows an observer of the link every frame ended by the pause point @p at, whatever
+   *        barrier the drains handed frames at. Called on the receiver's host thread once the
+   *        system decided to pause at @p at, after the pause's last drain, with every member
+   *        stopped. A link with no observer keeps the default, which does nothing.
+   */
+  virtual void release_through([[maybe_unused]] sys_time at)
+  {}
+
+  /**
    * @brief Settles what an observer sees at the system's final stop @p at, called on the
    *        receiver's host thread with every member stopped.
    */

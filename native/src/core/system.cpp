@@ -421,6 +421,13 @@ public:
           {
             return std::nullopt;
           }
+          if(sys_.chosen.pause)
+          {
+            for(auto* link : one.inbound)
+            {
+              link->release_through(sys_.result.at);
+            }
+          }
           if(sys_.chosen.sleep)
           {
             phase_    = phase::sleeping;
@@ -1482,7 +1489,7 @@ void system::impl::complete_clock() noexcept
     set_pause(*idle);
     std::ranges::fill(points, idle->at);
     pending        = idle->at;
-    chosen.confirm = sleeps_at_idle() ? earlier_of(idle->at, earliest_position()) : idle->at;
+    chosen.confirm = earlier_of(idle->at, earliest_position());
   }
 }
 
@@ -1670,12 +1677,8 @@ void system::impl::settle_confirm() noexcept
   {
     return;
   }
-  auto at = chosen.head ? chosen.head->at : chosen.target;
-  if(not chosen.idle or sleeps_at_idle())
-  {
-    at = earlier_of(at, earliest_position());
-  }
-  chosen.confirm = at;
+  auto const at  = chosen.head ? chosen.head->at : chosen.target;
+  chosen.confirm = earlier_of(at, earliest_position());
 }
 
 auto system::impl::sleeps_at_idle() const noexcept -> bool

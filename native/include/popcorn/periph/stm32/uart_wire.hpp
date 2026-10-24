@@ -481,6 +481,7 @@ public:
       core::time_map        receiver) -> std::optional<core::link_fault> override;
   [[nodiscard]] auto due() const -> std::optional<core::sys_time> override;
   [[nodiscard]] auto quiet() const -> bool override;
+  void               release_through(core::sys_time at) override;
   void               finish(core::sys_time at) override;
   void               save(std::vector<std::byte>& out) const override;
   void               load(std::span<std::byte const> in) override;

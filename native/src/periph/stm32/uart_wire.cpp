@@ -900,6 +900,11 @@ auto uart_wire::inject(
   return {};
 }
 
+void uart_wire::release_through(core::sys_time at)
+{
+  emit(state_.untapped, at, cuts_before(at));
+}
+
 void uart_wire::finish(core::sys_time at)
 {
   auto pending = state_.untapped;
