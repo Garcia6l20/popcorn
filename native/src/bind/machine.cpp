@@ -916,8 +916,6 @@ auto machine_handle::gil_entries() const noexcept -> std::uint64_t
 auto machine_handle::hold_at_boundary() -> boundary_hold
 {
   std::scoped_lock const lock{gate_->mutex};
-  gate_->held     = false;
-  gate_->released = false;
   gate_->armed.store(true, std::memory_order_release);
   return boundary_hold{gate_, ++gate_->generation};
 }
@@ -933,9 +931,11 @@ void detail::boundary_gate::pass()
   {
     return;
   }
-  held = true;
+  auto const mine = generation;
+  held            = true;
+  held_generation = mine;
   changed.notify_all();
-  changed.wait(lock, [this] { return released; });
+  changed.wait(lock, [this, mine] { return released_generation >= mine; });
   held = false;
 }
 
@@ -955,20 +955,20 @@ auto boundary_hold::wait_held(double seconds) -> bool
 {
   reflex::py::nb::gil_scoped_release const released;
   std::unique_lock                         lock{gate_->mutex};
-  return gate_->changed.wait_for(
-      lock, std::chrono::duration<double>{seconds}, [this] { return gate_->held; });
+  return gate_->changed.wait_for(lock, std::chrono::duration<double>{seconds}, [this] {
+    return gate_->held and gate_->held_generation == generation_;
+  });
 }
 
 void boundary_hold::release()
 {
   {
     std::scoped_lock const lock{gate_->mutex};
-    if(gate_->generation != generation_)
+    gate_->released_generation = std::max(gate_->released_generation, generation_);
+    if(gate_->generation == generation_)
     {
-      return;
+      gate_->armed.store(false, std::memory_order_release);
     }
-    gate_->armed.store(false, std::memory_order_release);
-    gate_->released = true;
   }
   gate_->changed.notify_all();
 }

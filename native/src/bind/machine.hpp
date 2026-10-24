@@ -225,21 +225,23 @@ struct host_abandon
 /** @brief Where a machine's thread blocks at its next slice boundary once armed, for tests. */
 struct boundary_gate
 {
-  /** @brief Guards held and released. */
+  /** @brief Guards held, the generations and the release. */
   std::mutex mutex{};
-  /** @brief Signalled when held or released changes. */
+  /** @brief Signalled when held or released_generation changes. */
   std::condition_variable changed{};
   /** @brief Whether the next boundary blocks. */
   std::atomic<bool> armed{false};
   /** @brief Whether the thread blocks in the gate. */
   bool held = false;
-  /** @brief Whether the thread may go on. */
-  bool released = false;
-  /** @brief Counts the arms, so only the hold of the latest arm releases the gate. */
+  /** @brief The arm number of the pass the thread blocks in, valid while held. */
+  std::uint64_t held_generation = 0;
+  /** @brief The highest arm number released, a pass of an arm at or below it goes on. */
+  std::uint64_t released_generation = 0;
+  /** @brief Counts the arms, so only the hold of the latest arm disarms the gate. */
   std::uint64_t generation = 0;
 
-  /** @brief When armed, disarms the gate and blocks the calling thread until released. Takes no
-   * GIL and no lock but the gate's. */
+  /** @brief When armed, disarms the gate and blocks the calling thread until the arm it took is
+   * released. Takes no GIL and no lock but the gate's. */
   void pass();
 };
 
@@ -267,21 +269,22 @@ public:
   /** @brief Takes the gate of @p other. */
   boundary_hold(boundary_hold&& other) noexcept = default;
   /** @brief Not move-assignable, the assigned hold would drop its gate unreleased. */
-  auto operator=(boundary_hold&& other) noexcept -> boundary_hold& = delete;
+  auto operator=(boundary_hold&& other) -> boundary_hold& = delete;
   /** @brief Releases the gate, so a hold dropped unreleased never blocks the thread. */
   ~boundary_hold();
 
   /**
-   * @brief Waits, the GIL released, until the machine's thread blocks in the gate.
+   * @brief Waits, the GIL released, until the machine's thread blocks in the pass of this
+   *        hold's arm.
    * @param seconds Longest wait.
-   * @return Whether the thread blocks in the gate.
+   * @return Whether the thread blocks in the pass of this hold's arm.
    */
   [[= py::doc{
       "Wait until the machine thread blocks at its boundary, return whether it does."}]] auto
       wait_held(double seconds) -> bool;
 
-  /** @brief Lets the machine's thread go on, and disarms the gate if it was not reached. Does
-   * nothing once the gate was armed again by a later hold. */
+  /** @brief Lets the machine's thread go on from the pass of this hold's arm or of an earlier
+   * one. Disarms the gate unless a later hold armed it again. */
   [[= py::doc{"Let the machine thread go on."}]] void release();
 
 private:

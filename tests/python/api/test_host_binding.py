@@ -778,6 +778,27 @@ def test_a_stale_boundary_hold_leaves_a_later_arm_held(machines: Machines) -> No
         hold.release()
 
 
+def test_a_re_arm_during_a_pass_leaves_the_pass_held_and_gets_its_own(
+    machines: Machines,
+) -> None:
+    m = machines()
+    handle = m._handle  # pyright: ignore[reportPrivateUsage]
+    first = handle.hold_at_boundary()
+    m.start()
+    second: _core.BoundaryHold | None = None
+    try:
+        assert first.wait_held(10), "machine never reached its boundary"
+        second = handle.hold_at_boundary()
+        assert first.wait_held(0), "the re-arm cleared the pass in progress"
+        first.release()
+        assert second.wait_held(10), "the re-arm never got a boundary of its own"
+        assert not first.wait_held(0)
+    finally:
+        first.release()
+        if second is not None:
+            second.release()
+
+
 def test_a_context_copy_runs_while_its_source_is_entered_on_the_loop(machines: Machines) -> None:
     m = machines()
     predicate_values: list[str] = []
