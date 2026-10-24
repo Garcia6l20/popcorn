@@ -658,6 +658,8 @@ TEST_CASE("SECCR.INV is stored, and OPTSTRT under TrustZone warns once, RM0456 7
   r.write("SECCR", inv, secure_priv);
   CHECK(r.read("SECCR", secure_priv) == inv);
   r.unlock(false);
+  r.write("OPTKEYR", 0x0819'2a3bu, nonsecure_priv);
+  r.write("OPTKEYR", 0x4c5d'6e7fu, nonsecure_priv);
   r.write("NSCR", optstrt, nonsecure_priv);
   r.write("NSCR", optstrt, nonsecure_priv);
   CHECK((r.peek("NSCR") & optstrt) == 0);

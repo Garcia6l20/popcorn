@@ -42,33 +42,38 @@ using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 using popcorn::testing::u575;
 
-constexpr address       bank2      = 0x0808'0000;
-constexpr address       last_page  = 0x080f'e000;
-constexpr std::uint32_t page_bytes = 0x2000;
-constexpr std::uint32_t flash_irq  = 6;
-constexpr std::uint32_t pg         = 1u << 0;
-constexpr std::uint32_t per        = 1u << 1;
-constexpr std::uint32_t mer1       = 1u << 2;
-constexpr std::uint32_t bker       = 1u << 11;
-constexpr std::uint32_t bwr        = 1u << 14;
-constexpr std::uint32_t mer2       = 1u << 15;
-constexpr std::uint32_t strt       = 1u << 16;
-constexpr std::uint32_t optstrt    = 1u << 17;
-constexpr std::uint32_t eopie      = 1u << 24;
-constexpr std::uint32_t errie      = 1u << 25;
-constexpr std::uint32_t all_errors = 0x20fb;
-constexpr std::uint32_t eop        = 1u << 0;
-constexpr std::uint32_t hsion      = 1u << 8;
-constexpr std::uint32_t sw_hsi16   = 1;
-constexpr std::uint32_t vos_range1 = 3u << 16;
-constexpr std::uint32_t lpm        = 1u << 11;
-constexpr std::uint32_t eccd       = 1u << 31;
-constexpr std::uint32_t eccc       = 1u << 30;
-constexpr std::uint32_t eccie      = 1u << 24;
-constexpr std::uint32_t bk_ecc     = 1u << 21;
-constexpr std::uint32_t exc_nmi    = 2;
-constexpr address       torn_line  = last_page + 0x30;
-constexpr address       secure     = 0x0400'0000;
+constexpr address       bank2       = 0x0808'0000;
+constexpr address       last_page   = 0x080f'e000;
+constexpr std::uint32_t page_bytes  = 0x2000;
+constexpr std::uint32_t flash_irq   = 6;
+constexpr std::uint32_t pg          = 1u << 0;
+constexpr std::uint32_t per         = 1u << 1;
+constexpr std::uint32_t mer1        = 1u << 2;
+constexpr std::uint32_t bker        = 1u << 11;
+constexpr std::uint32_t bwr         = 1u << 14;
+constexpr std::uint32_t mer2        = 1u << 15;
+constexpr std::uint32_t strt        = 1u << 16;
+constexpr std::uint32_t optstrt     = 1u << 17;
+constexpr std::uint32_t eopie       = 1u << 24;
+constexpr std::uint32_t errie       = 1u << 25;
+constexpr std::uint32_t all_errors  = 0x20fb;
+constexpr std::uint32_t eop         = 1u << 0;
+constexpr std::uint32_t hsion       = 1u << 8;
+constexpr std::uint32_t sw_hsi16    = 1;
+constexpr std::uint32_t vos_range1  = 3u << 16;
+constexpr std::uint32_t lpm         = 1u << 11;
+constexpr std::uint32_t eccd        = 1u << 31;
+constexpr std::uint32_t eccc        = 1u << 30;
+constexpr std::uint32_t eccie       = 1u << 24;
+constexpr std::uint32_t bk_ecc      = 1u << 21;
+constexpr std::uint32_t exc_nmi     = 2;
+constexpr address       torn_line   = last_page + 0x30;
+constexpr address       secure      = 0x0400'0000;
+constexpr std::uint32_t option_key1 = 0x0819'2a3b;
+constexpr std::uint32_t option_key2 = 0x4c5d'6e7f;
+constexpr std::uint32_t lock_bit    = 1u << 31;
+constexpr std::uint32_t optlock_bit = 1u << 30;
+constexpr std::uint32_t obl_launch  = 1u << 27;
 
 auto pnb(std::uint32_t page) -> std::uint32_t
 {
@@ -110,6 +115,8 @@ struct new_flash_state
 {
   bool                          first_key{};
   bool                          locked_up{};
+  bool                          option_first_key{};
+  bool                          option_locked_up{};
   std::array<std::uint32_t, 32> buffer{};
   std::uint32_t                 filled{};
   bool                          burst{};
@@ -248,6 +255,23 @@ struct flash_rig
     write(set("KEYR"), 0x4567'0123u);
     write(set("KEYR"), 0xcdef'89abu);
     REQUIRE(field(set("CR"), "LOCK") == 0);
+  }
+
+  [[nodiscard]] auto try_write(std::string_view reg, std::uint32_t value) const -> bool
+  {
+    auto&      regs = f.target->peripheral("FLASH");
+    auto const word = popcorn::find_register(regs.description(), reg);
+    REQUIRE(word != nullptr);
+    return f.target->model("FLASH")
+        ->on_write(
+            regs, word->offset, 4, regs.peek(word->offset), value, {.pc = 0, .now = icount{0}})
+        .has_value();
+  }
+
+  void unlock_options() const
+  {
+    write("FLASH_OPTKEYR", option_key1);
+    write("FLASH_OPTKEYR", option_key2);
   }
 
   [[nodiscard]] auto at(std::string_view reg, std::string_view peripheral = "FLASH") const
@@ -861,6 +885,7 @@ TEST_CASE("every PGSERR case of RM0456 7.3.9 sets it and starts nothing")
     CHECK(rig.status("WDW") == 0);
     CHECK(rig.status("BSY") == 0);
     CHECK(pgserr());
+    rig.unlock_options();
     rig.control(pg);
     rig.store_words(last_page, {1});
     rig.control(pg | optstrt);
@@ -869,6 +894,7 @@ TEST_CASE("every PGSERR case of RM0456 7.3.9 sets it and starts nothing")
   }
   SUBCASE("STRT and OPTSTRT together")
   {
+    rig.unlock_options();
     rig.control(per | bker | pnb(63) | strt | optstrt);
     CHECK(rig.status("BSY") == 0);
     CHECK(pgserr());
@@ -2005,7 +2031,10 @@ TEST_CASE("without option bytes the option registers are the description's stora
   flash_rig const rig;
   CHECK(rig.read("FLASH_OPTR") == 0);
   rig.write("FLASH_SECWM1R1", 0x0005'0003);
-  CHECK(rig.read("FLASH_SECWM1R1") == 0x0005'0003);
+  CHECK(rig.read("FLASH_SECWM1R1") == 0xff00'ff00);
+  rig.unlock_options();
+  rig.write("FLASH_SECWM1R1", 0x0005'0003);
+  CHECK(rig.read("FLASH_SECWM1R1") == 0xff05'ff03);
 }
 
 TEST_CASE("SWAP_BANK puts bank 1 at half the flash for BKER, MER1, MER2 and BK_ECC, RM0456 7.9.13")
@@ -2206,4 +2235,89 @@ TEST_CASE("configure_option_bytes refuses before it changes the options")
   CHECK(refused(u575(), {.tzen = true}, options) == "option_bytes");
   CHECK_FALSE(options.vector_table);
   CHECK(configure_option_bytes(no_extension, {}, (options = {})).has_value());
+}
+
+TEST_CASE("OPTLOCK clears on OPTKEY1 then OPTKEY2 with LOCK clear, RM0456 7.4.2")
+{
+  flash_rig rig;
+  REQUIRE(rig.field("FLASH_NSCR", "OPTLOCK") == 1);
+  rig.write("FLASH_OPTKEYR", option_key1);
+  CHECK(rig.field("FLASH_NSCR", "OPTLOCK") == 1);
+  CHECK(rig.read("FLASH_OPTKEYR") == 0);
+  rig.write("FLASH_OPTKEYR", option_key2);
+  CHECK(rig.field("FLASH_NSCR", "OPTLOCK") == 0);
+  CHECK(rig.field("FLASH_NSCR", "LOCK") == 0);
+}
+
+TEST_CASE("a wrong OPTKEYR sequence keeps OPTLOCK set until reset and returns a bus error")
+{
+  for(auto const wrong : {0x1234'5678u, option_key2})
+  {
+    CAPTURE(wrong);
+    flash_rig rig;
+    CHECK_FALSE(rig.try_write("FLASH_OPTKEYR", wrong));
+    CHECK(rig.try_write("FLASH_OPTKEYR", option_key1) == false);
+    CHECK_FALSE(rig.try_write("FLASH_OPTKEYR", option_key2));
+    CHECK(rig.field("FLASH_NSCR", "OPTLOCK") == 1);
+    rig.f.target->reset(popcorn::reset_kind::software);
+    rig.unlock();
+    rig.unlock_options();
+    CHECK(rig.field("FLASH_NSCR", "OPTLOCK") == 0);
+  }
+}
+
+TEST_CASE("KEY1 twice, or a key while OPTLOCK is clear, is a wrong OPTKEYR sequence")
+{
+  flash_rig rig;
+  REQUIRE(rig.try_write("FLASH_OPTKEYR", option_key1));
+  CHECK_FALSE(rig.try_write("FLASH_OPTKEYR", option_key1));
+  CHECK_FALSE(rig.try_write("FLASH_OPTKEYR", option_key2));
+  CHECK(rig.field("FLASH_NSCR", "OPTLOCK") == 1);
+  rig.f.target->reset(popcorn::reset_kind::software);
+  rig.unlock();
+  rig.unlock_options();
+  REQUIRE(rig.field("FLASH_NSCR", "OPTLOCK") == 0);
+  CHECK_FALSE(rig.try_write("FLASH_OPTKEYR", option_key1));
+  CHECK(rig.field("FLASH_NSCR", "OPTLOCK") == 0);
+}
+
+TEST_CASE("an OPTKEYR sequence while NSCR.LOCK is set does not unlock OPTLOCK")
+{
+  flash_rig rig;
+  rig.control(lock_bit);
+  CHECK_FALSE(rig.try_write("FLASH_OPTKEYR", option_key1));
+  CHECK_FALSE(rig.try_write("FLASH_OPTKEYR", option_key2));
+  CHECK(rig.field("FLASH_NSCR", "OPTLOCK") == 1);
+}
+
+TEST_CASE("writing OPTLOCK or LOCK relocks the option registers, and a 0 write does not unlock")
+{
+  flash_rig rig;
+  rig.unlock_options();
+  REQUIRE(rig.field("FLASH_NSCR", "OPTLOCK") == 0);
+  rig.control(0);
+  CHECK(rig.field("FLASH_NSCR", "OPTLOCK") == 0);
+  rig.control(optlock_bit);
+  CHECK(rig.field("FLASH_NSCR", "OPTLOCK") == 1);
+  rig.control(0);
+  CHECK(rig.field("FLASH_NSCR", "OPTLOCK") == 1);
+  rig.unlock_options();
+  REQUIRE(rig.field("FLASH_NSCR", "OPTLOCK") == 0);
+  rig.control(lock_bit);
+  CHECK(rig.field("FLASH_NSCR", "OPTLOCK") == 1);
+  CHECK(rig.field("FLASH_NSCR", "LOCK") == 1);
+}
+
+TEST_CASE("OBL_LAUNCH and the option registers ignore writes while OPTLOCK is set")
+{
+  flash_rig rig;
+  rig.control(obl_launch);
+  CHECK(rig.field("FLASH_NSCR", "OBL_LAUNCH") == 0);
+  rig.write("FLASH_SECWM1R1", 0x0005'0003);
+  CHECK(rig.read("FLASH_SECWM1R1") == 0xff00'ff00);
+  rig.unlock_options();
+  rig.write("FLASH_SECWM1R1", 0x0005'0003);
+  CHECK(rig.read("FLASH_SECWM1R1") == 0xff05'ff03);
+  rig.control(obl_launch);
+  CHECK(rig.field("FLASH_NSCR", "OBL_LAUNCH") == 1);
 }

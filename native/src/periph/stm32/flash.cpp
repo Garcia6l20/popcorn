@@ -35,6 +35,8 @@ namespace
 {
 constexpr std::uint32_t key1          = 0x4567'0123;
 constexpr std::uint32_t key2          = 0xcdef'89ab;
+constexpr std::uint32_t option_key1   = 0x0819'2a3b;
+constexpr std::uint32_t option_key2   = 0x4c5d'6e7f;
 constexpr std::uint32_t quad_word     = 16;
 constexpr std::uint32_t burst_size    = 8 * quad_word;
 constexpr std::uint32_t burst_words   = burst_size / 4;
@@ -65,6 +67,8 @@ struct flash_state
 {
   bool                                   first_key{};
   bool                                   locked_up{};
+  bool                                   option_first_key{};
+  bool                                   option_locked_up{};
   std::array<std::uint32_t, burst_words> buffer{};
   std::uint32_t                          filled{};
   bool                                   burst{};
@@ -109,6 +113,7 @@ enum class set_role : std::uint8_t
   option_lock,
   start,
   option_start,
+  option_load,
   program,
   page_erase,
   bank1_erase,
@@ -130,12 +135,13 @@ enum class set_role : std::uint8_t
   waiting,
 };
 
-constexpr std::array<named_field<set_role>, 23> u5_set_fields{
+constexpr std::array<named_field<set_role>, 24> u5_set_fields{
     {
      {set_role::lock, {"CR", "LOCK"}},
      {set_role::option_lock, {"CR", "OPTLOCK", true}},
      {set_role::start, {"CR", "STRT"}},
      {set_role::option_start, {"CR", "OPTSTRT", true}},
+     {set_role::option_load, {"CR", "OBL_LAUNCH", true}},
      {set_role::program, {"CR", "PG"}},
      {set_role::page_erase, {"CR", "PER"}},
      {set_role::bank1_erase, {"CR", "MER1"}},
@@ -317,8 +323,13 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  *
  * Unlock, RM0456 7.3.5: KEY1 then KEY2 in FLASH_NSKEYR clears FLASH_NSCR.LOCK, any other write
  * is a bus error and keeps FLASH_NSCR locked until the next reset. A key write while unlocked
- * counts as a wrong sequence. FLASH_NSCR ignores writes while locked. Option-byte unlock is not
- * modelled: OPTLOCK stays 1 and OPTSTRT is cleared.
+ * counts as a wrong sequence. FLASH_NSCR ignores writes while locked.
+ *
+ * Option unlock, RM0456 7.4.2: OPTLOCK is 1 at reset. With LOCK clear, OPTKEY1 then OPTKEY2 in
+ * FLASH_OPTKEYR clear it. Any other write to FLASH_OPTKEYR, a key while LOCK is set or OPTLOCK is
+ * clear included, keeps OPTLOCK set until the next reset and returns a bus error, as for
+ * FLASH_NSKEYR. OPTLOCK is set-only, and setting LOCK sets it. While OPTLOCK is set, OPTSTRT and
+ * OBL_LAUNCH ignore writes and the option registers keep their value.
  *
  * Program, RM0456 7.3.7: with PG set, a 32-bit store at a quad-word address opens the write
  * buffer and sets WDW, the fourth word of that quad-word launches the program, BSY is set for
@@ -340,22 +351,23 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * FLASH_NSBOOTADDxR, FLASH_SECBOOTADD0R and FLASH_SECWMxRy are the description's registers, which
  * firmware writes as storage. A TrustZone machine without option bytes is refused at
  * construction, key `option_bytes`, since its page security would have no watermark. With them,
- * every reset loads the encoded option bytes into those registers, and writes are ignored, as
- * OPTLOCK stays set. FLASH_OPTR reads the production value with TZEN, DUALBANK and SWAP_BANK
- * replaced. FLASH_NSBOOTADD1R reads its production value 0x0BF9007F. Reserved bits read their
- * production values, and so do the bits of a SECWMx_PSTRT, SECWMx_PEND or HDPx_PEND field above the
- * part's 7 bits, 5 on the STM32U535 and U545, 8 on the U59x, U5Ax, U5Fx and U5Gx: FLASH_SECWM1R1
- * reads 0xFFFFFF80 for the whole bank on the U575. Deviation on the U535 and U545: FLASH_SECWMxR1
- * reads 0xFFFFFFE0 for the whole bank, bits 7:5 set above the 5-bit fields, where RM0456 7.9.17
- * and 7.9.21 give 0xFFFFFF80. The CMSIS header masks the fields with 0x1F, and every other U535 row
- * of those registers sets bits 7:5, so the RM0456 value reads as the U575 row repeated. A
- * whole-bank area encodes PSTRT = 0 and PEND = the field maximum, RM0456 Table 58, no area PSTRT =
- * the field maximum and PEND = 0, Table 61. With TZEN = 0, FLASH_SECBOOTADD0R and FLASH_SECWMxRy
- * are secure registers and read as zero, RM0456 7.5.1. The checks, all made before the machine is
- * built: watermark and HDP pages inside the bank, an HDP area starting at the first page of its
- * secure area and ending inside it, RM0456 Table 60, boot addresses aligned to 128 bytes. RM0456
- * Table 27 allows any boot address at RDP level 0, so no range is checked. DUALBANK = 0, the
- * single-bank organization, is not modelled and refused.
+ * every reset loads the encoded option bytes into those registers, and writes are ignored.
+ * Without them the registers also ignore writes while OPTLOCK is set. FLASH_OPTR reads the
+ * production value with TZEN, DUALBANK and SWAP_BANK replaced. FLASH_NSBOOTADD1R reads its
+ * production value 0x0BF9007F. Reserved bits read their production values, and so do the bits of a
+ * SECWMx_PSTRT, SECWMx_PEND or HDPx_PEND field above the part's 7 bits, 5 on the STM32U535 and
+ * U545, 8 on the U59x, U5Ax, U5Fx and U5Gx: FLASH_SECWM1R1 reads 0xFFFFFF80 for the whole bank on
+ * the U575. Deviation on the U535 and U545: FLASH_SECWMxR1 reads 0xFFFFFFE0 for the whole bank,
+ * bits 7:5 set above the 5-bit fields, where RM0456 7.9.17 and 7.9.21 give 0xFFFFFF80. The CMSIS
+ * header masks the fields with 0x1F, and every other U535 row of those registers sets bits 7:5, so
+ * the RM0456 value reads as the U575 row repeated. A whole-bank area encodes PSTRT = 0 and PEND =
+ * the field maximum, RM0456 Table 58, no area PSTRT = the field maximum and PEND = 0, Table 61.
+ * With TZEN = 0, FLASH_SECBOOTADD0R and FLASH_SECWMxRy are secure registers and read as zero,
+ * RM0456 7.5.1. The checks, all made before the machine is built: watermark and HDP pages inside
+ * the bank, an HDP area starting at the first page of its secure area and ending inside it, RM0456
+ * Table 60, boot addresses aligned to 128 bytes. RM0456 Table 27 allows any boot address at RDP
+ * level 0, so no range is checked. DUALBANK = 0, the single-bank organization, is not modelled and
+ * refused.
  *
  * Errors, RM0456 7.3.9: PGSERR, SIZERR, PGAERR and PROGERR as its list states. For PROGERR the
  * 7.3.9 list wins over the FLASH_NSSR bit text, which accepts all-zero data over an all-zero
@@ -494,19 +506,21 @@ public:
   [[nodiscard]] auto secure_function() const -> bool override;
   [[nodiscard]] auto secure_word() const -> std::uint32_t override;
 
-  void access_written(std::uint32_t old, std::uint32_t now);
-  void key_written(std::uint32_t old, std::uint32_t now);
-  void secure_key_written(std::uint32_t old, std::uint32_t now);
-  void control_written(std::uint32_t old, std::uint32_t now);
-  void secure_control_written(std::uint32_t old, std::uint32_t now);
-  void status_written(std::uint32_t old, std::uint32_t now);
-  void secure_status_written(std::uint32_t old, std::uint32_t now);
-  void ecc_written(std::uint32_t old, std::uint32_t now);
-  void option_written(std::uint32_t old, std::uint32_t now);
-  void secure_block_written(std::uint32_t old, std::uint32_t now);
-  void hide_written(std::uint32_t old, std::uint32_t now);
-  void privilege_written(std::uint32_t old, std::uint32_t now);
-  void privileged_block_written(std::uint32_t old, std::uint32_t now);
+  void               access_written(std::uint32_t old, std::uint32_t now);
+  void               key_written(std::uint32_t old, std::uint32_t now);
+  void               secure_key_written(std::uint32_t old, std::uint32_t now);
+  void               option_key_written(std::uint32_t old, std::uint32_t now);
+  void               control_written(std::uint32_t old, std::uint32_t now);
+  void               secure_control_written(std::uint32_t old, std::uint32_t now);
+  void               status_written(std::uint32_t old, std::uint32_t now);
+  void               secure_status_written(std::uint32_t old, std::uint32_t now);
+  void               ecc_written(std::uint32_t old, std::uint32_t now);
+  void               option_written(std::uint32_t old, std::uint32_t now);
+  [[nodiscard]] auto option_locked() const -> bool;
+  void               secure_block_written(std::uint32_t old, std::uint32_t now);
+  void               hide_written(std::uint32_t old, std::uint32_t now);
+  void               privilege_written(std::uint32_t old, std::uint32_t now);
+  void               privileged_block_written(std::uint32_t old, std::uint32_t now);
 
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
@@ -603,6 +617,7 @@ private:
   bool                                                              protection_logged_{};
   bool                                                              option_logged_{};
   std::vector<std::pair<std::uint32_t, std::uint32_t>>              option_words_;
+  std::vector<std::uint32_t>                                        option_offsets_;
   bool                                                              swapped_{};
   std::vector<std::uint32_t>                                        secure_words_;
   std::vector<std::uint32_t>                                        secure_blocks_;
@@ -623,6 +638,7 @@ auto flash_table(peripheral_desc const& desc, flash_options const& options, bool
   std::vector<write_entry<flash>> table{
       {"FLASH_ACR",      &flash::access_written        },
       {"FLASH_NSKEYR",   &flash::key_written           },
+      {"FLASH_OPTKEYR",  &flash::option_key_written    },
       {"FLASH_NSCR",     &flash::control_written       },
       {"FLASH_NSSR",     &flash::status_written        },
       {"FLASH_ECCR",     &flash::ecc_written           },
@@ -649,9 +665,9 @@ auto flash_table(peripheral_desc const& desc, flash_options const& options, bool
       }
     }
   }
-  if(options.option_bytes)
+  for(auto const name : option_registers)
   {
-    for(auto const name : option_registers)
+    if(options.option_bytes or find_register(desc, name) != nullptr)
     {
       table.push_back({name, &flash::option_written});
     }
@@ -678,6 +694,13 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
   for(auto const name : {"FLASH_SECKEYR", "FLASH_SECSR", "FLASH_SECCR", "FLASH_SECHDPCR"})
   {
     secure_words_.push_back(reg(name).offset);
+  }
+  for(auto const name : option_registers)
+  {
+    if(has_register(name))
+    {
+      option_offsets_.push_back(reg(name).offset);
+    }
   }
   for(auto const name : secure_block_registers)
   {
@@ -908,7 +931,8 @@ void flash::reset(register_file& regs, reset_kind)
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    auto const& described = describe(name);
+    regs.poke(reg(name).offset, described.reset & described.reset_mask);
   }
   auto const generation = state_.generation;
   auto       torn       = std::move(state_.torn);
@@ -937,19 +961,32 @@ auto flash::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size
   {
     return 0;
   }
-  if(std::ranges::contains(option_words_ | std::views::keys, word))
+  if(std::ranges::contains(option_offsets_, word))
   {
     return read_lanes(regs.peek(word), offset, size);
   }
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
 
-void flash::option_written(std::uint32_t, std::uint32_t)
+void flash::option_written(std::uint32_t old, std::uint32_t)
 {
+  if(option_words_.empty())
+  {
+    if(option_locked())
+    {
+      regs_.poke(written_word_, old);
+    }
+    return;
+  }
   for(auto const [offset, value] : option_words_)
   {
     regs_.poke(offset, value);
   }
+}
+
+auto flash::option_locked() const -> bool
+{
+  return flag(false, set_role::option_lock);
 }
 
 void flash::power_cut()
@@ -1795,6 +1832,27 @@ void flash::key_written(bool secure, std::uint32_t now)
   rejected_ = true;
 }
 
+void flash::option_key_written(std::uint32_t, std::uint32_t now)
+{
+  regs_.poke(reg("FLASH_OPTKEYR").offset, 0);
+  auto const armed =
+      option_locked() and not flag(false, set_role::lock) and not state_.option_locked_up;
+  if(armed and not state_.option_first_key and now == option_key1)
+  {
+    state_.option_first_key = true;
+    return;
+  }
+  if(armed and state_.option_first_key and now == option_key2)
+  {
+    state_.option_first_key = false;
+    update(regs_, field_of(false, set_role::option_lock), 0);
+    return;
+  }
+  state_.option_first_key = false;
+  state_.option_locked_up = true;
+  rejected_               = true;
+}
+
 void flash::control_written(std::uint32_t old, std::uint32_t now)
 {
   control_written(false, old, now);
@@ -1816,9 +1874,10 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
     regs_.poke(control, old);
     return;
   }
-  auto const option_lock  = sets_[secure ? 1 : 0].fields.find(set_role::option_lock);
-  auto const option_field = sets_[secure ? 1 : 0].fields.find(set_role::option_start);
-  auto const erase_select = [&](std::uint32_t word) {
+  auto const option_lock       = sets_[secure ? 1 : 0].fields.find(set_role::option_lock);
+  auto const option_field      = sets_[secure ? 1 : 0].fields.find(set_role::option_start);
+  auto const option_load_field = sets_[secure ? 1 : 0].fields.find(set_role::option_load);
+  auto const erase_select      = [&](std::uint32_t word) {
     return of(set_role::page_erase, word)
         or of(set_role::bank1_erase, word)
         or of(set_role::bank2_erase, word);
@@ -1828,7 +1887,8 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
   auto const hsi16_before = of(set_role::program, old) or of(set_role::start, old) or other_held;
   auto const program_set  = of(set_role::program, now) and not of(set_role::program, old);
   auto const start_set    = of(set_role::start, now) and not of(set_role::start, old);
-  auto const option_start = option_field and option_field->of(now) != 0;
+  auto const unlocked     = option_lock and option_lock->of(old) == 0;
+  auto const option_start = unlocked and option_field and option_field->of(now) != 0;
   auto const waiting      = flag(false, set_role::waiting);
   auto       sequence     = false;
   if(of(set_role::program, now) and erase_select(now) and (program_set or not erase_select(old)))
@@ -1859,11 +1919,20 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
   }
   if(option_lock)
   {
-    now = option_lock->with(now, 1);
+    auto const relock =
+        option_lock->of(old) != 0 or option_lock->of(now) != 0 or of(set_role::lock, now);
+    now = option_lock->with(now, relock ? 1 : 0);
   }
   if(option_field)
   {
     now = option_field->with(now, 0);
+  }
+  if(option_load_field)
+  {
+    if(not unlocked)
+    {
+      now = option_load_field->with(now, option_load_field->of(old));
+    }
   }
   auto const start = field_of(secure, set_role::start);
   now              = start.with(now, start.of(old));

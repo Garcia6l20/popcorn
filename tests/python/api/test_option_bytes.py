@@ -284,6 +284,12 @@ def test_without_option_bytes_the_registers_read_as_at_main(
         0x0F00_0F00,
     ]
     m.mem.u32[OPTR] = 0x1234_5678
+    assert m.mem.u32[OPTR] == 0
+    m.mem.u32[FLASH + 0x08] = 0x4567_0123
+    m.mem.u32[FLASH + 0x08] = 0xCDEF_89AB
+    m.mem.u32[FLASH + 0x10] = 0x0819_2A3B
+    m.mem.u32[FLASH + 0x10] = 0x4C5D_6E7F
+    m.mem.u32[OPTR] = 0x1234_5678
     assert m.mem.u32[OPTR] == 0x1234_5678
 
 
@@ -332,13 +338,21 @@ def test_tzen_1_reads_the_encoded_option_bytes(u575: popcorn.PartDescription) ->
 def test_writes_to_the_option_registers_are_ignored_and_a_reset_keeps_them(
     u575: popcorn.PartDescription,
 ) -> None:
-    """RM0456 7.9.14 to 7.9.22: the option registers cannot be written while OPTLOCK is set,
-    and the model never clears OPTLOCK."""
+    """RM0456 7.9.14 to 7.9.22: the option registers cannot be written while OPTLOCK is set.
+    With option bytes configured they also ignore writes after the OPTKEYR unlock."""
     m = booted(u575, OptionBytes(tzen=True, secwm1=(2, 9)))
     expected = readback(m)
     for at in OPTION_REGISTERS:
         m.mem.u32[at] = 0
         m.mem.u8[at + 1] = 0x55
+    assert readback(m) == expected
+    m.mem.u32[FLASH + 0x08] = 0x4567_0123
+    m.mem.u32[FLASH + 0x08] = 0xCDEF_89AB
+    m.mem.u32[FLASH + 0x10] = 0x0819_2A3B
+    m.mem.u32[FLASH + 0x10] = 0x4C5D_6E7F
+    assert m.periph.FLASH.FLASH_NSCR.OPTLOCK == 0
+    for at in OPTION_REGISTERS:
+        m.mem.u32[at] = 0
     assert readback(m) == expected
     m.reset()
     assert readback(m) == expected
