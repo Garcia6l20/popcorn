@@ -443,12 +443,11 @@ public:
           }
           if(sys_.chosen.sleep and sys_.clocked())
           {
-            lead_      = sys_time{std::numeric_limits<std::int64_t>::min()};
+            lead_      = sys_.points[index_];
             published_ = sys_.points[index_];
             if(position(target) < sys_.points[index_])
             {
-              jumping_ = true;
-              phase_   = phase::sleep_to;
+              phase_ = phase::sleep_to;
               return request_to(sys_.points[index_], false, true);
             }
           }
@@ -486,7 +485,6 @@ public:
         case phase::sleep_to:
           if(position(target) < sys_.points[index_])
           {
-            jumping_ = true;
             return request_to(sys_.points[index_], false, true);
           }
           phase_    = phase::sleeping;
@@ -1086,8 +1084,15 @@ private:
       {
         return request_to(here, false, false);
       }
-      auto const cap   = later_by(here, sys_.lookahead.ps);
-      auto       bound = std::min(goal, cap);
+      auto furthest = sys_time{std::numeric_limits<std::int64_t>::min()};
+      for(auto const next : one.successors)
+      {
+        furthest =
+            std::max(furthest, sys_time{sys_.syncs[next].clock.load(std::memory_order_acquire)});
+      }
+      auto const cap =
+          one.successors.empty() ? here : later_by(std::min(here, furthest), sys_.lookahead.ps);
+      auto bound = std::min(goal, cap);
       for(auto const& edge : one.coupled)
       {
         clocks_[edge.source] =
@@ -1153,9 +1158,8 @@ private:
         auto const busy =
             (next and *next < target.virtual_clock().to_icount(one.map.to_local(bound)))
             or (at and *at < bound);
-        if(allowed and not busy and bound >= cap)
+        if(allowed and not busy and bound >= cap and cap > here)
         {
-          jumping_ = true;
           unlead();
           return request_to(cap, false, true);
         }

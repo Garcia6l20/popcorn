@@ -522,7 +522,7 @@ class System:
     """
 
     _sync: ClassVar[Literal["barrier", "clocks"]] = "barrier"
-    _lookahead_ps: ClassVar[int] = 10_000_000_000
+    _lookahead_ps: ClassVar[int | None] = None
 
     __slots__ = (
         "__weakref__",
@@ -635,7 +635,9 @@ class System:
             slice_instructions, max(1, round(slice_wall_budget * 1e9))
         )
         self._handle.set_sync(type(self)._sync)
-        self._handle.set_lookahead(type(self)._lookahead_ps)
+        lookahead_ps = type(self)._lookahead_ps
+        if lookahead_ps is not None:
+            self._handle.set_lookahead(lookahead_ps)
         for name in self._names:
             native = self._machines[name]._handle  # pyright: ignore[reportPrivateUsage]
             self._handle.add_member(native, name, on_member_reset == "stop")
