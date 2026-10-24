@@ -4629,7 +4629,7 @@ struct owner_gate
 };
 }
 
-TEST_CASE("a run drain shows no frame past an off-link cut owner's clock")
+TEST_CASE("a run drain hands and shows no frame past an off-link cut owner's clock")
 {
   for(auto how : {variants()[7], variants()[10]})
   {
@@ -4679,15 +4679,17 @@ TEST_CASE("a run drain shows no frame past an off-link cut owner's clock")
       pending         = r.sys->resume(held);
     }
     auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
-    auto const past     = [&state] {
+    auto const near     = [&state] {
       auto const held = state->held_at.load();
-      return held >= 0 and state->barrier_max.load() > held;
+      return held >= 0 and state->barrier_max.load() >= held - 5 * us_ps;
     };
-    while(not past() and std::chrono::steady_clock::now() < deadline)
+    while(not near() and std::chrono::steady_clock::now() < deadline)
     {
       std::this_thread::yield();
     }
-    REQUIRE(past());
+    REQUIRE(near());
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    CHECK(state->barrier_max.load() <= state->held_at.load());
     CHECK(state->shown_max.load() <= state->held_at.load());
     open_gate(state->released);
     r.sys->request_pause();
@@ -4695,7 +4697,7 @@ TEST_CASE("a run drain shows no frame past an off-link cut owner's clock")
   }
 }
 
-TEST_CASE("a confirm drain shows no frame past an off-link cut owner's stop")
+TEST_CASE("a confirm drain hands and shows no frame past an off-link cut owner's stop")
 {
   for(auto const& how : {variants()[7], variants()[10]})
   {
@@ -4729,16 +4731,22 @@ TEST_CASE("a confirm drain shows no frame past an off-link cut owner's stop")
     REQUIRE(stopped.reason == core::pause_reason::delivered);
     REQUIRE(stopped.member == 2);
     REQUIRE_FALSE(confirms->empty());
-    CHECK(confirms->back().first == stopped.at.ps + 20 * us_ps);
+    CHECK(confirms->back().first == stopped.at.ps);
     CHECK(confirms->back().second == stopped.at.ps);
   }
 }
 
 TEST_CASE("a TIME pause releases a link's tap through its ends' positions")
 {
-  for(auto const& how : {variants()[7], variants()[10]})
+  for(auto const& [how, offset] : {
+          std::pair{variants()[7],  0},
+          std::pair{variants()[10], 0},
+          std::pair{variants()[7],  1},
+          std::pair{variants()[10], 1}
+  })
   {
     CAPTURE(how.name);
+    CAPTURE(offset);
     pinned const pin{how.one_cpu};
     rig          r{
         .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
@@ -4751,7 +4759,8 @@ TEST_CASE("a TIME pause releases a link's tap through its ends' positions")
         std::move_only_function<void(std::size_t)>{}, how.mode);
     {
       auto const                  held = r.sys->lock();
-      std::vector<core::sys_time> offsets{core::sys_time{0}, core::sys_time{100'000}};
+      std::vector<core::sys_time> offsets{core::sys_time{0}, core::sys_time{0}};
+      offsets.at(1 - offset) = core::sys_time{100'000};
       r.sys->start(held, offsets);
     }
     auto const released    = std::make_shared<std::vector<std::int64_t>>();
@@ -4826,4 +4835,146 @@ TEST_CASE("a stamp between two slices of a sleep's move is refused at the settle
       std::ignore = stamp.get(), doctest::Contains("before 4.980000 ms"), std::invalid_argument);
   r.sys->request_pause();
   CHECK(pending.get().reason != core::pause_reason::closed);
+}
+
+TEST_CASE("a command on a leading member lands at its published clock")
+{
+  constexpr std::int64_t gate = 30 * ms_ps;
+  for(auto const& how : {variants()[7], variants()[10]})
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    struct shared
+    {
+      std::array<std::shared_ptr<core::host>, 2> hosts{};
+      std::atomic<std::int64_t>                  runner_at{0};
+      std::atomic<bool>                          released{false};
+    };
+    auto state = std::make_shared<shared>();
+    rig  r{
+        .members = {member("idle", "idle_forever"), member("alu", "alu_entry")},
+        .arrival = [state](std::size_t index) {
+          if(index != 1)
+          {
+            return;
+          }
+          auto const now = static_cast<std::int64_t>(
+              state->hosts.at(1)->member_inline(core::member_id{}).virtual_clock().time().ps);
+          state->runner_at = now;
+          if(now >= gate)
+          {
+            state->released.wait(false);
+          }
+                    }
+    };
+    state->hosts = {r.members[0].on, r.members[1].on};
+    r.build(how);
+    at_scope_end const opened{[state] { open_gate(state->released); }};
+    std::ignore = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    std::ignore = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held);
+    }
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    while(state->runner_at.load() < gate and std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::yield();
+    }
+    REQUIRE(state->runner_at.load() >= gate);
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    auto served = [&r] {
+      auto const held_host = r.members[0].on->lock();
+      return r.members[0].on->post(held_host, 0, [](core::machine&) {});
+    }();
+    REQUIRE(served.wait_for(std::chrono::seconds{10}));
+    CHECK(served.get().ps >= static_cast<std::uint64_t>(gate - 20 * us_ps));
+    open_gate(state->released);
+    r.sys->request_pause();
+    CHECK(pending.get().reason == core::pause_reason::requested);
+  }
+}
+
+TEST_CASE("a boundary pump on a leading member lands its input at the member's reach")
+{
+  constexpr std::int64_t gate = 30 * ms_ps;
+  for(auto const& how : {variants()[7], variants()[10]})
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    struct shared
+    {
+      popcorn::testing::test_arch* module{};
+      std::shared_ptr<core::host>  runner{};
+      std::atomic<std::int64_t>    runner_at{0};
+      std::atomic<bool>            armed{false};
+      std::atomic<std::int64_t>    pumped_at{-1};
+      std::atomic<bool>            released{false};
+      std::shared_ptr<core::host>  quiet{};
+    };
+    auto state = std::make_shared<shared>();
+    popcorn::testing::machine_fixture<popcorn::testing::test_arch> f{
+        m33(), "idle", core::machine_options{}};
+    f.set("pc", sym("idle", "idle_forever"));
+    f.set("r0", 0);
+    state->module = f.module;
+    std::vector<std::unique_ptr<core::machine>> machines;
+    machines.push_back(std::move(f.target));
+    state->quiet = std::make_shared<core::host>(
+        std::move(machines), core::slice_bounds{},
+        core::host_hooks{.boundary = [state](core::member_id) {
+          if(not state->armed.exchange(false))
+          {
+            return;
+          }
+          auto& m          = state->quiet->member_inline(core::member_id{});
+          state->pumped_at = static_cast<std::int64_t>(m.virtual_clock().time().ps);
+          std::ignore      = state->module->attached_events().schedule(
+              icount{m.virtual_clock().now().value}, logged_kind, 9);
+        }});
+    rig r{
+        .members =
+            {core::member_ref{.on = state->quiet, .name = "quiet"}, member("alu", "alu_entry")},
+        .arrival = [state](std::size_t index) {
+          if(index != 1)
+          {
+            return;
+          }
+          auto const now = static_cast<std::int64_t>(
+              state->runner->member_inline(core::member_id{}).virtual_clock().time().ps);
+          state->runner_at = now;
+          if(now >= gate)
+          {
+            state->released.wait(false);
+          }
+                      }
+    };
+    state->runner = r.members[1].on;
+    r.build(how);
+    at_scope_end const opened{[state] { open_gate(state->released); }};
+    std::ignore = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    std::ignore = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held);
+    }
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    while(state->runner_at.load() < 5 * ms_ps and std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::yield();
+    }
+    REQUIRE(state->runner_at.load() >= 5 * ms_ps);
+    state->armed = true;
+    while(state->pumped_at.load() < 0 and std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::yield();
+    }
+    REQUIRE(state->pumped_at.load() >= 0);
+    CHECK(state->pumped_at.load() >= 5 * ms_ps);
+    open_gate(state->released);
+    r.sys->request_pause();
+    CHECK(pending.get().reason == core::pause_reason::requested);
+  }
 }

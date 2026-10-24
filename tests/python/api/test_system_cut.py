@@ -40,6 +40,8 @@ from .linked import (
     to,
 )
 
+pytestmark = pytest.mark.usefixtures("both_sync_modes")
+
 LINK_IDLE = 2
 LINK_ERROR = 4
 FE_ENTRY = LINK_ERROR << 16 | 1
@@ -499,7 +501,9 @@ def test_a_cut_from_the_owner_s_callback_is_bound_by_its_time(
 
 
 @pytest.mark.parametrize("swap", [False, True], ids=["a stops", "b stops"])
-def test_a_stopped_break_takes_the_later_end_s_system_time(pair: Build, swap: bool) -> None:
+def test_a_stopped_break_takes_the_later_end_s_system_time(
+    pair: Build, swap: bool, both_sync_modes: str
+) -> None:
     entries = {"a_entry": "link_rx", "b_entry": "link_tx"} if swap else {}
     system = pair(**entries)
     stop = asyncio.run(system.run(until=at(3000)))
@@ -513,7 +517,8 @@ def test_a_stopped_break_takes_the_later_end_s_system_time(pair: Build, swap: bo
     with pytest.raises(ValueError, match="no cut is open"):
         tap.restore_line()
     asyncio.run(to(system, at(2990.5)))
-    assert system.time != at(2990.5)
+    if both_sync_modes == "barrier":
+        assert system.time != at(2990.5)
     assert tap.break_line() == at(2990.5)
 
 

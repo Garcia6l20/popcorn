@@ -1081,9 +1081,15 @@ auto system_handle::change_cut(
               "{} from a callback: only callbacks of {}, the link's cut owner, change its cuts",
               what, members_[owner].name));
     }
-    auto const local = caller->host->member_inline(core::member_id{}).virtual_clock().time();
-    auto const now   = system_->base_of(owner).ps + static_cast<std::int64_t>(local.ps);
-    return refused(change(forth, back, core::sys_time{now}));
+    auto&      engine  = caller->host->member_inline(core::member_id{});
+    auto const local   = engine.virtual_clock().time();
+    auto const now     = system_->base_of(owner).ps + static_cast<std::int64_t>(local.ps);
+    auto const outcome = change(forth, back, core::sys_time{now});
+    if(outcome and system_->mode() == core::sync_mode::clocks)
+    {
+      engine.interrupt();
+    }
+    return refused(outcome);
   }
   system_ref const ref{system()};
   auto&            sys = *ref;

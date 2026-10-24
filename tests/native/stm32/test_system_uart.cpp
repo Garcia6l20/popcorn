@@ -1602,7 +1602,7 @@ TEST_CASE("a frame a pause carries is suppressed by a cut its receiver makes aft
 
   std::optional<std::string> reference;
   std::vector<std::size_t>   carried;
-  for(auto const& how : {variants()[0], variants()[1]})
+  for(auto const& how : {variants()[0], variants()[1], variants()[9], variants()[10]})
   {
     CAPTURE(how.name);
     auto w = paired_world("link_tx", "link_rx", latency_20);
@@ -1640,7 +1640,7 @@ TEST_CASE("a frame a pause carries is suppressed by a cut its receiver makes aft
     }
     reference = seen;
   }
-  CHECK(carried == std::vector<std::size_t>{1, 0});
+  CHECK(carried == std::vector<std::size_t>{1, 0, 1, 1});
 }
 
 TEST_CASE("a strict shape fault a pause carries is the pause, before the goal stop behind it")

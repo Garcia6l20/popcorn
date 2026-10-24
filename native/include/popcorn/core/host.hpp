@@ -183,12 +183,19 @@ public:
   }
 
   /**
-   * @brief Local time before which nothing may land on the member: the host accepts its stamps
-   *        at or after it. Read on the host thread between slices and while plan() reads a stamp.
+   * @brief Local time before which nothing may land on the member: the host serves its mail,
+   *        accepts its stamps and calls the boundary hook at or after it. Read on the host thread
+   * between slices and while plan() reads a stamp.
    * @param target The member.
    * @return The member's time by default.
    */
   [[nodiscard]] virtual auto reach(machine const& target) const -> vtime;
+
+  /** @brief Called under the host mutex when mail or a stamp is queued for the member, from any
+   * thread: a driver blocked in plan() returns soon, so the host serves the mail at the
+   * member's reach. Must not block or lock. */
+  virtual void nudge() noexcept
+  {}
 };
 
 /** @brief A run to a stop, carried across slices by the host as one request. */
@@ -368,7 +375,8 @@ struct host_hooks
    * gives the thread up as on a host thread instead of closing, which blocks. Empty for true. */
   std::move_only_function<bool()> may_block{};
   /** @brief Called on the host thread as the engine owner before and after every slice of a
-   * goal or a free run, with the member. Empty for none. */
+   * goal or a free run, with the member. Under a member_driver only while the member stands at
+   * or past member_driver::reach(). Empty for none. */
   std::move_only_function<void(member_id)> boundary{};
   /** @brief Called on the host thread with no host mutex held, with the member and the
    * exception that ends its free run, before it parks holding it. It may replace the exception

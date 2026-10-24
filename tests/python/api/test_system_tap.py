@@ -32,6 +32,8 @@ from .linked import (
     to,
 )
 
+pytestmark = pytest.mark.usefixtures("both_sync_modes")
+
 
 def tap_pauses(system: System) -> list[list[TapFrame]]:
     """The frames the tap of `system`'s first link takes at each of seven TIME pauses."""

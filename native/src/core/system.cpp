@@ -326,6 +326,7 @@ public:
     published_ = lead_;
     counted_   = false;
     calm_      = false;
+    nudged_.store(false, std::memory_order_relaxed);
     std::ranges::fill(clocks_, sys_time{});
     if(sys_.measuring)
     {
@@ -548,6 +549,15 @@ public:
   auto sleep_requested() noexcept -> bool override
   {
     return sleeping_ and not aborted_.load(std::memory_order_acquire);
+  }
+
+  void nudge() noexcept override
+  {
+    nudged_.store(true, std::memory_order_release);
+    if(sys_.syncs)
+    {
+      sys_.bump(index_);
+    }
   }
 
   [[nodiscard]] auto reach(machine const& target) const -> vtime override
@@ -1032,9 +1042,10 @@ private:
     for(std::size_t index = 0; index < one.inbound.size(); ++index)
     {
       auto* const link    = one.inbound[index];
-      auto const  barrier = sys_.chosen.idle
-                              ? sys_.chosen.confirm
-                              : std::min(sys_.points[index_], sys_.points[link->sender()]);
+      auto const  barrier = sys_.chosen.idle ? sys_.chosen.confirm
+                                             : std::min(
+                                                   {sys_.points[index_], sys_.points[link->sender()],
+                                                    sys_.points[one.cut_owners[index]]});
       auto const  shown =
           sys_.chosen.idle ? barrier : std::min(barrier, sys_.points[one.cut_owners[index]]);
       take_fault(*link, link->drain(one.sealed[index], barrier, barrier, one.map, shown));
@@ -1072,6 +1083,16 @@ private:
         }
         return std::nullopt;
       }
+      if(nudged_.load(std::memory_order_acquire))
+      {
+        if(lead_ > here)
+        {
+          unlead();
+          return request_to(lead_, false, true);
+        }
+        nudged_.store(false, std::memory_order_relaxed);
+        return request_to(here, false, false);
+      }
       auto const at = stamp_of(stamp);
       if(at and *at <= here)
       {
@@ -1104,12 +1125,17 @@ private:
         one.sealed[index]   = through;
         faulted =
             take_fault(
-                *link, link->drain(
-                           through, std::min(ahead, clocks_[link->sender()]), bound, one.map,
-                           std::min(
-                               {ahead, clocks_[link->sender()],
-                                one.cut_owners[index] == index_ ? ahead
-                                                                : clocks_[one.cut_owners[index]]})))
+                *link,
+                link->drain(
+                    through,
+                    std::min(
+                        {ahead, clocks_[link->sender()],
+                         one.cut_owners[index] == index_ ? ahead : clocks_[one.cut_owners[index]]}),
+                    bound, one.map,
+                    std::min(
+                        {ahead, clocks_[link->sender()],
+                         one.cut_owners[index] == index_ ? ahead
+                                                         : clocks_[one.cut_owners[index]]})))
             or faulted;
       }
       if(sys_.measuring)
@@ -1197,6 +1223,7 @@ private:
   std::vector<sys_time> clocks_{};
   vtime                 until_last_{};
   std::atomic<bool>     aborted_{false};
+  std::atomic<bool>     nudged_{false};
 
   std::chrono::steady_clock::time_point left_{};
 };

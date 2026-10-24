@@ -18,6 +18,9 @@ from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .linked import member
 
+pytestmark = pytest.mark.usefixtures("both_sync_modes")
+
+
 L = us(20)
 VARIANTS: list[tuple[int, VirtualDuration | None]] = [
     (1_000_000, None),

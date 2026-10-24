@@ -351,6 +351,14 @@ auto linked(member_slot const& slot) noexcept -> bool
      and (slot.link_released == nullptr or not slot.link_released->load(std::memory_order_acquire));
 }
 
+void nudge(member_slot const& slot) noexcept
+{
+  if(auto const driver = slot.driver.load())
+  {
+    driver->nudge();
+  }
+}
+
 void give_back(machine& engine)
 {
   if(engine.core_held() and not engine.in_call())
@@ -518,6 +526,14 @@ struct host_core
       deferred done;
       for(auto const& [slot, plan] : std::views::zip(members, *plans))
       {
+        if(not plan.mail.empty()
+           and plan.slice
+           and not plan.cancel
+           and not plan.halt
+           and reach_of(*slot) > slot->engine->virtual_clock().time())
+        {
+          keep_mail(*slot, plan.mail);
+        }
         if(not plan.mail.empty())
         {
           serve_mail(*slot, plan.mail);
@@ -736,6 +752,16 @@ struct host_core
     }
   }
 
+  void keep_mail(member_slot& slot, std::deque<command>& mail)
+  {
+    std::scoped_lock const lock{mutex};
+    for(auto& posted : std::views::reverse(mail))
+    {
+      slot.mail.push_front(std::move(posted));
+    }
+    mail.clear();
+  }
+
   static auto reach_of(member_slot const& slot) -> vtime
   {
     if(slot.goal and slot.goal->goal.driver)
@@ -824,6 +850,14 @@ struct host_core
     auto const found = std::ranges::find_if(
         members, [&slot](auto const& member) { return member.get() == &slot; });
     return static_cast<member_id>(found - members.begin());
+  }
+
+  void reached_boundary(member_slot const& slot)
+  {
+    if(reach_of(slot) <= slot.engine->virtual_clock().time())
+    {
+      at_boundary(slot);
+    }
   }
 
   void at_boundary(member_slot const& slot)
@@ -1035,7 +1069,7 @@ struct host_core
     try
     {
       owner_scope const owning{this};
-      at_boundary(slot);
+      reached_boundary(slot);
       result = slot.engine->run_slice(request);
     }
     catch(...)
@@ -1050,7 +1084,7 @@ struct host_core
     try
     {
       owner_scope const owning{this};
-      at_boundary(slot);
+      reached_boundary(slot);
       driver.ran(*slot.engine, result);
     }
     catch(...)
@@ -1895,6 +1929,7 @@ auto host::post(
   {
     slot.mail.push_back({.body = std::move(body), .promise = promise});
     core_->notify_locked(slot);
+    detail::nudge(slot);
   }
   return promise.future();
 }
@@ -1912,6 +1947,7 @@ void host::post_stamped(
     slot.incoming.push_back(
         {.at = at, .seq = slot.next_seq++, .body = std::move(body), .promise = promise});
     core_->notify_locked(slot);
+    detail::nudge(slot);
     return;
   }
   if(not inline_owner)

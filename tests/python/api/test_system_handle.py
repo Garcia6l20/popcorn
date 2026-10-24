@@ -23,6 +23,9 @@ from popcorn.units import ms, us
 
 from .linked import LINK_BYTE, PING_BYTES, USART_LL, logged, member
 
+pytestmark = pytest.mark.usefixtures("both_sync_modes")
+
+
 LATENCY = us(20).ps
 
 

@@ -17,6 +17,8 @@ from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from .linked import Ticker, logged, member, ticker
 
+pytestmark = pytest.mark.usefixtures("both_sync_modes")
+
 L = us(20)
 IRQ = "USART1_IRQHandler"
 NEVER = "link_audio_peer"
