@@ -117,3 +117,18 @@ __attribute__((noipa)) void
   CLEAR_BIT(FLASH->NSCR, FLASH_NSCR_PG | FLASH_NSCR_BWR);
   DONE();
 }
+
+void launch_options(void);
+void after_launch(void);
+
+__attribute__((noipa)) void after_launch(void)
+{
+  LOG(0xaf7eu);
+  DONE();
+}
+
+__attribute__((noipa)) void launch_options(void)
+{
+  SET_BIT(FLASH->NSCR, FLASH_NSCR_OBL_LAUNCH);
+  after_launch();
+}

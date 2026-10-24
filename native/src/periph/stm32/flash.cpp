@@ -81,6 +81,7 @@ struct flash_state
   std::uint64_t                          due_ps{};
   std::vector<std::uint32_t>             torn{};
   std::vector<std::uint32_t>             wrp{};
+  std::vector<std::uint32_t>             wrp_active{};
 
   friend auto operator==(flash_state const&, flash_state const&) -> bool = default;
 };
@@ -337,9 +338,11 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  *
  * Option unlock, RM0456 7.4.2: OPTLOCK is 1 at reset. With LOCK clear, OPTKEY1 then OPTKEY2 in
  * FLASH_OPTKEYR clear it. Any other write to FLASH_OPTKEYR, a key while LOCK is set or OPTLOCK is
- * clear included, keeps OPTLOCK set until the next reset and returns a bus error, as for
- * FLASH_NSKEYR. OPTLOCK is set-only, and setting LOCK sets it. While OPTLOCK is set, OPTSTRT and
- * OBL_LAUNCH ignore writes and the option registers keep their value.
+ * clear included, returns a bus error and locks the sequence until the next reset, and OPTLOCK,
+ * once set, stays set until then. RM0456 states the bus error for FLASH_NSKEYR only, RM0481
+ * states it for FLASH_OPTKEYR too, and the model follows it. OPTLOCK is set-only, and setting
+ * LOCK sets it. While OPTLOCK is set, OPTSTRT and OBL_LAUNCH ignore writes and the option
+ * registers keep their value.
  *
  * Write protection, RM0456 7.6.1 and 7.9.19 to 7.9.24: FLASH_WRP1AR, FLASH_WRP1BR, FLASH_WRP2AR
  * and FLASH_WRP2BR hold UNLOCK in bit 31, PEND in bits 23:16 and PSTRT in bits 7:0, the fields as
@@ -353,9 +356,13 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * completes at once, with no BSY. A page of bank x, the bank number following SWAP_BANK, lies in
  * area A or B of that bank when PSTRT <= page <= PEND. A store, page erase, bank erase or mass
  * erase that reaches such a page sets WRPERR in its register set, drops the store and erases
- * nothing. OBL_LAUNCH reloads the registers and clears while the core keeps running. OPTSTRT
- * programs the WRP registers only: FLASH_OPTR, the boot addresses and the SECWM registers keep
- * the machine's option bytes.
+ * nothing. The protection follows the loaded words, which a reset loads from the programmed
+ * ones, as RM0456 7.6.1 requires the option bytes to be reloaded. OBL_LAUNCH, with OPTLOCK clear,
+ * clears itself and requests an option byte loader reset, reset_kind::option_load, which sets
+ * RCC_CSR.OBLRSTF and loads the registers from the programmed words. OPTSTRT programs the WRP
+ * registers only: FLASH_OPTR, the boot addresses and the SECWM registers keep the machine's
+ * option bytes, and a write to one of them that differs from the loaded word logs a
+ * model_warning once at the next OPTSTRT.
  *
  * Program, RM0456 7.3.7: with PG set, a 32-bit store at a quad-word address opens the write
  * buffer and sets WDW, the fourth word of that quad-word launches the program, BSY is set for
@@ -619,6 +626,8 @@ private:
   [[nodiscard]] auto wrp_top() const -> std::uint32_t;
   [[nodiscard]] auto wrp_normal(std::uint32_t word) const -> std::uint32_t;
   [[nodiscard]] auto wrp_programmed(std::size_t index) const -> std::uint32_t;
+  [[nodiscard]] auto option_loaded(std::uint32_t offset) const -> std::uint32_t;
+  void               warn_dropped_options();
   [[nodiscard]] auto wrp_protected(std::uint32_t from, std::uint32_t length) const -> bool;
   void               load_options();
   void               program_options();
@@ -644,6 +653,8 @@ private:
   access_ctx                                                        access_{};
   bool                                                              rejected_{};
   bool                                                              page_logged_{};
+  bool                                                              option_logged_{};
+  std::vector<std::uint32_t>                                        option_changed_;
   std::vector<std::pair<std::uint32_t, std::uint32_t>>              option_words_;
   std::vector<std::uint32_t>                                        option_offsets_;
   std::vector<std::uint32_t>                                        wrp_offsets_;
@@ -701,9 +712,10 @@ auto flash_table(peripheral_desc const& desc, flash_options const& options, bool
       table.push_back({name, &flash::option_written});
     }
   }
-  for(auto const name : wrp_registers)
+  if(std::ranges::all_of(
+         wrp_registers, [&desc](auto name) { return find_register(desc, name) != nullptr; }))
   {
-    if(find_register(desc, name) != nullptr)
+    for(auto const name : wrp_registers)
     {
       table.push_back({name, &flash::wrp_written});
     }
@@ -746,6 +758,7 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
       option_offsets_.push_back(reg(name).offset);
     }
     state_.wrp.assign(wrp_offsets_.size(), ~(wrp_top() << 16));
+    state_.wrp_active = state_.wrp;
   }
   for(auto const name : secure_block_registers)
   {
@@ -986,7 +999,9 @@ void flash::reset(register_file& regs, reset_kind)
   state_.generation     = generation + 1;
   state_.torn           = std::move(torn);
   state_.wrp            = std::move(wrp);
-  secure_               = {};
+  state_.wrp_active     = state_.wrp;
+  option_changed_.clear();
+  secure_ = {};
   for(auto const [offset, value] : option_words_)
   {
     regs.poke(offset, value);
@@ -1016,8 +1031,14 @@ auto flash::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
 
-void flash::option_written(std::uint32_t old, std::uint32_t)
+void flash::option_written(std::uint32_t old, std::uint32_t now)
 {
+  if(not option_locked()
+     and now != option_loaded(written_word_)
+     and not std::ranges::contains(option_changed_, written_word_))
+  {
+    option_changed_.push_back(written_word_);
+  }
   if(option_words_.empty())
   {
     if(option_locked())
@@ -1053,6 +1074,45 @@ auto flash::wrp_programmed(std::size_t index) const -> std::uint32_t
   return state_.wrp[index];
 }
 
+auto flash::option_loaded(std::uint32_t offset) const -> std::uint32_t
+{
+  auto const found =
+      std::ranges::find(option_words_, offset, &std::pair<std::uint32_t, std::uint32_t>::first);
+  if(found != option_words_.end())
+  {
+    return found->second;
+  }
+  for(auto const name : option_registers)
+  {
+    if(has_register(name) and reg(name).offset == offset)
+    {
+      auto const& described = describe(name);
+      return described.reset & described.reset_mask;
+    }
+  }
+  return 0;
+}
+
+void flash::warn_dropped_options()
+{
+  if(option_changed_.empty() or std::exchange(option_logged_, true))
+  {
+    return;
+  }
+  auto const offset = option_changed_.front();
+  for(auto const name : option_registers)
+  {
+    if(has_register(name) and reg(name).offset == offset)
+    {
+      warn(
+          name, "written, but OPTSTRT programs only the FLASH_WRPxyR registers: the machine's "
+                "option bytes "
+                "set the others");
+      return;
+    }
+  }
+}
+
 auto flash::wrp_protected(std::uint32_t from, std::uint32_t length) const -> bool
 {
   if(storage_ == nullptr or wrp_offsets_.empty())
@@ -1071,7 +1131,7 @@ auto flash::wrp_protected(std::uint32_t from, std::uint32_t length) const -> boo
     auto const page = (at - bank_base(at)) / page_size;
     for(std::size_t area = 0; area < 2; ++area)
     {
-      auto const word = wrp_programmed(bank * 2 + area);
+      auto const word = state_.wrp_active[bank * 2 + area];
       if((word & top) <= page and page <= (word >> 16 & top))
       {
         return true;
@@ -1905,6 +1965,11 @@ void flash::load(std::span<std::byte const> in)
     state_.wrp.assign(wrp_offsets_.size(), ~(wrp_top() << 16));
     load_options();
   }
+  if(state_.wrp_active.size() != state_.wrp.size())
+  {
+    state_.wrp_active = state_.wrp;
+  }
+  option_changed_.clear();
   latency_logged_.clear();
   sync_watches();
 }
@@ -2079,10 +2144,11 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
   if(option_start and not sequence and not busy())
   {
     program_options();
+    warn_dropped_options();
   }
   if(load)
   {
-    load_options();
+    ctx_.services.request_reset(reset_kind::option_load);
   }
   if(sequence)
   {

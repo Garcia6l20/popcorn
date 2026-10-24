@@ -17,6 +17,8 @@ add_ll_firmware(
         "wait_idle",
         "spin",
         "burst_program",
+        "launch_options",
+        "after_launch",
     ],
 )
 

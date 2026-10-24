@@ -1032,6 +1032,8 @@ TEST_CASE("RM0456 7.6.1: under TrustZone a WRP area set by OPTSTRT refuses a Non
   r.write("OPTKEYR", 0x4c5d'6e7fu, nonsecure_priv);
   r.write("WRP1AR", 0x8009'0009u, nonsecure_priv);
   r.write("NSCR", optstrt, nonsecure_priv);
+  r.target->reset(popcorn::reset_kind::option_load);
+  r.unlock(false);
   r.write("NSCR", pg, nonsecure_priv);
   r.store(page10, {1, 2, 3, 4}, nonsecure_priv);
   r.settle();
