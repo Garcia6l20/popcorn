@@ -1350,45 +1350,43 @@ void system::impl::set_global() noexcept
 auto system::impl::pause_points(entry const* head, std::optional<sys_time> requested) const
     -> std::vector<sys_time>
 {
-  auto const            n = slots.size();
+  auto const n     = slots.size();
+  auto const timed = head and head->kind == entry_kind::system_time;
+  std::vector<std::pair<sys_time, std::size_t>> sources;
+  if(head and not timed)
+  {
+    sources.emplace_back(head->anchor, head->anchored);
+  }
+  for(std::size_t from = 0; from < n; ++from)
+  {
+    if(frozen(slots[from]))
+    {
+      sources.emplace_back(slots[from].rep.reach, from);
+    }
+  }
+  for(auto const& one : held)
+  {
+    if((head and earlier(one, *head)) or (not head and requested and one.at <= *requested))
+    {
+      sources.emplace_back(one.anchor, one.anchored);
+    }
+  }
   std::vector<sys_time> out(n, never);
-  auto const            timed = head and head->kind == entry_kind::system_time;
   for(std::size_t to = 0; to < n; ++to)
   {
-    if(timed and slots[to].goal)
+    if(frozen(slots[to]) or (timed and slots[to].goal))
     {
       out[to] = slots[to].rep.reach;
       continue;
     }
-    if(timed)
+    out[to] = timed ? head->at : requested.value_or(never);
+    for(auto const& [at, from] : sources)
     {
-      out[to] = head->at;
-    }
-    else if(head)
-    {
-      out[to] = later_by(head->anchor, distance(head->anchored, to).ps);
-    }
-    else if(requested)
-    {
-      out[to] = *requested;
-    }
-    for(std::size_t from = 0; from < n; ++from)
-    {
-      if(frozen(slots[from]))
-      {
-        out[to] = std::min(out[to], later_by(slots[from].rep.reach, distance(from, to).ps));
-      }
+      out[to] = std::min(out[to], later_by(at, distance(from, to).ps));
     }
     if(until and not timed)
     {
       out[to] = std::min(out[to], *until);
-    }
-  }
-  for(std::size_t index = 0; index < n; ++index)
-  {
-    if(frozen(slots[index]))
-    {
-      out[index] = slots[index].rep.reach;
     }
   }
   return out;

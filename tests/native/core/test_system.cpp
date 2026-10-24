@@ -601,28 +601,28 @@ TEST_CASE("a pause requested after its flight ended does not end the next flight
 
 namespace
 {
-class gate_release
+class at_scope_end
 {
 public:
-  explicit gate_release(std::shared_ptr<std::atomic<bool>> gate) : gate_{std::move(gate)}
+  explicit at_scope_end(std::move_only_function<void()> run) : run_{std::move(run)}
   {}
-  gate_release(gate_release const&)                    = delete;
-  auto operator=(gate_release const&) -> gate_release& = delete;
+  at_scope_end(at_scope_end const&)                    = delete;
+  auto operator=(at_scope_end const&) -> at_scope_end& = delete;
 
-  ~gate_release()
+  ~at_scope_end()
   {
-    open();
-  }
-
-  void open() const noexcept
-  {
-    gate_->store(true);
-    gate_->notify_all();
+    run_();
   }
 
 private:
-  std::shared_ptr<std::atomic<bool>> gate_;
+  std::move_only_function<void()> run_;
 };
+
+void open_gate(std::atomic<bool>& gate) noexcept
+{
+  gate.store(true);
+  gate.notify_all();
+}
 }
 
 TEST_CASE("a pause requested right after resume ends that flight")
@@ -633,14 +633,14 @@ TEST_CASE("a pause requested right after resume ends that flight")
       .arrival = [asked](std::size_t) { asked->wait(false); }
   };
   r.build(variants()[0]);
-  gate_release const             release{asked};
+  at_scope_end const             release{[asked] { open_gate(*asked); }};
   core::host_future<core::pause> pending;
   {
     auto const held = r.sys->lock();
     pending         = r.sys->resume(held, core::sys_time{10 * ms_ps});
   }
   r.sys->request_pause();
-  release.open();
+  open_gate(*asked);
   CHECK(pending.get().reason == core::pause_reason::requested);
 }
 
@@ -753,7 +753,7 @@ TEST_CASE("a member's time and the pending barrier are refused while a resume is
   auto const asked = std::make_shared<std::atomic<bool>>(false);
   rig r{.members = sleeper_and_runner(), .arrival = [asked](std::size_t) { asked->wait(false); }};
   r.build(variants()[0]);
-  gate_release const release{asked};
+  at_scope_end const release{[asked] { open_gate(*asked); }};
   CHECK(r.sys->hosts() == std::vector{r.members[0].on, r.members[1].on});
   core::host_future<core::pause> pending;
   {
@@ -765,7 +765,7 @@ TEST_CASE("a member's time and the pending barrier are refused while a resume is
   CHECK(r.sys->base_of(0).ps == 0);
   CHECK(r.sys->base_of(1).ps == 0);
   r.sys->request_pause();
-  release.open();
+  open_gate(*asked);
   auto const stopped = pending.get();
   CHECK(stopped.reason == core::pause_reason::requested);
   auto const held = r.sys->lock();
@@ -3957,22 +3957,6 @@ struct failing_alignment
   }
 };
 
-class gates_open
-{
-public:
-  explicit gates_open(failing_alignment& state) : state_{state}
-  {}
-  gates_open(gates_open const&)                    = delete;
-  auto operator=(gates_open const&) -> gates_open& = delete;
-
-  ~gates_open()
-  {
-    state_.open_all();
-  }
-
-private:
-  failing_alignment& state_;
-};
 }
 
 TEST_CASE(
@@ -4059,7 +4043,7 @@ TEST_CASE(
           {},
           core::sync_mode::clocks
       };
-      gates_open const               opened{*state};
+      at_scope_end const             opened{[state] { state->open_all(); }};
       core::host_future<core::pause> pending;
       {
         auto const                  held = sys.lock();
@@ -4104,6 +4088,245 @@ TEST_CASE(
       CHECK(sys.time_of(held, 1).ps > until);
       CHECK(sys.time_of(held, 2).ps == x);
       CHECK(sys.time_of(held, 3).ps == x + latency);
+    }
+  }
+}
+
+namespace
+{
+struct held_fault_rig
+{
+  std::array<std::shared_ptr<core::host>, 5> hosts{};
+  std::atomic<bool>                          a_done{false};
+  std::atomic<bool>                          b_done{false};
+  std::atomic<int>                           waiting{0};
+  std::atomic<bool>                          requested{false};
+  std::atomic<bool>                          armed{false};
+  std::atomic<bool>                          found{false};
+  std::atomic<std::int64_t>                  fault_at{-1};
+  std::array<int, 5>                         phases{};
+
+  void open_all() noexcept
+  {
+    open_gate(requested);
+    open_gate(found);
+  }
+};
+
+class faulting_link final : public core::member_link
+{
+public:
+  faulting_link(
+      std::size_t                     from,
+      std::size_t                     to,
+      std::int64_t                    latency,
+      std::shared_ptr<held_fault_rig> state)
+      : from_{from}, to_{to}, latency_{latency}, state_{std::move(state)}
+  {}
+
+  auto sender() const noexcept -> std::size_t override
+  {
+    return from_;
+  }
+
+  auto receiver() const noexcept -> std::size_t override
+  {
+    return to_;
+  }
+
+  auto latency() const noexcept -> core::sys_time override
+  {
+    return core::sys_time{latency_};
+  }
+
+  void enter_slice(core::time_map) override
+  {}
+
+  auto posted_count() const noexcept -> std::uint64_t override
+  {
+    return 0;
+  }
+
+  void sender_reset(core::sys_time) override
+  {}
+
+  void receiver_reset(core::sys_time) override
+  {}
+
+  auto drain(std::uint64_t, core::sys_time const& barrier, core::sys_time const&, core::time_map)
+      -> std::optional<core::link_fault> override
+  {
+    if(not state_->armed.exchange(false))
+    {
+      return std::nullopt;
+    }
+    state_->fault_at = barrier.ps;
+    open_gate(state_->found);
+    return core::link_fault{
+        .at     = barrier,
+        .member = from_,
+        .error  = std::make_exception_ptr(test_failure("held fault"))};
+  }
+
+  auto due() const -> std::optional<core::sys_time> override
+  {
+    return std::nullopt;
+  }
+
+  auto quiet() const -> bool override
+  {
+    return true;
+  }
+
+  void finish(core::sys_time) override
+  {}
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+private:
+  std::size_t                     from_;
+  std::size_t                     to_;
+  std::int64_t                    latency_;
+  std::shared_ptr<held_fault_rig> state_;
+};
+}
+
+TEST_CASE("a drain fault found while a pause aligns stops a lagging member at its point")
+{
+  constexpr std::int64_t latency = 20 * us_ps;
+  constexpr std::int64_t onward  = 30 * us_ps;
+  constexpr std::int64_t far     = 10 * latency;
+  constexpr std::int64_t until   = 1 * ms_ps;
+  constexpr std::int64_t gate_sr = until - 5 * latency;
+  constexpr std::int64_t gate_c  = until - 8 * latency;
+  constexpr std::size_t  s       = 2;
+  constexpr std::size_t  r       = 3;
+  constexpr std::size_t  c       = 4;
+  for(bool const timed : {true, false})
+  {
+    for(std::uint64_t const slice : {std::uint64_t{8}, std::uint64_t{3}})
+    {
+      for(int repeat = 0; repeat < 5; ++repeat)
+      {
+        CAPTURE(timed);
+        CAPTURE(slice);
+        CAPTURE(repeat);
+        std::vector<core::member_ref> members{
+            member("idle", "idle_forever"), member("alu", "alu_entry"),
+            member("idle", "idle_forever"), member("idle", "idle_forever"),
+            member("idle", "idle_forever")};
+        auto state = std::make_shared<held_fault_rig>();
+        for(std::size_t index = 0; index < members.size(); ++index)
+        {
+          state->hosts.at(index) = members[index].on;
+        }
+        std::vector<std::shared_ptr<core::member_link>> wires{
+            std::make_shared<faulting_link>(s, r, latency, state),
+            std::make_shared<bare_link>(r, c, onward)};
+        for(std::size_t from : {s, r, c})
+        {
+          for(std::size_t to : {std::size_t{0}, std::size_t{1}})
+          {
+            wires.push_back(std::make_shared<bare_link>(from, to, far));
+          }
+        }
+        wires.push_back(std::make_shared<bare_link>(r, s, far));
+        wires.push_back(std::make_shared<bare_link>(c, s, far));
+        wires.push_back(std::make_shared<bare_link>(c, r, far));
+        core::system sys{
+            members,
+            std::move(wires),
+            core::slice_bounds{
+                               .max_instructions = icount{slice}, .wall_budget = std::chrono::milliseconds{1}},
+            [state](std::size_t index) {
+              auto const now   = static_cast<std::int64_t>(state->hosts.at(index)
+                                                               ->member_inline(core::member_id{})
+                                                               .virtual_clock()
+                                                               .time()
+                                                               .ps);
+              auto&      phase = state->phases.at(index);
+              if(index == 0)
+              {
+                state->a_done = state->a_done or now >= until;
+                return;
+              }
+              if(index == 1)
+              {
+                state->b_done = state->b_done or now >= until;
+                return;
+              }
+              if(phase == 0 and now >= (index == c ? gate_c : gate_sr))
+              {
+                phase = 1;
+                ++state->waiting;
+                state->requested.wait(false);
+              }
+              else if(phase == 1)
+              {
+                phase = 2;
+              }
+              else if(phase == 2 and index == r)
+              {
+                phase        = 3;
+                state->armed = true;
+              }
+              else if(phase == 2 and index == c)
+              {
+                phase = 3;
+                state->found.wait(false);
+              }
+                               },
+            {},
+            core::sync_mode::clocks
+        };
+        at_scope_end const             opened{[state] { state->open_all(); }};
+        core::host_future<core::pause> pending;
+        {
+          auto const                  held = sys.lock();
+          std::vector<core::sys_time> offsets(members.size());
+          sys.start(held, offsets);
+          for(auto const halted : {s, r, c})
+          {
+            sys.release(held, halted, true);
+          }
+          pending = sys.resume(held, core::sys_time{timed ? until : 10 * until});
+        }
+        std::atomic<bool> landed{false};
+        std::jthread      guard{[&sys, &landed, state](std::stop_token const& stopping) {
+          auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+          while(not stopping.stop_requested() and std::chrono::steady_clock::now() < deadline)
+          {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+          }
+          if(not landed.load())
+          {
+            state->open_all();
+            sys.close();
+          }
+        }};
+        while(not(state->waiting == 3 and (not timed or (state->a_done and state->b_done)))
+              and not pending.done())
+        {
+          std::this_thread::sleep_for(std::chrono::microseconds{200});
+        }
+        sys.request_pause();
+        open_gate(state->requested);
+        auto const stopped = pending.get();
+        landed.store(true);
+        guard.request_stop();
+        REQUIRE(stopped.reason == core::pause_reason::error);
+        CHECK(stopped.member == s);
+        auto const t = state->fault_at.load();
+        REQUIRE(t > gate_c);
+        CHECK(stopped.at.ps == t);
+        auto const held = sys.lock();
+        CHECK(sys.time_of(held, r).ps == t + latency);
+        CHECK(sys.time_of(held, c).ps == t + latency + onward);
+      }
     }
   }
 }
