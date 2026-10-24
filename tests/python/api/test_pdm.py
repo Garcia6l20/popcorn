@@ -377,6 +377,7 @@ def test_a_snapshot_between_two_samples_keeps_the_bits_clocked_before_it(
     assert [s.at for s in got] == [sample_at(anchor, k) for k in range(first, first + 33)]
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 def test_a_reset_after_a_reads_stop_leaves_the_samples_past_the_stop_queued(
     u575: popcorn.PartDescription, running: bool
@@ -457,6 +458,7 @@ class Racing:
         return self.link.drain_until(count, until_ps, resets)
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 def test_a_reset_after_a_no_wait_reads_count_leaves_the_samples_past_its_deadline_queued(
     u575: popcorn.PartDescription, running: bool, monkeypatch: pytest.MonkeyPatch
@@ -538,6 +540,7 @@ def test_a_full_tap_drops_its_oldest_samples_and_cycles_keep_every_queue_bounded
     assert tap.dropped == 12
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 def test_parked_and_running_reads_give_the_same_samples_and_times(
     u575: popcorn.PartDescription, running: bool

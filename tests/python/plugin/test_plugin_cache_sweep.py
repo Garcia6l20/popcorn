@@ -197,6 +197,7 @@ def test_an_xdist_worker_does_not_sweep(pytester: pytest.Pytester) -> None:
     assert survives(entry)
 
 
+@pytest.mark.timeout(70)
 def test_the_controller_sweeps_under_xdist(pytester: pytest.Pytester) -> None:
     pytest.importorskip("xdist")
     entry = booted(pytester)

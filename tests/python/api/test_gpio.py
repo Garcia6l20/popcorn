@@ -131,6 +131,7 @@ def post_samples(
     return [m.read(pa5, seen, at=at + EDGE_GAP // 2) for at, _ in edges]
 
 
+@pytest.mark.timeout(40)
 def test_timed_edges_give_the_same_samples_parked_and_running(board: popcorn.Machine) -> None:
     rerun = popcorn.Machine(board.description, image=board.images[0])
     rerun.reset()

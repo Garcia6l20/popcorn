@@ -60,6 +60,7 @@ def test_a_second_build_without_a_change_runs_nothing(
     assert (entry.stat().st_mtime_ns, library.stat().st_mtime_ns) == before
 
 
+@pytest.mark.timeout(60)
 def test_an_edit_seen_by_a_new_process_builds_a_new_entry(tmp_path: Path, cache: Path) -> None:
     source = copied("echo", tmp_path)
     code = f"from popcorn.plugin import Plugin\nprint(Plugin.dev({str(source)!r}).built())\n"
@@ -76,6 +77,7 @@ def test_an_edit_seen_by_a_new_process_builds_a_new_entry(tmp_path: Path, cache:
     assert len(entries(cache, "echo")) == 2
 
 
+@pytest.mark.timeout(60)
 def test_an_entry_built_before_a_helper_edit_is_not_reused_after_it(
     tmp_path: Path, cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -166,6 +168,7 @@ def test_an_include_outside_the_plugin_directory_fails_naming_it(
     assert str(other / "outside.hpp") in str(raised.value)
 
 
+@pytest.mark.timeout(250)
 def test_two_processes_building_together_build_once(tmp_path: Path, cache: Path) -> None:
     source = copied("echo", tmp_path)
     log = tmp_path / "builds.log"
@@ -196,6 +199,7 @@ def test_two_processes_building_together_build_once(tmp_path: Path, cache: Path)
     assert len(log.read_text().splitlines()) == 1
 
 
+@pytest.mark.timeout(60)
 def test_a_failed_build_is_reported_once_and_cached_until_fixed(
     tmp_path: Path, cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -217,6 +221,7 @@ def test_a_failed_build_is_reported_once_and_cached_until_fixed(
     assert len(log.read_text().splitlines()) == 1
 
 
+@pytest.mark.timeout(60)
 def test_a_failed_build_fixed_in_the_same_process_builds(tmp_path: Path, cache: Path) -> None:
     source = copied("echo", tmp_path)
     good = (source / "echo.cpp").read_text()
@@ -252,6 +257,7 @@ def test_another_compiler_is_refused_naming_both(
     assert not cache.exists() or not entries(cache, "echo")
 
 
+@pytest.mark.timeout(90)
 def test_five_edits_leave_at_most_two_entries(tmp_path: Path, cache: Path) -> None:
     source = copied("echo", tmp_path)
     code = f"from popcorn.plugin import Plugin\nprint(Plugin.dev({str(source)!r}).built())\n"
@@ -262,6 +268,7 @@ def test_five_edits_leave_at_most_two_entries(tmp_path: Path, cache: Path) -> No
     assert len(entries(cache, "echo")) == 2
 
 
+@pytest.mark.timeout(60)
 def test_eviction_skips_an_entry_whose_build_lock_is_held(tmp_path: Path, cache: Path) -> None:
     source = copied("echo", tmp_path)
     code = f"from popcorn.plugin import Plugin\nprint(Plugin.dev({str(source)!r}).built())\n"
@@ -303,6 +310,7 @@ def test_eviction_removes_staging_copies_a_killed_process_left(cache: Path) -> N
     assert fresh.is_dir() and other.is_dir()
 
 
+@pytest.mark.timeout(60)
 def test_a_failed_build_keeps_no_use_lock(tmp_path: Path, cache: Path) -> None:
     source = copied("echo", tmp_path)
     good = (source / "echo.cpp").read_text()
@@ -331,6 +339,7 @@ def test_the_cache_root_follows_the_variables(
     assert _build_cache.cache_root() == tmp_path / "home" / ".cache" / "popcorn" / "plugins"
 
 
+@pytest.mark.timeout(250)
 def test_an_unset_cache_variable_builds_under_xdg_cache_home(tmp_path: Path) -> None:
     source = copied("nobind", tmp_path)
     environment = {key: value for key, value in os.environ.items() if key != "POPCORN_PLUGIN_CACHE"}
@@ -351,6 +360,7 @@ def test_an_unset_cache_variable_builds_under_xdg_cache_home(tmp_path: Path) -> 
     assert Path(ran.stdout.strip()).is_relative_to(tmp_path / "xdg" / "popcorn" / "plugins")
 
 
+@pytest.mark.timeout(60)
 @pytest.mark.parametrize(
     ("variable", "value"), [("CXXFLAGS", "-fabi-version=20"), ("CXX", "/nonexistent/g++")]
 )

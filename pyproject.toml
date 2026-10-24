@@ -34,6 +34,7 @@ dev = [
     "jsonschema",
     "pytest-asyncio==1.4.0",
     "pytest-xdist==3.8.0",
+    "pytest-timeout==2.4.0",
 ]
 docs = [
     "mkdocstrings-python==2.0.10",
@@ -70,4 +71,8 @@ executionEnvironments = [
 [tool.uv]
 default-groups = ["dev", "docs"]
 no-build-isolation-package = ["popcorn"]
+
+[tool.pytest.ini_options]
+timeout = 15
+timeout_method = "thread"
 

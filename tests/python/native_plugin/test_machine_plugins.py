@@ -147,6 +147,7 @@ def test_two_plugins_of_one_name_are_refused(kit: Plugin) -> None:
     assert error.key == "plugins[1]"
 
 
+@pytest.mark.timeout(20)
 def test_a_plugin_model_serves_only_the_peripheral_the_board_names(kit: Plugin) -> None:
     named = described(kit, RNG=popcorn.Periph(model=kit.model("rng"))).machine()
     declared = described(kit).machine()
@@ -623,6 +624,7 @@ def boot_session(root: Path, cache: Path) -> str:
     )
 
 
+@pytest.mark.timeout(610)
 @pytest.mark.parametrize(
     "board", ['{"UNMODELLED": popcorn.Periph(model=PLUGIN.model("rng"))}', "{}"]
 )

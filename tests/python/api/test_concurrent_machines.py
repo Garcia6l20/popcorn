@@ -298,6 +298,7 @@ def test_machines_held_inside_their_runs_together_equal_each_alone(
     assert frames(chosen) == ref.frames
 
 
+@pytest.mark.timeout(30)
 def test_a_restore_mid_run_leaves_the_other_machines_alone(
     u575: popcorn.PartDescription,
 ) -> None:

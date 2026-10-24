@@ -84,6 +84,7 @@ def test_rng_words_of_seed_0_are_fixed() -> None:
     assert rng_words(0, 0) == []
 
 
+@pytest.mark.timeout(40)
 @pytest.mark.parametrize("seed", [0, 0x5EED])
 def test_the_firmware_reads_rng_words_parked_and_running(
     u575: popcorn.PartDescription, seed: int

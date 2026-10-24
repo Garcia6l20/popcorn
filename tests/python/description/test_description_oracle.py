@@ -135,6 +135,7 @@ def _access_name(access: Access) -> str:
     return access.value
 
 
+@pytest.mark.timeout(70)
 def test_oracle_matches_peripherals_registers_and_fields(st_svd_u575: Path) -> None:
     device: SvdDevice = expand_svd(st_svd_u575.read_bytes(), file=str(st_svd_u575))
     lines = _run_oracle(st_svd_u575)
@@ -156,6 +157,7 @@ def test_oracle_matches_peripherals_registers_and_fields(st_svd_u575: Path) -> N
     assert oracle_fields == builder_fields
 
 
+@pytest.mark.timeout(70)
 def test_oracle_matches_irq_number_sets(st_svd_u575: Path) -> None:
     device: SvdDevice = expand_svd(st_svd_u575.read_bytes(), file=str(st_svd_u575))
     lines = _run_oracle(st_svd_u575)

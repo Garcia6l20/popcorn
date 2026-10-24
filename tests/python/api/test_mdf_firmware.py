@@ -409,6 +409,7 @@ def outcome(m: popcorn.Machine) -> Outcome:
     )
 
 
+@pytest.mark.timeout(40)
 def test_two_mics_give_the_same_ring_samples_and_times_parked_and_running(
     u575: popcorn.PartDescription,
 ) -> None:

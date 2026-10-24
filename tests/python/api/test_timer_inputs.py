@@ -52,6 +52,7 @@ def drive(m: popcorn.Machine, edges: dict[int, list[tuple[VirtualTime, bool]]]) 
         asyncio.run(m.periph.GPIOA.pin(pin).drive_edges(pin_edges))
 
 
+@pytest.mark.timeout(40)
 def test_an_encoder_counts_a_quadrature_sequence_alike_parked_and_running(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -95,6 +96,7 @@ def pulse_train(start: VirtualTime, count: int) -> list[tuple[VirtualTime, bool]
     return edges
 
 
+@pytest.mark.timeout(40)
 def test_a_capture_with_icpsc_4_and_a_filter_logs_every_fourth_edge_alike_parked_and_running(
     u575: popcorn.PartDescription,
 ) -> None:

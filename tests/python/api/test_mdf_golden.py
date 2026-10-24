@@ -440,6 +440,7 @@ def test_the_peer_chain_fills_a_16_bit_ring_with_filter_0_then_filter_1(
         ]
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("running", [False, True], ids=["parked", "running"])
 def test_parked_and_running_captures_give_the_same_buffers_and_times(
     u575: popcorn.PartDescription, running: bool
@@ -548,6 +549,7 @@ def snapshot_leg(
     return at, data, got
 
 
+@pytest.mark.timeout(30)
 def test_a_snapshot_mid_sample_restores_the_chain_and_a_fresh_modulator_parked_or_running(
     u575: popcorn.PartDescription,
 ) -> None:

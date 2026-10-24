@@ -476,6 +476,7 @@ def test_a_free_run_deadline_read_ends_at_its_absolute_time(board: popcorn.Machi
     assert len(frames) < 40
 
 
+@pytest.mark.timeout(30)
 def test_a_free_run_deadline_read_takes_the_frames_a_parked_one_takes(
     board: popcorn.Machine,
 ) -> None:
@@ -504,6 +505,7 @@ def test_a_free_run_deadline_read_takes_the_frames_a_parked_one_takes(
     assert asyncio.run(reads(at)) == (first, later)
 
 
+@pytest.mark.timeout(30)
 def test_a_read_registered_past_its_deadline_takes_only_the_frames_ready_by_it(
     board: popcorn.Machine,
 ) -> None:
@@ -540,6 +542,7 @@ def test_a_read_registered_past_its_deadline_takes_only_the_frames_ready_by_it(
     assert asyncio.run(reads(at)) == (waited, fast, later)
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize(
     ("fields", "sent", "echoed"),
     [
@@ -608,6 +611,7 @@ ISR_STEPS = (1.5, 2.5, 4.1, 4.5)
 2-bit hold, after the NOISE c."""
 
 
+@pytest.mark.timeout(30)
 def test_tagged_bytes_and_a_break_give_the_same_flags_and_frames_parked_and_running(
     board: popcorn.Machine,
 ) -> None:
@@ -750,6 +754,7 @@ def test_read_until_gives_the_same_bytes_and_span_parked_and_running(
     assert first[1].span() == second[1].span()
 
 
+@pytest.mark.timeout(40)
 def test_a_growing_match_is_the_shortest_even_when_one_slice_saw_every_byte(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -1014,6 +1019,7 @@ def frames_after(at: VirtualTime, frames: float) -> VirtualTime:
     return at + VirtualDuration(int(frames * FRAME_PS))
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("rtse", [True, False], ids=["rts", "no-rts"])
 def test_cts_holds_the_echo_and_rts_holds_the_host_the_same_parked_and_running(
     board: popcorn.Machine, rtse: bool

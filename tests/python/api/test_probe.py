@@ -33,6 +33,7 @@ def reached(machines: Machines, target: int | str, scenario: str | None = None) 
     return stop.time
 
 
+@pytest.mark.timeout(40)
 def test_a_probe_counts_a_jump_made_once_while_the_machine_free_runs(machines: Machines) -> None:
     m = machines("jump")
     flag = m.ref.var("jump_flag")
@@ -55,6 +56,7 @@ def test_a_probe_counts_a_jump_made_once_while_the_machine_free_runs(machines: M
     assert ticks > 0
 
 
+@pytest.mark.timeout(40)
 def test_a_hit_answers_the_same_parked_and_running(machines: Machines) -> None:
     mark = reached(machines, "alu_mark")
     parked = machines()
@@ -137,6 +139,7 @@ def test_within_is_checked_at_the_call(machines: Machines) -> None:
     assert m.time == VirtualTime(0)
 
 
+@pytest.mark.timeout(40)
 def test_a_with_block_removes_the_probe_parked_and_running(machines: Machines) -> None:
     m = machines("jump")
     m.mem.u32[m.sym("jump_flag")] = 1
@@ -207,6 +210,7 @@ def test_a_probe_shares_its_address_with_an_intercept(machines: Machines) -> Non
     assert skip.active
 
 
+@pytest.mark.timeout(40)
 def test_a_hit_raises_as_wait_until_on_another_stop(machines: Machines) -> None:
     m = machines("fault")
     with pytest.raises(popcorn.FaultError):
@@ -232,6 +236,7 @@ def test_a_hit_raises_as_wait_until_on_another_stop(machines: Machines) -> None:
         run_bounded(scenario(), HANG)
 
 
+@pytest.mark.timeout(40)
 def test_a_probe_from_a_handler_is_refused_and_from_a_posted_body_is_added(
     machines: Machines,
 ) -> None:
@@ -258,6 +263,7 @@ def test_a_probe_from_a_handler_is_refused_and_from_a_posted_body_is_added(
     assert probe.active and probe.count == 0
 
 
+@pytest.mark.timeout(40)
 def test_a_thousand_hits_take_no_gil(machines: Machines) -> None:
     m = machines("jump")
     m.mem.u32[m.sym("jump_flag")] = 1
@@ -314,6 +320,7 @@ def test_a_probe_counts_an_arrival_once_after_the_intercept_that_stopped_there_g
     assert probe.count == 1
 
 
+@pytest.mark.timeout(40)
 def test_a_free_run_wait_ends_its_time_at_or_after_the_deadline_it_returns(
     machines: Machines,
 ) -> None:
@@ -336,6 +343,7 @@ def test_a_free_run_wait_ends_its_time_at_or_after_the_deadline_it_returns(
     assert ms(1).ps <= deadline <= stop.time.ps
 
 
+@pytest.mark.timeout(40)
 def test_ctrl_c_while_waiting_for_the_boundary_adds_nothing_and_still_removes(
     machines: Machines,
 ) -> None:
@@ -384,6 +392,7 @@ def test_ctrl_c_while_waiting_for_the_boundary_adds_nothing_and_still_removes(
     assert m.remove_hooks() == 0
 
 
+@pytest.mark.timeout(40)
 def test_a_hit_during_a_run_awaited_elsewhere_is_refused_as_busy(machines: Machines) -> None:
     m = machines()
     probe = m.probe("idle_main")
@@ -398,6 +407,7 @@ def test_a_hit_during_a_run_awaited_elsewhere_is_refused_as_busy(machines: Machi
     run_bounded(scenario(), HANG)
 
 
+@pytest.mark.timeout(40)
 def test_a_reached_wait_in_a_free_run_sees_a_jump_made_once_mid_slice(machines: Machines) -> None:
     m = machines("jump")
     flag = m.ref.var("jump_flag")
@@ -416,6 +426,7 @@ def test_a_reached_wait_in_a_free_run_sees_a_jump_made_once_mid_slice(machines: 
     assert m.mem.u32[m.sym("alu_rounds")] == 1
 
 
+@pytest.mark.timeout(40)
 def test_a_reached_wait_in_a_free_run_counts_the_current_pc_at_its_next_execution(
     machines: Machines,
 ) -> None:
@@ -439,6 +450,7 @@ def test_a_reached_wait_in_a_free_run_counts_the_current_pc_at_its_next_executio
     assert m.remove_hooks() == 0
 
 
+@pytest.mark.timeout(40)
 def test_a_probe_is_added_and_removed_after_a_fault_ended_the_free_run(
     machines: Machines,
 ) -> None:

@@ -93,6 +93,7 @@ def test_a_controller_clocks_the_firmware_target_and_hears_its_frames(
     assert m.pending_events == events
 
 
+@pytest.mark.timeout(40)
 def test_a_transfer_is_alike_parked_and_running(u575: popcorn.PartDescription) -> None:
     m, parked = echo_machine(u575)
     at = m.time + START

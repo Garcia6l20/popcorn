@@ -781,12 +781,14 @@ except popcorn.EmulationError as error:
 """
 
 
+@pytest.mark.timeout(70)
 def test_a_command_pending_when_its_machine_closes_raises_closed() -> None:
     child = run_child(CLOSED.format(m33=str(M33_JSON), driver=str(DRIVER_ELF)), CHILD_TIMEOUT)
     assert child.returncode == 0, child.stderr
     assert child.stdout.strip() == "the machine was closed"
 
 
+@pytest.mark.timeout(70)
 def test_the_lock_order_holds_under_contention(u575: popcorn.PartDescription) -> None:
     from .conftest import BOARD_ELF
 
@@ -867,6 +869,7 @@ print("ok")
 """
 
 
+@pytest.mark.timeout(70)
 def test_hooks_and_traces_dropped_during_a_run_are_removed_at_a_boundary(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -958,6 +961,7 @@ print("ok")
 """
 
 
+@pytest.mark.timeout(70)
 @pytest.mark.parametrize("native", [False, True], ids=["del", "destructor"])
 @pytest.mark.parametrize("surfaced", [False, True], ids=["unclaimed", "surfaced"])
 @pytest.mark.parametrize("kind", ["stop", "raise"])
@@ -974,6 +978,7 @@ def test_a_collected_machine_reports_only_an_end_no_wait_delivered(
     assert child.stdout.strip() == "ok"
 
 
+@pytest.mark.timeout(70)
 @pytest.mark.parametrize("native", [False, True], ids=["del", "destructor"])
 @pytest.mark.parametrize("kind", ["stop", "raise"])
 def test_a_collected_machine_reports_no_end_a_condition_wait_delivered(
@@ -1054,6 +1059,7 @@ print("ok")
 """
 
 
+@pytest.mark.timeout(70)
 @pytest.mark.parametrize("kind", ["stop", "raise"])
 def test_a_wait_of_an_earlier_free_run_delivers_nothing_of_the_next(kind: str) -> None:
     script = (
@@ -1124,6 +1130,7 @@ print("ok")
 """
 
 
+@pytest.mark.timeout(70)
 def test_an_end_a_wait_delivered_is_not_reported_after_a_boundary_stop_read_later() -> None:
     script = (
         TWO_WAITS.replace("__API__", repr(str(pathlib.Path(__file__).parent)))
@@ -1478,6 +1485,7 @@ def free_run_script(shape: str, rounds: int) -> str:
     )
 
 
+@pytest.mark.timeout(70)
 @pytest.mark.parametrize("shape", ["attribute", "method", "lambda", "hook"])
 def test_a_free_running_machine_held_by_its_model_is_collected(shape: str) -> None:
     child = subprocess.run(
@@ -1667,6 +1675,7 @@ print("ok")
 """
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("mode", ["asyncio", "result", "halt"])
 def test_ctrl_c_on_a_blocked_handler_abandons_its_machine(mode: str) -> None:
     script = (
@@ -2084,6 +2093,7 @@ print("child", os.waitstatus_to_exitcode(status), took < 5, flush=True)
 """
 
 
+@pytest.mark.timeout(40)
 @pytest.mark.parametrize("mode", ["exit", "use", "collect", "inherited"])
 def test_a_child_forked_from_a_running_machine_exits_and_refuses_it(mode: str) -> None:
     script = (
@@ -2103,6 +2113,7 @@ def test_a_child_forked_from_a_running_machine_exits_and_refuses_it(mode: str) -
         assert lines[0].startswith("request refused: this machine request was made before os.fork")
 
 
+@pytest.mark.timeout(40)
 def test_a_stamped_write_left_queued_at_script_end_is_not_reported() -> None:
     child = run_child(
         f"""
@@ -2149,6 +2160,7 @@ print("child", os.waitstatus_to_exitcode(status), flush=True)
 """
 
 
+@pytest.mark.timeout(40)
 def test_a_forked_child_refuses_a_new_pty_and_closes_an_inherited_one_at_once() -> None:
     child = run_child(FORKED_PTY.replace("__ELF__", repr(str(BOARD_ELF))), timeout=30)
     assert child.returncode == 0, child.stderr
@@ -2245,6 +2257,7 @@ print(late, sorted(set(device.seen[mark + len(late):])))
 """
 
 
+@pytest.mark.timeout(70)
 def test_a_device_reattached_after_an_abandon_is_never_called_in_the_new_machines_context(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -2340,6 +2353,7 @@ print("gone" if _core.host_threads() < running else "alive")
 """
 
 
+@pytest.mark.timeout(70)
 @pytest.mark.parametrize("kind", ["I2C1", "SPI1"])
 def test_an_abandoned_machines_thread_drops_its_python_devices_under_the_gil(kind: str) -> None:
     """The abandoned machine's thread is the last owner of its engine once the blocked device
@@ -2431,6 +2445,7 @@ print(reported)
 """
 
 
+@pytest.mark.timeout(40)
 @pytest.mark.parametrize("native_only", [False, True], ids=["finalizer", "native"])
 def test_a_late_failure_of_an_abandoned_machine_is_reported_when_it_is_dropped(
     native_only: bool,
@@ -2516,6 +2531,7 @@ print("ok")
 """
 
 
+@pytest.mark.timeout(40)
 def test_an_abandoned_machine_runs_its_queued_removals_once_its_thread_is_gone() -> None:
     script = ORPHAN_REMOVALS.replace("__JSON__", repr(str(M33_JSON))).replace(
         "__ELF__", repr(str(DRIVER_ELF))
@@ -2565,6 +2581,7 @@ print("leaving", flush=True)
 """
 
 
+@pytest.mark.timeout(40)
 def test_a_machine_halted_and_dropped_after_the_exit_abandon_does_not_hang() -> None:
     script = DROPPED_AFTER_EXIT.replace("__JSON__", repr(str(M33_JSON))).replace(
         "__ELF__", repr(str(DRIVER_ELF))
@@ -2574,6 +2591,7 @@ def test_a_machine_halted_and_dropped_after_the_exit_abandon_does_not_hang() -> 
     assert "the machine thread of POPCORN-M33-TEST did not stop at exit" in child.stderr
 
 
+@pytest.mark.timeout(35)
 @pytest.mark.parametrize("interrupted", [False, True], ids=["timeout", "signal"])
 def test_an_exit_with_a_blocked_handler_abandons_its_machine(interrupted: bool) -> None:
     script = (
@@ -2693,6 +2711,7 @@ def test_a_park_after_a_wait_returned_the_end_returns_none(machines: Machines) -
     assert m._park() is None  # pyright: ignore[reportPrivateUsage]
 
 
+@pytest.mark.timeout(30)
 def test_an_always_raising_filter_sees_the_dropped_count_a_bounded_number_of_times(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

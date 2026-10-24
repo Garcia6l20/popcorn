@@ -90,6 +90,7 @@ def outcome(call: Callable[[], object]) -> str:
     return "ok"
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)
 def test_a_scheduled_idle_cut_classifies_frames_by_their_sender_times(
     pair: Build, slice_instructions: int, third: VirtualDuration | None
@@ -110,6 +111,7 @@ def test_a_scheduled_idle_cut_classifies_frames_by_their_sender_times(
     assert abs(words[byte + 3] - words[byte + 1] - CYCLES_PER_FRAME * idle_after) <= 20
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)
 def test_a_scheduled_break_cut_gives_one_break_character_at_its_stop_sample(
     pair: Build, slice_instructions: int, third: VirtualDuration | None
@@ -185,6 +187,7 @@ def owner_paused_cut(system: System) -> tuple[Seen, Outcome]:
     return seen, receiver_outcome(system)
 
 
+@pytest.mark.timeout(30)
 def test_break_and_restore_from_the_owner_s_intercepts_take_its_system_time(
     pair: Build,
 ) -> None:
@@ -216,6 +219,7 @@ def wide_pair(
     return system
 
 
+@pytest.mark.timeout(30)
 def test_a_cut_from_the_owner_s_callback_after_a_pause_misses_no_frame_the_peer_sent_ahead(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -242,6 +246,7 @@ def paused_owner_legs(u575: popcorn.PartDescription, made: list[System]) -> None
     assert [f.index for f in frames if f.cut][:2] == [9, 10]
 
 
+@pytest.mark.timeout(30)
 def test_break_line_from_the_body_while_running_raises_and_changes_nothing(
     pair: Build,
 ) -> None:
@@ -299,6 +304,7 @@ def two_callers(system: System) -> tuple[list[str], list[str]]:
     return by_a, by_b
 
 
+@pytest.mark.timeout(30)
 def test_only_the_cut_owner_s_callbacks_change_cuts_whichever_calls_first(pair: Build) -> None:
     refused_a = "RuntimeError: break_line from a callback: only callbacks of a, the link's"
     for slice_instructions, third in VARIANT_VALUES:
@@ -314,6 +320,7 @@ def test_only_the_cut_owner_s_callbacks_change_cuts_whichever_calls_first(pair: 
         assert "only callbacks of b" in by_a[0]
 
 
+@pytest.mark.timeout(30)
 def test_a_callback_of_another_system_s_machine_is_refused(pair: Build) -> None:
     system = pair()
     tap = system.tap("a.USART1")
@@ -358,6 +365,7 @@ def body_after_a_pause(system: System) -> None:
     assert tap.owner == "a"
 
 
+@pytest.mark.timeout(30)
 def test_a_body_call_after_a_pause_inside_running_or_with_a_goal_pending_raises(
     pair: Build,
 ) -> None:
@@ -382,6 +390,7 @@ def test_a_body_call_after_a_pause_inside_running_or_with_a_goal_pending_raises(
     assert tap.owner == "a"
 
 
+@pytest.mark.timeout(30)
 def test_the_caller_is_found_by_its_engine_and_a_parked_section_is_refused(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -457,6 +466,7 @@ def callback_cuts(system: System) -> tuple[list[str], Outcome]:
     return tried + by_b, done
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)
 def test_a_cut_from_the_owner_s_callback_is_bound_by_its_time(
     pair: Build, slice_instructions: int, third: VirtualDuration | None
@@ -473,6 +483,7 @@ def test_a_cut_from_the_owner_s_callback_is_bound_by_its_time(
     assert other.startswith("RuntimeError: cut from a callback: only callbacks of a")
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("swap", [False, True], ids=["a stops", "b stops"])
 def test_a_stopped_break_takes_the_later_end_s_system_time(pair: Build, swap: bool) -> None:
     entries = {"a_entry": "link_rx", "b_entry": "link_tx"} if swap else {}
@@ -501,6 +512,7 @@ def snapshot_run(system: System, restored: popcorn.SystemSnapshot | None) -> Out
     return finish(system)
 
 
+@pytest.mark.timeout(30)
 def test_an_open_cut_is_in_a_snapshot_and_the_owner_is_kept_across_a_restore(
     pair: Build,
 ) -> None:
@@ -519,6 +531,7 @@ def test_an_open_cut_is_in_a_snapshot_and_the_owner_is_kept_across_a_restore(
     assert [f.index for f in frames if f.cut] == list(range(8, 30))
 
 
+@pytest.mark.timeout(30)
 def test_a_cut_window_stays_in_system_time_across_a_receiver_reset(pair: Build) -> None:
     def run(reset: bool) -> tuple[list[tuple[int, bool, bool]], VirtualTime]:
         system = pair()
@@ -587,6 +600,7 @@ def intercept_lag(u575: popcorn.PartDescription) -> int:
     return seen[0] - reached.time.ps
 
 
+@pytest.mark.timeout(30)
 def test_a_callback_s_time_is_the_owner_s_system_time_after_its_resets(
     u575: popcorn.PartDescription, pair: Build
 ) -> None:
@@ -604,6 +618,7 @@ def test_a_callback_s_time_is_the_owner_s_system_time_after_its_resets(
     assert all(f.cut for f in after)
 
 
+@pytest.mark.timeout(30)
 def test_refused_changes_leave_the_link_usable(pair: Build) -> None:
     system = pair(b_entry="link_tx")
     tap = system.tap("a.USART1")
@@ -671,6 +686,7 @@ def test_a_full_link_refusal_names_the_native_limit(pair: Build) -> None:
         tap.cut(at(500), at(600))
 
 
+@pytest.mark.timeout(30)
 def test_a_run_with_cuts_and_no_callback_enters_python_on_no_machine_thread(
     pair: Build,
 ) -> None:
@@ -720,6 +736,7 @@ def injected_cut_run(system: System, running: bool) -> Outcome:
     return tuple(tap.frames()), tuple(logged(b))
 
 
+@pytest.mark.timeout(30)
 def test_injected_frames_are_cut_on_their_receiver_times_stopped_and_running(
     pair: Build,
 ) -> None:
@@ -734,6 +751,7 @@ def test_injected_frames_are_cut_on_their_receiver_times_stopped_and_running(
     assert bytes_of(log) == TX_BYTES
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("third", [None, us(3)], ids=["q=l", "q=3us"])
 def test_frames_ending_at_the_start_or_starting_at_the_end_are_delivered(
     pair: Build, third: VirtualDuration | None
@@ -747,6 +765,7 @@ def test_frames_ending_at_the_start_or_starting_at_the_end_are_delivered(
     assert (frames, log) == scheduled(pair, (1_000_000, None), start, end)
 
 
+@pytest.mark.timeout(30)
 def test_a_closed_system_and_its_tap_are_collected_after_cuts(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -764,6 +783,7 @@ def test_a_closed_system_and_its_tap_are_collected_after_cuts(
     assert held[0]() is None and held[1]() is None
 
 
+@pytest.mark.timeout(30)
 def test_a_free_run_does_not_sleep_through_a_break_cut_ahead(pair: Build) -> None:
     def run(free: bool) -> tuple[int, ...]:
         system = pair()
@@ -789,6 +809,7 @@ def test_a_free_run_does_not_sleep_through_a_break_cut_ahead(pair: Build) -> Non
     assert tail == (FE_ENTRY, LINK_BYTE << 16, LINK_IDLE << 16)
 
 
+@pytest.mark.timeout(30)
 def test_the_tap_of_a_running_system_refuses_owner_changes_from_its_callbacks(
     pair: Build,
 ) -> None:

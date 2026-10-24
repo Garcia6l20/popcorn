@@ -339,6 +339,7 @@ def raised_in_handler(machines: Machines) -> weakref.ref[popcorn.Machine]:
     return weakref.ref(m)
 
 
+@pytest.mark.timeout(60)
 def test_a_single_collection_right_after_a_handler_raised_collects_its_machine(
     machines: Machines, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -147,6 +147,7 @@ def installed(tmp_path_factory: pytest.TempPathFactory) -> Installed:
     return unpacked(wheel, root / "site")
 
 
+@pytest.mark.timeout(250)
 def test_find_names_the_installed_model_on_the_board(installed: Installed) -> None:
     out = lines(
         run_installed(
@@ -180,6 +181,7 @@ def test_find_names_the_installed_model_on_the_board(installed: Installed) -> No
     ]
 
 
+@pytest.mark.timeout(250)
 def test_an_installed_plugin_loads_without_pcons(installed: Installed) -> None:
     out = lines(
         run_installed(
@@ -206,6 +208,7 @@ def test_an_installed_plugin_loads_without_pcons(installed: Installed) -> None:
     assert out == ["True", BINDINGS, str(RNG_BASE)]
 
 
+@pytest.mark.timeout(250)
 def test_a_device_from_plugin_module_attaches_and_runs(installed: Installed) -> None:
     out = lines(
         run_installed(
@@ -248,6 +251,7 @@ def test_a_device_from_plugin_module_attaches_and_runs(installed: Installed) -> 
     assert out == [f"{0xA0} 1 1 1", "Echo"]
 
 
+@pytest.mark.timeout(250)
 def test_a_device_of_a_direct_import_is_refused(installed: Installed) -> None:
     out = lines(
         run_installed(
@@ -289,6 +293,7 @@ def test_a_device_of_a_direct_import_is_refused(installed: Installed) -> None:
     assert out[4] == "dlopen"
 
 
+@pytest.mark.timeout(250)
 def test_a_class_of_a_bindings_module_no_plugin_named_is_refused(installed: Installed) -> None:
     (path,) = installed.package.glob("_native*.so")
     out = lines(run_installed(f"""
@@ -320,6 +325,7 @@ def test_a_class_of_a_bindings_module_no_plugin_named_is_refused(installed: Inst
     ]
 
 
+@pytest.mark.timeout(250)
 def test_a_class_of_a_plugin_module_submodule_follows_its_plugin(installed: Installed) -> None:
     out = lines(
         run_installed(
@@ -352,6 +358,7 @@ def test_a_class_of_a_plugin_module_submodule_follows_its_plugin(installed: Inst
     ]
 
 
+@pytest.mark.timeout(250)
 def test_a_device_of_an_undeclared_installed_plugin_is_refused(installed: Installed) -> None:
     out = lines(
         run_installed(
@@ -415,6 +422,7 @@ def installed_digest(site: Path, bindings: str) -> str:
     return digest
 
 
+@pytest.mark.timeout(250)
 def test_the_installed_digest_covers_the_bindings_module(
     installed: Installed, tmp_path: Path
 ) -> None:
@@ -513,6 +521,7 @@ def test_find_refuses_an_entry_point_that_is_not_its_plugin(
         assert raised.value.expected == f"a popcorn.plugin.Plugin named {name}"
 
 
+@pytest.mark.timeout(250)
 @pytest.mark.parametrize(
     "dependency",
     [
@@ -535,6 +544,7 @@ def test_a_wheel_without_the_exact_pin_is_refused_writing_nothing(
     assert not (source / "build" / "build.ninja").exists()
 
 
+@pytest.mark.timeout(250)
 def test_a_wheel_without_bindings_is_refused_before_any_compile(tmp_path: Path) -> None:
     source = project(tmp_path)
     script = source / "pcons-build.py"
@@ -586,6 +596,7 @@ NATIVE = "project.native(['fixture.cpp'])"
 BIND = "project.bindings(['bind.cpp'])"
 
 
+@pytest.mark.timeout(250)
 @pytest.mark.parametrize("wheel", [False, True])
 def test_plugin_project_calls_come_in_order(tmp_path: Path, wheel: bool) -> None:
     source = project(tmp_path)
@@ -599,6 +610,7 @@ def test_plugin_project_calls_come_in_order(tmp_path: Path, wheel: bool) -> None
     assert scripted(source, f"{NATIVE};{BIND};project.wheel()", wheel) == "ok"
 
 
+@pytest.mark.timeout(250)
 def test_a_wheel_without_its_package_or_a_readable_pyproject_is_refused(tmp_path: Path) -> None:
     calls = f"{NATIVE};{BIND};project.wheel()"
     missing = project(tmp_path / "missing")
@@ -671,6 +683,7 @@ def overlay(tmp_path: Path, digest: str) -> Path:
     return root
 
 
+@pytest.mark.timeout(250)
 def test_a_wheel_built_against_other_sdk_headers_is_refused(
     installed: Installed, tmp_path: Path
 ) -> None:
@@ -709,6 +722,7 @@ def test_a_wheel_built_against_other_sdk_headers_is_refused(
     assert tag in out[1] and host in out[1]
 
 
+@pytest.mark.timeout(250)
 def test_an_installed_plugin_keeps_its_library_absolute(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -716,6 +730,7 @@ def test_an_installed_plugin_keeps_its_library_absolute(
     assert Plugin.installed("x", "libx.so").library == tmp_path / "libx.so"
 
 
+@pytest.mark.timeout(250)
 def test_an_installed_plugin_is_checked_at_the_call(tmp_path: Path) -> None:
     library = tmp_path / "libx.so"
     plugin = Plugin.installed("x", str(library), bindings="x._native")
@@ -737,6 +752,7 @@ def test_an_installed_plugin_is_checked_at_the_call(tmp_path: Path) -> None:
     assert raised.value.key == "bindings"
 
 
+@pytest.mark.timeout(250)
 def test_a_bindings_name_of_a_python_module_is_a_config_error(installed: Installed) -> None:
     out = lines(
         run_installed(
@@ -759,6 +775,7 @@ def test_a_bindings_name_of_a_python_module_is_a_config_error(installed: Install
     assert message.startswith(f"plugin {NAME}: bindings module {NAME} is not an extension module")
 
 
+@pytest.mark.timeout(250)
 def test_a_bindings_module_that_does_not_import_is_a_config_error(installed: Installed) -> None:
     out = lines(
         run_installed(

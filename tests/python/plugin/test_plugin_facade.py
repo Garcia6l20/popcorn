@@ -178,6 +178,7 @@ def test_a_waiter_inside_running_sets_no_last_stop() -> None:
     assert m.last_stop is None
 
 
+@pytest.mark.timeout(70)
 def test_default_budget_bounds_run_wait_for_and_call() -> None:
     m = driver()
     asyncio.run(m.run(until="alu_mark"))

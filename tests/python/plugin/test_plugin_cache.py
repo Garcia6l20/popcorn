@@ -191,6 +191,7 @@ def test_without_the_cache_plugin_every_session_boots(pytester: pytest.Pytester)
     assert not (pytester.path / ".pytest_cache").exists()
 
 
+@pytest.mark.timeout(70)
 def test_cold_workers_boot_once(pytester: pytest.Pytester) -> None:
     pytest.importorskip("xdist")
     write_conftest(pytester)

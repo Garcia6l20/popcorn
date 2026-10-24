@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from .support import copied
 
 TESTS = "def test_one() -> None:\n    pass\n\n\ndef test_two() -> None:\n    pass\n"
@@ -45,6 +47,7 @@ def broken_tree(tmp_path: Path) -> Path:
     return root
 
 
+@pytest.mark.timeout(610)
 def test_a_nested_conftests_build_failure_is_one_collection_error(tmp_path: Path) -> None:
     root = broken_tree(tmp_path)
     ran = pytest_run(root, tmp_path / "cache", ".")
@@ -58,6 +61,7 @@ def test_a_nested_conftests_build_failure_is_one_collection_error(tmp_path: Path
     assert "2 passed" in ran.stdout
 
 
+@pytest.mark.timeout(610)
 def test_an_initial_paths_build_failure_is_one_collection_error(tmp_path: Path) -> None:
     root = broken_tree(tmp_path)
     ran = pytest_run(root, tmp_path / "cache", "a")
@@ -67,6 +71,7 @@ def test_an_initial_paths_build_failure_is_one_collection_error(tmp_path: Path) 
     assert "passed" not in ran.stdout
 
 
+@pytest.mark.timeout(610)
 def test_six_workers_build_once_and_each_loads_the_plugin(tmp_path: Path) -> None:
     source = copied("echo", tmp_path)
     log = tmp_path / "builds.log"

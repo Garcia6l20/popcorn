@@ -239,6 +239,7 @@ def ring_block_rows(m: popcorn.Machine) -> list[tuple[int, int, int]]:
     return [(r.time, r.pc, r.icount) for r in m.ring.records() if isinstance(r, Block)]
 
 
+@pytest.mark.timeout(40)
 def test_ring_blocks_are_alike_parked_and_running() -> None:
     parked = nested(blocks=True)
     stop = asyncio.run(parked.run(budget=10_000))
@@ -273,6 +274,7 @@ def test_ring_blocks_are_checked_and_refused_while_running() -> None:
     assert not m.ring.blocks
 
 
+@pytest.mark.timeout(40)
 def test_ring_blocks_are_refused_from_a_command_of_a_free_run() -> None:
     m = branches(count=1_000_000)
     refused: list[type[BaseException]] = []
@@ -292,6 +294,7 @@ def test_ring_blocks_are_refused_from_a_command_of_a_free_run() -> None:
     assert not m.ring.blocks
 
 
+@pytest.mark.timeout(40)
 def test_ring_blocks_are_refused_from_a_handler_in_a_slice() -> None:
     m = branches(count=2)
     refused: list[type[BaseException]] = []

@@ -340,6 +340,7 @@ def test_a_parse_runs_with_the_collector_off_and_restores_it(
     assert seen == [False, False]
 
 
+@pytest.mark.timeout(70)
 def test_overlapping_parses_restore_the_collector_once_both_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

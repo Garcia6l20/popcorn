@@ -8,9 +8,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from .support import copied, run_python
 
 
+@pytest.mark.timeout(20)
 def test_the_module_derives_from_core_and_is_imported_once(tmp_path: Path) -> None:
     source = copied("echo", tmp_path)
     ran = run_python(
@@ -103,6 +106,7 @@ def test_a_plugin_without_bindings_is_refused_before_it_loads(tmp_path: Path) ->
     assert ran.stdout.splitlines() == ["plugin nobind has no bindings module", "not mapped"]
 
 
+@pytest.mark.timeout(20)
 def test_a_second_plugin_of_one_name_is_refused(tmp_path: Path) -> None:
     first = copied("echo", tmp_path / "one")
     second = copied("echo", tmp_path / "two")

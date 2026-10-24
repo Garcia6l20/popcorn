@@ -40,6 +40,7 @@ def test_without_doxygen_the_build_warns_once_and_writes_a_stub(
     assert "doxygen" in (tmp_path / "api/index.html").read_text()
 
 
+@pytest.mark.timeout(20)
 @pytest.mark.skipif(shutil.which("doxygen") is None, reason="doxygen is not installed")
 def test_doxygen_reports_no_undocumented_public_declaration(tmp_path: Path) -> None:
     assert docs.build_sdk_reference(tmp_path / "api") == 0

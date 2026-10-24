@@ -73,6 +73,7 @@ def test_facts_match_the_local_rzone(facts: Path) -> None:
         assert written_region == local_region, local_region.name
 
 
+@pytest.mark.timeout(20)
 def test_the_u575_built_from_its_facts_has_the_content_of_the_local_build(
     u575_sources: Sources,
 ) -> None:
@@ -92,6 +93,7 @@ def test_the_u575_built_from_its_facts_has_the_content_of_the_local_build(
     assert content(dump_json(shipped)) == content(dump_json(local))
 
 
+@pytest.mark.timeout(15)
 def test_a_local_build_reads_the_rzone_and_never_the_facts(
     u575_sources: Sources, monkeypatch: pytest.MonkeyPatch
 ) -> None:

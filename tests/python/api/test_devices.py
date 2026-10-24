@@ -968,6 +968,7 @@ def test_each_i2c_hook_call_takes_the_gil_once_with_or_without_an_error(
     assert gil_entries(m) - before == len(device.events) + starts
 
 
+@pytest.mark.timeout(40)
 def test_an_injected_arbitration_loss_is_alike_parked_and_running(
     u575: popcorn.PartDescription,
 ) -> None:
@@ -1118,6 +1119,7 @@ def test_a_held_bus_delays_the_firmware_start_to_the_hold_end(
     check_held_starts(target.starts, at)
 
 
+@pytest.mark.timeout(40)
 def test_a_hold_is_alike_parked_and_running(u575: popcorn.PartDescription) -> None:
     m, parked, at = held_eeprom(u575)
     asyncio.run(parked.hold_bus(at=at, for_=HOLD_FOR))
@@ -1300,6 +1302,7 @@ def test_a_device_declaring_another_spi_mode_fails_the_run_after_its_first_frame
     assert device.frames == [0x9F, 0, 0, 0]
 
 
+@pytest.mark.timeout(40)
 def test_an_spi_mode_mismatch_inside_running_raises_at_the_next_wait(
     u575: popcorn.PartDescription,
 ) -> None:

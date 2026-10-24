@@ -92,6 +92,7 @@ def test_build_without_a_gpio_modes_file_logs_and_carries_none(
     assert any("no CubeMX GPIO modes file" in record.message for record in caplog.records)
 
 
+@pytest.mark.timeout(20)
 def test_build_u575_validates_against_schema(u575_sources: Sources) -> None:
     description = build_description(u575_sources)
     text = dump_json(description)
@@ -110,6 +111,7 @@ def test_build_u575_round_trips_through_load_json(u575_sources: Sources) -> None
     assert reloaded == description
 
 
+@pytest.mark.timeout(20)
 def test_build_u575_from_open_pin_data_namespaced_copies_has_the_same_content(
     u575_sources: Sources, tmp_path: Path
 ) -> None:

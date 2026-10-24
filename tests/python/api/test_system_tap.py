@@ -382,6 +382,7 @@ class HeldTake:
         return getattr(self._handle, name)
 
 
+@pytest.mark.timeout(40)
 def test_frames_taken_by_two_threads_at_once_keep_each_direction_in_order(pair: Build) -> None:
     system = pair()
     tap = system.tap("a.USART1")

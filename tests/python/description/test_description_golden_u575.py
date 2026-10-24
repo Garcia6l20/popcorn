@@ -37,6 +37,7 @@ def test_golden_dump_matches_expected_counts(u575_sources: Sources) -> None:
     assert golden["counts"]["irqs"] == 121
 
 
+@pytest.mark.timeout(20)
 def test_a_patch_byte_change_fails_only_the_fields_digest(
     u575_sources: Sources, tmp_path: Path
 ) -> None:
