@@ -2353,6 +2353,11 @@ class UartTap:
         system is stopped, to any member, an end of the link or not. It never depends on which
         member calls first.
 
+        Reading it works from any thread, member callbacks included.
+
+        Raises, when read:
+            EmulationError: The system was closed.
+
         Raises, when set:
             TypeError: The value is no str.
             ValueError: No member of the system has that name.

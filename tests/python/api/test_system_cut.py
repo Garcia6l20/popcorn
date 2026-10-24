@@ -338,6 +338,31 @@ def test_a_callback_of_another_system_s_machine_is_refused(pair: Build) -> None:
     assert tap.break_line() == at(0)
 
 
+def test_the_owner_reads_from_a_member_callback_and_raises_once_closed(pair: Build) -> None:
+    system = pair()
+    tap = system.tap("a.USART1")
+    tap.owner = "b"
+    seen: list[str] = []
+
+    def on_a(call: Call) -> Return:
+        if call.occurrence == 0:
+            seen.append(outcome(lambda: seen.append(tap.owner)))
+        return call.proceed()
+
+    def on_b(call: Call) -> Return:
+        if call.occurrence == 0:
+            seen.append(outcome(lambda: seen.append(tap.owner)))
+        return call.proceed()
+
+    system.members["a"].intercept("wait_complete", on_a)
+    system.members["b"].intercept("USART1_IRQHandler", on_b)
+    finish(system)
+    assert seen == ["b", "ok", "b", "ok"]
+    system.close()
+    with pytest.raises(popcorn.EmulationError, match="closed"):
+        _ = tap.owner
+
+
 def body_after_a_pause(system: System) -> None:
     """Inside running(), the body calls break_line and sets the owner right after a wait that
     a pause resolved: both raise, nothing changes."""

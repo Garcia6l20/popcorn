@@ -152,7 +152,8 @@ public:
    * @brief The earliest system time at which a later drain must hand the receiver something the
    *        link holds after the last drain: a kept post, a cut edge, an injection. Called on the
    *        receiver's host thread after its drain. The receiver runs no further before a drain
-   *        whose barrier lies past it.
+   *        whose barrier lies past it. A quiet() link can still be due: a cut edge yet to hand
+   *        counts here and not in quiet().
    * @return Empty when the link holds nothing a drain would hand.
    */
   [[nodiscard]] virtual auto due() const -> std::optional<sys_time> = 0;

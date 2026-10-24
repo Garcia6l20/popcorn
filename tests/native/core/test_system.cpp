@@ -3252,7 +3252,7 @@ TEST_CASE("a time goal whose slice overshoots a due bound past its time resolves
     }
     std::atomic<bool> landed{false};
     std::jthread      guard{[&sys, &landed](std::stop_token const& stopping) {
-      auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+      auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
       while(not stopping.stop_requested() and std::chrono::steady_clock::now() < deadline)
       {
         std::this_thread::sleep_for(std::chrono::milliseconds{5});
@@ -3391,6 +3391,19 @@ public:
       starts.insert(std::ranges::upper_bound(starts, barrier.ps), barrier.ps);
       exact_from.reset();
     }
+    if(fault_after
+       and barrier.ps >= *fault_after
+       and next.ps - latency_ > barrier.ps
+       and next.ps != never_ps)
+    {
+      fault_after.reset();
+      fault       = barrier.ps + (next.ps - latency_ - barrier.ps) / 2;
+      fault_reach = position;
+      return core::link_fault{
+          .at     = core::sys_time{*fault},
+          .member = 1,
+          .error  = std::make_exception_ptr(test_failure("scripted fault"))};
+    }
     while(handed_ < starts.size() and starts[handed_] < barrier.ps)
     {
       auto const start   = starts[handed_++];
@@ -3454,6 +3467,9 @@ public:
   std::vector<hand>           hands{};
   std::optional<std::int64_t> exact_from{};
   std::optional<std::int64_t> exact{};
+  std::optional<std::int64_t> fault_after{};
+  std::optional<std::int64_t> fault{};
+  std::int64_t                fault_reach{};
   std::int64_t                past_position{std::numeric_limits<std::int64_t>::min()};
   std::uint64_t               sender_ahead{};
 
@@ -3473,6 +3489,11 @@ struct scripted_run
   std::int64_t                past_position{};
   std::uint64_t               sender_ahead{};
   std::optional<std::int64_t> exact;
+  std::optional<std::int64_t> fault;
+  std::int64_t                fault_reach{};
+  core::sys_time              at{};
+  std::optional<std::size_t>  member;
+  std::vector<std::int64_t>   times;
 };
 
 auto scripted(
@@ -3480,7 +3501,8 @@ auto scripted(
     std::string_view            receiver_entry,
     std::optional<std::int64_t> reset_at,
     std::optional<std::int64_t> exact_from,
-    std::int64_t                until) -> scripted_run
+    std::int64_t                until,
+    std::optional<std::int64_t> fault_after = std::nullopt) -> scripted_run
 {
   constexpr std::int64_t        latency = 20 * us_ps;
   pinned const                  pin{how.one_cpu};
@@ -3497,8 +3519,9 @@ auto scripted(
   {
     starts.push_back(at);
   }
-  auto const link  = std::make_shared<scripted_link>(latency, target, std::move(starts));
-  link->exact_from = exact_from;
+  auto const link   = std::make_shared<scripted_link>(latency, target, std::move(starts));
+  link->exact_from  = exact_from;
+  link->fault_after = fault_after;
   std::vector<std::shared_ptr<core::member_link>> wires{
       link, std::make_shared<fake_link>(1, 0, 3 * latency)};
   core::system sys{
@@ -3530,7 +3553,28 @@ auto scripted(
     }
     pending = sys.resume(held, core::sys_time{until});
   }
-  auto const stopped = pending.get();
+  std::atomic<bool> landed{false};
+  std::jthread      guard{[&sys, &landed](std::stop_token const& stopping) {
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    while(not stopping.stop_requested() and std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    if(not landed.load())
+    {
+      sys.close();
+    }
+  }};
+  auto const        stopped = pending.get();
+  landed.store(true);
+  guard.request_stop();
+  std::vector<std::int64_t> times;
+  if(stopped.reason != core::pause_reason::closed)
+  {
+    auto const held = sys.lock();
+    times.push_back(sys.time_of(held, 0).ps);
+    times.push_back(sys.time_of(held, 1).ps);
+  }
   sys.close();
   return {
       .reason        = stopped.reason,
@@ -3539,7 +3583,12 @@ auto scripted(
       .late          = link->latest_hand(),
       .past_position = link->past_position,
       .sender_ahead  = link->sender_ahead,
-      .exact         = link->exact};
+      .exact         = link->exact,
+      .fault         = link->fault,
+      .fault_reach   = link->fault_reach,
+      .at            = stopped.at,
+      .member        = stopped.member,
+      .times         = std::move(times)};
 }
 }
 
@@ -3768,4 +3817,90 @@ TEST_CASE("a million clock publish and wait rounds between two members lose no w
   REQUIRE(stopped.reason == core::pause_reason::system_time);
   CHECK(published->at(0).load() + published->at(1).load() >= rounds);
   CHECK(stopped.windows > 0);
+}
+
+TEST_CASE("a drain fault past a lagging receiver's reach in clock mode pauses on it at its anchor")
+{
+  constexpr std::int64_t latency = 20 * us_ps;
+  for(auto const& how : clock_variants())
+  {
+    for(int repeat = 0; repeat < 5; ++repeat)
+    {
+      CAPTURE(how.name);
+      CAPTURE(repeat);
+      auto const run =
+          scripted(how, "alu_entry", std::nullopt, std::nullopt, 2 * ms_ps, 500 * us_ps);
+      REQUIRE(run.reason == core::pause_reason::error);
+      REQUIRE(run.fault);
+      CHECK(*run.fault > run.fault_reach);
+      CHECK(run.member == 1);
+      CHECK(run.at.ps == *run.fault);
+      REQUIRE(run.times.size() == 2);
+      check_at(run.times[1], *run.fault + latency);
+      check_at(run.times[0], *run.fault + latency + 3 * latency);
+    }
+  }
+}
+
+TEST_CASE(
+    "a TIME pause with a halted member and goal holders at different positions matches barrier "
+    "mode")
+{
+  auto const make = [] {
+    return std::vector<core::member_ref>{
+        member("idle", "idle_forever"), member("alu", "alu_entry"), member("idle", "idle_forever")};
+  };
+  std::int64_t cut{};
+  std::int64_t past{};
+  for(std::int64_t step = 0; step < 16 and past <= cut; ++step)
+  {
+    cut = 1 * ms_ps + step * instruction_ps;
+    rig r{.members = make()};
+    r.build(variants()[0]);
+    r.release(2);
+    REQUIRE(r.run(cut).reason == core::pause_reason::system_time);
+    past = r.now_of(1);
+  }
+  REQUIRE(past > cut);
+  std::optional<std::vector<std::int64_t>> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    rig          r{.members = make()};
+    r.build(how);
+    r.release(2);
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held, core::sys_time{cut});
+    }
+    std::atomic<bool> landed{false};
+    std::jthread      guard{[&r, &landed](std::stop_token const& stopping) {
+      auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+      while(not stopping.stop_requested() and std::chrono::steady_clock::now() < deadline)
+      {
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+      }
+      if(not landed.load())
+      {
+        r.sys->close();
+      }
+    }};
+    auto const        stopped = pending.get();
+    landed.store(true);
+    guard.request_stop();
+    REQUIRE(stopped.reason == core::pause_reason::system_time);
+    std::vector<std::int64_t> times{r.now_of(0), r.now_of(1), r.now_of(2)};
+    CHECK(times[0] == cut);
+    CHECK(times[1] > cut);
+    if(reference)
+    {
+      CHECK(times == *reference);
+    }
+    else
+    {
+      reference = times;
+    }
+  }
 }

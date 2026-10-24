@@ -1156,7 +1156,16 @@ auto system_handle::restore(std::size_t index, bool stopped) -> cut_outcome
 
 auto system_handle::link_owner(std::size_t index) const -> std::size_t
 {
-  return system()->cut_owner(link(index).forth);
+  auto const& entry = link(index);
+  if(closed_)
+  {
+    throw core::machine_closed("the linked system was closed");
+  }
+  if(system_ == nullptr)
+  {
+    throw std::logic_error("the linked system is not started");
+  }
+  return system_->cut_owner(entry.forth);
 }
 
 auto system_handle::max_waiting_cuts() const -> std::size_t

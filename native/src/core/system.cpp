@@ -307,7 +307,8 @@ struct system::impl
 class system::impl::runner final : public member_driver
 {
 public:
-  runner(system::impl& owner, std::size_t index) : sys_{owner}, index_{index}
+  runner(system::impl& owner, std::size_t index)
+      : sys_{owner}, index_{index}, clocks_(owner.slots.size(), sys_time{})
   {}
 
   void restart() noexcept
@@ -318,7 +319,7 @@ public:
     counted_   = false;
     calm_      = false;
     jumping_   = false;
-    clocks_.assign(sys_.slots.size(), sys_time{});
+    std::ranges::fill(clocks_, sys_time{});
     if(sys_.measuring)
     {
       left_ = std::chrono::steady_clock::now();
@@ -881,11 +882,11 @@ private:
     }
   }
 
-  void take_fault(member_link const& link, std::optional<link_fault> fault)
+  auto take_fault(member_link const& link, std::optional<link_fault> fault) -> bool
   {
     if(not fault)
     {
-      return;
+      return false;
     }
     auto& one = sys_.slots[index_];
     one.rep.found.push_back(
@@ -899,6 +900,7 @@ private:
     {
       sys_.found(fault->at);
     }
+    return true;
   }
 
   [[nodiscard]] auto reach(machine const& target) const noexcept -> sys_time
@@ -921,7 +923,7 @@ private:
       }
     }
     auto const at = reach(target);
-    if(at <= published_)
+    if(at <= published_ or at.ps <= sys_.syncs[index_].clock.load(std::memory_order_relaxed))
     {
       return;
     }
@@ -1035,23 +1037,37 @@ private:
       {
         bound = std::min(bound, *at);
       }
-      auto const from = sys_.measuring ? std::chrono::steady_clock::now()
-                                       : std::chrono::steady_clock::time_point{};
+      auto const from    = sys_.measuring ? std::chrono::steady_clock::now()
+                                          : std::chrono::steady_clock::time_point{};
+      auto       faulted = false;
       for(std::size_t index = 0; index < one.inbound.size(); ++index)
       {
         auto* const link    = one.inbound[index];
         auto const  through = link->posted_count();
         one.sealed[index]   = through;
-        take_fault(
-            *link, link->drain(through, std::min(ahead, clocks_[link->sender()]), bound, one.map));
+        faulted =
+            take_fault(
+                *link,
+                link->drain(through, std::min(ahead, clocks_[link->sender()]), bound, one.map))
+            or faulted;
       }
       if(sys_.measuring)
       {
         one.drained += std::chrono::steady_clock::now() - from;
       }
-      if(system::impl::frozen(one) or not one.rep.found.empty())
+      if(system::impl::frozen(one))
       {
         continue;
+      }
+      if(faulted)
+      {
+        auto const lowered =
+            std::min(sys_time{sys_.stop_at.load(std::memory_order_acquire)}, sys_.targets[index_]);
+        if(sys_.decide.load(std::memory_order_acquire) or ahead >= lowered)
+        {
+          continue;
+        }
+        bound = std::min(bound, lowered);
       }
       for(auto const* link : one.inbound)
       {
@@ -1382,6 +1398,17 @@ void system::impl::align(entry const* head, std::optional<sys_time> requested) n
       });
   if(not there)
   {
+    if(head and head->kind == entry_kind::system_time)
+    {
+      for(std::size_t index = 0; index < slots.size(); ++index)
+      {
+        if(slots[index].goal)
+        {
+          auto const raised = std::max(slots[index].rep.reach, head->at);
+          syncs[index].clock.store(raised.ps, std::memory_order_release);
+        }
+      }
+    }
     targets  = std::move(aimed);
     aligning = true;
     stop_at.store(never.ps, std::memory_order_release);

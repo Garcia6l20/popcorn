@@ -396,7 +396,9 @@ public:
    *        cut it while the system runs. Under sync_mode::clocks an owner that is neither end of
    *        the link bounds both ends by its clock plus the link's latency from the next resume.
    *        Each link's owner is its sender until set.
+   * @param held The system lock.
    * @param link Index into the links the system was built with.
+   * @param member Index of the new owner among the members.
    * @throws std::logic_error while a resume is in flight.
    * @throws std::out_of_range for no such link.
    */
@@ -405,6 +407,8 @@ public:
 
   /**
    * @brief The cut owner of link @p link. Any thread, no lock, also while the system runs.
+   * @param link Index into the links the system was built with.
+   * @return The owner's member index.
    * @throws std::out_of_range for no such link.
    */
   [[nodiscard]] auto cut_owner(std::size_t link) const -> std::size_t;
