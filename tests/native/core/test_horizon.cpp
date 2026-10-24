@@ -72,7 +72,7 @@ public:
 
   std::optional<std::optional<vtime>>              quiet{};
   std::optional<std::pair<address, std::uint64_t>> ask{};
-  mutable bool                                     watched{};
+  mutable std::optional<bool>                      watched{};
 
   void watch_reads(address at, std::uint32_t size)
   {
@@ -453,9 +453,11 @@ auto watching_rig() -> std::unique_ptr<rig>
 
 auto read_watched(rig& r, address at, std::uint64_t size) -> bool
 {
-  r.probes[0]->ask = std::pair{at, size};
-  std::ignore      = r.machine().horizon();
-  return r.probes[0]->watched;
+  r.probes[0]->ask     = std::pair{at, size};
+  r.probes[0]->watched = std::nullopt;
+  std::ignore          = r.machine().horizon();
+  REQUIRE(r.probes[0]->watched.has_value());
+  return *r.probes[0]->watched;
 }
 }
 

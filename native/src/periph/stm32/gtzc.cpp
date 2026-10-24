@@ -583,6 +583,10 @@ public:
     return true;
   }
 
+  /**
+   * @brief False: every DMA verdict is allow or read_zero_write_ignore, and the GTZC_IRQn line the
+   * TZIC raises on a DMA access counts in gpdma::illegal_wakes.
+   */
   [[nodiscard]] auto faults_transfers() const -> bool override
   {
     return false;
