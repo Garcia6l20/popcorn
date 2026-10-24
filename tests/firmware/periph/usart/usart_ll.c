@@ -61,6 +61,7 @@ void link_audio(void);
 void link_audio_peer(void);
 void link_audio_tim6(void);
 void link_self(void);
+void link_ue_toggle(void);
 void USART3_IRQHandler(void);
 void USART2_IRQHandler(void);
 void SysTick_Handler(void);
@@ -1209,4 +1210,19 @@ void link_audio_tim6(void)
     audio_block(1);
     next += AUDIO_PERIOD_MS;
   }
+}
+
+void link_ue_toggle(void)
+{
+  start_link();
+  for(uint32_t round = 0; round < 20000u; ++round)
+  {
+    send_byte((uint8_t)round);
+    wait_us(1);
+    LL_USART_Disable(USART1);
+    enable(USART1);
+  }
+  send_byte('z');
+  wait_complete();
+  DONE();
 }

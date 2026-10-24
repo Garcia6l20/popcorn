@@ -153,11 +153,6 @@ auto uart_wire::cuts_before(core::sys_time reach) const -> std::vector<detail::l
       std::ranges::lower_bound(state_.cuts, reach, {}, &detail::line_cut::start)};
 }
 
-auto uart_wire::mailbox(std::uint64_t window) -> std::vector<detail::wire_post>&
-{
-  return window % 2 == 0 ? state_.mail_even : state_.mail_odd;
-}
-
 void uart_wire::started(line_frame const& frame)
 {
   core::time_map const map{state_.sender_base};
@@ -188,7 +183,7 @@ void uart_wire::started(line_frame const& frame)
   }
   state_.flight_start = post.start;
   state_.flight_end   = post.end;
-  mailbox(state_.window).push_back(post);
+  ring_.push(post);
   if(forward_)
   {
     forward_->started(frame);
@@ -198,7 +193,7 @@ void uart_wire::started(line_frame const& frame)
 void uart_wire::aborted(vtime at)
 {
   auto const system = core::time_map{state_.sender_base}.to_system(at);
-  mailbox(state_.window).push_back({.abort = true, .start = system, .end = system});
+  ring_.push({.abort = true, .start = system, .end = system});
   if(forward_)
   {
     forward_->aborted(at);
@@ -228,17 +223,21 @@ auto uart_wire::latency() const noexcept -> core::sys_time
   return latency_;
 }
 
-void uart_wire::enter_window(std::uint64_t window, core::time_map sender)
+void uart_wire::enter_slice(core::time_map sender)
 {
-  state_.window      = window;
   state_.sender_base = sender.base();
+}
+
+auto uart_wire::posted_count() const noexcept -> std::uint64_t
+{
+  return ring_.pushed();
 }
 
 void uart_wire::sender_reset(core::sys_time at)
 {
   if(state_.flight_start < at and at < state_.flight_end)
   {
-    mailbox(state_.window).push_back({.abort = true, .start = at, .end = at});
+    ring_.push({.abort = true, .start = at, .end = at});
     state_.flight_end = at;
   }
 }
@@ -475,8 +474,7 @@ void uart_wire::deliver_injection(
 auto uart_wire::quiet() const -> bool
 {
   core::link_guard const held{inject_mutex_};
-  return state_.mail_even.empty()
-     and state_.mail_odd.empty()
+  return ring_.empty()
      and state_.injections.empty()
      and state_.carried.empty()
      and std::ranges::none_of(state_.cuts, [](detail::line_cut const& cut) {
@@ -518,11 +516,13 @@ void uart_wire::truncate(
 }
 
 auto uart_wire::drain(
-    std::uint64_t         window,
+    std::uint64_t         through,
     core::sys_time const& barrier,
     core::sys_time const& next,
     core::time_map        receiver) -> std::optional<core::link_fault>
 {
+  std::vector<detail::wire_post> posts;
+  ring_.pop_through(through, posts);
   std::vector<detail::line_cut>         cuts;
   std::vector<detail::queued_injection> due;
   std::vector<detail::wire_post>        held_over;
@@ -630,7 +630,6 @@ auto uart_wire::drain(
       carry.push_back(post);
     }
   }
-  auto&                           posts = mailbox(window);
   std::optional<core::link_fault> fault;
   for(auto const& post : posts)
   {
@@ -683,7 +682,6 @@ auto uart_wire::drain(
     hand_frame(post, state_.delivered.back());
   }
   collect(posts, state_.untapped);
-  posts.clear();
   std::ranges::sort(due, {}, [](detail::queued_injection const& frame) {
     return std::pair{frame.start.ps, frame.index};
   });
@@ -810,25 +808,22 @@ auto uart_wire::inject(
     };
   }
   std::vector<detail::line_span> busy = state_.delivered;
-  for(auto const* posts : {&mailbox(state_.window + 1), &mailbox(state_.window)})
+  for(auto const& post : ring_.contents())
   {
-    for(auto const& post : *posts)
+    auto const start = shifted(post.start, latency_);
+    if(post.abort)
     {
-      auto const start = shifted(post.start, latency_);
-      if(post.abort)
+      for(auto& span : busy)
       {
-        for(auto& span : busy)
+        if(not span.injected and span.start < start and start < span.end)
         {
-          if(not span.injected and span.start < start and start < span.end)
-          {
-            span.end = start;
-          }
+          span.end = start;
         }
       }
-      else if(not post.dropped)
-      {
-        busy.push_back({.start = start, .end = shifted(post.end, latency_), .post = post.start});
-      }
+    }
+    else if(not post.dropped)
+    {
+      busy.push_back({.start = start, .end = shifted(post.end, latency_), .post = post.start});
     }
   }
   {
@@ -876,8 +871,7 @@ auto uart_wire::inject(
 void uart_wire::finish(core::sys_time at)
 {
   auto pending = state_.untapped;
-  collect(mailbox(state_.window + 1), pending);
-  collect(mailbox(state_.window), pending);
+  collect(ring_.contents(), pending);
   emit(pending, at, cuts_before(at));
 }
 
@@ -894,6 +888,8 @@ void uart_wire::save(std::vector<std::byte>& out) const
   auto                   state = state_;
   state.cuts                   = std::move(cuts);
   state.carried                = std::move(carried);
+  state.queued                 = ring_.contents();
+  state.queued_from            = ring_.popped();
   reflex::serde::bson::serializer{out}.dump(state);
 }
 
@@ -911,7 +907,10 @@ void uart_wire::load(std::span<std::byte const> in)
         std::format("a state uart_wire::save wrote: {}", failure.what()));
   }
   core::link_guard const held{edit_mutex_};
-  state_ = std::move(loaded);
+  ring_.assign(loaded.queued_from, loaded.queued);
+  loaded.queued.clear();
+  loaded.queued_from = 0;
+  state_             = std::move(loaded);
 }
 
 auto uart_wire::tap() noexcept -> tap_queue&

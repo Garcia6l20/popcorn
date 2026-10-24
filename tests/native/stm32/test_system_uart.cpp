@@ -6,6 +6,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/member_link.hpp>
 #include <popcorn/core/snapshot.hpp>
+#include <popcorn/core/spsc_queue.hpp>
 #include <popcorn/core/system.hpp>
 #include <popcorn/core/window_barrier.hpp>
 #include <popcorn/periph/stm32/board.hpp>
@@ -27,9 +28,11 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <random>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -352,12 +355,13 @@ struct world
   void oracle(std::int64_t end)
   {
     REQUIRE(nodes.size() == 2);
-    wires[0]->enter_window(0, nodes[0]->map());
+    wires[0]->enter_slice(nodes[0]->map());
     REQUIRE(
         nodes[0]->f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason
         == stop_reason::user);
-    std::ignore =
-        wires[0]->drain(0, core::sys_time{end}, core::sys_time{end + ms_ps}, nodes[1]->map());
+    std::ignore = wires[0]->drain(
+        wires[0]->posted_count(), core::sys_time{end}, core::sys_time{end + ms_ps},
+        nodes[1]->map());
     REQUIRE(nodes[1]->advance(end) == stop_reason::time);
     for(auto const& wire : wires)
     {
@@ -888,15 +892,15 @@ TEST_CASE("frames a halted sender's FIFO still shifts arrive at their end plus L
     reference.add("link_tx_fifo_stop");
     reference.add("link_rx");
     reference.link(0, 1, latency);
-    reference.wires[0]->enter_window(0, reference.nodes[0]->map());
+    reference.wires[0]->enter_slice(reference.nodes[0]->map());
     REQUIRE(
         reference.nodes[0]->f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason
         == stop_reason::user);
     reference.nodes[0]->target->hold_core(true);
     REQUIRE(reference.nodes[0]->advance(script_end) == stop_reason::time);
     std::ignore = reference.wires[0]->drain(
-        0, core::sys_time{script_end}, core::sys_time{script_end + ms_ps},
-        reference.nodes[1]->map());
+        reference.wires[0]->posted_count(), core::sys_time{script_end},
+        core::sys_time{script_end + ms_ps}, reference.nodes[1]->map());
     REQUIRE(reference.nodes[1]->advance(script_end) == stop_reason::time);
     reference.wires[0]->finish(core::sys_time{script_end});
     reference.collect();
@@ -1789,5 +1793,43 @@ TEST_CASE("an idle pause waits for a break cut's hold and release, then the IDLE
         reference = seen;
       }
     }
+  }
+}
+
+TEST_CASE("a sender toggling UE mid-frame posts many segments a window and matches the oracle")
+{
+  constexpr std::int64_t latency = 1 * ms_ps;
+  constexpr std::int64_t end     = 30 * ms_ps;
+  world                  reference;
+  reference.add("link_ue_toggle");
+  reference.add("link_rx");
+  reference.link(0, 1, latency);
+  reference.oracle(end);
+  auto const expected = reference.dump();
+  keep_dump("ue-toggle-oracle", expected);
+  auto const lost = std::ranges::count(reference.taps[0], true, &stm32::tap_frame::lost);
+  REQUIRE(lost > 10'000);
+  for(auto const& how : {variants()[0], variants()[2], variants()[4], variants()[7]})
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    w.add("link_ue_toggle");
+    w.add("link_rx");
+    w.link(0, 1, latency);
+    w.host(how);
+    auto const stopped = w.run_to(end);
+    CHECK(stopped.reason == core::pause_reason::system_time);
+    auto const seen = w.dump();
+    keep_dump(std::string{"ue-toggle-"} + std::string{how.name}, seen);
+    CHECK(seen == expected);
+    std::map<std::int64_t, std::uint64_t> per_window;
+    for(auto const& frame : w.taps[0])
+    {
+      per_window[frame.start.ps / latency] += frame.lost ? 2 : 1;
+    }
+    auto const busiest = std::ranges::max(per_window | std::views::values);
+    MESSAGE("posts ", w.wires[0]->posted_count(), ", busiest window ", busiest);
+    CHECK(busiest > 4 * core::spsc_queue<stm32::detail::wire_post>::segment_slots);
   }
 }

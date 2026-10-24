@@ -187,6 +187,7 @@ struct rig
   std::vector<std::unique_ptr<node>>             nodes;
   std::vector<std::shared_ptr<stm32::uart_wire>> wires;
   std::vector<std::vector<stm32::tap_frame>>     taps;
+  std::vector<std::uint64_t>                     sealed;
   bool                                           strict{};
 
   auto add(std::string_view entry, std::uint64_t start_ps = 0) -> node&
@@ -221,25 +222,35 @@ struct rig
     return *wire;
   }
 
-  void enter(std::size_t member, std::uint64_t window)
+  void enter(std::size_t member)
   {
     for(auto const& wire : wires)
     {
       if(wire->sender() == member)
       {
-        wire->enter_window(window, nodes[member]->map());
+        wire->enter_slice(nodes[member]->map());
       }
     }
   }
 
-  void drain(std::size_t member, std::uint64_t window, std::uint64_t barrier, std::uint64_t next)
+  void seal()
   {
-    for(auto const& wire : wires)
+    sealed.resize(wires.size());
+    for(std::size_t index = 0; index < wires.size(); ++index)
     {
+      sealed[index] = wires[index]->posted_count();
+    }
+  }
+
+  void drain(std::size_t member, std::uint64_t barrier, std::uint64_t next)
+  {
+    for(std::size_t index = 0; index < wires.size(); ++index)
+    {
+      auto const& wire = wires[index];
       if(wire->receiver() == member)
       {
         auto const found = wire->drain(
-            window, core::sys_time{static_cast<std::int64_t>(barrier)},
+            sealed[index], core::sys_time{static_cast<std::int64_t>(barrier)},
             core::sys_time{static_cast<std::int64_t>(next)}, nodes[member]->map());
         if(found)
         {
@@ -251,13 +262,12 @@ struct rig
 
   void run_window(
       std::size_t                     member,
-      std::uint64_t                   window,
       std::uint64_t                   barrier,
       run_plan const&                 plan,
       std::optional<host_byte> const& host)
   {
     auto& one = *nodes[member];
-    enter(member, window);
+    enter(member);
     if(one.done or one.failed)
     {
       return;
@@ -378,15 +388,16 @@ struct rig
       {
         for(std::size_t member = 0; member < nodes.size(); ++member)
         {
-          run_window(member, window, barrier(window), plan, plan.host);
+          run_window(member, barrier(window), plan, plan.host);
         }
         if(window + 1 == windows)
         {
           break;
         }
+        seal();
         for(std::size_t member = 0; member < nodes.size(); ++member)
         {
-          drain(member, window, barrier(window), (window + 2) * plan.window);
+          drain(member, barrier(window), (window + 2) * plan.window);
         }
         if(plan.after_drain)
         {
@@ -406,17 +417,17 @@ struct rig
           std::uniform_int_distribution<std::uint64_t> pause{0, 50};
           for(std::uint64_t window = plan.first; window < windows; ++window)
           {
-            run_window(member, window, barrier(window), plan, plan.host);
+            run_window(member, barrier(window), plan, plan.host);
             if(plan.seed)
             {
               auto const us = pause(rng);
               slept[member] += us;
               std::this_thread::sleep_for(std::chrono::microseconds{us});
             }
-            meet.arrive_and_wait([]() noexcept {});
+            meet.arrive_and_wait([this]() noexcept { seal(); });
             if(window + 1 < windows)
             {
-              drain(member, window, barrier(window), (window + 2) * plan.window);
+              drain(member, barrier(window), (window + 2) * plan.window);
             }
           }
         });
@@ -433,12 +444,13 @@ struct rig
   void oracle(std::uint64_t end, std::optional<host_byte> const& host = {})
   {
     REQUIRE(nodes.size() == 2);
-    enter(0, 0);
+    enter(0);
     REQUIRE(
         nodes[0]->f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason
         == stop_reason::user);
     nodes[0]->done = true;
-    drain(1, 0, end, end + ms_ps);
+    seal();
+    drain(1, end, end + ms_ps);
     if(host)
     {
       REQUIRE(nodes[1]->advance(host->at, coarse, false) == stop_reason::time);
@@ -922,7 +934,8 @@ TEST_CASE("a peer frame at another baud warns once per wire, a fault at its star
   }
 }
 
-TEST_CASE("a wire saved with posts in both mailboxes loads into a fresh wire with the same result")
+TEST_CASE(
+    "a wire saved with posts of two windows queued loads into a fresh wire with the same result")
 {
   std::vector<std::uint16_t> const edit{'E'};
   auto                             reference = one_way("link_tx", "link_rx", latency_20);
@@ -943,18 +956,19 @@ TEST_CASE("a wire saved with posts in both mailboxes loads into a fresh wire wit
   auto const     windows = script_end_ps / latency_20;
   for(; k + 1 < windows; ++k)
   {
-    r.run_window(0, k, barrier(k), plan, {});
-    r.run_window(1, k, barrier(k), plan, {});
+    r.run_window(0, barrier(k), plan, {});
+    r.run_window(1, barrier(k), plan, {});
     if(not saved and k >= 20)
     {
-      r.run_window(0, k + 1, barrier(k + 1), plan, {});
+      r.seal();
+      r.run_window(0, barrier(k + 1), plan, {});
       std::vector<std::byte> bytes;
       r.wires[0]->save(bytes);
       auto const state = reflex::serde::bson::deserializer{
           std::span<std::byte const>{
               bytes}}.load<stm32::detail::wire_state>();
-      CHECK_FALSE(state.mail_even.empty());
-      CHECK_FALSE(state.mail_odd.empty());
+      CHECK(state.queued_from < r.sealed[0]);
+      CHECK(r.sealed[0] < state.queued_from + state.queued.size());
       CHECK(state.edits.size() == 1);
       CHECK(state.injections.size() == 1);
       auto& a     = *r.nodes[0];
@@ -970,14 +984,15 @@ TEST_CASE("a wire saved with posts in both mailboxes loads into a fresh wire wit
       a.port->attach(fresh);
       r.wires[0] = fresh;
       saved      = true;
-      r.drain(1, k, barrier(k), barrier(k + 1));
+      r.drain(1, barrier(k), barrier(k + 1));
       ++k;
-      r.run_window(1, k, barrier(k), plan, {});
+      r.run_window(1, barrier(k), plan, {});
     }
-    r.drain(1, k, barrier(k), barrier(k + 1));
+    r.seal();
+    r.drain(1, barrier(k), barrier(k + 1));
   }
-  r.run_window(0, k, barrier(k), plan, {});
-  r.run_window(1, k, barrier(k), plan, {});
+  r.run_window(0, barrier(k), plan, {});
+  r.run_window(1, barrier(k), plan, {});
   r.finish(script_end_ps);
   CHECK(saved);
   CHECK(r.dump() == expected);
@@ -1332,7 +1347,7 @@ TEST_CASE("an injection while stopped is refused over a frame delivered or still
       return not post.abort and post.index == frame.index;
     });
   };
-  REQUIRE((holds(state.mail_even) or holds(state.mail_odd)));
+  REQUIRE(holds(state.queued));
   auto const arrival = frame.start.ps + window;
   auto const posted  = injected_byte(*r.wires[0], 0x55, arrival, now);
   REQUIRE_FALSE(posted.has_value());
@@ -1643,7 +1658,7 @@ TEST_CASE("a 7E1 link taps data bits and gives edited and injected frames their 
   std::vector<std::uint16_t> const edit{0x01};
   REQUIRE(wire.replace(1, edit));
   REQUIRE(injected_byte(wire, 0xc1, static_cast<std::int64_t>(ms_ps), std::nullopt).has_value());
-  r.enter(0, 0);
+  r.enter(0);
   for(auto const value : {0x41u, 0x40u, 0x7fu})
   {
     poke(*r.nodes[0], "USART1", "TDR", value);
@@ -1677,7 +1692,7 @@ TEST_CASE("a 7N1 link masks edited and injected frames to 7 bits")
   std::vector<std::uint16_t> const edit{0xff};
   REQUIRE(wire.replace(1, edit));
   REQUIRE(injected_byte(wire, 0xff, static_cast<std::int64_t>(ms_ps), std::nullopt).has_value());
-  r.enter(0, 0);
+  r.enter(0);
   for(auto const value : {0x41u, 0x40u})
   {
     poke(*r.nodes[0], "USART1", "TDR", value);
@@ -1702,7 +1717,7 @@ TEST_CASE("a 7N1 link masks edited and injected frames to 7 bits")
     line_7n1(*one);
   }
   REQUIRE(injected_byte(only, 0xff, static_cast<std::int64_t>(ms_ps), std::nullopt).has_value());
-  lone.enter(0, 0);
+  lone.enter(0);
   lone.run({.window = latency_20});
   CHECK(peek(*lone.nodes[1], "USART1", "RDR") == 0x7f);
 }
@@ -1869,7 +1884,11 @@ struct stub_link
   std::shared_ptr<stm32::uart_wire>         forth;
   std::shared_ptr<stm32::uart_wire>         back;
   std::vector<stm32::tap_frame>             tap;
-  std::move_only_function<void(std::uint64_t, std::int64_t)> after;
+  std::move_only_function<void(std::uint64_t, std::int64_t)>          after;
+  std::array<std::vector<std::pair<std::uint64_t, std::uint64_t>>, 2> runs{
+      {{{0, 0}}, {{0, 0}}}
+  };
+  std::array<std::uint64_t, 2> popped{};
 
   stub_link(std::int64_t latency_ps, stm32::line_shape line) : latency{latency_ps}, shape{line}
   {
@@ -1897,11 +1916,49 @@ struct stub_link
         .end      = vtime{static_cast<std::uint64_t>(start) + ps}};
   }
 
+  [[nodiscard]] auto wire(std::size_t side) const -> stm32::uart_wire&
+  {
+    return side == 0 ? *forth : *back;
+  }
+
+  void enter(std::uint64_t k)
+  {
+    for(std::size_t side = 0; side < 2; ++side)
+    {
+      runs[side].emplace_back(k % 2, wire(side).posted_count());
+      wire(side).enter_slice({});
+    }
+  }
+
+  auto through(std::size_t side, std::uint64_t k) -> std::uint64_t
+  {
+    auto const& seen  = runs[side];
+    auto const  end   = wire(side).posted_count();
+    auto        at    = popped[side];
+    bool        other = false;
+    for(std::size_t index = 0; index < seen.size(); ++index)
+    {
+      auto const high = index + 1 < seen.size() ? seen[index + 1].second : end;
+      if(high <= at or seen[index].second == high)
+      {
+        continue;
+      }
+      if(seen[index].first != k % 2)
+      {
+        other = true;
+        continue;
+      }
+      REQUIRE_FALSE(other);
+      at = high;
+    }
+    popped[side] = at;
+    return at;
+  }
+
   void window(std::uint64_t k, std::int64_t q, std::span<std::int64_t const> starts)
   {
     auto const begin = static_cast<std::int64_t>(k) * q;
-    forth->enter_window(k, {});
-    back->enter_window(k, {});
+    enter(k);
     for(auto const start : starts)
     {
       if(start >= begin and start < begin + q)
@@ -1915,8 +1972,8 @@ struct stub_link
   {
     auto const barrier = core::sys_time{(static_cast<std::int64_t>(k) + 1) * q};
     auto const next    = core::sys_time{(static_cast<std::int64_t>(k) + 2) * q};
-    forth->drain(k, barrier, next, {});
-    back->drain(k, barrier, next, {});
+    forth->drain(through(0, k), barrier, next, {});
+    back->drain(through(1, k), barrier, next, {});
     auto taken = forth->tap().take();
     tap.insert(tap.end(), taken.begin(), taken.end());
     if(after)
@@ -2483,7 +2540,8 @@ TEST_CASE("a frame never handed to the port is never truncated: an overlap clash
   REQUIRE(link.cut(t0, t0 + 100 * us, 0).has_value());
   std::vector<std::int64_t> const starts{10 * us, 15 * us};
   link.window(0, l, starts);
-  auto const fault = link.forth->drain(0, core::sys_time{l}, core::sys_time{2 * l}, {});
+  auto const fault =
+      link.forth->drain(link.through(0, 0), core::sys_time{l}, core::sys_time{2 * l}, {});
   REQUIRE(fault.has_value());
   CHECK(fault->at.ps == 15 * us);
   CHECK(link.forth_port.received.size() == 1);
@@ -2622,8 +2680,8 @@ TEST_CASE("drains between a cut's checks and its commit wait, so the cut acts wh
   std::jthread      drains;
   link.shared->between_checks_and_commit = [&] {
     drains = std::jthread{[&] {
-      link.forth->drain(1, core::sys_time{2 * q}, core::sys_time{3 * q}, {});
-      link.forth->drain(2, core::sys_time{3 * q}, core::sys_time{4 * q}, {});
+      link.forth->drain(link.through(0, 1), core::sys_time{2 * q}, core::sys_time{3 * q}, {});
+      link.forth->drain(link.through(0, 2), core::sys_time{3 * q}, core::sys_time{4 * q}, {});
       done.store(true);
     }};
     while(not done.load() and link.shared->contenders.load() == 0)
@@ -2725,7 +2783,8 @@ TEST_CASE("cuts registered from one thread while both wires drain on two others"
         for(std::uint64_t k = 0; k < rounds; ++k)
         {
           auto const barrier = static_cast<std::int64_t>(k + 1) * q;
-          link.forth->drain(k, core::sys_time{barrier}, core::sys_time{barrier + q}, {});
+          link.forth->drain(
+              link.through(0, k), core::sys_time{barrier}, core::sys_time{barrier + q}, {});
           std::this_thread::sleep_for(std::chrono::microseconds{10});
         }
       }},
@@ -2733,7 +2792,8 @@ TEST_CASE("cuts registered from one thread while both wires drain on two others"
         for(std::uint64_t k = 0; k < rounds; ++k)
         {
           auto const barrier = static_cast<std::int64_t>(k + 1) * q;
-          link.back->drain(k, core::sys_time{barrier}, core::sys_time{barrier + q}, {});
+          link.back->drain(
+              link.through(1, k), core::sys_time{barrier}, core::sys_time{barrier + q}, {});
           std::this_thread::sleep_for(std::chrono::microseconds{10});
         }
       }},
@@ -2887,8 +2947,7 @@ TEST_CASE("the receiver gets the earlier of an abort and a cut of the same frame
     stub_link link{l, declared()};
     REQUIRE(start + static_cast<std::int64_t>(declared().frame_ps()) > t0);
     REQUIRE(link.cut(t0, t0 + 100 * us, 0).has_value());
-    link.forth->enter_window(0, {});
-    link.back->enter_window(0, {});
+    link.enter(0);
     link.forth->started(link.frame(start));
     link.forth->aborted(vtime{static_cast<std::uint64_t>(abort)});
     link.drain(0, l);
@@ -2926,8 +2985,8 @@ void run_windows(stub_link& link, std::uint64_t from, std::uint64_t to, std::int
 auto pause_drain(stub_link& link, std::uint64_t k, std::int64_t at)
     -> std::optional<core::link_fault>
 {
-  auto fault  = link.forth->drain(k, core::sys_time{at}, core::sys_time{at}, {});
-  std::ignore = link.back->drain(k, core::sys_time{at}, core::sys_time{at}, {});
+  auto fault  = link.forth->drain(link.through(0, k), core::sys_time{at}, core::sys_time{at}, {});
+  std::ignore = link.back->drain(link.through(1, k), core::sys_time{at}, core::sys_time{at}, {});
   return fault;
 }
 }
@@ -3029,7 +3088,8 @@ TEST_CASE("a pause drain reports an overlap of a post it carries, dated at the p
   REQUIRE(c + l < 35 * us + static_cast<std::int64_t>(declared().frame_ps()));
   REQUIRE(injected_byte(*link.forth, 0x5a, 35 * us, std::nullopt).has_value());
   link.window(0, q, {});
-  CHECK_FALSE(link.forth->drain(0, core::sys_time{q}, core::sys_time{2 * q}, {}).has_value());
+  CHECK_FALSE(link.forth->drain(link.through(0, 0), core::sys_time{q}, core::sys_time{2 * q}, {})
+                  .has_value());
   REQUIRE(link.forth_port.received.size() == 1);
   link.window(1, q, {});
   link.forth->started(link.frame(c));
@@ -3059,13 +3119,15 @@ TEST_CASE("an abort after the barrier edits the record at once and cancels at it
       link.forth->started(link.frame(f));
       link.forth->aborted(vtime{static_cast<std::uint64_t>(a)});
       link.forth->started(link.frame(g));
-      auto fault = link.forth->drain(0, core::sys_time{q}, core::sys_time{2 * q}, {});
+      auto fault =
+          link.forth->drain(link.through(0, 0), core::sys_time{q}, core::sys_time{2 * q}, {});
       CHECK_FALSE(fault.has_value());
       CHECK(received_starts(link.forth_port) == std::vector<std::int64_t>{f + l});
       CHECK(link.forth_port.cancels.empty());
       CHECK(saved_state(*link.forth).carried.size() == 2);
       link.window(1, q, {});
-      fault = link.forth->drain(1, core::sys_time{2 * q}, core::sys_time{3 * q}, {});
+      fault =
+          link.forth->drain(link.through(0, 1), core::sys_time{2 * q}, core::sys_time{3 * q}, {});
       CHECK_FALSE(fault.has_value());
       CHECK(received_starts(link.forth_port) == std::vector<std::int64_t>{f + l, g + l});
       CHECK(link.forth_port.cancels == std::vector<std::int64_t>{a + l});
@@ -3084,7 +3146,9 @@ TEST_CASE("an abort after the barrier edits the record at once and cancels at it
       CHECK_FALSE(pause_drain(link, 0, c).has_value());
       CHECK(received_starts(link.forth_port) == std::vector<std::int64_t>{f + l});
       CHECK(saved_state(*link.forth).carried.size() == 2);
-      CHECK_FALSE(link.forth->drain(0, core::sys_time{q}, core::sys_time{2 * q}, {}).has_value());
+      CHECK_FALSE(
+          link.forth->drain(link.through(0, 0), core::sys_time{q}, core::sys_time{2 * q}, {})
+              .has_value());
       CHECK(received_starts(link.forth_port) == std::vector<std::int64_t>{f + l, g + l});
       CHECK(link.forth_port.cancels == std::vector<std::int64_t>{a + l});
     }
@@ -3178,7 +3242,8 @@ TEST_CASE("a frame a recorded receiver reset drops is final at its drain, never 
         link.forth->aborted(vtime{static_cast<std::uint64_t>(s + 5 * us)});
       }
       link.forth->receiver_reset(core::sys_time{s + reset_from_start});
-      std::ignore      = link.forth->drain(0, core::sys_time{q}, core::sys_time{2 * q}, {});
+      std::ignore =
+          link.forth->drain(link.through(0, 0), core::sys_time{q}, core::sys_time{2 * q}, {});
       auto const quiet = link.forth->quiet();
       CHECK(saved_state(*link.forth).carried.size() == (quiet ? 0U : (aborted ? 2U : 1U)));
       run_windows(link, 1, 10, q);
@@ -3346,12 +3411,36 @@ struct span_before_carry
 
 struct state_before_carry
 {
-  std::uint64_t                  window{};
   std::uint64_t                  started{};
   core::sys_time                 drained_through{};
   std::vector<span_before_carry> delivered;
   core::sys_time                 last_barrier{};
 };
+}
+
+struct state_with_mailboxes
+{
+  std::vector<stm32::detail::wire_post> mail_even;
+  std::vector<stm32::detail::wire_post> mail_odd;
+  std::uint64_t                         window{};
+  std::uint64_t                         started{};
+};
+
+TEST_CASE("a wire state holding window mailboxes is refused, one holding its queue loads")
+{
+  stub_link link{static_cast<std::int64_t>(latency_20), declared()};
+  link.forth->started(link.frame(10));
+  std::vector<std::byte> queued;
+  link.forth->save(queued);
+  state_with_mailboxes const old{
+      .mail_even = saved_state(*link.forth).queued, .mail_odd = {}, .window = 0, .started = 1};
+  std::vector<std::byte> bytes;
+  reflex::serde::bson::serializer{bytes}.dump(old);
+  stub_link fresh{static_cast<std::int64_t>(latency_20), declared()};
+  CHECK_THROWS_AS(fresh.forth->load(bytes), popcorn::config_error);
+  fresh.forth->load(queued);
+  CHECK(fresh.forth->posted_count() == 1);
+  CHECK(saved_state(*fresh.forth) == saved_state(*link.forth));
 }
 
 TEST_CASE("a wire state saved before the carry loads with nothing carried and carries by the rule")
@@ -3364,7 +3453,6 @@ TEST_CASE("a wire state saved before the carry loads with nothing carried and ca
   auto const             g        = q + 5 * us;
   REQUIRE(g + l < s + l + frame_ps);
   state_before_carry const old{
-      .window          = 1,
       .started         = 1,
       .drained_through = core::sys_time{2 * q},
       .delivered =
@@ -3386,7 +3474,8 @@ TEST_CASE("a wire state saved before the carry loads with nothing carried and ca
   link.window(1, q, {});
   link.forth->started(link.frame(g));
   link.forth->started(link.frame(2 * q));
-  auto const fault = link.forth->drain(1, core::sys_time{2 * q}, core::sys_time{3 * q}, {});
+  auto const fault =
+      link.forth->drain(link.through(0, 1), core::sys_time{2 * q}, core::sys_time{3 * q}, {});
   REQUIRE(fault.has_value());
   CHECK(fault->at.ps == g);
   CHECK(link.forth_port.received.empty());

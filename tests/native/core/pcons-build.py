@@ -211,6 +211,7 @@ for _, target in core_firmware.values():
         test_horizon.depends(target)
 
 add_doctest("core-window-barrier", [here / "test_window_barrier.cpp"], [core])
+add_doctest("core-spsc-queue", [here / "test_spsc_queue.cpp"], [core])
 test_system = add_doctest(
     "core-system",
     [here / "test_system.cpp"],

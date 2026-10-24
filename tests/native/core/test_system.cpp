@@ -11,6 +11,7 @@
 #include "../support/test_arch.hpp"
 
 #include <doctest/doctest.h>
+#include <reflex/serde/bson.hpp>
 
 #include <sched.h>
 #include <sys/wait.h>
@@ -70,9 +71,8 @@ public:
 
 struct drained
 {
-  std::uint64_t window{};
-  std::int64_t  barrier{};
-  std::int64_t  next{};
+  std::int64_t barrier{};
+  std::int64_t next{};
 
   friend auto operator==(drained const&, drained const&) -> bool = default;
 };
@@ -101,9 +101,14 @@ public:
     return core::sys_time{latency_};
   }
 
-  void enter_window(std::uint64_t window, core::time_map) override
+  void enter_slice(core::time_map) override
   {
-    entered = window;
+    entered.fetch_add(1, std::memory_order_release);
+  }
+
+  auto posted_count() const noexcept -> std::uint64_t override
+  {
+    return entered.load(std::memory_order_acquire);
   }
 
   void sender_reset(core::sys_time at) override
@@ -117,14 +122,20 @@ public:
   }
 
   auto drain(
-      std::uint64_t         window,
+      std::uint64_t         through,
       core::sys_time const& barrier,
       core::sys_time const& next,
       core::time_map) -> std::optional<core::link_fault> override
   {
+    CHECK(through >= last_through);
+    last_through = through;
+    if(on_through)
+    {
+      on_through(through);
+    }
     if(drains.size() < kept_drains)
     {
-      drains.push_back({.window = window, .barrier = barrier.ps, .next = next.ps});
+      drains.push_back({.barrier = barrier.ps, .next = next.ps});
     }
     if(on_drain)
     {
@@ -165,17 +176,19 @@ public:
     state = in[0];
   }
 
-  std::uint64_t                               entered{};
-  std::vector<drained>                        drains;
-  std::vector<std::int64_t>                   sender_resets;
-  std::vector<std::int64_t>                   receiver_resets;
-  std::optional<std::int64_t>                 fault_at{};
-  std::move_only_function<void(std::int64_t)> on_drain{};
-  bool                                        busy{};
-  std::byte                                   state{};
-  bool                                        fail_load{};
-  std::vector<std::int64_t>                   finished{};
-  bool                                        reported{};
+  std::atomic<std::uint64_t>                   entered{};
+  std::uint64_t                                last_through{};
+  std::vector<drained>                         drains;
+  std::vector<std::int64_t>                    sender_resets;
+  std::vector<std::int64_t>                    receiver_resets;
+  std::optional<std::int64_t>                  fault_at{};
+  std::move_only_function<void(std::int64_t)>  on_drain{};
+  std::move_only_function<void(std::uint64_t)> on_through{};
+  bool                                         busy{};
+  std::byte                                    state{};
+  bool                                         fail_load{};
+  std::vector<std::int64_t>                    finished{};
+  bool                                         reported{};
 
 private:
   std::size_t  from_;
@@ -437,17 +450,57 @@ TEST_CASE("every receiver drains each window once, in order, at its barrier")
       CHECK(
           link->drains[window]
           == drained{
-              .window  = window,
               .barrier = static_cast<std::int64_t>(window + 1) * q,
               .next    = static_cast<std::int64_t>(window + 2) * q});
     }
     auto const& confirm = link->drains.back();
-    CHECK(confirm.window == stopped.windows);
     CHECK(confirm.barrier == 1 * ms_ps);
     CHECK(confirm.next == 1 * ms_ps);
   }
   auto const held = r.sys->lock();
   CHECK(r.sys->pending_barrier(held).ps == static_cast<std::int64_t>(stopped.windows + 1) * q);
+}
+
+TEST_CASE("a drain takes the posts its sender made before the barrier, not those after it")
+{
+  rig        r{.members = sleeper_and_runner()};
+  auto const slow = std::make_shared<fake_link>(1, 0, 20 * us_ps);
+  auto const fast = std::make_shared<fake_link>(1, 0, 20 * us_ps);
+  slow->on_drain  = [](std::int64_t) {
+    std::this_thread::sleep_for(std::chrono::microseconds{200});
+  };
+  std::vector<std::uint64_t> arrived;
+  std::vector<std::uint64_t> drained;
+  fast->on_through = [&drained](std::uint64_t through) {
+    if(drained.empty() or drained.back() != through)
+    {
+      drained.push_back(through);
+    }
+  };
+  r.sys = std::make_unique<core::system>(
+      r.members, std::vector<std::shared_ptr<core::member_link>>{slow, fast},
+      core::slice_bounds{
+          .max_instructions = icount{997}, .wall_budget = std::chrono::microseconds{10}},
+      [&arrived, &fast](std::size_t index) {
+        auto const count = fast->posted_count();
+        if(index == 1 and (arrived.empty() or arrived.back() != count))
+        {
+          arrived.push_back(count);
+        }
+      });
+  {
+    auto const                        held = r.sys->lock();
+    std::vector<core::sys_time> const offsets(2);
+    r.sys->start(held, offsets);
+  }
+  auto const endless = r.goal(1, {.budget = icount{1'000'000'000'000}});
+  auto const stopped = r.run(1 * ms_ps);
+  REQUIRE(stopped.reason == core::pause_reason::system_time);
+  REQUIRE(stopped.windows > 20);
+  REQUIRE(drained.size() >= stopped.windows);
+  REQUIRE(arrived.size() >= drained.size());
+  arrived.resize(drained.size());
+  CHECK(drained == arrived);
 }
 
 TEST_CASE("a member linked to itself drains its own wire each window, at its barrier")
@@ -475,7 +528,6 @@ TEST_CASE("a member linked to itself drains its own wire each window, at its bar
       CHECK(
           link->drains[window]
           == drained{
-              .window  = window,
               .barrier = static_cast<std::int64_t>(window + 1) * q,
               .next    = static_cast<std::int64_t>(window + 2) * q});
     }
@@ -2463,6 +2515,47 @@ TEST_CASE("a load that fails on its second link leaves the system as it was")
   CHECK_THROWS_AS(r.sys->load(held, saved), popcorn::config_error);
   CHECK(r.links[0]->state == std::byte{5});
   CHECK(r.sys->pending_barrier(held) == barrier);
+}
+
+namespace
+{
+struct member_mirror
+{
+  core::sys_time                base{};
+  std::optional<core::sys_time> held_to{};
+  bool                          released{};
+};
+
+struct system_mirror
+{
+  std::uint32_t                       format{};
+  std::uint64_t                       window{};
+  core::sys_time                      pending{};
+  std::optional<core::sys_time>       last_point{};
+  std::vector<member_mirror>          members{};
+  std::vector<std::vector<std::byte>> links{};
+};
+}
+
+TEST_CASE("a system state of format 2 loads, one of format 1 is refused")
+{
+  rig r{.members = sleeper_and_runner()};
+  r.build(variants()[0]);
+  REQUIRE(r.run(100 * us_ps).reason == core::pause_reason::system_time);
+  auto const             held = r.sys->lock();
+  std::vector<std::byte> saved;
+  r.sys->save(held, saved);
+  auto state =
+      reflex::serde::bson::deserializer{std::span<std::byte const>{saved}}.load<system_mirror>();
+  REQUIRE(state.format == 2);
+  std::vector<std::byte> again;
+  reflex::serde::bson::serializer{again}.dump(state);
+  CHECK(again == saved);
+  r.sys->load(held, again);
+  state.format = 1;
+  std::vector<std::byte> old;
+  reflex::serde::bson::serializer{old}.dump(state);
+  CHECK_THROWS_AS(r.sys->load(held, old), popcorn::config_error);
 }
 
 namespace

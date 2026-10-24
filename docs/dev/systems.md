@@ -19,10 +19,10 @@ sequenceDiagram
     participant S as sender member
     participant B as barrier
     participant R as receiver member
-    S->>S: run window k, post frames to the mailbox
+    S->>S: run window k, push frames to the wire's queue
     S->>B: arrive
     R->>B: arrive
-    B->>B: last arriver runs the completion
+    B->>B: last arriver runs the completion, seals each queue's count
     B-->>R: release
     R->>R: drain the wires, senders in member order, then link order
     R->>R: run window k + 1
@@ -31,9 +31,11 @@ sequenceDiagram
 - A member whose core runs is held at each barrier with `slice_request::hold_from_until`, so
   every post reaches its receiver at its exact time whatever `Q`, the slicing or the thread
   timing.
-- A sender appends a frame to the mailbox of its current window. After barrier `k` the
-  receiver drains the mailbox of window `k` on its own thread. The sender writes that mailbox
-  again only in window `k + 2`, which holds only while every member arrives at every barrier.
+- A sender pushes each frame to its wire's queue, `core::spsc_queue`, an unbounded
+  single-producer single-consumer queue in segments of 256 posts. The barrier's completion
+  reads every queue's count while every member waits in it, the seal. After the barrier the
+  receiver drains its wires on its own thread up to the seal, so a sender already running
+  window `k + 1` pushes past it and its posts wait for the next drain.
 - A frame that ends at sender time `t` is delivered at `t + L`.
 - `member_link::sender_reset` and `receiver_reset` tell a link that a member reset. A frame in
   flight at a sender reset is aborted, and a receiver reset drops the frames whose arrival is
@@ -76,5 +78,5 @@ it takes at most one host mutex at a time. Host threads never take the system mu
 ## Determinism
 
 The frames, their times and every member's state do not depend on `Q`, on the slicing or on
-the thread timing. The barrier and the mailbox rules above give that property, and the
+the thread timing. The barrier and the seal rules above give that property, and the
 linked_uart example tests it at several quanta, slicings and CPU counts.

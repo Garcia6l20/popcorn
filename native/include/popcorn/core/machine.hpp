@@ -404,9 +404,10 @@ public:
   /**
    * @brief The machine's horizon at its current time: for a sleeping core, the earliest local
    *        times at which it can wake, a wire's transmit source can start a frame, or a resumable
-   *        stop can happen, with no input from outside the machine. A pure read: it changes no
-   *        state. Wake takes the earliest of the arch events that can pend an exception, see
-   *        arch::arch::event_pends(), and of every model's answer by its
+   *        stop can happen, with no input from outside the machine. It changes no machine
+   *        state, but writes per-machine evaluation buffers, so call it on the machine's thread,
+   *        one call at a time. Wake takes the earliest of the arch events that can pend an
+   * exception, see arch::arch::event_pends(), and of every model's answer by its
    *        periph::model::role_in_horizon(): periph::model::quiet_until() of a `lines` model while
    *        one of its IRQ lines passes arch::arch::may_wake(), of a `bus_master` model always,
    *        and the earliest queued event of a `trigger`, `reset_source` or `opaque` model. A

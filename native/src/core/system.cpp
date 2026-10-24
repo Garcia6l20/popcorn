@@ -89,7 +89,6 @@ struct decision
   sys_time             target{};
   std::optional<entry> head{};
   sys_time             confirm{};
-  std::uint64_t        window{};
   sys_time             barrier{};
   sys_time             next{};
 };
@@ -114,7 +113,7 @@ struct saved_member
 
 struct saved_system
 {
-  std::uint32_t                       format{1};
+  std::uint32_t                       format{2};
   std::uint64_t                       window{};
   sys_time                            pending{};
   std::optional<sys_time>             last_point{};
@@ -136,6 +135,7 @@ struct system::impl
     std::uint64_t                                                         resets{};
     std::vector<member_link*>                                             outbound{};
     std::vector<member_link*>                                             inbound{};
+    std::vector<std::uint64_t>                                            sealed{};
     std::optional<goal_run>                                               goal{};
     bool                                                                  undecided{};
     bool                                                                  released{};
@@ -191,6 +191,7 @@ struct system::impl
   void               set_pause(entry const& head) noexcept;
   void               reconsider() noexcept;
   void               settle_confirm() noexcept;
+  void               seal() noexcept;
   void               complete_a() noexcept;
   void               complete_b() noexcept;
   void               complete_c() noexcept;
@@ -298,12 +299,12 @@ public:
         case phase::after_b:
           if(not sys_.chosen.pause)
           {
-            drain(sys_.chosen.window, sys_.chosen.barrier, sys_.chosen.next);
+            drain(sys_.chosen.barrier, sys_.chosen.next);
             one.rep.quiescent = false;
             phase_            = phase::run;
             continue;
           }
-          drain(sys_.chosen.window, sys_.chosen.confirm, sys_.chosen.confirm);
+          drain(sys_.chosen.confirm, sys_.chosen.confirm);
           one.rep.quiet = std::ranges::all_of(
                               one.inbound, [](member_link const* link) { return link->quiet(); })
                       and target.pending_events() == 0
@@ -326,7 +327,7 @@ public:
           {
             if(sys_.chosen.exchange)
             {
-              drain(sys_.chosen.window, sys_.chosen.barrier, sys_.chosen.next);
+              drain(sys_.chosen.barrier, sys_.chosen.next);
             }
             one.rep.quiescent = false;
             phase_            = phase::run;
@@ -354,7 +355,6 @@ public:
         case phase::idle_to:
           if(position(target) < sys_.chosen.target)
           {
-            window_ = sys_.window;
             return request_to(sys_.chosen.target, false, false);
           }
           settle_idle(target);
@@ -546,19 +546,19 @@ private:
     return sys_.slots[index_].map.to_system(*local);
   }
 
-  void enter_windows()
+  void enter_slice()
   {
     auto& one = sys_.slots[index_];
     for(auto* link : one.outbound)
     {
-      link->enter_window(window_, one.map);
+      link->enter_slice(one.map);
     }
   }
 
   auto request_to(sys_time bound, bool quiescent, bool hold) -> slice_request
   {
     auto& one = sys_.slots[index_];
-    enter_windows();
+    enter_slice();
     one.held_to = bound;
     held_last_  = hold;
     until_last_ = one.map.to_local(bound);
@@ -606,7 +606,6 @@ private:
   auto running(machine const& target, earliest_stamp const& stamp) -> std::optional<slice_request>
   {
     auto& one = sys_.slots[index_];
-    window_   = sys_.window;
     if(not one.running() or one.rep.quiescent)
     {
       return std::nullopt;
@@ -652,7 +651,6 @@ private:
   auto halted(machine const& target, earliest_stamp const& stamp) -> std::optional<slice_request>
   {
     auto& one = sys_.slots[index_];
-    window_   = sys_.chosen.window;
     if(one.goal or one.failed or one.rep.quiescent)
     {
       return std::nullopt;
@@ -710,24 +708,24 @@ private:
     return passed;
   }
 
-  void drain(std::uint64_t window, sys_time const& barrier, sys_time const& next)
+  void drain(sys_time const& barrier, sys_time const& next)
   {
     auto& one = sys_.slots[index_];
     if(not sys_.measuring)
     {
-      drain_inbound(one, window, barrier, next);
+      drain_inbound(one, barrier, next);
       return;
     }
     auto const from = std::chrono::steady_clock::now();
-    drain_inbound(one, window, barrier, next);
+    drain_inbound(one, barrier, next);
     one.drained += std::chrono::steady_clock::now() - from;
   }
 
-  void drain_inbound(slot& one, std::uint64_t window, sys_time const& barrier, sys_time const& next)
+  void drain_inbound(slot& one, sys_time const& barrier, sys_time const& next)
   {
-    for(auto* link : one.inbound)
+    for(std::size_t index = 0; index < one.inbound.size(); ++index)
     {
-      if(auto fault = link->drain(window, barrier, next, one.map))
+      if(auto fault = one.inbound[index]->drain(one.sealed[index], barrier, next, one.map))
       {
         one.rep.found.push_back(
             {.at     = fault->at,
@@ -743,7 +741,6 @@ private:
   phase             phase_{phase::begin};
   bool              held_last_{};
   bool              sleeping_{};
-  std::uint64_t     window_{};
   vtime             until_last_{};
   std::atomic<bool> aborted_{false};
 
@@ -782,6 +779,7 @@ system::impl::impl(
   {
     slots[link->sender()].outbound.push_back(link);
     slots[link->receiver()].inbound.push_back(link);
+    slots[link->receiver()].sealed.push_back(0);
   }
   std::size_t linked = 0;
   try
@@ -1015,12 +1013,24 @@ void system::impl::account() noexcept
   work.ideal += slowest;
 }
 
+void system::impl::seal() noexcept
+{
+  for(auto& one : slots)
+  {
+    for(std::size_t index = 0; index < one.inbound.size(); ++index)
+    {
+      one.sealed[index] = one.inbound[index]->posted_count();
+    }
+  }
+}
+
 void system::impl::complete_a() noexcept
 {
+  seal();
   account();
   woke.store(false);
   merge_found();
-  chosen = decision{.window = window, .barrier = pending, .next = {pending.ps + q.ps}};
+  chosen = decision{.barrier = pending, .next = {pending.ps + q.ps}};
   if(auto const head = best_entry())
   {
     set_pause(*head);
@@ -1052,6 +1062,7 @@ void system::impl::complete_a() noexcept
 
 void system::impl::complete_b() noexcept
 {
+  seal();
   account();
   ++result.phase_b;
   merge_found();
@@ -1061,6 +1072,7 @@ void system::impl::complete_b() noexcept
 
 void system::impl::complete_c() noexcept
 {
+  seal();
   account();
   merge_found();
   reconsider();
@@ -1536,7 +1548,7 @@ auto system::impl::load_links(std::span<std::byte const> in, bool keep) -> saved
     throw config_error(
         "system state", 0, "bytes", std::format("a state system::save wrote: {}", failure.what()));
   }
-  if(state.format != 1
+  if(state.format != saved_system{}.format
      or state.members.size() != slots.size()
      or state.links.size() != links.size())
   {

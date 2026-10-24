@@ -72,12 +72,11 @@ struct link_fault
 
 /**
  * @brief One direction of a link between two members of a linked system, as the system's
- *        scheduler sees it. The sender half is touched only by the sender's host thread while it
- *        runs a window, the receiver half only by the receiver's host thread after a barrier.
- *        The barrier orders the halves: posts of window k are drained after barrier k, before
- *        the sender writes the same mailbox again in window k + 2. That holds only while every
- *        member arrives at every barrier: a member skipping a round would let a sender refill a
- *        mailbox its receiver has not drained.
+ *        scheduler sees it. The sender half runs on the sender's host thread, the receiver half
+ *        on the receiver's. Posts go into a queue in push order. posted_count() reads its count
+ *        from any thread, and a drain hands only the posts below a count read after them, so
+ *        a sender running on while its receiver drains pushes past the count and its posts wait
+ *        for a later drain.
  */
 class POPCORN_API member_link
 {
@@ -105,13 +104,17 @@ public:
   [[nodiscard]] virtual auto latency() const noexcept -> sys_time = 0;
 
   /**
-   * @brief Starts a window on the sender's side. Called on the sender's host thread before each
-   *        slice. Posts go to that window's mailbox until the next call, those of a block that
-   *        overshoots the barrier included.
-   * @param window Index of the window the slice starts in.
+   * @brief Starts a slice on the sender's side. Called on the sender's host thread before each
+   *        slice: posts until the next call convert their times through @p sender.
    * @param sender The sender's time map.
    */
-  virtual void enter_window(std::uint64_t window, time_map sender) = 0;
+  virtual void enter_slice(time_map sender) = 0;
+
+  /**
+   * @brief Posts made so far, any thread: a count drain() takes as its limit. Reading it
+   *        synchronizes with the posts below it.
+   */
+  [[nodiscard]] virtual auto posted_count() const noexcept -> std::uint64_t = 0;
 
   /**
    * @brief The sender is about to be reset at @p at. Called on the sender's host thread before
@@ -128,13 +131,13 @@ public:
   virtual void receiver_reset(sys_time at) = 0;
 
   /**
-   * @brief Hands the posts of a window it delivers to the receiver. A link may keep some for a
+   * @brief Hands the posts up to count @p through to the receiver. A link may keep some for a
    *        later drain, as long as each still reaches the receiver on time. Called on the
-   *        receiver's host thread after the barrier closing @p window, before the receiver runs
-   *        on.
-   * @param window Index of the window whose mailbox is drained.
-   * @param barrier System time of that barrier.
-   * @param next System time of the barrier after it: what the link's drains reach so far.
+   *        receiver's host thread, before the receiver runs on.
+   * @param through A count posted_count() returned, at or after the last drain's.
+   * @param barrier System time the receiver stands at: posts starting before it are handed.
+   * @param next System time the receiver may run to before the next drain: what the link's
+   *        drains reach so far.
    * @param receiver The receiver's time map.
    * @return The earliest system error the drain found, if any. Its time may lie before
    *         @p barrier: a fault on a peer frame is dated at the frame's sender start, up to L
@@ -142,13 +145,13 @@ public:
    *         the drain that found them.
    */
   virtual auto
-      drain(std::uint64_t window, sys_time const& barrier, sys_time const& next, time_map receiver)
+      drain(std::uint64_t through, sys_time const& barrier, sys_time const& next, time_map receiver)
           -> std::optional<link_fault> = 0;
 
   /**
    * @brief Whether the link holds nothing for its receiver: nothing posted, queued or kept
    *        that a later drain would hand. Called on the receiver's host thread after its drain,
-   *        with every sender stopped at a barrier.
+   *        with the sender stopped.
    */
   [[nodiscard]] virtual auto quiet() const -> bool = 0;
 

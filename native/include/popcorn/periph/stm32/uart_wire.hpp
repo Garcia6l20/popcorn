@@ -3,6 +3,7 @@
 #include <popcorn/core/link_guard.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/member_link.hpp>
+#include <popcorn/core/spsc_queue.hpp>
 #include <popcorn/export.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
 
@@ -295,9 +296,8 @@ struct line_cut
 /** @brief Everything a wire saves. */
 struct wire_state
 {
-  std::vector<wire_post>        mail_even;
-  std::vector<wire_post>        mail_odd;
-  std::uint64_t                 window{};
+  std::vector<wire_post>        queued;
+  std::uint64_t                 queued_from{};
   core::sys_time                sender_base{};
   std::uint64_t                 started{};
   std::vector<armed_edit>       edits;
@@ -325,30 +325,27 @@ struct wire_state
 /**
  * @brief One direction of a UART link between two members of a linked system. Attached as the
  *        sender port's far end, it numbers each frame at its start bit and posts it, in system
- *        time, to the mailbox of the sender's window. The receiver's drain after the barrier
- *        hands each frame to the receiver's port at its start plus L in the receiver's time, on
- *        the wire's peer lane, and each abort as a cancel at its time plus L. A frame whose shape
- *        differs from the declared line logs one warning per wire on the receiver, and under
- *        strict_peripherals is also a model_error at the frame's sender start. The check compares
- *        each sender with the declaration, not with the receiver: two ends just under 3 percent
- *        off in opposite directions are about 6 percent apart and get no warning, the
- *        receiver's FE and NE still show it. Frames the sender
- *        transmits still reach the endpoint the wire replaced. Edits armed from any thread
- *        replace or drop frames by number. Injected frames go on the wire's injected lane. Two
- *        frames overlapping on the receiver's line are a system error at the later one's start,
- *        its sender start for a peer frame, its receiver start for an injected one. The tap gets
- *        each frame once its end, or its abort for a lost frame, the receiver end for an
- *        injected frame, lies at or before a drained barrier or the final stop, in order of
- *        that time, so its content at a barrier does not depend on how the run was cut into
- *        windows. A sender reset aborts the frame in flight. After a receiver reset at r, frames
- *        on the line at r or starting before r plus L never reach the receiver, the tap still
- *        shows them.
+ *        time, to the wire's queue. The receiver's drain hands each frame to the receiver's port at
+ * its start plus L in the receiver's time, on the wire's peer lane, and each abort as a cancel at
+ * its time plus L. A frame whose shape differs from the declared line logs one warning per wire on
+ * the receiver, and under strict_peripherals is also a model_error at the frame's sender start. The
+ * check compares each sender with the declaration, not with the receiver: two ends just under 3
+ * percent off in opposite directions are about 6 percent apart and get no warning, the receiver's
+ * FE and NE still show it. Frames the sender transmits still reach the endpoint the wire replaced.
+ * Edits armed from any thread replace or drop frames by number. Injected frames go on the wire's
+ * injected lane. Two frames overlapping on the receiver's line are a system error at the later
+ * one's start, its sender start for a peer frame, its receiver start for an injected one. The tap
+ * gets each frame once its end, or its abort for a lost frame, the receiver end for an injected
+ * frame, lies at or before a drained barrier or the final stop, in order of that time, so its
+ * content at a barrier does not depend on how the run was cut into windows. A sender reset aborts
+ * the frame in flight. After a receiver reset at r, frames on the line at r or starting before r
+ * plus L never reach the receiver, the tap still shows them.
  *
  *        A drain hands the port only posts starting before its barrier, the pause point at a
  *        pause. It carries the rest it would hand, aborts included, in order, and the next drain
  *        takes them first. A carried frame is on time: it starts at or after the barrier, so its
  *        receiver start lies at or after the next barrier. The shape and overlap checks and an
- *        abort's edit of the record run when a post leaves its mailbox, carried or not, so errors
+ *        abort's edit of the record run when a post leaves the queue, carried or not, so errors
  *        keep their date and the drain that reports them. A dropped or clashing post is final
  *        there, never carried. So is a frame a receiver reset recorded so far drops, a frame
  *        starting inside a closed cut, and an abort with no frame left to cancel: none crosses
@@ -472,11 +469,12 @@ public:
   [[nodiscard]] auto sender() const noexcept -> std::size_t override;
   [[nodiscard]] auto receiver() const noexcept -> std::size_t override;
   [[nodiscard]] auto latency() const noexcept -> core::sys_time override;
-  void               enter_window(std::uint64_t window, core::time_map sender) override;
+  void               enter_slice(core::time_map sender) override;
+  [[nodiscard]] auto posted_count() const noexcept -> std::uint64_t override;
   void               sender_reset(core::sys_time at) override;
   void               receiver_reset(core::sys_time at) override;
   auto               drain(
-      std::uint64_t         window,
+      std::uint64_t         through,
       core::sys_time const& barrier,
       core::sys_time const& next,
       core::time_map        receiver) -> std::optional<core::link_fault> override;
@@ -494,7 +492,7 @@ public:
    * @param registration The link's registration.
    */
   void share_registration(std::shared_ptr<link_registration> registration)
-      pre(registration != nullptr) pre(state_.started == 0 and state_.window == 0);
+      pre(registration != nullptr) pre(state_.started == 0);
 
   /** @brief Whether this wire and @p other share one registration. */
   [[nodiscard]] auto shares_registration(uart_wire const& other) const noexcept -> bool;
@@ -561,7 +559,6 @@ private:
   friend auto restore_link(uart_wire& forth, uart_wire& back, core::sys_time now)
       -> std::expected<core::sys_time, cut_refusal>;
 
-  auto mailbox(std::uint64_t window) -> std::vector<detail::wire_post>&;
   void collect(std::vector<detail::wire_post> const& posts, std::vector<tap_frame>& into) const;
   void emit(
       std::vector<tap_frame>&           from,
@@ -588,16 +585,17 @@ private:
       core::sys_time                    before) const -> detail::line_cut const*;
   [[nodiscard]] auto cuts_before(core::sys_time reach) const -> std::vector<detail::line_cut>;
 
-  wire_ends                          ends_;
-  wire_lanes                         lanes_;
-  core::sys_time                     latency_;
-  line_shape                         declared_;
-  wire_receiver                      into_;
-  std::shared_ptr<uart_endpoint>     forward_;
-  tap_queue                          tap_;
-  std::shared_ptr<link_registration> registration_;
-  mutable std::mutex                 edit_mutex_;
-  mutable std::mutex                 inject_mutex_;
-  detail::wire_state                 state_;
+  wire_ends                           ends_;
+  wire_lanes                          lanes_;
+  core::sys_time                      latency_;
+  line_shape                          declared_;
+  wire_receiver                       into_;
+  std::shared_ptr<uart_endpoint>      forward_;
+  tap_queue                           tap_;
+  std::shared_ptr<link_registration>  registration_;
+  mutable std::mutex                  edit_mutex_;
+  mutable std::mutex                  inject_mutex_;
+  detail::wire_state                  state_;
+  core::spsc_queue<detail::wire_post> ring_;
 };
 }
