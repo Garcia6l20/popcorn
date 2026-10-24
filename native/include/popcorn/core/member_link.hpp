@@ -167,8 +167,11 @@ public:
 
   /**
    * @brief Asks the link to call @p watcher with the system time of each post its sender makes,
-   *        a frame start, an abort or a reset abort, on the sender's host thread, once the post
-   *        is counted. Called once, before the system first runs.
+   *        a frame start, an abort or a reset abort, once the post is counted: on the sender's
+   *        host thread, or on a thread that holds the sender's host mutex while the sender is
+   *        parked. The system calls it under the sender's host mutex when it is built, and with
+   *        an empty watcher when it is destroyed or its construction fails.
+   * @param watcher Called with each post's system time. An empty watcher stops the calls.
    * @return Whether the link calls @p watcher. The default returns false and never calls it.
    */
   virtual auto watch_posts([[maybe_unused]] std::move_only_function<void(sys_time)> watcher) -> bool
@@ -177,10 +180,14 @@ public:
   }
 
   /**
-   * @brief Refuses from now on every input that would reach the receiver before @p at, such as
-   *        a running injection, then returns due(). Called on the receiver's host thread before
-   *        the receiver promises its peers to post nothing before @p at unless an input reaches
-   *        it. The default only returns due(), for a link that takes no such input.
+   * @brief Refuses every input that would reach the receiver before @p at, such as a running
+   *        injection, until the next call replaces the bound, then returns due(). Called on the
+   *        receiver's host thread before the receiver promises its peers to post nothing before
+   *        @p at unless an input reaches it, and at each resume with the receiver's time, which
+   *        may lower the bound. The default only returns due(), for a link that takes no such
+   *        input.
+   * @param at System time before which the link refuses inputs to the receiver.
+   * @return due() once the bound is set, so it holds every input accepted before the bound.
    */
   virtual auto hold_inputs_before([[maybe_unused]] sys_time at) -> std::optional<sys_time>
   {

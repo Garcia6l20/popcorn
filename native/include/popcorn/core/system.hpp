@@ -223,7 +223,7 @@ public:
    * @param lookahead Under sync_mode::clocks, how far past its position a member publishes its
    *        lead and promises at most: the host is an inbound wire of that latency, so a stamp at
    *        or after a member's position plus @p lookahead lands exactly. A member with nothing due
-   * moves by a hold slice to its position plus @p lookahead when it leads that far.
+   *        moves by a hold slice to its position plus @p lookahead when it leads that far.
    * @throws machine_busy when a member is busy.
    */
   system(
