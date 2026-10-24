@@ -131,8 +131,12 @@ public:
       core::sys_time const& barrier,
       core::sys_time const& next,
       core::time_map,
-      core::sys_time const&) -> std::optional<core::link_fault> override
+      core::sys_time const& shown) -> std::optional<core::link_fault> override
   {
+    if(on_shown)
+    {
+      on_shown(barrier.ps, next.ps, shown.ps);
+    }
     CHECK(through >= last_through);
     last_through = through;
     if(on_through)
@@ -176,6 +180,14 @@ public:
     return not busy;
   }
 
+  void release_through(core::sys_time at) override
+  {
+    if(on_release)
+    {
+      on_release(at.ps);
+    }
+  }
+
   void finish(core::sys_time at) override
   {
     finished.push_back(at.ps);
@@ -195,20 +207,22 @@ public:
     state = in[0];
   }
 
-  std::atomic<std::uint64_t>                   entered{};
-  std::uint64_t                                last_through{};
-  std::vector<drained>                         drains;
-  std::vector<std::int64_t>                    sender_resets;
-  std::vector<std::int64_t>                    receiver_resets;
-  std::optional<std::int64_t>                  fault_at{};
-  std::optional<std::int64_t>                  due_at{};
-  std::move_only_function<void(std::int64_t)>  on_drain{};
-  std::move_only_function<void(std::uint64_t)> on_through{};
-  bool                                         busy{};
-  std::byte                                    state{};
-  bool                                         fail_load{};
-  std::vector<std::int64_t>                    finished{};
-  bool                                         reported{};
+  std::atomic<std::uint64_t>                                              entered{};
+  std::uint64_t                                                           last_through{};
+  std::vector<drained>                                                    drains;
+  std::vector<std::int64_t>                                               sender_resets;
+  std::vector<std::int64_t>                                               receiver_resets;
+  std::optional<std::int64_t>                                             fault_at{};
+  std::optional<std::int64_t>                                             due_at{};
+  std::move_only_function<void(std::int64_t)>                             on_drain{};
+  std::move_only_function<void(std::int64_t, std::int64_t, std::int64_t)> on_shown{};
+  std::move_only_function<void(std::int64_t)>                             on_release{};
+  std::move_only_function<void(std::uint64_t)>                            on_through{};
+  bool                                                                    busy{};
+  std::byte                                                               state{};
+  bool                                                                    fail_load{};
+  std::vector<std::int64_t>                                               finished{};
+  bool                                                                    reported{};
 
 private:
   std::size_t  from_;
@@ -4601,4 +4615,215 @@ TEST_CASE("a lookahead below a link's latency still lets a member reach its paus
   auto const held = sys.lock();
   CHECK(sys.time_of(held, 0).ps == failed->load());
   CHECK(sys.time_of(held, 1).ps >= failed->load() + latency);
+}
+
+namespace
+{
+struct owner_gate
+{
+  std::array<std::shared_ptr<core::host>, 3> hosts{};
+  std::atomic<std::int64_t>                  held_at{-1};
+  std::atomic<std::int64_t>                  shown_max{-1};
+  std::atomic<std::int64_t>                  barrier_max{-1};
+  std::atomic<bool>                          released{false};
+};
+}
+
+TEST_CASE("a run drain shows no frame past an off-link cut owner's clock")
+{
+  for(auto how : {variants()[7], variants()[10]})
+  {
+    CAPTURE(how.name);
+    how.bounds = {.max_instructions = icount{8}, .wall_budget = std::chrono::milliseconds{1}};
+    pinned const pin{how.one_cpu};
+    auto         state = std::make_shared<owner_gate>();
+    rig          r{
+        .members =
+            {member("alu", "alu_entry"), member("alu", "alu_entry"), member("alu", "alu_entry")},
+        .arrival = [state](std::size_t index) {
+          if(index != 2 or state->released.load())
+          {
+            return;
+          }
+          auto const now = static_cast<std::int64_t>(
+              state->hosts.at(2)->member_inline(core::member_id{}).virtual_clock().time().ps);
+          if(now > 100 * us_ps and state->held_at.load() < 0)
+          {
+            state->held_at = now;
+            state->released.wait(false);
+          }
+                      }
+    };
+    state->hosts = {r.members[0].on, r.members[1].on, r.members[2].on};
+    r.build(how);
+    at_scope_end const opened{[state] { open_gate(state->released); }};
+    r.links[0]->on_shown = [state](std::int64_t barrier, std::int64_t, std::int64_t shown) {
+      if(state->released.load())
+      {
+        return;
+      }
+      state->shown_max.store(std::max(state->shown_max.load(), shown));
+      state->barrier_max.store(std::max(state->barrier_max.load(), barrier));
+    };
+    {
+      auto const held = r.sys->lock();
+      r.sys->set_cut_owner(held, 0, 2);
+    }
+    for(std::size_t member = 0; member < 3; ++member)
+    {
+      std::ignore = r.goal(member, {.until = popcorn::address{0x0800'0001}, .open = true});
+    }
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held);
+    }
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    auto const past     = [&state] {
+      auto const held = state->held_at.load();
+      return held >= 0 and state->barrier_max.load() > held;
+    };
+    while(not past() and std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::yield();
+    }
+    REQUIRE(past());
+    CHECK(state->shown_max.load() <= state->held_at.load());
+    open_gate(state->released);
+    r.sys->request_pause();
+    CHECK(pending.get().reason == core::pause_reason::requested);
+  }
+}
+
+TEST_CASE("a confirm drain shows no frame past an off-link cut owner's stop")
+{
+  for(auto const& how : {variants()[7], variants()[10]})
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    rig          r{
+        .members = {
+                    member("alu", "alu_entry"), member("alu", "alu_entry"), member("alu", "alu_entry")}
+    };
+    r.build(how);
+    auto const confirms  = std::make_shared<std::vector<std::pair<std::int64_t, std::int64_t>>>();
+    r.links[0]->on_shown = [confirms](std::int64_t barrier, std::int64_t next, std::int64_t shown) {
+      if(barrier == next)
+      {
+        confirms->emplace_back(barrier, shown);
+      }
+    };
+    {
+      auto const held = r.sys->lock();
+      r.sys->set_cut_owner(held, 0, 2);
+    }
+    std::ignore   = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    std::ignore   = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto stopping = r.goal(2, {.until_time = core::sys_time{100 * us_ps}});
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held);
+    }
+    auto const stopped = pending.get();
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    REQUIRE(stopped.member == 2);
+    REQUIRE_FALSE(confirms->empty());
+    CHECK(confirms->back().first == stopped.at.ps + 20 * us_ps);
+    CHECK(confirms->back().second == stopped.at.ps);
+  }
+}
+
+TEST_CASE("a TIME pause releases a link's tap through its ends' positions")
+{
+  for(auto const& how : {variants()[7], variants()[10]})
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    rig          r{
+        .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+    };
+    std::vector<std::shared_ptr<core::member_link>> wires;
+    r.links.push_back(std::make_shared<fake_link>(0, 1, 20 * us_ps));
+    wires.push_back(r.links[0]);
+    r.sys = std::make_unique<core::system>(
+        r.members, std::move(wires), how.bounds, std::move_only_function<void(std::size_t)>{},
+        std::move_only_function<void(std::size_t)>{}, how.mode);
+    {
+      auto const                  held = r.sys->lock();
+      std::vector<core::sys_time> offsets{core::sys_time{0}, core::sys_time{100'000}};
+      r.sys->start(held, offsets);
+    }
+    auto const released    = std::make_shared<std::vector<std::int64_t>>();
+    r.links[0]->on_release = [released](std::int64_t at) { released->push_back(at); };
+    auto const stopped     = r.run(1 * ms_ps + 10'000);
+    REQUIRE(stopped.reason == core::pause_reason::system_time);
+    auto const first  = r.now_of(0);
+    auto const second = r.now_of(1);
+    REQUIRE(first != second);
+    REQUIRE(released->size() == 1);
+    CHECK(released->front() == std::min(first, second));
+    CHECK(released->front() < std::max(first, second));
+  }
+}
+
+TEST_CASE("a stamp between two slices of a sleep's move is refused at the settled clock")
+{
+  auto const how = variants()[8];
+  struct shared
+  {
+    std::array<std::shared_ptr<core::host>, 2> hosts{};
+    std::atomic<int>                           moves{0};
+    std::atomic<std::int64_t>                  held_at{-1};
+    std::atomic<bool>                          released{false};
+  };
+  auto state = std::make_shared<shared>();
+  rig  r{
+      .members = {sleeper_with_event(400), sleeper_with_event(20'000)},
+      .arrival = [state](std::size_t index) {
+        if(index != 0 or state->released.load())
+        {
+          return;
+        }
+        auto const now = static_cast<std::int64_t>(
+            state->hosts.at(0)->member_inline(core::member_id{}).virtual_clock().time().ps);
+        if(now > 1 * ms_ps)
+        {
+          if(++state->moves == 2)
+          {
+            state->held_at = now;
+            state->released.wait(false);
+          }
+        }
+                  }
+  };
+  state->hosts = {r.members[0].on, r.members[1].on};
+  r.build(how);
+  at_scope_end const opened{[state] { open_gate(state->released); }};
+  std::ignore = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+  std::ignore = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+  core::host_future<core::pause> pending;
+  {
+    auto const held = r.sys->lock();
+    pending         = r.sys->resume(held);
+  }
+  auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+  while(state->held_at.load() < 0 and std::chrono::steady_clock::now() < deadline)
+  {
+    std::this_thread::yield();
+  }
+  auto const held_at = state->held_at.load();
+  REQUIRE(held_at > 0);
+  constexpr std::int64_t settled = 20'000 * instruction_ps - 20 * us_ps;
+  REQUIRE(held_at < settled);
+  auto stamp = [&r, at = (held_at + settled) / 2] {
+    auto const held_host = r.members[0].on->lock();
+    return r.members[0].on->post(
+        held_host, 0, [](core::machine&) {}, vtime{static_cast<std::uint64_t>(at)});
+  }();
+  open_gate(state->released);
+  CHECK_THROWS_WITH_AS(
+      std::ignore = stamp.get(), doctest::Contains("before 4.980000 ms"), std::invalid_argument);
+  r.sys->request_pause();
+  CHECK(pending.get().reason != core::pause_reason::closed);
 }

@@ -2199,9 +2199,8 @@ class UartTap:
 
         At a pause it takes exactly the frames not taken yet that the class doc names, whatever
         the quantum, the slicing or the wall timing. After `close()` it takes those ended by
-        the last pause. While
-        the system runs, the tap fills at each barrier, so how many frames a call takes
-        depends on wall timing. Each frame's content never does.
+        the last pause. While the system runs, the tap fills at each drain, so how many frames
+        a call takes depends on wall timing. Each frame's content never does.
 
         Returns:
             The frames, ordered by `end`, then direction: towards the link's second end first.
