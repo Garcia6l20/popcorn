@@ -479,6 +479,7 @@ public:
       core::sys_time const& barrier,
       core::sys_time const& next,
       core::time_map        receiver) -> std::optional<core::link_fault> override;
+  [[nodiscard]] auto due() const -> std::optional<core::sys_time> override;
   [[nodiscard]] auto quiet() const -> bool override;
   void               finish(core::sys_time at) override;
   void               save(std::vector<std::byte>& out) const override;

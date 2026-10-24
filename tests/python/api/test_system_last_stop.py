@@ -12,6 +12,8 @@ from popcorn.units import VirtualTime, ms, s, us
 
 from .linked import member
 
+pytestmark = pytest.mark.usefixtures("both_sync_modes")
+
 
 @pytest.fixture
 def ping(u575: popcorn.PartDescription) -> Iterator[System]:

@@ -153,6 +153,15 @@ public:
       add_link(std::size_t forth, std::size_t back) -> std::size_t;
 
   /**
+   * @brief Picks the core::sync_mode start() builds the system with, by its name, `barrier` or
+   *        `clocks`. A private seam for tests and probes, barrier until set.
+   * @throws std::logic_error after start().
+   * @throws std::invalid_argument for another name.
+   */
+  [[= py::doc{"Pick the sync mode by name before start()."}]] void
+      set_sync(std::string const& mode);
+
+  /**
    * @brief Attaches the wires, builds the system and fixes each member's base: member i's local
    *        time now is system time @p offsets_ps[i].
    * @throws machine_busy when a member is busy.
@@ -427,9 +436,8 @@ private:
 
   struct link_entry
   {
-    std::size_t              forth{};
-    std::size_t              back{};
-    std::atomic<std::size_t> owner{};
+    std::size_t forth{};
+    std::size_t back{};
   };
 
   using cut_change = std::function_ref<std::expected<core::sys_time, periph::stm32::cut_refusal>(
@@ -450,6 +458,7 @@ private:
   void give_back() noexcept;
 
   core::slice_bounds                          bounds_;
+  core::sync_mode                             sync_{core::sync_mode::barrier};
   std::size_t                                 tap_capacity_ = std::size_t{1} << 20;
   std::vector<member_entry>                   members_;
   std::vector<wire_entry>                     wires_;

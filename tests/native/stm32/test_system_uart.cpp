@@ -169,6 +169,7 @@ struct variant
   core::slice_bounds           bounds{};
   std::optional<std::uint32_t> seed{};
   bool                         one_cpu{};
+  core::sync_mode              mode{core::sync_mode::barrier};
 };
 
 auto variants() -> std::vector<variant>
@@ -185,6 +186,10 @@ auto variants() -> std::vector<variant>
       {.name = "sleeps 3 997", .bounds = fine, .seed = 3},
       {.name = "one cpu", .one_cpu = true},
       {.name = "one cpu q=l/3 997", .lowered = 3, .bounds = fine, .one_cpu = true},
+      {.name = "clocks", .mode = core::sync_mode::clocks},
+      {.name = "clocks q=l/3 997", .lowered = 3, .bounds = fine, .mode = core::sync_mode::clocks},
+      {.name = "clocks sleeps 3 997", .bounds = fine, .seed = 3, .mode = core::sync_mode::clocks},
+      {.name = "clocks one cpu", .one_cpu = true, .mode = core::sync_mode::clocks},
   };
 }
 
@@ -307,7 +312,9 @@ struct world
       };
     }
     std::vector<std::shared_ptr<core::member_link>> links{wires.begin(), wires.end()};
-    sys = std::make_unique<core::system>(members, std::move(links), how.bounds, std::move(hook));
+    sys = std::make_unique<core::system>(
+        members, std::move(links), how.bounds, std::move(hook),
+        std::move_only_function<void(std::size_t)>{}, how.mode);
     if(offsets.empty())
     {
       offsets.resize(nodes.size());
@@ -568,7 +575,8 @@ TEST_CASE("a link between two UARTs of one member delivers at its end plus L in 
 TEST_CASE("two links of 20 and 50 us each deliver at their own latency, Q the smaller")
 {
   std::optional<std::string> reference;
-  for(auto const& how : {variants()[0], variants()[3], variants()[5]})
+  for(auto const& how :
+      {variants()[0], variants()[3], variants()[5], variants()[9], variants()[10]})
   {
     CAPTURE(how.name);
     world w;
@@ -603,7 +611,8 @@ TEST_CASE("a 1 us link, shorter than a block, still gives the oracle's result")
   reference.link(0, 1, us_ps);
   reference.oracle(script_end);
   auto const expected = reference.dump();
-  for(auto const& how : {variants()[0], variants()[2], variants()[4]})
+  for(auto const& how :
+      {variants()[0], variants()[2], variants()[4], variants()[9], variants()[10]})
   {
     CAPTURE(how.name);
     CHECK(system_dump("link_tx", "link_rx", us_ps, how).first == expected);
@@ -642,7 +651,7 @@ TEST_CASE("a wire 20 us longer shifts every received byte by 20 us exactly")
 TEST_CASE("members booted to 627 ms and 300 ms convert through their bases, offsets shift")
 {
   auto const plain = system_dump("link_tx", "link_rx", latency_20, variants()[0]).first;
-  for(auto const& how : {variants()[0], variants()[3]})
+  for(auto const& how : {variants()[0], variants()[3], variants()[9], variants()[10]})
   {
     CAPTURE(how.name);
     world w;
@@ -717,7 +726,8 @@ TEST_CASE("a sender reset mid-frame loses that frame and its base moves by its l
 TEST_CASE("a peer frame at another baud is a strict system error at its start at any quantum")
 {
   std::optional<core::sys_time> reference;
-  for(auto const& how : {variants()[0], variants()[1], variants()[3], variants()[5]})
+  for(auto const& how :
+      {variants()[0], variants()[1], variants()[3], variants()[5], variants()[9], variants()[10]})
   {
     CAPTURE(how.name);
     world w;
@@ -737,7 +747,7 @@ TEST_CASE("a peer frame at another baud is a strict system error at its start at
     reference = stopped.at;
   }
   REQUIRE(reference);
-  for(auto const& how : {variants()[0], variants()[1]})
+  for(auto const& how : {variants()[0], variants()[1], variants()[9], variants()[10]})
   {
     CAPTURE(how.name);
     world w;
@@ -752,9 +762,55 @@ TEST_CASE("a peer frame at another baud is a strict system error at its start at
   }
 }
 
+TEST_CASE("a strict peer fault in clock mode leaves every member at one aligned point in every run")
+{
+  std::optional<core::sys_time> reference;
+  for(auto const& how : variants())
+  {
+    if(how.mode != core::sync_mode::clocks)
+    {
+      continue;
+    }
+    std::optional<std::vector<std::int64_t>> positions;
+    auto const back = how.lowered != 0 ? latency_20 / how.lowered : latency_20;
+    for(int repeat = 0; repeat < 5; ++repeat)
+    {
+      CAPTURE(how.name);
+      CAPTURE(repeat);
+      world w;
+      w.strict = true;
+      w.add("link_tx_switch");
+      w.add("link_rx");
+      w.link(0, 1, latency_20);
+      w.host(how);
+      auto const stopped = w.run_to(script_end);
+      REQUIRE(stopped.reason == core::pause_reason::error);
+      CHECK(stopped.member == 1);
+      std::vector<std::int64_t> seen;
+      {
+        auto const held = w.sys->lock();
+        seen.push_back(w.sys->time_of(held, 0).ps);
+        seen.push_back(w.sys->time_of(held, 1).ps);
+      }
+      CHECK(seen[1] >= stopped.at.ps + latency_20);
+      CHECK(seen[0] >= stopped.at.ps + latency_20 + back);
+      if(reference)
+      {
+        CHECK(stopped.at == *reference);
+      }
+      if(positions)
+      {
+        CHECK(seen == *positions);
+      }
+      reference = stopped.at;
+      positions = seen;
+    }
+  }
+}
+
 TEST_CASE("a mismatched frame warns once through the receiver machine's own log")
 {
-  for(auto const& how : {variants()[0], variants()[1]})
+  for(auto const& how : {variants()[0], variants()[1], variants()[9], variants()[10]})
   {
     CAPTURE(how.name);
     world w;
@@ -770,7 +826,7 @@ TEST_CASE("a mismatched frame warns once through the receiver machine's own log"
 
 TEST_CASE("a pause's drain leaves an injection at the pending barrier accepted")
 {
-  for(auto const& how : {variants()[0], variants()[1]})
+  for(auto const& how : {variants()[0], variants()[1], variants()[9], variants()[10]})
   {
     CAPTURE(how.name);
     world w;
@@ -789,7 +845,8 @@ TEST_CASE("a pause's drain leaves an injection at the pending barrier accepted")
 TEST_CASE("halted members follow system time until nothing is due, then pause as IDLE")
 {
   std::optional<std::pair<std::string, core::pause>> reference;
-  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  for(auto const& how :
+      {variants()[0], variants()[1], variants()[2], variants()[9], variants()[10]})
   {
     CAPTURE(how.name);
     world w;
@@ -863,7 +920,8 @@ TEST_CASE("an HCLK change charged ahead in a block held at a barrier gives one r
       REQUIRE(probe.target->virtual_clock().epoch_time() > until);
     }
     std::optional<std::string> reference;
-    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    for(auto const& how :
+        {variants()[0], variants()[1], variants()[2], variants()[9], variants()[10]})
     {
       CAPTURE(how.name);
       world w;
@@ -921,7 +979,8 @@ TEST_CASE(
 {
   constexpr std::int64_t     stamp_at = 700 * us_ps;
   std::optional<std::string> reference;
-  for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[4]})
+  for(auto const& how :
+      {variants()[0], variants()[1], variants()[2], variants()[4], variants()[9], variants()[10]})
   {
     CAPTURE(how.name);
     world w;
@@ -1020,7 +1079,8 @@ TEST_CASE("a halted receiver's USART overruns while its core is held, the same i
 TEST_CASE("an injection queued while every member sleeps is received, then the system pauses IDLE")
 {
   std::optional<std::string> reference;
-  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  for(auto const& how :
+      {variants()[0], variants()[1], variants()[2], variants()[9], variants()[10]})
   {
     CAPTURE(how.name);
     world w;
@@ -1067,7 +1127,8 @@ TEST_CASE("a system saved with its members mid-burst and loaded again runs on th
   })
   {
     std::optional<std::string> runs;
-    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    for(auto const& how :
+        {variants()[0], variants()[1], variants()[2], variants()[9], variants()[10]})
     {
       CAPTURE(how.name);
       CAPTURE(sender);
@@ -1250,7 +1311,8 @@ TEST_CASE("a halted receiver's RX DMA ring fills, or stops with its GPDMA channe
   for(auto const frozen : {false, true})
   {
     std::optional<std::pair<std::vector<std::uint8_t>, std::string>> reference;
-    for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[4]})
+    for(auto const& how :
+        {variants()[0], variants()[1], variants()[2], variants()[4], variants()[9], variants()[10]})
     {
       CAPTURE(frozen);
       CAPTURE(how.name);
@@ -1333,7 +1395,8 @@ TEST_CASE("a halted sender's watchdog bites unless DBG_IWDG_STOP freezes it")
   for(auto const frozen : {false, true})
   {
     std::optional<std::string> reference;
-    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    for(auto const& how :
+        {variants()[0], variants()[1], variants()[2], variants()[9], variants()[10]})
     {
       CAPTURE(frozen);
       CAPTURE(how.name);
@@ -1552,7 +1615,8 @@ TEST_CASE("a strict shape fault a pause carries is the pause, before the goal st
   auto const& shaped = oracle.taps[0];
   REQUIRE(shaped.size() == 8);
   auto const s = shaped[4].start.ps;
-  for(auto const& how : {variants()[0], variants()[1]})
+  for(auto const& how :
+      {variants()[0], variants()[1], variants()[9], variants()[10], variants()[11], variants()[12]})
   {
     CAPTURE(how.name);
     world w;
@@ -1578,7 +1642,10 @@ TEST_CASE("a strict shape fault a pause carries is the pause, before the goal st
     CHECK(stopped.at.ps == s);
     CHECK(stopped.member == 1);
     CHECK_THROWS_AS(std::rethrow_exception(stopped.error), popcorn::model_error);
-    CHECK(carried_now(*w.wires[0]) == 1);
+    if(how.mode == core::sync_mode::barrier)
+    {
+      CHECK(carried_now(*w.wires[0]) == 1);
+    }
   }
 }
 
@@ -1588,7 +1655,8 @@ TEST_CASE("an idle attempt whose pause carries a frame is abandoned, the frame a
   {
     CAPTURE(stamp_at);
     std::optional<stamped_send> reference;
-    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    for(auto const& how :
+        {variants()[0], variants()[1], variants()[2], variants()[9], variants()[10]})
     {
       CAPTURE(how.name);
       auto const seen = send_while_receiver_sleeps(how, stamp_at, false);
@@ -1614,20 +1682,26 @@ TEST_CASE("an idle attempt over a dropped frame past its pause point pauses wher
   {
     CAPTURE(stamp_at);
     std::optional<stamped_send> reference;
-    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    std::optional<stamped_send> clocked;
+    for(auto const& how :
+        {variants()[0], variants()[1], variants()[2], variants()[9], variants()[10]})
     {
       CAPTURE(how.name);
       auto const seen = send_while_receiver_sleeps(how, stamp_at, true);
       CHECK(seen.stopped.reason == core::pause_reason::idle);
       CHECK(seen.bytes.empty());
+      auto& same = how.mode == core::sync_mode::barrier ? reference : clocked;
       if(reference)
       {
         CHECK(seen.stopped.at == reference->stopped.at);
-        CHECK(seen.dump == reference->dump);
+      }
+      if(same)
+      {
+        CHECK(seen.dump == same->dump);
       }
       else
       {
-        reference = seen;
+        same = seen;
       }
     }
   }
@@ -1731,7 +1805,8 @@ auto break_reset(variant const& how) -> break_run
 TEST_CASE("an idle pause after receiver resets inside a break cut falls at the same point at any Q")
 {
   std::optional<break_run> reference;
-  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  for(auto const& how :
+      {variants()[0], variants()[1], variants()[2], variants()[9], variants()[10]})
   {
     CAPTURE(how.name);
     auto const seen = break_reset(how);
@@ -1758,7 +1833,8 @@ TEST_CASE("an idle pause waits for a break cut's hold and release, then the IDLE
   {
     CAPTURE(closed);
     std::optional<break_run> reference;
-    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    for(auto const& how :
+        {variants()[0], variants()[1], variants()[2], variants()[9], variants()[10]})
     {
       CAPTURE(how.name);
       auto const seen = break_ahead(how, closed);

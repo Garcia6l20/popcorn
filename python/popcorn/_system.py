@@ -12,7 +12,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from popcorn import _core
 from popcorn._enums import ResetKind, StopReason
@@ -521,6 +521,8 @@ class System:
     The system holds its members until `close()`, also run by `with`.
     """
 
+    _sync: ClassVar[Literal["barrier", "clocks"]] = "barrier"
+
     __slots__ = (
         "__weakref__",
         "_admitting",
@@ -631,6 +633,7 @@ class System:
         self._handle = _core.SystemHandle(
             slice_instructions, max(1, round(slice_wall_budget * 1e9))
         )
+        self._handle.set_sync(type(self)._sync)
         for name in self._names:
             native = self._machines[name]._handle  # pyright: ignore[reportPrivateUsage]
             self._handle.add_member(native, name, on_member_reset == "stop")

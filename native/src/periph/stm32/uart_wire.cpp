@@ -471,6 +471,38 @@ void uart_wire::deliver_injection(
        .injected = true});
 }
 
+auto uart_wire::due() const -> std::optional<core::sys_time>
+{
+  core::link_guard const        held{inject_mutex_};
+  std::optional<core::sys_time> first;
+  auto const                    take = [&first](core::sys_time at) {
+    if(not first or at < *first)
+    {
+      first = at;
+    }
+  };
+  for(auto const& post : state_.carried)
+  {
+    take(shifted(post.start, latency_));
+  }
+  for(auto const& frame : state_.injections)
+  {
+    take(frame.start);
+  }
+  for(auto const& cut : state_.cuts)
+  {
+    if(cut.start >= state_.last_barrier)
+    {
+      take(shifted(cut.start, latency_));
+    }
+    if(cut.low and cut.held and not cut.open and not cut.released)
+    {
+      take(shifted(cut.end, latency_));
+    }
+  }
+  return first;
+}
+
 auto uart_wire::quiet() const -> bool
 {
   core::link_guard const held{inject_mutex_};

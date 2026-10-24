@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <functional>
 #include <latch>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -44,8 +45,9 @@ using popcorn::vtime;
 using popcorn::testing::m33;
 using popcorn::testing::sym;
 
-constexpr std::int64_t us_ps = 1'000'000;
-constexpr std::int64_t ms_ps = 1'000'000'000;
+constexpr std::int64_t us_ps          = 1'000'000;
+constexpr std::int64_t instruction_ps = 250'000;
+constexpr std::int64_t ms_ps          = 1'000'000'000;
 
 struct test_failure : std::runtime_error
 {
@@ -141,6 +143,10 @@ public:
     {
       on_drain(barrier.ps);
     }
+    if(due_at and *due_at < barrier.ps)
+    {
+      due_at.reset();
+    }
     if(fault_at and not reported and *fault_at < barrier.ps)
     {
       reported = true;
@@ -148,6 +154,15 @@ public:
           .at     = core::sys_time{*fault_at},
           .member = to_,
           .error  = std::make_exception_ptr(test_failure("link fault"))};
+    }
+    return std::nullopt;
+  }
+
+  auto due() const -> std::optional<core::sys_time> override
+  {
+    if(due_at)
+    {
+      return core::sys_time{*due_at};
     }
     return std::nullopt;
   }
@@ -182,6 +197,7 @@ public:
   std::vector<std::int64_t>                    sender_resets;
   std::vector<std::int64_t>                    receiver_resets;
   std::optional<std::int64_t>                  fault_at{};
+  std::optional<std::int64_t>                  due_at{};
   std::move_only_function<void(std::int64_t)>  on_drain{};
   std::move_only_function<void(std::uint64_t)> on_through{};
   bool                                         busy{};
@@ -219,6 +235,7 @@ struct variant
   core::slice_bounds           bounds{};
   std::optional<std::uint32_t> seed{};
   bool                         one_cpu{};
+  core::sync_mode              mode{core::sync_mode::barrier};
 };
 
 auto variants() -> std::vector<variant>
@@ -234,6 +251,13 @@ auto variants() -> std::vector<variant>
       {.name = "sleeps 1", .seed = 1},
       {.name = "sleeps 2", .lowered = 3, .seed = 2},
       {.name = "one cpu", .one_cpu = true},
+      {.name = "clocks", .mode = core::sync_mode::clocks},
+      {.name    = "clocks 997 q=l/3",
+       .lowered = 3,
+       .bounds  = {.max_instructions = icount{997}, .wall_budget = std::chrono::microseconds{10}},
+       .mode    = core::sync_mode::clocks},
+      {.name = "clocks sleeps 1", .seed = 1, .mode = core::sync_mode::clocks},
+      {.name = "clocks one cpu", .one_cpu = true, .mode = core::sync_mode::clocks},
   };
 }
 
@@ -312,7 +336,9 @@ struct rig
     {
       hook = std::move(arrival);
     }
-    sys = std::make_unique<core::system>(members, std::move(wires), how.bounds, std::move(hook));
+    sys = std::make_unique<core::system>(
+        members, std::move(wires), how.bounds, std::move(hook),
+        std::move_only_function<void(std::size_t)>{}, how.mode);
     auto const                  held = sys->lock();
     std::vector<core::sys_time> offsets(members.size());
     sys->start(held, offsets);
@@ -418,7 +444,7 @@ TEST_CASE("a system TIME run leaves a sleeper exactly at T and a runner at its b
 
 TEST_CASE("chunked system TIME runs equal one run to the last T")
 {
-  for(auto const& how : {variants()[0], variants()[3]})
+  for(auto const& how : {variants()[0], variants()[3], variants()[7], variants()[8]})
   {
     CAPTURE(how.name);
     rig whole{.members = sleeper_and_runner()};
@@ -866,7 +892,8 @@ TEST_CASE("a TIME run whose T lies in a block past several barriers dispatches u
   std::optional<std::vector<std::uint64_t>> reference;
   for(auto const latency : {20 * us_ps, 200 * us_ps})
   {
-    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    for(auto const& how :
+        {variants()[0], variants()[1], variants()[2], variants()[7], variants()[8]})
     {
       CAPTURE(latency);
       CAPTURE(how.name);
@@ -971,7 +998,7 @@ TEST_CASE("goals to two addresses deliver each at its point, the released one ha
 
 TEST_CASE("two goals resolved in one window deliver by time, then by member index")
 {
-  for(auto const& how : {variants()[0], variants()[1], variants()[4]})
+  for(auto const& how : {variants()[0], variants()[1], variants()[4], variants()[7], variants()[8]})
   {
     CAPTURE(how.name);
     rig r{
@@ -1199,7 +1226,7 @@ TEST_CASE("a lone goal posted while its closed system is destroyed reads no link
 
 TEST_CASE("a member goal arriving at its until address stops there with nothing executed")
 {
-  for(auto const& how : {variants()[0], variants()[1]})
+  for(auto const& how : {variants()[0], variants()[1], variants()[7], variants()[8]})
   {
     for(auto const arrive : {false, true})
     {
@@ -1245,7 +1272,7 @@ TEST_CASE("a member goal with several until addresses stops at the first one rea
       return static_cast<popcorn::address>(m.regs().read(*m.regs().find("pc")));
     });
   };
-  for(auto const& how : {variants()[0], variants()[1]})
+  for(auto const& how : {variants()[0], variants()[1], variants()[7], variants()[8]})
   {
     CAPTURE(how.name);
     long_block made;
@@ -1272,7 +1299,7 @@ TEST_CASE("a member goal with several until addresses stops at the first one rea
 
 TEST_CASE("a goal posted to a halted member while paused starts at the delivered point")
 {
-  for(auto const& how : {variants()[0], variants()[1]})
+  for(auto const& how : {variants()[0], variants()[1], variants()[7], variants()[8]})
   {
     CAPTURE(how.name);
     rig r{
@@ -1319,7 +1346,7 @@ TEST_CASE("goal stops past a barrier dispatch the lane event before them at any 
     std::optional<std::vector<std::uint64_t>> reference;
     for(auto const latency : {20 * us_ps, 200 * us_ps})
     {
-      for(auto const& how : {variants()[0], variants()[1]})
+      for(auto const& how : {variants()[0], variants()[1], variants()[7], variants()[8]})
       {
         CAPTURE(name);
         CAPTURE(latency);
@@ -1396,7 +1423,7 @@ TEST_CASE("a stamped write on a halted member lands exactly at its time during a
 
 TEST_CASE("a stamped write on a sleeping goal member lands at its time, not at the barrier")
 {
-  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[7], variants()[8]})
   {
     CAPTURE(how.name);
     rig r{
@@ -1425,7 +1452,7 @@ TEST_CASE("a stamp overshot by a block past the barrier sees every event up to t
   {
     for(auto const latency : {20 * us_ps, 400 * us_ps})
     {
-      for(auto const& how : {variants()[0], variants()[1]})
+      for(auto const& how : {variants()[0], variants()[1], variants()[7], variants()[8]})
       {
         CAPTURE(stamp_at);
         CAPTURE(latency);
@@ -1599,7 +1626,8 @@ TEST_CASE("an IDLE pause resolves goals that are not open and keeps the open one
 
 TEST_CASE("an error in a halted member before a resolution found later in its window comes first")
 {
-  for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[4]})
+  for(auto const& how :
+      {variants()[0], variants()[1], variants()[2], variants()[4], variants()[7], variants()[8]})
   {
     CAPTURE(how.name);
     rig r{
@@ -1624,7 +1652,7 @@ TEST_CASE("an error in a halted member before a resolution found later in its wi
 
 TEST_CASE("a goal cap stops the goal at its start plus the cap as a TIME stop")
 {
-  for(auto const& how : {variants()[0], variants()[1]})
+  for(auto const& how : {variants()[0], variants()[1], variants()[7], variants()[8]})
   {
     CAPTURE(how.name);
     rig r{
@@ -1790,7 +1818,8 @@ TEST_CASE("two stops in one window and in two windows give the same pause sequen
         [loops](popcorn::testing::machine_fixture<>& f) { f.set("r0", loops); });
   };
   std::optional<std::vector<std::pair<int, std::int64_t>>> reference;
-  for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[4]})
+  for(auto const& how :
+      {variants()[0], variants()[1], variants()[2], variants()[4], variants()[7], variants()[8]})
   {
     CAPTURE(how.name);
     rig r{
@@ -1912,7 +1941,7 @@ TEST_CASE("a TIME run with every member released pauses at T or past it, naming 
 
 TEST_CASE("a tie found rounds apart is delivered by member index at any quantum")
 {
-  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[7], variants()[8]})
   {
     CAPTURE(how.name);
     rig r{
@@ -2171,7 +2200,10 @@ TEST_CASE("an arrival hook that throws pauses the system on that error once")
       CHECK(thrown.load() == 1);
       auto const quantum = how.lowered != 0 ? 20 * us_ps / how.lowered : 20 * us_ps;
       CHECK(stopped.at.ps >= quantum);
-      CHECK(stopped.at.ps < 2 * quantum);
+      if(how.mode == core::sync_mode::barrier)
+      {
+        CHECK(stopped.at.ps < 2 * quantum);
+      }
       {
         auto const held = r.sys->lock();
         CHECK(r.sys->time_of(held, 1) == stopped.at);
@@ -2926,3 +2958,350 @@ TEST_CASE_TEMPLATE(
   CHECK(WEXITSTATUS(status) == 66);
 }
 #endif
+
+namespace
+{
+struct wire_spec
+{
+  std::size_t                from{};
+  std::size_t                to{};
+  std::int64_t               latency{};
+  std::optional<std::size_t> owner{};
+};
+
+struct aligned
+{
+  delivery                  first{};
+  std::vector<std::int64_t> times{};
+  std::vector<std::int64_t> executed{};
+  std::optional<delivery>   second{};
+
+  friend auto operator==(aligned const&, aligned const&) -> bool = default;
+};
+
+auto clock_variants() -> std::vector<variant>
+{
+  auto all = variants();
+  std::erase_if(all, [](variant const& how) { return how.mode != core::sync_mode::clocks; });
+  return all;
+}
+
+auto jitter(variant const& how, std::size_t members) -> std::move_only_function<void(std::size_t)>
+{
+  if(not how.seed)
+  {
+    return {};
+  }
+  auto engines = std::make_shared<std::vector<std::mt19937>>();
+  for(std::size_t index = 0; index < members; ++index)
+  {
+    engines->emplace_back(*how.seed * 31 + index);
+  }
+  return [engines](std::size_t index) {
+    std::uniform_int_distribution<int> pause{0, 50};
+    std::this_thread::sleep_for(std::chrono::microseconds{pause((*engines)[index])});
+  };
+}
+
+auto run_aligned(
+    std::vector<core::member_ref>             members,
+    std::vector<wire_spec> const&             specs,
+    std::vector<std::optional<std::uint32_t>> stops,
+    variant const&                            how,
+    bool                                      again  = false,
+    std::vector<std::size_t> const&           halted = {}) -> aligned
+{
+  pinned const                                    pin{how.one_cpu};
+  std::vector<std::shared_ptr<core::member_link>> wires;
+  for(auto const& one : specs)
+  {
+    wires.push_back(std::make_shared<fake_link>(one.from, one.to, one.latency));
+  }
+  core::system sys{members, std::move(wires), how.bounds, jitter(how, members.size()),
+                   {},      how.mode};
+  std::vector<core::host_future<core::goal_reached>> goals;
+  {
+    auto const                  held = sys.lock();
+    std::vector<core::sys_time> offsets(members.size());
+    sys.start(held, offsets);
+    for(std::size_t index = 0; index < specs.size(); ++index)
+    {
+      if(specs[index].owner)
+      {
+        sys.set_cut_owner(held, index, *specs[index].owner);
+      }
+    }
+    for(std::size_t index = 0; index < members.size(); ++index)
+    {
+      if(std::ranges::contains(halted, index))
+      {
+        continue;
+      }
+      core::member_goal goal{};
+      if(stops[index])
+      {
+        goal.until = popcorn::address{*stops[index]};
+      }
+      goals.push_back(sys.post_goal(held, index, std::move(goal)));
+    }
+  }
+  auto const resume = [&sys] {
+    core::host_future<core::pause> pending;
+    {
+      auto const held = sys.lock();
+      pending         = sys.resume(held);
+    }
+    return pending.get();
+  };
+  aligned out{.first = delivered(resume())};
+  {
+    auto const held = sys.lock();
+    for(std::size_t index = 0; index < members.size(); ++index)
+    {
+      out.times.push_back(sys.time_of(held, index).ps);
+      out.executed.push_back(static_cast<std::int64_t>(sys.executed_of(held, index).value));
+    }
+    sys.release(held, out.first.member, true);
+  }
+  if(again)
+  {
+    out.second = delivered(resume());
+  }
+  sys.close();
+  return out;
+}
+
+auto every_run(std::function_ref<aligned(variant const&)> one) -> aligned
+{
+  std::optional<aligned> reference;
+  for(auto const& how : clock_variants())
+  {
+    for(int repeat = 0; repeat < 5; ++repeat)
+    {
+      CAPTURE(how.name);
+      CAPTURE(repeat);
+      auto const seen = one(how);
+      if(reference)
+      {
+        CHECK(seen == *reference);
+      }
+      else
+      {
+        reference = seen;
+      }
+    }
+  }
+  return *reference;
+}
+
+void check_at(std::int64_t seen, std::int64_t at)
+{
+  CHECK(seen >= at);
+  CHECK(seen < at + 512 * instruction_ps);
+}
+}
+
+TEST_CASE("after a member stop a linked member stands at the stop plus L in clock mode")
+{
+  auto const done = sym("alu", "alu_done");
+  auto const run  = every_run([&](variant const& how) {
+    return run_aligned(
+        {
+            alu_counting(2000), alu_counting(1'000'000)
+    },
+        {{.from = 0, .to = 1, .latency = 20 * us_ps}}, {done, done}, how);
+  });
+  CHECK(run.first.member == 0);
+  CHECK(run.first.reason == static_cast<int>(core::pause_reason::delivered));
+  CHECK(run.times[0] == run.first.at);
+  check_at(run.times[1], run.first.at + 20 * us_ps);
+}
+
+TEST_CASE("after a member stop the end of a chain stands at the stop plus both latencies")
+{
+  auto const done = sym("alu", "alu_done");
+  auto const run  = every_run([&](variant const& how) {
+    return run_aligned(
+        {
+            alu_counting(2000), alu_counting(1'000'000), alu_counting(1'000'000)
+    },
+        {{.from = 0, .to = 1, .latency = 20 * us_ps}, {.from = 1, .to = 2, .latency = 30 * us_ps}},
+        {done, done, done}, how);
+  });
+  CHECK(run.first.member == 0);
+  check_at(run.times[1], run.first.at + 20 * us_ps);
+  check_at(run.times[2], run.first.at + 50 * us_ps);
+}
+
+TEST_CASE(
+    "after a member stop an unlinked pair stands at the stop plus Q through its synthetic edge")
+{
+  auto const done = sym("alu", "alu_done");
+  auto const run  = every_run([&](variant const& how) {
+    return run_aligned(
+        {
+            alu_counting(2000), alu_counting(1'000'000), alu_counting(1'000'000),
+            alu_counting(1'000'000)
+    },
+        {{.from = 0, .to = 1, .latency = 20 * us_ps}, {.from = 2, .to = 3, .latency = 50 * us_ps}},
+        {done, done, done, done}, how);
+  });
+  CHECK(run.first.member == 0);
+  check_at(run.times[1], run.first.at + 20 * us_ps);
+  check_at(run.times[2], run.first.at + 20 * us_ps);
+  check_at(run.times[3], run.first.at + 20 * us_ps);
+}
+
+TEST_CASE("after its stop an off-link cut owner that never cuts holds both ends at its stop plus L")
+{
+  auto const done = sym("alu", "alu_done");
+  auto const run  = every_run([&](variant const& how) {
+    return run_aligned(
+        {
+            alu_counting(1'000'000), alu_counting(1'000'000), alu_counting(2000)
+    },
+        {{.from = 0, .to = 1, .latency = 20 * us_ps, .owner = 2},
+         {.from = 1, .to = 0, .latency = 20 * us_ps, .owner = 2},
+         {.from = 0, .to = 2, .latency = 5 * us_ps}},
+        {done, done, done}, how);
+  });
+  CHECK(run.first.member == 2);
+  check_at(run.times[0], run.first.at + 20 * us_ps);
+  check_at(run.times[1], run.first.at + 20 * us_ps);
+}
+
+TEST_CASE("after a member stop a quiescent member jumps to its aligned point executing nothing")
+{
+  auto const done = sym("alu", "alu_done");
+  auto const run  = every_run([&](variant const& how) {
+    return run_aligned(
+        {
+            alu_counting(2000), member("idle", "idle_forever")
+    },
+        {{.from = 0, .to = 1, .latency = 20 * us_ps}}, {done, std::nullopt}, how);
+  });
+  CHECK(run.first.member == 0);
+  CHECK(run.times[1] >= run.first.at + 20 * us_ps);
+  CHECK(run.times[1] < run.first.at + 20 * us_ps + instruction_ps);
+  CHECK(run.executed[1] < 100);
+}
+
+TEST_CASE(
+    "a member whose own stop comes before its aligned point stands there, held, delivered next")
+{
+  auto const done = sym("alu", "alu_done");
+  auto const run  = every_run([&](variant const& how) {
+    return run_aligned(
+        {
+            alu_counting(2000), alu_counting(2002), alu_counting(1'000'000)
+    },
+        {{.from = 0, .to = 1, .latency = 20 * us_ps}, {.from = 1, .to = 2, .latency = 20 * us_ps}},
+        {done, done, done}, how, true);
+  });
+  CHECK(run.first.member == 0);
+  CHECK(run.times[1] > run.first.at);
+  CHECK(run.times[1] < run.first.at + 20 * us_ps);
+  check_at(run.times[2], run.times[1] + 20 * us_ps);
+  REQUIRE(run.second);
+  CHECK(run.second->member == 1);
+  CHECK(run.second->at == run.times[1]);
+}
+
+TEST_CASE("a time goal whose slice overshoots a due bound past its time resolves at its time")
+{
+  std::int64_t cut{};
+  std::int64_t past{};
+  for(std::int64_t step = 0; step < 16 and past <= cut; ++step)
+  {
+    cut = 1 * ms_ps + step * instruction_ps;
+    rig r{.members = sleeper_and_runner()};
+    r.build(variants()[0]);
+    REQUIRE(r.run(cut).reason == core::pause_reason::system_time);
+    past = r.now_of(1);
+  }
+  REQUIRE(past > cut);
+  for(auto const& how : clock_variants())
+  {
+    CAPTURE(how.name);
+    pinned const                  pin{how.one_cpu};
+    std::vector<core::member_ref> members{
+        member("idle", "idle_forever"), member("alu", "alu_entry")};
+    auto const inbound = std::make_shared<fake_link>(0, 1, 20 * us_ps);
+    inbound->due_at    = cut;
+    std::vector<std::shared_ptr<core::member_link>> wires{
+        std::make_shared<fake_link>(1, 0, 20 * us_ps), inbound};
+    core::system sys{members, std::move(wires), how.bounds, jitter(how, 2), {}, how.mode};
+    core::host_future<core::goal_reached> goal;
+    core::host_future<core::pause>        pending;
+    {
+      auto const                  held = sys.lock();
+      std::vector<core::sys_time> offsets(2);
+      sys.start(held, offsets);
+      goal    = sys.post_goal(held, 1, {.until_time = core::sys_time{past}});
+      pending = sys.resume(held);
+    }
+    std::atomic<bool> landed{false};
+    std::jthread      guard{[&sys, &landed](std::stop_token const& stopping) {
+      auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+      while(not stopping.stop_requested() and std::chrono::steady_clock::now() < deadline)
+      {
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+      }
+      if(not landed.load())
+      {
+        sys.close();
+      }
+    }};
+    auto const        stopped = pending.get();
+    landed.store(true);
+    guard.request_stop();
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    CHECK(stopped.member == 1);
+    CHECK(goal.get().stopped.reason == stop_reason::time);
+    CHECK(stopped.at.ps == past);
+  }
+}
+
+TEST_CASE("after a member stop two halted members stand at the stop, as in barrier mode")
+{
+  auto const done = sym("alu", "alu_done");
+  auto const make = [&](variant const& how) {
+    return run_aligned(
+        {
+            alu_counting(2000), alu_counting(1'000'000), member("idle", "idle_forever"),
+            alu_counting(1'000'000)
+    },
+        {{.from = 0, .to = 1, .latency = 20 * us_ps}}, {done, done, std::nullopt, std::nullopt},
+        how, false, {2, 3});
+  };
+  auto const barrier = make(variants()[0]);
+  auto const run     = every_run(make);
+  CHECK(run.first == barrier.first);
+  CHECK(run.first.member == 0);
+  CHECK(run.times[2] == barrier.times[2]);
+  CHECK(run.times[3] == barrier.times[3]);
+  CHECK(run.times[2] >= run.first.at);
+  CHECK(run.times[2] < run.first.at + instruction_ps);
+  CHECK(run.times[3] >= run.first.at);
+  CHECK(run.times[3] < run.first.at + instruction_ps);
+  check_at(run.times[1], run.first.at + 20 * us_ps);
+}
+
+TEST_CASE("after a member stop a halted receiver of the stopped member stands at the stop")
+{
+  auto const done = sym("alu", "alu_done");
+  auto const make = [&](variant const& how) {
+    return run_aligned(
+        {
+            alu_counting(2000), member("idle", "idle_forever")
+    },
+        {{.from = 0, .to = 1, .latency = 20 * us_ps}, {.from = 1, .to = 0, .latency = 20 * us_ps}},
+        {done, std::nullopt}, how, false, {1});
+  };
+  auto const barrier = make(variants()[0]);
+  auto const run     = every_run(make);
+  CHECK(run.first == barrier.first);
+  CHECK(run.times[1] == barrier.times[1]);
+  CHECK(run.times[1] >= run.first.at);
+  CHECK(run.times[1] < run.first.at + instruction_ps);
+}

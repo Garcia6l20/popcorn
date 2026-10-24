@@ -149,6 +149,15 @@ public:
           -> std::optional<link_fault> = 0;
 
   /**
+   * @brief The earliest system time at which a later drain must hand the receiver something the
+   *        link holds after the last drain: a kept post, a cut edge, an injection. Called on the
+   *        receiver's host thread after its drain. The receiver runs no further before a drain
+   *        whose barrier lies past it.
+   * @return Empty when the link holds nothing a drain would hand.
+   */
+  [[nodiscard]] virtual auto due() const -> std::optional<sys_time> = 0;
+
+  /**
    * @brief Whether the link holds nothing for its receiver: nothing posted, queued or kept
    *        that a later drain would hand. Called on the receiver's host thread after its drain,
    *        with the sender stopped.

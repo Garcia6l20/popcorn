@@ -473,7 +473,7 @@ auto system_handle::add_link(std::size_t forth, std::size_t back) -> std::size_t
   other.wire->share_registration(std::move(registration));
   one.linked   = true;
   other.linked = true;
-  links_.emplace_back(forth, back, one.sender);
+  links_.emplace_back(forth, back);
   return links_.size() - 1;
 }
 
@@ -512,7 +512,8 @@ void system_handle::start(std::vector<std::int64_t> const& offsets_ps)
       nb::gil_scoped_release const released;
       return std::make_shared<core::system>(
           std::move(refs), std::move(links), bounds_, std::move_only_function<void(std::size_t)>{},
-          [sleeps = sleeps_](std::size_t) { sleeps->fetch_add(1, std::memory_order_relaxed); });
+          [sleeps = sleeps_](std::size_t) { sleeps->fetch_add(1, std::memory_order_relaxed); },
+          sync_);
     }();
   }
   catch(...)
@@ -525,7 +526,13 @@ void system_handle::start(std::vector<std::int64_t> const& offsets_ps)
   {
     offsets.push_back(core::sys_time{one});
   }
-  locked(*system_, [&](core::held_system const& held) { system_->start(held, offsets); });
+  locked(*system_, [&](core::held_system const& held) {
+    system_->start(held, offsets);
+    for(auto const& one : links_)
+    {
+      system_->set_cut_owner(held, one.back, wires_[one.forth].sender);
+    }
+  });
 }
 
 auto system_handle::system() const -> std::shared_ptr<core::system>
@@ -1030,7 +1037,7 @@ auto system_handle::change_cut(
   auto const& entry = link(index);
   auto&       forth = wire(entry.forth);
   auto&       back  = wire(entry.back);
-  auto const  owner = entry.owner.load(std::memory_order_relaxed);
+  auto const  owner = system_->cut_owner(entry.forth);
   auto const  refused =
       [](std::expected<core::sys_time, periph::stm32::cut_refusal> const& outcome) -> cut_outcome {
     if(outcome)
@@ -1149,7 +1156,7 @@ auto system_handle::restore(std::size_t index, bool stopped) -> cut_outcome
 
 auto system_handle::link_owner(std::size_t index) const -> std::size_t
 {
-  return link(index).owner.load(std::memory_order_relaxed);
+  return system()->cut_owner(link(index).forth);
 }
 
 auto system_handle::max_waiting_cuts() const -> std::size_t
@@ -1159,8 +1166,27 @@ auto system_handle::max_waiting_cuts() const -> std::size_t
 
 void system_handle::set_link_owner(std::size_t index, std::size_t member)
 {
-  std::ignore = link(index);
-  links_[index].owner.store(member_index(member), std::memory_order_relaxed);
+  auto const& entry = link(index);
+  auto const  owner = member_index(member);
+  auto const  sys   = system();
+  locked(*sys, [&](core::held_system const& held) {
+    sys->set_cut_owner(held, entry.forth, owner);
+    sys->set_cut_owner(held, entry.back, owner);
+  });
+}
+
+void system_handle::set_sync(std::string const& mode)
+{
+  if(system_ != nullptr or closed_)
+  {
+    throw std::logic_error("the sync mode is set before start()");
+  }
+  auto const chosen = reflex::to_enum_value<core::sync_mode>(mode);
+  if(not chosen)
+  {
+    throw std::invalid_argument(std::format("no sync mode {:?}", mode));
+  }
+  sync_ = *chosen;
 }
 
 auto system_handle::replace(

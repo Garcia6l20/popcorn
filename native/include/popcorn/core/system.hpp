@@ -119,7 +119,9 @@ struct pause
   stop stopped{};
   /** @brief The error for pause_reason::error. */
   std::exception_ptr error{};
-  /** @brief Windows exchanged since the resume, bookkeeping that depends on the quantum. */
+  /** @brief Windows exchanged since the resume, bookkeeping that depends on the quantum. Under
+   * sync_mode::clocks the decision rendezvous plus every member's clock waits, bookkeeping that
+   * depends on thread timing. */
   std::uint64_t windows{};
   /** @brief Slices run since the resume over every member, bookkeeping. */
   std::uint64_t slices{};
@@ -127,6 +129,16 @@ struct pause
   std::uint64_t phase_b{};
   /** @brief Work timing since the resume, zero unless system::measure_work() is on. */
   work_timing work{};
+};
+
+/** @brief How the members of a linked system keep in step. */
+enum class[[= reflex::derive{reflex::Format}]] sync_mode : std::uint8_t
+{
+  /** @brief Each member runs to the earliest clock its peers published plus the latency of the
+   * edge from them, and the members meet only to decide a pause. */
+  clocks,
+  /** @brief Every member meets the others at a barrier every quantum. */
+  barrier,
 };
 
 class system;
@@ -149,13 +161,27 @@ private:
 
 /**
  * @brief Several members on one virtual clock, each run by its own host thread, linked by
- *        member_link wires. Members meet at a window_barrier every quantum Q, the smallest link
- *        latency, at system times k Q from system start. After each barrier every receiver drains
- *        its inbound wires of the window on its own thread, senders in member index order, then
- *        link order. A member whose core runs is held at each barrier with
- *        slice_request::hold_from_until, so every post reaches its receiver at its exact time
- *        whatever Q, the slicing or the thread timing. A member with no goal is halted: its core
- *        is held and it advances to the system's decision after each barrier.
+ *        member_link wires. Under sync_mode::barrier members meet at a window_barrier every
+ *        quantum Q, the smallest link latency, at system times k Q from system start. After each
+ *        barrier every receiver drains its inbound wires of the window on its own thread, senders
+ *        in member index order, then link order. A member whose core runs is held at each barrier
+ *        with slice_request::hold_from_until, so every post reaches its receiver at its exact
+ *        time whatever Q, the slicing or the thread timing. A member with no goal is halted: its
+ *        core is held and it advances to the system's decision after each barrier.
+ *
+ *        Under sync_mode::clocks every member publishes its clock after each slice and runs to
+ *        the earliest clock of its coupling edges plus the edge's latency: every wire, an off-link
+ *        cut owner to both ends of its link, a member with a goal to every halted member at
+ *        latency 0, and an edge of latency Q between members with no path between them otherwise.
+ *        A member with nothing due before that bound publishes it as its lead without running.
+ *        A drain hands the posts starting before the earlier of the receiver's reach and the
+ *        sender's clock. The members meet at the window_barrier only to decide a pause. After a
+ *        member stop or an error every member stands at the stop time plus its coupling distance
+ *        from the stopping member, or at its own stop before that point, a position that depends
+ *        on neither the slicing nor the thread timing. A requested pause puts every member at the
+ *        latest member position. Frames, IDLE times and every member's state at a time pause equal
+ *        those of sync_mode::barrier. Under sync_mode::clocks commands, stamps, injections and
+ *        cuts reach a member while the system is paused.
  *
  *        Lock order: the system mutex first, taken only by threads that are not host threads,
  *        then at most one host mutex at a time. Host threads never take it.
@@ -178,6 +204,8 @@ public:
    *        its host to sleep on IDLE inside open goals, holding nothing, for tests that wake it
    *        in that window. A throw fails the member with that error, the member wakes the
    *        others and the system pauses on it.
+   * @param mode How the members keep in step. Under sync_mode::clocks before_arrival is also
+   *        called after every slice, before the member publishes its clock.
    * @throws machine_busy when a member is busy.
    */
   system(
@@ -185,8 +213,8 @@ public:
       std::vector<std::shared_ptr<member_link>>  links,
       slice_bounds                               bounds         = {},
       std::move_only_function<void(std::size_t)> before_arrival = {},
-      std::move_only_function<void(std::size_t)> before_sleep   = {}) pre(not members.empty())
-      pre(not links.empty());
+      std::move_only_function<void(std::size_t)> before_sleep   = {},
+      sync_mode mode = sync_mode::barrier) pre(not members.empty()) pre(not links.empty());
 
   /** @brief Closes, waits for every member to park, then unlinks the hosts. Not on a host
    * thread, holding no host mutex. */
@@ -360,11 +388,33 @@ public:
   /** @brief The members' hosts, member index order, fixed at construction. Any thread. */
   [[nodiscard]] auto hosts() const -> std::vector<std::shared_ptr<host>>;
 
+  /** @brief How the members keep in step, fixed at construction. */
+  [[nodiscard]] auto mode() const noexcept -> sync_mode;
+
+  /**
+   * @brief Makes member @p member the cut owner of link @p link, the member whose callbacks may
+   *        cut it while the system runs. Under sync_mode::clocks an owner that is neither end of
+   *        the link bounds both ends by its clock plus the link's latency from the next resume.
+   *        Each link's owner is its sender until set.
+   * @param link Index into the links the system was built with.
+   * @throws std::logic_error while a resume is in flight.
+   * @throws std::out_of_range for no such link.
+   */
+  void set_cut_owner(held_system const& held, std::size_t link, std::size_t member)
+      pre(held.holds(*this)) pre(member < members());
+
+  /**
+   * @brief The cut owner of link @p link. Any thread, no lock, also while the system runs.
+   * @throws std::out_of_range for no such link.
+   */
+  [[nodiscard]] auto cut_owner(std::size_t link) const -> std::size_t;
+
   /** @brief The quantum Q, the smallest link latency. */
   [[nodiscard]] auto quantum() const noexcept -> sys_time;
 
   /**
-   * @brief The first barrier whose exchange has not happened, bookkeeping while paused.
+   * @brief The first barrier whose exchange has not happened, bookkeeping while paused. Under
+   *        sync_mode::clocks the latest member position at the last pause.
    * @throws machine_running while a resume is in flight.
    */
   [[nodiscard]] auto pending_barrier(held_system const& held) const -> sys_time

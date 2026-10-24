@@ -19,6 +19,8 @@ from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 from .conftest import run_bounded
 from .linked import PING_BYTES, Ticker, logged, member, received, ticker
 
+pytestmark = pytest.mark.usefixtures("both_sync_modes")
+
 L = us(20)
 VARIANTS = [
     pytest.param(1_000_000, None, id="plain"),

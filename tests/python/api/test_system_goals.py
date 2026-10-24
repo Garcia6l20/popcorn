@@ -20,6 +20,8 @@ from popcorn.units import VirtualDuration, VirtualTime, ms, s, us
 
 from .linked import Ticker, logged, member, received, ticker
 
+pytestmark = pytest.mark.usefixtures("both_sync_modes")
+
 L = us(20)
 IRQ = "USART1_IRQHandler"
 VARIANTS: list[tuple[int, VirtualDuration | None]] = [

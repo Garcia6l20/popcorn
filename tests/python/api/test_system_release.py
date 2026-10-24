@@ -16,6 +16,8 @@ from popcorn.units import ms, s, us
 
 from .linked import PING_BYTES, member, received
 
+pytestmark = pytest.mark.usefixtures("both_sync_modes")
+
 ROOT = Path(__file__).parents[3]
 USB_CDC = ROOT / "examples" / "stm32u575" / "usb_cdc" / "prebuilt" / "usb_cdc.elf"
 OTG_FS_IRQ = 73

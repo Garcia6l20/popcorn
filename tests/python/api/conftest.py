@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, cast
 
 import popcorn
 import pytest
@@ -84,6 +85,16 @@ def core_firmware() -> Path:
 def m33() -> popcorn.PartDescription:
     """The core test description, a Cortex-M33 with flash, SRAM and test peripherals."""
     return popcorn.load_description(M33_JSON)
+
+
+@pytest.fixture(params=["barrier", "clocks"])
+def both_sync_modes(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Literal["barrier", "clocks"]:
+    """Build every System of the test in each sync mode in turn, through the private seam."""
+    mode = cast(Literal["barrier", "clocks"], request.param)
+    monkeypatch.setattr(popcorn.System, "_sync", mode)
+    return mode
 
 
 @pytest.fixture
