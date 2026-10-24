@@ -51,6 +51,8 @@ exceptions. They stop the run with a FAULT stop instead:
 - Only a lone Python `Machine` applies the reset a RESET_REQUEST stop reported at its next
   run, step or free run. A C++ driver of `machine::run_slice` or `host::run` resumes the old code
   after the stop. A member of a linked system follows `on_member_reset`.
+- A reset a store requests applies after the instructions that follow the store up to the next
+  branch, as for AIRCR.SYSRESETREQ.
 
 ## ADC
 
@@ -95,7 +97,7 @@ Not modelled:
 Differs from RM0456:
 
 - OPTSTRT programs the FLASH_WRPxyR registers only and completes at once, with no BSY. The
-  protection follows the option bytes load, OBL_LAUNCH or a reset. FLASH_OPTR, the boot addresses
+  protection follows OBL_LAUNCH or a power-on reset. FLASH_OPTR, the boot addresses
   and the SECWM registers keep the machine's option bytes, and a write to one of them logs a
   warning once at the next OPTSTRT.
 - A store while BSY is set completes at once and is applied when BSY clears. Silicon stalls the

@@ -2456,7 +2456,9 @@ TEST_CASE("WRP1 follows the bank number after SWAP_BANK, RM0456 7.6.1")
   CHECK(rig.words(page_at(bank1, 1), 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
 }
 
-TEST_CASE("a WRP area protects only once the option bytes load, and a reset keeps the words")
+TEST_CASE(
+    "a WRP area protects only once the option bytes load, and a system reset keeps the loaded "
+    "words")
 {
   flash_rig rig;
   rig.unlock_options();
@@ -2480,6 +2482,54 @@ TEST_CASE("a WRP area protects only once the option bytes load, and a reset keep
   rig.unlock();
   rig.erase_page(page_at(bank1, 2));
   CHECK(rig.status("WRPERR") == 1);
+}
+
+TEST_CASE("only a power-on, brown-out or option byte loader reset loads the programmed WRP words")
+{
+  for(auto const kind :
+      {popcorn::reset_kind::pin, popcorn::reset_kind::software, popcorn::reset_kind::watchdog,
+       popcorn::reset_kind::window_watchdog, popcorn::reset_kind::low_power})
+  {
+    CAPTURE(kind);
+    flash_rig rig;
+    rig.unlock_options();
+    rig.set_wrp("FLASH_WRP1AR", 2, 2);
+    rig.program_options();
+    rig.load_options();
+    rig.unlock_options();
+    rig.set_wrp("FLASH_WRP1AR", 5, 5);
+    rig.program_options();
+    rig.f.target->reset(kind);
+    CHECK(rig.read("FLASH_WRP1AR") == 0xff82'ff82);
+    CHECK(rig.state().wrp[0] == 0xff85'ff85);
+    CHECK(rig.state().wrp_active[0] == 0xff82'ff82);
+    rig.unlock();
+    rig.program(page_at(bank1, 5), {1, 2, 3, 4});
+    CHECK(rig.status("WRPERR") == 0);
+    rig.clear_errors();
+    rig.erase_page(page_at(bank1, 2));
+    CHECK(rig.status("WRPERR") == 1);
+  }
+  for(auto const kind :
+      {popcorn::reset_kind::power_on, popcorn::reset_kind::brown_out,
+       popcorn::reset_kind::option_load})
+  {
+    CAPTURE(kind);
+    flash_rig rig;
+    rig.unlock_options();
+    rig.set_wrp("FLASH_WRP1AR", 2, 2);
+    rig.program_options();
+    rig.load_options();
+    rig.unlock_options();
+    rig.set_wrp("FLASH_WRP1AR", 5, 5);
+    rig.program_options();
+    rig.f.target->reset(kind);
+    CHECK(rig.read("FLASH_WRP1AR") == 0xff85'ff85);
+    CHECK(rig.state().wrp_active[0] == 0xff85'ff85);
+    rig.unlock();
+    rig.program(page_at(bank1, 5), {1, 2, 3, 4});
+    CHECK(rig.status("WRPERR") == 1);
+  }
 }
 
 TEST_CASE("OBL_LAUNCH requests an option byte loader reset that loads the programmed WRP words")
@@ -2550,6 +2600,19 @@ TEST_CASE(
   rig.write("FLASH_OPTR", 0);
   rig.program_options();
   CHECK(rig.logged.size() == 1);
+}
+
+TEST_CASE("OPTSTRT does not warn for a locked write or a write of the loaded word")
+{
+  flash_rig rig;
+  rig.logged.clear();
+  rig.write("FLASH_SECWM1R1", 0x0005'0003);
+  rig.unlock_options();
+  rig.program_options();
+  CHECK(rig.logged.empty());
+  rig.write("FLASH_SECWM1R1", rig.read("FLASH_SECWM1R1"));
+  rig.program_options();
+  CHECK(rig.logged.empty());
 }
 
 TEST_CASE("WRP words are saved in the snapshot and restored into a fresh machine")

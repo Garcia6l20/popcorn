@@ -351,14 +351,14 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * are stored while OPTLOCK is clear and ignored while it is set. OPTSTRT, with OPTLOCK clear and
  * no PGSERR or OPTWERR set, programs the four registers as the option bytes. A register whose
  * programmed UNLOCK is 0 cannot change, and one such change discards the whole modification,
- * reloads the registers and sets OPTWERR. The programmed words survive every reset, the registers
- * reload from them at each reset and at OBL_LAUNCH, and the snapshot holds them. OPTSTRT
- * completes at once, with no BSY. A page of bank x, the bank number following SWAP_BANK, lies in
- * area A or B of that bank when PSTRT <= page <= PEND. A store, page erase, bank erase or mass
- * erase that reaches such a page sets WRPERR in its register set, drops the store and erases
- * nothing. The protection follows the loaded words, which a reset loads from the programmed
- * ones, as RM0456 7.6.1 requires the option bytes to be reloaded. OBL_LAUNCH, with OPTLOCK clear,
- * clears itself and requests an option byte loader reset, reset_kind::option_load, which sets
+ * reloads the registers and sets OPTWERR. The programmed words survive every reset and the snapshot
+ * holds them. OPTSTRT completes at once, with no BSY. A page of bank x, the bank number following
+ * SWAP_BANK, lies in area A or B of that bank when PSTRT <= page <= PEND. A store, page erase,
+ * bank erase or mass erase that reaches such a page sets WRPERR in its register set, drops the
+ * store and erases nothing. A power-on, brown-out or option byte loader reset loads the programmed
+ * words into the protection and the WRP registers, RM0456 7.4.2. Any other reset keeps the loaded
+ * words and resets the registers to them. OBL_LAUNCH, with OPTLOCK clear, clears itself and
+ * requests an option byte loader reset, reset_kind::option_load, which sets
  * RCC_CSR.OBLRSTF and loads the registers from the programmed words. OPTSTRT programs the WRP
  * registers only: FLASH_OPTR, the boot addresses and the SECWM registers keep the machine's
  * option bytes, and a write to one of them that differs from the loaded word logs a
@@ -629,9 +629,11 @@ private:
   [[nodiscard]] auto option_loaded(std::uint32_t offset) const -> std::uint32_t;
   void               warn_dropped_options();
   [[nodiscard]] auto wrp_protected(std::uint32_t from, std::uint32_t length) const -> bool;
-  void               load_options();
-  void               program_options();
-  void               check_latency(std::string_view trigger);
+  [[nodiscard]] static auto loads_options(reset_kind kind) -> bool;
+  void                      poke_wrp();
+  void                      load_options();
+  void                      program_options();
+  void                      check_latency(std::string_view trigger);
 
   flash_options                                                     options_;
   register_file&                                                    regs_;
@@ -985,7 +987,7 @@ auto flash::encode_options(
   };
 }
 
-void flash::reset(register_file& regs, reset_kind)
+void flash::reset(register_file& regs, reset_kind kind)
 {
   for(auto const& name : claims())
   {
@@ -995,18 +997,19 @@ void flash::reset(register_file& regs, reset_kind)
   auto const generation = state_.generation;
   auto       torn       = std::move(state_.torn);
   auto       wrp        = std::move(state_.wrp);
+  auto       wrp_active = std::move(state_.wrp_active);
   state_                = {};
   state_.generation     = generation + 1;
   state_.torn           = std::move(torn);
   state_.wrp            = std::move(wrp);
-  state_.wrp_active     = state_.wrp;
+  state_.wrp_active     = loads_options(kind) ? state_.wrp : std::move(wrp_active);
   option_changed_.clear();
   secure_ = {};
   for(auto const [offset, value] : option_words_)
   {
     regs.poke(offset, value);
   }
-  load_options();
+  poke_wrp();
   line_.lower();
   if(secure_line_ != nullptr)
   {
@@ -1105,9 +1108,8 @@ void flash::warn_dropped_options()
     if(has_register(name) and reg(name).offset == offset)
     {
       warn(
-          name, "written, but OPTSTRT programs only the FLASH_WRPxyR registers: the machine's "
-                "option bytes "
-                "set the others");
+          name, "written, but OPTSTRT programs only the FLASH_WRPxyR registers: "
+                "the machine's option bytes set the others");
       return;
     }
   }
@@ -1139,6 +1141,21 @@ auto flash::wrp_protected(std::uint32_t from, std::uint32_t length) const -> boo
     }
   }
   return false;
+}
+
+auto flash::loads_options(reset_kind kind) -> bool
+{
+  return kind == reset_kind::power_on
+      or kind == reset_kind::brown_out
+      or kind == reset_kind::option_load;
+}
+
+void flash::poke_wrp()
+{
+  for(auto const [index, offset] : std::views::enumerate(wrp_offsets_))
+  {
+    regs_.poke(offset, state_.wrp_active[static_cast<std::size_t>(index)]);
+  }
 }
 
 void flash::load_options()

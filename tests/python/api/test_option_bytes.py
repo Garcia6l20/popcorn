@@ -368,7 +368,7 @@ def test_wrp_registers_are_programmed_by_optstrt_and_survive_a_reset(
     u575: popcorn.PartDescription,
 ) -> None:
     """RM0456 7.6.1 and 7.9.19: FLASH_WRP1AR reads 0xFF80FFFF, takes a write once OPTLOCK is
-    clear, programs on OPTSTRT and reloads from the programmed value at a reset."""
+    clear, programs on OPTSTRT and reloads from the programmed value at a power-on reset."""
     wrp1ar = FLASH + 0x58
     m = booted(u575, None)
     assert m.mem.u32[wrp1ar] == 0xFF80_FFFF

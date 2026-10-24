@@ -68,7 +68,7 @@ struct machine_options
    * handler. Passed to the arch module in `arch::arch_context::faults`. */
   arch::fault_policy faults{arch::fault_policy::stop};
   /** @brief Whether a firmware reset request stops the run with stop_reason::reset_request, the
-   * default, or resets the machine as reset_kind::software and continues. A reset request during
+   * default, or resets the machine with the requested kind and continues. A reset request during
    * a call begun by begin_call() always stops with stop_reason::reset_request, whatever the
    * policy: a reset would lose the call frame and its return sentinel. end_call() then restores
    * the caller's context. The stop leaves reset_pending() set, see apply_reset_request(). */
