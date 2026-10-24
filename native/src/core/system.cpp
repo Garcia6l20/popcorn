@@ -68,6 +68,7 @@ enum class phase : std::uint8_t
   arrive_b,
   after_b,
   idle_to,
+  sleep_to,
   sleeping,
 };
 
@@ -212,7 +213,8 @@ struct system::impl
       slice_bounds                               slicing,
       std::move_only_function<void(std::size_t)> hook,
       std::move_only_function<void(std::size_t)> sleep_hook,
-      sync_mode                                  how);
+      sync_mode                                  how,
+      sys_time                                   ahead);
 
   [[nodiscard]] auto clocked() const noexcept -> bool
   {
@@ -294,6 +296,7 @@ struct system::impl
   completion                                  on_c{this, &impl::complete_c};
   completion                                  on_clock{this, &impl::complete_clock};
   sync_mode                                   mode{};
+  sys_time                                    lookahead{};
   std::unique_ptr<member_sync[]>              syncs{};
   std::unique_ptr<std::atomic<std::size_t>[]> owners{};
   alignas(64) std::atomic<std::int64_t> stop_at{never.ps};
@@ -428,6 +431,17 @@ public:
               link->release_through(sys_.result.at);
             }
           }
+          if(sys_.chosen.sleep and sys_.clocked())
+          {
+            lead_      = sys_time{std::numeric_limits<std::int64_t>::min()};
+            published_ = sys_.points[index_];
+            if(position(target) < sys_.points[index_])
+            {
+              jumping_ = true;
+              phase_   = phase::sleep_to;
+              return request_to(sys_.points[index_], false, true);
+            }
+          }
           if(sys_.chosen.sleep)
           {
             phase_    = phase::sleeping;
@@ -459,6 +473,19 @@ public:
             return std::nullopt;
           }
           continue;
+        case phase::sleep_to:
+          if(position(target) < sys_.points[index_])
+          {
+            jumping_ = true;
+            return request_to(sys_.points[index_], false, true);
+          }
+          phase_    = phase::sleeping;
+          sleeping_ = true;
+          if(sys_.before_sleep)
+          {
+            sys_.before_sleep(index_);
+          }
+          return std::nullopt;
         case phase::sleeping:
           sleeping_ = false;
           if(sys_.measuring)
@@ -1041,7 +1068,8 @@ private:
       {
         return request_to(here, false, false);
       }
-      auto bound = goal;
+      auto const cap   = later_by(here, sys_.lookahead.ps);
+      auto       bound = std::min(goal, cap);
       for(auto const& edge : one.coupled)
       {
         clocks_[edge.source] =
@@ -1103,6 +1131,12 @@ private:
         auto const busy =
             (next and *next < target.virtual_clock().to_icount(one.map.to_local(bound)))
             or (at and *at < bound);
+        if(allowed and not busy and bound >= cap)
+        {
+          jumping_ = true;
+          unlead();
+          return request_to(cap, false, true);
+        }
         if(allowed and not busy)
         {
           if(bound > lead_)
@@ -1163,10 +1197,11 @@ system::impl::impl(
     slice_bounds                               slicing,
     std::move_only_function<void(std::size_t)> hook,
     std::move_only_function<void(std::size_t)> sleep_hook,
-    sync_mode                                  how)
+    sync_mode                                  how,
+    sys_time                                   ahead)
     : owner{owner}, links{std::move(wires)}, barrier{members.size()}, bounds{slicing},
       before_arrival{std::move(hook)}, before_sleep{std::move(sleep_hook)}, mode{how},
-      syncs{std::make_unique<member_sync[]>(members.size())},
+      lookahead{ahead}, syncs{std::make_unique<member_sync[]>(members.size())},
       owners{std::make_unique<std::atomic<std::size_t>[]>(links.size())},
       targets(members.size(), never), points(members.size(), never)
 {
@@ -1816,6 +1851,22 @@ void system::impl::complete_c() noexcept
   }
   if(sleeps_at_idle())
   {
+    if(clocked())
+    {
+      for(std::size_t index = 0; index < slots.size(); ++index)
+      {
+        auto at = slots[index].rep.position;
+        for(std::size_t to = 0; to < slots.size(); ++to)
+        {
+          if(auto const apart = distance(index, to); apart < never)
+          {
+            at = std::max(at, sys_time{slots[to].rep.position.ps - apart.ps});
+          }
+        }
+        points[index] = at;
+        syncs[index].clock.store(at.ps, std::memory_order_release);
+      }
+    }
     chosen.pause = false;
     chosen.idle  = false;
     chosen.sleep = true;
@@ -1979,10 +2030,11 @@ system::system(
     slice_bounds                               bounds,
     std::move_only_function<void(std::size_t)> before_arrival,
     std::move_only_function<void(std::size_t)> before_sleep,
-    sync_mode                                  mode)
+    sync_mode                                  mode,
+    sys_time                                   lookahead)
     : impl_{std::in_place,           this,   std::move(members),
             std::move(links),        bounds, std::move(before_arrival),
-            std::move(before_sleep), mode}
+            std::move(before_sleep), mode,   lookahead}
 {}
 
 system::~system()

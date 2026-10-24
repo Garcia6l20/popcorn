@@ -2078,8 +2078,11 @@ auto both_asleep(rig const& r, core::host_future<core::pause> const& pending) ->
 
 TEST_CASE("open goals asleep on IDLE wait until a stamp wakes one member, then all resume")
 {
-  std::optional<std::vector<std::uint64_t>> reference;
-  for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[6]})
+  std::optional<std::vector<std::uint64_t>>              reference;
+  std::optional<std::vector<std::uint64_t>>              clocked;
+  std::optional<std::pair<std::uint64_t, std::uint64_t>> landing;
+  for(auto const& how :
+      {variants()[0], variants()[1], variants()[2], variants()[6], variants()[7], variants()[8]})
   {
     CAPTURE(how.name);
     pinned const                 pin{how.one_cpu};
@@ -2125,11 +2128,18 @@ TEST_CASE("open goals asleep on IDLE wait until a stamp wakes one member, then a
     auto dump = r.dump();
     dump.push_back(landed.get().ps);
     dump.push_back(logged);
-    if(reference)
+    auto& same = how.mode == core::sync_mode::barrier ? reference : clocked;
+    if(same)
     {
-      CHECK(dump == *reference);
+      CHECK(dump == *same);
     }
-    reference = dump;
+    same            = dump;
+    auto const pair = std::pair{landed.get().ps, logged};
+    if(landing)
+    {
+      CHECK(pair == *landing);
+    }
+    landing = pair;
   }
 }
 
@@ -4433,5 +4443,91 @@ TEST_CASE("an idle attempt hands frames at its earliest member, so a fault past 
     CHECK(drained->load() < 222 * us_ps);
     r.sys->request_pause();
     CHECK(pending.get().reason != core::pause_reason::closed);
+  }
+}
+
+TEST_CASE("a quiet member moves by the lookahead and lands a stamp at its position plus it")
+{
+  constexpr std::int64_t lookahead = core::system::default_lookahead.ps;
+  constexpr std::int64_t start     = 200 * us_ps;
+  constexpr std::int64_t gate      = 30 * ms_ps;
+  for(auto const& how : {variants()[7], variants()[10]})
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    struct shared
+    {
+      std::array<std::shared_ptr<core::host>, 2> hosts{};
+      std::atomic<std::int64_t>                  quiet_at{0};
+      std::mutex                                 mutex;
+      std::vector<std::int64_t>                  moves;
+      std::atomic<bool>                          released{false};
+    };
+    auto state = std::make_shared<shared>();
+    rig  r{
+        .members = {member("idle", "idle_forever"), member("alu", "alu_entry")},
+        .arrival = [state](std::size_t index) {
+          auto const now = static_cast<std::int64_t>(
+              state->hosts.at(index)->member_inline(core::member_id{}).virtual_clock().time().ps);
+          if(index == 0)
+          {
+            if(now > state->quiet_at.load())
+            {
+              std::scoped_lock const lock{state->mutex};
+              state->moves.push_back(now);
+            }
+            state->quiet_at = now;
+          }
+          else if(now >= gate)
+          {
+            state->released.wait(false);
+          }
+                    }
+    };
+    state->hosts = {r.members[0].on, r.members[1].on};
+    r.build(how);
+    REQUIRE(r.run(start).reason == core::pause_reason::system_time);
+    at_scope_end const opened{[state] { open_gate(state->released); }};
+    std::ignore     = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    std::ignore     = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    state->quiet_at = start;
+    {
+      std::scoped_lock const lock{state->mutex};
+      state->moves.clear();
+    }
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held);
+    }
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    while(state->quiet_at.load() < start + 2 * lookahead
+          and not pending.done()
+          and std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::yield();
+    }
+    auto const quiet_at = state->quiet_at.load();
+    if(quiet_at != start + 2 * lookahead)
+    {
+      open_gate(state->released);
+      r.sys->close();
+    }
+    REQUIRE(quiet_at == start + 2 * lookahead);
+    core::host_future<vtime> landed;
+    {
+      auto const held_host = r.members[0].on->lock();
+      landed               = r.members[0].on->post(
+          held_host, 0, [](core::machine&) {},
+          vtime{static_cast<std::uint64_t>(quiet_at + lookahead)});
+    }
+    open_gate(state->released);
+    CHECK(landed.get().ps == static_cast<std::uint64_t>(quiet_at + lookahead));
+    r.sys->request_pause();
+    CHECK(pending.get().reason == core::pause_reason::requested);
+    std::scoped_lock const lock{state->mutex};
+    CHECK(state->moves.size() >= 2);
+    CHECK(state->moves.at(0) == start + lookahead);
+    CHECK(state->moves.at(1) == start + 2 * lookahead);
   }
 }

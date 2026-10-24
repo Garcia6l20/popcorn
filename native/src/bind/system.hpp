@@ -162,6 +162,15 @@ public:
       set_sync(std::string const& mode);
 
   /**
+   * @brief Sets the lookahead start() builds the system with, in picoseconds of system time.
+   *        A private seam for tests and probes, core::system::default_lookahead until set.
+   * @throws std::logic_error after start().
+   * @throws std::invalid_argument for a value at or below 0.
+   */
+  [[= py::doc{"Set the clock-mode lookahead in picoseconds before start()."}]] void
+      set_lookahead(std::int64_t ps);
+
+  /**
    * @brief Attaches the wires, builds the system and fixes each member's base: member i's local
    *        time now is system time @p offsets_ps[i].
    * @throws machine_busy when a member is busy.
@@ -463,6 +472,7 @@ private:
 
   core::slice_bounds                          bounds_;
   core::sync_mode                             sync_{core::sync_mode::barrier};
+  core::sys_time                              lookahead_{core::system::default_lookahead};
   std::size_t                                 tap_capacity_ = std::size_t{1} << 20;
   std::vector<member_entry>                   members_;
   std::vector<wire_entry>                     wires_;

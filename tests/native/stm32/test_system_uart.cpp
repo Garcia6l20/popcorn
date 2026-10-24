@@ -2181,3 +2181,51 @@ TEST_CASE("a delivered pause's tap holds every frame ended by its point at any q
     }
   }
 }
+
+TEST_CASE("a member asleep behind a peer that ran on its lead takes input at the peer minus L")
+{
+  for(auto const& how : {variants()[9], variants()[12]})
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    auto         w = paired_world("link_rx", "link_rx", latency_20);
+    w.host(how);
+    REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+    {
+      auto const held = w.sys->lock();
+      for(std::size_t member = 0; member < 2; ++member)
+      {
+        std::ignore =
+            w.sys->post_goal(held, member, {.until = popcorn::address{0x0800'0001}, .open = true});
+      }
+      auto const held_host = w.members[1].on->lock();
+      std::ignore          = w.members[1].on->post(
+          held_host, 0, [](core::machine&) {},
+          vtime{static_cast<std::uint64_t>(5 * ms_ps - w.sys->base_of(1).ps)});
+    }
+    core::host_future<core::pause> pending;
+    {
+      auto const held = w.sys->lock();
+      pending         = w.sys->resume(held);
+    }
+    REQUIRE(asleep(w, pending));
+    auto const reach = 5 * ms_ps - latency_20;
+    auto const base  = w.sys->base_of(0).ps;
+    auto const bound =
+        std::format("before machine time {:.6f} ms", static_cast<double>(reach - base) / 1e9);
+    core::host_future<vtime> early;
+    core::host_future<vtime> exact;
+    {
+      auto const held_host = w.members[0].on->lock();
+      early                = w.members[0].on->post(
+          held_host, 0, [](core::machine&) {}, vtime{static_cast<std::uint64_t>(ms_ps - base)});
+      exact = w.members[0].on->post(
+          held_host, 0, [](core::machine&) {}, vtime{static_cast<std::uint64_t>(reach - base)});
+    }
+    CHECK_THROWS_WITH_AS(
+        std::ignore = early.get(), doctest::Contains(bound.c_str()), std::invalid_argument);
+    CHECK(exact.get().ps == static_cast<std::uint64_t>(reach - base));
+    w.sys->request_pause();
+    CHECK(pending.get().reason == core::pause_reason::requested);
+  }
+}
