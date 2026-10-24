@@ -1197,6 +1197,44 @@ struct machine::run_state
   /** @brief Description indexes of the transmit sources of each wire,
    * machine::set_transmit_sources(). */
   std::vector<std::vector<std::uint32_t>> transmit_wires{};
+
+  /** @brief Lookups of machine::horizon(), built at its first call from the peripherals, which
+   * are fixed once the machine is built, and its per-call buffers. */
+  struct horizon_tables
+  {
+    /** @brief A description unit's window and the description index serving it. */
+    struct unit_window
+    {
+      std::uint64_t                base{};
+      std::uint64_t                end{};
+      std::optional<std::uint32_t> serving{};
+    };
+
+    /** @brief The IRQ lines of one slot, or its NMI line when nmi is set. */
+    struct line_span
+    {
+      periph::irq_line const* first{};
+      periph::irq_line const* last{};
+      std::uint32_t           slot{};
+      bool                    nmi{};
+    };
+
+    /** @brief Unit windows sorted by base. The machine build refuses overlapping windows. */
+    std::vector<unit_window> units{};
+    /** @brief Model of each slot, sorted by address. */
+    std::vector<std::pair<periph::model const*, std::uint32_t>> models{};
+    /** @brief Line spans, sorted by first. */
+    std::vector<line_span> lines{};
+    /** @brief Earliest event time per slot, refilled by each call. */
+    std::vector<std::optional<vtime>> first{};
+    /** @brief Queue position of each slot's earliest event, refilled by each call. */
+    std::vector<std::uint32_t> first_at{};
+    /** @brief Whether each interrupt source wakes the core, -1 until asked, per call. */
+    std::vector<std::int8_t> wakes{};
+  };
+
+  /** @brief Tables of machine::horizon(), empty until its first call. */
+  std::optional<horizon_tables> horizon_index{};
   /** @brief Models of the machine for model contexts, empty until attach_peripherals ends. */
   machine_peers peers{};
   /** @brief Bus firewall a model installed, asked before every peripheral window access, null

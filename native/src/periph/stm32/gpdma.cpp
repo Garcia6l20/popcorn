@@ -304,6 +304,16 @@ auto item_hull(
   return out;
 }
 
+constexpr std::size_t quiet_memo_slots = 8;
+
+struct quiet_memo
+{
+  popcorn::address at{};
+  bool             write{};
+  bool             quiet{};
+  bool             known{};
+};
+
 struct transfer_cache
 {
   bool               valid{};
@@ -507,6 +517,8 @@ private:
   std::array<transfer_cache, max_channels>            cache_{};
   mutable std::vector<dma_feeder const*>              feeders_{};
   mutable bool                                        feeders_resolved_{};
+  mutable std::array<quiet_memo, quiet_memo_slots>    quiet_memo_{};
+  mutable std::size_t                                 quiet_memo_next_{};
   mutable std::array<model const*, requests>          requester_{};
   mutable std::bitset<requests>                       requester_resolved_{};
   mutable std::vector<irq_line const*>                tzic_lines_{};
@@ -1615,8 +1627,21 @@ auto gpdma::feeders() const -> std::span<dma_feeder const* const>
 
 auto gpdma::quiet_data(popcorn::address at, bool write) const -> bool
 {
-  return std::ranges::any_of(
+  auto const known = std::ranges::find_if(quiet_memo_, [&](quiet_memo const& memo) {
+    return memo.known and memo.at == at and memo.write == write;
+  });
+  if(known != quiet_memo_.end())
+  {
+    return known->quiet;
+  }
+  auto const quiet = std::ranges::any_of(
       feeders(), [&](dma_feeder const* feeder) { return feeder->quiet_data(at, write); });
+  if(feeders_resolved_)
+  {
+    quiet_memo_[quiet_memo_next_] = {.at = at, .write = write, .quiet = quiet, .known = true};
+    quiet_memo_next_              = (quiet_memo_next_ + 1) % quiet_memo_slots;
+  }
+  return quiet;
 }
 
 auto gpdma::feed_of(std::uint32_t request, quiet_query const& query) const

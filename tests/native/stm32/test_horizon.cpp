@@ -1419,3 +1419,34 @@ TEST_CASE("a 2D channel in block mode past its half transfer wakes at the next b
   std::ignore = run_until(f, vtime{first.ps + 5 * request_ps + burst_ps + 2 * instruction_ps});
   CHECK((read32(f, channel_base(planar_ch) + 0x10) & htf) != 0);
 }
+
+TEST_CASE("a channel writing a feeder's read-only quiet register is loud after a read of it")
+{
+  pulses      p;
+  auto const& f = *p.f;
+  set_bits(f, rcc + 0xa4, 1u << 14);
+  park(f, wfi_loop);
+  enable_irq(f, gpdma0_irq);
+  enable_irq(f, gpdma1_irq);
+  channel(f, 0, tr1_dinc, tr2_swreq, 64, usart1 + 0x24, target_words, cr_dteie | cr_enable);
+  channel(
+      f, 1, tr1_words | tr1_sinc, tr2_swreq, 16, source_words, usart1 + 0x24, cr_tcie | cr_enable);
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, burst_ps));
+}
+
+TEST_CASE("a 2D channel writing the SAI data register stays quiet beside a channel to a TDR")
+{
+  slot<ticking_requester> adc;
+  stm32_fixture           f{u575(), "boot_ll", adc_requester(adc)};
+  park(f, wfi_loop);
+  enable_irq(f, gpdma12_irq);
+  auto const late = later(f, 1 * ms);
+  adc.model->arm(late, request_ps, 1);
+  channel0(f, tr1_sinc, adc_request(f), 1, source_words, usart1 + 0x28, cr_enable);
+  channel_2d(f, planar_ch, {.to = sai1_a + 0x1c});
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, 8 * burst_ps));
+}

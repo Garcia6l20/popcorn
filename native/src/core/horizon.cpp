@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <format>
+#include <functional>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <ranges>
@@ -30,11 +32,15 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
   class horizon_reader final : public periph::quiet_query
   {
   public:
-    horizon_reader(machine const& owner, vtime now) : owner_{owner}, now_{now}
+    horizon_reader(machine const& owner, vtime now, run_state::horizon_tables& tables)
+        : owner_{owner}, now_{now}, tables_{tables}, first_{tables_.first},
+          first_at_{tables_.first_at}, wake_memo_{tables_.wakes}
     {
-      auto const& slots = owner_.peripherals_;
-      first_.resize(slots.size());
-      for(auto const& due : owner_.scheduler_.pending())
+      wake_memo_.clear();
+      first_.assign(owner_.peripherals_.size(), std::nullopt);
+      first_at_.assign(owner_.peripherals_.size(), 0);
+      auto const pending = owner_.scheduler_.pending();
+      for(auto const& [position, due] : std::views::enumerate(pending))
       {
         auto const at = time_of(due);
         if(due.id.owner == arch::arch_event_owner)
@@ -48,6 +54,10 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
         lower(any_first_, at);
         if(due.id.owner < first_.size())
         {
+          if(not first_[due.id.owner])
+          {
+            first_at_[due.id.owner] = static_cast<std::uint32_t>(position);
+          }
           lower(first_[due.id.owner], at);
         }
       }
@@ -64,11 +74,11 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
         -> std::optional<vtime> override
     {
       auto const index = index_of(of);
-      if(not index)
+      if(not index or not first_[*index])
       {
         return std::nullopt;
       }
-      for(auto const& due : owner_.scheduler_.pending())
+      for(auto const& due : owner_.scheduler_.pending().subspan(first_at_[*index]))
       {
         if(due.id.owner == *index and counts(due.id.kind, due.payload))
         {
@@ -80,23 +90,24 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
 
     [[nodiscard]] auto wakes(periph::irq_line const& line) const -> bool override
     {
-      for(auto const& slot : owner_.peripherals_)
+      auto const& lines = tables_.lines;
+      auto const  after = std::ranges::upper_bound(
+          lines, &line, std::less{}, &run_state::horizon_tables::line_span::first);
+      if(after == lines.begin())
       {
-        if(not slot)
-        {
-          continue;
-        }
-        if(&line == &slot->nmi)
-        {
-          return true;
-        }
-        if(auto const* const first = slot->irqs.data();
-           &line >= first and &line < first + slot->irqs.size())
-        {
-          return wakes_source(slot->irq_numbers[static_cast<std::size_t>(&line - first)]);
-        }
+        return true;
       }
-      return true;
+      auto const& span = *std::prev(after);
+      if(&line >= span.last)
+      {
+        return true;
+      }
+      if(span.nmi)
+      {
+        return true;
+      }
+      auto const& slot = *owner_.peripherals_[span.slot];
+      return wakes_source(slot.irq_numbers[static_cast<std::size_t>(&line - span.first)]);
     }
 
     [[nodiscard]] auto wakes(periph::model const& of) const -> bool override
@@ -191,27 +202,26 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
 
     [[nodiscard]] auto index_of(periph::model const& of) const -> std::optional<std::uint32_t>
     {
-      for(auto const& [index, slot] : std::views::enumerate(owner_.peripherals_))
+      auto const& models = tables_.models;
+      auto const  found  = std::ranges::lower_bound(
+          models, &of, std::less{}, &std::pair<periph::model const*, std::uint32_t>::first);
+      if(found == models.end() or found->first != &of)
       {
-        if(slot and slot->model.get() == &of)
-        {
-          return static_cast<std::uint32_t>(index);
-        }
+        return std::nullopt;
       }
-      return std::nullopt;
+      return found->second;
     }
 
     [[nodiscard]] auto unit_at(address at) const -> std::optional<std::uint32_t>
     {
-      auto const& units = owner_.description_.peripherals;
-      for(auto const& unit : units)
+      auto const& units = tables_.units;
+      auto const  after = std::ranges::upper_bound(
+          units, std::uint64_t{at}, std::less{}, &run_state::horizon_tables::unit_window::base);
+      if(after == units.begin() or std::uint64_t{at} >= std::prev(after)->end)
       {
-        if(at >= unit.base and std::uint64_t{at} < std::uint64_t{unit.base} + unit.size)
-        {
-          return owner_.run_->serving(unit.name);
-        }
+        return std::nullopt;
       }
-      return std::nullopt;
+      return std::prev(after)->serving;
     }
 
     [[nodiscard]] auto peripheral_holds(address at, std::uint64_t size) const -> bool
@@ -237,16 +247,59 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
       return known != 0;
     }
 
-    machine const&                    owner_;
-    vtime                             now_;
-    std::vector<std::optional<vtime>> first_{};
-    std::optional<vtime>              arch_first_{};
-    std::optional<vtime>              any_first_{};
-    mutable std::vector<std::int8_t>  wake_memo_{};
+    machine const&                     owner_;
+    vtime                              now_;
+    run_state::horizon_tables&         tables_;
+    std::vector<std::optional<vtime>>& first_;
+    std::vector<std::uint32_t>&        first_at_;
+    std::optional<vtime>               arch_first_{};
+    std::optional<vtime>               any_first_{};
+    std::vector<std::int8_t>&          wake_memo_;
   };
 
+  if(not run_->horizon_index)
+  {
+    run_state::horizon_tables tables;
+    for(auto const& unit : description_.peripherals)
+    {
+      if(unit.size == 0)
+      {
+        continue;
+      }
+      tables.units.push_back(
+          {.base    = unit.base,
+           .end     = std::uint64_t{unit.base} + unit.size,
+           .serving = run_->serving(unit.name)});
+    }
+    std::ranges::sort(tables.units, std::less{}, &run_state::horizon_tables::unit_window::base);
+    for(auto const& [index, slot] : std::views::enumerate(peripherals_))
+    {
+      if(not slot)
+      {
+        continue;
+      }
+      auto const at = static_cast<std::uint32_t>(index);
+      if(slot->model)
+      {
+        tables.models.emplace_back(slot->model.get(), at);
+      }
+      tables.lines.push_back(
+          {.first = &slot->nmi, .last = &slot->nmi + 1, .slot = at, .nmi = true});
+      if(not slot->irqs.empty())
+      {
+        tables.lines.push_back(
+            {.first = slot->irqs.data(),
+             .last  = slot->irqs.data() + slot->irqs.size(),
+             .slot  = at,
+             .nmi   = false});
+      }
+    }
+    std::ranges::sort(tables.models);
+    std::ranges::sort(tables.lines, std::less{}, &run_state::horizon_tables::line_span::first);
+    run_->horizon_index.emplace(std::move(tables));
+  }
   auto const           now = clock_driver_.exact_time();
-  horizon_reader const reader{*this, now};
+  horizon_reader const reader{*this, now, *run_->horizon_index};
   core::horizon        out;
   auto const&          wires = run_->transmit_wires;
   auto const           held  = run_->core_held;
@@ -281,7 +334,7 @@ auto machine::horizon(std::optional<icount> instructions_left) const -> core::ho
     }
     auto const  index = static_cast<std::size_t>(at);
     auto const& model = *slot->model;
-    auto const  role  = reader.opaque(index) ? periph::wake_role::opaque : model.role_in_horizon();
+    auto const  role  = slot->python_backed ? periph::wake_role::opaque : model.role_in_horizon();
     auto const  first = reader.first(index);
     if(role == periph::wake_role::opaque
        or role == periph::wake_role::reset_source

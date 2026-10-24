@@ -73,6 +73,8 @@ public:
   std::optional<std::optional<vtime>>              quiet{};
   std::optional<std::pair<address, std::uint64_t>> ask{};
   mutable std::optional<bool>                      watched{};
+  std::vector<address>                             units_at{};
+  mutable std::vector<std::pair<bool, bool>>       units{};
 
   void watch_reads(address at, std::uint32_t size)
   {
@@ -129,6 +131,11 @@ public:
     if(ask)
     {
       watched = query.read_watched(ask->first, ask->second);
+    }
+    units.clear();
+    for(auto const at : units_at)
+    {
+      units.emplace_back(query.peripheral_at(at), query.opaque_at(at));
     }
     return quiet ? *quiet : query.next_event(*this);
   }
@@ -473,4 +480,36 @@ TEST_CASE("a read of a watched region counts as watched")
   auto const r = watching_rig();
   CHECK(read_watched(*r, 0x4004'0000, 16));
   CHECK(read_watched(*r, 0x4003'fff8, 16));
+}
+
+namespace
+{
+auto units_seen(std::vector<std::optional<periph::wake_role>> roles, popcorn::part_description d)
+    -> std::vector<std::pair<bool, bool>>
+{
+  rig r{std::move(roles), core::machine_options{}, std::move(d)};
+  r.probes[0]->units_at = {0x4002'fffc, 0x4003'0000, 0x4003'03fc, 0x4003'0400,
+                           0x4003'07fc, 0x4003'0800, 0x4003'0c00, 0x4003'1000};
+  std::ignore           = r.machine().horizon();
+  return r.probes[0]->units;
+}
+}
+
+TEST_CASE("the horizon finds the unit serving an address at each window's edges")
+{
+  using seen = std::pair<bool, bool>;
+  auto const units =
+      units_seen({role::bus_master, role::opaque, role::lines, role::opaque}, desc());
+  CHECK(
+      units
+      == std::vector<seen>{
+          {false, false},
+          {true,  false},
+          {true,  false},
+          {true,  true },
+          {true,  true },
+          {true,  false},
+          {true,  true },
+          {false, false}
+  });
 }
