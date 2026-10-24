@@ -4673,7 +4673,8 @@ auto blocked(std::initializer_list<std::size_t> members) -> bool
     }
   }
   return std::ranges::all_of(members, [&before](std::size_t member) {
-    return waits_noted.turns.at(member).load() == before.at(member);
+    return waits_noted.turns.at(member).load() == before.at(member)
+       and waits_noted.epochs.at(member).load()->load() == waits_noted.seen.at(member).load();
   });
 }
 }
