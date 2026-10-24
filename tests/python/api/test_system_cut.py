@@ -500,6 +500,65 @@ def test_a_cut_from_the_owner_s_callback_is_bound_by_its_time(
     assert other.startswith("RuntimeError: cut from a callback: only callbacks of a")
 
 
+SRAM_CODE = 0x2003_8000
+SRAM_WATCHED = 0x2003_9000
+DWT_CYCCNT = 0xE000_1004
+LOOP_TO_STORE = 8800
+LONG_L = us(100)
+STORE_AT = 110.01875
+SLEEPS = {
+    "wfi": [0xBF30, 0xE7FD],
+    "b .": [0xE7FE],
+}
+
+
+@pytest.mark.parametrize("sleep", list(SLEEPS))
+def test_a_break_from_a_receiving_owner_s_watch_inside_a_slice_reaches_it_after_l(
+    u575: popcorn.PartDescription, sleep: str
+) -> None:
+    """a receives on link_rx and owns the link to b, which idles. a's goal stops at 100 us,
+    so b stands at 100 us plus L and a's next slice may reach 100 us plus 2 L. Right after the
+    resume a's SRAM loop stores its cycle count to a watched word at 110 us, then sleeps in
+    WFI or spins in `b .`. The watch's break reaches a's USART at the store plus L: its framing
+    error interrupt logs the stop sample of a break starting then, not the end of a's slice."""
+    a = member(u575, "link_rx", "a")
+    b = member(u575, "idle", "b")
+    assert asyncio.run(a.run(until="idle", budget=1_000_000)).reason is StopReason.IDLE
+    words = [0x3A01, 0xD1FD, 0x6819, 0x6001, *SLEEPS[sleep]]
+    for index, word in enumerate(words):
+        a.mem.u16[SRAM_CODE + 2 * index] = word
+    a.reg.pc = SRAM_CODE | 1
+    a.reg.r0 = SRAM_WATCHED
+    a.reg.r2 = LOOP_TO_STORE
+    a.reg.r3 = DWT_CYCCNT
+    system = System(
+        {"a": a, "b": b}, [UartLink("a.USART1", "b.USART1", latency=LONG_L, baud=460_800)]
+    )
+    try:
+        tap = system.tap("a.USART1")
+        seen: list[tuple[VirtualTime, VirtualTime, int]] = []
+
+        def on_store(hit: popcorn.WatchHit) -> None:
+            own = system.to_system("a", a.time)
+            seen.append((tap.break_line(line="break"), own, hit.value))
+
+        a.watch(SRAM_WATCHED, handler=on_store)
+
+        async def free() -> None:
+            async with system.running():
+                await a.elapse(us(100))
+                await a.elapse(us(400))
+
+        asyncio.run(free())
+        assert [(start, own) for start, own, _ in seen] == [(at(STORE_AT), at(STORE_AT))]
+        log = logged(a)
+        assert log[0] == FE_ENTRY
+        expected = LONG_L.ps * 160 / 10**6 + CYCLES_PER_FRAME * STOP_SAMPLE
+        assert abs(log[1] - seen[0][2] - expected) <= 50
+    finally:
+        system.close()
+
+
 @pytest.mark.parametrize("swap", [False, True], ids=["a stops", "b stops"])
 def test_a_stopped_break_takes_the_later_end_s_system_time(
     pair: Build, swap: bool, both_sync_modes: str

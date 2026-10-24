@@ -2,6 +2,8 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/system.hpp>
 
+#include "system_seam.hpp"
+
 #include <reflex/enum.hpp>
 #include <reflex/serde/bson.hpp>
 
@@ -18,6 +20,8 @@
 namespace popcorn::core
 {
 member_link::~member_link() = default;
+
+std::atomic<detail::clock_wait_hook> detail::on_clock_wait{nullptr};
 
 namespace
 {
@@ -1209,8 +1213,7 @@ private:
           {
             continue;
           }
-          ++one.waits;
-          mine.epoch.wait(seen, std::memory_order_acquire);
+          wait_past(seen);
           continue;
         }
         unlead();
@@ -1227,8 +1230,23 @@ private:
           continue;
         }
       }
-      ++one.waits;
-      mine.epoch.wait(seen, std::memory_order_acquire);
+      wait_past(seen);
+    }
+  }
+
+  void wait_past(std::uint32_t seen)
+  {
+    auto& epoch = sys_.syncs[index_].epoch;
+    ++sys_.slots[index_].waits;
+    auto const hook = detail::on_clock_wait.load(std::memory_order_acquire);
+    if(hook != nullptr)
+    {
+      hook(index_, &epoch, seen);
+    }
+    epoch.wait(seen, std::memory_order_acquire);
+    if(hook != nullptr)
+    {
+      hook(index_, nullptr, seen);
     }
   }
 

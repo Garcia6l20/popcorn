@@ -7,6 +7,7 @@
 #include <popcorn/core/system.hpp>
 #include <popcorn/core/window_barrier.hpp>
 
+#include "../../../native/src/core/system_seam.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 
@@ -24,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <latch>
 #include <limits>
 #include <map>
@@ -4627,6 +4629,53 @@ struct owner_gate
   std::atomic<std::int64_t>                  barrier_max{-1};
   std::atomic<bool>                          released{false};
 };
+
+struct clock_waits
+{
+  std::array<std::atomic<std::uint64_t>, 3>                     turns{};
+  std::array<std::atomic<std::atomic<std::uint32_t> const*>, 3> epochs{};
+  std::array<std::atomic<std::uint32_t>, 3>                     seen{};
+};
+
+clock_waits waits_noted;
+
+void note_wait(std::size_t member, std::atomic<std::uint32_t> const* epoch, std::uint32_t seen)
+{
+  if(member >= waits_noted.turns.size())
+  {
+    return;
+  }
+  if(epoch != nullptr)
+  {
+    waits_noted.epochs.at(member).store(epoch);
+    waits_noted.seen.at(member).store(seen);
+  }
+  waits_noted.turns.at(member).fetch_add(1);
+}
+
+void unhook_waits() noexcept
+{
+  core::detail::on_clock_wait.store(nullptr);
+}
+
+auto blocked(std::initializer_list<std::size_t> members) -> bool
+{
+  std::array<std::uint64_t, 3> before{};
+  for(auto const member : members)
+  {
+    before.at(member)       = waits_noted.turns.at(member).load();
+    auto const* const epoch = waits_noted.epochs.at(member).load();
+    if(before.at(member) % 2 == 0
+       or epoch == nullptr
+       or epoch->load() != waits_noted.seen.at(member).load())
+    {
+      return false;
+    }
+  }
+  return std::ranges::all_of(members, [&before](std::size_t member) {
+    return waits_noted.turns.at(member).load() == before.at(member);
+  });
+}
 }
 
 TEST_CASE("a run drain hands and shows no frame past an off-link cut owner's clock")
@@ -4636,8 +4685,15 @@ TEST_CASE("a run drain hands and shows no frame past an off-link cut owner's clo
     CAPTURE(how.name);
     how.bounds = {.max_instructions = icount{8}, .wall_budget = std::chrono::milliseconds{1}};
     pinned const pin{how.one_cpu};
-    auto         state = std::make_shared<owner_gate>();
-    rig          r{
+    for(std::size_t member = 0; member < waits_noted.turns.size(); ++member)
+    {
+      waits_noted.turns.at(member).store(0);
+      waits_noted.epochs.at(member).store(nullptr);
+    }
+    core::detail::on_clock_wait.store(&note_wait);
+    at_scope_end const unhooked{&unhook_waits};
+    auto               state = std::make_shared<owner_gate>();
+    rig                r{
         .members =
             {member("alu", "alu_entry"), member("alu", "alu_entry"), member("alu", "alu_entry")},
         .arrival = [state](std::size_t index) {
@@ -4679,16 +4735,13 @@ TEST_CASE("a run drain hands and shows no frame past an off-link cut owner's clo
       pending         = r.sys->resume(held);
     }
     auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
-    auto const near     = [&state] {
-      auto const held = state->held_at.load();
-      return held >= 0 and state->barrier_max.load() >= held - 5 * us_ps;
-    };
-    while(not near() and std::chrono::steady_clock::now() < deadline)
+    auto const settled  = [&state] { return state->held_at.load() >= 0 and blocked({0, 1}); };
+    while(not settled() and std::chrono::steady_clock::now() < deadline)
     {
       std::this_thread::yield();
     }
-    REQUIRE(near());
-    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    REQUIRE(settled());
+    CHECK(state->barrier_max.load() >= state->held_at.load() - 5 * us_ps);
     CHECK(state->barrier_max.load() <= state->held_at.load());
     CHECK(state->shown_max.load() <= state->held_at.load());
     open_gate(state->released);
