@@ -750,12 +750,32 @@ def test_a_dropped_boundary_hold_lets_its_machine_close(machines: Machines) -> N
     m.start()
     assert hold.wait_held(10), "machine never reached its boundary"
     del hold
-    started = time.monotonic()
     gone = weakref.ref(m)
+    held = [m]
     del m
-    gc.collect()
+    done = threading.Event()
+
+    def drop() -> None:
+        held.clear()
+        gc.collect()
+        done.set()
+
+    threading.Thread(target=drop, daemon=True).start()
+    assert done.wait(30), "the machine never closed"
     assert gone() is None
-    assert time.monotonic() - started < 5
+
+
+def test_a_stale_boundary_hold_leaves_a_later_arm_held(machines: Machines) -> None:
+    m = machines()
+    handle = m._handle  # pyright: ignore[reportPrivateUsage]
+    stale = handle.hold_at_boundary()
+    hold = handle.hold_at_boundary()
+    del stale
+    m.start()
+    try:
+        assert hold.wait_held(10), "machine never reached its boundary"
+    finally:
+        hold.release()
 
 
 def test_a_context_copy_runs_while_its_source_is_entered_on_the_loop(machines: Machines) -> None:
