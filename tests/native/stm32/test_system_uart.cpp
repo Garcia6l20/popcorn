@@ -1,5 +1,7 @@
 #include "stm32_fixture.hpp"
 
+#include "../../../native/src/core/system_seam.hpp"
+
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/host.hpp>
 #include <popcorn/core/log.hpp>
@@ -691,6 +693,57 @@ TEST_CASE("a stamped write on a member asleep past its promise lands at its time
     }
     reference = seen;
   }
+}
+
+namespace
+{
+constexpr popcorn::address usart1_tdr{0x4001'3828};
+core::host*                commanded{};
+std::atomic<bool>          commanding{false};
+std::atomic<bool>          command_written{false};
+std::jthread               command_thread;
+
+void command_before_couple()
+{
+  core::detail::before_couple.store(nullptr);
+  command_thread = std::jthread{[] {
+    auto const held_host = commanded->lock();
+    commanding.store(true);
+    command_written.store(
+        commanded->member(held_host, 0).mem().write(usart1_tdr, 4, 0x3c).has_value());
+  }};
+  while(not commanding.load())
+  {
+    std::this_thread::yield();
+  }
+}
+}
+
+TEST_CASE("a paused member transmits while another thread resumes the system")
+{
+  auto const how = variants()[9];
+  REQUIRE(how.mode == core::sync_mode::clocks);
+  world w;
+  arm_pwm(w.add("link_rx"));
+  arm_pwm(w.add("link_echo"));
+  w.link(0, 1, latency_20);
+  w.link(1, 0, latency_20);
+  w.host(how);
+  REQUIRE(w.resume(ms_ps).reason == core::pause_reason::system_time);
+  commanded = w.members[1].on.get();
+  commanding.store(false);
+  command_written.store(false);
+  core::detail::before_couple.store(&command_before_couple);
+  auto const stopped = w.resume(2 * ms_ps);
+  command_thread     = {};
+  core::detail::before_couple.store(nullptr);
+  CHECK(commanding.load());
+  CHECK(command_written.load());
+  CHECK(stopped.reason == core::pause_reason::system_time);
+  w.collect();
+  REQUIRE(w.taps[1].size() == 1);
+  CHECK(w.taps[1][0].start.ps == ms_ps);
+  CHECK(w.taps[1][0].data == 0x3c);
 }
 
 TEST_CASE("a budget running out in a member's self-branch aligns its peer at its stop plus L")

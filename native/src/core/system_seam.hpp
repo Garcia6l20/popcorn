@@ -18,4 +18,14 @@ using clock_wait_hook =
 
 /** @brief The process's clock_wait_hook, empty unless a test sets it. */
 POPCORN_API extern std::atomic<clock_wait_hook> on_clock_wait;
+
+/**
+ * @brief Test seam: called on the thread that resumes a sync_mode::clocks system, with the
+ *        system lock and no host mutex held, after the runners restarted and before the coupling
+ *        tables are rebuilt.
+ */
+using resume_hook = void (*)();
+
+/** @brief The process's resume_hook, empty unless a test sets it. */
+POPCORN_API extern std::atomic<resume_hook> before_couple;
 }

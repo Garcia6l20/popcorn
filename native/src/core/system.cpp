@@ -25,6 +25,7 @@ namespace popcorn::core
 member_link::~member_link() = default;
 
 std::atomic<detail::clock_wait_hook> detail::on_clock_wait{nullptr};
+std::atomic<detail::resume_hook>     detail::before_couple{nullptr};
 
 namespace
 {
@@ -276,6 +277,7 @@ struct system::impl
   void               wake_all(std::optional<std::size_t> except = {}) noexcept;
   [[nodiscard]] auto in_flight() const noexcept -> bool;
   void               note_post(std::size_t link, sys_time at);
+  void               unwatch() noexcept;
   void               write_record(std::size_t member, promise_record const& record) noexcept;
   void               write_final(std::size_t member, sys_time at) noexcept;
   void               read_record(std::size_t member, promise_record& out) const noexcept;
@@ -371,6 +373,17 @@ public:
   }
 
   auto plan(machine& target, earliest_stamp stamp) -> std::optional<slice_request> override
+  {
+    in_run_.store(true, std::memory_order_relaxed);
+    auto request = next_slice(target, stamp);
+    if(not request)
+    {
+      in_run_.store(false, std::memory_order_release);
+    }
+    return request;
+  }
+
+  auto next_slice(machine& target, earliest_stamp stamp) -> std::optional<slice_request>
   {
     auto& one = sys_.slots[index_];
     mark_     = target.virtual_clock().now().value;
@@ -577,8 +590,10 @@ public:
 
   /**
    * @brief Records a post this member made at @p at on its outbound link at @p position, global
-   *        index @p link, and ends the running slice when the receiver's reaction to it can reach
-   *        this member before the slice's bound. On this member's host thread.
+   *        index @p link. While the member's goal runs, also trims the posts no reader needs and
+   *        ends the running slice when the receiver's reaction to the post can reach this member
+   *        before the slice's bound. On this member's host thread, or on a commanding thread
+   *        under its host mutex while the member is parked, where it only records.
    */
   void note_post(std::size_t position, std::size_t link, sys_time at)
   {
@@ -588,6 +603,10 @@ public:
     }
     auto& sent = posts_[position];
     sent.push_back(at);
+    if(not in_run_.load(std::memory_order_acquire))
+    {
+      return;
+    }
     auto const& one  = sys_.slots[index_];
     auto const* wire = one.outbound[position];
     if(not sys_.listed[link])
@@ -1619,6 +1638,7 @@ private:
   vtime                             until_last_{};
   std::atomic<bool>                 aborted_{false};
   std::atomic<bool>                 nudged_{false};
+  std::atomic<bool>                 in_run_{false};
 
   std::chrono::steady_clock::time_point left_{};
 };
@@ -1690,7 +1710,8 @@ system::impl::impl(
     }
     for(std::size_t id = 0; id < links.size(); ++id)
     {
-      watched[id] = links[id]->watch_posts([this, id](sys_time at) { note_post(id, at); });
+      auto const held_host = slots[links[id]->sender()].ref.on->lock();
+      watched[id]          = links[id]->watch_posts([this, id](sys_time at) { note_post(id, at); });
     }
     for(auto& one : slots)
     {
@@ -1703,16 +1724,22 @@ system::impl::impl(
   }
   catch(...)
   {
-    for(auto const& link : links)
-    {
-      link->watch_posts({});
-    }
+    unwatch();
     for(std::size_t index = 0; index < linked; ++index)
     {
       auto const held_host = slots[index].ref.on->lock();
       slots[index].ref.on->link(held_host, 0, false);
     }
     throw;
+  }
+}
+
+void system::impl::unwatch() noexcept
+{
+  for(auto const& link : links)
+  {
+    auto const held_host = slots[link->sender()].ref.on->lock();
+    link->watch_posts({});
   }
 }
 
@@ -2569,11 +2596,8 @@ system::~system()
   {
     std::ignore = impl_->future.wait_for(std::chrono::hours{24 * 365});
   }
+  impl_->unwatch();
   impl_->members_released.store(true, std::memory_order_release);
-  for(auto const& link : impl_->links)
-  {
-    link->watch_posts({});
-  }
   for(auto& one : impl_->slots)
   {
     if(one.goal and not one.goal->system)
@@ -2782,6 +2806,10 @@ auto system::resume(held_system const&, std::optional<sys_time> system_until) ->
   self.note_owners();
   if(self.clocked())
   {
+    if(auto const hook = detail::before_couple.load(std::memory_order_acquire))
+    {
+      hook();
+    }
     self.couple();
     for(std::size_t index = 0; index < self.slots.size(); ++index)
     {
