@@ -4195,6 +4195,13 @@ private:
 };
 }
 
+enum class pause_leg : std::uint8_t
+{
+  timed,
+  requested,
+  open,
+};
+
 TEST_CASE("a drain fault found while a pause aligns stops a lagging member at its point")
 {
   constexpr std::int64_t latency = 20 * us_ps;
@@ -4206,19 +4213,30 @@ TEST_CASE("a drain fault found while a pause aligns stops a lagging member at it
   constexpr std::size_t  s       = 2;
   constexpr std::size_t  r       = 3;
   constexpr std::size_t  c       = 4;
-  for(bool const timed : {true, false})
+  auto const ticking = [](popcorn::testing::machine_fixture<popcorn::testing::test_arch>& f) {
+    for(std::uint64_t tick = 1; tick <= 1'000; ++tick)
+    {
+      std::ignore = f.module->attached_events().schedule(icount{tick * 8}, logged_kind, 0);
+    }
+  };
+  for(auto const leg : {pause_leg::timed, pause_leg::requested, pause_leg::open})
   {
+    auto const timed = leg == pause_leg::timed;
     for(std::uint64_t const slice : {std::uint64_t{8}, std::uint64_t{3}})
     {
       for(int repeat = 0; repeat < 5; ++repeat)
       {
-        CAPTURE(timed);
+        CAPTURE(static_cast<int>(leg));
         CAPTURE(slice);
         CAPTURE(repeat);
+        auto const halted = [&] {
+          return leg == pause_leg::open
+                   ? member<popcorn::testing::test_arch>("idle", "idle_forever", ticking)
+                   : member("idle", "idle_forever");
+        };
         std::vector<core::member_ref> members{
-            member("idle", "idle_forever"), member("alu", "alu_entry"),
-            member("idle", "idle_forever"), member("idle", "idle_forever"),
-            member("idle", "idle_forever")};
+            member("idle", "idle_forever"), member("alu", "alu_entry"), halted(), halted(),
+            halted()};
         auto state = std::make_shared<held_fault_rig>();
         for(std::size_t index = 0; index < members.size(); ++index)
         {
@@ -4293,7 +4311,19 @@ TEST_CASE("a drain fault found while a pause aligns stops a lagging member at it
           {
             sys.release(held, halted, true);
           }
-          pending = sys.resume(held, core::sys_time{timed ? until : 10 * until});
+          if(leg == pause_leg::open)
+          {
+            for(std::size_t const holder : {std::size_t{0}, std::size_t{1}})
+            {
+              std::ignore = sys.post_goal(
+                  held, holder, {.until = popcorn::address{0x0800'0001}, .open = true});
+            }
+            pending = sys.resume(held);
+          }
+          else
+          {
+            pending = sys.resume(held, core::sys_time{timed ? until : 10 * until});
+          }
         }
         std::atomic<bool> landed{false};
         std::jthread      guard{[&sys, &landed, state](std::stop_token const& stopping) {
@@ -4328,5 +4358,52 @@ TEST_CASE("a drain fault found while a pause aligns stops a lagging member at it
         CHECK(sys.time_of(held, c).ps == t + latency + onward);
       }
     }
+  }
+}
+
+TEST_CASE("a stamp dated inside a leading member's published lead is refused at its reach")
+{
+  for(auto const& how : clock_variants())
+  {
+    if(how.seed)
+    {
+      continue;
+    }
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    auto const   published = std::make_shared<std::atomic<int>>(0);
+    rig          r{
+        .members = {member("idle", "idle_forever"), member("alu", "alu_entry")},
+        .arrival = [published](std::size_t index) {
+          if(index == 1)
+          {
+            ++*published;
+          }
+                    }
+    };
+    r.build(how);
+    REQUIRE(r.run(200 * us_ps).reason == core::pause_reason::system_time);
+    REQUIRE(r.now_of(0) == 200 * us_ps);
+    std::ignore = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    std::ignore = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held);
+    }
+    while(published->load() < 200 and not pending.done())
+    {
+      std::this_thread::yield();
+    }
+    core::host_future<vtime> landed;
+    {
+      auto const held_host = r.members[0].on->lock();
+      landed = r.members[0].on->post(held_host, 0, [](core::machine&) {}, vtime{200 * us_ps + 1});
+    }
+    CHECK_THROWS_WITH_AS(
+        std::ignore = landed.get(),
+        doctest::Contains("the earliest time an input lands on the member"), std::invalid_argument);
+    r.sys->request_pause();
+    CHECK(pending.get().reason == core::pause_reason::requested);
   }
 }

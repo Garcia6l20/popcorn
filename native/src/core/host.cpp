@@ -36,6 +36,11 @@ operation_cancelled::~operation_cancelled() = default;
 machine_forked::~machine_forked()           = default;
 member_driver::~member_driver()             = default;
 
+auto member_driver::reach(machine const& target) const -> vtime
+{
+  return target.virtual_clock().time();
+}
+
 namespace detail
 {
 struct waiter
@@ -322,6 +327,14 @@ auto past_stamp(vtime at, vtime now) -> std::invalid_argument
 {
   return std::invalid_argument(
       std::format("stamp {} is before machine time {}", in_ms(at), in_ms(now)));
+}
+
+auto past_reach(vtime at, vtime reach) -> std::invalid_argument
+{
+  return std::invalid_argument(
+      std::format(
+          "stamp {} is before {}, the earliest time an input lands on the member", in_ms(at),
+          in_ms(reach)));
 }
 
 void fail_all(std::vector<stamped> const& dropped, std::exception_ptr const& error)
@@ -723,6 +736,15 @@ struct host_core
     }
   }
 
+  static auto reach_of(member_slot const& slot) -> vtime
+  {
+    if(slot.goal and slot.goal->goal.driver)
+    {
+      return slot.goal->goal.driver->reach(*slot.engine);
+    }
+    return slot.engine->virtual_clock().time();
+  }
+
   void serve_mail(member_slot& slot, std::deque<command>& mail)
   {
     std::vector<std::pair<host_promise<vtime>, std::expected<vtime, std::exception_ptr>>> results;
@@ -765,7 +787,7 @@ struct host_core
       auto fresh = std::exchange(slot.incoming, {});
       lock.unlock();
       serve_mail(slot, batch);
-      accept_incoming(slot, std::move(fresh));
+      accept_incoming(slot, std::move(fresh), slot.engine->virtual_clock().time());
       apply_due(slot);
       lock.lock();
     }
@@ -859,16 +881,15 @@ struct host_core
       std::scoped_lock const lock{mutex};
       fresh = std::exchange(slot.incoming, {});
     }
-    accept_incoming(slot, std::move(fresh));
+    accept_incoming(slot, std::move(fresh), reach_of(slot));
   }
 
-  void accept_incoming(member_slot& slot, std::vector<stamped> fresh)
+  void accept_incoming(member_slot& slot, std::vector<stamped> fresh, vtime now)
   {
     if(fresh.empty())
     {
       return;
     }
-    auto const           now = slot.engine->virtual_clock().time();
     std::vector<stamped> late;
     {
       std::scoped_lock const lock{mutex};
@@ -884,9 +905,12 @@ struct host_core
         }
       }
     }
+    auto const machine_time = slot.engine->virtual_clock().time();
     for(auto const& posted : late)
     {
-      posted.promise.fail(std::make_exception_ptr(past_stamp(posted.at, now)));
+      posted.promise.fail(
+          std::make_exception_ptr(
+              now > machine_time ? past_reach(posted.at, now) : past_stamp(posted.at, now)));
     }
   }
 

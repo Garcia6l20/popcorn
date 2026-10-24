@@ -515,6 +515,15 @@ public:
     return sleeping_ and not aborted_.load(std::memory_order_acquire);
   }
 
+  [[nodiscard]] auto reach(machine const& target) const -> vtime override
+  {
+    if(not sys_.clocked())
+    {
+      return target.virtual_clock().time();
+    }
+    return sys_.slots[index_].map.to_local(reach_at(target));
+  }
+
 private:
   void settle(machine& target, slice_result const& result)
   {
@@ -583,7 +592,7 @@ private:
   void fail(machine const& target, std::exception_ptr error) noexcept
   {
     auto&      one = sys_.slots[index_];
-    auto const at  = reach(target);
+    auto const at  = reach_at(target);
     one.failed     = true;
     one.rep.found.push_back(
         {.at       = position(target),
@@ -828,7 +837,7 @@ private:
   {
     auto& one          = sys_.slots[index_];
     one.rep.position   = position(target);
-    one.rep.reach      = reach(target);
+    one.rep.reach      = reach_at(target);
     one.rep.done       = sys_.until and one.rep.position >= *sys_.until;
     auto const next    = target.next_event();
     auto const stamped = stamp_of(stamp);
@@ -905,7 +914,7 @@ private:
     return true;
   }
 
-  [[nodiscard]] auto reach(machine const& target) const noexcept -> sys_time
+  [[nodiscard]] auto reach_at(machine const& target) const noexcept -> sys_time
   {
     return std::max(position(target), lead_);
   }
@@ -924,7 +933,7 @@ private:
         fail(target, std::current_exception());
       }
     }
-    auto const at = reach(target);
+    auto const at = reach_at(target);
     if(at <= published_ or at.ps <= sys_.syncs[index_].clock.load(std::memory_order_relaxed))
     {
       return;
@@ -1005,7 +1014,7 @@ private:
         return std::nullopt;
       }
       auto const here  = position(target);
-      auto const ahead = reach(target);
+      auto const ahead = reach_at(target);
       auto const goal =
           std::min(sys_time{sys_.stop_at.load(std::memory_order_acquire)}, sys_.targets[index_]);
       if(sys_.decide.load(std::memory_order_acquire))

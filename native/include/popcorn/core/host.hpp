@@ -181,6 +181,14 @@ public:
   {
     return false;
   }
+
+  /**
+   * @brief Local time before which nothing may land on the member: the host accepts its stamps
+   *        at or after it. Read on the host thread between slices and while plan() reads a stamp.
+   * @param target The member.
+   * @return The member's time by default.
+   */
+  [[nodiscard]] virtual auto reach(machine const& target) const -> vtime;
 };
 
 /** @brief A run to a stop, carried across slices by the host as one request. */
