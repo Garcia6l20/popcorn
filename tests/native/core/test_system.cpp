@@ -4551,3 +4551,54 @@ TEST_CASE("a quiet member moves by the lookahead and lands a stamp at its positi
     CHECK(state->moves.at(1) == start + 2 * lookahead);
   }
 }
+
+TEST_CASE("a lookahead below a link's latency still lets a member reach its pause point")
+{
+  constexpr std::int64_t        latency   = 20 * us_ps;
+  constexpr std::int64_t        lookahead = 5 * us_ps;
+  std::vector<core::member_ref> members{member("alu", "alu_entry"), member("alu", "alu_entry")};
+  auto const                    hosts  = std::array{members[0].on, members[1].on};
+  auto const                    failed = std::make_shared<std::atomic<std::int64_t>>(-1);
+  core::system                  sys{
+      members,
+      {std::make_shared<bare_link>(0, 1, latency)},
+      {},
+      [hosts, failed](std::size_t index) {
+        auto const now = static_cast<std::int64_t>(
+            hosts.at(index)->member_inline(core::member_id{}).virtual_clock().time().ps);
+        if(index == 0 and now >= 100 * us_ps and failed->load() < 0)
+        {
+          failed->store(now);
+          throw std::runtime_error("member 0 fails");
+        }
+      },
+      {},
+      core::sync_mode::clocks,
+      core::sys_time{lookahead}};
+  core::host_future<core::pause> pending;
+  {
+    auto const                  held = sys.lock();
+    std::vector<core::sys_time> offsets(2);
+    sys.start(held, offsets);
+    pending = sys.resume(held, core::sys_time{1 * ms_ps});
+  }
+  std::atomic<bool> landed{false};
+  std::jthread      guard{[&sys, &landed](std::stop_token const& stopping) {
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    while(not stopping.stop_requested() and std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    if(not landed.load())
+    {
+      sys.close();
+    }
+  }};
+  auto const        stopped = pending.get();
+  landed.store(true);
+  guard.request_stop();
+  REQUIRE(stopped.reason == core::pause_reason::error);
+  auto const held = sys.lock();
+  CHECK(sys.time_of(held, 0).ps == failed->load());
+  CHECK(sys.time_of(held, 1).ps >= failed->load() + latency);
+}

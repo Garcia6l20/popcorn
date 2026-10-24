@@ -326,7 +326,6 @@ public:
     published_ = lead_;
     counted_   = false;
     calm_      = false;
-    jumping_   = false;
     std::ranges::fill(clocks_, sys_time{});
     if(sys_.measuring)
     {
@@ -398,7 +397,6 @@ public:
           if(auto const to = sys_.points[index_];
              not system::impl::frozen(one) and position(target) < to)
           {
-            jumping_ = true;
             return request_to(to, false, true);
           }
           phase_ = phase::after_b;
@@ -521,11 +519,6 @@ public:
 
   void ran(machine& target, slice_result const& result) override
   {
-    if(jumping_)
-    {
-      jumping_ = false;
-      contract_assert(result.executed.value == 0);
-    }
     settle(target, result);
     if(sys_.clocked())
     {
@@ -1084,15 +1077,8 @@ private:
       {
         return request_to(here, false, false);
       }
-      auto furthest = sys_time{std::numeric_limits<std::int64_t>::min()};
-      for(auto const next : one.successors)
-      {
-        furthest =
-            std::max(furthest, sys_time{sys_.syncs[next].clock.load(std::memory_order_acquire)});
-      }
-      auto const cap =
-          one.successors.empty() ? here : later_by(std::min(here, furthest), sys_.lookahead.ps);
-      auto bound = std::min(goal, cap);
+      auto const cap   = later_by(here, sys_.lookahead.ps);
+      auto       bound = std::min(goal, cap);
       for(auto const& edge : one.coupled)
       {
         clocks_[edge.source] =
@@ -1158,7 +1144,7 @@ private:
         auto const busy =
             (next and *next < target.virtual_clock().to_icount(one.map.to_local(bound)))
             or (at and *at < bound);
-        if(allowed and not busy and bound >= cap and cap > here)
+        if(allowed and not busy and bound >= cap)
         {
           unlead();
           return request_to(cap, false, true);
@@ -1206,7 +1192,6 @@ private:
   bool                  sleeping_{};
   bool                  counted_{};
   bool                  calm_{};
-  bool                  jumping_{};
   sys_time              lead_{std::numeric_limits<std::int64_t>::min()};
   sys_time              published_{std::numeric_limits<std::int64_t>::min()};
   std::vector<sys_time> clocks_{};
