@@ -651,7 +651,7 @@ TEST_CASE(
   CHECK(r.peek("SECHDPCR") == 0);
 }
 
-TEST_CASE("SECCR.INV is stored, and OPTSTRT under TrustZone warns once, RM0456 7.5.5 and 7.9.9")
+TEST_CASE("SECCR.INV is stored, and OPTSTRT under TrustZone completes and clears, RM0456 7.5.5")
 {
   rig const r{true, four_secure_pages};
   r.unlock(true);
@@ -663,7 +663,7 @@ TEST_CASE("SECCR.INV is stored, and OPTSTRT under TrustZone warns once, RM0456 7
   r.write("NSCR", optstrt, nonsecure_priv);
   r.write("NSCR", optstrt, nonsecure_priv);
   CHECK((r.peek("NSCR") & optstrt) == 0);
-  CHECK(r.warned("option-byte programming is not modelled") == 1);
+  CHECK(r.warned("option-byte programming") == 0);
 }
 
 TEST_CASE(
@@ -1020,4 +1020,24 @@ TEST_CASE("a PRIVBB write drops the cached data verdict of its page, RM0456 7.5.
   CHECK(load() == 0);
   r.write("PRIV1BBR1", 0, secure_priv);
   CHECK(load() == 0x6666'6666);
+}
+
+TEST_CASE("RM0456 7.6.1: under TrustZone a WRP area set by OPTSTRT refuses a Non-secure program")
+{
+  rig const         r{true, four_secure_pages};
+  constexpr address page9  = flash_ns + 9 * page_bytes;
+  constexpr address page10 = flash_ns + 10 * page_bytes;
+  r.unlock(false);
+  r.write("OPTKEYR", 0x0819'2a3bu, nonsecure_priv);
+  r.write("OPTKEYR", 0x4c5d'6e7fu, nonsecure_priv);
+  r.write("WRP1AR", 0x8009'0009u, nonsecure_priv);
+  r.write("NSCR", optstrt, nonsecure_priv);
+  r.write("NSCR", pg, nonsecure_priv);
+  r.store(page10, {1, 2, 3, 4}, nonsecure_priv);
+  r.settle();
+  CHECK((r.peek("NSSR") & wrperr) == 0);
+  CHECK(r.word(page10) == 1);
+  r.store(page9, {1, 2, 3, 4}, nonsecure_priv);
+  CHECK((r.peek("NSSR") & wrperr) != 0);
+  CHECK(r.word(page9) == 0xffff'ffff);
 }

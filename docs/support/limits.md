@@ -90,13 +90,14 @@ Source: [flash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/p
 
 Not modelled:
 
-- Write protection by the WRP areas. WRPERR never sets for it.
-- Option-byte programming. OPTSTRT is cleared and the option bytes stay those of the machine
-  description.
 - Single ECC errors. ECCC never sets and ECCIE has no effect.
 
 Differs from RM0456:
 
+- OPTSTRT programs the FLASH_WRPxyR registers only and completes at once, with no BSY. The
+  protection is active at that point. FLASH_OPTR, the boot addresses and the SECWM registers keep
+  the machine's option bytes.
+- OBL_LAUNCH reloads the option registers and clears. The core keeps running.
 - A store while BSY is set completes at once and is applied when BSY clears. Silicon stalls the
   bus until then.
 - Host and debugger reads, instruction fetches and vector table reads never detect an ECC error.

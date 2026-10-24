@@ -362,3 +362,22 @@ def test_writes_to_the_option_registers_are_ignored_and_a_reset_keeps_them(
     assert m.mem.u32[SECWM1R1] == 0
     m.reset()
     assert readback(m) == expected
+
+
+def test_wrp_registers_are_programmed_by_optstrt_and_survive_a_reset(
+    u575: popcorn.PartDescription,
+) -> None:
+    """RM0456 7.6.1 and 7.9.19: FLASH_WRP1AR reads 0xFF80FFFF, takes a write once OPTLOCK is
+    clear, programs on OPTSTRT and reloads from the programmed value at a reset."""
+    wrp1ar = FLASH + 0x58
+    m = booted(u575, None)
+    assert m.mem.u32[wrp1ar] == 0xFF80_FFFF
+    m.mem.u32[FLASH + 0x08] = 0x4567_0123
+    m.mem.u32[FLASH + 0x08] = 0xCDEF_89AB
+    m.mem.u32[FLASH + 0x10] = 0x0819_2A3B
+    m.mem.u32[FLASH + 0x10] = 0x4C5D_6E7F
+    m.mem.u32[wrp1ar] = 0x8005_0003
+    assert m.mem.u32[wrp1ar] == 0xFF85_FF83
+    m.mem.u32[FLASH + 0x28] = 1 << 17
+    m.reset()
+    assert m.mem.u32[wrp1ar] == 0xFF85_FF83

@@ -128,6 +128,7 @@ struct new_flash_state
   std::vector<held_store>       held{};
   std::uint64_t                 due_ps{};
   std::vector<std::uint32_t>    torn{};
+  std::vector<std::uint32_t>    wrp{};
 
   friend auto operator==(new_flash_state const&, new_flash_state const&) -> bool = default;
 };
@@ -266,6 +267,17 @@ struct flash_rig
         ->on_write(
             regs, word->offset, 4, regs.peek(word->offset), value, {.pc = 0, .now = icount{0}})
         .has_value();
+  }
+
+  void set_wrp(std::string_view reg, std::uint32_t pstrt, std::uint32_t pend, bool unlock = true)
+      const
+  {
+    write(reg, (unlock ? 1u << 31 : 0u) | pend << 16 | pstrt);
+  }
+
+  void program_options() const
+  {
+    control(optstrt);
   }
 
   void unlock_options() const
@@ -1072,17 +1084,6 @@ TEST_CASE("HSI16 stays on while a held program runs after PG is cleared")
   CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 0);
 }
 
-TEST_CASE("write protection is logged once as not modelled")
-{
-  flash_rig rig;
-  rig.logged.clear();
-  rig.program(last_page, {1, 2, 3, 4});
-  rig.program(last_page + 16, {1, 2, 3, 4});
-  REQUIRE(rig.logged.size() == 1);
-  CHECK(rig.logged.front().message.contains("write protection"));
-  CHECK(rig.words(last_page + 16, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
-}
-
 TEST_CASE("a BWR burst collects 32 words then programs 128 bytes under one BSY")
 {
   flash_rig rig;
@@ -1110,7 +1111,7 @@ TEST_CASE("a BWR burst collects 32 words then programs 128 bytes under one BSY")
   CHECK(rig.words(last_page + 128, 4) == erased(4));
   CHECK(rig.status("EOP") == 1);
   CHECK((rig.read("FLASH_NSSR") & all_errors & ~eop) == 0);
-  CHECK(rig.logged.size() == 1);
+  CHECK(rig.logged.empty());
 }
 
 TEST_CASE("firmware bursts with PG and BWR cleared before or after BSY drops")
@@ -2308,7 +2309,7 @@ TEST_CASE("writing OPTLOCK or LOCK relocks the option registers, and a 0 write d
   CHECK(rig.field("FLASH_NSCR", "LOCK") == 1);
 }
 
-TEST_CASE("OBL_LAUNCH and the option registers ignore writes while OPTLOCK is set")
+TEST_CASE("OBL_LAUNCH and the option registers take writes only once OPTLOCK is clear")
 {
   flash_rig rig;
   rig.control(obl_launch);
@@ -2319,5 +2320,234 @@ TEST_CASE("OBL_LAUNCH and the option registers ignore writes while OPTLOCK is se
   rig.write("FLASH_SECWM1R1", 0x0005'0003);
   CHECK(rig.read("FLASH_SECWM1R1") == 0xff05'ff03);
   rig.control(obl_launch);
-  CHECK(rig.field("FLASH_NSCR", "OBL_LAUNCH") == 1);
+  CHECK(rig.field("FLASH_NSCR", "OBL_LAUNCH") == 0);
+}
+
+constexpr std::uint32_t wrp_production = 0xff80'ffff;
+constexpr address       bank1          = 0x0800'0000;
+
+auto page_at(address bank, std::uint32_t page) -> address
+{
+  return bank + page * page_bytes;
+}
+
+TEST_CASE("WRPxyR read the production value, keep unlocked writes and fill reserved bits with 1")
+{
+  flash_rig rig;
+  for(auto const reg : {"FLASH_WRP1AR", "FLASH_WRP1BR", "FLASH_WRP2AR", "FLASH_WRP2BR"})
+  {
+    CAPTURE(reg);
+    CHECK(rig.read(reg) == wrp_production);
+    rig.write(reg, 0x8005'0003);
+    CHECK(rig.read(reg) == wrp_production);
+  }
+  rig.unlock_options();
+  rig.write("FLASH_WRP1AR", 0x8005'0003);
+  CHECK(rig.read("FLASH_WRP1AR") == 0xff85'ff83);
+  rig.write("FLASH_WRP1BR", 0x0000'0000);
+  CHECK(rig.read("FLASH_WRP1BR") == 0x7f80'ff80);
+  rig.write("FLASH_WRP2AR", 0xffff'ffff);
+  CHECK(rig.read("FLASH_WRP2AR") == 0xffff'ffff);
+}
+
+TEST_CASE("a WRP area protects the pages from PSTRT to PEND included, in both areas and banks")
+{
+  struct area
+  {
+    std::string_view reg;
+    address          bank;
+  };
+  for(auto const [reg, bank] : {
+          area{"FLASH_WRP1AR", bank1},
+          area{"FLASH_WRP1BR", bank1},
+          area{"FLASH_WRP2AR", bank2},
+          area{"FLASH_WRP2BR", bank2}
+  })
+  {
+    CAPTURE(reg);
+    flash_rig rig;
+    rig.unlock_options();
+    rig.set_wrp(reg, 10, 12);
+    rig.program_options();
+    REQUIRE(rig.status("OPTWERR") == 0);
+    REQUIRE(rig.field("FLASH_NSCR", "OPTSTRT") == 0);
+    for(std::uint32_t page = 8; page < 15; ++page)
+    {
+      CAPTURE(page);
+      auto const hit = page >= 10 and page <= 12;
+      rig.clear_errors();
+      rig.program(page_at(bank, page), {1, 2, 3, 4});
+      CHECK(rig.status("WRPERR") == (hit ? 1u : 0u));
+      CHECK(
+          rig.words(page_at(bank, page), 4)
+          == (hit ? erased(4) : std::vector<std::uint32_t>{1, 2, 3, 4}));
+    }
+  }
+}
+
+TEST_CASE("a page, bank or mass erase over a WRP page sets WRPERR and erases nothing")
+{
+  flash_rig rig;
+  rig.program(page_at(bank1, 3), {1, 2, 3, 4});
+  rig.program(page_at(bank1, 5), {5, 6, 7, 8});
+  rig.program(page_at(bank2, 5), {9, 10, 11, 12});
+  rig.control(0);
+  rig.unlock_options();
+  rig.set_wrp("FLASH_WRP1AR", 3, 3);
+  rig.program_options();
+  rig.clear_errors();
+  rig.erase_page(page_at(bank1, 3));
+  CHECK(rig.status("WRPERR") == 1);
+  CHECK(rig.status("BSY") == 0);
+  CHECK(rig.field("FLASH_NSCR", "STRT") == 0);
+  CHECK(rig.words(page_at(bank1, 3), 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
+  rig.clear_errors();
+  rig.control(mer1 | strt);
+  rig.wait_idle();
+  CHECK(rig.status("WRPERR") == 1);
+  CHECK(rig.words(page_at(bank1, 5), 4) == std::vector<std::uint32_t>{5, 6, 7, 8});
+  rig.clear_errors();
+  rig.control(mer1 | mer2 | strt);
+  rig.wait_idle();
+  CHECK(rig.status("WRPERR") == 1);
+  CHECK(rig.words(page_at(bank2, 5), 4) == std::vector<std::uint32_t>{9, 10, 11, 12});
+  rig.clear_errors();
+  rig.erase_page(page_at(bank1, 5));
+  CHECK(rig.status("WRPERR") == 0);
+  CHECK(rig.words(page_at(bank1, 5), 4) == erased(4));
+  rig.control(mer2 | strt);
+  rig.wait_idle();
+  CHECK(rig.status("WRPERR") == 0);
+  CHECK(rig.words(page_at(bank2, 5), 4) == erased(4));
+}
+
+TEST_CASE("WRP1 follows the bank number after SWAP_BANK, RM0456 7.6.1")
+{
+  flash_rig rig{option_board({.swap_bank = true})};
+  rig.unlock_options();
+  rig.set_wrp("FLASH_WRP1AR", 1, 1);
+  rig.program_options();
+  rig.program(page_at(bank2, 1), {1, 2, 3, 4});
+  CHECK(rig.status("WRPERR") == 1);
+  CHECK(rig.words(page_at(bank2, 1), 4) == erased(4));
+  rig.clear_errors();
+  rig.program(page_at(bank1, 1), {1, 2, 3, 4});
+  CHECK(rig.status("WRPERR") == 0);
+  CHECK(rig.words(page_at(bank1, 1), 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
+}
+
+TEST_CASE("a WRP area is active only after OPTSTRT, survives resets and OBL_LAUNCH reloads it")
+{
+  flash_rig rig;
+  rig.unlock_options();
+  rig.set_wrp("FLASH_WRP1AR", 2, 2);
+  rig.program(page_at(bank1, 2), {1, 2, 3, 4});
+  CHECK(rig.status("WRPERR") == 0);
+  rig.clear_errors();
+  rig.control(0);
+  rig.program_options();
+  rig.erase_page(page_at(bank1, 2));
+  CHECK(rig.status("WRPERR") == 1);
+  rig.f.target->reset(popcorn::reset_kind::software);
+  rig.unlock();
+  CHECK(rig.read("FLASH_WRP1AR") == 0xff82'ff82);
+  rig.erase_page(page_at(bank1, 2));
+  CHECK(rig.status("WRPERR") == 1);
+  rig.unlock_options();
+  rig.set_wrp("FLASH_WRP1AR", 6, 7);
+  rig.control(obl_launch);
+  CHECK(rig.field("FLASH_NSCR", "OBL_LAUNCH") == 0);
+  CHECK(rig.read("FLASH_WRP1AR") == 0xff82'ff82);
+  CHECK(rig.state().wrp.size() == 4);
+  CHECK(rig.state().wrp[0] == 0xff82'ff82);
+}
+
+TEST_CASE("WRP words are saved in the snapshot and restored into a fresh machine")
+{
+  flash_rig rig;
+  rig.unlock_options();
+  rig.set_wrp("FLASH_WRP2BR", 7, 9);
+  rig.program_options();
+  auto const saved = rig.f.target->snapshot();
+  flash_rig  other;
+  REQUIRE(other.state().wrp == std::vector<std::uint32_t>(4, wrp_production));
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.state().wrp == rig.state().wrp);
+  CHECK(other.read("FLASH_WRP2BR") == 0xff89'ff87);
+  other.program(page_at(bank2, 8), {1, 2, 3, 4});
+  CHECK(other.status("WRPERR") == 1);
+}
+
+TEST_CASE("a change of a WRP register with UNLOCK clear sets OPTWERR and discards the modification")
+{
+  flash_rig rig;
+  rig.unlock_options();
+  rig.set_wrp("FLASH_WRP1AR", 2, 4, false);
+  rig.program_options();
+  REQUIRE(rig.status("OPTWERR") == 0);
+  CHECK(rig.read("FLASH_WRP1AR") == 0x7f84'ff82);
+  rig.set_wrp("FLASH_WRP1AR", 6, 7);
+  rig.set_wrp("FLASH_WRP2AR", 1, 1);
+  rig.program_options();
+  CHECK(rig.status("OPTWERR") == 1);
+  CHECK(rig.field("FLASH_NSCR", "OPTSTRT") == 0);
+  CHECK(rig.read("FLASH_WRP1AR") == 0x7f84'ff82);
+  CHECK(rig.read("FLASH_WRP2AR") == wrp_production);
+  rig.clear_errors();
+  rig.program(page_at(bank1, 3), {1, 2, 3, 4});
+  CHECK(rig.status("WRPERR") == 1);
+  rig.clear_errors();
+  rig.program(page_at(bank1, 6), {1, 2, 3, 4});
+  CHECK(rig.status("WRPERR") == 0);
+  rig.clear_errors();
+  rig.program(page_at(bank2, 1), {1, 2, 3, 4});
+  CHECK(rig.status("WRPERR") == 0);
+}
+
+TEST_CASE("an unchanged register with UNLOCK clear is no violation, UNLOCK set stays modifiable")
+{
+  flash_rig rig;
+  rig.unlock_options();
+  rig.set_wrp("FLASH_WRP1AR", 2, 4);
+  rig.program_options();
+  rig.set_wrp("FLASH_WRP1AR", 3, 5);
+  rig.set_wrp("FLASH_WRP2AR", 0, 0, false);
+  rig.program_options();
+  CHECK(rig.status("OPTWERR") == 0);
+  CHECK(rig.read("FLASH_WRP1AR") == 0xff85'ff83);
+  rig.set_wrp("FLASH_WRP1BR", 1, 1);
+  rig.program_options();
+  CHECK(rig.status("OPTWERR") == 0);
+  CHECK(rig.read("FLASH_WRP2AR") == 0x7f80'ff80);
+}
+
+TEST_CASE("OPTSTRT keeps the old option bytes while OPTWERR or PGSERR is set, RM0456 7.4.2")
+{
+  for(auto const flag : {"OPTWERR", "PGSERR"})
+  {
+    CAPTURE(flag);
+    flash_rig rig;
+    rig.unlock_options();
+    rig.set_wrp("FLASH_WRP1AR", 2, 2, false);
+    rig.program_options();
+    rig.set_wrp("FLASH_WRP1AR", 3, 3);
+    rig.program_options();
+    REQUIRE(rig.status("OPTWERR") == 1);
+    if(std::string_view{flag} == "PGSERR")
+    {
+      rig.clear_errors();
+      rig.control(pg | per | strt);
+      rig.control(0);
+      REQUIRE(rig.status("PGSERR") == 1);
+    }
+    rig.set_wrp("FLASH_WRP2AR", 4, 4);
+    rig.program_options();
+    CHECK(rig.read("FLASH_WRP2AR") == wrp_production);
+    rig.clear_errors();
+    rig.set_wrp("FLASH_WRP2AR", 4, 4);
+    rig.program_options();
+    CHECK(rig.status("OPTWERR") == 0);
+    CHECK(rig.read("FLASH_WRP2AR") == 0xff84'ff84);
+  }
 }

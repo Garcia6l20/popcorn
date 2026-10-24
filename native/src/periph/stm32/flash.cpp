@@ -80,6 +80,7 @@ struct flash_state
   std::vector<held_store>                held{};
   std::uint64_t                          due_ps{};
   std::vector<std::uint32_t>             torn{};
+  std::vector<std::uint32_t>             wrp{};
 
   friend auto operator==(flash_state const&, flash_state const&) -> bool = default;
 };
@@ -234,6 +235,15 @@ constexpr std::array<std::string_view, 8> option_registers{
     "FLASH_SECWM1R1", "FLASH_SECWM1R2",    "FLASH_SECWM2R1",    "FLASH_SECWM2R2",
 };
 
+constexpr std::array<std::string_view, 4> wrp_registers{
+    "FLASH_WRP1AR",
+    "FLASH_WRP1BR",
+    "FLASH_WRP2AR",
+    "FLASH_WRP2BR",
+};
+
+constexpr std::uint32_t wrp_unlock = 1u << 31;
+
 constexpr std::uint32_t optr_production        = 0x1fef'f8aa;
 constexpr std::uint32_t optr_tzen              = 1u << 31;
 constexpr std::uint32_t optr_dualbank          = 1u << 21;
@@ -331,6 +341,22 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * FLASH_NSKEYR. OPTLOCK is set-only, and setting LOCK sets it. While OPTLOCK is set, OPTSTRT and
  * OBL_LAUNCH ignore writes and the option registers keep their value.
  *
+ * Write protection, RM0456 7.6.1 and 7.9.19 to 7.9.24: FLASH_WRP1AR, FLASH_WRP1BR, FLASH_WRP2AR
+ * and FLASH_WRP2BR hold UNLOCK in bit 31, PEND in bits 23:16 and PSTRT in bits 7:0, the fields as
+ * wide as the SECWM fields of the part. Other bits read 1. The production value has PSTRT at the
+ * field maximum and PEND at 0, which protects nothing: 0xFF80FFFF on the STM32U575. Writes
+ * are stored while OPTLOCK is clear and ignored while it is set. OPTSTRT, with OPTLOCK clear and
+ * no PGSERR or OPTWERR set, programs the four registers as the option bytes. A register whose
+ * programmed UNLOCK is 0 cannot change, and one such change discards the whole modification,
+ * reloads the registers and sets OPTWERR. The programmed words survive every reset, the registers
+ * reload from them at each reset and at OBL_LAUNCH, and the snapshot holds them. OPTSTRT
+ * completes at once, with no BSY. A page of bank x, the bank number following SWAP_BANK, lies in
+ * area A or B of that bank when PSTRT <= page <= PEND. A store, page erase, bank erase or mass
+ * erase that reaches such a page sets WRPERR in its register set, drops the store and erases
+ * nothing. OBL_LAUNCH reloads the registers and clears while the core keeps running. OPTSTRT
+ * programs the WRP registers only: FLASH_OPTR, the boot addresses and the SECWM registers keep
+ * the machine's option bytes.
+ *
  * Program, RM0456 7.3.7: with PG set, a 32-bit store at a quad-word address opens the write
  * buffer and sets WDW, the fourth word of that quad-word launches the program, BSY is set for
  * flash_options::quad_word_program, then the 16 bytes are written. With BWR also set when the
@@ -374,8 +400,7 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * target: the model refuses it. A burst is checked per quad-word and programs nothing when one
  * of its 8 quad-words fails. Every error aborts the operation and flushes the write buffer.
  * With ERRIE an error also sets OPERR. FLASH_IRQn follows EOP with EOPIE and OPERR with ERRIE.
- * Write protection by the WRPxyR areas is not modelled, logged once. HSI16 is kept on while PG or
- * STRT is set in either register set, through the RCC model.
+ * HSI16 is kept on while PG or STRT is set in either register set, through the RCC model.
  *
  * TrustZone, RM0456 7.5 and 7.7. With TZEN = 0 FLASH_SECKEYR, FLASH_SECSR, FLASH_SECCR,
  * FLASH_SECyBBRx and FLASH_SECHDPCR read as zero and ignore writes, RM0456 7.5.1, and
@@ -417,7 +442,6 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  *   and ends the engine run after the instruction, a reset or a restore drops them too. SECCR.INV
  *   inverts the flash security state of Table 62, Secure when a page is Secure, which the RCC
  *   FLASHEN and FLASHSMEN bits follow, RM0456 7.5.5.
- * - Option-byte programming is not modelled: OPTSTRT is cleared and logs a model_warning once.
  * - Deviation from RM0456 3.5.5: it calls a bank secure when one page is secure, which would let
  *   a Secure bank erase run over a mixed bank. The model follows Table 70 and refuses it whole.
  *
@@ -516,6 +540,7 @@ public:
   void               secure_status_written(std::uint32_t old, std::uint32_t now);
   void               ecc_written(std::uint32_t old, std::uint32_t now);
   void               option_written(std::uint32_t old, std::uint32_t now);
+  void               wrp_written(std::uint32_t old, std::uint32_t now);
   [[nodiscard]] auto option_locked() const -> bool;
   void               secure_block_written(std::uint32_t old, std::uint32_t now);
   void               hide_written(std::uint32_t old, std::uint32_t now);
@@ -591,7 +616,12 @@ private:
   [[nodiscard]] auto hsi16_held() const -> bool;
   void               program(bool secure);
   void               hold_hsi16(bool held);
-  void               note_unmodelled_protection();
+  [[nodiscard]] auto wrp_top() const -> std::uint32_t;
+  [[nodiscard]] auto wrp_normal(std::uint32_t word) const -> std::uint32_t;
+  [[nodiscard]] auto wrp_programmed(std::size_t index) const -> std::uint32_t;
+  [[nodiscard]] auto wrp_protected(std::uint32_t from, std::uint32_t length) const -> bool;
+  void               load_options();
+  void               program_options();
   void               check_latency(std::string_view trigger);
 
   flash_options                                                     options_;
@@ -614,10 +644,9 @@ private:
   access_ctx                                                        access_{};
   bool                                                              rejected_{};
   bool                                                              page_logged_{};
-  bool                                                              protection_logged_{};
-  bool                                                              option_logged_{};
   std::vector<std::pair<std::uint32_t, std::uint32_t>>              option_words_;
   std::vector<std::uint32_t>                                        option_offsets_;
+  std::vector<std::uint32_t>                                        wrp_offsets_;
   bool                                                              swapped_{};
   std::vector<std::uint32_t>                                        secure_words_;
   std::vector<std::uint32_t>                                        secure_blocks_;
@@ -672,6 +701,13 @@ auto flash_table(peripheral_desc const& desc, flash_options const& options, bool
       table.push_back({name, &flash::option_written});
     }
   }
+  for(auto const name : wrp_registers)
+  {
+    if(find_register(desc, name) != nullptr)
+    {
+      table.push_back({name, &flash::wrp_written});
+    }
+  }
   return table;
 }
 
@@ -701,6 +737,15 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
     {
       option_offsets_.push_back(reg(name).offset);
     }
+  }
+  if(std::ranges::all_of(wrp_registers, [this](auto name) { return has_register(name); }))
+  {
+    for(auto const name : wrp_registers)
+    {
+      wrp_offsets_.push_back(reg(name).offset);
+      option_offsets_.push_back(reg(name).offset);
+    }
+    state_.wrp.assign(wrp_offsets_.size(), ~(wrp_top() << 16));
   }
   for(auto const name : secure_block_registers)
   {
@@ -936,14 +981,17 @@ void flash::reset(register_file& regs, reset_kind)
   }
   auto const generation = state_.generation;
   auto       torn       = std::move(state_.torn);
+  auto       wrp        = std::move(state_.wrp);
   state_                = {};
   state_.generation     = generation + 1;
   state_.torn           = std::move(torn);
+  state_.wrp            = std::move(wrp);
   secure_               = {};
   for(auto const [offset, value] : option_words_)
   {
     regs.poke(offset, value);
   }
+  load_options();
   line_.lower();
   if(secure_line_ != nullptr)
   {
@@ -982,6 +1030,88 @@ void flash::option_written(std::uint32_t old, std::uint32_t)
   {
     regs_.poke(offset, value);
   }
+}
+
+void flash::wrp_written(std::uint32_t old, std::uint32_t now)
+{
+  regs_.poke(written_word_, option_locked() ? old : wrp_normal(now));
+}
+
+auto flash::wrp_top() const -> std::uint32_t
+{
+  return (1u << watermark_bits(ctx_.part.part)) - 1;
+}
+
+auto flash::wrp_normal(std::uint32_t word) const -> std::uint32_t
+{
+  auto const fields = wrp_unlock | wrp_top() << 16 | wrp_top();
+  return (word & fields) | ~fields;
+}
+
+auto flash::wrp_programmed(std::size_t index) const -> std::uint32_t
+{
+  return state_.wrp[index];
+}
+
+auto flash::wrp_protected(std::uint32_t from, std::uint32_t length) const -> bool
+{
+  if(storage_ == nullptr or wrp_offsets_.empty())
+  {
+    return false;
+  }
+  auto const [base, size] = banks();
+  auto const top          = wrp_top();
+  for(auto at = from; at - from < length; at += page_size)
+  {
+    if(at - base >= 2 * size)
+    {
+      continue;
+    }
+    auto const bank = bank_of(at);
+    auto const page = (at - bank_base(at)) / page_size;
+    for(std::size_t area = 0; area < 2; ++area)
+    {
+      auto const word = wrp_programmed(bank * 2 + area);
+      if((word & top) <= page and page <= (word >> 16 & top))
+      {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void flash::load_options()
+{
+  for(auto const [index, offset] : std::views::enumerate(wrp_offsets_))
+  {
+    regs_.poke(offset, wrp_programmed(static_cast<std::size_t>(index)));
+  }
+}
+
+void flash::program_options()
+{
+  if(flag(false, set_role::sequence_error) or flag(false, set_role::option_error))
+  {
+    load_options();
+    return;
+  }
+  std::vector<std::uint32_t> requested;
+  auto                       violation = false;
+  for(auto const [index, offset] : std::views::enumerate(wrp_offsets_))
+  {
+    auto const programmed = wrp_programmed(static_cast<std::size_t>(index));
+    auto const word       = wrp_normal(regs_.peek(offset));
+    requested.push_back(word);
+    violation = violation or (word != programmed and (programmed & wrp_unlock) == 0);
+  }
+  if(violation)
+  {
+    load_options();
+    fail(false, set_role::option_error);
+    return;
+  }
+  state_.wrp = std::move(requested);
 }
 
 auto flash::option_locked() const -> bool
@@ -1355,18 +1485,6 @@ void flash::hold_hsi16(bool held)
   }
 }
 
-void flash::note_unmodelled_protection()
-{
-  if(not std::exchange(protection_logged_, true))
-  {
-    warn(
-        "FLASH_NSSR", ctx_.trustzone
-                          ? "write protection by the WRPxyR areas is not modelled: they never set "
-                            "WRPERR"
-                          : "write protection is not modelled: WRPERR is never set");
-  }
-}
-
 void flash::illegal_access(std::string_view enable_field)
 {
   if(not events_linked_ and not ctx_.peers.all().empty())
@@ -1527,7 +1645,8 @@ void flash::store(held_store const& one, std::uint8_t attrs)
 {
   auto const [addr, size, value, written, dma] = one;
   auto const secure                            = (attrs & held_secure) != 0;
-  if(ctx_.trustzone and not writable(addr, 1, secure, (attrs & held_privileged) != 0))
+  if((ctx_.trustzone and not writable(addr, 1, secure, (attrs & held_privileged) != 0))
+     or wrp_protected(addr, 1))
   {
     fail(secure, set_role::protection_error);
     return;
@@ -1588,7 +1707,6 @@ void flash::store(held_store const& one, std::uint8_t attrs)
 
 void flash::start(operation which, std::uint32_t target, std::uint32_t length, bool secure)
 {
-  note_unmodelled_protection();
   state_.running         = static_cast<std::uint8_t>(which);
   secure_.running_secure = secure;
   state_.target          = target;
@@ -1642,7 +1760,8 @@ void flash::start_erase(bool secure, std::uint32_t control)
     length = bank_size;
     which  = operation::bank_erase;
   }
-  if(ctx_.trustzone and not writable(target, length, secure, access_.privileged))
+  if((ctx_.trustzone and not writable(target, length, secure, access_.privileged))
+     or wrp_protected(target, length))
   {
     fail(secure, set_role::protection_error);
     update(regs_, field_of(secure, set_role::start), 0);
@@ -1781,6 +1900,11 @@ void flash::load(std::span<std::byte const> in)
   {
     dispatch_model::load(in);
   }
+  if(not wrp_offsets_.empty() and state_.wrp.size() != wrp_offsets_.size())
+  {
+    state_.wrp.assign(wrp_offsets_.size(), ~(wrp_top() << 16));
+    load_options();
+  }
   latency_logged_.clear();
   sync_watches();
 }
@@ -1911,12 +2035,6 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
   {
     sequence = true;
   }
-  if(ctx_.trustzone and option_start and not std::exchange(option_logged_, true))
-  {
-    warn(
-        "FLASH_NSCR", "option-byte programming is not modelled: OPTSTRT is cleared and the "
-                      "option bytes stay those of the machine description");
-  }
   if(option_lock)
   {
     auto const relock =
@@ -1952,7 +2070,20 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
       launch = true;
     }
   }
+  auto const load = unlocked and option_load_field and option_load_field->of(now) != 0;
+  if(load)
+  {
+    now = option_load_field->with(now, 0);
+  }
   regs_.poke(control, now);
+  if(option_start and not sequence and not busy())
+  {
+    program_options();
+  }
+  if(load)
+  {
+    load_options();
+  }
   if(sequence)
   {
     fail(secure, set_role::sequence_error);
