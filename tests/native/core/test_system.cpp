@@ -599,6 +599,32 @@ TEST_CASE("a pause requested after its flight ended does not end the next flight
   CHECK(r.run(200 * us_ps).reason == core::pause_reason::system_time);
 }
 
+namespace
+{
+class gate_release
+{
+public:
+  explicit gate_release(std::shared_ptr<std::atomic<bool>> gate) : gate_{std::move(gate)}
+  {}
+  gate_release(gate_release const&)                    = delete;
+  auto operator=(gate_release const&) -> gate_release& = delete;
+
+  ~gate_release()
+  {
+    open();
+  }
+
+  void open() const noexcept
+  {
+    gate_->store(true);
+    gate_->notify_all();
+  }
+
+private:
+  std::shared_ptr<std::atomic<bool>> gate_;
+};
+}
+
 TEST_CASE("a pause requested right after resume ends that flight")
 {
   auto const asked = std::make_shared<std::atomic<bool>>(false);
@@ -607,14 +633,14 @@ TEST_CASE("a pause requested right after resume ends that flight")
       .arrival = [asked](std::size_t) { asked->wait(false); }
   };
   r.build(variants()[0]);
+  gate_release const             release{asked};
   core::host_future<core::pause> pending;
   {
     auto const held = r.sys->lock();
     pending         = r.sys->resume(held, core::sys_time{10 * ms_ps});
   }
   r.sys->request_pause();
-  asked->store(true);
-  asked->notify_all();
+  release.open();
   CHECK(pending.get().reason == core::pause_reason::requested);
 }
 
@@ -727,6 +753,7 @@ TEST_CASE("a member's time and the pending barrier are refused while a resume is
   auto const asked = std::make_shared<std::atomic<bool>>(false);
   rig r{.members = sleeper_and_runner(), .arrival = [asked](std::size_t) { asked->wait(false); }};
   r.build(variants()[0]);
+  gate_release const release{asked};
   CHECK(r.sys->hosts() == std::vector{r.members[0].on, r.members[1].on});
   core::host_future<core::pause> pending;
   {
@@ -738,8 +765,7 @@ TEST_CASE("a member's time and the pending barrier are refused while a resume is
   CHECK(r.sys->base_of(0).ps == 0);
   CHECK(r.sys->base_of(1).ps == 0);
   r.sys->request_pause();
-  asked->store(true);
-  asked->notify_all();
+  release.open();
   auto const stopped = pending.get();
   CHECK(stopped.reason == core::pause_reason::requested);
   auto const held = r.sys->lock();
@@ -3763,8 +3789,10 @@ private:
 
 #if defined(__SANITIZE_THREAD__)
 constexpr std::int64_t lost_wake_rounds = 50'000;
+constexpr auto         lost_wake_guard  = std::chrono::seconds{60};
 #else
 constexpr std::int64_t lost_wake_rounds = 1'000'000;
+constexpr auto         lost_wake_guard  = std::chrono::seconds{15};
 #endif
 
 TEST_CASE("a million clock publish and wait rounds between two members lose no wake")
@@ -3801,7 +3829,7 @@ TEST_CASE("a million clock publish and wait rounds between two members lose no w
   }
   std::atomic<bool> landed{false};
   std::jthread      guard{[&sys, &landed](std::stop_token const& stopping) {
-    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{60};
+    auto const deadline = std::chrono::steady_clock::now() + lost_wake_guard;
     while(not stopping.stop_requested() and std::chrono::steady_clock::now() < deadline)
     {
       std::this_thread::sleep_for(std::chrono::milliseconds{5});
@@ -3901,6 +3929,181 @@ TEST_CASE(
     else
     {
       reference = times;
+    }
+  }
+}
+
+namespace
+{
+struct failing_alignment
+{
+  std::array<std::shared_ptr<core::host>, 4> hosts{};
+  std::atomic<bool>                          a_done{false};
+  std::atomic<bool>                          b_done{false};
+  std::atomic<bool>                          h_waiting{false};
+  std::atomic<bool>                          c_waiting{false};
+  std::atomic<bool>                          requested{false};
+  std::atomic<bool>                          h_failed{false};
+  std::atomic<std::int64_t>                  failed_at{-1};
+  int                                        h_phase{};
+  int                                        c_phase{};
+
+  void open_all() noexcept
+  {
+    requested.store(true);
+    requested.notify_all();
+    h_failed.store(true);
+    h_failed.notify_all();
+  }
+};
+
+class gates_open
+{
+public:
+  explicit gates_open(failing_alignment& state) : state_{state}
+  {}
+  gates_open(gates_open const&)                    = delete;
+  auto operator=(gates_open const&) -> gates_open& = delete;
+
+  ~gates_open()
+  {
+    state_.open_all();
+  }
+
+private:
+  failing_alignment& state_;
+};
+}
+
+TEST_CASE(
+    "a halted member failing while a TIME pause aligns stops its halted receiver at its point")
+{
+  constexpr std::int64_t latency = 20 * us_ps;
+  constexpr std::int64_t far     = 10 * latency;
+  constexpr std::int64_t until   = 1 * ms_ps;
+  constexpr std::int64_t gate_h  = until - 5 * latency;
+  constexpr std::int64_t gate_c  = until - 6 * latency;
+  for(std::uint64_t const slice : {std::uint64_t{8}, std::uint64_t{3}})
+  {
+    for(int repeat = 0; repeat < 5; ++repeat)
+    {
+      CAPTURE(slice);
+      CAPTURE(repeat);
+      std::vector<core::member_ref> members{
+          member("idle", "idle_forever"), member("alu", "alu_entry"),
+          member("idle", "idle_forever"), member("idle", "idle_forever")};
+      auto state = std::make_shared<failing_alignment>();
+      for(std::size_t index = 0; index < members.size(); ++index)
+      {
+        state->hosts.at(index) = members[index].on;
+      }
+      std::vector<std::shared_ptr<core::member_link>> wires{
+          std::make_shared<bare_link>(2, 3, latency), std::make_shared<bare_link>(3, 2, far),
+          std::make_shared<bare_link>(2, 0, far),     std::make_shared<bare_link>(2, 1, far),
+          std::make_shared<bare_link>(3, 0, far),     std::make_shared<bare_link>(3, 1, far)};
+      core::system sys{
+          members,
+          std::move(wires),
+          core::slice_bounds{
+                             .max_instructions = icount{slice}, .wall_budget = std::chrono::milliseconds{1}},
+          [state](std::size_t index) {
+            auto const now = static_cast<std::int64_t>(
+                state->hosts.at(index)->member_inline(core::member_id{}).virtual_clock().time().ps);
+            switch(index)
+            {
+              case 0:
+                state->a_done = state->a_done or now >= until;
+                break;
+              case 1:
+                state->b_done = state->b_done or now >= until;
+                break;
+              case 2:
+                if(state->h_phase == 0 and now >= gate_h)
+                {
+                  state->h_phase   = 1;
+                  state->h_waiting = true;
+                  state->requested.wait(false);
+                }
+                else if(state->h_phase == 1)
+                {
+                  state->h_phase = 2;
+                }
+                else if(state->h_phase == 2)
+                {
+                  state->h_phase   = 3;
+                  state->failed_at = now;
+                  state->h_failed  = true;
+                  state->h_failed.notify_all();
+                  throw std::runtime_error("halted member fails while aligning");
+                }
+                break;
+              default:
+                if(state->c_phase == 0 and now >= gate_c)
+                {
+                  state->c_phase   = 1;
+                  state->c_waiting = true;
+                  state->requested.wait(false);
+                }
+                else if(state->c_phase == 1)
+                {
+                  state->c_phase = 2;
+                }
+                else if(state->c_phase == 2)
+                {
+                  state->c_phase = 3;
+                  state->h_failed.wait(false);
+                }
+                break;
+            }
+                             },
+          {},
+          core::sync_mode::clocks
+      };
+      gates_open const               opened{*state};
+      core::host_future<core::pause> pending;
+      {
+        auto const                  held = sys.lock();
+        std::vector<core::sys_time> offsets(members.size());
+        sys.start(held, offsets);
+        sys.release(held, 2, true);
+        sys.release(held, 3, true);
+        pending = sys.resume(held, core::sys_time{until});
+      }
+      std::atomic<bool> landed{false};
+      std::jthread      guard{[&sys, &landed, state](std::stop_token const& stopping) {
+        auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+        while(not stopping.stop_requested() and std::chrono::steady_clock::now() < deadline)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+        if(not landed.load())
+        {
+          state->open_all();
+          sys.close();
+        }
+      }};
+      while(not(state->a_done and state->b_done and state->h_waiting and state->c_waiting)
+            and not pending.done())
+      {
+        std::this_thread::sleep_for(std::chrono::microseconds{200});
+      }
+      sys.request_pause();
+      state->requested = true;
+      state->requested.notify_all();
+      auto const stopped = pending.get();
+      landed.store(true);
+      guard.request_stop();
+      REQUIRE(stopped.reason == core::pause_reason::error);
+      CHECK(stopped.member == 2);
+      auto const x = state->failed_at.load();
+      REQUIRE(x >= gate_h);
+      REQUIRE(x + latency < until);
+      CHECK(stopped.at.ps == x);
+      auto const held = sys.lock();
+      CHECK(sys.time_of(held, 0).ps == until);
+      CHECK(sys.time_of(held, 1).ps > until);
+      CHECK(sys.time_of(held, 2).ps == x);
+      CHECK(sys.time_of(held, 3).ps == x + latency);
     }
   }
 }

@@ -1352,14 +1352,19 @@ auto system::impl::pause_points(entry const* head, std::optional<sys_time> reque
 {
   auto const            n = slots.size();
   std::vector<sys_time> out(n, never);
+  auto const            timed = head and head->kind == entry_kind::system_time;
   for(std::size_t to = 0; to < n; ++to)
   {
-    if(head and head->kind == entry_kind::system_time)
+    if(timed and slots[to].goal)
     {
-      out[to] = slots[to].goal ? slots[to].rep.reach : head->at;
+      out[to] = slots[to].rep.reach;
       continue;
     }
-    if(head)
+    if(timed)
+    {
+      out[to] = head->at;
+    }
+    else if(head)
     {
       out[to] = later_by(head->anchor, distance(head->anchored, to).ps);
     }
@@ -1374,7 +1379,7 @@ auto system::impl::pause_points(entry const* head, std::optional<sys_time> reque
         out[to] = std::min(out[to], later_by(slots[from].rep.reach, distance(from, to).ps));
       }
     }
-    if(until)
+    if(until and not timed)
     {
       out[to] = std::min(out[to], *until);
     }

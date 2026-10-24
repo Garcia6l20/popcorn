@@ -364,7 +364,11 @@ public:
   [[= py::doc{"End a link's open cut now."}]] auto restore(std::size_t link, bool stopped)
       -> cut_outcome;
 
-  /** @brief The member whose callbacks may change link @p link's cuts while it runs. */
+  /** @brief The member whose callbacks may change link @p link's cuts while it runs. Any thread,
+   * a machine's callbacks included, no lock: it reads `closed_` and `system_` under the GIL,
+   * which close() and the destructor hold when they write them.
+   * @throws IndexError for no such link, machine_closed once the system is closed,
+   *         std::logic_error before it starts. */
   [[= py::doc{"A link's cut owner, a member index."}]] [[nodiscard]] auto
       link_owner(std::size_t link) const -> std::size_t;
 
