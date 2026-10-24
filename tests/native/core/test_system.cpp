@@ -18,17 +18,20 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <latch>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -598,8 +601,10 @@ TEST_CASE("a pause requested after its flight ended does not end the next flight
 
 TEST_CASE("a pause requested right after resume ends that flight")
 {
-  rig r{
-      .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+  auto const asked = std::make_shared<std::atomic<bool>>(false);
+  rig        r{
+      .members = {member("alu", "alu_entry"), member("alu", "alu_entry")},
+      .arrival = [asked](std::size_t) { asked->wait(false); }
   };
   r.build(variants()[0]);
   core::host_future<core::pause> pending;
@@ -608,6 +613,8 @@ TEST_CASE("a pause requested right after resume ends that flight")
     pending         = r.sys->resume(held, core::sys_time{10 * ms_ps});
   }
   r.sys->request_pause();
+  asked->store(true);
+  asked->notify_all();
   CHECK(pending.get().reason == core::pause_reason::requested);
 }
 
@@ -717,7 +724,8 @@ TEST_CASE("halted members advance with their events and pause at the barrier on 
 
 TEST_CASE("a member's time and the pending barrier are refused while a resume is in flight")
 {
-  rig r{.members = sleeper_and_runner()};
+  auto const asked = std::make_shared<std::atomic<bool>>(false);
+  rig r{.members = sleeper_and_runner(), .arrival = [asked](std::size_t) { asked->wait(false); }};
   r.build(variants()[0]);
   CHECK(r.sys->hosts() == std::vector{r.members[0].on, r.members[1].on});
   core::host_future<core::pause> pending;
@@ -730,6 +738,8 @@ TEST_CASE("a member's time and the pending barrier are refused while a resume is
   CHECK(r.sys->base_of(0).ps == 0);
   CHECK(r.sys->base_of(1).ps == 0);
   r.sys->request_pause();
+  asked->store(true);
+  asked->notify_all();
   auto const stopped = pending.get();
   CHECK(stopped.reason == core::pause_reason::requested);
   auto const held = r.sys->lock();
@@ -3304,4 +3314,458 @@ TEST_CASE("after a member stop a halted receiver of the stopped member stands at
   CHECK(run.times[1] == barrier.times[1]);
   CHECK(run.times[1] >= run.first.at);
   CHECK(run.times[1] < run.first.at + instruction_ps);
+}
+
+namespace
+{
+class scripted_link final : public core::member_link
+{
+public:
+  struct hand
+  {
+    std::int64_t start{};
+    std::int64_t position{};
+    bool         dropped{};
+    bool         wiped{};
+  };
+
+  scripted_link(std::int64_t latency, core::machine* receiver, std::vector<std::int64_t> starts)
+      : starts{std::move(starts)}, latency_{latency}, receiver_{receiver}
+  {}
+
+  auto sender() const noexcept -> std::size_t override
+  {
+    return 0;
+  }
+
+  auto receiver() const noexcept -> std::size_t override
+  {
+    return 1;
+  }
+
+  auto latency() const noexcept -> core::sys_time override
+  {
+    return core::sys_time{latency_};
+  }
+
+  void enter_slice(core::time_map) override
+  {
+    entered_.fetch_add(1, std::memory_order_release);
+  }
+
+  auto posted_count() const noexcept -> std::uint64_t override
+  {
+    return entered_.load(std::memory_order_acquire);
+  }
+
+  void sender_reset(core::sys_time) override
+  {}
+
+  void receiver_reset(core::sys_time at) override
+  {
+    resets.push_back(at.ps);
+    for(auto& one : hands)
+    {
+      if(not one.dropped and one.start + latency_ > at.ps)
+      {
+        one.wiped = true;
+      }
+    }
+  }
+
+  auto drain(
+      std::uint64_t,
+      core::sys_time const& barrier,
+      core::sys_time const& next,
+      core::time_map        receiver) -> std::optional<core::link_fault> override
+  {
+    auto const position = receiver.to_system(receiver_->virtual_clock().time()).ps;
+    past_position       = std::max(past_position, barrier.ps - position);
+    if(next.ps - latency_ > position)
+    {
+      ++sender_ahead;
+    }
+    if(exact_from and barrier.ps >= *exact_from and barrier.ps != never_ps)
+    {
+      exact = barrier.ps;
+      starts.insert(std::ranges::upper_bound(starts, barrier.ps), barrier.ps);
+      exact_from.reset();
+    }
+    while(handed_ < starts.size() and starts[handed_] < barrier.ps)
+    {
+      auto const start   = starts[handed_++];
+      auto const dropped = std::ranges::any_of(
+          resets, [&](std::int64_t reset) { return start < reset and reset < start + latency_; });
+      hands.push_back({.start = start, .position = position, .dropped = dropped});
+    }
+    return std::nullopt;
+  }
+
+  auto due() const -> std::optional<core::sys_time> override
+  {
+    if(handed_ < starts.size())
+    {
+      return core::sys_time{starts[handed_] + latency_};
+    }
+    return std::nullopt;
+  }
+
+  auto quiet() const -> bool override
+  {
+    return handed_ == starts.size();
+  }
+
+  void finish(core::sys_time) override
+  {}
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+  [[nodiscard]] auto lost() const -> std::vector<std::int64_t>
+  {
+    std::vector<std::int64_t> out;
+    for(auto const& one : hands)
+    {
+      if(one.dropped or one.wiped)
+      {
+        out.push_back(one.start);
+      }
+    }
+    return out;
+  }
+
+  [[nodiscard]] auto latest_hand() const -> std::int64_t
+  {
+    std::int64_t worst = std::numeric_limits<std::int64_t>::min();
+    for(auto const& one : hands)
+    {
+      worst = std::max(worst, one.position - one.start - latency_);
+    }
+    return worst;
+  }
+
+  static constexpr std::int64_t never_ps = std::numeric_limits<std::int64_t>::max();
+
+  std::vector<std::int64_t>   starts;
+  std::vector<std::int64_t>   resets{};
+  std::vector<hand>           hands{};
+  std::optional<std::int64_t> exact_from{};
+  std::optional<std::int64_t> exact{};
+  std::int64_t                past_position{std::numeric_limits<std::int64_t>::min()};
+  std::uint64_t               sender_ahead{};
+
+private:
+  std::int64_t               latency_;
+  core::machine*             receiver_;
+  std::size_t                handed_{};
+  std::atomic<std::uint64_t> entered_{};
+};
+
+struct scripted_run
+{
+  core::pause_reason          reason{};
+  std::vector<std::int64_t>   lost;
+  std::vector<std::int64_t>   resets;
+  std::int64_t                late{};
+  std::int64_t                past_position{};
+  std::uint64_t               sender_ahead{};
+  std::optional<std::int64_t> exact;
+};
+
+auto scripted(
+    variant const&              how,
+    std::string_view            receiver_entry,
+    std::optional<std::int64_t> reset_at,
+    std::optional<std::int64_t> exact_from,
+    std::int64_t                until) -> scripted_run
+{
+  constexpr std::int64_t        latency = 20 * us_ps;
+  pinned const                  pin{how.one_cpu};
+  std::vector<core::member_ref> members{
+      member("alu", "alu_entry"),
+      member(receiver_entry == "alu_entry" ? "alu" : "idle", receiver_entry)};
+  core::machine* target = nullptr;
+  {
+    auto const held_host = members[1].on->lock();
+    target               = &members[1].on->member(held_host, 0);
+  }
+  std::vector<std::int64_t> starts;
+  for(std::int64_t at = 3 * us_ps; at < until; at += 3 * us_ps)
+  {
+    starts.push_back(at);
+  }
+  auto const link  = std::make_shared<scripted_link>(latency, target, std::move(starts));
+  link->exact_from = exact_from;
+  std::vector<std::shared_ptr<core::member_link>> wires{
+      link, std::make_shared<fake_link>(1, 0, 3 * latency)};
+  core::system sys{
+      members,
+      std::move(wires),
+      how.bounds,
+      [](std::size_t index) {
+        if(index == 1)
+        {
+          std::this_thread::sleep_for(std::chrono::microseconds{100});
+        }
+      },
+      {},
+      how.mode};
+  core::host_future<core::pause> pending;
+  {
+    auto const                  held = sys.lock();
+    std::vector<core::sys_time> offsets(2);
+    sys.start(held, offsets);
+    if(reset_at)
+    {
+      auto const held_host = members[1].on->lock();
+      std::ignore          = members[1].on->post(
+          held_host, 0,
+          [](core::machine& m) {
+            REQUIRE(m.mem().write(0xE000'E00C, 4, popcorn::testing::test_arch::reset_key));
+          },
+          vtime{static_cast<std::uint64_t>(*reset_at)});
+    }
+    pending = sys.resume(held, core::sys_time{until});
+  }
+  auto const stopped = pending.get();
+  sys.close();
+  return {
+      .reason        = stopped.reason,
+      .lost          = link->lost(),
+      .resets        = link->resets,
+      .late          = link->latest_hand(),
+      .past_position = link->past_position,
+      .sender_ahead  = link->sender_ahead,
+      .exact         = link->exact};
+}
+}
+
+TEST_CASE(
+    "a receiver reset while its sender runs ahead drops in clock mode what barrier mode drops")
+{
+  constexpr std::int64_t reset_at = 1 * ms_ps + 1'300'000;
+  for(auto const* entry : {"alu_entry", "idle_forever"})
+  {
+    CAPTURE(entry);
+    std::optional<std::pair<std::vector<std::int64_t>, std::vector<std::int64_t>>> reference;
+    for(auto const& how : variants())
+    {
+      CAPTURE(how.name);
+      auto const run = scripted(how, entry, reset_at, std::nullopt, 2 * ms_ps);
+      REQUIRE(run.resets.size() == 1);
+      auto const reset = run.resets[0];
+      CHECK(reset >= reset_at);
+      CHECK(reset < reset_at + 4 * us_ps);
+      CHECK_FALSE(run.lost.empty());
+      CHECK(std::ranges::all_of(run.lost, [reset](std::int64_t start) {
+        return start < reset and reset < start + 20 * us_ps;
+      }));
+      if(std::string_view{entry} == "alu_entry")
+      {
+        CHECK(run.reason == core::pause_reason::system_time);
+        CHECK(run.past_position <= 0);
+        if(how.mode == core::sync_mode::clocks)
+        {
+          CHECK(run.sender_ahead > 0);
+        }
+      }
+      std::pair seen{run.resets, run.lost};
+      if(reference)
+      {
+        CHECK(seen == *reference);
+      }
+      else
+      {
+        reference = seen;
+      }
+    }
+  }
+}
+
+TEST_CASE("a post carried from the drain whose barrier is its start is handed by its arrival")
+{
+  for(auto const* entry : {"alu_entry", "idle_forever"})
+  {
+    for(auto const& how : variants())
+    {
+      CAPTURE(entry);
+      CAPTURE(how.name);
+      auto const run = scripted(how, entry, std::nullopt, 500 * us_ps, 1 * ms_ps);
+      CHECK(run.reason == core::pause_reason::system_time);
+      REQUIRE(run.exact);
+      CHECK(run.late <= 8 * instruction_ps);
+      if(std::string_view{entry} == "alu_entry" and how.mode == core::sync_mode::clocks)
+      {
+        CHECK(run.sender_ahead > 0);
+      }
+    }
+  }
+}
+
+TEST_CASE("a requested pause in clock mode leaves every member at one time")
+{
+  for(auto const& how : clock_variants())
+  {
+    for(int repeat = 0; repeat < 5; ++repeat)
+    {
+      CAPTURE(how.name);
+      CAPTURE(repeat);
+      pinned const pin{how.one_cpu};
+      rig          r{
+          .members = {
+                      member("alu", "alu_entry"), member("alu", "alu_entry"),
+                      member("idle", "idle_forever")}
+      };
+      r.build(how);
+      auto                           first  = r.goal(0, {.budget = icount{1'000'000'000'000}});
+      auto                           second = r.goal(1, {.budget = icount{1'000'000'000'000}});
+      core::host_future<core::pause> pending;
+      {
+        auto const held = r.sys->lock();
+        pending         = r.sys->resume(held);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds{2 + repeat});
+      r.sys->request_pause();
+      auto const stopped = pending.get();
+      REQUIRE(stopped.reason == core::pause_reason::requested);
+      auto const held = r.sys->lock();
+      for(std::size_t index = 0; index < 3; ++index)
+      {
+        CAPTURE(index);
+        CHECK(r.sys->time_of(held, index) == stopped.at);
+      }
+      CHECK(r.sys->pending_barrier(held) == stopped.at);
+    }
+  }
+}
+
+namespace
+{
+class bare_link final : public core::member_link
+{
+public:
+  bare_link(std::size_t from, std::size_t to, std::int64_t latency)
+      : from_{from}, to_{to}, latency_{latency}
+  {}
+
+  auto sender() const noexcept -> std::size_t override
+  {
+    return from_;
+  }
+
+  auto receiver() const noexcept -> std::size_t override
+  {
+    return to_;
+  }
+
+  auto latency() const noexcept -> core::sys_time override
+  {
+    return core::sys_time{latency_};
+  }
+
+  void enter_slice(core::time_map) override
+  {}
+
+  auto posted_count() const noexcept -> std::uint64_t override
+  {
+    return 0;
+  }
+
+  void sender_reset(core::sys_time) override
+  {}
+
+  void receiver_reset(core::sys_time) override
+  {}
+
+  auto drain(std::uint64_t, core::sys_time const&, core::sys_time const&, core::time_map)
+      -> std::optional<core::link_fault> override
+  {
+    return std::nullopt;
+  }
+
+  auto due() const -> std::optional<core::sys_time> override
+  {
+    return std::nullopt;
+  }
+
+  auto quiet() const -> bool override
+  {
+    return true;
+  }
+
+  void finish(core::sys_time) override
+  {}
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+private:
+  std::size_t  from_;
+  std::size_t  to_;
+  std::int64_t latency_;
+};
+}
+
+#if defined(__SANITIZE_THREAD__)
+constexpr std::int64_t lost_wake_rounds = 50'000;
+#else
+constexpr std::int64_t lost_wake_rounds = 1'000'000;
+#endif
+
+TEST_CASE("a million clock publish and wait rounds between two members lose no wake")
+{
+  constexpr std::int64_t        rounds  = lost_wake_rounds;
+  constexpr std::int64_t        latency = 1 * us_ps;
+  auto                          how     = clock_variants()[0];
+  std::vector<core::member_ref> members{member("alu", "alu_entry"), member("alu", "alu_entry")};
+  std::vector<std::shared_ptr<core::member_link>> wires{
+      std::make_shared<bare_link>(0, 1, latency), std::make_shared<bare_link>(1, 0, latency)};
+  auto const published = std::make_shared<std::array<std::atomic<std::int64_t>, 2>>();
+  auto       engines   = std::make_shared<std::array<std::mt19937, 2>>(
+      std::array<std::mt19937, 2>{std::mt19937{7}, std::mt19937{11}});
+  core::system sys{
+      members,
+      std::move(wires),
+      how.bounds,
+      [published, engines](std::size_t index) {
+        published->at(index).fetch_add(1, std::memory_order_relaxed);
+        std::uniform_int_distribution<int> spin{0, 8};
+        for(int left = spin(engines->at(index)); left > 0; --left)
+        {
+          std::this_thread::yield();
+        }
+      },
+      {},
+      how.mode};
+  core::host_future<core::pause> pending;
+  {
+    auto const                  held = sys.lock();
+    std::vector<core::sys_time> offsets(2);
+    sys.start(held, offsets);
+    pending = sys.resume(held, core::sys_time{rounds * latency * 13 / 10});
+  }
+  std::atomic<bool> landed{false};
+  std::jthread      guard{[&sys, &landed](std::stop_token const& stopping) {
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{60};
+    while(not stopping.stop_requested() and std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    if(not landed.load())
+    {
+      sys.close();
+    }
+  }};
+  auto const        stopped = pending.get();
+  landed.store(true);
+  guard.request_stop();
+  REQUIRE(stopped.reason == core::pause_reason::system_time);
+  CHECK(published->at(0).load() + published->at(1).load() >= rounds);
+  CHECK(stopped.windows > 0);
 }

@@ -1128,17 +1128,22 @@ TEST_CASE("a system saved with its members mid-burst and loaded again runs on th
   {
     std::optional<std::string> runs;
     for(auto const& how :
-        {variants()[0], variants()[1], variants()[2], variants()[9], variants()[10]})
+        {variants()[0], variants()[1], variants()[2], variants()[9], variants()[10], variants()[11],
+         variants()[12]})
     {
       CAPTURE(how.name);
       CAPTURE(sender);
-      world w;
+      pinned const pin{how.one_cpu};
+      world        w;
       w.add(sender);
       w.add("link_rx");
       w.link(0, 1, latency_20);
       w.host(how);
       REQUIRE(w.resume(at).reason == core::pause_reason::system_time);
       w.collect();
+      CHECK(std::ranges::any_of(w.taps[0], [at](stm32::tap_frame const& one) {
+        return one.start.ps < at and at < one.arrival.ps;
+      }));
       for(auto& tap : w.taps)
       {
         tap.clear();
@@ -1382,6 +1387,40 @@ TEST_CASE("a sender bitten by its watchdog mid-burst loses the frame in flight, 
       CHECK(w.sys->time_of(held, 0).ps >= 8 * ms_ps);
     }
     auto const seen = w.dump();
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
+TEST_CASE(
+    "a member bitten mid-burst with frames in flight both ways gives one result in every variant")
+{
+  std::optional<std::string> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    w.add("link_iwdg");
+    w.add("link_echo");
+    w.link(0, 1, latency_20);
+    w.link(1, 0, latency_20);
+    w.host(how);
+    REQUIRE(w.run_to(8 * ms_ps).reason == core::pause_reason::system_time);
+    auto const lost = std::ranges::find_if(w.taps[0], &stm32::tap_frame::lost);
+    REQUIRE(lost != w.taps[0].end());
+    CHECK(std::ranges::count_if(w.taps[0], &stm32::tap_frame::lost) == 1);
+    auto const reset = lost->end;
+    CHECK(std::ranges::any_of(w.taps[0], [&](stm32::tap_frame const& one) {
+      return not one.lost and one.end < reset and reset < one.arrival;
+    }));
+    CHECK(std::ranges::any_of(w.taps[1], [&](stm32::tap_frame const& one) {
+      return one.start < reset and reset < one.arrival;
+    }));
+    auto const seen = w.dump() + w.pause_dump();
     if(reference)
     {
       CHECK(seen == *reference);

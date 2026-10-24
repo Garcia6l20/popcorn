@@ -158,7 +158,7 @@ struct measured
 class world
 {
 public:
-  world(std::int64_t latency, std::uint32_t spin_threshold)
+  world(std::int64_t latency, std::uint32_t spin_threshold, core::sync_mode mode)
   {
     stm32::register_builtin_models();
     nodes_.push_back(std::make_unique<node>("link_audio", spin_threshold));
@@ -177,7 +177,10 @@ public:
       members.push_back({.on = hosts_.back(), .name = std::format("m{}", index)});
     }
     std::vector<std::shared_ptr<core::member_link>> links{wires_.begin(), wires_.end()};
-    sys_            = std::make_unique<core::system>(members, std::move(links));
+    sys_ = std::make_unique<core::system>(
+        members, std::move(links), core::slice_bounds{},
+        std::move_only_function<void(std::size_t)>{}, std::move_only_function<void(std::size_t)>{},
+        mode);
     auto const held = sys_->lock();
     sys_->start(held, std::vector<core::sys_time>(nodes_.size()));
   }
@@ -297,12 +300,12 @@ struct variant
 
 auto variant_named(std::string_view name) -> variant
 {
-  if(name == "B" or name == "solo" or name == "solo-plain" or name == "solo-held")
+  if(name == "B" or name == "C" or name == "solo" or name == "solo-plain" or name == "solo-held")
   {
     return {.name = std::string{name}};
   }
   throw std::invalid_argument{
-      std::format("bad variant {}, want B, solo, solo-plain or solo-held", name)};
+      std::format("bad variant {}, want B, C, solo, solo-plain or solo-held", name)};
 }
 
 auto parse_number(std::string_view text) -> std::int64_t
@@ -505,7 +508,9 @@ auto measure(options const& how, variant const& v) -> measured
   {
     return measure_alone(how, v);
   }
-  world      w{how.latency_us * us_ps, how.spin_threshold};
+  world w{
+      how.latency_us * us_ps, how.spin_threshold,
+      v.name == "C" ? core::sync_mode::clocks : core::sync_mode::barrier};
   auto const warm_from = clock_type::now();
   std::ignore          = w.run_to(how.warmup_ms * ms_ps);
   auto const warm_wall = std::chrono::duration<double>(clock_type::now() - warm_from).count();
