@@ -235,6 +235,8 @@ struct boundary_gate
   bool held = false;
   /** @brief Whether the thread may go on. */
   bool released = false;
+  /** @brief Counts the arms, so only the hold of the latest arm releases the gate. */
+  std::uint64_t generation = 0;
 
   /** @brief When armed, disarms the gate and blocks the calling thread until released. Takes no
    * GIL and no lock but the gate's. */
@@ -254,16 +256,18 @@ struct boundary_gate
 class[[= py::rename{"BoundaryHold"}]] boundary_hold
 {
 public:
-  /** @brief The hold of @p gate. */
-  [[= py::skip]] explicit boundary_hold(std::shared_ptr<detail::boundary_gate> gate);
+  /** @brief The hold of @p gate, armed as its arm number @p generation. */
+  [[= py::skip]] boundary_hold(
+      std::shared_ptr<detail::boundary_gate> gate,
+      std::uint64_t                          generation);
   /** @brief Not copyable, the destructor releases the gate. */
   boundary_hold(boundary_hold const&) = delete;
   /** @brief Not copy-assignable. */
   auto operator=(boundary_hold const&) -> boundary_hold& = delete;
   /** @brief Takes the gate of @p other. */
   boundary_hold(boundary_hold&& other) noexcept = default;
-  /** @brief Takes the gate of @p other. */
-  auto operator=(boundary_hold&& other) noexcept -> boundary_hold& = default;
+  /** @brief Not move-assignable, the assigned hold would drop its gate unreleased. */
+  auto operator=(boundary_hold&& other) noexcept -> boundary_hold& = delete;
   /** @brief Releases the gate, so a hold dropped unreleased never blocks the thread. */
   ~boundary_hold();
 
@@ -276,11 +280,13 @@ public:
       "Wait until the machine thread blocks at its boundary, return whether it does."}]] auto
       wait_held(double seconds) -> bool;
 
-  /** @brief Lets the machine's thread go on, and disarms the gate if it was not reached. */
+  /** @brief Lets the machine's thread go on, and disarms the gate if it was not reached. Does
+   * nothing once the gate was armed again by a later hold. */
   [[= py::doc{"Let the machine thread go on."}]] void release();
 
 private:
   std::shared_ptr<detail::boundary_gate> gate_;
+  std::uint64_t                          generation_;
 };
 
 /**

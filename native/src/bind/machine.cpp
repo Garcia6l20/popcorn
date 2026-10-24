@@ -916,13 +916,11 @@ auto machine_handle::gil_entries() const noexcept -> std::uint64_t
 
 auto machine_handle::hold_at_boundary() -> boundary_hold
 {
-  {
-    std::scoped_lock const lock{gate_->mutex};
-    gate_->held     = false;
-    gate_->released = false;
-    gate_->armed.store(true, std::memory_order_release);
-  }
-  return boundary_hold{gate_};
+  std::scoped_lock const lock{gate_->mutex};
+  gate_->held     = false;
+  gate_->released = false;
+  gate_->armed.store(true, std::memory_order_release);
+  return boundary_hold{gate_, ++gate_->generation};
 }
 
 auto machine_handle::python_backed() const -> std::vector<std::string>
@@ -947,7 +945,8 @@ void detail::boundary_gate::pass()
   held = false;
 }
 
-boundary_hold::boundary_hold(std::shared_ptr<detail::boundary_gate> gate) : gate_{std::move(gate)}
+boundary_hold::boundary_hold(std::shared_ptr<detail::boundary_gate> gate, std::uint64_t generation)
+    : gate_{std::move(gate)}, generation_{generation}
 {}
 
 boundary_hold::~boundary_hold()
@@ -970,6 +969,10 @@ void boundary_hold::release()
 {
   {
     std::scoped_lock const lock{gate_->mutex};
+    if(gate_->generation != generation_)
+    {
+      return;
+    }
     gate_->armed.store(false, std::memory_order_release);
     gate_->released = true;
   }
