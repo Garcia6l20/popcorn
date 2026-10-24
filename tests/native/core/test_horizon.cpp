@@ -70,7 +70,14 @@ public:
       : context_{ctx}, role_{role}
   {}
 
-  std::optional<std::optional<vtime>> quiet{};
+  std::optional<std::optional<vtime>>              quiet{};
+  std::optional<std::pair<address, std::uint64_t>> ask{};
+  mutable bool                                     watched{};
+
+  void watch_reads(address at, std::uint32_t size)
+  {
+    context_.services.watch_reads(at, size, true);
+  }
 
   void arm(vtime at)
   {
@@ -119,6 +126,10 @@ public:
   [[nodiscard]] auto quiet_until(periph::quiet_query const& query) const
       -> std::optional<vtime> override
   {
+    if(ask)
+    {
+      watched = query.read_watched(ask->first, ask->second);
+    }
     return quiet ? *quiet : query.next_event(*this);
   }
 
@@ -160,7 +171,8 @@ struct rig
 
   explicit rig(
       std::vector<std::optional<periph::wake_role>> chosen,
-      core::machine_options                         options = {})
+      core::machine_options                         options     = {},
+      popcorn::part_description                     description = desc())
       : roles{std::move(chosen)}, probes(roles.size(), nullptr)
   {
     for(std::size_t index = 0; index < roles.size(); ++index)
@@ -174,7 +186,7 @@ struct rig
           });
     }
     owned = std::make_unique<popcorn::testing::machine_fixture<horizon_arch>>(
-        desc(), "idle", std::move(options));
+        std::move(description), "idle", std::move(options));
     fixture = owned.get();
   }
 
@@ -418,4 +430,45 @@ TEST_CASE("an event already due bounds at the machine's time")
   rig r{{role::trigger}};
   r.probes[0]->arm(vtime{0});
   CHECK(r.machine().horizon().wake == std::optional{r.machine().virtual_clock().time()});
+}
+
+namespace
+{
+auto watching_rig() -> std::unique_ptr<rig>
+{
+  auto description  = desc();
+  auto region       = description.regions.front();
+  region.name       = "PMA";
+  region.start      = 0x4004'0000;
+  region.size       = 0x400;
+  region.physical   = std::nullopt;
+  region.controller = "P0";
+  description.regions.push_back(std::move(region));
+  auto made = std::make_unique<rig>(
+      std::vector<std::optional<periph::wake_role>>{role::bus_master}, core::machine_options{},
+      std::move(description));
+  made->probes[0]->watch_reads(0x4004'0000, 16);
+  return made;
+}
+
+auto read_watched(rig& r, address at, std::uint64_t size) -> bool
+{
+  r.probes[0]->ask = std::pair{at, size};
+  std::ignore      = r.machine().horizon();
+  return r.probes[0]->watched;
+}
+}
+
+TEST_CASE("a read inside one peripheral window is not watched, one past its end is")
+{
+  auto const r = watching_rig();
+  CHECK_FALSE(read_watched(*r, 0x4003'03f0, 16));
+  CHECK(read_watched(*r, 0x4003'03f8, 16));
+}
+
+TEST_CASE("a read of a watched region counts as watched")
+{
+  auto const r = watching_rig();
+  CHECK(read_watched(*r, 0x4004'0000, 16));
+  CHECK(read_watched(*r, 0x4003'fff8, 16));
 }

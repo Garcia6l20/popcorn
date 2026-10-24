@@ -149,7 +149,8 @@ public:
   /**
    * @brief Whether a read of @p size bytes at @p at reaches a range a model watches through
    *        core::machine_services::watch_reads, whose periph::model::on_memory_read can raise a
-   *        flag or NMI. True for a range the machine cannot place in one region.
+   *        flag or NMI. True for a range the machine places neither in one region nor in one
+   * peripheral window.
    * @param at Bus address.
    * @param size Bytes read from @p at.
    */
