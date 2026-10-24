@@ -97,7 +97,7 @@ Not modelled:
 Differs from RM0456:
 
 - OPTSTRT programs the FLASH_WRPxyR registers only and completes at once, with no BSY. The
-  protection follows OBL_LAUNCH or a power-on reset. FLASH_OPTR, the boot addresses
+  protection follows OBL_LAUNCH, a power-on or a brown-out reset. FLASH_OPTR, the boot addresses
   and the SECWM registers keep the machine's option bytes, and a write to one of them logs a
   warning once at the next OPTSTRT.
 - A store while BSY is set completes at once and is applied when BSY clears. Silicon stalls the

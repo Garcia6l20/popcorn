@@ -2604,15 +2604,19 @@ TEST_CASE(
 
 TEST_CASE("OPTSTRT does not warn for a locked write or a write of the loaded word")
 {
-  flash_rig rig;
-  rig.logged.clear();
-  rig.write("FLASH_SECWM1R1", 0x0005'0003);
-  rig.unlock_options();
-  rig.program_options();
-  CHECK(rig.logged.empty());
-  rig.write("FLASH_SECWM1R1", rig.read("FLASH_SECWM1R1"));
-  rig.program_options();
-  CHECK(rig.logged.empty());
+  for(auto const with_options : {false, true})
+  {
+    CAPTURE(with_options);
+    flash_rig rig{with_options ? option_board({}) : periph::stm32::board{}};
+    rig.logged.clear();
+    rig.write("FLASH_OPTR", 0x0000'0003);
+    rig.unlock_options();
+    rig.program_options();
+    CHECK(rig.logged.empty());
+    rig.write("FLASH_OPTR", rig.read("FLASH_OPTR"));
+    rig.program_options();
+    CHECK(rig.logged.empty());
+  }
 }
 
 TEST_CASE("WRP words are saved in the snapshot and restored into a fresh machine")

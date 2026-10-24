@@ -351,15 +351,15 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * are stored while OPTLOCK is clear and ignored while it is set. OPTSTRT, with OPTLOCK clear and
  * no PGSERR or OPTWERR set, programs the four registers as the option bytes. A register whose
  * programmed UNLOCK is 0 cannot change, and one such change discards the whole modification,
- * reloads the registers and sets OPTWERR. The programmed words survive every reset and the snapshot
- * holds them. OPTSTRT completes at once, with no BSY. A page of bank x, the bank number following
- * SWAP_BANK, lies in area A or B of that bank when PSTRT <= page <= PEND. A store, page erase,
- * bank erase or mass erase that reaches such a page sets WRPERR in its register set, drops the
- * store and erases nothing. A power-on, brown-out or option byte loader reset loads the programmed
- * words into the protection and the WRP registers, RM0456 7.4.2. Any other reset keeps the loaded
- * words and resets the registers to them. OBL_LAUNCH, with OPTLOCK clear, clears itself and
- * requests an option byte loader reset, reset_kind::option_load, which sets
- * RCC_CSR.OBLRSTF and loads the registers from the programmed words. OPTSTRT programs the WRP
+ * reloads the registers from the programmed words and sets OPTWERR. The programmed words survive
+ * every reset and the snapshot holds them. OPTSTRT completes at once, with no BSY. A page of bank
+ * x, the bank number following SWAP_BANK, lies in area A or B of that bank when PSTRT <= page <=
+ * PEND. A store, page erase, bank erase or mass erase that reaches such a page sets WRPERR in its
+ * register set, drops the store and erases nothing. A power-on, brown-out or option byte loader
+ * reset loads the programmed words into the protection and the WRP registers, RM0456 7.4.2. Any
+ * other reset keeps the loaded words and resets the registers to them. OBL_LAUNCH, with OPTLOCK
+ * clear, clears itself and requests an option byte loader reset, reset_kind::option_load, which
+ * sets RCC_CSR.OBLRSTF and loads the registers from the programmed words. OPTSTRT programs the WRP
  * registers only: FLASH_OPTR, the boot addresses and the SECWM registers keep the machine's
  * option bytes, and a write to one of them that differs from the loaded word logs a
  * model_warning once at the next OPTSTRT.
@@ -627,6 +627,7 @@ private:
   [[nodiscard]] auto wrp_normal(std::uint32_t word) const -> std::uint32_t;
   [[nodiscard]] auto wrp_programmed(std::size_t index) const -> std::uint32_t;
   [[nodiscard]] auto option_loaded(std::uint32_t offset) const -> std::uint32_t;
+  [[nodiscard]] auto option_mask(std::uint32_t offset) const -> std::uint32_t;
   void               warn_dropped_options();
   [[nodiscard]] auto wrp_protected(std::uint32_t from, std::uint32_t length) const -> bool;
   [[nodiscard]] static auto loads_options(reset_kind kind) -> bool;
@@ -1037,7 +1038,7 @@ auto flash::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size
 void flash::option_written(std::uint32_t old, std::uint32_t now)
 {
   if(not option_locked()
-     and now != option_loaded(written_word_)
+     and ((now ^ option_loaded(written_word_)) & option_mask(written_word_)) != 0
      and not std::ranges::contains(option_changed_, written_word_))
   {
     option_changed_.push_back(written_word_);
@@ -1094,6 +1095,35 @@ auto flash::option_loaded(std::uint32_t offset) const -> std::uint32_t
     }
   }
   return 0;
+}
+
+auto flash::option_mask(std::uint32_t offset) const -> std::uint32_t
+{
+  auto const top = (1u << watermark_bits(ctx_.part.part)) - 1;
+  for(auto const name : option_registers)
+  {
+    if(not has_register(name) or reg(name).offset != offset)
+    {
+      continue;
+    }
+    if(name == "FLASH_SECWM1R1" or name == "FLASH_SECWM2R1")
+    {
+      return top | top << 16;
+    }
+    if(name == "FLASH_SECWM1R2" or name == "FLASH_SECWM2R2")
+    {
+      return hdp_enable | top << 16;
+    }
+    if(name == "FLASH_NSBOOTADD0R" or name == "FLASH_NSBOOTADD1R")
+    {
+      return ~nsboot_reserved;
+    }
+    if(name == "FLASH_SECBOOTADD0R")
+    {
+      return ~secboot_reserved;
+    }
+  }
+  return ~0u;
 }
 
 void flash::warn_dropped_options()

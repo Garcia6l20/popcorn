@@ -4,6 +4,7 @@ of the STM32U575, RM0456 7.9.13 to 7.9.22."""
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import popcorn
@@ -379,5 +380,64 @@ def test_wrp_registers_are_programmed_by_optstrt_and_survive_a_reset(
     m.mem.u32[wrp1ar] = 0x8005_0003
     assert m.mem.u32[wrp1ar] == 0xFF85_FF83
     m.mem.u32[FLASH + 0x28] = 1 << 17
+    m.reset(popcorn.ResetKind.SOFTWARE)
+    assert m.mem.u32[wrp1ar] == 0xFF80_FFFF
     m.reset()
     assert m.mem.u32[wrp1ar] == 0xFF85_FF83
+
+
+def optstrt_warns(
+    description: popcorn.PartDescription,
+    caplog: pytest.LogCaptureFixture,
+    register: int,
+    write: int,
+) -> bool:
+    m = popcorn.Machine(
+        description,
+        option_bytes=OptionBytes(tzen=True, secwm1=(2, 9), hdp1=(2, 5)),
+    )
+    m.reset()
+    m.mem.u32[FLASH + 0x08] = 0x4567_0123
+    m.mem.u32[FLASH + 0x08] = 0xCDEF_89AB
+    m.mem.u32[FLASH + 0x10] = 0x0819_2A3B
+    m.mem.u32[FLASH + 0x10] = 0x4C5D_6E7F
+    m.mem.u32[register] = write
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="popcorn"):
+        m.mem.u32[FLASH + 0x28] = 1 << 17
+        m.mem.u32[FLASH + 0x28]
+    return any(
+        getattr(r, "popcorn_kind", None) == "model_warning" and "OPTSTRT" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_optstrt_compares_only_the_bits_the_model_encodes(
+    u575: popcorn.PartDescription, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A SECWM write of the machine's own watermarks, or one that changes only the PCROP1
+    bits of SECWM1R2, is no unprogrammed change. A changed watermark or HDP1EN is."""
+    m = popcorn.Machine(u575, option_bytes=OptionBytes(tzen=True, secwm1=(2, 9), hdp1=(2, 5)))
+    m.reset()
+    first, second = m.mem.u32[SECWM1R1], m.mem.u32[SECWM1R2]
+    assert not optstrt_warns(u575, caplog, SECWM1R1, first)
+    assert not optstrt_warns(u575, caplog, SECWM1R2, second)
+    assert not optstrt_warns(u575, caplog, SECWM1R2, second ^ 1)
+    assert optstrt_warns(u575, caplog, SECWM1R1, first ^ (1 << 16))
+    assert optstrt_warns(u575, caplog, SECWM1R2, second ^ (1 << 31))
+
+
+def test_optstrt_accepts_the_watermarks_of_a_five_bit_part(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """On the STM32U535 the SVD fields are 8 bits wide and the model encodes 5, so the
+    firmware's `end << 16 | start` leaves bits 7:5 clear where the loaded word has them set."""
+    from popcorn.stm32 import mcu
+    from popcorn.stm32.description import DescriptionError
+
+    try:
+        u535 = mcu("STM32U535CBTx")
+    except DescriptionError as error:
+        pytest.skip(f"no STM32U535 description: {error}")
+    assert not optstrt_warns(u535, caplog, SECWM1R1, 9 << 16 | 2)
+    assert optstrt_warns(u535, caplog, SECWM1R1, 8 << 16 | 2)
