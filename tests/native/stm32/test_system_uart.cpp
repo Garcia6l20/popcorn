@@ -598,6 +598,90 @@ TEST_CASE("an echo from a member asleep past its promise reaches the pinger on t
   }
 }
 
+namespace
+{
+std::atomic<bool>          pinger_waiting{false};
+stm32::uart_wire const*    echo_gate{};
+std::uint64_t              echo_gated{};
+std::atomic<std::uint64_t> echo_held{};
+
+void hold_echo(std::size_t member, std::atomic<std::uint32_t> const* epoch, std::uint32_t)
+{
+  if(member == 0)
+  {
+    pinger_waiting.store(epoch != nullptr);
+    return;
+  }
+  if(epoch != nullptr or echo_gate == nullptr)
+  {
+    return;
+  }
+  auto const posted = echo_gate->posted_count();
+  if(posted == echo_gated or posted >= 16)
+  {
+    return;
+  }
+  echo_gated     = posted;
+  auto const end = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+  while(not pinger_waiting.load() and std::chrono::steady_clock::now() < end)
+  {
+    std::this_thread::yield();
+  }
+  if(pinger_waiting.load())
+  {
+    echo_held.fetch_add(1);
+  }
+}
+}
+
+TEST_CASE("an echo slower than L from a sleeper reaches a pinger that drained past its ping")
+{
+  constexpr std::int64_t     latency_100 = 100 * us_ps;
+  std::optional<std::string> reference;
+  for(auto const& how : variants())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    arm_pwm(w.add("link_ping"));
+    arm_pwm(w.add("link_echo"));
+    auto& ping = w.link(0, 1, latency_100);
+    w.link(1, 0, latency_100);
+    REQUIRE(stm32::line_shape{.baud = 460'800}.frame_ps() < latency_100 / 4);
+    w.host(how);
+    {
+      auto const held = w.sys->lock();
+      w.sys->set_cut_owner(held, 1, 0);
+    }
+    pinger_waiting.store(false);
+    echo_gate  = &ping;
+    echo_gated = 0;
+    echo_held.store(0);
+    core::detail::on_clock_wait.store(&hold_echo);
+    auto const stopped = w.run_to(2 * script_end);
+    core::detail::on_clock_wait.store(nullptr);
+    echo_gate = nullptr;
+    CHECK(stopped.reason == core::pause_reason::system_time);
+    REQUIRE(w.taps[0].size() == 16);
+    REQUIRE(w.taps[1].size() == 16);
+    if(how.mode == core::sync_mode::clocks)
+    {
+      CHECK(echo_held.load() > 0);
+    }
+    for(std::size_t index = 0; index < 16; ++index)
+    {
+      CHECK(w.taps[1][index].start.ps >= w.taps[0][index].arrival.ps);
+      CHECK(w.taps[1][index].start.ps <= w.taps[0][index].arrival.ps + 2 * us_ps);
+    }
+    auto const seen = w.dump();
+    if(reference)
+    {
+      CHECK(seen == *reference);
+    }
+    reference = seen;
+  }
+}
+
 TEST_CASE("frames echoed by a member asleep past its promise reach a third member on time")
 {
   std::optional<std::pair<std::string, std::string>> reference;

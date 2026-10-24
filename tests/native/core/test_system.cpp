@@ -6,6 +6,7 @@
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/core/system.hpp>
 #include <popcorn/core/window_barrier.hpp>
+#include <popcorn/periph/model.hpp>
 
 #include "../../../native/src/core/promise_record.hpp"
 #include "../../../native/src/core/system_seam.hpp"
@@ -5509,6 +5510,25 @@ TEST_CASE("an error inside a sleeper's promise aligns every member past the late
   }
 }
 
+namespace
+{
+std::atomic<bool> sleeper_waits{false};
+std::atomic<bool> sleeper_commanded{false};
+
+void hold_sleeper(std::size_t member, std::atomic<std::uint32_t> const* epoch, std::uint32_t)
+{
+  if(member != 1 or epoch == nullptr or sleeper_commanded.load())
+  {
+    return;
+  }
+  sleeper_waits.store(true);
+  while(not sleeper_commanded.load())
+  {
+    std::this_thread::yield();
+  }
+}
+}
+
 TEST_CASE("a command on a sleeper whose promise grows lands once its machine reaches it")
 {
   constexpr std::int64_t        latency = 20 * us_ps;
@@ -5537,15 +5557,167 @@ TEST_CASE("a command on a sleeper whose promise grows lands once its machine rea
     sys.start(held, offsets);
     std::ignore = sys.post_goal(held, 0, {.until = popcorn::address{0x0800'0001}, .open = true});
     std::ignore = sys.post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
-    pending     = sys.resume(held);
+    sleeper_waits.store(false);
+    sleeper_commanded.store(false);
+    core::detail::on_clock_wait.store(&hold_sleeper);
+    pending = sys.resume(held);
   }
-  std::this_thread::sleep_for(std::chrono::milliseconds{5});
+  while(not sleeper_waits.load())
+  {
+    std::this_thread::yield();
+  }
   auto served = [&members] {
     auto const held_host = members[1].on->lock();
     return members[1].on->post(held_host, 0, [](core::machine&) {});
   }();
+  sleeper_commanded.store(true);
+  core::detail::on_clock_wait.store(nullptr);
   REQUIRE(served.wait_for(std::chrono::seconds{10}));
   std::ignore = served.get();
   sys.request_pause();
   std::ignore = pending.get();
+}
+
+namespace
+{
+class lines_quiet_arch final : public sleeping_arch
+{
+public:
+  using sleeping_arch::sleeping_arch;
+
+  [[nodiscard]] auto may_wake(std::uint32_t) const -> bool override
+  {
+    return false;
+  }
+};
+
+class ram_poke_model final : public popcorn::periph::model
+{
+public:
+  static constexpr popcorn::address poked{0x2000'0100};
+
+  explicit ram_poke_model(popcorn::periph::model_context& ctx) noexcept : context_{ctx}
+  {}
+
+  void arm(vtime at)
+  {
+    std::ignore = context_.events.schedule_at(at, 0, 0, context_.clock);
+  }
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+
+  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
+  {}
+
+  auto on_read(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+
+  auto on_write(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+
+  void on_event(std::uint32_t, std::uint64_t) override
+  {
+    std::ignore = context_.services.write(poked, 4, 0x5a, popcorn::initiator::dma);
+  }
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+  [[nodiscard]] auto stateless() const -> bool override
+  {
+    return true;
+  }
+
+  [[nodiscard]] auto role_in_horizon() const noexcept -> popcorn::periph::wake_role override
+  {
+    return popcorn::periph::wake_role::lines;
+  }
+
+private:
+  popcorn::periph::model_context& context_;
+};
+}
+
+TEST_CASE("a DMA write a watch stops on inside a sleeper's promise aligns its peer at its time")
+{
+  constexpr std::int64_t   latency = 20 * us_ps;
+  constexpr std::int64_t   poke    = 100 * us_ps;
+  auto                     part    = m33();
+  popcorn::peripheral_desc unit;
+  unit.name = "P0";
+  unit.ip   = "PROBE";
+  unit.base = 0x4003'0000;
+  unit.size = 0x400;
+  unit.irqs = {4};
+  part.peripherals.push_back(std::move(unit));
+  ram_poke_model*       poker{};
+  core::machine_options options;
+  options.models.emplace(
+      "P0", [&poker](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
+        auto made = std::make_shared<ram_poke_model>(ctx);
+        poker     = made.get();
+        return std::shared_ptr<popcorn::periph::model>{made};
+      });
+  popcorn::testing::machine_fixture<lines_quiet_arch> f{
+      std::move(part), "idle", std::move(options)};
+  f.set("pc", sym("idle", "idle_forever"));
+  f.set("r0", 0);
+  f.target->set_transmit_sources({{}});
+  REQUIRE(poker != nullptr);
+  poker->arm(vtime{poke});
+  auto const watch = f.target->add_watch(
+      ram_poke_model::poked, 4, core::watch_kind::write,
+      [](core::watch_hit const&) { return core::watch_action::stop; });
+  std::vector<std::unique_ptr<core::machine>> machines;
+  machines.push_back(std::move(f.target));
+  std::vector<core::member_ref> members{
+      member<popcorn::testing::test_arch>(
+          "alu", "alu_entry", sends_nothing<popcorn::testing::test_arch>),
+      {.on = std::make_shared<core::host>(std::move(machines)), .name = "poked"}
+  };
+  core::system sys{
+      members,
+      {std::make_shared<watched_link>(0, 1, latency),
+        std::make_shared<watched_link>(1, 0, latency)},
+      core::slice_bounds{
+        .max_instructions = icount{1'000'000}, .wall_budget = std::chrono::hours{1}},
+      {},
+      {},
+      core::sync_mode::clocks
+  };
+  core::host_future<core::pause> pending;
+  {
+    auto const                  held = sys.lock();
+    std::vector<core::sys_time> offsets(2);
+    sys.start(held, offsets);
+    pending = sys.resume(held, core::sys_time{10 * ms_ps});
+  }
+  auto const stopped = pending.get();
+  REQUIRE(stopped.reason == core::pause_reason::delivered);
+  CHECK(stopped.member == 1);
+  CHECK(stopped.at.ps == poke);
+  auto const held = sys.lock();
+  CHECK(sys.time_of(held, 1).ps == poke);
+  CHECK(sys.time_of(held, 0).ps >= poke + latency);
+  CHECK(sys.time_of(held, 0).ps < poke + latency + us_ps);
 }
