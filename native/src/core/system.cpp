@@ -292,6 +292,8 @@ struct system::impl
   std::atomic<bool>                           host_closed{false};
   std::atomic<bool>                           members_released{false};
   std::atomic<bool>                           woke{false};
+  std::atomic<std::uint64_t>                  wakes{0};
+  std::uint64_t                               sleep_wakes{};
   bool                                        measuring{};
   completion                                  on_a{this, &impl::complete_a};
   completion                                  on_b{this, &impl::complete_b};
@@ -452,11 +454,9 @@ public:
           }
           if(sys_.chosen.sleep)
           {
-            phase_    = phase::sleeping;
-            sleeping_ = true;
-            if(sys_.before_sleep)
+            if(not fall_asleep())
             {
-              sys_.before_sleep(index_);
+              continue;
             }
             return std::nullopt;
           }
@@ -486,11 +486,9 @@ public:
           {
             return request_to(sys_.points[index_], false, true);
           }
-          phase_    = phase::sleeping;
-          sleeping_ = true;
-          if(sys_.before_sleep)
+          if(not fall_asleep())
           {
-            sys_.before_sleep(index_);
+            continue;
           }
           return std::nullopt;
         case phase::sleeping:
@@ -570,6 +568,27 @@ public:
   }
 
 private:
+  /**
+   * @brief Enters phase sleeping. In clock mode a wake since the decision, or a nudge, cancels
+   *        the sleep: the runner stays awake and takes the wake path at once.
+   * @return true when the member sleeps.
+   */
+  auto fall_asleep() -> bool
+  {
+    phase_ = phase::sleeping;
+    if(sys_.clocked()
+       and (sys_.wakes.load(std::memory_order_acquire) != sys_.sleep_wakes or nudged_.load(std::memory_order_acquire)))
+    {
+      return false;
+    }
+    sleeping_ = true;
+    if(sys_.before_sleep)
+    {
+      sys_.before_sleep(index_);
+    }
+    return true;
+  }
+
   void settle(machine& target, slice_result const& result)
   {
     auto& one = sys_.slots[index_];
@@ -1543,6 +1562,7 @@ void system::impl::align(entry const* head, std::optional<sys_time> requested) n
 
 void system::impl::complete_clock() noexcept
 {
+  sleep_wakes = wakes.load(std::memory_order_acquire);
   seal();
   account();
   woke.store(false);
@@ -1587,6 +1607,7 @@ auto system::impl::in_flight() const noexcept -> bool
 
 void system::impl::wake_all(std::optional<std::size_t> except) noexcept
 {
+  wakes.fetch_add(1, std::memory_order_acq_rel);
   for(std::size_t index = 0; index < slots.size(); ++index)
   {
     if(except == index)

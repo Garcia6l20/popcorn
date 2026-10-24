@@ -324,6 +324,7 @@ struct rig
   std::vector<std::shared_ptr<fake_link>>    links{};
   std::unique_ptr<core::system>              sys{};
   std::move_only_function<void(std::size_t)> arrival{};
+  std::move_only_function<void(std::size_t)> slept{};
 
   void build(variant const& how, std::int64_t latency = 20 * us_ps)
   {
@@ -355,8 +356,7 @@ struct rig
       hook = std::move(arrival);
     }
     sys = std::make_unique<core::system>(
-        members, std::move(wires), how.bounds, std::move(hook),
-        std::move_only_function<void(std::size_t)>{}, how.mode);
+        members, std::move(wires), how.bounds, std::move(hook), std::move(slept), how.mode);
     auto const                  held = sys->lock();
     std::vector<core::sys_time> offsets(members.size());
     sys->start(held, offsets);
@@ -4835,6 +4835,144 @@ TEST_CASE("a stamp between two slices of a sleep's move is refused at the settle
       std::ignore = stamp.get(), doctest::Contains("before 4.980000 ms"), std::invalid_argument);
   r.sys->request_pause();
   CHECK(pending.get().reason != core::pause_reason::closed);
+}
+
+TEST_CASE("a wake that lands during a sleep's move keeps the member awake")
+{
+  enum class wake_by : std::uint8_t
+  {
+    pause,
+    mail,
+    stamp,
+  };
+  for(auto const by : {wake_by::pause, wake_by::mail, wake_by::stamp})
+  {
+    CAPTURE(static_cast<int>(by));
+    auto const how = variants()[8];
+    struct shared
+    {
+      std::array<std::shared_ptr<core::host>, 2> hosts{};
+      popcorn::testing::test_arch*               module{};
+      std::atomic<int>                           moves{0};
+      std::atomic<std::int64_t>                  held_at{-1};
+      std::atomic<bool>                          released{false};
+      std::atomic<bool>                          requested{false};
+      std::atomic<bool>                          peer_arrived{false};
+      std::atomic<bool>                          served{false};
+      std::atomic<int>                           slept_after{-1};
+    };
+    auto       state = std::make_shared<shared>();
+    auto const first = member<popcorn::testing::test_arch>(
+        "idle", "idle_forever", [state](popcorn::testing::machine_fixture<>& f) {
+          state->module  = f.module;
+          auto const now = f.target->virtual_clock().now().value;
+          std::ignore    = f.module->attached_events().schedule(icount{now + 400}, logged_kind, 7);
+        });
+    rig r{
+        .members = {first, sleeper_with_event(20'000)},
+        .arrival =
+            [state](std::size_t index) {
+              if(index == 1)
+              {
+                if(state->requested.load())
+                {
+                  state->peer_arrived = true;
+                }
+                return;
+              }
+              if(state->released.load())
+              {
+                return;
+              }
+              auto const now = static_cast<std::int64_t>(
+                  state->hosts.at(0)->member_inline(core::member_id{}).virtual_clock().time().ps);
+              if(now > 1 * ms_ps and ++state->moves == 2)
+              {
+                state->held_at = now;
+                state->released.wait(false);
+              }
+                    },
+        .slept =
+            [state](std::size_t index) {
+              if(index != 0 or not state->served.load() or state->slept_after.load() >= 0)
+              {
+                return;
+              }
+              state->slept_after = std::ranges::contains(
+                                       state->module->event_log, std::uint64_t{9},
+                                       &popcorn::testing::test_arch::logged_event::payload)
+                                     ? 1
+                                     : 0;
+                    }
+    };
+    state->hosts = {r.members[0].on, r.members[1].on};
+    r.build(how);
+    at_scope_end const opened{[state] { open_gate(state->released); }};
+    std::ignore  = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    std::ignore  = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto pending = [&r] {
+      auto const held = r.sys->lock();
+      return r.sys->resume(held);
+    }();
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    while(state->held_at.load() < 0 and std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::yield();
+    }
+    constexpr std::int64_t settled = 20'000 * instruction_ps - 20 * us_ps;
+    REQUIRE(state->held_at.load() > 0);
+    REQUIRE(state->held_at.load() < settled);
+    auto posted = [&r, &state, by] {
+      auto const held_host = r.members[0].on->lock();
+      if(by == wake_by::stamp)
+      {
+        return r.members[0].on->post(
+            held_host, 0, [](core::machine&) {},
+            vtime{static_cast<std::uint64_t>(settled + 1 * us_ps)});
+      }
+      return r.members[0].on->post(held_host, 0, [state](core::machine& m) {
+        std::ignore = state->module->attached_events().schedule(
+            icount{m.virtual_clock().now().value}, logged_kind, 9);
+        state->served = true;
+      });
+    }();
+    if(by == wake_by::pause)
+    {
+      state->requested = true;
+      r.sys->request_pause();
+      while(not state->peer_arrived.load() and std::chrono::steady_clock::now() < deadline)
+      {
+        std::this_thread::yield();
+      }
+      REQUIRE(state->peer_arrived.load());
+    }
+    open_gate(state->released);
+    if(by == wake_by::mail)
+    {
+      REQUIRE(posted.wait_for(std::chrono::seconds{10}));
+      while(state->slept_after.load() < 0
+            and std::chrono::steady_clock::now() < deadline + std::chrono::seconds{10})
+      {
+        std::this_thread::yield();
+      }
+      CHECK(state->slept_after.load() == 1);
+    }
+    if(by == wake_by::stamp)
+    {
+      CHECK(posted.wait_for(std::chrono::seconds{10}));
+    }
+    if(by != wake_by::pause)
+    {
+      r.sys->request_pause();
+    }
+    auto ended = pending.wait_for(std::chrono::seconds{10});
+    CHECK(ended);
+    if(not ended)
+    {
+      r.sys->wake();
+    }
+    CHECK(pending.get().reason == core::pause_reason::requested);
+  }
 }
 
 TEST_CASE("a command on a leading member lands at its published clock")
