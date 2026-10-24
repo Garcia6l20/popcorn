@@ -504,6 +504,11 @@ def test_a_cut_from_the_owner_s_callback_is_bound_by_its_time(
 def test_a_stopped_break_takes_the_later_end_s_system_time(
     pair: Build, swap: bool, both_sync_modes: str
 ) -> None:
+    """A break at a member stop takes the later end's time, not the system time.
+
+    In clock mode every member stands at the TIME pause point, so only the member-stop half
+    tells the two times apart there.
+    """
     entries = {"a_entry": "link_rx", "b_entry": "link_tx"} if swap else {}
     system = pair(**entries)
     stop = asyncio.run(system.run(until=at(3000)))
@@ -519,6 +524,8 @@ def test_a_stopped_break_takes_the_later_end_s_system_time(
     asyncio.run(to(system, at(2990.5)))
     if both_sync_modes == "barrier":
         assert system.time != at(2990.5)
+    else:
+        assert system.time == at(2990.5)
     assert tap.break_line() == at(2990.5)
 
 

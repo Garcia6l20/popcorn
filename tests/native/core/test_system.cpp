@@ -4844,8 +4844,9 @@ TEST_CASE("a wake that lands during a sleep's move keeps the member awake")
     pause,
     mail,
     stamp,
+    pump,
   };
-  for(auto const by : {wake_by::pause, wake_by::mail, wake_by::stamp})
+  for(auto const by : {wake_by::pause, wake_by::mail, wake_by::stamp, wake_by::pump})
   {
     CAPTURE(static_cast<int>(by));
     auto const how = variants()[8];
@@ -4860,14 +4861,36 @@ TEST_CASE("a wake that lands during a sleep's move keeps the member awake")
       std::atomic<bool>                          peer_arrived{false};
       std::atomic<bool>                          served{false};
       std::atomic<int>                           slept_after{-1};
+      std::atomic<bool>                          armed{false};
+      std::atomic<std::int64_t>                  pumped_at{-1};
     };
-    auto       state = std::make_shared<shared>();
-    auto const first = member<popcorn::testing::test_arch>(
-        "idle", "idle_forever", [state](popcorn::testing::machine_fixture<>& f) {
-          state->module  = f.module;
-          auto const now = f.target->virtual_clock().now().value;
-          std::ignore    = f.module->attached_events().schedule(icount{now + 400}, logged_kind, 7);
-        });
+    auto state = std::make_shared<shared>();
+    popcorn::testing::machine_fixture<popcorn::testing::test_arch> f{
+        m33(), "idle", core::machine_options{}};
+    f.set("pc", sym("idle", "idle_forever"));
+    f.set("r0", 0);
+    state->module = f.module;
+    std::ignore   = f.module->attached_events().schedule(
+        icount{f.target->virtual_clock().now().value + 400}, logged_kind, 7);
+    std::vector<std::unique_ptr<core::machine>> machines;
+    machines.push_back(std::move(f.target));
+    auto const first = core::member_ref{
+        .on = std::make_shared<core::host>(
+            std::move(machines), core::slice_bounds{},
+            core::host_hooks{
+                .boundary =
+                    [state](core::member_id) {
+                      if(not state->armed.exchange(false))
+                      {
+                        return;
+                      }
+                      auto& m          = state->hosts.at(0)->member_inline(core::member_id{});
+                      state->pumped_at = static_cast<std::int64_t>(m.virtual_clock().time().ps);
+                      std::ignore      = state->module->attached_events().schedule(
+                          icount{m.virtual_clock().now().value}, logged_kind, 9);
+                      state->served = true;
+                    }}),
+        .name = "first"};
     rig r{
         .members = {first, sleeper_with_event(20'000)},
         .arrival =
@@ -4923,6 +4946,11 @@ TEST_CASE("a wake that lands during a sleep's move keeps the member awake")
     REQUIRE(state->held_at.load() > 0);
     REQUIRE(state->held_at.load() < settled);
     auto posted = [&r, &state, by] {
+      if(by == wake_by::pump)
+      {
+        state->armed = true;
+        return core::host_future<vtime>{};
+      }
       auto const held_host = r.members[0].on->lock();
       if(by == wake_by::stamp)
       {
@@ -4947,15 +4975,22 @@ TEST_CASE("a wake that lands during a sleep's move keeps the member awake")
       REQUIRE(state->peer_arrived.load());
     }
     open_gate(state->released);
-    if(by == wake_by::mail)
+    if(by == wake_by::mail or by == wake_by::pump)
     {
-      REQUIRE(posted.wait_for(std::chrono::seconds{10}));
+      if(by == wake_by::mail)
+      {
+        REQUIRE(posted.wait_for(std::chrono::seconds{10}));
+      }
       while(state->slept_after.load() < 0
             and std::chrono::steady_clock::now() < deadline + std::chrono::seconds{10})
       {
         std::this_thread::yield();
       }
       CHECK(state->slept_after.load() == 1);
+      if(by == wake_by::pump)
+      {
+        CHECK(state->pumped_at.load() >= settled);
+      }
     }
     if(by == wake_by::stamp)
     {
@@ -4978,9 +5013,15 @@ TEST_CASE("a wake that lands during a sleep's move keeps the member awake")
 TEST_CASE("a command on a leading member lands at its published clock")
 {
   constexpr std::int64_t gate = 30 * ms_ps;
-  for(auto const& how : {variants()[7], variants()[10]})
+  for(auto const& [how, blocking] : {
+          std::pair{variants()[7],  true },
+          std::pair{variants()[10], true },
+          std::pair{variants()[7],  false},
+          std::pair{variants()[10], false}
+  })
   {
     CAPTURE(how.name);
+    CAPTURE(blocking);
     pinned const pin{how.one_cpu};
     struct shared
     {
@@ -4991,7 +5032,7 @@ TEST_CASE("a command on a leading member lands at its published clock")
     auto state = std::make_shared<shared>();
     rig  r{
         .members = {member("idle", "idle_forever"), member("alu", "alu_entry")},
-        .arrival = [state](std::size_t index) {
+        .arrival = [state, blocking](std::size_t index) {
           if(index != 1)
           {
             return;
@@ -4999,7 +5040,7 @@ TEST_CASE("a command on a leading member lands at its published clock")
           auto const now = static_cast<std::int64_t>(
               state->hosts.at(1)->member_inline(core::member_id{}).virtual_clock().time().ps);
           state->runner_at = now;
-          if(now >= gate)
+          if(blocking and now >= gate)
           {
             state->released.wait(false);
           }

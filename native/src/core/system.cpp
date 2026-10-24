@@ -454,7 +454,7 @@ public:
           }
           if(sys_.chosen.sleep)
           {
-            if(not fall_asleep())
+            if(not fall_asleep(target))
             {
               continue;
             }
@@ -486,7 +486,7 @@ public:
           {
             return request_to(sys_.points[index_], false, true);
           }
-          if(not fall_asleep())
+          if(not fall_asleep(target))
           {
             continue;
           }
@@ -569,15 +569,17 @@ public:
 
 private:
   /**
-   * @brief Enters phase sleeping. In clock mode a wake since the decision, or a nudge, cancels
-   *        the sleep: the runner stays awake and takes the wake path at once.
+   * @brief Enters phase sleeping. In clock mode a wake since the decision, a nudge or an event
+   *        queued since, such as pumped input, cancels the sleep: the runner stays awake and
+   *        takes the wake path at once.
    * @return true when the member sleeps.
    */
-  auto fall_asleep() -> bool
+  auto fall_asleep(machine const& target) -> bool
   {
     phase_ = phase::sleeping;
     if(sys_.clocked()
-       and (sys_.wakes.load(std::memory_order_acquire) != sys_.sleep_wakes or nudged_.load(std::memory_order_acquire)))
+       and (sys_.wakes.load(std::memory_order_acquire) != sys_.sleep_wakes
+            or target.pending_events() != 0 or nudged_.load(std::memory_order_acquire)))
     {
       return false;
     }

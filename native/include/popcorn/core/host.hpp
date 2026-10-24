@@ -183,9 +183,10 @@ public:
   }
 
   /**
-   * @brief Local time before which nothing may land on the member: the host serves its mail,
-   *        accepts its stamps and calls the boundary hook at or after it. Read on the host thread
-   * between slices and while plan() reads a stamp.
+   * @brief Local time before which nothing may land on the member while a goal under the driver
+   *        runs a slice: the host then serves its mail, accepts its stamps and calls the boundary
+   *        hook at or after it. Read on the host thread between slices and while plan() reads a
+   *        stamp.
    * @param target The member.
    * @return The member's time by default.
    */
