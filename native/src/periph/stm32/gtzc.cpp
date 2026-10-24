@@ -585,7 +585,8 @@ public:
 
   /**
    * @brief False: every DMA verdict is allow or read_zero_write_ignore, and the GTZC_IRQn line the
-   * TZIC raises on a DMA access counts in gpdma::illegal_wakes.
+   * TZIC raises on a DMA access counts in gpdma::illegal_wakes. With a user model in place of the
+   * block that drives GTZC_IRQn, the TZIC drives no line, so a DMA access wakes nothing here.
    */
   [[nodiscard]] auto faults_transfers() const -> bool override
   {
