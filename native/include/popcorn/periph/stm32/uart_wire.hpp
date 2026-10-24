@@ -203,7 +203,8 @@ inline constexpr std::size_t max_waiting_cuts = 65536;
 /**
  * @brief The registration lock of a link: both wires of a link share one. Cut changes hold it
  *        for their checks and their commit together, drains hold it for their start and end
- *        sections, so no drain passes a bound between a cut's check and its commit. It is not a
+ *        sections and uart_wire::hold_inputs_before() for its bound and its due() read, so no
+ *        drain and no hold passes a bound between a cut's check and its commit. It is not a
  *        link lock: its holder takes link locks after it, never a GIL, a host mutex or the
  *        system lock, and no link-lock holder takes it. A thread never takes it twice.
  */

@@ -2697,6 +2697,33 @@ TEST_CASE("drains between a cut's checks and its commit wait, so the cut acts wh
   CHECK(saved_state(*link.forth).delivered.front().suppressed);
 }
 
+TEST_CASE("a hold between a cut's checks and its commit waits, so it sees the cut")
+{
+  constexpr std::int64_t        q     = static_cast<std::int64_t>(latency_20);
+  constexpr std::int64_t        us    = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t        start = 3 * q;
+  stub_link                     link{q, declared()};
+  std::optional<core::sys_time> due;
+  std::atomic<bool>             held{false};
+  std::jthread                  holder;
+  link.shared->between_checks_and_commit = [&] {
+    holder = std::jthread{[&] {
+      due = link.forth->hold_inputs_before(core::sys_time{10 * q});
+      held.store(true);
+    }};
+    while(not held.load() and link.shared->contenders.load() == 0)
+    {
+      std::this_thread::yield();
+    }
+  };
+  auto const result                      = link.cut(start, start + 60 * us, std::nullopt);
+  link.shared->between_checks_and_commit = {};
+  holder                                 = {};
+  REQUIRE(result == core::sys_time{start});
+  REQUIRE(due.has_value());
+  CHECK(due->ps == start + q);
+}
+
 TEST_CASE("a closed cut stays until the frames crossing it are tapped")
 {
   constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);

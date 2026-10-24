@@ -270,6 +270,7 @@ void uart_wire::cut_changed(core::sys_time at)
 
 auto uart_wire::hold_inputs_before(core::sys_time at) -> std::optional<core::sys_time>
 {
+  registration_hold const registered{*registration_};
   {
     core::link_guard const held{inject_mutex_};
     held_before_ = at;
