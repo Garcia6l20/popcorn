@@ -1659,9 +1659,12 @@ void system::impl::settle_confirm() noexcept
     return;
   }
   auto at = chosen.head ? chosen.head->at : chosen.target;
-  for(auto const& one : slots)
+  if(not chosen.idle)
   {
-    at = earlier_of(at, one.rep.position);
+    for(auto const& one : slots)
+    {
+      at = earlier_of(at, one.rep.position);
+    }
   }
   chosen.confirm = at;
 }
