@@ -314,6 +314,14 @@ struct quiet_memo
   bool             known{};
 };
 
+struct item_walk
+{
+  address_hull  source;
+  address_hull  target;
+  std::uint64_t source_width;
+  std::uint64_t target_width;
+};
+
 struct transfer_cache
 {
   bool               valid{};
@@ -480,7 +488,9 @@ private:
   [[nodiscard]] auto irregular(std::size_t ch) const -> bool;
   [[nodiscard]] auto source_bytes(std::size_t ch) const -> std::uint64_t;
   [[nodiscard]] auto data_valid(std::size_t ch) const -> bool;
+  [[nodiscard]] auto item_hulls(std::size_t ch) const -> std::optional<item_walk>;
   [[nodiscard]] auto item_valid(std::size_t ch) const -> bool;
+  [[nodiscard]] auto item_target_valid(std::size_t ch) const -> bool;
   [[nodiscard]] auto hull_valid(address_hull const& hull, std::uint64_t width, bool write) const
       -> bool;
   [[nodiscard]] auto in_memory(std::uint64_t from, std::uint64_t size, bool write) const -> bool;
@@ -1726,7 +1736,7 @@ auto gpdma::hull_valid(address_hull const& hull, std::uint64_t width, bool write
       or (hull.low == hull.high and quiet_data(static_cast<popcorn::address>(from), write));
 }
 
-auto gpdma::item_valid(std::size_t ch) const -> bool
+auto gpdma::item_hulls(std::size_t ch) const -> std::optional<item_walk>
 {
   auto const& c       = ch_[ch];
   auto const& d       = *c.two_d;
@@ -1736,7 +1746,7 @@ auto gpdma::item_valid(std::size_t ch) const -> bool
   auto const  packing = sw != dw and (get(regs_, c.packing) & 2u) != 0;
   if(packing and dw > sw)
   {
-    return false;
+    return std::nullopt;
   }
   auto const signed_of = [&](field_ref amount, field_ref decrement) {
     auto const value = static_cast<std::int64_t>(get(regs_, amount));
@@ -1767,7 +1777,21 @@ auto gpdma::item_valid(std::size_t ch) const -> bool
        .jump     = d_jump},
       {.accesses = each * per, .head = group, .group = group, .step = d_step, .jump = d_jump},
       signed_of(d.block_destination_offset, d.block_destination_decrement), blocks);
-  return hull_valid(source, sw, false) and hull_valid(target, dw, true);
+  return item_walk{.source = source, .target = target, .source_width = sw, .target_width = dw};
+}
+
+auto gpdma::item_valid(std::size_t ch) const -> bool
+{
+  auto const walk = item_hulls(ch);
+  return walk
+     and hull_valid(walk->source, walk->source_width, false)
+     and hull_valid(walk->target, walk->target_width, true);
+}
+
+auto gpdma::item_target_valid(std::size_t ch) const -> bool
+{
+  auto const walk = item_hulls(ch);
+  return walk and hull_valid(walk->target, walk->target_width, true);
 }
 
 auto gpdma::data_valid(std::size_t ch) const -> bool
@@ -1782,7 +1806,8 @@ auto gpdma::data_valid(std::size_t ch) const -> bool
   auto const  bytes  = std::uint64_t{get(regs_, c.bytes)};
   auto const  source = regs_.peek(c.sar.offset);
   auto const  target = regs_.peek(c.dar.offset);
-  auto const  write  = get(regs_, c.destination_increment) != 0 ? (bytes / sw + 1) * dw : dw;
+  auto const  write =
+      get(regs_, c.destination_increment) != 0 ? (bytes / sw + 1) * std::max(sw, dw) : dw;
   return (in_memory(source, source_bytes(ch), false) or quiet_data(source, false))
      and (in_memory(target, write, true) or quiet_data(target, true));
 }
@@ -1905,6 +1930,7 @@ auto gpdma::quiet_until(quiet_query const& query) const -> std::optional<vtime>
         illegal
         or faults
         or (query.peripheral_at(target) and not quiet_data(target, true))
+        or (irregular(ch) and not item_target_valid(ch))
         or query.opaque_at(source)
         or query.opaque_at(target)
         or query.read_watched(

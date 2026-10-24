@@ -635,6 +635,7 @@ constexpr std::uint32_t br1_brsdec    = 1u << 30;
 constexpr std::uint32_t htf           = 1u << 9;
 constexpr std::size_t   planar_ch     = 12;
 constexpr address       planar_link   = 0x2006'3000;
+constexpr address       sram3_end     = 0x200c'0000;
 constexpr std::uint64_t request_ps    = 20 * us;
 constexpr std::uint32_t planar_blocks = 8;
 
@@ -1383,7 +1384,9 @@ TEST_CASE("a 2D channel past its half transfer wakes at the closed form of its i
   park(f, wfi_loop);
   auto const first = later(f, 10 * us);
   adc.model->arm(first, request_ps, 2 * planar_blocks);
-  channel_2d(f, planar_ch, {.tr2 = adc_request(f) | tcem_item});
+  channel_2d(
+      f, planar_ch,
+      {.tr2 = adc_request(f) | tcem_item, .cr = cr_tcie | cr_htie | cr_dteie | cr_enable});
   std::ignore = run_until(f, vtime{first.ps + 8 * request_ps + request_ps / 2});
   rearm_line(f, planar_ch, gpdma12_irq);
   auto const h = f.target->horizon();
@@ -1449,4 +1452,132 @@ TEST_CASE("a 2D channel writing the SAI data register stays quiet beside a chann
   auto const h = f.target->horizon();
   REQUIRE(h.wake.has_value());
   CHECK(*h.wake == later(f, 8 * burst_ps));
+}
+
+TEST_CASE("a 1D channel unpacking words to bytes near the end of SRAM wakes at its next burst")
+{
+  pulses      p;
+  auto const& f = *p.f;
+  REQUIRE_FALSE(f.target->mem().read(sram3_end, 1).has_value());
+  park(f, wfi_loop);
+  enable_irq(f, gpdma0_irq);
+  auto const t0 = now(f);
+  channel0(
+      f, 2u | tr1_sinc | tr1_dinc | (1u << 12), tr2_swreq, 32, source_words, sram3_end - 16,
+      cr_tcie | cr_dteie | cr_enable);
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, burst_ps));
+  check_asleep_until(f, vtime{t0.ps + 4 * burst_ps});
+  std::ignore = run_until(f, vtime{t0.ps + 5 * burst_ps + 2 * instruction_ps});
+  CHECK((read32(f, gpdma + 0x60) & (1u << 10)) != 0);
+}
+
+TEST_CASE("a 2D channel whose block offset alone leaves SRAM wakes at its next burst")
+{
+  pulses            p;
+  auto const&       f     = *p.f;
+  constexpr address start = sram3_end - 0x2000;
+  park(f, wfi_loop);
+  enable_irq(f, gpdma12_irq);
+  auto const t0 = now(f);
+  channel_2d(
+      f, planar_ch,
+      {.br1 = 4u | ((planar_blocks - 1) << 16), .from = start, .tr3 = 2, .br2 = 0x1000});
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, burst_ps));
+  check_asleep_until(f, vtime{t0.ps + 4 * burst_ps});
+  std::ignore = run_until(f, vtime{t0.ps + 5 * burst_ps + 2 * instruction_ps});
+  CHECK((read32(f, channel_base(planar_ch) + 0x10) & (1u << 10)) != 0);
+}
+
+TEST_CASE("a 2D channel kept in SRAM only by its block offset decrement wakes at its half")
+{
+  pulses      p;
+  auto const& f = *p.f;
+  park(f, wfi_loop);
+  enable_irq(f, gpdma12_irq);
+  channel_2d(
+      f, planar_ch,
+      {.br1  = 4u | ((planar_blocks - 1) << 16) | br1_brsdec,
+       .from = sram3_end - 0x100,
+       .tr3  = 2,
+       .br2  = 0x1000});
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, 8 * burst_ps));
+  check_wakes_at(f, *h.wake);
+  CHECK((read32(f, channel_base(planar_ch) + 0x10) & htf) != 0);
+}
+
+TEST_CASE("a 2D channel stepping from a quiet register onto others is loud without DTEIE")
+{
+  pulses      p;
+  auto const& f = *p.f;
+  park(f, wfi_loop);
+  enable_irq(f, gpdma12_irq);
+  channel_2d(
+      f, planar_ch,
+      {.tr1 = 2u | tr1_sinc | (2u << 16),
+       .to  = sai1_a + 0x1c,
+       .tr3 = 4u << 16,
+       .br2 = 0,
+       .cr  = cr_tcie | cr_htie | cr_enable});
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, burst_ps));
+}
+
+TEST_CASE("a 2D channel between the beats of a destination burst wakes at its crossing burst")
+{
+  slot<ticking_requester> adc;
+  stm32_fixture           f{u575(), "boot_ll", adc_requester(adc)};
+  park(f, wfi_loop);
+  enable_irq(f, gpdma12_irq);
+  constexpr std::uint32_t jump  = 0x100;
+  constexpr address       start = sram3_end - 20 - 0x180;
+  auto const              first = later(f, 10 * us);
+  adc.model->arm(first, request_ps, 5);
+  channel_2d(
+      f, planar_ch,
+      {.tr1    = 2u | tr1_sinc | (2u << 16) | tr1_dinc | (1u << 20),
+       .tr2    = adc_request(f),
+       .br1    = 20u,
+       .to     = start,
+       .tr3    = jump << 16,
+       .br2    = 0,
+       .linked = false,
+       .cr     = cr_tcie | cr_dteie | cr_enable});
+  std::ignore  = run_until(f, vtime{first.ps + request_ps / 2});
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == vtime{first.ps + request_ps});
+  check_asleep_until(f, vtime{first.ps + 4 * request_ps});
+  std::ignore = run_until(f, vtime{first.ps + 4 * request_ps + burst_ps + 2 * instruction_ps});
+  CHECK((read32(f, channel_base(planar_ch) + 0x10) & (1u << 10)) != 0);
+}
+
+TEST_CASE("a 2D channel unpacking words to bytes near the end of SRAM wakes at its next burst")
+{
+  pulses      p;
+  auto const& f = *p.f;
+  park(f, wfi_loop);
+  enable_irq(f, gpdma12_irq);
+  auto const t0 = now(f);
+  channel_2d(
+      f, planar_ch,
+      {.tr1    = 2u | tr1_sinc | tr1_dinc | (1u << 12),
+       .br1    = 8u | (1u << 16),
+       .to     = sram3_end - 12,
+       .tr3    = 0,
+       .br2    = 0,
+       .linked = false,
+       .cr     = cr_dteie | cr_enable});
+  auto const h = f.target->horizon();
+  REQUIRE(h.wake.has_value());
+  CHECK(*h.wake == later(f, burst_ps));
+  check_asleep_until(f, vtime{t0.ps + 3 * burst_ps});
+  std::ignore = run_until(f, vtime{t0.ps + 4 * burst_ps + 2 * instruction_ps});
+  CHECK((read32(f, channel_base(planar_ch) + 0x10) & (1u << 10)) != 0);
 }
