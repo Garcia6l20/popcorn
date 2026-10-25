@@ -527,6 +527,11 @@ auto host_threads() -> std::uint64_t
   return live_host_threads.load();
 }
 
+auto exit_removals_run() -> std::uint64_t
+{
+  return detail::exit_removals_ran.load();
+}
+
 auto on_host_thread() -> bool
 {
   return core::detail::on_host_thread;

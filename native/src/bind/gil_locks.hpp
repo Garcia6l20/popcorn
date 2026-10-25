@@ -303,6 +303,9 @@ struct exit_removals
   bool exited = false;
 };
 
+/** @brief Removals run by run_exit_removals() so far, across every host. */
+inline std::atomic<std::uint64_t> exit_removals_ran{0};
+
 /**
  * @brief Runs every removal of @p box on the stopping host thread and marks it exited, so a
  *        later one runs on the thread that hands it over. Never throws.
@@ -323,6 +326,7 @@ inline void run_exit_removals(exit_removals& box) noexcept
     }
     catch(...)
     {}
+    exit_removals_ran.fetch_add(1);
   }
 }
 

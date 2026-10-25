@@ -708,6 +708,7 @@ def test_a_trace_of_a_machine_collected_on_another_host_thread_is_closed_as_its_
 ) -> None:
     gc.collect()
     before = _core.host_threads()
+    removals = _core.exit_removals_run()
     enabled = gc.isenabled()
     path = tmp_path / "t.pctr"
     collected: list[bool] = []
@@ -741,6 +742,7 @@ def test_a_trace_of_a_machine_collected_on_another_host_thread_is_closed_as_its_
             gc.enable()
     assert collected == [True]
     assert settles(lambda: _core.host_threads() == before + 1)
+    assert settles(lambda: _core.exit_removals_run() > removals)
     assert path.stat().st_size == size
 
 

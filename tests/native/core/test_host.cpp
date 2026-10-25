@@ -1071,6 +1071,20 @@ TEST_CASE("a supersede on an abandoned host whose orphan left does nothing")
   h.on->supersede(held, 0);
 }
 
+TEST_CASE(
+    "the thread token is empty before the start, live while the thread runs and expired after "
+    "close")
+{
+  hosted h{idle_forever()};
+  CHECK(h.on->thread_token().expired());
+  h.start();
+  auto const token = h.on->thread_token();
+  CHECK_FALSE(token.expired());
+  h.on->close();
+  CHECK(token.expired());
+  CHECK(h.on->thread_token().expired());
+}
+
 TEST_CASE("a last share dropped where blocking is refused gives the running thread up")
 {
   blocking_hook blocking;

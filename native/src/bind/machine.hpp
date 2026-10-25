@@ -1575,8 +1575,8 @@ public:
   /**
    * @brief Arms the gate the machine's thread blocks in at its next slice boundary, outside any
    *        slice, with no host mutex and no GIL held, until the returned hold or a later one
-   *        releases it. For tests
-   *        that pin the thread there.
+   *        releases it. For tests that pin the
+   *        thread there.
    */
   [[= py::doc{"Block the machine thread at its next slice boundary until released, for tests."}]]
       [[nodiscard]] auto hold_at_boundary() -> boundary_hold;

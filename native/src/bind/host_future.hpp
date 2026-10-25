@@ -419,6 +419,10 @@ void count_interruptible_wait() noexcept;
 [[= py::doc{"Number of machine threads running now."}]] [[nodiscard]] auto host_threads()
     -> std::uint64_t;
 
+/** @brief Removals run so far by a stopping host thread for a handle that died first. */
+[[= py::doc{"Number of removals run by stopping machine threads, for tests."}]] [[nodiscard]] auto
+    exit_removals_run() -> std::uint64_t;
+
 /** @brief Whether the calling thread is the thread of some machine. */
 [[= py::doc{"Whether the calling thread is a machine thread, of any machine."}]] [[nodiscard]] auto
     on_host_thread() -> bool;
