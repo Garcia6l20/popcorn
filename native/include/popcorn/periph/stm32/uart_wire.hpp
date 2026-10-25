@@ -344,7 +344,8 @@ struct wire_state
  *        names or the final stop, in order of that time, so its content at a barrier does not
  *        depend on how the run was cut into windows. A release collects the posts still in
  *        both mailboxes as the final stop does, and a later drain that hands the same frames
- *        does not show them again. A sender reset aborts the frame in flight. After a receiver
+ *        does not show them again. A running injection starts at or after the last pause point
+ *        released. A sender reset aborts the frame in flight. After a receiver
  *        reset at r, frames on the line at r or starting before r plus L never reach the
  *        receiver, the tap still shows them.
  *

@@ -911,6 +911,10 @@ void uart_wire::show_through(core::sys_time at)
 void uart_wire::release_through(core::sys_time at)
 {
   sole_tapper const sole{tapping_};
+  {
+    core::link_guard const held{inject_mutex_};
+    state_.drained_through = std::max(state_.drained_through, at);
+  }
   show_through(at);
 }
 

@@ -1875,6 +1875,104 @@ TEST_CASE("a delivered pause's tap holds every frame ended by its point at any q
 
 namespace
 {
+struct injected_after_stop
+{
+  core::pause                   stopped;
+  std::int64_t                  receiver_at{};
+  std::vector<stm32::tap_frame> shown_at_pause{};
+  std::vector<stm32::tap_frame> tapped{};
+};
+
+auto inject_at_receiver_after_stop(variant const& how, std::int64_t stamp_at, std::int64_t stop_at)
+    -> injected_after_stop
+{
+  constexpr std::int64_t latency = 100 * us_ps;
+  pinned const           pin{how.one_cpu};
+  world                  w;
+  w.add("link_rx");
+  w.add("link_rx");
+  w.link(0, 1, latency);
+  w.host(how);
+  REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+  core::host_future<core::goal_reached> stopping;
+  core::host_future<core::goal_reached> listening;
+  core::host_future<vtime>              written;
+  {
+    auto const held = w.sys->lock();
+    stopping        = w.sys->post_goal(held, 0, {.until_time = core::sys_time{stop_at}});
+    listening = w.sys->post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto const base      = w.sys->base_of(0).ps;
+    auto const held_host = w.members[0].on->lock();
+    written              = w.members[0].on->post(
+        held_host, 0,
+        [](core::machine& m) {
+          auto&      usart = m.peripheral("USART1");
+          auto const found = popcorn::find_register(usart.description(), std::string_view{"TDR"});
+          REQUIRE(found != nullptr);
+          REQUIRE(m.mem().write(usart.description().base + found->offset, 4, 0x5a));
+        },
+        vtime{static_cast<std::uint64_t>(stamp_at - base)});
+  }
+  core::host_future<core::pause> pending;
+  {
+    auto const held = w.sys->lock();
+    pending         = w.sys->resume(held);
+  }
+  injected_after_stop out{.stopped = pending.get()};
+  std::ignore        = written.get();
+  out.shown_at_pause = w.wires[0]->tap().take();
+  {
+    auto const held  = w.sys->lock();
+    auto const now   = w.sys->time_of(held, 1);
+    auto const local = static_cast<std::int64_t>(core::access(
+        *w.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; }));
+    out.receiver_at  = now.ps;
+    std::vector<std::uint16_t> const data{0x3c};
+    REQUIRE(w.wires[0]
+                ->inject(
+                    data, now,
+                    stm32::stopped_receiver{
+                        .now = now, .map = core::time_map{core::sys_time{now.ps - local}}})
+                .has_value());
+    w.sys->release(held, 0, true);
+  }
+  REQUIRE(w.resume(900 * us_ps).reason == core::pause_reason::system_time);
+  {
+    auto const held = w.sys->lock();
+    w.sys->finish(held);
+  }
+  out.tapped = out.shown_at_pause;
+  auto rest  = w.wires[0]->tap().take();
+  out.tapped.insert(out.tapped.end(), rest.begin(), rest.end());
+  return out;
+}
+}
+
+TEST_CASE("a frame injected at a sleeper's time after a member stop is tapped once")
+{
+  constexpr std::int64_t stamp_at = 700 * us_ps;
+  constexpr std::int64_t stop_at  = 760 * us_ps;
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    auto const seen = inject_at_receiver_after_stop(how, stamp_at, stop_at);
+    REQUIRE(seen.stopped.reason == core::pause_reason::delivered);
+    CHECK(seen.stopped.at.ps == stop_at);
+    CHECK(seen.receiver_at == stop_at);
+    REQUIRE(seen.shown_at_pause.size() == 1);
+    CHECK(seen.shown_at_pause[0].data == 0x5a);
+    CHECK(seen.shown_at_pause[0].end.ps <= stop_at);
+    CHECK(
+        std::ranges::count_if(
+            seen.tapped,
+            [](stm32::tap_frame const& frame) { return frame.injected and frame.data == 0x3c; })
+        == 1);
+    CHECK(seen.tapped.size() == 2);
+  }
+}
+
+namespace
+{
 auto send_then_stay_busy(variant const& how, std::int64_t stamp_at, std::int64_t busy_at)
     -> busy_send
 {

@@ -1641,7 +1641,8 @@ struct park_wake
   std::shared_ptr<std::atomic<core::host*>> await_idle{};
 };
 
-constexpr int hook_throw_cap = 1000;
+constexpr int hook_throw_cap   = 1000;
+constexpr int await_idle_polls = 10'000'000;
 
 auto sleeper_woken_at_park(park_wake const& wake) -> core::member_ref
 {
@@ -1679,7 +1680,8 @@ auto sleeper_woken_at_park(park_wake const& wake) -> core::member_ref
     if(wake.await_idle)
     {
       auto* const other = wake.await_idle->load();
-      for(;;)
+      auto        polls = 0;
+      for(; polls < await_idle_polls; ++polls)
       {
         {
           auto const held = other->lock();
@@ -1689,6 +1691,10 @@ auto sleeper_woken_at_park(park_wake const& wake) -> core::member_ref
           }
         }
         std::this_thread::yield();
+      }
+      if(polls == await_idle_polls)
+      {
+        wake.woken->fetch_add(100);
       }
     }
   }};
@@ -2050,18 +2056,25 @@ TEST_CASE("a member stop, an IDLE pause and an error pause release each link thr
       CHECK(link->released == std::vector{stopped.at.ps});
     }
   }
+  for(auto const& how : {variants()[0], variants()[1]})
   {
+    CAPTURE(how.name);
     rig r{
         .members = {sleeper_with_event(400), sleeper_with_event(9000)}
     };
-    r.build(variants()[0]);
+    r.build(how);
     auto       a       = r.goal(0, {.until = popcorn::address{0x0800'0001}});
     auto       b       = r.goal(1, {.until = popcorn::address{0x0800'0001}});
     auto const stopped = r.run({});
     REQUIRE(stopped.reason == core::pause_reason::idle);
-    CHECK(r.links[0]->released == std::vector{stopped.at.ps});
+    for(auto const& link : r.links)
+    {
+      CHECK(link->released == std::vector{stopped.at.ps});
+    }
   }
+  for(auto const& how : {variants()[0], variants()[1]})
   {
+    CAPTURE(how.name);
     rig r{
         .members = {
                     member("alu", "alu_entry"),
@@ -2071,10 +2084,13 @@ TEST_CASE("a member stop, an IDLE pause and an error pause release each link thr
                       icount{1777}, throwing_arch::throw_event, 0);
                 })}
     };
-    r.build(variants()[0]);
+    r.build(how);
     auto const stopped = r.run(2 * ms_ps);
     REQUIRE(stopped.reason == core::pause_reason::error);
-    CHECK(r.links[0]->released == std::vector{stopped.at.ps});
+    for(auto const& link : r.links)
+    {
+      CHECK(link->released == std::vector{stopped.at.ps});
+    }
   }
 }
 
@@ -2098,10 +2114,11 @@ TEST_CASE("a TIME or requested pause with a member asleep far below its point re
     auto const held = r.sys->lock();
     pending         = r.sys->resume(held);
   }
-  while(drained->load() < 50)
+  while(drained->load() < 50 and not pending.done())
   {
     std::this_thread::yield();
   }
+  REQUIRE_FALSE(pending.done());
   r.sys->request_pause();
   auto const stopped = pending.get();
   REQUIRE(stopped.reason == core::pause_reason::requested);
@@ -2109,7 +2126,7 @@ TEST_CASE("a TIME or requested pause with a member asleep far below its point re
   CHECK(r.links[0]->released.empty());
 }
 
-TEST_CASE("a release runs once per pause on whichever member's thread finishes the pause last")
+TEST_CASE("a release runs once per pause, off the receiver's thread when the sender finishes last")
 {
   for(auto const sender_last : {true, false})
   {
