@@ -9,11 +9,69 @@ from __future__ import annotations
 
 import hashlib
 import re
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 _INCLUDE = re.compile(r'^\s*#\s*include\s*([<"])([^>"]+)[>"]', re.MULTILINE)
+
+_BLANKS = " \t\r\f\v"
+
+_WHITESPACE = re.compile(r"[ \t\r\n\f\v]+")
+
+
+def _collapse(text: str) -> str:
+    return _WHITESPACE.sub(" ", text).strip(" ")
+
+
+def _directive_aware(text: str) -> str:
+    """@p text with each directive line kept on its own line and all other whitespace one space."""
+    out: list[str] = []
+    plain: list[str] = []
+    directive: list[str] = []
+    for line in text.split("\n"):
+        if directive or line.lstrip(_BLANKS).startswith("#"):
+            directive.append(line)
+            if not line.rstrip(_BLANKS).endswith("\\"):
+                if plain:
+                    out.append(_collapse(" ".join(plain)))
+                    plain = []
+                out.append(_collapse(" ".join(directive)))
+                directive = []
+        else:
+            plain.append(line)
+    if directive:
+        plain.extend(directive)
+    if plain:
+        out.append(_collapse(" ".join(plain)))
+    return "\n".join(part for part in out if part)
+
+
+def normalized_text(header: Path, compiler: str = "g++") -> str:
+    """The text of @p header with comments removed and whitespace normalized.
+
+    A directive line, with its `\\` continuations, keeps its ending newline. Every other run of
+    ASCII whitespace, newlines included, is one space, so reflowed code keeps its text and a
+    directive never merges with the line after it.
+
+    @p compiler strips the comments, `-fpreprocessed -dD -E -P -x c++` keeps directives and
+    expands no macro or include, so the text does not depend on include paths.
+    @throws RuntimeError when @p compiler is missing, exits with an error or prints non-UTF-8.
+    """
+    command = [compiler, "-fpreprocessed", "-dD", "-E", "-P", "-x", "c++", str(header)]
+    try:
+        result = subprocess.run(command, capture_output=True, check=False)
+    except OSError as error:
+        raise RuntimeError(f"cannot run {compiler!r} to digest {header}: {error}") from error
+    if result.returncode != 0:
+        message = result.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(f"{compiler!r} exited with {result.returncode} on {header}: {message}")
+    try:
+        output = result.stdout.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"{compiler!r} printed non-UTF-8 text for {header}: {error}") from error
+    return _directive_aware(output)
 
 
 def _reflex_closure(roots: Sequence[Path], include_dirs: Sequence[Path]) -> set[Path]:
@@ -53,12 +111,17 @@ def reflex_include_dirs(reflex_root: Path) -> list[Path]:
     return [reflex_root / component / "include" for component in ("core", "poly", "serde")]
 
 
-def sdk_digest(include_root: Path, reflex_root: Path, reflex_include_dirs: Sequence[Path]) -> str:
-    """SHA-256, lower-case hex, over the SDK headers' paths and contents, sorted by path.
+def sdk_digest(
+    include_root: Path,
+    reflex_root: Path,
+    reflex_include_dirs: Sequence[Path],
+    compiler: str = "g++",
+) -> str:
+    """SHA-256, lower-case hex, over the SDK headers' paths and comment-free text, sorted by path.
 
     @p include_root is native/include, every `*.hpp` under its `popcorn` directory counts.
     @p reflex_include_dirs are the reflex include directories, @p reflex_root the directory
-    reflex paths are recorded relative to.
+    reflex paths are recorded relative to. @p compiler strips the comments.
     """
     popcorn = sorted((include_root / "popcorn").rglob("*.hpp"))
     entries = [(f"popcorn:{path.relative_to(include_root).as_posix()}", path) for path in popcorn]
@@ -68,7 +131,7 @@ def sdk_digest(include_root: Path, reflex_root: Path, reflex_include_dirs: Seque
     )
     digest = hashlib.sha256()
     for label, path in sorted(entries):
-        content = path.read_bytes()
+        content = normalized_text(path, compiler).encode()
         digest.update(f"{label}\0{len(content)}\0".encode())
         digest.update(content)
     return digest.hexdigest()
@@ -93,16 +156,18 @@ def build_info(version: str, nanobind_version: str, variant: str, digest: str) -
 def main(argv: Sequence[str]) -> int:
     """Write build_info.hpp, the build edge behind it.
 
-    Arguments: output, version, nanobind version, variant, native include root, reflex root.
+    Arguments: output, version, nanobind version, variant, native include root, reflex root and
+    optionally the compiler, `g++` when absent.
     The file is rewritten only when its text changes, so its includers rebuild only then.
     """
-    output, version, nanobind_version, variant, include_root, reflex_root = argv
+    output, version, nanobind_version, variant, include_root, reflex_root, *rest = argv
+    compiler = rest[0] if rest else "g++"
     root = Path(reflex_root)
     text = build_info(
         version,
         nanobind_version,
         variant,
-        sdk_digest(Path(include_root), root, reflex_include_dirs(root)),
+        sdk_digest(Path(include_root), root, reflex_include_dirs(root), compiler),
     )
     target = Path(output)
     if not target.is_file() or target.read_text() != text:

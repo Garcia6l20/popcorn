@@ -640,15 +640,12 @@ def abi_tag(library: Path) -> str:
 
 def edited_header(include: Path) -> Path:
     header = include / "popcorn" / "periph" / "model.hpp"
-    data = bytearray(header.read_bytes())
-    at = data.index(b"@brief") + 1
-    data[at] = ord("B")
-    header.write_bytes(bytes(data))
+    header.write_bytes(header.read_bytes() + b"\nstruct sdk_digest_edit;\n")
     return header
 
 
 def overlay(tmp_path: Path, digest: str) -> Path:
-    """A popcorn package beside this one whose SDK has one byte of `periph/model.hpp` changed
+    """A popcorn package beside this one whose SDK has one declaration added to `periph/model.hpp`
     and `digest` in its `build_info.hpp`, the root to put on `PYTHONPATH`."""
     staged = package_directory()
     root = tmp_path / "overlay"
@@ -678,10 +675,11 @@ def test_a_wheel_built_against_other_sdk_headers_is_refused(
     reflex = ROOT / "third_party" / "reflex"
     headers = tmp_path / "headers"
     shutil.copytree(ROOT / "native" / "include", headers)
-    original = sdk_digest(headers, reflex, reflex_include_dirs(reflex))
+    compiler = sdk().compiler
+    original = sdk_digest(headers, reflex, reflex_include_dirs(reflex), compiler)
     assert host.endswith(f";sdk {original}")
     edited_header(headers)
-    digest = sdk_digest(headers, reflex, reflex_include_dirs(reflex))
+    digest = sdk_digest(headers, reflex, reflex_include_dirs(reflex), compiler)
     assert digest != original
     root = overlay(tmp_path, digest)
     wheel = built_wheel(project(tmp_path), tmp_path / "dist", root)

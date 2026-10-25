@@ -83,11 +83,12 @@ nanobind_version = tomllib.loads((project_dir / "deps.toml").read_text())["packa
 generated_include = build_dir / "generated" / "include"
 build_info_path = generated_include / "popcorn" / "plugin" / "build_info.hpp"
 native_include = project_dir / "native" / "include"
+digest_compiler = shutil.which(str(env.cxx.cmd)) or str(env.cxx.cmd)
 build_info = project.Command(
     env,
     name="popcorn-build-info",
     target=build_info_path,
-    source=sdk_inputs(native_include, reflex_include_dirs(reflex_root)),
+    source=[*sdk_inputs(native_include, reflex_include_dirs(reflex_root)), digest_compiler],
     command=[
         interpreter,
         "-m",
@@ -98,6 +99,7 @@ build_info = project.Command(
         VARIANT,
         str(native_include),
         str(reflex_root),
+        digest_compiler,
     ],
     cwd=project_dir,
     restat=True,
