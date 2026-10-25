@@ -119,6 +119,8 @@ times at the senders. Each receiver's line is cut over `[start + L, end + L)`.
 - `tap.break_line()` opens a cut now and `tap.restore_line()` closes it. While the system runs,
   only a callback of the member `tap.owner` may call them, by default the member of the link's
   first end.
+- `tap.owner` is readable from any callback of a member. It raises `EmulationError` once the
+  system is closed.
 
 "Now" for a stopped system is the later of the two ends' `system.time_of`, as the test does.
 Never use `system.time` for it, which depends on the quantum.

@@ -555,8 +555,8 @@ TEST_CASE("a pause requested right after resume ends that flight")
       .arrival = [asked](std::size_t) { asked->wait(false); }
   };
   r.build(variants()[0]);
-  gate_release const             release{asked};
   core::host_future<core::pause> pending;
+  gate_release const             release{asked};
   {
     auto const held = r.sys->lock();
     pending         = r.sys->resume(held, core::sys_time{10 * ms_ps});
@@ -675,9 +675,9 @@ TEST_CASE("a member's time and the pending barrier are refused while a resume is
   auto const asked = std::make_shared<std::atomic<bool>>(false);
   rig r{.members = sleeper_and_runner(), .arrival = [asked](std::size_t) { asked->wait(false); }};
   r.build(variants()[0]);
-  gate_release const release{asked};
   CHECK(r.sys->hosts() == std::vector{r.members[0].on, r.members[1].on});
   core::host_future<core::pause> pending;
+  gate_release const             release{asked};
   {
     auto const held = r.sys->lock();
     pending         = r.sys->resume(held, core::sys_time{10'000 * ms_ps});
