@@ -635,6 +635,7 @@ for sender, receiver, s_link, r_link in ((0, 1, a, b), (1, 0, b, a)):
     spec.sender, spec.receiver, spec.receiver_unit = sender, receiver, "USART1"
     spec.latency_ps, spec.baud = 20_000_000, 460_800
     handle.add_wire(spec, s_link._ports.link("USART1"), r_link._ports.link("USART1"))
+{sync}
 handle.start([0, 0])
 {body}
 print("ok")
@@ -672,6 +673,10 @@ while not collected:
     time.sleep(0.001)
 del goal, other, pending
 """
+
+BARRIER = 'handle.set_sync("barrier")'
+"""The member blocked in its callback runs while its peer waits in its own: only barrier mode
+lets the peer reach its next event without the blocked member's clock."""
 
 BLOCKED = """
 class Box:
@@ -721,7 +726,7 @@ def test_an_interpreter_exits_with_a_system_closing_or_open(
     u575: popcorn.PartDescription, body: str
 ) -> None:
     child = subprocess.run(
-        [sys.executable, "-c", CHILD.format(elf=str(USART_LL), body=body)],
+        [sys.executable, "-c", CHILD.format(elf=str(USART_LL), sync="", body=body)],
         capture_output=True,
         text=True,
         timeout=60,
@@ -736,7 +741,7 @@ def test_an_exit_reports_a_closer_stuck_past_the_exit_budget(
     u575: popcorn.PartDescription,
 ) -> None:
     child = subprocess.run(
-        [sys.executable, "-c", CHILD.format(elf=str(USART_LL), body=BLOCKED)],
+        [sys.executable, "-c", CHILD.format(elf=str(USART_LL), sync=BARRIER, body=BLOCKED)],
         capture_output=True,
         text=True,
         timeout=60,

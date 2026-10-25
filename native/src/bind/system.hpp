@@ -484,7 +484,7 @@ private:
   void give_back() noexcept;
 
   core::slice_bounds                          bounds_;
-  core::sync_mode                             sync_{core::sync_mode::barrier};
+  core::sync_mode                             sync_{core::sync_mode::clocks};
   core::sys_time                              lookahead_{core::system::default_lookahead};
   core::sys_time                              progress_{core::system::default_progress};
   std::size_t                                 tap_capacity_ = std::size_t{1} << 20;

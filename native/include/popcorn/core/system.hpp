@@ -238,7 +238,7 @@ public:
       slice_bounds                               bounds         = {},
       std::move_only_function<void(std::size_t)> before_arrival = {},
       std::move_only_function<void(std::size_t)> before_sleep   = {},
-      sync_mode                                  mode           = sync_mode::barrier,
+      sync_mode                                  mode           = sync_mode::clocks,
       sys_time                                   lookahead      = default_lookahead,
       sys_time progress = default_progress) pre(not members.empty()) pre(not links.empty())
       pre(lookahead.ps > 0) pre(progress.ps >= 0);

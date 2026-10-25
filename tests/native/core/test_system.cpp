@@ -543,7 +543,8 @@ TEST_CASE("a drain takes the posts its sender made before the barrier, not those
         {
           arrived.push_back(count);
         }
-      });
+      },
+      std::move_only_function<void(std::size_t)>{}, core::sync_mode::barrier);
   {
     auto const                        held = r.sys->lock();
     std::vector<core::sys_time> const offsets(2);
@@ -565,7 +566,9 @@ TEST_CASE("a member linked to itself drains its own wire each window, at its bar
   r.links.push_back(std::make_shared<fake_link>(1, 1, 20 * us_ps));
   r.links.push_back(std::make_shared<fake_link>(0, 1, 50 * us_ps));
   r.sys = std::make_unique<core::system>(
-      r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0], r.links[1]});
+      r.members, std::vector<std::shared_ptr<core::member_link>>{r.links[0], r.links[1]},
+      core::slice_bounds{}, std::move_only_function<void(std::size_t)>{},
+      std::move_only_function<void(std::size_t)>{}, core::sync_mode::barrier);
   {
     auto const                        held = r.sys->lock();
     std::vector<core::sys_time> const offsets(2);

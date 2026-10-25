@@ -521,7 +521,7 @@ class System:
     The system holds its members until `close()`, also run by `with`.
     """
 
-    _sync: ClassVar[Literal["barrier", "clocks"]] = "barrier"
+    _sync: ClassVar[Literal["barrier", "clocks"]] = "clocks"
     _lookahead_ps: ClassVar[int | None] = None
     _progress_ps: ClassVar[int | None] = None
 
