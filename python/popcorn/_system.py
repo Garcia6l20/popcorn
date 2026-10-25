@@ -2075,7 +2075,9 @@ class UartTap:
 
     The tap gets a frame once it ended. After a member stop, an IDLE pause or an error it holds
     every frame whose stop-bit `end` is at or before the pause point, whatever the quantum, the
-    slicing or the wall timing. After a TIME stop or a requested pause it holds the frames ended
+    slicing or the wall timing. After an error the link whose frame raised it holds no later
+    frame, another link can also hold frames ended after the pause point, by an amount that
+    depends on the quantum. After a TIME stop or a requested pause it holds the frames ended
     by the earliest member's position, which can lie before the pause point by an amount that
     depends on the quantum. After `close()` it holds every frame that ended by the last pause.
     It keeps up to 1 Mi frames per direction not read yet, about 380 bytes each, the oldest

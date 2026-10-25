@@ -748,6 +748,35 @@ TEST_CASE("a peer frame at another baud is a strict system error at its start at
   }
 }
 
+TEST_CASE("a drain fault's error pause taps only the frames ended by its point at any quantum")
+{
+  std::optional<std::vector<stm32::tap_frame>> reference;
+  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  {
+    CAPTURE(how.name);
+    world w;
+    w.strict = true;
+    w.add("link_tx_switch");
+    w.add("link_rx");
+    w.link(0, 1, 250 * us_ps);
+    w.host(how);
+    auto const stopped = w.run_to(script_end);
+    REQUIRE(stopped.reason == core::pause_reason::error);
+    CHECK(stopped.member == 1);
+    auto const& shown = w.taps[0];
+    CHECK(shown.size() == 4);
+    for(auto const& frame : shown)
+    {
+      CHECK(frame.end <= stopped.at);
+    }
+    if(reference)
+    {
+      CHECK(shown == *reference);
+    }
+    reference = shown;
+  }
+}
+
 TEST_CASE("a mismatched frame warns once through the receiver machine's own log")
 {
   for(auto const& how : {variants()[0], variants()[1]})

@@ -99,8 +99,11 @@ and `arrival` in system time. Reading never changes what the receiver gets.
 
 What the tap holds at a pause depends on the pause's kind:
 
-- After a member stop, an IDLE pause or an error, it holds every frame ended by the pause point,
-  whatever the quantum, the slicing or the wall timing.
+- After a member stop or an IDLE pause, it holds every frame ended by the pause point, whatever
+  the quantum, the slicing or the wall timing.
+- After an error, it holds every frame ended by the pause point. The link whose frame raised the
+  error holds no later frame. Another link can also hold frames ended after the pause point, by an
+  amount that depends on the quantum.
 - After a TIME stop or a requested pause, it holds the frames ended by the earliest member's
   position, which can lie before the pause point by an amount that depends on the quantum. The
   rest follow at the next pause or at `close()`.

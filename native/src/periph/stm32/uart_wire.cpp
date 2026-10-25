@@ -764,7 +764,7 @@ auto uart_wire::drain(
       into_.port->release_line(receiver.to_local(shifted(cut.end, latency_)), lanes_.peer);
     }
   }
-  emit(state_.untapped, barrier, cuts);
+  emit(state_.untapped, fault ? std::min(barrier, fault->at) : barrier, cuts);
   {
     registration_hold const registered{*registration_};
     core::link_guard const  held{inject_mutex_};
