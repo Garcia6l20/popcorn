@@ -338,11 +338,13 @@ struct wire_state
  *        frames overlapping on the receiver's line are a system error at the later one's start,
  *        its sender start for a peer frame, its receiver start for an injected one. The tap gets
  *        each frame once its end, or its abort for a lost frame, the receiver end for an
- *        injected frame, lies at or before a drained barrier or the final stop, in order of
- *        that time, so its content at a barrier does not depend on how the run was cut into
- *        windows. A sender reset aborts the frame in flight. After a receiver reset at r, frames
- *        on the line at r or starting before r plus L never reach the receiver, the tap still
- *        shows them.
+ *        injected frame, lies at or before a drained barrier, a pause point release_through()
+ *        names or the final stop, in order of that time, so its content at a barrier does not
+ *        depend on how the run was cut into windows. A release collects the posts still in
+ *        both mailboxes as the final stop does, and a later drain that hands the same frames
+ *        does not show them again. A sender reset aborts the frame in flight. After a receiver
+ * reset at r, frames on the line at r or starting before r plus L never reach the receiver, the tap
+ * still shows them.
  *
  *        A drain hands the port only posts starting before its barrier, the pause point at a
  *        pause. It carries the rest it would hand, aborts included, in order, and the next drain
@@ -481,6 +483,7 @@ public:
       core::sys_time const& next,
       core::time_map        receiver) -> std::optional<core::link_fault> override;
   [[nodiscard]] auto quiet() const -> bool override;
+  void               release_through(core::sys_time at) override;
   void               finish(core::sys_time at) override;
   void               save(std::vector<std::byte>& out) const override;
   void               load(std::span<std::byte const> in) override;
@@ -567,6 +570,7 @@ private:
       std::vector<tap_frame>&           from,
       core::sys_time                    through,
       std::span<detail::line_cut const> cuts);
+  void show_through(core::sys_time at);
   auto check_shape(detail::wire_post const& post) -> std::optional<core::link_fault>;
   auto arm(detail::armed_edit edit) -> bool;
   auto overlap(detail::line_span const& span) const -> std::optional<core::link_fault>;
@@ -598,6 +602,7 @@ private:
   std::shared_ptr<link_registration> registration_;
   mutable std::mutex                 edit_mutex_;
   mutable std::mutex                 inject_mutex_;
+  std::atomic<bool>                  tapping_{false};
   detail::wire_state                 state_;
 };
 }

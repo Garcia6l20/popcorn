@@ -153,6 +153,23 @@ public:
   [[nodiscard]] virtual auto quiet() const -> bool = 0;
 
   /**
+   * @brief Shows an observer of the link every frame ended by the pause point @p at, whatever
+   *        barrier the drains handed frames at. Called once per pause that delivered a member
+   *        stop, paused IDLE or paused on an error, after every member stopped, with no drain()
+   *        or finish() of the link running: on the host thread that finished the pause last, or
+   *        on the caller of system::resume() when every member finished before it returned. At
+   *        a member stop and at IDLE every member then stands at or past @p at, so no later post
+   *        or injection ends at or before @p at. After a TIME or requested pause a member can
+   *        stand below the pause point, and the link is not called: an observer then holds the
+   *        frames ended by the earliest member's position. A frame a later drain hands is
+   *        shown once. Runs where no exception may leave, an allocation failure terminates. A
+   *        link with no observer keeps the default, which does nothing.
+   * @param at The pause point, system time.
+   */
+  virtual void release_through([[maybe_unused]] sys_time at)
+  {}
+
+  /**
    * @brief Settles what an observer sees at the system's final stop @p at, called on the
    *        receiver's host thread with every member stopped.
    */

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <format>
 #include <limits>
 #include <stdexcept>
@@ -54,6 +55,29 @@ public:
 
 private:
   link_registration& registration_;
+};
+
+class sole_tapper
+{
+public:
+  explicit sole_tapper(std::atomic<bool>& tapping) noexcept : tapping_{tapping}
+  {
+    auto const taken = tapping_.exchange(true, std::memory_order_relaxed);
+    contract_assert(not taken);
+  }
+
+  sole_tapper(sole_tapper const&)                    = delete;
+  auto operator=(sole_tapper const&) -> sole_tapper& = delete;
+  sole_tapper(sole_tapper&&)                         = delete;
+  auto operator=(sole_tapper&&) -> sole_tapper&      = delete;
+
+  ~sole_tapper()
+  {
+    tapping_.store(false, std::memory_order_relaxed);
+  }
+
+private:
+  std::atomic<bool>& tapping_;
 };
 
 auto overlaps(detail::line_cut const& cut, core::sys_time start, core::sys_time end) -> bool
@@ -523,6 +547,7 @@ auto uart_wire::drain(
     core::sys_time const& next,
     core::time_map        receiver) -> std::optional<core::link_fault>
 {
+  sole_tapper const                     sole{tapping_};
   std::vector<detail::line_cut>         cuts;
   std::vector<detail::queued_injection> due;
   std::vector<detail::wire_post>        held_over;
@@ -873,12 +898,24 @@ auto uart_wire::inject(
   return {};
 }
 
-void uart_wire::finish(core::sys_time at)
+void uart_wire::show_through(core::sys_time at)
 {
   auto pending = state_.untapped;
   collect(mailbox(state_.window + 1), pending);
   collect(mailbox(state_.window), pending);
   emit(pending, at, cuts_before(at));
+}
+
+void uart_wire::release_through(core::sys_time at)
+{
+  sole_tapper const sole{tapping_};
+  show_through(at);
+}
+
+void uart_wire::finish(core::sys_time at)
+{
+  sole_tapper const sole{tapping_};
+  show_through(at);
 }
 
 void uart_wire::save(std::vector<std::byte>& out) const
