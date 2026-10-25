@@ -972,6 +972,12 @@ void uart_wire::save(std::vector<std::byte>& out) const
   state.carried                = std::move(carried);
   state.queued                 = ring_.contents();
   state.queued_from            = ring_.popped();
+  std::erase_if(state.delivered, [&](detail::line_span const& span) {
+    return span.end <= state.last_barrier;
+  });
+  std::erase_if(state.resets, [&](core::sys_time const& reset) {
+    return shifted(reset, latency_) <= state.last_barrier;
+  });
   reflex::serde::bson::serializer{out}.dump(state);
 }
 

@@ -2724,6 +2724,28 @@ TEST_CASE("a hold between a cut's checks and its commit waits, so it sees the cu
   CHECK(due->ps == start + q);
 }
 
+TEST_CASE("a wire's saved state holds no span or reset its last barrier already passed")
+{
+  constexpr std::int64_t q     = static_cast<std::int64_t>(latency_20);
+  auto const             saved = [&](bool twice) {
+    stub_link                       link{q, declared()};
+    std::vector<std::int64_t> const starts{0};
+    link.window(0, q, starts);
+    auto const through = link.through(0, 0);
+    link.forth->receiver_reset(core::sys_time{2 * q + q / 4});
+    if(twice)
+    {
+      link.forth->drain(through, core::sys_time{4 * q}, core::sys_time{6 * q}, {});
+    }
+    link.forth->drain(through, core::sys_time{6 * q}, core::sys_time{7 * q}, {});
+    REQUIRE(received_at(link, 0));
+    std::vector<std::byte> out;
+    link.forth->save(out);
+    return out;
+  };
+  CHECK(saved(true) == saved(false));
+}
+
 TEST_CASE("a closed cut stays until the frames crossing it are tapped")
 {
   constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
