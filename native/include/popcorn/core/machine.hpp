@@ -172,12 +172,9 @@ struct slice_request
    * the core sleeps with no event pending: the clock jumps there. */
   std::optional<vtime> until_time{};
   /** @brief Once until_time is reached, dispatch only the events due before it, whatever stop
-   * ends the slice: those at an instruction count below until_time's, then, while the next
-   * event in key order is a deadline::time event at until_time's count whose virtual due time is
-   * before until_time, that event. The others stay pending and the next slice dispatches them
-   * first, in key order with any lane event posted in between. stop_quiescent counts the same
-   * events as due before until_time. For a bound a scheduler of several machines sets, never for a
-   * stamp bound. */
+   * ends the slice. The others stay pending and the next slice dispatches them first, in key
+   * order with any lane event posted in between. For a bound a scheduler of several machines
+   * sets, never for a stamp bound. */
   bool hold_from_until{};
   /** @brief Stop predicate, evaluated after every dispatched event and at the slice end, never
    * per instruction. Stops with stop_reason::user when it returns true. */

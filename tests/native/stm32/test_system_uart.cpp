@@ -236,7 +236,6 @@ struct world
   std::unique_ptr<core::system>                  sys;
   std::vector<core::pause>                       pauses;
   std::move_only_function<void(std::size_t)>     on_sleep;
-  std::move_only_function<void(std::size_t)>     on_arrival;
   bool                                           strict{};
   std::size_t                                    real{};
 
@@ -295,7 +294,7 @@ struct world
           {.on   = std::make_shared<core::host>(std::move(machines)),
            .name = std::format("m{}", index)});
     }
-    auto hook = std::move(on_arrival);
+    std::move_only_function<void(std::size_t)> hook;
     if(how.seed)
     {
       auto engines = std::make_shared<std::vector<std::mt19937>>();
@@ -303,13 +302,9 @@ struct world
       {
         engines->emplace_back(*how.seed * 31 + index);
       }
-      hook = [engines, then = std::move(hook)](std::size_t index) mutable {
+      hook = [engines](std::size_t index) {
         std::uniform_int_distribution<int> pause{0, 50};
         std::this_thread::sleep_for(std::chrono::microseconds{pause((*engines)[index])});
-        if(then)
-        {
-          then(index);
-        }
       };
     }
     std::vector<std::shared_ptr<core::member_link>> links{wires.begin(), wires.end()};
@@ -2297,172 +2292,6 @@ TEST_CASE("a sender toggling UE mid-frame posts many segments a window and match
     auto const busiest = std::ranges::max(per_window | std::views::values);
     MESSAGE("busiest window ", busiest);
     CHECK(busiest > 1000);
-  }
-}
-
-namespace
-{
-struct last_cycle_end
-{
-  std::int64_t latency{};
-  std::int64_t barrier{};
-  std::int64_t end{};
-  std::int64_t first_end{};
-};
-
-auto barrier_after_last_cycle_end(
-    std::string_view entry,
-    std::int64_t     period,
-    std::int64_t     until,
-    std::int64_t     after_first) -> last_cycle_end
-{
-  world reference;
-  reference.add(entry);
-  reference.add("idle");
-  reference.link(0, 1, latency_20);
-  auto& sender = *reference.nodes[0];
-  reference.wires[0]->enter_window(0, sender.map());
-  REQUIRE(
-      sender.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason
-      == stop_reason::user);
-  sender.target->hold_core(true);
-  REQUIRE(sender.advance(until) == stop_reason::time);
-  std::ignore = reference.wires[0]->drain(
-      0, core::sys_time{until}, core::sys_time{until + ms_ps}, reference.nodes[1]->map());
-  REQUIRE(reference.nodes[1]->advance(until) == stop_reason::time);
-  reference.wires[0]->finish(core::sys_time{until});
-  reference.collect();
-  auto const& time   = sender.target->virtual_clock();
-  auto const& frames = reference.taps[0];
-  REQUIRE(frames.size() > 2);
-  REQUIRE(1'000'000'000'000 / time.instruction_hz() == static_cast<std::uint64_t>(period));
-  auto const first_end = frames.front().end.ps;
-  for(std::size_t index = 1; index + 1 < frames.size(); ++index)
-  {
-    auto const end = frames[index].end.ps;
-    if(frames[index + 1].start.ps != end or end < first_end + after_first)
-    {
-      continue;
-    }
-    auto const count = time.to_icount(vtime{static_cast<std::uint64_t>(end + sender.origin)});
-    auto const k     = std::max<std::int64_t>(1, end / latency_20);
-    auto const third = (end + 3 * k) / (3 * k);
-    auto const at    = k * 3 * third;
-    auto const local = vtime{static_cast<std::uint64_t>(at + sender.origin)};
-    if(at > end and time.to_icount(local) == count)
-    {
-      return {.latency = 3 * third, .barrier = at, .end = end, .first_end = first_end};
-    }
-  }
-  FAIL("no back-to-back frame leaves room for a barrier in its last cycle");
-  return {};
-}
-}
-
-TEST_CASE("a back-to-back frame ending in the last cycle before a barrier posts the next before it")
-{
-  struct sender
-  {
-    std::string_view entry;
-    std::int64_t     period;
-    std::int64_t     until;
-    bool             asleep{};
-  };
-  for(auto const& one : {
-          sender{.entry = "link_tx", .period = cycle_ps, .until = script_end},
-          sender{
-                 .entry  = "link_tx_fifo_stop",
-                 .period = cycle_ps,
-                 .until  = script_end,
-                 .asleep = true},
-          sender{.entry = "link_tx_bursts", .period = 250'000, .until = 20 * ms_ps}
-  })
-  {
-    CAPTURE(one.entry);
-    CAPTURE(one.asleep);
-    auto const point = barrier_after_last_cycle_end(
-        one.entry, one.period, one.until, one.asleep ? 3 * latency_20 : 0);
-    CAPTURE(point.latency);
-    CAPTURE(point.barrier);
-    CAPTURE(point.end);
-    REQUIRE(point.barrier - point.end < one.period);
-    for(std::int64_t const lowered : {1, 3})
-    {
-      CAPTURE(lowered);
-      auto const quantum = point.latency / lowered;
-      world      w;
-      w.add(one.entry);
-      w.add("idle");
-      w.add("link_tx_long");
-      w.link(0, 1, point.latency);
-      if(lowered != 1)
-      {
-        w.link(0, 1, quantum, true);
-      }
-      auto sender_at = std::make_shared<std::vector<std::size_t>>();
-      auto busy_at   = std::make_shared<std::vector<std::int64_t>>();
-      w.on_arrival   = [&w, sender_at, busy_at](std::size_t index) {
-        if(index == 0)
-        {
-          sender_at->push_back(w.nodes[0]->own->frames.size());
-        }
-        else if(index == 2)
-        {
-          auto const& busy = *w.nodes[2];
-          busy_at->push_back(
-              static_cast<std::int64_t>(busy.target->virtual_clock().time().ps) - busy.origin);
-        }
-      };
-      w.host(variants()[0]);
-      if(one.asleep)
-      {
-        REQUIRE(w.run_to(point.first_end).reason == core::pause_reason::system_time);
-        auto const held   = w.sys->lock();
-        auto&      target = *w.nodes[0]->target;
-        target.regs().write(*target.regs().find("pc"), sym("usart_ll", "idle"));
-        std::ignore =
-            w.sys->post_goal(held, 0, {.until = popcorn::address{0x0800'0001}, .open = true});
-        std::ignore = w.sys->post_goal(held, 2, {.until = popcorn::address{0x0800'0001}});
-      }
-      if(one.asleep)
-      {
-        core::host_future<core::pause> pending;
-        {
-          auto const held = w.sys->lock();
-          pending         = w.sys->resume(held);
-        }
-        auto const stopped = pending.get();
-        REQUIRE(stopped.reason == core::pause_reason::delivered);
-        REQUIRE(stopped.at.ps > point.barrier + 2 * point.latency);
-      }
-      else
-      {
-        REQUIRE(
-            w.run_to(point.barrier + 2 * point.latency).reason == core::pause_reason::system_time);
-      }
-      REQUIRE(sender_at->size() == busy_at->size());
-      auto const& sent         = w.nodes[0]->own->frames;
-      auto const  ended_before = [&](std::int64_t bound) {
-        return static_cast<std::size_t>(std::ranges::count_if(sent, [&](auto const& frame) {
-          return static_cast<std::int64_t>(frame.at.ps) - w.nodes[0]->origin < bound;
-        }));
-      };
-      auto at_barrier = 0;
-      for(std::size_t round = 0; round < busy_at->size(); ++round)
-      {
-        auto const bound = (*busy_at)[round] / quantum * quantum;
-        auto const seen  = (*sender_at)[round];
-        CAPTURE(round);
-        CAPTURE(bound);
-        CHECK(seen >= ended_before(bound));
-        if(bound == point.barrier)
-        {
-          ++at_barrier;
-          CHECK(seen == ended_before(point.end + 1));
-        }
-      }
-      CHECK(at_barrier >= 1);
-    }
   }
 }
 

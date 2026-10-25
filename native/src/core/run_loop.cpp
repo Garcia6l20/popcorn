@@ -43,24 +43,6 @@ auto hold_limit(vtime until, clock const& time) -> std::optional<icount>
   return icount{first - 1};
 }
 
-auto due_before_hold(event const& due, icount held, vtime until) noexcept -> bool
-{
-  return due.at.value == held.value + 1 and due.kind == deadline::time and due.due_ps < until.ps;
-}
-
-auto held_due_first(slice_request const& request, scheduler const& queue, clock const& time) -> bool
-{
-  if(not request.hold_from_until or not request.until_time)
-  {
-    return false;
-  }
-  auto const held   = hold_limit(*request.until_time, time);
-  auto const queued = queue.pending();
-  return held
-     and not queued.empty()
-     and due_before_hold(queued.front(), *held, *request.until_time);
-}
-
 auto internal_end(slice_request const& request, stop const& stopped) noexcept -> bool
 {
   return request.internal_stop
@@ -839,13 +821,12 @@ auto machine::run_state::handle_requests() -> std::optional<slice_end>
 
 auto machine::run_state::dispatch_due(slice_request const& request) -> std::optional<slice_end>
 {
-  std::uint32_t         countdown = wall_check_blocks;
-  auto                  limit     = owner.clock_driver_.exact_now();
-  auto                  holding   = false;
-  std::optional<icount> held;
+  std::uint32_t countdown = wall_check_blocks;
+  auto          limit     = owner.clock_driver_.exact_now();
+  auto          holding   = false;
   if(request.hold_from_until and request.until_time)
   {
-    held = hold_limit(*request.until_time, owner.clock_);
+    auto const held = hold_limit(*request.until_time, owner.clock_);
     if(not held)
     {
       return std::nullopt;
@@ -853,18 +834,7 @@ auto machine::run_state::dispatch_due(slice_request const& request) -> std::opti
     holding = *held < limit;
     limit   = std::min(limit, *held);
   }
-  auto const next_due = [&] -> std::optional<event> {
-    if(auto due = owner.scheduler_.pop_due(limit))
-    {
-      return due;
-    }
-    if(holding and held_due_first(request, owner.scheduler_, owner.clock_))
-    {
-      return owner.scheduler_.pop_due(icount{held->value + 1});
-    }
-    return std::nullopt;
-  };
-  while(auto const due = next_due())
+  while(auto const due = owner.scheduler_.pop_due(limit))
   {
     if(due->id.owner == arch::arch_event_owner)
     {
@@ -943,10 +913,7 @@ auto machine::run_state::idle_jump(slice_request const& request) -> std::optiona
     return slice_end{make_stop(stop_reason::idle, {}, std::nullopt)};
   }
   if(request.stop_quiescent
-     and (not next
-          or (request.until_time
-              and *next >= owner.clock_.to_icount(*request.until_time)
-              and not held_due_first(request, owner.scheduler_, owner.clock_))))
+     and (not next or (request.until_time and *next >= owner.clock_.to_icount(*request.until_time))))
   {
     return slice_end{make_stop(stop_reason::idle, {}, std::nullopt)};
   }

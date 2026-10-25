@@ -30,9 +30,7 @@ sequenceDiagram
 
 - A member whose core runs is held at each barrier with `slice_request::hold_from_until`, so
   every post reaches its receiver at its exact time whatever `Q`, the slicing or the thread
-  timing. The held slice dispatches every event due before the barrier, including a timed event
-  in the last instruction cycle before it, so a frame that starts before barrier `B` is posted
-  in a window that ends at or before `B`.
+  timing.
 - A sender appends a frame to the mailbox of its current window. After barrier `k` the
   receiver drains the mailbox of window `k` on its own thread. The sender writes that mailbox
   again only in window `k + 2`, which holds only while every member arrives at every barrier.
