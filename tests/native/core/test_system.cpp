@@ -2275,7 +2275,7 @@ TEST_CASE("an idle attempt hands frames at its earliest member, so a fault past 
     REQUIRE(both_asleep(r, pending));
     CHECK(drained->load() < 222 * us_ps);
     r.sys->request_pause();
-    CHECK(pending.get().reason != core::pause_reason::closed);
+    CHECK(pending.get().reason == core::pause_reason::requested);
   }
 }
 

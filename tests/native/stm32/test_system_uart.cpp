@@ -1890,15 +1890,12 @@ auto send_then_stay_busy(variant const& how, std::int64_t stamp_at, std::int64_t
   REQUIRE(w.wires[0]->drop(0, 1));
   core::host_future<core::goal_reached> sending;
   core::host_future<core::goal_reached> listening;
-  std::int64_t                          base = 0;
   {
     auto const held = w.sys->lock();
     sending         = w.sys->post_goal(held, 0, {.until = popcorn::address{0x0800'0001}});
     listening = w.sys->post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
-    base = static_cast<std::int64_t>(core::access(
-               *w.members[0].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; }))
-         - w.sys->time_of(held, 0).ps;
   }
+  auto const               base = w.sys->base_of(0).ps;
   core::host_future<vtime> written;
   core::host_future<vtime> busy;
   {
@@ -1911,9 +1908,9 @@ auto send_then_stay_busy(variant const& how, std::int64_t stamp_at, std::int64_t
           REQUIRE(found != nullptr);
           REQUIRE(m.mem().write(usart.description().base + found->offset, 4, 0x5a));
         },
-        vtime{static_cast<std::uint64_t>(stamp_at + base)});
+        vtime{static_cast<std::uint64_t>(stamp_at - base)});
     busy = w.members[0].on->post(
-        held_host, 0, [](core::machine&) {}, vtime{static_cast<std::uint64_t>(busy_at + base)});
+        held_host, 0, [](core::machine&) {}, vtime{static_cast<std::uint64_t>(busy_at - base)});
   }
   core::host_future<core::pause> pending;
   {
