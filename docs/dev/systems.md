@@ -73,10 +73,12 @@ time. A halted member's time counts in its instruction count but not in a goal's
 A member whose goal runs and whose core sleeps stops a slice where it fell asleep, so its
 position at a pause depends on `Q`. When a pause delivers a member stop at `P`, every such member
 below `P` runs on to `P` after the third completion fixed the outcome as that member stop, past
-the pause's drain. Its slice holds at `P` with `hold_from_until`, `stop_quiescent` off. It
-executes nothing on the way: it slept with no event due before the barrier, and the pause's
-drain hands only frames that arrive at or after the barrier. A member asleep past `P` stays
-where it fell asleep. Parking applies to delivered member stops only.
+the pause's drain. Its core is held on the way and its slice carries none of its goal's stop
+conditions, so it executes nothing and its goal stops nothing before `P`. The slice holds at `P`
+with `hold_from_until`, `stop_quiescent` off, and the core is released there. Input that lands
+on the way, such as a byte a pty pump hands at a slice boundary, stays pending and is taken at
+`P` when the system resumes. A member asleep past `P` stays where it fell asleep. A sleeper runs
+on to `P` at delivered member stops only.
 
 ## Locks
 

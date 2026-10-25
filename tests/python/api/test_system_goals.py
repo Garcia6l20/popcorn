@@ -261,6 +261,29 @@ def test_a_member_stop_inside_running_raises_on_leaving(ping: Build) -> None:
         asyncio.run(body())
 
 
+def test_a_member_asleep_in_running_stands_at_a_member_stop_s_time(
+    u575: popcorn.PartDescription,
+) -> None:
+    async def body(system: System) -> tuple[VirtualTime, VirtualTime]:
+        a, b = system.members["a"], system.members["b"]
+        async with a.running():
+            stop = await b.run(for_=ms(1) + us(3))
+            assert stop.reason is StopReason.TIME
+            return system.time_of("a"), system.time_of("b")
+
+    seen: list[tuple[VirtualTime, VirtualTime]] = []
+    for latency in (L, VirtualDuration(L.ps // 3)):
+        a, b = member(u575, "idle", "a"), member(u575, "idle", "b")
+        links = [UartLink("a.USART1", "b.USART1", latency=latency, baud=460_800)]
+        system = System({"a": a, "b": b}, links)
+        try:
+            seen.append(asyncio.run(body(system)))
+        finally:
+            system.close()
+    assert seen[0][0] == seen[0][1]
+    assert seen[1] == seen[0]
+
+
 def test_a_goal_cap_stops_a_sleeping_member(ping: Build) -> None:
     system = ping(goal_cap=ms(1))
     b = system.members["b"]

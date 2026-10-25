@@ -246,7 +246,8 @@ public:
 
   void restart() noexcept
   {
-    phase_ = phase::begin;
+    phase_     = phase::begin;
+    park_held_ = false;
     if(sys_.measuring)
     {
       left_ = std::chrono::steady_clock::now();
@@ -366,7 +367,16 @@ public:
           if(position(target) < sys_.chosen.head->at)
           {
             window_ = sys_.window;
-            return request_to(sys_.chosen.head->at, false, true);
+            if(not target.core_held())
+            {
+              target.hold_core(true);
+              park_held_ = true;
+            }
+            return request_to(sys_.chosen.head->at, false, true, false);
+          }
+          if(std::exchange(park_held_, false))
+          {
+            target.hold_core(false);
           }
           phase_ = phase::begin;
           return std::nullopt;
@@ -565,7 +575,7 @@ private:
     }
   }
 
-  auto request_to(sys_time bound, bool quiescent, bool hold) -> slice_request
+  auto request_to(sys_time bound, bool quiescent, bool hold, bool goal = true) -> slice_request
   {
     auto& one = sys_.slots[index_];
     enter_windows();
@@ -581,17 +591,17 @@ private:
         .stop_quiescent        = quiescent,
         .stop_when_events_only = true,
     };
-    if(one.running())
+    if(goal and one.running())
     {
-      auto const& goal           = one.goal->goal;
-      request.until              = goal.until;
-      request.until_also         = goal.until_also;
-      request.until_return       = goal.until_return;
-      request.arrive_at          = goal.arrive_at;
-      request.budget_left        = left(goal.budget, one.goal->executed);
-      request.exact_instructions = left(goal.exact, one.goal->executed);
+      auto const& wanted         = one.goal->goal;
+      request.until              = wanted.until;
+      request.until_also         = wanted.until_also;
+      request.until_return       = wanted.until_return;
+      request.arrive_at          = wanted.arrive_at;
+      request.budget_left        = left(wanted.budget, one.goal->executed);
+      request.exact_instructions = left(wanted.exact, one.goal->executed);
       request.leave_until        = one.goal->executed == 0;
-      if(goal.stop_when)
+      if(wanted.stop_when)
       {
         request.stop_when = std::ref(one.goal->goal.stop_when);
       }
@@ -752,6 +762,7 @@ private:
   std::size_t       index_;
   phase             phase_{phase::begin};
   bool              held_last_{};
+  bool              park_held_{};
   bool              sleeping_{};
   std::uint64_t     window_{};
   vtime             until_last_{};
