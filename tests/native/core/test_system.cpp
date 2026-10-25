@@ -518,18 +518,51 @@ TEST_CASE("a pause requested after its flight ended does not end the next flight
   CHECK(r.run(200 * us_ps).reason == core::pause_reason::system_time);
 }
 
+namespace
+{
+/**
+ * @brief Opens a gate on scope exit, so a failing REQUIRE cannot leave a blocked hook behind.
+ */
+class gate_release
+{
+public:
+  explicit gate_release(std::shared_ptr<std::atomic<bool>> gate) : gate_{std::move(gate)}
+  {}
+  gate_release(gate_release const&)                    = delete;
+  auto operator=(gate_release const&) -> gate_release& = delete;
+
+  ~gate_release()
+  {
+    open();
+  }
+
+  void open() const noexcept
+  {
+    gate_->store(true);
+    gate_->notify_all();
+  }
+
+private:
+  std::shared_ptr<std::atomic<bool>> gate_;
+};
+}
+
 TEST_CASE("a pause requested right after resume ends that flight")
 {
-  rig r{
-      .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+  auto const asked = std::make_shared<std::atomic<bool>>(false);
+  rig        r{
+      .members = {member("alu", "alu_entry"), member("alu", "alu_entry")},
+      .arrival = [asked](std::size_t) { asked->wait(false); }
   };
   r.build(variants()[0]);
+  gate_release const             release{asked};
   core::host_future<core::pause> pending;
   {
     auto const held = r.sys->lock();
     pending         = r.sys->resume(held, core::sys_time{10 * ms_ps});
   }
   r.sys->request_pause();
+  release.open();
   CHECK(pending.get().reason == core::pause_reason::requested);
 }
 
@@ -639,8 +672,10 @@ TEST_CASE("halted members advance with their events and pause at the barrier on 
 
 TEST_CASE("a member's time and the pending barrier are refused while a resume is in flight")
 {
-  rig r{.members = sleeper_and_runner()};
+  auto const asked = std::make_shared<std::atomic<bool>>(false);
+  rig r{.members = sleeper_and_runner(), .arrival = [asked](std::size_t) { asked->wait(false); }};
   r.build(variants()[0]);
+  gate_release const release{asked};
   CHECK(r.sys->hosts() == std::vector{r.members[0].on, r.members[1].on});
   core::host_future<core::pause> pending;
   {
@@ -652,6 +687,7 @@ TEST_CASE("a member's time and the pending barrier are refused while a resume is
   CHECK(r.sys->base_of(0).ps == 0);
   CHECK(r.sys->base_of(1).ps == 0);
   r.sys->request_pause();
+  release.open();
   auto const stopped = pending.get();
   CHECK(stopped.reason == core::pause_reason::requested);
   auto const held = r.sys->lock();
