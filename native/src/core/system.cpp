@@ -2,6 +2,7 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/system.hpp>
 
+#include "promise_pace.hpp"
 #include "promise_record.hpp"
 #include "system_seam.hpp"
 
@@ -346,10 +347,6 @@ struct system::impl
 class system::impl::runner final : public member_driver
 {
 public:
-  /** @brief The most publishes between two promise evaluations of a member none of whose
-   *         successors used its last promise. */
-  static constexpr std::uint32_t max_period = 64;
-
   runner(system::impl& owner, std::size_t index)
       : sys_{owner}, index_{index}, posts_(owner.slots[index].outbound.size()),
         passed_(owner.slots[index].inbound.size(), earliest),
@@ -362,9 +359,7 @@ public:
     phase_    = phase::begin;
     lead_     = earliest;
     promised_ = earliest;
-    period_   = 1;
-    skipped_  = 0;
-    judging_  = false;
+    pace_.restart();
     counted_  = false;
     calm_     = false;
     slept_    = false;
@@ -1267,13 +1262,21 @@ private:
     mine_.floor          = std::max(reach_at(target), published);
     mine_.general        = mine_.floor;
     std::ranges::fill(mine_.wires, mine_.floor.ps);
-    if(not system::impl::frozen(one)
-       and phase_ == phase::run
-       and (slept_ or one.rep.quiescent)
-       and not eventless(target)
-       and paced(published))
+    auto const eligible = not system::impl::frozen(one)
+                      and phase_ == phase::run
+                      and (slept_ or one.rep.quiescent)
+                      and not eventless(target);
+    auto const evaluated = eligible and paced(published);
+    if(evaluated)
     {
       promise(target);
+    }
+    if(eligible)
+    {
+      if(auto const hook = detail::on_promise.load(std::memory_order_acquire))
+      {
+        hook(index_, evaluated, mine_.floor, mine_.general);
+      }
     }
     if(nudged_.load(std::memory_order_acquire))
     {
@@ -1304,36 +1307,21 @@ private:
   }
 
   /**
-   * @brief Whether a publish where the member could promise evaluates its promise. The publish
-   *        after an evaluation judges it: used when a successor's floor passed @p published,
-   *        the floor this member had published, plus their coupling distance, which no reader
-   *        reaches without the promise. A used promise sets the period to every publish, an
-   *        unused one doubles it, up to max_period. A publish that skips its promise publishes
-   *        the floor alone, which every reader may take.
+   * @brief Whether a publish where the member could promise evaluates its promise, by pace_.
+   *        The publish after an evaluation judges it against @p published, the floor this
+   *        member had published, with detail::promise_used() over its successors. A publish
+   *        that skips its promise publishes the floor alone, which every reader may take.
    */
   [[nodiscard]] auto paced(sys_time published) -> bool
   {
-    if(judging_)
+    if(pace_.judging())
     {
-      judging_        = false;
-      auto const used = std::ranges::any_of(sys_.slots[index_].successors, [&](std::size_t next) {
-        return sys_.syncs[next].record.floor()
-             > later_by(published, sys_.distance(index_, next).ps);
-      });
-      period_         = used ? 1 : std::min(period_ * 2, max_period);
-      skipped_        = 0;
+      pace_.judge(std::ranges::any_of(sys_.slots[index_].successors, [&](std::size_t next) {
+        return detail::promise_used(
+            sys_.syncs[next].record.floor_seen(), published, sys_.distance(index_, next));
+      }));
     }
-    auto const evaluated = ++skipped_ >= period_;
-    if(evaluated)
-    {
-      skipped_ = 0;
-      judging_ = true;
-    }
-    if(auto const hook = detail::on_promise.load(std::memory_order_acquire))
-    {
-      hook(index_, evaluated);
-    }
-    return evaluated;
+    return pace_.next();
   }
 
   /**
@@ -1745,9 +1733,7 @@ private:
   bool                              calm_{};
   sys_time                          lead_{earliest};
   sys_time                          promised_{earliest};
-  std::uint32_t                     period_{1};
-  std::uint32_t                     skipped_{};
-  bool                              judging_{};
+  detail::promise_pace              pace_{};
   sys_time                          slice_to_{never};
   std::optional<sys_time>           stamped_{};
   std::optional<sys_time>           frozen_reach_{};

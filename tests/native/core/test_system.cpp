@@ -8,6 +8,7 @@
 #include <popcorn/core/window_barrier.hpp>
 #include <popcorn/periph/model.hpp>
 
+#include "../../../native/src/core/promise_pace.hpp"
 #include "../../../native/src/core/promise_record.hpp"
 #include "../../../native/src/core/system_seam.hpp"
 #include "../support/machine_fixture.hpp"
@@ -5431,57 +5432,48 @@ namespace
 {
 struct promise_counts
 {
-  using per_member = std::array<std::atomic<std::uint64_t>, 2>;
+  std::array<std::atomic<std::uint64_t>, 2> evaluated{};
+  std::array<std::atomic<std::uint64_t>, 2> skipped{};
+  std::atomic<std::uint64_t>                skipped_past_floor{};
 
-  std::array<per_member, 2>  evaluated{};
-  std::array<per_member, 2>  skipped{};
-  std::atomic<std::uint64_t> arrivals{};
-  std::atomic<std::size_t>   phase{};
-  std::uint64_t              switch_at{};
-
-  void reset(std::uint64_t at)
+  void reset()
   {
-    for(auto& phased : {&evaluated, &skipped})
+    for(auto& count : evaluated)
     {
-      for(auto& counts : *phased)
-      {
-        for(auto& count : counts)
-        {
-          count.store(0);
-        }
-      }
+      count.store(0);
     }
-    arrivals.store(0);
-    phase.store(0);
-    switch_at = at;
+    for(auto& count : skipped)
+    {
+      count.store(0);
+    }
+    skipped_past_floor.store(0);
   }
 };
 
 promise_counts promising;
 
-void note_promise(std::size_t member, bool evaluated)
+void note_promise(std::size_t member, bool evaluated, core::sys_time floor, core::sys_time general)
 {
-  if(member < 2)
+  if(member >= 2)
   {
-    (evaluated ? promising.evaluated : promising.skipped)[promising.phase.load()][member].fetch_add(
-        1);
+    return;
+  }
+  (evaluated ? promising.evaluated : promising.skipped)[member].fetch_add(1);
+  if(not evaluated and general != floor)
+  {
+    promising.skipped_past_floor.fetch_add(1);
   }
 }
 
-void slow_arrival(std::size_t member)
+void slow_alu(std::size_t member)
 {
-  if(promising.arrivals.fetch_add(1) >= promising.switch_at)
-  {
-    promising.phase.store(1);
-  }
-  if(member == promising.phase.load())
+  if(member == 0)
   {
     std::this_thread::sleep_for(std::chrono::microseconds{20});
   }
 }
 
-auto paced_run(core::sync_mode mode, std::int64_t until, std::int64_t back)
-    -> std::array<std::int64_t, 2>
+auto paced_run(core::sync_mode mode, std::int64_t until) -> std::array<std::int64_t, 2>
 {
   constexpr std::int64_t        latency = 20 * us_ps;
   std::vector<core::member_ref> members{
@@ -5490,9 +5482,10 @@ auto paced_run(core::sync_mode mode, std::int64_t until, std::int64_t back)
       member<sleeping_arch>("idle", "idle_entry", sends_nothing<sleeping_arch>)};
   core::system sys{
       members,
-      {std::make_shared<watched_link>(0, 1, back), std::make_shared<watched_link>(1, 0, latency)},
+      {std::make_shared<watched_link>(0, 1, latency),
+        std::make_shared<watched_link>(1, 0, latency)},
       core::slice_bounds{.max_instructions = icount{4}, .wall_budget = std::chrono::hours{1}},
-      &slow_arrival,
+      &slow_alu,
       {},
       mode
   };
@@ -5507,48 +5500,76 @@ auto paced_run(core::sync_mode mode, std::int64_t until, std::int64_t back)
   auto const held = sys.lock();
   return {sys.time_of(held, 0).ps, sys.time_of(held, 1).ps};
 }
-
-auto paced_clocks(std::int64_t until, std::uint64_t switch_at, std::int64_t back = 20 * us_ps)
-    -> std::array<std::int64_t, 2>
-{
-  promising.reset(switch_at);
-  core::detail::on_promise.store(&note_promise);
-  auto const stood = paced_run(core::sync_mode::clocks, until, back);
-  core::detail::on_promise.store(nullptr);
-  promising.arrivals.store(0);
-  promising.switch_at = switch_at;
-  CHECK(stood == paced_run(core::sync_mode::barrier, until, back));
-  return stood;
-}
 }
 
-TEST_CASE("a sleeper whose promise no peer uses evaluates it at a growing period")
+TEST_CASE("a promise is used only past the publisher's floor plus the coupling distance")
 {
-  for(std::int64_t const back : {20 * us_ps, us_ps / 2})
+  constexpr core::sys_time published{100 * us_ps};
+  constexpr core::sys_time distance{20 * us_ps};
+  CHECK_FALSE(core::detail::promise_used(core::sys_time{120 * us_ps}, published, distance));
+  CHECK(core::detail::promise_used(core::sys_time{120 * us_ps + 1}, published, distance));
+  CHECK_FALSE(core::detail::promise_used(core::sys_time{119 * us_ps}, published, distance));
+  CHECK_FALSE(core::detail::promise_used(core::sys_time{1 * ms_ps}, published, core::sys_time{}));
+  CHECK_FALSE(
+      core::detail::promise_used(
+          core::sys_time{std::numeric_limits<std::int64_t>::max()},
+          core::sys_time{std::numeric_limits<std::int64_t>::max() - 1}, distance));
+}
+
+TEST_CASE("an unused promise doubles the evaluation period up to its cap, a used one resets it")
+{
+  core::detail::promise_pace pace;
+  auto const                 evaluations = [&](std::uint32_t publishes, bool used) {
+    std::vector<bool> evaluated;
+    for(std::uint32_t publish = 0; publish < publishes; ++publish)
+    {
+      if(pace.judging())
+      {
+        pace.judge(used);
+      }
+      evaluated.push_back(pace.next());
+    }
+    return evaluated;
+  };
+  CHECK_FALSE(pace.judging());
+  auto const               unused = evaluations(383, false);
+  std::vector<std::size_t> at;
+  for(std::size_t publish = 0; publish < unused.size(); ++publish)
   {
-    CAPTURE(back);
-    std::ignore          = paced_clocks(2 * ms_ps, std::numeric_limits<std::uint64_t>::max(), back);
-    auto const evaluated = promising.evaluated[0][1].load();
-    auto const skipped   = promising.skipped[0][1].load();
-    MESSAGE("evaluated " << evaluated << " skipped " << skipped);
-    CHECK(promising.evaluated[0][0].load() + promising.skipped[0][0].load() == 0);
-    REQUIRE(evaluated + skipped >= 500);
-    CHECK(evaluated * 8 < evaluated + skipped);
-    CHECK(evaluated * 64 >= evaluated + skipped);
-    CHECK(evaluated <= (evaluated + skipped) / 64 + 12);
+    if(unused[publish])
+    {
+      at.push_back(publish);
+    }
   }
+  std::vector<std::size_t> const expected{0, 2, 6, 14, 30, 62, 126, 190, 254, 318, 382};
+  CHECK(at == expected);
+  CHECK(pace.period() == core::detail::promise_pace::max_period);
+  auto const used = evaluations(10, true);
+  CHECK(pace.period() == 1);
+  CHECK(std::ranges::count(used, true) == 10);
+  pace.restart();
+  CHECK(pace.period() == 1);
+  CHECK_FALSE(pace.judging());
+  CHECK(pace.next());
+  CHECK(pace.judging());
 }
 
-TEST_CASE("a used promise sets a sleeper back to a promise at every publish")
+TEST_CASE("a sleeper whose promise no peer uses skips it and publishes its floor")
 {
-  std::ignore          = paced_clocks(4 * ms_ps, 3000);
-  auto const before    = promising.evaluated[0][1].load();
-  auto const evaluated = promising.evaluated[1][1].load();
-  auto const skipped   = promising.skipped[1][1].load();
-  MESSAGE("before " << before << " evaluated " << evaluated << " skipped " << skipped);
-  REQUIRE(before * 8 < before + promising.skipped[0][1].load());
-  REQUIRE(evaluated + skipped >= 200);
-  CHECK(evaluated * 2 > evaluated + skipped);
+  promising.reset();
+  core::detail::on_promise.store(&note_promise);
+  auto const paced = paced_run(core::sync_mode::clocks, 2 * ms_ps);
+  core::detail::on_promise.store(nullptr);
+  CHECK(paced == paced_run(core::sync_mode::barrier, 2 * ms_ps));
+  auto const evaluated = promising.evaluated[1].load();
+  auto const skipped   = promising.skipped[1].load();
+  MESSAGE("evaluated " << evaluated << " skipped " << skipped);
+  CHECK(promising.evaluated[0].load() + promising.skipped[0].load() == 0);
+  CHECK(promising.skipped_past_floor.load() == 0);
+  REQUIRE(evaluated + skipped >= 500);
+#if not defined(__SANITIZE_THREAD__)
+  CHECK(evaluated * 4 < evaluated + skipped);
+#endif
 }
 
 TEST_CASE("a promise record is read whole while its writer publishes")

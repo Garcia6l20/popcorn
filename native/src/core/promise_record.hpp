@@ -110,6 +110,15 @@ public:
     }
   }
 
+  /**
+   * @brief A floor the writer published, read on any thread while it may publish: its last
+   *        floor or an earlier one.
+   */
+  [[nodiscard]] auto floor_seen() const noexcept -> sys_time
+  {
+    return sys_time{floor_.load(std::memory_order_relaxed)};
+  }
+
   /** @brief The published floor, on the writer's thread or with the writer stopped. */
   [[nodiscard]] auto floor() const noexcept -> sys_time
   {
