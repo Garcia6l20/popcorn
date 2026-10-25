@@ -847,7 +847,8 @@ class System:
         return self._handle.base_of_ps(index)
 
     def time_of(self, member: str) -> VirtualTime:
-        """System time of `member`, its local time plus its base.
+        """System time of `member`, its local time plus its base. After a member stop at
+        system time P, a member that runs a goal and sleeps below P stands at P.
 
         Raises:
             KeyError: No such member.
@@ -2116,9 +2117,10 @@ class UartTap:
 
     - Stopped: no run, no free run, no member goal and no member `running()` pending. Anyone
       but a callback of another machine, see the last item. Now is the later of the two ends'
-      system times, `System.time_of`. After a run a member stop ended, the other members stand
-      where the run left them, a position that depends on the quantum, and so does now. `cut`
-      accepts a start from now on.
+      system times, `System.time_of`. After a run a member stop ended at P, a member that runs
+      a goal and sleeps below P stands at P. A member that ran past P stands where the run left
+      it, a position that depends on the quantum, and so does now. `cut` accepts a start from
+      now on.
     - While the system runs, between two pauses of `running()` too, or with a member goal
       pending: a callback of the link's cut owner, `owner`, such as an intercept or a model
       method on that member. Now is the owner's system time at the callback, so the result is

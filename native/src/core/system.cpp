@@ -65,6 +65,7 @@ enum class phase : std::uint8_t
   arrive_b,
   after_b,
   idle_to,
+  park,
   sleeping,
 };
 
@@ -184,6 +185,7 @@ struct system::impl
       std::move_only_function<void(std::size_t)> sleep_hook);
 
   [[nodiscard]] auto deliverable(entry const& head) const noexcept -> bool;
+  [[nodiscard]] auto parks(slot const& one) const noexcept -> bool;
   [[nodiscard]] auto best_entry() const -> std::optional<entry>;
   [[nodiscard]] auto idle_entry() const -> std::optional<entry>;
   void               merge_found() noexcept;
@@ -332,7 +334,7 @@ public:
             phase_            = phase::run;
             continue;
           }
-          phase_ = sys_.chosen.idle ? phase::idle_to : phase::begin;
+          phase_ = sys_.chosen.idle ? phase::idle_to : sys_.parks(one) ? phase::park : phase::begin;
           if(phase_ == phase::begin)
           {
             return std::nullopt;
@@ -358,6 +360,14 @@ public:
             return request_to(sys_.chosen.target, false, false);
           }
           settle_idle(target);
+          phase_ = phase::begin;
+          return std::nullopt;
+        case phase::park:
+          if(position(target) < sys_.chosen.head->at)
+          {
+            window_ = sys_.window;
+            return request_to(sys_.chosen.head->at, false, true);
+          }
           phase_ = phase::begin;
           return std::nullopt;
       }
@@ -866,6 +876,16 @@ auto system::impl::deliverable(entry const& head) const noexcept -> bool
   return std::ranges::all_of(slots, [&head](slot const& one) {
     return not one.running() or one.rep.quiescent or one.rep.position >= head.at;
   });
+}
+
+auto system::impl::parks(slot const& one) const noexcept -> bool
+{
+  return chosen.pause
+     and chosen.head
+     and chosen.head->kind == entry_kind::stopped
+     and one.running()
+     and one.rep.quiescent
+     and one.rep.position < chosen.head->at;
 }
 
 auto system::impl::best_entry() const -> std::optional<entry>

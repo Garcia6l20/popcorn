@@ -371,7 +371,9 @@ public:
       pre(held.holds(*this));
 
   /**
-   * @brief System time of member @p member, parked.
+   * @brief System time of member @p member, parked. After a pause that delivered a member
+   *        stop at P, a member whose goal runs and whose core sleeps below P stands at P. A
+   *        member past P stands where it stopped.
    * @throws machine_running while a resume is in flight.
    */
   [[nodiscard]] auto time_of(held_system const& held, std::size_t member) const -> sys_time

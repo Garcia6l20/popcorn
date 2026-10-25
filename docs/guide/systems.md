@@ -32,6 +32,10 @@ is the member's `Machine`, so `var`, `periph`, `reg` and the hooks work as on a 
 A member's `Machine.time` counts from its own reset. `system.time_of(name)` gives its system
 time, and `system.to_local()` and `system.to_system()` convert between the two.
 
+After a member stop at system time `P`, every other member that runs a goal and sleeps below
+`P` stands at `P`: its `system.time_of(name)` is `P`. A member that ran past `P`, busy or asleep,
+stands where it stopped, a position that depends on the quantum.
+
 A member that has no goal while another one runs one is halted. Its core executes nothing, and
 its clocks, peripherals and DMA follow the system time. A goal's `budget` counts executed
 instructions, so halted time does not use it up.

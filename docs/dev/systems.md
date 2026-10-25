@@ -68,6 +68,16 @@ A member with no goal while another member runs one is halted. Its core is held 
 to the system's decision after each barrier, so its clocks, peripherals and DMA follow system
 time. A halted member's time counts in its instruction count but not in a goal's budget.
 
+## Members asleep at a member stop
+
+A member whose goal runs and whose core sleeps stops a slice where it fell asleep, so its
+position at a pause depends on `Q`. When a pause delivers a member stop at `P`, every such member
+below `P` runs on to `P` after the third completion fixed the outcome as that member stop, past
+the pause's drain. Its slice holds at `P` with `hold_from_until`, `stop_quiescent` off. It
+executes nothing on the way: it slept with no event due before the barrier, and the pause's
+drain hands only frames that arrive at or after the barrier. A member asleep past `P` stays
+where it fell asleep. Parking applies to delivered member stops only.
+
 ## Locks
 
 The system has one mutex. Only threads that are not host threads take it, and a thread holding

@@ -1581,6 +1581,182 @@ TEST_CASE("an IDLE pause resolves goals that are not open and keeps the open one
   CHECK(r.sys->undecided(held) == std::vector<std::size_t>{0});
 }
 
+namespace
+{
+constexpr std::int64_t parking_stop = 1 * ms_ps + 3 * us_ps + 250'000;
+
+auto sleeper_clock(rig const& r, std::size_t member) -> std::int64_t
+{
+  return static_cast<std::int64_t>(core::access(
+      *r.members[member].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; }));
+}
+
+auto parking_quanta() -> std::vector<variant>
+{
+  auto quanta = variants();
+  quanta.push_back({.name = "q=l/7", .lowered = 7});
+  return quanta;
+}
+
+auto sleeper_and_stopper() -> std::vector<core::member_ref>
+{
+  return {member("idle", "idle_forever"), member("alu", "alu_entry")};
+}
+}
+
+TEST_CASE("a member stop parks a sleeping running member at the stop's time, at any quantum")
+{
+  std::optional<std::vector<std::uint64_t>> reference;
+  for(auto const& how : parking_quanta())
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    rig          r{.members = sleeper_and_stopper()};
+    r.build(how);
+    auto       sleeping = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto       stopping = r.goal(1, {.until_time = core::sys_time{parking_stop}});
+    auto const stopped  = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    CHECK(stopped.member == 1);
+    CHECK(stopped.at.ps >= parking_stop);
+    CHECK(stopping.get().at == stopped.at);
+    CHECK_FALSE(sleeping.done());
+    CHECK(r.now_of(0) == stopped.at.ps);
+    CHECK(sleeper_clock(r, 0) == stopped.at.ps);
+    auto dump = r.dump();
+    dump.push_back(static_cast<std::uint64_t>(stopped.at.ps));
+    if(reference)
+    {
+      CHECK(dump == *reference);
+    }
+    else
+    {
+      reference = dump;
+    }
+  }
+}
+
+TEST_CASE("a sleeping member that ran past a member stop's time stays where it fell asleep")
+{
+  constexpr std::int64_t woken = 1 * ms_ps + 10 * us_ps;
+  for(auto const& how : {variants()[0], variants()[2]})
+  {
+    CAPTURE(how.name);
+    rig r{
+        .members = {sleeper_with_event(woken / 250'000), member("alu", "alu_entry")}
+    };
+    r.build(how);
+    auto       sleeping = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto       stopping = r.goal(1, {.until_time = core::sys_time{parking_stop}});
+    auto const stopped  = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    CHECK(stopped.member == 1);
+    REQUIRE(stopped.at.ps < woken);
+    CHECK(r.now_of(0) == woken);
+    CHECK(sleeper_clock(r, 0) == woken);
+    CHECK_FALSE(sleeping.done());
+  }
+}
+
+TEST_CASE("a parked member's goal stops nothing on its way to the member stop's time")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    rig r{.members = sleeper_and_stopper()};
+    r.build(how);
+    auto const asked    = std::make_shared<std::atomic<int>>(0);
+    auto       sleeping = r.goal(
+        0, {.until     = popcorn::address{0x0800'0001},
+            .budget    = icount{100},
+            .exact     = icount{100},
+            .stop_when = [asked] { return ++*asked > 0; },
+            .open      = true});
+    auto       stopping = r.goal(1, {.until_time = core::sys_time{parking_stop}});
+    auto const stopped  = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    CHECK(stopped.member == 1);
+    CHECK(stopping.get().at == stopped.at);
+    CHECK_FALSE(sleeping.done());
+    CHECK(asked->load() == 0);
+    CHECK(r.now_of(0) == stopped.at.ps);
+  }
+}
+
+TEST_CASE("a member parked by a member stop resets at the stop's time")
+{
+  rig r{.members = sleeper_and_stopper()};
+  r.build(variants()[1]);
+  auto       sleeping = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+  auto       stopping = r.goal(1, {.until_time = core::sys_time{parking_stop}});
+  auto const stopped  = r.run({});
+  REQUIRE(stopped.reason == core::pause_reason::delivered);
+  {
+    auto const held = r.sys->lock();
+    r.sys->withdraw(held, 0);
+    r.sys->reset(held, 0, popcorn::reset_kind::software);
+    CHECK(r.sys->time_of(held, 0) == stopped.at);
+    CHECK(r.sys->base_of(0) == stopped.at);
+  }
+  CHECK_THROWS_AS(std::ignore = sleeping.get(), core::operation_cancelled);
+  CHECK(r.links[0]->sender_resets == std::vector{stopped.at.ps});
+}
+
+TEST_CASE("a state saved after a member stop resumes as the run that kept going")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    rig r{.members = sleeper_and_stopper()};
+    r.build(how);
+    auto       sleeping = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto       stopping = r.goal(1, {.until_time = core::sys_time{parking_stop}});
+    auto const stopped  = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    {
+      auto const held = r.sys->lock();
+      r.sys->withdraw(held, 0);
+      r.sys->release(held, 1, true);
+    }
+    std::vector<core::snapshot> saved;
+    for(auto const& one : r.members)
+    {
+      saved.push_back(core::access(*one.on, 0, [](core::machine& m) { return m.snapshot(); }));
+    }
+    std::vector<std::byte> state;
+    {
+      auto const held = r.sys->lock();
+      r.sys->save(held, state);
+    }
+    auto const onward = [&r] {
+      auto       again = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+      auto       later = r.goal(1, {.until_time = core::sys_time{2 * parking_stop}});
+      auto const next  = r.run({});
+      REQUIRE(next.reason == core::pause_reason::delivered);
+      CHECK(r.now_of(0) == next.at.ps);
+      auto dump = r.dump();
+      dump.push_back(static_cast<std::uint64_t>(next.at.ps));
+      auto const held = r.sys->lock();
+      r.sys->withdraw(held, 0);
+      r.sys->release(held, 1, true);
+      return dump;
+    };
+    auto const kept = onward();
+    {
+      auto const held = r.sys->lock();
+      for(std::size_t index = 0; index < 2; ++index)
+      {
+        core::access(*r.members[index].on, 0, [&](core::machine& m) {
+          m.restore(core::snapshot{saved[index].data()});
+        });
+      }
+      r.sys->load(held, state);
+      CHECK(r.sys->time_of(held, 0) == stopped.at);
+    }
+    CHECK(onward() == kept);
+  }
+}
+
 TEST_CASE("an error in a halted member before a resolution found later in its window comes first")
 {
   for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[4]})
