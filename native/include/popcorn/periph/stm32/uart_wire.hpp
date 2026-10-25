@@ -336,11 +336,12 @@ struct wire_state
  *        off in opposite directions are about 6 percent apart and get no warning, the
  *        receiver's FE and NE still show it. Frames the sender
  *        transmits still reach the endpoint the wire replaced. Edits armed from any thread
- *        replace or drop frames by number. Injected frames go on the wire's injected lane. Two
- *        frames overlapping on the receiver's line are a system error at the later one's start,
- *        its sender start for a peer frame, its receiver start for an injected one. An injected
- *        frame and a peer frame overlapping are an error at the later of the injected frame's
- *        start and the peer frame's sender start. The tap gets
+ *        replace or drop frames by number. Injected frames go on the wire's injected lane. Two peer
+ *        frames or two injected frames overlapping on the receiver's line are a system error at
+ *        the later one's start, its sender start for a peer frame, its receiver start for an
+ *        injected one. An injected frame and a peer frame overlapping are an error of the
+ *        receiver at the later of the injected frame's start and the peer frame's sender start,
+ *        naming the injected frame. The tap gets
  *        each frame once its end, or its abort for a lost frame, the receiver end for an
  *        injected frame, lies at or before the barrier of the drain before the latest one, a
  *        pause point release_through() names, the earliest member position show_drained() names
@@ -549,7 +550,7 @@ public:
    *        it. Acceptance then depends on wall timing. No overlap check at the call: an overlap
    *        is found at the drain, a system error at the later frame's start for two injected
    *        frames, at the later of the injected frame's start and the peer frame's sender start
-   *        for a peer frame.
+   *        for a peer frame. Either error faults the receiver.
    * @param data Data bits, one frame each, not empty. Each frame gets the declared parity's bit
    *        in place of the MSB of its word.
    * @param at Start-bit edge of the first frame at the receiver, system time.

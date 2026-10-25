@@ -115,7 +115,7 @@ A tap also edits the line:
   frame already on the receiver's line raises `ValueError` at the call. While the system runs,
   the overlap stops the system with an error at a time the frames fix: the later frame's start
   for two injected frames, and the later of the injected frame's start and the peer frame's
-  sender start for an injected frame and a peer frame.
+  sender start for an injected frame and a peer frame. The error is the receiving member's.
 - `tap.replace(index, data, towards=)` gives the sender's frames from number `index` on new data,
   one frame per byte. `tap.drop(index, n, towards=)` keeps `n` frames off the line. Both raise
   `ValueError` for a frame that has started already. `TapFrame.index` is the number.

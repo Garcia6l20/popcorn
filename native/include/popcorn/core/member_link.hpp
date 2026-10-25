@@ -184,9 +184,10 @@ public:
    *        with no drain() or finish() of the link running: on the host thread that finished the
    *        pause last, or on the caller of system::resume() when every member finished before it
    *        returned. Called at each sleep, on the receiver's host thread after its drain at
-   *        that attempt and before it sleeps, with every member stopped at the attempt. Runs
-   *        where no exception may leave, an allocation failure terminates. A link with no
-   *        observer keeps the default, which does nothing.
+   *        that attempt and before it sleeps, with no other drain(), release_through(),
+   *        show_drained() or finish() of the link running. Runs where no exception may leave,
+   *        an allocation failure terminates. A link with no observer keeps the default, which
+   *        does nothing.
    * @param at The earliest member position at the pause or the sleep attempt, system time.
    */
   virtual void show_drained([[maybe_unused]] sys_time at)

@@ -499,7 +499,7 @@ def clash_before_a_peer_frame(system: System, start: VirtualTime) -> tuple[str, 
     return clash[0], tap.frames()
 
 
-@pytest.mark.parametrize(("slice_instructions", "third"), [VARIANTS[0], VARIANTS[2]])
+@pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)
 def test_a_running_injection_meeting_an_earlier_drained_peer_frame_errs_at_its_start(
     pair: Build, slice_instructions: int, third: VirtualDuration | None
 ) -> None:

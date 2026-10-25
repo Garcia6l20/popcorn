@@ -2204,6 +2204,7 @@ class UartTap:
         member's position, see the class. While the system runs, the tap fills at each
         barrier and holds every frame ended two windows before the receiving member's time, so
         how many frames a call takes depends on wall timing. Each frame's content never does.
+        Before a free run sleeps, it holds every frame ended by the earliest member's position.
 
         Returns:
             The frames, ordered by `end`, then direction: towards the link's second end first.
@@ -2237,7 +2238,8 @@ class UartTap:
         after the reach of the deliveries done so far, which depends on wall timing, and an
         overlap is found later: the system stops with an error at a time fixed by the frames,
         the later frame's start for two injected frames, and the later of the injected frame's
-        start and the peer frame's sender start for an injected frame and a peer frame.
+        start and the peer frame's sender start for an injected frame and a peer frame. The
+        error is the receiving member's.
 
         Raises:
             TypeError: `data` is no bytes, `at` no VirtualTime or `towards` no str.

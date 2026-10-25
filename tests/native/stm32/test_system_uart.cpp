@@ -2465,3 +2465,63 @@ TEST_CASE("a back-to-back frame ending in the last cycle before a barrier posts 
     }
   }
 }
+
+TEST_CASE("a frame handed to the receiver's port before its member reset never reaches it")
+{
+  constexpr std::int64_t latency = 1 * ms_ps;
+  for(auto const reset : {false, true})
+  {
+    CAPTURE(reset);
+    world w;
+    w.add("idle");
+    w.add("link_rx");
+    w.link(0, 1, latency);
+    w.host(variants()[0]);
+    REQUIRE(w.resume(1500 * us_ps).reason == core::pause_reason::system_time);
+    auto const stopped = [&w](core::held_system const& held) {
+      auto const now   = w.sys->time_of(held, 1);
+      auto const local = static_cast<std::int64_t>(core::access(
+          *w.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; }));
+      return stm32::stopped_receiver{
+          .now = now, .map = core::time_map{core::sys_time{now.ps - local}}};
+    };
+    auto const pending = [&w] {
+      return core::access(*w.members[1].on, 0, [](core::machine& m) { return m.pending_events(); });
+    };
+    std::int64_t end{};
+    {
+      auto const                       held     = w.sys->lock();
+      auto const                       receiver = stopped(held);
+      auto const                       before   = pending();
+      std::vector<std::uint16_t> const first{0x5a};
+      REQUIRE(w.wires[0]
+                  ->inject(first, core::sys_time{receiver.now.ps + 300 * us_ps}, receiver)
+                  .has_value());
+      REQUIRE(pending() > before);
+      if(reset)
+      {
+        w.sys->reset(held, 1, popcorn::reset_kind::software);
+        auto& target = *w.nodes[1]->target;
+        target.regs().write(*target.regs().find("pc"), sym("usart_ll", "link_rx"));
+      }
+      auto const                       after = stopped(held);
+      std::vector<std::uint16_t> const second{0xa5};
+      REQUIRE(w.wires[0]
+                  ->inject(second, core::sys_time{after.now.ps + 1500 * us_ps}, after)
+                  .has_value());
+      end = after.now.ps + 3 * ms_ps;
+    }
+    REQUIRE(w.resume(end).reason == core::pause_reason::system_time);
+    std::vector<std::uint32_t> received;
+    for(auto const& one : entries(w.nodes[1]->log()))
+    {
+      if(one.kind == link_byte)
+      {
+        received.push_back(one.data);
+      }
+    }
+    CHECK(
+        received
+        == (reset ? std::vector<std::uint32_t>{0xa5} : std::vector<std::uint32_t>{0x5a, 0xa5}));
+  }
+}
