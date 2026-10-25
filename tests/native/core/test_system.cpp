@@ -2231,6 +2231,28 @@ TEST_CASE("save refuses a pending goal and an undecided member")
   CHECK_FALSE(out.empty());
 }
 
+TEST_CASE("a system state of another format is refused with both formats named")
+{
+  rig r{
+      .members = {member("alu", "alu_entry"), member("alu", "alu_entry")}
+  };
+  r.build(variants()[0]);
+  std::vector<std::byte> state;
+  auto const             held = r.sys->lock();
+  r.sys->save(held, state);
+  constexpr std::string_view key = "format";
+  auto const                 at  = std::ranges::search(state, key, [](std::byte byte, char c) {
+                    return std::to_integer<char>(byte) == c;
+                                   }).begin();
+  REQUIRE(at != state.end());
+  auto const value = at + key.size() + 1;
+  REQUIRE(std::to_integer<int>(*value) == 1);
+  *value = std::byte{2};
+  CHECK_THROWS_WITH_AS(
+      r.sys->load(held, state),
+      doctest::Contains("a state of format 2, this system loads format 1"), popcorn::config_error);
+}
+
 TEST_CASE("a reset decides a member held at its stop, which runs on the next system time resume")
 {
   for(bool const released : {false, true})
