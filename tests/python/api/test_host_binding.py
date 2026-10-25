@@ -27,11 +27,13 @@ from popcorn._observe import open_trace
 from popcorn._refs import Pending
 from popcorn._stop import Stop, stop_of
 from popcorn.model import Model, on_read
+from popcorn.stm32.description import cached_description
 from popcorn.trace import TraceKind
 from popcorn.units import VirtualTime, s, us
 
 from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, Machines, load_each_unforwarded, stalled
 from .devices_example import Eeprom24
+from .linked import USART_LL
 from .projects import MODEL_ELF, MODEL_JSON
 
 VALUE: contextvars.ContextVar[str] = contextvars.ContextVar("host_binding_value", default="unset")
@@ -2269,6 +2271,56 @@ def test_a_child_forked_from_a_running_machine_exits_and_refuses_it(mode: str) -
         assert "was built before os.fork, in the parent process" in lines[0]
     if mode == "inherited":
         assert lines[0].startswith("request refused: this machine request was made before os.fork")
+
+
+def test_a_child_forked_from_a_parent_with_a_run_system_drops_it(
+    u575: popcorn.PartDescription,
+) -> None:
+    del u575
+    child = run_child(
+        f"""
+        import asyncio
+        import gc
+        import os
+        import sys
+        import warnings
+
+        import popcorn
+        from popcorn import System, UartLink
+        from popcorn.units import ms, us
+
+        warnings.simplefilter("ignore", DeprecationWarning)
+        part = popcorn.load_description({str(cached_description("STM32U575QGIx"))!r})
+
+
+        def member(entry, name):
+            m = popcorn.Machine(part, image=popcorn.Image.elf({str(USART_LL)!r}), name=name)
+            m.reset()
+            asyncio.run(m.run(until="main", budget=1_000_000))
+            m.reg.pc = m.sym(entry)
+            return m
+
+
+        a = member("link_ping", "a")
+        b = member("link_echo", "b")
+        system = System(
+            {{"a": a, "b": b}}, [UartLink("a.USART1", "b.USART1", latency=us(20), baud=460_800)]
+        )
+        asyncio.run(system.run(for_=ms(1)))
+        pid = os.fork()
+        if pid == 0:
+            del system, a, b
+            gc.collect()
+            sys.exit(0)
+        _, status = os.waitpid(pid, 0)
+        system.close()
+        print("child", os.waitstatus_to_exitcode(status), flush=True)
+        """,
+        timeout=60,
+    )
+    assert child.returncode == 0, child.stderr
+    assert child.stderr == ""
+    assert child.stdout.strip().splitlines()[-1] == "child 0"
 
 
 def test_a_stamped_write_left_queued_at_script_end_is_not_reported() -> None:

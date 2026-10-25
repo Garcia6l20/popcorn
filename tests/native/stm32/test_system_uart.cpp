@@ -27,9 +27,11 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <random>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -2185,5 +2187,43 @@ TEST_CASE("an owner woken from an idle sleep behind the latest member cuts its l
     std::ignore    = cut.get();
     w.sys->request_pause();
     CHECK(pending.get().reason == core::pause_reason::requested);
+  }
+}
+
+TEST_CASE("a sender toggling UE mid-frame posts many segments a window and matches the oracle")
+{
+  constexpr std::int64_t latency = 1 * ms_ps;
+  constexpr std::int64_t end     = 30 * ms_ps;
+  world                  reference;
+  reference.add("link_ue_toggle");
+  reference.add("link_rx");
+  reference.link(0, 1, latency);
+  reference.oracle(end);
+  auto const expected = reference.dump();
+  keep_dump("ue-toggle-oracle", expected);
+  auto const lost = std::ranges::count(reference.taps[0], true, &stm32::tap_frame::lost);
+  REQUIRE(lost > 10'000);
+  for(auto const& how : {variants()[0], variants()[2], variants()[7]})
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    w.add("link_ue_toggle");
+    w.add("link_rx");
+    w.link(0, 1, latency);
+    w.host(how);
+    auto const stopped = w.run_to(end);
+    CHECK(stopped.reason == core::pause_reason::system_time);
+    auto const seen = w.dump();
+    keep_dump(std::string{"ue-toggle-"} + std::string{how.name}, seen);
+    CHECK(seen == expected);
+    std::map<std::int64_t, std::uint64_t> per_window;
+    for(auto const& frame : w.taps[0])
+    {
+      per_window[frame.start.ps / latency] += frame.lost ? 2 : 1;
+    }
+    auto const busiest = std::ranges::max(per_window | std::views::values);
+    MESSAGE("busiest window ", busiest);
+    CHECK(busiest > 1000);
   }
 }
