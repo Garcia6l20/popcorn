@@ -1380,16 +1380,11 @@ private:
       at = std::min(at, *stamped_);
     }
     at = std::max(at, mine_.floor);
-    if(not one.inbound.empty())
+    for(auto* link : one.inbound)
     {
-      held_dues_.resize(one.inbound.size());
-      one.inbound.front()->hold_group_before(one.inbound, std::max(at, promised_), held_dues_);
-      for(auto const& due : held_dues_)
+      if(auto const due = link->hold_inputs_before(std::max(at, promised_)))
       {
-        if(due)
-        {
-          at = std::min(at, *due);
-        }
+        at = std::min(at, *due);
       }
     }
     mine_.general = std::max(mine_.floor, at);
@@ -1729,34 +1724,33 @@ private:
     }
   }
 
-  system::impl&                        sys_;
-  std::size_t                          index_;
-  phase                                phase_{phase::begin};
-  bool                                 held_last_{};
-  bool                                 sleeping_{};
-  bool                                 counted_{};
-  bool                                 calm_{};
-  sys_time                             lead_{earliest};
-  sys_time                             promised_{earliest};
-  detail::promise_pace                 pace_{};
-  sys_time                             slice_to_{never};
-  std::optional<sys_time>              stamped_{};
-  std::optional<sys_time>              frozen_reach_{};
-  bool                                 slept_{};
-  std::uint64_t                        mark_{};
-  std::vector<std::deque<sys_time>>    posts_{};
-  std::vector<sys_time>                passed_{};
-  std::vector<sys_time>                wire_eot_{};
-  std::vector<sys_time>                eot_{};
-  std::vector<std::optional<sys_time>> held_dues_{};
-  promise_record                       mine_{};
-  promise_record                       view_{};
-  promise_record                       progressed_{};
-  machine const*                       progressing_{};
-  vtime                                until_last_{};
-  std::atomic<bool>                    aborted_{false};
-  std::atomic<bool>                    nudged_{false};
-  std::atomic<bool>                    in_run_{false};
+  system::impl&                     sys_;
+  std::size_t                       index_;
+  phase                             phase_{phase::begin};
+  bool                              held_last_{};
+  bool                              sleeping_{};
+  bool                              counted_{};
+  bool                              calm_{};
+  sys_time                          lead_{earliest};
+  sys_time                          promised_{earliest};
+  detail::promise_pace              pace_{};
+  sys_time                          slice_to_{never};
+  std::optional<sys_time>           stamped_{};
+  std::optional<sys_time>           frozen_reach_{};
+  bool                              slept_{};
+  std::uint64_t                     mark_{};
+  std::vector<std::deque<sys_time>> posts_{};
+  std::vector<sys_time>             passed_{};
+  std::vector<sys_time>             wire_eot_{};
+  std::vector<sys_time>             eot_{};
+  promise_record                    mine_{};
+  promise_record                    view_{};
+  promise_record                    progressed_{};
+  machine const*                    progressing_{};
+  vtime                             until_last_{};
+  std::atomic<bool>                 aborted_{false};
+  std::atomic<bool>                 nudged_{false};
+  std::atomic<bool>                 in_run_{false};
 
   std::chrono::steady_clock::time_point left_{};
 };

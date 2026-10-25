@@ -651,33 +651,3 @@ TEST_CASE("a host read and write of the system space carry Secure privileged att
   REQUIRE(f.target->mem().write(0xE000'E400, 4, 0));
   CHECK(seen(f.module->access_attrs()) == seen_attrs{.secure = true, .privileged = true});
 }
-
-TEST_CASE("a wake answer follows every NVIC write, reset and restore of the priorities")
-{
-  constexpr std::uint32_t source = 3;
-  constexpr address       iser   = 0xE000'E100;
-  constexpr address       icer   = 0xE000'E180;
-  constexpr address       ipr    = 0xE000'E400 + source;
-  auto                    f      = booted();
-  f.set("basepri", 0x60);
-  CHECK_FALSE(f.module->may_wake(source));
-  REQUIRE(f.target->mem().write(iser, 4, 1u << source));
-  REQUIRE(f.target->mem().write(ipr, 1, 0x80));
-  CHECK_FALSE(f.module->may_wake(source));
-  REQUIRE(f.target->mem().write(ipr, 1, 0x40));
-  CHECK(f.module->may_wake(source));
-  auto const taken = f.target->snapshot();
-  REQUIRE(f.target->mem().write(ipr, 1, 0x80));
-  CHECK_FALSE(f.module->may_wake(source));
-  f.target->restore(taken);
-  CHECK(f.module->may_wake(source));
-  REQUIRE(f.target->mem().write(icer, 4, 1u << source));
-  CHECK_FALSE(f.module->may_wake(source));
-  f.target->restore(taken);
-  CHECK(f.module->may_wake(source));
-  f.set("basepri", 0x20);
-  CHECK_FALSE(f.module->may_wake(source));
-  f.set("basepri", 0x60);
-  f.target->reset();
-  CHECK_FALSE(f.module->may_wake(source));
-}

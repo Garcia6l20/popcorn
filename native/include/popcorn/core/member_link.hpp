@@ -195,29 +195,6 @@ public:
   }
 
   /**
-   * @brief hold_inputs_before() over a group of one receiver's inbound links at one time: sets
-   *        the bound of every link of @p links to @p at and stores each link's due() at its
-   *        index of @p dues. The bounds and dues equal those of calling
-   *        hold_inputs_before(@p at) on each link in turn, so an override may take a lock the
-   *        links of the group share once for the whole call. Called on the receiver's host
-   *        thread, on the first link of @p links, under the conditions of
-   *        hold_inputs_before(). The default makes the per-link calls.
-   * @param links The receiver's inbound links, this link first.
-   * @param at System time before which every link of @p links refuses inputs to the receiver.
-   * @param dues One entry per link of @p links, set to that link's due() once its bound is set.
-   */
-  virtual void hold_group_before(
-      std::span<member_link* const>      links,
-      sys_time                           at,
-      std::span<std::optional<sys_time>> dues)
-  {
-    for(std::size_t index = 0; index < links.size() and index < dues.size(); ++index)
-    {
-      dues[index] = links[index]->hold_inputs_before(at);
-    }
-  }
-
-  /**
    * @brief Whether the link holds nothing for its receiver: nothing posted, queued or kept
    *        that a later drain would hand. Called on the receiver's host thread after its drain,
    *        with the sender stopped.

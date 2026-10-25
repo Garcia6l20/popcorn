@@ -247,7 +247,6 @@ void cortex_m::reset(address reset_vector)
   }
   state_ = reset_state(reset_vector);
   ++generation_;
-  nvic_changed();
   for(auto const& reg : registers())
   {
     if(reg.name.starts_with('r') or reg.name.starts_with('s') or reg.name == "fpscr")
@@ -563,7 +562,6 @@ void cortex_m::load(std::span<std::byte const> in)
 {
   auto live = state_;
   state_    = reflex::serde::bson::deserializer{in}.load<state>();
-  nvic_changed();
   if(not trustzone())
   {
     set_context(engine_handle(), state_.special, stack_limits());
@@ -658,11 +656,6 @@ void cortex_m::set_exception_enabled(std::uint32_t number, bool value)
 {
   put_bit(state_.exceptions.enabled, number, value);
   refresh_pending();
-}
-
-void cortex_m::nvic_changed() noexcept
-{
-  ++nvic_generation_;
 }
 
 void cortex_m::keep_failure(std::exception_ptr failure) noexcept

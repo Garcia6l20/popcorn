@@ -7,8 +7,6 @@
 #include <array>
 #include <format>
 #include <limits>
-#include <mutex>
-#include <ranges>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -34,14 +32,13 @@ constinit thread_local int registrations_held = 0;
 class registration_hold
 {
 public:
-  explicit registration_hold(link_registration& registration)
-      : registration_{registration}, held_{registrations_held}
+  explicit registration_hold(link_registration& registration) : registration_{registration}
   {
-    contract_assert(held_ == 0);
+    contract_assert(registrations_held == 0);
     registration_.contenders.fetch_add(1);
     registration_.mutex.lock();
     registration_.contenders.fetch_sub(1);
-    ++held_;
+    ++registrations_held;
   }
 
   registration_hold(registration_hold const&)                    = delete;
@@ -51,35 +48,12 @@ public:
 
   ~registration_hold()
   {
-    --held_;
+    --registrations_held;
     registration_.mutex.unlock();
   }
 
 private:
   link_registration& registration_;
-  int&               held_;
-};
-
-class link_locks_counted
-{
-public:
-  link_locks_counted() : held_{core::detail::link_locks_held}
-  {
-    ++held_;
-  }
-
-  link_locks_counted(link_locks_counted const&)                    = delete;
-  auto operator=(link_locks_counted const&) -> link_locks_counted& = delete;
-  link_locks_counted(link_locks_counted&&)                         = delete;
-  auto operator=(link_locks_counted&&) -> link_locks_counted&      = delete;
-
-  ~link_locks_counted()
-  {
-    --held_;
-  }
-
-private:
-  int& held_;
 };
 
 auto overlaps(detail::line_cut const& cut, core::sys_time start, core::sys_time end) -> bool
@@ -297,39 +271,11 @@ void uart_wire::cut_changed(core::sys_time at)
 auto uart_wire::hold_inputs_before(core::sys_time at) -> std::optional<core::sys_time>
 {
   registration_hold const registered{*registration_};
-  core::link_guard const  held{inject_mutex_};
-  held_before_ = at;
-  return due_held();
-}
-
-void uart_wire::hold_group_before(
-    std::span<core::member_link* const>      links,
-    core::sys_time                           at,
-    std::span<std::optional<core::sys_time>> dues)
-{
-  auto const shared = [this](core::member_link* link) -> uart_wire* {
-    auto* const wire = dynamic_cast<uart_wire*>(link);
-    return wire != nullptr and wire->registration_ == registration_ ? wire : nullptr;
-  };
-  auto const group = std::views::zip(links, dues);
-  for(auto&& [link, due] : group)
   {
-    if(shared(link) == nullptr)
-    {
-      due = link->hold_inputs_before(at);
-    }
+    core::link_guard const held{inject_mutex_};
+    held_before_ = at;
   }
-  registration_hold const  registered{*registration_};
-  link_locks_counted const counted;
-  for(auto&& [link, due] : group)
-  {
-    if(auto* const wire = shared(link))
-    {
-      std::scoped_lock const held{wire->inject_mutex_};
-      wire->held_before_ = at;
-      due                = wire->due_held();
-    }
-  }
+  return due();
 }
 
 void uart_wire::receiver_reset(core::sys_time at)
@@ -563,12 +509,7 @@ void uart_wire::deliver_injection(
 
 auto uart_wire::due() const -> std::optional<core::sys_time>
 {
-  core::link_guard const held{inject_mutex_};
-  return due_held();
-}
-
-auto uart_wire::due_held() const -> std::optional<core::sys_time>
-{
+  core::link_guard const        held{inject_mutex_};
   std::optional<core::sys_time> first;
   auto const                    take = [&first](core::sys_time at) {
     if(not first or at < *first)
