@@ -808,7 +808,7 @@ TEST_CASE("an aborted frame is lost on the wire and in the tap, the next one arr
   }
 }
 
-TEST_CASE("the tap at each barrier holds exactly the frames ended by it, at any window")
+TEST_CASE("the tap after each drain holds exactly the frames ended by the barrier before it")
 {
   auto full = one_way("link_tx", "link_rx", latency_20);
   full.oracle(script_end_ps);
@@ -823,8 +823,9 @@ TEST_CASE("the tap at each barrier holds exactly the frames ended by it, at any 
              auto taken = r.wires[0]->tap().take();
              seen.insert(seen.end(), taken.begin(), taken.end());
              auto const barrier = static_cast<std::int64_t>((k + 1) * window);
+             auto const before  = static_cast<std::int64_t>(k * window);
              auto const ended   = std::ranges::count_if(
-                 all, [&](stm32::tap_frame const& frame) { return frame.end.ps <= barrier; });
+                 all, [&](stm32::tap_frame const& frame) { return frame.end.ps <= before; });
              CHECK(seen.size() == static_cast<std::size_t>(ended));
              in_flight_checks += std::ranges::any_of(all, [&](stm32::tap_frame const& frame) {
                return frame.start.ps < barrier and barrier < frame.end.ps;

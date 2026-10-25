@@ -1226,6 +1226,14 @@ void system::impl::finish_pause() noexcept
       link->release_through(ended.at);
     }
   }
+  if(not was_closed
+     and (ended.reason == pause_reason::system_time or ended.reason == pause_reason::requested))
+  {
+    for(auto const& link : links)
+    {
+      link->show_drained(chosen.confirm);
+    }
+  }
   if(was_closed)
   {
     ended.reason = pause_reason::closed;

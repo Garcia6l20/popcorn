@@ -549,6 +549,7 @@ auto uart_wire::drain(
     core::time_map        receiver) -> std::optional<core::link_fault>
 {
   sole_tapper const                     sole{tapping_};
+  auto const                            shown = state_.last_barrier;
   std::vector<detail::line_cut>         cuts;
   std::vector<detail::queued_injection> due;
   std::vector<detail::wire_post>        held_over;
@@ -764,7 +765,11 @@ auto uart_wire::drain(
       into_.port->release_line(receiver.to_local(shifted(cut.end, latency_)), lanes_.peer);
     }
   }
-  emit(state_.untapped, fault ? std::min(barrier, fault->at) : barrier, cuts);
+  contract_assert(not fault or fault->at >= shown);
+  if(barrier < next)
+  {
+    emit(state_.untapped, shown, cuts);
+  }
   {
     registration_hold const registered{*registration_};
     core::link_guard const  held{inject_mutex_};
@@ -916,6 +921,12 @@ void uart_wire::release_through(core::sys_time at)
     state_.drained_through = std::max(state_.drained_through, at);
   }
   show_through(at);
+}
+
+void uart_wire::show_drained(core::sys_time at)
+{
+  sole_tapper const sole{tapping_};
+  emit(state_.untapped, at, cuts_before(at));
 }
 
 void uart_wire::finish(core::sys_time at)

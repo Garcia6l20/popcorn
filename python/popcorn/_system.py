@@ -2074,12 +2074,13 @@ class UartTap:
     on the line with its system times, and frames injected, replaced or dropped by number.
 
     The tap gets a frame once it ended. After a member stop, an IDLE pause or an error it holds
-    every frame whose stop-bit `end` is at or before the pause point, whatever the quantum, the
-    slicing or the wall timing. After an error the link whose frame raised it holds no later
-    frame, another link can also hold frames ended after the pause point, by an amount that
-    depends on the quantum. After a TIME stop or a requested pause it holds the frames ended
-    by the earliest member's position, which can lie before the pause point by an amount that
-    depends on the quantum. After `close()` it holds every frame that ended by the last pause.
+    every frame whose stop-bit `end` is at or before the pause point and no later frame,
+    whatever the quantum, the slicing or the wall timing. After a TIME stop or a requested pause
+    it holds the frames ended by the earliest member's position, which can lie before the pause
+    point by an amount that depends on the quantum. After `close()` it holds every frame that
+    ended by the last pause. While the system runs it can lag the latest frames by up to two
+    windows of the quantum behind the receiving member's time, and a read at a pause is complete
+    as above.
     It keeps up to 1 Mi frames per direction not read yet, about 380 bytes each, the oldest
     dropped and counted in `dropped`: take them with `frames()`.
     Reading never changes what the receiver gets.
@@ -2201,8 +2202,8 @@ class UartTap:
         ended by that point and not taken yet, whatever the quantum, the slicing or the wall
         timing. After a TIME stop or a requested pause it takes those ended by the earliest
         member's position, see the class. While the system runs, the tap fills at each
-        barrier, so how many frames a call takes depends on wall timing. Each frame's content
-        never does.
+        barrier and holds every frame ended two windows before the receiving member's time, so
+        how many frames a call takes depends on wall timing. Each frame's content never does.
 
         Returns:
             The frames, ordered by `end`, then direction: towards the link's second end first.

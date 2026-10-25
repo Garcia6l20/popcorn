@@ -137,6 +137,10 @@ public:
     {
       on_drain(barrier.ps);
     }
+    if(barrier == next)
+    {
+      pause_drained = barrier.ps;
+    }
     if(on_pause_drain and barrier == next)
     {
       on_pause_drain();
@@ -165,6 +169,11 @@ public:
     {
       on_drain(at.ps);
     }
+  }
+
+  void show_drained(core::sys_time at) override
+  {
+    shown_drained.push_back(at.ps);
   }
 
   void finish(core::sys_time at) override
@@ -198,6 +207,8 @@ public:
   bool                                        fail_load{};
   std::vector<std::int64_t>                   finished{};
   std::vector<std::int64_t>                   released{};
+  std::vector<std::int64_t>                   shown_drained{};
+  std::optional<std::int64_t>                 pause_drained{};
   std::thread::id                             released_on{};
   std::thread::id                             drained_on{};
   bool                                        reported{};
@@ -2054,6 +2065,7 @@ TEST_CASE("a member stop, an IDLE pause and an error pause release each link thr
     for(auto const& link : r.links)
     {
       CHECK(link->released == std::vector{stopped.at.ps});
+      CHECK(link->shown_drained.empty());
     }
   }
   for(auto const& how : {variants()[0], variants()[1]})
@@ -2070,6 +2082,7 @@ TEST_CASE("a member stop, an IDLE pause and an error pause release each link thr
     for(auto const& link : r.links)
     {
       CHECK(link->released == std::vector{stopped.at.ps});
+      CHECK(link->shown_drained.empty());
     }
   }
   for(auto const& how : {variants()[0], variants()[1]})
@@ -2090,11 +2103,12 @@ TEST_CASE("a member stop, an IDLE pause and an error pause release each link thr
     for(auto const& link : r.links)
     {
       CHECK(link->released == std::vector{stopped.at.ps});
+      CHECK(link->shown_drained.empty());
     }
   }
 }
 
-TEST_CASE("a TIME or requested pause with a member asleep far below its point releases no link")
+TEST_CASE("a TIME or requested pause shows each link through its earliest member, releasing none")
 {
   {
     rig r{.members = sleeper_and_stopper()};
@@ -2102,6 +2116,8 @@ TEST_CASE("a TIME or requested pause with a member asleep far below its point re
     auto const stopped = r.run(parking_stop);
     REQUIRE(stopped.reason == core::pause_reason::system_time);
     CHECK(r.links[0]->released.empty());
+    REQUIRE(r.links[0]->pause_drained.has_value());
+    CHECK(r.links[0]->shown_drained == std::vector{*r.links[0]->pause_drained});
   }
   rig r{.members = sleeper_and_stopper()};
   r.build(variants()[0]);
@@ -2124,6 +2140,8 @@ TEST_CASE("a TIME or requested pause with a member asleep far below its point re
   REQUIRE(stopped.reason == core::pause_reason::requested);
   CHECK(r.now_of(0) + 10 * static_cast<std::int64_t>(us_ps) < stopped.at.ps);
   CHECK(r.links[0]->released.empty());
+  REQUIRE(r.links[0]->pause_drained.has_value());
+  CHECK(r.links[0]->shown_drained == std::vector{*r.links[0]->pause_drained});
 }
 
 TEST_CASE("a release runs once per pause, off the receiver's thread when the sender finishes last")

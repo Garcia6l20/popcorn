@@ -340,10 +340,10 @@ struct wire_state
  *        frames overlapping on the receiver's line are a system error at the later one's start,
  *        its sender start for a peer frame, its receiver start for an injected one. The tap gets
  *        each frame once its end, or its abort for a lost frame, the receiver end for an
- *        injected frame, lies at or before a drained barrier, a pause point release_through()
- *        names or the final stop, in order of that time, so its content at a barrier does not
- *        depend on how the run was cut into windows. A drain that finds a fault shows only the
- *        frames ended by the fault's time, the rest follow at the release. A release collects the
+ *        injected frame, lies at or before the barrier of the drain before the latest one, a
+ *        pause point release_through() names, the earliest member position show_drained() names
+ *        or the final stop, in order of that time, so its content at a pause does not depend on
+ *        how the run was cut into windows. A pause's drain shows nothing. A release collects the
  *        posts still in both mailboxes as the final stop does, and a later drain that hands the
  *        same frames does not show them again. A running injection starts at or after the last
  *        pause point released. A sender reset aborts the frame in flight. After a receiver reset at
@@ -488,6 +488,7 @@ public:
       core::time_map        receiver) -> std::optional<core::link_fault> override;
   [[nodiscard]] auto quiet() const -> bool override;
   void               release_through(core::sys_time at) override;
+  void               show_drained(core::sys_time at) override;
   void               finish(core::sys_time at) override;
   void               save(std::vector<std::byte>& out) const override;
   void               load(std::span<std::byte const> in) override;

@@ -11,7 +11,7 @@ from typing import cast
 
 import popcorn
 import pytest
-from popcorn import EmulationError, System, TapFrame, UartTap, _core
+from popcorn import Call, EmulationError, Return, System, TapFrame, UartTap, _core
 from popcorn._refs import Pending
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
@@ -397,6 +397,47 @@ def test_frames_taken_by_two_threads_at_once_keep_each_direction_in_order(pair: 
     holding.join(10)
     every = first + tap.frames(towards="b.USART1")
     assert [f.index for f in every] == list(range(64))
+
+
+def read_from_receiver(system: System) -> tuple[list[tuple[VirtualTime, int]], list[TapFrame]]:
+    """Read the tap from b's USART1 interrupts while a runs free and b runs for 1003 us, then
+    at b's stop: each read's time with the frames held by then, and every frame read."""
+    a, b = system.members["a"], system.members["b"]
+    tap = system.tap("a.USART1")
+    shown: list[TapFrame] = []
+    reads: list[tuple[VirtualTime, int]] = []
+
+    def on_irq(call: Call) -> Return:
+        shown.extend(tap.frames(towards="b.USART1"))
+        reads.append((system.to_system("b", b.time), len(shown)))
+        return call.proceed()
+
+    b.intercept("USART1_IRQHandler", on_irq)
+
+    async def body() -> None:
+        async with a.running():
+            await b.run(for_=us(1003))
+
+    asyncio.run(body())
+    shown.extend(tap.frames(towards="b.USART1"))
+    return reads, shown
+
+
+@pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)
+def test_a_tap_read_from_a_member_callback_lags_two_windows_and_the_pause_completes_it(
+    pair: Build, slice_instructions: int, third: VirtualDuration | None
+) -> None:
+    whole = pair()
+    asyncio.run(to(whole, at(3000)))
+    every = whole.tap("a.USART1").frames(towards="b.USART1")
+    system = pair(slice_instructions, third)
+    reads, shown = read_from_receiver(system)
+    point = system.time_of("b")
+    assert len(reads) > 10
+    assert shown == [frame for frame in every if frame.end <= point]
+    for when, held in reads:
+        due = sum(1 for frame in every if frame.end.ps <= when.ps - 2 * L.ps)
+        assert held >= due, (when, held, due)
 
 
 def test_a_uart_whose_cts_is_held_or_pending_is_refused_a_link(

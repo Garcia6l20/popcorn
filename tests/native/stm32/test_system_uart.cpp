@@ -777,6 +777,46 @@ TEST_CASE("a drain fault's error pause taps only the frames ended by its point a
   }
 }
 
+TEST_CASE("a drain fault's error pause taps no frame past its point on any link at any quantum")
+{
+  for(auto const until : {script_end, std::int64_t{600 * us_ps}})
+  {
+    CAPTURE(until);
+    std::optional<std::vector<std::vector<stm32::tap_frame>>> reference;
+    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    {
+      CAPTURE(how.name);
+      world w;
+      w.strict = true;
+      w.add("link_tx_switch");
+      w.add("link_rx");
+      w.add("link_tx");
+      w.add("link_rx");
+      w.link(0, 1, 250 * us_ps);
+      w.link(2, 3, 250 * us_ps);
+      w.host(how);
+      auto const stopped = w.run_to(until);
+      REQUIRE(stopped.reason == core::pause_reason::error);
+      CHECK(stopped.member == 1);
+      CHECK(w.taps[0].size() == 4);
+      CHECK_FALSE(w.taps[1].empty());
+      std::vector<std::vector<stm32::tap_frame>> const shown{w.taps[0], w.taps[1]};
+      for(auto const& one : shown)
+      {
+        for(auto const& frame : one)
+        {
+          CHECK(frame.end <= stopped.at);
+        }
+      }
+      if(reference)
+      {
+        CHECK(shown == *reference);
+      }
+      reference = shown;
+    }
+  }
+}
+
 TEST_CASE("a mismatched frame warns once through the receiver machine's own log")
 {
   for(auto const& how : {variants()[0], variants()[1]})
