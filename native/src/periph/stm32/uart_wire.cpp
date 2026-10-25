@@ -906,7 +906,8 @@ auto uart_wire::inject(
         continue;
       }
     }
-    deliver_injection(frame, stopped->map, false, cuts);
+    deliver_injection(
+        frame, stopped->map, reset_drops({.start = frame.start, .end = frame.end}), cuts);
     truncate(state_.delivered.back(), cuts, state_.last_barrier, stopped->map);
   }
   return {};

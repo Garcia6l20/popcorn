@@ -3930,3 +3930,38 @@ TEST_CASE("a break cut hands its hold and release once, quiet only once each is 
     }
   }
 }
+
+TEST_CASE(
+    "a stopped injection below the drained reach meets a recorded receiver reset as a queued one")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 50 * us;
+  constexpr std::int64_t r  = 40 * us;
+  constexpr std::int64_t c  = 55 * us;
+  constexpr std::int64_t at = 58 * us;
+  for(auto const q : {l, l / 2})
+  {
+    for(auto const drained_first : {false, true})
+    {
+      CAPTURE(q);
+      CAPTURE(drained_first);
+      std::uint64_t drained = 0;
+      while(drained_first and static_cast<std::int64_t>(drained + 1) * q <= at)
+      {
+        ++drained;
+      }
+      stub_link link{l, declared()};
+      run_windows(link, 0, drained, q);
+      link.window(drained, q, {});
+      link.forth->receiver_reset(core::sys_time{r});
+      REQUIRE(
+          injected_byte(
+              *link.forth, 0x5a, at, stm32::stopped_receiver{.now = core::sys_time{c}, .map = {}})
+              .has_value());
+      link.drain(drained, q);
+      run_windows(link, drained + 1, drained + 8, q);
+      CHECK(link.forth_port.received.empty());
+      CHECK(link.forth->quiet());
+    }
+  }
+}
