@@ -13,6 +13,11 @@ other member's UART as the line would carry it, with a latency you choose.
 - `members` maps a name to a `MachineDescription`. Two members may share one description.
 - `UartLink("member.UART", "member.UART", latency=, baud=)` joins two UARTs in both directions.
   `latency` has no default, because it is part of the model, like a baud rate or a cable.
+  A frame whose baud or format differs from the link's is an error of a strict receiving member,
+  dated at the frame's start at the sender. A frame can start before a barrier of the quantum
+  by less than one sender instruction period and still be posted after it, because the sender's
+  slice held at the barrier runs the events of the barrier's last instruction cycle in the next
+  window. Its error is dated at the barrier.
 - `@popcorn.pytest.system` declares a fixture that hands each test a booted `System`. Every
   member boots from the boot snapshot of its own description, the one a machine fixture of that
   description uses, so the system adds no boot.

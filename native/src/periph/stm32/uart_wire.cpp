@@ -772,6 +772,10 @@ auto uart_wire::drain(
       into_.port->release_line(receiver.to_local(shifted(cut.end, latency_)), lanes_.peer);
     }
   }
+  if(fault)
+  {
+    fault->at = std::max(fault->at, shown);
+  }
   contract_assert(not fault or fault->at >= shown);
   if(barrier < next)
   {

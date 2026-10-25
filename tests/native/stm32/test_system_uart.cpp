@@ -1,5 +1,6 @@
 #include "stm32_fixture.hpp"
 
+#include <popcorn/arch/arch.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/host.hpp>
 #include <popcorn/core/log.hpp>
@@ -2352,5 +2353,163 @@ TEST_CASE("a frame handed to the receiver's port before its member reset never r
     CHECK(
         received
         == (reset ? std::vector<std::uint32_t>{0xa5} : std::vector<std::uint32_t>{0x5a, 0xa5}));
+  }
+}
+
+namespace
+{
+struct last_cycle_end
+{
+  std::int64_t  latency{};
+  std::int64_t  barrier{};
+  std::int64_t  end{};
+  std::uint64_t index{};
+};
+
+auto barrier_after_last_cycle_end(
+    std::string_view entry,
+    std::int64_t     period,
+    std::int64_t     until,
+    std::int64_t     after) -> last_cycle_end
+{
+  world reference;
+  reference.add(entry);
+  reference.add("idle");
+  reference.link(0, 1, latency_20);
+  auto& sender = *reference.nodes[0];
+  reference.wires[0]->enter_window(0, sender.map());
+  REQUIRE(
+      sender.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason
+      == stop_reason::user);
+  sender.target->hold_core(true);
+  REQUIRE(sender.advance(until) == stop_reason::time);
+  std::ignore = reference.wires[0]->drain(
+      0, core::sys_time{until}, core::sys_time{until + ms_ps}, reference.nodes[1]->map());
+  REQUIRE(reference.nodes[1]->advance(until) == stop_reason::time);
+  reference.wires[0]->finish(core::sys_time{until});
+  reference.collect();
+  auto const& time   = sender.target->virtual_clock();
+  auto const& frames = reference.taps[0];
+  REQUIRE(frames.size() > 2);
+  REQUIRE(1'000'000'000'000 / time.instruction_hz() == static_cast<std::uint64_t>(period));
+  for(std::size_t index = 0; index + 1 < frames.size(); ++index)
+  {
+    auto const end = frames[index].end.ps;
+    if(frames[index + 1].start.ps != end or end < after)
+    {
+      continue;
+    }
+    auto const count = time.to_icount(vtime{static_cast<std::uint64_t>(end + sender.origin)});
+    auto const k     = std::max<std::int64_t>(1, end / latency_20);
+    auto const third = (end + 3 * k) / (3 * k);
+    auto const at    = k * 3 * third;
+    auto const local = vtime{static_cast<std::uint64_t>(at + sender.origin)};
+    if(at > end and time.to_icount(local) == count)
+    {
+      return {.latency = 3 * third, .barrier = at, .end = end, .index = frames[index].index};
+    }
+  }
+  FAIL("no back-to-back frame leaves room for a barrier in its last cycle");
+  return {};
+}
+
+auto systick_due(core::machine const& target) -> std::optional<core::event>
+{
+  for(auto const& due : target.snapshot().data().events.pending)
+  {
+    if(due.id.owner == popcorn::arch::arch_event_owner and due.kind == core::deadline::instructions)
+    {
+      return due;
+    }
+  }
+  return std::nullopt;
+}
+
+void arm_systick_at(core::machine& target, icount wrap)
+{
+  constexpr popcorn::address csr{0xe000'e010};
+  constexpr popcorn::address rvr{0xe000'e014};
+  constexpr popcorn::address cvr{0xe000'e018};
+  std::uint64_t              reload = 1'000;
+  for(int attempt = 0; attempt < 2; ++attempt)
+  {
+    REQUIRE(target.mem().write(csr, 4, 0).has_value());
+    REQUIRE(target.mem().write(rvr, 4, reload).has_value());
+    REQUIRE(target.mem().write(cvr, 4, 0).has_value());
+    REQUIRE(target.mem().write(csr, 4, 7).has_value());
+    auto const due = systick_due(target);
+    REQUIRE(due.has_value());
+    if(due->at == wrap)
+    {
+      return;
+    }
+    REQUIRE(reload + wrap.value > due->at.value);
+    reload = reload + wrap.value - due->at.value;
+  }
+  FAIL("SysTick wrap not at the requested count");
+}
+}
+
+TEST_CASE("a strict fault on a frame starting in the last cycle before a barrier is dated at it")
+{
+  constexpr std::int64_t period = 250'000;
+  constexpr std::int64_t until  = 20 * ms_ps;
+  auto const point = barrier_after_last_cycle_end("link_tx_bursts", period, until, 20 * latency_20);
+  CAPTURE(point.latency);
+  CAPTURE(point.barrier);
+  CAPTURE(point.end);
+  REQUIRE(point.barrier - point.end < period);
+  auto const armed = point.barrier - 8 * point.latency;
+  for(auto const paused : {false, true})
+  {
+    for(std::int64_t const lowered : {1, 3})
+    {
+      CAPTURE(paused);
+      CAPTURE(lowered);
+      world w;
+      w.strict = true;
+      w.add("link_tx_bursts");
+      w.add("idle");
+      auto& link = w.link(0, 1, point.latency);
+      if(lowered != 1)
+      {
+        w.link(0, 1, point.latency / lowered, true);
+      }
+      REQUIRE(link.drop(0, point.index + 1));
+      w.host(variants()[0]);
+      REQUIRE(w.run_to(armed).reason == core::pause_reason::system_time);
+      auto&      sender = *w.nodes[0];
+      auto const wrap   = sender.target->virtual_clock().to_icount(
+          vtime{static_cast<std::uint64_t>(point.barrier + sender.origin)});
+      {
+        auto const held = w.sys->lock();
+        arm_systick_at(*sender.target, wrap);
+      }
+      if(paused)
+      {
+        REQUIRE(w.run_to(point.barrier).reason == core::pause_reason::system_time);
+        auto const held    = w.sys->lock();
+        auto const pending = sender.target->snapshot().data().events.pending;
+        auto const tick    = systick_due(*sender.target);
+        REQUIRE(tick.has_value());
+        CHECK(tick->at == wrap);
+        auto const done = std::ranges::find_if(pending, [&](core::event const& due) {
+          return due.kind == core::deadline::time
+             and due.due_ps == static_cast<std::uint64_t>(point.end + sender.origin);
+        });
+        REQUIRE(done != pending.end());
+        CHECK(done->at == wrap);
+        CHECK(tick->seq < done->seq);
+      }
+      auto const stopped = w.run_to(until);
+      REQUIRE(stopped.reason == core::pause_reason::error);
+      CHECK(stopped.member == 1);
+      CHECK(stopped.at.ps == point.barrier);
+      CHECK(w.taps[0].size() == point.index + 1);
+      for(auto const& frame : w.taps[0])
+      {
+        CHECK(frame.end.ps <= point.barrier);
+      }
+    }
   }
 }

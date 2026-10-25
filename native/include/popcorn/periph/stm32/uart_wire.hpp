@@ -341,7 +341,10 @@ struct wire_state
  *        the later one's start, its sender start for a peer frame, its receiver start for an
  *        injected one. An injected frame and a peer frame overlapping are an error of the
  *        receiver at the later of the injected frame's start and the peer frame's sender start,
- *        naming the injected frame. The tap gets
+ *        naming the injected frame. A sender's slice held at a barrier dispatches the events of
+ *        the barrier's last instruction cycle in the next window, so a frame can start before
+ *        the barrier opening the window it is posted in, by less than one sender instruction
+ *        period. An error found on such a frame is dated at that barrier. The tap gets
  *        each frame once its end, or its abort for a lost frame, the receiver end for an
  *        injected frame, lies at or before the barrier of the drain before the latest one, a
  *        pause point release_through() names, the earliest member position show_drained() names

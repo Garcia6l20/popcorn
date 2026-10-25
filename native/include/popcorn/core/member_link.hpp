@@ -143,11 +143,13 @@ public:
    *         link's previous drain, a rule every link keeps: every drain of a system runs at the
    *         same barriers, so a drain shows an observer no frame ended after that previous
    *         barrier, and an error pause then shows no frame past its point on any link. An
-   *         observer reading while
-   *         the system runs can then lag the latest frames by up to two windows behind the
-   *         receiver's time. A drain with @p next equal to @p barrier is a pause's drain and
-   *         shows nothing: release_through() or show_drained() shows its frames once the
-   *         pause's kind is known, so a read at a pause is complete.
+   *         observer reading while the system runs can then lag the latest frames by up to two
+   *         windows behind the receiver's time. A sender's slice held at a barrier dispatches
+   *         the events of the barrier's last instruction cycle in the next window, so a post
+   *         can start before the previous barrier by less than one sender instruction period. A
+   *         fault found on such a post is dated at that barrier. A drain with @p next equal to
+   *         @p barrier is a pause's drain and shows nothing: release_through() or show_drained()
+   *         shows its frames once the pause's kind is known, so a read at a pause is complete.
    */
   virtual auto
       drain(std::uint64_t window, sys_time const& barrier, sys_time const& next, time_map receiver)
