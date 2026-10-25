@@ -223,11 +223,13 @@ public:
    *        it, the others are halted, or with @p system_until run their core as a system TIME goal
    *        unless release() halted them. When every member sleeps with nothing due, the system
    *        pauses as pause_reason::idle at the latest quiescent point and every goal that is not
-   *        open resolves there with stop_reason::idle. When every goal left is open, the system
-   *        sleeps instead: each host waits as an idle free run does, and the first member woken, by
-   *        a command, a stamp, a watched descriptor or wake(), wakes the others. Where the run
-   *        resumes then depends on wall time. Every pause drains the wires up to its point before
-   *        it is decided, so an error a wire dates before the delivered entry comes first. A member
+   *        open resolves there with stop_reason::idle. Members below that point move on to it
+   *        executing nothing and with none of their goal's stop conditions, so input landing on
+   *        the way stays pending and is taken at the point when the system resumes. When every goal
+   * left is open, the system sleeps instead: each host waits as an idle free run does, and the
+   * first member woken, by a command, a stamp, a watched descriptor or wake(), wakes the others.
+   * Where the run resumes then depends on wall time. Every pause drains the wires up to its point
+   * before it is decided, so an error a wire dates before the delivered entry comes first. A member
    *        stop delivered without a member goal leaves it undecided as a goal's stop does.
    * @return Completes once every member parked, from the last host thread to park.
    * @throws std::logic_error before start(), while a resume is in flight, with an undecided

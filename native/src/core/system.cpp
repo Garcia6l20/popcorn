@@ -357,7 +357,7 @@ public:
           if(position(target) < sys_.chosen.target)
           {
             window_ = sys_.window;
-            return request_to(sys_.chosen.target, false, false);
+            return request_to(sys_.chosen.target, false, false, false);
           }
           settle_idle(target);
           phase_ = phase::begin;
@@ -461,6 +461,10 @@ private:
     if(phase_ == phase::park and at < sys_.chosen.head->at)
     {
       return sys_.chosen.head->at;
+    }
+    if(phase_ == phase::idle_to and at < sys_.chosen.target)
+    {
+      return sys_.chosen.target;
     }
     return at;
   }

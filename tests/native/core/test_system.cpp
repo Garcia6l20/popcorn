@@ -1763,6 +1763,86 @@ TEST_CASE("an error a model event raises on a sleeper's way to a member stop's t
   }
 }
 
+TEST_CASE("input landing on a sleeper during its IDLE move is taken at the pause point")
+{
+  std::optional<std::vector<std::uint64_t>> reference;
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    park_wake const wake;
+    rig             r{
+        .members = {sleeper_woken_at_park(wake), sleeper_with_event(9000)}
+    };
+    r.build(how);
+    r.links[0]->on_pause_drain = [armed = wake.armed] { armed->store(true); };
+    auto       sleeping        = r.goal(0, {.until = sym("idle", "tick_handler")});
+    auto       other           = r.goal(1, {.until = popcorn::address{0x0800'0001}});
+    auto const stopped         = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::idle);
+    CHECK(wake.woken->load() == 1);
+    CHECK(r.now_of(0) == stopped.at.ps);
+    CHECK(
+        core::access(
+            *r.members[0].on, 0,
+            [](core::machine& m) { return m.mem().read(sym("idle", "ticks"), 4).value_or(1); })
+        == 0);
+    CHECK(sleeping.done());
+    auto again = std::move(sleeping);
+    if(again.done())
+    {
+      CHECK(again.get().stopped.reason == stop_reason::idle);
+      CHECK(again.get().at == stopped.at);
+      again = r.goal(0, {.until = sym("idle", "tick_handler")});
+    }
+    r.release(1, true);
+    auto const next = r.run(stopped.at.ps + 100 * us_ps);
+    REQUIRE(next.reason == core::pause_reason::delivered);
+    CHECK(next.member == 0);
+    CHECK(next.at >= stopped.at);
+    REQUIRE(again.done());
+    CHECK(again.get().at == next.at);
+    auto dump = r.dump();
+    dump.push_back(static_cast<std::uint64_t>(stopped.at.ps));
+    dump.push_back(static_cast<std::uint64_t>(next.at.ps));
+    if(reference)
+    {
+      CHECK(dump == *reference);
+    }
+    else
+    {
+      reference = dump;
+    }
+  }
+}
+
+TEST_CASE("an error a model event raises during an IDLE move lands at the pause point")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    park_wake wake;
+    wake.throws = true;
+    rig r{
+        .members = {sleeper_woken_at_park(wake), sleeper_with_event(9000)}
+    };
+    r.build(how);
+    r.links[0]->on_pause_drain = [armed = wake.armed] { armed->store(true); };
+    auto       sleeping        = r.goal(0, {.until = popcorn::address{0x0800'0001}});
+    auto       other           = r.goal(1, {.until = popcorn::address{0x0800'0001}});
+    auto const stopped         = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::idle);
+    CHECK(wake.woken->load() == 1);
+    CHECK(r.now_of(0) == stopped.at.ps);
+    r.release(1, true);
+    auto const next = r.run(stopped.at.ps + 100 * us_ps);
+    REQUIRE(next.reason == core::pause_reason::error);
+    CHECK(next.member == 0);
+    CHECK(next.at == stopped.at);
+    CHECK_THROWS_AS(std::rethrow_exception(next.error), test_failure);
+    CHECK_THROWS_AS(std::ignore = sleeping.get(), test_failure);
+  }
+}
+
 TEST_CASE("input landing on a sleeper as it runs on to a member stop's time is taken from there")
 {
   for(auto const& how : {variants()[0], variants()[1]})

@@ -901,7 +901,9 @@ class System:
 
         A run pauses IDLE once every member sleeps with nothing due and every link is empty. A
         `line="break"` cut of a link, `UartTap.cut`, makes its hold and release due: the pause
-        then comes only after its release and the receiver's IDLE after it.
+        then comes only after its release and the receiver's IDLE after it. Members asleep
+        below the IDLE point move on to it executing nothing, so input that lands on the way,
+        such as a pty byte, is taken at the IDLE point when the system runs again.
 
         Each member's `last_stop` becomes its stop in the result's `stops`, None for a member a
         member stop left where it stood, and None for every member when the run ends without a
