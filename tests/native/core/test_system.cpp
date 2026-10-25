@@ -2075,6 +2075,34 @@ TEST_CASE("close and wake reach a system asleep on IDLE inside open goals")
   CHECK(parked(r.members[1]));
 }
 
+TEST_CASE("an idle attempt hands frames at its earliest member, so a fault past it waits")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    rig r{
+        .members = {sleeper_with_event(400), sleeper_with_event(900)}
+    };
+    r.build(how);
+    r.links[0]->fault_at = 222 * us_ps;
+    auto const drained   = std::make_shared<std::atomic<std::int64_t>>(0);
+    r.links[0]->on_drain = [drained](std::int64_t barrier) {
+      drained->store(std::max(drained->load(), barrier));
+    };
+    auto a = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto b = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held);
+    }
+    REQUIRE(both_asleep(r, pending));
+    CHECK(drained->load() < 222 * us_ps);
+    r.sys->request_pause();
+    CHECK(pending.get().reason != core::pause_reason::closed);
+  }
+}
+
 TEST_CASE("a wake that lands between the sleep decision and the host's wait is not lost")
 {
   auto const slices = [](bool hooked) {
