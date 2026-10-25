@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <format>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -129,6 +130,35 @@ TEST_CASE("a budget stops at the first block boundary at or past it")
   CHECK(result.executed.value <= 1'000'005);
   CHECK(f.target->virtual_clock().now().value - before.value == result.executed.value);
   CHECK(result.stopped->instructions == f.target->virtual_clock().now());
+}
+
+TEST_CASE("progress is called every progress_every instructions and never past the count's range")
+{
+  for(std::uint64_t const every :
+      {std::uint64_t{100}, std::numeric_limits<std::uint64_t>::max() - 10})
+  {
+    CAPTURE(every);
+    auto f = alu(10'000);
+    std::ignore =
+        f.run({.wall_budget = std::chrono::seconds{60}, .exact_instructions = icount{1000}});
+    std::uint64_t       calls   = 0;
+    auto                counted = [&calls]() noexcept { ++calls; };
+    core::slice_request request{
+        .wall_budget = std::chrono::seconds{60}, .until = sym("alu", "alu_done")};
+    request.progress.emplace(counted);
+    request.progress_every = icount{every};
+    auto const stop        = f.run_to_stop(request);
+    CHECK(stop.reason == stop_reason::address);
+    if(every == 100)
+    {
+      CHECK(calls >= 480);
+      CHECK(calls <= 491);
+    }
+    else
+    {
+      CHECK(calls == 0);
+    }
+  }
 }
 
 TEST_CASE("a budget spans slices when the caller subtracts what each executed")

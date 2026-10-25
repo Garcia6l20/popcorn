@@ -432,7 +432,7 @@ auto machine::run_state::deliverable() noexcept -> bool
     run.stop_at_boundary(engine, now);
     return;
   }
-  if(now >= run.progress_at) [[unlikely]]
+  if(now >= run.progress_at)
   {
     run.call_progress(now);
   }
@@ -465,7 +465,7 @@ auto machine::run_state::deliverable() noexcept -> bool
 
 void machine::run_state::call_progress(icount now) noexcept
 {
-  progress_at = icount{now.value + progress_every.value};
+  progress_at = add_sat(now, progress_every.value);
   (*progress)();
 }
 
@@ -1188,7 +1188,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
   wall_deadline  = std::chrono::steady_clock::now() + request.wall_budget;
   progress       = request.progress;
   progress_every = request.progress_every;
-  progress_at    = progress ? icount{owner.clock_driver_.exact_now().value + progress_every.value}
+  progress_at    = progress ? add_sat(owner.clock_driver_.exact_now(), progress_every.value)
                             : icount{std::numeric_limits<std::uint64_t>::max()};
   until_thread   = request.until_thread;
   until_return   = request.until_return;

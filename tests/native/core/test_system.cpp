@@ -5754,8 +5754,8 @@ namespace
 {
 struct follow_state
 {
-  std::atomic<std::uint64_t> sleeper_slices{};
-  std::atomic<bool>          sleeper_waiting{false};
+  std::atomic<std::uint64_t> peer_slices{};
+  std::atomic<bool>          peer_waiting{false};
   std::uint64_t              calls{};
   std::uint64_t              base{};
   std::atomic<int>           followed{};
@@ -5763,11 +5763,11 @@ struct follow_state
 
 follow_state following;
 
-void note_sleeper_wait(std::size_t member, std::atomic<std::uint32_t> const* epoch, std::uint32_t)
+void note_peer_wait(std::size_t member, std::atomic<std::uint32_t> const* epoch, std::uint32_t)
 {
   if(member == 1)
   {
-    following.sleeper_waiting.store(epoch != nullptr);
+    following.peer_waiting.store(epoch != nullptr);
   }
 }
 
@@ -5785,7 +5785,7 @@ template <typename Done> auto await_for(Done done) -> bool
   return true;
 }
 
-void follow_awake(std::size_t member, core::sys_time)
+void follow_first(std::size_t member, core::sys_time)
 {
   if(member != 0 or following.followed.load() != 0)
   {
@@ -5794,17 +5794,17 @@ void follow_awake(std::size_t member, core::sys_time)
   ++following.calls;
   if(following.calls == 1)
   {
-    if(not await_for([] { return following.sleeper_waiting.load(); }))
+    if(not await_for([] { return following.peer_waiting.load(); }))
     {
       following.followed.store(-1);
       return;
     }
-    following.base = following.sleeper_slices.load();
+    following.base = following.peer_slices.load();
     return;
   }
   if(following.calls == 2)
   {
-    auto const moved = await_for([] { return following.sleeper_slices.load() > following.base; });
+    auto const moved = await_for([] { return following.peer_slices.load() > following.base; });
     following.followed.store(moved ? 1 : -1);
   }
 }
@@ -5829,7 +5829,7 @@ auto followed_run(std::int64_t progress) -> std::pair<core::pause, std::array<st
         }
         else
         {
-          following.sleeper_slices.fetch_add(1);
+          following.peer_slices.fetch_add(1);
         }
         },
       {},
@@ -5857,12 +5857,12 @@ TEST_CASE("a sleeper follows an awake peer's floor while the peer's slice still 
   for(std::int64_t const progress : {50 * us_ps, std::int64_t{0}})
   {
     CAPTURE(progress);
-    following.sleeper_slices.store(0);
-    following.sleeper_waiting.store(false);
+    following.peer_slices.store(0);
+    following.peer_waiting.store(false);
     following.calls = 0;
     following.followed.store(0);
-    core::detail::on_clock_wait.store(&note_sleeper_wait);
-    core::detail::on_progress.store(&follow_awake);
+    core::detail::on_clock_wait.store(&note_peer_wait);
+    core::detail::on_progress.store(&follow_first);
     auto const [stopped, stood] = followed_run(progress);
     core::detail::on_progress.store(nullptr);
     core::detail::on_clock_wait.store(nullptr);
@@ -5876,6 +5876,110 @@ TEST_CASE("a sleeper follows an awake peer's floor while the peer's slice still 
       CHECK(following.followed.load() == 0);
     }
     CHECK(stood == promised_windows(core::sync_mode::barrier).second);
+  }
+}
+
+namespace
+{
+class ticking_quiet_arch final : public sleeping_arch
+{
+public:
+  using sleeping_arch::sleeping_arch;
+
+  static constexpr std::uint32_t tick   = 12;
+  static constexpr std::uint64_t period = 40;
+
+  [[nodiscard]] auto event_pends(std::uint32_t kind, std::uint64_t) const -> bool override
+  {
+    return kind != tick;
+  }
+
+  void on_event(std::uint32_t kind, std::uint64_t payload) override
+  {
+    if(kind == tick)
+    {
+      std::ignore =
+          attached_events().schedule(icount{attached_clock().now().value + period}, tick, payload);
+      return;
+    }
+    sleeping_arch::on_event(kind, payload);
+  }
+};
+
+std::atomic<std::uint64_t> first_slices{};
+
+auto followed_sleeper(std::int64_t progress) -> int
+{
+  constexpr std::int64_t        latency = 200 * us_ps;
+  std::vector<core::member_ref> members{
+      member<ticking_quiet_arch>(
+          "idle", "idle_forever",
+          [](popcorn::testing::machine_fixture<ticking_quiet_arch>& f) {
+            f.target->set_transmit_sources({{}});
+            std::ignore = f.module->attached_events().schedule(
+                icount{ticking_quiet_arch::period}, ticking_quiet_arch::tick, 0);
+          }),
+      member<popcorn::testing::test_arch>(
+          "alu", "alu_entry", sends_nothing<popcorn::testing::test_arch>)};
+  core::system sys{
+      members,
+      {std::make_shared<watched_link>(0, 1, latency),
+        std::make_shared<watched_link>(1, 0, latency)},
+      core::slice_bounds{
+        .max_instructions = icount{1'000'000}, .wall_budget = std::chrono::hours{1}},
+      [](std::size_t index) {
+        if(index == 0)
+        {
+          following.calls = 0;
+          first_slices.fetch_add(1);
+        }
+        else
+        {
+          following.peer_slices.fetch_add(1);
+        }
+        },
+      {},
+      core::sync_mode::clocks,
+      core::system::default_lookahead,
+      core::sys_time{progress}
+  };
+  core::host_future<core::pause> pending;
+  {
+    auto const                  held = sys.lock();
+    std::vector<core::sys_time> offsets(2);
+    sys.start(held, offsets);
+    std::ignore = sys.post_goal(
+        held, 0,
+        {.until = popcorn::address{0x0800'0001}, .stop_when = [] { return false; }, .open = true});
+    std::ignore = sys.post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    pending     = sys.resume(held);
+  }
+  while(following.followed.load() == 0 and first_slices.load() < 20)
+  {
+    std::this_thread::yield();
+  }
+  sys.request_pause();
+  std::ignore = pending.get();
+  return following.followed.load();
+}
+}
+
+TEST_CASE("an awake peer follows a sleeper with no promise while the sleeper's slice still runs")
+{
+  for(std::int64_t const progress : {25 * us_ps, std::int64_t{0}})
+  {
+    CAPTURE(progress);
+    following.peer_slices.store(0);
+    following.peer_waiting.store(false);
+    following.calls = 0;
+    following.followed.store(0);
+    first_slices.store(0);
+    core::detail::on_clock_wait.store(&note_peer_wait);
+    core::detail::on_progress.store(&follow_first);
+    auto const followed = followed_sleeper(progress);
+    core::detail::on_progress.store(nullptr);
+    core::detail::on_clock_wait.store(nullptr);
+    CHECK(followed == (progress != 0 ? 1 : 0));
   }
 }
 

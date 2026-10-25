@@ -224,9 +224,11 @@ public:
    *        lead and promises at most: the host is an inbound wire of that latency, so a stamp at
    *        or after a member's position plus @p lookahead lands exactly. A member with nothing due
    *        moves by a hold slice to its position plus @p lookahead when it leads that far.
-   * @param progress Under sync_mode::clocks, how far a member runs in its own virtual time inside
-   *        a slice between two publishes of its clock, so its peers follow it while the slice
-   *        runs. 0 publishes at slice ends only. The value changes how members overlap, never a
+   * @param progress Under sync_mode::clocks, about how far a member runs in its own virtual time
+   *        inside a slice between two publishes of its clock, so its peers follow it while the
+   *        slice runs. It is converted to instructions at the member's clock rate when the slice
+   *        starts, and a publish happens at the first block boundary or event loop pass past it.
+   *        0 publishes at slice ends only. The value changes how members overlap, never a
    *        result.
    * @throws machine_busy when a member is busy.
    */

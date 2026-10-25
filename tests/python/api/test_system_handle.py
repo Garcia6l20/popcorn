@@ -298,6 +298,25 @@ def test_wires_and_members_are_checked_before_start(u575: popcorn.PartDescriptio
     handle.close()
 
 
+def test_the_lookahead_and_progress_are_checked_and_set_only_before_start(
+    u575: popcorn.PartDescription,
+) -> None:
+    handle = _core.SystemHandle(1_000_000, 1_000_000)
+    with pytest.raises(ValueError, match="progress -1 ps is below 0"):
+        handle.set_progress(-1)
+    with pytest.raises(ValueError, match="lookahead 0 ps is not above 0"):
+        handle.set_lookahead(0)
+    handle.set_progress(0)
+    handle.set_lookahead(1)
+    handle.close()
+    linked = link(member(u575, "link_ping", "a"), member(u575, "link_echo", "b"))
+    with pytest.raises(RuntimeError, match="the progress is set before start"):
+        linked.handle.set_progress(25_000_000)
+    with pytest.raises(RuntimeError, match="the lookahead is set before start"):
+        linked.handle.set_lookahead(1_000_000)
+    linked.handle.close()
+
+
 def test_a_completion_callback_re_entering_the_system_raises_instead_of_deadlocking(
     ping: Callable[[int, int | None], Linked], monkeypatch: pytest.MonkeyPatch
 ) -> None:
