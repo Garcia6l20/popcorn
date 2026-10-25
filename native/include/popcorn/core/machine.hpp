@@ -207,8 +207,10 @@ struct slice_request
   /** @brief Whether the core executes. With false, the clock, the events and the peripherals
    * advance as for a sleeping core, the core executes no instruction and enters no exception,
    * and an exception that becomes pending stays pending for the next slice that executes. The
-   * core is not held: timers that stop in Debug state keep counting. For a scheduler that moves
-   * a sleeping member to a point fixed after its last executing slice. */
+   * core stays out of Debug state, so SysTick, CYCCNT and the timers that stop in Debug state
+   * keep counting. An awake core keeps its PC while the clock moves, and the stops that count
+   * executed instructions, budget_left and exact_instructions, stay unreached. For a scheduler
+   * that moves a sleeping member to a point fixed after its last executing slice. */
   bool execute{true};
 };
 

@@ -357,7 +357,7 @@ public:
           if(position(target) < sys_.chosen.target)
           {
             window_ = sys_.window;
-            return request_to(sys_.chosen.target, false, false, false);
+            return request_to(sys_.chosen.target, false, false, true);
           }
           settle_idle(target);
           phase_ = phase::begin;
@@ -366,7 +366,7 @@ public:
           if(position(target) < sys_.chosen.head->at)
           {
             window_ = sys_.window;
-            return request_to(sys_.chosen.head->at, false, true, false);
+            return request_to(sys_.chosen.head->at, false, true, true);
           }
           phase_ = phase::begin;
           return std::nullopt;
@@ -471,7 +471,11 @@ private:
 
   void fail(machine const& target, std::exception_ptr error) noexcept
   {
-    auto& one  = sys_.slots[index_];
+    auto& one = sys_.slots[index_];
+    if(one.failed and (phase_ == phase::park or phase_ == phase::idle_to))
+    {
+      return;
+    }
     one.failed = true;
     one.rep.found.push_back(
         {.at = found_at(target), .member = index_, .kind = entry_kind::error, .error = error});
@@ -579,7 +583,8 @@ private:
     }
   }
 
-  auto request_to(sys_time bound, bool quiescent, bool hold, bool executes = true) -> slice_request
+  auto request_to(sys_time bound, bool quiescent, bool hold, bool moves_asleep = false)
+      -> slice_request
   {
     auto& one = sys_.slots[index_];
     enter_windows();
@@ -594,9 +599,9 @@ private:
         .internal_stop         = true,
         .stop_quiescent        = quiescent,
         .stop_when_events_only = true,
-        .execute               = executes,
+        .execute               = not moves_asleep,
     };
-    if(executes and one.running())
+    if(not moves_asleep and one.running())
     {
       auto const& wanted         = one.goal->goal;
       request.until              = wanted.until;
@@ -1199,6 +1204,7 @@ void system::impl::deliver(entry const& head) noexcept
 
 void system::impl::finish_pause() noexcept
 {
+  merge_found();
   auto const completing = promise;
   auto       ended      = result;
   auto const was_closed = closed.load() or host_closed.load();

@@ -76,16 +76,18 @@ below `P` runs on to `P` after the third completion fixed the outcome as that me
 the pause's drain. Its slice runs with `execute` off and none of its goal's stop conditions:
 the clock, the events and the peripherals advance to `P` as for a sleeping core, the core
 executes no instruction and enters no exception, and its goal stops nothing before `P`. The
-core is not held, so SysTick, CYCCNT and the timers that stop in Debug state keep counting. The
-slice holds at `P` with `hold_from_until`, `stop_quiescent` off. Input that lands on the way,
-such as a byte a pty pump hands at a slice boundary, stays pending and is taken at `P` when the
-system resumes. A stop or an error that a model event raises on the way is recorded at `P`.
+core stays out of Debug state, so SysTick, CYCCNT and the timers that stop in Debug state keep
+counting. The slice holds at `P` with `hold_from_until`, `stop_quiescent` off. Input that lands
+on the way, such as a byte a pty pump hands at a slice boundary, stays pending and is taken at
+`P` when the system resumes. A stop or an error that a model event raises on the way is recorded
+at `P`, once per member, and joins the system's entries before the pause completes, so resume,
+`withdraw` and `reset` see it. A member asleep past `P` stays where it fell asleep. A sleeper
+runs on to `P` at delivered member stops only.
 
 An IDLE pause moves every member below its point the same way, with `execute` off and no goal
 stop conditions, so input that lands during the move is taken at the IDLE point when the system
 resumes, and a stop or an error raised on the way is recorded at that point. The IDLE decision
-stands: the members' quiet state fixed it before the move. A member asleep past `P` stays where it fell asleep. A sleeper runs
-on to `P` at delivered member stops only.
+stands: the members' quiet state fixed it before the move.
 
 ## Locks
 
