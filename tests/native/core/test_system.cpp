@@ -1636,8 +1636,12 @@ struct park_wake
   bool                                      timer{true};
   bool                                      throws{};
   bool                                      resets{};
+  bool                                      hook_throws{};
+  std::shared_ptr<std::atomic<int>>         hook_threw = std::make_shared<std::atomic<int>>(0);
   std::shared_ptr<std::atomic<core::host*>> await_idle{};
 };
+
+constexpr int hook_throw_cap = 1000;
 
 auto sleeper_woken_at_park(park_wake const& wake) -> core::member_ref
 {
@@ -1649,6 +1653,10 @@ auto sleeper_woken_at_park(park_wake const& wake) -> core::member_ref
   machines.push_back(std::move(f.target));
   auto const       self = std::make_shared<std::atomic<core::host*>>(nullptr);
   core::host_hooks hooks{.boundary = [wake, self, module](core::member_id who) {
+    if(wake.hook_throws and wake.armed->load() and wake.hook_threw->fetch_add(1) < hook_throw_cap)
+    {
+      throw test_failure("boundary hook");
+    }
     if(not wake.armed->exchange(false))
     {
       return;
@@ -1935,6 +1943,56 @@ TEST_CASE("a stop found on a sleeper's way to a member stop's time goes with the
     CHECK(next.member == 1);
     CHECK(next.at.ps >= 2 * parking_stop);
     CHECK_FALSE(again.done());
+  }
+}
+
+TEST_CASE("a boundary hook that throws before a sleeper moves ends its move with one error")
+{
+  for(bool const idle : {false, true})
+  {
+    for(auto const& how : {variants()[0], variants()[1]})
+    {
+      CAPTURE(idle);
+      CAPTURE(how.name);
+      park_wake wake;
+      wake.timer       = false;
+      wake.hook_throws = true;
+      rig r{
+          .members = {
+                      sleeper_woken_at_park(wake),
+                      idle ? sleeper_with_event(9000) : member("alu", "alu_entry")}
+      };
+      r.build(how);
+      r.links[0]->on_pause_drain = [armed = wake.armed] { armed->store(true); };
+      auto       sleeping = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = not idle});
+      auto       stopping = idle ? r.goal(1, {.until = popcorn::address{0x0800'0001}})
+                                 : r.goal(1, {.until_time = core::sys_time{parking_stop}});
+      auto const stopped  = r.run({});
+      wake.armed->store(false);
+      REQUIRE(stopped.reason == (idle ? core::pause_reason::idle : core::pause_reason::delivered));
+      CHECK(wake.hook_threw->load() == 1);
+      auto const executed = [&r] {
+        auto const held = r.sys->lock();
+        return r.sys->executed_of(held, 0).value;
+      };
+      auto const                                           before = executed();
+      std::optional<core::host_future<core::goal_reached>> later;
+      if(idle)
+      {
+        r.release(1, true);
+      }
+      else
+      {
+        later = r.goal(1, {.until_time = core::sys_time{2 * parking_stop}});
+      }
+      auto const next = r.run(stopped.at.ps + 100 * us_ps);
+      REQUIRE(next.reason == core::pause_reason::error);
+      CHECK(next.member == 0);
+      CHECK(next.at == stopped.at);
+      CHECK(executed() == before);
+      CHECK_THROWS_AS(std::rethrow_exception(next.error), test_failure);
+      CHECK_THROWS_AS(std::ignore = sleeping.get(), test_failure);
+    }
   }
 }
 

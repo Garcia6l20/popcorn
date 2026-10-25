@@ -335,6 +335,7 @@ public:
             continue;
           }
           phase_ = sys_.chosen.idle ? phase::idle_to : sys_.parks(one) ? phase::park : phase::begin;
+          moved_from_.reset();
           if(phase_ == phase::begin)
           {
             return std::nullopt;
@@ -354,7 +355,7 @@ public:
           phase_            = phase::run;
           continue;
         case phase::idle_to:
-          if(position(target) < sys_.chosen.target)
+          if(moves_on(target, sys_.chosen.target))
           {
             window_ = sys_.window;
             return request_to(sys_.chosen.target, false, false, true);
@@ -363,7 +364,7 @@ public:
           phase_ = phase::begin;
           return std::nullopt;
         case phase::park:
-          if(position(target) < sys_.chosen.head->at)
+          if(moves_on(target, sys_.chosen.head->at))
           {
             window_ = sys_.window;
             return request_to(sys_.chosen.head->at, false, true, true);
@@ -455,6 +456,14 @@ public:
   }
 
 private:
+  [[nodiscard]] auto moves_on(machine const& target, sys_time to) -> bool
+  {
+    auto const at      = position(target);
+    auto const stalled = sys_.slots[index_].failed and moved_from_ == at;
+    moved_from_        = at;
+    return at < to and not stalled;
+  }
+
   [[nodiscard]] auto found_at(machine const& target) const noexcept -> sys_time
   {
     auto const at = position(target);
@@ -768,14 +777,15 @@ private:
     }
   }
 
-  system::impl&     sys_;
-  std::size_t       index_;
-  phase             phase_{phase::begin};
-  bool              held_last_{};
-  bool              sleeping_{};
-  std::uint64_t     window_{};
-  vtime             until_last_{};
-  std::atomic<bool> aborted_{false};
+  system::impl&           sys_;
+  std::size_t             index_;
+  phase                   phase_{phase::begin};
+  bool                    held_last_{};
+  bool                    sleeping_{};
+  std::uint64_t           window_{};
+  vtime                   until_last_{};
+  std::optional<sys_time> moved_from_{};
+  std::atomic<bool>       aborted_{false};
 
   std::chrono::steady_clock::time_point left_{};
 };
