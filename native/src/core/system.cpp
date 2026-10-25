@@ -1208,6 +1208,14 @@ void system::impl::finish_pause() noexcept
   auto const completing = promise;
   auto       ended      = result;
   auto const was_closed = closed.load() or host_closed.load();
+  if(not was_closed
+     and (ended.reason == pause_reason::delivered or ended.reason == pause_reason::idle or ended.reason == pause_reason::error))
+  {
+    for(auto const& link : links)
+    {
+      link->release_through(ended.at);
+    }
+  }
   if(was_closed)
   {
     ended.reason = pause_reason::closed;

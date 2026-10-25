@@ -2073,11 +2073,13 @@ class UartTap:
     """Both directions of one link of a `System`, `system.tap("a.USART1")`: every frame
     on the line with its system times, and frames injected, replaced or dropped by number.
 
-    The tap gets a frame once it ended, its stop-bit end at or before a point where the system
-    paused, so the frames it holds at a pause, `end` at or before that pause's point, do not
-    depend on the quantum, the slicing or the wall timing. After `close()` it holds every frame
-    that ended by the last pause. It keeps up to 1 Mi frames per direction not read yet, about
-    380 bytes each, the oldest dropped and counted in `dropped`: take them with `frames()`.
+    The tap gets a frame once it ended. After a member stop, an IDLE pause or an error it holds
+    every frame whose stop-bit `end` is at or before the pause point, whatever the quantum, the
+    slicing or the wall timing. After a TIME stop or a requested pause it holds the frames ended
+    by the earliest member's position, which can lie before the pause point by an amount that
+    depends on the quantum. After `close()` it holds every frame that ended by the last pause.
+    It keeps up to 1 Mi frames per direction not read yet, about 380 bytes each, the oldest
+    dropped and counted in `dropped`: take them with `frames()`.
     Reading never changes what the receiver gets.
 
     `towards` names the receiving end of a direction, `"<member>.<UART>"`.
@@ -2193,10 +2195,12 @@ class UartTap:
         """Take every frame the tap holds, towards `towards` only when given, oldest first.
         Never runs the system, allowed stopped and running, from any thread.
 
-        At a pause, or after `close()`, it takes exactly the frames ended by that point and
-        not taken yet, whatever the quantum, the slicing or the wall timing. While the system
-        runs, the tap fills at each barrier, so how many frames a call takes depends on wall
-        timing. Each frame's content never does.
+        After a member stop, an IDLE pause, an error or `close()`, it takes exactly the frames
+        ended by that point and not taken yet, whatever the quantum, the slicing or the wall
+        timing. After a TIME stop or a requested pause it takes those ended by the earliest
+        member's position, see the class. While the system runs, the tap fills at each
+        barrier, so how many frames a call takes depends on wall timing. Each frame's content
+        never does.
 
         Returns:
             The frames, ordered by `end`, then direction: towards the link's second end first.

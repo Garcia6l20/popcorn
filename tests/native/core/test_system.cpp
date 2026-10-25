@@ -122,6 +122,7 @@ public:
       core::sys_time const& next,
       core::time_map) -> std::optional<core::link_fault> override
   {
+    drained_on = std::this_thread::get_id();
     if(drains.size() < kept_drains)
     {
       drains.push_back({.window = window, .barrier = barrier.ps, .next = next.ps});
@@ -148,6 +149,16 @@ public:
   auto quiet() const -> bool override
   {
     return not busy;
+  }
+
+  void release_through(core::sys_time at) override
+  {
+    released.push_back(at.ps);
+    released_on = std::this_thread::get_id();
+    if(on_drain)
+    {
+      on_drain(at.ps);
+    }
   }
 
   void finish(core::sys_time at) override
@@ -180,6 +191,9 @@ public:
   std::byte                                   state{};
   bool                                        fail_load{};
   std::vector<std::int64_t>                   finished{};
+  std::vector<std::int64_t>                   released{};
+  std::thread::id                             released_on{};
+  std::thread::id                             drained_on{};
   bool                                        reported{};
 
 private:
@@ -1610,11 +1624,12 @@ auto sleeper_and_stopper() -> std::vector<core::member_ref>
 
 struct park_wake
 {
-  std::shared_ptr<std::atomic<bool>> armed = std::make_shared<std::atomic<bool>>(false);
-  std::shared_ptr<std::atomic<int>>  woken = std::make_shared<std::atomic<int>>(0);
-  std::shared_ptr<std::atomic<int>>  held  = std::make_shared<std::atomic<int>>(0);
-  bool                               timer{true};
-  bool                               throws{};
+  std::shared_ptr<std::atomic<bool>>        armed = std::make_shared<std::atomic<bool>>(false);
+  std::shared_ptr<std::atomic<int>>         woken = std::make_shared<std::atomic<int>>(0);
+  std::shared_ptr<std::atomic<int>>         held  = std::make_shared<std::atomic<int>>(0);
+  bool                                      timer{true};
+  bool                                      throws{};
+  std::shared_ptr<std::atomic<core::host*>> await_idle{};
 };
 
 auto sleeper_woken_at_park(park_wake const& wake) -> core::member_ref
@@ -1645,6 +1660,21 @@ auto sleeper_woken_at_park(park_wake const& wake) -> core::member_ref
       started = target.mem().write(0xE000'E014, 4, 40) and target.mem().write(0xE000'E010, 4, 1);
     }
     wake.woken->fetch_add(started ? 1 : 100);
+    if(wake.await_idle)
+    {
+      auto* const other = wake.await_idle->load();
+      for(;;)
+      {
+        {
+          auto const held = other->lock();
+          if(not other->busy(held, 0))
+          {
+            break;
+          }
+        }
+        std::this_thread::yield();
+      }
+    }
   }};
   auto             on =
       std::make_shared<core::host>(std::move(machines), core::slice_bounds{}, std::move(hooks));
@@ -1890,6 +1920,123 @@ TEST_CASE("an error a model event raises during an IDLE move lands at the pause 
     CHECK(next.at == stopped.at);
     CHECK_THROWS_AS(std::rethrow_exception(next.error), test_failure);
     CHECK_THROWS_AS(std::ignore = sleeping.get(), test_failure);
+  }
+}
+
+TEST_CASE("a member stop, an IDLE pause and an error pause release each link through their point")
+{
+  {
+    rig r{.members = sleeper_and_stopper()};
+    r.build(variants()[1]);
+    auto       sleeping = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto       stopping = r.goal(1, {.until_time = core::sys_time{parking_stop}});
+    auto const stopped  = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    for(auto const& link : r.links)
+    {
+      CHECK(link->released == std::vector{stopped.at.ps});
+    }
+  }
+  {
+    rig r{
+        .members = {sleeper_with_event(400), sleeper_with_event(9000)}
+    };
+    r.build(variants()[0]);
+    auto       a       = r.goal(0, {.until = popcorn::address{0x0800'0001}});
+    auto       b       = r.goal(1, {.until = popcorn::address{0x0800'0001}});
+    auto const stopped = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::idle);
+    CHECK(r.links[0]->released == std::vector{stopped.at.ps});
+  }
+  {
+    rig r{
+        .members = {
+                    member("alu", "alu_entry"),
+                    member<throwing_arch>(
+                "idle", "idle_budget", [](popcorn::testing::machine_fixture<throwing_arch>& f) {
+                  std::ignore = f.module->attached_events().schedule(
+                      icount{1777}, throwing_arch::throw_event, 0);
+                })}
+    };
+    r.build(variants()[0]);
+    auto const stopped = r.run(2 * ms_ps);
+    REQUIRE(stopped.reason == core::pause_reason::error);
+    CHECK(r.links[0]->released == std::vector{stopped.at.ps});
+  }
+}
+
+TEST_CASE("a TIME or requested pause with a member asleep far below its point releases no link")
+{
+  {
+    rig r{.members = sleeper_and_stopper()};
+    r.build(variants()[0]);
+    auto const stopped = r.run(parking_stop);
+    REQUIRE(stopped.reason == core::pause_reason::system_time);
+    CHECK(r.links[0]->released.empty());
+  }
+  rig r{.members = sleeper_and_stopper()};
+  r.build(variants()[0]);
+  auto const drained   = std::make_shared<std::atomic<int>>(0);
+  r.links[0]->on_drain = [drained](std::int64_t) { drained->fetch_add(1); };
+  auto sleeping        = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+  auto running         = r.goal(1, {.until = popcorn::address{0x0800'0001}, .open = true});
+  core::host_future<core::pause> pending;
+  {
+    auto const held = r.sys->lock();
+    pending         = r.sys->resume(held);
+  }
+  while(drained->load() < 50)
+  {
+    std::this_thread::yield();
+  }
+  r.sys->request_pause();
+  auto const stopped = pending.get();
+  REQUIRE(stopped.reason == core::pause_reason::requested);
+  CHECK(r.now_of(0) + 10 * static_cast<std::int64_t>(us_ps) < stopped.at.ps);
+  CHECK(r.links[0]->released.empty());
+}
+
+TEST_CASE("a release runs once per pause on whichever member's thread finishes the pause last")
+{
+  for(auto const sender_last : {true, false})
+  {
+    CAPTURE(sender_last);
+    std::size_t off_receiver = 0;
+    std::size_t on_receiver  = 0;
+    for(int round = 0; round < 4; ++round)
+    {
+      park_wake wake;
+      wake.timer      = false;
+      wake.await_idle = std::make_shared<std::atomic<core::host*>>(nullptr);
+      auto runner     = member("alu", "alu_entry");
+      wake.await_idle->store(runner.on.get());
+      auto sleeper = sleeper_woken_at_park(wake);
+      rig  r{
+          .members = sender_last ? std::vector{sleeper, runner }
+              : std::vector{runner,  sleeper}
+      };
+      r.build(variants()[0]);
+      r.links[0]->on_pause_drain = [armed = wake.armed] { armed->store(true); };
+      auto const sleeper_index   = sender_last ? std::size_t{0} : std::size_t{1};
+      auto const runner_index    = 1 - sleeper_index;
+      auto sleeping = r.goal(sleeper_index, {.until = popcorn::address{0x0800'0001}, .open = true});
+      auto stopping = r.goal(runner_index, {.until_time = core::sys_time{parking_stop}});
+      auto const stopped = r.run({});
+      REQUIRE(stopped.reason == core::pause_reason::delivered);
+      CHECK(wake.woken->load() == 1);
+      CHECK(r.links[0]->released == std::vector{stopped.at.ps});
+      CHECK(r.now_of(sleeper_index) == stopped.at.ps);
+      if(r.links[0]->released_on == r.links[0]->drained_on)
+      {
+        ++on_receiver;
+      }
+      else
+      {
+        ++off_receiver;
+      }
+    }
+    MESSAGE("sender_last " << sender_last << " off " << off_receiver << " on " << on_receiver);
+    CHECK((sender_last ? off_receiver : on_receiver) > 0);
   }
 }
 
