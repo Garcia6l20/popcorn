@@ -355,7 +355,10 @@ public:
   [[= py::doc{"End a link's open cut now."}]] auto restore(std::size_t link, bool stopped)
       -> cut_outcome;
 
-  /** @brief The member whose callbacks may change link @p link's cuts while it runs. */
+  /**
+   * @brief The member whose callbacks may change link @p link's cuts while it runs.
+   * @throws machine_closed once the system is closed.
+   */
   [[= py::doc{"A link's cut owner, a member index."}]] [[nodiscard]] auto
       link_owner(std::size_t link) const -> std::size_t;
 

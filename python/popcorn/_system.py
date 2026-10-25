@@ -2348,7 +2348,8 @@ class UartTap:
         """The member whose callbacks may change the link's cuts while the system runs, its
         cut owner. Default the member of the link's first end, `UartLink.a`. Set it while the
         system is stopped, to any member, an end of the link or not. It never depends on which
-        member calls first.
+        member calls first. Reading it works from any callback of a member and raises
+        `EmulationError` once the system is closed.
 
         Raises, when set:
             TypeError: The value is no str.
