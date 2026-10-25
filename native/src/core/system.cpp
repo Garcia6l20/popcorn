@@ -1271,13 +1271,6 @@ private:
     {
       promise(target);
     }
-    if(eligible)
-    {
-      if(auto const hook = detail::on_promise.load(std::memory_order_acquire))
-      {
-        hook(index_, evaluated, mine_.floor, mine_.general);
-      }
-    }
     if(nudged_.load(std::memory_order_acquire))
     {
       auto const frozen = std::max(promised_, mine_.floor);
@@ -1285,6 +1278,13 @@ private:
       for(auto& wire : mine_.wires)
       {
         wire = std::min(wire, frozen.ps);
+      }
+    }
+    if(eligible)
+    {
+      if(auto const hook = detail::on_promise.load(std::memory_order_acquire))
+      {
+        hook(index_, evaluated, mine_.floor, mine_.general, mine_.wires);
       }
     }
     std::ranges::transform(passed_, mine_.consumed.begin(), &sys_time::ps);
@@ -3007,8 +3007,14 @@ void system::save(held_system const&, std::vector<std::byte>& out) const
   saved_system state{.window = self.window, .pending = self.pending, .last_point = self.last_point};
   for(auto const& one : self.slots)
   {
-    state.members.push_back(
-        {.base = one.map.base(), .held_to = one.held_to, .released = one.released});
+    auto held_to = one.held_to;
+    if(held_to)
+    {
+      auto const held_host = one.ref.on->lock();
+      held_to              = std::min(
+          *held_to, one.map.to_system(one.ref.on->member(held_host, 0).virtual_clock().time()));
+    }
+    state.members.push_back({.base = one.map.base(), .held_to = held_to, .released = one.released});
   }
   for(auto const& link : self.links)
   {

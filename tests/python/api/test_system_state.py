@@ -138,6 +138,21 @@ def test_a_restore_then_a_run_equals_the_run_after_the_snapshot(
     assert seen[1:] == seen[:1] * 3
 
 
+def test_a_snapshot_at_a_member_stop_equals_the_one_after_a_restore_and_the_same_run(
+    pair: Build,
+) -> None:
+    for slice_instructions, third in VARIANTS:
+        system = pair(slice_instructions, third)
+        start = system.snapshot()
+        stop = asyncio.run(system.run(for_=ms(3)))
+        assert (stop.reason, stop.member) == (StopReason.USER, "a")
+        first = encoded(system)
+        system.restore(start)
+        again = asyncio.run(system.run(for_=ms(3)))
+        assert (again.reason, again.member, again.time) == (stop.reason, stop.member, stop.time)
+        assert encoded(system) == first
+
+
 @pytest.mark.parametrize("created", [True, False])
 def test_a_restore_drops_what_every_tap_held_created_or_not(pair: Build, created: bool) -> None:
     system = pair(a_entry="link_tx_count", b_entry="link_rx")

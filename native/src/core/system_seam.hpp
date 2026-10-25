@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace popcorn::core::detail
 {
@@ -50,10 +51,16 @@ POPCORN_API extern std::atomic<progress_hook> on_progress;
 
 /**
  * @brief Test seam: called on a member's host thread at each sync_mode::clocks publish where
- *        the member could promise past its floor, before the record is written, with whether
- *        the publish evaluated the promise, and the floor and general promise it publishes.
+ *        the member could promise past its floor, right before the record is written, with
+ *        whether the publish evaluated the promise, and the floor, general promise and wire
+ *        promises in picoseconds it writes.
  */
-using promise_hook = void (*)(std::size_t member, bool evaluated, sys_time floor, sys_time general);
+using promise_hook = void (*)(
+    std::size_t                   member,
+    bool                          evaluated,
+    sys_time                      floor,
+    sys_time                      general,
+    std::span<std::int64_t const> wires);
 
 /** @brief The process's promise_hook, empty unless a test sets it. */
 POPCORN_API extern std::atomic<promise_hook> on_promise;

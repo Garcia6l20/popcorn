@@ -2746,6 +2746,46 @@ TEST_CASE("a wire's saved state holds no span or reset its last barrier already 
   CHECK(saved(true) == saved(false));
 }
 
+TEST_CASE("a wire's saved drained bound stops at its last barrier")
+{
+  constexpr std::int64_t q     = static_cast<std::int64_t>(latency_20);
+  auto const             saved = [&](std::int64_t next) {
+    stub_link                       link{q, declared()};
+    std::vector<std::int64_t> const starts{0};
+    link.window(0, q, starts);
+    link.forth->drain(link.through(0, 0), core::sys_time{6 * q}, core::sys_time{next}, {});
+    std::vector<std::byte> out;
+    link.forth->save(out);
+    return out;
+  };
+  CHECK(saved(7 * q) == saved(9 * q));
+}
+
+TEST_CASE("a stopped injection inside a recorded receiver reset is dropped on either path")
+{
+  constexpr std::int64_t q        = static_cast<std::int64_t>(latency_20);
+  constexpr std::int64_t injected = 3 * q + q / 4;
+  for(std::int64_t const next : {5 * q, 3 * q})
+  {
+    CAPTURE(next);
+    stub_link                       link{q, declared()};
+    std::vector<std::int64_t> const none;
+    link.window(0, q, none);
+    link.forth->drain(link.through(0, 0), core::sys_time{2 * q}, core::sys_time{next}, {});
+    link.forth->receiver_reset(core::sys_time{3 * q});
+    std::array<std::uint16_t, 1> const one{0x55};
+    REQUIRE(link.forth
+                ->inject(
+                    one, core::sys_time{injected},
+                    stm32::stopped_receiver{.now = core::sys_time{3 * q}, .map = {}})
+                .has_value());
+    link.forth->drain(link.through(0, 0), core::sys_time{5 * q}, core::sys_time{6 * q}, {});
+    CHECK(std::ranges::none_of(link.forth_port.received, [&](periph::line_frame const& frame) {
+      return static_cast<std::int64_t>(frame.start.ps) == injected;
+    }));
+  }
+}
+
 TEST_CASE("a closed cut stays until the frames crossing it are tapped")
 {
   constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);

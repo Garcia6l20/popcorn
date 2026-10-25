@@ -939,7 +939,9 @@ auto uart_wire::inject(
         continue;
       }
     }
-    deliver_injection(frame, stopped->map, false, cuts);
+    deliver_injection(
+        frame, stopped->map,
+        reset_drops({.start = frame.start, .end = frame.end, .injected = true}), cuts);
     truncate(state_.delivered.back(), cuts, state_.last_barrier, stopped->map);
   }
   return {};
@@ -972,6 +974,7 @@ void uart_wire::save(std::vector<std::byte>& out) const
   state.carried                = std::move(carried);
   state.queued                 = ring_.contents();
   state.queued_from            = ring_.popped();
+  state.drained_through        = std::min(state.drained_through, state.last_barrier);
   std::erase_if(state.delivered, [&](detail::line_span const& span) {
     return span.end <= state.last_barrier;
   });

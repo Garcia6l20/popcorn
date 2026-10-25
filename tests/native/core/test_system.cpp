@@ -5452,14 +5452,21 @@ struct promise_counts
 
 promise_counts promising;
 
-void note_promise(std::size_t member, bool evaluated, core::sys_time floor, core::sys_time general)
+void note_promise(
+    std::size_t                   member,
+    bool                          evaluated,
+    core::sys_time                floor,
+    core::sys_time                general,
+    std::span<std::int64_t const> wires)
 {
   if(member >= 2)
   {
     return;
   }
   (evaluated ? promising.evaluated : promising.skipped)[member].fetch_add(1);
-  if(not evaluated and general != floor)
+  if(not evaluated and (general != floor or std::ranges::any_of(wires, [&](std::int64_t wire) {
+                          return wire != floor.ps;
+                        })))
   {
     promising.skipped_past_floor.fetch_add(1);
   }
