@@ -675,8 +675,6 @@ del goal, other, pending
 """
 
 BARRIER = 'handle.set_sync("barrier")'
-"""The member blocked in its callback runs while its peer waits in its own: only barrier mode
-lets the peer reach its next event without the blocked member's clock."""
 
 BLOCKED = """
 class Box:

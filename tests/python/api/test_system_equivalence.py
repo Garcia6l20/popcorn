@@ -1,8 +1,8 @@
 """Each sync mode gives one record per scenario: frames, logs, instruction counts and times.
 
-A record holds what rule 1 of the sync design fixes: at a TIME pause every member's pc,
-instruction count, time and log and the tap of each link, at a member stop the stopping member's
-state, and every pause's reason, member and time. It leaves out the other members' positions
+A record holds what every mode must give alike: at a TIME pause every member's pc, instruction
+count, time and log and the tap of each link, at a member stop the stopping member's state, and
+every pause's reason, member and time. It leaves out the other members' positions
 after a member stop and the tap there, which each mode sets by its own rule. Records are JSON, so
 a reference record can be read from a file in place of a run.
 """
@@ -279,6 +279,28 @@ def test_a_scenario_gives_its_reference_record_in_clock_mode(
     seen = record(SCENARIOS[name], "clocks", u575, slice_instructions, third, monkeypatch)
     expected = reference(name, slice_instructions, third)
     assert json.loads(seen) == json.loads(expected)
+
+
+def peer_after_stop(
+    u575: popcorn.PartDescription, slice_instructions: int, third: VirtualDuration | None
+) -> Json:
+    """link_ping against link_echo: b's time at a's first member stop, which each mode sets."""
+    system = build(u575, slice_instructions, third, "link_ping", "link_echo")
+    try:
+        stop = asyncio.run(system.run(until=at(4000)))
+        assert stop.reason is not StopReason.TIME and stop.member == "a", stop
+        return {"stop": stop.time.ps, "b": system.members["b"].time.ps}
+    finally:
+        system.close()
+
+
+def test_the_reference_runs_in_barrier_mode_and_the_check_in_clock_mode(
+    u575: popcorn.PartDescription, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    barrier = json.loads(record(peer_after_stop, "barrier", u575, 1_000_000, None, monkeypatch))
+    clocks = json.loads(record(peer_after_stop, "clocks", u575, 1_000_000, None, monkeypatch))
+    assert barrier["stop"] == clocks["stop"]
+    assert barrier["b"] != clocks["b"]
 
 
 def test_the_records_hold_frames_member_stops_and_time_pauses(
