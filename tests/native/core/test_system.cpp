@@ -57,12 +57,18 @@ public:
   using test_arch::test_arch;
 
   static constexpr std::uint32_t throw_event = 9;
+  static constexpr std::uint32_t reset_event = 10;
 
   void on_event(std::uint32_t kind, std::uint64_t payload) override
   {
     if(kind == throw_event)
     {
       throw test_failure("member event");
+    }
+    if(kind == reset_event)
+    {
+      attached_services().request_reset(popcorn::reset_kind::software);
+      return;
     }
     test_arch::on_event(kind, payload);
   }
@@ -1629,6 +1635,7 @@ struct park_wake
   std::shared_ptr<std::atomic<int>>         held  = std::make_shared<std::atomic<int>>(0);
   bool                                      timer{true};
   bool                                      throws{};
+  bool                                      resets{};
   std::shared_ptr<std::atomic<core::host*>> await_idle{};
 };
 
@@ -1649,11 +1656,12 @@ auto sleeper_woken_at_park(park_wake const& wake) -> core::member_ref
     auto& target = self->load()->member_inline(who);
     wake.held->fetch_add(target.core_held() ? 1 : 0);
     auto started = true;
-    if(wake.throws)
+    if(wake.throws or wake.resets)
     {
       auto const now = target.virtual_clock().now().value;
-      std::ignore =
-          module->attached_events().schedule(icount{now + 40}, throwing_arch::throw_event, 0);
+      std::ignore    = module->attached_events().schedule(
+          icount{now + 40}, wake.throws ? throwing_arch::throw_event : throwing_arch::reset_event,
+          0);
     }
     if(wake.timer)
     {
@@ -1893,13 +1901,49 @@ TEST_CASE("an error found on a sleeper's way to a member stop's time holds it th
   }
 }
 
+TEST_CASE("a stop found on a sleeper's way to a member stop's time goes with the goal withdrawn")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    park_wake wake;
+    wake.timer       = false;
+    wake.resets      = true;
+    auto sleeper     = sleeper_woken_at_park(wake);
+    sleeper.on_reset = popcorn::core::reset_request_policy::stop;
+    rig r{
+        .members = {sleeper, member("alu", "alu_entry")}
+    };
+    r.build(how);
+    r.links[0]->on_pause_drain = [armed = wake.armed] { armed->store(true); };
+    auto       sleeping        = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto       stopping        = r.goal(1, {.until_time = core::sys_time{parking_stop}});
+    auto const stopped         = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    CHECK(stopped.member == 1);
+    CHECK(wake.woken->load() == 1);
+    CHECK_FALSE(sleeping.done());
+    {
+      auto const held = r.sys->lock();
+      r.sys->withdraw(held, 0);
+    }
+    CHECK_THROWS_AS(std::ignore = sleeping.get(), core::operation_cancelled);
+    auto       again = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto       later = r.goal(1, {.until_time = core::sys_time{2 * parking_stop}});
+    auto const next  = r.run({});
+    REQUIRE(next.reason == core::pause_reason::delivered);
+    CHECK(next.member == 1);
+    CHECK(next.at.ps >= 2 * parking_stop);
+    CHECK_FALSE(again.done());
+  }
+}
+
 TEST_CASE("an error a model event raises during an IDLE move lands at the pause point")
 {
   for(auto const& how : {variants()[0], variants()[1]})
   {
     CAPTURE(how.name);
     park_wake wake;
-    wake.timer  = false;
     wake.throws = true;
     rig r{
         .members = {sleeper_woken_at_park(wake), sleeper_with_event(9000)}
@@ -1913,11 +1957,22 @@ TEST_CASE("an error a model event raises during an IDLE move lands at the pause 
     CHECK(wake.woken->load() == 1);
     CHECK(wake.held->load() == 0);
     CHECK(r.now_of(0) == stopped.at.ps);
+    auto const executed = [&r] {
+      auto const held = r.sys->lock();
+      return r.sys->executed_of(held, 0).value;
+    };
+    auto const before = executed();
     r.release(1, true);
     auto const next = r.run(stopped.at.ps + 100 * us_ps);
     REQUIRE(next.reason == core::pause_reason::error);
     CHECK(next.member == 0);
     CHECK(next.at == stopped.at);
+    CHECK(executed() == before);
+    CHECK(
+        core::access(
+            *r.members[0].on, 0,
+            [](core::machine& m) { return m.mem().read(sym("idle", "ticks"), 4).value_or(1); })
+        == 0);
     CHECK_THROWS_AS(std::rethrow_exception(next.error), test_failure);
     CHECK_THROWS_AS(std::ignore = sleeping.get(), test_failure);
   }

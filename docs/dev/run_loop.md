@@ -68,8 +68,7 @@ In order, one turn of the loop:
    `max_instructions`, which ends the slice without a stop.
 4. When the core is held, as a halted member of a system is, or the slice runs with `execute`
    off, jumps the clock to the earliest of the next event, the time bound and the instruction
-   bound. With no event and no time bound it stops
-   with IDLE.
+   bound. With no event and no time bound it stops with IDLE.
 5. Otherwise delivers a pending exception. A pending interrupt therefore wakes a core in WFI
    before any jump. If the core still sleeps after the delivery, it jumps the clock as in step 4.
 6. Otherwise takes the smallest of the instruction bounds and the next event as the deadline and

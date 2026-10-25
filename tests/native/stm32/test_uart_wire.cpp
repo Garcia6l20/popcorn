@@ -1407,8 +1407,14 @@ TEST_CASE("a frame aborted at a release point behind an injected frame ending th
   auto const  point = cut.start.ps + 2 * static_cast<std::int64_t>(us_ps);
   REQUIRE(point - frame_ps - static_cast<std::int64_t>(latency) >= all[widest].end.ps);
   REQUIRE(point < cut.end.ps);
-  auto const     start = point - frame_ps;
-  auto           r     = one_way("link_tx", "link_rx", latency);
+  auto const                       start = point - frame_ps;
+  auto                             r     = one_way("link_tx", "link_rx", latency);
+  auto const                       late  = all.back().end.ps + 5 * static_cast<std::int64_t>(us_ps);
+  std::vector<std::uint16_t> const burst(cut.index + 1, 0x55);
+  REQUIRE(
+      late + static_cast<std::int64_t>(burst.size()) * frame_ps
+      < static_cast<std::int64_t>(script_end_ps));
+  REQUIRE(r.wires[0]->inject(burst, core::sys_time{late}, std::nullopt).has_value());
   run_plan const plan{.window = latency};
   auto const     barrier = [](std::uint64_t k) { return (k + 1) * latency; };
   auto const     windows = script_end_ps / latency;
@@ -1440,9 +1446,11 @@ TEST_CASE("a frame aborted at a release point behind an injected frame ending th
   auto const tapped = r.wires[0]->tap().take();
   auto       seen   = r.taps[0];
   seen.insert(seen.end(), tapped.begin(), tapped.end());
-  auto const injected = std::ranges::find_if(seen, &stm32::tap_frame::injected);
+  auto const injected = std::ranges::find_if(seen, [&](stm32::tap_frame const& frame) {
+    return frame.injected and frame.end.ps == point;
+  });
   REQUIRE(injected != seen.end());
-  CHECK(injected->end.ps == point);
+  CHECK(injected->index > cut.index);
   auto const lost = std::ranges::find_if(seen, [&](stm32::tap_frame const& frame) {
     return frame.index == cut.index and not frame.injected;
   });
