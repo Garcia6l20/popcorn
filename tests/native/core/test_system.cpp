@@ -5427,6 +5427,130 @@ TEST_CASE("a sleeping member's promise lets an awake peer run to the sleeper's n
   CHECK(clocks.windows <= 40);
 }
 
+namespace
+{
+struct promise_counts
+{
+  using per_member = std::array<std::atomic<std::uint64_t>, 2>;
+
+  std::array<per_member, 2>  evaluated{};
+  std::array<per_member, 2>  skipped{};
+  std::atomic<std::uint64_t> arrivals{};
+  std::atomic<std::size_t>   phase{};
+  std::uint64_t              switch_at{};
+
+  void reset(std::uint64_t at)
+  {
+    for(auto& phased : {&evaluated, &skipped})
+    {
+      for(auto& counts : *phased)
+      {
+        for(auto& count : counts)
+        {
+          count.store(0);
+        }
+      }
+    }
+    arrivals.store(0);
+    phase.store(0);
+    switch_at = at;
+  }
+};
+
+promise_counts promising;
+
+void note_promise(std::size_t member, bool evaluated)
+{
+  if(member < 2)
+  {
+    (evaluated ? promising.evaluated : promising.skipped)[promising.phase.load()][member].fetch_add(
+        1);
+  }
+}
+
+void slow_arrival(std::size_t member)
+{
+  if(promising.arrivals.fetch_add(1) >= promising.switch_at)
+  {
+    promising.phase.store(1);
+  }
+  if(member == promising.phase.load())
+  {
+    std::this_thread::sleep_for(std::chrono::microseconds{20});
+  }
+}
+
+auto paced_run(core::sync_mode mode, std::int64_t until, std::int64_t back)
+    -> std::array<std::int64_t, 2>
+{
+  constexpr std::int64_t        latency = 20 * us_ps;
+  std::vector<core::member_ref> members{
+      member<popcorn::testing::test_arch>(
+          "alu", "alu_entry", sends_nothing<popcorn::testing::test_arch>),
+      member<sleeping_arch>("idle", "idle_entry", sends_nothing<sleeping_arch>)};
+  core::system sys{
+      members,
+      {std::make_shared<watched_link>(0, 1, back), std::make_shared<watched_link>(1, 0, latency)},
+      core::slice_bounds{.max_instructions = icount{4}, .wall_budget = std::chrono::hours{1}},
+      &slow_arrival,
+      {},
+      mode
+  };
+  core::host_future<core::pause> pending;
+  {
+    auto const                  held = sys.lock();
+    std::vector<core::sys_time> offsets(2);
+    sys.start(held, offsets);
+    pending = sys.resume(held, core::sys_time{until});
+  }
+  REQUIRE(pending.get().reason == core::pause_reason::system_time);
+  auto const held = sys.lock();
+  return {sys.time_of(held, 0).ps, sys.time_of(held, 1).ps};
+}
+
+auto paced_clocks(std::int64_t until, std::uint64_t switch_at, std::int64_t back = 20 * us_ps)
+    -> std::array<std::int64_t, 2>
+{
+  promising.reset(switch_at);
+  core::detail::on_promise.store(&note_promise);
+  auto const stood = paced_run(core::sync_mode::clocks, until, back);
+  core::detail::on_promise.store(nullptr);
+  promising.arrivals.store(0);
+  promising.switch_at = switch_at;
+  CHECK(stood == paced_run(core::sync_mode::barrier, until, back));
+  return stood;
+}
+}
+
+TEST_CASE("a sleeper whose promise no peer uses evaluates it at a growing period")
+{
+  for(std::int64_t const back : {20 * us_ps, us_ps / 2})
+  {
+    CAPTURE(back);
+    std::ignore          = paced_clocks(2 * ms_ps, std::numeric_limits<std::uint64_t>::max(), back);
+    auto const evaluated = promising.evaluated[0][1].load();
+    auto const skipped   = promising.skipped[0][1].load();
+    MESSAGE("evaluated " << evaluated << " skipped " << skipped);
+    CHECK(promising.evaluated[0][0].load() + promising.skipped[0][0].load() == 0);
+    REQUIRE(evaluated + skipped >= 500);
+    CHECK(evaluated * 8 < evaluated + skipped);
+    CHECK(evaluated * 64 >= evaluated + skipped);
+    CHECK(evaluated <= (evaluated + skipped) / 64 + 12);
+  }
+}
+
+TEST_CASE("a used promise sets a sleeper back to a promise at every publish")
+{
+  std::ignore          = paced_clocks(4 * ms_ps, 3000);
+  auto const before    = promising.evaluated[0][1].load();
+  auto const evaluated = promising.evaluated[1][1].load();
+  auto const skipped   = promising.skipped[1][1].load();
+  MESSAGE("before " << before << " evaluated " << evaluated << " skipped " << skipped);
+  REQUIRE(before * 8 < before + promising.skipped[0][1].load());
+  REQUIRE(evaluated + skipped >= 200);
+  CHECK(evaluated * 2 > evaluated + skipped);
+}
+
 TEST_CASE("a promise record is read whole while its writer publishes")
 {
 #if defined(__SANITIZE_THREAD__)

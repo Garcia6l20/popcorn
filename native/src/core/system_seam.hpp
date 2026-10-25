@@ -47,4 +47,14 @@ using progress_hook = void (*)(std::size_t member, sys_time floor);
 
 /** @brief The process's progress_hook, empty unless a test sets it. */
 POPCORN_API extern std::atomic<progress_hook> on_progress;
+
+/**
+ * @brief Test seam: called on a member's host thread at each sync_mode::clocks publish where
+ *        the member could promise past its floor, with true when the publish evaluates the
+ *        promise and false when it publishes its floor alone.
+ */
+using promise_hook = void (*)(std::size_t member, bool evaluated);
+
+/** @brief The process's promise_hook, empty unless a test sets it. */
+POPCORN_API extern std::atomic<promise_hook> on_promise;
 }
