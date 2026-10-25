@@ -451,7 +451,14 @@ auto uart_wire::overlap(detail::line_span const& span) const -> std::optional<co
     {
       auto const later_is_new =
           span.start > other.start or (span.start == other.start and span.injected);
-      found = earliest(found, fault_of(later_is_new ? span : other));
+      auto const* dated = later_is_new ? &span : &other;
+      if(span.injected != other.injected)
+      {
+        auto const& injected = span.injected ? span : other;
+        auto const& peer     = span.injected ? other : span;
+        dated                = peer.post > injected.start ? &peer : &injected;
+      }
+      found = earliest(found, fault_of(*dated));
     }
   }
   return found;

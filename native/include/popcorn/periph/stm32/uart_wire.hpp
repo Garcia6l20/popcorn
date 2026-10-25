@@ -338,7 +338,9 @@ struct wire_state
  *        transmits still reach the endpoint the wire replaced. Edits armed from any thread
  *        replace or drop frames by number. Injected frames go on the wire's injected lane. Two
  *        frames overlapping on the receiver's line are a system error at the later one's start,
- *        its sender start for a peer frame, its receiver start for an injected one. The tap gets
+ *        its sender start for a peer frame, its receiver start for an injected one. An injected
+ *        frame and a peer frame overlapping are an error at the later of the injected frame's
+ *        start and the peer frame's sender start. The tap gets
  *        each frame once its end, or its abort for a lost frame, the receiver end for an
  *        injected frame, lies at or before the barrier of the drain before the latest one, a
  *        pause point release_through() names, the earliest member position show_drained() names
@@ -545,7 +547,9 @@ public:
    *        delivered at once. While the system runs, any thread: accepted when @p at is at or
    *        after the reach of the drains so far, then delivered by the drain whose reach covers
    *        it. Acceptance then depends on wall timing. No overlap check at the call: an overlap
-   *        is found at the drain, a system error.
+   *        is found at the drain, a system error at the later frame's start for two injected
+   *        frames, at the later of the injected frame's start and the peer frame's sender start
+   *        for a peer frame.
    * @param data Data bits, one frame each, not empty. Each frame gets the declared parity's bit
    *        in place of the MSB of its word.
    * @param at Start-bit edge of the first frame at the receiver, system time.

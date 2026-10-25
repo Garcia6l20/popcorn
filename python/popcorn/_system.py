@@ -2235,8 +2235,9 @@ class UartTap:
         receiver's system time, and no frame may overlap one already on the receiver's line.
         While the system runs, from a `running()` body or another thread, `at` must be at or
         after the reach of the deliveries done so far, which depends on wall timing, and an
-        overlap is found later: the system stops with an error at the later frame's start,
-        a time fixed by the frames.
+        overlap is found later: the system stops with an error at a time fixed by the frames,
+        the later frame's start for two injected frames, and the later of the injected frame's
+        start and the peer frame's sender start for an injected frame and a peer frame.
 
         Raises:
             TypeError: `data` is no bytes, `at` no VirtualTime or `towards` no str.

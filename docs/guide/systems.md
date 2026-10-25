@@ -105,11 +105,17 @@ What the tap holds at a pause depends on the pause's kind:
   position, which can lie before the pause point by an amount that depends on the quantum. The
   rest follow at the next pause or at `close()`.
 - While the system runs, a read can lag the latest frames by up to two windows of the quantum
-  behind the receiving member's time. A read at a pause is complete as above.
+  behind the receiving member's time. Before a free run sleeps, the tap shows every frame ended
+  by the earliest member's position, so a host polling the tap while the system sleeps sees
+  those frames. A read at a pause is complete as above.
 
 A tap also edits the line:
 
-- `tap.inject(data, at=, towards=)` puts frames on the line.
+- `tap.inject(data, at=, towards=)` puts frames on the line. Stopped or paused, an overlap with a
+  frame already on the receiver's line raises `ValueError` at the call. While the system runs,
+  the overlap stops the system with an error at a time the frames fix: the later frame's start
+  for two injected frames, and the later of the injected frame's start and the peer frame's
+  sender start for an injected frame and a peer frame.
 - `tap.replace(index, data, towards=)` gives the sender's frames from number `index` on new data,
   one frame per byte. `tap.drop(index, n, towards=)` keeps `n` frames off the line. Both raise
   `ValueError` for a frame that has started already. `TapFrame.index` is the number.

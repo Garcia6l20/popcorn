@@ -29,6 +29,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <ranges>
@@ -234,6 +235,7 @@ struct world
   std::vector<core::member_ref>                  members;
   std::unique_ptr<core::system>                  sys;
   std::vector<core::pause>                       pauses;
+  std::move_only_function<void(std::size_t)>     on_sleep;
   bool                                           strict{};
   std::size_t                                    real{};
 
@@ -306,7 +308,8 @@ struct world
       };
     }
     std::vector<std::shared_ptr<core::member_link>> links{wires.begin(), wires.end()};
-    sys = std::make_unique<core::system>(members, std::move(links), how.bounds, std::move(hook));
+    sys = std::make_unique<core::system>(
+        members, std::move(links), how.bounds, std::move(hook), std::move(on_sleep));
     if(offsets.empty())
     {
       offsets.resize(nodes.size());
@@ -2185,6 +2188,69 @@ TEST_CASE("an owner woken from an idle sleep behind the latest member cuts its l
     CHECK(busy.get().ps + static_cast<std::uint64_t>(w.sys->base_of(1).ps) == 5 * ms_ps);
     auto const cut = cut_from_member(w, 0);
     std::ignore    = cut.get();
+    w.sys->request_pause();
+    CHECK(pending.get().reason == core::pause_reason::requested);
+  }
+}
+
+TEST_CASE("a free run that sleeps first shows every frame ended by its earliest member")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    world w;
+    w.add("idle");
+    w.add("idle");
+    w.link(0, 1, latency_20);
+    auto seen  = std::make_shared<std::vector<std::vector<stm32::tap_frame>>>();
+    auto lock  = std::make_shared<std::mutex>();
+    w.on_sleep = [&w, seen, lock](std::size_t index) {
+      if(index == 1)
+      {
+        std::scoped_lock const held{*lock};
+        seen->push_back(w.wires[0]->tap().take());
+      }
+    };
+    w.host(how);
+    REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+    std::int64_t                          at = 0;
+    std::vector<core::host_future<vtime>> busy;
+    {
+      auto const held = w.sys->lock();
+      for(std::size_t member = 0; member < 2; ++member)
+      {
+        std::ignore =
+            w.sys->post_goal(held, member, {.until = popcorn::address{0x0800'0001}, .open = true});
+      }
+      at = w.sys->pending_barrier(held).ps + 7 * us_ps;
+      std::vector<std::uint16_t> const data{0x7e};
+      REQUIRE(w.wires[0]->inject(data, core::sys_time{at}, std::nullopt).has_value());
+      auto const after = at + 25 * us_ps;
+      for(std::size_t member = 0; member < 2; ++member)
+      {
+        auto const held_host = w.members[member].on->lock();
+        busy.push_back(w.members[member].on->post(
+            held_host, 0, [](core::machine&) {},
+            vtime{static_cast<std::uint64_t>(after - w.sys->base_of(member).ps)}));
+      }
+    }
+    core::host_future<core::pause> pending;
+    {
+      auto const held = w.sys->lock();
+      pending         = w.sys->resume(held);
+    }
+    REQUIRE(asleep(w, pending));
+    for(auto& one : busy)
+    {
+      std::ignore = one.get();
+    }
+    {
+      std::scoped_lock const held{*lock};
+      REQUIRE(seen->size() == 1);
+      REQUIRE(seen->front().size() == 1);
+      CHECK(seen->front().front().data == 0x7e);
+      CHECK(seen->front().front().start.ps == at);
+    }
     w.sys->request_pause();
     CHECK(pending.get().reason == core::pause_reason::requested);
   }

@@ -1584,15 +1584,16 @@ TEST_CASE("an injection while running is refused before the drains' reach, else 
   CHECK(seen == bytes);
 }
 
-TEST_CASE("an injection overlapping later peer frames is a system error at the earliest start")
+TEST_CASE("an injection overlapping a peer frame starting after it is a system error at its start")
 {
   auto full = one_way("link_tx", "link_rx", latency_20);
   full.oracle(script_end_ps);
   auto const& all      = full.taps[0];
   auto const  frame_ps = all[10].end.ps - all[10].start.ps;
   auto const  at       = all[10].start.ps + static_cast<std::int64_t>(latency_20) - frame_ps / 2;
-  auto const  expected = fault_seen{.at = all[10].start.ps, .member = 0};
-  auto const  arm      = [&](rig& r) {
+  REQUIRE(at > all[10].start.ps);
+  auto const expected = fault_seen{.at = at, .member = 1};
+  auto const arm      = [&](rig& r) {
     REQUIRE(injected_byte(*r.wires[0], 0x5a, at, std::nullopt).has_value());
   };
   auto reference = one_way("link_tx", "link_rx", latency_20);

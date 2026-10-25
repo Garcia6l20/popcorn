@@ -316,6 +316,10 @@ public:
           }
           if(sys_.chosen.sleep)
           {
+            for(auto* link : one.inbound)
+            {
+              link->show_drained(sys_.chosen.confirm);
+            }
             phase_    = phase::sleeping;
             sleeping_ = true;
             if(sys_.before_sleep)
