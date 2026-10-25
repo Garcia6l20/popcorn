@@ -126,6 +126,7 @@ void system_space::write(window which, std::uint32_t offset, unsigned size, std:
   {
     return;
   }
+  core_.nvic_changed();
   if(which == window::scs_nonsecure)
   {
     which = window::scs;

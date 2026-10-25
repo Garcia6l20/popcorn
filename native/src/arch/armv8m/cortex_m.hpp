@@ -206,6 +206,8 @@ private:
   [[nodiscard]] auto stack_limits() const noexcept -> bool;
   [[nodiscard]] auto v7() const noexcept -> bool;
   [[nodiscard]] auto current_priority(bool ignore_primask = false) const -> int;
+  [[nodiscard]] auto wake_rank(std::uint32_t number) const -> int;
+  void               nvic_changed() noexcept;
   [[nodiscard]] auto banked_priority(bool ignore_primask) const -> int;
   [[nodiscard]] auto one_bank_priority(bool ignore_primask) const -> int;
   auto               deliver_banked() -> trap_result;
@@ -284,6 +286,9 @@ private:
   uc_mem_attrs                              access_{};
   mutable std::exception_ptr                failure_{};
   std::uint64_t                             generation_{};
+  std::uint64_t                             nvic_generation_{};
+  mutable std::uint64_t                     ranked_generation_{~std::uint64_t{0}};
+  mutable std::vector<std::int16_t>         wake_ranks_{};
   mutable std::vector<std::uint64_t>        exits_{};
   mutable std::vector<std::uint16_t>        halfwords_{};
   bool                                      in_call_{};

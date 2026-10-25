@@ -11,12 +11,15 @@
 #include <cstdint>
 #include <exception>
 #include <format>
+#include <limits>
 #include <string_view>
 
 namespace popcorn::arch::armv8m
 {
 namespace
 {
+constexpr std::int16_t  unranked        = std::numeric_limits<std::int16_t>::min();
+constexpr std::int16_t  disabled_rank   = std::numeric_limits<std::int16_t>::max();
 constexpr std::uint32_t wfi_narrow      = 0xbf30;
 constexpr std::uint32_t wfi_wide_first  = 0xf3af;
 constexpr std::uint32_t wfi_wide_second = 0x8003;
@@ -154,18 +157,38 @@ auto cortex_m::may_wake(std::uint32_t source) const -> bool
   {
     return true;
   }
-  if(not is_enabled(number))
+  auto const rank = wake_rank(number);
+  return rank != disabled_rank and rank < current_priority(asleep and not wfe);
+}
+
+auto cortex_m::wake_rank(std::uint32_t number) const -> int
+{
+  if(ranked_generation_ != nvic_generation_)
   {
-    return false;
+    wake_ranks_.assign(exception_count(), unranked);
+    ranked_generation_ = nvic_generation_;
   }
-  auto const current = current_priority(asleep and not wfe);
-  if(trustzone())
+  auto& rank = wake_ranks_[number];
+  if(rank == unranked)
   {
-    auto const config = priority_config();
-    auto const target = exception_target(state_.exceptions, config, number, current_security());
-    return exception_priority(state_.exceptions, config, number, target, true) < current;
+    if(not is_enabled(number))
+    {
+      rank = disabled_rank;
+    }
+    else if(trustzone())
+    {
+      auto const config = priority_config();
+      auto const target = exception_target(state_.exceptions, config, number, current_security());
+      rank              = static_cast<std::int16_t>(
+          exception_priority(state_.exceptions, config, number, target, true));
+    }
+    else
+    {
+      rank = static_cast<std::int16_t>(
+          group_priority(priority_of(state_.exceptions, number), state_.scs.prigroup));
+    }
   }
-  return group_priority(priority_of(state_.exceptions, number), state_.scs.prigroup) < current;
+  return rank;
 }
 
 auto cortex_m::wake_pending() const -> bool

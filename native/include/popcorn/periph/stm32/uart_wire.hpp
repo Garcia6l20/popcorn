@@ -492,6 +492,10 @@ public:
   [[nodiscard]] auto due() const -> std::optional<core::sys_time> override;
   auto watch_posts(std::move_only_function<void(core::sys_time)> watcher) -> bool override;
   auto hold_inputs_before(core::sys_time at) -> std::optional<core::sys_time> override;
+  void hold_group_before(
+      std::span<core::member_link* const>      links,
+      core::sys_time                           at,
+      std::span<std::optional<core::sys_time>> dues) override;
   [[nodiscard]] auto quiet() const -> bool override;
   void               release_through(core::sys_time at) override;
   void               finish(core::sys_time at) override;
@@ -586,8 +590,9 @@ private:
       std::vector<tap_frame>&           from,
       core::sys_time                    through,
       std::span<detail::line_cut const> cuts);
-  auto check_shape(detail::wire_post const& post) -> std::optional<core::link_fault>;
-  auto arm(detail::armed_edit edit) -> bool;
+  auto               check_shape(detail::wire_post const& post) -> std::optional<core::link_fault>;
+  auto               arm(detail::armed_edit edit) -> bool;
+  [[nodiscard]] auto due_held() const -> std::optional<core::sys_time>;
   auto overlap(detail::line_span const& span) const -> std::optional<core::link_fault>;
   [[nodiscard]] auto reset_drops(detail::line_span const& span) const -> bool;
   auto               fault_of(detail::line_span const& span) const -> core::link_fault;
