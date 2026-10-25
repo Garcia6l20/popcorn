@@ -1393,6 +1393,64 @@ auto earliest_fault(rig const& r) -> std::optional<fault_seen>
 }
 }
 
+TEST_CASE("a frame aborted at a release point behind an injected frame ending there is tapped")
+{
+  constexpr std::uint64_t latency = 5 * us_ps;
+  auto                    full    = one_way("link_tx", "link_rx", latency);
+  full.oracle(script_end_ps);
+  auto const& all      = full.taps[0];
+  auto const  frame_ps = static_cast<std::int64_t>(declared().frame_ps());
+  auto const  widest   = std::ranges::max(
+      std::views::iota(std::size_t{0}, all.size() - 1), {},
+      [&](std::size_t index) { return all[index + 1].start.ps - all[index].end.ps; });
+  auto const& cut   = all[widest + 1];
+  auto const  point = cut.start.ps + 2 * static_cast<std::int64_t>(us_ps);
+  REQUIRE(point - frame_ps - static_cast<std::int64_t>(latency) >= all[widest].end.ps);
+  REQUIRE(point < cut.end.ps);
+  auto const     start = point - frame_ps;
+  auto           r     = one_way("link_tx", "link_rx", latency);
+  run_plan const plan{.window = latency};
+  auto const     barrier = [](std::uint64_t k) { return (k + 1) * latency; };
+  auto const     windows = script_end_ps / latency;
+  auto const     j       = static_cast<std::uint64_t>(start) / latency - 1;
+  auto const     m       = static_cast<std::uint64_t>(point) / latency;
+  for(std::uint64_t k = 0; k <= j; ++k)
+  {
+    r.run_window(0, k, barrier(k), plan, {});
+    r.run_window(1, k, barrier(k), plan, {});
+    r.drain(1, k, barrier(k), barrier(k + 1));
+  }
+  for(auto k = j + 1; k <= m; ++k)
+  {
+    r.run_window(0, k, barrier(k), plan, {});
+  }
+  REQUIRE(injected_byte(*r.wires[0], 0x77, start, receiver_now(r)).has_value());
+  r.wires[0]->release_through(core::sys_time{point});
+  r.wires[0]->sender_reset(core::sys_time{point});
+  for(auto k = j + 1; k + 1 < windows; ++k)
+  {
+    if(k > m)
+    {
+      r.run_window(0, k, barrier(k), plan, {});
+    }
+    r.run_window(1, k, barrier(k), plan, {});
+    r.drain(1, k, barrier(k), barrier(k + 1));
+  }
+  r.finish(script_end_ps);
+  auto const tapped = r.wires[0]->tap().take();
+  auto       seen   = r.taps[0];
+  seen.insert(seen.end(), tapped.begin(), tapped.end());
+  auto const injected = std::ranges::find_if(seen, &stm32::tap_frame::injected);
+  REQUIRE(injected != seen.end());
+  CHECK(injected->end.ps == point);
+  auto const lost = std::ranges::find_if(seen, [&](stm32::tap_frame const& frame) {
+    return frame.index == cut.index and not frame.injected;
+  });
+  REQUIRE(lost != seen.end());
+  CHECK(lost->lost);
+  CHECK(lost->end.ps == point);
+}
+
 TEST_CASE("an injection while stopped arrives at its time and cancels the IDLE due after it")
 {
   auto full = one_way("link_tx", "link_rx", latency_20);

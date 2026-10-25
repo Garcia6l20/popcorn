@@ -383,7 +383,7 @@ void uart_wire::emit(
     std::span<detail::line_cut const> cuts)
 {
   auto const key = [](tap_frame const& frame) {
-    return std::tuple{frame.end.ps, frame.injected, frame.index};
+    return std::tuple{frame.end.ps, not frame.injected, frame.index};
   };
   auto const ready = std::ranges::stable_partition(
       from, [&](tap_frame const& frame) { return frame.end <= through; });
@@ -412,7 +412,8 @@ void uart_wire::emit(
       }
     }
   }
-  auto const cursor = std::tuple{state_.tapped_end.ps, state_.tapped_injected, state_.tapped_index};
+  auto const cursor =
+      std::tuple{state_.tapped_end.ps, not state_.tapped_injected, state_.tapped_index};
   for(auto const& frame : settled)
   {
     if(state_.tapped_any and key(frame) <= cursor)

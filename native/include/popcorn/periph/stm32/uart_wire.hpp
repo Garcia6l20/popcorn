@@ -80,7 +80,8 @@ struct wire_receiver
 /**
  * @brief One frame of a wire, as the tap shows it. The tap orders frames by their settle time:
  *        end for a peer frame, its sender stop-bit end, and end for an injected one, its receiver
- *        stop-bit end. So it is not ordered by arrival: a peer frame arrives L after its end.
+ *        stop-bit end, an injected frame before a peer frame at an equal time, then by number.
+ *        So it is not ordered by arrival: a peer frame arrives L after its end.
  */
 struct tap_frame
 {
