@@ -2268,7 +2268,8 @@ TEST_CASE("a sender toggling UE mid-frame posts many segments a window and match
   auto const expected = reference.dump();
   keep_dump("ue-toggle-oracle", expected);
   auto const lost = std::ranges::count(reference.taps[0], true, &stm32::tap_frame::lost);
-  REQUIRE(lost > 10'000);
+  CHECK(lost > 10'000);
+  constexpr std::uint64_t posts_per_lost_frame = 2;
   for(auto const& how : {variants()[0], variants()[2], variants()[7]})
   {
     CAPTURE(how.name);
@@ -2286,7 +2287,7 @@ TEST_CASE("a sender toggling UE mid-frame posts many segments a window and match
     std::map<std::int64_t, std::uint64_t> per_window;
     for(auto const& frame : w.taps[0])
     {
-      per_window[frame.start.ps / latency] += frame.lost ? 2 : 1;
+      per_window[frame.start.ps / latency] += frame.lost ? posts_per_lost_frame : 1;
     }
     auto const busiest = std::ranges::max(per_window | std::views::values);
     MESSAGE("busiest window ", busiest);

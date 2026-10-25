@@ -2273,10 +2273,8 @@ def test_a_child_forked_from_a_running_machine_exits_and_refuses_it(mode: str) -
         assert lines[0].startswith("request refused: this machine request was made before os.fork")
 
 
-def test_a_child_forked_from_a_parent_with_a_run_system_drops_it(
-    u575: popcorn.PartDescription,
-) -> None:
-    del u575
+@pytest.mark.usefixtures("u575")
+def test_a_child_forked_from_a_parent_with_a_run_system_drops_it() -> None:
     child = run_child(
         f"""
         import asyncio
@@ -2316,7 +2314,7 @@ def test_a_child_forked_from_a_parent_with_a_run_system_drops_it(
         system.close()
         print("child", os.waitstatus_to_exitcode(status), flush=True)
         """,
-        timeout=60,
+        timeout=10,
     )
     assert child.returncode == 0, child.stderr
     assert child.stderr == ""
