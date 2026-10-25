@@ -1870,3 +1870,86 @@ TEST_CASE("a delivered pause's tap holds every frame ended by its point at any q
     }
   }
 }
+
+namespace
+{
+auto send_then_stay_busy(variant const& how, std::int64_t stamp_at, std::int64_t busy_at)
+    -> busy_send
+{
+  constexpr std::int64_t latency = 100 * us_ps;
+  pinned const           pin{how.one_cpu};
+  world                  w;
+  w.add("link_rx");
+  w.add("link_rx");
+  w.link(0, 1, latency);
+  w.link(1, 0, latency);
+  w.host(how);
+  REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+  REQUIRE(w.wires[0]->drop(0, 1));
+  core::host_future<core::goal_reached> sending;
+  core::host_future<core::goal_reached> listening;
+  std::int64_t                          base = 0;
+  {
+    auto const held = w.sys->lock();
+    sending         = w.sys->post_goal(held, 0, {.until = popcorn::address{0x0800'0001}});
+    listening = w.sys->post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    base = static_cast<std::int64_t>(core::access(
+               *w.members[0].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; }))
+         - w.sys->time_of(held, 0).ps;
+  }
+  core::host_future<vtime> written;
+  core::host_future<vtime> busy;
+  {
+    auto const held_host = w.members[0].on->lock();
+    written              = w.members[0].on->post(
+        held_host, 0,
+        [](core::machine& m) {
+          auto&      usart = m.peripheral("USART1");
+          auto const found = popcorn::find_register(usart.description(), std::string_view{"TDR"});
+          REQUIRE(found != nullptr);
+          REQUIRE(m.mem().write(usart.description().base + found->offset, 4, 0x5a));
+        },
+        vtime{static_cast<std::uint64_t>(stamp_at + base)});
+    busy = w.members[0].on->post(
+        held_host, 0, [](core::machine&) {}, vtime{static_cast<std::uint64_t>(busy_at + base)});
+  }
+  core::host_future<core::pause> pending;
+  {
+    auto const held = w.sys->lock();
+    pending         = w.sys->resume(held);
+  }
+  auto const stopped = pending.get();
+  std::ignore        = written.get();
+  std::ignore        = busy.get();
+  {
+    auto const held = w.sys->lock();
+    w.sys->withdraw(held, 1);
+  }
+  w.collect();
+  return {
+      .dump = w.dump(), .stopped = stopped, .tapped = {w.taps[0].size(), w.taps[1].size()}
+  };
+}
+}
+
+TEST_CASE("an idle pause's tap holds every frame ended by its point at any quantum")
+{
+  for(auto const stamp_at : {776 * us_ps, 780 * us_ps, 786 * us_ps})
+  {
+    CAPTURE(stamp_at);
+    std::optional<std::string> reference;
+    for(auto const& how : variants())
+    {
+      CAPTURE(how.name);
+      auto const seen = send_then_stay_busy(how, stamp_at, stamp_at + 30 * us_ps);
+      CHECK(seen.stopped.reason == core::pause_reason::idle);
+      CHECK(seen.stopped.at.ps == stamp_at + 30 * us_ps);
+      CHECK(seen.tapped == std::vector<std::size_t>{1, 0});
+      if(reference)
+      {
+        CHECK(seen.dump == *reference);
+      }
+      reference = seen.dump;
+    }
+  }
+}
