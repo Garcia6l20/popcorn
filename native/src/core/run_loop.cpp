@@ -1206,7 +1206,7 @@ auto machine::run_state::run(slice_request const& request) -> slice_result
     {
       return finish(request, std::move(*end));
     }
-    if(core_held)
+    if(core_held or not request.execute)
     {
       rethrow_failure();
       spin.progress();

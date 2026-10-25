@@ -246,8 +246,7 @@ public:
 
   void restart() noexcept
   {
-    phase_     = phase::begin;
-    park_held_ = false;
+    phase_ = phase::begin;
     if(sys_.measuring)
     {
       left_ = std::chrono::steady_clock::now();
@@ -367,16 +366,7 @@ public:
           if(position(target) < sys_.chosen.head->at)
           {
             window_ = sys_.window;
-            if(not target.core_held())
-            {
-              target.hold_core(true);
-              park_held_ = true;
-            }
             return request_to(sys_.chosen.head->at, false, true, false);
-          }
-          if(std::exchange(park_held_, false))
-          {
-            target.hold_core(false);
           }
           phase_ = phase::begin;
           return std::nullopt;
@@ -465,12 +455,22 @@ public:
   }
 
 private:
+  [[nodiscard]] auto found_at(machine const& target) const noexcept -> sys_time
+  {
+    auto const at = position(target);
+    if(phase_ == phase::park and at < sys_.chosen.head->at)
+    {
+      return sys_.chosen.head->at;
+    }
+    return at;
+  }
+
   void fail(machine const& target, std::exception_ptr error) noexcept
   {
     auto& one  = sys_.slots[index_];
     one.failed = true;
     one.rep.found.push_back(
-        {.at = position(target), .member = index_, .kind = entry_kind::error, .error = error});
+        {.at = found_at(target), .member = index_, .kind = entry_kind::error, .error = error});
   }
 
   void resolve(machine& target, popcorn::stop stopped)
@@ -478,7 +478,7 @@ private:
     auto& one    = sys_.slots[index_];
     one.resolved = true;
     one.rep.found.push_back(
-        {.at      = position(target),
+        {.at      = found_at(target),
          .member  = index_,
          .kind    = entry_kind::stopped,
          .stopped = std::move(stopped)});
@@ -575,7 +575,7 @@ private:
     }
   }
 
-  auto request_to(sys_time bound, bool quiescent, bool hold, bool goal = true) -> slice_request
+  auto request_to(sys_time bound, bool quiescent, bool hold, bool executes = true) -> slice_request
   {
     auto& one = sys_.slots[index_];
     enter_windows();
@@ -590,8 +590,9 @@ private:
         .internal_stop         = true,
         .stop_quiescent        = quiescent,
         .stop_when_events_only = true,
+        .execute               = executes,
     };
-    if(goal and one.running())
+    if(executes and one.running())
     {
       auto const& wanted         = one.goal->goal;
       request.until              = wanted.until;
@@ -762,7 +763,6 @@ private:
   std::size_t       index_;
   phase             phase_{phase::begin};
   bool              held_last_{};
-  bool              park_held_{};
   bool              sleeping_{};
   std::uint64_t     window_{};
   vtime             until_last_{};

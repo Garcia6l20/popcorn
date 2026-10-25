@@ -284,6 +284,47 @@ def test_a_member_asleep_in_running_stands_at_a_member_stop_s_time(
     assert seen[1] == seen[0]
 
 
+SYST_CSR, SYST_RVR, SYST_CVR = 0xE000_E010, 0xE000_E014, 0xE000_E018
+
+
+def test_a_member_run_on_to_a_member_stop_keeps_its_systick_period(
+    u575: popcorn.PartDescription,
+) -> None:
+    async def ticks(m: popcorn.Machine) -> tuple[int, int]:
+        first = await m.run(until="SysTick_Handler", budget=10_000_000)
+        second = await m.run(until="SysTick_Handler", budget=10_000_000)
+        return first.time.ps, second.time.ps
+
+    async def body(system: System) -> tuple[int, VirtualTime]:
+        a, b = system.members["a"], system.members["b"]
+        async with a.running():
+            stop = await b.run(for_=ms(2) + us(3))
+            assert stop.reason is StopReason.TIME
+            assert system.time_of("a") == system.time_of("b")
+        tick = await a.run(until="SysTick_Handler", budget=10_000_000)
+        assert tick.reason is StopReason.ADDRESS
+        return tick.time.ps, system.time_of("a")
+
+    seen: list[tuple[int, VirtualTime]] = []
+    for latency in (L, VirtualDuration(L.ps // 3)):
+        a, b = member(u575, "idle", "a"), member(u575, "idle", "b")
+        a.mem.u32[SYST_RVR] = 3999
+        a.mem.u32[SYST_CVR] = 0
+        a.mem.u32[SYST_CSR] = 0b111
+        first, second = asyncio.run(ticks(a))
+        period = second - first
+        assert period > 0
+        links = [UartLink("a.USART1", "b.USART1", latency=latency, baud=460_800)]
+        system = System({"a": a, "b": b}, links)
+        try:
+            tick, at = asyncio.run(body(system))
+        finally:
+            system.close()
+        assert (tick - first) % period == 0
+        seen.append((tick - first, at))
+    assert seen[1] == seen[0]
+
+
 def test_a_goal_cap_stops_a_sleeping_member(ping: Build) -> None:
     system = ping(goal_cap=ms(1))
     b = system.members["b"]

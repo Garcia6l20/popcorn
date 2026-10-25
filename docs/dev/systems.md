@@ -73,11 +73,13 @@ time. A halted member's time counts in its instruction count but not in a goal's
 A member whose goal runs and whose core sleeps stops a slice where it fell asleep, so its
 position at a pause depends on `Q`. When a pause delivers a member stop at `P`, every such member
 below `P` runs on to `P` after the third completion fixed the outcome as that member stop, past
-the pause's drain. Its core is held on the way and its slice carries none of its goal's stop
-conditions, so it executes nothing and its goal stops nothing before `P`. The slice holds at `P`
-with `hold_from_until`, `stop_quiescent` off, and the core is released there. Input that lands
-on the way, such as a byte a pty pump hands at a slice boundary, stays pending and is taken at
-`P` when the system resumes. A member asleep past `P` stays where it fell asleep. A sleeper runs
+the pause's drain. Its slice runs with `execute` off and none of its goal's stop conditions:
+the clock, the events and the peripherals advance to `P` as for a sleeping core, the core
+executes no instruction and enters no exception, and its goal stops nothing before `P`. The
+core is not held, so SysTick, CYCCNT and the timers that stop in Debug state keep counting. The
+slice holds at `P` with `hold_from_until`, `stop_quiescent` off. Input that lands on the way,
+such as a byte a pty pump hands at a slice boundary, stays pending and is taken at `P` when the
+system resumes. A stop or an error that a model event raises on the way is recorded at `P`. A member asleep past `P` stays where it fell asleep. A sleeper runs
 on to `P` at delivered member stops only.
 
 ## Locks

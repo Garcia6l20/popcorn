@@ -1612,22 +1612,32 @@ struct park_wake
 {
   std::shared_ptr<std::atomic<bool>> armed = std::make_shared<std::atomic<bool>>(false);
   std::shared_ptr<std::atomic<int>>  woken = std::make_shared<std::atomic<int>>(0);
+  bool                               throws{};
 };
 
 auto sleeper_woken_at_park(park_wake const& wake) -> core::member_ref
 {
-  popcorn::testing::machine_fixture<> f{m33(), "idle", core::machine_options{}};
+  popcorn::testing::machine_fixture<throwing_arch> f{m33(), "idle", core::machine_options{}};
   f.set("pc", sym("idle", "idle_forever"));
   f.set("r0", 0);
+  auto* const                                 module = f.module;
   std::vector<std::unique_ptr<core::machine>> machines;
   machines.push_back(std::move(f.target));
   auto const       self = std::make_shared<std::atomic<core::host*>>(nullptr);
-  core::host_hooks hooks{.boundary = [wake, self](core::member_id who) {
+  core::host_hooks hooks{.boundary = [wake, self, module](core::member_id who) {
     if(not wake.armed->exchange(false))
     {
       return;
     }
-    auto&      target = self->load()->member_inline(who);
+    auto& target = self->load()->member_inline(who);
+    if(wake.throws)
+    {
+      auto const now = target.virtual_clock().now().value;
+      std::ignore =
+          module->attached_events().schedule(icount{now + 40}, throwing_arch::throw_event, 0);
+      wake.woken->fetch_add(1);
+      return;
+    }
     auto const started =
         target.mem().write(0xE000'E014, 4, 40) and target.mem().write(0xE000'E010, 4, 1);
     wake.woken->fetch_add(started ? 1 : 100);
@@ -1720,6 +1730,36 @@ TEST_CASE("a parked member's goal stops nothing on its way to the member stop's 
     CHECK(wake.woken->load() == 1);
     CHECK(asked->load() == 0);
     CHECK(r.now_of(0) == stopped.at.ps);
+  }
+}
+
+TEST_CASE("an error a model event raises on a sleeper's way to a member stop's time lands there")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    park_wake wake;
+    wake.throws = true;
+    rig r{
+        .members = {sleeper_woken_at_park(wake), member("alu", "alu_entry")}
+    };
+    r.build(how);
+    r.links[0]->on_pause_drain = [armed = wake.armed] { armed->store(true); };
+    auto       sleeping        = r.goal(0, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto       stopping        = r.goal(1, {.until_time = core::sys_time{parking_stop}});
+    auto const stopped         = r.run({});
+    REQUIRE(stopped.reason == core::pause_reason::delivered);
+    CHECK(stopped.member == 1);
+    CHECK(wake.woken->load() == 1);
+    CHECK_FALSE(sleeping.done());
+    CHECK(r.now_of(0) == stopped.at.ps);
+    auto       later = r.goal(1, {.until_time = core::sys_time{2 * parking_stop}});
+    auto const next  = r.run({});
+    REQUIRE(next.reason == core::pause_reason::error);
+    CHECK(next.member == 0);
+    CHECK(next.at == stopped.at);
+    CHECK_THROWS_AS(std::rethrow_exception(next.error), test_failure);
+    CHECK_THROWS_AS(std::ignore = sleeping.get(), test_failure);
   }
 }
 

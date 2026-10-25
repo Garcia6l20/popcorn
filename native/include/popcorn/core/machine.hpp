@@ -204,6 +204,12 @@ struct slice_request
   /** @brief Evaluate stop_when only after a dispatched event, never at the slice end, so a slice
    * end set by max_instructions, the wall budget or a bound never decides the user stop. */
   bool stop_when_events_only{};
+  /** @brief Whether the core executes. With false, the clock, the events and the peripherals
+   * advance as for a sleeping core, the core executes no instruction and enters no exception,
+   * and an exception that becomes pending stays pending for the next slice that executes. The
+   * core is not held: timers that stop in Debug state keep counting. For a scheduler that moves
+   * a sleeping member to a point fixed after its last executing slice. */
+  bool execute{true};
 };
 
 /** @brief Outcome of one native slice. */
