@@ -343,8 +343,8 @@ struct wire_state
  *        depend on how the run was cut into windows. A release collects the posts still in
  *        both mailboxes as the final stop does, and a later drain that hands the same frames
  *        does not show them again. A sender reset aborts the frame in flight. After a receiver
- * reset at r, frames on the line at r or starting before r plus L never reach the receiver, the tap
- * still shows them.
+ *        reset at r, frames on the line at r or starting before r plus L never reach the
+ *        receiver, the tap still shows them.
  *
  *        A drain hands the port only posts starting before its barrier, the pause point at a
  *        pause. It carries the rest it would hand, aborts included, in order, and the next drain

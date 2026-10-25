@@ -1168,11 +1168,12 @@ TEST_CASE("a release through a pause point past an abort taps the frame lost, on
   REQUIRE(all[1].lost);
   auto const start  = static_cast<std::uint64_t>(all[1].start.ps);
   auto const abort  = static_cast<std::uint64_t>(all[1].end.ps);
-  auto const window = (abort - start) / 2;
-  auto const k      = abort / window - 1;
-  REQUIRE(start < (k + 1) * window);
-  REQUIRE((k + 1) * window < abort);
+  auto const window = (abort - start) * 9 / 10;
+  auto const k      = start / window;
+  REQUIRE((k + 1) * window <= abort);
+  REQUIRE(abort < (k + 2) * window);
   auto const released = shown_mid_run("link_abort", latency_20, window, k, shown_by::release);
+  CHECK(released.both_mailboxes);
   CHECK(released.abort_mailed);
   REQUIRE(released.point >= all[1].end.ps);
   CHECK(released.shown == ended_by(all, released.point));

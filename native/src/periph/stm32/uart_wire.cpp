@@ -828,6 +828,7 @@ auto uart_wire::inject(
     }
     return {};
   }
+  sole_tapper const sole{tapping_};
   if(at < stopped->now)
   {
     return std::unexpected{
@@ -936,6 +937,7 @@ void uart_wire::save(std::vector<std::byte>& out) const
 
 void uart_wire::load(std::span<std::byte const> in)
 {
+  sole_tapper const  sole{tapping_};
   detail::wire_state loaded;
   try
   {

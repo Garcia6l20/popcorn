@@ -159,11 +159,11 @@ public:
    *        or finish() of the link running: on the host thread that finished the pause last, or
    *        on the caller of system::resume() when every member finished before it returned. At
    *        a member stop and at IDLE every member then stands at or past @p at, so no later post
-   *        or injection ends at or before @p at. After a TIME or requested pause a member can
-   *        stand below the pause point, and the link is not called: an observer then holds the
-   *        frames ended by the earliest member's position. A frame a later drain hands is
-   *        shown once. Runs where no exception may leave, an allocation failure terminates. A
-   *        link with no observer keeps the default, which does nothing.
+   *        or injection ends before @p at. An error pause stops the system, so no member runs
+   *        after it. The system calls it at those three kinds only. After a TIME or requested
+   *        pause an observer holds the frames ended by the earliest member's position. A frame
+   *        a later drain hands is shown once. Runs where no exception may leave, an allocation
+   *        failure terminates. A link with no observer keeps the default, which does nothing.
    * @param at The pause point, system time.
    */
   virtual void release_through([[maybe_unused]] sys_time at)
