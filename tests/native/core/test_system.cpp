@@ -5954,13 +5954,11 @@ auto followed_sleeper(std::int64_t progress) -> int
     std::ignore = sys.post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
     pending     = sys.resume(held);
   }
-  while(following.followed.load() == 0 and first_slices.load() < 20)
-  {
-    std::this_thread::yield();
-  }
+  auto const ended =
+      await_for([] { return following.followed.load() != 0 or first_slices.load() >= 20; });
   sys.request_pause();
   std::ignore = pending.get();
-  return following.followed.load();
+  return ended ? following.followed.load() : -2;
 }
 }
 

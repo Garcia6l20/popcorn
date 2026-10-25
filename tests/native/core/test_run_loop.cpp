@@ -147,12 +147,14 @@ TEST_CASE("progress is called every progress_every instructions and never past t
         .wall_budget = std::chrono::seconds{60}, .until = sym("alu", "alu_done")};
     request.progress.emplace(counted);
     request.progress_every = icount{every};
+    auto const from        = f.target->virtual_clock().now().value;
     auto const stop        = f.run_to_stop(request);
     CHECK(stop.reason == stop_reason::address);
+    auto const ran = stop.instructions.value - from;
     if(every == 100)
     {
-      CHECK(calls >= 480);
-      CHECK(calls <= 491);
+      CHECK(calls <= ran / every);
+      CHECK(calls >= ran / (2 * every));
     }
     else
     {
