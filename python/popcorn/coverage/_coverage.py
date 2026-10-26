@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Callable, Iterable, Sequence
@@ -72,6 +73,35 @@ class EdgeHit:
     hits: int
 
 
+class UnmodelledReason(IntEnum):
+    """Why a register that the firmware accessed is unmodelled."""
+
+    NO_REGISTER = 1
+    STORAGE_ONLY = 2
+    NO_MODEL = 3
+    UNIMPLEMENTED = 4
+    RAZ_WI = 5
+
+
+@dataclass(frozen=True, slots=True)
+class UnmodelledAccess:
+    """CPU accesses from one instruction to one register no model implements.
+
+    `peripheral` is the window name. A raz_wi range is `raz_wi[<index>]` when unnamed,
+    `<name>[<index>]` when several ranges share the name and the bare name otherwise. `register`
+    is empty where the description names none, `offset` is the byte offset of the accessed word in
+    the peripheral or range.
+    """
+
+    pc: int
+    peripheral: str
+    register: str
+    offset: int
+    write: bool
+    reason: UnmodelledReason
+    hits: int
+
+
 @dataclass(frozen=True, slots=True)
 class CoverageGroup:
     """Coverage collected against one list of images."""
@@ -80,6 +110,7 @@ class CoverageGroup:
     ranges: tuple[CodeRange, ...]
     blocks: tuple[BlockHit, ...]
     edges: tuple[EdgeHit, ...]
+    unmodelled: tuple[UnmodelledAccess, ...] = ()
     split: int = 0
     dropped: int = 0
 
@@ -128,6 +159,10 @@ class Coverage:
                 [(r.name, r.start, r.size) for r in group.ranges],
                 [(b.start, b.size, b.hits) for b in group.blocks],
                 [(e.source, e.target, e.hits) for e in group.edges],
+                [
+                    (u.pc, u.peripheral, u.register, u.offset, u.write, int(u.reason), u.hits)
+                    for u in group.unmodelled
+                ],
                 group.split,
                 group.dropped,
             )
@@ -148,10 +183,16 @@ class Coverage:
                     ranges=tuple(CodeRange(*r) for r in ranges),
                     blocks=tuple(BlockHit(*b) for b in blocks),
                     edges=tuple(EdgeHit(*e) for e in edges),
+                    unmodelled=tuple(
+                        UnmodelledAccess(
+                            pc, peripheral, register, offset, write, UnmodelledReason(reason), hits
+                        )
+                        for pc, peripheral, register, offset, write, reason, hits in unmodelled
+                    ),
                     split=split,
                     dropped=dropped,
                 )
-                for images, ranges, blocks, edges, split, dropped in _call(
+                for images, ranges, blocks, edges, unmodelled, split, dropped in _call(
                     _obs.describe_pcov, self._data
                 )
             )
@@ -198,6 +239,43 @@ class Coverage:
             CoverageFileError: an ELF changed since the coverage was collected.
         """
         Path(path).write_text(_call(_obs.lcov_text, self._data, branches, test_name))
+
+    def export_unmodelled(self, path: PathLike) -> None:
+        """Writes the source lines that accessed unmodelled registers as a JSON sidecar of an
+        lcov file, the ELF images loaded from their recorded paths.
+
+        The file is `{"version": 1, "files": {path: {line: [use, ...]}}}`, `path` as the lcov
+        `SF` record names it and a line one the lcov file has a `DA` record for. A use is
+        `{"peripheral", "register", "offset", "write", "reason", "hits"}`, the reason one of
+        `no_register`, `storage_only`, `no_model`, `unimplemented` and `raz_wi`, and the hits
+        the sum over the line's instructions and over the groups. `peripheral` follows
+        `UnmodelledAccess`: the window name, or for a raz_wi range `raz_wi[<index>]`,
+        `<name>[<index>]` or the bare name. `"unplaced"` is the sum of the hits of the accesses
+        no listed line holds, because their instruction has no source line with an lcov `DA`
+        record. `CoverageGroup.unmodelled` holds every access. Coverage recorded without
+        `unmodelled` gives no file entries.
+
+        Raises:
+            CoverageFileError: an ELF changed since the coverage was collected.
+        """
+        files: dict[str, dict[str, list[dict[str, object]]]] = {}
+        placed = 0
+        for file, line, uses in _call(_obs.unmodelled_lines, self._data):
+            files.setdefault(file, {})[str(line)] = [
+                {
+                    "peripheral": peripheral,
+                    "register": register,
+                    "offset": offset,
+                    "write": write,
+                    "reason": UnmodelledReason(reason).name.lower(),
+                    "hits": hits,
+                }
+                for peripheral, register, offset, write, reason, hits in uses
+            ]
+            placed += sum(use[5] for use in uses)
+        total = sum(access.hits for group in self.groups for access in group.unmodelled)
+        document = {"version": 1, "files": files, "unplaced": total - placed}
+        Path(path).write_text(json.dumps(document, indent=1, sort_keys=True) + "\n")
 
     def export_drcov(self, path: PathLike) -> int:
         """Writes a drcov version 2 file for Lighthouse and other drcov readers.
@@ -246,8 +324,19 @@ def worker_path(directory: PathLike, worker: str) -> Path:
     return Path(directory) / f"{worker}.pcov"
 
 
-def merge_session(directory: PathLike, lcov: PathLike, *, branches: bool = True) -> Coverage:
+def unmodelled_path(lcov: PathLike) -> Path:
+    """The unmodelled-access sidecar of an lcov file, `<lcov>.unmodelled.json`."""
+    lcov = Path(lcov)
+    return lcov.with_name(f"{lcov.name}.unmodelled.json")
+
+
+def merge_session(
+    directory: PathLike, lcov: PathLike, *, branches: bool = True, unmodelled: bool = False
+) -> Coverage:
     """Merges every .pcov file of a session directory, writes one lcov file, returns the sum.
+
+    With `unmodelled`, `unmodelled_path(lcov)` gets the sidecar of `Coverage.export_unmodelled`,
+    without it a sidecar of an earlier run is removed.
 
     Writes nothing into the directory, so calling it again gives the same result. Temporary
     files of a save in progress, `<name>.pcov.tmp.<suffix>`, are not read.
@@ -257,4 +346,8 @@ def merge_session(directory: PathLike, lcov: PathLike, *, branches: bool = True)
     """
     merged = merge(sorted(Path(directory).glob("*.pcov")))
     merged.export_lcov(lcov, branches=branches)
+    if unmodelled:
+        merged.export_unmodelled(unmodelled_path(lcov))
+    else:
+        unmodelled_path(lcov).unlink(missing_ok=True)
     return merged

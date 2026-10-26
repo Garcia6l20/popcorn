@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from .helpers import ROOT, write_conftest, write_project
+from .helpers import ROOT, cov_args, write_conftest, write_project
 
 pytest_plugins = ["pytester"]
 
@@ -45,7 +45,7 @@ def session(
     write_project(pytester, until, elf=elf)
     (pytester.path / "test_cov.py").write_text(tests)
     lcov = pytester.path / f"{name}.info"
-    result = pytester.runpytest("-p", "no:asyncio", *args, f"--popcorn-cov={lcov}")
+    result = pytester.runpytest("-p", "no:asyncio", *args, *cov_args(str(lcov)))
     result.assert_outcomes(passed=tests.count("async def test_"))
     return lcov
 

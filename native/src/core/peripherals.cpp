@@ -136,6 +136,7 @@ void machine::run_state::attach_peripherals()
         }
       }
     }
+    slot->classify_unmodelled();
     owner.peripherals_[index] = std::move(slot);
   }
 

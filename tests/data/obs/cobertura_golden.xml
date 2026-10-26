@@ -1,0 +1,61 @@
+<?xml version="1.0" ?>
+<coverage line-rate="0.75" branch-rate="0.5" lines-covered="6" lines-valid="8" branches-covered="1" branches-valid="2" complexity="0" version="VERSION" timestamp="1700000000123">
+  <sources>
+    <source>/work/proj</source>
+    <source>/</source>
+  </sources>
+  <packages>
+    <package name="/opt/sdk/lib" line-rate="1.0" branch-rate="1.0" complexity="0">
+      <classes>
+        <class name="a&amp;b.c" filename="/opt/sdk/lib/a&amp;b.c" line-rate="1.0" branch-rate="1.0" complexity="0">
+          <methods />
+          <lines>
+            <line number="1" hits="5" branch="false" />
+          </lines>
+        </class>
+      </classes>
+    </package>
+    <package name="src" line-rate="0.5" branch-rate="0.5" complexity="0">
+      <classes>
+        <class name="driver.c" filename="src/driver.c" line-rate="0.5" branch-rate="0.5" complexity="0">
+          <methods>
+            <method name="add" signature="" line-rate="1.0" branch-rate="0.0">
+              <lines>
+                <line number="1" hits="3" />
+              </lines>
+            </method>
+            <method name="sub" signature="" line-rate="0.0" branch-rate="0.0">
+              <lines>
+                <line number="6" hits="0" />
+              </lines>
+            </method>
+          </methods>
+          <lines>
+            <line number="1" hits="3" branch="false" />
+            <line number="2" hits="3" branch="true" condition-coverage="50% (1/2)" />
+            <line number="7" hits="0" branch="false" />
+            <line number="8" hits="0" branch="false" />
+          </lines>
+        </class>
+      </classes>
+    </package>
+    <package name="tests/firmware" line-rate="1.0" branch-rate="1.0" complexity="0">
+      <classes>
+        <class name="shared_exit.S" filename="tests/firmware/shared_exit.S" line-rate="1.0" branch-rate="1.0" complexity="0">
+          <methods>
+            <method name="start" signature="" line-rate="1.0" branch-rate="0.0">
+              <lines>
+                <line number="3" hits="1" />
+              </lines>
+            </method>
+          </methods>
+          <lines>
+            <line number="3" hits="1" branch="false" />
+            <line number="4" hits="1" branch="false" />
+            <line number="5" hits="1" branch="false" />
+          </lines>
+        </class>
+      </classes>
+    </package>
+  </packages>
+</coverage>

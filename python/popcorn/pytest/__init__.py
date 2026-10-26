@@ -105,12 +105,62 @@ Write it as `--popcorn-trace-on-fail=DIR` or last on the command line: a bare fl
 takes the path as its DIR. `machine_factory` machines are not traced. Kept traces are never
 pruned: `--cache-clear` removes those in the pytest cache.
 
-With `--popcorn-cov=LCOV`, every machine the plugin builds counts coverage. Each process adds
+With `--popcorn-cov`, every machine the plugin builds counts coverage. Each process adds
 its machines' counts to one `.pcov` file of a temporary `popcorn-cov-*` directory, the boot of
-each configuration counted once, and the controller merges them into `LCOV` at session end. An
-interrupted session keeps the directory and writes no lcov. A crash or SIGKILL leaves the
-directory behind. xdist workers on other hosts, `--tx ssh=...`, are not supported: they share
-the directory by path.
+each configuration counted once, and the controller merges them at session end into the lcov
+files of the reports: `--popcorn-cov-report=lcov:PATH`, repeatable, and the `popcorn_cov_lcov`
+ini option, an implicit `lcov:` report. A bare `lcov` report writes `popcorn_cov_lcov`. The
+ini options `popcorn_cov_report` (one `TYPE[:TARGET]` per line), `popcorn_cov_fail_under`,
+`popcorn_cov_include` and `popcorn_cov_omit` (one glob per line) hold the defaults of
+`--popcorn-cov-report`, `--popcorn-cov-fail-under`, `--popcorn-cov-include` and
+`--popcorn-cov-omit`. `--popcorn-cov-fail-under` takes a percent from 0 to 100, checked at
+startup. When the total line coverage after include and omit is below it, compared exactly
+with nothing rounded, the summary prints `FAIL Required coverage of N% not reached` with the
+total cut to two decimals. A run that would exit 0 exits 1, any other status is kept. The
+`term` table cuts to one decimal. A session that collected no coverage, or whose merge
+failed, counts as 0 percent.
+An interrupted session skips the check. A command-line value replaces the ini value of its
+setting. Command-line targets resolve against the invocation directory, ini targets
+against the rootdir. The `--popcorn-cov-*` options need `--popcorn-cov`, ini values are
+ignored without it. The `term` report prints a table of lines, functions and branches per
+source file and a `TOTAL` row under a `firmware coverage` header at the end of the run, once
+under xdist and also with `-q`. A bare `--popcorn-cov` with no report and no
+`popcorn_cov_lcov` writes the `term` report. The `xml` report writes Cobertura xml to its
+target, `coverage.xml` by default, through a temporary file renamed over it. Its `<sources>`
+lists the rootdir, and `/` too for a source outside it. A `filename` is relative to the rootdir
+for a source under it and as written otherwise, and `timestamp` counts milliseconds.
+The `html` report is written into its target, `htmlcov` by default, by genhtml from LCOV 2.0 or
+later when it is on `PATH`, with branch and function coverage, run from the rootdir where a
+relative source path resolves. A source file genhtml cannot read renders as blank lines. A source
+file edited after the firmware build, so that a covered line lies past its end, fails genhtml
+with a `(range)` error. Without genhtml a built-in renderer writes `index.html`, `style.css` and
+one `src-<n>.html` page per file, with line counts, functions and branch rates, from sources
+read through the rootdir, with no scripts and no external files. A target that is missing, empty
+or holds an earlier html report of either writer, which is emptied first, takes the report. Any
+other target is left untouched: a symbolic link, a directory of other content, and a directory
+that is or contains the rootdir, the working directory or the home directory. The summary then
+says `html report not written`, as it does when genhtml fails or runs past 300 s, and the other
+reports are still written with the exit status unchanged. A failed genhtml removes the target
+directory the run created or emptied. Whenever a report is not written, the `.pcov` files stay
+in their directory, named in the summary.
+`--popcorn-cov-unmodelled=hit|mark|miss`, with the ini option `popcorn_cov_unmodelled`, sets how
+source lines that read or write a register no model implements are reported. The default `hit`
+counts them as covered and records nothing. `mark` and `miss` make every machine record the CPU
+accesses per accessing instruction, which adds about 20 ns to each access to a peripheral
+register. `mark` keeps the counts and adds an `Unmodelled` column, the lines per file, to the
+`term` table, colours the lines in the built-in `html` report with a tooltip of
+`peripheral.register (reason, N hits)`, and writes `html` with the built-in renderer even when
+genhtml is installed, when a kept line is marked. An `lcov` report then has a sidecar
+`<lcov>.unmodelled.json` next to it, and an `lcov` report that applies no sidecar removes the one
+at its path. The `term` report ends with the count of accesses from code with no line in the
+report. `miss` counts those lines, the functions whose only hit lines are among them and their
+branches as not hit in every report, and rewrites the `lcov` report. The mode is part of the boot
+cache key. A line is marked when one of its instructions accessed an unmodelled register.
+The include and omit globs match a source path as written and relative to the rootdir, `**`
+included: `**/tests/**` matches `tests/a.c` and `/home/u/x/tests/a.c`, where `*/tests/*` matches
+neither. A filter rewrites the lcov files from the kept files. An interrupted session
+keeps the directory and writes no report. A crash or SIGKILL leaves the directory behind. xdist
+workers on other hosts, `--tx ssh=...`, are not supported: they share the directory by path.
 
 xdist workers are spawned processes, not forks of the controller, so each worker builds its own
 machines after it starts, as a machine requires: it does not survive `os.fork`.
@@ -179,8 +229,10 @@ async test and fixture. They run on its loops, everything else on popcorn's. Mix
 
 Tests and fixtures anyio's plugin runs, those using its `anyio_backend` fixture, are left to it.
 
-Options, registered for `pytest --help`: `--popcorn-cov`, `--popcorn-trace-on-fail[=DIR]`,
-`--popcorn-strict`, `--popcorn-budget`, `--popcorn-ring`, `--popcorn-ring-blocks`.
+Options, registered for `pytest --help`: `--popcorn-cov`, `--popcorn-cov-report`,
+`--popcorn-cov-fail-under`, `--popcorn-cov-include`, `--popcorn-cov-omit`,
+`--popcorn-cov-unmodelled`, `--popcorn-trace-on-fail[=DIR]`, `--popcorn-strict`,
+`--popcorn-budget`, `--popcorn-ring`, `--popcorn-ring-blocks`.
 
     @pytest.mark.popcorn(budget=1_000_000, strict=True)
     async def test_bounded(controller: popcorn.Machine, linked: popcorn.System) -> None: ...

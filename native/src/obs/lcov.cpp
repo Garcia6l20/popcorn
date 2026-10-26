@@ -14,6 +14,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -529,7 +530,10 @@ void add_branches(
       }
       if(auto const* row = row_at(source, at))
       {
-        out[source.files.at(row->file)].branches[row->line][at] = view.outcome(branch);
+        auto& record                   = out[source.files.at(row->file)];
+        record.branches[row->line][at] = view.outcome(branch);
+        auto& covered                  = record.lines[row->line];
+        covered                        = std::max(covered, view.instructions(at));
       }
     }
   }
@@ -593,32 +597,44 @@ void write_file(
     std::string&        out)
 {
   std::format_to(std::back_inserter(out), "TN:{}\nSF:{}\n", options.test_name, path);
-  std::vector<std::pair<std::uint32_t, std::string_view>> order;
+  struct placed
+  {
+    std::uint32_t    line;
+    std::uint32_t    end;
+    std::string_view name;
+    count            hits;
+  };
+  std::vector<placed> order;
   for(auto const& [name, function] : record.functions)
   {
-    order.emplace_back(function.line, name);
+    order.push_back({function.line, function.end, name, function.hits});
   }
-  std::ranges::sort(order);
-  for(auto const& [line, name] : order)
+  std::ranges::sort(
+      order, {}, [](placed const& entry) { return std::pair{entry.line, entry.name}; });
+  for(auto& entry : order)
   {
-    auto const next = std::ranges::upper_bound(
-        order, line, {}, &std::pair<std::uint32_t, std::string_view>::first);
-    auto end = record.functions.at(std::string{name}).end;
+    auto const next = std::ranges::upper_bound(order, entry.line, {}, &placed::line);
     if(next != order.end())
     {
-      end = std::min(end, next->first - 1);
+      entry.end = std::min(entry.end, next->line - 1);
     }
-    std::format_to(std::back_inserter(out), "FN:{},{},{}\n", line, end, name);
+    auto const first = record.lines.lower_bound(entry.line);
+    auto const last  = record.lines.upper_bound(entry.end);
+    if(entry.hits == 0
+       and std::ranges::any_of(
+           std::ranges::subrange(first, last), [](auto const& line) { return line.second != 0; }))
+    {
+      entry.hits = 1;
+    }
+    std::format_to(std::back_inserter(out), "FN:{},{},{}\n", entry.line, entry.end, entry.name);
   }
-  for(auto const& [line, name] : order)
+  for(auto const& entry : order)
   {
-    std::format_to(
-        std::back_inserter(out), "FNDA:{},{}\n", record.functions.at(std::string{name}).hits, name);
+    std::format_to(std::back_inserter(out), "FNDA:{},{}\n", entry.hits, entry.name);
   }
   std::format_to(
-      std::back_inserter(out), "FNF:{}\nFNH:{}\n", record.functions.size(),
-      std::ranges::count_if(
-          record.functions, [](auto const& entry) { return entry.second.hits != 0; }));
+      std::back_inserter(out), "FNF:{}\nFNH:{}\n", order.size(),
+      std::ranges::count_if(order, [](placed const& entry) { return entry.hits != 0; }));
   if(options.branches)
   {
     std::size_t found = 0;
@@ -671,7 +687,8 @@ auto lcov(
       }
       add_lines(view, source, records);
       add_functions(view, source, records);
-      if(auto const* const analysis = arch::find_code_analysis(source.elf_machine))
+      if(auto const* const analysis = arch::find_code_analysis(source.elf_machine);
+         options.branches and analysis != nullptr)
       {
         add_branches(view, source, *analysis, records);
       }
@@ -682,6 +699,71 @@ auto lcov(
   for(auto const& [path, record] : total)
   {
     write_file(path, record, options, out);
+  }
+  return out;
+}
+
+auto unmodelled_lines(coverage_set const& set, std::span<std::vector<image::image> const> images)
+    -> std::vector<unmodelled_line>
+{
+  using use_key =
+      std::tuple<std::string, std::string, std::uint32_t, bool, core::unmodelled_reason>;
+  std::map<std::pair<std::string, std::uint32_t>, std::map<use_key, count>> by_line;
+  for(auto const& [group, loaded] : std::views::zip(set.groups, images))
+  {
+    contract_assert(loaded.size() == group.images.size());
+    if(group.unmodelled.empty())
+    {
+      continue;
+    }
+    group_view   view{group};
+    file_records records;
+    for(auto const& [ref, source] : std::views::zip(group.images, loaded))
+    {
+      if(ref.kind == image_kind::elf)
+      {
+        add_lines(view, source, records);
+        add_functions(view, source, records);
+      }
+    }
+    for(auto const& access : group.unmodelled)
+    {
+      for(auto const& [ref, source] : std::views::zip(group.images, loaded))
+      {
+        if(ref.kind != image_kind::elf or executable_segment(source, access.pc) == nullptr)
+        {
+          continue;
+        }
+        if(auto const* row = row_at(source, access.pc))
+        {
+          auto const& file  = source.files.at(row->file);
+          auto const  found = records.find(file);
+          if(found != records.end() and found->second.lines.contains(row->line))
+          {
+            auto& hits = by_line[{file, row->line}][{
+                access.peripheral, access.reg, access.offset, access.write, access.reason}];
+            hits       = add(hits, access.hits);
+          }
+        }
+        break;
+      }
+    }
+  }
+  std::vector<unmodelled_line> out;
+  for(auto const& [place, uses] : by_line)
+  {
+    auto& line = out.emplace_back(place.first, place.second);
+    for(auto const& [key, hits] : uses)
+    {
+      auto const& [peripheral, reg, offset, write, reason] = key;
+      line.uses.push_back(
+          {.peripheral = peripheral,
+           .reg        = reg,
+           .offset     = offset,
+           .write      = write,
+           .reason     = reason,
+           .hits       = hits});
+    }
   }
   return out;
 }

@@ -253,9 +253,16 @@ def _registration_lines(project: MachineDescription, description: PartDescriptio
     return lines
 
 
-def cache_key(project: MachineDescription, strict: bool, devices: str | None = None) -> str:
+def cache_key(
+    project: MachineDescription,
+    strict: bool,
+    devices: str | None = None,
+    *,
+    unmodelled: bool = False,
+) -> str:
     """The name of a boot of `project` with strictness `strict` and the device set of digest
-    `devices`, None for the machine description's.
+    `devices`, None for the machine description's, and with `unmodelled` the boot that records
+    CPU accesses to unmodelled registers in its coverage.
 
     It covers the popcorn version and native extension, the description, every image,
     `project.digest`, `strict`, the source file of every board model and device class and of
@@ -289,6 +296,8 @@ def cache_key(project: MachineDescription, strict: bool, devices: str | None = N
     ]
     if devices is not None:
         lines.append(f"devices {devices}")
+    if unmodelled:
+        lines.append("unmodelled")
     for name, periph in sorted(project.board.items()):
         uses: list[Use] = [periph.model] if isinstance(periph.model, Use) else []
         for use in [*uses, *periph.devices]:

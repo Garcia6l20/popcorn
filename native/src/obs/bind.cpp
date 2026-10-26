@@ -35,13 +35,25 @@ namespace detail
 using image_row = std::tuple<std::uint32_t, std::string, std::string, std::uint32_t, std::uint32_t>;
 using range_row = std::tuple<std::string, std::uint32_t, std::uint32_t>;
 using hit_row   = std::tuple<std::uint32_t, std::uint32_t, std::uint64_t>;
+using access_row = std::tuple<
+    std::uint32_t,
+    std::string,
+    std::string,
+    std::uint32_t,
+    bool,
+    std::uint8_t,
+    std::uint64_t>;
 using group_row = std::tuple<
     std::vector<image_row>,
     std::vector<range_row>,
     std::vector<hit_row>,
     std::vector<hit_row>,
+    std::vector<access_row>,
     std::uint64_t,
     std::uint64_t>;
+using use_row =
+    std::tuple<std::string, std::string, std::uint32_t, bool, std::uint8_t, std::uint64_t>;
+using line_row = std::tuple<std::string, std::uint32_t, std::vector<use_row>>;
 
 auto copy(nb::bytes const& bytes) -> std::vector<std::byte>
 {
@@ -73,6 +85,11 @@ auto rows(coverage_set const& set) -> std::vector<group_row>
                }) | std::ranges::to<std::vector>(),
                group.edges | std::views::transform([](edge_hit const& edge) {
                  return hit_row{edge.from, edge.to, edge.hits};
+               }) | std::ranges::to<std::vector>(),
+               group.unmodelled | std::views::transform([](core::unmodelled_access const& use) {
+                 return access_row{use.pc,     use.peripheral, use.reg,
+                                   use.offset, use.write,      std::to_underlying(use.reason),
+                                   use.hits};
                }) | std::ranges::to<std::vector>(),
                group.split,
                group.dropped,
@@ -117,10 +134,15 @@ auto record_of(record_row const& row) -> core::trace_record
   };
 }
 
+auto reason_of(std::uint8_t value) -> core::unmodelled_reason
+{
+  return static_cast<core::unmodelled_reason>(value);
+}
+
 auto set_of(std::vector<group_row> const& groups) -> coverage_set
 {
   coverage_set set;
-  for(auto const& [images, ranges, blocks, edges, split, dropped] : groups)
+  for(auto const& [images, ranges, blocks, edges, accesses, split, dropped] : groups)
   {
     auto& group = set.groups.emplace_back();
     for(auto const& [kind, path, digest, base, end] : images)
@@ -148,6 +170,17 @@ auto set_of(std::vector<group_row> const& groups) -> coverage_set
     {
       group.edges.push_back({.from = from, .to = to, .hits = hits});
     }
+    for(auto const& [pc, peripheral, reg, offset, write, reason, hits] : accesses)
+    {
+      group.unmodelled.push_back(
+          {.pc         = pc,
+           .peripheral = peripheral,
+           .reg        = reg,
+           .offset     = offset,
+           .write      = write,
+           .reason     = reason_of(reason),
+           .hits       = hits});
+    }
     group.split   = split;
     group.dropped = dropped;
   }
@@ -172,7 +205,8 @@ auto set_of(std::vector<group_row> const& groups) -> coverage_set
 }
 
 [[= py::doc{"Groups of a .pcov file: images (kind, path, digest, base, end), ranges (name, "
-            "start, size), blocks (start, size, hits), edges (from, to, hits), split, "
+            "start, size), blocks (start, size, hits), edges (from, to, hits), unmodelled "
+            "accesses (pc, peripheral, register, offset, write, reason, hits), split, "
             "dropped."}]] auto describe_pcov(nb::bytes const& pcov)
     -> std::vector<detail::group_row>
 {
@@ -209,6 +243,46 @@ auto set_of(std::vector<group_row> const& groups) -> coverage_set
     text = lcov(set, images, {.branches = branches, .test_name = test_name});
   }
   return text;
+}
+
+[[= py::doc{"Source lines of a .pcov file that accessed unmodelled registers, its ELF images "
+            "loaded from their paths: (file, line, uses (peripheral, register, offset, write, "
+            "reason, hits)), sorted by file and line."}]] auto
+    unmodelled_lines(nb::bytes const& pcov) -> std::vector<detail::line_row>
+{
+  auto const                    copy = detail::copy(pcov);
+  std::vector<detail::line_row> rows;
+  {
+    nb::gil_scoped_release released;
+    auto const             set    = decode_pcov(copy);
+    auto const             images = load_images(set);
+    for(auto const& line : obs::unmodelled_lines(set, images))
+    {
+      rows.emplace_back(
+          line.file, line.line,
+          line.uses | std::views::transform([](unmodelled_use const& use) {
+            return detail::use_row{
+                use.peripheral, use.reg, use.offset, use.write, std::to_underlying(use.reason),
+                use.hits};
+          }) | std::ranges::to<std::vector>());
+    }
+  }
+  return rows;
+}
+
+[[= py::doc{"Unmodelled access reasons: (name, value), none excluded."}]] auto unmodelled_reasons()
+    -> std::vector<std::tuple<std::string, std::uint8_t>>
+{
+  std::vector<std::tuple<std::string, std::uint8_t>> reasons;
+  template for(constexpr auto e :
+               std::define_static_array(std::meta::enumerators_of(^^core::unmodelled_reason)))
+  {
+    if([:e:] != core::unmodelled_reason::none)
+    {
+      reasons.emplace_back(std::string{reflex::enum_value_name([:e:])}, std::to_underlying([:e:]));
+    }
+  }
+  return reasons;
 }
 
 [[= py::doc{"drcov version 2 bytes of a .pcov file, and the count of blocks left out."}]] auto

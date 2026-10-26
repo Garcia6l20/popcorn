@@ -44,9 +44,20 @@ class MachineCoverage:
         self._images = images
         self._check = check
 
-    def enable(self, ranges: Ranges | None = None, functions: Iterable[str] | None = None) -> None:
+    def enable(
+        self,
+        ranges: Ranges | None = None,
+        functions: Iterable[str] | None = None,
+        *,
+        unmodelled: bool = False,
+    ) -> None:
         """Start counting over `ranges` and the code of `functions`, every executable segment
         of the loaded and symbols-only images when both are None. Enabling again adds ranges.
+
+        With `unmodelled`, the CPU accesses to registers no model implements are counted per
+        accessing instruction too, and `collect()` carries them in `CoverageGroup.unmodelled`.
+        That installs the exact-pc hook on the peripheral windows, which makes every load and
+        store to them slower until `disable()`. Enabling again without it stops the recording.
 
         Raises:
             SymbolError: No loaded or symbols-only image has a function name.
@@ -59,7 +70,7 @@ class MachineCoverage:
             rows += self._handle.function_ranges(list(functions))
         if not rows and (ranges is not None or functions is not None):
             return
-        self._handle.enable_coverage(rows)
+        self._handle.enable_coverage(rows, unmodelled)
 
     def disable(self) -> None:
         """Stop counting, keeping the counters."""

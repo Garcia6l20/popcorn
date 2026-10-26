@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from .coverage_suite import NODE_IDS, write_suite
+from .helpers import cov_args
 
 pytest_plugins = ["pytester"]
 
@@ -31,7 +32,7 @@ def covered(
     pytester: pytest.Pytester, name: str, *args: str
 ) -> tuple[bytes, list[tuple[str, str]]]:
     result = pytester.runpytest_subprocess(
-        *BASE, f"--popcorn-cov={name}.info", f"--junitxml={name}.xml", *args
+        *BASE, *cov_args(f"{name}.info"), f"--junitxml={name}.xml", *args
     )
     result.assert_outcomes(passed=30)
     return (pytester.path / f"{name}.info").read_bytes(), outcomes(pytester.path / f"{name}.xml")
@@ -72,9 +73,7 @@ def test_each_worker_boots_and_saves_its_own_file(pytester: pytest.Pytester) -> 
             _coverage.merge_session = merge
         """,
     )
-    result = pytester.runpytest_subprocess(
-        *BASE, "-n", "2", "--dist", "each", "--popcorn-cov=a.info"
-    )
+    result = pytester.runpytest_subprocess(*BASE, "-n", "2", "--dist", "each", *cov_args("a.info"))
     result.assert_outcomes(passed=60)
     result.stdout.fnmatch_lines(["popcorn: 2 key(s), 2 boot(s), 2 from cache"])
     *names, directory = (pytester.path / "files.txt").read_text().splitlines()

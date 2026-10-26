@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from .coverage_suite import write_suite
-from .helpers import DRIVER_ELF, ROOT
+from .helpers import DRIVER_ELF, ROOT, cov_args
 
 pytest_plugins = ["pytester"]
 
@@ -32,7 +32,7 @@ def test_coverage_without_xdist(pytester: pytest.Pytester) -> None:
     write_suite(pytester)
     lcov = pytester.path / "out" / "a.info"
     lcov.parent.mkdir()
-    result = pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", "--popcorn-cov=out/a.info")
+    result = pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", *cov_args("out/a.info"))
     result.assert_outcomes(passed=30)
     result.stdout.fnmatch_lines([f"popcorn: firmware coverage written to {lcov}"])
     text = lcov.read_text()
@@ -46,9 +46,9 @@ def test_coverage_without_xdist(pytester: pytest.Pytester) -> None:
 def test_no_machine_no_lcov(pytester: pytest.Pytester) -> None:
     write_suite(pytester)
     pytester.makepyfile(test_suite="def test_plain():\n    pass\n")
-    result = pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", "--popcorn-cov=a.info")
+    result = pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", *cov_args("a.info"))
     result.assert_outcomes(passed=1)
-    result.stdout.fnmatch_lines(["popcorn: no firmware coverage collected, no lcov written"])
+    result.stdout.fnmatch_lines(["popcorn: no firmware coverage collected, no report written"])
     assert not (pytester.path / "a.info").exists()
 
 
@@ -76,7 +76,7 @@ def test_the_session_directory_holds_one_file_per_process_and_key(
             _coverage.merge_session = merge
         """,
     )
-    pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", "--popcorn-cov=a.info")
+    pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", *cov_args("a.info"))
     *names, directory = (pytester.path / "files.txt").read_text().splitlines()
     assert names[-1] == "main.pcov"
     assert [name.startswith("boot-") and name.endswith(".pcov") for name in names[:-1]] == [
@@ -102,7 +102,7 @@ def test_spoiled_and_factory_machines_are_counted(pytester: pytest.Pytester) -> 
             other = await machine_factory.booted(description)
             await other.call("negate", 3)
         """)
-    result = pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", "--popcorn-cov=a.info")
+    result = pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", *cov_args("a.info"))
     result.assert_outcomes(passed=3)
     text = (pytester.path / "a.info").read_text()
     assert re.search(r"^FNDA:3,negate$", text, re.M)
@@ -130,7 +130,7 @@ def test_a_boot_whose_coverage_cannot_be_saved_still_boots(pytester: pytest.Pyte
             popcorn.coverage.Coverage.save = SAVE
         """,
     )
-    result = pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", "--popcorn-cov=a.info")
+    result = pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", *cov_args("a.info"))
     result.assert_outcomes(passed=30)
     result.stdout.fnmatch_lines(
         [
@@ -152,11 +152,11 @@ def test_an_interrupted_session_keeps_its_pcov_files(pytester: pytest.Pytester) 
             raise KeyboardInterrupt
         """)
     result = pytester.runpytest_subprocess(
-        "-p", "no:asyncio", "-p", "no:xdist", "--popcorn-cov=a.info"
+        "-p", "no:asyncio", "-p", "no:xdist", *cov_args("a.info")
     )
     assert result.ret == pytest.ExitCode.INTERRUPTED
     result.stdout.fnmatch_lines(
-        ["popcorn: session interrupted, no lcov written, the .pcov files stay in *popcorn-cov-*"]
+        ["popcorn: session interrupted, no report written, the .pcov files stay in *popcorn-cov-*"]
     )
     assert not (pytester.path / "a.info").exists()
     line = next(line for line in result.outlines if "stay in" in line)

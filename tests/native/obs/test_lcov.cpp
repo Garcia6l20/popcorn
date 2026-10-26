@@ -337,6 +337,133 @@ TEST_CASE("scope, unexecuted rows, line-0 rows and empty rows")
   CHECK(has(text, "LH:1"));
 }
 
+namespace
+{
+using reason = core::unmodelled_reason;
+
+auto use_at(
+    address       pc,
+    std::string   peripheral,
+    std::string   reg,
+    bool          write,
+    reason        why,
+    std::uint64_t hits) -> core::unmodelled_access
+{
+  return {
+      .pc         = pc,
+      .peripheral = std::move(peripheral),
+      .reg        = std::move(reg),
+      .offset     = 4,
+      .write      = write,
+      .reason     = why,
+      .hits       = hits};
+}
+
+auto lines_of(image::image const& made, std::vector<obs::coverage_group> groups)
+    -> std::vector<obs::unmodelled_line>
+{
+  obs::coverage_set const                set{.groups = std::move(groups)};
+  std::vector<std::vector<image::image>> images(set.groups.size(), std::vector{made});
+  return obs::unmodelled_lines(set, images);
+}
+}
+
+TEST_CASE("unmodelled accesses go to the lines lcov writes, summed per register")
+{
+  auto const made = synthetic(
+      nops(8),
+      {
+          {0x100, 5},
+          {0x104, 4},
+          {0x104, 6},
+          {0x108, 0},
+          {0x10a, 9},
+          {0x10c, 0}
+  },
+      0x10);
+  auto group = group_of(
+      {
+          {.start = 0x100, .size = 4, .hits = 2}
+  },
+      {}, 8);
+  group.unmodelled = {
+      use_at(0x102, "UART", "DR", false, reason::no_model, 3),
+      use_at(0x104, "UART", "DR", false, reason::no_model, 2),
+      use_at(0x106, "UART", "DR", false, reason::no_model, 5),
+      use_at(0x106, "UART", "DR", true, reason::no_model, 1),
+      use_at(0x106, "UART", "SR", false, reason::unimplemented, 4),
+      use_at(0x108, "UART", "DR", false, reason::no_model, 7),
+      use_at(0x10a, "UART", "DR", false, reason::no_model, 7),
+      use_at(0x300, "UART", "DR", false, reason::no_model, 7),
+  };
+  auto const text  = lcov_of(made, {group});
+  auto const lines = lines_of(made, {group});
+  CHECK(starting(text, "DA:") == std::vector<std::string>{"DA:5,2", "DA:6,0"});
+  REQUIRE(lines.size() == 2);
+  CHECK(lines[0].file == "a.c");
+  CHECK(lines[0].line == 5);
+  CHECK(
+      lines[0].uses
+      == std::vector{
+          obs::unmodelled_use{"UART", "DR", 4, false, reason::no_model, 3}
+  });
+  CHECK(lines[1].line == 6);
+  CHECK(
+      lines[1].uses
+      == std::vector{
+          obs::unmodelled_use{"UART", "DR", 4, false, reason::no_model,      7},
+          obs::unmodelled_use{"UART", "DR", 4, true,  reason::no_model,      1},
+          obs::unmodelled_use{"UART", "SR", 4, false, reason::unimplemented, 4},
+  });
+}
+
+TEST_CASE("unmodelled accesses of groups add up, a raw image holds none")
+{
+  auto const made = synthetic(
+      nops(8),
+      {
+          {0x100, 5}
+  },
+      0x10);
+  auto one = group_of(
+      {
+          {.start = 0x100, .size = 4, .hits = 1}
+  },
+      {}, 8, "d1");
+  auto two = group_of(
+      {
+          {.start = 0x100, .size = 4, .hits = 1}
+  },
+      {}, 8, "d2");
+  auto raw = group_of(
+      {
+          {.start = 0x100, .size = 4, .hits = 1}
+  },
+      {}, 8, "d3");
+  one.unmodelled = {
+      use_at(0x100, "UART", "DR", false, reason::no_model, 2),
+      use_at(0x300, "UART", "DR", false, reason::no_model, 100),
+  };
+  two.unmodelled     = {use_at(0x102, "UART", "DR", false, reason::no_model, 3)};
+  raw.images[0].kind = obs::image_kind::raw;
+  raw.unmodelled     = {use_at(0x100, "UART", "DR", false, reason::no_model, 9)};
+  auto const lines   = lines_of(made, {one, two, raw});
+  REQUIRE(lines.size() == 1);
+  CHECK(
+      lines[0].uses
+      == std::vector{
+          obs::unmodelled_use{"UART", "DR", 4, false, reason::no_model, 5}
+  });
+  CHECK(lines_of(
+            made,
+            {
+                group_of({{.start = 0x100, .size = 4, .hits = 1}},
+                {                                     },
+                8)
+  })
+            .empty());
+}
+
 TEST_CASE("rows of one line keep their largest count")
 {
   auto const made = synthetic(
@@ -421,6 +548,108 @@ TEST_CASE("branch counts: never reached, blocks sharing the branch, branch to th
                     )
   });
   CHECK(starting(text, "BRDA:") == std::vector<std::string>{"BRDA:7,0,0,5", "BRDA:7,0,1,0"});
+}
+
+TEST_CASE("a branch on a line whose own rows lie outside the scope still gets a DA record")
+{
+  auto made = synthetic(
+      code({
+          0xbf00, 0xbf00, 0x2800, 0xd000, 0xbf00, 0x4770
+  }),
+      {{0x100, 5}, {0x102, 6}}, 0x0c);
+  made.files = {"tests/firmware/obs/lines.c"};
+  obs::coverage_group group{
+      .images = {{.kind = obs::image_kind::elf, .path = "/a.elf", .digest = "d"}},
+      .ranges =
+          {{.name = "head", .start = 0x100, .size = 2},
+                 {.name = "tail", .start = 0x106, .size = 8}},
+  };
+  auto const text = lcov_of(made, {group});
+  CHECK(starting(text, "BRDA:") == std::vector<std::string>{"BRDA:6,0,0,-", "BRDA:6,0,1,-"});
+  CHECK(starting(text, "DA:") == std::vector<std::string>{"DA:5,0", "DA:6,0"});
+  check_genhtml(text, "branch_row");
+
+  group.blocks = {
+      {.start = 0x100, .size = 8, .hits = 3}
+  };
+  auto const hit = lcov_of(made, {group});
+  CHECK(starting(hit, "DA:") == std::vector<std::string>{"DA:5,3", "DA:6,3"});
+
+  group.blocks = {
+      {.start = 0x104, .size = 4, .hits = 3}
+  };
+  auto const late = lcov_of(made, {group});
+  CHECK(starting(late, "DA:") == std::vector<std::string>{"DA:5,0", "DA:6,3"});
+  CHECK(starting(late, "FNDA:") == std::vector<std::string>{"FNDA:1,f"});
+
+  group.blocks = {
+      {.start = 0x100, .size = 8, .hits = 3}
+  };
+  auto const plain = lcov_of(made, {group}, {.branches = false});
+  CHECK(starting(plain, "DA:") == std::vector<std::string>{"DA:5,3"});
+  CHECK(starting(plain, "BRDA:").empty());
+}
+
+TEST_CASE("a function whose body ran without a block at its entry counts as hit")
+{
+  auto made = synthetic(
+      nops(8),
+      {
+          {0x100, 3},
+          {0x104, 4},
+          {0x108, 0}
+  },
+      8);
+  made.files       = {"tests/firmware/obs/lines.c"};
+  auto const early = lcov_of(
+      made, {
+                group_of({{.start = 0x104, .size = 4, .hits = 2}}
+                )
+  });
+  CHECK(starting(early, "DA:") == std::vector<std::string>{"DA:3,0", "DA:4,2"});
+  CHECK(starting(early, "FNDA:") == std::vector<std::string>{"FNDA:1,f"});
+  CHECK(starting(early, "FNH:") == std::vector<std::string>{"FNH:1"});
+  check_genhtml(early, "entered_early");
+
+  auto const both = lcov_of(
+      made,
+      {
+          group_of(
+              {{.start = 0x100, .size = 4, .hits = 2}, {.start = 0x104, .size = 4, .hits = 7}}
+              )
+  });
+  CHECK(starting(both, "FNDA:") == std::vector<std::string>{"FNDA:2,f"});
+  check_genhtml(both, "entered_and_ran");
+
+  auto const never = lcov_of(made, {group_of({})});
+  CHECK(starting(never, "FNDA:") == std::vector<std::string>{"FNDA:0,f"});
+  CHECK(starting(never, "FNH:") == std::vector<std::string>{"FNH:0"});
+  check_genhtml(never, "never_entered");
+}
+
+TEST_CASE("a function counts only the lines of its clamped range")
+{
+  auto made = synthetic(
+      nops(8),
+      {
+          {0x100, 10},
+          {0x104, 30},
+          {0x108, 20},
+          {0x10c, 0 }
+  },
+      8);
+  made.files = {"tests/firmware/obs/lines.c"};
+  made.symbols.push_back(
+      {.name = "g", .value = 0x108, .size = 4, .kind = image::symbol_kind::function});
+  auto const text = lcov_of(
+      made, {
+                group_of({{.start = 0x104, .size = 4, .hits = 3}}
+                )
+  });
+  CHECK(starting(text, "FN:") == std::vector<std::string>{"FN:10,19,f", "FN:20,20,g"});
+  CHECK(starting(text, "DA:") == std::vector<std::string>{"DA:10,0", "DA:20,0", "DA:30,3"});
+  CHECK(starting(text, "FNDA:") == std::vector<std::string>{"FNDA:0,f", "FNDA:0,g"});
+  check_genhtml(text, "clamped_neighbour");
 }
 
 TEST_CASE("a literal pool after a return is not decoded for branches")

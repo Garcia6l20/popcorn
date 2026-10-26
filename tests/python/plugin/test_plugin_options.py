@@ -11,7 +11,12 @@ from .helpers import write_conftest
 pytest_plugins = ["pytester"]
 
 OPTIONS = (
-    "--popcorn-cov=LCOV",
+    "--popcorn-cov",
+    "--popcorn-cov-report=TYPE[[]:TARGET]",
+    "--popcorn-cov-fail-under=PERCENT",
+    "--popcorn-cov-include=GLOB",
+    "--popcorn-cov-omit=GLOB",
+    "--popcorn-cov-unmodelled=MODE",
     "--popcorn-trace-on-fail=[[]DIR]",
     "--popcorn-strict",
     "--popcorn-budget=N",
@@ -42,7 +47,6 @@ def test_defaults_parse_to_settings(pytester: pytest.Pytester) -> None:
         def test_defaults(request):
             settings = request.config.stash[SETTINGS]
             assert settings == Settings(
-                cov=None,
                 trace_on_fail=False,
                 trace_dir=None,
                 strict=False,
@@ -63,13 +67,15 @@ def test_values_parse_relative_to_the_invocation_directory(
     (here / "test_values.py").write_text(textwrap.dedent(f"""
         from pathlib import Path
 
+        from popcorn.coverage.report import ReportSpec
         from popcorn.pytest._options import SETTINGS
 
         def test_values(request):
             settings = request.config.stash[SETTINGS]
             here = Path({str(here)!r})
             assert request.config.rootpath == here.parent
-            assert settings.cov == here / "out" / "cov.info"
+            assert settings.cov_enabled
+            assert settings.cov_reports == (ReportSpec("lcov", here / "out" / "cov.info"),)
             assert settings.trace_on_fail
             assert settings.trace_dir == here / "traces"
             assert settings.strict
@@ -80,7 +86,8 @@ def test_values_parse_relative_to_the_invocation_directory(
     result = pytester.runpytest(
         "-p",
         "no:asyncio",
-        "--popcorn-cov=out/cov.info",
+        "--popcorn-cov",
+        "--popcorn-cov-report=lcov:out/cov.info",
         "--popcorn-trace-on-fail=traces",
         "--popcorn-strict",
         "--popcorn-budget=1000",

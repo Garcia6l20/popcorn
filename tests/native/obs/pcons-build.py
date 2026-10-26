@@ -15,6 +15,7 @@ obs_static = project.get_target("popcorn_obs_static")
 obs_sources = str(project_dir / "native" / "src" / "obs")
 
 branches_elf, branches_firmware = firmware("core", "branches")
+mmio_elf, mmio_firmware = firmware("core", "mmio")
 test_ranges = add_doctest(
     "obs-ranges",
     [here / "test_ranges.cpp"],
@@ -73,11 +74,13 @@ test_pcov = add_doctest(
     env={
         "POPCORN_M33_DESC": str(core_data / "m33.json"),
         "POPCORN_FW_BRANCHES": str(branches_elf),
+        "POPCORN_FW_MMIO": str(mmio_elf),
         "POPCORN_OBS_SCRATCH": str(build_dir / "test-obs-scratch"),
     },
 )
-if branches_firmware is not None:
-    test_pcov.depends(branches_firmware)
+for target in (branches_firmware, mmio_firmware):
+    if target is not None:
+        test_pcov.depends(target)
 
 test_drcov = add_doctest(
     "obs-drcov",

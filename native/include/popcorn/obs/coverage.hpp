@@ -1,5 +1,6 @@
 #pragma once
 
+#include <popcorn/core/coverage.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
 #include <popcorn/image/image.hpp>
@@ -81,6 +82,9 @@ struct coverage_group
   std::vector<block_hit> blocks{};
   /** @brief Edges with hits, sorted by from then to. */
   std::vector<edge_hit> edges{};
+  /** @brief CPU accesses to unmodelled registers with hits, sorted by pc, peripheral, register,
+   * offset, write and reason. */
+  std::vector<core::unmodelled_access> unmodelled{};
   /** @brief Block starts whose hits were split over several sizes. */
   std::uint64_t split{};
   /** @brief Hits of block starts whose first instruction could not be read, in no block. */
@@ -142,8 +146,9 @@ struct lcov_options
  * flow through each function in range, and counted from the edges out of the blocks that end with
  * them. A branch whose block never ran to it is `-`. Edges the machine did not record, at an
  * exception entry or a stop right after a branch, are missing from the counts. BRDA block numbers
- * are the branch's index among its line's branches. Each file record starts with its own TN
- * record.
+ * are the branch's index among its line's branches. A line that has a BRDA record has a DA
+ * record of at least the executed count of the branch instruction. Each file record starts with
+ * its own TN record.
  *
  * A function is `FN:<start>,<end>,<name>`. With a debug function at its address, image::image
  * functions, it is filed under the declaring file at the declaration line. Without one, it is
@@ -151,7 +156,10 @@ struct lcov_options
  * smallest non-zero line among the rows at its entry in that file. Its end is the largest line of
  * that file among the rows of its code, at least its start and before the start of the next
  * function of the file. The start line has a DA record of at least the function's entry count, so
- * that genhtml finds it a line.
+ * that genhtml finds it a line. A function with no counted entry whose `FN` range holds a
+ * line with a DA count above 0 has FNDA 1, and FNH counts it. Such a line comes from a body
+ * entered before counting began, or from an inlined helper or split part whose rows are filed
+ * inside the range. A function with counted entries keeps their sum.
  *
  * Rules and limits:
  * - Rows of zero length, followed by a row at the same address, cover no instruction: their line
@@ -179,26 +187,86 @@ POPCORN_API auto lcov(
     std::span<std::vector<image::image> const> images,
     lcov_options const& options) -> std::string pre(images.size() == set.groups.size());
 
+/** @brief CPU accesses of one source line to one unmodelled register, summed over the line's
+ * instructions. */
+struct unmodelled_use
+{
+  /** @brief Peripheral as the window names it, or for a raz_wi range `raz_wi[<index>]` when
+   * unnamed, `<name>[<index>]` when several ranges share the name, the bare name otherwise. */
+  std::string peripheral{};
+  /** @brief Register name, empty where the description has none. */
+  std::string reg{};
+  /** @brief Byte offset of the accessed word in the peripheral or range. */
+  std::uint32_t offset{};
+  /** @brief Whether the access was a write. */
+  bool write{};
+  /** @brief Why the register is unmodelled. */
+  core::unmodelled_reason reason{};
+  /** @brief Times it was accessed. */
+  std::uint64_t hits{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(unmodelled_use const&, unmodelled_use const&) -> bool = default;
+};
+
+/** @brief A source line whose instructions accessed unmodelled registers. */
+struct unmodelled_line
+{
+  /** @brief Source path as the lcov `SF` record names it. */
+  std::string file{};
+  /** @brief Line number, one that lcov() writes a `DA` record for. */
+  std::uint32_t line{};
+  /** @brief Accesses, sorted by peripheral, register, offset, write and reason. */
+  std::vector<unmodelled_use> uses{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(unmodelled_line const&, unmodelled_line const&) -> bool = default;
+};
+
 /**
- * @brief Encodes a coverage set as a `.pcov` version 1 file, little endian, fields 4-byte aligned,
- *        strings padded with zeros: `PCOV`, u16 version 1, u16 flags 0, u32 group count, then per
+ * @brief Source lines that accessed unmodelled registers, the accesses of
+ *        coverage_group::unmodelled mapped to lines with the rules lcov() uses.
+ *
+ * An access goes to the line of the line-table row holding its pc, in the first ELF image of its
+ * group whose executable segment holds the pc, when lcov() writes a `DA` record for that file and
+ * line. Accesses of other pcs, such as code outside the group's ranges, are left out. Accesses
+ * of one register from several instructions of a line, and of several groups, sum.
+ *
+ * @param set Coverage, as collect() or a `.pcov` load gives it.
+ * @param images Per group, its images as lcov() takes them.
+ * @return Lines sorted by file then line.
+ */
+POPCORN_API auto
+    unmodelled_lines(coverage_set const& set, std::span<std::vector<image::image> const> images)
+        -> std::vector<unmodelled_line> pre(images.size() == set.groups.size());
+
+/**
+ * @brief Encodes a coverage set as a `.pcov` version 2 file, little endian, fields 4-byte aligned,
+ *        strings padded with zeros: `PCOV`, u16 version 2, u16 flags, u32 group count, then per
  *        group u64 split, u64 dropped, the images `{u32 kind, u32 base, u32 end, u32 length, path,
  *        u32 length, digest}`, the ranges `{u32 start, u32 size, u32 length, name}`, the blocks
- *        `{u32 start, u32 size, u64 hits}` and the edges `{u32 from, u32 to, u64 hits}`, each list
- *        after its u32 count. The set is made canonical first, as merge() does.
+ *        `{u32 start, u32 size, u64 hits}`, the edges `{u32 from, u32 to, u64 hits}` and, when
+ *        flags bit 0 is set, the unmodelled accesses `{u32 pc, u32 offset, u32 access, u64 hits,
+ *        u32 length, peripheral, u32 length, register}`, access holding the write flag in bit 0
+ *        and the core::unmodelled_reason in bits 8 to 15. Each list comes after its u32 count.
+ *        Flags bit 0 is set when some group has an unmodelled access, every other flag bit is
+ *        0. The set is made canonical first, as merge() does.
  * @param set Coverage.
  * @return The file bytes.
  */
 POPCORN_API auto encode_pcov(coverage_set const& set) -> std::vector<std::byte>;
 
 /**
- * @brief Decodes a `.pcov` file.
+ * @brief Decodes a `.pcov` file of version 2, or of version 1, the layout of version 2 with flags
+ *        0, whose groups have no unmodelled access.
  * @param bytes File bytes.
  * @param file Name for errors.
  * @return The set, canonical.
- * @throws format_error when the bytes are not a canonical `.pcov` version 1 file: bad magic or
- *         version, a count past the end, an unsorted or repeated key, a zero hit, a block size
- *         outside 1 to 1024, an unknown image kind or a raw image with a path.
+ * @throws format_error when the bytes are not a canonical `.pcov` version 1 or 2 file: bad magic,
+ *         version or flags, a count past the end, an unsorted or repeated key, a zero hit, a
+ *         block size outside 1 to 1024, an unknown image kind, a raw image with a path, an
+ *         unmodelled access whose access word sets bits other than write and reason or holds a
+ *         reason outside no_register to raz_wi, or flags bit 0 with no unmodelled access.
  */
 POPCORN_API auto decode_pcov(std::span<std::byte const> bytes, std::string_view file = {})
     -> coverage_set;
@@ -222,9 +290,9 @@ POPCORN_API auto load_pcov(std::filesystem::path const& path) -> coverage_set;
 
 /**
  * @brief Sums coverage sets, canonical: groups with the same image digests add their block,
- *        edge, split and dropped counts, saturating, and take the union of their ranges, the
- *        smallest name for one start and size. Each image keeps the smallest of its paths, so
- *        the result does not depend on the order of @p sets. Other groups are kept.
+ *        edge, unmodelled access, split and dropped counts, saturating, and take the union of their
+ *        ranges, the smallest name for one start and size. Each image keeps the smallest of its
+ *        paths, so the result does not depend on the order of @p sets. Other groups are kept.
  * @param sets Sets to sum, possibly none.
  * @return The sum, groups sorted by their digest lists.
  */

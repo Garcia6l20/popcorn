@@ -92,8 +92,125 @@ fault registers and the call stack.
   interrupts, calls and stops.
 - `--popcorn-trace-on-fail=DIR` traces every machine fixture and keeps the trace of each failed
   test in `DIR`.
-- `--popcorn-cov=LCOV` collects firmware coverage of every machine the plugin builds and writes
-  it as an lcov file at the end of the session.
+
+## Firmware coverage
+
+`--popcorn-cov` counts the firmware lines, functions and branches that every machine of the session
+runs, and prints a table at the end of the run:
+
+```console
+$ pytest --popcorn-cov
+...
+------------------------------ firmware coverage -------------------------------
+Name                         Lines  Hit  Cover  Funcs  Cover  Branches  Cover
+-----------------------------------------------------------------------------
+tests/firmware/api/callee.c    115   11   9.5%     32  15.6%         8   0.0%
+tests/firmware/api/driver.c     38   11  28.9%     10  20.0%         6  33.3%
+-----------------------------------------------------------------------------
+TOTAL                          153   22  14.3%     42  16.6%        14  14.2%
+```
+
+`--popcorn-cov-report=KIND[:TARGET]` picks the reports and repeats. The options below have ini
+options that hold their defaults:
+
+| Option | Ini option | Value |
+|--------|------------|-------|
+| `--popcorn-cov-report` | `popcorn_cov_report` | `term`, `html[:DIR]`, `xml[:FILE]` or `lcov:FILE`, one per line in the ini file |
+| `--popcorn-cov-include` | `popcorn_cov_include` | glob of the source files to keep |
+| `--popcorn-cov-omit` | `popcorn_cov_omit` | glob of the source files to drop |
+| `--popcorn-cov-fail-under` | `popcorn_cov_fail_under` | percent from 0 to 100 |
+| `--popcorn-cov-unmodelled` | `popcorn_cov_unmodelled` | `hit`, `mark` or `miss` |
+| none | `popcorn_cov_lcov` | path of an lcov file, an implicit `lcov:` report |
+
+```toml
+--8<-- "guide/coverage_pyproject.toml"
+```
+
+The flag turns counting on. A `--popcorn-cov-*` option without it is a usage error, and the ini values
+do nothing without it. A command-line
+value replaces the ini value of its setting. Command-line targets resolve against the directory
+pytest ran in, ini targets against the rootdir.
+
+### Reports
+
+- `term` is the table above, printed once with `-q` too and once under xdist. A bare
+  `--popcorn-cov` with no other report and no `popcorn_cov_lcov` writes it.
+- `html` writes into `htmlcov`, or the target directory.
+- `xml` writes Cobertura xml to `coverage.xml`, or the target file.
+- `lcov` writes the lcov tracefile, the format of `lcov` and `genhtml`. A bare `lcov` takes the
+  path of `popcorn_cov_lcov`.
+
+Each process adds its counts to a temporary directory, and the controller builds the reports
+from them once, at the end of the session. Under xdist the workers build none.
+
+### Include and omit
+
+A glob matches a source path as the lcov file writes it and relative to the rootdir, and `**`
+crosses directories. `**/tests/**` matches `tests/a.c` and `/home/u/x/tests/a.c`, where
+`*/tests/*` matches neither. Include applies first, omit second. Every report, the lcov files
+included, holds the kept files only.
+
+### html and genhtml
+
+`genhtml` from LCOV 2.0 or later, when it is on `PATH`, writes the `html` report with branch and
+function coverage. It runs from the rootdir, where a relative source path resolves. Without
+genhtml, a built-in renderer writes `index.html`, `style.css` and one page per source file,
+with no scripts and no external files. `mark` mode uses the built-in renderer whenever a kept
+line is marked.
+
+The target directory takes the report when it is missing, empty or holds an earlier html report,
+which is emptied first.
+Any other target is left alone: a symbolic link, a directory of other files, and a directory that
+is or contains the rootdir, the working directory or the home directory. The summary then says
+`html report not written`, the other reports are still written, and the exit status is the run's.
+A genhtml that fails or runs past 300 s gives the same summary line, and the `.pcov` files stay in
+their directory.
+
+`genhtml --branch-coverage` reads the lcov file with one message, which the data can legitimately
+produce:
+
+```text
+line is hit but no branches on line have been evaluated
+```
+
+It names a line whose branch never ran while another instruction of the line did, such as a
+shared exit that the line table files under the branch's line. `--ignore-errors inconsistent`
+renders it. A function never entered can report as hit, `FNDA` 1, when the lines of an inlined
+helper are filed inside its range: `genhtml` requires a function with a hit line to be hit.
+
+### fail-under
+
+`--popcorn-cov-fail-under=N` compares the total line coverage after include and omit with `N`
+exactly, with nothing rounded first. Below it, the summary prints the failure and a run that
+would exit 0 exits 1:
+
+```text
+FAIL Required coverage of 80% not reached. Total coverage: 79.99%
+```
+
+The printed total is cut to two decimals, so 79.999 prints 79.99. A run that
+collected no coverage counts as 0 percent. An interrupted session skips the check.
+
+### Unmodelled registers
+
+A source line that reads or writes a peripheral register no model implements runs, but the
+firmware did not exercise a model. `--popcorn-cov-unmodelled` sets how these lines report:
+
+- `hit` counts them as covered and records nothing.
+- `mark` keeps the counts, adds an `Unmodelled` column to the `term` table and colours the lines in
+  the `html` report with a tooltip of `peripheral.register (reason, N hits)`. The reason is `no_register`,
+  `storage_only`, `no_model`, `unimplemented` or `raz_wi`. Accesses from an instruction with no line in the report
+  add up to `unplaced`, which the `term` report prints as
+  `N unmodelled accesses came from code with no line in this report`.
+- `miss` counts those lines, the functions whose only hit lines are among them and their branches
+  as not hit in every report.
+
+An `lcov` report in `mark` or `miss` has a sidecar `<lcov>.unmodelled.json` that lists the uses per
+line, and an `lcov` report that applies no sidecar removes the one at its path.
+
+`mark` and `miss` make each machine record the CPU accesses per accessing instruction, about 20 ns
+per access to a peripheral register, boot accesses included, and the mode is part of the boot cache
+key. A line is marked when one of its instructions accessed an unmodelled register.
 
 ## Boot cache
 
