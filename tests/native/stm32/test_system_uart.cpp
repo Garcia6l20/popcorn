@@ -1,5 +1,6 @@
 #include "stm32_fixture.hpp"
 
+#include <popcorn/arch/arch.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/host.hpp>
 #include <popcorn/core/log.hpp>
@@ -27,9 +28,12 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -232,6 +236,7 @@ struct world
   std::vector<core::member_ref>                  members;
   std::unique_ptr<core::system>                  sys;
   std::vector<core::pause>                       pauses;
+  std::move_only_function<void(std::size_t)>     on_sleep;
   bool                                           strict{};
   std::size_t                                    real{};
 
@@ -304,7 +309,8 @@ struct world
       };
     }
     std::vector<std::shared_ptr<core::member_link>> links{wires.begin(), wires.end()};
-    sys = std::make_unique<core::system>(members, std::move(links), how.bounds, std::move(hook));
+    sys = std::make_unique<core::system>(
+        members, std::move(links), how.bounds, std::move(hook), std::move(on_sleep));
     if(offsets.empty())
     {
       offsets.resize(nodes.size());
@@ -745,6 +751,75 @@ TEST_CASE("a peer frame at another baud is a strict system error at its start at
     auto const stopped = w.run_to(reference->ps + 2 * us_ps);
     REQUIRE(stopped.reason == core::pause_reason::error);
     CHECK(stopped.at == *reference);
+  }
+}
+
+TEST_CASE("a drain fault's error pause taps only the frames ended by its point at any quantum")
+{
+  std::optional<std::vector<stm32::tap_frame>> reference;
+  for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+  {
+    CAPTURE(how.name);
+    world w;
+    w.strict = true;
+    w.add("link_tx_switch");
+    w.add("link_rx");
+    w.link(0, 1, 250 * us_ps);
+    w.host(how);
+    auto const stopped = w.run_to(script_end);
+    REQUIRE(stopped.reason == core::pause_reason::error);
+    CHECK(stopped.member == 1);
+    auto const& shown = w.taps[0];
+    CHECK(shown.size() == 4);
+    for(auto const& frame : shown)
+    {
+      CHECK(frame.end <= stopped.at);
+    }
+    if(reference)
+    {
+      CHECK(shown == *reference);
+    }
+    reference = shown;
+  }
+}
+
+TEST_CASE("a drain fault's error pause taps no frame past its point on any link at any quantum")
+{
+  for(auto const until : {script_end, std::int64_t{600 * us_ps}})
+  {
+    CAPTURE(until);
+    std::optional<std::vector<std::vector<stm32::tap_frame>>> reference;
+    for(auto const& how : {variants()[0], variants()[1], variants()[2]})
+    {
+      CAPTURE(how.name);
+      world w;
+      w.strict = true;
+      w.add("link_tx_switch");
+      w.add("link_rx");
+      w.add("link_tx");
+      w.add("link_rx");
+      w.link(0, 1, 250 * us_ps);
+      w.link(2, 3, 250 * us_ps);
+      w.host(how);
+      auto const stopped = w.run_to(until);
+      REQUIRE(stopped.reason == core::pause_reason::error);
+      CHECK(stopped.member == 1);
+      CHECK(w.taps[0].size() == 4);
+      CHECK_FALSE(w.taps[1].empty());
+      std::vector<std::vector<stm32::tap_frame>> const shown{w.taps[0], w.taps[1]};
+      for(auto const& one : shown)
+      {
+        for(auto const& frame : one)
+        {
+          CHECK(frame.end <= stopped.at);
+        }
+      }
+      if(reference)
+      {
+        CHECK(shown == *reference);
+      }
+      reference = shown;
+    }
   }
 }
 
@@ -1575,6 +1650,8 @@ TEST_CASE("a strict shape fault a pause carries is the pause, before the goal st
     CHECK(stopped.member == 1);
     CHECK_THROWS_AS(std::rethrow_exception(stopped.error), popcorn::model_error);
     CHECK(carried_now(*w.wires[0]) == 1);
+    auto const held = w.sys->lock();
+    CHECK(w.sys->time_of(held, 1) < stopped.at);
   }
 }
 
@@ -1787,6 +1864,651 @@ TEST_CASE("an idle pause waits for a break cut's hold and release, then the IDLE
       else
       {
         reference = seen;
+      }
+    }
+  }
+}
+
+namespace
+{
+struct busy_send
+{
+  std::string              dump;
+  core::pause              stopped;
+  std::vector<std::size_t> tapped;
+};
+
+auto send_then_stop(variant const& how, std::int64_t stamp_at, std::int64_t stop_at) -> busy_send
+{
+  constexpr std::int64_t latency = 100 * us_ps;
+  pinned const           pin{how.one_cpu};
+  world                  w;
+  w.add("link_rx");
+  w.add("link_rx");
+  w.add("link_rx");
+  w.link(0, 1, latency);
+  w.link(1, 0, latency);
+  w.host(how);
+  REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+  core::host_future<core::goal_reached> stopping;
+  core::host_future<vtime>              written;
+  {
+    auto const held = w.sys->lock();
+    stopping        = w.sys->post_goal(held, 0, {.until_time = core::sys_time{stop_at}});
+    for(std::size_t const member : {std::size_t{1}, std::size_t{2}})
+    {
+      std::ignore =
+          w.sys->post_goal(held, member, {.until = popcorn::address{0x0800'0001}, .open = true});
+    }
+    auto const base      = w.sys->base_of(0).ps;
+    auto const held_host = w.members[0].on->lock();
+    written              = w.members[0].on->post(
+        held_host, 0,
+        [](core::machine& m) {
+          auto&      usart = m.peripheral("USART1");
+          auto const found = popcorn::find_register(usart.description(), std::string_view{"TDR"});
+          REQUIRE(found != nullptr);
+          REQUIRE(m.mem().write(usart.description().base + found->offset, 4, 0x5a));
+        },
+        vtime{static_cast<std::uint64_t>(stamp_at - base)});
+  }
+  core::host_future<core::pause> pending;
+  {
+    auto const held = w.sys->lock();
+    pending         = w.sys->resume(held);
+  }
+  auto const stopped = pending.get();
+  std::ignore        = written.get();
+  w.collect();
+  return {
+      .dump = w.dump(), .stopped = stopped, .tapped = {w.taps[0].size(), w.taps[1].size()}
+  };
+}
+}
+
+TEST_CASE("a delivered pause's tap holds every frame ended by its point at any quantum")
+{
+  for(auto const stamp_at : {760 * us_ps, 772 * us_ps, 784 * us_ps, 796 * us_ps})
+  {
+    CAPTURE(stamp_at);
+    std::optional<std::vector<std::size_t>> reference;
+    for(auto const& how : variants())
+    {
+      CAPTURE(how.name);
+      auto const seen = send_then_stop(how, stamp_at, stamp_at + 40 * us_ps);
+      REQUIRE(seen.stopped.reason == core::pause_reason::delivered);
+      CHECK(seen.stopped.at.ps == stamp_at + 40 * us_ps);
+      CHECK(seen.tapped == std::vector<std::size_t>{1, 0});
+      if(reference)
+      {
+        CHECK(seen.tapped == *reference);
+      }
+      reference = seen.tapped;
+    }
+  }
+}
+
+namespace
+{
+struct injected_after_stop
+{
+  core::pause                   stopped;
+  std::int64_t                  receiver_at{};
+  std::vector<stm32::tap_frame> shown_at_pause{};
+  std::vector<stm32::tap_frame> tapped{};
+};
+
+auto inject_at_receiver_after_stop(variant const& how, std::int64_t stamp_at, std::int64_t stop_at)
+    -> injected_after_stop
+{
+  constexpr std::int64_t latency = 100 * us_ps;
+  pinned const           pin{how.one_cpu};
+  world                  w;
+  w.add("link_rx");
+  w.add("link_rx");
+  w.link(0, 1, latency);
+  w.host(how);
+  REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+  core::host_future<core::goal_reached> stopping;
+  core::host_future<core::goal_reached> listening;
+  core::host_future<vtime>              written;
+  {
+    auto const held = w.sys->lock();
+    stopping        = w.sys->post_goal(held, 0, {.until_time = core::sys_time{stop_at}});
+    listening = w.sys->post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
+    auto const base      = w.sys->base_of(0).ps;
+    auto const held_host = w.members[0].on->lock();
+    written              = w.members[0].on->post(
+        held_host, 0,
+        [](core::machine& m) {
+          auto&      usart = m.peripheral("USART1");
+          auto const found = popcorn::find_register(usart.description(), std::string_view{"TDR"});
+          REQUIRE(found != nullptr);
+          REQUIRE(m.mem().write(usart.description().base + found->offset, 4, 0x5a));
+        },
+        vtime{static_cast<std::uint64_t>(stamp_at - base)});
+  }
+  core::host_future<core::pause> pending;
+  {
+    auto const held = w.sys->lock();
+    pending         = w.sys->resume(held);
+  }
+  injected_after_stop out{.stopped = pending.get()};
+  std::ignore        = written.get();
+  out.shown_at_pause = w.wires[0]->tap().take();
+  {
+    auto const held  = w.sys->lock();
+    auto const now   = w.sys->time_of(held, 1);
+    auto const local = static_cast<std::int64_t>(core::access(
+        *w.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; }));
+    out.receiver_at  = now.ps;
+    std::vector<std::uint16_t> const data{0x3c};
+    REQUIRE(w.wires[0]
+                ->inject(
+                    data, now,
+                    stm32::stopped_receiver{
+                        .now = now, .map = core::time_map{core::sys_time{now.ps - local}}})
+                .has_value());
+    w.sys->release(held, 0, true);
+  }
+  REQUIRE(w.resume(900 * us_ps).reason == core::pause_reason::system_time);
+  {
+    auto const held = w.sys->lock();
+    w.sys->finish(held);
+  }
+  out.tapped = out.shown_at_pause;
+  auto rest  = w.wires[0]->tap().take();
+  out.tapped.insert(out.tapped.end(), rest.begin(), rest.end());
+  return out;
+}
+}
+
+TEST_CASE("a frame injected at a sleeper's time after a member stop is tapped once")
+{
+  constexpr std::int64_t stamp_at = 700 * us_ps;
+  constexpr std::int64_t stop_at  = 760 * us_ps;
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    auto const seen = inject_at_receiver_after_stop(how, stamp_at, stop_at);
+    REQUIRE(seen.stopped.reason == core::pause_reason::delivered);
+    CHECK(seen.stopped.at.ps == stop_at);
+    CHECK(seen.receiver_at == stop_at);
+    REQUIRE(seen.shown_at_pause.size() == 1);
+    CHECK(seen.shown_at_pause[0].data == 0x5a);
+    CHECK(seen.shown_at_pause[0].end.ps <= stop_at);
+    CHECK(
+        std::ranges::count_if(
+            seen.tapped,
+            [](stm32::tap_frame const& frame) { return frame.injected and frame.data == 0x3c; })
+        == 1);
+    CHECK(seen.tapped.size() == 2);
+  }
+}
+
+namespace
+{
+auto send_then_stay_busy(variant const& how, std::int64_t stamp_at, std::int64_t busy_at)
+    -> busy_send
+{
+  constexpr std::int64_t latency = 100 * us_ps;
+  pinned const           pin{how.one_cpu};
+  world                  w;
+  w.add("link_rx");
+  w.add("link_rx");
+  w.link(0, 1, latency);
+  w.link(1, 0, latency);
+  w.host(how);
+  REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+  REQUIRE(w.wires[0]->drop(0, 1));
+  core::host_future<core::goal_reached> sending;
+  core::host_future<core::goal_reached> listening;
+  {
+    auto const held = w.sys->lock();
+    sending         = w.sys->post_goal(held, 0, {.until = popcorn::address{0x0800'0001}});
+    listening = w.sys->post_goal(held, 1, {.until = popcorn::address{0x0800'0001}, .open = true});
+  }
+  auto const               base = w.sys->base_of(0).ps;
+  core::host_future<vtime> written;
+  core::host_future<vtime> busy;
+  {
+    auto const held_host = w.members[0].on->lock();
+    written              = w.members[0].on->post(
+        held_host, 0,
+        [](core::machine& m) {
+          auto&      usart = m.peripheral("USART1");
+          auto const found = popcorn::find_register(usart.description(), std::string_view{"TDR"});
+          REQUIRE(found != nullptr);
+          REQUIRE(m.mem().write(usart.description().base + found->offset, 4, 0x5a));
+        },
+        vtime{static_cast<std::uint64_t>(stamp_at - base)});
+    busy = w.members[0].on->post(
+        held_host, 0, [](core::machine&) {}, vtime{static_cast<std::uint64_t>(busy_at - base)});
+  }
+  core::host_future<core::pause> pending;
+  {
+    auto const held = w.sys->lock();
+    pending         = w.sys->resume(held);
+  }
+  auto const stopped = pending.get();
+  std::ignore        = written.get();
+  std::ignore        = busy.get();
+  {
+    auto const held = w.sys->lock();
+    w.sys->withdraw(held, 1);
+  }
+  w.collect();
+  return {
+      .dump = w.dump(), .stopped = stopped, .tapped = {w.taps[0].size(), w.taps[1].size()}
+  };
+}
+}
+
+TEST_CASE("an idle pause's tap holds every frame ended by its point at any quantum")
+{
+  for(auto const stamp_at : {776 * us_ps, 780 * us_ps, 786 * us_ps})
+  {
+    CAPTURE(stamp_at);
+    std::optional<std::string> reference;
+    for(auto const& how : variants())
+    {
+      CAPTURE(how.name);
+      auto const seen = send_then_stay_busy(how, stamp_at, stamp_at + 30 * us_ps);
+      CHECK(seen.stopped.reason == core::pause_reason::idle);
+      CHECK(seen.stopped.at.ps == stamp_at + 30 * us_ps);
+      CHECK(seen.tapped == std::vector<std::size_t>{1, 0});
+      if(reference)
+      {
+        CHECK(seen.dump == *reference);
+      }
+      reference = seen.dump;
+    }
+  }
+}
+
+namespace
+{
+auto cut_from_member(world& w, std::size_t member) -> core::host_future<vtime>
+{
+  auto const held_host = w.members[member].on->lock();
+  return w.members[member].on->post(held_host, 0, [&w, member](core::machine& m) {
+    auto const now = core::sys_time{
+        w.sys->base_of(member).ps + static_cast<std::int64_t>(m.virtual_clock().time().ps)};
+    REQUIRE(
+        stm32::cut_link(
+            *w.wires[0], *w.wires[1], now, core::sys_time{now.ps + 10 * us_ps}, false, now));
+  });
+}
+
+auto asleep(world const& w, core::host_future<core::pause> const& pending) -> bool
+{
+  for(;;)
+  {
+    if(pending.done())
+    {
+      return false;
+    }
+    if(std::ranges::all_of(w.members, [](core::member_ref const& one) {
+         return one.on->state(0) == core::host_state::idle_wait;
+       }))
+    {
+      return true;
+    }
+    std::this_thread::yield();
+  }
+}
+}
+
+TEST_CASE("an owner woken from an idle sleep behind the latest member cuts its link at its time")
+{
+  for(auto const& how : {variants()[0], variants()[1], variants()[2], variants()[4]})
+  {
+    CAPTURE(how.name);
+    auto w = paired_world("link_rx", "link_rx", latency_20);
+    w.host(how);
+    REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+    core::host_future<vtime> busy;
+    {
+      auto const held = w.sys->lock();
+      for(std::size_t member = 0; member < 2; ++member)
+      {
+        std::ignore =
+            w.sys->post_goal(held, member, {.until = popcorn::address{0x0800'0001}, .open = true});
+      }
+      auto const base      = w.sys->base_of(1).ps;
+      auto const held_host = w.members[1].on->lock();
+      busy                 = w.members[1].on->post(
+          held_host, 0, [](core::machine&) {}, vtime{static_cast<std::uint64_t>(5 * ms_ps - base)});
+    }
+    core::host_future<core::pause> pending;
+    {
+      auto const held = w.sys->lock();
+      pending         = w.sys->resume(held);
+    }
+    REQUIRE(asleep(w, pending));
+    CHECK(busy.get().ps + static_cast<std::uint64_t>(w.sys->base_of(1).ps) == 5 * ms_ps);
+    auto const cut = cut_from_member(w, 0);
+    std::ignore    = cut.get();
+    w.sys->request_pause();
+    CHECK(pending.get().reason == core::pause_reason::requested);
+  }
+}
+
+TEST_CASE("a free run that sleeps first shows every frame ended by its earliest member")
+{
+  for(auto const& how : {variants()[0], variants()[1]})
+  {
+    CAPTURE(how.name);
+    world w;
+    w.add("idle");
+    w.add("idle");
+    w.link(0, 1, latency_20);
+    auto seen  = std::make_shared<std::vector<std::vector<stm32::tap_frame>>>();
+    auto lock  = std::make_shared<std::mutex>();
+    w.on_sleep = [&w, seen, lock](std::size_t index) {
+      if(index == 1)
+      {
+        std::scoped_lock const held{*lock};
+        seen->push_back(w.wires[0]->tap().take());
+      }
+    };
+    w.host(how);
+    REQUIRE(w.resume(600 * us_ps).reason == core::pause_reason::system_time);
+    std::int64_t                          at = 0;
+    std::vector<core::host_future<vtime>> busy;
+    {
+      auto const held = w.sys->lock();
+      for(std::size_t member = 0; member < 2; ++member)
+      {
+        std::ignore =
+            w.sys->post_goal(held, member, {.until = popcorn::address{0x0800'0001}, .open = true});
+      }
+      at = w.sys->pending_barrier(held).ps + 7 * us_ps;
+      std::vector<std::uint16_t> const data{0x7e};
+      REQUIRE(w.wires[0]->inject(data, core::sys_time{at}, std::nullopt).has_value());
+      auto const after = at + 25 * us_ps;
+      for(std::size_t member = 0; member < 2; ++member)
+      {
+        auto const held_host = w.members[member].on->lock();
+        busy.push_back(w.members[member].on->post(
+            held_host, 0, [](core::machine&) {},
+            vtime{static_cast<std::uint64_t>(after - w.sys->base_of(member).ps)}));
+      }
+    }
+    core::host_future<core::pause> pending;
+    {
+      auto const held = w.sys->lock();
+      pending         = w.sys->resume(held);
+    }
+    REQUIRE(asleep(w, pending));
+    for(auto& one : busy)
+    {
+      std::ignore = one.get();
+    }
+    {
+      std::scoped_lock const held{*lock};
+      REQUIRE(seen->size() == 1);
+      REQUIRE(seen->front().size() == 1);
+      CHECK(seen->front().front().data == 0x7e);
+      CHECK(seen->front().front().start.ps == at);
+    }
+    w.sys->request_pause();
+    CHECK(pending.get().reason == core::pause_reason::requested);
+  }
+}
+
+TEST_CASE("a sender toggling UE mid-frame posts many segments a window and matches the oracle")
+{
+  constexpr std::int64_t latency = 1 * ms_ps;
+  constexpr std::int64_t end     = 30 * ms_ps;
+  world                  reference;
+  reference.add("link_ue_toggle");
+  reference.add("link_rx");
+  reference.link(0, 1, latency);
+  reference.oracle(end);
+  auto const expected = reference.dump();
+  keep_dump("ue-toggle-oracle", expected);
+  auto const lost = std::ranges::count(reference.taps[0], true, &stm32::tap_frame::lost);
+  CHECK(lost > 10'000);
+  constexpr std::uint64_t posts_per_lost_frame = 2;
+  for(auto const& how : {variants()[0], variants()[2], variants()[7]})
+  {
+    CAPTURE(how.name);
+    pinned const pin{how.one_cpu};
+    world        w;
+    w.add("link_ue_toggle");
+    w.add("link_rx");
+    w.link(0, 1, latency);
+    w.host(how);
+    auto const stopped = w.run_to(end);
+    CHECK(stopped.reason == core::pause_reason::system_time);
+    auto const seen = w.dump();
+    keep_dump(std::string{"ue-toggle-"} + std::string{how.name}, seen);
+    CHECK(seen == expected);
+    std::map<std::int64_t, std::uint64_t> per_window;
+    for(auto const& frame : w.taps[0])
+    {
+      per_window[frame.start.ps / latency] += frame.lost ? posts_per_lost_frame : 1;
+    }
+    auto const busiest = std::ranges::max(per_window | std::views::values);
+    MESSAGE("busiest window ", busiest);
+    CHECK(busiest > 1000);
+  }
+}
+
+TEST_CASE("a frame handed to the receiver's port before its member reset never reaches it")
+{
+  constexpr std::int64_t latency = 1 * ms_ps;
+  for(auto const reset : {false, true})
+  {
+    CAPTURE(reset);
+    world w;
+    w.add("idle");
+    w.add("link_rx");
+    w.link(0, 1, latency);
+    w.host(variants()[0]);
+    REQUIRE(w.resume(1500 * us_ps).reason == core::pause_reason::system_time);
+    auto const stopped = [&w](core::held_system const& held) {
+      auto const now   = w.sys->time_of(held, 1);
+      auto const local = static_cast<std::int64_t>(core::access(
+          *w.members[1].on, 0, [](core::machine& m) { return m.virtual_clock().time().ps; }));
+      return stm32::stopped_receiver{
+          .now = now, .map = core::time_map{core::sys_time{now.ps - local}}};
+    };
+    auto const pending = [&w] {
+      return core::access(*w.members[1].on, 0, [](core::machine& m) { return m.pending_events(); });
+    };
+    std::int64_t end{};
+    {
+      auto const                       held     = w.sys->lock();
+      auto const                       receiver = stopped(held);
+      auto const                       before   = pending();
+      std::vector<std::uint16_t> const first{0x5a};
+      REQUIRE(w.wires[0]
+                  ->inject(first, core::sys_time{receiver.now.ps + 300 * us_ps}, receiver)
+                  .has_value());
+      REQUIRE(pending() > before);
+      if(reset)
+      {
+        w.sys->reset(held, 1, popcorn::reset_kind::software);
+        auto& target = *w.nodes[1]->target;
+        target.regs().write(*target.regs().find("pc"), sym("usart_ll", "link_rx"));
+      }
+      auto const                       after = stopped(held);
+      std::vector<std::uint16_t> const second{0xa5};
+      REQUIRE(w.wires[0]
+                  ->inject(second, core::sys_time{after.now.ps + 1500 * us_ps}, after)
+                  .has_value());
+      end = after.now.ps + 3 * ms_ps;
+    }
+    REQUIRE(w.resume(end).reason == core::pause_reason::system_time);
+    std::vector<std::uint32_t> received;
+    for(auto const& one : entries(w.nodes[1]->log()))
+    {
+      if(one.kind == link_byte)
+      {
+        received.push_back(one.data);
+      }
+    }
+    CHECK(
+        received
+        == (reset ? std::vector<std::uint32_t>{0xa5} : std::vector<std::uint32_t>{0x5a, 0xa5}));
+  }
+}
+
+namespace
+{
+struct last_cycle_end
+{
+  std::int64_t  latency{};
+  std::int64_t  barrier{};
+  std::int64_t  end{};
+  std::uint64_t index{};
+};
+
+auto barrier_after_last_cycle_end(
+    std::string_view entry,
+    std::int64_t     period,
+    std::int64_t     until,
+    std::int64_t     after) -> last_cycle_end
+{
+  world reference;
+  reference.add(entry);
+  reference.add("idle");
+  reference.link(0, 1, latency_20);
+  auto& sender = *reference.nodes[0];
+  reference.wires[0]->enter_window(0, sender.map());
+  REQUIRE(
+      sender.f->run_to_stop({.max_instructions = icount{1'000'000'000}}).reason
+      == stop_reason::user);
+  sender.target->hold_core(true);
+  REQUIRE(sender.advance(until) == stop_reason::time);
+  std::ignore = reference.wires[0]->drain(
+      0, core::sys_time{until}, core::sys_time{until + ms_ps}, reference.nodes[1]->map());
+  REQUIRE(reference.nodes[1]->advance(until) == stop_reason::time);
+  reference.wires[0]->finish(core::sys_time{until});
+  reference.collect();
+  auto const& time   = sender.target->virtual_clock();
+  auto const& frames = reference.taps[0];
+  REQUIRE(frames.size() > 2);
+  REQUIRE(1'000'000'000'000 / time.instruction_hz() == static_cast<std::uint64_t>(period));
+  for(std::size_t index = 0; index + 1 < frames.size(); ++index)
+  {
+    auto const end = frames[index].end.ps;
+    if(frames[index + 1].start.ps != end or end < after)
+    {
+      continue;
+    }
+    auto const count = time.to_icount(vtime{static_cast<std::uint64_t>(end + sender.origin)});
+    auto const k     = std::max<std::int64_t>(1, end / latency_20);
+    auto const third = (end + 3 * k) / (3 * k);
+    auto const at    = k * 3 * third;
+    auto const local = vtime{static_cast<std::uint64_t>(at + sender.origin)};
+    if(at > end and time.to_icount(local) == count)
+    {
+      return {.latency = 3 * third, .barrier = at, .end = end, .index = frames[index].index};
+    }
+  }
+  FAIL("no back-to-back frame leaves room for a barrier in its last cycle");
+  return {};
+}
+
+auto systick_due(core::machine const& target) -> std::optional<core::event>
+{
+  for(auto const& due : target.snapshot().data().events.pending)
+  {
+    if(due.id.owner == popcorn::arch::arch_event_owner and due.kind == core::deadline::instructions)
+    {
+      return due;
+    }
+  }
+  return std::nullopt;
+}
+
+void arm_systick_at(core::machine& target, icount wrap)
+{
+  constexpr popcorn::address csr{0xe000'e010};
+  constexpr popcorn::address rvr{0xe000'e014};
+  constexpr popcorn::address cvr{0xe000'e018};
+  std::uint64_t              reload = 1'000;
+  for(int attempt = 0; attempt < 2; ++attempt)
+  {
+    REQUIRE(target.mem().write(csr, 4, 0).has_value());
+    REQUIRE(target.mem().write(rvr, 4, reload).has_value());
+    REQUIRE(target.mem().write(cvr, 4, 0).has_value());
+    REQUIRE(target.mem().write(csr, 4, 7).has_value());
+    auto const due = systick_due(target);
+    REQUIRE(due.has_value());
+    if(due->at == wrap)
+    {
+      return;
+    }
+    REQUIRE(reload + wrap.value > due->at.value);
+    reload = reload + wrap.value - due->at.value;
+  }
+  FAIL("SysTick wrap not at the requested count");
+}
+}
+
+TEST_CASE("a strict fault on a frame starting in the last cycle before a barrier is dated at it")
+{
+  constexpr std::int64_t period = 250'000;
+  constexpr std::int64_t until  = 20 * ms_ps;
+  auto const point = barrier_after_last_cycle_end("link_tx_bursts", period, until, 20 * latency_20);
+  CAPTURE(point.latency);
+  CAPTURE(point.barrier);
+  CAPTURE(point.end);
+  REQUIRE(point.barrier - point.end < period);
+  auto const armed = point.barrier - 8 * point.latency;
+  for(auto const paused : {false, true})
+  {
+    for(std::int64_t const lowered : {1, 3})
+    {
+      CAPTURE(paused);
+      CAPTURE(lowered);
+      world w;
+      w.strict = true;
+      w.add("link_tx_bursts");
+      w.add("idle");
+      auto& link = w.link(0, 1, point.latency);
+      if(lowered != 1)
+      {
+        w.link(0, 1, point.latency / lowered, true);
+      }
+      REQUIRE(link.drop(0, point.index + 1));
+      w.host(variants()[0]);
+      REQUIRE(w.run_to(armed).reason == core::pause_reason::system_time);
+      auto&      sender = *w.nodes[0];
+      auto const wrap   = sender.target->virtual_clock().to_icount(
+          vtime{static_cast<std::uint64_t>(point.barrier + sender.origin)});
+      {
+        auto const held = w.sys->lock();
+        arm_systick_at(*sender.target, wrap);
+      }
+      if(paused)
+      {
+        REQUIRE(w.run_to(point.barrier).reason == core::pause_reason::system_time);
+        auto const held    = w.sys->lock();
+        auto const pending = sender.target->snapshot().data().events.pending;
+        auto const tick    = systick_due(*sender.target);
+        REQUIRE(tick.has_value());
+        CHECK(tick->at == wrap);
+        auto const done = std::ranges::find_if(pending, [&](core::event const& due) {
+          return due.kind == core::deadline::time
+             and due.due_ps == static_cast<std::uint64_t>(point.end + sender.origin);
+        });
+        REQUIRE(done != pending.end());
+        CHECK(done->at == wrap);
+        CHECK(tick->seq < done->seq);
+      }
+      auto const stopped = w.run_to(until);
+      REQUIRE(stopped.reason == core::pause_reason::error);
+      CHECK(stopped.member == 1);
+      CHECK(stopped.at.ps == point.barrier);
+      CHECK(w.taps[0].size() == point.index + 1);
+      for(auto const& frame : w.taps[0])
+      {
+        CHECK(frame.end.ps <= point.barrier);
       }
     }
   }

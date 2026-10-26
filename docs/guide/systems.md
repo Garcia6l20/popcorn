@@ -13,6 +13,11 @@ other member's UART as the line would carry it, with a latency you choose.
 - `members` maps a name to a `MachineDescription`. Two members may share one description.
 - `UartLink("member.UART", "member.UART", latency=, baud=)` joins two UARTs in both directions.
   `latency` has no default, because it is part of the model, like a baud rate or a cable.
+  A frame whose baud or format differs from the link's is an error of a strict receiving member,
+  dated at the frame's start at the sender. A frame can start before a barrier of the quantum
+  by less than one sender instruction period and still be posted after it, because the sender's
+  slice held at the barrier runs the events of the barrier's last instruction cycle in the next
+  window. Its error is dated at the barrier.
 - `@popcorn.pytest.system` declares a fixture that hands each test a booted `System`. Every
   member boots from the boot snapshot of its own description, the one a machine fixture of that
   description uses, so the system adds no boot.
@@ -31,6 +36,10 @@ In a script, `await SYSTEM.boot()` builds the machines, boots each one and links
 is the member's `Machine`, so `var`, `periph`, `reg` and the hooks work as on a single machine.
 A member's `Machine.time` counts from its own reset. `system.time_of(name)` gives its system
 time, and `system.to_local()` and `system.to_system()` convert between the two.
+
+After a member stop at system time `P`, every other member that runs a goal and sleeps below
+`P` stands at `P`: its `system.time_of(name)` is `P`. A member that ran past `P`, busy or asleep,
+stands where it stopped, a position that depends on the quantum.
 
 A member that has no goal while another one runs one is halted. Its core executes nothing, and
 its clocks, peripherals and DMA follow the system time. A goal's `budget` counts executed
@@ -93,9 +102,25 @@ take `2 L`, so a protocol with millisecond timeouts runs the same at 50 us as at
 the tap holds in one direction, oldest first, each a `TapFrame` with its `data`, `start`, `end`
 and `arrival` in system time. Reading never changes what the receiver gets.
 
+What the tap holds at a pause depends on the pause's kind:
+
+- After a member stop, an IDLE pause or an error, it holds every frame ended by the pause point and
+  no later one, whatever the quantum, the slicing or the wall timing.
+- After a TIME stop or a requested pause, it holds the frames ended by the earliest member's
+  position, which can lie before the pause point by an amount that depends on the quantum. The
+  rest follow at the next pause or at `close()`.
+- While the system runs, a read can lag the latest frames by up to two windows of the quantum
+  behind the receiving member's time. Before a free run sleeps, the tap shows every frame ended
+  by the earliest member's position, so a host polling the tap while the system sleeps sees
+  those frames. A read at a pause is complete as above.
+
 A tap also edits the line:
 
-- `tap.inject(data, at=, towards=)` puts frames on the line.
+- `tap.inject(data, at=, towards=)` puts frames on the line. Stopped or paused, an overlap with a
+  frame already on the receiver's line raises `ValueError` at the call. While the system runs,
+  the overlap stops the system with an error at a time the frames fix: the later frame's start
+  for two injected frames, and the later of the injected frame's start and the peer frame's
+  sender start for an injected frame and a peer frame. The error is the receiving member's.
 - `tap.replace(index, data, towards=)` gives the sender's frames from number `index` on new data,
   one frame per byte. `tap.drop(index, n, towards=)` keeps `n` frames off the line. Both raise
   `ValueError` for a frame that has started already. `TapFrame.index` is the number.
@@ -119,6 +144,8 @@ times at the senders. Each receiver's line is cut over `[start + L, end + L)`.
 - `tap.break_line()` opens a cut now and `tap.restore_line()` closes it. While the system runs,
   only a callback of the member `tap.owner` may call them, by default the member of the link's
   first end.
+- `tap.owner` is readable from any callback of a member. It raises `EmulationError` once the
+  system is closed.
 
 "Now" for a stopped system is the later of the two ends' `system.time_of`, as the test does.
 Never use `system.time` for it, which depends on the quantum.

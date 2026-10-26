@@ -21,14 +21,19 @@ from typing import Any
 import popcorn
 import pytest
 from popcorn import _core
+from popcorn._hooks import Relay
 from popcorn._host import awaited
+from popcorn._observe import open_trace
 from popcorn._refs import Pending
 from popcorn._stop import Stop, stop_of
 from popcorn.model import Model, on_read
+from popcorn.stm32.description import cached_description
+from popcorn.trace import TraceKind
 from popcorn.units import VirtualTime, s, us
 
 from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, Machines, load_each_unforwarded, stalled
 from .devices_example import Eeprom24
+from .linked import USART_LL
 from .projects import MODEL_ELF, MODEL_JSON
 
 VALUE: contextvars.ContextVar[str] = contextvars.ContextVar("host_binding_value", default="unset")
@@ -631,6 +636,171 @@ def test_a_collection_inside_a_handler_destroys_another_machine(machines: Machin
     asyncio.run(first.run(budget=1_000_000))
     assert len(collected) == 1 and collected[0] > 0
     assert settles(lambda: _core.host_threads() == before + 1)
+
+
+class TracedRelay(Relay):
+    """A relay a weak reference can follow."""
+
+    __slots__ = ("__weakref__",)
+
+
+class Cycle:
+    """Holds a machine through a reference cycle, so only a collection frees it."""
+
+    def __init__(self, machine: popcorn.Machine) -> None:
+        self.machine = machine
+        self.itself = self
+
+
+def test_a_collection_on_another_host_thread_defers_the_hook_removals_of_a_held_machine(
+    machines: Machines,
+) -> None:
+    gc.collect()
+    before = _core.host_threads()
+    enabled = gc.isenabled()
+    relays: list[weakref.ref[Relay]] = []
+    hooks: list[_core.Hook] = []
+    collected: list[bool] = []
+    deferred: list[bool] = []
+    first = machines()
+
+    def relay(self: popcorn.Machine, handler: Callable[..., object], keys: list[int]) -> Relay:
+        table = self._callback_table  # pyright: ignore[reportPrivateUsage]
+        keys.append(table.add(handler))
+        made = TracedRelay(table, keys[-1])
+        relays.append(weakref.ref(made))
+        return made
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(popcorn.Machine, "_relay", relay)
+        idle = first.intercept("tick", lambda call: call.proceed())
+    hooks.extend(idle._hooks)  # pyright: ignore[reportPrivateUsage]
+    del idle
+    hold = first._handle.hold_at_boundary()  # pyright: ignore[reportPrivateUsage]
+    gc.disable()
+    try:
+        Cycle(first)
+        first.start()
+        assert hold.wait_held(10), "machine never reached its boundary"
+        gone = weakref.ref(first)
+        del first
+        second = machines()
+
+        def handler(call: popcorn.Call) -> popcorn.Return:
+            gc.collect()
+            collected.append(gone() is None)
+            hooks.clear()
+            deferred.append(relays[-1]() is not None)
+            return call.proceed()
+
+        second.intercept("alu_mark", handler, once=True)
+        asyncio.run(second.run(budget=1_000_000))
+    finally:
+        hold.release()
+        if enabled:
+            gc.enable()
+    assert collected == [True]
+    assert deferred == [True]
+    assert settles(lambda: relays[-1]() is None)
+    assert settles(lambda: _core.host_threads() == before + 1)
+
+
+def test_a_trace_of_a_machine_collected_on_another_host_thread_is_closed_as_its_thread_stops(
+    machines: Machines, tmp_path: pathlib.Path
+) -> None:
+    gc.collect()
+    before = _core.host_threads()
+    removals = _core.exit_removals_run()
+    enabled = gc.isenabled()
+    path = tmp_path / "t.pctr"
+    collected: list[bool] = []
+    first = machines()
+    handle = first._handle  # pyright: ignore[reportPrivateUsage]
+    recordings = [open_trace(handle, {TraceKind.BLOCK}, path, None, None)]
+    asyncio.run(first.run(budget=10_000))
+    size = recordings[0].size
+    hold = handle.hold_at_boundary()
+    del handle
+    gc.disable()
+    try:
+        Cycle(first)
+        first.start()
+        assert hold.wait_held(10), "machine never reached its boundary"
+        gone = weakref.ref(first)
+        del first
+        second = machines()
+
+        def handler(call: popcorn.Call) -> popcorn.Return:
+            gc.collect()
+            collected.append(gone() is None)
+            recordings.clear()
+            return call.proceed()
+
+        second.intercept("alu_mark", handler, once=True)
+        asyncio.run(second.run(budget=1_000_000))
+    finally:
+        hold.release()
+        if enabled:
+            gc.enable()
+    assert collected == [True]
+    assert settles(lambda: _core.host_threads() == before + 1)
+    assert settles(lambda: _core.exit_removals_run() > removals)
+    assert path.stat().st_size == size
+
+
+def test_a_dropped_boundary_hold_lets_its_machine_close(machines: Machines) -> None:
+    m = machines()
+    hold = m._handle.hold_at_boundary()  # pyright: ignore[reportPrivateUsage]
+    m.start()
+    assert hold.wait_held(10), "machine never reached its boundary"
+    del hold
+    gone = weakref.ref(m)
+    held = [m]
+    del m
+    done = threading.Event()
+
+    def drop() -> None:
+        held.clear()
+        gc.collect()
+        done.set()
+
+    threading.Thread(target=drop, daemon=True).start()
+    assert done.wait(30), "the machine never closed"
+    assert gone() is None
+
+
+def test_a_stale_boundary_hold_leaves_a_later_arm_held(machines: Machines) -> None:
+    m = machines()
+    handle = m._handle  # pyright: ignore[reportPrivateUsage]
+    stale = handle.hold_at_boundary()
+    hold = handle.hold_at_boundary()
+    del stale
+    m.start()
+    try:
+        assert hold.wait_held(10), "machine never reached its boundary"
+    finally:
+        hold.release()
+
+
+def test_a_re_arm_during_a_pass_leaves_the_pass_held_and_gets_its_own(
+    machines: Machines,
+) -> None:
+    m = machines()
+    handle = m._handle  # pyright: ignore[reportPrivateUsage]
+    first = handle.hold_at_boundary()
+    m.start()
+    second: _core.BoundaryHold | None = None
+    try:
+        assert first.wait_held(10), "machine never reached its boundary"
+        second = handle.hold_at_boundary()
+        assert first.wait_held(0), "the re-arm cleared the pass in progress"
+        first.release()
+        assert second.wait_held(10), "the re-arm never got a boundary of its own"
+        assert not first.wait_held(0)
+    finally:
+        first.release()
+        if second is not None:
+            second.release()
 
 
 def test_a_context_copy_runs_while_its_source_is_entered_on_the_loop(machines: Machines) -> None:
@@ -2101,6 +2271,54 @@ def test_a_child_forked_from_a_running_machine_exits_and_refuses_it(mode: str) -
         assert "was built before os.fork, in the parent process" in lines[0]
     if mode == "inherited":
         assert lines[0].startswith("request refused: this machine request was made before os.fork")
+
+
+@pytest.mark.usefixtures("u575")
+def test_a_child_forked_from_a_parent_with_a_run_system_drops_it() -> None:
+    child = run_child(
+        f"""
+        import asyncio
+        import gc
+        import os
+        import sys
+        import warnings
+
+        import popcorn
+        from popcorn import System, UartLink
+        from popcorn.units import ms, us
+
+        warnings.simplefilter("ignore", DeprecationWarning)
+        part = popcorn.load_description({str(cached_description("STM32U575QGIx"))!r})
+
+
+        def member(entry, name):
+            m = popcorn.Machine(part, image=popcorn.Image.elf({str(USART_LL)!r}), name=name)
+            m.reset()
+            asyncio.run(m.run(until="main", budget=1_000_000))
+            m.reg.pc = m.sym(entry)
+            return m
+
+
+        a = member("link_ping", "a")
+        b = member("link_echo", "b")
+        system = System(
+            {{"a": a, "b": b}}, [UartLink("a.USART1", "b.USART1", latency=us(20), baud=460_800)]
+        )
+        asyncio.run(system.run(for_=ms(1)))
+        pid = os.fork()
+        if pid == 0:
+            del system, a, b
+            gc.collect()
+            sys.exit(0)
+        _, status = os.waitpid(pid, 0)
+        system.close()
+        print("child", os.waitstatus_to_exitcode(status), flush=True)
+        """,
+        timeout=10,
+    )
+    assert child.returncode == 0, child.stderr
+    assert child.stderr == ""
+    assert child.stdout.strip().splitlines()[-1] == "child 0"
 
 
 def test_a_stamped_write_left_queued_at_script_end_is_not_reported() -> None:

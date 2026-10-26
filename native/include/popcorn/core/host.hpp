@@ -1002,6 +1002,12 @@ public:
   [[nodiscard]] auto orphan() const -> std::weak_ptr<void const> pre(abandoned());
 
   /**
+   * @brief The host thread's token, expired once the thread left the engine for good, and from
+   *        the start when no thread was started. Safe while no other thread starts the host.
+   */
+  [[nodiscard]] auto thread_token() const -> std::weak_ptr<void const>;
+
+  /**
    * @brief close(), waiting at most @p limit for the host thread to stop.
    * @return Whether the thread stopped and was joined. False leaves the host closed with its
    *         thread running: the caller abandons it or tries again.
@@ -1086,7 +1092,7 @@ private:
   std::shared_ptr<detail::host_core> core_;
   std::mutex                         join_mutex_;
   /** @brief The thread's token, written by ensure_thread() before the thread starts and read
-   * by orphan() once abandoned() is true, never written again. */
+   * by orphan() once abandoned() is true and by thread_token(), never written again. */
   std::weak_ptr<void const> running_;
   std::jthread              thread_;
 };

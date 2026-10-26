@@ -66,9 +66,9 @@ In order, one turn of the loop:
 3. Checks the bounds, in this order: the call return sentinel, `budget_left`,
    `exact_instructions`, `until_time`, the `until` addresses, `until_return`, and last
    `max_instructions`, which ends the slice without a stop.
-4. When the core is held, as a halted member of a system is, jumps the clock to the earliest of the
-   next event, the time bound and the instruction bound. With no event and no time bound it stops
-   with IDLE.
+4. When the core is held, as a halted member of a system is, or the slice runs with `execute`
+   off, jumps the clock to the earliest of the next event, the time bound and the instruction
+   bound. With no event and no time bound it stops with IDLE.
 5. Otherwise delivers a pending exception. A pending interrupt therefore wakes a core in WFI
    before any jump. If the core still sleeps after the delivery, it jumps the clock as in step 4.
 6. Otherwise takes the smallest of the instruction bounds and the next event as the deadline and

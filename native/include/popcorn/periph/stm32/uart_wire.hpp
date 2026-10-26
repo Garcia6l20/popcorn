@@ -80,7 +80,9 @@ struct wire_receiver
 /**
  * @brief One frame of a wire, as the tap shows it. The tap orders frames by their settle time:
  *        end for a peer frame, its sender stop-bit end, and end for an injected one, its receiver
- *        stop-bit end. So it is not ordered by arrival: a peer frame arrives L after its end.
+ *        stop-bit end. At an equal time an injected frame comes before a peer frame, and equal
+ *        frames go by number. So it is not ordered by arrival: a peer frame arrives L after its
+ *        end.
  */
 struct tap_frame
 {
@@ -334,15 +336,25 @@ struct wire_state
  *        off in opposite directions are about 6 percent apart and get no warning, the
  *        receiver's FE and NE still show it. Frames the sender
  *        transmits still reach the endpoint the wire replaced. Edits armed from any thread
- *        replace or drop frames by number. Injected frames go on the wire's injected lane. Two
- *        frames overlapping on the receiver's line are a system error at the later one's start,
- *        its sender start for a peer frame, its receiver start for an injected one. The tap gets
+ *        replace or drop frames by number. Injected frames go on the wire's injected lane. Two peer
+ *        frames or two injected frames overlapping on the receiver's line are a system error at
+ *        the later one's start, its sender start for a peer frame, its receiver start for an
+ *        injected one. An injected frame and a peer frame overlapping are an error of the
+ *        receiver at the later of the injected frame's start and the peer frame's sender start,
+ *        naming the injected frame. A sender's slice held at a barrier dispatches the events of
+ *        the barrier's last instruction cycle in the next window, so a frame can start before
+ *        the barrier opening the window it is posted in, by less than one sender instruction
+ *        period. An error found on such a frame is dated at that barrier. The tap gets
  *        each frame once its end, or its abort for a lost frame, the receiver end for an
- *        injected frame, lies at or before a drained barrier or the final stop, in order of
- *        that time, so its content at a barrier does not depend on how the run was cut into
- *        windows. A sender reset aborts the frame in flight. After a receiver reset at r, frames
- *        on the line at r or starting before r plus L never reach the receiver, the tap still
- *        shows them.
+ *        injected frame, lies at or before the barrier of the drain before the latest one, a
+ *        pause point release_through() names, the earliest member position show_drained() names
+ *        or the final stop, in order of that time, so its content at a pause does not depend on
+ *        how the run was cut into windows. A pause's drain shows nothing. A release collects the
+ *        posts still in both mailboxes as the final stop does, and a later drain that hands the
+ *        same frames does not show them again. A running injection starts at or after the last
+ *        pause point released. A sender reset aborts the frame in flight. After a receiver reset at
+ *        r, frames on the line at r or starting before r plus L never reach the receiver, the tap
+ *        still shows them.
  *
  *        A drain hands the port only posts starting before its barrier, the pause point at a
  *        pause. It carries the rest it would hand, aborts included, in order, and the next drain
@@ -481,6 +493,8 @@ public:
       core::sys_time const& next,
       core::time_map        receiver) -> std::optional<core::link_fault> override;
   [[nodiscard]] auto quiet() const -> bool override;
+  void               release_through(core::sys_time at) override;
+  void               show_drained(core::sys_time at) override;
   void               finish(core::sys_time at) override;
   void               save(std::vector<std::byte>& out) const override;
   void               load(std::span<std::byte const> in) override;
@@ -537,7 +551,9 @@ public:
    *        delivered at once. While the system runs, any thread: accepted when @p at is at or
    *        after the reach of the drains so far, then delivered by the drain whose reach covers
    *        it. Acceptance then depends on wall timing. No overlap check at the call: an overlap
-   *        is found at the drain, a system error.
+   *        is found at the drain, a system error at the later frame's start for two injected
+   *        frames, at the later of the injected frame's start and the peer frame's sender start
+   *        for a peer frame. Either error faults the receiver.
    * @param data Data bits, one frame each, not empty. Each frame gets the declared parity's bit
    *        in place of the MSB of its word.
    * @param at Start-bit edge of the first frame at the receiver, system time.
@@ -567,6 +583,7 @@ private:
       std::vector<tap_frame>&           from,
       core::sys_time                    through,
       std::span<detail::line_cut const> cuts);
+  void show_through(core::sys_time at);
   auto check_shape(detail::wire_post const& post) -> std::optional<core::link_fault>;
   auto arm(detail::armed_edit edit) -> bool;
   auto overlap(detail::line_span const& span) const -> std::optional<core::link_fault>;
@@ -598,6 +615,7 @@ private:
   std::shared_ptr<link_registration> registration_;
   mutable std::mutex                 edit_mutex_;
   mutable std::mutex                 inject_mutex_;
+  std::atomic<bool>                  tapping_{false};
   detail::wire_state                 state_;
 };
 }

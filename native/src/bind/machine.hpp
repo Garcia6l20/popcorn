@@ -21,6 +21,7 @@
 #include <reflex/py.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -221,6 +222,29 @@ struct host_abandon
   void operator()() const;
 };
 
+/** @brief Where a machine's thread blocks at its next slice boundary once armed, for tests. */
+struct boundary_gate
+{
+  /** @brief Guards held, the generations and the release. */
+  std::mutex mutex{};
+  /** @brief Signalled when held or released_generation changes. */
+  std::condition_variable changed{};
+  /** @brief Whether the next boundary blocks. */
+  std::atomic<bool> armed{false};
+  /** @brief Whether the thread blocks in the gate. */
+  bool held = false;
+  /** @brief The arm number of the pass the thread blocks in, valid while held. */
+  std::uint64_t held_generation = 0;
+  /** @brief The highest arm number released, a pass of an arm at or below it goes on. */
+  std::uint64_t released_generation = 0;
+  /** @brief Counts the arms, so only the hold of the latest arm disarms the gate. */
+  std::uint64_t generation = 0;
+
+  /** @brief When armed, disarms the gate and blocks the calling thread until the arm it took is
+   * released. Takes no GIL and no lock but the gate's. */
+  void pass();
+};
+
 /** @brief Takes the mutex of @p ptys, releasing the GIL while it blocks when the thread holds it.
  */
 [[nodiscard]] auto lock_ptys(pty_bridges& ptys) -> std::unique_lock<std::mutex>;
@@ -228,6 +252,45 @@ struct host_abandon
 /** @brief The StopInfo of @p stopped, owning its text. */
 [[nodiscard]] auto stop_info(stop const& stopped) -> stop_record;
 }
+
+/** @brief The test side of a machine's boundary_gate, armed by machine_handle::hold_at_boundary().
+ */
+class[[= py::rename{"BoundaryHold"}]] boundary_hold
+{
+public:
+  /** @brief The hold of @p gate, armed as its arm number @p generation. */
+  [[= py::skip]] boundary_hold(
+      std::shared_ptr<detail::boundary_gate> gate,
+      std::uint64_t                          generation);
+  /** @brief Not copyable, the destructor releases the gate. */
+  boundary_hold(boundary_hold const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(boundary_hold const&) -> boundary_hold& = delete;
+  /** @brief Takes the gate of @p other. */
+  boundary_hold(boundary_hold&& other) noexcept = default;
+  /** @brief Not move-assignable, the assigned hold would drop its gate unreleased. */
+  auto operator=(boundary_hold&& other) -> boundary_hold& = delete;
+  /** @brief Releases the gate, so a hold dropped unreleased never blocks the thread. */
+  ~boundary_hold();
+
+  /**
+   * @brief Waits, the GIL released, until the machine's thread blocks in the pass of this
+   *        hold's arm.
+   * @param seconds Longest wait.
+   * @return Whether the thread blocks in the pass of this hold's arm.
+   */
+  [[= py::doc{
+      "Wait until the machine thread blocks at the boundary this hold armed, return whether it "
+      "does."}]] auto wait_held(double seconds) -> bool;
+
+  /** @brief Lets the machine's thread go on from the pass of this hold's arm or of an earlier
+   * one. Disarms the gate unless a later hold armed it again. */
+  [[= py::doc{"Let the machine thread go on."}]] void release();
+
+private:
+  std::shared_ptr<detail::boundary_gate> gate_;
+  std::uint64_t                          generation_;
+};
 
 /**
  * @brief A host pty bridged to a UART or a CDC function, pumped by the machine's thread. Holds
@@ -288,12 +351,12 @@ public:
    *        released, then destroys the machine. A free run's end never collected by halt() goes
    *        to sys.unraisablehook. Runs with the GIL: nanobind destroys the handle in instance
    *        deallocation, and no native code owns one. On a host thread or inside a parked
-   *        section it takes the host's orphan path. While the
-   *        interpreter finalizes with the host thread alive it leaves both alive: the thread
-   *        needs the GIL to exit, and late command failures still queued are not reported. An
-   *        abandoned host is left to its thread, which frees the machine when the blocked handler
-   *        returns. It never checks signals: on a live host whose handler blocks it waits for
-   *        the handler.
+   *        section it takes the host's orphan path, and every later hook removal runs on the
+   *        host thread's exit or after it. While the interpreter finalizes with the host thread
+   *        alive it leaves both alive: the thread needs the GIL to exit, and late command
+   *        failures still queued are not reported. An abandoned host is left to its thread,
+   *        which frees the machine when the blocked handler returns. It never checks signals: on
+   *        a live host whose handler blocks it waits for the handler.
    */
   ~machine_handle();
 
@@ -1509,6 +1572,15 @@ public:
   [[= py::doc{"Times the machine thread took the GIL, for tests."}]] [[nodiscard]] auto
       gil_entries() const noexcept -> std::uint64_t;
 
+  /**
+   * @brief Arms the gate the machine's thread blocks in at its next slice boundary, outside any
+   *        slice, with no host mutex and no GIL held, until the returned hold or a later one
+   *        releases it. For tests that pin the
+   *        thread there.
+   */
+  [[= py::doc{"Block the machine thread at its next slice boundary until released, for tests."}]]
+      [[nodiscard]] auto hold_at_boundary() -> boundary_hold;
+
   /** @brief Identity of the machine, never 0. */
   [[= py::doc{"Identity of the machine, never 0."}]] [[nodiscard]] auto id() const noexcept
       -> std::uint64_t;
@@ -1626,6 +1698,7 @@ private:
   std::shared_ptr<detail::delivered_end>      delivered_;
   std::shared_ptr<std::atomic<bool>>          collected_;
   std::shared_ptr<std::atomic<std::uint64_t>> gil_entries_;
+  std::shared_ptr<detail::boundary_gate>      gate_ = std::make_shared<detail::boundary_gate>();
   std::shared_ptr<core::machine>              engine_owner_;
   std::optional<hook>                         log_hook_;
   std::map<std::string, detail::usb_hubs>     hubs_;

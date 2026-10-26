@@ -58,8 +58,23 @@ flowchart TD
 `popcorn_build/sdk.py` hashes the public headers under `native/include/popcorn` and every reflex
 header they reach. The digest is the `;sdk` field of the plugin ABI tag, so a plugin built
 against other headers is refused even when the version string is unchanged. The header list is
-read when pcons configures, so a new header joins the digest at the next configure. Editing any
-public header, a comment included, changes the digest and makes dev plugins rebuild.
+read when pcons configures, so a new header joins the digest at the next configure.
+
+The digest covers each header's text after the compiler strips the comments. A directive line,
+with its backslash continuations, keeps its ending newline and every other run of ASCII
+whitespace, newlines included, is one space. The compiler runs
+`g++ -fpreprocessed -dD -E -P -x c++ <header>`, which keeps directives and expands no macro or
+include, so the text does not depend on include paths. The pcons build passes its C++ compiler to
+`popcorn_build.sdk`, tests and direct callers use `g++` from `PATH`. A missing compiler, a failing
+run or non-UTF-8 output stops the build with an error. Comments, doxygen blocks, indentation, line
+breaks and blank lines do not reach the digest, so a documentation or clang-format edit keeps it
+and keeps built plugins valid. Inline and template bodies, private members, default arguments,
+macros, string literals and the spelling of operators and spaces count, so `a+b` and `a + b`
+differ, `#define F(x)` and `#define F (x)` differ, and `#define A 1` followed by a line `B`
+differs from `#define A 1 B`. Editing any of them changes the digest and makes dev plugins
+rebuild. The compiler consumes `#pragma once`, `push_macro`, `pop_macro`, `GCC poison`,
+`GCC system_header` and `GCC warning` under `-fpreprocessed`, so these pragmas are not in the
+digest.
 
 ## Dependencies
 

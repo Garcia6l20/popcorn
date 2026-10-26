@@ -808,7 +808,7 @@ TEST_CASE("an aborted frame is lost on the wire and in the tap, the next one arr
   }
 }
 
-TEST_CASE("the tap at each barrier holds exactly the frames ended by it, at any window")
+TEST_CASE("the tap after each drain holds exactly the frames ended by the barrier before it")
 {
   auto full = one_way("link_tx", "link_rx", latency_20);
   full.oracle(script_end_ps);
@@ -823,8 +823,9 @@ TEST_CASE("the tap at each barrier holds exactly the frames ended by it, at any 
              auto taken = r.wires[0]->tap().take();
              seen.insert(seen.end(), taken.begin(), taken.end());
              auto const barrier = static_cast<std::int64_t>((k + 1) * window);
+             auto const before  = static_cast<std::int64_t>(k * window);
              auto const ended   = std::ranges::count_if(
-                 all, [&](stm32::tap_frame const& frame) { return frame.end.ps <= barrier; });
+                 all, [&](stm32::tap_frame const& frame) { return frame.end.ps <= before; });
              CHECK(seen.size() == static_cast<std::size_t>(ended));
              in_flight_checks += std::ranges::any_of(all, [&](stm32::tap_frame const& frame) {
                return frame.start.ps < barrier and barrier < frame.end.ps;
@@ -1050,6 +1051,137 @@ auto saved_state(stm32::uart_wire const& wire) -> stm32::detail::wire_state
 }
 }
 
+namespace
+{
+enum class shown_by : std::uint8_t
+{
+  release,
+  finish,
+};
+
+struct mid_run
+{
+  std::vector<stm32::tap_frame> shown{};
+  std::vector<stm32::tap_frame> taken{};
+  std::int64_t                  point{};
+  bool                          both_mailboxes{};
+  bool                          abort_mailed{};
+};
+
+auto shown_mid_run(
+    std::string_view sender,
+    std::uint64_t    latency,
+    std::uint64_t    window,
+    std::uint64_t    k,
+    shown_by         how) -> mid_run
+{
+  auto           r = one_way(sender, "link_rx", latency);
+  run_plan const plan{.window = window};
+  auto const     windows = (script_end_ps + window - 1) / window;
+  auto const barrier = [&](std::uint64_t j) { return std::min((j + 1) * window, script_end_ps); };
+  REQUIRE(k + 2 < windows);
+  for(std::uint64_t j = 0; j <= k; ++j)
+  {
+    r.run_window(0, j, barrier(j), plan, {});
+    r.run_window(1, j, barrier(j), plan, {});
+    if(j < k)
+    {
+      r.drain(1, j, barrier(j), barrier(j + 1));
+    }
+  }
+  r.run_window(0, k + 1, barrier(k + 1), plan, {});
+  mid_run    out{.point = static_cast<std::int64_t>(barrier(k + 1))};
+  auto const state   = saved_state(*r.wires[0]);
+  out.both_mailboxes = not state.mail_even.empty() and not state.mail_odd.empty();
+  out.abort_mailed   = std::ranges::any_of(state.mail_even, &stm32::detail::wire_post::abort)
+                    or std::ranges::any_of(state.mail_odd, &stm32::detail::wire_post::abort);
+  if(how == shown_by::release)
+  {
+    r.wires[0]->release_through(core::sys_time{out.point});
+  }
+  else
+  {
+    r.wires[0]->finish(core::sys_time{out.point});
+  }
+  out.shown = r.wires[0]->tap().take();
+  r.drain(1, k, barrier(k), barrier(k + 1));
+  for(auto j = k + 1; j < windows; ++j)
+  {
+    if(j > k + 1)
+    {
+      r.run_window(0, j, barrier(j), plan, {});
+    }
+    r.run_window(1, j, barrier(j), plan, {});
+    if(j + 1 < windows)
+    {
+      r.drain(1, j, barrier(j), barrier(j + 1));
+    }
+  }
+  r.finish(script_end_ps);
+  out.taken = out.shown;
+  out.taken.insert(out.taken.end(), r.taps[0].begin(), r.taps[0].end());
+  return out;
+}
+
+auto ended_by(std::vector<stm32::tap_frame> const& all, std::int64_t point)
+    -> std::vector<stm32::tap_frame>
+{
+  return all
+       | std::views::filter(
+             [point](stm32::tap_frame const& frame) { return frame.end.ps <= point; })
+       | std::ranges::to<std::vector>();
+}
+}
+
+TEST_CASE("a release through a pause point taps the frames of both mailboxes ended by it, once")
+{
+  constexpr auto latency = 2 * latency_20;
+  auto           full    = one_way("link_tx", "link_rx", latency);
+  full.oracle(script_end_ps);
+  auto const& all = full.taps[0];
+  for(auto const k : {std::uint64_t{20}, std::uint64_t{27}})
+  {
+    CAPTURE(k);
+    auto const released = shown_mid_run("link_tx", latency, latency, k, shown_by::release);
+    CHECK(released.both_mailboxes);
+    CHECK(released.shown == ended_by(all, released.point));
+    auto const window_start = released.point - static_cast<std::int64_t>(2 * latency);
+    CHECK(std::ranges::any_of(released.shown, [&](stm32::tap_frame const& frame) {
+      return frame.start.ps < window_start + static_cast<std::int64_t>(latency)
+         and frame.end.ps > window_start + static_cast<std::int64_t>(latency);
+    }));
+    CHECK(std::ranges::any_of(released.shown, [&](stm32::tap_frame const& frame) {
+      return frame.start.ps >= window_start + static_cast<std::int64_t>(latency);
+    }));
+    CHECK(released.taken == all);
+    auto const finished = shown_mid_run("link_tx", latency, latency, k, shown_by::finish);
+    CHECK(finished.shown == released.shown);
+    CHECK(finished.taken == released.taken);
+  }
+}
+
+TEST_CASE("a release through a pause point past an abort taps the frame lost, once")
+{
+  auto reference = one_way("link_abort", "link_rx", latency_20);
+  reference.oracle(script_end_ps);
+  auto const& all = reference.taps[0];
+  REQUIRE(all.size() == 3);
+  REQUIRE(all[1].lost);
+  auto const start  = static_cast<std::uint64_t>(all[1].start.ps);
+  auto const abort  = static_cast<std::uint64_t>(all[1].end.ps);
+  auto const window = (abort - start) * 9 / 10;
+  auto const k      = start / window;
+  REQUIRE((k + 1) * window <= abort);
+  REQUIRE(abort < (k + 2) * window);
+  auto const released = shown_mid_run("link_abort", latency_20, window, k, shown_by::release);
+  CHECK(released.both_mailboxes);
+  CHECK(released.abort_mailed);
+  REQUIRE(released.point >= all[1].end.ps);
+  CHECK(released.shown == ended_by(all, released.point));
+  CHECK(std::ranges::count_if(released.shown, &stm32::tap_frame::lost) == 1);
+  CHECK(released.taken == all);
+}
+
 TEST_CASE("an edit armed before its frame starts replaces frames by number at any window")
 {
   auto plain = one_way("link_tx", "link_rx", latency_20);
@@ -1262,6 +1394,72 @@ auto earliest_fault(rig const& r) -> std::optional<fault_seen>
 }
 }
 
+TEST_CASE("a frame aborted at a release point behind an injected frame ending there is tapped")
+{
+  constexpr std::uint64_t latency = 5 * us_ps;
+  auto                    full    = one_way("link_tx", "link_rx", latency);
+  full.oracle(script_end_ps);
+  auto const& all      = full.taps[0];
+  auto const  frame_ps = static_cast<std::int64_t>(declared().frame_ps());
+  auto const  widest   = std::ranges::max(
+      std::views::iota(std::size_t{0}, all.size() - 1), {},
+      [&](std::size_t index) { return all[index + 1].start.ps - all[index].end.ps; });
+  auto const& cut   = all[widest + 1];
+  auto const  point = cut.start.ps + 2 * static_cast<std::int64_t>(us_ps);
+  REQUIRE(point - frame_ps - static_cast<std::int64_t>(latency) >= all[widest].end.ps);
+  REQUIRE(point < cut.end.ps);
+  auto const                       start = point - frame_ps;
+  auto                             r     = one_way("link_tx", "link_rx", latency);
+  auto const                       late  = all.back().end.ps + 5 * static_cast<std::int64_t>(us_ps);
+  std::vector<std::uint16_t> const burst(cut.index + 1, 0x55);
+  REQUIRE(
+      late + static_cast<std::int64_t>(burst.size()) * frame_ps
+      < static_cast<std::int64_t>(script_end_ps));
+  REQUIRE(r.wires[0]->inject(burst, core::sys_time{late}, std::nullopt).has_value());
+  run_plan const plan{.window = latency};
+  auto const     barrier = [](std::uint64_t k) { return (k + 1) * latency; };
+  auto const     windows = script_end_ps / latency;
+  auto const     j       = static_cast<std::uint64_t>(start) / latency - 1;
+  auto const     m       = static_cast<std::uint64_t>(point) / latency;
+  for(std::uint64_t k = 0; k <= j; ++k)
+  {
+    r.run_window(0, k, barrier(k), plan, {});
+    r.run_window(1, k, barrier(k), plan, {});
+    r.drain(1, k, barrier(k), barrier(k + 1));
+  }
+  for(auto k = j + 1; k <= m; ++k)
+  {
+    r.run_window(0, k, barrier(k), plan, {});
+  }
+  REQUIRE(injected_byte(*r.wires[0], 0x77, start, receiver_now(r)).has_value());
+  r.wires[0]->release_through(core::sys_time{point});
+  r.wires[0]->sender_reset(core::sys_time{point});
+  for(auto k = j + 1; k + 1 < windows; ++k)
+  {
+    if(k > m)
+    {
+      r.run_window(0, k, barrier(k), plan, {});
+    }
+    r.run_window(1, k, barrier(k), plan, {});
+    r.drain(1, k, barrier(k), barrier(k + 1));
+  }
+  r.finish(script_end_ps);
+  auto const tapped = r.wires[0]->tap().take();
+  auto       seen   = r.taps[0];
+  seen.insert(seen.end(), tapped.begin(), tapped.end());
+  auto const injected = std::ranges::find_if(seen, [&](stm32::tap_frame const& frame) {
+    return frame.injected and frame.end.ps == point;
+  });
+  REQUIRE(injected != seen.end());
+  CHECK(injected->index > cut.index);
+  auto const lost = std::ranges::find_if(seen, [&](stm32::tap_frame const& frame) {
+    return frame.index == cut.index and not frame.injected;
+  });
+  REQUIRE(lost != seen.end());
+  CHECK(lost->lost);
+  CHECK(lost->end.ps == point);
+}
+
 TEST_CASE("an injection while stopped arrives at its time and cancels the IDLE due after it")
 {
   auto full = one_way("link_tx", "link_rx", latency_20);
@@ -1386,15 +1584,16 @@ TEST_CASE("an injection while running is refused before the drains' reach, else 
   CHECK(seen == bytes);
 }
 
-TEST_CASE("an injection overlapping later peer frames is a system error at the earliest start")
+TEST_CASE("an injection overlapping a peer frame starting after it is a system error at its start")
 {
   auto full = one_way("link_tx", "link_rx", latency_20);
   full.oracle(script_end_ps);
   auto const& all      = full.taps[0];
   auto const  frame_ps = all[10].end.ps - all[10].start.ps;
   auto const  at       = all[10].start.ps + static_cast<std::int64_t>(latency_20) - frame_ps / 2;
-  auto const  expected = fault_seen{.at = all[10].start.ps, .member = 0};
-  auto const  arm      = [&](rig& r) {
+  REQUIRE(at > all[10].start.ps);
+  auto const expected = fault_seen{.at = at, .member = 1};
+  auto const arm      = [&](rig& r) {
     REQUIRE(injected_byte(*r.wires[0], 0x5a, at, std::nullopt).has_value());
   };
   auto reference = one_way("link_tx", "link_rx", latency_20);
@@ -3728,6 +3927,41 @@ TEST_CASE("a break cut hands its hold and release once, quiet only once each is 
                 {'l', 10 * q + l}
         });
       }
+    }
+  }
+}
+
+TEST_CASE(
+    "a stopped injection below the drained reach meets a recorded receiver reset as a queued one")
+{
+  constexpr std::int64_t us = static_cast<std::int64_t>(us_ps);
+  constexpr std::int64_t l  = 50 * us;
+  constexpr std::int64_t r  = 40 * us;
+  constexpr std::int64_t c  = 55 * us;
+  constexpr std::int64_t at = 58 * us;
+  for(auto const q : {l, l / 2})
+  {
+    for(auto const drained_first : {false, true})
+    {
+      CAPTURE(q);
+      CAPTURE(drained_first);
+      std::uint64_t drained = 0;
+      while(drained_first and static_cast<std::int64_t>(drained + 1) * q <= at)
+      {
+        ++drained;
+      }
+      stub_link link{l, declared()};
+      run_windows(link, 0, drained, q);
+      link.window(drained, q, {});
+      link.forth->receiver_reset(core::sys_time{r});
+      REQUIRE(
+          injected_byte(
+              *link.forth, 0x5a, at, stm32::stopped_receiver{.now = core::sys_time{c}, .map = {}})
+              .has_value());
+      link.drain(drained, q);
+      run_windows(link, drained + 1, drained + 8, q);
+      CHECK(link.forth_port.received.empty());
+      CHECK(link.forth->quiet());
     }
   }
 }

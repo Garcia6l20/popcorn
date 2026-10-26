@@ -1149,7 +1149,12 @@ auto system_handle::restore(std::size_t index, bool stopped) -> cut_outcome
 
 auto system_handle::link_owner(std::size_t index) const -> std::size_t
 {
-  return link(index).owner.load(std::memory_order_relaxed);
+  auto const& entry = link(index);
+  if(closed_)
+  {
+    throw core::machine_closed("the linked system was closed");
+  }
+  return entry.owner.load(std::memory_order_relaxed);
 }
 
 auto system_handle::max_waiting_cuts() const -> std::size_t

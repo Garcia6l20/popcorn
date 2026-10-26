@@ -139,7 +139,17 @@ public:
    * @return The earliest system error the drain found, if any. Its time may lie before
    *         @p barrier: a fault on a peer frame is dated at the frame's sender start, up to L
    *         before the barrier whose drain reports it. Order errors by link_fault::at, not by
-   *         the drain that found them.
+   *         the drain that found them. A fault must be dated at or after the barrier of this
+   *         link's previous drain, a rule every link keeps: every drain of a system runs at the
+   *         same barriers, so a drain shows an observer no frame ended after that previous
+   *         barrier, and an error pause then shows no frame past its point on any link. An
+   *         observer reading while the system runs can then lag the latest frames by up to two
+   *         windows behind the receiver's time. A sender's slice held at a barrier dispatches
+   *         the events of the barrier's last instruction cycle in the next window, so a post
+   *         can start before the previous barrier by less than one sender instruction period. A
+   *         fault found on such a post is dated at that barrier. A drain with @p next equal to
+   *         @p barrier is a pause's drain and shows nothing: release_through() or show_drained()
+   *         shows its frames once the pause's kind is known, so a read at a pause is complete.
    */
   virtual auto
       drain(std::uint64_t window, sys_time const& barrier, sys_time const& next, time_map receiver)
@@ -151,6 +161,39 @@ public:
    *        with every sender stopped at a barrier.
    */
   [[nodiscard]] virtual auto quiet() const -> bool = 0;
+
+  /**
+   * @brief Shows an observer of the link every frame ended by the pause point @p at, whatever
+   *        barrier the drains handed frames at. Called once per pause that delivered a member
+   *        stop, paused IDLE or paused on an error, after every member stopped, with no drain()
+   *        or finish() of the link running: on the host thread that finished the pause last, or
+   *        on the caller of system::resume() when every member finished before it returned. At
+   *        a member stop and at IDLE every member then stands at or past @p at, so no later post
+   *        or injection ends before @p at. An error pause stops the system, so no member runs
+   *        after it. The system calls it at those three kinds only. After a TIME or requested
+   *        pause an observer holds the frames ended by the earliest member's position. A frame
+   *        a later drain hands is shown once. Runs where no exception may leave, an allocation
+   *        failure terminates. A link with no observer keeps the default, which does nothing.
+   * @param at The pause point, system time.
+   */
+  virtual void release_through([[maybe_unused]] sys_time at)
+  {}
+
+  /**
+   * @brief Shows an observer of the link the frames the drains handed that ended by @p at, the
+   *        earliest member's position at a TIME or requested pause, or at an attempt that
+   *        puts a free run to sleep. Called once per such pause, after every member stopped,
+   *        with no drain() or finish() of the link running: on the host thread that finished the
+   *        pause last, or on the caller of system::resume() when every member finished before it
+   *        returned. Called at each sleep, on the receiver's host thread after its drain at
+   *        that attempt and before it sleeps, with no other drain(), release_through(),
+   *        show_drained() or finish() of the link running. Runs where no exception may leave,
+   *        an allocation failure terminates. A link with no observer keeps the default, which
+   *        does nothing.
+   * @param at The earliest member position at the pause or the sleep attempt, system time.
+   */
+  virtual void show_drained([[maybe_unused]] sys_time at)
+  {}
 
   /**
    * @brief Settles what an observer sees at the system's final stop @p at, called on the

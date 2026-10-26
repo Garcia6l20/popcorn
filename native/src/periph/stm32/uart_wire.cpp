@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <format>
 #include <limits>
 #include <stdexcept>
@@ -54,6 +55,29 @@ public:
 
 private:
   link_registration& registration_;
+};
+
+class sole_tapper
+{
+public:
+  explicit sole_tapper(std::atomic<bool>& tapping) noexcept : tapping_{tapping}
+  {
+    auto const taken = tapping_.exchange(true, std::memory_order_relaxed);
+    contract_assert(not taken);
+  }
+
+  sole_tapper(sole_tapper const&)                    = delete;
+  auto operator=(sole_tapper const&) -> sole_tapper& = delete;
+  sole_tapper(sole_tapper&&)                         = delete;
+  auto operator=(sole_tapper&&) -> sole_tapper&      = delete;
+
+  ~sole_tapper()
+  {
+    tapping_.store(false, std::memory_order_relaxed);
+  }
+
+private:
+  std::atomic<bool>& tapping_;
 };
 
 auto overlaps(detail::line_cut const& cut, core::sys_time start, core::sys_time end) -> bool
@@ -359,7 +383,7 @@ void uart_wire::emit(
     std::span<detail::line_cut const> cuts)
 {
   auto const key = [](tap_frame const& frame) {
-    return std::tuple{frame.end.ps, frame.injected, frame.index};
+    return std::tuple{frame.end.ps, not frame.injected, frame.index};
   };
   auto const ready = std::ranges::stable_partition(
       from, [&](tap_frame const& frame) { return frame.end <= through; });
@@ -388,7 +412,8 @@ void uart_wire::emit(
       }
     }
   }
-  auto const cursor = std::tuple{state_.tapped_end.ps, state_.tapped_injected, state_.tapped_index};
+  auto const cursor =
+      std::tuple{state_.tapped_end.ps, not state_.tapped_injected, state_.tapped_index};
   for(auto const& frame : settled)
   {
     if(state_.tapped_any and key(frame) <= cursor)
@@ -426,7 +451,14 @@ auto uart_wire::overlap(detail::line_span const& span) const -> std::optional<co
     {
       auto const later_is_new =
           span.start > other.start or (span.start == other.start and span.injected);
-      found = earliest(found, fault_of(later_is_new ? span : other));
+      auto const* dated = later_is_new ? &span : &other;
+      if(span.injected != other.injected)
+      {
+        auto const& injected = span.injected ? span : other;
+        auto const& peer     = span.injected ? other : span;
+        dated                = peer.post > injected.start ? &peer : &injected;
+      }
+      found = earliest(found, fault_of(*dated));
     }
   }
   return found;
@@ -523,6 +555,8 @@ auto uart_wire::drain(
     core::sys_time const& next,
     core::time_map        receiver) -> std::optional<core::link_fault>
 {
+  sole_tapper const                     sole{tapping_};
+  auto const                            shown = state_.last_barrier;
   std::vector<detail::line_cut>         cuts;
   std::vector<detail::queued_injection> due;
   std::vector<detail::wire_post>        held_over;
@@ -738,7 +772,15 @@ auto uart_wire::drain(
       into_.port->release_line(receiver.to_local(shifted(cut.end, latency_)), lanes_.peer);
     }
   }
-  emit(state_.untapped, barrier, cuts);
+  if(fault)
+  {
+    fault->at = std::max(fault->at, shown);
+  }
+  contract_assert(not fault or fault->at >= shown);
+  if(barrier < next)
+  {
+    emit(state_.untapped, shown, cuts);
+  }
   {
     registration_hold const registered{*registration_};
     core::link_guard const  held{inject_mutex_};
@@ -803,6 +845,7 @@ auto uart_wire::inject(
     }
     return {};
   }
+  sole_tapper const sole{tapping_};
   if(at < stopped->now)
   {
     return std::unexpected{
@@ -867,18 +910,41 @@ auto uart_wire::inject(
         continue;
       }
     }
-    deliver_injection(frame, stopped->map, false, cuts);
+    deliver_injection(
+        frame, stopped->map, reset_drops({.start = frame.start, .end = frame.end}), cuts);
     truncate(state_.delivered.back(), cuts, state_.last_barrier, stopped->map);
   }
   return {};
 }
 
-void uart_wire::finish(core::sys_time at)
+void uart_wire::show_through(core::sys_time at)
 {
   auto pending = state_.untapped;
   collect(mailbox(state_.window + 1), pending);
   collect(mailbox(state_.window), pending);
   emit(pending, at, cuts_before(at));
+}
+
+void uart_wire::release_through(core::sys_time at)
+{
+  sole_tapper const sole{tapping_};
+  {
+    core::link_guard const held{inject_mutex_};
+    state_.drained_through = std::max(state_.drained_through, at);
+  }
+  show_through(at);
+}
+
+void uart_wire::show_drained(core::sys_time at)
+{
+  sole_tapper const sole{tapping_};
+  emit(state_.untapped, at, cuts_before(at));
+}
+
+void uart_wire::finish(core::sys_time at)
+{
+  sole_tapper const sole{tapping_};
+  show_through(at);
 }
 
 void uart_wire::save(std::vector<std::byte>& out) const
@@ -899,6 +965,7 @@ void uart_wire::save(std::vector<std::byte>& out) const
 
 void uart_wire::load(std::span<std::byte const> in)
 {
+  sole_tapper const  sole{tapping_};
   detail::wire_state loaded;
   try
   {

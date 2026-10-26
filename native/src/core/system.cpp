@@ -65,6 +65,7 @@ enum class phase : std::uint8_t
   arrive_b,
   after_b,
   idle_to,
+  park,
   sleeping,
 };
 
@@ -184,6 +185,7 @@ struct system::impl
       std::move_only_function<void(std::size_t)> sleep_hook);
 
   [[nodiscard]] auto deliverable(entry const& head) const noexcept -> bool;
+  [[nodiscard]] auto parks(slot const& one) const noexcept -> bool;
   [[nodiscard]] auto best_entry() const -> std::optional<entry>;
   [[nodiscard]] auto idle_entry() const -> std::optional<entry>;
   void               merge_found() noexcept;
@@ -314,6 +316,10 @@ public:
           }
           if(sys_.chosen.sleep)
           {
+            for(auto* link : one.inbound)
+            {
+              link->show_drained(sys_.chosen.confirm);
+            }
             phase_    = phase::sleeping;
             sleeping_ = true;
             if(sys_.before_sleep)
@@ -332,7 +338,8 @@ public:
             phase_            = phase::run;
             continue;
           }
-          phase_ = sys_.chosen.idle ? phase::idle_to : phase::begin;
+          phase_ = sys_.chosen.idle ? phase::idle_to : sys_.parks(one) ? phase::park : phase::begin;
+          moved_from_.reset();
           if(phase_ == phase::begin)
           {
             return std::nullopt;
@@ -352,12 +359,20 @@ public:
           phase_            = phase::run;
           continue;
         case phase::idle_to:
-          if(position(target) < sys_.chosen.target)
+          if(moves_on(target, sys_.chosen.target))
           {
             window_ = sys_.window;
-            return request_to(sys_.chosen.target, false, false);
+            return request_to(sys_.chosen.target, false, false, true);
           }
           settle_idle(target);
+          phase_ = phase::begin;
+          return std::nullopt;
+        case phase::park:
+          if(moves_on(target, sys_.chosen.head->at))
+          {
+            window_ = sys_.window;
+            return request_to(sys_.chosen.head->at, false, true, true);
+          }
           phase_ = phase::begin;
           return std::nullopt;
       }
@@ -445,12 +460,38 @@ public:
   }
 
 private:
+  [[nodiscard]] auto moves_on(machine const& target, sys_time to) -> bool
+  {
+    auto const at      = position(target);
+    auto const stalled = sys_.slots[index_].failed and moved_from_ == at;
+    moved_from_        = at;
+    return at < to and not stalled;
+  }
+
+  [[nodiscard]] auto found_at(machine const& target) const noexcept -> sys_time
+  {
+    auto const at = position(target);
+    if(phase_ == phase::park and at < sys_.chosen.head->at)
+    {
+      return sys_.chosen.head->at;
+    }
+    if(phase_ == phase::idle_to and at < sys_.chosen.target)
+    {
+      return sys_.chosen.target;
+    }
+    return at;
+  }
+
   void fail(machine const& target, std::exception_ptr error) noexcept
   {
-    auto& one  = sys_.slots[index_];
+    auto& one = sys_.slots[index_];
+    if(one.failed and (phase_ == phase::park or phase_ == phase::idle_to))
+    {
+      return;
+    }
     one.failed = true;
     one.rep.found.push_back(
-        {.at = position(target), .member = index_, .kind = entry_kind::error, .error = error});
+        {.at = found_at(target), .member = index_, .kind = entry_kind::error, .error = error});
   }
 
   void resolve(machine& target, popcorn::stop stopped)
@@ -458,7 +499,7 @@ private:
     auto& one    = sys_.slots[index_];
     one.resolved = true;
     one.rep.found.push_back(
-        {.at      = position(target),
+        {.at      = found_at(target),
          .member  = index_,
          .kind    = entry_kind::stopped,
          .stopped = std::move(stopped)});
@@ -555,7 +596,8 @@ private:
     }
   }
 
-  auto request_to(sys_time bound, bool quiescent, bool hold) -> slice_request
+  auto request_to(sys_time bound, bool quiescent, bool hold, bool moves_asleep = false)
+      -> slice_request
   {
     auto& one = sys_.slots[index_];
     enter_windows();
@@ -570,18 +612,19 @@ private:
         .internal_stop         = true,
         .stop_quiescent        = quiescent,
         .stop_when_events_only = true,
+        .execute               = not moves_asleep,
     };
-    if(one.running())
+    if(not moves_asleep and one.running())
     {
-      auto const& goal           = one.goal->goal;
-      request.until              = goal.until;
-      request.until_also         = goal.until_also;
-      request.until_return       = goal.until_return;
-      request.arrive_at          = goal.arrive_at;
-      request.budget_left        = left(goal.budget, one.goal->executed);
-      request.exact_instructions = left(goal.exact, one.goal->executed);
+      auto const& wanted         = one.goal->goal;
+      request.until              = wanted.until;
+      request.until_also         = wanted.until_also;
+      request.until_return       = wanted.until_return;
+      request.arrive_at          = wanted.arrive_at;
+      request.budget_left        = left(wanted.budget, one.goal->executed);
+      request.exact_instructions = left(wanted.exact, one.goal->executed);
       request.leave_until        = one.goal->executed == 0;
-      if(goal.stop_when)
+      if(wanted.stop_when)
       {
         request.stop_when = std::ref(one.goal->goal.stop_when);
       }
@@ -738,14 +781,15 @@ private:
     }
   }
 
-  system::impl&     sys_;
-  std::size_t       index_;
-  phase             phase_{phase::begin};
-  bool              held_last_{};
-  bool              sleeping_{};
-  std::uint64_t     window_{};
-  vtime             until_last_{};
-  std::atomic<bool> aborted_{false};
+  system::impl&           sys_;
+  std::size_t             index_;
+  phase                   phase_{phase::begin};
+  bool                    held_last_{};
+  bool                    sleeping_{};
+  std::uint64_t           window_{};
+  vtime                   until_last_{};
+  std::optional<sys_time> moved_from_{};
+  std::atomic<bool>       aborted_{false};
 
   std::chrono::steady_clock::time_point left_{};
 };
@@ -866,6 +910,16 @@ auto system::impl::deliverable(entry const& head) const noexcept -> bool
   return std::ranges::all_of(slots, [&head](slot const& one) {
     return not one.running() or one.rep.quiescent or one.rep.position >= head.at;
   });
+}
+
+auto system::impl::parks(slot const& one) const noexcept -> bool
+{
+  return chosen.pause
+     and chosen.head
+     and chosen.head->kind == entry_kind::stopped
+     and one.running()
+     and one.rep.quiescent
+     and one.rep.position < chosen.head->at;
 }
 
 auto system::impl::best_entry() const -> std::optional<entry>
@@ -1164,9 +1218,26 @@ void system::impl::deliver(entry const& head) noexcept
 
 void system::impl::finish_pause() noexcept
 {
+  merge_found();
   auto const completing = promise;
   auto       ended      = result;
   auto const was_closed = closed.load() or host_closed.load();
+  if(not was_closed
+     and (ended.reason == pause_reason::delivered or ended.reason == pause_reason::idle or ended.reason == pause_reason::error))
+  {
+    for(auto const& link : links)
+    {
+      link->release_through(ended.at);
+    }
+  }
+  if(not was_closed
+     and (ended.reason == pause_reason::system_time or ended.reason == pause_reason::requested))
+  {
+    for(auto const& link : links)
+    {
+      link->show_drained(chosen.confirm);
+    }
+  }
   if(was_closed)
   {
     ended.reason = pause_reason::closed;
@@ -1536,9 +1607,15 @@ auto system::impl::load_links(std::span<std::byte const> in, bool keep) -> saved
     throw config_error(
         "system state", 0, "bytes", std::format("a state system::save wrote: {}", failure.what()));
   }
-  if(state.format != 1
-     or state.members.size() != slots.size()
-     or state.links.size() != links.size())
+  if(state.format != saved_system{}.format)
+  {
+    throw config_error(
+        "system state", 0, "format",
+        std::format(
+            "a state of format {}, this system loads format {}", state.format,
+            saved_system{}.format));
+  }
+  if(state.members.size() != slots.size() or state.links.size() != links.size())
   {
     throw config_error(
         "system state", 0, "bytes", "a state saved by a system of the same members and links");

@@ -12,12 +12,14 @@
 
 #include <nanobind/nanobind.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -287,6 +289,47 @@ struct log_forwarding
   std::exception_ptr deferred{};
 };
 
+/**
+ * @brief Removals a host_slot still held when it died before its host's thread stopped, run by
+ *        that thread as it stops, after shut_down() and before its token expires.
+ */
+struct exit_removals
+{
+  /** @brief Guards bodies and exited, a leaf: nothing is taken under it. */
+  std::mutex mutex{};
+  /** @brief Removals waiting for the thread to stop. */
+  std::vector<std::move_only_function<void()>> bodies{};
+  /** @brief Whether the thread took bodies for the last time. */
+  bool exited = false;
+};
+
+/** @brief Removals run by run_exit_removals() so far, across every host. */
+inline std::atomic<std::uint64_t> exit_removals_ran{0};
+
+/**
+ * @brief Runs every removal of @p box on the stopping host thread and marks it exited, so a
+ *        later one runs on the thread that hands it over. Never throws.
+ */
+inline void run_exit_removals(exit_removals& box) noexcept
+{
+  std::vector<std::move_only_function<void()>> bodies;
+  {
+    std::scoped_lock const lock{box.mutex};
+    box.exited = true;
+    bodies     = std::exchange(box.bodies, {});
+  }
+  for(auto& body : bodies)
+  {
+    try
+    {
+      body();
+    }
+    catch(...)
+    {}
+    exit_removals_ran.fetch_add(1);
+  }
+}
+
 /** @brief The host of a machine, empty until its handle hands the machine over. */
 struct host_slot
 {
@@ -303,6 +346,9 @@ struct host_slot
   mutable std::weak_ptr<void const> orphan{};
   /** @brief Whether the host was abandoned: removals then wait until orphan expired. */
   mutable std::atomic<bool> abandoned{false};
+  /** @brief Where the removals still queued at the slot's death go while the abandoned host's
+   * thread lives, shared with that thread's stop hook. */
+  std::shared_ptr<exit_removals> on_exit = std::make_shared<exit_removals>();
   /** @brief Where the machine's log records go, shared with its HostFutures. */
   std::shared_ptr<log_forwarding> logs = std::make_shared<log_forwarding>();
   /** @brief Whether a parked access is refused: a member of a linked system with a pending
@@ -313,8 +359,8 @@ struct host_slot
   host_slot(host_slot const&)                    = delete;
   auto operator=(host_slot const&) -> host_slot& = delete;
   /**
-   * @brief Runs the removals an abandoned host left once its thread is gone, keeps them for the
-   *        rest of the process otherwise.
+   * @brief Runs the removals an abandoned host left once its thread is gone, hands them to
+   *        on_exit for the thread's stop otherwise.
    */
   ~host_slot();
 };
@@ -466,15 +512,6 @@ private:
 };
 
 /**
- * @brief Keeps @p body, a removal of engine state, alive for the rest of the process without
- *        running it: the abandoned host's thread may still run the engine it would edit.
- */
-inline void keep_forever(std::move_only_function<void()> body) noexcept
-{
-  std::ignore = std::make_unique<std::move_only_function<void()>>(std::move(body)).release();
-}
-
-/**
  * @brief Queues @p body, when set, on the slot of an abandoned host, then runs every queued
  *        removal once the host thread left the engine for good. The batch runs outside
  *        retired_mutex, since a removal may retire more: the GIL every caller holds keeps two
@@ -492,6 +529,7 @@ inline void run_orphaned(host_slot const& slot, std::move_only_function<void()> 
     }
     if(slot.orphan.expired())
     {
+      std::atomic_thread_fence(std::memory_order_acquire);
       ready = std::exchange(slot.retired, {});
       slot.retiring.store(false, std::memory_order_release);
     }
@@ -530,14 +568,22 @@ inline host_slot::~host_slot()
   {
     return;
   }
-  auto const gone = orphan.expired();
-  for(auto& body : std::exchange(retired, {}))
+  auto bodies = std::exchange(retired, {});
+  if(orphan.expired())
   {
-    if(not gone)
+    std::atomic_thread_fence(std::memory_order_acquire);
+  }
+  else
+  {
+    std::scoped_lock const lock{on_exit->mutex};
+    if(not on_exit->exited)
     {
-      keep_forever(std::move(body));
-      continue;
+      std::ranges::move(bodies, std::back_inserter(on_exit->bodies));
+      return;
     }
+  }
+  for(auto& body : bodies)
+  {
     try
     {
       body();

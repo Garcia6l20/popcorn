@@ -7,11 +7,12 @@ import asyncio
 import gc
 import threading
 import weakref
+from collections.abc import Callable
 from typing import cast
 
 import popcorn
 import pytest
-from popcorn import EmulationError, System, TapFrame, UartTap, _core
+from popcorn import Call, EmulationError, Return, System, TapFrame, UartTap, _core
 from popcorn._refs import Pending
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
@@ -23,12 +24,14 @@ from .linked import (
     VARIANTS,
     Build,
     L,
+    Ticker,
     at,
     in_flight,
     links,
     logged,
     member,
     past_done,
+    received,
     to,
 )
 
@@ -397,6 +400,149 @@ def test_frames_taken_by_two_threads_at_once_keep_each_direction_in_order(pair: 
     holding.join(10)
     every = first + tap.frames(towards="b.USART1")
     assert [f.index for f in every] == list(range(64))
+
+
+TAP_READS: list[Callable[[], None]] = []
+
+
+class TapReader(Ticker):
+    """A Ticker every microsecond that calls each function in `TAP_READS` at each tick."""
+
+    period_us = 1
+
+    def _tick(self) -> None:
+        super()._tick()
+        for read in TAP_READS:
+            read()
+
+
+def read_from_receiver(
+    u575: popcorn.PartDescription, slice_instructions: int, third: VirtualDuration | None
+) -> tuple[list[tuple[VirtualTime, int]], list[TapFrame], VirtualTime]:
+    """Read the tap every microsecond of b's time from b's TIM6 model while a runs free and b
+    runs for 1003 us, then at b's stop: each read's time with the frames held by then, every
+    frame read, and b's stop."""
+    a = member(u575, "link_tx", "a", slice_instructions)
+    b = member(u575, "link_rx", "b", slice_instructions, models={"TIM6": TapReader})
+    shown: list[TapFrame] = []
+    reads: list[tuple[VirtualTime, int]] = []
+    with System({"a": a, "b": b}, links(third), slice_instructions=slice_instructions) as system:
+        tap = system.tap("a.USART1")
+
+        def read() -> None:
+            shown.extend(tap.frames(towards="b.USART1"))
+            reads.append((system.to_system("b", b.time), len(shown)))
+
+        async def body() -> None:
+            async with a.running():
+                await b.run(for_=us(1003))
+
+        TAP_READS.append(read)
+        try:
+            asyncio.run(body())
+        finally:
+            TAP_READS.clear()
+        shown.extend(tap.frames(towards="b.USART1"))
+        return reads, shown, system.time_of("b")
+
+
+@pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)
+def test_a_tap_read_from_a_member_callback_lags_two_windows_and_the_pause_completes_it(
+    u575: popcorn.PartDescription,
+    pair: Build,
+    slice_instructions: int,
+    third: VirtualDuration | None,
+) -> None:
+    whole = pair()
+    asyncio.run(to(whole, at(3000)))
+    every = whole.tap("a.USART1").frames(towards="b.USART1")
+    reads, shown, point = read_from_receiver(u575, slice_instructions, third)
+    assert len(reads) > 900
+    assert shown == [frame for frame in every if frame.end <= point]
+    quantum = L if third is None else min(L, third, key=lambda one: one.ps)
+    for when, held in reads:
+        due = sum(1 for frame in every if frame.end.ps <= when.ps - 2 * quantum.ps)
+        assert held >= due, (when, held, due)
+
+
+def clash_before_a_peer_frame(system: System, start: VirtualTime) -> tuple[str, list[TapFrame]]:
+    """Inject one frame towards b at `start` from the free run, while b's USART1 interrupt
+    holds b 25 to 60 us before it: the error note and the tap at the error pause."""
+    b = system.members["b"]
+    tap = system.tap("a.USART1")
+    reached = threading.Event()
+    go = threading.Event()
+
+    def on_irq(call: Call) -> Return:
+        now = system.to_system("b", b.time).ps
+        if not reached.is_set() and start.ps - us(60).ps <= now <= start.ps - us(25).ps:
+            reached.set()
+            assert go.wait(10)
+        return call.proceed()
+
+    b.intercept("USART1_IRQHandler", on_irq)
+
+    async def body() -> None:
+        async with system.running():
+            assert await asyncio.to_thread(reached.wait, 10)
+            try:
+                tap.inject(b"x", at=start, towards="b.USART1")
+            finally:
+                go.set()
+            await b.elapse(ms(1))
+
+    with pytest.raises(EmulationError) as raised:
+        asyncio.run(body())
+    notes = [str(raised.value), *getattr(raised.value, "__notes__", [])]
+    clash = [note for note in notes if "overlap" in note]
+    assert len(clash) == 1, notes
+    return clash[0], tap.frames()
+
+
+@pytest.mark.parametrize(("slice_instructions", "third"), VARIANTS)
+def test_a_running_injection_meeting_an_earlier_drained_peer_frame_errs_at_its_start(
+    pair: Build, slice_instructions: int, third: VirtualDuration | None
+) -> None:
+    whole = pair()
+    asyncio.run(to(whole, at(1000)))
+    every = whole.tap("a.USART1").frames(towards="b.USART1")
+    for after_send in (us(3), L - us(5)):
+        start = VirtualTime(every[5].start.ps + after_send.ps)
+        assert every[4].end + L > start
+        note, frames = clash_before_a_peer_frame(pair(slice_instructions, third), start)
+        assert f"injected frame 0 starts at {start.ps} ps" in note
+        assert frames == [frame for frame in every if frame.end <= start]
+
+
+async def polled(tap: UartTap, towards: str) -> TapFrame:
+    """The first frame the tap shows towards `towards`, polled while the system runs."""
+    while not (frames := tap.frames(towards=towards)):
+        await asyncio.sleep(0.001)
+    return frames[0]
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize(("slice_instructions", "third"), [VARIANTS[0], VARIANTS[2]])
+def test_a_host_polling_the_tap_of_a_sleeping_free_run_sees_each_echo_and_injects_the_next(
+    pair: Build, slice_instructions: int, third: VirtualDuration | None
+) -> None:
+    system = pair(slice_instructions, third, a_entry="link_rx", b_entry="link_echo")
+    asyncio.run(to(system, at(600)))
+    tap = system.tap("a.USART1")
+
+    async def body() -> list[TapFrame]:
+        echoes: list[TapFrame] = []
+        start = at(700)
+        async with system.running():
+            for data in (b"q", b"r"):
+                tap.inject(data, at=start, towards="b.USART1")
+                echoes.append(await polled(tap, "a.USART1"))
+                start = echoes[-1].end + us(200)
+        return echoes
+
+    echoes = asyncio.run(body())
+    assert [frame.data for frame in echoes] == [ord("q"), ord("r")]
+    assert received(system.members["a"]) == [ord("q"), ord("r")]
 
 
 def test_a_uart_whose_cts_is_held_or_pending_is_refused_a_link(

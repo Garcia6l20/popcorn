@@ -847,7 +847,8 @@ class System:
         return self._handle.base_of_ps(index)
 
     def time_of(self, member: str) -> VirtualTime:
-        """System time of `member`, its local time plus its base.
+        """System time of `member`, its local time plus its base. After a member stop at
+        system time P, a member that runs a goal and sleeps below P stands at P.
 
         Raises:
             KeyError: No such member.
@@ -900,7 +901,9 @@ class System:
 
         A run pauses IDLE once every member sleeps with nothing due and every link is empty. A
         `line="break"` cut of a link, `UartTap.cut`, makes its hold and release due: the pause
-        then comes only after its release and the receiver's IDLE after it.
+        then comes only after its release and the receiver's IDLE after it. Members asleep
+        below the IDLE point move on to it executing nothing, so input that lands on the way,
+        such as a pty byte, is taken at the IDLE point when the system runs again.
 
         Each member's `last_stop` becomes its stop in the result's `stops`, None for a member a
         member stop left where it stood, and None for every member when the run ends without a
@@ -2070,11 +2073,16 @@ class UartTap:
     """Both directions of one link of a `System`, `system.tap("a.USART1")`: every frame
     on the line with its system times, and frames injected, replaced or dropped by number.
 
-    The tap gets a frame once it ended, its stop-bit end at or before a point where the system
-    paused, so the frames it holds at a pause, `end` at or before that pause's point, do not
-    depend on the quantum, the slicing or the wall timing. After `close()` it holds every frame
-    that ended by the last pause. It keeps up to 1 Mi frames per direction not read yet, about
-    380 bytes each, the oldest dropped and counted in `dropped`: take them with `frames()`.
+    The tap gets a frame once it ended. After a member stop, an IDLE pause or an error it holds
+    every frame whose stop-bit `end` is at or before the pause point and no later frame,
+    whatever the quantum, the slicing or the wall timing. After a TIME stop or a requested pause
+    it holds the frames ended by the earliest member's position, which can lie before the pause
+    point by an amount that depends on the quantum. After `close()` it holds every frame that
+    ended by the last pause. While the system runs it can lag the latest frames by up to two
+    windows of the quantum behind the receiving member's time, and a read at a pause is complete
+    as above.
+    It keeps up to 1 Mi frames per direction not read yet, about 380 bytes each, the oldest
+    dropped and counted in `dropped`: take them with `frames()`.
     Reading never changes what the receiver gets.
 
     `towards` names the receiving end of a direction, `"<member>.<UART>"`.
@@ -2116,9 +2124,10 @@ class UartTap:
 
     - Stopped: no run, no free run, no member goal and no member `running()` pending. Anyone
       but a callback of another machine, see the last item. Now is the later of the two ends'
-      system times, `System.time_of`. After a run a member stop ended, the other members stand
-      where the run left them, a position that depends on the quantum, and so does now. `cut`
-      accepts a start from now on.
+      system times, `System.time_of`. After a run a member stop ended at P, a member that runs
+      a goal and sleeps below P stands at P. A member that ran past P stands where the run left
+      it, a position that depends on the quantum, and so does now. `cut` accepts a start from
+      now on.
     - While the system runs, between two pauses of `running()` too, or with a member goal
       pending: a callback of the link's cut owner, `owner`, such as an intercept or a model
       method on that member. Now is the owner's system time at the callback, so the result is
@@ -2189,10 +2198,13 @@ class UartTap:
         """Take every frame the tap holds, towards `towards` only when given, oldest first.
         Never runs the system, allowed stopped and running, from any thread.
 
-        At a pause, or after `close()`, it takes exactly the frames ended by that point and
-        not taken yet, whatever the quantum, the slicing or the wall timing. While the system
-        runs, the tap fills at each barrier, so how many frames a call takes depends on wall
-        timing. Each frame's content never does.
+        After a member stop, an IDLE pause, an error or `close()`, it takes exactly the frames
+        ended by that point and not taken yet, whatever the quantum, the slicing or the wall
+        timing. After a TIME stop or a requested pause it takes those ended by the earliest
+        member's position, see the class. While the system runs, the tap fills at each
+        barrier and holds every frame ended two windows before the receiving member's time, so
+        how many frames a call takes depends on wall timing. Each frame's content never does.
+        Before a free run sleeps, it holds every frame ended by the earliest member's position.
 
         Returns:
             The frames, ordered by `end`, then direction: towards the link's second end first.
@@ -2224,8 +2236,10 @@ class UartTap:
         receiver's system time, and no frame may overlap one already on the receiver's line.
         While the system runs, from a `running()` body or another thread, `at` must be at or
         after the reach of the deliveries done so far, which depends on wall timing, and an
-        overlap is found later: the system stops with an error at the later frame's start,
-        a time fixed by the frames.
+        overlap is found later: the system stops with an error at a time fixed by the frames,
+        the later frame's start for two injected frames, and the later of the injected frame's
+        start and the peer frame's sender start for an injected frame and a peer frame. The
+        error is the receiving member's.
 
         Raises:
             TypeError: `data` is no bytes, `at` no VirtualTime or `towards` no str.
@@ -2348,7 +2362,8 @@ class UartTap:
         """The member whose callbacks may change the link's cuts while the system runs, its
         cut owner. Default the member of the link's first end, `UartLink.a`. Set it while the
         system is stopped, to any member, an end of the link or not. It never depends on which
-        member calls first.
+        member calls first. Reading it works from any callback of a member and raises
+        `EmulationError` once the system is closed.
 
         Raises, when set:
             TypeError: The value is no str.
