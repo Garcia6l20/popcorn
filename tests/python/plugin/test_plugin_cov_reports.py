@@ -6,6 +6,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from popcorn.coverage.report import display_name
 
 from .coverage_suite import write_suite
 from .helpers import cov_args, write_conftest
@@ -197,18 +198,6 @@ def test_an_ini_report_line_keeps_the_spaces_of_its_target(pytester: pytest.Pyte
     result.assert_outcomes(passed=1)
 
 
-def test_a_bare_flag_with_nothing_configured_writes_nothing(
-    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    write_suite(pytester)
-    scratch = pytester.mkdir("scratch")
-    monkeypatch.setenv("TMPDIR", str(scratch))
-    result = pytester.runpytest_subprocess(*NO_XDIST, "--popcorn-cov", "-k", "test_add")
-    assert result.ret == 0
-    result.stdout.no_fnmatch_line("popcorn: *coverage*")
-    assert list(scratch.glob("popcorn-cov-*")) == []
-
-
 def test_an_unavailable_report_writes_no_file_and_keeps_the_directory(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -294,3 +283,67 @@ def test_ini_report_targets_resolve_against_the_rootdir_from_a_subdirectory(
         """))
     monkeypatch.chdir(sub)
     pytester.runpytest("-p", "no:asyncio", "--popcorn-cov").assert_outcomes(passed=1)
+
+
+TERM_HEADER = "Name*Lines*Hit*Cover*Funcs*Cover*Branches*Cover"
+
+
+def count_lines(output: str, needle: str) -> int:
+    return sum(1 for line in output.splitlines() if needle in line)
+
+
+@pytest.mark.parametrize("quiet", [(), ("-q",)], ids=["verbose", "quiet"])
+def test_term_report_prints_the_table(pytester: pytest.Pytester, quiet: tuple[str, ...]) -> None:
+    write_suite(pytester)
+    result = pytester.runpytest(*NO_XDIST, "--popcorn-cov", "--popcorn-cov-report=term", *quiet)
+    result.assert_outcomes(passed=30)
+    result.stdout.fnmatch_lines(["*firmware coverage*", TERM_HEADER, "*driver.c*", "TOTAL*"])
+    assert count_lines(result.stdout.str(), "TOTAL") == 1
+
+
+def test_bare_flag_prints_the_term_table(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_suite(pytester)
+    scratch = pytester.mkdir("scratch")
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    result = pytester.runpytest_subprocess(*NO_XDIST, "--popcorn-cov")
+    result.assert_outcomes(passed=30)
+    result.stdout.fnmatch_lines([TERM_HEADER, "*driver.c*", "TOTAL*"])
+    assert list(scratch.glob("popcorn-cov-*")) == []
+
+
+def test_ini_lcov_alone_prints_no_table(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    pytester.makeini("[pytest]\npopcorn_cov_lcov = out.info\n")
+    result = pytester.runpytest(*NO_XDIST, "--popcorn-cov")
+    result.assert_outcomes(passed=30)
+    assert "TOTAL" not in result.stdout.str()
+
+
+def test_term_report_prints_once_under_xdist(pytester: pytest.Pytester) -> None:
+    pytest.importorskip("xdist")
+    write_suite(pytester)
+    result = pytester.runpytest_subprocess(
+        "-p", "no:asyncio", "-n", "2", "--popcorn-cov", "--popcorn-cov-report=term", timeout=60
+    )
+    result.assert_outcomes(passed=30)
+    output = result.stdout.str()
+    assert count_lines(output, "TOTAL") == 1
+    assert count_lines(output, "firmware coverage ---") == 1
+
+
+def test_term_row_name_is_the_display_name_of_the_source(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    result = pytester.runpytest(
+        *NO_XDIST,
+        *cov_args("cov.info"),
+        "--popcorn-cov-report=term",
+        "--popcorn-cov-include=**/driver.c",
+    )
+    result.assert_outcomes(passed=30)
+    (sf,) = sources(pytester.path / "cov.info")
+    expected = display_name(sf, pytester.path)
+    rows = [line for line in result.stdout.str().splitlines() if "driver.c" in line]
+    assert len(rows) == 1
+    assert rows[0].split()[0] == expected

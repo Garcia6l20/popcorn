@@ -24,6 +24,7 @@ from popcorn.coverage.report._model import (
     resolve,
 )
 from popcorn.coverage.report._spec import ReportResult, ReportSpec, generate, parse_spec
+from popcorn.coverage.report._term import render_term
 
 __all__ = [
     "BranchRecord",
@@ -40,5 +41,6 @@ __all__ = [
     "matches",
     "parse_lcov",
     "parse_spec",
+    "render_term",
     "resolve",
 ]

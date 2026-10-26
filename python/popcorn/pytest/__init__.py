@@ -115,14 +115,16 @@ ini options `popcorn_cov_report` (one `TYPE[:TARGET]` per line), `popcorn_cov_fa
 `--popcorn-cov-report`, `--popcorn-cov-fail-under`, `--popcorn-cov-include` and
 `--popcorn-cov-omit`. `--popcorn-cov-fail-under` takes a percent from 0 to 100, checked at
 startup, and leaves the exit status unchanged. A command-line value replaces the ini value of
-its setting. Command-line
-targets resolve against the invocation directory, ini targets against the rootdir. The
-`--popcorn-cov-*` options need `--popcorn-cov`, ini values are ignored without it. The
-include and omit globs match a source path as written and relative to the rootdir, `**`
-included, and a filter rewrites the lcov files from the kept files. An
-interrupted session keeps the directory and writes no lcov. A crash or SIGKILL leaves the
-directory behind. xdist workers on other hosts, `--tx ssh=...`, are not supported: they share
-the directory by path.
+its setting. Command-line targets resolve against the invocation directory, ini targets
+against the rootdir. The `--popcorn-cov-*` options need `--popcorn-cov`, ini values are
+ignored without it. The `term` report prints a table of lines, functions and branches per
+source file and a `TOTAL` row under a `firmware coverage` header at the end of the run, once
+under xdist and also with `-q`. A bare `--popcorn-cov` with no report and no
+`popcorn_cov_lcov` writes the `term` report. The include and omit globs match a source path
+as written and relative to the rootdir, `**` included, and a filter rewrites the lcov files
+from the kept files. An interrupted session keeps the directory and writes no report. A crash
+or SIGKILL leaves the directory behind. xdist workers on other hosts, `--tx ssh=...`, are
+not supported: they share the directory by path.
 
 xdist workers are spawned processes, not forks of the controller, so each worker builds its own
 machines after it starts, as a machine requires: it does not survive `os.fork`.

@@ -24,9 +24,10 @@ class Settings:
         cov_lcov: The lcov file a bare `lcov` report and the implicit lcov report write, the
             `popcorn_cov_lcov` ini option, resolved against the rootdir.
         cov_reports: The reports written at session end, `--popcorn-cov-report` else
-            `popcorn_cov_report`, then the implicit lcov report of `popcorn_cov_lcov`. A bare
-            `lcov` report has its target set from `cov_lcov`. Command-line targets resolve
-            against the invocation directory, ini targets against the rootdir.
+            `popcorn_cov_report`, then the implicit lcov report of `popcorn_cov_lcov`, `[term]`
+            when none of them is given. A bare `lcov` report has its target set from `cov_lcov`.
+            Command-line targets resolve against the invocation directory, ini targets against
+            the rootdir.
         cov_fail_under: The threshold in percent from 0 to 100, `--popcorn-cov-fail-under` else
             `popcorn_cov_fail_under`, None when neither is given. It is validated at startup and
             leaves the exit status unchanged.
@@ -141,6 +142,8 @@ def _coverage_settings(config: pytest.Config) -> _Coverage:
             specs.append(spec)
     if lcov is not None and ReportSpec("lcov", lcov) not in specs:
         specs.insert(0, ReportSpec("lcov", lcov))
+    if not specs:
+        specs.append(ReportSpec("term"))
     return _Coverage(
         True,
         lcov,
@@ -242,7 +245,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         help="count firmware coverage of every popcorn machine, merged across tests and "
         "workers. The reports come from --popcorn-cov-report, for an lcov file "
-        "--popcorn-cov-report=lcov:PATH or the popcorn_cov_lcov ini option",
+        "--popcorn-cov-report=lcov:PATH or the popcorn_cov_lcov ini option. With none "
+        "of them set the report is the terminal table, term",
     )
     group.addoption(
         "--popcorn-cov-report",

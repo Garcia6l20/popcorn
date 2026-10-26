@@ -48,7 +48,7 @@ def test_no_machine_no_lcov(pytester: pytest.Pytester) -> None:
     pytester.makepyfile(test_suite="def test_plain():\n    pass\n")
     result = pytester.runpytest("-p", "no:asyncio", "-p", "no:xdist", *cov_args("a.info"))
     result.assert_outcomes(passed=1)
-    result.stdout.fnmatch_lines(["popcorn: no firmware coverage collected, no lcov written"])
+    result.stdout.fnmatch_lines(["popcorn: no firmware coverage collected, no report written"])
     assert not (pytester.path / "a.info").exists()
 
 
@@ -156,7 +156,7 @@ def test_an_interrupted_session_keeps_its_pcov_files(pytester: pytest.Pytester) 
     )
     assert result.ret == pytest.ExitCode.INTERRUPTED
     result.stdout.fnmatch_lines(
-        ["popcorn: session interrupted, no lcov written, the .pcov files stay in *popcorn-cov-*"]
+        ["popcorn: session interrupted, no report written, the .pcov files stay in *popcorn-cov-*"]
     )
     assert not (pytester.path / "a.info").exists()
     line = next(line for line in result.outlines if "stay in" in line)

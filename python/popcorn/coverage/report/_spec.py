@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from popcorn.coverage.report._model import Totals, parse_lcov
+from popcorn.coverage.report._term import render_term
 
 KINDS = ("term", "html", "xml", "lcov")
 DEFAULT_TARGETS = {"html": "htmlcov", "xml": "coverage.xml"}
-WRITABLE = frozenset({"lcov"})
+WRITABLE = frozenset({"term", "lcov"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,10 +35,12 @@ class ReportResult:
     Attributes:
         totals: The counts of the report after include and omit.
         written: The files and directories written, in spec order.
+        term: The text of the `term` report, None when no spec asked for it.
     """
 
     totals: Totals
     written: tuple[Path, ...]
+    term: str | None = None
 
 
 def parse_spec(text: str, base: Path | None = None) -> ReportSpec:
@@ -74,21 +77,22 @@ def generate(
     """Parse `lcov` once, apply `include` and `omit`, and write every report of `specs`.
 
     Every spec is checked before the first report is written, so a refused list writes nothing.
-    An `lcov` report holds the bytes of `lcov` when no filter is given, else the filtered
-    tracefile as UTF-8.
+    The `term` report is returned in `ReportResult.term`, `generate` never prints it. An `lcov`
+    report holds the bytes of `lcov` when no filter is given, else the filtered tracefile as UTF-8.
 
     Raises:
         ValueError: `lcov` is not a tracefile, or an `lcov` spec has no target.
-        NotImplementedError: A spec of another kind than `lcov`.
+        NotImplementedError: A spec of kind `html` or `xml`.
         OSError: A target cannot be written.
     """
     targets: list[Path] = []
     for spec in specs:
         if spec.kind not in WRITABLE:
             raise NotImplementedError(f"the {spec.kind} report is not available")
-        if spec.target is None:
-            raise ValueError("an lcov report needs a target path")
-        targets.append(spec.target)
+        if spec.kind == "lcov":
+            if spec.target is None:
+                raise ValueError("an lcov report needs a target path")
+            targets.append(spec.target)
     data = lcov.read_bytes()
     report = parse_lcov(data.decode())
     filtered = bool(include or omit)
@@ -97,4 +101,5 @@ def generate(
     for target in targets:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(report.to_lcov().encode() if filtered else data)
-    return ReportResult(report.totals(), tuple(targets))
+    term = render_term(report, root=root) if any(spec.kind == "term" for spec in specs) else None
+    return ReportResult(report.totals(), tuple(targets), term)

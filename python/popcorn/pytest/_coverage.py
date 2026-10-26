@@ -15,6 +15,7 @@ from popcorn.pytest._options import SETTINGS
 from popcorn.pytest._session import COVERAGE, SESSION, WORKER_SUMMARIES, CoverageRun, summary
 
 OUTCOME = pytest.StashKey[str]()
+TERM = pytest.StashKey[str]()
 
 
 class XdistHooks:
@@ -74,12 +75,12 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     failures = _failures(config)
     if session.exitstatus == pytest.ExitCode.INTERRUPTED:
         outcome = (
-            "popcorn: session interrupted, no lcov written, the .pcov files stay in "
+            "popcorn: session interrupted, no report written, the .pcov files stay in "
             f"{run.directory}"
         )
     elif not any(run.directory.glob("*.pcov")):
         shutil.rmtree(run.directory)
-        outcome = "popcorn: no firmware coverage collected, no lcov written"
+        outcome = "popcorn: no firmware coverage collected, no report written"
     else:
         try:
             merged = run.directory / "merged.info"
@@ -100,6 +101,8 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
             outcome = "\n".join(
                 f"popcorn: firmware coverage written to {path}" for path in result.written
             )
+            if result.term is not None:
+                config.stash[TERM] = result.term
     config.stash[OUTCOME] = "\n".join(
         line for line in (outcome, *(f"popcorn: {failure}" for failure in failures)) if line
     )
@@ -118,8 +121,13 @@ def _failures(config: pytest.Config) -> list[str]:
 
 
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
-    """The coverage outcome line."""
+    """The coverage outcome lines, then the terminal table under a `firmware coverage` header."""
     outcome = terminalreporter.config.stash.get(OUTCOME, None)
     if outcome is not None:
         for line in outcome.splitlines():
+            terminalreporter.write_line(line)
+    table = terminalreporter.config.stash.get(TERM, None)
+    if table is not None:
+        terminalreporter.write_sep("-", "firmware coverage")
+        for line in table.splitlines():
             terminalreporter.write_line(line)

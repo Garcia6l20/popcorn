@@ -55,8 +55,20 @@ def test_generate_refuses_what_it_cannot_write(tmp_path: Path) -> None:
     source.write_text(TRACEFILE)
     with pytest.raises(ValueError):
         generate(source, [ReportSpec("lcov")], root=tmp_path)
-    with pytest.raises(NotImplementedError):
-        generate(source, [ReportSpec("term")], root=tmp_path)
+    for kind in ("html", "xml"):
+        with pytest.raises(NotImplementedError):
+            generate(source, [ReportSpec(kind, tmp_path / kind)], root=tmp_path)
+
+
+def test_generate_returns_the_term_text_and_writes_nothing(tmp_path: Path) -> None:
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    result = generate(source, [ReportSpec("term")], omit=["**/b.c"], root=tmp_path)
+    assert result.written == ()
+    assert result.term is not None
+    assert "src/a.c" in result.term
+    assert "src/b.c" not in result.term
+    assert generate(source, [], root=tmp_path).term is None
 
 
 def test_generate_checks_every_spec_before_writing(tmp_path: Path) -> None:
@@ -65,7 +77,7 @@ def test_generate_checks_every_spec_before_writing(tmp_path: Path) -> None:
     out = tmp_path / "out.info"
     with pytest.raises(NotImplementedError):
         generate(
-            source, [ReportSpec("lcov", out), ReportSpec("xml", tmp_path / "c.xml")], root=tmp_path
+            source, [ReportSpec("lcov", out), ReportSpec("html", tmp_path / "c")], root=tmp_path
         )
     with pytest.raises(ValueError):
         generate(source, [ReportSpec("lcov", out), ReportSpec("lcov")], root=tmp_path)
@@ -75,9 +87,10 @@ def test_generate_checks_every_spec_before_writing(tmp_path: Path) -> None:
 def test_generate_copies_bytes_whatever_the_locale(tmp_path: Path) -> None:
     text = TRACEFILE.replace("src/a.c", "src/\u00e9.c")
     source = tmp_path / "in.info"
-    source.write_bytes(text.encode())
+    raw = text.replace("\n", "\r\n").encode()
+    source.write_bytes(raw)
     out = tmp_path / "out.info"
     generate(source, [ReportSpec("lcov", out)], root=tmp_path)
-    assert out.read_bytes() == text.encode()
+    assert out.read_bytes() == raw
     generate(source, [ReportSpec("lcov", out)], omit=["**/b.c"], root=tmp_path)
     assert "src/\u00e9.c" in out.read_bytes().decode()
