@@ -453,6 +453,7 @@ TEST_CASE("a branch on a line whose own rows lie outside the scope still gets a 
   };
   auto const late = lcov_of(made, {group});
   CHECK(starting(late, "DA:") == std::vector<std::string>{"DA:5,0", "DA:6,3"});
+  CHECK(starting(late, "FNDA:") == std::vector<std::string>{"FNDA:1,f"});
 
   group.blocks = {
       {.start = 0x100, .size = 8, .hits = 3}
@@ -460,6 +461,68 @@ TEST_CASE("a branch on a line whose own rows lie outside the scope still gets a 
   auto const plain = lcov_of(made, {group}, {.branches = false});
   CHECK(starting(plain, "DA:") == std::vector<std::string>{"DA:5,3"});
   CHECK(starting(plain, "BRDA:").empty());
+}
+
+TEST_CASE("a function whose body ran without a block at its entry counts as hit")
+{
+  auto made = synthetic(
+      nops(8),
+      {
+          {0x100, 3},
+          {0x104, 4},
+          {0x108, 0}
+  },
+      8);
+  made.files       = {"tests/firmware/obs/lines.c"};
+  auto const early = lcov_of(
+      made, {
+                group_of({{.start = 0x104, .size = 4, .hits = 2}}
+                )
+  });
+  CHECK(starting(early, "DA:") == std::vector<std::string>{"DA:3,0", "DA:4,2"});
+  CHECK(starting(early, "FNDA:") == std::vector<std::string>{"FNDA:1,f"});
+  CHECK(starting(early, "FNH:") == std::vector<std::string>{"FNH:1"});
+  check_genhtml(early, "entered_early");
+
+  auto const both = lcov_of(
+      made,
+      {
+          group_of(
+              {{.start = 0x100, .size = 4, .hits = 2}, {.start = 0x104, .size = 4, .hits = 7}}
+              )
+  });
+  CHECK(starting(both, "FNDA:") == std::vector<std::string>{"FNDA:2,f"});
+  check_genhtml(both, "entered_and_ran");
+
+  auto const never = lcov_of(made, {group_of({})});
+  CHECK(starting(never, "FNDA:") == std::vector<std::string>{"FNDA:0,f"});
+  CHECK(starting(never, "FNH:") == std::vector<std::string>{"FNH:0"});
+  check_genhtml(never, "never_entered");
+}
+
+TEST_CASE("a function counts only the lines of its clamped range")
+{
+  auto made = synthetic(
+      nops(8),
+      {
+          {0x100, 10},
+          {0x104, 30},
+          {0x108, 20},
+          {0x10c, 0 }
+  },
+      8);
+  made.files = {"tests/firmware/obs/lines.c"};
+  made.symbols.push_back(
+      {.name = "g", .value = 0x108, .size = 4, .kind = image::symbol_kind::function});
+  auto const text = lcov_of(
+      made, {
+                group_of({{.start = 0x104, .size = 4, .hits = 3}}
+                )
+  });
+  CHECK(starting(text, "FN:") == std::vector<std::string>{"FN:10,19,f", "FN:20,20,g"});
+  CHECK(starting(text, "DA:") == std::vector<std::string>{"DA:10,0", "DA:20,0", "DA:30,3"});
+  CHECK(starting(text, "FNDA:") == std::vector<std::string>{"FNDA:0,f", "FNDA:0,g"});
+  check_genhtml(text, "clamped_neighbour");
 }
 
 TEST_CASE("a literal pool after a return is not decoded for branches")

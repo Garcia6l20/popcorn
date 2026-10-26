@@ -596,32 +596,44 @@ void write_file(
     std::string&        out)
 {
   std::format_to(std::back_inserter(out), "TN:{}\nSF:{}\n", options.test_name, path);
-  std::vector<std::pair<std::uint32_t, std::string_view>> order;
+  struct placed
+  {
+    std::uint32_t    line;
+    std::uint32_t    end;
+    std::string_view name;
+    count            hits;
+  };
+  std::vector<placed> order;
   for(auto const& [name, function] : record.functions)
   {
-    order.emplace_back(function.line, name);
+    order.push_back({function.line, function.end, name, function.hits});
   }
-  std::ranges::sort(order);
-  for(auto const& [line, name] : order)
+  std::ranges::sort(
+      order, {}, [](placed const& entry) { return std::pair{entry.line, entry.name}; });
+  for(auto& entry : order)
   {
-    auto const next = std::ranges::upper_bound(
-        order, line, {}, &std::pair<std::uint32_t, std::string_view>::first);
-    auto end = record.functions.at(std::string{name}).end;
+    auto const next = std::ranges::upper_bound(order, entry.line, {}, &placed::line);
     if(next != order.end())
     {
-      end = std::min(end, next->first - 1);
+      entry.end = std::min(entry.end, next->line - 1);
     }
-    std::format_to(std::back_inserter(out), "FN:{},{},{}\n", line, end, name);
+    auto const first = record.lines.lower_bound(entry.line);
+    auto const last  = record.lines.upper_bound(entry.end);
+    if(entry.hits == 0
+       and std::ranges::any_of(
+           std::ranges::subrange(first, last), [](auto const& line) { return line.second != 0; }))
+    {
+      entry.hits = 1;
+    }
+    std::format_to(std::back_inserter(out), "FN:{},{},{}\n", entry.line, entry.end, entry.name);
   }
-  for(auto const& [line, name] : order)
+  for(auto const& entry : order)
   {
-    std::format_to(
-        std::back_inserter(out), "FNDA:{},{}\n", record.functions.at(std::string{name}).hits, name);
+    std::format_to(std::back_inserter(out), "FNDA:{},{}\n", entry.hits, entry.name);
   }
   std::format_to(
-      std::back_inserter(out), "FNF:{}\nFNH:{}\n", record.functions.size(),
-      std::ranges::count_if(
-          record.functions, [](auto const& entry) { return entry.second.hits != 0; }));
+      std::back_inserter(out), "FNF:{}\nFNH:{}\n", order.size(),
+      std::ranges::count_if(order, [](placed const& entry) { return entry.hits != 0; }));
   if(options.branches)
   {
     std::size_t found = 0;

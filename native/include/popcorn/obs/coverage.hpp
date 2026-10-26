@@ -152,7 +152,10 @@ struct lcov_options
  * smallest non-zero line among the rows at its entry in that file. Its end is the largest line of
  * that file among the rows of its code, at least its start and before the start of the next
  * function of the file. The start line has a DA record of at least the function's entry count, so
- * that genhtml finds it a line.
+ * that genhtml finds it a line. A function with no counted entry whose `FN` range holds a
+ * line with a DA count above 0 has FNDA 1, and FNH counts it. Such a line comes from a body
+ * entered before counting began, or from an inlined helper or split part whose rows are filed
+ * inside the range. A function with counted entries keeps their sum.
  *
  * Rules and limits:
  * - Rows of zero length, followed by a row at the same address, cover no instruction: their line

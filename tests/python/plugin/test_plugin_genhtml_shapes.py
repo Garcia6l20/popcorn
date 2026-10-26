@@ -18,11 +18,6 @@ async def test_booted(machine):
     assert machine.pc == machine.sym("shapes_done")
 """
 
-INLINE_AFTER = (
-    '"tests/firmware/obs/genhtml_shapes.c":15: '
-    "function 'inline_f' is not hit but line 22 is: function marked 'hit'."
-)
-
 
 def shape_messages(rendered: subprocess.CompletedProcess[str]) -> list[str]:
     """The genhtml messages about the shapes source, genhtml's prefix and suffix stripped."""
@@ -36,8 +31,8 @@ def shape_messages(rendered: subprocess.CompletedProcess[str]) -> list[str]:
 
 
 @pytest.mark.skipif(GENHTML is None, reason="genhtml is not installed")
-def test_the_shapes_elf_gives_only_the_inline_after_message(pytester: pytest.Pytester) -> None:
+def test_the_shapes_elf_gives_no_genhtml_message(pytester: pytest.Pytester) -> None:
     lcov = session(pytester, SHAPES_ELF, "shapes_done", BOOT_ONLY, "shapes", "-p", "no:xdist")
-    rendered = genhtml(lcov, pytester.path / "html", "--ignore-errors", "inconsistent")
+    rendered = genhtml(lcov, pytester.path / "html")
     assert rendered.returncode == 0, rendered.stderr
-    assert shape_messages(rendered) == [INLINE_AFTER], messages(rendered)
+    assert shape_messages(rendered) == [], messages(rendered)
