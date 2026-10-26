@@ -10,6 +10,7 @@ print(kept.totals().lines.percent)
 ```
 """
 
+from popcorn.coverage.report._cobertura import render_cobertura
 from popcorn.coverage.report._model import (
     BranchRecord,
     Counts,
@@ -44,6 +45,7 @@ __all__ = [
     "matches",
     "parse_lcov",
     "parse_spec",
+    "render_cobertura",
     "render_term",
     "resolve",
     "truncated_percent",

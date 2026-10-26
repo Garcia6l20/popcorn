@@ -125,11 +125,14 @@ against the rootdir. The `--popcorn-cov-*` options need `--popcorn-cov`, ini val
 ignored without it. The `term` report prints a table of lines, functions and branches per
 source file and a `TOTAL` row under a `firmware coverage` header at the end of the run, once
 under xdist and also with `-q`. A bare `--popcorn-cov` with no report and no
-`popcorn_cov_lcov` writes the `term` report. The include and omit globs match a source path
-as written and relative to the rootdir, `**` included, and a filter rewrites the lcov files
-from the kept files. An interrupted session keeps the directory and writes no report. A crash
-or SIGKILL leaves the directory behind. xdist workers on other hosts, `--tx ssh=...`, are
-not supported: they share the directory by path.
+`popcorn_cov_lcov` writes the `term` report. The `xml` report writes Cobertura xml to its
+target, `coverage.xml` by default, through a temporary file renamed over it. Its `<sources>`
+lists the rootdir, and `/` too for a source outside it. A `filename` is relative to the rootdir
+for a source under it and as written otherwise, and `timestamp` counts milliseconds.
+The include and omit globs match a source path as written and relative to the rootdir, `**`
+included, and a filter rewrites the lcov files from the kept files. An interrupted session
+keeps the directory and writes no report. A crash or SIGKILL leaves the directory behind. xdist
+workers on other hosts, `--tx ssh=...`, are not supported: they share the directory by path.
 
 xdist workers are spawned processes, not forks of the controller, so each worker builds its own
 machines after it starts, as a machine requires: it does not survive `os.fork`.

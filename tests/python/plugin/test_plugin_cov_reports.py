@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import textwrap
+import xml.etree.ElementTree as ElementTree
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from popcorn.coverage.report import display_name, parse_lcov, truncated_percent
 
 from .coverage_suite import write_suite
 from .helpers import cov_args, write_conftest
+from .test_plugin_genhtml import CUT_ELF, CUT_TESTS, session
 
 pytest_plugins = ["pytester"]
 
@@ -206,10 +208,10 @@ def test_an_unavailable_report_writes_no_file_and_keeps_the_directory(
     scratch = pytester.mkdir("scratch")
     monkeypatch.setenv("TMPDIR", str(scratch))
     result = pytester.runpytest_subprocess(
-        *NO_XDIST, *cov_args("a.info"), "--popcorn-cov-report=xml", "-k", "test_add"
+        *NO_XDIST, *cov_args("a.info"), "--popcorn-cov-report=html", "-k", "test_add"
     )
     result.stdout.fnmatch_lines(
-        ["popcorn: coverage merge failed: the xml report is not available*"]
+        ["popcorn: coverage merge failed: the html report is not available*"]
     )
     assert not (pytester.path / "a.info").exists()
     assert len(list(scratch.glob("popcorn-cov-*"))) == 1
@@ -461,7 +463,7 @@ def test_a_failed_merge_fails_under_any_threshold(
     result = pytester.runpytest_subprocess(
         *NO_XDIST,
         "--popcorn-cov",
-        "--popcorn-cov-report=xml",
+        "--popcorn-cov-report=html",
         "--popcorn-cov-fail-under=1",
         "-k",
         "test_add",
@@ -479,13 +481,15 @@ def test_an_interrupted_session_skips_the_check(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     write_suite(pytester)
-    monkeypatch.setenv("TMPDIR", str(pytester.mkdir("scratch")))
+    scratch = pytester.mkdir("scratch")
+    monkeypatch.setenv("TMPDIR", str(scratch))
     (pytester.path / "test_stop.py").write_text("def test_stop():\n    raise KeyboardInterrupt\n")
     result = pytester.runpytest_subprocess(
         *NO_XDIST, "--popcorn-cov", "--popcorn-cov-fail-under=100", "test_suite.py", "test_stop.py"
     )
     assert result.ret == pytest.ExitCode.INTERRUPTED
     assert "FAIL Required" not in result.stdout.str()
+    assert len(list(scratch.glob("popcorn-cov-*"))) == 1
 
 
 @pytest.mark.parametrize(
@@ -508,3 +512,61 @@ def test_a_status_other_than_ok_is_kept(pytester: pytest.Pytester) -> None:
     )
     assert result.ret == pytest.ExitCode.NO_TESTS_COLLECTED
     result.stdout.fnmatch_lines([f"FAIL {FAIL_UNDER.format('50%')}*"])
+
+
+def cobertura(path: Path) -> ElementTree.Element:
+    return ElementTree.parse(path).getroot()
+
+
+def test_xml_report_matches_the_term_totals(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    result = pytester.runpytest(
+        *NO_XDIST,
+        "--popcorn-cov",
+        "--popcorn-cov-report=xml:out/c.xml",
+        "--popcorn-cov-report=term",
+    )
+    result.assert_outcomes(passed=30)
+    out = pytester.path / "out" / "c.xml"
+    result.stdout.fnmatch_lines([f"popcorn: firmware coverage written to {out}"])
+    top = cobertura(out)
+    (total,) = [line.split() for line in result.stdout.str().splitlines() if "TOTAL" in line]
+    assert top.get("lines-valid") == total[1]
+    assert top.get("lines-covered") == total[2]
+    assert top.get("branches-valid") == total[6]
+    paths = [
+        element.get("filename", "") for element in top.iterfind("./packages/package/classes/class")
+    ]
+    assert len(paths) == 2
+    assert not any(Path(path).is_absolute() for path in paths)
+    assert [element.text for element in top.iterfind("./sources/source")] == [str(pytester.path)]
+
+
+def test_xml_report_of_a_relative_sf_keeps_the_sf_as_filename(pytester: pytest.Pytester) -> None:
+    lcov = session(
+        pytester,
+        CUT_ELF,
+        "cut_mid",
+        CUT_TESTS,
+        "plain",
+        "-p",
+        "no:xdist",
+        "--popcorn-cov-report=xml:c.xml",
+    )
+    sf = [line[3:] for line in lcov.read_text().splitlines() if line[:3] == "SF:"]
+    assert sf
+    assert not Path(sf[0]).is_absolute()
+    top = cobertura(pytester.path / "c.xml")
+    filenames = [
+        element.get("filename") for element in top.iterfind("./packages/package/classes/class")
+    ]
+    assert filenames == sf
+    totals = parse_lcov(lcov.read_text()).totals()
+    assert float(top.get("line-rate", "")) == totals.lines.hit / totals.lines.found
+
+
+def test_xml_report_without_a_target_writes_coverage_xml(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    result = pytester.runpytest(*NO_XDIST, "--popcorn-cov", "--popcorn-cov-report=xml")
+    result.assert_outcomes(passed=30)
+    assert cobertura(pytester.path / "coverage.xml").tag == "coverage"

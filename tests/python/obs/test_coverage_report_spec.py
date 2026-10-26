@@ -55,9 +55,10 @@ def test_generate_refuses_what_it_cannot_write(tmp_path: Path) -> None:
     source.write_text(TRACEFILE)
     with pytest.raises(ValueError):
         generate(source, [ReportSpec("lcov")], root=tmp_path)
-    for kind in ("html", "xml"):
-        with pytest.raises(NotImplementedError):
-            generate(source, [ReportSpec(kind, tmp_path / kind)], root=tmp_path)
+    with pytest.raises(ValueError):
+        generate(source, [ReportSpec("xml")], root=tmp_path)
+    with pytest.raises(NotImplementedError):
+        generate(source, [ReportSpec("html", tmp_path / "html")], root=tmp_path)
 
 
 def test_generate_returns_the_term_text_and_writes_nothing(tmp_path: Path) -> None:
