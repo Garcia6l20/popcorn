@@ -810,18 +810,26 @@ public:
    *        the ranges counts, nothing crosses to Python. Counters already held for a range are
    *        kept, so enabling again only adds ranges.
    * @param ranges Code ranges, empty for every executable segment of the loaded images.
+   * @param record_unmodelled Whether to count CPU accesses to unmodelled registers per
+   *        accessing instruction, coverage_data::unmodelled, from now until disable_coverage()
+   *        or an enable without it. Recording installs the exact pc memory hook, which flushes
+   *        translated code and makes every load and store to a peripheral window pay a hook.
    * @throws machine_running while a slice runs, handlers included.
+   * @throws emulation_error when the engine refuses the exact pc hook.
    */
-  void enable_coverage(std::vector<address_range> ranges);
+  void enable_coverage(std::vector<address_range> ranges, bool record_unmodelled = false);
 
   /**
-   * @brief Stops collecting, keeping the counters.
+   * @brief Stops collecting, keeping the counters, and stops recording unmodelled accesses.
    * @throws machine_running while a slice runs, handlers included.
    */
   void disable_coverage();
 
   /** @brief Whether coverage is being collected. */
   [[nodiscard]] auto coverage_enabled() const noexcept -> bool;
+
+  /** @brief Whether CPU accesses to unmodelled registers are being recorded. */
+  [[nodiscard]] auto unmodelled_recorded() const noexcept -> bool;
 
   /**
    * @brief Copy of the counters, cumulative across restores.

@@ -12,7 +12,8 @@ namespace popcorn::core
 {
 namespace
 {
-constexpr std::size_t first_edge_slots = 1024;
+constexpr std::size_t first_edge_slots       = 1024;
+constexpr std::size_t first_unmodelled_slots = 64;
 }
 
 void flat_edge_table::grow()
@@ -59,6 +60,43 @@ void flat_edge_table::clear() noexcept
   used_ = 0;
 }
 
+void unmodelled_table::grow()
+{
+  auto const old = std::exchange(
+      slots_, std::vector<entry>(std::max(first_unmodelled_slots, 2 * slots_.size())));
+  used_           = 0;
+  last_           = slots_.size();
+  auto const mask = slots_.size() - 1;
+  for(auto const& held : old)
+  {
+    if(held.hits == 0)
+    {
+      continue;
+    }
+    auto index = hash(held.at, held.where) >> 32 & mask;
+    while(slots_[index].hits != 0)
+    {
+      index = (index + 1) & mask;
+    }
+    slots_[index] = held;
+    ++used_;
+  }
+}
+
+auto unmodelled_table::entries() const -> std::vector<entry>
+{
+  return slots_
+       | std::views::filter([](entry const& held) { return held.hits != 0; })
+       | std::ranges::to<std::vector>();
+}
+
+void unmodelled_table::clear() noexcept
+{
+  slots_.clear();
+  used_ = 0;
+  last_ = 0;
+}
+
 void coverage_state::leave(arch::arch const& core, address pc, bool at_exit)
 {
   auto const insns = std::exchange(open_insns, 0u);
@@ -79,7 +117,7 @@ void coverage_state::leave(arch::arch const& core, address pc, bool at_exit)
   ++cuts[{from, pc}];
 }
 
-void machine::enable_coverage(std::vector<address_range> ranges)
+void machine::enable_coverage(std::vector<address_range> ranges, bool record_unmodelled)
 {
   require_stopped(*this);
   if(ranges.empty())
@@ -122,8 +160,17 @@ void machine::enable_coverage(std::vector<address_range> ranges)
       }
     }
   }
+  if(record_unmodelled and not run_->record_unmodelled)
+  {
+    run_->acquire_exact_pc();
+  }
   state.has_previous = false;
   run_->coverage_on  = true;
+  if(run_->record_unmodelled and not record_unmodelled)
+  {
+    run_->release_exact_pc();
+  }
+  run_->record_unmodelled = record_unmodelled;
 }
 
 void machine::disable_coverage()
@@ -131,6 +178,10 @@ void machine::disable_coverage()
   require_stopped(*this);
   run_->coverage_on           = false;
   run_->coverage.has_previous = false;
+  if(std::exchange(run_->record_unmodelled, false))
+  {
+    run_->release_exact_pc();
+  }
 }
 
 auto machine::coverage_enabled() const noexcept -> bool
@@ -138,19 +189,25 @@ auto machine::coverage_enabled() const noexcept -> bool
   return run_->coverage_on;
 }
 
+auto machine::unmodelled_recorded() const noexcept -> bool
+{
+  return run_->record_unmodelled;
+}
+
 auto machine::coverage() const -> coverage_data
 {
   require_view_access();
   auto const& state = run_->coverage;
   return {
-      .blocks = state.blocks,
-      .edges  = state.edges.edges(),
-      .cuts   = state.cuts
-              | std::views::transform([](auto const& held) {
+      .blocks     = state.blocks,
+      .edges      = state.edges.edges(),
+      .cuts       = state.cuts
+                  | std::views::transform([](auto const& held) {
                 return cut_counter{
                     .start = held.first.first, .at = held.first.second, .hits = held.second};
-                })
-              | std::ranges::to<std::vector>(),
+                    })
+                  | std::ranges::to<std::vector>(),
+      .unmodelled = run_->unmodelled_accesses(),
   };
 }
 
@@ -164,6 +221,7 @@ void machine::clear_coverage()
   }
   state.edges.clear();
   state.cuts.clear();
+  run_->unmodelled_hits.clear();
   state.has_previous = false;
 }
 }

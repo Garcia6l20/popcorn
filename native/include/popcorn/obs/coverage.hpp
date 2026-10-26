@@ -1,5 +1,6 @@
 #pragma once
 
+#include <popcorn/core/coverage.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
 #include <popcorn/image/image.hpp>
@@ -81,6 +82,9 @@ struct coverage_group
   std::vector<block_hit> blocks{};
   /** @brief Edges with hits, sorted by from then to. */
   std::vector<edge_hit> edges{};
+  /** @brief CPU accesses to unmodelled registers with hits, sorted by pc, peripheral, register,
+   * offset, write and reason. */
+  std::vector<core::unmodelled_access> unmodelled{};
   /** @brief Block starts whose hits were split over several sizes. */
   std::uint64_t split{};
   /** @brief Hits of block starts whose first instruction could not be read, in no block. */
@@ -184,25 +188,32 @@ POPCORN_API auto lcov(
     lcov_options const& options) -> std::string pre(images.size() == set.groups.size());
 
 /**
- * @brief Encodes a coverage set as a `.pcov` version 1 file, little endian, fields 4-byte aligned,
- *        strings padded with zeros: `PCOV`, u16 version 1, u16 flags 0, u32 group count, then per
+ * @brief Encodes a coverage set as a `.pcov` version 2 file, little endian, fields 4-byte aligned,
+ *        strings padded with zeros: `PCOV`, u16 version 2, u16 flags, u32 group count, then per
  *        group u64 split, u64 dropped, the images `{u32 kind, u32 base, u32 end, u32 length, path,
  *        u32 length, digest}`, the ranges `{u32 start, u32 size, u32 length, name}`, the blocks
- *        `{u32 start, u32 size, u64 hits}` and the edges `{u32 from, u32 to, u64 hits}`, each list
- *        after its u32 count. The set is made canonical first, as merge() does.
+ *        `{u32 start, u32 size, u64 hits}`, the edges `{u32 from, u32 to, u64 hits}` and, when
+ *        flags bit 0 is set, the unmodelled accesses `{u32 pc, u32 offset, u32 access, u64 hits,
+ *        u32 length, peripheral, u32 length, register}`, access holding the write flag in bit 0
+ *        and the core::unmodelled_reason in bits 8 to 15. Each list comes after its u32 count.
+ *        Flags bit 0 is set when some group has an unmodelled access, every other flag bit is
+ *        0. The set is made canonical first, as merge() does.
  * @param set Coverage.
  * @return The file bytes.
  */
 POPCORN_API auto encode_pcov(coverage_set const& set) -> std::vector<std::byte>;
 
 /**
- * @brief Decodes a `.pcov` file.
+ * @brief Decodes a `.pcov` file of version 2, or of version 1, the layout of version 2 with flags
+ *        0, whose groups have no unmodelled access.
  * @param bytes File bytes.
  * @param file Name for errors.
  * @return The set, canonical.
- * @throws format_error when the bytes are not a canonical `.pcov` version 1 file: bad magic or
- *         version, a count past the end, an unsorted or repeated key, a zero hit, a block size
- *         outside 1 to 1024, an unknown image kind or a raw image with a path.
+ * @throws format_error when the bytes are not a canonical `.pcov` version 1 or 2 file: bad magic,
+ *         version or flags, a count past the end, an unsorted or repeated key, a zero hit, a
+ *         block size outside 1 to 1024, an unknown image kind, a raw image with a path, an
+ *         unmodelled access whose access word sets bits other than write and reason or holds a
+ *         reason outside no_register to raz_wi, or flags bit 0 with no unmodelled access.
  */
 POPCORN_API auto decode_pcov(std::span<std::byte const> bytes, std::string_view file = {})
     -> coverage_set;
@@ -226,9 +237,9 @@ POPCORN_API auto load_pcov(std::filesystem::path const& path) -> coverage_set;
 
 /**
  * @brief Sums coverage sets, canonical: groups with the same image digests add their block,
- *        edge, split and dropped counts, saturating, and take the union of their ranges, the
- *        smallest name for one start and size. Each image keeps the smallest of its paths, so
- *        the result does not depend on the order of @p sets. Other groups are kept.
+ *        edge, unmodelled access, split and dropped counts, saturating, and take the union of their
+ *        ranges, the smallest name for one start and size. Each image keeps the smallest of its
+ *        paths, so the result does not depend on the order of @p sets. Other groups are kept.
  * @param sets Sets to sum, possibly none.
  * @return The sum, groups sorted by their digest lists.
  */

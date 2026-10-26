@@ -70,7 +70,7 @@ def prepare_output(out: Path, *, protect: Sequence[tuple[str, Path]] = ()) -> st
         if held == resolved or resolved in held.parents:
             return f"{out} holds {label}"
     if _is_report(out):
-        if (out / ".git").exists():
+        if os.path.lexists(out / ".git"):
             return f"{out} holds a .git entry"
         shutil.rmtree(out)
         return None
@@ -121,9 +121,11 @@ def run_genhtml(
     ) as process:
         try:
             _, stderr = process.communicate(timeout=limit)
-        except subprocess.TimeoutExpired:
+        except BaseException as error:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
             process.communicate()
-            return GenhtmlResult(-1, "", timed_out=True)
+            if isinstance(error, subprocess.TimeoutExpired):
+                return GenhtmlResult(-1, "", timed_out=True)
+            raise
     return GenhtmlResult(process.returncode, stderr)

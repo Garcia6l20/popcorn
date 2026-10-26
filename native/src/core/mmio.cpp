@@ -13,7 +13,9 @@
 #include <ranges>
 #include <span>
 #include <string>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 namespace popcorn::core
 {
@@ -64,6 +66,10 @@ void machine::run_state::map_peripherals()
         }));
   }
   std::ranges::sort(windows, {}, [](auto const& window) { return window->base; });
+  for(auto const& [index, window] : std::views::enumerate(windows))
+  {
+    window->id = static_cast<std::uint32_t>(index);
+  }
   auto const refuse = [&](mmio_window const& window, std::string expected) {
     throw config_error(
         owner.description_.part, 0, std::format("peripherals.{}", window.unit->name),
@@ -221,7 +227,10 @@ auto machine::run_state::map_raz_wi(std::uint32_t page)
       }
     }
     auto& window = *raz_windows.emplace_back(
-        std::make_unique<raz_window>(raz_window{.run = this, .range = &range}));
+        std::make_unique<raz_window>(raz_window{
+            .run   = this,
+            .range = &range,
+            .id    = static_cast<std::uint32_t>(windows.size() + raz_windows.size())}));
     check(
         uc_mmio_map_attrs(
             engine, range.start, range.size, &on_raz_read, &window, &on_raz_write, &window),
@@ -237,6 +246,10 @@ void machine::run_state::note_raz(
     bool          write,
     initiator     by)
 {
+  if(record_unmodelled and by == initiator::cpu)
+  {
+    unmodelled_hits.count(arch->pc(), window.id, offset / 4, write, unmodelled_reason::raz_wi);
+  }
   auto const strict = owner.options_.strict_peripherals;
   if(by == initiator::debugger and strict)
   {
@@ -509,6 +522,10 @@ auto machine::run_state::dispatch_read(
       return 0u;
     }
   }
+  if(record_unmodelled and by == initiator::cpu)
+  {
+    count_unmodelled(window, word, false);
+  }
   if(word >= slot.layout.words())
   {
     warn_unregistered(window, offset, false, by);
@@ -588,6 +605,10 @@ auto machine::run_state::dispatch_write(
       note_watched(window.base + offset, size, value, true, by);
       return {};
     }
+  }
+  if(record_unmodelled and by == initiator::cpu)
+  {
+    count_unmodelled(window, word, true);
   }
   if(word >= slot.layout.words())
   {
@@ -862,6 +883,50 @@ void machine::run_state::note_unmodelled(
   {
     throw model_error(name, reg, offset);
   }
+}
+
+auto machine::run_state::raz_name(std::size_t index) const -> std::string
+{
+  auto const& ranges = owner.options_.raz_wi;
+  auto const& name   = ranges[index].name;
+  auto const  shared = std::ranges::count(ranges, name, &address_range::name) > 1;
+  if(name.empty())
+  {
+    return std::format("raz_wi[{}]", index);
+  }
+  return shared ? std::format("{}[{}]", name, index) : name;
+}
+
+auto machine::run_state::unmodelled_accesses() const -> std::vector<unmodelled_access>
+{
+  auto found = unmodelled_hits.entries()
+             | std::views::transform([this](unmodelled_table::entry const& held) {
+                 auto const        window = held.where >> 1;
+                 auto const        word   = static_cast<std::uint32_t>(held.at);
+                 unmodelled_access access{
+                     .pc     = static_cast<address>(held.at >> 32),
+                     .offset = word * 4,
+                     .write  = (held.where & 1) != 0,
+                     .reason = held.reason,
+                     .hits   = held.hits};
+                 if(window < windows.size())
+                 {
+                   auto const& mmio  = *windows[window];
+                   access.peripheral = mmio.unit->name;
+                   access.reg        = register_name(mmio.slot->desc, word);
+                 }
+                 else
+                 {
+                   access.peripheral = raz_name(window - windows.size());
+                 }
+                 return access;
+               })
+             | std::ranges::to<std::vector>();
+  std::ranges::sort(found, {}, [](unmodelled_access const& access) {
+    return std::tie(
+        access.pc, access.peripheral, access.reg, access.offset, access.write, access.reason);
+  });
+  return found;
 }
 
 void machine::run_state::refuse_unmodelled(address addr, std::size_t size) const

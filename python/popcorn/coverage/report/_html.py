@@ -62,8 +62,8 @@ def _source_page(file: LcovFile, name: str, root: Path) -> str:
     parts = [f'<p><a href="index.html">index</a> {_rate(file.totals().lines)} lines</p>\n']
     if source is None:
         parts.append(
-            '<p class="notice">The source file is not a regular file under 16 MiB,'
-            " or could not be read.</p>\n"
+            '<p class="notice">The source file is not a regular file under '
+            f"{SOURCE_LIMIT // (1 << 20)} MiB, or could not be read.</p>\n"
         )
     if file.functions:
         parts.append("<table><tr><th>function</th><th>line</th><th>hits</th></tr>\n")

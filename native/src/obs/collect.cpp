@@ -48,24 +48,25 @@ auto collect(core::machine& target, std::span<image_source const> sources) -> co
   auto sized = size_blocks(data, code);
 
   coverage_group group{
-      .images  = std::views::zip_transform(
-                     [](image::image const& loaded, image_source const& source) {
+      .images = std::views::zip_transform(
+                    [](image::image const& loaded, image_source const& source) {
                       return reference_of(loaded, source.kind, source.path);
-                     },
-                     images, sources)
-               | std::ranges::to<std::vector>(),
-      .ranges  = data.blocks
-               | std::views::transform(&core::block_counters::range)
-               | std::ranges::to<std::vector>(),
-      .blocks  = std::move(sized.blocks),
-      .edges   = data.edges
-               | std::views::filter([](core::edge_counter const& edge) { return edge.hits != 0; })
-               | std::views::transform([](core::edge_counter const& edge) {
+                    },
+                    images, sources)
+              | std::ranges::to<std::vector>(),
+      .ranges = data.blocks
+              | std::views::transform(&core::block_counters::range)
+              | std::ranges::to<std::vector>(),
+      .blocks = std::move(sized.blocks),
+      .edges  = data.edges
+              | std::views::filter([](core::edge_counter const& edge) { return edge.hits != 0; })
+              | std::views::transform([](core::edge_counter const& edge) {
                  return edge_hit{.from = edge.from, .to = edge.to, .hits = edge.hits};
-                 })
-               | std::ranges::to<std::vector>(),
-      .split   = sized.split,
-      .dropped = sized.dropped,
+                })
+              | std::ranges::to<std::vector>(),
+      .unmodelled = data.unmodelled,
+      .split      = sized.split,
+      .dropped    = sized.dropped,
   };
   std::ranges::sort(group.ranges, {}, [](address_range const& range) {
     return std::tie(range.start, range.size, range.name);

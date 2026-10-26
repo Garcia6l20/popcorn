@@ -46,9 +46,10 @@ namespace
 static_assert(std::endian::native == std::endian::little);
 
 constexpr std::array<char, 4> magic{'P', 'C', 'O', 'V'};
-constexpr std::uint16_t       version    = 1;
-constexpr std::uint32_t       largest_tb = 1024;
-constexpr auto                most       = std::numeric_limits<std::uint64_t>::max();
+constexpr std::uint16_t       version        = 2;
+constexpr std::uint16_t       has_unmodelled = 1;
+constexpr std::uint32_t       largest_tb     = 1024;
+constexpr auto                most           = std::numeric_limits<std::uint64_t>::max();
 
 constexpr auto add(std::uint64_t a, std::uint64_t b) noexcept -> std::uint64_t
 {
@@ -80,12 +81,22 @@ auto image_key(image_ref const& ref)
   return std::tie(ref.path, ref.kind, ref.base, ref.end);
 }
 
+auto unmodelled_key(core::unmodelled_access const& access)
+{
+  return std::tie(
+      access.pc, access.peripheral, access.reg, access.offset, access.write, access.reason);
+}
+
+using unmodelled_tuple =
+    std::tuple<address, std::string, std::string, std::uint32_t, bool, core::unmodelled_reason>;
+
 struct accumulated
 {
   std::vector<image_ref>                                     images;
   std::map<std::pair<address, std::uint32_t>, std::string>   ranges;
   std::map<std::pair<address, std::uint32_t>, std::uint64_t> blocks;
   std::map<std::pair<address, address>, std::uint64_t>       edges;
+  std::map<unmodelled_tuple, std::uint64_t>                  unmodelled;
   std::uint64_t                                              split{};
   std::uint64_t                                              dropped{};
 };
@@ -124,6 +135,11 @@ void fold(accumulated& into, coverage_group const& group)
     auto& held = into.edges[edge_key(edge)];
     held       = add(held, edge.hits);
   }
+  for(auto const& access : group.unmodelled)
+  {
+    auto& held = into.unmodelled[unmodelled_tuple{unmodelled_key(access)}];
+    held       = add(held, access.hits);
+  }
   into.split   = add(into.split, group.split);
   into.dropped = add(into.dropped, group.dropped);
 }
@@ -148,6 +164,21 @@ auto finish(accumulated const& held) -> coverage_group
     if(hits != 0)
     {
       group.edges.push_back({.from = key.first, .to = key.second, .hits = hits});
+    }
+  }
+  for(auto const& [key, hits] : held.unmodelled)
+  {
+    if(hits != 0)
+    {
+      auto const& [pc, peripheral, reg, offset, write, reason] = key;
+      group.unmodelled.push_back(
+          {.pc         = pc,
+           .peripheral = peripheral,
+           .reg        = reg,
+           .offset     = offset,
+           .write      = write,
+           .reason     = reason,
+           .hits       = hits});
     }
   }
   return group;
@@ -256,7 +287,7 @@ private:
   std::size_t                at_ = 0;
 };
 
-auto decode_group(reader& in) -> coverage_group
+auto decode_group(reader& in, bool unmodelled) -> coverage_group
 {
   coverage_group group;
   group.split       = in.scalar<std::uint64_t>("the split count");
@@ -337,6 +368,47 @@ auto decode_group(reader& in) -> coverage_group
     }
     group.edges.push_back(edge);
   }
+  if(not unmodelled)
+  {
+    return group;
+  }
+  auto const accesses = in.count(28, "the unmodelled access count");
+  for(std::uint32_t index = 0; index < accesses; ++index)
+  {
+    auto const              at = in.offset();
+    core::unmodelled_access access{.pc = in.scalar<std::uint32_t>("an unmodelled access pc")};
+    access.offset     = in.scalar<std::uint32_t>("an unmodelled access offset");
+    auto const kind   = in.scalar<std::uint32_t>("an unmodelled access kind");
+    access.hits       = in.scalar<std::uint64_t>("an unmodelled access hit count");
+    access.peripheral = in.text("an unmodelled access peripheral");
+    access.reg        = in.text("an unmodelled access register");
+    auto const reason = kind >> 8;
+    if((kind & ~std::uint32_t{0xff01}) != 0
+       or reason < std::to_underlying(core::unmodelled_reason::no_register)
+       or reason > std::to_underlying(core::unmodelled_reason::raz_wi))
+    {
+      in.fail(
+          at,
+          std::format(
+              "an unmodelled access kind of write bit 0 and a reason of {} to {} in bits 8 to 15",
+              std::to_underlying(core::unmodelled_reason::no_register),
+              std::to_underlying(core::unmodelled_reason::raz_wi)));
+    }
+    access.write  = (kind & 1) != 0;
+    access.reason = static_cast<core::unmodelled_reason>(reason);
+    if(access.hits == 0)
+    {
+      in.fail(at, "an unmodelled access hit count above 0");
+    }
+    if(not group.unmodelled.empty()
+       and unmodelled_key(group.unmodelled.back()) >= unmodelled_key(access))
+    {
+      in.fail(
+          at, "unmodelled accesses sorted by pc, peripheral, register, offset, write and reason, "
+              "each once");
+    }
+    group.unmodelled.push_back(std::move(access));
+  }
   return group;
 }
 
@@ -374,11 +446,13 @@ auto merge(std::span<coverage_set const> sets) -> coverage_set
 
 auto encode_pcov(coverage_set const& set) -> std::vector<std::byte>
 {
-  auto const canonical = merge(std::span{&set, 1});
-  writer     out;
+  auto const canonical  = merge(std::span{&set, 1});
+  auto const unmodelled = std::ranges::any_of(
+      canonical.groups, [](coverage_group const& group) { return not group.unmodelled.empty(); });
+  writer out;
   out.raw(magic.data(), magic.size());
   out.u16(version);
-  out.u16(0);
+  out.u16(unmodelled ? has_unmodelled : 0);
   out.u32(static_cast<std::uint32_t>(canonical.groups.size()));
   for(auto const& group : canonical.groups)
   {
@@ -414,6 +488,20 @@ auto encode_pcov(coverage_set const& set) -> std::vector<std::byte>
       out.u32(edge.to);
       out.u64(edge.hits);
     }
+    if(unmodelled)
+    {
+      out.u32(static_cast<std::uint32_t>(group.unmodelled.size()));
+      for(auto const& access : group.unmodelled)
+      {
+        out.u32(access.pc);
+        out.u32(access.offset);
+        out.u32(
+            std::uint32_t{std::to_underlying(access.reason)} << 8 | std::uint32_t{access.write});
+        out.u64(access.hits);
+        out.text(access.peripheral);
+        out.text(access.reg);
+      }
+    }
   }
   return out.take();
 }
@@ -426,25 +514,37 @@ auto decode_pcov(std::span<std::byte const> bytes, std::string_view file) -> cov
   {
     in.fail(0, "the PCOV magic");
   }
-  if(in.scalar<std::uint16_t>("the version") != version)
+  auto const found = in.scalar<std::uint16_t>("the version");
+  if(found != 1 and found != version)
   {
-    in.fail(4, "version 1");
+    in.fail(4, "version 1 or 2");
   }
-  if(in.scalar<std::uint16_t>("the flags") != 0)
+  auto const flags = in.scalar<std::uint16_t>("the flags");
+  if(found == 1 and flags != 0)
   {
-    in.fail(6, "flags 0");
+    in.fail(6, "flags 0 in version 1");
+  }
+  if((flags & ~has_unmodelled) != 0)
+  {
+    in.fail(6, "flags 0 or 1");
   }
   auto const   groups = in.count(0, "the group count");
   coverage_set set;
   for(std::uint32_t index = 0; index < groups; ++index)
   {
     auto const at    = in.offset();
-    auto       group = decode_group(in);
+    auto       group = decode_group(in, (flags & has_unmodelled) != 0);
     if(not set.groups.empty() and digests(set.groups.back()) >= digests(group))
     {
       in.fail(at, "groups sorted by their image digests, each once");
     }
     set.groups.push_back(std::move(group));
+  }
+  if((flags & has_unmodelled) != 0
+     and std::ranges::all_of(
+         set.groups, [](coverage_group const& group) { return group.unmodelled.empty(); }))
+  {
+    in.fail(6, "flags bit 0 only with an unmodelled access");
   }
   if(not in.done())
   {

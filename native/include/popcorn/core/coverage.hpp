@@ -2,6 +2,8 @@
 
 #include <popcorn/core/types.hpp>
 
+#include <reflex/enum.hpp>
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -59,6 +61,46 @@ struct cut_counter
 };
 
 /**
+ * @brief Why a CPU access reached a register no model implements. none: a register a model
+ *        serves. no_register: an offset of a peripheral window where the description has no
+ *        register. storage_only: a register the model claims and calls storage only,
+ *        periph::model::storage_only. no_model: a register of a peripheral without a model.
+ *        unimplemented: a register of a modelled peripheral its model does not claim. raz_wi: an
+ *        access to a machine_options::raz_wi range.
+ */
+enum class[[= reflex::derive{reflex::Format}]] unmodelled_reason : std::uint8_t
+{
+  none,
+  no_register,
+  storage_only,
+  no_model,
+  unimplemented,
+  raz_wi,
+};
+
+/** @brief Count of CPU accesses from one instruction to one register no model implements. */
+struct unmodelled_access
+{
+  /** @brief Address of the accessing instruction. */
+  address pc{};
+  /** @brief Peripheral as the window names it, an alias's own name, or the raz_wi range name. */
+  std::string peripheral{};
+  /** @brief Register name, empty where the description has none. */
+  std::string reg{};
+  /** @brief Byte offset of the accessed word in the peripheral or range, a multiple of 4. */
+  std::uint32_t offset{};
+  /** @brief Whether the access was a write. */
+  bool write{};
+  /** @brief Why the register is unmodelled. */
+  unmodelled_reason reason{};
+  /** @brief Times it was accessed. */
+  std::uint64_t hits{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(unmodelled_access const&, unmodelled_access const&) -> bool = default;
+};
+
+/**
  * @brief Raw coverage counters of a machine, plain data: the input of `.pcov` files, lcov and
  *        drcov exports, never lcov text. A `.pcov` file stores them per translated block with
  *        64-bit sums, so files from runs with different block boundaries merge.
@@ -72,6 +114,9 @@ struct coverage_data
   /** @brief Blocks entered but left before their end, ordered by start then at. Their entries
    * are in blocks too. */
   std::vector<cut_counter> cuts{};
+  /** @brief CPU accesses to unmodelled registers, ordered by pc, peripheral, register, offset,
+   * write and reason. Empty unless coverage was enabled with record_unmodelled. */
+  std::vector<unmodelled_access> unmodelled{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(coverage_data const&, coverage_data const&) -> bool = default;

@@ -206,7 +206,7 @@ TEST_CASE("malformed and non-canonical files are refused")
   bad[0]           = std::byte{'X'};
   CHECK(throws_format(bad));
   bad    = bytes;
-  bad[4] = std::byte{2};
+  bad[4] = std::byte{3};
   CHECK(throws_format(bad));
   auto trailing = bytes;
   trailing.push_back(std::byte{0});
@@ -404,4 +404,126 @@ TEST_CASE("each rejection of a patched byte: ranges, edges and groups out of ord
   CHECK_FALSE(throws_format(groups));
   CHECK(throws_format(swap_records(groups, 12, 72, 60)));
   CHECK(throws_format(copy_record(groups, 12, 72, 60)));
+}
+
+namespace
+{
+using popcorn::core::unmodelled_access;
+using popcorn::core::unmodelled_reason;
+
+auto with_unmodelled(std::vector<unmodelled_access> accesses) -> obs::coverage_set
+{
+  auto set                 = sample();
+  set.groups[0].unmodelled = std::move(accesses);
+  return set;
+}
+
+auto rw_read(std::uint64_t hits) -> unmodelled_access
+{
+  return {
+      .pc         = 0x102,
+      .peripheral = "TESTDEV",
+      .reg        = "RW",
+      .offset     = 8,
+      .reason     = unmodelled_reason::unimplemented,
+      .hits       = hits};
+}
+
+auto rw_write(std::uint64_t hits) -> unmodelled_access
+{
+  return {
+      .pc         = 0x102,
+      .peripheral = "TESTDEV",
+      .reg        = "RW",
+      .offset     = 8,
+      .write      = true,
+      .reason     = unmodelled_reason::unimplemented,
+      .hits       = hits};
+}
+
+constexpr std::size_t access_record = 4 + 4 + 4 + 8 + 4 + 8 + 4 + 4;
+}
+
+TEST_CASE("a version 1 file decodes with no unmodelled access and encodes as version 2")
+{
+  auto bytes = obs::encode_pcov(sample());
+  REQUIRE(bytes[4] == std::byte{2});
+  REQUIRE(bytes[6] == std::byte{0});
+  auto old = bytes;
+  old[4]   = std::byte{1};
+  CHECK(obs::decode_pcov(old) == sample());
+  CHECK(obs::encode_pcov(obs::decode_pcov(old)) == bytes);
+  old[6] = std::byte{1};
+  CHECK(throws_format(old));
+  auto later = bytes;
+  later[4]   = std::byte{3};
+  CHECK(throws_format(later));
+}
+
+TEST_CASE("unmodelled accesses round trip byte for byte and merges sum them per key")
+{
+  auto const set   = with_unmodelled({rw_read(3), rw_write(2)});
+  auto const bytes = obs::encode_pcov(set);
+  CHECK(bytes[6] == std::byte{1});
+  CHECK(bytes.size() == obs::encode_pcov(sample()).size() + 4 + 2 * access_record);
+  CHECK(obs::decode_pcov(bytes) == set);
+  CHECK(obs::encode_pcov(obs::decode_pcov(bytes)) == bytes);
+
+  auto const other = with_unmodelled({rw_read(4)});
+  auto const sum   = merged({set, other});
+  CHECK(sum.groups[0].unmodelled == std::vector{rw_read(7), rw_write(2)});
+  CHECK(obs::encode_pcov(merged({other, set})) == obs::encode_pcov(sum));
+  CHECK(merged({set, sample()}).groups[0].unmodelled == set.groups[0].unmodelled);
+  CHECK(obs::encode_pcov(with_unmodelled({rw_write(2), rw_read(3)})) == obs::encode_pcov(set));
+}
+
+TEST_CASE("malformed and non-canonical unmodelled accesses are refused")
+{
+  auto const bytes  = obs::encode_pcov(with_unmodelled({rw_read(3), rw_write(2)}));
+  auto const first  = bytes.size() - 2 * access_record;
+  auto const second = bytes.size() - access_record;
+  CHECK_FALSE(throws_format(bytes));
+  CHECK(throws_format(swap_records(bytes, first, second, access_record)));
+  CHECK(throws_format(copy_record(bytes, first, second, access_record)));
+  CHECK(throws_format(patch_u32(bytes, first + 12, 0)));
+  CHECK(throws_format(patch_u32(bytes, first + 8, 0)));
+  CHECK(throws_format(patch_u32(bytes, first + 8, 6u << 8)));
+  CHECK(throws_format(patch_u32(bytes, first + 8, (4u << 8) | 2)));
+  CHECK_FALSE(throws_format(patch_u32(bytes, first + 8, 5u << 8)));
+
+  auto const             one_access = obs::encode_pcov(with_unmodelled({rw_read(3)}));
+  std::vector<std::byte> empty_section{
+      one_access.begin(), one_access.end() - static_cast<std::ptrdiff_t>(access_record)};
+  empty_section = patch_u32(empty_section, empty_section.size() - 4, 0);
+  CHECK(throws_format(empty_section));
+}
+
+TEST_CASE("collect keeps the unmodelled accesses a machine counted")
+{
+  elf_machine f{"mmio"};
+  f.target->enable_coverage({}, true);
+  f.set("pc", sym("mmio", "read_entry"));
+  f.set("r0", 4);
+  f.set("r2", 0x4002'0004);
+  REQUIRE(
+      f.target
+          ->run_slice({.wall_budget = std::chrono::seconds{60}, .until = sym("mmio", "read_done")})
+          .stopped->reason
+      == stop_reason::address);
+  auto const set = obs::collect(*f.target, sources("mmio"));
+  REQUIRE(set.groups.size() == 1);
+  CHECK(
+      set.groups[0].unmodelled
+      == std::vector<unmodelled_access>{
+          {.pc         = sym("mmio", "read_entry") + 2,
+           .peripheral = "UNMODELLED",
+           .reg        = "STAT",
+           .offset     = 4,
+           .reason     = unmodelled_reason::no_model,
+           .hits       = 4}
+  });
+  auto const bytes = obs::encode_pcov(set);
+  CHECK(obs::decode_pcov(bytes) == set);
+  CHECK(obs::encode_pcov(merged({set, set})) != bytes);
+  CHECK(merged({set, set}).groups[0].unmodelled[0].hits == 8);
 }

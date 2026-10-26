@@ -6,6 +6,7 @@
 #include "memory_map.hpp"
 
 #include <popcorn/arch/arch.hpp>
+#include <popcorn/core/coverage.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/trace.hpp>
 #include <popcorn/periph/firewall.hpp>
@@ -212,10 +213,45 @@ struct machine::peripheral_slot
   std::vector<std::uint8_t> logged = std::vector<std::uint8_t>(claimed.size(), 0);
   /** @brief Offsets without a register whose access was logged. */
   std::set<std::uint32_t> warned{};
+  /** @brief Why a CPU access to each storage word is unmodelled, none for a served word. Set
+   * once the model is attached, by classify_unmodelled(). */
+  std::vector<unmodelled_reason> unmodelled_reasons{};
   /** @brief aux of an mmio record per rule index of the layout, less one. */
   std::vector<std::uint16_t> trace_ids{};
   /** @brief aux per byte offset of the words holding several registers, sorted by offset. */
   std::vector<std::pair<std::uint32_t, std::uint16_t>> byte_trace_ids{};
+
+  /** @brief Fills unmodelled_reasons from the claims, the model's storage_only() answers and
+   * the layout. */
+  void classify_unmodelled()
+  {
+    unmodelled_reasons.assign(layout.words(), unmodelled_reason::none);
+    for(auto const [word, reason] : std::views::enumerate(unmodelled_reasons))
+    {
+      auto const at = static_cast<std::uint32_t>(word);
+      if(claimed[at] != 0)
+      {
+        reason =
+            model->storage_only(at * 4) ? unmodelled_reason::storage_only : unmodelled_reason::none;
+      }
+      else if(layout.find(at) == nullptr)
+      {
+        reason = unmodelled_reason::no_register;
+      }
+      else
+      {
+        reason = model ? unmodelled_reason::unimplemented : unmodelled_reason::no_model;
+      }
+    }
+  }
+
+  /** @brief Why a CPU access to the word at @p word is unmodelled, no_register past the
+   * layout. */
+  [[nodiscard]] auto unmodelled_at(std::uint32_t word) const noexcept -> unmodelled_reason
+  {
+    return word < unmodelled_reasons.size() ? unmodelled_reasons[word]
+                                            : unmodelled_reason::no_register;
+  }
 
   /** @brief aux of an mmio record at byte @p offset, trace_id_overflow where no register lies. */
   [[nodiscard]] auto trace_id_at(std::uint32_t offset) const noexcept -> std::uint16_t
@@ -285,6 +321,103 @@ void flat_edge_table::count(std::uint64_t key)
     if(held.key == key)
     {
       ++held.hits;
+      return;
+    }
+  }
+}
+
+/**
+ * @brief Counts of CPU accesses to unmodelled registers by `(pc, window, word, write)`, open
+ *        addressing over a power-of-two table. The slot counted last is tried first, so a
+ *        polling loop that repeats one access skips the hash.
+ */
+class unmodelled_table
+{
+public:
+  /** @brief One counted access. */
+  struct entry
+  {
+    /** @brief `pc << 32 | word`. */
+    std::uint64_t at{};
+    /** @brief `window << 1 | write`. */
+    std::uint32_t where{};
+    /** @brief Why the word is unmodelled. */
+    unmodelled_reason reason{};
+    /** @brief Times counted, 0 for a free slot. */
+    std::uint64_t hits{};
+  };
+
+  /**
+   * @brief Adds one to the count of an access.
+   * @param pc Address of the accessing instruction.
+   * @param window Window id, mmio_window::id or raz_window::id.
+   * @param word Word index in the window's peripheral or range.
+   * @param write Whether the access is a write.
+   * @param reason Why the word is unmodelled, fixed per window and word.
+   */
+  [[gnu::always_inline]] inline void count(
+      address           pc,
+      std::uint32_t     window,
+      std::uint32_t     word,
+      bool              write,
+      unmodelled_reason reason);
+
+  /** @brief Accesses with a non-zero count, in slot order. */
+  [[nodiscard]] auto entries() const -> std::vector<entry>;
+
+  /** @brief Drops every access. */
+  void clear() noexcept;
+
+private:
+  static auto hash(std::uint64_t at, std::uint32_t where) noexcept -> std::uint64_t
+  {
+    return (at ^ std::uint64_t{where} << 13) * 0x9e37'79b9'7f4a'7c15;
+  }
+
+  void grow();
+
+  std::vector<entry> slots_{};
+  std::size_t        used_ = 0;
+  std::size_t        last_ = 0;
+};
+
+void unmodelled_table::count(
+    address           pc,
+    std::uint32_t     window,
+    std::uint32_t     word,
+    bool              write,
+    unmodelled_reason reason)
+{
+  auto const at    = std::uint64_t{pc} << 32 | word;
+  auto const where = window << 1 | std::uint32_t{write};
+  if(last_ < slots_.size())
+  {
+    auto& cached = slots_[last_];
+    if(cached.at == at and cached.where == where and cached.hits != 0)
+    {
+      ++cached.hits;
+      return;
+    }
+  }
+  if(2 * (used_ + 1) > slots_.size())
+  {
+    grow();
+  }
+  auto const mask = slots_.size() - 1;
+  for(auto index = hash(at, where) >> 32 & mask;; index = (index + 1) & mask)
+  {
+    auto& held = slots_[index];
+    if(held.hits == 0)
+    {
+      held  = {.at = at, .where = where, .reason = reason, .hits = 1};
+      last_ = index;
+      ++used_;
+      return;
+    }
+    if(held.at == at and held.where == where)
+    {
+      ++held.hits;
+      last_ = index;
       return;
     }
   }
@@ -701,6 +834,8 @@ struct machine::run_state
     /** @brief Index in the description of the peripheral the window reaches, the aliased one
      * for an alias window. */
     std::size_t serving{};
+    /** @brief Index in windows, the window id of unmodelled access counts. */
+    std::uint32_t id{};
   };
 
   /** @brief An intercept added with machine::add_intercept(). */
@@ -1108,6 +1243,11 @@ struct machine::run_state
   bool coverage_on = false;
   /** @brief Coverage counters. */
   coverage_state coverage{};
+  /** @brief Whether CPU accesses to unmodelled registers are counted, with a reference on
+   * exact_pc held. */
+  bool record_unmodelled = false;
+  /** @brief Counts of CPU accesses to unmodelled registers. */
+  unmodelled_table unmodelled_hits{};
   /** @brief Whether some sink selects block records. */
   bool sinks_want_block = false;
   /** @brief Whether block records go to the trace ring. */
@@ -1378,6 +1518,23 @@ struct machine::run_state
    */
   void note_unmodelled(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
 
+  /**
+   * @brief Counts a CPU access to the word @p word of @p window when the word is unmodelled,
+   *        at the exact pc. Called only while record_unmodelled holds.
+   */
+  void count_unmodelled(mmio_window const& window, std::uint32_t word, bool write)
+  {
+    auto const reason = window.slot->unmodelled_at(word);
+    if(reason != unmodelled_reason::none)
+    {
+      unmodelled_hits.count(arch->pc(), window.id, word, write, reason);
+    }
+  }
+
+  /** @brief The counted unmodelled accesses, named, ordered as coverage_data::unmodelled. */
+  [[nodiscard]] auto unmodelled_accesses() const -> std::vector<unmodelled_access>;
+  [[nodiscard]] auto raz_name(std::size_t index) const -> std::string;
+
   /** @brief Logs the first access to an offset without register. */
   void warn_unregistered(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
 
@@ -1434,6 +1591,9 @@ struct machine::run_state
     address_range const* range{};
     /** @brief Whether its first access was logged. */
     bool warned{};
+    /** @brief Window id of unmodelled access counts: windows.size() plus its index in
+     * raz_windows. */
+    std::uint32_t id{};
   };
 
   /** @brief The machine_options::raz_wi windows, in option order. */
@@ -2039,6 +2199,18 @@ struct machine_internals
   [[nodiscard]] static auto arch(machine const& target) noexcept -> arch::arch const&
   {
     return *target.arch_;
+  }
+
+  /** @brief Takes a reference on the exact pc memory hook of @p target, between slices. */
+  static void acquire_exact_pc(machine& target)
+  {
+    target.run_->acquire_exact_pc();
+  }
+
+  /** @brief Whether the exact pc memory hook of @p target is installed. */
+  [[nodiscard]] static auto exact_pc_installed(machine const& target) noexcept -> bool
+  {
+    return target.run_->exact_pc.installed();
   }
 
   /** @brief The bus firewall a model of @p target installed, or null. */

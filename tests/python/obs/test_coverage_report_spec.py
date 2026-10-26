@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import stat
+import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -543,9 +544,7 @@ def test_html_cleans_up_when_genhtml_vanishes_after_the_check(
     assert not out.exists()
 
 
-def test_html_kills_the_children_of_a_timed_out_genhtml(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _fake_spawning_genhtml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     pids = tmp_path / "child.pid"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -559,19 +558,82 @@ def test_html_kills_the_children_of_a_timed_out_genhtml(
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", str(bin_dir))
-    monkeypatch.setattr("popcorn.coverage.report._genhtml.GENHTML_TIMEOUT", 1.0)
-    monkeypatch.setattr("popcorn.coverage.report._spec.GENHTML_TIMEOUT", 1.0)
+    return pids
+
+
+def _wait_for_pid(pids: Path) -> int:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if pids.exists() and pids.read_text():
+            return int(pids.read_text())
+        time.sleep(0.02)
+    raise AssertionError("the fake genhtml wrote no pid")
+
+
+def _is_gone(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[0]
+    except FileNotFoundError:
+        return True
+    return state in ("Z", "X")
+
+
+def _assert_dies(pid: int) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not _is_gone(pid):
+        time.sleep(0.05)
+    assert _is_gone(pid)
+
+
+def test_html_kills_the_children_of_a_timed_out_genhtml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pids = _fake_spawning_genhtml(tmp_path, monkeypatch)
+    monkeypatch.setattr("popcorn.coverage.report._genhtml.GENHTML_TIMEOUT", 3.0)
+    monkeypatch.setattr("popcorn.coverage.report._spec.GENHTML_TIMEOUT", 3.0)
     source = tmp_path / "in.info"
     source.write_text(TRACEFILE)
     result = generate(source, [ReportSpec("html", tmp_path / "out")], root=tmp_path)
-    assert result.problems == ("html report not written, genhtml ran past 1 s",)
-    child = int(pids.read_text())
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        try:
-            os.kill(child, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.05)
-    with pytest.raises(ProcessLookupError):
-        os.kill(child, 0)
+    assert result.problems == ("html report not written, genhtml ran past 3 s",)
+    _assert_dies(_wait_for_pid(pids))
+
+
+def test_html_kills_genhtml_on_an_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pids = _fake_spawning_genhtml(tmp_path, monkeypatch)
+    real: Callable[..., object] = vars(subprocess.Popen)["communicate"]
+    calls: list[int] = []
+
+    def interrupted(self: subprocess.Popen[str], *args: object, **kwargs: object) -> object:
+        calls.append(1)
+        if len(calls) == 1:
+            _wait_for_pid(pids)
+            raise KeyboardInterrupt
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    out = tmp_path / "out"
+    with pytest.raises(KeyboardInterrupt):
+        generate(source, [ReportSpec("html", out)], root=tmp_path)
+    _assert_dies(_wait_for_pid(pids))
+    assert not out.exists()
+
+
+def test_html_refuses_a_dangling_git_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / ".git").symlink_to(tmp_path / "nowhere")
+    (site / "index.html").write_text("old")
+    (site / "gcov.css").write_text("old")
+    (site / ".popcorn-html-report").write_text("")
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    result = generate(source, [ReportSpec("html", site)], root=tmp_path)
+    assert result.problems == (f"html report not written, {site} holds a .git entry",)
+    assert (site / "index.html").read_text() == "old"

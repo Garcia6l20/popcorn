@@ -2,7 +2,9 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/intercept.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/services.hpp>
 #include <popcorn/core/trace.hpp>
+#include <popcorn/periph/model.hpp>
 
 #include "../../../native/src/core/machine_impl.hpp"
 #include "../support/machine_fixture.hpp"
@@ -12,10 +14,15 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <map>
+#include <memory>
 #include <optional>
 #include <ranges>
+#include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -294,4 +301,250 @@ TEST_CASE("a block left at an exit after all its counted instructions is cut unl
   CHECK(left(body, 5, loop, true).empty());
   CHECK(left(entry, 2, body, true).empty());
   CHECK(left(entry, 0, entry, true).empty());
+}
+
+namespace
+{
+using popcorn::initiator;
+using reason = core::unmodelled_reason;
+
+constexpr address testdev    = 0x4001'0000;
+constexpr address unmodelled = 0x4002'0000;
+constexpr address raz        = 0x4004'0000;
+constexpr address data_reg   = 0x58;
+constexpr address ctrl_reg   = 0x5c;
+
+class storage_model final : public popcorn::periph::model
+{
+public:
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {"DATA", "CTRL"};
+  }
+  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      popcorn::periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+  [[nodiscard]] auto storage_only(std::uint32_t offset) const -> bool override
+  {
+    return offset == ctrl_reg;
+  }
+};
+
+auto mmio_fixture() -> fixture
+{
+  core::machine_options options;
+  options.models.emplace(
+      "TESTDEV", [](popcorn::periph::model_context&, popcorn::peripheral_desc const&) {
+        return std::make_shared<storage_model>();
+      });
+  options.raz_wi = {
+      {.name = "RAZ", .start = raz, .size = 0x1000}
+  };
+  return fixture{m33(), "mmio", std::move(options)};
+}
+
+auto mmio(std::string_view name) -> address
+{
+  return sym("mmio", name);
+}
+
+void loop(fixture const& f, std::string_view entry, address target, std::uint32_t n)
+{
+  f.set("pc", mmio(entry));
+  f.set("r0", n);
+  f.set("r2", target);
+  auto const done = entry == "read_entry" ? mmio("read_done") : mmio("write_done");
+  REQUIRE(f.run_to_stop({.until = done}).reason == stop_reason::address);
+}
+
+auto access(
+    address       pc,
+    std::string   peripheral,
+    std::string   reg,
+    std::uint32_t offset,
+    bool          write,
+    reason        why,
+    std::uint64_t hits) -> core::unmodelled_access
+{
+  return {
+      .pc         = pc,
+      .peripheral = std::move(peripheral),
+      .reg        = std::move(reg),
+      .offset     = offset,
+      .write      = write,
+      .reason     = why,
+      .hits       = hits};
+}
+
+auto services(fixture const& f) -> popcorn::core::machine_services&
+{
+  return core::machine_internals::services(*f.target);
+}
+}
+
+TEST_CASE("each unmodelled reason is counted at the exact accessing pc, served registers are not")
+{
+  auto f = mmio_fixture();
+  f.target->enable_coverage({}, true);
+  for(auto const at :
+      {testdev + data_reg, testdev + ctrl_reg, testdev + 0x08, testdev + 0x200, unmodelled, raz + 8,
+       address{0x5001'0008}})
+  {
+    loop(f, "read_entry", at, 3);
+  }
+  loop(f, "write_entry", testdev + 0x08, 2);
+  auto const read  = mmio("read_entry") + 2;
+  auto const write = mmio("write_entry") + 2;
+  CHECK(
+      f.target->coverage().unmodelled
+      == std::vector{
+          access(read, "RAZ", "", 8, false, reason::raz_wi, 3),
+          access(read, "SEC_TESTDEV", "RW", 8, false, reason::unimplemented, 3),
+          access(read, "TESTDEV", "", 0x200, false, reason::no_register, 3),
+          access(read, "TESTDEV", "CTRL", ctrl_reg, false, reason::storage_only, 3),
+          access(read, "TESTDEV", "RW", 8, false, reason::unimplemented, 3),
+          access(read, "UNMODELLED", "DATA", 0, false, reason::no_model, 3),
+          access(write, "TESTDEV", "RW", 8, true, reason::unimplemented, 2),
+      });
+  f.target->clear_coverage();
+  CHECK(f.target->coverage().unmodelled.empty());
+}
+
+TEST_CASE("raz_wi ranges with no name or a shared name count apart")
+{
+  core::machine_options options;
+  options.raz_wi = {
+      {.name = "",     .start = raz,          .size = 0x1000},
+      {.name = "",     .start = raz + 0x1000, .size = 0x1000},
+      {.name = "TWIN", .start = raz + 0x2000, .size = 0x1000},
+      {.name = "TWIN", .start = raz + 0x3000, .size = 0x1000},
+      {.name = "ONE",  .start = raz + 0x4000, .size = 0x1000},
+  };
+  fixture f{m33(), "mmio", std::move(options)};
+  f.target->enable_coverage({}, true);
+  auto&      bus = services(f);
+  auto const pc  = static_cast<address>(f.reg("pc"));
+  for(std::uint32_t range = 0; range < 5; ++range)
+  {
+    REQUIRE(bus.read(raz + 0x1000 * range, 4, initiator::cpu));
+  }
+  CHECK(
+      f.target->coverage().unmodelled
+      == std::vector{
+          access(pc, "ONE", "", 0, false, reason::raz_wi, 1),
+          access(pc, "TWIN[2]", "", 0, false, reason::raz_wi, 1),
+          access(pc, "TWIN[3]", "", 0, false, reason::raz_wi, 1),
+          access(pc, "raz_wi[0]", "", 0, false, reason::raz_wi, 1),
+          access(pc, "raz_wi[1]", "", 0, false, reason::raz_wi, 1),
+      });
+}
+
+TEST_CASE("only CPU accesses to unmodelled registers are counted, debugger and DMA ones are not")
+{
+  auto f = mmio_fixture();
+  f.target->enable_coverage({}, true);
+  auto& bus = services(f);
+  REQUIRE(bus.read(testdev + 0x08, 4, initiator::dma));
+  REQUIRE(bus.write(testdev + 0x08, 4, 1, initiator::dma));
+  REQUIRE(bus.read(raz + 4, 4, initiator::dma));
+  REQUIRE(bus.read(testdev + 0x08, 4, initiator::debugger));
+  CHECK(f.target->coverage().unmodelled.empty());
+  REQUIRE(bus.read(raz + 4, 4, initiator::cpu));
+  CHECK(
+      f.target->coverage().unmodelled
+      == std::vector{access(f.reg("pc"), "RAZ", "", 4, false, reason::raz_wi, 1)});
+}
+
+TEST_CASE("a read and a write of one word from one pc count apart")
+{
+  auto f = mmio_fixture();
+  f.target->enable_coverage({}, true);
+  auto&      bus = services(f);
+  auto const pc  = static_cast<address>(f.reg("pc"));
+  for(int round = 0; round < 2; ++round)
+  {
+    REQUIRE(bus.read(testdev + 0x08, 4, initiator::cpu));
+    REQUIRE(bus.write(testdev + 0x08, 4, 1, initiator::cpu));
+  }
+  CHECK(
+      f.target->coverage().unmodelled
+      == std::vector{
+          access(pc, "TESTDEV", "RW", 8, false, reason::unimplemented, 2),
+          access(pc, "TESTDEV", "RW", 8, true, reason::unimplemented, 2),
+      });
+}
+
+TEST_CASE("a polling loop keeps one entry, many distinct accesses keep one each")
+{
+  auto f = mmio_fixture();
+  f.target->enable_coverage({}, true);
+  loop(f, "read_entry", testdev + 0x08, 1000);
+  CHECK(
+      f.target->coverage().unmodelled
+      == std::vector{
+          access(mmio("read_entry") + 2, "TESTDEV", "RW", 8, false, reason::unimplemented, 1000)});
+  f.target->clear_coverage();
+  auto&      bus = services(f);
+  auto const pc  = static_cast<address>(f.reg("pc"));
+  for(std::uint32_t word = 0; word < 1000; ++word)
+  {
+    REQUIRE(bus.read(raz + 4 * word, 4, initiator::cpu));
+    REQUIRE(bus.read(raz + 4 * word, 4, initiator::cpu));
+  }
+  auto const found = f.target->coverage().unmodelled;
+  REQUIRE(found.size() == 1000);
+  CHECK(std::ranges::all_of(found, [&](core::unmodelled_access const& held) {
+    return held.pc == pc and held.hits == 2 and held.reason == reason::raz_wi;
+  }));
+  CHECK(std::ranges::is_sorted(found, {}, &core::unmodelled_access::offset));
+}
+
+TEST_CASE("recording holds the exact pc hook, coverage without it does not")
+{
+  auto       f         = mmio_fixture();
+  auto const installed = [&] { return core::machine_internals::exact_pc_installed(*f.target); };
+  f.target->enable_coverage({});
+  CHECK_FALSE(installed());
+  CHECK_FALSE(f.target->unmodelled_recorded());
+  loop(f, "read_entry", testdev + 0x08, 3);
+  CHECK(f.target->coverage().unmodelled.empty());
+
+  f.target->enable_coverage({}, true);
+  CHECK(installed());
+  CHECK(f.target->unmodelled_recorded());
+  f.target->enable_coverage({}, true);
+  f.target->enable_coverage({});
+  CHECK_FALSE(installed());
+  CHECK_FALSE(f.target->unmodelled_recorded());
+
+  f.target->enable_coverage({}, true);
+  f.target->enable_coverage({}, true);
+  f.target->disable_coverage();
+  CHECK_FALSE(installed());
+  CHECK_FALSE(f.target->unmodelled_recorded());
+  loop(f, "read_entry", testdev + 0x08, 3);
+  CHECK(f.target->coverage().unmodelled.empty());
 }
