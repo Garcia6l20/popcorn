@@ -741,3 +741,24 @@ def test_html_report_renders_the_documented_genhtml_message(pytester: pytest.Pyt
         f"--popcorn-cov-report=html:{out}",
     )
     assert (out / "index.html").is_file()
+
+
+GUIDE_PYPROJECT = ROOT / "tests" / "docs" / "guide" / "coverage_pyproject.toml"
+
+
+def test_the_documented_pyproject_block_configures_the_reports(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    (pytester.path / "pyproject.toml").write_text(GUIDE_PYPROJECT.read_text())
+    result = pytester.runpytest(*NO_XDIST, "--popcorn-cov")
+    result.assert_outcomes(passed=30)
+    result.stdout.fnmatch_lines(
+        ["FAIL Required coverage of 80% not reached.*", "*firmware coverage*", "TOTAL*"]
+    )
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    out = pytester.path / "build" / "cov"
+    assert (out / "html" / "index.html").is_file()
+    assert cobertura(out / "coverage.xml").tag == "coverage"
+    assert sources(out / "firmware.info") == {
+        "tests/firmware/api/callee.c",
+        "tests/firmware/api/driver.c",
+    }

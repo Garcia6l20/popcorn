@@ -1,0 +1,10 @@
+[tool.pytest.ini_options]
+popcorn_cov_report = [
+    "term",
+    "html:build/cov/html",
+    "xml:build/cov/coverage.xml",
+    "lcov:build/cov/firmware.info",
+]
+popcorn_cov_include = ["**/firmware/**"]
+popcorn_cov_omit = ["**/vendor/**"]
+popcorn_cov_fail_under = "80"

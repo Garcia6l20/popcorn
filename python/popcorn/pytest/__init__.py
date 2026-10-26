@@ -151,12 +151,14 @@ register. `mark` keeps the counts and adds an `Unmodelled` column, the lines per
 `term` table, colours the lines in the built-in `html` report with a tooltip of
 `peripheral.register (reason, N hits)`, and writes `html` with the built-in renderer even when
 genhtml is installed, when a kept line is marked. An `lcov` report then has a sidecar
-`<lcov>.unmodelled.json` next to it. `miss` counts those lines, the functions whose only hit lines
-are among them and their branches as not hit in every report, and rewrites the `lcov` report. The
-mode is part of the boot cache key. A line is marked when one of its instructions accessed an
-unmodelled register.
+`<lcov>.unmodelled.json` next to it, and an `lcov` report that applies no sidecar removes the one
+at its path. The `term` report ends with the count of accesses from code with no line in the
+report. `miss` counts those lines, the functions whose only hit lines are among them and their
+branches as not hit in every report, and rewrites the `lcov` report. The mode is part of the boot
+cache key. A line is marked when one of its instructions accessed an unmodelled register.
 The include and omit globs match a source path as written and relative to the rootdir, `**`
-included, and a filter rewrites the lcov files from the kept files. An interrupted session
+included: `**/tests/**` matches `tests/a.c` and `/home/u/x/tests/a.c`, where `*/tests/*` matches
+neither. A filter rewrites the lcov files from the kept files. An interrupted session
 keeps the directory and writes no report. A crash or SIGKILL leaves the directory behind. xdist
 workers on other hosts, `--tx ssh=...`, are not supported: they share the directory by path.
 
