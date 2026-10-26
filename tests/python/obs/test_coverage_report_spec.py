@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import stat
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -54,18 +56,13 @@ def test_generate_lcov_filters_and_counts_the_kept_files(tmp_path: Path) -> None
     assert result.totals.lines.found == 2
 
 
-def test_generate_refuses_what_it_cannot_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("PATH", str(tmp_path))
+def test_generate_refuses_what_it_cannot_write(tmp_path: Path) -> None:
     source = tmp_path / "in.info"
     source.write_text(TRACEFILE)
     with pytest.raises(ValueError):
         generate(source, [ReportSpec("lcov")], root=tmp_path)
     with pytest.raises(ValueError):
         generate(source, [ReportSpec("xml")], root=tmp_path)
-    with pytest.raises(NotImplementedError):
-        generate(source, [ReportSpec("html", tmp_path / "html")], root=tmp_path)
 
 
 def test_generate_returns_the_term_text_and_writes_nothing(tmp_path: Path) -> None:
@@ -79,17 +76,10 @@ def test_generate_returns_the_term_text_and_writes_nothing(tmp_path: Path) -> No
     assert generate(source, [], root=tmp_path).term is None
 
 
-def test_generate_checks_every_spec_before_writing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("PATH", str(tmp_path))
+def test_generate_checks_every_spec_before_writing(tmp_path: Path) -> None:
     source = tmp_path / "in.info"
     source.write_text(TRACEFILE)
     out = tmp_path / "out.info"
-    with pytest.raises(NotImplementedError):
-        generate(
-            source, [ReportSpec("lcov", out), ReportSpec("html", tmp_path / "c")], root=tmp_path
-        )
     with pytest.raises(ValueError):
         generate(source, [ReportSpec("lcov", out), ReportSpec("lcov")], root=tmp_path)
     assert not out.exists()
@@ -378,3 +368,210 @@ def test_html_keeps_a_symbolic_link_to_a_report(
         assert result.problems == (f"html report not written, {target} is a symbolic link",)
     assert (real / "index.html").read_text() == "mine"
     assert not (tmp_path / "nowhere").exists()
+
+
+def test_html_without_genhtml_is_written_by_the_builtin_renderer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    out = tmp_path / "out"
+    result = generate(source, [ReportSpec("html", out)], root=tmp_path)
+    assert result.problems == ()
+    assert result.written == (out,)
+    assert sorted(path.name for path in out.iterdir()) == [
+        ".popcorn-html-report",
+        "index.html",
+        "src-0.html",
+        "src-1.html",
+        "style.css",
+    ]
+
+
+def test_html_builtin_keeps_the_target_rules_of_genhtml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    (foreign / "notes.txt").write_text("mine")
+    (foreign / "index.html").write_text("mine")
+    (foreign / "style.css").write_text("mine")
+    result = generate(source, [ReportSpec("html", foreign)], root=tmp_path)
+    assert result.written == ()
+    assert sorted(path.name for path in foreign.iterdir()) == [
+        "index.html",
+        "notes.txt",
+        "style.css",
+    ]
+    link = tmp_path / "link"
+    link.symlink_to(foreign, target_is_directory=True)
+    result = generate(source, [ReportSpec("html", link)], root=tmp_path)
+    assert result.problems == (f"html report not written, {link} is a symbolic link",)
+    assert (foreign / "notes.txt").read_text() == "mine"
+    here = tmp_path / "here"
+    here.mkdir()
+    (here / "index.html").write_text("mine")
+    (here / ".popcorn-html-report").write_text("")
+    monkeypatch.chdir(here)
+    result = generate(source, [ReportSpec("html", here)], root=tmp_path)
+    assert result.problems == (f"html report not written, {here} holds the working directory",)
+    assert (here / "index.html").read_text() == "mine"
+
+
+def test_html_builtin_replaces_an_earlier_builtin_report_and_a_genhtml_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    out = tmp_path / "out"
+    assert generate(source, [ReportSpec("html", out)], root=tmp_path).problems == ()
+    (out / "stale.txt").write_text("old")
+    (out / "index.html").write_text("old")
+    result = generate(source, [ReportSpec("html", out)], root=tmp_path)
+    assert result.problems == ()
+    assert not (out / "stale.txt").exists()
+    assert (out / "index.html").read_text() != "old"
+    assert (out / ".popcorn-html-report").is_file()
+    earlier = tmp_path / "genhtml"
+    earlier.mkdir()
+    (earlier / "index.html").write_text("old")
+    (earlier / "gcov.css").write_text("old")
+    assert generate(source, [ReportSpec("html", earlier)], root=tmp_path).problems == ()
+    assert (earlier / "src-0.html").is_file()
+
+
+def test_html_builtin_leaves_no_directory_when_it_cannot_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+
+    def full(*_: object) -> str:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("popcorn.coverage.report._html._source_page", full)
+    out = tmp_path / "out"
+    with pytest.raises(OSError):
+        generate(source, [ReportSpec("html", out)], root=tmp_path)
+    assert not out.exists()
+
+
+def test_html_uses_genhtml_when_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_genhtml(tmp_path, monkeypatch)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    out = tmp_path / "out"
+    generate(source, [ReportSpec("html", out)], root=tmp_path)
+    assert (out / "index.html").read_text() == "fake"
+    assert not (out / "src-0.html").exists()
+
+
+def test_html_target_survives_an_unknown_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    def no_home() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "home", no_home)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    out = tmp_path / "out"
+    result = generate(source, [ReportSpec("html", out)], root=tmp_path)
+    assert result.problems == ()
+    assert (out / "index.html").is_file()
+
+
+@pytest.mark.parametrize("builtin", [True, False])
+def test_html_keeps_a_report_directory_that_holds_a_git_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, builtin: bool
+) -> None:
+    if builtin:
+        monkeypatch.setenv("PATH", str(tmp_path))
+    else:
+        fake_genhtml(tmp_path, monkeypatch)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    site = tmp_path / "site"
+    (site / ".git").mkdir(parents=True)
+    (site / ".git" / "HEAD").write_text("ref")
+    (site / "index.html").write_text("old")
+    (site / "gcov.css").write_text("old")
+    (site / ".popcorn-html-report").write_text("")
+    result = generate(source, [ReportSpec("html", site)], root=tmp_path)
+    assert result.written == ()
+    assert result.problems == (f"html report not written, {site} holds a .git entry",)
+    assert (site / ".git" / "HEAD").read_text() == "ref"
+    assert (site / "index.html").read_text() == "old"
+
+
+def test_html_keeps_an_existing_empty_target_after_a_failed_genhtml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_genhtml(tmp_path, monkeypatch, code=1, index=False)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    out = tmp_path / "out"
+    out.mkdir()
+    result = generate(source, [ReportSpec("html", out)], root=tmp_path)
+    assert result.problems == ("html report not written, genhtml exited 1: boom",)
+    assert out.is_dir()
+    assert list(out.iterdir()) == []
+
+
+def test_html_cleans_up_when_genhtml_vanishes_after_the_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_genhtml(tmp_path, monkeypatch)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    out = tmp_path / "out"
+
+    def vanished(*_: object, **__: object) -> None:
+        raise FileNotFoundError("genhtml is not installed")
+
+    monkeypatch.setattr("popcorn.coverage.report._spec.run_genhtml", vanished)
+    with pytest.raises(FileNotFoundError):
+        generate(source, [ReportSpec("html", out)], root=tmp_path)
+    assert not out.exists()
+
+
+def test_html_kills_the_children_of_a_timed_out_genhtml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pids = tmp_path / "child.pid"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "genhtml"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import subprocess, sys, time\n"
+        f"child = subprocess.Popen([{sys.executable!r}, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pids)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setattr("popcorn.coverage.report._genhtml.GENHTML_TIMEOUT", 1.0)
+    monkeypatch.setattr("popcorn.coverage.report._spec.GENHTML_TIMEOUT", 1.0)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    result = generate(source, [ReportSpec("html", tmp_path / "out")], root=tmp_path)
+    assert result.problems == ("html report not written, genhtml ran past 1 s",)
+    child = int(pids.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)

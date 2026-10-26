@@ -95,7 +95,7 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
                 omit=settings.cov_omit,
                 root=config.rootpath,
             )
-        except (OSError, ValueError, NotImplementedError) as error:
+        except (OSError, ValueError) as error:
             outcome = (
                 f"popcorn: coverage merge failed: {error}, the .pcov files stay in {run.directory}"
             )

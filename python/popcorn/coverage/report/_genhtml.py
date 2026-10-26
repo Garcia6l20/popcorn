@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shutil
+import signal
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -45,7 +48,8 @@ def prepare_output(out: Path, *, protect: Sequence[tuple[str, Path]] = ()) -> st
     A missing or empty directory is used as is. A directory holding an earlier html report,
     an `index.html` next to `gcov.css` from genhtml or `BUILTIN_MARKER` from the built-in
     renderer, is emptied. Anything else is left untouched: a file, a symbolic link, a directory
-    of other content, and a directory that is or contains one of `protect`.
+    of other content, a report directory that holds a `.git` entry, and a directory that is or
+    contains one of `protect`.
 
     Args:
         out: The directory a report is about to be written to.
@@ -66,6 +70,8 @@ def prepare_output(out: Path, *, protect: Sequence[tuple[str, Path]] = ()) -> st
         if held == resolved or resolved in held.parents:
             return f"{out} holds {label}"
     if _is_report(out):
+        if (out / ".git").exists():
+            return f"{out} holds a .git entry"
         shutil.rmtree(out)
         return None
     if any(out.iterdir()):
@@ -82,7 +88,8 @@ def run_genhtml(
     tracefile resolves. A source it cannot read renders as a page of blank lines. The one
     consistency error the lcov export can legitimately produce is ignored. The options need
     genhtml from LCOV 2.0 or later. A genhtml still running after `timeout` seconds,
-    `GENHTML_TIMEOUT` when None, is killed and the result has `timed_out` set.
+    `GENHTML_TIMEOUT` when None, is killed with every process of its group, and the result has
+    `timed_out` set.
 
     Raises:
         FileNotFoundError: genhtml is not installed.
@@ -91,26 +98,32 @@ def run_genhtml(
     if genhtml is None:
         raise FileNotFoundError("genhtml is not installed")
     limit = GENHTML_TIMEOUT if timeout is None else timeout
-    try:
-        done = subprocess.run(
-            [
-                genhtml,
-                "--quiet",
-                "--branch-coverage",
-                "--function-coverage",
-                "--ignore-errors",
-                "inconsistent,source",
-                "--synthesize-missing",
-                "-o",
-                str(out.absolute()),
-                str(lcov.absolute()),
-            ],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=limit,
-        )
-    except subprocess.TimeoutExpired:
-        return GenhtmlResult(-1, "", timed_out=True)
-    return GenhtmlResult(done.returncode, done.stderr)
+    command = [
+        genhtml,
+        "--quiet",
+        "--branch-coverage",
+        "--function-coverage",
+        "--ignore-errors",
+        "inconsistent,source",
+        "--synthesize-missing",
+        "-o",
+        str(out.absolute()),
+        str(lcov.absolute()),
+    ]
+    with subprocess.Popen(
+        command,
+        cwd=root,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as process:
+        try:
+            _, stderr = process.communicate(timeout=limit)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            return GenhtmlResult(-1, "", timed_out=True)
+    return GenhtmlResult(process.returncode, stderr)

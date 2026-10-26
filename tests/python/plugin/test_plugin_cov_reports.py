@@ -210,21 +210,18 @@ def test_an_ini_report_line_keeps_the_spaces_of_its_target(pytester: pytest.Pyte
     result.assert_outcomes(passed=1)
 
 
-def test_an_unavailable_report_writes_no_file_and_keeps_the_directory(
+def test_html_report_without_genhtml_is_written_by_the_builtin_renderer(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     write_suite(pytester)
-    scratch = pytester.mkdir("scratch")
-    monkeypatch.setenv("TMPDIR", str(scratch))
     monkeypatch.setenv("PATH", str(pytester.mkdir("nobin")))
     result = pytester.runpytest_subprocess(
-        *NO_XDIST, *cov_args("a.info"), "--popcorn-cov-report=html", "-k", "test_add"
+        *NO_XDIST, "--popcorn-cov", "--popcorn-cov-report=html:out", "-k", "test_add"
     )
-    result.stdout.fnmatch_lines(
-        ["popcorn: coverage merge failed: the html report is not available*"]
-    )
-    assert not (pytester.path / "a.info").exists()
-    assert len(list(scratch.glob("popcorn-cov-*"))) == 1
+    assert result.ret == pytest.ExitCode.OK
+    result.stdout.fnmatch_lines([f"popcorn: firmware coverage written to {pytester.path / 'out'}"])
+    assert (pytester.path / "out" / "index.html").is_file()
+    assert (pytester.path / "out" / "src-0.html").is_file()
 
 
 def test_a_report_that_fails_to_write_keeps_the_directory(

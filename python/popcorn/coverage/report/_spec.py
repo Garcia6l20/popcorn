@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -17,6 +18,7 @@ from popcorn.coverage.report._genhtml import (
     prepare_output,
     run_genhtml,
 )
+from popcorn.coverage.report._html import render_html
 from popcorn.coverage.report._model import LcovReport, Totals, parse_lcov
 from popcorn.coverage.report._term import render_term
 
@@ -91,38 +93,61 @@ def _write_atomic(target: Path, data: bytes) -> None:
 
 
 def use_genhtml(report: LcovReport) -> bool:
-    """Whether genhtml writes the `html` report of `report`, which it does when installed."""
+    """Whether genhtml writes the `html` report of `report`, which it does when installed.
+
+    Otherwise the built-in renderer writes it.
+    """
     return find_genhtml() is not None
+
+
+def _protected(root: Path, lcov: Path) -> tuple[tuple[str, Path], ...]:
+    held = [("the rootdir", root), ("the working directory", Path.cwd())]
+    with contextlib.suppress(RuntimeError):
+        held.append(("the home directory", Path.home()))
+    held.append(("the coverage data", lcov))
+    return tuple(held)
+
+
+def _discard(target: Path, *, keep: bool) -> None:
+    if not keep:
+        shutil.rmtree(target, ignore_errors=True)
+        return
+    for entry in target.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
 
 
 def _write_html(
     report: LcovReport, lcov: Path, target: Path, filtered: bool, root: Path
 ) -> str | None:
-    reason = prepare_output(
-        target,
-        protect=(
-            ("the rootdir", root),
-            ("the working directory", Path.cwd()),
-            ("the home directory", Path.home()),
-            ("the coverage data", lcov),
-        ),
-    )
+    was_empty_dir = target.is_dir() and not target.is_symlink() and not any(target.iterdir())
+    reason = prepare_output(target, protect=_protected(root, lcov))
     if reason is not None:
         return f"html report not written, {reason}"
-    with tempfile.TemporaryDirectory(prefix="popcorn-html-") as scratch:
-        source = lcov
-        if filtered:
-            source = Path(scratch) / "filtered.info"
-            source.write_text(report.to_lcov())
-        done = run_genhtml(source, target, root=root)
-    if done.timed_out:
-        shutil.rmtree(target, ignore_errors=True)
-        return f"html report not written, genhtml ran past {GENHTML_TIMEOUT:g} s"
-    if done.returncode != 0:
-        shutil.rmtree(target, ignore_errors=True)
-        detail = done.stderr.strip()
-        return f"html report not written, genhtml exited {done.returncode}: {detail}"
-    return None
+    problem: str | None = None
+    written = False
+    try:
+        if not use_genhtml(report):
+            render_html(report, target, root=root)
+        else:
+            with tempfile.TemporaryDirectory(prefix="popcorn-html-") as scratch:
+                source = lcov
+                if filtered:
+                    source = Path(scratch) / "filtered.info"
+                    source.write_text(report.to_lcov())
+                done = run_genhtml(source, target, root=root)
+            if done.timed_out:
+                problem = f"html report not written, genhtml ran past {GENHTML_TIMEOUT:g} s"
+            elif done.returncode != 0:
+                detail = done.stderr.strip()
+                problem = f"html report not written, genhtml exited {done.returncode}: {detail}"
+        written = problem is None
+    finally:
+        if not written:
+            _discard(target, keep=was_empty_dir)
+    return problem
 
 
 def generate(
@@ -143,17 +168,18 @@ def generate(
     in its directory and renamed, with `timestamp` in milliseconds since the epoch, the current
     time when None.
 
-    An `html` report is written by genhtml from LCOV 2.0 or later, into a missing or empty
-    directory or one that holds an earlier html report, which is emptied first. A symbolic link,
-    a directory of other content, and a directory that is or contains the rootdir, the working
-    directory, the home directory or `lcov` are left untouched. Each of those, and a genhtml run
-    that fails, times out or finds a source line past the end of a source file edited after the
-    build, adds a line to `ReportResult.problems` and leaves the other reports written. A failed
-    genhtml leaves no directory behind that the call created or emptied.
+    An `html` report is written by genhtml from LCOV 2.0 or later when it is installed, else by
+    `render_html`, into a missing or empty directory or one that holds an earlier html report of
+    either writer, which is emptied first. A symbolic link, a directory of other content, a report
+    directory that holds a `.git` entry, and a directory that is or contains the rootdir, the
+    working directory, the home directory or `lcov` are left untouched. Each of those, and a
+    genhtml run that fails, times out or finds a source line past the end of a source file edited
+    after the build, adds a line to `ReportResult.problems` and leaves the other reports written.
+    After a failed run a directory the call created or replaced a report in is removed, and a
+    directory that was empty before the call stays, emptied of what the run wrote.
 
     Raises:
         ValueError: `lcov` is not a tracefile, or an `lcov`, `xml` or `html` spec has no target.
-        NotImplementedError: A spec of kind `html` while genhtml is not installed.
         OSError: A target cannot be written.
     """
     data = lcov.read_bytes()
@@ -163,8 +189,6 @@ def generate(
         report = report.filtered(include, omit, root)
     files: list[ReportSpec] = []
     for spec in specs:
-        if spec.kind == "html" and not use_genhtml(report):
-            raise NotImplementedError("the html report is not available")
         if spec.kind != "term":
             if spec.target is None:
                 raise ValueError(f"an {spec.kind} report needs a target path")
