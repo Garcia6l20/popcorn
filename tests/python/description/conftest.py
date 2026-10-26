@@ -21,6 +21,19 @@ def u575_sources() -> Sources:
 
 
 @pytest.fixture(scope="session")
+def h573_sources() -> Sources:
+    """Sources of STM32H573AIIx found on this machine, skips naming what find_sources searched
+    and when the CMSIS header stm32h573xx.h is not among them."""
+    try:
+        sources = find_sources("STM32H573AIIx")
+    except DescriptionError as exc:
+        pytest.skip(f"STM32H573AIIx sources not found: {exc}")
+    if sources.cmsis_header is None:
+        pytest.skip("stm32h573xx.h not found by find_sources, set POPCORN_CMSIS_DEVICE_DIRS")
+    return sources
+
+
+@pytest.fixture(scope="session")
 def st_svd_u575(u575_sources: Sources) -> Path:
     """Path of the local ST STM32U575.svd install, skips naming every path searched."""
     return u575_sources.svd

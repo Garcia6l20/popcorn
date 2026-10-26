@@ -1,0 +1,632 @@
+format = 1
+source = "RM0481 Rev 5 and STM32H573 CubeMX db: SVD naming against CubeMX instances. IRQ adds: RM0481 Rev 5, 17.3 Table 152 STM32H562/563/573xx vector table lists PVD_AVD 1, RTC 2, RTC_S 3, FPU 103 and CEC 119, which STM32H573.svd lacks and the CMSIS IRQn_Type defines. PVD_AVD and FPU go to EXTI as the U5 SVD places PVD_PVM and FPU. The RTC lines go to RTC. HDMI-CEC is an unmodelled H5 block with no peripheral in the SVD, so CEC goes to EXTI too"
+
+[match]
+parts = ["STM32H5*"]
+svd = ["STM32H5*.svd"]
+
+[peripherals]
+drop = ["SEC_LPUART1"]
+source = "STM32H573.svd derives SEC_LPUART1 from LPUART, not LPUART1, so the alias rule finds no base. RM0481 Rev 5, 2.3: the secure LPUART1 window is NS base + 0x1000_0000, unused under TZEN=0, D4"
+
+[aliases]
+prefix = "SEC_"
+offset = 0x10000000
+source = "RM0481 Rev 5, 2.3 memory map: secure peripheral alias at NS base + 0x1000_0000"
+
+[ip]
+renames = { DCACHE1 = ["DCACHE"], LPUART1 = ["LPUART"], DAC1 = ["DAC"], OCTOSPI1 = ["OCTOSPI"], I3C1 = ["I3C"], GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPIOF", "GPIOG", "GPIOH", "GPIOI"], GTZC = ["GTZC1_TZSC", "GTZC1_TZIC"], GTZC_NS = ["GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3"] }
+
+[irqs]
+add = [
+  { number = 1, name = "PVD_AVD", peripheral = "EXTI" },
+  { number = 2, name = "RTC", peripheral = "RTC" },
+  { number = 3, name = "RTC_S", peripheral = "RTC" },
+  { number = 103, name = "FPU", peripheral = "EXTI" },
+  { number = 119, name = "CEC", peripheral = "EXTI" },
+]
+
+[core]
+reset_clock_hz = 32_000_000
+source = "RM0481 Rev 5, 11.8.1 RCC_CR HSIDIV reset 01, hsi_ck 32 MHz, SYSCLK after reset"
+
+[[peripheral_sizes]]
+peripheral = "USB"
+size = 0xC00
+source = "RM0481 Rev 5, 2.3: USB_FS RAM 0x40016400 to 0x40016BFF follows the registers"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["EXTI_RPR1"]
+fields = ["RPIF0", "RPIF1", "RPIF2", "RPIF3", "RPIF4", "RPIF5", "RPIF6", "RPIF7", "RPIF8", "RPIF9", "RPIF10", "RPIF11", "RPIF12", "RPIF13", "RPIF14", "RPIF15", "RPIF16"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 18.7.4 EXTI rising edge pending register (EXTI_RPR1): RPIF0 to RPIF16 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["EXTI_FPR1"]
+fields = ["FPIF0", "FPIF1", "FPIF2", "FPIF3", "FPIF4", "FPIF5", "FPIF6", "FPIF7", "FPIF8", "FPIF9", "FPIF10", "FPIF11", "FPIF12", "FPIF13", "FPIF14", "FPIF15", "FPIF16"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 18.7.5 EXTI falling edge pending register (EXTI_FPR1): FPIF0 to FPIF16 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["EXTI_RPR2"]
+fields = ["RPIF46", "RPIF50", "RPIF53"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 18.7.11 EXTI rising edge pending register 2 (EXTI_RPR2): RPIF46, RPIF50 and RPIF53 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["EXTI_FPR2"]
+fields = ["FPIF46", "FPIF50", "FPIF53"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 18.7.12 EXTI falling edge pending register 2 (EXTI_FPR2): FPIF46, FPIF50 and FPIF53 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
+
+[[fields]]
+ip = "I2C"
+registers = ["I2C_ISR"]
+fields = ["TXIS", "TXE"]
+on_write = "one_to_set"
+source = "RM0481 Rev 5, 53.9.7 I2C interrupt and status register (I2C_ISR): TXIS and TXE are rs, software sets them to force a transmit event or flush TXDR, not a clear"
+
+[[fields]]
+instances = ["RNG"]
+registers = ["RNG_SR"]
+fields = ["SEIS", "CEIS"]
+on_write = "zero_to_clear"
+source = "RM0481 Rev 5, 36.7.2 RNG status register (RNG_SR): SEIS and CEIS are rc_w0, writing 1 has no effect. ST's STM32H573 SVD gives plain read-write"
+
+[[fields]]
+instances = ["HASH"]
+registers = ["HASH_SR"]
+fields = ["NBWE", "NBWP"]
+width = 6
+source = "RM0481 Rev 5, 40.6.6 HASH status register (HASH_SR): NBWE[5:0] in bits 21:16 and NBWP[5:0] in bits 14:9. ST's STM32H573 SVD gives 5 bits each, and SHA3-224 needs NBWE 37"
+
+[[cross]]
+ip = "GPDMA"
+reg = "GPDMA_C{n}FCR"
+target_reg = "GPDMA_C{n}SR"
+each = { n = [0, 7] }
+effect = "clear"
+pairs = { TCF = "TCF", HTF = "HTF", DTEF = "DTEF", ULEF = "ULEF", USEF = "USEF", SUSPF = "SUSPF", TOF = "TOF" }
+source = "RM0481 Rev 5, 16.8.7/16.8.8 GPDMA channel x flag clear register / status register, one shared layout for channels 0 to 7 of GPDMA1 and GPDMA2"
+
+[[cross]]
+ip = "I2C"
+reg = "I2C_ICR"
+target_reg = "I2C_ISR"
+effect = "clear"
+pairs = { ALERTCF = "ALERT", TIMOUTCF = "TIMEOUT", PECCF = "PECERR", OVRCF = "OVR", ARLOCF = "ARLO", BERRCF = "BERR", STOPCF = "STOPF", NACKCF = "NACKF", ADDRCF = "ADDR" }
+source = "RM0481 Rev 5, 53.9.7/53.9.8 I2C interrupt and status register (I2C_ISR) / I2C interrupt clear register (I2C_ICR)"
+
+[[cross]]
+instances = ["RCC"]
+reg = "RCC_CICR"
+target_reg = "RCC_CIFR"
+effect = "clear"
+pairs = { LSIRDYC = "LSIRDYF", LSERDYC = "LSERDYF", CSIRDYC = "CSIRDYF", HSIRDYC = "HSIRDYF", HSERDYC = "HSERDYF", HSI48RDYC = "HSI48RDYF", PLL1RDYC = "PLL1RDYF", PLL2RDYC = "PLL2RDYF", PLL3RDYC = "PLL3RDYF", HSECSSC = "HSECSSF" }
+source = "RM0481 Rev 5, 11.8.17/11.8.18 RCC clock source interrupt flag register (RCC_CIFR) / RCC clock source interrupt clear register (RCC_CICR)"
+
+[[cross]]
+instances = ["RTC"]
+reg = "RTC_SCR"
+target_reg = "RTC_SR"
+effect = "clear"
+pairs = { CALRAF = "ALRAF", CALRBF = "ALRBF", CWUTF = "WUTF", CTSF = "TSF", CTSOVF = "TSOVF", CITSF = "ITSF", CSSRUF = "SSRUF" }
+source = "RM0481 Rev 5, 51.6.20/51.6.23 RTC status register (RTC_SR) / RTC status clear register (RTC_SCR)"
+
+[[cross]]
+ip = "SAI"
+reg = "SAI_ACLRFR"
+target_reg = "SAI_ASR"
+effect = "clear"
+pairs = { CLFSDET = "LFSDET", CAFSDET = "AFSDET", CCNRDY = "CNRDY", CWCKCFG = "WCKCFG", CMUTEDET = "MUTEDET", COVRUDR = "OVRUDR" }
+source = "RM0481 Rev 5, 59.6.7/59.6.8 SAI status register (SAI_ASR) / SAI clear flag register (SAI_ACLRFR), sub-block A"
+
+[[cross]]
+ip = "SAI"
+reg = "SAI_BCLRFR"
+target_reg = "SAI_BSR"
+effect = "clear"
+pairs = { CLFSDET = "LFSDET", CAFSDET = "AFSDET", CCNRDY = "CNRDY", CWCKCFG = "WCKCFG", CMUTEDET = "MUTEDET", COVRUDR = "OVRUDR" }
+source = "RM0481 Rev 5, 59.6.15/59.6.16 SAI status register (SAI_BSR) / SAI clear flag register (SAI_BCLRFR), sub-block B"
+
+[[cross]]
+ip = "SPI"
+reg = "SPI_IFCR"
+target_reg = "SPI_SR"
+effect = "clear"
+pairs = { SUSPC = "SUSP", MODFC = "MODF", TIFREC = "TIFRE", CRCEC = "CRCE", OVRC = "OVR", UDRC = "UDR", TXTFC = "TXTF", EOTC = "EOT" }
+source = "RM0481 Rev 5, 58.11.6/58.11.7 SPI/I2S status register (SPI_SR) / SPI/I2S interrupt/status flags clear register (SPI_IFCR)"
+
+[[cross]]
+ip = "USART"
+reg = "USART_ICR"
+target_reg = "USART_ISR_enabled"
+effect = "clear"
+pairs = { CMCF = "CMF", EOBCF = "EOBF", RTOCF = "RTOF", CTSCF = "CTSIF", LBDCF = "LBDF", TCBGTCF = "TCBGT", TCCF = "TC", TXFECF = "TXFE", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE", UDRCF = "UDR", WUCF = "WUF" }
+source = "RM0481 Rev 5, 56.8.10/56.8.12 USART interrupt and status register (USART_ISR) / USART interrupt flag clear register (USART_ICR); ISR_enabled is the storage owner the SVD's ISR_disabled alternate view points at."
+
+[[cross]]
+ip = "UART"
+reg = "USART_ICR"
+target_reg = "USART_ISR_enabled"
+effect = "clear"
+pairs = { CMCF = "CMF", EOBCF = "EOBF", RTOCF = "RTOF", CTSCF = "CTSIF", LBDCF = "LBDF", TCBGTCF = "TCBGT", TCCF = "TC", TXFECF = "TXFE", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE", UDRCF = "UDR", WUCF = "WUF" }
+source = "RM0481 Rev 5, 56.8.10/56.8.12, the same shared USART/UART chapter as the USART-keyed rule above; UART4, UART5, UART7 to UART9 and UART12 are a different db IP (UART, not USART) with the same ISR/ICR layout in the SVD."
+
+[[cross]]
+ip = "LPUART"
+reg = "LPUART_ICR"
+target_reg = "LPUART_ISR_enabled"
+effect = "clear"
+pairs = { CMCF = "CMF", CTSCF = "CTSIF", TCCF = "TC", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE", WUCF = "WUF" }
+source = "RM0481 Rev 5, 57.7.8 LPUART interrupt and status register (LPUART_ISR) / 57.7.10 LPUART interrupt flag clear register (LPUART_ICR): a reduced set versus USART_ICR."
+
+[[cross]]
+instances = ["UCPD1"]
+reg = "UCPD_ICR"
+target_reg = "UCPD_SR"
+effect = "clear"
+pairs = { FRSEVTCF = "FRSEVT", TYPECEVT2CF = "TYPECEVT2", TYPECEVT1CF = "TYPECEVT1", RXMSGENDCF = "RXMSGEND", RXOVRCF = "RXOVR", RXHRSTDETCF = "RXHRSTDET", RXORDDETCF = "RXORDDET", TXUNDCF = "TXUND", HRSTSENTCF = "HRSTSENT", HRSTDISCCF = "HRSTDISC", TXMSGABTCF = "TXMSGABT", TXMSGSENTCF = "TXMSGSENT", TXMSGDISCCF = "TXMSGDISC" }
+source = "RM0481 Rev 5, 62.8.6/62.8.7 UCPD status register (UCPD_SR) / UCPD interrupt clear register (UCPD_ICR)"
+
+[[cross]]
+instances = ["FLASH"]
+reg = "FLASH_NSCCR"
+target_reg = "FLASH_NSSR"
+effect = "clear"
+pairs = { CLR_EOP = "EOP", CLR_WRPERR = "WRPERR", CLR_PGSERR = "PGSERR", CLR_STRBERR = "STRBERR", CLR_INCERR = "INCERR", CLR_OBKERR = "OBKERR", CLR_OBKWERR = "OBKWERR", CLR_OPTCHANGEERR = "OPTCHANGEERR" }
+source = "RM0481 Rev 5, 7.11.9/7.11.13 FLASH nonsecure status register (FLASH_NSSR) / FLASH nonsecure clear control register (FLASH_NSCCR): a write of 1 to CLR_x clears the NSSR flag"
+
+[[resets]]
+peripheral = "RNG"
+register = "RNG_CR"
+reset = 0x00800D00
+source = "RM0481 Rev 5, 36.7.1 RNG control register (RNG_CR): reset value 0x0080 0D00, RNG_CONFIG1 0x08 and RNG_CONFIG3 0xD. ST's STM32H573 SVD gives 0x00871F00"
+
+[[resets]]
+peripheral = "RCC"
+register = "RCC_CR"
+reset = 0x2B
+source = "RM0481 Rev 5, 11.8.1 RCC clock control register (RCC_CR): reset value 0x0000 002B, HSIDIV 01. ST's STM32H573 SVD gives 0x23, HSIDIV 00"
+
+[[resets]]
+peripheral = "GPIOB"
+register = "GPIOB_MODER"
+reset = 0xFFFFFEBF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFEBF for port B. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOB"
+register = "GPIOB_OSPEEDR"
+reset = 0x000000C0
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x000000C0 for port B. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOB"
+register = "GPIOB_PUPDR"
+reset = 0x00000100
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000100 for port B. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOC"
+register = "GPIO_MODER"
+reset = 0xFFFFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port C. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOC"
+register = "GPIO_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port C. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOC"
+register = "GPIO_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port C. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOD"
+register = "GPIO_MODER"
+reset = 0xFFFFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port D. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOD"
+register = "GPIO_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port D. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOD"
+register = "GPIO_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port D. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOE"
+register = "GPIO_MODER"
+reset = 0xFFFFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port E. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOE"
+register = "GPIO_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port E. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOE"
+register = "GPIO_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port E. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOF"
+register = "GPIO_MODER"
+reset = 0xFFFFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port F. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOF"
+register = "GPIO_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port F. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOF"
+register = "GPIO_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port F. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOG"
+register = "GPIO_MODER"
+reset = 0xFFFFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port G. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOG"
+register = "GPIO_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port G. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOG"
+register = "GPIO_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port G. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOH"
+register = "GPIOH_MODER"
+reset = 0xFFFFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port H. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOH"
+register = "GPIOH_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port H. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOH"
+register = "GPIOH_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port H. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOI"
+register = "GPIOI_MODER"
+reset = 0x00FFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0x00FFFFFF for port I. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOI"
+register = "GPIOI_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port I. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOI"
+register = "GPIOI_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port I. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOI"
+register = "GPIOI_SECCFGR"
+reset = 0x00000FFF
+source = "RM0481 Rev 5, 13.4.13 GPIOx_SECCFGR reset value 0x00000FFF for port I, which has 12 pins. ST's STM32H573 SVD gives 0x0000FFFF"
+
+[[resets]]
+peripheral = "DBGMCU"
+register = "DBGMCU_IDCODE"
+reset = 0x10016484
+source = "RM0481 Rev 5, 66.12.4 DBGMCU_IDCODE: DEV_ID 0x484 for STM32H562/563/573, REV_ID 0x1001 for revision Z, bits 15:12 read 6 as the reset value 0xXXXX 6XXX shows. ST's STM32H573 SVD gives 0x00006000"
+
+[memory]
+source = "RM0481 Rev 5, 7.3.9: the 2048-byte OTP area at 0x08FF F000 to 0x08FF F7FF, written once in 16-bit units through the flash interface and read-only to the CPU, and the read-only area at 0x08FF F800 to 0x08FF FFFF that holds the device signature, 67.1 to 67.3. 7.3.10: the high-cycle data area at 0x0900 0000 to 0x0901 7FFF is a plain read-only region here, with no controller, since EDATA programming is not modelled. 7.3.5 to 7.3.8: flash is programmed by stores into the main memory range through the FLASH interface, so FLASH controls both flash windows. OTP programming is not modelled"
+controller = { Flash_NS = "FLASH", Flash_S = "FLASH" }
+add = [
+  { name = "OTP_NS", start = 0x08FFF000, size = 0x800, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },
+  { name = "RO_NS", start = 0x08FFF800, size = 0x800, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },
+]
+
+[signature]
+source = "RM0481 Rev 5, 67.1 unique device ID at 0x08FF F800, 96 bits, here a fixed value: wafer coordinates 0x00320014, wafer 1, lot POPCORN in ASCII. 67.2 flash size data register at 0x08FF F80C, FLASH_SIZE in KB from the CubeMX part. 67.3 package data register at 0x08FF F80E, PKG[5:0] from the table of 67.3 keyed by the CubeMX package, SMPS for a part name ending in Q, UFBGA169 is 0b00110, a package absent from that table leaves the register erased. DS14121 Rev 5, Table 28 and Table 102: factory calibration words, raw 12-bit ADC codes at VDDA = 3.3 V, here typical values as V / 3.3 V x (2^12 - 1), rounded: VREFINT_CAL at 0x08FF F810, VREFINT 1.216 V (Table 27) = 1509 = 0x05E5. TS_CAL1 at 0x08FF F814, 30 C, V30 0.62 V (Table 101) = 769 = 0x0301. TS_CAL2 at 0x08FF F818, 130 C, 0.62 V + 100 x 2 mV/C Avg_Slope = 0.82 V = 1018 = 0x03FA"
+region = "RO_NS"
+package = 0x00E
+uid = 0x000
+flash_size = 0x00C
+uid_words = [0x0032_0014, 0x4F52_4E01, 0x504F_5043]
+content = [
+  { offset = 0x010, data = [0xE5, 0x05] },
+  { offset = 0x014, data = [0x01, 0x03] },
+  { offset = 0x018, data = [0xFA, 0x03] },
+]
+packages = { "LQFP64" = 0x00, "WLCSP63" = 0x00, "VFQFPN68" = 0x01, "LQFP100" = 0x02, "UFBGA176+25" = 0x03, "LQFP144" = 0x04, "LQFP48" = 0x05, "UFBGA169" = 0x06, "LQFP176" = 0x07, "LQFP100 SMPS" = 0x0A, "UFBGA176+25 SMPS" = 0x0B, "LQFP144 SMPS" = 0x0C, "LQFP176 SMPS" = 0x0D, "UFBGA169 SMPS" = 0x0E, "UFQFPN48" = 0x10, "WLCSP39" = 0x11, "LQFP80" = 0x12, "UFBGA100" = 0x14, "UFBGA144" = 0x15, "LQFP144-EP" = 0x17, "LQFP100-EP" = 0x1E }
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR16"
+offset = 0x350
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR17"
+offset = 0x354
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR18"
+offset = 0x358
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR19"
+offset = 0x35c
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR20"
+offset = 0x360
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR21"
+offset = 0x364
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR22"
+offset = 0x368
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR23"
+offset = 0x36c
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR24"
+offset = 0x370
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR25"
+offset = 0x374
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR26"
+offset = 0x378
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR27"
+offset = 0x37c
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR28"
+offset = 0x380
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR29"
+offset = 0x384
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR30"
+offset = 0x388
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR31"
+offset = 0x38c
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR32"
+offset = 0x390
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR33"
+offset = 0x394
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR34"
+offset = 0x398
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR35"
+offset = 0x39c
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR36"
+offset = 0x3a0
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR37"
+offset = 0x3a4
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR38"
+offset = 0x3a8
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR39"
+offset = 0x3ac
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR40"
+offset = 0x3b0
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
+
+[[registers]]
+peripheral = "HASH"
+name = "HASH_HR41"
+offset = 0x3b4
+width = 32
+reset = 0
+acc = "read_only"
+fields = [{ name = "Hx", lsb = 0, width = 32 }]
+source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"

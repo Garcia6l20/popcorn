@@ -76,3 +76,26 @@ def section_sources() -> dict[str, str]:
 def test_each_model_with_a_limit_has_a_limits_section(model: str) -> None:
     link = f"native/src/periph/stm32/{model})"
     assert [heading for heading, source in section_sources().items() if link in source]
+
+
+def test_the_h573_page_builds_without_trustzone_rows() -> None:
+    from popcorn_build import support_pages
+
+    page = support_pages.part_page(popcorn.stm32.mcu("STM32H573AIIx"))
+    assert "| `RNG` |" in page
+    assert support_pages.TRUSTZONE_ONLY not in page
+
+
+def test_another_support_refusal_is_not_absorbed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from popcorn_build import support_pages
+
+    real = support_pages.support
+
+    def refuse(part: popcorn.PartDescription, *, trustzone: bool = False) -> object:
+        if trustzone:
+            raise popcorn.ConfigError("some other refusal")
+        return real(part)
+
+    monkeypatch.setattr(support_pages, "support", refuse)
+    with pytest.raises(popcorn.ConfigError, match="some other refusal"):
+        support_pages.part_page(popcorn.stm32.mcu("STM32U575QGIx"))
