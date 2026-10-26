@@ -9,7 +9,7 @@ from typing import NamedTuple, NoReturn, cast
 
 import pytest
 
-from popcorn.coverage.report import ReportSpec, parse_spec
+from popcorn.coverage.report import UNMODELLED_MODES, ReportSpec, parse_spec
 
 DEFAULT_CACHE_MAX_AGE_DAYS = 7
 MARKER = "popcorn(budget=None, strict=None): popcorn machine settings for this test"
@@ -35,6 +35,13 @@ class Settings:
             `popcorn_cov_include`. A command-line value replaces the ini value.
         cov_omit: Glob patterns that drop a source file, `--popcorn-cov-omit` else
             `popcorn_cov_omit`. A command-line value replaces the ini value.
+        cov_unmodelled: How lines that access unmodelled registers are reported,
+            `--popcorn-cov-unmodelled` else `popcorn_cov_unmodelled`, `hit` when neither is given.
+            `hit` counts them as covered and records nothing. `mark` counts them as covered and
+            marks them in the `term` and built-in `html` reports. `miss` counts them, their
+            functions and their branches as not hit. `mark` and `miss` make every machine record
+            the CPU accesses per accessing instruction, which slows each access to a peripheral
+            register.
         trace_on_fail: Whether a failing test keeps its trace, `--popcorn-trace-on-fail`.
         trace_dir: Where kept traces go, None for the default location under the pytest cache.
         strict: Whether unmodelled peripheral accesses raise, `--popcorn-strict`.
@@ -61,6 +68,7 @@ class Settings:
     cov_fail_under: float | None = None
     cov_include: tuple[str, ...] = ()
     cov_omit: tuple[str, ...] = ()
+    cov_unmodelled: str = "hit"
 
     @classmethod
     def from_config(cls, config: pytest.Config) -> Settings:
@@ -89,6 +97,7 @@ class Settings:
             cov_fail_under=cov.fail_under,
             cov_include=cov.include,
             cov_omit=cov.omit,
+            cov_unmodelled=cov.unmodelled,
         )
 
 
@@ -99,6 +108,7 @@ _COV_DEPENDENT = (
     ("popcorn_cov_fail_under", "--popcorn-cov-fail-under"),
     ("popcorn_cov_include", "--popcorn-cov-include"),
     ("popcorn_cov_omit", "--popcorn-cov-omit"),
+    ("popcorn_cov_unmodelled", "--popcorn-cov-unmodelled"),
 )
 
 
@@ -109,6 +119,7 @@ class _Coverage(NamedTuple):
     fail_under: float | None = None
     include: tuple[str, ...] = ()
     omit: tuple[str, ...] = ()
+    unmodelled: str = "hit"
 
 
 def _coverage_settings(config: pytest.Config) -> _Coverage:
@@ -153,7 +164,21 @@ def _coverage_settings(config: pytest.Config) -> _Coverage:
         ),
         _patterns(config, "popcorn_cov_include"),
         _patterns(config, "popcorn_cov_omit"),
+        _unmodelled(
+            config.getoption("popcorn_cov_unmodelled"), config.getini("popcorn_cov_unmodelled")
+        ),
     )
+
+
+def _unmodelled(option: object, ini: object) -> str:
+    text = str(ini).strip() if option is None else str(option)
+    if not text:
+        return "hit"
+    if text not in UNMODELLED_MODES:
+        raise pytest.UsageError(
+            f"popcorn_cov_unmodelled must be one of {', '.join(UNMODELLED_MODES)}, not {text!r}"
+        )
+    return text
 
 
 def _words(value: object) -> tuple[str, ...]:
@@ -239,6 +264,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="glob patterns, one per line: matching source files are not reported",
         type="linelist",
     )
+    parser.addini(
+        "popcorn_cov_unmodelled",
+        help="mark, miss or hit: how --popcorn-cov reports lines that access unmodelled "
+        "registers, default hit",
+        default="",
+    )
     group = parser.getgroup("popcorn", "popcorn firmware emulation")
     group.addoption(
         "--popcorn-cov",
@@ -275,6 +306,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="GLOB",
         help="leave out source files matching GLOB, repeatable. Replaces the popcorn_cov_omit "
         "ini option",
+    )
+    group.addoption(
+        "--popcorn-cov-unmodelled",
+        choices=UNMODELLED_MODES,
+        metavar="MODE",
+        help="how lines that access unmodelled registers are reported: hit counts them as "
+        "covered and records nothing (default), mark counts them as covered and marks them in "
+        "the term and built-in html reports, miss counts them as not hit. mark and miss slow "
+        "every access to a peripheral register. Replaces the popcorn_cov_unmodelled ini option",
     )
     group.addoption(
         "--popcorn-trace-on-fail",

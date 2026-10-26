@@ -87,13 +87,16 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     else:
         try:
             merged = run.directory / "merged.info"
-            merge_session(run.directory, merged, branches=True)
+            merge_session(
+                run.directory, merged, branches=True, unmodelled=settings.cov_unmodelled != "hit"
+            )
             result = generate(
                 merged,
                 settings.cov_reports,
                 include=settings.cov_include,
                 omit=settings.cov_omit,
                 root=config.rootpath,
+                unmodelled=settings.cov_unmodelled,
             )
         except (OSError, ValueError) as error:
             outcome = (

@@ -209,6 +209,12 @@ class PopcornSession:
         digest = devices_digest(self.project(key), devices)
         return dataclasses.replace(key, devices=UNCACHED if digest is None else digest)
 
+    @property
+    def unmodelled(self) -> bool:
+        """Whether the machines record CPU accesses to unmodelled registers: coverage is on and
+        `--popcorn-cov-unmodelled` is `mark` or `miss`."""
+        return self.coverage is not None and self.settings.cov_unmodelled != "hit"
+
     def build(self, key: Key, devices: Devices | None = None, name: str | None = None) -> Machine:
         """A new machine of `key` with `devices`, named `name`, not reset, counting coverage
         under `--popcorn-cov`, its ring keeping BLOCK records under `--popcorn-ring-blocks`."""
@@ -216,7 +222,7 @@ class PopcornSession:
             strict_peripherals=key.strict, devices=devices, name=name
         )
         if self.coverage is not None:
-            machine.coverage.enable()
+            machine.coverage.enable(unmodelled=self.unmodelled)
         machine.ring.blocks = self.settings.ring_blocks
         return machine
 
@@ -426,7 +432,9 @@ class PopcornSession:
         if self.cache is None:
             return await self._fresh_boot(key, project, devices, name)
         self.cache.mkdir(parents=True, exist_ok=True)
-        entry = Entry.of(self.cache, cache_key(project, key.strict, key.devices))
+        entry = Entry.of(
+            self.cache, cache_key(project, key.strict, key.devices, unmodelled=self.unmodelled)
+        )
         async with locked(entry):
             if entry.exists(self.coverage is not None):
                 restored = self._restored_from(key, entry, devices, name)

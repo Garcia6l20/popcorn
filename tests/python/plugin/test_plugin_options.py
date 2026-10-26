@@ -16,6 +16,7 @@ OPTIONS = (
     "--popcorn-cov-fail-under=PERCENT",
     "--popcorn-cov-include=GLOB",
     "--popcorn-cov-omit=GLOB",
+    "--popcorn-cov-unmodelled=MODE",
     "--popcorn-trace-on-fail=[[]DIR]",
     "--popcorn-strict",
     "--popcorn-budget=N",

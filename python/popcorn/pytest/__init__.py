@@ -143,6 +143,18 @@ says `html report not written`, as it does when genhtml fails or runs past 300 s
 reports are still written with the exit status unchanged. A failed genhtml removes the target
 directory the run created or emptied. Whenever a report is not written, the `.pcov` files stay
 in their directory, named in the summary.
+`--popcorn-cov-unmodelled=hit|mark|miss`, with the ini option `popcorn_cov_unmodelled`, sets how
+source lines that read or write a register no model implements are reported. The default `hit`
+counts them as covered and records nothing. `mark` and `miss` make every machine record the CPU
+accesses per accessing instruction, which adds about 20 ns to each access to a peripheral
+register. `mark` keeps the counts and adds an `Unmodelled` column, the lines per file, to the
+`term` table, colours the lines in the built-in `html` report with a tooltip of
+`peripheral.register (reason, N hits)`, and writes `html` with the built-in renderer even when
+genhtml is installed, when a kept line is marked. An `lcov` report then has a sidecar
+`<lcov>.unmodelled.json` next to it. `miss` counts those lines, the functions whose only hit lines
+are among them and their branches as not hit in every report, and rewrites the `lcov` report. The
+mode is part of the boot cache key. A line is marked when one of its instructions accessed an
+unmodelled register.
 The include and omit globs match a source path as written and relative to the rootdir, `**`
 included, and a filter rewrites the lcov files from the kept files. An interrupted session
 keeps the directory and writes no report. A crash or SIGKILL leaves the directory behind. xdist
@@ -217,8 +229,8 @@ Tests and fixtures anyio's plugin runs, those using its `anyio_backend` fixture,
 
 Options, registered for `pytest --help`: `--popcorn-cov`, `--popcorn-cov-report`,
 `--popcorn-cov-fail-under`, `--popcorn-cov-include`, `--popcorn-cov-omit`,
-`--popcorn-trace-on-fail[=DIR]`, `--popcorn-strict`, `--popcorn-budget`, `--popcorn-ring`,
-`--popcorn-ring-blocks`.
+`--popcorn-cov-unmodelled`, `--popcorn-trace-on-fail[=DIR]`, `--popcorn-strict`,
+`--popcorn-budget`, `--popcorn-ring`, `--popcorn-ring-blocks`.
 
     @pytest.mark.popcorn(budget=1_000_000, strict=True)
     async def test_bounded(controller: popcorn.Machine, linked: popcorn.System) -> None: ...

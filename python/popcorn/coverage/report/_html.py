@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from html import escape
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from popcorn.coverage.report._model import (
     Counts,
     LcovFile,
     LcovReport,
+    UnmodelledUse,
     display_name,
     resolve,
     truncated_percent,
@@ -26,6 +28,7 @@ table.src td.no, table.src td.hits { text-align: right; color: #666; }
 tr.hit td.src { background: #d8f0d8; }
 tr.miss td.src { background: #f6d0d0; }
 tr.partial td.src { background: #f8ecb8; }
+tr.unmodelled td.src { background: #cfe0f6; }
 .notice { color: #8a2a2a; }
 """
 
@@ -56,10 +59,21 @@ def _read_source(path: Path) -> list[str] | None:
     return [line.removesuffix("\r") for line in lines]
 
 
-def _source_page(file: LcovFile, name: str, root: Path) -> str:
+def _tooltip(uses: Sequence[UnmodelledUse]) -> str:
+    text = "&#10;".join(
+        escape(f"{use.target} ({use.reason}, {use.hits} hits)", quote=True) for use in uses
+    )
+    return f' title="{text}"'
+
+
+def _source_page(
+    marked: dict[int, Sequence[UnmodelledUse]], file: LcovFile, name: str, root: Path
+) -> str:
     source = _read_source(resolve(file.path, root))
     untaken = {branch.line for branch in file.branches if not branch.taken}
     parts = [f'<p><a href="index.html">index</a> {_rate(file.totals().lines)} lines</p>\n']
+    if marked:
+        parts.append(f"<p>{len(marked)} lines accessed unmodelled hardware.</p>\n")
     if source is None:
         parts.append(
             '<p class="notice">The source file is not a regular file under '
@@ -80,8 +94,11 @@ def _source_page(file: LcovFile, name: str, root: Path) -> str:
     parts.append('<table class="src">\n')
     for number in shown:
         hits = file.lines.get(number)
+        uses = marked.get(number, ())
         if hits is None:
             state = "none"
+        elif uses:
+            state = "unmodelled"
         elif hits == 0:
             state = "miss"
         elif number in untaken:
@@ -92,8 +109,9 @@ def _source_page(file: LcovFile, name: str, root: Path) -> str:
         if source is not None and number <= len(source):
             text = escape(source[number - 1])
         count = "" if hits is None else str(hits)
+        tip = _tooltip(uses) if uses else ""
         parts.append(
-            f'<tr class="{state}"><td class="no">{number}</td><td class="hits">{count}</td>'
+            f'<tr class="{state}"{tip}><td class="no">{number}</td><td class="hits">{count}</td>'
             f'<td class="src">{text}</td></tr>\n'
         )
     parts.append("</table>\n")
@@ -107,7 +125,10 @@ def render_html(report: LcovReport, out: Path, *, root: Path) -> tuple[Path, ...
     function and branch rates. A file's page is `src-<n>.html` for its position `n` in that
     order, so no source path reaches a file name. The page holds the functions with their hits
     and every source line with its count, coloured hit, miss, or partial when a branch of a hit
-    line was not taken. The source is read from `resolve(path, root)` and split on newlines only.
+    line was not taken. A line of `report.unmodelled` is coloured `unmodelled`, and its row
+    carries a `title` tooltip with one `peripheral.register (reason, N hits)` entry per register,
+    escaped, and the page says how many lines accessed unmodelled hardware. The source is read from
+    `resolve(path, root)` and split on newlines only.
     A source that cannot be read, is not a regular file or exceeds `SOURCE_LIMIT` bytes gives
     the counted lines with no text and a notice. A page lists the source lines and the counted
     lines past its end, so its size is bounded by the source and the tracefile. Every source line
@@ -124,10 +145,13 @@ def render_html(report: LcovReport, out: Path, *, root: Path) -> tuple[Path, ...
     rows: list[str] = []
     written = [out / "style.css", out / "index.html"]
     written[0].write_text(STYLE)
+    marked_by_file: dict[str, dict[int, Sequence[UnmodelledUse]]] = {}
+    for (path, line), uses in report.unmodelled.items():
+        marked_by_file.setdefault(path, {})[line] = uses
     for number, file in enumerate(ordered):
         name = display_name(file.path, root)
         page = out / f"src-{number}.html"
-        page.write_text(_source_page(file, name, root))
+        page.write_text(_source_page(marked_by_file.get(file.path, {}), file, name, root))
         written.append(page)
         totals = file.totals()
         rows.append(

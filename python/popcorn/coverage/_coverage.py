@@ -250,14 +250,16 @@ class Coverage:
         `no_register`, `storage_only`, `no_model`, `unimplemented` and `raz_wi`, and the hits
         the sum over the line's instructions and over the groups. `peripheral` follows
         `UnmodelledAccess`: the window name, or for a raz_wi range `raz_wi[<index>]`,
-        `<name>[<index>]` or the bare name. Accesses from a pc with no `DA` line are not listed,
-        `CoverageGroup.unmodelled` holds them all. Coverage recorded without `unmodelled` gives
-        no file entries.
+        `<name>[<index>]` or the bare name. `"unplaced"` is the sum of the hits of the accesses
+        no listed line holds, because their instruction has no source line with an lcov `DA`
+        record. `CoverageGroup.unmodelled` holds every access. Coverage recorded without
+        `unmodelled` gives no file entries.
 
         Raises:
             CoverageFileError: an ELF changed since the coverage was collected.
         """
         files: dict[str, dict[str, list[dict[str, object]]]] = {}
+        placed = 0
         for file, line, uses in _call(_obs.unmodelled_lines, self._data):
             files.setdefault(file, {})[str(line)] = [
                 {
@@ -270,7 +272,9 @@ class Coverage:
                 }
                 for peripheral, register, offset, write, reason, hits in uses
             ]
-        document = {"version": 1, "files": files}
+            placed += sum(use[5] for use in uses)
+        total = sum(access.hits for group in self.groups for access in group.unmodelled)
+        document = {"version": 1, "files": files, "unplaced": total - placed}
         Path(path).write_text(json.dumps(document, indent=1, sort_keys=True) + "\n")
 
     def export_drcov(self, path: PathLike) -> int:

@@ -191,3 +191,18 @@ def test_merging_without_the_sidecar_removes_one_of_an_earlier_run(tmp_path: Pat
 def test_an_access_is_a_dataclass_of_plain_values() -> None:
     access = UnmodelledAccess(1, "P", "R", 4, True, UnmodelledReason.STORAGE_ONLY, 2)
     assert access.reason.name.lower() == "storage_only"
+
+
+def test_accesses_from_code_without_a_line_are_counted_as_unplaced(tmp_path: Path) -> None:
+    m = machine()
+    m.coverage.enable(functions=["poll_unmodelled", "touch_stat"], unmodelled=True)
+    drive(m)
+    limited = m.coverage.collect()
+    limited.export_unmodelled(tmp_path / "limited.json")
+    assert json.loads((tmp_path / "limited.json").read_text())["unplaced"] == 2
+
+    full = machine()
+    full.coverage.enable(unmodelled=True)
+    drive(full)
+    full.coverage.collect().export_unmodelled(tmp_path / "full.json")
+    assert json.loads((tmp_path / "full.json").read_text())["unplaced"] == 0

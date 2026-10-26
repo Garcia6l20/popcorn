@@ -26,5 +26,6 @@ if unmodelled is not None:
             "read_unimplemented",
             "read_no_register",
             "read_modelled",
+            "boot_done",
         )
     )

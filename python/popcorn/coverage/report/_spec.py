@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from popcorn.coverage._coverage import unmodelled_path
 from popcorn.coverage.report._cobertura import render_cobertura
 from popcorn.coverage.report._genhtml import (
     GENHTML_TIMEOUT,
@@ -19,7 +20,15 @@ from popcorn.coverage.report._genhtml import (
     run_genhtml,
 )
 from popcorn.coverage.report._html import render_html
-from popcorn.coverage.report._model import LcovReport, Totals, parse_lcov
+from popcorn.coverage.report._model import (
+    LcovReport,
+    Totals,
+    UnmodelledUses,
+    check_mode,
+    dump_unmodelled,
+    parse_lcov,
+    parse_unmodelled,
+)
 from popcorn.coverage.report._term import render_term
 
 KINDS = ("term", "html", "xml", "lcov")
@@ -93,11 +102,12 @@ def _write_atomic(target: Path, data: bytes) -> None:
 
 
 def use_genhtml(report: LcovReport) -> bool:
-    """Whether genhtml writes the `html` report of `report`, which it does when installed.
+    """Whether genhtml writes the `html` report of `report`.
 
-    Otherwise the built-in renderer writes it.
+    That is when genhtml is installed and `report` holds no line that accessed unmodelled
+    registers, which only the built-in renderer marks. Otherwise the built-in renderer writes it.
     """
-    return find_genhtml() is not None
+    return find_genhtml() is not None and not report.unmodelled
 
 
 def _protected(root: Path, lcov: Path) -> tuple[tuple[str, Path], ...]:
@@ -120,7 +130,7 @@ def _discard(target: Path, *, keep: bool) -> None:
 
 
 def _write_html(
-    report: LcovReport, lcov: Path, target: Path, filtered: bool, root: Path
+    report: LcovReport, lcov: Path, target: Path, rewritten: bool, root: Path
 ) -> str | None:
     was_empty_dir = target.is_dir() and not target.is_symlink() and not any(target.iterdir())
     reason = prepare_output(target, protect=_protected(root, lcov))
@@ -134,7 +144,7 @@ def _write_html(
         else:
             with tempfile.TemporaryDirectory(prefix="popcorn-html-") as scratch:
                 source = lcov
-                if filtered:
+                if rewritten:
                     source = Path(scratch) / "filtered.info"
                     source.write_text(report.to_lcov())
                 done = run_genhtml(source, target, root=root)
@@ -158,6 +168,7 @@ def generate(
     omit: Sequence[str] = (),
     root: Path,
     timestamp: int | None = None,
+    unmodelled: str = "hit",
 ) -> ReportResult:
     """Parse `lcov` once, apply `include` and `omit`, and write every report of `specs`.
 
@@ -178,15 +189,37 @@ def generate(
     After a failed run a directory the call created or replaced a report in is removed, and a
     directory that was empty before the call stays, emptied of what the run wrote.
 
+    `unmodelled` is `mark`, `miss` or `hit`. Unless it is `hit`, the sidecar
+    `unmodelled_path(lcov)` is read when it exists, and an `lcov` report gets one next to its
+    target, `unmodelled_path(target)`, with the lines of the kept files. `mark` keeps the counts
+    and marks those lines in the `term` and built-in `html` reports, which then write `html`
+    even when genhtml is installed and a kept line is marked. `miss` counts those lines, their
+    functions and their branches as not hit in every report, and rewrites an `lcov` report.
+    `hit` reads no sidecar.
+
     Raises:
-        ValueError: `lcov` is not a tracefile, or an `lcov`, `xml` or `html` spec has no target.
+        ValueError: `lcov` is not a tracefile, `unmodelled` is not a mode, the sidecar is not
+            one, or an `lcov`, `xml` or `html` spec has no target.
         OSError: A target cannot be written.
     """
+    check_mode(unmodelled)
     data = lcov.read_bytes()
     report = parse_lcov(data.decode())
     filtered = bool(include or omit)
     if filtered:
         report = report.filtered(include, omit, root)
+    uses: UnmodelledUses | None = None
+    unplaced = 0
+    sidecar = unmodelled_path(lcov)
+    if unmodelled != "hit" and sidecar.is_file():
+        try:
+            uses, unplaced = parse_unmodelled(sidecar.read_text())
+        except ValueError as error:
+            raise ValueError(f"{sidecar}: {error}") from error
+        report = report.attached(uses, unplaced)
+        uses = report.unmodelled
+        report = report.with_unmodelled(unmodelled)
+    rewritten = filtered or (unmodelled == "miss" and uses is not None)
     files: list[ReportSpec] = []
     for spec in specs:
         if spec.kind != "term":
@@ -199,7 +232,7 @@ def generate(
         target = spec.target
         assert target is not None
         if spec.kind == "html":
-            problem = _write_html(report, lcov, target, filtered, root)
+            problem = _write_html(report, lcov, target, rewritten, root)
             if problem is not None:
                 problems.append(problem)
                 continue
@@ -209,7 +242,11 @@ def generate(
             _write_atomic(target, xml.encode())
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(report.to_lcov().encode() if filtered else data)
+            target.write_bytes(report.to_lcov().encode() if rewritten else data)
+            if uses is not None:
+                unmodelled_path(target).write_text(dump_unmodelled(uses, unplaced))
+            else:
+                unmodelled_path(target).unlink(missing_ok=True)
         written.append(target)
     term = render_term(report, root=root) if any(spec.kind == "term" for spec in specs) else None
     return ReportResult(report.totals(), tuple(written), term, tuple(problems))

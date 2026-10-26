@@ -43,8 +43,13 @@ __attribute__((noipa)) uint32_t read_modelled(void)
   return TESTDEV_RO;
 }
 
+__attribute__((noipa)) void boot_done(void)
+{}
+
 [[noreturn]] void Reset_Handler(void)
 {
+  sink = TESTDEV_GAP;
+  boot_done();
   for(;;)
   {
   }

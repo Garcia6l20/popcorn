@@ -573,7 +573,7 @@ def _wait_for_pid(pids: Path) -> int:
 def _is_gone(pid: int) -> bool:
     try:
         state = Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[0]
-    except FileNotFoundError:
+    except FileNotFoundError, ProcessLookupError:
         return True
     return state in ("Z", "X")
 

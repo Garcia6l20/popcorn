@@ -13,6 +13,8 @@ absolute pattern. Use `**/tests/**` to select a directory at any depth. The cove
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -21,6 +23,7 @@ from pathlib import Path, PurePath
 from types import MappingProxyType
 
 __all__ = [
+    "UNMODELLED_MODES",
     "BranchRecord",
     "Counts",
     "FunctionRecord",
@@ -28,11 +31,18 @@ __all__ = [
     "LcovFormatError",
     "LcovReport",
     "Totals",
+    "UnmodelledUse",
+    "UnmodelledUses",
+    "check_mode",
     "display_name",
+    "dump_unmodelled",
     "matches",
     "parse_lcov",
+    "parse_unmodelled",
     "resolve",
 ]
+
+UNMODELLED_MODES = ("mark", "miss", "hit")
 
 
 class LcovFormatError(ValueError):
@@ -131,6 +141,96 @@ class LcovFile:
             ),
             Counts(len(self.branches), sum(1 for branch in self.branches if branch.taken)),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class UnmodelledUse:
+    """CPU accesses from one source line to one register no model implements.
+
+    `register` is empty where the description names none, `offset` is the byte offset of the
+    accessed word, `reason` the lowercase name the sidecar holds.
+    """
+
+    peripheral: str
+    register: str
+    offset: int
+    write: bool
+    reason: str
+    hits: int
+
+    @property
+    def target(self) -> str:
+        """`peripheral.register`, `peripheral+0xOFFSET` for a register with no name."""
+        if self.register:
+            return f"{self.peripheral}.{self.register}"
+        return f"{self.peripheral}+{self.offset:#x}"
+
+
+type UnmodelledUses = Mapping[tuple[str, int], tuple[UnmodelledUse, ...]]
+
+
+def parse_unmodelled(text: str) -> tuple[UnmodelledUses, int]:
+    """Parses the unmodelled-access sidecar of an lcov file.
+
+    Returns:
+        The uses keyed by `SF` path and line, and the hits of the accesses no line holds, 0 for
+        a sidecar with no `unplaced` entry.
+
+    Raises:
+        ValueError: The text is not a version 1 sidecar.
+    """
+    try:
+        document = json.loads(text)
+        if document["version"] != 1:
+            raise ValueError(f"unmodelled sidecar version {document['version']!r} is not 1")
+        uses = {
+            (path, int(line)): tuple(
+                UnmodelledUse(
+                    str(use["peripheral"]),
+                    str(use["register"]),
+                    int(use["offset"]),
+                    bool(use["write"]),
+                    str(use["reason"]),
+                    int(use["hits"]),
+                )
+                for use in group
+            )
+            for path, lines in document["files"].items()
+            for line, group in lines.items()
+        }
+        return uses, int(document.get("unplaced", 0))
+    except (KeyError, TypeError, AttributeError) as error:
+        raise ValueError(f"bad unmodelled sidecar: {error!r}") from error
+
+
+NO_USES: UnmodelledUses = MappingProxyType({})
+
+
+def check_mode(mode: str) -> None:
+    """Raises `ValueError` unless `mode` is `mark`, `miss` or `hit`."""
+    if mode not in UNMODELLED_MODES:
+        raise ValueError(f"unknown unmodelled mode {mode!r}, use {', '.join(UNMODELLED_MODES)}")
+
+
+def dump_unmodelled(uses: UnmodelledUses, unplaced: int = 0) -> str:
+    """The sidecar text of `uses` and `unplaced`, as `Coverage.export_unmodelled` writes it."""
+    files: dict[str, dict[str, list[dict[str, object]]]] = {}
+    for (path, line), group in uses.items():
+        files.setdefault(path, {})[str(line)] = [
+            {
+                "peripheral": use.peripheral,
+                "register": use.register,
+                "offset": use.offset,
+                "write": use.write,
+                "reason": use.reason,
+                "hits": use.hits,
+            }
+            for use in group
+        ]
+    return (
+        json.dumps({"version": 1, "files": files, "unplaced": unplaced}, indent=1, sort_keys=True)
+        + "\n"
+    )
 
 
 def _root(root: Path) -> PurePath:
@@ -262,16 +362,48 @@ def parse_lcov(text: str) -> LcovReport:
     return LcovReport(tuple(files), has_branch_summary)
 
 
+def _span(function: FunctionRecord, ordered: Sequence[FunctionRecord]) -> range:
+    if function.end is not None:
+        return range(function.start, function.end + 1)
+    later = [other.start for other in ordered if other.start > function.start]
+    return range(function.start, min(later, default=2**31))
+
+
+def _zeroed(file: LcovFile, lines: set[int]) -> LcovFile:
+    hit = {number for number in lines if file.lines.get(number)}
+    if not hit:
+        return file
+    counts = {number: 0 if number in hit else count for number, count in file.lines.items()}
+    ordered = sorted(file.functions, key=lambda function: function.start)
+    functions: list[FunctionRecord] = []
+    for function in file.functions:
+        span = _span(function, ordered)
+        inside = [number for number in counts if number in span]
+        if function.hits and hit.intersection(inside) and not any(counts[n] for n in inside):
+            function = dataclasses.replace(function, hits=0)
+        functions.append(function)
+    branches = tuple(
+        dataclasses.replace(branch, taken=0) if branch.line in hit and branch.taken else branch
+        for branch in file.branches
+    )
+    return LcovFile(file.path, file.test_name, MappingProxyType(counts), tuple(functions), branches)
+
+
 @dataclass(frozen=True, slots=True)
 class LcovReport:
     """The files of an lcov tracefile.
 
     `has_branch_summary` is True when the parsed text carried `BRF` or `BRH` lines, which
     `to_lcov` then emits for every file, as the writer does when branch coverage is on.
+    `unmodelled` holds the lines that accessed unmodelled registers, set by `attached` and
+    kept by `with_unmodelled` in mode `mark` only. A key is a file path and a line the file has
+    a `DA` record for. `unplaced` is the hits of the accesses no line holds, kept like `unmodelled`.
     """
 
     files: tuple[LcovFile, ...]
     has_branch_summary: bool = False
+    unmodelled: UnmodelledUses = field(default=NO_USES, hash=False)
+    unplaced: int = 0
 
     def totals(self) -> Totals:
         """The counts summed over every file."""
@@ -288,7 +420,44 @@ class LcovReport:
             if (not include or matches(file.path, include, root))
             and not matches(file.path, omit, root)
         )
-        return LcovReport(kept, self.has_branch_summary)
+        paths = {file.path for file in kept}
+        uses = {key: uses for key, uses in self.unmodelled.items() if key[0] in paths}
+        return LcovReport(kept, self.has_branch_summary, uses, self.unplaced)
+
+    def attached(self, uses: UnmodelledUses, unplaced: int = 0) -> LcovReport:
+        """The report with the lines of `uses` that a file of the report has a `DA` record for,
+        and `unplaced`."""
+        counted = {file.path: file.lines for file in self.files}
+        kept = {key: group for key, group in uses.items() if key[1] in counted.get(key[0], ())}
+        return LcovReport(self.files, self.has_branch_summary, kept, unplaced)
+
+    def with_unmodelled(self, mode: str) -> LcovReport:
+        """The report with the attached unmodelled lines applied as `mode` says.
+
+        `hit` counts them as they are and drops the data. `mark` keeps counts and data. `miss`
+        sets the `DA` count of each line to 0, the `BRDA` taken counts of those lines to 0
+        where evaluated, and the `FNDA` count of each function that holds one of them and no
+        other line hit to 0, then drops the data. A function with no `FN` end line spans to the
+        line before the next function starts.
+
+        Raises:
+            ValueError: `mode` is not `mark`, `miss` or `hit`.
+        """
+        check_mode(mode)
+        if mode == "mark":
+            return self
+        if mode == "hit" or not self.unmodelled:
+            return LcovReport(self.files, self.has_branch_summary)
+        zeroed: dict[str, set[int]] = {}
+        for path, line in self.unmodelled:
+            zeroed.setdefault(path, set()).add(line)
+        return LcovReport(
+            tuple(
+                _zeroed(file, zeroed[file.path]) if file.path in zeroed else file
+                for file in self.files
+            ),
+            self.has_branch_summary,
+        )
 
     def to_lcov(self) -> str:
         """The tracefile text, in the record order of the native writer."""
