@@ -171,10 +171,13 @@ auto machine_handle::function_ranges(std::vector<std::string> const& names) cons
   });
 }
 
-void machine_handle::enable_coverage(std::vector<detail::range_row> const& ranges)
+void machine_handle::enable_coverage(
+    std::vector<detail::range_row> const& ranges,
+    bool                                  record_unmodelled)
 {
   auto native = native_ranges(ranges);
-  access([&](core::machine& target) { target.enable_coverage(std::move(native)); });
+  access(
+      [&](core::machine& target) { target.enable_coverage(std::move(native), record_unmodelled); });
 }
 
 void machine_handle::disable_coverage()

@@ -83,7 +83,9 @@ struct unmodelled_access
 {
   /** @brief Address of the accessing instruction. */
   address pc{};
-  /** @brief Peripheral as the window names it, an alias's own name, or the raz_wi range name. */
+  /** @brief Peripheral as the window names it, an alias's own name, or for a raz_wi range
+   * `raz_wi[<index>]` when unnamed, `<name>[<index>]` when several ranges share the name, the bare
+   * name otherwise. */
   std::string peripheral{};
   /** @brief Register name, empty where the description has none. */
   std::string reg{};

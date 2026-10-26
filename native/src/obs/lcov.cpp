@@ -14,6 +14,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -698,6 +699,71 @@ auto lcov(
   for(auto const& [path, record] : total)
   {
     write_file(path, record, options, out);
+  }
+  return out;
+}
+
+auto unmodelled_lines(coverage_set const& set, std::span<std::vector<image::image> const> images)
+    -> std::vector<unmodelled_line>
+{
+  using use_key =
+      std::tuple<std::string, std::string, std::uint32_t, bool, core::unmodelled_reason>;
+  std::map<std::pair<std::string, std::uint32_t>, std::map<use_key, count>> by_line;
+  for(auto const& [group, loaded] : std::views::zip(set.groups, images))
+  {
+    contract_assert(loaded.size() == group.images.size());
+    if(group.unmodelled.empty())
+    {
+      continue;
+    }
+    group_view   view{group};
+    file_records records;
+    for(auto const& [ref, source] : std::views::zip(group.images, loaded))
+    {
+      if(ref.kind == image_kind::elf)
+      {
+        add_lines(view, source, records);
+        add_functions(view, source, records);
+      }
+    }
+    for(auto const& access : group.unmodelled)
+    {
+      for(auto const& [ref, source] : std::views::zip(group.images, loaded))
+      {
+        if(ref.kind != image_kind::elf or executable_segment(source, access.pc) == nullptr)
+        {
+          continue;
+        }
+        if(auto const* row = row_at(source, access.pc))
+        {
+          auto const& file  = source.files.at(row->file);
+          auto const  found = records.find(file);
+          if(found != records.end() and found->second.lines.contains(row->line))
+          {
+            auto& hits = by_line[{file, row->line}][{
+                access.peripheral, access.reg, access.offset, access.write, access.reason}];
+            hits       = add(hits, access.hits);
+          }
+        }
+        break;
+      }
+    }
+  }
+  std::vector<unmodelled_line> out;
+  for(auto const& [place, uses] : by_line)
+  {
+    auto& line = out.emplace_back(place.first, place.second);
+    for(auto const& [key, hits] : uses)
+    {
+      auto const& [peripheral, reg, offset, write, reason] = key;
+      line.uses.push_back(
+          {.peripheral = peripheral,
+           .reg        = reg,
+           .offset     = offset,
+           .write      = write,
+           .reason     = reason,
+           .hits       = hits});
+    }
   }
   return out;
 }

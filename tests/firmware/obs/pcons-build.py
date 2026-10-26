@@ -15,3 +15,16 @@ if shapes is not None:
     shapes.private.link_flags.extend(
         f"-Wl,--undefined={name}" for name in ("inline_f", "alias_two", "same_b")
     )
+
+_, unmodelled = add_firmware("obs", "unmodelled", [here / "unmodelled.c"])
+if unmodelled is not None:
+    unmodelled.private.link_flags.extend(
+        f"-Wl,--undefined={name}"
+        for name in (
+            "poll_unmodelled",
+            "touch_stat",
+            "read_unimplemented",
+            "read_no_register",
+            "read_modelled",
+        )
+    )

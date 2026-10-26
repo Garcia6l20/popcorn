@@ -6,7 +6,9 @@ import random
 import struct
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 from popcorn import _obs
@@ -19,6 +21,8 @@ from popcorn.coverage import (
     EdgeHit,
     ImageKind,
     ImageRef,
+    UnmodelledAccess,
+    UnmodelledReason,
     merge,
     merge_session,
     worker_path,
@@ -270,3 +274,45 @@ def test_drcov_of_the_lines_firmware(tmp_path: Path) -> None:
     assert header[5] == "BB Table: 2 bbs"
     assert entries == [(0x0800_0008 - image.base, 4, 0), (0x0800_0014 - image.base, 4, 0)]
     assert out.read_bytes() == _obs.drcov_bytes(coverage.to_bytes())[0]
+
+
+def accesses() -> tuple[UnmodelledAccess, ...]:
+    return (
+        UnmodelledAccess(0x100, "UART", "DR", 4, False, UnmodelledReason.NO_MODEL, 3),
+        UnmodelledAccess(0x100, "UART", "DR", 4, True, UnmodelledReason.NO_MODEL, 1),
+        UnmodelledAccess(0x104, "RAZ", "", 8, False, UnmodelledReason.RAZ_WI, 2),
+    )
+
+
+def test_unmodelled_accesses_round_trip_and_sum_on_merge() -> None:
+    parts = replace(group({(0x100, 4): 3}, {}), unmodelled=accesses())
+    coverage = Coverage.from_parts([parts])
+    assert coverage.groups == (parts,)
+    assert Coverage(coverage.to_bytes()) == coverage
+    doubled = merge([coverage, coverage]).groups[0].unmodelled
+    assert [u.hits for u in doubled] == [6, 2, 4]
+    assert [u.pc for u in doubled] == [u.pc for u in accesses()]
+    plain = Coverage.from_parts([group({(0x100, 4): 3}, {})])
+    assert plain.groups[0].unmodelled == ()
+    assert plain != coverage
+
+
+def test_unmodelled_accesses_are_checked() -> None:
+    bad = replace(
+        group({(0x100, 4): 1}, {}),
+        unmodelled=(UnmodelledAccess(0x100, "U", "R", 0, False, cast(UnmodelledReason, 0), 1),),
+    )
+    with pytest.raises(CoverageFileError, match="reason of 1 to 5"):
+        Coverage.from_parts([bad])
+    past = replace(
+        bad,
+        unmodelled=(UnmodelledAccess(0x100, "U", "R", 0, False, cast(UnmodelledReason, 6), 1),),
+    )
+    with pytest.raises(CoverageFileError, match="reason of 1 to 5"):
+        Coverage.from_parts([past])
+
+
+def test_unmodelled_reasons_are_the_native_ones() -> None:
+    assert {name: value for name, value in _obs.unmodelled_reasons()} == {
+        reason.name.lower(): int(reason) for reason in UnmodelledReason
+    }

@@ -384,8 +384,8 @@ auto decode_group(reader& in, bool unmodelled) -> coverage_group
     access.reg        = in.text("an unmodelled access register");
     auto const reason = kind >> 8;
     if((kind & ~std::uint32_t{0xff01}) != 0
-       or reason < std::to_underlying(core::unmodelled_reason::no_register)
-       or reason > std::to_underlying(core::unmodelled_reason::raz_wi))
+       or reason == 0
+       or not is_enumerator(static_cast<core::unmodelled_reason>(reason)))
     {
       in.fail(
           at,

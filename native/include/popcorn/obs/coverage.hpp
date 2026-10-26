@@ -187,6 +187,59 @@ POPCORN_API auto lcov(
     std::span<std::vector<image::image> const> images,
     lcov_options const& options) -> std::string pre(images.size() == set.groups.size());
 
+/** @brief CPU accesses of one source line to one unmodelled register, summed over the line's
+ * instructions. */
+struct unmodelled_use
+{
+  /** @brief Peripheral as the window names it, or for a raz_wi range `raz_wi[<index>]` when
+   * unnamed, `<name>[<index>]` when several ranges share the name, the bare name otherwise. */
+  std::string peripheral{};
+  /** @brief Register name, empty where the description has none. */
+  std::string reg{};
+  /** @brief Byte offset of the accessed word in the peripheral or range. */
+  std::uint32_t offset{};
+  /** @brief Whether the access was a write. */
+  bool write{};
+  /** @brief Why the register is unmodelled. */
+  core::unmodelled_reason reason{};
+  /** @brief Times it was accessed. */
+  std::uint64_t hits{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(unmodelled_use const&, unmodelled_use const&) -> bool = default;
+};
+
+/** @brief A source line whose instructions accessed unmodelled registers. */
+struct unmodelled_line
+{
+  /** @brief Source path as the lcov `SF` record names it. */
+  std::string file{};
+  /** @brief Line number, one that lcov() writes a `DA` record for. */
+  std::uint32_t line{};
+  /** @brief Accesses, sorted by peripheral, register, offset, write and reason. */
+  std::vector<unmodelled_use> uses{};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(unmodelled_line const&, unmodelled_line const&) -> bool = default;
+};
+
+/**
+ * @brief Source lines that accessed unmodelled registers, the accesses of
+ *        coverage_group::unmodelled mapped to lines with the rules lcov() uses.
+ *
+ * An access goes to the line of the line-table row holding its pc, in the first ELF image of its
+ * group whose executable segment holds the pc, when lcov() writes a `DA` record for that file and
+ * line. Accesses of other pcs, such as code outside the group's ranges, are left out. Accesses
+ * of one register from several instructions of a line, and of several groups, sum.
+ *
+ * @param set Coverage, as collect() or a `.pcov` load gives it.
+ * @param images Per group, its images as lcov() takes them.
+ * @return Lines sorted by file then line.
+ */
+POPCORN_API auto
+    unmodelled_lines(coverage_set const& set, std::span<std::vector<image::image> const> images)
+        -> std::vector<unmodelled_line> pre(images.size() == set.groups.size());
+
 /**
  * @brief Encodes a coverage set as a `.pcov` version 2 file, little endian, fields 4-byte aligned,
  *        strings padded with zeros: `PCOV`, u16 version 2, u16 flags, u32 group count, then per
