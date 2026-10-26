@@ -105,9 +105,21 @@ Write it as `--popcorn-trace-on-fail=DIR` or last on the command line: a bare fl
 takes the path as its DIR. `machine_factory` machines are not traced. Kept traces are never
 pruned: `--cache-clear` removes those in the pytest cache.
 
-With `--popcorn-cov=LCOV`, every machine the plugin builds counts coverage. Each process adds
+With `--popcorn-cov`, every machine the plugin builds counts coverage. Each process adds
 its machines' counts to one `.pcov` file of a temporary `popcorn-cov-*` directory, the boot of
-each configuration counted once, and the controller merges them into `LCOV` at session end. An
+each configuration counted once, and the controller merges them at session end into the lcov
+files of the reports: `--popcorn-cov-report=lcov:PATH`, repeatable, and the `popcorn_cov_lcov`
+ini option, an implicit `lcov:` report. A bare `lcov` report writes `popcorn_cov_lcov`. The
+ini options `popcorn_cov_report` (one `TYPE[:TARGET]` per line), `popcorn_cov_fail_under`,
+`popcorn_cov_include` and `popcorn_cov_omit` (one glob per line) hold the defaults of
+`--popcorn-cov-report`, `--popcorn-cov-fail-under`, `--popcorn-cov-include` and
+`--popcorn-cov-omit`. `--popcorn-cov-fail-under` takes a percent from 0 to 100, checked at
+startup, and leaves the exit status unchanged. A command-line value replaces the ini value of
+its setting. Command-line
+targets resolve against the invocation directory, ini targets against the rootdir. The
+`--popcorn-cov-*` options need `--popcorn-cov`, ini values are ignored without it. The
+include and omit globs match a source path as written and relative to the rootdir, `**`
+included, and a filter rewrites the lcov files from the kept files. An
 interrupted session keeps the directory and writes no lcov. A crash or SIGKILL leaves the
 directory behind. xdist workers on other hosts, `--tx ssh=...`, are not supported: they share
 the directory by path.
@@ -179,8 +191,10 @@ async test and fixture. They run on its loops, everything else on popcorn's. Mix
 
 Tests and fixtures anyio's plugin runs, those using its `anyio_backend` fixture, are left to it.
 
-Options, registered for `pytest --help`: `--popcorn-cov`, `--popcorn-trace-on-fail[=DIR]`,
-`--popcorn-strict`, `--popcorn-budget`, `--popcorn-ring`, `--popcorn-ring-blocks`.
+Options, registered for `pytest --help`: `--popcorn-cov`, `--popcorn-cov-report`,
+`--popcorn-cov-fail-under`, `--popcorn-cov-include`, `--popcorn-cov-omit`,
+`--popcorn-trace-on-fail[=DIR]`, `--popcorn-strict`, `--popcorn-budget`, `--popcorn-ring`,
+`--popcorn-ring-blocks`.
 
     @pytest.mark.popcorn(budget=1_000_000, strict=True)
     async def test_bounded(controller: popcorn.Machine, linked: popcorn.System) -> None: ...

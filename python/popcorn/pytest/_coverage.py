@@ -10,6 +10,7 @@ from typing import cast
 import pytest
 
 from popcorn.coverage import merge_session
+from popcorn.coverage.report import generate
 from popcorn.pytest._options import SETTINGS
 from popcorn.pytest._session import COVERAGE, SESSION, WORKER_SUMMARIES, CoverageRun, summary
 
@@ -55,7 +56,7 @@ def pytest_configure(config: pytest.Config) -> None:
         if isinstance(directory, str):
             config.stash[COVERAGE] = CoverageRun(Path(directory), str(received["workerid"]), False)
         return
-    if config.stash[SETTINGS].cov is not None:
+    if config.stash[SETTINGS].cov_enabled:
         directory = Path(tempfile.mkdtemp(prefix="popcorn-cov-"))
         config.stash[COVERAGE] = CoverageRun(directory, "main", True)
     if config.pluginmanager.hasplugin("xdist"):
@@ -64,11 +65,11 @@ def pytest_configure(config: pytest.Config) -> None:
 
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Merge every `.pcov` file of the session into the lcov file, then remove the directory."""
+    """Merge every `.pcov` file of the session, write the reports, then remove the directory."""
     config = session.config
     run = config.stash.get(COVERAGE, None)
-    lcov = config.stash[SETTINGS].cov
-    if run is None or not run.owner or lcov is None:
+    settings = config.stash[SETTINGS]
+    if run is None or not run.owner or not settings.cov_enabled:
         return
     failures = _failures(config)
     if session.exitstatus == pytest.ExitCode.INTERRUPTED:
@@ -81,15 +82,27 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
         outcome = "popcorn: no firmware coverage collected, no lcov written"
     else:
         try:
-            merge_session(run.directory, lcov, branches=True)
-        except (OSError, ValueError) as error:
+            merged = run.directory / "merged.info"
+            merge_session(run.directory, merged, branches=True)
+            result = generate(
+                merged,
+                settings.cov_reports,
+                include=settings.cov_include,
+                omit=settings.cov_omit,
+                root=config.rootpath,
+            )
+        except (OSError, ValueError, NotImplementedError) as error:
             outcome = (
                 f"popcorn: coverage merge failed: {error}, the .pcov files stay in {run.directory}"
             )
         else:
             shutil.rmtree(run.directory)
-            outcome = f"popcorn: firmware coverage written to {lcov}"
-    config.stash[OUTCOME] = "\n".join([outcome, *(f"popcorn: {failure}" for failure in failures)])
+            outcome = "\n".join(
+                f"popcorn: firmware coverage written to {path}" for path in result.written
+            )
+    config.stash[OUTCOME] = "\n".join(
+        line for line in (outcome, *(f"popcorn: {failure}" for failure in failures)) if line
+    )
 
 
 def _failures(config: pytest.Config) -> list[str]:

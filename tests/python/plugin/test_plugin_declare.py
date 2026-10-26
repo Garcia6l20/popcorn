@@ -15,6 +15,7 @@ from .helpers import (
     BOARD_ELF,
     CALLEE_ELF,
     DRIVER_ELF,
+    cov_args,
     write_conftest,
     write_model_project,
     write_project,
@@ -469,7 +470,7 @@ def test_coverage_counts_declared_machines(pytester: pytest.Pytester) -> None:
             await first.call("negate", 2)
             await second.call("negate", 3)
         """)
-    result = pytester.runpytest(*NO_ASYNCIO, "-p", "no:xdist", "--popcorn-cov=a.info")
+    result = pytester.runpytest(*NO_ASYNCIO, "-p", "no:xdist", *cov_args("a.info"))
     result.assert_outcomes(passed=2)
     text = (pytester.path / "a.info").read_text()
     assert re.search(r"^FNDA:3,negate$", text, re.M)

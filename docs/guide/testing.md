@@ -92,8 +92,10 @@ fault registers and the call stack.
   interrupts, calls and stops.
 - `--popcorn-trace-on-fail=DIR` traces every machine fixture and keeps the trace of each failed
   test in `DIR`.
-- `--popcorn-cov=LCOV` collects firmware coverage of every machine the plugin builds and writes
-  it as an lcov file at the end of the session.
+- `--popcorn-cov` collects firmware coverage of every machine the plugin builds. The lcov file
+  written at the end of the session is `--popcorn-cov-report=lcov:PATH` or the `popcorn_cov_lcov`
+  ini option. `--popcorn-cov-include=GLOB` and `--popcorn-cov-omit=GLOB` filter the source files,
+  and a command-line value replaces the ini value of the same setting.
 
 ## Boot cache
 

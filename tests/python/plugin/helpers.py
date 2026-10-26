@@ -164,3 +164,8 @@ def read_loops(pytester: pytest.Pytester) -> Loops:
     """The loops the inner `record` calls saw, and whether popcorn's runner was created."""
     data = json.loads((pytester.path / "loops.json").read_text())
     return Loops(ids=data["ids"], closed=data["closed"], started=data["started"])
+
+
+def cov_args(path: str) -> tuple[str, ...]:
+    """The options that count coverage and write the lcov file `path`."""
+    return ("--popcorn-cov", f"--popcorn-cov-report=lcov:{path}")

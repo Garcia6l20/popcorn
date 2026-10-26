@@ -23,6 +23,7 @@ from popcorn.coverage.report._model import (
     parse_lcov,
     resolve,
 )
+from popcorn.coverage.report._spec import ReportResult, ReportSpec, generate, parse_spec
 
 __all__ = [
     "BranchRecord",
@@ -31,9 +32,13 @@ __all__ = [
     "LcovFile",
     "LcovFormatError",
     "LcovReport",
+    "ReportResult",
+    "ReportSpec",
     "Totals",
     "display_name",
+    "generate",
     "matches",
     "parse_lcov",
+    "parse_spec",
     "resolve",
 ]

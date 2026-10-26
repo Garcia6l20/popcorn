@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from .helpers import ROOT, write_conftest, write_project
+from .helpers import ROOT, cov_args, write_conftest, write_project
 
 pytest_plugins = ["pytester"]
 
@@ -258,7 +258,7 @@ def test_factory_machines_left_started_are_parked_and_counted(
             for _ in range(2):
                 machine_factory(description).start()
         """)
-    result = run(pytester, "--popcorn-cov=cov.info")
+    result = run(pytester, *cov_args("cov.info"))
     result.assert_outcomes(passed=1)
     result.stdout.no_fnmatch_line("*MachineRunning*")
     result.stdout.fnmatch_lines(["popcorn: firmware coverage written to *cov.info"])
@@ -295,7 +295,7 @@ def test_xdist_workers_park_and_exit(pytester: pytest.Pytester) -> None:
             assert fired.wait(10)
         """)
     result = pytester.runpytest_subprocess(
-        *NO_ASYNCIO, "-n", "2", "--popcorn-cov=cov.info", timeout=EXIT_WITHIN
+        *NO_ASYNCIO, "-n", "2", *cov_args("cov.info"), timeout=EXIT_WITHIN
     )
     result.assert_outcomes(passed=2)
     result.stdout.fnmatch_lines(["popcorn: firmware coverage written to *cov.info"])

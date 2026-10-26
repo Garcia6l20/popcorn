@@ -18,6 +18,7 @@ from .helpers import (
     DRIVER_ELF,
     M33_JSON,
     ROOT,
+    cov_args,
     write_conftest,
     write_project,
     write_project_conftest,
@@ -211,7 +212,7 @@ def test_cached_boots_give_the_same_lcov(pytester: pytest.Pytester) -> None:
         ("warm4", ("-n", "4")),
         ("nocache", ("-n", "0", "-p", "no:cacheprovider")),
     ):
-        result = pytester.runpytest_subprocess(*BASE, *args, f"--popcorn-cov={name}.info")
+        result = pytester.runpytest_subprocess(*BASE, *args, *cov_args(f"{name}.info"))
         result.assert_outcomes(passed=30)
         files.append((pytester.path / f"{name}.info").read_bytes())
     assert files[0] == files[1] == files[2] == files[3]
@@ -286,11 +287,11 @@ def test_an_entry_without_boot_coverage_is_a_miss_under_cov(pytester: pytest.Pyt
     write_project(pytester)
     pytester.makepyfile("def test_boot(machine):\n    pass\n")
     run(pytester).assert_outcomes(passed=1)
-    result = run(pytester, "-p", "no:xdist", "--popcorn-cov=a.info")
+    result = run(pytester, "-p", "no:xdist", *cov_args("a.info"))
     result.assert_outcomes(passed=1)
     result.stdout.no_fnmatch_line("*dropped*")
     assert summary(result) == "popcorn: 1 key(s), 1 boot(s), 0 from cache"
-    again = run(pytester, "-p", "no:xdist", "--popcorn-cov=b.info")
+    again = run(pytester, "-p", "no:xdist", *cov_args("b.info"))
     assert summary(again) == "popcorn: 1 key(s), 0 boot(s), 1 from cache"
     assert (pytester.path / "a.info").read_bytes() == (pytester.path / "b.info").read_bytes()
 
