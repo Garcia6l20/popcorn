@@ -105,29 +105,40 @@ def checked_program(
     return elf_path, elf
 
 
-def add_firmware(area: str, name: str, sources: Sequence[str | Path]) -> tuple[Path, Target | None]:
+def add_firmware(
+    area: str,
+    name: str,
+    sources: Sequence[str | Path],
+    subdir: str = "",
+    linker_script: str = LINKER_SCRIPT,
+) -> tuple[Path, Target | None]:
     """Build tests/firmware/@p area/@p name.elf, or fall back to its committed prebuilt copy.
+
+    With a @p subdir the prebuilt copy is prebuilt/@p subdir/@p name.elf, the target is
+    firmware-@p area-@p subdir_@p name and `firmware` finds it as @p subdir_@p name. The firmware
+    links with @p linker_script, a project-relative path.
 
     @return The ELF path tests load and the target building it, None when the prebuilt copy is used.
     With the toolchain, a firmware-check-@p name target fails when the loadable content of the
     rebuilt ELF differs from the prebuilt one.
     """
-    prebuilt = project_dir / "tests" / "firmware" / area / "prebuilt" / f"{name}.elf"
+    prebuilt = project_dir / "tests" / "firmware" / area / "prebuilt" / subdir / f"{name}.elf"
+    declared = f"{subdir}_{name}" if subdir else name
     env = firmware_env()
     if env is None:
-        _declared[area, name] = (prebuilt_only(prebuilt), None)
+        _declared[area, declared] = (prebuilt_only(prebuilt), None)
         return prebuilt, None
 
     elf_path, elf = checked_program(
-        f"firmware-{area}-{name}",
-        name,
+        f"firmware-{area}-{declared}",
+        declared,
         env,
         sources,
-        PathToken(prefix="-T", path=LINKER_SCRIPT, path_type="project"),
-        project_dir / LINKER_SCRIPT,
+        PathToken(prefix="-T", path=linker_script, path_type="project"),
+        project_dir / linker_script,
         prebuilt,
     )
-    _declared[area, name] = (elf_path, elf)
+    _declared[area, declared] = (elf_path, elf)
     return elf_path, elf
 
 

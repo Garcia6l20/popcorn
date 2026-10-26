@@ -29,6 +29,13 @@ inline auto u575() -> part_description const&
   return desc;
 }
 
+/** @brief The STM32H573 description built from ST's files, `POPCORN_H573_DESC`, read once. */
+inline auto h573() -> part_description const&
+{
+  static auto const desc = description_from("POPCORN_H573_DESC");
+  return desc;
+}
+
 /** @brief Machine options of the STM32 tests: faults and spins stop the run. */
 inline auto stm32_options() -> core::machine_options
 {

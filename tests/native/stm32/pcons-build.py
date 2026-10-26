@@ -19,6 +19,7 @@ private_dir = project_dir / "native" / "src" / "periph" / "stm32"
 periph_data = project_dir / "tests" / "data" / "periph"
 
 u575 = cached_st_description("STM32U575QGIx", "POPCORN_U575_DESC")
+h573 = cached_st_description("STM32H573AIIx", "POPCORN_H573_DESC")
 firmwares = {
     name: firmware("periph", name)
     for name in (
@@ -41,9 +42,15 @@ firmwares = {
         "rng_ll",
     )
 }
+h573_firmwares = {name: firmware("periph", name) for name in ("h573_boot_ll",)}
+h573_env = {
+    "POPCORN_H573_DESC": str(h573),
+    **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in h573_firmwares.items()},
+}
 u575_env = {
     "POPCORN_U575_DESC": str(u575),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in firmwares.items()},
+    **h573_env,
     "POPCORN_MDF_VECTORS": str(periph_data / "mdf"),
     "POPCORN_FW_USB_CDC": str(
         project_dir / "examples" / "stm32u575" / "usb_cdc" / "prebuilt" / "usb_cdc.elf"
@@ -117,6 +124,18 @@ for program in u575_programs:
     for _, target in firmwares.values():
         if target is not None:
             program.depends(target)
+
+attach_h573 = add_doctest(
+    "stm32-attach-h573",
+    [here / "test_attach_h573.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+attach_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        attach_h573.depends(target)
 
 link_queues = add_doctest("stm32-link-queues", [here / "test_link_queues.cpp"], static)
 link_queues.private.include_dirs.append(project_dir / "native" / "src" / "bind")

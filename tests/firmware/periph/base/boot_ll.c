@@ -1,5 +1,5 @@
+#include "family.h"
 #include "periph_test.h"
-#include "stm32u5xx_ll_rcc.h"
 
 int main(void)
 {
@@ -10,6 +10,6 @@ int main(void)
   LL_RCC_GetSystemClocksFreq(&clocks);
   LOG(clocks.SYSCLK_Frequency);
   LOG(clocks.PCLK2_Frequency);
-  LOG(LL_RCC_MSIS_GetRange());
+  LOG_RESET_CLOCK_SOURCE();
   DONE();
 }
