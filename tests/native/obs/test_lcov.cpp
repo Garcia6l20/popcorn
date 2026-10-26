@@ -423,6 +423,45 @@ TEST_CASE("branch counts: never reached, blocks sharing the branch, branch to th
   CHECK(starting(text, "BRDA:") == std::vector<std::string>{"BRDA:7,0,0,5", "BRDA:7,0,1,0"});
 }
 
+TEST_CASE("a branch on a line whose own rows lie outside the scope still gets a DA record")
+{
+  auto made = synthetic(
+      code({
+          0xbf00, 0xbf00, 0x2800, 0xd000, 0xbf00, 0x4770
+  }),
+      {{0x100, 5}, {0x102, 6}}, 0x0c);
+  made.files = {"tests/firmware/obs/lines.c"};
+  obs::coverage_group group{
+      .images = {{.kind = obs::image_kind::elf, .path = "/a.elf", .digest = "d"}},
+      .ranges =
+          {{.name = "head", .start = 0x100, .size = 2},
+                 {.name = "tail", .start = 0x106, .size = 8}},
+  };
+  auto const text = lcov_of(made, {group});
+  CHECK(starting(text, "BRDA:") == std::vector<std::string>{"BRDA:6,0,0,-", "BRDA:6,0,1,-"});
+  CHECK(starting(text, "DA:") == std::vector<std::string>{"DA:5,0", "DA:6,0"});
+  check_genhtml(text, "branch_row");
+
+  group.blocks = {
+      {.start = 0x100, .size = 8, .hits = 3}
+  };
+  auto const hit = lcov_of(made, {group});
+  CHECK(starting(hit, "DA:") == std::vector<std::string>{"DA:5,3", "DA:6,3"});
+
+  group.blocks = {
+      {.start = 0x104, .size = 4, .hits = 3}
+  };
+  auto const late = lcov_of(made, {group});
+  CHECK(starting(late, "DA:") == std::vector<std::string>{"DA:5,0", "DA:6,3"});
+
+  group.blocks = {
+      {.start = 0x100, .size = 8, .hits = 3}
+  };
+  auto const plain = lcov_of(made, {group}, {.branches = false});
+  CHECK(starting(plain, "DA:") == std::vector<std::string>{"DA:5,3"});
+  CHECK(starting(plain, "BRDA:").empty());
+}
+
 TEST_CASE("a literal pool after a return is not decoded for branches")
 {
   auto const made = synthetic(

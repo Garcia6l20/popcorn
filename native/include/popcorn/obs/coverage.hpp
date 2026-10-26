@@ -142,8 +142,9 @@ struct lcov_options
  * flow through each function in range, and counted from the edges out of the blocks that end with
  * them. A branch whose block never ran to it is `-`. Edges the machine did not record, at an
  * exception entry or a stop right after a branch, are missing from the counts. BRDA block numbers
- * are the branch's index among its line's branches. Each file record starts with its own TN
- * record.
+ * are the branch's index among its line's branches. A line that has a BRDA record has a DA
+ * record of at least the executed count of the branch instruction. Each file record starts with
+ * its own TN record.
  *
  * A function is `FN:<start>,<end>,<name>`. With a debug function at its address, image::image
  * functions, it is filed under the declaring file at the declaration line. Without one, it is

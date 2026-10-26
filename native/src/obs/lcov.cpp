@@ -529,7 +529,10 @@ void add_branches(
       }
       if(auto const* row = row_at(source, at))
       {
-        out[source.files.at(row->file)].branches[row->line][at] = view.outcome(branch);
+        auto& record                   = out[source.files.at(row->file)];
+        record.branches[row->line][at] = view.outcome(branch);
+        auto& covered                  = record.lines[row->line];
+        covered                        = std::max(covered, view.instructions(at));
       }
     }
   }
@@ -671,7 +674,8 @@ auto lcov(
       }
       add_lines(view, source, records);
       add_functions(view, source, records);
-      if(auto const* const analysis = arch::find_code_analysis(source.elf_machine))
+      if(auto const* const analysis = arch::find_code_analysis(source.elf_machine);
+         options.branches and analysis != nullptr)
       {
         add_branches(view, source, *analysis, records);
       }
