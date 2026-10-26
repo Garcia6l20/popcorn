@@ -114,8 +114,13 @@ ini options `popcorn_cov_report` (one `TYPE[:TARGET]` per line), `popcorn_cov_fa
 `popcorn_cov_include` and `popcorn_cov_omit` (one glob per line) hold the defaults of
 `--popcorn-cov-report`, `--popcorn-cov-fail-under`, `--popcorn-cov-include` and
 `--popcorn-cov-omit`. `--popcorn-cov-fail-under` takes a percent from 0 to 100, checked at
-startup, and leaves the exit status unchanged. A command-line value replaces the ini value of
-its setting. Command-line targets resolve against the invocation directory, ini targets
+startup. When the total line coverage after include and omit is below it, compared exactly
+with nothing rounded, the summary prints `FAIL Required coverage of N% not reached` with the
+total cut to two decimals. A run that would exit 0 exits 1, any other status is kept. The
+`term` table cuts to one decimal. A session that collected no coverage, or whose merge
+failed, counts as 0 percent.
+An interrupted session skips the check. A command-line value replaces the ini value of its
+setting. Command-line targets resolve against the invocation directory, ini targets
 against the rootdir. The `--popcorn-cov-*` options need `--popcorn-cov`, ini values are
 ignored without it. The `term` report prints a table of lines, functions and branches per
 source file and a `TOTAL` row under a `firmware coverage` header at the end of the run, once

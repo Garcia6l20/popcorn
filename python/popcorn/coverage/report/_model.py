@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path, PurePath
 from types import MappingProxyType
 
@@ -68,6 +69,27 @@ class Totals:
             self.functions + other.functions,
             self.branches + other.branches,
         )
+
+
+def below(totals: Totals, threshold: float) -> bool:
+    """True when the line coverage of `totals` is under `threshold` percent.
+
+    The comparison is exact on the decimal text of `threshold`, no percentage is rounded first.
+    Nothing found counts as 0 percent, so it is below any positive threshold.
+    """
+    lines = totals.lines
+    if lines.found == 0:
+        return threshold > 0
+    return lines.hit * 100 < Fraction(str(threshold)) * lines.found
+
+
+def truncated_percent(counts: Counts) -> str:
+    """The percent hit of `counts` with two decimals, cut and never rounded up.
+
+    Nothing found gives `0.00`, and so does one hit in more than 10000 found lines.
+    """
+    hundredths = 0 if counts.found == 0 else counts.hit * 10000 // counts.found
+    return f"{hundredths // 100}.{hundredths % 100:02d}"
 
 
 @dataclass(frozen=True, slots=True)

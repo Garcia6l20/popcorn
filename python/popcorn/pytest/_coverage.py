@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
 import pytest
 
 from popcorn.coverage import merge_session
-from popcorn.coverage.report import generate
+from popcorn.coverage.report import Totals, below, generate, truncated_percent
 from popcorn.pytest._options import SETTINGS
 from popcorn.pytest._session import COVERAGE, SESSION, WORKER_SUMMARIES, CoverageRun, summary
 
@@ -72,8 +73,10 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     settings = config.stash[SETTINGS]
     if run is None or not run.owner or not settings.cov_enabled:
         return
-    failures = _failures(config)
-    if session.exitstatus == pytest.ExitCode.INTERRUPTED:
+    failures = [f"popcorn: {failure}" for failure in _failures(config)]
+    interrupted = session.exitstatus == pytest.ExitCode.INTERRUPTED
+    totals = Totals()
+    if interrupted:
         outcome = (
             "popcorn: session interrupted, no report written, the .pcov files stay in "
             f"{run.directory}"
@@ -97,15 +100,23 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
                 f"popcorn: coverage merge failed: {error}, the .pcov files stay in {run.directory}"
             )
         else:
+            totals = result.totals
             shutil.rmtree(run.directory)
             outcome = "\n".join(
                 f"popcorn: firmware coverage written to {path}" for path in result.written
             )
             if result.term is not None:
                 config.stash[TERM] = result.term
-    config.stash[OUTCOME] = "\n".join(
-        line for line in (outcome, *(f"popcorn: {failure}" for failure in failures)) if line
-    )
+    threshold = settings.cov_fail_under
+    if threshold is not None and not interrupted and below(totals, threshold):
+        shown = format(Decimal(str(threshold)).normalize(), "f")
+        failures.append(
+            f"FAIL Required coverage of {shown}% not reached. "
+            f"Total coverage: {truncated_percent(totals.lines)}%"
+        )
+        if session.exitstatus == pytest.ExitCode.OK:
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    config.stash[OUTCOME] = "\n".join(line for line in (outcome, *failures) if line)
 
 
 def _failures(config: pytest.Config) -> list[str]:

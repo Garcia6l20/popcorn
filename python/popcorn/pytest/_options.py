@@ -29,8 +29,8 @@ class Settings:
             Command-line targets resolve against the invocation directory, ini targets against
             the rootdir.
         cov_fail_under: The threshold in percent from 0 to 100, `--popcorn-cov-fail-under` else
-            `popcorn_cov_fail_under`, None when neither is given. It is validated at startup and
-            leaves the exit status unchanged.
+            `popcorn_cov_fail_under`, None when neither is given. It is validated at startup. The
+            session exits with status 1 instead of 0 when the total line coverage is below it.
         cov_include: Glob patterns a source file must match, `--popcorn-cov-include` else
             `popcorn_cov_include`. A command-line value replaces the ini value.
         cov_omit: Glob patterns that drop a source file, `--popcorn-cov-omit` else
@@ -225,8 +225,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     parser.addini(
         "popcorn_cov_fail_under",
-        help="coverage threshold in percent, from 0 to 100, validated at startup and leaving "
-        "the exit status unchanged",
+        help="exit with status 1 instead of 0 when the total line coverage is below PERCENT, "
+        "from 0 to 100",
         default="",
     )
     parser.addini(
@@ -259,8 +259,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--popcorn-cov-fail-under",
         type=float,
         metavar="PERCENT",
-        help="coverage threshold in percent, from 0 to 100, validated at startup and leaving "
-        "the exit status unchanged",
+        help="exit with status 1 instead of 0 when the total line coverage is below PERCENT, "
+        "from 0 to 100",
     )
     group.addoption(
         "--popcorn-cov-include",

@@ -18,10 +18,12 @@ from popcorn.coverage.report._model import (
     LcovFormatError,
     LcovReport,
     Totals,
+    below,
     display_name,
     matches,
     parse_lcov,
     resolve,
+    truncated_percent,
 )
 from popcorn.coverage.report._spec import ReportResult, ReportSpec, generate, parse_spec
 from popcorn.coverage.report._term import render_term
@@ -36,6 +38,7 @@ __all__ = [
     "ReportResult",
     "ReportSpec",
     "Totals",
+    "below",
     "display_name",
     "generate",
     "matches",
@@ -43,4 +46,5 @@ __all__ = [
     "parse_spec",
     "render_term",
     "resolve",
+    "truncated_percent",
 ]

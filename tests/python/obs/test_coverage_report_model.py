@@ -16,7 +16,15 @@ from popcorn.coverage import (
     LcovFormatError,
     parse_lcov,
 )
-from popcorn.coverage.report import display_name, matches, resolve
+from popcorn.coverage.report import (
+    Counts,
+    Totals,
+    below,
+    display_name,
+    matches,
+    resolve,
+    truncated_percent,
+)
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "obs" / "prebuilt"
 LINES = "tests/firmware/obs/lines.c"
@@ -268,3 +276,36 @@ def test_resolve_and_display_name_follow_the_root_not_the_process_directory() ->
     assert display_name("/home/u/proj/a/b.c", ROOT) == "a/b.c"
     assert display_name("/home/u/projx/b.c", ROOT) == "/home/u/projx/b.c"
     assert matches("a/b.c", ["**/b.c"], ROOT)
+
+
+def lines_of(found: int, hit: int) -> Totals:
+    return Totals(lines=Counts(found, hit))
+
+
+def test_below_is_false_at_the_threshold_and_true_under_it() -> None:
+    assert not below(lines_of(4, 3), 75)
+    assert below(lines_of(4, 3), 75.01)
+    assert not below(lines_of(3, 3), 100)
+    assert below(lines_of(3, 2), 100)
+    assert not below(lines_of(7, 0), 0)
+
+
+def test_below_compares_the_exact_ratio_not_a_rounded_one() -> None:
+    totals = lines_of(100000, 89996)
+    assert below(totals, 90)
+    assert not below(totals, 89.996)
+    assert below(totals, 89.997)
+    assert round(totals.lines.percent, 2) == 90.0
+
+
+def test_the_printed_percent_is_cut_never_rounded_up() -> None:
+    assert truncated_percent(Counts(100000, 89996)) == "89.99"
+    assert truncated_percent(Counts(3, 2)) == "66.66"
+    assert truncated_percent(Counts(3, 3)) == "100.00"
+    assert truncated_percent(Counts(7, 0)) == "0.00"
+
+
+def test_nothing_found_is_zero_percent() -> None:
+    assert below(Totals(), 0.01)
+    assert not below(Totals(), 0)
+    assert truncated_percent(Counts()) == "0.00"

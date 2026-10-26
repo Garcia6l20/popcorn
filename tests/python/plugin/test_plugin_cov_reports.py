@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import textwrap
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from popcorn.coverage.report import display_name
+from popcorn.coverage.report import display_name, parse_lcov, truncated_percent
 
 from .coverage_suite import write_suite
 from .helpers import cov_args, write_conftest
@@ -347,3 +348,163 @@ def test_term_row_name_is_the_display_name_of_the_source(pytester: pytest.Pytest
     rows = [line for line in result.stdout.str().splitlines() if "driver.c" in line]
     assert len(rows) == 1
     assert rows[0].split()[0] == expected
+
+
+FAIL_UNDER = "Required coverage of {} not reached"
+
+
+def line_percent(lcov: Path) -> float:
+    return parse_lcov(lcov.read_text()).totals().lines.percent
+
+
+@pytest.fixture
+def measured(pytester: pytest.Pytester) -> tuple[float, float]:
+    """The line percent of the suite over every file, and without `driver.c`."""
+    write_suite(pytester)
+    pytester.runpytest(*NO_XDIST, *cov_args("all.info")).assert_outcomes(passed=30)
+    pytester.runpytest(*NO_XDIST, *cov_args("rest.info"), "--popcorn-cov-omit=**/driver.c")
+    return line_percent(pytester.path / "all.info"), line_percent(pytester.path / "rest.info")
+
+
+def test_a_threshold_above_the_total_fails_the_session(
+    pytester: pytest.Pytester, measured: tuple[float, float]
+) -> None:
+    total, _ = measured
+    assert 1 < total < 99
+    threshold = int(total) + 1
+    result = pytester.runpytest(*NO_XDIST, "--popcorn-cov", f"--popcorn-cov-fail-under={threshold}")
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.assert_outcomes(passed=30)
+    result.stdout.fnmatch_lines(
+        [f"FAIL {FAIL_UNDER.format(f'{threshold}%')}. Total coverage: {int(total)}.*%"]
+    )
+
+
+def test_a_threshold_at_or_below_the_total_passes(
+    pytester: pytest.Pytester, measured: tuple[float, float]
+) -> None:
+    total, _ = measured
+    result = pytester.runpytest(
+        *NO_XDIST, "--popcorn-cov", f"--popcorn-cov-fail-under={int(total)}"
+    )
+    assert result.ret == pytest.ExitCode.OK
+    assert "FAIL Required" not in result.stdout.str()
+
+
+def test_the_threshold_boundary_is_the_cut_total(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    pytester.runpytest(*NO_XDIST, *cov_args("x.info"))
+    lines = parse_lcov((pytester.path / "x.info").read_text()).totals().lines
+    cut = truncated_percent(lines)
+    above = Decimal(cut) + Decimal("0.01")
+    passing = pytester.runpytest(*NO_XDIST, "--popcorn-cov", f"--popcorn-cov-fail-under={cut}")
+    assert passing.ret == pytest.ExitCode.OK
+    failing = pytester.runpytest(*NO_XDIST, "--popcorn-cov", f"--popcorn-cov-fail-under={above}")
+    assert failing.ret == pytest.ExitCode.TESTS_FAILED
+    failing.stdout.fnmatch_lines([f"*Total coverage: {cut}%"])
+
+
+def test_omit_moves_the_total_across_the_threshold(
+    pytester: pytest.Pytester, measured: tuple[float, float]
+) -> None:
+    total, rest = measured
+    assert abs(total - rest) > 1
+    low, high = sorted((total, rest))
+    threshold = f"--popcorn-cov-fail-under={(low + high) / 2}"
+    assert pytester.runpytest(*NO_XDIST, "--popcorn-cov", threshold).ret == (
+        pytest.ExitCode.OK if total > rest else pytest.ExitCode.TESTS_FAILED
+    )
+    omitted = pytester.runpytest(
+        *NO_XDIST, "--popcorn-cov", threshold, "--popcorn-cov-omit=**/driver.c"
+    )
+    assert omitted.ret == (pytest.ExitCode.TESTS_FAILED if total > rest else pytest.ExitCode.OK)
+
+
+def test_a_failing_test_keeps_its_exit_status(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    (pytester.path / "test_bad.py").write_text("def test_bad():\n    assert False\n")
+    result = pytester.runpytest(
+        *NO_XDIST, "--popcorn-cov", "--popcorn-cov-fail-under=100", "test_suite.py", "test_bad.py"
+    )
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.stdout.fnmatch_lines([f"FAIL {FAIL_UNDER.format('100%')}*"])
+    assert result.parseoutcomes()["failed"] == 1
+
+
+def test_a_run_without_coverage_fails_under_any_threshold(pytester: pytest.Pytester) -> None:
+    write_conftest(pytester)
+    (pytester.path / "test_plain.py").write_text("def test_plain():\n    pass\n")
+    result = pytester.runpytest(*NO_XDIST, "--popcorn-cov", "--popcorn-cov-fail-under=0.5")
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.stdout.fnmatch_lines(
+        [
+            "popcorn: no firmware coverage collected*",
+            f"FAIL {FAIL_UNDER.format('0.5%')}. Total coverage: 0.00%",
+        ]
+    )
+
+
+def test_a_run_without_coverage_passes_a_zero_threshold(
+    pytester: pytest.Pytester,
+) -> None:
+    write_conftest(pytester)
+    (pytester.path / "test_plain.py").write_text("def test_plain():\n    pass\n")
+    result = pytester.runpytest(*NO_XDIST, "--popcorn-cov", "--popcorn-cov-fail-under=0")
+    assert result.ret == pytest.ExitCode.OK
+
+
+def test_a_failed_merge_fails_under_any_threshold(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_suite(pytester)
+    monkeypatch.setenv("TMPDIR", str(pytester.mkdir("scratch")))
+    result = pytester.runpytest_subprocess(
+        *NO_XDIST,
+        "--popcorn-cov",
+        "--popcorn-cov-report=xml",
+        "--popcorn-cov-fail-under=1",
+        "-k",
+        "test_add",
+    )
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.stdout.fnmatch_lines(
+        [
+            "popcorn: coverage merge failed*",
+            f"FAIL {FAIL_UNDER.format('1%')}. Total coverage: 0.00%",
+        ]
+    )
+
+
+def test_an_interrupted_session_skips_the_check(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_suite(pytester)
+    monkeypatch.setenv("TMPDIR", str(pytester.mkdir("scratch")))
+    (pytester.path / "test_stop.py").write_text("def test_stop():\n    raise KeyboardInterrupt\n")
+    result = pytester.runpytest_subprocess(
+        *NO_XDIST, "--popcorn-cov", "--popcorn-cov-fail-under=100", "test_suite.py", "test_stop.py"
+    )
+    assert result.ret == pytest.ExitCode.INTERRUPTED
+    assert "FAIL Required" not in result.stdout.str()
+
+
+@pytest.mark.parametrize(
+    ("threshold", "shown"),
+    [("12.3456789", "12.3456789"), ("0.00001", "0.00001"), ("75.0", "75"), ("89.996", "89.996")],
+)
+def test_the_fail_line_prints_the_threshold_as_given(
+    pytester: pytest.Pytester, threshold: str, shown: str
+) -> None:
+    write_conftest(pytester)
+    (pytester.path / "test_plain.py").write_text("def test_plain():\n    pass\n")
+    result = pytester.runpytest(*NO_XDIST, "--popcorn-cov", f"--popcorn-cov-fail-under={threshold}")
+    result.stdout.fnmatch_lines([f"FAIL {FAIL_UNDER.format(f'{shown}%')}. Total coverage: 0.00%"])
+
+
+def test_a_status_other_than_ok_is_kept(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    result = pytester.runpytest(
+        *NO_XDIST, "--popcorn-cov", "--popcorn-cov-fail-under=50", "-k", "nothing_matches_this"
+    )
+    assert result.ret == pytest.ExitCode.NO_TESTS_COLLECTED
+    result.stdout.fnmatch_lines([f"FAIL {FAIL_UNDER.format('50%')}*"])
