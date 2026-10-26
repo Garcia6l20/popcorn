@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import textwrap
 import xml.etree.ElementTree as ElementTree
 from decimal import Decimal
@@ -11,10 +12,18 @@ import pytest
 from popcorn.coverage.report import display_name, parse_lcov, truncated_percent
 
 from .coverage_suite import write_suite
-from .helpers import cov_args, write_conftest
-from .test_plugin_genhtml import CUT_ELF, CUT_TESTS, session
+from .helpers import ROOT, cov_args, write_conftest, write_project
+from .test_plugin_genhtml import (
+    CUT_ELF,
+    CUT_TESTS,
+    SHARED_EXIT_ELF,
+    SHARED_EXIT_TESTS,
+    session,
+)
 
 pytest_plugins = ["pytester"]
+
+CUT_SOURCE = ROOT / "tests" / "firmware" / "obs" / "cut.c"
 
 NO_XDIST = ("-p", "no:asyncio", "-p", "no:xdist")
 
@@ -207,6 +216,7 @@ def test_an_unavailable_report_writes_no_file_and_keeps_the_directory(
     write_suite(pytester)
     scratch = pytester.mkdir("scratch")
     monkeypatch.setenv("TMPDIR", str(scratch))
+    monkeypatch.setenv("PATH", str(pytester.mkdir("nobin")))
     result = pytester.runpytest_subprocess(
         *NO_XDIST, *cov_args("a.info"), "--popcorn-cov-report=html", "-k", "test_add"
     )
@@ -214,6 +224,21 @@ def test_an_unavailable_report_writes_no_file_and_keeps_the_directory(
         ["popcorn: coverage merge failed: the html report is not available*"]
     )
     assert not (pytester.path / "a.info").exists()
+    assert len(list(scratch.glob("popcorn-cov-*"))) == 1
+
+
+def test_a_report_that_fails_to_write_keeps_the_directory(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_suite(pytester)
+    scratch = pytester.mkdir("scratch")
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    (pytester.path / "blocker").write_text("a file")
+    result = pytester.runpytest_subprocess(
+        *NO_XDIST, "--popcorn-cov", "--popcorn-cov-report=xml:blocker/c.xml", "-k", "test_add"
+    )
+    result.stdout.fnmatch_lines(["popcorn: coverage merge failed:*"])
+    assert not (pytester.path / "blocker" / "c.xml").exists()
     assert len(list(scratch.glob("popcorn-cov-*"))) == 1
 
 
@@ -460,10 +485,11 @@ def test_a_failed_merge_fails_under_any_threshold(
 ) -> None:
     write_suite(pytester)
     monkeypatch.setenv("TMPDIR", str(pytester.mkdir("scratch")))
+    (pytester.path / "blocker").write_text("a file")
     result = pytester.runpytest_subprocess(
         *NO_XDIST,
         "--popcorn-cov",
-        "--popcorn-cov-report=html",
+        "--popcorn-cov-report=xml:blocker/c.xml",
         "--popcorn-cov-fail-under=1",
         "-k",
         "test_add",
@@ -570,3 +596,151 @@ def test_xml_report_without_a_target_writes_coverage_xml(pytester: pytest.Pytest
     result = pytester.runpytest(*NO_XDIST, "--popcorn-cov", "--popcorn-cov-report=xml")
     result.assert_outcomes(passed=30)
     assert cobertura(pytester.path / "coverage.xml").tag == "coverage"
+
+
+needs_genhtml = pytest.mark.skipif(
+    shutil.which("genhtml") is None, reason="genhtml is not installed"
+)
+
+
+@needs_genhtml
+def test_html_report_of_driver_firmware_renders_without_errors(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_suite(pytester)
+    scratch = pytester.mkdir("scratch")
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    result = pytester.runpytest_subprocess(
+        *NO_XDIST, "--popcorn-cov", "--popcorn-cov-report=html:out", "-k", "test_add"
+    )
+    assert result.ret == pytest.ExitCode.OK
+    out = pytester.path / "out"
+    result.stdout.fnmatch_lines([f"popcorn: firmware coverage written to {out}"])
+    assert (out / "index.html").is_file()
+    assert "ERROR" not in result.stdout.str() + result.stderr.str()
+    assert list(scratch.glob("popcorn-cov-*")) == []
+
+
+@needs_genhtml
+def test_html_report_finds_relative_sources_from_the_rootdir_not_the_cwd(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = pytester.mkdir("project")
+    source = project / "tests" / "firmware" / "obs"
+    source.mkdir(parents=True)
+    shutil.copy(CUT_SOURCE, source / "cut.c")
+    write_conftest(pytester)
+    (pytester.path / "conftest.py").replace(project / "conftest.py")
+    write_project(pytester, "cut_mid", elf=CUT_ELF, directory=project)
+    (project / "test_cov.py").write_text(CUT_TESTS)
+    elsewhere = pytester.mkdir("elsewhere")
+    monkeypatch.chdir(elsewhere)
+    result = pytester.runpytest_subprocess(
+        "-p",
+        "no:asyncio",
+        "-p",
+        "no:xdist",
+        f"--rootdir={project}",
+        "--popcorn-cov",
+        f"--popcorn-cov-report=html:{elsewhere / 'out'}",
+        str(project),
+    )
+    assert result.ret == pytest.ExitCode.OK
+    pages = "".join(page.read_text() for page in (elsewhere / "out").rglob("cut.c.gcov.html"))
+    assert "use_pick" in pages
+    assert "pick(v) * 2u" in pages
+
+
+@needs_genhtml
+def test_html_report_leaves_a_foreign_directory_and_keeps_the_exit_status(
+    pytester: pytest.Pytester,
+) -> None:
+    write_suite(pytester)
+    foreign = pytester.mkdir("foreign")
+    (foreign / "notes.txt").write_text("mine")
+    result = pytester.runpytest_subprocess(
+        *NO_XDIST,
+        "--popcorn-cov",
+        f"--popcorn-cov-report=html:{foreign}",
+        "--popcorn-cov-report=term",
+        "-k",
+        "test_add",
+    )
+    assert result.ret == pytest.ExitCode.OK
+    result.stdout.fnmatch_lines(
+        [
+            f"popcorn: html report not written, {foreign} is not empty "
+            "and holds no earlier html report"
+        ]
+    )
+    assert [path.name for path in foreign.iterdir()] == ["notes.txt"]
+    assert "TOTAL" in result.stdout.str()
+
+
+@needs_genhtml
+def test_a_refused_html_target_keeps_the_pcov_files(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_suite(pytester)
+    scratch = pytester.mkdir("scratch")
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    foreign = pytester.mkdir("src")
+    (foreign / "notes.txt").write_text("mine")
+    result = pytester.runpytest_subprocess(
+        *NO_XDIST, "--popcorn-cov", f"--popcorn-cov-report=html:{foreign}", "-k", "test_add"
+    )
+    result.stdout.fnmatch_lines(
+        [
+            "popcorn: html report not written, *",
+            "popcorn: a report was not written, the .pcov files stay in *",
+        ]
+    )
+    kept = list(scratch.glob("popcorn-cov-*"))
+    assert len(kept) == 1
+    assert list(kept[0].glob("*.pcov"))
+    assert [path.name for path in foreign.iterdir()] == ["notes.txt"]
+
+
+@needs_genhtml
+def test_html_report_at_the_rootdir_leaves_the_project_alone(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    (pytester.path / "index.html").write_text("mine")
+    (pytester.path / "gcov.css").write_text("mine")
+    result = pytester.runpytest_subprocess(
+        *NO_XDIST, "--popcorn-cov", "--popcorn-cov-report=html:.", "-k", "test_add"
+    )
+    assert result.ret == pytest.ExitCode.OK
+    result.stdout.fnmatch_lines(["popcorn: html report not written, * holds the rootdir"])
+    assert (pytester.path / "index.html").read_text() == "mine"
+    assert (pytester.path / "gcov.css").read_text() == "mine"
+
+
+@needs_genhtml
+def test_html_report_replaces_an_earlier_report(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    out = pytester.mkdir("out")
+    (out / "index.html").write_text("old")
+    (out / "gcov.css").write_text("old")
+    (out / "stale.txt").write_text("old")
+    result = pytester.runpytest_subprocess(
+        *NO_XDIST, "--popcorn-cov", "--popcorn-cov-report=html:out", "-k", "test_add"
+    )
+    assert result.ret == pytest.ExitCode.OK
+    assert not (out / "stale.txt").exists()
+    assert (out / "index.html").read_text() != "old"
+
+
+@needs_genhtml
+def test_html_report_renders_the_documented_genhtml_message(pytester: pytest.Pytester) -> None:
+    out = pytester.path / "out"
+    session(
+        pytester,
+        SHARED_EXIT_ELF,
+        "settled",
+        SHARED_EXIT_TESTS,
+        "shared",
+        "-p",
+        "no:xdist",
+        f"--popcorn-cov-report=html:{out}",
+    )
+    assert (out / "index.html").is_file()

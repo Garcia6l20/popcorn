@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from popcorn.coverage.report._cobertura import render_cobertura
-from popcorn.coverage.report._model import Totals, parse_lcov
+from popcorn.coverage.report._genhtml import (
+    GENHTML_TIMEOUT,
+    find_genhtml,
+    prepare_output,
+    run_genhtml,
+)
+from popcorn.coverage.report._model import LcovReport, Totals, parse_lcov
 from popcorn.coverage.report._term import render_term
 
 KINDS = ("term", "html", "xml", "lcov")
 DEFAULT_TARGETS = {"html": "htmlcov", "xml": "coverage.xml"}
-WRITABLE = frozenset({"term", "lcov", "xml"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,11 +46,14 @@ class ReportResult:
         totals: The counts of the report after include and omit.
         written: The files and directories written, in spec order.
         term: The text of the `term` report, None when no spec asked for it.
+        problems: One line for each report that was not written and does not fail the others, in
+            spec order.
     """
 
     totals: Totals
     written: tuple[Path, ...]
     term: str | None = None
+    problems: tuple[str, ...] = ()
 
 
 def parse_spec(text: str, base: Path | None = None) -> ReportSpec:
@@ -80,6 +90,41 @@ def _write_atomic(target: Path, data: bytes) -> None:
         raise
 
 
+def use_genhtml(report: LcovReport) -> bool:
+    """Whether genhtml writes the `html` report of `report`, which it does when installed."""
+    return find_genhtml() is not None
+
+
+def _write_html(
+    report: LcovReport, lcov: Path, target: Path, filtered: bool, root: Path
+) -> str | None:
+    reason = prepare_output(
+        target,
+        protect=(
+            ("the rootdir", root),
+            ("the working directory", Path.cwd()),
+            ("the home directory", Path.home()),
+            ("the coverage data", lcov),
+        ),
+    )
+    if reason is not None:
+        return f"html report not written, {reason}"
+    with tempfile.TemporaryDirectory(prefix="popcorn-html-") as scratch:
+        source = lcov
+        if filtered:
+            source = Path(scratch) / "filtered.info"
+            source.write_text(report.to_lcov())
+        done = run_genhtml(source, target, root=root)
+    if done.timed_out:
+        shutil.rmtree(target, ignore_errors=True)
+        return f"html report not written, genhtml ran past {GENHTML_TIMEOUT:g} s"
+    if done.returncode != 0:
+        shutil.rmtree(target, ignore_errors=True)
+        detail = done.stderr.strip()
+        return f"html report not written, genhtml exited {done.returncode}: {detail}"
+    return None
+
+
 def generate(
     lcov: Path,
     specs: Sequence[ReportSpec],
@@ -98,29 +143,43 @@ def generate(
     in its directory and renamed, with `timestamp` in milliseconds since the epoch, the current
     time when None.
 
+    An `html` report is written by genhtml from LCOV 2.0 or later, into a missing or empty
+    directory or one that holds an earlier html report, which is emptied first. A symbolic link,
+    a directory of other content, and a directory that is or contains the rootdir, the working
+    directory, the home directory or `lcov` are left untouched. Each of those, and a genhtml run
+    that fails, times out or finds a source line past the end of a source file edited after the
+    build, adds a line to `ReportResult.problems` and leaves the other reports written. A failed
+    genhtml leaves no directory behind that the call created or emptied.
+
     Raises:
-        ValueError: `lcov` is not a tracefile, or an `lcov` or `xml` spec has no target.
-        NotImplementedError: A spec of kind `html`.
+        ValueError: `lcov` is not a tracefile, or an `lcov`, `xml` or `html` spec has no target.
+        NotImplementedError: A spec of kind `html` while genhtml is not installed.
         OSError: A target cannot be written.
     """
-    files: list[ReportSpec] = []
-    for spec in specs:
-        if spec.kind not in WRITABLE:
-            raise NotImplementedError(f"the {spec.kind} report is not available")
-        if spec.kind != "term":
-            if spec.target is None:
-                raise ValueError(f"an {spec.kind} report needs a target path")
-            files.append(spec)
     data = lcov.read_bytes()
     report = parse_lcov(data.decode())
     filtered = bool(include or omit)
     if filtered:
         report = report.filtered(include, omit, root)
+    files: list[ReportSpec] = []
+    for spec in specs:
+        if spec.kind == "html" and not use_genhtml(report):
+            raise NotImplementedError("the html report is not available")
+        if spec.kind != "term":
+            if spec.target is None:
+                raise ValueError(f"an {spec.kind} report needs a target path")
+            files.append(spec)
     written: list[Path] = []
+    problems: list[str] = []
     for spec in files:
         target = spec.target
         assert target is not None
-        if spec.kind == "xml":
+        if spec.kind == "html":
+            problem = _write_html(report, lcov, target, filtered, root)
+            if problem is not None:
+                problems.append(problem)
+                continue
+        elif spec.kind == "xml":
             stamp = int(time.time() * 1000) if timestamp is None else timestamp
             xml = render_cobertura(report, root=root, timestamp=stamp)
             _write_atomic(target, xml.encode())
@@ -129,4 +188,4 @@ def generate(
             target.write_bytes(report.to_lcov().encode() if filtered else data)
         written.append(target)
     term = render_term(report, root=root) if any(spec.kind == "term" for spec in specs) else None
-    return ReportResult(report.totals(), tuple(written), term)
+    return ReportResult(report.totals(), tuple(written), term, tuple(problems))

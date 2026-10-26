@@ -101,10 +101,15 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
             )
         else:
             totals = result.totals
-            shutil.rmtree(run.directory)
-            outcome = "\n".join(
-                f"popcorn: firmware coverage written to {path}" for path in result.written
-            )
+            written = [f"popcorn: firmware coverage written to {path}" for path in result.written]
+            problems = [f"popcorn: {problem}" for problem in result.problems]
+            if problems:
+                problems.append(
+                    f"popcorn: a report was not written, the .pcov files stay in {run.directory}"
+                )
+            else:
+                shutil.rmtree(run.directory)
+            outcome = "\n".join((*written, *problems))
             if result.term is not None:
                 config.stash[TERM] = result.term
     threshold = settings.cov_fail_under

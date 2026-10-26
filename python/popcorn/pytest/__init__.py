@@ -129,6 +129,18 @@ under xdist and also with `-q`. A bare `--popcorn-cov` with no report and no
 target, `coverage.xml` by default, through a temporary file renamed over it. Its `<sources>`
 lists the rootdir, and `/` too for a source outside it. A `filename` is relative to the rootdir
 for a source under it and as written otherwise, and `timestamp` counts milliseconds.
+The `html` report is written by genhtml from LCOV 2.0 or later into its target, `htmlcov` by
+default, with branch and function coverage, run from the rootdir where a relative source path
+resolves. A source file genhtml cannot read renders as blank lines. A source file edited after
+the firmware build, so that a covered line lies past its end, fails genhtml with a `(range)`
+error. A target that is missing, empty or holds an earlier html report, which is emptied first,
+takes the report. Any other target is left untouched: a symbolic link, a directory of other
+content, and a directory that is or contains the rootdir, the working directory or the home
+directory. The summary then says `html report not written`, as it does when genhtml fails or
+runs past 300 s, and the other reports are still written with the exit status unchanged. A
+failed genhtml removes the target directory the run created or emptied. The `html` report needs
+genhtml on `PATH`. Whenever a report is not written, the `.pcov` files stay in their directory,
+named in the summary.
 The include and omit globs match a source path as written and relative to the rootdir, `**`
 included, and a filter rewrites the lcov files from the kept files. An interrupted session
 keeps the directory and writes no report. A crash or SIGKILL leaves the directory behind. xdist

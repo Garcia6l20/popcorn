@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -50,7 +54,10 @@ def test_generate_lcov_filters_and_counts_the_kept_files(tmp_path: Path) -> None
     assert result.totals.lines.found == 2
 
 
-def test_generate_refuses_what_it_cannot_write(tmp_path: Path) -> None:
+def test_generate_refuses_what_it_cannot_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
     source = tmp_path / "in.info"
     source.write_text(TRACEFILE)
     with pytest.raises(ValueError):
@@ -72,7 +79,10 @@ def test_generate_returns_the_term_text_and_writes_nothing(tmp_path: Path) -> No
     assert generate(source, [], root=tmp_path).term is None
 
 
-def test_generate_checks_every_spec_before_writing(tmp_path: Path) -> None:
+def test_generate_checks_every_spec_before_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
     source = tmp_path / "in.info"
     source.write_text(TRACEFILE)
     out = tmp_path / "out.info"
@@ -95,3 +105,276 @@ def test_generate_copies_bytes_whatever_the_locale(tmp_path: Path) -> None:
     assert out.read_bytes() == raw
     generate(source, [ReportSpec("lcov", out)], omit=["**/b.c"], root=tmp_path)
     assert "src/\u00e9.c" in out.read_bytes().decode()
+
+
+RECORDER = """#!{python}
+import json, os, sys, time
+from pathlib import Path
+
+args = sys.argv[1:]
+Path({log!r}).write_text(
+    json.dumps({{"argv": args, "cwd": os.getcwd(), "lcov": Path(args[-1]).read_text()}})
+)
+out = Path(args[args.index("-o") + 1])
+out.mkdir(parents=True, exist_ok=True)
+(out / "partial.txt").write_text("partial")
+if {index}:
+    (out / "index.html").write_text("fake")
+    (out / "gcov.css").write_text("css")
+time.sleep({sleep})
+sys.stderr.write({stderr!r})
+sys.exit({code})
+"""
+
+
+def fake_genhtml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    code: int = 0,
+    *,
+    index: bool = True,
+    sleep: float = 0,
+) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "call.json"
+    script = bin_dir / "genhtml"
+    script.write_text(
+        RECORDER.format(
+            python=sys.executable,
+            log=str(log),
+            stderr="boom\n",
+            code=code,
+            index=index,
+            sleep=sleep,
+        )
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    return log
+
+
+def test_html_runs_genhtml_from_the_root_without_a_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = fake_genhtml(tmp_path, monkeypatch)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    root = tmp_path / "root dir"
+    root.mkdir()
+    out = tmp_path / "out dir;touch pwned"
+    result = generate(source, [ReportSpec("html", out)], root=root)
+    call = json.loads(log.read_text())
+    assert result.written == (out,)
+    assert result.problems == ()
+    assert call["cwd"] == str(root)
+    assert call["argv"][call["argv"].index("-o") + 1] == str(out)
+    assert call["argv"][-1] == str(source)
+    assert "--branch-coverage" in call["argv"]
+    assert "--function-coverage" in call["argv"]
+    assert "--synthesize-missing" in call["argv"]
+    ignored = call["argv"][call["argv"].index("--ignore-errors") + 1].split(",")
+    assert sorted(ignored) == ["inconsistent", "source"]
+    assert not (root / "pwned").exists()
+    assert not (tmp_path / "pwned").exists()
+
+
+def test_html_gives_genhtml_the_filtered_tracefile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = fake_genhtml(tmp_path, monkeypatch)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    generate(source, [ReportSpec("html", tmp_path / "out")], omit=["**/b.c"], root=tmp_path)
+    call = json.loads(log.read_text())
+    assert call["argv"][-1] != str(source)
+    assert [file.path for file in parse_lcov(call["lcov"]).files] == ["src/a.c"]
+
+
+def test_html_reports_a_failed_genhtml_and_writes_the_other_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_genhtml(tmp_path, monkeypatch, code=3)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    out = tmp_path / "copy.info"
+    result = generate(
+        source, [ReportSpec("html", tmp_path / "out"), ReportSpec("lcov", out)], root=tmp_path
+    )
+    assert result.written == (out,)
+    assert result.problems == ("html report not written, genhtml exited 3: boom",)
+    assert out.read_text() == TRACEFILE
+
+
+def test_html_empties_a_directory_holding_an_index_and_keeps_a_foreign_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_genhtml(tmp_path, monkeypatch)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    (stale / "index.html").write_text("old")
+    (stale / "gcov.css").write_text("old")
+    (stale / "old.css").write_text("old")
+    result = generate(source, [ReportSpec("html", stale)], root=tmp_path)
+    assert result.problems == ()
+    assert (stale / "index.html").read_text() == "fake"
+    assert not (stale / "old.css").exists()
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    (foreign / "notes.txt").write_text("mine")
+    result = generate(source, [ReportSpec("html", foreign)], root=tmp_path)
+    assert result.written == ()
+    assert result.problems == (
+        f"html report not written, {foreign} is not empty and holds no earlier html report",
+    )
+    assert [path.name for path in foreign.iterdir()] == ["notes.txt"]
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert generate(source, [ReportSpec("html", empty)], root=tmp_path).written == (empty,)
+    blocked = tmp_path / "blocked"
+    blocked.write_text("a file")
+    result = generate(source, [ReportSpec("html", blocked)], root=tmp_path)
+    assert result.problems == (f"html report not written, {blocked} is not a directory",)
+    assert blocked.read_text() == "a file"
+
+
+@pytest.mark.skipif(shutil.which("genhtml") is None, reason="genhtml is not installed")
+def test_html_renders_a_tracefile_whose_source_is_missing(tmp_path: Path) -> None:
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE.replace("src/a.c", "/nonexistent/src/a.c"))
+    out = tmp_path / "out"
+    result = generate(source, [ReportSpec("html", out)], root=tmp_path)
+    assert result.problems == ()
+    assert (out / "index.html").is_file()
+
+
+def test_html_removes_what_a_failed_genhtml_left_so_a_rerun_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_genhtml(tmp_path, monkeypatch, code=1, index=False)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    out = tmp_path / "out"
+    result = generate(source, [ReportSpec("html", out)], root=tmp_path)
+    assert result.problems == ("html report not written, genhtml exited 1: boom",)
+    assert not out.exists()
+    (tmp_path / "again").mkdir()
+    fake_genhtml(tmp_path / "again", monkeypatch)
+    result = generate(source, [ReportSpec("html", out)], root=tmp_path)
+    assert result.problems == ()
+    assert (out / "index.html").is_file()
+
+
+def test_html_removes_an_emptied_report_when_genhtml_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_genhtml(tmp_path, monkeypatch, code=1, index=False)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "index.html").write_text("old")
+    (out / "gcov.css").write_text("old")
+    generate(source, [ReportSpec("html", out)], root=tmp_path)
+    assert not out.exists()
+
+
+def test_html_kills_a_genhtml_that_runs_past_the_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_genhtml(tmp_path, monkeypatch, sleep=30)
+    monkeypatch.setattr("popcorn.coverage.report._genhtml.GENHTML_TIMEOUT", 0.5)
+    monkeypatch.setattr("popcorn.coverage.report._spec.GENHTML_TIMEOUT", 0.5)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    out = tmp_path / "out"
+    result = generate(source, [ReportSpec("html", out)], root=tmp_path)
+    assert result.written == ()
+    assert result.problems == ("html report not written, genhtml ran past 0.5 s",)
+    assert not out.exists()
+
+
+def test_html_keeps_a_handwritten_site(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_genhtml(tmp_path, monkeypatch)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    site = tmp_path / "docs"
+    site.mkdir()
+    (site / "index.html").write_text("mine")
+    (site / "page.md").write_text("mine")
+    (site / "style.css").write_text("mine")
+    result = generate(source, [ReportSpec("html", site)], root=tmp_path)
+    assert result.written == ()
+    assert result.problems == (
+        f"html report not written, {site} is not empty and holds no earlier html report",
+    )
+    assert sorted(path.name for path in site.iterdir()) == ["index.html", "page.md", "style.css"]
+
+
+@pytest.mark.parametrize("target", [".", "..", "sub/.."])
+def test_html_keeps_the_rootdir_and_its_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    fake_genhtml(tmp_path, monkeypatch)
+    root = tmp_path / "project"
+    (root / "sub").mkdir(parents=True)
+    (root / "index.html").write_text("mine")
+    (root / "gcov.css").write_text("mine")
+    source = root / "in.info"
+    source.write_text(TRACEFILE)
+    out = root / target
+    result = generate(source, [ReportSpec("html", out)], root=root)
+    assert result.written == ()
+    assert result.problems == (f"html report not written, {out} holds the rootdir",)
+    assert (root / "index.html").read_text() == "mine"
+    assert source.exists()
+
+
+def test_html_keeps_the_working_directory_the_home_and_the_coverage_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_genhtml(tmp_path, monkeypatch)
+    root = tmp_path / "root"
+    root.mkdir()
+    cases = {
+        "the working directory": tmp_path / "cwd",
+        "the home directory": tmp_path / "home",
+        "the coverage data": tmp_path / "data",
+    }
+    for directory in cases.values():
+        directory.mkdir()
+        (directory / "index.html").write_text("mine")
+        (directory / "gcov.css").write_text("mine")
+    monkeypatch.chdir(cases["the working directory"])
+    monkeypatch.setenv("HOME", str(cases["the home directory"]))
+    source = cases["the coverage data"] / "in.info"
+    source.write_text(TRACEFILE)
+    for label, directory in cases.items():
+        result = generate(source, [ReportSpec("html", directory)], root=root)
+        assert result.written == ()
+        assert result.problems == (f"html report not written, {directory} holds {label}",)
+        assert (directory / "index.html").read_text() == "mine"
+
+
+def test_html_keeps_a_symbolic_link_to_a_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_genhtml(tmp_path, monkeypatch)
+    source = tmp_path / "in.info"
+    source.write_text(TRACEFILE)
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "index.html").write_text("mine")
+    (real / "gcov.css").write_text("mine")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "nowhere")
+    for target in (link, dangling):
+        result = generate(source, [ReportSpec("html", target)], root=tmp_path)
+        assert result.written == ()
+        assert result.problems == (f"html report not written, {target} is a symbolic link",)
+    assert (real / "index.html").read_text() == "mine"
+    assert not (tmp_path / "nowhere").exists()
