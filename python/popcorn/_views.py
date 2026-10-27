@@ -497,16 +497,20 @@ class PeripheralView:
         return Pin(self._access, self._name, number)
 
     def input(self, channel: int) -> AnalogInput:
-        """External channel `channel` of this ADC.
+        """External channel `channel` of this ADC. The ADC model gives the external channels:
+        1 to 17 on the STM32U5 ADC1, 0 to 15, 18 and 19 on the STM32H5 ADC1 and ADC2.
 
         Raises:
-            ConfigError: `channel` is not 1 to 17.
+            ConfigError: `channel` is not an external channel of this ADC.
+            ModelError: The peripheral's model is not the built-in ADC.
         """
-        if not 1 <= channel <= 17:
+        mask = self._access.handle.adc_channels(self._name)
+        if not 0 <= channel < 32 or not mask >> channel & 1:
+            external = ", ".join(str(n) for n in range(32) if mask >> n & 1)
             raise ConfigError(
                 f"{self._name}: no external channel {channel}",
                 key="channel",
-                expected="an external channel from 1 to 17",
+                expected=f"an external channel, one of {external}",
             )
         return AnalogInput(self._access, self._name, channel)
 
@@ -654,10 +658,10 @@ class AnalogInput:
 
     Setting `volts` drives the channel from outside the MCU, in whole microvolts. The drive is
     board state, kept across an MCU reset and restored by snapshots. A conversion reads the value
-    in force when it ends: V x 16384 / VDDA at 14 bits, floored, saturated at VDDA, VDDA from
-    `SupplyOptions`. While the machine is busy, every access raises MachineRunning outside its
-    callbacks: `m.write((m.ref.periph.ADC1.input(5).volts, 1.5))` drives it at a block boundary
-    then. Every access raises ModelError when the peripheral's model is not the built-in ADC.
+    in force when it ends: V x 2**N / VDDA at the N bits of the ADC, 14 on the STM32U5 ADC1 and
+    12 on the STM32H5 ADC1 and ADC2, floored, saturated at VDDA, VDDA from `SupplyOptions`.
+    While the machine is busy, every access raises MachineRunning outside its callbacks:
+    `m.write((m.ref.periph.ADC1.input(5).volts, 1.5))` drives it at a block boundary then.
     """
 
     __slots__ = ("_access", "adc", "channel")

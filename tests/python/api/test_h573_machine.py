@@ -11,7 +11,8 @@ from popcorn.stm32 import mcu
 from popcorn.stm32.description import DescriptionError
 from popcorn.units import ms
 
-BOOT_LL = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt" / "h573" / "boot_ll.elf"
+H5_EXTERNAL = ", ".join(str(n) for n in (*range(16), 18, 19))
+RCC_LL = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt" / "h573" / "rcc_ll.elf"
 
 
 @pytest.fixture(scope="module")
@@ -49,8 +50,9 @@ def test_gpioi_pin_12_is_refused_at_the_call(h573: popcorn.PartDescription) -> N
 def test_gpioi_pin_12_edges_are_refused_at_the_call_parked_and_running(
     h573: popcorn.PartDescription,
 ) -> None:
-    machine = popcorn.Machine(h573, image=popcorn.Image.elf(BOOT_LL))
+    machine = popcorn.Machine(h573, image=popcorn.Image.elf(RCC_LL))
     machine.reset()
+    machine.reg.pc = machine.sym("idle")
     gpioi = machine.periph.GPIOI
     at = machine.time + ms(1)
     for pin in (12, 15):
@@ -66,3 +68,19 @@ def test_gpioi_pin_12_edges_are_refused_at_the_call_parked_and_running(
 
     asyncio.run(running())
     asyncio.run(machine.run(for_=ms(2)))
+
+
+@pytest.mark.parametrize("adc", ["ADC1", "ADC2"])
+def test_the_h573_adc_inputs_are_the_external_channels_of_its_model(
+    h573: popcorn.PartDescription, adc: str
+) -> None:
+    machine = popcorn.Machine(h573)
+    unit = getattr(machine.periph, adc)
+    for channel in (*range(16), 18, 19):
+        unit.input(channel).volts = channel / 10
+    for channel in (*range(16), 18, 19):
+        assert unit.input(channel).volts == pytest.approx(channel / 10)
+    for channel in (16, 17, 20, -1):
+        with pytest.raises(popcorn.ConfigError) as caught:
+            unit.input(channel)
+        assert caught.value.expected == f"an external channel, one of {H5_EXTERNAL}"

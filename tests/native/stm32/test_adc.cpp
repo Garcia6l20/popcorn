@@ -221,7 +221,7 @@ auto clock_warnings(std::vector<core::log_record> const& logged) -> std::vector<
 {
   std::vector<core::log_record> out;
   std::ranges::copy_if(logged, std::back_inserter(out), [](core::log_record const& record) {
-    return record.message.contains("after PRESC");
+    return record.message.contains("ADC clock");
   });
   return out;
 }
@@ -317,6 +317,43 @@ TEST_CASE("VREFINT and the temperature sensor read their factory codes once conn
   CHECK(f.convert(19) == ts_cal1);
   CHECK(f.convert(5) == 0);
   CHECK(f.convert(18) == 0);
+}
+
+TEST_CASE("an ADC2 beside ADC1 reads VREFINT on 0, the sensor on 19 and its input on 5")
+{
+  auto       description = u575();
+  auto const adc1        = std::ranges::find(
+      description.peripherals, std::string_view{"ADC1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(adc1 != description.peripherals.end());
+  auto adc2 = *adc1;
+  adc2.name = "ADC2";
+  adc2.base = 0x4202'8100;
+  description.irqs.push_back(popcorn::irq_desc{.number = adc2.irqs.front(), .name = "ADC2_IRQn"});
+  description.peripherals.push_back(std::move(adc2));
+  adc_fixture const f{description};
+  auto* const       port = f.model_of<stm32::analog_port>("ADC2");
+  REQUIRE(port != nullptr);
+  auto const convert = [&](std::uint32_t channel) {
+    f.write("ADC2", "ADC_PCSEL", all_channels);
+    f.write("ADC2", "ADC_SQR1", channel << 6);
+    f.write("ADC2", "ADC_CR", advregen);
+    f.write("ADC2", "ADC_CR", advregen | aden);
+    f.write("ADC2", "ADC_CR", advregen | aden | adstart);
+    f.settle();
+    REQUIRE(f.field("ADC2", "ADC_ISR", "EOC") == 1);
+    auto& regs  = f.target->peripheral("ADC2");
+    auto  value = f.target->model("ADC2")->on_read(
+        regs, popcorn::find_register(regs.description(), "ADC_DR")->offset, 4,
+        {.pc = 0, .now = icount{0}, .by = popcorn::initiator::cpu});
+    REQUIRE(value.has_value());
+    return *value;
+  };
+  f.write("ADC12", "ADC12_CCR", vrefen | vsensesel);
+  CHECK(convert(0) == vrefint_cal);
+  CHECK(convert(19) == ts_cal1);
+  port->drive(5, 1'500'000);
+  CHECK(convert(5) == 8192);
+  CHECK(f.port().input(5) == 0);
 }
 
 TEST_CASE("a conversion sets EOC and EOS and clears ADSTART at its end, reading ADC_DR clears EOC")
@@ -778,6 +815,54 @@ TEST_CASE("LSHIFT, gain compensation and a matching offset each log one warning"
   CHECK(logged[0].reg == "ADC_CFGR2");
   CHECK(logged[1].reg == "ADC_GCOMP");
   CHECK(logged[2].reg == "ADC_OFR1");
+}
+
+TEST_CASE("BULB, SMPTRIG, TROVS and the DIFSEL bit of a converted channel each log once on the U5")
+{
+  constexpr std::uint32_t trovs   = 1u << 9;
+  constexpr std::uint32_t bulb    = 1u << 13;
+  constexpr std::uint32_t smptrig = 1u << 15;
+  {
+    adc_fixture const             f;
+    std::vector<core::log_record> logged;
+    auto const                    sink = recorder(f, logged);
+    f.port().drive(5, 1'000'000);
+    f.enable();
+    f.write("ADC1", "ADC_DIFSEL", 1u << 6);
+    CHECK(f.convert(5) == 5461);
+    CHECK(logged.empty());
+    f.write("ADC1", "ADC_CFGR2", bulb | smptrig | trovs);
+    f.write("ADC1", "ADC_DIFSEL", 1u << 5);
+    CHECK(f.convert(5) == 5461);
+    CHECK(f.convert(5) == 5461);
+    REQUIRE(logged.size() == 4);
+    CHECK(logged[0].message.contains("BULB"));
+    CHECK(logged[1].message.contains("SMPTRIG"));
+    CHECK(logged[2].message.contains("TROVS"));
+    CHECK(logged[3].reg == "ADC_DIFSEL");
+  }
+  struct setting
+  {
+    std::string_view reg;
+    std::uint32_t    value;
+  };
+  for(auto const [name, value] : {
+          setting{"ADC_CFGR2",  bulb   },
+          setting{"ADC_CFGR2",  smptrig},
+          setting{"ADC_CFGR2",  trovs  },
+          setting{"ADC_DIFSEL", 1u << 5},
+  })
+  {
+    CAPTURE(value);
+    adc_fixture const f{u575(), {}, true, true};
+    f.enable();
+    f.write("ADC1", name, value);
+    f.write("ADC1", "ADC_SQR1", 5u << 6);
+    CHECK_THROWS_AS(
+        static_cast<void>(
+            f.target->mem().write(f.at("ADC1", "ADC_CR"), 4, advregen | aden | adstart)),
+        popcorn::model_error);
+  }
 }
 
 TEST_CASE("an ADC state saved before the inputs loads with inputs at 0 and converts again")

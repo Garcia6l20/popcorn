@@ -157,6 +157,15 @@ namespace popcorn::periph::stm32
 /** @brief Factory of the ADC12 common register model, RM0456 section 33.7. */
 [[nodiscard]] auto adc_common_factory() -> model_factory;
 
+/**
+ * @brief Factory of the STM32H5 ADC1 and ADC2 model, RM0481 section 28.
+ * @param supply Board supplies, VDDA the conversion reference, copied into every model made.
+ */
+[[nodiscard]] auto adc_h5_factory(supply_options supply) -> model_factory;
+
+/** @brief Factory of the STM32H5 ADCC common register model, RM0481 section 28.7. */
+[[nodiscard]] auto adc_common_h5_factory() -> model_factory;
+
 /** @brief Factory of the DBGMCU model, RM0456 section 75.12. */
 [[nodiscard]] auto dbgmcu_factory() -> model_factory;
 

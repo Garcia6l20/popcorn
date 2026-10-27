@@ -200,6 +200,18 @@ for _, target in h573_firmwares.values():
     if target is not None:
         gpdma_h573.depends(target)
 
+adc_h573 = add_doctest(
+    "stm32-adc-h573",
+    [here / "test_adc_h573.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+adc_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        adc_h573.depends(target)
+
 tim_spi_h573 = add_doctest(
     "stm32-tim-spi-h573",
     [here / "test_tim_spi_h573.cpp"],

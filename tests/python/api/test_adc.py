@@ -11,10 +11,13 @@ import popcorn
 import pytest
 from popcorn import ConfigError, StopReason
 from popcorn.board import AnalogInput, SupplyOptions
+from popcorn.stm32 import mcu
+from popcorn.stm32.description import DescriptionError
 from popcorn.units import VirtualDuration, us
 
 PREBUILT = Path(__file__).parents[2] / "firmware" / "periph" / "prebuilt"
 RCC_ELF = PREBUILT / "rcc_ll.elf"
+H573_RCC_ELF = PREBUILT / "h573" / "rcc_ll.elf"
 ADEN = 1 << 0
 ADDIS = 1 << 1
 ADSTART = 1 << 2
@@ -25,6 +28,7 @@ ADC12EN = 1 << 10
 ADCDACSEL_PLL2R = 2 << 12
 ADCDACSEL_HSI16 = 4 << 12
 ALL_CHANNELS = 0xF_FFFF
+RANGE_1_TO_17 = ", ".join(str(n) for n in range(1, 18))
 
 
 def settle(m: popcorn.Machine, duration: int = 200) -> None:
@@ -141,11 +145,16 @@ def test_a_vdda_outside_the_datasheet_range_is_refused(
 
 def test_only_external_channels_take_an_input(u575: popcorn.PartDescription) -> None:
     m = popcorn.Machine(u575)
-    for channel in (0, 18, 19, 20):
-        with pytest.raises(ConfigError):
+    for channel in (0, 18, 19, 20, -1):
+        with pytest.raises(ConfigError) as caught:
             m.periph.ADC1.input(channel)
+        assert caught.value.expected == f"an external channel, one of {RANGE_1_TO_17}"
+    for channel in range(1, 18):
+        m.periph.ADC1.input(channel).volts = channel / 10
+    for channel in range(1, 18):
+        assert m.periph.ADC1.input(channel).volts == pytest.approx(channel / 10)
     with pytest.raises(popcorn.ModelError):
-        _ = m.periph.USART1.input(5).volts
+        m.periph.USART1.input(5)
     for volts in (-0.1, float("nan"), float("inf"), 4295.0):
         with pytest.raises(ValueError, match="V is not a voltage"):
             m.periph.ADC1.input(5).volts = volts
@@ -189,6 +198,42 @@ def test_a_drive_from_another_thread_during_a_run_raises(
     assert len(errors) == 1 and isinstance(errors[0], popcorn.MachineRunning)
 
 
+@pytest.fixture(scope="module")
+def h573() -> popcorn.PartDescription:
+    try:
+        return mcu("STM32H573AIIx")
+    except DescriptionError as error:
+        pytest.skip(f"no STM32H573 description: {error}")
+
+
+@pytest.mark.parametrize(
+    ("part", "image", "accepted", "refused"),
+    [("u575", RCC_ELF, 5, 18), ("h573", H573_RCC_ELF, 0, 16)],
+    ids=["u575", "h573"],
+)
+def test_an_input_ref_builds_and_drives_inside_running(
+    request: pytest.FixtureRequest,
+    part: str,
+    image: Path,
+    accepted: int,
+    refused: int,
+) -> None:
+    description: popcorn.PartDescription = request.getfixturevalue(part)
+    m = popcorn.Machine(description, image=popcorn.Image.elf(image))
+    m.reset()
+    m.reg.pc = m.sym("idle")
+
+    async def body() -> None:
+        async with m.running():
+            ref = m.ref.periph.ADC1.input(accepted)
+            with pytest.raises(ConfigError):
+                m.ref.periph.ADC1.input(refused)
+            await m.write((ref.volts, 1.5))
+
+    asyncio.run(body())
+    assert m.periph.ADC1.input(accepted).volts == pytest.approx(1.5)
+
+
 class ConversionEnded:
     def ready(self, machine: popcorn.Machine) -> bool:
         return machine.periph.ADC1.ADC_ISR.EOC == 1
@@ -220,7 +265,7 @@ def range_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     return [
         r
         for r in caplog.records
-        if getattr(r, "popcorn_peripheral", None) == "ADC1" and "after PRESC" in r.getMessage()
+        if getattr(r, "popcorn_peripheral", None) == "ADC1" and "is outside" in r.getMessage()
     ]
 
 

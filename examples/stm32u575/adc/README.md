@@ -16,7 +16,7 @@ the LL macros give 3000 mV and 30 C. External channels read the voltage driven o
 `m.periph.ADC1.input(5).volts = 1.2`, and 0 when never driven.
 
 The 4 MHz ADC clock is below the 5 MHz datasheet minimum, so each of the two ADC enables logs
-`ADC clock 4000000 Hz after PRESC is outside 5 to 55 MHz`. The conversions keep their computed
+`ADC clock 4000000 Hz is outside 5 to 55 MHz`. The conversions keep their computed
 time and the test does not read the log.
 
 ## Run

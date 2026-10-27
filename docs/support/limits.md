@@ -11,8 +11,7 @@ The MDF and ADF model raises `UnmodelledConfig`. Read the log records of a run t
 settings a firmware reached.
 
 On the STM32H5 a Machine runs the STM32H562, H563 and H573. The STM32H503, H523 and H533
-descriptions build from their SVD, and attaching a Machine to them raises `ConfigError`: at
-FLASH_SECKEYR on the STM32H503, at the RCC reset bit of ADCC on the STM32H523 and H533.
+descriptions build from their SVD, and attaching a Machine to them raises `ConfigError`.
 
 ## Peripherals without a model
 
@@ -69,9 +68,32 @@ Not modelled, logged once each:
 - The MDF data path, `ADC_CFGR1.DMNGT` 10.
 - DMA requests gated by the AWD1 window, `AWDFILT1` with `DMNGT`.
 - Left shift, gain compensation and offset of the result.
+- Bulb sampling, `ADC_CFGR2.BULB`.
+- The sampling time control trigger mode, `ADC_CFGR2.SMPTRIG` with `SWTRIG`.
+- Triggered regular oversampling, `ADC_CFGR2.TROVS`: all samples of a result convert back to
+  back from the first trigger.
+- Differential conversions, the `ADC_DIFSEL` bit of a converted channel: the channel converts
+  single-ended.
 - Reserved trigger selections in `EXTSEL`.
 - A reserved prescaler in `ADC12_CCR.PRESC` divides by 256.
 - ADC4 has no model.
+
+On the STM32H5, RM0481 section 28:
+
+- The dual ADC modes, `ADC_CCR.DUAL` other than 0, are logged once. ADC1 and ADC2 convert
+  independently. `ADC_CDR` is storage. `ADC_CSR` reads the `ADC_ISR` bits 10:0 of ADC1 at its
+  bits 10:0 and of ADC2 at its bits 26:16.
+- An enabled offset, `ADC_OFRy.OFFSET_EN` on the converted channel, is logged once and leaves
+  the result unchanged.
+- ADC2 channels 16 and 17, VBAT / 4 and VDDCORE, read 0.
+- Channel 0 of ADC1 or ADC2 converted while ADC1 `ADC_OR.OP0` is clear is logged once, a
+  model_error under strict_peripherals, and converts the driven input as if the bit were set.
+- ADC2 `ADC_OR.OP0`, the VDDCORE channel enable, is storage.
+- In the synchronous clock modes the ADC clock is HCLK divided by CKMODE, whatever ADC12EN.
+  CKMODE 01 with HCLK not SYSCLK is logged once at the ADEN edge, a model_error under
+  strict_peripherals, and converts at HCLK.
+- ADEN sets ADRDY at the write once ADVREGEN is set out of deep power-down. The tADCVREG_STUP
+  wait of DS14121 Table 96 is the firmware's.
 
 ## CRC
 

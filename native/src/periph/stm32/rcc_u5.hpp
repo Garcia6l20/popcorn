@@ -111,7 +111,7 @@ constexpr std::array<mux<signal>, 28> muxes{
      {"RCC_CCIPR3",
          "ADCDACSEL",
          {hclk, sysclk, pll2_r, hse, hsi16, msik},
-         {{{"ADC1", "ADC12EN"}, {"ADC4", "ADC4EN"}, {"DAC1", "DAC1EN"}}}},
+         {{{"ADC1", "ADC12EN"}, {"ADC2", "ADC12EN"}, {"ADC4", "ADC4EN"}, {"DAC1", "DAC1EN"}}}},
      {"RCC_CCIPR3", "ADF1SEL", audio_inputs, {{{"ADF1", "ADF1EN"}}}},
      }
 };

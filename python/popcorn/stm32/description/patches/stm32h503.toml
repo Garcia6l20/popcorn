@@ -34,13 +34,13 @@ add = [
 instances = ["TIM2"]
 registers = ["TIM2_CR2"]
 rename = { MMS1 = "MMS", MMS2 = "MMS_1" }
-source = "STM32H503 SVD: TIM2_CR2 spells MMS[2:0] at bits 6:4 MMS1 and MMS bit 3 at bit 25 MMS2, the positions of MMS and MMS_1 on TIM1 of the same SVD and of RM0481 Rev 5, 44.5.2. The spelling the model uses is MMS and MMS_1"
+source = "STM32H503 SVD: TIM2_CR2 spells MMS[2:0] at bits 6:4 MMS1 and MMS bit 3 at bit 25 MMS2, the positions of MMS and MMS_1 on TIM1 of the same SVD. The spelling the model uses is MMS and MMS_1"
 
 [[fields]]
 instances = ["TIM3"]
 registers = ["TIM3_CR2"]
 rename = { MMS1 = "MMS", MMS2 = "MMS_1" }
-source = "STM32H503 SVD: TIM3_CR2 spells MMS[2:0] at bits 6:4 MMS1 and MMS bit 3 at bit 25 MMS2, the positions of MMS and MMS_1 on TIM1 of the same SVD and of RM0481 Rev 5, 44.5.2. The spelling the model uses is MMS and MMS_1"
+source = "STM32H503 SVD: TIM3_CR2 spells MMS[2:0] at bits 6:4 MMS1 and MMS bit 3 at bit 25 MMS2, the positions of MMS and MMS_1 on TIM1 of the same SVD. The spelling the model uses is MMS and MMS_1"
 
 [[fields]]
 instances = ["TIM3"]

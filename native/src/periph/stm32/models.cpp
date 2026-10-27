@@ -31,7 +31,7 @@ struct builtin
   std::string_view part_glob     = "*";
 };
 
-constexpr std::array<builtin, 48> builtins{
+constexpr std::array<builtin, 50> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -142,6 +142,14 @@ constexpr std::array<builtin, 48> builtins{
      {"USB_OTG_FS", "otgfs1_v3_0_Cube", [](board const& b) { return otg_fs_factory(b); }},
      {"ADC", "aditf5_40v1_U5_Cube", [](board const& b) { return adc_factory(b.supply); }},
      {"ADC12", "*", [](board const&) { return adc_common_factory(); }},
+     {.ip              = "ADC",
+         .ip_version_glob = "aditf5_v3_0_H5*",
+         .make            = [](board const& b) { return adc_h5_factory(b.supply); },
+         .part_glob       = "STM32H5*"},
+     {.ip              = "ADCC",
+         .ip_version_glob = "*",
+         .make            = [](board const&) { return adc_common_h5_factory(); },
+         .part_glob       = "STM32H5*"},
      {"DBGMCU", "", [](board const&) { return dbgmcu_factory(); }},
      {"DBG", "", [](board const&) { return dbgmcu_factory(); }},
      {"CRC", "integtest1_v2_0", [](board const&) { return crc_factory(); }},

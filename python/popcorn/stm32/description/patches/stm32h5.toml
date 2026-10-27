@@ -37,6 +37,13 @@ on_write = "one_to_clear"
 source = "RM0481 Rev 5, 18.7.5 EXTI falling edge pending register (EXTI_FPR1): FPIF0 to FPIF16 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
 
 [[fields]]
+ip = "ADC"
+registers = ["ADC_ISR"]
+fields = ["ADRDY", "EOSMP", "EOC", "EOS", "OVR", "JEOC", "JEOS", "AWD1", "AWD2", "AWD3", "JQOVF"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 28.6.1 ADC interrupt and status register (ADC_ISR): ADRDY to JQOVF in bits 10:0 are rc_w1. ST's STM32H573 SVD gives plain read-write. ip, not instances: the ADCC common block has its own IP and no ADC_ISR"
+
+[[fields]]
 ip = "I2C"
 registers = ["I2C_ISR"]
 fields = ["TXIS", "TXE"]

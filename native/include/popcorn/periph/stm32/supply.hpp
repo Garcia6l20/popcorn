@@ -16,7 +16,7 @@ inline constexpr std::uint32_t vdda_max_mv = 3600;
 struct supply_options
 {
   /** @brief VDDA in millivolts, also VREF+: the ADC reference with VREFBUF off. 3000 is the
-   * voltage the factory calibration words were taken at. */
+   * voltage the STM32U5 factory calibration words were taken at, 3300 the STM32H5 one. */
   std::uint32_t vdda_mv = 3000;
 };
 }

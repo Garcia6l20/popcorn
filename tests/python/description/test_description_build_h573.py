@@ -340,7 +340,7 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
         peripherals_dropped=1,
         ip_renamed=19,
         aliased=103,
-        fields_touched=60,
+        fields_touched=104,
         fields_dropped=48,
         fields_renamed=21,
         fields_added=2,

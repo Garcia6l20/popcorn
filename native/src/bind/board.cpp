@@ -550,6 +550,11 @@ auto machine_handle::adc_input(std::string const& peripheral, std::uint8_t chann
       [&](core::machine& target) { return adc_input_body(analog(peripheral), channel)(target); });
 }
 
+auto machine_handle::adc_channels(std::string const& peripheral) const -> std::uint32_t
+{
+  return analog(peripheral).external_channels();
+}
+
 auto machine_handle::entropy(std::string const& peripheral) const -> periph::stm32::entropy_source&
 {
   auto* const source = dynamic_cast<periph::stm32::entropy_source*>(engine().model(peripheral));
