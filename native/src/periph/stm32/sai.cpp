@@ -210,7 +210,10 @@ class sai final : public dispatch_model<sai, sai_state>,
                   public bus_reset_listener
 {
 public:
-  sai(model_context& ctx, peripheral_desc const& desc, std::array<audio_attachment, blocks> wired);
+  sai(model_context&                       ctx,
+      peripheral_desc const&               desc,
+      std::array<audio_attachment, blocks> wired,
+      sai_variant const&                   variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -238,7 +241,7 @@ public:
 
 private:
   void               restore_reset_values(std::optional<reset_kind> kind);
-  [[nodiscard]] auto fields_of(char prefix) const -> block_fields;
+  [[nodiscard]] auto fields_of(char prefix, std::string_view enable) const -> block_fields;
   [[nodiscard]] auto on(field_ref field) const -> bool;
   [[nodiscard]] auto enabled(std::size_t b) const -> bool;
   [[nodiscard]] auto receiver(std::size_t b) const -> bool;
@@ -324,11 +327,12 @@ auto sai_writes() -> std::span<write_entry<sai> const>
 sai::sai(
     model_context&                       ctx,
     peripheral_desc const&               desc,
-    std::array<audio_attachment, blocks> wired)
+    std::array<audio_attachment, blocks> wired,
+    sai_variant const&                   variant)
     : dispatch_model{ctx, desc, "SAI", sai_writes()}, regs_{ctx.regs}, wired_{std::move(wired)},
-      block_{fields_of('A'), fields_of('B')}, pdm_enable_{field("PDMCR", "PDMEN")},
-      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")},
-      requests_{requests_of(ctx.peers, desc.name)}
+      block_{fields_of('A', variant.enable), fields_of('B', variant.enable)},
+      pdm_enable_{field("PDMCR", "PDMEN")}, kernel_{ctx.clock.domain(lower(desc.name))},
+      line_{irq(desc.name + "_IRQn")}, requests_{requests_of(ctx.peers, desc.name)}
 {
   auto& clocks = state_.clock.emplace();
   for(std::size_t b = 0; b < blocks; ++b)
@@ -337,7 +341,7 @@ sai::sai(
   }
 }
 
-auto sai::fields_of(char prefix) const -> block_fields
+auto sai::fields_of(char prefix, std::string_view enable) const -> block_fields
 {
   auto const name = [prefix](std::string_view reg) { return std::format("{}{}", prefix, reg); };
   auto const cr1  = name("CR1");
@@ -345,10 +349,7 @@ auto sai::fields_of(char prefix) const -> block_fields
   auto const sr   = name("SR");
   auto const im   = name("IM");
   auto const clr  = name("CLRFR");
-  auto const enable =
-      std::ranges::contains(describe(cr1).fields, std::string_view{"SAIEN"}, &field_desc::name)
-          ? std::string_view{"SAIEN"}
-          : std::string_view{"SAIAEN"};
+
   block_fields out{
       .mode             = field(cr1, "MODE"),
       .protocol         = field(cr1, "PRTCFG"),
@@ -1341,20 +1342,20 @@ void sai::flags()
 }
 }
 
-auto sai_factory(board const& b) -> model_factory
+auto sai_factory(board const& b, sai_variant variant) -> model_factory
 {
-  return
-      [audio = b.audio](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-        std::array<audio_attachment, 2> wired{};
-        for(std::size_t index = 0; index < wired.size(); ++index)
-        {
-          auto const name = std::format("{}_{}", desc.name, index == 0 ? 'A' : 'B');
-          if(auto const found = audio.find(name); found != audio.end())
-          {
-            wired[index] = found->second;
-          }
-        }
-        return std::make_shared<sai>(ctx, desc, std::move(wired));
-      };
+  return [audio = b.audio,
+          variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    std::array<audio_attachment, 2> wired{};
+    for(std::size_t index = 0; index < wired.size(); ++index)
+    {
+      auto const name = std::format("{}_{}", desc.name, index == 0 ? 'A' : 'B');
+      if(auto const found = audio.find(name); found != audio.end())
+      {
+        wired[index] = found->second;
+      }
+    }
+    return std::make_shared<sai>(ctx, desc, std::move(wired), variant);
+  };
 }
 }

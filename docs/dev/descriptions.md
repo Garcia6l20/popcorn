@@ -37,9 +37,9 @@ The modules are in `python/popcorn/stm32/description`:
   pure function of the file bytes.
 - `_cubemx.py` reads the part lookup, the memory regions and processor facts, the IP instance
   join and the GPIO alternate functions.
-- `_patches.py` applies popcorn's own TOML patches: peripheral drops, fields, cross rules,
-  aliases, IP renames, IRQ changes, core overrides, added registers and regions, and the
-  device signature. The patches are in the `patches` directory.
+- `_patches.py` applies popcorn's own TOML patches: peripheral drops, fields, field drops, cross
+  rules, aliases, IP renames, IRQ changes, GPIO alternate function drops, core overrides, added
+  registers and regions, and the device signature. The patches are in the `patches` directory.
 - `_builder.py` assembles the description: expand the SVD, read the db and rzone, apply every
   patch, strip the peripheral prefix of register names, build the IRQ table, then assemble the
   core, regions and peripherals.
@@ -49,6 +49,46 @@ The modules are in `python/popcorn/stm32/description`:
 The built description is cached as JSON under `$XDG_CACHE_HOME/popcorn/mcu`, keyed by the part,
 the core, the schema version, the generator string and the digests of the resolved sources
 in `_cache.py`.
+
+## Alternate function drops
+
+The CubeMX GPIO modes file can list an alternate function a part cannot route. A patch removes
+it with an `[alternates]` table:
+
+```toml
+[alternates]
+drop = [
+  { peripheral = "GPIOH", pin = 2, af = 5, signal = "SPI5_SCK", source = "datasheet Table n" },
+]
+```
+
+Each rule takes the port in `peripheral`, the `pin` and `af` numbers from 0 to 15, the `signal`
+name and a non-empty `source` naming the document that justifies the drop. The entry must exist
+on the port and no rule may repeat it, otherwise the build raises `DescriptionError` with the
+rule's index. The builder applies the rules after it reads the CubeMX modes, validates all of
+them before removing any, and counts the drops in the patch report.
+
+## Field drops
+
+An SVD can describe fields a part does not implement, such as the per-pin fields of pins a port
+lacks. A `[[fields]]` rule with `drop = true` removes them:
+
+```toml
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_MODER"]
+fields = ["MODE12", "MODE13", "MODE14", "MODE15"]
+drop = true
+source = "silicon read-back: GPIOI_MODER keeps 0x00FFFFFF of 0xFFFFFFFF"
+```
+
+The rule takes the usual `ip` or `instances` selector, `registers` with an optional `each`
+range, the `fields` and a non-empty `source`. It carries no `width`, `on_write` or `on_read`.
+An `ip` selector picks the peripherals of that IP that are not aliases, `instances` must name
+such peripherals. Each named register and field must exist and no rule may drop a field twice.
+Otherwise the build raises `DescriptionError` with the rule's index. The fields leave the named
+peripheral and each of its aliases, and a later rule naming them fails as naming an unknown
+field. The patch report counts the drops in `fields_dropped`.
 
 ## Shipped descriptions
 

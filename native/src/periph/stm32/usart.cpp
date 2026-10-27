@@ -344,7 +344,11 @@ class usart final : public dispatch_model<usart, usart_state>,
                     public bus_reset_listener
 {
 public:
-  usart(model_context& ctx, peripheral_desc const& desc, std::shared_ptr<uart_endpoint> far_end);
+  usart(
+      model_context&                 ctx,
+      peripheral_desc const&         desc,
+      std::shared_ptr<uart_endpoint> far_end,
+      usart_variant const&           variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -380,8 +384,6 @@ public:
 
 private:
   void               restore_reset_values(bool keep_host);
-  [[nodiscard]] auto name_of(std::string_view with_views, std::string_view plain) const
-      -> std::string_view;
   [[nodiscard]] auto enabled() const -> bool;
   [[nodiscard]] auto fifo() const -> bool;
   [[nodiscard]] auto frame_ps() -> std::uint64_t;
@@ -421,7 +423,7 @@ private:
   field_ref                                    enable_;
   field_ref                                    transmit_;
   field_ref                                    receive_;
-  field_ref                                    fifo_enable_;
+  std::optional<field_ref>                     fifo_enable_;
   field_ref                                    word_low_;
   field_ref                                    word_high_;
   std::optional<field_ref>                     oversampling_;
@@ -487,7 +489,7 @@ private:
   std::optional<field_ref>                     retransmissions_;
 };
 
-auto usart_writes(bool plain_names) -> std::span<write_entry<usart> const>
+auto usart_writes(usart_variant const& variant) -> std::span<write_entry<usart> const>
 {
   static constexpr std::array<write_entry<usart>, 10> with_views{
       {
@@ -517,18 +519,12 @@ auto usart_writes(bool plain_names) -> std::span<write_entry<usart> const>
        {"PRESC", &usart::control_written},
        }
   };
-  return plain_names ? std::span<write_entry<usart> const>{plain} : with_views;
+  return variant.mode_views ? std::span<write_entry<usart> const>{with_views} : plain;
 }
 
-auto line_name(part_description const& part, peripheral_desc const& desc) -> std::string
+auto line_name(peripheral_desc const& desc, usart_variant const& variant) -> std::string
 {
-  auto own = desc.name + "_IRQn";
-  if(desc.irqs.size() != 1 or std::ranges::contains(part.irqs, own, &irq_desc::name))
-  {
-    return own;
-  }
-  auto const only = std::ranges::find(part.irqs, desc.irqs.front(), &irq_desc::number);
-  return only != part.irqs.end() ? only->name : own;
+  return variant.irq_name.empty() ? desc.name + "_IRQn" : std::string{variant.irq_name};
 }
 
 auto lower(std::string_view name) -> std::string
@@ -542,13 +538,15 @@ auto lower(std::string_view name) -> std::string
 usart::usart(
     model_context&                 ctx,
     peripheral_desc const&         desc,
-    std::shared_ptr<uart_endpoint> far_end)
-    : dispatch_model{
-          ctx, desc, desc.ip, usart_writes(find_register(desc, "CR1_enabled") == nullptr)},
-      regs_{ctx.regs}, far_end_{std::move(far_end)}, low_power_{desc.ip == "LPUART"},
-      cr1_{name_of("CR1_enabled", "CR1")}, isr_{name_of("ISR_enabled", "ISR")}, rdr_{reg("RDR")},
-      tdr_{reg("TDR")}, icr_{reg("ICR")}, enable_{field(cr1_, "UE")}, transmit_{field(cr1_, "TE")},
-      receive_{field(cr1_, "RE")}, fifo_enable_{field(cr1_, "FIFOEN")},
+    std::shared_ptr<uart_endpoint> far_end,
+    usart_variant const&           variant)
+    : dispatch_model{ctx, desc, desc.ip, usart_writes(variant)}, regs_{ctx.regs},
+      far_end_{std::move(far_end)}, low_power_{desc.ip == "LPUART"},
+      cr1_{variant.mode_views ? "CR1_enabled" : "CR1"},
+      isr_{variant.mode_views ? "ISR_enabled" : "ISR"}, rdr_{reg("RDR")}, tdr_{reg("TDR")},
+      icr_{reg("ICR")}, enable_{field(cr1_, "UE")}, transmit_{field(cr1_, "TE")},
+      receive_{field(cr1_, "RE")},
+      fifo_enable_{variant.fifo ? std::optional{field(cr1_, "FIFOEN")} : std::nullopt},
       word_low_{field(cr1_, "M0")}, word_high_{field(cr1_, "M1")},
       oversampling_{low_power_ ? std::nullopt : std::optional{field(cr1_, "OVER8")}},
       stop_{field("CR2", "STOP")}, overrun_disable_{field("CR3", "OVRDIS")},
@@ -581,8 +579,10 @@ usart::usart(
               &field_desc::name)
               ? std::optional{field("CR3", "ONEBIT")}
               : std::nullopt},
-      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(line_name(ctx.part, desc))}
+      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(line_name(desc, variant))}
 {
+  expect_register("CR1_enabled", variant.mode_views);
+  expect_field(cr1_, "FIFOEN", variant.fifo);
   for(auto const& clear : describe("ICR").fields)
   {
     auto const target = clear.name == "CTSCF"
@@ -694,11 +694,6 @@ auto usart::on_write(
   return dispatch_model::on_write(regs, word, 4, old, kept, access);
 }
 
-auto usart::name_of(std::string_view with_views, std::string_view plain) const -> std::string_view
-{
-  return has_register(with_views) ? with_views : plain;
-}
-
 void usart::reset(register_file&, reset_kind)
 {
   restore_reset_values(false);
@@ -770,7 +765,7 @@ auto usart::enabled() const -> bool
 
 auto usart::fifo() const -> bool
 {
-  return get(regs_, fifo_enable_) != 0;
+  return fifo_enable_ and get(regs_, *fifo_enable_) != 0;
 }
 
 auto usart::frame_ps() -> std::uint64_t
@@ -1655,12 +1650,13 @@ void usart::attach(std::shared_ptr<uart_endpoint> far_end)
 }
 }
 
-auto usart_factory(board const& b) -> model_factory
+auto usart_factory(board const& b, usart_variant variant) -> model_factory
 {
-  return
-      [uarts = b.uarts](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-        auto const found = uarts.find(desc.name);
-        return std::make_shared<usart>(ctx, desc, found != uarts.end() ? found->second : nullptr);
-      };
+  return [uarts = b.uarts,
+          variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    auto const found = uarts.find(desc.name);
+    return std::make_shared<usart>(
+        ctx, desc, found != uarts.end() ? found->second : nullptr, variant);
+  };
 }
 }

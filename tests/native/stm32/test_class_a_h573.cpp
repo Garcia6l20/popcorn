@@ -1,6 +1,7 @@
 #include "model_base.hpp"
 #include "stm32_fixture.hpp"
 
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
@@ -9,6 +10,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -211,7 +213,6 @@ TEST_CASE("GPIOI drives pin 11 as an output, the LCD reset pin, and PA13 resets 
   CHECK(r.port("GPIOA").mode(13) == stm32::pin_mode::alternate);
   CHECK(r.port("GPIOA").alternate(13) == 0);
   auto& gpioi = r.port("GPIOI");
-  CHECK(popcorn::find_register(r.f.target->peripheral("GPIOI").description(), "AFRH") == nullptr);
   CHECK(gpioi.alternate(11) == 0);
   r.set("GPIOI", "MODER", "MODE11", 1);
   CHECK(gpioi.mode(11) == stm32::pin_mode::output);
@@ -222,6 +223,142 @@ TEST_CASE("GPIOI drives pin 11 as an output, the LCD reset pin, and PA13 resets 
   r.write("GPIOI", "BSRR", 1u << 27);
   CHECK_FALSE(gpioi.level(11));
   CHECK(r.read("GPIOI", "ODR") == 0);
+}
+
+TEST_CASE("PI11 selects AF13 through GPIOI_AFRH, whose upper half reads 0 as on silicon")
+{
+  rig   r;
+  auto& gpioi = r.port("GPIOI");
+  CHECK(popcorn::find_register(r.f.target->peripheral("GPIOI").description(), "AFRH") != nullptr);
+  CHECK(gpioi.alternate(11) == 0);
+  r.set("GPIOI", "AFRH", "AFSEL11", 13);
+  CHECK(gpioi.alternate(11) == 13);
+  r.write("GPIOI", "AFRH", 0xffff'ffff);
+  CHECK(r.read("GPIOI", "AFRH") == 0x0000'ffff);
+  r.write("GPIOI", "AFRH", 0x0000'd5a1);
+  CHECK(r.read("GPIOI", "AFRH") == 0x0000'd5a1);
+  CHECK(gpioi.alternate(11) == 0xd);
+  CHECK(gpioi.alternate(8) == 1);
+  r.write("GPIOI", "AFRH", 0);
+  CHECK(r.read("GPIOI", "AFRH") == 0);
+}
+
+TEST_CASE("every H573 port has AFRH, and a description that disagrees with the variant throws")
+{
+  rig r;
+  for(auto const port : std::string_view{"ABCDEFGHI"})
+  {
+    auto const name = std::string{"GPIO"} + port;
+    CAPTURE(name);
+    CHECK(popcorn::find_register(r.f.target->peripheral(name).description(), "AFRH") != nullptr);
+  }
+  auto const attach = [](popcorn::part_description desc) {
+    return stm32_fixture{std::move(desc), "h573_boot_ll", popcorn::testing::stm32_options()};
+  };
+  auto const find = [](popcorn::part_description& desc, std::string_view name) -> auto& {
+    auto const found = std::ranges::find(desc.peripherals, name, &popcorn::peripheral_desc::name);
+    REQUIRE(found != desc.peripherals.end());
+    return *found;
+  };
+  for(auto const name : {"GPIOE", "GPIOI"})
+  {
+    CAPTURE(name);
+    auto lacking = h573();
+    REQUIRE(
+        std::erase_if(
+            find(lacking, name).registers,
+            [](popcorn::register_desc const& reg) { return reg.name == "AFRH"; })
+        == 1);
+    CHECK_THROWS_AS(attach(lacking), popcorn::config_error);
+  }
+}
+
+TEST_CASE("a GPIOI register missing its pin 11 field or carrying a pin 12 field throws")
+{
+  auto const attach = [](popcorn::part_description desc) {
+    return stm32_fixture{std::move(desc), "h573_boot_ll", popcorn::testing::stm32_options()};
+  };
+  auto const reg_of = [](popcorn::part_description& desc,
+                         std::string_view           name) -> popcorn::register_desc& {
+    auto const port = std::ranges::find(
+        desc.peripherals, std::string_view{"GPIOI"}, &popcorn::peripheral_desc::name);
+    REQUIRE(port != desc.peripherals.end());
+    auto const found = std::ranges::find(port->registers, name, &popcorn::register_desc::name);
+    REQUIRE(found != port->registers.end());
+    return *found;
+  };
+  constexpr std::array<std::pair<std::string_view, std::string_view>, 13> pin_fields{
+      {
+       {"MODER", "MODE"},
+       {"OTYPER", "OT"},
+       {"OSPEEDR", "OSPEED"},
+       {"PUPDR", "PUPD"},
+       {"IDR", "ID"},
+       {"ODR", "OD"},
+       {"BSRR", "BS"},
+       {"BSRR", "BR"},
+       {"BRR", "BR"},
+       {"LCKR", "LCK"},
+       {"HSLVR", "HSLV"},
+       {"SECCFGR", "SEC"},
+       {"AFRH", "AFSEL"},
+       }
+  };
+  for(auto const& [name, prefix] : pin_fields)
+  {
+    CAPTURE(name);
+    CAPTURE(prefix);
+    auto const last    = std::string{prefix} + "11";
+    auto const named   = [&](popcorn::field_desc const& field) { return field.name == last; };
+    auto       lacking = h573();
+    REQUIRE(std::erase_if(reg_of(lacking, name).fields, named) == 1);
+    CHECK_THROWS_AS(attach(lacking), popcorn::config_error);
+
+    auto  carrying = h573();
+    auto& reg      = reg_of(carrying, name);
+    auto  extra    = *std::ranges::find_if(reg.fields, named);
+    extra.name     = std::string{prefix} + "12";
+    extra.lsb      = static_cast<std::uint8_t>(extra.lsb + extra.width);
+    reg.fields.push_back(extra);
+    CHECK_THROWS_AS(attach(carrying), popcorn::config_error);
+  }
+}
+
+TEST_CASE("GPIOI has pins 0 to 11: MODER keeps 0x00FFFFFF of a 0xFFFFFFFF write, as on silicon")
+{
+  rig   r;
+  auto& gpioi = r.port("GPIOI");
+  r.write("GPIOI", "MODER", 0xffff'ffff);
+  CHECK(r.read("GPIOI", "MODER") == 0x00ff'ffff);
+  CHECK(gpioi.mode(11) == stm32::pin_mode::analog);
+  CHECK(gpioi.mode(12) == stm32::pin_mode::input);
+  r.write("GPIOI", "ODR", 0xffff'ffff);
+  CHECK(r.read("GPIOI", "ODR") == 0x0fff);
+  r.write("GPIOI", "BSRR", 0xffff'0000);
+  CHECK(r.read("GPIOI", "ODR") == 0);
+  r.write("GPIOH", "MODER", 0xffff'ffff);
+  CHECK(r.read("GPIOH", "MODER") == 0xffff'ffff);
+}
+
+TEST_CASE("driving GPIOI pin 12 to 15 throws config_error, pin 11 and GPIOH pin 15 drive")
+{
+  rig   r;
+  auto& gpioi = r.port("GPIOI");
+  CHECK(gpioi.pin_count() == 12);
+  CHECK(r.port("GPIOH").pin_count() == 16);
+  for(std::uint8_t pin = 12; pin < 16; ++pin)
+  {
+    CAPTURE(pin);
+    CHECK_THROWS_AS(gpioi.drive(pin, true), popcorn::config_error);
+    CHECK_THROWS_AS(gpioi.drive_at(pin, true, popcorn::vtime{0}), popcorn::config_error);
+  }
+  CHECK(gpioi.pending_edges() == 0);
+  r.set("GPIOI", "MODER", "MODE11", 0);
+  CHECK_NOTHROW(gpioi.drive(11, true));
+  CHECK(gpioi.level(11));
+  r.set("GPIOH", "MODER", "MODE15", 0);
+  CHECK_NOTHROW(r.port("GPIOH").drive(15, true));
+  CHECK(r.port("GPIOH").level(15));
 }
 
 TEST_CASE("every H573 GPIO port resets with the reference manual values of its own port")

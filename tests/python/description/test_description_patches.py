@@ -6,12 +6,18 @@ from popcorn.stm32.description._cubemx import DbIp, DbPart, read_part, read_rzon
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import (
     Access,
+    AlternateDesc,
     RegionAccess,
     RegionDesc,
     RegionKind,
     WriteEffect,
 )
-from popcorn.stm32.description._patches import PatchTarget, apply_patches, load_patches
+from popcorn.stm32.description._patches import (
+    PatchTarget,
+    apply_alternate_drops,
+    apply_patches,
+    load_patches,
+)
 from popcorn.stm32.description._sources import Sources
 from popcorn.stm32.description._svd import expand_svd
 
@@ -1372,3 +1378,197 @@ parts = ["TOY*"]
     assert excinfo.value.key == "resets[1].register"
     assert excinfo.value.expected == "a register no earlier rule resets"
     assert target == before
+
+
+def _alternates_target() -> PatchTarget:
+    target = _synthetic_target()
+    for peripheral in target.peripherals:
+        if peripheral.name == "A":
+            peripheral.alternates = [
+                AlternateDesc(pin=1, af=2, signal="x_a"),
+                AlternateDesc(pin=9, af=13, signal="x_b"),
+                AlternateDesc(pin=9, af=5, signal="x_c"),
+            ]
+    return target
+
+
+def _alternates_patch(tmp_path: Path, *entries: str) -> Path:
+    body = ",\n".join(entries)
+    return _write_patch(
+        tmp_path,
+        f"""
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [alternates]
+    drop = [{body}]
+    """,
+    )
+
+
+def _drop(
+    peripheral: str, pin: int, af: int, signal: str, source: str = ', source = "probe"'
+) -> str:
+    return f'{{ peripheral = "{peripheral}", pin = {pin}, af = {af}, signal = "{signal}"{source} }}'
+
+
+def test_alternates_drop_removes_exactly_the_named_entries(tmp_path: Path) -> None:
+    path = _alternates_patch(tmp_path, _drop("A", 9, 13, "x_b"))
+    target = _alternates_target()
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert apply_alternate_drops(patches, target.peripherals) == 1
+    kept = next(p for p in target.peripherals if p.name == "A").alternates
+    assert kept == [
+        AlternateDesc(pin=1, af=2, signal="x_a"),
+        AlternateDesc(pin=9, af=5, signal="x_c"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        _drop("A", 9, 13, "x_nope"),
+        _drop("A", 9, 12, "x_b"),
+        _drop("A", 8, 13, "x_b"),
+        _drop("B", 9, 13, "x_b"),
+        _drop("NOPE", 9, 13, "x_b"),
+    ],
+)
+def test_alternates_drop_naming_an_absent_entry_is_an_error(tmp_path: Path, entry: str) -> None:
+    path = _alternates_patch(tmp_path, entry)
+    target = _alternates_target()
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_alternate_drops(patches, target.peripherals)
+    assert excinfo.value.key == "alternates.drop[0]"
+
+
+def test_alternates_drop_of_one_entry_twice_or_after_an_error_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    path = _alternates_patch(tmp_path, _drop("A", 1, 2, "x_a"), _drop("A", 1, 2, "x_a"))
+    target = _alternates_target()
+    before = copy.deepcopy(target.peripherals)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_alternate_drops(patches, target.peripherals)
+    assert excinfo.value.key == "alternates.drop[1]"
+    assert target.peripherals == before
+
+
+def test_alternates_drop_without_a_source_is_an_error(tmp_path: Path) -> None:
+    path = _alternates_patch(tmp_path, _drop("A", 1, 2, "x_a", source=""))
+    with pytest.raises(DescriptionError) as excinfo:
+        load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert excinfo.value.key == "alternates.drop[0].source"
+
+
+def test_alternates_drop_with_an_empty_source_is_an_error(tmp_path: Path) -> None:
+    path = _alternates_patch(tmp_path, _drop("A", 1, 2, "x_a", source=', source = ""'))
+    with pytest.raises(DescriptionError) as excinfo:
+        load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert excinfo.value.key == "alternates.drop[0].source"
+
+
+@pytest.mark.parametrize(
+    ("pin", "af", "key"),
+    [(16, 2, "pin"), (-1, 2, "pin"), (1, 16, "af"), (1, -1, "af")],
+)
+def test_alternates_drop_pin_and_af_are_four_bit(
+    tmp_path: Path, pin: int, af: int, key: str
+) -> None:
+    path = _alternates_patch(tmp_path, _drop("A", pin, af, "x_a"))
+    with pytest.raises(DescriptionError) as excinfo:
+        load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert excinfo.value.key == f"alternates.drop[0].{key}"
+
+
+def test_alternates_drop_accepts_pin_15_and_af_15(tmp_path: Path) -> None:
+    path = _alternates_patch(tmp_path, _drop("A", 15, 15, "x_a"))
+    load_patches([path], part="TOY1", svd_name="synthetic.svd")
+
+
+def _field_drop_patch(tmp_path: Path, *rules: str) -> Path:
+    text = """
+format = 1
+[match]
+parts = ["TOY*"]
+[aliases]
+prefix = "SEC_"
+offset = 0x10000000
+"""
+    for rule in rules:
+        text += f"\n[[fields]]\n{rule}\n"
+    return _write_patch(tmp_path, text)
+
+
+_DROP_EN = 'instances = ["D"]\nregisters = ["CR"]\nfields = ["EN"]\ndrop = true\nsource = "probe"'
+
+
+def _drop_error(tmp_path: Path, *rules: str) -> DescriptionError:
+    path = _field_drop_patch(tmp_path, *rules)
+    target = _synthetic_target()
+    before = copy.deepcopy(target)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert target == before
+    assert excinfo.value.file == str(path)
+    return excinfo.value
+
+
+def test_a_field_drop_removes_the_field_from_the_peripheral_and_its_aliases(
+    tmp_path: Path,
+) -> None:
+    target = _synthetic_target()
+    path = _field_drop_patch(tmp_path, _DROP_EN)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fields_dropped == 1
+    assert report.fields_touched == 0
+    for name in ("D", "SEC_D"):
+        register = target_peripheral(target, name).registers[0]
+        assert register.name == "CR"
+        assert register.fields == []
+    a = target_peripheral(target, "A")
+    assert [f.name for f in next(r for r in a.registers if r.name == "SR").fields] == ["F", "R"]
+
+
+def test_a_field_drop_by_ip_drops_each_base_peripheral_once_and_its_aliases(
+    tmp_path: Path,
+) -> None:
+    target = _synthetic_target()
+    path = _field_drop_patch(tmp_path, _DROP_EN.replace('instances = ["D"]', 'ip = "D"'))
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fields_dropped == 1
+    for name in ("D", "SEC_D"):
+        assert target_peripheral(target, name).registers[0].fields == []
+
+
+@pytest.mark.parametrize(
+    ("rule", "key"),
+    [
+        (_DROP_EN.replace('["CR"]', '["NOPE"]'), "fields[0].registers"),
+        (_DROP_EN.replace('["EN"]', '["NOPE"]'), "fields[0].fields"),
+        (_DROP_EN.replace('["D"]', '["SEC_D"]'), "fields[0].instances"),
+        (_DROP_EN.replace('"probe"', '""'), "fields[0].source"),
+        (_DROP_EN + '\non_write = "modify"', "fields[0].drop"),
+        (_DROP_EN + "\nwidth = 2", "fields[0].drop"),
+        (_DROP_EN + '\non_read = "clear"', "fields[0].drop"),
+    ],
+)
+def test_a_field_drop_refuses_a_bad_rule(tmp_path: Path, rule: str, key: str) -> None:
+    assert _drop_error(tmp_path, rule).key == key
+
+
+def test_a_field_dropped_twice_is_an_error(tmp_path: Path) -> None:
+    error = _drop_error(tmp_path, _DROP_EN, _DROP_EN)
+    assert error.key == "fields[1].fields"
+    assert "earlier" in error.expected
+    assert _drop_error(tmp_path, _DROP_EN.replace('["EN"]', '["EN", "EN"]')).key == (
+        "fields[0].fields"
+    )
+
+
+def test_a_rule_naming_a_dropped_field_is_an_error(tmp_path: Path) -> None:
+    later = 'instances = ["D"]\nregisters = ["CR"]\nfields = ["EN"]\non_write = "modify"\n'
+    later += 'source = "probe"'
+    assert _drop_error(tmp_path, _DROP_EN, later).key == "fields[1].fields"

@@ -46,7 +46,38 @@ def test_build_u575_matches_expected_shape(u575_sources: Sources) -> None:
     assert description.sources["cmsis_header"]
     assert description.sources["patch:stm32u5.toml"]
     assert description.sources["patch:stm32u575.toml"]
+    assert description.sources["patch:stm32u57x.toml"]
     assert description.sources["gpio_modes"]
+
+
+def test_u575_gpioi_has_pins_0_to_7_and_an_empty_afrh(u575_sources: Sources) -> None:
+    by_name = {p.name: p for p in build_description(u575_sources).peripherals}
+    for name in ("GPIOI", "SEC_GPIOI"):
+        registers = {r.name: r for r in by_name[name].registers}
+        for register, prefix in (
+            ("MODER", "MODE"),
+            ("OTYPER", "OT"),
+            ("OSPEEDR", "OSPEED"),
+            ("PUPDR", "PUPD"),
+            ("IDR", "ID"),
+            ("ODR", "OD"),
+            ("LCKR", "LCK"),
+            ("BRR", "BR"),
+            ("HSLVR", "HSLV"),
+            ("SECCFGR", "SEC"),
+        ):
+            names = {f.name for f in registers[register].fields}
+            assert {f"{prefix}{n}" for n in range(8)} <= names, f"{name} {register}"
+            assert not {f"{prefix}{n}" for n in range(8, 16)} & names, f"{name} {register}"
+        assert {f.name for f in registers["BSRR"].fields} == {
+            f"{kind}{n}" for kind in ("BS", "BR") for n in range(8)
+        }
+        assert registers["AFRH"].fields == []
+        assert registers["SECCFGR"].reset == 0xFF
+    gpioh = {r.name: r for r in by_name["GPIOH"].registers}
+    assert len(gpioh["AFRH"].fields) == 8
+    assert len(gpioh["MODER"].fields) == 16
+    assert gpioh["SECCFGR"].reset == 0xFFFF
 
 
 def test_build_u575_gpio_ports_carry_their_alternate_functions(u575_sources: Sources) -> None:

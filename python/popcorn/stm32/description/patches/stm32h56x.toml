@@ -1,0 +1,82 @@
+format = 1
+source = "Port I of the STM32H562, H563 and H573. RM0481 Rev 5 Table 5 maps GPIOI on these parts, Tables 6 and 7 of the STM32H523, H533, H543 and H553 do not"
+
+[match]
+parts = ["STM32H562*", "STM32H563*", "STM32H573*"]
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_MODER"]
+fields = ["MODE12", "MODE13", "MODE14", "MODE15"]
+drop = true
+source = "Silicon read-back on an STM32H573 (MCU fitted on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_OTYPER"]
+fields = ["OT12", "OT13", "OT14", "OT15"]
+drop = true
+source = "Silicon read-back on an STM32H573 (MCU fitted on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_OSPEEDR"]
+fields = ["OSPEED12", "OSPEED13", "OSPEED14", "OSPEED15"]
+drop = true
+source = "Silicon read-back on an STM32H573 (MCU fitted on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_PUPDR"]
+fields = ["PUPD12", "PUPD13", "PUPD14", "PUPD15"]
+drop = true
+source = "Silicon read-back on an STM32H573 (MCU fitted on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_IDR"]
+fields = ["ID12", "ID13", "ID14", "ID15"]
+drop = true
+source = "Silicon read-back on an STM32H573 (MCU fitted on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_ODR"]
+fields = ["OD12", "OD13", "OD14", "OD15"]
+drop = true
+source = "Silicon read-back on an STM32H573 (MCU fitted on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_LCKR"]
+fields = ["LCK12", "LCK13", "LCK14", "LCK15"]
+drop = true
+source = "Silicon read-back on an STM32H573 (MCU fitted on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_BRR"]
+fields = ["BR12", "BR13", "BR14", "BR15"]
+drop = true
+source = "Silicon read-back on an STM32H573 (MCU fitted on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_HSLVR"]
+fields = ["HSLV12", "HSLV13", "HSLV14", "HSLV15"]
+drop = true
+source = "Silicon read-back on an STM32H573 (MCU fitted on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_SECCFGR"]
+fields = ["SEC12", "SEC13", "SEC14", "SEC15"]
+drop = true
+source = "Silicon read-back on an STM32H573 (MCU fitted on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_BSRR"]
+fields = ["BS12", "BS13", "BS14", "BS15", "BR12", "BR13", "BR14", "BR15"]
+drop = true
+source = "Silicon read-back on an STM32H573 (MCU fitted on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"

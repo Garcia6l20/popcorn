@@ -1,7 +1,7 @@
 """Patch file format, loader and application: peripheral drops, fields, cross rules, aliases,
-IP renames, IRQ add/drop, core overrides, peripheral sizes, added registers, added memory regions,
-region controllers, the device signature. popcorn's own TOML format, so these dataclasses are the
-format definition, not a mirror of any C++ or schema type."""
+IP renames, IRQ add/drop, GPIO alternate function drops, core overrides, peripheral sizes, added
+registers, added memory regions, region controllers, the device signature. popcorn's own TOML
+format, so these dataclasses are the format definition, not a mirror of any C++ or schema type."""
 
 import copy
 import fnmatch
@@ -15,6 +15,7 @@ from popcorn.stm32.description._cubemx import DbIp, DbPart
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import (
     Access,
+    AlternateDesc,
     CoreDesc,
     CrossEffect,
     CrossRule,
@@ -98,6 +99,20 @@ class PatchIrqs:
 
 
 @dataclass(slots=True, kw_only=True)
+class AlternateDrop:
+    peripheral: str
+    pin: int = field(metadata={"minimum": 0, "maximum": 15})
+    af: int = field(metadata={"minimum": 0, "maximum": 15})
+    signal: str
+    source: str = field(metadata={"min_length": 1})
+
+
+@dataclass(slots=True, kw_only=True)
+class PatchAlternates:
+    drop: list[AlternateDrop]
+
+
+@dataclass(slots=True, kw_only=True)
 class EachRange:
     n: list[int]
 
@@ -115,6 +130,7 @@ class FieldsRule:
     on_write: WriteEffect | None = None
     on_read: ReadEffect | None = None
     width: int | None = field(default=None, metadata={"minimum": 1, "maximum": 32})
+    drop: bool | None = None
     each: EachRange | None = None
 
 
@@ -174,6 +190,7 @@ class Patch:
     ip: PatchIp | None = None
     peripherals: PatchPeripherals | None = None
     irqs: PatchIrqs | None = None
+    alternates: PatchAlternates | None = None
     svd: PatchSvd | None = None
     fields: list[FieldsRule] | None = None
     cross: list[CrossRuleSpec] | None = None
@@ -200,9 +217,11 @@ class PatchReport:
     ip_renamed: int = 0
     aliased: int = 0
     fields_touched: int = 0
+    fields_dropped: int = 0
     cross_rules_added: int = 0
     irqs_dropped: int = 0
     irqs_added: int = 0
+    alternates_dropped: int = 0
     sizes_set: int = 0
     registers_added: int = 0
     resets_set: int = 0
@@ -478,6 +497,9 @@ def _apply_fields(
 ) -> None:
     targets = _selector_targets(rule.ip, rule.instances, peripherals, file=file, key=key)
     suffixes = _expand_each(rule.each, file=file, key=key)
+    if rule.drop:
+        _drop_fields(rule, targets, peripherals, suffixes, touched, report, file=file, key=key)
+        return
     for peripheral in targets:
         for register_template in rule.registers:
             for suffix in suffixes:
@@ -514,6 +536,53 @@ def _apply_fields(
                         touched.add(marker)
                         field_desc.on_read = rule.on_read
                         report.fields_touched += 1
+
+
+def _drop_fields(
+    rule: FieldsRule,
+    targets: list[PeripheralDesc],
+    peripherals: dict[str, PeripheralDesc],
+    suffixes: list[str],
+    touched: set[tuple[str, str, str, str]],
+    report: PatchReport,
+    *,
+    file: str,
+    key: str,
+) -> None:
+    if rule.width is not None or rule.on_write is not None or rule.on_read is not None:
+        raise DescriptionError(file, 0, f"{key}.drop", "a rule with no width, on_write or on_read")
+    if not rule.source:
+        raise DescriptionError(file, 0, f"{key}.source", "a non-empty source")
+    if rule.instances is None:
+        targets = [target for target in targets if target.alias_of is None]
+    for peripheral in targets:
+        if peripheral.alias_of is not None:
+            raise DescriptionError(
+                file,
+                0,
+                f"{key}.instances",
+                f"a peripheral that is not an alias, not {peripheral.name}",
+            )
+        for register_template in rule.registers:
+            for suffix in suffixes:
+                register_name = register_template.replace("{n}", suffix)
+                register = _find_register(
+                    peripheral, register_name, file=file, key=f"{key}.registers"
+                )
+                for field_name in rule.fields:
+                    marker = (peripheral.name, register.name, field_name, "drop")
+                    if marker in touched:
+                        raise DescriptionError(
+                            file, 0, f"{key}.fields", f"{field_name} dropped by no earlier rule"
+                        )
+                    touched.add(marker)
+                    _find_field(register, field_name, file=file, key=f"{key}.fields")
+                    for target in peripherals.values():
+                        if target is peripheral or target.alias_of == peripheral.name:
+                            for same in target.registers:
+                                if same.name == register.name:
+                                    same.fields = [f for f in same.fields if f.name != field_name]
+                    report.fields_dropped += 1
 
 
 def _resize_field(
@@ -601,6 +670,37 @@ def _apply_irqs(
         if add.number not in peripheral.irqs:
             peripheral.irqs = [*peripheral.irqs, add.number]
         report.irqs_added += 1
+
+
+def apply_alternate_drops(
+    patches: Sequence[LoadedPatch], peripherals: Sequence[PeripheralDesc]
+) -> int:
+    """Removes the GPIO alternate functions the `[alternates]` rules of @p patches drop from
+    @p peripherals, the ports read from the CubeMX GPIO modes file, and returns how many. A rule
+    names a port, a pin, an AF number and a signal. Raises DescriptionError when the port has no
+    such entry or the entry was dropped before. Validates every rule before removing any."""
+    by_name = {p.name: p for p in peripherals}
+    remaining = {
+        name: list(p.alternates) for name, p in by_name.items() if p.alternates is not None
+    }
+    for loaded in patches:
+        for j, rule in enumerate(loaded.patch.alternates.drop if loaded.patch.alternates else []):
+            entry = AlternateDesc(pin=rule.pin, af=rule.af, signal=rule.signal)
+            if entry not in remaining.get(rule.peripheral, []):
+                raise DescriptionError(
+                    str(loaded.path),
+                    0,
+                    f"alternates.drop[{j}]",
+                    f"an alternate function of {rule.peripheral} listed and not yet dropped",
+                )
+            remaining[rule.peripheral].remove(entry)
+    dropped = 0
+    for name, kept in remaining.items():
+        peripheral = by_name[name]
+        assert peripheral.alternates is not None
+        dropped += len(peripheral.alternates) - len(kept)
+        peripheral.alternates = kept
+    return dropped
 
 
 def _apply_drops(
@@ -757,7 +857,8 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
     core, memory regions and their controllers, the device signature. Drops come first, so a later
     rule naming a dropped peripheral fails as naming an unknown one. A peripheral size, an added
     register and a register reset land in the named peripheral and in each of its aliases, so
-    fields and cross rules may name the register.
+    fields and cross rules may name the register. A fields rule with `drop` removes its fields
+    from the named peripheral and its aliases, and a later rule naming them fails.
     Validates every rule before mutating @p target: an error leaves it exactly as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)

@@ -1,4 +1,5 @@
 #include "dma.hpp"
+#include "factories.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/log.hpp>
@@ -377,7 +378,11 @@ struct rig
   stm32::board                   board{};
   std::unique_ptr<stm32_fixture> f;
 
-  explicit rig(std::string_view entry, bool probe = false, popcorn::part_description desc = u575())
+  explicit rig(
+      std::string_view                  entry,
+      bool                              probe   = false,
+      popcorn::part_description         desc    = u575(),
+      std::optional<stm32::i2c_variant> variant = std::nullopt)
   {
     memory->resets    = resets;
     table->resets     = resets;
@@ -388,6 +393,10 @@ struct rig
     board.i2c["I2C1"] = {memory, table, picky, faulty};
     auto options      = popcorn::testing::stm32_options();
     options.models    = stm32::factories(board, desc);
+    if(variant)
+    {
+      options.models.insert_or_assign("I2C1", stm32::i2c_factory(board, *variant));
+    }
     if(probe)
     {
       options.models.insert_or_assign(
@@ -1265,7 +1274,7 @@ TEST_CASE("without AUTOCR, TC and TCR leave the I2C1 event DMA request low")
       std::erase_if(
           i2c1->registers, [](popcorn::register_desc const& reg) { return reg.name == "AUTOCR"; })
       == 1);
-  rig r{"idle", true, std::move(desc)};
+  rig r{"idle", true, std::move(desc), stm32::h5_i2c};
   bus b{*r.f};
   b.controller();
   b.command(0x38, 2, false, false);

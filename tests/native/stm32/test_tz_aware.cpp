@@ -238,7 +238,7 @@ TEST_CASE("RM0456 13.4.13, P1: GPIOx_SECCFGR is RAZ/WI under TZEN=0, every pin o
   CHECK(r.read("GPIOA", "SECCFGR", nonsecure_priv) == 0);
   r.write("GPIOA", "SECCFGR", 0, nonsecure_priv);
   CHECK(r.peek("GPIOA", "SECCFGR") == 0xffff);
-  CHECK(r.peek("GPIOI", "SECCFGR") == 0xffff);
+  CHECK(r.peek("GPIOI", "SECCFGR") == 0x00ff);
   r.write("GPIOA", "MODER", 0x1u << 8, nonsecure_unpriv);
   CHECK(r.read("GPIOA", "MODER", nonsecure_unpriv) == 0x1u << 8);
 }

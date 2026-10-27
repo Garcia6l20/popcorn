@@ -1,5 +1,5 @@
 format = 1
-source = "RM0481 Rev 5 and STM32H573 CubeMX db: SVD naming against CubeMX instances. IRQ adds: RM0481 Rev 5, 17.3 Table 152 STM32H562/563/573xx vector table lists PVD_AVD 1, RTC 2, RTC_S 3, FPU 103 and CEC 119, which STM32H573.svd lacks and the CMSIS IRQn_Type defines. PVD_AVD and FPU go to EXTI as the U5 SVD places PVD_PVM and FPU. The RTC lines go to RTC. HDMI-CEC is an unmodelled H5 block with no peripheral in the SVD, so CEC goes to EXTI too"
+source = "RM0481 Rev 5 and STM32H573 CubeMX db: SVD naming against CubeMX instances. IRQ adds: RM0481 Rev 5, 17.3 Table 152 STM32H562/563/573xx vector table lists PVD_AVD 1, RTC 2, RTC_S 3, FPU 103 and CEC 119, which STM32H573.svd lacks and the CMSIS IRQn_Type defines. PVD_AVD and FPU go to EXTI as the U5 SVD places PVD_PVM and FPU. The RTC lines go to RTC. HDMI-CEC is an unmodelled H5 block with no peripheral in the SVD, so CEC goes to EXTI too. IRQ rename: the SVD names IRQ 105 DCACHE, RM0481 Rev 5, 17.3 Table 152 names it DCACHE1 and the CMSIS IRQn_Type DCACHE1_IRQn, so it is dropped and added again under that name at the same number, which gives the same line name with and without the CMSIS header"
 
 [match]
 parts = ["STM32H5*"]
@@ -18,7 +18,9 @@ source = "RM0481 Rev 5, 2.3 memory map: secure peripheral alias at NS base + 0x1
 renames = { DCACHE1 = ["DCACHE"], LPUART1 = ["LPUART"], DAC1 = ["DAC"], OCTOSPI1 = ["OCTOSPI"], I3C1 = ["I3C"], GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPIOF", "GPIOG", "GPIOH", "GPIOI"], GTZC = ["GTZC1_TZSC", "GTZC1_TZIC"], GTZC_NS = ["GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3"] }
 
 [irqs]
+drop = ["DCACHE"]
 add = [
+  { number = 105, name = "DCACHE1", peripheral = "DCACHE" },
   { number = 1, name = "PVD_AVD", peripheral = "EXTI" },
   { number = 2, name = "RTC", peripheral = "RTC" },
   { number = 3, name = "RTC_S", peripheral = "RTC" },
@@ -180,6 +182,16 @@ target_reg = "FLASH_NSSR"
 effect = "clear"
 pairs = { CLR_EOP = "EOP", CLR_WRPERR = "WRPERR", CLR_PGSERR = "PGSERR", CLR_STRBERR = "STRBERR", CLR_INCERR = "INCERR", CLR_OBKERR = "OBKERR", CLR_OBKWERR = "OBKWERR", CLR_OPTCHANGEERR = "OPTCHANGEERR" }
 source = "RM0481 Rev 5, 7.11.9/7.11.13 FLASH nonsecure status register (FLASH_NSSR) / FLASH nonsecure clear control register (FLASH_NSCCR): a write of 1 to CLR_x clears the NSSR flag"
+
+[[registers]]
+peripheral = "GPIOI"
+name = "GPIOI_AFRH"
+offset = 0x024
+width = 32
+reset = 0
+acc = "read_write"
+fields = [{ name = "AFSEL8", lsb = 0, width = 4 }, { name = "AFSEL9", lsb = 4, width = 4 }, { name = "AFSEL10", lsb = 8, width = 4 }, { name = "AFSEL11", lsb = 12, width = 4 }]
+source = "Silicon read-back on an STM32H573 (on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_AFRH at 0x42022024 takes 0x0000D5A1 and returns it, 0xFFFFFFFF returns 0x0000FFFF, so AFSEL8 to AFSEL11 exist and bits 31:16 read 0. DS14121 Rev 5, Table 17 lists PI11 AF13 PSSI_D15. RM0481 Rev 5, 13.4.10 limits GPIOx_AFRH to x = A to H and the STM32H5 SVDs have no GPIOI_AFRH"
 
 [[resets]]
 peripheral = "RNG"

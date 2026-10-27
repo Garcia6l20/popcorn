@@ -8,6 +8,8 @@
 #include <popcorn/periph/stm32/rcc.hpp>
 #include <popcorn/periph/stm32/rng.hpp>
 
+#include "variants.hpp"
+
 #include <chrono>
 #include <optional>
 
@@ -43,8 +45,11 @@ namespace popcorn::periph::stm32
  */
 [[nodiscard]] auto flash_factory(flash_options options) -> model_factory;
 
-/** @brief Factory of the GPIO port model, RM0456 section 13. Returns no model for LPGPIO1. */
-[[nodiscard]] auto gpio_factory() -> model_factory;
+/**
+ * @brief Factory of the GPIO port model, RM0456 section 13. Returns no model for LPGPIO1.
+ * @param variant What differs between the ports of the family the row serves.
+ */
+[[nodiscard]] auto gpio_factory(gpio_variant variant) -> model_factory;
 
 /** @brief Factory of the EXTI model, RM0456 section 23. */
 [[nodiscard]] auto exti_factory() -> model_factory;
@@ -59,8 +64,9 @@ namespace popcorn::periph::stm32
  * @brief Factory of the USART, UART and LPUART model, RM0456 sections 66 and 67.
  * @param b Board whose `uarts` give each instance its far end, copied: the endpoints stay
  *        shared.
+ * @param variant What differs between the peripherals of the family the row serves.
  */
-[[nodiscard]] auto usart_factory(board const& b) -> model_factory;
+[[nodiscard]] auto usart_factory(board const& b, usart_variant variant) -> model_factory;
 
 /** @brief Factory of the TIM model, RM0456 sections 54 to 57. */
 [[nodiscard]] auto tim_factory() -> model_factory;
@@ -71,11 +77,16 @@ namespace popcorn::periph::stm32
 /**
  * @brief Factory of the RTC model, RM0456 section 63.
  * @param initial Calendar at power-on, the board's `rtc_initial`, copied.
+ * @param variant What differs between the RTC of the family the row serves.
  */
-[[nodiscard]] auto rtc_factory(std::optional<std::chrono::sys_seconds> initial) -> model_factory;
+[[nodiscard]] auto rtc_factory(std::optional<std::chrono::sys_seconds> initial, rtc_variant variant)
+    -> model_factory;
 
-/** @brief Factory of the TAMP backup register model, RM0456 section 64. */
-[[nodiscard]] auto tamp_factory() -> model_factory;
+/**
+ * @brief Factory of the TAMP backup register model, RM0456 section 64.
+ * @param variant What differs between the TAMP of the family the row serves.
+ */
+[[nodiscard]] auto tamp_factory(rtc_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the SPI model, RM0456 section 68.
@@ -86,14 +97,16 @@ namespace popcorn::periph::stm32
 /**
  * @brief Factory of the I2C model, RM0456 section 65.
  * @param b Board whose `i2c` lists each instance's targets, copied when a model is made.
+ * @param variant What differs between the peripherals of the family the row serves.
  */
-[[nodiscard]] auto i2c_factory(board const& b) -> model_factory;
+[[nodiscard]] auto i2c_factory(board const& b, i2c_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the SAI model, RM0456 section 69.
  * @param b Board whose `audio` wires each audio block, copied: the endpoints stay shared.
+ * @param variant What differs between the peripherals of the family the row serves.
  */
-[[nodiscard]] auto sai_factory(board const& b) -> model_factory;
+[[nodiscard]] auto sai_factory(board const& b, sai_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the MDF and ADF model, RM0456 sections 39 and 40, its layout read from the

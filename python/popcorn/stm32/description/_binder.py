@@ -167,6 +167,12 @@ def _check_bounds(value: object, *, file: str, key: str) -> None:
                     raise DescriptionError(file, 0, field_key, f"<= {maximum}")
                 if const is not None and attr != const:
                     raise DescriptionError(file, 0, field_key, f"== {const}")
+            if isinstance(attr, str):
+                min_length = f.metadata.get("min_length")
+                if min_length is not None and len(attr) < min_length:
+                    raise DescriptionError(
+                        file, 0, field_key, f"a string of >= {min_length} characters"
+                    )
             _check_bounds(attr, file=file, key=field_key)
     elif isinstance(value, list):
         for i, item in enumerate(cast(list[object], value)):

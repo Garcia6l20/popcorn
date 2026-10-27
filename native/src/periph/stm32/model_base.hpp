@@ -197,6 +197,54 @@ protected:
   }
 
   /**
+   * @brief Checks that the description agrees with the variant the model was built for.
+   * @param name Register name or alias as the description spells it.
+   * @param present Whether the variant has the register.
+   * @throws config_error naming the part, the register and the model when the description has
+   *         the register and the variant has none, or lacks it and the variant has it.
+   */
+  void expect_register(std::string_view name, bool present) const
+  {
+    if(has_register(name) != present)
+    {
+      throw config_error(
+          ctx_.part.part, 0, std::format("peripherals.{}.registers.{}", desc_.name, name),
+          present
+              ? std::format(
+                    "the {} variant of the {} model needs this register, the description lacks it",
+                    ctx_.part.part, model_name_)
+              : std::format(
+                    "the {} variant of the {} model has no such register, the description has one",
+                    ctx_.part.part, model_name_));
+    }
+  }
+
+  /**
+   * @brief Checks that a field of a register is present or absent as the variant says.
+   * @param reg_name Register name or alias as the description spells it.
+   * @param name Field name.
+   * @param present Whether the variant has the field.
+   * @throws config_error naming the part, the field and the model when the description
+   *         disagrees.
+   */
+  void expect_field(std::string_view reg_name, std::string_view name, bool present) const
+  {
+    auto const& fields = describe(reg_name).fields;
+    if(std::ranges::contains(fields, name, &field_desc::name) != present)
+    {
+      throw config_error(
+          ctx_.part.part, 0,
+          std::format("peripherals.{}.registers.{}.fields.{}", desc_.name, reg_name, name),
+          present ? std::format(
+                        "the {} variant of the {} model needs this field, the description lacks it",
+                        ctx_.part.part, model_name_)
+                  : std::format(
+                        "the {} variant of the {} model has no such field, the description has one",
+                        ctx_.part.part, model_name_));
+    }
+  }
+
+  /**
    * @brief Description of a register of the peripheral by name.
    * @param name Register name or alias as the description spells it.
    * @throws config_error as reg() does.
@@ -311,16 +359,6 @@ protected:
     throw config_error(
         ctx_.part.part, 0, std::format("peripherals.{}.irqs.{}", desc_.name, name),
         std::format("an IRQ the {} model raises", model_name_));
-  }
-
-  /**
-   * @brief Whether the part names an IRQ of that name that the peripheral raises, so irq()
-   *        would find it.
-   * @param name IRQ name as the description spells it.
-   */
-  [[nodiscard]] auto has_irq(std::string_view name) const -> bool
-  {
-    return find_irq(name) != nullptr;
   }
 
   /**

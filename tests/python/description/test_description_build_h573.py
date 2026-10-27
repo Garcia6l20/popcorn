@@ -14,6 +14,9 @@ from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import PartDescription, PeripheralDesc
 from popcorn.stm32.description._sources import Sources
 
+pytestmark = pytest.mark.timeout(30)
+
+
 NO_CUBEMX_PERIPHERAL = {
     "CORTEX_M33_NS",
     "CORTEX_M33_S",
@@ -69,7 +72,6 @@ NAMES_ONLY_IN_CMSIS = {
     95: ("GPDMA2_CH5_IRQn", "GPDMA2_Channel5_IRQn"),
     96: ("GPDMA2_CH6_IRQn", "GPDMA2_Channel6_IRQn"),
     97: ("GPDMA2_CH7_IRQn", "GPDMA2_Channel7_IRQn"),
-    105: ("DCACHE_IRQn", "DCACHE1_IRQn"),
     111: ("Cordic_IRQn", "CORDIC_IRQn"),
     113: ("DTS_WKUP_IRQn", "DTS_IRQn"),
 }
@@ -161,7 +163,15 @@ def test_interrupts_the_svd_lacks_are_added(h573_sources: Sources) -> None:
     assert {2, 3} <= set(peripherals["RTC"].irqs)
 
 
-@pytest.mark.timeout(30)
+def test_the_dcache_line_has_one_name_with_and_without_the_cmsis_header(
+    h573_sources: Sources,
+) -> None:
+    for sources in (h573_sources, replace(h573_sources, cmsis_header=None)):
+        description = build_description(sources)
+        assert _irq_names(description)[105] == "DCACHE1_IRQn"
+        assert _by_name(description)["DCACHE"].irqs == [105]
+
+
 def test_the_cmsis_header_renames_exactly_the_documented_interrupts(
     h573_sources: Sources,
 ) -> None:
@@ -303,11 +313,12 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
         ip_renamed=19,
         aliased=103,
         fields_touched=60,
+        fields_dropped=48,
         cross_rules_added=847,
-        irqs_dropped=0,
-        irqs_added=5,
+        irqs_dropped=1,
+        irqs_added=6,
         sizes_set=1,
-        registers_added=26,
+        registers_added=27,
         resets_set=28,
         core_fields_set=1,
         regions_added=2,
@@ -317,6 +328,7 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
     patch = next(path for path in h573_sources.patches if path.name == "stm32h5.toml")
     rules = tomllib.loads(patch.read_text(encoding="utf-8"))
     assert len(rules["irqs"]["add"]) == report.irqs_added
+    assert len(rules["irqs"]["drop"]) == report.irqs_dropped
     assert len(rules["registers"]) == report.registers_added
     assert len(rules["memory"]["add"]) == report.regions_added
     assert len(rules["peripherals"]["drop"]) == report.peripherals_dropped
@@ -338,3 +350,72 @@ def test_a_machine_builds_on_the_description_with_and_without_the_cmsis_header(
     for sources in (h573_sources, replace(h573_sources, cmsis_header=None)):
         description = popcorn.parse_description(dump_json(build_description(sources)), "h573")
         assert popcorn.Machine(description).mem.read(0x08FFF80C, 2) == (2048).to_bytes(2, "little")
+
+
+def test_an_alternates_rule_drops_the_entry_from_the_built_port(
+    h573_sources: Sources, tmp_path: Path
+) -> None:
+    extra = tmp_path / "drop.toml"
+    extra.write_text(
+        'format = 1\n[match]\nparts = ["STM32H5*"]\n[alternates]\n'
+        'drop = [{ peripheral = "GPIOI", pin = 11, af = 13, signal = "pssi_d15", '
+        'source = "probe" }]\n',
+        encoding="utf-8",
+    )
+    plain, _ = build_description_with_report(h573_sources)
+    dropped, report = build_description_with_report(
+        replace(h573_sources, patches=[*h573_sources.patches, extra])
+    )
+    assert report.alternates_dropped == 1
+
+    def port(description: PartDescription, name: str) -> list[tuple[int, int, str]]:
+        found = next(p for p in description.peripherals if p.name == name)
+        return [(a.pin, a.af, a.signal) for a in found.alternates or []]
+
+    assert (11, 13, "pssi_d15") in port(plain, "GPIOI")
+    assert port(dropped, "GPIOI") == [a for a in port(plain, "GPIOI") if a[0] != 11]
+    assert port(dropped, "GPIOA") == port(plain, "GPIOA")
+
+
+def test_gpioi_has_afrh_with_afsel8_to_afsel11_and_keeps_pi11_af13(
+    h573_sources: Sources,
+) -> None:
+    description, _ = build_description_with_report(h573_sources)
+    port = next(p for p in description.peripherals if p.name == "GPIOI")
+    afrh = next(r for r in port.registers if r.name == "AFRH")
+    assert afrh.offset == 0x24
+    assert sorted((f.name, f.lsb, f.width) for f in afrh.fields) == sorted(
+        [
+            ("AFSEL8", 0, 4),
+            ("AFSEL9", 4, 4),
+            ("AFSEL10", 8, 4),
+            ("AFSEL11", 12, 4),
+        ]
+    )
+    assert "GPIOI_AFRH" in (afrh.aliases or [])
+    assert any((a.pin, a.af, a.signal) == (11, 13, "pssi_d15") for a in port.alternates or [])
+
+
+def test_gpioi_carries_the_per_pin_fields_of_pins_0_to_11_only(h573_sources: Sources) -> None:
+    peripherals = _by_name(build_description(h573_sources))
+    prefixes = {
+        "MODER": ["MODE"],
+        "OTYPER": ["OT"],
+        "OSPEEDR": ["OSPEED"],
+        "PUPDR": ["PUPD"],
+        "IDR": ["ID"],
+        "ODR": ["OD"],
+        "BSRR": ["BS", "BR"],
+        "LCKR": ["LCK"],
+        "BRR": ["BR"],
+        "HSLVR": ["HSLV"],
+        "SECCFGR": ["SEC"],
+    }
+    for name in ("GPIOI", "SEC_GPIOI", "GPIOH"):
+        pins = 12 if name.endswith("GPIOI") else 16
+        registers = {r.name: r for r in peripherals[name].registers}
+        for register, starts in prefixes.items():
+            expected = {f"{start}{pin}" for start in starts for pin in range(pins)}
+            if register == "LCKR":
+                expected.add("LCKK")
+            assert {f.name for f in registers[register].fields} == expected, f"{name} {register}"

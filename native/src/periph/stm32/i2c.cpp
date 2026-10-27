@@ -140,7 +140,8 @@ class i2c final : public dispatch_model<i2c, i2c_state>, public i2c_bus, public 
 public:
   i2c(model_context&                           ctx,
       peripheral_desc const&                   desc,
-      std::vector<std::shared_ptr<i2c_target>> targets);
+      std::vector<std::shared_ptr<i2c_target>> targets,
+      i2c_variant const&                       variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -265,17 +266,18 @@ constexpr std::array<write_entry<i2c>, 11> i2c_writes{
 
 static_assert(i2c_writes.back().reg == "I2C_AUTOCR");
 
-auto i2c_table(peripheral_desc const& desc) -> std::span<write_entry<i2c> const>
+auto i2c_table(i2c_variant const& variant) -> std::span<write_entry<i2c> const>
 {
   auto const all = std::span{i2c_writes};
-  return find_register(desc, "I2C_AUTOCR") != nullptr ? all : all.first(all.size() - 1);
+  return variant.autocr ? all : all.first(all.size() - 1);
 }
 
 i2c::i2c(
     model_context&                           ctx,
     peripheral_desc const&                   desc,
-    std::vector<std::shared_ptr<i2c_target>> targets)
-    : dispatch_model{ctx, desc, "I2C", i2c_table(desc)}, regs_{ctx.regs},
+    std::vector<std::shared_ptr<i2c_target>> targets,
+    i2c_variant const&                       variant)
+    : dispatch_model{ctx, desc, "I2C", i2c_table(variant)}, regs_{ctx.regs},
       targets_{std::move(targets)}, command_{reg("CR2")}, status_{reg("ISR")}, clear_{reg("ICR")},
       transmit_{reg("TXDR")}, receive_{reg("RXDR")}, enable_{field("CR1", "PE")},
       start_{field("CR2", "START")}, stop_{field("CR2", "STOP")}, count_{field("CR2", "NBYTES")},
@@ -293,15 +295,14 @@ i2c::i2c(
       error_line_{irq(desc.name + "_ER_IRQn")}, tx_dma_enable_{field("CR1", "TXDMAEN")},
       rx_dma_enable_{field("CR1", "RXDMAEN")},
       complete_dma_enable_{
-          has_register("I2C_AUTOCR") ? std::optional{field("I2C_AUTOCR", "TCDMAEN")}
-                                     : std::nullopt},
+          variant.autocr ? std::optional{field("I2C_AUTOCR", "TCDMAEN")} : std::nullopt},
       reload_dma_enable_{
-          has_register("I2C_AUTOCR") ? std::optional{field("I2C_AUTOCR", "TCRDMAEN")}
-                                     : std::nullopt},
+          variant.autocr ? std::optional{field("I2C_AUTOCR", "TCRDMAEN")} : std::nullopt},
       tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
       rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"},
       event_dma_{ctx.peers, lower(desc.name) + "_evc_dma"}
 {
+  expect_register("I2C_AUTOCR", variant.autocr);
   for(auto const name : {"START", "STOP", "NACK", "PECBYTE"})
   {
     command_set_only_ |= field("CR2", name).mask();
@@ -337,7 +338,7 @@ i2c::i2c(
   {
     errors_.push_back(field("ISR", name));
   }
-  for(auto const& [reg_name, name] : std::array<std::pair<std::string_view, std::string_view>, 10>{
+  for(auto const& [reg_name, name] : std::array<std::pair<std::string_view, std::string_view>, 9>{
           {
            {"CR1", "SBC"},
            {"CR1", "NOSTRETCH"},
@@ -348,14 +349,14 @@ i2c::i2c(
            {"CR1", "PECEN"},
            {"OAR1", "OA1EN"},
            {"OAR2", "OA2EN"},
-           {"I2C_AUTOCR", "TRIGEN"},
            }
   })
   {
-    if(has_register(reg_name))
-    {
-      unsupported_.push_back(field(reg_name, name));
-    }
+    unsupported_.push_back(field(reg_name, name));
+  }
+  if(variant.autocr)
+  {
+    unsupported_.push_back(field("I2C_AUTOCR", "TRIGEN"));
   }
 }
 
@@ -1050,14 +1051,15 @@ void i2c::load(std::span<std::byte const> in)
 }
 }
 
-auto i2c_factory(board const& b) -> model_factory
+auto i2c_factory(board const& b, i2c_variant variant) -> model_factory
 {
-  return
-      [targets = b.i2c](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-        auto const found = targets.find(desc.name);
-        return std::make_shared<i2c>(
-            ctx, desc,
-            found != targets.end() ? found->second : std::vector<std::shared_ptr<i2c_target>>{});
-      };
+  return [targets = b.i2c,
+          variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    auto const found = targets.find(desc.name);
+    return std::make_shared<i2c>(
+        ctx, desc,
+        found != targets.end() ? found->second : std::vector<std::shared_ptr<i2c_target>>{},
+        variant);
+  };
 }
 }

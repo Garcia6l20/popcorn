@@ -116,7 +116,7 @@ def test_find_sources_real_u575(st_svd_u575: Path, st_cubemx_db: Path) -> None:
     assert sources.rzone_facts is None
     assert sources.cmsis_header is not None
     assert sources.cmsis_header.name == "stm32u575xx.h"
-    assert len(sources.patches) == 2
+    assert len(sources.patches) == 3
 
 
 def test_find_sources_without_a_cubemx_db_is_a_missing_input(
