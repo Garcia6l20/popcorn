@@ -106,6 +106,16 @@ Differs from RM0456:
 - An unprivileged fetch of a privileged page is a BusFault. RM0456 Table 73 gives zeros.
 - A Secure bank erase over a bank with mixed pages is refused whole, by Table 70, not by 3.5.5.
 
+Not modelled on the STM32H5:
+
+- OBK key storage, the high-cycle data area, OTP and read-only area programming, the HDPL
+  levels and FLASH_HDPEXTR. Their registers are storage.
+- FLASH_ACR.WRHIGHFREQ is storage, only LATENCY is checked against RM0481 Table 48.
+
+Differs from RM0481:
+
+- A program over a word that is not erased writes the new data as given.
+
 ## GPDMA and LPDMA
 
 Source: [gpdma.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/gpdma.cpp)

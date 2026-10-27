@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from popcorn_build.stm32_firmware import add_ll_firmware
+from popcorn_build.stm32_firmware import STM32H573, add_ll_firmware
 
 here = Path(__file__).resolve().parent
 
@@ -20,6 +20,22 @@ add_ll_firmware(
         "launch_options",
         "after_launch",
     ],
+)
+
+add_ll_firmware(
+    "flash_ll",
+    [here / "flash_ll_h5.c"],
+    entries=[
+        "words",
+        "copy_words",
+        "store_half",
+        "store_byte",
+        "wait_idle",
+        "spin",
+        "boot_write",
+        "read_word",
+    ],
+    chipset=STM32H573,
 )
 
 add_ll_firmware(

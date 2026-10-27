@@ -532,7 +532,7 @@ struct flash_rig
 
   void tear(address line, icount slice = icount{100'000'000}) const
   {
-    constexpr periph::stm32::flash_options timing{};
+    constexpr auto timing = periph::stm32::u5_flash_timing;
     control(pg);
     store_words_sliced(line, {1, 2, 3, 4}, slice);
     run_into(timing.quad_word_program, timing.quad_word_program / 2, slice);
@@ -1475,9 +1475,9 @@ TEST_CASE("under strict_peripherals each latency violation raises model_error")
 
 TEST_CASE("a power cut during a BWR burst programs the quad-words its elapsed time reached")
 {
-  constexpr periph::stm32::flash_options timing{};
-  flash_rig                              rig;
-  auto const                             data = burst_data(0x300);
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  flash_rig      rig;
+  auto const     data = burst_data(0x300);
   rig.control(pg | bwr);
   SUBCASE("cut at 3.5 quad-word times tears quad-word 3")
   {
@@ -1529,7 +1529,7 @@ TEST_CASE("a power cut during a BWR burst programs the quad-words its elapsed ti
 
 TEST_CASE("a power cut at half a quad-word program tears it")
 {
-  constexpr periph::stm32::flash_options timing{};
+  constexpr auto timing = periph::stm32::u5_flash_timing;
   for(bool const after_reset : {false, true})
   {
     CAPTURE(after_reset);
@@ -1553,9 +1553,9 @@ TEST_CASE("a power cut at half a quad-word program tears it")
 
 TEST_CASE("a power cut at half a page erase erases its first half and tears the boundary")
 {
-  constexpr periph::stm32::flash_options timing{};
-  flash_rig                              rig;
-  auto const line = [](std::uint32_t index) { return last_page + 16 * index; };
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  flash_rig      rig;
+  auto const     line = [](std::uint32_t index) { return last_page + 16 * index; };
   SUBCASE("a programmed boundary is torn")
   {
     for(std::uint32_t const index : {0u, 255u, 256u, 257u, 511u})
@@ -1590,10 +1590,10 @@ TEST_CASE("a power cut at half a page erase erases its first half and tears the 
 
 TEST_CASE("a power cut at a quarter of a bank 2 erase erases its first quarter")
 {
-  constexpr periph::stm32::flash_options timing{};
-  constexpr address                      boundary = bank2 + 0x2'0000;
-  flash_rig                              rig;
-  auto const                             code = rig.words(0x0800'0000, 4);
+  constexpr auto    timing   = periph::stm32::u5_flash_timing;
+  constexpr address boundary = bank2 + 0x2'0000;
+  flash_rig         rig;
+  auto const        code = rig.words(0x0800'0000, 4);
   rig.program(bank2, {1, 2, 3, 4});
   rig.program(boundary - 16, {5, 6, 7, 8});
   rig.program(boundary, {9, 10, 11, 12});
@@ -1611,9 +1611,9 @@ TEST_CASE("a power cut at a quarter of a bank 2 erase erases its first quarter")
 
 TEST_CASE("torn quad-words survive every reset and a restore into a fresh machine")
 {
-  constexpr periph::stm32::flash_options timing{};
-  flash_rig                              rig;
-  auto const                             before = rig.f.target->snapshot();
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  flash_rig      rig;
+  auto const     before = rig.f.target->snapshot();
   rig.control(pg);
   rig.store_words(last_page, {1, 2, 3, 4});
   rig.cut_after(timing.quad_word_program, timing.quad_word_program / 2);
@@ -1636,8 +1636,8 @@ TEST_CASE("torn quad-words survive every reset and a restore into a fresh machin
 
 TEST_CASE("a program into a torn quad-word sets PROGERR until an erase of its page")
 {
-  constexpr periph::stm32::flash_options timing{};
-  flash_rig                              rig;
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  flash_rig      rig;
   rig.control(pg);
   rig.store_words(last_page, {1, 2, 3, 4});
   rig.cut_after(timing.quad_word_program, timing.quad_word_program / 2);
@@ -1664,9 +1664,9 @@ TEST_CASE("a program into a torn quad-word sets PROGERR until an erase of its pa
 
 TEST_CASE("a cut reached in one slice or in many small slices leaves the same torn state")
 {
-  constexpr periph::stm32::flash_options timing{};
-  auto const                             data = burst_data(0x500);
-  auto const                             cut  = [&](icount slice) {
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  auto const     data   = burst_data(0x500);
+  auto const     cut    = [&](icount slice) {
     auto rig = std::make_unique<flash_rig>();
     rig->control(pg | bwr);
     rig->store_words_sliced(last_page, data, slice);
@@ -1872,8 +1872,8 @@ TEST_CASE("a DMA load of a torn quad-word reports, a host or debugger read does 
 
 TEST_CASE("an erase of a torn quad-word's page drops its watch and its reports")
 {
-  constexpr periph::stm32::flash_options timing{};
-  flash_rig                              rig;
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  flash_rig      rig;
   rig.tear(torn_line);
   CHECK(rig.f.target->controller_watches() == 1);
   rig.tear(torn_line + 16);

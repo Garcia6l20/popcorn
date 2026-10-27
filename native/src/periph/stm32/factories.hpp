@@ -58,6 +58,12 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto flash_factory(flash_options options) -> model_factory;
 
 /**
+ * @brief Factory of the STM32H5 FLASH model, RM0481 section 7.
+ * @param options Board configuration, copied into every model made.
+ */
+[[nodiscard]] auto flash_h5_factory(flash_options options) -> model_factory;
+
+/**
  * @brief Factory of the GPIO port model, RM0456 section 13. Returns no model for LPGPIO1.
  * @param variant What differs between the ports of the family the row serves.
  */

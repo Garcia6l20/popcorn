@@ -43,7 +43,8 @@ firmwares = {
     )
 }
 h573_firmwares = {
-    name: firmware("periph", name) for name in ("h573_boot_ll", "h573_rcc_ll", "h573_pwr_ll")
+    name: firmware("periph", name)
+    for name in ("h573_boot_ll", "h573_rcc_ll", "h573_pwr_ll", "h573_flash_ll")
 }
 h573_env = {
     "POPCORN_H573_DESC": str(h573),
@@ -162,6 +163,18 @@ power_h573.private.include_dirs.append(private_dir)
 for _, target in h573_firmwares.values():
     if target is not None:
         power_h573.depends(target)
+
+flash_h573 = add_doctest(
+    "stm32-flash-h573",
+    [here / "test_flash_h573.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+flash_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        flash_h573.depends(target)
 
 class_a_h573 = add_doctest(
     "stm32-class-a-h573",
