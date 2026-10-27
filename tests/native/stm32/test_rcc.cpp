@@ -540,6 +540,33 @@ TEST_CASE("a snapshot taken while PLL1 locks restores to the same run, in place 
   CHECK(other.log() == expected);
 }
 
+TEST_CASE("the RCC model state at the 160 MHz point saves the bytes captured before the template")
+{
+  constexpr auto expected = std::to_array<unsigned char>(
+      {0xcd, 0x00, 0x00, 0x00, 0x04, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+       0x00, 0x8b, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x12, 0x31, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x00,
+       0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x33, 0x00, 0x01, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x12, 0x34, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x12, 0x35, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x36, 0x00, 0x01,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x37, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x12, 0x38, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x39, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x30, 0x00, 0x02,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x31, 0x00, 0x02, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x70, 0x65, 0x6e, 0x64, 0x69, 0x6e, 0x67, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x6c, 0x73, 0x69, 0x5f, 0x66, 0x6f, 0x72,
+       0x63, 0x65, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x68, 0x73, 0x69, 0x31, 0x36, 0x5f,
+       0x68, 0x65, 0x6c, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+  stm32_fixture f{u575(), "rcc_ll", with_listener()};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  REQUIRE(probe(f).hz("sysclk") == 160 * mhz);
+  std::vector<std::byte> bytes;
+  f.target->model("RCC")->save(bytes);
+  CHECK(std::ranges::equal(bytes, expected, {}, [](std::byte b) {
+    return std::to_integer<unsigned char>(b);
+  }));
+}
+
 TEST_CASE("timer domains run at twice their APB clock when the APB prescaler divides")
 {
   auto  f      = idle_fixture();
@@ -553,6 +580,69 @@ TEST_CASE("timer domains run at twice their APB clock when the APB prescaler div
   write(f, "RCC_CFGR2", (peek(f, "RCC_CFGR2") & ~(7u << 4)) | (5u << 4));
   CHECK(clocks.hz("pclk1") == 1 * mhz);
   CHECK(clocks.hz("tim2") == 2 * mhz);
+}
+
+TEST_CASE("PLL1 P, Q and R each divide the VCO by their own divider and follow their own enable")
+{
+  auto  f      = idle_fixture();
+  auto& clocks = probe(f);
+  REQUIRE(clocks.hz("sysclk") == 4 * mhz);
+  write(
+      f, "RCC_PLL1CFGR",
+      bit_of("RCC_PLL1CFGR", "PLL1SRC")
+          | bit_of("RCC_PLL1CFGR", "PLL1PEN")
+          | bit_of("RCC_PLL1CFGR", "PLL1QEN")
+          | bit_of("RCC_PLL1CFGR", "PLL1REN"));
+  write(
+      f, "RCC_PLL1DIVR",
+      7u * bit_of("RCC_PLL1DIVR", "PLL1N")
+          | 1u * bit_of("RCC_PLL1DIVR", "PLL1P")
+          | 3u * bit_of("RCC_PLL1DIVR", "PLL1Q")
+          | 7u * bit_of("RCC_PLL1DIVR", "PLL1R"));
+  write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "PLL1ON"));
+  idle_until(f, std::chrono::microseconds{150});
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  CHECK(clocks.hz("pll1_p") == 16 * mhz);
+  CHECK(clocks.hz("pll1_q") == 8 * mhz);
+  CHECK(clocks.hz("pll1_r") == 4 * mhz);
+  write(f, "RCC_PLL1CFGR", peek(f, "RCC_PLL1CFGR") & ~bit_of("RCC_PLL1CFGR", "PLL1PEN"));
+  CHECK(clocks.hz("pll1_p") == 0);
+  CHECK(clocks.hz("pll1_q") == 8 * mhz);
+  CHECK(clocks.hz("pll1_r") == 4 * mhz);
+}
+
+TEST_CASE("USART1SEL picks the USART1 kernel clock between pclk2 and sysclk")
+{
+  auto  f      = idle_fixture();
+  auto& clocks = probe(f);
+  write(f, "RCC_APB2ENR", bit_of("RCC_APB2ENR", "USART1EN"));
+  write(f, "RCC_CFGR2", peek(f, "RCC_CFGR2") | 4u * bit_of("RCC_CFGR2", "PPRE2"));
+  REQUIRE(clocks.hz("sysclk") == 4 * mhz);
+  REQUIRE(clocks.hz("pclk2") == 2 * mhz);
+  CHECK(clocks.hz("usart1") == 2 * mhz);
+  write(f, "RCC_CCIPR1", 1u * bit_of("RCC_CCIPR1", "USART1SEL"));
+  CHECK(clocks.hz("usart1") == 4 * mhz);
+}
+
+TEST_CASE("a U575 RCC description without PPRE2 or PPRE3 is a config_error")
+{
+  for(auto const name : {"PPRE2", "PPRE3"})
+  {
+    CAPTURE(name);
+    auto desc = u575();
+    auto rcc  = std::ranges::find(
+        desc.peripherals, std::string_view{"RCC"}, &popcorn::peripheral_desc::name);
+    REQUIRE(rcc != desc.peripherals.end());
+    auto removed = std::size_t{};
+    for(auto& reg : rcc->registers)
+    {
+      removed += std::erase_if(
+          reg.fields, [&](popcorn::field_desc const& bits) { return bits.name == name; });
+    }
+    REQUIRE(removed > 0);
+    CHECK_THROWS_AS(
+        stm32_fixture(std::move(desc), "rcc_ll", with_listener()), popcorn::config_error);
+  }
 }
 
 TEST_CASE("the oscillator driving the system clock cannot be switched off")
