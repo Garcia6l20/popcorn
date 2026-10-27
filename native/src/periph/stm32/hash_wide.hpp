@@ -112,4 +112,100 @@ constexpr void
     h[i] += v[i];
   }
 }
+
+namespace keccak
+{
+inline constexpr std::size_t lanes  = 25;
+inline constexpr std::size_t rounds = 24;
+
+using state = std::array<std::uint64_t, lanes>;
+
+/** @brief Round constants of Keccak-f[1600], the LFSR of FIPS 202 3.2.5. */
+constexpr auto round_constants() noexcept -> std::array<std::uint64_t, rounds>
+{
+  std::array<std::uint64_t, rounds> out{};
+  std::uint8_t                      lfsr = 1;
+  auto const                        step = [&] {
+    auto const bit = lfsr & 1u;
+    lfsr           = static_cast<std::uint8_t>(lfsr & 0x80 ? (lfsr << 1) ^ 0x71 : lfsr << 1);
+    return bit;
+  };
+  for(auto& constant : out)
+  {
+    for(unsigned j = 0; j < 7; ++j)
+    {
+      if(step() != 0)
+      {
+        constant |= std::uint64_t{1} << ((1u << j) - 1);
+      }
+    }
+  }
+  return out;
+}
+
+/** @brief Rotation offsets of rho indexed by x + 5y, FIPS 202 3.2.2. */
+constexpr auto rotations() noexcept -> std::array<unsigned, lanes>
+{
+  std::array<unsigned, lanes> out{};
+  std::size_t                 x = 1;
+  std::size_t                 y = 0;
+  for(unsigned t = 0; t < 24; ++t)
+  {
+    out[x + 5 * y]  = ((t + 1) * (t + 2) / 2) % 64;
+    auto const next = (2 * x + 3 * y) % 5;
+    x               = y;
+    y               = next;
+  }
+  return out;
+}
+
+inline constexpr auto constants = round_constants();
+inline constexpr auto offsets   = rotations();
+
+/**
+ * @brief Applies the Keccak-f[1600] permutation, FIPS 202 3.3, lane x + 5y holding A[x][y].
+ * @param a State of 25 lanes.
+ */
+constexpr void permute(state& a) noexcept
+{
+  for(std::size_t round = 0; round < rounds; ++round)
+  {
+    std::array<std::uint64_t, 5> c{};
+    for(std::size_t x = 0; x < 5; ++x)
+    {
+      c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20];
+    }
+    for(std::size_t x = 0; x < 5; ++x)
+    {
+      auto const d = c[(x + 4) % 5] ^ std::rotl(c[(x + 1) % 5], 1);
+      for(std::size_t y = 0; y < 5; ++y)
+      {
+        a[x + 5 * y] ^= d;
+      }
+    }
+    state b{};
+    for(std::size_t x = 0; x < 5; ++x)
+    {
+      for(std::size_t y = 0; y < 5; ++y)
+      {
+        b[y + 5 * ((2 * x + 3 * y) % 5)] =
+            std::rotl(a[x + 5 * y], static_cast<int>(offsets[x + 5 * y]));
+      }
+    }
+    for(std::size_t y = 0; y < 5; ++y)
+    {
+      for(std::size_t x = 0; x < 5; ++x)
+      {
+        a[x + 5 * y] = b[x + 5 * y] ^ (~b[(x + 1) % 5 + 5 * y] & b[(x + 2) % 5 + 5 * y]);
+      }
+    }
+    a[0] ^= constants[round];
+  }
+}
+
+static_assert(constants[0] == 0x0000'0000'0000'0001);
+static_assert(constants[1] == 0x0000'0000'0000'8082);
+static_assert(constants[23] == 0x8000'0000'8000'8008);
+static_assert(offsets[1] == 1 and offsets[5] == 36 and offsets[24] == 14);
+}
 }

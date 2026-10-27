@@ -35,6 +35,7 @@ constexpr std::size_t   csr_blocks    = 2;
 constexpr std::size_t   csr_chain     = 4;
 constexpr std::size_t   csr_pending   = 12;
 constexpr std::size_t   csr_wide_pend = 20;
+constexpr std::size_t   csr_last      = 54;
 
 constexpr std::uint8_t phase_inner_key = 0;
 constexpr std::uint8_t phase_message   = 1;
@@ -57,6 +58,7 @@ enum class function : std::uint8_t
   md5,
   sha256,
   sha512,
+  keccak,
 };
 
 /**
@@ -69,7 +71,10 @@ struct algorithm
   std::uint8_t  digest_words;
   std::uint8_t  init;
   std::uint8_t  csr_inner;
+  std::uint8_t  suffix;
   std::uint16_t cycles;
+  bool          hmac;
+  bool          extendable;
   bool          reserved;
 };
 
@@ -122,21 +127,27 @@ constexpr std::array<std::uint32_t, 64> md5_k{
 
 constexpr std::array<int, 16> md5_shifts{7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21};
 
-constexpr algorithm sha1_code{function::sha1, 16, 5, 0, 38, 82, false};
-constexpr algorithm md5_code{function::md5, 16, 4, 1, 38, 66, false};
-constexpr algorithm sha224_code{function::sha256, 16, 7, 2, 38, 66, false};
-constexpr algorithm sha256_code{function::sha256, 16, 8, 3, 38, 66, false};
-constexpr algorithm sha384_code{function::sha512, 32, 12, 0, 52, 98, false};
-constexpr algorithm sha512_224_code{function::sha512, 32, 7, 2, 52, 98, false};
-constexpr algorithm sha512_256_code{function::sha512, 32, 8, 3, 52, 98, false};
-constexpr algorithm sha512_code{function::sha512, 32, 16, 1, 52, 98, false};
-constexpr algorithm reserved_code{function::sha256, 16, 8, 3, 38, 66, true};
+constexpr algorithm sha1_code{function::sha1, 16, 5, 0, 38, 0, 82, true, false, false};
+constexpr algorithm md5_code{function::md5, 16, 4, 1, 38, 0, 66, true, false, false};
+constexpr algorithm sha224_code{function::sha256, 16, 7, 2, 38, 0, 66, true, false, false};
+constexpr algorithm sha256_code{function::sha256, 16, 8, 3, 38, 0, 66, true, false, false};
+constexpr algorithm sha384_code{function::sha512, 32, 12, 0, 52, 0, 98, true, false, false};
+constexpr algorithm sha512_224_code{function::sha512, 32, 7, 2, 52, 0, 98, true, false, false};
+constexpr algorithm sha512_256_code{function::sha512, 32, 8, 3, 52, 0, 98, true, false, false};
+constexpr algorithm sha512_code{function::sha512, 32, 16, 1, 52, 0, 98, true, false, false};
+constexpr algorithm sha3_224_code{function::keccak, 36, 7, 0, 55, 0x06, 60, true, false, false};
+constexpr algorithm sha3_256_code{function::keccak, 34, 8, 0, 55, 0x06, 58, true, false, false};
+constexpr algorithm sha3_384_code{function::keccak, 26, 12, 0, 72, 0x06, 50, true, false, false};
+constexpr algorithm sha3_512_code{function::keccak, 18, 16, 0, 72, 0x06, 42, true, false, false};
+constexpr algorithm shake128_code{function::keccak, 42, 42, 0, 0, 0x1F, 66, false, true, false};
+constexpr algorithm shake256_code{function::keccak, 34, 34, 0, 0, 0x1F, 58, false, true, false};
+constexpr algorithm reserved_code{function::sha256, 16, 8, 3, 38, 0, 66, true, false, true};
 
 constexpr std::array<algorithm, 4> u5_codes{sha1_code, md5_code, sha224_code, sha256_code};
 
 constexpr std::array<algorithm, 16> h5_codes{
-    sha1_code,     reserved_code,   sha224_code,     sha256_code,   reserved_code, reserved_code,
-    reserved_code, reserved_code,   reserved_code,   reserved_code, reserved_code, reserved_code,
+    sha1_code,     reserved_code,   sha224_code,     sha256_code,   sha3_224_code, sha3_256_code,
+    sha3_384_code, sha3_512_code,   shake128_code,   shake256_code, reserved_code, reserved_code,
     sha384_code,   sha512_224_code, sha512_256_code, sha512_code,
 };
 
@@ -284,6 +295,30 @@ constexpr auto inner_width(algorithm const& a) noexcept -> std::size_t
   return a.digest_words > 8 ? inner_words : 8;
 }
 
+constexpr auto state_end(algorithm const& a) noexcept -> std::size_t
+{
+  switch(a.kind)
+  {
+    case function::sha512:
+      return csr_wide_pend + 32;
+    case function::keccak:
+      return csr_last + 1;
+    default:
+      return csr_pending + block_words;
+  }
+}
+
+constexpr auto inner_clear(hash_family const& family) noexcept -> bool
+{
+  return std::ranges::all_of(family.algorithms, [&](algorithm const& a) {
+    return not a.hmac
+        or (a.csr_inner >= state_end(a) and a.csr_inner + inner_width(a) <= family.csr_count);
+  });
+}
+
+static_assert(inner_clear(u5_hash));
+static_assert(inner_clear(h5_hash));
+
 /**
  * @brief The DIN word as message bits in big-endian order, RM0456 Figure 502.
  * @param value Word written to DIN.
@@ -318,25 +353,27 @@ static_assert(swapped(0x0000'0001, 3) == 0x8000'0000);
 
 struct hash_state
 {
-  std::uint8_t                           algo{};
-  chain                                  h{};
-  std::array<std::uint64_t, 8>           lanes{};
-  std::uint64_t                          blocks{};
-  words                                  pending{};
-  std::uint8_t                           count{};
-  words                                  digest{};
-  std::uint8_t                           digest_size{};
-  std::uint64_t                          busy_end{};
-  std::uint64_t                          queued{};
-  std::uint8_t                           busy{};
-  std::uint8_t                           final_pending{};
-  std::uint8_t                           digested{};
-  std::uint8_t                           hmac{};
-  std::uint8_t                           long_key{};
-  std::uint8_t                           phase{};
-  std::array<std::uint32_t, inner_words> inner{};
-  std::uint8_t                           refused{};
-  std::uint8_t                           suspend{};
+  std::uint8_t                             algo{};
+  chain                                    h{};
+  std::array<std::uint64_t, keccak::lanes> lanes{};
+  std::uint64_t                            blocks{};
+  words                                    pending{};
+  std::uint8_t                             count{};
+  std::uint32_t                            last{};
+  words                                    digest{};
+  std::uint8_t                             digest_size{};
+  std::uint64_t                            busy_end{};
+  std::uint64_t                            queued{};
+  std::uint8_t                             busy{};
+  std::uint8_t                             final_pending{};
+  std::uint8_t                             digested{};
+  std::uint8_t                             squeezing{};
+  std::uint8_t                             hmac{};
+  std::uint8_t                             long_key{};
+  std::uint8_t                             phase{};
+  std::array<std::uint32_t, inner_words>   inner{};
+  std::uint8_t                             refused{};
+  std::uint8_t                             suspend{};
 
   friend auto operator==(hash_state const&, hash_state const&) -> bool = default;
 };
@@ -344,8 +381,8 @@ struct hash_state
 /**
  * @brief Hash processor of the STM32U5, RM0456 section 51: SHA-1, MD5, SHA-224 and SHA-256, and
  *        HMAC over them, on words written to DIN by the CPU or by DMA. The STM32H5 processor,
- *        RM0481 section 40, adds SHA2-384, SHA2-512, SHA2-512/224 and SHA2-512/256 and drops
- *        MD5, see the H5 paragraph below.
+ *        RM0481 section 40, adds SHA2-384, SHA2-512, SHA2-512/224, SHA2-512/256, SHA3-224 to
+ *        SHA3-512, SHAKE128 and SHAKE256 and drops MD5, see the H5 paragraph below.
  *
  *        Each DIN word is swapped by the DATATYPE in CR at the time of the write into message
  *        bits in big-endian order. A write that finds 16 words pending compresses them first, so
@@ -403,33 +440,55 @@ struct hash_state
  *
  *        Context swap, RM0456 51.4.8 and 51.6.7: CSR0-53 hold an emulator-defined serialisation of
  *        the state, not silicon's layout, and read 0 while DINIS is 0. CSR0 reads 0x48530001, a tag
- *        and a version, out of reset too, where RM0456 gives 0x00000002. CSR1 holds ALGO in bits
- *        0-1, MODE in bit 2, LKEY in bit 3, the HMAC phase in bits 4-5 and the pending word count
- *        in bits 8-12. CSR2 and CSR3 hold the count of compressed blocks, low word first, CSR4-11
- *        the chaining value, CSR12-27 the pending block, CSR38-45 the inner HMAC digest, the others
- *        read 0. A hash needs CSR0-37 and an HMAC CSR0-53, as RM0456 says. Each CSR write loads its
- *        word into the state at once, NBWP, NBWE and DINNE follow CSR1. Restoring IMR, STR, CR,
- *        then INIT, then the CSRs resumes the message where it was saved. NBLW is not part of the
- *        context, STR holds it. Reads while BUSY show the state after the queued work. A CSR1 write
- *        while BUSY without INIT first is outside RM0456's sequence: it replaces the count under
- *        the pending BUSY end, which then sets DINIS and NBWE from the new count.
+ *        and a version, out of reset too, where RM0456 gives 0x00000002. CSR1 holds ALGO bits 1:0
+ *        in bits 1:0 and, on the H5, ALGO bits 3:2 in bits 15:14, MODE in bit 2, LKEY in bit 3, the
+ *        HMAC phase in bits 5:4 and the pending word count in bits 13:8. CSR2 and CSR3 hold the
+ *        count of compressed blocks, low word first, CSR4-11 the chaining value, CSR12-27 the
+ *        pending block, CSR38-45 the inner HMAC digest, the others read 0. A hash needs CSR0-37 and
+ *        an HMAC CSR0-53, as RM0456 says. Each CSR write loads its word into the state at once,
+ *        NBWP, NBWE and DINNE follow CSR1. Restoring IMR, STR, CR, then INIT, then the CSRs resumes
+ *        the message where it was saved. NBLW is not part of the context, STR holds it. Reads while
+ *        BUSY show the state after the queued work. A CSR1 write while BUSY without INIT first is
+ *        outside RM0456's sequence: it replaces the count under the pending BUSY end, which then
+ *        sets DINIS and NBWE from the new count.
  *
  *        STM32H5, RM0481 40.4: ALGO is four bits, selecting the algorithm of the family's code
- *        table. The block is 64 bytes for SHA-1, SHA2-224 and SHA2-256, 128 bytes for the SHA-512
- *        family with a 128-bit length field. NBWE reads the block size in words plus 1 after
- *        INIT, six bits wide. The digest fills HR0 to HR15 at most, HR16 to HR41 read 0. A block
- *        takes 98 cycles for the SHA-512 family. HMAC takes the block size as its key size.
- *        Context swap CSRs hold the SHA-512 chaining value at CSR4-19, the pending block at
+ *        table. The SHA-2 block is 64 bytes for SHA-1, SHA2-224 and SHA2-256, 128 bytes for the
+ *        SHA-512 family with a 128-bit length field. The SHA-3 block is the sponge rate, Table
+ *        399: 144, 136, 104 and 72 bytes, SHAKE128 168 and SHAKE256 136. NBWE reads the block
+ *        size in words plus 1 after INIT, six bits wide. A DIN word is XORed into the Keccak
+ *        state at once, the first message byte of the word in its most significant byte going
+ *        to the lowest byte of the lane, and the permutation of a full rate runs at the next
+ *        DIN word or at DCAL. DCAL pads with 0x06 for SHA-3 and 0x1F for SHAKE, 0x80 in the last
+ *        byte of the rate. NBLW counts valid bits of the last word and reads bits 2:0 as zero
+ *        under SHA-3 and SHAKE, the message being bytes. The digest is HR0 to HR6 for SHA3-224,
+ *        HR0 to HR7, HR0 to HR11 and HR0 to HR15 for SHA3-256, SHA3-384 and SHA3-512, and the
+ *        rate for SHAKE, byte 0 in HR0[31:24]. HRA0-4 read zero under SHA-3 and SHAKE. A DCAL with
+ *        no DIN word since a SHAKE digest runs one more permutation and shows the next rate bytes.
+ *        A block takes 98 cycles for the SHA-512 family and 60, 58, 50 and 42 for SHA3-224 to
+ *        SHA3-512, Table 401, and 66 and 58 for SHAKE128 and SHAKE256 by the same rule, one
+ *        permutation of a squeeze taking a block time. HMAC takes the block size as its key size,
+ *        for every algorithm but SHAKE. Context swap CSRs hold the Keccak lanes at CSR4-53, the
+ *        last word at CSR54, and the inner HMAC digest at CSR55 for SHA3-224 and SHA3-256, CSR72
+ *        for SHA3-384 and SHA3-512, the SHA-512 chaining value at CSR4-19, the pending block at
  *        CSR20-51 and the inner digest at CSR52.
  *
- *        Divergence: a DIN write while BUSY does not stall the bus, the CPU runs on. Not
- *        modelled, each logged once and a model_error under strict_peripherals, thrown before
- *        the write is stored: an HMAC key longer than the block with LKEY 0, hashed as with
- *        LKEY 1, ALGO 1 and 4 to 11 of the H5, run as SHA2-256. DMAE 1 with no controller serving
- *        hash_in_dma. A CSR0 write other than the tag, or a CSR1 write whose
- * ALGO, MODE or LKEY differ from those latched at INIT, with a count above 16 or a phase out of
- * range: without strict_peripherals the CSR writes that follow are dropped up to the next INIT or
- * CSR0 tag write. The RCC clock gate is not modelled.
+ *        Divergence: a DIN write while BUSY does not stall the bus, the CPU runs on.
+ *
+ *        Not modelled, each logged once and a model_error under strict_peripherals, thrown before
+ *        the write is stored:
+ *        - An HMAC key longer than the block with LKEY 0 is hashed as with LKEY 1.
+ *        - MODE 1 with SHAKE is ignored.
+ *        - ALGO 1, 10 and 11 of the H5 are reserved codes and run as SHA2-256.
+ *        - A DIN word after a SHAKE digest with no INIT starts a new message.
+ *        - A DCAL while BUSY of a SHAKE digest or squeeze squeezes the next rate at once.
+ *        - DMAE 1 with no controller serving hash_in_dma requests nothing.
+ *        - A CSR0 write other than the tag, or a CSR1 write whose ALGO, MODE or LKEY differ from
+ *          those latched at INIT, with a count above the block size in words or a phase out of
+ *          range, drops the CSR writes that follow up to the next INIT or CSR0 tag write, without
+ *          strict_peripherals.
+ *
+ *        The RCC clock gate is not modelled.
  */
 class hash final : public dispatch_model<hash, hash_state>,
                    public dma_requester,
@@ -472,10 +531,19 @@ private:
   void               finish_digest();
   [[nodiscard]] auto last_bits() const -> std::uint32_t;
   auto               pad(std::uint32_t last_bits) -> std::size_t;
+  auto               pad_keccak(std::uint32_t last_bits) -> std::size_t;
   [[nodiscard]] auto output() const -> words;
   [[nodiscard]] auto alg() const -> algorithm const&;
   [[nodiscard]] auto code_of(std::uint32_t control) const -> algorithm const&;
+  [[nodiscard]] auto keccak_selected() const -> bool;
   void               compress_block(std::span<std::uint32_t const> m);
+  void               process_full();
+  void               push(std::uint32_t word);
+  void               xor_word(std::size_t index, std::uint32_t word);
+  void               xor_byte(std::size_t index, std::uint8_t value);
+  void               drop_garbage(std::uint32_t last_bits);
+  void               squeeze();
+  void               conclude(std::size_t compressed, bool final);
   [[nodiscard]] auto lane_word(std::size_t index) const -> std::uint32_t;
   void               set_lane_word(std::size_t index, std::uint32_t value);
   [[nodiscard]] auto algo_of_config(std::uint32_t value) const -> std::uint32_t;
@@ -530,6 +598,9 @@ private:
   dma_signal                           dma_;
   bool                                 long_key_logged_{};
   bool                                 code_logged_{};
+  bool                                 squeeze_logged_{};
+  bool                                 hmac_logged_{};
+  bool                                 dcal_busy_logged_{};
   bool                                 dma_logged_{};
   bool                                 swap_logged_{};
 };
@@ -585,6 +656,14 @@ hash::hash(
       busy_{field("SR", "BUSY")}, nbwp_{field("SR", "NBWP")}, dinne_{field("SR", "DINNE")},
       nbwe_{field("SR", "NBWE")}, line_{&irq("HASH_IRQn")}, dma_{ctx.peers, "hash_in_dma"}
 {
+  if((std::size_t{1} << algo_.width) > family_.algorithms.size())
+  {
+    throw config_error(
+        desc.name, 0, "CR.ALGO",
+        std::format(
+            "a field of at most {} bits, the family has {} codes",
+            std::bit_width(family_.algorithms.size() - 1), family_.algorithms.size()));
+  }
   for(std::size_t i = 0; i < family_.hr_count; ++i)
   {
     hr_[i] = reg(std::format("HR{}", i)).offset;
@@ -634,7 +713,12 @@ auto hash::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size,
   {
     return get(regs_, dinis_) != 0 ? context_word((offset - csr0_) / 4) : 0u;
   }
-  return dispatch_model::on_read(regs, offset, size, ctx);
+  auto const value = dispatch_model::on_read(regs, offset, size, ctx);
+  if(value and offset == str_ and keccak_selected())
+  {
+    return *value & ~std::uint32_t{7};
+  }
+  return value;
 }
 
 auto hash::on_write(
@@ -656,6 +740,12 @@ auto hash::on_write(
   }
   if(offset == din_)
   {
+    if(state_.squeezing != 0)
+    {
+      unmodelled(
+          squeeze_logged_, "DIN", offset,
+          "a DIN write after a SHAKE digest with no INIT starts a new message");
+    }
     if(key_overflows())
     {
       unmodelled(
@@ -680,14 +770,26 @@ auto hash::on_write(
           dma_logged_, "CR", offset,
           "no DMA controller serves hash_in_dma: DMAE 1 requests nothing");
     }
-    if(init_.of(value) != 0 and code_of(value).reserved)
+    if(init_.of(value) != 0)
     {
-      unmodelled(
-          code_logged_, "CR", offset,
-          std::format(
-              "ALGO {:#x} selects no modelled algorithm: the hash runs as SHA2-256",
-              algo_.of(value)));
+      auto const& chosen = code_of(value);
+      if(chosen.reserved)
+      {
+        unmodelled(
+            code_logged_, "CR", offset,
+            std::format("ALGO {:#x} is reserved: the hash runs as SHA2-256", algo_.of(value)));
+      }
+      else if(mode_.of(value) != 0 and not chosen.hmac)
+      {
+        unmodelled(
+            hmac_logged_, "CR", offset,
+            std::format("ALGO {:#x} has no HMAC mode: MODE 1 is ignored", algo_.of(value)));
+      }
     }
+  }
+  if(offset == str_ and keccak_selected())
+  {
+    value &= ~std::uint32_t{7};
   }
   return dispatch_model::on_write(regs, offset, size, old, value, ctx);
 }
@@ -700,6 +802,11 @@ auto hash::alg() const -> algorithm const&
 auto hash::code_of(std::uint32_t control) const -> algorithm const&
 {
   return family_.algorithms[algo_.of(control)];
+}
+
+auto hash::keccak_selected() const -> bool
+{
+  return code_of(regs_.peek(cr_)).kind == function::keccak;
 }
 
 auto hash::algo_of_config(std::uint32_t value) const -> std::uint32_t
@@ -744,31 +851,39 @@ auto hash::context_word(std::size_t index) const -> std::uint32_t
     return static_cast<std::uint32_t>(state_.blocks >> 32);
   }
   auto const& a = alg();
-  if(index >= a.csr_inner and index < a.csr_inner + inner_width(a))
+  if(index >= a.csr_inner and index < a.csr_inner + inner_width(a) and a.hmac)
   {
     return state_.inner[index - a.csr_inner];
   }
-  if(a.kind == function::sha512)
+  switch(a.kind)
   {
-    if(index >= csr_chain and index < csr_chain + 16)
-    {
-      return lane_word(index - csr_chain);
-    }
-    if(index >= csr_wide_pend and index < csr_wide_pend + 32)
-    {
-      return state_.pending[index - csr_wide_pend];
-    }
-    return 0;
+    case function::sha512:
+      if(index >= csr_chain and index < csr_chain + 16)
+      {
+        return lane_word(index - csr_chain);
+      }
+      if(index >= csr_wide_pend and index < csr_wide_pend + 32)
+      {
+        return state_.pending[index - csr_wide_pend];
+      }
+      return 0;
+    case function::keccak:
+      if(index >= csr_chain and index < csr_chain + 2 * keccak::lanes)
+      {
+        return lane_word(index - csr_chain);
+      }
+      return index == csr_last ? state_.last : 0u;
+    default:
+      if(index >= csr_chain and index < csr_chain + state_.h.size())
+      {
+        return state_.h[index - csr_chain];
+      }
+      if(index >= csr_pending and index < csr_pending + block_words)
+      {
+        return state_.pending[index - csr_pending];
+      }
+      return 0;
   }
-  if(index >= csr_chain and index < csr_chain + state_.h.size())
-  {
-    return state_.h[index - csr_chain];
-  }
-  if(index >= csr_pending and index < csr_pending + block_words)
-  {
-    return state_.pending[index - csr_pending];
-  }
-  return 0;
 }
 
 auto hash::config_valid(std::uint32_t value) const -> bool
@@ -843,29 +958,43 @@ void hash::context_written(std::size_t index, std::uint32_t value)
     return;
   }
   auto const& a = alg();
-  if(index >= a.csr_inner and index < a.csr_inner + inner_width(a))
+  if(index >= a.csr_inner and index < a.csr_inner + inner_width(a) and a.hmac)
   {
     state_.inner[index - a.csr_inner] = value;
     return;
   }
-  if(a.kind == function::sha512)
+  switch(a.kind)
   {
-    if(index >= csr_chain and index < csr_chain + 16)
-    {
-      set_lane_word(index - csr_chain, value);
-    }
-    else if(index >= csr_wide_pend and index < csr_wide_pend + 32)
-    {
-      state_.pending[index - csr_wide_pend] = value;
-    }
-  }
-  else if(index >= csr_chain and index < csr_chain + state_.h.size())
-  {
-    state_.h[index - csr_chain] = value;
-  }
-  else if(index >= csr_pending and index < csr_pending + block_words)
-  {
-    state_.pending[index - csr_pending] = value;
+    case function::sha512:
+      if(index >= csr_chain and index < csr_chain + 16)
+      {
+        set_lane_word(index - csr_chain, value);
+      }
+      else if(index >= csr_wide_pend and index < csr_wide_pend + 32)
+      {
+        state_.pending[index - csr_wide_pend] = value;
+      }
+      break;
+    case function::keccak:
+      if(index >= csr_chain and index < csr_chain + 2 * keccak::lanes)
+      {
+        set_lane_word(index - csr_chain, value);
+      }
+      else if(index == csr_last)
+      {
+        state_.last = value;
+      }
+      break;
+    default:
+      if(index >= csr_chain and index < csr_chain + state_.h.size())
+      {
+        state_.h[index - csr_chain] = value;
+      }
+      else if(index >= csr_pending and index < csr_pending + block_words)
+      {
+        state_.pending[index - csr_pending] = value;
+      }
+      break;
   }
 }
 
@@ -928,7 +1057,7 @@ void hash::initialise(std::uint32_t control)
   state_.digested      = 0;
   state_.digest        = {};
   state_.digest_size   = 0;
-  state_.hmac          = static_cast<std::uint8_t>(mode_.of(control) != 0);
+  state_.hmac          = static_cast<std::uint8_t>(mode_.of(control) != 0 and alg().hmac);
   state_.long_key      = static_cast<std::uint8_t>(state_.hmac != 0 ? lkey_.of(control) : 0);
   state_.phase         = phase_inner_key;
   state_.inner         = {};
@@ -949,15 +1078,19 @@ void hash::initialise(std::uint32_t control)
 void hash::data_written(std::uint32_t value)
 {
   auto const word = swapped(value, get(regs_, datatype_));
+  if(state_.squeezing != 0)
+  {
+    restart();
+  }
   if(state_.count == alg().block_words)
   {
-    compress_block(std::span{state_.pending}.first(alg().block_words));
+    process_full();
     ++state_.blocks;
     state_.count = 0;
     work(alg().cycles, false);
   }
-  state_.pending[state_.count++] = word;
-  state_.digested                = 0;
+  push(word);
+  state_.digested = 0;
   update(regs_, dinis_, 0);
   update(regs_, dinne_, 1);
   if(auto const expected = get(regs_, nbwe_); expected > 0)
@@ -970,6 +1103,50 @@ void hash::data_written(std::uint32_t value)
   {
     state_.suspend = suspend_launched;
     request();
+  }
+}
+
+void hash::push(std::uint32_t word)
+{
+  if(alg().kind == function::keccak)
+  {
+    xor_word(state_.count, word);
+    state_.last = word;
+  }
+  else
+  {
+    state_.pending[state_.count] = word;
+  }
+  ++state_.count;
+}
+
+void hash::xor_word(std::size_t index, std::uint32_t word)
+{
+  state_.lanes[index / 2] ^= std::uint64_t{std::byteswap(word)} << (32 * (index % 2));
+}
+
+void hash::xor_byte(std::size_t index, std::uint8_t value)
+{
+  state_.lanes[index / 8] ^= std::uint64_t{value} << (8 * (index % 8));
+}
+
+void hash::drop_garbage(std::uint32_t last_bits)
+{
+  if(state_.count != 0 and last_bits < 32)
+  {
+    xor_word(state_.count - 1u, state_.last & (~std::uint32_t{} >> last_bits));
+  }
+}
+
+void hash::process_full()
+{
+  if(alg().kind == function::keccak)
+  {
+    keccak::permute(state_.lanes);
+  }
+  else
+  {
+    compress_block(std::span{state_.pending}.first(alg().block_words));
   }
 }
 
@@ -987,7 +1164,9 @@ void hash::compress_block(std::span<std::uint32_t const> m)
       sha256_compress(state_.h, m.first<block_words>());
       break;
     case function::sha512:
-      sha512_compress(state_.lanes, m.first<32>());
+      sha512_compress(std::span<std::uint64_t, 8>{state_.lanes.data(), 8}, m.first<32>());
+      break;
+    case function::keccak:
       break;
   }
 }
@@ -999,6 +1178,12 @@ void hash::start_written(std::uint32_t old, std::uint32_t now)
     return;
   }
   regs_.poke(nblw_.offset, dcal_.with(nblw_.with(now, nblw_.of(old)), 0));
+  if(state_.busy != 0 and state_.squeezing != 0)
+  {
+    unmodelled(
+        dcal_busy_logged_, "STR", str_,
+        "DCAL while BUSY squeezes past a rate the firmware has not read");
+  }
   calculate();
 }
 
@@ -1007,6 +1192,10 @@ void hash::calculate()
   if(state_.digested == 0)
   {
     finish_digest();
+  }
+  else if(state_.squeezing != 0)
+  {
+    squeeze();
   }
 }
 
@@ -1021,7 +1210,7 @@ auto hash::key_overflows() const -> bool
 
 auto hash::last_bits() const -> std::uint32_t
 {
-  auto const valid = get(regs_, nblw_);
+  auto const valid = get(regs_, nblw_) & (alg().kind == function::keccak ? ~7u : ~0u);
   return valid == 0 ? 32u : valid;
 }
 
@@ -1032,14 +1221,16 @@ void hash::restart()
   state_.lanes  = {};
   if(a.kind == function::sha512)
   {
-    state_.lanes = sha512_initial[a.init];
+    std::ranges::copy(sha512_initial[a.init], state_.lanes.begin());
   }
-  else
+  else if(a.kind != function::keccak)
   {
     state_.h = initial_values[a.init];
   }
-  state_.blocks = 0;
-  state_.count  = 0;
+  state_.blocks    = 0;
+  state_.count     = 0;
+  state_.last      = 0;
+  state_.squeezing = 0;
 }
 
 auto hash::output() const -> words
@@ -1056,6 +1247,9 @@ auto hash::output() const -> words
       case function::sha512:
         out[i] = lane_word(i ^ 1u);
         break;
+      case function::keccak:
+        out[i] = std::byteswap(lane_word(i));
+        break;
       default:
         out[i] = state_.h[i];
         break;
@@ -1069,12 +1263,21 @@ auto hash::open_hmac(std::uint32_t pad_word) -> std::size_t
   auto const& a = alg();
   words       key{};
   std::size_t compressed = 0;
+  bool        in_place   = false;
   if(state_.long_key == 0 and state_.blocks == 0)
   {
-    std::copy_n(state_.pending.begin(), state_.count, key.begin());
-    if(auto const bits = last_bits(); state_.count != 0 and bits < 32)
+    if(a.kind == function::keccak)
     {
-      key[state_.count - 1] &= ~(~std::uint32_t{} >> bits);
+      drop_garbage(last_bits());
+      in_place = true;
+    }
+    else
+    {
+      std::copy_n(state_.pending.begin(), state_.count, key.begin());
+      if(auto const bits = last_bits(); state_.count != 0 and bits < 32)
+      {
+        key[state_.count - 1] &= ~(~std::uint32_t{} >> bits);
+      }
     }
   }
   else
@@ -1082,12 +1285,28 @@ auto hash::open_hmac(std::uint32_t pad_word) -> std::size_t
     compressed = pad(last_bits());
     key        = output();
   }
-  restart();
-  for(std::size_t i = 0; i < a.block_words; ++i)
+  if(not in_place)
   {
-    key[i] ^= pad_word;
+    restart();
   }
-  compress_block(std::span{key}.first(a.block_words));
+  if(a.kind == function::keccak)
+  {
+    for(std::size_t i = 0; i < a.block_words; ++i)
+    {
+      xor_word(i, (in_place ? 0u : key[i]) ^ pad_word);
+    }
+    keccak::permute(state_.lanes);
+    state_.count = 0;
+    state_.last  = 0;
+  }
+  else
+  {
+    for(std::size_t i = 0; i < a.block_words; ++i)
+    {
+      key[i] ^= pad_word;
+    }
+    compress_block(std::span{key}.first(a.block_words));
+  }
   state_.blocks = 1;
   return compressed + 1;
 }
@@ -1119,17 +1338,34 @@ void hash::finish_digest()
   {
     compressed      = open_hmac(opad);
     auto const size = alg().digest_words;
-    std::copy_n(state_.inner.begin(), size, state_.pending.begin());
-    state_.count = static_cast<std::uint8_t>(size);
+    state_.count    = 0;
+    for(std::size_t i = 0; i < size; ++i)
+    {
+      push(state_.inner[i]);
+    }
     compressed += pad(32);
     state_.digest = output();
     state_.phase  = phase_inner_key;
   }
+  conclude(compressed, final);
+}
+
+void hash::conclude(std::size_t compressed, bool final)
+{
   if(final)
   {
     state_.digest_size = alg().digest_words;
     state_.digested    = 1;
-    restart();
+    if(alg().extendable)
+    {
+      state_.squeezing = 1;
+      state_.count     = 0;
+      state_.last      = 0;
+    }
+    else
+    {
+      restart();
+    }
   }
   update(regs_, dinne_, 0);
   update(regs_, dcis_, 0);
@@ -1139,9 +1375,20 @@ void hash::finish_digest()
   interrupts();
 }
 
+void hash::squeeze()
+{
+  keccak::permute(state_.lanes);
+  state_.digest = output();
+  conclude(1, true);
+}
+
 auto hash::pad(std::uint32_t last_bits) -> std::size_t
 {
-  auto const&                       a = alg();
+  auto const& a = alg();
+  if(a.kind == function::keccak)
+  {
+    return pad_keccak(last_bits);
+  }
   std::array<std::uint32_t, 2 * 32> tail{};
   std::copy_n(state_.pending.begin(), state_.count, tail.begin());
   std::size_t   at   = state_.count;
@@ -1175,6 +1422,29 @@ auto hash::pad(std::uint32_t last_bits) -> std::size_t
     compress_block(std::span{tail}.subspan(i * a.block_words, a.block_words));
   }
   return blocks;
+}
+
+auto hash::pad_keccak(std::uint32_t last_bits) -> std::size_t
+{
+  auto const&       a      = alg();
+  std::size_t const rate   = 4 * std::size_t{a.block_words};
+  std::size_t       offset = 0;
+  std::size_t       passes = 0;
+  if(state_.count != 0)
+  {
+    drop_garbage(last_bits);
+    offset = 4 * (state_.count - 1u) + last_bits / 8;
+  }
+  if(offset == rate)
+  {
+    keccak::permute(state_.lanes);
+    ++passes;
+    offset = 0;
+  }
+  xor_byte(offset, a.suffix);
+  xor_byte(rate - 1, 0x80);
+  keccak::permute(state_.lanes);
+  return passes + 1;
 }
 
 void hash::work(std::uint64_t cycles, bool final)
@@ -1275,13 +1545,14 @@ void hash::publish()
 
 void hash::show_digest(bool visible)
 {
+  auto const aliased = alg().kind != function::keccak;
   for(std::size_t i = 0; i < family_.hr_count; ++i)
   {
     auto const value = visible and i < state_.digest_size ? state_.digest[i] : 0u;
     regs_.poke(hr_[i], value);
     if(i < hra_count)
     {
-      regs_.poke(hra_[i], value);
+      regs_.poke(hra_[i], aliased ? value : 0u);
     }
   }
 }

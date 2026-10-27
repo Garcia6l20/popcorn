@@ -74,14 +74,11 @@ auto decode_snapshot(std::span<std::byte const> bytes) -> snapshot_data
   constexpr std::string_view format_key{"format"};
   constexpr std::size_t      element_at = 4;
   constexpr std::size_t      value_at   = element_at + 1 + format_key.size() + 1;
-  constexpr std::uint8_t     int32_type = 0x10;
   constexpr std::uint8_t     int64_type = 0x12;
-  auto const                 type =
-      bytes.size() > element_at ? static_cast<std::uint8_t>(bytes[element_at]) : std::uint8_t{};
-  auto const value_size = type == int64_type ? sizeof(std::int64_t) : sizeof(std::int32_t);
-  bool const leads_with_format =
-      (type == int32_type or type == int64_type)
-      and bytes.size() >= value_at + value_size
+  constexpr std::size_t      value_end  = value_at + sizeof(std::int64_t);
+  bool const                 leads_with_format =
+      bytes.size() >= value_end
+      and static_cast<std::uint8_t>(bytes[element_at]) == int64_type
       and std::memcmp(bytes.data() + element_at + 1, "format", format_key.size() + 1) == 0;
   if(not leads_with_format)
   {
@@ -89,16 +86,7 @@ auto decode_snapshot(std::span<std::byte const> bytes) -> snapshot_data
         "snapshot", 0, "bytes", "a snapshot matching snapshot_data: no leading format element");
   }
   std::int64_t leading{};
-  if(type == int64_type)
-  {
-    std::memcpy(&leading, bytes.data() + value_at, sizeof(std::int64_t));
-  }
-  else
-  {
-    std::int32_t narrow{};
-    std::memcpy(&narrow, bytes.data() + value_at, sizeof narrow);
-    leading = narrow;
-  }
+  std::memcpy(&leading, bytes.data() + value_at, sizeof leading);
   if(leading != snapshot_format_version)
   {
     throw config_error(

@@ -161,6 +161,21 @@ TEST_CASE("a saved form that does not lead with the format element is a config_e
       popcorn::config_error);
 }
 
+TEST_CASE("a saved form whose leading format is a 32-bit integer is a config_error on bytes")
+{
+  struct narrow
+  {
+    std::int32_t format{};
+    std::int32_t after{};
+  };
+  std::vector<std::byte> bytes;
+  reflex::serde::bson::serializer{bytes}.dump(narrow{.format = 8, .after = 0});
+  CHECK_THROWS_WITH_AS(
+      std::ignore = core::decode_snapshot(bytes),
+      doctest::Contains("bytes, expected a snapshot matching snapshot_data: no leading format"),
+      popcorn::config_error);
+}
+
 TEST_CASE("an NMI line level survives the saved form")
 {
   auto data                          = filled();

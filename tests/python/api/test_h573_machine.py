@@ -54,6 +54,7 @@ def test_gpioi_pin_12_edges_are_refused_at_the_call_parked_and_running(
     machine.reset()
     machine.reg.pc = machine.sym("idle")
     gpioi = machine.periph.GPIOI
+    gpioi.MODER.MODE11 = 0
     at = machine.time + ms(1)
     for pin in (12, 15):
         with pytest.raises(popcorn.ConfigError, match="a pin of the port, 0 to 11"):
@@ -68,6 +69,7 @@ def test_gpioi_pin_12_edges_are_refused_at_the_call_parked_and_running(
 
     asyncio.run(running())
     asyncio.run(machine.run(for_=ms(2)))
+    assert gpioi.IDR.ID11 == 1
 
 
 @pytest.mark.parametrize("adc", ["ADC1", "ADC2"])

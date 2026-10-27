@@ -75,8 +75,8 @@ struct board_clock
 
 struct sai_state
 {
-  std::array<block_state, blocks>                block{};
-  std::optional<std::array<board_clock, blocks>> clock{};
+  std::array<block_state, blocks> block{};
+  std::array<board_clock, blocks> clock{};
 
   friend auto operator==(sai_state const&, sai_state const&) -> bool = default;
 };
@@ -332,10 +332,9 @@ sai::sai(
       pdm_enable_{field("PDMCR", "PDMEN")}, kernel_{ctx.clock.domain(lower(desc.name))},
       line_{irq(desc.name + "_IRQn")}, requests_{requests_of(ctx.peers, desc.name)}
 {
-  auto& clocks = state_.clock.emplace();
   for(std::size_t b = 0; b < blocks; ++b)
   {
-    clocks[b].hz = wired_[b].external_frame_hz;
+    state_.clock[b].hz = wired_[b].external_frame_hz;
   }
 }
 
@@ -490,7 +489,7 @@ auto sai::mask(std::size_t b) const -> std::uint32_t
 auto sai::clock_rate(std::size_t b) const -> rate
 {
   return {
-      .hz     = (*state_.clock)[b].hz,
+      .hz     = state_.clock[b].hz,
       .cycles = std::uint64_t{std::max<std::uint32_t>(wired_[b].decimation, 1)}};
 }
 
@@ -516,7 +515,7 @@ auto sai::clocked(std::size_t b) const -> bool
 
 auto sai::clock(std::size_t b) -> board_clock&
 {
-  return (*state_.clock)[b];
+  return state_.clock[b];
 }
 
 auto sai::board_now() const -> std::uint64_t
@@ -526,7 +525,7 @@ auto sai::board_now() const -> std::uint64_t
 
 auto sai::running(std::size_t b) const -> bool
 {
-  auto const& c = (*state_.clock)[b];
+  auto const& c = state_.clock[b];
   return c.hz != 0
       or (c.anchored and board_now() < c.anchor_ps)
       or (state_.block[b].ticking and clocked(b));
@@ -534,7 +533,7 @@ auto sai::running(std::size_t b) const -> bool
 
 auto sai::boundary(std::size_t b, std::uint64_t now) const -> grid_point
 {
-  auto const& c = (*state_.clock)[b];
+  auto const& c = state_.clock[b];
   auto const  r = clock_rate(b);
   if(now <= c.anchor_ps or r.hz == 0)
   {
@@ -1282,7 +1281,7 @@ void sai::set_external_clock(audio_block which, std::uint32_t frame_hz)
 
 auto sai::external_clock(audio_block which) const -> std::uint32_t
 {
-  return (*state_.clock)[index_of(which)].hz;
+  return state_.clock[index_of(which)].hz;
 }
 
 void sai::flags()

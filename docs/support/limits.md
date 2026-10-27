@@ -174,10 +174,24 @@ Source: [gtzc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/hash.cpp)
 
 - An HMAC key longer than the block with LKEY 0 is hashed as with LKEY 1, and logged. The block is
-  64 bytes for SHA-1, SHA2-224 and SHA2-256, 128 bytes for the SHA-512 family.
-- The H5 ALGO codes 1 and 4 to 11 log once at INIT and run as SHA2-256.
-- The H5 CSR registers use popcorn's layout too: CSR4 up hold the SHA-512 chaining value and
-  pending block, the inner HMAC digest sits at CSR52.
+  64 bytes for SHA-1, SHA2-224 and SHA2-256, 128 bytes for the SHA-512 family and the sponge rate
+  for SHA-3.
+- The H5 HASH reads SHA-3 and SHAKE DIN words as the SHA-2 core does: the first message byte of a
+  word, after the DATATYPE swap, is its most significant byte, and the digest bytes fill HR0 and
+  up from bit 31. RM0481 40.4.4 does not spell this out for SHA-3. DATATYPE 00, 01 and 11 follow
+  the same mapping.
+- The H5 BUSY time of SHAKE128 and SHAKE256, 66 and 58 cycles, follows the SHA-3 rule of
+  RM0481 Table 401, which has no SHAKE row. A DCAL that squeezes the next rate takes the same time.
+  A DCAL written while BUSY of a SHAKE digest squeezes the next rate at once, logs once, and the
+  rate of the first DCAL is never shown. NBWP and CR.NBW read 0 after a SHAKE digest, as after a
+  SHA-3 digest.
+- A DIN word after a SHAKE digest with no INIT starts a new message and logs once. MODE 1 with
+  SHAKE and the reserved ALGO codes 1, 10 and 11 log once at INIT, MODE 1 is ignored and a
+  reserved code runs as SHA2-256.
+- The H5 CSR registers use popcorn's layout too: CSR4 up hold the Keccak lanes or the SHA-512
+  chaining value and pending block, the inner HMAC digest sits at CSR55, CSR72 or CSR52 by
+  algorithm. A save of CSR0 to CSR71 covers every SHA-3 context but the SHA3-384 and SHA3-512
+  HMAC, as RM0481 40.4.8 says.
 - DMA input works through GPDMA request 89. A machine with no DMA controller that serves
   `hash_in_dma` logs DMAE 1 once and requests nothing.
 - The CSR registers hold popcorn's own serialisation of the state, not the silicon layout. CSR0
