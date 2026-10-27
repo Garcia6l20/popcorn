@@ -1,5 +1,5 @@
 format = 1
-source = "STM32H503 IP instance names, TIM2 and TIM3 field spellings and IRQ adds against its SVD. IRQ adds: stm32h503xx.h defines PVD_AVD_IRQn 1 and FPU_IRQn 103, which STM32H503.svd lacks, so both go to EXTI as the other H5 files place them. RM0492 documents the part, which has ports A to D and H and no DCACHE, OCTOSPI or TrustZone USB IRQ 74: the SVD names it USB_FS, RM0481 Rev 5, 17.3 Table 152 and the CMSIS IRQn_Type USB_DRD_FS, dropped and added again under that name at the same number, so the line has one name with and without the CMSIS header."
+source = "STM32H503 IP instance names, TIM2 and TIM3 field spellings and IRQ adds against its SVD. IRQ adds: stm32h503xx.h defines PVD_AVD_IRQn 1 and FPU_IRQn 103, which STM32H503.svd lacks, so both go to EXTI as the other H5 files place them. RM0492 documents the part, which has ports A to D and H and no DCACHE, OCTOSPI or TrustZone. USB IRQ 74: the SVD names it USB_FS, RM0481 Rev 5, 17.3 Table 152 and the CMSIS IRQn_Type USB_DRD_FS, dropped and added again under that name at the same number, so the line has one name with and without the CMSIS header."
 
 [match]
 parts = ["STM32H503*"]

@@ -18,9 +18,9 @@ struct usb_host_options
 
 /**
  * @brief The virtual host of a USB device controller as a board sees it, implemented by the
- *        OTG_FS model. The model owns the host, schedules its wake-ups and keeps its state and
- *        the cable in its snapshots. Reach it with
- *        `dynamic_cast<usb_host_port*>(machine.model("OTG_FS"))`.
+ *        OTG_FS model of the STM32U5 and the USB model of the STM32H5. The model owns the host,
+ *        schedules its wake-ups and keeps its state and the cable in its snapshots. Reach it
+ *        with `dynamic_cast<usb_host_port*>(machine.model("OTG_FS"))`, or `"USB"` on the H5.
  */
 class POPCORN_API usb_host_port
 {

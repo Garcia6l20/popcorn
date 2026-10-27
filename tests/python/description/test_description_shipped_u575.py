@@ -53,6 +53,13 @@ def test_the_shipped_description_matches_a_fresh_ship_build(name: str) -> None:
         pytest.skip(f"{name} sources not found: {exc}")
     local = compute_source_digests(sources)
     shipped_sources = _sources_of(path)
+    stale = [
+        key for key in local if key.startswith("patch:") and local[key] != shipped_sources.get(key)
+    ]
+    assert not stale, f"{name}: shipped patch digests differ, rerun ship: {stale}"
+    assert {k for k in shipped_sources if k.startswith("patch:")} == {
+        k for k in local if k.startswith("patch:")
+    }
     differing = [key for key in EXTERNAL_SOURCES if local.get(key) != shipped_sources.get(key)]
     if differing:
         pytest.skip(f"{name}: local {', '.join(differing)} differ from the shipped file's")
@@ -88,21 +95,6 @@ def test_ship_refuses_to_write_without_out(
     status = main(["ship", "STM32U575QGIx", "--pin-data", str(tmp_path / "absent")])
     assert status == 1
     assert "--out is required" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("name", shipped_names())
-def test_every_alias_of_a_shipped_description_equals_its_base_register_by_register(
-    name: str,
-) -> None:
-    path = SHIPPED_DIR / f"{name}.json.xz"
-    data = cast(dict[str, object], json.loads(shipped_text(path.read_bytes(), file=str(path))))
-    peripherals = cast(list[dict[str, object]], data["peripherals"])
-    by_name = {cast(str, p["name"]): p for p in peripherals}
-    aliases = [p for p in peripherals if p.get("alias_of")]
-    assert aliases
-    for alias in aliases:
-        base = by_name[cast(str, alias["alias_of"])]
-        assert alias["registers"] == base["registers"], alias["name"]
 
 
 def test_the_shipped_h573_sec_usb_keeps_the_patched_usb_field_kinds() -> None:

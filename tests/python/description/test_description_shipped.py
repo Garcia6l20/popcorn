@@ -6,12 +6,19 @@ import os
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import popcorn
 import pytest
 from popcorn.stm32.description import _shipped
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
-from popcorn.stm32.description._shipped import description_path, shipped_description
+from popcorn.stm32.description._shipped import (
+    SHIPPED_DIR,
+    description_path,
+    shipped_description,
+    shipped_names,
+    shipped_text,
+)
 
 M33_JSON = Path(__file__).parents[3] / "tests" / "data" / "core" / "m33.json"
 NAME = "STM32T001ABCx"
@@ -241,3 +248,18 @@ def test_a_read_only_cache_still_serves_its_file(
     monkeypatch.setattr("popcorn.stm32.description._shipped.os.utime", read_only)
     assert description_path(NAME) == first
     assert calls == []
+
+
+@pytest.mark.parametrize("name", shipped_names())
+def test_every_alias_of_a_shipped_description_equals_its_base_register_by_register(
+    name: str,
+) -> None:
+    path = SHIPPED_DIR / f"{name}.json.xz"
+    data = cast(dict[str, object], json.loads(shipped_text(path.read_bytes(), file=str(path))))
+    peripherals = cast(list[dict[str, object]], data["peripherals"])
+    by_name = {cast(str, p["name"]): p for p in peripherals}
+    aliases = [p for p in peripherals if p.get("alias_of")]
+    assert aliases
+    for alias in aliases:
+        base = by_name[cast(str, alias["alias_of"])]
+        assert alias["registers"] == base["registers"], alias["name"]

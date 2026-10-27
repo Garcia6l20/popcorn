@@ -160,7 +160,8 @@ Each value applies to the named peripheral and each of its aliases, so a secure 
 fields of its base. The build raises `DescriptionError` with the rule's index when a register or a
 field is unknown, when an earlier rule set the same property of the same field, or when a new
 width leaves the register or overlaps another field. The patch report counts one
-`fields_touched` per property, field and peripheral or alias it sets.
+`fields_touched` per property, field and peripheral or alias it sets. `fields_dropped`,
+`fields_renamed` and `fields_added` count each base field once, whatever its aliases.
 
 ## Shipped descriptions
 

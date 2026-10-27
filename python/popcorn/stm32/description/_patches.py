@@ -1057,7 +1057,11 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
     from the named peripheral and its aliases, and a later rule naming them fails. A fields rule
     with `rename` renames fields in the named peripheral and its aliases, and a later rule names
     the new spelling. A fields rule with `add` adds one field, with its reset value, to the
-    named register of the named peripheral and its aliases, and a later rule names it.
+    named register of the named peripheral and its aliases, and a later rule names it. A fields
+    rule with `width`, `on_write`, `on_read` or `acc` sets it on the named fields of the named
+    peripheral and each of its aliases, and refuses an alias in `instances`. The report counts
+    each field of the peripheral and of each alias per property in `fields_touched`, and each
+    base field once in `fields_dropped`, `fields_renamed` and `fields_added`.
     Validates every rule before mutating @p target: an error leaves it exactly as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)

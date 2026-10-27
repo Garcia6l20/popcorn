@@ -711,7 +711,7 @@ class MachineDescription:
         for periph_name, periph in self.board.items():
             if periph.host is None:
                 continue
-            if periph.model is not None or ips.get(periph_name) != "USB_OTG_FS":
+            if periph.model is not None or ips.get(periph_name) not in _USB_DEVICE_IPS:
                 raise _plain_error(
                     f"board.{periph_name}.host", "a USB device controller with the built-in model"
                 )
@@ -1041,6 +1041,7 @@ def _kind(periph: Periph) -> str:
     return "plugin" if isinstance(periph.model, PluginModel) else "Python"
 
 
+_USB_DEVICE_IPS = ("USB_OTG_FS", "USB")
 _NANOBIND_TYPE = type(_core.SpiTargetBase)
 _NANOBIND_FUNCTION = type(_core.version)
 

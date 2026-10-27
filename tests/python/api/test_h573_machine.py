@@ -7,6 +7,7 @@ from pathlib import Path
 
 import popcorn
 import pytest
+from popcorn.board import UsbHostOptions
 from popcorn.stm32 import mcu
 from popcorn.stm32.description import DescriptionError
 from popcorn.units import ms
@@ -65,7 +66,8 @@ def test_gpioi_pin_12_edges_are_refused_at_the_call_parked_and_running(
             for pin in (12, 15):
                 with pytest.raises(popcorn.ConfigError, match="a pin of the port, 0 to 11"):
                     gpioi.pin(pin).drive_edges([(at, True)])
-            gpioi.pin(11).drive_at(True, at=at)
+            ran = await gpioi.pin(11).drive_at(True, at=at)
+            assert ran < at
 
     asyncio.run(running())
     asyncio.run(machine.run(for_=ms(2)))
@@ -86,3 +88,35 @@ def test_the_h573_adc_inputs_are_the_external_channels_of_its_model(
         with pytest.raises(popcorn.ConfigError) as caught:
             unit.input(channel)
         assert caught.value.expected == f"an external channel, one of {H5_EXTERNAL}"
+
+
+def test_a_usb_host_on_the_h573_usb_controller_builds_and_is_reachable() -> None:
+    description = popcorn.MachineDescription(
+        part="STM32H573AIIx",
+        images=[],
+        board={"USB": popcorn.Periph(host=UsbHostOptions())},
+    )
+    try:
+        machine = description.machine()
+    except (DescriptionError, popcorn.MissingInput) as error:
+        pytest.skip(f"no STM32H573 description: {error}")
+    host = machine.periph.USB.host
+    assert host.attached
+
+
+def test_a_usb_host_on_an_h573_peripheral_that_is_no_usb_controller_is_refused() -> None:
+    description = popcorn.MachineDescription(
+        part="STM32H573AIIx",
+        images=[],
+        board={"SPI1": popcorn.Periph(host=UsbHostOptions())},
+    )
+    with pytest.raises(popcorn.ConfigError) as caught:
+        description.machine()
+    assert caught.value.key == "board.SPI1.host"
+
+
+def test_the_native_usb_host_table_accepts_the_h573_usb_controller(
+    h573: popcorn.PartDescription,
+) -> None:
+    machine = popcorn.Machine(h573, usb={"USB": UsbHostOptions()})
+    assert machine.periph.USB.host.attached
