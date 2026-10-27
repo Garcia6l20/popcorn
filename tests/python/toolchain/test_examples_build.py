@@ -42,6 +42,13 @@ def test_a_flash_offset_moves_the_rom_region_and_puts_the_app_header_first() -> 
     assert restored.replace("    KEEP(*(.app_header))\n", "") == ST_MEMORY
 
 
+def test_a_flash_offset_moves_the_flash_region_of_an_h5_script() -> None:
+    h5 = ST_MEMORY.replace("ROM\t(rx)\t: ORIGIN = 0x08000000", "FLASH\t(rx)\t: ORIGIN = 0x8000000")
+    derived = offset_linker_script(h5, 0xC000)
+    assert "FLASH\t(rx)\t: ORIGIN = 0x0800c000,\tLENGTH = 2000K" in derived
+    assert HEADER_FIRST in derived
+
+
 @pytest.mark.parametrize("offset", [0, -0x400, 0x200])
 def test_a_flash_offset_is_a_positive_multiple_of_1_kib(offset: int) -> None:
     with pytest.raises(ValueError, match="multiple of 1 KiB"):

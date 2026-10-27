@@ -1,0 +1,20 @@
+"""MachineDescription of the gpdma example."""
+
+from pathlib import Path
+
+import popcorn
+import popcorn.pytest
+
+HERE = Path(__file__).parent
+
+GPDMA = popcorn.MachineDescription(
+    name="gpdma-uart",
+    part="STM32H573AIIx",
+    images=[popcorn.Elf(HERE / "prebuilt/gpdma_uart.elf")],
+    boot=popcorn.Boot(until="main", budget=1_000_000),
+)
+
+
+@popcorn.pytest.machine
+def gpdma() -> popcorn.MachineDescription:
+    return GPDMA

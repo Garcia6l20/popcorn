@@ -29,7 +29,8 @@ TINYUSB_SOURCES = (
     "device/usbd.c",
 )
 ROM_REGION = re.compile(
-    r"(ROM\s*\(rx\)\s*:\s*ORIGIN\s*=\s*)0x08000000(\s*,\s*LENGTH\s*=\s*)(\d+)K", re.IGNORECASE
+    r"(\b(?:ROM|FLASH)\s*\(rx\)\s*:\s*ORIGIN\s*=\s*)0x0?8000000(\s*,\s*LENGTH\s*=\s*)(\d+)K",
+    re.IGNORECASE,
 )
 
 VECTORS = re.compile(r"([ \t]*)(KEEP\s*\(\s*\*\s*\(\s*\.isr_vector\s*\)\s*\))")
@@ -97,8 +98,8 @@ def prebuilt_elf(example_dir: Path, name: str) -> Path:
 
 
 def offset_linker_script(text: str, offset: int) -> str:
-    """ST's linker script @p text with its ROM region starting @p offset bytes into flash, and
-    the input section `.app_header` placed first, ahead of the vector table.
+    """ST's linker script @p text with its ROM or FLASH region starting @p offset bytes into
+    flash, and the input section `.app_header` placed first, ahead of the vector table.
 
     @throws ValueError @p offset is not a positive multiple of 1 KiB, or the script has no single
     ROM region at 0x08000000 or no single `KEEP(*(.isr_vector))`.

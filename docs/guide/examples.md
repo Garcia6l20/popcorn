@@ -218,3 +218,15 @@ Voltage scaling, flash wait states, sector erase and program, LL. [Sources and t
 printf banner and line echo on UART9, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/usart).
 
 --8<-- "stm32h573/usart/README.md:3:10"
+
+### h573 spi
+
+SPI NOR flash on SPI4 from FreeRTOS and GPDMA, behind a bootloader offset. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/spi).
+
+--8<-- "stm32h573/spi/README.md:3:12"
+
+### h573 gpdma
+
+UART9 TX over GPDMA, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/gpdma).
+
+--8<-- "stm32h573/gpdma/README.md:3:12"
