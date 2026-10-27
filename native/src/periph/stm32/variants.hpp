@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <span>
 #include <string_view>
 
 namespace popcorn::periph::stm32
@@ -82,4 +84,97 @@ struct sai_variant
 inline constexpr sai_variant u5_sai{};
 /** @brief STM32H5 SAI, RM0481 59.6.2. */
 inline constexpr sai_variant h5_sai{.enable = "SAIEN"};
+
+/** @brief One internal trigger input of a timer's slave mode controller. */
+struct trigger_entry
+{
+  /** @brief SMCR.TS value that selects the input. */
+  std::uint32_t select;
+  /** @brief Timer whose `<name>_trgo` the input carries, or the unmodelled source, such as
+   *         `tim13_oc1`, which no model produces. */
+  std::string_view source;
+};
+
+/** @brief Differences between the timer peripherals the model rows serve. */
+struct tim_variant
+{
+  /** @brief Internal trigger inputs by TS value. The input a timer would take from itself is
+   *         reserved, and TS values with no entry reach nothing. */
+  std::span<trigger_entry const> triggers;
+  /** @brief Instances whose CR2.MMS has 4 bits, bit 3 in field `MMS_1`. The other timers with an
+   *         MMS field have 3 bits. */
+  std::span<std::string_view const> wide_master;
+  /** @brief Instances with no master mode, so no CR2.MMS field. Every other timer has one. */
+  std::span<std::string_view const> no_master;
+};
+
+/** @brief RM0456 54.6.2 and 55.5.2, RM0481 43.6.2 and 44.5.2: MMS[3:0] on TIM1, TIM8 and TIM2 to
+ *         TIM5. RM0456 56.7.2, 57.4.2 and RM0481 45.4.2, 46.7.2, 47.7.2: MMS[2:0] on the others. */
+inline constexpr auto wide_master_timers =
+    std::to_array<std::string_view>({"TIM1", "TIM2", "TIM3", "TIM4", "TIM5", "TIM8"});
+
+/** @brief TS 0 to 3 are ITR0 to ITR3, 8 to 10 are ITR4 to ITR6, RM0456 54.6.3 and 55.5.3 TIMx_SMCR.
+ */
+inline constexpr auto u5_triggers = std::to_array<trigger_entry>({
+    {0,  "tim1" },
+    {1,  "tim2" },
+    {2,  "tim3" },
+    {3,  "tim4" },
+    {8,  "tim5" },
+    {9,  "tim8" },
+    {10, "tim15"},
+});
+/** @brief RM0456 56.8.2: TIM16 and TIM17 have no master mode. */
+inline constexpr auto u5_no_master = std::to_array<std::string_view>({"TIM16", "TIM17"});
+/** @brief STM32U5 timers. */
+inline constexpr tim_variant u5_tim{u5_triggers, wide_master_timers, u5_no_master};
+
+/**
+ * @brief TS 0 to 3 are ITR0 to ITR3, 8 to 15 are ITR4 to ITR11 and 16 is ITR12, RM0481 43.6.3
+ *        and 44.5.3 TIMx_SMCR. RM0481 Tables 456, 480, 502 and 514 connect the same source to the
+ *        same ITR on TIM1, TIM2 to TIM5, TIM8, TIM12 and TIM15. ITR12 is USBSOF on TIM2 and TIM5
+ *        and reserved on the other six. Sources with no model: the OC1 outputs of TIM13, TIM14,
+ *        TIM16 and TIM17 and USBSOF.
+ */
+inline constexpr auto h5_triggers = std::to_array<trigger_entry>({
+    {0,  "tim1"     },
+    {1,  "tim2"     },
+    {2,  "tim3"     },
+    {3,  "tim4"     },
+    {8,  "tim5"     },
+    {9,  "tim8"     },
+    {10, "tim12"    },
+    {11, "tim13_oc1"},
+    {12, "tim14_oc1"},
+    {13, "tim15"    },
+    {14, "tim16_oc1"},
+    {15, "tim17_oc1"},
+    {16, "usbsof"   },
+});
+/** @brief RM0481 46.8.13: TIM13 and TIM14 have no CR2. RM0481 47.8.2: TIM16 and TIM17 have no
+ *         master mode. */
+inline constexpr auto h5_no_master =
+    std::to_array<std::string_view>({"TIM13", "TIM14", "TIM16", "TIM17"});
+/** @brief STM32H5 timers. */
+inline constexpr tim_variant h5_tim{h5_triggers, wide_master_timers, h5_no_master};
+
+/** @brief Differences between the SPI peripherals the model rows serve. */
+struct spi_variant
+{
+  /** @brief Instances with an 8-byte FIFO, the others hold 16 bytes. */
+  std::span<std::string_view const> limited;
+  /** @brief The limited instances have the `CTSIZE` remaining-frames counter. */
+  bool limited_counter = false;
+  /** @brief The peripheral has the `SPI_AUTOCR` register and its trigger field. */
+  bool autocr = true;
+};
+
+inline constexpr auto u5_limited = std::to_array<std::string_view>({"SPI3"});
+/** @brief STM32U5 SPI, RM0456 68.3: SPI3 has an 8-byte FIFO and no `CTSIZE`. */
+inline constexpr spi_variant u5_spi{u5_limited};
+
+inline constexpr auto h5_limited = std::to_array<std::string_view>({"SPI4", "SPI5", "SPI6"});
+/** @brief STM32H5 SPI, RM0481 Table 645: SPI4 to SPI6 have an 8-byte FIFO and keep TSIZE up to
+ *         65535, so `CTSIZE` counts there. RM0481 section 58.11 has no `SPI_AUTOCR`. */
+inline constexpr spi_variant h5_spi{h5_limited, true, false};
 }

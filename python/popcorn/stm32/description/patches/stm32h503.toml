@@ -1,0 +1,49 @@
+format = 1
+source = "STM32H503 IP instance names, TIM2 and TIM3 field spellings and IRQ adds against its SVD. IRQ adds: stm32h503xx.h defines PVD_AVD_IRQn 1 and FPU_IRQn 103, which STM32H503.svd lacks, so both go to EXTI as the other H5 files place them. RM0492 documents the part, which has ports A to D and H and no DCACHE, OCTOSPI or TrustZone"
+
+[match]
+parts = ["STM32H503*"]
+svd = ["STM32H5*.svd"]
+
+[ip]
+renames = { GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOH"] }
+
+[[cross]]
+ip = "USART"
+reg = "USART_ICR"
+target_reg = "USART_ISR_enabled"
+effect = "clear"
+pairs = { CMCF = "CMF", EOBCF = "EOBF", RTOCF = "RTOF", CTSCF = "CTSIF", LBDCF = "LBDF", TCBGTCF = "TCBGT", TCCF = "TC", TXFECF = "TXFE", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE", UDRCF = "UDR", WUCF = "WUF" }
+source = "RM0481 Rev 5, 56.8.10/56.8.12 USART interrupt and status register (USART_ISR) / USART interrupt flag clear register (USART_ICR); ISR_enabled is the storage owner the SVD's ISR_disabled alternate view points at."
+
+[[cross]]
+ip = "LPUART"
+reg = "LPUART_ICR"
+target_reg = "LPUART_ISR_enabled"
+effect = "clear"
+pairs = { CMCF = "CMF", CTSCF = "CTSIF", TCCF = "TC", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE", WUCF = "WUF" }
+source = "RM0481 Rev 5, 57.7.8 LPUART interrupt and status register (LPUART_ISR) / 57.7.10 LPUART interrupt flag clear register (LPUART_ICR): a reduced set versus USART_ICR."
+
+[irqs]
+add = [
+  { number = 1, name = "PVD_AVD", peripheral = "EXTI" },
+  { number = 103, name = "FPU", peripheral = "EXTI" },
+]
+
+[[fields]]
+instances = ["TIM2"]
+registers = ["TIM2_CR2"]
+rename = { MMS1 = "MMS", MMS2 = "MMS_1" }
+source = "STM32H503 SVD: TIM2_CR2 spells MMS[2:0] at bits 6:4 MMS1 and MMS bit 3 at bit 25 MMS2, the positions of MMS and MMS_1 on TIM1 of the same SVD and of RM0481 Rev 5, 44.5.2. The spelling the model uses is MMS and MMS_1"
+
+[[fields]]
+instances = ["TIM3"]
+registers = ["TIM3_CR2"]
+rename = { MMS1 = "MMS", MMS2 = "MMS_1" }
+source = "STM32H503 SVD: TIM3_CR2 spells MMS[2:0] at bits 6:4 MMS1 and MMS bit 3 at bit 25 MMS2, the positions of MMS and MMS_1 on TIM1 of the same SVD and of RM0481 Rev 5, 44.5.2. The spelling the model uses is MMS and MMS_1"
+
+[[fields]]
+instances = ["TIM3"]
+registers = ["TIM3_SMCR"]
+rename = { SMS_2 = "SMS_1", TS_2 = "TS_1" }
+source = "STM32H503 SVD: TIM3_SMCR spells SMS bit 3 at bit 16 SMS_2 and TS[4:3] at bits 21:20 TS_2, where TIM2_SMCR of the same SVD spells the same bits SMS_1 and TS_1, the spelling the model uses"

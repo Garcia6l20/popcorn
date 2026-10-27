@@ -1,0 +1,18 @@
+format = 1
+source = "STM32H533 TIM12 field spellings against its SVD. The STM32H523 SVD has no TIM12, so the rules sit in a file of their own and not in stm32h52x.toml"
+
+[match]
+parts = ["STM32H533*"]
+svd = ["STM32H5*.svd"]
+
+[[fields]]
+instances = ["TIM12"]
+registers = ["TIM12_CR2"]
+rename = { MMS1 = "MMS" }
+source = "RM0481 Rev 5, 46.7.2 TIM12_CR2: the SVD spells MMS[2:0] MMS1, the spelling the model and the TIM1 and TIM8 SVD use is MMS"
+
+[[fields]]
+instances = ["TIM12"]
+registers = ["TIM12_SMCR"]
+rename = { SMS_2 = "SMS_1", TS_2 = "TS_1" }
+source = "RM0481 Rev 5, 46.7.3 TIM12_SMCR: the SVD spells SMS bit 3 SMS_2 and TS[4:3] TS_2, the spelling the model and the TIM1 and TIM8 SVD use is SMS_1 and TS_1"

@@ -1,12 +1,50 @@
 format = 1
-source = "FLASH_OPTSR_CUR delivery value of the RM0481 parts outside stm32h56x.toml, the STM32H523, H533, H543 and H553, which have no silicon read-back of it. RM0481 Rev 5, Table 55 (7.4.3) gives the delivery option bytes, and the STM32H562, H563 and H573 take the value read on silicon from stm32h56x.toml. The STM32H503 is documented by RM0492, not RM0481, so it gets no rule here and keeps its SVD reset value"
+source = "IRQ add: stm32h523xx.h and stm32h533xx.h define PVD_AVD_IRQn 1, which the SVDs lack, placed on EXTI. FLASH_OPTSR_CUR delivery value of the RM0481 parts outside stm32h56x.toml, the STM32H523, H533, H543 and H553, which have no silicon read-back of it. RM0481 Rev 5, Table 55 (7.4.3) gives the delivery option bytes, and the STM32H562, H563 and H573 take the value read on silicon from stm32h56x.toml. The STM32H503 is documented by RM0492, not RM0481, so it gets no rule here and keeps its SVD reset value"
 
 [match]
 parts = ["STM32H523*", "STM32H533*", "STM32H543*", "STM32H553*"]
 svd = ["STM32H5*.svd"]
+
+[ip]
+renames = { DCACHE1 = ["DCACHE"], OCTOSPI1 = ["OCTOSPI"], I3C1 = ["I3C"], GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPIOF", "GPIOG", "GPIOH", "GPIOI"], GTZC = ["GTZC1_TZSC", "GTZC1_TZIC"] }
+
+[irqs]
+add = [
+  { number = 1, name = "PVD_AVD", peripheral = "EXTI" },
+]
 
 [[resets]]
 peripheral = "FLASH"
 register = "FLASH_OPTSR_CUR"
 reset = 0x2D30EDD8
 source = "RM0481 Rev 5, 7.11.19 FLASH_OPTSR_CUR: reset value 0xXXXX XXXX, the register is loaded from the option bytes, so the delivery value of Table 55 (7.4.3) and 7.4.4 is the reset value: BOOT_UBE 0xB4, IWDG_STDBY and IWDG_STOP 1, IO_VDDIO2_HSLV and IO_VDD_HSLV 0, PRODUCT_STATE 0xED, NRST_STOP, NRST_STDBY, IWDG_SW and WWDG_SW 1, BORH_EN 0, BOR_LEV 0, SWAP_BANK 0. The Table 55 row prints 29 bit digits for 28 field bits, bit 5 is reserved and is taken as 0, a modelled choice and not a manufacturing fact. ST's STM32H573 SVD gives 0"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["EXTI_RPR2"]
+fields = ["RPIF46", "RPIF50", "RPIF53"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 18.7.11 EXTI rising edge pending register 2 (EXTI_RPR2): RPIF46, RPIF50 and RPIF53 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["EXTI_FPR2"]
+fields = ["FPIF46", "FPIF50", "FPIF53"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 18.7.12 EXTI falling edge pending register 2 (EXTI_FPR2): FPIF46, FPIF50 and FPIF53 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
+
+[[cross]]
+instances = ["RCC"]
+reg = "RCC_CICR"
+target_reg = "RCC_CIFR"
+effect = "clear"
+pairs = { LSIRDYC = "LSIRDYF", LSERDYC = "LSERDYF", CSIRDYC = "CSIRDYF", HSIRDYC = "HSIRDYF", HSERDYC = "HSERDYF", HSI48RDYC = "HSI48RDYF", PLL1RDYC = "PLL1RDYF", PLL2RDYC = "PLL2RDYF", PLL3RDYC = "PLL3RDYF", HSECSSC = "HSECSSF" }
+source = "RM0481 Rev 5, 11.8.17/11.8.18 RCC clock source interrupt flag register (RCC_CIFR) / RCC clock source interrupt clear register (RCC_CICR)"
+
+[[cross]]
+instances = ["FLASH"]
+reg = "FLASH_NSCCR"
+target_reg = "FLASH_NSSR"
+effect = "clear"
+pairs = { CLR_EOP = "EOP", CLR_WRPERR = "WRPERR", CLR_PGSERR = "PGSERR", CLR_STRBERR = "STRBERR", CLR_INCERR = "INCERR", CLR_OBKERR = "OBKERR", CLR_OBKWERR = "OBKWERR", CLR_OPTCHANGEERR = "OPTCHANGEERR" }
+source = "RM0481 Rev 5, 7.11.9/7.11.13 FLASH nonsecure status register (FLASH_NSSR) / FLASH nonsecure clear control register (FLASH_NSCCR): a write of 1 to CLR_x clears the NSSR flag"

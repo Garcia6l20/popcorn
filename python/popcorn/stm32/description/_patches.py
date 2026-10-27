@@ -7,7 +7,7 @@ import copy
 import fnmatch
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from popcorn.stm32.description._binder import from_mapping
@@ -121,9 +121,18 @@ _INSTANCE_SELECTOR = {"selector_group": "instance_selector"}
 
 
 @dataclass(slots=True, kw_only=True)
+class FieldAdd:
+    name: str
+    lsb: int = field(metadata={"minimum": 0, "maximum": 31})
+    width: int = field(metadata={"minimum": 1, "maximum": 32})
+    acc: Access
+    reset: int = field(metadata={"minimum": 0, "maximum": 4294967295})
+
+
+@dataclass(slots=True, kw_only=True)
 class FieldsRule:
     registers: list[str]
-    fields: list[str]
+    fields: list[str] | None = None
     source: str
     ip: str | None = field(default=None, metadata=_INSTANCE_SELECTOR)
     instances: list[str] | None = field(default=None, metadata=_INSTANCE_SELECTOR)
@@ -131,6 +140,8 @@ class FieldsRule:
     on_read: ReadEffect | None = None
     width: int | None = field(default=None, metadata={"minimum": 1, "maximum": 32})
     drop: bool | None = None
+    rename: dict[str, str] | None = None
+    add: FieldAdd | None = None
     each: EachRange | None = None
 
 
@@ -218,6 +229,8 @@ class PatchReport:
     aliased: int = 0
     fields_touched: int = 0
     fields_dropped: int = 0
+    fields_renamed: int = 0
+    fields_added: int = 0
     cross_rules_added: int = 0
     irqs_dropped: int = 0
     irqs_added: int = 0
@@ -498,6 +511,14 @@ def _apply_fields(
 ) -> None:
     targets = _selector_targets(rule.ip, rule.instances, peripherals, file=file, key=key)
     suffixes = _expand_each(rule.each, file=file, key=key)
+    if rule.add is not None:
+        _add_field(rule, targets, peripherals, suffixes, touched, report, file=file, key=key)
+        return
+    if rule.rename is not None:
+        _rename_fields(rule, targets, peripherals, suffixes, touched, report, file=file, key=key)
+        return
+    if not rule.fields:
+        raise DescriptionError(file, 0, f"{key}.fields", "at least one field name")
     if rule.drop:
         _drop_fields(rule, targets, peripherals, suffixes, touched, report, file=file, key=key)
         return
@@ -508,7 +529,7 @@ def _apply_fields(
                 register = _find_register(
                     peripheral, register_name, file=file, key=f"{key}.registers"
                 )
-                for field_name in rule.fields:
+                for field_name in rule.fields or []:
                     field_desc = _find_field(register, field_name, file=file, key=f"{key}.fields")
                     if rule.width is not None:
                         marker = (peripheral.name, register.name, field_desc.name, "width")
@@ -570,7 +591,7 @@ def _drop_fields(
                 register = _find_register(
                     peripheral, register_name, file=file, key=f"{key}.registers"
                 )
-                for field_name in rule.fields:
+                for field_name in rule.fields or []:
                     marker = (peripheral.name, register.name, field_name, "drop")
                     if marker in touched:
                         raise DescriptionError(
@@ -584,6 +605,165 @@ def _drop_fields(
                                 if same.name == register.name:
                                     same.fields = [f for f in same.fields if f.name != field_name]
                     report.fields_dropped += 1
+
+
+def _add_field(
+    rule: FieldsRule,
+    targets: list[PeripheralDesc],
+    peripherals: dict[str, PeripheralDesc],
+    suffixes: list[str],
+    touched: set[tuple[str, str, str, str]],
+    report: PatchReport,
+    *,
+    file: str,
+    key: str,
+) -> None:
+    assert rule.add is not None
+    added = rule.add
+    if (
+        rule.fields
+        or rule.drop
+        or rule.rename is not None
+        or rule.width is not None
+        or rule.on_write is not None
+        or rule.on_read is not None
+    ):
+        raise DescriptionError(
+            file, 0, f"{key}.add", "a rule with no fields, drop, rename, width, on_write or on_read"
+        )
+    if not rule.source:
+        raise DescriptionError(file, 0, f"{key}.source", "a non-empty source")
+    if added.reset >> added.width:
+        raise DescriptionError(file, 0, f"{key}.add.reset", f"a value of {added.width} bits")
+    if rule.instances is None:
+        targets = [target for target in targets if target.alias_of is None]
+    bits = ((1 << added.width) - 1) << added.lsb
+    for peripheral in targets:
+        if peripheral.alias_of is not None:
+            raise DescriptionError(
+                file,
+                0,
+                f"{key}.instances",
+                f"a peripheral that is not an alias, not {peripheral.name}",
+            )
+        for register_template in rule.registers:
+            for suffix in suffixes:
+                register_name = register_template.replace("{n}", suffix)
+                register = _find_register(
+                    peripheral, register_name, file=file, key=f"{key}.registers"
+                )
+                marker = (peripheral.name, register.name, added.name, "add")
+                if marker in touched:
+                    raise DescriptionError(
+                        file, 0, f"{key}.add.name", f"{added.name} added by no earlier rule"
+                    )
+                touched.add(marker)
+                if any(other.name == added.name for other in register.fields):
+                    raise DescriptionError(
+                        file,
+                        0,
+                        f"{key}.add.name",
+                        f"a name not used in {register.name}, not {added.name}",
+                    )
+                if added.lsb + added.width > register.width:
+                    raise DescriptionError(
+                        file,
+                        0,
+                        f"{key}.add.width",
+                        f"bits inside the {register.width}-bit register",
+                    )
+                if any(bits & (((1 << f.width) - 1) << f.lsb) for f in register.fields):
+                    raise DescriptionError(
+                        file, 0, f"{key}.add.lsb", "bits clear of the other fields"
+                    )
+                new_field = FieldDesc(
+                    name=added.name,
+                    lsb=added.lsb,
+                    width=added.width,
+                    acc=added.acc,
+                    on_write=WriteEffect.MODIFY,
+                    on_read=ReadEffect.NONE,
+                )
+                for target in peripherals.values():
+                    if target is peripheral or target.alias_of == peripheral.name:
+                        for same in target.registers:
+                            if same.name == register.name:
+                                same.fields = sorted(
+                                    [*same.fields, replace(new_field)],
+                                    key=lambda f: f.lsb,
+                                    reverse=True,
+                                )
+                                same.reset = (same.reset & ~bits) | (added.reset << added.lsb)
+                                same.reset_mask |= bits
+                report.fields_added += 1
+
+
+def _rename_fields(
+    rule: FieldsRule,
+    targets: list[PeripheralDesc],
+    peripherals: dict[str, PeripheralDesc],
+    suffixes: list[str],
+    touched: set[tuple[str, str, str, str]],
+    report: PatchReport,
+    *,
+    file: str,
+    key: str,
+) -> None:
+    assert rule.rename is not None
+    if (
+        rule.fields
+        or rule.drop
+        or rule.width is not None
+        or rule.on_write is not None
+        or rule.on_read is not None
+    ):
+        raise DescriptionError(
+            file, 0, f"{key}.rename", "a rule with no fields, drop, width, on_write or on_read"
+        )
+    if not rule.source:
+        raise DescriptionError(file, 0, f"{key}.source", "a non-empty source")
+    if not rule.rename:
+        raise DescriptionError(file, 0, f"{key}.rename", "at least one field to rename")
+    if rule.instances is None:
+        targets = [target for target in targets if target.alias_of is None]
+    for peripheral in targets:
+        if peripheral.alias_of is not None:
+            raise DescriptionError(
+                file,
+                0,
+                f"{key}.instances",
+                f"a peripheral that is not an alias, not {peripheral.name}",
+            )
+        for register_template in rule.registers:
+            for suffix in suffixes:
+                register_name = register_template.replace("{n}", suffix)
+                register = _find_register(
+                    peripheral, register_name, file=file, key=f"{key}.registers"
+                )
+                for old, new in rule.rename.items():
+                    marker = (peripheral.name, register.name, old, "rename")
+                    if marker in touched:
+                        raise DescriptionError(
+                            file, 0, f"{key}.rename.{old}", f"{old} renamed by no earlier rule"
+                        )
+                    touched.add(marker)
+                    _find_field(register, old, file=file, key=f"{key}.rename.{old}")
+                    if any(other.name == new for other in register.fields):
+                        raise DescriptionError(
+                            file,
+                            0,
+                            f"{key}.rename.{old}",
+                            f"a name not used in {register.name}, not {new}",
+                        )
+                    for target in peripherals.values():
+                        if target is peripheral or target.alias_of == peripheral.name:
+                            for same in target.registers:
+                                if same.name == register.name:
+                                    same.fields = [
+                                        replace(f, name=new) if f.name == old else f
+                                        for f in same.fields
+                                    ]
+                    report.fields_renamed += 1
 
 
 def _resize_field(
@@ -859,7 +1039,10 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
     rule naming a dropped peripheral fails as naming an unknown one. A peripheral size, an added
     register and a register reset land in the named peripheral and in each of its aliases, so
     fields and cross rules may name the register. A fields rule with `drop` removes its fields
-    from the named peripheral and its aliases, and a later rule naming them fails.
+    from the named peripheral and its aliases, and a later rule naming them fails. A fields rule
+    with `rename` renames fields in the named peripheral and its aliases, and a later rule names
+    the new spelling. A fields rule with `add` adds one field, with its reset value, to the
+    named register of the named peripheral and its aliases, and a later rule names it.
     Validates every rule before mutating @p target: an error leaves it exactly as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)

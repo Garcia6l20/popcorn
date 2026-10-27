@@ -1,13 +1,9 @@
 format = 1
-source = "RM0481 Rev 5 and STM32H573 CubeMX db: SVD naming against CubeMX instances. IRQ adds: RM0481 Rev 5, 17.3 Table 152 STM32H562/563/573xx vector table lists PVD_AVD 1, RTC 2, RTC_S 3, FPU 103 and CEC 119, which STM32H573.svd lacks and the CMSIS IRQn_Type defines. PVD_AVD and FPU go to EXTI as the U5 SVD places PVD_PVM and FPU. The RTC lines go to RTC. HDMI-CEC is an unmodelled H5 block with no peripheral in the SVD, so CEC goes to EXTI too. IRQ rename: the SVD names IRQ 105 DCACHE, RM0481 Rev 5, 17.3 Table 152 names it DCACHE1 and the CMSIS IRQn_Type DCACHE1_IRQn, so it is dropped and added again under that name at the same number. GPDMA1 and GPDMA2 channels 0 to 7, IRQ 27 to 34 and 90 to 97: the SVD names them GPDMA<n>_CH<c>, RM0481 Rev 5, 17.3 Table 152 names them GPDMA<n>_Channel<c> as the CMSIS IRQn_Type does, dropped and added again the same way. Both renames give the same line name with and without the CMSIS header"
+source = "RM0481 Rev 5 and STM32H573 CubeMX db: SVD naming against CubeMX instances. IRQ adds: RM0481 Rev 5, 17.3 Table 152 STM32H562/563/573xx vector table lists PVD_AVD 1, RTC 2, RTC_S 3, FPU 103 and CEC 119, which STM32H573.svd lacks and the CMSIS IRQn_Type defines. PVD_AVD and FPU go to EXTI as the U5 SVD places PVD_PVM and FPU. The RTC lines go to RTC. HDMI-CEC is an unmodelled H5 block with no peripheral in the SVD, so CEC goes to EXTI too. IRQ rename: the SVD names IRQ 105 DCACHE, RM0481 Rev 5, 17.3 Table 152 names it DCACHE1 and the CMSIS IRQn_Type DCACHE1_IRQn, so it is dropped and added again under that name at the same number. GPDMA1 and GPDMA2 channels 0 to 7, IRQ 27 to 34 and 90 to 97: the SVD names them GPDMA<n>_CH<c>, RM0481 Rev 5, 17.3 Table 152 names them GPDMA<n>_Channel<c> as the CMSIS IRQn_Type does, dropped and added again the same way. The renames give the same line name with and without the CMSIS header"
 
 [match]
 parts = ["STM32H5*"]
 svd = ["STM32H5*.svd"]
-
-[peripherals]
-drop = ["SEC_LPUART1"]
-source = "STM32H573.svd derives SEC_LPUART1 from LPUART, not LPUART1, so the alias rule finds no base. RM0481 Rev 5, 2.3: the secure LPUART1 window is NS base + 0x1000_0000, unused under TZEN=0, D4"
 
 [aliases]
 prefix = "SEC_"
@@ -15,34 +11,7 @@ offset = 0x10000000
 source = "RM0481 Rev 5, 2.3 memory map: secure peripheral alias at NS base + 0x1000_0000"
 
 [ip]
-renames = { DCACHE1 = ["DCACHE"], LPUART1 = ["LPUART"], DAC1 = ["DAC"], OCTOSPI1 = ["OCTOSPI"], I3C1 = ["I3C"], GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPIOF", "GPIOG", "GPIOH", "GPIOI"], GTZC = ["GTZC1_TZSC", "GTZC1_TZIC"], GTZC_NS = ["GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3"] }
-
-[irqs]
-drop = ["DCACHE", "GPDMA1_CH0", "GPDMA1_CH1", "GPDMA1_CH2", "GPDMA1_CH3", "GPDMA1_CH4", "GPDMA1_CH5", "GPDMA1_CH6", "GPDMA1_CH7", "GPDMA2_CH0", "GPDMA2_CH1", "GPDMA2_CH2", "GPDMA2_CH3", "GPDMA2_CH4", "GPDMA2_CH5", "GPDMA2_CH6", "GPDMA2_CH7"]
-add = [
-  { number = 105, name = "DCACHE1", peripheral = "DCACHE" },
-  { number = 27, name = "GPDMA1_Channel0", peripheral = "GPDMA1" },
-  { number = 28, name = "GPDMA1_Channel1", peripheral = "GPDMA1" },
-  { number = 29, name = "GPDMA1_Channel2", peripheral = "GPDMA1" },
-  { number = 30, name = "GPDMA1_Channel3", peripheral = "GPDMA1" },
-  { number = 31, name = "GPDMA1_Channel4", peripheral = "GPDMA1" },
-  { number = 32, name = "GPDMA1_Channel5", peripheral = "GPDMA1" },
-  { number = 33, name = "GPDMA1_Channel6", peripheral = "GPDMA1" },
-  { number = 34, name = "GPDMA1_Channel7", peripheral = "GPDMA1" },
-  { number = 90, name = "GPDMA2_Channel0", peripheral = "GPDMA2" },
-  { number = 91, name = "GPDMA2_Channel1", peripheral = "GPDMA2" },
-  { number = 92, name = "GPDMA2_Channel2", peripheral = "GPDMA2" },
-  { number = 93, name = "GPDMA2_Channel3", peripheral = "GPDMA2" },
-  { number = 94, name = "GPDMA2_Channel4", peripheral = "GPDMA2" },
-  { number = 95, name = "GPDMA2_Channel5", peripheral = "GPDMA2" },
-  { number = 96, name = "GPDMA2_Channel6", peripheral = "GPDMA2" },
-  { number = 97, name = "GPDMA2_Channel7", peripheral = "GPDMA2" },
-  { number = 1, name = "PVD_AVD", peripheral = "EXTI" },
-  { number = 2, name = "RTC", peripheral = "RTC" },
-  { number = 3, name = "RTC_S", peripheral = "RTC" },
-  { number = 103, name = "FPU", peripheral = "EXTI" },
-  { number = 119, name = "CEC", peripheral = "EXTI" },
-]
+renames = { LPUART1 = ["LPUART"], DAC1 = ["DAC"] }
 
 [core]
 reset_clock_hz = 32_000_000
@@ -66,20 +35,6 @@ registers = ["EXTI_FPR1"]
 fields = ["FPIF0", "FPIF1", "FPIF2", "FPIF3", "FPIF4", "FPIF5", "FPIF6", "FPIF7", "FPIF8", "FPIF9", "FPIF10", "FPIF11", "FPIF12", "FPIF13", "FPIF14", "FPIF15", "FPIF16"]
 on_write = "one_to_clear"
 source = "RM0481 Rev 5, 18.7.5 EXTI falling edge pending register (EXTI_FPR1): FPIF0 to FPIF16 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
-
-[[fields]]
-instances = ["EXTI"]
-registers = ["EXTI_RPR2"]
-fields = ["RPIF46", "RPIF50", "RPIF53"]
-on_write = "one_to_clear"
-source = "RM0481 Rev 5, 18.7.11 EXTI rising edge pending register 2 (EXTI_RPR2): RPIF46, RPIF50 and RPIF53 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
-
-[[fields]]
-instances = ["EXTI"]
-registers = ["EXTI_FPR2"]
-fields = ["FPIF46", "FPIF50", "FPIF53"]
-on_write = "one_to_clear"
-source = "RM0481 Rev 5, 18.7.12 EXTI falling edge pending register 2 (EXTI_FPR2): FPIF46, FPIF50 and FPIF53 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
 
 [[fields]]
 ip = "I2C"
@@ -120,14 +75,6 @@ pairs = { ALERTCF = "ALERT", TIMOUTCF = "TIMEOUT", PECCF = "PECERR", OVRCF = "OV
 source = "RM0481 Rev 5, 53.9.7/53.9.8 I2C interrupt and status register (I2C_ISR) / I2C interrupt clear register (I2C_ICR)"
 
 [[cross]]
-instances = ["RCC"]
-reg = "RCC_CICR"
-target_reg = "RCC_CIFR"
-effect = "clear"
-pairs = { LSIRDYC = "LSIRDYF", LSERDYC = "LSERDYF", CSIRDYC = "CSIRDYF", HSIRDYC = "HSIRDYF", HSERDYC = "HSERDYF", HSI48RDYC = "HSI48RDYF", PLL1RDYC = "PLL1RDYF", PLL2RDYC = "PLL2RDYF", PLL3RDYC = "PLL3RDYF", HSECSSC = "HSECSSF" }
-source = "RM0481 Rev 5, 11.8.17/11.8.18 RCC clock source interrupt flag register (RCC_CIFR) / RCC clock source interrupt clear register (RCC_CICR)"
-
-[[cross]]
 instances = ["RTC"]
 reg = "RTC_SCR"
 target_reg = "RTC_SR"
@@ -136,294 +83,12 @@ pairs = { CALRAF = "ALRAF", CALRBF = "ALRBF", CWUTF = "WUTF", CTSF = "TSF", CTSO
 source = "RM0481 Rev 5, 51.6.20/51.6.23 RTC status register (RTC_SR) / RTC status clear register (RTC_SCR)"
 
 [[cross]]
-ip = "SAI"
-reg = "SAI_ACLRFR"
-target_reg = "SAI_ASR"
-effect = "clear"
-pairs = { CLFSDET = "LFSDET", CAFSDET = "AFSDET", CCNRDY = "CNRDY", CWCKCFG = "WCKCFG", CMUTEDET = "MUTEDET", COVRUDR = "OVRUDR" }
-source = "RM0481 Rev 5, 59.6.7/59.6.8 SAI status register (SAI_ASR) / SAI clear flag register (SAI_ACLRFR), sub-block A"
-
-[[cross]]
-ip = "SAI"
-reg = "SAI_BCLRFR"
-target_reg = "SAI_BSR"
-effect = "clear"
-pairs = { CLFSDET = "LFSDET", CAFSDET = "AFSDET", CCNRDY = "CNRDY", CWCKCFG = "WCKCFG", CMUTEDET = "MUTEDET", COVRUDR = "OVRUDR" }
-source = "RM0481 Rev 5, 59.6.15/59.6.16 SAI status register (SAI_BSR) / SAI clear flag register (SAI_BCLRFR), sub-block B"
-
-[[cross]]
 ip = "SPI"
 reg = "SPI_IFCR"
 target_reg = "SPI_SR"
 effect = "clear"
 pairs = { SUSPC = "SUSP", MODFC = "MODF", TIFREC = "TIFRE", CRCEC = "CRCE", OVRC = "OVR", UDRC = "UDR", TXTFC = "TXTF", EOTC = "EOT" }
 source = "RM0481 Rev 5, 58.11.6/58.11.7 SPI/I2S status register (SPI_SR) / SPI/I2S interrupt/status flags clear register (SPI_IFCR)"
-
-[[cross]]
-ip = "USART"
-reg = "USART_ICR"
-target_reg = "USART_ISR_enabled"
-effect = "clear"
-pairs = { CMCF = "CMF", EOBCF = "EOBF", RTOCF = "RTOF", CTSCF = "CTSIF", LBDCF = "LBDF", TCBGTCF = "TCBGT", TCCF = "TC", TXFECF = "TXFE", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE", UDRCF = "UDR", WUCF = "WUF" }
-source = "RM0481 Rev 5, 56.8.10/56.8.12 USART interrupt and status register (USART_ISR) / USART interrupt flag clear register (USART_ICR); ISR_enabled is the storage owner the SVD's ISR_disabled alternate view points at."
-
-[[cross]]
-ip = "UART"
-reg = "USART_ICR"
-target_reg = "USART_ISR_enabled"
-effect = "clear"
-pairs = { CMCF = "CMF", EOBCF = "EOBF", RTOCF = "RTOF", CTSCF = "CTSIF", LBDCF = "LBDF", TCBGTCF = "TCBGT", TCCF = "TC", TXFECF = "TXFE", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE", UDRCF = "UDR", WUCF = "WUF" }
-source = "RM0481 Rev 5, 56.8.10/56.8.12, the same shared USART/UART chapter as the USART-keyed rule above; UART4, UART5, UART7 to UART9 and UART12 are a different db IP (UART, not USART) with the same ISR/ICR layout in the SVD."
-
-[[cross]]
-ip = "LPUART"
-reg = "LPUART_ICR"
-target_reg = "LPUART_ISR_enabled"
-effect = "clear"
-pairs = { CMCF = "CMF", CTSCF = "CTSIF", TCCF = "TC", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE", WUCF = "WUF" }
-source = "RM0481 Rev 5, 57.7.8 LPUART interrupt and status register (LPUART_ISR) / 57.7.10 LPUART interrupt flag clear register (LPUART_ICR): a reduced set versus USART_ICR."
-
-[[cross]]
-instances = ["UCPD1"]
-reg = "UCPD_ICR"
-target_reg = "UCPD_SR"
-effect = "clear"
-pairs = { FRSEVTCF = "FRSEVT", TYPECEVT2CF = "TYPECEVT2", TYPECEVT1CF = "TYPECEVT1", RXMSGENDCF = "RXMSGEND", RXOVRCF = "RXOVR", RXHRSTDETCF = "RXHRSTDET", RXORDDETCF = "RXORDDET", TXUNDCF = "TXUND", HRSTSENTCF = "HRSTSENT", HRSTDISCCF = "HRSTDISC", TXMSGABTCF = "TXMSGABT", TXMSGSENTCF = "TXMSGSENT", TXMSGDISCCF = "TXMSGDISC" }
-source = "RM0481 Rev 5, 62.8.6/62.8.7 UCPD status register (UCPD_SR) / UCPD interrupt clear register (UCPD_ICR)"
-
-[[cross]]
-instances = ["FLASH"]
-reg = "FLASH_NSCCR"
-target_reg = "FLASH_NSSR"
-effect = "clear"
-pairs = { CLR_EOP = "EOP", CLR_WRPERR = "WRPERR", CLR_PGSERR = "PGSERR", CLR_STRBERR = "STRBERR", CLR_INCERR = "INCERR", CLR_OBKERR = "OBKERR", CLR_OBKWERR = "OBKWERR", CLR_OPTCHANGEERR = "OPTCHANGEERR" }
-source = "RM0481 Rev 5, 7.11.9/7.11.13 FLASH nonsecure status register (FLASH_NSSR) / FLASH nonsecure clear control register (FLASH_NSCCR): a write of 1 to CLR_x clears the NSSR flag"
-
-[[registers]]
-peripheral = "GPIOI"
-name = "GPIOI_AFRH"
-offset = 0x024
-width = 32
-reset = 0
-acc = "read_write"
-fields = [{ name = "AFSEL8", lsb = 0, width = 4 }, { name = "AFSEL9", lsb = 4, width = 4 }, { name = "AFSEL10", lsb = 8, width = 4 }, { name = "AFSEL11", lsb = 12, width = 4 }]
-source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_AFRH at 0x42022024 takes 0x0000D5A1 and returns it, 0xFFFFFFFF returns 0x0000FFFF, so AFSEL8 to AFSEL11 exist and bits 31:16 read 0. DS14121 Rev 5, Table 17 lists PI11 AF13 PSSI_D15. RM0481 Rev 5, 13.4.10 limits GPIOx_AFRH to x = A to H and the STM32H5 SVDs have no GPIOI_AFRH"
-
-[[resets]]
-peripheral = "RNG"
-register = "RNG_CR"
-reset = 0x00800D00
-source = "RM0481 Rev 5, 36.7.1 RNG control register (RNG_CR): reset value 0x0080 0D00, RNG_CONFIG1 0x08 and RNG_CONFIG3 0xD. ST's STM32H573 SVD gives 0x00871F00"
-
-[[resets]]
-peripheral = "PWR"
-register = "PWR_VOSSR"
-reset = 0x2008
-source = "RM0481 Rev 5, 10.11.6 PWR voltage scaling status register (PWR_VOSSR): reset value 0x0000 2008, ACTVOSRDY and VOSRDY set at VOS3. ST's STM32H573 SVD gives 0x8"
-
-[[resets]]
-peripheral = "RCC"
-register = "RCC_CR"
-reset = 0x2B
-source = "RM0481 Rev 5, 11.8.1 RCC clock control register (RCC_CR): reset value 0x0000 002B, HSIDIV 01. ST's STM32H573 SVD gives 0x23, HSIDIV 00"
-
-[[resets]]
-peripheral = "GPIOB"
-register = "GPIOB_MODER"
-reset = 0xFFFFFEBF
-source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFEBF for port B. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOB"
-register = "GPIOB_OSPEEDR"
-reset = 0x000000C0
-source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x000000C0 for port B. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOB"
-register = "GPIOB_PUPDR"
-reset = 0x00000100
-source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000100 for port B. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOC"
-register = "GPIO_MODER"
-reset = 0xFFFFFFFF
-source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port C. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOC"
-register = "GPIO_OSPEEDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port C. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOC"
-register = "GPIO_PUPDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port C. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOD"
-register = "GPIO_MODER"
-reset = 0xFFFFFFFF
-source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port D. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOD"
-register = "GPIO_OSPEEDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port D. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOD"
-register = "GPIO_PUPDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port D. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOE"
-register = "GPIO_MODER"
-reset = 0xFFFFFFFF
-source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port E. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOE"
-register = "GPIO_OSPEEDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port E. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOE"
-register = "GPIO_PUPDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port E. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOF"
-register = "GPIO_MODER"
-reset = 0xFFFFFFFF
-source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port F. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOF"
-register = "GPIO_OSPEEDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port F. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOF"
-register = "GPIO_PUPDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port F. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOG"
-register = "GPIO_MODER"
-reset = 0xFFFFFFFF
-source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port G. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOG"
-register = "GPIO_OSPEEDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port G. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOG"
-register = "GPIO_PUPDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port G. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOH"
-register = "GPIOH_MODER"
-reset = 0xFFFFFFFF
-source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port H. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOH"
-register = "GPIOH_OSPEEDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port H. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOH"
-register = "GPIOH_PUPDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port H. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOI"
-register = "GPIOI_MODER"
-reset = 0x00FFFFFF
-source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0x00FFFFFF for port I. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOI"
-register = "GPIOI_OSPEEDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port I. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOI"
-register = "GPIOI_PUPDR"
-reset = 0x00000000
-source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port I. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
-
-[[resets]]
-peripheral = "GPIOI"
-register = "GPIOI_SECCFGR"
-reset = 0x00000FFF
-source = "RM0481 Rev 5, 13.4.13 GPIOx_SECCFGR reset value 0x00000FFF for port I, which has 12 pins. ST's STM32H573 SVD gives 0x0000FFFF"
-
-[[resets]]
-peripheral = "DBGMCU"
-register = "DBGMCU_IDCODE"
-reset = 0x10016484
-source = "RM0481 Rev 5, 66.12.4 DBGMCU_IDCODE: DEV_ID 0x484 for STM32H562/563/573, REV_ID 0x1001 for revision Z, bits 15:12 read 6 as the reset value 0xXXXX 6XXX shows. REV_ID is a modelled revision, not a manufacturing fact, the RM lists several and gives no default. ST's STM32H573 SVD gives 0x00006000"
-
-[[resets]]
-peripheral = "FLASH"
-register = "FLASH_OPTSR2_CUR"
-reset = 0xC300017C
-source = "Silicon read-back on two STM32H573 parts in delivery state: FLASH_OPTSR2_CUR 0xC300017C. RM0481 Rev 5, 7.11.23 FLASH_OPTSR2_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: TZEN 0xC3 (TrustZone disabled), USBPD_DIS, SRAM2_ECC, SRAM3_ECC, BKPRAM_ECC, SRAM2_RST and SRAM13_RST 1. ST STM32H573 SVD gives 0"
-
-[[resets]]
-peripheral = "FLASH"
-register = "FLASH_NSBOOTR_CUR"
-reset = 0x080000C3
-source = "RM0481 Rev 5, 7.11.25 FLASH_NSBOOTR_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: NSBOOTADD 0x0800 0000 (NSBOOTADD[23:8] 0x0800, NSBOOTADD[7:0] 0x00) and NSBOOT_LOCK 0xC3. ST's STM32H573 SVD gives 0"
-
-[[resets]]
-peripheral = "FLASH"
-register = "FLASH_SECBOOTR_CUR"
-reset = 0x0C0000C3
-source = "RM0481 Rev 5, 7.11.27 FLASH_SECBOOTR_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: SECBOOTADD 0x0C00 0000 (SECBOOTADD[23:8] 0x0C00, SECBOOTADD[7:0] 0x00) and SECBOOT_LOCK 0xC3. ST's STM32H573 SVD gives 0"
-
-[[resets]]
-peripheral = "FLASH"
-register = "FLASH_SECWM1R_CUR"
-reset = 0x0000007F
-source = "RM0481 Rev 5, 7.11.33 FLASH_SECWM1R_CUR: reset value 0x00XX 00XX, loaded from the option bytes. Delivery value of Table 55: SECWM1_STRT 0x7F, SECWM1_END 0x00, no secure area. ST's STM32H573 SVD gives 0"
-
-[[resets]]
-peripheral = "FLASH"
-register = "FLASH_SECWM2R_CUR"
-reset = 0x0000007F
-source = "RM0481 Rev 5, 7.11.46 FLASH_SECWM2R_CUR: reset value 0x00XX 00XX, loaded from the option bytes. Delivery value of Table 55: SECWM2_STRT 0x7F, SECWM2_END 0x00, no secure area. ST's STM32H573 SVD gives 0"
-
-[[resets]]
-peripheral = "FLASH"
-register = "FLASH_HDP1R_CUR"
-reset = 0x00000001
-source = "RM0481 Rev 5, 7.11.39 FLASH_HDP1R_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: HDP1_STRT 1, HDP1_END 0, no HDP area. ST's STM32H573 SVD gives 0"
-
-[[resets]]
-peripheral = "FLASH"
-register = "FLASH_HDP2R_CUR"
-reset = 0x00000001
-source = "RM0481 Rev 5, 7.11.52 FLASH_HDP2R_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: HDP2_STRT 1, HDP2_END 0, no HDP area. ST's STM32H573 SVD gives 0"
 
 [memory]
 source = "RM0481 Rev 5, 7.3.9: the 2048-byte OTP area at 0x08FF F000 to 0x08FF F7FF, written once in 16-bit units through the flash interface and read-only to the CPU, and the read-only area at 0x08FF F800 to 0x08FF FFFF that holds the device signature, 67.1 to 67.3. 7.3.10: the high-cycle data area at 0x0900 0000 to 0x0901 7FFF is a plain read-only region here, with no controller, since EDATA programming is not modelled. 7.3.5 to 7.3.8: flash is programmed by stores into the main memory range through the FLASH interface, so FLASH controls both flash windows. OTP programming is not modelled"

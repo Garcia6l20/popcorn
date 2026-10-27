@@ -90,6 +90,51 @@ Otherwise the build raises `DescriptionError` with the rule's index. The fields 
 peripheral and each of its aliases, and a later rule naming them fails as naming an unknown
 field. The patch report counts the drops in `fields_dropped`.
 
+## Field renames
+
+Two families can spell one field differently in their SVDs, such as the high bit of the timer
+slave mode. A `[[fields]]` rule with `rename` gives the SVD field the spelling the model looks up:
+
+```toml
+[[fields]]
+instances = ["TIM2"]
+registers = ["TIM2_SMCR"]
+rename = { SMS_2 = "SMS_1", TS_2 = "TS_1" }
+source = "RM0481 Rev 5, 44.5.3: the SVD spells the SMCR bits as SMS_2 and TS_2"
+```
+
+`rename` maps each old name to its new one. The rule takes the usual selector, `registers` with an
+optional `each` range and a non-empty `source`. It carries no `fields`, `drop`, `width`,
+`on_write` or `on_read`. An `ip` selector picks the peripherals of that IP that are not aliases,
+`instances` must name such peripherals. The build raises `DescriptionError` with the rule's index
+when a register or a field is unknown, when the new name is already a field of the register, when
+a rule renames a field an earlier rule renamed, or when the rule names no field. The new spelling
+applies to the named peripheral and each of its aliases, and a later rule names it. The patch
+report counts the renames in `fields_renamed`.
+
+## Field adds
+
+Silicon can hold a field the SVD omits. A `[[fields]]` rule with `add` puts one field into an
+existing register:
+
+```toml
+[[fields]]
+instances = ["TIM15"]
+registers = ["TIM15_SMCR"]
+add = { name = "SMSPE", lsb = 24, width = 1, acc = "read_write", reset = 0 }
+source = "Silicon read-back on an STM32H573: TIM15_SMCR written 0xFFFFFFFF reads 0x033100F7"
+```
+
+`add` holds the field `name`, its bit offset `lsb`, its `width`, its access `acc` and its `reset`
+value. The reset value lands in the register's reset word and marks those bits as known. The rule
+takes the usual selector, `registers` with an optional `each` range and a non-empty `source`. It
+carries no `fields`, `drop`, `rename`, `width`, `on_write` or `on_read`. The field is added to
+the named peripheral and each of its aliases, and a later rule names it. The build raises
+`DescriptionError` with the rule's index when the register is unknown, when the name is already a
+field of the register, when the bits overlap another field or leave the register, when the reset
+value does not fit the width, or when an earlier rule added the same field. The patch report
+counts the adds in `fields_added`.
+
 ## Shipped descriptions
 
 A description can ship in the package as `<RefName>[-<core>].json.xz` under

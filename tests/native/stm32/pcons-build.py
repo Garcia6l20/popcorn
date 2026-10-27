@@ -200,6 +200,18 @@ for _, target in h573_firmwares.values():
     if target is not None:
         gpdma_h573.depends(target)
 
+tim_spi_h573 = add_doctest(
+    "stm32-tim-spi-h573",
+    [here / "test_tim_spi_h573.cpp"],
+    static_with_devices,
+    env=h573_env,
+    register=h573 is not None,
+)
+tim_spi_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        tim_spi_h573.depends(target)
+
 link_queues = add_doctest("stm32-link-queues", [here / "test_link_queues.cpp"], static)
 link_queues.private.include_dirs.append(project_dir / "native" / "src" / "bind")
 

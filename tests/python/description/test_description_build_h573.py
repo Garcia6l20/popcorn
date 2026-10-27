@@ -51,10 +51,6 @@ NO_IP_VERSION = {"ADCC", "CRS", "DBGMCU", "DLYBOS1", "DLYBSD1", "DLYBSD2", "EXTI
 """Peripherals with no CubeMX instance under any name, so their IP version stays empty."""
 
 NAMES_ONLY_IN_CMSIS = {
-    41: ("TIM1_BRK_TERR_IERR_IRQn", "TIM1_BRK_IRQn"),
-    43: ("TIM1_TRG_COM_DIR_IDX_IRQn", "TIM1_TRG_COM_IRQn"),
-    65: ("IM8_BRK_TERR_IERR_IRQn", "TIM8_BRK_IRQn"),
-    67: ("TIM8_TRG_COM_DIR_IDX_IRQn", "TIM8_TRG_COM_IRQn"),
     74: ("USB_FS_IRQn", "USB_DRD_FS_IRQn"),
     111: ("Cordic_IRQn", "CORDIC_IRQn"),
     113: ("DTS_WKUP_IRQn", "DTS_IRQn"),
@@ -114,8 +110,12 @@ def test_only_peripherals_without_a_cubemx_instance_have_no_ip_version(
     empty = {p.name for p in description.peripherals if p.alias_of is None and not p.ip_version}
     assert empty == NO_IP_VERSION
     part = read_part(h573_sources.mcu_db.read_bytes(), file=str(h573_sources.mcu_db))
-    patch = next(path for path in h573_sources.patches if path.name == "stm32h5.toml")
-    renamed = set(tomllib.loads(patch.read_text(encoding="utf-8"))["ip"]["renames"])
+    renamed = {
+        instance
+        for path in h573_sources.patches
+        if path.name in ("stm32h5.toml", "stm32h56x.toml")
+        for instance in tomllib.loads(path.read_text(encoding="utf-8"))["ip"]["renames"]
+    }
     peripherals = _by_name(description)
     unmatched = {ip.instance for ip in part.ips if ip.instance not in peripherals} - renamed
     assert unmatched == NO_CUBEMX_PERIPHERAL
@@ -317,7 +317,7 @@ def test_each_flash_cur_register_resets_to_its_table_55_delivery_value(
 
 def test_every_patched_reset_is_a_known_value_in_every_bit(h573_sources: Sources) -> None:
     peripherals = _by_name(build_description(h573_sources))
-    patch = next(path for path in h573_sources.patches if path.name == "stm32h5.toml")
+    patch = next(path for path in h573_sources.patches if path.name == "stm32h56x.toml")
     rules = tomllib.loads(patch.read_text(encoding="utf-8"))["resets"]
     assert rules
     for rule in rules:
@@ -342,9 +342,11 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
         aliased=103,
         fields_touched=60,
         fields_dropped=48,
+        fields_renamed=21,
+        fields_added=2,
         cross_rules_added=847,
-        irqs_dropped=17,
-        irqs_added=22,
+        irqs_dropped=21,
+        irqs_added=26,
         sizes_set=1,
         registers_added=27,
         resets_set=37,
@@ -355,20 +357,26 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
     )
     patch = next(path for path in h573_sources.patches if path.name == "stm32h5.toml")
     rules = tomllib.loads(patch.read_text(encoding="utf-8"))
-    assert len(rules["irqs"]["add"]) == report.irqs_added
-    assert len(rules["irqs"]["drop"]) == report.irqs_dropped
-    assert len(rules["registers"]) == report.registers_added
+    family = tomllib.loads(
+        next(path for path in h573_sources.patches if path.name == "stm32h56x.toml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "irqs" not in rules
+    assert len(family["irqs"]["add"]) == report.irqs_added
+    assert len(family["irqs"]["drop"]) == report.irqs_dropped
+    assert len(rules["registers"]) + len(family["registers"]) == report.registers_added
     assert len(rules["memory"]["add"]) == report.regions_added
-    assert len(rules["peripherals"]["drop"]) == report.peripherals_dropped
+    assert len(family["peripherals"]["drop"]) == report.peripherals_dropped
 
 
 def test_the_patch_file_applies_only_to_its_parts(h573_sources: Sources, tmp_path: Path) -> None:
-    patch = next(path for path in h573_sources.patches if path.name == "stm32h5.toml")
-    text = patch.read_text(encoding="utf-8").replace('parts = ["STM32H5*"]', 'parts = ["STM32H6*"]')
+    patch = next(path for path in h573_sources.patches if path.name == "stm32h56x.toml")
+    text = patch.read_text(encoding="utf-8").replace('"STM32H573*"', '"STM32H673*"')
     other = tmp_path / patch.name
     other.write_text(text, encoding="utf-8")
     patches = [other if path == patch else path for path in h573_sources.patches]
-    with pytest.raises(DescriptionError, match=r"PVD_AVD_IRQn\(1\), RTC_IRQn\(2\)"):
+    with pytest.raises(DescriptionError, match=r"aliases\.SEC_LPUART1"):
         build_description(replace(h573_sources, patches=patches))
 
 
@@ -447,3 +455,12 @@ def test_gpioi_carries_the_per_pin_fields_of_pins_0_to_11_only(h573_sources: Sou
             if register == "LCKR":
                 expected.add("LCKK")
             assert {f.name for f in registers[register].fields} == expected, f"{name} {register}"
+
+
+def test_tim15_smcr_holds_the_preload_fields_the_svd_lacks(h573_sources: Sources) -> None:
+    peripherals = _by_name(build_description(h573_sources))
+    for unit in ("TIM15", "SEC_TIM15"):
+        smcr = next(r for r in peripherals[unit].registers if r.name in ("SMCR", "TIM15_SMCR"))
+        fields = {f.name: (f.lsb, f.width) for f in smcr.fields}
+        assert fields["SMSPE"] == (24, 1), unit
+        assert fields["SMSPS"] == (25, 1), unit

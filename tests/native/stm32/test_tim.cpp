@@ -2,6 +2,7 @@
 #include "stm32_fixture.hpp"
 #include "trigger_signal.hpp"
 
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/intercept.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
@@ -1662,7 +1663,7 @@ auto last_warning(std::vector<core::log_record> const& logged) -> core::log_reco
 
 TEST_CASE("TIM1 and TIM8 warnings name registers by their bare names")
 {
-  for(auto const* const unit : {"TIM1", "TIM8"})
+  for(std::string_view const unit : {"TIM1", "TIM8"})
   {
     CAPTURE(unit);
     direct                        t;
@@ -3884,4 +3885,70 @@ TEST_CASE("a glitching filtered input keeps one filter event queued")
   run_to(t, t.next);
   CHECK(t.f.target->pending_events() <= events + 1);
   CHECK(t.bits("TIM3", "SR", "CC1IF") == 0);
+}
+
+namespace
+{
+auto timer_register(popcorn::part_description& desc, std::string_view unit, std::string_view reg)
+    -> popcorn::register_desc&
+{
+  auto const found =
+      std::ranges::find(desc.peripherals, std::string{unit}, &popcorn::peripheral_desc::name);
+  REQUIRE(found != desc.peripherals.end());
+  auto const named =
+      std::ranges::find(found->registers, std::string{reg}, &popcorn::register_desc::name);
+  REQUIRE(named != found->registers.end());
+  return *named;
+}
+
+void drop_field(popcorn::register_desc& reg, std::string_view field)
+{
+  REQUIRE(
+      std::erase_if(reg.fields, [&](popcorn::field_desc const& bits) { return bits.name == field; })
+      == 1);
+}
+}
+
+TEST_CASE("a U575 timer without its renamed SMS_1, TS_1 or 4-bit MMS_1 throws at construction")
+{
+  for(std::string_view const unit : {"TIM1", "TIM2", "TIM3", "TIM4", "TIM5", "TIM8"})
+  {
+    CAPTURE(unit);
+    auto desc = u575();
+    drop_field(timer_register(desc, unit, "CR2"), "MMS_1");
+    CHECK_THROWS_AS(stm32_fixture(std::move(desc), "tim_ll"), popcorn::config_error);
+  }
+  for(std::string_view const field : {"SMS_1", "TS_1"})
+  {
+    CAPTURE(field);
+    auto desc = u575();
+    drop_field(timer_register(desc, "TIM2", "SMCR"), field);
+    CHECK_THROWS_AS(stm32_fixture(std::move(desc), "tim_ll"), popcorn::config_error);
+  }
+}
+
+TEST_CASE("a U575 timer whose MMS has 3 bits or none throws when the description says otherwise")
+{
+  SUBCASE("TIM15 given an MMS_1")
+  {
+    auto desc = u575();
+    timer_register(desc, "TIM15", "CR2").fields.push_back({.name = "MMS_1", .lsb = 25, .width = 1});
+    CHECK_THROWS_AS(stm32_fixture(std::move(desc), "tim_ll"), popcorn::config_error);
+  }
+  SUBCASE("TIM6 without its MMS")
+  {
+    auto desc = u575();
+    drop_field(timer_register(desc, "TIM6", "CR2"), "MMS");
+    CHECK_THROWS_AS(stm32_fixture(std::move(desc), "tim_ll"), popcorn::config_error);
+  }
+  SUBCASE("TIM16 given an MMS")
+  {
+    auto desc = u575();
+    timer_register(desc, "TIM16", "CR2").fields.push_back({.name = "MMS", .lsb = 4, .width = 3});
+    CHECK_THROWS_AS(stm32_fixture(std::move(desc), "tim_ll"), popcorn::config_error);
+  }
+  SUBCASE("the shipped description")
+  {
+    CHECK_NOTHROW(stm32_fixture(u575(), "tim_ll"));
+  }
 }

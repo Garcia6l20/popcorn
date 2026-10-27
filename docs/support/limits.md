@@ -10,6 +10,10 @@ keep running as the section says. Under `strict` each such warning raises `Model
 The MDF and ADF model raises `UnmodelledConfig`. Read the log records of a run to see which
 settings a firmware reached.
 
+On the STM32H5 a Machine runs the STM32H562, H563 and H573. The STM32H503, H523 and H533
+descriptions build from their SVD, and attaching a Machine to them raises `ConfigError`: at
+FLASH_SECKEYR on the STM32H503, at the RCC reset bit of ADCC on the STM32H523 and H533.
+
 ## Peripherals without a model
 
 The [part pages](generated/parts.md) list the instances with no model.
@@ -122,6 +126,9 @@ Differs from RM0481:
   the delivery values of RM0481 Table 55, FLASH_SECBOOTR_CUR reads 0 on the bus while TrustZone
   is off, and the WRP _CUR registers read 0xFFFFFFFF. With them every reset loads the encoded
   values. FLASH_NSEPOCHR_CUR, FLASH_SECEPOCHR_CUR and the _PRG registers reset to 0.
+- On the STM32H562, H563 and H573 FLASH_OPTSR_CUR reads the delivery value 0x2D30EDF8 read from
+  silicon, which differs from RM0481 Table 55 in bit 5. The STM32H523, H533, H543 and H553 read
+  the Table 55 value.
 - A program over a word that is not erased writes the new data as given.
 
 ## GPDMA and LPDMA
@@ -307,6 +314,8 @@ Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   as a plain full-duplex or simplex SPI.
 - The dummy frame RM0456 Figure 858 shows ahead of the UDRDR pattern is UDRDR too, and UDR rises
   at once, with no propagation latency.
+- RM0481 Table 645 limits SPI4 to SPI6 of the STM32H5 to DSIZE of 16 bits and CRC of 17 bits.
+  The model accepts the DSIZE values of SPI1 to SPI3 there, and the CRC is not modelled.
 
 ## SYSCFG
 
@@ -329,6 +338,8 @@ Not modelled, logged:
 - A slave mode trigger input that no pin and no routed timer drives. No trigger reaches the slave
   mode controller.
 - The trigger DMA request, TDE, and COM and trigger burst requests.
+- The slave mode preload, `SMCR.SMSPE` and `SMSPS`. Both are storage and a counter start with
+  SMSPE set logs once.
 
 Differs from RM0456:
 

@@ -413,3 +413,21 @@ peripheral = "TIM17"
 register = "DMAR"
 reset = 0
 source = "RM0456 rev 6, 56.8.20 TIMx DMA control register (TIMx_DCR)(x = 16 to 17) and 56.8.21 TIM16/TIM17 DMA address for full transfer (TIMx_DMAR)(x = 16 to 17): reset value 0x0000 0000. ST's STM32U575 SVD gives 0x1, which would point DBA at CR2 and send DMAR accesses there"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM5"]
+registers = ["CR2"]
+rename = { MMS_3 = "MMS_1" }
+source = "RM0456 rev 6, 55.5.2 TIMx control register 2: the STM32U575 SVD spells MMS bit 3 MMS_3 on TIM2 to TIM5, the spelling the model and the TIM1 and TIM8 SVD use is MMS_1"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM5"]
+registers = ["SMCR"]
+rename = { SMS_bit3 = "SMS_1", TS_4_3 = "TS_1" }
+source = "RM0456 rev 6, 55.5.3 TIMx slave mode control register: the STM32U575 SVD spells SMS bit 3 SMS_bit3 and TS[4:3] TS_4_3 on TIM2 to TIM5, the spelling the model and the TIM1 and TIM8 SVD use is SMS_1 and TS_1"
+
+[[fields]]
+instances = ["TIM15"]
+registers = ["SMCR"]
+rename = { SMS_3 = "SMS_1", TS_4_3 = "TS_1" }
+source = "RM0456 rev 6, 56.7.3 TIM15 slave mode control register: the STM32U575 SVD spells SMS bit 3 SMS_3 and TS[4:3] TS_4_3 on TIM15, the spelling the model and the TIM1 and TIM8 SVD use is SMS_1 and TS_1"

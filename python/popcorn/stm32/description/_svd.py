@@ -6,7 +6,7 @@ Pure function of the file bytes: ``expand_svd`` never touches the filesystem.
 import copy
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from xml.etree.ElementTree import Element
 
@@ -338,7 +338,7 @@ def _build_register(
         reset=props.reset_value,
         reset_mask=props.reset_mask,
         acc=props.access,
-        fields=fields,
+        fields=[replace(field) for field in fields],
         alternate_of=alternate_of,
     )
 

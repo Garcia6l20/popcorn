@@ -1,0 +1,13 @@
+format = 1
+source = "STM32H523 IRQ adds. stm32h523xx.h defines PKA_IRQn 118 and TIM12_IRQn 120, which STM32H523.svd lacks. The part has both blocks, RM0481 Rev 5, 41.3 lists its PKA in limited mode and the header defines PKA_BASE and TIM12_BASE, but the SVD describes neither, so both lines go to EXTI as the CEC line does in stm32h5.toml"
+
+[match]
+parts = ["STM32H523*"]
+svd = ["STM32H5*.svd"]
+
+
+[irqs]
+add = [
+  { number = 118, name = "PKA", peripheral = "EXTI" },
+  { number = 120, name = "TIM12", peripheral = "EXTI" },
+]

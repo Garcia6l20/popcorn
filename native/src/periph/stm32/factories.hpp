@@ -92,8 +92,11 @@ namespace popcorn::periph::stm32
  */
 [[nodiscard]] auto usart_factory(board const& b, usart_variant variant) -> model_factory;
 
-/** @brief Factory of the TIM model, RM0456 sections 54 to 57. */
-[[nodiscard]] auto tim_factory() -> model_factory;
+/**
+ * @brief Factory of the TIM model, RM0456 sections 54 to 57 and RM0481 sections 43 to 48.
+ * @param variant What differs between the timers of the family the row serves.
+ */
+[[nodiscard]] auto tim_factory(tim_variant variant) -> model_factory;
 
 /** @brief Factory of the IWDG model, RM0456 section 61. */
 [[nodiscard]] auto iwdg_factory() -> model_factory;
@@ -113,10 +116,11 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto tamp_factory(rtc_variant variant) -> model_factory;
 
 /**
- * @brief Factory of the SPI model, RM0456 section 68.
+ * @brief Factory of the SPI model, RM0456 section 68 and RM0481 section 58.
  * @param b Board whose `spi` lists each instance's devices, copied when a model is made.
+ * @param variant What differs between the peripherals of the family the row serves.
  */
-[[nodiscard]] auto spi_factory(board const& b) -> model_factory;
+[[nodiscard]] auto spi_factory(board const& b, spi_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the I2C model, RM0456 section 65.

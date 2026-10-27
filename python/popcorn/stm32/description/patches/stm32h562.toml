@@ -1,0 +1,12 @@
+format = 1
+source = "STM32H562 and STM32H563 IRQ add. stm32h562xx.h and stm32h563xx.h define PKA_IRQn 118, which the two SVDs lack. Both parts have a PKA, RM0481 Rev 5, 41.3 lists it in limited mode, but neither SVD describes it, so the line goes to EXTI as the CEC line does in stm32h5.toml"
+
+[match]
+parts = ["STM32H562*", "STM32H563*"]
+svd = ["STM32H5*.svd"]
+
+
+[irqs]
+add = [
+  { number = 118, name = "PKA", peripheral = "EXTI" },
+]

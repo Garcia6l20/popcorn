@@ -41,6 +41,14 @@ inline constexpr at25sf_part at25sf641{
     .device_id    = 0x16,
     .size         = 8u << 20};
 
+/** @brief The AT25SF321B, 32 Mbit, JEDEC ID 1F 87 01, device ID 15h. */
+inline constexpr at25sf_part at25sf321{
+    .manufacturer = 0x1F,
+    .memory_type  = 0x87,
+    .capacity     = 0x01,
+    .device_id    = 0x15,
+    .size         = 4u << 20};
+
 /**
  * @brief Options of an AT25SF device. Times default to the typical values of the AT25SF641
  *        datasheet AC characteristics.
