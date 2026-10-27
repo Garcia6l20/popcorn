@@ -29,31 +29,26 @@ analog_port::~analog_port() = default;
 
 namespace
 {
-constexpr address       ts_cal1_address     = 0x0BFA'0710;
-constexpr address       vrefint_cal_address = 0x0BFA'07A5;
-constexpr std::uint32_t vrefint_channel     = 0;
-constexpr std::uint32_t first_external      = 1;
-constexpr std::uint32_t last_external       = 17;
-constexpr std::uint32_t sensor_channel      = 19;
-constexpr std::size_t   channels            = 20;
-constexpr std::size_t   offsets             = 4;
-constexpr std::uint32_t full_scale          = 1u << 14;
-constexpr std::uint32_t factory_vdda_mv     = 3000;
-constexpr std::uint64_t min_adc_hz          = 5'000'000;
-constexpr std::uint64_t max_adc_hz          = 55'000'000;
-constexpr std::uint64_t ps_per_second       = 1'000'000'000'000;
-constexpr std::uint32_t conversion_end      = 0;
-constexpr std::uint32_t sampling_end        = 1;
-constexpr std::size_t   ranks               = 16;
-constexpr std::size_t   fifo_depth          = 8;
-constexpr std::uint32_t dma_one_shot        = 1;
-constexpr std::uint32_t dma_mdf             = 2;
-constexpr std::uint32_t dma_circular        = 3;
-constexpr std::size_t   trigger_selections  = 32;
-constexpr std::uint32_t exten_rising        = 1;
-constexpr std::uint32_t exten_falling       = 2;
-constexpr std::size_t   watchdogs           = 3;
-constexpr std::uint8_t  max_filter_count    = 8;
+constexpr std::size_t   channels           = 20;
+constexpr std::size_t   offsets            = 4;
+constexpr std::uint64_t min_adc_hz         = 5'000'000;
+constexpr std::uint64_t max_adc_hz         = 55'000'000;
+constexpr std::uint64_t ps_per_second      = 1'000'000'000'000;
+constexpr std::uint32_t conversion_end     = 0;
+constexpr std::uint32_t sampling_end       = 1;
+constexpr std::size_t   trigger_selections = 32;
+constexpr std::uint32_t exten_rising       = 1;
+constexpr std::uint32_t exten_falling      = 2;
+constexpr std::size_t   watchdogs          = 3;
+constexpr std::uint8_t  max_filter_count   = 8;
+
+enum class dma_mode : std::uint8_t
+{
+  off      = 0,
+  one_shot = 1,
+  mdf      = 2,
+  circular = 3,
+};
 
 enum class regular_trigger : std::uint8_t
 {
@@ -80,24 +75,111 @@ enum class regular_trigger : std::uint8_t
   lptim4_out = 21,
 };
 
-[[nodiscard]] auto trigger_signal(std::uint32_t selection) -> std::string
-{
-  template for(constexpr auto e :
-               std::define_static_array(std::meta::enumerators_of(^^regular_trigger)))
-  {
-    if(std::to_underlying([:e:]) == selection)
-    {
-      return std::string{std::meta::identifier_of(e)};
-    }
-  }
-  return std::format("adc_ext_trg{}", selection);
-}
-
 using wide = unsigned __int128;
 
-constexpr std::array<std::uint32_t, 8>  sampling_cycles{5, 6, 12, 20, 36, 68, 391, 814};
-constexpr std::array<std::uint32_t, 4>  sar_cycles{17, 15, 13, 11};
-constexpr std::array<std::uint32_t, 12> prescalers{1, 2, 4, 6, 8, 10, 12, 16, 32, 64, 128, 256};
+[[nodiscard]] constexpr auto
+    half_cycles_ps(std::uint64_t half_cycles, std::uint32_t divider, std::uint64_t hz)
+        -> std::uint64_t
+{
+  auto const period = 2 * wide{hz};
+  return static_cast<std::uint64_t>(
+      (wide{half_cycles} * divider * ps_per_second + period - 1u) / period);
+}
+
+/**
+ * @brief Register-ranked sequence: SQR1.L + 1 ranks of SQ1 to SQ16 across SQR1 to SQR4, the layout
+ *        of the STM32U5 and STM32H5 ADC. A family selecting channels by a bitmask supplies its
+ *        own type with the same two members.
+ */
+class rank_sequence
+{
+public:
+  static constexpr std::size_t ranks = 16;
+
+  template <typename Lookup>
+  explicit rank_sequence(Lookup const& lookup) : length_{lookup("ADC_SQR1", "L")}
+  {
+    for(std::size_t rank = 0; rank < ranks; ++rank)
+    {
+      sequence_[rank] =
+          lookup(std::format("ADC_SQR{}", (rank + 1) / 5 + 1), std::format("SQ{}", rank + 1));
+    }
+  }
+
+  [[nodiscard]] auto sequence_length(register_file const& regs) const -> std::size_t
+  {
+    return get(regs, length_) + std::size_t{1};
+  }
+
+  [[nodiscard]] auto next_channel(register_file const& regs, std::size_t rank) const
+      -> std::uint32_t
+  {
+    return get(regs, sequence_[std::min(rank, ranks - 1)]);
+  }
+
+private:
+  field_ref                    length_;
+  std::array<field_ref, ranks> sequence_;
+};
+
+/**
+ * @brief Family traits of the STM32U5 ADC1, `aditf5_40v1_U5_Cube`, RM0456 section 33: register
+ *        names, 14-bit codes, the sampling and SAR times in half ADC clock cycles, the EXTSEL map
+ *        of Table 308, tLATR, the factory words and the eight-result FIFO.
+ */
+struct u5_adc
+{
+  using sequence     = rank_sequence;
+  using trigger_enum = regular_trigger;
+
+  static constexpr std::string_view unit_name           = "ADC";
+  static constexpr std::string_view config              = "ADC_CFGR1";
+  static constexpr std::string_view dma_field           = "DMNGT";
+  static constexpr std::string_view common_unit         = "ADC12";
+  static constexpr std::string_view common_register     = "ADC12_CCR";
+  static constexpr std::string_view common_vrefint      = "VREFEN";
+  static constexpr std::string_view common_sensor       = "VSENSESEL";
+  static constexpr std::string_view common_prescaler    = "PRESC";
+  static constexpr bool             regulator_flag      = true;
+  static constexpr std::size_t      result_depth        = 8;
+  static constexpr unsigned         bits                = 14;
+  static constexpr address          ts_cal1_address     = 0x0BFA'0710;
+  static constexpr address          vrefint_cal_address = 0x0BFA'07A5;
+  static constexpr std::uint32_t    vrefint_channel     = 0;
+  static constexpr std::uint32_t    first_external      = 1;
+  static constexpr std::uint32_t    last_external       = 17;
+  static constexpr std::uint32_t    sensor_channel      = 19;
+  static constexpr std::uint32_t    factory_vdda_mv     = 3000;
+
+  static constexpr std::array<std::uint32_t, 8>  sampling_half_cycles{10, 12,  24,  40,
+                                                                      72, 136, 782, 1628};
+  static constexpr std::array<std::uint32_t, 4>  sar_half_cycles{34, 30, 26, 22};
+  static constexpr std::array<std::uint32_t, 12> prescalers{1,  2,  4,  6,  8,   10,
+                                                            12, 16, 32, 64, 128, 256};
+
+  [[nodiscard]] static constexpr auto decode_dma(std::uint32_t raw) -> dma_mode
+  {
+    return static_cast<dma_mode>(raw & 3u);
+  }
+
+  [[nodiscard]] static constexpr auto trigger_latency_cycles(std::uint32_t divider) -> std::uint32_t
+  {
+    return divider == 1 ? 3u : 3u * divider + 1u;
+  }
+
+  [[nodiscard]] static auto trigger_signal(std::uint32_t selection) -> std::string
+  {
+    template for(constexpr auto e :
+                 std::define_static_array(std::meta::enumerators_of(^^regular_trigger)))
+    {
+      if(std::to_underlying([:e:]) == selection)
+      {
+        return std::string{std::meta::identifier_of(e)};
+      }
+    }
+    return std::format("adc_ext_trg{}", selection);
+  }
+};
 
 struct adc_state
 {
@@ -146,17 +228,21 @@ struct adc_common_state
   return std::nullopt;
 }
 
-[[nodiscard]] constexpr auto code14(std::uint64_t microvolts, std::uint32_t vdda_mv)
+template <typename Traits>
+[[nodiscard]] constexpr auto code_of(std::uint64_t microvolts, std::uint32_t vdda_mv)
     -> std::uint32_t
 {
+  constexpr std::uint32_t full_scale = 1u << Traits::bits;
   return static_cast<std::uint32_t>(std::min<std::uint64_t>(
       full_scale - 1u, microvolts * full_scale / (std::uint64_t{vdda_mv} * 1000u)));
 }
 
+template <typename Traits>
 [[nodiscard]] constexpr auto at_vdda(std::uint32_t factory_code, std::uint32_t vdda_mv)
     -> std::uint32_t
 {
-  return std::min<std::uint32_t>(full_scale - 1u, factory_code * factory_vdda_mv / vdda_mv);
+  constexpr std::uint32_t full_scale = 1u << Traits::bits;
+  return std::min<std::uint32_t>(full_scale - 1u, factory_code * Traits::factory_vdda_mv / vdda_mv);
 }
 
 auto lower(std::string_view name) -> std::string
@@ -172,11 +258,21 @@ auto lower(std::string_view name) -> std::string
  *        VREFINT with VREFEN and the temperature sensor with VSENSESEL to the ADC1 internal
  *        channels, and divides the ADC kernel clock by PRESC. Storage otherwise.
  */
-class adc_common final : public dispatch_model<adc_common, adc_common_state>,
-                         public bus_reset_listener
+template <typename Traits>
+class adc_common_model final : public dispatch_model<adc_common_model<Traits>, adc_common_state>,
+                               public bus_reset_listener
 {
+  using base = dispatch_model<adc_common_model<Traits>, adc_common_state>;
+  using base::claims;
+  using base::ctx_;
+  using base::desc_;
+  using base::describe;
+  using base::field;
+  using base::reg;
+  using base::warn;
+
 public:
-  adc_common(model_context& ctx, peripheral_desc const& desc);
+  adc_common_model(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -199,20 +295,21 @@ public:
   [[nodiscard]] auto divider() -> std::uint32_t
   {
     auto const code = get(regs_, prescaler_);
-    if(code >= prescalers.size())
+    if(code >= Traits::prescalers.size())
     {
       if(not std::exchange(reserved_logged_, true))
       {
         warn(
-            "ADC12_CCR",
+            Traits::common_register,
             std::format("PRESC {:#06b}: a reserved prescaler not modelled, divided by 256", code));
       }
       if(ctx_.strict_peripherals)
       {
-        throw model_error(desc_.name, "ADC12_CCR", reg("ADC12_CCR").offset);
+        throw model_error(
+            desc_.name, std::string{Traits::common_register}, reg(Traits::common_register).offset);
       }
     }
-    return prescalers[std::min<std::size_t>(code, prescalers.size() - 1)];
+    return Traits::prescalers[std::min<std::size_t>(code, Traits::prescalers.size() - 1)];
   }
 
 private:
@@ -224,29 +321,32 @@ private:
   bool           reserved_logged_{};
 };
 
-constexpr std::array<write_entry<adc_common>, 1> adc_common_writes{
+template <typename Traits>
+constexpr std::array<write_entry<adc_common_model<Traits>>, 1> adc_common_writes{
     {
-     {"ADC12_CCR", &adc_common::ccr_written},
+     {Traits::common_register, &adc_common_model<Traits>::ccr_written},
      }
 };
 
-adc_common::adc_common(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "ADC12", adc_common_writes}, regs_{ctx.regs},
-      vrefint_{field("ADC12_CCR", "VREFEN")}, sensor_{field("ADC12_CCR", "VSENSESEL")},
-      prescaler_{field("ADC12_CCR", "PRESC")}
+template <typename Traits>
+adc_common_model<Traits>::adc_common_model(model_context& ctx, peripheral_desc const& desc)
+    : base{ctx, desc, Traits::common_unit, adc_common_writes<Traits>}, regs_{ctx.regs},
+      vrefint_{field(Traits::common_register, Traits::common_vrefint)},
+      sensor_{field(Traits::common_register, Traits::common_sensor)},
+      prescaler_{field(Traits::common_register, Traits::common_prescaler)}
 {}
 
-void adc_common::reset(register_file&, reset_kind)
+template <typename Traits> void adc_common_model<Traits>::reset(register_file&, reset_kind)
 {
   restore_reset_values();
 }
 
-void adc_common::on_bus_reset()
+template <typename Traits> void adc_common_model<Traits>::on_bus_reset()
 {
   restore_reset_values();
 }
 
-void adc_common::restore_reset_values()
+template <typename Traits> void adc_common_model<Traits>::restore_reset_values()
 {
   for(auto const& name : claims())
   {
@@ -351,15 +451,27 @@ struct offset_fields
  *        hardware: not modelled, logged once at the sequence start, a model_error under
  *        strict_peripherals.
  */
-class adc final : public dispatch_model<adc, adc_state>,
-                  public analog_port,
-                  public clock_listener,
-                  public dma_requester,
-                  public trigger_sink,
-                  public bus_reset_listener
+template <typename Traits>
+class adc_model final : public dispatch_model<adc_model<Traits>, adc_state>,
+                        public analog_port,
+                        public clock_listener,
+                        public dma_requester,
+                        public trigger_sink,
+                        public bus_reset_listener
 {
+  using base = dispatch_model<adc_model<Traits>, adc_state>;
+  using base::claims;
+  using base::ctx_;
+  using base::desc_;
+  using base::describe;
+  using base::field;
+  using base::irq;
+  using base::reg;
+  using base::state_;
+  using base::warn;
+
 public:
-  adc(model_context& ctx, peripheral_desc const& desc, supply_options supply);
+  adc_model(model_context& ctx, peripheral_desc const& desc, supply_options supply);
 
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_bus_reset() override;
@@ -394,13 +506,13 @@ public:
 
 private:
   void               restore_reset_values();
-  [[nodiscard]] auto common() const -> adc_common const*;
+  [[nodiscard]] auto common() const -> adc_common_model<Traits> const*;
   [[nodiscard]] auto divider() -> std::uint32_t;
   [[nodiscard]] auto adc_hz() -> std::uint64_t;
   [[nodiscard]] auto sampling() const -> std::uint32_t;
   [[nodiscard]] auto conversion() const -> std::uint32_t;
   [[nodiscard]] auto code() const -> std::uint32_t;
-  [[nodiscard]] auto after(std::uint64_t cycles) const -> std::uint64_t;
+  [[nodiscard]] auto after(std::uint64_t half_cycles) const -> std::uint64_t;
   void               hold_until(std::uint64_t ps);
   [[nodiscard]] auto ratio() const -> std::uint32_t;
   [[nodiscard]] auto channel() const -> std::uint32_t;
@@ -410,6 +522,7 @@ private:
   [[nodiscard]] auto external(std::uint8_t channel) const -> std::size_t;
   [[nodiscard]] auto calibration(address at, std::string_view name) const -> std::uint16_t;
   [[nodiscard]] auto sample(std::uint32_t channel) const -> std::uint32_t;
+  [[nodiscard]] auto dma() const -> dma_mode;
   [[nodiscard]] auto dma_level() const -> bool;
   [[nodiscard]] auto listened() const -> std::optional<std::uint32_t>;
   void               retune(std::optional<std::uint32_t> was);
@@ -455,7 +568,7 @@ private:
   field_ref                                    end_of_conversion_;
   field_ref                                    end_of_sequence_;
   field_ref                                    overrun_;
-  field_ref                                    regulator_ready_;
+  std::optional<field_ref>                     regulator_ready_;
   field_ref                                    dma_mode_;
   field_ref                                    resolution_;
   field_ref                                    trigger_;
@@ -465,7 +578,7 @@ private:
   field_ref                                    auto_delay_;
   field_ref                                    discontinuous_;
   field_ref                                    discontinuous_count_;
-  field_ref                                    length_;
+  typename Traits::sequence                    sequence_;
   field_ref                                    data_;
   field_ref                                    oversampling_;
   field_ref                                    oversampling_ratio_;
@@ -473,7 +586,6 @@ private:
   field_ref                                    low_frequency_;
   field_ref                                    left_shift_;
   field_ref                                    gain_;
-  std::array<field_ref, ranks>                 sequence_;
   std::array<field_ref, channels>              sampling_;
   std::array<offset_fields, offsets>           offsets_;
   std::array<field_ref, channels>              preselection_;
@@ -503,21 +615,23 @@ private:
   bool                                         preselection_logged_{};
 };
 
-constexpr std::array<write_entry<adc>, 5> adc_writes{
+template <typename Traits>
+constexpr std::array<write_entry<adc_model<Traits>>, 5> adc_writes{
     {
-     {"ADC_ISR", &adc::isr_written},
-     {"ADC_IER", &adc::plain_written},
-     {"ADC_CR", &adc::cr_written},
-     {"ADC_CFGR1", &adc::plain_written},
-     {"ADC_DR", &adc::dr_written},
+     {"ADC_ISR", &adc_model<Traits>::isr_written},
+     {"ADC_IER", &adc_model<Traits>::plain_written},
+     {"ADC_CR", &adc_model<Traits>::cr_written},
+     {Traits::config, &adc_model<Traits>::plain_written},
+     {"ADC_DR", &adc_model<Traits>::dr_written},
      }
 };
 
 constexpr std::array<std::string_view, offsets> offset_registers{
     "ADC_OFR1", "ADC_OFR2", "ADC_OFR3", "ADC_OFR4"};
 
-adc::adc(model_context& ctx, peripheral_desc const& desc, supply_options supply)
-    : dispatch_model{ctx, desc, "ADC", adc_writes}, regs_{ctx.regs}, supply_{supply},
+template <typename Traits>
+adc_model<Traits>::adc_model(model_context& ctx, peripheral_desc const& desc, supply_options supply)
+    : base{ctx, desc, Traits::unit_name, adc_writes<Traits>}, regs_{ctx.regs}, supply_{supply},
       kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")},
       request_{ctx.peers, lower(desc.name) + "_dma"}, isr_{reg("ADC_ISR")},
       enable_{field("ADC_CR", "ADEN")}, disable_{field("ADC_CR", "ADDIS")},
@@ -526,18 +640,23 @@ adc::adc(model_context& ctx, peripheral_desc const& desc, supply_options supply)
       deep_power_down_{field("ADC_CR", "DEEPPWD")}, calibrate_{field("ADC_CR", "ADCAL")},
       ready_{field("ADC_ISR", "ADRDY")}, end_of_sampling_{field("ADC_ISR", "EOSMP")},
       end_of_conversion_{field("ADC_ISR", "EOC")}, end_of_sequence_{field("ADC_ISR", "EOS")},
-      overrun_{field("ADC_ISR", "OVR")}, regulator_ready_{field("ADC_ISR", "LDORDY")},
-      dma_mode_{field("ADC_CFGR1", "DMNGT")}, resolution_{field("ADC_CFGR1", "RES")},
-      trigger_{field("ADC_CFGR1", "EXTEN")}, trigger_select_{field("ADC_CFGR1", "EXTSEL")},
-      overrun_mode_{field("ADC_CFGR1", "OVRMOD")}, continuous_{field("ADC_CFGR1", "CONT")},
-      auto_delay_{field("ADC_CFGR1", "AUTDLY")}, discontinuous_{field("ADC_CFGR1", "DISCEN")},
-      discontinuous_count_{field("ADC_CFGR1", "DISCNUM")}, length_{field("ADC_SQR1", "L")},
+      overrun_{field("ADC_ISR", "OVR")},
+      regulator_ready_{
+          Traits::regulator_flag ? std::optional{field("ADC_ISR", "LDORDY")} : std::nullopt},
+      dma_mode_{field(Traits::config, Traits::dma_field)},
+      resolution_{field(Traits::config, "RES")}, trigger_{field(Traits::config, "EXTEN")},
+      trigger_select_{field(Traits::config, "EXTSEL")},
+      overrun_mode_{field(Traits::config, "OVRMOD")}, continuous_{field(Traits::config, "CONT")},
+      auto_delay_{field(Traits::config, "AUTDLY")}, discontinuous_{field(Traits::config, "DISCEN")},
+      discontinuous_count_{field(Traits::config, "DISCNUM")},
+      sequence_{[this](std::string_view name, std::string_view bits) { return field(name, bits); }},
       data_{field("ADC_DR", "RDATA")}, oversampling_{field("ADC_CFGR2", "ROVSE")},
       oversampling_ratio_{field("ADC_CFGR2", "OSR")},
       oversampling_shift_{field("ADC_CFGR2", "OVSS")}, low_frequency_{field("ADC_CFGR2", "LFTRIG")},
       left_shift_{field("ADC_CFGR2", "LSHIFT")}, gain_{field("ADC_GCOMP", "GCOMP")},
-      watchdog1_{field("ADC_CFGR1", "AWD1EN")}, watchdog1_single_{field("ADC_CFGR1", "AWD1SGL")},
-      watchdog1_channel_{field("ADC_CFGR1", "AWD1CH")},
+      watchdog1_{field(Traits::config, "AWD1EN")},
+      watchdog1_single_{field(Traits::config, "AWD1SGL")},
+      watchdog1_channel_{field(Traits::config, "AWD1CH")},
       watchdog1_filter_{field("ADC_HTR1", "AWDFILT1")}
 {
   for(std::size_t index = 0; index < watchdogs; ++index)
@@ -551,11 +670,6 @@ adc::adc(model_context& ctx, peripheral_desc const& desc, supply_options supply)
       watchdog_channels_[index] =
           field(std::format("ADC_AWD{}CR", number), std::format("AWD{}CH", number));
     }
-  }
-  for(std::size_t rank = 0; rank < ranks; ++rank)
-  {
-    sequence_[rank] =
-        field(std::format("ADC_SQR{}", (rank + 1) / 5 + 1), std::format("SQ{}", rank + 1));
   }
   for(std::size_t index = 0; index < channels; ++index)
   {
@@ -592,46 +706,46 @@ adc::adc(model_context& ctx, peripheral_desc const& desc, supply_options supply)
   }
 }
 
-auto adc::common() const -> adc_common const*
+template <typename Traits> auto adc_model<Traits>::common() const -> adc_common_model<Traits> const*
 {
-  return dynamic_cast<adc_common const*>(ctx_.peers.find("ADC12"));
+  return dynamic_cast<adc_common_model<Traits> const*>(ctx_.peers.find(Traits::common_unit));
 }
 
-auto adc::divider() -> std::uint32_t
+template <typename Traits> auto adc_model<Traits>::divider() -> std::uint32_t
 {
-  auto* const shared = dynamic_cast<adc_common*>(ctx_.peers.find("ADC12"));
+  auto* const shared =
+      dynamic_cast<adc_common_model<Traits>*>(ctx_.peers.find(Traits::common_unit));
   return shared != nullptr ? shared->divider() : 1u;
 }
 
-auto adc::adc_hz() -> std::uint64_t
+template <typename Traits> auto adc_model<Traits>::adc_hz() -> std::uint64_t
 {
   return ctx_.clock.hz(kernel_) / divider();
 }
 
-auto adc::sampling() const -> std::uint32_t
+template <typename Traits> auto adc_model<Traits>::sampling() const -> std::uint32_t
 {
   auto const which = channel();
-  return sampling_cycles[which < channels ? get(regs_, sampling_[which]) : 0u];
+  return Traits::sampling_half_cycles[which < channels ? get(regs_, sampling_[which]) : 0u];
 }
 
-auto adc::conversion() const -> std::uint32_t
+template <typename Traits> auto adc_model<Traits>::conversion() const -> std::uint32_t
 {
-  return sampling() + sar_cycles[get(regs_, resolution_)];
+  return sampling() + Traits::sar_half_cycles[get(regs_, resolution_)];
 }
 
-auto adc::code() const -> std::uint32_t
+template <typename Traits> auto adc_model<Traits>::code() const -> std::uint32_t
 {
   return sample(channel()) >> (2 * get(regs_, resolution_));
 }
 
-auto adc::after(std::uint64_t cycles) const -> std::uint64_t
+template <typename Traits>
+auto adc_model<Traits>::after(std::uint64_t half_cycles) const -> std::uint64_t
 {
-  auto const hz = state_.clock_hz;
-  return state_.start_ps
-       + static_cast<std::uint64_t>((wide{cycles} * state_.divider * ps_per_second + hz - 1u) / hz);
+  return state_.start_ps + half_cycles_ps(half_cycles, state_.divider, state_.clock_hz);
 }
 
-void adc::hold_until(std::uint64_t ps)
+template <typename Traits> void adc_model<Traits>::hold_until(std::uint64_t ps)
 {
   auto const samples = ratio();
   while(state_.held < samples
@@ -642,44 +756,48 @@ void adc::hold_until(std::uint64_t ps)
   }
 }
 
-auto adc::ratio() const -> std::uint32_t
+template <typename Traits> auto adc_model<Traits>::ratio() const -> std::uint32_t
 {
   return get(regs_, oversampling_) != 0 ? get(regs_, oversampling_ratio_) + 1u : 1u;
 }
 
-auto adc::channel() const -> std::uint32_t
+template <typename Traits> auto adc_model<Traits>::channel() const -> std::uint32_t
 {
   return channel_at(state_.rank);
 }
 
-auto adc::channel_at(std::size_t rank) const -> std::uint32_t
+template <typename Traits>
+auto adc_model<Traits>::channel_at(std::size_t rank) const -> std::uint32_t
 {
-  return get(regs_, sequence_[std::min(rank, ranks - 1)]);
+  return sequence_.next_channel(regs_, rank);
 }
 
-auto adc::length() const -> std::size_t
+template <typename Traits> auto adc_model<Traits>::length() const -> std::size_t
 {
-  return get(regs_, length_) + std::size_t{1};
+  return sequence_.sequence_length(regs_);
 }
 
-auto adc::busy() const -> bool
+template <typename Traits> auto adc_model<Traits>::busy() const -> bool
 {
   return state_.converting or state_.waiting_clock;
 }
 
-auto adc::external(std::uint8_t channel) const -> std::size_t
+template <typename Traits>
+auto adc_model<Traits>::external(std::uint8_t channel) const -> std::size_t
 {
-  if(channel < first_external or channel > last_external)
+  if(channel < Traits::first_external or channel > Traits::last_external)
   {
     throw config_error(
         desc_.name, 0, "channel",
         std::format(
-            "an external channel from {} to {}, not {}", first_external, last_external, channel));
+            "an external channel from {} to {}, not {}", Traits::first_external,
+            Traits::last_external, channel));
   }
   return channel;
 }
 
-void adc::drive(std::uint8_t channel, std::uint32_t microvolts)
+template <typename Traits>
+void adc_model<Traits>::drive(std::uint8_t channel, std::uint32_t microvolts)
 {
   auto const at = external(channel);
   if(state_.converting)
@@ -689,17 +807,19 @@ void adc::drive(std::uint8_t channel, std::uint32_t microvolts)
   state_.input_uv[at] = microvolts;
 }
 
-auto adc::input(std::uint8_t channel) const -> std::uint32_t
+template <typename Traits>
+auto adc_model<Traits>::input(std::uint8_t channel) const -> std::uint32_t
 {
   return state_.input_uv[external(channel)];
 }
 
-auto adc::vdda_mv() const -> std::uint32_t
+template <typename Traits> auto adc_model<Traits>::vdda_mv() const -> std::uint32_t
 {
   return supply_.vdda_mv;
 }
 
-auto adc::calibration(address at, std::string_view name) const -> std::uint16_t
+template <typename Traits>
+auto adc_model<Traits>::calibration(address at, std::string_view name) const -> std::uint16_t
 {
   auto const word = factory_halfword(ctx_.part, at);
   if(not word)
@@ -711,19 +831,19 @@ auto adc::calibration(address at, std::string_view name) const -> std::uint16_t
   return *word;
 }
 
-void adc::reset(register_file&, reset_kind)
+template <typename Traits> void adc_model<Traits>::reset(register_file&, reset_kind)
 {
   restore_reset_values();
 }
 
-void adc::on_bus_reset()
+template <typename Traits> void adc_model<Traits>::on_bus_reset()
 {
   auto const was = listened();
   restore_reset_values();
   retune(was);
 }
 
-void adc::restore_reset_values()
+template <typename Traits> void adc_model<Traits>::restore_reset_values()
 {
   for(auto const& name : claims())
   {
@@ -737,10 +857,14 @@ void adc::restore_reset_values()
   signal();
 }
 
-auto adc::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
-    -> std::expected<std::uint32_t, bus_error>
+template <typename Traits>
+auto adc_model<Traits>::on_read(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    access_ctx     ctx) -> std::expected<std::uint32_t, bus_error>
 {
-  auto const value = dispatch_model::on_read(regs, offset, size, ctx);
+  auto const value = base::on_read(regs, offset, size, ctx);
   if((offset & ~3u) == data_.offset and ctx.by != initiator::debugger)
   {
     pop();
@@ -748,7 +872,7 @@ auto adc::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
   return value;
 }
 
-void adc::cr_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits> void adc_model<Traits>::cr_written(std::uint32_t old, std::uint32_t now)
 {
   now |= old & set_only_;
   auto const refused = start_.of(now) != 0
@@ -763,8 +887,12 @@ void adc::cr_written(std::uint32_t old, std::uint32_t now)
     now = regulator_.with(now, 0);
   }
   regs_.poke(enable_.offset, now);
-  update(
-      regs_, regulator_ready_, regulator_.of(now) != 0 and deep_power_down_.of(now) == 0 ? 1u : 0u);
+  if constexpr(Traits::regulator_flag)
+  {
+    update(
+        regs_, *regulator_ready_,
+        regulator_.of(now) != 0 and deep_power_down_.of(now) == 0 ? 1u : 0u);
+  }
   update(regs_, calibrate_, 0);
   if(injected_start_.of(now) != 0)
   {
@@ -784,7 +912,7 @@ void adc::cr_written(std::uint32_t old, std::uint32_t now)
   }
   if(enable_.of(now) != 0 and enable_.of(old) == 0)
   {
-    if(get(regs_, regulator_ready_) != 0)
+    if(not Traits::regulator_flag or get(regs_, *regulator_ready_) != 0)
     {
       update(regs_, ready_, 1);
     }
@@ -819,7 +947,7 @@ void adc::cr_written(std::uint32_t old, std::uint32_t now)
   refuse_start(refused);
 }
 
-void adc::refuse_start(bool refused)
+template <typename Traits> void adc_model<Traits>::refuse_start(bool refused)
 {
   if(refused)
   {
@@ -829,7 +957,7 @@ void adc::refuse_start(bool refused)
   }
 }
 
-void adc::isr_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits> void adc_model<Traits>::isr_written(std::uint32_t old, std::uint32_t now)
 {
   regs_.poke(isr_.offset, old & ~(now & clearable_));
   if(end_of_sampling_.of(old) != 0 and get(regs_, end_of_sampling_) == 0 and state_.converting)
@@ -839,7 +967,7 @@ void adc::isr_written(std::uint32_t old, std::uint32_t now)
   signal();
 }
 
-void adc::check_clock_range()
+template <typename Traits> void adc_model<Traits>::check_clock_range()
 {
   if(ctx_.clock.hz(kernel_) == 0)
   {
@@ -852,29 +980,27 @@ void adc::check_clock_range()
   }
 }
 
-void adc::prepare()
+template <typename Traits> void adc_model<Traits>::prepare()
 {
   if(get(regs_, discontinuous_) != 0 and get(regs_, continuous_) != 0)
   {
     forbidden(
-        discontinuous_continuous_logged_, "ADC_CFGR1",
+        discontinuous_continuous_logged_, Traits::config,
         "DISCEN and CONT both set, forbidden by RM0456 33.4.15: converted as DISCEN alone");
   }
   if(get(regs_, auto_delay_) != 0)
   {
-    unmodelled(auto_delay_logged_, "ADC_CFGR1", "AUTDLY: auto-delayed conversions");
+    unmodelled(auto_delay_logged_, Traits::config, "AUTDLY: auto-delayed conversions");
   }
   if(get(regs_, low_frequency_) != 0)
   {
     unmodelled(low_frequency_logged_, "ADC_CFGR2", "LFTRIG: low frequency trigger mode");
   }
-  if(get(regs_, dma_mode_) == dma_mdf)
+  if(dma() == dma_mode::mdf)
   {
-    unmodelled(mdf_logged_, "ADC_CFGR1", "DMNGT 10: the MDF data path");
+    unmodelled(mdf_logged_, Traits::config, "DMNGT 10: the MDF data path");
   }
-  if(get(regs_, watchdog1_) != 0
-     and get(regs_, watchdog1_filter_) != 0
-     and get(regs_, dma_mode_) != 0)
+  if(get(regs_, watchdog1_) != 0 and get(regs_, watchdog1_filter_) != 0 and dma() != dma_mode::off)
   {
     unmodelled(
         watchdog_filter_dma_logged_, "ADC_HTR1",
@@ -888,7 +1014,7 @@ void adc::prepare()
   }
 }
 
-void adc::begin_sequence(std::uint64_t start_ps)
+template <typename Traits> void adc_model<Traits>::begin_sequence(std::uint64_t start_ps)
 {
   prepare();
   if(get(regs_, discontinuous_) == 0 or state_.rank >= length())
@@ -899,7 +1025,7 @@ void adc::begin_sequence(std::uint64_t start_ps)
   begin_rank(start_ps);
 }
 
-void adc::begin_rank(std::uint64_t start_ps)
+template <typename Traits> void adc_model<Traits>::begin_rank(std::uint64_t start_ps)
 {
   if(ctx_.clock.hz(kernel_) == 0)
   {
@@ -913,7 +1039,7 @@ void adc::begin_rank(std::uint64_t start_ps)
   schedule(start_ps);
 }
 
-void adc::check_unmodelled(std::uint32_t channel)
+template <typename Traits> void adc_model<Traits>::check_unmodelled(std::uint32_t channel)
 {
   if(get(regs_, left_shift_) != 0)
   {
@@ -932,7 +1058,7 @@ void adc::check_unmodelled(std::uint32_t channel)
   }
 }
 
-void adc::check_preselection(std::uint32_t channel)
+template <typename Traits> void adc_model<Traits>::check_preselection(std::uint32_t channel)
 {
   if(channel < channels and get(regs_, preselection_[channel]) == 0)
   {
@@ -944,7 +1070,7 @@ void adc::check_preselection(std::uint32_t channel)
   }
 }
 
-void adc::schedule(std::uint64_t start_ps)
+template <typename Traits> void adc_model<Traits>::schedule(std::uint64_t start_ps)
 {
   state_.start_ps      = start_ps;
   state_.clock_hz      = ctx_.clock.hz(kernel_);
@@ -963,7 +1089,8 @@ void adc::schedule(std::uint64_t start_ps)
   }
 }
 
-void adc::schedule_sampling_end(std::uint64_t not_before_ps)
+template <typename Traits>
+void adc_model<Traits>::schedule_sampling_end(std::uint64_t not_before_ps)
 {
   for(std::uint32_t k = 0, samples = ratio(); k < samples; ++k)
   {
@@ -976,7 +1103,7 @@ void adc::schedule_sampling_end(std::uint64_t not_before_ps)
   }
 }
 
-void adc::finish()
+template <typename Traits> void adc_model<Traits>::finish()
 {
   auto const end    = after(std::uint64_t{ratio()} * conversion());
   state_.converting = false;
@@ -1001,7 +1128,7 @@ void adc::finish()
   signal();
 }
 
-void adc::advance(std::uint64_t end_ps, bool last)
+template <typename Traits> void adc_model<Traits>::advance(std::uint64_t end_ps, bool last)
 {
   state_.rank      = last ? std::uint8_t{0} : static_cast<std::uint8_t>(state_.rank + 1u);
   auto const stays = get(regs_, trigger_) != 0 ? 1u : 0u;
@@ -1025,7 +1152,8 @@ void adc::advance(std::uint64_t end_ps, bool last)
   begin_rank(end_ps);
 }
 
-auto adc::guarded(std::size_t watchdog, std::uint32_t channel) const -> bool
+template <typename Traits>
+auto adc_model<Traits>::guarded(std::size_t watchdog, std::uint32_t channel) const -> bool
 {
   if(watchdog == 0)
   {
@@ -1035,7 +1163,8 @@ auto adc::guarded(std::size_t watchdog, std::uint32_t channel) const -> bool
   return channel < channels and (get(regs_, watchdog_channels_[watchdog]) >> channel & 1u) != 0;
 }
 
-void adc::watch(std::uint32_t channel, std::uint32_t result)
+template <typename Traits>
+void adc_model<Traits>::watch(std::uint32_t channel, std::uint32_t result)
 {
   auto const compared = std::uint64_t{result} << (2 * get(regs_, resolution_));
   for(std::size_t watchdog = 0; watchdog < watchdogs; ++watchdog)
@@ -1059,11 +1188,11 @@ void adc::watch(std::uint32_t channel, std::uint32_t result)
   }
 }
 
-void adc::land(std::uint32_t result)
+template <typename Traits> void adc_model<Traits>::land(std::uint32_t result)
 {
   if(get(regs_, overrun_mode_) == 0)
   {
-    if(get(regs_, overrun_) != 0 or state_.data.size() >= fifo_depth)
+    if(get(regs_, overrun_) != 0 or state_.data.size() >= Traits::result_depth)
     {
       update(regs_, overrun_, 1);
       return;
@@ -1082,7 +1211,7 @@ void adc::land(std::uint32_t result)
   update(regs_, end_of_conversion_, 1);
 }
 
-void adc::pop()
+template <typename Traits> void adc_model<Traits>::pop()
 {
   if(not state_.data.empty())
   {
@@ -1096,7 +1225,7 @@ void adc::pop()
   signal();
 }
 
-void adc::abort()
+template <typename Traits> void adc_model<Traits>::abort()
 {
   ++state_.generation;
   state_.converting    = false;
@@ -1105,14 +1234,20 @@ void adc::abort()
   state_.subgroup_left = 0;
 }
 
-auto adc::dma_level() const -> bool
+template <typename Traits> auto adc_model<Traits>::dma() const -> dma_mode
 {
-  auto const mode    = get(regs_, dma_mode_);
-  auto const enabled = mode == dma_circular or (mode == dma_one_shot and not state_.dma_stopped);
+  return Traits::decode_dma(get(regs_, dma_mode_));
+}
+
+template <typename Traits> auto adc_model<Traits>::dma_level() const -> bool
+{
+  auto const mode = dma();
+  auto const enabled =
+      mode == dma_mode::circular or (mode == dma_mode::one_shot and not state_.dma_stopped);
   return enabled and not state_.data.empty() and get(regs_, overrun_) == 0;
 }
 
-void adc::signal()
+template <typename Traits> void adc_model<Traits>::signal()
 {
   auto const level = std::ranges::any_of(interrupts_, [this](auto const& pair) {
     return get(regs_, pair.first) != 0 and get(regs_, pair.second) != 0;
@@ -1128,7 +1263,7 @@ void adc::signal()
   request_.set(dma_level());
 }
 
-auto adc::listened() const -> std::optional<std::uint32_t>
+template <typename Traits> auto adc_model<Traits>::listened() const -> std::optional<std::uint32_t>
 {
   if(get(regs_, enable_) == 0 or get(regs_, start_) == 0 or get(regs_, trigger_) == 0)
   {
@@ -1137,14 +1272,15 @@ auto adc::listened() const -> std::optional<std::uint32_t>
   return get(regs_, trigger_select_);
 }
 
-auto adc::listens(std::string_view signal) const -> bool
+template <typename Traits> auto adc_model<Traits>::listens(std::string_view signal) const -> bool
 {
   auto const selected = listened();
-  auto const named    = reflex::to_enum_value<regular_trigger>(signal);
+  auto const named    = reflex::to_enum_value<typename Traits::trigger_enum>(signal);
   return selected and named and std::to_underlying(*named) == *selected;
 }
 
-void adc::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps)
+template <typename Traits>
+void adc_model<Traits>::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps)
 {
   auto const polarity = get(regs_, trigger_);
   auto const detected = edge == trigger_edge::rising ? (polarity & exten_rising) != 0
@@ -1156,19 +1292,19 @@ void adc::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at
   begin_sequence(at_ps + trigger_latency_ps());
 }
 
-auto adc::trigger_latency_ps() -> std::uint64_t
+template <typename Traits> auto adc_model<Traits>::trigger_latency_ps() -> std::uint64_t
 {
   auto const hz = ctx_.clock.hz(kernel_);
   if(hz == 0)
   {
     return 0;
   }
-  auto const div    = divider();
-  auto const cycles = div == 1 ? 3u : 3u * div + 1u;
-  return static_cast<std::uint64_t>((wide{cycles} * div * ps_per_second + hz - 1u) / hz);
+  auto const div = divider();
+  return half_cycles_ps(2u * Traits::trigger_latency_cycles(div), div, hz);
 }
 
-auto adc::on_write(
+template <typename Traits>
+auto adc_model<Traits>::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -1179,7 +1315,7 @@ auto adc::on_write(
   auto const word = offset & ~3u;
   if(word != start_.offset and word != trigger_.offset)
   {
-    return dispatch_model::on_write(regs, offset, size, old, value, access);
+    return base::on_write(regs, offset, size, old, value, access);
   }
   auto const config   = regs_.peek(trigger_.offset);
   auto const next     = word == trigger_.offset ? merge_write(config, offset, size, value) : config;
@@ -1187,19 +1323,21 @@ auto adc::on_write(
   auto const moved    = trigger_select_.of(next) != trigger_select_.of(config);
   if(external)
   {
-    static_cast<void>(interest_changed(ctx_.peers, trigger_signal(trigger_select_.of(config))));
+    static_cast<void>(
+        interest_changed(ctx_.peers, Traits::trigger_signal(trigger_select_.of(config))));
   }
   if(trigger_.of(next) != 0 and (not external or moved))
   {
-    static_cast<void>(interest_changed(ctx_.peers, trigger_signal(trigger_select_.of(next))));
+    static_cast<void>(
+        interest_changed(ctx_.peers, Traits::trigger_signal(trigger_select_.of(next))));
   }
   auto const was    = listened();
-  auto const result = dispatch_model::on_write(regs, offset, size, old, value, access);
+  auto const result = base::on_write(regs, offset, size, old, value, access);
   retune(was);
   return result;
 }
 
-void adc::retune(std::optional<std::uint32_t> was)
+template <typename Traits> void adc_model<Traits>::retune(std::optional<std::uint32_t> was)
 {
   auto const now = listened();
   if(now == was)
@@ -1208,26 +1346,27 @@ void adc::retune(std::optional<std::uint32_t> was)
   }
   if(was)
   {
-    static_cast<void>(interest_changed(ctx_.peers, trigger_signal(*was)));
+    static_cast<void>(interest_changed(ctx_.peers, Traits::trigger_signal(*was)));
   }
   if(not now)
   {
     return;
   }
-  auto const signal = trigger_signal(*now);
+  auto const signal = Traits::trigger_signal(*now);
   if(not interest_changed(ctx_.peers, signal))
   {
     unmodelled(
-        unproduced_logged_[*now], "ADC_CFGR1",
+        unproduced_logged_[*now], Traits::config,
         signal.starts_with("adc_ext_trg")
             ? std::format("EXTSEL {}: reserved trigger selection", *now)
             : std::format("EXTSEL {}: trigger {}", *now, signal));
   }
 }
 
-void adc::transfer_completed(dma_controller const& by, std::uint32_t request)
+template <typename Traits>
+void adc_model<Traits>::transfer_completed(dma_controller const& by, std::uint32_t request)
 {
-  if(get(regs_, dma_mode_) != dma_one_shot or not request_.carries(by, request))
+  if(dma() != dma_mode::one_shot or not request_.carries(by, request))
   {
     return;
   }
@@ -1236,7 +1375,8 @@ void adc::transfer_completed(dma_controller const& by, std::uint32_t request)
   signal();
 }
 
-void adc::on_event(std::uint32_t kind, std::uint64_t payload)
+template <typename Traits>
+void adc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   if(payload != state_.generation or not state_.converting)
   {
@@ -1254,7 +1394,7 @@ void adc::on_event(std::uint32_t kind, std::uint64_t payload)
   }
 }
 
-void adc::on_clock_change()
+template <typename Traits> void adc_model<Traits>::on_clock_change()
 {
   if(state_.waiting_clock and ctx_.clock.hz(kernel_) != 0)
   {
@@ -1262,46 +1402,49 @@ void adc::on_clock_change()
   }
 }
 
-void adc::require_factory_word(std::uint32_t channel) const
+template <typename Traits> void adc_model<Traits>::require_factory_word(std::uint32_t channel) const
 {
   auto const* const shared = common();
   if(shared == nullptr)
   {
     return;
   }
-  if(channel == vrefint_channel and shared->vrefint_connected())
+  if(channel == Traits::vrefint_channel and shared->vrefint_connected())
   {
-    static_cast<void>(calibration(vrefint_cal_address, "VREFINT_CAL"));
+    static_cast<void>(calibration(Traits::vrefint_cal_address, "VREFINT_CAL"));
   }
-  if(channel == sensor_channel and shared->sensor_connected())
+  if(channel == Traits::sensor_channel and shared->sensor_connected())
   {
-    static_cast<void>(calibration(ts_cal1_address, "TS_CAL1"));
+    static_cast<void>(calibration(Traits::ts_cal1_address, "TS_CAL1"));
   }
 }
 
-auto adc::sample(std::uint32_t channel) const -> std::uint32_t
+template <typename Traits>
+auto adc_model<Traits>::sample(std::uint32_t channel) const -> std::uint32_t
 {
   auto const* const shared = common();
-  if(channel == vrefint_channel)
+  if(channel == Traits::vrefint_channel)
   {
     return shared != nullptr and shared->vrefint_connected()
-             ? at_vdda(calibration(vrefint_cal_address, "VREFINT_CAL"), supply_.vdda_mv)
+             ? at_vdda<Traits>(
+                   calibration(Traits::vrefint_cal_address, "VREFINT_CAL"), supply_.vdda_mv)
              : 0u;
   }
-  if(channel == sensor_channel)
+  if(channel == Traits::sensor_channel)
   {
     return shared != nullptr and shared->sensor_connected()
-             ? at_vdda(calibration(ts_cal1_address, "TS_CAL1"), supply_.vdda_mv)
+             ? at_vdda<Traits>(calibration(Traits::ts_cal1_address, "TS_CAL1"), supply_.vdda_mv)
              : 0u;
   }
-  if(channel >= first_external and channel <= last_external)
+  if(channel >= Traits::first_external and channel <= Traits::last_external)
   {
-    return code14(state_.input_uv[channel], supply_.vdda_mv);
+    return code_of<Traits>(state_.input_uv[channel], supply_.vdda_mv);
   }
   return 0;
 }
 
-void adc::warn_once(bool& logged, std::string_view reg, std::string_view what)
+template <typename Traits>
+void adc_model<Traits>::warn_once(bool& logged, std::string_view reg, std::string_view what)
 {
   if(std::exchange(logged, true))
   {
@@ -1310,7 +1453,8 @@ void adc::warn_once(bool& logged, std::string_view reg, std::string_view what)
   warn(reg, std::format("{} not modelled", what));
 }
 
-void adc::forbidden(bool& logged, std::string_view name, std::string message)
+template <typename Traits>
+void adc_model<Traits>::forbidden(bool& logged, std::string_view name, std::string message)
 {
   if(not std::exchange(logged, true))
   {
@@ -1322,7 +1466,8 @@ void adc::forbidden(bool& logged, std::string_view name, std::string message)
   }
 }
 
-void adc::unmodelled(bool& logged, std::string_view name, std::string_view what)
+template <typename Traits>
+void adc_model<Traits>::unmodelled(bool& logged, std::string_view name, std::string_view what)
 {
   warn_once(logged, name, what);
   if(ctx_.strict_peripherals)
@@ -1335,14 +1480,14 @@ void adc::unmodelled(bool& logged, std::string_view name, std::string_view what)
 auto adc_factory(supply_options supply) -> model_factory
 {
   return [supply](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<adc>(ctx, desc, supply);
+    return std::make_shared<adc_model<u5_adc>>(ctx, desc, supply);
   };
 }
 
 auto adc_common_factory() -> model_factory
 {
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<adc_common>(ctx, desc);
+    return std::make_shared<adc_common_model<u5_adc>>(ctx, desc);
   };
 }
 }
