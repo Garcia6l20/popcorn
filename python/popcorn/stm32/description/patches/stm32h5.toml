@@ -347,7 +347,7 @@ source = "RM0481 Rev 5, 13.4.13 GPIOx_SECCFGR reset value 0x00000FFF for port I,
 peripheral = "DBGMCU"
 register = "DBGMCU_IDCODE"
 reset = 0x10016484
-source = "RM0481 Rev 5, 66.12.4 DBGMCU_IDCODE: DEV_ID 0x484 for STM32H562/563/573, REV_ID 0x1001 for revision Z, bits 15:12 read 6 as the reset value 0xXXXX 6XXX shows. ST's STM32H573 SVD gives 0x00006000"
+source = "RM0481 Rev 5, 66.12.4 DBGMCU_IDCODE: DEV_ID 0x484 for STM32H562/563/573, REV_ID 0x1001 for revision Z, bits 15:12 read 6 as the reset value 0xXXXX 6XXX shows. REV_ID is a modelled revision, not a manufacturing fact, the RM lists several and gives no default. ST's STM32H573 SVD gives 0x00006000"
 
 [memory]
 source = "RM0481 Rev 5, 7.3.9: the 2048-byte OTP area at 0x08FF F000 to 0x08FF F7FF, written once in 16-bit units through the flash interface and read-only to the CPU, and the read-only area at 0x08FF F800 to 0x08FF FFFF that holds the device signature, 67.1 to 67.3. 7.3.10: the high-cycle data area at 0x0900 0000 to 0x0901 7FFF is a plain read-only region here, with no controller, since EDATA programming is not modelled. 7.3.5 to 7.3.8: flash is programmed by stores into the main memory range through the FLASH interface, so FLASH controls both flash windows. OTP programming is not modelled"

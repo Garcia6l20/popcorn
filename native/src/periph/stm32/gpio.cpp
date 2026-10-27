@@ -68,10 +68,12 @@ struct listener_table
 };
 
 /**
- * @brief GPIO port of the STM32U5, RM0456 section 13. Pin levels follow the output register,
- *        external drives and pulls. BSRR and BRR set and reset outputs, a set wins over a reset
- *        of the same pin. The LCKR key sequence freezes the configuration of the locked pins
- *        until reset. Level changes reach board listeners, then the EXTI model. Edges
+ * @brief GPIO port of the STM32U5 and STM32H5, RM0456 section 13 and RM0481 section 13.
+ *        Pin levels follow the output register, external drives and pulls. BSRR and BRR set and
+ *        reset outputs, a set wins over a reset of the same pin. A port with no `AFRH` register,
+ *        the H5 port I of RM0481 13.4.10 whose pins 8 to 11 have no alternate function, reads
+ *        alternate 0 for pins 8 and up. The LCKR key sequence freezes the configuration of the
+ *        locked pins until reset. Level changes reach board listeners, then the EXTI model. Edges
  *        scheduled with drive_at() apply through events on core::host_lane, kept in the state
  *        with their board time, rescheduled at every reset at the same instant. A pin in
  *        alternate function mode carries its level to the signal its AFSEL selects in the
@@ -146,6 +148,7 @@ private:
   std::array<field_ref, pins>                                            speed_{};
   std::array<field_ref, pins>                                            pull_{};
   std::array<field_ref, pins>                                            alternate_{};
+  bool                                                                   has_afrh_{};
   std::array<field_ref, pins>                                            input_{};
   std::array<field_ref, pins>                                            output_{};
   std::array<field_ref, pins>                                            set_{};
@@ -181,11 +184,19 @@ constexpr std::array<write_entry<gpio>, 12> gpio_writes{
      {"BSRR", &gpio::set_reset_written},
      {"LCKR", &gpio::lock_written},
      {"AFRL", &gpio::config_written<4>},
-     {"AFRH", &gpio::config_written<5>},
      {"BRR", &gpio::reset_written},
      {"SECCFGR", nullptr},
+     {"AFRH", &gpio::config_written<5>},
      }
 };
+
+static_assert(gpio_writes.back().reg == "AFRH");
+
+auto gpio_table(peripheral_desc const& desc) -> std::span<write_entry<gpio> const>
+{
+  auto const all = std::span{gpio_writes};
+  return find_register(desc, "AFRH") != nullptr ? all : all.first(all.size() - 1);
+}
 
 constexpr std::array<write_entry<gpio>, 1> gpio_trustzone_writes{
     {
@@ -208,10 +219,11 @@ constexpr std::array<secure_reset, 2> secure_resets{
 };
 
 gpio::gpio(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "GPIO", gpio_writes, gpio_trustzone_writes}, regs_{ctx.regs},
+    : dispatch_model{ctx, desc, "GPIO", gpio_table(desc), gpio_trustzone_writes}, regs_{ctx.regs},
       port_{static_cast<std::uint8_t>(desc.name.back() - 'A')}, lock_key_{field("LCKR", "LCKK")},
       secure_pins_{reg("SECCFGR")}, secure_reset_{describe("SECCFGR").reset}
 {
+  has_afrh_ = has_register("AFRH");
   for(auto const& entry : secure_resets)
   {
     if(entry.port == desc.name and glob_match(entry.part_glob, ctx.part.part))
@@ -221,18 +233,21 @@ gpio::gpio(model_context& ctx, peripheral_desc const& desc)
   }
   for(std::size_t pin = 0; pin < pins; ++pin)
   {
-    auto const n    = std::to_string(pin);
-    mode_[pin]      = field("MODER", "MODE" + n);
-    type_[pin]      = field("OTYPER", "OT" + n);
-    speed_[pin]     = field("OSPEEDR", "OSPEED" + n);
-    pull_[pin]      = field("PUPDR", "PUPD" + n);
-    alternate_[pin] = field(pin < 8 ? "AFRL" : "AFRH", "AFSEL" + n);
-    input_[pin]     = field("IDR", "ID" + n);
-    output_[pin]    = field("ODR", "OD" + n);
-    set_[pin]       = field("BSRR", "BS" + n);
-    clear_[pin]     = field("BSRR", "BR" + n);
-    brr_[pin]       = field("BRR", "BR" + n);
-    lock_[pin]      = field("LCKR", "LCK" + n);
+    auto const n = std::to_string(pin);
+    mode_[pin]   = field("MODER", "MODE" + n);
+    type_[pin]   = field("OTYPER", "OT" + n);
+    speed_[pin]  = field("OSPEEDR", "OSPEED" + n);
+    pull_[pin]   = field("PUPDR", "PUPD" + n);
+    if(pin < 8 or has_afrh_)
+    {
+      alternate_[pin] = field(pin < 8 ? "AFRL" : "AFRH", "AFSEL" + n);
+    }
+    input_[pin]  = field("IDR", "ID" + n);
+    output_[pin] = field("ODR", "OD" + n);
+    set_[pin]    = field("BSRR", "BS" + n);
+    clear_[pin]  = field("BSRR", "BR" + n);
+    brr_[pin]    = field("BRR", "BR" + n);
+    lock_[pin]   = field("LCKR", "LCK" + n);
   }
   auto const add = [this](field_ref f, std::size_t pin) {
     auto found = std::ranges::find(pin_bits_, f.offset, &decltype(pin_bits_)::value_type::first);
@@ -249,7 +264,10 @@ gpio::gpio(model_context& ctx, peripheral_desc const& desc)
         {&mode_, &type_, &speed_, &pull_, &alternate_, &input_, &output_, &set_, &clear_, &brr_,
          &lock_})
     {
-      add((*fields)[pin], pin);
+      if(fields != &alternate_ or pin < 8 or has_afrh_)
+      {
+        add((*fields)[pin], pin);
+      }
     }
     add(field("HSLVR", "HSLV" + std::to_string(pin)), pin);
   }
@@ -405,7 +423,7 @@ auto gpio::mode(std::uint8_t pin) const -> pin_mode
 
 auto gpio::alternate(std::uint8_t pin) const -> std::uint8_t
 {
-  return static_cast<std::uint8_t>(get(regs_, alternate_[pin]));
+  return pin < 8 or has_afrh_ ? static_cast<std::uint8_t>(get(regs_, alternate_[pin])) : 0;
 }
 
 auto gpio::level(std::uint8_t pin) const -> bool

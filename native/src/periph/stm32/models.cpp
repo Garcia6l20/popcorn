@@ -28,7 +28,7 @@ struct builtin
   std::string_view instance_glob = "*";
 };
 
-constexpr std::array<builtin, 30> builtins{
+constexpr std::array<builtin, 32> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"ICACHE", "Icache_v1_0_0*", [](board const& b) { return icache_factory(b.caches); }},
@@ -36,6 +36,7 @@ constexpr std::array<builtin, 30> builtins{
      {"PWR", "STM32U5_pwr_*", [](board const& b) { return pwr_factory(b.pwr); }},
      {"flash", "v1.0.0_U5_Cube", [](board const& b) { return flash_factory(b.flash); }},
      {"GPIO", "STM32U5x_gpio_*", [](board const&) { return gpio_factory(); }, "GPIO?"},
+     {"GPIO", "STM32H56x_gpio_*", [](board const&) { return gpio_factory(); }, "GPIO?"},
      {"EXTI", "", [](board const&) { return exti_factory(); }},
      {"GPDMA", "STM32U5_dma3_*", [](board const&) { return gpdma_factory(); }},
      {"LPDMA", "STM32U5_dma3_*", [](board const&) { return lpdma_factory(); }},
@@ -55,6 +56,7 @@ constexpr std::array<builtin, 30> builtins{
      {"ADC", "aditf5_40v1_U5_Cube", [](board const& b) { return adc_factory(b.supply); }},
      {"ADC12", "*", [](board const&) { return adc_common_factory(); }},
      {"DBGMCU", "", [](board const&) { return dbgmcu_factory(); }},
+     {"DBG", "", [](board const&) { return dbgmcu_factory(); }},
      {"CRC", "integtest1_v2_0", [](board const&) { return crc_factory(); }},
      {"HASH", "hash1_v2_2*", [](board const&) { return hash_factory(); }},
      {"RNG", "rng1_v4_1", [](board const& b) { return rng_factory(b.rng); }},

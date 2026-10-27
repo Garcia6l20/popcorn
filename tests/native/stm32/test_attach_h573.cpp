@@ -22,16 +22,17 @@ using popcorn::testing::h573;
 using popcorn::testing::stm32_fixture;
 
 constexpr auto attached = std::to_array<std::string_view>({
-    "CRC",    "DCACHE", "EXTI",  "I2C1",   "I2C2",    "I2C3",    "I2C4",   "ICACHE", "IWDG",
-    "LPUART", "RNG",    "RTC",   "SAI1",   "SAI2",    "TAMP",    "UART12", "UART4",  "UART5",
-    "UART7",  "UART8",  "UART9", "USART1", "USART10", "USART11", "USART2", "USART3", "USART6",
+    "CRC",     "DBGMCU",  "DCACHE", "EXTI",   "GPIOA",  "GPIOB", "GPIOC", "GPIOD",
+    "GPIOE",   "GPIOF",   "GPIOG",  "GPIOH",  "GPIOI",  "I2C1",  "I2C2",  "I2C3",
+    "I2C4",    "ICACHE",  "IWDG",   "LPUART", "RNG",    "RTC",   "SAI1",  "SAI2",
+    "TAMP",    "UART12",  "UART4",  "UART5",  "UART7",  "UART8", "UART9", "USART1",
+    "USART10", "USART11", "USART2", "USART3", "USART6",
 });
 
 constexpr auto matched_without_model = std::to_array<std::string_view>(
     {"GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3", "GTZC1_TZIC", "GTZC1_TZSC"});
 
-constexpr auto without_row =
-    std::to_array<std::string_view>({"DBGMCU", "FLASH", "GPIOA", "GPIOI", "RCC", "SBS", "USB"});
+constexpr auto without_row = std::to_array<std::string_view>({"FLASH", "RCC", "SBS", "USB"});
 
 constexpr std::uint32_t sram_end = 0x2000'0000 + 640 * 1024;
 
