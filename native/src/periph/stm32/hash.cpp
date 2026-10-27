@@ -1,6 +1,7 @@
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
+#include "hash_wide.hpp"
 #include "model_base.hpp"
 
 #include <algorithm>
@@ -25,20 +26,15 @@ namespace
 constexpr std::uint32_t busy_done     = 0;
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 constexpr std::size_t   block_words   = 16;
-constexpr std::uint32_t fresh_expect  = 17;
+constexpr std::size_t   max_block     = 42;
+constexpr std::size_t   inner_words   = 16;
 constexpr std::size_t   hra_count     = 5;
-constexpr std::size_t   hr_count      = 8;
-constexpr std::size_t   csr_count     = 54;
 constexpr std::uint32_t swap_tag      = 0x4853'0001;
 constexpr std::size_t   csr_config    = 1;
 constexpr std::size_t   csr_blocks    = 2;
 constexpr std::size_t   csr_chain     = 4;
 constexpr std::size_t   csr_pending   = 12;
-constexpr std::size_t   csr_inner     = 38;
-
-constexpr std::uint8_t sha1   = 0;
-constexpr std::uint8_t md5    = 1;
-constexpr std::uint8_t sha224 = 2;
+constexpr std::size_t   csr_wide_pend = 20;
 
 constexpr std::uint8_t phase_inner_key = 0;
 constexpr std::uint8_t phase_message   = 1;
@@ -52,7 +48,40 @@ constexpr std::uint32_t ipad = 0x3636'3636;
 constexpr std::uint32_t opad = 0x5C5C'5C5C;
 
 using chain = std::array<std::uint32_t, 8>;
-using block = std::array<std::uint32_t, block_words>;
+using block = std::span<std::uint32_t const, block_words>;
+using words = std::array<std::uint32_t, max_block>;
+
+enum class function : std::uint8_t
+{
+  sha1,
+  md5,
+  sha256,
+  sha512,
+};
+
+/**
+ * @brief One ALGO code of a HASH family.
+ */
+struct algorithm
+{
+  function      kind;
+  std::uint8_t  block_words;
+  std::uint8_t  digest_words;
+  std::uint8_t  init;
+  std::uint8_t  csr_inner;
+  std::uint16_t cycles;
+  bool          reserved;
+};
+
+/**
+ * @brief The ALGO codes and register counts of one HASH IP version.
+ */
+struct hash_family
+{
+  std::span<algorithm const> algorithms;
+  std::size_t                hr_count;
+  std::size_t                csr_count;
+};
 
 constexpr std::array<chain, 4> initial_values{
     {
@@ -64,9 +93,6 @@ constexpr std::array<chain, 4> initial_values{
          0x5BE0'CD19},
      }
 };
-
-constexpr std::array<std::size_t, 4>   digest_words{5, 4, 7, 8};
-constexpr std::array<std::uint64_t, 4> block_cycles{82, 66, 66, 66};
 
 constexpr std::array<std::uint32_t, 64> sha256_k{
     0x428A'2F98, 0x7137'4491, 0xB5C0'FBCF, 0xE9B5'DBA5, 0x3956'C25B, 0x59F1'11F1, 0x923F'82A4,
@@ -96,12 +122,33 @@ constexpr std::array<std::uint32_t, 64> md5_k{
 
 constexpr std::array<int, 16> md5_shifts{7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21};
 
+constexpr algorithm sha1_code{function::sha1, 16, 5, 0, 38, 82, false};
+constexpr algorithm md5_code{function::md5, 16, 4, 1, 38, 66, false};
+constexpr algorithm sha224_code{function::sha256, 16, 7, 2, 38, 66, false};
+constexpr algorithm sha256_code{function::sha256, 16, 8, 3, 38, 66, false};
+constexpr algorithm sha384_code{function::sha512, 32, 12, 0, 52, 98, false};
+constexpr algorithm sha512_224_code{function::sha512, 32, 7, 2, 52, 98, false};
+constexpr algorithm sha512_256_code{function::sha512, 32, 8, 3, 52, 98, false};
+constexpr algorithm sha512_code{function::sha512, 32, 16, 1, 52, 98, false};
+constexpr algorithm reserved_code{function::sha256, 16, 8, 3, 38, 66, true};
+
+constexpr std::array<algorithm, 4> u5_codes{sha1_code, md5_code, sha224_code, sha256_code};
+
+constexpr std::array<algorithm, 16> h5_codes{
+    sha1_code,     reserved_code,   sha224_code,     sha256_code,   reserved_code, reserved_code,
+    reserved_code, reserved_code,   reserved_code,   reserved_code, reserved_code, reserved_code,
+    sha384_code,   sha512_224_code, sha512_256_code, sha512_code,
+};
+
+constexpr hash_family u5_hash{u5_codes, 8, 54};
+constexpr hash_family h5_hash{h5_codes, 42, 103};
+
 /**
  * @brief Compresses one 512-bit block into a SHA-1 chaining value, FIPS 180-4 6.1.2.
  * @param h Chaining value, words 0 to 4.
  * @param m Message block as big-endian words.
  */
-constexpr void sha1_compress(chain& h, block const& m) noexcept
+constexpr void sha1_compress(chain& h, block m) noexcept
 {
   std::array<std::uint32_t, 80> w{};
   std::ranges::copy(m, w.begin());
@@ -158,7 +205,7 @@ constexpr void sha1_compress(chain& h, block const& m) noexcept
  * @param h Chaining value.
  * @param m Message block as big-endian words.
  */
-constexpr void sha256_compress(chain& h, block const& m) noexcept
+constexpr void sha256_compress(chain& h, block m) noexcept
 {
   std::array<std::uint32_t, 64> w{};
   std::ranges::copy(m, w.begin());
@@ -191,7 +238,7 @@ constexpr void sha256_compress(chain& h, block const& m) noexcept
  * @param m Message block as big-endian words, byte-swapped here to RFC 1321's little-endian
  *        words.
  */
-constexpr void md5_compress(chain& h, block const& m) noexcept
+constexpr void md5_compress(chain& h, block m) noexcept
 {
   auto a = h[0];
   auto b = h[1];
@@ -232,26 +279,9 @@ constexpr void md5_compress(chain& h, block const& m) noexcept
   h[3] += d;
 }
 
-/**
- * @brief Compresses one block with the algorithm's function.
- * @param algo ALGO field value, 00 SHA-1, 01 MD5, 10 SHA-224, 11 SHA-256.
- * @param h Chaining value.
- * @param m Message block as big-endian words.
- */
-constexpr void compress(std::uint8_t algo, chain& h, block const& m) noexcept
+constexpr auto inner_width(algorithm const& a) noexcept -> std::size_t
 {
-  if(algo == sha1)
-  {
-    sha1_compress(h, m);
-  }
-  else if(algo == md5)
-  {
-    md5_compress(h, m);
-  }
-  else
-  {
-    sha256_compress(h, m);
-  }
+  return a.digest_words > 8 ? inner_words : 8;
 }
 
 /**
@@ -288,31 +318,34 @@ static_assert(swapped(0x0000'0001, 3) == 0x8000'0000);
 
 struct hash_state
 {
-  std::uint8_t                 algo{};
-  chain                        h{};
-  std::uint64_t                blocks{};
-  block                        pending{};
-  std::uint8_t                 count{};
-  std::array<std::uint32_t, 8> digest{};
-  std::uint8_t                 digest_size{};
-  std::uint64_t                busy_end{};
-  std::uint64_t                queued{};
-  std::uint8_t                 busy{};
-  std::uint8_t                 final_pending{};
-  std::uint8_t                 digested{};
-  std::uint8_t                 hmac{};
-  std::uint8_t                 long_key{};
-  std::uint8_t                 phase{};
-  std::array<std::uint32_t, 8> inner{};
-  std::uint8_t                 refused{};
-  std::uint8_t                 suspend{};
+  std::uint8_t                           algo{};
+  chain                                  h{};
+  std::array<std::uint64_t, 8>           lanes{};
+  std::uint64_t                          blocks{};
+  words                                  pending{};
+  std::uint8_t                           count{};
+  words                                  digest{};
+  std::uint8_t                           digest_size{};
+  std::uint64_t                          busy_end{};
+  std::uint64_t                          queued{};
+  std::uint8_t                           busy{};
+  std::uint8_t                           final_pending{};
+  std::uint8_t                           digested{};
+  std::uint8_t                           hmac{};
+  std::uint8_t                           long_key{};
+  std::uint8_t                           phase{};
+  std::array<std::uint32_t, inner_words> inner{};
+  std::uint8_t                           refused{};
+  std::uint8_t                           suspend{};
 
   friend auto operator==(hash_state const&, hash_state const&) -> bool = default;
 };
 
 /**
  * @brief Hash processor of the STM32U5, RM0456 section 51: SHA-1, MD5, SHA-224 and SHA-256, and
- *        HMAC over them, on words written to DIN by the CPU or by DMA.
+ *        HMAC over them, on words written to DIN by the CPU or by DMA. The STM32H5 processor,
+ *        RM0481 section 40, adds SHA2-384, SHA2-512, SHA2-512/224 and SHA2-512/256 and drops
+ *        MD5, see the H5 paragraph below.
  *
  *        Each DIN word is swapped by the DATATYPE in CR at the time of the write into message
  *        bits in big-endian order. A write that finds 16 words pending compresses them first, so
@@ -381,20 +414,33 @@ struct hash_state
  *        while BUSY without INIT first is outside RM0456's sequence: it replaces the count under
  *        the pending BUSY end, which then sets DINIS and NBWE from the new count.
  *
+ *        STM32H5, RM0481 40.4: ALGO is four bits, selecting the algorithm of the family's code
+ *        table. The block is 64 bytes for SHA-1, SHA2-224 and SHA2-256, 128 bytes for the SHA-512
+ *        family with a 128-bit length field. NBWE reads the block size in words plus 1 after
+ *        INIT, six bits wide. The digest fills HR0 to HR15 at most, HR16 to HR41 read 0. A block
+ *        takes 98 cycles for the SHA-512 family. HMAC takes the block size as its key size.
+ *        Context swap CSRs hold the SHA-512 chaining value at CSR4-19, the pending block at
+ *        CSR20-51 and the inner digest at CSR52.
+ *
  *        Divergence: a DIN write while BUSY does not stall the bus, the CPU runs on. Not
  *        modelled, each logged once and a model_error under strict_peripherals, thrown before
- *        the write is stored: an HMAC key longer than 64 bytes with LKEY 0, hashed as with
- *        LKEY 1. DMAE 1 with no controller serving hash_in_dma. A CSR0 write other than the tag,
- *        or a CSR1 write whose ALGO, MODE or LKEY differ from those latched at INIT, with a count
- *        above 16 or a phase out of range: without strict_peripherals the CSR writes that follow
- *        are dropped up to the next INIT or CSR0 tag write. The RCC clock gate is not modelled.
+ *        the write is stored: an HMAC key longer than the block with LKEY 0, hashed as with
+ *        LKEY 1, ALGO 1 and 4 to 11 of the H5, run as SHA2-256. DMAE 1 with no controller serving
+ *        hash_in_dma. A CSR0 write other than the tag, or a CSR1 write whose
+ * ALGO, MODE or LKEY differ from those latched at INIT, with a count above 16 or a phase out of
+ * range: without strict_peripherals the CSR writes that follow are dropped up to the next INIT or
+ * CSR0 tag write. The RCC clock gate is not modelled.
  */
 class hash final : public dispatch_model<hash, hash_state>,
                    public dma_requester,
                    public bus_reset_listener
 {
 public:
-  hash(model_context& ctx, peripheral_desc const& desc);
+  hash(
+      model_context&                     ctx,
+      peripheral_desc const&             desc,
+      hash_family const&                 family,
+      std::span<write_entry<hash> const> writes);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -426,7 +472,13 @@ private:
   void               finish_digest();
   [[nodiscard]] auto last_bits() const -> std::uint32_t;
   auto               pad(std::uint32_t last_bits) -> std::size_t;
-  [[nodiscard]] auto output() const -> std::array<std::uint32_t, 8>;
+  [[nodiscard]] auto output() const -> words;
+  [[nodiscard]] auto alg() const -> algorithm const&;
+  [[nodiscard]] auto code_of(std::uint32_t control) const -> algorithm const&;
+  void               compress_block(std::span<std::uint32_t const> m);
+  [[nodiscard]] auto lane_word(std::size_t index) const -> std::uint32_t;
+  void               set_lane_word(std::size_t index, std::uint32_t value);
+  [[nodiscard]] auto algo_of_config(std::uint32_t value) const -> std::uint32_t;
   void               restart();
   auto               open_hmac(std::uint32_t pad_word) -> std::size_t;
   [[nodiscard]] auto key_overflows() const -> bool;
@@ -446,8 +498,10 @@ private:
   void unmodelled(bool& logged, std::string_view name, std::uint32_t offset, std::string message);
 
   register_file&                       regs_;
+  hash_family const&                   family_;
   std::uint32_t                        cr_;
   std::uint32_t                        din_;
+  std::uint32_t                        str_;
   std::uint32_t                        sr_;
   std::uint32_t                        csr0_;
   field_ref                            init_;
@@ -470,16 +524,17 @@ private:
   field_ref                            nbwp_;
   field_ref                            dinne_;
   field_ref                            nbwe_;
-  std::array<std::uint32_t, hr_count>  hr_{};
+  std::array<std::uint32_t, max_block> hr_{};
   std::array<std::uint32_t, hra_count> hra_{};
   irq_line*                            line_;
   dma_signal                           dma_;
   bool                                 long_key_logged_{};
+  bool                                 code_logged_{};
   bool                                 dma_logged_{};
   bool                                 swap_logged_{};
 };
 
-auto hash_writes() -> std::span<write_entry<hash> const>
+template <hash_family const& Family> auto hash_writes() -> std::span<write_entry<hash> const>
 {
   static std::deque<std::string> const names = [] {
     std::deque<std::string> out;
@@ -487,11 +542,11 @@ auto hash_writes() -> std::span<write_entry<hash> const>
     {
       out.push_back(std::format("HRA{}", i));
     }
-    for(std::size_t i = 0; i < hr_count; ++i)
+    for(std::size_t i = 0; i < Family.hr_count; ++i)
     {
       out.push_back(std::format("HR{}", i));
     }
-    for(std::size_t i = 0; i < csr_count; ++i)
+    for(std::size_t i = 0; i < Family.csr_count; ++i)
     {
       out.push_back(std::format("CSR{}", i));
     }
@@ -514,19 +569,23 @@ auto hash_writes() -> std::span<write_entry<hash> const>
   return table;
 }
 
-hash::hash(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "HASH", hash_writes()}, regs_{ctx.regs}, cr_{reg("CR").offset},
-      din_{reg("DIN").offset}, sr_{reg("SR").offset}, csr0_{reg("CSR0").offset},
-      init_{field("CR", "INIT")}, dmae_{field("CR", "DMAE")}, mdmat_{field("CR", "MDMAT")},
-      dmas_{field("SR", "DMAS")}, datatype_{field("CR", "DATATYPE")}, mode_{field("CR", "MODE")},
-      lkey_{field("CR", "LKEY")}, algo_{field("CR", "ALGO")}, nbw_{field("CR", "NBW")},
-      cr_dinne_{field("CR", "DINNE")}, nblw_{field("STR", "NBLW")}, dcal_{field("STR", "DCAL")},
-      dinie_{field("IMR", "DINIE")}, dcie_{field("IMR", "DCIE")}, dinis_{field("SR", "DINIS")},
-      dcis_{field("SR", "DCIS")}, busy_{field("SR", "BUSY")}, nbwp_{field("SR", "NBWP")},
-      dinne_{field("SR", "DINNE")}, nbwe_{field("SR", "NBWE")}, line_{&irq("HASH_IRQn")},
-      dma_{ctx.peers, "hash_in_dma"}
+hash::hash(
+    model_context&                     ctx,
+    peripheral_desc const&             desc,
+    hash_family const&                 family,
+    std::span<write_entry<hash> const> writes)
+    : dispatch_model{ctx, desc, "HASH", writes}, regs_{ctx.regs}, family_{family},
+      cr_{reg("CR").offset}, din_{reg("DIN").offset}, str_{reg("STR").offset},
+      sr_{reg("SR").offset}, csr0_{reg("CSR0").offset}, init_{field("CR", "INIT")},
+      dmae_{field("CR", "DMAE")}, mdmat_{field("CR", "MDMAT")}, dmas_{field("SR", "DMAS")},
+      datatype_{field("CR", "DATATYPE")}, mode_{field("CR", "MODE")}, lkey_{field("CR", "LKEY")},
+      algo_{field("CR", "ALGO")}, nbw_{field("CR", "NBW")}, cr_dinne_{field("CR", "DINNE")},
+      nblw_{field("STR", "NBLW")}, dcal_{field("STR", "DCAL")}, dinie_{field("IMR", "DINIE")},
+      dcie_{field("IMR", "DCIE")}, dinis_{field("SR", "DINIS")}, dcis_{field("SR", "DCIS")},
+      busy_{field("SR", "BUSY")}, nbwp_{field("SR", "NBWP")}, dinne_{field("SR", "DINNE")},
+      nbwe_{field("SR", "NBWE")}, line_{&irq("HASH_IRQn")}, dma_{ctx.peers, "hash_in_dma"}
 {
-  for(std::size_t i = 0; i < hr_count; ++i)
+  for(std::size_t i = 0; i < family_.hr_count; ++i)
   {
     hr_[i] = reg(std::format("HR{}", i)).offset;
   }
@@ -561,7 +620,7 @@ void hash::restore_reset_values()
 
 auto hash::is_csr(std::uint32_t offset) const -> bool
 {
-  return offset >= csr0_ and offset < csr0_ + 4 * csr_count;
+  return offset >= csr0_ and offset < csr0_ + 4 * family_.csr_count;
 }
 
 auto hash::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
@@ -601,7 +660,9 @@ auto hash::on_write(
     {
       unmodelled(
           long_key_logged_, "DIN", offset,
-          "an HMAC key longer than 64 bytes needs LKEY 1: the key is hashed as with LKEY 1");
+          std::format(
+              "an HMAC key longer than {} bytes needs LKEY 1: the key is hashed as with LKEY 1",
+              4 * alg().block_words));
     }
     data_written(value);
     return {};
@@ -619,8 +680,44 @@ auto hash::on_write(
           dma_logged_, "CR", offset,
           "no DMA controller serves hash_in_dma: DMAE 1 requests nothing");
     }
+    if(init_.of(value) != 0 and code_of(value).reserved)
+    {
+      unmodelled(
+          code_logged_, "CR", offset,
+          std::format(
+              "ALGO {:#x} selects no modelled algorithm: the hash runs as SHA2-256",
+              algo_.of(value)));
+    }
   }
   return dispatch_model::on_write(regs, offset, size, old, value, ctx);
+}
+
+auto hash::alg() const -> algorithm const&
+{
+  return family_.algorithms[state_.algo];
+}
+
+auto hash::code_of(std::uint32_t control) const -> algorithm const&
+{
+  return family_.algorithms[algo_.of(control)];
+}
+
+auto hash::algo_of_config(std::uint32_t value) const -> std::uint32_t
+{
+  return (value & 3u) | (((value >> 14) & 3u) << 2);
+}
+
+auto hash::lane_word(std::size_t index) const -> std::uint32_t
+{
+  auto const lane = state_.lanes[index / 2];
+  return static_cast<std::uint32_t>(index % 2 == 0 ? lane : lane >> 32);
+}
+
+void hash::set_lane_word(std::size_t index, std::uint32_t value)
+{
+  auto& lane = state_.lanes[index / 2];
+  lane       = index % 2 == 0 ? (lane & ~std::uint64_t{0xFFFF'FFFF}) | value
+                              : (lane & 0xFFFF'FFFF) | std::uint64_t{value} << 32;
 }
 
 auto hash::context_word(std::size_t index) const -> std::uint32_t
@@ -631,11 +728,12 @@ auto hash::context_word(std::size_t index) const -> std::uint32_t
   }
   if(index == csr_config)
   {
-    return state_.algo
+    return (state_.algo & 3u)
          | std::uint32_t{state_.hmac} << 2
          | std::uint32_t{state_.long_key} << 3
          | std::uint32_t{state_.phase} << 4
-         | std::uint32_t{state_.count} << 8;
+         | std::uint32_t{state_.count} << 8
+         | std::uint32_t{static_cast<std::uint32_t>(state_.algo >> 2)} << 14;
   }
   if(index == csr_blocks)
   {
@@ -645,6 +743,23 @@ auto hash::context_word(std::size_t index) const -> std::uint32_t
   {
     return static_cast<std::uint32_t>(state_.blocks >> 32);
   }
+  auto const& a = alg();
+  if(index >= a.csr_inner and index < a.csr_inner + inner_width(a))
+  {
+    return state_.inner[index - a.csr_inner];
+  }
+  if(a.kind == function::sha512)
+  {
+    if(index >= csr_chain and index < csr_chain + 16)
+    {
+      return lane_word(index - csr_chain);
+    }
+    if(index >= csr_wide_pend and index < csr_wide_pend + 32)
+    {
+      return state_.pending[index - csr_wide_pend];
+    }
+    return 0;
+  }
   if(index >= csr_chain and index < csr_chain + state_.h.size())
   {
     return state_.h[index - csr_chain];
@@ -653,10 +768,6 @@ auto hash::context_word(std::size_t index) const -> std::uint32_t
   {
     return state_.pending[index - csr_pending];
   }
-  if(index >= csr_inner and index < csr_inner + state_.inner.size())
-  {
-    return state_.inner[index - csr_inner];
-  }
   return 0;
 }
 
@@ -664,11 +775,11 @@ auto hash::config_valid(std::uint32_t value) const -> bool
 {
   auto const phase = (value >> 4) & 3u;
   auto const hmac  = (value >> 2) & 1u;
-  return (value & ~0x1F3Fu) == 0
-     and (value & 3u) == state_.algo
+  return (value & ~0xFF3Fu) == 0
+     and algo_of_config(value) == state_.algo
      and hmac == state_.hmac
      and ((value >> 3) & 1u) == state_.long_key
-     and ((value >> 8) & 0x1Fu) <= block_words
+     and ((value >> 8) & 0x3Fu) <= alg().block_words
      and phase <= phase_outer_key
      and (hmac != 0 or phase == phase_inner_key);
 }
@@ -676,10 +787,10 @@ auto hash::config_valid(std::uint32_t value) const -> bool
 void hash::load_config(std::uint32_t value)
 {
   state_.phase    = static_cast<std::uint8_t>((value >> 4) & 3u);
-  state_.count    = static_cast<std::uint8_t>((value >> 8) & 0x1Fu);
+  state_.count    = static_cast<std::uint8_t>((value >> 8) & 0x3Fu);
   state_.digested = 0;
   update(regs_, dinne_, state_.count != 0 ? 1u : 0u);
-  update(regs_, nbwe_, fresh_expect - state_.count);
+  update(regs_, nbwe_, alg().block_words + 1u - state_.count);
   publish();
 }
 
@@ -724,10 +835,29 @@ void hash::context_written(std::size_t index, std::uint32_t value)
   if(index == csr_blocks)
   {
     state_.blocks = (state_.blocks & ~std::uint64_t{0xFFFF'FFFF}) | value;
+    return;
   }
-  else if(index == csr_blocks + 1)
+  if(index == csr_blocks + 1)
   {
     state_.blocks = (state_.blocks & 0xFFFF'FFFF) | std::uint64_t{value} << 32;
+    return;
+  }
+  auto const& a = alg();
+  if(index >= a.csr_inner and index < a.csr_inner + inner_width(a))
+  {
+    state_.inner[index - a.csr_inner] = value;
+    return;
+  }
+  if(a.kind == function::sha512)
+  {
+    if(index >= csr_chain and index < csr_chain + 16)
+    {
+      set_lane_word(index - csr_chain, value);
+    }
+    else if(index >= csr_wide_pend and index < csr_wide_pend + 32)
+    {
+      state_.pending[index - csr_wide_pend] = value;
+    }
   }
   else if(index >= csr_chain and index < csr_chain + state_.h.size())
   {
@@ -736,10 +866,6 @@ void hash::context_written(std::size_t index, std::uint32_t value)
   else if(index >= csr_pending and index < csr_pending + block_words)
   {
     state_.pending[index - csr_pending] = value;
-  }
-  else if(index >= csr_inner and index < csr_inner + state_.inner.size())
-  {
-    state_.inner[index - csr_inner] = value;
   }
 }
 
@@ -797,22 +923,20 @@ void hash::transfer_completed(dma_controller const& by, std::uint32_t number)
 void hash::initialise(std::uint32_t control)
 {
   state_.algo          = static_cast<std::uint8_t>(algo_.of(control));
-  state_.h             = initial_values[state_.algo];
-  state_.blocks        = 0;
-  state_.count         = 0;
   state_.busy          = 0;
   state_.final_pending = 0;
   state_.digested      = 0;
   state_.digest        = {};
   state_.digest_size   = 0;
-  state_.hmac          = static_cast<std::uint8_t>(mode_.of(control));
+  state_.hmac          = static_cast<std::uint8_t>(mode_.of(control) != 0);
   state_.long_key      = static_cast<std::uint8_t>(state_.hmac != 0 ? lkey_.of(control) : 0);
   state_.phase         = phase_inner_key;
   state_.inner         = {};
   state_.refused       = 0;
   state_.suspend       = suspend_none;
+  restart();
   withdraw();
-  update(regs_, nbwe_, fresh_expect);
+  update(regs_, nbwe_, alg().block_words + 1u);
   update(regs_, dinne_, 0);
   update(regs_, dcis_, 0);
   update(regs_, dinis_, 1);
@@ -825,12 +949,12 @@ void hash::initialise(std::uint32_t control)
 void hash::data_written(std::uint32_t value)
 {
   auto const word = swapped(value, get(regs_, datatype_));
-  if(state_.count == block_words)
+  if(state_.count == alg().block_words)
   {
-    compress(state_.algo, state_.h, state_.pending);
+    compress_block(std::span{state_.pending}.first(alg().block_words));
     ++state_.blocks;
     state_.count = 0;
-    work(block_cycles[state_.algo], false);
+    work(alg().cycles, false);
   }
   state_.pending[state_.count++] = word;
   state_.digested                = 0;
@@ -846,6 +970,25 @@ void hash::data_written(std::uint32_t value)
   {
     state_.suspend = suspend_launched;
     request();
+  }
+}
+
+void hash::compress_block(std::span<std::uint32_t const> m)
+{
+  switch(alg().kind)
+  {
+    case function::sha1:
+      sha1_compress(state_.h, m.first<block_words>());
+      break;
+    case function::md5:
+      md5_compress(state_.h, m.first<block_words>());
+      break;
+    case function::sha256:
+      sha256_compress(state_.h, m.first<block_words>());
+      break;
+    case function::sha512:
+      sha512_compress(state_.lanes, m.first<32>());
+      break;
   }
 }
 
@@ -873,7 +1016,7 @@ auto hash::key_overflows() const -> bool
      and state_.long_key == 0
      and state_.phase != phase_message
      and state_.blocks == 0
-     and state_.count == block_words;
+     and state_.count == alg().block_words;
 }
 
 auto hash::last_bits() const -> std::uint32_t
@@ -884,25 +1027,47 @@ auto hash::last_bits() const -> std::uint32_t
 
 void hash::restart()
 {
-  state_.h      = initial_values[state_.algo];
+  auto const& a = alg();
+  state_.h      = {};
+  state_.lanes  = {};
+  if(a.kind == function::sha512)
+  {
+    state_.lanes = sha512_initial[a.init];
+  }
+  else
+  {
+    state_.h = initial_values[a.init];
+  }
   state_.blocks = 0;
   state_.count  = 0;
 }
 
-auto hash::output() const -> std::array<std::uint32_t, 8>
+auto hash::output() const -> words
 {
-  std::array<std::uint32_t, 8> out{};
-  auto const                   size = digest_words[state_.algo];
-  for(std::size_t i = 0; i < size; ++i)
+  words       out{};
+  auto const& a = alg();
+  for(std::size_t i = 0; i < a.digest_words; ++i)
   {
-    out[i] = state_.algo == md5 ? std::byteswap(state_.h[i]) : state_.h[i];
+    switch(a.kind)
+    {
+      case function::md5:
+        out[i] = std::byteswap(state_.h[i]);
+        break;
+      case function::sha512:
+        out[i] = lane_word(i ^ 1u);
+        break;
+      default:
+        out[i] = state_.h[i];
+        break;
+    }
   }
   return out;
 }
 
 auto hash::open_hmac(std::uint32_t pad_word) -> std::size_t
 {
-  block       key{};
+  auto const& a = alg();
+  words       key{};
   std::size_t compressed = 0;
   if(state_.long_key == 0 and state_.blocks == 0)
   {
@@ -915,14 +1080,14 @@ auto hash::open_hmac(std::uint32_t pad_word) -> std::size_t
   else
   {
     compressed = pad(last_bits());
-    std::ranges::copy(output(), key.begin());
+    key        = output();
   }
   restart();
-  for(auto& word : key)
+  for(std::size_t i = 0; i < a.block_words; ++i)
   {
-    word ^= pad_word;
+    key[i] ^= pad_word;
   }
-  compress(state_.algo, state_.h, key);
+  compress_block(std::span{key}.first(a.block_words));
   state_.blocks = 1;
   return compressed + 1;
 }
@@ -944,8 +1109,8 @@ void hash::finish_digest()
   }
   else if(state_.phase == phase_message)
   {
-    compressed   = pad(last_bits());
-    state_.inner = output();
+    compressed = pad(last_bits());
+    std::copy_n(output().begin(), state_.inner.size(), state_.inner.begin());
     state_.phase = phase_outer_key;
     restart();
     final = false;
@@ -953,7 +1118,7 @@ void hash::finish_digest()
   else
   {
     compressed      = open_hmac(opad);
-    auto const size = digest_words[state_.algo];
+    auto const size = alg().digest_words;
     std::copy_n(state_.inner.begin(), size, state_.pending.begin());
     state_.count = static_cast<std::uint8_t>(size);
     compressed += pad(32);
@@ -962,7 +1127,7 @@ void hash::finish_digest()
   }
   if(final)
   {
-    state_.digest_size = static_cast<std::uint8_t>(digest_words[state_.algo]);
+    state_.digest_size = alg().digest_words;
     state_.digested    = 1;
     restart();
   }
@@ -970,16 +1135,17 @@ void hash::finish_digest()
   update(regs_, dcis_, 0);
   show_digest(false);
   publish();
-  work(compressed * block_cycles[state_.algo], final);
+  work(compressed * alg().cycles, final);
   interrupts();
 }
 
 auto hash::pad(std::uint32_t last_bits) -> std::size_t
 {
-  std::array<std::uint32_t, 2 * block_words> tail{};
+  auto const&                       a = alg();
+  std::array<std::uint32_t, 2 * 32> tail{};
   std::copy_n(state_.pending.begin(), state_.count, tail.begin());
   std::size_t   at   = state_.count;
-  std::uint64_t bits = 512 * state_.blocks;
+  std::uint64_t bits = std::uint64_t{32} * a.block_words * state_.blocks;
   if(at == 0)
   {
     tail[at++] = 0x8000'0000;
@@ -997,18 +1163,16 @@ auto hash::pad(std::uint32_t last_bits) -> std::size_t
       last = (last & ~(~std::uint32_t{} >> last_bits)) | (0x8000'0000u >> last_bits);
     }
   }
-  std::size_t const blocks = at > block_words - 2 ? 2 : 1;
-  auto const        end    = blocks * block_words;
+  std::size_t const length = a.kind == function::sha512 ? 4 : 2;
+  std::size_t const blocks = at > a.block_words - length ? 2 : 1;
+  auto const        end    = blocks * a.block_words;
   auto const        high   = static_cast<std::uint32_t>(bits >> 32);
   auto const        low    = static_cast<std::uint32_t>(bits);
-  tail[end - 2]            = state_.algo == md5 ? std::byteswap(low) : high;
-  tail[end - 1]            = state_.algo == md5 ? std::byteswap(high) : low;
+  tail[end - 2]            = a.kind == function::md5 ? std::byteswap(low) : high;
+  tail[end - 1]            = a.kind == function::md5 ? std::byteswap(high) : low;
   for(std::size_t i = 0; i < blocks; ++i)
   {
-    block piece{};
-    std::copy_n(
-        tail.begin() + static_cast<std::ptrdiff_t>(i * block_words), block_words, piece.begin());
-    compress(state_.algo, state_.h, piece);
+    compress_block(std::span{tail}.subspan(i * a.block_words, a.block_words));
   }
   return blocks;
 }
@@ -1071,7 +1235,7 @@ void hash::finish_work()
   {
     update(regs_, dcis_, 1);
     update(regs_, dinis_, 1);
-    update(regs_, nbwe_, fresh_expect);
+    update(regs_, nbwe_, alg().block_words + 1u);
     show_digest(true);
   }
   else
@@ -1080,7 +1244,7 @@ void hash::finish_work()
     {
       update(regs_, dinis_, 1);
     }
-    update(regs_, nbwe_, fresh_expect - state_.count);
+    update(regs_, nbwe_, alg().block_words + 1u - state_.count);
   }
   interrupts();
 }
@@ -1111,7 +1275,7 @@ void hash::publish()
 
 void hash::show_digest(bool visible)
 {
-  for(std::size_t i = 0; i < hr_count; ++i)
+  for(std::size_t i = 0; i < family_.hr_count; ++i)
   {
     auto const value = visible and i < state_.digest_size ? state_.digest[i] : 0u;
     regs_.poke(hr_[i], value);
@@ -1156,7 +1320,14 @@ void hash::unmodelled(
 auto hash_factory() -> model_factory
 {
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<hash>(ctx, desc);
+    return std::make_shared<hash>(ctx, desc, u5_hash, hash_writes<u5_hash>());
+  };
+}
+
+auto hash_h5_factory() -> model_factory
+{
+  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<hash>(ctx, desc, h5_hash, hash_writes<h5_hash>());
   };
 }
 }

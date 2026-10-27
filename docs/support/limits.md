@@ -173,7 +173,11 @@ Source: [gtzc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 
 Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/hash.cpp)
 
-- An HMAC key longer than 64 bytes with LKEY 0 is hashed as with LKEY 1, and logged.
+- An HMAC key longer than the block with LKEY 0 is hashed as with LKEY 1, and logged. The block is
+  64 bytes for SHA-1, SHA2-224 and SHA2-256, 128 bytes for the SHA-512 family.
+- The H5 ALGO codes 1 and 4 to 11 log once at INIT and run as SHA2-256.
+- The H5 CSR registers use popcorn's layout too: CSR4 up hold the SHA-512 chaining value and
+  pending block, the inner HMAC digest sits at CSR52.
 - DMA input works through GPDMA request 89. A machine with no DMA controller that serves
   `hash_in_dma` logs DMAE 1 once and requests nothing.
 - The CSR registers hold popcorn's own serialisation of the state, not the silicon layout. CSR0

@@ -212,6 +212,18 @@ for _, target in h573_firmwares.values():
     if target is not None:
         adc_h573.depends(target)
 
+hash_h573 = add_doctest(
+    "stm32-hash-h573",
+    [here / "test_hash_h573.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+hash_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        hash_h573.depends(target)
+
 tim_spi_h573 = add_doctest(
     "stm32-tim-spi-h573",
     [here / "test_tim_spi_h573.cpp"],
