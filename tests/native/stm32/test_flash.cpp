@@ -1395,7 +1395,7 @@ TEST_CASE("Table 54 range 1 asks LATENCY 0 up to 32 MHz and LATENCY 4 up to 160 
     REQUIRE(rig.f.field("PWR", "PWR_SVMSR", "ACTVOS") == 3);
     rig.write("FLASH_ACR", ws);
     rig.switch_to_hsi16();
-    rig.write("RCC", "RCC_PLL1CFGR", 2u | 1u << 18);
+    rig.write("RCC", "RCC_PLL1CFGR", 2u | 3u << 2 | 1u << 18);
     rig.write("RCC", "RCC_PLL1DIVR", (n - 1) | (r - 1) << 24);
     rig.write("RCC", "RCC_CR", rig.read_reg("RCC", "RCC_CR") | 1u << 24);
     rig.spin();
