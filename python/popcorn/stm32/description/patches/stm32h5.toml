@@ -200,6 +200,12 @@ reset = 0x00800D00
 source = "RM0481 Rev 5, 36.7.1 RNG control register (RNG_CR): reset value 0x0080 0D00, RNG_CONFIG1 0x08 and RNG_CONFIG3 0xD. ST's STM32H573 SVD gives 0x00871F00"
 
 [[resets]]
+peripheral = "PWR"
+register = "PWR_VOSSR"
+reset = 0x2008
+source = "RM0481 Rev 5, 10.11.6 PWR voltage scaling status register (PWR_VOSSR): reset value 0x0000 2008, ACTVOSRDY and VOSRDY set at VOS3. ST's STM32H573 SVD gives 0x8"
+
+[[resets]]
 peripheral = "RCC"
 register = "RCC_CR"
 reset = 0x2B

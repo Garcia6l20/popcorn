@@ -46,6 +46,12 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto pwr_factory(pwr_options options) -> model_factory;
 
 /**
+ * @brief Factory of the STM32H5 PWR model, RM0481 section 10.
+ * @param options Board configuration, copied into every model made.
+ */
+[[nodiscard]] auto pwr_h5_factory(pwr_options options) -> model_factory;
+
+/**
  * @brief Factory of the FLASH model, RM0456 section 7.
  * @param options Board configuration, copied into every model made.
  */

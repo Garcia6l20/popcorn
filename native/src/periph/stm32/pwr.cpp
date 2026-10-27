@@ -36,6 +36,9 @@ enum class low_power_mode : std::uint8_t
   shutdown,
 };
 
+constexpr std::array<low_power_mode, 2> h5_modes_by_lpms{
+    low_power_mode::stop0, low_power_mode::standby};
+
 constexpr std::array<low_power_mode, 8> modes_by_lpms{
     low_power_mode::stop0,    low_power_mode::stop1,   low_power_mode::stop2,
     low_power_mode::stop3,    low_power_mode::standby, low_power_mode::standby,
@@ -100,11 +103,16 @@ struct pwr_family
 };
 
 /**
- * @brief PWR voltage scaling of the STM32U5, RM0456 section 10.10.4: VOSRDY follows a VOS change
- *        and BOOSTRDY follows BOOSTEN after the board's ready delay, and PWR_SVMSR.ACTVOS takes
- *        the new range with VOSRDY, which the FLASH model is told for its latency check.
- *        Low-power modes are not modelled: the first write to PWR_CR1 logs one warning per
- *        machine life naming the LPMS mode, and a deep-sleep WFI idles as a plain WFI.
+ * @brief PWR voltage scaling of the STM32U5, RM0456 section 10.10.4, and of the STM32H5, RM0481
+ *        10.11.5 and 10.11.6. A VOS write that steps to a higher voltage clears VOSRDY until the
+ *        board's ready delay ends, one that steps to a lower voltage keeps VOSRDY, the voltage
+ *        being at or above the selected level, RM0456 10.10.4 and RM0481 10.11.6. ACTVOSRDY clears
+ *        on every VOS change until the delay ends, and BOOSTRDY follows BOOSTEN the same way on the
+ *        U5. ACTVOS takes the new range at the end of the delay and the FLASH model is told for its
+ *        latency check. The H5 reads them in PWR_VOSSR and writes VOS in PWR_VOSCR.
+ *        Low-power modes are not modelled: the first write to the mode register, PWR_CR1 on the
+ *        U5 and PWR_PMCR on the H5, logs one warning per machine life naming the LPMS mode, and
+ *        a deep-sleep WFI idles as a plain WFI.
  *
  *        TrustZone, RM0456 10.8 and Table 109: the bits a `PWR_SECCFGR` bit secures, the VOSR
  *        bits `RCC_SECCFGR.SYSCLKSEC` secures, the PUCRx and PDCRx bits of the Secure pins of
@@ -230,6 +238,40 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> u5_names{
 
 constexpr std::array<std::uint8_t, 4> u5_vos_levels{3, 2, 1, 0};
 
+/** @brief STM32H5 PWR, RM0481 10.11: VOS 00 VOS3 to 11 VOS0, VOSRDY and ACTVOSRDY read 1 when
+ *         ready, no EPOD booster, LPMS 0 Stop and 1 Standby. */
+constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> h5_names{
+    {
+     {pwr_role::vos, {"PWR_VOSCR", "VOS"}},
+     {pwr_role::vos_ready, {"PWR_VOSSR", "VOSRDY"}},
+     {pwr_role::active_vos, {"PWR_VOSSR", "ACTVOS"}},
+     {pwr_role::active_vos_ready, {"PWR_VOSSR", "ACTVOSRDY"}},
+     {pwr_role::mode, {"PWR_PMCR", "LPMS"}},
+     {pwr_role::booster, {"", ""}},
+     {pwr_role::booster_ready, {"", ""}},
+     }
+};
+
+constexpr std::array<std::uint8_t, 4> h5_vos_levels{3, 2, 1, 0};
+
+constexpr std::array<write_entry<pwr>, 3> h5_writes{
+    {
+     {"PWR_PMCR", &pwr::cr1_written},
+     {"PWR_VOSCR", &pwr::vosr_written},
+     {"PWR_SECCFGR", nullptr},
+     }
+};
+
+constexpr pwr_family h5_pwr{
+    .fields           = h5_names,
+    .modes            = h5_modes_by_lpms,
+    .vos_levels       = h5_vos_levels,
+    .vos_ready_set    = true,
+    .active_ready_set = true,
+    .writes           = h5_writes,
+    .trustzone_writes = {},
+};
+
 constexpr pwr_family u5_pwr{
     .fields           = u5_names,
     .modes            = modes_by_lpms,
@@ -241,6 +283,7 @@ constexpr pwr_family u5_pwr{
 };
 
 static_assert(names_every_role(u5_names));
+static_assert(names_every_role(h5_names));
 
 pwr::pwr(
     model_context&         ctx,
@@ -463,7 +506,10 @@ void pwr::vosr_written(std::uint32_t old, std::uint32_t now)
   auto const level = names_[pwr_role::vos];
   if(level.of(now) != level.of(old))
   {
-    update(regs_, names_[pwr_role::vos_ready], family_.vos_ready_set ? 0 : 1);
+    if(family_.vos_levels[level.of(now)] < family_.vos_levels[level.of(old)])
+    {
+      update(regs_, names_[pwr_role::vos_ready], family_.vos_ready_set ? 0 : 1);
+    }
     update(regs_, names_[pwr_role::active_vos_ready], family_.active_ready_set ? 0 : 1);
     schedule_in(options_.ready_delay, voltage_ready, ++state_.generation[voltage_ready]);
   }
@@ -486,9 +532,10 @@ void pwr::cr1_written(std::uint32_t, std::uint32_t now)
     return;
   }
   warn(
-      "PWR_CR1", std::format(
-                     "LPMS selects {}, not modelled: a deep-sleep WFI idles as a plain WFI",
-                     reflex::enum_value_name(family_.modes[names_[pwr_role::mode].of(now)])));
+      family_.fields[std::to_underlying(pwr_role::mode)].name.reg,
+      std::format(
+          "LPMS selects {}, not modelled: a deep-sleep WFI idles as a plain WFI",
+          reflex::enum_value_name(family_.modes[names_[pwr_role::mode].of(now)])));
 }
 
 auto pwr::active_level() const -> std::uint32_t
@@ -527,6 +574,13 @@ auto pwr_factory(pwr_options options) -> model_factory
 {
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<pwr>(ctx, desc, u5_pwr, options);
+  };
+}
+
+auto pwr_h5_factory(pwr_options options) -> model_factory
+{
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<pwr>(ctx, desc, h5_pwr, options);
   };
 }
 }

@@ -234,3 +234,34 @@ TEST_CASE("RM0456 10.10.4: active_level() maps every ACTVOS code to a level, ran
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
   CHECK(source->active_level() == 0);
 }
+
+TEST_CASE("RM0456 10.10.4: a lower VOS range keeps VOSRDY, a higher one clears it until the delay")
+{
+  stm32_fixture           f{u575(), "pwr_ll", popcorn::testing::stm32_options()};
+  constexpr std::uint32_t loop_at = 0x2000'0100;
+  REQUIRE(f.target->mem().write(loop_at, 4, 0xE7FD'BF30).has_value());
+  f.set("pc", loop_at | 1u);
+  auto const& pwr    = f.target->peripheral("PWR").description();
+  auto const  vosr   = pwr.base + popcorn::find_register(pwr, "PWR_VOSR")->offset;
+  auto const  run_us = [&](std::uint64_t us) {
+    auto const until = popcorn::vtime{f.target->virtual_clock().time().ps + us * 1'000'000};
+    REQUIRE(
+        f.run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = until}).reason
+        == stop_reason::time);
+  };
+  REQUIRE(field(f, "PWR_VOSR", "VOSRDY") == 1);
+  REQUIRE(f.target->mem().write(vosr, 4, 3u << 16).has_value());
+  CHECK(field(f, "PWR_VOSR", "VOSRDY") == 0);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOSRDY") == 0);
+  run_us(60);
+  CHECK(field(f, "PWR_VOSR", "VOSRDY") == 1);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOS") == 3);
+  REQUIRE(f.target->mem().write(vosr, 4, 1u << 16).has_value());
+  CHECK(field(f, "PWR_VOSR", "VOSRDY") == 1);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOSRDY") == 0);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOS") == 3);
+  run_us(60);
+  CHECK(field(f, "PWR_VOSR", "VOSRDY") == 1);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOSRDY") == 1);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOS") == 1);
+}

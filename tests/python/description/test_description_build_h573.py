@@ -319,7 +319,7 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
         irqs_added=6,
         sizes_set=1,
         registers_added=27,
-        resets_set=28,
+        resets_set=29,
         core_fields_set=1,
         regions_added=2,
         controllers_set=2,

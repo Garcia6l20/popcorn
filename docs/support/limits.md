@@ -199,8 +199,11 @@ Not modelled, logged:
 
 Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/pwr.cpp)
 
-- The low-power modes `PWR_CR1.LPMS` selects are not modelled. A deep-sleep WFI idles as a plain
-  WFI.
+- The low-power modes `PWR_CR1.LPMS` selects on the U5 and `PWR_PMCR.LPMS` on the H5 are not
+  modelled. A deep-sleep WFI idles as a plain WFI.
+- The voltage scaling ready bits follow a VOS write after the board's `ready_delay`, 50 us by
+  default. A write that steps to a higher voltage clears VOSRDY for that delay, one that steps to
+  a lower voltage keeps VOSRDY set. ACTVOSRDY clears for the delay on every change.
 
 ## RCC
 

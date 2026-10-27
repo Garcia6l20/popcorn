@@ -214,7 +214,7 @@ TEST_CASE("RM0481 11.8: the bootloader clock sequence reaches 250 MHz on PLL1 P,
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
   auto const log = f.log();
   REQUIRE(log.size() == 11);
-  CHECK(log[0] == 0);
+  CHECK(log[0] > 0);
   CHECK(log[1] == 0);
   CHECK(log[2] == 0);
   CHECK(log[3] == 0);

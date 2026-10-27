@@ -22,11 +22,11 @@ using popcorn::testing::h573;
 using popcorn::testing::stm32_fixture;
 
 constexpr auto attached = std::to_array<std::string_view>({
-    "CRC",    "DBGMCU",  "DCACHE",  "EXTI",   "GPIOA",  "GPIOB",  "GPIOC", "GPIOD",
-    "GPIOE",  "GPIOF",   "GPIOG",   "GPIOH",  "GPIOI",  "I2C1",   "I2C2",  "I2C3",
-    "I2C4",   "ICACHE",  "IWDG",    "LPUART", "RCC",    "RNG",    "RTC",   "SAI1",
-    "SAI2",   "TAMP",    "UART12",  "UART4",  "UART5",  "UART7",  "UART8", "UART9",
-    "USART1", "USART10", "USART11", "USART2", "USART3", "USART6",
+    "CRC",   "DBGMCU", "DCACHE",  "EXTI",    "GPIOA",  "GPIOB",  "GPIOC",  "GPIOD",
+    "GPIOE", "GPIOF",  "GPIOG",   "GPIOH",   "GPIOI",  "I2C1",   "I2C2",   "I2C3",
+    "I2C4",  "ICACHE", "IWDG",    "LPUART",  "PWR",    "RCC",    "RNG",    "RTC",
+    "SAI1",  "SAI2",   "TAMP",    "UART12",  "UART4",  "UART5",  "UART7",  "UART8",
+    "UART9", "USART1", "USART10", "USART11", "USART2", "USART3", "USART6",
 });
 
 constexpr auto matched_without_model = std::to_array<std::string_view>(
