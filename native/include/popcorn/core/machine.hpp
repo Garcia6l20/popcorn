@@ -383,8 +383,7 @@ public:
    * @brief Instructions the core executed since reset, counted as virtual_clock().now() counts
    *        them, without the time the core slept in WFI or WFE or was held: virtual_clock().now()
    *        minus this is that time in instructions. Zeroed by every reset kind, saved in
-   *        snapshots and restored with them. A save from before it existed restores it as 0,
-   *        and the difference is then not that time.
+   *        snapshots and restored with them.
    */
   [[nodiscard]] auto executed() const noexcept -> icount;
 

@@ -3130,15 +3130,6 @@ template <typename Traits> void flash_model<Traits>::load(std::span<std::byte co
   {
     base::load(in);
   }
-  if(not wrp_offsets_.empty() and state_.wrp.size() != wrp_offsets_.size())
-  {
-    state_.wrp.assign(wrp_offsets_.size(), Traits::wrp_production(ctx_.part.part));
-    load_options();
-  }
-  if(state_.wrp_active.size() != state_.wrp.size())
-  {
-    state_.wrp_active = state_.wrp;
-  }
   option_changed_.clear();
   latency_logged_.clear();
   sync_watches();

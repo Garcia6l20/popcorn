@@ -201,8 +201,7 @@ auto sai_writes() -> std::span<write_entry<sai> const>;
  *        its clock runs starts at the next boundary, at once on the first enable of a clock with no
  *        phase, which fixes it. The external clock is defined by its frame rate and always matches
  *        the block's frame, so AFSDET and LFSDET never rise, as with a correctly wired codec, and
- *        their interrupt enables log nothing. A state saved before the external clock existed loads
- *        with the clocks of the machine loading it, their phase taken again at the next enable.
+ *        their interrupt enables log nothing.
  */
 class sai final : public dispatch_model<sai, sai_state>,
                   public audio_port,
@@ -228,7 +227,6 @@ public:
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
   void               on_clock_change() override;
-  void               load(std::span<std::byte const> in) override;
   void               attach(audio_block block, audio_attachment attachment) override;
   void               set_external_clock(audio_block which, std::uint32_t frame_hz) override;
   [[nodiscard]] auto external_clock(audio_block which) const -> std::uint32_t override;
@@ -1285,20 +1283,6 @@ void sai::set_external_clock(audio_block which, std::uint32_t frame_hz)
 auto sai::external_clock(audio_block which) const -> std::uint32_t
 {
   return (*state_.clock)[index_of(which)].hz;
-}
-
-void sai::load(std::span<std::byte const> in)
-{
-  auto kept = state_.clock;
-  dispatch_model::load(in);
-  if(not state_.clock)
-  {
-    for(auto& c : *kept)
-    {
-      c.anchored = false;
-    }
-    state_.clock = kept;
-  }
 }
 
 void sai::flags()

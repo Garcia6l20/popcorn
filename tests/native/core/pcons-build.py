@@ -41,11 +41,7 @@ add_doctest(
     "core-machine-api",
     [here / "test_machine_api.cpp", here / "test_trace.cpp", here / "test_snapshot.cpp"],
     [test_support, core],
-    env={
-        "POPCORN_TOY_DESC": toy,
-        "POPCORN_SNAPSHOT_V2": str(project_dir / "tests" / "data" / "core" / "snapshot_v2.bson"),
-        "POPCORN_SNAPSHOT_V4": str(project_dir / "tests" / "data" / "core" / "snapshot_v4.bson"),
-    },
+    env={"POPCORN_TOY_DESC": toy},
 )
 add_doctest("core-unicorn-dev", [here / "test_unicorn_dev.cpp"], [smoke_support, core])
 

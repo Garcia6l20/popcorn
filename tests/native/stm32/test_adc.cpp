@@ -865,23 +865,6 @@ TEST_CASE("BULB, SMPTRIG, TROVS and the DIFSEL bit of a converted channel each l
   }
 }
 
-TEST_CASE("an ADC state saved before the inputs loads with inputs at 0 and converts again")
-{
-  adc_fixture const f;
-  f.port().drive(5, 1'000'000);
-  f.enable();
-  std::vector<std::byte> bytes;
-  reflex::serde::bson::serializer{bytes}.dump(old_adc_state{});
-  f.target->model("ADC1")->load(bytes);
-  f.target->model("ADC12")->load(bytes);
-  CHECK(f.port().input(5) == 0);
-  f.settle();
-  CHECK(f.isr("EOC") == 0);
-  CHECK(f.convert(5) == 0);
-  f.port().drive(5, 1'000'000);
-  CHECK(f.convert(5) == 5461);
-}
-
 namespace
 {
 constexpr std::uint64_t slow_cycle_ps = 16 * us;
@@ -1531,45 +1514,6 @@ TEST_CASE("a snapshot mid-scan with two results queued for the DMA resumes to th
   finish(other);
 }
 
-TEST_CASE("an ADC state saved before the sequence loads mid-conversion as rank 0, the scan goes on")
-{
-  adc_fixture const f;
-  f.port().drive(5, 1'000'000);
-  f.port().drive(6, 2'000'000);
-  f.enable();
-  f.write("ADC1", "ADC_SQR1", 1u | (5u << 6) | (6u << 12));
-  auto const start = f.now();
-  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
-  f.run_until(start + 22 * adc_cycle_ps);
-  REQUIRE(f.cpu_read("ADC_DR") == 5461);
-  f.run_until(start + 33 * adc_cycle_ps);
-  auto const now = live_state(f);
-  REQUIRE(now.converting);
-  REQUIRE(now.rank == 1);
-  step03_adc_state const old{
-      .input_uv      = now.input_uv,
-      .generation    = now.generation,
-      .start_ps      = now.start_ps,
-      .clock_hz      = now.clock_hz,
-      .divider       = now.divider,
-      .held          = now.held,
-      .sum           = now.sum,
-      .converting    = now.converting,
-      .waiting_clock = now.waiting_clock};
-  std::vector<std::byte> bytes;
-  reflex::serde::bson::serializer{bytes}.dump(old);
-  f.target->model("ADC1")->load(bytes);
-  f.run_until(start + 44 * adc_cycle_ps);
-  CHECK(f.isr("EOC") == 1);
-  CHECK(f.isr("EOS") == 0);
-  CHECK(f.cpu_read("ADC_DR") == 5461);
-  f.run_until(start + 66 * adc_cycle_ps);
-  CHECK(f.isr("EOC") == 1);
-  CHECK(f.isr("EOS") == 1);
-  CHECK(f.cpu_read("ADC_DR") == 10922);
-  CHECK(f.cr("ADSTART") == 0);
-}
-
 TEST_CASE("DISCEN with CONT converts as DISCEN alone and logs once, a model_error when strict")
 {
   {
@@ -2205,37 +2149,6 @@ TEST_CASE("a snapshot with two out-of-window results counted flags the third, in
   other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
   CHECK(live_state(other).filter_count == 2);
   CHECK(watched(other, 5, out_of_window) == awd1);
-}
-
-TEST_CASE("an ADC state saved before the watchdogs loads with the AWDFILT1 count at 0")
-{
-  adc_fixture const f;
-  f.enable();
-  f.write("ADC1", "ADC_CFGR1", res12 | awd1en);
-  f.write("ADC1", "ADC_HTR1", awdfilt1(1) | 8000);
-  CHECK(watched(f, 5, out_of_window) == 0);
-  auto const now = live_state(f);
-  REQUIRE(now.filter_count == 1);
-  step04_adc_state const old{
-      .input_uv      = now.input_uv,
-      .generation    = now.generation,
-      .start_ps      = now.start_ps,
-      .clock_hz      = now.clock_hz,
-      .divider       = now.divider,
-      .held          = now.held,
-      .sum           = now.sum,
-      .converting    = now.converting,
-      .waiting_clock = now.waiting_clock,
-      .rank          = now.rank,
-      .subgroup_left = now.subgroup_left,
-      .data          = now.data,
-      .dma_stopped   = now.dma_stopped};
-  std::vector<std::byte> bytes;
-  reflex::serde::bson::serializer{bytes}.dump(old);
-  f.target->model("ADC1")->load(bytes);
-  CHECK(live_state(f).filter_count == 0);
-  CHECK(watched(f, 5, out_of_window) == 0);
-  CHECK(watched(f, 5, out_of_window) == awd1);
 }
 
 TEST_CASE("AWDFILT1 with AWD1EN and a DMA mode logs once at the start, a model_error when strict")

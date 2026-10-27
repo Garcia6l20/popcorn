@@ -2,13 +2,12 @@
 
 #include <popcorn/core/errors.hpp>
 
+#include <reflex/serde/bson.hpp>
+
 #include <doctest/doctest.h>
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <fstream>
-#include <iterator>
 #include <tuple>
 #include <vector>
 
@@ -124,47 +123,42 @@ TEST_CASE("a saved form with a future format is a config_error")
   CHECK_THROWS_AS(std::ignore = popcorn::core::decode_snapshot(bytes), popcorn::config_error);
 }
 
-TEST_CASE(
-    "the format 2 form encode_snapshot(filled()) wrote at 55a536c reads back as the current format")
+TEST_CASE("a saved form of format 7 is a config_error naming the format")
 {
-  char const* const path = std::getenv("POPCORN_SNAPSHOT_V2");
-  REQUIRE(path != nullptr);
-  std::ifstream           file{path, std::ios::binary};
-  std::vector<char> const raw{std::istreambuf_iterator<char>{file}, {}};
-  REQUIRE_FALSE(raw.empty());
-  auto const back = core::decode_snapshot(std::as_bytes(std::span{raw}));
-  auto       data = filled();
-  CHECK(back.format == core::snapshot_format_version);
-  REQUIRE(back.events.pending.size() == data.events.pending.size());
-  for(auto const& pending : back.events.pending)
-  {
-    CHECK(pending.kind == core::deadline::instructions);
-    CHECK(pending.due_ps == 0);
-  }
-  CHECK(back == data);
+  auto data   = filled();
+  data.format = 7;
+  CHECK_THROWS_WITH_AS(
+      std::ignore = core::decode_snapshot(core::encode_snapshot(data)),
+      doctest::Contains("format, expected snapshot_format_version 8, bytes have 7"),
+      popcorn::config_error);
 }
 
-TEST_CASE(
-    "the format 4 form encode_snapshot(filled()) wrote at b3b4acc reads back with its events in "
-    "lane 0")
+TEST_CASE("a saved form of another format with a different member set names the format")
 {
-  char const* const path = std::getenv("POPCORN_SNAPSHOT_V4");
-  REQUIRE(path != nullptr);
-  std::ifstream           file{path, std::ios::binary};
-  std::vector<char> const raw{std::istreambuf_iterator<char>{file}, {}};
-  REQUIRE_FALSE(raw.empty());
-  auto const back = core::decode_snapshot(std::as_bytes(std::span{raw}));
-  REQUIRE(back.events.pending.size() == filled().events.pending.size());
-  for(auto const& pending : back.events.pending)
+  struct reshaped
   {
-    CHECK(pending.lane == 0);
-  }
-  CHECK(back.format == core::snapshot_format_version);
-  CHECK_FALSE(back.core_held);
-  CHECK(back.peripherals.front().nmi_level == 0);
-  CHECK_FALSE(back.trustzone);
-  CHECK(back.idau.empty());
-  CHECK(back == filled());
+    std::uint32_t format{};
+    std::uint32_t gone{};
+  };
+  std::vector<std::byte> bytes;
+  reflex::serde::bson::serializer{bytes}.dump(reshaped{.format = 7, .gone = 1});
+  CHECK_THROWS_WITH_AS(
+      std::ignore = core::decode_snapshot(bytes), doctest::Contains("format, expected"),
+      popcorn::config_error);
+}
+
+TEST_CASE("a saved form that does not lead with the format element is a config_error on bytes")
+{
+  struct unordered
+  {
+    std::uint32_t gone{};
+    std::uint32_t format{};
+  };
+  std::vector<std::byte> bytes;
+  reflex::serde::bson::serializer{bytes}.dump(unordered{.gone = 1, .format = 8});
+  CHECK_THROWS_WITH_AS(
+      std::ignore = core::decode_snapshot(bytes), doctest::Contains("bytes"),
+      popcorn::config_error);
 }
 
 TEST_CASE("an NMI line level survives the saved form")
@@ -186,16 +180,6 @@ TEST_CASE("an event's lane survives the saved form")
   auto const back                    = core::decode_snapshot(core::encode_snapshot(data));
   CHECK(back.events.pending.front().lane == 3);
   CHECK(back == data);
-}
-
-TEST_CASE("a format 3 snapshot reads back as the current format, its clock holding nothing")
-{
-  auto data   = filled();
-  data.format = 3;
-  auto back   = core::decode_snapshot(core::encode_snapshot(data));
-  CHECK(back.format == core::snapshot_format_version);
-  CHECK(back.clock.held == popcorn::icount{0});
-  CHECK(back.clock.held_time == popcorn::vtime{0});
 }
 
 TEST_CASE("the clock hold survives the saved form")
@@ -224,30 +208,6 @@ TEST_CASE("a snapshot read back from bytes has no engine context")
   CHECK(copy.data().generation == 3);
 }
 
-TEST_CASE("the format 4 file written before format 6 has no held key and loads with none held")
-{
-  char const* const path = std::getenv("POPCORN_SNAPSHOT_V4");
-  REQUIRE(path != nullptr);
-  std::ifstream           file{path, std::ios::binary};
-  std::vector<char> const raw{std::istreambuf_iterator<char>{file}, {}};
-  REQUIRE_FALSE(raw.empty());
-  auto const key = std::string_view{"held_in_reset"};
-  CHECK(std::ranges::search(raw, key).empty());
-  auto const back = core::decode_snapshot(std::as_bytes(std::span{raw}));
-  REQUIRE_FALSE(back.peripherals.empty());
-  for(auto const& image : back.peripherals)
-  {
-    CHECK(image.held_in_reset == 0);
-  }
-}
-
-TEST_CASE("a format 5 snapshot reads back as the current format")
-{
-  auto data   = filled();
-  data.format = 5;
-  CHECK(core::decode_snapshot(core::encode_snapshot(data)).format == core::snapshot_format_version);
-}
-
 TEST_CASE("a peripheral held in reset survives the saved form")
 {
   auto data                              = filled();
@@ -255,26 +215,6 @@ TEST_CASE("a peripheral held in reset survives the saved form")
   auto const back                        = core::decode_snapshot(core::encode_snapshot(data));
   CHECK(back.peripherals.front().held_in_reset == 1);
   CHECK(back == data);
-}
-
-TEST_CASE("a format 6 snapshot reads back as the current format with no reset pending")
-{
-  auto data   = filled();
-  data.format = 6;
-  auto back   = core::decode_snapshot(core::encode_snapshot(data));
-  CHECK(back.format == core::snapshot_format_version);
-  CHECK_FALSE(back.reset_pending.has_value());
-}
-
-TEST_CASE("the format 4 file written before format 7 has no reset_pending key and loads none")
-{
-  char const* const path = std::getenv("POPCORN_SNAPSHOT_V4");
-  REQUIRE(path != nullptr);
-  std::ifstream           file{path, std::ios::binary};
-  std::vector<char> const raw{std::istreambuf_iterator<char>{file}, {}};
-  REQUIRE_FALSE(raw.empty());
-  CHECK(std::ranges::search(raw, std::string_view{"reset_pending"}).empty());
-  CHECK_FALSE(core::decode_snapshot(std::as_bytes(std::span{raw})).reset_pending.has_value());
 }
 
 TEST_CASE("a pending reset request survives the saved form")

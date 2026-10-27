@@ -199,17 +199,13 @@ struct usart_state
   std::uint32_t                                                      linked_generation{};
   bool                                                               break_pending{};
   bool                                                               break_shifting{};
-  /** @brief RX FIFO of a state saved before tagged frames, moved into rx_fifo by usart::load(). */
-  [[= reflex::serde::rename{"rx_fifo"}]] std::vector<std::uint16_t> legacy_rx;
-  /** @brief Host queue of a state saved before tagged frames, moved into host by usart::load(). */
-  [[= reflex::serde::rename{"host"}]] std::vector<std::uint16_t> legacy_host;
-  bool                                                           cts_ready{true};
-  std::uint64_t                                                  cts_hold_from_ps{};
-  std::vector<cts_change>                                        cts_changes;
-  std::uint64_t                                                  next_cts{};
-  std::uint32_t                                                  cts_fired{};
-  std::vector<line_hold>                                         holds;
-  std::uint64_t                                                  hold_events{};
+  bool                                                               cts_ready{true};
+  std::uint64_t                                                      cts_hold_from_ps{};
+  std::vector<cts_change>                                            cts_changes;
+  std::uint64_t                                                      next_cts{};
+  std::uint32_t                                                      cts_fired{};
+  std::vector<line_hold>                                             holds;
+  std::uint64_t                                                      hold_events{};
 
   friend auto operator==(usart_state const&, usart_state const&) -> bool = default;
 };
@@ -352,7 +348,6 @@ public:
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
-  void load(std::span<std::byte const> in) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
@@ -743,19 +738,6 @@ void usart::restore_reset_values(bool keep_host)
   tx_dma_.resolve();
   rx_dma_.resolve();
   flags();
-}
-
-void usart::load(std::span<std::byte const> in)
-{
-  dispatch_model::load(in);
-  for(auto const word : std::exchange(state_.legacy_rx, {}))
-  {
-    state_.rx_fifo.push_back({.data = word});
-  }
-  for(auto const word : std::exchange(state_.legacy_host, {}))
-  {
-    state_.host.push_back({.data = word});
-  }
 }
 
 auto usart::enabled() const -> bool

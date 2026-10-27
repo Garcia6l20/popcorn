@@ -97,21 +97,6 @@ struct held_store
   friend auto operator==(held_store const&, held_store const&) -> bool = default;
 };
 
-struct old_flash_state
-{
-  bool                          first_key{};
-  bool                          locked_up{};
-  std::array<std::uint32_t, 32> buffer{};
-  std::uint32_t                 filled{};
-  bool                          burst{};
-  std::uint32_t                 buffer_addr{};
-  std::uint8_t                  running{};
-  std::uint32_t                 target{};
-  std::uint32_t                 length{};
-  std::uint32_t                 generation{};
-  std::vector<held_store>       held{};
-};
-
 struct new_flash_state
 {
   bool                          first_key{};
@@ -1721,40 +1706,6 @@ TEST_CASE("a cut reached in one slice or in many small slices leaves the same to
     CHECK(running->words(last_page, 32) == parked->words(last_page, 32));
     CHECK(running->state() == parked->state());
   }
-}
-
-TEST_CASE("a FLASH save made before the power-cut fields loads with no torn quad-word")
-{
-  flash_rig rig;
-  rig.control(pg);
-  rig.store_words(last_page, {1, 2, 3, 4});
-  rig.store_words(last_page + 16, {5, 6});
-  REQUIRE(rig.status("BSY") == 1);
-  auto const now = rig.state();
-  REQUIRE(now.due_ps != 0);
-  old_flash_state const old{
-      .first_key   = now.first_key,
-      .locked_up   = now.locked_up,
-      .buffer      = now.buffer,
-      .filled      = now.filled,
-      .burst       = now.burst,
-      .buffer_addr = now.buffer_addr,
-      .running     = now.running,
-      .target      = now.target,
-      .length      = now.length,
-      .generation  = now.generation,
-      .held        = now.held,
-  };
-  std::vector<std::byte> bytes;
-  reflex::serde::bson::serializer{bytes}.dump(old);
-  rig.f.target->model("FLASH")->load(bytes);
-  auto expected   = now;
-  expected.due_ps = 0;
-  CHECK(rig.state() == expected);
-  rig.cycle();
-  CHECK(rig.words(last_page, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
-  CHECK(rig.words(last_page + 16, 4) == erased(4));
-  CHECK(rig.torn().empty());
 }
 
 TEST_CASE("a CPU load of a torn quad-word sets ECCD, BK_ECC and ADDR_ECC and takes the NMI")

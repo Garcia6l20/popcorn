@@ -1,9 +1,8 @@
-"""TrustZone system space: the SAU slice stop and snapshots across the TrustZone change."""
+"""TrustZone system space: the SAU slice stop and TrustZone snapshots."""
 
 from __future__ import annotations
 
 import asyncio
-import gzip
 import struct
 from pathlib import Path
 
@@ -13,30 +12,13 @@ from popcorn import OptionBytes, Snapshot, StopReason
 from popcorn.units import ms
 
 ROOT = Path(__file__).parents[3]
-SCS_ELF = ROOT / "tests" / "firmware" / "arch" / "prebuilt" / "scs.elf"
 RCC_ELF = ROOT / "tests" / "firmware" / "periph" / "prebuilt" / "rcc_ll.elf"
-SAVE_BEFORE_TRUSTZONE = ROOT / "tests" / "data" / "core" / "scs_before_trustzone.bson.gz"
 
 CODE = 0x2008_0000
 SAU_CTRL = 0xE000_EDD0
 SAU_RNR = 0xE000_EDD8
 SAU_RBAR = 0xE000_EDDC
 SAU_RLAR = 0xE000_EDE0
-SCS_REGISTERS = (
-    0xE000_ED08,
-    0xE000_ED0C,
-    0xE000_ED10,
-    0xE000_ED14,
-    0xE000_ED18,
-    0xE000_ED1C,
-    0xE000_ED20,
-    0xE000_ED24,
-    0xE000_ED88,
-    0xE000_ED94,
-    0xE000_EF34,
-    0xE000_E100,
-    0xE000_E400,
-)
 CORE_REGISTERS = (
     "r0",
     "r1",
@@ -65,38 +47,6 @@ SAU_LOOP = (
     0xD1F5,
     0xBE02,
 )
-
-
-def scs_machine(m33: popcorn.PartDescription) -> popcorn.Machine:
-    return popcorn.Machine(m33, image=popcorn.Image.elf(SCS_ELF))
-
-
-def state_of(m: popcorn.Machine) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    return (
-        tuple(int(getattr(m.reg, name)) for name in CORE_REGISTERS),
-        tuple(m.mem.u32[at] for at in SCS_REGISTERS),
-    )
-
-
-def test_a_save_from_before_trustzone_restores_as_a_save_taken_today(
-    m33: popcorn.PartDescription,
-) -> None:
-    """P7: the arch state of a format 5 save from before TrustZone decodes with the Secure bank
-    only, TZEN=0, and runs on as a save of the same point taken by this build."""
-    old = scs_machine(m33)
-    old.restore(Snapshot.from_bytes(gzip.decompress(SAVE_BEFORE_TRUSTZONE.read_bytes())))
-    new = scs_machine(m33)
-    new.reset()
-    assert asyncio.run(new.run(budget=2_000_000)).reason is StopReason.USER
-    assert state_of(old) == state_of(new)
-    stops: list[tuple[StopReason, int]] = []
-    for m in (old, new):
-        m.reg.pc = m.sym("scs_run")
-        stop = asyncio.run(m.run(budget=1_000_000))
-        stops.append((stop.reason, stop.pc))
-    assert stops[0] == stops[1]
-    assert stops[0][0] is StopReason.USER
-    assert state_of(old) == state_of(new)
 
 
 def sau_loop(u575: popcorn.PartDescription, running: bool) -> tuple[int, int, StopReason]:
