@@ -197,6 +197,17 @@ protected:
   }
 
   /**
+   * @brief Whether the peripheral has a field of that name in a register.
+   * @param reg_name Register name or alias as the description spells it.
+   * @param name Field name.
+   */
+  [[nodiscard]] auto has_field(std::string_view reg_name, std::string_view name) const -> bool
+  {
+    auto const* const found = find_register(desc_, reg_name);
+    return found != nullptr and std::ranges::contains(found->fields, name, &field_desc::name);
+  }
+
+  /**
    * @brief Checks that the description agrees with the variant the model was built for.
    * @param name Register name or alias as the description spells it.
    * @param present Whether the variant has the register.

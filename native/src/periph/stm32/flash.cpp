@@ -1956,7 +1956,7 @@ void flash::check_latency(std::string_view trigger)
   {
     if(auto const* const source = dynamic_cast<voltage_range_source const*>(peer))
     {
-      range = source->active_range();
+      range = source->active_level() + 1;
     }
   }
   auto const latency  = get(regs_, latency_);

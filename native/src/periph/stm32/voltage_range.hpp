@@ -22,8 +22,9 @@ public:
   /** @brief Not move-assignable. */
   auto operator=(voltage_range_source&&) -> voltage_range_source& = delete;
 
-  /** @brief Range applied to VCORE, PWR_SVMSR.ACTVOS as a range number, 1 to 4. */
-  [[nodiscard]] virtual auto active_range() const -> std::uint32_t = 0;
+  /** @brief Performance level applied to VCORE, 0 the highest the family offers. The STM32U5
+   *         range 1 to 4 of PWR_SVMSR.ACTVOS are the levels 0 to 3. */
+  [[nodiscard]] virtual auto active_level() const -> std::uint32_t = 0;
 
 protected:
   /** @brief Destroys the interface, only through its model. */

@@ -292,6 +292,7 @@ class rcc_model final : public dispatch_model<rcc_model<Traits>, rcc_state<Trait
   using base::ctx_;
   using base::describe;
   using base::field;
+  using base::has_field;
   using base::has_register;
   using base::reg;
   using base::state_;
@@ -337,7 +338,6 @@ private:
   [[nodiscard]] auto locked(std::size_t pll) const -> bool;
   [[nodiscard]] auto rates() const -> std::array<std::uint64_t, signal_count>;
   [[nodiscard]] auto enable_field(std::string_view name) const -> field_ref;
-  [[nodiscard]] auto has_field(std::string_view reg_name, std::string_view name) const -> bool;
   [[nodiscard]] auto read(rcc_role role) const -> std::uint32_t;
 
   void oscillators_written(
@@ -647,13 +647,6 @@ auto rcc_model<Traits>::enable_field(std::string_view name) const -> field_ref
     }
   }
   return field(Traits::enable_registers.back(), name);
-}
-
-template <typename Traits>
-auto rcc_model<Traits>::has_field(std::string_view reg_name, std::string_view name) const -> bool
-{
-  auto const* const found = find_register(this->desc_, reg_name);
-  return found != nullptr and std::ranges::contains(found->fields, name, &field_desc::name);
 }
 
 template <typename Traits> auto rcc_model<Traits>::read(rcc_role role) const -> std::uint32_t

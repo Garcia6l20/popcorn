@@ -1,16 +1,19 @@
 #include "factories.hpp"
+#include "family_names.hpp"
 #include "gtzc.hpp"
 #include "model_base.hpp"
 #include "voltage_range.hpp"
 
 #include <reflex/enum.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <format>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -38,6 +41,17 @@ constexpr std::array<low_power_mode, 8> modes_by_lpms{
     low_power_mode::stop3,    low_power_mode::standby, low_power_mode::standby,
     low_power_mode::shutdown, low_power_mode::shutdown};
 
+enum class pwr_role : std::uint8_t
+{
+  vos,
+  vos_ready,
+  active_vos,
+  active_vos_ready,
+  mode,
+  booster,
+  booster_ready,
+};
+
 enum class guard_source : std::uint8_t
 {
   own,
@@ -64,6 +78,27 @@ struct pwr_state
   friend auto operator==(pwr_state const&, pwr_state const&) -> bool = default;
 };
 
+class pwr;
+
+/** @brief What differs between the PWR blocks one model serves. */
+struct pwr_family
+{
+  /** @brief Register and field of every role, an empty name for a role the family lacks. */
+  std::span<named_field<pwr_role> const> fields;
+  /** @brief Low-power mode of every value of the mode field. */
+  std::span<low_power_mode const> modes;
+  /** @brief Performance level, 0 the highest, of every value of the VOS field. */
+  std::span<std::uint8_t const> vos_levels;
+  /** @brief The VOS ready bit reads 1 when the voltage is ready. */
+  bool vos_ready_set = true;
+  /** @brief The active VOS ready bit reads 1 when the voltage is ready. */
+  bool active_ready_set = true;
+  /** @brief Write handlers of every machine. */
+  std::span<write_entry<pwr> const> writes;
+  /** @brief Write handlers added under TrustZone. */
+  std::span<write_entry<pwr> const> trustzone_writes;
+};
+
 /**
  * @brief PWR voltage scaling of the STM32U5, RM0456 section 10.10.4: VOSRDY follows a VOS change
  *        and BOOSTRDY follows BOOSTEN after the board's ready delay, and PWR_SVMSR.ACTVOS takes
@@ -87,11 +122,14 @@ class pwr final : public dispatch_model<pwr, pwr_state>,
                   public trustzone_aware
 {
 public:
-  pwr(model_context& ctx, peripheral_desc const& desc, pwr_options const& options);
+  pwr(model_context&         ctx,
+      peripheral_desc const& desc,
+      pwr_family const&      family,
+      pwr_options const&     options);
 
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
-  [[nodiscard]] auto active_range() const -> std::uint32_t override;
+  [[nodiscard]] auto active_level() const -> std::uint32_t override;
 
   void vosr_written(std::uint32_t old, std::uint32_t now);
   void cr1_written(std::uint32_t old, std::uint32_t now);
@@ -106,13 +144,8 @@ private:
 
   pwr_options                options_;
   register_file&             regs_;
-  field_ref                  range_;
-  field_ref                  range_ready_;
-  field_ref                  booster_;
-  field_ref                  booster_ready_;
-  field_ref                  active_range_;
-  field_ref                  active_range_ready_;
-  field_ref                  low_power_;
+  pwr_family const&          family_;
+  field_table<pwr_role>      names_;
   bool                       low_power_logged_{};
   reg_ref                    secure_;
   reg_ref                    privilege_;
@@ -124,7 +157,7 @@ private:
   illegal_event              illegal_;
 };
 
-constexpr std::array<write_entry<pwr>, 3> pwr_writes{
+constexpr std::array<write_entry<pwr>, 3> u5_writes{
     {
      {"PWR_CR1", &pwr::cr1_written},
      {"PWR_VOSR", &pwr::vosr_written},
@@ -132,7 +165,7 @@ constexpr std::array<write_entry<pwr>, 3> pwr_writes{
      }
 };
 
-constexpr auto pwr_trustzone_writes = std::to_array<write_entry<pwr>>({
+constexpr auto u5_trustzone_writes = std::to_array<write_entry<pwr>>({
     {"PWR_CR2",      nullptr},
     {"PWR_CR3",      nullptr},
     {"PWR_SVMCR",    nullptr},
@@ -182,12 +215,48 @@ constexpr std::array<own_group, 4> own_groups{
      }
 };
 
-pwr::pwr(model_context& ctx, peripheral_desc const& desc, pwr_options const& options)
-    : dispatch_model{ctx, desc, "PWR", pwr_writes, pwr_trustzone_writes}, options_{options},
-      regs_{ctx.regs}, range_{field("PWR_VOSR", "VOS")}, range_ready_{field("PWR_VOSR", "VOSRDY")},
-      booster_{field("PWR_VOSR", "BOOSTEN")}, booster_ready_{field("PWR_VOSR", "BOOSTRDY")},
-      active_range_{field("PWR_SVMSR", "ACTVOS")},
-      active_range_ready_{field("PWR_SVMSR", "ACTVOSRDY")}, low_power_{field("PWR_CR1", "LPMS")},
+/** @brief STM32U5 PWR, RM0456 10.10: VOS 00 range 4 to 11 range 1, ready bits read 1. */
+constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> u5_names{
+    {
+     {pwr_role::vos, {"PWR_VOSR", "VOS"}},
+     {pwr_role::vos_ready, {"PWR_VOSR", "VOSRDY"}},
+     {pwr_role::active_vos, {"PWR_SVMSR", "ACTVOS"}},
+     {pwr_role::active_vos_ready, {"PWR_SVMSR", "ACTVOSRDY"}},
+     {pwr_role::mode, {"PWR_CR1", "LPMS"}},
+     {pwr_role::booster, {"PWR_VOSR", "BOOSTEN"}},
+     {pwr_role::booster_ready, {"PWR_VOSR", "BOOSTRDY"}},
+     }
+};
+
+constexpr std::array<std::uint8_t, 4> u5_vos_levels{3, 2, 1, 0};
+
+constexpr pwr_family u5_pwr{
+    .fields           = u5_names,
+    .modes            = modes_by_lpms,
+    .vos_levels       = u5_vos_levels,
+    .vos_ready_set    = true,
+    .active_ready_set = true,
+    .writes           = u5_writes,
+    .trustzone_writes = u5_trustzone_writes,
+};
+
+static_assert(names_every_role(u5_names));
+
+pwr::pwr(
+    model_context&         ctx,
+    peripheral_desc const& desc,
+    pwr_family const&      family,
+    pwr_options const&     options)
+    : dispatch_model{ctx, desc, "PWR", family.writes, family.trustzone_writes}, options_{options},
+      regs_{ctx.regs}, family_{family},
+      names_{
+          family.fields,
+          [this](std::string_view reg_name, std::string_view name) {
+            return field(reg_name, name);
+          },
+          [this](std::string_view reg_name, std::string_view name) {
+            return has_field(reg_name, name);
+          }},
       secure_{reg("PWR_SECCFGR")}, unit_{unit_named(ctx.part, desc.name)}
 {
   if(ctx.trustzone)
@@ -391,17 +460,19 @@ void pwr::reset(register_file& regs, reset_kind)
 
 void pwr::vosr_written(std::uint32_t old, std::uint32_t now)
 {
-  if(range_.of(now) != range_.of(old))
+  auto const level = names_[pwr_role::vos];
+  if(level.of(now) != level.of(old))
   {
-    update(regs_, range_ready_, 0);
-    update(regs_, active_range_ready_, 0);
+    update(regs_, names_[pwr_role::vos_ready], family_.vos_ready_set ? 0 : 1);
+    update(regs_, names_[pwr_role::active_vos_ready], family_.active_ready_set ? 0 : 1);
     schedule_in(options_.ready_delay, voltage_ready, ++state_.generation[voltage_ready]);
   }
-  if(booster_.of(now) != booster_.of(old))
+  auto const booster = names_.find(pwr_role::booster);
+  if(booster and booster->of(now) != booster->of(old))
   {
-    update(regs_, booster_ready_, 0);
+    update(regs_, names_[pwr_role::booster_ready], 0);
     auto const generation = ++state_.generation[booster_ready];
-    if(booster_.of(now) != 0)
+    if(booster->of(now) != 0)
     {
       schedule_in(options_.ready_delay, booster_ready, generation);
     }
@@ -417,12 +488,12 @@ void pwr::cr1_written(std::uint32_t, std::uint32_t now)
   warn(
       "PWR_CR1", std::format(
                      "LPMS selects {}, not modelled: a deep-sleep WFI idles as a plain WFI",
-                     reflex::enum_value_name(modes_by_lpms[low_power_.of(now)])));
+                     reflex::enum_value_name(family_.modes[names_[pwr_role::mode].of(now)])));
 }
 
-auto pwr::active_range() const -> std::uint32_t
+auto pwr::active_level() const -> std::uint32_t
 {
-  return 4u - get(regs_, active_range_);
+  return family_.vos_levels[get(regs_, names_[pwr_role::active_vos])];
 }
 
 void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
@@ -433,9 +504,9 @@ void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
   }
   if(kind == voltage_ready)
   {
-    update(regs_, range_ready_, 1);
-    update(regs_, active_range_, get(regs_, range_));
-    update(regs_, active_range_ready_, 1);
+    update(regs_, names_[pwr_role::vos_ready], family_.vos_ready_set ? 1 : 0);
+    update(regs_, names_[pwr_role::active_vos], get(regs_, names_[pwr_role::vos]));
+    update(regs_, names_[pwr_role::active_vos_ready], family_.active_ready_set ? 1 : 0);
     for(auto* const peer : ctx_.peers.all())
     {
       if(auto* const listener = dynamic_cast<voltage_range_listener*>(peer))
@@ -444,9 +515,10 @@ void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
       }
     }
   }
-  else if(get(regs_, booster_) != 0)
+  else if(
+      auto const booster = names_.find(pwr_role::booster); booster and get(regs_, *booster) != 0)
   {
-    update(regs_, booster_ready_, 1);
+    update(regs_, names_[pwr_role::booster_ready], 1);
   }
 }
 }
@@ -454,7 +526,7 @@ void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
 auto pwr_factory(pwr_options options) -> model_factory
 {
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<pwr>(ctx, desc, options);
+    return std::make_shared<pwr>(ctx, desc, u5_pwr, options);
   };
 }
 }

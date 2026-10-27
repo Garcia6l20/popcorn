@@ -1,4 +1,5 @@
 #include "stm32_fixture.hpp"
+#include "voltage_range.hpp"
 
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
@@ -209,4 +210,27 @@ TEST_CASE("the first PWR_CR1 write logs its LPMS mode, Stop 0 included")
       f.target->model("PWR")->on_write(regs, cr1->offset, 4, 0, 0, {.pc = 0, .now = icount{0}}));
   REQUIRE(logged.size() == 1);
   CHECK(logged.front().message.contains("stop0"));
+}
+
+TEST_CASE("RM0456 10.10.4: active_level() maps every ACTVOS code to a level, range 1 is level 0")
+{
+  stm32_fixture f{u575(), "pwr_ll", popcorn::testing::stm32_options()};
+  auto* const   source = dynamic_cast<stm32::voltage_range_source*>(f.target->model("PWR"));
+  REQUIRE(source != nullptr);
+  auto&       regs  = f.target->peripheral("PWR");
+  auto const* svmsr = popcorn::find_register(regs.description(), std::string_view{"PWR_SVMSR"});
+  auto const  active =
+      std::ranges::find(svmsr->fields, std::string_view{"ACTVOS"}, &popcorn::field_desc::name);
+  REQUIRE(active != svmsr->fields.end());
+  auto const shift = 8 * (svmsr->offset % 4) + active->lsb;
+  auto const word  = svmsr->offset & ~3u;
+  auto const mask  = std::uint32_t{3} << shift;
+  for(std::uint32_t code = 0; code < 4; ++code)
+  {
+    CAPTURE(code);
+    regs.poke(word, (regs.peek(word) & ~mask) | (code << shift));
+    CHECK(source->active_level() == 3 - code);
+  }
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(source->active_level() == 0);
 }
