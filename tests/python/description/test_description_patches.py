@@ -1288,6 +1288,7 @@ def test_resets_set_the_register_reset_in_the_peripheral_and_its_aliases(tmp_pat
     for name in ("D", "SEC_D"):
         register = target_peripheral(target, name).registers[0]
         assert (register.name, register.reset) == ("CR", 0x1)
+        assert register.reset_mask == (1 << register.width) - 1
 
 
 @pytest.mark.parametrize(

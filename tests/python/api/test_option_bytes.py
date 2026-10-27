@@ -279,10 +279,10 @@ def test_without_option_bytes_the_registers_read_as_at_main(
         0x0000_000F,
         0x0000_000F,
         0x0000_0000,
-        0xFF00_FF00,
-        0x0F00_0F00,
-        0xFF00_FF00,
-        0x0F00_0F00,
+        0x0000_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0x0000_0000,
     ]
     m.mem.u32[OPTR] = 0x1234_5678
     assert m.mem.u32[OPTR] == 0

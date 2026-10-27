@@ -46,6 +46,7 @@ constexpr std::uint32_t    incerrie   = 1u << 20;
 constexpr std::uint32_t    bksel      = 1u << 31;
 constexpr std::uint32_t    eop        = 1u << 16;
 constexpr std::uint32_t    all_errors = 0x00fe'0000;
+constexpr std::uint32_t    optstrt    = 1u << 1;
 constexpr std::uint32_t    eccd       = 1u << 31;
 constexpr std::uint32_t    bk_ecc     = 1u << 22;
 constexpr std::uint32_t    flash_irq  = 6;
@@ -73,7 +74,8 @@ struct rig
   std::vector<core::log_record> logged{};
   core::hook_handle             sink{};
 
-  explicit rig(stm32::board const& board = {}) : f{h573(), firmware, options_for(board)}
+  explicit rig(stm32::board const& board = {}, std::string_view image = firmware)
+      : f{h573(), image, options_for(board)}
   {
     sink = f.target->add_log_sink(
         [this](core::log_record const& record) { logged.push_back(record); });
@@ -126,6 +128,12 @@ struct rig
     write("FLASH_NSKEYR", 0x4567'0123u);
     write("FLASH_NSKEYR", 0xcdef'89abu);
     REQUIRE(field("FLASH_NSCR", "LOCK") == 0);
+  }
+
+  void unlock_options() const
+  {
+    write("FLASH_OPTKEYR", 0x0819'2a3bu);
+    write("FLASH_OPTKEYR", 0x4c5d'6e7fu);
   }
 
   void control(std::uint32_t value) const
@@ -228,6 +236,29 @@ auto pattern(std::uint32_t count) -> std::vector<std::uint32_t>
 auto erased(std::size_t count) -> std::vector<std::uint32_t>
 {
   return std::vector<std::uint32_t>(count, ~0u);
+}
+
+auto option_fixture(stm32::option_bytes const& wanted) -> stm32_fixture
+{
+  auto options         = popcorn::testing::stm32_options();
+  options.vector_table = 0x0800'0000;
+  REQUIRE(stm32::configure_option_bytes(h573(), wanted, options).has_value());
+  return stm32_fixture{h573(), firmware, std::move(options)};
+}
+
+auto option_word(stm32_fixture const& f, std::string_view name) -> std::uint32_t
+{
+  auto const& regs  = f.target->peripheral("FLASH");
+  auto const  found = popcorn::find_register(regs.description(), name);
+  REQUIRE(found != nullptr);
+  return regs.peek(found->offset);
+}
+
+auto refused_key(stm32::option_bytes const& wanted) -> std::string
+{
+  auto const result = stm32::check_option_bytes(h573(), wanted);
+  REQUIRE_FALSE(result.has_value());
+  return result.error().key;
 }
 }
 
@@ -539,6 +570,129 @@ TEST_CASE("RM0481 Table 48: at 32 MHz in VOS3 LATENCY 1 is enough and LATENCY 0 
   CHECK(r.logged.back().message.find("RM0481 Table 48") != std::string::npos);
 }
 
+TEST_CASE("RM0481 Table 48: the bootloader's VOS0 250 MHz LATENCY 5 is enough and LATENCY 4 warns")
+{
+  rig r{{}, "h573_rcc_ll"};
+  REQUIRE(r.f.target->virtual_clock().core_hz() == 250'000'000);
+  REQUIRE(r.field("FLASH_ACR", "LATENCY") == 5);
+  CHECK(r.warnings("FLASH_ACR") == 0);
+  r.write("FLASH_ACR", 4);
+  REQUIRE(r.warnings("FLASH_ACR") == 1);
+  CHECK(r.logged.back().message.find("RM0481 Table 48") != std::string::npos);
+}
+
+TEST_CASE("RM0481 7.9.4: a 16-bit store while WBNE is set is PGSERR and writes nothing")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.store_words(sector2, {0x1122'3344u});
+  REQUIRE(r.status("WBNE") == 1);
+  REQUIRE(r.status("PGSERR") == 0);
+  r.call("store_half", {static_cast<std::uint32_t>(sector2 + 4), 0x5566u});
+  CHECK(r.status("PGSERR") == 1);
+  CHECK(r.status("WBNE") == 0);
+  r.control(0);
+  r.run_for(100 * us);
+  CHECK(r.words(sector2, 4) == erased(4));
+}
+
+TEST_CASE("RM0481 7.9.4: a 16-bit store into an empty buffer fills it")
+{
+  rig r;
+  r.unlock();
+  r.control(pg);
+  r.call("store_half", {static_cast<std::uint32_t>(sector2), 0x5566u});
+  CHECK(r.status("PGSERR") == 0);
+  CHECK(r.status("WBNE") == 1);
+}
+
+TEST_CASE("RM0481 7.4.3: OPTSTRT programs FLASH_WRP2R_PRG into FLASH_WRP2R_CUR at once")
+{
+  rig r;
+  r.unlock();
+  r.program(sector2, pattern(4));
+  r.control(lock);
+  REQUIRE(r.field("FLASH_OPTCR", "OPTLOCK") == 1);
+  REQUIRE(r.field("FLASH_NSCR", "LOCK") == 1);
+  CHECK(r.read("FLASH_WRP2R_CUR") == ~0u);
+  r.write("FLASH_WRP2R_PRG", ~1u);
+  CHECK(r.read("FLASH_WRP2R_PRG") != ~1u);
+  r.unlock_options();
+  CHECK(r.field("FLASH_OPTCR", "OPTLOCK") == 0);
+  r.write("FLASH_WRP2R_PRG", ~1u);
+  CHECK(r.read("FLASH_WRP2R_CUR") == ~0u);
+  r.write("FLASH_OPTCR", optstrt);
+  CHECK(r.read("FLASH_WRP2R_CUR") == ~1u);
+  CHECK(r.field("FLASH_OPTCR", "OPTSTRT") == 0);
+  CHECK(r.status("BSY") == 0);
+  r.write("FLASH_OPTCR", 1);
+  CHECK(r.field("FLASH_OPTCR", "OPTLOCK") == 1);
+  r.write("FLASH_WRP2R_PRG", ~0u);
+  CHECK(r.read("FLASH_WRP2R_PRG") == ~1u);
+  r.unlock();
+  SUBCASE("a store into sector 3 of bank 2 is WRPERR and raises FLASH_IRQn with WRPERRIE")
+  {
+    r.control(pg | wrperrie);
+    r.store_words(bank2 + 3 * 0x2000, {1});
+    CHECK(r.status("WRPERR") == 1);
+    CHECK(r.pending());
+    r.run_for(100 * us);
+    CHECK(r.words(bank2 + 3 * 0x2000, 4) == erased(4));
+  }
+  SUBCASE("a sector erase in the group is WRPERR, one past it runs")
+  {
+    r.program(bank2 + 4 * 0x2000, pattern(4));
+    r.clear();
+    r.control(ser | bksel | snb(2) | strt);
+    CHECK(r.status("WRPERR") == 1);
+    CHECK(r.status("BSY") == 0);
+    r.clear();
+    r.control(ser | bksel | snb(4) | strt);
+    r.wait_idle();
+    CHECK(r.status("WRPERR") == 0);
+    CHECK(r.words(bank2 + 4 * 0x2000, 4) == erased(4));
+    CHECK(r.words(bank2 + 2 * 0x2000, 4) == pattern(4));
+  }
+}
+
+TEST_CASE("a _PRG register other than WRP written before OPTSTRT logs a model_warning once")
+{
+  rig r;
+  r.unlock_options();
+  r.write("FLASH_OPTSR_PRG", 0x1234'5678u);
+  CHECK(r.read("FLASH_OPTSR_PRG") != 0);
+  r.logged.clear();
+  r.write("FLASH_OPTCR", optstrt);
+  CHECK(r.warnings("FLASH_OPTSR_PRG") == 1);
+  r.write("FLASH_OPTCR", optstrt);
+  CHECK(r.warnings("FLASH_OPTSR_PRG") == 1);
+}
+
+TEST_CASE("RM0481 7.6.1: with TZEN 0xC3 the secure option registers read zero and ignore writes")
+{
+  stm32::board board;
+  SUBCASE("without option bytes")
+  {}
+  SUBCASE("with option bytes")
+  {
+    board.flash.option_bytes = stm32::option_bytes{};
+  }
+  rig r{board};
+  r.unlock_options();
+  for(auto const name :
+      {"FLASH_SECBOOTR_CUR", "FLASH_BOOTR_PRG", "FLASH_SECWM1R_PRG", "FLASH_SECWM2R_PRG"})
+  {
+    CAPTURE(name);
+    r.write(name, 0x0000'007fu);
+    CHECK(r.read(name) == 0);
+  }
+  r.logged.clear();
+  r.write("FLASH_OPTCR", optstrt);
+  CHECK(r.warnings("FLASH_SECWM1R_PRG") == 0);
+  CHECK(r.warnings("FLASH_SECWM2R_PRG") == 0);
+}
+
 TEST_CASE("RM0481 7.11.11: FLASH_NSCR bit 1 is PG, the bootloader's OPTSTART write sets PG")
 {
   rig r;
@@ -552,6 +706,79 @@ TEST_CASE("RM0481 7.11.11: FLASH_NSCR bit 1 is PG, the bootloader's OPTSTART wri
   r.control(lock);
   CHECK(r.field("FLASH_NSCR", "LOCK") == 1);
   CHECK(r.field("FLASH_OPTCR", "OPTLOCK") == 1);
+}
+
+TEST_CASE("RM0481 7.11: the H5 option bytes read back in the _CUR registers")
+{
+  SUBCASE("watermarks, HDP and boot addresses")
+  {
+    auto const f = option_fixture({
+        .secwm1  = stm32::page_range{.first = 0,  .last = 3 },
+        .hdp1    = stm32::page_range{.first = 10, .last = 39},
+        .secboot = 0x0c00'1000,
+        .nsboot  = 0x0800'2000
+    });
+    CHECK(option_word(f, "FLASH_SECWM1R_CUR") == 0x0003'0000);
+    CHECK(option_word(f, "FLASH_SECWM2R_CUR") == 0x007f'0000);
+    CHECK(option_word(f, "FLASH_HDP1R_CUR") == 0x0027'000a);
+    CHECK(option_word(f, "FLASH_HDP2R_CUR") == 0x0000'0001);
+    CHECK(option_word(f, "FLASH_NSBOOTR_CUR") == 0x0800'20c3);
+    CHECK(option_word(f, "FLASH_SECBOOTR_CUR") == 0x0c00'10c3);
+    auto const& desc        = f.target->peripheral("FLASH").description();
+    auto const  secure_boot = f.target->mem().read(
+        desc.base + popcorn::find_register(desc, "FLASH_SECBOOTR_CUR")->offset, 4);
+    REQUIRE(secure_boot.has_value());
+    CHECK(*secure_boot == 0);
+    CHECK(option_word(f, "FLASH_OPTSR2_CUR") == 0xc300'017c);
+    CHECK(option_word(f, "FLASH_OPTSR_CUR") == 0x2d30'edf8);
+  }
+  SUBCASE("no area")
+  {
+    auto const f = option_fixture({.secwm1 = stm32::no_area{}});
+    CHECK(option_word(f, "FLASH_SECWM1R_CUR") == 0x0000'007f);
+  }
+  SUBCASE("swap_bank")
+  {
+    auto const f = option_fixture({.swap_bank = true});
+    CHECK(option_word(f, "FLASH_OPTSR_CUR") == (0x2d30'edf8u | 1u << 31));
+    CHECK(f.field("FLASH", "FLASH_OPTCR", "SWAP_BANK") == 1);
+  }
+}
+
+TEST_CASE("H5 option bytes refuse only what RM0481 cannot encode, each keyed by its field")
+{
+  CHECK(
+      refused_key({
+          .secwm1 = stm32::page_range{.first = 0, .last = 128}
+  })
+      == "option_bytes.secwm1");
+  CHECK(
+      refused_key({
+          .hdp2 = stm32::page_range{.first = 5, .last = 4}
+  })
+      == "option_bytes.hdp2");
+  CHECK(refused_key({.nsboot = 0x0800'0080}) == "option_bytes.nsboot");
+  CHECK(refused_key({.dualbank = false}) == "option_bytes.dualbank");
+  CHECK(stm32::check_option_bytes(h573(), {.dualbank = true}) == address{0x0800'0000});
+  CHECK(
+      stm32::check_option_bytes(
+          h573(),
+          {
+              .secwm1    = stm32::page_range{.first = 0, .last = 3},
+              .secwm2    = stm32::no_area{},
+              .hdp1      = stm32::page_range{.first = 10, .last = 39},
+              .hdp2      = stm32::page_range{.first = 0, .last = 127},
+              .secboot   = 0x0c00'1000,
+              .nsboot    = 0x0800'2000,
+              .swap_bank = true,
+              .dualbank  = true
+  })
+      == address{0x0800'2000});
+  CHECK(stm32::check_option_bytes(h573(), {.tzen = true}) == address{0x0c00'0000});
+  core::machine_options options;
+  auto const            tz = stm32::configure_option_bytes(h573(), {.tzen = true}, options);
+  REQUIRE_FALSE(tz.has_value());
+  CHECK(tz.error().key == "option_bytes.tzen");
 }
 
 TEST_CASE("an H573 description without FLASH_NSCR.FW or FLASH_OPTCR.OPTLOCK throws config_error")
@@ -575,5 +802,56 @@ TEST_CASE("an H573 description without FLASH_NSCR.FW or FLASH_OPTCR.OPTLOCK thro
     CHECK_THROWS_AS(
         core::machine(desc, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()),
         popcorn::config_error);
+  }
+}
+
+TEST_CASE("with only the FLASH model, tzen sets FLASH_OPTSR2_CUR.TZEN to 0xB4, RM0481 7.11.23")
+{
+  stm32::board board;
+  board.flash.option_bytes = stm32::option_bytes{.tzen = true};
+  auto options             = options_for(board);
+  for(auto& [name, factory] : options.models)
+  {
+    if(name != "FLASH")
+    {
+      factory = [](popcorn::periph::model_context&,
+                   popcorn::peripheral_desc const&) -> std::shared_ptr<popcorn::periph::model> {
+        return nullptr;
+      };
+    }
+  }
+  options.trustzone    = true;
+  options.vector_table = 0x0c00'0000;
+  stm32_fixture const f{h573(), firmware, std::move(options)};
+  CHECK(option_word(f, "FLASH_OPTSR2_CUR") == 0xb400'017c);
+  CHECK(option_word(f, "FLASH_SECBOOTR_CUR") == 0x0c00'00c3);
+}
+
+TEST_CASE("RM0481 Table 55: without option bytes each _CUR register reads its delivery value")
+{
+  rig         r;
+  auto const& regs = r.f.target->peripheral("FLASH");
+  auto const  peek = [&](std::string_view name) {
+    auto const found = popcorn::find_register(regs.description(), name);
+    REQUIRE(found != nullptr);
+    return regs.peek(found->offset);
+  };
+  for(auto const& [name, delivery] : {
+          std::pair{"FLASH_OPTSR_CUR",    0x2d30'edf8u},
+          std::pair{"FLASH_OPTSR2_CUR",   0xc300'017cu},
+          std::pair{"FLASH_NSBOOTR_CUR",  0x0800'00c3u},
+          std::pair{"FLASH_SECBOOTR_CUR", 0x0c00'00c3u},
+          std::pair{"FLASH_SECWM1R_CUR",  0x0000'007fu},
+          std::pair{"FLASH_SECWM2R_CUR",  0x0000'007fu},
+          std::pair{"FLASH_HDP1R_CUR",    0x0000'0001u},
+          std::pair{"FLASH_HDP2R_CUR",    0x0000'0001u},
+          std::pair{"FLASH_EDATA1R_CUR",  0u          },
+          std::pair{"FLASH_EDATA2R_CUR",  0u          },
+          std::pair{"FLASH_OTPBLR_CUR",   0u          },
+  })
+  {
+    CAPTURE(name);
+    CHECK(peek(name) == delivery);
+    CHECK(r.read(name) == (name == std::string_view{"FLASH_SECBOOTR_CUR"} ? 0u : delivery));
   }
 }

@@ -198,6 +198,16 @@ private:
   periph::model_context& ctx_;
 };
 
+auto unknown_flash() -> popcorn::part_description
+{
+  auto part  = u575();
+  auto flash = std::ranges::find(
+      part.peripherals, std::string_view{"FLASH"}, &popcorn::peripheral_desc::name);
+  REQUIRE(flash != part.peripherals.end());
+  flash->ip_version = "v0.0.0_unknown";
+  return part;
+}
+
 auto board_options(
     periph::stm32::board const&      board,
     bool                             strict,
@@ -2091,11 +2101,29 @@ TEST_CASE("without option bytes the option registers are the description's stora
 {
   flash_rig const rig;
   CHECK(rig.read("FLASH_OPTR") == 0);
-  rig.write("FLASH_SECWM1R1", 0x0005'0003);
-  CHECK(rig.read("FLASH_SECWM1R1") == 0xff00'ff00);
+  auto const before = rig.read("FLASH_NSBOOTADD0R");
+  rig.write("FLASH_NSBOOTADD0R", 0x0005'0003);
+  CHECK(rig.read("FLASH_NSBOOTADD0R") == before);
   rig.unlock_options();
-  rig.write("FLASH_SECWM1R1", 0x0005'0003);
-  CHECK(rig.read("FLASH_SECWM1R1") == 0xff05'ff03);
+  rig.write("FLASH_NSBOOTADD0R", 0x0005'0003);
+  CHECK(rig.read("FLASH_NSBOOTADD0R") == 0x0005'000f);
+}
+
+TEST_CASE("without option bytes and with TZEN = 0 the secure option registers read zero")
+{
+  flash_rig rig;
+  rig.unlock_options();
+  for(auto const name :
+      {"FLASH_SECWM1R1", "FLASH_SECWM1R2", "FLASH_SECWM2R1", "FLASH_SECWM2R2",
+       "FLASH_SECBOOTADD0R"})
+  {
+    CAPTURE(name);
+    rig.write(name, 0x0005'0003);
+    CHECK(rig.read(name) == 0);
+  }
+  rig.logged.clear();
+  rig.program_options();
+  CHECK(rig.logged.empty());
 }
 
 TEST_CASE("SWAP_BANK puts bank 1 at half the flash for BKER, MER1, MER2 and BK_ECC, RM0456 7.9.13")
@@ -2214,9 +2242,7 @@ TEST_CASE("check_option_bytes returns the boot address and the refusal of each f
   CHECK(refused({.nsboot = 0x0800'0040}) == "option_bytes.nsboot");
   CHECK(refused({.dualbank = false}) == "option_bytes.dualbank");
   CHECK(check_option_bytes(u575(), {.dualbank = true}).has_value());
-  auto other        = u575();
-  other.part        = "STM32H573IIKx";
-  auto const result = check_option_bytes(other, {});
+  auto const result = check_option_bytes(unknown_flash(), {});
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().key == "option_bytes");
 }
@@ -2282,7 +2308,7 @@ TEST_CASE("configure_option_bytes refuses before it changes the options")
   auto other_family = u575();
   other_family.part = "STM32H573IIKx";
   CHECK(refused(other_family, {.tzen = true}, options) == "option_bytes.tzen");
-  CHECK(refused(other_family, {}, options) == "option_bytes");
+  CHECK(refused(unknown_flash(), {}, options) == "option_bytes");
   CHECK(
       refused(
           u575(),
@@ -2374,11 +2400,12 @@ TEST_CASE("OBL_LAUNCH and the option registers take writes only once OPTLOCK is 
   flash_rig rig;
   rig.control(obl_launch);
   CHECK(rig.field("FLASH_NSCR", "OBL_LAUNCH") == 0);
-  rig.write("FLASH_SECWM1R1", 0x0005'0003);
-  CHECK(rig.read("FLASH_SECWM1R1") == 0xff00'ff00);
+  auto const before = rig.read("FLASH_NSBOOTADD0R");
+  rig.write("FLASH_NSBOOTADD0R", 0x0005'0003);
+  CHECK(rig.read("FLASH_NSBOOTADD0R") == before);
   rig.unlock_options();
-  rig.write("FLASH_SECWM1R1", 0x0005'0003);
-  CHECK(rig.read("FLASH_SECWM1R1") == 0xff05'ff03);
+  rig.write("FLASH_NSBOOTADD0R", 0x0005'0003);
+  CHECK(rig.read("FLASH_NSBOOTADD0R") == 0x0005'000f);
   rig.control(obl_launch);
   CHECK(rig.field("FLASH_NSCR", "OBL_LAUNCH") == 0);
 }
@@ -2634,11 +2661,11 @@ TEST_CASE(
   rig.set_wrp("FLASH_WRP1AR", 2, 2);
   rig.program_options();
   CHECK(rig.logged.empty());
-  rig.write("FLASH_SECWM1R1", 0x0005'0003);
+  rig.write("FLASH_NSBOOTADD0R", 0x0005'0003);
   rig.program_options();
   REQUIRE(rig.logged.size() == 1);
   CHECK(rig.logged[0].kind == core::log_kind::model_warning);
-  CHECK(rig.logged[0].reg == "FLASH_SECWM1R1");
+  CHECK(rig.logged[0].reg == "FLASH_NSBOOTADD0R");
   CHECK(rig.logged[0].message.contains("FLASH_WRPxyR"));
   rig.write("FLASH_OPTR", 0);
   rig.program_options();

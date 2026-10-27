@@ -49,11 +49,11 @@ struct option_bytes
   watermark secwm1{whole_bank{}};
   /** @brief Secure area of bank 2, the whole bank as after TZEN goes from 0 to 1. */
   watermark secwm2{whole_bank{}};
-  /** @brief Hide-protection area of bank 1, empty for none. It starts at the first page of
-   * secwm1. */
+  /** @brief Hide-protection area of bank 1, empty for none. On the STM32U5 it starts at the
+   * first page of secwm1, RM0456 Table 60. On the STM32H5 it is any sector range, RM0481 7.6.2. */
   std::optional<page_range> hdp1{};
-  /** @brief Hide-protection area of bank 2, empty for none. It starts at the first page of
-   * secwm2. */
+  /** @brief Hide-protection area of bank 2, empty for none. On the STM32U5 it starts at the
+   * first page of secwm2, RM0456 Table 60. On the STM32H5 it is any sector range, RM0481 7.6.2. */
   std::optional<page_range> hdp2{};
   /** @brief Secure boot address, empty for the family default. */
   std::optional<std::uint32_t> secboot{};

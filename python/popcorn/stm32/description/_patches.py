@@ -410,6 +410,7 @@ def _apply_reset(
             for candidate in target.registers:
                 if candidate.name == rule.register:
                     candidate.reset = rule.reset
+                    candidate.reset_mask = (1 << candidate.width) - 1
     report.resets_set += 1
 
 

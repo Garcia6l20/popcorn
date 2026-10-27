@@ -191,7 +191,7 @@ width = 32
 reset = 0
 acc = "read_write"
 fields = [{ name = "AFSEL8", lsb = 0, width = 4 }, { name = "AFSEL9", lsb = 4, width = 4 }, { name = "AFSEL10", lsb = 8, width = 4 }, { name = "AFSEL11", lsb = 12, width = 4 }]
-source = "Silicon read-back on an STM32H573 (on a NUCLEO-H563ZI board) over SWD, 2026-10-27: GPIOI_AFRH at 0x42022024 takes 0x0000D5A1 and returns it, 0xFFFFFFFF returns 0x0000FFFF, so AFSEL8 to AFSEL11 exist and bits 31:16 read 0. DS14121 Rev 5, Table 17 lists PI11 AF13 PSSI_D15. RM0481 Rev 5, 13.4.10 limits GPIOx_AFRH to x = A to H and the STM32H5 SVDs have no GPIOI_AFRH"
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_AFRH at 0x42022024 takes 0x0000D5A1 and returns it, 0xFFFFFFFF returns 0x0000FFFF, so AFSEL8 to AFSEL11 exist and bits 31:16 read 0. DS14121 Rev 5, Table 17 lists PI11 AF13 PSSI_D15. RM0481 Rev 5, 13.4.10 limits GPIOx_AFRH to x = A to H and the STM32H5 SVDs have no GPIOI_AFRH"
 
 [[resets]]
 peripheral = "RNG"
@@ -366,6 +366,54 @@ peripheral = "DBGMCU"
 register = "DBGMCU_IDCODE"
 reset = 0x10016484
 source = "RM0481 Rev 5, 66.12.4 DBGMCU_IDCODE: DEV_ID 0x484 for STM32H562/563/573, REV_ID 0x1001 for revision Z, bits 15:12 read 6 as the reset value 0xXXXX 6XXX shows. REV_ID is a modelled revision, not a manufacturing fact, the RM lists several and gives no default. ST's STM32H573 SVD gives 0x00006000"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_OPTSR_CUR"
+reset = 0x2D30EDF8
+source = "Silicon read-back on two STM32H573 parts in delivery state, option bytes never changed: FLASH_OPTSR_CUR 0x2D30EDF8. RM0481 Rev 5, 7.11.19 FLASH_OPTSR_CUR gives reset value 0xXXXX XXXX, the register is loaded from the option bytes, and Table 55 (7.4.3) with 7.4.4 gives the delivery value: BOOT_UBE 0xB4, IWDG_STDBY and IWDG_STOP 1, PRODUCT_STATE 0xED, NRST_STOP, NRST_STDBY, IWDG_SW and WWDG_SW 1, BORH_EN 0, BOR_LEV 0, SWAP_BANK 0. The Table 55 row prints 29 bit digits for 28 field bits and the read-back shows the extra digit as bit 5 set to 1. ST STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_OPTSR2_CUR"
+reset = 0xC300017C
+source = "Silicon read-back on two STM32H573 parts in delivery state: FLASH_OPTSR2_CUR 0xC300017C. RM0481 Rev 5, 7.11.23 FLASH_OPTSR2_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: TZEN 0xC3 (TrustZone disabled), USBPD_DIS, SRAM2_ECC, SRAM3_ECC, BKPRAM_ECC, SRAM2_RST and SRAM13_RST 1. ST STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_NSBOOTR_CUR"
+reset = 0x080000C3
+source = "RM0481 Rev 5, 7.11.25 FLASH_NSBOOTR_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: NSBOOTADD 0x0800 0000 (NSBOOTADD[23:8] 0x0800, NSBOOTADD[7:0] 0x00) and NSBOOT_LOCK 0xC3. ST's STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_SECBOOTR_CUR"
+reset = 0x0C0000C3
+source = "RM0481 Rev 5, 7.11.27 FLASH_SECBOOTR_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: SECBOOTADD 0x0C00 0000 (SECBOOTADD[23:8] 0x0C00, SECBOOTADD[7:0] 0x00) and SECBOOT_LOCK 0xC3. ST's STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_SECWM1R_CUR"
+reset = 0x0000007F
+source = "RM0481 Rev 5, 7.11.33 FLASH_SECWM1R_CUR: reset value 0x00XX 00XX, loaded from the option bytes. Delivery value of Table 55: SECWM1_STRT 0x7F, SECWM1_END 0x00, no secure area. ST's STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_SECWM2R_CUR"
+reset = 0x0000007F
+source = "RM0481 Rev 5, 7.11.46 FLASH_SECWM2R_CUR: reset value 0x00XX 00XX, loaded from the option bytes. Delivery value of Table 55: SECWM2_STRT 0x7F, SECWM2_END 0x00, no secure area. ST's STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_HDP1R_CUR"
+reset = 0x00000001
+source = "RM0481 Rev 5, 7.11.39 FLASH_HDP1R_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: HDP1_STRT 1, HDP1_END 0, no HDP area. ST's STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_HDP2R_CUR"
+reset = 0x00000001
+source = "RM0481 Rev 5, 7.11.52 FLASH_HDP2R_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: HDP2_STRT 1, HDP2_END 0, no HDP area. ST's STM32H573 SVD gives 0"
 
 [memory]
 source = "RM0481 Rev 5, 7.3.9: the 2048-byte OTP area at 0x08FF F000 to 0x08FF F7FF, written once in 16-bit units through the flash interface and read-only to the CPU, and the read-only area at 0x08FF F800 to 0x08FF FFFF that holds the device signature, 67.1 to 67.3. 7.3.10: the high-cycle data area at 0x0900 0000 to 0x0901 7FFF is a plain read-only region here, with no controller, since EDATA programming is not modelled. 7.3.5 to 7.3.8: flash is programmed by stores into the main memory range through the FLASH interface, so FLASH controls both flash windows. OTP programming is not modelled"

@@ -74,6 +74,7 @@ def test_u575_gpioi_has_pins_0_to_7_and_an_empty_afrh(u575_sources: Sources) -> 
         }
         assert registers["AFRH"].fields == []
         assert registers["SECCFGR"].reset == 0xFF
+        assert (registers["MODER"].reset, registers["MODER"].reset_mask) == (0xFFFF, 0xFFFFFFFF)
     gpioh = {r.name: r for r in by_name["GPIOH"].registers}
     assert len(gpioh["AFRH"].fields) == 8
     assert len(gpioh["MODER"].fields) == 16

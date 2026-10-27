@@ -93,3 +93,9 @@ peripheral = "GPIOI"
 register = "GPIO_SECCFGR"
 reset = 0x000000FF
 source = "RM0456 Rev 7, 13.4.13 GPIOx_SECCFGR reset value 0x0000 00FF for port I on STM32U575/585, which has 8 pins. ST's STM32U575 SVD gives 0x0000FFFF"
+
+[[resets]]
+peripheral = "GPIOI"
+register = "GPIO_MODER"
+reset = 0x0000FFFF
+source = "RM0456 Rev 7, 13.4.1 GPIOx_MODER reset value 0x0000 FFFF for port I on STM32U575/585, which has 8 pins, and silicon read-back on a NUCLEO-U575ZI-Q (STM32U575) where 0xFFFFFFFF written reads back 0x0000FFFF. ST's STM32U575 SVD gives 0xFFFFFFFF"

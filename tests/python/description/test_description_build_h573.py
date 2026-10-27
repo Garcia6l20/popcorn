@@ -306,6 +306,50 @@ def test_the_dbgmcu_idcode_carries_the_h573_device_id(h573_sources: Sources) -> 
     assert dbgmcu["IDCODE"].reset == 0x10016484
 
 
+FLASH_CUR_DELIVERY = {
+    "OPTSR_CUR": 0x2D30EDF8,
+    "OPTSR2_CUR": 0xC300017C,
+    "NSBOOTR_CUR": 0x080000C3,
+    "SECBOOTR_CUR": 0x0C0000C3,
+    "SECWM1R_CUR": 0x0000007F,
+    "SECWM2R_CUR": 0x0000007F,
+    "HDP1R_CUR": 0x00000001,
+    "HDP2R_CUR": 0x00000001,
+    "EDATA1R_CUR": 0,
+    "EDATA2R_CUR": 0,
+    "OTPBLR_CUR": 0,
+}
+
+
+def test_each_flash_cur_register_resets_to_its_table_55_delivery_value(
+    h573_sources: Sources,
+) -> None:
+    peripherals = _by_name(build_description(h573_sources))
+    for flash in ("FLASH", "SEC_FLASH"):
+        registers = {r.name: r.reset for r in peripherals[flash].registers}
+        for name, delivery in FLASH_CUR_DELIVERY.items():
+            assert registers[name] == delivery, f"{flash} {name}"
+
+
+def test_every_patched_reset_is_a_known_value_in_every_bit(h573_sources: Sources) -> None:
+    peripherals = _by_name(build_description(h573_sources))
+    patch = next(path for path in h573_sources.patches if path.name == "stm32h5.toml")
+    rules = tomllib.loads(patch.read_text(encoding="utf-8"))["resets"]
+    assert rules
+    for rule in rules:
+        for unit in (rule["peripheral"], "SEC_" + rule["peripheral"]):
+            if unit not in peripherals:
+                continue
+            register = next(
+                r
+                for r in peripherals[unit].registers
+                if rule["register"] in (r.name, *(r.aliases or []))
+                or rule["register"].removeprefix(rule["peripheral"] + "_") == r.name
+            )
+            assert register.reset == rule["reset"], f"{unit} {register.name}"
+            assert register.reset_mask == (1 << register.width) - 1, f"{unit} {register.name}"
+
+
 def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
     _, report = build_description_with_report(h573_sources)
     assert report == _patches.PatchReport(
@@ -319,7 +363,7 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
         irqs_added=6,
         sizes_set=1,
         registers_added=27,
-        resets_set=29,
+        resets_set=37,
         core_fields_set=1,
         regions_added=2,
         controllers_set=2,
