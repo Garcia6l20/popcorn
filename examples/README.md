@@ -5,6 +5,9 @@ Copy one, build it, run its tests, then read its `test_*.py` to see how a test d
 
 | example | firmware style | shows |
 | --- | --- | --- |
+| [stm32h573/pwr_flash](stm32h573/pwr_flash) | LL | VOS0 and 5 wait states before 250 MHz, a sector erase with SER, SNB and BKSEL and a quad-word program read back through `machine.mem`, EOP cleared in FLASH_NSCCR, PGSERR from a store without PG, a too low wait-state count failing a strict run |
+| [stm32h573/rcc](stm32h573/rcc) | LL | HSI to a 250 MHz PLL1 with a fractional N, VOS0, flash latency, SysTick period in virtual time |
+| [stm32h573/usart](stm32h573/usart) | HAL IT | a printf banner and a receive-to-idle line echo on UART9, PG0 and PG1 on AF11, frame timing at the BRR rate |
 | [stm32u575/adc](stm32u575/adc) | LL | ADC1 power-up, calibration, VREFINT and the temperature sensor read against the factory words, timed conversions |
 | [stm32u575/adc_watchdog](stm32u575/adc_watchdog) | HAL DMA | a TIM15-triggered 4-channel ADC1 scan, 8x oversampling, circular GPDMA, AWD3 on one input: inputs driven with `ADC1.input(n).volts`, `SupplyOptions(vdda_mv=3300)`, the strict threshold comparison, scan timing |
 | [stm32u575/crc](stm32u575/crc) | HAL | the CRC unit from `HAL_CRC_Calculate` and `HAL_CRC_Accumulate`: CRC-32/MPEG-2 on words, CRC-32/ISO-HDLC with input and output reversal, CRC-16/IBM-3740, checked against a bit-serial Python reference |
