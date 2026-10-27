@@ -34,6 +34,10 @@ enum class rcc_role : std::uint8_t
   lsi_prediv,
   backup_reset,
   remove_flags,
+  hsi_divider,
+  hsi_divider_flag,
+  timer_prescaler,
+  rtc_prescaler,
 };
 
 struct rate_inputs
@@ -72,7 +76,7 @@ template <typename Signal> struct mux
   std::string_view        reg;
   std::string_view        field;
   std::array<Signal, 8>   inputs;
-  std::array<consumer, 3> consumers;
+  std::array<consumer, 4> consumers;
 };
 
 template <typename Signal> struct signal_mux
@@ -92,8 +96,8 @@ template <typename Signal> struct divided_signal
 
 template <typename Signal> struct rtc_input
 {
-  Signal        from;
-  std::uint64_t divider;
+  Signal    from;
+  rate_rule divider;
 };
 
 template <typename Signal> struct timer_names
@@ -138,6 +142,11 @@ constexpr auto plus_one(std::uint32_t code) -> std::uint64_t
   return std::uint64_t{code} + 1;
 }
 
+constexpr auto direct(std::uint32_t code) -> std::uint64_t
+{
+  return code;
+}
+
 struct secured_group
 {
   std::string_view bit;
@@ -150,6 +159,11 @@ using unit_alias = std::pair<std::string_view, std::string_view>;
 template <std::uint64_t Hz> auto fixed_rate(rate_inputs const&) -> std::uint64_t
 {
   return Hz;
+}
+
+template <std::uint64_t N> auto divide_by(rate_inputs const&) -> std::uint64_t
+{
+  return N;
 }
 
 auto hse_rate(rate_inputs const& in) -> std::uint64_t

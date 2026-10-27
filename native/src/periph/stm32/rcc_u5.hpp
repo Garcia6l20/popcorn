@@ -2,6 +2,8 @@
 
 #include "rcc_graph.hpp"
 
+#include <popcorn/core/types.hpp>
+
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -193,6 +195,10 @@ constexpr auto names = std::to_array<named_field<rcc_role>>({
     {rcc_role::lsi_prediv,         {"RCC_BDCR", "LSIPREDIV"}  },
     {rcc_role::backup_reset,       {"RCC_BDCR", "BDRST"}      },
     {rcc_role::remove_flags,       {"RCC_CSR", "RMVF"}        },
+    {rcc_role::hsi_divider,        {}                         },
+    {rcc_role::hsi_divider_flag,   {}                         },
+    {rcc_role::timer_prescaler,    {}                         },
+    {rcc_role::rtc_prescaler,      {}                         },
 });
 
 static_assert(names_every_role(names));
@@ -212,7 +218,7 @@ constexpr std::array<divided_signal<signal>, 1> divided{
 constexpr std::array<signal, 1> internal_signals{hsi48_half};
 
 constexpr std::array<rtc_input<signal>, 4> rtc_sources{
-    {{none, 1}, {lse, 1}, {lsi, 1}, {hse, 32}}
+    {{none, &divide_by<1>}, {lse, &divide_by<1>}, {lsi, &divide_by<1>}, {hse, &divide_by<32>}}
 };
 
 constexpr std::array<source, 4> pll_inputs{source::pll1, source::msis, source::hsi16, source::hse};
@@ -375,7 +381,9 @@ struct u5_rcc
   using source = u5::source;
   using signal = u5::signal;
 
-  static constexpr bool msi = true;
+  static constexpr bool                  msi               = true;
+  static constexpr bool                  hsi_divider       = false;
+  static constexpr std::optional<source> programming_clock = source::hsi16;
 
   static constexpr auto const& oscillators      = u5::oscillators;
   static constexpr auto const& names            = u5::names;
@@ -409,6 +417,35 @@ struct u5_rcc
   static auto timer_multiplier(rate_inputs const& in, rcc_role prescaler) -> std::uint64_t
   {
     return ppre_divider(in.read(prescaler)) == 1 ? 1 : 2;
+  }
+
+  /**
+   * @brief Flags of `RCC_CSR` a reset of @p kind sets, RM0456 11.8.50.
+   * @param kind Kind of the reset.
+   */
+  static constexpr auto reset_flags_of(reset_kind kind) noexcept -> std::array<std::string_view, 2>
+  {
+    switch(kind)
+    {
+      case reset_kind::power_on:
+      case reset_kind::brown_out:
+        return {"BORRSTF", "PINRSTF"};
+      case reset_kind::pin:
+        return {"PINRSTF", {}};
+      case reset_kind::software:
+        return {"SFTRSTF", {}};
+      case reset_kind::watchdog:
+        return {"IWDGRSTF", {}};
+      case reset_kind::window_watchdog:
+        return {"WWDGRSTF", {}};
+      case reset_kind::low_power:
+        return {"LPWRRSTF", {}};
+      case reset_kind::option_load:
+        return {"OBLRSTF", {}};
+      case reset_kind::peripheral:
+        return {};
+    }
+    return {};
   }
 };
 }

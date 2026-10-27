@@ -22,6 +22,12 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto rcc_factory(rcc_options options) -> model_factory;
 
 /**
+ * @brief Factory of the STM32H5 RCC model, RM0481 section 11.
+ * @param options Board configuration, copied into every model made.
+ */
+[[nodiscard]] auto rcc_h5_factory(rcc_options options) -> model_factory;
+
+/**
  * @brief Factory of the ICACHE model, RM0456 section 8.
  * @param options Board configuration, copied into every model made.
  */

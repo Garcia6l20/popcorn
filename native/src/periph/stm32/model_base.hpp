@@ -616,10 +616,13 @@ protected:
           std::ranges::find(ctx.part.peripherals, std::string_view{"RCC"}, &peripheral_desc::name);
       if(rcc != ctx.part.peripherals.end() and not reset_bit_of(*rcc, desc.name))
       {
+        auto const named    = reset_bit_name(desc.name);
+        auto const fallback = std::format("{}RST", desc.name);
         throw config_error(
             ctx.part.part, 0,
             std::format(
-                "peripherals.RCC.registers.RCC_xxxRSTR.fields.{}", reset_bit_name(desc.name)),
+                "peripherals.RCC.registers.RCC_xxxRSTR.fields.{}",
+                named == fallback ? named : std::format("{} or {}", named, fallback)),
             std::format(
                 "the RCC reset bit of {}, which the {} model resets", desc.name, model_name));
       }

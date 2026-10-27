@@ -758,10 +758,33 @@ TEST_CASE("every U575 instance with an RCC reset bit resolves it, the renamed on
                                                "GTZC2_TZIC",   "GTZC2_TZSC",   "ICache",
                                                "IWDG",         "PWR",          "RCC",
                                                "RTC",          "TAMP",         "WWDG"});
+  auto const described = [&](std::string_view field) {
+    return std::ranges::any_of(rcc.registers, [&](popcorn::register_desc const& reg) {
+      return reg.name.contains("RSTR")
+         and std::ranges::contains(reg.fields, field, &popcorn::field_desc::name);
+    });
+  };
+  auto renamed = std::size_t{};
   for(auto const& [instance, field] : stm32::reset_bit_names)
   {
     CAPTURE(instance);
     CHECK(stm32::reset_bit_name(instance) == field);
+    if(not described(field))
+    {
+      continue;
+    }
+    ++renamed;
+    auto const found = stm32::reset_bit_of(rcc, instance);
+    REQUIRE(found.has_value());
+    CHECK(found->field == field);
+  }
+  CHECK(renamed == 11);
+  for(auto const& [instance, field] : {
+          std::pair{"UCPD1",  "UCPD1RST" },
+          std::pair{"FDCAN1", "FDCAN1RST"}
+  })
+  {
+    CAPTURE(instance);
     auto const found = stm32::reset_bit_of(rcc, instance);
     REQUIRE(found.has_value());
     CHECK(found->field == field);
