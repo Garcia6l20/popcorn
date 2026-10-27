@@ -22,7 +22,9 @@ struct dbgmcu_state
 /**
  * @brief DBGMCU of the STM32U5, RM0456 section 75.12. DBGMCU_IDCODE reads the description's
  *        reset value, read-only, reserved bits 15:12 included, as RM0456 gives it as
- *        0xXXXX6XXX. ST's HAL reads it to pick the ADC calibration sequence.
+ *        0xXXXX6XXX. ST's HAL reads it to pick the ADC calibration sequence. The base read
+ *        handler of a dispatch_model returns only the bits that fields cover, and the fields
+ *        of DBGMCU_IDCODE are DEV_ID and REV_ID, so `on_read` returns the whole reset value.
  *        The freeze fields, `DBG_<peripheral>_STOP` in the freeze registers, are read by the
  *        models that freeze while the machine holds its core, through debug_freeze, at each
  *        hold and release. Deviation: a freeze write while the core is held takes effect at the

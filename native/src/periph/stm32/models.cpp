@@ -31,7 +31,7 @@ struct builtin
   std::string_view part_glob     = "*";
 };
 
-constexpr std::array<builtin, 44> builtins{
+constexpr std::array<builtin, 45> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -55,6 +55,7 @@ constexpr std::array<builtin, 44> builtins{
      {"GPIO", "STM32H56x_gpio_*", [](board const&) { return gpio_factory(h56x_gpio); }, "GPIO?"},
      {"EXTI", "", [](board const&) { return exti_factory(); }},
      {"GPDMA", "STM32U5_dma3_*", [](board const&) { return gpdma_factory(); }},
+     {"GPDMA", "*STM32H5_dma3_*", [](board const&) { return gpdma_h5_factory(); }},
      {"LPDMA", "STM32U5_dma3_*", [](board const&) { return lpdma_factory(); }},
      {.ip              = "USART",
          .ip_version_glob = "sci3_v2*",

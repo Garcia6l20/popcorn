@@ -91,8 +91,7 @@ readbacks of the STM32U5:
 
 - FLASH `SECKEYR`, `SECSR`, `SECCR`, `SECBBRx` and `SECHDPCR` read 0 and ignore writes. `SECCR`
   no longer reads 0x80000000.
-- With `option_bytes` set and `tzen` False, `SECWMxRy` and `SECBOOTADD0R` read 0 and ignore
-  writes.
+- FLASH `SECWMxRy` and `SECBOOTADD0R` read 0 and ignore writes, with or without `option_bytes`.
 - `GPIOx_SECCFGR`, `RCC_SECCFGR`, `PWR_SECCFGR` and `SYSCFG_SECCFGR` read 0 and ignore writes.
   The GPDMA and LPDMA `RCFGLOCKR` ignore writes.
 

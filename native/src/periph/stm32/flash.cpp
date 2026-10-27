@@ -1221,11 +1221,11 @@ static_assert(flag_matches_roles(
  * - Program, RM0481 7.3.5: one 128-bit write buffer takes 8-, 16- and 32-bit stores into one
  *   flash word. WBNE is set while it fills, a full buffer starts the program, BSY set for
  *   flash_options::quad_word_program. A second store to a byte sets STRBERR, a store into another
- *   flash word sets INCERR, a store with PG clear or with SER, BER or MER set sets PGSERR, a
- *   16-bit store while WBNE is set sets PGSERR, and each flushes the buffer and writes nothing,
- *   RM0481 7.9. FW programs a partly filled buffer
- *   with its unwritten bytes at 0xFF, and does nothing for a buffer of 0xFF bytes. A program
- *   over a word that is not erased writes the data as given.
+ *   flash word sets INCERR, a store with PG clear or with SER, BER or MER set sets PGSERR, and
+ *   each flushes the buffer and writes nothing, RM0481 7.9. A 16-bit store while WBNE is set
+ *   fills the buffer like a word store, as measured on an STM32H573. FW programs a partly
+ *   filled buffer with its unwritten bytes at 0xFF, and does nothing for a buffer of 0xFF bytes. A
+ * program over a word that is not erased writes the data as given.
  * - Erase, RM0481 7.3.6: STRT with SER erases sector SNB of the physical bank BKSEL, with BER
  *   that bank, with MER both banks. STRT with none or more than one of them is PGSERR, 7.9.4.
  * - EOP sets at the end of every operation. FLASH_NSSR is read-only: FLASH_NSCCR clears its
@@ -2820,11 +2820,6 @@ void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
       fail(secure, set_role::sequence_error);
       return;
     }
-    if(size == 2 and state_.filled != 0)
-    {
-      fail(secure, set_role::sequence_error);
-      return;
-    }
     fill(addr, size, value, secure);
     return;
   }
@@ -3541,9 +3536,7 @@ auto check_option_bytes(part_description const& part, option_bytes const& wanted
       option_refusal{
                      .key      = "option_bytes",
                      .expected = std::format(
-              "a part whose built-in FLASH model encodes option bytes, an STM32U5 or STM32H5 with "
-              "a "
-              "flash region its FLASH controls, not {}", part.part)}
+              "an STM32U5 or STM32H5 part with a flash region its FLASH controls, not {}", part.part)}
   };
 }
 

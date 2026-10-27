@@ -1,5 +1,5 @@
 format = 1
-source = "Port I of the STM32H562, H563 and H573. RM0481 Rev 5 Table 5 maps GPIOI on these parts, Tables 6 and 7 of the STM32H523, H533, H543 and H553 do not"
+source = "Port I and the FLASH_OPTSR_CUR delivery value of the STM32H562, H563 and H573. RM0481 Rev 5 Table 5 maps GPIOI on these parts, Tables 6 and 7 of the STM32H523, H533, H543 and H553 do not"
 
 [match]
 parts = ["STM32H562*", "STM32H563*", "STM32H573*"]
@@ -80,3 +80,9 @@ registers = ["GPIOI_BSRR"]
 fields = ["BS12", "BS13", "BS14", "BS15", "BR12", "BR13", "BR14", "BR15"]
 drop = true
 source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_OPTSR_CUR"
+reset = 0x2D30EDF8
+source = "Silicon read-back on two STM32H573 parts in delivery state, option bytes never changed: FLASH_OPTSR_CUR 0x2D30EDF8. RM0481 Rev 5, 7.11.19 FLASH_OPTSR_CUR gives reset value 0xXXXX XXXX, the register is loaded from the option bytes, and Table 55 (7.4.3) with 7.4.4 gives the delivery value: BOOT_UBE 0xB4, IWDG_STDBY and IWDG_STOP 1, PRODUCT_STATE 0xED, NRST_STOP, NRST_STDBY, IWDG_SW and WWDG_SW 1, BORH_EN 0, BOR_LEV 0, SWAP_BANK 0. The Table 55 row prints 29 bit digits for 28 field bits and the read-back shows the extra digit as bit 5 set to 1. The STM32H562 and STM32H563 are taken equal, with the same RM0481 Table 55 row. ST STM32H573 SVD gives 0"

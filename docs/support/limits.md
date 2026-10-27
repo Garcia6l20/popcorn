@@ -115,12 +115,13 @@ Not modelled on the STM32H5:
 Differs from RM0481:
 
 - OPTSTRT programs FLASH_WRP1R_PRG and FLASH_WRP2R_PRG into the _CUR registers at once, with
-  no BSY. The other _PRG registers are storage, and a write to one logs a warning once at the
-  next OPTSTRT.
-- Without machine option bytes the OPTSR, OPTSR2, NSBOOTR, SECBOOTR, SECWM and HDP _CUR
-  registers read the delivery values of RM0481 Table 55 and the WRP _CUR registers read
-  0xFFFFFFFF. With them every reset loads the encoded values. FLASH_NSEPOCHR_CUR,
-  FLASH_SECEPOCHR_CUR and the _PRG registers reset to 0.
+  no BSY. The other _PRG registers are storage, except FLASH_BOOTR_PRG, FLASH_SECWM1R_PRG and
+  FLASH_SECWM2R_PRG, which read 0 and ignore writes while TrustZone is off. A write to a storage
+  register logs a warning once at the next OPTSTRT.
+- Without machine option bytes the OPTSR, OPTSR2, NSBOOTR, SECWM and HDP _CUR registers read
+  the delivery values of RM0481 Table 55, FLASH_SECBOOTR_CUR reads 0 on the bus while TrustZone
+  is off, and the WRP _CUR registers read 0xFFFFFFFF. With them every reset loads the encoded
+  values. FLASH_NSEPOCHR_CUR, FLASH_SECEPOCHR_CUR and the _PRG registers reset to 0.
 - A program over a word that is not erased writes the new data as given.
 
 ## GPDMA and LPDMA

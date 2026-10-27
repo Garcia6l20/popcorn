@@ -808,6 +808,34 @@ TEST_CASE("byte and half-word stores set SIZERR, misplaced words PGAERR, and flu
   CHECK(rig.words(last_page, 4) == erased(4));
 }
 
+TEST_CASE(
+    "U575 silicon: a half-word store is SIZERR, a second one adds PGSERR, a word then a half-word "
+    "clears WDW")
+{
+  constexpr std::uint32_t sizerr = 1u << 6;
+  constexpr std::uint32_t pgserr = 1u << 7;
+  constexpr std::uint32_t wdw    = 1u << 17;
+  flash_rig               rig;
+  rig.control(pg);
+  SUBCASE("strh then strh")
+  {
+    rig.call("store_half", {last_page, 0x1234});
+    CHECK(rig.read("FLASH_NSSR") == sizerr);
+    rig.call("store_half", {last_page + 2, 0x5678});
+    CHECK(rig.read("FLASH_NSSR") == (sizerr | pgserr));
+  }
+  SUBCASE("str then strh")
+  {
+    rig.store_words(last_page, {0x1122'3344u});
+    CHECK(rig.read("FLASH_NSSR") == wdw);
+    rig.call("store_half", {last_page + 4, 0x5678});
+    CHECK(rig.read("FLASH_NSSR") == sizerr);
+  }
+  rig.control(0);
+  rig.wait_idle();
+  CHECK(rig.words(last_page, 4) == erased(4));
+}
+
 TEST_CASE("a VSTR.64 into flash programs two words of the quad-word, low word first")
 {
   flash_rig rig;
@@ -2245,6 +2273,11 @@ TEST_CASE("check_option_bytes returns the boot address and the refusal of each f
   auto const result = check_option_bytes(unknown_flash(), {});
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().key == "option_bytes");
+  CHECK(
+      result.error().expected
+      == std::format(
+          "an STM32U5 or STM32H5 part with a flash region its FLASH controls, not {}",
+          unknown_flash().part));
 }
 
 TEST_CASE("the U5 IDAU map is RM0456 2.2 Table 3, other families have none")

@@ -581,30 +581,44 @@ TEST_CASE("RM0481 Table 48: the bootloader's VOS0 250 MHz LATENCY 5 is enough an
   CHECK(r.logged.back().message.find("RM0481 Table 48") != std::string::npos);
 }
 
-TEST_CASE("RM0481 7.9.4: a 16-bit store while WBNE is set is PGSERR and writes nothing")
+TEST_CASE("H573 silicon: 16-bit stores fill the write buffer, NSSR holds WBNE only, FW programs it")
 {
-  rig r;
+  constexpr std::uint32_t wbne = 1u << 1;
+  constexpr std::uint32_t eop  = 1u << 16;
+  rig                     r;
   r.unlock();
   r.control(pg);
-  r.store_words(sector2, {0x1122'3344u});
-  REQUIRE(r.status("WBNE") == 1);
-  REQUIRE(r.status("PGSERR") == 0);
-  r.call("store_half", {static_cast<std::uint32_t>(sector2 + 4), 0x5566u});
-  CHECK(r.status("PGSERR") == 1);
-  CHECK(r.status("WBNE") == 0);
-  r.control(0);
-  r.run_for(100 * us);
-  CHECK(r.words(sector2, 4) == erased(4));
-}
-
-TEST_CASE("RM0481 7.9.4: a 16-bit store into an empty buffer fills it")
-{
-  rig r;
-  r.unlock();
-  r.control(pg);
-  r.call("store_half", {static_cast<std::uint32_t>(sector2), 0x5566u});
-  CHECK(r.status("PGSERR") == 0);
-  CHECK(r.status("WBNE") == 1);
+  SUBCASE("strh then strh")
+  {
+    r.call("store_half", {static_cast<std::uint32_t>(sector2), 0x1234u});
+    CHECK(r.read("FLASH_NSSR") == wbne);
+    r.call("store_half", {static_cast<std::uint32_t>(sector2 + 2), 0x5678u});
+    CHECK(r.read("FLASH_NSSR") == wbne);
+    r.control(pg | fw);
+    r.wait_idle();
+    CHECK(r.read("FLASH_NSSR") == eop);
+    CHECK(r.words(sector2, 4) == std::vector<std::uint32_t>{0x5678'1234u, ~0u, ~0u, ~0u});
+  }
+  SUBCASE("str then strh")
+  {
+    r.store_words(sector2, {0xaabb'ccddu});
+    CHECK(r.read("FLASH_NSSR") == wbne);
+    r.call("store_half", {static_cast<std::uint32_t>(sector2 + 4), 0x1111u});
+    CHECK(r.read("FLASH_NSSR") == wbne);
+    r.control(pg | fw);
+    r.wait_idle();
+    CHECK(r.read("FLASH_NSSR") == eop);
+    CHECK(r.words(sector2, 4) == std::vector<std::uint32_t>{0xaabb'ccddu, 0xffff'1111u, ~0u, ~0u});
+  }
+  SUBCASE("a single strh")
+  {
+    r.call("store_half", {static_cast<std::uint32_t>(sector2), 0x2222u});
+    CHECK(r.read("FLASH_NSSR") == wbne);
+    r.control(pg | fw);
+    r.wait_idle();
+    CHECK(r.read("FLASH_NSSR") == eop);
+    CHECK(r.words(sector2, 4) == std::vector<std::uint32_t>{0xffff'2222u, ~0u, ~0u, ~0u});
+  }
 }
 
 TEST_CASE("RM0481 7.4.3: OPTSTRT programs FLASH_WRP2R_PRG into FLASH_WRP2R_CUR at once")

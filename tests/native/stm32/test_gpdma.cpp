@@ -816,7 +816,7 @@ struct new_channel_state
 struct new_gpdma_state
 {
   std::array<new_channel_state, 16> channel{};
-  std::array<std::uint8_t, 128>     request{};
+  std::array<std::uint8_t, 256>     request{};
 };
 }
 
@@ -1652,7 +1652,8 @@ struct repeat_gpdma_state
 
 auto without_beats(new_gpdma_state const& now) -> repeat_gpdma_state
 {
-  repeat_gpdma_state out{.request = now.request};
+  repeat_gpdma_state out{};
+  std::ranges::copy_n(now.request.begin(), out.request.size(), out.request.begin());
   for(auto const [index, c] : std::views::enumerate(now.channel))
   {
     out.channel[static_cast<std::size_t>(index)] = {

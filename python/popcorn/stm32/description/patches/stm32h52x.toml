@@ -1,0 +1,12 @@
+format = 1
+source = "FLASH_OPTSR_CUR delivery value of the RM0481 parts outside stm32h56x.toml, the STM32H523, H533, H543 and H553, which have no silicon read-back of it. RM0481 Rev 5, Table 55 (7.4.3) gives the delivery option bytes, and the STM32H562, H563 and H573 take the value read on silicon from stm32h56x.toml. The STM32H503 is documented by RM0492, not RM0481, so it gets no rule here and keeps its SVD reset value"
+
+[match]
+parts = ["STM32H523*", "STM32H533*", "STM32H543*", "STM32H553*"]
+svd = ["STM32H5*.svd"]
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_OPTSR_CUR"
+reset = 0x2D30EDD8
+source = "RM0481 Rev 5, 7.11.19 FLASH_OPTSR_CUR: reset value 0xXXXX XXXX, the register is loaded from the option bytes, so the delivery value of Table 55 (7.4.3) and 7.4.4 is the reset value: BOOT_UBE 0xB4, IWDG_STDBY and IWDG_STOP 1, IO_VDDIO2_HSLV and IO_VDD_HSLV 0, PRODUCT_STATE 0xED, NRST_STOP, NRST_STDBY, IWDG_SW and WWDG_SW 1, BORH_EN 0, BOR_LEV 0, SWAP_BANK 0. The Table 55 row prints 29 bit digits for 28 field bits, bit 5 is reserved and is taken as 0, a modelled choice and not a manufacturing fact. ST's STM32H573 SVD gives 0"

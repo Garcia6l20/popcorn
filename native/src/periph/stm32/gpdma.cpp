@@ -28,7 +28,7 @@ namespace popcorn::periph::stm32
 namespace
 {
 constexpr std::size_t   max_channels  = 16;
-constexpr std::size_t   requests      = 128;
+constexpr std::size_t   requests      = 256;
 constexpr std::uint32_t burst_done    = 0;
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 
@@ -152,7 +152,22 @@ struct dma_layout
   bool                           bursts;
   bool                           srd_only;
   std::span<gpdma_request const> requests;
+  auto (*freeze_unit)(std::string_view instance, std::string_view ip, std::size_t channel)
+      -> std::string;
 };
+
+/** @brief Freeze field unit of the U5 engines, the register prefix and the channel, `GPDMA3`. */
+auto freeze_by_ip(std::string_view, std::string_view ip, std::size_t channel) -> std::string
+{
+  return std::format("{}{}", ip, channel);
+}
+
+/** @brief Freeze field unit of the H5 engines, the instance and the channel, `GPDMA1_3`. */
+auto freeze_by_instance(std::string_view instance, std::string_view, std::size_t channel)
+    -> std::string
+{
+  return std::format("{}_{}", instance, channel);
+}
 
 /** @brief Name prefix of the description's SRD SRAM regions, SRAM4 on the U5. */
 constexpr std::string_view srd_sram_prefix{"SRAM_SRD"};
@@ -172,19 +187,29 @@ constexpr std::array<address_range, 2> srd_peripheral_windows{
 constexpr std::uint64_t secure_alias_offset = 0x1000'0000;
 
 constexpr dma_layout gpdma_layout{
-    .ip       = "GPDMA",
-    .channels = 16,
-    .first_2d = 12,
-    .bursts   = true,
-    .srd_only = false,
-    .requests = gpdma_requests};
+    .ip          = "GPDMA",
+    .channels    = 16,
+    .first_2d    = 12,
+    .bursts      = true,
+    .srd_only    = false,
+    .requests    = gpdma_requests,
+    .freeze_unit = freeze_by_ip};
+constexpr dma_layout h5_gpdma_layout{
+    .ip          = "GPDMA",
+    .channels    = 8,
+    .first_2d    = 6,
+    .bursts      = true,
+    .srd_only    = false,
+    .requests    = h5_gpdma_requests,
+    .freeze_unit = freeze_by_instance};
 constexpr dma_layout lpdma_layout{
-    .ip       = "LPDMA",
-    .channels = 4,
-    .first_2d = 4,
-    .bursts   = false,
-    .srd_only = true,
-    .requests = lpdma_requests};
+    .ip          = "LPDMA",
+    .channels    = 4,
+    .first_2d    = 4,
+    .bursts      = false,
+    .srd_only    = true,
+    .requests    = lpdma_requests,
+    .freeze_unit = freeze_by_ip};
 
 enum class unsupported : std::uint8_t
 {
@@ -265,7 +290,9 @@ struct transfer_cache
  *        warning once per channel for a source, a destination and a linked-list fetch outside
  *        the SRD SRAM regions of the description and the AHB3 and APB3 windows with their
  *        secure aliases, and raises a model_error under strict_peripherals. No DTEF or ULEF is
- *        set.
+ *        set. The STM32H5 GPDMA1 and GPDMA2, RM0481 section 16, are the same engine on
+ *        `GPDMA_C<n>`, 8 channels with 2D addressing on 6 and 7, on `<name>_Channel<n>_IRQn`,
+ *        frozen by `DBG_<name>_<n>_STOP`, their requests from RM0481 Table 142, REQSEL 8 bits wide.
  *
  *        TrustZone, RM0456 17.4.14, 17.4.15, 17.8.1 to 17.8.5 and 18.8: `SECCFGR.SECx` makes
  *        channel x Secure, `PRIVCFGR.PRIVx` privileged. A Non-secure access to a register of a
@@ -1375,7 +1402,7 @@ void gpdma::on_core_hold(bool held)
     std::array<bool, max_channels> frozen{};
     for(std::size_t ch = 0; ch < layout_.channels; ++ch)
     {
-      frozen[ch] = debug_frozen(freeze_logged_, std::format("{}{}", layout_.ip, ch));
+      frozen[ch] = debug_frozen(freeze_logged_, layout_.freeze_unit(desc_.name, layout_.ip, ch));
     }
     for(std::size_t ch = 0; ch < layout_.channels; ++ch)
     {
@@ -1444,6 +1471,13 @@ auto gpdma_factory() -> model_factory
 {
   return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<gpdma>(ctx, desc, gpdma_layout, writes<gpdma_layout>());
+  };
+}
+
+auto gpdma_h5_factory() -> model_factory
+{
+  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<gpdma>(ctx, desc, h5_gpdma_layout, writes<h5_gpdma_layout>());
   };
 }
 

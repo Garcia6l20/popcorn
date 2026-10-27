@@ -1573,3 +1573,36 @@ def test_a_rule_naming_a_dropped_field_is_an_error(tmp_path: Path) -> None:
     later = 'instances = ["D"]\nregisters = ["CR"]\nfields = ["EN"]\non_write = "modify"\n'
     later += 'source = "probe"'
     assert _drop_error(tmp_path, _DROP_EN, later).key == "fields[1].fields"
+
+
+H5_PATCHES = Path(__file__).parents[3] / "python" / "popcorn" / "stm32" / "description" / "patches"
+
+
+@pytest.mark.parametrize(
+    ("part", "value"),
+    [
+        ("STM32H573AIIx", 0x2D30EDF8),
+        ("STM32H563ZITx", 0x2D30EDF8),
+        ("STM32H562RGTx", 0x2D30EDF8),
+        ("STM32H533RETx", 0x2D30EDD8),
+        ("STM32H523CEUx", 0x2D30EDD8),
+        ("STM32H543VGTx", 0x2D30EDD8),
+        ("STM32H553RGTx", 0x2D30EDD8),
+    ],
+)
+def test_every_rm0481_part_gets_one_optsr_delivery_value(part: str, value: int) -> None:
+    assert _optsr_resets(part) == [value]
+
+
+def test_the_h503_gets_no_rm0481_optsr_delivery_value() -> None:
+    assert _optsr_resets("STM32H503CBTx") == []
+
+
+def _optsr_resets(part: str) -> list[int]:
+    patches = load_patches(sorted(H5_PATCHES.glob("*.toml")), part=part, svd_name="STM32H573.svd")
+    return [
+        rule.reset
+        for loaded in patches
+        for rule in loaded.patch.resets or []
+        if rule.register == "FLASH_OPTSR_CUR"
+    ]

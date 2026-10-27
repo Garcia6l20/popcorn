@@ -1,5 +1,5 @@
 format = 1
-source = "RM0481 Rev 5 and STM32H573 CubeMX db: SVD naming against CubeMX instances. IRQ adds: RM0481 Rev 5, 17.3 Table 152 STM32H562/563/573xx vector table lists PVD_AVD 1, RTC 2, RTC_S 3, FPU 103 and CEC 119, which STM32H573.svd lacks and the CMSIS IRQn_Type defines. PVD_AVD and FPU go to EXTI as the U5 SVD places PVD_PVM and FPU. The RTC lines go to RTC. HDMI-CEC is an unmodelled H5 block with no peripheral in the SVD, so CEC goes to EXTI too. IRQ rename: the SVD names IRQ 105 DCACHE, RM0481 Rev 5, 17.3 Table 152 names it DCACHE1 and the CMSIS IRQn_Type DCACHE1_IRQn, so it is dropped and added again under that name at the same number, which gives the same line name with and without the CMSIS header"
+source = "RM0481 Rev 5 and STM32H573 CubeMX db: SVD naming against CubeMX instances. IRQ adds: RM0481 Rev 5, 17.3 Table 152 STM32H562/563/573xx vector table lists PVD_AVD 1, RTC 2, RTC_S 3, FPU 103 and CEC 119, which STM32H573.svd lacks and the CMSIS IRQn_Type defines. PVD_AVD and FPU go to EXTI as the U5 SVD places PVD_PVM and FPU. The RTC lines go to RTC. HDMI-CEC is an unmodelled H5 block with no peripheral in the SVD, so CEC goes to EXTI too. IRQ rename: the SVD names IRQ 105 DCACHE, RM0481 Rev 5, 17.3 Table 152 names it DCACHE1 and the CMSIS IRQn_Type DCACHE1_IRQn, so it is dropped and added again under that name at the same number. GPDMA1 and GPDMA2 channels 0 to 7, IRQ 27 to 34 and 90 to 97: the SVD names them GPDMA<n>_CH<c>, RM0481 Rev 5, 17.3 Table 152 names them GPDMA<n>_Channel<c> as the CMSIS IRQn_Type does, dropped and added again the same way. Both renames give the same line name with and without the CMSIS header"
 
 [match]
 parts = ["STM32H5*"]
@@ -18,9 +18,25 @@ source = "RM0481 Rev 5, 2.3 memory map: secure peripheral alias at NS base + 0x1
 renames = { DCACHE1 = ["DCACHE"], LPUART1 = ["LPUART"], DAC1 = ["DAC"], OCTOSPI1 = ["OCTOSPI"], I3C1 = ["I3C"], GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPIOF", "GPIOG", "GPIOH", "GPIOI"], GTZC = ["GTZC1_TZSC", "GTZC1_TZIC"], GTZC_NS = ["GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3"] }
 
 [irqs]
-drop = ["DCACHE"]
+drop = ["DCACHE", "GPDMA1_CH0", "GPDMA1_CH1", "GPDMA1_CH2", "GPDMA1_CH3", "GPDMA1_CH4", "GPDMA1_CH5", "GPDMA1_CH6", "GPDMA1_CH7", "GPDMA2_CH0", "GPDMA2_CH1", "GPDMA2_CH2", "GPDMA2_CH3", "GPDMA2_CH4", "GPDMA2_CH5", "GPDMA2_CH6", "GPDMA2_CH7"]
 add = [
   { number = 105, name = "DCACHE1", peripheral = "DCACHE" },
+  { number = 27, name = "GPDMA1_Channel0", peripheral = "GPDMA1" },
+  { number = 28, name = "GPDMA1_Channel1", peripheral = "GPDMA1" },
+  { number = 29, name = "GPDMA1_Channel2", peripheral = "GPDMA1" },
+  { number = 30, name = "GPDMA1_Channel3", peripheral = "GPDMA1" },
+  { number = 31, name = "GPDMA1_Channel4", peripheral = "GPDMA1" },
+  { number = 32, name = "GPDMA1_Channel5", peripheral = "GPDMA1" },
+  { number = 33, name = "GPDMA1_Channel6", peripheral = "GPDMA1" },
+  { number = 34, name = "GPDMA1_Channel7", peripheral = "GPDMA1" },
+  { number = 90, name = "GPDMA2_Channel0", peripheral = "GPDMA2" },
+  { number = 91, name = "GPDMA2_Channel1", peripheral = "GPDMA2" },
+  { number = 92, name = "GPDMA2_Channel2", peripheral = "GPDMA2" },
+  { number = 93, name = "GPDMA2_Channel3", peripheral = "GPDMA2" },
+  { number = 94, name = "GPDMA2_Channel4", peripheral = "GPDMA2" },
+  { number = 95, name = "GPDMA2_Channel5", peripheral = "GPDMA2" },
+  { number = 96, name = "GPDMA2_Channel6", peripheral = "GPDMA2" },
+  { number = 97, name = "GPDMA2_Channel7", peripheral = "GPDMA2" },
   { number = 1, name = "PVD_AVD", peripheral = "EXTI" },
   { number = 2, name = "RTC", peripheral = "RTC" },
   { number = 3, name = "RTC_S", peripheral = "RTC" },
@@ -366,12 +382,6 @@ peripheral = "DBGMCU"
 register = "DBGMCU_IDCODE"
 reset = 0x10016484
 source = "RM0481 Rev 5, 66.12.4 DBGMCU_IDCODE: DEV_ID 0x484 for STM32H562/563/573, REV_ID 0x1001 for revision Z, bits 15:12 read 6 as the reset value 0xXXXX 6XXX shows. REV_ID is a modelled revision, not a manufacturing fact, the RM lists several and gives no default. ST's STM32H573 SVD gives 0x00006000"
-
-[[resets]]
-peripheral = "FLASH"
-register = "FLASH_OPTSR_CUR"
-reset = 0x2D30EDF8
-source = "Silicon read-back on two STM32H573 parts in delivery state, option bytes never changed: FLASH_OPTSR_CUR 0x2D30EDF8. RM0481 Rev 5, 7.11.19 FLASH_OPTSR_CUR gives reset value 0xXXXX XXXX, the register is loaded from the option bytes, and Table 55 (7.4.3) with 7.4.4 gives the delivery value: BOOT_UBE 0xB4, IWDG_STDBY and IWDG_STOP 1, PRODUCT_STATE 0xED, NRST_STOP, NRST_STDBY, IWDG_SW and WWDG_SW 1, BORH_EN 0, BOR_LEV 0, SWAP_BANK 0. The Table 55 row prints 29 bit digits for 28 field bits and the read-back shows the extra digit as bit 5 set to 1. ST STM32H573 SVD gives 0"
 
 [[resets]]
 peripheral = "FLASH"

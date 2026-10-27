@@ -75,6 +75,12 @@ namespace popcorn::periph::stm32
 /** @brief Factory of the GPDMA1 model, RM0456 section 17. */
 [[nodiscard]] auto gpdma_factory() -> model_factory;
 
+/**
+ * @brief Factory of the GPDMA1 and GPDMA2 model of the STM32H5, RM0481 section 16: 8 channels,
+ *        2D addressing on 6 and 7, requests from Table 142, frozen by `DBG_GPDMA<n>_<ch>_STOP`.
+ */
+[[nodiscard]] auto gpdma_h5_factory() -> model_factory;
+
 /** @brief Factory of the LPDMA1 model, the GPDMA engine with 4 channels, RM0456 section 18. */
 [[nodiscard]] auto lpdma_factory() -> model_factory;
 
