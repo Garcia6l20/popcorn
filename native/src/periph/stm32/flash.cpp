@@ -112,64 +112,159 @@ struct trustzone_flash_state
 enum class set_role : std::uint8_t
 {
   lock,
-  option_lock,
-  start,
-  option_start,
-  option_load,
   program,
+  start,
+  end,
+  end_irq,
+  busy,
+  buffer_open,
   page_erase,
+  page,
+  bank_select,
   bank1_erase,
   bank2_erase,
-  page,
-  bank,
   burst,
-  end_irq,
+  sector_erase,
+  sector,
+  bank_erase,
+  mass_erase,
+  force_write,
   error_irq,
-  end,
   operation_error,
   program_error,
   protection_error,
   alignment_error,
   size_error,
   sequence_error,
-  option_error,
-  busy,
-  waiting,
+  strobe_error,
+  inconsistency_error,
 };
 
-constexpr std::array<named_field<set_role>, 24> u5_set_fields{
+constexpr std::array<named_field<set_role>, 27> u5_set_fields{
     {
      {set_role::lock, {"CR", "LOCK"}},
-     {set_role::option_lock, {"CR", "OPTLOCK", true}},
-     {set_role::start, {"CR", "STRT"}},
-     {set_role::option_start, {"CR", "OPTSTRT", true}},
-     {set_role::option_load, {"CR", "OBL_LAUNCH", true}},
      {set_role::program, {"CR", "PG"}},
+     {set_role::start, {"CR", "STRT"}},
+     {set_role::end, {"SR", "EOP"}},
+     {set_role::end_irq, {"CR", "EOPIE"}},
+     {set_role::busy, {"SR", "BSY"}},
+     {set_role::buffer_open, {"SR", "WDW"}},
      {set_role::page_erase, {"CR", "PER"}},
+     {set_role::page, {"CR", "PNB"}},
+     {set_role::bank_select, {"CR", "BKER"}},
      {set_role::bank1_erase, {"CR", "MER1"}},
      {set_role::bank2_erase, {"CR", "MER2"}},
-     {set_role::page, {"CR", "PNB"}},
-     {set_role::bank, {"CR", "BKER"}},
      {set_role::burst, {"CR", "BWR"}},
-     {set_role::end_irq, {"CR", "EOPIE"}},
+     {set_role::sector_erase, {}},
+     {set_role::sector, {}},
+     {set_role::bank_erase, {}},
+     {set_role::mass_erase, {}},
+     {set_role::force_write, {}},
      {set_role::error_irq, {"CR", "ERRIE"}},
-     {set_role::end, {"SR", "EOP"}},
      {set_role::operation_error, {"SR", "OPERR"}},
      {set_role::program_error, {"SR", "PROGERR"}},
      {set_role::protection_error, {"SR", "WRPERR"}},
      {set_role::alignment_error, {"SR", "PGAERR"}},
      {set_role::size_error, {"SR", "SIZERR"}},
      {set_role::sequence_error, {"SR", "PGSERR"}},
-     {set_role::option_error, {"SR", "OPTWERR", true}},
-     {set_role::busy, {"SR", "BSY"}},
-     {set_role::waiting, {"SR", "WDW"}},
+     {set_role::strobe_error, {}},
+     {set_role::inconsistency_error, {}},
      }
 };
-static_assert(names_every_role(u5_set_fields));
 
-constexpr std::array<set_role, 6> error_roles{
+enum class unit_role : std::uint8_t
+{
+  latency,
+  low_power_read,
+  ecc_detect,
+  ecc_correct,
+  ecc_bank,
+  ecc_address,
+  invert,
+  hide_bank1,
+  hide_bank2,
+  option_lock,
+  option_start,
+  option_load,
+  option_error,
+};
+
+constexpr std::array<named_field<unit_role>, 13> u5_unit_fields{
+    {
+     {unit_role::latency, {"FLASH_ACR", "LATENCY"}},
+     {unit_role::low_power_read, {"FLASH_ACR", "LPM"}},
+     {unit_role::ecc_detect, {"FLASH_ECCR", "ECCD"}},
+     {unit_role::ecc_correct, {"FLASH_ECCR", "ECCC"}},
+     {unit_role::ecc_bank, {"FLASH_ECCR", "BK_ECC"}},
+     {unit_role::ecc_address, {"FLASH_ECCR", "ADDR_ECC"}},
+     {unit_role::invert, {"FLASH_SECCR", "INV"}},
+     {unit_role::hide_bank1, {"FLASH_SECHDPCR", "HDP1_ACCDIS"}},
+     {unit_role::hide_bank2, {"FLASH_SECHDPCR", "HDP2_ACCDIS"}},
+     {unit_role::option_lock, {"FLASH_NSCR", "OPTLOCK"}},
+     {unit_role::option_start, {"FLASH_NSCR", "OPTSTRT"}},
+     {unit_role::option_load, {"FLASH_NSCR", "OBL_LAUNCH"}},
+     {unit_role::option_error, {"FLASH_NSSR", "OPTWERR"}},
+     }
+};
+
+enum class privilege_role : std::uint8_t
+{
+  nonsecure,
+  secure,
+};
+
+constexpr std::array<named_field<privilege_role>, 2> u5_privilege_fields{
+    {
+     {privilege_role::nonsecure, {"FLASH_PRIVCFGR", "NSPRIV"}},
+     {privilege_role::secure, {"FLASH_PRIVCFGR", "SPRIV"}},
+     }
+};
+
+/** @brief Capability flags of the U5 FLASH, each tied to the roles it needs. */
+struct u5_capabilities
+{
+  /** @brief BWR collects a burst of 8 quad-words, RM0456 7.3.7. */
+  static constexpr bool burst_write = true;
+  /** @brief FW forces a partly filled write buffer out. */
+  static constexpr bool force_write = false;
+  /** @brief PER, PNB, MER1 and MER2 select the erase, RM0456 7.3.6. */
+  static constexpr bool erase_by_page = true;
+  /** @brief OPERR with ERRIE summarizes every error, RM0456 7.3.9. */
+  static constexpr bool summary_error = true;
+  /** @brief OBL_LAUNCH requests an option byte loader reset, RM0456 7.4.2. */
+  static constexpr bool option_load = true;
+};
+
+static_assert(names_every_role(u5_set_fields));
+static_assert(names_every_role(u5_unit_fields));
+static_assert(names_every_role(u5_privilege_fields));
+static_assert(flag_matches_roles(u5_set_fields, u5_capabilities::burst_write, {set_role::burst}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
+    u5_capabilities::force_write,
+    {set_role::force_write, set_role::strobe_error, set_role::inconsistency_error}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
+    not u5_capabilities::force_write,
+    {set_role::size_error, set_role::alignment_error, set_role::program_error}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
+    u5_capabilities::erase_by_page,
+    {set_role::page_erase, set_role::page, set_role::bank1_erase, set_role::bank2_erase}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
+    not u5_capabilities::erase_by_page,
+    {set_role::sector_erase, set_role::sector, set_role::bank_erase, set_role::mass_erase}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
+    u5_capabilities::summary_error,
+    {set_role::operation_error, set_role::error_irq}));
+static_assert(
+    flag_matches_roles(u5_unit_fields, u5_capabilities::option_load, {unit_role::option_load}));
+
+constexpr std::array<set_role, 5> error_roles{
     set_role::program_error,    set_role::size_error,     set_role::alignment_error,
-    set_role::protection_error, set_role::sequence_error, set_role::option_error,
+    set_role::protection_error, set_role::sequence_error,
 };
 
 constexpr std::array<std::string_view, 16> secure_block_registers{
@@ -580,11 +675,18 @@ private:
   };
 
   [[nodiscard]] auto make_set(std::string_view prefix) const -> register_set;
+  template <typename Role>
+  [[nodiscard]] auto make_table(std::span<named_field<Role> const> names) const
+      -> field_table<Role>;
+  [[nodiscard]] auto has_field(std::string_view reg, std::string_view name) const -> bool;
+  [[nodiscard]] auto option_field(unit_role role, std::uint32_t control) const
+      -> std::optional<field_ref>;
   [[nodiscard]] auto field_of(bool secure, set_role role) const -> field_ref;
   [[nodiscard]] auto flag(bool secure, set_role role) const -> bool;
   [[nodiscard]] auto busy() const -> bool;
   [[nodiscard]] auto errors_pending(bool secure) const -> bool;
   void               fail(bool secure, set_role role);
+  void               fail(bool secure, field_ref flagged);
   void               set_busy(bool on);
   void               set_waiting(bool on);
   void               interrupt();
@@ -639,15 +741,10 @@ private:
   flash_options                                                     options_;
   register_file&                                                    regs_;
   region_desc const*                                                storage_{};
+  field_table<unit_role>                                            unit_;
   std::array<register_set, 2>                                       sets_;
-  field_ref                                                         ecc_detect_;
-  field_ref                                                         ecc_correct_;
-  field_ref                                                         ecc_bank_;
-  field_ref                                                         ecc_address_;
   irq_line&                                                         line_;
   irq_line*                                                         secure_line_{};
-  field_ref                                                         latency_;
-  field_ref                                                         low_power_read_;
   core::clock_domain                                                hclk_;
   std::set<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>> latency_logged_;
   std::vector<std::uint32_t>                                        watched_;
@@ -665,11 +762,8 @@ private:
   std::vector<std::uint32_t>                                        secure_words_;
   std::vector<std::uint32_t>                                        secure_blocks_;
   std::vector<std::uint32_t>                                        privileged_blocks_;
-  std::uint32_t                                                     hide_word_{};
-  field_ref                                                         invert_;
+  std::optional<field_table<privilege_role>>                        privilege_;
   std::optional<std::uint32_t>                                      privilege_word_;
-  field_ref                                                         nonsecure_privileged_;
-  field_ref                                                         secure_privileged_;
   secure_flash_state                                                secure_;
   illegal_access_controller*                                        events_{};
   bool                                                              events_linked_{};
@@ -728,24 +822,21 @@ auto flash_table(peripheral_desc const& desc, flash_options const& options, bool
 
 flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options const& options)
     : dispatch_model{ctx, desc, "FLASH", flash_table(desc, options, ctx.trustzone)},
-      options_{options}, regs_{ctx.regs}, sets_{make_set("NS"), make_set("SEC")},
-      ecc_detect_{field("FLASH_ECCR", "ECCD")}, ecc_correct_{field("FLASH_ECCR", "ECCC")},
-      ecc_bank_{field("FLASH_ECCR", "BK_ECC")}, ecc_address_{field("FLASH_ECCR", "ADDR_ECC")},
-      line_{irq("FLASH_IRQn")}, latency_{field("FLASH_ACR", "LATENCY")},
-      low_power_read_{field("FLASH_ACR", "LPM")}, hclk_{ctx.clock.domain("hclk")},
-      hide_word_{reg("FLASH_SECHDPCR").offset}, invert_{field("FLASH_SECCR", "INV")}
+      options_{options}, regs_{ctx.regs}, unit_{make_table<unit_role>(u5_unit_fields)},
+      sets_{make_set("NS"), make_set("SEC")}, line_{irq("FLASH_IRQn")},
+      hclk_{ctx.clock.domain("hclk")}
 {
   if(ctx.trustzone)
   {
-    secure_line_          = &irq("FLASH_S_IRQn");
-    privilege_word_       = reg("FLASH_PRIVCFGR").offset;
-    nonsecure_privileged_ = field("FLASH_PRIVCFGR", "NSPRIV");
-    secure_privileged_    = field("FLASH_PRIVCFGR", "SPRIV");
+    secure_line_    = &irq("FLASH_S_IRQn");
+    privilege_      = make_table<privilege_role>(u5_privilege_fields);
+    privilege_word_ = (*privilege_)[privilege_role::nonsecure].offset;
   }
-  for(auto const name : {"FLASH_SECKEYR", "FLASH_SECSR", "FLASH_SECCR", "FLASH_SECHDPCR"})
-  {
-    secure_words_.push_back(reg(name).offset);
-  }
+  auto const& secure_set = sets_[1];
+  secure_words_.push_back(secure_set.key.offset);
+  secure_words_.push_back(secure_set.status.offset);
+  secure_words_.push_back(secure_set.control.offset);
+  secure_words_.push_back(unit_[unit_role::hide_bank1].offset);
   for(auto const name : option_registers)
   {
     if(has_register(name))
@@ -821,6 +912,26 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
   swapped_ = options_.option_bytes->swap_bank;
 }
 
+auto flash::has_field(std::string_view reg, std::string_view name) const -> bool
+{
+  auto const* const found = find_register(desc_, reg);
+  return found != nullptr and std::ranges::contains(found->fields, name, &field_desc::name);
+}
+
+template <typename Role>
+auto flash::make_table(std::span<named_field<Role> const> names) const -> field_table<Role>
+{
+  return {
+      names, [this](std::string_view reg, std::string_view name) { return field(reg, name); },
+      [this](std::string_view reg, std::string_view name) { return has_field(reg, name); }};
+}
+
+auto flash::option_field(unit_role role, std::uint32_t control) const -> std::optional<field_ref>
+{
+  auto const found = unit_.find(role);
+  return found and found->offset == control ? found : std::nullopt;
+}
+
 auto flash::make_set(std::string_view prefix) const -> register_set
 {
   auto const named = [prefix](std::string_view reg) {
@@ -829,25 +940,27 @@ auto flash::make_set(std::string_view prefix) const -> register_set
   field_table<set_role> fields{
       u5_set_fields,
       [&](std::string_view reg, std::string_view name) { return field(named(reg), name); },
-      [&](std::string_view reg, std::string_view name) {
-        auto const* const found = find_register(desc_, named(reg));
-        return found != nullptr and std::ranges::contains(found->fields, name, &field_desc::name);
-      }};
+      [&](std::string_view reg, std::string_view name) { return has_field(named(reg), name); }};
   std::uint32_t clearable = 0;
   for(auto const role :
       {set_role::end, set_role::operation_error, set_role::program_error,
        set_role::protection_error, set_role::alignment_error, set_role::size_error,
-       set_role::sequence_error, set_role::option_error})
+       set_role::sequence_error})
   {
     if(auto const found = fields.find(role))
     {
       clearable |= found->mask();
     }
   }
+  auto const status = reg(named("SR"));
+  if(auto const option_error = option_field(unit_role::option_error, status.offset))
+  {
+    clearable |= option_error->mask();
+  }
   return {
       .key       = reg(named("KEYR")),
       .control   = reg(named("CR")),
-      .status    = reg(named("SR")),
+      .status    = status,
       .fields    = fields,
       .clearable = clearable};
 }
@@ -1198,7 +1311,7 @@ void flash::load_options()
 
 void flash::program_options()
 {
-  if(flag(false, set_role::sequence_error) or flag(false, set_role::option_error))
+  if(flag(false, set_role::sequence_error) or get(regs_, unit_[unit_role::option_error]) != 0)
   {
     load_options();
     return;
@@ -1215,7 +1328,7 @@ void flash::program_options()
   if(violation)
   {
     load_options();
-    fail(false, set_role::option_error);
+    fail(false, unit_[unit_role::option_error]);
     return;
   }
   state_.wrp = std::move(requested);
@@ -1223,7 +1336,8 @@ void flash::program_options()
 
 auto flash::option_locked() const -> bool
 {
-  return flag(false, set_role::option_lock);
+  auto const found = unit_.find(unit_role::option_lock);
+  return found and get(regs_, *found) != 0;
 }
 
 void flash::power_cut()
@@ -1428,10 +1542,11 @@ auto flash::rule_of(std::uint32_t at) const -> page_policy
   auto const top         = (1u << watermark_bits(ctx_.part.part)) - 1;
   auto const start       = first & top;
   auto const watermarked = start <= page and page <= (first >> 16 & top);
-  auto const hidden      = (second & hdp_enable) != 0
-                  and (regs_.peek(hide_word_) >> bank & 1u) != 0
-                  and start <= page
-                  and page <= (second >> 16 & top);
+  auto const hidden =
+      (second & hdp_enable) != 0
+      and get(regs_, unit_[bank == 0 ? unit_role::hide_bank1 : unit_role::hide_bank2]) != 0
+      and start <= page
+      and page <= (second >> 16 & top);
   policy.secure = policy.secure or watermarked;
   policy.hidden = hidden;
   return policy;
@@ -1465,7 +1580,7 @@ auto flash::secure_function() const -> bool
   {
     any = rule_of(at).secure;
   }
-  return any != (get(regs_, invert_) != 0);
+  return any != (get(regs_, unit_[unit_role::invert]) != 0);
 }
 
 auto flash::secure_word() const -> std::uint32_t
@@ -1495,13 +1610,14 @@ void flash::on_memory_read(region_desc const& region, address addr, std::uint8_t
 
 void flash::report_double_error(std::uint32_t line)
 {
-  if(get(regs_, ecc_detect_) != 0 or get(regs_, ecc_correct_) != 0)
+  if(get(regs_, unit_[unit_role::ecc_detect]) != 0
+     or get(regs_, unit_[unit_role::ecc_correct]) != 0)
   {
     return;
   }
-  update(regs_, ecc_address_, line - bank_base(line));
-  update(regs_, ecc_bank_, bank_of(line));
-  update(regs_, ecc_detect_, 1);
+  update(regs_, unit_[unit_role::ecc_address], line - bank_base(line));
+  update(regs_, unit_[unit_role::ecc_bank], bank_of(line));
+  update(regs_, unit_[unit_role::ecc_detect], 1);
   ctx_.nmi.raise();
 }
 
@@ -1532,16 +1648,17 @@ void flash::set_busy(bool on)
 
 void flash::set_waiting(bool on)
 {
-  update(regs_, field_of(false, set_role::waiting), on ? 1 : 0);
+  update(regs_, field_of(false, set_role::buffer_open), on ? 1 : 0);
   if(ctx_.trustzone)
   {
-    update(regs_, field_of(true, set_role::waiting), on ? 1 : 0);
+    update(regs_, field_of(true, set_role::buffer_open), on ? 1 : 0);
   }
 }
 
 auto flash::errors_pending(bool secure) const -> bool
 {
-  return std::ranges::any_of(error_roles, [&](set_role role) { return flag(secure, role); });
+  return std::ranges::any_of(error_roles, [&](set_role role) { return flag(secure, role); })
+      or (not secure and get(regs_, unit_[unit_role::option_error]) != 0);
 }
 
 void flash::interrupt()
@@ -1559,7 +1676,12 @@ void flash::interrupt()
 
 void flash::fail(bool secure, set_role role)
 {
-  update(regs_, field_of(secure, role), 1);
+  fail(secure, field_of(secure, role));
+}
+
+void flash::fail(bool secure, field_ref flagged)
+{
+  update(regs_, flagged, 1);
   if(flag(secure, set_role::error_irq))
   {
     update(regs_, field_of(secure, set_role::operation_error), 1);
@@ -1637,7 +1759,7 @@ auto flash::register_refused(std::uint32_t word, access_ctx ctx, bool write) -> 
       }
       return true;
     }
-    return not ctx.privileged and get(regs_, secure_privileged_) != 0;
+    return not ctx.privileged and get(regs_, (*privilege_)[privilege_role::secure]) != 0;
   }
   if(in(secure_blocks_))
   {
@@ -1659,7 +1781,7 @@ auto flash::register_refused(std::uint32_t word, access_ctx ctx, bool write) -> 
   {
     return false;
   }
-  return not ctx.privileged and get(regs_, nonsecure_privileged_) != 0;
+  return not ctx.privileged and get(regs_, (*privilege_)[privilege_role::nonsecure]) != 0;
 }
 
 auto flash::writable(std::uint32_t from, std::uint32_t length, bool secure, bool privileged) -> bool
@@ -1857,7 +1979,7 @@ void flash::start_erase(bool secure, std::uint32_t control)
       }
       return;
     }
-    target = bank_start(field(set_role::bank)) + page * page_size;
+    target = bank_start(field(set_role::bank_select)) + page * page_size;
     length = page_size;
     which  = operation::page_erase;
   }
@@ -1959,8 +2081,9 @@ void flash::check_latency(std::string_view trigger)
       range = source->active_level() + 1;
     }
   }
-  auto const latency  = get(regs_, latency_);
-  auto const required = required_wait_states(hclk, range, get(regs_, low_power_read_) != 0);
+  auto const latency = get(regs_, unit_[unit_role::latency]);
+  auto const required =
+      required_wait_states(hclk, range, get(regs_, unit_[unit_role::low_power_read]) != 0);
   if(required and latency >= *required)
   {
     return;
@@ -2081,7 +2204,7 @@ void flash::option_key_written(std::uint32_t, std::uint32_t now)
   if(armed and state_.option_first_key and now == option_key2)
   {
     state_.option_first_key = false;
-    update(regs_, field_of(false, set_role::option_lock), 0);
+    update(regs_, unit_[unit_role::option_lock], 0);
     return;
   }
   state_.option_first_key = false;
@@ -2110,9 +2233,9 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
     regs_.poke(control, old);
     return;
   }
-  auto const option_lock       = sets_[secure ? 1 : 0].fields.find(set_role::option_lock);
-  auto const option_field      = sets_[secure ? 1 : 0].fields.find(set_role::option_start);
-  auto const option_load_field = sets_[secure ? 1 : 0].fields.find(set_role::option_load);
+  auto const option_lock       = option_field(unit_role::option_lock, control);
+  auto const option_start_bit  = option_field(unit_role::option_start, control);
+  auto const option_load_field = option_field(unit_role::option_load, control);
   auto const erase_select      = [&](std::uint32_t word) {
     return of(set_role::page_erase, word)
         or of(set_role::bank1_erase, word)
@@ -2124,8 +2247,8 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
   auto const program_set  = of(set_role::program, now) and not of(set_role::program, old);
   auto const start_set    = of(set_role::start, now) and not of(set_role::start, old);
   auto const unlocked     = option_lock and option_lock->of(old) == 0;
-  auto const option_start = unlocked and option_field and option_field->of(now) != 0;
-  auto const waiting      = flag(false, set_role::waiting);
+  auto const option_start = unlocked and option_start_bit and option_start_bit->of(now) != 0;
+  auto const waiting      = flag(false, set_role::buffer_open);
   auto       sequence     = false;
   if(of(set_role::program, now) and erase_select(now) and (program_set or not erase_select(old)))
   {
@@ -2153,9 +2276,9 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
         option_lock->of(old) != 0 or option_lock->of(now) != 0 or of(set_role::lock, now);
     now = option_lock->with(now, relock ? 1 : 0);
   }
-  if(option_field)
+  if(option_start_bit)
   {
-    now = option_field->with(now, 0);
+    now = option_start_bit->with(now, 0);
   }
   if(option_load_field)
   {
@@ -2255,10 +2378,10 @@ void flash::privilege_written(std::uint32_t old, std::uint32_t now)
   auto allowed = 0u;
   if(access_.privileged)
   {
-    allowed |= nonsecure_privileged_.mask();
+    allowed |= (*privilege_)[privilege_role::nonsecure].mask();
     if(access_.secure)
     {
-      allowed |= secure_privileged_.mask();
+      allowed |= (*privilege_)[privilege_role::secure].mask();
     }
   }
   regs_.poke(written_word_, (now & allowed) | (old & ~allowed));
@@ -2299,9 +2422,10 @@ void flash::policy_written(std::uint32_t old, std::uint32_t now)
 
 void flash::ecc_written(std::uint32_t old, std::uint32_t now)
 {
-  auto const flags = ecc_detect_.mask() | ecc_correct_.mask();
-  regs_.poke(ecc_detect_.offset, (now & ~flags) | (old & flags & ~written_));
-  if(get(regs_, ecc_detect_) == 0)
+  auto const detect = unit_[unit_role::ecc_detect];
+  auto const flags  = detect.mask() | unit_[unit_role::ecc_correct].mask();
+  regs_.poke(detect.offset, (now & ~flags) | (old & flags & ~written_));
+  if(get(regs_, detect) == 0)
   {
     ctx_.nmi.lower();
   }
