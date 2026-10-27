@@ -83,7 +83,7 @@ source = "silicon read-back: GPIOI_MODER keeps 0x00FFFFFF of 0xFFFFFFFF"
 ```
 
 The rule takes the usual `ip` or `instances` selector, `registers` with an optional `each`
-range, the `fields` and a non-empty `source`. It carries no `width`, `on_write` or `on_read`.
+range, the `fields` and a non-empty `source`. It carries no `width`, `on_write`, `on_read` or `acc`.
 An `ip` selector picks the peripherals of that IP that are not aliases, `instances` must name
 such peripherals. Each named register and field must exist and no rule may drop a field twice.
 Otherwise the build raises `DescriptionError` with the rule's index. The fields leave the named
@@ -105,7 +105,7 @@ source = "RM0481 Rev 5, 44.5.3: the SVD spells the SMCR bits as SMS_2 and TS_2"
 
 `rename` maps each old name to its new one. The rule takes the usual selector, `registers` with an
 optional `each` range and a non-empty `source`. It carries no `fields`, `drop`, `width`,
-`on_write` or `on_read`. An `ip` selector picks the peripherals of that IP that are not aliases,
+`on_write`, `on_read` or `acc`. An `ip` selector picks the peripherals of that IP that are not aliases,
 `instances` must name such peripherals. The build raises `DescriptionError` with the rule's index
 when a register or a field is unknown, when the new name is already a field of the register, when
 a rule renames a field an earlier rule renamed, or when the rule names no field. The new spelling
@@ -128,12 +128,39 @@ source = "Silicon read-back on an STM32H573: TIM15_SMCR written 0xFFFFFFFF reads
 `add` holds the field `name`, its bit offset `lsb`, its `width`, its access `acc` and its `reset`
 value. The reset value lands in the register's reset word and marks those bits as known. The rule
 takes the usual selector, `registers` with an optional `each` range and a non-empty `source`. It
-carries no `fields`, `drop`, `rename`, `width`, `on_write` or `on_read`. The field is added to
+carries no `fields`, `drop`, `rename`, `width`, `on_write`, `on_read` or `acc`. The field is added to
 the named peripheral and each of its aliases, and a later rule names it. The build raises
 `DescriptionError` with the rule's index when the register is unknown, when the name is already a
 field of the register, when the bits overlap another field or leave the register, when the reset
 value does not fit the width, or when an earlier rule added the same field. The patch report
 counts the adds in `fields_added`.
+
+## Field effects
+
+An SVD can give a field the wrong size, write effect, read effect or access, such as the USB
+endpoint registers of the STM32H5, whose toggle bits the SVD calls write-only. A `[[fields]]` rule
+with any of `width`, `on_write`, `on_read` and `acc` sets them on existing fields:
+
+```toml
+[[fields]]
+ip = "USB"
+registers = ["USB_CHEP{n}R"]
+each = { n = [0, 7] }
+fields = ["STATTX", "DTOGTX", "STATRX", "DTOGRX"]
+acc = "read_write"
+on_write = "one_to_toggle"
+source = "RM0481 Rev 5, 61.6.7: STATTX, DTOGTX, STATRX and DTOGRX are read and toggled by writing 1"
+```
+
+`width` is a bit count, `on_write`, `on_read` and `acc` take the spellings of the description
+JSON, such as `zero_to_clear`, `clear` and `read_only`. The rule takes the usual selector,
+`registers` with an optional `each` range, the `fields` and a non-empty `source`. An `ip` selector
+picks the peripherals of that IP that are not aliases, `instances` must name such peripherals.
+Each value applies to the named peripheral and each of its aliases, so a secure alias keeps the
+fields of its base. The build raises `DescriptionError` with the rule's index when a register or a
+field is unknown, when an earlier rule set the same property of the same field, or when a new
+width leaves the register or overlaps another field. The patch report counts one
+`fields_touched` per property, field and peripheral or alias it sets.
 
 ## Shipped descriptions
 

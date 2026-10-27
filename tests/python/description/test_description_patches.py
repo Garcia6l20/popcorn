@@ -932,7 +932,7 @@ source = "probe"
     ]
     assert added.fields[1].on_write == WriteEffect.ONE_TO_CLEAR
     assert target_peripheral(target, "SEC_D").registers[1].fields[1].on_write == (
-        WriteEffect.MODIFY
+        WriteEffect.ONE_TO_CLEAR
     )
 
 
@@ -1545,6 +1545,37 @@ def test_a_field_drop_by_ip_drops_each_base_peripheral_once_and_its_aliases(
         assert target_peripheral(target, name).registers[0].fields == []
 
 
+_PATCH_EN = (
+    'instances = ["D"]\nregisters = ["CR"]\nfields = ["EN"]\nsource = "probe"\n'
+    'width = 3\non_write = "zero_to_clear"\non_read = "clear"\nacc = "read_only"'
+)
+
+
+@pytest.mark.parametrize("selector", ['instances = ["D"]', 'ip = "D"'])
+def test_a_field_patch_applies_to_the_peripheral_and_its_aliases_alike(
+    tmp_path: Path, selector: str
+) -> None:
+    target = _synthetic_target()
+    path = _field_drop_patch(tmp_path, _PATCH_EN.replace('instances = ["D"]', selector))
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fields_touched == 8
+    base = target_peripheral(target, "D")
+    alias = target_peripheral(target, "SEC_D")
+    patched = base.registers[0].fields[0]
+    assert (patched.width, patched.on_write.value, patched.on_read.value, patched.acc.value) == (
+        3,
+        "zero_to_clear",
+        "clear",
+        "read_only",
+    )
+    assert alias.registers == base.registers
+
+
+def test_a_field_patch_refuses_an_alias_instance(tmp_path: Path) -> None:
+    error = _drop_error(tmp_path, _PATCH_EN.replace('["D"]', '["SEC_D"]'))
+    assert error.key == "fields[0].instances"
+
+
 @pytest.mark.parametrize(
     ("rule", "key"),
     [
@@ -1671,7 +1702,7 @@ def test_a_rule_naming_the_new_spelling_after_a_rename_applies(tmp_path: Path) -
     later += 'source = "probe"'
     path = _field_drop_patch(tmp_path, _RENAME_EN, later)
     report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
-    assert (report.fields_renamed, report.fields_touched) == (1, 1)
+    assert (report.fields_renamed, report.fields_touched) == (1, 2)
 
 
 def test_a_field_rename_expands_a_register_template_over_each(tmp_path: Path) -> None:
@@ -1781,7 +1812,7 @@ def test_a_rule_naming_the_added_field_applies(tmp_path: Path) -> None:
     later = 'instances = ["D"]\nregisters = ["CR"]\nfields = ["X"]\non_write = "modify"\n'
     later += 'source = "probe"'
     _, report = _applied(tmp_path, _ADD_X, later)
-    assert (report.fields_added, report.fields_touched) == (1, 1)
+    assert (report.fields_added, report.fields_touched) == (1, 2)
 
 
 @pytest.mark.parametrize(
@@ -1878,3 +1909,34 @@ def test_a_fields_rule_on_one_element_of_a_dim_register_leaves_its_siblings(
     }
     untouched = ("modify", "none", 8)
     assert effects == {"ARR0": untouched, "ARR1": value, "ARR2": untouched, "ARR3": untouched}
+
+
+_ACC_EN = (
+    'instances = ["D"]\nregisters = ["CR"]\nfields = ["EN"]\nacc = "read_only"\nsource = "probe"'
+)
+
+
+def test_an_acc_rule_sets_the_access_of_its_fields(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    path = _field_drop_patch(tmp_path, _ACC_EN)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fields_touched == 2
+    for name in ("D", "SEC_D"):
+        [field] = target_peripheral(target, name).registers[0].fields
+        assert field.name == "EN"
+        assert field.acc == Access.READ_ONLY
+
+
+@pytest.mark.parametrize(
+    ("rules", "key"),
+    [
+        ((_ACC_EN, _ACC_EN), "fields[1].acc"),
+        ((_DROP_EN + '\nacc = "read_only"',), "fields[0].drop"),
+        ((_RENAME_EN + '\nacc = "read_only"',), "fields[0].rename"),
+        ((_ADD_X + '\nacc = "read_only"',), "fields[0].add"),
+    ],
+)
+def test_an_acc_rule_refuses_a_second_patch_and_a_drop_rename_or_add(
+    tmp_path: Path, rules: tuple[str, ...], key: str
+) -> None:
+    assert _drop_error(tmp_path, *rules).key == key

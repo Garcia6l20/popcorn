@@ -51,7 +51,6 @@ NO_IP_VERSION = {"ADCC", "CRS", "DBGMCU", "DLYBOS1", "DLYBSD1", "DLYBSD2", "EXTI
 """Peripherals with no CubeMX instance under any name, so their IP version stays empty."""
 
 NAMES_ONLY_IN_CMSIS = {
-    74: ("USB_FS_IRQn", "USB_DRD_FS_IRQn"),
     111: ("Cordic_IRQn", "CORDIC_IRQn"),
     113: ("DTS_WKUP_IRQn", "DTS_IRQn"),
 }
@@ -340,13 +339,13 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
         peripherals_dropped=1,
         ip_renamed=19,
         aliased=103,
-        fields_touched=104,
+        fields_touched=408,
         fields_dropped=48,
         fields_renamed=21,
         fields_added=2,
         cross_rules_added=847,
-        irqs_dropped=21,
-        irqs_added=26,
+        irqs_dropped=22,
+        irqs_added=27,
         sizes_set=1,
         registers_added=27,
         resets_set=37,
@@ -362,10 +361,16 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
             encoding="utf-8"
         )
     )
+    hash_rules = tomllib.loads(
+        next(path for path in h573_sources.patches if path.name == "stm32h5hash.toml").read_text(
+            encoding="utf-8"
+        )
+    )
     assert "irqs" not in rules
     assert len(family["irqs"]["add"]) == report.irqs_added
     assert len(family["irqs"]["drop"]) == report.irqs_dropped
-    assert len(rules["registers"]) + len(family["registers"]) == report.registers_added
+    assert "registers" not in rules
+    assert len(hash_rules["registers"]) + len(family["registers"]) == report.registers_added
     assert len(rules["memory"]["add"]) == report.regions_added
     assert len(family["peripherals"]["drop"]) == report.peripherals_dropped
 

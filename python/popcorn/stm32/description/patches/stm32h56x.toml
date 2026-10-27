@@ -1,5 +1,5 @@
 format = 1
-source = "Port I and the FLASH_OPTSR_CUR delivery value of the STM32H562, H563 and H573. RM0481 Rev 5 Table 5 maps GPIOI on these parts, Tables 6 and 7 of the STM32H523, H533, H543 and H553 do not. The TIM field and IRQ spellings of the STM32H562, H563 and H573 SVDs, whose TIM2 to TIM5, TIM12 and TIM15 carry MMS1, MMS2, SMS_2 and TS_2 where the STM32H523 SVD spells MMS, MMS_1, SMS_1 and TS_1. stm32h503.toml and stm32h533.toml rename the STM32H503 TIM2 and TIM3 and the STM32H533 TIM12 spellings. TIM1 and TIM8 IRQ 41, 43, 65 and 67: the SVD names them TIM1_BRK_TERR_IERR, TIM1_TRG_COM_DIR_IDX, IM8_BRK_TERR_IERR (a typo) and TIM8_TRG_COM_DIR_IDX, RM0481 Rev 5, 17.3 Table 152 names them TIM1_BRK, TIM1_TRG_COM, TIM8_BRK and TIM8_TRG_COM as the CMSIS IRQn_Type does, dropped and added again the same way."
+source = "Port I and the FLASH_OPTSR_CUR delivery value of the STM32H562, H563 and H573. RM0481 Rev 5 Table 5 maps GPIOI on these parts, Tables 6 and 7 of the STM32H523, H533, H543 and H553 do not. The TIM field and IRQ spellings of the STM32H562, H563 and H573 SVDs, whose TIM2 to TIM5, TIM12 and TIM15 carry MMS1, MMS2, SMS_2 and TS_2 where the STM32H523 SVD spells MMS, MMS_1, SMS_1 and TS_1. stm32h503.toml and stm32h533.toml rename the STM32H503 TIM2 and TIM3 and the STM32H533 TIM12 spellings. TIM1 and TIM8 IRQ 41, 43, 65 and 67: the SVD names them TIM1_BRK_TERR_IERR, TIM1_TRG_COM_DIR_IDX, IM8_BRK_TERR_IERR (a typo) and TIM8_TRG_COM_DIR_IDX, RM0481 Rev 5, 17.3 Table 152 names them TIM1_BRK, TIM1_TRG_COM, TIM8_BRK and TIM8_TRG_COM as the CMSIS IRQn_Type does, dropped and added again the same way. USB IRQ 74: the SVD names it USB_FS, RM0481 Rev 5, 17.3 Table 152 and the CMSIS IRQn_Type USB_DRD_FS, dropped and added again under that name at the same number, so the line has one name with and without the CMSIS header."
 
 [match]
 parts = ["STM32H562*", "STM32H563*", "STM32H573*"]
@@ -12,8 +12,9 @@ source = "The STM32H562, H563 and H573 SVDs derive SEC_LPUART1 from LPUART, not 
 renames = { DCACHE1 = ["DCACHE"], OCTOSPI1 = ["OCTOSPI"], I3C1 = ["I3C"], GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPIOF", "GPIOG", "GPIOH", "GPIOI"], GTZC = ["GTZC1_TZSC", "GTZC1_TZIC"], GTZC_NS = ["GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3"] }
 
 [irqs]
-drop = ["TIM1_BRK_TERR_IERR", "TIM1_TRG_COM_DIR_IDX", "IM8_BRK_TERR_IERR", "TIM8_TRG_COM_DIR_IDX", "DCACHE", "GPDMA1_CH0", "GPDMA1_CH1", "GPDMA1_CH2", "GPDMA1_CH3", "GPDMA1_CH4", "GPDMA1_CH5", "GPDMA1_CH6", "GPDMA1_CH7", "GPDMA2_CH0", "GPDMA2_CH1", "GPDMA2_CH2", "GPDMA2_CH3", "GPDMA2_CH4", "GPDMA2_CH5", "GPDMA2_CH6", "GPDMA2_CH7"]
+drop = ["USB_FS", "TIM1_BRK_TERR_IERR", "TIM1_TRG_COM_DIR_IDX", "IM8_BRK_TERR_IERR", "TIM8_TRG_COM_DIR_IDX", "DCACHE", "GPDMA1_CH0", "GPDMA1_CH1", "GPDMA1_CH2", "GPDMA1_CH3", "GPDMA1_CH4", "GPDMA1_CH5", "GPDMA1_CH6", "GPDMA1_CH7", "GPDMA2_CH0", "GPDMA2_CH1", "GPDMA2_CH2", "GPDMA2_CH3", "GPDMA2_CH4", "GPDMA2_CH5", "GPDMA2_CH6", "GPDMA2_CH7"]
 add = [
+  { number = 74, name = "USB_DRD_FS", peripheral = "USB" },
   { number = 41, name = "TIM1_BRK", peripheral = "TIM1" },
   { number = 43, name = "TIM1_TRG_COM", peripheral = "TIM1" },
   { number = 65, name = "TIM8_BRK", peripheral = "TIM8" },

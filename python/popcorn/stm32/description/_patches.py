@@ -138,6 +138,7 @@ class FieldsRule:
     instances: list[str] | None = field(default=None, metadata=_INSTANCE_SELECTOR)
     on_write: WriteEffect | None = None
     on_read: ReadEffect | None = None
+    acc: Access | None = None
     width: int | None = field(default=None, metadata={"minimum": 1, "maximum": 32})
     drop: bool | None = None
     rename: dict[str, str] | None = None
@@ -522,7 +523,16 @@ def _apply_fields(
     if rule.drop:
         _drop_fields(rule, targets, peripherals, suffixes, touched, report, file=file, key=key)
         return
+    if rule.instances is None:
+        targets = [target for target in targets if target.alias_of is None]
     for peripheral in targets:
+        if peripheral.alias_of is not None:
+            raise DescriptionError(
+                file,
+                0,
+                f"{key}.instances",
+                f"a peripheral that is not an alias, not {peripheral.name}",
+            )
         for register_template in rule.registers:
             for suffix in suffixes:
                 register_name = register_template.replace("{n}", suffix)
@@ -531,33 +541,26 @@ def _apply_fields(
                 )
                 for field_name in rule.fields or []:
                     field_desc = _find_field(register, field_name, file=file, key=f"{key}.fields")
-                    if rule.width is not None:
-                        marker = (peripheral.name, register.name, field_desc.name, "width")
+                    for prop in ("width", "on_write", "on_read", "acc"):
+                        value = getattr(rule, prop)
+                        if value is None:
+                            continue
+                        marker = (peripheral.name, register.name, field_desc.name, prop)
                         if marker in touched:
                             raise DescriptionError(
-                                file, 0, f"{key}.width", "a field not already patched"
+                                file, 0, f"{key}.{prop}", "a field not already patched"
                             )
                         touched.add(marker)
-                        _resize_field(register, field_desc, rule.width, file=file, key=key)
-                        report.fields_touched += 1
-                    if rule.on_write is not None:
-                        marker = (peripheral.name, register.name, field_desc.name, "on_write")
-                        if marker in touched:
-                            raise DescriptionError(
-                                file, 0, f"{key}.on_write", "a field not already patched"
-                            )
-                        touched.add(marker)
-                        field_desc.on_write = rule.on_write
-                        report.fields_touched += 1
-                    if rule.on_read is not None:
-                        marker = (peripheral.name, register.name, field_desc.name, "on_read")
-                        if marker in touched:
-                            raise DescriptionError(
-                                file, 0, f"{key}.on_read", "a field not already patched"
-                            )
-                        touched.add(marker)
-                        field_desc.on_read = rule.on_read
-                        report.fields_touched += 1
+                        for target in peripherals.values():
+                            if target is not peripheral and target.alias_of != peripheral.name:
+                                continue
+                            same = _find_register(target, register.name, file=file, key=key)
+                            same_field = _find_field(same, field_name, file=file, key=key)
+                            if prop == "width":
+                                _resize_field(same, same_field, value, file=file, key=key)
+                            else:
+                                setattr(same_field, prop, value)
+                            report.fields_touched += 1
 
 
 def _drop_fields(
@@ -571,8 +574,15 @@ def _drop_fields(
     file: str,
     key: str,
 ) -> None:
-    if rule.width is not None or rule.on_write is not None or rule.on_read is not None:
-        raise DescriptionError(file, 0, f"{key}.drop", "a rule with no width, on_write or on_read")
+    if (
+        rule.width is not None
+        or rule.on_write is not None
+        or rule.on_read is not None
+        or rule.acc is not None
+    ):
+        raise DescriptionError(
+            file, 0, f"{key}.drop", "a rule with no width, on_write, on_read or acc"
+        )
     if not rule.source:
         raise DescriptionError(file, 0, f"{key}.source", "a non-empty source")
     if rule.instances is None:
@@ -627,9 +637,13 @@ def _add_field(
         or rule.width is not None
         or rule.on_write is not None
         or rule.on_read is not None
+        or rule.acc is not None
     ):
         raise DescriptionError(
-            file, 0, f"{key}.add", "a rule with no fields, drop, rename, width, on_write or on_read"
+            file,
+            0,
+            f"{key}.add",
+            "a rule with no fields, drop, rename, width, on_write, on_read or acc",
         )
     if not rule.source:
         raise DescriptionError(file, 0, f"{key}.source", "a non-empty source")
@@ -716,9 +730,10 @@ def _rename_fields(
         or rule.width is not None
         or rule.on_write is not None
         or rule.on_read is not None
+        or rule.acc is not None
     ):
         raise DescriptionError(
-            file, 0, f"{key}.rename", "a rule with no fields, drop, width, on_write or on_read"
+            file, 0, f"{key}.rename", "a rule with no fields, drop, width, on_write, on_read or acc"
         )
     if not rule.source:
         raise DescriptionError(file, 0, f"{key}.source", "a non-empty source")

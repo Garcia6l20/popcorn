@@ -120,6 +120,18 @@ void machine::run_state::attach_peripherals()
         }
         slot->claimed[*word] = 1;
       }
+      for(auto const [first, last] : slot->model->served_ranges())
+      {
+        if(first % 4 != 0 or last % 4 != 0 or first > last or last / 4 > slot->layout.words())
+        {
+          throw config_error(
+              unit.name, 0, std::format("peripherals.{}.size", unit.name),
+              std::format(
+                  "a size holding the model's served range 0x{:x} to 0x{:x}, word aligned", first,
+                  last));
+        }
+        std::ranges::fill(slot->claimed.begin() + first / 4, slot->claimed.begin() + last / 4, 1);
+      }
       for(auto const& rule : unit.cross_rules)
       {
         auto const source = slot->layout.word_of(rule.reg);

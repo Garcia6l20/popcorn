@@ -48,7 +48,10 @@ A device is a C++ class bound with nanobind. The bindings module declares it:
 ```
 
 `claims()` of a model names its registers, `on_read` and `on_write` serve them, and
-`ctx.events.schedule_at` schedules work in virtual time. `save` and `load` carry the state a
+`ctx.events.schedule_at` schedules work in virtual time. A model that serves memory besides its
+registers, a packet buffer or a FIFO window, returns its byte ranges from `served_ranges()`:
+word-aligned offset pairs, first included and last excluded, inside the peripheral's size and
+clear of the registers it does not claim. Every access in them reaches `on_read` and `on_write`. `save` and `load` carry the state a
 snapshot keeps. `plugin/saved.hpp` holds the helpers both models of the example use. The C++
 API is documented in the [Plugin SDK reference](../reference/sdk/index.md).
 

@@ -88,3 +88,40 @@ def test_ship_refuses_to_write_without_out(
     status = main(["ship", "STM32U575QGIx", "--pin-data", str(tmp_path / "absent")])
     assert status == 1
     assert "--out is required" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", shipped_names())
+def test_every_alias_of_a_shipped_description_equals_its_base_register_by_register(
+    name: str,
+) -> None:
+    path = SHIPPED_DIR / f"{name}.json.xz"
+    data = cast(dict[str, object], json.loads(shipped_text(path.read_bytes(), file=str(path))))
+    peripherals = cast(list[dict[str, object]], data["peripherals"])
+    by_name = {cast(str, p["name"]): p for p in peripherals}
+    aliases = [p for p in peripherals if p.get("alias_of")]
+    assert aliases
+    for alias in aliases:
+        base = by_name[cast(str, alias["alias_of"])]
+        assert alias["registers"] == base["registers"], alias["name"]
+
+
+def test_the_shipped_h573_sec_usb_keeps_the_patched_usb_field_kinds() -> None:
+    path = SHIPPED_DIR / "STM32H573AIIx.json.xz"
+    data = cast(dict[str, object], json.loads(shipped_text(path.read_bytes(), file=str(path))))
+    peripherals = cast(list[dict[str, object]], data["peripherals"])
+    by_name = {cast(str, p["name"]): p for p in peripherals}
+    secure = by_name["SEC_USB"]
+    assert secure["alias_of"] == "USB"
+    kinds: dict[str, dict[str, tuple[object, object]]] = {}
+    for unit in ("USB", "SEC_USB"):
+        registers = cast(list[dict[str, object]], by_name[unit]["registers"])
+        kinds[unit] = {
+            f"{r['name']}.{f['name']}": (f.get("on_write"), f.get("acc"))
+            for r in registers
+            if cast(str, r["name"]) in {f"CHEP{n}R" for n in range(8)} | {"ISTR"}
+            for f in cast(list[dict[str, object]], r["fields"])
+        }
+    assert kinds["SEC_USB"] == kinds["USB"]
+    assert kinds["SEC_USB"]["CHEP3R.DTOGRX"] == ("one_to_toggle", "read_write")
+    assert kinds["SEC_USB"]["CHEP3R.VTRX"][0] == "zero_to_clear"
+    assert kinds["SEC_USB"]["ISTR.RST_DCON"][0] == "zero_to_clear"

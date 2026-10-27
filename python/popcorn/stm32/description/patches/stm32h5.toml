@@ -58,11 +58,28 @@ on_write = "zero_to_clear"
 source = "RM0481 Rev 5, 36.7.2 RNG status register (RNG_SR): SEIS and CEIS are rc_w0, writing 1 has no effect. ST's STM32H573 SVD gives plain read-write"
 
 [[fields]]
-instances = ["HASH"]
-registers = ["HASH_SR"]
-fields = ["NBWE", "NBWP"]
-width = 6
-source = "RM0481 Rev 5, 40.6.6 HASH status register (HASH_SR): NBWE[5:0] in bits 21:16 and NBWP[5:0] in bits 14:9. ST's STM32H573 SVD gives 5 bits each, and SHA3-224 needs NBWE 37"
+ip = "USB"
+registers = ["USB_CHEP{n}R"]
+each = { n = [0, 7] }
+fields = ["STATTX", "DTOGTX", "STATRX", "DTOGRX"]
+acc = "read_write"
+on_write = "one_to_toggle"
+source = "RM0481 Rev 5, 61.6.7 USB endpoint/channel n register (USB_CHEPnR): STATTX, DTOGTX, STATRX and DTOGRX are t, read and toggled by writing 1. ST's STM32H5 SVDs give write-only"
+
+[[fields]]
+ip = "USB"
+registers = ["USB_CHEP{n}R"]
+each = { n = [0, 7] }
+fields = ["VTTX", "VTRX", "NAK", "ERR_TX", "ERR_RX", "THREE_ERR_TX", "THREE_ERR_RX"]
+on_write = "zero_to_clear"
+source = "RM0481 Rev 5, 61.6.7 USB endpoint/channel n register (USB_CHEPnR): VTTX, VTRX, NAK, ERR_TX, ERR_RX, THREE_ERR_TX and THREE_ERR_RX are rc_w0. ST's STM32H5 SVDs give plain read-write"
+
+[[fields]]
+ip = "USB"
+registers = ["USB_ISTR"]
+fields = ["L1REQ", "ESOF", "SOF", "RST_DCON", "SUSP", "WKUP", "ERR", "PMAOVR", "THR512", "DDISC"]
+on_write = "zero_to_clear"
+source = "RM0481 Rev 5, 61.6.2 USB interrupt status register (USB_ISTR): L1REQ to DDISC are rc_w0. ST's STM32H5 SVDs give plain read-write"
 
 [[cross]]
 ip = "GPDMA"
@@ -118,263 +135,3 @@ content = [
   { offset = 0x018, data = [0xFA, 0x03] },
 ]
 packages = { "LQFP64" = 0x00, "WLCSP63" = 0x00, "VFQFPN68" = 0x01, "LQFP100" = 0x02, "UFBGA176+25" = 0x03, "LQFP144" = 0x04, "LQFP48" = 0x05, "UFBGA169" = 0x06, "LQFP176" = 0x07, "LQFP100 SMPS" = 0x0A, "UFBGA176+25 SMPS" = 0x0B, "LQFP144 SMPS" = 0x0C, "LQFP176 SMPS" = 0x0D, "UFBGA169 SMPS" = 0x0E, "UFQFPN48" = 0x10, "WLCSP39" = 0x11, "LQFP80" = 0x12, "UFBGA100" = 0x14, "UFBGA144" = 0x15, "LQFP144-EP" = 0x17, "LQFP100-EP" = 0x1E }
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR16"
-offset = 0x350
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR17"
-offset = 0x354
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR18"
-offset = 0x358
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR19"
-offset = 0x35c
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR20"
-offset = 0x360
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR21"
-offset = 0x364
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR22"
-offset = 0x368
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR23"
-offset = 0x36c
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR24"
-offset = 0x370
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR25"
-offset = 0x374
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR26"
-offset = 0x378
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR27"
-offset = 0x37c
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR28"
-offset = 0x380
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR29"
-offset = 0x384
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR30"
-offset = 0x388
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR31"
-offset = 0x38c
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR32"
-offset = 0x390
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR33"
-offset = 0x394
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR34"
-offset = 0x398
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR35"
-offset = 0x39c
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR36"
-offset = 0x3a0
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR37"
-offset = 0x3a4
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR38"
-offset = 0x3a8
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR39"
-offset = 0x3ac
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR40"
-offset = 0x3b0
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"
-
-[[registers]]
-peripheral = "HASH"
-name = "HASH_HR41"
-offset = 0x3b4
-width = 32
-reset = 0
-acc = "read_only"
-fields = [{ name = "Hx", lsb = 0, width = 32 }]
-source = "RM0481 Rev 5, 40.6.4 HASH digest registers: HASH_HRx at 0x310 + 0x4 * x, x = 5 to 41, SHAKE128 returns HR0 to HR41. ST's STM32H573 SVD stops at HASH_HR15"

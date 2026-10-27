@@ -22,12 +22,12 @@ TIM_RENAMES = {
     "STM32H573AIIx": 21,
 }
 IRQS_ADDED = {
-    "STM32H503RBTx": 2,
-    "STM32H523CETx": 3,
-    "STM32H533RETx": 1,
-    "STM32H562ZITx": 27,
-    "STM32H563ZITx": 27,
-    "STM32H573AIIx": 26,
+    "STM32H503RBTx": 3,
+    "STM32H523CETx": 4,
+    "STM32H533RETx": 2,
+    "STM32H562ZITx": 28,
+    "STM32H563ZITx": 28,
+    "STM32H573AIIx": 27,
 }
 
 
@@ -67,3 +67,24 @@ def test_every_h5_part_builds_from_its_own_svd(part: str, with_header: bool) -> 
     names = {p.name for p in description.peripherals}
     assert {"RCC", "FLASH", "GPIOA"} <= names
     assert not any(n.startswith("SEC_") and n[4:] not in names for n in names)
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("part", H56X_PARTS + OTHER_PARTS)
+def test_the_hash_registers_and_widths_apply_to_the_rm0481_parts_only(part: str) -> None:
+    try:
+        sources = find_sources(part)
+    except DescriptionError as exc:
+        pytest.skip(f"{part} sources not found: {exc}")
+    description = build_description(sources)
+    hash_block = next(p for p in description.peripherals if p.name == "HASH")
+    registers = {r.name: r for r in hash_block.registers}
+    status = {f.name: f.width for f in registers["SR"].fields}
+    if part == "STM32H503RBTx":
+        assert "HR16" not in registers
+        assert "HR41" not in registers
+        assert status["NBWE"] == 5
+    else:
+        assert registers["HR16"].offset == 0x350
+        assert registers["HR41"].offset == 0x3B4
+        assert status["NBWE"] == status["NBWP"] == 6
