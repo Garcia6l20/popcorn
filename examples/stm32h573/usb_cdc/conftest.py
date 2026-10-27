@@ -1,0 +1,24 @@
+"""MachineDescription of the usb_cdc example."""
+
+from pathlib import Path
+
+import popcorn
+import popcorn.pytest
+from popcorn.board import UsbHostOptions
+
+HERE = Path(__file__).parent
+
+USB_CDC = popcorn.MachineDescription(
+    name="usb-cdc",
+    part="STM32H573AIIx",
+    images=[popcorn.Elf(HERE / "prebuilt/usb_cdc.elf")],
+    boot=popcorn.Boot(until="main", budget=1_000_000),
+    board={
+        "USB": popcorn.Periph(host=UsbHostOptions()),
+    },
+)
+
+
+@popcorn.pytest.machine
+def usb_cdc() -> popcorn.MachineDescription:
+    return USB_CDC

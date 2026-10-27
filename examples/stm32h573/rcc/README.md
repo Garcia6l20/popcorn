@@ -1,10 +1,11 @@
 # RCC clock tree to 250 MHz, LL
 
 An STM32H573 application switches from the 32 MHz HSI reset clock to PLL1 at 250 MHz. It
-follows RM0481 section 11.4: regulator range VOS0, 5 flash wait states, HSI ready, then PLL1
-from HSI with M 2, N 31 and a fractional part of 2048/8192, so the VCO runs at 500 MHz and P 2
-gives SYSCLK. SYSCLK switches with HCLK divided by 2 first, then HCLK returns to SYSCLK, as the
-HAL does. Then SysTick counts milliseconds. The code uses LL only.
+follows RM0481 section 11.4: regulator range VOS0, 5 flash wait states with a programming delay
+of 2 (`WRHIGHFREQ`, RM0481 Table 48), HSI ready, then PLL1 from HSI with M 2, N 31 and a
+fractional part of 2048/8192, so the VCO runs at 500 MHz and P 2 gives SYSCLK. SYSCLK switches
+with HCLK divided by 2 first, then HCLK returns to SYSCLK. Then SysTick counts milliseconds.
+The code uses LL only.
 
 It ports `stm32u575/rcc`. The H5 has no EPOD booster: VOS0 takes its place, the HSI is divided
 by 2 at reset, and PLL1 takes a fractional N.

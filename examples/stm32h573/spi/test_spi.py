@@ -45,6 +45,12 @@ async def test_the_firmware_reads_the_jedec_id(spi: Machine) -> None:
     assert [jedec[index].value for index in range(3)] == AT25SF321_JEDEC
 
 
+async def test_the_programming_delay_matches_250_mhz(spi: Machine) -> None:
+    await run_flash_task(spi)
+    assert spi.periph.FLASH.FLASH_ACR.WRHIGHFREQ == 2
+    assert spi.periph.FLASH.FLASH_ACR.LATENCY == 5
+
+
 async def test_a_page_program_lands_in_the_flash_after_tpp(spi: Machine) -> None:
     times: dict[str, VirtualTime] = {}
     for hook in ("flash_page_program_sent", "flash_page_program_done"):

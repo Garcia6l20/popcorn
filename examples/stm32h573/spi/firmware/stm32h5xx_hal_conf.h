@@ -40,6 +40,6 @@
 #include "stm32h5xx_hal_spi.h"
 #include "stm32h5xx_hal_tim.h"
 
-#define assert_param(expr) ((void)(expr))
+#define assert_param(expr) ((void)sizeof(expr))
 
 #endif

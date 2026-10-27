@@ -63,6 +63,7 @@ static void SystemClock_Config(void)
       .APB2CLKDivider = RCC_HCLK_DIV1,
       .APB3CLKDivider = RCC_HCLK_DIV1,
   };
+  __HAL_FLASH_SET_PROGRAM_DELAY(FLASH_PROGRAMMING_DELAY_2);
   if(HAL_RCC_ClockConfig(&clocks, FLASH_LATENCY_5) != HAL_OK)
   {
     Error_Handler();

@@ -216,6 +216,7 @@ constexpr std::array<named_field<set_role>, 31> h5_set_fields{
 enum class unit_role : std::uint8_t
 {
   latency,
+  programming_delay,
   low_power_read,
   ecc_detect,
   ecc_correct,
@@ -232,9 +233,10 @@ enum class unit_role : std::uint8_t
   option_swap,
 };
 
-constexpr std::array<named_field<unit_role>, 15> u5_unit_fields{
+constexpr std::array<named_field<unit_role>, 16> u5_unit_fields{
     {
      {unit_role::latency, {"FLASH_ACR", "LATENCY"}},
+     {unit_role::programming_delay, {}},
      {unit_role::low_power_read, {"FLASH_ACR", "LPM"}},
      {unit_role::ecc_detect, {"FLASH_ECCR", "ECCD"}},
      {unit_role::ecc_correct, {"FLASH_ECCR", "ECCC"}},
@@ -252,9 +254,10 @@ constexpr std::array<named_field<unit_role>, 15> u5_unit_fields{
      }
 };
 
-constexpr std::array<named_field<unit_role>, 15> h5_unit_fields{
+constexpr std::array<named_field<unit_role>, 16> h5_unit_fields{
     {
      {unit_role::latency, {"FLASH_ACR", "LATENCY"}},
+     {unit_role::programming_delay, {"FLASH_ACR", "WRHIGHFREQ"}},
      {unit_role::low_power_read, {}},
      {unit_role::ecc_detect, {"FLASH_ECCDETR", "ECCD"}},
      {unit_role::ecc_correct, {"FLASH_ECCCORR", "ECCC"}},
@@ -675,6 +678,16 @@ struct u5_flash
   }
 
   /**
+   * @brief The STM32U5 has no programming delay field.
+   * @return Empty.
+   */
+  [[nodiscard]] static auto programming_delay(std::uint64_t, std::uint32_t)
+      -> std::optional<std::uint32_t>
+  {
+    return std::nullopt;
+  }
+
+  /**
    * @brief FLASH_ECCR.ADDR_ECC of a failing quad-word, its byte offset in its bank.
    * @param line Physical address of the quad-word.
    * @param bank_base Physical address of its bank.
@@ -942,6 +955,21 @@ struct h5_flash
       -> std::optional<std::uint32_t>
   {
     return first_wait_states(vos_read_max_mhz[range - 1], hclk);
+  }
+
+  /**
+   * @brief Least FLASH_ACR.WRHIGHFREQ RM0481 Table 48 asks for: 0 up to 1 wait state, 1 for 2 and
+   *        3, 2 for 4 and 5.
+   * @param hclk HCLK in Hz.
+   * @param range VOS level plus 1, 1 for VOS0 to 4 for VOS3.
+   * @return The least WRHIGHFREQ, empty when HCLK is above the maximum of the level.
+   */
+  [[nodiscard]] static auto programming_delay(std::uint64_t hclk, std::uint32_t range)
+      -> std::optional<std::uint32_t>
+  {
+    return first_wait_states(vos_read_max_mhz[range - 1], hclk).transform([](std::uint32_t ws) {
+      return ws / 2;
+    });
   }
 
   /**
@@ -1412,6 +1440,8 @@ private:
   void                      load_options();
   void                      program_options();
   void                      check_latency(std::string_view trigger);
+  void                      check_programming_delay(std::string_view trigger);
+  [[nodiscard]] auto        active_range() const -> std::uint32_t;
 
   flash_options                                                     options_;
   register_file&                                                    regs_;
@@ -1422,6 +1452,7 @@ private:
   irq_line*                                                         secure_line_{};
   core::clock_domain                                                hclk_;
   std::set<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>> latency_logged_;
+  std::set<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>> delay_logged_;
   std::vector<std::uint32_t>                                        watched_;
   std::uint32_t                                                     written_{};
   std::uint32_t                                                     written_word_{};
@@ -2768,6 +2799,10 @@ auto flash_model<Traits>::on_memory_write(
       .dma     = ctx.by == initiator::dma};
   auto const attrs = static_cast<std::uint8_t>(
       (secure ? held_secure : 0u) | (ctx.privileged ? held_privileged : 0u));
+  if(field_of(secure, set_role::program).of(one.control) != 0)
+  {
+    check_programming_delay("on a flash store with PG set");
+  }
   if(busy())
   {
     hold(one, attrs);
@@ -2946,6 +2981,7 @@ void flash_model<Traits>::start(
 template <typename Traits> void flash_model<Traits>::start_erase(bool secure, std::uint32_t control)
 {
   auto const register_name = Traits::set_registers[secure ? 1 : 0].control;
+  check_programming_delay("on an erase START");
   if(storage_ == nullptr)
   {
     warn(register_name, "erase requested, but no flash region names FLASH as its controller");
@@ -3066,13 +3102,8 @@ template <typename Traits> auto flash_model<Traits>::hsi16_held() const -> bool
          });
 }
 
-template <typename Traits> void flash_model<Traits>::check_latency(std::string_view trigger)
+template <typename Traits> auto flash_model<Traits>::active_range() const -> std::uint32_t
 {
-  auto const hclk = ctx_.clock.hz(hclk_);
-  if(hclk == 0)
-  {
-    return;
-  }
   std::uint32_t range = 1;
   for(auto* const peer : ctx_.peers.all())
   {
@@ -3081,6 +3112,51 @@ template <typename Traits> void flash_model<Traits>::check_latency(std::string_v
       range = source->active_level() + 1;
     }
   }
+  return range;
+}
+
+template <typename Traits>
+void flash_model<Traits>::check_programming_delay(std::string_view trigger)
+{
+  auto const field = unit_.find(unit_role::programming_delay);
+  if(not field)
+  {
+    return;
+  }
+  auto const hclk = ctx_.clock.hz(hclk_);
+  if(hclk == 0)
+  {
+    return;
+  }
+  auto const range    = active_range();
+  auto const required = Traits::programming_delay(hclk, range);
+  auto const delay    = get(regs_, *field);
+  if(not required or delay >= *required)
+  {
+    return;
+  }
+  if(delay_logged_.emplace(hclk, range, delay).second or ctx_.strict_peripherals)
+  {
+    warn(
+        "FLASH_ACR", std::format(
+                         "{}: WRHIGHFREQ {} is below the {} {} asks for HCLK {} Hz in voltage "
+                         "range {}, silicon would program out of timing",
+                         trigger, delay, *required, Traits::latency_section, hclk, range));
+  }
+  if(ctx_.strict_peripherals)
+  {
+    throw model_error(desc_.name, "FLASH_ACR", reg("FLASH_ACR").offset);
+  }
+}
+
+template <typename Traits> void flash_model<Traits>::check_latency(std::string_view trigger)
+{
+  auto const hclk = ctx_.clock.hz(hclk_);
+  if(hclk == 0)
+  {
+    return;
+  }
+  auto const range   = active_range();
   auto const latency = get(regs_, unit_[unit_role::latency]);
   auto const required =
       Traits::wait_states(hclk, range, unit_value(unit_role::low_power_read) != 0);
@@ -3132,6 +3208,7 @@ template <typename Traits> void flash_model<Traits>::load(std::span<std::byte co
   }
   option_changed_.clear();
   latency_logged_.clear();
+  delay_logged_.clear();
   sync_watches();
 }
 

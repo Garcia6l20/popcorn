@@ -8,7 +8,7 @@ WFI while the DMA feeds the USART.
 UART9 runs from PCLK1 at the 32 MHz reset clock: a frame lasts 10 * BRR / PCLK1. The frame check
 allows 1 ns.
 
-The whole run executes a few thousand translated blocks, the WFI wait sleeping between DMA and
+The whole run executes about 1050 translated blocks, the WFI wait sleeping between DMA and
 UART interrupts. Busy-polling the UART for the 3.85 ms the 352 frames take would run tens of
 thousands of blocks at 32 MHz, so the block count bound shows the CPU asleep.
 

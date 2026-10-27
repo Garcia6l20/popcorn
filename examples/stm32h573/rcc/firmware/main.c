@@ -27,6 +27,10 @@ static void SystemClock_Config(void)
   while(LL_FLASH_GetLatency() != LL_FLASH_LATENCY_5)
   {
   }
+  MODIFY_REG(FLASH->ACR, FLASH_ACR_WRHIGHFREQ, FLASH_ACR_WRHIGHFREQ_1);
+  while(READ_BIT(FLASH->ACR, FLASH_ACR_WRHIGHFREQ) != FLASH_ACR_WRHIGHFREQ_1)
+  {
+  }
 
   LL_RCC_HSI_SetDivider(LL_RCC_HSI_DIV_2);
   while(LL_RCC_HSI_IsDividerReady() == 0)

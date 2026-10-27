@@ -58,9 +58,10 @@ auto snb(std::uint32_t sector) -> std::uint32_t
   return sector << 6;
 }
 
-auto options_for(stm32::board const& board) -> core::machine_options
+auto options_for(stm32::board const& board, bool strict = false) -> core::machine_options
 {
-  auto options = popcorn::testing::stm32_options();
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = strict;
   for(auto& [name, factory] : stm32::factories(board, h573()))
   {
     options.models.emplace(name, std::move(factory));
@@ -74,8 +75,11 @@ struct rig
   std::vector<core::log_record> logged{};
   core::hook_handle             sink{};
 
-  explicit rig(stm32::board const& board = {}, std::string_view image = firmware)
-      : f{h573(), image, options_for(board)}
+  explicit rig(
+      stm32::board const& board  = {},
+      std::string_view    image  = firmware,
+      bool                strict = false)
+      : f{h573(), image, options_for(board, strict)}
   {
     sink = f.target->add_log_sink(
         [this](core::log_record const& record) { logged.push_back(record); });
@@ -192,6 +196,20 @@ struct rig
     REQUIRE(
         f.run_to_stop({.max_instructions = icount{50'000'000}, .until_time = until}).reason
         == stop_reason::time);
+  }
+
+  void guest_store(address to, std::uint32_t value) const
+  {
+    constexpr address stub = 0x2000'0200;
+    REQUIRE(f.target->mem().write(stub, 4, 0xE7FE'6001).has_value());
+    f.set("r0", to);
+    f.set("r1", value);
+    f.set("pc", stub | 1u);
+    auto const until = vtime{f.target->virtual_clock().time().ps + us};
+    auto const result =
+        f.target->run_slice({.max_instructions = icount{1'000'000}, .until_time = until});
+    REQUIRE(result.stopped.has_value());
+    REQUIRE(result.stopped->reason == stop_reason::time);
   }
 
   [[nodiscard]] auto now() const -> std::uint64_t
@@ -579,6 +597,144 @@ TEST_CASE("RM0481 Table 48: the bootloader's VOS0 250 MHz LATENCY 5 is enough an
   r.write("FLASH_ACR", 4);
   REQUIRE(r.warnings("FLASH_ACR") == 1);
   CHECK(r.logged.back().message.find("RM0481 Table 48") != std::string::npos);
+}
+
+namespace
+{
+constexpr std::uint32_t wrhighfreq_1 = 1u << 4;
+constexpr std::uint32_t wrhighfreq_2 = 2u << 4;
+constexpr std::uint32_t latency_5    = 5;
+
+auto delay_warnings(rig const& r) -> std::size_t
+{
+  return static_cast<std::size_t>(
+      std::ranges::count_if(r.logged, [](core::log_record const& record) {
+        return record.reg == "FLASH_ACR" and record.message.contains("WRHIGHFREQ");
+      }));
+}
+
+void set_field(
+    rig const&       r,
+    std::string_view peripheral,
+    std::string_view reg,
+    std::string_view name,
+    std::uint32_t    value)
+{
+  auto const& desc  = r.f.target->peripheral(peripheral).description();
+  auto const* found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
+  auto const bits = std::ranges::find(found->fields, name, &popcorn::field_desc::name);
+  REQUIRE(bits != found->fields.end());
+  auto const mask = ((std::uint32_t{1} << bits->width) - 1u) << bits->lsb;
+  auto const at   = desc.base + found->offset;
+  auto const old  = r.word(at);
+  REQUIRE(r.f.target->mem().write(at, 4, (old & ~mask) | (value << bits->lsb)).has_value());
+}
+
+auto store_warnings(rig& r, address to, std::uint32_t acr) -> std::size_t
+{
+  r.logged.clear();
+  r.write("FLASH_ACR", acr);
+  r.guest_store(to, 1);
+  return delay_warnings(r);
+}
+}
+
+TEST_CASE("RM0481 Table 48: a PG store at 250 MHz with WRHIGHFREQ 1 warns once")
+{
+  rig r{{}, "h573_rcc_ll"};
+  REQUIRE(r.f.target->virtual_clock().core_hz() == 250'000'000);
+  REQUIRE(r.field("FLASH_ACR", "WRHIGHFREQ") == 2);
+  r.unlock();
+  r.control(pg);
+  r.logged.clear();
+  r.guest_store(sector2, 1);
+  CHECK(delay_warnings(r) == 0);
+  r.write("FLASH_ACR", latency_5 | wrhighfreq_1);
+  r.guest_store(sector2 + 4, 2);
+  REQUIRE(delay_warnings(r) == 1);
+  CHECK(r.logged.back().message.contains("RM0481 Table 48"));
+  CHECK(r.logged.back().message.contains("WRHIGHFREQ 1 is below the 2"));
+  r.guest_store(sector2 + 8, 3);
+  CHECK(delay_warnings(r) == 1);
+  r.write("FLASH_ACR", latency_5 | wrhighfreq_2);
+  r.guest_store(sector2 + 12, 4);
+  CHECK(delay_warnings(r) == 1);
+}
+
+TEST_CASE("RM0481 Table 48: an erase START at 250 MHz with WRHIGHFREQ 1 warns once")
+{
+  rig r{{}, "h573_rcc_ll"};
+  r.unlock();
+  r.logged.clear();
+  r.control(ser | snb(2) | bksel | strt);
+  CHECK(delay_warnings(r) == 0);
+  r.run_for(30'000 * us);
+  r.clear();
+  r.write("FLASH_ACR", latency_5 | wrhighfreq_1);
+  r.control(ser | snb(3) | bksel | strt);
+  REQUIRE(delay_warnings(r) == 1);
+  CHECK(r.logged.back().message.contains("WRHIGHFREQ 1 is below the 2"));
+}
+
+TEST_CASE("RM0481 Table 48: WRHIGHFREQ 0 is enough at 32 MHz in VOS3")
+{
+  rig r;
+  REQUIRE(r.field("FLASH_ACR", "WRHIGHFREQ") == 1);
+  r.write("FLASH_ACR", 3);
+  r.unlock();
+  r.logged.clear();
+  r.control(pg);
+  r.guest_store(sector2, 1);
+  r.write("FLASH_ACR", 3);
+  CHECK(delay_warnings(r) == 0);
+}
+
+TEST_CASE("RM0481 Table 48: the WRHIGHFREQ rows split after 1 and 3 wait states")
+{
+  constexpr std::uint32_t latency_3 = 3;
+  {
+    rig r;
+    REQUIRE(r.field("FLASH_ACR", "LATENCY") == latency_3);
+    set_field(r, "RCC", "RCC_CR", "HSIDIV", 0);
+    r.run_for(1'000 * us);
+    REQUIRE(r.f.target->virtual_clock().core_hz() == 64'000'000);
+    r.unlock();
+    r.control(pg);
+    CHECK(store_warnings(r, sector2, latency_3 | wrhighfreq_1) == 0);
+    CHECK(store_warnings(r, sector2 + 4, latency_3) == 1);
+    CHECK(r.logged.back().message.contains("WRHIGHFREQ 0 is below the 1"));
+  }
+  rig r{{}, "h573_rcc_ll"};
+  set_field(r, "RCC", "RCC_CFGR2", "HPRE", 0b1000);
+  REQUIRE(r.f.target->virtual_clock().core_hz() == 125'000'000);
+  r.unlock();
+  r.control(pg);
+  CHECK(store_warnings(r, sector2, latency_5 | wrhighfreq_1) == 0);
+  CHECK(store_warnings(r, sector2 + 4, latency_5) == 1);
+  CHECK(r.logged.back().message.contains("WRHIGHFREQ 0 is below the 1"));
+  set_field(r, "PWR", "PWR_VOSCR", "VOS", 0b01);
+  r.run_for(1'000 * us);
+  REQUIRE(r.f.field("PWR", "PWR_VOSSR", "ACTVOS") == 0b01);
+  CHECK(store_warnings(r, sector2 + 8, latency_5 | wrhighfreq_1) == 1);
+  CHECK(r.logged.back().message.contains("WRHIGHFREQ 1 is below the 2"));
+}
+
+TEST_CASE("under strict_peripherals a PG store or an erase START below Table 48 raises model_error")
+{
+  rig r{{}, "h573_rcc_ll", true};
+  r.write("FLASH_ACR", latency_5 | wrhighfreq_1);
+  r.unlock();
+  r.control(pg);
+  CHECK_THROWS_AS(r.guest_store(sector2, 1), popcorn::model_error);
+  CHECK_THROWS_AS(r.guest_store(sector2 + 4, 1), popcorn::model_error);
+  CHECK(delay_warnings(r) == 2);
+  r.control(0);
+  CHECK_THROWS_AS(
+      static_cast<void>(
+          r.f.target->mem().write(r.at("FLASH_NSCR"), 4, ser | snb(2) | bksel | strt)),
+      popcorn::model_error);
+  CHECK(delay_warnings(r) == 3);
 }
 
 TEST_CASE("H573 silicon: 16-bit stores fill the write buffer, NSSR holds WBNE only, FW programs it")

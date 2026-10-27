@@ -37,6 +37,6 @@
 #include "stm32h5xx_hal_rcc.h"
 #include "stm32h5xx_hal_uart.h"
 
-#define assert_param(expr) ((void)(expr))
+#define assert_param(expr) ((void)sizeof(expr))
 
 #endif

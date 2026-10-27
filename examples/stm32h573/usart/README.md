@@ -22,7 +22,8 @@ uv run pytest -q examples/stm32h573/usart
 - `test_usart.py`: `machine.periph.UART9.port` is the far end of the UART. `read_frames`
   returns each frame with the virtual time it ended, and the banner test checks the frame
   spacing against the rate BRR gives, read back through `machine.periph.UART9.BRR`. The pin test
-  reads GPIOG MODER and AFRL. `write` sends the host's line, and `read` collects the echo.
+  reads GPIOG MODER and AFRL, and IDR following a driven PG0. `write` sends the host's line,
+  and `read` collects the echo.
 - `firmware/main.c`: the `_write` retarget, the receive-to-idle loop and the echo.
 - `firmware/stm32h5xx_hal_msp.c`: the UART9 clock and the PG0 and PG1 pins.
 

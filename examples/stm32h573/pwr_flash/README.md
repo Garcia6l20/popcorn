@@ -1,14 +1,15 @@
 # Voltage scaling, flash wait states, sector erase and program, LL
 
 An STM32H573 application raises its clock from the 32 MHz HSI reset clock to 250 MHz, in the
-order RM0481 section 11.4 gives: regulator range VOS0, 5 flash wait states, then PLL1 from the
-HSI as SYSCLK, and the instruction cache on. Then it programs its own flash with plain register
-accesses, as RM0481 sections 7.3.5 and 7.3.6 describe: unlock FLASH_NSCR, erase the last
-sector of bank 2 with SER, SNB, BKSEL and START, program one quad-word with PG and four word
-stores, wait for BSY each time. EOP stays set after the erase until `FLASH_NSCCR.CLR_EOP`
-clears it. A last store into flash without PG shows the PGSERR flag. Last, it reads the device
-electronic signature of RM0481 section 67 with `LL_GetFlashSize`, `LL_GetPackageType` and the
-`LL_GetUID_Word` calls. The code uses LL and CMSIS only.
+order RM0481 section 11.4 gives: regulator range VOS0, 5 flash wait states and a programming
+delay of 2 (`WRHIGHFREQ`, RM0481 Table 48), then PLL1 from the HSI as SYSCLK, and the
+instruction cache on. Then it programs its own flash with plain register accesses, as RM0481
+sections 7.3.5 and 7.3.6 describe: unlock FLASH_NSCR, erase the last sector of bank 2 with SER,
+SNB, BKSEL and START, program one quad-word with PG and four word stores, wait for BSY each
+time. EOP stays set after the erase until `FLASH_NSCCR.CLR_EOP` clears it. A last store into
+flash without PG shows the PGSERR flag. Last, it reads the device electronic signature of
+RM0481 section 67 with `LL_GetFlashSize`, `LL_GetPackageType` and the `LL_GetUID_Word` calls.
+The code uses LL and CMSIS only.
 
 It ports `stm32u575/pwr_flash`. The H5 erases 8 KB sectors with SER and SNB where the U5 erases
 pages with PER and PNB, takes the flags back through `FLASH_NSCCR`, sets EOP without an

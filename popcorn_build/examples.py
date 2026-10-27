@@ -102,12 +102,12 @@ def offset_linker_script(text: str, offset: int) -> str:
     flash, and the input section `.app_header` placed first, ahead of the vector table.
 
     @throws ValueError @p offset is not a positive multiple of 1 KiB, or the script has no single
-    ROM region at 0x08000000 or no single `KEEP(*(.isr_vector))`.
+    ROM or FLASH region at 0x08000000 or no single `KEEP(*(.isr_vector))`.
     """
     if offset <= 0 or offset % 1024:
         raise ValueError(f"a flash offset is a positive multiple of 1 KiB, not {offset:#x}")
     if len(ROM_REGION.findall(text)) != 1:
-        raise ValueError("the linker script has no single ROM region at 0x08000000")
+        raise ValueError("the linker script has no single ROM or FLASH region at 0x08000000")
     if len(VECTORS.findall(text)) != 1:
         raise ValueError("the linker script has no single KEEP(*(.isr_vector))")
     text = VECTORS.sub(lambda match: f"{match[1]}KEEP(*(.app_header))\n{match[1]}{match[2]}", text)
@@ -301,7 +301,8 @@ def add_example_firmware(
     HAL modules @p hal with the ones every HAL project needs, the LL modules @p ll, and with
     @p freertos the FreeRTOS kernel on its non-secure Cortex-M33 port and heap_4, and with
     @p tinyusb the TinyUSB device stack, the device driver of @p chipset and the device class
-    drivers named, such as `cdc` and `hid`. Headers are looked up in @p example_dir/firmware
+    drivers named, such as `cdc` and `hid`. A TinyUSB firmware compiles with `-fasm`, which the
+    `asm` keyword of the FSDEV driver needs. Headers are looked up in @p example_dir/firmware
     first, where a TinyUSB firmware keeps its `tusb_config.h`.
 
     @param flash_offset Link the image this many bytes into flash, as an application behind a
@@ -367,6 +368,8 @@ def add_example_firmware(
             *defines,
         ]
     )
+    if tinyusb:
+        target.private.compile_flags.append("-fasm")
     return elf, target
 
 

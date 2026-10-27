@@ -238,7 +238,9 @@ TEST_CASE("a double-buffered bulk IN sends the two buffers by DTOGTX")
   CHECK(r.get("CHEP4R", "STATTX") == valid);
 }
 
-TEST_CASE("the first double-buffered transaction after EPKIND changes NAKs, later ones keep VALID")
+TEST_CASE(
+    "the first double-buffered transaction after EPKIND or UTYPE changes NAKs, later ones keep "
+    "VALID")
 {
   rig const  r;
   auto const plain = [&] {

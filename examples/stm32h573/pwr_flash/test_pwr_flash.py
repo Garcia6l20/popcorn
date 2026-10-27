@@ -109,6 +109,7 @@ async def test_too_few_wait_states_at_250_mhz_fail_a_strict_run(pwr_flash: Machi
     store that raised it stays: FLASH_ACR.LATENCY reads 1 afterwards."""
     await run_to(pwr_flash, "flash_done")
     assert pwr_flash.periph.FLASH.FLASH_ACR.LATENCY == 5
+    assert pwr_flash.periph.FLASH.FLASH_ACR.WRHIGHFREQ == 2
     pc, sp = pwr_flash.pc, pwr_flash.reg.sp
 
     with pytest.raises(ModelError, match="FLASH"):

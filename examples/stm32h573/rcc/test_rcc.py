@@ -16,6 +16,7 @@ pytestmark = pytest.mark.popcorn(budget=2_000_000)
 SYSCLK_HZ = 250_000_000
 SWS_PLL1 = 3
 FLASH_LATENCY = 5
+PROGRAMMING_DELAY = 2
 
 
 def timestamps(machine: Machine, function: str) -> list[VirtualTime]:
@@ -47,6 +48,7 @@ async def test_voltage_range_and_wait_states_are_set_before_the_clock_is_raised(
     assert rcc.periph.PWR.PWR_VOSCR.VOS == 3
     assert rcc.periph.PWR.PWR_VOSSR.VOSRDY == 1
     assert rcc.periph.FLASH.FLASH_ACR.LATENCY == FLASH_LATENCY
+    assert rcc.periph.FLASH.FLASH_ACR.WRHIGHFREQ == PROGRAMMING_DELAY
 
 
 async def test_hsi_is_ready_before_pll1_locks(rcc: Machine) -> None:

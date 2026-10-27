@@ -136,7 +136,10 @@ Not modelled on the STM32H5:
 
 - OBK key storage, the high-cycle data area, OTP and read-only area programming, the HDPL
   levels and FLASH_HDPEXTR. Their registers are storage.
-- FLASH_ACR.WRHIGHFREQ is storage, only LATENCY is checked against RM0481 Table 48.
+- The effect of FLASH_ACR.WRHIGHFREQ on programming: a program or erase takes its datasheet time
+  whatever the delay. A WRHIGHFREQ below RM0481 Table 48 for the current HCLK and voltage range
+  warns once per HCLK, range and value at an erase START or a store with PG set, and raises a
+  model error under `strict`. LATENCY is checked against the same table.
 
 Differs from RM0481:
 

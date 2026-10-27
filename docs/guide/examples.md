@@ -205,13 +205,13 @@ The same layout on the STM32H573. Each example ports its STM32U575 namesake and 
 
 HSI to a 250 MHz PLL1 with a fractional N, VOS0 and 5 wait states, LL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/rcc).
 
---8<-- "stm32h573/rcc/README.md:3:10"
+--8<-- "stm32h573/rcc/README.md:3:11"
 
 ### h573 pwr_flash
 
 Voltage scaling, flash wait states, sector erase and program, LL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/pwr_flash).
 
---8<-- "stm32h573/pwr_flash/README.md:3:15"
+--8<-- "stm32h573/pwr_flash/README.md:3:16"
 
 ### h573 usart
 
@@ -230,3 +230,9 @@ SPI NOR flash on SPI4 from FreeRTOS and GPDMA, behind a bootloader offset. [Sour
 UART9 TX over GPDMA, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/gpdma).
 
 --8<-- "stm32h573/gpdma/README.md:3:12"
+
+### h573 usb_cdc
+
+CDC ACM device on the USB full-speed controller enumerated by a virtual host, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/usb_cdc).
+
+--8<-- "stm32h573/usb_cdc/README.md:3:12"

@@ -56,7 +56,7 @@ def test_a_flash_offset_is_a_positive_multiple_of_1_kib(offset: int) -> None:
 
 
 def test_a_script_without_the_st_rom_region_is_refused() -> None:
-    with pytest.raises(ValueError, match="no single ROM region"):
+    with pytest.raises(ValueError, match="no single ROM or FLASH region"):
         offset_linker_script(ST_MEMORY.replace("0x08000000", "0x08100000"), 0xC000)
 
 
