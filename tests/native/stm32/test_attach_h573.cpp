@@ -29,13 +29,13 @@ constexpr auto attached = std::to_array<std::string_view>({
     "SPI4",   "SPI5",   "SPI6",   "TAMP",  "TIM1",   "TIM12",  "TIM13",  "TIM14",   "TIM15",
     "TIM16",  "TIM17",  "TIM2",   "TIM3",  "TIM4",   "TIM5",   "TIM6",   "TIM7",    "TIM8",
     "UART12", "UART4",  "UART5",  "UART7", "UART8",  "UART9",  "USART1", "USART10", "USART11",
-    "USART2", "USART3", "USART6",
+    "USART2", "USART3", "USART6", "USB",
 });
 
 constexpr auto matched_without_model = std::to_array<std::string_view>(
     {"GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3", "GTZC1_TZIC", "GTZC1_TZSC"});
 
-constexpr auto without_row = std::to_array<std::string_view>({"SBS", "USB"});
+constexpr auto without_row = std::to_array<std::string_view>({"SBS"});
 
 constexpr std::uint32_t sram_end = 0x2000'0000 + 640 * 1024;
 

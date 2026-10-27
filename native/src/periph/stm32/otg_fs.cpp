@@ -1235,16 +1235,13 @@ void otg_fs::on_event(std::uint32_t kind, std::uint64_t payload)
 
 void otg_fs::save(std::vector<std::byte>& out) const
 {
-  auto saved = state_;
-  save_host(saved.link.host);
-  reflex::serde::bson::serializer{out}.dump(saved);
+  save_with_host(state_, out);
 }
 
 void otg_fs::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
-  load_host();
-  link(false);
+  loaded();
 }
 
 void otg_fs::bus_reset(vtime at)
@@ -1640,12 +1637,6 @@ void otg_fs::resume(vtime)
 
 auto otg_fs_factory(board const& b) -> model_factory
 {
-  return [hosts = b.usb_hosts](
-             model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    auto const found = hosts.find(desc.name);
-    return std::make_shared<otg_fs>(
-        ctx, desc,
-        found == hosts.end() ? std::nullopt : std::optional<usb_host_options>{found->second});
-  };
+  return usb_device_factory<otg_fs>(b);
 }
 }

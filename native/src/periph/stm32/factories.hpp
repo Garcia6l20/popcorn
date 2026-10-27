@@ -149,6 +149,12 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto otg_fs_factory(board const& b) -> model_factory;
 
 /**
+ * @brief Factory of the USB full-speed device controller model of the STM32H5, RM0481 section 61.
+ * @param b Board whose `usb_hosts` gives each instance its virtual host, copied.
+ */
+[[nodiscard]] auto usb_drd_factory(board const& b) -> model_factory;
+
+/**
  * @brief Factory of the ADC1 model, RM0456 section 33.
  * @param supply Board supplies, VDDA the conversion reference, copied into every model made.
  */

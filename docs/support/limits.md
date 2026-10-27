@@ -260,6 +260,37 @@ Not modelled, logged:
 - A TX FIFO numbered other than its IN endpoint. DFIFOn feeds IN endpoint n.
 - An isochronous endpoint armed with PKTCNT above 1. One packet goes per frame.
 
+## USB
+
+Source: [usb_drd.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/usb_drd.cpp)
+
+The USB full-speed device controller of the STM32H5 runs in device mode.
+
+- A CPU access of the packet memory reaches only its own byte lanes of the word. Word accesses
+  are the ones RM0481 61.7 allows, so a byte or half-word access logs once and raises
+  `ModelError` under `strict`. Debugger accesses of any width pass.
+- The packet memory reads 0 after a power-on reset and keeps its content across every other
+  reset, an RCC USBFSRST pulse included.
+- ESOF, FNR.RXDP and FNR.RXDM read 0. A suspend raises SUSP after the host's 3 ms of idle bus.
+- Transfers run whatever kernel clock `RCC_CCIPR4.USBFSSEL` selects.
+- A double-buffered endpoint fills or sends descriptor word 2n while its DTOG is 0 and word
+  2n + 1 while it is 1, in both directions, as RM0481 61.5.3 states in its text and the ST HAL
+  and tinyusb drivers expect.
+- The first transaction of a double-buffered bulk endpoint after `EPKIND` or `UTYPE` changes, or
+  after a reset, sets its STAT to NAK. Every later transaction keeps STAT VALID.
+- Writing `CNTR.USBRST` from 0 to 1 clears every `CHEPnR` but `VTRX` and `VTTX`, and `DADDR`.
+  `ISTR.RST_DCON` and `FNR.LCK` stay as they are.
+- Tokens get no answer while `ISTR.RST_DCON` is set.
+- A SETUP to control endpoint 0 is acknowledged with `STATRX` NAK or STALL, and leaves both
+  toggles at 1.
+
+Not modelled, logged:
+
+- Host mode, `CNTR.HOST`. The controller stays a device.
+- LPM, `LPMCSR.LPMEN`.
+- Battery charging detection, `BCDR.BCDEN`.
+- Remote wake-up signalling, `CNTR.L1RES` and `CNTR.L2RES`.
+
 ## PWR
 
 Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/pwr.cpp)

@@ -224,6 +224,19 @@ for _, target in h573_firmwares.values():
     if target is not None:
         hash_h573.depends(target)
 
+usb_drd_h573 = [
+    add_doctest(name, [here / source], static, env=h573_env, register=h573 is not None)
+    for name, source in (
+        ("stm32-usb-drd", "test_usb_drd.cpp"),
+        ("stm32-usb-drd-device", "test_usb_drd_device.cpp"),
+    )
+]
+for program in usb_drd_h573:
+    program.private.include_dirs.append(private_dir)
+    for _, target in h573_firmwares.values():
+        if target is not None:
+            program.depends(target)
+
 tim_spi_h573 = add_doctest(
     "stm32-tim-spi-h573",
     [here / "test_tim_spi_h573.cpp"],

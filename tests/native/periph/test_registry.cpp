@@ -9,9 +9,12 @@
 #include <doctest/doctest.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -398,4 +401,139 @@ TEST_CASE("the model context carries strict_peripherals, unchanged by a restore 
     CHECK(target.model("UNMODELLED") == &probe);
     CHECK(probe.context.strict_peripherals == strict);
   }
+}
+
+namespace
+{
+class serving_model final : public periph::model
+{
+public:
+  explicit serving_model(std::vector<std::pair<std::uint32_t, std::uint32_t>> ranges)
+      : ranges_{std::move(ranges)}
+  {}
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {"DATA", "CTRL"};
+  }
+  [[nodiscard]] auto served_ranges() const
+      -> std::vector<std::pair<std::uint32_t, std::uint32_t>> override
+  {
+    return ranges_;
+  }
+  void reset(periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(periph::register_file&, std::uint32_t offset, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0xa000'0000u | offset;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+
+private:
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> ranges_;
+};
+
+auto serving(std::vector<std::pair<std::uint32_t, std::uint32_t>> ranges) -> core::machine_options
+{
+  core::machine_options options;
+  options.models.emplace(
+      "TESTDEV",
+      [ranges = std::move(ranges)](periph::model_context&, popcorn::peripheral_desc const&)
+          -> std::shared_ptr<periph::model> { return std::make_shared<serving_model>(ranges); });
+  return options;
+}
+
+auto refusal_key(std::vector<std::pair<std::uint32_t, std::uint32_t>> ranges) -> std::string
+{
+  try
+  {
+    core::machine target{m33(), popcorn::testing::test_arch_factory(), serving(std::move(ranges))};
+  }
+  catch(popcorn::config_error const& e)
+  {
+    return e.key();
+  }
+  return {};
+}
+}
+
+TEST_CASE("a served range not word aligned or inverted is refused under the model's key")
+{
+  CHECK(
+      refusal_key({
+          {0x102, 0x200}
+  })
+      == "models.TESTDEV.served_ranges");
+  CHECK(
+      refusal_key({
+          {0x100, 0x1fe}
+  })
+      == "models.TESTDEV.served_ranges");
+  CHECK(
+      refusal_key({
+          {0x200, 0x100}
+  })
+      == "models.TESTDEV.served_ranges");
+}
+
+TEST_CASE("a served range past the peripheral's size is refused under its size key")
+{
+  CHECK(
+      refusal_key({
+          {0x300, 0x404}
+  })
+      == "peripherals.TESTDEV.size");
+  CHECK(refusal_key({
+                        {0x300, 0x400}
+  })
+            .empty());
+}
+
+TEST_CASE("a served range over a register the model does not claim is refused under its key")
+{
+  CHECK(
+      refusal_key({
+          {0x50, 0x60}
+  })
+      == "peripherals.TESTDEV.registers.ICR");
+  CHECK(
+      refusal_key({
+          {0x00, 0x04}
+  })
+      == "peripherals.TESTDEV.registers.RO");
+  CHECK(refusal_key({
+                        {0x58, 0x60}
+  })
+            .empty());
+  CHECK(refusal_key({
+                        {0x200, 0x200}
+  })
+            .empty());
+}
+
+TEST_CASE("an access inside a served range reaches the model")
+{
+  core::machine target{
+      m33(), popcorn::testing::test_arch_factory(), serving({{0x100, 0x200}}
+        )
+  };
+  auto const base = target.peripheral("TESTDEV").description().base;
+  CHECK(target.mem().read(base + 0x1fc, 4) == 0xa000'01fcu);
+  CHECK(target.mem().read(base + 0x100, 4) == 0xa000'0100u);
 }

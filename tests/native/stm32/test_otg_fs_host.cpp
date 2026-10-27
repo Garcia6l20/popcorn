@@ -371,6 +371,31 @@ TEST_CASE("a cable plugged back within 3 ms cancels the suspend")
   CHECK(r.f->field("OTG_FS", "DSTS", "SUSPSTS") == 0);
 }
 
+TEST_CASE("a cable plugged back, a soft disconnect and an unplug within 3 ms never suspend")
+{
+  rig const r{false};
+  r.run_for(300 * ms);
+  r.port().plug(false);
+  r.run_for(1 * ms);
+  r.port().plug(true);
+  r.run_for(500 * us);
+  auto const& desc = r.f->target->peripheral("OTG_FS").description();
+  auto const* dctl = popcorn::find_register(desc, "DCTL");
+  REQUIRE(dctl != nullptr);
+  auto const sdis =
+      std::ranges::find(dctl->fields, std::string_view{"SDIS"}, &popcorn::field_desc::name);
+  REQUIRE(sdis != dctl->fields.end());
+  auto const at  = desc.base + dctl->offset;
+  auto const old = r.f->target->mem().read(at, 4);
+  REQUIRE(old.has_value());
+  REQUIRE(r.f->target->mem().write(at, 4, *old | (std::uint32_t{1} << sdis->lsb)));
+  REQUIRE_FALSE(dynamic_cast<usb::device_port&>(r.port()).pulled_up());
+  r.port().plug(false);
+  r.run_for(4 * ms);
+  CHECK(r.var("usb_suspends") == 0);
+  CHECK(r.f->field("OTG_FS", "DSTS", "SUSPSTS") == 0);
+}
+
 TEST_CASE("with a board host, a host given to attach() is not saved")
 {
   rig const r{false};

@@ -26,6 +26,7 @@ stm32 = [
         "sai.cpp",
         "mdf.cpp",
         "otg_fs.cpp",
+        "usb_drd.cpp",
         "adc.cpp",
         "dbgmcu.cpp",
         "crc.cpp",

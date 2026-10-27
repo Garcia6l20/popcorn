@@ -122,13 +122,32 @@ void machine::run_state::attach_peripherals()
       }
       for(auto const [first, last] : slot->model->served_ranges())
       {
-        if(first % 4 != 0 or last % 4 != 0 or first > last or last / 4 > slot->layout.words())
+        if(first % 4 != 0 or last % 4 != 0 or first > last)
+        {
+          throw config_error(
+              unit.name, 0, std::format("models.{}.served_ranges", unit.name),
+              std::format(
+                  "word-aligned offsets, first at most last, for the served range 0x{:x} to 0x{:x}",
+                  first, last));
+        }
+        if(last / 4 > slot->layout.words())
         {
           throw config_error(
               unit.name, 0, std::format("peripherals.{}.size", unit.name),
-              std::format(
-                  "a size holding the model's served range 0x{:x} to 0x{:x}, word aligned", first,
-                  last));
+              std::format("a size holding the model's served range 0x{:x} to 0x{:x}", first, last));
+        }
+        for(auto const& reg : unit.registers)
+        {
+          auto const word = slot->layout.word_of(reg.name);
+          if(word and *word >= first / 4 and *word < last / 4 and slot->claimed[*word] == 0)
+          {
+            throw config_error(
+                unit.name, 0, std::format("peripherals.{}.registers.{}", unit.name, reg.name),
+                std::format(
+                    "a register outside the model's served range 0x{:x} to 0x{:x}, or one the "
+                    "model claims",
+                    first, last));
+          }
         }
         std::ranges::fill(slot->claimed.begin() + first / 4, slot->claimed.begin() + last / 4, 1);
       }

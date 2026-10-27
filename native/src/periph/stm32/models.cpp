@@ -31,7 +31,7 @@ struct builtin
   std::string_view part_glob     = "*";
 };
 
-constexpr std::array<builtin, 54> builtins{
+constexpr std::array<builtin, 55> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -140,6 +140,7 @@ constexpr std::array<builtin, 54> builtins{
          .part_glob       = "STM32H5*"},
      {"MDF", "v1_0_Cube", [](board const&) { return mdf_factory(); }},
      {"USB_OTG_FS", "otgfs1_v3_0_Cube", [](board const& b) { return otg_fs_factory(b); }},
+     {"USB", "usbfs_v1*", [](board const& b) { return usb_drd_factory(b); }},
      {"ADC", "aditf5_40v1_U5_Cube", [](board const& b) { return adc_factory(b.supply); }},
      {"ADC12", "*", [](board const&) { return adc_common_factory(); }},
      {.ip              = "ADC",

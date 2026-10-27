@@ -2,9 +2,11 @@
 
 #include "model_base.hpp"
 
+#include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/usb.hpp>
 #include <popcorn/periph/usb.hpp>
 #include <popcorn/periph/usb_host.hpp>
+#include <reflex/serde/bson.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -190,6 +192,24 @@ protected:
     }
   }
 
+  /**
+   * @brief Writes the model state with the host's bytes in its link, as save_host() picks them.
+   * @param saved A copy of the model state, with a `link` member of type usb_link_state.
+   * @param out The snapshot bytes, appended to.
+   */
+  template <typename State> void save_with_host(State saved, std::vector<std::byte>& out) const
+  {
+    save_host(saved.link.host);
+    reflex::serde::bson::serializer{out}.dump(saved);
+  }
+
+  /** @brief Gives the host its bytes back after a load and retells the pull-up. */
+  void loaded()
+  {
+    load_host();
+    model().link(false);
+  }
+
   /** @brief Gives the host its bytes back after a load, then empties them in the state. */
   void load_host()
   {
@@ -238,4 +258,22 @@ private:
   std::shared_ptr<usb::host>      board_host_;
   bool                            plugged_at_power_on_{};
 };
+
+/**
+ * @brief The factory of a USB device controller model, given the board's host options for its
+ *        peripheral when the board wires a host to it.
+ * @tparam Model The controller model, constructed from the context, the description and the
+ *         optional host options.
+ * @param b The board, whose usb_hosts are copied.
+ */
+template <typename Model> auto usb_device_factory(board const& b) -> model_factory
+{
+  return [hosts = b.usb_hosts](
+             model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    auto const found = hosts.find(desc.name);
+    return std::make_shared<Model>(
+        ctx, desc,
+        found == hosts.end() ? std::nullopt : std::optional<usb_host_options>{found->second});
+  };
+}
 }
