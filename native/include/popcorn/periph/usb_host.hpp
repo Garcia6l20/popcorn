@@ -453,6 +453,9 @@ struct host_options
   std::chrono::nanoseconds debounce{std::chrono::milliseconds{100}};
   /** @brief SE0 time of a bus reset, USB 2.0 7.1.7.5. */
   std::chrono::nanoseconds reset_time{std::chrono::milliseconds{10}};
+  /** @brief Reset recovery after each bus reset ends, USB 2.0 7.1.7.5 TRSTRCY: the host sends
+   *  SOFs and no other transaction for this long. */
+  std::chrono::nanoseconds reset_recovery{std::chrono::milliseconds{10}};
   /** @brief A control transfer not done this long after its SETUP ends `timed_out`. */
   std::chrono::nanoseconds request_timeout{std::chrono::seconds{5}};
   /** @brief Share of the frame, in percent, periodic transactions must end within: the device's
@@ -611,7 +614,8 @@ private:
 
 /**
  * @brief A virtual full-speed USB host with one port, in virtual time. It sees the device's
- *        pull-up, debounces, resets the bus, enumerates, binds class drivers, then runs frames:
+ *        pull-up, debounces, resets the bus, waits the reset recovery with SOFs only after each
+ *        bus reset, enumerates, binds class drivers, then runs frames:
  *        a SOF every 1 ms, the periodic transactions of the frame, isochronous then interrupt,
  *        before the EOPF point, then control and bulk transactions one per slot, round robin,
  *        each slot after the bus time of the previous transaction. When every control and bulk

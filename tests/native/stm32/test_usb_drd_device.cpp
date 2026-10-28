@@ -288,8 +288,7 @@ TEST_CASE("ISTR.RST_DCON set holds every token unanswered until the firmware cle
 {
   rig const r;
   r.enumerate();
-  r.port().bus_reset(r.now());
-  r.run_for(20 * us);
+  r.reset_bus();
   REQUIRE(r.get("ISTR", "RST_DCON") == 1);
   r.write("DADDR", r.mask("DADDR", "EF"));
   r.open_control();
@@ -493,11 +492,12 @@ void send_packet(rig const& r, scripted_firmware& fw)
   fw.sent += size;
   auto const word = r.read("CHEP0R");
   r.write(
-      "CHEP0R", ((word
-                  & ~(r.mask("CHEP0R", "STATRX", 3)
-                      | r.mask("CHEP0R", "DTOGTX")
-                      | r.mask("CHEP0R", "DTOGRX")))
-                 ^ r.mask("CHEP0R", "STATTX", valid ^ r.get("CHEP0R", "STATTX")))
+      "CHEP0R", (word
+                 & ~(r.mask("CHEP0R", "STATRX", 3)
+                     | r.mask("CHEP0R", "STATTX", 3)
+                     | r.mask("CHEP0R", "DTOGTX")
+                     | r.mask("CHEP0R", "DTOGRX")))
+                    | r.mask("CHEP0R", "STATTX", valid ^ r.get("CHEP0R", "STATTX"))
                     | r.mask("CHEP0R", "VTRX")
                     | r.mask("CHEP0R", "VTTX"));
 }
@@ -506,11 +506,12 @@ void arm_rx(rig const& r)
 {
   auto const word = r.read("CHEP0R");
   r.write(
-      "CHEP0R", ((word
-                  & ~(r.mask("CHEP0R", "STATTX", 3)
-                      | r.mask("CHEP0R", "DTOGTX")
-                      | r.mask("CHEP0R", "DTOGRX")))
-                 ^ r.mask("CHEP0R", "STATRX", valid ^ r.get("CHEP0R", "STATRX")))
+      "CHEP0R", (word
+                 & ~(r.mask("CHEP0R", "STATTX", 3)
+                     | r.mask("CHEP0R", "STATRX", 3)
+                     | r.mask("CHEP0R", "DTOGTX")
+                     | r.mask("CHEP0R", "DTOGRX")))
+                    | r.mask("CHEP0R", "STATRX", valid ^ r.get("CHEP0R", "STATRX"))
                     | r.mask("CHEP0R", "VTRX")
                     | r.mask("CHEP0R", "VTTX"));
 }
@@ -595,17 +596,31 @@ void service(rig const& r, scripted_firmware& fw)
   }
 }
 
-void run_firmware(rig const& r, scripted_firmware& fw, std::function_ref<bool()> done)
+void run_firmware(
+    rig const&                r,
+    scripted_firmware&        fw,
+    std::function_ref<bool()> done,
+    std::uint64_t             reset_latency = 0)
 {
+  std::optional<std::uint64_t> raised;
   for(std::size_t slice = 0; slice < 20'000 and not done(); ++slice)
   {
     r.run_for(25 * us);
+    if(r.get("ISTR", "RST_DCON") != 0)
+    {
+      raised = raised.value_or(r.now().ps);
+      if(r.now().ps < *raised + reset_latency)
+      {
+        continue;
+      }
+    }
+    raised.reset();
     service(r, fw);
   }
 }
 }
 
-TEST_CASE("the virtual host enumerates the USB model run by a register-level firmware ")
+TEST_CASE("the virtual host enumerates the USB model run by a register-level firmware")
 {
   rig const                r;
   std::vector<std::string> warnings;
@@ -644,4 +659,186 @@ TEST_CASE("the virtual host enumerates the USB model run by a register-level fir
   std::vector<std::byte> model_state;
   r.f->target->model("USB")->save(model_state);
   CHECK_FALSE(std::ranges::search(model_state, host_state).empty());
+}
+
+TEST_CASE(
+    "a firmware that serves RST_DCON 5 ms after it rises enumerates: the host sends its "
+    "SETUP after the 10 ms reset recovery of USB 2.0 7.1.7.5")
+{
+  constexpr std::uint64_t  ms = 1000 * us;
+  rig const                r;
+  std::vector<std::string> warnings;
+  usb::host_options        options;
+  options.warn           = [&](std::string const& message) { warnings.push_back(message); };
+  auto const        host = std::make_shared<usb::host>(r.port(), std::move(options));
+  scripted_firmware fw;
+  r.power_up();
+  r.port().attach(host);
+  r.write("BCDR", r.mask("BCDR", "DPPU_DPD"));
+  run_firmware(r, fw, [&] { return host->state() == usb::device_state::configured; }, 5 * ms);
+  REQUIRE(host->state() == usb::device_state::configured);
+  CHECK(warnings.empty());
+  CHECK(host->address() == 1);
+  REQUIRE_FALSE(fw.requests.empty());
+  CHECK(fw.requests.back().request == 9);
+}
+
+TEST_CASE(
+    "H573 board, PC host: SE0 at DPPU_DPD 0, J at 1, ESOF and SUSP before the host's bus reset, "
+    "LCK and FN on its SOFs, FN, LCK and ISTR kept after DPPU_DPD returns to 0")
+{
+  constexpr std::uint64_t ms = 1000 * us;
+  rig const               r;
+  auto const              host = std::make_shared<usb::host>(r.port(), usb::host_options{});
+  r.power_up();
+  r.port().attach(host);
+  r.run_for(5 * ms);
+  CHECK(r.get("FNR", "RXDP") == 0);
+  CHECK(r.get("FNR", "RXDM") == 0);
+  CHECK(r.read("ISTR") == 0);
+  CHECK(r.read("FNR") == 0);
+
+  r.write("BCDR", r.mask("BCDR", "DPPU_DPD"));
+  auto const pulled = r.now().ps;
+  auto const at     = [&](std::uint64_t ps) { r.run_for(pulled + ps - r.now().ps); };
+  CHECK(r.get("FNR", "RXDP") == 1);
+  CHECK(r.get("FNR", "RXDM") == 0);
+  at(ms + us);
+  CHECK(r.get("ISTR", "ESOF") == 1);
+  CHECK(r.get("FNR", "LSOF") == 1);
+  CHECK(r.get("ISTR", "SUSP") == 0);
+  at(3 * ms + us);
+  CHECK(r.get("ISTR", "SUSP") == 1);
+  CHECK(r.get("FNR", "LSOF") == 3);
+  CHECK(r.get("FNR", "RXDP") == 1);
+  CHECK(r.get("FNR", "RXDM") == 0);
+  CHECK(r.get("ISTR", "RST_DCON") == 0);
+
+  at(99 * ms + 500 * us);
+  r.write("ISTR", 0);
+  at(115 * ms + 500 * us);
+  CHECK(r.get("ISTR", "RST_DCON") == 1);
+  CHECK(r.get("ISTR", "SOF") == 1);
+  CHECK(r.get("FNR", "LCK") == 1);
+  CHECK(r.get("FNR", "LSOF") == 0);
+  auto const first = r.get("FNR", "FN");
+  r.write("ISTR", 0);
+  at(120 * ms + 500 * us);
+  CHECK(r.get("FNR", "FN") == first + 5);
+  CHECK(r.get("ISTR", "SOF") == 1);
+  CHECK(r.get("ISTR", "ESOF") == 0);
+  CHECK(r.get("ISTR", "SUSP") == 0);
+  CHECK(r.get("FNR", "LCK") == 1);
+  CHECK(r.get("FNR", "RXDP") == 1);
+  CHECK(r.get("FNR", "RXDM") == 0);
+
+  r.write("BCDR", 0);
+  auto const latched = r.read("ISTR");
+  auto const frozen  = r.read("FNR");
+  CHECK(r.get("FNR", "RXDP") == 0);
+  CHECK(r.get("FNR", "RXDM") == 0);
+  r.run_for(10 * ms);
+  CHECK(r.read("ISTR") == latched);
+  CHECK(r.read("FNR") == frozen);
+  CHECK(r.get("FNR", "LCK") == 1);
+  CHECK(r.get("FNR", "LSOF") == 0);
+  r.write("ISTR", 0);
+  r.run_for(5 * ms);
+  CHECK(r.read("ISTR") == 0);
+  CHECK(r.read("FNR") == frozen);
+}
+
+TEST_CASE(
+    "a bus reset stops the frame timer while SE0 lasts, inferred, then ESOF follows 1 ms after SE0 "
+    "ends and SUSP at the third ESOF with no SOF, RM0481 61.6.2")
+{
+  constexpr std::uint64_t ms = 1000 * us;
+  rig const               r;
+  r.connect();
+  r.port().start_of_frame(1, r.now());
+  r.run_for(ms / 2);
+  auto const reset = r.now().ps;
+  r.port().bus_reset(r.now());
+  auto const at = [&](std::uint64_t ps) { r.run_for(reset + ps - r.now().ps); };
+  at(ms / 2);
+  r.write("ISTR", 0);
+  at(12 * ms);
+  CHECK(r.get("ISTR", "ESOF") == 0);
+  CHECK(r.get("FNR", "LSOF") == 0);
+  r.port().bus_reset_end(r.now());
+  r.write("ISTR", 0);
+  at(13 * ms - us);
+  CHECK(r.get("ISTR", "ESOF") == 0);
+  CHECK(r.get("ISTR", "SUSP") == 0);
+  CHECK(r.get("FNR", "LSOF") == 0);
+  at(13 * ms + us);
+  CHECK(r.get("ISTR", "ESOF") == 1);
+  CHECK(r.get("FNR", "LSOF") == 1);
+  at(15 * ms - us);
+  CHECK(r.get("ISTR", "SUSP") == 0);
+  at(15 * ms + us);
+  CHECK(r.get("ISTR", "SUSP") == 1);
+  CHECK(r.get("FNR", "LSOF") == 3);
+}
+
+TEST_CASE(
+    "the frame timer holds through a bus reset, restarts at each SOF, raises SUSP at the third "
+    "ESOF and every fourth after it, and a SOF or a resume starts the count again")
+{
+  constexpr std::uint64_t ms = 1000 * us;
+  rig const               r;
+  r.connect();
+  r.port().bus_reset(r.now());
+  r.run_for(5 * ms);
+  CHECK(r.get("ISTR", "ESOF") == 0);
+  CHECK(r.get("ISTR", "SUSP") == 0);
+  r.port().bus_reset_end(r.now());
+  r.write("ISTR", 0);
+
+  r.port().start_of_frame(1, r.now());
+  r.run_for(ms);
+  r.port().start_of_frame(2, r.now());
+  REQUIRE(r.get("FNR", "LCK") == 1);
+  auto const sof = r.now().ps;
+  auto const at  = [&](std::uint64_t ps) { r.run_for(sof + ps - r.now().ps); };
+  at(ms + us / 2);
+  CHECK(r.get("ISTR", "ESOF") == 0);
+  at(ms + 3 * us / 2);
+  CHECK(r.get("ISTR", "ESOF") == 1);
+  CHECK(r.get("FNR", "LSOF") == 1);
+  at(3 * ms + us / 2);
+  CHECK(r.get("ISTR", "SUSP") == 0);
+  CHECK(r.get("FNR", "LCK") == 1);
+  at(3 * ms + 3 * us / 2);
+  CHECK(r.get("ISTR", "SUSP") == 1);
+  CHECK(r.get("FNR", "LCK") == 0);
+  r.write("ISTR", 0);
+  at(5 * ms + 3 * us / 2);
+  CHECK(r.get("ISTR", "ESOF") == 1);
+  CHECK(r.get("ISTR", "SUSP") == 0);
+  at(7 * ms + us / 2);
+  CHECK(r.get("ISTR", "SUSP") == 0);
+  at(7 * ms + 3 * us / 2);
+  CHECK(r.get("ISTR", "SUSP") == 1);
+  CHECK(r.get("FNR", "LSOF") == 3);
+
+  r.port().start_of_frame(3, r.now());
+  CHECK(r.get("FNR", "LSOF") == 0);
+  r.write("ISTR", 0);
+  auto const again = r.now().ps;
+  r.run_for(again + 3 * ms - us - r.now().ps);
+  CHECK(r.get("ISTR", "ESOF") == 1);
+  CHECK(r.get("ISTR", "SUSP") == 0);
+  r.run_for(3 * us);
+  CHECK(r.get("ISTR", "SUSP") == 1);
+
+  r.write("CNTR", r.mask("CNTR", "SUSPEN"));
+  r.port().resume(r.now());
+  CHECK(r.get("ISTR", "WKUP") == 1);
+  r.write("ISTR", 0);
+  r.run_for(2 * ms);
+  CHECK(r.get("ISTR", "ESOF") == 1);
+  CHECK(r.get("ISTR", "SUSP") == 0);
+  r.run_for(ms + us);
+  CHECK(r.get("ISTR", "SUSP") == 1);
 }

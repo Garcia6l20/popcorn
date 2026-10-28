@@ -11,8 +11,10 @@ with no Python on the transaction path. Everything runs in virtual time.
 ```
 
 `Periph(host=UsbHostOptions())` on OTG_FS gives the model a host with its cable plugged in from
-power-on. The host sees the pull-up the firmware enables, waits a 100 ms debounce, resets the
-bus and enumerates the device. Both firmwares here use TinyUSB 0.21.0 on OTG_FS in device mode.
+power-on. The host sees the pull-up the firmware enables, waits a 100 ms debounce, resets the bus
+for 10 ms and enumerates the device. After each bus reset it sends only SOFs for the 10 ms reset
+recovery of USB 2.0 7.1.7.5, then its next request. Both firmwares here use TinyUSB 0.21.0 on OTG_FS
+in device mode.
 
 `UsbHostOptions` changes the host:
 

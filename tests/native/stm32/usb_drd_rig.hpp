@@ -298,10 +298,17 @@ struct rig
     endpoint(0, {.address = 0, .type = control, .stat_tx = nak, .stat_rx = valid});
   }
 
+  void reset_bus() const
+  {
+    port().bus_reset(now());
+    run_for(10'000 * us);
+    port().bus_reset_end(now());
+  }
+
   void enumerate() const
   {
     connect();
-    port().bus_reset(now());
+    reset_bus();
     run_for(20 * us);
     write("ISTR", 0);
     write("DADDR", mask("DADDR", "EF"));

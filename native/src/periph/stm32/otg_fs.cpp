@@ -294,6 +294,7 @@ public:
 
   [[nodiscard]] auto pulled_up() const -> bool override;
   void               bus_reset(vtime at) override;
+  void               bus_reset_end(vtime at) override;
   void               start_of_frame(std::uint16_t frame, vtime at) override;
   auto setup(std::uint8_t address, usb::setup_packet packet, vtime at) -> usb::handshake override;
   auto
@@ -1267,6 +1268,9 @@ void otg_fs::bus_reset(vtime at)
   schedule(enumeration_done, at.ps + enumeration_ps);
   refresh();
 }
+
+void otg_fs::bus_reset_end(vtime)
+{}
 
 void otg_fs::start_of_frame(std::uint16_t frame, vtime at)
 {

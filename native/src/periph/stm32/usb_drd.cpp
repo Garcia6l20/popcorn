@@ -25,14 +25,16 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::size_t   endpoints    = 8;
-constexpr std::uint32_t reset_end    = 0;
-constexpr std::uint32_t host_wake    = 1;
-constexpr std::uint32_t idle_suspend = 2;
-constexpr std::uint64_t reset_ps     = 10'000'000;
-constexpr std::uint32_t pma_first    = 0x400;
-constexpr std::uint32_t pma_bytes    = 0x800;
-constexpr std::uint32_t pma_last     = pma_first + pma_bytes;
+constexpr std::size_t   endpoints     = 8;
+constexpr std::uint32_t host_wake     = 0;
+constexpr std::uint32_t idle_suspend  = 1;
+constexpr std::uint32_t frame_timer   = 2;
+constexpr std::uint64_t frame_ps      = 1'000'000'000;
+constexpr std::uint64_t sof_window_ps = 1'000'000;
+constexpr std::uint8_t  idle_frames   = 3;
+constexpr std::uint32_t pma_first     = 0x400;
+constexpr std::uint32_t pma_bytes     = 0x800;
+constexpr std::uint32_t pma_last      = pma_first + pma_bytes;
 
 constexpr std::uint32_t stat_disabled = 0;
 constexpr std::uint32_t stat_stall    = 1;
@@ -68,6 +70,9 @@ struct usb_drd_state
   std::uint8_t                 frames{};
   std::uint8_t                 armed{};
   bool                         suspended{};
+  bool                         in_reset{};
+  bool                         timing{};
+  std::uint8_t                 missed{};
 
   friend auto operator==(usb_drd_state const&, usb_drd_state const&) -> bool = default;
 };
@@ -121,11 +126,17 @@ struct interrupt_pair
  * Registers, RM0481 61.6: CHEPnR keep their bit kinds by name, checked against the description
  * at construction: STATTX, DTOGTX, STATRX and DTOGRX toggle on a written 1, VTTX, VTRX, NAK and
  * the error fields clear on a written 0, SETUP is read-only, the rest is replaced. A byte or
- * half-word write reaches only its lanes. ISTR's L1REQ to DDISC clear on a written 0, CTR, DIR
- * and IDN follow the endpoints: CTR while one has VTRX or VTTX, IDN the first such endpoint,
- * isochronous and double-buffered bulk ones before the others, lowest number first, DIR 1 when
- * it has VTRX. IRQ 74 is any ISTR flag whose CNTR mask, the flag's name plus M, is set.
- * SUSPRDY reads SUSPEN.
+ * half-word write of any register is a word write with the other lanes 0, as measured on an
+ * STM32H573 for CHEPnR and DADDR and applied to every register: a toggle bit there stays, a bit
+ * cleared by 0 clears and a field reads 0. ISTR's L1REQ to DDISC clear on a written 0, CTR, DIR and
+ * IDN follow the endpoints: CTR while one has VTRX or VTTX, IDN the first such endpoint,
+ * isochronous and double-buffered bulk ones before the others, lowest number first, DIR 1 when it
+ * has VTRX. IRQ 74 is any ISTR flag whose CNTR mask, the flag's name plus M, is set. SUSPRDY reads
+ * SUSPEN. A written 0 keeps SUSPEN, as measured on an STM32H573. FNR.RXDP and RXDM read 1 and 1
+ * with no host attached, as measured on an STM32H573. With a host attached they read SE0, 0 and 0,
+ * while the device does not pull D+ up, the host's pull-downs of USB 2.0 7.1.5.1, and the idle J
+ * state, RXDP 1 and RXDM 0, while it does, USB 2.0 7.1.7.1, both as measured on an STM32H573
+ * with a PC host.
  *
  * Packet memory, RM0481 61.3 and 61.7: 2048 bytes at offsets 0x400 to 0xBFF, zero at power-on
  * and kept by every other reset. The buffer descriptors of endpoint n are its words 2n and
@@ -137,11 +148,18 @@ struct interrupt_pair
  * and tells the host of every change. It answers tokens to DADDR.ADD while DADDR.EF is set and
  * CNTR.PDWN, CNTR.USBRST and ISTR.RST_DCON are clear, RM0481 61.6.1, on the first endpoint whose
  * EA matches with its STAT for the direction not DISABLED. A bus reset clears every CHEPnR but
- * VTRX and VTTX, DADDR, SUSPEN and SUSPRDY, then sets ISTR.RST_DCON 10 us later. CNTR.USBRST
- * written from 0 to 1 clears every CHEPnR but VTRX and VTTX and DADDR, RM0481 61.6.1 and 61.6.7,
- * and leaves RST_DCON as it is. A SOF sets FNR.FN, clears LSOF, sets LCK from the second SOF
- * after a reset or resume, and raises ISTR.SOF. Suspend raises SUSP, resume raises WKUP and
- * clears SUSPEN.
+ * VTRX and VTTX and DADDR when SE0 starts, inferred. It clears SUSPEN and SUSPRDY when SE0 starts
+ * and sets ISTR.RST_DCON when SE0 ends, as measured on an STM32H573 with a PC host. CNTR.USBRST
+ * written from 0 to 1 clears every CHEPnR but VTRX and VTTX, RM0481 61.6.1 and 61.6.7, keeps
+ * DADDR, as measured on an STM32H573, and leaves RST_DCON as it is. A SOF sets FNR.FN, clears
+ * LSOF and raises ISTR.SOF. FNR.LCK sets at the second SOF after a bus reset, with
+ * ISTR.RST_DCON pending or cleared, and reads 0 while ISTR.WKUP is set, as measured on an
+ * STM32H573 with a PC host after a bus reset. After a resume it sets at the second SOF, RM0481
+ * FNR.LCK, and reads 0 while WKUP is set, inferred. A SOF while WKUP is set starts the count of
+ * two again, so LCK sets at the second SOF after the firmware clears WKUP, inferred: on the part
+ * WKUP was cleared before SE0 ended. Suspend raises SUSP, resume raises WKUP and clears SUSPEN. A
+ * bus reset or a SOF while CNTR.SUSPEN is set raises WKUP and clears SUSPEN and SUSPRDY, RM0481
+ * 61.5.7 and 61.6.2, the bus reset as read on an STM32H573 with a PC host.
  *
  * Transfers, RM0481 61.5.2: a SETUP to a control endpoint 0 whose STATRX is not DISABLED and
  * whose VTRX is clear lands in its receive buffer, sets COUNT_RX 8, DTOGRX and DTOGTX 1, both
@@ -176,8 +194,23 @@ struct interrupt_pair
  *
  * Not modelled, logged once and a model_error under strict_peripherals: host mode CNTR.HOST,
  * LPM LPMCSR.LPMEN, battery charging detection BCDR.BCDEN, remote wake-up CNTR.L1RES and L2RES,
- * a CPU access to the packet memory of another width than a word, which RM0481 61.7 forbids and
- * which then reaches only its lanes. ESOF, FNR.RXDP and FNR.RXDM read 0.
+ * a CPU access to the packet memory of another width than a word, which RM0481 61.7 forbids. Such a
+ * write stores its lanes and zeroes the others, a read returns its lanes, as measured on an
+ * STM32H573.
+ *
+ * Frame timer: while BCDR.DPPU_DPD is set and CNTR.PDWN, USBRST and SUSPEN are clear, with a host
+ * attached or not, ISTR.ESOF rises and FNR.LSOF counts, wrapping at 4, every 1 ms with no SOF.
+ * SUSP rises at each ESOF that brings the count of missed frames to 3, the count wrapping at 4 and
+ * starting again at a SOF, a bus reset, a resume and the timer start, so with no SOF it rises
+ * every 4 ms, as read on an STM32H573 with nothing attached and with a PC host before its bus
+ * reset. Setting SUSPEN stops the timer and clears LSOF, as read on the part, RM0481 61.5.7. The
+ * first ESOF comes 1 ms after the pull-up and each SOF moves the next one to 1 ms plus 1 us after
+ * it. A bus reset stops the timer while SE0 lasts, as read on an STM32H573 with a PC host after
+ * a reset with and without suspend, and the next ESOF comes 1 ms after SE0 ends, as RM0481 61.6.2
+ * enables the suspend check right after any USB reset. The 1 ms period follows RM0481 61.6.2. The
+ * first ESOF time and the 1 us window are inferred.
+ * Clearing DPPU_DPD stops the timer, and FN, LCK, LSOF and the ISTR flags keep their values, as
+ * read on the part with a PC host.
  */
 class usb_drd final : public dispatch_model<usb_drd, usb_drd_state>,
                       public usb_device_link<usb_drd>,
@@ -210,6 +243,7 @@ public:
 
   [[nodiscard]] auto pulled_up() const -> bool override;
   void               bus_reset(vtime at) override;
+  void               bus_reset_end(vtime at) override;
   void               start_of_frame(std::uint16_t frame, vtime at) override;
   auto setup(std::uint8_t address, usb::setup_packet packet, vtime at) -> usb::handshake override;
   auto
@@ -247,13 +281,17 @@ private:
   [[nodiscard]] auto pma_word(std::uint32_t at) const -> std::uint32_t;
   void               set_pma_word(std::uint32_t at, std::uint32_t word);
   void               restore_reset_values(std::optional<reset_kind> kind);
-  void               clear_endpoints();
+  void               clear_endpoints(bool address);
   [[nodiscard]] auto first_transaction(std::size_t n) -> bool;
   void               link(bool report);
   void               refresh();
   void               schedule(std::uint32_t kind, std::uint64_t at_ps);
   void               cancel(std::uint32_t kind);
   void               enter_suspend();
+  void               raise_suspend();
+  void               wake();
+  void               time_frames();
+  void               frame_missed();
   void unmodelled(std::string_view name, std::uint32_t offset, std::string message, warning kind);
   [[nodiscard]] auto link_state() -> usb_link_state&;
   [[nodiscard]] auto link_state() const -> usb_link_state const&;
@@ -272,6 +310,7 @@ private:
   field_ref                              reset_done_;
   field_ref                              frame_flag_;
   field_ref                              suspend_flag_;
+  field_ref                              expected_flag_;
   field_ref                              wake_flag_;
   field_ref                              core_reset_;
   field_ref                              power_down_;
@@ -283,13 +322,14 @@ private:
   field_ref                              frame_number_;
   field_ref                              lost_frames_;
   field_ref                              locked_;
+  field_ref                              line_plus_;
+  field_ref                              line_minus_;
   field_ref                              address_;
   field_ref                              function_enable_;
   field_ref                              lpm_enable_;
   field_ref                              charging_enable_;
   field_ref                              pull_up_;
   std::uint32_t                          access_offset_{};
-  std::uint32_t                          lanes_{};
   std::uint32_t                          warned_{};
 };
 
@@ -323,14 +363,16 @@ usb_drd::usb_drd(
       transfer_{field("ISTR", "CTR")}, direction_{field("ISTR", "DIR")},
       endpoint_id_{field("ISTR", "IDN")}, reset_done_{field("ISTR", "RST_DCON")},
       frame_flag_{field("ISTR", "SOF")}, suspend_flag_{field("ISTR", "SUSP")},
-      wake_flag_{field("ISTR", "WKUP")}, core_reset_{field("CNTR", "USBRST")},
-      power_down_{field("CNTR", "PDWN")}, suspend_enable_{field("CNTR", "SUSPEN")},
-      suspend_ready_{field("CNTR", "SUSPRDY")}, l1_resume_{field("CNTR", "L1RES")},
-      l2_resume_{field("CNTR", "L2RES")}, host_mode_{field("CNTR", "HOST")},
-      frame_number_{field("FNR", "FN")}, lost_frames_{field("FNR", "LSOF")},
-      locked_{field("FNR", "LCK")}, address_{field("DADDR", "ADD")},
-      function_enable_{field("DADDR", "EF")}, lpm_enable_{field("LPMCSR", "LPMEN")},
-      charging_enable_{field("BCDR", "BCDEN")}, pull_up_{field("BCDR", "DPPU_DPD")}
+      expected_flag_{field("ISTR", "ESOF")}, wake_flag_{field("ISTR", "WKUP")},
+      core_reset_{field("CNTR", "USBRST")}, power_down_{field("CNTR", "PDWN")},
+      suspend_enable_{field("CNTR", "SUSPEN")}, suspend_ready_{field("CNTR", "SUSPRDY")},
+      l1_resume_{field("CNTR", "L1RES")}, l2_resume_{field("CNTR", "L2RES")},
+      host_mode_{field("CNTR", "HOST")}, frame_number_{field("FNR", "FN")},
+      lost_frames_{field("FNR", "LSOF")}, locked_{field("FNR", "LCK")},
+      line_plus_{field("FNR", "RXDP")}, line_minus_{field("FNR", "RXDM")},
+      address_{field("DADDR", "ADD")}, function_enable_{field("DADDR", "EF")},
+      lpm_enable_{field("LPMCSR", "LPMEN")}, charging_enable_{field("BCDR", "BCDEN")},
+      pull_up_{field("BCDR", "DPPU_DPD")}
 {
   endpoint_toggles_ = kind_mask(endpoint_toggles, write_effect::one_to_toggle);
   endpoint_clears_  = kind_mask(endpoint_clears, write_effect::zero_to_clear);
@@ -477,8 +519,52 @@ void usb_drd::link(bool)
   tell_pull_up(pulled_up());
 }
 
+void usb_drd::time_frames()
+{
+  if(not pulled_up())
+  {
+    state_.in_reset = false;
+  }
+  auto const running = get(regs_, pull_up_) != 0
+                   and get(regs_, power_down_) == 0
+                   and get(regs_, core_reset_) == 0
+                   and get(regs_, suspend_enable_) == 0
+                   and not state_.in_reset;
+  if(running == state_.timing)
+  {
+    return;
+  }
+  state_.timing = running;
+  state_.missed = 0;
+  if(running)
+  {
+    schedule(frame_timer, now().ps + frame_ps);
+  }
+  else
+  {
+    cancel(frame_timer);
+  }
+}
+
+void usb_drd::frame_missed()
+{
+  update(regs_, expected_flag_, 1);
+  auto const wrap = 1u << lost_frames_.width;
+  update(regs_, lost_frames_, (get(regs_, lost_frames_) + 1u) % wrap);
+  state_.missed = static_cast<std::uint8_t>((state_.missed + 1u) % wrap);
+  if(state_.missed == idle_frames)
+  {
+    raise_suspend();
+  }
+  schedule(frame_timer, now().ps + frame_ps);
+}
+
 void usb_drd::refresh()
 {
+  time_frames();
+  auto const attached = host() != nullptr;
+  update(regs_, line_plus_, attached and not pulled_up() ? 0u : 1u);
+  update(regs_, line_minus_, attached ? 0u : 1u);
   std::optional<std::size_t> first;
   for(auto const priority : {true, false})
   {
@@ -622,16 +708,16 @@ auto usb_drd::on_write(
     {
       unmodelled(
           "USBSRAM", offset & ~3u,
-          std::format("a {}-byte write of the packet memory writes its lanes of the word", size),
+          std::format(
+              "a {}-byte write of the packet memory zeroes the other lanes of the word", size),
           pma_width);
     }
-    auto const at = offset - pma_first;
-    set_pma_word(at, merge_write(pma_word(at), offset, size, value));
+    set_pma_word(offset - pma_first, merge_write(0, offset, size, value));
     return {};
   }
   access_offset_ = offset & ~3u;
-  lanes_         = merge_write(0, offset, size, ~std::uint32_t{});
-  return dispatch_model::on_write(regs, offset, size, old, value, ctx);
+  return dispatch_model::on_write(
+      regs, access_offset_, 4, old, merge_write(0, offset, size, value), ctx);
 }
 
 auto usb_drd::applied(
@@ -640,7 +726,7 @@ auto usb_drd::applied(
     std::uint32_t clears,
     std::uint32_t toggles) const -> std::uint32_t
 {
-  return (now & ~(clears | toggles)) | (old & now & clears) | ((old ^ (now & lanes_)) & toggles);
+  return (now & ~(clears | toggles)) | (old & now & clears) | ((old ^ now) & toggles);
 }
 
 void usb_drd::plain_written(std::uint32_t, std::uint32_t)
@@ -681,7 +767,15 @@ void usb_drd::control_written(std::uint32_t old, std::uint32_t now)
   }
   if(core_reset_.of(now) != 0 and core_reset_.of(old) == 0)
   {
-    clear_endpoints();
+    clear_endpoints(false);
+  }
+  if(suspend_enable_.of(old) != 0)
+  {
+    update(regs_, suspend_enable_, 1);
+  }
+  else if(suspend_enable_.of(now) != 0)
+  {
+    update(regs_, lost_frames_, 0);
   }
   update(regs_, suspend_ready_, get(regs_, suspend_enable_));
   refresh();
@@ -713,13 +807,13 @@ void usb_drd::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     return;
   }
-  if(kind == reset_end)
-  {
-    update(regs_, reset_done_, 1);
-  }
-  else if(kind == idle_suspend)
+  if(kind == idle_suspend)
   {
     idle_ended();
+  }
+  else if(kind == frame_timer)
+  {
+    frame_missed();
   }
   else
   {
@@ -741,31 +835,50 @@ void usb_drd::load(std::span<std::byte const> in)
   loaded();
 }
 
-void usb_drd::bus_reset(vtime at)
+void usb_drd::bus_reset(vtime)
 {
   if(not pulled_up())
   {
     return;
   }
-  clear_endpoints();
-  update(regs_, suspend_enable_, 0);
-  update(regs_, suspend_ready_, 0);
+  clear_endpoints(true);
+  wake();
   update(regs_, locked_, 0);
   state_.frames    = 0;
   state_.suspended = false;
-  schedule(reset_end, at.ps + reset_ps);
+  state_.in_reset  = true;
   refresh();
 }
 
-void usb_drd::clear_endpoints()
+void usb_drd::bus_reset_end(vtime at)
+{
+  if(not state_.in_reset or not pulled_up())
+  {
+    return;
+  }
+  state_.in_reset = false;
+  update(regs_, reset_done_, 1);
+  time_frames();
+  state_.missed = 0;
+  if(state_.timing)
+  {
+    schedule(frame_timer, at.ps + frame_ps);
+  }
+  refresh();
+}
+
+void usb_drd::clear_endpoints(bool address)
 {
   for(auto const& ep : ep_)
   {
     regs_.poke(ep.offset, regs_.peek(ep.offset) & (ep.vtrx.mask() | ep.vttx.mask()));
   }
   state_.armed = 0;
-  update(regs_, address_, 0);
-  update(regs_, function_enable_, 0);
+  if(address)
+  {
+    update(regs_, address_, 0);
+    update(regs_, function_enable_, 0);
+  }
 }
 
 auto usb_drd::first_transaction(std::size_t n) -> bool
@@ -783,11 +896,21 @@ void usb_drd::start_of_frame(std::uint16_t frame, vtime at)
     return;
   }
   frames_.start(at.ps);
-  state_.frames = static_cast<std::uint8_t>(std::min(state_.frames + 1, 2));
   update(regs_, frame_number_, frame);
   update(regs_, lost_frames_, 0);
-  update(regs_, locked_, state_.frames >= 2 ? 1 : 0);
   update(regs_, frame_flag_, 1);
+  wake();
+  state_.frames = get(regs_, wake_flag_) != 0
+                    ? std::uint8_t{0}
+                    : static_cast<std::uint8_t>(std::min(state_.frames + 1, 2));
+  update(regs_, locked_, state_.frames >= 2 ? 1 : 0);
+  time_frames();
+  state_.missed    = 0;
+  state_.suspended = false;
+  if(state_.timing)
+  {
+    schedule(frame_timer, at.ps + frame_ps + sof_window_ps);
+  }
   refresh();
 }
 
@@ -996,11 +1119,29 @@ void usb_drd::suspend(vtime)
 
 void usb_drd::enter_suspend()
 {
+  if(not state_.suspended)
+  {
+    raise_suspend();
+  }
+}
+
+void usb_drd::raise_suspend()
+{
   state_.suspended = true;
   state_.frames    = 0;
   update(regs_, locked_, 0);
   update(regs_, suspend_flag_, 1);
   refresh();
+}
+
+void usb_drd::wake()
+{
+  if(get(regs_, suspend_enable_) != 0)
+  {
+    update(regs_, wake_flag_, 1);
+  }
+  update(regs_, suspend_enable_, 0);
+  update(regs_, suspend_ready_, 0);
 }
 
 void usb_drd::resume(vtime)
@@ -1010,6 +1151,7 @@ void usb_drd::resume(vtime)
     return;
   }
   state_.suspended = false;
+  state_.missed    = 0;
   update(regs_, suspend_enable_, 0);
   update(regs_, suspend_ready_, 0);
   update(regs_, wake_flag_, 1);

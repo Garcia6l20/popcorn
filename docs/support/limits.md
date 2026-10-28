@@ -329,20 +329,50 @@ Source: [usb_drd.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src
 
 The USB full-speed device controller of the STM32H5 runs in device mode.
 
-- A CPU access of the packet memory reaches only its own byte lanes of the word. Word accesses
-  are the ones RM0481 61.7 allows, so a byte or half-word access logs once and raises
-  `ModelError` under `strict`. Debugger accesses of any width pass.
+- A byte or half-word write of the packet memory stores its lanes and writes 0 to the other lanes
+  of the word, from the CPU and the debugger alike, as measured on an STM32H573. A narrow read
+  returns its lanes. Word accesses are the ones RM0481 61.7 allows, so a CPU byte or half-word
+  access logs once and raises `ModelError` under `strict`. Debugger accesses of any width pass.
+- A byte or half-word write of a USB register is a word write with the other lanes 0, as
+  measured on an STM32H573 for `CHEPnR` and `DADDR` and applied to every register: in `CHEPnR` a toggle bit there stays, `VTRX` and `VTTX` there clear
+  and `EA` or `UTYPE` there read 0.
 - The packet memory reads 0 after a power-on reset and keeps its content across every other
   reset, an RCC USBFSRST pulse included.
-- ESOF, FNR.RXDP and FNR.RXDM read 0. A suspend raises SUSP after the host's 3 ms of idle bus.
+- While `BCDR.DPPU_DPD` is set and `CNTR.SUSPEN` is clear, `ISTR.ESOF` rises and `FNR.LSOF`
+  counts every 1 ms with no SOF, with a host attached or not. `SUSP` rises at each ESOF that
+  brings the count of missed frames to 3, the count wrapping at 4 and starting again at a SOF, a
+  bus reset, a resume and the timer start, so with no SOF it rises every 4 ms, as read on an
+  STM32H573 with nothing attached and with a PC host before its bus reset. Setting `SUSPEN` stops
+  the count and clears `LSOF`, as read on the part. The first ESOF comes 1 ms after the pull-up
+  and each SOF moves the next one to 1 ms plus 1 us after it, both inferred. A bus reset stops
+  the count while SE0 lasts, as read on an STM32H573 with a PC host after a reset with and
+  without suspend. The next ESOF comes 1 ms after SE0 ends, as RM0481 61.6.2 enables the
+  suspend check right after any USB reset. Clearing `DPPU_DPD` stops the count, and `FN`, `LCK`,
+  `LSOF` and the `ISTR` flags keep their values, as read on the part.
+- A bus reset or a SOF while `CNTR.SUSPEN` is set raises `ISTR.WKUP` and clears `SUSPEN` and
+  `SUSPRDY`, RM0481 61.5.7 and 61.6.2, the bus reset as read on an STM32H573 with a PC host.
+- `FNR.LCK` sets at the second SOF after a bus reset, with `ISTR.RST_DCON` pending or cleared,
+  and reads 0 while `ISTR.WKUP` is set, as measured on an STM32H573 with a PC host after a bus
+  reset. After a resume it sets at the second SOF, RM0481 FNR.LCK, and reads 0 while `WKUP` is
+  set, inferred. A SOF while `WKUP` is set starts the count of two again, so `LCK` sets at the
+  second SOF after the firmware clears `WKUP`, inferred: on the part `WKUP` was cleared before
+  SE0 ended. A firmware that leaves `WKUP` set reads `LCK` 0.
+- FNR.RXDP and FNR.RXDM read 1 and 1 with no host attached, as measured on an STM32H573. With a
+  host attached they read SE0, 0 and 0, while the device does not pull D+ up, and the idle J
+  state, 1 and 0, while it does, as measured on an STM32H573 with a PC host.
+  A suspend raises SUSP after the host's 3 ms of idle bus.
 - Transfers run whatever kernel clock `RCC_CCIPR4.USBFSSEL` selects.
 - A double-buffered endpoint fills or sends descriptor word 2n while its DTOG is 0 and word
   2n + 1 while it is 1, in both directions, as RM0481 61.5.3 states in its text and the ST HAL
   and tinyusb drivers expect.
 - The first transaction of a double-buffered bulk endpoint after `EPKIND` or `UTYPE` changes, or
   after a reset, sets its STAT to NAK. Every later transaction keeps STAT VALID.
-- Writing `CNTR.USBRST` from 0 to 1 clears every `CHEPnR` but `VTRX` and `VTTX`, and `DADDR`.
-  `ISTR.RST_DCON` and `FNR.LCK` stay as they are.
+- Writing `CNTR.USBRST` from 0 to 1 clears every `CHEPnR` but `VTRX` and `VTTX`. `DADDR`,
+  `ISTR.RST_DCON` and `FNR.LCK` stay as they are, `DADDR` as measured on an STM32H573.
+- A written 0 keeps `CNTR.SUSPEN`, as measured on an STM32H573. A resume and a bus reset clear
+  it.
+- A bus reset clears the endpoints and `DADDR` when SE0 starts, inferred, and sets
+  `ISTR.RST_DCON` when SE0 ends, as measured on an STM32H573 with a PC host.
 - Tokens get no answer while `ISTR.RST_DCON` is set.
 - A SETUP to control endpoint 0 is acknowledged with `STATRX` NAK or STALL, and leaves both
   toggles at 1.

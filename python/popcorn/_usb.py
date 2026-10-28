@@ -23,6 +23,8 @@ Time model:
       after that NAK ends, as long as its transaction fits before the next SOF.
     - A newly opened isochronous pipe sends its first packet 2 frames later, as Linux does.
       An interrupt pipe is first polled in the next frame.
+    - After each bus reset ends the host sends only SOFs for 10 ms, the USB 2.0 7.1.7.5 reset
+      recovery, then its next transaction.
     - The same writes at the same virtual times give the same transactions at the same times.
 
 Snapshots:

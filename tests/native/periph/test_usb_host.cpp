@@ -80,6 +80,7 @@ struct device_script
   std::uint8_t                                                   configuration{};
   std::vector<request_record>                                    requests{};
   std::vector<std::uint64_t>                                     resets{};
+  std::vector<std::uint64_t>                                     reset_ends{};
   std::vector<std::uint64_t>                                     frames{};
   std::vector<token_record>                                      tokens{};
   std::map<std::uint8_t, std::deque<std::vector<std::uint8_t>>>  in_queue{};
@@ -175,6 +176,11 @@ public:
     s.address = 0;
     s.next_address.reset();
     s.request.reset();
+  }
+
+  void bus_reset_end(vtime at) override
+  {
+    s.reset_ends.push_back(at.ps);
   }
 
   void start_of_frame(std::uint16_t, vtime at) override
@@ -722,13 +728,17 @@ TEST_CASE("enumeration sends the Linux sequence, SET_CONFIGURATION 1 last, at th
 
   REQUIRE(r.dev.s.resets.size() == 2);
   CHECK(r.dev.s.resets[0] == t0 + 100 * ms);
+  REQUIRE(r.dev.s.reset_ends.size() == 2);
+  CHECK(r.dev.s.reset_ends[0] == t0 + 110 * ms);
   auto const first_setup = r.dev.s.requests[0].at;
-  CHECK(first_setup >= t0 + 110 * ms);
-  CHECK(first_setup < t0 + 110 * ms + 60 * us);
+  CHECK(first_setup >= t0 + 120 * ms);
+  CHECK(first_setup < t0 + 120 * ms + 60 * us);
   REQUIRE_FALSE(r.dev.s.frames.empty());
   CHECK(r.dev.s.frames[0] == t0 + 110 * ms);
   CHECK(r.dev.s.resets[1] > first_setup);
-  CHECK(r.dev.s.requests[1].at >= r.dev.s.resets[1] + 10 * ms);
+  CHECK(r.dev.s.reset_ends[1] == r.dev.s.resets[1] + 10 * ms);
+  CHECK(r.dev.s.requests[1].at >= r.dev.s.reset_ends[1] + 10 * ms);
+  CHECK(r.dev.s.requests[1].at < r.dev.s.reset_ends[1] + 10 * ms + 60 * us);
   CHECK(r.dev.s.requests[2].at >= r.dev.s.requests[1].at + 10 * ms);
   CHECK(std::ranges::none_of(r.dev.s.frames, [&](std::uint64_t at) {
     return at > r.dev.s.resets[1] and at < r.dev.s.resets[1] + 10 * ms;
@@ -748,6 +758,50 @@ TEST_CASE("enumeration sends the Linux sequence, SET_CONFIGURATION 1 last, at th
   CHECK(std::ranges::all_of(log | std::views::drop(3), [](usb::log_entry const& entry) {
     return entry.kind == usb::log_kind::request and entry.status == usb::transfer_status::completed;
   }));
+}
+
+TEST_CASE(
+    "after each bus reset end the host sends SOFs every 1 ms and no token for the 10 ms reset "
+    "recovery of USB 2.0 7.1.7.5, then the next SETUP")
+{
+  rig r;
+  r.plug();
+  r.run_until(t0 + second);
+  REQUIRE(r.host->state() == usb::device_state::configured);
+  REQUIRE(r.dev.s.reset_ends.size() == 2);
+  for(auto const end : r.dev.s.reset_ends)
+  {
+    CAPTURE(end);
+    CHECK(std::ranges::none_of(r.dev.s.tokens, [&](token_record const& record) {
+      return record.at >= end and record.at < end + 10 * ms;
+    }));
+    for(std::uint64_t n = 0; n < 10; ++n)
+    {
+      CHECK(std::ranges::contains(r.dev.s.frames, end + n * ms));
+    }
+    auto const next = std::ranges::find_if(
+        r.dev.s.tokens, [&](token_record const& record) { return record.at >= end; });
+    REQUIRE(next != r.dev.s.tokens.end());
+    CHECK(next->kind == token::setup);
+    CHECK(next->at >= end + 10 * ms);
+    CHECK(next->at < end + 10 * ms + 60 * us);
+  }
+}
+
+TEST_CASE("a reset recovery of 0 sends the first SETUP in the frame of the reset end")
+{
+  usb::host_options options;
+  options.reset_recovery = std::chrono::nanoseconds{0};
+  rig r{std::move(options)};
+  r.plug();
+  r.run_until(t0 + second);
+  CHECK(r.host->state() == usb::device_state::configured);
+  CHECK(requests_of(r.dev.s) == expected_requests());
+  REQUIRE(r.dev.s.reset_ends.size() == 2);
+  CHECK(r.dev.s.reset_ends[0] == t0 + 110 * ms);
+  REQUIRE_FALSE(r.dev.s.requests.empty());
+  CHECK(r.dev.s.requests[0].at >= t0 + 110 * ms);
+  CHECK(r.dev.s.requests[0].at < t0 + 110 * ms + 60 * us);
 }
 
 TEST_CASE("a table without the second reset skips it")
@@ -1138,7 +1192,7 @@ TEST_CASE("a snapshot taken while the host sleeps after a NAKed pass restores th
     rig a;
     a.dev.s.data_naks = 20;
     a.plug();
-    a.run_until(t0 + 112 * ms);
+    a.run_until(t0 + 122 * ms);
     auto const nak = std::ranges::find_if(a.dev.s.tokens, [](token_record const& record) {
       return record.hs == usb::handshake::nak;
     });
@@ -1429,14 +1483,14 @@ TEST_CASE(
       {.action = usb::enumeration_action::wait, .wait = std::chrono::milliseconds{20}});
   rig r{std::move(options)};
   r.plug();
-  r.run_until(t0 + 115 * ms);
+  r.run_until(t0 + 125 * ms);
   REQUIRE(r.dev.s.requests.size() == 1);
   REQUIRE(r.dev.s.resets.size() == 1);
   r.dev.s.data_nones = 2;
   r.dev.s.data_naks  = 1'000'000;
   auto const id      = r.host->control(descriptor(1, 0, 0, 18));
   auto const before  = r.dev.s.tokens.size();
-  r.run_until(t0 + 125 * ms);
+  r.run_until(t0 + 135 * ms);
   REQUIRE(r.dev.s.resets.size() == 1);
   CHECK(
       std::ranges::count_if(
@@ -1464,6 +1518,8 @@ TEST_CASE(
   CHECK(logged[0] == first);
   auto const restart = logged[1];
   CHECK(restart > r.dev.s.resets[1]);
+  REQUIRE(r.dev.s.reset_ends.size() == 2);
+  CHECK(restart >= r.dev.s.reset_ends[1] + 10 * ms);
   CHECK(restart < r.dev.s.requests[2].at);
 
   r.run_until(first + 5 * second + 5 * ms);
