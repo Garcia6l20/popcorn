@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import html
 import json
+import re
 import shutil
+import subprocess
+import sys
 import textwrap
 import xml.etree.ElementTree as ElementTree
 from decimal import Decimal
@@ -842,3 +846,56 @@ def test_gcovr_report_is_one_union_file_under_xdist(pytester: pytest.Pytester) -
     )
     result.assert_outcomes(passed=30)
     assert gcovr_document(pytester.path / "two.json") == gcovr_document(pytester.path / "one.json")
+
+
+def test_gcovr_reads_the_session_tracefile_with_the_documented_command(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = pytester.mkdir("project")
+    source = project / "tests" / "firmware" / "obs"
+    source.mkdir(parents=True)
+    shutil.copy(CUT_SOURCE, source / "cut.c")
+    write_conftest(pytester)
+    (pytester.path / "conftest.py").replace(project / "conftest.py")
+    write_project(pytester, "cut_mid", elf=CUT_ELF, directory=project)
+    (project / "test_cov.py").write_text(CUT_TESTS)
+    elsewhere = pytester.mkdir("elsewhere")
+    monkeypatch.chdir(elsewhere)
+    result = pytester.runpytest_subprocess(
+        "-p",
+        "no:asyncio",
+        "-p",
+        "no:xdist",
+        f"--rootdir={project}",
+        "--popcorn-cov",
+        f"--popcorn-cov-report=gcovr:{elsewhere / 'cov.json'}",
+        "--popcorn-cov-report=term",
+        str(project),
+    )
+    assert result.ret == pytest.ExitCode.OK
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gcovr",
+            "--root",
+            str(project),
+            "--json-add-tracefile",
+            str(elsewhere / "cov.json"),
+            "--html-details",
+            str(elsewhere / "site.html"),
+            "--json-summary",
+            str(elsewhere / "s.json"),
+        ],
+        cwd=elsewhere,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stderr
+    (total,) = [line.split() for line in result.stdout.str().splitlines() if "TOTAL" in line]
+    counted = json.loads((elsewhere / "s.json").read_text())
+    assert str(counted["line_total"]) == total[1]
+    assert str(counted["line_covered"]) == total[2]
+    (page,) = elsewhere.glob("site.cut.c.*.html")
+    assert "pick(v) * 2u" in html.unescape(re.sub(r"<[^>]*>", "", page.read_text()))

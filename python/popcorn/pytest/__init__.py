@@ -131,7 +131,8 @@ lists the rootdir, and `/` too for a source outside it. A `filename` is relative
 for a source under it and as written otherwise, and `timestamp` counts milliseconds.
 The `gcovr:FILE` report writes a gcovr JSON tracefile, through a temporary file renamed over it,
 for `gcovr --json-add-tracefile FILE --root ROOTDIR`. A `file` is relative to the rootdir for a
-source under it and as written otherwise. It needs a target.
+source under it and as written otherwise. gcovr reports only the files under `--root`, so add
+`--filter DIR` for each directory outside it. The report needs a target.
 The `html` report is written into its target, `htmlcov` by default, by genhtml from LCOV 2.0 or
 later when it is on `PATH`, with branch and function coverage, run from the rootdir where a
 relative source path resolves. A source file genhtml cannot read renders as blank lines. A source

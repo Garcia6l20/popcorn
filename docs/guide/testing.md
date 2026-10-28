@@ -115,7 +115,7 @@ options that hold their defaults:
 
 | Option | Ini option | Value |
 |--------|------------|-------|
-| `--popcorn-cov-report` | `popcorn_cov_report` | `term`, `html[:DIR]`, `xml[:FILE]` or `lcov:FILE`, one per line in the ini file |
+| `--popcorn-cov-report` | `popcorn_cov_report` | `term`, `html[:DIR]`, `xml[:FILE]`, `lcov:FILE` or `gcovr:FILE`, one per line in the ini file |
 | `--popcorn-cov-include` | `popcorn_cov_include` | glob of the source files to keep |
 | `--popcorn-cov-omit` | `popcorn_cov_omit` | glob of the source files to drop |
 | `--popcorn-cov-fail-under` | `popcorn_cov_fail_under` | percent from 0 to 100 |
@@ -139,9 +139,40 @@ pytest ran in, ini targets against the rootdir.
 - `xml` writes Cobertura xml to `coverage.xml`, or the target file.
 - `lcov` writes the lcov tracefile, the format of `lcov` and `genhtml`. A bare `lcov` takes the
   path of `popcorn_cov_lcov`.
+- `gcovr:FILE` writes a gcovr JSON tracefile, see [gcovr reports](#gcovr-reports). It needs a
+  target.
 
 Each process adds its counts to a temporary directory, and the controller builds the reports
 from them once, at the end of the session. Under xdist the workers build none.
+
+### gcovr reports
+
+`--popcorn-cov-report=gcovr:cov.json` writes the coverage as a gcovr JSON tracefile. gcovr
+builds its html pages from this tracefile, with a line and a branch column, the counts per line,
+a function table and the summary with thresholds:
+
+```console
+$ python -m pytest --popcorn-cov --popcorn-cov-report=gcovr:cov.json
+$ gcovr --root <rootdir> --json-add-tracefile cov.json --html-details out/cov.html
+```
+
+- gcovr is installed by the user. The tracefile has `gcovr/format_version` `0.15`, which gcovr 8.8
+  reads. gcovr reads only a tracefile of its own format version, so another release needs a
+  popcorn that writes that version.
+- A `file` is relative to the pytest rootdir for a source under it and as written otherwise.
+  `--root <rootdir>` makes gcovr find the sources, and the same tracefile works from any working
+  directory and from a moved copy of the tree given as `--root`. gcovr reports only the files
+  under `--root`, add `--filter <dir>` for each directory outside it.
+- Include, omit and `--popcorn-cov-unmodelled` apply as for the other reports. `mark` writes the
+  counts, `miss` the zeroed counts, and both write the sidecar `cov.json.unmodelled.json`, which
+  gcovr ignores.
+- A branch that never ran has a count of 0. Each branch carries its block and its index on the
+  line. A line inside a function carries the function name.
+- Tracefiles of several sessions merge with one `--json-add-tracefile` each. gcovr sums the line,
+  branch and function counts. A function that starts on different lines in two tracefiles is a
+  merge error, `--merge-mode-functions=separate` keeps both entries.
+- gcovr marks a coverage percentage below `--html-medium-threshold` (75 by default) as low and
+  below `--html-high-threshold` (90 by default) as medium.
 
 ### Include and omit
 
@@ -205,8 +236,8 @@ firmware did not exercise a model. `--popcorn-cov-unmodelled` sets how these lin
 - `miss` counts those lines, the functions whose only hit lines are among them and their branches
   as not hit in every report.
 
-An `lcov` report in `mark` or `miss` has a sidecar `<lcov>.unmodelled.json` that lists the uses per
-line, and an `lcov` report that applies no sidecar removes the one at its path.
+An `lcov` or `gcovr` report in `mark` or `miss` has a sidecar `<target>.unmodelled.json` that lists
+the uses per line, and one that applies no sidecar removes the one at its path.
 
 `mark` and `miss` make each machine record the CPU accesses per accessing instruction, about 20 ns
 per access to a peripheral register, boot accesses included, and the mode is part of the boot cache
