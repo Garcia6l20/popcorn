@@ -25,7 +25,7 @@ uv run pytest -q examples/stm32h573/rcc
 
 - `conftest.py`: the chip, the image, a boot to `main` and `strict=True`. The HSI needs no
   board clock.
-- `test_rcc.py`: `SystemCoreClock` and `RCC_CFGR1.SWS` read through the symbol and peripheral
+- `test_rcc_h573.py`: `SystemCoreClock` and `RCC_CFGR1.SWS` read through the symbol and peripheral
   views, the VOS0 and wait-state registers, the ready flags captured by intercepts, and the
   SysTick period in virtual time. `SystemCoreClock` is what the firmware computes from the PLL1
   registers. The SysTick period checks the real frequency: the core clock follows HCLK, so the

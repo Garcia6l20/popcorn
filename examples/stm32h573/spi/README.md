@@ -32,7 +32,7 @@ uv run pytest -q examples/stm32h573/spi
 
 - `conftest.py`: the chip, the prebuilt image, `Boot(vtor=0x800C008)` entering the application's
   own vector table, and the 4 MiB flash on SPI4 with its page program time set to 800 us.
-- `test_spi.py`: the `spi` fixture, the `popcorn` marker's instruction budget, runs to a
+- `test_spi_h573.py`: the `spi` fixture, the `popcorn` marker's instruction budget, runs to a
   symbol, intercepts that time two firmware hooks in virtual time, the DWARF view of
   `flash_result`, the flash contents, the pins and the GPDMA request selectors, and a snapshot
   with its restore.

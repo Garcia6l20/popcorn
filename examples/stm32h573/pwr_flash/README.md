@@ -31,10 +31,10 @@ uv run pytest -q examples/stm32h573/pwr_flash
 
 - `conftest.py`: the chip, the image, a boot to `main`, and `strict=True`. No board device:
   flash is part of the chip.
-- `test_pwr_flash.py`: the data sector read through `machine.mem` before the erase, after it
+- `test_pwr_flash_h573.py`: the data sector read through `machine.mem` before the erase, after it
   and after the program, the FLASH_NSSR flags through the peripheral view, the EOP flag and its
-  clear in FLASH_NSCCR, the erase and program times in virtual time, a wait-state count too low
-  for 250 MHz failing the run, and the device signature as the firmware read it.
+  clear in FLASH_NSCCR, the erase and program times in virtual time, a wait-state count too low for
+  250 MHz failing the run, and the device signature as the firmware read it.
 - `firmware/main.c`: the clock sequence, then the erase, program and stray store, then the
   signature reads.
 

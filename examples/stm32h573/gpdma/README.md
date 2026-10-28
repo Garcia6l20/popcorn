@@ -25,7 +25,7 @@ uv run pytest -q examples/stm32h573/gpdma
 
 ## Read first
 
-- `test_gpdma.py`:
+- `test_gpdma_h573.py`:
   - The UART port collects the 352 bytes, with frames back to back at the BRR rate.
   - A block trace shows the CPU mostly asleep while the DMA works.
   - The channel's request selector is the UART9 TX request.

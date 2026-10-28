@@ -40,13 +40,12 @@ uv run pytest -q examples/stm32h573/usb_cdc
 
 ## Read first
 
-- `test_usb_cdc.py`: `machine.periph.USB.host` is the virtual host. `wait_configured` runs
-  the machine until the device is configured, `device_descriptor`, `strings` and `interfaces`
-  give what the host read, compared with the descriptors in the firmware through
-  `machine.var`, and `control` sends a request of the test's own. The controller registers
-  show the address and the endpoint numbers the driver set. `host.cdc()` writes and reads the
-  echo, across a snapshot, an unplug and a replug, parked and inside `running()`, and through a
-  pty.
+- `test_usb_cdc_h573.py`: `machine.periph.USB.host` is the virtual host. `wait_configured` runs the
+  machine until the device is configured, `device_descriptor`, `strings` and `interfaces` give what
+  the host read, compared with the descriptors in the firmware through `machine.var`, and `control`
+  sends a request of the test's own. The controller registers show the address and the endpoint
+  numbers the driver set. `host.cdc()` writes and reads the echo, across a snapshot, an unplug and a
+  replug, parked and inside `running()`, and through a pty.
 - `firmware/usb_descriptors.c`: the device, configuration and string descriptors.
 - `firmware/main.c`: the clock and USB power setup and the CDC echo.
 
