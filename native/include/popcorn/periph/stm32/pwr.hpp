@@ -8,8 +8,9 @@ namespace popcorn::periph::stm32
 struct pwr_options
 {
   /**
-   * @brief Virtual time from a PWR_VOSR.VOS or BOOSTEN change to VOSRDY or BOOSTRDY, or from a
-   *        PWR_VOSCR.VOS change to VOSRDY. RM0456 and RM0481 give no single figure.
+   * @brief Virtual time from a PWR_VOSR.VOS or BOOSTEN change to VOSRDY or BOOSTRDY on the
+   *        STM32U5, RM0456 gives no single figure. The STM32H5 times PWR_VOSCR.VOS changes by
+   *        its measured ACTVOS steps.
    */
   std::chrono::nanoseconds ready_delay = std::chrono::microseconds{50};
 };

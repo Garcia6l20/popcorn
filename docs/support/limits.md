@@ -330,9 +330,15 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 
 - The low-power modes `PWR_CR1.LPMS` selects on the U5 and `PWR_PMCR.LPMS` on the H5 are not
   modelled. A deep-sleep WFI idles as a plain WFI.
-- The voltage scaling ready bits follow a VOS write after the board's `ready_delay`, 50 us by
-  default. A write that steps to a higher voltage clears VOSRDY for that delay, one that steps to
-  a lower voltage keeps VOSRDY set. ACTVOSRDY clears for the delay on every change.
+- STM32U5: the voltage scaling ready bits follow a VOS write after the board's `ready_delay`,
+  50 us by default. A write that steps to a higher voltage clears VOSRDY for that delay, one that
+  steps to a lower voltage keeps VOSRDY set. ACTVOSRDY clears for the delay on every change.
+- STM32H5: a VOS write moves ACTVOS one level toward VOS at once and one more level every
+  10.4 us, and VOSRDY and ACTVOSRDY set 15.2 us after the last step. VOS3 to VOS0 reads
+  0x4000, 0x8000 and 0xC000 in PWR_VOSSR, then 0xE008 36 us after the write, as measured on an
+  STM32H573. A step to a lower voltage keeps VOSRDY set and takes the same steps, and a change
+  of one or two levels follows the same rule. The measurement covers VOS3 to VOS0 only. FLASH
+  checks its latency against the range of the last ready.
 - STM32H5: PWR_USBSCR is storage, the USB model runs whatever USB33DEN and USB33SV hold.
 
 ## RCC

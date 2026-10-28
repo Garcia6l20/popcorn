@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -25,6 +26,7 @@ namespace
 {
 constexpr std::uint32_t voltage_ready = 0;
 constexpr std::uint32_t booster_ready = 1;
+constexpr std::uint32_t voltage_step  = 2;
 
 enum class low_power_mode : std::uint8_t
 {
@@ -78,6 +80,7 @@ struct pwr_rule
 struct pwr_state
 {
   std::array<std::uint32_t, 2> generation{};
+  std::uint32_t                settled_level{};
 
   friend auto operator==(pwr_state const&, pwr_state const&) -> bool = default;
 };
@@ -108,6 +111,15 @@ struct pwr_wakeup_field
   bool raz = true;
 };
 
+/** @brief ACTVOS stepping of a VOS change, measured on silicon. */
+struct vos_stepping
+{
+  /** @brief Time between two one-level ACTVOS steps. */
+  std::chrono::nanoseconds step;
+  /** @brief Time from the last ACTVOS step to VOSRDY and ACTVOSRDY. */
+  std::chrono::nanoseconds settle;
+};
+
 /** @brief What differs between the PWR blocks one model serves. */
 struct pwr_family
 {
@@ -121,6 +133,10 @@ struct pwr_family
   bool vos_ready_set = true;
   /** @brief The active VOS ready bit reads 1 when the voltage is ready. */
   bool active_ready_set = true;
+  /** @brief ACTVOS moves one level toward VOS at the VOS write and one more every `step`, and
+   *         the ready bits set `settle` after the last step. Without it ACTVOS takes the new VOS
+   *         when the board's ready delay ends. */
+  std::optional<vos_stepping> stepping{};
   /** @brief Write handlers of every machine. */
   std::span<write_entry<pwr> const> writes;
   /** @brief Write handlers added under TrustZone. */
@@ -141,7 +157,11 @@ struct pwr_family
  *        being at or above the selected level, RM0456 10.10.4 and RM0481 10.11.6. ACTVOSRDY clears
  *        on every VOS change until the delay ends, and BOOSTRDY follows BOOSTEN the same way on the
  *        U5. ACTVOS takes the new range at the end of the delay and the FLASH model is told for its
- *        latency check. The H5 reads them in PWR_VOSSR and writes VOS in PWR_VOSCR.
+ *        latency check. The H5 reads them in PWR_VOSSR and writes VOS in PWR_VOSCR, and steps
+ *        ACTVOS one level at the write and one more every 10.4 us, with VOSRDY and ACTVOSRDY set
+ *        15.2 us after the last step: VOS3 to VOS0 is ready 36 us after the write, as measured on
+ *        an STM32H573. The voltage range FLASH checks against is the one at the last ready, so
+ *        the steps change it only when the ready bits set.
  *        Low-power modes are not modelled: the first write to the mode register, PWR_CR1 on the
  *        U5 and PWR_PMCR on the H5, logs one warning per machine life naming the LPMS mode, and
  *        a deep-sleep WFI idles as a plain WFI.
@@ -189,6 +209,8 @@ public:
 private:
   void               add_rules();
   [[nodiscard]] auto rule_secure(pwr_rule const& rule) const -> bool;
+  void               step_active(vos_stepping const& stepping, std::uint64_t generation);
+  [[nodiscard]] auto active_ready() const -> bool;
 
   pwr_options                options_;
   register_file&             regs_;
@@ -350,11 +372,16 @@ constexpr std::array<write_entry<pwr>, 4> h5_writes{
 };
 
 constexpr pwr_family h5_pwr{
-    .fields              = h5_names,
-    .modes               = h5_modes_by_lpms,
-    .vos_levels          = h5_vos_levels,
-    .vos_ready_set       = true,
-    .active_ready_set    = true,
+    .fields           = h5_names,
+    .modes            = h5_modes_by_lpms,
+    .vos_levels       = h5_vos_levels,
+    .vos_ready_set    = true,
+    .active_ready_set = true,
+    .stepping =
+        vos_stepping{
+                     .step   = std::chrono::nanoseconds{10'400},
+                     .settle = std::chrono::nanoseconds{15'200},
+                     },
     .writes              = h5_writes,
     .trustzone_writes    = h5_trustzone_writes,
     .secured             = h5_secured,
@@ -586,6 +613,7 @@ void pwr::reset(register_file& regs, reset_kind)
   {
     regs.poke(reg(name).offset, describe(name).reset);
   }
+  state_.settled_level = family_.vos_levels[get(regs, names_[pwr_role::active_vos])];
 }
 
 void pwr::vosr_written(std::uint32_t old, std::uint32_t now)
@@ -598,7 +626,15 @@ void pwr::vosr_written(std::uint32_t old, std::uint32_t now)
       update(regs_, names_[pwr_role::vos_ready], family_.vos_ready_set ? 0 : 1);
     }
     update(regs_, names_[pwr_role::active_vos_ready], family_.active_ready_set ? 0 : 1);
-    schedule_in(options_.ready_delay, voltage_ready, ++state_.generation[voltage_ready]);
+    auto const generation = ++state_.generation[voltage_ready];
+    if(family_.stepping)
+    {
+      step_active(*family_.stepping, generation);
+    }
+    else
+    {
+      schedule_in(options_.ready_delay, voltage_ready, generation);
+    }
   }
   auto const booster = names_.find(pwr_role::booster);
   if(booster and booster->of(now) != booster->of(old))
@@ -625,13 +661,49 @@ void pwr::cr1_written(std::uint32_t, std::uint32_t now)
           reflex::enum_value_name(family_.modes[names_[pwr_role::mode].of(now)])));
 }
 
+void pwr::step_active(vos_stepping const& stepping, std::uint64_t generation)
+{
+  auto const target = get(regs_, names_[pwr_role::vos]);
+  auto       active = get(regs_, names_[pwr_role::active_vos]);
+  if(active != target)
+  {
+    active = active < target ? active + 1 : active - 1;
+    update(regs_, names_[pwr_role::active_vos], active);
+  }
+  if(active == target)
+  {
+    schedule_in(stepping.settle, voltage_ready, generation);
+  }
+  else
+  {
+    schedule_in(stepping.step, voltage_step, generation);
+  }
+}
+
+auto pwr::active_ready() const -> bool
+{
+  return get(regs_, names_[pwr_role::active_vos_ready]) == (family_.active_ready_set ? 1u : 0u);
+}
+
 auto pwr::active_level() const -> std::uint32_t
 {
+  if(not active_ready())
+  {
+    return state_.settled_level;
+  }
   return family_.vos_levels[get(regs_, names_[pwr_role::active_vos])];
 }
 
 void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == voltage_step)
+  {
+    if(family_.stepping and payload == state_.generation[voltage_ready])
+    {
+      step_active(*family_.stepping, payload);
+    }
+    return;
+  }
   if(kind > booster_ready or payload != state_.generation[kind])
   {
     return;
@@ -641,6 +713,7 @@ void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
     update(regs_, names_[pwr_role::vos_ready], family_.vos_ready_set ? 1 : 0);
     update(regs_, names_[pwr_role::active_vos], get(regs_, names_[pwr_role::vos]));
     update(regs_, names_[pwr_role::active_vos_ready], family_.active_ready_set ? 1 : 0);
+    state_.settled_level = family_.vos_levels[get(regs_, names_[pwr_role::active_vos])];
     for(auto* const peer : ctx_.peers.all())
     {
       if(auto* const listener = dynamic_cast<voltage_range_listener*>(peer))

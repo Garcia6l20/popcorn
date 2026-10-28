@@ -28,6 +28,7 @@ using popcorn::testing::h573;
 using popcorn::testing::stm32_fixture;
 
 constexpr std::uint32_t loop_at = 0x2000'0100;
+constexpr std::uint64_t ns      = 1'000;
 constexpr std::uint64_t us      = 1'000'000;
 
 struct rig
@@ -115,40 +116,52 @@ TEST_CASE("RM0481 10.11.6: PWR_VOSSR resets to 0x2008, VOSRDY and ACTVOSRDY set 
   CHECK(r.level() == 3);
 }
 
-TEST_CASE("a VOS write clears both ready bits at once and the delay sets them with ACTVOS")
+TEST_CASE("STM32H573 silicon: VOS3 to VOS0 steps ACTVOS every 10.4 us and is ready after 36 us")
 {
   rig        r;
   auto const idle = r.pending();
   r.write("PWR_VOSCR", 3u << 4);
-  CHECK(r.get("PWR_VOSSR", "VOSRDY") == 0);
-  CHECK(r.get("PWR_VOSSR", "ACTVOSRDY") == 0);
-  CHECK(r.get("PWR_VOSSR", "ACTVOS") == 0);
+  CHECK(r.read("PWR_VOSSR") == 0x4000);
   CHECK(r.level() == 3);
   CHECK(r.pending() == idle + 1);
-  r.run_for(49 * us);
-  CHECK(r.get("PWR_VOSSR", "VOSRDY") == 0);
+  r.run_for(10'300 * ns);
+  CHECK(r.read("PWR_VOSSR") == 0x4000);
+  r.run_for(200 * ns);
+  CHECK(r.read("PWR_VOSSR") == 0x8000);
   CHECK(r.level() == 3);
-  r.run_for(2 * us);
-  CHECK(r.get("PWR_VOSSR", "VOSRDY") == 1);
-  CHECK(r.get("PWR_VOSSR", "ACTVOSRDY") == 1);
-  CHECK(r.get("PWR_VOSSR", "ACTVOS") == 3);
+  r.run_for(10'200 * ns);
+  CHECK(r.read("PWR_VOSSR") == 0x8000);
+  r.run_for(200 * ns);
+  CHECK(r.read("PWR_VOSSR") == 0xC000);
+  CHECK(r.level() == 3);
+  r.run_for(15'000 * ns);
+  CHECK(r.read("PWR_VOSSR") == 0xC000);
+  CHECK(r.level() == 3);
+  r.run_for(200 * ns);
+  CHECK(r.read("PWR_VOSSR") == 0xE008);
   CHECK(r.level() == 0);
 }
 
-TEST_CASE("RM0481 10.11.6: a lower VOS keeps VOSRDY, ACTVOSRDY clears until the delay")
+TEST_CASE("RM0481 10.11.6: a lower VOS keeps VOSRDY and steps down, ACTVOSRDY clears until ready")
 {
   rig r;
   r.write("PWR_VOSCR", 3u << 4);
-  r.run_for(60 * us);
-  REQUIRE(r.get("PWR_VOSSR", "VOSRDY") == 1);
-  REQUIRE(r.get("PWR_VOSSR", "ACTVOS") == 3);
+  r.run_for(40 * us);
+  REQUIRE(r.read("PWR_VOSSR") == 0xE008);
   auto const idle = r.pending();
   r.write("PWR_VOSCR", 1u << 4);
   CHECK(r.get("PWR_VOSSR", "VOSRDY") == 1);
   CHECK(r.get("PWR_VOSSR", "ACTVOSRDY") == 0);
-  CHECK(r.get("PWR_VOSSR", "ACTVOS") == 3);
+  CHECK(r.get("PWR_VOSSR", "ACTVOS") == 2);
+  CHECK(r.level() == 0);
   CHECK(r.pending() == idle + 1);
-  r.run_for(60 * us);
+  r.run_for(10'500 * ns);
+  CHECK(r.get("PWR_VOSSR", "ACTVOS") == 1);
+  CHECK(r.get("PWR_VOSSR", "ACTVOSRDY") == 0);
+  CHECK(r.level() == 0);
+  r.run_for(15'000 * ns);
+  CHECK(r.get("PWR_VOSSR", "ACTVOSRDY") == 0);
+  r.run_for(200 * ns);
   CHECK(r.get("PWR_VOSSR", "VOSRDY") == 1);
   CHECK(r.get("PWR_VOSSR", "ACTVOSRDY") == 1);
   CHECK(r.get("PWR_VOSSR", "ACTVOS") == 1);
@@ -164,19 +177,42 @@ TEST_CASE("a VOS write that changes nothing starts no delay")
   CHECK(r.get("PWR_VOSSR", "VOSRDY") == 1);
 }
 
-TEST_CASE("a second VOS write supersedes the first: the stale due time changes nothing")
+TEST_CASE("each VOS write restarts the steps: a stale step or ready event changes nothing")
 {
   rig r;
   r.write("PWR_VOSCR", 3u << 4);
-  r.run_for(30 * us);
-  r.write("PWR_VOSCR", 2u << 4);
-  r.run_for(25 * us);
-  CHECK(r.get("PWR_VOSSR", "VOSRDY") == 0);
+  r.run_for(2 * us);
+  r.write("PWR_VOSCR", 0);
   CHECK(r.get("PWR_VOSSR", "ACTVOS") == 0);
-  r.run_for(30 * us);
-  CHECK(r.get("PWR_VOSSR", "VOSRDY") == 1);
+  r.run_for(2 * us);
+  r.write("PWR_VOSCR", 3u << 4);
+  CHECK(r.get("PWR_VOSSR", "ACTVOS") == 1);
+  r.run_for(8 * us);
+  CHECK(r.get("PWR_VOSSR", "ACTVOS") == 1);
+  r.run_for(6 * us);
   CHECK(r.get("PWR_VOSSR", "ACTVOS") == 2);
-  CHECK(r.level() == 1);
+  CHECK(r.get("PWR_VOSSR", "ACTVOSRDY") == 0);
+  CHECK(r.get("PWR_VOSSR", "VOSRDY") == 0);
+  r.run_for(21'900 * ns);
+  CHECK(r.get("PWR_VOSSR", "ACTVOS") == 3);
+  CHECK(r.get("PWR_VOSSR", "VOSRDY") == 0);
+  r.run_for(200 * ns);
+  CHECK(r.read("PWR_VOSSR") == 0xE008);
+  CHECK(r.level() == 0);
+}
+
+TEST_CASE("a reset sets the FLASH voltage range back to VOS3 for the next VOS change")
+{
+  rig r;
+  r.write("PWR_VOSCR", 3u << 4);
+  r.run_for(40 * us);
+  REQUIRE(r.level() == 0);
+  r.f.target->reset();
+  r.f.set("pc", loop_at | 1u);
+  CHECK(r.level() == 3);
+  r.write("PWR_VOSCR", 3u << 4);
+  CHECK(r.get("PWR_VOSSR", "ACTVOSRDY") == 0);
+  CHECK(r.level() == 3);
 }
 
 TEST_CASE("active_level() maps every H5 ACTVOS code to a level, VOS0 is level 0")
@@ -200,18 +236,28 @@ TEST_CASE("active_level() maps every H5 ACTVOS code to a level, VOS0 is level 0"
   }
 }
 
-TEST_CASE("a snapshot taken while VOSRDY is pending restores to the same run")
+TEST_CASE("a snapshot taken between two ACTVOS steps restores to the same run")
 {
   rig r;
   r.write("PWR_VOSCR", 3u << 4);
-  auto const saved = r.f.target->snapshot();
-  r.run_for(60 * us);
-  CHECK(r.get("PWR_VOSSR", "ACTVOS") == 3);
-  r.f.target->restore(saved);
-  CHECK(r.get("PWR_VOSSR", "VOSRDY") == 0);
-  r.run_for(60 * us);
-  CHECK(r.get("PWR_VOSSR", "VOSRDY") == 1);
-  CHECK(r.get("PWR_VOSSR", "ACTVOS") == 3);
+  auto const at_write = r.f.target->snapshot();
+  r.run_for(12 * us);
+  REQUIRE(r.get("PWR_VOSSR", "ACTVOS") == 2);
+  auto const between = r.f.target->snapshot();
+  r.run_for(30 * us);
+  CHECK(r.read("PWR_VOSSR") == 0xE008);
+  r.f.target->restore(between);
+  CHECK(r.read("PWR_VOSSR") == 0x8000);
+  CHECK(r.level() == 3);
+  r.run_for(9 * us);
+  CHECK(r.read("PWR_VOSSR") == 0xC000);
+  r.run_for(21 * us);
+  CHECK(r.read("PWR_VOSSR") == 0xE008);
+  CHECK(r.level() == 0);
+  r.f.target->restore(at_write);
+  CHECK(r.read("PWR_VOSSR") == 0x4000);
+  r.run_for(40 * us);
+  CHECK(r.read("PWR_VOSSR") == 0xE008);
 }
 
 TEST_CASE("RM0481 10.11.1: the first PWR_PMCR write logs its LPMS mode, 1 is standby")
