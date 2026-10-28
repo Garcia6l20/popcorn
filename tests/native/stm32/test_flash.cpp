@@ -1096,12 +1096,12 @@ TEST_CASE("a restore into a fresh machine keeps stores reaching its FLASH model"
   CHECK(other.words(last_page, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
 }
 
-TEST_CASE("HSI16 runs while PG or STRT is set, then stops unless HSION keeps it")
+TEST_CASE("RM0456 11.8.1: HSIRDY stays 0 with HSION 0 while PG or STRT runs HSI16")
 {
   flash_rig rig;
   REQUIRE(rig.f.field("RCC", "RCC_CR", "HSION") == 0);
   rig.program(last_page, {1, 2, 3, 4});
-  CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 1);
+  CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 0);
   rig.control(0);
   CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 0);
   rig.control(per | bker | pnb(63) | strt);
@@ -1109,20 +1109,23 @@ TEST_CASE("HSI16 runs while PG or STRT is set, then stops unless HSION keeps it"
   CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 0);
 }
 
-TEST_CASE("HSI16 stays on while a held program runs after PG is cleared")
+TEST_CASE("RM0456 11.8.1: a switch to HSI16 with HSION 0 waits through a FLASH program")
 {
   flash_rig rig;
   REQUIRE(rig.f.field("RCC", "RCC_CR", "HSION") == 0);
+  rig.write("RCC", "RCC_CFGR1", sw_hsi16);
   rig.control(pg);
   rig.store_words(last_page, {1, 2, 3, 4});
-  rig.wait_idle();
-  REQUIRE(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 1);
-  rig.store_words(last_page + 16, {5, 6, 7, 8});
   REQUIRE(rig.status("BSY") == 1);
-  rig.control(0);
-  CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 1);
-  rig.wait_idle();
+  rig.spin();
   CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 0);
+  CHECK(rig.f.field("RCC", "RCC_CFGR1", "SWS") == 0);
+  rig.wait_idle();
+  CHECK(rig.f.field("RCC", "RCC_CFGR1", "SWS") == 0);
+  rig.write("RCC", "RCC_CR", rig.read_reg("RCC", "RCC_CR") | hsion);
+  rig.spin();
+  CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 1);
+  CHECK(rig.f.field("RCC", "RCC_CFGR1", "SWS") == sw_hsi16);
 }
 
 TEST_CASE("a BWR burst collects 32 words then programs 128 bytes under one BSY")
@@ -1486,14 +1489,36 @@ TEST_CASE("under strict_peripherals each latency violation raises model_error")
 
   flash_rig late{{}, true};
   late.write("FLASH_ACR", 0);
-  late.write("RCC", "RCC_CR", late.read_reg("RCC", "RCC_CR") | hsion);
-  late.spin();
   late.write("RCC", "RCC_CFGR1", sw_hsi16);
+  late.write("RCC", "RCC_CR", late.read_reg("RCC", "RCC_CR") | hsion);
   late.f.set("r0", 2000);
   late.f.set("pc", sym("flash_ll", "spin"));
   CHECK_THROWS_AS(
       static_cast<void>(late.f.target->run_slice({.max_instructions = icount{100'000}})),
       popcorn::model_error);
+
+  flash_rig store{{}, true};
+  store.write("PWR", "PWR_VOSR", vos_range1);
+  store.spin();
+  REQUIRE(store.f.field("PWR", "PWR_SVMSR", "ACTVOS") == 3);
+  store.write("FLASH_ACR", 0);
+  store.switch_to_hsi16();
+  store.write("RCC", "RCC_PLL1CFGR", 2u | 3u << 2 | 1u << 18);
+  store.write("RCC", "RCC_PLL1DIVR", 19u | 1u << 24);
+  store.write("RCC", "RCC_CR", store.read_reg("RCC", "RCC_CR") | 1u << 24);
+  store.spin();
+  REQUIRE(store.f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  auto const buffer = sym("flash_ll", "words");
+  REQUIRE(
+      store.f.target->mem().write(buffer, 4, store.read_reg("RCC", "RCC_CFGR1") | 3u).has_value());
+  store.f.set("r0", store.at("RCC_CFGR1", "RCC"));
+  store.f.set("r1", buffer);
+  store.f.set("r2", 1);
+  store.f.set("pc", sym("flash_ll", "copy_words"));
+  CHECK_THROWS_AS(
+      static_cast<void>(store.f.target->run_slice({.max_instructions = icount{1'000}})),
+      popcorn::model_error);
+  CHECK(store.f.field("RCC", "RCC_CFGR1", "SWS") == 3);
 }
 
 TEST_CASE("a power cut during a BWR burst programs the quad-words its elapsed time reached")

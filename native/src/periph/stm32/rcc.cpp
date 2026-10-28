@@ -51,7 +51,7 @@ template <typename Traits>
 inline constexpr std::size_t signal_count = role_count<typename Traits::signal>;
 
 template <typename Traits>
-inline constexpr std::size_t event_count = source_count<Traits> + (Traits::hsi_divider ? 2 : 1);
+inline constexpr std::size_t event_count = source_count<Traits> + (Traits::hsi_divider ? 1 : 0);
 
 struct unit_bits
 {
@@ -145,10 +145,10 @@ template <typename Traits> consteval auto source_maps_agree() -> bool
 
 template <typename Traits> struct rcc_state
 {
-  std::array<std::uint32_t, event_count<Traits>> generation{};
-  std::uint32_t                                  pending{};
-  std::uint8_t                                   lsi_forced{};
-  std::uint8_t                                   hsi16_held{};
+  std::array<std::uint32_t, event_count<Traits>>      generation{};
+  std::uint32_t                                       pending{};
+  std::uint8_t                                        lsi_forced{};
+  std::array<std::uint32_t, Traits::pll_nodes.size()> fraction{};
 
   friend auto operator==(rcc_state const&, rcc_state const&) -> bool = default;
 };
@@ -197,26 +197,43 @@ template <typename Signal> struct timer
 };
 
 /**
- * @brief RCC of the STM32U5, RM0456 section 11, and of the STM32H5, RM0481 section 11. Ready
- *        flags follow their enables after the
- *        board's ready delay. RCC writes RCC_CIFR storage directly when the matching RCC_CIER bit
- *        is set and raises no ready interrupt: firmware waiting on the RCC IRQ hangs, and the
- *        spin stop names its loop. A write that would stop the core clock, switching off the
- *        oscillator that drives it or changing PLL1 while it drives it, is refused and logs one
- *        warning per machine life. A started IWDG keeps the LSI on until the next reset, RM0456
- *        section 11.4.16. FLASH programming or erase keeps HSI16 on while it runs, RM0456
- *        sections 7.3.6 and 7.3.7. A change of an instance's bit in an RCC_xxxRSTR register,
- *        RM0456 11.8.21 to 11.8.28, holds or releases the instance through
- *        `core::machine_services::hold_in_reset()`, which resets its storage and calls its
- *        model's `periph::bus_reset_listener::on_bus_reset()`. The bit is `<instance>RST`, or
- *        the name of `reset_bit_names`. The STM32H5 reset registers are RM0481 11.8.19 to
- *        11.8.25, its reset flags `RCC_RSR`, RM0481 11.8.46.
+ * @brief RCC of the STM32U5, RM0456 section 11, and of the STM32H5, RM0481 section 11. Ready flags
+ *        follow their enables after the board's ready delay. SWS follows SW in the write that
+ *        selects a ready source, or when the selected source becomes ready, RM0456 11.4.9 and
+ *        RM0481 11.4.8. RCC writes RCC_CIFR storage directly when the matching RCC_CIER bit is set
+ *        and raises no ready interrupt: firmware waiting on the RCC IRQ hangs, and the spin stop
+ *        names its loop. RCC holds, with no log record, each write RM0456 11.8 and RM0481 11.8 say
+ *        the hardware ignores: a clear of the ON bit of the SYSCLK source and of the PLL1 input
+ *        while PLL1 drives SYSCLK, on the STM32H5 of the PLL1 input while PLL1ON stays set after
+ *        the write, RM0481 11.8.1, a write of `PLLxSRC`, `PLLxM`, `PLLxRGE`, `PLLxN` and the output
+ *        dividers while the PLL is on or ready, on the STM32H5 of PLL1PEN, PLL1QEN and PLL1REN too,
+ *        RM0481 11.8.7, and a clear of the PLL1 output enable that feeds SYSCLK while it does. The
+ *        STM32U5 `PLL1MBOOST` is storage. A selected SYSCLK source that runs at 0 Hz, such as a
+ *        PLL1 output whose enable is clear, leaves the core clock at its rate and logs one warning
+ *        per machine life. A started IWDG keeps the LSI on until the next reset, RM0456 section
+ *        11.4.16. FLASH programming or erase runs HSI16 for the FLASH interface, RM0456 sections
+ *        7.3.6 and 7.3.7, and `HSIRDY` and the HSI16 clock of the tree follow `HSION` alone, RM0456
+ *        11.8.1. A change of an instance's bit in an RCC_xxxRSTR register, RM0456 11.8.21 to
+ *        11.8.28, holds or releases the instance through `core::machine_services::hold_in_reset()`,
+ *        which resets its storage and calls its model's
+ *        `periph::bus_reset_listener::on_bus_reset()`. The bit is `<instance>RST`, or the name of
+ *        `reset_bit_names`. The STM32H5 reset registers are RM0481 11.8.19 to 11.8.25, its reset
+ *        flags `RCC_RSR`, RM0481 11.8.46.
  *
- *        STM32H5, RM0481 11.8.1: a write of `HSIDIV` sets the HSI rate at once, clears
- *        `HSIDIVF` and sets it again after the ready delay. Deviation: on silicon the rate
- *        follows when `HSIDIVF` sets. `HSIDIV` keeps its value while HSI feeds a PLL whose
- *        PLLxON is set. `TIMPRE`, RM0481 11.8.5, sets the timer clocks of APB1 and APB2.
- *        `VSWRST` resets the backup domain, RM0481 11.3.3.
+ *        The PLL fractional modulator loads `PLLxFRACN` when `PLLxON` sets with `PLLxFRACEN` 1,
+ *        and 0 with `PLLxFRACEN` 0, in either write order, as measured on an STM32H573. While
+ *        the PLL runs, a `PLLxFRACEN` write from 0 to 1 loads `PLLxFRACN` again and the VCO keeps
+ *        the loaded fraction whatever `PLLxFRACEN` and `PLLxFRACN` read later, RM0456 11.4.6 and
+ *        11.8.9, RM0481 11.4.5 and 11.8.7. Deviation: the fraction applies at once, silicon takes
+ *        it three reference clock periods later.
+ *
+ *        STM32H5, RM0481 11.8.1: a write of `HSIDIV` sets the HSI rate at once, clears `HSIDIVF`
+ *        and sets it again `h5_rcc::hsi_divider_delay` later. Deviation: on silicon the rate
+ *        follows when `HSIDIVF` sets. `HSIDIV` keeps its value while PLL1 drives SYSCLK from HSI
+ *        and changes in every other state, an enabled PLL1 off SYSCLK fed by HSI included, as
+ *        measured on an STM32H573 against the RM0481 11.8.1 text. For PLL2 and PLL3 fed by HSI the
+ *        model applies the same rule, inferred from PLL1. `TIMPRE`, RM0481 11.8.5, sets the timer
+ *        clocks of APB1 and APB2. `VSWRST` resets the backup domain, RM0481 11.3.3.
  *
  *        TrustZone, RM0456 11.5 and Table 117: the bits each `RCC_SECCFGR` bit secures, and the
  *        reset, enable, sleep enable, autonomous enable and kernel clock selection bits of a
@@ -255,8 +272,7 @@ class rcc_model final : public dispatch_model<rcc_model<Traits>, rcc_state<Trait
 
   static constexpr std::size_t   source_count = stm32::source_count<Traits>;
   static constexpr std::size_t   signal_count = stm32::signal_count<Traits>;
-  static constexpr std::uint32_t switch_kind  = source_count;
-  static constexpr std::uint32_t divider_kind = source_count + 1;
+  static constexpr std::uint32_t divider_kind = source_count;
 
   static_assert(Traits::oscillators.size() == source_count);
   static_assert(std::to_underlying(source::pll1) + Traits::pll_nodes.size() == source_count);
@@ -346,13 +362,14 @@ private:
       std::uint32_t    old,
       std::uint32_t    now);
   void start(source which);
+  void load_fraction(std::size_t pll);
   void stop(source which);
   void schedule(std::uint32_t kind);
   void cancel(std::uint32_t kind);
   void settle(bool notify);
   void publish(bool notify);
   void load(std::span<std::byte const> in) override;
-  void refuse_core_stop(std::string_view reg, std::string_view what);
+  void refuse_stopped_clock();
 
   bool                                                 core_stop_logged_{};
   rcc_options                                          options_;
@@ -678,8 +695,7 @@ template <typename Traits> auto rcc_model<Traits>::is_ready(source which) const 
 template <typename Traits> auto rcc_model<Traits>::is_on(source which) const -> bool
 {
   return get(regs_, osc_[std::to_underlying(which)].on) != 0
-      or (which == source::lsi and state_.lsi_forced != 0)
-      or (which == Traits::programming_clock and state_.hsi16_held != 0);
+      or (which == source::lsi and state_.lsi_forced != 0);
 }
 
 template <typename Traits> auto rcc_model<Traits>::pll_input(std::size_t pll) const -> source
@@ -712,7 +728,15 @@ template <typename Traits> void rcc_model<Traits>::schedule(std::uint32_t kind)
 {
   auto const generation = ++state_.generation[kind];
   state_.pending |= std::uint32_t{1} << kind;
-  auto const delay = static_cast<std::uint64_t>(options_.ready_delay.count()) * 1000u;
+  auto ready = options_.ready_delay;
+  if constexpr(Traits::hsi_divider)
+  {
+    if(kind == divider_kind)
+    {
+      ready = Traits::hsi_divider_delay;
+    }
+  }
+  auto const delay = static_cast<std::uint64_t>(ready.count()) * 1000u;
   ctx_.events.schedule_at(vtime{ctx_.clock.time().ps + delay}, kind, generation, ctx_.clock);
 }
 
@@ -720,6 +744,13 @@ template <typename Traits> void rcc_model<Traits>::cancel(std::uint32_t kind)
 {
   ++state_.generation[kind];
   state_.pending &= ~(std::uint32_t{1} << kind);
+}
+
+template <typename Traits> void rcc_model<Traits>::load_fraction(std::size_t pll)
+{
+  auto const& fields   = pll_[pll];
+  auto const  fraction = fields.fracen and fields.frac and get(regs_, *fields.fracen) != 0;
+  state_.fraction[pll] = fraction ? get(regs_, *fields.frac) : 0;
 }
 
 template <typename Traits> void rcc_model<Traits>::start(source which)
@@ -746,7 +777,17 @@ void rcc_model<Traits>::oscillators_written(
     std::uint32_t    old,
     std::uint32_t    now)
 {
-  auto const used = in_use();
+  auto used = in_use();
+  if constexpr(Traits::pll1_input_held_while_on)
+  {
+    auto const pll1 = std::to_underlying(source::pll1);
+    auto const written =
+        Traits::oscillators[pll1].reg == reg ? osc_[pll1].on.of(now) != 0 : is_on(source::pll1);
+    if((written or (used >> pll1 & 1u) != 0) and pll_input(0) != source::pll1)
+    {
+      used |= std::uint32_t{1} << std::to_underlying(pll_input(0));
+    }
+  }
   for(auto const& [index, names] : std::views::enumerate(Traits::oscillators))
   {
     if(names.reg != reg)
@@ -757,10 +798,6 @@ void rcc_model<Traits>::oscillators_written(
     now             = osc.ready.with(now, osc.ready.of(old));
     if((used >> static_cast<std::uint32_t>(index) & 1u) != 0)
     {
-      if(osc.on.of(now) == 0)
-      {
-        refuse_core_stop(reg, std::format("{} = 0", names.on));
-      }
       now = osc.on.with(now, 1);
     }
   }
@@ -776,6 +813,10 @@ void rcc_model<Traits>::oscillators_written(
     if(is and not was)
     {
       start(static_cast<source>(index));
+      if(auto const at = static_cast<std::size_t>(index); at >= std::to_underlying(source::pll1))
+      {
+        load_fraction(at - std::to_underlying(source::pll1));
+      }
     }
     else if(was and not is and not is_on(static_cast<source>(index)))
     {
@@ -800,13 +841,10 @@ auto rcc_model<Traits>::divider_written(std::uint32_t old, std::uint32_t now) ->
 {
   auto const divider = names_[rcc_role::hsi_divider];
   auto const flag    = names_[rcc_role::hsi_divider_flag];
-  for(std::size_t pll = 0; pll < pll_.size(); ++pll)
+  if((in_use() >> std::to_underlying(source::pll1) & 1u) != 0
+     and pll_input(0) == Traits::divided_oscillator)
   {
-    auto const which = static_cast<source>(std::to_underlying(source::pll1) + pll);
-    if(pll_input(pll) == Traits::divided_oscillator and is_on(which))
-    {
-      now = divider.with(now, divider.of(old));
-    }
+    now = divider.with(now, divider.of(old));
   }
   if(divider.of(now) != divider.of(old))
   {
@@ -833,8 +871,7 @@ template <typename Traits>
 template <std::size_t Pll>
 void rcc_model<Traits>::pll_config_written(std::uint32_t old, std::uint32_t now)
 {
-  auto const& fields    = pll_[Pll];
-  auto const  attempted = now;
+  auto const& fields = pll_[Pll];
   if(locked(Pll))
   {
     for(auto const& kept : {std::optional{fields.src}, fields.range, fields.m})
@@ -844,20 +881,27 @@ void rcc_model<Traits>::pll_config_written(std::uint32_t old, std::uint32_t now)
         now = kept->with(now, kept->of(old));
       }
     }
+    if constexpr(Traits::pll_nodes[Pll].outputs_held_while_on)
+    {
+      for(auto const& kept : fields.output_enable)
+      {
+        if(kept)
+        {
+          now = kept->with(now, kept->of(old));
+        }
+      }
+    }
   }
   auto const drives_core = Pll == 0 and (in_use() >> std::to_underlying(source::pll1) & 1u) != 0;
-  if(drives_core)
+  if(auto const& enable = fields.output_enable[system_output]; drives_core and enable)
   {
-    if(auto const& enable = fields.output_enable[system_output])
-    {
-      now = enable->with(now, 1);
-    }
-    if(now != attempted)
-    {
-      refuse_core_stop(Traits::pll_nodes.front().config, "a PLL1 configuration change");
-    }
+    now = enable->with(now, 1);
   }
   regs_.poke(fields.src.offset, now);
+  if(fields.fracen and fields.fracen->of(old) == 0 and fields.fracen->of(now) != 0)
+  {
+    load_fraction(Pll);
+  }
   settle(true);
 }
 
@@ -865,8 +909,7 @@ template <typename Traits>
 template <std::size_t Pll>
 void rcc_model<Traits>::pll_dividers_written(std::uint32_t old, std::uint32_t now)
 {
-  auto const& fields    = pll_[Pll];
-  auto const  attempted = now;
+  auto const& fields = pll_[Pll];
   if(locked(Pll))
   {
     now = fields.n.with(now, fields.n.of(old));
@@ -876,26 +919,21 @@ void rcc_model<Traits>::pll_dividers_written(std::uint32_t old, std::uint32_t no
       now              = kept.with(now, kept.of(old));
     }
   }
-  if(Pll == 0 and now != attempted and (in_use() >> std::to_underlying(source::pll1) & 1u) != 0)
-  {
-    refuse_core_stop(Traits::pll_nodes.front().dividers, "a PLL1 divider change");
-  }
   regs_.poke(fields.n.offset, now);
   settle(true);
 }
 
-template <typename Traits>
-void rcc_model<Traits>::refuse_core_stop(std::string_view reg, std::string_view what)
+template <typename Traits> void rcc_model<Traits>::refuse_stopped_clock()
 {
   if(std::exchange(core_stop_logged_, true))
   {
     return;
   }
   warn(
-      reg,
+      "RCC_CFGR1",
       std::format(
-          "firmware tried to stop the core clock with {}, refused: the core clock stays at {} Hz",
-          what, ctx_.clock.core_hz()));
+          "the selected system clock source runs at 0 Hz, the core clock stays at {} Hz",
+          ctx_.clock.core_hz()));
 }
 
 template <typename Traits> auto rcc_model<Traits>::locked(std::size_t pll) const -> bool
@@ -964,14 +1002,6 @@ void rcc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     update(regs_, names_[rcc_role::hsi_divider_flag], 1);
   }
-  else if(kind == switch_kind)
-  {
-    auto const target = read(rcc_role::sw);
-    if(auto const input = system_source(target); input and is_ready(*input))
-    {
-      update(regs_, names_[rcc_role::sws], target & Traits::sw_mask);
-    }
-  }
   else if(is_on(static_cast<source>(kind)))
   {
     update(regs_, osc_[kind].ready, 1);
@@ -1004,18 +1034,10 @@ template <typename Traits> void rcc_model<Traits>::settle(bool notify)
     }
   }
   auto const target = read(rcc_role::sw) & Traits::sw_mask;
-  if(target == (read(rcc_role::sws) & Traits::sw_mask))
+  if(auto const input = system_source(target);
+     input and is_ready(*input) and target != (read(rcc_role::sws) & Traits::sw_mask))
   {
-    if((state_.pending >> switch_kind & 1u) != 0)
-    {
-      cancel(switch_kind);
-    }
-  }
-  else if(
-      auto const input = system_source(target);
-      input and is_ready(*input) and (state_.pending >> switch_kind & 1u) == 0)
-  {
-    schedule(switch_kind);
+    update(regs_, names_[rcc_role::sws], target);
   }
   publish(notify);
 }
@@ -1040,16 +1062,13 @@ auto rcc_model<Traits>::rates() const -> std::array<std::uint64_t, signal_count>
   }
   for(std::size_t pll = 0; pll < pll_.size(); ++pll)
   {
-    auto const& fields = pll_[pll];
-    auto const& node   = Traits::pll_nodes[pll];
-    auto const  which  = static_cast<source>(std::to_underlying(source::pll1) + pll);
-    auto const  input  = at(Traits::pll_sources[get(regs_, fields.src)]);
-    auto const  value  = [&](std::optional<field_ref> const& f) {
-      return f ? get(regs_, *f) : std::uint32_t{};
-    };
-    auto const frac    = fields.fracen and value(fields.fracen) != 0 ? value(fields.frac) : 0u;
-    auto const divisor = fields.m ? node.m_decode(get(regs_, *fields.m)) : 1;
-    auto const vco =
+    auto const& fields  = pll_[pll];
+    auto const& node    = Traits::pll_nodes[pll];
+    auto const  which   = static_cast<source>(std::to_underlying(source::pll1) + pll);
+    auto const  input   = at(Traits::pll_sources[get(regs_, fields.src)]);
+    auto const  frac    = state_.fraction[pll];
+    auto const  divisor = fields.m ? node.m_decode(get(regs_, *fields.m)) : 1;
+    auto const  vco =
         ready(which) and divisor != 0
             ? input * (node.n_decode(get(regs_, fields.n)) * frac_one + frac) / (divisor * frac_one)
             : 0;
@@ -1120,7 +1139,7 @@ template <typename Traits> void rcc_model<Traits>::publish(bool notify)
   auto const core = hz[std::to_underlying(signal::hclk)];
   if(not options_.fixed_core_clock and core == 0)
   {
-    refuse_core_stop("RCC_CFGR1", "a stopped system clock");
+    refuse_stopped_clock();
   }
   else if(not options_.fixed_core_clock and core != clock.core_hz())
   {
@@ -1174,7 +1193,7 @@ template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, re
   }
   state_.pending    = 0;
   state_.lsi_forced = 0;
-  state_.hsi16_held = 0;
+  state_.fraction   = {};
   if(not is_on(source::lsi))
   {
     update(regs_, osc_[std::to_underlying(source::lsi)].ready, 0);
@@ -1428,26 +1447,7 @@ void rcc_model<Traits>::resets_written(std::uint32_t old, std::uint32_t now)
 
 template <typename Traits> void rcc_model<Traits>::hold_hsi16(bool held)
 {
-  if constexpr(not Traits::programming_clock.has_value())
-  {
-    static_cast<void>(held);
-  }
-  else
-  {
-    auto const hsi    = *Traits::programming_clock;
-    auto const was    = is_on(hsi);
-    state_.hsi16_held = held ? 1 : 0;
-    auto const is     = is_on(hsi);
-    if(is and not was and not is_ready(hsi))
-    {
-      start(hsi);
-    }
-    else if(was and not is and (in_use() >> std::to_underlying(hsi) & 1u) == 0)
-    {
-      stop(hsi);
-      settle(true);
-    }
-  }
+  static_cast<void>(held);
 }
 }
 

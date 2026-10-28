@@ -222,7 +222,7 @@ TEST_CASE("RM0481 11.8: the bootloader clock sequence reaches 250 MHz on PLL1 P,
   CHECK(log[2] == 0);
   CHECK(log[3] == 0);
   CHECK(log[4] > 0);
-  CHECK(log[5] > 0);
+  CHECK(log[5] == 0);
   CHECK(log[6] > 0);
   CHECK(log[7] == 250 * mhz);
   CHECK(log[8] == 250 * mhz);
@@ -267,6 +267,126 @@ TEST_CASE("RM0481 11.8.5: SYSCLK takes the PLL1 P output while R runs at its own
   CHECK(f.target->virtual_clock().core_hz() == 128 * mhz);
 }
 
+TEST_CASE("RM0481 11.8.7: PLL1PEN, PLL1QEN and PLL1REN hold while PLL1 runs, PLL2's do not")
+{
+  auto        f      = idle_fixture();
+  auto const& clocks = probe(f);
+  pll1_from(f, 1, 4, 8);
+  set(f, "RCC_PLL1CFGR", "PLL1QEN", 1);
+  set(f, "RCC_CR", "PLL1ON", 1);
+  set(f, "RCC_PLL1CFGR", "PLL1PEN", 1);
+  set(f, "RCC_PLL1CFGR", "PLL1QEN", 0);
+  CHECK(f.field("RCC", "RCC_PLL1CFGR", "PLL1PEN") == 0);
+  CHECK(f.field("RCC", "RCC_PLL1CFGR", "PLL1QEN") == 1);
+  idle_until(f, delay);
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  set(f, "RCC_PLL1CFGR", "PLL1REN", 1);
+  set(f, "RCC_PLL1CFGR", "PLL1QEN", 0);
+  CHECK(f.field("RCC", "RCC_PLL1CFGR", "PLL1REN") == 0);
+  CHECK(f.field("RCC", "RCC_PLL1CFGR", "PLL1QEN") == 1);
+  CHECK(clocks.hz("pll1_q") > 0);
+  CHECK(clocks.hz("pll1_r") == 0);
+  set(f, "RCC_CR", "PLL1ON", 0);
+  set(f, "RCC_PLL1CFGR", "PLL1REN", 1);
+  set(f, "RCC_PLL1CFGR", "PLL1QEN", 0);
+  CHECK(f.field("RCC", "RCC_PLL1CFGR", "PLL1REN") == 1);
+  CHECK(f.field("RCC", "RCC_PLL1CFGR", "PLL1QEN") == 0);
+
+  set(f, "RCC_PLL2CFGR", "PLL2SRC", 1);
+  set(f, "RCC_PLL2CFGR", "DIVM2", 4);
+  set(f, "RCC_PLL2DIVR", "PLL2N", 7);
+  set(f, "RCC_CR", "PLL2ON", 1);
+  idle_until(f, delay);
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL2RDY") == 1);
+  set(f, "RCC_PLL2CFGR", "PLL2QEN", 1);
+  CHECK(f.field("RCC", "RCC_PLL2CFGR", "PLL2QEN") == 1);
+  CHECK(clocks.hz("pll2_q") > 0);
+  set(f, "RCC_PLL2CFGR", "PLL2QEN", 0);
+  CHECK(clocks.hz("pll2_q") == 0);
+}
+
+TEST_CASE("H573 board: PLL1ON loads PLL1FRACN under PLL1FRACEN in either write order")
+{
+  struct leg
+  {
+    std::string_view name;
+    bool             fracen_first;
+    std::uint32_t    fracen;
+    std::uint64_t    sysclk;
+  };
+  for(auto const& [name, fracen_first, fracen, sysclk] : std::to_array<leg>({
+          {"FRACEN then FRACN", true,  1, 250 * mhz},
+          {"FRACN then FRACEN", false, 1, 250 * mhz},
+          {"FRACEN 0",          false, 0, 248 * mhz},
+  }))
+  {
+    CAPTURE(name);
+    auto        f      = idle_fixture();
+    auto const& clocks = probe(f);
+    pll1_from(f, 1, 2, 31);
+    set(f, "RCC_PLL1DIVR", "PLL1P", 1);
+    set(f, "RCC_PLL1CFGR", "PLL1PEN", 1);
+    if(fracen_first)
+    {
+      set(f, "RCC_PLL1CFGR", "PLL1FRACEN", fracen);
+    }
+    set(f, "RCC_PLL1FRACR", "PLL1FRACN", 2048);
+    if(not fracen_first)
+    {
+      set(f, "RCC_PLL1CFGR", "PLL1FRACEN", fracen);
+    }
+    set(f, "RCC_CR", "PLL1ON", 1);
+    idle_until(f, delay);
+    REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+    CHECK(clocks.hz("pll1_p") == sysclk);
+  }
+}
+
+TEST_CASE("RM0481 11.4.5: a running PLL1 takes a new PLL1FRACN on a PLL1FRACEN 0 to 1 write")
+{
+  auto        f      = idle_fixture();
+  auto const& clocks = probe(f);
+  pll1_from(f, 1, 2, 31);
+  set(f, "RCC_PLL1DIVR", "PLL1P", 1);
+  set(f, "RCC_PLL1CFGR", "PLL1PEN", 1);
+  set(f, "RCC_PLL1CFGR", "PLL1FRACEN", 1);
+  set(f, "RCC_PLL1FRACR", "PLL1FRACN", 2048);
+  set(f, "RCC_CR", "PLL1ON", 1);
+  idle_until(f, delay);
+  REQUIRE(clocks.hz("pll1_p") == 250 * mhz);
+  set(f, "RCC_PLL1FRACR", "PLL1FRACN", 4096);
+  CHECK(clocks.hz("pll1_p") == 250 * mhz);
+  set(f, "RCC_PLL1CFGR", "PLL1FRACEN", 0);
+  CHECK(clocks.hz("pll1_p") == 250 * mhz);
+  set(f, "RCC_PLL1CFGR", "PLL1FRACEN", 1);
+  CHECK(clocks.hz("pll1_p") == 252 * mhz);
+}
+
+TEST_CASE("a restored PLL1 keeps its loaded fraction over a different PLL1FRACN")
+{
+  auto f = idle_fixture();
+  probe(f);
+  pll1_from(f, 1, 2, 31);
+  set(f, "RCC_PLL1DIVR", "PLL1P", 1);
+  set(f, "RCC_PLL1CFGR", "PLL1PEN", 1);
+  set(f, "RCC_PLL1CFGR", "PLL1FRACEN", 1);
+  set(f, "RCC_PLL1FRACR", "PLL1FRACN", 2048);
+  set(f, "RCC_CR", "PLL1ON", 1);
+  idle_until(f, delay);
+  set(f, "RCC_PLL1FRACR", "PLL1FRACN", 4096);
+  auto const bytes = core::encode_snapshot(f.target->snapshot().data());
+
+  auto        other  = idle_fixture();
+  auto const& clocks = probe(other);
+  other.target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(clocks.hz("pll1_p") == 250 * mhz);
+  write(other, "RCC_PLL1FRACR", peek(other, "RCC_PLL1FRACR"));
+  CHECK(clocks.hz("pll1_p") == 250 * mhz);
+  set(other, "RCC_PLL1CFGR", "PLL1FRACEN", 0);
+  set(other, "RCC_PLL1CFGR", "PLL1FRACEN", 1);
+  CHECK(clocks.hz("pll1_p") == 252 * mhz);
+}
+
 TEST_CASE("RM0481 11.8.7: PLL1SRC 10 takes CSI, DIVM1 0 keeps PLL1RDY clear")
 {
   auto  f      = idle_fixture();
@@ -295,7 +415,7 @@ TEST_CASE("RM0481 11.8.7: PLL1SRC 10 takes CSI, DIVM1 0 keeps PLL1RDY clear")
   CHECK(clocks.hz("pll1_q") == 16 * mhz);
 }
 
-TEST_CASE("RM0481 11.8.1: HSIDIV takes effect with HSIDIVF after the ready delay")
+TEST_CASE("H573 board: HSIDIVF sets again 1 us after an HSIDIV write")
 {
   auto  f      = idle_fixture();
   auto& clocks = probe(f);
@@ -305,7 +425,10 @@ TEST_CASE("RM0481 11.8.1: HSIDIV takes effect with HSIDIVF after the ready delay
   set(f, "RCC_CR", "HSIDIV", 0);
   CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
   CHECK(f.field("RCC", "RCC_CR", "HSIDIV") == 0);
-  idle_until(f, delay);
+  CHECK(clocks.hz("hsi") == 64 * mhz);
+  idle_until(f, std::chrono::nanoseconds{500});
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
+  idle_until(f, std::chrono::nanoseconds{600});
   CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
   CHECK(clocks.hz("hsi") == 64 * mhz);
   CHECK(f.target->virtual_clock().core_hz() == 64 * mhz);
@@ -313,21 +436,39 @@ TEST_CASE("RM0481 11.8.1: HSIDIV takes effect with HSIDIVF after the ready delay
   CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
 }
 
-TEST_CASE("RM0481 11.8.1: HSIDIV keeps its value while HSI feeds an enabled PLL")
+TEST_CASE("H573 board: HSIDIV changes while HSI feeds an enabled PLL1 off SYSCLK, holds on it")
 {
-  auto  f      = idle_fixture();
-  auto& clocks = probe(f);
-  pll1_from(f, 1, 1, 8);
-  set(f, "RCC_CR", "PLL1ON", 1);
-  set(f, "RCC_CR", "HSIDIV", 3);
-  CHECK(f.field("RCC", "RCC_CR", "HSIDIV") == 1);
-  CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
-  CHECK(clocks.hz("hsi") == 32 * mhz);
-  set(f, "RCC_CR", "PLL1ON", 0);
-  set(f, "RCC_CR", "HSIDIV", 3);
-  CHECK(f.field("RCC", "RCC_CR", "HSIDIV") == 3);
-  idle_until(f, delay);
-  CHECK(clocks.hz("hsi") == 8 * mhz);
+  for(auto const sw : {0u, 1u, 3u})
+  {
+    CAPTURE(sw);
+    auto  f      = idle_fixture();
+    auto& clocks = probe(f);
+    set(f, "RCC_CR", "CSION", 1);
+    pll1_from(f, 1, 4, 32);
+    set(f, "RCC_PLL1DIVR", "PLL1P", 3);
+    set(f, "RCC_PLL1CFGR", "PLL1PEN", 1);
+    set(f, "RCC_CR", "PLL1ON", 1);
+    idle_until(f, delay);
+    REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+    set(f, "RCC_CFGR1", "SW", sw);
+    REQUIRE(f.field("RCC", "RCC_CFGR1", "SWS") == sw);
+    set(f, "RCC_CR", "HSIDIV", 0);
+    idle_until(f, delay);
+    if(sw == 3)
+    {
+      CHECK(f.field("RCC", "RCC_CR", "HSIDIV") == 1);
+      CHECK(clocks.hz("hsi") == 32 * mhz);
+      CHECK(clocks.hz("pll1_p") == 64 * mhz);
+    }
+    else
+    {
+      CHECK(f.field("RCC", "RCC_CR", "HSIDIV") == 0);
+      CHECK(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+      CHECK(clocks.hz("hsi") == 64 * mhz);
+      CHECK(clocks.hz("pll1_p") == 128 * mhz);
+    }
+    CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
+  }
 }
 
 TEST_CASE("a snapshot taken while HSIDIVF is clear restores the pending divider event")
@@ -336,11 +477,13 @@ TEST_CASE("a snapshot taken while HSIDIVF is clear restores the pending divider 
   set(f, "RCC_CR", "HSIDIV", 0);
   REQUIRE(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
   auto const saved = f.target->snapshot();
-  idle_until(f, delay);
+  idle_until(f, std::chrono::nanoseconds{1100});
   REQUIRE(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
   f.target->restore(saved);
   CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
-  idle_until(f, delay);
+  idle_until(f, std::chrono::nanoseconds{500});
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 0);
+  idle_until(f, std::chrono::nanoseconds{600});
   CHECK(f.field("RCC", "RCC_CR", "HSIDIVF") == 1);
 }
 
@@ -518,7 +661,7 @@ TEST_CASE("RM0481 11.8.46: every reset kind leaves its own RCC_RSR flag, RMVF cl
   }
 }
 
-TEST_CASE("RM0481 11.8.1: the oscillator driving the system clock cannot be switched off")
+TEST_CASE("RM0481 11.8.1: the oscillator driving SYSCLK stays on, with no log record")
 {
   auto                          f = idle_fixture();
   std::vector<core::log_record> logged;
@@ -527,10 +670,117 @@ TEST_CASE("RM0481 11.8.1: the oscillator driving the system clock cannot be swit
   write(f, "RCC_CR", peek(f, "RCC_CR") & ~lsb_of("RCC_CR", "HSION"));
   CHECK(f.field("RCC", "RCC_CR", "HSION") == 1);
   CHECK(f.field("RCC", "RCC_CR", "HSIRDY") == 1);
+  CHECK(probe(f).hz("sysclk") == 32 * mhz);
+  CHECK(logged.empty());
+}
+
+TEST_CASE("RM0481 11.8.1: the oscillator feeding an enabled PLL1 stays on while SYSCLK runs apart")
+{
+  struct leg
+  {
+    std::string_view on;
+    std::uint32_t    pll_source;
+    std::uint32_t    sw;
+  };
+  for(auto const& [on, pll_source, sw] : std::to_array<leg>({
+          {"HSEON", 3, 0},
+          {"HSION", 1, 1},
+          {"CSION", 2, 0},
+  }))
+  {
+    CAPTURE(on);
+    auto                          f = idle_fixture();
+    std::vector<core::log_record> logged;
+    auto const                    sink =
+        f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+    auto const& clocks = probe(f);
+    set(f, "RCC_CR", "CSION", 1);
+    set(f, "RCC_CR", on, 1);
+    idle_until(f, delay);
+    set(f, "RCC_CFGR1", "SW", sw);
+    REQUIRE(f.field("RCC", "RCC_CFGR1", "SWS") == sw);
+    pll1_from(f, pll_source, 1, 8);
+    set(f, "RCC_PLL1DIVR", "PLL1Q", 1);
+    set(f, "RCC_PLL1CFGR", "PLL1QEN", 1);
+    set(f, "RCC_CR", "PLL1ON", 1);
+    idle_until(f, delay);
+    REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+    auto const rate = clocks.hz("pll1_q");
+    REQUIRE(rate > 0);
+    set(f, "RCC_CR", on, 0);
+    CHECK(f.field("RCC", "RCC_CR", on) == 1);
+    idle_until(f, delay);
+    CHECK(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+    CHECK(clocks.hz("pll1_q") == rate);
+    CHECK(logged.empty());
+  }
+}
+
+TEST_CASE("RM0481 11.8.1: one RCC_CR write clears HSEON and PLL1ON of a PLL1 off SYSCLK")
+{
+  auto        f      = idle_fixture();
+  auto const& clocks = probe(f);
+  set(f, "RCC_CR", "HSEON", 1);
+  idle_until(f, delay);
+  pll1_from(f, 3, 1, 8);
+  set(f, "RCC_PLL1CFGR", "PLL1QEN", 1);
+  set(f, "RCC_CR", "PLL1ON", 1);
+  idle_until(f, delay);
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  write(f, "RCC_CR", peek(f, "RCC_CR") & ~(lsb_of("RCC_CR", "HSEON") | lsb_of("RCC_CR", "PLL1ON")));
+  CHECK(f.field("RCC", "RCC_CR", "HSEON") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "HSERDY") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1ON") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1RDY") == 0);
+  CHECK(clocks.hz("pll1_q") == 0);
+}
+
+TEST_CASE("RM0481 11.8.1: PLL1 driving SYSCLK keeps its configuration, with no log record")
+{
+  stm32_fixture f{h573(), "h573_rcc_ll", with_listener()};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  auto const divider = peek(f, "RCC_PLL1DIVR");
+  write(f, "RCC_CR", lsb_of("RCC_CR", "HSION"));
+  write(
+      f, "RCC_PLL1CFGR",
+      peek(f, "RCC_PLL1CFGR")
+          & ~(3u * lsb_of("RCC_PLL1CFGR", "PLL1SRC")
+              | 63u * lsb_of("RCC_PLL1CFGR", "DIVM1")
+              | lsb_of("RCC_PLL1CFGR", "PLL1PEN")));
+  write(f, "RCC_PLL1DIVR", 0);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1ON") == 1);
+  CHECK(f.field("RCC", "RCC_PLL1CFGR", "PLL1SRC") == 1);
+  CHECK(f.field("RCC", "RCC_PLL1CFGR", "DIVM1") == 2);
+  CHECK(f.field("RCC", "RCC_PLL1CFGR", "PLL1PEN") == 1);
+  CHECK(peek(f, "RCC_PLL1DIVR") == divider);
+  CHECK(f.target->virtual_clock().core_hz() == 250 * mhz);
+  CHECK(logged.empty());
+  f.set("pc", popcorn::testing::sym("h573_rcc_ll", "idle"));
+  idle_until(f, std::chrono::microseconds{10});
+}
+
+TEST_CASE("RM0481 11.8.5: a switch to a PLL1 P output that is off keeps the core clock, warns once")
+{
+  auto                          f = idle_fixture();
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  pll1_from(f, 1, 4, 8);
+  set(f, "RCC_CR", "PLL1ON", 1);
+  idle_until(f, delay);
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  REQUIRE(logged.empty());
+  set(f, "RCC_CFGR1", "SW", 3);
+  CHECK(f.field("RCC", "RCC_CFGR1", "SWS") == 3);
+  CHECK(probe(f).hz("sysclk") == 0);
+  CHECK(f.target->virtual_clock().core_hz() == 32 * mhz);
   REQUIRE(logged.size() == 1);
   CHECK(logged.front().kind == core::log_kind::model_warning);
-  CHECK(logged.front().message.contains("HSION = 0"));
-  CHECK(probe(f).hz("sysclk") == 32 * mhz);
+  CHECK(logged.front().reg == "RCC_CFGR1");
+  CHECK(logged.front().message.contains("0 Hz"));
 }
 
 TEST_CASE("every H573 instance with an RCC reset bit resolves it, the renamed ones included")
@@ -867,4 +1117,86 @@ TEST_CASE(
   auto const vswrst = r.bit("RCC", "RCC_BDCR", "VSWRST");
   r.write("RCC", "RCC_BDCR", vswrst, false);
   CHECK((r.peek("RCC", "RCC_BDCR") & vswrst) == vswrst);
+}
+
+TEST_CASE("RM0481 11.4.8: the CMSIS SystemInit run after the bootloader leaves HSI as SYSCLK")
+{
+  stm32_fixture f{h573(), "h573_rcc_ll", with_listener()};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  REQUIRE(f.field("RCC", "RCC_CFGR1", "SWS") == 3);
+  std::vector<std::string> warnings;
+  auto const               sink = f.target->add_log_sink([&](core::log_record const& record) {
+    if(record.kind == core::log_kind::model_warning)
+    {
+      warnings.push_back(record.message);
+    }
+  });
+  f.set("pc", popcorn::testing::sym("h573_rcc_ll", "SystemInit"));
+  f.set("lr", popcorn::testing::sym("h573_rcc_ll", "idle") | 1u);
+  idle_until(f, std::chrono::microseconds{10});
+  auto const pc   = f.target->regs().read(*f.target->regs().find("pc"));
+  auto const idle = popcorn::testing::sym("h573_rcc_ll", "idle");
+  CHECK(pc >= idle);
+  CHECK(pc < idle + 16);
+  CHECK(f.field("RCC", "RCC_CFGR1", "SW") == 0);
+  CHECK(f.field("RCC", "RCC_CFGR1", "SWS") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1ON") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1RDY") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIV") == 1);
+  CHECK(probe(f).hz("sysclk") == 32 * mhz);
+  CHECK(probe(f).hz("hclk") == 32 * mhz);
+  CHECK(probe(f).hz("pll1_p") == 0);
+  CHECK(f.target->virtual_clock().core_hz() == 32 * mhz);
+  CHECK(warnings.empty());
+}
+
+TEST_CASE("H573 board: the SystemInit that clears HSIDIV keeps it until PLL1 stops driving SYSCLK")
+{
+  stm32_fixture f{h573(), "h573_rcc_ll", with_listener()};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  REQUIRE(f.field("RCC", "RCC_CFGR1", "SWS") == 3);
+  std::vector<std::string> warnings;
+  auto const               sink   = f.target->add_log_sink([&](core::log_record const& record) {
+    if(record.kind == core::log_kind::model_warning)
+    {
+      warnings.push_back(record.message);
+    }
+  });
+  auto const&              clocks = probe(f);
+  auto const               bit    = [](std::string_view field) { return lsb_of("RCC_CR", field); };
+  write(f, "RCC_CR", bit("HSION"));
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIV") == 1);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1ON") == 1);
+  CHECK(clocks.hz("hclk") == 250 * mhz);
+  write(f, "RCC_CFGR1", 0);
+  CHECK(f.field("RCC", "RCC_CFGR1", "SWS") == 0);
+  CHECK(clocks.hz("hclk") == 32 * mhz);
+  write(f, "RCC_CFGR2", 0);
+  CHECK(clocks.hz("hclk") == 32 * mhz);
+  write(
+      f, "RCC_CR",
+      peek(f, "RCC_CR")
+          & ~(bit("HSEON")
+              | bit("HSECSSON")
+              | bit("HSEBYP")
+              | bit("HSEEXT")
+              | 3u * bit("HSIDIV")
+              | bit("HSIKERON")
+              | bit("CSION")
+              | bit("CSIKERON")
+              | bit("HSI48ON")
+              | bit("PLL1ON")
+              | bit("PLL2ON")
+              | bit("PLL3ON")));
+  CHECK(f.field("RCC", "RCC_CR", "PLL1ON") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1RDY") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "HSIDIV") == 0);
+  CHECK(clocks.hz("hclk") == 64 * mhz);
+  write(f, "RCC_PLL1CFGR", 0);
+  write(f, "RCC_PLL1DIVR", 0x01010280u);
+  write(f, "RCC_PLL1FRACR", 0);
+  CHECK(clocks.hz("pll1_p") == 0);
+  CHECK(clocks.hz("hclk") == 64 * mhz);
+  CHECK(f.target->virtual_clock().core_hz() == 64 * mhz);
+  CHECK(warnings.empty());
 }

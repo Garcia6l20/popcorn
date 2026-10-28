@@ -401,9 +401,13 @@ struct u5_rcc
   using source = u5::source;
   using signal = u5::signal;
 
-  static constexpr bool                  msi               = true;
-  static constexpr bool                  hsi_divider       = false;
-  static constexpr std::optional<source> programming_clock = source::hsi16;
+  static constexpr bool msi         = true;
+  static constexpr bool hsi_divider = false;
+  /**
+   * @brief RM0456 11.8.1: the ON bit of the PLL1 input is held only while PLL1 drives SYSCLK.
+   */
+  static constexpr bool                  pll1_input_held_while_on = false;
+  static constexpr std::optional<source> programming_clock        = source::hsi16;
 
   static constexpr auto const& oscillators      = u5::oscillators;
   static constexpr auto const& names            = u5::names;

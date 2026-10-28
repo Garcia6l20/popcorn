@@ -374,8 +374,32 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   `ADCDACSEL`, `TIMICSEL` and the `FDCAN12` bits on the STM32H5.
 - STM32H5 TrustZone: `RCC_CR.HSIDIV`, `HSIDIVF` and the `RCC_CFGR2` `AHBxDIS` and `APBxDIS` bits
   take Non-secure writes, RM0481 Table 122 lists them under no security bit.
-- STM32H5, RM0481 11.8.1: a write of `RCC_CR.HSIDIV` sets the HSI rate at once. `HSIDIVF` reads
-  0 until the RCC ready delay ends, while on silicon the rate changes when `HSIDIVF` sets.
+- SWS follows SW in the store that selects a ready source. On an STM32H573, the first one or two
+  reads of `RCC_CFGR1` after that store return the old SWS. Firmware that polls SWS ends in the
+  same state.
+- RCC holds each write RM0456 11.8 and RM0481 11.8 say the hardware ignores, with no log record, on
+  the STM32U5 and the STM32H5 alike: a clear of the ON bit of the SYSCLK source and of the PLL1
+  input while PLL1 drives SYSCLK, on the STM32H5 a clear of HSEON, HSION or CSION while that
+  oscillator feeds PLL1 and the same write leaves PLL1ON set, RM0481 11.8.1, a write of
+  `PLLxSRC`, `PLLxM`, `PLLxRGE`, `PLLxN` and the output dividers while the PLL is on or ready, on
+  the STM32H5 of PLL1PEN, PLL1QEN and PLL1REN too, RM0481 11.8.7, and a clear of the PLL1 output
+  enable that feeds SYSCLK. The STM32U5 `PLL1MBOOST` is storage. ST's CMSIS `SystemInit` run with
+  PLL1 as SYSCLK logs nothing.
+- A switch to a SYSCLK source that runs at 0 Hz, such as a PLL1 output whose enable is clear,
+  keeps the core clock at its last rate and logs one `model_warning` per machine.
+- A PLL loads `PLLxFRACN` as its fraction when `PLLxON` sets with `PLLxFRACEN` 1, and runs in
+  integer mode with `PLLxFRACEN` 0, whatever order firmware wrote them in, as measured on an
+  STM32H573. While the PLL runs, it takes a new `PLLxFRACN` only on a `PLLxFRACEN` write from 0
+  to 1 and keeps the loaded fraction across a `PLLxFRACEN` clear. That running rule follows
+  RM0456 11.4.6 and RM0481 11.4.5, unmeasured. The new fraction applies at once, where silicon
+  takes it three reference clock periods later.
+- STM32H5: `RCC_CR.HSIDIV` keeps its value while PLL1 drives SYSCLK from HSI and takes a write in
+  every other state, an enabled PLL1 off SYSCLK fed by HSI included, as measured on an STM32H573
+  for PLL1. For PLL2 and PLL3 fed by HSI the model applies the same rule, inferred from PLL1. One
+  write that clears PLL1ON of a PLL1 off SYSCLK and changes `HSIDIV` takes both.
+- STM32H5: `HSIDIVF` reads 0 for 1 us after an `HSIDIV` change and the HSI rate changes in the
+  write. On an STM32H573 the flag clears one read after the write and sets again within 35
+  cycles.
 - Without TrustZone, a coverage report classes `RCC_CIFR` and `RCC_CICR` as `unimplemented`. The
   RCC sets the `RCC_CIFR` flags `RCC_CIER` enables, and a `RCC_CICR` write clears them.
 

@@ -5,6 +5,7 @@
 #include <popcorn/core/types.hpp>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -226,22 +227,23 @@ constexpr std::array<bus_node<signal>, 3> buses{
 
 constexpr std::array<pll_node<signal>, 3> pll_nodes{
     {
-     {.config        = "RCC_PLL1CFGR",
-         .dividers      = "RCC_PLL1DIVR",
-         .fraction      = "RCC_PLL1FRACR",
-         .src           = "PLL1SRC",
-         .range         = "PLL1RGE",
-         .m             = "DIVM1",
-         .fracen        = "PLL1FRACEN",
-         .n             = "PLL1N",
-         .frac          = "PLL1FRACN",
-         .divider       = {"PLL1P", "PLL1Q", "PLL1R"},
-         .output_enable = {"PLL1PEN", "PLL1QEN", "PLL1REN"},
-         .out           = {pll1_p, pll1_q, pll1_r},
-         .outputs       = 3,
-         .m_decode      = &direct,
-         .n_decode      = &plus_one,
-         .output_decode = {&plus_one, &plus_one, &plus_one}},
+     {.config                = "RCC_PLL1CFGR",
+         .dividers              = "RCC_PLL1DIVR",
+         .fraction              = "RCC_PLL1FRACR",
+         .src                   = "PLL1SRC",
+         .range                 = "PLL1RGE",
+         .m                     = "DIVM1",
+         .fracen                = "PLL1FRACEN",
+         .n                     = "PLL1N",
+         .frac                  = "PLL1FRACN",
+         .divider               = {"PLL1P", "PLL1Q", "PLL1R"},
+         .output_enable         = {"PLL1PEN", "PLL1QEN", "PLL1REN"},
+         .out                   = {pll1_p, pll1_q, pll1_r},
+         .outputs               = 3,
+         .m_decode              = &direct,
+         .n_decode              = &plus_one,
+         .output_decode         = {&plus_one, &plus_one, &plus_one},
+         .outputs_held_while_on = true},
      {.config        = "RCC_PLL2CFGR",
          .dividers      = "RCC_PLL2DIVR",
          .fraction      = "RCC_PLL2FRACR",
@@ -397,10 +399,20 @@ struct h5_rcc
   using source = h5::source;
   using signal = h5::signal;
 
-  static constexpr bool                  msi                = false;
-  static constexpr bool                  hsi_divider        = true;
-  static constexpr source                divided_oscillator = source::hsi;
-  static constexpr std::optional<source> programming_clock  = std::nullopt;
+  static constexpr bool msi         = false;
+  static constexpr bool hsi_divider = true;
+  /**
+   * @brief Time from an `HSIDIV` change to `HSIDIVF` set. An STM32H573 sets the flag within 35
+   *        cycles at 32 MHz, the longest transition being /2 to /1.
+   */
+  static constexpr std::chrono::nanoseconds hsi_divider_delay = std::chrono::microseconds{1};
+  /**
+   * @brief RM0481 11.8.1: HSEON, HSION and CSION hold while their oscillator feeds PLL1 with
+   *        PLL1ON set.
+   */
+  static constexpr bool                  pll1_input_held_while_on = true;
+  static constexpr source                divided_oscillator       = source::hsi;
+  static constexpr std::optional<source> programming_clock        = std::nullopt;
 
   static constexpr auto const& oscillators      = h5::oscillators;
   static constexpr auto const& names            = h5::names;

@@ -319,7 +319,9 @@ TEST_CASE("TIM16 CNT follows the virtual time between updates")
   };
   until(f.target->virtual_clock().time().ps + 50 * ms + ms / 2);
   REQUIRE(irq.at.size() >= 50);
-  auto const entry = irq.at.back();
+  auto const entry = irq.at.back() + ms;
+  until(entry + us / 2);
+  REQUIRE(irq.at.back() == entry);
   until(entry + 300 * us + us / 2);
   CHECK((b.read("TIM16", "CNT") & 0xffffu) == 300);
   until(entry + 400 * us + us / 2);

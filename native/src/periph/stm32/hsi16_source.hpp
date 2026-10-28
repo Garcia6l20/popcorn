@@ -22,9 +22,9 @@ public:
   auto operator=(hsi16_source&&) -> hsi16_source& = delete;
 
   /**
-   * @brief Keeps HSI16 on while @p held, starting it when it is off, HSIRDY following after
-   *        the board's ready delay. Releasing it stops HSI16 unless RCC_CR.HSION is set or the
-   *        system clock uses it. A reset releases it.
+   * @brief Tells the RCC that the FLASH interface runs HSI16 while @p held. RCC_CR.HSIRDY and
+   *        the HSI16 clock of the tree follow RCC_CR.HSION alone, RM0456 11.8.1, so the RCC keeps
+   *        no state for it.
    * @param held Whether the FLASH interface needs HSI16.
    */
   virtual void hold_hsi16(bool held) = 0;
