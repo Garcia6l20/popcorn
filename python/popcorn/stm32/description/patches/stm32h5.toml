@@ -58,6 +58,19 @@ on_write = "zero_to_clear"
 source = "RM0481 Rev 5, 36.7.2 RNG status register (RNG_SR): SEIS and CEIS are rc_w0, writing 1 has no effect. ST's STM32H573 SVD gives plain read-write"
 
 [[fields]]
+instances = ["SBS"]
+registers = ["SBS_MESR"]
+fields = ["MCLR", "IPMEE"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 14.5.12 and RM0492 Rev 3, 13.5.7 SBS memory erase status register (SBS_MESR): MCLR and IPMEE are rc_w1. Silicon read-back on an STM32H573 over SWD, 2026-10-28: a write of 1 to MCLR clears it, a write of 1 to IPMEE with IPMEE 0 leaves it 0. The SVDs of the six H5 parts give plain read-write"
+
+[[resets]]
+peripheral = "SBS"
+register = "SBS_MESR"
+reset = 0x00000001
+source = "RM0481 Rev 5, 14.5.12 and RM0492 Rev 3, 13.5.7 SBS_MESR: hardware sets MCLR when the memory erase after a power-on reset completes, and a system reset keeps it. The model erases at once, so MCLR reads 1 from the power-on. Silicon read-back on an STM32H573 over SWD, 2026-10-28, after unplugging and replugging the board: RCC_RSR 0x0C000000, BORRSTF and PINRSTF, SBS_MESR 0x00000001. The SVDs of the six H5 parts give 0"
+
+[[fields]]
 ip = "USB"
 registers = ["USB_CHEP{n}R"]
 each = { n = [0, 7] }

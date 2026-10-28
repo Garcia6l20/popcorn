@@ -49,3 +49,10 @@ instances = ["TIM3"]
 registers = ["TIM3_SMCR"]
 rename = { SMS_2 = "SMS_1", TS_2 = "TS_1" }
 source = "STM32H503 SVD: TIM3_SMCR spells SMS bit 3 at bit 16 SMS_2 and TS[4:3] at bits 21:20 TS_2, where TIM2_SMCR of the same SVD spells the same bits SMS_1 and TS_1, the spelling the model uses"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["RCC_APB3RSTR"]
+fields = ["SBSRST"]
+drop = true
+source = "RM0492 Rev 3, 10.8.21 RCC_APB3RSTR: bits 11 LPTIM1RST, 9 I3C2RST and 6 LPUART1RST, bit 1 reserved. ST's STM32H503 SVD names bit 1 SBSRST, as the H562, H563 and H573 SVDs do, where an STM32H573 reads bit 1 back as 0"

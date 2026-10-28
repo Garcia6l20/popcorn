@@ -4,6 +4,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/stm32/analog.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/supply.hpp>
@@ -395,6 +396,37 @@ TEST_CASE("ADEN in deep power-down sets no ADRDY")
   CHECK(r.get("ADC1", "ADC_CR", "ADVREGEN") == 0);
 }
 
+TEST_CASE("a snapshot taken while ADRDY is pending sets it 35 cycles after ADEN once restored")
+{
+  rig const r;
+  r.write("ADC1", "ADC_CR", advregen);
+  auto const start = r.now();
+  r.write("ADC1", "ADC_CR", advregen | aden);
+  r.run_until(start + 20 * cycle_ps);
+  auto const saved = r.f->target->snapshot();
+  r.run_until(start + 40 * cycle_ps);
+  for(int again = 0; again < 2; ++again)
+  {
+    r.write("ADC1", "ADC_CR", advregen | aden | (1u << 1));
+    r.write("ADC1", "ADC_CR", advregen | aden);
+  }
+  r.f->target->restore(saved);
+  CHECK(r.isr("ADRDY") == 0);
+  r.run_until(start + 34 * cycle_ps);
+  CHECK(r.isr("ADRDY") == 0);
+  r.run_until(start + 35 * cycle_ps);
+  CHECK(r.isr("ADRDY") == 1);
+
+  auto const bytes = core::encode_snapshot(saved.data());
+  rig const  fresh;
+  fresh.f->target->restore(core::snapshot{core::decode_snapshot(bytes)});
+  CHECK(fresh.isr("ADRDY") == 0);
+  fresh.run_until(start + 34 * cycle_ps);
+  CHECK(fresh.isr("ADRDY") == 0);
+  fresh.run_until(start + 35 * cycle_ps);
+  CHECK(fresh.isr("ADRDY") == 1);
+}
+
 TEST_CASE("ADDIS, ADC12RST or a second ADEN before ADRDY leave no stale ADRDY")
 {
   {
@@ -601,8 +633,8 @@ TEST_CASE("CKMODE 10 and 11 divide HCLK at 16 MHz while the kernel clock is SYSC
 }
 
 TEST_CASE(
-    "a TIM15 trigger starts the conversion tLATR later: 2 cycles at CKMODE 00, 2.5 at 10, 2.25 at "
-    "11, 4.75 at CKMODE 00 with PRESC /256 as measured on an H573")
+    "H573 board: a TIM15 trigger at CKMODE 00 waits for the next ADC clock edge, then tLATR 4.5 "
+    "cycles; 2.5 at CKMODE 10, 2.25 at 11")
 {
   struct setting
   {
@@ -610,24 +642,36 @@ TEST_CASE(
     std::uint32_t prescaler;
     std::uint64_t divider;
     std::uint64_t latency_quarters;
+    std::uint64_t offset_ps;
   };
-  for(auto const [mode, prescaler, divider, quarters] : {
-          setting{0, 0,  1,   8 },
-          setting{2, 0,  2,   10},
-          setting{3, 0,  4,   9 },
-          setting{0, 11, 256, 19},
+  for(auto const [mode, prescaler, divider, quarters, offset] : {
+          setting{0, 0,  1,   18, 0      },
+          setting{0, 1,  2,   18, half_ps},
+          setting{2, 0,  2,   10, 0      },
+          setting{3, 0,  4,   9,  0      },
+          setting{0, 10, 128, 18, us     },
+          setting{0, 11, 256, 18, 0      },
+          setting{0, 11, 256, 18, 3 * us },
   })
   {
     CAPTURE(mode);
     CAPTURE(divider);
+    CAPTURE(offset);
     rig const r;
     r.write("ADCC", "ADC_CCR", ckmode(mode) | presc(prescaler));
     r.enable();
     r.port().drive(3, 1'000'000);
     r.write("ADC1", "ADC_CFGR", (1u << 10) | (14u << 5));
-    auto const start = r.tim15_trgo();
+    if(offset != 0)
+    {
+      r.run_until(r.now() + offset);
+    }
+    auto const start   = r.tim15_trgo();
+    auto const trigger = start + ms;
+    auto const period  = cycle_ps * divider;
+    auto const edge    = mode == 0 ? (trigger + period - 1) / period * period - trigger : 0;
     static_cast<void>(r.start(3));
-    auto const end = start + ms + (quarters + 4 * 15) * cycle_ps * divider / 4;
+    auto const end = trigger + edge + (quarters + 4 * 15) * cycle_ps * divider / 4;
     r.ends_at(end);
     CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 1);
   }

@@ -53,6 +53,8 @@ inline constexpr std::size_t signal_count = role_count<typename Traits::signal>;
 template <typename Traits>
 inline constexpr std::size_t event_count = source_count<Traits> + (Traits::hsi_divider ? 1 : 0);
 
+inline constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
+
 struct unit_bits
 {
   std::uint32_t          offset{};
@@ -149,6 +151,9 @@ template <typename Traits> struct rcc_state
   std::uint32_t                                       pending{};
   std::uint8_t                                        lsi_forced{};
   std::array<std::uint32_t, Traits::pll_nodes.size()> fraction{};
+  std::uint32_t                                       hsi_divider{};
+  std::uint8_t                                        divider_clearing{};
+  std::uint64_t                                       divider_set_ps{};
 
   friend auto operator==(rcc_state const&, rcc_state const&) -> bool = default;
 };
@@ -227,13 +232,15 @@ template <typename Signal> struct timer
  *        11.8.9, RM0481 11.4.5 and 11.8.7. Deviation: the fraction applies at once, silicon takes
  *        it three reference clock periods later.
  *
- *        STM32H5, RM0481 11.8.1: a write of `HSIDIV` sets the HSI rate at once, clears `HSIDIVF`
- *        and sets it again `h5_rcc::hsi_divider_delay` later. Deviation: on silicon the rate
- *        follows when `HSIDIVF` sets. `HSIDIV` keeps its value while PLL1 drives SYSCLK from HSI
- *        and changes in every other state, an enabled PLL1 off SYSCLK fed by HSI included, as
- *        measured on an STM32H573 against the RM0481 11.8.1 text. For PLL2 and PLL3 fed by HSI the
- *        model applies the same rule, inferred from PLL1. `TIMPRE`, RM0481 11.8.5, sets the timer
- *        clocks of APB1 and APB2. `VSWRST` resets the backup domain, RM0481 11.3.3.
+ *        STM32H5, RM0481 11.8.1: `HSIDIV` reads its new value from the write. `HSIDIVF` clears and
+ *        then sets again with the new HSI rate after the cycles of the running HSI rate in
+ *        `h5_rcc::hsi_divider_timings`, as measured on an STM32H573: /2 to /4 or /8 clear at 3 and
+ *        set at 6, /2 to /1 3 and 16, /4 to /2 2 and 8. The HSI keeps its old rate until `HSIDIVF`
+ *        sets, a point the board run did not measure. `HSIDIV` keeps its value while PLL1 drives
+ *        SYSCLK from HSI and changes in every other state, an enabled PLL1 off SYSCLK fed by HSI
+ *        included, as measured on an STM32H573 against the RM0481 11.8.1 text. For PLL2 and PLL3
+ *        fed by HSI the model applies the same rule, inferred from PLL1. `TIMPRE`, RM0481 11.8.5,
+ *        sets the timer clocks of APB1 and APB2. `VSWRST` resets the backup domain, RM0481 11.3.3.
  *
  *        TrustZone, RM0456 11.5 and Table 117: the bits each `RCC_SECCFGR` bit secures, and the
  *        reset, enable, sleep enable, autonomous enable and kernel clock selection bits of a
@@ -364,7 +371,7 @@ private:
   void start(source which);
   void load_fraction(std::size_t pll);
   void stop(source which);
-  void schedule(std::uint32_t kind);
+  void schedule(std::uint32_t kind, std::optional<std::uint64_t> delay_ps = std::nullopt);
   void cancel(std::uint32_t kind);
   void settle(bool notify);
   void publish(bool notify);
@@ -724,19 +731,13 @@ template <typename Traits> auto rcc_model<Traits>::in_use() const -> std::uint32
   return used;
 }
 
-template <typename Traits> void rcc_model<Traits>::schedule(std::uint32_t kind)
+template <typename Traits>
+void rcc_model<Traits>::schedule(std::uint32_t kind, std::optional<std::uint64_t> delay_ps)
 {
   auto const generation = ++state_.generation[kind];
   state_.pending |= std::uint32_t{1} << kind;
-  auto ready = options_.ready_delay;
-  if constexpr(Traits::hsi_divider)
-  {
-    if(kind == divider_kind)
-    {
-      ready = Traits::hsi_divider_delay;
-    }
-  }
-  auto const delay = static_cast<std::uint64_t>(ready.count()) * 1000u;
+  auto const delay =
+      delay_ps.value_or(static_cast<std::uint64_t>(options_.ready_delay.count()) * 1000u);
   ctx_.events.schedule_at(vtime{ctx_.clock.time().ps + delay}, kind, generation, ctx_.clock);
 }
 
@@ -848,8 +849,18 @@ auto rcc_model<Traits>::divider_written(std::uint32_t old, std::uint32_t now) ->
   }
   if(divider.of(now) != divider.of(old))
   {
-    now = flag.with(now, 0);
-    schedule(divider_kind);
+    now = flag.with(now, flag.of(old));
+    if constexpr(Traits::hsi_divider)
+    {
+      auto const timing = Traits::hsi_divider_timings[state_.hsi_divider][divider.of(now)];
+      auto const old_hz = Traits::undivided_hsi_hz >> state_.hsi_divider;
+      auto const cycles = [old_hz](std::uint64_t count) {
+        return (count * ps_per_second + old_hz - 1) / old_hz;
+      };
+      state_.divider_set_ps   = ctx_.clock.time().ps + cycles(timing.set);
+      state_.divider_clearing = 1;
+      schedule(divider_kind, cycles(timing.clear));
+    }
   }
   return now;
 }
@@ -1000,7 +1011,14 @@ void rcc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
   state_.pending &= ~(std::uint32_t{1} << kind);
   if(kind == divider_kind)
   {
+    if(std::exchange(state_.divider_clearing, 0) != 0)
+    {
+      update(regs_, names_[rcc_role::hsi_divider_flag], 0);
+      schedule(divider_kind, state_.divider_set_ps - ctx_.clock.time().ps);
+      return;
+    }
     update(regs_, names_[rcc_role::hsi_divider_flag], 1);
+    state_.hsi_divider = read(rcc_role::hsi_divider);
   }
   else if(is_on(static_cast<source>(kind)))
   {
@@ -1048,7 +1066,8 @@ auto rcc_model<Traits>::rates() const -> std::array<std::uint64_t, signal_count>
   std::array<std::uint64_t, signal_count> hz{};
   auto const at    = [&](signal which) -> std::uint64_t& { return hz[std::to_underlying(which)]; };
   auto const ready = [&](source which) { return is_ready(which); };
-  rate_inputs const inputs{.regs = regs_, .names = names_, .options = options_};
+  rate_inputs const inputs{
+      .regs = regs_, .names = names_, .options = options_, .hsi_divider = state_.hsi_divider};
   for(auto const& [index, names] : std::views::enumerate(Traits::oscillators))
   {
     if(names.rate != nullptr)
@@ -1129,7 +1148,8 @@ template <typename Traits> void rcc_model<Traits>::publish(bool notify)
     changed   = changed or (known and published != enabled);
     published = enabled;
   }
-  rate_inputs const inputs{.regs = regs_, .names = names_, .options = options_};
+  rate_inputs const inputs{
+      .regs = regs_, .names = names_, .options = options_, .hsi_divider = state_.hsi_divider};
   for(auto const& entry : timers_)
   {
     auto const bus      = hz[std::to_underlying(entry.bus)];
@@ -1194,6 +1214,11 @@ template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, re
   state_.pending    = 0;
   state_.lsi_forced = 0;
   state_.fraction   = {};
+  if constexpr(Traits::hsi_divider)
+  {
+    state_.divider_clearing = 0;
+    state_.hsi_divider      = read(rcc_role::hsi_divider);
+  }
   if(not is_on(source::lsi))
   {
     update(regs_, osc_[std::to_underlying(source::lsi)].ready, 0);

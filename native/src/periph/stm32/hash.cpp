@@ -25,6 +25,8 @@ namespace
 {
 constexpr std::uint32_t busy_done     = 0;
 constexpr std::uint32_t digest_done   = 1;
+constexpr std::uint32_t block_shown   = 2;
+constexpr std::uint32_t block_ready   = 3;
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 constexpr std::size_t   block_words   = 16;
 constexpr std::size_t   max_block     = 42;
@@ -76,6 +78,7 @@ struct algorithm
   std::uint16_t cycles;
   std::uint8_t  tail;
   std::uint8_t  lag;
+  std::uint8_t  flag_lag;
   bool          hmac;
   bool          extendable;
   bool          absent;
@@ -130,34 +133,36 @@ constexpr std::array<std::uint32_t, 64> md5_k{
 
 constexpr std::array<int, 16> md5_shifts{7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21};
 
-constexpr algorithm sha1_code{function::sha1, 16, 5, 0, 38, 0, 82, 0, 0, true, false, false};
-constexpr algorithm h5_sha1_code{function::sha1, 16, 5, 0, 38, 0, 82, 15, 11, true, false, false};
-constexpr algorithm md5_code{function::md5, 16, 4, 1, 38, 0, 66, 0, 0, true, false, false};
-constexpr algorithm sha224_code{function::sha256, 16, 7, 2, 38, 0, 66, 0, 0, true, false, false};
-constexpr algorithm sha256_code{function::sha256, 16, 8, 3, 38, 0, 66, 0, 0, true, false, false};
+constexpr algorithm sha1_code{function::sha1, 16, 5, 0, 38, 0, 82, 0, 0, 0, true, false, false};
+constexpr algorithm h5_sha1_code{function::sha1, 16, 5, 0, 38, 0, 67, 17, 1, 1, true, false, false};
+constexpr algorithm md5_code{function::md5, 16, 4, 1, 38, 0, 66, 0, 0, 0, true, false, false};
+constexpr algorithm sha224_code{function::sha256, 16, 7, 2, 38, 0, 66, 0, 0, 0, true, false, false};
+constexpr algorithm sha256_code{function::sha256, 16, 8, 3, 38, 0, 66, 0, 0, 0, true, false, false};
 constexpr algorithm h5_sha224_code{
-    function::sha256, 16, 7, 2, 38, 0, 64, 15, 11, true, false, false};
+    function::sha256, 16, 7, 2, 38, 0, 51, 17, 1, 1, true, false, false};
 constexpr algorithm h5_sha256_code{
-    function::sha256, 16, 8, 3, 38, 0, 64, 15, 11, true, false, false};
-constexpr algorithm sha384_code{function::sha512, 32, 12, 0, 52, 0, 82, 27, 11, true, false, false};
+    function::sha256, 16, 8, 3, 38, 0, 51, 17, 1, 1, true, false, false};
+constexpr algorithm sha384_code{
+    function::sha512, 32, 12, 0, 52, 0, 67, 33, 1, 1, true, false, false};
 constexpr algorithm sha512_224_code{
-    function::sha512, 32, 7, 2, 52, 0, 82, 27, 11, true, false, false};
+    function::sha512, 32, 7, 2, 52, 0, 67, 33, 1, 1, true, false, false};
 constexpr algorithm sha512_256_code{
-    function::sha512, 32, 8, 3, 52, 0, 82, 27, 11, true, false, false};
-constexpr algorithm sha512_code{function::sha512, 32, 16, 1, 52, 0, 82, 27, 11, true, false, false};
+    function::sha512, 32, 8, 3, 52, 0, 67, 33, 1, 1, true, false, false};
+constexpr algorithm sha512_code{
+    function::sha512, 32, 16, 1, 52, 0, 67, 33, 1, 1, true, false, false};
 constexpr algorithm sha3_224_code{
-    function::keccak, 36, 7, 0, 55, 0x06, 60, 0, 0, true, false, false};
+    function::keccak, 36, 7, 0, 55, 0x06, 60, 0, 0, 0, true, false, false};
 constexpr algorithm sha3_256_code{
-    function::keccak, 34, 8, 0, 55, 0x06, 58, 0, 0, true, false, false};
+    function::keccak, 34, 8, 0, 55, 0x06, 58, 0, 0, 0, true, false, false};
 constexpr algorithm sha3_384_code{
-    function::keccak, 26, 12, 0, 72, 0x06, 50, 0, 0, true, false, false};
+    function::keccak, 26, 12, 0, 72, 0x06, 50, 0, 0, 0, true, false, false};
 constexpr algorithm sha3_512_code{
-    function::keccak, 18, 16, 0, 72, 0x06, 42, 0, 0, true, false, false};
+    function::keccak, 18, 16, 0, 72, 0x06, 42, 0, 0, 0, true, false, false};
 constexpr algorithm shake128_code{
-    function::keccak, 42, 42, 0, 0, 0x1F, 66, 0, 0, false, true, false};
+    function::keccak, 42, 42, 0, 0, 0x1F, 66, 0, 0, 0, false, true, false};
 constexpr algorithm shake256_code{
-    function::keccak, 34, 34, 0, 0, 0x1F, 58, 0, 0, false, true, false};
-constexpr algorithm absent_code{function::sha1, 16, 5, 0, 38, 0, 82, 15, 11, true, false, true};
+    function::keccak, 34, 34, 0, 0, 0x1F, 58, 0, 0, 0, false, true, false};
+constexpr algorithm absent_code{function::sha1, 16, 5, 0, 38, 0, 67, 17, 1, 1, true, false, true};
 
 constexpr std::array<algorithm, 4> u5_codes{sha1_code, md5_code, sha224_code, sha256_code};
 
@@ -389,6 +394,8 @@ struct hash_state
   std::uint64_t                            busy_end{};
   std::uint64_t                            queued{};
   std::uint64_t                            flagged{};
+  std::uint64_t                            shown{};
+  std::uint8_t                             block_lag{};
   std::uint8_t                             busy{};
   std::uint8_t                             final_pending{};
   std::uint8_t                             digested{};
@@ -447,9 +454,9 @@ struct hash_state
  *        compresses the block, the one that leaves one word pending. They drop at that write,
  *        and the BUSY end raises DINIS whatever the count, so words of a burst already started
  *        stay pending in the context. With no word pending, DINIS 1, or one word pending behind
- *        a running block, they drop at the CR write. A channel completing while the request is
- *        held drops it too, and with MDMAT 0 starts DCAL as at any transfer end, so DCIS rises
- *        as RM0456 step 4 foresees. Setting DMAE or INIT ends the hold.
+ *        a block from its launch to its DINIS, they drop at the CR write. A channel completing
+ *        while the request is held drops it too, and with MDMAT 0 starts DCAL as at any transfer
+ *        end, so DCIS rises as RM0456 step 4 foresees. Setting DMAE or INIT ends the hold.
  *
  *        HMAC, RM0456 51.4.7: MODE 1 at INIT selects HMAC and latches LKEY. Three phases follow,
  *        each closed by DCAL: the inner key, the message, the outer key. A key phase ends by
@@ -495,20 +502,26 @@ struct hash_state
  *        to HR6 for SHA3-224, HR0 to HR7, HR0 to HR11 and HR0 to HR15 for SHA3-256, SHA3-384 and
  *        SHA3-512, and the rate for SHAKE, byte 0 in HR0[31:24]. HRA0-4 read zero under SHA-3 and
  *        SHAKE. A DCAL with no DIN word since a SHAKE digest runs one more permutation and shows
- *        the next rate bytes. A block keeps BUSY from its launching write for 82 cycles under SHA-1
- *        and the SHA-512 family and 64 under SHA2-224 and SHA2-256, as measured on an STM32H573,
- *        where Table 401 gives 82, 98 and 66. A final digest keeps BUSY 15 cycles past its blocks
- *        under SHA-1, SHA2-224 and SHA2-256 and 27 under the SHA-512 family, and DCIS, DINIS, NBWE
- *        and the digest registers follow 11 cycles after BUSY clears, as measured on an STM32H573
- *        for SHA-1, SHA2-256 and SHA2-512, DCAL to BUSY 0 in 97, 79 and 109 cycles and to DCIS in
- *        108, 90 and 120. SHA2-224 and SHA2-384 to SHA2-512/256 follow the measured algorithm of
- *        their block size. SHA-3 and SHAKE digests take their blocks only, DCIS with BUSY 0.
- *        SHA3-224 to SHA3-512 take 60, 58, 50 and 42, Table 401, and SHAKE128 and SHAKE256 66 and
- *        58 by the same rule, one permutation of a squeeze taking a block time. HMAC takes the
- *        block size as its key size, for every algorithm but SHAKE. Context swap CSRs hold the
- *        Keccak lanes at CSR4-53, the last word at CSR54, and the inner HMAC digest at CSR55 for
- *        SHA3-224 and SHA3-256, CSR72 for SHA3-384 and SHA3-512, the SHA-512 chaining value at
- *        CSR4-19, the pending block at CSR20-51 and the inner digest at CSR52.
+ *        the next rate bytes. A block keeps BUSY from its launching write for 67 cycles under SHA-1
+ *        and SHA2-512 and 51 under SHA2-256, as measured on an STM32H573, where Table 401 gives 82,
+ *        98 and 66. NBWE and NBWP take their new values 1 cycle after BUSY clears and DINIS rises 1
+ *        cycle later, as measured. A DIN write or a DCAL before that applies both first. While
+ *        BUSY, NBWP counts the launched block's words with the pending ones. A final digest
+ *        keeps BUSY its compressions times the block time plus 17 cycles under SHA-1 and SHA2-256
+ *        and 33 under SHA2-512. DCIS, NBWE and the digest registers follow 1 cycle after BUSY
+ *        clears and DINIS 1 cycle later, or all at a DIN write before that, as measured from the
+ *        DCAL store: BUSY 0 at 84, 68 and 100 cycles for one compression, the rule within 1 cycle
+ *        of the two compression readings. The digest registers read 0 in the cycle between BUSY
+ *        0 and DCIS, as on the part. SHA2-224 takes the SHA2-256 times and SHA2-384 to
+ *        SHA2-512/256 the SHA2-512 ones, inferred from their families. SHA-3 and SHAKE digests
+ *        take their blocks only, DCIS with BUSY 0. SHA3-224 to SHA3-512 take 60, 58, 50 and 42,
+ *        Table 401, and SHAKE128 and SHAKE256 66 and 58 by the same rule, one permutation of a
+ *        squeeze taking a block time. HMAC takes the block size as its key size, for every
+ *        algorithm but SHAKE.
+ *        Context swap CSRs hold the Keccak lanes at CSR4-53, the last word at CSR54, and the inner
+ *        HMAC digest at CSR55 for SHA3-224 and SHA3-256, CSR72 for SHA3-384 and SHA3-512, the
+ *        SHA-512 chaining value at CSR4-19, the pending block at CSR20-51 and the inner digest at
+ *        CSR52.
  *
  *        Divergence: a DIN write while BUSY does not stall the bus, the CPU runs on.
  *
@@ -565,6 +578,8 @@ private:
   void               status_written(std::uint32_t value);
   void               initialise(std::uint32_t control);
   void               finish_digest();
+  void               settle_block();
+  [[nodiscard]] auto reveal_block() -> bool;
   [[nodiscard]] auto last_bits() const -> std::uint32_t;
   auto               pad(std::uint32_t last_bits) -> std::size_t;
   auto               pad_keccak(std::uint32_t last_bits) -> std::size_t;
@@ -590,7 +605,7 @@ private:
   void               calculate();
   void               request();
   void               work(std::uint64_t cycles, bool final);
-  void               complete_digest();
+  void               complete_digest(bool input_ready = true);
   void               finish_work();
   void               publish();
   void               show_digest(bool visible);
@@ -1058,7 +1073,10 @@ void hash::control_written(std::uint32_t old, std::uint32_t now)
 
 auto hash::block_launched() const -> bool
 {
-  return state_.count == 0 or get(regs_, dinis_) != 0 or (state_.busy != 0 and state_.count == 1);
+  return state_.count == 0
+      or get(regs_, dinis_) != 0
+      or (state_.busy != 0 and state_.count == 1)
+      or (state_.shown != 0 and (state_.block_lag != 1 or state_.count <= 1));
 }
 
 void hash::request()
@@ -1103,6 +1121,7 @@ void hash::initialise(std::uint32_t control)
   state_.inner         = {};
   state_.refused       = 0;
   state_.suspend       = suspend_none;
+  state_.block_lag     = 0;
   restart();
   withdraw();
   update(regs_, nbwe_, alg().block_words + 1u);
@@ -1117,16 +1136,23 @@ void hash::initialise(std::uint32_t control)
 
 void hash::data_written(std::uint32_t value)
 {
+  if(auto const seq = std::exchange(state_.flagged, 0); seq != 0)
+  {
+    ctx_.events.cancel(seq - 1);
+    complete_digest();
+  }
   auto const word = swapped(value, get(regs_, datatype_));
   if(state_.squeezing != 0)
   {
     restart();
   }
+  settle_block();
   if(state_.count == alg().block_words)
   {
     process_full();
     ++state_.blocks;
-    state_.count = 0;
+    state_.count     = 0;
+    state_.block_lag = static_cast<std::uint8_t>(alg().lag != 0);
     work(alg().cycles, false);
   }
   push(word);
@@ -1392,6 +1418,8 @@ void hash::finish_digest()
 
 void hash::conclude(std::size_t compressed, bool final)
 {
+  settle_block();
+  state_.block_lag = 0;
   if(final)
   {
     state_.digest_size = alg().digest_words;
@@ -1511,7 +1539,7 @@ void hash::post()
 
 void hash::withdraw()
 {
-  for(auto* queued : {&state_.queued, &state_.flagged})
+  for(auto* queued : {&state_.queued, &state_.flagged, &state_.shown})
   {
     if(auto const seq = std::exchange(*queued, 0); seq != 0)
     {
@@ -1520,12 +1548,43 @@ void hash::withdraw()
   }
 }
 
-void hash::on_event(std::uint32_t kind, std::uint64_t)
+void hash::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == block_shown or kind == block_ready)
+  {
+    state_.shown = 0;
+    if(kind != block_shown)
+    {
+      update(regs_, dinis_, 1);
+    }
+    else if(reveal_block())
+    {
+      auto const lag = alg().flag_lag * ps_per_second / ctx_.clock.core_hz();
+      state_.shown   = ctx_.events.schedule_at(
+                           vtime{ctx_.clock.time().ps + lag}, block_ready, payload, ctx_.clock)
+                     + 1;
+    }
+    interrupts();
+    return;
+  }
   if(kind == digest_done)
   {
     state_.flagged = 0;
-    complete_digest();
+    if(payload != 0)
+    {
+      update(regs_, dinis_, 1);
+    }
+    else
+    {
+      complete_digest(alg().flag_lag == 0);
+      if(alg().flag_lag != 0)
+      {
+        auto const lag = alg().flag_lag * ps_per_second / ctx_.clock.core_hz();
+        state_.flagged =
+            ctx_.events.schedule_at(vtime{ctx_.clock.time().ps + lag}, digest_done, 1, ctx_.clock)
+            + 1;
+      }
+    }
     interrupts();
     return;
   }
@@ -1565,6 +1624,13 @@ void hash::finish_work()
           + 1;
     }
   }
+  else if(state_.block_lag != 0)
+  {
+    state_.block_lag = static_cast<std::uint8_t>(launched ? 2 : 1);
+    auto const lag   = alg().lag * ps_per_second / ctx_.clock.core_hz();
+    state_.shown =
+        ctx_.events.schedule_at(vtime{ctx_.clock.time().ps + lag}, block_shown, 0, ctx_.clock) + 1;
+  }
   else
   {
     if(state_.count <= 1 or launched)
@@ -1576,10 +1642,34 @@ void hash::finish_work()
   interrupts();
 }
 
-void hash::complete_digest()
+auto hash::reveal_block() -> bool
+{
+  auto const launched = state_.block_lag == 2;
+  state_.block_lag    = 0;
+  update(regs_, nbwe_, alg().block_words + 1u - state_.count);
+  publish();
+  return state_.count <= 1 or launched;
+}
+
+void hash::settle_block()
+{
+  if(auto const seq = std::exchange(state_.shown, 0); seq != 0)
+  {
+    ctx_.events.cancel(seq - 1);
+    if(state_.block_lag == 0 or reveal_block())
+    {
+      update(regs_, dinis_, 1);
+    }
+  }
+}
+
+void hash::complete_digest(bool input_ready)
 {
   update(regs_, dcis_, 1);
-  update(regs_, dinis_, 1);
+  if(input_ready)
+  {
+    update(regs_, dinis_, 1);
+  }
   update(regs_, nbwe_, alg().block_words + 1u);
   show_digest(true);
 }
@@ -1603,7 +1693,7 @@ void hash::mask_written(std::uint32_t, std::uint32_t)
 
 void hash::publish()
 {
-  update(regs_, nbwp_, state_.count);
+  update(regs_, nbwp_, state_.count + (state_.block_lag != 0 ? alg().block_words : 0u));
   update(regs_, nbw_, state_.count);
   update(regs_, cr_dinne_, get(regs_, dinne_));
 }

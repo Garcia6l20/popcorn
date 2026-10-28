@@ -142,7 +142,7 @@ TEST_CASE("STM32H573 silicon: VOS3 to VOS0 steps ACTVOS every 10.4 us and is rea
   CHECK(r.level() == 0);
 }
 
-TEST_CASE("RM0481 10.11.6: a lower VOS keeps VOSRDY and steps down, ACTVOSRDY clears until ready")
+TEST_CASE("a lower VOS keeps VOSRDY, RM0481 10.11.6, and steps down at the measured upward rate")
 {
   rig r;
   r.write("PWR_VOSCR", 3u << 4);

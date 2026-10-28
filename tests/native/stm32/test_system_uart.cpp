@@ -1632,10 +1632,9 @@ TEST_CASE("a strict shape fault a pause carries is the pause, before the goal st
     w.add("link_rx");
     w.link(0, 1, latency_20);
     w.host(how);
-    auto const q       = w.sys->quantum().ps;
-    auto const barrier = (s / q + 1) * q;
-    auto const goal    = s + (barrier - s) / 2;
-    REQUIRE(goal < barrier);
+    auto const                            q       = w.sys->quantum().ps;
+    auto const                            barrier = (s / q + 1) * q;
+    auto const                            goal    = s + (barrier - s) / 2;
     core::host_future<core::goal_reached> sending;
     core::host_future<core::goal_reached> listening;
     {

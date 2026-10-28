@@ -40,11 +40,21 @@ enum class rcc_role : std::uint8_t
   rtc_prescaler,
 };
 
+/** @brief Cycles of the running HSI rate from an `HSIDIV` write to the `HSIDIVF` clear and set. */
+struct hsi_divider_timing
+{
+  /** @brief Cycles to the clear. */
+  std::uint8_t clear;
+  /** @brief Cycles to the set and the new rate. */
+  std::uint8_t set;
+};
+
 struct rate_inputs
 {
   register_file const&         regs;
   field_table<rcc_role> const& names;
   rcc_options const&           options;
+  std::uint32_t                hsi_divider{};
 
   [[nodiscard]] auto read(rcc_role role) const -> std::uint32_t
   {

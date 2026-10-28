@@ -43,11 +43,12 @@ static_assert(std::is_empty_v<syscfg_state>);
  *        and every other register is storage. Every register but `SYSCFG_SECCFGR` is storage
  *        the model does not model, at TZEN=0 and 1: a firmware write that lands, past the Table
  *        131 rules, logs one model_warning per register, and raises model_error under
- *        strict_peripherals before it is stored. Firmware reads are silent. A host view access
- *        to such a register raises model_error, peek and poke reach it. Deviation: RM0456 Table
- *        131 makes `SYSCFG_CSLCKR` RAZ/WI at TZEN=0, the model keeps it storage, P1 covers
- *        `SYSCFG_SECCFGR` only. The model is stateless: a save made by a machine without it
- *        restores it from the register storage.
+ *        strict_peripherals before it is stored. Firmware reads are silent. A write while the
+ *        unit is held by SYSCFGRST raises the illegal access event the rules give and is not
+ *        noted. A host view access to such a register raises model_error, peek and poke reach
+ *        it. Deviation: RM0456 Table 131 makes `SYSCFG_CSLCKR` RAZ/WI at TZEN=0, the model
+ *        keeps it storage, P1 covers `SYSCFG_SECCFGR` only. The model is stateless: a save
+ *        made by a machine without it restores it from the register storage.
  */
 class syscfg final : public dispatch_model<syscfg, syscfg_state>,
                      public trustzone_aware,
@@ -132,7 +133,7 @@ void syscfg::reset(register_file&, reset_kind)
 
 void syscfg::on_held_write(std::uint32_t offset, access_ctx ctx)
 {
-  static_cast<void>(guard(offset & ~3u, ctx, true));
+  static_cast<void>(rule(offset & ~3u, ctx, true));
 }
 
 void syscfg::on_bus_reset()

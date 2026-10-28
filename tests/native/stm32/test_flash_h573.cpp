@@ -1914,21 +1914,115 @@ TEST_CASE(
   CHECK(sbs.peek("SBS_EPOCHSELCR") == 0);
 }
 
-TEST_CASE("a system reset restores every SBS register but SBS_RSSCMDR, a power-on reset every one")
+TEST_CASE(
+    "a system reset restores every SBS register but SBS_RSSCMDR and SBS_MESR.MCLR, a power-on "
+    "reset every one")
 {
+  struct written
+  {
+    std::string_view reg;
+    std::uint32_t    value;
+    std::uint32_t    reset;
+  };
   secure_flash const s;
   sbs_bus const      sbs{s};
-  sbs.write("SBS_CSLCKR", sbs.bit("SBS_CSLCKR", "LOCKSAU"), secure_priv);
+  std::array const   registers{
+      written{"SBS_SECCFGR", sbs.bit("SBS_SECCFGR", "CLASSBSEC"), 0},
+      written{"SBS_CSLCKR", sbs.bit("SBS_CSLCKR", "LOCKSAU"), 0},
+      written{"SBS_CNSLCKR", sbs.bit("SBS_CNSLCKR", "LOCKNSMPU"), 0},
+      written{"SBS_CFGR2", sbs.bit("SBS_CFGR2", "CLL"), 0},
+      written{"SBS_DBGCR", 0xb4, 0},
+      written{"SBS_DBGLOCKR", 0xc3, 0xb4},
+      written{"SBS_FPUIMR", 0, 0x1f},
+      written{"SBS_EPOCHSELCR", 1, 0},
+  };
+  for(auto const& [reg, value, reset] : registers)
+  {
+    sbs.write(reg, value, secure_priv);
+    REQUIRE(sbs.peek(reg) == value);
+  }
   sbs.write("SBS_RSSCMDR", 1, secure_priv);
+  auto const  mclr = sbs.bit("SBS_MESR", "MCLR");
+  auto const& desc = s.r.f.target->peripheral("SBS").description();
+  auto const* mesr = popcorn::find_register(desc, "SBS_MESR");
+  REQUIRE(mesr != nullptr);
+  s.r.f.target->peripheral("SBS").poke(mesr->offset, sbs.bit("SBS_MESR", "IPMEE") | mclr);
   sbs.write("SBS_HDPLCR", 0x6a, secure_priv);
   REQUIRE(sbs.peek("SBS_HDPLSR") == 0x8a);
   s.r.f.target->reset(popcorn::reset_kind::software);
+  CHECK(sbs.peek("SBS_MESR") == mclr);
   CHECK(sbs.peek("SBS_HDPLSR") == 0x51);
   CHECK(sbs.peek("SBS_HDPLCR") == 0xb4);
-  CHECK(sbs.peek("SBS_CSLCKR") == 0);
+  for(auto const& [reg, value, reset] : registers)
+  {
+    CAPTURE(reg);
+    CHECK(sbs.peek(reg) == reset);
+  }
   CHECK(sbs.peek("SBS_RSSCMDR") == 1);
   s.r.f.target->reset();
   CHECK(sbs.peek("SBS_RSSCMDR") == 0);
+  CHECK(sbs.peek("SBS_MESR") == mclr);
+}
+
+TEST_CASE(
+    "RM0481 14.5.12 and an STM32H573 reading: SBS_MESR reads MCLR 1 from the power-on, a system "
+    "reset keeps it, a written 1 clears MCLR and IPMEE")
+{
+  secure_flash const s;
+  sbs_bus const      sbs{s};
+  auto const         mclr  = sbs.bit("SBS_MESR", "MCLR");
+  auto const         ipmee = sbs.bit("SBS_MESR", "IPMEE");
+  auto&              unit  = s.r.f.target->peripheral("SBS");
+  auto const*        mesr  = popcorn::find_register(unit.description(), "SBS_MESR");
+  REQUIRE(mesr != nullptr);
+  CHECK(sbs.peek("SBS_MESR") == mclr);
+  sbs.write("SBS_MESR", ipmee, secure_priv);
+  CHECK(sbs.peek("SBS_MESR") == mclr);
+  sbs.write("SBS_MESR", 0, secure_priv);
+  CHECK(sbs.peek("SBS_MESR") == mclr);
+  s.r.f.target->reset(popcorn::reset_kind::software);
+  CHECK(sbs.peek("SBS_MESR") == mclr);
+  sbs.write("SBS_MESR", mclr, secure_priv);
+  CHECK(sbs.peek("SBS_MESR") == 0);
+  s.r.f.target->reset(popcorn::reset_kind::software);
+  CHECK(sbs.peek("SBS_MESR") == 0);
+  unit.poke(mesr->offset, ipmee | mclr);
+  sbs.write("SBS_MESR", ipmee, secure_priv);
+  CHECK(sbs.peek("SBS_MESR") == mclr);
+  s.r.f.target->reset();
+  CHECK(sbs.peek("SBS_MESR") == mclr);
+
+  stm32_fixture const f{h573(), firmware};
+  auto const&         plain = f.target->peripheral("SBS");
+  auto&               bus   = core::machine_internals::services(*f.target);
+  CHECK(plain.peek(mesr->offset) == mclr);
+  REQUIRE(bus.write(plain.description().base + mesr->offset, 4, mclr, nonsecure_priv).has_value());
+  CHECK(plain.peek(mesr->offset) == 0);
+}
+
+TEST_CASE("an H573 description with an SBS reset bit throws config_error at the SBS model")
+{
+  auto desc = h573();
+  auto rcc =
+      std::ranges::find(desc.peripherals, std::string_view{"RCC"}, &popcorn::peripheral_desc::name);
+  REQUIRE(rcc != desc.peripherals.end());
+  auto* const rstr = const_cast<popcorn::register_desc*>(
+      popcorn::find_register(*rcc, std::string_view{"RCC_APB3RSTR"}));
+  REQUIRE(rstr != nullptr);
+  stm32::register_builtin_models();
+  CHECK_NOTHROW(
+      core::machine(desc, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()));
+  rstr->fields.push_back({.name = "SBSRST", .lsb = 1, .width = 1});
+  try
+  {
+    core::machine(desc, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options());
+    FAIL("no config_error");
+  }
+  catch(popcorn::config_error const& error)
+  {
+    CHECK(std::string_view{error.what()}.contains("fields.SBSRST"));
+    CHECK(std::string_view{error.what()}.contains("no SBS reset bit"));
+  }
 }
 
 TEST_CASE("RM0481 11.5.1: SBSSEC makes RCC_APB3ENR.SBSEN Secure")
@@ -2036,18 +2130,22 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0481 Table 72 note 1 and Table 64: without TrustZone HDPL 2 closes the HDP area, a load of "
-    "it reads zero, a fetch from it faults and a program into it sets WRPERR, the next sector "
-    "stays open with its SECWM1 range ignored")
+    "RM0481 7.6.2, Table 63 and Table 64: without TrustZone HDPL 2 closes the HDP area, a load of "
+    "it reads zero, a fetch from it is a BusFault, a program, a sector erase or a bank erase of it "
+    "sets WRPERR, the next sector stays open with its SECWM1 range ignored, and a restore of an "
+    "HDPL 2 snapshot closes it again")
 {
-  constexpr address closed = flash_ns + 10 * sector_bytes;
-  constexpr address open   = flash_ns + 12 * sector_bytes;
-  auto              f      = option_fixture({
+  constexpr address         closed  = flash_ns + 10 * sector_bytes;
+  constexpr address         open    = flash_ns + 12 * sector_bytes;
+  constexpr address         cfsr    = 0xe000'ed28;
+  constexpr std::uint32_t   ibuserr = 1u << 8;
+  stm32::option_bytes const options{
       .secwm1 = stm32::page_range{.first = 12, .last = 13},
       .hdp1   = stm32::page_range{.first = 10, .last = 11}
-  });
-  auto&             bus    = core::machine_internals::services(*f.target);
-  auto const        at     = [&](std::string_view unit, std::string_view reg) {
+  };
+  auto       f   = option_fixture(options);
+  auto&      bus = core::machine_internals::services(*f.target);
+  auto const at  = [&](std::string_view unit, std::string_view reg) {
     auto const& desc  = f.target->peripheral(unit).description();
     auto const* found = popcorn::find_register(desc, reg);
     REQUIRE(found != nullptr);
@@ -2078,6 +2176,7 @@ TEST_CASE(
   CHECK(load(open) == 0x9abc'def0);
   f.set("pc", (closed + 0x100) | 1u);
   CHECK(f.run_to_stop({.max_instructions = icount{4}}).reason == stop_reason::fault);
+  CHECK((f.target->mem().read(cfsr, 4).value_or(0) & ibuserr) != 0);
   write("FLASH", "FLASH_NSKEYR", secure_key1);
   write("FLASH", "FLASH_NSKEYR", secure_key2);
   write("FLASH", "FLASH_NSCR", pg);
@@ -2089,6 +2188,23 @@ TEST_CASE(
   CHECK(f.target->mem().read(closed + 0x20, 4) == 0xffff'ffff);
   write("FLASH", "FLASH_NSCCR", ~0u);
   REQUIRE(f.field("FLASH", "FLASH_NSSR", "WRPERR") == 0);
+  auto const* const nscr =
+      popcorn::find_register(f.target->peripheral("FLASH").description(), "FLASH_NSCR");
+  REQUIRE(nscr != nullptr);
+  auto const snb =
+      std::ranges::find(nscr->fields, std::string_view{"SNB"}, &popcorn::field_desc::name);
+  REQUIRE(snb != nscr->fields.end());
+  for(auto const erase : {ser | (10u << snb->lsb) | strt, ber | strt})
+  {
+    CAPTURE(erase);
+    write("FLASH", "FLASH_NSCR", erase);
+    CHECK(f.field("FLASH", "FLASH_NSSR", "WRPERR") == 1);
+    CHECK(f.field("FLASH", "FLASH_NSSR", "BSY") == 0);
+    CHECK(f.target->mem().read(closed, 4) == 0x1234'5678);
+    write("FLASH", "FLASH_NSCCR", ~0u);
+    REQUIRE(f.field("FLASH", "FLASH_NSSR", "WRPERR") == 0);
+  }
+  write("FLASH", "FLASH_NSCR", pg);
   for(address word = 0; word < 4; ++word)
   {
     REQUIRE(bus.write(open + 0x20 + 4 * word, 4, word, nonsecure_priv).has_value());
@@ -2100,6 +2216,18 @@ TEST_CASE(
   CHECK(load(closed) == 0x1234'5678);
   f.set("pc", (closed + 0x100) | 1u);
   CHECK(f.run_to_stop({.max_instructions = icount{4}}).reason == stop_reason::user);
+  auto        other     = option_fixture(options);
+  auto&       other_bus = core::machine_internals::services(*other.target);
+  auto const& sbs       = other.target->peripheral("SBS").description();
+  auto const* hdplcr    = popcorn::find_register(sbs, "SBS_HDPLCR");
+  REQUIRE(hdplcr != nullptr);
+  REQUIRE(other.target->mem().write(loop_at, 4, 0xbe01'6801u));
+  REQUIRE(other.target->mem().write(closed, 4, 0x1234'5678));
+  REQUIRE(other_bus.write(sbs.base + hdplcr->offset, 4, 0x6a, nonsecure_priv).has_value());
+  auto const taken = other.target->snapshot();
+  f.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(taken.data()))});
+  REQUIRE(bus.read(at("SBS", "SBS_HDPLSR"), 4, nonsecure_priv) == 0x8a);
+  CHECK(load(closed) == 0);
 }
 
 TEST_CASE(

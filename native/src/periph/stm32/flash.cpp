@@ -664,7 +664,7 @@ struct u5_flash
   /** @brief A completed OPTSTRT loads the programmed protection at once. */
   static constexpr bool option_reload_on_start = false;
   /** @brief The Secure hide protection area lies in a Secure watermark area, RM0456 7.5.3, so
-   * only a TrustZone machine closes it. */
+   *         only a TrustZone machine closes it. */
   static constexpr bool hide_without_trustzone = false;
   /** @brief Clearing ECCD also clears the address and bank it recorded. */
   static constexpr bool ecc_record_clears = false;
@@ -1015,7 +1015,8 @@ struct h5_flash
   static constexpr bool option_key_needs_unlock = false;
   /** @brief A completed OPTSTRT reloads the _CUR registers, RM0481 7.4.3. */
   static constexpr bool option_reload_on_start = true;
-  /** @brief HDPL closes the HDP areas with TZ_STATE 0xC3 too, RM0481 Table 72 note 1. */
+  /** @brief HDPL closes the HDP areas with TZ_STATE 0xC3 too, RM0481 7.6.2 and Table 63, and
+   *         Table 72 note 1. */
   static constexpr bool hide_without_trustzone = true;
   /** @brief Clearing ECCD clears FLASH_ECCDETR, RM0481 7.9.10. */
   static constexpr bool ecc_record_clears = true;
@@ -1502,10 +1503,15 @@ static_assert(flag_matches_roles(
  *   two to HDPx_END plus the HDPx_EXT sectors of FLASH_HDPEXTR. FLASH_HDPEXTR fields only grow
  *   and ignore writes at HDPL 3, 7.11.18. A closed sector reads zero and refuses every fetch, as
  *   the U5 HDP area does, Table 64.
- * - HDP without TrustZone, Table 72 note 1: with machine option bytes and TZEN = 0xC3 the HDP
- *   areas close by HDPL as above. The model installs a memory filter for the flash, so a load of
- *   a closed sector reads zero and a fetch from it is a BusFault, and a program or erase of it
- *   sets WRPERR in FLASH_NSSR. The watermark and the block bits take no part there.
+ * - HDP without TrustZone, 7.6.2 and Table 63, and Table 72 note 1: with machine option bytes
+ *   and TZEN = 0xC3 the HDP areas close by HDPL as above. The model installs a memory filter for
+ *   the flash, so a load of a closed sector reads zero and a fetch from it is a BusFault, and a
+ *   program or erase of it sets WRPERR in FLASH_NSSR. The watermark and the block bits take no
+ *   part there. With the filter installed, a CPU block transfer such as exception stacking and
+ *   unstacking moves word by word through the filter, every MMIO access asks it for a verdict,
+ *   every engine TLB fill of RAM or flash asks it for the page, and every FLASH_PRIVBBxRy or
+ *   FLASH_SECBBxRy change drops the engine's page verdicts. A machine with no option bytes
+ *   installs no filter.
  * - ECC, 7.9.10: ECCD and its record are in FLASH_ECCDETR, ADDR_ECC the 128-bit word index in
  *   the bank, and clearing ECCD clears the record. ECCC is in FLASH_ECCCORR.
  * - Latency: RM0481 Table 48 per VOS level, with no LPM. No oscillator is held for programming.

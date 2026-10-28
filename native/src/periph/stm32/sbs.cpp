@@ -1,13 +1,16 @@
 #include "factories.hpp"
 #include "model_base.hpp"
+#include "rcc_resets.hpp"
 #include "secure_config.hpp"
 #include "temporal_isolation.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <format>
 #include <memory>
 #include <span>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -55,14 +58,18 @@ constexpr std::uint8_t                 top_level    = 3;
  *
  *        The SBS has no RCC reset bit, RM0481 11.8.25: `RCC_APB3RSTR` bit 1 reads 0 after a
  *        write of 1 on an STM32H573 and every SBS register keeps its value, where the STM32H562,
- *        H563 and H573 SVDs place SBSRST. A power-on or brown-out reset restores every register,
+ *        H563 and H573 SVDs place SBSRST. A description that keeps an SBS reset bit throws
+ *        config_error at construction. A power-on or brown-out reset restores every register,
  *        any other machine reset every one but `SBS_RSSCMDR`, which RM0481 14.5.6 clears by a
- *        power-on reset.
+ *        power-on reset, and MCLR of `SBS_MESR`, which RM0481 14.5.12 keeps across a system
+ *        reset. `SBS_MESR` reads MCLR 1 from the power-on, the memory erase done at once, and
+ *        its fields the description makes rc_w1, MCLR and IPMEE, clear on a written 1, as read
+ *        on an STM32H573.
  *
- *        Every register but `SBS_HDPLCR`, `SBS_HDPLSR` and `SBS_SECCFGR` is storage the model
- *        does not model: a firmware write that lands, past the bus rules, logs one
- *        model_warning per register and raises model_error under strict_peripherals before it
- *        is stored, as the U5 SYSCFG. Firmware reads are silent. `SBS_PMCR` takes every
+ *        Every register but `SBS_HDPLCR`, `SBS_HDPLSR`, `SBS_SECCFGR` and `SBS_MESR` is
+ *        storage the model does not model: a firmware write that lands, past the bus rules, logs
+ *        one model_warning per register and raises model_error under strict_peripherals before
+ *        it is stored, as the U5 SYSCFG. Firmware reads are silent. `SBS_PMCR` takes every
  *        access, the bits RM0481 14.5.9 makes Secure with a GPIOB pin, ADC12SEC or ETHSEC
  *        included. The level lives in `SBS_HDPLSR`, so the model is stateless.
  */
@@ -83,6 +90,7 @@ public:
   [[nodiscard]] auto secure_word() const -> std::uint32_t override;
 
   void increment_written(std::uint32_t old, std::uint32_t now);
+  void erase_status_written(std::uint32_t old, std::uint32_t now);
 
   [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
 
@@ -94,6 +102,8 @@ private:
   field_ref                    increment_;
   field_ref                    level_;
   field_ref                    fpu_;
+  field_ref                    erase_done_;
+  std::uint32_t                erase_flags_{};
   reg_ref                      security_;
   std::uint32_t                always_secure_{};
   std::array<std::uint32_t, 2> secure_privileged_{};
@@ -106,12 +116,16 @@ private:
 auto sbs_writes(peripheral_desc const& desc) -> std::vector<write_entry<sbs>>
 {
   std::vector<write_entry<sbs>> out;
-  auto const* const             increment = find_register(desc, "SBS_HDPLCR");
+  auto const* const             increment    = find_register(desc, "SBS_HDPLCR");
+  auto const* const             erase_status = find_register(desc, "SBS_MESR");
   for(auto const& described : desc.registers)
   {
     if(not described.alternate_of)
     {
-      out.push_back({described.name, increment == &described ? &sbs::increment_written : nullptr});
+      out.push_back(
+          {described.name, increment == &described      ? &sbs::increment_written
+                           : erase_status == &described ? &sbs::erase_status_written
+                                                        : nullptr});
     }
   }
   return out;
@@ -123,7 +137,8 @@ sbs::sbs(model_context& ctx, peripheral_desc const& desc)
 },
       regs_{ctx.regs}, increment_{field("SBS_HDPLCR", "INCR_HDPL")},
       level_{field("SBS_HDPLSR", "HDPL")}, fpu_{field("SBS_SECCFGR", "FPUSEC")},
-      security_{reg("SBS_SECCFGR")}, always_secure_{reg("SBS_RSSCMDR").offset},
+      erase_done_{field("SBS_MESR", "MCLR")}, security_{reg("SBS_SECCFGR")},
+      always_secure_{reg("SBS_RSSCMDR").offset},
       secure_privileged_{reg("SBS_EPOCHSELCR").offset, reg("SBS_ECCNMIR").offset},
       debug_{reg("SBS_DBGCR").offset, reg("SBS_DBGLOCKR").offset},
       isolation_words_{increment_.offset, level_.offset},
@@ -139,7 +154,28 @@ sbs::sbs(model_context& ctx, peripheral_desc const& desc)
               {reg("SBS_MESR").offset, reg("SBS_CCCSR").offset, reg("SBS_CCVALR").offset,
                reg("SBS_CCSWCR").offset},
           .unit = unit_named(ctx.part, desc.name)}
-{}
+{
+  for(auto const& erase : describe("SBS_MESR").fields)
+  {
+    if(erase.on_write == write_effect::one_to_clear)
+    {
+      erase_flags_ |= field("SBS_MESR", erase.name).mask();
+    }
+  }
+  auto const rcc =
+      std::ranges::find(ctx.part.peripherals, std::string_view{"RCC"}, &peripheral_desc::name);
+  if(rcc == ctx.part.peripherals.end())
+  {
+    return;
+  }
+  if(auto const bit = reset_bit_of(*rcc, desc.name))
+  {
+    throw config_error(
+        ctx.part.part, 0,
+        std::format("peripherals.RCC.registers.{}.fields.{}", bit->reg, bit->field),
+        "no SBS reset bit: the SBS has no RCC reset, RM0481 11.8.25 and an STM32H573 reading");
+  }
+}
 
 void sbs::restore_reset_values(std::span<std::uint32_t const> kept)
 {
@@ -156,9 +192,13 @@ void sbs::restore_reset_values(std::span<std::uint32_t const> kept)
 void sbs::reset(register_file&, reset_kind kind)
 {
   auto const       power_on = kind == reset_kind::power_on or kind == reset_kind::brown_out;
-  std::array const kept{
-      isolation_words_[0], isolation_words_[1], power_on ? isolation_words_[0] : always_secure_};
-  restore_reset_values(kept);
+  auto const       erased   = get(regs_, erase_done_);
+  std::array const kept{isolation_words_[0], isolation_words_[1], always_secure_};
+  restore_reset_values(std::span{kept}.first(power_on ? 2 : 3));
+  if(not power_on)
+  {
+    update(regs_, erase_done_, erased);
+  }
   update(regs_, increment_, no_increment);
   update(regs_, level_, level_codes[boot_level]);
 }
@@ -210,7 +250,9 @@ auto sbs::stateless() const -> bool
 
 auto sbs::storage_only(std::uint32_t offset) const -> bool
 {
-  return offset != security_.offset and not std::ranges::contains(isolation_words_, offset);
+  return offset != security_.offset
+     and offset != erase_done_.offset
+     and not std::ranges::contains(isolation_words_, offset);
 }
 
 auto sbs::secure_word() const -> std::uint32_t
@@ -229,6 +271,11 @@ auto sbs::isolation_level() const -> std::uint8_t
   auto const found = std::ranges::find(level_codes, code);
   return found == level_codes.end() ? boot_level
                                     : static_cast<std::uint8_t>(found - level_codes.begin());
+}
+
+void sbs::erase_status_written(std::uint32_t old, std::uint32_t now)
+{
+  regs_.poke(erase_done_.offset, old & ~(now & erase_flags_));
 }
 
 void sbs::increment_written(std::uint32_t, std::uint32_t now)

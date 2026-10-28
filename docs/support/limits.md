@@ -11,7 +11,8 @@ The MDF and ADF model raises `UnmodelledConfig`. Read the log records of a run t
 settings a firmware reached.
 
 On the STM32H5 a Machine runs the STM32H562, H563 and H573. The STM32H503, H523 and H533
-descriptions build from their SVD, and attaching a Machine to them raises `ConfigError`.
+descriptions build from their SVD, and attaching a Machine to them raises `ConfigError`. The
+STM32H543 and H553 descriptions need ST's DIE47C rzone file to build.
 
 ## Peripherals without a model
 
@@ -103,8 +104,10 @@ On the STM32H5, RM0481 section 28:
   reading consistent with that run.
 - The end of a one-shot DMA transfer, DMACFG 0, clears ADSTART and stops the conversions, as
   measured on an STM32H573 with CONT 1.
-- tLATR at CKMODE 00 with PRESC dividing by 256 is 4.75 ADC clock cycles, as measured on an
-  STM32H573. The other prescalers take the 2 cycles of DS14121 Table 96.
+- At CKMODE 00 a trigger waits for the next ADC clock edge, and tLATR is 4.5 ADC clock cycles
+  from that edge at every prescaler, as measured on an STM32H573 at /1, /2, /128 and /256.
+  DS14121 Table 96 gives 2 cycles. The ADC clock edges fall on multiples of the ADC clock period
+  from virtual time 0.
 
 ## CRC
 
@@ -160,6 +163,8 @@ Differs from RM0456:
 - Host and debugger reads, instruction fetches and vector table reads never detect an ECC error.
 - An unprivileged fetch of a privileged page is a BusFault. RM0456 Table 73 gives zeros.
 - A Secure bank erase over a bank with mixed pages is refused whole, by Table 70, not by 3.5.5.
+- Without TrustZone the FLASH_PRIVxBBRy bits are stored and gate no access. RM0456 3.6.3 keeps
+  the privileged protection with TZEN = 0.
 
 Not modelled on the STM32H5:
 
@@ -173,9 +178,9 @@ Not modelled on the STM32H5:
   model error under `strict`. LATENCY is checked against the same table.
 
 The HDP area of each bank closes by the SBS HDPL level of RM0481 Table 63, with TrustZone on
-and off, Table 72 note 1. A closed sector reads zero to a load, a fetch from it is a BusFault,
-and a program or erase of it sets WRPERR, Table 64. FLASH_HDPEXTR extends the area at HDPL 3.
-Without TrustZone the rule needs machine option bytes, which set the HDP areas.
+and off, RM0481 7.6.2 and Table 72 note 1. A closed sector reads zero to a load, a fetch from it
+is a BusFault, and a program or erase of it sets WRPERR, Table 64. FLASH_HDPEXTR extends the area
+at HDPL 3. Without TrustZone the rule needs machine option bytes, which set the HDP areas.
 
 Differs from RM0481:
 
@@ -191,6 +196,8 @@ Differs from RM0481:
   silicon, which differs from RM0481 Table 55 in bit 5. The STM32H523, H533, H543 and H553 read
   the Table 55 value.
 - A program over a word that is not erased writes the new data as given.
+- Without TrustZone the FLASH_PRIVBBxRy bits are stored and gate no access. RM0481 3.7.2 keeps
+  the privileged protection with TZEN = 0xC3.
 
 ## GPDMA and LPDMA
 
@@ -226,20 +233,24 @@ Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
   0001 and 0100 to 1011. The H543 and H553 store 0000 for 0001, 1010 and 1011 by the same rule,
   which is the H573 reading applied there. The write logs once and raises a model_error under
   strict_peripherals before CR changes.
-- The H5 SHA-3 and SHAKE rules below come from RM0481 and run on the H543 and H553 rows. Their
-  cases run on the STM32H573 description renamed STM32H553ZGTx: an H543 or H553 description
-  build takes ST's DIE47C rzone file.
-- The H5 BUSY time of one block, from its launching DIN write, is 82 HCLK cycles under SHA-1 and
-  the SHA-512 family and 64 under SHA2-224 and SHA2-256, as measured on an STM32H573 at 32 MHz.
-  RM0481 Table 401 gives 82, 98 and 66. The U5 keeps RM0456 Table 486: 82 under SHA-1 and 66
-  under MD5, SHA2-224 and SHA2-256.
-- An H5 final digest keeps BUSY 15 HCLK cycles past its blocks under SHA-1, SHA2-224 and SHA2-256
-  and 27 under the SHA-512 family. DCIS, DINIS, NBWE and the digest registers follow 11 cycles
-  after BUSY clears, and the digest registers read 0 in between. An STM32H573 measured DCAL to
-  BUSY 0 in 97, 79 and 109 cycles and DCAL to DCIS in 108, 90 and 120 for SHA-1, SHA2-256 and
-  SHA2-512 on a one-block message. SHA2-224 and SHA2-384 to SHA2-512/256 take the figures of the
-  measured algorithm with their block size. SHA-3 and SHAKE digests take their block times, DCIS
-  with BUSY 0. The U5 sets DCIS with BUSY 0 after one block time per padded block.
+- The SHA-3 and SHAKE rules follow RM0481 and are served on the STM32H543 and H553 rows. Building
+  a description for those parts needs ST's DIE47C rzone file.
+- The H5 BUSY time of one block, from its launching DIN write, is 67 HCLK cycles under SHA-1 and
+  SHA2-512 and 51 under SHA2-256, as measured on an STM32H573 at 32 MHz. RM0481 Table 401 gives
+  82, 98 and 66. NBWE and NBWP take their new values 1 cycle after BUSY clears and DINIS 1 cycle
+  later, as measured. While BUSY, NBWP counts the launched block's words with the pending ones.
+  SHA2-384, SHA2-512/224 and SHA2-512/256 take the SHA2-512 times and SHA2-224 the SHA2-256
+  times, inferred from their families. The U5 keeps RM0456 Table 486: 82 under SHA-1 and 66 under
+  MD5, SHA2-224 and SHA2-256.
+- An H5 final digest keeps BUSY its compressions times the block time plus 17 HCLK cycles under
+  SHA-1 and SHA2-256 and 33 under SHA2-512. DCIS, NBWE and the digest registers follow 1 cycle
+  after BUSY clears and DINIS 1 cycle later. An STM32H573 measured from the DCAL store BUSY 0 at
+  84, 68 and 100 cycles for one compression and 150, 118 and 166 for two, 152, 120 and 168 when
+  the padding spills into a second block, under SHA-1, SHA2-256 and SHA2-512. The rule gives each
+  within 1 cycle. The digest registers read 0 in the one cycle between BUSY 0 and DCIS, and after
+  INIT. A DIN write in between completes the digest first. SHA-3 and SHAKE digests take their
+  block times, DCIS with BUSY 0. The U5 sets DCIS with BUSY 0 after one block time per padded
+  block.
 - The H5 HASH reads SHA-3 and SHAKE DIN words as the SHA-2 core does: the first message byte of a
   word, after the DATATYPE swap, is its most significant byte, and the digest bytes fill HR0 and
   up from bit 31. RM0481 40.4.4 does not spell this out for SHA-3. DATATYPE 00, 01 and 11 follow
@@ -334,8 +345,8 @@ The USB full-speed device controller of the STM32H5 runs in device mode.
   returns its lanes. Word accesses are the ones RM0481 61.7 allows, so a CPU byte or half-word
   access logs once and raises `ModelError` under `strict`. Debugger accesses of any width pass.
 - A byte or half-word write of a USB register is a word write with the other lanes 0, as
-  measured on an STM32H573 for `CHEPnR` and `DADDR` and applied to every register: in `CHEPnR` a toggle bit there stays, `VTRX` and `VTTX` there clear
-  and `EA` or `UTYPE` there read 0.
+  measured on an STM32H573 for `CHEPnR` and `DADDR` and applied to every register: in `CHEPnR` a
+  toggle bit there stays, `VTRX` and `VTTX` there clear and `EA` or `UTYPE` there read 0.
 - The packet memory reads 0 after a power-on reset and keeps its content across every other
   reset, an RCC USBFSRST pulse included.
 - While `BCDR.DPPU_DPD` is set and `CNTR.SUSPEN` is clear, `ISTR.ESOF` rises and `FNR.LSOF`
@@ -463,9 +474,15 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   every other state, an enabled PLL1 off SYSCLK fed by HSI included, as measured on an STM32H573
   for PLL1. For PLL2 and PLL3 fed by HSI the model applies the same rule, inferred from PLL1. One
   write that clears PLL1ON of a PLL1 off SYSCLK and changes `HSIDIV` takes both.
-- STM32H5: `HSIDIVF` reads 0 for 1 us after an `HSIDIV` change and the HSI rate changes in the
-  write. On an STM32H573 the flag clears one read after the write and sets again within 35
-  cycles.
+- STM32H5: after an `HSIDIV` change, `HSIDIV` reads the new value at once. `HSIDIVF` clears and sets
+  again after the cycles of the running HSI rate measured on an STM32H573: /2 to /4 or /8 clear at 3
+  and set at 6, /2 to /1 3 and 16, /4 to /2 2 and 8, /4 to /1 2 and 14, /8 to /1 2 and 8. The other
+  transitions are inferred: from /1 they take the /2 row, /4 to /8 and /8 to /2 and /4 the /4 to /2
+  timing. The new HSI rate applies when `HSIDIVF` sets, a point the board run did not measure. On an
+  STM32H573 ST's HAL reads `HSIDIVF` about 24 cycles after the store and reads 1 for every
+  transition. The model runs one cycle per instruction, so the same load lands 13 cycles after the
+  store and reads 1, except for /2 to /1 and /4 to /1, where it reads 0 and HAL takes `HSI_VALUE`
+  either way.
 - Without TrustZone, a coverage report classes `RCC_CIFR` and `RCC_CICR` as `unimplemented`. The
   RCC sets the `RCC_CIFR` flags `RCC_CIER` enables, and a `RCC_CICR` write clears them.
 
@@ -548,9 +565,13 @@ Source: [sbs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   and H573 SVDs name SBSRST, is reserved and reads 0, and a write of it leaves every SBS
   register as it was, as read back on an STM32H573.
 - A power-on or brown-out reset restores every SBS register. Every other machine reset restores
-  all but `SBS_RSSCMDR`.
-- Every SBS register but `SBS_HDPLCR`, `SBS_HDPLSR` and `SBS_SECCFGR` is storage: the functions
-  of the debug, RSS, EPOCH, ECC NMI, FPU interrupt, memory erase, compensation cell, Class B and
+  all but `SBS_RSSCMDR` and MCLR of `SBS_MESR`, RM0481 14.5.6 and 14.5.12.
+- `SBS_MESR` reads MCLR 1 from the power-on: the memory erase after a power-on is done at once.
+  MCLR and IPMEE clear on a written 1. IPMEE stays 0, the erase after a tamper or a product
+  state regression is outside the model. The power-on value and the MCLR clear are read on an
+  STM32H573.
+- Every SBS register but `SBS_HDPLCR`, `SBS_HDPLSR`, `SBS_SECCFGR` and `SBS_MESR` is storage:
+  the functions of the debug, RSS, EPOCH, ECC NMI, FPU interrupt, compensation cell, Class B and
   lock registers are not modelled. Coverage reports a firmware access to them as `storage_only`.
   A firmware write that lands on one logs one `model_warning` per register. Under `strict` it
   raises `ModelError` before the store. Firmware reads are silent.
@@ -565,7 +586,8 @@ Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/
 
 - Every register but `SYSCFG_SECCFGR` is storage. The functions it selects are not modelled. A
   firmware write lands and logs one `model_warning` per register. Under `strict` it raises
-  `ModelError` before the store.
+  `ModelError` before the store. A write while SYSCFGRST holds the unit raises the illegal
+  access event the TrustZone rules give and is not noted.
 - `SYSCFG_CSLCKR` stays storage at TZEN 0. RM0456 Table 131 makes it RAZ/WI.
 
 ## TIM

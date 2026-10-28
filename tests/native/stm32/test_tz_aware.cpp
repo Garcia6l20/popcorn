@@ -823,6 +823,30 @@ TEST_CASE("under strict_peripherals a SYSCFG storage register write raises model
 }
 
 TEST_CASE(
+    "under strict_peripherals a write to a SYSCFG held by SYSCFGRST is dropped with no warning and "
+    "no model_error, with TrustZone on and off")
+{
+  for(auto const trustzone : {false, true})
+  {
+    CAPTURE(trustzone);
+    rig const                     r{trustzone, {.tzen = true}, true};
+    std::vector<core::log_record> logged;
+    auto const                    sink =
+        r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+    auto const rst = bit("RCC", "APB3RSTR", "SYSCFGRST");
+    auto const at  = r.at("SYSCFG", "CFGR2");
+    r.write("RCC", "APB3RSTR", rst, secure_priv);
+    REQUIRE(r.peek("RCC", "APB3RSTR") == rst);
+    CHECK_NOTHROW(std::ignore = r.bus->services().write(at, 4, 0x1, secure_priv));
+    CHECK(r.peek("SYSCFG", "CFGR2") == 0);
+    CHECK(warnings_of(logged, "CFGR2") == 0);
+    r.write("RCC", "APB3RSTR", 0, secure_priv);
+    CHECK_THROWS_AS(
+        std::ignore = r.bus->services().write(at, 4, 0x1, secure_priv), popcorn::model_error);
+  }
+}
+
+TEST_CASE(
     "under strict_peripherals an SBS storage register write raises model_error, unstored, with "
     "TrustZone on and off")
 {
@@ -840,6 +864,10 @@ TEST_CASE(
     CHECK_NOTHROW(r.write("SBS", "SBS_CSLCKR", 0x1, nonsecure_priv));
     CHECK_NOTHROW(r.write("SBS", "SBS_HDPLCR", 0x6a, secure_priv));
     CHECK(r.read("SBS", "SBS_HDPLSR", secure_priv) == 0x8a);
+    auto const mclr = bit("SBS", "SBS_MESR", "MCLR", h573());
+    REQUIRE(r.peek("SBS", "SBS_MESR") == mclr);
+    CHECK_NOTHROW(r.write("SBS", "SBS_MESR", mclr, secure_priv));
+    CHECK(r.peek("SBS", "SBS_MESR") == 0);
   }
 }
 
@@ -866,7 +894,10 @@ TEST_CASE(
     r.write("SBS", "SBS_HDPLCR", 0x6a, secure_priv);
     r.write("SBS", "SBS_CSLCKR", 0x1, nonsecure_priv);
     std::ignore = r.read("SBS", "SBS_CCVALR", secure_priv);
+    r.write("SBS", "SBS_MESR", bit("SBS", "SBS_MESR", "MCLR", h573()), secure_priv);
     CHECK(r.peek("SBS", "SBS_CSLCKR") == 0);
+    CHECK(r.peek("SBS", "SBS_MESR") == 0);
+    CHECK(count("MESR") == 0);
     CHECK(count("PMCR") == 1);
     CHECK(count("HDPLCR") == 0);
     CHECK(count("CSLCKR") == 0);

@@ -1835,6 +1835,32 @@ TEST_CASE("a trigger starts the sequence tLATR later: 3, 7, 13 ADC clocks for PR
   }
 }
 
+TEST_CASE(
+    "a U5 trigger one kernel cycle off the ADC clock grid at CKMODE 00 and PRESC /4 starts the "
+    "sequence 13 ADC clocks later, with no wait for the next ADC clock edge")
+{
+  constexpr std::uint64_t divider = 4;
+  constexpr std::uint64_t grid    = divider * adc_cycle_ps;
+  adc_fixture const       f;
+  f.put("RCC", "RCC_CFGR1", "SW", 1);
+  f.run_until(f.now() + 200 * us);
+  REQUIRE(f.field("RCC", "RCC_CFGR1", "SWS") == 1);
+  downstream_scan(f, ovrmod | exten_rising | extsel(14));
+  f.write("ADC12", "ADC12_CCR", vrefen | vsensesel | (2u << 18));
+  f.run_until(f.now() + (grid + adc_cycle_ps - f.now() % grid) % grid);
+  REQUIRE(f.now() % grid == adc_cycle_ps);
+  auto const start = tim15_trgo(f, 499);
+  static_cast<void>(start_scan(f));
+  auto const trigger = start + tim15_period;
+  REQUIRE(trigger % grid == adc_cycle_ps);
+  auto const eoc = trigger + (13 + scan_eoc_cycles[0]) * divider * adc_cycle_ps;
+  f.run_until(eoc - adc_cycle_ps);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(eoc);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.cpu_read("ADC_DR") == scan_code(0));
+}
+
 TEST_CASE("DISCEN with DISCNUM 2 converts three ranks per TIM15 update, ADSTART stays set")
 {
   adc_fixture const f;

@@ -131,10 +131,10 @@ constexpr auto cycles_of(std::uint32_t algo) -> std::uint64_t
   switch(algo)
   {
     case sha1:
-      return 82;
+      return 67;
     case sha224:
     case sha256:
-      return 64;
+      return 51;
     case sha3_224:
       return 60;
     case sha3_256:
@@ -149,7 +149,7 @@ constexpr auto cycles_of(std::uint32_t algo) -> std::uint64_t
     case sha512_224:
     case sha512_256:
     case sha512:
-      return 82;
+      return 67;
     default:
       return 66;
   }
@@ -890,23 +890,25 @@ TEST_CASE("one SHA-1, SHA-2 or SHA-3 block keeps BUSY for its cycles from its la
     r.until(end - r.cycle_ps());
     CHECK((r.read(sr) & (sr_dinis | sr_busy)) == sr_busy);
     r.until(end);
+    auto const flagged = keccak_algo(algo) ? end : end + 2 * r.cycle_ps();
+    CHECK((r.read(sr) & (sr_dinis | sr_busy)) == (flagged == end ? sr_dinis : 0u));
+    r.until(flagged);
     CHECK((r.read(sr) & (sr_dinis | sr_busy)) == sr_dinis);
   }
 }
 
-TEST_CASE("H573 board: a final digest clears BUSY and sets DCIS at the measured cycles from DCAL")
+TEST_CASE("H573 board: a final digest clears BUSY, then sets DCIS and DINIS one cycle apart")
 {
   struct leg
   {
     std::uint32_t algo;
     std::uint64_t busy;
-    std::uint64_t dcis;
   };
   rig const r;
-  for(auto const& [algo, busy, dcis] : std::to_array<leg>({
-          {sha1,   97,  108},
-          {sha256, 79,  90 },
-          {sha512, 109, 120}
+  for(auto const& [algo, busy] : std::to_array<leg>({
+          {sha256, 68 },
+          {sha512, 100},
+          {sha1,   84 },
   }))
   {
     CAPTURE(algo);
@@ -918,14 +920,31 @@ TEST_CASE("H573 board: a final digest clears BUSY and sets DCIS at the measured 
     r.until(start + (busy - 1) * r.cycle_ps());
     CHECK((r.read(sr) & (sr_busy | sr_dcis)) == sr_busy);
     r.until(start + busy * r.cycle_ps());
-    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == 0);
+    CHECK((r.read(sr) & (sr_busy | sr_dcis | sr_dinis)) == 0);
     CHECK(r.read(hr0) == 0);
-    r.until(start + (dcis - 1) * r.cycle_ps());
-    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == 0);
-    r.until(start + dcis * r.cycle_ps());
-    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == sr_dcis);
+    r.until(start + (busy + 1) * r.cycle_ps());
+    CHECK((r.read(sr) & (sr_busy | sr_dcis | sr_dinis)) == sr_dcis);
     CHECK(r.read(hr0) != 0);
+    r.until(start + (busy + 2) * r.cycle_ps());
+    CHECK((r.read(sr) & (sr_busy | sr_dcis | sr_dinis)) == (sr_dcis | sr_dinis));
   }
+}
+
+TEST_CASE("a DIN write between BUSY 0 and DCIS completes the digest first, then takes the word")
+{
+  rig const r;
+  r.begin(sha256);
+  r.feed(text("abc"));
+  r.finish(3);
+  auto const start = r.now();
+  r.until(start + 68 * r.cycle_ps());
+  REQUIRE((r.read(sr) & (sr_busy | sr_dcis)) == 0);
+  r.write(din, 0x6162'6300);
+  CHECK((r.read(sr) & sr_dcis) == sr_dcis);
+  r.until(start + 70 * r.cycle_ps());
+  CHECK((r.read(sr) & sr_dinis) == 0);
+  CHECK(field(r.read(sr), 16, 6) == 16);
+  CHECK((r.read(sr) & sr_dcis) == sr_dcis);
 }
 
 TEST_CASE("INIT between BUSY 0 and DCIS of a final digest leaves no stale DCIS")
@@ -935,7 +954,7 @@ TEST_CASE("INIT between BUSY 0 and DCIS of a final digest leaves no stale DCIS")
   r.feed(text("abc"));
   r.finish(3);
   auto const start = r.now();
-  r.until(start + 80 * r.cycle_ps());
+  r.until(start + 68 * r.cycle_ps());
   REQUIRE((r.read(sr) & (sr_busy | sr_dcis)) == 0);
   r.begin(sha256);
   r.settle();
@@ -943,26 +962,125 @@ TEST_CASE("INIT between BUSY 0 and DCIS of a final digest leaves no stale DCIS")
   CHECK(r.read(hr0) == 0);
 }
 
-TEST_CASE("a snapshot taken between BUSY 0 and DCIS of a final digest restores the pending DCIS")
+TEST_CASE("a snapshot taken between BUSY 0 and DINIS of a final digest restores the pending flags")
 {
   rig const r;
   r.begin(sha256);
   r.feed(text("abc"));
   r.finish(3);
   auto const start = r.now();
-  r.until(start + 80 * r.cycle_ps());
+  r.until(start + 68 * r.cycle_ps());
   REQUIRE((r.read(sr) & (sr_busy | sr_dcis)) == 0);
   auto const saved = r.f->target->snapshot();
-  r.until(start + 90 * r.cycle_ps());
+  r.until(start + 69 * r.cycle_ps());
   REQUIRE((r.read(sr) & sr_dcis) == sr_dcis);
-  auto const digest = r.read(hr0);
+  auto const at_dcis = r.f->target->snapshot();
+  auto const digest  = r.read(hr0);
   r.f->target->restore(saved);
   CHECK((r.read(sr) & sr_dcis) == 0);
-  r.until(start + 89 * r.cycle_ps());
-  CHECK((r.read(sr) & sr_dcis) == 0);
-  r.until(start + 90 * r.cycle_ps());
-  CHECK((r.read(sr) & sr_dcis) == sr_dcis);
+  r.until(start + 69 * r.cycle_ps());
+  CHECK((r.read(sr) & (sr_dcis | sr_dinis)) == sr_dcis);
   CHECK(r.read(hr0) == digest);
+  r.f->target->restore(at_dcis);
+  CHECK((r.read(sr) & sr_dinis) == 0);
+  r.until(start + 70 * r.cycle_ps());
+  CHECK((r.read(sr) & sr_dinis) == sr_dinis);
+}
+
+TEST_CASE(
+    "a DIN write or a DCAL between BUSY 0 and the NBWE update of a block takes the update first")
+{
+  rig const r;
+  for(auto const dcal : {false, true})
+  {
+    CAPTURE(dcal);
+    r.begin(sha256);
+    r.feed(pattern(68));
+    auto const end = r.now() + 51 * r.cycle_ps();
+    r.until(end);
+    REQUIRE((r.read(sr) & (sr_busy | sr_dinis)) == 0);
+    REQUIRE(field(r.read(sr), 16, 6) == 0);
+    if(dcal)
+    {
+      r.finish(68);
+      CHECK((r.read(sr) & (sr_busy | sr_dcis)) == sr_busy);
+      CHECK(field(r.read(sr), 9, 6) == 0);
+      r.until(end + 2 * r.cycle_ps());
+      CHECK((r.read(sr) & sr_busy) == sr_busy);
+    }
+    else
+    {
+      r.write(din, 0x6162'6300);
+      CHECK(field(r.read(sr), 9, 6) == 2);
+      CHECK(field(r.read(sr), 16, 6) == 15);
+      r.until(end + 2 * r.cycle_ps());
+      CHECK((r.read(sr) & sr_dinis) == 0);
+      CHECK(field(r.read(sr), 9, 6) == 2);
+    }
+  }
+}
+
+TEST_CASE("a snapshot taken between BUSY 0 and DINIS of a block restores the pending update")
+{
+  rig const r;
+  r.begin(sha256);
+  r.feed(pattern(68));
+  auto const end = r.now() + 51 * r.cycle_ps();
+  r.until(end);
+  auto const saved = r.f->target->snapshot();
+  r.until(end + r.cycle_ps());
+  REQUIRE(field(r.read(sr), 16, 6) == 16);
+  auto const shown = r.f->target->snapshot();
+  r.f->target->restore(saved);
+  CHECK(field(r.read(sr), 16, 6) == 0);
+  CHECK(field(r.read(sr), 9, 6) == 17);
+  r.until(end + r.cycle_ps());
+  CHECK(field(r.read(sr), 16, 6) == 16);
+  CHECK(field(r.read(sr), 9, 6) == 1);
+  CHECK((r.read(sr) & sr_dinis) == 0);
+  r.f->target->restore(shown);
+  r.until(end + 2 * r.cycle_ps());
+  CHECK((r.read(sr) & sr_dinis) == sr_dinis);
+}
+
+TEST_CASE("INIT while a block is BUSY or before its NBWE update leaves NBWP at the new count")
+{
+  rig const r;
+  for(auto const offset : {-1, 0})
+  {
+    CAPTURE(offset);
+    r.begin(sha256);
+    r.feed(pattern(68));
+    auto const end = r.now() + 51 * r.cycle_ps();
+    r.until(end + offset * static_cast<std::int64_t>(r.cycle_ps()));
+    REQUIRE(field(r.read(sr), 9, 6) == 17);
+    r.begin(sha256);
+    CHECK(field(r.read(sr), 9, 6) == 0);
+    CHECK(field(r.read(sr), 16, 6) == 17);
+    r.write(din, 0x6162'6300);
+    CHECK(field(r.read(sr), 9, 6) == 1);
+    CHECK(field(r.read(sr), 16, 6) == 16);
+    r.until(end + 4 * r.cycle_ps());
+    CHECK(field(r.read(sr), 9, 6) == 1);
+    CHECK((r.read(sr) & (sr_busy | sr_dinis)) == 0);
+  }
+}
+
+TEST_CASE("HASHRST before the NBWE update of a block leaves no stale DINIS for the next message")
+{
+  rig const r;
+  r.begin(sha256);
+  r.feed(pattern(68));
+  auto const end = r.now() + 51 * r.cycle_ps();
+  r.until(end);
+  REQUIRE(saved_integer(*r.f, "HASH", "shown").value_or(0) != 0);
+  rcc_reset_pulse(*r.f, "AHB2RSTR", "HASHRST");
+  r.begin(sha256);
+  r.write(din, 0x6162'6300);
+  r.until(end + 4 * r.cycle_ps());
+  CHECK((r.read(sr) & (sr_busy | sr_dinis)) == 0);
+  CHECK(field(r.read(sr), 9, 6) == 1);
+  CHECK(field(r.read(sr), 16, 6) == 16);
 }
 
 TEST_CASE("a SHAKE squeeze keeps BUSY for one block time")
@@ -1257,24 +1375,74 @@ TEST_CASE("RM0481 Table 397: only the STM32H543 and H553 rows keep the SHA-3 and
 }
 
 TEST_CASE(
-    "STM32H573 silicon: a block keeps BUSY 82 cycles under SHA-1 and SHA2-512, 64 under SHA2-256")
+    "STM32H573 silicon: a block keeps BUSY 67 cycles under SHA-1 and SHA2-512 and 51 under "
+    "SHA2-256 from its launching store, NBWE and NBWP follow 1 cycle later and DINIS 1 after that")
 {
   rig const r;
   for(auto const& [algo, cycles] : {
-          std::pair{sha1,   82u},
-          std::pair{sha256, 64u},
-          std::pair{sha512, 82u}
+          std::pair{sha1,   67u},
+          std::pair{sha256, 51u},
+          std::pair{sha512, 67u}
   })
   {
     CAPTURE(algo);
+    auto const words = block_bytes(algo) / 4;
     r.begin(algo);
     r.feed(pattern(block_bytes(algo)));
     r.feed(pattern(4));
     auto const end = r.now() + cycles * r.cycle_ps();
     r.until(end - r.cycle_ps());
-    CHECK((r.read(sr) & sr_busy) == sr_busy);
+    CHECK((r.read(sr) & (sr_busy | sr_dinis)) == sr_busy);
+    CHECK(field(r.read(sr), 9, 6) == words + 1);
+    CHECK(field(r.read(sr), 16, 6) == 0);
     r.until(end);
-    CHECK((r.read(sr) & sr_busy) == 0);
+    CHECK((r.read(sr) & (sr_busy | sr_dinis)) == 0);
+    CHECK(field(r.read(sr), 9, 6) == words + 1);
+    CHECK(field(r.read(sr), 16, 6) == 0);
+    r.until(end + r.cycle_ps());
+    CHECK((r.read(sr) & (sr_busy | sr_dinis)) == 0);
+    CHECK(field(r.read(sr), 9, 6) == 1);
+    CHECK(field(r.read(sr), 16, 6) == words);
+    r.until(end + 2 * r.cycle_ps());
+    CHECK((r.read(sr) & (sr_busy | sr_dinis)) == sr_dinis);
+  }
+}
+
+TEST_CASE(
+    "an H5 final digest keeps BUSY its compressions times the block time plus 17 cycles under "
+    "SHA-1 and SHA2-256 and 33 under SHA2-512, within 1 cycle of an STM32H573")
+{
+  struct leg
+  {
+    std::uint32_t algo;
+    std::size_t   size;
+    std::uint64_t busy;
+  };
+  rig const r;
+  for(auto const& [algo, size, busy] : std::to_array<leg>({
+          {sha1,   3,   84 },
+          {sha256, 3,   68 },
+          {sha512, 3,   100},
+          {sha1,   64,  151},
+          {sha256, 64,  119},
+          {sha512, 128, 167},
+          {sha1,   56,  151},
+          {sha256, 56,  119},
+          {sha512, 120, 167},
+  }))
+  {
+    CAPTURE(algo);
+    CAPTURE(size);
+    r.begin(algo);
+    r.feed(pattern(size));
+    r.finish(size);
+    auto const start = r.now();
+    r.until(start + (busy - 1) * r.cycle_ps());
+    CHECK((r.read(sr) & sr_busy) == sr_busy);
+    r.until(start + busy * r.cycle_ps());
+    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == 0);
+    r.until(start + (busy + 1) * r.cycle_ps());
+    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == sr_dcis);
   }
 }
 
@@ -1487,6 +1655,32 @@ TEST_CASE("a DMA suspend mid SHA-512 block keeps the words of the started burst 
   CHECK_FALSE(d.enabled());
   CHECK(r.digest(sha512) == unhex(find_digest(sha512, 300).digest));
   CHECK(r.logged.empty());
+}
+
+TEST_CASE("a DMAE clear from a block's launch to its DINIS drops DMAS and holds no DMA word")
+{
+  constexpr std::uint32_t sr_dmas = 1u << 2;
+  auto const              control = cr_mdmat | (sha256 << 17) | (2u << 4);
+  for(auto const offset : {-1, 0, 1, 2})
+  {
+    CAPTURE(offset);
+    rig const r;
+    dma_feed  d{r};
+    d.stage(pattern(128));
+    r.write(str, 0);
+    r.write(cr, cr_init | cr_dmae | control);
+    d.start(0, 17);
+    REQUIRE(d.until([&] { return d.sent() == 17 and not d.enabled(); }));
+    REQUIRE((r.read(sr) & sr_busy) == sr_busy);
+    auto const end = static_cast<std::uint64_t>(saved_integer(*r.f, "HASH", "busy_end").value());
+    r.until(end + offset * static_cast<std::int64_t>(r.cycle_ps()));
+    r.write(cr, control);
+    CHECK((r.read(sr) & sr_dmas) == 0);
+    d.start(17, 15);
+    r.until(r.now() + 200 * r.cycle_ps());
+    CHECK(d.sent() == 17);
+    CHECK((r.read(sr) & sr_dmas) == 0);
+  }
 }
 
 TEST_CASE("a context saved under one algorithm is refused under another")

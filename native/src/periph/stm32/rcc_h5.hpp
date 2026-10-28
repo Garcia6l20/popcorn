@@ -5,7 +5,6 @@
 #include <popcorn/core/types.hpp>
 
 #include <array>
-#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -152,7 +151,7 @@ constexpr std::uint64_t lsi_hz   = 32'000;
 
 auto hsi_rate(rate_inputs const& in) -> std::uint64_t
 {
-  return hsi_hz >> in.read(rcc_role::hsi_divider);
+  return hsi_hz >> in.hsi_divider;
 }
 
 auto rtc_prescaler(rate_inputs const& in) -> std::uint64_t
@@ -402,10 +401,22 @@ struct h5_rcc
   static constexpr bool msi         = false;
   static constexpr bool hsi_divider = true;
   /**
-   * @brief Time from an `HSIDIV` change to `HSIDIVF` set. An STM32H573 sets the flag within 35
-   *        cycles at 32 MHz, the longest transition being /2 to /1.
+   * @brief Cycles of the running HSI rate from an `HSIDIV` write to the `HSIDIVF` clear and to
+   *        its set with the new rate, indexed by the running and the new `HSIDIV`. Measured on
+   *        an STM32H573: /2 to /4 and /8 clear at 3 and set at 6, /2 to /1 3 and 16, /4 to /2 2
+   *        and 8, /4 to /1 2 and 14, /8 to /1 2 and 8. Inferred: from /1 the /2 row, /4 to /8
+   *        and /8 to /2 and /4 the /4 to /2 timing.
    */
-  static constexpr std::chrono::nanoseconds hsi_divider_delay = std::chrono::microseconds{1};
+  static constexpr std::array<std::array<hsi_divider_timing, 4>, 4> hsi_divider_timings{
+      {
+       {{{0, 0}, {3, 6}, {3, 6}, {3, 6}}},
+       {{{3, 16}, {0, 0}, {3, 6}, {3, 6}}},
+       {{{2, 14}, {2, 8}, {0, 0}, {2, 8}}},
+       {{{2, 8}, {2, 8}, {2, 8}, {0, 0}}},
+       }
+  };
+  /** @brief HSI rate before HSIDIV. */
+  static constexpr std::uint64_t undivided_hsi_hz = h5::hsi_hz;
   /**
    * @brief RM0481 11.8.1: HSEON, HSION and CSION hold while their oscillator feeds PLL1 with
    *        PLL1ON set.
