@@ -27,11 +27,13 @@ def test_parse_spec_defaults_and_targets() -> None:
     assert parse_spec("html") == ReportSpec("html", Path("htmlcov"))
     assert parse_spec("xml", base) == ReportSpec("xml", base / "coverage.xml")
     assert parse_spec("lcov") == ReportSpec("lcov")
+    assert parse_spec("gcovr") == ReportSpec("gcovr")
+    assert parse_spec("gcovr:out/a.json", base) == ReportSpec("gcovr", base / "out" / "a.json")
     assert parse_spec("lcov:out/a.info", base) == ReportSpec("lcov", base / "out" / "a.info")
     assert parse_spec("html:/abs/dir", base) == ReportSpec("html", Path("/abs/dir"))
 
 
-@pytest.mark.parametrize("text", ["json", "term:x", "xml:", "html:", "lcov:", ":x", ""])
+@pytest.mark.parametrize("text", ["json", "term:x", "xml:", "html:", "lcov:", "gcovr:", ":x", ""])
 def test_parse_spec_refuses(text: str) -> None:
     with pytest.raises(ValueError):
         parse_spec(text)
@@ -64,6 +66,8 @@ def test_generate_refuses_what_it_cannot_write(tmp_path: Path) -> None:
         generate(source, [ReportSpec("lcov")], root=tmp_path)
     with pytest.raises(ValueError):
         generate(source, [ReportSpec("xml")], root=tmp_path)
+    with pytest.raises(ValueError, match="needs a target path"):
+        generate(source, [ReportSpec("gcovr")], root=tmp_path)
 
 
 def test_generate_returns_the_term_text_and_writes_nothing(tmp_path: Path) -> None:

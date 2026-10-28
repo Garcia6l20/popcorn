@@ -13,6 +13,7 @@ from pathlib import Path
 
 from popcorn.coverage._coverage import unmodelled_path
 from popcorn.coverage.report._cobertura import render_cobertura
+from popcorn.coverage.report._gcovr import render_gcovr_json
 from popcorn.coverage.report._genhtml import (
     GENHTML_TIMEOUT,
     find_genhtml,
@@ -31,7 +32,7 @@ from popcorn.coverage.report._model import (
 )
 from popcorn.coverage.report._term import render_term
 
-KINDS = ("term", "html", "xml", "lcov")
+KINDS = ("term", "html", "xml", "lcov", "gcovr")
 DEFAULT_TARGETS = {"html": "htmlcov", "xml": "coverage.xml"}
 
 
@@ -40,9 +41,9 @@ class ReportSpec:
     """One requested report.
 
     Attributes:
-        kind: `term`, `html`, `xml` or `lcov`.
-        target: The file or directory to write, None for `term`, and for an `lcov` report that
-            takes its path from the caller.
+        kind: `term`, `html`, `xml`, `lcov` or `gcovr`.
+        target: The file or directory to write, None for `term`, and for an `lcov` or `gcovr`
+            report that takes its path from the caller.
     """
 
     kind: str
@@ -173,8 +174,10 @@ def generate(
     """Parse `lcov` once, apply `include` and `omit`, and write every report of `specs`.
 
     Every spec is checked before the first report is written, so a refused list writes nothing.
-    The `term` report is returned in `ReportResult.term`, `generate` never prints it. An `lcov`
-    report holds the bytes of `lcov` when no filter is given, else the filtered tracefile as UTF-8.
+    The `term` report is returned in `ReportResult.term`, `generate` never prints it. A `gcovr`
+    report is the gcovr JSON tracefile of `render_gcovr_json`, written through a temporary file
+    in its directory and renamed. An `lcov` report holds the bytes of `lcov` when no filter is
+    given, else the filtered tracefile as UTF-8.
     An `xml` report is the Cobertura file of `render_cobertura`, written through a temporary file
     in its directory and renamed, with `timestamp` in milliseconds since the epoch, the current
     time when None.
@@ -190,16 +193,19 @@ def generate(
     directory that was empty before the call stays, emptied of what the run wrote.
 
     `unmodelled` is `mark`, `miss` or `hit`. Unless it is `hit`, the sidecar
-    `unmodelled_path(lcov)` is read when it exists, and an `lcov` report gets one next to its
-    target, `unmodelled_path(target)`, with the lines of the kept files. `mark` keeps the counts
-    and marks those lines in the `term` and built-in `html` reports, which then write `html`
-    even when genhtml is installed and a kept line is marked. `miss` counts those lines, their
-    functions and their branches as not hit in every report, and rewrites an `lcov` report.
-    `hit` reads no sidecar.
+    `unmodelled_path(lcov)` is read when it exists, and an `lcov` or `gcovr` report gets one next
+    to its target, `unmodelled_path(target)`, with the lines of the kept files. `mark` keeps the
+    counts and marks those lines in the `term` and built-in `html` reports, which then write
+    `html` even when genhtml is installed and a kept line is marked. `miss` counts those lines,
+    their functions and their branches as not hit in every report, and rewrites an `lcov` report.
+    The `gcovr` report holds the counts the other reports hold, and a `gcovr` report that applies
+    no sidecar removes the one at its path. `hit` reads no sidecar.
 
     Raises:
         ValueError: `lcov` is not a tracefile, `unmodelled` is not a mode, the sidecar is not
-            one, or an `lcov`, `xml` or `html` spec has no target.
+            one, an `lcov`, `gcovr`, `xml` or `html` spec has no target, or a `gcovr`
+            report holds a `BRDA` record on a line with no `DA` record. The last is raised before
+            any report is written.
         OSError: A target cannot be written.
     """
     check_mode(unmodelled)
@@ -226,6 +232,11 @@ def generate(
             if spec.target is None:
                 raise ValueError(f"an {spec.kind} report needs a target path")
             files.append(spec)
+    gcovr_text = (
+        render_gcovr_json(report, root=root)
+        if any(spec.kind == "gcovr" for spec in files)
+        else None
+    )
     written: list[Path] = []
     problems: list[str] = []
     for spec in files:
@@ -241,8 +252,12 @@ def generate(
             xml = render_cobertura(report, root=root, timestamp=stamp)
             _write_atomic(target, xml.encode())
         else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(report.to_lcov().encode() if rewritten else data)
+            if spec.kind == "gcovr":
+                assert gcovr_text is not None
+                _write_atomic(target, gcovr_text.encode())
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(report.to_lcov().encode() if rewritten else data)
             if uses is not None:
                 unmodelled_path(target).write_text(dump_unmodelled(uses, unplaced))
             else:

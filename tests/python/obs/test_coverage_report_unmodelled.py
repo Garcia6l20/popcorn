@@ -255,3 +255,52 @@ def test_a_corrupt_sidecar_names_its_file(tmp_path: Path) -> None:
     unmodelled_path(lcov).write_text("{")
     with pytest.raises(ValueError, match=r"in\.info\.unmodelled\.json"):
         generate(lcov, [ReportSpec("term")], root=tmp_path, unmodelled="mark")
+
+
+def gcovr_lines(path: Path, name: str) -> dict[int, int]:
+    document = json.loads(path.read_text())
+    (entry,) = [entry for entry in document["files"] if entry["file"] == name]
+    return {line["line_number"]: line["count"] for line in entry["lines"]}
+
+
+def test_the_gcovr_report_keeps_counts_in_mark_and_writes_the_sidecar(tmp_path: Path) -> None:
+    lcov = lcov_with_sidecar(tmp_path, 3)
+    target = tmp_path / "o" / "g.json"
+    generate(lcov, [ReportSpec("gcovr", target)], root=tmp_path, unmodelled="mark")
+    assert gcovr_lines(target, "src/a.c")[2] == 3
+    assert unmodelled_path(target).read_text() == sidecar(3)
+
+
+def test_the_gcovr_report_zeroes_the_marked_lines_in_miss(tmp_path: Path) -> None:
+    lcov = lcov_with_sidecar(tmp_path)
+    target = tmp_path / "g.json"
+    generate(lcov, [ReportSpec("gcovr", target)], root=tmp_path, unmodelled="miss")
+    counts = gcovr_lines(target, "src/a.c")
+    assert (counts[2], counts[7], counts[8], counts[1]) == (0, 0, 0, 3)
+    assert unmodelled_path(target).read_text() == sidecar()
+
+
+def test_the_gcovr_report_in_hit_keeps_the_counts_and_removes_an_old_sidecar(
+    tmp_path: Path,
+) -> None:
+    lcov = lcov_with_sidecar(tmp_path)
+    target = tmp_path / "g.json"
+    generate(lcov, [ReportSpec("gcovr", target)], root=tmp_path, unmodelled="mark")
+    assert unmodelled_path(target).is_file()
+    generate(lcov, [ReportSpec("gcovr", target)], root=tmp_path, unmodelled="hit")
+    assert gcovr_lines(target, "src/a.c")[2] == 3
+    assert not unmodelled_path(target).exists()
+
+
+def test_the_gcovr_report_filters_and_refuses_a_bad_tracefile_before_writing(
+    tmp_path: Path,
+) -> None:
+    lcov = lcov_with_sidecar(tmp_path)
+    target = tmp_path / "g.json"
+    other = tmp_path / "o.info"
+    generate(lcov, [ReportSpec("gcovr", target)], root=tmp_path, omit=["src/b.c"])
+    assert [entry["file"] for entry in json.loads(target.read_text())["files"]] == ["src/a.c"]
+    lcov.write_text("SF:a.c\nDA:1,1\nBRDA:9,0,0,1\nend_of_record\n")
+    with pytest.raises(ValueError, match=r"a\.c:9"):
+        generate(lcov, [ReportSpec("lcov", other), ReportSpec("gcovr", target)], root=tmp_path)
+    assert not other.exists()

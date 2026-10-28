@@ -149,6 +149,8 @@ def _coverage_settings(config: pytest.Config) -> _Coverage:
                     "ini option"
                 )
             spec = ReportSpec("lcov", lcov)
+        if spec.kind == "gcovr" and spec.target is None:
+            raise pytest.UsageError("--popcorn-cov-report=gcovr needs a path: gcovr:PATH")
         if spec not in specs:
             specs.append(spec)
     if lcov is not None and ReportSpec("lcov", lcov) not in specs:
@@ -283,7 +285,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--popcorn-cov-report",
         action="append",
         metavar="TYPE[:TARGET]",
-        help="a report written at session end: term, html[:DIR], xml[:FILE] or lcov[:FILE]. "
+        help="a report written at session end: term, html[:DIR], xml[:FILE], lcov[:FILE] or "
+        "gcovr:FILE. "
         "Repeat the option for several. Replaces the popcorn_cov_report ini option",
     )
     group.addoption(

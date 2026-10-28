@@ -129,6 +129,9 @@ under xdist and also with `-q`. A bare `--popcorn-cov` with no report and no
 target, `coverage.xml` by default, through a temporary file renamed over it. Its `<sources>`
 lists the rootdir, and `/` too for a source outside it. A `filename` is relative to the rootdir
 for a source under it and as written otherwise, and `timestamp` counts milliseconds.
+The `gcovr:FILE` report writes a gcovr JSON tracefile, through a temporary file renamed over it,
+for `gcovr --json-add-tracefile FILE --root ROOTDIR`. A `file` is relative to the rootdir for a
+source under it and as written otherwise. It needs a target.
 The `html` report is written into its target, `htmlcov` by default, by genhtml from LCOV 2.0 or
 later when it is on `PATH`, with branch and function coverage, run from the rootdir where a
 relative source path resolves. A source file genhtml cannot read renders as blank lines. A source
@@ -152,7 +155,8 @@ register. `mark` keeps the counts and adds an `Unmodelled` column, the lines per
 `peripheral.register (reason, N hits)`, and writes `html` with the built-in renderer even when
 genhtml is installed, when a kept line is marked. An `lcov` report then has a sidecar
 `<lcov>.unmodelled.json` next to it, and an `lcov` report that applies no sidecar removes the one
-at its path. The `term` report ends with the count of accesses from code with no line in the
+at its path. A `gcovr` report keeps the same sidecar, with the same removal rule.
+The `term` report ends with the count of accesses from code with no line in the
 report. `miss` counts those lines, the functions whose only hit lines are among them and their
 branches as not hit in every report, and rewrites the `lcov` report. The mode is part of the boot
 cache key. A line is marked when one of its instructions accessed an unmodelled register.

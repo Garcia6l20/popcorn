@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import textwrap
 import xml.etree.ElementTree as ElementTree
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
-from popcorn.coverage.report import display_name, parse_lcov, truncated_percent
+from popcorn.coverage.report import (
+    GCOVR_FORMAT_VERSION,
+    display_name,
+    parse_lcov,
+    truncated_percent,
+)
 
 from .coverage_suite import write_suite
 from .helpers import ROOT, cov_args, write_conftest, write_project
@@ -128,6 +135,8 @@ def test_dependent_options_need_the_flag(pytester: pytest.Pytester, option: str)
         (("--popcorn-cov-report=json",), "", "*unknown report kind 'json'*"),
         (("--popcorn-cov-report=lcov",), "", "*lcov needs a path*"),
         (("--popcorn-cov-report=xml:",), "", "*empty target*"),
+        (("--popcorn-cov-report=gcovr",), "", "*gcovr needs a path*"),
+        (("--popcorn-cov-report=gcovr:",), "", "*empty target*"),
         (("--popcorn-cov-fail-under=101",), "", "*from 0 to 100*"),
         (("--popcorn-cov-fail-under=-1",), "", "*from 0 to 100*"),
         ((), "popcorn_cov_fail_under = many", "*popcorn_cov_fail_under must be a number*"),
@@ -762,3 +771,74 @@ def test_the_documented_pyproject_block_configures_the_reports(pytester: pytest.
         "tests/firmware/api/callee.c",
         "tests/firmware/api/driver.c",
     }
+
+
+def gcovr_document(path: Path) -> dict[str, Any]:
+    document: dict[str, Any] = json.loads(path.read_text())
+    return document
+
+
+def test_gcovr_report_matches_the_term_totals(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    result = pytester.runpytest(
+        *NO_XDIST,
+        "--popcorn-cov",
+        "--popcorn-cov-report=gcovr:out/g.json",
+        "--popcorn-cov-report=term",
+    )
+    result.assert_outcomes(passed=30)
+    out = pytester.path / "out" / "g.json"
+    result.stdout.fnmatch_lines([f"popcorn: firmware coverage written to {out}"])
+    document = gcovr_document(out)
+    assert document["gcovr/format_version"] == GCOVR_FORMAT_VERSION
+    (total,) = [line.split() for line in result.stdout.str().splitlines() if "TOTAL" in line]
+    lines = [line for entry in document["files"] for line in entry["lines"]]
+    assert str(len(lines)) == total[1]
+    assert str(sum(1 for line in lines if line["count"] > 0)) == total[2]
+    branches = [branch for line in lines for branch in line["branches"]]
+    assert str(len(branches)) == total[6]
+    assert not any(Path(entry["file"]).is_absolute() for entry in document["files"])
+
+
+def test_gcovr_report_is_written_beside_the_other_reports(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    result = pytester.runpytest(
+        *NO_XDIST,
+        "--popcorn-cov",
+        "--popcorn-cov-report=gcovr:g.json",
+        "--popcorn-cov-report=xml:c.xml",
+        "--popcorn-cov-report=lcov:a.info",
+        "--popcorn-cov-report=html:site",
+    )
+    result.assert_outcomes(passed=30)
+    for name in ("g.json", "c.xml", "a.info", "site"):
+        assert (pytester.path / name).exists()
+
+
+def test_gcovr_report_honours_include_and_omit(pytester: pytest.Pytester) -> None:
+    write_suite(pytester)
+    pytester.runpytest(
+        *NO_XDIST,
+        "--popcorn-cov",
+        "--popcorn-cov-report=gcovr:only.json",
+        "--popcorn-cov-include=**/driver.c",
+    )
+    files = [entry["file"] for entry in gcovr_document(pytester.path / "only.json")["files"]]
+    assert files and all(file.endswith("driver.c") for file in files)
+
+
+def test_gcovr_report_is_one_union_file_under_xdist(pytester: pytest.Pytester) -> None:
+    pytest.importorskip("xdist")
+    write_suite(pytester)
+    pytester.runpytest(*NO_XDIST, "--popcorn-cov", "--popcorn-cov-report=gcovr:one.json")
+    result = pytester.runpytest_subprocess(
+        "-p",
+        "no:asyncio",
+        "-n",
+        "2",
+        "--popcorn-cov",
+        "--popcorn-cov-report=gcovr:two.json",
+        timeout=60,
+    )
+    result.assert_outcomes(passed=30)
+    assert gcovr_document(pytester.path / "two.json") == gcovr_document(pytester.path / "one.json")

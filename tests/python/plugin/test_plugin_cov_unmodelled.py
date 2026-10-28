@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -138,3 +139,23 @@ def test_the_cache_key_names_the_recording(pytester: pytest.Pytester) -> None:
     plain = cache_key(description, False)
     assert cache_key(description, False, unmodelled=False) == plain
     assert cache_key(description, False, unmodelled=True) != plain
+
+
+def test_gcovr_report_follows_the_mode_and_the_sidecar(pytester: pytest.Pytester) -> None:
+    project(pytester)
+    target = pytester.path / "out" / "g.json"
+    report = f"--popcorn-cov-report=gcovr:{target}"
+    run(pytester, "mark", report).assert_outcomes(passed=2)
+    uses, _ = parse_unmodelled(unmodelled_path(target).read_text())
+    marked = {line for _, line in uses}
+    document = json.loads(target.read_text())
+    (entry,) = document["files"]
+    counts = {line["line_number"]: line["count"] for line in entry["lines"]}
+    assert marked and all(counts[line] > 0 for line in marked)
+    run(pytester, "miss", report).assert_outcomes(passed=2)
+    (entry,) = json.loads(target.read_text())["files"]
+    missed = {line["line_number"]: line["count"] for line in entry["lines"]}
+    assert all(missed[line] == 0 for line in marked)
+    assert unmodelled_path(target).is_file()
+    run(pytester, "hit", report).assert_outcomes(passed=2)
+    assert not unmodelled_path(target).exists()
