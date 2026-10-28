@@ -31,7 +31,7 @@ struct builtin
   std::string_view part_glob     = "*";
 };
 
-constexpr std::array<builtin, 56> builtins{
+constexpr std::array<builtin, 57> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -181,6 +181,7 @@ constexpr std::array<builtin, 56> builtins{
          .ip_version_glob = "tzsc1_v2_2*",
          .make            = [](board const&) { return gtzc_factory(h5_gtzc); },
          .part_glob       = "STM32H5*"},
+     {"SBS", "sbs_v1_1*", [](board const&) { return sbs_factory(); }},
      }
 };
 

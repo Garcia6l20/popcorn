@@ -33,9 +33,7 @@ constexpr auto attached = std::to_array<std::string_view>({
 });
 
 constexpr auto matched_without_model = std::to_array<std::string_view>(
-    {"GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3", "GTZC1_TZIC", "GTZC1_TZSC"});
-
-constexpr auto without_row = std::to_array<std::string_view>({"SBS"});
+    {"GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3", "GTZC1_TZIC", "GTZC1_TZSC", "SBS"});
 
 constexpr std::uint32_t sram_end = 0x2000'0000 + 640 * 1024;
 
@@ -62,11 +60,6 @@ TEST_CASE("the H573 description is the H573 and its trustzone units match the GT
   {
     CAPTURE(name);
     CHECK(factories.contains(std::string{name}));
-  }
-  for(auto const name : without_row)
-  {
-    CAPTURE(name);
-    CHECK_FALSE(factories.contains(std::string{name}));
   }
   CHECK_FALSE(factories.contains("SYS"));
   CHECK(std::ranges::none_of(h573().peripherals, [](auto const& unit) {
@@ -102,11 +95,6 @@ TEST_CASE("every H573 peripheral with a built-in row has a model, and the rest h
     CHECK(target.model(std::string{name}) != nullptr);
   }
   for(auto const name : matched_without_model)
-  {
-    CAPTURE(name);
-    CHECK(target.model(std::string{name}) == nullptr);
-  }
-  for(auto const name : without_row)
   {
     CAPTURE(name);
     CHECK(target.model(std::string{name}) == nullptr);

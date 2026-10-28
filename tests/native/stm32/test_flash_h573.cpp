@@ -1,3 +1,5 @@
+#include "gtzc.hpp"
+#include "h573_secure_rig.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -14,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -975,6 +978,28 @@ TEST_CASE("an H573 description without FLASH_NSCR.FW or FLASH_OPTCR.OPTLOCK thro
   }
 }
 
+TEST_CASE(
+    "an H573 description without a block register its 128-sector bank needs throws config_error")
+{
+  for(std::string_view const name : {"SECBB2R4", "PRIVBB1R4"})
+  {
+    CAPTURE(name);
+    auto desc  = h573();
+    auto flash = std::ranges::find(
+        desc.peripherals, std::string_view{"FLASH"}, &popcorn::peripheral_desc::name);
+    REQUIRE(flash != desc.peripherals.end());
+    REQUIRE(
+        std::erase_if(
+            flash->registers,
+            [name](popcorn::register_desc const& reg) { return reg.name == name; })
+        == 1);
+    stm32::register_builtin_models();
+    CHECK_THROWS_AS(
+        core::machine(desc, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()),
+        popcorn::config_error);
+  }
+}
+
 TEST_CASE("with only the FLASH model, tzen sets FLASH_OPTSR2_CUR.TZEN to 0xB4, RM0481 7.11.23")
 {
   stm32::board board;
@@ -1023,5 +1048,226 @@ TEST_CASE("RM0481 Table 55: without option bytes each _CUR register reads its de
     CAPTURE(name);
     CHECK(peek(name) == delivery);
     CHECK(r.read(name) == (name == std::string_view{"FLASH_SECBOOTR_CUR"} ? 0u : delivery));
+  }
+}
+
+namespace
+{
+constexpr std::uint32_t sector_bytes = 8 * 1024;
+
+auto policy_at(popcorn::testing::h573_secure_rig const& r, address at) -> stm32::page_policy
+{
+  auto const* const pages = r.f.model_of<stm32::secure_page_controller>("FLASH");
+  REQUIRE(pages != nullptr);
+  auto const rule = pages->page_rule(at);
+  REQUIRE(rule.has_value());
+  return *rule;
+}
+
+auto without_watermarks() -> stm32::option_bytes
+{
+  return {.tzen = true, .secwm1 = stm32::no_area{}, .secwm2 = stm32::no_area{}};
+}
+}
+
+TEST_CASE(
+    "RM0481 7.6.3: a FLASH_SECBB2R3 bit secures its bank 2 sector, 64 plus the bit, its "
+    "neighbours stay Non-secure")
+{
+  popcorn::testing::h573_secure_rig const r{firmware, without_watermarks()};
+  r.write("FLASH", "FLASH_SECBB2R3", 1u << 5, true);
+  CHECK(r.peek("FLASH", "FLASH_SECBB2R3") == 1u << 5);
+  CHECK(policy_at(r, bank2 + 69 * sector_bytes).secure);
+  CHECK_FALSE(policy_at(r, bank2 + 68 * sector_bytes).secure);
+  CHECK_FALSE(policy_at(r, bank2 + 70 * sector_bytes).secure);
+  CHECK_FALSE(policy_at(r, 0x0800'0000 + 69 * sector_bytes).secure);
+  r.write("FLASH", "FLASH_PRIVBB1R4", 1u << 31, true);
+  CHECK(policy_at(r, 0x0800'0000 + 127 * sector_bytes).privileged);
+  CHECK_FALSE(policy_at(r, bank2 + 127 * sector_bytes).privileged);
+}
+
+TEST_CASE("RM0481 7.6.1 Table 62: SECWMx_STRT to SECWMx_END are Secure in each bank")
+{
+  stm32::option_bytes wanted = without_watermarks();
+  wanted.secwm2              = stm32::page_range{.first = 3, .last = 9};
+  popcorn::testing::h573_secure_rig const r{firmware, wanted};
+  CHECK_FALSE(policy_at(r, bank2 + 2 * sector_bytes).secure);
+  CHECK(policy_at(r, bank2 + 3 * sector_bytes).secure);
+  CHECK(policy_at(r, bank2 + 9 * sector_bytes).secure);
+  CHECK_FALSE(policy_at(r, bank2 + 10 * sector_bytes).secure);
+  CHECK_FALSE(policy_at(r, 0x0800'0000 + 3 * sector_bytes).secure);
+}
+
+TEST_CASE(
+    "RM0481 7.6.2 Table 63: the bank 2 HDP area closes at HDPL 2, and at HDPL 3 with its "
+    "FLASH_HDPEXTR extension, which only grows and freezes at HDPL 3")
+{
+  stm32::option_bytes wanted = without_watermarks();
+  wanted.hdp2                = stm32::page_range{.first = 10, .last = 39};
+  popcorn::testing::h573_secure_rig const r{firmware, wanted};
+  auto const                              hidden = [&](std::uint32_t sector) {
+    return policy_at(r, bank2 + sector * sector_bytes).hidden;
+  };
+  CHECK(r.read("SBS", "SBS_HDPLSR", true) == 0x51);
+  CHECK_FALSE(hidden(10));
+  r.write("SBS", "SBS_HDPLCR", 0xb4, true);
+  CHECK(r.read("SBS", "SBS_HDPLSR", true) == 0x51);
+  r.write("SBS", "SBS_HDPLCR", 0x6a, true);
+  CHECK(r.read("SBS", "SBS_HDPLSR", true) == 0x8a);
+  CHECK_FALSE(hidden(9));
+  CHECK(hidden(10));
+  CHECK(hidden(39));
+  CHECK_FALSE(hidden(40));
+  CHECK_FALSE(policy_at(r, 0x0800'0000 + 10 * sector_bytes).hidden);
+  r.write("FLASH", "FLASH_HDPEXTR", 3u << 16, false);
+  CHECK(r.peek("FLASH", "FLASH_HDPEXTR") == 3u << 16);
+  r.write("FLASH", "FLASH_HDPEXTR", 1u << 16, false);
+  CHECK(r.peek("FLASH", "FLASH_HDPEXTR") == 3u << 16);
+  CHECK_FALSE(hidden(40));
+  r.write("SBS", "SBS_HDPLCR", 0x6a, true);
+  CHECK(r.read("SBS", "SBS_HDPLSR", true) == 0x6f);
+  CHECK(hidden(10));
+  CHECK(hidden(42));
+  CHECK_FALSE(hidden(43));
+  r.write("FLASH", "FLASH_HDPEXTR", 5u << 16, false);
+  CHECK(r.peek("FLASH", "FLASH_HDPEXTR") == 3u << 16);
+  r.write("SBS", "SBS_HDPLCR", 0x6a, true);
+  CHECK(r.read("SBS", "SBS_HDPLSR", true) == 0x6f);
+}
+
+TEST_CASE(
+    "RM0481 Table 63: at HDPL 3 an empty HDP area with an extension hides HDPx_END to END+EXT")
+{
+  stm32::option_bytes                     wanted = without_watermarks();
+  popcorn::testing::h573_secure_rig const r{firmware, wanted};
+  r.write("FLASH", "FLASH_HDPEXTR", 1u, false);
+  r.write("SBS", "SBS_HDPLCR", 0x6a, true);
+  CHECK_FALSE(policy_at(r, 0x0800'0000).hidden);
+  r.write("SBS", "SBS_HDPLCR", 0x6a, true);
+  CHECK(policy_at(r, 0x0800'0000).hidden);
+  CHECK(policy_at(r, 0x0800'0000 + sector_bytes).hidden);
+  CHECK_FALSE(policy_at(r, 0x0800'0000 + 2 * sector_bytes).hidden);
+}
+
+TEST_CASE("RM0481 14.5.2: an SBS RCC reset keeps HDPL, a system reset returns it to HDPL1")
+{
+  popcorn::testing::h573_secure_rig const r{firmware};
+  r.write("SBS", "SBS_HDPLCR", 0x6a, true);
+  REQUIRE(r.read("SBS", "SBS_HDPLSR", true) == 0x8a);
+  popcorn::testing::rcc_reset_pulse(r.f, "RCC_APB3RSTR", "SBSRST");
+  CHECK(r.read("SBS", "SBS_HDPLSR", true) == 0x8a);
+  r.f.target->reset();
+  CHECK(r.read("SBS", "SBS_HDPLSR", true) == 0x51);
+  CHECK(r.read("SBS", "SBS_HDPLCR", true) == 0xb4);
+}
+
+TEST_CASE(
+    "an SBS_HDPLCR store inside a cached Secure loop closes the HDP area for the loop's next "
+    "load of a hidden sector, RM0481 7.6.2, a 0xB4 store leaves it open")
+{
+  for(auto const increment : {false, true})
+  {
+    CAPTURE(increment);
+    stm32::option_bytes wanted{.tzen = true};
+    wanted.hdp2 = stm32::page_range{.first = 10, .last = 39};
+    popcorn::testing::h573_secure_rig const r{firmware, wanted};
+    constexpr address                       hidden = 0x0c10'0000 + 10 * sector_bytes + 0x20;
+    constexpr address                       code   = 0x3000'0200;
+    REQUIRE(r.f.target->mem().write(bank2 + 10 * sector_bytes + 0x20, 4, 0x1234'5678));
+    for(auto const& [at, half] : std::initializer_list<std::pair<std::uint32_t, std::uint16_t>>{
+            {0x00, 0x3b01},
+            {0x02, 0x42a3},
+            {0x04, 0xd100},
+            {0x06, 0x6001},
+            {0x08, 0x682a},
+            {0x0a, 0x2b00},
+            {0x0c, 0xd1f8},
+            {0x0e, 0xbe00},
+    })
+    {
+      REQUIRE(r.f.target->mem().write(code + at, 2, half));
+    }
+    auto const value = [&](std::string_view name) {
+      return r.f.target->regs().read(*r.f.target->regs().find(name));
+    };
+    r.f.set("r0", r.alias("SBS", "SBS_HDPLCR", true));
+    r.f.set("r1", increment ? 0x6a : 0xb4);
+    r.f.set("r5", hidden);
+    r.f.set("r3", 100);
+    r.f.set("r4", 50);
+    r.f.set("pc", code | 1u);
+    auto const stopped = r.f.run_to_stop({.max_instructions = icount{2000}});
+    CHECK(stopped.reason == stop_reason::user);
+    CHECK(value("r3") == 0);
+    CHECK(r.read("SBS", "SBS_HDPLSR", true) == (increment ? 0x8a : 0x51));
+    CHECK(value("r2") == (increment ? 0 : 0x1234'5678));
+  }
+}
+
+TEST_CASE(
+    "an SBS_HDPLCR store that closes the HDP area holding the running Secure loop faults its next "
+    "fetch, RM0481 7.6.2 Table 64, a 0xB4 store runs the loop to its end")
+{
+  constexpr address code      = 0x0c10'0000 + 10 * sector_bytes;
+  constexpr address vectors   = 0x3000'0400;
+  constexpr address handler   = 0x3000'0600;
+  constexpr address stack_top = 0x3000'2000;
+  constexpr address vtor_s    = 0xe000'ed08;
+  constexpr address cfsr      = 0xe000'ed28;
+  constexpr address hfsr      = 0xe000'ed2c;
+  constexpr auto    ibuserr   = std::uint32_t{1} << 8;
+  constexpr auto    forced    = std::uint32_t{1} << 30;
+  for(auto const increment : {false, true})
+  {
+    CAPTURE(increment);
+    stm32::option_bytes wanted{.tzen = true};
+    wanted.hdp2 = stm32::page_range{.first = 10, .last = 39};
+    popcorn::testing::h573_secure_rig const r{
+        firmware, wanted, popcorn::arch::fault_policy::enter_handler};
+    auto mem = r.f.target->mem(true);
+    for(auto const& [at, half] : std::initializer_list<std::pair<std::uint32_t, std::uint16_t>>{
+            {0x00, 0x3b01},
+            {0x02, 0x6001},
+            {0x04, 0x2b00},
+            {0x06, 0xd1fb},
+            {0x08, 0xbe00},
+    })
+    {
+      REQUIRE(r.f.target->mem().write(bank2 + 10 * sector_bytes + at, 2, half));
+    }
+    REQUIRE(mem.write(handler, 2, 0xbe00));
+    REQUIRE(mem.write(vectors, 4, stack_top));
+    REQUIRE(mem.write(vectors + 4 * 3, 4, handler | 1u));
+    REQUIRE(mem.write(vtor_s, 4, vectors));
+    auto const value = [&](std::string_view name) {
+      return static_cast<std::uint32_t>(r.f.target->regs().read(*r.f.target->regs().find(name)));
+    };
+    auto const word = [&](address at) {
+      auto const read = mem.read(at, 4);
+      REQUIRE(read.has_value());
+      return static_cast<std::uint32_t>(*read);
+    };
+    r.f.set("msp", stack_top);
+    r.f.set("r0", r.alias("SBS", "SBS_HDPLCR", true));
+    r.f.set("r1", increment ? 0x6a : 0xb4);
+    r.f.set("r3", 100);
+    r.f.set("pc", code | 1u);
+    auto const stopped = r.f.run_to_stop({.max_instructions = icount{2000}});
+    CHECK(stopped.reason == stop_reason::user);
+    CHECK(r.read("SBS", "SBS_HDPLSR", true) == (increment ? 0x8a : 0x51));
+    if(increment)
+    {
+      CHECK(value("pc") == handler + 2);
+      CHECK((value("xpsr") & 0x1ff) == 3);
+      CHECK((word(hfsr) & forced) != 0);
+      CHECK((word(cfsr) & ibuserr) != 0);
+      CHECK(word(value("msp") + 24) == code + 4);
+      CHECK(value("r3") == 99);
+    }
+    else
+    {
+      CHECK(value("pc") == code + 10);
+      CHECK(value("r3") == 0);
+    }
   }
 }

@@ -3,6 +3,7 @@
 #include "gtzc.hpp"
 #include "hsi16_source.hpp"
 #include "model_base.hpp"
+#include "temporal_isolation.hpp"
 #include "voltage_range.hpp"
 
 #include <popcorn/core/types.hpp>
@@ -225,6 +226,8 @@ enum class unit_role : std::uint8_t
   invert,
   hide_bank1,
   hide_bank2,
+  hide_extension1,
+  hide_extension2,
   option_lock,
   option_start,
   option_load,
@@ -233,7 +236,7 @@ enum class unit_role : std::uint8_t
   option_swap,
 };
 
-constexpr std::array<named_field<unit_role>, 16> u5_unit_fields{
+constexpr std::array<named_field<unit_role>, 18> u5_unit_fields{
     {
      {unit_role::latency, {"FLASH_ACR", "LATENCY"}},
      {unit_role::programming_delay, {}},
@@ -245,6 +248,8 @@ constexpr std::array<named_field<unit_role>, 16> u5_unit_fields{
      {unit_role::invert, {"FLASH_SECCR", "INV"}},
      {unit_role::hide_bank1, {"FLASH_SECHDPCR", "HDP1_ACCDIS"}},
      {unit_role::hide_bank2, {"FLASH_SECHDPCR", "HDP2_ACCDIS"}},
+     {unit_role::hide_extension1, {}},
+     {unit_role::hide_extension2, {}},
      {unit_role::option_lock, {"FLASH_NSCR", "OPTLOCK"}},
      {unit_role::option_start, {"FLASH_NSCR", "OPTSTRT"}},
      {unit_role::option_load, {"FLASH_NSCR", "OBL_LAUNCH"}},
@@ -254,7 +259,7 @@ constexpr std::array<named_field<unit_role>, 16> u5_unit_fields{
      }
 };
 
-constexpr std::array<named_field<unit_role>, 16> h5_unit_fields{
+constexpr std::array<named_field<unit_role>, 18> h5_unit_fields{
     {
      {unit_role::latency, {"FLASH_ACR", "LATENCY"}},
      {unit_role::programming_delay, {"FLASH_ACR", "WRHIGHFREQ"}},
@@ -266,6 +271,8 @@ constexpr std::array<named_field<unit_role>, 16> h5_unit_fields{
      {unit_role::invert, {"FLASH_SECCR", "INV"}},
      {unit_role::hide_bank1, {}},
      {unit_role::hide_bank2, {}},
+     {unit_role::hide_extension1, {"FLASH_HDPEXTR", "HDP1_EXT"}},
+     {unit_role::hide_extension2, {"FLASH_HDPEXTR", "HDP2_EXT"}},
      {unit_role::option_lock, {"FLASH_OPTCR", "OPTLOCK"}},
      {unit_role::option_start, {"FLASH_OPTCR", "OPTSTRT"}},
      {unit_role::option_load, {}},
@@ -303,20 +310,6 @@ struct error_enable
   set_role enable{};
 };
 
-constexpr std::array<std::string_view, 16> secure_block_registers{
-    "FLASH_SEC1BBR1", "FLASH_SEC1BBR2", "FLASH_SEC1BBR3", "FLASH_SEC1BBR4",
-    "FLASH_SEC1BBR5", "FLASH_SEC1BBR6", "FLASH_SEC1BBR7", "FLASH_SEC1BBR8",
-    "FLASH_SEC2BBR1", "FLASH_SEC2BBR2", "FLASH_SEC2BBR3", "FLASH_SEC2BBR4",
-    "FLASH_SEC2BBR5", "FLASH_SEC2BBR6", "FLASH_SEC2BBR7", "FLASH_SEC2BBR8",
-};
-
-constexpr std::array<std::string_view, 16> privileged_block_registers{
-    "FLASH_PRIV1BBR1", "FLASH_PRIV1BBR2", "FLASH_PRIV1BBR3", "FLASH_PRIV1BBR4",
-    "FLASH_PRIV1BBR5", "FLASH_PRIV1BBR6", "FLASH_PRIV1BBR7", "FLASH_PRIV1BBR8",
-    "FLASH_PRIV2BBR1", "FLASH_PRIV2BBR2", "FLASH_PRIV2BBR3", "FLASH_PRIV2BBR4",
-    "FLASH_PRIV2BBR5", "FLASH_PRIV2BBR6", "FLASH_PRIV2BBR7", "FLASH_PRIV2BBR8",
-};
-
 /**
  * @brief Register a role names in @p table, found by role, empty when the family lacks it.
  * @param table Name table of one family.
@@ -340,8 +333,26 @@ consteval auto names_control_or_status(std::span<named_field<set_role> const> ta
   });
 }
 
-constexpr std::size_t block_registers_per_bank = 8;
 constexpr std::size_t pages_per_block_register = 32;
+
+/** @brief What decides whether a page lies in a closed HDP area. */
+struct hide_inputs
+{
+  /** @brief Watermark option word of the page's bank. */
+  std::uint32_t watermark{};
+  /** @brief HDP option word of the page's bank. */
+  std::uint32_t area{};
+  /** @brief Access disable bit of the bank, set. */
+  bool access_disabled{};
+  /** @brief Extension of the bank's HDP area in pages. */
+  std::uint32_t extension{};
+  /** @brief Temporal isolation level HDPL. */
+  std::uint8_t level{};
+  /** @brief Page in its bank. */
+  std::uint32_t page{};
+  /** @brief Mask of a page number field. */
+  std::uint32_t top{};
+};
 
 void drive(irq_line& line, bool level)
 {
@@ -575,6 +586,40 @@ struct u5_flash
   };
   /** @brief Registers the dropped-option warning names as the ones OPTSTRT programs. */
   static constexpr std::string_view wrp_text = "FLASH_WRPxyR";
+  /** @brief Block-based security registers of bank 1, then bank 2, RM0456 7.9.30. */
+  static constexpr std::array<std::string_view, 16> secure_block_registers{
+      "FLASH_SEC1BBR1", "FLASH_SEC1BBR2", "FLASH_SEC1BBR3", "FLASH_SEC1BBR4",
+      "FLASH_SEC1BBR5", "FLASH_SEC1BBR6", "FLASH_SEC1BBR7", "FLASH_SEC1BBR8",
+      "FLASH_SEC2BBR1", "FLASH_SEC2BBR2", "FLASH_SEC2BBR3", "FLASH_SEC2BBR4",
+      "FLASH_SEC2BBR5", "FLASH_SEC2BBR6", "FLASH_SEC2BBR7", "FLASH_SEC2BBR8",
+  };
+  /** @brief Block-based privilege registers of bank 1, then bank 2, RM0456 7.9.32. */
+  static constexpr std::array<std::string_view, 16> privileged_block_registers{
+      "FLASH_PRIV1BBR1", "FLASH_PRIV1BBR2", "FLASH_PRIV1BBR3", "FLASH_PRIV1BBR4",
+      "FLASH_PRIV1BBR5", "FLASH_PRIV1BBR6", "FLASH_PRIV1BBR7", "FLASH_PRIV1BBR8",
+      "FLASH_PRIV2BBR1", "FLASH_PRIV2BBR2", "FLASH_PRIV2BBR3", "FLASH_PRIV2BBR4",
+      "FLASH_PRIV2BBR5", "FLASH_PRIV2BBR6", "FLASH_PRIV2BBR7", "FLASH_PRIV2BBR8",
+  };
+  /** @brief Block registers of one bank, 32 pages each. */
+  static constexpr std::size_t block_registers_per_bank = 8;
+  /** @brief Index in option_registers of the watermark word of bank 1 and bank 2. */
+  static constexpr std::array<std::size_t, 2> watermark_words{4, 6};
+  /** @brief Index in option_registers of the HDP word of bank 1 and bank 2. */
+  static constexpr std::array<std::size_t, 2> hide_words{5, 7};
+
+  /**
+   * @brief Whether a page lies in the closed HDP area of its bank, RM0456 7.5.3: HDPxEN and
+   *        HDPx_ACCDIS set, from SECWMx_PSTRT to HDPx_PEND.
+   * @param in Option words, bits and page of the bank.
+   */
+  [[nodiscard]] static constexpr auto hidden(hide_inputs const& in) -> bool
+  {
+    auto const start = in.watermark & in.top;
+    return (in.area & hdp_enable) != 0
+       and in.access_disabled
+       and start <= in.page
+       and in.page <= (in.area >> 16 & in.top);
+  }
 
   /**
    * @brief Highest page number of a SECWM, HDP or WRP field of @p part, RM0456 7.9.17.
@@ -894,6 +939,44 @@ struct h5_flash
   };
   /** @brief Registers the dropped-option warning names as the ones OPTSTRT programs. */
   static constexpr std::string_view wrp_text = "FLASH_WRPxR_PRG";
+  /** @brief Block-based security registers of bank 1, then bank 2, RM0481 7.11.29. */
+  static constexpr std::array<std::string_view, 8> secure_block_registers{
+      "FLASH_SECBB1R1", "FLASH_SECBB1R2", "FLASH_SECBB1R3", "FLASH_SECBB1R4",
+      "FLASH_SECBB2R1", "FLASH_SECBB2R2", "FLASH_SECBB2R3", "FLASH_SECBB2R4",
+  };
+  /** @brief Block-based privilege registers of bank 1, then bank 2, RM0481 7.11.30. */
+  static constexpr std::array<std::string_view, 8> privileged_block_registers{
+      "FLASH_PRIVBB1R1", "FLASH_PRIVBB1R2", "FLASH_PRIVBB1R3", "FLASH_PRIVBB1R4",
+      "FLASH_PRIVBB2R1", "FLASH_PRIVBB2R2", "FLASH_PRIVBB2R3", "FLASH_PRIVBB2R4",
+  };
+  /** @brief Block registers of one bank, 32 sectors each, 128 sectors per bank. */
+  static constexpr std::size_t block_registers_per_bank = 4;
+  /** @brief Index in option_registers of FLASH_SECWM1R_CUR and FLASH_SECWM2R_CUR. */
+  static constexpr std::array<std::size_t, 2> watermark_words{4, 5};
+  /** @brief Index in option_registers of FLASH_HDP1R_CUR and FLASH_HDP2R_CUR. */
+  static constexpr std::array<std::size_t, 2> hide_words{6, 7};
+
+  /**
+   * @brief Whether a sector lies in the closed HDP area of its bank, RM0481 7.6.2 and Table 63:
+   *        none at HDPL 1 or below, HDPx_STRT to HDPx_END at HDPL 2, and at HDPL 3 the lower of
+   *        HDPx_STRT and HDPx_END to HDPx_END plus HDPx_EXT, when HDPx_END is not below
+   *        HDPx_STRT or HDPx_EXT is above 0.
+   * @param in Option words, extension, level and sector of the bank.
+   */
+  [[nodiscard]] static constexpr auto hidden(hide_inputs const& in) -> bool
+  {
+    auto const start = in.area & in.top;
+    auto const end   = in.area >> 16 & in.top;
+    if(in.level == 2)
+    {
+      return start <= in.page and in.page <= end;
+    }
+    if(in.level < 2 or (end < start and in.extension == 0))
+    {
+      return false;
+    }
+    return std::min(start, end) <= in.page and in.page <= end + in.extension;
+  }
 
   /**
    * @brief Highest sector number of a SECWM or HDP field, RM0481 7.11.33.
@@ -1275,7 +1358,15 @@ static_assert(flag_matches_roles(
  *   reads SWAP_BANK. The checks: sectors inside the bank, boot addresses aligned to 256 bytes,
  *   DUALBANK set. With TZEN = 0xC3, with or without option bytes, FLASH_SECBOOTR_CUR,
  *   FLASH_BOOTR_PRG, FLASH_SECWM1R_PRG, FLASH_SECWM2R_PRG and the Secure set read zero and
- *   ignore writes, 7.6.1. The HDP area is encoded only, the SBS HDPL level closes it.
+ *   ignore writes, 7.6.1.
+ * - TrustZone, 7.6.1 to 7.6.4: a sector is Secure inside FLASH_SECWMxR_CUR, SECWMx_STRT to
+ *   SECWMx_END, or with its FLASH_SECBBxRy bit set, 32 sectors per register and 4 registers per
+ *   bank, and privileged with its FLASH_PRIVBBxRy bit set. The HDP area of a bank is
+ *   FLASH_HDPxR_CUR, HDPx_STRT to HDPx_END, independent of the watermark. The SBS HDPL level
+ *   closes it, Table 63: at HDPL 2 from HDPx_STRT to HDPx_END, at HDPL 3 from the lower of the
+ *   two to HDPx_END plus the HDPx_EXT sectors of FLASH_HDPEXTR. FLASH_HDPEXTR fields only grow
+ *   and ignore writes at HDPL 3, 7.11.18. A closed sector reads zero and refuses every fetch, as
+ *   the U5 HDP area does.
  * - ECC, 7.9.10: ECCD and its record are in FLASH_ECCDETR, ADDR_ECC the 128-bit word index in
  *   the bank, and clearing ECCD clears the record. ECCC is in FLASH_ECCCORR.
  * - Latency: RM0481 Table 48 per VOS level, with no LPM. No oscillator is held for programming.
@@ -1357,6 +1448,7 @@ public:
   [[nodiscard]] auto option_locked() const -> bool;
   void               secure_block_written(std::uint32_t old, std::uint32_t now);
   void               hide_written(std::uint32_t old, std::uint32_t now);
+  void               extension_written(std::uint32_t old, std::uint32_t now);
   void               privilege_written(std::uint32_t old, std::uint32_t now);
   void               privileged_block_written(std::uint32_t old, std::uint32_t now);
 
@@ -1522,7 +1614,7 @@ auto flash_table(peripheral_desc const& desc, flash_options const& options, bool
       table.push_back({hide_register, &model::hide_written});
     }
   }
-  for(auto const name : secure_block_registers)
+  for(auto const name : Traits::secure_block_registers)
   {
     if(find_register(desc, name) != nullptr)
     {
@@ -1532,7 +1624,13 @@ auto flash_table(peripheral_desc const& desc, flash_options const& options, bool
   if(trustzone)
   {
     table.push_back({"FLASH_PRIVCFGR", &flash_model<Traits>::privilege_written});
-    for(auto const name : privileged_block_registers)
+    if constexpr(
+        constexpr auto extension = register_of(Traits::unit_fields, unit_role::hide_extension1);
+        not extension.empty())
+    {
+      table.push_back({extension, &flash_model<Traits>::extension_written});
+    }
+    for(auto const name : Traits::privileged_block_registers)
     {
       if(find_register(desc, name) != nullptr)
       {
@@ -1628,11 +1726,11 @@ flash_model<Traits>::flash_model(
     state_.wrp.assign(wrp_offsets_.size(), Traits::wrp_production(ctx.part.part));
     state_.wrp_active = state_.wrp;
   }
-  for(auto const name : secure_block_registers)
+  for(auto const name : Traits::secure_block_registers)
   {
     secure_blocks_.push_back(has_register(name) ? reg(name).offset : ~0u);
   }
-  for(auto const name : privileged_block_registers)
+  for(auto const name : Traits::privileged_block_registers)
   {
     privileged_blocks_.push_back(has_register(name) ? reg(name).offset : ~0u);
   }
@@ -1641,7 +1739,18 @@ flash_model<Traits>::flash_model(
   });
   if(own != ctx.part.regions.end())
   {
-    storage_ = &*own;
+    storage_          = &*own;
+    auto const needed = (banks().size / Traits::page_bytes + pages_per_block_register - 1)
+                      / pages_per_block_register;
+    for(std::size_t bank = 0; bank < 2; ++bank)
+    {
+      for(std::size_t index = 0; index < needed; ++index)
+      {
+        auto const at = bank * Traits::block_registers_per_bank + index;
+        this->expect_register(Traits::secure_block_registers[at], true);
+        this->expect_register(Traits::privileged_block_registers[at], true);
+      }
+    }
   }
   for(auto const name : Traits::secure_option_registers)
   {
@@ -2431,9 +2540,7 @@ auto flash_model<Traits>::page_rule(address at) const -> std::optional<page_poli
 
 template <typename Traits> auto flash_model<Traits>::rule_of(std::uint32_t at) const -> page_policy
 {
-  constexpr std::size_t secwm1r1 = 4;
-  constexpr std::size_t secwm2r1 = 6;
-  page_policy           policy{
+  page_policy policy{
       .secure = block_bit(secure_blocks_, at), .privileged = block_bit(privileged_blocks_, at)};
   if(option_words_.size() != Traits::option_registers.size())
   {
@@ -2441,19 +2548,22 @@ template <typename Traits> auto flash_model<Traits>::rule_of(std::uint32_t at) c
   }
   auto const bank        = bank_of(at);
   auto const page        = (at - bank_base(at)) / Traits::page_bytes;
-  auto const first       = option_words_[bank == 0 ? secwm1r1 : secwm2r1].second;
-  auto const second      = option_words_[(bank == 0 ? secwm1r1 : secwm2r1) + 1].second;
+  auto const first       = option_words_[Traits::watermark_words[bank]].second;
   auto const top         = Traits::watermark_top(ctx_.part.part);
-  auto const start       = first & top;
-  auto const watermarked = start <= page and page <= (first >> 16 & top);
+  auto const watermarked = (first & top) <= page and page <= (first >> 16 & top);
   auto const hide        = unit_.find(bank == 0 ? unit_role::hide_bank1 : unit_role::hide_bank2);
-  auto const hidden      = (second & hdp_enable) != 0
-                  and hide
-                  and get(regs_, *hide) != 0
-                  and start <= page
-                  and page <= (second >> 16 & top);
-  policy.secure = policy.secure or watermarked;
-  policy.hidden = hidden;
+  auto const extension =
+      unit_.find(bank == 0 ? unit_role::hide_extension1 : unit_role::hide_extension2);
+  auto const* const isolation = dynamic_cast<temporal_isolation const*>(ctx_.peers.find("SBS"));
+  policy.secure               = policy.secure or watermarked;
+  policy.hidden               = Traits::hidden(
+      {.watermark       = first,
+       .area            = option_words_[Traits::hide_words[bank]].second,
+       .access_disabled = hide and get(regs_, *hide) != 0,
+       .extension       = extension ? get(regs_, *extension) : 0,
+       .level           = isolation != nullptr ? isolation->isolation_level() : std::uint8_t{0},
+       .page            = page,
+       .top             = top});
   return policy;
 }
 
@@ -2461,8 +2571,9 @@ template <typename Traits>
 auto flash_model<Traits>::block_bit(std::span<std::uint32_t const> words, std::uint32_t at) const
     -> bool
 {
-  auto const page  = (at - bank_base(at)) / Traits::page_bytes;
-  auto const index = bank_of(at) * block_registers_per_bank + page / pages_per_block_register;
+  auto const page = (at - bank_base(at)) / Traits::page_bytes;
+  auto const index =
+      bank_of(at) * Traits::block_registers_per_bank + page / pages_per_block_register;
   if(index >= words.size() or words[index] == ~0u)
   {
     return false;
@@ -3505,6 +3616,23 @@ void flash_model<Traits>::hide_written(std::uint32_t old, std::uint32_t now)
 }
 
 template <typename Traits>
+void flash_model<Traits>::extension_written(std::uint32_t old, std::uint32_t now)
+{
+  auto const* const isolation = dynamic_cast<temporal_isolation const*>(ctx_.peers.find("SBS"));
+  auto              kept      = old;
+  if(isolation == nullptr or isolation->isolation_level() <= 2)
+  {
+    for(auto const role : {unit_role::hide_extension1, unit_role::hide_extension2})
+    {
+      auto const bits = unit_[role];
+      kept            = bits.with(kept, std::max(bits.of(old), bits.of(now)));
+    }
+  }
+  regs_.poke(written_word_, kept);
+  policy_written(old, kept);
+}
+
+template <typename Traits>
 void flash_model<Traits>::privilege_written(std::uint32_t old, std::uint32_t now)
 {
   auto allowed = 0u;
@@ -3527,9 +3655,10 @@ void flash_model<Traits>::privileged_block_written(std::uint32_t old, std::uint3
   {
     auto const index =
         std::ranges::find(privileged_blocks_, written_word_) - privileged_blocks_.begin();
-    auto const bank = static_cast<std::uint32_t>(index) / block_registers_per_bank;
-    auto const first =
-        static_cast<std::uint32_t>(index) % block_registers_per_bank * pages_per_block_register;
+    auto const bank  = static_cast<std::uint32_t>(index) / Traits::block_registers_per_bank;
+    auto const first = static_cast<std::uint32_t>(index)
+                     % Traits::block_registers_per_bank
+                     * pages_per_block_register;
     for(std::uint32_t bit = 0; bit < pages_per_block_register; ++bit)
     {
       auto const at = bank_start(bank) + (first + bit) * Traits::page_bytes;

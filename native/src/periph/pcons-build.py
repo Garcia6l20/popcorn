@@ -34,6 +34,7 @@ stm32 = [
         "rng.cpp",
         "gtzc.cpp",
         "syscfg.cpp",
+        "sbs.cpp",
     )
 ]
 stm32_entry = here / "stm32" / "plugin.cpp"

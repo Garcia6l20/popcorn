@@ -25,17 +25,21 @@ struct h573_secure_rig
 
   explicit h573_secure_rig(
       std::string_view                   firmware = "h573_pwr_ll",
-      periph::stm32::option_bytes const& wanted   = {.tzen = true})
-      : f{h573(), firmware, options(wanted)}
+      periph::stm32::option_bytes const& wanted   = {.tzen = true},
+      arch::fault_policy                 faults   = arch::fault_policy::stop)
+      : f{h573(), firmware, options(wanted, faults)}
   {
     REQUIRE(f.target->mem().write(parked_at, 4, 0xE7FD'BF30).has_value());
     f.set("pc", parked_at | 1u);
     REQUIRE(f.target->mem(true).write(0xe000'edd0, 4, 0x2).has_value());
   }
 
-  static auto options(periph::stm32::option_bytes const& wanted) -> core::machine_options
+  static auto options(
+      periph::stm32::option_bytes const& wanted,
+      arch::fault_policy                 faults = arch::fault_policy::stop) -> core::machine_options
   {
-    auto out = stm32_options();
+    auto out   = stm32_options();
+    out.faults = faults;
     REQUIRE(periph::stm32::configure_option_bytes(h573(), wanted, out).has_value());
     return out;
   }

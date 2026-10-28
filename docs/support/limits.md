@@ -402,6 +402,15 @@ Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - SPI_I2SCFGR of the STM32H5 SPI1 to SPI3 is storage: the I2S mode is not modelled. SPI_CFG2.SP,
   MIDI and MSSI and SPI_CFG1.CRCEN log one model_warning when set and have no effect.
 
+## SBS
+
+Source: [sbs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/sbs.cpp)
+
+- The SBS model serves only with TrustZone enabled, `OptionBytes(tzen=True)`, and holds the
+  temporal isolation level alone. Every other SBS register is storage.
+- HDPL starts at HDPL1 after every reset, the level of a user flash boot. The RSS boot at HDPL0
+  is outside the model.
+
 ## SYSCFG
 
 Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/syscfg.cpp)
