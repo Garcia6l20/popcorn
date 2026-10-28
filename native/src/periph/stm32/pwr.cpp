@@ -24,9 +24,10 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::uint32_t voltage_ready = 0;
-constexpr std::uint32_t booster_ready = 1;
-constexpr std::uint32_t voltage_step  = 2;
+constexpr std::uint32_t voltage_ready   = 0;
+constexpr std::uint32_t booster_ready   = 1;
+constexpr std::uint32_t voltage_step    = 2;
+constexpr std::uint32_t regulator_ready = 3;
 
 enum class low_power_mode : std::uint8_t
 {
@@ -55,6 +56,8 @@ enum class pwr_role : std::uint8_t
   mode,
   booster,
   booster_ready,
+  regulator_select,
+  regulator_status,
 };
 
 enum class guard_source : std::uint8_t
@@ -81,6 +84,7 @@ struct pwr_state
 {
   std::array<std::uint32_t, 2> generation{};
   std::uint32_t                settled_level{};
+  std::uint32_t                regulator_generation{};
 
   friend auto operator==(pwr_state const&, pwr_state const&) -> bool = default;
 };
@@ -120,6 +124,15 @@ struct vos_stepping
   std::chrono::nanoseconds settle;
 };
 
+/** @brief Time from a REGSEL change to REGS, per ACTVOS code, 0 range 4 to 3 range 1. */
+struct regulator_switch
+{
+  /** @brief LDO to SMPS. */
+  std::array<std::chrono::nanoseconds, 4> to_smps;
+  /** @brief SMPS to LDO. */
+  std::array<std::chrono::nanoseconds, 4> to_ldo;
+};
+
 /** @brief What differs between the PWR blocks one model serves. */
 struct pwr_family
 {
@@ -137,6 +150,11 @@ struct pwr_family
    *         the ready bits set `settle` after the last step. Without it ACTVOS takes the new VOS
    *         when the board's ready delay ends. */
   std::optional<vos_stepping> stepping{};
+  /** @brief The package has the SMPS: REGS follows a REGSEL change after the time of the range
+   *         ACTVOS gives at the write. Without it a firmware write that sets REGSEL logs one
+   *         warning per machine life and raises model_error under strict_peripherals, and REGS
+   *         keeps 0, the LDO. */
+  std::optional<regulator_switch> smps{};
   /** @brief Write handlers of every machine. */
   std::span<write_entry<pwr> const> writes;
   /** @brief Write handlers added under TrustZone. */
@@ -165,6 +183,15 @@ struct pwr_family
  *        Low-power modes are not modelled: the first write to the mode register, PWR_CR1 on the
  *        U5 and PWR_PMCR on the H5, logs one warning per machine life naming the LPMS mode, and
  *        a deep-sleep WFI idles as a plain WFI.
+ *
+ *        Regulator selection, RM0456 10.5 and 10.10.3: on a U5 package with the SMPS, the part
+ *        names ending in Q, PWR_SVMSR.REGS takes the value of PWR_CR3.REGSEL after the DS13737
+ *        Table 75 typical transition time of the range ACTVOS gives at the REGSEL write, 14 to
+ *        17 us. Every reset clears both, the regulator being the LDO. On a package without the
+ *        SMPS REGSEL is reserved: REGS stays 0, and a firmware write that changes REGSEL from 0
+ *        to 1 logs one warning per machine life. Under strict_peripherals that write raises
+ *        model_error and `PWR_CR3` keeps its value before the write. Otherwise REGSEL holds the
+ *        written value.
  *
  *        TrustZone, RM0456 10.8 and Table 109: the bits a `PWR_SECCFGR` bit secures, the VOSR
  *        bits `RCC_SECCFGR.SYSCLKSEC` secures, the PUCRx and PDCRx bits of the Secure pins of
@@ -201,6 +228,7 @@ public:
 
   void vosr_written(std::uint32_t old, std::uint32_t now);
   void cr1_written(std::uint32_t old, std::uint32_t now);
+  void cr3_written(std::uint32_t old, std::uint32_t now);
 
   [[nodiscard]] auto secure_function() const -> bool override;
   [[nodiscard]] auto secure_word() const -> std::uint32_t override;
@@ -217,6 +245,8 @@ private:
   pwr_family const&          family_;
   field_table<pwr_role>      names_;
   bool                       low_power_logged_{};
+  bool                       reserved_select_logged_{};
+  initiator                  writer_{initiator::cpu};
   reg_ref                    secure_;
   reg_ref                    privilege_;
   field_ref                  secure_privileged_;
@@ -227,9 +257,10 @@ private:
   illegal_event              illegal_;
 };
 
-constexpr std::array<write_entry<pwr>, 4> u5_writes{
+constexpr std::array<write_entry<pwr>, 5> u5_writes{
     {
      {"PWR_CR1", &pwr::cr1_written},
+     {"PWR_CR3", &pwr::cr3_written},
      {"PWR_VOSR", &pwr::vosr_written},
      {"PWR_SVMSR", nullptr},
      {"PWR_SECCFGR", nullptr},
@@ -238,7 +269,6 @@ constexpr std::array<write_entry<pwr>, 4> u5_writes{
 
 constexpr auto u5_trustzone_writes = std::to_array<write_entry<pwr>>({
     {"PWR_CR2",      nullptr},
-    {"PWR_CR3",      nullptr},
     {"PWR_SVMCR",    nullptr},
     {"PWR_WUCR1",    nullptr},
     {"PWR_WUCR2",    nullptr},
@@ -307,6 +337,8 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> u5_names{
      {pwr_role::mode, {"PWR_CR1", "LPMS"}},
      {pwr_role::booster, {"PWR_VOSR", "BOOSTEN"}},
      {pwr_role::booster_ready, {"PWR_VOSR", "BOOSTRDY"}},
+     {pwr_role::regulator_select, {"PWR_CR3", "REGSEL"}},
+     {pwr_role::regulator_status, {"PWR_SVMSR", "REGS"}},
      }
 };
 
@@ -323,6 +355,8 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> h5_names{
      {pwr_role::mode, {"PWR_PMCR", "LPMS"}},
      {pwr_role::booster, {"", ""}},
      {pwr_role::booster_ready, {"", ""}},
+     {pwr_role::regulator_select, {"", ""}},
+     {pwr_role::regulator_status, {"", ""}},
      }
 };
 
@@ -401,6 +435,22 @@ constexpr pwr_family u5_pwr{
     .wakeup_fields       = u5_wakeup_fields,
     .system_clock_fields = u5_system_clock_fields,
 };
+
+/** @brief DS13737 Rev 10 Table 75, typical tSMPS and tLDO at 3 V and 25 C, to the REGS change. */
+constexpr regulator_switch u5_regulator_switch{
+    .to_smps =
+        {std::chrono::microseconds{14}, std::chrono::microseconds{17},
+                  std::chrono::microseconds{16}, std::chrono::microseconds{16}},
+    .to_ldo =
+        {std::chrono::microseconds{16}, std::chrono::microseconds{15},
+                  std::chrono::microseconds{14}, std::chrono::microseconds{14}},
+};
+
+constexpr pwr_family u5_smps_pwr = [] {
+  auto family = u5_pwr;
+  family.smps = u5_regulator_switch;
+  return family;
+}();
 
 static_assert(names_every_role(u5_names));
 static_assert(names_every_role(h5_names));
@@ -557,6 +607,10 @@ auto pwr::secure_function() const -> bool
 auto pwr::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
 {
   auto const all = ~std::uint32_t{};
+  if(write)
+  {
+    writer_ = ctx.by;
+  }
   if(word == secure_.offset)
   {
     if(not ctx_.trustzone)
@@ -661,6 +715,37 @@ void pwr::cr1_written(std::uint32_t, std::uint32_t now)
           reflex::enum_value_name(family_.modes[names_[pwr_role::mode].of(now)])));
 }
 
+void pwr::cr3_written(std::uint32_t old, std::uint32_t now)
+{
+  auto const select = names_[pwr_role::regulator_select];
+  if(not family_.smps)
+  {
+    auto const reg = family_.fields[std::to_underlying(pwr_role::regulator_select)].name.reg;
+    if(select.of(old) != 0 or select.of(now) == 0 or writer_ == initiator::debugger)
+    {
+      return;
+    }
+    if(not std::exchange(reserved_select_logged_, true))
+    {
+      warn(reg, "REGSEL selects the SMPS, which this package lacks: REGS stays 0, the LDO");
+    }
+    if(ctx_.strict_peripherals)
+    {
+      regs_.poke(select.offset, old);
+      throw model_error(desc_.name, std::string{reg}, select.offset);
+    }
+    return;
+  }
+  if(select.of(now) == select.of(old))
+  {
+    return;
+  }
+  auto const& times = select.of(now) != 0 ? family_.smps->to_smps : family_.smps->to_ldo;
+  schedule_in(
+      times[get(regs_, names_[pwr_role::active_vos])], regulator_ready,
+      ++state_.regulator_generation);
+}
+
 void pwr::step_active(vos_stepping const& stepping, std::uint64_t generation)
 {
   auto const target = get(regs_, names_[pwr_role::vos]);
@@ -696,6 +781,16 @@ auto pwr::active_level() const -> std::uint32_t
 
 void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == regulator_ready)
+  {
+    if(payload == state_.regulator_generation)
+    {
+      update(
+          regs_, names_[pwr_role::regulator_status],
+          get(regs_, names_[pwr_role::regulator_select]));
+    }
+    return;
+  }
   if(kind == voltage_step)
   {
     if(family_.stepping and payload == state_.generation[voltage_ready])
@@ -734,6 +829,13 @@ auto pwr_factory(pwr_options options) -> model_factory
 {
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<pwr>(ctx, desc, u5_pwr, options);
+  };
+}
+
+auto pwr_smps_factory(pwr_options options) -> model_factory
+{
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<pwr>(ctx, desc, u5_smps_pwr, options);
   };
 }
 

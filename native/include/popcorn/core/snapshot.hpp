@@ -17,7 +17,7 @@
 namespace popcorn::core
 {
 /** @brief Version of the snapshot_data layout, stamped by the machine and checked on restore. */
-inline constexpr std::uint32_t snapshot_format_version = 8;
+inline constexpr std::uint32_t snapshot_format_version = 9;
 
 /** @brief Opaque state saved by one owner: the arch module or one peripheral model. */
 struct snapshot_part

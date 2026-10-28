@@ -411,6 +411,16 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   of one or two levels follows the same rule. The measurement covers VOS3 to VOS0 only. FLASH
   checks its latency against the range of the last ready.
 - STM32H5: PWR_USBSCR is storage, the USB model runs whatever USB33DEN and USB33SV hold.
+- STM32U5 packages with the SMPS, the part names ending in Q: `PWR_SVMSR.REGS` takes the value
+  of `PWR_CR3.REGSEL` after the typical transition time of DS13737 Table 75 for the range
+  ACTVOS gives at the REGSEL write: LDO to SMPS 14, 17, 16 and 16 us in range 4 to 1, SMPS to
+  LDO 16, 15, 14 and 14 us. The figures are the DS13737 typical values, applied to every U5 SMPS
+  part. Every reset sets both to 0, the LDO.
+- STM32U5 packages without the SMPS: REGSEL is reserved, RM0456 10.10.3, and REGS stays 0. A
+  firmware write that changes REGSEL from 0 to 1 logs one warning per machine life. Under
+  `strict_peripherals` it is a `model_error` and `PWR_CR3` keeps its value before the write.
+  Otherwise the firmware REGSEL write is stored, an inferred rule.
+- STM32U5: `PWR_CR3.FSTEN` is storage.
 
 ## RCC
 
