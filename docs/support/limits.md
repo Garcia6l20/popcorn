@@ -87,13 +87,24 @@ On the STM32H5, RM0481 section 28:
   the result unchanged.
 - ADC2 channels 16 and 17, VBAT / 4 and VDDCORE, read 0.
 - Channel 0 of ADC1 or ADC2 converted while ADC1 `ADC_OR.OP0` is clear is logged once, a
-  model_error under strict_peripherals, and converts the driven input as if the bit were set.
+  model_error under strict_peripherals, and converts as 0. An STM32H573 reads an internal level
+  there, not PA0.
 - ADC2 `ADC_OR.OP0`, the VDDCORE channel enable, is storage.
 - In the synchronous clock modes the ADC clock is HCLK divided by CKMODE, whatever ADC12EN.
   CKMODE 01 with HCLK not SYSCLK is logged once at the ADEN edge, a model_error under
   strict_peripherals, and converts at HCLK.
-- ADEN sets ADRDY at the write once ADVREGEN is set out of deep power-down. The tADCVREG_STUP
-  wait of DS14121 Table 96 is the firmware's.
+- Out of deep power-down, ADRDY sets 35 HCLK cycles after the ADEN edge with ADVREGEN set and 45
+  with it clear, as measured on an STM32H573 with the ADC clock at HCLK. The cycle count is kept
+  in HCLK cycles at every ADC clock. The tADCVREG_STUP wait of DS14121 Table 96 is the
+  firmware's.
+- Under OVRMOD 0 a result that finds the three-result FIFO full sets OVR and leaves the head
+  only. While OVR stays set, a result lands when the FIFO is empty and is discarded otherwise.
+  Measured on an STM32H573, the discard of a second result while the FIFO holds one is the
+  reading consistent with that run.
+- The end of a one-shot DMA transfer, DMACFG 0, clears ADSTART and stops the conversions, as
+  measured on an STM32H573 with CONT 1.
+- tLATR at CKMODE 00 with PRESC dividing by 256 is 4.75 ADC clock cycles, as measured on an
+  STM32H573. The other prescalers take the 2 cycles of DS14121 Table 96.
 
 ## CRC
 

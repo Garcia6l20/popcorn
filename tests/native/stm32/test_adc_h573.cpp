@@ -364,19 +364,66 @@ TEST_CASE("a conversion takes (SMP + TSAR) ADC clock cycles, SMPPLUS makes SMP 0
   }
 }
 
-TEST_CASE("ADEN sets ADRDY at the write while ADVREGEN is set out of deep power-down")
+TEST_CASE("H573 board: ADRDY sets 35 cycles after ADEN with ADVREGEN, 45 without")
+{
+  for(auto const& [regulator, cycles] : {
+          std::pair{advregen, 35u},
+          std::pair{0u,       45u}
+  })
+  {
+    CAPTURE(cycles);
+    rig const r;
+    r.write("ADC1", "ADC_CR", regulator);
+    auto const start = r.now();
+    r.write("ADC1", "ADC_CR", regulator | aden);
+    CHECK(r.read("ADC1", "ADC_ISR") == 0);
+    r.run_until(start + (cycles - 1) * cycle_ps);
+    CHECK(r.isr("ADRDY") == 0);
+    r.run_until(start + cycles * cycle_ps);
+    CHECK(r.read("ADC1", "ADC_ISR") == 1);
+  }
+}
+
+TEST_CASE("ADEN in deep power-down sets no ADRDY")
 {
   rig const r;
-  r.write("ADC1", "ADC_CR", aden);
+  r.write("ADC1", "ADC_CR", deeppwd | aden);
+  r.settle();
   CHECK(r.isr("ADRDY") == 0);
-  r.write("ADC1", "ADC_CR", 1u << 1);
+  r.write("ADC1", "ADC_CR", deeppwd | aden | (1u << 1));
   r.write("ADC1", "ADC_CR", deeppwd | advregen);
   CHECK(r.get("ADC1", "ADC_CR", "ADVREGEN") == 0);
-  r.write("ADC1", "ADC_CR", advregen);
-  CHECK(r.read("ADC1", "ADC_ISR") == 0);
-  r.write("ADC1", "ADC_CR", advregen | aden);
-  CHECK(r.isr("ADRDY") == 1);
-  CHECK(r.read("ADC1", "ADC_ISR") == 1);
+}
+
+TEST_CASE("ADDIS, ADC12RST or a second ADEN before ADRDY leave no stale ADRDY")
+{
+  {
+    rig const r;
+    r.write("ADC1", "ADC_CR", advregen | aden);
+    r.write("ADC1", "ADC_CR", advregen | aden | (1u << 1));
+    r.settle();
+    CHECK(r.isr("ADRDY") == 0);
+  }
+  {
+    rig const r;
+    r.write("ADC1", "ADC_CR", advregen | aden);
+    rcc_reset_pulse(*r.f, "RCC_AHB2RSTR", "ADC12RST");
+    r.settle();
+    CHECK(r.isr("ADRDY") == 0);
+  }
+  {
+    rig const r;
+    r.write("ADC1", "ADC_CR", advregen | aden);
+    auto const first = r.now();
+    r.run_until(first + 20 * cycle_ps);
+    r.write("ADC1", "ADC_CR", advregen | aden | (1u << 1));
+    auto const second = r.now();
+    r.write("ADC1", "ADC_CR", advregen | aden);
+    r.run_until(first + 35 * cycle_ps);
+    CHECK(r.isr("ADRDY") == 0);
+    r.run_until(second + 35 * cycle_ps);
+    CHECK(r.isr("ADRDY") == 1);
+  }
 }
 
 TEST_CASE("EOC, EOS and ADRDY clear by writing 1, writing 0 keeps them")
@@ -398,7 +445,7 @@ TEST_CASE("EOC, EOS and ADRDY clear by writing 1, writing 0 keeps them")
   CHECK(r.read("ADC1", "ADC_ISR") == 0);
 }
 
-TEST_CASE("OVRMOD 0 keeps three results, the fourth sets OVR and is discarded")
+TEST_CASE("H573 board: OVRMOD 0 keeps three results, the fourth sets OVR and leaves the head only")
 {
   rig const r;
   r.enable();
@@ -420,9 +467,29 @@ TEST_CASE("OVRMOD 0 keeps three results, the fourth sets OVR and is discarded")
   {
     drained.push_back(r.cpu_read("ADC1", "ADC_DR"));
   }
-  CHECK(
-      drained
-      == std::vector<std::uint32_t>{code_at(1'000'000), code_at(2'000'000), code_at(1'000'000)});
+  CHECK(drained == std::vector<std::uint32_t>{code_at(1'000'000)});
+}
+
+TEST_CASE("H573 board: while OVR stays set a result lands in an empty FIFO, the next is discarded")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(3, 1'000'000);
+  r.write("ADC1", "ADC_CFGR", cont);
+  auto const start = r.start(3);
+  r.run_until(start + 4 * 15 * cycle_ps);
+  REQUIRE(r.isr("OVR") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == code_at(1'000'000));
+  CHECK(r.isr("EOC") == 0);
+  r.port().drive(3, 2'000'000);
+  r.run_until(start + 5 * 15 * cycle_ps);
+  CHECK(r.isr("EOC") == 1);
+  CHECK(r.read("ADC1", "ADC_DR") == code_at(2'000'000));
+  r.port().drive(3, 3'000'000);
+  r.run_until(start + 7 * 15 * cycle_ps);
+  CHECK(r.isr("OVR") == 1);
+  CHECK(r.cpu_read("ADC1", "ADC_DR") == code_at(2'000'000));
+  CHECK(r.isr("EOC") == 0);
 }
 
 TEST_CASE("OVRMOD 1 overwrites ADC_DR with the latest result and sets OVR")
@@ -464,7 +531,8 @@ TEST_CASE("DMAEN 1 DMACFG 1 feeds 16 results, the request stays on after the cha
   CHECK(r.buffer_words(4) == std::vector<std::uint32_t>(4, code_at(2'400'000)));
 }
 
-TEST_CASE("DMAEN 1 DMACFG 0 stops the request once the channel completes, until ADSTART 0 to 1")
+TEST_CASE(
+    "H573 board: DMAEN 1 DMACFG 0 stops the ADC once the channel completes, until ADSTART 0 to 1")
 {
   rig const r;
   r.enable();
@@ -474,7 +542,11 @@ TEST_CASE("DMAEN 1 DMACFG 0 stops the request once the channel completes, until 
   static_cast<void>(r.start(3));
   r.run_until(r.now() + 5 * 15 * cycle_ps + 2 * us);
   CHECK(r.dma_left() == 0);
-  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 1);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 0);
+  auto const frozen = r.read("ADC1", "ADC_DR");
+  r.port().drive(3, 2'400'000);
+  r.run_until(r.now() + 5 * 15 * cycle_ps);
+  CHECK(r.read("ADC1", "ADC_DR") == frozen);
   r.dma(16);
   r.write("ADC1", "ADC_ISR", ovr);
   r.run_until(r.now() + 5 * 15 * cycle_ps + 2 * us);
@@ -530,23 +602,26 @@ TEST_CASE("CKMODE 10 and 11 divide HCLK at 16 MHz while the kernel clock is SYSC
 
 TEST_CASE(
     "a TIM15 trigger starts the conversion tLATR later: 2 cycles at CKMODE 00, 2.5 at 10, 2.25 at "
-    "11")
+    "11, 4.75 at CKMODE 00 with PRESC /256 as measured on an H573")
 {
   struct setting
   {
     std::uint32_t mode;
+    std::uint32_t prescaler;
     std::uint64_t divider;
     std::uint64_t latency_quarters;
   };
-  for(auto const [mode, divider, quarters] : {
-          setting{0, 1, 8 },
-          setting{2, 2, 10},
-          setting{3, 4, 9 },
+  for(auto const [mode, prescaler, divider, quarters] : {
+          setting{0, 0,  1,   8 },
+          setting{2, 0,  2,   10},
+          setting{3, 0,  4,   9 },
+          setting{0, 11, 256, 19},
   })
   {
     CAPTURE(mode);
+    CAPTURE(divider);
     rig const r;
-    r.write("ADCC", "ADC_CCR", ckmode(mode));
+    r.write("ADCC", "ADC_CCR", ckmode(mode) | presc(prescaler));
     r.enable();
     r.port().drive(3, 1'000'000);
     r.write("ADC1", "ADC_CFGR", (1u << 10) | (14u << 5));
@@ -724,6 +799,7 @@ TEST_CASE("the external channels are 0 to 15, 18 and 19")
 {
   rig const r;
   r.enable();
+  r.write("ADC1", "ADC_OR", 1);
   for(std::uint8_t channel : {0, 15, 18, 19})
   {
     CAPTURE(channel);
@@ -899,8 +975,8 @@ TEST_CASE(
     CHECK(r.convert(0, "ADC2") == 0);
     CHECK(r.warnings().empty());
     r.write("ADC1", "ADC_OR", 0);
-    CHECK(r.convert(0, "ADC1") == 2048);
-    CHECK(r.convert(0, "ADC1") == 2048);
+    CHECK(r.convert(0, "ADC1") == 0);
+    CHECK(r.convert(0, "ADC1") == 0);
     auto const logged = r.warnings();
     REQUIRE(logged.size() == 1);
     CHECK(logged[0].peripheral == "ADC1");
@@ -1010,8 +1086,10 @@ TEST_CASE("ADC_CSR reads ADC1 ADC_ISR bits 10:0 at 10:0 and ADC2's at 26:16")
   rig const r;
   CHECK(r.read("ADCC", "ADC_CSR") == 0);
   r.enable("ADC1");
+  r.run_until(r.now() + 35 * cycle_ps);
   CHECK(r.read("ADCC", "ADC_CSR") == 1u);
   r.enable("ADC2");
+  r.run_until(r.now() + 35 * cycle_ps);
   CHECK(r.read("ADCC", "ADC_CSR") == (1u | 1u << 16));
   r.port("ADC2").drive(3, 1'000'000);
   static_cast<void>(r.start(3, "ADC2"));

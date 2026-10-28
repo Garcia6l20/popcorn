@@ -34,6 +34,7 @@ constexpr std::size_t   offsets            = 4;
 constexpr std::uint64_t ps_per_second      = 1'000'000'000'000;
 constexpr std::uint32_t conversion_end     = 0;
 constexpr std::uint32_t sampling_end       = 1;
+constexpr std::uint32_t ready_end          = 2;
 constexpr std::size_t   trigger_selections = 32;
 constexpr std::uint32_t exten_rising       = 1;
 constexpr std::uint32_t exten_falling      = 2;
@@ -186,46 +187,49 @@ struct u5_adc
   using sequence     = rank_sequence;
   using trigger_enum = regular_trigger;
 
-  static constexpr std::string_view unit_name           = "ADC";
-  static constexpr std::string_view config              = "ADC_CFGR1";
-  static constexpr std::string_view common_unit         = "ADC12";
-  static constexpr std::string_view common_register     = "ADC12_CCR";
-  static constexpr std::string_view common_vrefint      = "VREFEN";
-  static constexpr std::string_view common_sensor       = "VSENSESEL";
-  static constexpr std::string_view common_prescaler    = "PRESC";
-  static constexpr std::string_view common_clock_mode   = {};
-  static constexpr std::string_view common_dual         = {};
-  static constexpr std::string_view common_status       = {};
-  static constexpr bool             regulator_flag      = true;
-  static constexpr std::size_t      result_depth        = 8;
-  static constexpr std::uint32_t    result_mask         = 0xFFFF'FFFF;
-  static constexpr unsigned         bits                = 14;
-  static constexpr address          ts_cal1_address     = 0x0BFA'0710;
-  static constexpr address          vrefint_cal_address = 0x0BFA'07A5;
-  static constexpr std::uint32_t    factory_vdda_mv     = 3000;
-  static constexpr std::string_view externals           = "from 1 to 17";
-  static constexpr std::string_view sampling_plus       = {};
-  static constexpr std::string_view ratio_field         = "OSR";
-  static constexpr std::string_view filter_register     = "ADC_HTR1";
-  static constexpr std::string_view filter_field        = "AWDFILT1";
-  static constexpr bool             filter_gates_dma    = true;
-  static constexpr bool             preselection        = true;
-  static constexpr bool             gain                = true;
-  static constexpr bool             left_shift          = true;
-  static constexpr bool             low_frequency       = true;
-  static constexpr std::string_view align               = {};
-  static constexpr std::string_view offset_enable       = {};
-  static constexpr std::string_view injected_oversample = {};
-  static constexpr std::string_view option_register     = {};
-  static constexpr std::string_view option_switch       = {};
-  static constexpr std::string_view option_owner        = {};
-  static constexpr std::uint32_t    option_channel      = 0;
-  static constexpr std::string_view cite_option         = {};
-  static constexpr std::uint64_t    min_hz              = 5'000'000;
-  static constexpr std::uint64_t    max_hz              = 55'000'000;
-  static constexpr std::string_view clock_range         = "5 to 55 MHz";
-  static constexpr std::string_view cite_control        = "RM0456 33.6.3";
-  static constexpr std::string_view cite_discontinuous  = "RM0456 33.4.15";
+  static constexpr std::string_view                            unit_name           = "ADC";
+  static constexpr std::string_view                            config              = "ADC_CFGR1";
+  static constexpr std::string_view                            common_unit         = "ADC12";
+  static constexpr std::string_view                            common_register     = "ADC12_CCR";
+  static constexpr std::string_view                            common_vrefint      = "VREFEN";
+  static constexpr std::string_view                            common_sensor       = "VSENSESEL";
+  static constexpr std::string_view                            common_prescaler    = "PRESC";
+  static constexpr std::string_view                            common_clock_mode   = {};
+  static constexpr std::string_view                            common_dual         = {};
+  static constexpr std::string_view                            common_status       = {};
+  static constexpr bool                                        regulator_flag      = true;
+  static constexpr std::size_t                                 result_depth        = 8;
+  static constexpr bool                                        overrun_flush       = false;
+  static constexpr bool                                        dma_end_stops       = false;
+  static constexpr std::optional<std::array<std::uint32_t, 2>> ready_cycles        = std::nullopt;
+  static constexpr std::uint32_t                               result_mask         = 0xFFFF'FFFF;
+  static constexpr unsigned                                    bits                = 14;
+  static constexpr address                                     ts_cal1_address     = 0x0BFA'0710;
+  static constexpr address                                     vrefint_cal_address = 0x0BFA'07A5;
+  static constexpr std::uint32_t                               factory_vdda_mv     = 3000;
+  static constexpr std::string_view                            externals           = "from 1 to 17";
+  static constexpr std::string_view                            sampling_plus       = {};
+  static constexpr std::string_view                            ratio_field         = "OSR";
+  static constexpr std::string_view                            filter_register     = "ADC_HTR1";
+  static constexpr std::string_view                            filter_field        = "AWDFILT1";
+  static constexpr bool                                        filter_gates_dma    = true;
+  static constexpr bool                                        preselection        = true;
+  static constexpr bool                                        gain                = true;
+  static constexpr bool                                        left_shift          = true;
+  static constexpr bool                                        low_frequency       = true;
+  static constexpr std::string_view                            align               = {};
+  static constexpr std::string_view                            offset_enable       = {};
+  static constexpr std::string_view                            injected_oversample = {};
+  static constexpr std::string_view                            option_register     = {};
+  static constexpr std::string_view                            option_switch       = {};
+  static constexpr std::string_view                            option_owner        = {};
+  static constexpr std::uint32_t                               option_channel      = 0;
+  static constexpr std::string_view                            cite_option         = {};
+  static constexpr std::uint64_t                               min_hz              = 5'000'000;
+  static constexpr std::uint64_t                               max_hz              = 55'000'000;
+  static constexpr std::string_view                            clock_range         = "5 to 55 MHz";
+  static constexpr std::string_view                            cite_control = "RM0456 33.6.3";
+  static constexpr std::string_view cite_discontinuous                      = "RM0456 33.4.15";
 
   static constexpr std::array<std::string_view, 1> dma_fields{"DMNGT"};
   static constexpr std::array<adc_inputs, 2>       inputs{
@@ -284,22 +288,32 @@ struct h5_adc
   using sequence     = rank_sequence;
   using trigger_enum = h5_regular_trigger;
 
-  static constexpr std::string_view unit_name           = "ADC";
-  static constexpr std::string_view config              = "ADC_CFGR";
-  static constexpr std::string_view common_unit         = "ADCC";
-  static constexpr std::string_view common_register     = "ADC_CCR";
-  static constexpr std::string_view common_vrefint      = "VREFEN";
-  static constexpr std::string_view common_sensor       = "TSEN";
-  static constexpr std::string_view common_prescaler    = "PRESC";
-  static constexpr std::string_view common_clock_mode   = "CKMODE";
-  static constexpr std::string_view common_dual         = "DUAL";
-  static constexpr std::string_view common_status       = "ADC_CSR";
-  static constexpr std::string_view status_master       = "ADC1";
-  static constexpr std::string_view status_slave        = "ADC2";
-  static constexpr std::uint32_t    status_flags        = 0x7FF;
-  static constexpr unsigned         status_slave_shift  = 16;
-  static constexpr bool             regulator_flag      = false;
-  static constexpr std::size_t      result_depth        = 3;
+  static constexpr std::string_view unit_name          = "ADC";
+  static constexpr std::string_view config             = "ADC_CFGR";
+  static constexpr std::string_view common_unit        = "ADCC";
+  static constexpr std::string_view common_register    = "ADC_CCR";
+  static constexpr std::string_view common_vrefint     = "VREFEN";
+  static constexpr std::string_view common_sensor      = "TSEN";
+  static constexpr std::string_view common_prescaler   = "PRESC";
+  static constexpr std::string_view common_clock_mode  = "CKMODE";
+  static constexpr std::string_view common_dual        = "DUAL";
+  static constexpr std::string_view common_status      = "ADC_CSR";
+  static constexpr std::string_view status_master      = "ADC1";
+  static constexpr std::string_view status_slave       = "ADC2";
+  static constexpr std::uint32_t    status_flags       = 0x7FF;
+  static constexpr unsigned         status_slave_shift = 16;
+  static constexpr bool             regulator_flag     = false;
+  static constexpr std::size_t      result_depth       = 3;
+  /** @brief An overrun under OVRMOD 0 keeps the FIFO head only, measured on an STM32H573. */
+  static constexpr bool overrun_flush = true;
+  /** @brief The end of a one-shot DMA transfer clears ADSTART, measured on an STM32H573. */
+  static constexpr bool dma_end_stops = true;
+  /**
+   * @brief HCLK cycles from the ADEN edge to ADRDY with ADVREGEN 1 and 0, measured on an
+   *        STM32H573 with the ADC clock at HCLK.
+   */
+  static constexpr std::optional<std::array<std::uint32_t, 2>> ready_cycles =
+      std::array<std::uint32_t, 2>{35, 45};
   static constexpr std::uint32_t    result_mask         = 0xFFFF;
   static constexpr unsigned         bits                = 12;
   static constexpr address          ts_cal1_address     = 0x08FF'F814;
@@ -389,9 +403,15 @@ struct h5_adc
   }
 
   [[nodiscard]] static constexpr auto
-      trigger_latency_quarters(std::uint32_t, std::uint32_t clock_mode) -> std::uint32_t
+      trigger_latency_quarters(std::uint32_t divider, std::uint32_t clock_mode) -> std::uint32_t
   {
     constexpr std::array<std::uint32_t, 4> quarters{8, 10, 10, 9};
+    constexpr std::uint32_t                slowest_divider  = 256;
+    constexpr std::uint32_t                slowest_quarters = 19;
+    if((clock_mode & 3u) == 0 and divider == slowest_divider)
+    {
+      return slowest_quarters;
+    }
     return quarters[clock_mode & 3u];
   }
 };
@@ -400,6 +420,7 @@ struct adc_state
 {
   std::array<std::uint32_t, channels> input_uv{};
   std::uint32_t                       generation{};
+  std::uint32_t                       ready_generation{};
   std::uint64_t                       start_ps{};
   std::uint64_t                       clock_hz{};
   std::uint32_t                       divider{};
@@ -763,27 +784,33 @@ struct adc_clock
  *        cycles, SMP 2.5, 6.5, 12.5, 24.5, 47.5, 92.5, 247.5 or 640.5 cycles, RM0481 28.4.12, SMP
  *        000 3.5 cycles with SMPR1.SMPPLUS, TSAR 12.5, 10.5, 8.5 and 6.5 cycles, Table 285. The ADC
  *        clock comes from ADCC.CKMODE. A reserved ADC_CCR.PRESC divides by 256, logged once by
- *        ADCC, a model_error under strict_peripherals. No LDORDY: ADEN sets ADRDY at the write
- *        while ADVREGEN is set and DEEPPWD clear, RM0481 28.4.6 and 28.4.9. The external channels
- *        are 0 to 15, 18 and 19. ADC1 reads the temperature sensor on channel 16 and VREFINT on 17,
- *        the factory TS_CAL1 and VREFINT_CAL scaled by 3300 / VDDA, when ADCC connects them, Table
- *        282. ADC2 channels 16 and 17, VBAT / 4 and VDDCORE, read 0. ADC_DR shows the head of a
- *        three-result FIFO under OVRMOD 0, Table 279 and 28.4.26. DMAEN 1 holds the `adc<n>_dma`
- *        request, DMACFG 0 one-shot and DMACFG 1 circular, as DMNGT 01 and 11 do. The oversampling
- *        ratio is 2 to the OVSR + 1, the result is truncated to 16 bits after the shift, RM0481
- *        28.4.29. ALIGN 1 left-aligns ADC_DR, a 6-bit code on the byte, RM0481 28.4.26, while ROVSE
- *        and JOVSE are clear. The watchdogs compare the 12-bit raw code before alignment, AWD1 with
- *        LT1 and HT1, AWD2 and AWD3 its 8 MSBs with LTx and HTx, RM0481 Tables 288 and 289. With
- *        ROVSE they compare ADC_DR[15:4] and ADC_DR[15:8]. AWDFILT in ADC_TR1 counts as AWDFILT1
- *        does. An enabled offset, OFFSET_EN with OFFSET_CH matching and ROVSE and JOVSE clear, logs
- *        once as unmodelled. The EXTSEL map is RM0481 Table 282, 17 and 20 to 31 reserved. A
- *        sequence converting channel 0 of ADC1 or ADC2 while ADC1 ADC_OR.OP0 is clear logs a
- *        warning once, a model_error under strict_peripherals, and converts it as if the bit were
- *        set, RM0481 28.6.23. ADC2 ADC_OR is storage. tLATR is 2 ADC clock cycles at CKMODE 00 and
- *        2.5, 2.5 and 2.25 at CKMODE 01, 10 and 11, DS14121 Table 96. Each ADEN edge with the ADC
- *        clock outside 1.5 to 75 MHz logs a warning. An ADEN edge under CKMODE 01 with HCLK not
- *        SYSCLK, forbidden by RM0481 28.7.2, logs a warning once, a model_error under
- *        strict_peripherals, and converts at HCLK.
+ *        ADCC, a model_error under strict_peripherals. No LDORDY: with DEEPPWD clear, ADRDY sets 35
+ *        HCLK cycles after the ADEN edge with ADVREGEN set and 45 with it clear, as measured on an
+ *        STM32H573 with the ADC clock at HCLK, RM0481 28.4.6 and 28.4.9. ADDIS and a reset drop a
+ *        pending ADRDY. The external channels are 0 to 15, 18 and 19. ADC1 reads the temperature
+ *        sensor on channel 16 and VREFINT on 17, the factory TS_CAL1 and VREFINT_CAL scaled by 3300
+ *        / VDDA, when ADCC connects them, Table 282. ADC2 channels 16 and 17, VBAT / 4 and VDDCORE,
+ *        read 0. ADC_DR shows the head of a three-result FIFO under OVRMOD 0, Table 279 and
+ *        28.4.26. A result that finds the FIFO full sets OVR and leaves the head only. While OVR
+ *        stays set, a result lands when the FIFO is empty and is discarded otherwise, as measured
+ *        on an STM32H573. DMAEN 1 holds the `adc<n>_dma` request, DMACFG 0 one-shot and DMACFG 1
+ *        circular, as DMNGT 01 and 11 do. The end of a one-shot transfer clears ADSTART and stops
+ *        the conversions, as measured on an STM32H573. The oversampling ratio is 2 to the OVSR + 1,
+ *        the result is truncated to 16 bits after the shift, RM0481 28.4.29. ALIGN 1 left-aligns
+ *        ADC_DR, a 6-bit code on the byte, RM0481 28.4.26, while ROVSE and JOVSE are clear. The
+ *        watchdogs compare the 12-bit raw code before alignment, AWD1 with LT1 and HT1, AWD2 and
+ *        AWD3 its 8 MSBs with LTx and HTx, RM0481 Tables 288 and 289. With ROVSE they compare
+ *        ADC_DR[15:4] and ADC_DR[15:8]. AWDFILT in ADC_TR1 counts as AWDFILT1 does. An enabled
+ *        offset, OFFSET_EN with OFFSET_CH matching and ROVSE and JOVSE clear, logs once as
+ *        unmodelled. The EXTSEL map is RM0481 Table 282, 17 and 20 to 31 reserved. A sequence
+ *        converting channel 0 of ADC1 or ADC2 while ADC1 ADC_OR.OP0 is clear logs a warning once, a
+ *        model_error under strict_peripherals, and converts it as 0, RM0481 28.6.23. Deviation: an
+ *        STM32H573 reads an internal level there. ADC2 ADC_OR is storage. tLATR is 2 ADC clock
+ *        cycles at CKMODE 00 and 2.5, 2.5 and 2.25 at CKMODE 01, 10 and 11, DS14121 Table 96, and
+ *        4.75 cycles at CKMODE 00 with PRESC dividing by 256, as measured on an STM32H573. Each
+ *        ADEN edge with the ADC clock outside 1.5 to 75 MHz logs a warning. An ADEN edge under
+ *        CKMODE 01 with HCLK not SYSCLK, forbidden by RM0481 28.7.2, logs a warning once, a
+ *        model_error under strict_peripherals, and converts at HCLK.
  */
 template <typename Traits>
 class adc_model final : public dispatch_model<adc_model<Traits>, adc_state>,
@@ -889,6 +916,7 @@ private:
   void               check_preselection(std::uint32_t channel);
   [[nodiscard]] auto option_switch_set() const -> bool;
   void               check_option_switch(std::uint32_t channel);
+  [[nodiscard]] auto option_open(std::uint32_t channel) const -> bool;
   void               warn_once(bool& logged, std::string_view reg, std::string_view what);
   void               unmodelled(bool& logged, std::string_view name, std::string_view what);
   void               forbidden(bool& logged, std::string_view name, std::string message);
@@ -1363,7 +1391,17 @@ template <typename Traits> void adc_model<Traits>::cr_written(std::uint32_t old,
   }
   if(enable_.of(now) != 0 and enable_.of(old) == 0)
   {
-    if(regulator_.of(now) != 0 and deep_power_down_.of(now) == 0)
+    if constexpr(Traits::ready_cycles.has_value())
+    {
+      if(deep_power_down_.of(now) == 0)
+      {
+        auto const cycles = (*Traits::ready_cycles)[regulator_.of(now) != 0 ? 0 : 1];
+        ctx_.events.schedule_at(
+            vtime{ctx_.clock.time().ps + cycles * ps_per_second / ctx_.clock.core_hz()}, ready_end,
+            ++state_.ready_generation, ctx_.clock);
+      }
+    }
+    else if(regulator_.of(now) != 0 and deep_power_down_.of(now) == 0)
     {
       update(regs_, ready_, 1);
     }
@@ -1573,23 +1611,32 @@ template <typename Traits> auto adc_model<Traits>::option_switch_set() const -> 
   return option_switch_ and get(regs_, *option_switch_) != 0;
 }
 
+template <typename Traits> auto adc_model<Traits>::option_open(std::uint32_t channel) const -> bool
+{
+  if constexpr(not Traits::option_switch.empty())
+  {
+    if(channel == Traits::option_channel)
+    {
+      auto const* const owner =
+          dynamic_cast<adc_model const*>(ctx_.peers.find(Traits::option_owner));
+      return owner == nullptr or not owner->option_switch_set();
+    }
+  }
+  return false;
+}
+
 template <typename Traits> void adc_model<Traits>::check_option_switch(std::uint32_t channel)
 {
   if constexpr(not Traits::option_switch.empty())
   {
-    if(channel != Traits::option_channel)
-    {
-      return;
-    }
-    auto const* const owner = dynamic_cast<adc_model const*>(ctx_.peers.find(Traits::option_owner));
-    if(owner != nullptr and owner->option_switch_set())
+    if(not option_open(channel))
     {
       return;
     }
     forbidden(
         option_switch_logged_, Traits::option_register,
         std::format(
-            "channel {} converted with {} {}.{} clear, {}: converted as if set", channel,
+            "channel {} converted with {} {}.{} clear, {}: converted as 0", channel,
             Traits::option_owner, Traits::option_register, Traits::option_switch,
             Traits::cite_option));
   }
@@ -1727,7 +1774,21 @@ template <typename Traits> void adc_model<Traits>::land(std::uint32_t result)
   }
   if(get(regs_, overrun_mode_) == 0)
   {
-    if(get(regs_, overrun_) != 0 or state_.data.size() >= Traits::result_depth)
+    auto const overrun = get(regs_, overrun_) != 0;
+    if(Traits::overrun_flush and not overrun and state_.data.size() >= Traits::result_depth)
+    {
+      update(regs_, overrun_, 1);
+      state_.data.resize(1);
+      return;
+    }
+    if(Traits::overrun_flush and overrun and state_.data.empty())
+    {
+      state_.data.push_back(result);
+      update(regs_, data_, result);
+      update(regs_, end_of_conversion_, 1);
+      return;
+    }
+    if(overrun or state_.data.size() >= Traits::result_depth)
     {
       update(regs_, overrun_, 1);
       return;
@@ -1913,12 +1974,25 @@ void adc_model<Traits>::transfer_completed(dma_controller const& by, std::uint32
   }
   state_.dma_stopped = true;
   abort();
+  if constexpr(Traits::dma_end_stops)
+  {
+    update(regs_, start_, 0);
+  }
   signal();
 }
 
 template <typename Traits>
 void adc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == ready_end)
+  {
+    if(payload == state_.ready_generation and get(regs_, enable_) != 0)
+    {
+      update(regs_, ready_, 1);
+      signal();
+    }
+    return;
+  }
   if(payload != state_.generation or not state_.converting)
   {
     return;
@@ -1977,7 +2051,7 @@ auto adc_model<Traits>::sample(std::uint32_t channel) const -> std::uint32_t
              ? at_vdda<Traits>(calibration(Traits::ts_cal1_address, "TS_CAL1"), supply_.vdda_mv)
              : 0u;
   }
-  if(Traits::external(channel))
+  if(Traits::external(channel) and not option_open(channel))
   {
     return code_of<Traits>(state_.input_uv[channel], supply_.vdda_mv);
   }
