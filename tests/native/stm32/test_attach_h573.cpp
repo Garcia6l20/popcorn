@@ -22,18 +22,18 @@ using popcorn::testing::h573;
 using popcorn::testing::stm32_fixture;
 
 constexpr auto attached = std::to_array<std::string_view>({
-    "ADC1",   "ADC2",   "ADCC",   "CRC",   "DBGMCU", "DCACHE", "EXTI",   "FLASH",   "GPDMA1",
-    "GPDMA2", "GPIOA",  "GPIOB",  "GPIOC", "GPIOD",  "GPIOE",  "GPIOF",  "GPIOG",   "GPIOH",
-    "GPIOI",  "HASH",   "I2C1",   "I2C2",  "I2C3",   "I2C4",   "ICACHE", "IWDG",    "LPUART",
-    "PWR",    "RCC",    "RNG",    "RTC",   "SAI1",   "SAI2",   "SPI1",   "SPI2",    "SPI3",
-    "SPI4",   "SPI5",   "SPI6",   "TAMP",  "TIM1",   "TIM12",  "TIM13",  "TIM14",   "TIM15",
-    "TIM16",  "TIM17",  "TIM2",   "TIM3",  "TIM4",   "TIM5",   "TIM6",   "TIM7",    "TIM8",
-    "UART12", "UART4",  "UART5",  "UART7", "UART8",  "UART9",  "USART1", "USART10", "USART11",
-    "USART2", "USART3", "USART6", "USB",
+    "ADC1",    "ADC2",   "ADCC",   "CRC",    "DBGMCU", "DCACHE", "EXTI",   "FLASH",  "GPDMA1",
+    "GPDMA2",  "GPIOA",  "GPIOB",  "GPIOC",  "GPIOD",  "GPIOE",  "GPIOF",  "GPIOG",  "GPIOH",
+    "GPIOI",   "HASH",   "I2C1",   "I2C2",   "I2C3",   "I2C4",   "ICACHE", "IWDG",   "LPUART",
+    "PWR",     "RCC",    "RNG",    "RTC",    "SAI1",   "SAI2",   "SBS",    "SPI1",   "SPI2",
+    "SPI3",    "SPI4",   "SPI5",   "SPI6",   "TAMP",   "TIM1",   "TIM12",  "TIM13",  "TIM14",
+    "TIM15",   "TIM16",  "TIM17",  "TIM2",   "TIM3",   "TIM4",   "TIM5",   "TIM6",   "TIM7",
+    "TIM8",    "UART12", "UART4",  "UART5",  "UART7",  "UART8",  "UART9",  "USART1", "USART10",
+    "USART11", "USART2", "USART3", "USART6", "USB",
 });
 
 constexpr auto matched_without_model = std::to_array<std::string_view>(
-    {"GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3", "GTZC1_TZIC", "GTZC1_TZSC", "SBS"});
+    {"GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3", "GTZC1_TZIC", "GTZC1_TZSC"});
 
 constexpr std::uint32_t sram_end = 0x2000'0000 + 640 * 1024;
 

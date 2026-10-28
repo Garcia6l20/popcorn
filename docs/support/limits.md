@@ -136,14 +136,19 @@ Differs from RM0456:
 
 Not modelled on the STM32H5:
 
-- OBK key storage, the high-cycle data area, OTP and read-only area programming, the HDPL
-  levels and FLASH_HDPEXTR. Their registers are storage.
+- OBK key storage, the high-cycle data area, OTP and read-only area programming. Their
+  registers are storage.
 - FLASH_OPSR and FLASH_OTPBLR_CUR are storage. OPSR never reports an interrupted operation and
   OTPBLR_CUR locks no OTP block.
 - The effect of FLASH_ACR.WRHIGHFREQ on programming: a program or erase takes its datasheet time
   whatever the delay. A WRHIGHFREQ below RM0481 Table 48 for the current HCLK and voltage range
   warns once per HCLK, range and value at an erase START or a store with PG set, and raises a
   model error under `strict`. LATENCY is checked against the same table.
+
+The HDP area of each bank closes by the SBS HDPL level of RM0481 Table 63, with TrustZone on
+and off, Table 72 note 1. A closed sector reads zero to a load, a fetch from it is a BusFault,
+and a program or erase of it sets WRPERR, Table 64. FLASH_HDPEXTR extends the area at HDPL 3.
+Without TrustZone the rule needs machine option bytes, which set the HDP areas.
 
 Differs from RM0481:
 
@@ -176,9 +181,10 @@ Source: [gtzc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 - No debugger access raises a TZIC event, so a host view leaves the TZIC flags and GTZC_IRQn as
   they are.
 - STM32H573: `HDMICECSEC` and `HDMICECIE` name no peripheral, the SVD has no HDMI-CEC.
-- A delay block takes the SEC bit of the peripheral it serves, as on the STM32U5: DLYBOS1 the
-  OCTOSPI, DLYBSD1 and DLYBSD2 SDMMC1 and SDMMC2. RM0456 Table 5 and RM0481 Table 3 list no delay
-  block, and RM0456 Table 297 and RM0481 Table 275 give the same pairs.
+- A delay block takes the SEC bit of the peripheral it serves: DLYBSD1 and DLYBSD2 those of SDMMC1
+  and SDMMC2, DLYBOS1 that of OCTOSPI1 and DLYBOS2 that of OCTOSPI2 on the STM32U5, DLYBOS1 that
+  of the OCTOSPI on the STM32H573. RM0456 Table 5 and RM0481 Table 3 list no delay block, and
+  RM0456 Table 297 and RM0481 Table 275 give the same pairs.
 
 ## HASH
 
@@ -413,16 +419,47 @@ Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 
 ## SBS
 
-Source: [sbs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/sbs.cpp)
+Source: [sbs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/sbs.cpp), [secure_config.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/secure_config.hpp)
 
-- The SBS model serves only with TrustZone enabled, `OptionBytes(tzen=True)`, and holds the
-  temporal isolation level alone. Every other SBS register is storage.
+- The SBS model holds the temporal isolation level and the bus rules of RM0481 14.3.4 and 14.5,
+  with TrustZone on and off. Under TrustZone `SBS_SECCFGR` and `SBS_RSSCMDR` are Secure,
+  `SBS_EPOCHSELCR`, `SBS_ECCNMIR` and `SBS_CSLCKR` Secure and privileged, `SBS_CNSLCKR`
+  privileged, `SBS_FPUIMR` privileged and Secure with FPUSEC, `SBS_MESR`, `SBS_CCCSR`,
+  `SBS_CCVALR` and `SBS_CCSWCR` Secure with SBSSEC, `SBS_CFGR2` Secure with CLASSBSEC. A
+  Non-secure access to a Secure register is RAZ/WI and sets SBSF in `GTZC1_TZIC_SR4`, on a read
+  and on a write. An unprivileged access to a privileged register is RAZ/WI and sets no flag.
+- SBSSEC makes `RCC_APB3ENR.SBSEN` and `RCC_APB3RSTR.SBSRST` Secure, so a Non-secure write of
+  them is ignored while SBSSEC is set.
+- FPUSEC takes privileged writes and reads for every Secure transaction, after the register
+  description of RM0481 14.5.8. RM0481 14.3.4 lists FPUSEC among the privileged registers,
+  whose unprivileged reads are RAZ.
+- Without TrustZone `SBS_SECCFGR`, `SBS_RSSCMDR` and `SBS_CSLCKR` are RAZ/WI, RM0481 14.5.6
+  gives `SBS_RSSCMDR` "always secure (RAZ/WI if nonsecure)". `SBS_EPOCHSELCR`, `SBS_ECCNMIR`,
+  `SBS_FPUIMR` and `SBS_CNSLCKR` take privileged accesses only.
+- `SBS_DBGCR` and `SBS_DBGLOCKR` take any access at HDPL0 and HDPL1 and are RAZ/WI above it,
+  RM0481 14.5.4 and 14.5.5.
+- RM0481 11.8.25 gives `RCC_APB3RSTR` no SBS bit. The STM32H562, H563 and H573 SVDs place
+  SBSRST at bit 1, and the model serves it. A pulse keeps the security state of the unit and
+  returns every other register to its reset value. It keeps HDPL in `SBS_HDPLCR` and
+  `SBS_HDPLSR`, `SBS_SECCFGR`, the locks `SBS_CSLCKR` and `SBS_CNSLCKR`, `SBS_CFGR2`,
+  `SBS_DBGCR` and `SBS_DBGLOCKR`, which RM0481 14.5.4 and 14.5.5 clear by a debug reset, and
+  `SBS_RSSCMDR`, which RM0481 14.5.6 clears by a power-on reset. A Non-secure pulse leaves every
+  Secure setting and lock as it was.
+- A power-on or brown-out reset restores every SBS register. Every other machine reset restores
+  all but `SBS_RSSCMDR`.
+- Every SBS register but `SBS_HDPLCR`, `SBS_HDPLSR` and `SBS_SECCFGR` is storage: the functions
+  of the debug, RSS, EPOCH, ECC NMI, FPU interrupt, memory erase, compensation cell, Class B and
+  lock registers are not modelled. Coverage reports a firmware access to them as `storage_only`.
+  A firmware write that lands on one logs one `model_warning` per register. Under `strict` it
+  raises `ModelError` before the store. Firmware reads are silent.
+- `SBS_PMCR` takes every access. RM0481 14.5.9 makes its PBx_FMP bits Secure with their GPIOB
+  pin, ANASWVDD and IO_ANA_BOOST_EN with ADC12SEC and ETH_SEL_PHY with ETHSEC.
 - HDPL starts at HDPL1 after every reset, the level of a user flash boot. The RSS boot at HDPL0
   is outside the model.
 
 ## SYSCFG
 
-Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/syscfg.cpp)
+Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/syscfg.cpp), [secure_config.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/secure_config.hpp)
 
 - Every register but `SYSCFG_SECCFGR` is storage. The functions it selects are not modelled. A
   firmware write lands and logs one `model_warning` per register. Under `strict` it raises

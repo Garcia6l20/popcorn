@@ -228,25 +228,33 @@ def add_trustzone_firmware(
     nonsecure_sources: Sequence[str | Path],
     secure_ld: Path,
     nonsecure_ld: Path,
+    subdir: str = "",
+    include_dirs: Sequence[Path] = (),
+    defines: Sequence[str] = (),
 ) -> tuple[Path, Path, Target | None]:
     """Build the trustzone_pair tests/firmware/@p area/@p name_s.elf and @p name.elf with the
     test firmware flags. Without the cross toolchain both come from their committed prebuilt
     copies.
 
+    With a @p subdir the prebuilt copies are prebuilt/@p subdir/@p name_s.elf and @p name.elf,
+    declared as @p subdir_@p name_s and @p subdir_@p name. Both parts compile with
+    @p include_dirs and @p defines.
+
     @return The secure and the Non-secure ELF paths, and the Non-secure target, None when the
     prebuilt copies are used.
     """
-    prebuilt = project_dir / "tests" / "firmware" / area / "prebuilt"
+    prebuilt = project_dir / "tests" / "firmware" / area / "prebuilt" / subdir
+    declared = f"{subdir}_{name}" if subdir else name
     env = firmware_env()
     if env is None:
         secure_path = prebuilt_only(prebuilt / f"{name}_s.elf")
         nonsecure_path = prebuilt_only(prebuilt / f"{name}.elf")
-        _declared[area, f"{name}_s"] = (secure_path, None)
-        _declared[area, name] = (nonsecure_path, None)
+        _declared[area, f"{declared}_s"] = (secure_path, None)
+        _declared[area, declared] = (nonsecure_path, None)
         return secure_path, nonsecure_path, None
 
     secure_path, secure, nonsecure_path, nonsecure = trustzone_pair(
-        f"firmware-{area}-{name}",
+        f"firmware-{area}-{declared}",
         name,
         env,
         env,
@@ -256,8 +264,11 @@ def add_trustzone_firmware(
         nonsecure_ld,
         prebuilt,
     )
-    _declared[area, f"{name}_s"] = (secure_path, secure)
-    _declared[area, name] = (nonsecure_path, nonsecure)
+    for target in (secure, nonsecure):
+        target.private.include_dirs.extend(include_dirs)
+        target.private.defines.extend(defines)
+    _declared[area, f"{declared}_s"] = (secure_path, secure)
+    _declared[area, declared] = (nonsecure_path, nonsecure)
     return secure_path, nonsecure_path, nonsecure
 
 

@@ -5,7 +5,12 @@ from pathlib import Path
 from pcons import Target
 
 from popcorn_build.config import project_dir
-from popcorn_build.firmware import LINKER_SCRIPT, add_firmware, firmware_env
+from popcorn_build.firmware import (
+    LINKER_SCRIPT,
+    add_firmware,
+    add_trustzone_firmware,
+    firmware_env,
+)
 from popcorn_build.requirements import firmware_source
 
 AREA = "periph"
@@ -152,3 +157,44 @@ def add_ll_firmware(
         f"-Wl,--undefined={entry}" for entry in ("log_buf", "log_len", *entries)
     )
     return elf, target
+
+
+def add_trustzone_cmsis_firmware(
+    name: str,
+    secure_sources: Sequence[Path],
+    nonsecure_sources: Sequence[Path],
+    secure_ld: Path,
+    nonsecure_ld: Path,
+    chipset: Chipset,
+) -> tuple[Path, Path, Target | None]:
+    """Build the secure and Non-secure pair @p name_s.elf and @p name.elf of `periph` for
+    @p chipset, as `add_trustzone_firmware` links it, with the CMSIS device and core headers
+    and the chipset define only, so the pair reaches its registers through the CMSIS structures.
+
+    The prebuilt copies live in the chipset's `prebuilt_dir`, declared as
+    `<prebuilt_dir>_<name>_s` and `<prebuilt_dir>_<name>`. Without arm-none-eabi-gcc the
+    packages are not fetched and the committed copies are used.
+    """
+    if firmware_env() is None:
+        return add_trustzone_firmware(
+            AREA,
+            name,
+            secure_sources,
+            nonsecure_sources,
+            secure_ld,
+            nonsecure_ld,
+            subdir=chipset.prebuilt_dir,
+        )
+    device = firmware_source(chipset.device_package)
+    cmsis = firmware_source("cmsis-core")
+    return add_trustzone_firmware(
+        AREA,
+        name,
+        secure_sources,
+        nonsecure_sources,
+        secure_ld,
+        nonsecure_ld,
+        subdir=chipset.prebuilt_dir,
+        include_dirs=[device / "Include", cmsis / "CMSIS" / "Core" / "Include"],
+        defines=[chipset.define],
+    )

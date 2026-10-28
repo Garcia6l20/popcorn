@@ -1,6 +1,6 @@
 #include "factories.hpp"
-#include "gtzc.hpp"
 #include "model_base.hpp"
+#include "secure_config.hpp"
 
 #include <algorithm>
 #include <array>
@@ -70,28 +70,11 @@ public:
 private:
   void               restore_reset_values();
   [[nodiscard]] auto rule(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
-  [[nodiscard]] auto register_guard(std::uint32_t word, access_ctx const& ctx) -> bus_guard;
-  void               note_storage_write(std::uint32_t word);
-  [[nodiscard]] auto secure_peripheral(std::optional<std::size_t> unit) const -> bool;
 
-  register_file&               regs_;
-  reg_ref                      secure_;
-  field_ref                    system_;
-  field_ref                    class_b_;
-  field_ref                    fpu_;
-  std::uint32_t                fpu_mask_{};
-  std::uint32_t                config1_{};
-  std::uint32_t                config2_{};
-  std::uint32_t                secure_lock_{};
-  std::uint32_t                nonsecure_lock_{};
-  std::array<std::uint32_t, 4> compensation_{};
-  std::array<field_ref, 4>     fast_mode_{};
-  std::uint32_t                analog_{};
-  std::optional<std::size_t>   adc1_;
-  std::optional<std::size_t>   adc4_;
-  std::optional<std::size_t>   unit_;
-  illegal_event                illegal_;
-  std::vector<std::uint32_t>   logged_;
+  register_file&      regs_;
+  reg_ref             secure_;
+  secure_config_rules rules_;
+  storage_notes       notes_;
 };
 
 constexpr std::array<std::string_view, 3> system_reset_only{
@@ -112,28 +95,34 @@ auto syscfg_writes(peripheral_desc const& desc) -> std::vector<write_entry<syscf
 
 syscfg::syscfg(model_context& ctx, peripheral_desc const& desc)
     : dispatch_model{ctx, desc, "SYSCFG", syscfg_writes(desc)}, regs_{ctx.regs},
-      secure_{reg("SYSCFG_SECCFGR")}, system_{field("SYSCFG_SECCFGR", "SYSCFGSEC")},
-      class_b_{field("SYSCFG_SECCFGR", "CLASSBSEC")}, fpu_{field("SYSCFG_SECCFGR", "FPUSEC")},
-      adc1_{unit_named(ctx.part, "ADC1")}, adc4_{unit_named(ctx.part, "ADC4")},
-      unit_{unit_named(ctx.part, desc.name)}
+      secure_{reg("SYSCFG_SECCFGR")}, rules_{
+                                          .system  = field("SYSCFG_SECCFGR", "SYSCFGSEC"),
+                                          .class_b = field("SYSCFG_SECCFGR", "CLASSBSEC"),
+                                          .fpu     = field("SYSCFG_SECCFGR", "FPUSEC"),
+                                          .unit    = unit_named(ctx.part, desc.name)}
 {
   if(not ctx.trustzone)
   {
     return;
   }
-  fpu_mask_       = reg("SYSCFG_FPUIMR").offset;
-  config1_        = reg("SYSCFG_CFGR1").offset;
-  config2_        = reg("SYSCFG_CFGR2").offset;
-  secure_lock_    = reg("SYSCFG_CSLCKR").offset;
-  nonsecure_lock_ = reg("SYSCFG_CNSLCKR").offset;
-  compensation_   = {
+  rules_.fpu_mask       = reg("SYSCFG_FPUIMR").offset;
+  rules_.pin_config     = reg("SYSCFG_CFGR1").offset;
+  rules_.config2        = reg("SYSCFG_CFGR2").offset;
+  rules_.secure_lock    = reg("SYSCFG_CSLCKR").offset;
+  rules_.nonsecure_lock = reg("SYSCFG_CNSLCKR").offset;
+  rules_.compensation   = {
       reg("SYSCFG_MESR").offset, reg("SYSCFG_CCCSR").offset, reg("SYSCFG_CCVR").offset,
       reg("SYSCFG_CCCR").offset};
-  for(std::size_t at = 0; at < fast_mode_.size(); ++at)
+  for(std::size_t at = 0; at < rules_.fast_mode.size(); ++at)
   {
-    fast_mode_[at] = field("SYSCFG_CFGR1", std::format("PB{}_FMP", at + 6));
+    rules_.fast_mode[at] = field("SYSCFG_CFGR1", std::format("PB{}_FMP", at + 6));
   }
-  analog_ = field("SYSCFG_CFGR1", "BOOSTEN").mask() | field("SYSCFG_CFGR1", "ANASWVDD").mask();
+  auto const analog =
+      field("SYSCFG_CFGR1", "BOOSTEN").mask() | field("SYSCFG_CFGR1", "ANASWVDD").mask();
+  rules_.owned = {
+      owned_bits{analog, unit_named(ctx.part, "ADC1")},
+      owned_bits{analog, unit_named(ctx.part, "ADC4")}
+  };
 }
 
 void syscfg::reset(register_file&, reset_kind)
@@ -187,12 +176,7 @@ auto syscfg::stateless() const -> bool
 
 auto syscfg::secure_function() const -> bool
 {
-  return system_.of(secure_word()) != 0;
-}
-
-auto syscfg::secure_peripheral(std::optional<std::size_t> unit) const -> bool
-{
-  return unit and unit_secure(ctx_.peers, ctx_.part, *unit);
+  return rules_.system.of(secure_word()) != 0;
 }
 
 auto syscfg::storage_only(std::uint32_t offset) const -> bool
@@ -203,32 +187,11 @@ auto syscfg::storage_only(std::uint32_t offset) const -> bool
 auto syscfg::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
 {
   auto const result = rule(word, ctx, write);
-  if(write
-     and ctx.by != initiator::debugger
-     and word != secure_.offset
-     and result.wi != ~std::uint32_t{})
+  if(write and storage_only(word))
   {
-    note_storage_write(word);
+    notes_.written(ctx_, desc_, "SYSCFG", word, ctx, result);
   }
   return result;
-}
-
-void syscfg::note_storage_write(std::uint32_t word)
-{
-  auto const found = std::ranges::find_if(desc_.registers, [word](register_desc const& r) {
-    return not r.alternate_of and (r.offset & ~3u) == word;
-  });
-  auto const name  = found != desc_.registers.end() ? found->name : std::string{};
-  if(not std::ranges::contains(logged_, word))
-  {
-    logged_.push_back(word);
-    warn(
-        name, std::format("{} is storage: the SYSCFG functions it selects are not modelled", name));
-  }
-  if(ctx_.strict_peripherals)
-  {
-    throw model_error(desc_.name, name, word);
-  }
 }
 
 auto syscfg::rule(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
@@ -242,75 +205,20 @@ auto syscfg::rule(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_
     }
     if(not ctx.secure)
     {
-      if(write and unit_)
+      if(write and rules_.unit)
       {
-        illegal_.raise(ctx_.peers, *unit_, ctx.by);
+        rules_.illegal.raise(ctx_.peers, *rules_.unit, ctx.by);
       }
       return {.wi = all};
     }
-    return {.wi = ctx.privileged ? 0 : fpu_.mask()};
+    return {.wi = ctx.privileged ? 0 : rules_.fpu.mask()};
   }
   if(not ctx_.trustzone)
   {
     return {};
   }
-  return register_guard(word, ctx);
-}
-
-auto syscfg::register_guard(std::uint32_t word, access_ctx const& ctx) -> bus_guard
-{
-  auto const all      = ~std::uint32_t{};
-  auto const security = regs_.peek(secure_.offset);
-  auto const refused  = [&](bool secure, bool privileged) {
-    if(secure and not ctx.secure)
-    {
-      if(unit_)
-      {
-        illegal_.raise(ctx_.peers, *unit_, ctx.by);
-      }
-      return bus_guard::both(all);
-    }
-    return guard_of(all, false, privileged, ctx);
-  };
-  if(word == secure_lock_)
-  {
-    return refused(true, true);
-  }
-  if(word == fpu_mask_)
-  {
-    return refused(fpu_.of(security) != 0, true);
-  }
-  if(word == nonsecure_lock_)
-  {
-    return refused(false, true);
-  }
-  if(word == config2_)
-  {
-    return refused(class_b_.of(security) != 0, false);
-  }
-  if(std::ranges::contains(compensation_, word))
-  {
-    return refused(system_.of(security) != 0, false);
-  }
-  if(word != config1_ or ctx.secure)
-  {
-    return {};
-  }
-  std::uint32_t hidden = 0;
-  auto const*   port   = dynamic_cast<trustzone_aware const*>(ctx_.peers.find("GPIOB"));
-  auto const    pins   = port != nullptr ? port->secure_word() : 0;
-  for(std::size_t at = 0; at < fast_mode_.size(); ++at)
-  {
-    if((pins >> (at + 6) & 1u) != 0)
-    {
-      hidden |= fast_mode_[at].mask();
-    }
-  }
-  if(secure_peripheral(adc1_) or secure_peripheral(adc4_))
-  {
-    hidden |= analog_;
-  }
-  return bus_guard::both(hidden);
+  return rules_.guard(word, regs_.peek(secure_.offset), ctx, ctx_.peers, ctx_.part)
+      .value_or(bus_guard{});
 }
 }
 

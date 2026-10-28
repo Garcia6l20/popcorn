@@ -128,6 +128,32 @@ auto bit(
   return std::uint32_t{1} << bits->lsb;
 }
 
+struct on_u575
+{
+  static auto part() -> popcorn::part_description const&
+  {
+    return u575();
+  }
+
+  static constexpr std::string_view host               = "LPGPIO1";
+  static constexpr std::string_view lock_register      = "CFGLOCKR1";
+  static constexpr std::uint32_t    mpcbb1_superblocks = 12;
+  static constexpr std::uint32_t    lock_mask          = 0xfff;
+};
+
+struct on_h573
+{
+  static auto part() -> popcorn::part_description const&
+  {
+    return h573();
+  }
+
+  static constexpr std::string_view host               = "OTFDEC1";
+  static constexpr std::string_view lock_register      = "CFGLOCK1";
+  static constexpr std::uint32_t    mpcbb1_superblocks = 16;
+  static constexpr std::uint32_t    lock_mask          = 0xffff;
+};
+
 struct rig
 {
   std::unique_ptr<core::machine>   target;
@@ -153,12 +179,33 @@ struct rig
     target->reset();
   }
 
+  template <typename Part>
+  rig(Part,
+      bool                        trustzone,
+      stm32::option_bytes         wanted       = {.tzen = true},
+      popcorn::arch::fault_policy faults       = popcorn::arch::fault_policy::stop,
+      bool                        debug_blocks = true,
+      bool                        strict       = false)
+      : rig(Part::part(), Part::host, trustzone, wanted, faults, debug_blocks, strict)
+  {}
+
   explicit rig(
       bool                        trustzone,
       stm32::option_bytes         wanted       = {.tzen = true},
       popcorn::arch::fault_policy faults       = popcorn::arch::fault_policy::stop,
       bool                        debug_blocks = true,
       bool                        strict       = false)
+      : rig(u575(), "LPGPIO1", trustzone, wanted, faults, debug_blocks, strict)
+  {}
+
+  rig(popcorn::part_description const& on,
+      std::string_view                 host,
+      bool                             trustzone,
+      stm32::option_bytes              wanted,
+      popcorn::arch::fault_policy      faults,
+      bool                             debug_blocks,
+      bool                             strict)
+      : part{&on}
   {
     stm32::register_builtin_models();
     auto options               = popcorn::testing::stm32_options();
@@ -166,34 +213,47 @@ struct rig
     options.strict_peripherals = strict;
     if(debug_blocks)
     {
-      options.raz_wi = stm32::raz_wi_map(u575());
+      options.raz_wi = stm32::raz_wi_map(on);
     }
     if(trustzone)
     {
       wanted.tzen = true;
-      REQUIRE(stm32::configure_option_bytes(u575(), wanted, options).has_value());
+      REQUIRE(stm32::configure_option_bytes(on, wanted, options).has_value());
     }
     options.models.emplace(
-        "LPGPIO1", [this](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+        std::string{host}, [this](periph::model_context& ctx, popcorn::peripheral_desc const&) {
           auto made = std::make_shared<probe>(ctx);
           bus       = made.get();
           return made;
         });
-    target = std::make_unique<core::machine>(u575(), popcorn::arch::armv8m::factory(), options);
+    target = std::make_unique<core::machine>(on, popcorn::arch::armv8m::factory(), options);
     target->reset();
+  }
+
+  [[nodiscard]] auto
+      bit(std::string_view peripheral, std::string_view reg, std::string_view field) const
+      -> std::uint32_t
+  {
+    return ::bit(peripheral, reg, field, *part);
+  }
+
+  [[nodiscard]] auto address_of(std::string_view peripheral, std::string_view reg) const -> address
+  {
+    return ::address_of(peripheral, reg, *part);
   }
 
   auto
       write(std::string_view peripheral, std::string_view reg, std::uint32_t value, bus_attrs attrs)
           const -> void
   {
-    REQUIRE(bus->services().write(address_of(peripheral, reg, *part), 4, value, attrs).has_value());
+    REQUIRE(
+        bus->services().write(::address_of(peripheral, reg, *part), 4, value, attrs).has_value());
   }
 
   [[nodiscard]] auto read(std::string_view peripheral, std::string_view reg, bus_attrs attrs) const
       -> std::uint32_t
   {
-    auto const value = bus->services().read(address_of(peripheral, reg, *part), 4, attrs);
+    auto const value = bus->services().read(::address_of(peripheral, reg, *part), 4, attrs);
     REQUIRE(value.has_value());
     return *value;
   }
@@ -291,24 +351,27 @@ TEST_CASE("gtzc_fields maps every TZSC SECCFGRx and TZIC IERx field of the U575"
   }
 }
 
-TEST_CASE(
-    "RM0456 5.4.2: a Non-secure access to a Secure TIM2 is RAZ/WI with a TZIC event and IRQ 8")
+TEST_CASE_TEMPLATE(
+    "RM0456 5.4.2: a Non-secure access to a Secure TIM2 is RAZ/WI with a TZIC event and IRQ 8",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
+  rig const r{P{}, true};
   r.write("TIM2", "CR1", 0x80, nonsecure_priv);
   CHECK(r.peek("TIM2", "CR1") == 0x80);
-  r.write("GTZC1_TZSC", "SECCFGR1", bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"), secure_priv);
-  CHECK(r.peek("GTZC1_TZSC", "SECCFGR1") == bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"));
+  r.write("GTZC1_TZSC", "SECCFGR1", r.bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"), secure_priv);
+  CHECK(r.peek("GTZC1_TZSC", "SECCFGR1") == r.bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"));
   CHECK(r.peek("GTZC1_TZIC", "SR1") == 0);
 
   r.write("TIM2", "CR1", 0x1, nonsecure_priv);
   CHECK(r.peek("TIM2", "CR1") == 0x80);
   CHECK(r.read("TIM2", "CR1", nonsecure_priv) == 0);
-  auto const flag = bit("GTZC1_TZIC", "SR1", "TIM2F");
+  auto const flag = r.bit("GTZC1_TZIC", "SR1", "TIM2F");
   CHECK(r.peek("GTZC1_TZIC", "SR1") == flag);
   CHECK_FALSE(r.irq_pending(gtzc_irq));
 
-  r.write("GTZC1_TZIC", "IER1", bit("GTZC1_TZIC", "IER1", "TIM2IE"), secure_priv);
+  r.write("GTZC1_TZIC", "IER1", r.bit("GTZC1_TZIC", "IER1", "TIM2IE"), secure_priv);
   CHECK(r.irq_pending(gtzc_irq));
   CHECK(r.read("GTZC1_TZIC", "SR1", secure_priv) == flag);
   r.write("GTZC1_TZIC", "FCR1", flag, secure_priv);
@@ -320,23 +383,32 @@ TEST_CASE(
   CHECK(r.peek("GTZC1_TZIC", "SR1") == 0);
 }
 
-TEST_CASE("RM0456 3.5.5 Table 11: a Non-secure DMA access to a Secure TIM2 is RAZ/WI with an event")
+TEST_CASE_TEMPLATE(
+    "RM0456 3.5.5 Table 11, RM0481 3.6.5 Table 13: a Non-secure DMA access to a Secure TIM2 is "
+    "RAZ/WI with an event",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
-  r.write("GTZC1_TZSC", "SECCFGR1", bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"), secure_priv);
+  rig const r{P{}, true};
+  r.write("GTZC1_TZSC", "SECCFGR1", r.bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"), secure_priv);
   r.write("TIM2", "CR1", 0x1, bus_attrs{.by = initiator::dma, .secure = false});
   CHECK(r.peek("TIM2", "CR1") == 0);
-  CHECK(r.peek("GTZC1_TZIC", "SR1") == bit("GTZC1_TZIC", "SR1", "TIM2F"));
+  CHECK(r.peek("GTZC1_TZIC", "SR1") == r.bit("GTZC1_TZIC", "SR1", "TIM2F"));
   r.write("TIM2", "CR1", 0x1, bus_attrs{.by = initiator::dma, .secure = true});
   CHECK(r.peek("TIM2", "CR1") == 0x1);
 }
 
-TEST_CASE("RM0456 5.4.2: an unprivileged access to a privileged TIM2 is RAZ/WI with no event")
+TEST_CASE_TEMPLATE(
+    "RM0456 5.4.2: an unprivileged access to a privileged TIM2 is RAZ/WI with no event",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
+  rig const r{P{}, true};
   r.write("TIM2", "CR1", 0x80, secure_priv);
-  r.write("GTZC1_TZSC", "PRIVCFGR1", bit("GTZC1_TZSC", "PRIVCFGR1", "TIM2PRIV"), nonsecure_priv);
-  CHECK(r.peek("GTZC1_TZSC", "PRIVCFGR1") == bit("GTZC1_TZSC", "PRIVCFGR1", "TIM2PRIV"));
+  r.write("GTZC1_TZSC", "PRIVCFGR1", r.bit("GTZC1_TZSC", "PRIVCFGR1", "TIM2PRIV"), nonsecure_priv);
+  CHECK(r.peek("GTZC1_TZSC", "PRIVCFGR1") == r.bit("GTZC1_TZSC", "PRIVCFGR1", "TIM2PRIV"));
   CHECK(r.read("TIM2", "CR1", nonsecure_unpriv) == 0);
   CHECK(r.read("TIM2", "CR1", secure_unpriv) == 0);
   r.write("TIM2", "CR1", 0x1, secure_unpriv);
@@ -345,10 +417,14 @@ TEST_CASE("RM0456 5.4.2: an unprivileged access to a privileged TIM2 is RAZ/WI w
   CHECK(r.peek("GTZC1_TZIC", "SR1") == 0);
 }
 
-TEST_CASE("RM0456 5.6.1: TZSC CR.LCK ignores SECCFGR and PRIVCFGR writes until a reset")
+TEST_CASE_TEMPLATE(
+    "RM0456 5.6.1: TZSC CR.LCK ignores SECCFGR and PRIVCFGR writes until a reset",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const  r{true};
-  auto const tim2 = bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC");
+  rig const  r{P{}, true};
+  auto const tim2 = r.bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC");
   r.write("GTZC1_TZSC", "CR", 1, secure_unpriv);
   CHECK(r.peek("GTZC1_TZSC", "CR") == 0);
   r.write("GTZC1_TZSC", "CR", 1, secure_priv);
@@ -365,14 +441,18 @@ TEST_CASE("RM0456 5.6.1: TZSC CR.LCK ignores SECCFGR and PRIVCFGR writes until a
   CHECK(r.peek("GTZC1_TZSC", "SECCFGR1") == tim2);
 }
 
-TEST_CASE("RM0456 5.4.1 and 5.6.2: the TZSC write rules of the SEC and PRIV bits")
+TEST_CASE_TEMPLATE(
+    "RM0456 5.4.1 and 5.6.2: the TZSC write rules of the SEC and PRIV bits",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const  r{true};
-  auto const tim2_sec  = bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC");
-  auto const tim3_sec  = bit("GTZC1_TZSC", "SECCFGR1", "TIM3SEC");
-  auto const tim2_priv = bit("GTZC1_TZSC", "PRIVCFGR1", "TIM2PRIV");
-  auto const tim3_priv = bit("GTZC1_TZSC", "PRIVCFGR1", "TIM3PRIV");
-  auto const tzsc_flag = bit("GTZC1_TZIC", "SR4", "TZSC1F");
+  rig const  r{P{}, true};
+  auto const tim2_sec  = r.bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC");
+  auto const tim3_sec  = r.bit("GTZC1_TZSC", "SECCFGR1", "TIM3SEC");
+  auto const tim2_priv = r.bit("GTZC1_TZSC", "PRIVCFGR1", "TIM2PRIV");
+  auto const tim3_priv = r.bit("GTZC1_TZSC", "PRIVCFGR1", "TIM3PRIV");
+  auto const tzsc_flag = r.bit("GTZC1_TZIC", "SR4", "TZSC1F");
 
   r.write("GTZC1_TZSC", "SECCFGR1", tim2_sec, nonsecure_priv);
   CHECK(r.peek("GTZC1_TZSC", "SECCFGR1") == 0);
@@ -401,11 +481,15 @@ TEST_CASE("RM0456 5.4.1 and 5.6.2: the TZSC write rules of the SEC and PRIV bits
   CHECK(r.peek("GTZC1_TZSC", "PRIVCFGR1") == 0);
 }
 
-TEST_CASE("RM0456 5.7: TZIC registers are Secure privileged only, a Non-secure access flags TZIC1F")
+TEST_CASE_TEMPLATE(
+    "RM0456 5.7: TZIC registers are Secure privileged only, a Non-secure access flags TZIC1F",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const  r{true};
-  auto const tim2_ie = bit("GTZC1_TZIC", "IER1", "TIM2IE");
-  auto const own     = bit("GTZC1_TZIC", "SR4", "TZIC1F");
+  rig const  r{P{}, true};
+  auto const tim2_ie = r.bit("GTZC1_TZIC", "IER1", "TIM2IE");
+  auto const own     = r.bit("GTZC1_TZIC", "SR4", "TZIC1F");
   r.write("GTZC1_TZIC", "IER1", tim2_ie, secure_unpriv);
   CHECK(r.peek("GTZC1_TZIC", "IER1") == 0);
   CHECK(r.peek("GTZC1_TZIC", "SR4") == 0);
@@ -486,13 +570,17 @@ TEST_CASE(
   CHECK(r.peek("GTZC1_MPCBB1", "SECCFGR40") == 0x5);
 }
 
-TEST_CASE("RM0456 5.8.2: CFGLOCKR1 SPLCK0 locks super-block 0 only")
+TEST_CASE_TEMPLATE(
+    "RM0456 5.8.2 and RM0481 5.8.2: SPLCK0 of the MPCBB1 lock register locks super-block 0 only",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
-  r.write("GTZC1_MPCBB1", "CFGLOCKR1", 1, secure_priv);
-  CHECK(r.peek("GTZC1_MPCBB1", "CFGLOCKR1") == 1);
-  r.write("GTZC1_MPCBB1", "CFGLOCKR1", 0, secure_priv);
-  CHECK(r.peek("GTZC1_MPCBB1", "CFGLOCKR1") == 1);
+  rig const r{P{}, true};
+  r.write("GTZC1_MPCBB1", P::lock_register, 1, secure_priv);
+  CHECK(r.peek("GTZC1_MPCBB1", P::lock_register) == 1);
+  r.write("GTZC1_MPCBB1", P::lock_register, 0, secure_priv);
+  CHECK(r.peek("GTZC1_MPCBB1", P::lock_register) == 1);
   r.write("GTZC1_MPCBB1", "SECCFGR0", 0, secure_priv);
   r.write("GTZC1_MPCBB1", "PRIVCFGR0", 0, secure_priv);
   r.write("GTZC1_MPCBB1", "SECCFGR1", 0, secure_priv);
@@ -500,28 +588,39 @@ TEST_CASE("RM0456 5.8.2: CFGLOCKR1 SPLCK0 locks super-block 0 only")
   CHECK(r.peek("GTZC1_MPCBB1", "PRIVCFGR0") == 0xffff'ffff);
   CHECK(r.peek("GTZC1_MPCBB1", "SECCFGR1") == 0);
   r.target->reset(popcorn::reset_kind::pin);
-  CHECK(r.peek("GTZC1_MPCBB1", "CFGLOCKR1") == 0);
+  CHECK(r.peek("GTZC1_MPCBB1", P::lock_register) == 0);
   CHECK(r.peek("GTZC1_MPCBB1", "SECCFGR1") == 0xffff'ffff);
 }
 
-TEST_CASE("RM0456 5.3 Table 33: the U575 MPCBB1 has 12 super-blocks, SECCFGR12 is RAZ/WI")
+TEST_CASE_TEMPLATE(
+    "RM0456 and RM0481 5.3 Table 33: MPCBB1 has 12 super-blocks on the U575 and 16 on the H573, "
+    "the SECCFGR past them is RAZ/WI",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
-  r.write("GTZC1_MPCBB1", "SECCFGR11", 0x3, secure_priv);
-  CHECK(r.peek("GTZC1_MPCBB1", "SECCFGR11") == 0x3);
-  CHECK(r.read("GTZC1_MPCBB1", "SECCFGR12", secure_priv) == 0);
-  r.write("GTZC1_MPCBB1", "SECCFGR12", 0x3, secure_priv);
-  CHECK(r.peek("GTZC1_MPCBB1", "SECCFGR12") == 0);
-  r.write("GTZC1_MPCBB1", "CFGLOCKR1", 0xffff'ffff, secure_priv);
-  CHECK(r.peek("GTZC1_MPCBB1", "CFGLOCKR1") == 0xfff);
+  rig const  r{P{}, true};
+  auto const last  = std::format("SECCFGR{}", P::mpcbb1_superblocks - 1);
+  auto const after = std::format("SECCFGR{}", P::mpcbb1_superblocks);
+  r.write("GTZC1_MPCBB1", last, 0x3, secure_priv);
+  CHECK(r.peek("GTZC1_MPCBB1", last) == 0x3);
+  CHECK(r.read("GTZC1_MPCBB1", after, secure_priv) == 0);
+  r.write("GTZC1_MPCBB1", after, 0x3, secure_priv);
+  CHECK(r.peek("GTZC1_MPCBB1", after) == 0);
+  r.write("GTZC1_MPCBB1", P::lock_register, 0xffff'ffff, secure_priv);
+  CHECK(r.peek("GTZC1_MPCBB1", P::lock_register) == P::lock_mask);
 }
 
-TEST_CASE("RM0456 5.8.4 and 5.8.5: the MPCBB write rules and the block bits")
+TEST_CASE_TEMPLATE(
+    "RM0456 5.8.4 and 5.8.5, RM0481 5.8.3 and 5.8.4: the MPCBB write rules and the block bits",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const   r{true};
+  rig const   r{P{}, true};
   auto const* blocks = dynamic_cast<stm32::sram_block_controller*>(r.target->model("GTZC1_MPCBB1"));
   REQUIRE(blocks != nullptr);
-  auto const own = bit("GTZC1_TZIC", "SR4", "MPCBB1_REGF");
+  auto const own = r.bit("GTZC1_TZIC", "SR4", "MPCBB1_REGF");
 
   r.write("GTZC1_MPCBB1", "SECCFGR0", 0, nonsecure_priv);
   CHECK(r.peek("GTZC1_MPCBB1", "SECCFGR0") == 0xffff'ffff);
@@ -547,14 +646,18 @@ TEST_CASE("RM0456 5.8.4 and 5.8.5: the MPCBB write rules and the block bits")
   CHECK(blocks->block_secure(0x2000'0600) == true);
   CHECK(blocks->block_privileged(0x2000'0000) == false);
   CHECK(blocks->block_privileged(0x2000'0200) == true);
-  CHECK_FALSE(blocks->block_secure(0x2003'0000).has_value());
+  CHECK_FALSE(blocks->block_secure(0x2000'0000 + P::mpcbb1_superblocks * 0x4000).has_value());
   CHECK_FALSE(blocks->secure_data_allowed());
-  r.write("GTZC1_MPCBB1", "CR", bit("GTZC1_MPCBB1", "CR", "SRWILADIS"), secure_priv);
+  r.write("GTZC1_MPCBB1", "CR", r.bit("GTZC1_MPCBB1", "CR", "SRWILADIS"), secure_priv);
   CHECK(blocks->secure_data_allowed());
-  r.write("GTZC1_MPCBB1", "CR", bit("GTZC1_MPCBB1", "CR", "GLOCK"), secure_priv);
-  r.write("GTZC1_MPCBB1", "CR", bit("GTZC1_MPCBB1", "CR", "SRWILADIS"), secure_priv);
-  CHECK(r.peek("GTZC1_MPCBB1", "CR") == bit("GTZC1_MPCBB1", "CR", "GLOCK"));
+  r.write("GTZC1_MPCBB1", "CR", r.bit("GTZC1_MPCBB1", "CR", "GLOCK"), secure_priv);
+  r.write("GTZC1_MPCBB1", "CR", r.bit("GTZC1_MPCBB1", "CR", "SRWILADIS"), secure_priv);
+  CHECK(r.peek("GTZC1_MPCBB1", "CR") == r.bit("GTZC1_MPCBB1", "CR", "GLOCK"));
+}
 
+TEST_CASE("RM0456 5.8.4: the U575 GTZC2_MPCBB4 block bits")
+{
+  rig const   r{true};
   auto const* sram4 = dynamic_cast<stm32::sram_block_controller*>(r.target->model("GTZC2_MPCBB4"));
   REQUIRE(sram4 != nullptr);
   r.write("GTZC2_MPCBB4", "SECCFGR0", 0x7fff'ffff, secure_priv);
@@ -582,25 +685,29 @@ TEST_CASE("without TrustZone no GTZC block has a model and every register stays 
   CHECK(r.peek("GTZC1_TZIC", "IER1") == 0x3);
 }
 
-TEST_CASE("a snapshot keeps the TZIC flags, the TZSC bits and the GTZC line")
+TEST_CASE_TEMPLATE(
+    "a snapshot keeps the TZIC flags, the TZSC bits and the GTZC line",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
-  r.write("GTZC1_TZSC", "SECCFGR1", bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"), secure_priv);
-  r.write("GTZC1_TZIC", "IER1", bit("GTZC1_TZIC", "IER1", "TIM2IE"), secure_priv);
+  rig const r{P{}, true};
+  r.write("GTZC1_TZSC", "SECCFGR1", r.bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"), secure_priv);
+  r.write("GTZC1_TZIC", "IER1", r.bit("GTZC1_TZIC", "IER1", "TIM2IE"), secure_priv);
   r.write("TIM2", "CR1", 0x1, nonsecure_priv);
   auto const saved = r.target->snapshot();
-  r.write("GTZC1_TZIC", "FCR1", bit("GTZC1_TZIC", "FCR1", "CTIM2F"), secure_priv);
+  r.write("GTZC1_TZIC", "FCR1", r.bit("GTZC1_TZIC", "FCR1", "CTIM2F"), secure_priv);
   r.write("GTZC1_TZSC", "SECCFGR1", 0, secure_priv);
   REQUIRE(r.peek("GTZC1_TZIC", "SR1") == 0);
   r.target->restore(saved);
-  CHECK(r.peek("GTZC1_TZIC", "SR1") == bit("GTZC1_TZIC", "SR1", "TIM2F"));
+  CHECK(r.peek("GTZC1_TZIC", "SR1") == r.bit("GTZC1_TZIC", "SR1", "TIM2F"));
   CHECK(r.irq_pending(gtzc_irq));
   r.write("TIM2", "CR1", 0x1, nonsecure_priv);
   CHECK(r.peek("TIM2", "CR1") == 0);
-  r.write("GTZC1_TZIC", "FCR1", bit("GTZC1_TZIC", "FCR1", "CTIM2F"), secure_priv);
+  r.write("GTZC1_TZIC", "FCR1", r.bit("GTZC1_TZIC", "FCR1", "CTIM2F"), secure_priv);
   CHECK(r.peek("GTZC1_TZIC", "SR1") == 0);
   r.write("TIM2", "CR1", 0x1, nonsecure_priv);
-  CHECK(r.peek("GTZC1_TZIC", "SR1") == bit("GTZC1_TZIC", "SR1", "TIM2F"));
+  CHECK(r.peek("GTZC1_TZIC", "SR1") == r.bit("GTZC1_TZIC", "SR1", "TIM2F"));
 }
 
 constexpr address code_at = 0x2000'0000;
@@ -683,26 +790,30 @@ auto run_cpu(rig const& r, cpu_access const& access, address at, std::uint32_t v
   }
 }
 
-TEST_CASE("RM0456 5.4.2: CPU accesses to a Secure and privileged TIM2 from each state")
+TEST_CASE_TEMPLATE(
+    "RM0456 5.4.2: CPU accesses to a Secure and privileged TIM2 from each state",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const  r{true};
-  auto const cr1 = address_of("TIM2", "CR1");
+  rig const  r{P{}, true};
+  auto const cr1 = r.address_of("TIM2", "CR1");
   r.write("TIM2", "CR1", 0x80, secure_priv);
-  r.write("GTZC1_TZSC", "SECCFGR1", bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"), secure_priv);
+  r.write("GTZC1_TZSC", "SECCFGR1", r.bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"), secure_priv);
 
   run_cpu(r, {.insn = str_r1_r0, .nonsecure = true}, cr1, 0x1);
   CHECK(r.peek("TIM2", "CR1") == 0x80);
-  CHECK(r.peek("GTZC1_TZIC", "SR1") == bit("GTZC1_TZIC", "SR1", "TIM2F"));
+  CHECK(r.peek("GTZC1_TZIC", "SR1") == r.bit("GTZC1_TZIC", "SR1", "TIM2F"));
   run_cpu(r, {.insn = ldr_r2_r0, .nonsecure = true}, cr1, 0);
   CHECK(get(r, "r2") == 0);
-  r.write("GTZC1_TZIC", "FCR1", bit("GTZC1_TZIC", "FCR1", "CTIM2F"), secure_priv);
+  r.write("GTZC1_TZIC", "FCR1", r.bit("GTZC1_TZIC", "FCR1", "CTIM2F"), secure_priv);
 
   run_cpu(r, {.insn = ldr_r2_r0}, cr1, 0);
   CHECK(get(r, "r2") == 0x80);
   run_cpu(r, {.insn = str_r1_r0}, cr1, 0x81);
   CHECK(r.peek("TIM2", "CR1") == 0x81);
 
-  r.write("GTZC1_TZSC", "PRIVCFGR1", bit("GTZC1_TZSC", "PRIVCFGR1", "TIM2PRIV"), secure_priv);
+  r.write("GTZC1_TZSC", "PRIVCFGR1", r.bit("GTZC1_TZSC", "PRIVCFGR1", "TIM2PRIV"), secure_priv);
   run_cpu(r, {.insn = str_r1_r0, .unprivileged = true}, cr1, 0x80);
   CHECK(r.peek("TIM2", "CR1") == 0x81);
   run_cpu(r, {.insn = ldr_r2_r0, .unprivileged = true}, cr1, 0);
@@ -808,15 +919,18 @@ TEST_CASE("RM0456 75.5: the U5 debug blocks without a model are RAZ/WI with one 
   CHECK(r.target->mem().read(dbgmcu_cr, 4) == 0x6u);
 }
 
-TEST_CASE(
+TEST_CASE_TEMPLATE(
     "a host view access to a debug block is a model_error naming the range, strict or not, logs "
-    "nothing and leaves the firmware's first access logged, TZEN=0")
+    "nothing and leaves the firmware's first access logged, TZEN=0",
+    P,
+    on_u575,
+    on_h573)
 {
   constexpr address cti = 0xe004'2004;
   for(auto const strict : {false, true})
   {
     CAPTURE(strict);
-    rig const                     r{false, {}, popcorn::arch::fault_policy::stop, true, strict};
+    rig const r{P{}, false, {}, popcorn::arch::fault_policy::stop, true, strict};
     std::vector<core::log_record> logged;
     auto const                    sink =
         r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -846,10 +960,13 @@ TEST_CASE(
   }
 }
 
-TEST_CASE(
-    "the RAZ/WI warning names the firmware pc and stays once per machine life across a restore")
+TEST_CASE_TEMPLATE(
+    "the RAZ/WI warning names the firmware pc and stays once per machine life across a restore",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const                     r{false};
+  rig const                     r{P{}, false};
   std::vector<core::log_record> logged;
   auto const                    sink =
       r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -876,9 +993,13 @@ TEST_CASE(
   CHECK(stm32::raz_wi_map(l4).empty());
 }
 
-TEST_CASE("without the RAZ/WI ranges a CTI load is a precise BusFault, TZEN=0")
+TEST_CASE_TEMPLATE(
+    "without the RAZ/WI ranges a CTI load is a precise BusFault, TZEN=0",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{false, {}, popcorn::arch::fault_policy::stop, false};
+  rig const r{P{}, false, {}, popcorn::arch::fault_policy::stop, false};
   set(r, "r0", 0xe004'2004);
   REQUIRE(r.target->mem().write(code_at, 2, ldr_r2_r0));
   REQUIRE(r.target->mem().write(code_at + 2, 2, bkpt));
@@ -890,11 +1011,15 @@ TEST_CASE("without the RAZ/WI ranges a CTI load is a precise BusFault, TZEN=0")
   CHECK(result.stopped->fault->status == 0x8200);
 }
 
-TEST_CASE("a Non-secure load and store of the CTI with no SAU region over it are RAZ/WI, TZEN=1")
+TEST_CASE_TEMPLATE(
+    "a Non-secure load and store of the CTI with no SAU region over it are RAZ/WI, TZEN=1",
+    P,
+    on_u575,
+    on_h573)
 {
   constexpr address cti = 0xe004'2004;
   {
-    rig const                     r{true};
+    rig const                     r{P{}, true};
     std::vector<core::log_record> logged;
     auto const                    sink =
         r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -908,19 +1033,22 @@ TEST_CASE("a Non-secure load and store of the CTI with no SAU region over it are
     CHECK_FALSE(warned.front().write);
   }
   {
-    rig const  r{true, {.tzen = true}, popcorn::arch::fault_policy::stop, false};
+    rig const  r{P{}, true, {.tzen = true}, popcorn::arch::fault_policy::stop, false};
     auto const faulted = nonsecure_load(r, cti, false);
     REQUIRE(faulted.reason == popcorn::stop_reason::fault);
     CHECK(faulted.fault->kind == popcorn::fault_kind::bus);
   }
 }
 
-TEST_CASE(
+TEST_CASE_TEMPLATE(
     "under strict_peripherals a CPU or DMA access of a debug block is a model_error, an arch "
-    "debugger read reads zero")
+    "debugger read reads zero",
+    P,
+    on_u575,
+    on_h573)
 {
   constexpr address             cti = 0xe004'2004;
-  rig const                     r{false, {}, popcorn::arch::fault_policy::stop, true, true};
+  rig const                     r{P{}, false, {}, popcorn::arch::fault_policy::stop, true, true};
   std::vector<core::log_record> logged;
   auto const                    sink =
       r.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -1072,7 +1200,11 @@ TEST_CASE("RM0456 5.6.4 and the layout: one SEC bit secures each block it covers
   }
 }
 
-TEST_CASE("RM0456 3.5.5: a Non-secure read alone raises the event of a Secure register")
+TEST_CASE_TEMPLATE(
+    "RM0456 3.5.5 and RM0481 3.6.5: a Non-secure read alone raises the event of a Secure register",
+    P,
+    on_u575,
+    on_h573)
 {
   struct leg
   {
@@ -1082,23 +1214,23 @@ TEST_CASE("RM0456 3.5.5: a Non-secure read alone raises the event of a Secure re
     std::string_view flag;
   };
   for(auto const& one : std::initializer_list<leg>{
-          {"TIM2",         "CR1",       "SR1", "TIM2F"      },
-          {"GTZC1_TZSC",   "CR",        "SR4", "TZSC1F"     },
-          {"GTZC1_MPCBB1", "CR",        "SR4", "MPCBB1_REGF"},
-          {"GTZC1_MPCBB1", "CFGLOCKR1", "SR4", "MPCBB1_REGF"},
-          {"GTZC1_TZIC",   "IER1",      "SR4", "TZIC1F"     },
+          {"TIM2",         "CR1",            "SR1", "TIM2F"      },
+          {"GTZC1_TZSC",   "CR",             "SR4", "TZSC1F"     },
+          {"GTZC1_MPCBB1", "CR",             "SR4", "MPCBB1_REGF"},
+          {"GTZC1_MPCBB1", P::lock_register, "SR4", "MPCBB1_REGF"},
+          {"GTZC1_TZIC",   "IER1",           "SR4", "TZIC1F"     },
   })
   {
     std::string const name = std::string{one.peripheral} + "." + std::string{one.reg};
     CAPTURE(name);
-    rig const r{true};
-    r.write("GTZC1_TZSC", "SECCFGR1", bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"), secure_priv);
+    rig const r{P{}, true};
+    r.write("GTZC1_TZSC", "SECCFGR1", r.bit("GTZC1_TZSC", "SECCFGR1", "TIM2SEC"), secure_priv);
     REQUIRE(r.peek("GTZC1_TZIC", "SR1") == 0);
     REQUIRE(r.peek("GTZC1_TZIC", "SR4") == 0);
     CHECK(r.read(one.peripheral, one.reg, nonsecure_priv) == 0);
-    CHECK(r.peek("GTZC1_TZIC", one.flag_reg) == bit("GTZC1_TZIC", one.flag_reg, one.flag));
+    CHECK(r.peek("GTZC1_TZIC", one.flag_reg) == r.bit("GTZC1_TZIC", one.flag_reg, one.flag));
   }
-  rig const r{true};
+  rig const r{P{}, true};
   CHECK(r.read("GTZC1_TZSC", "SECCFGR1", nonsecure_unpriv) == 0);
   CHECK(r.read("GTZC1_MPCBB1", "SECCFGR0", nonsecure_unpriv) == 0xffff'ffff);
   CHECK(r.read("GTZC1_TZSC", "PRIVCFGR1", nonsecure_unpriv) == 0);
@@ -1225,9 +1357,13 @@ auto expect_fetch_fault(fetched const& run) -> void
   CHECK((run.stopped.fault->status & cfsr_ibuserr) != 0);
 }
 
-TEST_CASE("RM0456 5.4.2: MPCBB blocks filter the CPU data accesses of each state")
+TEST_CASE_TEMPLATE(
+    "RM0456 5.4.2: MPCBB blocks filter the CPU data accesses of each state",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
+  rig const r{P{}, true};
   block_bits(r, block_2, false, true);
   REQUIRE(r.target->mem().write(block_1, 4, 0xcafe'f00d));
 
@@ -1254,7 +1390,7 @@ TEST_CASE("RM0456 5.4.2: MPCBB blocks filter the CPU data accesses of each state
   CHECK(get(r, "r2") == 0xcafe'f00d);
   CHECK_FALSE(sram_flag(r));
 
-  r.write("GTZC1_MPCBB1", "CR", bit("GTZC1_MPCBB1", "CR", "SRWILADIS"), secure_priv);
+  r.write("GTZC1_MPCBB1", "CR", r.bit("GTZC1_MPCBB1", "CR", "SRWILADIS"), secure_priv);
   run_cpu(r, {.insn = ldr_r2_r0, .code = loop_at}, block_2, 0);
   CHECK(get(r, "r2") == 0x1234);
   run_cpu(r, {.insn = str_r1_r0, .code = loop_at}, block_2, 0x5678);
@@ -1270,9 +1406,13 @@ TEST_CASE("RM0456 5.4.2: MPCBB blocks filter the CPU data accesses of each state
   CHECK(get(r, "r2") == 0xcafe'f00d);
 }
 
-TEST_CASE("RM0456 5.4.2: a fetch the MPCBB refuses is a BusFault, for each state")
+TEST_CASE_TEMPLATE(
+    "RM0456 5.4.2: a fetch the MPCBB refuses is a BusFault, for each state",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
+  rig const r{P{}, true};
   block_bits(r, block_1, true, true);
   put_code(r, block_1, {nop, bkpt});
   enter_state(r, true);
@@ -1299,9 +1439,13 @@ TEST_CASE("RM0456 5.4.2: a fetch the MPCBB refuses is a BusFault, for each state
   CHECK(sram_flag(handled));
 }
 
-TEST_CASE("a 1 KB page whose two 512-byte blocks differ checks every fetch, both directions")
+TEST_CASE_TEMPLATE(
+    "a 1 KB page whose two 512-byte blocks differ checks every fetch, both directions",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
+  rig const r{P{}, true};
   block_bits(r, block_2, false, true);
   put_code(
       r, block_2 + block_512 - 16,
@@ -1395,15 +1539,20 @@ TEST_CASE("rewriting an MPCBB SECCFGR word with its value keeps the page verdict
       " engine runs, changed: ", changed_slow, ", ", changed_runs);
 }
 
-TEST_CASE(
-    "RM0456 Table 68: flash pages filter data and fetches by the transaction's security, SECWM1 "
-    "0 to 1")
+TEST_CASE_TEMPLATE(
+    "RM0456 Table 68, RM0481 Table 60: flash pages filter data and fetches by the transaction's "
+    "security, SECWM1 "
+    "0 to 1",
+    P,
+    on_u575,
+    on_h573)
 {
   rig const r{
+      P{},
       true, {.secwm1 = stm32::page_range{.first = 0, .last = 1}, .secwm2 = stm32::no_area{}}
   };
   auto const flash_flag = [&r] {
-    return (r.peek("GTZC1_TZIC", "SR4") & bit("GTZC1_TZIC", "SR4", "FLASHF")) != 0;
+    return (r.peek("GTZC1_TZIC", "SR4") & r.bit("GTZC1_TZIC", "SR4", "FLASHF")) != 0;
   };
   REQUIRE(r.target->mem().write(flash_ns, 4, 0x1111'1111));
   REQUIRE(r.target->mem().write(flash_ns + 2 * flash_page, 4, 0x2222'2222));
@@ -1446,9 +1595,13 @@ TEST_CASE(
   CHECK(control.stopped.reason == popcorn::stop_reason::user);
 }
 
-TEST_CASE("host accesses by DMA and stacking obey the memory policy, the debugger does not")
+TEST_CASE_TEMPLATE(
+    "host accesses by DMA and stacking obey the memory policy, the debugger does not",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
+  rig const r{P{}, true};
   REQUIRE(r.target->mem().write(block_1, 4, 0xcafe'f00d));
   auto& bus = r.bus->services();
   CHECK(bus.read(block_1, 4, bus_attrs{.by = initiator::dma, .secure = false}) == 0u);
@@ -1474,9 +1627,13 @@ TEST_CASE("host accesses by DMA and stacking obey the memory policy, the debugge
       == 0xcafe'f00du);
 }
 
-TEST_CASE("a read the MPCBB refuses reports 0 to a read watch, from the CPU and from DMA")
+TEST_CASE_TEMPLATE(
+    "a read the MPCBB refuses reports 0 to a read watch, from the CPU and from DMA",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
+  rig const r{P{}, true};
   REQUIRE(r.target->mem().write(block_1, 4, 0xcafe'f00d));
   std::vector<core::watch_hit> hits;
   auto const                   watch =
@@ -1498,10 +1655,14 @@ TEST_CASE("a read the MPCBB refuses reports 0 to a read watch, from the CPU and 
   CHECK(hits[2].value == 0xcafe'f00d);
 }
 
-TEST_CASE("Secure exception stacking into a Non-secure block is dropped with an event")
+TEST_CASE_TEMPLATE(
+    "Secure exception stacking into a Non-secure block is dropped with an event",
+    P,
+    on_u575,
+    on_h573)
 {
   auto const stacked = [](bool open) {
-    rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+    rig const r{P{}, true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
     if(open)
     {
       block_bits(r, block_2, false, true);
@@ -1530,9 +1691,13 @@ TEST_CASE("Secure exception stacking into a Non-secure block is dropped with an 
   CHECK(dropped_flag);
 }
 
-TEST_CASE("a call in Non-secure state writes its stack arguments as Non-secure transactions")
+TEST_CASE_TEMPLATE(
+    "a call in Non-secure state writes its stack arguments as Non-secure transactions",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
+  rig const r{P{}, true};
   block_bits(r, loop_at, false, true);
   block_bits(r, loop_at - block_512, false, true);
   put_code(r, loop_at, {0x9800, 0x4770});
@@ -1553,12 +1718,16 @@ TEST_CASE("a call in Non-secure state writes its stack arguments as Non-secure t
   enter_state(r, false);
 }
 
-TEST_CASE("MPCWM4: BKPSRAM is Secure and privileged outside its enabled sub-region, RM0456 5.6.8")
+TEST_CASE_TEMPLATE(
+    "MPCWM4: BKPSRAM is Secure and privileged outside its enabled sub-region, RM0456 5.6.8",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const  r{true};
+  rig const  r{P{}, true};
   auto&      bus  = r.bus->services();
   auto const flag = [&r] {
-    return (r.peek("GTZC1_TZIC", "SR4") & bit("GTZC1_TZIC", "SR4", "BKPSRAMF")) != 0;
+    return (r.peek("GTZC1_TZIC", "SR4") & r.bit("GTZC1_TZIC", "SR4", "BKPSRAMF")) != 0;
   };
   auto const ns_read = [&](address at) {
     return bus.read(at, 4, bus_attrs{.by = initiator::dma, .secure = false});
@@ -1571,10 +1740,10 @@ TEST_CASE("MPCWM4: BKPSRAM is Secure and privileged outside its enabled sub-regi
   CHECK(flag());
   clear_events(r);
 
-  auto const config = std::string{"TZSC_MPCWM4ACFGR"};
-  auto const area   = std::string{"TZSC_MPCWM4AR"};
+  auto const config = std::string{"MPCWM4ACFGR"};
+  auto const area   = std::string{"MPCWM4AR"};
   r.write("GTZC1_TZSC", area, 2u << 16 | 1u, secure_priv);
-  r.write("GTZC1_TZSC", config, bit("GTZC1_TZSC", config, "SREN"), secure_priv);
+  r.write("GTZC1_TZSC", config, r.bit("GTZC1_TZSC", config, "SREN"), secure_priv);
   CHECK(ns_read(backup_ns + 0x20) == 0x2020'2020u);
   CHECK(ns_read(backup_ns + 0x5c) == 0x5c5c'5c5cu);
   CHECK(ns_read(backup_ns + 0x60) == 0u);
@@ -1592,17 +1761,17 @@ TEST_CASE("MPCWM4: BKPSRAM is Secure and privileged outside its enabled sub-regi
       == 0x2020'2020u);
 
   r.write("GTZC1_TZSC", config, 0, nonsecure_priv);
-  CHECK(r.peek("GTZC1_TZSC", config) == bit("GTZC1_TZSC", config, "SREN"));
-  CHECK((r.peek("GTZC1_TZIC", "SR4") & bit("GTZC1_TZIC", "SR4", "TZSC1F")) != 0);
+  CHECK(r.peek("GTZC1_TZSC", config) == r.bit("GTZC1_TZSC", config, "SREN"));
+  CHECK((r.peek("GTZC1_TZIC", "SR4") & r.bit("GTZC1_TZIC", "SR4", "TZSC1F")) != 0);
   CHECK(r.read("GTZC1_TZSC", area, nonsecure_priv) == 0);
   r.write("GTZC1_TZSC", area, 0, secure_unpriv);
   CHECK(r.peek("GTZC1_TZSC", area) == (2u << 16 | 1u));
 
   r.write(
       "GTZC1_TZSC", config,
-      bit("GTZC1_TZSC", config, "SREN")
-          | bit("GTZC1_TZSC", config, "PRIV")
-          | bit("GTZC1_TZSC", config, "SRLOCK"),
+      r.bit("GTZC1_TZSC", config, "SREN")
+          | r.bit("GTZC1_TZSC", config, "PRIV")
+          | r.bit("GTZC1_TZSC", config, "SRLOCK"),
       secure_priv);
   CHECK(
       bus.read(
@@ -1616,7 +1785,7 @@ TEST_CASE("MPCWM4: BKPSRAM is Secure and privileged outside its enabled sub-regi
 
   r.target->reset(popcorn::reset_kind::software);
   CHECK(r.peek("GTZC1_TZSC", config) == 0);
-  r.write("GTZC1_TZSC", config, bit("GTZC1_TZSC", config, "SREN"), secure_priv);
+  r.write("GTZC1_TZSC", config, r.bit("GTZC1_TZSC", config, "SREN"), secure_priv);
   CHECK(r.peek("GTZC1_TZSC", config) == 0);
   CHECK(ns_read(backup_ns + 0x20) == 0u);
 }
@@ -1695,11 +1864,14 @@ TEST_CASE(
   }
 }
 
-TEST_CASE(
+TEST_CASE_TEMPLATE(
     "a Secure IRQ handler that makes the running Non-secure loop's block Secure faults the loop's "
-    "next fetch after the return")
+    "next fetch after the return",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
+  rig const r{P{}, true};
   nonsecure_blocks(r);
   block_bits(r, block_3, false, true);
   std::uint32_t stack = block_3 + 0x1f0;
@@ -1707,7 +1879,7 @@ TEST_CASE(
       uc_reg_write(core::machine_internals::engine(*r.target), UC_ARM_REG_MSP_NS, &stack)
       == UC_ERR_OK);
   secure_vectors(r, {});
-  auto const seccfgr0 = address_of("GTZC1_MPCBB1", "SECCFGR0");
+  auto const seccfgr0 = r.address_of("GTZC1_MPCBB1", "SECCFGR0");
   put_code(r, handler_at, {0x4802, 0x4903, str_r1_r0, bx_lr, nop, nop});
   REQUIRE(r.target->mem().write(handler_at + 12, 4, seccfgr0));
   REQUIRE(r.target->mem().write(handler_at + 16, 4, r.peek("GTZC1_MPCBB1", "SECCFGR0") | 4u));
@@ -1729,11 +1901,14 @@ TEST_CASE(
   CHECK(sram_flag(r) == false);
 }
 
-TEST_CASE(
+TEST_CASE_TEMPLATE(
     "a Secure fetch of a Non-secure block with GTZC_IRQn above BusFault runs the GTZC handler "
-    "first, the fault after it")
+    "first, the fault after it",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+  rig const r{P{}, true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
   block_bits(r, block_1, false, true);
   constexpr address gtzc_handler = handler_at + 0x40;
   put_code(r, block_1, {nop, bkpt});
@@ -1752,9 +1927,13 @@ TEST_CASE(
   CHECK(sram_flag(r));
 }
 
-TEST_CASE("memory_page gives the fetch window: 9 in a mixed MPCBB page, 5 at a 32-byte MPCWM4 edge")
+TEST_CASE_TEMPLATE(
+    "memory_page gives the fetch window: 9 in a mixed MPCBB page, 5 at a 32-byte MPCWM4 edge",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
+  rig const r{P{}, true};
   auto*     firewall = core::machine_internals::firewall(*r.target);
   REQUIRE(firewall != nullptr);
   constexpr bus_attrs secure_fetch{.by = initiator::cpu, .secure = true, .privileged = true};
@@ -1773,9 +1952,8 @@ TEST_CASE("memory_page gives the fetch window: 9 in a mixed MPCBB page, 5 at a 3
   CHECK_FALSE(uniform.fetch_each);
   CHECK(uniform.fetch_window_shift == 0);
 
-  r.write("GTZC1_TZSC", "TZSC_MPCWM4AR", 2u << 16 | 1u, secure_priv);
-  r.write(
-      "GTZC1_TZSC", "TZSC_MPCWM4ACFGR", bit("GTZC1_TZSC", "TZSC_MPCWM4ACFGR", "SREN"), secure_priv);
+  r.write("GTZC1_TZSC", "MPCWM4AR", 2u << 16 | 1u, secure_priv);
+  r.write("GTZC1_TZSC", "MPCWM4ACFGR", r.bit("GTZC1_TZSC", "MPCWM4ACFGR", "SREN"), secure_priv);
   auto const page = backup_ns & ~address{0x3ff};
   for(auto const& [at, shift] : std::initializer_list<std::pair<address, unsigned>>{
           {backup_ns + 0x20,  5},
@@ -1793,9 +1971,13 @@ TEST_CASE("memory_page gives the fetch window: 9 in a mixed MPCBB page, 5 at a 3
   }
 }
 
-TEST_CASE("memory_page leaves the fetch window 0 for a data access to a mixed page")
+TEST_CASE_TEMPLATE(
+    "memory_page leaves the fetch window 0 for a data access to a mixed page",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
+  rig const r{P{}, true};
   auto*     firewall = core::machine_internals::firewall(*r.target);
   REQUIRE(firewall != nullptr);
   constexpr bus_attrs secure_data{.by = initiator::cpu, .secure = true, .privileged = true};
@@ -1843,30 +2025,36 @@ auto expect_escalated_fetch_fault(rig const& r, fetched const& run, address at) 
   CHECK(get(r, "r3") == 50);
 }
 
-TEST_CASE(
+TEST_CASE_TEMPLATE(
     "a SECCFGR store that makes the running loop's window of a split page Non-secure faults its "
-    "next cached fetch, RM0456 5.4.2, B3.11 RJQMQ")
+    "next cached fetch, RM0456 5.4.2, B3.11 RJQMQ",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+  rig const r{P{}, true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
   block_bits(r, block_3, false, true);
   hard_fault_vector(r);
   put_split_loop(r, block_2, str_r1_r0);
-  set(r, "r0", address_of("GTZC1_MPCBB1", "SECCFGR0"));
+  set(r, "r0", r.address_of("GTZC1_MPCBB1", "SECCFGR0"));
   set(r, "r1", (r.peek("GTZC1_MPCBB1", "SECCFGR0") & ~4u) | 8u);
   auto const run = run_from(r, block_2, icount{2000}, icount{2000});
   expect_escalated_fetch_fault(r, run, block_2 + 8);
   CHECK((word(r, cfsr) & cfsr_ibuserr) != 0);
 }
 
-TEST_CASE(
+TEST_CASE_TEMPLATE(
     "a PRIVCFGR store from an SVCall handler that makes the unprivileged loop's window of a split "
-    "page privileged faults its next cached fetch after the return, RM0456 5.4.2")
+    "page privileged faults its next cached fetch after the return, RM0456 5.4.2",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+  rig const r{P{}, true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
   block_bits(r, block_2, true, false);
   block_bits(r, stack_top - block_512, true, false);
   hard_fault_vector(r);
-  auto const privcfgr0 = address_of("GTZC1_MPCBB1", "PRIVCFGR0");
+  auto const privcfgr0 = r.address_of("GTZC1_MPCBB1", "PRIVCFGR0");
   put_code(r, handler_at, {0x4802, 0x4903, str_r1_r0, bx_lr, nop, nop});
   REQUIRE(r.target->mem().write(handler_at + 12, 4, privcfgr0));
   REQUIRE(r.target->mem().write(handler_at + 16, 4, r.peek("GTZC1_MPCBB1", "PRIVCFGR0") | 4u));
@@ -1879,11 +2067,14 @@ TEST_CASE(
   CHECK((r.peek("GTZC1_MPCBB1", "PRIVCFGR0") & 4u) != 0);
 }
 
-TEST_CASE(
+TEST_CASE_TEMPLATE(
     "an SAU_RLAR store that makes the running loop's window of a split page Non-secure faults its "
-    "next cached fetch as SecureFault INVTRAN, B3.15 RXWPC")
+    "next cached fetch as SecureFault INVTRAN, B3.15 RXWPC",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+  rig const r{P{}, true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
   hard_fault_vector(r);
   put_split_loop(r, block_2, str_r1_r0);
   REQUIRE(r.target->mem().write(sau_rnr, 4, 0));
@@ -1899,12 +2090,15 @@ TEST_CASE(
   CHECK((word(r, sfsr) & sfsr_invtran) != 0);
 }
 
-TEST_CASE(
+TEST_CASE_TEMPLATE(
     "a Secure IRQ handler that makes the Non-secure loop's window of a split page Secure faults "
     "its "
-    "next cached fetch after the return, RM0456 5.4.2")
+    "next cached fetch after the return, RM0456 5.4.2",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
+  rig const r{P{}, true, {.tzen = true}, popcorn::arch::fault_policy::enter_handler};
   nonsecure_blocks(r);
   block_bits(r, block_1, false, true);
   std::uint32_t stack = block_1 + 0x1f0;
@@ -1913,7 +2107,7 @@ TEST_CASE(
       == UC_ERR_OK);
   hard_fault_vector(r);
   constexpr address irq_handler = handler_at + 0x80;
-  auto const        seccfgr0    = address_of("GTZC1_MPCBB1", "SECCFGR0");
+  auto const        seccfgr0    = r.address_of("GTZC1_MPCBB1", "SECCFGR0");
   put_code(r, irq_handler, {0x4802, 0x4903, str_r1_r0, bx_lr, nop, nop});
   REQUIRE(r.target->mem().write(irq_handler + 12, 4, seccfgr0));
   REQUIRE(r.target->mem().write(irq_handler + 16, 4, r.peek("GTZC1_MPCBB1", "SECCFGR0") | 4u));
@@ -1936,16 +2130,19 @@ TEST_CASE(
   CHECK(get(r, "r3") == 20);
 }
 
-TEST_CASE(
+TEST_CASE_TEMPLATE(
     "an MPCWM4 store that makes a BKPSRAM sub-region Non-secure holds for the next Secure load "
-    "of a cached loop, RM0456 5.6.8")
+    "of a cached loop, RM0456 5.6.8",
+    P,
+    on_u575,
+    on_h573)
 {
-  rig const r{true};
+  rig const r{P{}, true};
   REQUIRE(r.target->mem().write(backup_ns + 0x20, 4, 0x2020'2020));
-  r.write("GTZC1_TZSC", "TZSC_MPCWM4AR", 2u << 16 | 1u, secure_priv);
+  r.write("GTZC1_TZSC", "MPCWM4AR", 2u << 16 | 1u, secure_priv);
   put_code(r, loop_at, {0x3b01, 0x42a3, 0xd100, str_r1_r0, 0x682a, 0x2b00, 0xd1f8, bkpt});
-  set(r, "r0", address_of("GTZC1_TZSC", "TZSC_MPCWM4ACFGR"));
-  set(r, "r1", bit("GTZC1_TZSC", "TZSC_MPCWM4ACFGR", "SREN"));
+  set(r, "r0", r.address_of("GTZC1_TZSC", "MPCWM4ACFGR"));
+  set(r, "r1", r.bit("GTZC1_TZSC", "MPCWM4ACFGR", "SREN"));
   set(r, "r5", backup_s + 0x20);
   set(r, "r3", 100);
   set(r, "r4", 50);
@@ -1953,7 +2150,7 @@ TEST_CASE(
   CHECK(run.stopped.reason == popcorn::stop_reason::user);
   CHECK(get(r, "r3") == 0);
   CHECK(get(r, "r2") == 0);
-  CHECK((r.peek("GTZC1_TZIC", "SR4") & bit("GTZC1_TZIC", "SR4", "BKPSRAMF")) != 0);
+  CHECK((r.peek("GTZC1_TZIC", "SR4") & r.bit("GTZC1_TZIC", "SR4", "BKPSRAMF")) != 0);
 }
 
 TEST_CASE("RM0481 2.2 and 5: a TZEN=1 STM32H573 builds a model for each GTZC unit, TZEN=0 none")

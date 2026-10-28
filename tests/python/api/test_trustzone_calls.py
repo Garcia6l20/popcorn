@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import struct
-from pathlib import Path
 
 import popcorn
 import pytest
 from popcorn import OptionBytes, ValueKind
 
-ROOT = Path(__file__).parents[3]
-RCC_ELF = ROOT / "tests" / "firmware" / "periph" / "prebuilt" / "rcc_ll.elf"
+from .conftest import TzPart
 
 NONSECURE = 0x2008_0000
 SAU_CTRL = 0xE000_EDD0
@@ -20,9 +18,11 @@ SAU_RBAR = 0xE000_EDDC
 SAU_RLAR = 0xE000_EDE0
 
 
-def secure_core(u575: popcorn.PartDescription) -> popcorn.Machine:
+def secure_core(tz: TzPart) -> popcorn.Machine:
     """A TZEN=1 machine reset to Secure state, with one Non-secure SAU region at NONSECURE."""
-    m = popcorn.Machine(u575, image=popcorn.Image.elf(RCC_ELF), option_bytes=OptionBytes(tzen=True))
+    m = popcorn.Machine(
+        tz.description, image=popcorn.Image.elf(tz.rcc_elf), option_bytes=OptionBytes(tzen=True)
+    )
     m.reset()
     m.mem.u32[SAU_RNR] = 0
     m.mem.u32[SAU_RBAR] = NONSECURE
@@ -32,10 +32,10 @@ def secure_core(u575: popcorn.PartDescription) -> popcorn.Machine:
 
 
 def test_a_call_to_a_non_secure_function_from_secure_state_is_refused_before_it_runs(
-    u575: popcorn.PartDescription,
+    tz: TzPart,
 ) -> None:
     """The refusal comes before anything is posted: the core stays where it was and runs on."""
-    m = secure_core(u575)
+    m = secure_core(tz)
     pc = m.pc
     with pytest.raises(popcorn.ConfigError) as caught:
         asyncio.run(m.call(NONSECURE | 1, returns=ValueKind.I32))
@@ -55,11 +55,13 @@ SECURE_STUB = SECURE_CODE + 0x100
 
 
 def test_one_arena_returns_a_secure_and_a_non_secure_call(
-    u575: popcorn.PartDescription,
+    tz: TzPart,
 ) -> None:
     """A Secure call returns to its sentinel in Non-secure memory through the fetch fault there,
     a Non-secure call needs an arena in Non-secure memory, both on the default arena."""
-    m = popcorn.Machine(u575, image=popcorn.Image.elf(RCC_ELF), option_bytes=OptionBytes(tzen=True))
+    m = popcorn.Machine(
+        tz.description, image=popcorn.Image.elf(tz.rcc_elf), option_bytes=OptionBytes(tzen=True)
+    )
     m.reset()
     m.mem.u32[MPCBB1_SECCFGR0] &= ~(1 << ((NONSECURE_CODE - 0x2000_0000) // 0x200))
     for number, (base, limit) in enumerate(

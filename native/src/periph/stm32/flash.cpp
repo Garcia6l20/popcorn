@@ -7,6 +7,7 @@
 #include "voltage_range.hpp"
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/periph/firewall.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 
 #include <algorithm>
@@ -354,6 +355,134 @@ struct hide_inputs
   std::uint32_t top{};
 };
 
+/**
+ * @brief The memory filter of a flash's closed HDP sectors on a machine without TrustZone,
+ *        installed by the flash model. A load of a closed sector reads zero, a store to it
+ *        reaches the flash model, which refuses it, and a fetch from it is a BusFault. Every
+ *        other memory access and every peripheral access passes.
+ */
+class hide_filter final : public bus_firewall
+{
+public:
+  hide_filter(
+      secure_page_controller const& pages,
+      std::span<region_desc const>  regions,
+      std::string_view              controller,
+      std::uint32_t                 sector)
+      : pages_{pages}, sector_{sector}
+  {
+    for(auto const& region : regions)
+    {
+      if(region.controller == controller)
+      {
+        windows_.push_back({.start = region.start, .size = region.size});
+      }
+    }
+  }
+
+  [[nodiscard]] auto check_peripheral(std::size_t, bus_attrs, arch::memory_op)
+      -> bus_verdict override
+  {
+    return bus_verdict::allow;
+  }
+
+  [[nodiscard]] auto filters_memory() const -> bool override
+  {
+    return true;
+  }
+
+  [[nodiscard]] auto
+      memory_page(address page, std::uint32_t size, address at, bus_attrs, arch::memory_op op)
+          -> page_verdict override
+  {
+    if(window_at(at) == nullptr)
+    {
+      return {};
+    }
+    page_verdict verdict;
+    auto const   step   = std::min(sector_, size);
+    auto const   denied = hidden(at);
+    for(auto part = page; part - page < size; part += step)
+    {
+      auto const closed   = hidden(part);
+      verdict.filter_data = verdict.filter_data or closed;
+      verdict.fetch_each  = verdict.fetch_each or closed != denied;
+    }
+    verdict.deny_fetch = denied;
+    if(verdict.fetch_each and op == arch::memory_op::fetch)
+    {
+      verdict.fetch_window_shift = static_cast<std::uint8_t>(std::countr_zero(step));
+    }
+    return verdict;
+  }
+
+  [[nodiscard]] auto check_memory(address at, std::uint8_t, bus_attrs attrs, arch::memory_op op)
+      -> bus_verdict override
+  {
+    if(op == arch::memory_op::write and attrs.by != initiator::debugger)
+    {
+      return bus_verdict::allow;
+    }
+    return hidden(at) ? bus_verdict::read_zero_write_ignore : bus_verdict::allow;
+  }
+
+  [[nodiscard]] auto allowed_extent(address at, std::uint8_t, bus_attrs attrs, arch::memory_op op)
+      -> memory_extent override
+  {
+    auto const* const found = window_at(at);
+    if(found == nullptr)
+    {
+      std::uint64_t first = 0;
+      std::uint64_t last  = ~address{};
+      for(auto const& w : windows_)
+      {
+        auto const end = std::uint64_t{w.start} + w.size;
+        if(end <= at)
+        {
+          first = std::max(first, end);
+        }
+        else if(w.start > at)
+        {
+          last = std::min<std::uint64_t>(last, w.start - 1u);
+        }
+      }
+      return {.first = static_cast<address>(first), .last = static_cast<address>(last)};
+    }
+    auto const window_last = static_cast<address>(found->start + (found->size - 1u));
+    if(op == arch::memory_op::write and attrs.by != initiator::debugger)
+    {
+      return {.first = found->start, .last = window_last};
+    }
+    auto const unit = std::uint64_t{at} - ((at - found->start) % sector_);
+    return {
+        .first = static_cast<address>(std::max<std::uint64_t>(found->start, unit)),
+        .last  = static_cast<address>(std::min<std::uint64_t>(window_last, unit + sector_ - 1u))};
+  }
+
+private:
+  struct window
+  {
+    address       start{};
+    std::uint32_t size{};
+  };
+
+  [[nodiscard]] auto window_at(address at) const -> window const*
+  {
+    auto const found = std::ranges::find_if(
+        windows_, [at](window const& w) { return at >= w.start and at - w.start < w.size; });
+    return found != windows_.end() ? &*found : nullptr;
+  }
+
+  [[nodiscard]] auto hidden(address at) const -> bool
+  {
+    return window_at(at) != nullptr and pages_.page_rule(at).value_or(page_policy{}).hidden;
+  }
+
+  secure_page_controller const& pages_;
+  std::uint32_t                 sector_;
+  std::vector<window>           windows_;
+};
+
 void drive(irq_line& line, bool level)
 {
   if(level)
@@ -534,6 +663,9 @@ struct u5_flash
   static constexpr bool option_key_needs_unlock = true;
   /** @brief A completed OPTSTRT loads the programmed protection at once. */
   static constexpr bool option_reload_on_start = false;
+  /** @brief The Secure hide protection area lies in a Secure watermark area, RM0456 7.5.3, so
+   * only a TrustZone machine closes it. */
+  static constexpr bool hide_without_trustzone = false;
   /** @brief Clearing ECCD also clears the address and bank it recorded. */
   static constexpr bool ecc_record_clears = false;
   /** @brief Control field the out-of-range page warning names. */
@@ -883,6 +1015,8 @@ struct h5_flash
   static constexpr bool option_key_needs_unlock = false;
   /** @brief A completed OPTSTRT reloads the _CUR registers, RM0481 7.4.3. */
   static constexpr bool option_reload_on_start = true;
+  /** @brief HDPL closes the HDP areas with TZ_STATE 0xC3 too, RM0481 Table 72 note 1. */
+  static constexpr bool hide_without_trustzone = true;
   /** @brief Clearing ECCD clears FLASH_ECCDETR, RM0481 7.9.10. */
   static constexpr bool ecc_record_clears = true;
   /** @brief Control field the out-of-range sector warning names. */
@@ -1367,7 +1501,11 @@ static_assert(flag_matches_roles(
  *   closes it, Table 63: at HDPL 2 from HDPx_STRT to HDPx_END, at HDPL 3 from the lower of the
  *   two to HDPx_END plus the HDPx_EXT sectors of FLASH_HDPEXTR. FLASH_HDPEXTR fields only grow
  *   and ignore writes at HDPL 3, 7.11.18. A closed sector reads zero and refuses every fetch, as
- *   the U5 HDP area does.
+ *   the U5 HDP area does, Table 64.
+ * - HDP without TrustZone, Table 72 note 1: with machine option bytes and TZEN = 0xC3 the HDP
+ *   areas close by HDPL as above. The model installs a memory filter for the flash, so a load of
+ *   a closed sector reads zero and a fetch from it is a BusFault, and a program or erase of it
+ *   sets WRPERR in FLASH_NSSR. The watermark and the block bits take no part there.
  * - ECC, 7.9.10: ECCD and its record are in FLASH_ECCDETR, ADDR_ECC the 128-bit word index in
  *   the bank, and clearing ECCD clears the record. ECCC is in FLASH_ECCCORR.
  * - Latency: RM0481 Table 48 per VOS level, with no LPM. No oscillator is held for programming.
@@ -1514,6 +1652,7 @@ private:
   [[nodiscard]] auto bank_base(std::uint32_t at) const -> std::uint32_t;
   [[nodiscard]] auto bank_start(std::uint32_t bank) const -> std::uint32_t;
   [[nodiscard]] auto rule_of(std::uint32_t at) const -> page_policy;
+  [[nodiscard]] auto pages_ruled() const -> bool;
   [[nodiscard]] auto block_bit(std::span<std::uint32_t const> words, std::uint32_t at) const
       -> bool;
   [[nodiscard]] auto
@@ -1573,6 +1712,7 @@ private:
   bool                                                              events_linked_{};
   mutable temporal_isolation const*                                 isolation_{};
   mutable bool                                                      isolation_resolved_{};
+  std::unique_ptr<hide_filter>                                      hide_filter_;
 };
 
 template <typename Traits>
@@ -1802,6 +1942,12 @@ flash_model<Traits>::flash_model(
     option_words_.emplace_back(reg(name).offset, value);
   }
   swapped_ = options_.option_bytes->swap_bank;
+  if(Traits::hide_without_trustzone and not ctx.trustzone)
+  {
+    hide_filter_ =
+        std::make_unique<hide_filter>(*this, ctx.part.regions, desc.name, Traits::page_bytes);
+    ctx.install_firewall(*hide_filter_);
+  }
 }
 
 template <typename Traits>
@@ -2133,6 +2279,9 @@ template <typename Traits> void flash_model<Traits>::reset(register_file& regs, 
   if(secure_line_ != nullptr)
   {
     secure_line_->lower();
+  }
+  if(pages_ruled())
+  {
     ctx_.services.memory_policy_changed();
   }
   ctx_.nmi.lower();
@@ -2537,9 +2686,7 @@ auto flash_model<Traits>::page_secure(address at) const -> std::optional<bool>
 template <typename Traits>
 auto flash_model<Traits>::page_rule(address at) const -> std::optional<page_policy>
 {
-  if(not ctx_.trustzone
-     or storage_ == nullptr
-     or option_words_.size() != Traits::option_registers.size())
+  if(not pages_ruled() or storage_ == nullptr)
   {
     return std::nullopt;
   }
@@ -2553,10 +2700,20 @@ auto flash_model<Traits>::page_rule(address at) const -> std::optional<page_poli
   return rule_of(physical(*region, at));
 }
 
+template <typename Traits> auto flash_model<Traits>::pages_ruled() const -> bool
+{
+  return (ctx_.trustzone or Traits::hide_without_trustzone)
+     and option_words_.size() == Traits::option_registers.size();
+}
+
 template <typename Traits> auto flash_model<Traits>::rule_of(std::uint32_t at) const -> page_policy
 {
-  page_policy policy{
-      .secure = block_bit(secure_blocks_, at), .privileged = block_bit(privileged_blocks_, at)};
+  page_policy policy{};
+  if(ctx_.trustzone)
+  {
+    policy = {
+        .secure = block_bit(secure_blocks_, at), .privileged = block_bit(privileged_blocks_, at)};
+  }
   if(option_words_.size() != Traits::option_registers.size())
   {
     return policy;
@@ -2570,7 +2727,7 @@ template <typename Traits> auto flash_model<Traits>::rule_of(std::uint32_t at) c
   auto const extension =
       unit_.find(bank == 0 ? unit_role::hide_extension1 : unit_role::hide_extension2);
   auto const* const isolation = this->isolation();
-  policy.secure               = policy.secure or watermarked;
+  policy.secure               = policy.secure or (ctx_.trustzone and watermarked);
   policy.hidden               = Traits::hidden(
       {.watermark       = first,
        .area            = option_words_[Traits::hide_words[bank]].second,
@@ -2952,7 +3109,7 @@ void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
 {
   auto const [addr, size, value, written, dma] = one;
   auto const secure                            = (attrs & held_secure) != 0;
-  if((ctx_.trustzone and not writable(addr, 1, secure, (attrs & held_privileged) != 0))
+  if((pages_ruled() and not writable(addr, 1, secure, (attrs & held_privileged) != 0))
      or wrp_protected(addr, 1))
   {
     fail(secure, set_role::protection_error);
@@ -3146,7 +3303,7 @@ template <typename Traits> void flash_model<Traits>::start_erase(bool secure, st
     target = bank_start(command.bank);
     length = bank_size;
   }
-  if((ctx_.trustzone and not writable(target, length, secure, access_.privileged))
+  if((pages_ruled() and not writable(target, length, secure, access_.privileged))
      or wrp_protected(target, length))
   {
     fail(secure, set_role::protection_error);
@@ -3331,6 +3488,10 @@ template <typename Traits> void flash_model<Traits>::load(std::span<std::byte co
   else
   {
     base::load(in);
+    if(pages_ruled())
+    {
+      ctx_.services.memory_policy_changed();
+    }
   }
   option_changed_.clear();
   latency_logged_.clear();

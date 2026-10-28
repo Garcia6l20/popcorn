@@ -12,6 +12,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cstdint>
@@ -1153,18 +1154,6 @@ TEST_CASE(
   CHECK_FALSE(policy_at(r, 0x0800'0000 + 2 * sector_bytes).hidden);
 }
 
-TEST_CASE("RM0481 14.5.2: an SBS RCC reset keeps HDPL, a system reset returns it to HDPL1")
-{
-  popcorn::testing::h573_secure_rig const r{firmware};
-  r.write("SBS", "SBS_HDPLCR", 0x6a, true);
-  REQUIRE(r.read("SBS", "SBS_HDPLSR", true) == 0x8a);
-  popcorn::testing::rcc_reset_pulse(r.f, "RCC_APB3RSTR", "SBSRST");
-  CHECK(r.read("SBS", "SBS_HDPLSR", true) == 0x8a);
-  r.f.target->reset();
-  CHECK(r.read("SBS", "SBS_HDPLSR", true) == 0x51);
-  CHECK(r.read("SBS", "SBS_HDPLCR", true) == 0xb4);
-}
-
 TEST_CASE(
     "an SBS_HDPLCR store inside a cached Secure loop closes the HDP area for the loop's next "
     "load of a hidden sector, RM0481 7.6.2, a 0xB4 store leaves it open")
@@ -1341,17 +1330,17 @@ struct secure_flash
 
   void write(std::string_view reg, std::uint32_t value, bus_attrs attrs) const
   {
-    REQUIRE(bus().write(r.at("FLASH", reg), 4, value, attrs).has_value());
+    REQUIRE(bus().write(r.alias("FLASH", reg, attrs.secure), 4, value, attrs).has_value());
   }
 
   void write(std::string_view peripheral, std::string_view reg, std::uint32_t value) const
   {
-    REQUIRE(bus().write(r.at(peripheral, reg), 4, value, secure_priv).has_value());
+    REQUIRE(bus().write(r.alias(peripheral, reg, true), 4, value, secure_priv).has_value());
   }
 
   [[nodiscard]] auto read(std::string_view reg, bus_attrs attrs) const -> std::uint32_t
   {
-    auto const value = bus().read(r.at("FLASH", reg), 4, attrs);
+    auto const value = bus().read(r.alias("FLASH", reg, attrs.secure), 4, attrs);
     REQUIRE(value.has_value());
     return *value;
   }
@@ -1480,6 +1469,855 @@ TEST_CASE(
   s.write("FLASH_SECCR", 0, secure_priv);
   s.write("FLASH_NSCCR", ~0u, nonsecure_priv);
   CHECK(s.peek("FLASH_NSSR") == 0);
+}
+
+TEST_CASE(
+    "RM0481 7.6.1 Table 60: a program through each register set lands only on a sector of its "
+    "security, SECWM1 sectors 0 to 3")
+{
+  secure_flash const s;
+  auto const         pg_s     = s.bit("FLASH_SECCR", "PG");
+  auto const         pg_ns    = s.bit("FLASH_NSCR", "PG");
+  auto const         bsy_s    = s.bit("FLASH_SECSR", "BSY");
+  auto const         wrperr_s = s.bit("FLASH_SECSR", "WRPERR");
+  auto const         wrperr   = s.bit("FLASH_NSSR", "WRPERR");
+  s.unlock(true);
+  s.unlock(false);
+  s.write("FLASH_SECCR", pg_s | s.bit("FLASH_SECCR", "EOPIE"), secure_priv);
+  s.store(unused_secure, {1, 2, 3, 4}, secure_priv);
+  CHECK((s.peek("FLASH_SECSR") & bsy_s) != 0);
+  CHECK((s.peek("FLASH_NSSR") & s.bit("FLASH_NSSR", "BSY")) != 0);
+  s.settle();
+  CHECK(s.word(unused_secure + 12) == 4);
+  CHECK(s.peek("FLASH_SECSR") == s.bit("FLASH_SECSR", "EOP"));
+  CHECK(s.peek("FLASH_NSSR") == 0);
+  CHECK(s.pending(flash_s_irq));
+  CHECK_FALSE(s.pending(flash_irq));
+  CHECK_FALSE(s.tzic("FLASHF"));
+  s.clear_flags(true);
+
+  s.store(flash_s + 8 * sector_bytes, {5, 6, 7, 8}, secure_priv);
+  s.settle();
+  CHECK(s.word(flash_ns + 8 * sector_bytes) == 0xffff'ffff);
+  CHECK((s.peek("FLASH_SECSR") & wrperr_s) != 0);
+  CHECK((s.peek("FLASH_NSSR") & wrperr) == 0);
+  CHECK(s.tzic("FLASHF"));
+  s.clear_events();
+  s.write("FLASH_SECCR", 0, secure_priv);
+  s.clear_flags(true);
+
+  s.write("FLASH_NSCR", pg_ns, nonsecure_priv);
+  s.store(flash_ns + 8 * sector_bytes, {5, 6, 7, 8}, nonsecure_priv);
+  s.settle();
+  CHECK(s.word(flash_ns + 8 * sector_bytes + 4) == 6);
+  CHECK(s.peek("FLASH_NSSR") == s.bit("FLASH_NSSR", "EOP"));
+  CHECK(s.peek("FLASH_SECSR") == 0);
+  CHECK_FALSE(s.tzic("FLASHF"));
+  s.clear_flags(false);
+
+  s.store(unused_secure - flash_s + flash_ns + 16, {9, 10, 11, 12}, nonsecure_priv);
+  s.settle();
+  CHECK(s.word(unused_secure + 16) == 0xffff'ffff);
+  CHECK((s.peek("FLASH_NSSR") & wrperr) != 0);
+  CHECK((s.peek("FLASH_SECSR") & wrperr_s) == 0);
+  CHECK(s.tzic("FLASHF"));
+}
+
+TEST_CASE(
+    "RM0481 7.6.1 Table 60: the straddling erase, sector 3 through FLASH_SECCR and sector 4 "
+    "through FLASH_NSCR, erases both, and each set refuses the other's sector")
+{
+  secure_flash const s;
+  for(address const at : {flash_ns + 3 * sector_bytes, flash_ns + 4 * sector_bytes})
+  {
+    REQUIRE(s.r.f.target->mem().write(at, 4, 0));
+  }
+  auto const erase_s = [&s](std::uint32_t sector) {
+    return s.bit("FLASH_SECCR", "SER")
+         | s.sector_field("FLASH_SECCR", sector)
+         | s.bit("FLASH_SECCR", "STRT");
+  };
+  auto const erase_ns = [&s](std::uint32_t sector) {
+    return s.bit("FLASH_NSCR", "SER")
+         | s.sector_field("FLASH_NSCR", sector)
+         | s.bit("FLASH_NSCR", "STRT");
+  };
+  s.unlock(true);
+  s.unlock(false);
+  s.write("FLASH_NSCR", erase_ns(3), nonsecure_priv);
+  CHECK((s.peek("FLASH_NSSR") & s.bit("FLASH_NSSR", "WRPERR")) != 0);
+  CHECK((s.peek("FLASH_NSSR") & s.bit("FLASH_NSSR", "BSY")) == 0);
+  CHECK((s.peek("FLASH_NSCR") & s.bit("FLASH_NSCR", "STRT")) == 0);
+  CHECK(s.tzic("FLASHF"));
+  s.clear_events();
+  s.write("FLASH_SECCR", erase_s(4), secure_priv);
+  CHECK((s.peek("FLASH_SECSR") & s.bit("FLASH_SECSR", "WRPERR")) != 0);
+  CHECK(s.tzic("FLASHF"));
+  s.clear_flags(false);
+  s.clear_flags(true);
+
+  s.write("FLASH_SECCR", erase_s(3), secure_priv);
+  s.settle();
+  s.write("FLASH_SECCR", 0, secure_priv);
+  s.write("FLASH_NSCR", erase_ns(4), nonsecure_priv);
+  s.settle();
+  CHECK(s.word(flash_ns + 3 * sector_bytes) == 0xffff'ffff);
+  CHECK(s.word(flash_ns + 4 * sector_bytes) == 0xffff'ffff);
+  CHECK(s.peek("FLASH_NSSR") == s.bit("FLASH_NSSR", "EOP"));
+  CHECK(s.peek("FLASH_SECSR") == s.bit("FLASH_SECSR", "EOP"));
+}
+
+TEST_CASE(
+    "RM0481 7.6.1 Table 61: a bank erase over Secure and Non-secure sectors is refused whole by "
+    "either set, a bank erase of an all-Secure bank runs")
+{
+  {
+    secure_flash const s;
+    REQUIRE(s.r.f.target->mem().write(flash_ns + 5 * sector_bytes, 4, 0));
+    s.unlock(true);
+    s.unlock(false);
+    s.write("FLASH_SECCR", s.bit("FLASH_SECCR", "BER") | s.bit("FLASH_SECCR", "STRT"), secure_priv);
+    CHECK((s.peek("FLASH_SECSR") & s.bit("FLASH_SECSR", "WRPERR")) != 0);
+    CHECK(s.tzic("FLASHF"));
+    s.clear_events();
+    s.write("FLASH_NSCR", s.bit("FLASH_NSCR", "BER") | s.bit("FLASH_NSCR", "STRT"), nonsecure_priv);
+    CHECK((s.peek("FLASH_NSSR") & s.bit("FLASH_NSSR", "WRPERR")) != 0);
+    CHECK(s.tzic("FLASHF"));
+    CHECK(s.word(flash_ns + 5 * sector_bytes) == 0);
+  }
+  {
+    auto wanted   = four_secure_sectors();
+    wanted.secwm2 = stm32::page_range{.first = 0, .last = 127};
+    secure_flash const s{wanted};
+    REQUIRE(s.r.f.target->mem().write(bank2 + 5 * sector_bytes, 4, 0));
+    s.unlock(true);
+    s.write(
+        "FLASH_SECCR",
+        s.bit("FLASH_SECCR", "BER") | s.bit("FLASH_SECCR", "BKSEL") | s.bit("FLASH_SECCR", "STRT"),
+        secure_priv);
+    CHECK((s.peek("FLASH_SECSR") & s.bit("FLASH_SECSR", "BSY")) != 0);
+    s.settle(std::chrono::microseconds{300'000});
+    CHECK(s.word(bank2 + 5 * sector_bytes) == 0xffff'ffff);
+    CHECK(s.peek("FLASH_SECSR") == s.bit("FLASH_SECSR", "EOP"));
+    CHECK_FALSE(s.tzic("FLASHF"));
+  }
+  {
+    auto wanted   = four_secure_sectors();
+    wanted.secwm2 = stm32::page_range{.first = 120, .last = 127};
+    secure_flash const s{wanted};
+    REQUIRE(s.r.f.target->mem().write(bank2 + 125 * sector_bytes, 4, 0));
+    s.unlock(false);
+    s.write(
+        "FLASH_NSCR",
+        s.bit("FLASH_NSCR", "BER") | s.bit("FLASH_NSCR", "BKSEL") | s.bit("FLASH_NSCR", "STRT"),
+        nonsecure_priv);
+    CHECK((s.peek("FLASH_NSSR") & s.bit("FLASH_NSSR", "WRPERR")) != 0);
+    CHECK((s.peek("FLASH_NSSR") & s.bit("FLASH_NSSR", "BSY")) == 0);
+    CHECK(s.tzic("FLASHF"));
+    s.settle(std::chrono::microseconds{300'000});
+    CHECK(s.word(bank2 + 125 * sector_bytes) == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0481 7.6.5 Table 70: a Non-secure access to FLASH_SECCR is RAZ/WI with FLASH_REGF, SPRIV "
+    "and NSPRIV make their set RAZ/WI to unprivileged accesses")
+{
+  secure_flash const s;
+  auto const         lock_s = s.bit("FLASH_SECCR", "LOCK");
+  auto const         lock   = s.bit("FLASH_NSCR", "LOCK");
+  CHECK(s.read("FLASH_SECCR", nonsecure_priv) == 0);
+  CHECK(s.tzic("FLASH_REGF"));
+  s.clear_events();
+  s.write("FLASH_SECKEYR", secure_key1, nonsecure_priv);
+  s.write("FLASH_SECKEYR", secure_key2, nonsecure_priv);
+  CHECK((s.peek("FLASH_SECCR") & lock_s) != 0);
+  CHECK(s.tzic("FLASH_REGF"));
+  s.clear_events();
+  CHECK(s.read("FLASH_SECCR", secure_unpriv) == lock_s);
+  CHECK(s.read("FLASH_NSCR", nonsecure_unpriv) == lock);
+  CHECK_FALSE(s.tzic("FLASH_REGF"));
+
+  auto const spriv  = s.bit("FLASH_PRIVCFGR", "SPRIV");
+  auto const nspriv = s.bit("FLASH_PRIVCFGR", "NSPRIV");
+  s.write("FLASH_PRIVCFGR", spriv | nspriv, nonsecure_unpriv);
+  CHECK(s.peek("FLASH_PRIVCFGR") == 0);
+  s.write("FLASH_PRIVCFGR", spriv | nspriv, nonsecure_priv);
+  CHECK(s.peek("FLASH_PRIVCFGR") == nspriv);
+  s.write("FLASH_PRIVCFGR", spriv | nspriv, secure_priv);
+  CHECK(s.peek("FLASH_PRIVCFGR") == (spriv | nspriv));
+  CHECK(s.read("FLASH_PRIVCFGR", nonsecure_unpriv) == (spriv | nspriv));
+  CHECK(s.read("FLASH_SECCR", secure_unpriv) == 0);
+  CHECK(s.read("FLASH_NSCR", nonsecure_unpriv) == 0);
+  CHECK(s.read("FLASH_SECCR", secure_priv) == lock_s);
+  s.write("FLASH_NSKEYR", secure_key1, nonsecure_unpriv);
+  s.write("FLASH_NSKEYR", secure_key2, nonsecure_unpriv);
+  CHECK((s.peek("FLASH_NSCR") & lock) != 0);
+  CHECK_FALSE(s.tzic("FLASH_REGF"));
+}
+
+TEST_CASE(
+    "RM0481 7.6.3 Table 65 and 7.6.4 Table 68: FLASH_SECBB1R1 takes a Secure write, from an "
+    "unprivileged one only the unprivileged sectors, FLASH_PRIVBB1R1 a privileged one, from "
+    "Non-secure only Non-secure sectors")
+{
+  secure_flash const s;
+  s.write("FLASH_SECBB1R1", 0xf0, nonsecure_priv);
+  CHECK(s.peek("FLASH_SECBB1R1") == 0);
+  CHECK(s.tzic("FLASH_REGF"));
+  CHECK(s.read("FLASH_SECBB1R1", nonsecure_unpriv) == 0);
+  s.clear_events();
+  s.write("FLASH_PRIVBB1R1", 0xff, nonsecure_unpriv);
+  CHECK(s.peek("FLASH_PRIVBB1R1") == 0);
+  s.write("FLASH_PRIVBB1R1", 0xff, nonsecure_priv);
+  CHECK(s.peek("FLASH_PRIVBB1R1") == 0xf0);
+  s.write("FLASH_PRIVBB1R1", 0x30, secure_priv);
+  CHECK(s.peek("FLASH_PRIVBB1R1") == 0x30);
+  s.write("FLASH_SECBB1R1", 0x330, secure_unpriv);
+  CHECK(s.peek("FLASH_SECBB1R1") == 0x300);
+  s.write("FLASH_SECBB1R1", 0x330, secure_priv);
+  CHECK(s.peek("FLASH_SECBB1R1") == 0x330);
+  CHECK(s.read("FLASH_SECBB1R1", nonsecure_unpriv) == 0x330);
+  s.write("FLASH_PRIVBB1R1", 0x00, nonsecure_priv);
+  CHECK(s.peek("FLASH_PRIVBB1R1") == 0x30);
+  s.write("FLASH_PRIVBB2R2", ~0u, nonsecure_priv);
+  CHECK(s.peek("FLASH_PRIVBB2R2") == ~0u);
+  CHECK_FALSE(s.tzic("FLASH_REGF"));
+}
+
+struct sbs_bus
+{
+  secure_flash const& s;
+
+  void write(std::string_view reg, std::uint32_t value, bus_attrs attrs) const
+  {
+    REQUIRE(s.bus().write(s.r.at("SBS", reg), 4, value, attrs).has_value());
+  }
+
+  [[nodiscard]] auto read(std::string_view reg, bus_attrs attrs) const -> std::uint32_t
+  {
+    auto const value = s.bus().read(s.r.at("SBS", reg), 4, attrs);
+    REQUIRE(value.has_value());
+    return *value;
+  }
+
+  [[nodiscard]] auto peek(std::string_view reg) const -> std::uint32_t
+  {
+    return s.r.peek("SBS", reg);
+  }
+
+  [[nodiscard]] auto bit(std::string_view reg, std::string_view field) const -> std::uint32_t
+  {
+    return s.r.bit("SBS", reg, field);
+  }
+
+  [[nodiscard]] auto flips(std::string_view reg, std::string_view field, bus_attrs attrs) const
+      -> bool
+  {
+    auto const before = peek(reg);
+    write(reg, before ^ bit(reg, field), attrs);
+    auto const moved = peek(reg) != before;
+    write(reg, before, secure_priv);
+    return moved;
+  }
+
+  [[nodiscard]] auto raised() const -> bool
+  {
+    auto const flag = s.tzic("SBSF");
+    s.clear_events();
+    return flag;
+  }
+
+  void rcc(std::string_view reg, std::uint32_t value, bus_attrs attrs) const
+  {
+    REQUIRE(s.bus().write(s.r.alias("RCC", reg, attrs.secure), 4, value, attrs).has_value());
+  }
+
+  [[nodiscard]] auto reset_bit() const -> std::uint32_t
+  {
+    return s.r.bit("RCC", "RCC_APB3RSTR", "SBSRST");
+  }
+
+  [[nodiscard]] auto pulse(bus_attrs attrs) const -> bool
+  {
+    rcc("RCC_APB3RSTR", reset_bit(), attrs);
+    auto const held = (s.r.peek("RCC", "RCC_APB3RSTR") & reset_bit()) != 0;
+    rcc("RCC_APB3RSTR", 0, attrs);
+    return held;
+  }
+};
+
+TEST_CASE(
+    "RM0481 14.5.8: SBS_SECCFGR is always Secure, RAZ/WI to Non-secure, and FPUSEC takes "
+    "privileged writes only")
+{
+  secure_flash const s;
+  sbs_bus const      sbs{s};
+  auto const         sbssec = sbs.bit("SBS_SECCFGR", "SBSSEC");
+  auto const         fpusec = sbs.bit("SBS_SECCFGR", "FPUSEC");
+  s.clear_events();
+  sbs.write("SBS_SECCFGR", sbssec, nonsecure_priv);
+  CHECK(sbs.peek("SBS_SECCFGR") == 0);
+  CHECK(sbs.raised());
+  sbs.write("SBS_SECCFGR", sbssec | fpusec, secure_unpriv);
+  CHECK(sbs.peek("SBS_SECCFGR") == sbssec);
+  CHECK_FALSE(sbs.raised());
+  sbs.write("SBS_SECCFGR", sbssec | fpusec, secure_priv);
+  CHECK(sbs.peek("SBS_SECCFGR") == (sbssec | fpusec));
+  CHECK(sbs.read("SBS_SECCFGR", nonsecure_priv) == 0);
+  CHECK(sbs.raised());
+  CHECK(sbs.read("SBS_SECCFGR", nonsecure_unpriv) == 0);
+  CHECK(sbs.raised());
+  CHECK(sbs.read("SBS_SECCFGR", secure_unpriv) == (sbssec | fpusec));
+  CHECK_FALSE(sbs.raised());
+}
+
+TEST_CASE(
+    "RM0481 14.5.6, 14.5.7, 14.5.17 to 14.5.19 and 5.7.8: SBS_RSSCMDR is Secure, SBS_EPOCHSELCR, "
+    "SBS_CSLCKR and SBS_ECCNMIR Secure and privileged, SBS_CNSLCKR privileged, SBS_PMCR BOOSTEN "
+    "open while ADC12 is Non-secure, a Non-secure access to a Secure one raises SBSF")
+{
+  secure_flash const s;
+  sbs_bus const      sbs{s};
+  struct row
+  {
+    std::string_view reg;
+    std::string_view field;
+    bool             secure;
+    bool             privileged;
+  };
+  for(auto const& [reg, field, secure, privileged] : {
+          row{"SBS_RSSCMDR",    "RSSCMD",         true,  false},
+          row{"SBS_EPOCHSELCR", "EPOCH_SEL",      true,  true },
+          row{"SBS_CSLCKR",     "LOCKSMPU",       true,  true },
+          row{"SBS_ECCNMIR",    "ECCNMI_MASK_EN", true,  true },
+          row{"SBS_CNSLCKR",    "LOCKNSMPU",      false, true },
+          row{"SBS_PMCR",       "BOOSTEN",        false, false},
+  })
+  {
+    CAPTURE(reg);
+    s.clear_events();
+    CHECK(sbs.flips(reg, field, secure_priv));
+    CHECK_FALSE(sbs.raised());
+    CHECK(sbs.flips(reg, field, nonsecure_priv) == not secure);
+    CHECK(sbs.raised() == secure);
+    CHECK(sbs.flips(reg, field, secure_unpriv) == not privileged);
+    CHECK_FALSE(sbs.raised());
+    CHECK(sbs.flips(reg, field, nonsecure_unpriv) == (not secure and not privileged));
+    CHECK(sbs.raised() == secure);
+    sbs.write(reg, sbs.bit(reg, field), secure_priv);
+    CHECK((sbs.read(reg, nonsecure_priv) != 0) == not secure);
+    CHECK(sbs.raised() == secure);
+    CHECK((sbs.read(reg, secure_unpriv) != 0) == not privileged);
+    CHECK_FALSE(sbs.raised());
+  }
+}
+
+TEST_CASE(
+    "RM0481 14.5.8 to 14.5.16 and 5.7.8: FPUSEC makes SBS_FPUIMR Secure, SBSSEC the SBS_MESR "
+    "group and CLASSBSEC SBS_CFGR2, SBS_FPUIMR is privileged, SBSF follows the SEC bits")
+{
+  secure_flash const s;
+  sbs_bus const      sbs{s};
+  s.clear_events();
+  CHECK(sbs.flips("SBS_FPUIMR", "FPU_IE", nonsecure_priv));
+  CHECK_FALSE(sbs.flips("SBS_FPUIMR", "FPU_IE", nonsecure_unpriv));
+  CHECK(sbs.flips("SBS_CCSWCR", "SW_ANSRC1", nonsecure_unpriv));
+  CHECK(sbs.read("SBS_CCVALR", nonsecure_unpriv) != 0);
+  CHECK_FALSE(sbs.raised());
+  sbs.write("SBS_SECCFGR", sbs.bit("SBS_SECCFGR", "FPUSEC"), secure_priv);
+  CHECK_FALSE(sbs.flips("SBS_FPUIMR", "FPU_IE", nonsecure_priv));
+  CHECK(sbs.raised());
+  CHECK(sbs.read("SBS_FPUIMR", nonsecure_priv) == 0);
+  CHECK(sbs.raised());
+  CHECK(sbs.flips("SBS_FPUIMR", "FPU_IE", secure_priv));
+  CHECK_FALSE(sbs.flips("SBS_FPUIMR", "FPU_IE", secure_unpriv));
+  CHECK(sbs.flips("SBS_CCSWCR", "SW_ANSRC1", nonsecure_unpriv));
+  CHECK_FALSE(sbs.raised());
+  sbs.write("SBS_SECCFGR", sbs.bit("SBS_SECCFGR", "SBSSEC"), secure_priv);
+  CHECK_FALSE(sbs.flips("SBS_CCSWCR", "SW_ANSRC1", nonsecure_priv));
+  CHECK(sbs.raised());
+  CHECK_FALSE(sbs.flips("SBS_CCCSR", "EN1", nonsecure_priv));
+  CHECK(sbs.raised());
+  CHECK(sbs.read("SBS_CCVALR", nonsecure_priv) == 0);
+  CHECK(sbs.raised());
+  CHECK(sbs.read("SBS_CCSWCR", nonsecure_priv) == 0);
+  CHECK(sbs.raised());
+  CHECK(sbs.flips("SBS_CCSWCR", "SW_ANSRC1", secure_unpriv));
+  CHECK(sbs.read("SBS_CCVALR", secure_unpriv) != 0);
+  CHECK(sbs.read("SBS_CFGR2", nonsecure_priv) == 0);
+  sbs.write("SBS_CFGR2", sbs.bit("SBS_CFGR2", "CLL"), nonsecure_priv);
+  CHECK(sbs.peek("SBS_CFGR2") == 1);
+  CHECK_FALSE(sbs.raised());
+  sbs.write("SBS_SECCFGR", sbs.bit("SBS_SECCFGR", "CLASSBSEC"), secure_priv);
+  CHECK(sbs.flips("SBS_CFGR2", "PVDL", nonsecure_priv) == false);
+  CHECK(sbs.raised());
+  CHECK(sbs.read("SBS_CFGR2", nonsecure_priv) == 0);
+  CHECK(sbs.raised());
+  CHECK(sbs.read("SBS_CFGR2", secure_unpriv) == 1);
+  CHECK(sbs.flips("SBS_PMCR", "BOOSTEN", nonsecure_priv));
+  CHECK_FALSE(sbs.raised());
+}
+
+TEST_CASE(
+    "RM0481 14.5.4 and 14.5.5: SBS_DBGCR and SBS_DBGLOCKR take accesses at HDPL1 and are RAZ/WI "
+    "above it")
+{
+  secure_flash const s;
+  sbs_bus const      sbs{s};
+  sbs.write("SBS_DBGCR", 0xb4, secure_priv);
+  CHECK(sbs.peek("SBS_DBGCR") == 0xb4);
+  CHECK(sbs.read("SBS_DBGCR", nonsecure_unpriv) == 0xb4);
+  CHECK(sbs.read("SBS_DBGLOCKR", secure_priv) == 0xb4);
+  sbs.write("SBS_HDPLCR", 0x6a, secure_priv);
+  REQUIRE(sbs.peek("SBS_HDPLSR") == 0x8a);
+  CHECK(sbs.read("SBS_DBGCR", secure_priv) == 0);
+  CHECK(sbs.read("SBS_DBGLOCKR", secure_priv) == 0);
+  sbs.write("SBS_DBGCR", 0xb4b4, secure_priv);
+  sbs.write("SBS_DBGLOCKR", 0xc3, secure_priv);
+  CHECK(sbs.peek("SBS_DBGCR") == 0xb4);
+  CHECK(sbs.peek("SBS_DBGLOCKR") == 0xb4);
+  CHECK_FALSE(sbs.raised());
+}
+
+TEST_CASE(
+    "the SVD SBSRST pulse keeps HDPL and the security, lock, Class B, debug and RSS command "
+    "registers by the model's rule and restores the others, a system reset restores all but "
+    "SBS_RSSCMDR, a power-on reset every one")
+{
+  secure_flash const s;
+  sbs_bus const      sbs{s};
+  struct kept
+  {
+    std::string_view reg;
+    std::uint32_t    value;
+    std::uint32_t    reset;
+  };
+  std::array const pulse_kept{
+      kept{"SBS_SECCFGR", sbs.bit("SBS_SECCFGR", "CLASSBSEC"), 0},
+      kept{"SBS_CSLCKR", sbs.bit("SBS_CSLCKR", "LOCKSAU"), 0},
+      kept{"SBS_CNSLCKR", sbs.bit("SBS_CNSLCKR", "LOCKNSMPU"), 0},
+      kept{"SBS_CFGR2", sbs.bit("SBS_CFGR2", "CLL"), 0},
+      kept{"SBS_DBGCR", 0xb4, 0},
+      kept{"SBS_DBGLOCKR", 0xc3, 0xb4},
+  };
+  for(auto const& [reg, value, reset] : pulse_kept)
+  {
+    sbs.write(reg, value, secure_priv);
+    REQUIRE(sbs.peek(reg) == value);
+  }
+  sbs.write("SBS_RSSCMDR", 1, secure_priv);
+  sbs.write("SBS_HDPLCR", 0x6a, secure_priv);
+  sbs.write("SBS_FPUIMR", 0, secure_priv);
+  sbs.write("SBS_EPOCHSELCR", 1, secure_priv);
+  REQUIRE(sbs.peek("SBS_FPUIMR") == 0);
+  REQUIRE(sbs.peek("SBS_EPOCHSELCR") == 1);
+  CHECK(sbs.pulse(secure_priv));
+  CHECK(sbs.peek("SBS_HDPLSR") == 0x8a);
+  for(auto const& [reg, value, reset] : pulse_kept)
+  {
+    CAPTURE(reg);
+    CHECK(sbs.peek(reg) == value);
+  }
+  CHECK(sbs.peek("SBS_RSSCMDR") == 1);
+  CHECK(sbs.peek("SBS_FPUIMR") == 0x1f);
+  CHECK(sbs.peek("SBS_EPOCHSELCR") == 0);
+  s.r.f.target->reset(popcorn::reset_kind::software);
+  CHECK(sbs.peek("SBS_HDPLSR") == 0x51);
+  CHECK(sbs.peek("SBS_HDPLCR") == 0xb4);
+  for(auto const& [reg, value, reset] : pulse_kept)
+  {
+    CAPTURE(reg);
+    CHECK(sbs.peek(reg) == reset);
+  }
+  CHECK(sbs.peek("SBS_RSSCMDR") == 1);
+  s.r.f.target->reset();
+  CHECK(sbs.peek("SBS_RSSCMDR") == 0);
+}
+
+TEST_CASE(
+    "RM0481 14.5.8 and 11.5.1: SBSSEC makes RCC SBSRST and SBSEN Secure, a Non-secure SBSRST "
+    "pulse with SBSSEC set leaves SBS_SECCFGR, SBS_CSLCKR and SBS_FPUIMR")
+{
+  secure_flash const s;
+  sbs_bus const      sbs{s};
+  auto const         sbssec = sbs.bit("SBS_SECCFGR", "SBSSEC");
+  auto const         lock   = sbs.bit("SBS_CSLCKR", "LOCKSAU");
+  auto const         enable = s.r.bit("RCC", "RCC_APB3ENR", "SBSEN");
+  auto const         clock  = [&] { return s.r.peek("RCC", "RCC_APB3ENR") & enable; };
+  sbs.write("SBS_SECCFGR", sbssec, secure_priv);
+  sbs.write("SBS_CSLCKR", lock, secure_priv);
+  sbs.write("SBS_FPUIMR", 0, secure_priv);
+  CHECK_FALSE(sbs.pulse(nonsecure_priv));
+  CHECK(sbs.peek("SBS_SECCFGR") == sbssec);
+  CHECK(sbs.peek("SBS_CSLCKR") == lock);
+  CHECK(sbs.peek("SBS_FPUIMR") == 0);
+  auto const before = clock();
+  sbs.rcc("RCC_APB3ENR", s.r.peek("RCC", "RCC_APB3ENR") ^ enable, nonsecure_priv);
+  CHECK(clock() == before);
+  sbs.rcc("RCC_APB3ENR", s.r.peek("RCC", "RCC_APB3ENR") ^ enable, secure_priv);
+  CHECK(clock() != before);
+  sbs.write("SBS_SECCFGR", 0, secure_priv);
+  sbs.rcc("RCC_APB3ENR", s.r.peek("RCC", "RCC_APB3ENR") ^ enable, nonsecure_priv);
+  CHECK(clock() == before);
+  CHECK(sbs.pulse(nonsecure_priv));
+  CHECK(sbs.peek("SBS_FPUIMR") == 0x1f);
+  CHECK(sbs.peek("SBS_CSLCKR") == lock);
+}
+
+TEST_CASE(
+    "an SBS held by the SVD SBSRST raises SBSF of RM0481 5.7.8 on a Non-secure write of "
+    "SBS_SECCFGR, as the U5 SYSCFG")
+{
+  secure_flash const s;
+  sbs_bus const      sbs{s};
+  auto const         sbssec = sbs.bit("SBS_SECCFGR", "SBSSEC");
+  s.clear_events();
+  sbs.rcc("RCC_APB3RSTR", sbs.reset_bit(), secure_priv);
+  REQUIRE((s.r.peek("RCC", "RCC_APB3RSTR") & sbs.reset_bit()) != 0);
+  sbs.write("SBS_SECCFGR", sbssec, nonsecure_priv);
+  CHECK(sbs.peek("SBS_SECCFGR") == 0);
+  CHECK(sbs.raised());
+  sbs.write("SBS_SECCFGR", sbssec, secure_priv);
+  CHECK(sbs.peek("SBS_SECCFGR") == 0);
+  CHECK_FALSE(sbs.raised());
+  sbs.rcc("RCC_APB3RSTR", 0, secure_priv);
+  sbs.write("SBS_SECCFGR", sbssec, secure_priv);
+  CHECK(sbs.peek("SBS_SECCFGR") == sbssec);
+}
+
+TEST_CASE(
+    "coverage reports a firmware write of SBS_PMCR as storage_only and SBS_SECCFGR as served "
+    "under TrustZone")
+{
+  secure_flash const s;
+  s.r.f.target->enable_coverage({}, true);
+  s.put(code_s, {0x6001, 0x601a, bkpt});
+  s.r.f.set("r0", s.r.alias("SBS", "SBS_PMCR", true));
+  s.r.f.set("r1", s.r.bit("SBS", "SBS_PMCR", "BOOSTEN"));
+  s.r.f.set("r3", s.r.alias("SBS", "SBS_SECCFGR", true));
+  s.r.f.set("r2", s.r.bit("SBS", "SBS_SECCFGR", "CLASSBSEC"));
+  s.r.f.set("pc", code_s | 1u);
+  REQUIRE(s.r.f.run_to_stop({.max_instructions = icount{10}}).reason == stop_reason::user);
+  REQUIRE(s.r.peek("SBS", "SBS_PMCR") == s.r.bit("SBS", "SBS_PMCR", "BOOSTEN"));
+  REQUIRE(s.r.peek("SBS", "SBS_SECCFGR") == s.r.bit("SBS", "SBS_SECCFGR", "CLASSBSEC"));
+  auto const found = s.r.f.target->coverage().unmodelled;
+  REQUIRE(found.size() == 1);
+  CHECK(found.front().peripheral == "SEC_SBS");
+  CHECK(found.front().reg.ends_with("PMCR"));
+  CHECK(found.front().reason == popcorn::core::unmodelled_reason::storage_only);
+}
+
+TEST_CASE(
+    "RM0481 14.5.6 to 14.5.8, 14.5.11 and 14.5.17 to 14.5.19: without TrustZone SBS_SECCFGR, "
+    "SBS_RSSCMDR and SBS_CSLCKR are RAZ/WI, SBS_EPOCHSELCR, SBS_ECCNMIR, SBS_FPUIMR and "
+    "SBS_CNSLCKR privileged")
+{
+  stm32_fixture const f{h573(), firmware};
+  REQUIRE(f.target->model("SBS") != nullptr);
+  auto&       bus  = core::machine_internals::services(*f.target);
+  auto const& unit = f.target->peripheral("SBS");
+  auto const  at   = [&](std::string_view reg) {
+    auto const* found = popcorn::find_register(unit.description(), reg);
+    REQUIRE(found != nullptr);
+    return found->offset;
+  };
+  auto const write = [&](std::string_view reg, std::uint32_t value, bus_attrs attrs) {
+    REQUIRE(bus.write(unit.description().base + at(reg), 4, value, attrs).has_value());
+  };
+  auto const read = [&](std::string_view reg, bus_attrs attrs) {
+    auto const value = bus.read(unit.description().base + at(reg), 4, attrs);
+    REQUIRE(value.has_value());
+    return static_cast<std::uint32_t>(*value);
+  };
+  for(auto const reg : {"SBS_SECCFGR", "SBS_RSSCMDR", "SBS_CSLCKR"})
+  {
+    CAPTURE(reg);
+    write(reg, 0x7, nonsecure_priv);
+    write(reg, 0x7, secure_priv);
+    CHECK(unit.peek(at(reg)) == 0);
+    CHECK(read(reg, secure_priv) == 0);
+  }
+  struct row
+  {
+    std::string_view reg;
+    std::uint32_t    value;
+    bool             privileged;
+  };
+  for(auto const& [reg, value, privileged] : {
+          row{"SBS_EPOCHSELCR", 0x1,  true },
+          row{"SBS_ECCNMIR",    0x1,  true },
+          row{"SBS_FPUIMR",     0x3,  true },
+          row{"SBS_CNSLCKR",    0x1,  true },
+          row{"SBS_CFGR2",      0x1,  false},
+          row{"SBS_CCSWCR",     0x12, false},
+  })
+  {
+    CAPTURE(reg);
+    auto const before = unit.peek(at(reg));
+    write(reg, value, nonsecure_unpriv);
+    CHECK((unit.peek(at(reg)) == value) == not privileged);
+    CHECK((read(reg, nonsecure_unpriv) == value) == not privileged);
+    write(reg, before, nonsecure_priv);
+    write(reg, value, nonsecure_priv);
+    CHECK(unit.peek(at(reg)) == value);
+    CHECK(read(reg, nonsecure_priv) == value);
+  }
+  f.target->peripheral("SBS").poke(at("SBS_SECCFGR"), 0xb);
+  write("SBS_FPUIMR", 0x5, nonsecure_priv);
+  write("SBS_CCSWCR", 0x34, nonsecure_priv);
+  CHECK(unit.peek(at("SBS_FPUIMR")) == 0x5);
+  CHECK(unit.peek(at("SBS_CCSWCR")) == 0x34);
+  write("SBS_HDPLCR", 0x6a, nonsecure_unpriv);
+  CHECK(read("SBS_HDPLSR", nonsecure_unpriv) == 0x8a);
+}
+
+TEST_CASE(
+    "RM0481 Table 72 note 1 and Table 64: without TrustZone HDPL 2 closes the HDP area, a load of "
+    "it reads zero, a fetch from it faults and a program into it sets WRPERR, the next sector "
+    "stays open with its SECWM1 range ignored")
+{
+  constexpr address closed = flash_ns + 10 * sector_bytes;
+  constexpr address open   = flash_ns + 12 * sector_bytes;
+  auto              f      = option_fixture({
+      .secwm1 = stm32::page_range{.first = 12, .last = 13},
+      .hdp1   = stm32::page_range{.first = 10, .last = 11}
+  });
+  auto&             bus    = core::machine_internals::services(*f.target);
+  auto const        at     = [&](std::string_view unit, std::string_view reg) {
+    auto const& desc  = f.target->peripheral(unit).description();
+    auto const* found = popcorn::find_register(desc, reg);
+    REQUIRE(found != nullptr);
+    return desc.base + found->offset;
+  };
+  auto const write = [&](std::string_view unit, std::string_view reg, std::uint32_t value) {
+    REQUIRE(bus.write(at(unit, reg), 4, value, nonsecure_priv).has_value());
+  };
+  auto const value = [&](std::string_view name) {
+    return static_cast<std::uint32_t>(f.target->regs().read(*f.target->regs().find(name)));
+  };
+  auto const load = [&](address from) {
+    f.set("r0", from);
+    f.set("r1", 0xdead);
+    f.set("pc", loop_at | 1u);
+    REQUIRE(f.run_to_stop({.max_instructions = icount{4}}).reason == stop_reason::user);
+    return value("r1");
+  };
+  REQUIRE(f.target->mem().write(loop_at, 4, 0xbe01'6801u));
+  REQUIRE(f.target->mem().write(closed, 4, 0x1234'5678));
+  REQUIRE(f.target->mem().write(open, 4, 0x9abc'def0));
+  REQUIRE(f.target->mem().write(closed + 0x100, 2, bkpt));
+  CHECK(load(closed) == 0x1234'5678);
+  write("SBS", "SBS_HDPLCR", 0x6a);
+  REQUIRE(bus.read(at("SBS", "SBS_HDPLSR"), 4, nonsecure_priv) == 0x8a);
+  CHECK(load(closed) == 0);
+  CHECK(load(closed + sector_bytes) == 0);
+  CHECK(load(open) == 0x9abc'def0);
+  f.set("pc", (closed + 0x100) | 1u);
+  CHECK(f.run_to_stop({.max_instructions = icount{4}}).reason == stop_reason::fault);
+  write("FLASH", "FLASH_NSKEYR", secure_key1);
+  write("FLASH", "FLASH_NSKEYR", secure_key2);
+  write("FLASH", "FLASH_NSCR", pg);
+  for(address word = 0; word < 4; ++word)
+  {
+    REQUIRE(bus.write(closed + 0x20 + 4 * word, 4, word, nonsecure_priv).has_value());
+  }
+  CHECK(f.field("FLASH", "FLASH_NSSR", "WRPERR") == 1);
+  CHECK(f.target->mem().read(closed + 0x20, 4) == 0xffff'ffff);
+  write("FLASH", "FLASH_NSCCR", ~0u);
+  REQUIRE(f.field("FLASH", "FLASH_NSSR", "WRPERR") == 0);
+  for(address word = 0; word < 4; ++word)
+  {
+    REQUIRE(bus.write(open + 0x20 + 4 * word, 4, word, nonsecure_priv).has_value());
+  }
+  CHECK(f.field("FLASH", "FLASH_NSSR", "WRPERR") == 0);
+  CHECK(f.field("FLASH", "FLASH_NSSR", "BSY") == 1);
+  f.target->reset(popcorn::reset_kind::software);
+  REQUIRE(f.target->mem().write(loop_at, 4, 0xbe01'6801u));
+  CHECK(load(closed) == 0x1234'5678);
+  f.set("pc", (closed + 0x100) | 1u);
+  CHECK(f.run_to_stop({.max_instructions = icount{4}}).reason == stop_reason::user);
+}
+
+TEST_CASE(
+    "RM0481 7.6.3: a FLASH_SECBB1R1 bit makes sector 9 Secure, a Non-secure program into it is "
+    "refused with WRPERR and FLASHF")
+{
+  secure_flash const s;
+  constexpr address  sector9 = flash_ns + 9 * sector_bytes;
+  s.unlock(false);
+  s.write("FLASH_NSCR", s.bit("FLASH_NSCR", "PG"), nonsecure_priv);
+  s.store(sector9 + 0x20, {1, 2, 3, 4}, nonsecure_priv);
+  s.settle();
+  REQUIRE(s.word(sector9 + 0x20) == 1);
+  s.clear_flags(false);
+  s.write("FLASH_SECBB1R1", 1u << 9, secure_priv);
+  s.store(sector9, {1, 2, 3, 4}, nonsecure_priv);
+  s.settle();
+  CHECK((s.peek("FLASH_NSSR") & s.bit("FLASH_NSSR", "WRPERR")) != 0);
+  CHECK(s.word(sector9) == 0xffff'ffff);
+  CHECK(s.tzic("FLASHF"));
+}
+
+TEST_CASE(
+    "RM0481 7.6.4: an unprivileged program or erase of a FLASH_PRIVBB1R1 sector is refused with "
+    "WRPERR and no event, a privileged one lands")
+{
+  secure_flash const s;
+  constexpr address  sector6 = flash_ns + 6 * sector_bytes;
+  auto const         wrperr  = s.bit("FLASH_NSSR", "WRPERR");
+  s.write("FLASH_PRIVBB1R1", 1u << 6, secure_priv);
+  s.unlock(false);
+  s.write("FLASH_NSCR", s.bit("FLASH_NSCR", "PG"), nonsecure_priv);
+  s.store(sector6, {1, 2, 3, 4}, nonsecure_unpriv);
+  CHECK((s.peek("FLASH_NSSR") & wrperr) != 0);
+  CHECK_FALSE(s.tzic("FLASHF"));
+  s.clear_flags(false);
+  s.store(sector6, {1, 2, 3, 4}, nonsecure_priv);
+  s.settle();
+  CHECK(s.word(sector6 + 8) == 3);
+  s.clear_flags(false);
+  s.write(
+      "FLASH_NSCR",
+      s.bit("FLASH_NSCR", "SER") | s.sector_field("FLASH_NSCR", 6) | s.bit("FLASH_NSCR", "STRT"),
+      nonsecure_unpriv);
+  CHECK((s.peek("FLASH_NSSR") & wrperr) != 0);
+  CHECK(s.word(sector6 + 8) == 3);
+  CHECK_FALSE(s.tzic("FLASHF"));
+}
+
+TEST_CASE(
+    "RM0481 7.6.2 Table 63: at HDPL 2 a Secure program and erase of the closed HDP area are "
+    "refused with WRPERR, the sector past it erases")
+{
+  auto wanted = four_secure_sectors();
+  wanted.hdp1 = stm32::page_range{.first = 0, .last = 1};
+  secure_flash const s{wanted};
+  auto const         wrperr_s = s.bit("FLASH_SECSR", "WRPERR");
+  auto const         erase    = [&s](std::uint32_t sector) {
+    return s.bit("FLASH_SECCR", "SER")
+         | s.sector_field("FLASH_SECCR", sector)
+         | s.bit("FLASH_SECCR", "STRT");
+  };
+  s.unlock(true);
+  s.write("FLASH_SECCR", s.bit("FLASH_SECCR", "PG"), secure_priv);
+  s.store(flash_s + sector_bytes, {1, 2, 3, 4}, secure_priv);
+  s.settle();
+  CHECK(s.word(flash_s + sector_bytes) == 1);
+  s.clear_flags(true);
+  s.r.write("SBS", "SBS_HDPLCR", 0x6a, true);
+  REQUIRE(s.r.read("SBS", "SBS_HDPLSR", true) == 0x8a);
+  s.store(flash_s + sector_bytes + 16, {1, 2, 3, 4}, secure_priv);
+  CHECK((s.peek("FLASH_SECSR") & wrperr_s) != 0);
+  CHECK_FALSE(s.tzic("FLASHF"));
+  s.clear_flags(true);
+  s.write("FLASH_SECCR", erase(1), secure_priv);
+  CHECK((s.peek("FLASH_SECSR") & wrperr_s) != 0);
+  s.clear_flags(true);
+  REQUIRE(s.r.f.target->mem().write(flash_ns + 2 * sector_bytes, 4, 0));
+  s.write("FLASH_SECCR", erase(2), secure_priv);
+  CHECK((s.peek("FLASH_SECSR") & s.bit("FLASH_SECSR", "BSY")) != 0);
+  s.settle();
+  CHECK(s.word(flash_ns + 2 * sector_bytes) == 0xffff'ffff);
+  CHECK((s.peek("FLASH_SECSR") & wrperr_s) == 0);
+}
+
+TEST_CASE(
+    "a Secure core's store through an SAU Non-secure region programs a Non-secure H5 sector "
+    "through FLASH_NSCR, without the region it is a Secure store refused with "
+    "FLASH_SECSR.WRPERR, B10.2")
+{
+  constexpr address sector8 = flash_ns + 8 * sector_bytes;
+  for(auto const sau_over : {true, false})
+  {
+    CAPTURE(sau_over);
+    secure_flash const s;
+    s.unlock(false);
+    s.write("FLASH_NSCR", s.bit("FLASH_NSCR", "PG"), nonsecure_priv);
+    if(not sau_over)
+    {
+      s.unlock(true);
+      s.write("FLASH_SECCR", s.bit("FLASH_SECCR", "PG"), secure_priv);
+    }
+    s.sau_region(0, sector8, sector8 + sector_bytes - 32);
+    s.sau(sau_over ? 1u : 0u);
+    s.put(code_s, {0x6001, 0x6041, 0x6081, 0x60c1, bkpt});
+    s.r.f.set("r0", sector8);
+    s.r.f.set("r1", 0x0bad'f00d);
+    s.r.f.set("pc", code_s | 1u);
+    CHECK(s.r.f.run_to_stop({.max_instructions = icount{5}}).reason == stop_reason::user);
+    s.sau(0);
+    s.settle();
+    CHECK(s.word(sector8 + 12) == (sau_over ? 0x0bad'f00du : 0xffff'ffffu));
+    CHECK((s.peek("FLASH_NSSR") & s.bit("FLASH_NSSR", "WRPERR")) == 0);
+    CHECK(((s.peek("FLASH_SECSR") & s.bit("FLASH_SECSR", "WRPERR")) != 0) == not sau_over);
+  }
+}
+
+TEST_CASE(
+    "a FLASH_SECBB1R1 store that makes the running Secure loop's sector Non-secure faults its "
+    "next fetch in an SAU-split sector, RM0481 7.6.3 and B3.11 RJQMQ")
+{
+  secure_flash const s{four_secure_sectors(), popcorn::arch::fault_policy::enter_handler};
+  constexpr address  sector4 = flash_ns + 4 * sector_bytes;
+  s.write("FLASH_SECBB1R1", 1u << 4, secure_priv);
+  s.secure_vectors();
+  s.put(sector4, {0x3b01, 0x42a3, 0xd100, 0x6001, 0x2b00, 0xd1f9, bkpt});
+  s.sau_region(0, sector4 + 0x200, sector4 + 0x3e0);
+  s.sau(1);
+  s.r.f.set("r0", s.r.at("FLASH", "FLASH_SECBB1R1"));
+  s.r.f.set("r1", 0);
+  s.r.f.set("r3", 100);
+  s.r.f.set("r4", 50);
+  s.r.f.set("pc", sector4 | 1u);
+  CHECK(s.r.f.run_to_stop({.max_instructions = icount{2000}}).reason == stop_reason::user);
+  CHECK(s.value("pc") == handler_s + 2);
+  CHECK((s.value("xpsr") & 0x1ff) == 3);
+  CHECK((s.word(0xe000'ed2c) & (1u << 30)) != 0);
+  CHECK((s.word(0xe000'ed28) & (1u << 8)) != 0);
+  CHECK(s.word(s.value("msp") + 24) == sector4 + 8);
+  CHECK(s.value("r3") == 50);
+}
+
+TEST_CASE(
+    "an H5 TrustZone snapshot taken while a Secure program is BSY ends it in FLASH_SECSR after a "
+    "restore into a fresh machine, the Secure lock state kept")
+{
+  secure_flash const s;
+  s.unlock(true);
+  s.write("FLASH_SECCR", s.bit("FLASH_SECCR", "PG") | s.bit("FLASH_SECCR", "EOPIE"), secure_priv);
+  s.store(unused_secure + 32, {1, 2, 3, 4}, secure_priv);
+  REQUIRE((s.peek("FLASH_SECSR") & s.bit("FLASH_SECSR", "BSY")) != 0);
+  auto const         taken = s.r.f.target->snapshot();
+  secure_flash const fresh;
+  fresh.r.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(taken.data()))});
+  fresh.settle();
+  CHECK(fresh.word(unused_secure + 44) == 4);
+  CHECK(fresh.peek("FLASH_SECSR") == fresh.bit("FLASH_SECSR", "EOP"));
+  CHECK((fresh.peek("FLASH_SECCR") & fresh.bit("FLASH_SECCR", "LOCK")) == 0);
+  CHECK(fresh.pending(flash_s_irq));
+}
+
+TEST_CASE(
+    "H5 power_cycle under TrustZone keeps the option bytes, resets FLASH_SECBBxRy, the MPCBB, the "
+    "SAU and HDPL")
+{
+  secure_flash const s;
+  auto const         secwm = s.peek("FLASH_SECWM1R_CUR");
+  s.write("FLASH_SECBB1R1", 0xf0, secure_priv);
+  s.write("FLASH_SECBB2R4", 0x1, secure_priv);
+  s.write("GTZC1_MPCBB1", "SECCFGR0", 0xffff'fffe);
+  s.r.write("SBS", "SBS_HDPLCR", 0x6a, true);
+  s.sau_region(0, 0x2000'0000, 0x2000'03e0);
+  s.sau(1);
+  s.r.f.target->power_cycle();
+  CHECK(s.peek("FLASH_SECWM1R_CUR") == secwm);
+  CHECK(s.peek("FLASH_SECBB1R1") == 0);
+  CHECK(s.peek("FLASH_SECBB2R4") == 0);
+  CHECK(s.r.peek("GTZC1_MPCBB1", "SECCFGR0") == 0xffff'ffff);
+  CHECK(s.word(sau_ctrl) == 0);
+  CHECK(s.r.read("SBS", "SBS_HDPLSR", true) == 0x51);
 }
 
 TEST_CASE("an H5 flash whose banks need more block registers than the H5 traits hold throws")
