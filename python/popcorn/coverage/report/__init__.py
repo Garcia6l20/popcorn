@@ -30,6 +30,7 @@ An include or omit glob matches a source path as the lcov file writes it and rel
 """
 
 from popcorn.coverage.report._cobertura import render_cobertura
+from popcorn.coverage.report._gcovr import GCOVR_FORMAT_VERSION, render_gcovr_json
 from popcorn.coverage.report._html import render_html
 from popcorn.coverage.report._model import (
     UNMODELLED_MODES,
@@ -54,6 +55,7 @@ from popcorn.coverage.report._spec import ReportResult, ReportSpec, generate, pa
 from popcorn.coverage.report._term import render_term
 
 __all__ = [
+    "GCOVR_FORMAT_VERSION",
     "UNMODELLED_MODES",
     "BranchRecord",
     "Counts",
@@ -74,6 +76,7 @@ __all__ = [
     "parse_spec",
     "parse_unmodelled",
     "render_cobertura",
+    "render_gcovr_json",
     "render_html",
     "render_term",
     "resolve",
