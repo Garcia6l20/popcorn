@@ -2895,3 +2895,39 @@ TEST_CASE("a U5 description without an option or HDP field of the FLASH unit thr
         popcorn::config_error);
   }
 }
+
+TEST_CASE(
+    "a U575 description without a block register its 64-page bank needs throws config_error, one "
+    "past the need builds")
+{
+  for(auto const& [name, throws] : {
+          std::pair{std::string_view{"SEC2BBR2"},  true },
+          std::pair{std::string_view{"PRIV1BBR2"}, true },
+          std::pair{std::string_view{"SEC2BBR3"},  false},
+  })
+  {
+    std::string const which{name};
+    CAPTURE(which);
+    auto desc  = u575();
+    auto flash = std::ranges::find(
+        desc.peripherals, std::string_view{"FLASH"}, &popcorn::peripheral_desc::name);
+    REQUIRE(flash != desc.peripherals.end());
+    REQUIRE(
+        std::erase_if(
+            flash->registers,
+            [name](popcorn::register_desc const& reg) { return reg.name == name; })
+        == 1);
+    popcorn::periph::stm32::register_builtin_models();
+    if(throws)
+    {
+      CHECK_THROWS_AS(
+          core::machine(desc, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()),
+          popcorn::config_error);
+    }
+    else
+    {
+      CHECK_NOTHROW(
+          core::machine(desc, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()));
+    }
+  }
+}

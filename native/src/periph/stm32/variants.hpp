@@ -228,8 +228,9 @@ inline constexpr auto u5_gtzc_companions = std::to_array<gtzc_companion>({
     {"OCTOSPI2", "DLYBOS2"   },
 });
 /** @brief STM32U5 GTZC1 and GTZC2, RM0456 5.7.4 to 5.7.6 and 5.8: the SVD instance names of
- *         UART4, the instruction cache, the OTG, the FMC and the register blocks, and the bits
- *         that RM0456 Table 5 gives to two blocks. */
+ *         UART4, the instruction cache, the OTG, the FMC and the register blocks, the bits
+ *         that RM0456 Table 5 gives to two blocks, and each delay block with the peripheral
+ *         RM0456 Table 297 associates it with. */
 inline constexpr gtzc_variant u5_gtzc{u5_gtzc_renames, u5_gtzc_companions};
 
 inline constexpr auto h5_gtzc_renames    = std::to_array<gtzc_rename>({
@@ -242,13 +243,17 @@ inline constexpr auto h5_gtzc_renames    = std::to_array<gtzc_rename>({
     {"FLASH_REG", "FLASH"  },
 });
 inline constexpr auto h5_gtzc_companions = std::to_array<gtzc_companion>({
-    {"DCMI", "PSSI"},
-    {"ADC1", "ADC2"},
-    {"ADC1", "ADCC"},
+    {"DCMI",    "PSSI"   },
+    {"ADC1",    "ADC2"   },
+    {"ADC1",    "ADCC"   },
+    {"SDMMC1",  "DLYBSD1"},
+    {"SDMMC2",  "DLYBSD2"},
+    {"OCTOSPI", "DLYBOS1"},
 });
 /** @brief STM32H562, H563 and H573 GTZC1, RM0481 5.7.4 to 5.7.6 and 5.8: the SVD names
  *         `DAC`, `I3C`, `LPUART`, `OCTOSPI` and `UCPD1` of the stems `DAC1`, `I3C1`,
  *         `LPUART1`, `OCTOSPI1` and `UCPD`, and `ADC12SEC` covering ADC1, ADC2 and their common
- *         registers `ADCC`, RM0481 Table 3. `HDMICEC` names no peripheral of the SVD. */
+ *         registers `ADCC`, RM0481 Table 3, and each delay block with the peripheral RM0481
+ *         Table 275 associates it with. `HDMICEC` names no peripheral of the SVD. */
 inline constexpr gtzc_variant h5_gtzc{h5_gtzc_renames, h5_gtzc_companions};
 }

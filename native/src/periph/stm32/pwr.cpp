@@ -129,10 +129,9 @@ struct pwr_family
   std::span<pwr_secured const> secured;
   /** @brief Fields of each wakeup pin its `WUPxSEC` bit secures. */
   std::span<pwr_wakeup_field const> wakeup_fields;
-  /** @brief Register of the voltage scaling fields `RCC_SECCFGR.SYSCLKSEC` secures. */
-  std::string_view system_clock_register;
-  /** @brief Those fields, each secured when the description has it. */
-  std::span<std::string_view const> system_clock_fields;
+  /** @brief Voltage scaling fields `RCC_SECCFGR.SYSCLKSEC` secures. An optional one is secured
+   * when the description has it, a required one throws config_error when it lacks it. */
+  std::span<field_name const> system_clock_fields;
 };
 
 /**
@@ -269,8 +268,12 @@ constexpr auto u5_wakeup_fields = std::to_array<pwr_wakeup_field>({
     {.reg = "PWR_WUSCR", .prefix = "CWUF" },
 });
 
-constexpr auto u5_system_clock_fields =
-    std::to_array<std::string_view>({"VOS", "BOOSTEN", "USBPWREN", "USBBOOSTEN"});
+constexpr auto u5_system_clock_fields = std::to_array<field_name>({
+    {.reg = "PWR_VOSR", .field = "VOS"},
+    {.reg = "PWR_VOSR", .field = "BOOSTEN"},
+    {.reg = "PWR_VOSR", .field = "USBPWREN", .optional = true},
+    {.reg = "PWR_VOSR", .field = "USBBOOSTEN", .optional = true},
+});
 
 /** @brief STM32U5 PWR, RM0456 10.10: VOS 00 range 4 to 11 range 1, ready bits read 1. */
 constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> u5_names{
@@ -333,7 +336,9 @@ constexpr auto h5_wakeup_fields = std::to_array<pwr_wakeup_field>({
     {.reg = "PWR_WUSCR", .prefix = "CWUF", .raz = false},
 });
 
-constexpr auto h5_system_clock_fields = std::to_array<std::string_view>({"VOS"});
+constexpr auto h5_system_clock_fields = std::to_array<field_name>({
+    {.reg = "PWR_VOSCR", .field = "VOS"},
+});
 
 constexpr std::array<write_entry<pwr>, 4> h5_writes{
     {
@@ -345,31 +350,29 @@ constexpr std::array<write_entry<pwr>, 4> h5_writes{
 };
 
 constexpr pwr_family h5_pwr{
-    .fields                = h5_names,
-    .modes                 = h5_modes_by_lpms,
-    .vos_levels            = h5_vos_levels,
-    .vos_ready_set         = true,
-    .active_ready_set      = true,
-    .writes                = h5_writes,
-    .trustzone_writes      = h5_trustzone_writes,
-    .secured               = h5_secured,
-    .wakeup_fields         = h5_wakeup_fields,
-    .system_clock_register = "PWR_VOSCR",
-    .system_clock_fields   = h5_system_clock_fields,
+    .fields              = h5_names,
+    .modes               = h5_modes_by_lpms,
+    .vos_levels          = h5_vos_levels,
+    .vos_ready_set       = true,
+    .active_ready_set    = true,
+    .writes              = h5_writes,
+    .trustzone_writes    = h5_trustzone_writes,
+    .secured             = h5_secured,
+    .wakeup_fields       = h5_wakeup_fields,
+    .system_clock_fields = h5_system_clock_fields,
 };
 
 constexpr pwr_family u5_pwr{
-    .fields                = u5_names,
-    .modes                 = modes_by_lpms,
-    .vos_levels            = u5_vos_levels,
-    .vos_ready_set         = true,
-    .active_ready_set      = true,
-    .writes                = u5_writes,
-    .trustzone_writes      = u5_trustzone_writes,
-    .secured               = u5_secured,
-    .wakeup_fields         = u5_wakeup_fields,
-    .system_clock_register = "PWR_VOSR",
-    .system_clock_fields   = u5_system_clock_fields,
+    .fields              = u5_names,
+    .modes               = modes_by_lpms,
+    .vos_levels          = u5_vos_levels,
+    .vos_ready_set       = true,
+    .active_ready_set    = true,
+    .writes              = u5_writes,
+    .trustzone_writes    = u5_trustzone_writes,
+    .secured             = u5_secured,
+    .wakeup_fields       = u5_wakeup_fields,
+    .system_clock_fields = u5_system_clock_fields,
 };
 
 static_assert(names_every_role(u5_names));
@@ -433,15 +436,14 @@ void pwr::add_rules()
            .own    = bit});
     }
   }
-  auto const& scaling = describe(family_.system_clock_register);
-  for(auto const name : family_.system_clock_fields)
+  for(auto const& name : family_.system_clock_fields)
   {
-    if(std::ranges::find(scaling.fields, name, &field_desc::name) != scaling.fields.end())
+    if(name.optional and not has_field(name.reg, name.field))
     {
-      auto const f = field(family_.system_clock_register, name);
-      rules_.push_back(
-          {.offset = f.offset, .bits = f.mask(), .source = guard_source::system_clock});
+      continue;
     }
+    auto const f = field(name.reg, name.field);
+    rules_.push_back({.offset = f.offset, .bits = f.mask(), .source = guard_source::system_clock});
   }
   auto const ucpd = whole("PWR_UCPDR");
   rules_.push_back(

@@ -1,9 +1,11 @@
+#include "h573_secure_rig.hpp"
 #include "kernel_gate.hpp"
 #include "model_base.hpp"
 #include "rcc_resets.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/clock.hpp>
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
@@ -18,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <initializer_list>
 #include <memory>
 #include <meta>
 #include <string>
@@ -663,4 +666,205 @@ TEST_CASE("coverage classifies RCC_CIER as served, the model reads its enables")
   f.set("pc", stub | 1u);
   idle_until(f, std::chrono::microseconds{1});
   CHECK(f.target->coverage().unmodelled.empty());
+}
+
+TEST_CASE(
+    "RM0481 11.5.1 Table 122: each RCC_SECCFGR bit makes its RCC fields RAZ/WI to Non-secure "
+    "accesses, open while the bit is clear")
+{
+  struct row
+  {
+    std::string_view bit;
+    std::string_view reg;
+    std::string_view field;
+  };
+  for(auto const& one : std::initializer_list<row>{
+          {"HSISEC",      "RCC_HSICFGR",  "HSITRIM"   },
+          {"HSESEC",      "RCC_CIER",     "HSERDYIE"  },
+          {"CSISEC",      "RCC_CSICFGR",  "CSITRIM"   },
+          {"LSISEC",      "RCC_CIER",     "LSIRDYIE"  },
+          {"LSESEC",      "RCC_CIER",     "LSERDYIE"  },
+          {"SYSCLKSEC",   "RCC_CFGR1",    "MCO1PRE"   },
+          {"SYSCLKSEC",   "RCC_CCIPR4",   "SYSTICKSEL"},
+          {"PRESCSEC",    "RCC_CFGR1",    "TIMPRE"    },
+          {"PRESCSEC",    "RCC_CFGR2",    "PPRE3"     },
+          {"PLL1SEC",     "RCC_PLL1CFGR", "DIVM1"     },
+          {"PLL2SEC",     "RCC_PLL2DIVR", "PLL2N"     },
+          {"PLL3SEC",     "RCC_PLL3CFGR", "PLL3VCOSEL"},
+          {"HSI48SEC",    "RCC_CIER",     "HSI48RDYIE"},
+          {"CKPERSELSEC", "RCC_CCIPR5",   "CKPERSEL"  },
+  })
+  {
+    std::string const name = std::string{one.bit} + " " + std::string{one.field};
+    CAPTURE(name);
+    for(auto const secured : {false, true})
+    {
+      CAPTURE(secured);
+      popcorn::testing::h573_secure_rig const r{"h573_rcc_ll"};
+      auto const                              bits = r.bit("RCC", one.reg, one.field);
+      auto const                              mask = r.bit("RCC", "RCC_SECCFGR", one.bit);
+      r.write("RCC", "RCC_SECCFGR", secured ? mask : 0, true);
+      auto const stored = r.peek("RCC", one.reg);
+      r.write("RCC", one.reg, stored ^ bits, false);
+      CHECK((r.peek("RCC", one.reg) & bits) == ((secured ? stored : stored ^ bits) & bits));
+      CHECK((r.read("RCC", one.reg, false) & bits) == (secured ? 0 : (stored ^ bits) & bits));
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0481 11.5.1: a peripheral the TZSC secures has its RCC enable, sleep enable and kernel "
+    "clock bits RAZ/WI to Non-secure accesses, under its SVD bit name")
+{
+  struct row
+  {
+    std::string_view sec_reg;
+    std::string_view sec;
+    std::string_view reg;
+    std::string_view field;
+  };
+  for(auto const& one : std::initializer_list<row>{
+          {"SECCFGR2", "LPUART1SEC",  "RCC_APB3ENR",    "LPUART1EN"  },
+          {"SECCFGR2", "LPUART1SEC",  "RCC_APB3LPENR",  "LPUART1LPEN"},
+          {"SECCFGR2", "LPUART1SEC",  "RCC_CCIPR3",     "LPUART1SEL" },
+          {"SECCFGR3", "ADC12SEC",    "RCC_AHB2ENR",    "ADC12EN"    },
+          {"SECCFGR3", "ADC12SEC",    "RCC_CCIPR5",     "ADCDACSEL"  },
+          {"SECCFGR2", "UCPDSEC",     "RCC_APB1HENR",   "UCPDEN"     },
+          {"SECCFGR2", "USBSEC",      "RCC_APB2LPENR",  "USBFSLPEN"  },
+          {"SECCFGR1", "UART12SEC",   "RCC_CCIPR2",     "USART12SEL" },
+          {"SECCFGR1", "I3C1SEC",     "RCC_APB1LLPENR", "I3C1LPEN"   },
+          {"SECCFGR3", "OCTOSPI1SEC", "RCC_AHB4ENR",    "OCTOSPI1EN" },
+  })
+  {
+    std::string const name{one.field};
+    CAPTURE(name);
+    popcorn::testing::h573_secure_rig const r{"h573_rcc_ll"};
+    auto const                              bits = r.bit("RCC", one.reg, one.field);
+    r.write("GTZC1_TZSC", one.sec_reg, r.bit("GTZC1_TZSC", one.sec_reg, one.sec), true);
+    auto const stored = r.peek("RCC", one.reg);
+    r.write("RCC", one.reg, stored ^ bits, false);
+    CHECK((r.peek("RCC", one.reg) & bits) == (stored & bits));
+    CHECK((r.read("RCC", one.reg, false) & bits) == 0);
+    r.write("RCC", one.reg, stored ^ bits, true);
+    CHECK((r.peek("RCC", one.reg) & bits) == ((stored ^ bits) & bits));
+  }
+}
+
+TEST_CASE(
+    "RM0481 11.5.1: ADCDACSEL, TIMICSEL and the FDCAN12 bits are Secure while any peripheral they "
+    "serve is")
+{
+  struct row
+  {
+    std::string_view sec_reg;
+    std::string_view sec;
+    std::string_view reg;
+    std::string_view field;
+  };
+  for(auto const& one : std::initializer_list<row>{
+          {"SECCFGR1", "DAC1SEC",   "RCC_CCIPR5",   "ADCDACSEL" },
+          {"SECCFGR3", "ADC12SEC",  "RCC_CCIPR5",   "ADCDACSEL" },
+          {"SECCFGR2", "FDCAN2SEC", "RCC_CCIPR5",   "FDCAN12SEL"},
+          {"SECCFGR1", "TIM12SEC",  "RCC_CCIPR1",   "TIMICSEL"  },
+          {"SECCFGR2", "TIM15SEC",  "RCC_CCIPR1",   "TIMICSEL"  },
+          {"SECCFGR1", "LPTIM2SEC", "RCC_CCIPR1",   "TIMICSEL"  },
+          {"SECCFGR2", "FDCAN2SEC", "RCC_APB1HENR", "FDCAN12EN" },
+          {"SECCFGR2", "FDCAN1SEC", "RCC_APB1HENR", "FDCAN12EN" },
+  })
+  {
+    std::string const name = std::string{one.sec} + " " + std::string{one.field};
+    CAPTURE(name);
+    for(auto const secured : {false, true})
+    {
+      CAPTURE(secured);
+      popcorn::testing::h573_secure_rig const r{"h573_rcc_ll"};
+      auto const                              bits = r.bit("RCC", one.reg, one.field);
+      r.write(
+          "GTZC1_TZSC", one.sec_reg, secured ? r.bit("GTZC1_TZSC", one.sec_reg, one.sec) : 0, true);
+      auto const stored = r.peek("RCC", one.reg);
+      r.write("RCC", one.reg, stored ^ bits, false);
+      CHECK((r.peek("RCC", one.reg) & bits) == ((secured ? stored : stored ^ bits) & bits));
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0481 11.5.1 and 7.11 FLASH_SECCR.INV: FLITFEN and FLITFLPEN follow the FLASH security "
+    "state")
+{
+  popcorn::testing::h573_secure_rig const r{"h573_rcc_ll"};
+  struct bit_of
+  {
+    std::string_view reg;
+    std::uint32_t    bits;
+  };
+  auto const enables = std::to_array<bit_of>({
+      {"RCC_AHB1ENR",   r.bit("RCC", "RCC_AHB1ENR",   "FLITFEN")  },
+      {"RCC_AHB1LPENR", r.bit("RCC", "RCC_AHB1LPENR", "FLITFLPEN")},
+  });
+  for(auto const& [reg, bits] : enables)
+  {
+    std::string const name{reg};
+    CAPTURE(name);
+    REQUIRE((r.peek("RCC", reg) & bits) == bits);
+    r.write("RCC", reg, r.peek("RCC", reg) & ~bits, false);
+    CHECK((r.peek("RCC", reg) & bits) == bits);
+    CHECK((r.read("RCC", reg, false) & bits) == 0);
+  }
+  r.write("FLASH", "SECKEYR", 0x4567'0123, true);
+  r.write("FLASH", "SECKEYR", 0xcdef'89ab, true);
+  auto const inv = r.bit("FLASH", "SECCR", "INV");
+  r.write("FLASH", "SECCR", inv, true);
+  REQUIRE((r.peek("FLASH", "SECCR") & inv) == inv);
+  for(auto const& [reg, bits] : enables)
+  {
+    std::string const name{reg};
+    CAPTURE(name);
+    CHECK((r.read("RCC", reg, false) & bits) == bits);
+    r.write("RCC", reg, r.peek("RCC", reg) & ~bits, false);
+    CHECK((r.peek("RCC", reg) & bits) == 0);
+  }
+}
+
+TEST_CASE("an H573 description without RCC_CR.HSEEXT builds at TZEN=0 and throws at TZEN=1")
+{
+  auto desc = h573();
+  auto rcc =
+      std::ranges::find(desc.peripherals, std::string_view{"RCC"}, &popcorn::peripheral_desc::name);
+  REQUIRE(rcc != desc.peripherals.end());
+  auto cr =
+      std::ranges::find(rcc->registers, std::string_view{"CR"}, &popcorn::register_desc::name);
+  REQUIRE(cr != rcc->registers.end());
+  REQUIRE(
+      std::erase_if(cr->fields, [](popcorn::field_desc const& f) { return f.name == "HSEEXT"; })
+      == 1);
+  stm32::register_builtin_models();
+  CHECK_NOTHROW(
+      core::machine(desc, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()));
+  CHECK_THROWS_AS(
+      core::machine(
+          desc, popcorn::arch::armv8m::factory(),
+          popcorn::testing::h573_secure_rig::options({.tzen = true})),
+      popcorn::config_error);
+}
+
+TEST_CASE(
+    "RM0481 11.5.1: a Secure RTC function makes RTCPRE, RTCEN and RTCSEL RAZ/WI to Non-secure "
+    "accesses, VSWRST takes the write")
+{
+  popcorn::testing::h573_secure_rig const r{"h573_rcc_ll"};
+  r.write("PWR", "PWR_DBPCR", 1, false);
+  auto const rtcpre = r.bit("RCC", "RCC_CFGR1", "RTCPRE");
+  auto const backup = r.bit("RCC", "RCC_BDCR", "RTCEN") | r.bit("RCC", "RCC_BDCR", "RTCSEL");
+  r.write("RTC", "SECCFGR", r.bit("RTC", "SECCFGR", "SEC"), true);
+  r.write("RCC", "RCC_CFGR1", rtcpre, false);
+  CHECK((r.peek("RCC", "RCC_CFGR1") & rtcpre) == 0);
+  r.write("RCC", "RCC_BDCR", backup, false);
+  CHECK((r.peek("RCC", "RCC_BDCR") & backup) == 0);
+  r.write("RCC", "RCC_CFGR1", rtcpre, true);
+  CHECK((r.read("RCC", "RCC_CFGR1", false) & rtcpre) == 0);
+  CHECK((r.read("RCC", "RCC_CFGR1", true) & rtcpre) == rtcpre);
+  auto const vswrst = r.bit("RCC", "RCC_BDCR", "VSWRST");
+  r.write("RCC", "RCC_BDCR", vswrst, false);
+  CHECK((r.peek("RCC", "RCC_BDCR") & vswrst) == vswrst);
 }

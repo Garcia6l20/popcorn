@@ -280,15 +280,117 @@ constexpr std::array<pll_node<signal>, 3> pll_nodes{
 constexpr std::array<std::string_view, 6> reset_flags{"BORRSTF",  "PINRSTF",  "SFTRSTF",
                                                       "IWDGRSTF", "WWDGRSTF", "LPWRRSTF"};
 
-constexpr std::array<secured_group, 0>    rcc_secured{};
-constexpr std::array<std::string_view, 0> rcc_unit_registers{};
-constexpr std::array<unit_alias, 0>       rcc_unit_aliases{};
+constexpr auto rcc_secured = std::to_array<secured_group>({
+    {"HSISEC",      "RCC_CR",        "HSION HSIKERON HSIRDY"                                            },
+    {"HSISEC",      "RCC_HSICFGR",   "HSICAL HSITRIM"                                                   },
+    {"HSISEC",      "RCC_CIER",      "HSIRDYIE"                                                         },
+    {"HSISEC",      "RCC_CIFR",      "HSIRDYF"                                                          },
+    {"HSISEC",      "RCC_CICR",      "HSIRDYC"                                                          },
+    {"HSESEC",      "RCC_CR",        "HSEON HSERDY HSEBYP HSECSSON HSEEXT"                              },
+    {"HSESEC",      "RCC_CIER",      "HSERDYIE"                                                         },
+    {"HSESEC",      "RCC_CIFR",      "HSERDYF HSECSSF"                                                  },
+    {"HSESEC",      "RCC_CICR",      "HSERDYC HSECSSC"                                                  },
+    {"CSISEC",      "RCC_CR",        "CSION CSIKERON CSIRDY"                                            },
+    {"CSISEC",      "RCC_CSICFGR",   "CSICAL CSITRIM"                                                   },
+    {"CSISEC",      "RCC_CIER",      "CSIRDYIE"                                                         },
+    {"CSISEC",      "RCC_CIFR",      "CSIRDYF"                                                          },
+    {"CSISEC",      "RCC_CICR",      "CSIRDYC"                                                          },
+    {"LSISEC",      "RCC_BDCR",      "LSION LSIRDY LSCOSEL LSCOEN"                                      },
+    {"LSISEC",      "RCC_CIER",      "LSIRDYIE"                                                         },
+    {"LSISEC",      "RCC_CIFR",      "LSIRDYF"                                                          },
+    {"LSISEC",      "RCC_CICR",      "LSIRDYC"                                                          },
+    {"LSESEC",      "RCC_BDCR",      "LSECSSON LSECSSD LSEDRV LSEBYP LSERDY LSEON LSEEXT LSCOSEL LSCOEN"},
+    {"LSESEC",      "RCC_CIER",      "LSERDYIE"                                                         },
+    {"LSESEC",      "RCC_CIFR",      "LSERDYF"                                                          },
+    {"LSESEC",      "RCC_CICR",      "LSERDYC"                                                          },
+    {"SYSCLKSEC",   "RCC_CFGR1",     "SW SWS STOPWUCK STOPKERWUCK MCO1SEL MCO1PRE MCO2SEL MCO2PRE"      },
+    {"SYSCLKSEC",   "RCC_CCIPR4",    "SYSTICKSEL"                                                       },
+    {"PRESCSEC",    "RCC_CFGR1",     "TIMPRE"                                                           },
+    {"PRESCSEC",    "RCC_CFGR2",     "HPRE PPRE1 PPRE2 PPRE3"                                           },
+    {"PLL1SEC",     "RCC_PLL1CFGR",
+     "PLL1SRC PLL1RGE PLL1FRACEN DIVM1 PLL1VCOSEL PLL1PEN PLL1QEN PLL1REN"                              },
+    {"PLL1SEC",     "RCC_PLL1DIVR",  "PLL1N PLL1P PLL1Q PLL1R"                                          },
+    {"PLL1SEC",     "RCC_PLL1FRACR", "PLL1FRACN"                                                        },
+    {"PLL1SEC",     "RCC_CR",        "PLL1RDY PLL1ON"                                                   },
+    {"PLL1SEC",     "RCC_CIER",      "PLL1RDYIE"                                                        },
+    {"PLL1SEC",     "RCC_CIFR",      "PLL1RDYF"                                                         },
+    {"PLL1SEC",     "RCC_CICR",      "PLL1RDYC"                                                         },
+    {"PLL2SEC",     "RCC_PLL2CFGR",
+     "PLL2SRC PLL2RGE PLL2FRACEN DIVM2 PLL2VCOSEL PLL2PEN PLL2QEN PLL2REN"                              },
+    {"PLL2SEC",     "RCC_PLL2DIVR",  "PLL2N PLL2P PLL2Q PLL2R"                                          },
+    {"PLL2SEC",     "RCC_PLL2FRACR", "PLL2FRACN"                                                        },
+    {"PLL2SEC",     "RCC_CR",        "PLL2RDY PLL2ON"                                                   },
+    {"PLL2SEC",     "RCC_CIER",      "PLL2RDYIE"                                                        },
+    {"PLL2SEC",     "RCC_CIFR",      "PLL2RDYF"                                                         },
+    {"PLL2SEC",     "RCC_CICR",      "PLL2RDYC"                                                         },
+    {"PLL3SEC",     "RCC_PLL3CFGR",
+     "PLL3SRC PLL3RGE PLL3FRACEN DIVM3 PLL3VCOSEL PLL3PEN PLL3QEN PLL3REN"                              },
+    {"PLL3SEC",     "RCC_PLL3DIVR",  "PLL3N PLL3P PLL3Q PLL3R"                                          },
+    {"PLL3SEC",     "RCC_PLL3FRACR", "PLL3FRACN"                                                        },
+    {"PLL3SEC",     "RCC_CR",        "PLL3RDY PLL3ON"                                                   },
+    {"PLL3SEC",     "RCC_CIER",      "PLL3RDYIE"                                                        },
+    {"PLL3SEC",     "RCC_CIFR",      "PLL3RDYF"                                                         },
+    {"PLL3SEC",     "RCC_CICR",      "PLL3RDYC"                                                         },
+    {"HSI48SEC",    "RCC_CR",        "HSI48ON HSI48RDY"                                                 },
+    {"HSI48SEC",    "RCC_CRRCR",     "HSI48CAL"                                                         },
+    {"HSI48SEC",    "RCC_CIER",      "HSI48RDYIE"                                                       },
+    {"HSI48SEC",    "RCC_CIFR",      "HSI48RDYF"                                                        },
+    {"HSI48SEC",    "RCC_CICR",      "HSI48RDYC"                                                        },
+    {"CKPERSELSEC", "RCC_CCIPR5",    "CKPERSEL"                                                         },
+    {"RMVFSEC",     "RCC_RSR",       "RMVF"                                                             },
+});
+
+constexpr auto rcc_unit_registers = std::to_array<std::string_view>({
+    "RCC_AHB1RSTR",  "RCC_AHB2RSTR",  "RCC_AHB4RSTR",   "RCC_APB1LRSTR",  "RCC_APB1HRSTR",
+    "RCC_APB2RSTR",  "RCC_APB3RSTR",  "RCC_AHB1ENR",    "RCC_AHB2ENR",    "RCC_AHB4ENR",
+    "RCC_APB1LENR",  "RCC_APB1HENR",  "RCC_APB2ENR",    "RCC_APB3ENR",    "RCC_AHB1LPENR",
+    "RCC_AHB2LPENR", "RCC_AHB4LPENR", "RCC_APB1LLPENR", "RCC_APB1HLPENR", "RCC_APB2LPENR",
+    "RCC_APB3LPENR", "RCC_CCIPR1",    "RCC_CCIPR2",     "RCC_CCIPR3",     "RCC_CCIPR4",
+    "RCC_CCIPR5",
+});
+
+constexpr auto rcc_unit_suffixes = std::to_array<std::string_view>({"LPEN", "RST", "EN", "SEL"});
+
+constexpr auto rcc_backup_secured = std::to_array<secured_group>({
+    {"", "RCC_CFGR1", "RTCPRE"      },
+    {"", "RCC_BDCR",  "RTCEN RTCSEL"},
+});
+
+constexpr auto rcc_unit_aliases = std::to_array<unit_alias>({
+    {"ADC12",     "ADC1"   },
+    {"ADCDAC",    "ADC1"   },
+    {"ADCDAC",    "DAC"    },
+    {"DAC12",     "DAC"    },
+    {"DCMI_PSSI", "DCMI"   },
+    {"ETHTX",     "ETH"    },
+    {"ETHRX",     "ETH"    },
+    {"FDCAN12",   "FDCAN1" },
+    {"FDCAN12",   "FDCAN2" },
+    {"FLITF",     "FLASH"  },
+    {"I3C1",      "I3C"    },
+    {"LPUART1",   "LPUART" },
+    {"OCTOSPI1",  "OCTOSPI"},
+    {"RTCAPB",    "RTC"    },
+    {"TIMIC",     "TIM12"  },
+    {"TIMIC",     "TIM15"  },
+    {"TIMIC",     "LPTIM2" },
+    {"UCPD",      "UCPD1"  },
+    {"USART12",   "UART12" },
+    {"USBFS",     "USB"    },
+    {"VREF",      "VREFBUF"},
+});
 }
 
 /**
  * @brief Clock tree of the STM32H5 RCC, RM0481 section 11: HSI over HSIDIV, CSI, HSI48, HSE,
  *        LSI, LSE and PLL1 to PLL3, SYSCLK from the PLL1 P output, the kernel clock muxes of
- *        RCC_CCIPR1 to RCC_CCIPR5 with per_ck, and TIMPRE. The TrustZone tables are empty.
+ *        RCC_CCIPR1 to RCC_CCIPR5 with per_ck, and TIMPRE. The TrustZone tables are RM0481
+ *        11.5.1 and Table 122 in the SVD field names: `HSIRDYF`, `CSION`, `CSIRDY`, `DIVMx`,
+ *        `HSI48RDYIE`, `CKPERSELSEC` for `IPKERSECCFG`, and `RMVF` in `RCC_RSR`. `TIMPRE` goes
+ *        with PRESCSEC. A Secure RTC or TAMP secures `RTCPRE`, `RTCEN` and `RTCSEL`.
+ *        `ADCDACSEL` is Secure while ADC1, ADC2 or the DAC is, the `FDCAN12` bits while FDCAN1
+ *        or FDCAN2 is, and `FLITFEN` and `FLITFLPEN` follow the FLASH as `FLASHEN` does on the
+ *        STM32U5.
  */
 struct h5_rcc
 {
@@ -319,6 +421,8 @@ struct h5_rcc
   static constexpr auto const& secured          = h5::rcc_secured;
   static constexpr auto const& unit_registers   = h5::rcc_unit_registers;
   static constexpr auto const& unit_aliases     = h5::rcc_unit_aliases;
+  static constexpr auto const& unit_suffixes    = h5::rcc_unit_suffixes;
+  static constexpr auto const& backup_secured   = h5::rcc_backup_secured;
 
   static constexpr std::string_view reset_flags_register = "RCC_RSR";
   static constexpr std::uint32_t    sw_mask              = 0b11;

@@ -361,14 +361,34 @@ constexpr auto rcc_unit_registers = std::to_array<std::string_view>({
     "RCC_CCIPR1",     "RCC_CCIPR2",     "RCC_CCIPR3",
 });
 
+constexpr auto rcc_unit_suffixes =
+    std::to_array<std::string_view>({"SMEN", "AMEN", "RST", "EN", "SEL"});
+
+constexpr auto rcc_backup_secured = std::to_array<secured_group>({
+    {"", "RCC_BDCR", "BDRST"},
+});
+
 constexpr auto rcc_unit_aliases = std::to_array<unit_alias>({
-    {"DCMI_PSSI", "DCMI"   },
-    {"FSMC",      "FMC"    },
-    {"OTG",       "OTG_FS" },
-    {"ICACHE",    "ICache" },
-    {"DCACHE1",   "DCACHE" },
-    {"VREF",      "VREFBUF"},
-    {"RTCAPB",    "RTC"    },
+    {"ADCDAC",    "ADC1"    },
+    {"ADCDAC",    "ADC2"    },
+    {"ADCDAC",    "ADC4"    },
+    {"ADCDAC",    "DAC1"    },
+    {"LPTIM34",   "LPTIM3"  },
+    {"LPTIM34",   "LPTIM4"  },
+    {"OCTOSPI",   "OCTOSPI1"},
+    {"OCTOSPI",   "OCTOSPI2"},
+    {"SDMMC",     "SDMMC1"  },
+    {"SDMMC",     "SDMMC2"  },
+    {"TIMIC",     "TIM16"   },
+    {"TIMIC",     "TIM17"   },
+    {"TIMIC",     "LPTIM2"  },
+    {"DCMI_PSSI", "DCMI"    },
+    {"FSMC",      "FMC"     },
+    {"OTG",       "OTG_FS"  },
+    {"ICACHE",    "ICache"  },
+    {"DCACHE1",   "DCACHE"  },
+    {"VREF",      "VREFBUF" },
+    {"RTCAPB",    "RTC"     },
 });
 }
 
@@ -404,6 +424,8 @@ struct u5_rcc
   static constexpr auto const& secured          = u5::rcc_secured;
   static constexpr auto const& unit_registers   = u5::rcc_unit_registers;
   static constexpr auto const& unit_aliases     = u5::rcc_unit_aliases;
+  static constexpr auto const& unit_suffixes    = u5::rcc_unit_suffixes;
+  static constexpr auto const& backup_secured   = u5::rcc_backup_secured;
 
   static constexpr std::string_view reset_flags_register = "RCC_CSR";
   static constexpr std::uint32_t    sw_mask              = 0b11;

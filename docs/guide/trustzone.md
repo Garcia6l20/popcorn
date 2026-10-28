@@ -1,17 +1,18 @@
 # TrustZone
 
-popcorn runs the STM32U575 with TZEN=1. It models the Cortex-M33 Secure and Non-secure states,
-the SAU and the IDAU, the banked SCB, NVIC, SysTick and MPU registers, SG, BXNS, BLXNS,
-FNC_RETURN and SecureFault. On the STM32 side it models the GTZC TZSC, TZIC and MPCBB, the
-flash secure areas, HDP and PRIVBB, the 0x5xxx secure aliases, and the `SECCFGR` and `PRIVCFGR`
-bits of RCC, PWR, GPIO, EXTI, SYSCFG, FLASH, GPDMA and LPDMA. `OptionBytes(tzen=True)` turns it
-on:
+popcorn runs the STM32U575 and the STM32H573 with TZEN=1. It models the Cortex-M33 Secure and
+Non-secure states, the SAU and the IDAU, the banked SCB, NVIC, SysTick and MPU registers, SG,
+BXNS, BLXNS, FNC_RETURN and SecureFault. On the STM32 side it models the GTZC TZSC, TZIC and
+MPCBB, the flash secure areas, HDP and PRIVBB, the 0x5xxx secure aliases, and the `SECCFGR` and
+`PRIVCFGR` bits of RCC, PWR, GPIO, EXTI, FLASH and GPDMA, plus SYSCFG and LPDMA on the STM32U5.
+On the STM32H573 the SBS temporal isolation level HDPL closes the flash HDP areas.
+`OptionBytes(tzen=True)` turns it on:
 
 ```python
 --8<-- "guide/test_trustzone.py:describe"
 ```
 
-- The core boots Secure from `secboot`, 0x0C000000 by default on the STM32U5.
+- The core boots Secure from `secboot`, 0x0C000000 by default on the STM32U5 and the STM32H5.
 - `secwm1` and `secwm2` are the Secure flash pages of each bank, first and last included. The
   default `"all"` makes the whole bank Secure, as after TZEN goes from 0 to 1.
 - `option_bytes=None` keeps the description's option registers, and TrustZone stays off.

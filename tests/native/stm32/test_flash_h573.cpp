@@ -1,3 +1,4 @@
+#include "../../../native/src/core/machine_impl.hpp"
 #include "gtzc.hpp"
 #include "h573_secure_rig.hpp"
 #include "stm32_fixture.hpp"
@@ -5,15 +6,18 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1269,5 +1273,234 @@ TEST_CASE(
       CHECK(value("pc") == code + 10);
       CHECK(value("r3") == 0);
     }
+  }
+}
+
+namespace
+{
+using popcorn::bus_attrs;
+using popcorn::initiator;
+
+constexpr bus_attrs secure_priv{.by = initiator::cpu, .secure = true, .privileged = true};
+constexpr bus_attrs secure_unpriv{.by = initiator::cpu, .secure = true, .privileged = false};
+constexpr bus_attrs nonsecure_priv{.by = initiator::cpu, .secure = false, .privileged = true};
+constexpr bus_attrs nonsecure_unpriv{.by = initiator::cpu, .secure = false, .privileged = false};
+
+constexpr address       flash_ns      = 0x0800'0000;
+constexpr address       flash_s       = 0x0c00'0000;
+constexpr address       unused_secure = flash_s + 2 * sector_bytes;
+constexpr address       idle_s        = 0x3000'0100;
+constexpr address       code_s        = 0x3000'0200;
+constexpr address       vectors_s     = 0x3000'0400;
+constexpr address       handler_s     = 0x3000'0600;
+constexpr address       stack_s       = 0x3000'2000;
+constexpr address       sau_ctrl      = 0xe000'edd0;
+constexpr address       sau_rnr       = 0xe000'edd8;
+constexpr address       sau_rbar      = 0xe000'eddc;
+constexpr address       sau_rlar      = 0xe000'ede0;
+constexpr std::uint32_t flash_s_irq   = 7;
+constexpr std::uint32_t secure_key1   = 0x4567'0123;
+constexpr std::uint32_t secure_key2   = 0xcdef'89ab;
+constexpr std::uint16_t bkpt          = 0xbe01;
+
+auto four_secure_sectors() -> stm32::option_bytes
+{
+  return {
+      .tzen = true, .secwm1 = stm32::page_range{.first = 0, .last = 3},
+           .secwm2 = stm32::no_area{}
+  };
+}
+
+struct secure_flash
+{
+  popcorn::testing::h573_secure_rig r;
+
+  explicit secure_flash(
+      stm32::option_bytes const&  wanted = four_secure_sectors(),
+      popcorn::arch::fault_policy faults = popcorn::arch::fault_policy::stop)
+      : r{firmware, wanted, faults}
+  {
+    REQUIRE(r.f.target->mem().write(idle_s, 4, 0xE7FD'BF30).has_value());
+  }
+
+  [[nodiscard]] auto bus() const -> core::machine_services&
+  {
+    return core::machine_internals::services(*r.f.target);
+  }
+
+  [[nodiscard]] auto bit(std::string_view reg, std::string_view field) const -> std::uint32_t
+  {
+    return r.bit("FLASH", reg, field);
+  }
+
+  [[nodiscard]] auto sector_field(std::string_view reg, std::uint32_t sector) const -> std::uint32_t
+  {
+    auto const mask = bit(reg, "SNB");
+    return (sector << std::countr_zero(mask)) & mask;
+  }
+
+  void write(std::string_view reg, std::uint32_t value, bus_attrs attrs) const
+  {
+    REQUIRE(bus().write(r.at("FLASH", reg), 4, value, attrs).has_value());
+  }
+
+  void write(std::string_view peripheral, std::string_view reg, std::uint32_t value) const
+  {
+    REQUIRE(bus().write(r.at(peripheral, reg), 4, value, secure_priv).has_value());
+  }
+
+  [[nodiscard]] auto read(std::string_view reg, bus_attrs attrs) const -> std::uint32_t
+  {
+    auto const value = bus().read(r.at("FLASH", reg), 4, attrs);
+    REQUIRE(value.has_value());
+    return *value;
+  }
+
+  [[nodiscard]] auto peek(std::string_view reg) const -> std::uint32_t
+  {
+    return r.peek("FLASH", reg);
+  }
+
+  [[nodiscard]] auto word(address at) const -> std::uint32_t
+  {
+    auto const value = r.f.target->mem().read(at, 4);
+    REQUIRE(value.has_value());
+    return static_cast<std::uint32_t>(*value);
+  }
+
+  [[nodiscard]] auto value(std::string_view name) const -> std::uint32_t
+  {
+    return static_cast<std::uint32_t>(r.f.target->regs().read(*r.f.target->regs().find(name)));
+  }
+
+  [[nodiscard]] auto pending(std::uint32_t irq) const -> bool
+  {
+    return (word(0xe000'e200u + 4 * (irq / 32)) >> (irq % 32) & 1u) != 0;
+  }
+
+  [[nodiscard]] auto tzic(std::string_view field) const -> bool
+  {
+    return (r.peek("GTZC1_TZIC", "SR4") & r.bit("GTZC1_TZIC", "SR4", field)) != 0;
+  }
+
+  void clear_events() const
+  {
+    write("GTZC1_TZIC", "FCR4", ~0u);
+    REQUIRE(r.peek("GTZC1_TZIC", "SR4") == 0);
+  }
+
+  void unlock(bool secure) const
+  {
+    auto const attrs = secure ? secure_priv : nonsecure_priv;
+    auto const key   = secure ? "FLASH_SECKEYR" : "FLASH_NSKEYR";
+    write(key, secure_key1, attrs);
+    write(key, secure_key2, attrs);
+    auto const control = secure ? "FLASH_SECCR" : "FLASH_NSCR";
+    REQUIRE((peek(control) & bit(control, "LOCK")) == 0);
+  }
+
+  void clear_flags(bool secure) const
+  {
+    write(secure ? "FLASH_SECCCR" : "FLASH_NSCCR", ~0u, secure ? secure_priv : nonsecure_priv);
+  }
+
+  void store(address at, std::initializer_list<std::uint32_t> words, bus_attrs attrs) const
+  {
+    for(auto const [index, value] : std::views::enumerate(words))
+    {
+      REQUIRE(bus().write(at + 4 * static_cast<address>(index), 4, value, attrs).has_value());
+    }
+  }
+
+  void settle(std::chrono::microseconds wait = std::chrono::microseconds{3000}) const
+  {
+    r.f.set("pc", idle_s | 1u);
+    auto const until = vtime{
+        r.f.target->virtual_clock().time().ps + static_cast<std::uint64_t>(wait.count()) * us};
+    REQUIRE(
+        r.f.run_to_stop({.max_instructions = icount{50'000'000}, .until_time = until}).reason
+        == stop_reason::time);
+  }
+
+  void put(address at, std::initializer_list<std::uint16_t> code) const
+  {
+    for(auto const [index, half] : std::views::enumerate(code))
+    {
+      REQUIRE(r.f.target->mem().write(at + 2 * static_cast<address>(index), 2, half));
+    }
+  }
+
+  void sau_region(std::uint32_t number, address base, address limit) const
+  {
+    auto mem = r.f.target->mem(true);
+    REQUIRE(mem.write(sau_rnr, 4, number));
+    REQUIRE(mem.write(sau_rbar, 4, base));
+    REQUIRE(mem.write(sau_rlar, 4, (limit & ~0x1fu) | 1u));
+  }
+
+  void sau(std::uint32_t control) const
+  {
+    REQUIRE(r.f.target->mem(true).write(sau_ctrl, 4, control));
+  }
+
+  void secure_vectors() const
+  {
+    auto mem = r.f.target->mem(true);
+    put(handler_s, {bkpt});
+    REQUIRE(mem.write(vectors_s, 4, stack_s));
+    REQUIRE(mem.write(vectors_s + 4 * 3, 4, handler_s | 1u));
+    REQUIRE(mem.write(0xe000'ed08, 4, vectors_s));
+    r.f.set("msp", stack_s);
+  }
+};
+}
+
+TEST_CASE(
+    "RM0481 7.11.10 and 7.11.14: FLASH_SECCCR clears the FLASH_SECSR flags and leaves FLASH_NSSR, "
+    "FLASH_SECSR ignores writes")
+{
+  secure_flash const s;
+  s.unlock(true);
+  s.write("FLASH_SECCR", s.bit("FLASH_SECCR", "PG") | s.bit("FLASH_SECCR", "EOPIE"), secure_priv);
+  s.store(unused_secure, {1, 2, 3, 4}, secure_priv);
+  s.settle();
+  auto const eop_s = s.bit("FLASH_SECSR", "EOP");
+  REQUIRE(s.peek("FLASH_SECSR") == eop_s);
+  REQUIRE(s.pending(flash_s_irq));
+  s.store(unused_secure - flash_s + flash_ns + 0x10, {5}, nonsecure_priv);
+  REQUIRE((s.peek("FLASH_NSSR") & s.bit("FLASH_NSSR", "WRPERR")) != 0);
+  s.write("FLASH_SECSR", ~0u, secure_priv);
+  CHECK(s.peek("FLASH_SECSR") == eop_s);
+  s.write("FLASH_SECCCR", s.bit("FLASH_SECCCR", "CLR_EOP"), nonsecure_priv);
+  CHECK(s.peek("FLASH_SECSR") == eop_s);
+  s.write("FLASH_SECCCR", s.bit("FLASH_SECCCR", "CLR_EOP"), secure_priv);
+  CHECK(s.peek("FLASH_SECSR") == 0);
+  CHECK((s.peek("FLASH_NSSR") & s.bit("FLASH_NSSR", "WRPERR")) != 0);
+  CHECK(s.read("FLASH_SECCCR", secure_priv) == 0);
+  s.write("FLASH_SECCR", 0, secure_priv);
+  s.write("FLASH_NSCCR", ~0u, nonsecure_priv);
+  CHECK(s.peek("FLASH_NSSR") == 0);
+}
+
+TEST_CASE("an H5 flash whose banks need more block registers than the H5 traits hold throws")
+{
+  auto desc = h573();
+  for(auto& region : desc.regions)
+  {
+    if(region.controller == "FLASH")
+    {
+      region.size *= 2;
+    }
+  }
+  stm32::register_builtin_models();
+  try
+  {
+    core::machine const target{
+        desc, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()};
+    FAIL("the machine built");
+  }
+  catch(popcorn::config_error const& error)
+  {
+    CHECK(error.expected() == "8 block registers per bank, the traits hold 4");
   }
 }

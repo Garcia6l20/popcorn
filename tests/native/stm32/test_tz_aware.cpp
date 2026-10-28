@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <initializer_list>
 #include <memory>
 #include <span>
 #include <string>
@@ -369,6 +370,59 @@ TEST_CASE("RM0456 11.5.1: a peripheral's RCC bits follow its TZSC or own securit
   REQUIRE(r.peek("FLASH", "SECCR") == bit("FLASH", "SECCR", "INV"));
   r.write("RCC", "AHB1ENR", r.peek("RCC", "AHB1ENR") & ~flash, nonsecure_priv);
   CHECK((r.peek("RCC", "AHB1ENR") & flash) == 0);
+}
+
+TEST_CASE(
+    "RM0456 11.5.1: a kernel clock selection shared by several peripherals is Secure while any "
+    "of them is")
+{
+  struct row
+  {
+    std::string_view tzsc;
+    std::string_view sec_reg;
+    std::string_view sec;
+    std::string_view reg;
+    std::string_view field;
+  };
+  for(auto const& one : std::initializer_list<row>{
+          {"GTZC2_TZSC", "SECCFGR1", "DAC1SEC",         "CCIPR3", "ADCDACSEL" },
+          {"GTZC2_TZSC", "SECCFGR1", "ADC4SEC",         "CCIPR3", "ADCDACSEL" },
+          {"GTZC1_TZSC", "SECCFGR3", "ADC1SEC",         "CCIPR3", "ADCDACSEL" },
+          {"GTZC2_TZSC", "SECCFGR1", "LPTIM4SEC",       "CCIPR3", "LPTIM34SEL"},
+          {"GTZC2_TZSC", "SECCFGR1", "LPTIM3SEC",       "CCIPR3", "LPTIM34SEL"},
+          {"GTZC1_TZSC", "SECCFGR3", "SDMMC1SEC",       "CCIPR2", "SDMMCSEL"  },
+          {"GTZC1_TZSC", "SECCFGR3", "OCTOSPI1_REGSEC", "CCIPR2", "OCTOSPISEL"},
+          {"GTZC1_TZSC", "SECCFGR2", "TIM16SEC",        "CCIPR1", "TIMICSEL"  },
+          {"GTZC1_TZSC", "SECCFGR2", "TIM17SEC",        "CCIPR1", "TIMICSEL"  },
+          {"GTZC1_TZSC", "SECCFGR1", "LPTIM2SEC",       "CCIPR1", "TIMICSEL"  },
+  })
+  {
+    std::string const name = std::string{one.sec} + " " + std::string{one.field};
+    CAPTURE(name);
+    for(auto const secured : {false, true})
+    {
+      CAPTURE(secured);
+      rig const r{
+          true, {.tzen = true, .secwm1 = stm32::no_area{}, .secwm2 = stm32::no_area{}}
+      };
+      auto const bits = bit("RCC", one.reg, one.field);
+      r.write(
+          one.tzsc, one.sec_reg, secured ? bit(one.tzsc, one.sec_reg, one.sec) : 0, secure_priv);
+      r.write("RCC", one.reg, r.peek("RCC", one.reg) | bits, nonsecure_priv);
+      CHECK((r.peek("RCC", one.reg) & bits) == (secured ? 0 : bits));
+    }
+  }
+  rig const r{
+      true, {.tzen = true, .secwm1 = stm32::no_area{}, .secwm2 = stm32::no_area{}}
+  };
+  auto const sdmmc = bit("RCC", "CCIPR2", "SDMMCSEL");
+  auto const octo  = bit("RCC", "CCIPR2", "OCTOSPISEL");
+  r.write("GTZC1_TZSC", "SECCFGR3", bit("GTZC1_TZSC", "SECCFGR3", "SDMMC2SEC"), secure_priv);
+  r.write("RCC", "CCIPR2", r.peek("RCC", "CCIPR2") | sdmmc | octo, nonsecure_priv);
+  CHECK((r.peek("RCC", "CCIPR2") & (sdmmc | octo)) == octo);
+  r.write("GTZC1_TZSC", "SECCFGR3", bit("GTZC1_TZSC", "SECCFGR3", "OCTOSPI2_REGSEC"), secure_priv);
+  r.write("RCC", "CCIPR2", r.peek("RCC", "CCIPR2") & ~octo, nonsecure_priv);
+  CHECK((r.peek("RCC", "CCIPR2") & octo) == octo);
 }
 
 TEST_CASE("RM0456 11.5.1: RNGRST of a Secure RNG ignores a Non-secure write, ADC12RST stores")

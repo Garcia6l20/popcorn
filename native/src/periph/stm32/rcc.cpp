@@ -44,9 +44,6 @@ auto lower(std::string_view name) -> std::string
   return out;
 }
 
-constexpr auto rcc_unit_suffixes =
-    std::to_array<std::string_view>({"SMEN", "AMEN", "RST", "EN", "SEL"});
-
 template <typename Traits>
 inline constexpr std::size_t source_count = role_count<typename Traits::source>;
 
@@ -219,19 +216,22 @@ template <typename Signal> struct timer
  *        `HSIDIVF` and sets it again after the ready delay. Deviation: on silicon the rate
  *        follows when `HSIDIVF` sets. `HSIDIV` keeps its value while HSI feeds a PLL whose
  *        PLLxON is set. `TIMPRE`, RM0481 11.8.5, sets the timer clocks of APB1 and APB2.
- *        `VSWRST` resets the backup domain, RM0481 11.3.3. The STM32H5 traits hold no
- *        TrustZone tables.
+ *        `VSWRST` resets the backup domain, RM0481 11.3.3.
  *
  *        TrustZone, RM0456 11.5 and Table 117: the bits each `RCC_SECCFGR` bit secures, and the
  *        reset, enable, sleep enable, autonomous enable and kernel clock selection bits of a
  *        Secure peripheral, are RAZ/WI to a Non-secure access, with no event. A peripheral is
  *        Secure by its TZSC bit, or for a TrustZone-aware model by its own security bits, the
- *        FLASH by RM0456 Table 62. A bit whose name gives no peripheral of the part stays
- *        Non-secure, such as the GTZCn and shared kernel clock selections. Deviation: SRAMnEN
+ *        FLASH by RM0456 Table 62. A bit shared by several peripherals, such as `ADCDACSEL` or
+ *        `LPTIM34SEL`, is Secure while any of them is, as "its related clock source selection"
+ *        of RM0456 11.5.1 and RM0481 11.5.1 reads for each of them. A bit whose name gives no
+ *        peripheral of the part stays Non-secure, such as the GTZCn. Deviation: SRAMnEN
  *        and SRAMnSMEN stay Non-secure, the MPCBB and INVSECSTATE rule of RM0456 5.4 is not
- *        modelled. `BDRST` is
- *        Secure while the RTC or the TAMP has a secure function, RM0456 11.5.1. `SPRIV` makes
- *        the Secure bits privileged, `NSPRIV` the others, RAZ/WI to an unprivileged access.
+ *        modelled. `BDRST` is Secure while the RTC or the TAMP has a secure function, RM0456
+ *        11.5.1. The STM32H5 follows RM0481 11.5 and Table 122 the same way, through the H5
+ *        traits, the sleep enables in `RCC_xxxLPENR`, and `RTCPRE`, `RTCEN` and `RTCSEL` Secure
+ *        in place of `BDRST`. `SPRIV` makes the Secure bits privileged, `NSPRIV` the others,
+ *        RAZ/WI to an unprivileged access.
  *        `RCC_SECCFGR` reads for every transaction and takes Secure writes, privileged with SPRIV
  *        set. A Non-secure write to it is ignored with an illegal access event. `RCC_PRIVCFGR`
  *        takes privileged writes, SPRIV Secure ones only. A write of `RCC_CICR` clears the
@@ -378,6 +378,7 @@ private:
   std::vector<unit_bits>                               units_;
   std::vector<cross_ref>                               flag_clears_;
   std::array<trustzone_aware const*, 2>                backup_units_{};
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> backup_secured_;
   std::vector<std::pair<std::uint32_t, std::uint32_t>> words_;
   peripheral_security*                                 firewall_{};
   bool                                                 units_resolved_{};
@@ -479,7 +480,21 @@ template <> struct rcc_tables<h5_rcc>
        }
   };
 
-  static constexpr std::array<write_entry<model>, 0> trustzone_writes{};
+  static constexpr auto trustzone_writes = std::to_array<write_entry<model>>({
+      {"RCC_HSICFGR",    nullptr             },
+      {"RCC_CSICFGR",    nullptr             },
+      {"RCC_CRRCR",      nullptr             },
+      {"RCC_CIFR",       nullptr             },
+      {"RCC_CICR",       &model::cicr_written},
+      {"RCC_AHB1LPENR",  nullptr             },
+      {"RCC_AHB2LPENR",  nullptr             },
+      {"RCC_AHB4LPENR",  nullptr             },
+      {"RCC_APB1LLPENR", nullptr             },
+      {"RCC_APB1HLPENR", nullptr             },
+      {"RCC_APB2LPENR",  nullptr             },
+      {"RCC_APB3LPENR",  nullptr             },
+      {"RCC_PRIVCFGR",   nullptr             },
+  });
 };
 
 constexpr std::size_t max_reset_registers = 16;
@@ -1181,14 +1196,18 @@ template <typename Traits> void rcc_model<Traits>::add_security_rules()
   nonsecure_privileged_ = field("RCC_PRIVCFGR", "NSPRIV");
   for(auto const& group : Traits::secured)
   {
-    auto const& described = describe(group.reg);
     for(auto const name : std::views::split(group.fields, ' '))
     {
-      auto const wanted = std::string_view{name};
-      if(std::ranges::contains(described.fields, wanted, &field_desc::name))
-      {
-        secured_.emplace_back(field("RCC_SECCFGR", group.bit), field(group.reg, wanted));
-      }
+      secured_.emplace_back(
+          field("RCC_SECCFGR", group.bit), field(group.reg, std::string_view{name}));
+    }
+  }
+  for(auto const& group : Traits::backup_secured)
+  {
+    for(auto const name : std::views::split(group.fields, ' '))
+    {
+      auto const bits = field(group.reg, std::string_view{name});
+      backup_secured_.emplace_back(bits.offset, bits.mask());
     }
   }
   for(auto const name : Traits::unit_registers)
@@ -1196,21 +1215,27 @@ template <typename Traits> void rcc_model<Traits>::add_security_rules()
     for(auto const& bits : describe(name).fields)
     {
       auto const suffix = std::ranges::find_if(
-          rcc_unit_suffixes, [&](std::string_view s) { return bits.name.ends_with(s); });
-      if(suffix == rcc_unit_suffixes.end())
+          Traits::unit_suffixes, [&](std::string_view s) { return bits.name.ends_with(s); });
+      if(suffix == Traits::unit_suffixes.end())
       {
         continue;
       }
-      auto stem = std::string_view{bits.name}.substr(0, bits.name.size() - suffix->size());
-      if(auto const alias = std::ranges::find(Traits::unit_aliases, stem, &unit_alias::first);
-         alias != Traits::unit_aliases.end())
+      auto const stem = std::string_view{bits.name}.substr(0, bits.name.size() - suffix->size());
+      auto owners     = Traits::unit_aliases
+                      | std::views::filter([stem](unit_alias const& a) { return a.first == stem; })
+                      | std::views::values
+                      | std::ranges::to<std::vector>();
+      if(owners.empty())
       {
-        stem = alias->second;
+        owners.push_back(stem);
       }
-      if(auto const unit = unit_named(ctx_.part, stem))
+      for(auto const owner : owners)
       {
-        units_.push_back(
-            {.offset = reg(name).offset, .bits = field(name, bits.name).mask(), .unit = *unit});
+        if(auto const unit = unit_named(ctx_.part, owner))
+        {
+          units_.push_back(
+              {.offset = reg(name).offset, .bits = field(name, bits.name).mask(), .unit = *unit});
+        }
       }
     }
   }
@@ -1324,11 +1349,18 @@ auto rcc_model<Traits>::guard(std::uint32_t word, access_ctx const& ctx, bool wr
       secured |= rule.bits;
     }
   }
-  if(word == bdcr_.offset and std::ranges::any_of(backup_units_, [](trustzone_aware const* unit) {
-       return unit != nullptr and unit->secure_function();
-     }))
+  if(std::ranges::contains(backup_secured_, word, &std::pair<std::uint32_t, std::uint32_t>::first)
+     and std::ranges::any_of(backup_units_, [](trustzone_aware const* unit) {
+           return unit != nullptr and unit->secure_function();
+         }))
   {
-    secured |= names_[rcc_role::backup_reset].mask();
+    for(auto const& [offset, bits] : backup_secured_)
+    {
+      if(offset == word)
+      {
+        secured |= bits;
+      }
+    }
   }
   auto const known =
       std::ranges::find(words_, word, &std::pair<std::uint32_t, std::uint32_t>::first);

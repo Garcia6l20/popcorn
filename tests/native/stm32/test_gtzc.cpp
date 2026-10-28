@@ -2001,7 +2001,9 @@ TEST_CASE("gtzc_fields maps every TZSC SECCFGRx and TZIC IERx field of the H573,
   CHECK(named("GTZC1_TZSC", "LPUART1SEC") == names{"LPUART"});
   CHECK(named("GTZC1_TZSC", "DAC1SEC") == names{"DAC"});
   CHECK(named("GTZC1_TZSC", "I3C1SEC") == names{"I3C"});
-  CHECK(named("GTZC1_TZSC", "OCTOSPI1SEC") == names{"OCTOSPI"});
+  CHECK(named("GTZC1_TZSC", "OCTOSPI1SEC") == names{"OCTOSPI", "DLYBOS1"});
+  CHECK(named("GTZC1_TZSC", "SDMMC1SEC") == names{"SDMMC1", "DLYBSD1"});
+  CHECK(named("GTZC1_TZIC", "SDMMC2IE") == names{"SDMMC2", "DLYBSD2"});
   CHECK(named("GTZC1_TZSC", "ICACHESEC") == names{"ICACHE"});
   CHECK(named("GTZC1_TZSC", "DCMISEC") == names{"DCMI", "PSSI"});
   CHECK(named("GTZC1_TZIC", "FLASH_REGIE") == names{"FLASH"});
@@ -2031,13 +2033,12 @@ TEST_CASE(
     }
   }
   CHECK(
-      unruled == std::set<std::string>{"DLYBOS1",      "DLYBSD1",      "DLYBSD2",      "EXTI",
-                                       "FLASH",        "GPDMA1",       "GPDMA2",       "GPIOA",
-                                       "GPIOB",        "GPIOC",        "GPIOD",        "GPIOE",
-                                       "GPIOF",        "GPIOG",        "GPIOH",        "GPIOI",
-                                       "GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3", "GTZC1_TZIC",
-                                       "GTZC1_TZSC",   "OTFDEC1",      "PWR",          "RCC",
-                                       "RTC",          "SBS",          "TAMP"});
+      unruled == std::set<std::string>{"EXTI",       "FLASH",        "GPDMA1",       "GPDMA2",
+                                       "GPIOA",      "GPIOB",        "GPIOC",        "GPIOD",
+                                       "GPIOE",      "GPIOF",        "GPIOG",        "GPIOH",
+                                       "GPIOI",      "GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3",
+                                       "GTZC1_TZIC", "GTZC1_TZSC",   "OTFDEC1",      "PWR",
+                                       "RCC",        "RTC",          "SBS",          "TAMP"});
 }
 
 TEST_CASE(
@@ -2064,6 +2065,9 @@ TEST_CASE(
           {"SECCFGR1", "I3C1SEC",     "I3C",     "CFGR",    0x1,         "SR1", "I3C1F"    },
           {"SECCFGR3", "OCTOSPI1SEC", "OCTOSPI", "DCR1",    0x1,         "SR3", "OCTOSPI1F"},
           {"SECCFGR3", "ICACHESEC",   "ICACHE",  "IER",     0x2,         "SR3", "ICACHEF"  },
+          {"SECCFGR3", "SDMMC1SEC",   "DLYBSD1", "CR",      0x1,         "SR3", "SDMMC1F"  },
+          {"SECCFGR3", "SDMMC2SEC",   "DLYBSD2", "CR",      0x1,         "SR3", "SDMMC2F"  },
+          {"SECCFGR3", "OCTOSPI1SEC", "DLYBOS1", "CR",      0x1,         "SR3", "OCTOSPI1F"},
   })
   {
     std::string const name{one.peripheral};

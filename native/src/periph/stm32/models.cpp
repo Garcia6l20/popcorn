@@ -185,6 +185,8 @@ constexpr std::array<builtin, 57> builtins{
      }
 };
 
+/** @brief IDAU map of the STM32U5, RM0456 2.2 Table 3, and of the STM32H5, whose RM0481 2.2
+ *         Figures 2 to 4 give the same boundaries. */
 constexpr auto u5_idau = std::to_array<idau_region>({
     // Code area, Non-secure flash and SRAM aliases, RM0456 2.2 Table 3.
     {.start = 0x0000'0000, .end = 0x0c00'0000,   .nsc = false, .exempt = false},

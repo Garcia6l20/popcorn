@@ -1339,8 +1339,9 @@ static_assert(flag_matches_roles(
  * program over a word that is not erased writes the data as given.
  * - Erase, RM0481 7.3.6: STRT with SER erases sector SNB of the physical bank BKSEL, with BER
  *   that bank, with MER both banks. STRT with none or more than one of them is PGSERR, 7.9.4.
- * - EOP sets at the end of every operation. FLASH_NSSR is read-only: FLASH_NSCCR clears its
- *   flags through the description's cross rules, 7.11.13. FLASH_IRQn follows EOP with EOPIE,
+ * - EOP sets at the end of every operation. FLASH_NSSR and FLASH_SECSR are read-only:
+ *   FLASH_NSCCR and FLASH_SECCCR clear their flags through the description's cross rules,
+ *   7.11.13 and 7.11.14. FLASH_IRQn follows EOP with EOPIE,
  *   WRPERR, PGSERR, STRBERR and INCERR each with its own enable, and OPTCHANGEERR with
  *   OPTCHANGEERRIE, 7.11.11.
  * - Option unlock, 7.4.3 and 7.11.8: OPTLOCK and OPTSTRT are bits 0 and 1 of FLASH_OPTCR, and
@@ -1370,6 +1371,9 @@ static_assert(flag_matches_roles(
  * - ECC, 7.9.10: ECCD and its record are in FLASH_ECCDETR, ADDR_ECC the 128-bit word index in
  *   the bank, and clearing ECCD clears the record. ECCC is in FLASH_ECCCORR.
  * - Latency: RM0481 Table 48 per VOS level, with no LPM. No oscillator is held for programming.
+ *   WRHIGHFREQ is compared with the same table at an erase START and at a store with PG set, one
+ *   model_warning per HCLK, range and value since the last restore, model_error under
+ *   strict_peripherals.
  * - Timings default to DS14121 Rev 5 Table 52, h5_flash_timing.
  */
 template <typename Traits>
@@ -1449,6 +1453,7 @@ public:
   void               secure_block_written(std::uint32_t old, std::uint32_t now);
   void               hide_written(std::uint32_t old, std::uint32_t now);
   void               extension_written(std::uint32_t old, std::uint32_t now);
+  [[nodiscard]] auto isolation() const -> temporal_isolation const*;
   void               privilege_written(std::uint32_t old, std::uint32_t now);
   void               privileged_block_written(std::uint32_t old, std::uint32_t now);
 
@@ -1566,6 +1571,8 @@ private:
   secure_flash_state                                                secure_;
   illegal_access_controller*                                        events_{};
   bool                                                              events_linked_{};
+  mutable temporal_isolation const*                                 isolation_{};
+  mutable bool                                                      isolation_resolved_{};
 };
 
 template <typename Traits>
@@ -1742,6 +1749,14 @@ flash_model<Traits>::flash_model(
     storage_          = &*own;
     auto const needed = (banks().size / Traits::page_bytes + pages_per_block_register - 1)
                       / pages_per_block_register;
+    if(needed > Traits::block_registers_per_bank)
+    {
+      throw config_error(
+          desc.name, 0, std::string{Traits::secure_block_registers.front()},
+          std::format(
+              "{} block registers per bank, the traits hold {}", needed,
+              Traits::block_registers_per_bank));
+    }
     for(std::size_t bank = 0; bank < 2; ++bank)
     {
       for(std::size_t index = 0; index < needed; ++index)
@@ -2554,7 +2569,7 @@ template <typename Traits> auto flash_model<Traits>::rule_of(std::uint32_t at) c
   auto const hide        = unit_.find(bank == 0 ? unit_role::hide_bank1 : unit_role::hide_bank2);
   auto const extension =
       unit_.find(bank == 0 ? unit_role::hide_extension1 : unit_role::hide_extension2);
-  auto const* const isolation = dynamic_cast<temporal_isolation const*>(ctx_.peers.find("SBS"));
+  auto const* const isolation = this->isolation();
   policy.secure               = policy.secure or watermarked;
   policy.hidden               = Traits::hidden(
       {.watermark       = first,
@@ -3618,7 +3633,7 @@ void flash_model<Traits>::hide_written(std::uint32_t old, std::uint32_t now)
 template <typename Traits>
 void flash_model<Traits>::extension_written(std::uint32_t old, std::uint32_t now)
 {
-  auto const* const isolation = dynamic_cast<temporal_isolation const*>(ctx_.peers.find("SBS"));
+  auto const* const isolation = this->isolation();
   auto              kept      = old;
   if(isolation == nullptr or isolation->isolation_level() <= 2)
   {
@@ -3629,7 +3644,16 @@ void flash_model<Traits>::extension_written(std::uint32_t old, std::uint32_t now
     }
   }
   regs_.poke(written_word_, kept);
-  policy_written(old, kept);
+}
+
+template <typename Traits> auto flash_model<Traits>::isolation() const -> temporal_isolation const*
+{
+  if(not isolation_resolved_ and not ctx_.peers.all().empty())
+  {
+    isolation_resolved_ = true;
+    isolation_          = dynamic_cast<temporal_isolation const*>(ctx_.peers.find("SBS"));
+  }
+  return isolation_;
 }
 
 template <typename Traits>

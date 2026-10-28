@@ -50,3 +50,11 @@ target_reg = "FLASH_NSSR"
 effect = "clear"
 pairs = { CLR_EOP = "EOP", CLR_WRPERR = "WRPERR", CLR_PGSERR = "PGSERR", CLR_STRBERR = "STRBERR", CLR_INCERR = "INCERR", CLR_OBKERR = "OBKERR", CLR_OBKWERR = "OBKWERR", CLR_OPTCHANGEERR = "OPTCHANGEERR" }
 source = "RM0481 Rev 5, 7.11.9/7.11.13 FLASH nonsecure status register (FLASH_NSSR) / FLASH nonsecure clear control register (FLASH_NSCCR): a write of 1 to CLR_x clears the NSSR flag"
+
+[[cross]]
+instances = ["FLASH"]
+reg = "FLASH_SECCCR"
+target_reg = "FLASH_SECSR"
+effect = "clear"
+pairs = { CLR_EOP = "EOP", CLR_WRPERR = "WRPERR", CLR_PGSERR = "PGSERR", CLR_STRBERR = "STRBERR", CLR_INCERR = "INCERR", CLR_OBKERR = "OBKERR", CLR_OBKWERR = "OBKWERR" }
+source = "RM0481 Rev 5, 7.11.10/7.11.14 FLASH secure status register (FLASH_SECSR) / FLASH secure clear control register (FLASH_SECCCR): a write of 1 to CLR_x clears the SECSR flag"

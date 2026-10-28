@@ -16,8 +16,8 @@ pages with PER and PNB, takes the flags back through `FLASH_NSCCR`, sets EOP wit
 interrupt enable, and needs 5 wait states at 250 MHz in VOS0.
 
 `MachineDescription(strict=True)` makes any register access the models do not serve, and any
-flash wait state count below RM0481 Table 48 for the clock and voltage range, fail the run
-instead of being logged.
+flash wait state count or programming delay below RM0481 Table 48 for the clock and voltage
+range, fail the run instead of being logged.
 
 ## Run
 

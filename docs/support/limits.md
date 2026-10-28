@@ -26,9 +26,8 @@ The [part pages](generated/parts.md) list the instances with no model.
 - The debug blocks TPIU, ETM, CTI and the ROM tables have no model. A firmware or DMA access
   reads 0 and drops writes, with one `model_warning` per block. The ROM tables read 0, so a ROM
   table walk ends at its first entry.
-- The STM32H573 CRS has no model. `CRS_CR` and `CRS_CFGR` read and write as storage, the HSI48
-  trim never changes and `CRS_ISR` never sets SYNCOKF or SYNCWARNF. Firmware that enables
-  AUTOTRIMEN, as the USB stack does, runs on the untrimmed HSI48.
+- The CRS has no model. `CRS_CR`, `CRS_CFGR` and `CRS_ISR` are storage: `CRS_ISR` never sets
+  SYNCOKF or SYNCWARNF, and the HSI48 runs at 48 MHz whatever TRIM holds.
 
 ## Memory map
 
@@ -176,9 +175,10 @@ Source: [gtzc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 - The GTZC models serve only with TrustZone enabled, `OptionBytes(tzen=True)`.
 - No debugger access raises a TZIC event, so a host view leaves the TZIC flags and GTZC_IRQn as
   they are.
-- STM32H573: `HDMICECSEC` and `HDMICECIE` name no peripheral, the SVD has no HDMI-CEC. DLYBOS1,
-  DLYBSD1 and DLYBSD2 have no SEC bit, RM0481 Table 3 lists no delay block, so they stay
-  Non-secure.
+- STM32H573: `HDMICECSEC` and `HDMICECIE` name no peripheral, the SVD has no HDMI-CEC.
+- A delay block takes the SEC bit of the peripheral it serves, as on the STM32U5: DLYBOS1 the
+  OCTOSPI, DLYBSD1 and DLYBSD2 SDMMC1 and SDMMC2. RM0456 Table 5 and RM0481 Table 3 list no delay
+  block, and RM0456 Table 297 and RM0481 Table 275 give the same pairs.
 
 ## HASH
 
@@ -311,7 +311,7 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - The voltage scaling ready bits follow a VOS write after the board's `ready_delay`, 50 us by
   default. A write that steps to a higher voltage clears VOSRDY for that delay, one that steps to
   a lower voltage keeps VOSRDY set. ACTVOSRDY clears for the delay on every change.
-- STM32H5: PWR_USBSCR is storage. USB33DEN and USB33SV have no effect on the USB model.
+- STM32H5: PWR_USBSCR is storage, the USB model runs whatever USB33DEN and USB33SV hold.
 
 ## RCC
 
@@ -345,8 +345,17 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - While a reset bit is 1, bus writes to that peripheral are ignored, from the CPU, DMA and
   debugger alike. The TrustZone filter still runs first, so an illegal access still raises its
   event. Reads are not blocked. RM0456 gives no access rule for a peripheral held in reset.
+- TrustZone: an RCC bit shared by several peripherals is Secure while any of them is, on the
+  STM32U5 and the STM32H5 alike. RM0456 11.5.1 and RM0481 11.5.1 secure "its related clock
+  source selection" for each Secure peripheral and name no rule for a shared one. The shared bits
+  are `ADCDACSEL`, `LPTIM34SEL`, `OCTOSPISEL`, `SDMMCSEL` and `TIMICSEL` on the STM32U5,
+  `ADCDACSEL`, `TIMICSEL` and the `FDCAN12` bits on the STM32H5.
+- STM32H5 TrustZone: `RCC_CR.HSIDIV`, `HSIDIVF` and the `RCC_CFGR2` `AHBxDIS` and `APBxDIS` bits
+  take Non-secure writes, RM0481 Table 122 lists them under no security bit.
 - STM32H5, RM0481 11.8.1: a write of `RCC_CR.HSIDIV` sets the HSI rate at once. `HSIDIVF` reads
   0 until the RCC ready delay ends, while on silicon the rate changes when `HSIDIVF` sets.
+- Without TrustZone, a coverage report classes `RCC_CIFR` and `RCC_CICR` as `unimplemented`. The
+  RCC sets the `RCC_CIFR` flags `RCC_CIER` enables, and a `RCC_CICR` write clears them.
 
 ## RNG
 
@@ -394,13 +403,13 @@ Source: [sai.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/spi.cpp)
 
 - Half duplex, CRC, TI mode, the autonomous trigger and SS timing are not modelled. The SPI runs
-  as a plain full-duplex or simplex SPI.
+  as a plain full-duplex or simplex SPI. One model_warning per machine comes at the first transfer
+  started with SPI_CFG2.SP, MIDI or MSSI or SPI_CFG1.CRCEN set.
 - The dummy frame RM0456 Figure 858 shows ahead of the UDRDR pattern is UDRDR too, and UDR rises
   at once, with no propagation latency.
 - RM0481 Table 645 limits SPI4 to SPI6 of the STM32H5 to DSIZE of 16 bits and CRC of 17 bits.
   The model accepts the DSIZE values of SPI1 to SPI3 there, and the CRC is not modelled.
-- SPI_I2SCFGR of the STM32H5 SPI1 to SPI3 is storage: the I2S mode is not modelled. SPI_CFG2.SP,
-  MIDI and MSSI and SPI_CFG1.CRCEN log one model_warning when set and have no effect.
+- SPI_I2SCFGR of the STM32H5 SPI1 to SPI3 is storage: the I2S mode is not modelled.
 
 ## SBS
 

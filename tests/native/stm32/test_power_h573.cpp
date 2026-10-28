@@ -2,6 +2,7 @@
 #include "stm32_fixture.hpp"
 #include "voltage_range.hpp"
 
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
@@ -286,7 +287,7 @@ TEST_CASE("coverage classifies PWR_VOSSR as served and USBSCR as unimplemented")
 
 TEST_CASE(
     "RM0481 10.9 Table 114: a PWR_SECCFGR group bit makes its registers WI to Non-secure writes, "
-    "Non-secure reads see them")
+    "Non-secure reads see them, Table 114 against 10.9.1 RAZ")
 {
   struct row
   {
@@ -367,4 +368,27 @@ TEST_CASE("RM0481 10.9: a Non-secure PWR_SECCFGR write is WI, a Non-secure read 
   r.write("PWR", "PWR_SECCFGR", 0, false);
   CHECK(r.peek("PWR", "PWR_SECCFGR") == lpm);
   CHECK(r.read("PWR", "PWR_SECCFGR", false) == lpm);
+}
+
+TEST_CASE("an H573 description without PWR_VOSCR.VOS throws config_error at TZEN=0 and 1")
+{
+  auto desc = h573();
+  auto pwr =
+      std::ranges::find(desc.peripherals, std::string_view{"PWR"}, &popcorn::peripheral_desc::name);
+  REQUIRE(pwr != desc.peripherals.end());
+  auto vos =
+      std::ranges::find(pwr->registers, std::string_view{"VOSCR"}, &popcorn::register_desc::name);
+  REQUIRE(vos != pwr->registers.end());
+  REQUIRE(
+      std::erase_if(vos->fields, [](popcorn::field_desc const& f) { return f.name == "VOS"; })
+      == 1);
+  stm32::register_builtin_models();
+  CHECK_THROWS_AS(
+      core::machine(desc, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()),
+      popcorn::config_error);
+  CHECK_THROWS_AS(
+      core::machine(
+          desc, popcorn::arch::armv8m::factory(),
+          popcorn::testing::h573_secure_rig::options({.tzen = true})),
+      popcorn::config_error);
 }
