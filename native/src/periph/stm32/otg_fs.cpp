@@ -1,4 +1,5 @@
 #include "factories.hpp"
+#include "frame_signal.hpp"
 #include "model_base.hpp"
 #include "usb_device_link.hpp"
 
@@ -359,6 +360,7 @@ private:
   [[nodiscard]] auto link_state() const -> usb_link_state const&;
 
   register_file&                    regs_;
+  frame_output                      frames_;
   irq_line&                         line_;
   std::array<in_fields, endpoints>  in_;
   std::array<out_fields, endpoints> out_;
@@ -508,7 +510,7 @@ otg_fs::otg_fs(
     model_context&                  ctx,
     peripheral_desc const&          desc,
     std::optional<usb_host_options> wired)
-    : dispatch_model{ctx, desc, "OTG_FS", otg_fs_writes}, regs_{ctx.regs},
+    : dispatch_model{ctx, desc, "OTG_FS", otg_fs_writes}, regs_{ctx.regs}, frames_{ctx.peers},
       line_{irq("OTG_FS_IRQn")}, in_{[this]<std::size_t... n>(std::index_sequence<n...>) {
         return std::array<in_fields, endpoints>{in_fields_of(n)...};
       }(std::make_index_sequence<endpoints>{})},
@@ -1272,6 +1274,7 @@ void otg_fs::start_of_frame(std::uint16_t frame, vtime at)
   {
     return;
   }
+  frames_.start(at.ps);
   state_.frame = frame;
   for(auto& ep : state_.in)
   {

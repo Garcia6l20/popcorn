@@ -221,7 +221,7 @@ def test_report_totals(u575_target_and_report: _TargetAndReport) -> None:
     assert report.ip_renamed == 26
     assert report.aliased == 98
     assert report.fields_touched == 424
-    assert report.cross_rules_added == 570
+    assert report.cross_rules_added == 584
     assert report.irqs_dropped == 0
     assert report.irqs_added == 1
     assert report.core_fields_set == 1

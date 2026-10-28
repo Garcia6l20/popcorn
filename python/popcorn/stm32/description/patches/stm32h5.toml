@@ -91,6 +91,38 @@ pairs = { TCF = "TCF", HTF = "HTF", DTEF = "DTEF", ULEF = "ULEF", USEF = "USEF",
 source = "RM0481 Rev 5, 16.8.7/16.8.8 GPDMA channel x flag clear register / status register, one shared layout for channels 0 to 7 of GPDMA1 and GPDMA2"
 
 [[cross]]
+ip = "CRS"
+reg = "CRS_ICR"
+target_reg = "CRS_ISR"
+effect = "clear"
+pairs = { SYNCOKC = "SYNCOKF", SYNCWARNC = "SYNCWARNF", ESYNCC = "ESYNCF", ERRC = "ERRF" }
+source = "RM0481 Rev 5, 12.7.3/12.7.4 CRS interrupt and status register (CRS_ISR) / CRS interrupt flag clear register (CRS_ICR)"
+
+[[cross]]
+ip = "CRS"
+reg = "CRS_ICR"
+target_reg = "CRS_ISR"
+effect = "clear"
+pairs = { ERRC = "TRIMOVF" }
+source = "RM0481 Rev 5, 12.7.3/12.7.4 CRS interrupt and status register (CRS_ISR) / CRS interrupt flag clear register (CRS_ICR): ERRC also clears TRIMOVF, the sources of ERRF"
+
+[[cross]]
+ip = "CRS"
+reg = "CRS_ICR"
+target_reg = "CRS_ISR"
+effect = "clear"
+pairs = { ERRC = "SYNCMISS" }
+source = "RM0481 Rev 5, 12.7.3/12.7.4 CRS interrupt and status register (CRS_ISR) / CRS interrupt flag clear register (CRS_ICR): ERRC also clears SYNCMISS, the sources of ERRF"
+
+[[cross]]
+ip = "CRS"
+reg = "CRS_ICR"
+target_reg = "CRS_ISR"
+effect = "clear"
+pairs = { ERRC = "SYNCERR" }
+source = "RM0481 Rev 5, 12.7.3/12.7.4 CRS interrupt and status register (CRS_ISR) / CRS interrupt flag clear register (CRS_ICR): ERRC also clears SYNCERR, the sources of ERRF"
+
+[[cross]]
 ip = "I2C"
 reg = "I2C_ICR"
 target_reg = "I2C_ISR"

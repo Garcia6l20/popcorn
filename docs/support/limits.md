@@ -26,8 +26,6 @@ The [part pages](generated/parts.md) list the instances with no model.
 - The debug blocks TPIU, ETM, CTI and the ROM tables have no model. A firmware or DMA access
   reads 0 and drops writes, with one `model_warning` per block. The ROM tables read 0, so a ROM
   table walk ends at its first entry.
-- The CRS has no model. `CRS_CR`, `CRS_CFGR` and `CRS_ISR` are storage: `CRS_ISR` never sets
-  SYNCOKF or SYNCWARNF, and the HSI48 runs at 48 MHz whatever TRIM holds.
 
 ## Memory map
 
@@ -106,6 +104,24 @@ Source: [crc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - A write narrower than 32 bits to any register but `CRC_DR` is ignored and logged. Such a read
   is logged.
 - The RCC clock gate is not modelled. The CRC works with its RCC enable bit clear.
+
+## CRS
+
+Source: [crs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/crs.cpp)
+
+- A SYNC event is a write of 1 to `SWSYNC`, or a USB start of frame from the OTG_FS (STM32U5)
+  or the USB (STM32H5) while `SYNCSRC` is 2, divided by 2^`SYNCDIV`. Only `SWSYNC` and the
+  USB SOF give a SYNC, and only while `CEN` is set. Setting `CEN` with `SYNCSRC` 0, 1 or 3 logs
+  one warning per model life. `SYNCPOL` is storage.
+- The frequency error counter runs at exactly 48 MHz. The first SYNC after `CEN` is set loads
+  `RELOAD` and sets no flag. Each later SYNC latches `FECAP` and `FEDIR` and sets `SYNCOKF`,
+  `SYNCWARNF`, or `SYNCERR` with `ERRF`, by the thresholds of RM0456 12.4.5, then reloads.
+  `ESYNCF` is set `RELOAD` + 1 cycles after a SYNC, so the `RELOAD` of RM0456 12.4.6 gives
+  `FECAP` 0. When no SYNC comes, `SYNCMISS` and `ERRF` follow 128 x `FELIM` cycles later and
+  the counter stops, and the next SYNC latches 128 x `FELIM`. With `SYNCSRC` 2, `RELOAD` 47999
+  matches `SYNCDIV` 0 only.
+- `TRIM` keeps what the firmware wrote, with or without `AUTOTRIMEN`, and `TRIMOVF` stays 0.
+  The RCC clock enable of the CRS gates nothing.
 
 ## DBGMCU
 

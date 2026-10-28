@@ -132,6 +132,38 @@ pairs = { TCF = "TCF", HTF = "HTF", DTEF = "DTEF", ULEF = "ULEF", USEF = "USEF",
 source = "RM0456 rev 6, 17.8.7/17.8.8 GPDMA channel x flag clear register / status register, one shared layout for all 16 channels"
 
 [[cross]]
+ip = "CRS"
+reg = "ICR"
+target_reg = "ISR"
+effect = "clear"
+pairs = { SYNCOKC = "SYNCOKF", SYNCWARNC = "SYNCWARNF", ESYNCC = "ESYNCF", ERRC = "ERRF" }
+source = "RM0456 rev 7, 12.7.3/12.7.4 CRS interrupt and status register (CRS_ISR) / CRS interrupt flag clear register (CRS_ICR)"
+
+[[cross]]
+ip = "CRS"
+reg = "ICR"
+target_reg = "ISR"
+effect = "clear"
+pairs = { ERRC = "TRIMOVF" }
+source = "RM0456 rev 7, 12.7.3/12.7.4 CRS interrupt and status register (CRS_ISR) / CRS interrupt flag clear register (CRS_ICR): ERRC also clears TRIMOVF, the sources of ERRF"
+
+[[cross]]
+ip = "CRS"
+reg = "ICR"
+target_reg = "ISR"
+effect = "clear"
+pairs = { ERRC = "SYNCMISS" }
+source = "RM0456 rev 7, 12.7.3/12.7.4 CRS interrupt and status register (CRS_ISR) / CRS interrupt flag clear register (CRS_ICR): ERRC also clears SYNCMISS, the sources of ERRF"
+
+[[cross]]
+ip = "CRS"
+reg = "ICR"
+target_reg = "ISR"
+effect = "clear"
+pairs = { ERRC = "SYNCERR" }
+source = "RM0456 rev 7, 12.7.3/12.7.4 CRS interrupt and status register (CRS_ISR) / CRS interrupt flag clear register (CRS_ICR): ERRC also clears SYNCERR, the sources of ERRF"
+
+[[cross]]
 ip = "I2C"
 reg = "ICR"
 target_reg = "ISR"

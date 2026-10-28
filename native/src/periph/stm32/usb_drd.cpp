@@ -1,4 +1,5 @@
 #include "factories.hpp"
+#include "frame_signal.hpp"
 #include "model_base.hpp"
 #include "usb_device_link.hpp"
 
@@ -258,6 +259,7 @@ private:
   [[nodiscard]] auto link_state() const -> usb_link_state const&;
 
   register_file&                         regs_;
+  frame_output                           frames_;
   irq_line&                              line_;
   std::array<endpoint_fields, endpoints> ep_;
   std::uint32_t                          endpoint_clears_{};
@@ -314,7 +316,7 @@ usb_drd::usb_drd(
     model_context&                  ctx,
     peripheral_desc const&          desc,
     std::optional<usb_host_options> wired)
-    : dispatch_model{ctx, desc, "USB", usb_drd_writes}, regs_{ctx.regs},
+    : dispatch_model{ctx, desc, "USB", usb_drd_writes}, regs_{ctx.regs}, frames_{ctx.peers},
       line_{irq("USB_DRD_FS_IRQn")}, ep_{[this]<std::size_t... n>(std::index_sequence<n...>) {
         return std::array<endpoint_fields, endpoints>{endpoint_fields_of(n)...};
       }(std::make_index_sequence<endpoints>{})},
@@ -774,12 +776,13 @@ auto usb_drd::first_transaction(std::size_t n) -> bool
   return was;
 }
 
-void usb_drd::start_of_frame(std::uint16_t frame, vtime)
+void usb_drd::start_of_frame(std::uint16_t frame, vtime at)
 {
   if(not pulled_up())
   {
     return;
   }
+  frames_.start(at.ps);
   state_.frames = static_cast<std::uint8_t>(std::min(state_.frames + 1, 2));
   update(regs_, frame_number_, frame);
   update(regs_, lost_frames_, 0);

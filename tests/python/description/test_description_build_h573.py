@@ -345,7 +345,7 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
         fields_dropped=48,
         fields_renamed=21,
         fields_added=2,
-        cross_rules_added=863,
+        cross_rules_added=877,
         irqs_dropped=22,
         irqs_added=27,
         sizes_set=1,

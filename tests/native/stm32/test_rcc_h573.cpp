@@ -123,8 +123,8 @@ public:
 auto with_listener(core::machine_options options = popcorn::testing::stm32_options())
     -> core::machine_options
 {
-  options.models.emplace(
-      "CRS",
+  options.models.insert_or_assign(
+      "CORDIC",
       [](periph::model_context& ctx, popcorn::peripheral_desc const&)
           -> std::shared_ptr<periph::model> { return std::make_shared<listener>(ctx); });
   return options;
@@ -132,7 +132,7 @@ auto with_listener(core::machine_options options = popcorn::testing::stm32_optio
 
 auto probe(stm32_fixture const& f) -> listener&
 {
-  auto* const found = f.model_of<listener>("CRS");
+  auto* const found = f.model_of<listener>("CORDIC");
   REQUIRE(found != nullptr);
   return *found;
 }

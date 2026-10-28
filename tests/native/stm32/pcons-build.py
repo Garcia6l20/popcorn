@@ -113,6 +113,7 @@ u575_programs = [
         ("stm32-adc", "test_adc.cpp"),
         ("stm32-dbgmcu", "test_dbgmcu.cpp"),
         ("stm32-crc", "test_crc.cpp"),
+        ("stm32-crs", "test_crs.cpp"),
         ("stm32-hash", "test_hash.cpp"),
         ("stm32-rng", "test_rng.cpp"),
         ("stm32-gtzc", "test_gtzc.cpp"),
