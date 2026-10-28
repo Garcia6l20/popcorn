@@ -868,3 +868,22 @@ TEST_CASE("SPI4RST moves the frame generation past the event queued before it, t
   }
   CHECK(seen[1] > seen[0]);
 }
+
+TEST_CASE("coverage classifies SPI_CFG2 as served and SPI_I2SCFGR as unimplemented")
+{
+  rig r;
+  r.f->target->enable_coverage({}, true);
+  constexpr popcorn::address stub = 0x2000'0200;
+  REQUIRE(r.f->target->mem().write(stub, 4, 0xE7FE'6802).has_value());
+  for(auto const name : {"SPI_CFG2", "SPI_I2SCFGR"})
+  {
+    r.f->set("r0", r.at("SPI1", name));
+    r.f->set("pc", stub | 1u);
+    r.run_until(r.now() + 1'000'000);
+  }
+  auto const found = r.f->target->coverage().unmodelled;
+  REQUIRE(found.size() == 1);
+  CHECK(found.front().peripheral == "SPI1");
+  CHECK(found.front().reg == "I2SCFGR");
+  CHECK(found.front().reason == core::unmodelled_reason::unimplemented);
+}

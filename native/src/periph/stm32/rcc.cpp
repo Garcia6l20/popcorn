@@ -391,13 +391,14 @@ template <> struct rcc_tables<u5_rcc>
 {
   using model = rcc_model<u5_rcc>;
 
-  static constexpr std::array<write_entry<model>, 27> writes{
+  static constexpr std::array<write_entry<model>, 28> writes{
       {
        {"RCC_CR", &model::cr_written},
        {"RCC_ICSCR1", &model::icscr1_written},
        {"RCC_CFGR1", &model::tree_written},
        {"RCC_CFGR2", &model::tree_written},
        {"RCC_CFGR3", &model::tree_written},
+       {"RCC_CIER", nullptr},
        {"RCC_PLL1CFGR", &model::pll_config_written<0>},
        {"RCC_PLL2CFGR", &model::pll_config_written<1>},
        {"RCC_PLL3CFGR", &model::pll_config_written<2>},
@@ -427,7 +428,6 @@ template <> struct rcc_tables<u5_rcc>
       {"RCC_ICSCR2",     nullptr             },
       {"RCC_ICSCR3",     nullptr             },
       {"RCC_CRRCR",      nullptr             },
-      {"RCC_CIER",       nullptr             },
       {"RCC_CIFR",       nullptr             },
       {"RCC_CICR",       &model::cicr_written},
       {"RCC_AHB1SMENR",  nullptr             },
@@ -447,11 +447,12 @@ template <> struct rcc_tables<h5_rcc>
 {
   using model = rcc_model<h5_rcc>;
 
-  static constexpr std::array<write_entry<model>, 26> writes{
+  static constexpr std::array<write_entry<model>, 27> writes{
       {
        {"RCC_CR", &model::cr_written},
        {"RCC_CFGR1", &model::tree_written},
        {"RCC_CFGR2", &model::tree_written},
+       {"RCC_CIER", nullptr},
        {"RCC_PLL1CFGR", &model::pll_config_written<0>},
        {"RCC_PLL2CFGR", &model::pll_config_written<1>},
        {"RCC_PLL3CFGR", &model::pll_config_written<2>},

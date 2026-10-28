@@ -26,6 +26,9 @@ The [part pages](generated/parts.md) list the instances with no model.
 - The debug blocks TPIU, ETM, CTI and the ROM tables have no model. A firmware or DMA access
   reads 0 and drops writes, with one `model_warning` per block. The ROM tables read 0, so a ROM
   table walk ends at its first entry.
+- The STM32H573 CRS has no model. `CRS_CR` and `CRS_CFGR` read and write as storage, the HSI48
+  trim never changes and `CRS_ISR` never sets SYNCOKF or SYNCWARNF. Firmware that enables
+  AUTOTRIMEN, as the USB stack does, runs on the untrimmed HSI48.
 
 ## Memory map
 
@@ -136,6 +139,8 @@ Not modelled on the STM32H5:
 
 - OBK key storage, the high-cycle data area, OTP and read-only area programming, the HDPL
   levels and FLASH_HDPEXTR. Their registers are storage.
+- FLASH_OPSR and FLASH_OTPBLR_CUR are storage. OPSR never reports an interrupted operation and
+  OTPBLR_CUR locks no OTP block.
 - The effect of FLASH_ACR.WRHIGHFREQ on programming: a program or erase takes its datasheet time
   whatever the delay. A WRHIGHFREQ below RM0481 Table 48 for the current HCLK and voltage range
   warns once per HCLK, range and value at an erase START or a store with PG set, and raises a
@@ -303,6 +308,7 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - The voltage scaling ready bits follow a VOS write after the board's `ready_delay`, 50 us by
   default. A write that steps to a higher voltage clears VOSRDY for that delay, one that steps to
   a lower voltage keeps VOSRDY set. ACTVOSRDY clears for the delay on every change.
+- STM32H5: PWR_USBSCR is storage. USB33DEN and USB33SV have no effect on the USB model.
 
 ## RCC
 
@@ -390,6 +396,8 @@ Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   at once, with no propagation latency.
 - RM0481 Table 645 limits SPI4 to SPI6 of the STM32H5 to DSIZE of 16 bits and CRC of 17 bits.
   The model accepts the DSIZE values of SPI1 to SPI3 there, and the CRC is not modelled.
+- SPI_I2SCFGR of the STM32H5 SPI1 to SPI3 is storage: the I2S mode is not modelled. SPI_CFG2.SP,
+  MIDI and MSSI and SPI_CFG1.CRCEN log one model_warning when set and have no effect.
 
 ## SYSCFG
 

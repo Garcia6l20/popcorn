@@ -261,3 +261,22 @@ TEST_CASE("RM0481 10.9: PWR_SECCFGR is RAZ/WI with TrustZone off")
   CHECK(r.read("PWR_SECCFGR") == 0);
   CHECK(regs.peek(seccfg->offset) == stored);
 }
+
+TEST_CASE("coverage classifies PWR_VOSSR as served and USBSCR as unimplemented")
+{
+  rig r;
+  r.f.target->enable_coverage({}, true);
+  constexpr popcorn::address stub = 0x2000'0200;
+  REQUIRE(r.f.target->mem().write(stub, 4, 0xE7FE'6802).has_value());
+  for(auto const name : {"PWR_VOSSR", "USBSCR"})
+  {
+    r.f.set("r0", r.at(name));
+    r.f.set("pc", stub | 1u);
+    r.run_for(us);
+  }
+  auto const found = r.f.target->coverage().unmodelled;
+  REQUIRE(found.size() == 1);
+  CHECK(found.front().peripheral == "PWR");
+  CHECK(found.front().reg == "USBSCR");
+  CHECK(found.front().reason == popcorn::core::unmodelled_reason::unimplemented);
+}

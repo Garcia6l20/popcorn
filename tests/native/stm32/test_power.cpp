@@ -265,3 +265,14 @@ TEST_CASE("RM0456 10.10.4: a lower VOS range keeps VOSRDY, a higher one clears i
   CHECK(field(f, "PWR_SVMSR", "ACTVOSRDY") == 1);
   CHECK(field(f, "PWR_SVMSR", "ACTVOS") == 1);
 }
+
+TEST_CASE("coverage classifies the PWR_SVMSR polls of the voltage change as served")
+{
+  stm32_fixture f{u575(), "pwr_ll", popcorn::testing::stm32_options()};
+  f.target->enable_coverage({}, true);
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  auto const found = f.target->coverage().unmodelled;
+  CHECK(std::ranges::none_of(found, [](core::unmodelled_access const& access) {
+    return access.peripheral == "PWR" and access.reg == "SVMSR";
+  }));
+}

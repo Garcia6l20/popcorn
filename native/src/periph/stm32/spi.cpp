@@ -326,11 +326,12 @@ private:
   bool                                         size_logged_{};
 };
 
-constexpr std::array<write_entry<spi>, 9> spi_writes{
+constexpr std::array<write_entry<spi>, 10> spi_writes{
     {
      {"SPI_CR1", &spi::control_written},
      {"SPI_CR2", &spi::plain_written},
      {"SPI_CFG1", &spi::plain_written},
+     {"SPI_CFG2", nullptr},
      {"SPI_IER", &spi::plain_written},
      {"SPI_SR", &spi::status_written},
      {"SPI_IFCR", &spi::clear_written},

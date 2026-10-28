@@ -651,3 +651,16 @@ TEST_CASE("RM0481 11.8.44: the H573 RNG runs on its kernel clock and pauses with
     CHECK((rng.peek(sr) & drdy) == 0);
   }
 }
+
+TEST_CASE("coverage classifies RCC_CIER as served, the model reads its enables")
+{
+  auto f = idle_fixture();
+  f.target->enable_coverage({}, true);
+  constexpr popcorn::address stub = 0x2000'0200;
+  REQUIRE(f.target->mem().write(stub, 4, 0xE7FE'6802).has_value());
+  auto const& desc = rcc_of(h573());
+  f.set("r0", desc.base + offset_of("RCC_CIER"));
+  f.set("pc", stub | 1u);
+  idle_until(f, std::chrono::microseconds{1});
+  CHECK(f.target->coverage().unmodelled.empty());
+}

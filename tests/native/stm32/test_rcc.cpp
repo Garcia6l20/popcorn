@@ -1129,3 +1129,21 @@ TEST_CASE("a model that is no bus reset listener gets reset with the peripheral 
   REQUIRE(f.target->mem().write(desc.base + pol->offset, 4, 0x1021).has_value());
   CHECK(model->writes == 1);
 }
+
+TEST_CASE("coverage classifies RCC_CIER as served, the model reads its enables")
+{
+  stm32_fixture f{u575(), "rcc_ll", popcorn::testing::stm32_options()};
+  f.target->enable_coverage({}, true);
+  constexpr popcorn::address stub = 0x2000'0200;
+  REQUIRE(f.target->mem().write(stub, 4, 0xE7FE'6802).has_value());
+  auto const& regs = f.target->peripheral("RCC");
+  f.set(
+      "r0",
+      regs.description().base + popcorn::find_register(regs.description(), "RCC_CIER")->offset);
+  f.set("pc", stub | 1u);
+  auto const until = popcorn::vtime{f.target->virtual_clock().time().ps + 1'000'000};
+  auto const result =
+      f.target->run_slice({.max_instructions = popcorn::icount{1'000'000}, .until_time = until});
+  REQUIRE(result.stopped.has_value());
+  CHECK(f.target->coverage().unmodelled.empty());
+}

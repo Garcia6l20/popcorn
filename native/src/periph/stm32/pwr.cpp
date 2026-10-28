@@ -165,10 +165,11 @@ private:
   illegal_event              illegal_;
 };
 
-constexpr std::array<write_entry<pwr>, 3> u5_writes{
+constexpr std::array<write_entry<pwr>, 4> u5_writes{
     {
      {"PWR_CR1", &pwr::cr1_written},
      {"PWR_VOSR", &pwr::vosr_written},
+     {"PWR_SVMSR", nullptr},
      {"PWR_SECCFGR", nullptr},
      }
 };
@@ -254,10 +255,11 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> h5_names{
 
 constexpr std::array<std::uint8_t, 4> h5_vos_levels{3, 2, 1, 0};
 
-constexpr std::array<write_entry<pwr>, 3> h5_writes{
+constexpr std::array<write_entry<pwr>, 4> h5_writes{
     {
      {"PWR_PMCR", &pwr::cr1_written},
      {"PWR_VOSCR", &pwr::vosr_written},
+     {"PWR_VOSSR", nullptr},
      {"PWR_SECCFGR", nullptr},
      }
 };
