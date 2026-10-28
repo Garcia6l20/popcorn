@@ -49,7 +49,6 @@ def test_the_h5_option_bytes_read_back_in_the_cur_registers(
         (OptionBytes(secwm1=(0, 128)), "option_bytes.secwm1"),
         (OptionBytes(nsboot=0x0800_0080), "option_bytes.nsboot"),
         (OptionBytes(dualbank=False), "option_bytes.dualbank"),
-        (OptionBytes(tzen=True), "option_bytes.tzen"),
     ],
 )
 def test_the_h5_refusals_are_keyed_by_their_field(
@@ -62,3 +61,10 @@ def test_the_h5_refusals_are_keyed_by_their_field(
 
 def test_dualbank_true_builds(h573: popcorn.PartDescription) -> None:
     assert popcorn.Machine(h573, option_bytes=OptionBytes(dualbank=True))
+
+
+def test_tzen_builds_a_secure_machine(h573: popcorn.PartDescription) -> None:
+    m = popcorn.Machine(h573, option_bytes=OptionBytes(tzen=True))
+    m.reset()
+    assert m.security_state == "secure"
+    assert m.mem.u32[OPTSR2_CUR] >> 24 == 0xB4

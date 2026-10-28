@@ -34,19 +34,11 @@ def _memory(part: PartDescription, kind: str, name: str) -> int:
 
 
 def _models(part: PartDescription) -> dict[str, str]:
-    """Map each peripheral to its model column.
-
-    A TrustZone core whose family has no IDAU table has no TrustZone-only models, and only that
-    refusal is absorbed. Any other `ConfigError` propagates.
-    """
+    """Map each peripheral to its model column."""
     plain = {s.name: s for s in support(part)}
     secured: dict[str, PeripheralSupport] = plain
     if part.core.trustzone:
-        try:
-            secured = {s.name: s for s in support(part, trustzone=True)}
-        except popcorn.ConfigError as error:
-            if "has an IDAU table" not in str(error):
-                raise
+        secured = {s.name: s for s in support(part, trustzone=True)}
     found: dict[str, str] = {}
     for name, entry in plain.items():
         if entry.model == "builtin":

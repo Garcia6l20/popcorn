@@ -176,6 +176,9 @@ Source: [gtzc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 - The GTZC models serve only with TrustZone enabled, `OptionBytes(tzen=True)`.
 - No debugger access raises a TZIC event, so a host view leaves the TZIC flags and GTZC_IRQn as
   they are.
+- STM32H573: `HDMICECSEC` and `HDMICECIE` name no peripheral, the SVD has no HDMI-CEC. DLYBOS1,
+  DLYBSD1 and DLYBSD2 have no SEC bit, RM0481 Table 3 lists no delay block, so they stay
+  Non-secure.
 
 ## HASH
 

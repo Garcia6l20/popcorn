@@ -2231,7 +2231,7 @@ TEST_CASE("check_option_bytes returns the boot address and the refusal of each f
           unknown_flash().part));
 }
 
-TEST_CASE("the U5 IDAU map is RM0456 2.2 Table 3, other families have none")
+TEST_CASE("the U5 and H5 IDAU map is RM0456 2.2 Table 3, other families have none")
 {
   auto const map = periph::stm32::idau_map(u575());
   REQUIRE(map.has_value());
@@ -2248,8 +2248,12 @@ TEST_CASE("the U5 IDAU map is RM0456 2.2 Table 3, other families have none")
       {.start = 0xe010'0000, .end = 0x1'0000'0000, .nsc = false, .exempt = false},
   };
   CHECK(std::ranges::equal(*map, expected));
+  auto h5 = u575();
+  h5.part = "STM32H573IIKx";
+  REQUIRE(periph::stm32::idau_map(h5).has_value());
+  CHECK(std::ranges::equal(*periph::stm32::idau_map(h5), expected));
   auto other = u575();
-  other.part = "STM32H573IIKx";
+  other.part = "STM32G071RBTx";
   CHECK_FALSE(periph::stm32::idau_map(other).has_value());
 }
 
@@ -2290,7 +2294,7 @@ TEST_CASE("configure_option_bytes refuses before it changes the options")
   CHECK(options.models.empty());
   CHECK_FALSE(options.vector_table);
   auto other_family = u575();
-  other_family.part = "STM32H573IIKx";
+  other_family.part = "STM32G071RBTx";
   CHECK(refused(other_family, {.tzen = true}, options) == "option_bytes.tzen");
   CHECK(refused(unknown_flash(), {}, options) == "option_bytes");
   CHECK(

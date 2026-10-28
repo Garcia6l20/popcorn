@@ -78,24 +78,11 @@ def test_each_model_with_a_limit_has_a_limits_section(model: str) -> None:
     assert [heading for heading, source in section_sources().items() if link in source]
 
 
-def test_the_h573_page_builds_without_trustzone_rows() -> None:
+def test_the_h573_page_lists_its_gtzc_as_trustzone_only() -> None:
     from popcorn_build import support_pages
 
     page = support_pages.part_page(popcorn.stm32.mcu("STM32H573AIIx"))
-    assert "| `RNG` |" in page
-    assert support_pages.TRUSTZONE_ONLY not in page
-
-
-def test_another_support_refusal_is_not_absorbed(monkeypatch: pytest.MonkeyPatch) -> None:
-    from popcorn_build import support_pages
-
-    real = support_pages.support
-
-    def refuse(part: popcorn.PartDescription, *, trustzone: bool = False) -> object:
-        if trustzone:
-            raise popcorn.ConfigError("some other refusal")
-        return real(part)
-
-    monkeypatch.setattr(support_pages, "support", refuse)
-    with pytest.raises(popcorn.ConfigError, match="some other refusal"):
-        support_pages.part_page(popcorn.stm32.mcu("STM32U575QGIx"))
+    assert (
+        "| `GTZC` | `tzsc1_v2_2_rc1_Mustang2M` | GTZC1_MPCBB1, GTZC1_MPCBB2, GTZC1_MPCBB3, "
+        f"GTZC1_TZIC, GTZC1_TZSC | {support_pages.TRUSTZONE_ONLY} |" in page
+    )

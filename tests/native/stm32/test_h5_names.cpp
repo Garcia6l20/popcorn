@@ -243,17 +243,12 @@ TEST_CASE(
   for(auto const trustzone : {false, true})
   {
     CAPTURE(trustzone);
-    auto desc                              = u575();
-    described(desc, "RTC", "PRIVCR").name  = "PRIVCFGR";
-    described(desc, "TAMP", "PRIVCR").name = "PRIVCFGR";
-    auto options                           = popcorn::testing::stm32_options();
+    auto options = popcorn::testing::stm32_options();
     if(trustzone)
     {
-      REQUIRE(stm32::configure_option_bytes(desc, {.tzen = true}, options).has_value());
+      REQUIRE(stm32::configure_option_bytes(h573(), {.tzen = true}, options).has_value());
     }
-    options.models.insert_or_assign("RTC", stm32::rtc_factory(std::nullopt, stm32::h5_rtc));
-    options.models.insert_or_assign("TAMP", stm32::tamp_factory(stm32::h5_rtc));
-    auto const                    f = idle(desc, options);
+    auto const                    f = h5(h573(), options);
     std::vector<core::log_record> logged;
     auto const                    sink =
         f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
@@ -291,43 +286,57 @@ TEST_CASE("RM0456 64.6.7 and RM0481 52.7.10: a TAMP without SECCFGR throws")
   }
 }
 
-TEST_CASE("the registry and factories() pick the same model for every unit of the U575 and H573")
+TEST_CASE(
+    "the registry and factories() pick the same model for every unit of the U575 and H573, at "
+    "TZEN=0 and 1")
 {
   for(auto const& make : {+[] { return u575(); }, +[] { return h573(); }})
   {
-    auto desc = make();
-    CAPTURE(desc.part);
-    auto const  firmware = desc.part == "STM32H573AIIx" ? "h573_boot_ll" : "rcc_ll";
-    auto const  registry = stm32_fixture{desc, firmware, popcorn::testing::stm32_options()};
-    auto const  rows     = stm32::factories(stm32::board{}, desc);
-    std::size_t modelled = 0;
-    for(auto const& peripheral : desc.peripherals)
+    for(auto const trustzone : {false, true})
     {
-      if(peripheral.alias_of)
-      {
-        continue;
-      }
-      CAPTURE(peripheral.name);
-      auto const* const model = registry.target->model(peripheral.name);
-      CHECK(
-          (model != nullptr or peripheral.name.starts_with("GTZC"))
-          == rows.contains(peripheral.name));
-      if(model == nullptr)
-      {
-        continue;
-      }
-      ++modelled;
-      auto options   = popcorn::testing::stm32_options();
-      options.models = {
-          {peripheral.name, rows.at(peripheral.name)}
+      auto desc = make();
+      CAPTURE(desc.part);
+      CAPTURE(trustzone);
+      auto const firmware = desc.part == "STM32H573AIIx" ? "h573_boot_ll" : "rcc_ll";
+      auto const options  = [&] {
+        auto out = popcorn::testing::stm32_options();
+        if(trustzone)
+        {
+          REQUIRE(stm32::configure_option_bytes(desc, {.tzen = true}, out).has_value());
+        }
+        return out;
       };
-      stm32_fixture const single{desc, firmware, options};
-      auto const* const   other = single.target->model(peripheral.name);
-      REQUIRE(other != nullptr);
-      CHECK(typeid(*other) == typeid(*model));
-      CHECK(other->claims() == model->claims());
+      auto const  registry = stm32_fixture{desc, firmware, options()};
+      auto const  rows     = stm32::factories(stm32::board{}, desc);
+      std::size_t modelled = 0;
+      for(auto const& peripheral : desc.peripherals)
+      {
+        if(peripheral.alias_of)
+        {
+          continue;
+        }
+        CAPTURE(peripheral.name);
+        auto const* const model = registry.target->model(peripheral.name);
+        if(trustzone)
+        {
+          CHECK((model != nullptr) == rows.contains(peripheral.name));
+        }
+        if(model == nullptr)
+        {
+          continue;
+        }
+        CHECK(rows.contains(peripheral.name));
+        ++modelled;
+        auto single_options = options();
+        single_options.models.try_emplace(peripheral.name, rows.at(peripheral.name));
+        stm32_fixture const single{desc, firmware, single_options};
+        auto const* const   other = single.target->model(peripheral.name);
+        REQUIRE(other != nullptr);
+        CHECK(typeid(*other) == typeid(*model));
+        CHECK(other->claims() == model->claims());
+      }
+      CHECK(modelled > 20);
     }
-    CHECK(modelled > 20);
   }
 }
 

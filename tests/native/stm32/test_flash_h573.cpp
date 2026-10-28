@@ -946,9 +946,9 @@ TEST_CASE("H5 option bytes refuse only what RM0481 cannot encode, each keyed by 
       == address{0x0800'2000});
   CHECK(stm32::check_option_bytes(h573(), {.tzen = true}) == address{0x0c00'0000});
   core::machine_options options;
-  auto const            tz = stm32::configure_option_bytes(h573(), {.tzen = true}, options);
-  REQUIRE_FALSE(tz.has_value());
-  CHECK(tz.error().key == "option_bytes.tzen");
+  REQUIRE(stm32::configure_option_bytes(h573(), {.tzen = true}, options).has_value());
+  CHECK(options.trustzone);
+  CHECK(options.vector_table == address{0x0c00'0000});
 }
 
 TEST_CASE("an H573 description without FLASH_NSCR.FW or FLASH_OPTCR.OPTLOCK throws config_error")

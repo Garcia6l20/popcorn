@@ -5,8 +5,8 @@ source = "Port I and the FLASH_OPTSR_CUR delivery value of the STM32H562, H563 a
 parts = ["STM32H562*", "STM32H563*", "STM32H573*"]
 
 [peripherals]
-drop = ["SEC_LPUART1"]
-source = "The STM32H562, H563 and H573 SVDs derive SEC_LPUART1 from LPUART, not LPUART1, so the alias rule finds no base. RM0481 Rev 5, 2.3: the secure LPUART1 window is NS base + 0x1000_0000, unused under TZEN=0, D4"
+renames = { SEC_LPUART1 = "SEC_LPUART" }
+source = "The STM32H562, H563 and H573 SVDs name the Secure window of LPUART SEC_LPUART1 and derive it from LPUART. Renamed SEC_LPUART, so the alias rule pairs it with LPUART at NS base + 0x1000_0000, RM0481 Rev 5, 2.3 memory map"
 
 [ip]
 renames = { DCACHE1 = ["DCACHE"], OCTOSPI1 = ["OCTOSPI"], I3C1 = ["I3C"], GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPIOF", "GPIOG", "GPIOH", "GPIOI"], GTZC = ["GTZC1_TZSC", "GTZC1_TZIC"], GTZC_NS = ["GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3"] }

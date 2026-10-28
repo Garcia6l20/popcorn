@@ -67,6 +67,7 @@ struct pwr_rule
 {
   std::uint32_t              offset{};
   std::uint32_t              bits{};
+  bool                       raz = true;
   guard_source               source{};
   field_ref                  own{};
   std::string                peer{};
@@ -82,6 +83,30 @@ struct pwr_state
 };
 
 class pwr;
+
+/** @brief Bits a `PWR_SECCFGR` bit secures. */
+struct pwr_secured
+{
+  /** @brief Field of `PWR_SECCFGR`. */
+  std::string_view bit;
+  /** @brief Register it secures. */
+  std::string_view reg;
+  /** @brief Field it secures, empty for the whole register. */
+  std::string_view field = {};
+  /** @brief A Non-secure read of the bits reads 0, otherwise it reads them. */
+  bool raz = true;
+};
+
+/** @brief A field of every wakeup pin x that `PWR_SECCFGR.WUPxSEC` secures, `<prefix>x`. */
+struct pwr_wakeup_field
+{
+  /** @brief Register of the field. */
+  std::string_view reg;
+  /** @brief Field name before the pin number. */
+  std::string_view prefix;
+  /** @brief A Non-secure read of the bits reads 0, otherwise it reads them. */
+  bool raz = true;
+};
 
 /** @brief What differs between the PWR blocks one model serves. */
 struct pwr_family
@@ -100,6 +125,14 @@ struct pwr_family
   std::span<write_entry<pwr> const> writes;
   /** @brief Write handlers added under TrustZone. */
   std::span<write_entry<pwr> const> trustzone_writes;
+  /** @brief Bits each `PWR_SECCFGR` group bit secures. */
+  std::span<pwr_secured const> secured;
+  /** @brief Fields of each wakeup pin its `WUPxSEC` bit secures. */
+  std::span<pwr_wakeup_field const> wakeup_fields;
+  /** @brief Register of the voltage scaling fields `RCC_SECCFGR.SYSCLKSEC` secures. */
+  std::string_view system_clock_register;
+  /** @brief Those fields, each secured when the description has it. */
+  std::span<std::string_view const> system_clock_fields;
 };
 
 /**
@@ -124,6 +157,14 @@ struct pwr_family
  *        write to it is ignored with an illegal access event. `PWR_PRIVCFGR` takes privileged
  *        writes, SPRIV Secure ones only. Under TZEN=0 `PWR_SECCFGR` is RAZ/WI, its storage
  *        keeps its reset, and `PWR_PRIVCFGR` is storage.
+ *
+ *        The H5 follows RM0481 10.9 and Table 114 the same way: LPMSEC secures `PWR_PMCR`,
+ *        VUSBSEC `PWR_USBSCR`, VBSEC `PWR_BDCR` and `PWR_DBPCR`, RETSEC `PWR_IORETR`, SCMSEC
+ *        `PWR_SCCR` and `PWR_VMCR`, each WI to a Non-secure write and read back by a Non-secure
+ *        read. `WUPxSEC` secures `WUPENx`, `WUPPx` and `WUPPUPDx` of `PWR_WUCR` RAZ/WI and
+ *        `CWUFx` of `PWR_WUSCR` WI, SYSCLKSEC the `PWR_VOSCR.VOS` field RAZ/WI, and the UCPD1
+ *        SEC bit `PWR_UCPDR` RAZ/WI. SCMSEC is the `PWR_SECCFGR` bit the register descriptions
+ *        of RM0481 10.11.11 and 10.11.12 name.
  */
 class pwr final : public dispatch_model<pwr, pwr_state>,
                   public voltage_range_source,
@@ -209,20 +250,27 @@ constexpr auto u5_trustzone_writes = std::to_array<write_entry<pwr>>({
     {"PWR_PDCRI",    nullptr},
 });
 
-struct own_group
-{
-  std::string_view                bit;
-  std::array<std::string_view, 3> registers;
-};
+constexpr auto u5_secured = std::to_array<pwr_secured>({
+    {.bit = "LPMSEC", .reg = "PWR_CR1"},
+    {.bit = "LPMSEC", .reg = "PWR_CR2"},
+    {.bit = "VDMSEC", .reg = "PWR_CR3"},
+    {.bit = "VDMSEC", .reg = "PWR_SVMCR"},
+    {.bit = "VBSEC", .reg = "PWR_BDCR1"},
+    {.bit = "VBSEC", .reg = "PWR_BDCR2"},
+    {.bit = "VBSEC", .reg = "PWR_DBPR"},
+    {.bit = "APCSEC", .reg = "PWR_APCR"},
+    {.bit = "LPMSEC", .reg = "PWR_SR", .field = "CSSF"},
+});
 
-constexpr std::array<own_group, 4> own_groups{
-    {
-     {"LPMSEC", {"PWR_CR1", "PWR_CR2", ""}},
-     {"VDMSEC", {"PWR_CR3", "PWR_SVMCR", ""}},
-     {"VBSEC", {"PWR_BDCR1", "PWR_BDCR2", "PWR_DBPR"}},
-     {"APCSEC", {"PWR_APCR", "", ""}},
-     }
-};
+constexpr auto u5_wakeup_fields = std::to_array<pwr_wakeup_field>({
+    {.reg = "PWR_WUCR1", .prefix = "WUPEN"},
+    {.reg = "PWR_WUCR2", .prefix = "WUPP" },
+    {.reg = "PWR_WUCR3", .prefix = "WUSEL"},
+    {.reg = "PWR_WUSCR", .prefix = "CWUF" },
+});
+
+constexpr auto u5_system_clock_fields =
+    std::to_array<std::string_view>({"VOS", "BOOSTEN", "USBPWREN", "USBBOOSTEN"});
 
 /** @brief STM32U5 PWR, RM0456 10.10: VOS 00 range 4 to 11 range 1, ready bits read 1. */
 constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> u5_names{
@@ -255,6 +303,38 @@ constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> h5_names{
 
 constexpr std::array<std::uint8_t, 4> h5_vos_levels{3, 2, 1, 0};
 
+constexpr auto h5_trustzone_writes = std::to_array<write_entry<pwr>>({
+    {"PWR_USBSCR",   nullptr},
+    {"PWR_BDCR",     nullptr},
+    {"PWR_DBPCR",    nullptr},
+    {"PWR_IORETR",   nullptr},
+    {"PWR_SCCR",     nullptr},
+    {"PWR_VMCR",     nullptr},
+    {"PWR_WUCR",     nullptr},
+    {"PWR_WUSCR",    nullptr},
+    {"PWR_UCPDR",    nullptr},
+    {"PWR_PRIVCFGR", nullptr},
+});
+
+constexpr auto h5_secured = std::to_array<pwr_secured>({
+    {.bit = "LPMSEC",  .reg = "PWR_PMCR",   .raz = false},
+    {.bit = "VUSBSEC", .reg = "PWR_USBSCR", .raz = false},
+    {.bit = "VBSEC",   .reg = "PWR_BDCR",   .raz = false},
+    {.bit = "VBSEC",   .reg = "PWR_DBPCR",  .raz = false},
+    {.bit = "RETSEC",  .reg = "PWR_IORETR", .raz = false},
+    {.bit = "SCMSEC",  .reg = "PWR_SCCR",   .raz = false},
+    {.bit = "SCMSEC",  .reg = "PWR_VMCR",   .raz = false},
+});
+
+constexpr auto h5_wakeup_fields = std::to_array<pwr_wakeup_field>({
+    {.reg = "PWR_WUCR", .prefix = "WUPEN"},
+    {.reg = "PWR_WUCR", .prefix = "WUPPUPD"},
+    {.reg = "PWR_WUCR", .prefix = "WUPP"},
+    {.reg = "PWR_WUSCR", .prefix = "CWUF", .raz = false},
+});
+
+constexpr auto h5_system_clock_fields = std::to_array<std::string_view>({"VOS"});
+
 constexpr std::array<write_entry<pwr>, 4> h5_writes{
     {
      {"PWR_PMCR", &pwr::cr1_written},
@@ -265,23 +345,31 @@ constexpr std::array<write_entry<pwr>, 4> h5_writes{
 };
 
 constexpr pwr_family h5_pwr{
-    .fields           = h5_names,
-    .modes            = h5_modes_by_lpms,
-    .vos_levels       = h5_vos_levels,
-    .vos_ready_set    = true,
-    .active_ready_set = true,
-    .writes           = h5_writes,
-    .trustzone_writes = {},
+    .fields                = h5_names,
+    .modes                 = h5_modes_by_lpms,
+    .vos_levels            = h5_vos_levels,
+    .vos_ready_set         = true,
+    .active_ready_set      = true,
+    .writes                = h5_writes,
+    .trustzone_writes      = h5_trustzone_writes,
+    .secured               = h5_secured,
+    .wakeup_fields         = h5_wakeup_fields,
+    .system_clock_register = "PWR_VOSCR",
+    .system_clock_fields   = h5_system_clock_fields,
 };
 
 constexpr pwr_family u5_pwr{
-    .fields           = u5_names,
-    .modes            = modes_by_lpms,
-    .vos_levels       = u5_vos_levels,
-    .vos_ready_set    = true,
-    .active_ready_set = true,
-    .writes           = u5_writes,
-    .trustzone_writes = u5_trustzone_writes,
+    .fields                = u5_names,
+    .modes                 = modes_by_lpms,
+    .vos_levels            = u5_vos_levels,
+    .vos_ready_set         = true,
+    .active_ready_set      = true,
+    .writes                = u5_writes,
+    .trustzone_writes      = u5_trustzone_writes,
+    .secured               = u5_secured,
+    .wakeup_fields         = u5_wakeup_fields,
+    .system_clock_register = "PWR_VOSR",
+    .system_clock_fields   = u5_system_clock_fields,
 };
 
 static_assert(names_every_role(u5_names));
@@ -319,48 +407,38 @@ void pwr::add_rules()
     auto const at = reg(name);
     return field_ref{.offset = at.offset, .lsb = at.lsb, .width = at.width};
   };
-  for(auto const& group : own_groups)
+  for(auto const& secured : family_.secured)
   {
-    auto const bit = field("PWR_SECCFGR", group.bit);
-    for(auto const name : group.registers)
-    {
-      if(not name.empty())
-      {
-        auto const all = whole(name);
-        rules_.push_back(
-            {.offset = all.offset, .bits = all.mask(), .source = guard_source::own, .own = bit});
-      }
-    }
+    auto const bits =
+        secured.field.empty() ? whole(secured.reg) : field(secured.reg, secured.field);
+    rules_.push_back(
+        {.offset = bits.offset,
+         .bits   = bits.mask(),
+         .raz    = secured.raz,
+         .source = guard_source::own,
+         .own    = field("PWR_SECCFGR", secured.bit)});
   }
-  auto const css = field("PWR_SR", "CSSF");
-  rules_.push_back(
-      {.offset = css.offset,
-       .bits   = css.mask(),
-       .source = guard_source::own,
-       .own    = field("PWR_SECCFGR", "LPMSEC")});
   for(int x = 1; x <= 8; ++x)
   {
     auto const n   = std::to_string(x);
     auto const bit = field("PWR_SECCFGR", "WUP" + n + "SEC");
-    for(auto const& [name, prefix] : {
-            std::pair{"PWR_WUCR1", "WUPEN"},
-            std::pair{"PWR_WUCR2", "WUPP" },
-            std::pair{"PWR_WUCR3", "WUSEL"},
-            std::pair{"PWR_WUSCR", "CWUF" }
-    })
+    for(auto const& wakeup : family_.wakeup_fields)
     {
-      auto const f = field(name, prefix + n);
+      auto const f = field(wakeup.reg, std::string{wakeup.prefix} + n);
       rules_.push_back(
-          {.offset = f.offset, .bits = f.mask(), .source = guard_source::own, .own = bit});
+          {.offset = f.offset,
+           .bits   = f.mask(),
+           .raz    = wakeup.raz,
+           .source = guard_source::own,
+           .own    = bit});
     }
   }
-  for(auto const name : {"VOS", "BOOSTEN", "USBPWREN", "USBBOOSTEN"})
+  auto const& scaling = describe(family_.system_clock_register);
+  for(auto const name : family_.system_clock_fields)
   {
-    auto const& vosr = describe("PWR_VOSR");
-    if(std::ranges::find(vosr.fields, std::string_view{name}, &field_desc::name)
-       != vosr.fields.end())
+    if(std::ranges::find(scaling.fields, name, &field_desc::name) != scaling.fields.end())
     {
-      auto const f = field("PWR_VOSR", name);
+      auto const f = field(family_.system_clock_register, name);
       rules_.push_back(
           {.offset = f.offset, .bits = f.mask(), .source = guard_source::system_clock});
     }
@@ -489,8 +567,13 @@ auto pwr::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_gu
     {
       continue;
     }
-    auto const secure = rule_secure(rule);
-    out               = out | guard_of(rule.bits, secure, secure ? spriv : nspriv, ctx);
+    auto const secure     = rule_secure(rule);
+    auto const refused    = secure and not ctx.secure;
+    auto const privileged = (secure ? spriv : nspriv) and not ctx.privileged;
+    out                   = out
+                          | bus_guard{
+                              .raz = (refused and rule.raz) or privileged ? rule.bits : 0,
+                              .wi  = refused or privileged ? rule.bits : 0};
   }
   return out;
 }

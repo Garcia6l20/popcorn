@@ -1,7 +1,8 @@
-"""Patch file format, loader and application: peripheral drops, fields, cross rules, aliases,
-IP renames, IRQ add/drop, GPIO alternate function drops, core overrides, peripheral sizes, added
-registers, added memory regions, region controllers, the device signature. popcorn's own TOML
-format, so these dataclasses are the format definition, not a mirror of any C++ or schema type."""
+"""Patch file format, loader and application: peripheral drops and renames, fields, cross rules,
+aliases, IP renames, IRQ add/drop, GPIO alternate function drops, core overrides, peripheral
+sizes, added registers, added memory regions, region controllers, the device signature. popcorn's
+own TOML format, so these dataclasses are the format definition, not a mirror of any C++ or
+schema type."""
 
 import copy
 import fnmatch
@@ -62,8 +63,9 @@ class PatchSvd:
 
 @dataclass(slots=True, kw_only=True)
 class PatchPeripherals:
-    drop: list[str]
     source: str
+    drop: list[str] | None = None
+    renames: dict[str, str] | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -226,6 +228,7 @@ class PatchTarget:
 @dataclass(slots=True, kw_only=True)
 class PatchReport:
     peripherals_dropped: int = 0
+    peripherals_renamed: int = 0
     ip_renamed: int = 0
     aliased: int = 0
     fields_touched: int = 0
@@ -906,15 +909,31 @@ def _apply_drops(
 ) -> None:
     known = {p.name for p in peripherals}
     dropped: set[str] = set()
+    renamed: dict[str, str] = {}
     for rule, file in rules:
-        for name in rule.drop:
+        if not rule.drop and not rule.renames:
+            raise DescriptionError(file, 0, "peripherals", "a drop or a renames entry")
+        for name in rule.drop or []:
             if name in dropped:
                 raise DescriptionError(file, 0, "peripherals.drop", "each name once")
             if name not in known:
                 raise DescriptionError(file, 0, f"peripherals.drop.{name}", "a known peripheral")
             dropped.add(name)
+    taken = known - dropped
+    for rule, file in rules:
+        for old, new in (rule.renames or {}).items():
+            key = f"peripherals.renames.{old}"
+            if old not in taken or old in renamed:
+                raise DescriptionError(file, 0, key, "a known peripheral, renamed once")
+            if new in taken or new in renamed.values():
+                raise DescriptionError(file, 0, key, "a name no other peripheral has")
+            renamed[old] = new
     peripherals[:] = [p for p in peripherals if p.name not in dropped]
+    for peripheral in peripherals:
+        if peripheral.name in renamed:
+            peripheral.name = renamed[peripheral.name]
     report.peripherals_dropped += len(dropped)
+    report.peripherals_renamed += len(renamed)
 
 
 def _apply_core(
@@ -1048,10 +1067,12 @@ def _apply_signature(
 
 
 def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchReport:
-    """Applies @p patches to @p target in the fixed order: peripheral drops, IP renames, aliases,
-    peripheral sizes, added registers, register resets, fields, cross rules, IRQ drops and adds,
-    core, memory regions and their controllers, the device signature. Drops come first, so a later
-    rule naming a dropped peripheral fails as naming an unknown one. A peripheral size, an added
+    """Applies @p patches to @p target in the fixed order: peripheral drops and renames, IP
+    renames, aliases, peripheral sizes, added registers, register resets, fields, cross rules,
+    IRQ drops and adds, core, memory regions and their controllers, the device signature. Drops
+    come first, so a later rule naming a dropped peripheral fails as naming an unknown one. A
+    peripheral rename lands before the aliases, so the alias rule pairs the new name with its
+    base, and a later rule names the new name. A peripheral size, an added
     register and a register reset land in the named peripheral and in each of its aliases, so
     fields and cross rules may name the register. A fields rule with `drop` removes its fields
     from the named peripheral and its aliases, and a later rule naming them fails. A fields rule

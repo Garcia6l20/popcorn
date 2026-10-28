@@ -1,24 +1,24 @@
 {
   "counts": {
-    "aliases": 103,
+    "aliases": 104,
     "alternates": 1015,
-    "cross_rules": 847,
-    "fields": 39214,
+    "cross_rules": 856,
+    "fields": 39335,
     "irqs": 131,
     "patched_fields": 408,
-    "peripherals": 208,
+    "peripherals": 209,
     "regions": 12,
-    "registers": 4664
+    "registers": 4676
   },
   "part": "STM32H573AIIx",
   "svd_sha256": "c0eef483c65d36fabb58f59f0d8428a6bb81758761ff4cd68ef340c21b65efcd",
   "tables": {
     "alternates": "e6d903b7bfa9c27a1e3bdaaa3fe99e8ea84f2ea8a9af39d4cb0d0d26f88f785c",
     "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
-    "fields": "736ad34f0eaafc81d999de73df17fa829d2f5a7034f444b83a9b4abc3fb1406a",
+    "fields": "efe2f23bbd2988f3361e413fdee6eb9534ce7aee8af066457a286216eb47c64a",
     "irqs": "ccd22f69b74a688059d1ca98d417404a1cbaead9ec19549611bab07a6f46ff86",
-    "peripherals": "2643e5b494fa64971685dbb8860032f87aef39744d55980f4c8a4738f9a6853e",
+    "peripherals": "d2740efa0cdd47f30e4b358b871f2485627461e216a410c129b4abceab6c34f5",
     "regions": "b0dce162c6511eccb4ef50029218681a4f65fffea78ab868b22df767cab630e3",
-    "registers": "792597474b71fcebe300fe8d1919c2149c1648752a5a2790b3e06aee9dbd16be"
+    "registers": "3fa81161dbf57663719b773a97df58986e37e733f4f82cbe270cb8061be5d5fa"
   }
 }

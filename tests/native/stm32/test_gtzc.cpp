@@ -39,6 +39,7 @@ using popcorn::address;
 using popcorn::bus_attrs;
 using popcorn::icount;
 using popcorn::initiator;
+using popcorn::testing::h573;
 using popcorn::testing::u575;
 
 constexpr bus_attrs secure_priv{.by = initiator::cpu, .secure = true, .privileged = true};
@@ -95,22 +96,32 @@ private:
   periph::model_context& ctx_;
 };
 
-auto unit(std::string_view name) -> popcorn::peripheral_desc const&
+auto unit(std::string_view name, popcorn::part_description const& part = u575())
+    -> popcorn::peripheral_desc const&
 {
-  return *std::ranges::find(u575().peripherals, name, &popcorn::peripheral_desc::name);
+  auto const found = std::ranges::find(part.peripherals, name, &popcorn::peripheral_desc::name);
+  REQUIRE(found != part.peripherals.end());
+  return *found;
 }
 
-auto address_of(std::string_view peripheral, std::string_view reg) -> address
+auto address_of(
+    std::string_view                 peripheral,
+    std::string_view                 reg,
+    popcorn::part_description const& part = u575()) -> address
 {
-  auto const& p     = unit(peripheral);
+  auto const& p     = unit(peripheral, part);
   auto const* found = popcorn::find_register(p, reg);
   REQUIRE(found != nullptr);
   return p.base + found->offset;
 }
 
-auto bit(std::string_view peripheral, std::string_view reg, std::string_view field) -> std::uint32_t
+auto bit(
+    std::string_view                 peripheral,
+    std::string_view                 reg,
+    std::string_view                 field,
+    popcorn::part_description const& part = u575()) -> std::uint32_t
 {
-  auto const* found = popcorn::find_register(unit(peripheral), reg);
+  auto const* found = popcorn::find_register(unit(peripheral, part), reg);
   REQUIRE(found != nullptr);
   auto const bits = std::ranges::find(found->fields, field, &popcorn::field_desc::name);
   REQUIRE(bits != found->fields.end());
@@ -119,8 +130,28 @@ auto bit(std::string_view peripheral, std::string_view reg, std::string_view fie
 
 struct rig
 {
-  std::unique_ptr<core::machine> target;
-  probe*                         bus{};
+  std::unique_ptr<core::machine>   target;
+  probe*                           bus{};
+  popcorn::part_description const* part = &u575();
+
+  rig(popcorn::part_description const& on, bool trustzone, std::string_view host) : part{&on}
+  {
+    stm32::register_builtin_models();
+    auto options   = popcorn::testing::stm32_options();
+    options.raz_wi = stm32::raz_wi_map(on);
+    if(trustzone)
+    {
+      REQUIRE(stm32::configure_option_bytes(on, {.tzen = true}, options).has_value());
+    }
+    options.models.insert_or_assign(
+        std::string{host}, [this](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+          auto made = std::make_shared<probe>(ctx);
+          bus       = made.get();
+          return made;
+        });
+    target = std::make_unique<core::machine>(on, popcorn::arch::armv8m::factory(), options);
+    target->reset();
+  }
 
   explicit rig(
       bool                        trustzone,
@@ -156,20 +187,20 @@ struct rig
       write(std::string_view peripheral, std::string_view reg, std::uint32_t value, bus_attrs attrs)
           const -> void
   {
-    REQUIRE(bus->services().write(address_of(peripheral, reg), 4, value, attrs).has_value());
+    REQUIRE(bus->services().write(address_of(peripheral, reg, *part), 4, value, attrs).has_value());
   }
 
   [[nodiscard]] auto read(std::string_view peripheral, std::string_view reg, bus_attrs attrs) const
       -> std::uint32_t
   {
-    auto const value = bus->services().read(address_of(peripheral, reg), 4, attrs);
+    auto const value = bus->services().read(address_of(peripheral, reg, *part), 4, attrs);
     REQUIRE(value.has_value());
     return *value;
   }
 
   [[nodiscard]] auto peek(std::string_view peripheral, std::string_view reg) const -> std::uint32_t
   {
-    auto const* found = popcorn::find_register(unit(peripheral), reg);
+    auto const* found = popcorn::find_register(unit(peripheral, *part), reg);
     REQUIRE(found != nullptr);
     return target->peripheral(peripheral).peek(found->offset & ~3u);
   }
@@ -186,7 +217,7 @@ constexpr std::uint32_t gtzc_irq = 8;
 
 TEST_CASE("gtzc_fields maps every TZSC SECCFGRx and TZIC IERx field of the U575")
 {
-  auto const            fields = stm32::gtzc_fields(u575());
+  auto const            fields = stm32::gtzc_fields(u575(), stm32::u5_gtzc);
   std::set<std::string> unknown;
   std::set<std::string> memory;
   for(auto const& f : fields)
@@ -975,7 +1006,7 @@ TEST_CASE(
 TEST_CASE("every peripheral with a Secure alias has a SEC rule, except the TrustZone-aware ones")
 {
   std::set<std::size_t> ruled;
-  for(auto const& f : stm32::gtzc_fields(u575()))
+  for(auto const& f : stm32::gtzc_fields(u575(), stm32::u5_gtzc))
   {
     if(f.owner.ends_with("_TZSC"))
     {
@@ -1923,5 +1954,137 @@ TEST_CASE(
   CHECK(get(r, "r3") == 0);
   CHECK(get(r, "r2") == 0);
   CHECK((r.peek("GTZC1_TZIC", "SR4") & bit("GTZC1_TZIC", "SR4", "BKPSRAMF")) != 0);
+}
+
+TEST_CASE("RM0481 2.2 and 5: a TZEN=1 STM32H573 builds a model for each GTZC unit, TZEN=0 none")
+{
+  for(auto const trustzone : {false, true})
+  {
+    CAPTURE(trustzone);
+    rig const r{h573(), trustzone, "OTFDEC1"};
+    for(std::string_view const name :
+        {"GTZC1_TZSC", "GTZC1_TZIC", "GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3"})
+    {
+      CAPTURE(name);
+      CHECK((r.target->model(name) != nullptr) == trustzone);
+    }
+  }
+}
+
+TEST_CASE("gtzc_fields maps every TZSC SECCFGRx and TZIC IERx field of the H573, RM0481 Table 3")
+{
+  auto const            fields = stm32::gtzc_fields(h573(), stm32::h5_gtzc);
+  std::set<std::string> unknown;
+  for(auto const& f : fields)
+  {
+    if(f.target == stm32::gtzc_target::unknown)
+    {
+      unknown.insert(f.owner + "." + f.field);
+    }
+  }
+  CHECK(unknown == std::set<std::string>{"GTZC1_TZIC.HDMICECIE", "GTZC1_TZSC.HDMICECSEC"});
+  auto const named = [&](std::string_view owner, std::string_view field) {
+    auto const found = std::ranges::find_if(
+        fields, [&](stm32::gtzc_field const& f) { return f.owner == owner and f.field == field; });
+    REQUIRE(found != fields.end());
+    std::vector<std::string> names;
+    for(auto const index : found->units)
+    {
+      names.push_back(h573().peripherals[index].name);
+    }
+    return names;
+  };
+  using names = std::vector<std::string>;
+  CHECK(named("GTZC1_TZSC", "ADC12SEC") == names{"ADC1", "ADC2", "ADCC"});
+  CHECK(named("GTZC1_TZIC", "ADC12IE") == names{"ADC1", "ADC2", "ADCC"});
+  CHECK(named("GTZC1_TZSC", "UCPDSEC") == names{"UCPD1"});
+  CHECK(named("GTZC1_TZSC", "LPUART1SEC") == names{"LPUART"});
+  CHECK(named("GTZC1_TZSC", "DAC1SEC") == names{"DAC"});
+  CHECK(named("GTZC1_TZSC", "I3C1SEC") == names{"I3C"});
+  CHECK(named("GTZC1_TZSC", "OCTOSPI1SEC") == names{"OCTOSPI"});
+  CHECK(named("GTZC1_TZSC", "ICACHESEC") == names{"ICACHE"});
+  CHECK(named("GTZC1_TZSC", "DCMISEC") == names{"DCMI", "PSSI"});
+  CHECK(named("GTZC1_TZIC", "FLASH_REGIE") == names{"FLASH"});
+}
+
+TEST_CASE(
+    "every H573 peripheral with a Secure alias has a SEC rule, except the TrustZone-aware ones")
+{
+  std::set<std::size_t> ruled;
+  for(auto const& f : stm32::gtzc_fields(h573(), stm32::h5_gtzc))
+  {
+    if(f.owner.ends_with("_TZSC"))
+    {
+      ruled.insert(f.units.begin(), f.units.end());
+    }
+  }
+  std::set<std::string> unruled;
+  for(auto const& [index, p] : std::views::enumerate(h573().peripherals))
+  {
+    auto const aliased =
+        std::ranges::any_of(h573().peripherals, [&](popcorn::peripheral_desc const& a) {
+          return a.alias_of == p.name;
+        });
+    if(aliased and not p.alias_of and not ruled.contains(static_cast<std::size_t>(index)))
+    {
+      unruled.insert(p.name);
+    }
+  }
+  CHECK(
+      unruled == std::set<std::string>{"DLYBOS1",      "DLYBSD1",      "DLYBSD2",      "EXTI",
+                                       "FLASH",        "GPDMA1",       "GPDMA2",       "GPIOA",
+                                       "GPIOB",        "GPIOC",        "GPIOD",        "GPIOE",
+                                       "GPIOF",        "GPIOG",        "GPIOH",        "GPIOI",
+                                       "GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3", "GTZC1_TZIC",
+                                       "GTZC1_TZSC",   "OTFDEC1",      "PWR",          "RCC",
+                                       "RTC",          "SBS",          "TAMP"});
+}
+
+TEST_CASE(
+    "RM0481 5.4.3: a Non-secure write to a peripheral whose SEC bit names it under another name "
+    "is refused and raises its TZIC flag")
+{
+  struct tie
+  {
+    std::string_view sec_reg;
+    std::string_view sec;
+    std::string_view peripheral;
+    std::string_view reg;
+    std::uint32_t    value;
+    std::string_view flag_reg;
+    std::string_view flag;
+  };
+  for(auto const& one : std::initializer_list<tie>{
+          {"SECCFGR3", "ADC12SEC",    "ADC1",    "IER",     0x1,         "SR3", "ADC12F"   },
+          {"SECCFGR3", "ADC12SEC",    "ADC2",    "IER",     0x1,         "SR3", "ADC12F"   },
+          {"SECCFGR3", "ADC12SEC",    "ADCC",    "ADC_CCR", 0x0040'0000, "SR3", "ADC12F"   },
+          {"SECCFGR2", "UCPDSEC",     "UCPD1",   "CFGR1",   0x1,         "SR2", "UCPDF"    },
+          {"SECCFGR2", "LPUART1SEC",  "LPUART",  "BRR",     0x300,       "SR2", "LPUART1F" },
+          {"SECCFGR1", "DAC1SEC",     "DAC",     "DHR12R1", 0x1,         "SR1", "DAC1F"    },
+          {"SECCFGR1", "I3C1SEC",     "I3C",     "CFGR",    0x1,         "SR1", "I3C1F"    },
+          {"SECCFGR3", "OCTOSPI1SEC", "OCTOSPI", "DCR1",    0x1,         "SR3", "OCTOSPI1F"},
+          {"SECCFGR3", "ICACHESEC",   "ICACHE",  "IER",     0x2,         "SR3", "ICACHEF"  },
+  })
+  {
+    std::string const name{one.peripheral};
+    CAPTURE(name);
+    rig const  r{h573(), true, "OTFDEC1"};
+    auto const before = r.peek(one.peripheral, one.reg);
+    r.write(
+        "GTZC1_TZSC", one.sec_reg, bit("GTZC1_TZSC", one.sec_reg, one.sec, h573()), secure_priv);
+    r.write(one.peripheral, one.reg, one.value, nonsecure_priv);
+    CHECK(r.peek(one.peripheral, one.reg) == before);
+    CHECK(r.read(one.peripheral, one.reg, nonsecure_priv) == 0);
+    CHECK(r.peek("GTZC1_TZIC", one.flag_reg) == bit("GTZC1_TZIC", one.flag_reg, one.flag, h573()));
+    r.write(one.peripheral, one.reg, one.value, secure_priv);
+    CHECK(r.peek(one.peripheral, one.reg) != before);
+  }
+}
+
+TEST_CASE("RM0481 2.3: the Secure LPUART window at 0x54002400 reaches the LPUART registers")
+{
+  rig const r{h573(), true, "OTFDEC1"};
+  REQUIRE(r.bus->services().write(0x5400'240cu, 4, 0x300, secure_priv).has_value());
+  CHECK(r.peek("LPUART", "BRR") == 0x300);
 }
 }

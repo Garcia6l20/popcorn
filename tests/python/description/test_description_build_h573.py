@@ -123,11 +123,13 @@ def test_only_peripherals_without_a_cubemx_instance_have_no_ip_version(
             assert any(p.ip == ip.name and p.ip_version == ip.version for p in peripherals.values())
 
 
-def test_the_secure_alias_of_lpuart1_is_dropped_and_the_others_derive(
+def test_the_secure_window_of_lpuart_is_renamed_and_every_alias_derives(
     h573_sources: Sources,
 ) -> None:
     peripherals = _by_name(build_description(h573_sources))
     assert "SEC_LPUART1" not in peripherals
+    assert peripherals["SEC_LPUART"].alias_of == "LPUART"
+    assert peripherals["SEC_LPUART"].base == 0x54002400
     assert peripherals["SEC_RCC"].alias_of == "RCC"
     assert peripherals["SEC_RCC"].base == 0x54020C00
 
@@ -336,14 +338,14 @@ def test_every_patched_reset_is_a_known_value_in_every_bit(h573_sources: Sources
 def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
     _, report = build_description_with_report(h573_sources)
     assert report == _patches.PatchReport(
-        peripherals_dropped=1,
+        peripherals_renamed=1,
         ip_renamed=19,
-        aliased=103,
+        aliased=104,
         fields_touched=408,
         fields_dropped=48,
         fields_renamed=21,
         fields_added=2,
-        cross_rules_added=847,
+        cross_rules_added=856,
         irqs_dropped=22,
         irqs_added=27,
         sizes_set=1,
@@ -372,7 +374,8 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
     assert "registers" not in rules
     assert len(hash_rules["registers"]) + len(family["registers"]) == report.registers_added
     assert len(rules["memory"]["add"]) == report.regions_added
-    assert len(family["peripherals"]["drop"]) == report.peripherals_dropped
+    assert "drop" not in family["peripherals"]
+    assert len(family["peripherals"]["renames"]) == report.peripherals_renamed
 
 
 def test_the_patch_file_applies_only_to_its_parts(h573_sources: Sources, tmp_path: Path) -> None:

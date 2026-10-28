@@ -31,7 +31,7 @@ struct builtin
   std::string_view part_glob     = "*";
 };
 
-constexpr std::array<builtin, 55> builtins{
+constexpr std::array<builtin, 56> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -173,7 +173,14 @@ constexpr std::array<builtin, 55> builtins{
          .part_glob       = "STM32H57*"},
      {"RNG", "rng1_v4_1", [](board const& b) { return rng_factory(b.rng); }},
      {"SYS", "STM32U5x_sys_*", [](board const&) { return syscfg_factory(); }},
-     {"GTZC", "tzsc1_v2_2*", [](board const&) { return gtzc_factory(); }},
+     {.ip              = "GTZC",
+         .ip_version_glob = "tzsc1_v2_2*",
+         .make            = [](board const&) { return gtzc_factory(u5_gtzc); },
+         .part_glob       = "STM32U5*"},
+     {.ip              = "GTZC",
+         .ip_version_glob = "tzsc1_v2_2*",
+         .make            = [](board const&) { return gtzc_factory(h5_gtzc); },
+         .part_glob       = "STM32H5*"},
      }
 };
 
@@ -208,9 +215,10 @@ struct idau_family
   std::span<idau_region const> ranges;
 };
 
-constexpr std::array<idau_family, 1> idau_maps{
+constexpr std::array<idau_family, 2> idau_maps{
     {
      {"STM32U5*", u5_idau},
+     {"STM32H5*", u5_idau},
      }
 };
 
@@ -277,10 +285,33 @@ struct mpcbb_family
   std::span<sram_blocks const> controllers;
 };
 
-constexpr std::array<mpcbb_family, 2> mpcbb_maps{
+constexpr std::array<sram_blocks, 3> h573_mpcbb{
+    {
+     {.controller        = "GTZC1_MPCBB1",
+         .start             = 0x2000'0000,
+         .size              = 0x4'0000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     {.controller        = "GTZC1_MPCBB2",
+         .start             = 0x2004'0000,
+         .size              = 0x1'0000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     {.controller        = "GTZC1_MPCBB3",
+         .start             = 0x2005'0000,
+         .size              = 0x5'0000,
+         .block_size        = 512,
+         .superblock_blocks = 32},
+     }
+};
+
+constexpr std::array<mpcbb_family, 5> mpcbb_maps{
     {
      {"STM32U575*", u575_mpcbb},
      {"STM32U585*", u575_mpcbb},
+     {"STM32H562*", h573_mpcbb},
+     {"STM32H563*", h573_mpcbb},
+     {"STM32H573*", h573_mpcbb},
      }
 };
 

@@ -1,3 +1,4 @@
+#include "h573_secure_rig.hpp"
 #include "stm32_fixture.hpp"
 #include "voltage_range.hpp"
 
@@ -10,6 +11,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <initializer_list>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -279,4 +282,89 @@ TEST_CASE("coverage classifies PWR_VOSSR as served and USBSCR as unimplemented")
   CHECK(found.front().peripheral == "PWR");
   CHECK(found.front().reg == "USBSCR");
   CHECK(found.front().reason == popcorn::core::unmodelled_reason::unimplemented);
+}
+
+TEST_CASE(
+    "RM0481 10.9 Table 114: a PWR_SECCFGR group bit makes its registers WI to Non-secure writes, "
+    "Non-secure reads see them")
+{
+  struct row
+  {
+    std::string_view bit;
+    std::string_view reg;
+    std::string_view field;
+  };
+  for(auto const& one : std::initializer_list<row>{
+          {"LPMSEC",  "PWR_PMCR",   "SVOS"    },
+          {"VUSBSEC", "PWR_USBSCR", "USB33DEN"},
+          {"VBSEC",   "PWR_BDCR",   "BREN"    },
+          {"VBSEC",   "PWR_DBPCR",  "DBP"     },
+          {"RETSEC",  "PWR_IORETR", "IORETEN" },
+          {"SCMSEC",  "PWR_SCCR",   "BYPASS"  },
+          {"SCMSEC",  "PWR_VMCR",   "PVDE"    },
+  })
+  {
+    std::string const name{one.reg};
+    CAPTURE(name);
+    popcorn::testing::h573_secure_rig const r;
+    auto const                              value = r.bit("PWR", one.reg, one.field);
+    r.write("PWR", "PWR_SECCFGR", r.bit("PWR", "PWR_SECCFGR", one.bit), true);
+    auto const stored = r.peek("PWR", one.reg);
+    r.write("PWR", one.reg, stored ^ value, false);
+    CHECK(r.peek("PWR", one.reg) == stored);
+    CHECK(r.read("PWR", one.reg, false) == stored);
+    r.write("PWR", one.reg, stored ^ value, true);
+    CHECK(r.peek("PWR", one.reg) == (stored ^ value));
+    CHECK(r.read("PWR", one.reg, false) == (stored ^ value));
+  }
+}
+
+TEST_CASE(
+    "RM0481 10.9 Table 114: WUP3SEC makes the pin 3 fields of PWR_WUCR RAZ/WI to Non-secure "
+    "accesses, pin 2 stays open")
+{
+  popcorn::testing::h573_secure_rig const r;
+  auto const                              pin3 = r.bit("PWR", "PWR_WUCR", "WUPEN3")
+                                               | r.bit("PWR", "PWR_WUCR", "WUPP3")
+                                               | r.bit("PWR", "PWR_WUCR", "WUPPUPD3");
+  auto const                              pin2 = r.bit("PWR", "PWR_WUCR", "WUPEN2")
+                                               | r.bit("PWR", "PWR_WUCR", "WUPP2")
+                                               | r.bit("PWR", "PWR_WUCR", "WUPPUPD2");
+  r.write("PWR", "PWR_WUCR", pin3, true);
+  r.write("PWR", "PWR_SECCFGR", r.bit("PWR", "PWR_SECCFGR", "WUP3SEC"), true);
+  CHECK(r.read("PWR", "PWR_WUCR", false) == 0);
+  CHECK(r.read("PWR", "PWR_WUCR", true) == pin3);
+  r.write("PWR", "PWR_WUCR", pin2, false);
+  CHECK(r.peek("PWR", "PWR_WUCR") == (pin3 | pin2));
+  CHECK(r.read("PWR", "PWR_WUCR", false) == pin2);
+}
+
+TEST_CASE(
+    "RM0481 10.9 Table 114: SYSCLKSEC makes PWR_VOSCR.VOS RAZ/WI and the UCPD1 SEC bit "
+    "PWR_UCPDR RAZ/WI to Non-secure accesses")
+{
+  popcorn::testing::h573_secure_rig const r;
+  auto const                              vos = r.bit("PWR", "PWR_VOSCR", "VOS");
+  r.write("PWR", "PWR_VOSCR", vos & 0x10u, true);
+  r.write("RCC", "RCC_SECCFGR", r.bit("RCC", "RCC_SECCFGR", "SYSCLKSEC"), true);
+  CHECK(r.read("PWR", "PWR_VOSCR", false) == 0);
+  r.write("PWR", "PWR_VOSCR", 0, false);
+  CHECK((r.peek("PWR", "PWR_VOSCR") & vos) == (vos & 0x10u));
+  auto const ucpd = r.bit("PWR", "PWR_UCPDR", "UCPD_DBDIS");
+  r.write("PWR", "PWR_UCPDR", ucpd, true);
+  CHECK(r.read("PWR", "PWR_UCPDR", false) == ucpd);
+  r.write("GTZC1_TZSC", "SECCFGR2", r.bit("GTZC1_TZSC", "SECCFGR2", "UCPDSEC"), true);
+  CHECK(r.read("PWR", "PWR_UCPDR", false) == 0);
+  r.write("PWR", "PWR_UCPDR", 0, false);
+  CHECK(r.peek("PWR", "PWR_UCPDR") == ucpd);
+}
+
+TEST_CASE("RM0481 10.9: a Non-secure PWR_SECCFGR write is WI, a Non-secure read sees it")
+{
+  popcorn::testing::h573_secure_rig const r;
+  auto const                              lpm = r.bit("PWR", "PWR_SECCFGR", "LPMSEC");
+  r.write("PWR", "PWR_SECCFGR", lpm, true);
+  r.write("PWR", "PWR_SECCFGR", 0, false);
+  CHECK(r.peek("PWR", "PWR_SECCFGR") == lpm);
+  CHECK(r.read("PWR", "PWR_SECCFGR", false) == lpm);
 }

@@ -30,7 +30,7 @@ def test_golden_dump_matches_expected_counts(h573_sources: Sources) -> None:
     description, report = build_description_with_report(h573_sources)
     golden = compute_golden(description, report, svd_sha256=description.sources["svd"])
 
-    assert golden["counts"]["peripherals"] == 208
-    assert golden["counts"]["aliases"] == 103
+    assert golden["counts"]["peripherals"] == 209
+    assert golden["counts"]["aliases"] == 104
     assert golden["counts"]["regions"] == 12
     assert golden["counts"]["irqs"] == 131

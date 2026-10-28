@@ -50,6 +50,24 @@ The built description is cached as JSON under `$XDG_CACHE_HOME/popcorn/mcu`, key
 the core, the schema version, the generator string and the digests of the resolved sources
 in `_cache.py`.
 
+## Peripheral drops and renames
+
+A `[peripherals]` table removes SVD peripherals or gives them another name:
+
+```toml
+[peripherals]
+renames = { SEC_LPUART1 = "SEC_LPUART" }
+source = "the SVD names the Secure window of LPUART SEC_LPUART1"
+```
+
+`drop` lists names to remove, `renames` maps an SVD name to its new name, and the table carries
+at least one of them and a `source`. Both apply first, before the IP renames and the aliases, so
+the `[aliases]` rule pairs a renamed `SEC_<name>` with the peripheral `<name>` and every later
+rule names the new name. A renamed peripheral must exist and not be dropped, each name is
+renamed once across the files, and the new name must be free, otherwise the build raises
+`DescriptionError` keyed `peripherals.renames.<name>`. The patch report counts them in
+`peripherals_dropped` and `peripherals_renamed`.
+
 ## Alternate function drops
 
 The CubeMX GPIO modes file can list an alternate function a part cannot route. A patch removes

@@ -513,6 +513,89 @@ def test_a_name_dropped_twice_is_an_error(tmp_path: Path) -> None:
     assert target == before
 
 
+def test_a_peripheral_rename_lands_before_the_alias_rule(tmp_path: Path) -> None:
+    text = """
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [peripherals]
+    renames = { D = "E", SEC_D = "SEC_E" }
+    source = "probe"
+    [aliases]
+    prefix = "SEC_"
+    offset = 0x10000000
+    """
+    path = _write_patch(tmp_path, text)
+    target = _synthetic_target()
+    names = {p.name for p in target.peripherals}
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.peripherals_renamed == 2
+    assert report.aliased == 1
+    assert {p.name for p in target.peripherals} == (names - {"D", "SEC_D"}) | {"E", "SEC_E"}
+    assert target_peripheral(target, "SEC_E").alias_of == "E"
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "expected"),
+    [
+        (
+            'renames = { NOPE = "Z" }',
+            "peripherals.renames.NOPE",
+            "a known peripheral, renamed once",
+        ),
+        ('renames = { A = "B" }', "peripherals.renames.A", "a name no other peripheral has"),
+        (
+            'drop = ["A"]\n    renames = { A = "Z" }',
+            "peripherals.renames.A",
+            "a known peripheral, renamed once",
+        ),
+        (
+            'renames = { A = "Z", B = "Z" }',
+            "peripherals.renames.B",
+            "a name no other peripheral has",
+        ),
+        ("", "peripherals", "a drop or a renames entry"),
+    ],
+)
+def test_a_bad_peripheral_rename_is_an_error(
+    tmp_path: Path, section: str, key: str, expected: str
+) -> None:
+    text = f"""
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [peripherals]
+    {section}
+    source = "probe"
+    """
+    path = _write_patch(tmp_path, text)
+    target = _synthetic_target()
+    before = copy.deepcopy(target)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert excinfo.value.key == key
+    assert excinfo.value.expected == expected
+    assert target == before
+
+
+def test_a_peripheral_renamed_in_two_files_is_an_error(tmp_path: Path) -> None:
+    text = """
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [peripherals]
+    renames = { A = "Z" }
+    source = "probe"
+    """
+    first = _write_patch(tmp_path, text, "family.toml")
+    second = _write_patch(tmp_path, text, "part.toml")
+    target = _synthetic_target()
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(load_patches([first, second], part="TOY1", svd_name="synthetic.svd"), target)
+    assert excinfo.value.file == str(second)
+    assert excinfo.value.key == "peripherals.renames.A"
+
+
 def test_a_rule_naming_a_dropped_peripheral_is_an_error(tmp_path: Path) -> None:
     text = """
     format = 1

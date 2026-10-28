@@ -193,7 +193,11 @@ namespace popcorn::periph::stm32
 /** @brief Factory of the STM32H5 HASH model, RM0481 section 40, SHA-2, SHA-3 and SHAKE. */
 [[nodiscard]] auto hash_h5_factory() -> model_factory;
 
-/** @brief Factory of the GTZC TZSC, TZIC and MPCBB models, RM0456 section 5. Returns no model
- * without TrustZone: the GTZC registers then stay storage at their description reset values. */
-[[nodiscard]] auto gtzc_factory() -> model_factory;
+/**
+ * @brief Factory of the GTZC TZSC, TZIC and MPCBB models, RM0456 and RM0481 section 5. Returns
+ *        no model without TrustZone: the GTZC registers then stay storage at their description
+ *        reset values.
+ * @param variant Field stems of the family the row serves.
+ */
+[[nodiscard]] auto gtzc_factory(gtzc_variant variant) -> model_factory;
 }
