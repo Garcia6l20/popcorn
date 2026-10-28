@@ -24,6 +24,7 @@ namespace popcorn::periph::stm32
 namespace
 {
 constexpr std::uint32_t busy_done     = 0;
+constexpr std::uint32_t digest_done   = 1;
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 constexpr std::size_t   block_words   = 16;
 constexpr std::size_t   max_block     = 42;
@@ -73,9 +74,11 @@ struct algorithm
   std::uint8_t  csr_inner;
   std::uint8_t  suffix;
   std::uint16_t cycles;
+  std::uint8_t  tail;
+  std::uint8_t  lag;
   bool          hmac;
   bool          extendable;
-  bool          reserved;
+  bool          absent;
 };
 
 /**
@@ -127,32 +130,52 @@ constexpr std::array<std::uint32_t, 64> md5_k{
 
 constexpr std::array<int, 16> md5_shifts{7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21};
 
-constexpr algorithm sha1_code{function::sha1, 16, 5, 0, 38, 0, 82, true, false, false};
-constexpr algorithm md5_code{function::md5, 16, 4, 1, 38, 0, 66, true, false, false};
-constexpr algorithm sha224_code{function::sha256, 16, 7, 2, 38, 0, 66, true, false, false};
-constexpr algorithm sha256_code{function::sha256, 16, 8, 3, 38, 0, 66, true, false, false};
-constexpr algorithm sha384_code{function::sha512, 32, 12, 0, 52, 0, 98, true, false, false};
-constexpr algorithm sha512_224_code{function::sha512, 32, 7, 2, 52, 0, 98, true, false, false};
-constexpr algorithm sha512_256_code{function::sha512, 32, 8, 3, 52, 0, 98, true, false, false};
-constexpr algorithm sha512_code{function::sha512, 32, 16, 1, 52, 0, 98, true, false, false};
-constexpr algorithm sha3_224_code{function::keccak, 36, 7, 0, 55, 0x06, 60, true, false, false};
-constexpr algorithm sha3_256_code{function::keccak, 34, 8, 0, 55, 0x06, 58, true, false, false};
-constexpr algorithm sha3_384_code{function::keccak, 26, 12, 0, 72, 0x06, 50, true, false, false};
-constexpr algorithm sha3_512_code{function::keccak, 18, 16, 0, 72, 0x06, 42, true, false, false};
-constexpr algorithm shake128_code{function::keccak, 42, 42, 0, 0, 0x1F, 66, false, true, false};
-constexpr algorithm shake256_code{function::keccak, 34, 34, 0, 0, 0x1F, 58, false, true, false};
-constexpr algorithm reserved_code{function::sha256, 16, 8, 3, 38, 0, 66, true, false, true};
+constexpr algorithm sha1_code{function::sha1, 16, 5, 0, 38, 0, 82, 0, 0, true, false, false};
+constexpr algorithm h5_sha1_code{function::sha1, 16, 5, 0, 38, 0, 82, 15, 11, true, false, false};
+constexpr algorithm md5_code{function::md5, 16, 4, 1, 38, 0, 66, 0, 0, true, false, false};
+constexpr algorithm sha224_code{function::sha256, 16, 7, 2, 38, 0, 66, 0, 0, true, false, false};
+constexpr algorithm sha256_code{function::sha256, 16, 8, 3, 38, 0, 66, 0, 0, true, false, false};
+constexpr algorithm h5_sha224_code{
+    function::sha256, 16, 7, 2, 38, 0, 64, 15, 11, true, false, false};
+constexpr algorithm h5_sha256_code{
+    function::sha256, 16, 8, 3, 38, 0, 64, 15, 11, true, false, false};
+constexpr algorithm sha384_code{function::sha512, 32, 12, 0, 52, 0, 82, 27, 11, true, false, false};
+constexpr algorithm sha512_224_code{
+    function::sha512, 32, 7, 2, 52, 0, 82, 27, 11, true, false, false};
+constexpr algorithm sha512_256_code{
+    function::sha512, 32, 8, 3, 52, 0, 82, 27, 11, true, false, false};
+constexpr algorithm sha512_code{function::sha512, 32, 16, 1, 52, 0, 82, 27, 11, true, false, false};
+constexpr algorithm sha3_224_code{
+    function::keccak, 36, 7, 0, 55, 0x06, 60, 0, 0, true, false, false};
+constexpr algorithm sha3_256_code{
+    function::keccak, 34, 8, 0, 55, 0x06, 58, 0, 0, true, false, false};
+constexpr algorithm sha3_384_code{
+    function::keccak, 26, 12, 0, 72, 0x06, 50, 0, 0, true, false, false};
+constexpr algorithm sha3_512_code{
+    function::keccak, 18, 16, 0, 72, 0x06, 42, 0, 0, true, false, false};
+constexpr algorithm shake128_code{
+    function::keccak, 42, 42, 0, 0, 0x1F, 66, 0, 0, false, true, false};
+constexpr algorithm shake256_code{
+    function::keccak, 34, 34, 0, 0, 0x1F, 58, 0, 0, false, true, false};
+constexpr algorithm absent_code{function::sha1, 16, 5, 0, 38, 0, 82, 15, 11, true, false, true};
 
 constexpr std::array<algorithm, 4> u5_codes{sha1_code, md5_code, sha224_code, sha256_code};
 
 constexpr std::array<algorithm, 16> h5_codes{
-    sha1_code,     reserved_code,   sha224_code,     sha256_code,   sha3_224_code, sha3_256_code,
-    sha3_384_code, sha3_512_code,   shake128_code,   shake256_code, reserved_code, reserved_code,
+    h5_sha1_code, absent_code,     h5_sha224_code,  h5_sha256_code, absent_code, absent_code,
+    absent_code,  absent_code,     absent_code,     absent_code,    absent_code, absent_code,
+    sha384_code,  sha512_224_code, sha512_256_code, sha512_code,
+};
+
+constexpr std::array<algorithm, 16> h5_sha3_codes{
+    h5_sha1_code,  absent_code,     h5_sha224_code,  h5_sha256_code, sha3_224_code, sha3_256_code,
+    sha3_384_code, sha3_512_code,   shake128_code,   shake256_code,  absent_code,   absent_code,
     sha384_code,   sha512_224_code, sha512_256_code, sha512_code,
 };
 
 constexpr hash_family u5_hash{u5_codes, 8, 54};
 constexpr hash_family h5_hash{h5_codes, 42, 103};
+constexpr hash_family h5_sha3_hash{h5_sha3_codes, 42, 103};
 
 /**
  * @brief Compresses one 512-bit block into a SHA-1 chaining value, FIPS 180-4 6.1.2.
@@ -318,6 +341,7 @@ constexpr auto inner_clear(hash_family const& family) noexcept -> bool
 
 static_assert(inner_clear(u5_hash));
 static_assert(inner_clear(h5_hash));
+static_assert(inner_clear(h5_sha3_hash));
 
 /**
  * @brief The DIN word as message bits in big-endian order, RM0456 Figure 502.
@@ -364,6 +388,7 @@ struct hash_state
   std::uint8_t                             digest_size{};
   std::uint64_t                            busy_end{};
   std::uint64_t                            queued{};
+  std::uint64_t                            flagged{};
   std::uint8_t                             busy{};
   std::uint8_t                             final_pending{};
   std::uint8_t                             digested{};
@@ -381,8 +406,9 @@ struct hash_state
 /**
  * @brief Hash processor of the STM32U5, RM0456 section 51: SHA-1, MD5, SHA-224 and SHA-256, and
  *        HMAC over them, on words written to DIN by the CPU or by DMA. The STM32H5 processor,
- *        RM0481 section 40, adds SHA2-384, SHA2-512, SHA2-512/224, SHA2-512/256, SHA3-224 to
- *        SHA3-512, SHAKE128 and SHAKE256 and drops MD5, see the H5 paragraph below.
+ *        RM0481 section 40, adds SHA2-384, SHA2-512, SHA2-512/224 and SHA2-512/256, on the
+ *        STM32H543 and H553 also SHA3-224 to SHA3-512, SHAKE128 and SHAKE256, and drops MD5,
+ *        see the H5 paragraph below.
  *
  *        Each DIN word is swapped by the DATATYPE in CR at the time of the write into message
  *        bits in big-endian order. A write that finds 16 words pending compresses them first, so
@@ -397,11 +423,12 @@ struct hash_state
  *        only.
  *
  *        The arithmetic is done at the write, only the flags follow time. Each block keeps BUSY
- *        set for 82 HCLK cycles on SHA-1 and 66 on the others, RM0456 Table 487, the final
+ *        set for 82 HCLK cycles on SHA-1 and 66 on the others, RM0456 Table 486, the final
  *        digest one block time per block it compresses. Work arriving while BUSY queues behind
  *        the current block, its end time fixed on arrival from the core clock, which is HCLK.
- *        One BUSY end event is pending at a time, moved to the queue's end when it fires early.
- *        INIT and reset cancel it, so the queue never holds more than one event of this model.
+ *        One BUSY end event is pending at a time, moved to the queue's end when it fires early,
+ *        and on the STM32H5 one digest event after it, see below. INIT and reset cancel both, so
+ *        the queue never holds more than two events of this model.
  *        At the end of a partial block DINIS rises when at most one word is pending and NBWE
  *        reads 17 minus NBWP. At the end of a final digest DCIS and DINIS rise, NBWE reads 0x11
  *        and HR0-7 and HRA0-4 show the digest, digest bytes 4i to 4i+3 in HRi as a big-endian
@@ -452,26 +479,36 @@ struct hash_state
  *        outside RM0456's sequence: it replaces the count under the pending BUSY end, which then
  *        sets DINIS and NBWE from the new count.
  *
- *        STM32H5, RM0481 40.4: ALGO is four bits, selecting the algorithm of the family's code
- *        table. The SHA-2 block is 64 bytes for SHA-1, SHA2-224 and SHA2-256, 128 bytes for the
- *        SHA-512 family with a 128-bit length field. The SHA-3 block is the sponge rate, Table
- *        399: 144, 136, 104 and 72 bytes, SHAKE128 168 and SHAKE256 136. NBWE reads the block
- *        size in words plus 1 after INIT, six bits wide. A DIN word is XORed into the Keccak
- *        state at once, the first message byte of the word in its most significant byte going
- *        to the lowest byte of the lane, and the permutation of a full rate runs at the next
- *        DIN word or at DCAL. DCAL pads with 0x06 for SHA-3 and 0x1F for SHAKE, 0x80 in the last
- *        byte of the rate. NBLW counts valid bits of the last word and reads bits 2:0 as zero
- *        under SHA-3 and SHAKE, the message being bytes. The digest is HR0 to HR6 for SHA3-224,
- *        HR0 to HR7, HR0 to HR11 and HR0 to HR15 for SHA3-256, SHA3-384 and SHA3-512, and the
- *        rate for SHAKE, byte 0 in HR0[31:24]. HRA0-4 read zero under SHA-3 and SHAKE. A DCAL with
- *        no DIN word since a SHAKE digest runs one more permutation and shows the next rate bytes.
- *        A block takes 98 cycles for the SHA-512 family and 60, 58, 50 and 42 for SHA3-224 to
- *        SHA3-512, Table 401, and 66 and 58 for SHAKE128 and SHAKE256 by the same rule, one
- *        permutation of a squeeze taking a block time. HMAC takes the block size as its key size,
- *        for every algorithm but SHAKE. Context swap CSRs hold the Keccak lanes at CSR4-53, the
- *        last word at CSR54, and the inner HMAC digest at CSR55 for SHA3-224 and SHA3-256, CSR72
- *        for SHA3-384 and SHA3-512, the SHA-512 chaining value at CSR4-19, the pending block at
- *        CSR20-51 and the inner digest at CSR52.
+ *        STM32H5, RM0481 40.4: ALGO is four bits, selecting the algorithm of the variant's code
+ *        table, RM0481 Table 397. A CR write of a code outside it stores ALGO 0000, with or without
+ *        INIT, and the hash runs SHA-1, as read back on an STM32H573: 0001 and 0100 to 1011 there,
+ *        0001, 1010 and 1011 on the STM32H543 and H553. The write logs once and raises a
+ *        model_error under strict_peripherals before CR changes. The SHA-2 block is 64 bytes for
+ *        SHA-1, SHA2-224 and SHA2-256, 128 bytes for the SHA-512 family with a 128-bit length
+ *        field. The SHA-3 block is the sponge rate, Table 399: 144, 136, 104 and 72 bytes, SHAKE128
+ *        168 and SHAKE256 136. NBWE reads the block size in words plus 1 after INIT, six bits wide.
+ *        A DIN word is XORed into the Keccak state at once, the first message byte of the word in
+ *        its most significant byte going to the lowest byte of the lane, and the permutation of a
+ *        full rate runs at the next DIN word or at DCAL. DCAL pads with 0x06 for SHA-3 and 0x1F for
+ *        SHAKE, 0x80 in the last byte of the rate. NBLW counts valid bits of the last word and
+ *        reads bits 2:0 as zero under SHA-3 and SHAKE, the message being bytes. The digest is HR0
+ *        to HR6 for SHA3-224, HR0 to HR7, HR0 to HR11 and HR0 to HR15 for SHA3-256, SHA3-384 and
+ *        SHA3-512, and the rate for SHAKE, byte 0 in HR0[31:24]. HRA0-4 read zero under SHA-3 and
+ *        SHAKE. A DCAL with no DIN word since a SHAKE digest runs one more permutation and shows
+ *        the next rate bytes. A block keeps BUSY from its launching write for 82 cycles under SHA-1
+ *        and the SHA-512 family and 64 under SHA2-224 and SHA2-256, as measured on an STM32H573,
+ *        where Table 401 gives 82, 98 and 66. A final digest keeps BUSY 15 cycles past its blocks
+ *        under SHA-1, SHA2-224 and SHA2-256 and 27 under the SHA-512 family, and DCIS, DINIS, NBWE
+ *        and the digest registers follow 11 cycles after BUSY clears, as measured on an STM32H573
+ *        for SHA-1, SHA2-256 and SHA2-512, DCAL to BUSY 0 in 97, 79 and 109 cycles and to DCIS in
+ *        108, 90 and 120. SHA2-224 and SHA2-384 to SHA2-512/256 follow the measured algorithm of
+ *        their block size. SHA-3 and SHAKE digests take their blocks only, DCIS with BUSY 0.
+ *        SHA3-224 to SHA3-512 take 60, 58, 50 and 42, Table 401, and SHAKE128 and SHAKE256 66 and
+ *        58 by the same rule, one permutation of a squeeze taking a block time. HMAC takes the
+ *        block size as its key size, for every algorithm but SHAKE. Context swap CSRs hold the
+ *        Keccak lanes at CSR4-53, the last word at CSR54, and the inner HMAC digest at CSR55 for
+ *        SHA3-224 and SHA3-256, CSR72 for SHA3-384 and SHA3-512, the SHA-512 chaining value at
+ *        CSR4-19, the pending block at CSR20-51 and the inner digest at CSR52.
  *
  *        Divergence: a DIN write while BUSY does not stall the bus, the CPU runs on.
  *
@@ -479,7 +516,6 @@ struct hash_state
  *        the write is stored:
  *        - An HMAC key longer than the block with LKEY 0 is hashed as with LKEY 1.
  *        - MODE 1 with SHAKE is ignored.
- *        - ALGO 1, 10 and 11 of the H5 are reserved codes and run as SHA2-256.
  *        - A DIN word after a SHAKE digest with no INIT starts a new message.
  *        - A DCAL while BUSY of a SHAKE digest or squeeze squeezes the next rate at once.
  *        - DMAE 1 with no controller serving hash_in_dma requests nothing.
@@ -554,6 +590,7 @@ private:
   void               calculate();
   void               request();
   void               work(std::uint64_t cycles, bool final);
+  void               complete_digest();
   void               finish_work();
   void               publish();
   void               show_digest(bool visible);
@@ -770,16 +807,19 @@ auto hash::on_write(
           dma_logged_, "CR", offset,
           "no DMA controller serves hash_in_dma: DMAE 1 requests nothing");
     }
+    if(code_of(value).absent)
+    {
+      unmodelled(
+          code_logged_, "CR", offset,
+          std::format(
+              "ALGO {:#x} selects no algorithm of this part: ALGO reads 0 and the hash runs SHA-1",
+              algo_.of(value)));
+      value = algo_.with(value, 0);
+    }
     if(init_.of(value) != 0)
     {
       auto const& chosen = code_of(value);
-      if(chosen.reserved)
-      {
-        unmodelled(
-            code_logged_, "CR", offset,
-            std::format("ALGO {:#x} is reserved: the hash runs as SHA2-256", algo_.of(value)));
-      }
-      else if(mode_.of(value) != 0 and not chosen.hmac)
+      if(mode_.of(value) != 0 and not chosen.hmac)
       {
         unmodelled(
             hmac_logged_, "CR", offset,
@@ -1371,7 +1411,7 @@ void hash::conclude(std::size_t compressed, bool final)
   update(regs_, dcis_, 0);
   show_digest(false);
   publish();
-  work(compressed * alg().cycles, final);
+  work(compressed * alg().cycles + (final ? alg().tail : 0u), final);
   interrupts();
 }
 
@@ -1471,14 +1511,24 @@ void hash::post()
 
 void hash::withdraw()
 {
-  if(auto const seq = std::exchange(state_.queued, 0); seq != 0)
+  for(auto* queued : {&state_.queued, &state_.flagged})
   {
-    ctx_.events.cancel(seq - 1);
+    if(auto const seq = std::exchange(*queued, 0); seq != 0)
+    {
+      ctx_.events.cancel(seq - 1);
+    }
   }
 }
 
 void hash::on_event(std::uint32_t kind, std::uint64_t)
 {
+  if(kind == digest_done)
+  {
+    state_.flagged = 0;
+    complete_digest();
+    interrupts();
+    return;
+  }
   if(kind != busy_done)
   {
     return;
@@ -1503,10 +1553,17 @@ void hash::finish_work()
   update(regs_, busy_, 0);
   if(std::exchange(state_.final_pending, 0) != 0)
   {
-    update(regs_, dcis_, 1);
-    update(regs_, dinis_, 1);
-    update(regs_, nbwe_, alg().block_words + 1u);
-    show_digest(true);
+    if(alg().lag == 0)
+    {
+      complete_digest();
+    }
+    else
+    {
+      auto const lag = alg().lag * ps_per_second / ctx_.clock.core_hz();
+      state_.flagged =
+          ctx_.events.schedule_at(vtime{ctx_.clock.time().ps + lag}, digest_done, 0, ctx_.clock)
+          + 1;
+    }
   }
   else
   {
@@ -1517,6 +1574,14 @@ void hash::finish_work()
     update(regs_, nbwe_, alg().block_words + 1u - state_.count);
   }
   interrupts();
+}
+
+void hash::complete_digest()
+{
+  update(regs_, dcis_, 1);
+  update(regs_, dinis_, 1);
+  update(regs_, nbwe_, alg().block_words + 1u);
+  show_digest(true);
 }
 
 void hash::status_written(std::uint32_t value)
@@ -1595,9 +1660,13 @@ auto hash_factory() -> model_factory
   };
 }
 
-auto hash_h5_factory() -> model_factory
+auto hash_h5_factory(hash_variant variant) -> model_factory
 {
-  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+  return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    if(variant.sha3)
+    {
+      return std::make_shared<hash>(ctx, desc, h5_sha3_hash, hash_writes<h5_sha3_hash>());
+    }
     return std::make_shared<hash>(ctx, desc, h5_hash, hash_writes<h5_hash>());
   };
 }

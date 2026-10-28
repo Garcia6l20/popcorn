@@ -193,8 +193,11 @@ namespace popcorn::periph::stm32
 /** @brief Factory of the HASH model, RM0456 section 51. */
 [[nodiscard]] auto hash_factory() -> model_factory;
 
-/** @brief Factory of the STM32H5 HASH model, RM0481 section 40, SHA-2, SHA-3 and SHAKE. */
-[[nodiscard]] auto hash_h5_factory() -> model_factory;
+/**
+ * @brief Factory of the STM32H5 HASH model, RM0481 section 40, SHA-2, and SHA-3 and SHAKE where
+ *        @p variant has them.
+ */
+[[nodiscard]] auto hash_h5_factory(hash_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the GTZC TZSC, TZIC and MPCBB models, RM0456 and RM0481 section 5. Returns

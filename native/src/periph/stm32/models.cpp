@@ -31,7 +31,7 @@ struct builtin
   std::string_view part_glob     = "*";
 };
 
-constexpr std::array<builtin, 58> builtins{
+constexpr std::array<builtin, 60> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -157,19 +157,27 @@ constexpr std::array<builtin, 58> builtins{
      {"HASH", "hash1_v2_2*", [](board const&) { return hash_factory(); }},
      {.ip              = "HASH",
          .ip_version_glob = "hash1_v4*",
-         .make            = [](board const&) { return hash_h5_factory(); },
+         .make            = [](board const&) { return hash_h5_factory(hash_h5_sha2); },
          .part_glob       = "STM32H52*"},
      {.ip              = "HASH",
          .ip_version_glob = "hash1_v4*",
-         .make            = [](board const&) { return hash_h5_factory(); },
+         .make            = [](board const&) { return hash_h5_factory(hash_h5_sha2); },
          .part_glob       = "STM32H53*"},
      {.ip              = "HASH",
          .ip_version_glob = "hash1_v4*",
-         .make            = [](board const&) { return hash_h5_factory(); },
+         .make            = [](board const&) { return hash_h5_factory(hash_h5_sha3); },
+         .part_glob       = "STM32H54*"},
+     {.ip              = "HASH",
+         .ip_version_glob = "hash1_v4*",
+         .make            = [](board const&) { return hash_h5_factory(hash_h5_sha3); },
+         .part_glob       = "STM32H55*"},
+     {.ip              = "HASH",
+         .ip_version_glob = "hash1_v4*",
+         .make            = [](board const&) { return hash_h5_factory(hash_h5_sha2); },
          .part_glob       = "STM32H56*"},
      {.ip              = "HASH",
          .ip_version_glob = "hash1_v4*",
-         .make            = [](board const&) { return hash_h5_factory(); },
+         .make            = [](board const&) { return hash_h5_factory(hash_h5_sha2); },
          .part_glob       = "STM32H57*"},
      {"RNG", "rng1_v4_1", [](board const& b) { return rng_factory(b.rng); }},
      {"SYS", "STM32U5x_sys_*", [](board const&) { return syscfg_factory(); }},

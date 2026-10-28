@@ -209,6 +209,26 @@ Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 - An HMAC key longer than the block with LKEY 0 is hashed as with LKEY 1, and logged. The block is
   64 bytes for SHA-1, SHA2-224 and SHA2-256, 128 bytes for the SHA-512 family and the sponge rate
   for SHA-3.
+- The H5 HASH keeps SHA-3 and SHAKE on the STM32H543 and H553 only, RM0481 Table 397. On every
+  other H5 part, ALGO keeps 0000, 0010, 0011 and 1100 to 1111. A CR write of another code, with
+  or without INIT, stores ALGO 0000 and the hash runs SHA-1, as read back on an STM32H573 for
+  0001 and 0100 to 1011. The H543 and H553 store 0000 for 0001, 1010 and 1011 by the same rule,
+  which is the H573 reading applied there. The write logs once and raises a model_error under
+  strict_peripherals before CR changes.
+- The H5 SHA-3 and SHAKE rules below come from RM0481 and run on the H543 and H553 rows. Their
+  cases run on the STM32H573 description renamed STM32H553ZGTx: an H543 or H553 description
+  build takes ST's DIE47C rzone file.
+- The H5 BUSY time of one block, from its launching DIN write, is 82 HCLK cycles under SHA-1 and
+  the SHA-512 family and 64 under SHA2-224 and SHA2-256, as measured on an STM32H573 at 32 MHz.
+  RM0481 Table 401 gives 82, 98 and 66. The U5 keeps RM0456 Table 486: 82 under SHA-1 and 66
+  under MD5, SHA2-224 and SHA2-256.
+- An H5 final digest keeps BUSY 15 HCLK cycles past its blocks under SHA-1, SHA2-224 and SHA2-256
+  and 27 under the SHA-512 family. DCIS, DINIS, NBWE and the digest registers follow 11 cycles
+  after BUSY clears, and the digest registers read 0 in between. An STM32H573 measured DCAL to
+  BUSY 0 in 97, 79 and 109 cycles and DCAL to DCIS in 108, 90 and 120 for SHA-1, SHA2-256 and
+  SHA2-512 on a one-block message. SHA2-224 and SHA2-384 to SHA2-512/256 take the figures of the
+  measured algorithm with their block size. SHA-3 and SHAKE digests take their block times, DCIS
+  with BUSY 0. The U5 sets DCIS with BUSY 0 after one block time per padded block.
 - The H5 HASH reads SHA-3 and SHAKE DIN words as the SHA-2 core does: the first message byte of a
   word, after the DATATYPE swap, is its most significant byte, and the digest bytes fill HR0 and
   up from bit 31. RM0481 40.4.4 does not spell this out for SHA-3. DATATYPE 00, 01 and 11 follow
@@ -219,8 +239,7 @@ Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
   rate of the first DCAL is never shown. NBWP and CR.NBW read 0 after a SHAKE digest, as after a
   SHA-3 digest.
 - A DIN word after a SHAKE digest with no INIT starts a new message and logs once. MODE 1 with
-  SHAKE and the reserved ALGO codes 1, 10 and 11 log once at INIT, MODE 1 is ignored and a
-  reserved code runs as SHA2-256.
+  SHAKE logs once at INIT and MODE 1 is ignored.
 - The H5 CSR registers use popcorn's layout too: CSR4 up hold the Keccak lanes or the SHA-512
   chaining value and pending block, the inner HMAC digest sits at CSR55, CSR72 or CSR52 by
   algorithm. A save of CSR0 to CSR71 covers every SHA-3 context but the SHA3-384 and SHA3-512

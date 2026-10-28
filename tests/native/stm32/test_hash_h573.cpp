@@ -132,6 +132,9 @@ constexpr auto cycles_of(std::uint32_t algo) -> std::uint64_t
   {
     case sha1:
       return 82;
+    case sha224:
+    case sha256:
+      return 64;
     case sha3_224:
       return 60;
     case sha3_256:
@@ -146,7 +149,7 @@ constexpr auto cycles_of(std::uint32_t algo) -> std::uint64_t
     case sha512_224:
     case sha512_256:
     case sha512:
-      return 98;
+      return 82;
     default:
       return 66;
   }
@@ -483,13 +486,26 @@ struct context
   std::vector<std::uint32_t> csr;
 };
 
+auto renamed(std::string_view part) -> popcorn::part_description
+{
+  auto desc = h573();
+  desc.part = part;
+  return desc;
+}
+
+auto h553() -> popcorn::part_description const&
+{
+  static auto const desc = renamed("STM32H553ZGTx");
+  return desc;
+}
+
 struct rig
 {
-  explicit rig(bool strict = true)
+  explicit rig(bool strict = true, popcorn::part_description const& desc = h573())
   {
     auto options               = popcorn::testing::stm32_options();
     options.strict_peripherals = strict;
-    f = std::make_unique<stm32_fixture>(h573(), firmware, std::move(options));
+    f = std::make_unique<stm32_fixture>(desc, firmware, std::move(options));
     f->set("pc", sym(firmware, "idle"));
     sink = f->target->add_log_sink(
         [this](core::log_record const& record) { logged.push_back(record); });
@@ -730,14 +746,17 @@ TEST_CASE("a family with fewer codes than the ALGO field holds is a config_error
 
 TEST_CASE("FIPS 180-4, FIPS 202 and pattern vectors hash through byte-swapped DIN words")
 {
-  rig const r;
+  rig const sha2;
+  rig const sha3{true, h553()};
   for(auto const& c : digests)
   {
     CAPTURE(c.algo);
     CAPTURE(c.size);
+    auto const& r = keccak_algo(c.algo) ? sha3 : sha2;
     CHECK(r.hash(c.algo, c.input()) == unhex(c.digest));
   }
-  CHECK(r.logged.empty());
+  CHECK(sha2.logged.empty());
+  CHECK(sha3.logged.empty());
 }
 
 TEST_CASE("the SHA-512 family hashes the 896-bit FIPS message")
@@ -752,10 +771,12 @@ TEST_CASE("the SHA-512 family hashes the 896-bit FIPS message")
 
 TEST_CASE("every DATATYPE hashes the same message to the same digest as the model maps them")
 {
-  rig const r;
+  rig const sha2;
+  rig const sha3{true, h553()};
   for(auto const algo : {sha512, sha3_256})
   {
-    auto const expected = r.hash(algo, pattern(300));
+    auto const& r        = keccak_algo(algo) ? sha3 : sha2;
+    auto const  expected = r.hash(algo, pattern(300));
     for(std::uint32_t datatype = 0; datatype < 4; ++datatype)
     {
       CAPTURE(algo);
@@ -767,7 +788,7 @@ TEST_CASE("every DATATYPE hashes the same message to the same digest as the mode
 
 TEST_CASE("SHAKE128 and SHAKE256 squeeze 4 rates through repeated DCAL")
 {
-  rig const r;
+  rig const r{true, h553()};
   for(auto const& c : shakes)
   {
     CAPTURE(c.algo);
@@ -780,7 +801,7 @@ TEST_CASE("SHAKE128 and SHAKE256 squeeze 4 rates through repeated DCAL")
 
 TEST_CASE("a DCAL after a fixed-length digest keeps the digest")
 {
-  rig const  r;
+  rig const  r{true, h553()};
   auto const first = r.hash(sha3_256, text("abc"));
   r.write(str, str_dcal);
   r.settle();
@@ -790,7 +811,7 @@ TEST_CASE("a DCAL after a fixed-length digest keeps the digest")
 TEST_CASE("a DIN word after a SHAKE digest with no INIT is refused under strict peripherals")
 {
   {
-    rig const r;
+    rig const r{true, h553()};
     r.begin(shake128);
     r.feed(text("abc"));
     r.finish(3);
@@ -799,7 +820,7 @@ TEST_CASE("a DIN word after a SHAKE digest with no INIT is refused under strict 
         static_cast<void>(r.f->target->mem().write(hash_base + din, 4, 0x1234'5678)),
         popcorn::model_error);
   }
-  rig const r{false};
+  rig const r{false, h553()};
   r.begin(shake128);
   r.feed(text("abc"));
   r.finish(3);
@@ -814,22 +835,24 @@ TEST_CASE("a DIN word after a SHAKE digest with no INIT is refused under strict 
 
 TEST_CASE("NBWE after INIT is the block size in words plus 1 in six bits")
 {
-  rig const r;
+  rig const sha2;
+  rig const sha3{true, h553()};
   for(auto const algo :
       {sha1, sha224, sha256, sha3_224, sha3_256, sha3_384, sha3_512, shake128, shake256, sha384,
        sha512_224, sha512_256, sha512})
   {
     CAPTURE(algo);
+    auto const& r = keccak_algo(algo) ? sha3 : sha2;
     r.begin(algo);
     CHECK(field(r.read(sr), 16, 6) == block_bytes(algo) / 4 + 1);
   }
-  r.begin(sha3_224);
-  CHECK(field(r.read(sr), 16, 6) == 37);
+  sha3.begin(sha3_224);
+  CHECK(field(sha3.read(sr), 16, 6) == 37);
 }
 
 TEST_CASE("NBWE, NBWP, DINNE and the CR mirrors follow the words of a SHA-3 block")
 {
-  rig const r;
+  rig const r{true, h553()};
   r.begin(sha3_224);
   r.feed(pattern(4));
   CHECK(field(r.read(sr), 16, 6) == 36);
@@ -848,13 +871,16 @@ TEST_CASE("NBWE, NBWP, DINNE and the CR mirrors follow the words of a SHA-3 bloc
   CHECK((r.read(sr) & sr_dinis) != 0);
 }
 
-TEST_CASE("one SHA-3 or SHA-512 block keeps BUSY for its cycles")
+TEST_CASE("one SHA-1, SHA-2 or SHA-3 block keeps BUSY for its cycles from its launching write")
 {
-  rig const r;
+  rig const sha2;
+  rig const sha3{true, h553()};
   for(auto const algo :
-      {sha3_224, sha3_256, sha3_384, sha3_512, shake128, shake256, sha384, sha512})
+      {sha1, sha224, sha256, sha3_224, sha3_256, sha3_384, sha3_512, shake128, shake256, sha384,
+       sha512_224, sha512_256, sha512})
   {
     CAPTURE(algo);
+    auto const& r = keccak_algo(algo) ? sha3 : sha2;
     r.begin(algo);
     r.feed(pattern(block_bytes(algo)));
     CHECK((r.read(sr) & (sr_dinis | sr_busy)) == 0);
@@ -868,9 +894,80 @@ TEST_CASE("one SHA-3 or SHA-512 block keeps BUSY for its cycles")
   }
 }
 
-TEST_CASE("a SHAKE squeeze keeps BUSY for one block time")
+TEST_CASE("H573 board: a final digest clears BUSY and sets DCIS at the measured cycles from DCAL")
+{
+  struct leg
+  {
+    std::uint32_t algo;
+    std::uint64_t busy;
+    std::uint64_t dcis;
+  };
+  rig const r;
+  for(auto const& [algo, busy, dcis] : std::to_array<leg>({
+          {sha1,   97,  108},
+          {sha256, 79,  90 },
+          {sha512, 109, 120}
+  }))
+  {
+    CAPTURE(algo);
+    r.begin(algo);
+    r.feed(text("abc"));
+    r.finish(3);
+    auto const start = r.now();
+    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == sr_busy);
+    r.until(start + (busy - 1) * r.cycle_ps());
+    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == sr_busy);
+    r.until(start + busy * r.cycle_ps());
+    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == 0);
+    CHECK(r.read(hr0) == 0);
+    r.until(start + (dcis - 1) * r.cycle_ps());
+    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == 0);
+    r.until(start + dcis * r.cycle_ps());
+    CHECK((r.read(sr) & (sr_busy | sr_dcis)) == sr_dcis);
+    CHECK(r.read(hr0) != 0);
+  }
+}
+
+TEST_CASE("INIT between BUSY 0 and DCIS of a final digest leaves no stale DCIS")
 {
   rig const r;
+  r.begin(sha256);
+  r.feed(text("abc"));
+  r.finish(3);
+  auto const start = r.now();
+  r.until(start + 80 * r.cycle_ps());
+  REQUIRE((r.read(sr) & (sr_busy | sr_dcis)) == 0);
+  r.begin(sha256);
+  r.settle();
+  CHECK((r.read(sr) & sr_dcis) == 0);
+  CHECK(r.read(hr0) == 0);
+}
+
+TEST_CASE("a snapshot taken between BUSY 0 and DCIS of a final digest restores the pending DCIS")
+{
+  rig const r;
+  r.begin(sha256);
+  r.feed(text("abc"));
+  r.finish(3);
+  auto const start = r.now();
+  r.until(start + 80 * r.cycle_ps());
+  REQUIRE((r.read(sr) & (sr_busy | sr_dcis)) == 0);
+  auto const saved = r.f->target->snapshot();
+  r.until(start + 90 * r.cycle_ps());
+  REQUIRE((r.read(sr) & sr_dcis) == sr_dcis);
+  auto const digest = r.read(hr0);
+  r.f->target->restore(saved);
+  CHECK((r.read(sr) & sr_dcis) == 0);
+  r.until(start + 89 * r.cycle_ps());
+  CHECK((r.read(sr) & sr_dcis) == 0);
+  r.until(start + 90 * r.cycle_ps());
+  CHECK((r.read(sr) & sr_dcis) == sr_dcis);
+  CHECK(r.read(hr0) == digest);
+}
+
+TEST_CASE("a SHAKE squeeze keeps BUSY for one block time")
+{
+  rig const r{true, h553()};
   for(auto const algo : {shake128, shake256})
   {
     CAPTURE(algo);
@@ -890,7 +987,7 @@ TEST_CASE("a SHAKE squeeze keeps BUSY for one block time")
 
 TEST_CASE("NBWP and NBW read 0 after a SHAKE digest as after a SHA-3 digest")
 {
-  rig const r;
+  rig const r{true, h553()};
   for(auto const algo : {sha3_256, shake128})
   {
     CAPTURE(algo);
@@ -905,7 +1002,7 @@ TEST_CASE("NBWP and NBW read 0 after a SHAKE digest as after a SHA-3 digest")
 
 TEST_CASE("a DCAL while BUSY of a SHAKE digest logs once and squeezes at once")
 {
-  rig const r{false};
+  rig const r{false, h553()};
   r.begin(shake128);
   r.feed(text("abc"));
   r.finish(3);
@@ -919,7 +1016,7 @@ TEST_CASE("a DCAL while BUSY of a SHAKE digest logs once and squeezes at once")
 
 TEST_CASE("a second DCAL while BUSY of a SHAKE digest does not log again")
 {
-  rig const r{false};
+  rig const r{false, h553()};
   r.begin(shake128);
   r.feed(text("abc"));
   r.finish(3);
@@ -936,7 +1033,7 @@ TEST_CASE("a second DCAL while BUSY of a SHAKE digest does not log again")
 
 TEST_CASE("a DCAL while BUSY of a SHAKE digest is refused under strict peripherals")
 {
-  rig const r;
+  rig const r{true, h553()};
   r.begin(shake128);
   r.feed(text("abc"));
   r.finish(3);
@@ -951,7 +1048,7 @@ TEST_CASE("a DCAL while BUSY of a SHAKE digest is refused under strict periphera
 
 TEST_CASE("NBLW bits 2:0 read zero under SHA-3 and SHAKE and ignore writes")
 {
-  rig const r;
+  rig const r{true, h553()};
   r.write(cr, sha3_256 << 17);
   r.write(str, 0x19);
   CHECK(r.read(str) == 0x18);
@@ -970,7 +1067,7 @@ TEST_CASE("NBLW bits 2:0 read zero under SHA-3 and SHAKE and ignore writes")
 
 TEST_CASE("an NBLW written under SHA2-256 counts whole bytes after INIT selects SHA-3")
 {
-  rig const r;
+  rig const r{true, h553()};
   r.write(cr, sha256 << 17);
   r.write(str, 0x19);
   r.begin(sha3_256);
@@ -983,7 +1080,7 @@ TEST_CASE("an NBLW written under SHA2-256 counts whole bytes after INIT selects 
 
 TEST_CASE("HRA0 to HRA4 mirror HR0 to HR4 under SHA-2 and read zero under SHA-3")
 {
-  rig const  r;
+  rig const  r{true, h553()};
   auto const sha2 = r.hash(sha512, text("abc"));
   CHECK(r.read(hra0) == r.read(hr0));
   CHECK(r.read(hra0 + 16) == r.read(hr0 + 16));
@@ -999,7 +1096,7 @@ TEST_CASE("HRA0 to HRA4 mirror HR0 to HR4 under SHA-2 and read zero under SHA-3"
 
 TEST_CASE("SHAKE fills HR0 to HR41 and SHA3-224 leaves HR7 to HR41 zero")
 {
-  rig const r;
+  rig const r{true, h553()};
   r.begin(shake128);
   r.feed(text("abc"));
   r.finish(3);
@@ -1018,21 +1115,23 @@ TEST_CASE("SHAKE fills HR0 to HR41 and SHA3-224 leaves HR7 to HR41 zero")
 
 TEST_CASE("HMAC vectors hash through the three phases")
 {
-  rig const r;
+  rig const sha2;
+  rig const sha3{true, h553()};
   for(auto const& c : hmacs)
   {
     CAPTURE(c.algo);
     CAPTURE(c.key);
     CAPTURE(c.data);
-    CHECK(r.hmac(c) == unhex(c.digest));
+    CHECK((keccak_algo(c.algo) ? sha3 : sha2).hmac(c) == unhex(c.digest));
   }
-  CHECK(r.hmac(find_hmac(sha3_256, 200, 50), 0) == unhex(find_hmac(sha3_256, 200, 50).digest));
-  CHECK(r.logged.empty());
+  CHECK(sha3.hmac(find_hmac(sha3_256, 200, 50), 0) == unhex(find_hmac(sha3_256, 200, 50).digest));
+  CHECK(sha2.logged.empty());
+  CHECK(sha3.logged.empty());
 }
 
 TEST_CASE("an HMAC key longer than the block with LKEY 0 logs once and is hashed")
 {
-  rig const r{false};
+  rig const r{false, h553()};
   auto      c = find_hmac(sha3_256, 200, 50);
   c.long_key  = false;
   CHECK(r.hmac(c) == unhex(c.digest));
@@ -1044,7 +1143,7 @@ TEST_CASE("an HMAC key longer than the block with LKEY 0 logs once and is hashed
 TEST_CASE("MODE 1 with SHAKE is refused under strict peripherals and ignored otherwise")
 {
   {
-    rig const r;
+    rig const r{true, h553()};
     for(auto const algo : {shake128, shake256})
     {
       CHECK_THROWS_AS(
@@ -1054,7 +1153,7 @@ TEST_CASE("MODE 1 with SHAKE is refused under strict peripherals and ignored oth
       CHECK(r.read(cr) == 0);
     }
   }
-  rig const r{false};
+  rig const r{false, h553()};
   r.write(cr, cr_init | cr_mode | (shake128 << 17) | (2u << 4));
   r.feed(text("abc"));
   r.finish(3);
@@ -1063,9 +1162,9 @@ TEST_CASE("MODE 1 with SHAKE is refused under strict peripherals and ignored oth
   CHECK(r.words(168) == unhex(shakes[0].digest.substr(0, 336)));
 }
 
-TEST_CASE("the reserved code log and the MODE 1 with SHAKE log are separate")
+TEST_CASE("the absent code log and the MODE 1 with SHAKE log are separate")
 {
-  rig const r{false};
+  rig const r{false, h553()};
   r.write(cr, cr_init | (10u << 17));
   CHECK(r.logged.size() == 1);
   r.write(cr, cr_init | cr_mode | (shake128 << 17));
@@ -1075,24 +1174,108 @@ TEST_CASE("the reserved code log and the MODE 1 with SHAKE log are separate")
   CHECK(r.logged.size() == 2);
 }
 
-TEST_CASE("the reserved ALGO codes are refused under strict peripherals and run as SHA2-256")
+TEST_CASE("STM32H573 silicon: ALGO 0001 and 0100 to 1011 read 0000 and the hash runs SHA-1")
 {
+  for(std::uint32_t algo = 0; algo < 16; ++algo)
   {
-    rig const r;
-    for(auto const algo : {1u, 10u, 11u})
+    CAPTURE(algo);
+    rig const  r{false};
+    auto const absent = algo == 1 or (algo >= 4 and algo <= 11);
+    r.write(cr, algo << 17);
+    CHECK(field(r.read(cr), 17, 4) == (absent ? 0 : algo));
+    CHECK(r.logged.size() == (absent ? 1u : 0u));
+    if(absent)
     {
+      CHECK(r.logged[0].reg == "CR");
+      r.begin(algo);
+      CHECK(field(r.read(sr), 16, 6) == 17);
+      r.feed(text("abc"));
+      r.finish(3);
+      r.settle();
+      CHECK(r.digest(sha1) == unhex(find_digest(sha1, 3, "abc").digest));
+      CHECK(r.logged.size() == 1);
+    }
+  }
+}
+
+TEST_CASE("STM32H573 silicon: MODE 1 with ALGO 1000 starts an HMAC SHA-1 waiting for its key")
+{
+  rig const r{false};
+  r.write(cr, cr_init | cr_mode | (shake128 << 17) | (2u << 4));
+  CHECK(r.read(cr) == 0x60);
+  r.phase(pattern(20, 1));
+  r.phase(pattern(300, 2));
+  r.phase(pattern(20, 1));
+  CHECK(r.digest(sha1) == unhex("284619f7412dd8d83db71284945d98546948b9cd"));
+  CHECK(r.logged.size() == 1);
+}
+
+TEST_CASE("an absent ALGO code is refused under strict peripherals before CR changes")
+{
+  for(auto const& [desc, codes] : {
+          std::pair{&h573(), std::vector<std::uint32_t>{1, 4, 5, 6, 7, 8, 9, 10, 11}},
+          std::pair{&h553(), std::vector<std::uint32_t>{1, 10, 11}                  }
+  })
+  {
+    rig const r{true, *desc};
+    for(auto const algo : codes)
+    {
+      CAPTURE(desc->part);
       CAPTURE(algo);
+      r.write(cr, sha256 << 17);
       CHECK_THROWS_AS(
           static_cast<void>(r.f->target->mem().write(hash_base + cr, 4, cr_init | (algo << 17))),
           popcorn::model_error);
-      CHECK(r.read(cr) == 0);
+      CHECK(field(r.read(cr), 17, 4) == sha256);
     }
   }
-  rig const r{false};
-  CHECK(r.hash(1, text("abc")) == unhex(find_digest(sha256, 3, "abc").digest));
-  CHECK(r.hash(10, text("abc")) == unhex(find_digest(sha256, 3, "abc").digest));
-  REQUIRE(r.logged.size() == 1);
-  CHECK(r.logged[0].reg == "CR");
+}
+
+TEST_CASE("RM0481 Table 397: only the STM32H543 and H553 rows keep the SHA-3 and SHAKE codes")
+{
+  for(auto const& [part, sha3] : {
+          std::pair{"STM32H523CETx", false},
+          std::pair{"STM32H533CETx", false},
+          std::pair{"STM32H543ZGTx", true },
+          std::pair{"STM32H553ZGTx", true },
+          std::pair{"STM32H562VGTx", false},
+          std::pair{"STM32H563ZITx", false},
+          std::pair{"STM32H573AIIx", false}
+  })
+  {
+    CAPTURE(part);
+    rig const r{false, renamed(part)};
+    for(std::uint32_t algo = 0; algo < 16; ++algo)
+    {
+      CAPTURE(algo);
+      auto const absent = algo == 1 or algo == 10 or algo == 11 or (keccak_algo(algo) and not sha3);
+      r.write(cr, algo << 17);
+      CHECK(field(r.read(cr), 17, 4) == (absent ? 0 : algo));
+    }
+    CHECK(r.logged.size() == 1);
+  }
+}
+
+TEST_CASE(
+    "STM32H573 silicon: a block keeps BUSY 82 cycles under SHA-1 and SHA2-512, 64 under SHA2-256")
+{
+  rig const r;
+  for(auto const& [algo, cycles] : {
+          std::pair{sha1,   82u},
+          std::pair{sha256, 64u},
+          std::pair{sha512, 82u}
+  })
+  {
+    CAPTURE(algo);
+    r.begin(algo);
+    r.feed(pattern(block_bytes(algo)));
+    r.feed(pattern(4));
+    auto const end = r.now() + cycles * r.cycle_ps();
+    r.until(end - r.cycle_ps());
+    CHECK((r.read(sr) & sr_busy) == sr_busy);
+    r.until(end);
+    CHECK((r.read(sr) & sr_busy) == 0);
+  }
 }
 
 TEST_CASE("a SHA-512 hash saved at a DINIS point resumes after another hash")
@@ -1141,7 +1324,7 @@ TEST_CASE("an HMAC saved in its message phase and after it resumes after another
     {
       CAPTURE(c->algo);
       CAPTURE(after);
-      rig const  r;
+      rig const  r{true, keccak_algo(c->algo) ? h553() : h573()};
       auto const key   = pattern(c->key, 1);
       auto const data  = pattern(c->data, 2);
       auto const split = after ? data.size() : at;
@@ -1308,7 +1491,7 @@ TEST_CASE("a DMA suspend mid SHA-512 block keeps the words of the started burst 
 
 TEST_CASE("a context saved under one algorithm is refused under another")
 {
-  rig const r{false};
+  rig const r{false, h553()};
   r.begin(sha3_256);
   r.feed(pattern(140));
   r.settle();
@@ -1336,7 +1519,7 @@ TEST_CASE("a SHA-512 context is refused under SHA2-256 whose low ALGO bits are e
 
 TEST_CASE("a snapshot taken after a SHAKE digest resumes the squeeze elsewhere")
 {
-  rig const r;
+  rig const r{true, h553()};
   r.begin(shake256);
   r.feed(text("abc"));
   r.finish(3);
@@ -1352,7 +1535,7 @@ TEST_CASE("a snapshot taken after a SHAKE digest resumes the squeeze elsewhere")
   check(r);
   r.f->target->restore(saved);
   check(r);
-  rig const other;
+  rig const other{true, h553()};
   other.f->target->restore(
       core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
   check(other);
@@ -1360,7 +1543,7 @@ TEST_CASE("a snapshot taken after a SHAKE digest resumes the squeeze elsewhere")
 
 TEST_CASE("HASHRST drops the sponge of a SHA-3 hash in the middle of a message")
 {
-  rig const r;
+  rig const r{true, h553()};
   r.begin(sha3_256);
   r.feed(pattern(140));
   REQUIRE(saved_integer(*r.f, "HASH", "lanes.0").value_or(0) != 0);
@@ -1374,7 +1557,7 @@ TEST_CASE("HASHRST drops the sponge of a SHA-3 hash in the middle of a message")
 
 TEST_CASE("HASHRST drops the squeeze of a SHAKE digest")
 {
-  rig const r;
+  rig const r{true, h553()};
   r.begin(shake128);
   r.feed(text("abc"));
   r.finish(3);
@@ -1387,7 +1570,7 @@ TEST_CASE("HASHRST drops the squeeze of a SHAKE digest")
 
 TEST_CASE("HASHRST in the middle of a SHAKE squeeze leaves no stale completion for a shorter hash")
 {
-  rig const r;
+  rig const r{true, h553()};
   r.begin(shake128);
   r.feed(text("abc"));
   r.finish(3);
@@ -1411,7 +1594,7 @@ TEST_CASE("HASHRST in the middle of a SHAKE squeeze leaves no stale completion f
 
 TEST_CASE("HASHRST in the middle of a SHAKE squeeze leaves no stale BUSY end for the next hash")
 {
-  rig const r;
+  rig const r{true, h553()};
   r.begin(shake128);
   r.feed(text("abc"));
   r.finish(3);

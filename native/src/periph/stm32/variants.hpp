@@ -29,6 +29,21 @@ inline constexpr gpio_variant u575_gpio{.short_port = 'I', .short_port_pins = 8}
  *         as DS14121 Table 17 lists. */
 inline constexpr gpio_variant h56x_gpio{.short_port = 'I', .short_port_pins = 12};
 
+/** @brief Differences between the STM32H5 HASH processors the model rows serve, RM0481 40.3.
+ *         A code outside the variant's set reads 0000 after a CR write and the hash runs SHA-1,
+ *         as read back on an STM32H573. */
+struct hash_variant
+{
+  /** @brief ALGO also keeps the SHA-3 and SHAKE codes 0100 to 1001. */
+  bool sha3 = false;
+};
+
+/** @brief STM32H52x, H53x, H56x and H57x, SHA-1 and SHA-2 only, RM0481 Table 397: ALGO keeps
+ *         0000, 0010, 0011 and 1100 to 1111. */
+inline constexpr hash_variant hash_h5_sha2{};
+/** @brief STM32H543 and H553, SHA-3 and SHAKE too, RM0481 Table 397. */
+inline constexpr hash_variant hash_h5_sha3{.sha3 = true};
+
 /** @brief Differences between the I2C peripherals the model rows serve. */
 struct i2c_variant
 {
