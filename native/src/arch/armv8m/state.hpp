@@ -82,8 +82,7 @@ struct exception_state
   std::vector<std::uint32_t> active{};
   /** @brief IRQ line level per exception number. */
   std::vector<std::uint32_t> level{};
-  /** @brief NVIC_ITNS bit per exception number, set for an IRQ that targets Non-secure state.
-   * Empty in a save from before TrustZone, which loads every IRQ as Secure. */
+  /** @brief NVIC_ITNS bit per exception number, set for an IRQ that targets Non-secure state. */
   std::vector<std::uint32_t> targets_nonsecure{};
   /** @brief Pending bits of the Non-secure HardFault, MemManage, UsageFault, SVCall, PendSV and
    * SysTick, by exception number. Selection reads the Secure bank only. */
@@ -300,7 +299,7 @@ struct state
   /** @brief Special registers, read from the engine by save() and re-applied by load(). */
   special_registers special{};
   /** @brief Security state of the core, read from the engine by save(). Secure without
-   * TrustZone and in a save from before it. */
+   * TrustZone. */
   security current{security::secure};
   /** @brief Special registers of the other security state, with TrustZone only. */
   special_bank other{};

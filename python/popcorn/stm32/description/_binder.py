@@ -138,7 +138,8 @@ def from_mapping[T: "DataclassInstance"](
     cls: type[T], data: object, *, file: str, key: str = ""
 ) -> T:
     """Typed value of @p cls from parsed JSON/TOML, DescriptionError on unknown key, missing
-    required key, wrong type or integer out of the metadata bounds, key path in the error."""
+    required key, wrong type, integer out of the metadata bounds or string shorter than its
+    min_length, key path in the error."""
     instance = _bind_object(cls, data, file=file, key=key)
     _check_bounds(instance, file=file, key=key)
     return instance
@@ -146,7 +147,8 @@ def from_mapping[T: "DataclassInstance"](
 
 def check_bounds(value: object, *, file: str) -> None:
     """Raises DescriptionError when an integer field of @p value, or of a dataclass, list or
-    dict nested in it, falls outside its schema minimum/maximum/const metadata."""
+    dict nested in it, falls outside its schema minimum/maximum/const metadata, or a string
+    field is shorter than its min_length metadata."""
     _check_bounds(value, file=file, key="")
 
 
@@ -167,6 +169,12 @@ def _check_bounds(value: object, *, file: str, key: str) -> None:
                     raise DescriptionError(file, 0, field_key, f"<= {maximum}")
                 if const is not None and attr != const:
                     raise DescriptionError(file, 0, field_key, f"== {const}")
+            if isinstance(attr, str):
+                min_length = f.metadata.get("min_length")
+                if min_length is not None and len(attr) < min_length:
+                    raise DescriptionError(
+                        file, 0, field_key, f"a string of >= {min_length} characters"
+                    )
             _check_bounds(attr, file=file, key=field_key)
     elif isinstance(value, list):
         for i, item in enumerate(cast(list[object], value)):

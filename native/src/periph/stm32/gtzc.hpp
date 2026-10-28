@@ -1,5 +1,7 @@
 #pragma once
 
+#include "variants.hpp"
+
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/periph/model.hpp>
@@ -199,8 +201,10 @@ struct gtzc_field
  * @brief Every SECCFGRx field of every TZSC and IERx field of every TZIC of a part, each
  *        resolved to the peripheral or memory it names. The models ignore an unknown field.
  * @param part Description.
+ * @param variant Field stems of the family, the variant of the part's GTZC model row.
  */
-[[nodiscard]] auto gtzc_fields(part_description const& part) -> std::vector<gtzc_field>;
+[[nodiscard]] auto gtzc_fields(part_description const& part, gtzc_variant variant)
+    -> std::vector<gtzc_field>;
 
 /**
  * @brief The TZSC that is the machine's bus firewall, as the other models see it, found by

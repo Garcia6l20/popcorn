@@ -311,9 +311,10 @@ TEST_CASE(
   auto const ccr        = base_of("ADC12") + 8;
   auto const secure_ccr = base_of("SEC_ADC12") + 8;
   REQUIRE(base_of("ADC1") / 1024 == ccr / 1024);
-  REQUIRE(machine->mem().write(ccr, 4, 0x0001'0000));
-  CHECK(machine->mem().read(ccr, 4) == 0x0001'0000u);
-  CHECK(machine->mem().read(secure_ccr, 4) == 0x0001'0000u);
-  REQUIRE(machine->mem().write(secure_ccr, 4, 0x0002'0000));
-  CHECK(machine->mem().read(ccr, 4) == 0x0002'0000u);
+  auto& bus = popcorn::core::machine_internals::services(*machine);
+  REQUIRE(bus.write(ccr, 4, 0x0001'0000, popcorn::initiator::debugger));
+  CHECK(bus.read(ccr, 4, popcorn::initiator::debugger) == 0x0001'0000u);
+  CHECK(bus.read(secure_ccr, 4, popcorn::initiator::debugger) == 0x0001'0000u);
+  REQUIRE(bus.write(secure_ccr, 4, 0x0002'0000, popcorn::initiator::debugger));
+  CHECK(bus.read(ccr, 4, popcorn::initiator::debugger) == 0x0002'0000u);
 }

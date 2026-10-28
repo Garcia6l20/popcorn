@@ -13,9 +13,8 @@ struct rcc_options
   /** @brief LSE crystal or bypass clock frequency in Hz. */
   std::uint64_t lse_hz = 32'768;
   /**
-   * @brief Virtual time from an oscillator enable, a PLL enable or a system clock switch to its
-   *        ready flag. Shorter than the datasheet start-up times, LSE 2 s typical, so that a
-   *        boot polling at 4 MHz stays fast.
+   * @brief Virtual time from an oscillator or PLL enable to its ready flag. Shorter than the
+   *        datasheet start-up times, LSE 2 s typical, so that a boot polling at 4 MHz stays fast.
    */
   std::chrono::nanoseconds ready_delay = std::chrono::microseconds{100};
   /** @brief Whether the core clock stays at the machine's rate instead of following HCLK. */

@@ -64,6 +64,29 @@ void write(stm32_fixture const& f, std::string_view reg, std::uint32_t value)
           .has_value());
 }
 
+auto read_register(stm32_fixture const& f, std::string_view peripheral, std::string_view reg)
+    -> std::uint32_t
+{
+  auto const& desc  = f.target->peripheral(peripheral).description();
+  auto const  found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
+  auto const value = f.target->mem().read(desc.base + found->offset, 4);
+  REQUIRE(value.has_value());
+  return static_cast<std::uint32_t>(*value);
+}
+
+void write_register(
+    stm32_fixture const& f,
+    std::string_view     peripheral,
+    std::string_view     reg,
+    std::uint32_t        value)
+{
+  auto const& desc  = f.target->peripheral(peripheral).description();
+  auto const  found = popcorn::find_register(desc, reg);
+  REQUIRE(found != nullptr);
+  REQUIRE(f.target->mem().write(desc.base + found->offset, 4, value).has_value());
+}
+
 auto count(std::vector<std::uint32_t> const& log, std::uint32_t mark) -> long
 {
   return std::ranges::count(log, mark);
@@ -599,4 +622,39 @@ TEST_CASE("a board edge queued before GPIOCRST applies at its time after the res
           .reason
       == stop_reason::time);
   CHECK(pc.level(13));
+}
+
+TEST_CASE("RM0456 13.4.1: GPIOI of the STM32U575 has pins 0 to 7, as read back on silicon")
+{
+  stm32_fixture const f{u575(), "gpio_ll"};
+  write_register(f, "GPIOI", "MODER", 0xffff'ffff);
+  CHECK(read_register(f, "GPIOI", "MODER") == 0x0000'ffff);
+  write_register(f, "GPIOI", "OSPEEDR", 0xffff'ffff);
+  CHECK(read_register(f, "GPIOI", "OSPEEDR") == 0x0000'ffff);
+  write_register(f, "GPIOI", "AFRH", 0xffff'ffff);
+  CHECK(read_register(f, "GPIOI", "AFRH") == 0);
+  write_register(f, "GPIOI", "AFRH", 0x0000'd5a1);
+  CHECK(read_register(f, "GPIOI", "AFRH") == 0);
+  write_register(f, "GPIOH", "AFRH", 0xffff'ffff);
+  CHECK(read_register(f, "GPIOH", "AFRH") == 0xffff'ffff);
+  write_register(f, "GPIOH", "MODER", 0xffff'ffff);
+  CHECK(read_register(f, "GPIOH", "MODER") == 0xffff'ffff);
+}
+
+TEST_CASE("driving GPIOI pin 8 of the STM32U575 throws config_error, pin 7 and GPIOH pin 8 drive")
+{
+  stm32_fixture const f{u575(), "gpio_ll"};
+  auto&               gpioi = port(f, "GPIOI");
+  CHECK(gpioi.pin_count() == 8);
+  CHECK(port(f, "GPIOH").pin_count() == 16);
+  CHECK_THROWS_AS(gpioi.drive(8, true), popcorn::config_error);
+  CHECK_THROWS_AS(gpioi.drive_at(8, true, vtime{0}), popcorn::config_error);
+  CHECK_THROWS_AS(gpioi.drive(15, true), popcorn::config_error);
+  CHECK(gpioi.pending_edges() == 0);
+  write_register(f, "GPIOI", "MODER", 0xffff'0000);
+  CHECK_NOTHROW(gpioi.drive(7, true));
+  CHECK(gpioi.level(7));
+  write_register(f, "GPIOH", "MODER", 0xfffe'ffff);
+  CHECK_NOTHROW(port(f, "GPIOH").drive(8, true));
+  CHECK(port(f, "GPIOH").level(8));
 }

@@ -1309,7 +1309,7 @@ public:
   /**
    * @brief Drives an external ADC channel from outside the MCU.
    * @param peripheral ADC name.
-   * @param channel External channel, 1 to 17 on ADC1.
+   * @param channel External channel, one of adc_channels().
    * @param microvolts Input voltage in microvolts.
    * @throws config_error when the ADC is unknown or the channel is not external.
    * @throws model_error when the peripheral's model is not the built-in ADC.
@@ -1320,13 +1320,24 @@ public:
   /**
    * @brief Voltage driven on an external ADC channel.
    * @param peripheral ADC name.
-   * @param channel External channel, 1 to 17 on ADC1.
+   * @param channel External channel, one of adc_channels().
    * @return The input in microvolts, 0 when never driven.
    * @throws config_error when the ADC is unknown or the channel is not external.
    * @throws model_error when the peripheral's model is not the built-in ADC.
    */
   [[= py::doc{"Voltage driven on an external ADC channel, in microvolts."}]] [[nodiscard]] auto
       adc_input(std::string const& peripheral, std::uint8_t channel) const -> std::uint32_t;
+
+  /**
+   * @brief External channels of an ADC, read on the calling thread: the mask is fixed for the
+   *        life of the model.
+   * @param peripheral ADC name.
+   * @return Bit n set when channel n takes a drive.
+   * @throws config_error when the ADC is unknown.
+   * @throws model_error when the peripheral's model is not the built-in ADC.
+   */
+  [[= py::doc{"External channels of an ADC, bit n for channel n."}]] [[nodiscard]] auto
+      adc_channels(std::string const& peripheral) const -> std::uint32_t;
 
   /**
    * @brief Seed of the RNG word generator.

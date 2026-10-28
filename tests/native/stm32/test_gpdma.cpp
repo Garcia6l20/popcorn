@@ -779,89 +779,6 @@ TEST_CASE("a snapshot one and a half blocks into a restoring list resumes in a f
   CHECK(reg_value(other, "GPDMA_C0SR") == status);
 }
 
-namespace
-{
-struct old_channel_state
-{
-  std::uint32_t generation{};
-  std::uint32_t block_bytes{};
-  std::uint32_t packed{};
-  std::uint8_t  packed_bytes{};
-  bool          half_reported{};
-  bool          scheduled{};
-};
-
-struct old_gpdma_state
-{
-  std::array<old_channel_state, 16> channel{};
-  std::array<std::uint8_t, 128>     request{};
-};
-
-struct new_channel_state
-{
-  std::uint32_t generation{};
-  std::uint32_t block_bytes{};
-  std::uint16_t repeat{};
-  std::uint32_t packed{};
-  std::uint8_t  packed_bytes{};
-  bool          half_reported{};
-  bool          scheduled{};
-  std::uint8_t  destination_beats{};
-  std::uint64_t due_ps{};
-  std::uint8_t  held{};
-  std::uint8_t  burst_held{};
-  std::uint64_t remaining_ps{};
-};
-
-struct new_gpdma_state
-{
-  std::array<new_channel_state, 16> channel{};
-  std::array<std::uint8_t, 128>     request{};
-};
-}
-
-TEST_CASE("a GPDMA state saved before the block repeat counter loads and resumes mid-block")
-{
-  auto f = paced_pack();
-  pace(f, true);
-  for(int count = 0; count < 200 and f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") > 6; ++count)
-  {
-    idle_for(f, std::chrono::nanoseconds{250});
-  }
-  pace(f, false);
-  idle_for(f, std::chrono::microseconds{2});
-  REQUIRE(f.field("GPDMA1", "GPDMA_C0BR1", "BNDT") == 6);
-  auto const saved = f.target->snapshot();
-  auto const times = finish_paced(f);
-  auto const words = copied_bytes(f, 8);
-  REQUIRE(words == std::vector<std::uint8_t>(handled_bytes.begin(), handled_bytes.end()));
-
-  old_gpdma_state old{};
-  old.channel[0] = {
-      .generation    = 1,
-      .block_bytes   = 8,
-      .packed        = 0x0281,
-      .packed_bytes  = 2,
-      .half_reported = false,
-      .scheduled     = false,
-  };
-  std::vector<std::byte> bytes;
-  reflex::serde::bson::serializer{bytes}.dump(old);
-
-  auto other = idle_machine();
-  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
-  other.target->model("GPDMA1")->load(bytes);
-  CHECK(finish_paced(other) == times);
-  CHECK(copied_bytes(other, 8) == words);
-
-  std::vector<std::byte> now;
-  other.target->model("GPDMA1")->save(now);
-  auto const loaded =
-      reflex::serde::bson::deserializer{std::span<std::byte const>{now}}.load<new_gpdma_state>();
-  CHECK(loaded.channel[0].block_bytes == 8);
-  CHECK(std::ranges::all_of(loaded.channel, [](auto const& c) { return c.repeat == 0; }));
-}
-
 TEST_CASE("a UB1 clear link restores the BNDT the last loaded item started with")
 {
   auto       f     = long_source();
@@ -1632,41 +1549,6 @@ auto rx_at_block_300() -> stm32_fixture
   REQUIRE(peek(f, 13, "DAR") == stereo + 1024 + 600);
   return f;
 }
-
-struct repeat_channel_state
-{
-  std::uint32_t generation{};
-  std::uint32_t block_bytes{};
-  std::uint16_t repeat{};
-  std::uint32_t packed{};
-  std::uint8_t  packed_bytes{};
-  bool          half_reported{};
-  bool          scheduled{};
-};
-
-struct repeat_gpdma_state
-{
-  std::array<repeat_channel_state, 16> channel{};
-  std::array<std::uint8_t, 128>        request{};
-};
-
-auto without_beats(new_gpdma_state const& now) -> repeat_gpdma_state
-{
-  repeat_gpdma_state out{.request = now.request};
-  for(auto const [index, c] : std::views::enumerate(now.channel))
-  {
-    out.channel[static_cast<std::size_t>(index)] = {
-        .generation    = c.generation,
-        .block_bytes   = c.block_bytes,
-        .repeat        = c.repeat,
-        .packed        = c.packed,
-        .packed_bytes  = c.packed_bytes,
-        .half_reported = c.half_reported,
-        .scheduled     = c.scheduled,
-    };
-  }
-  return out;
-}
 }
 
 TEST_CASE(
@@ -1687,39 +1569,6 @@ TEST_CASE(
 
   auto other = idle_machine();
   other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
-  CHECK(rx_rest(other) == whole);
-}
-
-TEST_CASE("a GPDMA state saved before the destination burst count loads and resumes a 2D block")
-{
-  auto       f     = rx_at_block_300();
-  auto const saved = f.target->snapshot();
-  auto const whole = rx_rest(f);
-
-  std::vector<std::byte> current;
-  f.target->restore(saved);
-  f.target->model("GPDMA1")->save(current);
-  auto const now = reflex::serde::bson::deserializer{
-      std::span<std::byte const>{
-          current}}.load<new_gpdma_state>();
-  REQUIRE(now.channel[13].repeat == 511);
-  REQUIRE(now.channel[13].block_bytes == 8);
-  REQUIRE(now.channel[13].half_reported);
-  REQUIRE(now.channel[13].destination_beats == 0);
-  REQUIRE_FALSE(now.channel[13].scheduled);
-  std::vector<std::byte> old;
-  reflex::serde::bson::serializer{old}.dump(without_beats(now));
-
-  auto other = idle_machine();
-  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
-  other.target->model("GPDMA1")->load(old);
-  std::vector<std::byte> loaded_bytes;
-  other.target->model("GPDMA1")->save(loaded_bytes);
-  auto const loaded = reflex::serde::bson::deserializer{
-      std::span<std::byte const>{
-          loaded_bytes}}.load<new_gpdma_state>();
-  CHECK(loaded.channel[13].destination_beats == 0);
-  CHECK(loaded.channel[13].repeat == 511);
   CHECK(rx_rest(other) == whole);
 }
 

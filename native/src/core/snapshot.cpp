@@ -7,8 +7,12 @@
 
 #include <reflex/serde/bson.hpp>
 
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <format>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace popcorn::core
@@ -67,6 +71,28 @@ auto encode_snapshot(snapshot_data const& data) -> std::vector<std::byte>
 
 auto decode_snapshot(std::span<std::byte const> bytes) -> snapshot_data
 {
+  constexpr std::string_view format_key{"format"};
+  constexpr std::size_t      element_at = 4;
+  constexpr std::size_t      value_at   = element_at + 1 + format_key.size() + 1;
+  constexpr std::uint8_t     int64_type = 0x12;
+  constexpr std::size_t      value_end  = value_at + sizeof(std::int64_t);
+  bool const                 leads_with_format =
+      bytes.size() >= value_end
+      and static_cast<std::uint8_t>(bytes[element_at]) == int64_type
+      and std::memcmp(bytes.data() + element_at + 1, "format", format_key.size() + 1) == 0;
+  if(not leads_with_format)
+  {
+    throw config_error(
+        "snapshot", 0, "bytes", "a snapshot matching snapshot_data: no leading format element");
+  }
+  std::int64_t leading{};
+  std::memcpy(&leading, bytes.data() + value_at, sizeof leading);
+  if(leading != snapshot_format_version)
+  {
+    throw config_error(
+        "snapshot", 0, "format",
+        std::format("snapshot_format_version {}, bytes have {}", snapshot_format_version, leading));
+  }
   snapshot_data data;
   try
   {
@@ -83,17 +109,6 @@ auto decode_snapshot(std::span<std::byte const> bytes) -> snapshot_data
     throw config_error(
         "snapshot", 0, "bytes",
         std::format("a snapshot matching snapshot_data: {}", failure.what()));
-  }
-  if(data.format >= 2 and data.format <= 6)
-  {
-    data.format = snapshot_format_version;
-  }
-  if(data.format != snapshot_format_version)
-  {
-    throw config_error(
-        "snapshot", 0, "format",
-        std::format(
-            "snapshot_format_version {}, bytes have {}", snapshot_format_version, data.format));
   }
   return data;
 }

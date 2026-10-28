@@ -53,6 +53,13 @@ def test_the_shipped_description_matches_a_fresh_ship_build(name: str) -> None:
         pytest.skip(f"{name} sources not found: {exc}")
     local = compute_source_digests(sources)
     shipped_sources = _sources_of(path)
+    stale = [
+        key for key in local if key.startswith("patch:") and local[key] != shipped_sources.get(key)
+    ]
+    assert not stale, f"{name}: shipped patch digests differ, rerun ship: {stale}"
+    assert {k for k in shipped_sources if k.startswith("patch:")} == {
+        k for k in local if k.startswith("patch:")
+    }
     differing = [key for key in EXTERNAL_SOURCES if local.get(key) != shipped_sources.get(key)]
     if differing:
         pytest.skip(f"{name}: local {', '.join(differing)} differ from the shipped file's")
@@ -88,3 +95,25 @@ def test_ship_refuses_to_write_without_out(
     status = main(["ship", "STM32U575QGIx", "--pin-data", str(tmp_path / "absent")])
     assert status == 1
     assert "--out is required" in capsys.readouterr().err
+
+
+def test_the_shipped_h573_sec_usb_keeps_the_patched_usb_field_kinds() -> None:
+    path = SHIPPED_DIR / "STM32H573AIIx.json.xz"
+    data = cast(dict[str, object], json.loads(shipped_text(path.read_bytes(), file=str(path))))
+    peripherals = cast(list[dict[str, object]], data["peripherals"])
+    by_name = {cast(str, p["name"]): p for p in peripherals}
+    secure = by_name["SEC_USB"]
+    assert secure["alias_of"] == "USB"
+    kinds: dict[str, dict[str, tuple[object, object]]] = {}
+    for unit in ("USB", "SEC_USB"):
+        registers = cast(list[dict[str, object]], by_name[unit]["registers"])
+        kinds[unit] = {
+            f"{r['name']}.{f['name']}": (f.get("on_write"), f.get("acc"))
+            for r in registers
+            if cast(str, r["name"]) in {f"CHEP{n}R" for n in range(8)} | {"ISTR"}
+            for f in cast(list[dict[str, object]], r["fields"])
+        }
+    assert kinds["SEC_USB"] == kinds["USB"]
+    assert kinds["SEC_USB"]["CHEP3R.DTOGRX"] == ("one_to_toggle", "read_write")
+    assert kinds["SEC_USB"]["CHEP3R.VTRX"][0] == "zero_to_clear"
+    assert kinds["SEC_USB"]["ISTR.RST_DCON"][0] == "zero_to_clear"

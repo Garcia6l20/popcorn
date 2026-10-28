@@ -142,6 +142,7 @@ struct host_state
   std::uint64_t                     now_ps{};
   std::optional<std::uint64_t>      debounce_end{};
   std::optional<std::uint64_t>      reset_end{};
+  std::optional<std::uint64_t>      recovery_end{};
   std::optional<std::uint64_t>      hold_until{};
   std::optional<std::uint64_t>      next_frame{};
   std::optional<std::uint64_t>      next_slot{};
@@ -456,7 +457,8 @@ struct host::impl
   void schedule()
   {
     std::optional<std::uint64_t> next{};
-    for(auto const& due : {s.debounce_end, s.reset_end, s.hold_until, s.next_frame, s.next_slot})
+    for(auto const& due :
+        {s.debounce_end, s.reset_end, s.recovery_end, s.hold_until, s.next_frame, s.next_slot})
     {
       if(due and (not next or *due < *next))
       {
@@ -583,6 +585,7 @@ struct host::impl
   {
     s.next_frame.reset();
     s.next_slot.reset();
+    s.recovery_end.reset();
     s.reset_end = at + to_ps(options.reset_time);
     s.address   = 0;
     if(s.device > device_state::default_)
@@ -625,8 +628,20 @@ struct host::impl
   void finish_reset(std::uint64_t at)
   {
     s.reset_end.reset();
+    port.bus_reset_end(vtime{at});
     s.device     = std::max(s.device, device_state::default_);
     s.next_frame = at;
+    if(auto const recovery = to_ps(options.reset_recovery); recovery != 0)
+    {
+      s.recovery_end = at + recovery;
+      return;
+    }
+    finish_recovery(at);
+  }
+
+  void finish_recovery(std::uint64_t at)
+  {
+    s.recovery_end.reset();
     if(s.step_active)
     {
       s.step_active = false;
@@ -1250,7 +1265,7 @@ struct host::impl
   void plan_slot(std::uint64_t at)
   {
     s.next_slot.reset();
-    if(not s.next_frame)
+    if(not s.next_frame or s.recovery_end)
     {
       return;
     }
@@ -1275,7 +1290,10 @@ struct host::impl
   {
     s.next_slot.reset();
     auto const index = pick();
-    if(not index or not s.next_frame or at + worst_time(s.pipes[*index]) > *s.next_frame)
+    if(not index
+       or not s.next_frame
+       or s.recovery_end
+       or at + worst_time(s.pipes[*index]) > *s.next_frame)
     {
       return;
     }
@@ -1390,6 +1408,14 @@ struct host::impl
     if(s.reset_end and *s.reset_end <= at)
     {
       finish_reset(*s.reset_end);
+    }
+    if(s.recovery_end and *s.recovery_end <= at)
+    {
+      finish_recovery(at);
+      if(not s.next_slot and s.next_frame and *s.next_frame > at)
+      {
+        plan_slot(at);
+      }
     }
     if(s.hold_until and *s.hold_until <= at)
     {

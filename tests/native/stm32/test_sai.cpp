@@ -1015,161 +1015,6 @@ TEST_CASE("a snapshot keeps the phase of a running external clock no block uses 
   CHECK(since(other.a->frames, t) == std::vector<std::int64_t>{2 * slave_frame});
 }
 
-namespace
-{
-struct legacy_block
-{
-  std::uint32_t              generation{};
-  std::vector<std::uint32_t> fifo;
-  std::vector<std::uint32_t> frame;
-  std::uint64_t              anchor_ps{};
-  std::uint64_t              frames{};
-  std::uint64_t              next_ps{};
-  std::uint64_t              hz{};
-  std::uint64_t              cycles{};
-  std::uint32_t              bits{};
-  std::uint32_t              position{};
-  std::int8_t                resume_slot{-1};
-  bool                       ticking{};
-  bool                       stalled{};
-  bool                       active{};
-  bool                       stopping{};
-  bool                       waiting{};
-};
-
-struct saved_block
-{
-  std::uint32_t              generation{};
-  std::vector<std::uint32_t> fifo;
-  std::vector<std::uint32_t> frame;
-  std::uint64_t              anchor_ps{};
-  std::uint64_t              frames{};
-  std::uint64_t              next_ps{};
-  std::uint64_t              hz{};
-  std::uint64_t              cycles{};
-  std::uint32_t              bits{};
-  std::uint32_t              position{};
-  std::int8_t                resume_slot{-1};
-  std::int8_t                carry_slot{-1};
-  std::uint32_t              carry_at{};
-  std::uint32_t              carry_word{};
-  bool                       ticking{};
-  bool                       stalled{};
-  bool                       active{};
-  bool                       stopping{};
-  bool                       waiting{};
-};
-
-auto legacy(std::array<saved_block, 2> const& blocks) -> std::array<legacy_block, 2>
-{
-  std::array<legacy_block, 2> out{};
-  for(std::size_t index = 0; index < blocks.size(); ++index)
-  {
-    auto const& in = blocks[index];
-    REQUIRE(in.carry_slot == -1);
-    out[index] = {
-        .generation  = in.generation,
-        .fifo        = in.fifo,
-        .frame       = in.frame,
-        .anchor_ps   = in.anchor_ps,
-        .frames      = in.frames,
-        .next_ps     = in.next_ps,
-        .hz          = in.hz,
-        .cycles      = in.cycles,
-        .bits        = in.bits,
-        .position    = in.position,
-        .resume_slot = in.resume_slot,
-        .ticking     = in.ticking,
-        .stalled     = in.stalled,
-        .active      = in.active,
-        .stopping    = in.stopping,
-        .waiting     = in.waiting};
-  }
-  return out;
-}
-
-struct saved_clock
-{
-  std::uint32_t hz{};
-  std::uint64_t anchor_ps{};
-  bool          anchored{};
-};
-
-struct new_sai_state
-{
-  std::array<saved_block, 2>                block{};
-  std::optional<std::array<saved_clock, 2>> clock{};
-};
-
-struct old_sai_state
-{
-  std::array<legacy_block, 2> block{};
-};
-
-struct pre_carry_sai_state
-{
-  std::array<legacy_block, 2>               block{};
-  std::optional<std::array<saved_clock, 2>> clock{};
-};
-
-auto without_clock(core::snapshot const& saved) -> core::snapshot
-{
-  auto data = core::decode_snapshot(core::encode_snapshot(saved.data()));
-  auto part = std::ranges::find(data.models, std::string{"SAI1"}, &core::snapshot_part::owner);
-  REQUIRE(part != data.models.end());
-  auto const now = reflex::serde::bson::deserializer{
-      std::span<std::byte const>{
-          part->data}}.load<new_sai_state>();
-  REQUIRE(now.clock.has_value());
-  REQUIRE(now.block[0].ticking);
-  part->data.clear();
-  reflex::serde::bson::serializer{part->data}.dump(old_sai_state{.block = legacy(now.block)});
-  return core::snapshot{std::move(data)};
-}
-}
-
-TEST_CASE("an SAI state saved before the external clock loads and keeps the machine's clock")
-{
-  rig first{"idle", {}, {.external_frame_hz = 16'000}};
-  bus b{*first.f};
-  slave_a(b);
-  auto const start = b.now();
-  b.run_until(start + 100 * us);
-  auto const old  = without_clock(first.f->target->snapshot());
-  auto const done = first.a->frames.size();
-  b.run_until(start + 400 * us);
-  auto const rest = tail(first.a->frames, done);
-  REQUIRE(rest.size() == 5);
-
-  SUBCASE("built with the rate: the block runs on, its next enable takes a new phase")
-  {
-    rig other{"idle", {}, {.external_frame_hz = 16'000}};
-    bus o{*other.f};
-    other.f->target->restore(old);
-    CHECK(port_of(other).external_clock(clock_a) == 16'000);
-    o.run_until(start + 400 * us);
-    CHECK(other.a->frames == rest);
-    o.set("ACR1", "SAIAEN", 0);
-    o.run_until(start + 470 * us);
-    CHECK(o.get("ACR1", "SAIAEN") == 0);
-    o.set("ACR1", "SAIAEN", 1);
-    auto const enabled_at = o.now();
-    o.run_until(enabled_at + 70 * us);
-    REQUIRE_FALSE(other.a->frames.empty());
-    CHECK(other.a->frames.back().at.ps == enabled_at);
-  }
-  SUBCASE("built without a rate: the block ends its frame and waits")
-  {
-    rig other{"idle"};
-    bus o{*other.f};
-    other.f->target->restore(old);
-    CHECK(port_of(other).external_clock(clock_a) == 0);
-    o.run_until(start + 400 * us);
-    CHECK(other.a->frames == std::vector<stm32::captured_audio_frame>{rest[0]});
-    CHECK(o.get("ACR1", "SAIAEN") == 1);
-  }
-}
-
 TEST_CASE("frame sync errors never rise on an external clock, their enables log nothing")
 {
   rig                           r{"idle", {}, {.external_frame_hz = 16'000}};
@@ -1570,30 +1415,6 @@ void receiver_b(bus const& b, std::uint32_t offset, std::uint32_t first)
   });
   b.set("BCR1", "SAIAEN", 1);
 }
-
-auto has_key(core::snapshot const& saved, std::string_view key) -> bool
-{
-  auto const data = core::decode_snapshot(core::encode_snapshot(saved.data()));
-  auto const part =
-      std::ranges::find(data.models, std::string{"SAI1"}, &core::snapshot_part::owner);
-  REQUIRE(part != data.models.end());
-  auto const bytes = std::as_bytes(std::span{key});
-  return not std::ranges::search(part->data, bytes).empty();
-}
-
-auto without_carry(core::snapshot const& saved) -> core::snapshot
-{
-  auto data = core::decode_snapshot(core::encode_snapshot(saved.data()));
-  auto part = std::ranges::find(data.models, std::string{"SAI1"}, &core::snapshot_part::owner);
-  REQUIRE(part != data.models.end());
-  auto const now = reflex::serde::bson::deserializer{
-      std::span<std::byte const>{
-          part->data}}.load<new_sai_state>();
-  part->data.clear();
-  reflex::serde::bson::serializer{part->data}.dump(
-      pre_carry_sai_state{.block = legacy(now.block), .clock = now.clock});
-  return core::snapshot{std::move(data)};
-}
 }
 
 TEST_CASE("a receiver stores each slot's word when the slot ends, FSOFF and FSDEF included")
@@ -1751,14 +1572,13 @@ TEST_CASE("a follower's carried word is stored at the frame end when the followe
   CHECK(b.get("ASR", "FLVL") == 1);
 }
 
-TEST_CASE("a snapshot with a carried word restores it, a state saved before carries loads")
+TEST_CASE("a snapshot with a carried word restores it")
 {
   rig first{"idle"};
   bus b{*first.f};
   receiver_b(b, 1, 0);
   auto const start = b.now();
   b.run_until(start + 40 * bit_64);
-  auto const before = first.f->target->snapshot();
   b.run_until(start + 64 * bit_64 + bit_64 / 2);
   CHECK(b.get("BSR", "FLVL") == 1);
   auto const carrying = first.f->target->snapshot();
@@ -1774,20 +1594,6 @@ TEST_CASE("a snapshot with a carried word restores it, a state saved before carr
     rig other{"idle"};
     bus o{*other.f};
     other.f->target->restore(restored(carrying));
-    CHECK(o.get("BSR", "FLVL") == 1);
-    o.run_until(start + 65 * bit_64 + bit_64 / 2);
-    CHECK(o.get("BSR", "FLVL") == 2);
-    CHECK(std::vector<std::uint32_t>{o.pop('B'), o.pop('B')} == words);
-  }
-  SUBCASE("a state without the carry members")
-  {
-    REQUIRE(has_key(before, "carry_slot"));
-    auto const old = without_carry(before);
-    REQUIRE_FALSE(has_key(old, "carry_slot"));
-    rig other{"idle"};
-    bus o{*other.f};
-    other.f->target->restore(old);
-    o.run_until(start + 64 * bit_64 + bit_64 / 2);
     CHECK(o.get("BSR", "FLVL") == 1);
     o.run_until(start + 65 * bit_64 + bit_64 / 2);
     CHECK(o.get("BSR", "FLVL") == 2);

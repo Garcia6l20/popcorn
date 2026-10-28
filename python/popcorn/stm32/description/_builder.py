@@ -17,7 +17,13 @@ from popcorn.stm32.description._cubemx import (
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._irqs import build_irq_table, read_cmsis_irqs
 from popcorn.stm32.description._model import CoreDesc, IrqDesc, PartDescription, PeripheralDesc
-from popcorn.stm32.description._patches import PatchReport, PatchTarget, apply_patches, load_patches
+from popcorn.stm32.description._patches import (
+    PatchReport,
+    PatchTarget,
+    apply_alternate_drops,
+    apply_patches,
+    load_patches,
+)
 from popcorn.stm32.description._sources import Sources, compute_source_digests, generator_string
 from popcorn.stm32.description._svd import expand_svd
 
@@ -209,6 +215,7 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
             port = _GPIO_PORT_RE.fullmatch(peripheral.name)
             if alternates and port is not None and peripheral.alias_of is None:
                 peripheral.alternates = alternates.get(port.group(1), [])
+    report.alternates_dropped = apply_alternate_drops(loaded_patches, target.peripherals)
 
     description = PartDescription(
         part=sources.part,

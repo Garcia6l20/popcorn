@@ -31,6 +31,8 @@ def test_the_repository_manifest_marks_the_firmware_packages_firmware_only() -> 
     assert firmware == {
         "stm32u5-hal-driver",
         "cmsis-device-u5",
+        "stm32h5-hal-driver",
+        "cmsis-device-h5",
         "cmsis-core",
         "freertos-kernel",
         "tinyusb",

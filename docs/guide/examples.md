@@ -1,6 +1,6 @@
 # Examples
 
-Each example is a firmware project for the STM32U575 with the pytest suite that runs it on popcorn. Copy one, build it, run its tests, then read its `test_*.py` to see how a test drives the machine.
+Each example is a firmware project for the STM32U575 or the STM32H573 with the pytest suite that runs it on popcorn. Copy one, build it, run its tests, then read its `test_*.py` to see how a test drives the machine.
 
 Every example has the same layout:
 
@@ -196,3 +196,43 @@ A C++ model and a C++ device from a native plugin: the RNG and an SPI ADC, HAL. 
 Secure and Non-secure pair with TrustZone, CMSE. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32u575/trustzone).
 
 --8<-- "stm32u575/trustzone/README.md:3:6"
+
+## STM32H573
+
+The same layout on the STM32H573. Each example ports its STM32U575 namesake and runs the same way, from `examples/stm32h573/<name>`.
+
+### h573 rcc
+
+HSI to a 250 MHz PLL1 with a fractional N, VOS0 and 5 wait states, LL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/rcc).
+
+--8<-- "stm32h573/rcc/README.md:3:11"
+
+### h573 pwr_flash
+
+Voltage scaling, flash wait states, sector erase and program, LL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/pwr_flash).
+
+--8<-- "stm32h573/pwr_flash/README.md:3:16"
+
+### h573 usart
+
+printf banner and line echo on UART9, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/usart).
+
+--8<-- "stm32h573/usart/README.md:3:10"
+
+### h573 spi
+
+SPI NOR flash on SPI4 from FreeRTOS and GPDMA, behind a bootloader offset. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/spi).
+
+--8<-- "stm32h573/spi/README.md:3:12"
+
+### h573 gpdma
+
+UART9 TX over GPDMA, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/gpdma).
+
+--8<-- "stm32h573/gpdma/README.md:3:12"
+
+### h573 usb_cdc
+
+CDC ACM device on the USB full-speed controller enumerated by a virtual host, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/usb_cdc).
+
+--8<-- "stm32h573/usb_cdc/README.md:3:12"

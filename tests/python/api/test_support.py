@@ -59,6 +59,7 @@ U575_BUILTIN = [
     "DBGMCU",
     "LPUART1",
     "CRC",
+    "CRS",
     "USART1",
     "USART2",
     "USART3",

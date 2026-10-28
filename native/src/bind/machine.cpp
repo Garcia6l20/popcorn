@@ -9,6 +9,7 @@
 #include <popcorn/periph/stm32/board.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -28,9 +29,10 @@ namespace popcorn::bind
 {
 namespace
 {
-constexpr std::uint64_t hse_min_hz = 4'000'000;
-constexpr std::uint64_t hse_max_hz = 50'000'000;
-constexpr std::uint64_t lse_max_hz = 1'000'000;
+constexpr std::uint64_t                   hse_min_hz = 4'000'000;
+constexpr std::uint64_t                   hse_max_hz = 50'000'000;
+constexpr std::uint64_t                   lse_max_hz = 1'000'000;
+constexpr std::array<std::string_view, 2> usb_device_ips{"USB_OTG_FS", "USB"};
 
 auto rcc_options_of(machine_config const& config) -> std::optional<periph::stm32::rcc_options>
 {
@@ -215,7 +217,9 @@ auto usb_factories(
       return p.name == name and not p.alias_of;
     });
     auto       found = all.find(name);
-    if(unit == description.peripherals.end() or unit->ip != "USB_OTG_FS" or found == all.end())
+    if(unit == description.peripherals.end()
+       or not std::ranges::contains(usb_device_ips, unit->ip)
+       or found == all.end())
     {
       throw config_error("usb", 0, key_of(name), "a USB device controller a built-in model serves");
     }

@@ -271,8 +271,8 @@ guarded_probe::guarded_probe(periph::model_context& ctx, popcorn::peripheral_des
 auto with_listener(core::machine_options options = popcorn::testing::stm32_options())
     -> core::machine_options
 {
-  options.models.emplace(
-      "CRS",
+  options.models.insert_or_assign(
+      "CORDIC",
       [](periph::model_context& ctx, popcorn::peripheral_desc const&)
           -> std::shared_ptr<periph::model> { return std::make_shared<listener>(ctx); });
   return options;
@@ -280,7 +280,7 @@ auto with_listener(core::machine_options options = popcorn::testing::stm32_optio
 
 auto probe(stm32_fixture const& f) -> listener&
 {
-  auto* const found = f.model_of<listener>("CRS");
+  auto* const found = f.model_of<listener>("CORDIC");
   REQUIRE(found != nullptr);
   return *found;
 }
@@ -342,19 +342,16 @@ auto booted_log(core::machine_options options = with_listener()) -> std::vector<
 }
 }
 
-TEST_CASE("LL clock setup reaches 160 MHz on PLL1 with every ready flag after its delay")
+TEST_CASE("LL clock setup reaches 160 MHz on PLL1, every ready flag after its delay, SWS at once")
 {
   stm32_fixture f{u575(), "rcc_ll", with_listener()};
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
   auto const log = f.log();
   REQUIRE(log.size() == 10);
   CHECK(log[0] == 0);
-  for(std::size_t step = 1; step < 3; ++step)
-  {
-    CAPTURE(step);
-    CHECK(log[step] > 0);
-    CHECK(log[step] <= 400);
-  }
+  CHECK(log[1] > 0);
+  CHECK(log[1] <= 400);
+  CHECK(log[2] == 0);
   for(std::size_t step = 3; step < 7; ++step)
   {
     CAPTURE(step);
@@ -540,6 +537,39 @@ TEST_CASE("a snapshot taken while PLL1 locks restores to the same run, in place 
   CHECK(other.log() == expected);
 }
 
+TEST_CASE("the RCC model state at the 160 MHz point saves the bytes captured before the template")
+{
+  constexpr auto expected = std::to_array<unsigned char>(
+      {0x24, 0x01, 0x00, 0x00, 0x04, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+       0x00, 0x7f, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x12, 0x31, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x00,
+       0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x33, 0x00, 0x01, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x12, 0x34, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x12, 0x35, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x36, 0x00, 0x01,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x37, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x12, 0x38, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x39, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x30, 0x00, 0x02,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x70, 0x65, 0x6e, 0x64, 0x69, 0x6e,
+       0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x6c, 0x73, 0x69, 0x5f,
+       0x66, 0x6f, 0x72, 0x63, 0x65, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x66, 0x72, 0x61,
+       0x63, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x26, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x12, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x68, 0x73, 0x69, 0x5f, 0x64, 0x69, 0x76, 0x69, 0x64, 0x65, 0x72, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x64, 0x69, 0x76, 0x69, 0x64, 0x65, 0x72, 0x5f, 0x63,
+       0x6c, 0x65, 0x61, 0x72, 0x69, 0x6e, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x64, 0x69,
+       0x76, 0x69, 0x64, 0x65, 0x72, 0x5f, 0x73, 0x65, 0x74, 0x5f, 0x70, 0x73, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+  stm32_fixture f{u575(), "rcc_ll", with_listener()};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  REQUIRE(probe(f).hz("sysclk") == 160 * mhz);
+  std::vector<std::byte> bytes;
+  f.target->model("RCC")->save(bytes);
+  CHECK(std::ranges::equal(bytes, expected, {}, [](std::byte b) {
+    return std::to_integer<unsigned char>(b);
+  }));
+}
+
 TEST_CASE("timer domains run at twice their APB clock when the APB prescaler divides")
 {
   auto  f      = idle_fixture();
@@ -555,7 +585,113 @@ TEST_CASE("timer domains run at twice their APB clock when the APB prescaler div
   CHECK(clocks.hz("tim2") == 2 * mhz);
 }
 
-TEST_CASE("the oscillator driving the system clock cannot be switched off")
+TEST_CASE("PLL1 P, Q and R each divide the VCO by their own divider and follow their own enable")
+{
+  auto  f      = idle_fixture();
+  auto& clocks = probe(f);
+  REQUIRE(clocks.hz("sysclk") == 4 * mhz);
+  write(
+      f, "RCC_PLL1CFGR",
+      bit_of("RCC_PLL1CFGR", "PLL1SRC")
+          | bit_of("RCC_PLL1CFGR", "PLL1PEN")
+          | bit_of("RCC_PLL1CFGR", "PLL1QEN")
+          | bit_of("RCC_PLL1CFGR", "PLL1REN"));
+  write(
+      f, "RCC_PLL1DIVR",
+      7u * bit_of("RCC_PLL1DIVR", "PLL1N")
+          | 1u * bit_of("RCC_PLL1DIVR", "PLL1P")
+          | 3u * bit_of("RCC_PLL1DIVR", "PLL1Q")
+          | 7u * bit_of("RCC_PLL1DIVR", "PLL1R"));
+  write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "PLL1ON"));
+  idle_until(f, std::chrono::microseconds{150});
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  CHECK(clocks.hz("pll1_p") == 16 * mhz);
+  CHECK(clocks.hz("pll1_q") == 8 * mhz);
+  CHECK(clocks.hz("pll1_r") == 4 * mhz);
+  write(f, "RCC_PLL1CFGR", peek(f, "RCC_PLL1CFGR") & ~bit_of("RCC_PLL1CFGR", "PLL1PEN"));
+  CHECK(clocks.hz("pll1_p") == 0);
+  CHECK(clocks.hz("pll1_q") == 8 * mhz);
+  CHECK(clocks.hz("pll1_r") == 4 * mhz);
+}
+
+TEST_CASE("RM0456 11.4.6: PLL1ON loads PLL1FRACN under PLL1FRACEN, a running PLL1 on its 0 to 1")
+{
+  auto        f      = idle_fixture();
+  auto const& clocks = probe(f);
+  auto const  fracn  = [&](std::uint32_t value) {
+    write(f, "RCC_PLL1FRACR", value * bit_of("RCC_PLL1FRACR", "PLL1FRACN"));
+  };
+  auto const fracen = [&](std::uint32_t value) {
+    write(
+        f, "RCC_PLL1CFGR",
+        (peek(f, "RCC_PLL1CFGR") & ~bit_of("RCC_PLL1CFGR", "PLL1FRACEN"))
+            | value * bit_of("RCC_PLL1CFGR", "PLL1FRACEN"));
+  };
+  write(f, "RCC_PLL1CFGR", bit_of("RCC_PLL1CFGR", "PLL1SRC") | bit_of("RCC_PLL1CFGR", "PLL1REN"));
+  write(f, "RCC_PLL1DIVR", 7u * bit_of("RCC_PLL1DIVR", "PLL1N"));
+  fracn(4096);
+  write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "PLL1ON"));
+  idle_until(f, std::chrono::microseconds{150});
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  CHECK(clocks.hz("pll1_r") == 32 * mhz);
+  fracen(1);
+  CHECK(clocks.hz("pll1_r") == 34 * mhz);
+  fracn(0);
+  CHECK(clocks.hz("pll1_r") == 34 * mhz);
+  fracen(0);
+  CHECK(clocks.hz("pll1_r") == 34 * mhz);
+  fracn(2048);
+  fracen(1);
+  CHECK(clocks.hz("pll1_r") == 33 * mhz);
+  write(f, "RCC_CR", peek(f, "RCC_CR") & ~bit_of("RCC_CR", "PLL1ON"));
+  fracn(4096);
+  write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "PLL1ON"));
+  idle_until(f, std::chrono::microseconds{150});
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  CHECK(clocks.hz("pll1_r") == 34 * mhz);
+  write(f, "RCC_CR", peek(f, "RCC_CR") & ~bit_of("RCC_CR", "PLL1ON"));
+  fracen(0);
+  write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "PLL1ON"));
+  idle_until(f, std::chrono::microseconds{150});
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  CHECK(clocks.hz("pll1_r") == 32 * mhz);
+}
+
+TEST_CASE("USART1SEL picks the USART1 kernel clock between pclk2 and sysclk")
+{
+  auto  f      = idle_fixture();
+  auto& clocks = probe(f);
+  write(f, "RCC_APB2ENR", bit_of("RCC_APB2ENR", "USART1EN"));
+  write(f, "RCC_CFGR2", peek(f, "RCC_CFGR2") | 4u * bit_of("RCC_CFGR2", "PPRE2"));
+  REQUIRE(clocks.hz("sysclk") == 4 * mhz);
+  REQUIRE(clocks.hz("pclk2") == 2 * mhz);
+  CHECK(clocks.hz("usart1") == 2 * mhz);
+  write(f, "RCC_CCIPR1", 1u * bit_of("RCC_CCIPR1", "USART1SEL"));
+  CHECK(clocks.hz("usart1") == 4 * mhz);
+}
+
+TEST_CASE("a U575 RCC description without PPRE2 or PPRE3 is a config_error")
+{
+  for(auto const name : {"PPRE2", "PPRE3"})
+  {
+    CAPTURE(name);
+    auto desc = u575();
+    auto rcc  = std::ranges::find(
+        desc.peripherals, std::string_view{"RCC"}, &popcorn::peripheral_desc::name);
+    REQUIRE(rcc != desc.peripherals.end());
+    auto removed = std::size_t{};
+    for(auto& reg : rcc->registers)
+    {
+      removed += std::erase_if(
+          reg.fields, [&](popcorn::field_desc const& bits) { return bits.name == name; });
+    }
+    REQUIRE(removed > 0);
+    CHECK_THROWS_AS(
+        stm32_fixture(std::move(desc), "rcc_ll", with_listener()), popcorn::config_error);
+  }
+}
+
+TEST_CASE("the oscillator driving the system clock cannot be switched off, with no log record")
 {
   auto                          f = idle_fixture();
   std::vector<core::log_record> logged;
@@ -564,17 +700,37 @@ TEST_CASE("the oscillator driving the system clock cannot be switched off")
   write(f, "RCC_CR", peek(f, "RCC_CR") & ~bit_of("RCC_CR", "MSISON"));
   CHECK(f.field("RCC", "RCC_CR", "MSISON") == 1);
   CHECK(f.field("RCC", "RCC_CR", "MSISRDY") == 1);
-  REQUIRE(logged.size() == 1);
-  CHECK(logged.front().message.contains("MSISON = 0"));
-  write(f, "RCC_CR", peek(f, "RCC_CR") & ~bit_of("RCC_CR", "MSISON"));
-  CHECK(logged.size() == 1);
+  CHECK(logged.empty());
   write(f, "RCC_CR", peek(f, "RCC_CR") & ~bit_of("RCC_CR", "MSIKON"));
   CHECK(f.field("RCC", "RCC_CR", "MSIKON") == 0);
   CHECK(f.field("RCC", "RCC_CR", "MSIKRDY") == 0);
   CHECK(probe(f).hz("msik") == 0);
 }
 
-TEST_CASE("PLL1 driving the system clock keeps its configuration against a source write")
+TEST_CASE("RM0456 11.8.1: HSEON clears while HSE feeds a PLL1 that SYSCLK does not use")
+{
+  auto        f      = idle_fixture();
+  auto const& clocks = probe(f);
+  write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "HSEON"));
+  idle_until(f, std::chrono::microseconds{150});
+  write(
+      f, "RCC_PLL1CFGR",
+      3u * bit_of("RCC_PLL1CFGR", "PLL1SRC")
+          | bit_of("RCC_PLL1CFGR", "PLL1QEN")
+          | 1u * bit_of("RCC_PLL1CFGR", "PLL1M"));
+  write(f, "RCC_PLL1DIVR", 7u * bit_of("RCC_PLL1DIVR", "PLL1N") | bit_of("RCC_PLL1DIVR", "PLL1Q"));
+  write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "PLL1ON"));
+  idle_until(f, std::chrono::microseconds{150});
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  REQUIRE(clocks.hz("pll1_q") > 0);
+  write(f, "RCC_CR", peek(f, "RCC_CR") & ~bit_of("RCC_CR", "HSEON"));
+  CHECK(f.field("RCC", "RCC_CR", "HSEON") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "HSERDY") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1RDY") == 0);
+  CHECK(clocks.hz("pll1_q") == 0);
+}
+
+TEST_CASE("PLL1 driving the system clock keeps its configuration, with no log record")
 {
   stm32_fixture f{u575(), "rcc_ll", with_listener()};
   REQUIRE(f.run_to_stop().reason == stop_reason::user);
@@ -589,28 +745,100 @@ TEST_CASE("PLL1 driving the system clock keeps its configuration against a sourc
   CHECK(f.field("RCC", "RCC_PLL1CFGR", "PLL1REN") == 1);
   CHECK(probe(f).hz("sysclk") == 160 * mhz);
   CHECK(f.target->virtual_clock().core_hz() == 160 * mhz);
-  REQUIRE(logged.size() == 1);
-  CHECK(logged.front().kind == core::log_kind::model_warning);
-  CHECK(logged.front().peripheral == "RCC");
-  CHECK(logged.front().reg == "RCC_PLL1CFGR");
-  CHECK(logged.front().message.contains("stop the core clock"));
+  write(f, "RCC_CR", bit_of("RCC_CR", "MSISON"));
+  CHECK(f.field("RCC", "RCC_CR", "PLL1ON") == 1);
+  CHECK(logged.empty());
   f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
   idle_until(f, std::chrono::microseconds{10});
 }
 
-TEST_CASE("a switch to a source that is not ready happens after its ready event")
+TEST_CASE("a switch to a PLL1 output that is off keeps the core clock and warns once")
+{
+  auto                          f = idle_fixture();
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  write(f, "RCC_PLL1CFGR", bit_of("RCC_PLL1CFGR", "PLL1SRC"));
+  write(f, "RCC_PLL1DIVR", 7u * bit_of("RCC_PLL1DIVR", "PLL1N"));
+  write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "PLL1ON"));
+  idle_until(f, std::chrono::microseconds{150});
+  REQUIRE(f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  REQUIRE(logged.empty());
+  write(f, "RCC_CFGR1", 3u * bit_of("RCC_CFGR1", "SW"));
+  CHECK(f.field("RCC", "RCC_CFGR1", "SWS") == 3);
+  CHECK(probe(f).hz("sysclk") == 0);
+  CHECK(f.target->virtual_clock().core_hz() == 4 * mhz);
+  REQUIRE(logged.size() == 1);
+  CHECK(logged.front().kind == core::log_kind::model_warning);
+  CHECK(logged.front().peripheral == "RCC");
+  CHECK(logged.front().reg == "RCC_CFGR1");
+  CHECK(logged.front().message.contains("0 Hz"));
+  write(f, "RCC_CFGR1", 0);
+  write(f, "RCC_CFGR1", 3u * bit_of("RCC_CFGR1", "SW"));
+  CHECK(logged.size() == 1);
+}
+
+TEST_CASE("RM0456 11.4.9: a switch to a source that is not ready happens at its ready event")
 {
   auto f = idle_fixture();
   write(f, "RCC_CFGR1", bit_of("RCC_CFGR1", "SW"));
   idle_until(f, std::chrono::microseconds{150});
   CHECK(f.field("RCC", "RCC_CFGR1", "SWS") == 0);
   write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "HSION"));
-  idle_until(f, std::chrono::microseconds{150});
-  CHECK(f.field("RCC", "RCC_CR", "HSIRDY") == 1);
+  idle_until(f, std::chrono::microseconds{99});
+  CHECK(f.field("RCC", "RCC_CR", "HSIRDY") == 0);
   CHECK(f.field("RCC", "RCC_CFGR1", "SWS") == 0);
-  idle_until(f, std::chrono::microseconds{60});
+  CHECK(probe(f).hz("sysclk") == 4 * mhz);
+  idle_until(f, std::chrono::microseconds{2});
+  CHECK(f.field("RCC", "RCC_CR", "HSIRDY") == 1);
   CHECK(f.field("RCC", "RCC_CFGR1", "SWS") == 1);
   CHECK(probe(f).hz("sysclk") == 16 * mhz);
+}
+
+TEST_CASE("RM0456 11.4.9: SWS follows SW in the write that selects a ready source")
+{
+  auto f = idle_fixture();
+  write(f, "RCC_CR", peek(f, "RCC_CR") | bit_of("RCC_CR", "HSION"));
+  idle_until(f, std::chrono::microseconds{150});
+  REQUIRE(f.field("RCC", "RCC_CR", "HSIRDY") == 1);
+  write(f, "RCC_CFGR1", bit_of("RCC_CFGR1", "SW"));
+  CHECK(f.field("RCC", "RCC_CFGR1", "SWS") == 1);
+  CHECK(probe(f).hz("sysclk") == 16 * mhz);
+  CHECK(f.target->virtual_clock().core_hz() == 16 * mhz);
+  write(f, "RCC_CFGR1", 0);
+  CHECK(f.field("RCC", "RCC_CFGR1", "SWS") == 0);
+  CHECK(f.target->virtual_clock().core_hz() == 4 * mhz);
+}
+
+TEST_CASE("RM0456 11.4.9: the CMSIS SystemInit run after the LL setup leaves MSIS as SYSCLK")
+{
+  stm32_fixture f{u575(), "rcc_ll", with_listener()};
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  REQUIRE(f.field("RCC", "RCC_CFGR1", "SWS") == 3);
+  std::vector<std::string> warnings;
+  auto const               sink = f.target->add_log_sink([&](core::log_record const& record) {
+    if(record.kind == core::log_kind::model_warning)
+    {
+      warnings.push_back(record.message);
+    }
+  });
+  f.set("pc", popcorn::testing::sym("rcc_ll", "SystemInit"));
+  f.set("lr", popcorn::testing::sym("rcc_ll", "idle") | 1u);
+  idle_until(f, std::chrono::microseconds{10});
+  auto const pc   = f.target->regs().read(*f.target->regs().find("pc"));
+  auto const idle = popcorn::testing::sym("rcc_ll", "idle");
+  CHECK(pc >= idle);
+  CHECK(pc < idle + 16);
+  CHECK(f.field("RCC", "RCC_CFGR1", "SW") == 0);
+  CHECK(f.field("RCC", "RCC_CFGR1", "SWS") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1ON") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "PLL1RDY") == 0);
+  CHECK(f.field("RCC", "RCC_CR", "HSEON") == 0);
+  CHECK(probe(f).hz("sysclk") == 4 * mhz);
+  CHECK(probe(f).hz("hclk") == 4 * mhz);
+  CHECK(probe(f).hz("pll1_r") == 0);
+  CHECK(f.target->virtual_clock().core_hz() == 4 * mhz);
+  CHECK(warnings.empty());
 }
 
 TEST_CASE("RTCSEL locks once set and BDRST clears the backup domain until released")
@@ -668,10 +896,33 @@ TEST_CASE("every U575 instance with an RCC reset bit resolves it, the renamed on
                                                "GTZC2_TZIC",   "GTZC2_TZSC",   "ICache",
                                                "IWDG",         "PWR",          "RCC",
                                                "RTC",          "TAMP",         "WWDG"});
+  auto const described = [&](std::string_view field) {
+    return std::ranges::any_of(rcc.registers, [&](popcorn::register_desc const& reg) {
+      return reg.name.contains("RSTR")
+         and std::ranges::contains(reg.fields, field, &popcorn::field_desc::name);
+    });
+  };
+  auto renamed = std::size_t{};
   for(auto const& [instance, field] : stm32::reset_bit_names)
   {
     CAPTURE(instance);
     CHECK(stm32::reset_bit_name(instance) == field);
+    if(not described(field))
+    {
+      continue;
+    }
+    ++renamed;
+    auto const found = stm32::reset_bit_of(rcc, instance);
+    REQUIRE(found.has_value());
+    CHECK(found->field == field);
+  }
+  CHECK(renamed == 11);
+  for(auto const& [instance, field] : {
+          std::pair{"UCPD1",  "UCPD1RST" },
+          std::pair{"FDCAN1", "FDCAN1RST"}
+  })
+  {
+    CAPTURE(instance);
     auto const found = stm32::reset_bit_of(rcc, instance);
     REQUIRE(found.has_value());
     CHECK(found->field == field);
@@ -1015,4 +1266,22 @@ TEST_CASE("a model that is no bus reset listener gets reset with the peripheral 
   popcorn::testing::rcc_reset_write(f, "RCC_AHB1RSTR", "CRCRST", 0);
   REQUIRE(f.target->mem().write(desc.base + pol->offset, 4, 0x1021).has_value());
   CHECK(model->writes == 1);
+}
+
+TEST_CASE("coverage classifies RCC_CIER as served, the model reads its enables")
+{
+  stm32_fixture f{u575(), "rcc_ll", popcorn::testing::stm32_options()};
+  f.target->enable_coverage({}, true);
+  constexpr popcorn::address stub = 0x2000'0200;
+  REQUIRE(f.target->mem().write(stub, 4, 0xE7FE'6802).has_value());
+  auto const& regs = f.target->peripheral("RCC");
+  f.set(
+      "r0",
+      regs.description().base + popcorn::find_register(regs.description(), "RCC_CIER")->offset);
+  f.set("pc", stub | 1u);
+  auto const until = popcorn::vtime{f.target->virtual_clock().time().ps + 1'000'000};
+  auto const result =
+      f.target->run_slice({.max_instructions = popcorn::icount{1'000'000}, .until_time = until});
+  REQUIRE(result.stopped.has_value());
+  CHECK(f.target->coverage().unmodelled.empty());
 }

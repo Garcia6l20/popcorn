@@ -137,6 +137,19 @@ python/popcorn/stm32/data/STM32U575QGIx.json.xz:
     7d1f1514ed5583ec5007ad91236b4e1d377295b1
     License: BSD-3-Clause, see LICENSES/STM32_open_pin_data-LICENSE.
 
+python/popcorn/stm32/data/STM32H573AIIx.json.xz:
+  STM32H573.svd, version 1.7, Copyright (c) 2025 STMicroelectronics, from
+  STM32CubeCLT 1.20.0
+    License: Apache-2.0, see LICENSES/Apache-2.0.txt.
+  stm32h573xx.h, cmsis-device-h5 v1.7.0, Copyright (c) 2023 STMicroelectronics
+    https://github.com/STMicroelectronics/cmsis-device-h5
+    License: Apache-2.0, see LICENSES/Apache-2.0.txt.
+  mcu/STM32H573AIIx.xml and mcu/IP/GPIO-STM32H56x_gpio_v1_0_Modes.xml,
+  Copyright (c) 2026 STMicroelectronics
+    https://github.com/STMicroelectronics/STM32_open_pin_data, commit
+    7d1f1514ed5583ec5007ad91236b4e1d377295b1
+    License: BSD-3-Clause, see LICENSES/STM32_open_pin_data-LICENSE.
+
 Firmware-only packages. Fetched only when arm-none-eabi-gcc is found, compiled
 into the STM32 test and example firmware only, never linked into popcorn, its
 extension or its native test programs.

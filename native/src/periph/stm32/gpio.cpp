@@ -1,6 +1,7 @@
 #include "factories.hpp"
 #include "gtzc.hpp"
 #include "model_base.hpp"
+#include "pin_range.hpp"
 #include "trigger_signal.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -31,7 +32,24 @@ exti_input::~exti_input() = default;
 
 namespace
 {
-constexpr std::size_t   pins     = 16;
+constexpr std::size_t pins = 16;
+
+constexpr std::array<std::pair<std::string_view, std::string_view>, 12> pin_fields{
+    {
+     {"MODER", "MODE"},
+     {"OTYPER", "OT"},
+     {"OSPEEDR", "OSPEED"},
+     {"PUPDR", "PUPD"},
+     {"IDR", "ID"},
+     {"ODR", "OD"},
+     {"BSRR", "BS"},
+     {"BSRR", "BR"},
+     {"BRR", "BR"},
+     {"LCKR", "LCK"},
+     {"HSLVR", "HSLV"},
+     {"SECCFGR", "SEC"},
+     }
+};
 constexpr std::uint32_t edge_due = 0;
 constexpr std::uint8_t  released = 2;
 
@@ -68,20 +86,21 @@ struct listener_table
 };
 
 /**
- * @brief GPIO port of the STM32U5, RM0456 section 13. Pin levels follow the output register,
- *        external drives and pulls. BSRR and BRR set and reset outputs, a set wins over a reset
- *        of the same pin. The LCKR key sequence freezes the configuration of the locked pins
- *        until reset. Level changes reach board listeners, then the EXTI model. Edges
- *        scheduled with drive_at() apply through events on core::host_lane, kept in the state
- *        with their board time, rescheduled at every reset at the same instant. A pin in
- *        alternate function mode carries its level to the signal its AFSEL selects in the
- *        description's alternates, entries with a pin or AF above 15 ignored: every change of a
- *        signal's level, from a pin edge, a mode or AFSEL write or a pull, reaches the
- *        trigger_sink peers that take it from a pin, trigger_sink::takes_pin, at the time of the
- *        edge. A signal two pins of the port carry reads high when either does. Entries whose
- *        signal no peer takes are dropped once the peers exist, so a pin in USART, SPI or LPTIM
- *        alternate function mode costs a write nothing and reaches no ADC trigger of the same
- *        name.
+ * @brief GPIO port of the STM32U5 and STM32H5, RM0456 section 13 and RM0481 section 13. Pin levels
+ *        follow the output register, external drives and pulls. BSRR and BRR set and reset outputs,
+ *        a set wins over a reset of the same pin. A port the variant gives fewer than 16 pins, H5
+ *        port I with 12, has the per-pin fields of its pins only, the description checked at
+ *        attach, and its other pins read 0. The LCKR key sequence freezes the configuration of the
+ *        locked pins until reset. Level changes reach board listeners, then the EXTI model. Edges
+ *        scheduled with drive_at() apply through events on core::host_lane, kept in the state with
+ *        their board time, rescheduled at every reset at the same instant. A pin in alternate
+ *        function mode carries its level to the signal its AFSEL selects in the description's
+ *        alternates, entries with a pin or AF above 15 ignored: every change of a signal's level,
+ *        from a pin edge, a mode or AFSEL write or a pull, reaches the trigger_sink peers that take
+ *        it from a pin, trigger_sink::takes_pin, at the time of the edge. A signal two pins of the
+ *        port carry reads high when either does. Entries whose signal no peer takes are dropped
+ *        once the peers exist, so a pin in USART, SPI or LPTIM alternate function mode costs a
+ *        write nothing and reaches no ADC trigger of the same name.
  *
  *        TrustZone, RM0456 13.3.18 and Table 128: a Non-secure access reads the fields of a pin
  *        whose `GPIOx_SECCFGR` bit is set as 0 and cannot write them, in MODER, OTYPER,
@@ -99,7 +118,7 @@ class gpio final : public dispatch_model<gpio, gpio_state>,
                    public bus_reset_listener
 {
 public:
-  gpio(model_context& ctx, peripheral_desc const& desc);
+  gpio(model_context& ctx, peripheral_desc const& desc, gpio_variant const& variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -121,6 +140,7 @@ public:
       -> bus_guard;
 
   template <std::size_t Which> void config_written(std::uint32_t old, std::uint32_t now);
+  void                              afrh_written(std::uint32_t old, std::uint32_t now);
   void                              output_written(std::uint32_t old, std::uint32_t now);
   void                              input_written(std::uint32_t old, std::uint32_t now);
   void                              set_reset_written(std::uint32_t old, std::uint32_t now);
@@ -136,8 +156,13 @@ private:
   void               restore_reset_values();
   [[nodiscard]] auto routed() const -> std::vector<std::uint8_t>;
   void               route_pins();
-  void               forward();
-  auto               sinks() -> std::span<trigger_sink* const>;
+  void               check_pin(std::uint8_t pin) const;
+  [[nodiscard]] auto pin_count() const noexcept -> std::uint8_t override
+  {
+    return port_pins_;
+  }
+  void forward();
+  auto sinks() -> std::span<trigger_sink* const>;
 
   register_file&                                                         regs_;
   std::uint8_t                                                           port_;
@@ -146,6 +171,7 @@ private:
   std::array<field_ref, pins>                                            speed_{};
   std::array<field_ref, pins>                                            pull_{};
   std::array<field_ref, pins>                                            alternate_{};
+  std::uint8_t                                                           port_pins_{};
   std::array<field_ref, pins>                                            input_{};
   std::array<field_ref, pins>                                            output_{};
   std::array<field_ref, pins>                                            set_{};
@@ -172,68 +198,58 @@ private:
 
 constexpr std::array<write_entry<gpio>, 12> gpio_writes{
     {
-     {"GPIO_MODER", &gpio::config_written<0>},
-     {"GPIO_OTYPER", &gpio::config_written<1>},
-     {"GPIO_OSPEEDR", &gpio::config_written<2>},
-     {"GPIO_PUPDR", &gpio::config_written<3>},
-     {"GPIO_IDR", &gpio::input_written},
-     {"GPIO_ODR", &gpio::output_written},
-     {"GPIO_BSRR", &gpio::set_reset_written},
-     {"GPIO_LCKR", &gpio::lock_written},
-     {"GPIO_AFRL", &gpio::config_written<4>},
-     {"GPIO_AFRH", &gpio::config_written<5>},
-     {"GPIO_BRR", &gpio::reset_written},
-     {"GPIO_SECCFGR", nullptr},
+     {"MODER", &gpio::config_written<0>},
+     {"OTYPER", &gpio::config_written<1>},
+     {"OSPEEDR", &gpio::config_written<2>},
+     {"PUPDR", &gpio::config_written<3>},
+     {"IDR", &gpio::input_written},
+     {"ODR", &gpio::output_written},
+     {"BSRR", &gpio::set_reset_written},
+     {"LCKR", &gpio::lock_written},
+     {"AFRL", &gpio::config_written<4>},
+     {"BRR", &gpio::reset_written},
+     {"SECCFGR", nullptr},
+     {"AFRH", &gpio::afrh_written},
      }
 };
 
 constexpr std::array<write_entry<gpio>, 1> gpio_trustzone_writes{
     {
-     {"GPIO_HSLVR", nullptr},
+     {"HSLVR", nullptr},
      }
 };
 
-struct secure_reset
-{
-  std::string_view part_glob;
-  std::string_view port;
-  std::uint32_t    value{};
-};
-
-constexpr std::array<secure_reset, 2> secure_resets{
-    {
-     {.part_glob = "STM32U575*", .port = "GPIOI", .value = 0x00ff},
-     {.part_glob = "STM32U585*", .port = "GPIOI", .value = 0x00ff},
-     }
-};
-
-gpio::gpio(model_context& ctx, peripheral_desc const& desc)
+gpio::gpio(model_context& ctx, peripheral_desc const& desc, gpio_variant const& variant)
     : dispatch_model{ctx, desc, "GPIO", gpio_writes, gpio_trustzone_writes}, regs_{ctx.regs},
-      port_{static_cast<std::uint8_t>(desc.name.back() - 'A')},
-      lock_key_{field("GPIO_LCKR", "LCKK")}, secure_pins_{reg("GPIO_SECCFGR")},
-      secure_reset_{describe("GPIO_SECCFGR").reset}
+      port_{static_cast<std::uint8_t>(desc.name.back() - 'A')}, lock_key_{field("LCKR", "LCKK")},
+      secure_pins_{reg("SECCFGR")}, secure_reset_{describe("SECCFGR").reset}
 {
-  for(auto const& entry : secure_resets)
-  {
-    if(entry.port == desc.name and glob_match(entry.part_glob, ctx.part.part))
-    {
-      secure_reset_ = entry.value;
-    }
-  }
+  port_pins_ = desc.name.back() == variant.short_port ? variant.short_port_pins : pins;
+  expect_register("AFRH", true);
   for(std::size_t pin = 0; pin < pins; ++pin)
   {
+    auto const n       = std::to_string(pin);
+    auto const present = pin < port_pins_;
+    for(auto const& [reg_name, prefix] : pin_fields)
+    {
+      expect_field(reg_name, std::string{prefix} + n, present);
+    }
+    expect_field(pin < 8 ? "AFRL" : "AFRH", "AFSEL" + n, present);
+  }
+  for(std::size_t pin = 0; pin < port_pins_; ++pin)
+  {
     auto const n    = std::to_string(pin);
-    mode_[pin]      = field("GPIO_MODER", "MODE" + n);
-    type_[pin]      = field("GPIO_OTYPER", "OT" + n);
-    speed_[pin]     = field("GPIO_OSPEEDR", "OSPEED" + n);
-    pull_[pin]      = field("GPIO_PUPDR", "PUPD" + n);
-    alternate_[pin] = field(pin < 8 ? "GPIO_AFRL" : "GPIO_AFRH", "AFSEL" + n);
-    input_[pin]     = field("GPIO_IDR", "ID" + n);
-    output_[pin]    = field("GPIO_ODR", "OD" + n);
-    set_[pin]       = field("GPIO_BSRR", "BS" + n);
-    clear_[pin]     = field("GPIO_BSRR", "BR" + n);
-    brr_[pin]       = field("GPIO_BRR", "BR" + n);
-    lock_[pin]      = field("GPIO_LCKR", "LCK" + n);
+    mode_[pin]      = field("MODER", "MODE" + n);
+    type_[pin]      = field("OTYPER", "OT" + n);
+    speed_[pin]     = field("OSPEEDR", "OSPEED" + n);
+    pull_[pin]      = field("PUPDR", "PUPD" + n);
+    alternate_[pin] = field(pin < 8 ? "AFRL" : "AFRH", "AFSEL" + n);
+    input_[pin]     = field("IDR", "ID" + n);
+    output_[pin]    = field("ODR", "OD" + n);
+    set_[pin]       = field("BSRR", "BS" + n);
+    clear_[pin]     = field("BSRR", "BR" + n);
+    brr_[pin]       = field("BRR", "BR" + n);
+    lock_[pin]      = field("LCKR", "LCK" + n);
   }
   auto const add = [this](field_ref f, std::size_t pin) {
     auto found = std::ranges::find(pin_bits_, f.offset, &decltype(pin_bits_)::value_type::first);
@@ -244,7 +260,7 @@ gpio::gpio(model_context& ctx, peripheral_desc const& desc)
     }
     found->second[pin] |= f.mask();
   };
-  for(std::size_t pin = 0; pin < pins; ++pin)
+  for(std::size_t pin = 0; pin < port_pins_; ++pin)
   {
     for(auto const* fields :
         {&mode_, &type_, &speed_, &pull_, &alternate_, &input_, &output_, &set_, &clear_, &brr_,
@@ -252,7 +268,7 @@ gpio::gpio(model_context& ctx, peripheral_desc const& desc)
     {
       add((*fields)[pin], pin);
     }
-    add(field("GPIO_HSLVR", "HSLV" + std::to_string(pin)), pin);
+    add(field("HSLVR", "HSLV" + std::to_string(pin)), pin);
   }
   for(auto const& entry : desc.alternates.value_or(std::vector<alternate_desc>{}))
   {
@@ -365,6 +381,7 @@ void gpio::on_event(std::uint32_t kind, std::uint64_t payload)
 
 void gpio::drive_at(std::uint8_t pin, std::optional<bool> level, vtime at)
 {
+  check_pin(pin);
   auto const now  = ctx_.clock.time().ps;
   auto const base = board_base();
   if(at.ps < now)
@@ -645,6 +662,16 @@ template <std::size_t Which> void gpio::config_written(std::uint32_t old, std::u
   settle(true);
 }
 
+void gpio::afrh_written(std::uint32_t old, std::uint32_t now)
+{
+  if(port_pins_ <= pins / 2)
+  {
+    regs_.poke(reg("AFRH").offset, 0);
+    return;
+  }
+  config_written<5>(old, now);
+}
+
 void gpio::output_written(std::uint32_t, std::uint32_t)
 {
   settle(true);
@@ -763,7 +790,16 @@ auto gpio::guard(std::uint32_t word, access_ctx const& ctx, bool) const -> bus_g
 
 void gpio::drive(std::uint8_t pin, std::optional<bool> level)
 {
+  check_pin(pin);
   apply(pin, level);
+}
+
+void gpio::check_pin(std::uint8_t pin) const
+{
+  if(pin >= port_pins_)
+  {
+    throw config_error(desc_.name, 0, "pin", pin_range_text(port_pins_));
+  }
 }
 
 void gpio::apply(std::uint8_t pin, std::optional<bool> level)
@@ -789,14 +825,14 @@ auto gpio::on_change(std::move_only_function<void(std::uint8_t pin, bool level)>
 }
 }
 
-auto gpio_factory() -> model_factory
+auto gpio_factory(gpio_variant variant) -> model_factory
 {
-  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+  return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     if(not desc.name.starts_with("GPIO"))
     {
       return nullptr;
     }
-    return std::make_shared<gpio>(ctx, desc);
+    return std::make_shared<gpio>(ctx, desc, variant);
   };
 }
 }

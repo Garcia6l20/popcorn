@@ -19,6 +19,7 @@ private_dir = project_dir / "native" / "src" / "periph" / "stm32"
 periph_data = project_dir / "tests" / "data" / "periph"
 
 u575 = cached_st_description("STM32U575QGIx", "POPCORN_U575_DESC")
+h573 = cached_st_description("STM32H573AIIx", "POPCORN_H573_DESC")
 firmwares = {
     name: firmware("periph", name)
     for name in (
@@ -41,9 +42,18 @@ firmwares = {
         "rng_ll",
     )
 }
+h573_firmwares = {
+    name: firmware("periph", name)
+    for name in ("h573_boot_ll", "h573_rcc_ll", "h573_pwr_ll", "h573_flash_ll")
+}
+h573_env = {
+    "POPCORN_H573_DESC": str(h573),
+    **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in h573_firmwares.items()},
+}
 u575_env = {
     "POPCORN_U575_DESC": str(u575),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in firmwares.items()},
+    **h573_env,
     "POPCORN_MDF_VECTORS": str(periph_data / "mdf"),
     "POPCORN_FW_USB_CDC": str(
         project_dir / "examples" / "stm32u575" / "usb_cdc" / "prebuilt" / "usb_cdc.elf"
@@ -103,12 +113,14 @@ u575_programs = [
         ("stm32-adc", "test_adc.cpp"),
         ("stm32-dbgmcu", "test_dbgmcu.cpp"),
         ("stm32-crc", "test_crc.cpp"),
+        ("stm32-crs", "test_crs.cpp"),
         ("stm32-hash", "test_hash.cpp"),
         ("stm32-rng", "test_rng.cpp"),
         ("stm32-gtzc", "test_gtzc.cpp"),
         ("stm32-tz-aware", "test_tz_aware.cpp"),
         ("stm32-smc", "test_smc.cpp"),
         ("stm32-engine-counters", "test_engine_counters.cpp"),
+        ("stm32-h5-names", "test_h5_names.cpp"),
     )
 ]
 for program in u575_programs:
@@ -116,6 +128,127 @@ for program in u575_programs:
     for _, target in firmwares.values():
         if target is not None:
             program.depends(target)
+
+attach_h573 = add_doctest(
+    "stm32-attach-h573",
+    [here / "test_attach_h573.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+attach_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        attach_h573.depends(target)
+
+rcc_h573 = add_doctest(
+    "stm32-rcc-h573",
+    [here / "test_rcc_h573.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+rcc_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        rcc_h573.depends(target)
+
+power_h573 = add_doctest(
+    "stm32-power-h573",
+    [here / "test_power_h573.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+power_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        power_h573.depends(target)
+
+flash_h573 = add_doctest(
+    "stm32-flash-h573",
+    [here / "test_flash_h573.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+flash_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        flash_h573.depends(target)
+
+class_a_h573 = add_doctest(
+    "stm32-class-a-h573",
+    [here / "test_class_a_h573.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+class_a_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        class_a_h573.depends(target)
+
+gpdma_h573 = add_doctest(
+    "stm32-gpdma-h573",
+    [here / "test_gpdma_h573.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+gpdma_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        gpdma_h573.depends(target)
+
+adc_h573 = add_doctest(
+    "stm32-adc-h573",
+    [here / "test_adc_h573.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+adc_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        adc_h573.depends(target)
+
+hash_h573 = add_doctest(
+    "stm32-hash-h573",
+    [here / "test_hash_h573.cpp"],
+    static,
+    env=h573_env,
+    register=h573 is not None,
+)
+hash_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        hash_h573.depends(target)
+
+usb_drd_h573 = [
+    add_doctest(name, [here / source], static, env=h573_env, register=h573 is not None)
+    for name, source in (
+        ("stm32-usb-drd", "test_usb_drd.cpp"),
+        ("stm32-usb-drd-device", "test_usb_drd_device.cpp"),
+    )
+]
+for program in usb_drd_h573:
+    program.private.include_dirs.append(private_dir)
+    for _, target in h573_firmwares.values():
+        if target is not None:
+            program.depends(target)
+
+tim_spi_h573 = add_doctest(
+    "stm32-tim-spi-h573",
+    [here / "test_tim_spi_h573.cpp"],
+    static_with_devices,
+    env=h573_env,
+    register=h573 is not None,
+)
+tim_spi_h573.private.include_dirs.append(private_dir)
+for _, target in h573_firmwares.values():
+    if target is not None:
+        tim_spi_h573.depends(target)
 
 link_queues = add_doctest("stm32-link-queues", [here / "test_link_queues.cpp"], static)
 link_queues.private.include_dirs.append(project_dir / "native" / "src" / "bind")

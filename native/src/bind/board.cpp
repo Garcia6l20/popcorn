@@ -1,4 +1,5 @@
 #include "board.hpp"
+#include "../periph/stm32/pin_range.hpp"
 #include "gil_locks.hpp"
 #include "machine.hpp"
 
@@ -457,9 +458,9 @@ auto machine_handle::gpio(std::string const& peripheral, std::uint8_t pin) const
   {
     throw model_error(peripheral, "", 0);
   }
-  if(pin > 15)
+  if(pin >= port->pin_count())
   {
-    throw config_error(peripheral, 0, "pin", std::format("a pin from 0 to 15, not {}", pin));
+    throw config_error(peripheral, 0, "pin", periph::stm32::pin_range_text(port->pin_count()));
   }
   return *port;
 }
@@ -547,6 +548,11 @@ auto machine_handle::adc_input(std::string const& peripheral, std::uint8_t chann
 {
   return access(
       [&](core::machine& target) { return adc_input_body(analog(peripheral), channel)(target); });
+}
+
+auto machine_handle::adc_channels(std::string const& peripheral) const -> std::uint32_t
+{
+  return analog(peripheral).external_channels();
 }
 
 auto machine_handle::entropy(std::string const& peripheral) const -> periph::stm32::entropy_source&

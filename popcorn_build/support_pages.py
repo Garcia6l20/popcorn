@@ -34,10 +34,11 @@ def _memory(part: PartDescription, kind: str, name: str) -> int:
 
 
 def _models(part: PartDescription) -> dict[str, str]:
+    """Map each peripheral to its model column."""
     plain = {s.name: s for s in support(part)}
-    secured: dict[str, PeripheralSupport] = (
-        {s.name: s for s in support(part, trustzone=True)} if part.core.trustzone else plain
-    )
+    secured: dict[str, PeripheralSupport] = plain
+    if part.core.trustzone:
+        secured = {s.name: s for s in support(part, trustzone=True)}
     found: dict[str, str] = {}
     for name, entry in plain.items():
         if entry.model == "builtin":

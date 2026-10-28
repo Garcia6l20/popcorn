@@ -26,13 +26,16 @@ stm32 = [
         "sai.cpp",
         "mdf.cpp",
         "otg_fs.cpp",
+        "usb_drd.cpp",
         "adc.cpp",
         "dbgmcu.cpp",
         "crc.cpp",
+        "crs.cpp",
         "hash.cpp",
         "rng.cpp",
         "gtzc.cpp",
         "syscfg.cpp",
+        "sbs.cpp",
     )
 ]
 stm32_entry = here / "stm32" / "plugin.cpp"

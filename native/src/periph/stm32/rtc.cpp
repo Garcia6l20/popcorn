@@ -190,7 +190,8 @@ class rtc final : public dispatch_model<rtc, rtc_state>,
 public:
   rtc(model_context&                          ctx,
       peripheral_desc const&                  desc,
-      std::optional<std::chrono::sys_seconds> initial);
+      std::optional<std::chrono::sys_seconds> initial,
+      rtc_variant const&                      variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -304,7 +305,7 @@ private:
   std::uint32_t                                security_bits_{};
 };
 
-constexpr std::array<write_entry<rtc>, 24> rtc_writes{
+constexpr std::array<write_entry<rtc>, 23> rtc_writes{
     {
      {"TR", &rtc::time_written},          {"DR", &rtc::date_written},
      {"SSR", &rtc::plain_written},        {"ICSR", &rtc::status_written},
@@ -314,17 +315,18 @@ constexpr std::array<write_entry<rtc>, 24> rtc_writes{
      {"ALRMAR", &rtc::alarm_written},     {"ALRMASSR", &rtc::alarm_written},
      {"ALRMBR", &rtc::alarm_written},     {"ALRMBSSR", &rtc::alarm_written},
      {"SR", &rtc::plain_written},         {"MISR", &rtc::plain_written},
-     {"SCR", &rtc::clear_written},        {"PRIVCR", &rtc::security_written},
-     {"SECCFGR", &rtc::security_written}, {"ALRABINR", &rtc::plain_written},
-     {"ALRBBINR", &rtc::plain_written},   {"TSTR", &rtc::plain_written},
-     {"TSDR", &rtc::plain_written},       {"TSSSR", &rtc::plain_written},
+     {"SCR", &rtc::clear_written},        {"SECCFGR", &rtc::security_written},
+     {"ALRABINR", &rtc::plain_written},   {"ALRBBINR", &rtc::plain_written},
+     {"TSTR", &rtc::plain_written},       {"TSDR", &rtc::plain_written},
+     {"TSSSR", &rtc::plain_written},
      }
 };
 
 rtc::rtc(
     model_context&                          ctx,
     peripheral_desc const&                  desc,
-    std::optional<std::chrono::sys_seconds> initial)
+    std::optional<std::chrono::sys_seconds> initial,
+    rtc_variant const&                      variant)
     : dispatch_model{ctx, desc, "RTC", rtc_writes}, initial_{initial}, regs_{ctx.regs},
       time_{reg("TR")}, date_{reg("DR")}, subsecond_{reg("SSR")}, status_{reg("SR")},
       masked_{reg("MISR")}, clear_{reg("SCR")}, key_{reg("WPR")}, shift_{reg("SHIFTR")},
@@ -340,6 +342,7 @@ rtc::rtc(
       sub_hour_{field("CR", "SUB1H")}, reference_{field("CR", "REFCKON")},
       domain_{ctx.clock.domain("rtc")}, line_{irq("RTC_IRQn")}, security_{reg("SECCFGR")}
 {
+  bind(std::array<write_entry<rtc>, 1>{{{variant.privilege_register, &rtc::security_written}}});
   for(auto const& bits : describe("SECCFGR").fields)
   {
     security_bits_ |= field("SECCFGR", bits.name).mask();
@@ -1247,7 +1250,7 @@ class tamp final : public dispatch_model<tamp, tamp_state>,
                    public trustzone_aware
 {
 public:
-  tamp(model_context& ctx, peripheral_desc const& desc);
+  tamp(model_context& ctx, peripheral_desc const& desc, rtc_variant const& variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -1261,54 +1264,51 @@ public:
 private:
   void clear(register_file& regs);
 
-  bool                     security_logged_{};
-  std::optional<reg_ref>   security_;
-  std::optional<field_ref> tamper_;
-  std::optional<field_ref> counter_;
-  std::optional<field_ref> read_write_;
-  std::optional<field_ref> write_;
+  bool      security_logged_{};
+  reg_ref   security_;
+  field_ref tamper_;
+  field_ref counter_;
+  field_ref read_write_;
+  field_ref write_;
 };
 
-auto tamp_writes(peripheral_desc const& desc) -> std::vector<write_entry<tamp>>
+auto tamp_writes(peripheral_desc const& desc, rtc_variant const& variant)
+    -> std::vector<write_entry<tamp>>
 {
   std::vector<write_entry<tamp>> out;
   for(auto const& described : desc.registers)
   {
-    auto const security = described.name == "SECCFGR" or described.name == "PRIVCR";
+    auto const security =
+        described.name == "SECCFGR" or described.name == variant.privilege_register;
     out.push_back({described.name, security ? &tamp::security_written : &tamp::plain_written});
   }
   return out;
 }
 
-tamp::tamp(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "TAMP", tamp_writes(desc)}
+tamp::tamp(model_context& ctx, peripheral_desc const& desc, rtc_variant const& variant)
+    : dispatch_model{ctx, desc, "TAMP", tamp_writes(desc, variant)}, security_{reg("SECCFGR")},
+      tamper_{field("SECCFGR", "TAMPSEC")}, counter_{field("SECCFGR", "CNT1SEC")},
+      read_write_{field("SECCFGR", "BKPRWSEC")}, write_{field("SECCFGR", "BKPWSEC")}
 {
-  if(has_register("SECCFGR"))
-  {
-    security_   = reg("SECCFGR");
-    tamper_     = field("SECCFGR", "TAMPSEC");
-    counter_    = field("SECCFGR", "CNT1SEC");
-    read_write_ = field("SECCFGR", "BKPRWSEC");
-    write_      = field("SECCFGR", "BKPWSEC");
-  }
+  expect_register(variant.privilege_register, true);
 }
 
 auto tamp::secure_word() const -> std::uint32_t
 {
-  return ctx_.trustzone and security_ ? ctx_.regs.peek(security_->offset) : 0;
+  return ctx_.trustzone ? ctx_.regs.peek(security_.offset) : 0;
 }
 
 auto tamp::secure_function() const -> bool
 {
   auto const word = secure_word();
-  if(not security_ or word == 0)
+  if(word == 0)
   {
     return false;
   }
-  return tamper_->of(word) != 0
-      or counter_->of(word) != 0
-      or read_write_->of(word) != 0
-      or write_->of(word) > read_write_->of(word);
+  return tamper_.of(word) != 0
+      or counter_.of(word) != 0
+      or read_write_.of(word) != 0
+      or write_.of(word) > read_write_.of(word);
 }
 
 void tamp::clear(register_file& regs)
@@ -1349,17 +1349,19 @@ void tamp::security_written(std::uint32_t, std::uint32_t)
 }
 }
 
-auto rtc_factory(std::optional<std::chrono::sys_seconds> initial) -> model_factory
+auto rtc_factory(std::optional<std::chrono::sys_seconds> initial, rtc_variant variant)
+    -> model_factory
 {
-  return [initial](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<rtc>(ctx, desc, initial);
+  return [initial,
+          variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<rtc>(ctx, desc, initial, variant);
   };
 }
 
-auto tamp_factory() -> model_factory
+auto tamp_factory(rtc_variant variant) -> model_factory
 {
-  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<tamp>(ctx, desc);
+  return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<tamp>(ctx, desc, variant);
   };
 }
 }

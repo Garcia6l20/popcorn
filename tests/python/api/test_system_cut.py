@@ -46,7 +46,7 @@ FE_ENTRY = LINK_ERROR << 16 | 1
 CYCLES_PER_FRAME = 3470
 STOP_SAMPLE = 153 / 160
 FRAME_PS = 10 * 10**12 / FIRMWARE_BAUD
-WINDOW = (at(600), at(1050))
+WINDOW = (at(500), at(950))
 
 Outcome = tuple[tuple[TapFrame, ...], tuple[int, ...]]
 Seen = list[tuple[VirtualTime, VirtualTime]]
@@ -159,16 +159,16 @@ def receiver_outcome(system: System, until: float = 3000) -> Outcome:
 
 def owner_paused_cut(system: System) -> tuple[Seen, Outcome]:
     """a receives b's frames over a 50 us link and owns it. Inside `system.running()`, a's
-    wait to 525 us makes a goal-stop pause with b ahead to 550 us, its frame 10 started at
-    542.4 us. a's interrupts break the line at the first one at or after 525 us, frame 6's at
-    527.3 us, and restore it at the next, the IDLE the cut gives."""
+    wait to 425 us makes a goal-stop pause with b ahead to 450 us, its frame 10 started at
+    441.1 us. a's interrupts break the line at the first one at or after 425 us, frame 6's at
+    426.1 us, and restore it at the next, the IDLE the cut gives."""
     a = system.members["a"]
     tap = system.tap("a.USART1")
     seen: Seen = []
 
     def on_irq(call: Call) -> Return:
         own = system.to_system("a", a.time)
-        if not seen and own >= at(525):
+        if not seen and own >= at(425):
             seen.append((tap.break_line(), own))
         elif len(seen) == 1:
             seen.append((tap.restore_line(), own))
@@ -178,7 +178,7 @@ def owner_paused_cut(system: System) -> tuple[Seen, Outcome]:
 
     async def free() -> None:
         async with system.running():
-            await a.elapse(us(525))
+            await a.elapse(us(425))
             await a.elapse(us(900))
 
     asyncio.run(free())
@@ -194,7 +194,7 @@ def test_break_and_restore_from_the_owner_s_intercepts_take_its_system_time(
     assert len(seen) == 2
     assert all(returned == own for returned, own in seen)
     (start, _), (end, _) = seen
-    assert at(700) < start < end < at(1100)
+    assert at(600) < start < end < at(1000)
     assert done == scheduled(pair, (1_000_000, None), start, end)
     frames, _ = done
     assert any(f.cut for f in frames)
@@ -234,7 +234,7 @@ def paused_owner_legs(u575: popcorn.PartDescription, made: list[System]) -> None
     assert len(seen) == 2
     assert all(returned == own for returned, own in seen)
     (start, _), (end, _) = seen
-    assert at(525) <= start < at(530)
+    assert at(425) <= start < at(430)
     reference = wide_pair(u575, made, (1_000_000, None))
     reference.tap("a.USART1").cut(start, end)
     assert done == receiver_outcome(reference)
@@ -521,8 +521,8 @@ def snapshot_run(system: System, restored: popcorn.SystemSnapshot | None) -> Out
     tap = system.tap("a.USART1")
     if restored is not None:
         system.restore(restored)
-    asyncio.run(to(system, at(1000)))
-    assert tap.restore_line() == at(1000)
+    asyncio.run(to(system, at(905)))
+    assert tap.restore_line() == at(905)
     return finish(system)
 
 
@@ -531,8 +531,8 @@ def test_an_open_cut_is_in_a_snapshot_and_the_owner_is_kept_across_a_restore(
 ) -> None:
     system = pair()
     tap = system.tap("a.USART1")
-    asyncio.run(to(system, at(500)))
-    assert tap.break_line() == at(500)
+    asyncio.run(to(system, at(400)))
+    assert tap.break_line() == at(400)
     saved = system.snapshot()
     tap.frames()
     first = snapshot_run(system, None)
@@ -549,14 +549,14 @@ def test_a_cut_window_stays_in_system_time_across_a_receiver_reset(pair: Build) 
         system = pair()
         tap = system.tap("a.USART1")
         tap.cut(*WINDOW)
-        asyncio.run(to(system, at(700)))
+        asyncio.run(to(system, at(600)))
         if reset:
             system.reset("b", ResetKind.SOFTWARE)
             b = system.members["b"]
             b.reg.pc = b.sym("link_rx")
-        tap.cut(at(1200), at(1300))
+        tap.cut(at(1095), at(1195))
         asyncio.run(to(system, at(3000)))
-        return [(f.index, f.cut, f.lost) for f in tap.frames()], system.to_local("b", at(1200))
+        return [(f.index, f.cut, f.lost) for f in tap.frames()], system.to_local("b", at(1095))
 
     plain, plain_local = run(False)
     reset, reset_local = run(True)
@@ -648,24 +648,24 @@ def test_refused_changes_leave_the_link_usable(pair: Build) -> None:
         tap.break_line(line=cast(popcorn.LineState, 1))
     with pytest.raises(ValueError, match="no cut is open"):
         tap.restore_line()
-    tap.cut(at(590), at(800))
-    with pytest.raises(ValueError, match=r"overlaps the cut \[t=590000000 ps, t=800000000 ps\)"):
-        tap.cut(at(700), at(900))
-    with pytest.raises(ValueError, match=r"overlaps the cut \[t=590000000 ps"):
+    tap.cut(at(490), at(700))
+    with pytest.raises(ValueError, match=r"overlaps the cut \[t=490000000 ps, t=700000000 ps\)"):
+        tap.cut(at(600), at(800))
+    with pytest.raises(ValueError, match=r"overlaps the cut \[t=490000000 ps"):
         tap.break_line()
     with pytest.raises(TypeError, match="owner must be a str"):
         tap.owner = cast(str, 1)
     with pytest.raises(ValueError, match="'c' is no member"):
         tap.owner = "c"
     assert tap.owner == "a"
-    asyncio.run(to(system, at(900)))
+    asyncio.run(to(system, at(800)))
     opened = tap.break_line()
     assert opened == max(system.time_of("a"), system.time_of("b"))
     with pytest.raises(ValueError, match=rf"the cut from t={opened.ps} ps is open"):
         tap.break_line()
     with pytest.raises(ValueError, match=rf"overlaps the cut open from t={opened.ps} ps"):
         tap.cut(at(2000), at(2100))
-    asyncio.run(to(system, at(1000)))
+    asyncio.run(to(system, at(900)))
     assert tap.restore_line() == max(system.time_of("a"), system.time_of("b"))
     b = system.members["b"]
 
@@ -678,7 +678,7 @@ def test_refused_changes_leave_the_link_usable(pair: Build) -> None:
 
     asyncio.run(free())
     assert tap.owner == "a"
-    tap.cut(at(1900), at(2300))
+    tap.cut(at(1800), at(2200))
     asyncio.run(to(system, at(3000)))
     frames = tap.frames()
     for towards in ("a.USART1", "b.USART1"):

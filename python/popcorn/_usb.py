@@ -1,9 +1,10 @@
 """The virtual USB host of a device controller: cable, enumeration, descriptors, control
 requests, CDC ACM streams, HID functions and USB Audio 2.0 functions, in virtual time.
 
-`Periph(host=UsbHostOptions())` on OTG_FS in the machine description plugs a full-speed host into
-the controller, `machine.periph.OTG_FS.host` is its `UsbHost`. Everything below Python runs in
-model events: no Python call per transaction.
+`Periph(host=UsbHostOptions())` on a USB device controller in the machine description, OTG_FS on
+the STM32U5 or USB on the STM32H5, plugs a full-speed host into the controller, and
+`machine.periph.OTG_FS.host` or `machine.periph.USB.host` is its `UsbHost`. Everything below
+Python runs in model events: no Python call per transaction.
 
 Example:
     host = machine.periph.OTG_FS.host
@@ -22,6 +23,8 @@ Time model:
       after that NAK ends, as long as its transaction fits before the next SOF.
     - A newly opened isochronous pipe sends its first packet 2 frames later, as Linux does.
       An interrupt pipe is first polled in the next frame.
+    - After each bus reset ends the host sends only SOFs for 10 ms, the USB 2.0 7.1.7.5 reset
+      recovery, then its next transaction.
     - The same writes at the same virtual times give the same transactions at the same times.
 
 Snapshots:

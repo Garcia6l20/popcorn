@@ -17,7 +17,7 @@
 namespace popcorn::core
 {
 /** @brief Version of the snapshot_data layout, stamped by the machine and checked on restore. */
-inline constexpr std::uint32_t snapshot_format_version = 7;
+inline constexpr std::uint32_t snapshot_format_version = 8;
 
 /** @brief Opaque state saved by one owner: the arch module or one peripheral model. */
 struct snapshot_part
@@ -74,14 +74,12 @@ struct peripheral_image
   std::vector<std::uint8_t> irq_levels{};
   /** @brief Level of each `periph::dma_request`, in description order, 1 when active. */
   std::vector<std::uint8_t> dma_levels{};
-  /** @brief Level of the peripheral's `periph::model_context::nmi` line, 1 when active. A save
-   * from before the NMI line loads it as 0. */
+  /** @brief Level of the peripheral's `periph::model_context::nmi` line, 1 when active. */
   std::uint8_t nmi_level{};
   /** @brief Write-once lock bit of each word, bit `i % 32` of element `i / 32` for word `i`, set
    * after the first write since reset. Empty for a peripheral without write-once registers. */
   std::vector<std::uint32_t> write_locked{};
-  /** @brief 1 while the peripheral is held in a bus reset, machine_services::hold_in_reset(). A
-   * save from before format 6 loads it as 0, nothing held. */
+  /** @brief 1 while the peripheral is held in a bus reset, machine_services::hold_in_reset(). */
   std::uint8_t held_in_reset{};
 
   /** @brief Member-wise equality. */
@@ -96,7 +94,7 @@ struct scheduler_state
   std::vector<event> pending{};
   /** @brief Sequence number the next schedule returns. */
   std::uint64_t next_seq{};
-  /** @brief Lane sequence numbers handed out, 0 in saves before lanes existed. */
+  /** @brief Lane sequence numbers handed out. */
   std::uint64_t next_lane_seq{};
 
   /** @brief Member-wise equality. */
@@ -168,13 +166,11 @@ struct snapshot_data
   std::string config_digest{};
   /** @brief Machine generation when the snapshot was taken. */
   std::uint64_t generation{};
-  /** @brief `machine_options::trustzone` of the machine that took the snapshot. Absent from saves
-   * before it existed, which load as false. A restore into a machine with another value is
-   * refused. */
+  /** @brief `machine_options::trustzone` of the machine that took the snapshot. A restore into a
+   * machine with another value is refused. */
   bool trustzone{};
   /** @brief `machine_options::idau` of the machine that took the snapshot, empty without
-   * TrustZone and in saves before it existed. A restore into a machine with other ranges is
-   * refused. */
+   * TrustZone. A restore into a machine with other ranges is refused. */
   std::vector<idau_region> idau{};
   /** @brief Every mapped RAM and flash region, in description order, then the scratch region of
    * `machine_options::scratch`. MMIO is not memory. */
@@ -195,14 +191,13 @@ struct snapshot_data
   std::vector<intercept_state> intercepts{};
   /** @brief Return hook counters and calls in flight. */
   std::vector<return_hook_state> return_hooks{};
-  /** @brief Whether the core was held, `machine::core_held()`. Absent from saves before it
-   * existed, which load as not held. */
+  /** @brief Whether the core was held, `machine::core_held()`. */
   bool core_held{};
-  /** @brief machine::held_through(), absent from saves before it existed, which load as none. */
+  /** @brief machine::held_through(). */
   std::optional<icount> held_through{};
-  /** @brief machine::executed(), absent from saves before it existed, which load as 0. */
+  /** @brief machine::executed(). */
   icount executed{};
-  /** @brief machine::reset_pending(), absent from saves before it existed, which load as none. */
+  /** @brief machine::reset_pending(). */
   std::optional<reset_kind> reset_pending{};
 
   /** @brief Member-wise equality. */
@@ -261,16 +256,9 @@ POPCORN_API auto encode_snapshot(snapshot_data const& data) -> std::vector<std::
 /**
  * @brief Reads back bytes encode_snapshot() wrote.
  * @param bytes Serialized content.
- * @return The content, format snapshot_format_version. Formats 2 to 6 are also read.
- *         Format 2, the layout before virtual-time events: its events load as
- *         deadline::instructions, their meaning then. Format 3, the layout before the clock
- *         hold: its clock loads with nothing held, clock_state::held and held_time 0, as every
- *         format 3 machine ran. Format 4, the layout before event lanes: its events load in
- *         lane 0, the only lane then, with no lane sequence number handed out. Format 5, the
- *         layout before bus resets: its peripherals load with none held in reset. Format 6,
- *         the layout before the pending reset request: it loads with none pending.
+ * @return The content, format snapshot_format_version.
  * @throws config_error when @p bytes is malformed or its format is not
- *         snapshot_format_version or 2 to 6.
+ *         snapshot_format_version.
  */
 POPCORN_API auto decode_snapshot(std::span<std::byte const> bytes) -> snapshot_data;
 }

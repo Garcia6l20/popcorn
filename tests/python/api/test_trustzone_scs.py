@@ -1,42 +1,22 @@
-"""TrustZone system space: the SAU slice stop and snapshots across the TrustZone change."""
+"""TrustZone system space: the SAU slice stop and TrustZone snapshots."""
 
 from __future__ import annotations
 
 import asyncio
-import gzip
 import struct
-from pathlib import Path
 
 import popcorn
 import pytest
 from popcorn import OptionBytes, Snapshot, StopReason
 from popcorn.units import ms
 
-ROOT = Path(__file__).parents[3]
-SCS_ELF = ROOT / "tests" / "firmware" / "arch" / "prebuilt" / "scs.elf"
-RCC_ELF = ROOT / "tests" / "firmware" / "periph" / "prebuilt" / "rcc_ll.elf"
-SAVE_BEFORE_TRUSTZONE = ROOT / "tests" / "data" / "core" / "scs_before_trustzone.bson.gz"
+from .conftest import TzPart
 
 CODE = 0x2008_0000
 SAU_CTRL = 0xE000_EDD0
 SAU_RNR = 0xE000_EDD8
 SAU_RBAR = 0xE000_EDDC
 SAU_RLAR = 0xE000_EDE0
-SCS_REGISTERS = (
-    0xE000_ED08,
-    0xE000_ED0C,
-    0xE000_ED10,
-    0xE000_ED14,
-    0xE000_ED18,
-    0xE000_ED1C,
-    0xE000_ED20,
-    0xE000_ED24,
-    0xE000_ED88,
-    0xE000_ED94,
-    0xE000_EF34,
-    0xE000_E100,
-    0xE000_E400,
-)
 CORE_REGISTERS = (
     "r0",
     "r1",
@@ -67,44 +47,12 @@ SAU_LOOP = (
 )
 
 
-def scs_machine(m33: popcorn.PartDescription) -> popcorn.Machine:
-    return popcorn.Machine(m33, image=popcorn.Image.elf(SCS_ELF))
-
-
-def state_of(m: popcorn.Machine) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    return (
-        tuple(int(getattr(m.reg, name)) for name in CORE_REGISTERS),
-        tuple(m.mem.u32[at] for at in SCS_REGISTERS),
-    )
-
-
-def test_a_save_from_before_trustzone_restores_as_a_save_taken_today(
-    m33: popcorn.PartDescription,
-) -> None:
-    """P7: the arch state of a format 5 save from before TrustZone decodes with the Secure bank
-    only, TZEN=0, and runs on as a save of the same point taken by this build."""
-    old = scs_machine(m33)
-    old.restore(Snapshot.from_bytes(gzip.decompress(SAVE_BEFORE_TRUSTZONE.read_bytes())))
-    new = scs_machine(m33)
-    new.reset()
-    assert asyncio.run(new.run(budget=2_000_000)).reason is StopReason.USER
-    assert state_of(old) == state_of(new)
-    stops: list[tuple[StopReason, int]] = []
-    for m in (old, new):
-        m.reg.pc = m.sym("scs_run")
-        stop = asyncio.run(m.run(budget=1_000_000))
-        stops.append((stop.reason, stop.pc))
-    assert stops[0] == stops[1]
-    assert stops[0][0] is StopReason.USER
-    assert state_of(old) == state_of(new)
-
-
-def sau_loop(u575: popcorn.PartDescription, running: bool) -> tuple[int, int, StopReason]:
+def sau_loop(tz: TzPart, running: bool) -> tuple[int, int, StopReason]:
     """A self-chained Secure loop that stores SAU_RLAR at iteration 10, making its own page
     Non-secure. Returns the stop PC, r3 and the reason, parked or free."""
     m = popcorn.Machine(
-        u575,
-        image=popcorn.Image.elf(RCC_ELF),
+        tz.description,
+        image=popcorn.Image.elf(tz.rcc_elf),
         option_bytes=OptionBytes(tzen=True),
         slice_instructions=1_000_000,
         slice_wall_budget=1.0,
@@ -136,8 +84,8 @@ def sau_loop(u575: popcorn.PartDescription, running: bool) -> tuple[int, int, St
 
 
 @pytest.fixture(scope="module")
-def parked_sau_loop(u575: popcorn.PartDescription) -> tuple[int, int, StopReason]:
-    return sau_loop(u575, False)
+def parked_sau_loop(tz: TzPart) -> tuple[int, int, StopReason]:
+    return sau_loop(tz, False)
 
 
 def test_a_sau_write_faults_the_next_fetch_of_the_page_it_denies(
@@ -150,23 +98,25 @@ def test_a_sau_write_faults_the_next_fetch_of_the_page_it_denies(
 
 @pytest.mark.parametrize("repeat", range(20))
 def test_a_sau_write_faults_at_the_same_instruction_parked_and_running(
-    u575: popcorn.PartDescription,
+    tz: TzPart,
     parked_sau_loop: tuple[int, int, StopReason],
     repeat: int,
 ) -> None:
     del repeat
-    assert sau_loop(u575, True) == parked_sau_loop
+    assert sau_loop(tz, True) == parked_sau_loop
 
 
 def test_a_tzen_1_save_is_refused_by_a_tzen_0_machine_with_the_same_config_digest(
-    u575: popcorn.PartDescription,
+    tz: TzPart,
 ) -> None:
     """R-04 n7: the save records TrustZone and the IDAU, a restore across them is refused before
     anything changes, key trustzone."""
     secure = popcorn.Machine(
-        u575, image=popcorn.Image.elf(RCC_ELF), option_bytes=OptionBytes(tzen=True)
+        tz.description, image=popcorn.Image.elf(tz.rcc_elf), option_bytes=OptionBytes(tzen=True)
     )
-    plain = popcorn.Machine(u575, image=popcorn.Image.elf(RCC_ELF), option_bytes=OptionBytes())
+    plain = popcorn.Machine(
+        tz.description, image=popcorn.Image.elf(tz.rcc_elf), option_bytes=OptionBytes()
+    )
     secure.reset()
     plain.reset()
     theirs = Snapshot.from_bytes(secure.snapshot().to_bytes())
@@ -190,10 +140,10 @@ MPCBB1_SECCFGR0 = 0x5003_2D00
 SplitState = tuple[tuple[int, ...], int, bytes, int]
 
 
-def split_page_machine(u575: popcorn.PartDescription) -> popcorn.Machine:
+def split_page_machine(tz: TzPart) -> popcorn.Machine:
     m = popcorn.Machine(
-        u575,
-        image=popcorn.Image.elf(RCC_ELF),
+        tz.description,
+        image=popcorn.Image.elf(tz.rcc_elf),
         option_bytes=OptionBytes(tzen=True),
         slice_instructions=1_000_000,
         slice_wall_budget=1.0,
@@ -223,14 +173,12 @@ def to_breakpoint(m: popcorn.Machine, running: bool) -> None:
         assert asyncio.run(m.run(budget=1_000_000)).reason is StopReason.USER
 
 
-def split_page_restore(
-    u575: popcorn.PartDescription, running: bool
-) -> tuple[SplitState, SplitState]:
+def split_page_restore(tz: TzPart, running: bool) -> tuple[SplitState, SplitState]:
     """A Secure loop in a page an SAU region splits runs from its cached block, is saved, then
     its code and its MPCBB block change and the changed loop runs before the restore. Returns the
     state at the loop's breakpoint after the restore, parked or free, and that of a fresh machine
     restored from the save's bytes, parked."""
-    m = split_page_machine(u575)
+    m = split_page_machine(tz)
     m.mem.write(SPLIT_CODE, struct.pack(f"<{len(SPLIT_LOOP)}H", *SPLIT_LOOP))
     m.mem.u32[SAU_RNR] = 0
     m.mem.u32[SAU_RBAR] = SPLIT_HOLE
@@ -246,15 +194,15 @@ def split_page_restore(
     assert asyncio.run(m.run(budget=300)).reason is StopReason.BUDGET
     m.restore(saved)
     to_breakpoint(m, running)
-    fresh = split_page_machine(u575)
+    fresh = split_page_machine(tz)
     fresh.restore(Snapshot.from_bytes(saved.to_bytes()))
     to_breakpoint(fresh, False)
     return split_page_state(m), split_page_state(fresh)
 
 
 @pytest.fixture(scope="module")
-def parked_split_page_restore(u575: popcorn.PartDescription) -> tuple[SplitState, SplitState]:
-    return split_page_restore(u575, False)
+def parked_split_page_restore(tz: TzPart) -> tuple[SplitState, SplitState]:
+    return split_page_restore(tz, False)
 
 
 def test_a_restore_over_a_changed_split_page_runs_as_a_fresh_machine_from_the_save(
@@ -270,9 +218,9 @@ def test_a_restore_over_a_changed_split_page_runs_as_a_fresh_machine_from_the_sa
 
 @pytest.mark.parametrize("repeat", range(20))
 def test_a_restore_over_a_changed_split_page_runs_the_same_parked_and_running(
-    u575: popcorn.PartDescription,
+    tz: TzPart,
     parked_split_page_restore: tuple[SplitState, SplitState],
     repeat: int,
 ) -> None:
     del repeat
-    assert split_page_restore(u575, True) == parked_split_page_restore
+    assert split_page_restore(tz, True) == parked_split_page_restore

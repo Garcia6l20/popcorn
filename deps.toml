@@ -30,6 +30,20 @@ version = "1.4.2"
 build = "none"
 firmware = true
 
+[packages.stm32h5-hal-driver]
+url = "https://github.com/STMicroelectronics/stm32h5xx-hal-driver/archive/refs/tags/v1.7.0.tar.gz"
+sha256 = "dacce4aff19bb0c3fb462518afc35c3d7a018bf5696b513e1091702ebd458636"
+version = "1.7.0"
+build = "none"
+firmware = true
+
+[packages.cmsis-device-h5]
+url = "https://github.com/STMicroelectronics/cmsis-device-h5/archive/refs/tags/v1.7.0.tar.gz"
+sha256 = "f6b1e63f81cec1b118bce43154b07ca057708d0a06ff687423fa552f06d88189"
+version = "1.7.0"
+build = "none"
+firmware = true
+
 [packages.cmsis-core]
 url = "https://github.com/ARM-software/CMSIS_5/archive/refs/tags/5.9.0.tar.gz"
 sha256 = "9ce693dd15c41f02506adda79323c077912b3211303ca0d9b28b8ebe735a7031"

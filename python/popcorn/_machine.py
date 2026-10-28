@@ -1035,9 +1035,7 @@ class Machine:
         """Instructions the core executed since reset, without the time it slept in WFI or WFE
         or was halted: `instructions - executed` is that time, one per core clock cycle. A
         linked member counts what it executes in its own goals and in system runs, nothing while
-        halted. Every reset kind zeroes it, `snapshot` saves it and `restore` gives it back. A
-        snapshot from before it existed restores it as 0, and the difference is then not that
-        time.
+        halted. Every reset kind zeroes it, `snapshot` saves it and `restore` gives it back.
 
         Raises:
             MachineRunning: The machine is busy.

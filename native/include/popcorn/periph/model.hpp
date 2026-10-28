@@ -22,6 +22,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace popcorn::periph
@@ -87,6 +88,22 @@ public:
    * @return Register names.
    */
   [[nodiscard]] virtual auto claims() const -> std::vector<std::string> = 0;
+
+  /**
+   * @brief Byte ranges of the peripheral the model serves besides its registers, a packet memory
+   *        for instance: every access inside them reaches on_read() and on_write(). Called once,
+   *        when the model is attached to its peripheral. The machine refuses the model with
+   *        config_error at attach for a range not word aligned, with first above last, past the
+   *        peripheral's size, or over a description register the model does not claim.
+   * @return Pairs of word-aligned offsets from the peripheral base, first included, last
+   *         excluded, inside the peripheral's size. A word of a range that holds a register of
+   *         the description holds one the model claims. None by default.
+   */
+  [[nodiscard]] virtual auto served_ranges() const
+      -> std::vector<std::pair<std::uint32_t, std::uint32_t>>
+  {
+    return {};
+  }
 
   /**
    * @brief Whether a CPU write to this model can change the core clock rate. The machine then

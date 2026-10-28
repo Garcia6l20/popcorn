@@ -4,6 +4,7 @@ from pcons import context
 
 from popcorn_build.config import project_dir
 from popcorn_build.firmware import firmware
+from popcorn_build.st_description import cached_st_description
 from popcorn_build.testing import add_doctest, popcorn_libraries
 
 here = Path(__file__).resolve().parent
@@ -12,6 +13,7 @@ core = project.get_target("popcorn_core")
 core_static = project.get_target("popcorn_core_static")
 test_support = project.get_target("popcorn-test-support")
 toy = str(project_dir / "tests" / "data" / "desc" / "toy.json")
+u575 = cached_st_description("STM32U575QGIx", "POPCORN_U575_DESC")
 
 add_doctest(
     "periph-interfaces",
@@ -61,6 +63,7 @@ test_shared_page = add_doctest(
             project_dir / "tests" / "data" / "core" / "m33_shared_page.json"
         ),
         "POPCORN_FW_PERIPH": str(periph_elf),
+        **({"POPCORN_U575_DESC": str(u575)} if u575 is not None else {}),
     },
 )
 if periph_firmware is not None:

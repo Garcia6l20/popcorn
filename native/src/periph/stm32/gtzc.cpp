@@ -25,45 +25,6 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-struct rename
-{
-  std::string_view stem;
-  std::string_view peripheral;
-};
-
-constexpr std::array<rename, 10> renames{
-    {
-     {"USART4", "UART4"},
-     {"ICACHE", "ICache"},
-     {"ICACHE_REG", "ICache"},
-     {"DCACHE_REG", "DCACHE"},
-     {"OTGFS", "OTG_FS"},
-     {"FSMC", "FMC"},
-     {"FSMC_REG", "FMC"},
-     {"OCTOSPI1_REG", "OCTOSPI1"},
-     {"OCTOSPI2_REG", "OCTOSPI2"},
-     {"FLASH_REG", "FLASH"},
-     }
-};
-
-struct companion
-{
-  std::string_view primary;
-  std::string_view also;
-};
-
-constexpr std::array<companion, 7> companions{
-    {
-     {"DCMI", "PSSI"},
-     {"ADC1", "ADC12"},
-     {"FDCAN1", "FDCAN1_RAM"},
-     {"SDMMC1", "DLYBSD1"},
-     {"SDMMC2", "DLYBSD2"},
-     {"OCTOSPI1", "DLYBOS1"},
-     {"OCTOSPI2", "DLYBOS2"},
-     }
-};
-
 constexpr std::array<std::string_view, 2> memory_stems{"FLASH", "BKPSRAM"};
 
 struct watermark_memory
@@ -107,9 +68,11 @@ auto unit_named(part_description const& part, std::string_view name) -> std::opt
 
 namespace
 {
-auto unit_of_stem(part_description const& part, std::string_view stem) -> std::optional<std::size_t>
+auto unit_of_stem(part_description const& part, gtzc_variant variant, std::string_view stem)
+    -> std::optional<std::size_t>
 {
-  if(auto const renamed = std::ranges::find(renames, stem, &rename::stem); renamed != renames.end())
+  if(auto const renamed = std::ranges::find(variant.renames, stem, &gtzc_rename::stem);
+     renamed != variant.renames.end())
   {
     return unit_named(part, renamed->peripheral);
   }
@@ -135,17 +98,18 @@ auto unit_of_stem(part_description const& part, std::string_view stem) -> std::o
   return unit_named(part, stem);
 }
 
-auto units_of_stem(part_description const& part, std::string_view stem) -> std::vector<std::size_t>
+auto units_of_stem(part_description const& part, gtzc_variant variant, std::string_view stem)
+    -> std::vector<std::size_t>
 {
   std::vector<std::size_t> out;
   if(memory_stem(stem))
   {
     return out;
   }
-  if(auto const primary = unit_of_stem(part, stem))
+  if(auto const primary = unit_of_stem(part, variant, stem))
   {
     out.push_back(*primary);
-    for(auto const& tie : companions)
+    for(auto const& tie : variant.companions)
     {
       if(tie.primary == part.peripherals[*primary].name)
       {
@@ -449,7 +413,8 @@ struct securable
 class tzsc final : public gtzc_block, public bus_firewall, public peripheral_security
 {
 public:
-  tzsc(model_context& ctx, peripheral_desc const& desc) : gtzc_block{ctx, desc, "GTZC TZSC"}
+  tzsc(model_context& ctx, peripheral_desc const& desc, gtzc_variant variant)
+      : gtzc_block{ctx, desc, "GTZC TZSC"}, variant_{variant}
   {
     claim("CR");
     lock_ = field("CR", "LCK");
@@ -1028,7 +993,7 @@ private:
               priv_bit = field_of(*paired, *priv);
             }
           }
-          for(auto const target : units_of_stem(part, stem))
+          for(auto const target : units_of_stem(part, variant_, stem))
           {
             auto& rule   = rules_[target];
             rule.present = true;
@@ -1073,6 +1038,7 @@ private:
     }
   }
 
+  gtzc_variant                      variant_;
   field_ref                         lock_;
   std::vector<tzsc_word>            words_;
   std::vector<securable>            rules_;
@@ -1118,7 +1084,8 @@ struct tzic_word
 class tzic final : public gtzc_block, public illegal_access_controller
 {
 public:
-  tzic(model_context& ctx, peripheral_desc const& desc) : gtzc_block{ctx, desc, "GTZC TZIC"}
+  tzic(model_context& ctx, peripheral_desc const& desc, gtzc_variant variant)
+      : gtzc_block{ctx, desc, "GTZC TZIC"}
   {
     for(auto const& described : desc.registers)
     {
@@ -1154,7 +1121,7 @@ public:
                   .at =
                       {.reg  = static_cast<std::uint8_t>(*index - 1),
                            .mask = field_of(described, bit).mask()},
-                  .units = units_of_stem(ctx.part, stem)
+                  .units = units_of_stem(ctx.part, variant, stem)
               });
             }
           }
@@ -1619,7 +1586,7 @@ private:
 };
 }
 
-auto gtzc_fields(part_description const& part) -> std::vector<gtzc_field>
+auto gtzc_fields(part_description const& part, gtzc_variant variant) -> std::vector<gtzc_field>
 {
   std::vector<gtzc_field> out;
   for(auto const& unit : part.peripherals)
@@ -1645,7 +1612,7 @@ auto gtzc_fields(part_description const& part) -> std::vector<gtzc_field>
         }
         auto const stem    = std::string_view{bit.name}.substr(0, bit.name.size() - suffix.size());
         auto const memory  = memory_stem(stem);
-        auto       targets = units_of_stem(part, stem);
+        auto       targets = units_of_stem(part, variant, stem);
         out.push_back(
             {.owner  = unit.name,
              .reg    = described.name,
@@ -1706,20 +1673,20 @@ void illegal_event::raise(peer_directory const& peers, std::size_t unit, initiat
   }
 }
 
-auto gtzc_factory() -> model_factory
+auto gtzc_factory(gtzc_variant variant) -> model_factory
 {
-  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+  return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     if(not ctx.trustzone)
     {
       return nullptr;
     }
     if(desc.name.ends_with("_TZSC"))
     {
-      return std::make_shared<tzsc>(ctx, desc);
+      return std::make_shared<tzsc>(ctx, desc, variant);
     }
     if(desc.name.ends_with("_TZIC"))
     {
-      return std::make_shared<tzic>(ctx, desc);
+      return std::make_shared<tzic>(ctx, desc, variant);
     }
     if(desc.name.contains("_MPCBB"))
     {

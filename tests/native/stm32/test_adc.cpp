@@ -221,7 +221,7 @@ auto clock_warnings(std::vector<core::log_record> const& logged) -> std::vector<
 {
   std::vector<core::log_record> out;
   std::ranges::copy_if(logged, std::back_inserter(out), [](core::log_record const& record) {
-    return record.message.contains("after PRESC");
+    return record.message.contains("ADC clock");
   });
   return out;
 }
@@ -317,6 +317,43 @@ TEST_CASE("VREFINT and the temperature sensor read their factory codes once conn
   CHECK(f.convert(19) == ts_cal1);
   CHECK(f.convert(5) == 0);
   CHECK(f.convert(18) == 0);
+}
+
+TEST_CASE("an ADC2 beside ADC1 reads VREFINT on 0, the sensor on 19 and its input on 5")
+{
+  auto       description = u575();
+  auto const adc1        = std::ranges::find(
+      description.peripherals, std::string_view{"ADC1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(adc1 != description.peripherals.end());
+  auto adc2 = *adc1;
+  adc2.name = "ADC2";
+  adc2.base = 0x4202'8100;
+  description.irqs.push_back(popcorn::irq_desc{.number = adc2.irqs.front(), .name = "ADC2_IRQn"});
+  description.peripherals.push_back(std::move(adc2));
+  adc_fixture const f{description};
+  auto* const       port = f.model_of<stm32::analog_port>("ADC2");
+  REQUIRE(port != nullptr);
+  auto const convert = [&](std::uint32_t channel) {
+    f.write("ADC2", "ADC_PCSEL", all_channels);
+    f.write("ADC2", "ADC_SQR1", channel << 6);
+    f.write("ADC2", "ADC_CR", advregen);
+    f.write("ADC2", "ADC_CR", advregen | aden);
+    f.write("ADC2", "ADC_CR", advregen | aden | adstart);
+    f.settle();
+    REQUIRE(f.field("ADC2", "ADC_ISR", "EOC") == 1);
+    auto& regs  = f.target->peripheral("ADC2");
+    auto  value = f.target->model("ADC2")->on_read(
+        regs, popcorn::find_register(regs.description(), "ADC_DR")->offset, 4,
+        {.pc = 0, .now = icount{0}, .by = popcorn::initiator::cpu});
+    REQUIRE(value.has_value());
+    return *value;
+  };
+  f.write("ADC12", "ADC12_CCR", vrefen | vsensesel);
+  CHECK(convert(0) == vrefint_cal);
+  CHECK(convert(19) == ts_cal1);
+  port->drive(5, 1'500'000);
+  CHECK(convert(5) == 8192);
+  CHECK(f.port().input(5) == 0);
 }
 
 TEST_CASE("a conversion sets EOC and EOS and clears ADSTART at its end, reading ADC_DR clears EOC")
@@ -558,6 +595,26 @@ TEST_CASE("a conversion ends N x (SMP + TSAR) ADC clock cycles after ADSTART")
     CHECK(f.isr("EOC") == 1);
     CHECK(f.read("ADC_DR") == 5461 >> 2);
   }
+  SUBCASE("SMP 2 is 12 cycles, 29 cycles at 14 bits")
+  {
+    f.write("ADC1", "ADC_SMPR1", 2u << 15);
+    auto const start = f.now();
+    f.start(5);
+    f.run_until(start + 29 * 62'500 - us);
+    CHECK(f.isr("EOC") == 0);
+    f.run_until(start + 29 * 62'500);
+    CHECK(f.isr("EOC") == 1);
+  }
+  SUBCASE("SMP 6 is 391 cycles, 408 cycles at 14 bits")
+  {
+    f.write("ADC1", "ADC_SMPR1", 6u << 15);
+    auto const start = f.now();
+    f.start(5);
+    f.run_until(start + 408 * 62'500 - us);
+    CHECK(f.isr("EOC") == 0);
+    f.run_until(start + 408 * 62'500);
+    CHECK(f.isr("EOC") == 1);
+  }
   SUBCASE("PRESC divides the ADC clock by 16")
   {
     f.write("ADC12", "ADC12_CCR", 7u << 18);
@@ -760,21 +817,52 @@ TEST_CASE("LSHIFT, gain compensation and a matching offset each log one warning"
   CHECK(logged[2].reg == "ADC_OFR1");
 }
 
-TEST_CASE("an ADC state saved before the inputs loads with inputs at 0 and converts again")
+TEST_CASE("BULB, SMPTRIG, TROVS and the DIFSEL bit of a converted channel each log once on the U5")
 {
-  adc_fixture const f;
-  f.port().drive(5, 1'000'000);
-  f.enable();
-  std::vector<std::byte> bytes;
-  reflex::serde::bson::serializer{bytes}.dump(old_adc_state{});
-  f.target->model("ADC1")->load(bytes);
-  f.target->model("ADC12")->load(bytes);
-  CHECK(f.port().input(5) == 0);
-  f.settle();
-  CHECK(f.isr("EOC") == 0);
-  CHECK(f.convert(5) == 0);
-  f.port().drive(5, 1'000'000);
-  CHECK(f.convert(5) == 5461);
+  constexpr std::uint32_t trovs   = 1u << 9;
+  constexpr std::uint32_t bulb    = 1u << 13;
+  constexpr std::uint32_t smptrig = 1u << 15;
+  {
+    adc_fixture const             f;
+    std::vector<core::log_record> logged;
+    auto const                    sink = recorder(f, logged);
+    f.port().drive(5, 1'000'000);
+    f.enable();
+    f.write("ADC1", "ADC_DIFSEL", 1u << 6);
+    CHECK(f.convert(5) == 5461);
+    CHECK(logged.empty());
+    f.write("ADC1", "ADC_CFGR2", bulb | smptrig | trovs);
+    f.write("ADC1", "ADC_DIFSEL", 1u << 5);
+    CHECK(f.convert(5) == 5461);
+    CHECK(f.convert(5) == 5461);
+    REQUIRE(logged.size() == 4);
+    CHECK(logged[0].message.contains("BULB"));
+    CHECK(logged[1].message.contains("SMPTRIG"));
+    CHECK(logged[2].message.contains("TROVS"));
+    CHECK(logged[3].reg == "ADC_DIFSEL");
+  }
+  struct setting
+  {
+    std::string_view reg;
+    std::uint32_t    value;
+  };
+  for(auto const [name, value] : {
+          setting{"ADC_CFGR2",  bulb   },
+          setting{"ADC_CFGR2",  smptrig},
+          setting{"ADC_CFGR2",  trovs  },
+          setting{"ADC_DIFSEL", 1u << 5},
+  })
+  {
+    CAPTURE(value);
+    adc_fixture const f{u575(), {}, true, true};
+    f.enable();
+    f.write("ADC1", name, value);
+    f.write("ADC1", "ADC_SQR1", 5u << 6);
+    CHECK_THROWS_AS(
+        static_cast<void>(
+            f.target->mem().write(f.at("ADC1", "ADC_CR"), 4, advregen | aden | adstart)),
+        popcorn::model_error);
+  }
 }
 
 namespace
@@ -1082,6 +1170,7 @@ struct step06_adc_state
 {
   std::array<std::uint32_t, 20> input_uv{};
   std::uint32_t                 generation{};
+  std::uint32_t                 ready_generation{};
   std::uint64_t                 start_ps{};
   std::uint64_t                 clock_hz{};
   std::uint32_t                 divider{};
@@ -1426,45 +1515,6 @@ TEST_CASE("a snapshot mid-scan with two results queued for the DMA resumes to th
   finish(other);
 }
 
-TEST_CASE("an ADC state saved before the sequence loads mid-conversion as rank 0, the scan goes on")
-{
-  adc_fixture const f;
-  f.port().drive(5, 1'000'000);
-  f.port().drive(6, 2'000'000);
-  f.enable();
-  f.write("ADC1", "ADC_SQR1", 1u | (5u << 6) | (6u << 12));
-  auto const start = f.now();
-  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
-  f.run_until(start + 22 * adc_cycle_ps);
-  REQUIRE(f.cpu_read("ADC_DR") == 5461);
-  f.run_until(start + 33 * adc_cycle_ps);
-  auto const now = live_state(f);
-  REQUIRE(now.converting);
-  REQUIRE(now.rank == 1);
-  step03_adc_state const old{
-      .input_uv      = now.input_uv,
-      .generation    = now.generation,
-      .start_ps      = now.start_ps,
-      .clock_hz      = now.clock_hz,
-      .divider       = now.divider,
-      .held          = now.held,
-      .sum           = now.sum,
-      .converting    = now.converting,
-      .waiting_clock = now.waiting_clock};
-  std::vector<std::byte> bytes;
-  reflex::serde::bson::serializer{bytes}.dump(old);
-  f.target->model("ADC1")->load(bytes);
-  f.run_until(start + 44 * adc_cycle_ps);
-  CHECK(f.isr("EOC") == 1);
-  CHECK(f.isr("EOS") == 0);
-  CHECK(f.cpu_read("ADC_DR") == 5461);
-  f.run_until(start + 66 * adc_cycle_ps);
-  CHECK(f.isr("EOC") == 1);
-  CHECK(f.isr("EOS") == 1);
-  CHECK(f.cpu_read("ADC_DR") == 10922);
-  CHECK(f.cr("ADSTART") == 0);
-}
-
 TEST_CASE("DISCEN with CONT converts as DISCEN alone and logs once, a model_error when strict")
 {
   {
@@ -1785,6 +1835,32 @@ TEST_CASE("a trigger starts the sequence tLATR later: 3, 7, 13 ADC clocks for PR
   }
 }
 
+TEST_CASE(
+    "a U5 trigger one kernel cycle off the ADC clock grid at CKMODE 00 and PRESC /4 starts the "
+    "sequence 13 ADC clocks later, with no wait for the next ADC clock edge")
+{
+  constexpr std::uint64_t divider = 4;
+  constexpr std::uint64_t grid    = divider * adc_cycle_ps;
+  adc_fixture const       f;
+  f.put("RCC", "RCC_CFGR1", "SW", 1);
+  f.run_until(f.now() + 200 * us);
+  REQUIRE(f.field("RCC", "RCC_CFGR1", "SWS") == 1);
+  downstream_scan(f, ovrmod | exten_rising | extsel(14));
+  f.write("ADC12", "ADC12_CCR", vrefen | vsensesel | (2u << 18));
+  f.run_until(f.now() + (grid + adc_cycle_ps - f.now() % grid) % grid);
+  REQUIRE(f.now() % grid == adc_cycle_ps);
+  auto const start = tim15_trgo(f, 499);
+  static_cast<void>(start_scan(f));
+  auto const trigger = start + tim15_period;
+  REQUIRE(trigger % grid == adc_cycle_ps);
+  auto const eoc = trigger + (13 + scan_eoc_cycles[0]) * divider * adc_cycle_ps;
+  f.run_until(eoc - adc_cycle_ps);
+  CHECK(f.isr("EOC") == 0);
+  f.run_until(eoc);
+  CHECK(f.isr("EOC") == 1);
+  CHECK(f.cpu_read("ADC_DR") == scan_code(0));
+}
+
 TEST_CASE("DISCEN with DISCNUM 2 converts three ranks per TIM15 update, ADSTART stays set")
 {
   adc_fixture const f;
@@ -2102,37 +2178,6 @@ TEST_CASE("a snapshot with two out-of-window results counted flags the third, in
   CHECK(watched(other, 5, out_of_window) == awd1);
 }
 
-TEST_CASE("an ADC state saved before the watchdogs loads with the AWDFILT1 count at 0")
-{
-  adc_fixture const f;
-  f.enable();
-  f.write("ADC1", "ADC_CFGR1", res12 | awd1en);
-  f.write("ADC1", "ADC_HTR1", awdfilt1(1) | 8000);
-  CHECK(watched(f, 5, out_of_window) == 0);
-  auto const now = live_state(f);
-  REQUIRE(now.filter_count == 1);
-  step04_adc_state const old{
-      .input_uv      = now.input_uv,
-      .generation    = now.generation,
-      .start_ps      = now.start_ps,
-      .clock_hz      = now.clock_hz,
-      .divider       = now.divider,
-      .held          = now.held,
-      .sum           = now.sum,
-      .converting    = now.converting,
-      .waiting_clock = now.waiting_clock,
-      .rank          = now.rank,
-      .subgroup_left = now.subgroup_left,
-      .data          = now.data,
-      .dma_stopped   = now.dma_stopped};
-  std::vector<std::byte> bytes;
-  reflex::serde::bson::serializer{bytes}.dump(old);
-  f.target->model("ADC1")->load(bytes);
-  CHECK(live_state(f).filter_count == 0);
-  CHECK(watched(f, 5, out_of_window) == 0);
-  CHECK(watched(f, 5, out_of_window) == awd1);
-}
-
 TEST_CASE("AWDFILT1 with AWD1EN and a DMA mode logs once at the start, a model_error when strict")
 {
   {
@@ -2240,4 +2285,57 @@ TEST_CASE(
   f.settle();
   CHECK(f.read("ADC_ISR") == 0);
   CHECK_FALSE(pending(f));
+}
+
+TEST_CASE("the ADC1 and ADC12 state mid-scan saves the bytes captured before the template")
+{
+  constexpr auto expected_adc = std::to_array<unsigned char>(
+      {0xe8, 0x01, 0x00, 0x00, 0x04, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x5f, 0x75, 0x76, 0x00, 0xeb,
+       0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x00, 0x40, 0x0d,
+       0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x33, 0x00, 0xe0, 0x93, 0x04, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x12, 0x34, 0x00, 0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x35,
+       0x00, 0x20, 0xa1, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x36, 0x00, 0xc0, 0x27, 0x09,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x37, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x12, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x39, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x30, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x12, 0x31, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x31, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x34, 0x00,
+       0xc0, 0x5c, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x35, 0x00, 0x60, 0xe3, 0x16,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x36, 0x00, 0x00, 0x6a, 0x18, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x12, 0x31, 0x37, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x31, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x39, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x67, 0x65, 0x6e, 0x65, 0x72,
+       0x61, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x72, 0x65, 0x61, 0x64, 0x79, 0x5f, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f,
+       0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x73, 0x74, 0x61, 0x72,
+       0x74, 0x5f, 0x70, 0x73, 0x00, 0x20, 0x0e, 0x7b, 0x10, 0x00, 0x00, 0x00, 0x00, 0x12, 0x63,
+       0x6c, 0x6f, 0x63, 0x6b, 0x5f, 0x68, 0x7a, 0x00, 0x00, 0x24, 0xf4, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x12, 0x64, 0x69, 0x76, 0x69, 0x64, 0x65, 0x72, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x12, 0x68, 0x65, 0x6c, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x12, 0x73, 0x75, 0x6d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x08, 0x63, 0x6f, 0x6e, 0x76, 0x65, 0x72, 0x74, 0x69, 0x6e, 0x67, 0x00, 0x01, 0x08, 0x77,
+       0x61, 0x69, 0x74, 0x69, 0x6e, 0x67, 0x5f, 0x63, 0x6c, 0x6f, 0x63, 0x6b, 0x00, 0x00, 0x10,
+       0x72, 0x61, 0x6e, 0x6b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x10, 0x73, 0x75, 0x62, 0x67, 0x72,
+       0x6f, 0x75, 0x70, 0x5f, 0x6c, 0x65, 0x66, 0x74, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x64,
+       0x61, 0x74, 0x61, 0x00, 0x10, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x22, 0x02, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x64, 0x6d, 0x61, 0x5f, 0x73, 0x74, 0x6f, 0x70, 0x70,
+       0x65, 0x64, 0x00, 0x00, 0x10, 0x66, 0x69, 0x6c, 0x74, 0x65, 0x72, 0x5f, 0x63, 0x6f, 0x75,
+       0x6e, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+  constexpr auto    expected_common = std::to_array<unsigned char>({0x05, 0x00, 0x00, 0x00, 0x00});
+  adc_fixture const f;
+  downstream_scan(f, ovrmod);
+  auto const start = start_scan(f);
+  f.run_until(start + scan_eoc(2) + scan_ps / 100);
+  std::vector<std::byte> adc_bytes;
+  f.target->model("ADC1")->save(adc_bytes);
+  std::vector<std::byte> common_bytes;
+  f.target->model("ADC12")->save(common_bytes);
+  CHECK(std::ranges::equal(adc_bytes, expected_adc, {}, [](std::byte b) {
+    return std::to_integer<unsigned char>(b);
+  }));
+  CHECK(std::ranges::equal(common_bytes, expected_common, {}, [](std::byte b) {
+    return std::to_integer<unsigned char>(b);
+  }));
 }

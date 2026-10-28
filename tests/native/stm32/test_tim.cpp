@@ -2,6 +2,7 @@
 #include "stm32_fixture.hpp"
 #include "trigger_signal.hpp"
 
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/intercept.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
@@ -318,7 +319,9 @@ TEST_CASE("TIM16 CNT follows the virtual time between updates")
   };
   until(f.target->virtual_clock().time().ps + 50 * ms + ms / 2);
   REQUIRE(irq.at.size() >= 50);
-  auto const entry = irq.at.back();
+  auto const entry = irq.at.back() + ms;
+  until(entry + us / 2);
+  REQUIRE(irq.at.back() == entry);
   until(entry + 300 * us + us / 2);
   CHECK((b.read("TIM16", "CNT") & 0xffffu) == 300);
   until(entry + 400 * us + us / 2);
@@ -1662,7 +1665,7 @@ auto last_warning(std::vector<core::log_record> const& logged) -> core::log_reco
 
 TEST_CASE("TIM1 and TIM8 warnings name registers by their bare names")
 {
-  for(auto const* const unit : {"TIM1", "TIM8"})
+  for(std::string_view const unit : {"TIM1", "TIM8"})
   {
     CAPTURE(unit);
     direct                        t;
@@ -1702,168 +1705,6 @@ TEST_CASE("a description with only SVD names TIM1_CR1 and so on still runs TIM1"
   CHECK(t.flag("UIF") == 1);
   t.b.write("TIM1", "TIM1_SMCR", smcr(sms_external, ts_itr7));
   CHECK(last_warning(logged).reg == "TIM1_SMCR");
-}
-
-namespace
-{
-struct tim_state_fields
-{
-  std::uint64_t                anchor_ps{};
-  std::uint64_t                anchor_frac{};
-  std::uint64_t                hz{};
-  std::uint64_t                due_ps{};
-  std::uint64_t                carry{};
-  std::uint32_t                generation{};
-  std::uint32_t                count{};
-  std::uint32_t                repetition{};
-  std::uint32_t                prescaler{};
-  std::uint32_t                reload{};
-  std::uint32_t                burst_index{};
-  std::uint32_t                edges{};
-  std::array<std::uint32_t, 4> compare{};
-  std::array<std::uint8_t, 4>  compare_request{};
-  std::uint8_t                 update_request{};
-  std::uint8_t                 down{};
-  std::uint8_t                 scheduled{};
-  std::uint8_t                 gate{};
-  std::uint8_t                 held{};
-  std::uint64_t                held_ps{};
-  std::uint8_t                 inputs_seen{};
-  std::uint8_t                 inputs_filtered{};
-  std::uint8_t                 etr_edges{};
-  std::array<std::uint8_t, 4>  capture_edges{};
-  std::array<std::uint32_t, 5> input_generation{};
-  std::array<std::uint64_t, 5> input_due_ps{};
-  std::array<std::uint64_t, 5> input_due_seq{};
-};
-
-struct tim_state_without_edges
-{
-  std::uint64_t                anchor_ps{};
-  std::uint64_t                anchor_frac{};
-  std::uint64_t                hz{};
-  std::uint64_t                due_ps{};
-  std::uint64_t                carry{};
-  std::uint32_t                generation{};
-  std::uint32_t                count{};
-  std::uint32_t                repetition{};
-  std::uint32_t                prescaler{};
-  std::uint32_t                reload{};
-  std::uint32_t                burst_index{};
-  std::array<std::uint32_t, 4> compare{};
-  std::array<std::uint8_t, 4>  compare_request{};
-  std::uint8_t                 update_request{};
-  std::uint8_t                 down{};
-  std::uint8_t                 scheduled{};
-  std::uint8_t                 gate{};
-};
-
-struct tim_state_without_burst
-{
-  std::uint64_t                anchor_ps{};
-  std::uint64_t                anchor_frac{};
-  std::uint64_t                hz{};
-  std::uint64_t                due_ps{};
-  std::uint64_t                carry{};
-  std::uint32_t                generation{};
-  std::uint32_t                count{};
-  std::uint32_t                repetition{};
-  std::uint32_t                prescaler{};
-  std::uint32_t                reload{};
-  std::uint32_t                edges{};
-  std::array<std::uint32_t, 4> compare{};
-  std::array<std::uint8_t, 4>  compare_request{};
-  std::uint8_t                 update_request{};
-  std::uint8_t                 down{};
-  std::uint8_t                 scheduled{};
-  std::uint8_t                 gate{};
-};
-
-struct tim_state_without_gate
-{
-  std::uint64_t                anchor_ps{};
-  std::uint64_t                anchor_frac{};
-  std::uint64_t                hz{};
-  std::uint64_t                due_ps{};
-  std::uint64_t                carry{};
-  std::uint32_t                generation{};
-  std::uint32_t                count{};
-  std::uint32_t                repetition{};
-  std::uint32_t                prescaler{};
-  std::uint32_t                reload{};
-  std::uint32_t                burst_index{};
-  std::uint32_t                edges{};
-  std::array<std::uint32_t, 4> compare{};
-  std::array<std::uint8_t, 4>  compare_request{};
-  std::uint8_t                 update_request{};
-  std::uint8_t                 down{};
-  std::uint8_t                 scheduled{};
-};
-
-template <typename To, typename From> auto narrowed(From const& from) -> To
-{
-  To             to{};
-  constexpr auto access = std::meta::access_context::unchecked();
-  template for(constexpr auto out :
-               std::define_static_array(std::meta::nonstatic_data_members_of(^^To, access)))
-  {
-    template for(constexpr auto in :
-                 std::define_static_array(std::meta::nonstatic_data_members_of(^^From, access)))
-    {
-      if constexpr(std::meta::identifier_of(out) == std::meta::identifier_of(in))
-      {
-        to.[:out:] = from.[:in:];
-      }
-    }
-  }
-  return to;
-}
-
-auto saved_state(stm32_fixture const& f, std::string_view tim) -> tim_state_fields
-{
-  std::vector<std::byte> bytes;
-  f.target->model(tim)->save(bytes);
-  return reflex::serde::bson::deserializer{std::span<std::byte const>{bytes}}
-      .load<tim_state_fields>();
-}
-}
-
-TEST_CASE("a TIM state saved before the external clock prescaler count loads it as 0")
-{
-  slaves t;
-  t.base("TIM1", 0, 9);
-  t.master("TIM1", master_update);
-  t.base("TIM3", 2, 0xffff);
-  t.write("TIM3", "SMCR", smcr(sms_external, ts_itr0));
-  t.enable("TIM3");
-  t.enable("TIM1");
-  t.at(25);
-  auto const now = saved_state(t.f, "TIM3");
-  CHECK(now.edges == 2);
-  std::vector<std::byte> old;
-  reflex::serde::bson::serializer{old}.dump(narrowed<tim_state_without_edges>(now));
-  t.f.target->model("TIM3")->load(old);
-  CHECK(saved_state(t.f, "TIM3").edges == 0);
-  t.at(45);
-  CHECK(t.count("TIM3") == 0);
-}
-
-TEST_CASE("a TIM state saved before the gate loads it closed")
-{
-  slaves t;
-  t.base("TIM1", 0, 0xffff);
-  t.master("TIM1", master_enable);
-  t.enable("TIM1");
-  t.base("TIM3", 0, 0xffff);
-  t.write("TIM3", "SMCR", smcr(sms_gated, ts_itr0));
-  t.enable("TIM3");
-  t.at(10);
-  auto const now = saved_state(t.f, "TIM3");
-  CHECK(now.gate == 1);
-  std::vector<std::byte> old;
-  reflex::serde::bson::serializer{old}.dump(narrowed<tim_state_without_gate>(now));
-  t.f.target->model("TIM3")->load(old);
-  CHECK(saved_state(t.f, "TIM3").gate == 0);
 }
 
 TEST_CASE("a gated MMS 001 master gives its gate to its own gated slave")
@@ -2308,19 +2149,6 @@ TEST_CASE("the burst source holds its request across acknowledges until the inde
             {2, false}
     });
   }
-}
-
-TEST_CASE("a TIM state saved before the burst index loads it as 0")
-{
-  burst b;
-  b.t.b.write("TIM5", "DCR", dcr(13, 3, dbss_update));
-  b.cpu(1);
-  auto const now = saved_state(b.t.f, "TIM5");
-  CHECK(now.burst_index == 1);
-  std::vector<std::byte> old;
-  reflex::serde::bson::serializer{old}.dump(narrowed<tim_state_without_burst>(now));
-  b.t.f.target->model("TIM5")->load(old);
-  CHECK(saved_state(b.t.f, "TIM5").burst_index == 0);
 }
 
 TEST_CASE("TIM16 and TIM17 DCR and DMAR reset to 0")
@@ -3884,4 +3712,70 @@ TEST_CASE("a glitching filtered input keeps one filter event queued")
   run_to(t, t.next);
   CHECK(t.f.target->pending_events() <= events + 1);
   CHECK(t.bits("TIM3", "SR", "CC1IF") == 0);
+}
+
+namespace
+{
+auto timer_register(popcorn::part_description& desc, std::string_view unit, std::string_view reg)
+    -> popcorn::register_desc&
+{
+  auto const found =
+      std::ranges::find(desc.peripherals, std::string{unit}, &popcorn::peripheral_desc::name);
+  REQUIRE(found != desc.peripherals.end());
+  auto const named =
+      std::ranges::find(found->registers, std::string{reg}, &popcorn::register_desc::name);
+  REQUIRE(named != found->registers.end());
+  return *named;
+}
+
+void drop_field(popcorn::register_desc& reg, std::string_view field)
+{
+  REQUIRE(
+      std::erase_if(reg.fields, [&](popcorn::field_desc const& bits) { return bits.name == field; })
+      == 1);
+}
+}
+
+TEST_CASE("a U575 timer without its renamed SMS_1, TS_1 or 4-bit MMS_1 throws at construction")
+{
+  for(std::string_view const unit : {"TIM1", "TIM2", "TIM3", "TIM4", "TIM5", "TIM8"})
+  {
+    CAPTURE(unit);
+    auto desc = u575();
+    drop_field(timer_register(desc, unit, "CR2"), "MMS_1");
+    CHECK_THROWS_AS(stm32_fixture(std::move(desc), "tim_ll"), popcorn::config_error);
+  }
+  for(std::string_view const field : {"SMS_1", "TS_1"})
+  {
+    CAPTURE(field);
+    auto desc = u575();
+    drop_field(timer_register(desc, "TIM2", "SMCR"), field);
+    CHECK_THROWS_AS(stm32_fixture(std::move(desc), "tim_ll"), popcorn::config_error);
+  }
+}
+
+TEST_CASE("a U575 timer whose MMS has 3 bits or none throws when the description says otherwise")
+{
+  SUBCASE("TIM15 given an MMS_1")
+  {
+    auto desc = u575();
+    timer_register(desc, "TIM15", "CR2").fields.push_back({.name = "MMS_1", .lsb = 25, .width = 1});
+    CHECK_THROWS_AS(stm32_fixture(std::move(desc), "tim_ll"), popcorn::config_error);
+  }
+  SUBCASE("TIM6 without its MMS")
+  {
+    auto desc = u575();
+    drop_field(timer_register(desc, "TIM6", "CR2"), "MMS");
+    CHECK_THROWS_AS(stm32_fixture(std::move(desc), "tim_ll"), popcorn::config_error);
+  }
+  SUBCASE("TIM16 given an MMS")
+  {
+    auto desc = u575();
+    timer_register(desc, "TIM16", "CR2").fields.push_back({.name = "MMS", .lsb = 4, .width = 3});
+    CHECK_THROWS_AS(stm32_fixture(std::move(desc), "tim_ll"), popcorn::config_error);
+  }
+  SUBCASE("the shipped description")
+  {
+    CHECK_NOTHROW(stm32_fixture(u575(), "tim_ll"));
+  }
 }

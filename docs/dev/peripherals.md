@@ -11,6 +11,13 @@ model claims. A `periph::model` serves the registers it claims, as the descripti
 never writes the register file. The model pokes whatever it wants visible there, because the
 register file is what Python views, the trace and snapshots read.
 
+`model::served_ranges()` names byte ranges the model serves besides its registers, such as the
+packet memory of the STM32H5 USB controller. The machine calls it once at attach, after
+`claims()`. Each range is a pair of word-aligned offsets from the peripheral base, first included
+and last excluded, inside the peripheral's size. Every word of a range is claimed, so every access
+in it reaches `on_read` and `on_write`. A range word that holds a description register holds one
+of the model's claims. Python models serve their claimed registers only.
+
 A model receives `on_read` and `on_write` with the byte offset, the access size and an
 `access_ctx` that says where, when and by whom: the translated block, the instruction count,
 the bus master, the security attribute and privilege. A model returns a value or a bus error.
@@ -32,8 +39,11 @@ version. The newest registration that matches wins. A plugin cannot call `regist
 itself, the registry refuses it, and a plugin registers through its entry point instead.
 
 After the factory returns, the machine checks that every claimed register exists in the
-description and that cross rules point into claimed registers consistently, and it refuses the
-model with a `config_error` otherwise.
+description, that every served range is word aligned with its first offset at most its last, fits
+the peripheral's size and covers only claimed registers, and that cross rules point into claimed
+registers consistently. It refuses the model with a `config_error` otherwise: under
+`models.<name>.served_ranges` for a misaligned or inverted range, `peripherals.<name>.size` for a
+range past the size and `peripherals.<name>.registers.<reg>` for an unclaimed register in a range.
 
 ## Python models
 

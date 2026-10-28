@@ -2230,32 +2230,6 @@ TEST_CASE("tagged host frames still queued survive a snapshot and 1000 restores 
   CHECK(run() == first);
 }
 
-namespace
-{
-struct untagged_usart_state
-{
-  std::vector<std::uint16_t> rx_fifo;
-  std::vector<std::uint16_t> host;
-};
-}
-
-TEST_CASE("a USART state saved before tagged frames loads its RX FIFO and host bytes clean")
-{
-  parity_rig  p{{}, 35, cr1_fifoen};
-  auto* const usart = p.t.r.f->model_of<popcorn::periph::model>("USART1");
-  REQUIRE(usart != nullptr);
-  std::vector<std::byte> saved;
-  reflex::serde::bson::serializer{
-      saved
-  }
-      .dump(untagged_usart_state{.rx_fifo = {0x41, 0x42}, .host = {0x43}});
-  usart->load(saved);
-  CHECK(p.t.r.port("USART1").queued() == 1);
-  CHECK(p.pop() == 0x41);
-  CHECK(p.pop() == 0x42);
-  CHECK((p.isr() & isr_errors) == 0);
-}
-
 TEST_CASE("SBKRQ sends a break after the frame in flight, SBKF set until its low part ends")
 {
   member a{"break_tx"};
@@ -2944,23 +2918,6 @@ TEST_CASE("LPUART1 holds a frame on CTS and host frames on RTS")
   run(5 * ms_ps);
   CHECK(lpuart_pop(t) == 'y');
   CHECK((t.read("LPUART1", "ISR") & isr_ore) == 0);
-}
-
-TEST_CASE("a USART state saved before flow control loads with CTS ready and nothing pending")
-{
-  auto const  p     = flow_rig(cr3_ctse);
-  auto* const usart = p->t.r.f->model_of<popcorn::periph::model>("USART1");
-  REQUIRE(usart != nullptr);
-  std::vector<std::byte> saved;
-  reflex::serde::bson::serializer{saved}.dump(untagged_usart_state{.rx_fifo = {}, .host = {0x43}});
-  cts(*p, false);
-  usart->load(saved);
-  CHECK(p->t.r.port("USART1").pending_cts() == 0);
-  auto const start = p->now();
-  p->t.cpu("USART1", "TDR", 'a');
-  p->advance(2 * usart1_frame(*p));
-  REQUIRE(p->box->sent.size() == 1);
-  CHECK(p->box->sent[0].at.ps == start + usart1_frame(*p));
 }
 
 TEST_CASE("a CTS level survives a snapshot, its restores and a power-on reset")

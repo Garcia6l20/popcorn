@@ -1309,7 +1309,8 @@ class PeripheralRef:
         """External channel `channel` of this ADC.
 
         Raises:
-            ConfigError: `channel` is not 1 to 17.
+            ConfigError: `channel` is not an external channel of this ADC.
+            ModelError: The peripheral's model is not the built-in ADC.
         """
         return AnalogRefs(
             self._owner, f"periph.{self._name}.input({channel})", self._view.input(channel)

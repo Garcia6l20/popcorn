@@ -182,6 +182,96 @@ def u575() -> popcorn.PartDescription:
         pytest.skip(f"no STM32U575 description: {error}")
 
 
+PERIPH_FIRMWARE = ROOT / "tests" / "firmware" / "periph" / "prebuilt"
+API_FIRMWARE = ROOT / "tests" / "firmware" / "api" / "prebuilt"
+
+
+@dataclass(frozen=True, slots=True)
+class TzPart:
+    """A part the TrustZone cases run on, with its test firmware.
+
+    `rcc_elf` is the RCC LL firmware of the part, with an `idle` loop. `pair` and `pair_s` are
+    its Non-secure and Secure test pair: the Non-secure ELF embeds the Secure binary at
+    0x08000000, the Secure ELF gives its symbols, both built for that part. `mpcbb3_words` is
+    the number of SECCFGR words of MPCBB3, one per 16-Kbyte super-block of SRAM3.
+    `flash_block` names the FLASH register of the Secure bits of bank 1 sectors 0 to 31, and
+    `system_config` the unit whose SECCFGR the model guards, SYSCFG on the U575 and SBS on the
+    H573.
+    """
+
+    description: popcorn.PartDescription
+    rcc_elf: Path
+    pair: Path
+    pair_s: Path
+    mpcbb3_words: int
+    flash_block: str
+    system_config: str
+
+    @property
+    def sram_size(self) -> int:
+        """Size of the contiguous SRAM region at 0x20000000."""
+        return next(r.size for r in self.description.regions if r.name == "SRAM_NS")
+
+    def address(self, peripheral: str, register: str) -> int:
+        """Bus address of `register` of `peripheral`."""
+        unit = next(p for p in self.description.peripherals if p.name == peripheral)
+        return unit.base + unit.register(register).offset
+
+    def bit(self, peripheral: str, register: str, field: str) -> int:
+        """The lowest bit of `field` of `register` of `peripheral`, as a mask."""
+        unit = next(p for p in self.description.peripherals if p.name == peripheral)
+        return 1 << next(f.lsb for f in unit.register(register).fields if f.name == field)
+
+
+TZ_PARTS = {
+    "u575": ("STM32U575QGIx", PERIPH_FIRMWARE, API_FIRMWARE, 32, "SEC1BBR1", "SYSCFG"),
+    "h573": (
+        "STM32H573AIIx",
+        PERIPH_FIRMWARE / "h573",
+        PERIPH_FIRMWARE / "h573",
+        20,
+        "SECBB1R1",
+        "SBS",
+    ),
+}
+"""Part, RCC firmware directory, test pair directory, MPCBB3 SECCFGR count, FLASH block register
+of bank 1 sectors 0 to 31 and guarded system configuration unit of each TrustZone part, RM0456
+Table 33, 7.9.29 and 15.3, RM0481 Table 33, 7.11.31 and 14.5.8."""
+
+
+def tz_part(key: str) -> TzPart:
+    """The TrustZone part `key` of `TZ_PARTS`, the test skipped without its description."""
+    from popcorn.stm32 import mcu
+    from popcorn.stm32.description import DescriptionError
+
+    part, rcc, pair, words, flash_block, system_config = TZ_PARTS[key]
+    try:
+        description = mcu(part)
+    except DescriptionError as error:
+        pytest.skip(f"no {part} description: {error}")
+    return TzPart(
+        description,
+        rcc / "rcc_ll.elf",
+        pair / "tz_pair.elf",
+        pair / "tz_pair_s.elf",
+        words,
+        flash_block,
+        system_config,
+    )
+
+
+@pytest.fixture(scope="session", params=sorted(TZ_PARTS))
+def tz(request: pytest.FixtureRequest) -> TzPart:
+    """Each TrustZone part in turn."""
+    return tz_part(str(request.param))
+
+
+@pytest.fixture(scope="session")
+def tz_u575() -> TzPart:
+    """The STM32U575, for the TrustZone cases that name registers only the STM32U5 has."""
+    return tz_part("u575")
+
+
 @pytest.fixture
 def board(u575: popcorn.PartDescription) -> popcorn.Machine:
     """A U575 machine over the board firmware, at `ready`: USART1 echoes, PA5 follows PA0."""

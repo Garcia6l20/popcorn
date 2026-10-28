@@ -75,8 +75,8 @@ struct board_clock
 
 struct sai_state
 {
-  std::array<block_state, blocks>                block{};
-  std::optional<std::array<board_clock, blocks>> clock{};
+  std::array<block_state, blocks> block{};
+  std::array<board_clock, blocks> clock{};
 
   friend auto operator==(sai_state const&, sai_state const&) -> bool = default;
 };
@@ -201,8 +201,7 @@ auto sai_writes() -> std::span<write_entry<sai> const>;
  *        its clock runs starts at the next boundary, at once on the first enable of a clock with no
  *        phase, which fixes it. The external clock is defined by its frame rate and always matches
  *        the block's frame, so AFSDET and LFSDET never rise, as with a correctly wired codec, and
- *        their interrupt enables log nothing. A state saved before the external clock existed loads
- *        with the clocks of the machine loading it, their phase taken again at the next enable.
+ *        their interrupt enables log nothing.
  */
 class sai final : public dispatch_model<sai, sai_state>,
                   public audio_port,
@@ -210,7 +209,10 @@ class sai final : public dispatch_model<sai, sai_state>,
                   public bus_reset_listener
 {
 public:
-  sai(model_context& ctx, peripheral_desc const& desc, std::array<audio_attachment, blocks> wired);
+  sai(model_context&                       ctx,
+      peripheral_desc const&               desc,
+      std::array<audio_attachment, blocks> wired,
+      sai_variant const&                   variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -225,7 +227,6 @@ public:
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
   void               on_clock_change() override;
-  void               load(std::span<std::byte const> in) override;
   void               attach(audio_block block, audio_attachment attachment) override;
   void               set_external_clock(audio_block which, std::uint32_t frame_hz) override;
   [[nodiscard]] auto external_clock(audio_block which) const -> std::uint32_t override;
@@ -238,7 +239,7 @@ public:
 
 private:
   void               restore_reset_values(std::optional<reset_kind> kind);
-  [[nodiscard]] auto fields_of(char prefix) const -> block_fields;
+  [[nodiscard]] auto fields_of(char prefix, std::string_view enable) const -> block_fields;
   [[nodiscard]] auto on(field_ref field) const -> bool;
   [[nodiscard]] auto enabled(std::size_t b) const -> bool;
   [[nodiscard]] auto receiver(std::size_t b) const -> bool;
@@ -324,27 +325,28 @@ auto sai_writes() -> std::span<write_entry<sai> const>
 sai::sai(
     model_context&                       ctx,
     peripheral_desc const&               desc,
-    std::array<audio_attachment, blocks> wired)
+    std::array<audio_attachment, blocks> wired,
+    sai_variant const&                   variant)
     : dispatch_model{ctx, desc, "SAI", sai_writes()}, regs_{ctx.regs}, wired_{std::move(wired)},
-      block_{fields_of('A'), fields_of('B')}, pdm_enable_{field("PDMCR", "PDMEN")},
-      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")},
-      requests_{requests_of(ctx.peers, desc.name)}
+      block_{fields_of('A', variant.enable), fields_of('B', variant.enable)},
+      pdm_enable_{field("PDMCR", "PDMEN")}, kernel_{ctx.clock.domain(lower(desc.name))},
+      line_{irq(desc.name + "_IRQn")}, requests_{requests_of(ctx.peers, desc.name)}
 {
-  auto& clocks = state_.clock.emplace();
   for(std::size_t b = 0; b < blocks; ++b)
   {
-    clocks[b].hz = wired_[b].external_frame_hz;
+    state_.clock[b].hz = wired_[b].external_frame_hz;
   }
 }
 
-auto sai::fields_of(char prefix) const -> block_fields
+auto sai::fields_of(char prefix, std::string_view enable) const -> block_fields
 {
-  auto const   name = [prefix](std::string_view reg) { return std::format("{}{}", prefix, reg); };
-  auto const   cr1  = name("CR1");
-  auto const   cr2  = name("CR2");
-  auto const   sr   = name("SR");
-  auto const   im   = name("IM");
-  auto const   clr  = name("CLRFR");
+  auto const name = [prefix](std::string_view reg) { return std::format("{}{}", prefix, reg); };
+  auto const cr1  = name("CR1");
+  auto const cr2  = name("CR2");
+  auto const sr   = name("SR");
+  auto const im   = name("IM");
+  auto const clr  = name("CLRFR");
+
   block_fields out{
       .mode             = field(cr1, "MODE"),
       .protocol         = field(cr1, "PRTCFG"),
@@ -352,7 +354,7 @@ auto sai::fields_of(char prefix) const -> block_fields
       .sync             = field(cr1, "SYNCEN"),
       .mono             = field(cr1, "MONO"),
       .dma              = field(cr1, "DMAEN"),
-      .enable           = field(cr1, "SAIAEN"),
+      .enable           = field(cr1, enable),
       .no_divider       = field(cr1, "NODIV"),
       .divider          = field(cr1, "MCKDIV"),
       .oversampling     = field(cr1, "OSR"),
@@ -487,7 +489,7 @@ auto sai::mask(std::size_t b) const -> std::uint32_t
 auto sai::clock_rate(std::size_t b) const -> rate
 {
   return {
-      .hz     = (*state_.clock)[b].hz,
+      .hz     = state_.clock[b].hz,
       .cycles = std::uint64_t{std::max<std::uint32_t>(wired_[b].decimation, 1)}};
 }
 
@@ -513,7 +515,7 @@ auto sai::clocked(std::size_t b) const -> bool
 
 auto sai::clock(std::size_t b) -> board_clock&
 {
-  return (*state_.clock)[b];
+  return state_.clock[b];
 }
 
 auto sai::board_now() const -> std::uint64_t
@@ -523,7 +525,7 @@ auto sai::board_now() const -> std::uint64_t
 
 auto sai::running(std::size_t b) const -> bool
 {
-  auto const& c = (*state_.clock)[b];
+  auto const& c = state_.clock[b];
   return c.hz != 0
       or (c.anchored and board_now() < c.anchor_ps)
       or (state_.block[b].ticking and clocked(b));
@@ -531,7 +533,7 @@ auto sai::running(std::size_t b) const -> bool
 
 auto sai::boundary(std::size_t b, std::uint64_t now) const -> grid_point
 {
-  auto const& c = (*state_.clock)[b];
+  auto const& c = state_.clock[b];
   auto const  r = clock_rate(b);
   if(now <= c.anchor_ps or r.hz == 0)
   {
@@ -1279,21 +1281,7 @@ void sai::set_external_clock(audio_block which, std::uint32_t frame_hz)
 
 auto sai::external_clock(audio_block which) const -> std::uint32_t
 {
-  return (*state_.clock)[index_of(which)].hz;
-}
-
-void sai::load(std::span<std::byte const> in)
-{
-  auto kept = state_.clock;
-  dispatch_model::load(in);
-  if(not state_.clock)
-  {
-    for(auto& c : *kept)
-    {
-      c.anchored = false;
-    }
-    state_.clock = kept;
-  }
+  return state_.clock[index_of(which)].hz;
 }
 
 void sai::flags()
@@ -1337,20 +1325,20 @@ void sai::flags()
 }
 }
 
-auto sai_factory(board const& b) -> model_factory
+auto sai_factory(board const& b, sai_variant variant) -> model_factory
 {
-  return
-      [audio = b.audio](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-        std::array<audio_attachment, 2> wired{};
-        for(std::size_t index = 0; index < wired.size(); ++index)
-        {
-          auto const name = std::format("{}_{}", desc.name, index == 0 ? 'A' : 'B');
-          if(auto const found = audio.find(name); found != audio.end())
-          {
-            wired[index] = found->second;
-          }
-        }
-        return std::make_shared<sai>(ctx, desc, std::move(wired));
-      };
+  return [audio = b.audio,
+          variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    std::array<audio_attachment, 2> wired{};
+    for(std::size_t index = 0; index < wired.size(); ++index)
+    {
+      auto const name = std::format("{}_{}", desc.name, index == 0 ? 'A' : 'B');
+      if(auto const found = audio.find(name); found != audio.end())
+      {
+        wired[index] = found->second;
+      }
+    }
+    return std::make_shared<sai>(ctx, desc, std::move(wired), variant);
+  };
 }
 }

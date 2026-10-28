@@ -122,7 +122,8 @@ auto lower(std::string_view name) -> std::string
 }
 
 /**
- * @brief SPI1 to SPI3 of the STM32U5, RM0456 section 68 "Serial peripheral interface (SPI)",
+ * @brief SPI1 to SPI3 of the STM32U5 and SPI1 to SPI6 of the STM32H5, RM0456 section 68 and RM0481
+ *        section 58 "Serial peripheral interface (SPI)",
  *        controller and target mode. Controller mode, CFG2.MASTER 1: frames of CFG1.DSIZE + 1 bits
  *        leave one SCK frame time apart, SCK the kernel clock divided by CFG1.MBR, while CR1.CSTART
  *        runs and the TX FIFO holds data, or continuously in simplex receive. Each frame time is
@@ -141,20 +142,22 @@ auto lower(std::string_view name) -> std::string
  *        the controller at the start of the frame, before its end. The model stays consistent
  *        and a resumed run is not refused again for that transfer. Which checks a transfer has
  *        run is saved with the model. A device declaring none is never checked.
- *        FIFOs of 16 bytes on SPI1 and SPI2, 8 on SPI3, a frame taking 1 to 4 bytes, packed by the
- *        access size. A 17 to 24-bit frame takes 3 FIFO bytes, as RM0456 68.4.12 "Data packet
- *        control" states. TSIZE frames per transfer, then EOT, CSTART cleared, and TXTF once TSIZE
- *        frames were written, which clears TXPIE and DXPIE. TSIZE 0 runs until SPE clears. TXC
- *        copies EOT when TSIZE is set, and otherwise is set while the TX FIFO and the shifter are
- *        empty. TXP, RXP, DXP by the FTHLV packet, TXP by the remaining frames for the last packet,
- *        RXWNE, RXPLVL, CTSIZE except on SPI3. A full RX FIFO sets OVR and drops the frame, or with
- *        CR1.MASRX suspends the clock and sets SUSP until IFCR.SUSPC. CSUSP stops after the current
- *        frame and sets SUSP. IFCR clears its flags, re-enabling clears EOT, OVR, UDR and CRCE, the
- *        SPI IRQ follows SR and IER while SPE is set, EOTIE covering EOT, SUSP and TXC, and only
- *        MODF with MODFIE while SPE is clear, RM0456 section 68.7. A device is selected by its GPIO
- *        chip select pin, active low, or by the hardware SS output from CSTART to the end of the
- *        transfer while CFG2.SSOE is set. With no device selected MISO reads all ones, a pulled-up
- *        line. The devices are saved and loaded with the model. With CFG1.TXDMAEN the
+ *        FIFOs of 16 bytes, 8 on the spi_variant's limited instances, SPI3 of the STM32U5 and SPI4
+ *        to SPI6 of the STM32H5, RM0456 Table 696 and RM0481 Table 645, a frame taking 1 to 4
+ *        bytes, packed by the access size. A 17 to 24-bit frame takes 3 FIFO bytes, as
+ *        RM0456 68.4.12 "Data packet control" states. TSIZE frames per transfer, then EOT, CSTART
+ *        cleared, and TXTF once TSIZE frames were written, which clears TXPIE and DXPIE. TSIZE 0
+ *        runs until SPE clears. TXC copies EOT when TSIZE is set, and otherwise is set while the TX
+ * FIFO and the shifter are empty. TXP, RXP, DXP by the FTHLV packet, TXP by the remaining frames
+ * for the last packet, RXWNE, RXPLVL, CTSIZE except on the instances the spi_variant gives no
+ *        counter, SPI3 of the STM32U5. `SPI_I2SCFGR` of the STM32H5 SPI1 to SPI3 is plain storage.
+ * A full RX FIFO sets OVR and drops the frame, or with CR1.MASRX suspends the clock and sets SUSP
+ * until IFCR.SUSPC. CSUSP stops after the current frame and sets SUSP. IFCR clears its flags,
+ * re-enabling clears EOT, OVR, UDR and CRCE, the SPI IRQ follows SR and IER while SPE is set, EOTIE
+ * covering EOT, SUSP and TXC, and only MODF with MODFIE while SPE is clear, RM0456 section 68.7. A
+ * device is selected by its GPIO chip select pin, active low, or by the hardware SS output from
+ * CSTART to the end of the transfer while CFG2.SSOE is set. With no device selected MISO reads all
+ * ones, a pulled-up line. The devices are saved and loaded with the model. With CFG1.TXDMAEN the
  *        `<instance>_tx_dma` request follows TXP, with CFG1.RXDMAEN the `<instance>_rx_dma` request
  *        follows RXP, or a partial last packet left in the RX FIFO once EOT is set, RM0456 section
  *        68.4.14, through the GPDMA peer, both low while SPE is clear.
@@ -198,7 +201,8 @@ public:
   spi(model_context&                       ctx,
       peripheral_desc const&               desc,
       std::vector<spi_attachment>          attachments,
-      std::shared_ptr<spi_controller_sink> controller);
+      std::shared_ptr<spi_controller_sink> controller,
+      spi_variant                          variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -264,6 +268,7 @@ private:
   std::vector<subscription>                    subscriptions_;
   bool                                         subscribed_{};
   bool                                         limited_;
+  bool                                         counted_;
   std::size_t                                  fifo_bytes_;
   reg_ref                                      status_;
   reg_ref                                      clear_;
@@ -321,11 +326,12 @@ private:
   bool                                         size_logged_{};
 };
 
-constexpr std::array<write_entry<spi>, 9> spi_writes{
+constexpr std::array<write_entry<spi>, 10> spi_writes{
     {
      {"SPI_CR1", &spi::control_written},
      {"SPI_CR2", &spi::plain_written},
      {"SPI_CFG1", &spi::plain_written},
+     {"SPI_CFG2", nullptr},
      {"SPI_IER", &spi::plain_written},
      {"SPI_SR", &spi::status_written},
      {"SPI_IFCR", &spi::clear_written},
@@ -339,26 +345,28 @@ spi::spi(
     model_context&                       ctx,
     peripheral_desc const&               desc,
     std::vector<spi_attachment>          attachments,
-    std::shared_ptr<spi_controller_sink> controller)
+    std::shared_ptr<spi_controller_sink> controller,
+    spi_variant                          variant)
     : dispatch_model{ctx, desc, "SPI", spi_writes}, regs_{ctx.regs},
       attachments_{std::move(attachments)}, controller_{std::move(controller)},
-      limited_{desc.name == "SPI3"}, fifo_bytes_{limited_ ? 8u : 16u}, status_{reg("SPI_SR")},
-      clear_{reg("SPI_IFCR")}, transmit_{reg("SPI_TXDR")}, receive_{reg("SPI_RXDR")},
-      enable_{field("SPI_CR1", "SPE")}, start_{field("SPI_CR1", "CSTART")},
-      suspend_{field("SPI_CR1", "CSUSP")}, master_rx_{field("SPI_CR1", "MASRX")},
-      size_{field("SPI_CR2", "TSIZE")}, data_size_{field("SPI_CFG1", "DSIZE")},
-      threshold_{field("SPI_CFG1", "FTHLV")}, baud_{field("SPI_CFG1", "MBR")},
-      bypass_{field("SPI_CFG1", "BPASS")}, master_{field("SPI_CFG2", "MASTER")},
-      comm_{field("SPI_CFG2", "COMM")}, ss_output_{field("SPI_CFG2", "SSOE")},
-      rx_packet_{field("SPI_SR", "RXP")}, tx_packet_{field("SPI_SR", "TXP")},
-      duplex_packet_{field("SPI_SR", "DXP")}, end_{field("SPI_SR", "EOT")},
-      filled_{field("SPI_SR", "TXTF")}, overrun_{field("SPI_SR", "OVR")},
-      suspended_{field("SPI_SR", "SUSP")}, tx_complete_{field("SPI_SR", "TXC")},
-      rx_level_{field("SPI_SR", "RXPLVL")}, rx_word_{field("SPI_SR", "RXWNE")},
-      tx_packet_ie_{field("SPI_IER", "TXPIE")}, duplex_packet_ie_{field("SPI_IER", "DXPIE")},
-      remaining_{field("SPI_SR", "CTSIZE")}, kernel_{ctx.clock.domain(lower(desc.name))},
-      line_{irq(desc.name + "_IRQn")}, tx_dma_enable_{field("SPI_CFG1", "TXDMAEN")},
-      rx_dma_enable_{field("SPI_CFG1", "RXDMAEN")},
+      limited_{std::ranges::contains(variant.limited, std::string_view{desc.name})},
+      counted_{not limited_ or variant.limited_counter}, fifo_bytes_{limited_ ? 8u : 16u},
+      status_{reg("SPI_SR")}, clear_{reg("SPI_IFCR")}, transmit_{reg("SPI_TXDR")},
+      receive_{reg("SPI_RXDR")}, enable_{field("SPI_CR1", "SPE")},
+      start_{field("SPI_CR1", "CSTART")}, suspend_{field("SPI_CR1", "CSUSP")},
+      master_rx_{field("SPI_CR1", "MASRX")}, size_{field("SPI_CR2", "TSIZE")},
+      data_size_{field("SPI_CFG1", "DSIZE")}, threshold_{field("SPI_CFG1", "FTHLV")},
+      baud_{field("SPI_CFG1", "MBR")}, bypass_{field("SPI_CFG1", "BPASS")},
+      master_{field("SPI_CFG2", "MASTER")}, comm_{field("SPI_CFG2", "COMM")},
+      ss_output_{field("SPI_CFG2", "SSOE")}, rx_packet_{field("SPI_SR", "RXP")},
+      tx_packet_{field("SPI_SR", "TXP")}, duplex_packet_{field("SPI_SR", "DXP")},
+      end_{field("SPI_SR", "EOT")}, filled_{field("SPI_SR", "TXTF")},
+      overrun_{field("SPI_SR", "OVR")}, suspended_{field("SPI_SR", "SUSP")},
+      tx_complete_{field("SPI_SR", "TXC")}, rx_level_{field("SPI_SR", "RXPLVL")},
+      rx_word_{field("SPI_SR", "RXWNE")}, tx_packet_ie_{field("SPI_IER", "TXPIE")},
+      duplex_packet_ie_{field("SPI_IER", "DXPIE")}, remaining_{field("SPI_SR", "CTSIZE")},
+      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")},
+      tx_dma_enable_{field("SPI_CFG1", "TXDMAEN")}, rx_dma_enable_{field("SPI_CFG1", "RXDMAEN")},
       tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
       rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"}, mode_fault_flag_{field("SPI_SR", "MODF")},
       software_select_{field("SPI_CFG2", "SSM")}, select_input_{field("SPI_CR1", "SSI")},
@@ -407,17 +415,20 @@ spi::spi(
   {
     cleared_on_enable_.push_back(field("SPI_SR", name));
   }
-  for(auto const& [reg_name, name] : std::array<std::pair<std::string_view, std::string_view>, 5>{
+  for(auto const& [reg_name, name] : std::array<std::pair<std::string_view, std::string_view>, 4>{
           {
            {"SPI_CFG1", "CRCEN"},
            {"SPI_CFG2", "SP"},
            {"SPI_CFG2", "MIDI"},
            {"SPI_CFG2", "MSSI"},
-           {"SPI_AUTOCR", "TRIGEN"},
            }
   })
   {
     unsupported_.push_back(field(reg_name, name));
+  }
+  if(variant.autocr)
+  {
+    unsupported_.push_back(field("SPI_AUTOCR", "TRIGEN"));
   }
 }
 
@@ -780,7 +791,7 @@ void spi::flags()
   update(
       regs_, rx_level_,
       frame_bits() <= 16 ? static_cast<std::uint32_t>(bytes % 4 / frame_occupancy()) : 0);
-  update(regs_, remaining_, not limited_ and size > state_.done ? size - state_.done : 0);
+  update(regs_, remaining_, counted_ and size > state_.done ? size - state_.done : 0);
   regs_.poke(receive_.offset, state_.rx_fifo.empty() ? 0 : state_.rx_fifo.front());
   auto const up    = get(regs_, enable_) != 0;
   auto       level = false;
@@ -1240,15 +1251,15 @@ void spi::load(std::span<std::byte const> in)
 }
 }
 
-auto spi_factory(board const& b) -> model_factory
+auto spi_factory(board const& b, spi_variant variant) -> model_factory
 {
-  return [devices = b.spi, controllers = b.spi_controllers](
-             model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+  return [devices = b.spi, controllers = b.spi_controllers,
+          variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     auto const found      = devices.find(desc.name);
     auto const controller = controllers.find(desc.name);
     return std::make_shared<spi>(
         ctx, desc, found != devices.end() ? found->second : std::vector<spi_attachment>{},
-        controller != controllers.end() ? controller->second : nullptr);
+        controller != controllers.end() ? controller->second : nullptr, variant);
   };
 }
 }

@@ -1,4 +1,5 @@
 #include "stm32_fixture.hpp"
+#include "voltage_range.hpp"
 
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
@@ -209,4 +210,69 @@ TEST_CASE("the first PWR_CR1 write logs its LPMS mode, Stop 0 included")
       f.target->model("PWR")->on_write(regs, cr1->offset, 4, 0, 0, {.pc = 0, .now = icount{0}}));
   REQUIRE(logged.size() == 1);
   CHECK(logged.front().message.contains("stop0"));
+}
+
+TEST_CASE("RM0456 10.10.4: active_level() maps every ACTVOS code to a level, range 1 is level 0")
+{
+  stm32_fixture f{u575(), "pwr_ll", popcorn::testing::stm32_options()};
+  auto* const   source = dynamic_cast<stm32::voltage_range_source*>(f.target->model("PWR"));
+  REQUIRE(source != nullptr);
+  auto&       regs  = f.target->peripheral("PWR");
+  auto const* svmsr = popcorn::find_register(regs.description(), std::string_view{"PWR_SVMSR"});
+  auto const  active =
+      std::ranges::find(svmsr->fields, std::string_view{"ACTVOS"}, &popcorn::field_desc::name);
+  REQUIRE(active != svmsr->fields.end());
+  auto const shift = 8 * (svmsr->offset % 4) + active->lsb;
+  auto const word  = svmsr->offset & ~3u;
+  auto const mask  = std::uint32_t{3} << shift;
+  for(std::uint32_t code = 0; code < 4; ++code)
+  {
+    CAPTURE(code);
+    regs.poke(word, (regs.peek(word) & ~mask) | (code << shift));
+    CHECK(source->active_level() == 3 - code);
+  }
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  CHECK(source->active_level() == 0);
+}
+
+TEST_CASE("RM0456 10.10.4: a lower VOS range keeps VOSRDY, a higher one clears it until the delay")
+{
+  stm32_fixture           f{u575(), "pwr_ll", popcorn::testing::stm32_options()};
+  constexpr std::uint32_t loop_at = 0x2000'0100;
+  REQUIRE(f.target->mem().write(loop_at, 4, 0xE7FD'BF30).has_value());
+  f.set("pc", loop_at | 1u);
+  auto const& pwr    = f.target->peripheral("PWR").description();
+  auto const  vosr   = pwr.base + popcorn::find_register(pwr, "PWR_VOSR")->offset;
+  auto const  run_us = [&](std::uint64_t us) {
+    auto const until = popcorn::vtime{f.target->virtual_clock().time().ps + us * 1'000'000};
+    REQUIRE(
+        f.run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = until}).reason
+        == stop_reason::time);
+  };
+  REQUIRE(field(f, "PWR_VOSR", "VOSRDY") == 1);
+  REQUIRE(f.target->mem().write(vosr, 4, 3u << 16).has_value());
+  CHECK(field(f, "PWR_VOSR", "VOSRDY") == 0);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOSRDY") == 0);
+  run_us(60);
+  CHECK(field(f, "PWR_VOSR", "VOSRDY") == 1);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOS") == 3);
+  REQUIRE(f.target->mem().write(vosr, 4, 1u << 16).has_value());
+  CHECK(field(f, "PWR_VOSR", "VOSRDY") == 1);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOSRDY") == 0);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOS") == 3);
+  run_us(60);
+  CHECK(field(f, "PWR_VOSR", "VOSRDY") == 1);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOSRDY") == 1);
+  CHECK(field(f, "PWR_SVMSR", "ACTVOS") == 1);
+}
+
+TEST_CASE("coverage classifies the PWR_SVMSR polls of the voltage change as served")
+{
+  stm32_fixture f{u575(), "pwr_ll", popcorn::testing::stm32_options()};
+  f.target->enable_coverage({}, true);
+  REQUIRE(f.run_to_stop().reason == stop_reason::user);
+  auto const found = f.target->coverage().unmodelled;
+  CHECK(std::ranges::none_of(found, [](core::unmodelled_access const& access) {
+    return access.peripheral == "PWR" and access.reg == "SVMSR";
+  }));
 }

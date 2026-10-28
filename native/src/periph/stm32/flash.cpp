@@ -3,9 +3,11 @@
 #include "gtzc.hpp"
 #include "hsi16_source.hpp"
 #include "model_base.hpp"
+#include "temporal_isolation.hpp"
 #include "voltage_range.hpp"
 
 #include <popcorn/core/types.hpp>
+#include <popcorn/periph/firewall.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 
 #include <algorithm>
@@ -37,10 +39,7 @@ constexpr std::uint32_t key1          = 0x4567'0123;
 constexpr std::uint32_t key2          = 0xcdef'89ab;
 constexpr std::uint32_t option_key1   = 0x0819'2a3b;
 constexpr std::uint32_t option_key2   = 0x4c5d'6e7f;
-constexpr std::uint32_t quad_word     = 16;
-constexpr std::uint32_t burst_size    = 8 * quad_word;
-constexpr std::uint32_t burst_words   = burst_size / 4;
-constexpr std::uint32_t page_size     = 8 * 1024;
+constexpr std::uint32_t buffer_words  = 32;
 constexpr std::uint32_t operation_end = 0;
 
 enum class operation : std::uint8_t
@@ -65,23 +64,23 @@ struct held_store
 
 struct flash_state
 {
-  bool                                   first_key{};
-  bool                                   locked_up{};
-  bool                                   option_first_key{};
-  bool                                   option_locked_up{};
-  std::array<std::uint32_t, burst_words> buffer{};
-  std::uint32_t                          filled{};
-  bool                                   burst{};
-  std::uint32_t                          buffer_addr{};
-  std::uint8_t                           running{};
-  std::uint32_t                          target{};
-  std::uint32_t                          length{};
-  std::uint32_t                          generation{};
-  std::vector<held_store>                held{};
-  std::uint64_t                          due_ps{};
-  std::vector<std::uint32_t>             torn{};
-  std::vector<std::uint32_t>             wrp{};
-  std::vector<std::uint32_t>             wrp_active{};
+  bool                                    first_key{};
+  bool                                    locked_up{};
+  bool                                    option_first_key{};
+  bool                                    option_locked_up{};
+  std::array<std::uint32_t, buffer_words> buffer{};
+  std::uint32_t                           filled{};
+  bool                                    burst{};
+  std::uint32_t                           buffer_addr{};
+  std::uint8_t                            running{};
+  std::uint32_t                           target{};
+  std::uint32_t                           length{};
+  std::uint32_t                           generation{};
+  std::vector<held_store>                 held{};
+  std::uint64_t                           due_ps{};
+  std::vector<std::uint32_t>              torn{};
+  std::vector<std::uint32_t>              wrp{};
+  std::vector<std::uint32_t>              wrp_active{};
 
   friend auto operator==(flash_state const&, flash_state const&) -> bool = default;
 };
@@ -112,82 +111,377 @@ struct trustzone_flash_state
 enum class set_role : std::uint8_t
 {
   lock,
-  option_lock,
-  start,
-  option_start,
-  option_load,
   program,
+  start,
+  end,
+  end_irq,
+  busy,
+  buffer_open,
   page_erase,
+  page,
+  bank_select,
   bank1_erase,
   bank2_erase,
-  page,
-  bank,
   burst,
-  end_irq,
+  sector_erase,
+  sector,
+  bank_erase,
+  mass_erase,
+  force_write,
   error_irq,
-  end,
   operation_error,
   program_error,
   protection_error,
   alignment_error,
   size_error,
   sequence_error,
-  option_error,
-  busy,
-  waiting,
+  strobe_error,
+  inconsistency_error,
+  protection_irq,
+  sequence_irq,
+  strobe_irq,
+  inconsistency_irq,
 };
 
-constexpr std::array<named_field<set_role>, 24> u5_set_fields{
+constexpr std::array<named_field<set_role>, 31> u5_set_fields{
     {
      {set_role::lock, {"CR", "LOCK"}},
-     {set_role::option_lock, {"CR", "OPTLOCK", true}},
-     {set_role::start, {"CR", "STRT"}},
-     {set_role::option_start, {"CR", "OPTSTRT", true}},
-     {set_role::option_load, {"CR", "OBL_LAUNCH", true}},
      {set_role::program, {"CR", "PG"}},
+     {set_role::start, {"CR", "STRT"}},
+     {set_role::end, {"SR", "EOP"}},
+     {set_role::end_irq, {"CR", "EOPIE"}},
+     {set_role::busy, {"SR", "BSY"}},
+     {set_role::buffer_open, {"SR", "WDW"}},
      {set_role::page_erase, {"CR", "PER"}},
+     {set_role::page, {"CR", "PNB"}},
+     {set_role::bank_select, {"CR", "BKER"}},
      {set_role::bank1_erase, {"CR", "MER1"}},
      {set_role::bank2_erase, {"CR", "MER2"}},
-     {set_role::page, {"CR", "PNB"}},
-     {set_role::bank, {"CR", "BKER"}},
      {set_role::burst, {"CR", "BWR"}},
-     {set_role::end_irq, {"CR", "EOPIE"}},
+     {set_role::sector_erase, {}},
+     {set_role::sector, {}},
+     {set_role::bank_erase, {}},
+     {set_role::mass_erase, {}},
+     {set_role::force_write, {}},
      {set_role::error_irq, {"CR", "ERRIE"}},
-     {set_role::end, {"SR", "EOP"}},
      {set_role::operation_error, {"SR", "OPERR"}},
      {set_role::program_error, {"SR", "PROGERR"}},
      {set_role::protection_error, {"SR", "WRPERR"}},
      {set_role::alignment_error, {"SR", "PGAERR"}},
      {set_role::size_error, {"SR", "SIZERR"}},
      {set_role::sequence_error, {"SR", "PGSERR"}},
-     {set_role::option_error, {"SR", "OPTWERR", true}},
-     {set_role::busy, {"SR", "BSY"}},
-     {set_role::waiting, {"SR", "WDW"}},
+     {set_role::strobe_error, {}},
+     {set_role::inconsistency_error, {}},
+     {set_role::protection_irq, {}},
+     {set_role::sequence_irq, {}},
+     {set_role::strobe_irq, {}},
+     {set_role::inconsistency_irq, {}},
      }
 };
-static_assert(names_every_role(u5_set_fields));
 
-constexpr std::array<set_role, 6> error_roles{
-    set_role::program_error,    set_role::size_error,     set_role::alignment_error,
-    set_role::protection_error, set_role::sequence_error, set_role::option_error,
+constexpr std::array<named_field<set_role>, 31> h5_set_fields{
+    {
+     {set_role::lock, {"CR", "LOCK"}},
+     {set_role::program, {"CR", "PG"}},
+     {set_role::start, {"CR", "STRT"}},
+     {set_role::end, {"SR", "EOP"}},
+     {set_role::end_irq, {"CR", "EOPIE"}},
+     {set_role::busy, {"SR", "BSY"}},
+     {set_role::buffer_open, {"SR", "WBNE"}},
+     {set_role::page_erase, {}},
+     {set_role::page, {}},
+     {set_role::bank_select, {"CR", "BKSEL"}},
+     {set_role::bank1_erase, {}},
+     {set_role::bank2_erase, {}},
+     {set_role::burst, {}},
+     {set_role::sector_erase, {"CR", "SER"}},
+     {set_role::sector, {"CR", "SNB"}},
+     {set_role::bank_erase, {"CR", "BER"}},
+     {set_role::mass_erase, {"CR", "MER"}},
+     {set_role::force_write, {"CR", "FW"}},
+     {set_role::error_irq, {}},
+     {set_role::operation_error, {}},
+     {set_role::program_error, {}},
+     {set_role::protection_error, {"SR", "WRPERR"}},
+     {set_role::alignment_error, {}},
+     {set_role::size_error, {}},
+     {set_role::sequence_error, {"SR", "PGSERR"}},
+     {set_role::strobe_error, {"SR", "STRBERR"}},
+     {set_role::inconsistency_error, {"SR", "INCERR"}},
+     {set_role::protection_irq, {"CR", "WRPERRIE"}},
+     {set_role::sequence_irq, {"CR", "PGSERRIE"}},
+     {set_role::strobe_irq, {"CR", "STRBERRIE"}},
+     {set_role::inconsistency_irq, {"CR", "INCERRIE"}},
+     }
 };
 
-constexpr std::array<std::string_view, 16> secure_block_registers{
-    "FLASH_SEC1BBR1", "FLASH_SEC1BBR2", "FLASH_SEC1BBR3", "FLASH_SEC1BBR4",
-    "FLASH_SEC1BBR5", "FLASH_SEC1BBR6", "FLASH_SEC1BBR7", "FLASH_SEC1BBR8",
-    "FLASH_SEC2BBR1", "FLASH_SEC2BBR2", "FLASH_SEC2BBR3", "FLASH_SEC2BBR4",
-    "FLASH_SEC2BBR5", "FLASH_SEC2BBR6", "FLASH_SEC2BBR7", "FLASH_SEC2BBR8",
+enum class unit_role : std::uint8_t
+{
+  latency,
+  programming_delay,
+  low_power_read,
+  ecc_detect,
+  ecc_correct,
+  ecc_bank,
+  ecc_address,
+  invert,
+  hide_bank1,
+  hide_bank2,
+  hide_extension1,
+  hide_extension2,
+  option_lock,
+  option_start,
+  option_load,
+  option_error,
+  option_error_irq,
+  option_swap,
 };
 
-constexpr std::array<std::string_view, 16> privileged_block_registers{
-    "FLASH_PRIV1BBR1", "FLASH_PRIV1BBR2", "FLASH_PRIV1BBR3", "FLASH_PRIV1BBR4",
-    "FLASH_PRIV1BBR5", "FLASH_PRIV1BBR6", "FLASH_PRIV1BBR7", "FLASH_PRIV1BBR8",
-    "FLASH_PRIV2BBR1", "FLASH_PRIV2BBR2", "FLASH_PRIV2BBR3", "FLASH_PRIV2BBR4",
-    "FLASH_PRIV2BBR5", "FLASH_PRIV2BBR6", "FLASH_PRIV2BBR7", "FLASH_PRIV2BBR8",
+constexpr std::array<named_field<unit_role>, 18> u5_unit_fields{
+    {
+     {unit_role::latency, {"FLASH_ACR", "LATENCY"}},
+     {unit_role::programming_delay, {}},
+     {unit_role::low_power_read, {"FLASH_ACR", "LPM"}},
+     {unit_role::ecc_detect, {"FLASH_ECCR", "ECCD"}},
+     {unit_role::ecc_correct, {"FLASH_ECCR", "ECCC"}},
+     {unit_role::ecc_bank, {"FLASH_ECCR", "BK_ECC"}},
+     {unit_role::ecc_address, {"FLASH_ECCR", "ADDR_ECC"}},
+     {unit_role::invert, {"FLASH_SECCR", "INV"}},
+     {unit_role::hide_bank1, {"FLASH_SECHDPCR", "HDP1_ACCDIS"}},
+     {unit_role::hide_bank2, {"FLASH_SECHDPCR", "HDP2_ACCDIS"}},
+     {unit_role::hide_extension1, {}},
+     {unit_role::hide_extension2, {}},
+     {unit_role::option_lock, {"FLASH_NSCR", "OPTLOCK"}},
+     {unit_role::option_start, {"FLASH_NSCR", "OPTSTRT"}},
+     {unit_role::option_load, {"FLASH_NSCR", "OBL_LAUNCH"}},
+     {unit_role::option_error, {"FLASH_NSSR", "OPTWERR"}},
+     {unit_role::option_error_irq, {}},
+     {unit_role::option_swap, {}},
+     }
 };
 
-constexpr std::size_t block_registers_per_bank = 8;
+constexpr std::array<named_field<unit_role>, 18> h5_unit_fields{
+    {
+     {unit_role::latency, {"FLASH_ACR", "LATENCY"}},
+     {unit_role::programming_delay, {"FLASH_ACR", "WRHIGHFREQ"}},
+     {unit_role::low_power_read, {}},
+     {unit_role::ecc_detect, {"FLASH_ECCDETR", "ECCD"}},
+     {unit_role::ecc_correct, {"FLASH_ECCCORR", "ECCC"}},
+     {unit_role::ecc_bank, {"FLASH_ECCDETR", "BK_ECC"}},
+     {unit_role::ecc_address, {"FLASH_ECCDETR", "ADDR_ECC"}},
+     {unit_role::invert, {"FLASH_SECCR", "INV"}},
+     {unit_role::hide_bank1, {}},
+     {unit_role::hide_bank2, {}},
+     {unit_role::hide_extension1, {"FLASH_HDPEXTR", "HDP1_EXT"}},
+     {unit_role::hide_extension2, {"FLASH_HDPEXTR", "HDP2_EXT"}},
+     {unit_role::option_lock, {"FLASH_OPTCR", "OPTLOCK"}},
+     {unit_role::option_start, {"FLASH_OPTCR", "OPTSTRT"}},
+     {unit_role::option_load, {}},
+     {unit_role::option_error, {"FLASH_NSSR", "OPTCHANGEERR"}},
+     {unit_role::option_error_irq, {"FLASH_NSCR", "OPTCHANGEERRIE"}},
+     {unit_role::option_swap, {"FLASH_OPTCR", "SWAP_BANK"}},
+     }
+};
+
+enum class privilege_role : std::uint8_t
+{
+  nonsecure,
+  secure,
+};
+
+constexpr std::array<named_field<privilege_role>, 2> u5_privilege_fields{
+    {
+     {privilege_role::nonsecure, {"FLASH_PRIVCFGR", "NSPRIV"}},
+     {privilege_role::secure, {"FLASH_PRIVCFGR", "SPRIV"}},
+     }
+};
+
+constexpr std::array<set_role, 7> error_roles{
+    set_role::program_error,       set_role::size_error,     set_role::alignment_error,
+    set_role::protection_error,    set_role::sequence_error, set_role::strobe_error,
+    set_role::inconsistency_error,
+};
+
+/** @brief An error flag and the enable that raises the FLASH interrupt while it is set. */
+struct error_enable
+{
+  /** @brief Error flag role. */
+  set_role flag{};
+  /** @brief Interrupt enable role. */
+  set_role enable{};
+};
+
+/**
+ * @brief Register a role names in @p table, found by role, empty when the family lacks it.
+ * @param table Name table of one family.
+ * @param role Role to find.
+ */
+template <typename Role>
+consteval auto register_of(std::span<named_field<Role> const> table, Role role) -> std::string_view
+{
+  auto const found = std::ranges::find(table, role, &named_field<Role>::role);
+  return found == table.end() ? std::string_view{} : found->name.reg;
+}
+
+/**
+ * @brief Whether every named role of a register set table lives in its `CR` or its `SR`.
+ * @param table Set role names of one family.
+ */
+consteval auto names_control_or_status(std::span<named_field<set_role> const> table) -> bool
+{
+  return std::ranges::all_of(table, [](named_field<set_role> const& entry) {
+    return entry.name.reg.empty() or entry.name.reg == "CR" or entry.name.reg == "SR";
+  });
+}
+
 constexpr std::size_t pages_per_block_register = 32;
+
+/** @brief What decides whether a page lies in a closed HDP area. */
+struct hide_inputs
+{
+  /** @brief Watermark option word of the page's bank. */
+  std::uint32_t watermark{};
+  /** @brief HDP option word of the page's bank. */
+  std::uint32_t area{};
+  /** @brief Access disable bit of the bank, set. */
+  bool access_disabled{};
+  /** @brief Extension of the bank's HDP area in pages. */
+  std::uint32_t extension{};
+  /** @brief Temporal isolation level HDPL. */
+  std::uint8_t level{};
+  /** @brief Page in its bank. */
+  std::uint32_t page{};
+  /** @brief Mask of a page number field. */
+  std::uint32_t top{};
+};
+
+/**
+ * @brief The memory filter of a flash's closed HDP sectors on a machine without TrustZone,
+ *        installed by the flash model. A load of a closed sector reads zero, a store to it
+ *        reaches the flash model, which refuses it, and a fetch from it is a BusFault. Every
+ *        other memory access and every peripheral access passes.
+ */
+class hide_filter final : public bus_firewall
+{
+public:
+  hide_filter(
+      secure_page_controller const& pages,
+      std::span<region_desc const>  regions,
+      std::string_view              controller,
+      std::uint32_t                 sector)
+      : pages_{pages}, sector_{sector}
+  {
+    for(auto const& region : regions)
+    {
+      if(region.controller == controller)
+      {
+        windows_.push_back({.start = region.start, .size = region.size});
+      }
+    }
+  }
+
+  [[nodiscard]] auto check_peripheral(std::size_t, bus_attrs, arch::memory_op)
+      -> bus_verdict override
+  {
+    return bus_verdict::allow;
+  }
+
+  [[nodiscard]] auto filters_memory() const -> bool override
+  {
+    return true;
+  }
+
+  [[nodiscard]] auto
+      memory_page(address page, std::uint32_t size, address at, bus_attrs, arch::memory_op op)
+          -> page_verdict override
+  {
+    if(window_at(at) == nullptr)
+    {
+      return {};
+    }
+    page_verdict verdict;
+    auto const   step   = std::min(sector_, size);
+    auto const   denied = hidden(at);
+    for(auto part = page; part - page < size; part += step)
+    {
+      auto const closed   = hidden(part);
+      verdict.filter_data = verdict.filter_data or closed;
+      verdict.fetch_each  = verdict.fetch_each or closed != denied;
+    }
+    verdict.deny_fetch = denied;
+    if(verdict.fetch_each and op == arch::memory_op::fetch)
+    {
+      verdict.fetch_window_shift = static_cast<std::uint8_t>(std::countr_zero(step));
+    }
+    return verdict;
+  }
+
+  [[nodiscard]] auto check_memory(address at, std::uint8_t, bus_attrs attrs, arch::memory_op op)
+      -> bus_verdict override
+  {
+    if(op == arch::memory_op::write and attrs.by != initiator::debugger)
+    {
+      return bus_verdict::allow;
+    }
+    return hidden(at) ? bus_verdict::read_zero_write_ignore : bus_verdict::allow;
+  }
+
+  [[nodiscard]] auto allowed_extent(address at, std::uint8_t, bus_attrs attrs, arch::memory_op op)
+      -> memory_extent override
+  {
+    auto const* const found = window_at(at);
+    if(found == nullptr)
+    {
+      std::uint64_t first = 0;
+      std::uint64_t last  = ~address{};
+      for(auto const& w : windows_)
+      {
+        auto const end = std::uint64_t{w.start} + w.size;
+        if(end <= at)
+        {
+          first = std::max(first, end);
+        }
+        else if(w.start > at)
+        {
+          last = std::min<std::uint64_t>(last, w.start - 1u);
+        }
+      }
+      return {.first = static_cast<address>(first), .last = static_cast<address>(last)};
+    }
+    auto const window_last = static_cast<address>(found->start + (found->size - 1u));
+    if(op == arch::memory_op::write and attrs.by != initiator::debugger)
+    {
+      return {.first = found->start, .last = window_last};
+    }
+    auto const unit = std::uint64_t{at} - ((at - found->start) % sector_);
+    return {
+        .first = static_cast<address>(std::max<std::uint64_t>(found->start, unit)),
+        .last  = static_cast<address>(std::min<std::uint64_t>(window_last, unit + sector_ - 1u))};
+  }
+
+private:
+  struct window
+  {
+    address       start{};
+    std::uint32_t size{};
+  };
+
+  [[nodiscard]] auto window_at(address at) const -> window const*
+  {
+    auto const found = std::ranges::find_if(
+        windows_, [at](window const& w) { return at >= w.start and at - w.start < w.size; });
+    return found != windows_.end() ? &*found : nullptr;
+  }
+
+  [[nodiscard]] auto hidden(address at) const -> bool
+  {
+    return window_at(at) != nullptr and pages_.page_rule(at).value_or(page_policy{}).hidden;
+  }
+
+  secure_page_controller const& pages_;
+  std::uint32_t                 sector_;
+  std::vector<window>           windows_;
+};
 
 void drive(irq_line& line, bool level)
 {
@@ -218,29 +512,22 @@ struct bank_geometry
   std::uint32_t size{};
 };
 
-struct option_words
+/** @brief Encoded option registers, in the order of the traits' option_registers. */
+template <std::size_t N> struct option_words
 {
-  std::uint32_t optr{};
-  std::uint32_t nsbootadd0r{};
-  std::uint32_t nsbootadd1r{};
-  std::uint32_t secbootadd0r{};
-  std::uint32_t secwm1r1{};
-  std::uint32_t secwm1r2{};
-  std::uint32_t secwm2r1{};
-  std::uint32_t secwm2r2{};
-  address       boot{};
+  /** @brief One word per option register. */
+  std::array<std::uint32_t, N> words{};
+  /** @brief Boot address the option bytes select. */
+  address boot{};
 };
 
-constexpr std::array<std::string_view, 8> option_registers{
-    "FLASH_OPTR",     "FLASH_NSBOOTADD0R", "FLASH_NSBOOTADD1R", "FLASH_SECBOOTADD0R",
-    "FLASH_SECWM1R1", "FLASH_SECWM1R2",    "FLASH_SECWM2R1",    "FLASH_SECWM2R2",
-};
-
-constexpr std::array<std::string_view, 4> wrp_registers{
-    "FLASH_WRP1AR",
-    "FLASH_WRP1BR",
-    "FLASH_WRP2AR",
-    "FLASH_WRP2BR",
+/** @brief A write protection register firmware programs and the register that reads it back. */
+struct wrp_names
+{
+  /** @brief Register OPTSTRT programs from. */
+  std::string_view program;
+  /** @brief Register that reads the loaded protection. */
+  std::string_view active;
 };
 
 constexpr std::uint32_t wrp_unlock = 1u << 31;
@@ -328,9 +615,687 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
   return std::max(*normal, needed);
 }
 
+/** @brief Registers of one FLASH register set. */
+struct set_names
+{
+  /** @brief Key register. */
+  std::string_view key;
+  /** @brief Control register, the `CR` of the set roles. */
+  std::string_view control;
+  /** @brief Status register, the `SR` of the set roles. */
+  std::string_view status;
+  /** @brief Register whose bits clear the status flags through the description's cross rules,
+   * empty when the status register clears by writing 1. */
+  std::string_view clear{};
+};
+
+/** @brief Erase a control register word asks for, before any range check. */
+struct erase_command
+{
+  /** @brief Page, bank or mass erase. */
+  operation op{};
+  /** @brief Bank of a page or bank erase. */
+  std::uint32_t bank{};
+  /** @brief Page in its bank of a page erase. */
+  std::uint32_t page{};
+};
+
+/** @brief STM32U5 FLASH traits, RM0456 section 7, each capability tied to its roles. */
+struct u5_flash
+{
+  /** @brief BWR collects a burst of 8 quad-words, RM0456 7.3.7. */
+  static constexpr bool burst_write = true;
+  /** @brief FW forces a partly filled write buffer out. */
+  static constexpr bool force_write = false;
+  /** @brief PER, PNB, MER1 and MER2 select the erase, RM0456 7.3.6. */
+  static constexpr bool erase_by_page = true;
+  /** @brief OPERR with ERRIE summarizes every error, RM0456 7.3.9. */
+  static constexpr bool summary_error = true;
+  /** @brief OBL_LAUNCH requests an option byte loader reset, RM0456 7.4.2. */
+  static constexpr bool option_load = true;
+  /** @brief Each error flag has its own interrupt enable. */
+  static constexpr bool per_error_irq = false;
+  /** @brief EOP sets at the end of every operation, EOPIE clear too. */
+  static constexpr bool end_flag_always = false;
+  /** @brief PG or STRT keeps HSI16 on through the RCC model, RM0456 7.3.1. */
+  static constexpr bool holds_hsi16 = true;
+  /** @brief The option key sequence needs FLASH_NSCR.LOCK clear, RM0456 7.4.2. */
+  static constexpr bool option_key_needs_unlock = true;
+  /** @brief A completed OPTSTRT loads the programmed protection at once. */
+  static constexpr bool option_reload_on_start = false;
+  /** @brief The Secure hide protection area lies in a Secure watermark area, RM0456 7.5.3, so
+   *         only a TrustZone machine closes it. */
+  static constexpr bool hide_without_trustzone = false;
+  /** @brief Clearing ECCD also clears the address and bank it recorded. */
+  static constexpr bool ecc_record_clears = false;
+  /** @brief Control field the out-of-range page warning names. */
+  static constexpr std::string_view page_field = "PNB";
+  /** @brief Datasheet times of an empty flash_options field. */
+  static constexpr flash_timing timing = u5_flash_timing;
+  /** @brief Error flags with their own interrupt enable. */
+  static constexpr std::span<error_enable const> error_enables{};
+  /** @brief Bytes of one program, a quad-word, RM0456 7.3.7. */
+  static constexpr std::uint32_t program_bytes = 16;
+  /** @brief Bytes of the write buffer, a burst of 8 quad-words. */
+  static constexpr std::uint32_t buffer_bytes = 8 * program_bytes;
+  /** @brief Bytes of an erase page, RM0456 7.3.6. */
+  static constexpr std::uint32_t page_bytes = 8 * 1024;
+  /** @brief Section the latency warnings cite. */
+  static constexpr std::string_view latency_section = "RM0456 7.3.3";
+  /** @brief Register sets, the Non-secure one first, then the Secure one. */
+  static constexpr std::array<set_names, 2> set_registers{
+      {
+       {"FLASH_NSKEYR", "FLASH_NSCR", "FLASH_NSSR"},
+       {"FLASH_SECKEYR", "FLASH_SECCR", "FLASH_SECSR"},
+       }
+  };
+  /** @brief Role names of each register set. */
+  static constexpr std::span<named_field<set_role> const> set_fields = u5_set_fields;
+  /** @brief Role names of the fields outside the register sets. */
+  static constexpr std::span<named_field<unit_role> const> unit_fields = u5_unit_fields;
+  /** @brief Role names of the TrustZone privilege fields. */
+  static constexpr std::span<named_field<privilege_role> const> privilege_fields =
+      u5_privilege_fields;
+  /** @brief Option registers loaded from flash_options::option_bytes, in option_words order. */
+  static constexpr std::array<std::string_view, 8> option_registers{
+      "FLASH_OPTR",     "FLASH_NSBOOTADD0R", "FLASH_NSBOOTADD1R", "FLASH_SECBOOTADD0R",
+      "FLASH_SECWM1R1", "FLASH_SECWM1R2",    "FLASH_SECWM2R1",    "FLASH_SECWM2R2",
+  };
+  /** @brief Option registers that read zero and ignore writes with TZEN = 0, RM0456 7.5.1. */
+  static constexpr std::array<std::string_view, 5> secure_option_registers{
+      "FLASH_SECBOOTADD0R", "FLASH_SECWM1R1", "FLASH_SECWM1R2", "FLASH_SECWM2R1", "FLASH_SECWM2R2",
+  };
+  /** @brief Registers firmware writes for OPTSTRT besides option_registers. */
+  static constexpr std::array<std::string_view, 0> option_staging_registers{};
+  /** @brief Write protection registers, bank 1 area A and B, then bank 2. */
+  static constexpr std::array<wrp_names, 4> wrp_registers{
+      {
+       {"FLASH_WRP1AR", "FLASH_WRP1AR"},
+       {"FLASH_WRP1BR", "FLASH_WRP1BR"},
+       {"FLASH_WRP2AR", "FLASH_WRP2AR"},
+       {"FLASH_WRP2BR", "FLASH_WRP2BR"},
+       }
+  };
+  /** @brief Registers the dropped-option warning names as the ones OPTSTRT programs. */
+  static constexpr std::string_view wrp_text = "FLASH_WRPxyR";
+  /** @brief Block-based security registers of bank 1, then bank 2, RM0456 7.9.30. */
+  static constexpr std::array<std::string_view, 16> secure_block_registers{
+      "FLASH_SEC1BBR1", "FLASH_SEC1BBR2", "FLASH_SEC1BBR3", "FLASH_SEC1BBR4",
+      "FLASH_SEC1BBR5", "FLASH_SEC1BBR6", "FLASH_SEC1BBR7", "FLASH_SEC1BBR8",
+      "FLASH_SEC2BBR1", "FLASH_SEC2BBR2", "FLASH_SEC2BBR3", "FLASH_SEC2BBR4",
+      "FLASH_SEC2BBR5", "FLASH_SEC2BBR6", "FLASH_SEC2BBR7", "FLASH_SEC2BBR8",
+  };
+  /** @brief Block-based privilege registers of bank 1, then bank 2, RM0456 7.9.32. */
+  static constexpr std::array<std::string_view, 16> privileged_block_registers{
+      "FLASH_PRIV1BBR1", "FLASH_PRIV1BBR2", "FLASH_PRIV1BBR3", "FLASH_PRIV1BBR4",
+      "FLASH_PRIV1BBR5", "FLASH_PRIV1BBR6", "FLASH_PRIV1BBR7", "FLASH_PRIV1BBR8",
+      "FLASH_PRIV2BBR1", "FLASH_PRIV2BBR2", "FLASH_PRIV2BBR3", "FLASH_PRIV2BBR4",
+      "FLASH_PRIV2BBR5", "FLASH_PRIV2BBR6", "FLASH_PRIV2BBR7", "FLASH_PRIV2BBR8",
+  };
+  /** @brief Block registers of one bank, 32 pages each. */
+  static constexpr std::size_t block_registers_per_bank = 8;
+  /** @brief Index in option_registers of the watermark word of bank 1 and bank 2. */
+  static constexpr std::array<std::size_t, 2> watermark_words{4, 6};
+  /** @brief Index in option_registers of the HDP word of bank 1 and bank 2. */
+  static constexpr std::array<std::size_t, 2> hide_words{5, 7};
+
+  /**
+   * @brief Whether a page lies in the closed HDP area of its bank, RM0456 7.5.3: HDPxEN and
+   *        HDPx_ACCDIS set, from SECWMx_PSTRT to HDPx_PEND.
+   * @param in Option words, bits and page of the bank.
+   */
+  [[nodiscard]] static constexpr auto hidden(hide_inputs const& in) -> bool
+  {
+    auto const start = in.watermark & in.top;
+    return (in.area & hdp_enable) != 0
+       and in.access_disabled
+       and start <= in.page
+       and in.page <= (in.area >> 16 & in.top);
+  }
+
+  /**
+   * @brief Highest page number of a SECWM, HDP or WRP field of @p part, RM0456 7.9.17.
+   * @param part Part name.
+   */
+  [[nodiscard]] static auto watermark_top(std::string_view part) -> std::uint32_t
+  {
+    return (1u << watermark_bits(part)) - 1;
+  }
+
+  /**
+   * @brief Bits of an option register a firmware write is compared on, the fields of the part.
+   * @param name Register name.
+   * @param part Part name.
+   */
+  [[nodiscard]] static auto option_mask(std::string_view name, std::string_view part)
+      -> std::uint32_t
+  {
+    auto const top = watermark_top(part);
+    if(name == "FLASH_SECWM1R1" or name == "FLASH_SECWM2R1")
+    {
+      return top | top << 16;
+    }
+    if(name == "FLASH_SECWM1R2" or name == "FLASH_SECWM2R2")
+    {
+      return hdp_enable | top << 16;
+    }
+    if(name == "FLASH_NSBOOTADD0R" or name == "FLASH_NSBOOTADD1R")
+    {
+      return ~nsboot_reserved;
+    }
+    if(name == "FLASH_SECBOOTADD0R")
+    {
+      return ~secboot_reserved;
+    }
+    return ~0u;
+  }
+
+  /**
+   * @brief Production value of a write protection register: PSTRT at the field maximum, PEND 0.
+   * @param part Part name.
+   */
+  [[nodiscard]] static auto wrp_production(std::string_view part) -> std::uint32_t
+  {
+    return ~(watermark_top(part) << 16);
+  }
+
+  /**
+   * @brief A written write protection word as the register stores it, other bits read 1.
+   * @param word Written word.
+   * @param part Part name.
+   */
+  [[nodiscard]] static auto wrp_normal(std::uint32_t word, std::string_view part) -> std::uint32_t
+  {
+    auto const top    = watermark_top(part);
+    auto const fields = wrp_unlock | top << 16 | top;
+    return (word & fields) | ~fields;
+  }
+
+  /**
+   * @brief Whether OPTSTRT refuses a change: a programmed word with UNLOCK 0 cannot change.
+   * @param programmed Programmed word.
+   * @param requested Requested word.
+   */
+  [[nodiscard]] static constexpr auto wrp_refused(std::uint32_t programmed, std::uint32_t requested)
+      -> bool
+  {
+    return requested != programmed and (programmed & wrp_unlock) == 0;
+  }
+
+  /**
+   * @brief Whether the loaded protection covers a page: PSTRT <= page <= PEND of area A or B.
+   * @param words Loaded words, wrp_registers order.
+   * @param bank Bank of the page, 0 or 1, following SWAP_BANK.
+   * @param page Page in its bank.
+   * @param part Part name.
+   */
+  [[nodiscard]] static auto wrp_covers(
+      std::span<std::uint32_t const> words,
+      std::uint32_t                  bank,
+      std::uint32_t                  page,
+      std::string_view               part) -> bool
+  {
+    auto const top = watermark_top(part);
+    return std::ranges::any_of(words.subspan(bank * 2, 2), [&](std::uint32_t word) {
+      return (word & top) <= page and page <= (word >> 16 & top);
+    });
+  }
+
+  /**
+   * @brief Least LATENCY RM0456 Tables 54 and 55 ask for, see required_wait_states.
+   * @param hclk HCLK in Hz.
+   * @param range Voltage range, 1 to 4.
+   * @param low_power FLASH_ACR.LPM.
+   * @return The least LATENCY, empty when HCLK is above the maximum of the range.
+   */
+  [[nodiscard]] static auto wait_states(std::uint64_t hclk, std::uint32_t range, bool low_power)
+      -> std::optional<std::uint32_t>
+  {
+    return required_wait_states(hclk, range, low_power);
+  }
+
+  /**
+   * @brief The STM32U5 has no programming delay field.
+   * @return Empty.
+   */
+  [[nodiscard]] static auto programming_delay(std::uint64_t, std::uint32_t)
+      -> std::optional<std::uint32_t>
+  {
+    return std::nullopt;
+  }
+
+  /**
+   * @brief FLASH_ECCR.ADDR_ECC of a failing quad-word, its byte offset in its bank.
+   * @param line Physical address of the quad-word.
+   * @param bank_base Physical address of its bank.
+   */
+  [[nodiscard]] static constexpr auto ecc_address(std::uint32_t line, std::uint32_t bank_base)
+      -> std::uint32_t
+  {
+    return line - bank_base;
+  }
+
+  /**
+   * @brief Whether a control word selects an erase: PER, MER1 or MER2, RM0456 7.3.6.
+   * @param field Value of a set role in the control word.
+   */
+  template <typename Field> [[nodiscard]] static auto erase_selected(Field const& field) -> bool
+  {
+    return field(set_role::page_erase) != 0
+        or field(set_role::bank1_erase) != 0
+        or field(set_role::bank2_erase) != 0;
+  }
+
+  /**
+   * @brief Whether a control word selects a page and a bank erase at once, RM0456 7.3.9.
+   * @param field Value of a set role in the control word.
+   */
+  template <typename Field> [[nodiscard]] static auto erase_conflict(Field const& field) -> bool
+  {
+    return field(set_role::page_erase) != 0
+       and (field(set_role::bank1_erase) != 0 or field(set_role::bank2_erase) != 0);
+  }
+
+  /**
+   * @brief Erase a control word asks for, RM0456 7.3.6: PER with PNB and BKER, else MER1 or
+   *        MER2 alone a bank, else both banks.
+   * @param field Value of a set role in the control word.
+   */
+  template <typename Field>
+  [[nodiscard]] static auto decode_erase(Field const& field) -> erase_command
+  {
+    if(field(set_role::page_erase) != 0)
+    {
+      return {
+          .op   = operation::page_erase,
+          .bank = field(set_role::bank_select),
+          .page = field(set_role::page)};
+    }
+    if(field(set_role::bank1_erase) == 0 or field(set_role::bank2_erase) == 0)
+    {
+      return {.op = operation::bank_erase, .bank = field(set_role::bank1_erase) != 0 ? 0u : 1u};
+    }
+    return {.op = operation::mass_erase};
+  }
+
+  /**
+   * @brief Encodes option bytes into the U5 option registers, after the checks of the class
+   *        documentation.
+   * @param part Part name, which selects the width of the page fields.
+   * @param flash_size Size of the flash, both banks.
+   * @param wanted Option bytes to encode.
+   * @return The register values and the boot address, or the first refusal in field order.
+   */
+  [[nodiscard]] static auto
+      encode_options(std::string_view part, std::uint32_t flash_size, option_bytes const& wanted)
+          -> std::expected<option_words<option_registers.size()>, option_refusal>;
+};
+
+static_assert(names_every_role(u5_set_fields));
+static_assert(names_every_role(u5_unit_fields));
+static_assert(names_every_role(u5_privilege_fields));
+static_assert(flag_matches_roles(u5_set_fields, u5_flash::burst_write, {set_role::burst}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
+    u5_flash::force_write,
+    {set_role::force_write, set_role::strobe_error, set_role::inconsistency_error}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
+    not u5_flash::force_write,
+    {set_role::size_error, set_role::alignment_error, set_role::program_error}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
+    u5_flash::erase_by_page,
+    {set_role::page_erase, set_role::page, set_role::bank1_erase, set_role::bank2_erase}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
+    not u5_flash::erase_by_page,
+    {set_role::sector_erase, set_role::sector, set_role::bank_erase, set_role::mass_erase}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
+    u5_flash::summary_error,
+    {set_role::operation_error, set_role::error_irq}));
+static_assert(flag_matches_roles(u5_unit_fields, u5_flash::option_load, {unit_role::option_load}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
+    u5_flash::per_error_irq,
+    {set_role::protection_irq, set_role::sequence_irq, set_role::strobe_irq,
+     set_role::inconsistency_irq}));
+
+constexpr std::array<std::array<std::uint64_t, 6>, 4> vos_read_max_mhz{
+    {
+     {42, 84, 126, 168, 210, 250},
+     {34, 68, 102, 136, 170, 200},
+     {30, 60, 90, 120, 150, 0},
+     {20, 40, 60, 80, 100, 0},
+     }
+};
+
+constexpr std::array<error_enable, 4> h5_error_enables{
+    {
+     {.flag = set_role::protection_error, .enable = set_role::protection_irq},
+     {.flag = set_role::sequence_error, .enable = set_role::sequence_irq},
+     {.flag = set_role::strobe_error, .enable = set_role::strobe_irq},
+     {.flag = set_role::inconsistency_error, .enable = set_role::inconsistency_irq},
+     }
+};
+
+constexpr std::string_view u5_ip_version = "v1.0.0_U5_Cube";
+constexpr std::string_view h5_ip_version = "v1.0.0_H5_Cube";
+
+constexpr std::uint32_t optsr_production  = 0x2d30'edf8;
+constexpr std::uint32_t optsr_swap_bank   = 1u << 31;
+constexpr std::uint32_t optsr2_production = 0x0000'017c;
+constexpr std::uint32_t tzen_enabled      = 0xb4;
+constexpr std::uint32_t tzen_disabled     = 0xc3;
+constexpr std::uint32_t boot_unlocked     = 0xc3;
+constexpr std::uint32_t h5_boot_granule   = 256;
+constexpr std::uint32_t sector_top        = 0x7f;
+
+/** @brief STM32H5 FLASH traits, RM0481 section 7, each capability tied to its roles. */
+struct h5_flash
+{
+  /** @brief No burst programming, RM0481 7.3.5. */
+  static constexpr bool burst_write = false;
+  /** @brief FW forces a partly filled write buffer out, RM0481 7.11.11. */
+  static constexpr bool force_write = true;
+  /** @brief SER, SNB, BER and MER select the erase, RM0481 7.3.6. */
+  static constexpr bool erase_by_page = false;
+  /** @brief No summary error flag, RM0481 7.9. */
+  static constexpr bool summary_error = false;
+  /** @brief No option byte loader reset, RM0481 7.4.2. */
+  static constexpr bool option_load = false;
+  /** @brief Each error flag has its own interrupt enable, RM0481 7.11.11. */
+  static constexpr bool per_error_irq = true;
+  /** @brief EOP sets at the end of every operation, RM0481 7.11.9. */
+  static constexpr bool end_flag_always = true;
+  /** @brief No oscillator is held for flash operations, RM0481 7.3.12. */
+  static constexpr bool holds_hsi16 = false;
+  /** @brief The option key sequence works with FLASH_NSCR locked, RM0481 7.6.7. */
+  static constexpr bool option_key_needs_unlock = false;
+  /** @brief A completed OPTSTRT reloads the _CUR registers, RM0481 7.4.3. */
+  static constexpr bool option_reload_on_start = true;
+  /** @brief HDPL closes the HDP areas with TZ_STATE 0xC3 too, RM0481 7.6.2 and Table 63, and
+   *         Table 72 note 1. */
+  static constexpr bool hide_without_trustzone = true;
+  /** @brief Clearing ECCD clears FLASH_ECCDETR, RM0481 7.9.10. */
+  static constexpr bool ecc_record_clears = true;
+  /** @brief Control field the out-of-range sector warning names. */
+  static constexpr std::string_view page_field = "SNB";
+  /** @brief Datasheet times of an empty flash_options field. */
+  static constexpr flash_timing timing = h5_flash_timing;
+  /** @brief Error flags with their own interrupt enable, RM0481 7.11.11 bits 17 to 20. */
+  static constexpr std::span<error_enable const> error_enables = h5_error_enables;
+  /** @brief Bytes of one program, a 128-bit flash word, RM0481 7.3.5. */
+  static constexpr std::uint32_t program_bytes = 16;
+  /** @brief Bytes of the write buffer, one flash word. */
+  static constexpr std::uint32_t buffer_bytes = program_bytes;
+  /** @brief Bytes of an erase sector, RM0481 7.3.3. */
+  static constexpr std::uint32_t page_bytes = 8 * 1024;
+  /** @brief Section the latency warnings cite. */
+  static constexpr std::string_view latency_section = "RM0481 Table 48";
+  /** @brief Register sets, the Non-secure one first, then the Secure one. */
+  static constexpr std::array<set_names, 2> set_registers{
+      {
+       {"FLASH_NSKEYR", "FLASH_NSCR", "FLASH_NSSR", "FLASH_NSCCR"},
+       {"FLASH_SECKEYR", "FLASH_SECCR", "FLASH_SECSR", "FLASH_SECCCR"},
+       }
+  };
+  /** @brief Role names of each register set. */
+  static constexpr std::span<named_field<set_role> const> set_fields = h5_set_fields;
+  /** @brief Role names of the fields outside the register sets. */
+  static constexpr std::span<named_field<unit_role> const> unit_fields = h5_unit_fields;
+  /** @brief Role names of the TrustZone privilege fields. */
+  static constexpr std::span<named_field<privilege_role> const> privilege_fields =
+      u5_privilege_fields;
+  /** @brief Option registers loaded from flash_options::option_bytes, in option_words order. */
+  static constexpr std::array<std::string_view, 8> option_registers{
+      "FLASH_OPTSR_CUR",   "FLASH_OPTSR2_CUR",  "FLASH_NSBOOTR_CUR", "FLASH_SECBOOTR_CUR",
+      "FLASH_SECWM1R_CUR", "FLASH_SECWM2R_CUR", "FLASH_HDP1R_CUR",   "FLASH_HDP2R_CUR",
+  };
+  /** @brief Secure option registers, RAZ/WI with TZEN = 0xC3, RM0481 7.6.1 and 7.11.27. */
+  static constexpr std::array<std::string_view, 4> secure_option_registers{
+      "FLASH_SECBOOTR_CUR",
+      "FLASH_BOOTR_PRG",
+      "FLASH_SECWM1R_PRG",
+      "FLASH_SECWM2R_PRG",
+  };
+  /** @brief _PRG registers firmware writes for OPTSTRT, RM0481 7.4.3. */
+  static constexpr std::array<std::string_view, 8> option_staging_registers{
+      "FLASH_OPTSR_PRG",   "FLASH_OPTSR2_PRG",  "FLASH_NSBOOTR_PRG", "FLASH_BOOTR_PRG",
+      "FLASH_SECWM1R_PRG", "FLASH_SECWM2R_PRG", "FLASH_HDP1R_PRG",   "FLASH_HDP2R_PRG",
+  };
+  /** @brief Write protection registers of bank 1 and bank 2, RM0481 7.11.35 to 7.11.49. */
+  static constexpr std::array<wrp_names, 2> wrp_registers{
+      {
+       {"FLASH_WRP1R_PRG", "FLASH_WRP1R_CUR"},
+       {"FLASH_WRP2R_PRG", "FLASH_WRP2R_CUR"},
+       }
+  };
+  /** @brief Registers the dropped-option warning names as the ones OPTSTRT programs. */
+  static constexpr std::string_view wrp_text = "FLASH_WRPxR_PRG";
+  /** @brief Block-based security registers of bank 1, then bank 2, RM0481 7.11.29. */
+  static constexpr std::array<std::string_view, 8> secure_block_registers{
+      "FLASH_SECBB1R1", "FLASH_SECBB1R2", "FLASH_SECBB1R3", "FLASH_SECBB1R4",
+      "FLASH_SECBB2R1", "FLASH_SECBB2R2", "FLASH_SECBB2R3", "FLASH_SECBB2R4",
+  };
+  /** @brief Block-based privilege registers of bank 1, then bank 2, RM0481 7.11.30. */
+  static constexpr std::array<std::string_view, 8> privileged_block_registers{
+      "FLASH_PRIVBB1R1", "FLASH_PRIVBB1R2", "FLASH_PRIVBB1R3", "FLASH_PRIVBB1R4",
+      "FLASH_PRIVBB2R1", "FLASH_PRIVBB2R2", "FLASH_PRIVBB2R3", "FLASH_PRIVBB2R4",
+  };
+  /** @brief Block registers of one bank, 32 sectors each, 128 sectors per bank. */
+  static constexpr std::size_t block_registers_per_bank = 4;
+  /** @brief Index in option_registers of FLASH_SECWM1R_CUR and FLASH_SECWM2R_CUR. */
+  static constexpr std::array<std::size_t, 2> watermark_words{4, 5};
+  /** @brief Index in option_registers of FLASH_HDP1R_CUR and FLASH_HDP2R_CUR. */
+  static constexpr std::array<std::size_t, 2> hide_words{6, 7};
+
+  /**
+   * @brief Whether a sector lies in the closed HDP area of its bank, RM0481 7.6.2 and Table 63:
+   *        none at HDPL 1 or below, HDPx_STRT to HDPx_END at HDPL 2, and at HDPL 3 the lower of
+   *        HDPx_STRT and HDPx_END to HDPx_END plus HDPx_EXT, when HDPx_END is not below
+   *        HDPx_STRT or HDPx_EXT is above 0.
+   * @param in Option words, extension, level and sector of the bank.
+   */
+  [[nodiscard]] static constexpr auto hidden(hide_inputs const& in) -> bool
+  {
+    auto const start = in.area & in.top;
+    auto const end   = in.area >> 16 & in.top;
+    if(in.level == 2)
+    {
+      return start <= in.page and in.page <= end;
+    }
+    if(in.level < 2 or (end < start and in.extension == 0))
+    {
+      return false;
+    }
+    return std::min(start, end) <= in.page and in.page <= end + in.extension;
+  }
+
+  /**
+   * @brief Highest sector number of a SECWM or HDP field, RM0481 7.11.33.
+   */
+  [[nodiscard]] static constexpr auto watermark_top(std::string_view) -> std::uint32_t
+  {
+    return sector_top;
+  }
+
+  /** @brief Bits of an option register a firmware write is compared on: all of them. */
+  [[nodiscard]] static constexpr auto option_mask(std::string_view, std::string_view)
+      -> std::uint32_t
+  {
+    return ~0u;
+  }
+
+  /** @brief Delivery value of a WRPSG register, no group protected, RM0481 Table 55. */
+  [[nodiscard]] static constexpr auto wrp_production(std::string_view) -> std::uint32_t
+  {
+    return ~0u;
+  }
+
+  /** @brief A written WRPSG word, all 32 bits stored. */
+  [[nodiscard]] static constexpr auto wrp_normal(std::uint32_t word, std::string_view)
+      -> std::uint32_t
+  {
+    return word;
+  }
+
+  /** @brief WRPSG bits change in either direction, RM0481 7.4.7 lists no rule for them. */
+  [[nodiscard]] static constexpr auto wrp_refused(std::uint32_t, std::uint32_t) -> bool
+  {
+    return false;
+  }
+
+  /**
+   * @brief Whether the loaded protection covers a sector: its WRPSG group bit is 0, bit N for
+   *        sectors 4N to 4N+3, RM0481 7.11.35.
+   * @param words Loaded words, bank 1 then bank 2.
+   * @param bank Bank of the sector, 0 or 1.
+   * @param page Sector in its bank.
+   */
+  [[nodiscard]] static auto wrp_covers(
+      std::span<std::uint32_t const> words,
+      std::uint32_t                  bank,
+      std::uint32_t                  page,
+      std::string_view) -> bool
+  {
+    return (words[bank] >> (page / 4) & 1u) == 0;
+  }
+
+  /**
+   * @brief Least LATENCY RM0481 Table 48 asks for, the VOS level of D6 as the column.
+   * @param hclk HCLK in Hz.
+   * @param range VOS level plus 1, 1 for VOS0 to 4 for VOS3.
+   * @return The least LATENCY, empty when HCLK is above the maximum of the level.
+   */
+  [[nodiscard]] static auto wait_states(std::uint64_t hclk, std::uint32_t range, bool)
+      -> std::optional<std::uint32_t>
+  {
+    return first_wait_states(vos_read_max_mhz[range - 1], hclk);
+  }
+
+  /**
+   * @brief Least FLASH_ACR.WRHIGHFREQ RM0481 Table 48 asks for: 0 up to 1 wait state, 1 for 2 and
+   *        3, 2 for 4 and 5.
+   * @param hclk HCLK in Hz.
+   * @param range VOS level plus 1, 1 for VOS0 to 4 for VOS3.
+   * @return The least WRHIGHFREQ, empty when HCLK is above the maximum of the level.
+   */
+  [[nodiscard]] static auto programming_delay(std::uint64_t hclk, std::uint32_t range)
+      -> std::optional<std::uint32_t>
+  {
+    return first_wait_states(vos_read_max_mhz[range - 1], hclk).transform([](std::uint32_t ws) {
+      return ws / 2;
+    });
+  }
+
+  /**
+   * @brief FLASH_ECCDETR.ADDR_ECC of a failing flash word, its 128-bit word index in its bank,
+   *        0x0000 to 0xFFFF for a 1-Mbyte bank, RM0481 Table 88.
+   * @param line Physical address of the flash word.
+   * @param bank_base Physical address of its bank.
+   */
+  [[nodiscard]] static constexpr auto ecc_address(std::uint32_t line, std::uint32_t bank_base)
+      -> std::uint32_t
+  {
+    return (line - bank_base) / program_bytes;
+  }
+
+  /**
+   * @brief Whether a control word selects an erase: SER, BER or MER, RM0481 7.3.6.
+   * @param field Value of a set role in the control word.
+   */
+  template <typename Field> [[nodiscard]] static auto erase_selected(Field const& field) -> bool
+  {
+    return field(set_role::sector_erase) != 0
+        or field(set_role::bank_erase) != 0
+        or field(set_role::mass_erase) != 0;
+  }
+
+  /**
+   * @brief Whether a control word selects more than one of SER, BER and MER, RM0481 7.9.4.
+   * @param field Value of a set role in the control word.
+   */
+  template <typename Field> [[nodiscard]] static auto erase_conflict(Field const& field) -> bool
+  {
+    return (field(set_role::sector_erase) != 0 ? 1 : 0)
+             + (field(set_role::bank_erase) != 0 ? 1 : 0)
+             + (field(set_role::mass_erase) != 0 ? 1 : 0)
+         > 1;
+  }
+
+  /**
+   * @brief Erase a control word asks for, RM0481 7.3.6: SER the sector SNB of the physical
+   *        bank BKSEL, BER the bank BKSEL, MER both banks.
+   * @param field Value of a set role in the control word.
+   */
+  template <typename Field>
+  [[nodiscard]] static auto decode_erase(Field const& field) -> erase_command
+  {
+    if(field(set_role::sector_erase) != 0)
+    {
+      return {
+          .op   = operation::page_erase,
+          .bank = field(set_role::bank_select),
+          .page = field(set_role::sector)};
+    }
+    if(field(set_role::bank_erase) != 0)
+    {
+      return {.op = operation::bank_erase, .bank = field(set_role::bank_select)};
+    }
+    return {.op = operation::mass_erase};
+  }
+
+  /**
+   * @brief Encodes option bytes into the H5 _CUR option registers, RM0481 7.4 and 7.11.
+   * @param flash_size Size of the flash, both banks.
+   * @param wanted Option bytes to encode.
+   * @return The register values and the boot address, or the first refusal in field order.
+   */
+  [[nodiscard]] static auto
+      encode_options(std::string_view, std::uint32_t flash_size, option_bytes const& wanted)
+          -> std::expected<option_words<option_registers.size()>, option_refusal>;
+};
+
+static_assert(names_every_role(h5_set_fields));
+static_assert(names_every_role(h5_unit_fields));
+static_assert(flag_matches_roles(h5_set_fields, h5_flash::burst_write, {set_role::burst}));
+static_assert(flag_matches_roles(
+    h5_set_fields,
+    h5_flash::force_write,
+    {set_role::force_write, set_role::strobe_error, set_role::inconsistency_error}));
+static_assert(flag_matches_roles(
+    h5_set_fields,
+    not h5_flash::force_write,
+    {set_role::size_error, set_role::alignment_error, set_role::program_error}));
+static_assert(flag_matches_roles(
+    h5_set_fields,
+    h5_flash::erase_by_page,
+    {set_role::page_erase, set_role::page, set_role::bank1_erase, set_role::bank2_erase}));
+static_assert(flag_matches_roles(
+    h5_set_fields,
+    not h5_flash::erase_by_page,
+    {set_role::sector_erase, set_role::sector, set_role::bank_erase, set_role::mass_erase}));
+static_assert(flag_matches_roles(
+    h5_set_fields,
+    h5_flash::summary_error,
+    {set_role::operation_error, set_role::error_irq}));
+static_assert(flag_matches_roles(h5_unit_fields, h5_flash::option_load, {unit_role::option_load}));
+static_assert(flag_matches_roles(
+    h5_set_fields,
+    h5_flash::per_error_irq,
+    {set_role::protection_irq, set_role::sequence_irq, set_role::strobe_irq,
+     set_role::inconsistency_irq}));
+
 /**
- * @brief FLASH interface of the STM32U5, RM0456 section 7: the Non-secure register set, and
- *        under TrustZone the Secure register set, page security, HDP and page privilege.
+ * @brief FLASH interface of the STM32U5, RM0456 section 7, and of the STM32H5, RM0481 section 7:
+ *        the Non-secure register set, and under TrustZone the Secure register set, page
+ *        security, HDP and page privilege. The traits give the role names, the register
+ *        sets, the program, buffer and page sizes, the erase decode, the latency table, the
+ *        ECC address, the option registers and their encoding, and the capability flags.
+ *        u5_flash holds the STM32U5 values below, h5_flash the STM32H5 ones of the last
+ *        section.
  *
  * Unlock, RM0456 7.3.5: KEY1 then KEY2 in FLASH_NSKEYR clears FLASH_NSCR.LOCK, any other write
  * is a bus error and keeps FLASH_NSCR locked until the next reset. A key write while unlocked
@@ -497,15 +1462,91 @@ auto required_wait_states(std::uint64_t hclk, std::uint32_t range, bool low_powe
  * ECCIE has no effect. The model keeps no read buffer, so every load of a torn quad-word reports
  * once the flags are clear, where the 7.3.2 note lets a repeated read of a buffered line report
  * nothing.
+ *
+ * STM32H5, h5_flash, RM0481 section 7. The rules above hold with these differences:
+ * - Program, RM0481 7.3.5: one 128-bit write buffer takes 8-, 16- and 32-bit stores into one
+ *   flash word. WBNE is set while it fills, a full buffer starts the program, BSY set for
+ *   flash_options::quad_word_program. A second store to a byte sets STRBERR, a store into another
+ *   flash word sets INCERR, a store with PG clear or with SER, BER or MER set sets PGSERR, and
+ *   each flushes the buffer and writes nothing, RM0481 7.9. A 16-bit store while WBNE is set
+ *   fills the buffer like a word store, as measured on an STM32H573. FW programs a partly
+ *   filled buffer with its unwritten bytes at 0xFF, and does nothing for a buffer of 0xFF bytes. A
+ * program over a word that is not erased writes the data as given.
+ * - Erase, RM0481 7.3.6: STRT with SER erases sector SNB of the physical bank BKSEL, with BER
+ *   that bank, with MER both banks. STRT with none or more than one of them is PGSERR, 7.9.4.
+ * - EOP sets at the end of every operation. FLASH_NSSR and FLASH_SECSR are read-only:
+ *   FLASH_NSCCR and FLASH_SECCCR clear their flags through the description's cross rules,
+ *   7.11.13 and 7.11.14. FLASH_IRQn follows EOP with EOPIE,
+ *   WRPERR, PGSERR, STRBERR and INCERR each with its own enable, and OPTCHANGEERR with
+ *   OPTCHANGEERRIE, 7.11.11.
+ * - Option unlock, 7.4.3 and 7.11.8: OPTLOCK and OPTSTRT are bits 0 and 1 of FLASH_OPTCR, and
+ *   the OPTKEYR sequence works with FLASH_NSCR locked. FLASH_OPTCR and the _PRG registers ignore
+ *   writes while OPTLOCK is set. OPTSTRT programs FLASH_WRP1R_PRG and FLASH_WRP2R_PRG and loads
+ *   them into FLASH_WRP1R_CUR and FLASH_WRP2R_CUR at once, with no BSY. Bit N of a WRPSG word
+ *   protects sectors 4N to 4N+3 of its bank when 0, 7.11.35. The other _PRG registers are
+ *   storage and log a model_warning once at the next OPTSTRT. No option byte loader reset.
+ * - Option bytes, 7.4 and 7.11.19 to 7.11.52: every reset loads the encoded option bytes into
+ *   FLASH_OPTSR_CUR, FLASH_OPTSR2_CUR, FLASH_NSBOOTR_CUR, FLASH_SECBOOTR_CUR, FLASH_SECWMxR_CUR
+ *   and FLASH_HDPxR_CUR, from the delivery values of Table 55: TZEN 0xB4 or 0xC3, boot
+ *   addresses with their locks at 0xC3, a whole-bank watermark as STRT 0 END 0x7F, no area as
+ *   STRT 0x7F END 0, no HDP area as STRT 1 END 0. Without option bytes the eight registers
+ *   reset to those delivery values of the description. FLASH_OPTCR.SWAP_BANK
+ *   reads SWAP_BANK. The checks: sectors inside the bank, boot addresses aligned to 256 bytes,
+ *   DUALBANK set. With TZEN = 0xC3, with or without option bytes, FLASH_SECBOOTR_CUR,
+ *   FLASH_BOOTR_PRG, FLASH_SECWM1R_PRG, FLASH_SECWM2R_PRG and the Secure set read zero and
+ *   ignore writes, 7.6.1.
+ * - TrustZone, 7.6.1 to 7.6.4: a sector is Secure inside FLASH_SECWMxR_CUR, SECWMx_STRT to
+ *   SECWMx_END, or with its FLASH_SECBBxRy bit set, 32 sectors per register and 4 registers per
+ *   bank, and privileged with its FLASH_PRIVBBxRy bit set. The HDP area of a bank is
+ *   FLASH_HDPxR_CUR, HDPx_STRT to HDPx_END, independent of the watermark. The SBS HDPL level
+ *   closes it, Table 63: at HDPL 2 from HDPx_STRT to HDPx_END, at HDPL 3 from the lower of the
+ *   two to HDPx_END plus the HDPx_EXT sectors of FLASH_HDPEXTR. FLASH_HDPEXTR fields only grow
+ *   and ignore writes at HDPL 3, 7.11.18. A closed sector reads zero and refuses every fetch, as
+ *   the U5 HDP area does, Table 64.
+ * - HDP without TrustZone, 7.6.2 and Table 63, and Table 72 note 1: with machine option bytes
+ *   and TZEN = 0xC3 the HDP areas close by HDPL as above. The model installs a memory filter for
+ *   the flash, so a load of a closed sector reads zero and a fetch from it is a BusFault, and a
+ *   program or erase of it sets WRPERR in FLASH_NSSR. The watermark and the block bits take no
+ *   part there. With the filter installed, a CPU block transfer such as exception stacking and
+ *   unstacking moves word by word through the filter, every MMIO access asks it for a verdict,
+ *   every engine TLB fill of RAM or flash asks it for the page, and every FLASH_PRIVBBxRy or
+ *   FLASH_SECBBxRy change drops the engine's page verdicts. A machine with no option bytes
+ *   installs no filter.
+ * - ECC, 7.9.10: ECCD and its record are in FLASH_ECCDETR, ADDR_ECC the 128-bit word index in
+ *   the bank, and clearing ECCD clears the record. ECCC is in FLASH_ECCCORR.
+ * - Latency: RM0481 Table 48 per VOS level, with no LPM. No oscillator is held for programming.
+ *   WRHIGHFREQ is compared with the same table at an erase START and at a store with PG set, one
+ *   model_warning per HCLK, range and value since the last restore, model_error under
+ *   strict_peripherals.
+ * - Timings default to DS14121 Rev 5 Table 52, h5_flash_timing.
  */
-class flash final : public dispatch_model<flash, flash_state>,
-                    public clock_listener,
-                    public voltage_range_listener,
-                    public secure_page_controller,
-                    public trustzone_aware
+template <typename Traits>
+class flash_model final : public dispatch_model<flash_model<Traits>, flash_state>,
+                          public clock_listener,
+                          public voltage_range_listener,
+                          public secure_page_controller,
+                          public trustzone_aware
 {
+  using base = dispatch_model<flash_model<Traits>, flash_state>;
+  using base::apply_crosses;
+  using base::crosses_from;
+  static_assert(Traits::buffer_bytes / 4 <= buffer_words);
+  static_assert(Traits::buffer_bytes % Traits::program_bytes == 0);
+  static_assert(names_control_or_status(Traits::set_fields));
+  using base::claims;
+  using base::ctx_;
+  using base::desc_;
+  using base::describe;
+  using base::field;
+  using base::has_register;
+  using base::irq;
+  using base::reg;
+  using base::schedule_in;
+  using base::state_;
+  using base::warn;
+
 public:
-  flash(model_context& ctx, peripheral_desc const& desc, flash_options const& options);
+  flash_model(model_context& ctx, peripheral_desc const& desc, flash_options const& options);
 
   void reset(register_file& regs, reset_kind kind) override;
   void power_cut() override;
@@ -545,51 +1586,58 @@ public:
   void               secure_control_written(std::uint32_t old, std::uint32_t now);
   void               status_written(std::uint32_t old, std::uint32_t now);
   void               secure_status_written(std::uint32_t old, std::uint32_t now);
+  void               clear_written(std::uint32_t old, std::uint32_t now);
+  void               secure_clear_written(std::uint32_t old, std::uint32_t now);
+  void               option_control_written(std::uint32_t old, std::uint32_t now);
+  void               staging_written(std::uint32_t old, std::uint32_t now);
   void               ecc_written(std::uint32_t old, std::uint32_t now);
   void               option_written(std::uint32_t old, std::uint32_t now);
   void               wrp_written(std::uint32_t old, std::uint32_t now);
   [[nodiscard]] auto option_locked() const -> bool;
   void               secure_block_written(std::uint32_t old, std::uint32_t now);
   void               hide_written(std::uint32_t old, std::uint32_t now);
+  void               extension_written(std::uint32_t old, std::uint32_t now);
+  [[nodiscard]] auto isolation() const -> temporal_isolation const*;
   void               privilege_written(std::uint32_t old, std::uint32_t now);
   void               privileged_block_written(std::uint32_t old, std::uint32_t now);
 
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
 
-  /**
-   * @brief Encodes option bytes into the U5 option registers, after the checks of the class
-   *        documentation.
-   * @param part Part name, which selects the width of the page fields.
-   * @param flash_size Size of the flash, both banks.
-   * @param wanted Option bytes to encode.
-   * @return The register values and the boot address, or the first refusal in field order.
-   */
-  [[nodiscard]] static auto
-      encode_options(std::string_view part, std::uint32_t flash_size, option_bytes const& wanted)
-          -> std::expected<option_words, option_refusal>;
-
 private:
   struct register_set
   {
-    reg_ref               key;
-    reg_ref               control;
-    reg_ref               status;
-    field_table<set_role> fields;
-    std::uint32_t         clearable{};
+    reg_ref                key;
+    reg_ref                control;
+    reg_ref                status;
+    field_table<set_role>  fields;
+    std::uint32_t          clearable{};
+    std::vector<cross_ref> clears{};
   };
 
-  [[nodiscard]] auto make_set(std::string_view prefix) const -> register_set;
+  [[nodiscard]] auto make_set(std::size_t index) const -> register_set;
+  template <typename Role>
+  [[nodiscard]] auto make_table(std::span<named_field<Role> const> names) const
+      -> field_table<Role>;
+  [[nodiscard]] auto has_field(std::string_view reg, std::string_view name) const -> bool;
+  [[nodiscard]] auto option_field(unit_role role, std::uint32_t control) const
+      -> std::optional<field_ref>;
   [[nodiscard]] auto field_of(bool secure, set_role role) const -> field_ref;
+  [[nodiscard]] auto value_of(bool secure, set_role role, std::uint32_t word) const
+      -> std::uint32_t;
+  [[nodiscard]] auto unit_value(unit_role role) const -> std::uint32_t;
   [[nodiscard]] auto flag(bool secure, set_role role) const -> bool;
   [[nodiscard]] auto busy() const -> bool;
   [[nodiscard]] auto errors_pending(bool secure) const -> bool;
   void               fail(bool secure, set_role role);
+  void               fail(bool secure, field_ref flagged);
   void               set_busy(bool on);
   void               set_waiting(bool on);
   void               interrupt();
   void               finish();
   void               store(held_store const& one, std::uint8_t attrs);
+  void               fill(std::uint32_t addr, std::uint8_t size, std::uint32_t value, bool secure);
+  void               force(bool secure);
   void               hold(held_store const& one, std::uint8_t attrs);
   void start(operation which, std::uint32_t target, std::uint32_t length, bool secure);
   void start_erase(bool secure, std::uint32_t control);
@@ -599,7 +1647,7 @@ private:
       std::uint32_t              at,
       std::span<std::byte const> target,
       std::span<std::byte const> data) const -> bool;
-  [[nodiscard]] auto buffered() const -> std::array<std::byte, burst_size>;
+  [[nodiscard]] auto buffered() const -> std::array<std::byte, Traits::buffer_bytes>;
   void               tear_program(std::uint32_t full);
   void               tear_erase(std::uint32_t full);
   void               forget_torn(std::uint32_t from, std::uint32_t length);
@@ -610,6 +1658,7 @@ private:
   [[nodiscard]] auto bank_base(std::uint32_t at) const -> std::uint32_t;
   [[nodiscard]] auto bank_start(std::uint32_t bank) const -> std::uint32_t;
   [[nodiscard]] auto rule_of(std::uint32_t at) const -> page_policy;
+  [[nodiscard]] auto pages_ruled() const -> bool;
   [[nodiscard]] auto block_bit(std::span<std::uint32_t const> words, std::uint32_t at) const
       -> bool;
   [[nodiscard]] auto
@@ -623,8 +1672,6 @@ private:
   [[nodiscard]] auto hsi16_held() const -> bool;
   void               program(bool secure);
   void               hold_hsi16(bool held);
-  [[nodiscard]] auto wrp_top() const -> std::uint32_t;
-  [[nodiscard]] auto wrp_normal(std::uint32_t word) const -> std::uint32_t;
   [[nodiscard]] auto wrp_programmed(std::size_t index) const -> std::uint32_t;
   [[nodiscard]] auto option_loaded(std::uint32_t offset) const -> std::uint32_t;
   [[nodiscard]] auto option_mask(std::uint32_t offset) const -> std::uint32_t;
@@ -635,21 +1682,19 @@ private:
   void                      load_options();
   void                      program_options();
   void                      check_latency(std::string_view trigger);
+  void                      check_programming_delay(std::string_view trigger);
+  [[nodiscard]] auto        active_range() const -> std::uint32_t;
 
   flash_options                                                     options_;
   register_file&                                                    regs_;
   region_desc const*                                                storage_{};
-  std::array<register_set, 2>                                       sets_;
-  field_ref                                                         ecc_detect_;
-  field_ref                                                         ecc_correct_;
-  field_ref                                                         ecc_bank_;
-  field_ref                                                         ecc_address_;
+  field_table<unit_role>                                            unit_;
+  std::array<register_set, Traits::set_registers.size()>            sets_;
   irq_line&                                                         line_;
   irq_line*                                                         secure_line_{};
-  field_ref                                                         latency_;
-  field_ref                                                         low_power_read_;
   core::clock_domain                                                hclk_;
   std::set<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>> latency_logged_;
+  std::set<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>> delay_logged_;
   std::vector<std::uint32_t>                                        watched_;
   std::uint32_t                                                     written_{};
   std::uint32_t                                                     written_word_{};
@@ -661,113 +1706,184 @@ private:
   std::vector<std::pair<std::uint32_t, std::uint32_t>>              option_words_;
   std::vector<std::uint32_t>                                        option_offsets_;
   std::vector<std::uint32_t>                                        wrp_offsets_;
+  std::vector<std::uint32_t>                                        wrp_active_offsets_;
   bool                                                              swapped_{};
   std::vector<std::uint32_t>                                        secure_words_;
   std::vector<std::uint32_t>                                        secure_blocks_;
   std::vector<std::uint32_t>                                        privileged_blocks_;
-  std::uint32_t                                                     hide_word_{};
-  field_ref                                                         invert_;
+  std::optional<field_table<privilege_role>>                        privilege_;
   std::optional<std::uint32_t>                                      privilege_word_;
-  field_ref                                                         nonsecure_privileged_;
-  field_ref                                                         secure_privileged_;
   secure_flash_state                                                secure_;
   illegal_access_controller*                                        events_{};
   bool                                                              events_linked_{};
+  mutable temporal_isolation const*                                 isolation_{};
+  mutable bool                                                      isolation_resolved_{};
+  std::unique_ptr<hide_filter>                                      hide_filter_;
 };
 
+template <typename Traits>
 auto flash_table(peripheral_desc const& desc, flash_options const& options, bool trustzone)
-    -> std::vector<write_entry<flash>>
+    -> std::vector<write_entry<flash_model<Traits>>>
 {
-  std::vector<write_entry<flash>> table{
-      {"FLASH_ACR",      &flash::access_written        },
-      {"FLASH_NSKEYR",   &flash::key_written           },
-      {"FLASH_OPTKEYR",  &flash::option_key_written    },
-      {"FLASH_NSCR",     &flash::control_written       },
-      {"FLASH_NSSR",     &flash::status_written        },
-      {"FLASH_ECCR",     &flash::ecc_written           },
-      {"FLASH_SECKEYR",  &flash::secure_key_written    },
-      {"FLASH_SECCR",    &flash::secure_control_written},
-      {"FLASH_SECSR",    &flash::secure_status_written },
-      {"FLASH_SECHDPCR", &flash::hide_written          },
+  using model                     = flash_model<Traits>;
+  constexpr auto access_register  = register_of(Traits::unit_fields, unit_role::latency);
+  constexpr auto ecc_register     = register_of(Traits::unit_fields, unit_role::ecc_detect);
+  constexpr auto hide_register    = register_of(Traits::unit_fields, unit_role::hide_bank1);
+  constexpr auto correct_register = register_of(Traits::unit_fields, unit_role::ecc_correct);
+  constexpr auto option_register  = register_of(Traits::unit_fields, unit_role::option_lock);
+  auto const&    nonsecure        = Traits::set_registers[0];
+  std::vector<write_entry<model>> table{
+      {access_register,   &model::access_written    },
+      {nonsecure.key,     &model::key_written       },
+      {"FLASH_OPTKEYR",   &model::option_key_written},
+      {nonsecure.control, &model::control_written   },
+      {nonsecure.status,  &model::status_written    },
+      {ecc_register,      &model::ecc_written       },
   };
-  for(auto const name : secure_block_registers)
+  if constexpr(correct_register != ecc_register)
+  {
+    table.push_back({correct_register, &model::ecc_written});
+  }
+  if constexpr(option_register != Traits::set_registers[0].control)
+  {
+    table.push_back({option_register, &model::option_control_written});
+  }
+  if constexpr(not Traits::set_registers[0].clear.empty())
+  {
+    table.push_back({nonsecure.clear, &model::clear_written});
+  }
+  if constexpr(Traits::set_registers.size() > 1)
+  {
+    auto const& secure = Traits::set_registers[1];
+    table.push_back({secure.key, &model::secure_key_written});
+    table.push_back({secure.control, &model::secure_control_written});
+    table.push_back({secure.status, &model::secure_status_written});
+    if constexpr(not Traits::set_registers[1].clear.empty())
+    {
+      table.push_back({secure.clear, &model::secure_clear_written});
+    }
+    if constexpr(not hide_register.empty())
+    {
+      table.push_back({hide_register, &model::hide_written});
+    }
+  }
+  for(auto const name : Traits::secure_block_registers)
   {
     if(find_register(desc, name) != nullptr)
     {
-      table.push_back({name, &flash::secure_block_written});
+      table.push_back({name, &flash_model<Traits>::secure_block_written});
     }
   }
   if(trustzone)
   {
-    table.push_back({"FLASH_PRIVCFGR", &flash::privilege_written});
-    for(auto const name : privileged_block_registers)
+    table.push_back({"FLASH_PRIVCFGR", &flash_model<Traits>::privilege_written});
+    if constexpr(
+        constexpr auto extension = register_of(Traits::unit_fields, unit_role::hide_extension1);
+        not extension.empty())
+    {
+      table.push_back({extension, &flash_model<Traits>::extension_written});
+    }
+    for(auto const name : Traits::privileged_block_registers)
     {
       if(find_register(desc, name) != nullptr)
       {
-        table.push_back({name, &flash::privileged_block_written});
+        table.push_back({name, &flash_model<Traits>::privileged_block_written});
       }
     }
   }
-  for(auto const name : option_registers)
+  for(auto const name : Traits::option_registers)
   {
     if(options.option_bytes or find_register(desc, name) != nullptr)
     {
-      table.push_back({name, &flash::option_written});
+      table.push_back({name, &flash_model<Traits>::option_written});
     }
   }
-  if(std::ranges::all_of(
-         wrp_registers, [&desc](auto name) { return find_register(desc, name) != nullptr; }))
+  for(auto const name : Traits::option_staging_registers)
   {
-    for(auto const name : wrp_registers)
+    if(find_register(desc, name) != nullptr)
     {
-      table.push_back({name, &flash::wrp_written});
+      table.push_back({name, &flash_model<Traits>::staging_written});
+    }
+  }
+  if(std::ranges::all_of(Traits::wrp_registers, [&desc](wrp_names const& names) {
+       return find_register(desc, names.program) != nullptr
+          and find_register(desc, names.active) != nullptr;
+     }))
+  {
+    for(auto const& names : Traits::wrp_registers)
+    {
+      table.push_back({names.program, &flash_model<Traits>::wrp_written});
+      if(names.active != names.program)
+      {
+        table.push_back({names.active, nullptr});
+      }
     }
   }
   return table;
 }
 
-flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options const& options)
-    : dispatch_model{ctx, desc, "FLASH", flash_table(desc, options, ctx.trustzone)},
-      options_{options}, regs_{ctx.regs}, sets_{make_set("NS"), make_set("SEC")},
-      ecc_detect_{field("FLASH_ECCR", "ECCD")}, ecc_correct_{field("FLASH_ECCR", "ECCC")},
-      ecc_bank_{field("FLASH_ECCR", "BK_ECC")}, ecc_address_{field("FLASH_ECCR", "ADDR_ECC")},
-      line_{irq("FLASH_IRQn")}, latency_{field("FLASH_ACR", "LATENCY")},
-      low_power_read_{field("FLASH_ACR", "LPM")}, hclk_{ctx.clock.domain("hclk")},
-      hide_word_{reg("FLASH_SECHDPCR").offset}, invert_{field("FLASH_SECCR", "INV")}
+template <typename Traits>
+flash_model<Traits>::flash_model(
+    model_context&         ctx,
+    peripheral_desc const& desc,
+    flash_options const&   options)
+    : base{ctx, desc, "FLASH", flash_table<Traits>(desc, options, ctx.trustzone)},
+      options_{options}, regs_{ctx.regs}, unit_{make_table<unit_role>(Traits::unit_fields)},
+      sets_{[this]<std::size_t... index>(std::index_sequence<index...>) {
+        return std::array{make_set(index)...};
+      }(std::make_index_sequence<Traits::set_registers.size()>{})},
+      line_{irq("FLASH_IRQn")}, hclk_{ctx.clock.domain("hclk")}
 {
   if(ctx.trustzone)
   {
-    secure_line_          = &irq("FLASH_S_IRQn");
-    privilege_word_       = reg("FLASH_PRIVCFGR").offset;
-    nonsecure_privileged_ = field("FLASH_PRIVCFGR", "NSPRIV");
-    secure_privileged_    = field("FLASH_PRIVCFGR", "SPRIV");
+    secure_line_    = &irq("FLASH_S_IRQn");
+    privilege_      = make_table<privilege_role>(Traits::privilege_fields);
+    privilege_word_ = (*privilege_)[privilege_role::nonsecure].offset;
   }
-  for(auto const name : {"FLASH_SECKEYR", "FLASH_SECSR", "FLASH_SECCR", "FLASH_SECHDPCR"})
+  if constexpr(Traits::set_registers.size() > 1)
   {
-    secure_words_.push_back(reg(name).offset);
+    auto const& secure_set = sets_[1];
+    secure_words_.push_back(secure_set.key.offset);
+    secure_words_.push_back(secure_set.status.offset);
+    secure_words_.push_back(secure_set.control.offset);
+    if constexpr(not Traits::set_registers[1].clear.empty())
+    {
+      secure_words_.push_back(reg(Traits::set_registers[1].clear).offset);
+    }
+    if constexpr(not register_of(Traits::unit_fields, unit_role::hide_bank1).empty())
+    {
+      secure_words_.push_back(unit_[unit_role::hide_bank1].offset);
+    }
   }
-  for(auto const name : option_registers)
+  for(auto const name : Traits::option_registers)
   {
     if(has_register(name))
     {
       option_offsets_.push_back(reg(name).offset);
     }
   }
-  if(std::ranges::all_of(wrp_registers, [this](auto name) { return has_register(name); }))
+  if(std::ranges::all_of(Traits::wrp_registers, [this](wrp_names const& names) {
+       return has_register(names.program) and has_register(names.active);
+     }))
   {
-    for(auto const name : wrp_registers)
+    for(auto const& names : Traits::wrp_registers)
     {
-      wrp_offsets_.push_back(reg(name).offset);
-      option_offsets_.push_back(reg(name).offset);
+      wrp_offsets_.push_back(reg(names.program).offset);
+      wrp_active_offsets_.push_back(reg(names.active).offset);
+      option_offsets_.push_back(reg(names.program).offset);
+      if(names.active != names.program)
+      {
+        option_offsets_.push_back(reg(names.active).offset);
+      }
     }
-    state_.wrp.assign(wrp_offsets_.size(), ~(wrp_top() << 16));
+    state_.wrp.assign(wrp_offsets_.size(), Traits::wrp_production(ctx.part.part));
     state_.wrp_active = state_.wrp;
   }
-  for(auto const name : secure_block_registers)
+  for(auto const name : Traits::secure_block_registers)
   {
     secure_blocks_.push_back(has_register(name) ? reg(name).offset : ~0u);
   }
-  for(auto const name : privileged_block_registers)
+  for(auto const name : Traits::privileged_block_registers)
   {
     privileged_blocks_.push_back(has_register(name) ? reg(name).offset : ~0u);
   }
@@ -776,7 +1892,30 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
   });
   if(own != ctx.part.regions.end())
   {
-    storage_ = &*own;
+    storage_          = &*own;
+    auto const needed = (banks().size / Traits::page_bytes + pages_per_block_register - 1)
+                      / pages_per_block_register;
+    if(needed > Traits::block_registers_per_bank)
+    {
+      throw config_error(
+          desc.name, 0, std::string{Traits::secure_block_registers.front()},
+          std::format(
+              "{} block registers per bank, the traits hold {}", needed,
+              Traits::block_registers_per_bank));
+    }
+    for(std::size_t bank = 0; bank < 2; ++bank)
+    {
+      for(std::size_t index = 0; index < needed; ++index)
+      {
+        auto const at = bank * Traits::block_registers_per_bank + index;
+        this->expect_register(Traits::secure_block_registers[at], true);
+        this->expect_register(Traits::privileged_block_registers[at], true);
+      }
+    }
+  }
+  for(auto const name : Traits::secure_option_registers)
+  {
+    secure_words_.push_back(reg(name).offset);
   }
   if(not options_.option_bytes)
   {
@@ -799,63 +1938,94 @@ flash::flash(model_context& ctx, peripheral_desc const& desc, flash_options cons
     throw config_error(
         desc.name, 0, "option_bytes", "a flash region that names FLASH as its controller");
   }
-  auto const words = encode_options(ctx.part.part, storage_->size, *options_.option_bytes);
+  auto const words = Traits::encode_options(ctx.part.part, storage_->size, *options_.option_bytes);
   if(not words)
   {
     throw config_error(desc.name, 0, words.error().key, words.error().expected);
   }
-  for(auto const [name, value] : std::views::zip(
-          option_registers,
-          std::array{
-              words->optr, words->nsbootadd0r, words->nsbootadd1r, words->secbootadd0r,
-              words->secwm1r1, words->secwm1r2, words->secwm2r1, words->secwm2r2}))
+  for(auto const [name, value] : std::views::zip(Traits::option_registers, words->words))
   {
     option_words_.emplace_back(reg(name).offset, value);
   }
-  for(auto const name :
-      {"FLASH_SECBOOTADD0R", "FLASH_SECWM1R1", "FLASH_SECWM1R2", "FLASH_SECWM2R1",
-       "FLASH_SECWM2R2"})
-  {
-    secure_words_.push_back(reg(name).offset);
-  }
   swapped_ = options_.option_bytes->swap_bank;
+  if(Traits::hide_without_trustzone and not ctx.trustzone)
+  {
+    hide_filter_ =
+        std::make_unique<hide_filter>(*this, ctx.part.regions, desc.name, Traits::page_bytes);
+    ctx.install_firewall(*hide_filter_);
+  }
 }
 
-auto flash::make_set(std::string_view prefix) const -> register_set
+template <typename Traits>
+auto flash_model<Traits>::has_field(std::string_view reg, std::string_view name) const -> bool
 {
-  auto const named = [prefix](std::string_view reg) {
-    return std::format("FLASH_{}{}", prefix, reg);
+  auto const* const found = find_register(desc_, reg);
+  return found != nullptr and std::ranges::contains(found->fields, name, &field_desc::name);
+}
+
+template <typename Traits>
+template <typename Role>
+auto flash_model<Traits>::make_table(std::span<named_field<Role> const> names) const
+    -> field_table<Role>
+{
+  return {
+      names, [this](std::string_view reg, std::string_view name) { return field(reg, name); },
+      [this](std::string_view reg, std::string_view name) { return has_field(reg, name); }};
+}
+
+template <typename Traits>
+auto flash_model<Traits>::option_field(unit_role role, std::uint32_t control) const
+    -> std::optional<field_ref>
+{
+  auto const found = unit_.find(role);
+  return found and found->offset == control ? found : std::nullopt;
+}
+
+template <typename Traits>
+auto flash_model<Traits>::make_set(std::size_t index) const -> register_set
+{
+  auto const& names = Traits::set_registers[index];
+  auto const  named = [&names](std::string_view reg) {
+    return reg == "CR" ? names.control : names.status;
   };
   field_table<set_role> fields{
-      u5_set_fields,
+      Traits::set_fields,
       [&](std::string_view reg, std::string_view name) { return field(named(reg), name); },
-      [&](std::string_view reg, std::string_view name) {
-        auto const* const found = find_register(desc_, named(reg));
-        return found != nullptr and std::ranges::contains(found->fields, name, &field_desc::name);
-      }};
+      [&](std::string_view reg, std::string_view name) { return has_field(named(reg), name); }};
   std::uint32_t clearable = 0;
   for(auto const role :
       {set_role::end, set_role::operation_error, set_role::program_error,
        set_role::protection_error, set_role::alignment_error, set_role::size_error,
-       set_role::sequence_error, set_role::option_error})
+       set_role::sequence_error, set_role::strobe_error, set_role::inconsistency_error})
   {
     if(auto const found = fields.find(role))
     {
       clearable |= found->mask();
     }
   }
+  auto const status = reg(names.status);
+  if(auto const option_error = option_field(unit_role::option_error, status.offset))
+  {
+    clearable |= option_error->mask();
+  }
+  if(not names.clear.empty())
+  {
+    clearable = 0;
+  }
   return {
-      .key       = reg(named("KEYR")),
-      .control   = reg(named("CR")),
-      .status    = reg(named("SR")),
+      .key       = reg(names.key),
+      .control   = reg(names.control),
+      .status    = status,
       .fields    = fields,
-      .clearable = clearable};
+      .clearable = clearable,
+      .clears    = names.clear.empty() ? std::vector<cross_ref>{} : crosses_from(names.clear)};
 }
 
-auto flash::encode_options(
+auto u5_flash::encode_options(
     std::string_view    part,
     std::uint32_t       flash_size,
-    option_bytes const& wanted) -> std::expected<option_words, option_refusal>
+    option_bytes const& wanted)
+    -> std::expected<option_words<option_registers.size()>, option_refusal>
 {
   auto const refuse = [](std::string_view field, std::string expected) {
     return std::unexpected{
@@ -863,7 +2033,7 @@ auto flash::encode_options(
                        .key = std::format("option_bytes.{}", field), .expected = std::move(expected)}
     };
   };
-  auto const pages  = flash_size / 2 / page_size;
+  auto const pages  = flash_size / 2 / page_bytes;
   auto const top    = (1u << watermark_bits(part)) - 1;
   auto const unused = 0xffu & ~top;
   struct area
@@ -975,20 +2145,116 @@ auto flash::encode_options(
                          | optr_dualbank
                          | (wanted.swap_bank ? optr_swap_bank : 0);
   auto const secure_word = [&wanted](std::uint32_t word) { return wanted.tzen ? word : 0; };
-  return option_words{
-      .optr         = optr,
-      .nsbootadd0r  = *nsboot | nsboot_reserved,
-      .nsbootadd1r  = nsbootadd1_production,
-      .secbootadd0r = secure_word(*secboot | secboot_reserved),
-      .secwm1r1     = secure_word(first_word(*secure1)),
-      .secwm1r2     = secure_word(*hidden1),
-      .secwm2r1     = secure_word(first_word(*secure2)),
-      .secwm2r2     = secure_word(*hidden2),
-      .boot         = wanted.tzen ? *secboot : *nsboot,
+  return option_words<option_registers.size()>{
+      .words =
+          {optr, *nsboot | nsboot_reserved, nsbootadd1_production,
+                  secure_word(*secboot | secboot_reserved), secure_word(first_word(*secure1)),
+                  secure_word(*hidden1), secure_word(first_word(*secure2)), secure_word(*hidden2)},
+      .boot = wanted.tzen ? *secboot : *nsboot,
   };
 }
 
-void flash::reset(register_file& regs, reset_kind kind)
+auto h5_flash::encode_options(
+    std::string_view,
+    std::uint32_t       flash_size,
+    option_bytes const& wanted)
+    -> std::expected<option_words<option_registers.size()>, option_refusal>
+{
+  auto const refuse = [](std::string_view field, std::string expected) {
+    return std::unexpected{
+        option_refusal{
+                       .key = std::format("option_bytes.{}", field), .expected = std::move(expected)}
+    };
+  };
+  auto const sectors = flash_size / 2 / page_bytes;
+  auto const range_word =
+      [&](page_range const& range,
+          std::string_view  field) -> std::expected<std::uint32_t, option_refusal> {
+    if(range.first > range.last or range.last >= sectors)
+    {
+      return refuse(
+          field, std::format(
+                     "a first and a last sector from 0 to {}, the {} sectors of a bank, RM0481 "
+                     "7.11.33, not {} to {}",
+                     sectors - 1, sectors, range.first, range.last));
+    }
+    return range.last << 16 | range.first;
+  };
+  auto const watermark_word =
+      [&](watermark const& area,
+          std::string_view field) -> std::expected<std::uint32_t, option_refusal> {
+    if(std::holds_alternative<no_area>(area))
+    {
+      return sector_top;
+    }
+    if(std::holds_alternative<whole_bank>(area))
+    {
+      return (sectors - 1) << 16;
+    }
+    return range_word(std::get<page_range>(area), field);
+  };
+  auto const hide_word =
+      [&](std::optional<page_range> const& area,
+          std::string_view                 field) -> std::expected<std::uint32_t, option_refusal> {
+    return area ? range_word(*area, field) : std::expected<std::uint32_t, option_refusal>{1u};
+  };
+  auto const boot_of =
+      [&](std::optional<std::uint32_t> given, std::uint32_t fallback, std::string_view field,
+          std::string_view section) -> std::expected<std::uint32_t, option_refusal> {
+    auto const at = given.value_or(fallback);
+    if(at % h5_boot_granule != 0)
+    {
+      return refuse(
+          field,
+          std::format("an address aligned to 256 bytes, RM0481 {}, not {:#010x}", section, at));
+    }
+    return at;
+  };
+  auto const secure1 = watermark_word(wanted.secwm1, "secwm1");
+  if(not secure1)
+  {
+    return std::unexpected{secure1.error()};
+  }
+  auto const secure2 = watermark_word(wanted.secwm2, "secwm2");
+  if(not secure2)
+  {
+    return std::unexpected{secure2.error()};
+  }
+  auto const hidden1 = hide_word(wanted.hdp1, "hdp1");
+  if(not hidden1)
+  {
+    return std::unexpected{hidden1.error()};
+  }
+  auto const hidden2 = hide_word(wanted.hdp2, "hdp2");
+  if(not hidden2)
+  {
+    return std::unexpected{hidden2.error()};
+  }
+  auto const secboot = boot_of(wanted.secboot, secure_boot_default, "secboot", "7.11.27");
+  if(not secboot)
+  {
+    return std::unexpected{secboot.error()};
+  }
+  auto const nsboot = boot_of(wanted.nsboot, nonsecure_boot_default, "nsboot", "7.11.25");
+  if(not nsboot)
+  {
+    return std::unexpected{nsboot.error()};
+  }
+  if(not wanted.dualbank.value_or(true))
+  {
+    return refuse("dualbank", "a dual-bank flash, RM0481 7.2 has no single-bank organization");
+  }
+  return option_words<option_registers.size()>{
+      .words =
+          {optsr_production | (wanted.swap_bank ? optsr_swap_bank : 0),
+                  optsr2_production | (wanted.tzen ? tzen_enabled : tzen_disabled) << 24,
+                  *nsboot | boot_unlocked, *secboot | boot_unlocked, *secure1, *secure2, *hidden1,
+                  *hidden2},
+      .boot = wanted.tzen ? *secboot : *nsboot,
+  };
+}
+
+template <typename Traits> void flash_model<Traits>::reset(register_file& regs, reset_kind kind)
 {
   for(auto const& name : claims())
   {
@@ -1011,17 +2277,28 @@ void flash::reset(register_file& regs, reset_kind kind)
     regs.poke(offset, value);
   }
   poke_wrp();
+  if(auto const swap = unit_.find(unit_role::option_swap))
+  {
+    update(regs, *swap, swapped_ ? 1 : 0);
+  }
   line_.lower();
   if(secure_line_ != nullptr)
   {
     secure_line_->lower();
+  }
+  if(pages_ruled())
+  {
     ctx_.services.memory_policy_changed();
   }
   ctx_.nmi.lower();
 }
 
-auto flash::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
-    -> std::expected<std::uint32_t, bus_error>
+template <typename Traits>
+auto flash_model<Traits>::on_read(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    access_ctx     ctx) -> std::expected<std::uint32_t, bus_error>
 {
   auto const word = offset & ~3u;
   if(register_refused(word, ctx, false))
@@ -1032,10 +2309,11 @@ auto flash::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size
   {
     return read_lanes(regs.peek(word), offset, size);
   }
-  return dispatch_model::on_read(regs, offset, size, ctx);
+  return base::on_read(regs, offset, size, ctx);
 }
 
-void flash::option_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+void flash_model<Traits>::option_written(std::uint32_t old, std::uint32_t now)
 {
   if(not option_locked()
      and ((now ^ option_loaded(written_word_)) & option_mask(written_word_)) != 0
@@ -1057,28 +2335,34 @@ void flash::option_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-void flash::wrp_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+void flash_model<Traits>::wrp_written(std::uint32_t old, std::uint32_t now)
 {
-  regs_.poke(written_word_, option_locked() ? old : wrp_normal(now));
+  regs_.poke(written_word_, option_locked() ? old : Traits::wrp_normal(now, ctx_.part.part));
 }
 
-auto flash::wrp_top() const -> std::uint32_t
+template <typename Traits>
+void flash_model<Traits>::staging_written(std::uint32_t old, std::uint32_t now)
 {
-  return (1u << watermark_bits(ctx_.part.part)) - 1;
+  if(option_locked())
+  {
+    regs_.poke(written_word_, old);
+    return;
+  }
+  if(now != old and not std::ranges::contains(option_changed_, written_word_))
+  {
+    option_changed_.push_back(written_word_);
+  }
 }
 
-auto flash::wrp_normal(std::uint32_t word) const -> std::uint32_t
-{
-  auto const fields = wrp_unlock | wrp_top() << 16 | wrp_top();
-  return (word & fields) | ~fields;
-}
-
-auto flash::wrp_programmed(std::size_t index) const -> std::uint32_t
+template <typename Traits>
+auto flash_model<Traits>::wrp_programmed(std::size_t index) const -> std::uint32_t
 {
   return state_.wrp[index];
 }
 
-auto flash::option_loaded(std::uint32_t offset) const -> std::uint32_t
+template <typename Traits>
+auto flash_model<Traits>::option_loaded(std::uint32_t offset) const -> std::uint32_t
 {
   auto const found =
       std::ranges::find(option_words_, offset, &std::pair<std::uint32_t, std::uint32_t>::first);
@@ -1086,7 +2370,7 @@ auto flash::option_loaded(std::uint32_t offset) const -> std::uint32_t
   {
     return found->second;
   }
-  for(auto const name : option_registers)
+  for(auto const name : Traits::option_registers)
   {
     if(has_register(name) and reg(name).offset == offset)
     {
@@ -1097,98 +2381,85 @@ auto flash::option_loaded(std::uint32_t offset) const -> std::uint32_t
   return 0;
 }
 
-auto flash::option_mask(std::uint32_t offset) const -> std::uint32_t
+template <typename Traits>
+auto flash_model<Traits>::option_mask(std::uint32_t offset) const -> std::uint32_t
 {
-  auto const top = (1u << watermark_bits(ctx_.part.part)) - 1;
-  for(auto const name : option_registers)
+  for(auto const name : Traits::option_registers)
   {
-    if(not has_register(name) or reg(name).offset != offset)
+    if(has_register(name) and reg(name).offset == offset)
     {
-      continue;
-    }
-    if(name == "FLASH_SECWM1R1" or name == "FLASH_SECWM2R1")
-    {
-      return top | top << 16;
-    }
-    if(name == "FLASH_SECWM1R2" or name == "FLASH_SECWM2R2")
-    {
-      return hdp_enable | top << 16;
-    }
-    if(name == "FLASH_NSBOOTADD0R" or name == "FLASH_NSBOOTADD1R")
-    {
-      return ~nsboot_reserved;
-    }
-    if(name == "FLASH_SECBOOTADD0R")
-    {
-      return ~secboot_reserved;
+      return Traits::option_mask(name, ctx_.part.part);
     }
   }
   return ~0u;
 }
 
-void flash::warn_dropped_options()
+template <typename Traits> void flash_model<Traits>::warn_dropped_options()
 {
   if(option_changed_.empty() or std::exchange(option_logged_, true))
   {
     return;
   }
   auto const offset = option_changed_.front();
-  for(auto const name : option_registers)
+  for(auto const list :
+      {std::span<std::string_view const>{Traits::option_registers},
+       std::span<std::string_view const>{Traits::option_staging_registers}})
   {
-    if(has_register(name) and reg(name).offset == offset)
+    for(auto const name : list)
     {
-      warn(
-          name, "written, but OPTSTRT programs only the FLASH_WRPxyR registers: "
-                "the machine's option bytes set the others");
-      return;
+      if(has_register(name) and reg(name).offset == offset)
+      {
+        warn(
+            name, std::format(
+                      "written, but OPTSTRT programs only the {} registers: the machine's option "
+                      "bytes set the others",
+                      Traits::wrp_text));
+        return;
+      }
     }
   }
 }
 
-auto flash::wrp_protected(std::uint32_t from, std::uint32_t length) const -> bool
+template <typename Traits>
+auto flash_model<Traits>::wrp_protected(std::uint32_t from, std::uint32_t length) const -> bool
 {
   if(storage_ == nullptr or wrp_offsets_.empty())
   {
     return false;
   }
   auto const [base, size] = banks();
-  auto const top          = wrp_top();
-  for(auto at = from; at - from < length; at += page_size)
+  for(auto at = from; at - from < length; at += Traits::page_bytes)
   {
     if(at - base >= 2 * size)
     {
       continue;
     }
-    auto const bank = bank_of(at);
-    auto const page = (at - bank_base(at)) / page_size;
-    for(std::size_t area = 0; area < 2; ++area)
+    if(Traits::wrp_covers(
+           state_.wrp_active, bank_of(at), (at - bank_base(at)) / Traits::page_bytes,
+           ctx_.part.part))
     {
-      auto const word = state_.wrp_active[bank * 2 + area];
-      if((word & top) <= page and page <= (word >> 16 & top))
-      {
-        return true;
-      }
+      return true;
     }
   }
   return false;
 }
 
-auto flash::loads_options(reset_kind kind) -> bool
+template <typename Traits> auto flash_model<Traits>::loads_options(reset_kind kind) -> bool
 {
   return kind == reset_kind::power_on
       or kind == reset_kind::brown_out
       or kind == reset_kind::option_load;
 }
 
-void flash::poke_wrp()
+template <typename Traits> void flash_model<Traits>::poke_wrp()
 {
-  for(auto const [index, offset] : std::views::enumerate(wrp_offsets_))
+  for(auto const [index, offset] : std::views::enumerate(wrp_active_offsets_))
   {
     regs_.poke(offset, state_.wrp_active[static_cast<std::size_t>(index)]);
   }
 }
 
-void flash::load_options()
+template <typename Traits> void flash_model<Traits>::load_options()
 {
   for(auto const [index, offset] : std::views::enumerate(wrp_offsets_))
   {
@@ -1196,9 +2467,9 @@ void flash::load_options()
   }
 }
 
-void flash::program_options()
+template <typename Traits> void flash_model<Traits>::program_options()
 {
-  if(flag(false, set_role::sequence_error) or flag(false, set_role::option_error))
+  if(flag(false, set_role::sequence_error) or get(regs_, unit_[unit_role::option_error]) != 0)
   {
     load_options();
     return;
@@ -1208,25 +2479,31 @@ void flash::program_options()
   for(auto const [index, offset] : std::views::enumerate(wrp_offsets_))
   {
     auto const programmed = wrp_programmed(static_cast<std::size_t>(index));
-    auto const word       = wrp_normal(regs_.peek(offset));
+    auto const word       = Traits::wrp_normal(regs_.peek(offset), ctx_.part.part);
     requested.push_back(word);
-    violation = violation or (word != programmed and (programmed & wrp_unlock) == 0);
+    violation = violation or Traits::wrp_refused(programmed, word);
   }
   if(violation)
   {
     load_options();
-    fail(false, set_role::option_error);
+    fail(false, unit_[unit_role::option_error]);
     return;
   }
   state_.wrp = std::move(requested);
+  if constexpr(Traits::option_reload_on_start)
+  {
+    state_.wrp_active = state_.wrp;
+    poke_wrp();
+  }
 }
 
-auto flash::option_locked() const -> bool
+template <typename Traits> auto flash_model<Traits>::option_locked() const -> bool
 {
-  return flag(false, set_role::option_lock);
+  auto const found = unit_.find(unit_role::option_lock);
+  return found and get(regs_, *found) != 0;
 }
 
-void flash::power_cut()
+template <typename Traits> void flash_model<Traits>::power_cut()
 {
   auto const which = static_cast<operation>(state_.running);
   if(which == operation::none)
@@ -1237,7 +2514,7 @@ void flash::power_cut()
   auto const now   = ctx_.clock.since_power_on().ps;
   auto const total = static_cast<std::uint64_t>(duration_of(which, state_.length).count()) * 1000u;
   auto const left  = state_.due_ps > now ? state_.due_ps - now : 0;
-  auto const lines = state_.length / quad_word;
+  auto const lines = state_.length / Traits::program_bytes;
   auto const full =
       total == 0
           ? lines
@@ -1254,32 +2531,42 @@ void flash::power_cut()
   sync_watches();
 }
 
-auto flash::duration_of(operation which, std::uint32_t length) const -> std::chrono::nanoseconds
+template <typename Traits>
+auto flash_model<Traits>::duration_of(operation which, std::uint32_t length) const
+    -> std::chrono::nanoseconds
 {
+  constexpr auto const& timing = Traits::timing;
   switch(which)
   {
     case operation::program:
-      return length == quad_word ? options_.quad_word_program : options_.burst_program;
+      return length == Traits::program_bytes
+               ? options_.quad_word_program.value_or(timing.quad_word_program)
+               : options_.burst_program.value_or(timing.burst_program);
     case operation::page_erase:
-      return options_.page_erase;
+      return options_.page_erase.value_or(timing.page_erase);
     case operation::bank_erase:
-      return options_.bank_erase;
+      return options_.bank_erase.value_or(timing.bank_erase);
     case operation::mass_erase:
     case operation::none:
       break;
   }
-  return options_.mass_erase;
+  return options_.mass_erase.value_or(timing.mass_erase);
 }
 
-auto flash::refused(
+template <typename Traits>
+auto flash_model<Traits>::refused(
     std::uint32_t              at,
     std::span<std::byte const> target,
     std::span<std::byte const> data) const -> bool
 {
-  for(std::size_t line = 0; line < data.size(); line += quad_word)
+  if constexpr(Traits::force_write)
   {
-    auto const old       = target.subspan(line, quad_word);
-    auto const zero_data = all_of_byte(data.subspan(line, quad_word), std::byte{0});
+    return false;
+  }
+  for(std::size_t line = 0; line < data.size(); line += Traits::program_bytes)
+  {
+    auto const old       = target.subspan(line, Traits::program_bytes);
+    auto const zero_data = all_of_byte(data.subspan(line, Traits::program_bytes), std::byte{0});
     if(all_of_byte(old, std::byte{0}) or (not all_of_byte(old, std::byte{0xff}) and not zero_data))
     {
       return true;
@@ -1289,9 +2576,10 @@ auto flash::refused(
   return first != state_.torn.end() and *first < at + data.size();
 }
 
-auto flash::buffered() const -> std::array<std::byte, burst_size>
+template <typename Traits>
+auto flash_model<Traits>::buffered() const -> std::array<std::byte, Traits::buffer_bytes>
 {
-  std::array<std::byte, burst_size> data{};
+  std::array<std::byte, Traits::buffer_bytes> data{};
   for(std::size_t i = 0; i < data.size(); ++i)
   {
     data[i] = static_cast<std::byte>(state_.buffer[i / 4] >> (8 * (i % 4)));
@@ -1299,34 +2587,36 @@ auto flash::buffered() const -> std::array<std::byte, burst_size>
   return data;
 }
 
-void flash::tear_program(std::uint32_t full)
+template <typename Traits> void flash_model<Traits>::tear_program(std::uint32_t full)
 {
-  std::array<std::byte, burst_size> target_bytes{};
-  auto const                        target     = std::span{target_bytes}.first(state_.length);
-  auto                              data_bytes = buffered();
-  auto const                        data       = std::span{data_bytes}.first(state_.length);
+  std::array<std::byte, Traits::buffer_bytes> target_bytes{};
+  auto const                                  target = std::span{target_bytes}.first(state_.length);
+  auto                                        data_bytes = buffered();
+  auto const                                  data = std::span{data_bytes}.first(state_.length);
   if(not ctx_.services.read_block(state_.target, target, initiator::debugger)
      or refused(state_.target, target, data))
   {
     return;
   }
-  auto const done = full * quad_word;
+  auto const done = full * Traits::program_bytes;
   if(done < data.size())
   {
-    for(std::size_t i = done; i < done + quad_word / 2; ++i)
+    for(std::size_t i = done; i < done + Traits::program_bytes / 2; ++i)
     {
       data[i] &= target[i];
     }
-    std::ranges::copy(target.subspan(done + quad_word / 2), data.begin() + done + quad_word / 2);
+    std::ranges::copy(
+        target.subspan(done + Traits::program_bytes / 2),
+        data.begin() + done + Traits::program_bytes / 2);
     auto const line = state_.target + done;
     state_.torn.insert(std::ranges::upper_bound(state_.torn, line), line);
   }
   static_cast<void>(ctx_.services.write_block(state_.target, data, initiator::debugger));
 }
 
-void flash::tear_erase(std::uint32_t full)
+template <typename Traits> void flash_model<Traits>::tear_erase(std::uint32_t full)
 {
-  auto const                   done = full * quad_word;
+  auto const                   done = full * Traits::program_bytes;
   std::vector<std::byte> const erased(done, std::byte{0xff});
   static_cast<void>(ctx_.services.write_block(state_.target, erased, initiator::debugger));
   forget_torn(state_.target, done);
@@ -1334,8 +2624,8 @@ void flash::tear_erase(std::uint32_t full)
   {
     return;
   }
-  std::array<std::byte, quad_word> old{};
-  auto const                       line = state_.target + done;
+  std::array<std::byte, Traits::program_bytes> old{};
+  auto const                                   line = state_.target + done;
   if(not ctx_.services.read_block(line, old, initiator::debugger)
      or all_of_byte(old, std::byte{0xff}))
   {
@@ -1348,14 +2638,15 @@ void flash::tear_erase(std::uint32_t full)
   }
 }
 
-void flash::forget_torn(std::uint32_t from, std::uint32_t length)
+template <typename Traits>
+void flash_model<Traits>::forget_torn(std::uint32_t from, std::uint32_t length)
 {
   auto const first = std::ranges::lower_bound(state_.torn, from);
   auto const last  = std::ranges::lower_bound(state_.torn, from + length);
   state_.torn.erase(first, last);
 }
 
-void flash::sync_watches()
+template <typename Traits> void flash_model<Traits>::sync_watches()
 {
   std::vector<std::uint32_t> gone;
   std::vector<std::uint32_t> added;
@@ -1363,41 +2654,45 @@ void flash::sync_watches()
   std::ranges::set_difference(state_.torn, watched_, std::back_inserter(added));
   for(auto const line : gone)
   {
-    ctx_.services.watch_reads(line, quad_word, false);
+    ctx_.services.watch_reads(line, Traits::program_bytes, false);
   }
   for(auto const line : added)
   {
-    ctx_.services.watch_reads(line, quad_word, true);
+    ctx_.services.watch_reads(line, Traits::program_bytes, true);
   }
   watched_ = state_.torn;
 }
 
-auto flash::banks() const -> bank_geometry
+template <typename Traits> auto flash_model<Traits>::banks() const -> bank_geometry
 {
   contract_assert(storage_ != nullptr);
   return {.base = static_cast<std::uint32_t>(storage_->start), .size = storage_->size / 2};
 }
 
-auto flash::bank_of(std::uint32_t at) const -> std::uint32_t
+template <typename Traits>
+auto flash_model<Traits>::bank_of(std::uint32_t at) const -> std::uint32_t
 {
   auto const [base, size] = banks();
   return ((at - base) / size) ^ (swapped_ ? 1u : 0u);
 }
 
-auto flash::bank_base(std::uint32_t at) const -> std::uint32_t
+template <typename Traits>
+auto flash_model<Traits>::bank_base(std::uint32_t at) const -> std::uint32_t
 {
   auto const [base, size] = banks();
   return base + (at - base) / size * size;
 }
 
-auto flash::page_secure(address at) const -> std::optional<bool>
+template <typename Traits>
+auto flash_model<Traits>::page_secure(address at) const -> std::optional<bool>
 {
   return page_rule(at).transform([](page_policy const& page) { return page.secure; });
 }
 
-auto flash::page_rule(address at) const -> std::optional<page_policy>
+template <typename Traits>
+auto flash_model<Traits>::page_rule(address at) const -> std::optional<page_policy>
 {
-  if(not ctx_.trustzone or storage_ == nullptr or option_words_.size() != option_registers.size())
+  if(not pages_ruled() or storage_ == nullptr)
   {
     return std::nullopt;
   }
@@ -1411,36 +2706,52 @@ auto flash::page_rule(address at) const -> std::optional<page_policy>
   return rule_of(physical(*region, at));
 }
 
-auto flash::rule_of(std::uint32_t at) const -> page_policy
+template <typename Traits> auto flash_model<Traits>::pages_ruled() const -> bool
 {
-  constexpr std::size_t secwm1r1 = 4;
-  constexpr std::size_t secwm2r1 = 6;
-  page_policy           policy{
-      .secure = block_bit(secure_blocks_, at), .privileged = block_bit(privileged_blocks_, at)};
-  if(option_words_.size() != option_registers.size())
+  return (ctx_.trustzone or Traits::hide_without_trustzone)
+     and option_words_.size() == Traits::option_registers.size();
+}
+
+template <typename Traits> auto flash_model<Traits>::rule_of(std::uint32_t at) const -> page_policy
+{
+  page_policy policy{};
+  if(ctx_.trustzone)
+  {
+    policy = {
+        .secure = block_bit(secure_blocks_, at), .privileged = block_bit(privileged_blocks_, at)};
+  }
+  if(option_words_.size() != Traits::option_registers.size())
   {
     return policy;
   }
   auto const bank        = bank_of(at);
-  auto const page        = (at - bank_base(at)) / page_size;
-  auto const first       = option_words_[bank == 0 ? secwm1r1 : secwm2r1].second;
-  auto const second      = option_words_[(bank == 0 ? secwm1r1 : secwm2r1) + 1].second;
-  auto const top         = (1u << watermark_bits(ctx_.part.part)) - 1;
-  auto const start       = first & top;
-  auto const watermarked = start <= page and page <= (first >> 16 & top);
-  auto const hidden      = (second & hdp_enable) != 0
-                  and (regs_.peek(hide_word_) >> bank & 1u) != 0
-                  and start <= page
-                  and page <= (second >> 16 & top);
-  policy.secure = policy.secure or watermarked;
-  policy.hidden = hidden;
+  auto const page        = (at - bank_base(at)) / Traits::page_bytes;
+  auto const first       = option_words_[Traits::watermark_words[bank]].second;
+  auto const top         = Traits::watermark_top(ctx_.part.part);
+  auto const watermarked = (first & top) <= page and page <= (first >> 16 & top);
+  auto const hide        = unit_.find(bank == 0 ? unit_role::hide_bank1 : unit_role::hide_bank2);
+  auto const extension =
+      unit_.find(bank == 0 ? unit_role::hide_extension1 : unit_role::hide_extension2);
+  auto const* const isolation = this->isolation();
+  policy.secure               = policy.secure or (ctx_.trustzone and watermarked);
+  policy.hidden               = Traits::hidden(
+      {.watermark       = first,
+       .area            = option_words_[Traits::hide_words[bank]].second,
+       .access_disabled = hide and get(regs_, *hide) != 0,
+       .extension       = extension ? get(regs_, *extension) : 0,
+       .level           = isolation != nullptr ? isolation->isolation_level() : std::uint8_t{0},
+       .page            = page,
+       .top             = top});
   return policy;
 }
 
-auto flash::block_bit(std::span<std::uint32_t const> words, std::uint32_t at) const -> bool
+template <typename Traits>
+auto flash_model<Traits>::block_bit(std::span<std::uint32_t const> words, std::uint32_t at) const
+    -> bool
 {
-  auto const page  = (at - bank_base(at)) / page_size;
-  auto const index = bank_of(at) * block_registers_per_bank + page / pages_per_block_register;
+  auto const page = (at - bank_base(at)) / Traits::page_bytes;
+  auto const index =
+      bank_of(at) * Traits::block_registers_per_bank + page / pages_per_block_register;
   if(index >= words.size() or words[index] == ~0u)
   {
     return false;
@@ -1448,12 +2759,12 @@ auto flash::block_bit(std::span<std::uint32_t const> words, std::uint32_t at) co
   return (regs_.peek(words[index]) >> (page % pages_per_block_register) & 1u) != 0;
 }
 
-auto flash::secure_page_size() const -> std::uint32_t
+template <typename Traits> auto flash_model<Traits>::secure_page_size() const -> std::uint32_t
 {
-  return page_size;
+  return Traits::page_bytes;
 }
 
-auto flash::secure_function() const -> bool
+template <typename Traits> auto flash_model<Traits>::secure_function() const -> bool
 {
   if(not ctx_.trustzone or storage_ == nullptr)
   {
@@ -1461,30 +2772,36 @@ auto flash::secure_function() const -> bool
   }
   auto const [base, size] = banks();
   auto any                = false;
-  for(std::uint32_t at = base; not any and at - base < 2 * size; at += page_size)
+  for(std::uint32_t at = base; not any and at - base < 2 * size; at += Traits::page_bytes)
   {
     any = rule_of(at).secure;
   }
-  return any != (get(regs_, invert_) != 0);
+  return any != (get(regs_, unit_[unit_role::invert]) != 0);
 }
 
-auto flash::secure_word() const -> std::uint32_t
+template <typename Traits> auto flash_model<Traits>::secure_word() const -> std::uint32_t
 {
   return secure_function() ? 1u : 0u;
 }
 
-auto flash::bank_start(std::uint32_t bank) const -> std::uint32_t
+template <typename Traits>
+auto flash_model<Traits>::bank_start(std::uint32_t bank) const -> std::uint32_t
 {
   auto const [base, size] = banks();
   return base + (bank ^ (swapped_ ? 1u : 0u)) * size;
 }
 
-void flash::on_memory_read(region_desc const& region, address addr, std::uint8_t size, access_ctx)
+template <typename Traits>
+void flash_model<Traits>::on_memory_read(
+    region_desc const& region,
+    address            addr,
+    std::uint8_t       size,
+    access_ctx)
 {
   auto const at    = physical(region, addr);
-  auto const first = at & ~(quad_word - 1);
-  auto const last  = (at + size - 1) & ~(quad_word - 1);
-  for(auto line = first; line <= last; line += quad_word)
+  auto const first = at & ~(Traits::program_bytes - 1);
+  auto const last  = (at + size - 1) & ~(Traits::program_bytes - 1);
+  for(auto line = first; line <= last; line += Traits::program_bytes)
   {
     if(std::ranges::binary_search(state_.torn, line))
     {
@@ -1493,35 +2810,52 @@ void flash::on_memory_read(region_desc const& region, address addr, std::uint8_t
   }
 }
 
-void flash::report_double_error(std::uint32_t line)
+template <typename Traits> void flash_model<Traits>::report_double_error(std::uint32_t line)
 {
-  if(get(regs_, ecc_detect_) != 0 or get(regs_, ecc_correct_) != 0)
+  if(get(regs_, unit_[unit_role::ecc_detect]) != 0
+     or get(regs_, unit_[unit_role::ecc_correct]) != 0)
   {
     return;
   }
-  update(regs_, ecc_address_, line - bank_base(line));
-  update(regs_, ecc_bank_, bank_of(line));
-  update(regs_, ecc_detect_, 1);
+  update(regs_, unit_[unit_role::ecc_address], Traits::ecc_address(line, bank_base(line)));
+  update(regs_, unit_[unit_role::ecc_bank], bank_of(line));
+  update(regs_, unit_[unit_role::ecc_detect], 1);
   ctx_.nmi.raise();
 }
 
-auto flash::busy() const -> bool
+template <typename Traits> auto flash_model<Traits>::busy() const -> bool
 {
   return static_cast<operation>(state_.running) != operation::none;
 }
 
-auto flash::field_of(bool secure, set_role role) const -> field_ref
+template <typename Traits>
+auto flash_model<Traits>::field_of(bool secure, set_role role) const -> field_ref
 {
   return sets_[secure ? 1 : 0].fields[role];
 }
 
-auto flash::flag(bool secure, set_role role) const -> bool
+template <typename Traits>
+auto flash_model<Traits>::value_of(bool secure, set_role role, std::uint32_t word) const
+    -> std::uint32_t
+{
+  auto const found = sets_[secure ? 1 : 0].fields.find(role);
+  return found ? found->of(word) : 0;
+}
+
+template <typename Traits>
+auto flash_model<Traits>::unit_value(unit_role role) const -> std::uint32_t
+{
+  auto const found = unit_.find(role);
+  return found ? get(regs_, *found) : 0;
+}
+
+template <typename Traits> auto flash_model<Traits>::flag(bool secure, set_role role) const -> bool
 {
   auto const found = sets_[secure ? 1 : 0].fields.find(role);
   return found and get(regs_, *found) != 0;
 }
 
-void flash::set_busy(bool on)
+template <typename Traits> void flash_model<Traits>::set_busy(bool on)
 {
   update(regs_, field_of(false, set_role::busy), on ? 1 : 0);
   if(ctx_.trustzone)
@@ -1530,25 +2864,35 @@ void flash::set_busy(bool on)
   }
 }
 
-void flash::set_waiting(bool on)
+template <typename Traits> void flash_model<Traits>::set_waiting(bool on)
 {
-  update(regs_, field_of(false, set_role::waiting), on ? 1 : 0);
+  update(regs_, field_of(false, set_role::buffer_open), on ? 1 : 0);
   if(ctx_.trustzone)
   {
-    update(regs_, field_of(true, set_role::waiting), on ? 1 : 0);
+    update(regs_, field_of(true, set_role::buffer_open), on ? 1 : 0);
   }
 }
 
-auto flash::errors_pending(bool secure) const -> bool
+template <typename Traits> auto flash_model<Traits>::errors_pending(bool secure) const -> bool
 {
-  return std::ranges::any_of(error_roles, [&](set_role role) { return flag(secure, role); });
+  return std::ranges::any_of(error_roles, [&](set_role role) { return flag(secure, role); })
+      or (not secure and get(regs_, unit_[unit_role::option_error]) != 0);
 }
 
-void flash::interrupt()
+template <typename Traits> void flash_model<Traits>::interrupt()
 {
   auto const raised = [this](bool secure) {
+    auto const option_error = not secure
+                          and unit_value(unit_role::option_error) != 0
+                          and unit_value(unit_role::option_error_irq) != 0;
     return (flag(secure, set_role::end) and flag(secure, set_role::end_irq))
-        or (flag(secure, set_role::operation_error) and flag(secure, set_role::error_irq));
+        or (flag(secure, set_role::operation_error) and flag(secure, set_role::error_irq))
+        or std::ranges::any_of(
+               Traits::error_enables,
+               [&](error_enable const& pair) {
+                 return flag(secure, pair.flag) and flag(secure, pair.enable);
+               })
+        or option_error;
   };
   drive(line_, raised(false));
   if(secure_line_ != nullptr)
@@ -1557,9 +2901,14 @@ void flash::interrupt()
   }
 }
 
-void flash::fail(bool secure, set_role role)
+template <typename Traits> void flash_model<Traits>::fail(bool secure, set_role role)
 {
-  update(regs_, field_of(secure, role), 1);
+  fail(secure, field_of(secure, role));
+}
+
+template <typename Traits> void flash_model<Traits>::fail(bool secure, field_ref flagged)
+{
+  update(regs_, flagged, 1);
   if(flag(secure, set_role::error_irq))
   {
     update(regs_, field_of(secure, set_role::operation_error), 1);
@@ -1581,7 +2930,7 @@ void flash::fail(bool secure, set_role role)
   interrupt();
 }
 
-void flash::hold_hsi16(bool held)
+template <typename Traits> void flash_model<Traits>::hold_hsi16(bool held)
 {
   for(auto* const peer : ctx_.peers.all())
   {
@@ -1592,7 +2941,7 @@ void flash::hold_hsi16(bool held)
   }
 }
 
-void flash::illegal_access(std::string_view enable_field)
+template <typename Traits> void flash_model<Traits>::illegal_access(std::string_view enable_field)
 {
   if(not events_linked_ and not ctx_.peers.all().empty())
   {
@@ -1618,7 +2967,8 @@ void flash::illegal_access(std::string_view enable_field)
   }
 }
 
-auto flash::register_refused(std::uint32_t word, access_ctx ctx, bool write) -> bool
+template <typename Traits>
+auto flash_model<Traits>::register_refused(std::uint32_t word, access_ctx ctx, bool write) -> bool
 {
   auto const in = [word](std::span<std::uint32_t const> words) {
     return std::ranges::contains(words, word);
@@ -1637,7 +2987,7 @@ auto flash::register_refused(std::uint32_t word, access_ctx ctx, bool write) -> 
       }
       return true;
     }
-    return not ctx.privileged and get(regs_, secure_privileged_) != 0;
+    return not ctx.privileged and get(regs_, (*privilege_)[privilege_role::secure]) != 0;
   }
   if(in(secure_blocks_))
   {
@@ -1659,14 +3009,19 @@ auto flash::register_refused(std::uint32_t word, access_ctx ctx, bool write) -> 
   {
     return false;
   }
-  return not ctx.privileged and get(regs_, nonsecure_privileged_) != 0;
+  return not ctx.privileged and get(regs_, (*privilege_)[privilege_role::nonsecure]) != 0;
 }
 
-auto flash::writable(std::uint32_t from, std::uint32_t length, bool secure, bool privileged) -> bool
+template <typename Traits>
+auto flash_model<Traits>::writable(
+    std::uint32_t from,
+    std::uint32_t length,
+    bool          secure,
+    bool          privileged) -> bool
 {
   auto allowed = true;
   auto event   = false;
-  for(auto at = from; at - from < length; at += page_size)
+  for(auto at = from; at - from < length; at += Traits::page_bytes)
   {
     auto const rule = rule_of(at);
     event           = event or rule.secure != secure;
@@ -1682,7 +3037,8 @@ auto flash::writable(std::uint32_t from, std::uint32_t length, bool secure, bool
   return allowed;
 }
 
-void flash::on_event(std::uint32_t kind, std::uint64_t payload)
+template <typename Traits>
+void flash_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
 {
   if(kind != operation_end or payload != state_.generation or not busy())
   {
@@ -1691,7 +3047,8 @@ void flash::on_event(std::uint32_t kind, std::uint64_t payload)
   finish();
 }
 
-auto flash::on_write(
+template <typename Traits>
+auto flash_model<Traits>::on_write(
     register_file& regs,
     std::uint32_t  offset,
     std::uint8_t   size,
@@ -1706,7 +3063,7 @@ auto flash::on_write(
   {
     return {};
   }
-  auto const done = dispatch_model::on_write(regs, offset, size, old, value, ctx);
+  auto const done = base::on_write(regs, offset, size, old, value, ctx);
   if(std::exchange(rejected_, false))
   {
     return std::unexpected{bus_error::denied};
@@ -1714,7 +3071,8 @@ auto flash::on_write(
   return done;
 }
 
-auto flash::on_memory_write(
+template <typename Traits>
+auto flash_model<Traits>::on_memory_write(
     region_desc const& region,
     address            addr,
     std::uint8_t       size,
@@ -1730,6 +3088,10 @@ auto flash::on_memory_write(
       .dma     = ctx.by == initiator::dma};
   auto const attrs = static_cast<std::uint8_t>(
       (secure ? held_secure : 0u) | (ctx.privileged ? held_privileged : 0u));
+  if(field_of(secure, set_role::program).of(one.control) != 0)
+  {
+    check_programming_delay("on a flash store with PG set");
+  }
   if(busy())
   {
     hold(one, attrs);
@@ -1739,7 +3101,7 @@ auto flash::on_memory_write(
   return {};
 }
 
-void flash::hold(held_store const& one, std::uint8_t attrs)
+template <typename Traits> void flash_model<Traits>::hold(held_store const& one, std::uint8_t attrs)
 {
   state_.held.push_back(one);
   if(ctx_.trustzone)
@@ -1748,11 +3110,12 @@ void flash::hold(held_store const& one, std::uint8_t attrs)
   }
 }
 
-void flash::store(held_store const& one, std::uint8_t attrs)
+template <typename Traits>
+void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
 {
   auto const [addr, size, value, written, dma] = one;
   auto const secure                            = (attrs & held_secure) != 0;
-  if((ctx_.trustzone and not writable(addr, 1, secure, (attrs & held_privileged) != 0))
+  if((pages_ruled() and not writable(addr, 1, secure, (attrs & held_privileged) != 0))
      or wrp_protected(addr, 1))
   {
     fail(secure, set_role::protection_error);
@@ -1771,7 +3134,17 @@ void flash::store(held_store const& one, std::uint8_t attrs)
   }
   if(state_.filled != 0 and secure_.buffer_secure != secure)
   {
-    fail(secure, set_role::sequence_error);
+    fail(secure, Traits::force_write ? set_role::inconsistency_error : set_role::sequence_error);
+    return;
+  }
+  if constexpr(Traits::force_write)
+  {
+    if(Traits::erase_selected([&](set_role role) { return value_of(secure, role, control); }))
+    {
+      fail(secure, set_role::sequence_error);
+      return;
+    }
+    fill(addr, size, value, secure);
     return;
   }
   if(size != 4)
@@ -1784,7 +3157,7 @@ void flash::store(held_store const& one, std::uint8_t attrs)
   if(state_.filled == 0)
   {
     state_.burst = field_of(secure, set_role::burst).of(control) != 0;
-    if(addr % (state_.burst ? burst_size : quad_word) != 0)
+    if(addr % (state_.burst ? Traits::buffer_bytes : Traits::program_bytes) != 0)
     {
       fail(secure, set_role::alignment_error);
       return;
@@ -1794,13 +3167,14 @@ void flash::store(held_store const& one, std::uint8_t attrs)
     set_waiting(true);
   }
   else if(
-      state_.burst ? addr != next
-                   : addr < state_.buffer_addr or addr >= state_.buffer_addr + quad_word)
+      state_.burst
+          ? addr != next
+          : addr < state_.buffer_addr or addr >= state_.buffer_addr + Traits::program_bytes)
   {
     fail(secure, set_role::alignment_error);
     return;
   }
-  auto const length   = state_.burst ? burst_size : quad_word;
+  auto const length   = state_.burst ? Traits::buffer_bytes : Traits::program_bytes;
   auto const word     = (addr - state_.buffer_addr) / 4;
   state_.buffer[word] = value;
   state_.filled |= 1u << word;
@@ -1812,7 +3186,75 @@ void flash::store(held_store const& one, std::uint8_t attrs)
   start(operation::program, state_.buffer_addr, length, secure);
 }
 
-void flash::start(operation which, std::uint32_t target, std::uint32_t length, bool secure)
+template <typename Traits>
+void flash_model<Traits>::fill(
+    std::uint32_t addr,
+    std::uint8_t  size,
+    std::uint32_t value,
+    bool          secure)
+{
+  auto const line  = addr & ~(Traits::program_bytes - 1);
+  auto const first = addr - line;
+  if(state_.filled == 0)
+  {
+    state_.buffer_addr    = line;
+    secure_.buffer_secure = secure;
+    std::ranges::fill(state_.buffer, ~0u);
+    set_waiting(true);
+  }
+  else if(line != state_.buffer_addr)
+  {
+    fail(secure, set_role::inconsistency_error);
+    return;
+  }
+  if(first + size > Traits::program_bytes)
+  {
+    fail(secure, set_role::inconsistency_error);
+    return;
+  }
+  auto const bytes = ((1u << size) - 1) << first;
+  if((state_.filled & bytes) != 0)
+  {
+    fail(secure, set_role::strobe_error);
+    return;
+  }
+  for(std::uint32_t i = 0; i < size; ++i)
+  {
+    auto const at   = first + i;
+    auto&      out  = state_.buffer[at / 4];
+    auto const lane = 8 * (at % 4);
+    out             = (out & ~(0xffu << lane)) | ((value >> (8 * i) & 0xffu) << lane);
+  }
+  state_.filled |= bytes;
+  if(state_.filled != (1u << Traits::program_bytes) - 1)
+  {
+    return;
+  }
+  set_waiting(false);
+  start(operation::program, state_.buffer_addr, Traits::program_bytes, secure);
+}
+
+template <typename Traits> void flash_model<Traits>::force(bool secure)
+{
+  if(state_.filled == 0 or busy() or secure_.buffer_secure != secure)
+  {
+    return;
+  }
+  auto const data = buffered();
+  if(all_of_byte(std::span{data}.first(Traits::program_bytes), std::byte{0xff}))
+  {
+    return;
+  }
+  set_waiting(false);
+  start(operation::program, state_.buffer_addr, Traits::program_bytes, secure);
+}
+
+template <typename Traits>
+void flash_model<Traits>::start(
+    operation     which,
+    std::uint32_t target,
+    std::uint32_t length,
+    bool          secure)
 {
   state_.running         = static_cast<std::uint8_t>(which);
   secure_.running_secure = secure;
@@ -1825,65 +3267,65 @@ void flash::start(operation which, std::uint32_t target, std::uint32_t length, b
   schedule_in(delay, operation_end, ++state_.generation);
 }
 
-void flash::start_erase(bool secure, std::uint32_t control)
+template <typename Traits> void flash_model<Traits>::start_erase(bool secure, std::uint32_t control)
 {
-  auto const register_name = secure ? "FLASH_SECCR" : "FLASH_NSCR";
+  auto const register_name = Traits::set_registers[secure ? 1 : 0].control;
+  check_programming_delay("on an erase START");
   if(storage_ == nullptr)
   {
     warn(register_name, "erase requested, but no flash region names FLASH as its controller");
     return;
   }
   auto const [base, bank_size] = banks();
-  auto const field             = [&](set_role role) { return field_of(secure, role).of(control); };
+  auto const field             = [&](set_role role) { return value_of(secure, role, control); };
+  auto const command           = Traits::decode_erase(field);
   auto       target            = base;
   auto       length            = storage_->size;
-  auto       which             = operation::mass_erase;
-  if(field(set_role::page_erase) != 0)
+  if(command.op == operation::page_erase)
   {
-    auto const pages = bank_size / page_size;
-    auto const page  = field(set_role::page);
+    auto const pages = bank_size / Traits::page_bytes;
+    auto const page  = command.page;
     if(page >= pages)
     {
       update(regs_, field_of(secure, set_role::start), 0);
       if(not std::exchange(page_logged_, true))
       {
         warn(
-            register_name,
-            std::format("PNB {} is past the {} pages of a bank: nothing is erased", page, pages));
+            register_name, std::format(
+                               "{} {} is past the {} pages of a bank: nothing is erased",
+                               Traits::page_field, page, pages));
       }
       if(ctx_.strict_peripherals)
       {
-        throw model_error(desc_.name, register_name, reg(register_name).offset);
+        throw model_error(desc_.name, std::string{register_name}, reg(register_name).offset);
       }
       return;
     }
-    target = bank_start(field(set_role::bank)) + page * page_size;
-    length = page_size;
-    which  = operation::page_erase;
+    target = bank_start(command.bank) + page * Traits::page_bytes;
+    length = Traits::page_bytes;
   }
-  else if(field(set_role::bank1_erase) == 0 or field(set_role::bank2_erase) == 0)
+  else if(command.op == operation::bank_erase)
   {
-    target = bank_start(field(set_role::bank1_erase) != 0 ? 0 : 1);
+    target = bank_start(command.bank);
     length = bank_size;
-    which  = operation::bank_erase;
   }
-  if((ctx_.trustzone and not writable(target, length, secure, access_.privileged))
+  if((pages_ruled() and not writable(target, length, secure, access_.privileged))
      or wrp_protected(target, length))
   {
     fail(secure, set_role::protection_error);
     update(regs_, field_of(secure, set_role::start), 0);
     return;
   }
-  start(which, target, length, secure);
+  start(command.op, target, length, secure);
 }
 
-void flash::program(bool secure)
+template <typename Traits> void flash_model<Traits>::program(bool secure)
 {
-  std::array<std::byte, burst_size> target_bytes{};
-  auto const                        target     = std::span{target_bytes}.first(state_.length);
-  auto const                        data_bytes = buffered();
-  auto const                        data       = std::span{data_bytes}.first(state_.length);
-  state_.filled                                = 0;
+  std::array<std::byte, Traits::buffer_bytes> target_bytes{};
+  auto const                                  target = std::span{target_bytes}.first(state_.length);
+  auto const                                  data_bytes = buffered();
+  auto const                                  data = std::span{data_bytes}.first(state_.length);
+  state_.filled                                    = 0;
   if(not ctx_.services.read_block(state_.target, target, initiator::debugger)
      or refused(state_.target, target, data))
   {
@@ -1893,7 +3335,7 @@ void flash::program(bool secure)
   static_cast<void>(ctx_.services.write_block(state_.target, data, initiator::debugger));
 }
 
-void flash::finish()
+template <typename Traits> void flash_model<Traits>::finish()
 {
   auto const which  = static_cast<operation>(state_.running);
   auto const secure = secure_.running_secure;
@@ -1912,7 +3354,8 @@ void flash::finish()
     sync_watches();
     update(regs_, field_of(secure, set_role::start), 0);
   }
-  if(errors_pending(secure) == errors and flag(secure, set_role::end_irq))
+  if(errors_pending(secure) == errors
+     and (Traits::end_flag_always or flag(secure, set_role::end_irq)))
   {
     update(regs_, field_of(secure, set_role::end), 1);
   }
@@ -1936,31 +3379,76 @@ void flash::finish()
   }
 }
 
-auto flash::hsi16_held() const -> bool
+template <typename Traits> auto flash_model<Traits>::hsi16_held() const -> bool
 {
+  if constexpr(not Traits::holds_hsi16)
+  {
+    return false;
+  }
   return busy() or std::ranges::any_of(std::array{false, true}, [this](bool secure) {
            return (secure ? ctx_.trustzone : true)
               and (flag(secure, set_role::program) or flag(secure, set_role::start));
          });
 }
 
-void flash::check_latency(std::string_view trigger)
+template <typename Traits> auto flash_model<Traits>::active_range() const -> std::uint32_t
+{
+  std::uint32_t range = 1;
+  for(auto* const peer : ctx_.peers.all())
+  {
+    if(auto const* const source = dynamic_cast<voltage_range_source const*>(peer))
+    {
+      range = source->active_level() + 1;
+    }
+  }
+  return range;
+}
+
+template <typename Traits>
+void flash_model<Traits>::check_programming_delay(std::string_view trigger)
+{
+  auto const field = unit_.find(unit_role::programming_delay);
+  if(not field)
+  {
+    return;
+  }
+  auto const hclk = ctx_.clock.hz(hclk_);
+  if(hclk == 0)
+  {
+    return;
+  }
+  auto const range    = active_range();
+  auto const required = Traits::programming_delay(hclk, range);
+  auto const delay    = get(regs_, *field);
+  if(not required or delay >= *required)
+  {
+    return;
+  }
+  if(delay_logged_.emplace(hclk, range, delay).second or ctx_.strict_peripherals)
+  {
+    warn(
+        "FLASH_ACR", std::format(
+                         "{}: WRHIGHFREQ {} is below the {} {} asks for HCLK {} Hz in voltage "
+                         "range {}, silicon would program out of timing",
+                         trigger, delay, *required, Traits::latency_section, hclk, range));
+  }
+  if(ctx_.strict_peripherals)
+  {
+    throw model_error(desc_.name, "FLASH_ACR", reg("FLASH_ACR").offset);
+  }
+}
+
+template <typename Traits> void flash_model<Traits>::check_latency(std::string_view trigger)
 {
   auto const hclk = ctx_.clock.hz(hclk_);
   if(hclk == 0)
   {
     return;
   }
-  std::uint32_t range = 1;
-  for(auto* const peer : ctx_.peers.all())
-  {
-    if(auto const* const source = dynamic_cast<voltage_range_source const*>(peer))
-    {
-      range = source->active_range();
-    }
-  }
-  auto const latency  = get(regs_, latency_);
-  auto const required = required_wait_states(hclk, range, get(regs_, low_power_read_) != 0);
+  auto const range   = active_range();
+  auto const latency = get(regs_, unit_[unit_role::latency]);
+  auto const required =
+      Traits::wait_states(hclk, range, unit_value(unit_role::low_power_read) != 0);
   if(required and latency >= *required)
   {
     return;
@@ -1970,12 +3458,12 @@ void flash::check_latency(std::string_view trigger)
     warn(
         "FLASH_ACR",
         required ? std::format(
-                       "{}: LATENCY {} is below the {} wait states RM0456 7.3.3 asks for HCLK {} "
-                       "Hz in voltage range {}, silicon would read wrong data",
-                       trigger, latency, *required, hclk, range)
+                       "{}: LATENCY {} is below the {} wait states {} asks for HCLK {} Hz in "
+                       "voltage range {}, silicon would read wrong data",
+                       trigger, latency, *required, Traits::latency_section, hclk, range)
                  : std::format(
-                       "{}: HCLK {} Hz is above the maximum of voltage range {}, RM0456 7.3.3",
-                       trigger, hclk, range));
+                       "{}: HCLK {} Hz is above the maximum of voltage range {}, {}", trigger, hclk,
+                       range, Traits::latency_section));
   }
   if(ctx_.strict_peripherals)
   {
@@ -1983,7 +3471,7 @@ void flash::check_latency(std::string_view trigger)
   }
 }
 
-void flash::save(std::vector<std::byte>& out) const
+template <typename Traits> void flash_model<Traits>::save(std::vector<std::byte>& out) const
 {
   if(ctx_.trustzone)
   {
@@ -1991,10 +3479,10 @@ void flash::save(std::vector<std::byte>& out) const
         trustzone_flash_state{.flash = state_, .secure = secure_});
     return;
   }
-  dispatch_model::save(out);
+  base::save(out);
 }
 
-void flash::load(std::span<std::byte const> in)
+template <typename Traits> void flash_model<Traits>::load(std::span<std::byte const> in)
 {
   if(ctx_.trustzone)
   {
@@ -2005,48 +3493,45 @@ void flash::load(std::span<std::byte const> in)
   }
   else
   {
-    dispatch_model::load(in);
-  }
-  if(not wrp_offsets_.empty() and state_.wrp.size() != wrp_offsets_.size())
-  {
-    state_.wrp.assign(wrp_offsets_.size(), ~(wrp_top() << 16));
-    load_options();
-  }
-  if(state_.wrp_active.size() != state_.wrp.size())
-  {
-    state_.wrp_active = state_.wrp;
+    base::load(in);
+    if(pages_ruled())
+    {
+      ctx_.services.memory_policy_changed();
+    }
   }
   option_changed_.clear();
   latency_logged_.clear();
+  delay_logged_.clear();
   sync_watches();
 }
 
-void flash::on_clock_change()
+template <typename Traits> void flash_model<Traits>::on_clock_change()
 {
   check_latency("after an HCLK change");
 }
 
-void flash::on_voltage_range_change()
+template <typename Traits> void flash_model<Traits>::on_voltage_range_change()
 {
   check_latency("after a voltage range change");
 }
 
-void flash::access_written(std::uint32_t, std::uint32_t)
+template <typename Traits> void flash_model<Traits>::access_written(std::uint32_t, std::uint32_t)
 {
   check_latency("on a FLASH_ACR write");
 }
 
-void flash::key_written(std::uint32_t, std::uint32_t now)
+template <typename Traits> void flash_model<Traits>::key_written(std::uint32_t, std::uint32_t now)
 {
   key_written(false, now);
 }
 
-void flash::secure_key_written(std::uint32_t, std::uint32_t now)
+template <typename Traits>
+void flash_model<Traits>::secure_key_written(std::uint32_t, std::uint32_t now)
 {
   key_written(true, now);
 }
 
-void flash::key_written(bool secure, std::uint32_t now)
+template <typename Traits> void flash_model<Traits>::key_written(bool secure, std::uint32_t now)
 {
   auto& first_key = secure ? secure_.first_key : state_.first_key;
   auto& locked_up = secure ? secure_.locked_up : state_.locked_up;
@@ -2068,11 +3553,13 @@ void flash::key_written(bool secure, std::uint32_t now)
   rejected_ = true;
 }
 
-void flash::option_key_written(std::uint32_t, std::uint32_t now)
+template <typename Traits>
+void flash_model<Traits>::option_key_written(std::uint32_t, std::uint32_t now)
 {
   regs_.poke(reg("FLASH_OPTKEYR").offset, 0);
-  auto const armed =
-      option_locked() and not flag(false, set_role::lock) and not state_.option_locked_up;
+  auto const armed = option_locked()
+                 and not(Traits::option_key_needs_unlock and flag(false, set_role::lock))
+                 and not state_.option_locked_up;
   if(armed and not state_.option_first_key and now == option_key1)
   {
     state_.option_first_key = true;
@@ -2081,7 +3568,7 @@ void flash::option_key_written(std::uint32_t, std::uint32_t now)
   if(armed and state_.option_first_key and now == option_key2)
   {
     state_.option_first_key = false;
-    update(regs_, field_of(false, set_role::option_lock), 0);
+    update(regs_, unit_[unit_role::option_lock], 0);
     return;
   }
   state_.option_first_key = false;
@@ -2089,20 +3576,26 @@ void flash::option_key_written(std::uint32_t, std::uint32_t now)
   rejected_               = true;
 }
 
-void flash::control_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+void flash_model<Traits>::control_written(std::uint32_t old, std::uint32_t now)
 {
   control_written(false, old, now);
 }
 
-void flash::secure_control_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+void flash_model<Traits>::secure_control_written(std::uint32_t old, std::uint32_t now)
 {
   control_written(true, old, now);
 }
 
-void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+void flash_model<Traits>::control_written(bool secure, std::uint32_t old, std::uint32_t now)
 {
   auto const of = [&](set_role role, std::uint32_t word) {
-    return field_of(secure, role).of(word) != 0;
+    return value_of(secure, role, word) != 0;
+  };
+  auto const in = [&](std::uint32_t word) {
+    return [&, word](set_role role) { return value_of(secure, role, word); };
   };
   auto const control = sets_[secure ? 1 : 0].control.offset;
   if(of(set_role::lock, old))
@@ -2110,24 +3603,28 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
     regs_.poke(control, old);
     return;
   }
-  auto const option_lock       = sets_[secure ? 1 : 0].fields.find(set_role::option_lock);
-  auto const option_field      = sets_[secure ? 1 : 0].fields.find(set_role::option_start);
-  auto const option_load_field = sets_[secure ? 1 : 0].fields.find(set_role::option_load);
-  auto const erase_select      = [&](std::uint32_t word) {
-    return of(set_role::page_erase, word)
-        or of(set_role::bank1_erase, word)
-        or of(set_role::bank2_erase, word);
-  };
+  auto const option_lock       = option_field(unit_role::option_lock, control);
+  auto const option_start_bit  = option_field(unit_role::option_start, control);
+  auto const option_load_field = option_field(unit_role::option_load, control);
+  auto const erase_select = [&](std::uint32_t word) { return Traits::erase_selected(in(word)); };
   auto const other_held =
       ctx_.trustzone and (flag(not secure, set_role::program) or flag(not secure, set_role::start));
   auto const hsi16_before = of(set_role::program, old) or of(set_role::start, old) or other_held;
   auto const program_set  = of(set_role::program, now) and not of(set_role::program, old);
   auto const start_set    = of(set_role::start, now) and not of(set_role::start, old);
   auto const unlocked     = option_lock and option_lock->of(old) == 0;
-  auto const option_start = unlocked and option_field and option_field->of(now) != 0;
-  auto const waiting      = flag(false, set_role::waiting);
+  auto const option_start = unlocked and option_start_bit and option_start_bit->of(now) != 0;
+  auto const waiting      = flag(false, set_role::buffer_open);
   auto       sequence     = false;
-  if(of(set_role::program, now) and erase_select(now) and (program_set or not erase_select(old)))
+  if constexpr(Traits::force_write)
+  {
+    if(start_set and of(set_role::program, now))
+    {
+      sequence = true;
+    }
+  }
+  else if(
+      of(set_role::program, now) and erase_select(now) and (program_set or not erase_select(old)))
   {
     sequence = true;
   }
@@ -2153,9 +3650,9 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
         option_lock->of(old) != 0 or option_lock->of(now) != 0 or of(set_role::lock, now);
     now = option_lock->with(now, relock ? 1 : 0);
   }
-  if(option_field)
+  if(option_start_bit)
   {
-    now = option_field->with(now, 0);
+    now = option_start_bit->with(now, 0);
   }
   if(option_load_field)
   {
@@ -2167,12 +3664,15 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
   auto const start = field_of(secure, set_role::start);
   now              = start.with(now, start.of(old));
   auto launch      = false;
+  auto forced      = false;
+  if(auto const fw = sets_[secure ? 1 : 0].fields.find(set_role::force_write))
+  {
+    forced = fw->of(now) != 0;
+    now    = fw->with(now, 0);
+  }
   if(start_set and not busy())
   {
-    if(errors_pending(secure)
-       or not erase_select(now)
-       or (of(set_role::page_erase, now)
-           and (of(set_role::bank1_erase, now) or of(set_role::bank2_erase, now))))
+    if(errors_pending(secure) or not erase_select(now) or Traits::erase_conflict(in(now)))
     {
       sequence = true;
     }
@@ -2209,6 +3709,10 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
       update(regs_, start, 0);
     }
   }
+  if(forced)
+  {
+    force(secure);
+  }
   auto const hsi16_after = hsi16_held();
   if(hsi16_after != hsi16_before)
   {
@@ -2217,24 +3721,66 @@ void flash::control_written(bool secure, std::uint32_t old, std::uint32_t now)
   interrupt();
 }
 
-void flash::status_written(std::uint32_t old, std::uint32_t)
+template <typename Traits>
+void flash_model<Traits>::status_written(std::uint32_t old, std::uint32_t)
 {
   status_written(false, old);
 }
 
-void flash::secure_status_written(std::uint32_t old, std::uint32_t)
+template <typename Traits>
+void flash_model<Traits>::secure_status_written(std::uint32_t old, std::uint32_t)
 {
   status_written(true, old);
 }
 
-void flash::status_written(bool secure, std::uint32_t old)
+template <typename Traits> void flash_model<Traits>::status_written(bool secure, std::uint32_t old)
 {
   auto const& set = sets_[secure ? 1 : 0];
   regs_.poke(set.status.offset, old & ~(written_ & set.clearable));
   interrupt();
 }
 
-void flash::secure_block_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits> void flash_model<Traits>::clear_written(std::uint32_t, std::uint32_t now)
+{
+  apply_crosses(sets_[0].clears, now);
+  regs_.poke(written_word_, 0);
+  interrupt();
+}
+
+template <typename Traits>
+void flash_model<Traits>::secure_clear_written(std::uint32_t, std::uint32_t now)
+{
+  apply_crosses(sets_.back().clears, now);
+  regs_.poke(written_word_, 0);
+  interrupt();
+}
+
+template <typename Traits>
+void flash_model<Traits>::option_control_written(std::uint32_t old, std::uint32_t now)
+{
+  auto const lock      = unit_[unit_role::option_lock];
+  auto const start     = unit_[unit_role::option_start];
+  auto const unlocked  = lock.of(old) == 0;
+  auto const requested = unlocked and start.of(now) != 0;
+  auto       kept      = unlocked ? now : old;
+  kept                 = lock.with(kept, lock.of(old) | lock.of(now));
+  kept                 = start.with(kept, 0);
+  regs_.poke(written_word_, kept);
+  if(requested and not busy())
+  {
+    if(flag(false, set_role::buffer_open) or errors_pending(false))
+    {
+      fail(false, set_role::sequence_error);
+      return;
+    }
+    program_options();
+    warn_dropped_options();
+  }
+  interrupt();
+}
+
+template <typename Traits>
+void flash_model<Traits>::secure_block_written(std::uint32_t old, std::uint32_t now)
 {
   auto const index   = std::ranges::find(secure_blocks_, written_word_) - secure_blocks_.begin();
   auto const partner = privileged_blocks_[static_cast<std::size_t>(index)];
@@ -2244,40 +3790,70 @@ void flash::secure_block_written(std::uint32_t old, std::uint32_t now)
   policy_written(old, kept);
 }
 
-void flash::hide_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+void flash_model<Traits>::hide_written(std::uint32_t old, std::uint32_t now)
 {
   regs_.poke(written_word_, old | now);
   policy_written(old, old | now);
 }
 
-void flash::privilege_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+void flash_model<Traits>::extension_written(std::uint32_t old, std::uint32_t now)
+{
+  auto const* const isolation = this->isolation();
+  auto              kept      = old;
+  if(isolation == nullptr or isolation->isolation_level() <= 2)
+  {
+    for(auto const role : {unit_role::hide_extension1, unit_role::hide_extension2})
+    {
+      auto const bits = unit_[role];
+      kept            = bits.with(kept, std::max(bits.of(old), bits.of(now)));
+    }
+  }
+  regs_.poke(written_word_, kept);
+}
+
+template <typename Traits> auto flash_model<Traits>::isolation() const -> temporal_isolation const*
+{
+  if(not isolation_resolved_ and not ctx_.peers.all().empty())
+  {
+    isolation_resolved_ = true;
+    isolation_          = dynamic_cast<temporal_isolation const*>(ctx_.peers.find("SBS"));
+  }
+  return isolation_;
+}
+
+template <typename Traits>
+void flash_model<Traits>::privilege_written(std::uint32_t old, std::uint32_t now)
 {
   auto allowed = 0u;
   if(access_.privileged)
   {
-    allowed |= nonsecure_privileged_.mask();
+    allowed |= (*privilege_)[privilege_role::nonsecure].mask();
     if(access_.secure)
     {
-      allowed |= secure_privileged_.mask();
+      allowed |= (*privilege_)[privilege_role::secure].mask();
     }
   }
   regs_.poke(written_word_, (now & allowed) | (old & ~allowed));
 }
 
-void flash::privileged_block_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+void flash_model<Traits>::privileged_block_written(std::uint32_t old, std::uint32_t now)
 {
   auto allowed = ~0u;
   if(not access_.secure)
   {
     auto const index =
         std::ranges::find(privileged_blocks_, written_word_) - privileged_blocks_.begin();
-    auto const bank = static_cast<std::uint32_t>(index) / block_registers_per_bank;
-    auto const first =
-        static_cast<std::uint32_t>(index) % block_registers_per_bank * pages_per_block_register;
+    auto const bank  = static_cast<std::uint32_t>(index) / Traits::block_registers_per_bank;
+    auto const first = static_cast<std::uint32_t>(index)
+                     % Traits::block_registers_per_bank
+                     * pages_per_block_register;
     for(std::uint32_t bit = 0; bit < pages_per_block_register; ++bit)
     {
-      auto const at = bank_start(bank) + (first + bit) * page_size;
-      if(first + bit >= banks().size / page_size or rule_of(at).secure)
+      auto const at = bank_start(bank) + (first + bit) * Traits::page_bytes;
+      if(first + bit >= banks().size / Traits::page_bytes or rule_of(at).secure)
       {
         allowed &= ~(1u << bit);
       }
@@ -2288,7 +3864,8 @@ void flash::privileged_block_written(std::uint32_t old, std::uint32_t now)
   policy_written(old, kept);
 }
 
-void flash::policy_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+void flash_model<Traits>::policy_written(std::uint32_t old, std::uint32_t now)
 {
   if(old != now)
   {
@@ -2297,13 +3874,28 @@ void flash::policy_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-void flash::ecc_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+void flash_model<Traits>::ecc_written(std::uint32_t old, std::uint32_t now)
 {
-  auto const flags = ecc_detect_.mask() | ecc_correct_.mask();
-  regs_.poke(ecc_detect_.offset, (now & ~flags) | (old & flags & ~written_));
-  if(get(regs_, ecc_detect_) == 0)
+  auto const detect = unit_[unit_role::ecc_detect];
+  auto       flags  = 0u;
+  for(auto const role : {unit_role::ecc_detect, unit_role::ecc_correct})
   {
-    ctx_.nmi.lower();
+    if(auto const found = unit_.find(role); found and found->offset == written_word_)
+    {
+      flags |= found->mask();
+    }
+  }
+  regs_.poke(written_word_, (now & ~flags) | (old & flags & ~written_));
+  if(get(regs_, detect) != 0)
+  {
+    return;
+  }
+  ctx_.nmi.lower();
+  if constexpr(Traits::ecc_record_clears)
+  {
+    update(regs_, unit_[unit_role::ecc_address], 0);
+    update(regs_, unit_[unit_role::ecc_bank], 0);
   }
 }
 }
@@ -2319,24 +3911,34 @@ auto check_option_bytes(part_description const& part, option_bytes const& wanted
                          : std::ranges::find_if(part.regions, [&unit](region_desc const& region) {
                              return region.controller == unit->name and not region.physical;
                            });
-  if(not part.part.starts_with("STM32U5") or storage == part.regions.end())
+  auto const boot    = [](auto const& words) { return words.boot; };
+  if(storage != part.regions.end() and unit->ip_version == u5_ip_version)
   {
-    return std::unexpected{
-        option_refusal{
-                       .key      = "option_bytes",
-                       .expected = std::format(
-                "a part whose built-in FLASH model encodes option bytes, an STM32U5 with a flash "
-                "region its FLASH controls, not {}", part.part)}
-    };
+    return u5_flash::encode_options(part.part, storage->size, wanted).transform(boot);
   }
-  return flash::encode_options(part.part, storage->size, wanted)
-      .transform([](option_words const& words) { return words.boot; });
+  if(storage != part.regions.end() and unit->ip_version == h5_ip_version)
+  {
+    return h5_flash::encode_options(part.part, storage->size, wanted).transform(boot);
+  }
+  return std::unexpected{
+      option_refusal{
+                     .key      = "option_bytes",
+                     .expected = std::format(
+              "an STM32U5 or STM32H5 part with a flash region its FLASH controls, not {}", part.part)}
+  };
 }
 
 auto flash_factory(flash_options options) -> model_factory
 {
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<flash>(ctx, desc, options);
+    return std::make_shared<flash_model<u5_flash>>(ctx, desc, options);
+  };
+}
+
+auto flash_h5_factory(flash_options options) -> model_factory
+{
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<flash_model<h5_flash>>(ctx, desc, options);
   };
 }
 }

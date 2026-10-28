@@ -76,3 +76,13 @@ def section_sources() -> dict[str, str]:
 def test_each_model_with_a_limit_has_a_limits_section(model: str) -> None:
     link = f"native/src/periph/stm32/{model})"
     assert [heading for heading, source in section_sources().items() if link in source]
+
+
+def test_the_h573_page_lists_its_gtzc_as_trustzone_only() -> None:
+    from popcorn_build import support_pages
+
+    page = support_pages.part_page(popcorn.stm32.mcu("STM32H573AIIx"))
+    assert (
+        "| `GTZC` | `tzsc1_v2_2_rc1_Mustang2M` | GTZC1_MPCBB1, GTZC1_MPCBB2, GTZC1_MPCBB3, "
+        f"GTZC1_TZIC, GTZC1_TZSC | {support_pages.TRUSTZONE_ONLY} |" in page
+    )

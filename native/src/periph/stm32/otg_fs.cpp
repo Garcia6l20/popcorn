@@ -1,5 +1,7 @@
 #include "factories.hpp"
+#include "frame_signal.hpp"
 #include "model_base.hpp"
+#include "usb_device_link.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/stm32/usb.hpp>
@@ -34,7 +36,6 @@ constexpr std::uint32_t idle_suspend     = 3;
 constexpr std::uint64_t ps_per_us        = 1'000'000;
 constexpr std::uint64_t enumeration_ps   = 10 * ps_per_us;
 constexpr std::uint64_t frame_ps         = 1000 * ps_per_us;
-constexpr std::uint64_t idle_ps          = 3 * frame_ps;
 constexpr std::uint32_t all_tx_fifos     = 0x10;
 constexpr std::uint32_t full_speed_48mhz = 3;
 constexpr std::uint32_t endpoint_stride  = 0x20;
@@ -92,16 +93,13 @@ struct otg_fs_state
   std::vector<std::uint32_t>                        rx_data;
   std::array<std::vector<std::uint32_t>, endpoints> tx_fifo{};
   std::array<std::vector<std::uint16_t>, endpoints> tx_packets{};
-  std::vector<std::byte>                            host;
-  std::uint64_t                                     wake_ps{};
   std::array<endpoint_state, endpoints>             in{};
   std::array<endpoint_state, endpoints>             out{};
   std::uint16_t                                     frame{};
   std::uint8_t                                      address{};
   bool                                              address_pending{};
+  usb_link_state                                    link;
   bool                                              b_valid{};
-  bool                                              pulled_up{};
-  bool                                              cable{};
   bool                                              suspended{};
 
   friend auto operator==(otg_fs_state const&, otg_fs_state const&) -> bool = default;
@@ -268,11 +266,15 @@ struct out_fields
  * are not modelled either.
  */
 class otg_fs final : public dispatch_model<otg_fs, otg_fs_state>,
-                     public usb::device_port,
-                     public usb_host_port,
+                     public usb_device_link<otg_fs>,
                      public bus_reset_listener
 {
+  friend usb_device_link<otg_fs>;
+
 public:
+  static constexpr std::uint32_t host_wake_event    = host_wake;
+  static constexpr std::uint32_t idle_suspend_event = idle_suspend;
+
   otg_fs(model_context& ctx, peripheral_desc const& desc, std::optional<usb_host_options> wired);
 
   void reset(register_file& regs, reset_kind kind) override;
@@ -290,9 +292,9 @@ public:
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
 
-  void               attach(std::shared_ptr<usb::host_side> host) override;
   [[nodiscard]] auto pulled_up() const -> bool override;
   void               bus_reset(vtime at) override;
+  void               bus_reset_end(vtime at) override;
   void               start_of_frame(std::uint16_t frame, vtime at) override;
   auto setup(std::uint8_t address, usb::setup_packet packet, vtime at) -> usb::handshake override;
   auto
@@ -304,12 +306,7 @@ public:
   auto in(std::uint8_t address, std::uint8_t endpoint, vtime at) -> usb::in_result override;
   void suspend(vtime at) override;
   void resume(vtime at) override;
-  void wake_at(vtime at) override;
   [[nodiscard]] auto now() const -> vtime override;
-
-  [[nodiscard]] auto board_host() -> usb::host* override;
-  [[nodiscard]] auto plugged() const -> bool override;
-  void               plug(bool attached) override;
 
   void plain_written(std::uint32_t old, std::uint32_t now);
   void refresh_written(std::uint32_t old, std::uint32_t now);
@@ -358,13 +355,13 @@ private:
   void               schedule(std::uint32_t kind, std::uint64_t at_ps);
   void               unmodelled(std::string_view name, std::string message, warning kind);
   void               notice(std::string_view name, std::string message, warning kind);
-  void               select_host();
+  void               cancel(std::uint32_t kind);
   void               enter_suspend();
+  [[nodiscard]] auto link_state() -> usb_link_state&;
+  [[nodiscard]] auto link_state() const -> usb_link_state const&;
 
   register_file&                    regs_;
-  std::shared_ptr<usb::host_side>   host_;
-  std::shared_ptr<usb::host>        board_host_;
-  bool                              plugged_at_power_on_{};
+  frame_output                      frames_;
   irq_line&                         line_;
   std::array<in_fields, endpoints>  in_;
   std::array<out_fields, endpoints> out_;
@@ -514,7 +511,7 @@ otg_fs::otg_fs(
     model_context&                  ctx,
     peripheral_desc const&          desc,
     std::optional<usb_host_options> wired)
-    : dispatch_model{ctx, desc, "OTG_FS", otg_fs_writes}, regs_{ctx.regs},
+    : dispatch_model{ctx, desc, "OTG_FS", otg_fs_writes}, regs_{ctx.regs}, frames_{ctx.peers},
       line_{irq("OTG_FS_IRQn")}, in_{[this]<std::size_t... n>(std::index_sequence<n...>) {
         return std::array<in_fields, endpoints>{in_fields_of(n)...};
       }(std::make_index_sequence<endpoints>{})},
@@ -560,22 +557,22 @@ otg_fs::otg_fs(
   {
     clear_on_one_ |= field("GINTSTS", name).mask();
   }
-  if(wired)
-  {
-    if(not wired->host.warn)
-    {
-      wired->host.warn = [this](std::string const& message) { warn("host", message); };
-    }
-    board_host_          = std::make_shared<usb::host>(*this, std::move(wired->host));
-    plugged_at_power_on_ = wired->attached;
-    state_.cable         = wired->attached;
-    select_host();
-  }
+  wire(std::move(wired));
 }
 
-void otg_fs::select_host()
+auto otg_fs::link_state() -> usb_link_state&
 {
-  host_ = state_.cable ? board_host_ : nullptr;
+  return state_.link;
+}
+
+auto otg_fs::link_state() const -> usb_link_state const&
+{
+  return state_.link;
+}
+
+void otg_fs::cancel(std::uint32_t kind)
+{
+  ++state_.generation[kind];
 }
 
 auto otg_fs::in_fields_of(std::size_t n) const -> in_fields
@@ -653,20 +650,14 @@ void otg_fs::restore_reset_values(std::optional<reset_kind> kind)
     regs_.poke(reg(name).offset, describe(name).reset);
   }
   auto const generation = state_.generation;
-  auto const pulled     = state_.pulled_up;
-  auto const cable      = state_.cable;
+  auto const kept       = state_.link;
   state_                = {};
   state_.generation     = generation;
   for(auto& count : state_.generation)
   {
     ++count;
   }
-  state_.pulled_up = pulled;
-  state_.cable     = cable;
-  if(board_host_ and kind == reset_kind::power_on and cable != plugged_at_power_on_)
-  {
-    plug(plugged_at_power_on_);
-  }
+  keep_link(kept, kind);
   link(false);
   refresh();
 }
@@ -682,12 +673,12 @@ auto otg_fs::b_valid() const -> bool
   {
     return get(regs_, b_valid_value_) != 0;
   }
-  return host_ != nullptr and get(regs_, vbus_detection_) != 0;
+  return host() != nullptr and get(regs_, vbus_detection_) != 0;
 }
 
 auto otg_fs::pulled_up() const -> bool
 {
-  return host_ != nullptr
+  return host() != nullptr
      and b_valid()
      and get(regs_, power_up_) != 0
      and get(regs_, soft_disconnect_) == 0;
@@ -789,15 +780,7 @@ void otg_fs::link(bool report_session_end)
     update(regs_, session_end_, 1);
   }
   state_.b_valid = valid;
-  auto const up  = pulled_up();
-  if(up != state_.pulled_up)
-  {
-    state_.pulled_up = up;
-    if(host_)
-    {
-      host_->pull_up_changed(up, now());
-    }
-  }
+  tell_pull_up(pulled_up());
 }
 
 void otg_fs::refresh()
@@ -1243,93 +1226,25 @@ void otg_fs::on_event(std::uint32_t kind, std::uint64_t payload)
   }
   else if(kind == idle_suspend)
   {
-    if(not state_.cable)
-    {
-      enter_suspend();
-    }
+    idle_ended();
   }
-  else if(host_)
+  else
   {
-    host_->on_time(vtime{state_.wake_ps});
+    host_woken();
     return;
   }
   refresh();
 }
 
-void otg_fs::wake_at(vtime at)
-{
-  state_.wake_ps = std::max(at.ps, now().ps);
-  schedule(host_wake, state_.wake_ps);
-}
-
 void otg_fs::save(std::vector<std::byte>& out) const
 {
-  auto saved = state_;
-  saved.host.clear();
-  if(board_host_ and (host_ == board_host_ or host_ == nullptr))
-  {
-    board_host_->save(saved.host);
-  }
-  else if(not board_host_ and host_ != nullptr)
-  {
-    host_->save(saved.host);
-  }
-  reflex::serde::bson::serializer{out}.dump(saved);
+  save_with_host(state_, out);
 }
 
 void otg_fs::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
-  auto const blob = std::exchange(state_.host, {});
-  if(board_host_)
-  {
-    select_host();
-    board_host_->load(blob);
-  }
-  else if(host_)
-  {
-    host_->load(blob);
-  }
-  link(false);
-}
-
-void otg_fs::attach(std::shared_ptr<usb::host_side> host)
-{
-  host_ = std::move(host);
-  link(true);
-  refresh();
-}
-
-auto otg_fs::board_host() -> usb::host*
-{
-  return board_host_.get();
-}
-
-auto otg_fs::plugged() const -> bool
-{
-  return board_host_ != nullptr and state_.cable;
-}
-
-void otg_fs::plug(bool attached)
-{
-  if(not board_host_)
-  {
-    return;
-  }
-  auto const was_up = state_.pulled_up and host_ == board_host_;
-  state_.cable      = attached;
-  select_host();
-  link(true);
-  if(attached)
-  {
-    ++state_.generation[idle_suspend];
-  }
-  else if(was_up)
-  {
-    board_host_->pull_up_changed(false, now());
-    schedule(idle_suspend, now().ps + idle_ps);
-  }
-  refresh();
+  loaded();
 }
 
 void otg_fs::bus_reset(vtime at)
@@ -1354,12 +1269,16 @@ void otg_fs::bus_reset(vtime at)
   refresh();
 }
 
+void otg_fs::bus_reset_end(vtime)
+{}
+
 void otg_fs::start_of_frame(std::uint16_t frame, vtime at)
 {
   if(not pulled_up())
   {
     return;
   }
+  frames_.start(at.ps);
   state_.frame = frame;
   for(auto& ep : state_.in)
   {
@@ -1725,12 +1644,6 @@ void otg_fs::resume(vtime)
 
 auto otg_fs_factory(board const& b) -> model_factory
 {
-  return [hosts = b.usb_hosts](
-             model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    auto const found = hosts.find(desc.name);
-    return std::make_shared<otg_fs>(
-        ctx, desc,
-        found == hosts.end() ? std::nullopt : std::optional<usb_host_options>{found->second});
-  };
+  return usb_device_factory<otg_fs>(b);
 }
 }

@@ -1,0 +1,525 @@
+format = 1
+source = "Port I and the FLASH_OPTSR_CUR delivery value of the STM32H562, H563 and H573. RM0481 Rev 5 Table 5 maps GPIOI on these parts, Tables 6 and 7 of the STM32H523, H533, H543 and H553 do not. The TIM field and IRQ spellings of the STM32H562, H563 and H573 SVDs, whose TIM2 to TIM5, TIM12 and TIM15 carry MMS1, MMS2, SMS_2 and TS_2 where the STM32H523 SVD spells MMS, MMS_1, SMS_1 and TS_1. stm32h503.toml and stm32h533.toml rename the STM32H503 TIM2 and TIM3 and the STM32H533 TIM12 spellings. TIM1 and TIM8 IRQ 41, 43, 65 and 67: the SVD names them TIM1_BRK_TERR_IERR, TIM1_TRG_COM_DIR_IDX, IM8_BRK_TERR_IERR (a typo) and TIM8_TRG_COM_DIR_IDX, RM0481 Rev 5, 17.3 Table 152 names them TIM1_BRK, TIM1_TRG_COM, TIM8_BRK and TIM8_TRG_COM as the CMSIS IRQn_Type does, dropped and added again the same way. USB IRQ 74: the SVD names it USB_FS, RM0481 Rev 5, 17.3 Table 152 and the CMSIS IRQn_Type USB_DRD_FS, dropped and added again under that name at the same number, so the line has one name with and without the CMSIS header."
+
+[match]
+parts = ["STM32H562*", "STM32H563*", "STM32H573*"]
+
+[peripherals]
+renames = { SEC_LPUART1 = "SEC_LPUART" }
+source = "The STM32H562, H563 and H573 SVDs name the Secure window of LPUART SEC_LPUART1 and derive it from LPUART. Renamed SEC_LPUART, so the alias rule pairs it with LPUART at NS base + 0x1000_0000, RM0481 Rev 5, 2.3 memory map"
+
+[ip]
+renames = { DCACHE1 = ["DCACHE"], OCTOSPI1 = ["OCTOSPI"], I3C1 = ["I3C"], GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPIOF", "GPIOG", "GPIOH", "GPIOI"], GTZC = ["GTZC1_TZSC", "GTZC1_TZIC"], GTZC_NS = ["GTZC1_MPCBB1", "GTZC1_MPCBB2", "GTZC1_MPCBB3"] }
+
+[irqs]
+drop = ["USB_FS", "TIM1_BRK_TERR_IERR", "TIM1_TRG_COM_DIR_IDX", "IM8_BRK_TERR_IERR", "TIM8_TRG_COM_DIR_IDX", "DCACHE", "GPDMA1_CH0", "GPDMA1_CH1", "GPDMA1_CH2", "GPDMA1_CH3", "GPDMA1_CH4", "GPDMA1_CH5", "GPDMA1_CH6", "GPDMA1_CH7", "GPDMA2_CH0", "GPDMA2_CH1", "GPDMA2_CH2", "GPDMA2_CH3", "GPDMA2_CH4", "GPDMA2_CH5", "GPDMA2_CH6", "GPDMA2_CH7"]
+add = [
+  { number = 74, name = "USB_DRD_FS", peripheral = "USB" },
+  { number = 41, name = "TIM1_BRK", peripheral = "TIM1" },
+  { number = 43, name = "TIM1_TRG_COM", peripheral = "TIM1" },
+  { number = 65, name = "TIM8_BRK", peripheral = "TIM8" },
+  { number = 67, name = "TIM8_TRG_COM", peripheral = "TIM8" },
+  { number = 105, name = "DCACHE1", peripheral = "DCACHE" },
+  { number = 27, name = "GPDMA1_Channel0", peripheral = "GPDMA1" },
+  { number = 28, name = "GPDMA1_Channel1", peripheral = "GPDMA1" },
+  { number = 29, name = "GPDMA1_Channel2", peripheral = "GPDMA1" },
+  { number = 30, name = "GPDMA1_Channel3", peripheral = "GPDMA1" },
+  { number = 31, name = "GPDMA1_Channel4", peripheral = "GPDMA1" },
+  { number = 32, name = "GPDMA1_Channel5", peripheral = "GPDMA1" },
+  { number = 33, name = "GPDMA1_Channel6", peripheral = "GPDMA1" },
+  { number = 34, name = "GPDMA1_Channel7", peripheral = "GPDMA1" },
+  { number = 90, name = "GPDMA2_Channel0", peripheral = "GPDMA2" },
+  { number = 91, name = "GPDMA2_Channel1", peripheral = "GPDMA2" },
+  { number = 92, name = "GPDMA2_Channel2", peripheral = "GPDMA2" },
+  { number = 93, name = "GPDMA2_Channel3", peripheral = "GPDMA2" },
+  { number = 94, name = "GPDMA2_Channel4", peripheral = "GPDMA2" },
+  { number = 95, name = "GPDMA2_Channel5", peripheral = "GPDMA2" },
+  { number = 96, name = "GPDMA2_Channel6", peripheral = "GPDMA2" },
+  { number = 97, name = "GPDMA2_Channel7", peripheral = "GPDMA2" },
+  { number = 1, name = "PVD_AVD", peripheral = "EXTI" },
+  { number = 2, name = "RTC", peripheral = "RTC" },
+  { number = 3, name = "RTC_S", peripheral = "RTC" },
+  { number = 103, name = "FPU", peripheral = "EXTI" },
+  { number = 119, name = "CEC", peripheral = "EXTI" },
+]
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_MODER"]
+fields = ["MODE12", "MODE13", "MODE14", "MODE15"]
+drop = true
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_OTYPER"]
+fields = ["OT12", "OT13", "OT14", "OT15"]
+drop = true
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_OSPEEDR"]
+fields = ["OSPEED12", "OSPEED13", "OSPEED14", "OSPEED15"]
+drop = true
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_PUPDR"]
+fields = ["PUPD12", "PUPD13", "PUPD14", "PUPD15"]
+drop = true
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_IDR"]
+fields = ["ID12", "ID13", "ID14", "ID15"]
+drop = true
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_ODR"]
+fields = ["OD12", "OD13", "OD14", "OD15"]
+drop = true
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_LCKR"]
+fields = ["LCK12", "LCK13", "LCK14", "LCK15"]
+drop = true
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_BRR"]
+fields = ["BR12", "BR13", "BR14", "BR15"]
+drop = true
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_HSLVR"]
+fields = ["HSLV12", "HSLV13", "HSLV14", "HSLV15"]
+drop = true
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_SECCFGR"]
+fields = ["SEC12", "SEC13", "SEC14", "SEC15"]
+drop = true
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIOI_BSRR"]
+fields = ["BS12", "BS13", "BS14", "BS15", "BR12", "BR13", "BR14", "BR15"]
+drop = true
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_MODER at 0x42022000 takes 0xFFFFFFFF and returns 0x00FFFFFF, so port I has pins 0 to 11. RM0481 Rev 5 13.4.1 and 13.4.13 give the port I MODER reset 0x00FFFFFF and SECCFGR reset 0x00000FFF, the same 12 pins. The other per-pin registers follow from the pin count, and the H562 and H563, one die with the H573, are taken to have the same count"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_OPTSR_CUR"
+reset = 0x2D30EDF8
+source = "Silicon read-back on two STM32H573 parts in delivery state, option bytes never changed: FLASH_OPTSR_CUR 0x2D30EDF8. RM0481 Rev 5, 7.11.19 FLASH_OPTSR_CUR gives reset value 0xXXXX XXXX, the register is loaded from the option bytes, and Table 55 (7.4.3) with 7.4.4 gives the delivery value: BOOT_UBE 0xB4, IWDG_STDBY and IWDG_STOP 1, PRODUCT_STATE 0xED, NRST_STOP, NRST_STDBY, IWDG_SW and WWDG_SW 1, BORH_EN 0, BOR_LEV 0, SWAP_BANK 0. The Table 55 row prints 29 bit digits for 28 field bits and the read-back shows the extra digit as bit 5 set to 1. The STM32H562 and STM32H563 are taken equal, with the same RM0481 Table 55 row. ST STM32H573 SVD gives 0"
+
+[[fields]]
+instances = ["TIM2"]
+registers = ["TIM2_CR2"]
+rename = { MMS1 = "MMS", MMS2 = "MMS_1" }
+source = "RM0481 Rev 5, 44.5.2 TIMx_CR2: the SVD spells MMS[2:0] MMS1 and MMS bit 3 MMS2, the spelling the model and the TIM1 and TIM8 SVD use is MMS and MMS_1"
+
+[[fields]]
+instances = ["TIM2"]
+registers = ["TIM2_SMCR"]
+rename = { SMS_2 = "SMS_1", TS_2 = "TS_1" }
+source = "RM0481 Rev 5, 44.5.3 TIMx_SMCR: the SVD spells SMS bit 3 SMS_2 and TS[4:3] TS_2, the spelling the model and the TIM1 and TIM8 SVD use is SMS_1 and TS_1"
+
+[[fields]]
+instances = ["TIM3"]
+registers = ["TIM3_CR2"]
+rename = { MMS1 = "MMS", MMS2 = "MMS_1" }
+source = "RM0481 Rev 5, 44.5.2 TIMx_CR2: the SVD spells MMS[2:0] MMS1 and MMS bit 3 MMS2, the spelling the model and the TIM1 and TIM8 SVD use is MMS and MMS_1"
+
+[[fields]]
+instances = ["TIM3"]
+registers = ["TIM3_SMCR"]
+rename = { SMS_2 = "SMS_1", TS_2 = "TS_1" }
+source = "RM0481 Rev 5, 44.5.3 TIMx_SMCR: the SVD spells SMS bit 3 SMS_2 and TS[4:3] TS_2, the spelling the model and the TIM1 and TIM8 SVD use is SMS_1 and TS_1"
+
+[[fields]]
+instances = ["TIM4"]
+registers = ["TIM4_CR2"]
+rename = { MMS1 = "MMS", MMS2 = "MMS_1" }
+source = "RM0481 Rev 5, 44.5.2 TIMx_CR2: the SVD spells MMS[2:0] MMS1 and MMS bit 3 MMS2, the spelling the model and the TIM1 and TIM8 SVD use is MMS and MMS_1"
+
+[[fields]]
+instances = ["TIM4"]
+registers = ["TIM4_SMCR"]
+rename = { SMS_2 = "SMS_1", TS_2 = "TS_1" }
+source = "RM0481 Rev 5, 44.5.3 TIMx_SMCR: the SVD spells SMS bit 3 SMS_2 and TS[4:3] TS_2, the spelling the model and the TIM1 and TIM8 SVD use is SMS_1 and TS_1"
+
+[[fields]]
+instances = ["TIM5"]
+registers = ["TIM5_CR2"]
+rename = { MMS1 = "MMS", MMS2 = "MMS_1" }
+source = "RM0481 Rev 5, 44.5.2 TIMx_CR2: the SVD spells MMS[2:0] MMS1 and MMS bit 3 MMS2, the spelling the model and the TIM1 and TIM8 SVD use is MMS and MMS_1"
+
+[[fields]]
+instances = ["TIM5"]
+registers = ["TIM5_SMCR"]
+rename = { SMS_2 = "SMS_1", TS_2 = "TS_1" }
+source = "RM0481 Rev 5, 44.5.3 TIMx_SMCR: the SVD spells SMS bit 3 SMS_2 and TS[4:3] TS_2, the spelling the model and the TIM1 and TIM8 SVD use is SMS_1 and TS_1"
+
+[[fields]]
+instances = ["TIM12"]
+registers = ["TIM12_CR2"]
+rename = { MMS1 = "MMS" }
+source = "RM0481 Rev 5, 46.7.2 TIM12_CR2: the SVD spells MMS[2:0] MMS1, the spelling the model and the TIM1 and TIM8 SVD use is MMS"
+
+[[fields]]
+instances = ["TIM12"]
+registers = ["TIM12_SMCR"]
+rename = { SMS_2 = "SMS_1", TS_2 = "TS_1" }
+source = "RM0481 Rev 5, 46.7.3 TIM12_SMCR: the SVD spells SMS bit 3 SMS_2 and TS[4:3] TS_2, the spelling the model and the TIM1 and TIM8 SVD use is SMS_1 and TS_1"
+
+[[fields]]
+instances = ["TIM15"]
+registers = ["TIM15_SMCR"]
+rename = { SMS_2 = "SMS_1", TS_2 = "TS_1" }
+source = "RM0481 Rev 5, 47.7.3 TIM15_SMCR: the SVD spells SMS bit 3 SMS_2 and TS[4:3] TS_2, the spelling the model and the TIM1 and TIM8 SVD use is SMS_1 and TS_1"
+
+[[registers]]
+peripheral = "GPIOI"
+name = "GPIOI_AFRH"
+offset = 0x024
+width = 32
+reset = 0
+acc = "read_write"
+fields = [{ name = "AFSEL8", lsb = 0, width = 4 }, { name = "AFSEL9", lsb = 4, width = 4 }, { name = "AFSEL10", lsb = 8, width = 4 }, { name = "AFSEL11", lsb = 12, width = 4 }]
+source = "Silicon read-back on two STM32H573 parts over SWD, 2026-10-27: GPIOI_AFRH at 0x42022024 takes 0x0000D5A1 and returns it, 0xFFFFFFFF returns 0x0000FFFF, so AFSEL8 to AFSEL11 exist and bits 31:16 read 0. DS14121 Rev 5, Table 17 lists PI11 AF13 PSSI_D15. RM0481 Rev 5, 13.4.10 limits GPIOx_AFRH to x = A to H and the STM32H5 SVDs have no GPIOI_AFRH"
+
+[[resets]]
+peripheral = "RNG"
+register = "RNG_CR"
+reset = 0x00800D00
+source = "RM0481 Rev 5, 36.7.1 RNG control register (RNG_CR): reset value 0x0080 0D00, RNG_CONFIG1 0x08 and RNG_CONFIG3 0xD. ST's STM32H573 SVD gives 0x00871F00"
+
+[[resets]]
+peripheral = "PWR"
+register = "PWR_VOSSR"
+reset = 0x2008
+source = "RM0481 Rev 5, 10.11.6 PWR voltage scaling status register (PWR_VOSSR): reset value 0x0000 2008, ACTVOSRDY and VOSRDY set at VOS3. ST's STM32H573 SVD gives 0x8"
+
+[[resets]]
+peripheral = "RCC"
+register = "RCC_CR"
+reset = 0x2B
+source = "RM0481 Rev 5, 11.8.1 RCC clock control register (RCC_CR): reset value 0x0000 002B, HSIDIV 01. ST's STM32H573 SVD gives 0x23, HSIDIV 00"
+
+[[resets]]
+peripheral = "GPIOB"
+register = "GPIOB_MODER"
+reset = 0xFFFFFEBF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFEBF for port B. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOB"
+register = "GPIOB_OSPEEDR"
+reset = 0x000000C0
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x000000C0 for port B. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOB"
+register = "GPIOB_PUPDR"
+reset = 0x00000100
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000100 for port B. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOC"
+register = "GPIO_MODER"
+reset = 0xFFFFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port C. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOC"
+register = "GPIO_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port C. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOC"
+register = "GPIO_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port C. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOD"
+register = "GPIO_MODER"
+reset = 0xFFFFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port D. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOD"
+register = "GPIO_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port D. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOD"
+register = "GPIO_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port D. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOE"
+register = "GPIO_MODER"
+reset = 0xFFFFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port E. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOE"
+register = "GPIO_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port E. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOE"
+register = "GPIO_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port E. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOF"
+register = "GPIO_MODER"
+reset = 0xFFFFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port F. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOF"
+register = "GPIO_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port F. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOF"
+register = "GPIO_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port F. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOG"
+register = "GPIO_MODER"
+reset = 0xFFFFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port G. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOG"
+register = "GPIO_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port G. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOG"
+register = "GPIO_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port G. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOH"
+register = "GPIOH_MODER"
+reset = 0xFFFFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0xFFFFFFFF for port H. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOH"
+register = "GPIOH_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port H. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOH"
+register = "GPIOH_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port H. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOI"
+register = "GPIOI_MODER"
+reset = 0x00FFFFFF
+source = "RM0481 Rev 5, 13.4.1 GPIOx_MODER reset value 0x00FFFFFF for port I. ST's STM32H573 SVD gives 0xABFFFFFF, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOI"
+register = "GPIOI_OSPEEDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.3 GPIOx_OSPEEDR reset value 0x00000000 for port I. ST's STM32H573 SVD gives 0x0C000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOI"
+register = "GPIOI_PUPDR"
+reset = 0x00000000
+source = "RM0481 Rev 5, 13.4.4 GPIOx_PUPDR reset value 0x00000000 for port I. ST's STM32H573 SVD gives 0x64000000, the port A value, for every port"
+
+[[resets]]
+peripheral = "GPIOI"
+register = "GPIOI_SECCFGR"
+reset = 0x00000FFF
+source = "RM0481 Rev 5, 13.4.13 GPIOx_SECCFGR reset value 0x00000FFF for port I, which has 12 pins. ST's STM32H573 SVD gives 0x0000FFFF"
+
+[[resets]]
+peripheral = "DBGMCU"
+register = "DBGMCU_IDCODE"
+reset = 0x10016484
+source = "RM0481 Rev 5, 66.12.4 DBGMCU_IDCODE: DEV_ID 0x484 for STM32H562/563/573, REV_ID 0x1001 for revision Z, bits 15:12 read 6 as the reset value 0xXXXX 6XXX shows. REV_ID is a modelled revision, not a manufacturing fact, the RM lists several and gives no default. ST's STM32H573 SVD gives 0x00006000"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_OPTSR2_CUR"
+reset = 0xC300017C
+source = "Silicon read-back on two STM32H573 parts in delivery state: FLASH_OPTSR2_CUR 0xC300017C. RM0481 Rev 5, 7.11.23 FLASH_OPTSR2_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: TZEN 0xC3 (TrustZone disabled), USBPD_DIS, SRAM2_ECC, SRAM3_ECC, BKPRAM_ECC, SRAM2_RST and SRAM13_RST 1. ST STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_NSBOOTR_CUR"
+reset = 0x080000C3
+source = "RM0481 Rev 5, 7.11.25 FLASH_NSBOOTR_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: NSBOOTADD 0x0800 0000 (NSBOOTADD[23:8] 0x0800, NSBOOTADD[7:0] 0x00) and NSBOOT_LOCK 0xC3. ST's STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_SECBOOTR_CUR"
+reset = 0x0C0000C3
+source = "RM0481 Rev 5, 7.11.27 FLASH_SECBOOTR_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: SECBOOTADD 0x0C00 0000 (SECBOOTADD[23:8] 0x0C00, SECBOOTADD[7:0] 0x00) and SECBOOT_LOCK 0xC3. ST's STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_SECWM1R_CUR"
+reset = 0x0000007F
+source = "RM0481 Rev 5, 7.11.33 FLASH_SECWM1R_CUR: reset value 0x00XX 00XX, loaded from the option bytes. Delivery value of Table 55: SECWM1_STRT 0x7F, SECWM1_END 0x00, no secure area. ST's STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_SECWM2R_CUR"
+reset = 0x0000007F
+source = "RM0481 Rev 5, 7.11.46 FLASH_SECWM2R_CUR: reset value 0x00XX 00XX, loaded from the option bytes. Delivery value of Table 55: SECWM2_STRT 0x7F, SECWM2_END 0x00, no secure area. ST's STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_HDP1R_CUR"
+reset = 0x00000001
+source = "RM0481 Rev 5, 7.11.39 FLASH_HDP1R_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: HDP1_STRT 1, HDP1_END 0, no HDP area. ST's STM32H573 SVD gives 0"
+
+[[resets]]
+peripheral = "FLASH"
+register = "FLASH_HDP2R_CUR"
+reset = 0x00000001
+source = "RM0481 Rev 5, 7.11.52 FLASH_HDP2R_CUR: reset value 0xXXXX XXXX, loaded from the option bytes. Delivery value of Table 55: HDP2_STRT 1, HDP2_END 0, no HDP area. ST's STM32H573 SVD gives 0"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["EXTI_RPR2"]
+fields = ["RPIF46", "RPIF50", "RPIF53"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 18.7.11 EXTI rising edge pending register 2 (EXTI_RPR2): RPIF46, RPIF50 and RPIF53 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["EXTI_FPR2"]
+fields = ["FPIF46", "FPIF50", "FPIF53"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 18.7.12 EXTI falling edge pending register 2 (EXTI_FPR2): FPIF46, FPIF50 and FPIF53 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
+
+[[cross]]
+instances = ["RCC"]
+reg = "RCC_CICR"
+target_reg = "RCC_CIFR"
+effect = "clear"
+pairs = { LSIRDYC = "LSIRDYF", LSERDYC = "LSERDYF", CSIRDYC = "CSIRDYF", HSIRDYC = "HSIRDYF", HSERDYC = "HSERDYF", HSI48RDYC = "HSI48RDYF", PLL1RDYC = "PLL1RDYF", PLL2RDYC = "PLL2RDYF", PLL3RDYC = "PLL3RDYF", HSECSSC = "HSECSSF" }
+source = "RM0481 Rev 5, 11.8.17/11.8.18 RCC clock source interrupt flag register (RCC_CIFR) / RCC clock source interrupt clear register (RCC_CICR)"
+
+[[cross]]
+ip = "SAI"
+reg = "SAI_ACLRFR"
+target_reg = "SAI_ASR"
+effect = "clear"
+pairs = { CLFSDET = "LFSDET", CAFSDET = "AFSDET", CCNRDY = "CNRDY", CWCKCFG = "WCKCFG", CMUTEDET = "MUTEDET", COVRUDR = "OVRUDR" }
+source = "RM0481 Rev 5, 59.6.7/59.6.8 SAI status register (SAI_ASR) / SAI clear flag register (SAI_ACLRFR), sub-block A"
+
+[[cross]]
+ip = "SAI"
+reg = "SAI_BCLRFR"
+target_reg = "SAI_BSR"
+effect = "clear"
+pairs = { CLFSDET = "LFSDET", CAFSDET = "AFSDET", CCNRDY = "CNRDY", CWCKCFG = "WCKCFG", CMUTEDET = "MUTEDET", COVRUDR = "OVRUDR" }
+source = "RM0481 Rev 5, 59.6.15/59.6.16 SAI status register (SAI_BSR) / SAI clear flag register (SAI_BCLRFR), sub-block B"
+
+[[cross]]
+ip = "USART"
+reg = "USART_ICR"
+target_reg = "USART_ISR_enabled"
+effect = "clear"
+pairs = { CMCF = "CMF", EOBCF = "EOBF", RTOCF = "RTOF", CTSCF = "CTSIF", LBDCF = "LBDF", TCBGTCF = "TCBGT", TCCF = "TC", TXFECF = "TXFE", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE", UDRCF = "UDR", WUCF = "WUF" }
+source = "RM0481 Rev 5, 56.8.10/56.8.12 USART interrupt and status register (USART_ISR) / USART interrupt flag clear register (USART_ICR); ISR_enabled is the storage owner the SVD's ISR_disabled alternate view points at."
+
+[[cross]]
+ip = "UART"
+reg = "USART_ICR"
+target_reg = "USART_ISR_enabled"
+effect = "clear"
+pairs = { CMCF = "CMF", EOBCF = "EOBF", RTOCF = "RTOF", CTSCF = "CTSIF", LBDCF = "LBDF", TCBGTCF = "TCBGT", TCCF = "TC", TXFECF = "TXFE", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE", UDRCF = "UDR", WUCF = "WUF" }
+source = "RM0481 Rev 5, 56.8.10/56.8.12, the same shared USART/UART chapter as the USART-keyed rule above; UART4, UART5, UART7 to UART9 and UART12 are a different db IP (UART, not USART) with the same ISR/ICR layout in the SVD."
+
+[[cross]]
+ip = "LPUART"
+reg = "LPUART_ICR"
+target_reg = "LPUART_ISR_enabled"
+effect = "clear"
+pairs = { CMCF = "CMF", CTSCF = "CTSIF", TCCF = "TC", IDLECF = "IDLE", ORECF = "ORE", NECF = "NE", FECF = "FE", PECF = "PE", WUCF = "WUF" }
+source = "RM0481 Rev 5, 57.7.8 LPUART interrupt and status register (LPUART_ISR) / 57.7.10 LPUART interrupt flag clear register (LPUART_ICR): a reduced set versus USART_ICR."
+
+[[cross]]
+instances = ["UCPD1"]
+reg = "UCPD_ICR"
+target_reg = "UCPD_SR"
+effect = "clear"
+pairs = { FRSEVTCF = "FRSEVT", TYPECEVT2CF = "TYPECEVT2", TYPECEVT1CF = "TYPECEVT1", RXMSGENDCF = "RXMSGEND", RXOVRCF = "RXOVR", RXHRSTDETCF = "RXHRSTDET", RXORDDETCF = "RXORDDET", TXUNDCF = "TXUND", HRSTSENTCF = "HRSTSENT", HRSTDISCCF = "HRSTDISC", TXMSGABTCF = "TXMSGABT", TXMSGSENTCF = "TXMSGSENT", TXMSGDISCCF = "TXMSGDISC" }
+source = "RM0481 Rev 5, 62.8.6/62.8.7 UCPD status register (UCPD_SR) / UCPD interrupt clear register (UCPD_ICR)"
+
+[[cross]]
+instances = ["FLASH"]
+reg = "FLASH_NSCCR"
+target_reg = "FLASH_NSSR"
+effect = "clear"
+pairs = { CLR_EOP = "EOP", CLR_WRPERR = "WRPERR", CLR_PGSERR = "PGSERR", CLR_STRBERR = "STRBERR", CLR_INCERR = "INCERR", CLR_OBKERR = "OBKERR", CLR_OBKWERR = "OBKWERR", CLR_OPTCHANGEERR = "OPTCHANGEERR" }
+source = "RM0481 Rev 5, 7.11.9/7.11.13 FLASH nonsecure status register (FLASH_NSSR) / FLASH nonsecure clear control register (FLASH_NSCCR): a write of 1 to CLR_x clears the NSSR flag"
+
+[[cross]]
+instances = ["FLASH"]
+reg = "FLASH_SECCCR"
+target_reg = "FLASH_SECSR"
+effect = "clear"
+pairs = { CLR_EOP = "EOP", CLR_WRPERR = "WRPERR", CLR_PGSERR = "PGSERR", CLR_STRBERR = "STRBERR", CLR_INCERR = "INCERR", CLR_OBKERR = "OBKERR", CLR_OBKWERR = "OBKWERR" }
+source = "RM0481 Rev 5, 7.11.10/7.11.14 FLASH secure status register (FLASH_SECSR) / FLASH secure clear control register (FLASH_SECCCR): a write of 1 to CLR_x clears the SECSR flag"
+
+[[fields]]
+instances = ["TIM15"]
+registers = ["TIM15_SMCR"]
+add = { name = "SMSPE", lsb = 24, width = 1, acc = "read_write", reset = 0 }
+source = "Silicon read-back on an STM32H573: TIM15_SMCR written 0xFFFFFFFF reads 0x033100F7, so bits 24 and 25 exist. ST's STM32H573 SVD has no field there. RM0481 Rev 5, 47.7.3 TIM15_SMCR names bit 24 SMSPE, slave mode selection preload enable, and bit 25 SMSPS, slave mode selection preload source"
+
+
+[[fields]]
+instances = ["TIM15"]
+registers = ["TIM15_SMCR"]
+add = { name = "SMSPS", lsb = 25, width = 1, acc = "read_write", reset = 0 }
+source = "Silicon read-back on an STM32H573: TIM15_SMCR written 0xFFFFFFFF reads 0x033100F7, so bits 24 and 25 exist. ST's STM32H573 SVD has no field there. RM0481 Rev 5, 47.7.3 TIM15_SMCR names bit 24 SMSPE, slave mode selection preload enable, and bit 25 SMSPS, slave mode selection preload source"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["RCC_APB3RSTR"]
+fields = ["SBSRST"]
+drop = true
+source = "Silicon read-back on an STM32H573 (DBGMCU_IDCODE 0x10076484), 2026-10-28: RCC_APB3RSTR bit 1 written 1 reads 0, the register reads 0x0, and SBS_CNSLCKR, SBS_CFGR2, SBS_FPUIMR and SBS_EPOCHSELCR keep their values across the write. RM0481 Rev 5, 11.8.25 RCC_APB3RSTR marks bit 1 reserved. ST's STM32H562, H563 and H573 SVDs name it SBSRST"

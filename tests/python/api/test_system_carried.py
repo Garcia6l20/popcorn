@@ -228,7 +228,7 @@ def test_gather_order_lone_goals_and_halted_sequences_are_exact(pair: Build) -> 
 
     async def sequence(system: System) -> object:
         a, b = system.members["a"], system.members["b"]
-        first = await a.run(for_=us(300))
+        first = await a.run(for_=us(200))
         assert a.time == first.time
         assert system.time_of("a") == system.time_of("b")
         second = await b.run(for_=ms(1))

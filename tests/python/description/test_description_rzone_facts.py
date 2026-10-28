@@ -16,6 +16,7 @@ from popcorn.stm32.description._cubemx import (
     read_rzone,
     read_rzone_facts,
 )
+from popcorn.stm32.description._model import RegionDesc
 from popcorn.stm32.description._sources import Sources, default_search_paths, facts_path
 
 FACTS_DIR = Path(_cubemx.__file__).parent / "rzone"
@@ -28,6 +29,25 @@ EXPECTED_DIFFERENCES: dict[str, dict[str, tuple[object, object]]] = {
 the U575 126 vector positions where the rzone counts 125. Table 186 note 2: position 125 is
 reserved on STM32U575/585 rev. X and present on every other revision, so DS13737 3.20.1 counts
 125."""
+
+
+EXPECTED_REGION_DIFFERENCES: dict[str, dict[str, dict[str, tuple[object, object]]]] = {
+    "STM32_DIE484_640_2048": {
+        "HIGH_CYCLE_FLASH_NS": {"execute": (True, False)},
+        "HIGH_CYCLE_FLASH_S": {"execute": (True, False)},
+    },
+}
+"""Per facts file and region name, each access flag allowed to differ, as (local rzone, facts).
+RM0481 7.3.10 lists an instruction fetch from the flash high-cycle data area as a bus error,
+where the rzone grants execute."""
+
+
+def _region_differences(local: RegionDesc, written: RegionDesc) -> dict[str, tuple[object, object]]:
+    return {
+        flag: (getattr(local.acc, flag), getattr(written.acc, flag))
+        for flag in ("read", "write", "execute")
+        if getattr(local.acc, flag) != getattr(written.acc, flag)
+    }
 
 
 def _core_values(processor: RzoneProcessor) -> dict[str, object]:
@@ -52,6 +72,14 @@ def _local_rzone(facts: Path) -> Path:
 def test_every_expected_difference_names_a_facts_file() -> None:
     assert FACTS
     assert set(EXPECTED_DIFFERENCES) <= {facts.stem for facts in FACTS}
+    assert set(EXPECTED_REGION_DIFFERENCES) <= {facts.stem for facts in FACTS}
+
+
+@pytest.mark.parametrize("name", ["HIGH_CYCLE_FLASH_NS", "HIGH_CYCLE_FLASH_S"])
+def test_the_h573_high_cycle_flash_refuses_instruction_fetch(name: str) -> None:
+    facts = FACTS_DIR / "STM32_DIE484_640_2048.toml"
+    regions = {r.name: r for r in read_rzone_facts(facts.read_bytes(), file=str(facts)).regions}
+    assert (regions[name].acc.read, regions[name].acc.execute) == (True, False)
 
 
 @pytest.mark.parametrize("facts", FACTS, ids=[facts.stem for facts in FACTS])
@@ -69,28 +97,51 @@ def test_facts_match_the_local_rzone(facts: Path) -> None:
     }
     assert differences == EXPECTED_DIFFERENCES.get(facts.stem, {})
     assert [region.name for region in written.regions] == [region.name for region in local.regions]
+    expected = EXPECTED_REGION_DIFFERENCES.get(facts.stem, {})
     for local_region, written_region in zip(local.regions, written.regions, strict=True):
-        assert written_region == local_region, local_region.name
+        assert _region_differences(local_region, written_region) == expected.get(
+            local_region.name, {}
+        ), local_region.name
+        assert replace(written_region, acc=local_region.acc) == local_region, local_region.name
 
 
-@pytest.mark.timeout(20)
-def test_the_u575_built_from_its_facts_has_the_content_of_the_local_build(
-    u575_sources: Sources,
-) -> None:
-    part = read_part(u575_sources.mcu_db.read_bytes(), file=str(u575_sources.mcu_db))
+def _assert_facts_build_has_the_local_content(sources: Sources) -> None:
+    part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db))
     facts = facts_path(part)
     assert facts.is_file()
-    shipped = build_description(replace(u575_sources, rzone=None, rzone_facts=facts))
-    local = build_description(u575_sources)
+    shipped = build_description(replace(sources, rzone=None, rzone_facts=facts))
+    local = build_description(sources)
     assert "rzone" not in shipped.sources
     assert shipped.sources["rzone_facts"]
 
-    def content(text: str) -> dict[str, object]:
+    expected = EXPECTED_REGION_DIFFERENCES.get(facts.stem, {})
+
+    def content(text: str, *, as_written: bool) -> dict[str, object]:
         data = cast(dict[str, object], json.loads(text))
         del data["generator"], data["sources"]
+        if as_written:
+            for region in cast(list[dict[str, dict[str, bool]]], data["regions"]):
+                for flag, (_, written) in expected.get(cast(str, region["name"]), {}).items():
+                    region["acc"][flag] = cast(bool, written)
         return data
 
-    assert content(dump_json(shipped)) == content(dump_json(local))
+    assert content(dump_json(shipped), as_written=False) == content(
+        dump_json(local), as_written=True
+    )
+
+
+@pytest.mark.timeout(60)
+def test_the_u575_built_from_its_facts_has_the_content_of_the_local_build(
+    u575_sources: Sources,
+) -> None:
+    _assert_facts_build_has_the_local_content(u575_sources)
+
+
+@pytest.mark.timeout(60)
+def test_the_h573_built_from_its_facts_has_the_content_of_the_local_build(
+    h573_sources: Sources,
+) -> None:
+    _assert_facts_build_has_the_local_content(h573_sources)
 
 
 def test_a_local_build_reads_the_rzone_and_never_the_facts(

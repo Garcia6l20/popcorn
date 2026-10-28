@@ -134,9 +134,12 @@ Not modelled:
   `stm32/test_tz_aware.cpp` "Q9: RTC_SECCFGR and TAMP_SECCFGR stay storage" and "RM0456 11.5.1:
   BDRST and the RTC clock bits".
 - RCC bits that name no peripheral of the part stay Non-secure: SRAMnEN, SRAMnSMEN, BKPSRAM,
-  GTZCn, AES, SAES, SHSI and the shared kernel clock selections SDMMCSEL, OCTOSPISEL, ADCDACSEL
-  and LPTIM34SEL. The MPCBB INVSECSTATE rule of RM0456 5.4 is not modelled. Not tested, no rule
-  to pin.
+  GTZCn, AES, SAES and SHSI. The MPCBB INVSECSTATE rule of RM0456 5.4 is not modelled. Not
+  tested, no rule to pin.
+- A kernel clock selection shared by several peripherals, such as SDMMCSEL, OCTOSPISEL,
+  ADCDACSEL, LPTIM34SEL and TIMICSEL, is Secure while any of them is. `stm32/test_tz_aware.cpp`
+  "RM0456 11.5.1: a kernel clock selection shared by several peripherals is Secure while any of
+  them is".
 - SYSCFG `CSLCKR` and `CNSLCKR` are stored and lock nothing. `RSSCMDR` and the OTG_HS PHY
   registers have no security rule. Under TZEN=0 `CSLCKR` is storage, where RM0456 Table 131
   makes it RAZ/WI. Not tested, storage only.

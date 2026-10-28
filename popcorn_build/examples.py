@@ -17,8 +17,8 @@ from popcorn_build.firmware import (
     toolchain_found,
     trustzone_pair,
 )
+from popcorn_build.stm32_firmware import STM32U575, Chipset
 
-CHIPSET = "stm32u575"
 EXAMPLES_PREFIX = "example-firmware"
 HAL_BASE = ("", "cortex", "rcc", "rcc_ex", "gpio", "pwr", "pwr_ex")
 FREERTOS_SOURCES = ("tasks.c", "queue.c", "list.c", "timers.c")
@@ -27,11 +27,10 @@ TINYUSB_SOURCES = (
     "tusb.c",
     "common/tusb_fifo.c",
     "device/usbd.c",
-    "portable/synopsys/dwc2/dcd_dwc2.c",
-    "portable/synopsys/dwc2/dwc2_common.c",
 )
 ROM_REGION = re.compile(
-    r"(ROM\s*\(rx\)\s*:\s*ORIGIN\s*=\s*)0x08000000(\s*,\s*LENGTH\s*=\s*)(\d+)K", re.IGNORECASE
+    r"(\b(?:ROM|FLASH)\s*\(rx\)\s*:\s*ORIGIN\s*=\s*)0x0?8000000(\s*,\s*LENGTH\s*=\s*)(\d+)K",
+    re.IGNORECASE,
 )
 
 VECTORS = re.compile(r"([ \t]*)(KEEP\s*\(\s*\*\s*\(\s*\.isr_vector\s*\)\s*\))")
@@ -99,16 +98,16 @@ def prebuilt_elf(example_dir: Path, name: str) -> Path:
 
 
 def offset_linker_script(text: str, offset: int) -> str:
-    """ST's linker script @p text with its ROM region starting @p offset bytes into flash, and
-    the input section `.app_header` placed first, ahead of the vector table.
+    """ST's linker script @p text with its ROM or FLASH region starting @p offset bytes into
+    flash, and the input section `.app_header` placed first, ahead of the vector table.
 
     @throws ValueError @p offset is not a positive multiple of 1 KiB, or the script has no single
-    ROM region at 0x08000000 or no single `KEEP(*(.isr_vector))`.
+    ROM or FLASH region at 0x08000000 or no single `KEEP(*(.isr_vector))`.
     """
     if offset <= 0 or offset % 1024:
         raise ValueError(f"a flash offset is a positive multiple of 1 KiB, not {offset:#x}")
     if len(ROM_REGION.findall(text)) != 1:
-        raise ValueError("the linker script has no single ROM region at 0x08000000")
+        raise ValueError("the linker script has no single ROM or FLASH region at 0x08000000")
     if len(VECTORS.findall(text)) != 1:
         raise ValueError("the linker script has no single KEEP(*(.isr_vector))")
     text = VECTORS.sub(lambda match: f"{match[1]}KEEP(*(.app_header))\n{match[1]}{match[2]}", text)
@@ -263,8 +262,8 @@ def nonsecure_linker_script(text: str, layout: TrustZoneLayout) -> str:
     )
 
 
-def _derived_script(name: str, text: str) -> Path:
-    derived = build_dir / EXAMPLES_PREFIX / CHIPSET / f"{name}.ld"
+def _derived_script(chipset: Chipset, name: str, text: str) -> Path:
+    derived = build_dir / EXAMPLES_PREFIX / chipset.name / f"{name}.ld"
     if not derived.is_file() or derived.read_text() != text:
         derived.parent.mkdir(parents=True, exist_ok=True)
         derived.write_text(text)
@@ -275,11 +274,11 @@ def _templates(device: Path) -> Path:
     return device / "Source" / "Templates"
 
 
-def _linker_script(device: Path, name: str, flash_offset: int) -> Path:
-    script = _templates(device) / "gcc" / "linker" / "STM32U575xx_FLASH.ld"
+def _linker_script(chipset: Chipset, device: Path, name: str, flash_offset: int) -> Path:
+    script = _templates(device) / "gcc" / "linker" / chipset.linker
     if flash_offset == 0:
         return script
-    return _derived_script(name, offset_linker_script(script.read_text(), flash_offset))
+    return _derived_script(chipset, name, offset_linker_script(script.read_text(), flash_offset))
 
 
 def add_example_firmware(
@@ -293,15 +292,17 @@ def add_example_firmware(
     tinyusb: Sequence[str] = (),
     defines: Sequence[str] = (),
     flash_offset: int = 0,
+    chipset: Chipset = STM32U575,
 ) -> tuple[Path, Target | None]:
-    """Build @p example_dir/prebuilt/@p name.elf as a user's STM32U575 Cube project would, or
+    """Build @p example_dir/prebuilt/@p name.elf as a user's @p chipset Cube project would, or
     fall back to that committed copy without arm-none-eabi-gcc.
 
-    The firmware links ST's startup, system file and STM32U575xx_FLASH.ld with newlib-nano, the
+    The firmware links ST's startup, system file and FLASH linker script with newlib-nano, the
     HAL modules @p hal with the ones every HAL project needs, the LL modules @p ll, and with
     @p freertos the FreeRTOS kernel on its non-secure Cortex-M33 port and heap_4, and with
-    @p tinyusb the TinyUSB device stack, its Synopsys DWC2 device driver and the device class
-    drivers named, such as `cdc` and `hid`. Headers are looked up in @p example_dir/firmware
+    @p tinyusb the TinyUSB device stack, the device driver of @p chipset and the device class
+    drivers named, such as `cdc` and `hid`. A TinyUSB firmware compiles with `-fasm`, which the
+    `asm` keyword of the FSDEV driver needs. Headers are looked up in @p example_dir/firmware
     first, where a TinyUSB firmware keeps its `tusb_config.h`.
 
     @param flash_offset Link the image this many bytes into flash, as an application behind a
@@ -317,17 +318,18 @@ def add_example_firmware(
 
     from popcorn_build.requirements import firmware_source
 
-    driver = firmware_source("stm32u5-hal-driver")
-    device = firmware_source("cmsis-device-u5")
+    driver = firmware_source(chipset.hal_package)
+    device = firmware_source(chipset.device_package)
     cmsis = firmware_source("cmsis-core")
     templates = device / "Source" / "Templates"
+    family = f"stm32{chipset.family}xx"
     hal_modules = [*HAL_BASE, *(m for m in hal if m not in HAL_BASE)] if hal else []
     all_sources = [
         *sources,
-        templates / "gcc" / "startup_stm32u575xx.s",
-        templates / "system_stm32u5xx.c",
-        *(driver / "Src" / f"stm32u5xx_hal{'_' if m else ''}{m}.c" for m in hal_modules),
-        *(driver / "Src" / f"stm32u5xx_ll_{m}.c" for m in ll),
+        templates / "gcc" / chipset.startup,
+        templates / chipset.system,
+        *(driver / "Src" / f"{family}_hal{'_' if m else ''}{m}.c" for m in hal_modules),
+        *(driver / "Src" / f"{family}_ll_{m}.c" for m in ll),
     ]
     include_dirs = [
         driver / "Inc",
@@ -342,13 +344,14 @@ def add_example_firmware(
         include_dirs += [kernel / "include", port]
     if tinyusb:
         stack = firmware_source("tinyusb") / "src"
-        all_sources += [stack / source for source in TINYUSB_SOURCES]
+        device_sources = (*TINYUSB_SOURCES, *chipset.usb_device_sources)
+        all_sources += [stack / source for source in device_sources]
         all_sources += [stack / "class" / name / f"{name}_device.c" for name in tinyusb]
         include_dirs.append(stack)
 
-    script = _linker_script(device, name, flash_offset)
+    script = _linker_script(chipset, device, name, flash_offset)
     elf, target = checked_program(
-        f"example-{CHIPSET}-{name}",
+        f"example-{chipset.name}-{name}",
         name,
         env,
         all_sources,
@@ -359,12 +362,14 @@ def add_example_firmware(
     target.private.include_dirs.extend([example_dir / "firmware", *include_dirs])
     target.private.defines.extend(
         [
-            "STM32U575xx",
+            chipset.define,
             *(["USE_HAL_DRIVER"] if hal else []),
             *(["USE_FULL_LL_DRIVER"] if ll else []),
             *defines,
         ]
     )
+    if tinyusb:
+        target.private.compile_flags.append("-fasm")
     return elf, target
 
 
@@ -402,24 +407,29 @@ def add_trustzone_example_firmware(
 
     from popcorn_build.requirements import firmware_source
 
-    device = firmware_source("cmsis-device-u5")
+    chipset = STM32U575
+    device = firmware_source(chipset.device_package)
     cmsis = firmware_source("cmsis-core")
     templates = _templates(device)
     linker = templates / "gcc" / "linker"
-    startup = templates / "gcc" / "startup_stm32u575xx.s"
+    startup = templates / "gcc" / chipset.startup
     secure_ld = _derived_script(
-        f"{name}_s", secure_linker_script((linker / "STM32U575xx_FLASH_s.ld").read_text(), layout)
+        chipset,
+        f"{name}_s",
+        secure_linker_script((linker / chipset.secure_linker).read_text(), layout),
     )
     nonsecure_ld = _derived_script(
-        name, nonsecure_linker_script((linker / "STM32U575xx_FLASH_ns.ld").read_text(), layout)
+        chipset,
+        name,
+        nonsecure_linker_script((linker / chipset.nonsecure_linker).read_text(), layout),
     )
     secure_path, secure, nonsecure_path, nonsecure = trustzone_pair(
-        f"example-{CHIPSET}-{name}",
+        f"example-{chipset.name}-{name}",
         name,
         secure_env,
         env,
         [*secure_sources, startup],
-        [*nonsecure_sources, startup, templates / "system_stm32u5xx_ns.c"],
+        [*nonsecure_sources, startup, templates / chipset.nonsecure_system],
         secure_ld,
         nonsecure_ld,
         prebuilt,
@@ -428,5 +438,5 @@ def add_trustzone_example_firmware(
         target.private.include_dirs.extend(
             [example_dir / "firmware", device / "Include", cmsis / "CMSIS" / "Core" / "Include"]
         )
-        target.private.defines.append("STM32U575xx")
+        target.private.defines.append(chipset.define)
     return secure_path, nonsecure_path, nonsecure

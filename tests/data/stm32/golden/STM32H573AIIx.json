@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 104,
+    "alternates": 1015,
+    "cross_rules": 877,
+    "fields": 39333,
+    "irqs": 131,
+    "patched_fields": 412,
+    "peripherals": 209,
+    "regions": 12,
+    "registers": 4676
+  },
+  "part": "STM32H573AIIx",
+  "svd_sha256": "c0eef483c65d36fabb58f59f0d8428a6bb81758761ff4cd68ef340c21b65efcd",
+  "tables": {
+    "alternates": "e6d903b7bfa9c27a1e3bdaaa3fe99e8ea84f2ea8a9af39d4cb0d0d26f88f785c",
+    "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
+    "fields": "a48d15c0264ab7482fd43c5e264d17547bf57d24ec81f812917281fcfd7e2543",
+    "irqs": "ccd22f69b74a688059d1ca98d417404a1cbaead9ec19549611bab07a6f46ff86",
+    "peripherals": "d2740efa0cdd47f30e4b358b871f2485627461e216a410c129b4abceab6c34f5",
+    "regions": "b0dce162c6511eccb4ef50029218681a4f65fffea78ab868b22df767cab630e3",
+    "registers": "062ee8edee0d9ab22c7f9f878a103092c139a7f0aae44daadc4ba3a002bad80c"
+  }
+}

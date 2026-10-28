@@ -1,0 +1,182 @@
+format = 1
+source = "RM0481 Rev 5 and STM32H573 CubeMX db: SVD naming against CubeMX instances. IRQ adds: RM0481 Rev 5, 17.3 Table 152 STM32H562/563/573xx vector table lists PVD_AVD 1, RTC 2, RTC_S 3, FPU 103 and CEC 119, which STM32H573.svd lacks and the CMSIS IRQn_Type defines. PVD_AVD and FPU go to EXTI as the U5 SVD places PVD_PVM and FPU. The RTC lines go to RTC. HDMI-CEC is an unmodelled H5 block with no peripheral in the SVD, so CEC goes to EXTI too. IRQ rename: the SVD names IRQ 105 DCACHE, RM0481 Rev 5, 17.3 Table 152 names it DCACHE1 and the CMSIS IRQn_Type DCACHE1_IRQn, so it is dropped and added again under that name at the same number. GPDMA1 and GPDMA2 channels 0 to 7, IRQ 27 to 34 and 90 to 97: the SVD names them GPDMA<n>_CH<c>, RM0481 Rev 5, 17.3 Table 152 names them GPDMA<n>_Channel<c> as the CMSIS IRQn_Type does, dropped and added again the same way. The renames give the same line name with and without the CMSIS header"
+
+[match]
+parts = ["STM32H5*"]
+svd = ["STM32H5*.svd"]
+
+[aliases]
+prefix = "SEC_"
+offset = 0x10000000
+source = "RM0481 Rev 5, 2.3 memory map: secure peripheral alias at NS base + 0x1000_0000"
+
+[ip]
+renames = { LPUART1 = ["LPUART"], DAC1 = ["DAC"] }
+
+[core]
+reset_clock_hz = 32_000_000
+source = "RM0481 Rev 5, 11.8.1 RCC_CR HSIDIV reset 01, hsi_ck 32 MHz, SYSCLK after reset"
+
+[[peripheral_sizes]]
+peripheral = "USB"
+size = 0xC00
+source = "RM0481 Rev 5, 2.3: USB_FS RAM 0x40016400 to 0x40016BFF follows the registers"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["EXTI_RPR1"]
+fields = ["RPIF0", "RPIF1", "RPIF2", "RPIF3", "RPIF4", "RPIF5", "RPIF6", "RPIF7", "RPIF8", "RPIF9", "RPIF10", "RPIF11", "RPIF12", "RPIF13", "RPIF14", "RPIF15", "RPIF16"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 18.7.4 EXTI rising edge pending register (EXTI_RPR1): RPIF0 to RPIF16 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["EXTI_FPR1"]
+fields = ["FPIF0", "FPIF1", "FPIF2", "FPIF3", "FPIF4", "FPIF5", "FPIF6", "FPIF7", "FPIF8", "FPIF9", "FPIF10", "FPIF11", "FPIF12", "FPIF13", "FPIF14", "FPIF15", "FPIF16"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 18.7.5 EXTI falling edge pending register (EXTI_FPR1): FPIF0 to FPIF16 are cleared by writing 1. ST's STM32H573 SVD gives plain read-write"
+
+[[fields]]
+ip = "ADC"
+registers = ["ADC_ISR"]
+fields = ["ADRDY", "EOSMP", "EOC", "EOS", "OVR", "JEOC", "JEOS", "AWD1", "AWD2", "AWD3", "JQOVF"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 28.6.1 ADC interrupt and status register (ADC_ISR): ADRDY to JQOVF in bits 10:0 are rc_w1. ST's STM32H573 SVD gives plain read-write. ip, not instances: the ADCC common block has its own IP and no ADC_ISR"
+
+[[fields]]
+ip = "I2C"
+registers = ["I2C_ISR"]
+fields = ["TXIS", "TXE"]
+on_write = "one_to_set"
+source = "RM0481 Rev 5, 53.9.7 I2C interrupt and status register (I2C_ISR): TXIS and TXE are rs, software sets them to force a transmit event or flush TXDR, not a clear"
+
+[[fields]]
+instances = ["RNG"]
+registers = ["RNG_SR"]
+fields = ["SEIS", "CEIS"]
+on_write = "zero_to_clear"
+source = "RM0481 Rev 5, 36.7.2 RNG status register (RNG_SR): SEIS and CEIS are rc_w0, writing 1 has no effect. ST's STM32H573 SVD gives plain read-write"
+
+[[fields]]
+instances = ["SBS"]
+registers = ["SBS_MESR"]
+fields = ["MCLR", "IPMEE"]
+on_write = "one_to_clear"
+source = "RM0481 Rev 5, 14.5.12 and RM0492 Rev 3, 13.5.7 SBS memory erase status register (SBS_MESR): MCLR and IPMEE are rc_w1. Silicon read-back on an STM32H573 over SWD, 2026-10-28: a write of 1 to MCLR clears it, a write of 1 to IPMEE with IPMEE 0 leaves it 0. The SVDs of the six H5 parts give plain read-write"
+
+[[resets]]
+peripheral = "SBS"
+register = "SBS_MESR"
+reset = 0x00000001
+source = "RM0481 Rev 5, 14.5.12 and RM0492 Rev 3, 13.5.7 SBS_MESR: hardware sets MCLR when the memory erase after a power-on reset completes, and a system reset keeps it. The model erases at once, so MCLR reads 1 from the power-on. Silicon read-back on an STM32H573 over SWD, 2026-10-28, after unplugging and replugging the board: RCC_RSR 0x0C000000, BORRSTF and PINRSTF, SBS_MESR 0x00000001. The SVDs of the six H5 parts give 0"
+
+[[fields]]
+ip = "USB"
+registers = ["USB_CHEP{n}R"]
+each = { n = [0, 7] }
+fields = ["STATTX", "DTOGTX", "STATRX", "DTOGRX"]
+acc = "read_write"
+on_write = "one_to_toggle"
+source = "RM0481 Rev 5, 61.6.7 USB endpoint/channel n register (USB_CHEPnR): STATTX, DTOGTX, STATRX and DTOGRX are t, read and toggled by writing 1. ST's STM32H5 SVDs give write-only"
+
+[[fields]]
+ip = "USB"
+registers = ["USB_CHEP{n}R"]
+each = { n = [0, 7] }
+fields = ["VTTX", "VTRX", "NAK", "ERR_TX", "ERR_RX", "THREE_ERR_TX", "THREE_ERR_RX"]
+on_write = "zero_to_clear"
+source = "RM0481 Rev 5, 61.6.7 USB endpoint/channel n register (USB_CHEPnR): VTTX, VTRX, NAK, ERR_TX, ERR_RX, THREE_ERR_TX and THREE_ERR_RX are rc_w0. ST's STM32H5 SVDs give plain read-write"
+
+[[fields]]
+ip = "USB"
+registers = ["USB_ISTR"]
+fields = ["L1REQ", "ESOF", "SOF", "RST_DCON", "SUSP", "WKUP", "ERR", "PMAOVR", "THR512", "DDISC"]
+on_write = "zero_to_clear"
+source = "RM0481 Rev 5, 61.6.2 USB interrupt status register (USB_ISTR): L1REQ to DDISC are rc_w0. ST's STM32H5 SVDs give plain read-write"
+
+[[cross]]
+ip = "GPDMA"
+reg = "GPDMA_C{n}FCR"
+target_reg = "GPDMA_C{n}SR"
+each = { n = [0, 7] }
+effect = "clear"
+pairs = { TCF = "TCF", HTF = "HTF", DTEF = "DTEF", ULEF = "ULEF", USEF = "USEF", SUSPF = "SUSPF", TOF = "TOF" }
+source = "RM0481 Rev 5, 16.8.7/16.8.8 GPDMA channel x flag clear register / status register, one shared layout for channels 0 to 7 of GPDMA1 and GPDMA2"
+
+[[cross]]
+ip = "CRS"
+reg = "CRS_ICR"
+target_reg = "CRS_ISR"
+effect = "clear"
+pairs = { SYNCOKC = "SYNCOKF", SYNCWARNC = "SYNCWARNF", ESYNCC = "ESYNCF", ERRC = "ERRF" }
+source = "RM0481 Rev 5, 12.7.3/12.7.4 CRS interrupt and status register (CRS_ISR) / CRS interrupt flag clear register (CRS_ICR)"
+
+[[cross]]
+ip = "CRS"
+reg = "CRS_ICR"
+target_reg = "CRS_ISR"
+effect = "clear"
+pairs = { ERRC = "TRIMOVF" }
+source = "RM0481 Rev 5, 12.7.3/12.7.4 CRS interrupt and status register (CRS_ISR) / CRS interrupt flag clear register (CRS_ICR): ERRC also clears TRIMOVF, the sources of ERRF"
+
+[[cross]]
+ip = "CRS"
+reg = "CRS_ICR"
+target_reg = "CRS_ISR"
+effect = "clear"
+pairs = { ERRC = "SYNCMISS" }
+source = "RM0481 Rev 5, 12.7.3/12.7.4 CRS interrupt and status register (CRS_ISR) / CRS interrupt flag clear register (CRS_ICR): ERRC also clears SYNCMISS, the sources of ERRF"
+
+[[cross]]
+ip = "CRS"
+reg = "CRS_ICR"
+target_reg = "CRS_ISR"
+effect = "clear"
+pairs = { ERRC = "SYNCERR" }
+source = "RM0481 Rev 5, 12.7.3/12.7.4 CRS interrupt and status register (CRS_ISR) / CRS interrupt flag clear register (CRS_ICR): ERRC also clears SYNCERR, the sources of ERRF"
+
+[[cross]]
+ip = "I2C"
+reg = "I2C_ICR"
+target_reg = "I2C_ISR"
+effect = "clear"
+pairs = { ALERTCF = "ALERT", TIMOUTCF = "TIMEOUT", PECCF = "PECERR", OVRCF = "OVR", ARLOCF = "ARLO", BERRCF = "BERR", STOPCF = "STOPF", NACKCF = "NACKF", ADDRCF = "ADDR" }
+source = "RM0481 Rev 5, 53.9.7/53.9.8 I2C interrupt and status register (I2C_ISR) / I2C interrupt clear register (I2C_ICR)"
+
+[[cross]]
+instances = ["RTC"]
+reg = "RTC_SCR"
+target_reg = "RTC_SR"
+effect = "clear"
+pairs = { CALRAF = "ALRAF", CALRBF = "ALRBF", CWUTF = "WUTF", CTSF = "TSF", CTSOVF = "TSOVF", CITSF = "ITSF", CSSRUF = "SSRUF" }
+source = "RM0481 Rev 5, 51.6.20/51.6.23 RTC status register (RTC_SR) / RTC status clear register (RTC_SCR)"
+
+[[cross]]
+ip = "SPI"
+reg = "SPI_IFCR"
+target_reg = "SPI_SR"
+effect = "clear"
+pairs = { SUSPC = "SUSP", MODFC = "MODF", TIFREC = "TIFRE", CRCEC = "CRCE", OVRC = "OVR", UDRC = "UDR", TXTFC = "TXTF", EOTC = "EOT" }
+source = "RM0481 Rev 5, 58.11.6/58.11.7 SPI/I2S status register (SPI_SR) / SPI/I2S interrupt/status flags clear register (SPI_IFCR)"
+
+[memory]
+source = "RM0481 Rev 5, 7.3.9: the 2048-byte OTP area at 0x08FF F000 to 0x08FF F7FF, written once in 16-bit units through the flash interface and read-only to the CPU, and the read-only area at 0x08FF F800 to 0x08FF FFFF that holds the device signature, 67.1 to 67.3. 7.3.10: the high-cycle data area at 0x0900 0000 to 0x0901 7FFF is a plain read-only region here, with no controller, since EDATA programming is not modelled. 7.3.5 to 7.3.8: flash is programmed by stores into the main memory range through the FLASH interface, so FLASH controls both flash windows. OTP programming is not modelled"
+controller = { Flash_NS = "FLASH", Flash_S = "FLASH" }
+add = [
+  { name = "OTP_NS", start = 0x08FFF000, size = 0x800, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },
+  { name = "RO_NS", start = 0x08FFF800, size = 0x800, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },
+]
+
+[signature]
+source = "RM0481 Rev 5, 67.1 unique device ID at 0x08FF F800, 96 bits, here a fixed value: wafer coordinates 0x00320014, wafer 1, lot POPCORN in ASCII. 67.2 flash size data register at 0x08FF F80C, FLASH_SIZE in KB from the CubeMX part. 67.3 package data register at 0x08FF F80E, PKG[5:0] from the table of 67.3 keyed by the CubeMX package, SMPS for a part name ending in Q, UFBGA169 is 0b00110, a package absent from that table leaves the register erased. DS14121 Rev 5, Table 28 and Table 102: factory calibration words, raw 12-bit ADC codes at VDDA = 3.3 V, here typical values as V / 3.3 V x (2^12 - 1), rounded: VREFINT_CAL at 0x08FF F810, VREFINT 1.216 V (Table 27) = 1509 = 0x05E5. TS_CAL1 at 0x08FF F814, 30 C, V30 0.62 V (Table 101) = 769 = 0x0301. TS_CAL2 at 0x08FF F818, 130 C, 0.62 V + 100 x 2 mV/C Avg_Slope = 0.82 V = 1018 = 0x03FA"
+region = "RO_NS"
+package = 0x00E
+uid = 0x000
+flash_size = 0x00C
+uid_words = [0x0032_0014, 0x4F52_4E01, 0x504F_5043]
+content = [
+  { offset = 0x010, data = [0xE5, 0x05] },
+  { offset = 0x014, data = [0x01, 0x03] },
+  { offset = 0x018, data = [0xFA, 0x03] },
+]
+packages = { "LQFP64" = 0x00, "WLCSP63" = 0x00, "VFQFPN68" = 0x01, "LQFP100" = 0x02, "UFBGA176+25" = 0x03, "LQFP144" = 0x04, "LQFP48" = 0x05, "UFBGA169" = 0x06, "LQFP176" = 0x07, "LQFP100 SMPS" = 0x0A, "UFBGA176+25 SMPS" = 0x0B, "LQFP144 SMPS" = 0x0C, "LQFP176 SMPS" = 0x0D, "UFBGA169 SMPS" = 0x0E, "UFQFPN48" = 0x10, "WLCSP39" = 0x11, "LQFP80" = 0x12, "UFBGA100" = 0x14, "UFBGA144" = 0x15, "LQFP144-EP" = 0x17, "LQFP100-EP" = 0x1E }

@@ -27,6 +27,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -94,21 +95,6 @@ struct held_store
   bool          dma{};
 
   friend auto operator==(held_store const&, held_store const&) -> bool = default;
-};
-
-struct old_flash_state
-{
-  bool                          first_key{};
-  bool                          locked_up{};
-  std::array<std::uint32_t, 32> buffer{};
-  std::uint32_t                 filled{};
-  bool                          burst{};
-  std::uint32_t                 buffer_addr{};
-  std::uint8_t                  running{};
-  std::uint32_t                 target{};
-  std::uint32_t                 length{};
-  std::uint32_t                 generation{};
-  std::vector<held_store>       held{};
 };
 
 struct new_flash_state
@@ -196,6 +182,16 @@ public:
 private:
   periph::model_context& ctx_;
 };
+
+auto unknown_flash() -> popcorn::part_description
+{
+  auto part  = u575();
+  auto flash = std::ranges::find(
+      part.peripherals, std::string_view{"FLASH"}, &popcorn::peripheral_desc::name);
+  REQUIRE(flash != part.peripherals.end());
+  flash->ip_version = "v0.0.0_unknown";
+  return part;
+}
 
 auto board_options(
     periph::stm32::board const&      board,
@@ -531,7 +527,7 @@ struct flash_rig
 
   void tear(address line, icount slice = icount{100'000'000}) const
   {
-    constexpr periph::stm32::flash_options timing{};
+    constexpr auto timing = periph::stm32::u5_flash_timing;
     control(pg);
     store_words_sliced(line, {1, 2, 3, 4}, slice);
     run_into(timing.quad_word_program, timing.quad_word_program / 2, slice);
@@ -794,6 +790,34 @@ TEST_CASE("byte and half-word stores set SIZERR, misplaced words PGAERR, and flu
   rig.wait_idle();
   CHECK(rig.status("PGAERR") == 0);
   CHECK(rig.words(last_page + 16, 4) == std::vector<std::uint32_t>{5, 6, 7, 8});
+  CHECK(rig.words(last_page, 4) == erased(4));
+}
+
+TEST_CASE(
+    "U575 silicon: a half-word store is SIZERR, a second one adds PGSERR, a word then a half-word "
+    "clears WDW")
+{
+  constexpr std::uint32_t sizerr = 1u << 6;
+  constexpr std::uint32_t pgserr = 1u << 7;
+  constexpr std::uint32_t wdw    = 1u << 17;
+  flash_rig               rig;
+  rig.control(pg);
+  SUBCASE("strh then strh")
+  {
+    rig.call("store_half", {last_page, 0x1234});
+    CHECK(rig.read("FLASH_NSSR") == sizerr);
+    rig.call("store_half", {last_page + 2, 0x5678});
+    CHECK(rig.read("FLASH_NSSR") == (sizerr | pgserr));
+  }
+  SUBCASE("str then strh")
+  {
+    rig.store_words(last_page, {0x1122'3344u});
+    CHECK(rig.read("FLASH_NSSR") == wdw);
+    rig.call("store_half", {last_page + 4, 0x5678});
+    CHECK(rig.read("FLASH_NSSR") == sizerr);
+  }
+  rig.control(0);
+  rig.wait_idle();
   CHECK(rig.words(last_page, 4) == erased(4));
 }
 
@@ -1072,12 +1096,12 @@ TEST_CASE("a restore into a fresh machine keeps stores reaching its FLASH model"
   CHECK(other.words(last_page, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
 }
 
-TEST_CASE("HSI16 runs while PG or STRT is set, then stops unless HSION keeps it")
+TEST_CASE("RM0456 11.8.1: HSIRDY stays 0 with HSION 0 while PG or STRT runs HSI16")
 {
   flash_rig rig;
   REQUIRE(rig.f.field("RCC", "RCC_CR", "HSION") == 0);
   rig.program(last_page, {1, 2, 3, 4});
-  CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 1);
+  CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 0);
   rig.control(0);
   CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 0);
   rig.control(per | bker | pnb(63) | strt);
@@ -1085,20 +1109,23 @@ TEST_CASE("HSI16 runs while PG or STRT is set, then stops unless HSION keeps it"
   CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 0);
 }
 
-TEST_CASE("HSI16 stays on while a held program runs after PG is cleared")
+TEST_CASE("RM0456 11.8.1: a switch to HSI16 with HSION 0 waits through a FLASH program")
 {
   flash_rig rig;
   REQUIRE(rig.f.field("RCC", "RCC_CR", "HSION") == 0);
+  rig.write("RCC", "RCC_CFGR1", sw_hsi16);
   rig.control(pg);
   rig.store_words(last_page, {1, 2, 3, 4});
-  rig.wait_idle();
-  REQUIRE(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 1);
-  rig.store_words(last_page + 16, {5, 6, 7, 8});
   REQUIRE(rig.status("BSY") == 1);
-  rig.control(0);
-  CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 1);
-  rig.wait_idle();
+  rig.spin();
   CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 0);
+  CHECK(rig.f.field("RCC", "RCC_CFGR1", "SWS") == 0);
+  rig.wait_idle();
+  CHECK(rig.f.field("RCC", "RCC_CFGR1", "SWS") == 0);
+  rig.write("RCC", "RCC_CR", rig.read_reg("RCC", "RCC_CR") | hsion);
+  rig.spin();
+  CHECK(rig.f.field("RCC", "RCC_CR", "HSIRDY") == 1);
+  CHECK(rig.f.field("RCC", "RCC_CFGR1", "SWS") == sw_hsi16);
 }
 
 TEST_CASE("a BWR burst collects 32 words then programs 128 bytes under one BSY")
@@ -1386,6 +1413,48 @@ TEST_CASE("with LPM set, Table 55 asks one wait state for 16 MHz in range 1")
   CHECK(rig.latency_warnings() == 1);
 }
 
+TEST_CASE("Table 54 range 1 asks LATENCY 0 up to 32 MHz and LATENCY 4 up to 160 MHz")
+{
+  auto const run_pll = [](flash_rig& rig, std::uint32_t n, std::uint32_t r, std::uint32_t ws) {
+    rig.write("PWR", "PWR_VOSR", vos_range1);
+    rig.spin();
+    REQUIRE(rig.f.field("PWR", "PWR_SVMSR", "ACTVOS") == 3);
+    rig.write("FLASH_ACR", ws);
+    rig.switch_to_hsi16();
+    rig.write("RCC", "RCC_PLL1CFGR", 2u | 3u << 2 | 1u << 18);
+    rig.write("RCC", "RCC_PLL1DIVR", (n - 1) | (r - 1) << 24);
+    rig.write("RCC", "RCC_CR", rig.read_reg("RCC", "RCC_CR") | 1u << 24);
+    rig.spin();
+    REQUIRE(rig.f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+    rig.logged.clear();
+    rig.write("RCC", "RCC_CFGR1", 3);
+    rig.spin();
+    REQUIRE(rig.f.field("RCC", "RCC_CFGR1", "SWS") == 3);
+  };
+  SUBCASE("32 MHz at LATENCY 0")
+  {
+    flash_rig rig;
+    run_pll(rig, 8, 4, 0);
+    CHECK(rig.latency_warnings() == 0);
+  }
+  SUBCASE("160 MHz at LATENCY 4, then LATENCY 3")
+  {
+    flash_rig rig;
+    run_pll(rig, 20, 2, 4);
+    CHECK(rig.latency_warnings() == 0);
+    rig.write("FLASH_ACR", 3);
+    REQUIRE(rig.latency_warnings() == 1);
+    CHECK(rig.logged.back().message.contains("160000000"));
+    CHECK(rig.logged.back().message.contains("range 1"));
+  }
+  SUBCASE("34 MHz at LATENCY 0")
+  {
+    flash_rig rig;
+    run_pll(rig, 17, 8, 0);
+    CHECK(rig.latency_warnings() == 1);
+  }
+}
+
 TEST_CASE("lowering the voltage range under a fast HCLK warns when the range applies")
 {
   flash_rig rig;
@@ -1420,21 +1489,43 @@ TEST_CASE("under strict_peripherals each latency violation raises model_error")
 
   flash_rig late{{}, true};
   late.write("FLASH_ACR", 0);
-  late.write("RCC", "RCC_CR", late.read_reg("RCC", "RCC_CR") | hsion);
-  late.spin();
   late.write("RCC", "RCC_CFGR1", sw_hsi16);
+  late.write("RCC", "RCC_CR", late.read_reg("RCC", "RCC_CR") | hsion);
   late.f.set("r0", 2000);
   late.f.set("pc", sym("flash_ll", "spin"));
   CHECK_THROWS_AS(
       static_cast<void>(late.f.target->run_slice({.max_instructions = icount{100'000}})),
       popcorn::model_error);
+
+  flash_rig store{{}, true};
+  store.write("PWR", "PWR_VOSR", vos_range1);
+  store.spin();
+  REQUIRE(store.f.field("PWR", "PWR_SVMSR", "ACTVOS") == 3);
+  store.write("FLASH_ACR", 0);
+  store.switch_to_hsi16();
+  store.write("RCC", "RCC_PLL1CFGR", 2u | 3u << 2 | 1u << 18);
+  store.write("RCC", "RCC_PLL1DIVR", 19u | 1u << 24);
+  store.write("RCC", "RCC_CR", store.read_reg("RCC", "RCC_CR") | 1u << 24);
+  store.spin();
+  REQUIRE(store.f.field("RCC", "RCC_CR", "PLL1RDY") == 1);
+  auto const buffer = sym("flash_ll", "words");
+  REQUIRE(
+      store.f.target->mem().write(buffer, 4, store.read_reg("RCC", "RCC_CFGR1") | 3u).has_value());
+  store.f.set("r0", store.at("RCC_CFGR1", "RCC"));
+  store.f.set("r1", buffer);
+  store.f.set("r2", 1);
+  store.f.set("pc", sym("flash_ll", "copy_words"));
+  CHECK_THROWS_AS(
+      static_cast<void>(store.f.target->run_slice({.max_instructions = icount{1'000}})),
+      popcorn::model_error);
+  CHECK(store.f.field("RCC", "RCC_CFGR1", "SWS") == 3);
 }
 
 TEST_CASE("a power cut during a BWR burst programs the quad-words its elapsed time reached")
 {
-  constexpr periph::stm32::flash_options timing{};
-  flash_rig                              rig;
-  auto const                             data = burst_data(0x300);
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  flash_rig      rig;
+  auto const     data = burst_data(0x300);
   rig.control(pg | bwr);
   SUBCASE("cut at 3.5 quad-word times tears quad-word 3")
   {
@@ -1486,7 +1577,7 @@ TEST_CASE("a power cut during a BWR burst programs the quad-words its elapsed ti
 
 TEST_CASE("a power cut at half a quad-word program tears it")
 {
-  constexpr periph::stm32::flash_options timing{};
+  constexpr auto timing = periph::stm32::u5_flash_timing;
   for(bool const after_reset : {false, true})
   {
     CAPTURE(after_reset);
@@ -1510,9 +1601,9 @@ TEST_CASE("a power cut at half a quad-word program tears it")
 
 TEST_CASE("a power cut at half a page erase erases its first half and tears the boundary")
 {
-  constexpr periph::stm32::flash_options timing{};
-  flash_rig                              rig;
-  auto const line = [](std::uint32_t index) { return last_page + 16 * index; };
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  flash_rig      rig;
+  auto const     line = [](std::uint32_t index) { return last_page + 16 * index; };
   SUBCASE("a programmed boundary is torn")
   {
     for(std::uint32_t const index : {0u, 255u, 256u, 257u, 511u})
@@ -1547,10 +1638,10 @@ TEST_CASE("a power cut at half a page erase erases its first half and tears the 
 
 TEST_CASE("a power cut at a quarter of a bank 2 erase erases its first quarter")
 {
-  constexpr periph::stm32::flash_options timing{};
-  constexpr address                      boundary = bank2 + 0x2'0000;
-  flash_rig                              rig;
-  auto const                             code = rig.words(0x0800'0000, 4);
+  constexpr auto    timing   = periph::stm32::u5_flash_timing;
+  constexpr address boundary = bank2 + 0x2'0000;
+  flash_rig         rig;
+  auto const        code = rig.words(0x0800'0000, 4);
   rig.program(bank2, {1, 2, 3, 4});
   rig.program(boundary - 16, {5, 6, 7, 8});
   rig.program(boundary, {9, 10, 11, 12});
@@ -1568,9 +1659,9 @@ TEST_CASE("a power cut at a quarter of a bank 2 erase erases its first quarter")
 
 TEST_CASE("torn quad-words survive every reset and a restore into a fresh machine")
 {
-  constexpr periph::stm32::flash_options timing{};
-  flash_rig                              rig;
-  auto const                             before = rig.f.target->snapshot();
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  flash_rig      rig;
+  auto const     before = rig.f.target->snapshot();
   rig.control(pg);
   rig.store_words(last_page, {1, 2, 3, 4});
   rig.cut_after(timing.quad_word_program, timing.quad_word_program / 2);
@@ -1593,8 +1684,8 @@ TEST_CASE("torn quad-words survive every reset and a restore into a fresh machin
 
 TEST_CASE("a program into a torn quad-word sets PROGERR until an erase of its page")
 {
-  constexpr periph::stm32::flash_options timing{};
-  flash_rig                              rig;
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  flash_rig      rig;
   rig.control(pg);
   rig.store_words(last_page, {1, 2, 3, 4});
   rig.cut_after(timing.quad_word_program, timing.quad_word_program / 2);
@@ -1621,9 +1712,9 @@ TEST_CASE("a program into a torn quad-word sets PROGERR until an erase of its pa
 
 TEST_CASE("a cut reached in one slice or in many small slices leaves the same torn state")
 {
-  constexpr periph::stm32::flash_options timing{};
-  auto const                             data = burst_data(0x500);
-  auto const                             cut  = [&](icount slice) {
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  auto const     data   = burst_data(0x500);
+  auto const     cut    = [&](icount slice) {
     auto rig = std::make_unique<flash_rig>();
     rig->control(pg | bwr);
     rig->store_words_sliced(last_page, data, slice);
@@ -1640,40 +1731,6 @@ TEST_CASE("a cut reached in one slice or in many small slices leaves the same to
     CHECK(running->words(last_page, 32) == parked->words(last_page, 32));
     CHECK(running->state() == parked->state());
   }
-}
-
-TEST_CASE("a FLASH save made before the power-cut fields loads with no torn quad-word")
-{
-  flash_rig rig;
-  rig.control(pg);
-  rig.store_words(last_page, {1, 2, 3, 4});
-  rig.store_words(last_page + 16, {5, 6});
-  REQUIRE(rig.status("BSY") == 1);
-  auto const now = rig.state();
-  REQUIRE(now.due_ps != 0);
-  old_flash_state const old{
-      .first_key   = now.first_key,
-      .locked_up   = now.locked_up,
-      .buffer      = now.buffer,
-      .filled      = now.filled,
-      .burst       = now.burst,
-      .buffer_addr = now.buffer_addr,
-      .running     = now.running,
-      .target      = now.target,
-      .length      = now.length,
-      .generation  = now.generation,
-      .held        = now.held,
-  };
-  std::vector<std::byte> bytes;
-  reflex::serde::bson::serializer{bytes}.dump(old);
-  rig.f.target->model("FLASH")->load(bytes);
-  auto expected   = now;
-  expected.due_ps = 0;
-  CHECK(rig.state() == expected);
-  rig.cycle();
-  CHECK(rig.words(last_page, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
-  CHECK(rig.words(last_page + 16, 4) == erased(4));
-  CHECK(rig.torn().empty());
 }
 
 TEST_CASE("a CPU load of a torn quad-word sets ECCD, BK_ECC and ADDR_ECC and takes the NMI")
@@ -1829,8 +1886,8 @@ TEST_CASE("a DMA load of a torn quad-word reports, a host or debugger read does 
 
 TEST_CASE("an erase of a torn quad-word's page drops its watch and its reports")
 {
-  constexpr periph::stm32::flash_options timing{};
-  flash_rig                              rig;
+  constexpr auto timing = periph::stm32::u5_flash_timing;
+  flash_rig      rig;
   rig.tear(torn_line);
   CHECK(rig.f.target->controller_watches() == 1);
   rig.tear(torn_line + 16);
@@ -2048,11 +2105,29 @@ TEST_CASE("without option bytes the option registers are the description's stora
 {
   flash_rig const rig;
   CHECK(rig.read("FLASH_OPTR") == 0);
-  rig.write("FLASH_SECWM1R1", 0x0005'0003);
-  CHECK(rig.read("FLASH_SECWM1R1") == 0xff00'ff00);
+  auto const before = rig.read("FLASH_NSBOOTADD0R");
+  rig.write("FLASH_NSBOOTADD0R", 0x0005'0003);
+  CHECK(rig.read("FLASH_NSBOOTADD0R") == before);
   rig.unlock_options();
-  rig.write("FLASH_SECWM1R1", 0x0005'0003);
-  CHECK(rig.read("FLASH_SECWM1R1") == 0xff05'ff03);
+  rig.write("FLASH_NSBOOTADD0R", 0x0005'0003);
+  CHECK(rig.read("FLASH_NSBOOTADD0R") == 0x0005'000f);
+}
+
+TEST_CASE("without option bytes and with TZEN = 0 the secure option registers read zero")
+{
+  flash_rig rig;
+  rig.unlock_options();
+  for(auto const name :
+      {"FLASH_SECWM1R1", "FLASH_SECWM1R2", "FLASH_SECWM2R1", "FLASH_SECWM2R2",
+       "FLASH_SECBOOTADD0R"})
+  {
+    CAPTURE(name);
+    rig.write(name, 0x0005'0003);
+    CHECK(rig.read(name) == 0);
+  }
+  rig.logged.clear();
+  rig.program_options();
+  CHECK(rig.logged.empty());
 }
 
 TEST_CASE("SWAP_BANK puts bank 1 at half the flash for BKER, MER1, MER2 and BK_ECC, RM0456 7.9.13")
@@ -2171,14 +2246,17 @@ TEST_CASE("check_option_bytes returns the boot address and the refusal of each f
   CHECK(refused({.nsboot = 0x0800'0040}) == "option_bytes.nsboot");
   CHECK(refused({.dualbank = false}) == "option_bytes.dualbank");
   CHECK(check_option_bytes(u575(), {.dualbank = true}).has_value());
-  auto other        = u575();
-  other.part        = "STM32H573IIKx";
-  auto const result = check_option_bytes(other, {});
+  auto const result = check_option_bytes(unknown_flash(), {});
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().key == "option_bytes");
+  CHECK(
+      result.error().expected
+      == std::format(
+          "an STM32U5 or STM32H5 part with a flash region its FLASH controls, not {}",
+          unknown_flash().part));
 }
 
-TEST_CASE("the U5 IDAU map is RM0456 2.2 Table 3, other families have none")
+TEST_CASE("the U5 and H5 IDAU map is RM0456 2.2 Table 3, other families have none")
 {
   auto const map = periph::stm32::idau_map(u575());
   REQUIRE(map.has_value());
@@ -2195,8 +2273,12 @@ TEST_CASE("the U5 IDAU map is RM0456 2.2 Table 3, other families have none")
       {.start = 0xe010'0000, .end = 0x1'0000'0000, .nsc = false, .exempt = false},
   };
   CHECK(std::ranges::equal(*map, expected));
+  auto h5 = u575();
+  h5.part = "STM32H573IIKx";
+  REQUIRE(periph::stm32::idau_map(h5).has_value());
+  CHECK(std::ranges::equal(*periph::stm32::idau_map(h5), expected));
   auto other = u575();
-  other.part = "STM32H573IIKx";
+  other.part = "STM32G071RBTx";
   CHECK_FALSE(periph::stm32::idau_map(other).has_value());
 }
 
@@ -2237,9 +2319,9 @@ TEST_CASE("configure_option_bytes refuses before it changes the options")
   CHECK(options.models.empty());
   CHECK_FALSE(options.vector_table);
   auto other_family = u575();
-  other_family.part = "STM32H573IIKx";
+  other_family.part = "STM32G071RBTx";
   CHECK(refused(other_family, {.tzen = true}, options) == "option_bytes.tzen");
-  CHECK(refused(other_family, {}, options) == "option_bytes");
+  CHECK(refused(unknown_flash(), {}, options) == "option_bytes");
   CHECK(
       refused(
           u575(),
@@ -2331,11 +2413,12 @@ TEST_CASE("OBL_LAUNCH and the option registers take writes only once OPTLOCK is 
   flash_rig rig;
   rig.control(obl_launch);
   CHECK(rig.field("FLASH_NSCR", "OBL_LAUNCH") == 0);
-  rig.write("FLASH_SECWM1R1", 0x0005'0003);
-  CHECK(rig.read("FLASH_SECWM1R1") == 0xff00'ff00);
+  auto const before = rig.read("FLASH_NSBOOTADD0R");
+  rig.write("FLASH_NSBOOTADD0R", 0x0005'0003);
+  CHECK(rig.read("FLASH_NSBOOTADD0R") == before);
   rig.unlock_options();
-  rig.write("FLASH_SECWM1R1", 0x0005'0003);
-  CHECK(rig.read("FLASH_SECWM1R1") == 0xff05'ff03);
+  rig.write("FLASH_NSBOOTADD0R", 0x0005'0003);
+  CHECK(rig.read("FLASH_NSBOOTADD0R") == 0x0005'000f);
   rig.control(obl_launch);
   CHECK(rig.field("FLASH_NSCR", "OBL_LAUNCH") == 0);
 }
@@ -2591,11 +2674,11 @@ TEST_CASE(
   rig.set_wrp("FLASH_WRP1AR", 2, 2);
   rig.program_options();
   CHECK(rig.logged.empty());
-  rig.write("FLASH_SECWM1R1", 0x0005'0003);
+  rig.write("FLASH_NSBOOTADD0R", 0x0005'0003);
   rig.program_options();
   REQUIRE(rig.logged.size() == 1);
   CHECK(rig.logged[0].kind == core::log_kind::model_warning);
-  CHECK(rig.logged[0].reg == "FLASH_SECWM1R1");
+  CHECK(rig.logged[0].reg == "FLASH_NSBOOTADD0R");
   CHECK(rig.logged[0].message.contains("FLASH_WRPxyR"));
   rig.write("FLASH_OPTR", 0);
   rig.program_options();
@@ -2692,6 +2775,22 @@ TEST_CASE("an unchanged register with UNLOCK clear is no violation, UNLOCK set s
   CHECK(rig.read("FLASH_WRP2AR") == 0x7f80'ff80);
 }
 
+TEST_CASE("a pending OPTWERR refuses the first program store with PGSERR, RM0456 7.3.9")
+{
+  flash_rig rig;
+  rig.unlock_options();
+  rig.set_wrp("FLASH_WRP1AR", 2, 2, false);
+  rig.program_options();
+  rig.set_wrp("FLASH_WRP1AR", 3, 3);
+  rig.program_options();
+  REQUIRE(rig.status("OPTWERR") == 1);
+  REQUIRE(rig.status("PGSERR") == 0);
+  rig.control(pg);
+  rig.store_words(last_page, {1, 2, 3, 4});
+  CHECK(rig.status("PGSERR") == 1);
+  CHECK(rig.words(last_page, 4) == erased(4));
+}
+
 TEST_CASE("OPTSTRT keeps the old option bytes while OPTWERR or PGSERR is set, RM0456 7.4.2")
 {
   for(auto const flag : {"OPTWERR", "PGSERR"})
@@ -2719,5 +2818,141 @@ TEST_CASE("OPTSTRT keeps the old option bytes while OPTWERR or PGSERR is set, RM
     rig.program_options();
     CHECK(rig.status("OPTWERR") == 0);
     CHECK(rig.read("FLASH_WRP2AR") == 0xff84'ff84);
+  }
+}
+
+TEST_CASE(
+    "the FLASH state after a program, a torn cut and a WRP program saves the bytes "
+    "captured before the field tables")
+{
+  constexpr auto expected = std::to_array<unsigned char>(
+      {0xd8, 0x02, 0x00, 0x00, 0x08, 0x66, 0x69, 0x72, 0x73, 0x74, 0x5f, 0x6b, 0x65, 0x79, 0x00,
+       0x00, 0x08, 0x6c, 0x6f, 0x63, 0x6b, 0x65, 0x64, 0x5f, 0x75, 0x70, 0x00, 0x00, 0x08, 0x6f,
+       0x70, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x66, 0x69, 0x72, 0x73, 0x74, 0x5f, 0x6b, 0x65, 0x79,
+       0x00, 0x00, 0x08, 0x6f, 0x70, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x6c, 0x6f, 0x63, 0x6b, 0x65,
+       0x64, 0x5f, 0x75, 0x70, 0x00, 0x00, 0x04, 0x62, 0x75, 0x66, 0x66, 0x65, 0x72, 0x00, 0x7b,
+       0x01, 0x00, 0x00, 0x12, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x35,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x36, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x37, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x12, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x39, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x30, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x12, 0x31, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x31, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x34, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x35, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x12, 0x31, 0x37, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x31, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x31, 0x39, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x30, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x12, 0x32, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x32, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x34, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x35, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x12, 0x32, 0x37, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x32, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x39, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x33, 0x30, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x33, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x12, 0x66, 0x69, 0x6c, 0x6c, 0x65, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x08, 0x62, 0x75, 0x72, 0x73, 0x74, 0x00, 0x00, 0x12, 0x62, 0x75,
+       0x66, 0x66, 0x65, 0x72, 0x5f, 0x61, 0x64, 0x64, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x10, 0x72, 0x75, 0x6e, 0x6e, 0x69, 0x6e, 0x67, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x12, 0x74, 0x61, 0x72, 0x67, 0x65, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x12, 0x6c, 0x65, 0x6e, 0x67, 0x74, 0x68, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x12, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x00,
+       0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x68, 0x65, 0x6c, 0x64, 0x00, 0x05,
+       0x00, 0x00, 0x00, 0x00, 0x12, 0x64, 0x75, 0x65, 0x5f, 0x70, 0x73, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x74, 0x6f, 0x72, 0x6e, 0x00, 0x10, 0x00, 0x00, 0x00,
+       0x12, 0x30, 0x00, 0x30, 0xe0, 0x0f, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x77, 0x72,
+       0x70, 0x00, 0x31, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0xff, 0xff, 0x80, 0xff, 0x00, 0x00,
+       0x00, 0x00, 0x12, 0x31, 0x00, 0xff, 0xff, 0x80, 0xff, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32,
+       0x00, 0xff, 0xff, 0x80, 0xff, 0x00, 0x00, 0x00, 0x00, 0x12, 0x33, 0x00, 0x87, 0xff, 0x89,
+       0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x77, 0x72, 0x70, 0x5f, 0x61, 0x63, 0x74, 0x69,
+       0x76, 0x65, 0x00, 0x31, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0xff, 0xff, 0x80, 0xff, 0x00,
+       0x00, 0x00, 0x00, 0x12, 0x31, 0x00, 0xff, 0xff, 0x80, 0xff, 0x00, 0x00, 0x00, 0x00, 0x12,
+       0x32, 0x00, 0xff, 0xff, 0x80, 0xff, 0x00, 0x00, 0x00, 0x00, 0x12, 0x33, 0x00, 0xff, 0xff,
+       0x80, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+  flash_rig rig;
+  rig.erase_page(page_at(bank2, 4));
+  rig.program(page_at(bank2, 4), {0x1111'1111, 0x2222'2222, 0x3333'3333, 0x4444'4444});
+  rig.control(0);
+  rig.tear(torn_line);
+  rig.unlock_options();
+  rig.set_wrp("FLASH_WRP2BR", 7, 9);
+  rig.program_options();
+  std::vector<std::byte> bytes;
+  rig.f.target->model("FLASH")->save(bytes);
+  CHECK(std::ranges::equal(bytes, expected, {}, [](std::byte b) {
+    return std::to_integer<unsigned char>(b);
+  }));
+}
+
+TEST_CASE("a U5 description without an option or HDP field of the FLASH unit throws config_error")
+{
+  periph::stm32::register_builtin_models();
+  for(auto const& [reg, name] : std::to_array<std::pair<std::string_view, std::string_view>>({
+          {"FLASH_NSCR",     "OPTLOCK"    },
+          {"FLASH_NSCR",     "OPTSTRT"    },
+          {"FLASH_NSCR",     "OBL_LAUNCH" },
+          {"FLASH_NSSR",     "OPTWERR"    },
+          {"FLASH_SECHDPCR", "HDP1_ACCDIS"},
+          {"FLASH_SECHDPCR", "HDP2_ACCDIS"}
+  }))
+  {
+    CAPTURE(name);
+    auto       without = u575();
+    auto const unit    = std::ranges::find(
+        without.peripherals, std::string_view{"FLASH"}, &popcorn::peripheral_desc::name);
+    REQUIRE(unit != without.peripherals.end());
+    auto const word = std::ranges::find_if(unit->registers, [reg](popcorn::register_desc const& r) {
+      return r.name == reg or (r.aliases and std::ranges::contains(*r.aliases, reg));
+    });
+    REQUIRE(word != unit->registers.end());
+    REQUIRE(
+        std::erase_if(
+            word->fields, [name](popcorn::field_desc const& field) { return field.name == name; })
+        == 1);
+    CHECK_THROWS_AS(
+        core::machine(without, popcorn::arch::armv8m::factory(), board_options({}, false)),
+        popcorn::config_error);
+  }
+}
+
+TEST_CASE(
+    "a U575 description without a block register its 64-page bank needs throws config_error, one "
+    "past the need builds")
+{
+  for(auto const& [name, throws] : {
+          std::pair{std::string_view{"SEC2BBR2"},  true },
+          std::pair{std::string_view{"PRIV1BBR2"}, true },
+          std::pair{std::string_view{"SEC2BBR3"},  false},
+  })
+  {
+    std::string const which{name};
+    CAPTURE(which);
+    auto desc  = u575();
+    auto flash = std::ranges::find(
+        desc.peripherals, std::string_view{"FLASH"}, &popcorn::peripheral_desc::name);
+    REQUIRE(flash != desc.peripherals.end());
+    REQUIRE(
+        std::erase_if(
+            flash->registers,
+            [name](popcorn::register_desc const& reg) { return reg.name == name; })
+        == 1);
+    popcorn::periph::stm32::register_builtin_models();
+    if(throws)
+    {
+      CHECK_THROWS_AS(
+          core::machine(desc, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()),
+          popcorn::config_error);
+    }
+    else
+    {
+      CHECK_NOTHROW(
+          core::machine(desc, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()));
+    }
   }
 }

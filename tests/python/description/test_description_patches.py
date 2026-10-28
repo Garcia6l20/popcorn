@@ -6,12 +6,19 @@ from popcorn.stm32.description._cubemx import DbIp, DbPart, read_part, read_rzon
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import (
     Access,
+    AlternateDesc,
     RegionAccess,
     RegionDesc,
     RegionKind,
     WriteEffect,
 )
-from popcorn.stm32.description._patches import PatchTarget, apply_patches, load_patches
+from popcorn.stm32.description._patches import (
+    PatchReport,
+    PatchTarget,
+    apply_alternate_drops,
+    apply_patches,
+    load_patches,
+)
 from popcorn.stm32.description._sources import Sources
 from popcorn.stm32.description._svd import expand_svd
 
@@ -506,6 +513,89 @@ def test_a_name_dropped_twice_is_an_error(tmp_path: Path) -> None:
     assert target == before
 
 
+def test_a_peripheral_rename_lands_before_the_alias_rule(tmp_path: Path) -> None:
+    text = """
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [peripherals]
+    renames = { D = "E", SEC_D = "SEC_E" }
+    source = "probe"
+    [aliases]
+    prefix = "SEC_"
+    offset = 0x10000000
+    """
+    path = _write_patch(tmp_path, text)
+    target = _synthetic_target()
+    names = {p.name for p in target.peripherals}
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.peripherals_renamed == 2
+    assert report.aliased == 1
+    assert {p.name for p in target.peripherals} == (names - {"D", "SEC_D"}) | {"E", "SEC_E"}
+    assert target_peripheral(target, "SEC_E").alias_of == "E"
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "expected"),
+    [
+        (
+            'renames = { NOPE = "Z" }',
+            "peripherals.renames.NOPE",
+            "a known peripheral, renamed once",
+        ),
+        ('renames = { A = "B" }', "peripherals.renames.A", "a name no other peripheral has"),
+        (
+            'drop = ["A"]\n    renames = { A = "Z" }',
+            "peripherals.renames.A",
+            "a known peripheral, renamed once",
+        ),
+        (
+            'renames = { A = "Z", B = "Z" }',
+            "peripherals.renames.B",
+            "a name no other peripheral has",
+        ),
+        ("", "peripherals", "a drop or a renames entry"),
+    ],
+)
+def test_a_bad_peripheral_rename_is_an_error(
+    tmp_path: Path, section: str, key: str, expected: str
+) -> None:
+    text = f"""
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [peripherals]
+    {section}
+    source = "probe"
+    """
+    path = _write_patch(tmp_path, text)
+    target = _synthetic_target()
+    before = copy.deepcopy(target)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert excinfo.value.key == key
+    assert excinfo.value.expected == expected
+    assert target == before
+
+
+def test_a_peripheral_renamed_in_two_files_is_an_error(tmp_path: Path) -> None:
+    text = """
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [peripherals]
+    renames = { A = "Z" }
+    source = "probe"
+    """
+    first = _write_patch(tmp_path, text, "family.toml")
+    second = _write_patch(tmp_path, text, "part.toml")
+    target = _synthetic_target()
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(load_patches([first, second], part="TOY1", svd_name="synthetic.svd"), target)
+    assert excinfo.value.file == str(second)
+    assert excinfo.value.key == "peripherals.renames.A"
+
+
 def test_a_rule_naming_a_dropped_peripheral_is_an_error(tmp_path: Path) -> None:
     text = """
     format = 1
@@ -925,7 +1015,7 @@ source = "probe"
     ]
     assert added.fields[1].on_write == WriteEffect.ONE_TO_CLEAR
     assert target_peripheral(target, "SEC_D").registers[1].fields[1].on_write == (
-        WriteEffect.MODIFY
+        WriteEffect.ONE_TO_CLEAR
     )
 
 
@@ -1282,6 +1372,7 @@ def test_resets_set_the_register_reset_in_the_peripheral_and_its_aliases(tmp_pat
     for name in ("D", "SEC_D"):
         register = target_peripheral(target, name).registers[0]
         assert (register.name, register.reset) == ("CR", 0x1)
+        assert register.reset_mask == (1 << register.width) - 1
 
 
 @pytest.mark.parametrize(
@@ -1372,3 +1463,563 @@ parts = ["TOY*"]
     assert excinfo.value.key == "resets[1].register"
     assert excinfo.value.expected == "a register no earlier rule resets"
     assert target == before
+
+
+def _alternates_target() -> PatchTarget:
+    target = _synthetic_target()
+    for peripheral in target.peripherals:
+        if peripheral.name == "A":
+            peripheral.alternates = [
+                AlternateDesc(pin=1, af=2, signal="x_a"),
+                AlternateDesc(pin=9, af=13, signal="x_b"),
+                AlternateDesc(pin=9, af=5, signal="x_c"),
+            ]
+    return target
+
+
+def _alternates_patch(tmp_path: Path, *entries: str) -> Path:
+    body = ",\n".join(entries)
+    return _write_patch(
+        tmp_path,
+        f"""
+    format = 1
+    [match]
+    parts = ["TOY*"]
+    [alternates]
+    drop = [{body}]
+    """,
+    )
+
+
+def _drop(
+    peripheral: str, pin: int, af: int, signal: str, source: str = ', source = "probe"'
+) -> str:
+    return f'{{ peripheral = "{peripheral}", pin = {pin}, af = {af}, signal = "{signal}"{source} }}'
+
+
+def test_alternates_drop_removes_exactly_the_named_entries(tmp_path: Path) -> None:
+    path = _alternates_patch(tmp_path, _drop("A", 9, 13, "x_b"))
+    target = _alternates_target()
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert apply_alternate_drops(patches, target.peripherals) == 1
+    kept = next(p for p in target.peripherals if p.name == "A").alternates
+    assert kept == [
+        AlternateDesc(pin=1, af=2, signal="x_a"),
+        AlternateDesc(pin=9, af=5, signal="x_c"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        _drop("A", 9, 13, "x_nope"),
+        _drop("A", 9, 12, "x_b"),
+        _drop("A", 8, 13, "x_b"),
+        _drop("B", 9, 13, "x_b"),
+        _drop("NOPE", 9, 13, "x_b"),
+    ],
+)
+def test_alternates_drop_naming_an_absent_entry_is_an_error(tmp_path: Path, entry: str) -> None:
+    path = _alternates_patch(tmp_path, entry)
+    target = _alternates_target()
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_alternate_drops(patches, target.peripherals)
+    assert excinfo.value.key == "alternates.drop[0]"
+
+
+def test_alternates_drop_of_one_entry_twice_or_after_an_error_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    path = _alternates_patch(tmp_path, _drop("A", 1, 2, "x_a"), _drop("A", 1, 2, "x_a"))
+    target = _alternates_target()
+    before = copy.deepcopy(target.peripherals)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_alternate_drops(patches, target.peripherals)
+    assert excinfo.value.key == "alternates.drop[1]"
+    assert target.peripherals == before
+
+
+def test_alternates_drop_without_a_source_is_an_error(tmp_path: Path) -> None:
+    path = _alternates_patch(tmp_path, _drop("A", 1, 2, "x_a", source=""))
+    with pytest.raises(DescriptionError) as excinfo:
+        load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert excinfo.value.key == "alternates.drop[0].source"
+
+
+def test_alternates_drop_with_an_empty_source_is_an_error(tmp_path: Path) -> None:
+    path = _alternates_patch(tmp_path, _drop("A", 1, 2, "x_a", source=', source = ""'))
+    with pytest.raises(DescriptionError) as excinfo:
+        load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert excinfo.value.key == "alternates.drop[0].source"
+
+
+@pytest.mark.parametrize(
+    ("pin", "af", "key"),
+    [(16, 2, "pin"), (-1, 2, "pin"), (1, 16, "af"), (1, -1, "af")],
+)
+def test_alternates_drop_pin_and_af_are_four_bit(
+    tmp_path: Path, pin: int, af: int, key: str
+) -> None:
+    path = _alternates_patch(tmp_path, _drop("A", pin, af, "x_a"))
+    with pytest.raises(DescriptionError) as excinfo:
+        load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    assert excinfo.value.key == f"alternates.drop[0].{key}"
+
+
+def test_alternates_drop_accepts_pin_15_and_af_15(tmp_path: Path) -> None:
+    path = _alternates_patch(tmp_path, _drop("A", 15, 15, "x_a"))
+    load_patches([path], part="TOY1", svd_name="synthetic.svd")
+
+
+def _field_drop_patch(tmp_path: Path, *rules: str) -> Path:
+    text = """
+format = 1
+[match]
+parts = ["TOY*"]
+[aliases]
+prefix = "SEC_"
+offset = 0x10000000
+"""
+    for rule in rules:
+        text += f"\n[[fields]]\n{rule}\n"
+    return _write_patch(tmp_path, text)
+
+
+_DROP_EN = 'instances = ["D"]\nregisters = ["CR"]\nfields = ["EN"]\ndrop = true\nsource = "probe"'
+
+
+def _drop_error(tmp_path: Path, *rules: str) -> DescriptionError:
+    path = _field_drop_patch(tmp_path, *rules)
+    target = _synthetic_target()
+    before = copy.deepcopy(target)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert target == before
+    assert excinfo.value.file == str(path)
+    return excinfo.value
+
+
+def test_a_field_drop_removes_the_field_from_the_peripheral_and_its_aliases(
+    tmp_path: Path,
+) -> None:
+    target = _synthetic_target()
+    path = _field_drop_patch(tmp_path, _DROP_EN)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fields_dropped == 1
+    assert report.fields_touched == 0
+    for name in ("D", "SEC_D"):
+        register = target_peripheral(target, name).registers[0]
+        assert register.name == "CR"
+        assert register.fields == []
+    a = target_peripheral(target, "A")
+    assert [f.name for f in next(r for r in a.registers if r.name == "SR").fields] == ["F", "R"]
+
+
+def test_a_field_drop_by_ip_drops_each_base_peripheral_once_and_its_aliases(
+    tmp_path: Path,
+) -> None:
+    target = _synthetic_target()
+    path = _field_drop_patch(tmp_path, _DROP_EN.replace('instances = ["D"]', 'ip = "D"'))
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fields_dropped == 1
+    for name in ("D", "SEC_D"):
+        assert target_peripheral(target, name).registers[0].fields == []
+
+
+_PATCH_EN = (
+    'instances = ["D"]\nregisters = ["CR"]\nfields = ["EN"]\nsource = "probe"\n'
+    'width = 3\non_write = "zero_to_clear"\non_read = "clear"\nacc = "read_only"'
+)
+
+
+@pytest.mark.parametrize("selector", ['instances = ["D"]', 'ip = "D"'])
+def test_a_field_patch_applies_to_the_peripheral_and_its_aliases_alike(
+    tmp_path: Path, selector: str
+) -> None:
+    target = _synthetic_target()
+    path = _field_drop_patch(tmp_path, _PATCH_EN.replace('instances = ["D"]', selector))
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fields_touched == 8
+    base = target_peripheral(target, "D")
+    alias = target_peripheral(target, "SEC_D")
+    patched = base.registers[0].fields[0]
+    assert (patched.width, patched.on_write.value, patched.on_read.value, patched.acc.value) == (
+        3,
+        "zero_to_clear",
+        "clear",
+        "read_only",
+    )
+    assert alias.registers == base.registers
+
+
+def test_a_field_patch_refuses_an_alias_instance(tmp_path: Path) -> None:
+    error = _drop_error(tmp_path, _PATCH_EN.replace('["D"]', '["SEC_D"]'))
+    assert error.key == "fields[0].instances"
+
+
+@pytest.mark.parametrize(
+    ("rule", "key"),
+    [
+        (_DROP_EN.replace('["CR"]', '["NOPE"]'), "fields[0].registers"),
+        (_DROP_EN.replace('["EN"]', '["NOPE"]'), "fields[0].fields"),
+        (_DROP_EN.replace('["D"]', '["SEC_D"]'), "fields[0].instances"),
+        (_DROP_EN.replace('"probe"', '""'), "fields[0].source"),
+        (_DROP_EN + '\non_write = "modify"', "fields[0].drop"),
+        (_DROP_EN + "\nwidth = 2", "fields[0].drop"),
+        (_DROP_EN + '\non_read = "clear"', "fields[0].drop"),
+    ],
+)
+def test_a_field_drop_refuses_a_bad_rule(tmp_path: Path, rule: str, key: str) -> None:
+    assert _drop_error(tmp_path, rule).key == key
+
+
+def test_a_field_dropped_twice_is_an_error(tmp_path: Path) -> None:
+    error = _drop_error(tmp_path, _DROP_EN, _DROP_EN)
+    assert error.key == "fields[1].fields"
+    assert "earlier" in error.expected
+    assert _drop_error(tmp_path, _DROP_EN.replace('["EN"]', '["EN", "EN"]')).key == (
+        "fields[0].fields"
+    )
+
+
+def test_a_rule_naming_a_dropped_field_is_an_error(tmp_path: Path) -> None:
+    later = 'instances = ["D"]\nregisters = ["CR"]\nfields = ["EN"]\non_write = "modify"\n'
+    later += 'source = "probe"'
+    assert _drop_error(tmp_path, _DROP_EN, later).key == "fields[1].fields"
+
+
+_RENAME_EN = 'instances = ["D"]\nregisters = ["CR"]\nrename = { EN = "ENABLE" }\nsource = "probe"'
+_RENAME_F = 'instances = ["A"]\nregisters = ["SR"]\nrename = { F = "FLAG" }\nsource = "probe"'
+
+
+def test_a_field_rename_renames_the_field_in_the_peripheral_and_its_aliases(
+    tmp_path: Path,
+) -> None:
+    target = _synthetic_target()
+    path = _field_drop_patch(tmp_path, _RENAME_EN)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fields_renamed == 1
+    assert report.fields_touched == 0
+    assert report.fields_dropped == 0
+    for name in ("D", "SEC_D"):
+        register = target_peripheral(target, name).registers[0]
+        assert [f.name for f in register.fields] == ["ENABLE"]
+    a = target_peripheral(target, "A")
+    assert [f.name for f in next(r for r in a.registers if r.name == "SR").fields] == ["F", "R"]
+
+
+def test_a_field_rename_keeps_the_bits_of_the_field(tmp_path: Path) -> None:
+    before = _synthetic_target()
+    after = _synthetic_target()
+    path = _field_drop_patch(tmp_path, _RENAME_F)
+    apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), after)
+    old = next(r for r in target_peripheral(before, "A").registers if r.name == "SR")
+    new = next(r for r in target_peripheral(after, "A").registers if r.name == "SR")
+    assert [(f.name, f.lsb, f.width, f.acc, f.on_write, f.on_read) for f in new.fields] == [
+        ("FLAG" if f.name == "F" else f.name, f.lsb, f.width, f.acc, f.on_write, f.on_read)
+        for f in old.fields
+    ]
+
+
+def test_a_field_rename_by_ip_renames_each_base_peripheral_once_and_its_aliases(
+    tmp_path: Path,
+) -> None:
+    target = _synthetic_target()
+    path = _field_drop_patch(tmp_path, _RENAME_EN.replace('instances = ["D"]', 'ip = "D"'))
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fields_renamed == 1
+    for name in ("D", "SEC_D"):
+        assert target_peripheral(target, name).registers[0].fields[0].name == "ENABLE"
+
+
+@pytest.mark.parametrize(
+    ("rule", "key"),
+    [
+        (_RENAME_EN.replace('["CR"]', '["NOPE"]'), "fields[0].registers"),
+        (_RENAME_EN.replace("EN =", "NOPE ="), "fields[0].rename.NOPE"),
+        (_RENAME_F.replace('"FLAG"', '"R"'), "fields[0].rename.F"),
+        (_RENAME_F.replace('"FLAG"', '"F"'), "fields[0].rename.F"),
+        (_RENAME_EN.replace('["D"]', '["SEC_D"]'), "fields[0].instances"),
+        (_RENAME_EN.replace('"probe"', '""'), "fields[0].source"),
+        (_RENAME_EN.replace('rename = { EN = "ENABLE" }', "rename = {}"), "fields[0].rename"),
+        (_RENAME_EN + '\nfields = ["EN"]', "fields[0].rename"),
+        (_RENAME_EN + "\ndrop = true", "fields[0].rename"),
+        (_RENAME_EN + "\nwidth = 2", "fields[0].rename"),
+        (_RENAME_EN + '\non_write = "modify"', "fields[0].rename"),
+        (_RENAME_EN + '\non_read = "clear"', "fields[0].rename"),
+    ],
+)
+def test_a_field_rename_refuses_a_bad_rule(tmp_path: Path, rule: str, key: str) -> None:
+    assert _drop_error(tmp_path, rule).key == key
+
+
+def test_a_rename_to_a_name_the_register_holds_is_a_clash(tmp_path: Path) -> None:
+    error = _drop_error(tmp_path, _RENAME_F.replace('"FLAG"', '"R"'))
+    assert "not R" in error.expected
+
+
+def test_a_rename_after_another_rename_gives_a_clash(tmp_path: Path) -> None:
+    both = _RENAME_F.replace('{ F = "FLAG" }', '{ F = "FLAG", R = "FLAG" }')
+    assert _drop_error(tmp_path, both).key == "fields[0].rename.R"
+
+
+def test_a_field_renamed_twice_is_an_error(tmp_path: Path) -> None:
+    error = _drop_error(tmp_path, _RENAME_EN, _RENAME_EN)
+    assert error.key == "fields[1].rename.EN"
+    assert "earlier" in error.expected
+    other = _RENAME_EN.replace("ENABLE", "ON")
+    assert "earlier" in _drop_error(tmp_path, _RENAME_EN, other).expected
+
+
+def test_a_rule_naming_the_old_spelling_after_a_rename_is_an_error(tmp_path: Path) -> None:
+    later = 'instances = ["D"]\nregisters = ["CR"]\nfields = ["EN"]\non_write = "modify"\n'
+    later += 'source = "probe"'
+    assert _drop_error(tmp_path, _RENAME_EN, later).key == "fields[1].fields"
+
+
+def test_a_rule_naming_the_new_spelling_after_a_rename_applies(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    later = 'instances = ["D"]\nregisters = ["CR"]\nfields = ["ENABLE"]\non_write = "modify"\n'
+    later += 'source = "probe"'
+    path = _field_drop_patch(tmp_path, _RENAME_EN, later)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert (report.fields_renamed, report.fields_touched) == (1, 2)
+
+
+def test_a_field_rename_expands_a_register_template_over_each(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    rule = (
+        'instances = ["B"]\nregisters = ["ARR{n}"]\nrename = { V = "VAL" }\n'
+        'each = { n = [1, 2] }\nsource = "probe"'
+    )
+    path = _field_drop_patch(tmp_path, rule)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fields_renamed == 2
+    names = {
+        register.name: [field.name for field in register.fields]
+        for register in target_peripheral(target, "B").registers
+        if register.name.startswith("ARR")
+    }
+    assert names == {"ARR0": ["V"], "ARR1": ["VAL"], "ARR2": ["VAL"], "ARR3": ["V"]}
+
+
+def test_a_fields_rule_with_no_field_and_no_rename_is_an_error(tmp_path: Path) -> None:
+    rule = 'instances = ["D"]\nregisters = ["CR"]\nfields = []\non_write = "modify"\nsource = "x"'
+    assert _drop_error(tmp_path, rule).key == "fields[0].fields"
+
+
+_ADD_X = (
+    'instances = ["D"]\nregisters = ["CR"]\n'
+    'add = { name = "X", lsb = 4, width = 2, acc = "read_write", reset = 3 }\nsource = "probe"'
+)
+_ADD_Y = (
+    'instances = ["A"]\nregisters = ["SR"]\n'
+    'add = { name = "Y", lsb = 4, width = 2, acc = "read_only", reset = 1 }\nsource = "probe"'
+)
+
+
+def _applied(tmp_path: Path, *rules: str) -> tuple[PatchTarget, PatchReport]:
+    target = _synthetic_target()
+    path = _field_drop_patch(tmp_path, *rules)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    return target, report
+
+
+def test_a_field_add_puts_the_field_in_the_peripheral_and_its_aliases(tmp_path: Path) -> None:
+    target, report = _applied(tmp_path, _ADD_X)
+    assert report.fields_added == 1
+    assert report.fields_touched == 0
+    for name in ("D", "SEC_D"):
+        register = target_peripheral(target, name).registers[0]
+        assert [(f.name, f.lsb, f.width, f.acc) for f in register.fields] == [
+            ("X", 4, 2, Access.READ_WRITE),
+            ("EN", 0, 1, Access.READ_WRITE),
+        ]
+        assert (register.reset, register.reset_mask) == (0x30, 0xFFFFFFFF)
+    d, sec_d = (target_peripheral(target, name).registers[0].fields for name in ("D", "SEC_D"))
+    assert d[0] is not sec_d[0]
+
+
+def test_a_field_add_sets_the_reset_bits_of_the_field_only(tmp_path: Path) -> None:
+    target, _ = _applied(tmp_path, _ADD_Y)
+    sr = next(r for r in target_peripheral(target, "A").registers if r.name == "SR")
+    assert sr.reset == 0x14
+    sr2 = next(r for r in target_peripheral(target, "A").registers if r.name == "SR2")
+    assert sr2.reset == 0x4
+    cleared = _ADD_Y.replace("lsb = 4, width = 2", "lsb = 2, width = 1").replace(
+        "reset = 1", "reset = 0"
+    )
+    target, _ = _applied(tmp_path, cleared)
+    sr = next(r for r in target_peripheral(target, "A").registers if r.name == "SR")
+    assert sr.reset == 0
+
+
+def test_a_field_add_marks_the_reset_bits_as_known(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    register = next(r for r in target_peripheral(target, "A").registers if r.name == "SR")
+    register.reset_mask = 0xF
+    path = _field_drop_patch(tmp_path, _ADD_Y)
+    apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    sr = next(r for r in target_peripheral(target, "A").registers if r.name == "SR")
+    assert sr.reset_mask == 0x3F
+
+
+def test_a_field_add_by_ip_adds_to_each_base_peripheral_once_and_its_aliases(
+    tmp_path: Path,
+) -> None:
+    target, report = _applied(tmp_path, _ADD_X.replace('instances = ["D"]', 'ip = "D"'))
+    assert report.fields_added == 1
+    for name in ("D", "SEC_D"):
+        assert [f.name for f in target_peripheral(target, name).registers[0].fields] == ["X", "EN"]
+
+
+def test_a_field_add_expands_a_register_template_over_each(tmp_path: Path) -> None:
+    rule = (
+        'instances = ["B"]\nregisters = ["ARR{n}"]\n'
+        'add = { name = "W", lsb = 8, width = 1, acc = "read_write", reset = 1 }\n'
+        'each = { n = [1, 2] }\nsource = "probe"'
+    )
+    target, report = _applied(tmp_path, rule)
+    assert report.fields_added == 2
+    names = {
+        register.name: [field.name for field in register.fields]
+        for register in target_peripheral(target, "B").registers
+        if register.name.startswith("ARR")
+    }
+    assert names == {"ARR0": ["V"], "ARR1": ["W", "V"], "ARR2": ["W", "V"], "ARR3": ["V"]}
+
+
+def test_a_rule_naming_the_added_field_applies(tmp_path: Path) -> None:
+    later = 'instances = ["D"]\nregisters = ["CR"]\nfields = ["X"]\non_write = "modify"\n'
+    later += 'source = "probe"'
+    _, report = _applied(tmp_path, _ADD_X, later)
+    assert (report.fields_added, report.fields_touched) == (1, 2)
+
+
+@pytest.mark.parametrize(
+    ("rule", "key"),
+    [
+        (_ADD_X.replace('["CR"]', '["NOPE"]'), "fields[0].registers"),
+        (_ADD_X.replace('name = "X"', 'name = "EN"'), "fields[0].add.name"),
+        (_ADD_X.replace("lsb = 4, width = 2", "lsb = 0, width = 2"), "fields[0].add.lsb"),
+        (_ADD_Y.replace("lsb = 4, width = 2", "lsb = 0, width = 1"), "fields[0].add.lsb"),
+        (_ADD_X.replace("lsb = 4, width = 2", "lsb = 31, width = 2"), "fields[0].add.width"),
+        (_ADD_X.replace("reset = 3", "reset = 4"), "fields[0].add.reset"),
+        (_ADD_X.replace('["D"]', '["SEC_D"]'), "fields[0].instances"),
+        (_ADD_X.replace('"probe"', '""'), "fields[0].source"),
+        (_ADD_X + '\nfields = ["EN"]', "fields[0].add"),
+        (_ADD_X + "\ndrop = true", "fields[0].add"),
+        (_ADD_X + '\nrename = { EN = "E" }', "fields[0].add"),
+        (_ADD_X + "\nwidth = 2", "fields[0].add"),
+        (_ADD_X + '\non_write = "modify"', "fields[0].add"),
+        (_ADD_X + '\non_read = "clear"', "fields[0].add"),
+    ],
+)
+def test_a_field_add_refuses_a_bad_rule(tmp_path: Path, rule: str, key: str) -> None:
+    assert _drop_error(tmp_path, rule).key == key
+
+
+def test_a_field_added_twice_is_an_error(tmp_path: Path) -> None:
+    error = _drop_error(tmp_path, _ADD_X, _ADD_X)
+    assert error.key == "fields[1].add.name"
+    assert "earlier" in error.expected
+    elsewhere = _ADD_X.replace("lsb = 4", "lsb = 8")
+    assert "earlier" in _drop_error(tmp_path, _ADD_X, elsewhere).expected
+
+
+def test_a_field_added_over_an_added_field_is_an_overlap(tmp_path: Path) -> None:
+    over = _ADD_X.replace('name = "X"', 'name = "Z"').replace("lsb = 4", "lsb = 5")
+    assert _drop_error(tmp_path, _ADD_X, over).key == "fields[1].add.lsb"
+
+
+H5_PATCHES = Path(__file__).parents[3] / "python" / "popcorn" / "stm32" / "description" / "patches"
+
+
+@pytest.mark.parametrize(
+    ("part", "value"),
+    [
+        ("STM32H573AIIx", 0x2D30EDF8),
+        ("STM32H563ZITx", 0x2D30EDF8),
+        ("STM32H562RGTx", 0x2D30EDF8),
+        ("STM32H533RETx", 0x2D30EDD8),
+        ("STM32H523CEUx", 0x2D30EDD8),
+        ("STM32H543VGTx", 0x2D30EDD8),
+        ("STM32H553RGTx", 0x2D30EDD8),
+    ],
+)
+def test_every_rm0481_part_gets_one_optsr_delivery_value(part: str, value: int) -> None:
+    assert _optsr_resets(part) == [value]
+
+
+def test_the_h503_gets_no_rm0481_optsr_delivery_value() -> None:
+    assert _optsr_resets("STM32H503CBTx") == []
+
+
+def _optsr_resets(part: str) -> list[int]:
+    patches = load_patches(sorted(H5_PATCHES.glob("*.toml")), part=part, svd_name="STM32H573.svd")
+    return [
+        rule.reset
+        for loaded in patches
+        for rule in loaded.patch.resets or []
+        if rule.register == "FLASH_OPTSR_CUR"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("change", "value"),
+    [
+        ('on_write = "one_to_clear"', ("one_to_clear", "none", 8)),
+        ('on_read = "clear"', ("modify", "clear", 8)),
+        ("width = 4", ("modify", "none", 4)),
+    ],
+    ids=["on_write", "on_read", "width"],
+)
+def test_a_fields_rule_on_one_element_of_a_dim_register_leaves_its_siblings(
+    tmp_path: Path, change: str, value: tuple[str, str, int]
+) -> None:
+    target, report = _applied(
+        tmp_path,
+        f'instances = ["B"]\nregisters = ["ARR1"]\nfields = ["V"]\n{change}\nsource = "probe"',
+    )
+    assert report.fields_touched == 1
+    effects = {
+        register.name: (field.on_write.value, field.on_read.value, field.width)
+        for register in target_peripheral(target, "B").registers
+        if register.name.startswith("ARR")
+        for field in register.fields
+    }
+    untouched = ("modify", "none", 8)
+    assert effects == {"ARR0": untouched, "ARR1": value, "ARR2": untouched, "ARR3": untouched}
+
+
+_ACC_EN = (
+    'instances = ["D"]\nregisters = ["CR"]\nfields = ["EN"]\nacc = "read_only"\nsource = "probe"'
+)
+
+
+def test_an_acc_rule_sets_the_access_of_its_fields(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    path = _field_drop_patch(tmp_path, _ACC_EN)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fields_touched == 2
+    for name in ("D", "SEC_D"):
+        [field] = target_peripheral(target, name).registers[0].fields
+        assert field.name == "EN"
+        assert field.acc == Access.READ_ONLY
+
+
+@pytest.mark.parametrize(
+    ("rules", "key"),
+    [
+        ((_ACC_EN, _ACC_EN), "fields[1].acc"),
+        ((_DROP_EN + '\nacc = "read_only"',), "fields[0].drop"),
+        ((_RENAME_EN + '\nacc = "read_only"',), "fields[0].rename"),
+        ((_ADD_X + '\nacc = "read_only"',), "fields[0].add"),
+    ],
+)
+def test_an_acc_rule_refuses_a_second_patch_and_a_drop_rename_or_add(
+    tmp_path: Path, rules: tuple[str, ...], key: str
+) -> None:
+    assert _drop_error(tmp_path, *rules).key == key

@@ -197,6 +197,65 @@ protected:
   }
 
   /**
+   * @brief Whether the peripheral has a field of that name in a register.
+   * @param reg_name Register name or alias as the description spells it.
+   * @param name Field name.
+   */
+  [[nodiscard]] auto has_field(std::string_view reg_name, std::string_view name) const -> bool
+  {
+    auto const* const found = find_register(desc_, reg_name);
+    return found != nullptr and std::ranges::contains(found->fields, name, &field_desc::name);
+  }
+
+  /**
+   * @brief Checks that the description agrees with the variant the model was built for.
+   * @param name Register name or alias as the description spells it.
+   * @param present Whether the variant has the register.
+   * @throws config_error naming the part, the register and the model when the description has
+   *         the register and the variant has none, or lacks it and the variant has it.
+   */
+  void expect_register(std::string_view name, bool present) const
+  {
+    if(has_register(name) != present)
+    {
+      throw config_error(
+          ctx_.part.part, 0, std::format("peripherals.{}.registers.{}", desc_.name, name),
+          present
+              ? std::format(
+                    "the {} variant of the {} model needs this register, the description lacks it",
+                    ctx_.part.part, model_name_)
+              : std::format(
+                    "the {} variant of the {} model has no such register, the description has one",
+                    ctx_.part.part, model_name_));
+    }
+  }
+
+  /**
+   * @brief Checks that a field of a register is present or absent as the variant says.
+   * @param reg_name Register name or alias as the description spells it.
+   * @param name Field name.
+   * @param present Whether the variant has the field.
+   * @throws config_error naming the part, the field and the model when the description
+   *         disagrees.
+   */
+  void expect_field(std::string_view reg_name, std::string_view name, bool present) const
+  {
+    auto const& fields = describe(reg_name).fields;
+    if(std::ranges::contains(fields, name, &field_desc::name) != present)
+    {
+      throw config_error(
+          ctx_.part.part, 0,
+          std::format("peripherals.{}.registers.{}.fields.{}", desc_.name, reg_name, name),
+          present ? std::format(
+                        "the {} variant of the {} model needs this field, the description lacks it",
+                        ctx_.part.part, model_name_)
+                  : std::format(
+                        "the {} variant of the {} model has no such field, the description has one",
+                        ctx_.part.part, model_name_));
+    }
+  }
+
+  /**
    * @brief Description of a register of the peripheral by name.
    * @param name Register name or alias as the description spells it.
    * @throws config_error as reg() does.
@@ -304,15 +363,9 @@ protected:
    */
   [[nodiscard]] auto irq(std::string_view name) const -> irq_line&
   {
-    auto const named = std::ranges::find(ctx_.part.irqs, name, &irq_desc::name);
-    if(named != ctx_.part.irqs.end())
+    if(auto* const line = find_irq(name))
     {
-      auto const sources = irq_sources(ctx_.part, desc_, ctx_.trustzone);
-      auto const at      = std::ranges::find(sources, named->number);
-      if(at != sources.end())
-      {
-        return ctx_.irqs[static_cast<std::size_t>(at - sources.begin())];
-      }
+      return *line;
     }
     throw config_error(
         ctx_.part.part, 0, std::format("peripherals.{}.irqs.{}", desc_.name, name),
@@ -337,6 +390,21 @@ protected:
   State state_{};
 
 private:
+  [[nodiscard]] auto find_irq(std::string_view name) const -> irq_line*
+  {
+    auto const named = std::ranges::find(ctx_.part.irqs, name, &irq_desc::name);
+    if(named != ctx_.part.irqs.end())
+    {
+      auto const sources = irq_sources(ctx_.part, desc_, ctx_.trustzone);
+      auto const at      = std::ranges::find(sources, named->number);
+      if(at != sources.end())
+      {
+        return &ctx_.irqs[static_cast<std::size_t>(at - sources.begin())];
+      }
+    }
+    return nullptr;
+  }
+
   [[nodiscard]] static auto word_of(register_desc const& found) noexcept -> std::uint32_t
   {
     return found.offset & ~3u;
@@ -559,10 +627,13 @@ protected:
           std::ranges::find(ctx.part.peripherals, std::string_view{"RCC"}, &peripheral_desc::name);
       if(rcc != ctx.part.peripherals.end() and not reset_bit_of(*rcc, desc.name))
       {
+        auto const named    = reset_bit_name(desc.name);
+        auto const fallback = std::format("{}RST", desc.name);
         throw config_error(
             ctx.part.part, 0,
             std::format(
-                "peripherals.RCC.registers.RCC_xxxRSTR.fields.{}", reset_bit_name(desc.name)),
+                "peripherals.RCC.registers.RCC_xxxRSTR.fields.{}",
+                named == fallback ? named : std::format("{} or {}", named, fallback)),
             std::format(
                 "the RCC reset bit of {}, which the {} model resets", desc.name, model_name));
       }

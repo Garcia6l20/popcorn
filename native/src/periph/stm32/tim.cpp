@@ -90,18 +90,6 @@ enum class slave_mode : std::uint8_t
   gated_reset   = 0b1001,
 };
 
-constexpr std::array<std::pair<std::uint32_t, std::string_view>, 7> internal_triggers{
-    {
-     {0, "tim1"},
-     {1, "tim2"},
-     {2, "tim3"},
-     {3, "tim4"},
-     {8, "tim5"},
-     {9, "tim8"},
-     {10, "tim15"},
-     }
-};
-
 [[nodiscard]] constexpr auto modelled(std::uint32_t mode) -> bool
 {
   using enum slave_mode;
@@ -218,7 +206,8 @@ auto lower(std::string_view name) -> std::string
 }
 
 /**
- * @brief TIM1, TIM2 to TIM7 and TIM15 to TIM17 of the STM32U5, RM0456 sections 54
+ * @brief TIM1, TIM2 to TIM7 and TIM15 to TIM17 of the STM32U5, with TIM12 to TIM14 on the STM32H5,
+ *        RM0456 sections 54
  *        "Advanced-control timers (TIM1/TIM8)", 55 "General-purpose timers (TIM2/TIM3/TIM4/TIM5)",
  *        56 "General purpose timers (TIM15/TIM16/TIM17)" and 57 "Basic timers (TIM6/TIM7)": the
  *        time-base unit on the instance's timer clock. The counter is derived from the virtual time
@@ -239,47 +228,51 @@ auto lower(std::string_view name) -> std::string
  *        or 011, every update or CC1 match is scheduled at its own time instead of being skipped.
  *        MMS 100 and above, MMS2 and TRGO2 log a warning once and pulse nothing. The slave mode
  *        controller, RM0456 55.4 "Slave mode" and TIMx_SMCR, listens as a trigger_sink to the
- *        `<instance>_trgo` that TS selects among the internal triggers ITR0 TIM1, ITR1 TIM2, ITR2
- *        TIM3, ITR3 TIM4, ITR4 TIM5, ITR5 TIM8 and ITR6 TIM15. Reset mode reinitialises the counter
- *        and its prescaler at a rising edge, with the update event URS allows. Trigger mode sets
- *        CEN at a rising edge and counts from the edge's time. Reset + trigger does both. External
- *        clock mode 1 counts one tick per PSC + 1 rising edges, at the edge's time, and never on
- *        the timer clock. Gated mode counts on the timer clock while the master's level is high, a
- *        level only an MMS 001 master gives: under a pulsing master the counter holds and one
- *        warning is logged at its first rising edge. The gate is sampled again when the timer clock
- *        comes back. Gated + reset also reinitialises the counter when the gate closes. Every slave
- *        edge sets TIF, gate openings and closings included. ITR7, ITR8, ITR11, a timer's own ITR
- *        and the reserved codes reach nothing: the slave holds and one warning is logged at the
- *        SMCR write. Timer input pins: tim_ti1 to tim_ti4 are the `<instance>_ch1` to `_ch4`
+ *        `<instance>_trgo` that TS selects among the internal triggers of the tim_variant, the
+ *        input a timer would take from itself being reserved. The STM32U5 has ITR0 TIM1, ITR1 TIM2,
+ *        ITR2 TIM3, ITR3 TIM4, ITR4 TIM5, ITR5 TIM8 and ITR6 TIM15, the STM32H5 of RM0481 Tables
+ *        456, 480, 502 and 514 has ITR0 to ITR12 on TIM1 to TIM5, TIM8, TIM12 and TIM15, TS 8 to 16
+ *        selecting ITR4 to ITR12. A source with no model reaches nothing and logs the unrouted
+ *        warning: ITR7, ITR8, ITR10 and ITR11 carry the OC1 outputs of TIM13, TIM14, TIM16 and
+ *        TIM17, ITR12 carries USBSOF, which TIM2 and TIM5 take and TIM1, TIM3,
+ *        TIM4, TIM8, TIM12 and TIM15 reserve. One table serves all of them, since USBSOF has no
+ *        producer. Reset mode reinitialises the counter and its prescaler at a rising edge, with
+ *        the update event URS allows. Trigger mode sets CEN at a rising edge and counts from the
+ *        edge's time. Reset + trigger does both. External clock mode 1 counts one tick per PSC + 1
+ * rising edges, at the edge's time, and never on the timer clock. Gated mode counts on the timer
+ * clock while the master's level is high, a level only an MMS 001 master gives: under a pulsing
+ * master the counter holds and one warning is logged at its first rising edge. The gate is sampled
+ * again when the timer clock comes back. Gated + reset also reinitialises the counter when the gate
+ *        closes. Every slave edge sets TIF, gate openings and closings included. A source with no
+ * model, a timer's own ITR and the reserved codes reach nothing: the slave holds and one warning is
+ * logged at the SMCR write. Timer input pins: tim_ti1 to tim_ti4 are the `<instance>_ch1` to `_ch4`
  *        signals a GPIO pin in alternate function mode gives, while TIxSEL is 0, through the GPIO
- *        peers' signal levels. Another TIxSEL selects comparators, LSE, MCO or RTC: not modelled,
- *        the input reads low, logged once at the TISEL write. CR2.TI1S XORs tim_ti1 to tim_ti3 into
- *        tim_ti1. Each input transition takes effect at the time of its pin edge, after the ICxF
- *        filter below. The encoder modes, RM0456 55.4 "Encoder interface mode", SMS 0001 to 0011
- *        and 1010 to 1111, count on tim_ti1fp1 and tim_ti2fp2, CC1P and CC2P inverting them, by
- *        Table 569 and Table 570 and the clock plus direction rules, each count pulse through the
- *        prescaler, the counter wrapping between 0 and ARR with its update events. DIR follows
- *        every transition in the quadrature modes, tim_ti1 in the clock plus direction modes, the
- *        counting line in the directional clock modes, and DIRF rises when it changes. Table 569
- *        lists "Down" for a tim_ti2fp2 falling edge in mode 0001 with tim_ti1fp1 low: counted as
- *        nothing here, as Table 549, its TIM1/TIM8 copy, gives, since mode 0001 counts tim_ti1
- *        edges only. The encoder index, ECR.IE, and the transition and index error flags are not
- *        modelled, IE logs once. tim_etr_in is the `<instance>_etr` signal while AF1.ETRSEL is 0,
- *        other values read low and log once: ETP inverts it, ETPS divides it by 1, 2, 4 or 8:
- *        tim_etrp rises at every 2^ETPS-th rising edge and falls 2^(ETPS-1) rising edges later,
- *        then the ETF filter gives tim_etrf. External clock mode 2, ECE 1, counts each tim_etrf
- *        rising edge through the prescaler while a gated slave mode's gate is open, and with ECE
- *        set external clock mode 1 counts tim_etrf only, whatever TS, its trigger edges setting TIF
- *        alone. TS 00100 tim_ti1f_ed gives a rising edge at every tim_ti1 transition, TS 00101
- *        tim_ti1fp1 and 00110 tim_ti2fp2 their active edge by CCxP and CCxNP, both edges with both
- *        set, and their level to gated mode, TS 00111 tim_etrf: each drives the slave mode
- *        controller as an ITR edge does. Gated mode on tim_ti1f_ed holds and logs once, TS 00111 on
- *        a timer without ETR reaches nothing and logs once. A CCxP or ETP write that flips the
- *        polarised level is an edge of it, and so is a CCxNP write that moves the level TS 00101 or
- *        00110 gives the slave mode controller, as the polarity mux output moves on silicon: it
- *        counts in an encoder mode, triggers the slave mode controller and is a capture's active
- *        edge when the new level is high. Deviations: an ARR written below the count lets the
- *        counter run to its maximum and wrap with no update, a count written above ARR in
+ * peers' signal levels. Another TIxSEL selects comparators, LSE, MCO or RTC: not modelled, the
+ * input reads low, logged once at the TISEL write. CR2.TI1S XORs tim_ti1 to tim_ti3 into tim_ti1.
+ * Each input transition takes effect at the time of its pin edge, after the ICxF filter below. The
+ *        encoder modes, RM0456 55.4 "Encoder interface mode", SMS 0001 to 0011 and 1010 to 1111,
+ * count on tim_ti1fp1 and tim_ti2fp2, CC1P and CC2P inverting them, by Table 569 and Table 570 and
+ *        the clock plus direction rules, each count pulse through the prescaler, the counter
+ * wrapping between 0 and ARR with its update events. DIR follows every transition in the quadrature
+ * modes, tim_ti1 in the clock plus direction modes, the counting line in the directional clock
+ * modes, and DIRF rises when it changes. Table 569 lists "Down" for a tim_ti2fp2 falling edge in
+ * mode 0001 with tim_ti1fp1 low: counted as nothing here, as Table 549, its TIM1/TIM8 copy, gives,
+ * since mode 0001 counts tim_ti1 edges only. The encoder index, ECR.IE, and the transition and
+ * index error flags are not modelled, IE logs once. tim_etr_in is the `<instance>_etr` signal while
+ * AF1.ETRSEL is 0, other values read low and log once: ETP inverts it, ETPS divides it by 1, 2, 4
+ * or 8: tim_etrp rises at every 2^ETPS-th rising edge and falls 2^(ETPS-1) rising edges later, then
+ * the ETF filter gives tim_etrf. External clock mode 2, ECE 1, counts each tim_etrf rising edge
+ * through the prescaler while a gated slave mode's gate is open, and with ECE set external clock
+ * mode 1 counts tim_etrf only, whatever TS, its trigger edges setting TIF alone. TS 00100
+ * tim_ti1f_ed gives a rising edge at every tim_ti1 transition, TS 00101 tim_ti1fp1 and 00110
+ * tim_ti2fp2 their active edge by CCxP and CCxNP, both edges with both set, and their level to
+ * gated mode, TS 00111 tim_etrf: each drives the slave mode controller as an ITR edge does. Gated
+ * mode on tim_ti1f_ed holds and logs once, TS 00111 on a timer without ETR reaches nothing and logs
+ * once. A CCxP or ETP write that flips the polarised level is an edge of it, and so is a CCxNP
+ * write that moves the level TS 00101 or 00110 gives the slave mode controller, as the polarity mux
+ * output moves on silicon: it counts in an encoder mode, triggers the slave mode controller and is
+ * a capture's active edge when the new level is high. Deviations: an ARR written below the count
+ * lets the counter run to its maximum and wrap with no update, a count written above ARR in
  *        center-aligned mode does the same, UIFREMAP puts UIFCPY in bit 31 only where the
  *        description names a UIFCPY field, not on the 32-bit TIM2 to TIM5, and a trigger cycle
  *        between timers drops the edge that would re-enter a timer still reacting to its own event,
@@ -334,7 +327,7 @@ class tim final : public dispatch_model<tim, tim_state>,
                   public bus_reset_listener
 {
 public:
-  tim(model_context& ctx, peripheral_desc const& desc);
+  tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -513,6 +506,7 @@ private:
   std::optional<field_ref>                     master2_;
   std::optional<trigger_output>                trgo_;
   std::string                                  instance_;
+  std::span<trigger_entry const>               triggers_;
   std::optional<field_ref>                     slave_;
   std::optional<field_ref>                     slave_high_;
   std::optional<field_ref>                     select_;
@@ -659,7 +653,7 @@ auto multiline_group(std::string_view base) -> std::string_view
   return "TRG_COM";
 }
 
-tim::tim(model_context& ctx, peripheral_desc const& desc)
+tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
     : dispatch_model{ctx, desc, "TIM", tim_writes(desc)}, regs_{ctx.regs},
       prefix_{tim_prefix(desc)}, enable_{field(name("CR1"), "CEN")},
       no_update_{field(name("CR1"), "UDIS")}, update_source_{field(name("CR1"), "URS")},
@@ -675,25 +669,37 @@ tim::tim(model_context& ctx, peripheral_desc const& desc)
       burst_length_{optional_field(name("DCR"), "DBL")},
       burst_base_{optional_field(name("DCR"), "DBA")},
       burst_select_{optional_field(name("DCR"), "DBSS")},
-      master_{optional_field(name("CR2"), "MMS")},
-      master_high_{optional_field(name("CR2"), "MMS_3")},
       master2_{optional_field(name("CR2"), "MMS2")}, instance_{lower(desc.name)},
-      slave_{optional_field(name("SMCR"), "SMS")}, select_{optional_field(name("SMCR"), "TS")},
+      triggers_{variant.triggers}, slave_{optional_field(name("SMCR"), "SMS")},
+      select_{optional_field(name("SMCR"), "TS")},
       slave_preload_{optional_field(name("SMCR"), "SMSPE")},
       external_clock2_{optional_field(name("SMCR"), "ECE")},
       trigger_dma_{optional_field(name("DIER"), "TDE")}
 {
-  if(not master_high_)
+  if(std::ranges::contains(variant.no_master, std::string_view{desc.name}))
   {
-    master_high_ = optional_field(name("CR2"), "MMS_1");
+    if(has_register(name("CR2")))
+    {
+      expect_field(name("CR2"), "MMS", false);
+    }
   }
-  for(auto const bits : {"SMS_1", "SMS_bit3", "SMS_3"})
+  else
   {
-    slave_high_ = slave_high_ ? slave_high_ : optional_field(name("SMCR"), bits);
+    master_         = field(name("CR2"), "MMS");
+    auto const wide = std::ranges::contains(variant.wide_master, std::string_view{desc.name});
+    expect_field(name("CR2"), "MMS_1", wide);
+    if(wide)
+    {
+      master_high_ = field(name("CR2"), "MMS_1");
+    }
   }
-  for(auto const bits : {"TS_1", "TS_4_3"})
+  if(select_)
   {
-    select_high_ = select_high_ ? select_high_ : optional_field(name("SMCR"), bits);
+    select_high_ = field(name("SMCR"), "TS_1");
+  }
+  if(slave_)
+  {
+    slave_high_ = field(name("SMCR"), "SMS_1");
   }
   if(slave_)
   {
@@ -1085,14 +1091,12 @@ auto tim::input_of(std::uint32_t smcr) const -> std::optional<std::string_view>
   {
     return std::nullopt;
   }
-  auto const found = std::ranges::find(
-      internal_triggers, trigger_select_of(smcr),
-      &std::pair<std::uint32_t, std::string_view>::first);
-  if(found == internal_triggers.end() or found->second == instance_)
+  auto const found = std::ranges::find(triggers_, trigger_select_of(smcr), &trigger_entry::select);
+  if(found == triggers_.end() or found->source == instance_)
   {
     return std::nullopt;
   }
-  return found->second;
+  return found->source;
 }
 
 auto tim::flagged_when(bool up) const -> bool
@@ -2831,10 +2835,10 @@ void tim::plain_written(std::uint32_t, std::uint32_t)
 {}
 }
 
-auto tim_factory() -> model_factory
+auto tim_factory(tim_variant variant) -> model_factory
 {
-  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<tim>(ctx, desc);
+  return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<tim>(ctx, desc, variant);
   };
 }
 }

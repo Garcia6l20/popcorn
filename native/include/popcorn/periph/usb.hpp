@@ -170,12 +170,19 @@ public:
 
   /**
    * @brief The host started a bus reset. The device goes back to address 0 and DATA0 on every
-   *        endpoint at once. It reports the reset end, the OTG_FS ENUMDNE, 10 us after @p at:
-   *        from then the firmware prepares EP0, so a host keeping SE0 for the 10 ms of
-   *        USB 2.0 7.1.7.5 sends its first SETUP after the device is ready.
+   *        endpoint at once. A controller that flags the reset at its start reports it here, the
+   *        OTG_FS ENUMDNE 10 us after @p at.
    * @param at Virtual time SE0 starts.
    */
   virtual void bus_reset(vtime at) = 0;
+
+  /**
+   * @brief The host ended the bus reset of the last bus_reset() call: SE0 stops. A controller
+   *        that flags the reset at its end reports it here, the USB RST_DCON at @p at. The host
+   *        then sends only SOFs for host_options::reset_recovery before its first SETUP.
+   * @param at Virtual time SE0 ends.
+   */
+  virtual void bus_reset_end(vtime at) = 0;
 
   /**
    * @brief Start of a full-speed frame, every 1 ms while the bus is not suspended.

@@ -1,11 +1,14 @@
 #include "backup_domain.hpp"
 #include "factories.hpp"
+#include "family_names.hpp"
 #include "gtzc.hpp"
 #include "hsi16_source.hpp"
 #include "kernel_gate.hpp"
 #include "lsi_source.hpp"
 #include "model_base.hpp"
+#include "rcc_h5.hpp"
 #include "rcc_resets.hpp"
+#include "rcc_u5.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
@@ -20,6 +23,7 @@
 #include <cstdint>
 #include <format>
 #include <memory>
+#include <meta>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -32,226 +36,6 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-enum class source : std::uint8_t
-{
-  msis,
-  msik,
-  hsi16,
-  hsi48,
-  shsi,
-  hse,
-  lsi,
-  lse,
-  pll1,
-  pll2,
-  pll3,
-};
-
-constexpr std::size_t   source_count = 11;
-constexpr std::uint32_t switch_kind  = source_count;
-
-struct oscillator_names
-{
-  std::string_view reg;
-  std::string_view on;
-  std::string_view ready;
-  std::string_view flag;
-  std::string_view enable;
-};
-
-constexpr std::array<oscillator_names, source_count> oscillators{
-    {
-     {"RCC_CR", "MSISON", "MSISRDY", "MSISRDYF", "MSISRDYIE"},
-     {"RCC_CR", "MSIKON", "MSIKRDY", "MSIKRDYF", "MSIKRDYIE"},
-     {"RCC_CR", "HSION", "HSIRDY", "HSIRDYF", "HSIRDYIE"},
-     {"RCC_CR", "HSI48ON", "HSI48RDY", "HSI48RDYF", "HSI48RDYIE"},
-     {"RCC_CR", "SHSION", "SHSIRDY", "SHSIRDYF", "SHSIRDYIE"},
-     {"RCC_CR", "HSEON", "HSERDY", "HSERDYF", "HSERDYIE"},
-     {"RCC_BDCR", "LSION", "LSIRDY", "LSIRDYF", "LSIRDYIE"},
-     {"RCC_BDCR", "LSEON", "LSERDY", "LSERDYF", "LSERDYIE"},
-     {"RCC_CR", "PLL1ON", "PLL1RDY", "PLL1RDYF", "PLL1RDYIE"},
-     {"RCC_CR", "PLL2ON", "PLL2RDY", "PLL2RDYF", "PLL2RDYIE"},
-     {"RCC_CR", "PLL3ON", "PLL3RDY", "PLL3RDYF", "PLL3RDYIE"},
-     }
-};
-
-enum class signal : std::uint8_t
-{
-  none,
-  msis,
-  msik,
-  hsi16,
-  hsi48,
-  hsi48_half,
-  hse,
-  lsi,
-  lse,
-  sysclk,
-  hclk,
-  pclk1,
-  pclk2,
-  pclk3,
-  pll1_p,
-  pll1_q,
-  pll1_r,
-  pll2_p,
-  pll2_q,
-  pll2_r,
-  pll3_p,
-  pll3_q,
-  pll3_r,
-  iclk,
-  rtc,
-};
-
-constexpr std::size_t signal_count = 25;
-
-using enum signal;
-
-struct consumer
-{
-  std::string_view instance;
-  std::string_view enable;
-};
-
-struct mux
-{
-  std::string_view        reg;
-  std::string_view        field;
-  std::array<signal, 8>   inputs;
-  std::array<consumer, 3> consumers;
-};
-
-constexpr std::array<signal, 8> uart_inputs_1{pclk1, sysclk, hsi16, lse};
-constexpr std::array<signal, 8> i2c_inputs_1{pclk1, sysclk, hsi16, msik};
-constexpr std::array<signal, 8> low_power_inputs{msik, lsi, hsi16, lse};
-constexpr std::array<signal, 8> audio_inputs{hclk, pll1_p, pll3_q, none, msik};
-constexpr std::array<signal, 8> sai_inputs{pll2_p, pll3_p, pll1_p, none, hsi16};
-constexpr std::array<signal, 8> pclk3_inputs{pclk3, sysclk, hsi16, msik};
-
-constexpr std::array<mux, 28> muxes{
-    {
-     {"RCC_CCIPR1", "USART1SEL", {pclk2, sysclk, hsi16, lse}, {{{"USART1", "USART1EN"}}}},
-     {"RCC_CCIPR1", "USART2SEL", uart_inputs_1, {{{"USART2", "USART2EN"}}}},
-     {"RCC_CCIPR1", "USART3SEL", uart_inputs_1, {{{"USART3", "USART3EN"}}}},
-     {"RCC_CCIPR1", "UART4SEL", uart_inputs_1, {{{"UART4", "UART4EN"}}}},
-     {"RCC_CCIPR1", "UART5SEL", uart_inputs_1, {{{"UART5", "UART5EN"}}}},
-     {"RCC_CCIPR1", "I2C1SEL", i2c_inputs_1, {{{"I2C1", "I2C1EN"}}}},
-     {"RCC_CCIPR1", "I2C2SEL", i2c_inputs_1, {{{"I2C2", "I2C2EN"}}}},
-     {"RCC_CCIPR1", "I2C4SEL", i2c_inputs_1, {{{"I2C4", "I2C4EN"}}}},
-     {"RCC_CCIPR1", "SPI2SEL", i2c_inputs_1, {{{"SPI2", "SPI2EN"}}}},
-     {"RCC_CCIPR1", "LPTIM2SEL", {pclk1, lsi, hsi16, lse}, {{{"LPTIM2", "LPTIM2EN"}}}},
-     {"RCC_CCIPR1", "SPI1SEL", {pclk2, sysclk, hsi16, msik}, {{{"SPI1", "SPI1EN"}}}},
-     {"RCC_CCIPR1", "FDCAN1SEL", {hse, pll1_q, pll2_p, none}, {{{"FDCAN1", "FDCAN1EN"}}}},
-     {"RCC_CCIPR2", "MDF1SEL", audio_inputs, {{{"MDF1", "MDF1EN"}}}},
-     {"RCC_CCIPR2", "SAI1SEL", sai_inputs, {{{"SAI1", "SAI1EN"}}}},
-     {"RCC_CCIPR2", "SAI2SEL", sai_inputs, {{{"SAI2", "SAI2EN"}}}},
-     {"RCC_CCIPR2", "RNGSEL", {hsi48, hsi48_half, hsi16, none}, {{{"RNG", "RNGEN"}}}},
-     {"RCC_CCIPR2",
-         "SDMMCSEL",
-         {iclk, pll1_p},
-         {{{"SDMMC1", "SDMMC1EN"}, {"SDMMC2", "SDMMC2EN"}}}},
-     {"RCC_CCIPR2", "USART6SEL", uart_inputs_1, {{{"USART6", "USART6EN"}}}},
-     {"RCC_CCIPR2",
-         "OCTOSPISEL",
-         {sysclk, msik, pll1_q, pll2_q},
-         {{{"OCTOSPI1", "OCTOSPI1EN"}, {"OCTOSPI2", "OCTOSPI2EN"}}}},
-     {"RCC_CCIPR2", "I2C5SEL", i2c_inputs_1, {{{"I2C5", "I2C5EN"}}}},
-     {"RCC_CCIPR2", "I2C6SEL", i2c_inputs_1, {{{"I2C6", "I2C6EN"}}}},
-     {"RCC_CCIPR3",
-         "LPUART1SEL",
-         {pclk3, sysclk, hsi16, lse, msik},
-         {{{"LPUART1", "LPUART1EN"}}}},
-     {"RCC_CCIPR3", "SPI3SEL", pclk3_inputs, {{{"SPI3", "SPI3EN"}}}},
-     {"RCC_CCIPR3", "I2C3SEL", pclk3_inputs, {{{"I2C3", "I2C3EN"}}}},
-     {"RCC_CCIPR3",
-         "LPTIM34SEL",
-         low_power_inputs,
-         {{{"LPTIM3", "LPTIM3EN"}, {"LPTIM4", "LPTIM4EN"}}}},
-     {"RCC_CCIPR3", "LPTIM1SEL", low_power_inputs, {{{"LPTIM1", "LPTIM1EN"}}}},
-     {"RCC_CCIPR3",
-         "ADCDACSEL",
-         {hclk, sysclk, pll2_r, hse, hsi16, msik},
-         {{{"ADC1", "ADC12EN"}, {"ADC4", "ADC4EN"}, {"DAC1", "DAC1EN"}}}},
-     {"RCC_CCIPR3", "ADF1SEL", audio_inputs, {{{"ADF1", "ADF1EN"}}}},
-     }
-};
-
-struct timer_names
-{
-  std::string_view instance;
-  std::string_view enable;
-  signal           bus;
-};
-
-constexpr std::array<timer_names, 11> timers{
-    {
-     {"TIM1", "TIM1EN", pclk2},
-     {"TIM2", "TIM2EN", pclk1},
-     {"TIM3", "TIM3EN", pclk1},
-     {"TIM4", "TIM4EN", pclk1},
-     {"TIM5", "TIM5EN", pclk1},
-     {"TIM6", "TIM6EN", pclk1},
-     {"TIM7", "TIM7EN", pclk1},
-     {"TIM8", "TIM8EN", pclk2},
-     {"TIM15", "TIM15EN", pclk2},
-     {"TIM16", "TIM16EN", pclk2},
-     {"TIM17", "TIM17EN", pclk2},
-     }
-};
-
-constexpr std::array<std::string_view, 8> enable_registers{
-    "RCC_AHB1ENR",  "RCC_AHB2ENR1", "RCC_AHB2ENR2", "RCC_AHB3ENR",
-    "RCC_APB1ENR1", "RCC_APB1ENR2", "RCC_APB2ENR",  "RCC_APB3ENR"};
-
-constexpr std::array<std::uint64_t, 16> msi_hz{
-    48'000'000, 24'000'000, 16'000'000, 12'000'000, 4'000'000, 2'000'000, 1'330'000, 1'000'000,
-    3'072'000,  1'536'000,  1'024'000,  768'000,    400'000,   200'000,   133'000,   100'000};
-
-constexpr std::uint64_t hsi16_hz = 16'000'000;
-constexpr std::uint64_t hsi48_hz = 48'000'000;
-constexpr std::uint64_t lsi_hz   = 32'000;
-constexpr std::uint64_t frac_one = 8192;
-
-constexpr auto hpre_divider(std::uint32_t code) noexcept -> std::uint64_t
-{
-  constexpr std::array<std::uint64_t, 8> high{2, 4, 8, 16, 64, 128, 256, 512};
-  return code < 8 ? 1 : high[code - 8];
-}
-
-constexpr auto ppre_divider(std::uint32_t code) noexcept -> std::uint64_t
-{
-  return code < 4 ? 1 : std::uint64_t{2} << (code - 4);
-}
-
-constexpr auto flags_of(reset_kind kind) noexcept -> std::array<std::string_view, 2>
-{
-  switch(kind)
-  {
-    case reset_kind::power_on:
-    case reset_kind::brown_out:
-      return {"BORRSTF", "PINRSTF"};
-    case reset_kind::pin:
-      return {"PINRSTF", {}};
-    case reset_kind::software:
-      return {"SFTRSTF", {}};
-    case reset_kind::watchdog:
-      return {"IWDGRSTF", {}};
-    case reset_kind::window_watchdog:
-      return {"WWDGRSTF", {}};
-    case reset_kind::low_power:
-      return {"LPWRRSTF", {}};
-    case reset_kind::option_load:
-      return {"OBLRSTF", {}};
-    case reset_kind::peripheral:
-      return {};
-  }
-  return {};
-}
-
-constexpr std::array<std::string_view, 7> reset_flags{"BORRSTF",  "PINRSTF",  "SFTRSTF", "IWDGRSTF",
-                                                      "WWDGRSTF", "LPWRRSTF", "OBLRSTF"};
-
 auto lower(std::string_view name) -> std::string
 {
   std::string out{name};
@@ -260,98 +44,16 @@ auto lower(std::string_view name) -> std::string
   return out;
 }
 
-struct secured_group
-{
-  std::string_view bit;
-  std::string_view reg;
-  std::string_view fields;
-};
+template <typename Traits>
+inline constexpr std::size_t source_count = role_count<typename Traits::source>;
 
-constexpr auto rcc_secured = std::to_array<secured_group>({
-    {"HSISEC",    "RCC_CR",        "HSION HSIKERON HSIRDY"                                               },
-    {"HSISEC",    "RCC_ICSCR3",    "HSICAL HSITRIM"                                                      },
-    {"HSISEC",    "RCC_CIER",      "HSIRDYIE"                                                            },
-    {"HSISEC",    "RCC_CIFR",      "HSIRDYF"                                                             },
-    {"HSISEC",    "RCC_CICR",      "HSIRDYC"                                                             },
-    {"HSESEC",    "RCC_CR",        "HSEON HSERDY HSEBYP CSSON HSEEXT"                                    },
-    {"HSESEC",    "RCC_CIER",      "HSERDYIE"                                                            },
-    {"HSESEC",    "RCC_CIFR",      "HSERDYF CSSF"                                                        },
-    {"HSESEC",    "RCC_CICR",      "HSERDYC CSSC"                                                        },
-    {"MSISEC",    "RCC_CR",        "MSISON MSIKERON MSISRDY MSIPLLEN MSIKON MSIKRDY MSIPLLSEL MSIPLLFAST"},
-    {"MSISEC",    "RCC_ICSCR1",
-     "MSISRANGE MSIKRANGE MSIRGSEL MSIBIAS MSICAL0 MSICAL1 MSICAL2 MSICAL3"                              },
-    {"MSISEC",    "RCC_ICSCR2",    "MSITRIM0 MSITRIM1 MSITRIM2 MSITRIM3"                                 },
-    {"MSISEC",    "RCC_CIER",      "MSISRDYIE MSIKRDYIE"                                                 },
-    {"MSISEC",    "RCC_CIFR",      "MSISRDYF MSIKRDYF"                                                   },
-    {"MSISEC",    "RCC_CICR",      "MSISRDYC MSIKRDYC"                                                   },
-    {"MSISEC",    "RCC_CSR",       "MSISSRANGE MSIKSRANGE"                                               },
-    {"LSISEC",    "RCC_BDCR",      "LSION LSIRDY LSIPREDIV LSCOSEL LSCOEN"                               },
-    {"LSISEC",    "RCC_CIER",      "LSIRDYIE"                                                            },
-    {"LSISEC",    "RCC_CIFR",      "LSIRDYF"                                                             },
-    {"LSISEC",    "RCC_CICR",      "LSIRDYC"                                                             },
-    {"LSESEC",    "RCC_BDCR",
-     "LSECSSON LSECSSD LSEDRV LSEBYP LSERDY LSEON LSEGFON LSESYSRDY LSESYSEN LSCOSEL LSCOEN"             },
-    {"LSESEC",    "RCC_CIER",      "LSERDYIE"                                                            },
-    {"LSESEC",    "RCC_CIFR",      "LSERDYF"                                                             },
-    {"LSESEC",    "RCC_CICR",      "LSERDYC"                                                             },
-    {"SYSCLKSEC", "RCC_CFGR1",     "SW SWS STOPWUCK STOPKERWUCK MCOSEL MCOPRE"                           },
-    {"SYSCLKSEC", "RCC_CCIPR1",    "SYSTICKSEL"                                                          },
-    {"PRESCSEC",  "RCC_CFGR2",     "HPRE PPRE1 PPRE2"                                                    },
-    {"PRESCSEC",  "RCC_CFGR3",     "PPRE3"                                                               },
-    {"PLL1SEC",   "RCC_PLL1CFGR",
-     "PLL1SRC PLL1RGE PLL1FRACEN PLL1M PLL1MBOOST PLL1PEN PLL1QEN PLL1REN"                               },
-    {"PLL1SEC",   "RCC_PLL1DIVR",  "PLL1N PLL1P PLL1Q PLL1R"                                             },
-    {"PLL1SEC",   "RCC_PLL1FRACR", "PLL1FRACN"                                                           },
-    {"PLL1SEC",   "RCC_CR",        "PLL1RDY PLL1ON"                                                      },
-    {"PLL1SEC",   "RCC_CIER",      "PLL1RDYIE"                                                           },
-    {"PLL1SEC",   "RCC_CIFR",      "PLL1RDYF"                                                            },
-    {"PLL1SEC",   "RCC_CICR",      "PLL1RDYC"                                                            },
-    {"PLL2SEC",   "RCC_PLL2CFGR",  "PLL2SRC PLL2RGE PLL2FRACEN PLL2M PLL2PEN PLL2QEN PLL2REN"            },
-    {"PLL2SEC",   "RCC_PLL2DIVR",  "PLL2N PLL2P PLL2Q PLL2R"                                             },
-    {"PLL2SEC",   "RCC_PLL2FRACR", "PLL2FRACN"                                                           },
-    {"PLL2SEC",   "RCC_CR",        "PLL2RDY PLL2ON"                                                      },
-    {"PLL2SEC",   "RCC_CIER",      "PLL2RDYIE"                                                           },
-    {"PLL2SEC",   "RCC_CIFR",      "PLL2RDYF"                                                            },
-    {"PLL2SEC",   "RCC_CICR",      "PLL2RDYC"                                                            },
-    {"PLL3SEC",   "RCC_PLL3CFGR",  "PLL3SRC PLL3RGE PLL3FRACEN PLL3M PLL3PEN PLL3QEN PLL3REN"            },
-    {"PLL3SEC",   "RCC_PLL3DIVR",  "PLL3N PLL3P PLL3Q PLL3R"                                             },
-    {"PLL3SEC",   "RCC_PLL3FRACR", "PLL3FRACN"                                                           },
-    {"PLL3SEC",   "RCC_CR",        "PLL3RDY PLL3ON"                                                      },
-    {"PLL3SEC",   "RCC_CIER",      "PLL3RDYIE"                                                           },
-    {"PLL3SEC",   "RCC_CIFR",      "PLL3RDYF"                                                            },
-    {"PLL3SEC",   "RCC_CICR",      "PLL3RDYC"                                                            },
-    {"HSI48SEC",  "RCC_CR",        "HSI48ON HSI48RDY"                                                    },
-    {"HSI48SEC",  "RCC_CRRCR",     "HSI48CAL"                                                            },
-    {"HSI48SEC",  "RCC_CIER",      "HSI48RDYIE"                                                          },
-    {"HSI48SEC",  "RCC_CIFR",      "HSI48RDYF"                                                           },
-    {"HSI48SEC",  "RCC_CICR",      "HSI48RDYC"                                                           },
-    {"ICLKSEC",   "RCC_CCIPR1",    "ICLKSEL"                                                             },
-    {"RMVFSEC",   "RCC_CSR",       "RMVF"                                                                },
-});
+template <typename Traits>
+inline constexpr std::size_t signal_count = role_count<typename Traits::signal>;
 
-constexpr auto rcc_unit_registers = std::to_array<std::string_view>({
-    "RCC_AHB1RSTR",   "RCC_AHB2RSTR1",  "RCC_AHB2RSTR2",  "RCC_AHB3RSTR",   "RCC_APB1RSTR1",
-    "RCC_APB1RSTR2",  "RCC_APB2RSTR",   "RCC_APB3RSTR",   "RCC_AHB1ENR",    "RCC_AHB2ENR1",
-    "RCC_AHB2ENR2",   "RCC_AHB3ENR",    "RCC_APB1ENR1",   "RCC_APB1ENR2",   "RCC_APB2ENR",
-    "RCC_APB3ENR",    "RCC_AHB1SMENR",  "RCC_AHB2SMENR1", "RCC_AHB2SMENR2", "RCC_AHB3SMENR",
-    "RCC_APB1SMENR1", "RCC_APB1SMENR2", "RCC_APB2SMENR",  "RCC_APB3SMENR",  "RCC_SRDAMR",
-    "RCC_CCIPR1",     "RCC_CCIPR2",     "RCC_CCIPR3",
-});
+template <typename Traits>
+inline constexpr std::size_t event_count = source_count<Traits> + (Traits::hsi_divider ? 1 : 0);
 
-constexpr auto rcc_unit_suffixes =
-    std::to_array<std::string_view>({"SMEN", "AMEN", "RST", "EN", "SEL"});
-
-using unit_alias = std::pair<std::string_view, std::string_view>;
-
-constexpr auto rcc_unit_aliases = std::to_array<unit_alias>({
-    {"DCMI_PSSI", "DCMI"   },
-    {"FSMC",      "FMC"    },
-    {"OTG",       "OTG_FS" },
-    {"ICACHE",    "ICache" },
-    {"DCACHE1",   "DCACHE" },
-    {"VREF",      "VREFBUF"},
-    {"RTCAPB",    "RTC"    },
-});
+inline constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 
 struct unit_bits
 {
@@ -361,12 +63,97 @@ struct unit_bits
   trustzone_aware const* aware{};
 };
 
-struct rcc_state
+/**
+ * @brief Whether each oscillator row of @p Traits sits at the index of its source: a row with an
+ *        output signal names the signal of its source's name.
+ */
+template <typename Traits> consteval auto oscillators_in_source_order() -> bool
 {
-  std::array<std::uint32_t, source_count + 1> generation{};
-  std::uint32_t                               pending{};
-  std::uint8_t                                lsi_forced{};
-  std::uint8_t                                hsi16_held{};
+  using signal       = typename Traits::signal;
+  auto const sources = std::meta::enumerators_of(std::meta::dealias(^^typename Traits::source));
+  auto const signals = std::meta::enumerators_of(std::meta::dealias(^^signal));
+  if(sources.size() != Traits::oscillators.size())
+  {
+    return false;
+  }
+  for(std::size_t index = 0; index < sources.size(); ++index)
+  {
+    auto const out = Traits::oscillators[index].out;
+    if(out == signal::none)
+    {
+      continue;
+    }
+    auto const named = std::ranges::find_if(
+        signals, [&](std::meta::info e) { return std::meta::extract<signal>(e) == out; });
+    if(std::meta::identifier_of(*named) != std::meta::identifier_of(sources[index]))
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * @brief Whether the parallel source maps of @p Traits agree: each SYSCLK and PLL input names
+ *        the source whose oscillator outputs the signal of the same code, PLL1 exactly for a
+ *        PLL1 output, a reserved SYSCLK code exactly for `none`, and the PLL input `pll1`
+ *        exactly for the PLL source `none`.
+ */
+template <typename Traits> consteval auto source_maps_agree() -> bool
+{
+  using source       = typename Traits::source;
+  using signal       = typename Traits::signal;
+  auto const& pll1   = Traits::pll_nodes.front();
+  auto const  output = [](source which) {
+    return Traits::oscillators[std::to_underlying(which)].out;
+  };
+  auto const from_pll1 = [&](signal which) {
+    return std::ranges::contains(pll1.out.begin(), pll1.out.begin() + pll1.outputs, which);
+  };
+  for(std::size_t code = 0; code < Traits::system_inputs.size(); ++code)
+  {
+    auto const input = Traits::system_inputs[code];
+    auto const out   = Traits::system_sources[code];
+    if(not input)
+    {
+      if(out != signal::none)
+      {
+        return false;
+      }
+    }
+    else if(
+        (*input == source::pll1) != from_pll1(out)
+        or (*input != source::pll1 and output(*input) != out))
+    {
+      return false;
+    }
+  }
+  if(Traits::pll_inputs.size() != Traits::pll_sources.size())
+  {
+    return false;
+  }
+  for(std::size_t code = 0; code < Traits::pll_inputs.size(); ++code)
+  {
+    auto const input = Traits::pll_inputs[code];
+    auto const out   = Traits::pll_sources[code];
+    if((input == source::pll1) != (out == signal::none)
+       or (input != source::pll1 and output(input) != out))
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <typename Traits> struct rcc_state
+{
+  std::array<std::uint32_t, event_count<Traits>>      generation{};
+  std::uint32_t                                       pending{};
+  std::uint8_t                                        lsi_forced{};
+  std::array<std::uint32_t, Traits::pll_nodes.size()> fraction{};
+  std::uint32_t                                       hsi_divider{};
+  std::uint8_t                                        divider_clearing{};
+  std::uint64_t                                       divider_set_ps{};
 
   friend auto operator==(rcc_state const&, rcc_state const&) -> bool = default;
 };
@@ -381,21 +168,21 @@ struct oscillator
 
 struct pll_fields
 {
-  field_ref                src;
-  field_ref                range;
-  field_ref                m;
-  field_ref                fracen;
-  field_ref                n;
-  field_ref                frac;
-  std::array<field_ref, 3> divider;
-  std::array<field_ref, 3> output_enable;
+  field_ref                                             src;
+  std::optional<field_ref>                              range;
+  std::optional<field_ref>                              m;
+  std::optional<field_ref>                              fracen;
+  field_ref                                             n;
+  std::optional<field_ref>                              frac;
+  std::array<field_ref, max_pll_outputs>                divider{};
+  std::array<std::optional<field_ref>, max_pll_outputs> output_enable{};
 };
 
-struct kernel
+template <typename Signal> struct kernel
 {
   core::clock_domain           domain;
   field_ref                    select;
-  std::array<signal, 8> const* inputs;
+  std::array<Signal, 8> const* inputs;
   field_ref                    enable;
 };
 
@@ -406,53 +193,136 @@ struct reset_entry
   field_ref   bit;
 };
 
-struct timer
+template <typename Signal> struct timer
 {
   core::clock_domain domain;
-  signal             bus;
-  field_ref          prescaler;
+  Signal             bus;
+  rcc_role           prescaler;
   field_ref          enable;
 };
 
 /**
- * @brief RCC of the STM32U5, RM0456 section 11. Ready flags follow their enables after the
- *        board's ready delay. RCC writes RCC_CIFR storage directly when the matching RCC_CIER bit
- *        is set and raises no ready interrupt: firmware waiting on the RCC IRQ hangs, and the
- *        spin stop names its loop. A write that would stop the core clock, switching off the
- *        oscillator that drives it or changing PLL1 while it drives it, is refused and logs one
- *        warning per machine life. A started IWDG keeps the LSI on until the next reset, RM0456
- *        section 11.4.16. FLASH programming or erase keeps HSI16 on while it runs, RM0456
- *        sections 7.3.6 and 7.3.7. A change of an instance's bit in an RCC_xxxRSTR register,
- *        RM0456 11.8.21 to 11.8.28, holds or releases the instance through
- *        `core::machine_services::hold_in_reset()`, which resets its storage and calls its
- *        model's `periph::bus_reset_listener::on_bus_reset()`. The bit is `<instance>RST`, or
- *        the name of `reset_bit_names`.
+ * @brief RCC of the STM32U5, RM0456 section 11, and of the STM32H5, RM0481 section 11. Ready flags
+ *        follow their enables after the board's ready delay. SWS follows SW in the write that
+ *        selects a ready source, or when the selected source becomes ready, RM0456 11.4.9 and
+ *        RM0481 11.4.8. RCC writes RCC_CIFR storage directly when the matching RCC_CIER bit is set
+ *        and raises no ready interrupt: firmware waiting on the RCC IRQ hangs, and the spin stop
+ *        names its loop. RCC holds, with no log record, each write RM0456 11.8 and RM0481 11.8 say
+ *        the hardware ignores: a clear of the ON bit of the SYSCLK source and of the PLL1 input
+ *        while PLL1 drives SYSCLK, on the STM32H5 of the PLL1 input while PLL1ON stays set after
+ *        the write, RM0481 11.8.1, a write of `PLLxSRC`, `PLLxM`, `PLLxRGE`, `PLLxN` and the output
+ *        dividers while the PLL is on or ready, on the STM32H5 of PLL1PEN, PLL1QEN and PLL1REN too,
+ *        RM0481 11.8.7, and a clear of the PLL1 output enable that feeds SYSCLK while it does. The
+ *        STM32U5 `PLL1MBOOST` is storage. A selected SYSCLK source that runs at 0 Hz, such as a
+ *        PLL1 output whose enable is clear, leaves the core clock at its rate and logs one warning
+ *        per machine life. A started IWDG keeps the LSI on until the next reset, RM0456 section
+ *        11.4.16. FLASH programming or erase runs HSI16 for the FLASH interface, RM0456 sections
+ *        7.3.6 and 7.3.7, and `HSIRDY` and the HSI16 clock of the tree follow `HSION` alone, RM0456
+ *        11.8.1. A change of an instance's bit in an RCC_xxxRSTR register, RM0456 11.8.21 to
+ *        11.8.28, holds or releases the instance through `core::machine_services::hold_in_reset()`,
+ *        which resets its storage and calls its model's
+ *        `periph::bus_reset_listener::on_bus_reset()`. The bit is `<instance>RST`, or the name of
+ *        `reset_bit_names`. The STM32H5 reset registers are RM0481 11.8.19 to 11.8.25, its reset
+ *        flags `RCC_RSR`, RM0481 11.8.46.
+ *
+ *        The PLL fractional modulator loads `PLLxFRACN` when `PLLxON` sets with `PLLxFRACEN` 1,
+ *        and 0 with `PLLxFRACEN` 0, in either write order, as measured on an STM32H573. While
+ *        the PLL runs, a `PLLxFRACEN` write from 0 to 1 loads `PLLxFRACN` again and the VCO keeps
+ *        the loaded fraction whatever `PLLxFRACEN` and `PLLxFRACN` read later, RM0456 11.4.6 and
+ *        11.8.9, RM0481 11.4.5 and 11.8.7. Deviation: the fraction applies at once, silicon takes
+ *        it three reference clock periods later.
+ *
+ *        STM32H5, RM0481 11.8.1: `HSIDIV` reads its new value from the write. `HSIDIVF` clears and
+ *        then sets again with the new HSI rate after the cycles of the running HSI rate in
+ *        `h5_rcc::hsi_divider_timings`, as measured on an STM32H573: /2 to /4 or /8 clear at 3 and
+ *        set at 6, /2 to /1 3 and 16, /4 to /2 2 and 8. The HSI keeps its old rate until `HSIDIVF`
+ *        sets, a point the board run did not measure. `HSIDIV` keeps its value while PLL1 drives
+ *        SYSCLK from HSI and changes in every other state, an enabled PLL1 off SYSCLK fed by HSI
+ *        included, as measured on an STM32H573 against the RM0481 11.8.1 text. For PLL2 and PLL3
+ *        fed by HSI the model applies the same rule, inferred from PLL1. `TIMPRE`, RM0481 11.8.5,
+ *        sets the timer clocks of APB1 and APB2. `VSWRST` resets the backup domain, RM0481 11.3.3.
  *
  *        TrustZone, RM0456 11.5 and Table 117: the bits each `RCC_SECCFGR` bit secures, and the
  *        reset, enable, sleep enable, autonomous enable and kernel clock selection bits of a
  *        Secure peripheral, are RAZ/WI to a Non-secure access, with no event. A peripheral is
  *        Secure by its TZSC bit, or for a TrustZone-aware model by its own security bits, the
- *        FLASH by RM0456 Table 62. A bit whose name gives no peripheral of the part stays
- *        Non-secure, such as the GTZCn and shared kernel clock selections. Deviation: SRAMnEN
+ *        FLASH by RM0456 Table 62. A bit shared by several peripherals, such as `ADCDACSEL` or
+ *        `LPTIM34SEL`, is Secure while any of them is, as "its related clock source selection"
+ *        of RM0456 11.5.1 and RM0481 11.5.1 reads for each of them. A bit whose name gives no
+ *        peripheral of the part stays Non-secure, such as the GTZCn. Deviation: SRAMnEN
  *        and SRAMnSMEN stay Non-secure, the MPCBB and INVSECSTATE rule of RM0456 5.4 is not
- *        modelled. `BDRST` is
- *        Secure while the RTC or the TAMP has a secure function, RM0456 11.5.1. `SPRIV` makes
- *        the Secure bits privileged, `NSPRIV` the others, RAZ/WI to an unprivileged access.
+ *        modelled. `BDRST` is Secure while the RTC or the TAMP has a secure function, RM0456
+ *        11.5.1. The STM32H5 follows RM0481 11.5 and Table 122 the same way, through the H5
+ *        traits, the sleep enables in `RCC_xxxLPENR`, and `RTCPRE`, `RTCEN` and `RTCSEL` Secure
+ *        in place of `BDRST`. `SPRIV` makes the Secure bits privileged, `NSPRIV` the others,
+ *        RAZ/WI to an unprivileged access.
  *        `RCC_SECCFGR` reads for every transaction and takes Secure writes, privileged with SPRIV
  *        set. A Non-secure write to it is ignored with an illegal access event. `RCC_PRIVCFGR`
  *        takes privileged writes, SPRIV Secure ones only. A write of `RCC_CICR` clears the
  *        `RCC_CIFR` flags of the description's cross rules, the flags of a Secure oscillator only
  *        for a Secure write. Under TZEN=0 `RCC_SECCFGR` is RAZ/WI, RM0456 11.8.51, and
  *        `RCC_PRIVCFGR` is storage.
+ * @tparam Traits Family clock tree, u5_rcc or h5_rcc: the sources and signals, the oscillator,
+ *         mux, timer and enable tables, the source maps of the PLLs, SYSCLK and RTC, the names
+ *         of the single fields, and the TrustZone tables.
  */
-class rcc final : public dispatch_model<rcc, rcc_state>,
-                  public lsi_source,
-                  public hsi16_source,
-                  public kernel_gate,
-                  public trustzone_aware
+template <typename Traits>
+class rcc_model final : public dispatch_model<rcc_model<Traits>, rcc_state<Traits>>,
+                        public lsi_source,
+                        public hsi16_source,
+                        public kernel_gate,
+                        public trustzone_aware
 {
+  using base   = dispatch_model<rcc_model<Traits>, rcc_state<Traits>>;
+  using source = typename Traits::source;
+  using signal = typename Traits::signal;
+
+  static constexpr std::size_t   source_count = stm32::source_count<Traits>;
+  static constexpr std::size_t   signal_count = stm32::signal_count<Traits>;
+  static constexpr std::uint32_t divider_kind = source_count;
+
+  static_assert(Traits::oscillators.size() == source_count);
+  static_assert(std::to_underlying(source::pll1) + Traits::pll_nodes.size() == source_count);
+  static_assert(std::to_underlying(signal::none) == 0);
+  static_assert(Traits::system_inputs.size() == Traits::sw_mask + 1);
+  static_assert(Traits::system_sources.size() == Traits::sw_mask + 1);
+  static_assert(oscillators_in_source_order<Traits>());
+  static_assert(source_maps_agree<Traits>());
+  static_assert(flag_matches_roles(
+      Traits::names,
+      Traits::hsi_divider,
+      {rcc_role::hsi_divider, rcc_role::hsi_divider_flag}));
+  static_assert(std::ranges::all_of(Traits::timers, [](auto const& entry) {
+    return std::ranges::contains(Traits::buses, entry.bus, &bus_node<signal>::out);
+  }));
+
+  static constexpr std::size_t system_output = [] {
+    auto const& node = Traits::pll_nodes.front();
+    for(std::size_t output = 0; output < node.outputs; ++output)
+    {
+      if(std::ranges::contains(Traits::system_sources, node.out[output]))
+      {
+        return output;
+      }
+    }
+    return max_pll_outputs;
+  }();
+  static_assert(system_output < max_pll_outputs, "a PLL1 output feeds SYSCLK");
+
+  using base::apply_crosses;
+  using base::bind;
+  using base::crosses_from;
+  using base::ctx_;
+  using base::describe;
+  using base::field;
+  using base::has_field;
+  using base::has_register;
+  using base::reg;
+  using base::state_;
+  using base::warn;
+
 public:
-  rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& options);
+  rcc_model(model_context& ctx, peripheral_desc const& desc, rcc_options const& options);
 
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -464,9 +334,10 @@ public:
   void               hold_hsi16(bool held) override;
   [[nodiscard]] auto bus_enabled(core::clock_domain kernel) const -> bool override;
 
-  void                            cr_written(std::uint32_t old, std::uint32_t now);
-  void                            icscr1_written(std::uint32_t old, std::uint32_t now);
-  void                            tree_written(std::uint32_t old, std::uint32_t now);
+  void               cr_written(std::uint32_t old, std::uint32_t now);
+  [[nodiscard]] auto divider_written(std::uint32_t old, std::uint32_t now) -> std::uint32_t;
+  void               icscr1_written(std::uint32_t old, std::uint32_t now);
+  void               tree_written(std::uint32_t old, std::uint32_t now);
   template <std::size_t Pll> void pll_config_written(std::uint32_t old, std::uint32_t now);
   template <std::size_t Pll> void pll_dividers_written(std::uint32_t old, std::uint32_t now);
   void                            bdcr_written(std::uint32_t old, std::uint32_t now);
@@ -485,11 +356,12 @@ private:
   [[nodiscard]] auto is_ready(source which) const -> bool;
   [[nodiscard]] auto is_on(source which) const -> bool;
   [[nodiscard]] auto pll_input(std::size_t pll) const -> source;
-  [[nodiscard]] auto system_source(std::uint32_t code) const -> source;
+  [[nodiscard]] auto system_source(std::uint32_t code) const -> std::optional<source>;
   [[nodiscard]] auto in_use() const -> std::uint32_t;
   [[nodiscard]] auto locked(std::size_t pll) const -> bool;
   [[nodiscard]] auto rates() const -> std::array<std::uint64_t, signal_count>;
   [[nodiscard]] auto enable_field(std::string_view name) const -> field_ref;
+  [[nodiscard]] auto read(rcc_role role) const -> std::uint32_t;
 
   void oscillators_written(
       std::string_view reg,
@@ -497,44 +369,31 @@ private:
       std::uint32_t    old,
       std::uint32_t    now);
   void start(source which);
+  void load_fraction(std::size_t pll);
   void stop(source which);
-  void schedule(std::uint32_t kind);
+  void schedule(std::uint32_t kind, std::optional<std::uint64_t> delay_ps = std::nullopt);
   void cancel(std::uint32_t kind);
   void settle(bool notify);
   void publish(bool notify);
   void load(std::span<std::byte const> in) override;
-  void refuse_core_stop(std::string_view reg, std::string_view what);
+  void refuse_stopped_clock();
 
   bool                                                 core_stop_logged_{};
   rcc_options                                          options_;
   register_file&                                       regs_;
   std::array<oscillator, source_count>                 osc_{};
-  std::array<pll_fields, 3>                            pll_{};
-  field_ref                                            css_on_;
-  field_ref                                            msi_select_;
-  field_ref                                            msis_range_;
-  field_ref                                            msik_range_;
-  field_ref                                            msis_standby_range_;
-  field_ref                                            msik_standby_range_;
-  field_ref                                            sw_;
-  field_ref                                            sws_;
-  field_ref                                            hpre_;
-  std::array<field_ref, 3>                             ppre_{};
-  field_ref                                            iclk_select_;
-  field_ref                                            rtc_select_;
-  field_ref                                            rtc_enable_;
-  field_ref                                            lsi_prediv_;
-  field_ref                                            backup_reset_;
-  field_ref                                            remove_flags_;
-  std::array<field_ref, reset_flags.size()>            flags_{};
+  std::array<pll_fields, Traits::pll_nodes.size()>     pll_{};
+  field_table<rcc_role>                                names_;
+  std::array<field_ref, Traits::signal_muxes.size()>   selects_{};
+  std::array<field_ref, Traits::reset_flags.size()>    flags_{};
   reg_ref                                              bdcr_;
   reg_ref                                              csr_;
   std::vector<std::pair<core::clock_domain, signal>>   signals_;
-  std::vector<kernel>                                  kernels_;
+  std::vector<kernel<signal>>                          kernels_;
   std::vector<reset_entry>                             resets_;
   std::vector<std::string>                             reset_registers_;
   std::vector<std::uint8_t>                            kernel_enables_;
-  std::vector<timer>                                   timers_;
+  std::vector<timer<signal>>                           timers_;
   std::optional<reg_ref>                               secure_;
   reg_ref                                              privilege_;
   field_ref                                            secure_privileged_;
@@ -543,6 +402,7 @@ private:
   std::vector<unit_bits>                               units_;
   std::vector<cross_ref>                               flag_clears_;
   std::array<trustzone_aware const*, 2>                backup_units_{};
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> backup_secured_;
   std::vector<std::pair<std::uint32_t, std::uint32_t>> words_;
   peripheral_security*                                 firewall_{};
   bool                                                 units_resolved_{};
@@ -550,88 +410,148 @@ private:
   illegal_event                                        illegal_;
 };
 
-constexpr std::array<write_entry<rcc>, 27> rcc_writes{
-    {
-     {"RCC_CR", &rcc::cr_written},
-     {"RCC_ICSCR1", &rcc::icscr1_written},
-     {"RCC_CFGR1", &rcc::tree_written},
-     {"RCC_CFGR2", &rcc::tree_written},
-     {"RCC_CFGR3", &rcc::tree_written},
-     {"RCC_PLL1CFGR", &rcc::pll_config_written<0>},
-     {"RCC_PLL2CFGR", &rcc::pll_config_written<1>},
-     {"RCC_PLL3CFGR", &rcc::pll_config_written<2>},
-     {"RCC_PLL1DIVR", &rcc::pll_dividers_written<0>},
-     {"RCC_PLL2DIVR", &rcc::pll_dividers_written<1>},
-     {"RCC_PLL3DIVR", &rcc::pll_dividers_written<2>},
-     {"RCC_PLL1FRACR", &rcc::tree_written},
-     {"RCC_PLL2FRACR", &rcc::tree_written},
-     {"RCC_PLL3FRACR", &rcc::tree_written},
-     {"RCC_CCIPR1", &rcc::tree_written},
-     {"RCC_CCIPR2", &rcc::tree_written},
-     {"RCC_CCIPR3", &rcc::tree_written},
-     {"RCC_AHB1ENR", &rcc::tree_written},
-     {"RCC_AHB2ENR1", &rcc::tree_written},
-     {"RCC_AHB2ENR2", &rcc::tree_written},
-     {"RCC_AHB3ENR", &rcc::tree_written},
-     {"RCC_APB1ENR1", &rcc::tree_written},
-     {"RCC_APB1ENR2", &rcc::tree_written},
-     {"RCC_APB2ENR", &rcc::tree_written},
-     {"RCC_APB3ENR", &rcc::tree_written},
-     {"RCC_BDCR", &rcc::bdcr_written},
-     {"RCC_CSR", &rcc::csr_written},
-     }
+template <typename Traits> struct rcc_tables;
+
+template <> struct rcc_tables<u5_rcc>
+{
+  using model = rcc_model<u5_rcc>;
+
+  static constexpr std::array<write_entry<model>, 28> writes{
+      {
+       {"RCC_CR", &model::cr_written},
+       {"RCC_ICSCR1", &model::icscr1_written},
+       {"RCC_CFGR1", &model::tree_written},
+       {"RCC_CFGR2", &model::tree_written},
+       {"RCC_CFGR3", &model::tree_written},
+       {"RCC_CIER", nullptr},
+       {"RCC_PLL1CFGR", &model::pll_config_written<0>},
+       {"RCC_PLL2CFGR", &model::pll_config_written<1>},
+       {"RCC_PLL3CFGR", &model::pll_config_written<2>},
+       {"RCC_PLL1DIVR", &model::pll_dividers_written<0>},
+       {"RCC_PLL2DIVR", &model::pll_dividers_written<1>},
+       {"RCC_PLL3DIVR", &model::pll_dividers_written<2>},
+       {"RCC_PLL1FRACR", &model::tree_written},
+       {"RCC_PLL2FRACR", &model::tree_written},
+       {"RCC_PLL3FRACR", &model::tree_written},
+       {"RCC_CCIPR1", &model::tree_written},
+       {"RCC_CCIPR2", &model::tree_written},
+       {"RCC_CCIPR3", &model::tree_written},
+       {"RCC_AHB1ENR", &model::tree_written},
+       {"RCC_AHB2ENR1", &model::tree_written},
+       {"RCC_AHB2ENR2", &model::tree_written},
+       {"RCC_AHB3ENR", &model::tree_written},
+       {"RCC_APB1ENR1", &model::tree_written},
+       {"RCC_APB1ENR2", &model::tree_written},
+       {"RCC_APB2ENR", &model::tree_written},
+       {"RCC_APB3ENR", &model::tree_written},
+       {"RCC_BDCR", &model::bdcr_written},
+       {"RCC_CSR", &model::csr_written},
+       }
+  };
+
+  static constexpr auto trustzone_writes = std::to_array<write_entry<model>>({
+      {"RCC_ICSCR2",     nullptr             },
+      {"RCC_ICSCR3",     nullptr             },
+      {"RCC_CRRCR",      nullptr             },
+      {"RCC_CIFR",       nullptr             },
+      {"RCC_CICR",       &model::cicr_written},
+      {"RCC_AHB1SMENR",  nullptr             },
+      {"RCC_AHB2SMENR1", nullptr             },
+      {"RCC_AHB2SMENR2", nullptr             },
+      {"RCC_AHB3SMENR",  nullptr             },
+      {"RCC_APB1SMENR1", nullptr             },
+      {"RCC_APB1SMENR2", nullptr             },
+      {"RCC_APB2SMENR",  nullptr             },
+      {"RCC_APB3SMENR",  nullptr             },
+      {"RCC_SRDAMR",     nullptr             },
+      {"RCC_PRIVCFGR",   nullptr             },
+  });
+};
+
+template <> struct rcc_tables<h5_rcc>
+{
+  using model = rcc_model<h5_rcc>;
+
+  static constexpr std::array<write_entry<model>, 27> writes{
+      {
+       {"RCC_CR", &model::cr_written},
+       {"RCC_CFGR1", &model::tree_written},
+       {"RCC_CFGR2", &model::tree_written},
+       {"RCC_CIER", nullptr},
+       {"RCC_PLL1CFGR", &model::pll_config_written<0>},
+       {"RCC_PLL2CFGR", &model::pll_config_written<1>},
+       {"RCC_PLL3CFGR", &model::pll_config_written<2>},
+       {"RCC_PLL1DIVR", &model::pll_dividers_written<0>},
+       {"RCC_PLL2DIVR", &model::pll_dividers_written<1>},
+       {"RCC_PLL3DIVR", &model::pll_dividers_written<2>},
+       {"RCC_PLL1FRACR", &model::tree_written},
+       {"RCC_PLL2FRACR", &model::tree_written},
+       {"RCC_PLL3FRACR", &model::tree_written},
+       {"RCC_CCIPR1", &model::tree_written},
+       {"RCC_CCIPR2", &model::tree_written},
+       {"RCC_CCIPR3", &model::tree_written},
+       {"RCC_CCIPR4", &model::tree_written},
+       {"RCC_CCIPR5", &model::tree_written},
+       {"RCC_AHB1ENR", &model::tree_written},
+       {"RCC_AHB2ENR", &model::tree_written},
+       {"RCC_AHB4ENR", &model::tree_written},
+       {"RCC_APB1LENR", &model::tree_written},
+       {"RCC_APB1HENR", &model::tree_written},
+       {"RCC_APB2ENR", &model::tree_written},
+       {"RCC_APB3ENR", &model::tree_written},
+       {"RCC_BDCR", &model::bdcr_written},
+       {"RCC_RSR", &model::csr_written},
+       }
+  };
+
+  static constexpr auto trustzone_writes = std::to_array<write_entry<model>>({
+      {"RCC_HSICFGR",    nullptr             },
+      {"RCC_CSICFGR",    nullptr             },
+      {"RCC_CRRCR",      nullptr             },
+      {"RCC_CIFR",       nullptr             },
+      {"RCC_CICR",       &model::cicr_written},
+      {"RCC_AHB1LPENR",  nullptr             },
+      {"RCC_AHB2LPENR",  nullptr             },
+      {"RCC_AHB4LPENR",  nullptr             },
+      {"RCC_APB1LLPENR", nullptr             },
+      {"RCC_APB1HLPENR", nullptr             },
+      {"RCC_APB2LPENR",  nullptr             },
+      {"RCC_APB3LPENR",  nullptr             },
+      {"RCC_PRIVCFGR",   nullptr             },
+  });
 };
 
 constexpr std::size_t max_reset_registers = 16;
 
-template <std::size_t... Reg>
+template <typename Model, std::size_t... Reg>
 constexpr auto reset_handlers(std::index_sequence<Reg...>)
-    -> std::array<void (rcc::*)(std::uint32_t, std::uint32_t), sizeof...(Reg)>
+    -> std::array<void (Model::*)(std::uint32_t, std::uint32_t), sizeof...(Reg)>
 {
-  return {&rcc::resets_written<Reg>...};
+  return {&Model::template resets_written<Reg>...};
 }
 
-constexpr auto rcc_reset_handlers = reset_handlers(std::make_index_sequence<max_reset_registers>{});
-
-constexpr std::array<write_entry<rcc>, 1> rcc_secure_writes{
-    {
-     {"RCC_SECCFGR", nullptr},
-     }
-};
-
-constexpr auto rcc_trustzone_writes = std::to_array<write_entry<rcc>>({
-    {"RCC_ICSCR2",     nullptr           },
-    {"RCC_ICSCR3",     nullptr           },
-    {"RCC_CRRCR",      nullptr           },
-    {"RCC_CIER",       nullptr           },
-    {"RCC_CIFR",       nullptr           },
-    {"RCC_CICR",       &rcc::cicr_written},
-    {"RCC_AHB1SMENR",  nullptr           },
-    {"RCC_AHB2SMENR1", nullptr           },
-    {"RCC_AHB2SMENR2", nullptr           },
-    {"RCC_AHB3SMENR",  nullptr           },
-    {"RCC_APB1SMENR1", nullptr           },
-    {"RCC_APB1SMENR2", nullptr           },
-    {"RCC_APB2SMENR",  nullptr           },
-    {"RCC_APB3SMENR",  nullptr           },
-    {"RCC_SRDAMR",     nullptr           },
-    {"RCC_PRIVCFGR",   nullptr           },
-});
-
-rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& options)
-    : dispatch_model{ctx, desc, "RCC", rcc_writes, rcc_trustzone_writes}, options_{options},
-      regs_{ctx.regs}, css_on_{field("RCC_CR", "CSSON")},
-      msi_select_{field("RCC_ICSCR1", "MSIRGSEL")}, msis_range_{field("RCC_ICSCR1", "MSISRANGE")},
-      msik_range_{field("RCC_ICSCR1", "MSIKRANGE")},
-      msis_standby_range_{field("RCC_CSR", "MSISSRANGE")},
-      msik_standby_range_{field("RCC_CSR", "MSIKSRANGE")}, sw_{field("RCC_CFGR1", "SW")},
-      sws_{field("RCC_CFGR1", "SWS")}, hpre_{field("RCC_CFGR2", "HPRE")},
-      ppre_{field("RCC_CFGR2", "PPRE1"), field("RCC_CFGR2", "PPRE2"), field("RCC_CFGR3", "PPRE3")},
-      iclk_select_{field("RCC_CCIPR1", "ICLKSEL")}, rtc_select_{field("RCC_BDCR", "RTCSEL")},
-      rtc_enable_{field("RCC_BDCR", "RTCEN")}, lsi_prediv_{field("RCC_BDCR", "LSIPREDIV")},
-      backup_reset_{field("RCC_BDCR", "BDRST")}, remove_flags_{field("RCC_CSR", "RMVF")},
-      bdcr_{reg("RCC_BDCR")}, csr_{reg("RCC_CSR")}, unit_{unit_named(ctx.part, desc.name)}
+template <typename Traits>
+rcc_model<Traits>::rcc_model(
+    model_context&         ctx,
+    peripheral_desc const& desc,
+    rcc_options const&     options)
+    : base{ctx, desc, "RCC", rcc_tables<Traits>::writes, rcc_tables<Traits>::trustzone_writes},
+      options_{options}, regs_{ctx.regs},
+      names_{
+          Traits::names,
+          [this](std::string_view reg_name, std::string_view name) {
+            return field(reg_name, name);
+          },
+          [this](std::string_view reg_name, std::string_view name) {
+            return has_field(reg_name, name);
+          }},
+      bdcr_{reg("RCC_BDCR")}, csr_{reg(Traits::reset_flags_register)},
+      unit_{unit_named(ctx.part, desc.name)}
 {
+  for(auto const& [index, entry] : std::views::enumerate(Traits::signal_muxes))
+  {
+    selects_[index] = field(entry.reg, entry.field);
+  }
   for(auto const& described : desc.registers)
   {
     if(not described.alternate_of and described.name.contains("RSTR"))
@@ -645,10 +565,12 @@ rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& opt
         ctx.part.part, 0, "peripherals.RCC.registers",
         std::format("at most {} registers named RSTR", max_reset_registers));
   }
-  std::vector<write_entry<rcc>> reset_writes;
+  constexpr auto handlers =
+      reset_handlers<rcc_model>(std::make_index_sequence<max_reset_registers>{});
+  std::vector<write_entry<rcc_model>> reset_writes;
   for(std::size_t index = 0; index < reset_registers_.size(); ++index)
   {
-    reset_writes.push_back({reset_registers_[index], rcc_reset_handlers[index]});
+    reset_writes.push_back({reset_registers_[index], handlers[index]});
   }
   bind(reset_writes);
   for(auto const& peripheral : ctx.part.peripherals)
@@ -668,14 +590,19 @@ rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& opt
   }
   if(has_register("RCC_SECCFGR"))
   {
-    bind(rcc_secure_writes);
+    constexpr std::array<write_entry<rcc_model>, 1> secure_writes{
+        {
+         {"RCC_SECCFGR", nullptr},
+         }
+    };
+    bind(secure_writes);
     secure_ = reg("RCC_SECCFGR");
   }
   if(ctx.trustzone)
   {
     add_security_rules();
   }
-  for(auto const& [index, names] : std::views::enumerate(oscillators))
+  for(auto const& [index, names] : std::views::enumerate(Traits::oscillators))
   {
     osc_[index] = {
         .on     = field(names.reg, names.on),
@@ -683,32 +610,37 @@ rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& opt
         .flag   = field("RCC_CIFR", names.flag),
         .enable = field("RCC_CIER", names.enable)};
   }
-  for(std::size_t index = 0; index < pll_.size(); ++index)
+  for(auto const& [index, node] : std::views::enumerate(Traits::pll_nodes))
   {
-    auto const n   = std::to_string(index + 1);
-    auto const cfg = "RCC_PLL" + n + "CFGR";
-    auto const div = "RCC_PLL" + n + "DIVR";
-    auto const pll = "PLL" + n;
-    pll_[index]    = {
-        .src           = field(cfg, pll + "SRC"),
-        .range         = field(cfg, pll + "RGE"),
-        .m             = field(cfg, pll + "M"),
-        .fracen        = field(cfg, pll + "FRACEN"),
-        .n             = field(div, pll + "N"),
-        .frac          = field("RCC_PLL" + n + "FRACR", pll + "FRACN"),
-        .divider       = {field(div, pll + "P"),   field(div, pll + "Q"),   field(div, pll + "R")  },
-        .output_enable = {
-                          field(cfg, pll + "PEN"), field(cfg, pll + "QEN"), field(cfg, pll + "REN")}
+    auto const named = [&](std::string_view reg_name, std::string_view name) {
+      return name.empty() ? std::nullopt : std::optional{field(reg_name, name)};
     };
+    auto& fields  = pll_[index];
+    fields.src    = field(node.config, node.src);
+    fields.range  = named(node.config, node.range);
+    fields.m      = named(node.config, node.m);
+    fields.fracen = named(node.config, node.fracen);
+    fields.n      = field(node.dividers, node.n);
+    fields.frac   = named(node.fraction, node.frac);
+    for(std::size_t output = 0; output < node.outputs; ++output)
+    {
+      fields.divider[output] = field(node.dividers, node.divider[output]);
+    }
+    for(std::size_t output = 0; output < node.outputs; ++output)
+    {
+      fields.output_enable[output] = named(node.config, node.output_enable[output]);
+    }
   }
-  for(auto const& [index, name] : std::views::enumerate(reset_flags))
+  for(auto const& [index, name] : std::views::enumerate(Traits::reset_flags))
   {
-    flags_[index] = field("RCC_CSR", name);
+    flags_[index] = field(Traits::reset_flags_register, name);
   }
   auto& clock = ctx.clock;
-  template for(constexpr auto e : std::define_static_array(std::meta::enumerators_of(^^signal)))
+  template for(constexpr auto e :
+               std::define_static_array(std::meta::enumerators_of(std::meta::dealias(^^signal))))
   {
-    if constexpr([:e:] != none and [:e:] != hsi48_half)
+    if constexpr(
+        [:e:] != signal::none and not std::ranges::contains(Traits::internal_signals, [:e:]))
     {
       signals_.emplace_back(clock.domain(std::meta::identifier_of(e)), [:e:]);
     }
@@ -716,7 +648,7 @@ rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& opt
   auto const present = [&](std::string_view instance) {
     return std::ranges::contains(ctx.part.peripherals, instance, &peripheral_desc::name);
   };
-  for(auto const& entry : muxes)
+  for(auto const& entry : Traits::muxes)
   {
     for(auto const& user : entry.consumers)
     {
@@ -730,81 +662,99 @@ rcc::rcc(model_context& ctx, peripheral_desc const& desc, rcc_options const& opt
       }
     }
   }
-  for(auto const& entry : timers)
+  for(auto const& entry : Traits::timers)
   {
     if(present(entry.instance))
     {
       timers_.push_back(
-          {.domain    = clock.domain(lower(entry.instance)),
-           .bus       = entry.bus,
-           .prescaler = ppre_[entry.bus == pclk1 ? 0 : 1],
-           .enable    = enable_field(entry.enable)});
+          {.domain = clock.domain(lower(entry.instance)),
+           .bus    = entry.bus,
+           .prescaler =
+               std::ranges::find(Traits::buses, entry.bus, &bus_node<signal>::out)->prescaler,
+           .enable = enable_field(entry.enable)});
     }
   }
 }
 
-auto rcc::enable_field(std::string_view name) const -> field_ref
+template <typename Traits>
+auto rcc_model<Traits>::enable_field(std::string_view name) const -> field_ref
 {
-  for(auto const reg_name : enable_registers)
+  for(auto const reg_name : Traits::enable_registers)
   {
     if(std::ranges::contains(describe(reg_name).fields, name, &field_desc::name))
     {
       return field(reg_name, name);
     }
   }
-  return field(enable_registers.back(), name);
+  return field(Traits::enable_registers.back(), name);
 }
 
-auto rcc::is_ready(source which) const -> bool
+template <typename Traits> auto rcc_model<Traits>::read(rcc_role role) const -> std::uint32_t
+{
+  return get(regs_, names_[role]);
+}
+
+template <typename Traits> auto rcc_model<Traits>::is_ready(source which) const -> bool
 {
   return get(regs_, osc_[std::to_underlying(which)].ready) != 0;
 }
 
-auto rcc::is_on(source which) const -> bool
+template <typename Traits> auto rcc_model<Traits>::is_on(source which) const -> bool
 {
   return get(regs_, osc_[std::to_underlying(which)].on) != 0
-      or (which == source::lsi and state_.lsi_forced != 0)
-      or (which == source::hsi16 and state_.hsi16_held != 0);
+      or (which == source::lsi and state_.lsi_forced != 0);
 }
 
-auto rcc::pll_input(std::size_t pll) const -> source
+template <typename Traits> auto rcc_model<Traits>::pll_input(std::size_t pll) const -> source
 {
-  constexpr std::array<source, 4> inputs{source::pll1, source::msis, source::hsi16, source::hse};
-  return inputs[get(regs_, pll_[pll].src)];
+  return Traits::pll_inputs[get(regs_, pll_[pll].src)];
 }
 
-auto rcc::system_source(std::uint32_t code) const -> source
+template <typename Traits>
+auto rcc_model<Traits>::system_source(std::uint32_t code) const -> std::optional<source>
 {
-  constexpr std::array<source, 4> inputs{source::msis, source::hsi16, source::hse, source::pll1};
-  return inputs[code];
+  return Traits::system_inputs[code & Traits::sw_mask];
 }
 
-auto rcc::in_use() const -> std::uint32_t
+template <typename Traits> auto rcc_model<Traits>::in_use() const -> std::uint32_t
 {
-  auto const system = system_source(get(regs_, sws_));
-  auto       used   = std::uint32_t{1} << std::to_underlying(system);
-  if(system == source::pll1 and pll_input(0) != source::pll1)
+  auto const system = system_source(read(rcc_role::sws));
+  if(not system)
+  {
+    return 0;
+  }
+  auto used = std::uint32_t{1} << std::to_underlying(*system);
+  if(*system == source::pll1 and pll_input(0) != source::pll1)
   {
     used |= std::uint32_t{1} << std::to_underlying(pll_input(0));
   }
   return used;
 }
 
-void rcc::schedule(std::uint32_t kind)
+template <typename Traits>
+void rcc_model<Traits>::schedule(std::uint32_t kind, std::optional<std::uint64_t> delay_ps)
 {
   auto const generation = ++state_.generation[kind];
   state_.pending |= std::uint32_t{1} << kind;
-  auto const delay = static_cast<std::uint64_t>(options_.ready_delay.count()) * 1000u;
+  auto const delay =
+      delay_ps.value_or(static_cast<std::uint64_t>(options_.ready_delay.count()) * 1000u);
   ctx_.events.schedule_at(vtime{ctx_.clock.time().ps + delay}, kind, generation, ctx_.clock);
 }
 
-void rcc::cancel(std::uint32_t kind)
+template <typename Traits> void rcc_model<Traits>::cancel(std::uint32_t kind)
 {
   ++state_.generation[kind];
   state_.pending &= ~(std::uint32_t{1} << kind);
 }
 
-void rcc::start(source which)
+template <typename Traits> void rcc_model<Traits>::load_fraction(std::size_t pll)
+{
+  auto const& fields   = pll_[pll];
+  auto const  fraction = fields.fracen and fields.frac and get(regs_, *fields.fracen) != 0;
+  state_.fraction[pll] = fraction ? get(regs_, *fields.frac) : 0;
+}
+
+template <typename Traits> void rcc_model<Traits>::start(source which)
 {
   auto const index = std::to_underlying(which);
   if(index >= std::to_underlying(source::pll1))
@@ -814,21 +764,32 @@ void rcc::start(source which)
   schedule(index);
 }
 
-void rcc::stop(source which)
+template <typename Traits> void rcc_model<Traits>::stop(source which)
 {
   auto const index = std::to_underlying(which);
   update(regs_, osc_[index].ready, 0);
   cancel(index);
 }
 
-void rcc::oscillators_written(
+template <typename Traits>
+void rcc_model<Traits>::oscillators_written(
     std::string_view reg,
     std::uint32_t    word,
     std::uint32_t    old,
     std::uint32_t    now)
 {
-  auto const used = in_use();
-  for(auto const& [index, names] : std::views::enumerate(oscillators))
+  auto used = in_use();
+  if constexpr(Traits::pll1_input_held_while_on)
+  {
+    auto const pll1 = std::to_underlying(source::pll1);
+    auto const written =
+        Traits::oscillators[pll1].reg == reg ? osc_[pll1].on.of(now) != 0 : is_on(source::pll1);
+    if((written or (used >> pll1 & 1u) != 0) and pll_input(0) != source::pll1)
+    {
+      used |= std::uint32_t{1} << std::to_underlying(pll_input(0));
+    }
+  }
+  for(auto const& [index, names] : std::views::enumerate(Traits::oscillators))
   {
     if(names.reg != reg)
     {
@@ -838,15 +799,11 @@ void rcc::oscillators_written(
     now             = osc.ready.with(now, osc.ready.of(old));
     if((used >> static_cast<std::uint32_t>(index) & 1u) != 0)
     {
-      if(osc.on.of(now) == 0)
-      {
-        refuse_core_stop(reg, std::format("{} = 0", names.on));
-      }
       now = osc.on.with(now, 1);
     }
   }
   regs_.poke(word, now);
-  for(auto const& [index, names] : std::views::enumerate(oscillators))
+  for(auto const& [index, names] : std::views::enumerate(Traits::oscillators))
   {
     if(names.reg != reg)
     {
@@ -857,6 +814,10 @@ void rcc::oscillators_written(
     if(is and not was)
     {
       start(static_cast<source>(index));
+      if(auto const at = static_cast<std::size_t>(index); at >= std::to_underlying(source::pll1))
+      {
+        load_fraction(at - std::to_underlying(source::pll1));
+      }
     }
     else if(was and not is and not is_on(static_cast<source>(index)))
     {
@@ -866,97 +827,145 @@ void rcc::oscillators_written(
   settle(true);
 }
 
-void rcc::cr_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits> void rcc_model<Traits>::cr_written(std::uint32_t old, std::uint32_t now)
 {
-  now |= old & css_on_.mask();
-  oscillators_written("RCC_CR", css_on_.offset, old, now);
+  now |= old & names_[rcc_role::css_on].mask();
+  if constexpr(Traits::hsi_divider)
+  {
+    now = divider_written(old, now);
+  }
+  oscillators_written("RCC_CR", names_[rcc_role::css_on].offset, old, now);
 }
 
-void rcc::icscr1_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+auto rcc_model<Traits>::divider_written(std::uint32_t old, std::uint32_t now) -> std::uint32_t
 {
-  regs_.poke(msi_select_.offset, now | (old & msi_select_.mask()));
+  auto const divider = names_[rcc_role::hsi_divider];
+  auto const flag    = names_[rcc_role::hsi_divider_flag];
+  if((in_use() >> std::to_underlying(source::pll1) & 1u) != 0
+     and pll_input(0) == Traits::divided_oscillator)
+  {
+    now = divider.with(now, divider.of(old));
+  }
+  if(divider.of(now) != divider.of(old))
+  {
+    now = flag.with(now, flag.of(old));
+    if constexpr(Traits::hsi_divider)
+    {
+      auto const timing = Traits::hsi_divider_timings[state_.hsi_divider][divider.of(now)];
+      auto const old_hz = Traits::undivided_hsi_hz >> state_.hsi_divider;
+      auto const cycles = [old_hz](std::uint64_t count) {
+        return (count * ps_per_second + old_hz - 1) / old_hz;
+      };
+      state_.divider_set_ps   = ctx_.clock.time().ps + cycles(timing.set);
+      state_.divider_clearing = 1;
+      schedule(divider_kind, cycles(timing.clear));
+    }
+  }
+  return now;
+}
+
+template <typename Traits>
+void rcc_model<Traits>::icscr1_written(std::uint32_t old, std::uint32_t now)
+{
+  regs_.poke(
+      names_[rcc_role::msi_select].offset, now | (old & names_[rcc_role::msi_select].mask()));
   settle(true);
 }
 
-void rcc::tree_written(std::uint32_t, std::uint32_t)
+template <typename Traits> void rcc_model<Traits>::tree_written(std::uint32_t, std::uint32_t)
 {
   settle(true);
 }
 
-template <std::size_t Pll> void rcc::pll_config_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+template <std::size_t Pll>
+void rcc_model<Traits>::pll_config_written(std::uint32_t old, std::uint32_t now)
 {
-  auto const& fields    = pll_[Pll];
-  auto const  attempted = now;
+  auto const& fields = pll_[Pll];
   if(locked(Pll))
   {
-    for(auto const& kept : {fields.src, fields.range, fields.m})
+    for(auto const& kept : {std::optional{fields.src}, fields.range, fields.m})
     {
-      now = kept.with(now, kept.of(old));
+      if(kept)
+      {
+        now = kept->with(now, kept->of(old));
+      }
+    }
+    if constexpr(Traits::pll_nodes[Pll].outputs_held_while_on)
+    {
+      for(auto const& kept : fields.output_enable)
+      {
+        if(kept)
+        {
+          now = kept->with(now, kept->of(old));
+        }
+      }
     }
   }
   auto const drives_core = Pll == 0 and (in_use() >> std::to_underlying(source::pll1) & 1u) != 0;
-  if(drives_core)
+  if(auto const& enable = fields.output_enable[system_output]; drives_core and enable)
   {
-    now = fields.output_enable[2].with(now, 1);
-    if(now != attempted)
-    {
-      refuse_core_stop("RCC_PLL1CFGR", "a PLL1 configuration change");
-    }
+    now = enable->with(now, 1);
   }
   regs_.poke(fields.src.offset, now);
+  if(fields.fracen and fields.fracen->of(old) == 0 and fields.fracen->of(now) != 0)
+  {
+    load_fraction(Pll);
+  }
   settle(true);
 }
 
-template <std::size_t Pll> void rcc::pll_dividers_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+template <std::size_t Pll>
+void rcc_model<Traits>::pll_dividers_written(std::uint32_t old, std::uint32_t now)
 {
-  auto const& fields    = pll_[Pll];
-  auto const  attempted = now;
+  auto const& fields = pll_[Pll];
   if(locked(Pll))
   {
-    for(auto const& kept : {fields.n, fields.divider[0], fields.divider[1], fields.divider[2]})
+    now = fields.n.with(now, fields.n.of(old));
+    for(std::size_t output = 0; output < Traits::pll_nodes[Pll].outputs; ++output)
     {
-      now = kept.with(now, kept.of(old));
+      auto const& kept = fields.divider[output];
+      now              = kept.with(now, kept.of(old));
     }
-  }
-  if(Pll == 0 and now != attempted and (in_use() >> std::to_underlying(source::pll1) & 1u) != 0)
-  {
-    refuse_core_stop("RCC_PLL1DIVR", "a PLL1 divider change");
   }
   regs_.poke(fields.n.offset, now);
   settle(true);
 }
 
-void rcc::refuse_core_stop(std::string_view reg, std::string_view what)
+template <typename Traits> void rcc_model<Traits>::refuse_stopped_clock()
 {
   if(std::exchange(core_stop_logged_, true))
   {
     return;
   }
   warn(
-      reg,
+      "RCC_CFGR1",
       std::format(
-          "firmware tried to stop the core clock with {}, refused: the core clock stays at {} Hz",
-          what, ctx_.clock.core_hz()));
+          "the selected system clock source runs at 0 Hz, the core clock stays at {} Hz",
+          ctx_.clock.core_hz()));
 }
 
-auto rcc::locked(std::size_t pll) const -> bool
+template <typename Traits> auto rcc_model<Traits>::locked(std::size_t pll) const -> bool
 {
   auto const which = static_cast<source>(std::to_underlying(source::pll1) + pll);
   return is_on(which) or is_ready(which);
 }
 
-void rcc::bdcr_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+void rcc_model<Traits>::bdcr_written(std::uint32_t old, std::uint32_t now)
 {
-  if(backup_reset_.of(now) != 0)
+  if(names_[rcc_role::backup_reset].of(now) != 0)
   {
-    now = backup_reset_.with(0, 1);
+    now = names_[rcc_role::backup_reset].with(0, 1);
   }
-  else if(rtc_select_.of(old) != 0)
+  else if(names_[rcc_role::rtc_select].of(old) != 0)
   {
-    now = rtc_select_.with(now, rtc_select_.of(old));
+    now = names_[rcc_role::rtc_select].with(now, names_[rcc_role::rtc_select].of(old));
   }
   oscillators_written("RCC_BDCR", bdcr_.offset, old, now);
-  if(backup_reset_.of(old) == 0 and backup_reset_.of(now) != 0)
+  if(names_[rcc_role::backup_reset].of(old) == 0 and names_[rcc_role::backup_reset].of(now) != 0)
   {
     for(auto* const peer : ctx_.peers.all())
     {
@@ -968,37 +977,48 @@ void rcc::bdcr_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-void rcc::csr_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits> void rcc_model<Traits>::csr_written(std::uint32_t old, std::uint32_t now)
 {
-  if(get(regs_, msi_select_) == 0)
+  if constexpr(Traits::msi)
   {
-    now = msis_standby_range_.with(now, msis_standby_range_.of(old));
-    now = msik_standby_range_.with(now, msik_standby_range_.of(old));
+    if(read(rcc_role::msi_select) == 0)
+    {
+      for(auto const role : {rcc_role::msis_standby_range, rcc_role::msik_standby_range})
+      {
+        now = names_[role].with(now, names_[role].of(old));
+      }
+    }
   }
-  if(remove_flags_.of(now) != 0)
+  if(names_[rcc_role::remove_flags].of(now) != 0)
   {
     for(auto const& flag : flags_)
     {
       now = flag.with(now, 0);
     }
   }
-  regs_.poke(csr_.offset, remove_flags_.with(now, 0));
+  regs_.poke(csr_.offset, names_[rcc_role::remove_flags].with(now, 0));
 }
 
-void rcc::on_event(std::uint32_t kind, std::uint64_t payload)
+template <typename Traits>
+void rcc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
 {
-  if(kind > switch_kind or payload != state_.generation[kind] or (state_.pending >> kind & 1u) == 0)
+  if(kind >= event_count<Traits>
+     or payload != state_.generation[kind]
+     or (state_.pending >> kind & 1u) == 0)
   {
     return;
   }
   state_.pending &= ~(std::uint32_t{1} << kind);
-  if(kind == switch_kind)
+  if(kind == divider_kind)
   {
-    auto const target = get(regs_, sw_);
-    if(is_ready(system_source(target)))
+    if(std::exchange(state_.divider_clearing, 0) != 0)
     {
-      update(regs_, sws_, target);
+      update(regs_, names_[rcc_role::hsi_divider_flag], 0);
+      schedule(divider_kind, state_.divider_set_ps - ctx_.clock.time().ps);
+      return;
     }
+    update(regs_, names_[rcc_role::hsi_divider_flag], 1);
+    state_.hsi_divider = read(rcc_role::hsi_divider);
   }
   else if(is_on(static_cast<source>(kind)))
   {
@@ -1011,14 +1031,17 @@ void rcc::on_event(std::uint32_t kind, std::uint64_t payload)
   settle(true);
 }
 
-void rcc::settle(bool notify)
+template <typename Traits> void rcc_model<Traits>::settle(bool notify)
 {
   for(std::size_t pll = 0; pll < pll_.size(); ++pll)
   {
-    auto const which = static_cast<source>(std::to_underlying(source::pll1) + pll);
-    auto const index = std::to_underlying(which);
-    auto const input = pll_input(pll);
-    auto const fed   = input != source::pll1 and is_ready(input);
+    auto const  which = static_cast<source>(std::to_underlying(source::pll1) + pll);
+    auto const  index = std::to_underlying(which);
+    auto const  input = pll_input(pll);
+    auto const& m     = pll_[pll].m;
+    auto const  fed   = input != source::pll1
+                  and is_ready(input)
+                  and (not m or Traits::pll_nodes[pll].m_decode(get(regs_, *m)) != 0);
     if(is_ready(which) and not fed)
     {
       stop(which);
@@ -1028,70 +1051,77 @@ void rcc::settle(bool notify)
       schedule(index);
     }
   }
-  auto const target = get(regs_, sw_);
-  if(target == get(regs_, sws_))
+  auto const target = read(rcc_role::sw) & Traits::sw_mask;
+  if(auto const input = system_source(target);
+     input and is_ready(*input) and target != (read(rcc_role::sws) & Traits::sw_mask))
   {
-    if((state_.pending >> switch_kind & 1u) != 0)
-    {
-      cancel(switch_kind);
-    }
-  }
-  else if(is_ready(system_source(target)) and (state_.pending >> switch_kind & 1u) == 0)
-  {
-    schedule(switch_kind);
+    update(regs_, names_[rcc_role::sws], target);
   }
   publish(notify);
 }
 
-auto rcc::rates() const -> std::array<std::uint64_t, signal_count>
+template <typename Traits>
+auto rcc_model<Traits>::rates() const -> std::array<std::uint64_t, signal_count>
 {
   std::array<std::uint64_t, signal_count> hz{};
-  auto const at     = [&](signal which) -> std::uint64_t& { return hz[std::to_underlying(which)]; };
-  auto const ready  = [&](source which) { return is_ready(which); };
-  auto const ranged = get(regs_, msi_select_) != 0;
-  at(msis) =
-      ready(source::msis) ? msi_hz[get(regs_, ranged ? msis_range_ : msis_standby_range_)] : 0;
-  at(msik) =
-      ready(source::msik) ? msi_hz[get(regs_, ranged ? msik_range_ : msik_standby_range_)] : 0;
-  at(hsi16)      = ready(source::hsi16) ? hsi16_hz : 0;
-  at(hsi48)      = ready(source::hsi48) ? hsi48_hz : 0;
-  at(hsi48_half) = at(hsi48) / 2;
-  at(hse)        = ready(source::hse) ? options_.hse_hz : 0;
-  at(lse)        = ready(source::lse) ? options_.lse_hz : 0;
-  at(lsi)        = ready(source::lsi) ? (get(regs_, lsi_prediv_) != 0 ? lsi_hz / 128 : lsi_hz) : 0;
-  constexpr std::array<signal, 4> pll_sources{none, msis, hsi16, hse};
+  auto const at    = [&](signal which) -> std::uint64_t& { return hz[std::to_underlying(which)]; };
+  auto const ready = [&](source which) { return is_ready(which); };
+  rate_inputs const inputs{
+      .regs = regs_, .names = names_, .options = options_, .hsi_divider = state_.hsi_divider};
+  for(auto const& [index, names] : std::views::enumerate(Traits::oscillators))
+  {
+    if(names.rate != nullptr)
+    {
+      at(names.out) = ready(static_cast<source>(index)) ? names.rate(inputs) : 0;
+    }
+  }
+  for(auto const& node : Traits::divided)
+  {
+    at(node.out) = at(node.in) / node.divider;
+  }
   for(std::size_t pll = 0; pll < pll_.size(); ++pll)
   {
-    auto const& fields = pll_[pll];
-    auto const  which  = static_cast<source>(std::to_underlying(source::pll1) + pll);
-    auto const  input  = at(pll_sources[get(regs_, fields.src)]);
-    auto const  frac   = get(regs_, fields.fracen) != 0 ? get(regs_, fields.frac) : 0u;
-    auto const  vco    = ready(which) ? input
-                                            * ((get(regs_, fields.n) + 1u) * frac_one + frac)
-                                            / ((get(regs_, fields.m) + 1u) * frac_one)
-                                      : 0;
-    for(std::size_t output = 0; output < 3; ++output)
+    auto const& fields  = pll_[pll];
+    auto const& node    = Traits::pll_nodes[pll];
+    auto const  which   = static_cast<source>(std::to_underlying(source::pll1) + pll);
+    auto const  input   = at(Traits::pll_sources[get(regs_, fields.src)]);
+    auto const  frac    = state_.fraction[pll];
+    auto const  divisor = fields.m ? node.m_decode(get(regs_, *fields.m)) : 1;
+    auto const  vco =
+        ready(which) and divisor != 0
+            ? input * (node.n_decode(get(regs_, fields.n)) * frac_one + frac) / (divisor * frac_one)
+            : 0;
+    for(std::size_t output = 0; output < node.outputs; ++output)
     {
-      hz[std::to_underlying(pll1_p) + 3 * pll + output] =
-          get(regs_, fields.output_enable[output]) != 0
-              ? vco / (get(regs_, fields.divider[output]) + 1u)
+      auto const& enable = fields.output_enable[output];
+      at(node.out[output]) =
+          not enable or get(regs_, *enable) != 0
+              ? vco / node.output_decode[output](get(regs_, fields.divider[output]))
               : 0;
     }
   }
-  constexpr std::array<signal, 4> system_sources{msis, hsi16, hse, pll1_r};
-  at(sysclk) = at(system_sources[get(regs_, sws_)]);
-  at(hclk)   = at(sysclk) / hpre_divider(get(regs_, hpre_));
-  at(pclk1)  = at(hclk) / ppre_divider(get(regs_, ppre_[0]));
-  at(pclk2)  = at(hclk) / ppre_divider(get(regs_, ppre_[1]));
-  at(pclk3)  = at(hclk) / ppre_divider(get(regs_, ppre_[2]));
-  constexpr std::array<signal, 4> iclk_sources{hsi48, pll2_q, pll1_q, msik};
-  at(iclk) = at(iclk_sources[get(regs_, iclk_select_)]);
-  std::array<std::uint64_t, 4> const rtc_hz{0, at(lse), at(lsi), at(hse) / 32};
-  at(rtc) = get(regs_, rtc_enable_) != 0 ? rtc_hz[get(regs_, rtc_select_)] : 0;
+  at(signal::sysclk) = at(Traits::system_sources[read(rcc_role::sws) & Traits::sw_mask]);
+  at(signal::hclk)   = at(signal::sysclk) / hpre_divider(read(rcc_role::hpre));
+  for(auto const& bus : Traits::buses)
+  {
+    if(auto const prescaler = names_.find(bus.prescaler))
+    {
+      at(bus.out) = at(signal::hclk) / ppre_divider(get(regs_, *prescaler));
+    }
+  }
+  for(auto const& [node, select] : std::views::zip(Traits::signal_muxes, selects_))
+  {
+    auto const code = get(regs_, select);
+    at(node.out)    = code < node.inputs.size() ? at(node.inputs[code]) : 0;
+  }
+  auto const& rtc_from = Traits::rtc_sources[read(rcc_role::rtc_select)];
+  auto const  divider  = rtc_from.divider(inputs);
+  at(signal::rtc) =
+      read(rcc_role::rtc_enable) != 0 and divider != 0 ? at(rtc_from.from) / divider : 0;
   return hz;
 }
 
-void rcc::publish(bool notify)
+template <typename Traits> void rcc_model<Traits>::publish(bool notify)
 {
   auto const hz      = rates();
   auto&      clock   = ctx_.clock;
@@ -1112,22 +1142,24 @@ void rcc::publish(bool notify)
   for(auto const& [entry, published] : std::views::zip(kernels_, kernel_enables_))
   {
     auto const code    = get(regs_, entry.select);
-    auto const from    = code < entry.inputs->size() ? (*entry.inputs)[code] : none;
+    auto const from    = code < entry.inputs->size() ? (*entry.inputs)[code] : signal::none;
     auto const enabled = get(regs_, entry.enable) != 0 ? std::uint8_t{1} : std::uint8_t{0};
     set(entry.domain, enabled != 0 ? hz[std::to_underlying(from)] : 0);
     changed   = changed or (known and published != enabled);
     published = enabled;
   }
+  rate_inputs const inputs{
+      .regs = regs_, .names = names_, .options = options_, .hsi_divider = state_.hsi_divider};
   for(auto const& entry : timers_)
   {
-    auto const bus = hz[std::to_underlying(entry.bus)];
-    auto const x2  = ppre_divider(get(regs_, entry.prescaler)) == 1 ? 1u : 2u;
-    set(entry.domain, get(regs_, entry.enable) != 0 ? bus * x2 : 0);
+    auto const bus      = hz[std::to_underlying(entry.bus)];
+    auto const multiple = Traits::timer_multiplier(inputs, entry.prescaler);
+    set(entry.domain, get(regs_, entry.enable) != 0 ? bus * multiple : 0);
   }
-  auto const core = hz[std::to_underlying(hclk)];
+  auto const core = hz[std::to_underlying(signal::hclk)];
   if(not options_.fixed_core_clock and core == 0)
   {
-    refuse_core_stop("RCC_CFGR1", "a stopped system clock");
+    refuse_stopped_clock();
   }
   else if(not options_.fixed_core_clock and core != clock.core_hz())
   {
@@ -1145,7 +1177,7 @@ void rcc::publish(bool notify)
   }
 }
 
-void rcc::reset(register_file& regs, reset_kind kind)
+template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, reset_kind kind)
 {
   auto const kept_bdcr  = regs.peek(bdcr_.offset);
   auto       kept_flags = std::uint32_t{};
@@ -1153,11 +1185,11 @@ void rcc::reset(register_file& regs, reset_kind kind)
   {
     kept_flags |= regs.peek(csr_.offset) & flag.mask();
   }
-  for(auto const& name : claims())
+  for(auto const& name : this->claims())
   {
     regs.poke(reg(name).offset, describe(name).reset);
   }
-  auto csr = describe("RCC_CSR").reset;
+  auto csr = describe(Traits::reset_flags_register).reset;
   if(kind != reset_kind::power_on)
   {
     regs.poke(bdcr_.offset, kept_bdcr);
@@ -1167,11 +1199,11 @@ void rcc::reset(register_file& regs, reset_kind kind)
     }
     csr |= kept_flags;
   }
-  for(auto const name : flags_of(kind))
+  for(auto const name : Traits::reset_flags_of(kind))
   {
     if(not name.empty())
     {
-      csr = field("RCC_CSR", name).with(csr, 1);
+      csr = field(Traits::reset_flags_register, name).with(csr, 1);
     }
   }
   regs.poke(csr_.offset, csr);
@@ -1181,7 +1213,12 @@ void rcc::reset(register_file& regs, reset_kind kind)
   }
   state_.pending    = 0;
   state_.lsi_forced = 0;
-  state_.hsi16_held = 0;
+  state_.fraction   = {};
+  if constexpr(Traits::hsi_divider)
+  {
+    state_.divider_clearing = 0;
+    state_.hsi_divider      = read(rcc_role::hsi_divider);
+  }
   if(not is_on(source::lsi))
   {
     update(regs_, osc_[std::to_underlying(source::lsi)].ready, 0);
@@ -1189,54 +1226,64 @@ void rcc::reset(register_file& regs, reset_kind kind)
   publish(false);
 }
 
-void rcc::cicr_written(std::uint32_t, std::uint32_t now)
+template <typename Traits> void rcc_model<Traits>::cicr_written(std::uint32_t, std::uint32_t now)
 {
   apply_crosses(flag_clears_, now);
   regs_.poke(reg("RCC_CICR").offset, 0);
 }
 
-void rcc::add_security_rules()
+template <typename Traits> void rcc_model<Traits>::add_security_rules()
 {
   flag_clears_          = crosses_from("RCC_CICR");
   privilege_            = reg("RCC_PRIVCFGR");
   secure_privileged_    = field("RCC_PRIVCFGR", "SPRIV");
   nonsecure_privileged_ = field("RCC_PRIVCFGR", "NSPRIV");
-  for(auto const& group : rcc_secured)
+  for(auto const& group : Traits::secured)
   {
-    auto const& described = describe(group.reg);
     for(auto const name : std::views::split(group.fields, ' '))
     {
-      auto const wanted = std::string_view{name};
-      if(std::ranges::contains(described.fields, wanted, &field_desc::name))
-      {
-        secured_.emplace_back(field("RCC_SECCFGR", group.bit), field(group.reg, wanted));
-      }
+      secured_.emplace_back(
+          field("RCC_SECCFGR", group.bit), field(group.reg, std::string_view{name}));
     }
   }
-  for(auto const name : rcc_unit_registers)
+  for(auto const& group : Traits::backup_secured)
+  {
+    for(auto const name : std::views::split(group.fields, ' '))
+    {
+      auto const bits = field(group.reg, std::string_view{name});
+      backup_secured_.emplace_back(bits.offset, bits.mask());
+    }
+  }
+  for(auto const name : Traits::unit_registers)
   {
     for(auto const& bits : describe(name).fields)
     {
       auto const suffix = std::ranges::find_if(
-          rcc_unit_suffixes, [&](std::string_view s) { return bits.name.ends_with(s); });
-      if(suffix == rcc_unit_suffixes.end())
+          Traits::unit_suffixes, [&](std::string_view s) { return bits.name.ends_with(s); });
+      if(suffix == Traits::unit_suffixes.end())
       {
         continue;
       }
-      auto stem = std::string_view{bits.name}.substr(0, bits.name.size() - suffix->size());
-      if(auto const alias = std::ranges::find(rcc_unit_aliases, stem, &unit_alias::first);
-         alias != rcc_unit_aliases.end())
+      auto const stem = std::string_view{bits.name}.substr(0, bits.name.size() - suffix->size());
+      auto owners     = Traits::unit_aliases
+                      | std::views::filter([stem](unit_alias const& a) { return a.first == stem; })
+                      | std::views::values
+                      | std::ranges::to<std::vector>();
+      if(owners.empty())
       {
-        stem = alias->second;
+        owners.push_back(stem);
       }
-      if(auto const unit = unit_named(ctx_.part, stem))
+      for(auto const owner : owners)
       {
-        units_.push_back(
-            {.offset = reg(name).offset, .bits = field(name, bits.name).mask(), .unit = *unit});
+        if(auto const unit = unit_named(ctx_.part, owner))
+        {
+          units_.push_back(
+              {.offset = reg(name).offset, .bits = field(name, bits.name).mask(), .unit = *unit});
+        }
       }
     }
   }
-  for(auto const& name : claims())
+  for(auto const& name : this->claims())
   {
     std::uint32_t mask = 0;
     for(auto const& bits : describe(name).fields)
@@ -1247,7 +1294,7 @@ void rcc::add_security_rules()
   }
 }
 
-void rcc::resolve_units()
+template <typename Traits> void rcc_model<Traits>::resolve_units()
 {
   if(units_resolved_ or ctx_.peers.all().empty())
   {
@@ -1272,7 +1319,8 @@ void rcc::resolve_units()
       dynamic_cast<trustzone_aware const*>(ctx_.peers.find("TAMP"))};
 }
 
-auto rcc::unit_is_secure(unit_bits const& rule) const -> bool
+template <typename Traits>
+auto rcc_model<Traits>::unit_is_secure(unit_bits const& rule) const -> bool
 {
   if(firewall_ != nullptr)
   {
@@ -1284,17 +1332,18 @@ auto rcc::unit_is_secure(unit_bits const& rule) const -> bool
   return rule.aware != nullptr and rule.aware->secure_function();
 }
 
-auto rcc::secure_word() const -> std::uint32_t
+template <typename Traits> auto rcc_model<Traits>::secure_word() const -> std::uint32_t
 {
   return ctx_.trustzone and secure_ ? regs_.peek(secure_->offset) : 0;
 }
 
-auto rcc::secure_function() const -> bool
+template <typename Traits> auto rcc_model<Traits>::secure_function() const -> bool
 {
   return secure_word() != 0;
 }
 
-auto rcc::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
+template <typename Traits>
+auto rcc_model<Traits>::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
 {
   auto const all = ~std::uint32_t{};
   if(secure_ and word == secure_->offset)
@@ -1344,11 +1393,18 @@ auto rcc::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_gu
       secured |= rule.bits;
     }
   }
-  if(word == bdcr_.offset and std::ranges::any_of(backup_units_, [](trustzone_aware const* unit) {
-       return unit != nullptr and unit->secure_function();
-     }))
+  if(std::ranges::contains(backup_secured_, word, &std::pair<std::uint32_t, std::uint32_t>::first)
+     and std::ranges::any_of(backup_units_, [](trustzone_aware const* unit) {
+           return unit != nullptr and unit->secure_function();
+         }))
   {
-    secured |= backup_reset_.mask();
+    for(auto const& [offset, bits] : backup_secured_)
+    {
+      if(offset == word)
+      {
+        secured |= bits;
+      }
+    }
   }
   auto const known =
       std::ranges::find(words_, word, &std::pair<std::uint32_t, std::uint32_t>::first);
@@ -1357,7 +1413,7 @@ auto rcc::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_gu
        | guard_of(whole & ~secured, false, nonsecure_privileged_.of(privilege) != 0, ctx);
 }
 
-void rcc::force_lsi()
+template <typename Traits> void rcc_model<Traits>::force_lsi()
 {
   auto const lsi    = source::lsi;
   auto const was    = is_on(lsi);
@@ -1368,9 +1424,9 @@ void rcc::force_lsi()
   }
 }
 
-void rcc::load(std::span<std::byte const> in)
+template <typename Traits> void rcc_model<Traits>::load(std::span<std::byte const> in)
 {
-  dispatch_model::load(in);
+  base::load(in);
   kernel_enables_.clear();
   for(auto const& entry : kernels_)
   {
@@ -1378,13 +1434,16 @@ void rcc::load(std::span<std::byte const> in)
   }
 }
 
-auto rcc::bus_enabled(core::clock_domain kernel) const -> bool
+template <typename Traits>
+auto rcc_model<Traits>::bus_enabled(core::clock_domain kernel) const -> bool
 {
-  auto const found = std::ranges::find(kernels_, kernel, &kernel::domain);
+  auto const found = std::ranges::find(kernels_, kernel, &stm32::kernel<signal>::domain);
   return found == kernels_.end() or get(regs_, found->enable) != 0;
 }
 
-template <std::size_t Reg> void rcc::resets_written(std::uint32_t old, std::uint32_t now)
+template <typename Traits>
+template <std::size_t Reg>
+void rcc_model<Traits>::resets_written(std::uint32_t old, std::uint32_t now)
 {
   std::exception_ptr first;
   for(auto const& entry : resets_)
@@ -1411,28 +1470,23 @@ template <std::size_t Reg> void rcc::resets_written(std::uint32_t old, std::uint
   }
 }
 
-void rcc::hold_hsi16(bool held)
+template <typename Traits> void rcc_model<Traits>::hold_hsi16(bool held)
 {
-  auto const hsi    = source::hsi16;
-  auto const was    = is_on(hsi);
-  state_.hsi16_held = held ? 1 : 0;
-  auto const is     = is_on(hsi);
-  if(is and not was and not is_ready(hsi))
-  {
-    start(hsi);
-  }
-  else if(was and not is and (in_use() >> std::to_underlying(hsi) & 1u) == 0)
-  {
-    stop(hsi);
-    settle(true);
-  }
+  static_cast<void>(held);
 }
 }
 
 auto rcc_factory(rcc_options options) -> model_factory
 {
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<rcc>(ctx, desc, options);
+    return std::make_shared<rcc_model<u5_rcc>>(ctx, desc, options);
+  };
+}
+
+auto rcc_h5_factory(rcc_options options) -> model_factory
+{
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<rcc_model<h5_rcc>>(ctx, desc, options);
   };
 }
 }

@@ -1,0 +1,101 @@
+format = 1
+source = "Port I of the STM32U575 and STM32U585 has 8 pins and no GPIOx_AFRH pins, RM0456 Rev 7 13.4.1, 13.4.13. The STM32U59x, 5Ax, 5Fx and 5Gx have 16"
+
+[match]
+parts = ["STM32U575*", "STM32U585*"]
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIO_MODER"]
+fields = ["MODE8", "MODE9", "MODE10", "MODE11", "MODE12", "MODE13", "MODE14", "MODE15"]
+drop = true
+source = "Silicon read-back on a NUCLEO-U575ZI-Q (STM32U575, DEV_ID 0x482 rev W) over SWD, 2026-10-27, GPIOI clock on: GPIOI_MODER 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_OSPEEDR 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_AFRH 0xFFFFFFFF and 0x0000D5A1 read back 0 and the GPIOH_AFRH control reads 0xFFFFFFFF, so port I has pins 0 to 7 and no alternate function high register. RM0456 Rev 7 13.4.1 gives the port I MODER reset 0x0000FFFF and 13.4.13 the SECCFGR reset 0x000000FF on STM32U575/585, 0xFFFFFFFF and 0x0000FFFF on STM32U59x/5Ax/5Fx/5Gx. The other per-pin registers follow from the pin count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIO_OTYPER"]
+fields = ["OT8", "OT9", "OT10", "OT11", "OT12", "OT13", "OT14", "OT15"]
+drop = true
+source = "Silicon read-back on a NUCLEO-U575ZI-Q (STM32U575, DEV_ID 0x482 rev W) over SWD, 2026-10-27, GPIOI clock on: GPIOI_MODER 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_OSPEEDR 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_AFRH 0xFFFFFFFF and 0x0000D5A1 read back 0 and the GPIOH_AFRH control reads 0xFFFFFFFF, so port I has pins 0 to 7 and no alternate function high register. RM0456 Rev 7 13.4.1 gives the port I MODER reset 0x0000FFFF and 13.4.13 the SECCFGR reset 0x000000FF on STM32U575/585, 0xFFFFFFFF and 0x0000FFFF on STM32U59x/5Ax/5Fx/5Gx. The other per-pin registers follow from the pin count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIO_OSPEEDR"]
+fields = ["OSPEED8", "OSPEED9", "OSPEED10", "OSPEED11", "OSPEED12", "OSPEED13", "OSPEED14", "OSPEED15"]
+drop = true
+source = "Silicon read-back on a NUCLEO-U575ZI-Q (STM32U575, DEV_ID 0x482 rev W) over SWD, 2026-10-27, GPIOI clock on: GPIOI_MODER 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_OSPEEDR 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_AFRH 0xFFFFFFFF and 0x0000D5A1 read back 0 and the GPIOH_AFRH control reads 0xFFFFFFFF, so port I has pins 0 to 7 and no alternate function high register. RM0456 Rev 7 13.4.1 gives the port I MODER reset 0x0000FFFF and 13.4.13 the SECCFGR reset 0x000000FF on STM32U575/585, 0xFFFFFFFF and 0x0000FFFF on STM32U59x/5Ax/5Fx/5Gx. The other per-pin registers follow from the pin count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIO_PUPDR"]
+fields = ["PUPD8", "PUPD9", "PUPD10", "PUPD11", "PUPD12", "PUPD13", "PUPD14", "PUPD15"]
+drop = true
+source = "Silicon read-back on a NUCLEO-U575ZI-Q (STM32U575, DEV_ID 0x482 rev W) over SWD, 2026-10-27, GPIOI clock on: GPIOI_MODER 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_OSPEEDR 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_AFRH 0xFFFFFFFF and 0x0000D5A1 read back 0 and the GPIOH_AFRH control reads 0xFFFFFFFF, so port I has pins 0 to 7 and no alternate function high register. RM0456 Rev 7 13.4.1 gives the port I MODER reset 0x0000FFFF and 13.4.13 the SECCFGR reset 0x000000FF on STM32U575/585, 0xFFFFFFFF and 0x0000FFFF on STM32U59x/5Ax/5Fx/5Gx. The other per-pin registers follow from the pin count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIO_IDR"]
+fields = ["ID8", "ID9", "ID10", "ID11", "ID12", "ID13", "ID14", "ID15"]
+drop = true
+source = "Silicon read-back on a NUCLEO-U575ZI-Q (STM32U575, DEV_ID 0x482 rev W) over SWD, 2026-10-27, GPIOI clock on: GPIOI_MODER 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_OSPEEDR 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_AFRH 0xFFFFFFFF and 0x0000D5A1 read back 0 and the GPIOH_AFRH control reads 0xFFFFFFFF, so port I has pins 0 to 7 and no alternate function high register. RM0456 Rev 7 13.4.1 gives the port I MODER reset 0x0000FFFF and 13.4.13 the SECCFGR reset 0x000000FF on STM32U575/585, 0xFFFFFFFF and 0x0000FFFF on STM32U59x/5Ax/5Fx/5Gx. The other per-pin registers follow from the pin count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIO_ODR"]
+fields = ["OD8", "OD9", "OD10", "OD11", "OD12", "OD13", "OD14", "OD15"]
+drop = true
+source = "Silicon read-back on a NUCLEO-U575ZI-Q (STM32U575, DEV_ID 0x482 rev W) over SWD, 2026-10-27, GPIOI clock on: GPIOI_MODER 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_OSPEEDR 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_AFRH 0xFFFFFFFF and 0x0000D5A1 read back 0 and the GPIOH_AFRH control reads 0xFFFFFFFF, so port I has pins 0 to 7 and no alternate function high register. RM0456 Rev 7 13.4.1 gives the port I MODER reset 0x0000FFFF and 13.4.13 the SECCFGR reset 0x000000FF on STM32U575/585, 0xFFFFFFFF and 0x0000FFFF on STM32U59x/5Ax/5Fx/5Gx. The other per-pin registers follow from the pin count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIO_LCKR"]
+fields = ["LCK8", "LCK9", "LCK10", "LCK11", "LCK12", "LCK13", "LCK14", "LCK15"]
+drop = true
+source = "Silicon read-back on a NUCLEO-U575ZI-Q (STM32U575, DEV_ID 0x482 rev W) over SWD, 2026-10-27, GPIOI clock on: GPIOI_MODER 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_OSPEEDR 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_AFRH 0xFFFFFFFF and 0x0000D5A1 read back 0 and the GPIOH_AFRH control reads 0xFFFFFFFF, so port I has pins 0 to 7 and no alternate function high register. RM0456 Rev 7 13.4.1 gives the port I MODER reset 0x0000FFFF and 13.4.13 the SECCFGR reset 0x000000FF on STM32U575/585, 0xFFFFFFFF and 0x0000FFFF on STM32U59x/5Ax/5Fx/5Gx. The other per-pin registers follow from the pin count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIO_BRR"]
+fields = ["BR8", "BR9", "BR10", "BR11", "BR12", "BR13", "BR14", "BR15"]
+drop = true
+source = "Silicon read-back on a NUCLEO-U575ZI-Q (STM32U575, DEV_ID 0x482 rev W) over SWD, 2026-10-27, GPIOI clock on: GPIOI_MODER 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_OSPEEDR 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_AFRH 0xFFFFFFFF and 0x0000D5A1 read back 0 and the GPIOH_AFRH control reads 0xFFFFFFFF, so port I has pins 0 to 7 and no alternate function high register. RM0456 Rev 7 13.4.1 gives the port I MODER reset 0x0000FFFF and 13.4.13 the SECCFGR reset 0x000000FF on STM32U575/585, 0xFFFFFFFF and 0x0000FFFF on STM32U59x/5Ax/5Fx/5Gx. The other per-pin registers follow from the pin count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIO_HSLVR"]
+fields = ["HSLV8", "HSLV9", "HSLV10", "HSLV11", "HSLV12", "HSLV13", "HSLV14", "HSLV15"]
+drop = true
+source = "Silicon read-back on a NUCLEO-U575ZI-Q (STM32U575, DEV_ID 0x482 rev W) over SWD, 2026-10-27, GPIOI clock on: GPIOI_MODER 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_OSPEEDR 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_AFRH 0xFFFFFFFF and 0x0000D5A1 read back 0 and the GPIOH_AFRH control reads 0xFFFFFFFF, so port I has pins 0 to 7 and no alternate function high register. RM0456 Rev 7 13.4.1 gives the port I MODER reset 0x0000FFFF and 13.4.13 the SECCFGR reset 0x000000FF on STM32U575/585, 0xFFFFFFFF and 0x0000FFFF on STM32U59x/5Ax/5Fx/5Gx. The other per-pin registers follow from the pin count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIO_SECCFGR"]
+fields = ["SEC8", "SEC9", "SEC10", "SEC11", "SEC12", "SEC13", "SEC14", "SEC15"]
+drop = true
+source = "Silicon read-back on a NUCLEO-U575ZI-Q (STM32U575, DEV_ID 0x482 rev W) over SWD, 2026-10-27, GPIOI clock on: GPIOI_MODER 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_OSPEEDR 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_AFRH 0xFFFFFFFF and 0x0000D5A1 read back 0 and the GPIOH_AFRH control reads 0xFFFFFFFF, so port I has pins 0 to 7 and no alternate function high register. RM0456 Rev 7 13.4.1 gives the port I MODER reset 0x0000FFFF and 13.4.13 the SECCFGR reset 0x000000FF on STM32U575/585, 0xFFFFFFFF and 0x0000FFFF on STM32U59x/5Ax/5Fx/5Gx. The other per-pin registers follow from the pin count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIO_BSRR"]
+fields = ["BS8", "BS9", "BS10", "BS11", "BS12", "BS13", "BS14", "BS15", "BR8", "BR9", "BR10", "BR11", "BR12", "BR13", "BR14", "BR15"]
+drop = true
+source = "Silicon read-back on a NUCLEO-U575ZI-Q (STM32U575, DEV_ID 0x482 rev W) over SWD, 2026-10-27, GPIOI clock on: GPIOI_MODER 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_OSPEEDR 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_AFRH 0xFFFFFFFF and 0x0000D5A1 read back 0 and the GPIOH_AFRH control reads 0xFFFFFFFF, so port I has pins 0 to 7 and no alternate function high register. RM0456 Rev 7 13.4.1 gives the port I MODER reset 0x0000FFFF and 13.4.13 the SECCFGR reset 0x000000FF on STM32U575/585, 0xFFFFFFFF and 0x0000FFFF on STM32U59x/5Ax/5Fx/5Gx. The other per-pin registers follow from the pin count"
+
+[[fields]]
+instances = ["GPIOI"]
+registers = ["GPIO_AFRH"]
+fields = ["AFSEL8", "AFSEL9", "AFSEL10", "AFSEL11", "AFSEL12", "AFSEL13", "AFSEL14", "AFSEL15"]
+drop = true
+source = "Silicon read-back on a NUCLEO-U575ZI-Q (STM32U575, DEV_ID 0x482 rev W) over SWD, 2026-10-27, GPIOI clock on: GPIOI_MODER 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_OSPEEDR 0xFFFFFFFF reads back 0x0000FFFF, GPIOI_AFRH 0xFFFFFFFF and 0x0000D5A1 read back 0 and the GPIOH_AFRH control reads 0xFFFFFFFF, so port I has pins 0 to 7 and no alternate function high register. RM0456 Rev 7 13.4.1 gives the port I MODER reset 0x0000FFFF and 13.4.13 the SECCFGR reset 0x000000FF on STM32U575/585, 0xFFFFFFFF and 0x0000FFFF on STM32U59x/5Ax/5Fx/5Gx. The other per-pin registers follow from the pin count"
+
+[[resets]]
+peripheral = "GPIOI"
+register = "GPIO_SECCFGR"
+reset = 0x000000FF
+source = "RM0456 Rev 7, 13.4.13 GPIOx_SECCFGR reset value 0x0000 00FF for port I on STM32U575/585, which has 8 pins. ST's STM32U575 SVD gives 0x0000FFFF"
+
+[[resets]]
+peripheral = "GPIOI"
+register = "GPIO_MODER"
+reset = 0x0000FFFF
+source = "RM0456 Rev 7, 13.4.1 GPIOx_MODER reset value 0x0000 FFFF for port I on STM32U575/585, which has 8 pins, and silicon read-back on a NUCLEO-U575ZI-Q (STM32U575) where 0xFFFFFFFF written reads back 0x0000FFFF. ST's STM32U575 SVD gives 0xFFFFFFFF"

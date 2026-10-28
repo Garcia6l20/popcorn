@@ -1,4 +1,5 @@
 #include "dma.hpp"
+#include "factories.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/log.hpp>
@@ -377,7 +378,11 @@ struct rig
   stm32::board                   board{};
   std::unique_ptr<stm32_fixture> f;
 
-  explicit rig(std::string_view entry, bool probe = false)
+  explicit rig(
+      std::string_view                  entry,
+      bool                              probe   = false,
+      popcorn::part_description         desc    = u575(),
+      std::optional<stm32::i2c_variant> variant = std::nullopt)
   {
     memory->resets    = resets;
     table->resets     = resets;
@@ -387,7 +392,11 @@ struct rig
     picky->cuts       = cuts;
     board.i2c["I2C1"] = {memory, table, picky, faulty};
     auto options      = popcorn::testing::stm32_options();
-    options.models    = stm32::factories(board, u575());
+    options.models    = stm32::factories(board, desc);
+    if(variant)
+    {
+      options.models.insert_or_assign("I2C1", stm32::i2c_factory(board, *variant));
+    }
     if(probe)
     {
       options.models.insert_or_assign(
@@ -397,7 +406,7 @@ struct rig
             return std::make_shared<request_probe>();
           });
     }
-    f = std::make_unique<stm32_fixture>(u575(), "i2c_ll", std::move(options));
+    f = std::make_unique<stm32_fixture>(std::move(desc), "i2c_ll", std::move(options));
     REQUIRE(
         f->run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("i2c_ll", "main")})
             .reason
@@ -1252,6 +1261,34 @@ TEST_CASE("the I2C1 DMA requests follow TXIS, RXNE, TC and TCR with their enable
   b.set("CR1", "PE", 0);
   CHECK_FALSE(r.level(evc_request));
   CHECK_FALSE(r.level(rx_request));
+}
+
+TEST_CASE("without AUTOCR, TC and TCR leave the I2C1 event DMA request low")
+{
+  constexpr std::uint32_t evc_request = 14;
+  auto                    desc        = u575();
+  auto const              i2c1        = std::ranges::find(
+      desc.peripherals, std::string_view{"I2C1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(i2c1 != desc.peripherals.end());
+  REQUIRE(
+      std::erase_if(
+          i2c1->registers, [](popcorn::register_desc const& reg) { return reg.name == "AUTOCR"; })
+      == 1);
+  rig r{"idle", true, std::move(desc), stm32::h5_i2c};
+  bus b{*r.f};
+  b.controller();
+  b.command(0x38, 2, false, false);
+  b.run_until(b.now() + address_ps + period_ps / 2);
+  REQUIRE(b.get("ISR", "TXIS") == 1);
+  b.send(0x40);
+  b.send(0x02);
+  b.run_until(b.now() + 2 * byte_ps + period_ps / 2);
+  REQUIRE(b.get("ISR", "TC") == 1);
+  CHECK_FALSE(r.level(evc_request));
+  b.command(0x38, 1, true, false, true);
+  b.run_until(b.now() + address_ps + byte_ps + period_ps / 2);
+  REQUIRE(b.get("ISR", "TCR") == 1);
+  CHECK_FALSE(r.level(evc_request));
 }
 
 TEST_CASE("clearing PE drops the TX request, reading RXDR drops the RX request")

@@ -10,6 +10,10 @@ keep running as the section says. Under `strict` each such warning raises `Model
 The MDF and ADF model raises `UnmodelledConfig`. Read the log records of a run to see which
 settings a firmware reached.
 
+On the STM32H5 a Machine runs the STM32H562, H563 and H573. The STM32H503, H523 and H533
+descriptions build from their SVD, and attaching a Machine to them raises `ConfigError`. The
+STM32H543 and H553 descriptions need ST's DIE47C rzone file to build.
+
 ## Peripherals without a model
 
 The [part pages](generated/parts.md) list the instances with no model.
@@ -65,9 +69,45 @@ Not modelled, logged once each:
 - The MDF data path, `ADC_CFGR1.DMNGT` 10.
 - DMA requests gated by the AWD1 window, `AWDFILT1` with `DMNGT`.
 - Left shift, gain compensation and offset of the result.
+- Bulb sampling, `ADC_CFGR2.BULB`.
+- The sampling time control trigger mode, `ADC_CFGR2.SMPTRIG` with `SWTRIG`.
+- Triggered regular oversampling, `ADC_CFGR2.TROVS`: all samples of a result convert back to
+  back from the first trigger.
+- Differential conversions, the `ADC_DIFSEL` bit of a converted channel: the channel converts
+  single-ended.
 - Reserved trigger selections in `EXTSEL`.
 - A reserved prescaler in `ADC12_CCR.PRESC` divides by 256.
 - ADC4 has no model.
+
+On the STM32H5, RM0481 section 28:
+
+- The dual ADC modes, `ADC_CCR.DUAL` other than 0, are logged once. ADC1 and ADC2 convert
+  independently. `ADC_CDR` is storage. `ADC_CSR` reads the `ADC_ISR` bits 10:0 of ADC1 at its
+  bits 10:0 and of ADC2 at its bits 26:16.
+- An enabled offset, `ADC_OFRy.OFFSET_EN` on the converted channel, is logged once and leaves
+  the result unchanged.
+- ADC2 channels 16 and 17, VBAT / 4 and VDDCORE, read 0.
+- Channel 0 of ADC1 or ADC2 converted while ADC1 `ADC_OR.OP0` is clear is logged once, a
+  model_error under strict_peripherals, and converts as 0. An STM32H573 reads an internal level
+  there, not PA0.
+- ADC2 `ADC_OR.OP0`, the VDDCORE channel enable, is storage.
+- In the synchronous clock modes the ADC clock is HCLK divided by CKMODE, whatever ADC12EN.
+  CKMODE 01 with HCLK not SYSCLK is logged once at the ADEN edge, a model_error under
+  strict_peripherals, and converts at HCLK.
+- Out of deep power-down, ADRDY sets 35 HCLK cycles after the ADEN edge with ADVREGEN set and 45
+  with it clear, as measured on an STM32H573 with the ADC clock at HCLK. The cycle count is kept
+  in HCLK cycles at every ADC clock. The tADCVREG_STUP wait of DS14121 Table 96 is the
+  firmware's.
+- Under OVRMOD 0 a result that finds the three-result FIFO full sets OVR and leaves the head
+  only. While OVR stays set, a result lands when the FIFO is empty and is discarded otherwise.
+  Measured on an STM32H573, the discard of a second result while the FIFO holds one is the
+  reading consistent with that run.
+- The end of a one-shot DMA transfer, DMACFG 0, clears ADSTART and stops the conversions, as
+  measured on an STM32H573 with CONT 1.
+- At CKMODE 00 a trigger waits for the next ADC clock edge, and tLATR is 4.5 ADC clock cycles
+  from that edge at every prescaler, as measured on an STM32H573 at /1, /2, /128 and /256.
+  DS14121 Table 96 gives 2 cycles. The ADC clock edges fall on multiples of the ADC clock period
+  from virtual time 0.
 
 ## CRC
 
@@ -78,6 +118,24 @@ Source: [crc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - A write narrower than 32 bits to any register but `CRC_DR` is ignored and logged. Such a read
   is logged.
 - The RCC clock gate is not modelled. The CRC works with its RCC enable bit clear.
+
+## CRS
+
+Source: [crs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/crs.cpp)
+
+- A SYNC event is a write of 1 to `SWSYNC`, or a USB start of frame from the OTG_FS (STM32U5)
+  or the USB (STM32H5) while `SYNCSRC` is 2, divided by 2^`SYNCDIV`. Only `SWSYNC` and the
+  USB SOF give a SYNC, and only while `CEN` is set. Setting `CEN` with `SYNCSRC` 0, 1 or 3 logs
+  one warning per model life. `SYNCPOL` is storage.
+- The frequency error counter runs at exactly 48 MHz. The first SYNC after `CEN` is set loads
+  `RELOAD` and sets no flag. Each later SYNC latches `FECAP` and `FEDIR` and sets `SYNCOKF`,
+  `SYNCWARNF`, or `SYNCERR` with `ERRF`, by the thresholds of RM0456 12.4.5, then reloads.
+  `ESYNCF` is set `RELOAD` + 1 cycles after a SYNC, so the `RELOAD` of RM0456 12.4.6 gives
+  `FECAP` 0. When no SYNC comes, `SYNCMISS` and `ERRF` follow 128 x `FELIM` cycles later and
+  the counter stops, and the next SYNC latches 128 x `FELIM`. With `SYNCSRC` 2, `RELOAD` 47999
+  matches `SYNCDIV` 0 only.
+- `TRIM` keeps what the firmware wrote, with or without `AUTOTRIMEN`, and `TRIMOVF` stays 0.
+  The RCC clock enable of the CRS gates nothing.
 
 ## DBGMCU
 
@@ -105,6 +163,41 @@ Differs from RM0456:
 - Host and debugger reads, instruction fetches and vector table reads never detect an ECC error.
 - An unprivileged fetch of a privileged page is a BusFault. RM0456 Table 73 gives zeros.
 - A Secure bank erase over a bank with mixed pages is refused whole, by Table 70, not by 3.5.5.
+- Without TrustZone the FLASH_PRIVxBBRy bits are stored and gate no access. RM0456 3.6.3 keeps
+  the privileged protection with TZEN = 0.
+
+Not modelled on the STM32H5:
+
+- OBK key storage, the high-cycle data area, OTP and read-only area programming. Their
+  registers are storage.
+- FLASH_OPSR and FLASH_OTPBLR_CUR are storage. OPSR never reports an interrupted operation and
+  OTPBLR_CUR locks no OTP block.
+- The effect of FLASH_ACR.WRHIGHFREQ on programming: a program or erase takes its datasheet time
+  whatever the delay. A WRHIGHFREQ below RM0481 Table 48 for the current HCLK and voltage range
+  warns once per HCLK, range and value at an erase START or a store with PG set, and raises a
+  model error under `strict`. LATENCY is checked against the same table.
+
+The HDP area of each bank closes by the SBS HDPL level of RM0481 Table 63, with TrustZone on
+and off, RM0481 7.6.2 and Table 72 note 1. A closed sector reads zero to a load, a fetch from it
+is a BusFault, and a program or erase of it sets WRPERR, Table 64. FLASH_HDPEXTR extends the area
+at HDPL 3. Without TrustZone the rule needs machine option bytes, which set the HDP areas.
+
+Differs from RM0481:
+
+- OPTSTRT programs FLASH_WRP1R_PRG and FLASH_WRP2R_PRG into the _CUR registers at once, with
+  no BSY. The other _PRG registers are storage, except FLASH_BOOTR_PRG, FLASH_SECWM1R_PRG and
+  FLASH_SECWM2R_PRG, which read 0 and ignore writes while TrustZone is off. A write to a storage
+  register logs a warning once at the next OPTSTRT.
+- Without machine option bytes the OPTSR, OPTSR2, NSBOOTR, SECWM and HDP _CUR registers read
+  the delivery values of RM0481 Table 55, FLASH_SECBOOTR_CUR reads 0 on the bus while TrustZone
+  is off, and the WRP _CUR registers read 0xFFFFFFFF. With them every reset loads the encoded
+  values. FLASH_NSEPOCHR_CUR, FLASH_SECEPOCHR_CUR and the _PRG registers reset to 0.
+- On the STM32H562, H563 and H573 FLASH_OPTSR_CUR reads the delivery value 0x2D30EDF8 read from
+  silicon, which differs from RM0481 Table 55 in bit 5. The STM32H523, H533, H543 and H553 read
+  the Table 55 value.
+- A program over a word that is not erased writes the new data as given.
+- Without TrustZone the FLASH_PRIVBBxRy bits are stored and gate no access. RM0481 3.7.2 keeps
+  the privileged protection with TZEN = 0xC3.
 
 ## GPDMA and LPDMA
 
@@ -121,12 +214,58 @@ Source: [gtzc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 - The GTZC models serve only with TrustZone enabled, `OptionBytes(tzen=True)`.
 - No debugger access raises a TZIC event, so a host view leaves the TZIC flags and GTZC_IRQn as
   they are.
+- STM32H573: `HDMICECSEC` and `HDMICECIE` name no peripheral, the SVD has no HDMI-CEC.
+- A delay block takes the SEC bit of the peripheral it serves: DLYBSD1 and DLYBSD2 those of SDMMC1
+  and SDMMC2, DLYBOS1 that of OCTOSPI1 and DLYBOS2 that of OCTOSPI2 on the STM32U5, DLYBOS1 that
+  of the OCTOSPI on the STM32H573. RM0456 Table 5 and RM0481 Table 3 list no delay block, and
+  RM0456 Table 297 and RM0481 Table 275 give the same pairs.
 
 ## HASH
 
 Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/hash.cpp)
 
-- An HMAC key longer than 64 bytes with LKEY 0 is hashed as with LKEY 1, and logged.
+- An HMAC key longer than the block with LKEY 0 is hashed as with LKEY 1, and logged. The block is
+  64 bytes for SHA-1, SHA2-224 and SHA2-256, 128 bytes for the SHA-512 family and the sponge rate
+  for SHA-3.
+- The H5 HASH keeps SHA-3 and SHAKE on the STM32H543 and H553 only, RM0481 Table 397. On every
+  other H5 part, ALGO keeps 0000, 0010, 0011 and 1100 to 1111. A CR write of another code, with
+  or without INIT, stores ALGO 0000 and the hash runs SHA-1, as read back on an STM32H573 for
+  0001 and 0100 to 1011. The H543 and H553 store 0000 for 0001, 1010 and 1011 by the same rule,
+  which is the H573 reading applied there. The write logs once and raises a model_error under
+  strict_peripherals before CR changes.
+- The SHA-3 and SHAKE rules follow RM0481 and are served on the STM32H543 and H553 rows. Building
+  a description for those parts needs ST's DIE47C rzone file.
+- The H5 BUSY time of one block, from its launching DIN write, is 67 HCLK cycles under SHA-1 and
+  SHA2-512 and 51 under SHA2-256, as measured on an STM32H573 at 32 MHz. RM0481 Table 401 gives
+  82, 98 and 66. NBWE and NBWP take their new values 1 cycle after BUSY clears and DINIS 1 cycle
+  later, as measured. While BUSY, NBWP counts the launched block's words with the pending ones.
+  SHA2-384, SHA2-512/224 and SHA2-512/256 take the SHA2-512 times and SHA2-224 the SHA2-256
+  times, inferred from their families. The U5 keeps RM0456 Table 486: 82 under SHA-1 and 66 under
+  MD5, SHA2-224 and SHA2-256.
+- An H5 final digest keeps BUSY its compressions times the block time plus 17 HCLK cycles under
+  SHA-1 and SHA2-256 and 33 under SHA2-512. DCIS, NBWE and the digest registers follow 1 cycle
+  after BUSY clears and DINIS 1 cycle later. An STM32H573 measured from the DCAL store BUSY 0 at
+  84, 68 and 100 cycles for one compression and 150, 118 and 166 for two, 152, 120 and 168 when
+  the padding spills into a second block, under SHA-1, SHA2-256 and SHA2-512. The rule gives each
+  within 1 cycle. The digest registers read 0 in the one cycle between BUSY 0 and DCIS, and after
+  INIT. A DIN write in between completes the digest first. SHA-3 and SHAKE digests take their
+  block times, DCIS with BUSY 0. The U5 sets DCIS with BUSY 0 after one block time per padded
+  block.
+- The H5 HASH reads SHA-3 and SHAKE DIN words as the SHA-2 core does: the first message byte of a
+  word, after the DATATYPE swap, is its most significant byte, and the digest bytes fill HR0 and
+  up from bit 31. RM0481 40.4.4 does not spell this out for SHA-3. DATATYPE 00, 01 and 11 follow
+  the same mapping.
+- The H5 BUSY time of SHAKE128 and SHAKE256, 66 and 58 cycles, follows the SHA-3 rule of
+  RM0481 Table 401, which has no SHAKE row. A DCAL that squeezes the next rate takes the same time.
+  A DCAL written while BUSY of a SHAKE digest squeezes the next rate at once, logs once, and the
+  rate of the first DCAL is never shown. NBWP and CR.NBW read 0 after a SHAKE digest, as after a
+  SHA-3 digest.
+- A DIN word after a SHAKE digest with no INIT starts a new message and logs once. MODE 1 with
+  SHAKE logs once at INIT and MODE 1 is ignored.
+- The H5 CSR registers use popcorn's layout too: CSR4 up hold the Keccak lanes or the SHA-512
+  chaining value and pending block, the inner HMAC digest sits at CSR55, CSR72 or CSR52 by
+  algorithm. A save of CSR0 to CSR71 covers every SHA-3 context but the SHA3-384 and SHA3-512
+  HMAC, as RM0481 40.4.8 says.
 - DMA input works through GPDMA request 89. A machine with no DMA controller that serves
   `hash_in_dma` logs DMAE 1 once and requests nothing.
 - The CSR registers hold popcorn's own serialisation of the state, not the silicon layout. CSR0
@@ -195,12 +334,83 @@ Not modelled, logged:
 - A TX FIFO numbered other than its IN endpoint. DFIFOn feeds IN endpoint n.
 - An isochronous endpoint armed with PKTCNT above 1. One packet goes per frame.
 
+## USB
+
+Source: [usb_drd.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/usb_drd.cpp)
+
+The USB full-speed device controller of the STM32H5 runs in device mode.
+
+- A byte or half-word write of the packet memory stores its lanes and writes 0 to the other lanes
+  of the word, from the CPU and the debugger alike, as measured on an STM32H573. A narrow read
+  returns its lanes. Word accesses are the ones RM0481 61.7 allows, so a CPU byte or half-word
+  access logs once and raises `ModelError` under `strict`. Debugger accesses of any width pass.
+- A byte or half-word write of a USB register is a word write with the other lanes 0, as
+  measured on an STM32H573 for `CHEPnR` and `DADDR` and applied to every register: in `CHEPnR` a
+  toggle bit there stays, `VTRX` and `VTTX` there clear and `EA` or `UTYPE` there read 0.
+- The packet memory reads 0 after a power-on reset and keeps its content across every other
+  reset, an RCC USBFSRST pulse included.
+- While `BCDR.DPPU_DPD` is set and `CNTR.SUSPEN` is clear, `ISTR.ESOF` rises and `FNR.LSOF`
+  counts every 1 ms with no SOF, with a host attached or not. `SUSP` rises at each ESOF that
+  brings the count of missed frames to 3, the count wrapping at 4 and starting again at a SOF, a
+  bus reset, a resume and the timer start, so with no SOF it rises every 4 ms, as read on an
+  STM32H573 with nothing attached and with a PC host before its bus reset. Setting `SUSPEN` stops
+  the count and clears `LSOF`, as read on the part. The first ESOF comes 1 ms after the pull-up
+  and each SOF moves the next one to 1 ms plus 1 us after it, both inferred. A bus reset stops
+  the count while SE0 lasts, as read on an STM32H573 with a PC host after a reset with and
+  without suspend. The next ESOF comes 1 ms after SE0 ends, as RM0481 61.6.2 enables the
+  suspend check right after any USB reset. Clearing `DPPU_DPD` stops the count, and `FN`, `LCK`,
+  `LSOF` and the `ISTR` flags keep their values, as read on the part.
+- A bus reset or a SOF while `CNTR.SUSPEN` is set raises `ISTR.WKUP` and clears `SUSPEN` and
+  `SUSPRDY`, RM0481 61.5.7 and 61.6.2, the bus reset as read on an STM32H573 with a PC host.
+- `FNR.LCK` sets at the second SOF after a bus reset, with `ISTR.RST_DCON` pending or cleared,
+  and reads 0 while `ISTR.WKUP` is set, as measured on an STM32H573 with a PC host after a bus
+  reset. After a resume it sets at the second SOF, RM0481 FNR.LCK, and reads 0 while `WKUP` is
+  set, inferred. A SOF while `WKUP` is set starts the count of two again, so `LCK` sets at the
+  second SOF after the firmware clears `WKUP`, inferred: on the part `WKUP` was cleared before
+  SE0 ended. A firmware that leaves `WKUP` set reads `LCK` 0.
+- FNR.RXDP and FNR.RXDM read 1 and 1 with no host attached, as measured on an STM32H573. With a
+  host attached they read SE0, 0 and 0, while the device does not pull D+ up, and the idle J
+  state, 1 and 0, while it does, as measured on an STM32H573 with a PC host.
+  A suspend raises SUSP after the host's 3 ms of idle bus.
+- Transfers run whatever kernel clock `RCC_CCIPR4.USBFSSEL` selects.
+- A double-buffered endpoint fills or sends descriptor word 2n while its DTOG is 0 and word
+  2n + 1 while it is 1, in both directions, as RM0481 61.5.3 states in its text and the ST HAL
+  and tinyusb drivers expect.
+- The first transaction of a double-buffered bulk endpoint after `EPKIND` or `UTYPE` changes, or
+  after a reset, sets its STAT to NAK. Every later transaction keeps STAT VALID.
+- Writing `CNTR.USBRST` from 0 to 1 clears every `CHEPnR` but `VTRX` and `VTTX`. `DADDR`,
+  `ISTR.RST_DCON` and `FNR.LCK` stay as they are, `DADDR` as measured on an STM32H573.
+- A written 0 keeps `CNTR.SUSPEN`, as measured on an STM32H573. A resume and a bus reset clear
+  it.
+- A bus reset clears the endpoints and `DADDR` when SE0 starts, inferred, and sets
+  `ISTR.RST_DCON` when SE0 ends, as measured on an STM32H573 with a PC host.
+- Tokens get no answer while `ISTR.RST_DCON` is set.
+- A SETUP to control endpoint 0 is acknowledged with `STATRX` NAK or STALL, and leaves both
+  toggles at 1.
+
+Not modelled, logged:
+
+- Host mode, `CNTR.HOST`. The controller stays a device.
+- LPM, `LPMCSR.LPMEN`.
+- Battery charging detection, `BCDR.BCDEN`.
+- Remote wake-up signalling, `CNTR.L1RES` and `CNTR.L2RES`.
+
 ## PWR
 
 Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/pwr.cpp)
 
-- The low-power modes `PWR_CR1.LPMS` selects are not modelled. A deep-sleep WFI idles as a plain
-  WFI.
+- The low-power modes `PWR_CR1.LPMS` selects on the U5 and `PWR_PMCR.LPMS` on the H5 are not
+  modelled. A deep-sleep WFI idles as a plain WFI.
+- STM32U5: the voltage scaling ready bits follow a VOS write after the board's `ready_delay`,
+  50 us by default. A write that steps to a higher voltage clears VOSRDY for that delay, one that
+  steps to a lower voltage keeps VOSRDY set. ACTVOSRDY clears for the delay on every change.
+- STM32H5: a VOS write moves ACTVOS one level toward VOS at once and one more level every
+  10.4 us, and VOSRDY and ACTVOSRDY set 15.2 us after the last step. VOS3 to VOS0 reads
+  0x4000, 0x8000 and 0xC000 in PWR_VOSSR, then 0xE008 36 us after the write, as measured on an
+  STM32H573. A step to a lower voltage keeps VOSRDY set and takes the same steps, and a change
+  of one or two levels follows the same rule. The measurement covers VOS3 to VOS0 only. FLASH
+  checks its latency against the range of the last ready.
+- STM32H5: PWR_USBSCR is storage, the USB model runs whatever USB33DEN and USB33SV hold.
 
 ## RCC
 
@@ -211,11 +421,13 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - A peripheral reset bit in an `RCC_xxxRSTR` register, written from 0 to 1, resets every
   register of that instance that no model claims, for any instance, modelled or not, such as
   LPTIM1. It also resets the instance's model when the model supports it: RNG, CRC, HASH,
-  SYSCFG, ADC1 and ADC12 through ADC12RST, GPDMA1, LPDMA1, the timers, GPIOA to GPIOI, SPI, I2C,
-  SAI, MDF1, ADF1, the USARTs, UARTs and LPUART1, and OTG_FS. A native plugin model that derives
+  SYSCFG, ADC1 and ADC12 through ADC12RST on the STM32U5, ADC1, ADC2 and ADCC on the STM32H5,
+  GPDMA1, LPDMA1, the timers, GPIOA to GPIOI, SPI, I2C, SAI, MDF1 and ADF1 on the STM32U5, the
+  USARTs, UARTs, LPUART1 on the STM32U5 and LPUART on the STM32H5, OTG_FS on the STM32U5 and USB
+  on the STM32H5. A native plugin model that derives
   from `periph::bus_reset_listener`, and every Python model, hears it through `on_bus_reset()`.
-  Any other model gets `reset()` with `reset_kind::peripheral`. A peripheral reset sets no
-  RCC_CSR reset flag.
+  Any other model gets `reset()` with `reset_kind::peripheral`. A peripheral reset leaves the
+  flags of RCC_CSR, and of RCC_RSR on the STM32H5, as they are.
 - Board state survives such a reset: a pin's board drive, SPI devices and I2C targets, which an
   RCC reset of their controller does not reset, PDM sources, SAI external clocks and the frames
   a test queued for a USART receiver.
@@ -232,6 +444,47 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - While a reset bit is 1, bus writes to that peripheral are ignored, from the CPU, DMA and
   debugger alike. The TrustZone filter still runs first, so an illegal access still raises its
   event. Reads are not blocked. RM0456 gives no access rule for a peripheral held in reset.
+- TrustZone: an RCC bit shared by several peripherals is Secure while any of them is, on the
+  STM32U5 and the STM32H5 alike. RM0456 11.5.1 and RM0481 11.5.1 secure "its related clock
+  source selection" for each Secure peripheral and name no rule for a shared one. The shared bits
+  are `ADCDACSEL`, `LPTIM34SEL`, `OCTOSPISEL`, `SDMMCSEL` and `TIMICSEL` on the STM32U5,
+  `ADCDACSEL`, `TIMICSEL` and the `FDCAN12` bits on the STM32H5.
+- STM32H5 TrustZone: `RCC_CR.HSIDIV`, `HSIDIVF` and the `RCC_CFGR2` `AHBxDIS` and `APBxDIS` bits
+  take Non-secure writes, RM0481 Table 122 lists them under no security bit.
+- SWS follows SW in the store that selects a ready source. On an STM32H573, the first one or two
+  reads of `RCC_CFGR1` after that store return the old SWS. Firmware that polls SWS ends in the
+  same state.
+- RCC holds each write RM0456 11.8 and RM0481 11.8 say the hardware ignores, with no log record, on
+  the STM32U5 and the STM32H5 alike: a clear of the ON bit of the SYSCLK source and of the PLL1
+  input while PLL1 drives SYSCLK, on the STM32H5 a clear of HSEON, HSION or CSION while that
+  oscillator feeds PLL1 and the same write leaves PLL1ON set, RM0481 11.8.1, a write of
+  `PLLxSRC`, `PLLxM`, `PLLxRGE`, `PLLxN` and the output dividers while the PLL is on or ready, on
+  the STM32H5 of PLL1PEN, PLL1QEN and PLL1REN too, RM0481 11.8.7, and a clear of the PLL1 output
+  enable that feeds SYSCLK. The STM32U5 `PLL1MBOOST` is storage. ST's CMSIS `SystemInit` run with
+  PLL1 as SYSCLK logs nothing.
+- A switch to a SYSCLK source that runs at 0 Hz, such as a PLL1 output whose enable is clear,
+  keeps the core clock at its last rate and logs one `model_warning` per machine.
+- A PLL loads `PLLxFRACN` as its fraction when `PLLxON` sets with `PLLxFRACEN` 1, and runs in
+  integer mode with `PLLxFRACEN` 0, whatever order firmware wrote them in, as measured on an
+  STM32H573. While the PLL runs, it takes a new `PLLxFRACN` only on a `PLLxFRACEN` write from 0
+  to 1 and keeps the loaded fraction across a `PLLxFRACEN` clear. That running rule follows
+  RM0456 11.4.6 and RM0481 11.4.5, unmeasured. The new fraction applies at once, where silicon
+  takes it three reference clock periods later.
+- STM32H5: `RCC_CR.HSIDIV` keeps its value while PLL1 drives SYSCLK from HSI and takes a write in
+  every other state, an enabled PLL1 off SYSCLK fed by HSI included, as measured on an STM32H573
+  for PLL1. For PLL2 and PLL3 fed by HSI the model applies the same rule, inferred from PLL1. One
+  write that clears PLL1ON of a PLL1 off SYSCLK and changes `HSIDIV` takes both.
+- STM32H5: after an `HSIDIV` change, `HSIDIV` reads the new value at once. `HSIDIVF` clears and sets
+  again after the cycles of the running HSI rate measured on an STM32H573: /2 to /4 or /8 clear at 3
+  and set at 6, /2 to /1 3 and 16, /4 to /2 2 and 8, /4 to /1 2 and 14, /8 to /1 2 and 8. The other
+  transitions are inferred: from /1 they take the /2 row, /4 to /8 and /8 to /2 and /4 the /4 to /2
+  timing. The new HSI rate applies when `HSIDIVF` sets, a point the board run did not measure. On an
+  STM32H573 ST's HAL reads `HSIDIVF` about 24 cycles after the store and reads 1 for every
+  transition. The model runs one cycle per instruction, so the same load lands 13 cycles after the
+  store and reads 1, except for /2 to /1 and /4 to /1, where it reads 0 and HAL takes `HSI_VALUE`
+  either way.
+- Without TrustZone, a coverage report classes `RCC_CIFR` and `RCC_CICR` as `unimplemented`. The
+  RCC sets the `RCC_CIFR` flags `RCC_CIER` enables, and a `RCC_CICR` write clears them.
 
 ## RNG
 
@@ -279,17 +532,62 @@ Source: [sai.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/spi.cpp)
 
 - Half duplex, CRC, TI mode, the autonomous trigger and SS timing are not modelled. The SPI runs
-  as a plain full-duplex or simplex SPI.
+  as a plain full-duplex or simplex SPI. One model_warning per machine comes at the first transfer
+  started with SPI_CFG2.SP, MIDI or MSSI or SPI_CFG1.CRCEN set.
 - The dummy frame RM0456 Figure 858 shows ahead of the UDRDR pattern is UDRDR too, and UDR rises
   at once, with no propagation latency.
+- RM0481 Table 645 limits SPI4 to SPI6 of the STM32H5 to DSIZE of 16 bits and CRC of 17 bits.
+  The model accepts the DSIZE values of SPI1 to SPI3 there, and the CRC is not modelled.
+- SPI_I2SCFGR of the STM32H5 SPI1 to SPI3 is storage: the I2S mode is not modelled.
+
+## SBS
+
+Source: [sbs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/sbs.cpp), [secure_config.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/secure_config.hpp)
+
+- The SBS model holds the temporal isolation level and the bus rules of RM0481 14.3.4 and 14.5,
+  with TrustZone on and off. Under TrustZone `SBS_SECCFGR` and `SBS_RSSCMDR` are Secure,
+  `SBS_EPOCHSELCR`, `SBS_ECCNMIR` and `SBS_CSLCKR` Secure and privileged, `SBS_CNSLCKR`
+  privileged, `SBS_FPUIMR` privileged and Secure with FPUSEC, `SBS_MESR`, `SBS_CCCSR`,
+  `SBS_CCVALR` and `SBS_CCSWCR` Secure with SBSSEC, `SBS_CFGR2` Secure with CLASSBSEC. A
+  Non-secure access to a Secure register is RAZ/WI and sets SBSF in `GTZC1_TZIC_SR4`, on a read
+  and on a write. An unprivileged access to a privileged register is RAZ/WI and sets no flag.
+- SBSSEC makes `RCC_APB3ENR.SBSEN` Secure, so a Non-secure write of it is ignored while SBSSEC
+  is set.
+- FPUSEC takes privileged writes and reads for every Secure transaction, after the register
+  description of RM0481 14.5.8. RM0481 14.3.4 lists FPUSEC among the privileged registers,
+  whose unprivileged reads are RAZ.
+- Without TrustZone `SBS_SECCFGR`, `SBS_RSSCMDR` and `SBS_CSLCKR` are RAZ/WI, RM0481 14.5.6
+  gives `SBS_RSSCMDR` "always secure (RAZ/WI if nonsecure)". `SBS_EPOCHSELCR`, `SBS_ECCNMIR`,
+  `SBS_FPUIMR` and `SBS_CNSLCKR` take privileged accesses only.
+- `SBS_DBGCR` and `SBS_DBGLOCKR` take any access at HDPL0 and HDPL1 and are RAZ/WI above it,
+  RM0481 14.5.4 and 14.5.5.
+- The SBS has no RCC reset bit, RM0481 11.8.25. `RCC_APB3RSTR` bit 1, which the STM32H562, H563
+  and H573 SVDs name SBSRST, is reserved and reads 0, and a write of it leaves every SBS
+  register as it was, as read back on an STM32H573.
+- A power-on or brown-out reset restores every SBS register. Every other machine reset restores
+  all but `SBS_RSSCMDR` and MCLR of `SBS_MESR`, RM0481 14.5.6 and 14.5.12.
+- `SBS_MESR` reads MCLR 1 from the power-on: the memory erase after a power-on is done at once.
+  MCLR and IPMEE clear on a written 1. IPMEE stays 0, the erase after a tamper or a product
+  state regression is outside the model. The power-on value and the MCLR clear are read on an
+  STM32H573.
+- Every SBS register but `SBS_HDPLCR`, `SBS_HDPLSR`, `SBS_SECCFGR` and `SBS_MESR` is storage:
+  the functions of the debug, RSS, EPOCH, ECC NMI, FPU interrupt, compensation cell, Class B and
+  lock registers are not modelled. Coverage reports a firmware access to them as `storage_only`.
+  A firmware write that lands on one logs one `model_warning` per register. Under `strict` it
+  raises `ModelError` before the store. Firmware reads are silent.
+- `SBS_PMCR` takes every access. RM0481 14.5.9 makes its PBx_FMP bits Secure with their GPIOB
+  pin, ANASWVDD and IO_ANA_BOOST_EN with ADC12SEC and ETH_SEL_PHY with ETHSEC.
+- HDPL starts at HDPL1 after every reset, the level of a user flash boot. The RSS boot at HDPL0
+  is outside the model.
 
 ## SYSCFG
 
-Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/syscfg.cpp)
+Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/syscfg.cpp), [secure_config.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/secure_config.hpp)
 
 - Every register but `SYSCFG_SECCFGR` is storage. The functions it selects are not modelled. A
   firmware write lands and logs one `model_warning` per register. Under `strict` it raises
-  `ModelError` before the store.
+  `ModelError` before the store. A write while SYSCFGRST holds the unit raises the illegal
+  access event the TrustZone rules give and is not noted.
 - `SYSCFG_CSLCKR` stays storage at TZEN 0. RM0456 Table 131 makes it RAZ/WI.
 
 ## TIM
@@ -304,6 +602,8 @@ Not modelled, logged:
 - A slave mode trigger input that no pin and no routed timer drives. No trigger reaches the slave
   mode controller.
 - The trigger DMA request, TDE, and COM and trigger burst requests.
+- The slave mode preload, `SMCR.SMSPE` and `SMSPS`. Both are storage and a counter start with
+  SMSPE set logs once.
 
 Differs from RM0456:
 
