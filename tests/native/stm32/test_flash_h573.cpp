@@ -1732,19 +1732,6 @@ struct sbs_bus
   {
     REQUIRE(s.bus().write(s.r.alias("RCC", reg, attrs.secure), 4, value, attrs).has_value());
   }
-
-  [[nodiscard]] auto reset_bit() const -> std::uint32_t
-  {
-    return s.r.bit("RCC", "RCC_APB3RSTR", "SBSRST");
-  }
-
-  [[nodiscard]] auto pulse(bus_attrs attrs) const -> bool
-  {
-    rcc("RCC_APB3RSTR", reset_bit(), attrs);
-    auto const held = (s.r.peek("RCC", "RCC_APB3RSTR") & reset_bit()) != 0;
-    rcc("RCC_APB3RSTR", 0, attrs);
-    return held;
-  }
 };
 
 TEST_CASE(
@@ -1881,77 +1868,77 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "the SVD SBSRST pulse keeps HDPL and the security, lock, Class B, debug and RSS command "
-    "registers by the model's rule and restores the others, a system reset restores all but "
-    "SBS_RSSCMDR, a power-on reset every one")
+    "STM32H573 silicon: RCC_APB3RSTR bit 1 reads 0 after a write of 1 and every SBS register "
+    "keeps its value, RM0481 11.8.25 marks it reserved")
 {
   secure_flash const s;
   sbs_bus const      sbs{s};
+  auto const&        rcc  = s.r.f.target->peripheral("RCC").description();
+  auto const*        rstr = popcorn::find_register(rcc, std::string_view{"RCC_APB3RSTR"});
+  REQUIRE(rstr != nullptr);
+  CHECK(
+      std::ranges::none_of(rstr->fields, [](popcorn::field_desc const& f) { return f.lsb == 1; }));
   struct kept
   {
     std::string_view reg;
     std::uint32_t    value;
-    std::uint32_t    reset;
   };
-  std::array const pulse_kept{
-      kept{"SBS_SECCFGR", sbs.bit("SBS_SECCFGR", "CLASSBSEC"), 0},
-      kept{"SBS_CSLCKR", sbs.bit("SBS_CSLCKR", "LOCKSAU"), 0},
-      kept{"SBS_CNSLCKR", sbs.bit("SBS_CNSLCKR", "LOCKNSMPU"), 0},
-      kept{"SBS_CFGR2", sbs.bit("SBS_CFGR2", "CLL"), 0},
-      kept{"SBS_DBGCR", 0xb4, 0},
-      kept{"SBS_DBGLOCKR", 0xc3, 0xb4},
+  std::array const written{
+      kept{"SBS_CNSLCKR", 2},
+      kept{"SBS_CFGR2", 1},
+      kept{"SBS_FPUIMR", 0},
+      kept{"SBS_EPOCHSELCR", 1},
+      kept{"SBS_SECCFGR", sbs.bit("SBS_SECCFGR", "CLASSBSEC")},
+      kept{"SBS_CSLCKR", sbs.bit("SBS_CSLCKR", "LOCKSAU")},
+      kept{"SBS_DBGLOCKR", 0xc3},
   };
-  for(auto const& [reg, value, reset] : pulse_kept)
+  for(auto const& [reg, value] : written)
   {
     sbs.write(reg, value, secure_priv);
     REQUIRE(sbs.peek(reg) == value);
   }
+  sbs.write("SBS_HDPLCR", 0x6a, secure_priv);
+  for(auto const attrs : {secure_priv, nonsecure_priv})
+  {
+    sbs.rcc("RCC_APB3RSTR", 1u << 1, attrs);
+    CHECK(s.r.peek("RCC", "RCC_APB3RSTR") == 0);
+    sbs.rcc("RCC_APB3RSTR", 0, attrs);
+    for(auto const& [reg, value] : written)
+    {
+      CAPTURE(reg);
+      CHECK(sbs.peek(reg) == value);
+    }
+    CHECK(sbs.peek("SBS_HDPLSR") == 0x8a);
+  }
+  sbs.write("SBS_EPOCHSELCR", 0, secure_priv);
+  CHECK(sbs.peek("SBS_EPOCHSELCR") == 0);
+}
+
+TEST_CASE("a system reset restores every SBS register but SBS_RSSCMDR, a power-on reset every one")
+{
+  secure_flash const s;
+  sbs_bus const      sbs{s};
+  sbs.write("SBS_CSLCKR", sbs.bit("SBS_CSLCKR", "LOCKSAU"), secure_priv);
   sbs.write("SBS_RSSCMDR", 1, secure_priv);
   sbs.write("SBS_HDPLCR", 0x6a, secure_priv);
-  sbs.write("SBS_FPUIMR", 0, secure_priv);
-  sbs.write("SBS_EPOCHSELCR", 1, secure_priv);
-  REQUIRE(sbs.peek("SBS_FPUIMR") == 0);
-  REQUIRE(sbs.peek("SBS_EPOCHSELCR") == 1);
-  CHECK(sbs.pulse(secure_priv));
-  CHECK(sbs.peek("SBS_HDPLSR") == 0x8a);
-  for(auto const& [reg, value, reset] : pulse_kept)
-  {
-    CAPTURE(reg);
-    CHECK(sbs.peek(reg) == value);
-  }
-  CHECK(sbs.peek("SBS_RSSCMDR") == 1);
-  CHECK(sbs.peek("SBS_FPUIMR") == 0x1f);
-  CHECK(sbs.peek("SBS_EPOCHSELCR") == 0);
+  REQUIRE(sbs.peek("SBS_HDPLSR") == 0x8a);
   s.r.f.target->reset(popcorn::reset_kind::software);
   CHECK(sbs.peek("SBS_HDPLSR") == 0x51);
   CHECK(sbs.peek("SBS_HDPLCR") == 0xb4);
-  for(auto const& [reg, value, reset] : pulse_kept)
-  {
-    CAPTURE(reg);
-    CHECK(sbs.peek(reg) == reset);
-  }
+  CHECK(sbs.peek("SBS_CSLCKR") == 0);
   CHECK(sbs.peek("SBS_RSSCMDR") == 1);
   s.r.f.target->reset();
   CHECK(sbs.peek("SBS_RSSCMDR") == 0);
 }
 
-TEST_CASE(
-    "RM0481 14.5.8 and 11.5.1: SBSSEC makes RCC SBSRST and SBSEN Secure, a Non-secure SBSRST "
-    "pulse with SBSSEC set leaves SBS_SECCFGR, SBS_CSLCKR and SBS_FPUIMR")
+TEST_CASE("RM0481 11.5.1: SBSSEC makes RCC_APB3ENR.SBSEN Secure")
 {
   secure_flash const s;
   sbs_bus const      sbs{s};
   auto const         sbssec = sbs.bit("SBS_SECCFGR", "SBSSEC");
-  auto const         lock   = sbs.bit("SBS_CSLCKR", "LOCKSAU");
   auto const         enable = s.r.bit("RCC", "RCC_APB3ENR", "SBSEN");
   auto const         clock  = [&] { return s.r.peek("RCC", "RCC_APB3ENR") & enable; };
   sbs.write("SBS_SECCFGR", sbssec, secure_priv);
-  sbs.write("SBS_CSLCKR", lock, secure_priv);
-  sbs.write("SBS_FPUIMR", 0, secure_priv);
-  CHECK_FALSE(sbs.pulse(nonsecure_priv));
-  CHECK(sbs.peek("SBS_SECCFGR") == sbssec);
-  CHECK(sbs.peek("SBS_CSLCKR") == lock);
-  CHECK(sbs.peek("SBS_FPUIMR") == 0);
   auto const before = clock();
   sbs.rcc("RCC_APB3ENR", s.r.peek("RCC", "RCC_APB3ENR") ^ enable, nonsecure_priv);
   CHECK(clock() == before);
@@ -1960,30 +1947,6 @@ TEST_CASE(
   sbs.write("SBS_SECCFGR", 0, secure_priv);
   sbs.rcc("RCC_APB3ENR", s.r.peek("RCC", "RCC_APB3ENR") ^ enable, nonsecure_priv);
   CHECK(clock() == before);
-  CHECK(sbs.pulse(nonsecure_priv));
-  CHECK(sbs.peek("SBS_FPUIMR") == 0x1f);
-  CHECK(sbs.peek("SBS_CSLCKR") == lock);
-}
-
-TEST_CASE(
-    "an SBS held by the SVD SBSRST raises SBSF of RM0481 5.7.8 on a Non-secure write of "
-    "SBS_SECCFGR, as the U5 SYSCFG")
-{
-  secure_flash const s;
-  sbs_bus const      sbs{s};
-  auto const         sbssec = sbs.bit("SBS_SECCFGR", "SBSSEC");
-  s.clear_events();
-  sbs.rcc("RCC_APB3RSTR", sbs.reset_bit(), secure_priv);
-  REQUIRE((s.r.peek("RCC", "RCC_APB3RSTR") & sbs.reset_bit()) != 0);
-  sbs.write("SBS_SECCFGR", sbssec, nonsecure_priv);
-  CHECK(sbs.peek("SBS_SECCFGR") == 0);
-  CHECK(sbs.raised());
-  sbs.write("SBS_SECCFGR", sbssec, secure_priv);
-  CHECK(sbs.peek("SBS_SECCFGR") == 0);
-  CHECK_FALSE(sbs.raised());
-  sbs.rcc("RCC_APB3RSTR", 0, secure_priv);
-  sbs.write("SBS_SECCFGR", sbssec, secure_priv);
-  CHECK(sbs.peek("SBS_SECCFGR") == sbssec);
 }
 
 TEST_CASE(

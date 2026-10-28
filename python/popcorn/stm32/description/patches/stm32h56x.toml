@@ -516,3 +516,10 @@ instances = ["TIM15"]
 registers = ["TIM15_SMCR"]
 add = { name = "SMSPS", lsb = 25, width = 1, acc = "read_write", reset = 0 }
 source = "Silicon read-back on an STM32H573: TIM15_SMCR written 0xFFFFFFFF reads 0x033100F7, so bits 24 and 25 exist. ST's STM32H573 SVD has no field there. RM0481 Rev 5, 47.7.3 TIM15_SMCR names bit 24 SMSPE, slave mode selection preload enable, and bit 25 SMSPS, slave mode selection preload source"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["RCC_APB3RSTR"]
+fields = ["SBSRST"]
+drop = true
+source = "Silicon read-back on an STM32H573 (DBGMCU_IDCODE 0x10076484), 2026-10-28: RCC_APB3RSTR bit 1 written 1 reads 0, the register reads 0x0, and SBS_CNSLCKR, SBS_CFGR2, SBS_FPUIMR and SBS_EPOCHSELCR keep their values across the write. RM0481 Rev 5, 11.8.25 RCC_APB3RSTR marks bit 1 reserved. ST's STM32H562, H563 and H573 SVDs name it SBSRST"

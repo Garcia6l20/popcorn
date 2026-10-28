@@ -46,21 +46,18 @@ constexpr std::uint8_t                 top_level    = 3;
  *        RAZ/WI with no event, RM0481 5.4. FPUSEC takes privileged writes only and reads for
  *        every Secure transaction, after the register description of 14.5.8: RM0481 14.3.4
  *        lists FPUSEC among the privileged registers, whose unprivileged reads are RAZ. SBSSEC
- *        makes the RCC SBS clock and reset bits Secure, RM0481 11.5.1.
+ *        makes the RCC SBS clock bit Secure, RM0481 11.5.1.
  *
  *        Without TrustZone every transaction is Non-secure, so `SBS_SECCFGR`, `SBS_RSSCMDR` and
  *        `SBS_CSLCKR` are RAZ/WI and their storage keeps its reset, and `SBS_EPOCHSELCR`,
  *        `SBS_ECCNMIR`, `SBS_FPUIMR` and `SBS_CNSLCKR` are privileged, RM0481 14.5.6 to
  *        14.5.8, 14.5.11 and 14.5.17 to 14.5.19.
  *
- *        RM0481 11.8.25 gives `RCC_APB3RSTR` no SBS bit, the STM32H562, H563 and H573 SVDs
- *        place SBSRST at bit 1. A pulse of it keeps the security state of the unit and restores
- *        every other register: it keeps HDPL in `SBS_HDPLCR` and `SBS_HDPLSR`, the security
- *        register `SBS_SECCFGR`, the locks `SBS_CSLCKR` and `SBS_CNSLCKR`, the Class B register
- *        `SBS_CFGR2`, `SBS_DBGCR` and `SBS_DBGLOCKR`, which RM0481 14.5.4 and 14.5.5 clear by a
- *        debug reset, and `SBS_RSSCMDR`, which RM0481 14.5.6 clears by a power-on reset. So a
- *        Non-secure pulse never reopens a Secure setting or a lock. A power-on or brown-out
- *        reset restores every register, any other machine reset every one but `SBS_RSSCMDR`.
+ *        The SBS has no RCC reset bit, RM0481 11.8.25: `RCC_APB3RSTR` bit 1 reads 0 after a
+ *        write of 1 on an STM32H573 and every SBS register keeps its value, where the STM32H562,
+ *        H563 and H573 SVDs place SBSRST. A power-on or brown-out reset restores every register,
+ *        any other machine reset every one but `SBS_RSSCMDR`, which RM0481 14.5.6 clears by a
+ *        power-on reset.
  *
  *        Every register but `SBS_HDPLCR`, `SBS_HDPLSR` and `SBS_SECCFGR` is storage the model
  *        does not model: a firmware write that lands, past the bus rules, logs one
@@ -71,15 +68,12 @@ constexpr std::uint8_t                 top_level    = 3;
  */
 class sbs final : public dispatch_model<sbs, sbs_state>,
                   public temporal_isolation,
-                  public trustzone_aware,
-                  public bus_reset_listener
+                  public trustzone_aware
 {
 public:
   sbs(model_context& ctx, peripheral_desc const& desc);
 
   void reset(register_file& regs, reset_kind kind) override;
-  void on_bus_reset() override;
-  void on_held_write(std::uint32_t offset, access_ctx ctx) override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
 
   [[nodiscard]] auto stateless() const -> bool override;
@@ -105,7 +99,6 @@ private:
   std::array<std::uint32_t, 2> secure_privileged_{};
   std::array<std::uint32_t, 2> debug_{};
   std::array<std::uint32_t, 2> isolation_words_{};
-  std::array<std::uint32_t, 9> pulse_kept_{};
   secure_config_rules          rules_;
   storage_notes                notes_;
 };
@@ -134,16 +127,6 @@ sbs::sbs(model_context& ctx, peripheral_desc const& desc)
       secure_privileged_{reg("SBS_EPOCHSELCR").offset, reg("SBS_ECCNMIR").offset},
       debug_{reg("SBS_DBGCR").offset, reg("SBS_DBGLOCKR").offset},
       isolation_words_{increment_.offset, level_.offset},
-      pulse_kept_{
-          increment_.offset,
-          level_.offset,
-          security_.offset,
-          reg("SBS_CSLCKR").offset,
-          reg("SBS_CNSLCKR").offset,
-          reg("SBS_CFGR2").offset,
-          debug_[0],
-          debug_[1],
-          always_secure_},
       rules_{
           .system         = field("SBS_SECCFGR", "SBSSEC"),
           .class_b        = field("SBS_SECCFGR", "CLASSBSEC"),
@@ -178,16 +161,6 @@ void sbs::reset(register_file&, reset_kind kind)
   restore_reset_values(kept);
   update(regs_, increment_, no_increment);
   update(regs_, level_, level_codes[boot_level]);
-}
-
-void sbs::on_bus_reset()
-{
-  restore_reset_values(pulse_kept_);
-}
-
-void sbs::on_held_write(std::uint32_t offset, access_ctx ctx)
-{
-  static_cast<void>(rule(offset & ~3u, ctx));
 }
 
 auto sbs::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard

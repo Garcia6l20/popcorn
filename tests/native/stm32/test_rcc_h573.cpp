@@ -795,12 +795,13 @@ TEST_CASE("every H573 instance with an RCC reset bit resolves it, the renamed on
     }
   }
   std::ranges::sort(unresolved);
-  CHECK(
-      unresolved
-      == std::vector<std::string>{
-          "DBGMCU", "DCACHE", "DLYBOS1", "DLYBSD1", "DLYBSD2", "EXTI", "FLASH", "GTZC1_MPCBB1",
-          "GTZC1_MPCBB2", "GTZC1_MPCBB3", "GTZC1_TZIC", "GTZC1_TZSC", "ICACHE", "IWDG", "PWR",
-          "RCC", "RTC", "TAMP", "WWDG"});
+  CHECK(unresolved == std::vector<std::string>{"DBGMCU",       "DCACHE",       "DLYBOS1",
+                                               "DLYBSD1",      "DLYBSD2",      "EXTI",
+                                               "FLASH",        "GTZC1_MPCBB1", "GTZC1_MPCBB2",
+                                               "GTZC1_MPCBB3", "GTZC1_TZIC",   "GTZC1_TZSC",
+                                               "ICACHE",       "IWDG",         "PWR",
+                                               "RCC",          "RTC",          "SBS",
+                                               "TAMP",         "WWDG"});
   for(auto const& [instance, field] : std::to_array<std::pair<std::string_view, std::string_view>>({
           {"ADC1",    "ADC12RST"   },
           {"ADC2",    "ADC12RST"   },

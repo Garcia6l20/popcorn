@@ -493,8 +493,8 @@ Source: [sbs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   `SBS_CCVALR` and `SBS_CCSWCR` Secure with SBSSEC, `SBS_CFGR2` Secure with CLASSBSEC. A
   Non-secure access to a Secure register is RAZ/WI and sets SBSF in `GTZC1_TZIC_SR4`, on a read
   and on a write. An unprivileged access to a privileged register is RAZ/WI and sets no flag.
-- SBSSEC makes `RCC_APB3ENR.SBSEN` and `RCC_APB3RSTR.SBSRST` Secure, so a Non-secure write of
-  them is ignored while SBSSEC is set.
+- SBSSEC makes `RCC_APB3ENR.SBSEN` Secure, so a Non-secure write of it is ignored while SBSSEC
+  is set.
 - FPUSEC takes privileged writes and reads for every Secure transaction, after the register
   description of RM0481 14.5.8. RM0481 14.3.4 lists FPUSEC among the privileged registers,
   whose unprivileged reads are RAZ.
@@ -503,13 +503,9 @@ Source: [sbs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   `SBS_FPUIMR` and `SBS_CNSLCKR` take privileged accesses only.
 - `SBS_DBGCR` and `SBS_DBGLOCKR` take any access at HDPL0 and HDPL1 and are RAZ/WI above it,
   RM0481 14.5.4 and 14.5.5.
-- RM0481 11.8.25 gives `RCC_APB3RSTR` no SBS bit. The STM32H562, H563 and H573 SVDs place
-  SBSRST at bit 1, and the model serves it. A pulse keeps the security state of the unit and
-  returns every other register to its reset value. It keeps HDPL in `SBS_HDPLCR` and
-  `SBS_HDPLSR`, `SBS_SECCFGR`, the locks `SBS_CSLCKR` and `SBS_CNSLCKR`, `SBS_CFGR2`,
-  `SBS_DBGCR` and `SBS_DBGLOCKR`, which RM0481 14.5.4 and 14.5.5 clear by a debug reset, and
-  `SBS_RSSCMDR`, which RM0481 14.5.6 clears by a power-on reset. A Non-secure pulse leaves every
-  Secure setting and lock as it was.
+- The SBS has no RCC reset bit, RM0481 11.8.25. `RCC_APB3RSTR` bit 1, which the STM32H562, H563
+  and H573 SVDs name SBSRST, is reserved and reads 0, and a write of it leaves every SBS
+  register as it was, as read back on an STM32H573.
 - A power-on or brown-out reset restores every SBS register. Every other machine reset restores
   all but `SBS_RSSCMDR`.
 - Every SBS register but `SBS_HDPLCR`, `SBS_HDPLSR` and `SBS_SECCFGR` is storage: the functions

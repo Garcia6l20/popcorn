@@ -342,7 +342,7 @@ def test_every_rule_of_the_patch_file_applies(h573_sources: Sources) -> None:
         ip_renamed=19,
         aliased=104,
         fields_touched=408,
-        fields_dropped=48,
+        fields_dropped=49,
         fields_renamed=21,
         fields_added=2,
         cross_rules_added=877,
