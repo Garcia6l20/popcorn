@@ -173,6 +173,20 @@ def bonded_adc_channels(part: DbPart) -> dict[str, int]:
     return dict(sorted(adcs.items()))
 
 
+def reference_rank(part: DbPart) -> tuple[int, int, str]:
+    """Sort key putting the reference of a set of parts first: the most bonded GPIO pins, then
+    the largest first flash size, then the first RefName in sorted order."""
+    bonded = sum(mask.bit_count() for mask in bonded_pins(part).values())
+    return -bonded, -part.flash_kib[0], part.ref_name
+
+
+def die_ips(part: DbPart, donor: DbPart) -> list[DbIp]:
+    """IPs of @p donor whose instance @p part does not list, in @p donor's order: the die IP
+    identity of the instances @p part's package drops. Empty when @p donor is @p part."""
+    listed = {ip.instance for ip in part.ips}
+    return [ip for ip in donor.ips if ip.instance not in listed]
+
+
 def _parse_kib(el: Element, *, file: str, key: str) -> int:
     text = (el.text or "").strip()
     try:

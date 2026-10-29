@@ -1,12 +1,17 @@
-"""Assembles an PartDescription from Sources: expand the SVD, read the db and rzone, apply every
-patch, strip the peripheral prefix of register names, build the IRQ table, then assemble core,
-regions and peripherals, GPIO alternate functions and bonded pins included."""
+"""Assembles an PartDescription from Sources: expand the SVD, read the db, the die IP identity of
+the instances the package drops and the rzone, apply every patch, strip the peripheral prefix of
+register names, build the IRQ table, then assemble core, regions and peripherals, GPIO alternate
+functions and bonded pins included."""
 
 import logging
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from pathlib import Path
 
 from popcorn.stm32.description._cubemx import (
+    DbIp,
+    DbPart,
     Rzone,
     bonded_adc_channels,
     bonded_pins,
@@ -103,6 +108,20 @@ def _read_rzone_source(sources: Sources) -> Rzone:
     raise DescriptionError(sources.part, 0, "rzone", "an rzone file or an rzone facts file")
 
 
+def _die_ips(sources: Sources) -> list[DbIp]:
+    donors: dict[Path, DbPart] = {}
+    ips: list[DbIp] = []
+    for instance, path in sources.die_ip.items():
+        donor = donors.get(path)
+        if donor is None:
+            donor = donors[path] = read_part(path.read_bytes(), file=str(path))
+        found = [ip for ip in donor.ips if ip.instance == instance]
+        if not found:
+            raise DescriptionError(str(path), 0, f"Mcu.IP.{instance}", "an IP of this instance")
+        ips.append(found[0])
+    return ips
+
+
 def build_description(sources: Sources) -> PartDescription:
     """PartDescription assembled from @p sources."""
     description, _ = build_description_with_report(sources)
@@ -124,8 +143,9 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
     )
 
     svd_names = {p.name for p in svd.peripherals}
-    db_ips = {ip.instance: ip for ip in db_part.ips}
-    ip_map = instance_ips(db_part, svd_names, {})
+    joined = replace(db_part, ips=[*db_part.ips, *_die_ips(sources)])
+    db_ips = {ip.instance: ip for ip in joined.ips}
+    ip_map = instance_ips(joined, svd_names, {})
     real_ip_names = {ip.name for ip in db_ips.values()}
 
     peripherals: list[PeripheralDesc] = []

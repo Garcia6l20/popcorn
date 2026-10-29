@@ -28,6 +28,20 @@ The [part pages](generated/parts.md) list the instances with no model.
   reads 0 and drops writes, with one `model_warning` per block. The ROM tables read 0, so a ROM
   table walk ends at its first entry.
 
+## Instances a package drops
+
+A CubeMX part file lists the IPs its package brings out. An SVD instance that the part's file
+leaves out takes the IP name and version of the die reference, the part of the same die and SVD
+with the most bonded GPIO pins, then the largest flash, then the first RefName. The instance then
+gets that IP's patches and built-in model, as on the reference. UART5 and SAI2 on the STM32U575
+and U585 C packages and SPI4, UART8 and USART10 on the 64-pin STM32H5 parts are such instances.
+
+- This rule is inferred from the die. Its supporting reading is on a STM32U575ZITxQ, an LQFP144
+  that bonds no port I pin, where `GPIOI_MODER` reads 0x0000FFFF, the reset value of the 8 pins
+  of port I: an unbonded block keeps its registers.
+- An instance that no part of the die and SVD lists keeps the SVD group as its IP and an empty
+  version, and has no model.
+
 ## Memory map
 
 - Nothing is mapped at address 0, as on the STM32U5. Under the default `faults="stop"`, a load,

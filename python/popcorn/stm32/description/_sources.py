@@ -5,15 +5,18 @@ import hashlib
 import importlib.metadata
 import os
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from popcorn._errors import absent
 from popcorn.stm32.description._cubemx import (
     DbPart,
+    die_ips,
     gpio_modes_file_name,
     read_part,
+    reference_rank,
     rzone_file_name,
 )
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
@@ -37,7 +40,8 @@ class SearchPaths:
 class Sources:
     """Files a description is built from. The memory map and core values come from `rzone`
     when set, else from `rzone_facts`, and the source digests record only the one read. Neither
-    set is a DescriptionError at build time."""
+    set is a DescriptionError at build time. `die_ip` maps each instance `mcu_db` does not list
+    to the part file of the die reference that gives its IP identity, see die_ip_sources."""
 
     part: str
     svd: Path
@@ -47,6 +51,7 @@ class Sources:
     patches: list[Path]
     gpio_modes: Path | None = None
     rzone_facts: Path | None = None
+    die_ip: Mapping[str, Path] = field(default_factory=dict[str, Path])
 
 
 def _version_key(path: Path) -> tuple[int, ...]:
@@ -240,6 +245,91 @@ def _svd_path(
     return svd_dir / f"{stem}.svd"
 
 
+_DIE_IP_MEMO_SIZE = 64
+die_ip_memo: OrderedDict[tuple[object, ...], dict[str, Path]] = OrderedDict()
+
+
+def _stat_key(path: Path) -> tuple[str, int, int] | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (path.name, info.st_size, info.st_mtime_ns)
+
+
+def die_ip_sources(
+    db_part: DbPart,
+    mcu_db: Path,
+    svd_path: Path,
+    *,
+    core: str | None,
+    search: SearchPaths,
+) -> dict[str, Path]:
+    """Instance -> donor part file for the instances @p db_part's package drops. The donor is
+    the reference by reference_rank among the part files next to @p mcu_db of the same die
+    whose SVD, resolved as find_sources resolves it, has @p svd_path's file name. Candidates are
+    the part files whose name starts with that SVD's stem, wildcards matched, and SVDs are
+    resolved in rank order up to the first match. A part that resolves its SVD through an `[svd]`
+    patch exception or an explicit SVD of another name has no candidate. A part file that cannot
+    be read, that read_part refuses, or whose SVD does not resolve is no candidate. Maps every
+    instance die_ips gives, empty when @p db_part is the reference. Results are memoized in the
+    process, 64 entries, keyed on the inputs and the name, size and mtime of every candidate
+    file, so an edit of a candidate file gives a new scan."""
+    base = _CORE_SUFFIX_RE.sub("", svd_path.stem)
+    candidates = [
+        path
+        for path in sorted(mcu_db.parent.glob("*.xml"))
+        if path != mcu_db and _wildcard_prefix_matches(base, path.stem)
+    ]
+    key = (
+        mcu_db,
+        _stat_key(mcu_db),
+        svd_path.name,
+        core,
+        tuple(search.svd_dirs),
+        tuple(_stat_key(path) for path in candidates),
+    )
+    memoized = die_ip_memo.pop(key, None)
+    if memoized is not None:
+        die_ip_memo[key] = memoized
+        return dict(memoized)
+    found = _scan_die_ips(db_part, svd_path, candidates, core=core, search=search)
+    die_ip_memo[key] = found
+    if len(die_ip_memo) > _DIE_IP_MEMO_SIZE:
+        die_ip_memo.popitem(last=False)
+    return dict(found)
+
+
+def _scan_die_ips(
+    db_part: DbPart,
+    svd_path: Path,
+    candidates: Sequence[Path],
+    *,
+    core: str | None,
+    search: SearchPaths,
+) -> dict[str, Path]:
+    own_rank = reference_rank(db_part)
+    ranked: list[tuple[tuple[int, int, str], Path, DbPart]] = []
+    for path in candidates:
+        try:
+            candidate = read_part(path.read_bytes(), file=str(path))
+        except OSError, DescriptionError:
+            continue
+        rank = reference_rank(candidate)
+        if candidate.die == db_part.die and rank < own_rank:
+            ranked.append((rank, path, candidate))
+    for _, donor_path, donor in sorted(ranked, key=lambda entry: entry[0]):
+        try:
+            resolved = _svd_path(
+                donor.ref_name, core=core, svd=None, search=search, file=str(donor_path)
+            )
+        except DescriptionError:
+            continue
+        if resolved.name == svd_path.name:
+            return {ip.instance: donor_path for ip in die_ips(db_part, donor)}
+    return {}
+
+
 def find_sources(
     part: str,
     *,
@@ -252,11 +342,11 @@ def find_sources(
     """Sources of @p part: db files by exact db lookup, SVD by family-prefix matching across
     @p search's directories (or the spec 04 defaults, when @p search is None), CMSIS header
     optionally, every patch file in the package whose [match] selects this part and the resolved
-    SVD file name, and the GPIO modes file of the part's GPIO IP version when it exists, None
-    otherwise. MissingSource, a MissingInput and a DescriptionError, naming the path when a
-    required source does not exist: no CubeMX db, no existing SVD directory, an absent db, rzone
-    or SVD file. DescriptionError for an unknown part in an existing db, or a source that exists
-    but is not a file."""
+    SVD file name, the GPIO modes file of the part's GPIO IP version when it exists, None
+    otherwise, and the die_ip_sources donors. MissingSource, a MissingInput and a
+    DescriptionError, naming the path when a required source does not exist: no CubeMX db, no
+    existing SVD directory, an absent db, rzone or SVD file. DescriptionError for an unknown part
+    in an existing db, or a source that exists but is not a file."""
     search = search or default_search_paths()
     db_dir = cubemx_db or search.cubemx_db
     if absent(db_dir / "mcu"):
@@ -294,6 +384,7 @@ def find_sources(
         cmsis_header=cmsis_header_path,
         patches=[loaded.path for loaded in patches],
         gpio_modes=gpio_modes,
+        die_ip=die_ip_sources(db_part, mcu_db, svd_path, core=core, search=search),
     )
 
 
@@ -308,9 +399,10 @@ def pin_data_sources(
 ) -> Sources:
     """Sources of @p part for a shipped description: the part and GPIO modes files of a
     STM32_open_pin_data checkout at @p pin_data, laid out as a CubeMX db's `mcu/` and `mcu/IP/`,
-    the packaged rzone facts file in place of the rzone, and the SVD, CMSIS header and patches
-    as find_sources finds them. Reads no file of the CubeMX db. MissingSource naming the path
-    when the checkout, the part or modes file, or the SVD does not exist. DescriptionError for
+    the packaged rzone facts file in place of the rzone, and the SVD, CMSIS header, patches and
+    die_ip_sources donors, these from the checkout's part files, as find_sources finds them.
+    Reads no file of the CubeMX db. MissingSource naming the path when the checkout, the part or
+    modes file, or the SVD does not exist. DescriptionError for
     an unknown part, a part without a GPIO IP version, or no packaged facts file for its rzone."""
     search = search or default_search_paths()
     if absent(pin_data / "mcu"):
@@ -346,6 +438,7 @@ def pin_data_sources(
         patches=[loaded.path for loaded in patches],
         gpio_modes=gpio_modes,
         rzone_facts=facts,
+        die_ip=die_ip_sources(db_part, mcu_db, svd_path, core=core, search=search),
     )
 
 
@@ -355,8 +448,8 @@ def _sha256_bytes(data: bytes) -> str:
 
 def compute_source_digests(sources: Sources) -> dict[str, str]:
     """SHA-256 hex digest of each of @p sources's files, keyed svd and mcu_db, rzone when set
-    or else rzone_facts when set, cmsis_header and gpio_modes when present, and patch:<file
-    name> per patch file."""
+    or else rzone_facts when set, cmsis_header and gpio_modes when present, patch:<file name>
+    per patch file and die_ip:<instance> per die_ip entry."""
     digests = {
         "svd": _sha256_bytes(sources.svd.read_bytes()),
         "mcu_db": _sha256_bytes(sources.mcu_db.read_bytes()),
@@ -371,6 +464,8 @@ def compute_source_digests(sources: Sources) -> dict[str, str]:
         digests["gpio_modes"] = _sha256_bytes(sources.gpio_modes.read_bytes())
     for patch_path in sources.patches:
         digests[f"patch:{patch_path.name}"] = _sha256_bytes(patch_path.read_bytes())
+    for instance, donor_path in sources.die_ip.items():
+        digests[f"die_ip:{instance}"] = _sha256_bytes(donor_path.read_bytes())
     return digests
 
 
