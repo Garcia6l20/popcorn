@@ -293,8 +293,22 @@ Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 
 Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/i2c.cpp)
 
-- Target mode, 10-bit addressing, SMBus, PEC and the autonomous trigger are not modelled. The I2C
-  runs as a plain 7-bit controller.
+- The I2C runs as a 7-bit controller and as a 7-bit target on OAR1, OAR2 with its mask and the
+  general call, with clock stretching, NOSTRETCH and SBC. 10-bit addressing, SMBus, PEC, the
+  autonomous trigger, SBC or NOSTRETCH in controller mode and SBC with NOSTRETCH in target mode
+  warn once as unmodelled, `model_error` under strict peripherals.
+- A target stretches before a written byte's acknowledge after the byte instead: the acknowledge
+  and the release come at the end of the byte or at the RXDR read, up to one SCL period and the
+  acknowledge bit later than on silicon.
+- A STOP the controller queues during a target's stretch runs after the stretched byte's answer.
+  A STOP due inside a running byte drops that byte.
+- A target transmitter's TCR or empty-TXDR stretch holds only the next read byte. A STOP the
+  controller queues runs past it, and TCR stays set until a non-zero NBYTES write.
+- Inferred, unmeasured on a board: with NOSTRETCH and TXE 1 at the address acknowledge, TXIS sets
+  only when the firmware writes it. TXIS set before a NACK or a STOP stays until a TXDR write.
+  With SBC and RELOAD clear, bytes past NBYTES are acknowledged as CR2.NACK says, with no TCR. An
+  SBC transmitter with RELOAD sets TCR after the acknowledge of the NBYTES-th byte. A NOSTRETCH
+  receive overrun leaves CR2.NACK as it is.
 - PE set during a bus hold reads BUSY 1 at once. Silicon waits for the next START.
 - A transfer that meets a hold waits. On silicon it would lose arbitration. A target's ARLO reply
   models that case.

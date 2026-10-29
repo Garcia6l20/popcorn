@@ -3072,34 +3072,6 @@ TEST_CASE("a data phase with no acknowledged address answers NACK or 0xFF and lo
   }
 }
 
-TEST_CASE("a read phase after an acknowledged address logs once as not modelled, strict refuses")
-{
-  for(auto const& part : target_parts)
-  {
-    CAPTURE(part.name);
-    target_rig r{part};
-    r.listen();
-    auto const base = r.now() + us;
-    r.start(own, true, base, 1);
-    r.read(true, base, 2);
-    r.read(false, base, 3);
-    r.run_until(base + 3 * target_ps + us);
-    CHECK(r.sink->log == std::vector<std::string>{"answer 1 ack", "answer 2 ack", "answer 3 nack"});
-    CHECK(r.sink->answers[1].byte == 0xFF);
-    CHECK(r.warnings("TXDR") == 1);
-    target_rig strict{part, true};
-    strict.listen();
-    auto const at = strict.now() + us;
-    strict.start(own, true, at, 1);
-    strict.read(true, at, 2);
-    CHECK_THROWS_AS(
-        std::ignore = strict.f->run(
-            {.max_instructions = icount{1'000'000'000}, .until_time = vtime{at + 2 * target_ps}}),
-        popcorn::model_error);
-    CHECK(strict.sink->answers.size() == 2);
-  }
-}
-
 TEST_CASE("a 10-bit own address logs once as not modelled and is never matched, strict refuses")
 {
   for(auto const& part : target_parts)
@@ -3886,5 +3858,709 @@ TEST_CASE("a STOP on another lane due at the ADDRCF store that releases an ADDR 
     CHECK(r.get("ISR", "STOPF") == 1);
     CHECK(r.get("ISR", "BUSY") == 0);
     CHECK(port_due(*r.f).empty());
+  }
+}
+
+namespace
+{
+constexpr std::uint32_t txe_bit  = 1u << 0;
+constexpr std::uint32_t txis_bit = 1u << 1;
+
+void enable_with(target_rig const& r, std::string_view field)
+{
+  auto const b = r.b();
+  b.set("CR1", "PE", 0);
+  b.set("CR1", field, 1);
+  b.set("CR1", "PE", 1);
+}
+
+void write_isr(target_rig const& r, std::uint32_t value)
+{
+  auto const b = r.b();
+  b.write(b.at("I2C1", "ISR"), value);
+}
+}
+
+TEST_CASE("a read sends TXDR bytes, TXIS asks at the address and after each copy, NACK stops it")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen();
+    b.set("CR1", "TXIE", 1);
+    b.set("CR1", "NACKIE", 1);
+    b.send(0xC1);
+    REQUIRE(r.get("ISR", "TXE") == 0);
+    auto const base = r.now() + us;
+    r.start(own, true, base, 1);
+    r.read(true, base, 2);
+    r.read(true, base, 3);
+    r.read(false, base, 4);
+    r.stop(base + 4 * target_ps, 5);
+    auto const asks = [&](std::uint64_t end, std::uint8_t next) {
+      r.run_until(end - r.period());
+      CHECK_FALSE(pending(*r.f, part.event_irq));
+      CHECK(r.get("ISR", "TXIS") == 0);
+      r.run_until(end + r.period());
+      CHECK(pending(*r.f, part.event_irq));
+      CHECK(r.get("ISR", "TXIS") == 1);
+      CHECK(r.get("ISR", "TXE") == 1);
+      b.send(next);
+      CHECK(r.get("ISR", "TXIS") == 0);
+      unpend(*r.f, part.event_irq);
+    };
+    asks(base + target_ps, 0xC2);
+    asks(base + 2 * target_ps, 0xC3);
+    asks(base + 3 * target_ps, 0xC4);
+    r.run_until(base + 4 * target_ps - r.period());
+    CHECK_FALSE(pending(*r.f, part.event_irq));
+    CHECK(r.get("ISR", "NACKF") == 0);
+    r.run_until(base + 4 * target_ps + r.period());
+    CHECK(pending(*r.f, part.event_irq));
+    CHECK(r.get("ISR", "NACKF") == 1);
+    CHECK(r.get("ISR", "TXIS") == 0);
+    CHECK(r.get("ISR", "TXE") == 0);
+    CHECK(r.get("ISR", "STOPF") == 1);
+    CHECK(r.get("ISR", "BUSY") == 0);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, true,  0xFF, base + target_ps    },
+            {2, on_read,    true,  0xC1, base + 2 * target_ps},
+            {3, on_read,    true,  0xC2, base + 3 * target_ps},
+            {4, on_read,    false, 0xC3, base + 4 * target_ps},
+    });
+    CHECK(r.warnings("TXDR") == 0);
+    CHECK(r.sink->drops.empty());
+  }
+}
+
+TEST_CASE("an empty TXDR holds a read byte to the TXDR write, a later read queued before or during")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    std::vector<std::vector<heard>>     answers;
+    std::vector<std::vector<std::byte>> bytes;
+    for(bool const during : {false, true})
+    {
+      CAPTURE(during);
+      target_rig r{part};
+      auto const b = r.b();
+      r.listen();
+      auto const base = r.now() + us;
+      r.start(own, true, base, 1);
+      r.read(true, base, 2);
+      if(not during)
+      {
+        r.read(false, base, 3);
+      }
+      r.run_until(base + target_ps + r.period());
+      CHECK(r.get("ISR", "TXIS") == 1);
+      CHECK(r.get("ISR", "TXE") == 1);
+      if(during)
+      {
+        r.read(false, base, 3);
+      }
+      auto const write_at = base + target_ps + 40 * us;
+      r.run_until(write_at);
+      CHECK(r.sink->answers.size() == 1);
+      CHECK(port_due(*r.f).empty());
+      b.send(0xD1);
+      CHECK(r.get("ISR", "TXIS") == 1);
+      auto const after = port_due(*r.f);
+      REQUIRE(after.size() == 2);
+      CHECK(after[0].due_ps == write_at + target_ps);
+      CHECK(after[1].due_ps == write_at + target_ps);
+      b.send(0xD2);
+      r.run_until(write_at + 2 * target_ps + us);
+      CHECK(
+          r.sink->answers
+          == std::vector<heard>{
+              {1, on_address, true,  0xFF, base + target_ps        },
+              {2, on_read,    true,  0xD1, write_at + target_ps    },
+              {3, on_read,    false, 0xD2, write_at + 2 * target_ps},
+      });
+      CHECK(r.get("ISR", "NACKF") == 1);
+      answers.push_back(r.sink->answers);
+      bytes.push_back(r.model_bytes());
+    }
+    CHECK(answers[0] == answers[1]);
+    CHECK(bytes[0] == bytes[1]);
+  }
+}
+
+TEST_CASE("a STOP queued during a read stretch runs after the held byte's answer, not cutting it")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, true, base, 1);
+    r.read(false, base, 2);
+    r.stop(base + 2 * target_ps + 5 * us, 3);
+    r.run_until(base + target_ps + r.period());
+    REQUIRE(r.get("ISR", "TXIS") == 1);
+    REQUIRE(r.get("ISR", "TXE") == 1);
+    auto const write_at = base + 2 * target_ps + 40 * us;
+    r.run_until(write_at);
+    CHECK(r.sink->answers.size() == 1);
+    CHECK(r.get("ISR", "STOPF") == 0);
+    b.send(0xD1);
+    r.run_until(write_at + target_ps + us);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, true,  0xFF, base + target_ps    },
+            {2, on_read,    false, 0xD1, write_at + target_ps},
+    });
+    CHECK(r.sink->drops.empty());
+    CHECK(r.get("ISR", "NACKF") == 1);
+    CHECK(r.get("ISR", "BERR") == 0);
+    CHECK(r.get("ISR", "STOPF") == 1);
+  }
+}
+
+TEST_CASE("with NOSTRETCH, ADDR holds no SCL, TXIS follows a copy and an empty TXDR sends 0xFF")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const preload : {false, true})
+    {
+      CAPTURE(preload);
+      target_rig r{part};
+      auto const b = r.b();
+      r.listen(own, true);
+      enable_with(r, "NOSTRETCH");
+      if(preload)
+      {
+        b.send(0xE1);
+      }
+      auto const base = r.now() + us;
+      r.start(own, true, base, 1);
+      r.read(true, base, 2);
+      r.read(false, base, 3);
+      r.run_until(base + target_ps + r.period());
+      CHECK(
+          r.sink->answers
+          == std::vector<heard>{
+              {1, on_address, true, 0xFF, base + target_ps}
+      });
+      CHECK(r.get("ISR", "ADDR") == 1);
+      CHECK(r.get("ISR", "TXIS") == (preload ? 1u : 0u));
+      r.run_until(base + 2 * target_ps - r.period());
+      CHECK(r.get("ISR", "OVR") == (preload ? 0u : 1u));
+      r.run_until(base + 3 * target_ps + us);
+      REQUIRE(r.sink->answers.size() == 3);
+      CHECK(
+          r.sink->answers[1]
+          == heard{
+              2, on_read, true, preload ? std::uint8_t{0xE1} : std::uint8_t{0xFF},
+              base + 2 * target_ps});
+      CHECK(r.sink->answers[2] == heard{3, on_read, false, 0xFF, base + 3 * target_ps});
+      CHECK(r.get("ISR", "OVR") == 1);
+    }
+  }
+}
+
+TEST_CASE("with NOSTRETCH, STOPF at the first byte or a full RXDR sets OVR, firmware sets TXIS")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const cleared : {false, true})
+    {
+      CAPTURE(cleared);
+      target_rig r{part};
+      auto const b = r.b();
+      r.listen();
+      enable_with(r, "NOSTRETCH");
+      auto const base = r.now() + us;
+      r.start(own, false, base, 1);
+      r.stop(base + target_ps, 2);
+      r.run_until(base + target_ps + us);
+      REQUIRE(r.get("ISR", "STOPF") == 1);
+      if(cleared)
+      {
+        b.set("ICR", "STOPCF", 1);
+      }
+      b.send(0xE2);
+      auto const at = r.now() + us;
+      r.start(own, true, at, 3);
+      r.read(false, at, 4);
+      r.run_until(at + 2 * target_ps + us);
+      CHECK(r.sink->answers.back() == heard{4, on_read, false, 0xE2, at + 2 * target_ps});
+      CHECK(r.get("ISR", "OVR") == (cleared ? 0u : 1u));
+    }
+    {
+      target_rig r{part};
+      auto const b = r.b();
+      r.listen();
+      enable_with(r, "NOSTRETCH");
+      auto const base = r.now() + us;
+      r.start(own, false, base, 1);
+      r.write(0x11, base, 2);
+      r.write(0x22, base, 3);
+      r.run_until(base + 3 * target_ps + us);
+      CHECK(
+          r.sink->answers
+          == std::vector<heard>{
+              {1, on_address, true,  0xFF, base + target_ps    },
+              {2, on_write,   true,  0xFF, base + 2 * target_ps},
+              {3, on_write,   false, 0xFF, base + 3 * target_ps},
+      });
+      CHECK(r.get("ISR", "OVR") == 1);
+      CHECK(b.receive() == 0x11);
+      CHECK(r.get("ISR", "RXNE") == 0);
+    }
+    for(bool const stretch : {false, true})
+    {
+      CAPTURE(stretch);
+      target_rig r{part};
+      r.listen();
+      if(not stretch)
+      {
+        enable_with(r, "NOSTRETCH");
+      }
+      write_isr(r, txis_bit);
+      CHECK(r.get("ISR", "TXIS") == (stretch ? 0u : 1u));
+      r.b().send(0x55);
+      CHECK(r.get("ISR", "TXIS") == 0);
+    }
+    {
+      target_rig r{part};
+      r.listen();
+      enable_with(r, "NOSTRETCH");
+      r.b().set("CR1", "PE", 0);
+      write_isr(r, txis_bit);
+      CHECK(r.get("ISR", "TXIS") == 0);
+      r.b().set("CR1", "PE", 1);
+      CHECK(r.get("ISR", "TXIS") == 0);
+    }
+  }
+}
+
+TEST_CASE("SBC with RELOAD stretches each received byte at TCR, the NBYTES write sends its ACK")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen(own, true);
+    enable_with(r, "SBC");
+    b.set("CR1", "TCIE", 1);
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.write(0x11, base, 2);
+    r.write(0x22, base, 3);
+    r.run_until(base + target_ps + r.period());
+    REQUIRE(r.get("ISR", "ADDR") == 1);
+    b.set("CR2", "RELOAD", 1);
+    b.set("CR2", "NBYTES", 1);
+    auto const released = r.now();
+    b.set("ICR", "ADDRCF", 1);
+    r.run_until(released + target_ps - r.period());
+    CHECK_FALSE(pending(*r.f, part.event_irq));
+    r.run_until(released + target_ps + r.period());
+    CHECK(pending(*r.f, part.event_irq));
+    CHECK(r.get("ISR", "TCR") == 1);
+    CHECK(r.get("ISR", "RXNE") == 1);
+    r.run_until(released + target_ps + 10 * us);
+    CHECK(r.sink->answers.size() == 1);
+    CHECK(b.receive() == 0x11);
+    CHECK(r.sink->answers.size() == 1);
+    b.set("CR2", "NBYTES", 0);
+    CHECK(r.get("ISR", "TCR") == 1);
+    r.run_until(r.now() + 10 * us);
+    CHECK(r.sink->answers.size() == 1);
+    b.set("CR2", "NACK", 1);
+    auto const first = r.now();
+    b.set("CR2", "NBYTES", 1);
+    CHECK(r.get("ISR", "TCR") == 0);
+    r.run_until(first + target_ps + 10 * us);
+    CHECK(r.get("ISR", "TCR") == 1);
+    CHECK(b.receive() == 0x22);
+    auto const second = r.now();
+    b.set("CR2", "NBYTES", 1);
+    r.run_until(second + us);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, true,  0xFF, released},
+            {2, on_write,   false, 0xFF, first   },
+            {3, on_write,   true,  0xFF, second  },
+    });
+    CHECK(r.get("CR2", "NACK") == 0);
+    CHECK(r.get("ISR", "TCR") == 0);
+  }
+}
+
+TEST_CASE("SBC with RELOAD asks NBYTES TXIS, stretches at TCR and resumes at the NBYTES write")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen(own, true);
+    enable_with(r, "SBC");
+    auto const base = r.now() + us;
+    r.start(own, true, base, 1);
+    r.read(true, base, 2);
+    r.read(true, base, 3);
+    r.read(false, base, 4);
+    r.run_until(base + target_ps + r.period());
+    REQUIRE(r.get("ISR", "ADDR") == 1);
+    b.set("CR2", "RELOAD", 1);
+    b.set("CR2", "NBYTES", 2);
+    auto const released = r.now();
+    b.set("ICR", "ADDRCF", 1);
+    CHECK(r.get("ISR", "TXIS") == 1);
+    b.send(0xA1);
+    CHECK(r.get("ISR", "TXIS") == 1);
+    b.send(0xA2);
+    CHECK(r.get("ISR", "TXIS") == 0);
+    r.run_until(released + 2 * target_ps + r.period());
+    CHECK(r.get("ISR", "TCR") == 1);
+    CHECK(r.get("ISR", "TXIS") == 0);
+    r.run_until(released + 2 * target_ps + 20 * us);
+    CHECK(r.sink->answers.size() == 3);
+    auto const reload = r.now();
+    b.set("CR2", "NBYTES", 1);
+    CHECK(r.get("ISR", "TCR") == 0);
+    CHECK(r.get("ISR", "TXIS") == 1);
+    b.send(0xA3);
+    CHECK(r.get("ISR", "TXIS") == 0);
+    r.run_until(reload + target_ps + us);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, true,  0xFF, released                },
+            {2, on_read,    true,  0xA1, released + target_ps    },
+            {3, on_read,    true,  0xA2, released + 2 * target_ps},
+            {4, on_read,    false, 0xA3, reload + target_ps      },
+    });
+    CHECK(r.get("ISR", "NACKF") == 1);
+  }
+}
+
+TEST_CASE("SBC with RELOAD clear stops the count at 0 and acknowledges bytes as CR2.NACK says")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen(own, true);
+    enable_with(r, "SBC");
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.write(0x11, base, 2);
+    r.write(0x22, base, 3);
+    r.run_until(base + target_ps + r.period());
+    REQUIRE(r.get("ISR", "ADDR") == 1);
+    b.set("CR2", "NBYTES", 1);
+    auto const released = r.now();
+    b.set("ICR", "ADDRCF", 1);
+    r.run_until(released + target_ps + us);
+    CHECK(r.get("ISR", "TCR") == 0);
+    CHECK(b.receive() == 0x11);
+    r.run_until(released + 2 * target_ps + us);
+    CHECK(r.get("ISR", "TCR") == 0);
+    CHECK(b.receive() == 0x22);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, true, 0xFF, released                },
+            {2, on_write,   true, 0xFF, released + target_ps    },
+            {3, on_write,   true, 0xFF, released + 2 * target_ps},
+    });
+  }
+}
+
+TEST_CASE("a STOP after a transmitter's TCR byte leaves TCR to the NBYTES write, which clears it")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen(own, true);
+    enable_with(r, "SBC");
+    b.set("CR1", "TCIE", 1);
+    auto const base = r.now() + us;
+    r.start(own, true, base, 1);
+    r.read(true, base, 2);
+    r.run_until(base + target_ps + r.period());
+    REQUIRE(r.get("ISR", "ADDR") == 1);
+    b.set("CR2", "RELOAD", 1);
+    b.set("CR2", "NBYTES", 1);
+    auto const released = r.now();
+    b.set("ICR", "ADDRCF", 1);
+    b.send(0xA1);
+    r.stop(released + target_ps + 5 * us, 3);
+    r.run_until(released + target_ps + 10 * us);
+    CHECK(r.sink->answers.back() == heard{2, on_read, true, 0xA1, released + target_ps});
+    CHECK(r.sink->drops.empty());
+    REQUIRE(r.get("ISR", "STOPF") == 1);
+    CHECK(r.get("ISR", "TCR") == 1);
+    b.set("ICR", "STOPCF", 1);
+    unpend(*r.f, part.event_irq);
+    r.run_until(r.now() + r.period());
+    CHECK(pending(*r.f, part.event_irq));
+    b.set("CR2", "NBYTES", 1);
+    CHECK(r.get("ISR", "TCR") == 0);
+    CHECK(r.get("ISR", "TXIS") == 0);
+    unpend(*r.f, part.event_irq);
+    r.run_until(r.now() + 10 * r.period());
+    CHECK_FALSE(pending(*r.f, part.event_irq));
+  }
+}
+
+TEST_CASE("a target reset between the read address and the second read byte sends 0xFF")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const machine : {false, true})
+    {
+      CAPTURE(machine);
+      target_rig r{part};
+      auto const b = r.b();
+      r.listen();
+      b.send(0xC1);
+      auto const base = r.now() + us;
+      r.start(own, true, base, 1);
+      r.read(true, base, 2);
+      r.run_until(base + 2 * target_ps + us);
+      REQUIRE(r.sink->answers.size() == 2);
+      CHECK(r.sink->answers[1].byte == 0xC1);
+      if(machine)
+      {
+        r.reset(popcorn::reset_kind::software);
+      }
+      else
+      {
+        r.rcc_pulse();
+      }
+      r.listen();
+      b.send(0x99);
+      auto const at = r.now() + us;
+      r.read(true, at, 3);
+      r.run_until(at + target_ps + us);
+      CHECK(r.sink->answers.back() == heard{3, on_read, true, 0xFF, at + target_ps});
+      CHECK(r.get("ISR", "TXE") == 0);
+      CHECK(r.sink->drops.empty());
+    }
+  }
+}
+
+TEST_CASE("a snapshot inside a read stretch restores the held byte and its release")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, true, base, 1);
+    r.read(true, base, 2);
+    r.read(false, base, 3);
+    r.run_until(base + target_ps + 10 * us);
+    REQUIRE(r.sink->answers.size() == 1);
+    auto const saved    = core::encode_snapshot(r.f->target->snapshot().data());
+    auto const bytes    = r.model_bytes();
+    auto const write_at = base + target_ps + 30 * us;
+    auto const finish   = [&](target_rig const& one) {
+      one.run_until(write_at);
+      one.b().send(0xD1);
+      one.b().send(0xD2);
+      one.run_until(write_at + 2 * target_ps + us);
+    };
+    finish(r);
+    target_rig other{part};
+    other.f->target->restore(core::snapshot{core::decode_snapshot(saved)});
+    CHECK(other.model_bytes() == bytes);
+    finish(other);
+    auto const expected = std::vector<heard>{
+        {2, on_read, true,  0xD1, write_at + target_ps    },
+        {3, on_read, false, 0xD2, write_at + 2 * target_ps},
+    };
+    CHECK(other.sink->answers == expected);
+    REQUIRE(r.sink->answers.size() == 3);
+    CHECK(std::vector<heard>{r.sink->answers.begin() + 1, r.sink->answers.end()} == expected);
+  }
+}
+
+TEST_CASE("an RCC reset drops a running read at its end and a held read one phase after the reset")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    {
+      target_rig r{part};
+      r.listen();
+      r.b().send(0xC1);
+      auto const base = r.now() + us;
+      r.start(own, true, base, 1);
+      r.read(true, base, 2);
+      r.read(true, base, 3);
+      r.run_until(base + target_ps + target_ps / 2);
+      REQUIRE(port_due(*r.f).size() == 2);
+      r.rcc_pulse();
+      r.run_until(base + 3 * target_ps + us);
+      CHECK(
+          r.sink->drops
+          == std::vector<lost>{
+              {2, on_read, base + 2 * target_ps}
+      });
+      CHECK(r.sink->answers.back() == heard{3, on_read, true, 0xFF, base + 3 * target_ps});
+    }
+    std::vector<std::vector<heard>>     answers;
+    std::vector<std::vector<std::byte>> bytes;
+    for(bool const after : {false, true})
+    {
+      CAPTURE(after);
+      target_rig r{part};
+      r.listen();
+      auto const base = r.now() + us;
+      r.start(own, true, base, 1);
+      r.read(true, base, 2);
+      if(not after)
+      {
+        r.read(true, base, 3);
+      }
+      r.run_until(base + target_ps + 10 * us);
+      REQUIRE(r.sink->answers.size() == 1);
+      auto const reset_at = r.now();
+      r.rcc_pulse();
+      if(after)
+      {
+        r.read(true, base, 3);
+      }
+      r.run_until(reset_at + 2 * target_ps + us);
+      CHECK(
+          r.sink->drops
+          == std::vector<lost>{
+              {2, on_read, reset_at + target_ps}
+      });
+      CHECK(r.sink->answers.back() == heard{3, on_read, true, 0xFF, reset_at + 2 * target_ps});
+      answers.push_back(r.sink->answers);
+      bytes.push_back(r.model_bytes());
+      r.listen();
+      auto const again = r.now() + us;
+      r.start(own, true, again, 4);
+      r.run_until(again + target_ps + us);
+      CHECK(r.sink->answers.back() == heard{4, on_address, true, 0xFF, again + target_ps});
+    }
+    CHECK(answers[0] == answers[1]);
+    CHECK(bytes[0] == bytes[1]);
+  }
+}
+
+TEST_CASE("PE clear releases a held read byte, which reads 0xFF")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, true, base, 1);
+    r.read(true, base, 2);
+    r.read(false, base, 3);
+    r.run_until(base + target_ps + 10 * us);
+    REQUIRE(r.get("ISR", "TXIS") == 1);
+    auto const clear_at = r.now();
+    b.set("CR1", "PE", 0);
+    CHECK(r.get("ISR", "TXIS") == 0);
+    r.run_until(clear_at + 2 * target_ps + us);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, true,  0xFF, base + target_ps        },
+            {2, on_read,    true,  0xFF, clear_at + target_ps    },
+            {3, on_read,    false, 0xFF, clear_at + 2 * target_ps},
+    });
+    CHECK(r.get("ISR", "NACKF") == 0);
+  }
+}
+
+TEST_CASE("a machine reset during a read stretch drops the held byte one phase after it, rebased")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.after_system_reset();
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, true, base, 1);
+    r.read(true, base, 2);
+    r.run_until(base + target_ps + 10 * us);
+    REQUIRE(r.sink->answers.size() == 1);
+    r.reset(popcorn::reset_kind::software);
+    r.run_until(target_ps + us);
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {2, on_read, target_ps}
+    });
+  }
+}
+
+TEST_CASE("TXIS asked before a STOP stays set until TXDR is written")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, true, base, 1);
+    r.stop(base + target_ps, 2);
+    r.run_until(base + target_ps + 10 * us);
+    CHECK(r.get("ISR", "STOPF") == 1);
+    CHECK(r.get("ISR", "TXIS") == 1);
+    r.b().send(0x55);
+    CHECK(r.get("ISR", "TXIS") == 0);
+    CHECK(r.get("ISR", "TXE") == 0);
+  }
+}
+
+TEST_CASE("the target firmware sends bytes on TXIS, logs the NACK of the last and the STOP")
+{
+  constexpr std::uint32_t nacked_log = 0x4AC0;
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.f->set("pc", sym(part.firmware, "target"));
+    r.run_until(r.now() + 200 * us);
+    REQUIRE(r.get("CR1", "TXIE") == 1);
+    auto const base = r.now() + us;
+    r.start(own, true, base, 1);
+    r.read(true, base, 2);
+    r.read(true, base, 3);
+    r.read(false, base, 4);
+    r.stop(base + 4 * target_ps + 50 * us, 5);
+    r.run_until(base + 4 * target_ps + 100 * us);
+    std::vector<std::uint8_t> sent;
+    for(auto const& one : r.sink->answers | std::views::drop(1))
+    {
+      sent.push_back(one.byte);
+    }
+    CHECK(sent == std::vector<std::uint8_t>{0xB0, 0xB1, 0xB2});
+    CHECK(r.sink->log.front() == "answer 1 ack");
+    CHECK(r.sink->drops.empty());
+    CHECK(r.f->log() == std::vector<std::uint32_t>{addr_log | 0x85, nacked_log, stop_log});
   }
 }

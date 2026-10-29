@@ -180,6 +180,20 @@ auto held_unit(std::span<i2c_port_entry const> entries) -> std::optional<std::ui
   return out;
 }
 
+struct i2c_transmit
+{
+  std::uint8_t  target{};
+  std::uint8_t  shift{};
+  std::uint8_t  loaded{};
+  std::uint8_t  wait{};
+  std::uint8_t  ask{};
+  std::uint8_t  first{};
+  std::uint32_t left{};
+  std::uint32_t asks{};
+
+  friend auto operator==(i2c_transmit const&, i2c_transmit const&) -> bool = default;
+};
+
 struct i2c_state
 {
   std::uint32_t                       generation{};
@@ -200,6 +214,7 @@ struct i2c_state
   std::uint8_t                        addressed{};
   std::uint8_t                        involved{};
   std::uint8_t                        wire_busy{};
+  i2c_transmit                        tx;
   i2c_port                            port;
   std::vector<std::vector<std::byte>> devices;
 
@@ -256,52 +271,78 @@ auto lower(std::string_view name) -> std::string
  *        with AUTOCR.TCDMAEN or TCR with AUTOCR.TCRDMAEN. The targets are saved and loaded with
  *        the model.
  *
- *        Target mode, address and write phases, RM0456 65.4.8 and RM0481 53.4.8: the controller of
- *        board::i2c_controllers queues i2c_controller_port entries on the lane it names, each with
- *        a unit above the last one. The port runs the entries of one instruction count in unit
- *        order. A phase starts at the latest of its time, the end of the phases queued before it
- *        and the time of the STOPs queued before it. A START with PE set sets BUSY until the STOP.
- *        At the end of an address phase the address matches OAR1 with OA1EN and OA1MODE clear, OAR2
- *        with OA2EN and its OA2MSK low bits ignored, no reserved address 0b0000xxx or 0b1111xxx
- *        once OA2MSK is not 0, and the address byte 0b00000000 with GCEN, each read at that time,
- *        RM0456 65.9.3, 65.9.4 and 65.9.1, RM0481 53.9.3, 53.9.4 and 53.9.1. A match while PE is
- *        set, set already at the START, and no transfer of the I2C runs as controller is
- *        acknowledged: ADDCODE takes the address, DIR the direction and ADDR sets unless ADDRACLR
- *        is set, RM0456 65.9.7, RM0481 53.9.7. Any other address phase, PE clear included, answers
- *        NACK, as does the I2C held in reset. An address match clears CR2.NACK. The answer reaches
- *        the controller at the end of the phase, or, while ADDR is set, once ADDRCF or PE = 0
- *        clears it: SCL stays stretched after the acknowledge and every later phase and STOP waits
- *        for the release, RM0456 65.4.8, RM0481 53.4.8. A written byte after an acknowledged write
- *        address lands in RXDR and sets RXNE at the end of its phase, RM0456 65.4.8 "Target
- *        receiver", RM0481 53.4.8. The I2C acknowledges it unless CR2.NACK is set, and a NACK sent
- *        clears CR2.NACK, RM0456 65.9.2, RM0481 53.9.2. While RXNE is set, the next byte stays in
- *        the shift register and SCL stretched, and the read of RXDR moves it into RXDR, sets RXNE
- *        again, takes the acknowledge from CR2.NACK at that time and releases SCL. The answer then
- *        reaches the controller at the read. Silicon copies a byte into RXDR after its eighth SCL
- *        pulse and stretches between the eighth and the ninth, RM0456 65.4.7, RM0481 53.4.7: the
- *        model sets RXNE and releases a stretched byte after the ninth, one bit later. PE = 0
- *        releases a stretched byte with NACK. A written byte with no acknowledged write address
- *        answers NACK and reaches no register. A read phase answers 0xFF. After an acknowledged
- *        address it logs once that target read phases are not modelled, and raises model_error
- *        under strict_peripherals. A STOP sets STOPF when an address of the transfer was
+ *        Target mode, address, write and read phases, RM0456 65.4.8 and RM0481 53.4.8: the
+ *        controller of board::i2c_controllers queues i2c_controller_port entries on the lane it
+ *        names, each with a unit above the last one. The port runs the entries of one instruction
+ *        count in unit order. A phase starts at the latest of its time, the end of the phases
+ *        queued before it and the time of the STOPs queued before it. A START with PE set sets BUSY
+ *        until the STOP. At the end of an address phase the address matches OAR1 with OA1EN and
+ *        OA1MODE clear, OAR2 with OA2EN and its OA2MSK low bits ignored, no reserved address
+ *        0b0000xxx or 0b1111xxx once OA2MSK is not 0, and the address byte 0b00000000 with GCEN,
+ *        each read at that time, RM0456 65.9.3, 65.9.4 and 65.9.1, RM0481 53.9.3, 53.9.4 and
+ *        53.9.1. A match while PE is set, set already at the START, and no transfer of the I2C runs
+ *        as controller is acknowledged: ADDCODE takes the address, DIR the direction and ADDR sets
+ *        unless ADDRACLR is set, RM0456 65.9.7, RM0481 53.9.7. Any other address phase, PE clear
+ *        included, answers NACK, as does the I2C held in reset. An address match clears CR2.NACK.
+ *        The answer reaches the controller at the end of the phase, or, while ADDR is set, once
+ *        ADDRCF or PE = 0 clears it: SCL stays stretched after the acknowledge and every later
+ *        phase and STOP waits for the release, RM0456 65.4.8, RM0481 53.4.8. A written byte after
+ *        an acknowledged write address lands in RXDR and sets RXNE at the end of its phase, RM0456
+ *        65.4.8 "Target receiver", RM0481 53.4.8. The I2C acknowledges it unless CR2.NACK is set,
+ *        and a NACK sent clears CR2.NACK, RM0456 65.9.2, RM0481 53.9.2. While RXNE is set, the next
+ *        byte stays in the shift register and SCL stretched, and the read of RXDR moves it into
+ *        RXDR, sets RXNE again, takes the acknowledge from CR2.NACK at that time and releases SCL.
+ *        The answer then reaches the controller at the read. Silicon copies a byte into RXDR after
+ *        its eighth SCL pulse and stretches between the eighth and the ninth, RM0456 65.4.7, RM0481
+ *        53.4.7: the model sets RXNE and releases a stretched byte after the ninth, one bit later.
+ *        PE = 0 releases a stretched byte with NACK. A written byte with no acknowledged write
+ *        address answers NACK and reaches no register. After an acknowledged read address the I2C
+ *        is a target transmitter, RM0456 65.4.8 "Target transmitter", RM0481 53.4.8. At the release
+ *        of the address and after each byte the controller acknowledges, the shift register takes
+ *        TXDR when TXE is 0, which sets TXE, and TXIS sets to ask for the next byte. When TXE is 1
+ *        there, TXIS sets unless NOSTRETCH is set, and SCL stays stretched before the next read
+ *        byte until the TXDR write, which loads the byte and starts it. A TXDR write clears TXIS. A
+ *        read phase sends the loaded byte and answers it with the controller's acknowledge at its
+ *        end. A NACK sets NACKF and ends the transmission, RM0456 65.9.7, RM0481 53.9.7: no later
+ *        load and no later TXIS. TXDR keeps its byte, and a TXIS already set stays until a TXDR
+ *        write, at a NACK and at a STOP alike. A read phase with no acknowledged read address,
+ *        after a NACK or with PE clear answers 0xFF, and PE = 0 starts a held read byte at once,
+ *        read as 0xFF. With NOSTRETCH, RM0456 65.4.8 "Target without clock stretching" and 65.4.17,
+ *        RM0481 53.4.8 and 53.4.17, ADDR holds no SCL, a read byte that starts with the shift
+ *        register empty sends 0xFF and sets OVR, the first read byte of a transfer sets OVR while
+ *        STOPF is set, a written byte that ends while RXNE is set is lost with NACK and sets OVR,
+ *        and a firmware write of ISR.TXIS sets TXIS, RM0456 65.9.7. With SBC and NOSTRETCH clear,
+ *        RM0456 65.4.8 "Target byte control mode", RM0481 53.4.8, the address release takes NBYTES.
+ *        Each received byte counts it down, and the byte that ends it with RELOAD set lands in
+ *        RXDR, sets TCR and holds SCL before its acknowledge until a non-zero NBYTES write, which
+ *        takes the acknowledge from CR2.NACK and reloads the count. A transmitter asks TXIS at most
+ *        NBYTES times, and the acknowledged byte that ends NBYTES with RELOAD set sets TCR and
+ *        holds the next read byte until the NBYTES write, which reloads the count and loads the
+ *        shift register. A non-zero NBYTES write clears TCR whatever came between, RM0456 65.9.7,
+ *        RM0481 53.9.7, a STOP included: a transmitter's TCR or empty-TXDR stretch holds only the
+ *        next read byte, so a STOP the controller queues runs past it, and TCR stays set until that
+ *        write. A STOP that waits for a stretch runs after the stretched byte's answer, the end of
+ *        a held read byte included. With RELOAD clear the count stops at 0 and bytes are
+ *        acknowledged as without SBC. A STOP sets STOPF when an address of the transfer was
  *        acknowledged, unless STOPFACLR is set, and clears CR2.NACK. It ends the phases of lower
  *        units still queued or running, reported as dropped at its time and not received, and BERR
  *        sets for a data byte of an acknowledged address it ends, RM0456 65.4.17, RM0481 53.4.17. A
- *        START the firmware requests during the controller's transfer
- *        waits for its STOP. While OA1EN is set, OAR1 keeps OA1 and OA1MODE, and while OA2EN is set
- *        OAR2 keeps OA2 and OA2MSK, RM0456 65.9.3 and 65.9.4, RM0481 53.9.3 and 53.9.4: one warning
- *        per instance, model_error under strict_peripherals. An RCC reset releases a stretch at its
- *        time and drops the phases started at or before it, each reported at the later of its end
- *        and the reset, and keeps the later phases and STOPs, which run in the reset model. A phase
- *        queued after it with a start at or before it is dropped the same way, and a STOP or a drop
- *        queued after it is due no earlier than it. A machine reset of any kind, the model a
- *        reset_listener, drops every queued phase at its end rebased by the reset's local time and
- *        removes every queued STOP. A phase a reset drops holds the wire to its end, in the new
- *        base after a machine reset, and a later phase starts no earlier. Dropped units survive
- *        every reset and are reported once, through i2c_controller_sink::dropped(). The port
- *        entries, stretched ones included, the last unit, the generation and the time of the last
- *        RCC reset are saved with the model. Not modelled, logged once: 10-bit addressing, target
- *        byte control, NOSTRETCH, SMBus and PEC, the autonomous trigger, target read phases.
+ *        START the firmware requests during the controller's transfer waits for its STOP. While
+ *        OA1EN is set, OAR1 keeps OA1 and OA1MODE, and while OA2EN is set OAR2 keeps OA2 and
+ *        OA2MSK, RM0456 65.9.3 and 65.9.4, RM0481 53.9.3 and 53.9.4: one warning per instance,
+ *        model_error under strict_peripherals. An RCC reset releases a stretch at its time, starts
+ *        a held read byte there, and drops the phases started at or before it, each reported at the
+ *        later of its end and the reset, and keeps the later phases and STOPs, which run in the
+ *        reset model. A phase queued after it with a start at or before it is dropped the same way,
+ *        and a STOP or a drop queued after it is due no earlier than it. A machine reset of any
+ *        kind, the model a reset_listener, starts a held read byte at the reset and drops every
+ *        queued phase at its end rebased by the reset's local time and removes every queued STOP. A
+ *        phase a reset drops holds the wire to its end, in the new base after a machine reset, and
+ *        a later phase starts no earlier. Dropped units survive every reset and are reported once,
+ *        through i2c_controller_sink::dropped(). The port entries, stretched ones included, the
+ *        last unit, the generation and the time of the last RCC reset are saved with the model. Not
+ *        modelled, logged once: 10-bit addressing, SBC or NOSTRETCH in controller mode, SBC with
+ *        NOSTRETCH in target mode, SMBus and PEC, the autonomous trigger.
  */
 class i2c final : public dispatch_model<i2c, i2c_state>,
                   public i2c_bus,
@@ -398,7 +439,8 @@ private:
       std::uint64_t phase_ps,
       vtime         at,
       std::uint32_t lane,
-      std::uint64_t unit);
+      std::uint64_t unit,
+      bool          ack = false);
   [[nodiscard]] auto after_model_reset(std::uint64_t due_ps) const -> std::uint64_t;
   [[nodiscard]] auto count_of(std::uint64_t due_ps) const -> icount;
   void               queue_port(i2c_port_entry entry);
@@ -407,7 +449,19 @@ private:
   void               run_port(std::uint32_t lane);
   void               phase_begun(i2c_port_entry const& entry);
   [[nodiscard]] auto phase_ended(i2c_port_entry const& entry) -> std::optional<i2c_answer>;
-  [[nodiscard]] auto received(std::uint8_t byte) -> bool;
+  [[nodiscard]] auto received(std::uint8_t byte) -> std::optional<bool>;
+  [[nodiscard]] auto taken_ack() -> bool;
+  [[nodiscard]] auto read_begun(i2c_port_entry& entry) -> bool;
+  [[nodiscard]] auto read_ended(i2c_port_entry const& entry) -> i2c_answer;
+  [[nodiscard]] auto counted() -> bool;
+  [[nodiscard]] auto no_stretch() const -> bool;
+  [[nodiscard]] auto byte_control() const -> bool;
+  void               address_released();
+  void               load_point();
+  void               ask_transmit();
+  void               resume_read();
+  void               begin_read(i2c_port_entry& entry, std::uint8_t byte);
+  void               target_reload();
   [[nodiscard]] auto held_entry(std::uint8_t phase) -> i2c_port_entry*;
   void               release(i2c_port_entry& entry, bool ack);
   void               port_stopped(i2c_port_entry const& entry);
@@ -460,6 +514,8 @@ private:
   field_ref                                    address_auto_clear_;
   field_ref                                    stop_auto_clear_;
   field_ref                                    nack_;
+  field_ref                                    no_stretch_;
+  field_ref                                    byte_control_;
   reg_ref                                      own1_reg_;
   reg_ref                                      own2_reg_;
   std::vector<field_ref>                       target_unsupported_;
@@ -483,7 +539,6 @@ private:
   bool                                         unsupported_logged_{};
   bool                                         no_clock_logged_{};
   bool                                         target_logged_{};
-  bool                                         data_logged_{};
   bool                                         protect_logged_{};
   std::optional<std::uint64_t>                 reset_at_;
   std::optional<std::string>                   strict_refused_;
@@ -539,7 +594,8 @@ i2c::i2c(
       own2_{field("OAR2", "OA2")}, own2_mask_{field("OAR2", "OA2MSK")},
       own2_enable_{field("OAR2", "OA2EN")}, general_call_{field("CR1", "GCEN")},
       address_auto_clear_{field("CR1", "ADDRACLR")}, stop_auto_clear_{field("CR1", "STOPFACLR")},
-      nack_{field("CR2", "NACK")}, own1_reg_{reg("OAR1")}, own2_reg_{reg("OAR2")},
+      nack_{field("CR2", "NACK")}, no_stretch_{field("CR1", "NOSTRETCH")},
+      byte_control_{field("CR1", "SBC")}, own1_reg_{reg("OAR1")}, own2_reg_{reg("OAR2")},
       error_enable_{field("CR1", "ERRIE")}, kernel_{ctx.clock.domain(lower(desc.name))},
       event_line_{irq(desc.name + "_EV_IRQn")}, error_line_{irq(desc.name + "_ER_IRQn")},
       tx_dma_enable_{field("CR1", "TXDMAEN")}, rx_dma_enable_{field("CR1", "RXDMAEN")},
@@ -596,6 +652,9 @@ i2c::i2c(
   for(auto const name : {"SBC", "NOSTRETCH", "SMBHEN", "SMBDEN", "ALERTEN", "PECEN"})
   {
     unsupported_.push_back(field("CR1", name));
+  }
+  for(auto const name : {"SMBHEN", "SMBDEN", "ALERTEN", "PECEN"})
+  {
     target_unsupported_.push_back(field("CR1", name));
   }
   if(variant.autocr)
@@ -971,6 +1030,11 @@ void i2c::abort()
   {
     release(*held, false);
   }
+  if(auto* const held = held_entry(static_cast<std::uint8_t>(i2c_phase::read)))
+  {
+    begin_read(*held, 0xFF);
+  }
+  state_.tx = {};
   ++state_.generation;
   auto const lost = step() == phase::lost;
   enter(phase::idle);
@@ -1062,7 +1126,8 @@ void i2c::flags()
 {
   update(regs_, tx_empty_, state_.tx_full != 0 ? 0 : 1);
   auto const sending = state_.read == 0 and (step() == phase::byte or step() == phase::wait_tx);
-  update(regs_, tx_interrupt_, sending and state_.tx_full == 0 and to_load() != 0 ? 1 : 0);
+  auto const asked   = sending and state_.tx_full == 0 and to_load() != 0;
+  update(regs_, tx_interrupt_, asked or state_.tx.ask != 0 ? 1 : 0);
   auto event = false;
   for(auto const& [enable, flag] : events_)
   {
@@ -1110,8 +1175,9 @@ void i2c::warn_unsupported()
   {
     warn(
         "CR1",
-        "10-bit addressing, target byte control, NOSTRETCH, SMBus, PEC or the autonomous trigger "
-        "is configured: not modelled, the I2C runs as a plain 7-bit controller and target");
+        "10-bit addressing, SBC or NOSTRETCH in controller mode, SMBus, PEC or the autonomous "
+        "trigger is configured: not modelled, the I2C runs as a plain 7-bit controller and "
+        "target");
   }
 }
 
@@ -1145,6 +1211,10 @@ void i2c::command_written(std::uint32_t old, std::uint32_t now)
       if(stopped)
       {
         update(regs_, stop_, 0);
+      }
+      if(get(regs_, reload_complete_) != 0 and count_.of(word) != 0)
+      {
+        target_reload();
       }
       if(started and not bus_taken())
       {
@@ -1193,6 +1263,10 @@ void i2c::status_written(std::uint32_t old, std::uint32_t now)
   {
     state_.tx_full = 0;
   }
+  if(tx_interrupt_.of(now) != 0 and no_stretch() and enabled())
+  {
+    state_.tx.ask = 1;
+  }
 }
 
 void i2c::clear_written(std::uint32_t, std::uint32_t now)
@@ -1210,6 +1284,7 @@ void i2c::clear_written(std::uint32_t, std::uint32_t now)
     if(auto* const held = held_entry(static_cast<std::uint8_t>(i2c_phase::address)))
     {
       release(*held, true);
+      address_released();
     }
   }
 }
@@ -1280,7 +1355,8 @@ void i2c::queue_phase(
     std::uint64_t phase_ps,
     vtime         at,
     std::uint32_t lane,
-    std::uint64_t unit)
+    std::uint64_t unit,
+    bool          ack)
 {
   port_check(lane, unit);
   if(phase_ps == 0)
@@ -1304,7 +1380,8 @@ void i2c::queue_phase(
        .lane        = lane,
        .kind        = dropped ? entry_dropped : entry_phase,
        .phase       = static_cast<std::uint8_t>(phase),
-       .data        = data});
+       .data        = data,
+       .ack         = static_cast<std::uint8_t>(ack ? 1 : 0)});
 }
 
 void i2c::start(
@@ -1336,7 +1413,7 @@ void i2c::write(
 
 void i2c::read(bool ack, std::uint64_t phase_ps, vtime at, std::uint32_t lane, std::uint64_t unit)
 {
-  queue_phase(i2c_phase::read, ack ? 1 : 0, phase_ps, at, lane, unit);
+  queue_phase(i2c_phase::read, 0xFF, phase_ps, at, lane, unit, ack);
 }
 
 void i2c::stop(vtime at, std::uint32_t lane, std::uint64_t unit)
@@ -1403,10 +1480,16 @@ void i2c::run_port(std::uint32_t lane)
     switch(entry.kind)
     {
       case entry_phase:
+        phase_begun(entry);
+        if(phase == i2c_phase::read and not read_begun(entries[*pick]))
+        {
+          entries[*pick].kind = entry_held;
+          flags();
+          break;
+        }
         entries[*pick].kind   = entry_ending;
         entries[*pick].due_ps = entry.due_ps + entry.phase_ps;
         schedule_port(entries[*pick]);
-        phase_begun(entry);
         flags();
         break;
       case entry_ending:
@@ -1462,6 +1545,7 @@ auto i2c::phase_ended(i2c_port_entry const& entry) -> std::optional<i2c_answer>
       auto const address = static_cast<std::uint8_t>(entry.data >> 1);
       auto const read    = entry.data & 1u;
       warn_target_unsupported();
+      state_.tx = {.ask = state_.tx.ask};
       if(not enabled()
          or step() != phase::idle
          or state_.wire_busy == 0
@@ -1479,10 +1563,11 @@ auto i2c::phase_ended(i2c_port_entry const& entry) -> std::optional<i2c_answer>
       }
       state_.addressed = 1;
       state_.involved  = 1;
-      if(get(regs_, address_matched_) != 0)
+      if(get(regs_, address_matched_) != 0 and not no_stretch())
       {
         return std::nullopt;
       }
+      address_released();
       return i2c_answer{.ack = true};
     }
     case i2c_phase::write:
@@ -1495,29 +1580,200 @@ auto i2c::phase_ended(i2c_port_entry const& entry) -> std::optional<i2c_answer>
       }
       if(get(regs_, rx_full_) != 0)
       {
+        if(no_stretch())
+        {
+          update(regs_, overrun_, 1);
+          return i2c_answer{.ack = false};
+        }
         return std::nullopt;
       }
-      return i2c_answer{.ack = received(entry.data)};
-    case i2c_phase::read:
-      if(state_.addressed != 0)
+      if(auto const ack = received(entry.data))
       {
-        unmodelled(
-            "TXDR", data_logged_,
-            "a target read phase after an acknowledged address: not modelled, the I2C answers "
-            "0xFF");
+        return i2c_answer{.ack = *ack};
       }
-      return i2c_answer{.ack = entry.data != 0};
+      return std::nullopt;
+    case i2c_phase::read:
+      return read_ended(entry);
   }
   return i2c_answer{};
 }
 
-auto i2c::received(std::uint8_t byte) -> bool
+auto i2c::received(std::uint8_t byte) -> std::optional<bool>
 {
   regs_.poke(receive_.offset, byte);
   update(regs_, rx_full_, 1);
+  if(not counted())
+  {
+    return std::nullopt;
+  }
+  return taken_ack();
+}
+
+auto i2c::taken_ack() -> bool
+{
   auto const nack = get(regs_, nack_) != 0;
   update(regs_, nack_, 0);
   return not nack;
+}
+
+auto i2c::counted() -> bool
+{
+  if(not byte_control())
+  {
+    return true;
+  }
+  if(state_.tx.left != 0)
+  {
+    --state_.tx.left;
+  }
+  if(state_.tx.left == 0 and get(regs_, reload_) != 0)
+  {
+    update(regs_, reload_complete_, 1);
+    return false;
+  }
+  return true;
+}
+
+auto i2c::no_stretch() const -> bool
+{
+  return get(regs_, no_stretch_) != 0;
+}
+
+auto i2c::byte_control() const -> bool
+{
+  return get(regs_, byte_control_) != 0 and not no_stretch();
+}
+
+void i2c::address_released()
+{
+  state_.tx.left = state_.tx.asks = get(regs_, count_);
+  if(get(regs_, target_direction_) == 0)
+  {
+    return;
+  }
+  state_.tx.target = 1;
+  state_.tx.first  = 1;
+  load_point();
+}
+
+void i2c::ask_transmit()
+{
+  if(byte_control())
+  {
+    if(state_.tx.asks == 0)
+    {
+      return;
+    }
+    --state_.tx.asks;
+  }
+  state_.tx.ask = 1;
+}
+
+void i2c::load_point()
+{
+  if(state_.tx.target == 0)
+  {
+    return;
+  }
+  if(state_.tx_full != 0)
+  {
+    state_.tx.shift  = state_.tx_data;
+    state_.tx.loaded = 1;
+    state_.tx.wait   = 0;
+    state_.tx_full   = 0;
+    ask_transmit();
+    return;
+  }
+  state_.tx.wait = 1;
+  if(not no_stretch())
+  {
+    ask_transmit();
+  }
+}
+
+auto i2c::read_begun(i2c_port_entry& entry) -> bool
+{
+  if(state_.tx.target == 0 or not enabled())
+  {
+    return true;
+  }
+  if(std::exchange(state_.tx.first, 0) != 0 and no_stretch() and get(regs_, stop_detected_) != 0)
+  {
+    update(regs_, overrun_, 1);
+  }
+  if(state_.tx.loaded != 0)
+  {
+    entry.data       = state_.tx.shift;
+    state_.tx.loaded = 0;
+    return true;
+  }
+  if(no_stretch())
+  {
+    update(regs_, overrun_, 1);
+    state_.tx.wait = 0;
+    return true;
+  }
+  return false;
+}
+
+auto i2c::read_ended(i2c_port_entry const& entry) -> i2c_answer
+{
+  auto const ack = entry.ack != 0;
+  if(state_.tx.target == 0 or not enabled())
+  {
+    return {.ack = ack};
+  }
+  if(not ack)
+  {
+    update(regs_, nack_received_, 1);
+    state_.tx = {.ask = state_.tx.ask};
+    return {.ack = ack, .byte = entry.data};
+  }
+  if(counted())
+  {
+    load_point();
+  }
+  return {.ack = ack, .byte = entry.data};
+}
+
+void i2c::begin_read(i2c_port_entry& entry, std::uint8_t byte)
+{
+  auto const now  = ctx_.clock.time().ps;
+  entry.kind      = entry_ending;
+  entry.data      = byte;
+  entry.due_ps    = now + entry.phase_ps;
+  auto const unit = entry.unit;
+  auto const end  = entry.due_ps;
+  schedule_port(entry);
+  for(auto const index : place_after(state_.port.entries, unit, end))
+  {
+    schedule_port(state_.port.entries[index]);
+  }
+}
+
+void i2c::resume_read()
+{
+  if(state_.tx.loaded == 0)
+  {
+    return;
+  }
+  if(auto* const held = held_entry(static_cast<std::uint8_t>(i2c_phase::read)))
+  {
+    state_.tx.loaded = 0;
+    begin_read(*held, state_.tx.shift);
+  }
+}
+
+void i2c::target_reload()
+{
+  update(regs_, reload_complete_, 0);
+  state_.tx.left = state_.tx.asks = get(regs_, count_);
+  if(auto* const held = held_entry(static_cast<std::uint8_t>(i2c_phase::write)))
+  {
+    release(*held, taken_ack());
+  }
+  load_point();
+  resume_read();
 }
 
 auto i2c::held_entry(std::uint8_t phase) -> i2c_port_entry*
@@ -1601,6 +1857,7 @@ void i2c::port_stopped(i2c_port_entry const& entry)
     }
   }
   auto const waited = state_.wire_busy != 0;
+  state_.tx         = {.ask = state_.tx.ask};
   state_.addressed  = 0;
   state_.involved   = 0;
   state_.wire_busy  = 0;
@@ -1631,6 +1888,10 @@ void i2c::rearm_port(i2c_port port, std::optional<reset_kind> kind)
       if(entry.kind == entry_held)
       {
         entry.due_ps = std::max(entry.due_ps, floor);
+        if(static_cast<i2c_phase>(entry.phase) == i2c_phase::read)
+        {
+          entry.kind = entry_phase;
+        }
       }
     }
     std::ignore = place_after(port.entries, *holding, floor);
@@ -1681,14 +1942,15 @@ void i2c::rearm_port(i2c_port port, std::optional<reset_kind> kind)
 void i2c::warn_target_unsupported()
 {
   auto const ten_bit = get(regs_, own1_enable_) != 0 and get(regs_, own1_mode_) != 0;
-  if(ten_bit or std::ranges::any_of(target_unsupported_, [&](field_ref bits) {
+  auto const both    = get(regs_, byte_control_) != 0 and no_stretch();
+  if(ten_bit or both or std::ranges::any_of(target_unsupported_, [&](field_ref bits) {
        return get(regs_, bits) != 0;
      }))
   {
     unmodelled(
         ten_bit ? "OAR1" : "CR1", target_logged_,
-        "a 10-bit own address, target byte control, NOSTRETCH, SMBus or PEC in target mode: not "
-        "modelled, the I2C matches 7-bit addresses only");
+        "a 10-bit own address, SBC with NOSTRETCH, SMBus or PEC in target mode: not modelled, the "
+        "I2C matches 7-bit addresses only, without target byte control");
   }
 }
 
@@ -1729,9 +1991,14 @@ auto i2c::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
       update(regs_, rx_full_, 1);
       after_byte(released());
     }
-    else if(auto* const held = held_entry(static_cast<std::uint8_t>(i2c_phase::write)))
+    else if(
+        auto* const held = held_entry(static_cast<std::uint8_t>(i2c_phase::write));
+        held != nullptr and get(regs_, reload_complete_) == 0)
     {
-      release(*held, received(held->data));
+      if(auto const ack = received(held->data))
+      {
+        release(*held, *ack);
+      }
     }
   }
   flags();
@@ -1753,10 +2020,16 @@ auto i2c::on_write(
     {
       state_.tx_full = 1;
       state_.tx_data = data;
+      state_.tx.ask  = 0;
       regs_.poke(transmit_.offset, data);
       if(step() == phase::wait_tx)
       {
         next_byte(released());
+      }
+      if(state_.tx.wait != 0)
+      {
+        load_point();
+        resume_read();
       }
     }
     flags();

@@ -4,6 +4,7 @@
 #include "periph_test.h"
 
 volatile uint32_t i2c_target_active;
+static uint8_t    next_tx;
 
 void i2c_target_event(void)
 {
@@ -12,7 +13,21 @@ void i2c_target_event(void)
     LOG(TARGET_ADDRESS
         | LL_I2C_GetAddressMatchCode(I2C1)
         | (LL_I2C_GetTransferDirection(I2C1) >> I2C_ISR_DIR_Pos));
+    if(LL_I2C_GetTransferDirection(I2C1) == LL_I2C_DIRECTION_READ)
+    {
+      next_tx = TARGET_TX_FIRST;
+      LL_I2C_ClearFlag_TXE(I2C1);
+    }
     LL_I2C_ClearFlag_ADDR(I2C1);
+  }
+  if(LL_I2C_IsActiveFlag_TXIS(I2C1))
+  {
+    LL_I2C_TransmitData8(I2C1, next_tx++);
+  }
+  if(LL_I2C_IsActiveFlag_NACK(I2C1))
+  {
+    LOG(TARGET_NACKED);
+    LL_I2C_ClearFlag_NACK(I2C1);
   }
   if(LL_I2C_IsActiveFlag_RXNE(I2C1))
   {
@@ -43,6 +58,8 @@ void target(void)
   LL_I2C_EnableGeneralCall(I2C1);
   LL_I2C_EnableIT_ADDR(I2C1);
   LL_I2C_EnableIT_RX(I2C1);
+  LL_I2C_EnableIT_TX(I2C1);
+  LL_I2C_EnableIT_NACK(I2C1);
   LL_I2C_EnableIT_STOP(I2C1);
   i2c_target_active = 1;
   NVIC_EnableIRQ(I2C1_EV_IRQn);
