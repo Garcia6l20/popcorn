@@ -37,11 +37,14 @@ env:
 
 jobs:
   image:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
       contents: read
-      packages: write
+    outputs:
+      imageid: ${{ steps.build.outputs.imageid }}
+      version: ${{ steps.version.outputs.version }}
+      jobs: ${{ steps.version.outputs.jobs }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -58,7 +61,12 @@ jobs:
         if: github.ref_type == 'tag'
         run: |
           python3 -m venv "$RUNNER_TEMP/tag-check"
-          "$RUNNER_TEMP/tag-check/bin/pip" install -q packaging==26.3
+          cat > "$RUNNER_TEMP/tag-check/requirements.txt" <<'EOF'
+          packaging==26.3 \
+              --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c \
+              --hash=sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79
+          EOF
+          "$RUNNER_TEMP/tag-check/bin/pip" install -q --require-hashes -r "$RUNNER_TEMP/tag-check/requirements.txt"
           "$RUNNER_TEMP/tag-check/bin/python" - <<'EOF'
           import os
           import sys
@@ -78,26 +86,10 @@ jobs:
           print(f"tag {tag} names version {project}")
           EOF
 
-      - name: Decide whether the tag is a final release
-        id: ref
-        run: |
-          if [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "exact=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exact=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ env.IMAGE }}
-          flavor: latest=false
-          tags: |
-            type=raw,value=main,enable={{is_default_branch}}
-            type=ref,event=tag
-            type=raw,value=latest,enable=${{ steps.ref.outputs.exact == 'true' }}
+          version: v0.38.0
+          driver-opts: image=moby/buildkit:v0.34.0@sha256:b059f8d7226d0b326bc871af489a5dddf65e36af4d20d14251b072974d9ee87c
 
       - name: Build the image
         id: build
@@ -113,42 +105,80 @@ jobs:
             POPCORN_REVISION=${{ github.sha }}
             POPCORN_VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
 
       - name: Smoke test the image
         run: docker/smoke.sh "$LOCAL_TAG"
 
-      - name: Log in to GHCR
-        if: github.event_name == 'push'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+  publish:
+    needs: image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - name: Decide whether the tag is the newest final release
+        id: ref
+        shell: bash
+        run: |
+          latest=false
+          if [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            newest=$(git ls-remote --tags --refs "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" 'v*.*.*' \
+              | sed 's|.*refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+            echo "newest final release tag: $newest"
+            if [[ $GITHUB_REF_NAME == "$newest" ]]; then
+              latest=true
+            fi
+          fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.38.0
+          driver-opts: image=moby/buildkit:v0.34.0@sha256:b059f8d7226d0b326bc871af489a5dddf65e36af4d20d14251b072974d9ee87c
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=main,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ steps.ref.outputs.latest == 'true' }}
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push the image
+      - name: Push the image by digest
         id: push
-        if: github.event_name == 'push'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile
           platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           build-args: |
-            JOBS=${{ steps.version.outputs.jobs }}
+            JOBS=${{ needs.image.outputs.jobs }}
             POPCORN_REVISION=${{ github.sha }}
-            POPCORN_VERSION=${{ steps.version.outputs.version }}
+            POPCORN_VERSION=${{ needs.image.outputs.version }}
           cache-from: type=gha
 
       - name: Check that the pushed image is the smoke-tested one
-        if: github.event_name == 'push'
         env:
-          TESTED: ${{ steps.build.outputs.imageid }}
+          TESTED: ${{ needs.image.outputs.imageid }}
           PUSHED: ${{ steps.push.outputs.imageid }}
           DIGEST: ${{ steps.push.outputs.digest }}
-          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           echo "tested $TESTED, pushed $PUSHED"
           docker buildx imagetools inspect --raw "$IMAGE@$DIGEST" | python3 -c '
@@ -168,6 +198,23 @@ jobs:
               sys.exit(f"pushed image {amd64 or pushed} is not the tested {tested}")
           print(f"pushed image holds the tested manifest {tested}")
           '
+
+      - name: Tag the pushed image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          args=()
+          while IFS= read -r tag; do
+            if [[ -n $tag ]]; then
+              args+=(--tag "$tag")
+            fi
+          done <<< "$TAGS"
+          if (( ${#args[@]} == 0 )); then
+            echo "no tag to set on $IMAGE@$DIGEST" >&2
+            exit 1
+          fi
+          docker buildx imagetools create "${args[@]}" "$IMAGE@$DIGEST"
           {
             echo "Pushed $DIGEST"
             echo
