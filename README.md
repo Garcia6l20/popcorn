@@ -15,6 +15,9 @@ uv venv
 uv pip install "popcorn[pytest] @ git+<repository-url>"
 ```
 
+The image `ghcr.io/garcia6l20/popcorn:main` runs popcorn with no compiler on the host, see
+`docs/guide/docker.md`.
+
 ## Example
 
 This test boots the gpio example firmware, presses the button on PC13 once and checks the LED on
