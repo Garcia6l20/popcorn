@@ -235,16 +235,16 @@ inline void rcc_reset_pulse(stm32_fixture const& f, std::string_view reg, std::s
 /**
  * @brief An integer of a model's saved state, found in its bson save by path. Reads the bson
  *        element layout directly, so any element type the save holds can be skipped.
- * @param f Machine.
+ * @param target Machine.
  * @param instance Peripheral whose model saves the state.
  * @param path Dot-separated keys, an array index being its decimal key, such as
  *        `block.0.generation`.
  * @return The integer, nullopt when the save has no such key.
  */
-inline auto saved_integer(stm32_fixture const& f, std::string_view instance, std::string_view path)
+inline auto saved_integer(core::machine& target, std::string_view instance, std::string_view path)
     -> std::optional<std::int64_t>
 {
-  auto* const model = f.target->model(instance);
+  auto* const model = target.model(instance);
   REQUIRE(model != nullptr);
   std::vector<std::byte> bytes;
   model->save(bytes);
@@ -330,6 +330,13 @@ inline auto saved_integer(stm32_fixture const& f, std::string_view instance, std
     document = hit->second;
     path     = path.substr(dot + 1);
   }
+}
+
+/** @brief saved_integer() on the machine of @p f. */
+inline auto saved_integer(stm32_fixture const& f, std::string_view instance, std::string_view path)
+    -> std::optional<std::int64_t>
+{
+  return saved_integer(*f.target, instance, path);
 }
 
 /**

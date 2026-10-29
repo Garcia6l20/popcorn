@@ -22,6 +22,7 @@ stm32 = [
         "iwdg.cpp",
         "rtc.cpp",
         "spi.cpp",
+        "spi_medium.cpp",
         "i2c.cpp",
         "sai.cpp",
         "mdf.cpp",

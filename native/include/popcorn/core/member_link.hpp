@@ -147,9 +147,14 @@ public:
    *         windows behind the receiver's time. A sender's slice held at a barrier dispatches
    *         the events of the barrier's last instruction cycle in the next window, so a post
    *         can start before the previous barrier by less than one sender instruction period. A
-   *         fault found on such a post is dated at that barrier. A drain with @p next equal to
-   *         @p barrier is a pause's drain and shows nothing: release_through() or show_drained()
-   *         shows its frames once the pause's kind is known, so a read at a pause is complete.
+   *         fault found on such a post is dated at that barrier. A post handed at a drain is
+   *         therefore late by up to one sender instruction period plus the receiver's own stop
+   *         past the barrier, and every link schedules it on the receiver at its own due time: a
+   *         due time whose rounded-up instruction count lies below the receiver's current count
+   *         fires one count late, after the instruction at that count ran. A drain with @p next
+   *         equal to @p barrier is a pause's drain and shows nothing: release_through() or
+   *         show_drained() shows its frames once the pause's kind is known, so a read at a pause
+   *         is complete.
    */
   virtual auto
       drain(std::uint64_t window, sys_time const& barrier, sys_time const& next, time_map receiver)

@@ -8,5 +8,16 @@ add_ll_firmware(
     "spi_ll",
     [here / "spi_ll.c"],
     ["spi", "gpio"],
-    ["idle", "poll", "irq_eot", "no_cs", "hw_ss", "write_read", "erase", "dma", "target_echo"],
+    [
+        "idle",
+        "poll",
+        "irq_eot",
+        "no_cs",
+        "hw_ss",
+        "write_read",
+        "erase",
+        "dma",
+        "target_echo",
+        "link_run",
+    ],
 )

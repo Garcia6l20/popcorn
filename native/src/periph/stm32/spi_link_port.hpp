@@ -55,6 +55,17 @@ public:
   /** @brief The controller was detached. It keeps no reference linked() gave after the call. */
   virtual void unlinked() noexcept = 0;
 
+  /**
+   * @brief A frame queued through spi_controller_port::frame() ended. The model calls it in
+   *        place of spi_controller_sink::frame() for every such frame, with the unit the frame
+   *        was queued with. The default calls spi_controller_sink::frame().
+   * @param unit Unit number of the frame.
+   * @param sent The frame the controller sent.
+   * @param received The frame the instance returned.
+   * @param at Time of the frame end since the last reset.
+   */
+  virtual void unit_frame(std::uint64_t unit, std::uint32_t sent, std::uint32_t received, vtime at);
+
   /** @brief Destroys the controller. */
   ~spi_link_controller() override;
 };
@@ -144,6 +155,12 @@ public:
    * @throws std::invalid_argument When @p target is not attached.
    */
   [[nodiscard]] virtual auto muted(spi_link_target const& target) const -> bool = 0;
+
+  /**
+   * @brief Length of one frame at the instance's current kernel clock, prescaler and frame size.
+   * @return Picoseconds, 0 while the kernel clock is stopped.
+   */
+  [[nodiscard]] virtual auto frame_time() const -> std::uint64_t = 0;
 
 protected:
   /** @brief Destroyed through its model only. */

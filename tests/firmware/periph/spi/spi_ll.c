@@ -4,6 +4,37 @@
 #include "stm32u5xx_ll_gpio.h"
 #include "stm32u5xx_ll_spi.h"
 
+#define LINK_MAGIC    0x5B1A11u
+#define LINK_MASTER   1u
+#define LINK_SLAVE    2u
+#define LINK_END      0u
+#define LINK_CS_LOW   1u
+#define LINK_CS_HIGH  2u
+#define LINK_SEND     3u
+#define LINK_WAIT_US  4u
+#define LINK_RESET    5u
+#define LINK_HARD_NSS 6u
+#define LINK_RCC      7u
+#define LINK_STAMP    8u
+#define LINK_REPEAT   9u
+#define LINK_KICK     10u
+#define LINK_FORMAT   11u
+#define LINK_BOOT     0xB0000000u
+
+typedef struct
+{
+  uint32_t magic;
+  uint32_t entry;
+  uint32_t pc;
+  uint32_t log_len;
+  uint32_t count;
+  uint32_t prefill;
+  uint32_t script[64];
+  uint32_t log[256];
+} link_area_t;
+
+#define LINK_AREA ((volatile link_area_t*)0x20080000u)
+
 static uint8_t const     command[4] = {0x9F, 0, 0, 0};
 static uint8_t           answer[4];
 static volatile uint32_t received;
@@ -20,6 +51,7 @@ void write_read(void);
 void erase(void);
 void dma(void);
 void target_echo(void);
+void link_run(void);
 void GPDMA1_Channel2_IRQHandler(void);
 void GPDMA1_Channel3_IRQHandler(void);
 
@@ -43,11 +75,18 @@ static void chip_select(uint32_t low)
   }
 }
 
+static void configure_spi(uint32_t nss);
+
 static void configure(uint32_t nss)
 {
   LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOA);
   LL_GPIO_SetOutputPin(GPIOA, LL_GPIO_PIN_4);
   LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_4, LL_GPIO_MODE_OUTPUT);
+  configure_spi(nss);
+}
+
+static void configure_spi(uint32_t nss)
+{
   LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SPI1);
   LL_SPI_InitTypeDef config = {
       .TransferDirection = LL_SPI_FULL_DUPLEX,
@@ -144,8 +183,15 @@ static void echo_frames(void)
   }
 }
 
+static void link_slave_echo(void);
+
 void SPI1_IRQHandler(void)
 {
+  if(LINK_AREA->magic == LINK_MAGIC && LINK_AREA->entry == LINK_SLAVE)
+  {
+    link_slave_echo();
+    return;
+  }
   if(echoing)
   {
     echo_frames();
@@ -402,7 +448,215 @@ void target_echo(void)
   DONE();
 }
 
+static uint32_t link_nss;
+static uint32_t link_bits;
+
+static void link_log(uint32_t value)
+{
+  LINK_AREA->log[LINK_AREA->log_len++ & 0xffu] = value;
+}
+
+static void link_wait_us(uint32_t us)
+{
+  uint32_t const from = DWT->CYCCNT;
+  while(DWT->CYCCNT - from < us * 4u)
+  {
+  }
+}
+
+static void link_master_configure(void)
+{
+  LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOA);
+  configure_spi(link_nss ? LL_SPI_NSS_HARD_OUTPUT : LL_SPI_NSS_SOFT);
+  link_bits = 8u;
+}
+
+static void link_format(uint32_t bits, uint32_t prescaler)
+{
+  MODIFY_REG(
+      SPI1->CFG1, SPI_CFG1_DSIZE | SPI_CFG1_MBR,
+      ((bits - 1u) << SPI_CFG1_DSIZE_Pos) | (prescaler << SPI_CFG1_MBR_Pos));
+  link_bits = bits;
+}
+
+static void link_drive(uint32_t pin, uint32_t high)
+{
+  if(high)
+  {
+    LL_GPIO_SetOutputPin(GPIOA, 1u << pin);
+  }
+  else
+  {
+    LL_GPIO_ResetOutputPin(GPIOA, 1u << pin);
+  }
+  LL_GPIO_SetPinMode(GPIOA, 1u << pin, LL_GPIO_MODE_OUTPUT);
+}
+
+static void link_kick(uint32_t first)
+{
+  LL_SPI_SetTransferSize(SPI1, 1);
+  LL_SPI_Enable(SPI1);
+  LL_SPI_StartMasterTransfer(SPI1);
+  if(link_bits > 16u)
+  {
+    LL_SPI_TransmitData32(SPI1, first);
+  }
+  else if(link_bits > 8u)
+  {
+    LL_SPI_TransmitData16(SPI1, (uint16_t)first);
+  }
+  else
+  {
+    LL_SPI_TransmitData8(SPI1, (uint8_t)first);
+  }
+}
+
+static void link_slave_configure(void)
+{
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SPI1);
+  LL_SPI_InitTypeDef config = {
+      .TransferDirection = LL_SPI_FULL_DUPLEX,
+      .Mode              = LL_SPI_MODE_SLAVE,
+      .DataWidth         = LL_SPI_DATAWIDTH_8BIT,
+      .ClockPolarity     = LL_SPI_POLARITY_LOW,
+      .ClockPhase        = LL_SPI_PHASE_1EDGE,
+      .NSS               = LL_SPI_NSS_HARD_INPUT,
+      .BaudRate          = LL_SPI_BAUDRATEPRESCALER_DIV2,
+      .BitOrder          = LL_SPI_MSB_FIRST,
+      .CRCCalculation    = LL_SPI_CRCCALCULATION_DISABLE,
+      .CRCPoly           = 7,
+  };
+  LL_SPI_Init(SPI1, &config);
+  LL_SPI_SetFIFOThreshold(SPI1, LL_SPI_FIFO_TH_01DATA);
+  LL_SPI_SetTransferSize(SPI1, 0);
+  LL_SPI_SetUDRConfiguration(SPI1, LL_SPI_UDR_CONFIG_REGISTER_PATTERN);
+  SPI1->UDRDR = 0xEEu;
+  LL_SPI_Enable(SPI1);
+  LL_SPI_TransmitData8(SPI1, LINK_AREA->prefill != 0 ? (uint8_t)LINK_AREA->prefill : 0xA0u);
+  LL_SPI_EnableIT_RXP(SPI1);
+  NVIC_EnableIRQ(SPI1_IRQn);
+}
+
+static void link_send(uint32_t count, uint32_t first)
+{
+  LL_SPI_SetTransferSize(SPI1, count);
+  LL_SPI_Enable(SPI1);
+  LL_SPI_StartMasterTransfer(SPI1);
+  for(uint32_t index = 0; index < count; ++index)
+  {
+    while(!LL_SPI_IsActiveFlag_TXP(SPI1))
+    {
+    }
+    LL_SPI_TransmitData8(SPI1, (uint8_t)(first + index));
+    while(!LL_SPI_IsActiveFlag_RXP(SPI1))
+    {
+    }
+    link_log(LL_SPI_ReceiveData8(SPI1));
+  }
+  finish();
+}
+
+static void link_rcc(void)
+{
+  LL_APB2_GRP1_ForceReset(LL_APB2_GRP1_PERIPH_SPI1);
+  LL_APB2_GRP1_ReleaseReset(LL_APB2_GRP1_PERIPH_SPI1);
+  if(LINK_AREA->entry == LINK_MASTER)
+  {
+    link_master_configure();
+  }
+  else
+  {
+    link_slave_configure();
+  }
+}
+
+void link_run(void)
+{
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+  link_log(LINK_BOOT | LINK_AREA->pc);
+  link_nss = 0;
+  for(uint32_t at = 0; at < LINK_AREA->pc; ++at)
+  {
+    if(LINK_AREA->script[at] >> 24 == LINK_HARD_NSS)
+    {
+      link_nss = LINK_AREA->script[at] & 1u;
+    }
+  }
+  if(LINK_AREA->entry == LINK_MASTER)
+  {
+    link_master_configure();
+  }
+  else
+  {
+    link_slave_configure();
+  }
+  for(;;)
+  {
+    uint32_t const step = LINK_AREA->script[LINK_AREA->pc++ & 0x3fu];
+    uint32_t const arg  = step & 0xffffffu;
+    switch(step >> 24)
+    {
+      case LINK_CS_LOW:
+        link_drive(arg, 0);
+        break;
+      case LINK_CS_HIGH:
+        link_drive(arg, 1);
+        break;
+      case LINK_STAMP:
+        link_log(0x5A000000u | (DWT->CYCCNT & 0xffffffu));
+        break;
+      case LINK_REPEAT:
+        if(++LINK_AREA->count < (arg >> 8))
+        {
+          LINK_AREA->pc = arg & 0xffu;
+        }
+        break;
+      case LINK_KICK:
+        link_kick(arg);
+        break;
+      case LINK_SEND:
+        link_send(arg >> 8, arg & 0xffu);
+        break;
+      case LINK_WAIT_US:
+        link_wait_us(arg);
+        break;
+      case LINK_RESET:
+        NVIC_SystemReset();
+        break;
+      case LINK_HARD_NSS:
+        link_nss = arg & 1u;
+        link_master_configure();
+        break;
+      case LINK_RCC:
+        link_rcc();
+        break;
+      case LINK_FORMAT:
+        link_format(arg >> 8, arg & 0x7u);
+        break;
+      default:
+        LINK_AREA->pc--;
+        idle();
+    }
+  }
+}
+
+static void link_slave_echo(void)
+{
+  while(LL_SPI_IsActiveFlag_RXP(SPI1))
+  {
+    uint8_t const value = LL_SPI_ReceiveData8(SPI1);
+    link_log(0x5100u | value);
+    LL_SPI_TransmitData8(SPI1, (uint8_t)(value + 0x10u));
+  }
+}
+
 int main(void)
 {
+  if(LINK_AREA->magic == LINK_MAGIC)
+  {
+    link_run();
+  }
   idle();
 }

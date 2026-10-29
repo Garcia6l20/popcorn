@@ -284,12 +284,13 @@ public:
 
   /**
    * @brief Queues one frame on @p lane, shifted from the latest of @p at, the end of every frame
-   *        queued before it and the time of every queued deselect() due after the last RCC reset
-   *        of the instance. A frame of a lower unit than a queued deselect() does not count, since
-   *        that deselect() cuts it or follows its end. The controller hears the frame through
-   *        spi_controller_sink::frame() at its end, or through spi_controller_sink::dropped(). A
-   *        frame whose start is at or before the last RCC reset of the instance is dropped,
-   *        reported at the later of its end and that reset.
+   *        queued before it and the time of every queued deselect(). A frame of a lower unit than
+   *        a queued deselect() does not count, since that deselect() cuts it or follows its end.
+   *        The controller hears the frame through spi_controller_sink::frame() at its end, or
+   *        through spi_controller_sink::dropped(). A frame whose start is at or before the last
+   *        RCC reset of the instance is dropped, reported at the later of its end and that reset.
+   *        A frame an RCC reset drops still holds the wire until its end, so every later frame,
+   *        queued before or after the reset, starts at that end at the earliest.
    * @param word Frame the controller sends, in wire order, below 2 to the @p bits.
    * @param bits Frame size, 4 to 32.
    * @param frame_ps Length of the frame, at least 1.

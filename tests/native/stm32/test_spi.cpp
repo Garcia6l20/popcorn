@@ -3246,6 +3246,161 @@ TEST_CASE("an RCC reset during the first port frame drops it, the two unstarted 
   CHECK(r.sink->frames[1].at.ps == start + 3 * mhz_frame);
 }
 
+TEST_CASE(
+    "frames queued behind a frame an RCC reset drops start at its end, queued before or after")
+{
+  auto const run = [](bool queued_first) {
+    std::vector<std::string> log;
+    port_rig                 r;
+    r.sink->log = &log;
+    bus b{*r.f};
+    target(b, 7, 0);
+    auto const start = b.now() + us;
+    if(queued_first)
+    {
+      r.select(start, 1);
+      r.frame(1, start, 2);
+      r.frame(2, start + mhz_frame / 4, 3);
+      r.frame(3, start + 2 * mhz_frame, 4);
+    }
+    b.run_until(start + mhz_frame / 2);
+    popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+    if(not queued_first)
+    {
+      r.select(start, 1);
+      r.frame(1, start, 2);
+      r.frame(2, start + mhz_frame / 4, 3);
+      r.frame(3, start + 2 * mhz_frame, 4);
+    }
+    auto const reset = b.now();
+    b.run_until(start + 4 * mhz_frame);
+    std::vector<std::uint64_t> ends;
+    for(auto const& one : r.sink->frames)
+    {
+      ends.push_back(one.at.ps);
+    }
+    return std::tuple{log, r.sink->drops, ends, reset, start};
+  };
+  auto const [log, drops, ends, reset, start] = run(true);
+  CHECK(log == std::vector<std::string>{"dropped 2", "frame 2", "frame 3"});
+  CHECK(
+      drops
+      == std::vector<lost>{
+          {2, 0xFF, vtime{start + mhz_frame}}
+  });
+  CHECK(ends == std::vector<std::uint64_t>{start + 2 * mhz_frame, start + 3 * mhz_frame});
+  CHECK(reset > start + mhz_frame / 4);
+  auto const [other_log, other_drops, other_ends, other_reset, other_start] = run(false);
+  CHECK(other_log == log);
+  CHECK(other_drops == drops);
+  CHECK(other_ends == ends);
+}
+
+TEST_CASE("frames queued after an RCC reset chain on the wire ends of the frames it drops")
+{
+  std::vector<std::string> log;
+  port_rig                 r;
+  r.sink->log = &log;
+  bus b{*r.f};
+  target(b, 7, 0);
+  auto const start = b.now() + us;
+  b.run_until(start + 2 * mhz_frame + mhz_frame / 2);
+  popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  auto const reset = b.now();
+  REQUIRE(reset > start + 2 * mhz_frame);
+  REQUIRE(reset < start + 3 * mhz_frame);
+  r.three_frames(start);
+  r.frame(4, start, 5);
+  b.run_until(start + 5 * mhz_frame);
+  CHECK(log == std::vector<std::string>{"dropped 2", "dropped 3", "dropped 4", "frame 4"});
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {2, 0xFF, vtime{reset}                },
+          {3, 0xFF, vtime{reset}                },
+          {4, 0xFF, vtime{start + 3 * mhz_frame}}
+  });
+  REQUIRE(r.sink->frames.size() == 1);
+  CHECK(r.sink->frames[0].at.ps == start + 4 * mhz_frame);
+}
+
+TEST_CASE(
+    "frames queued behind a deselect an RCC reset follows start alike, queued before or after")
+{
+  auto const run = [](bool queued_first) {
+    port_rig r;
+    bus      b{*r.f};
+    target(b, 7, 0);
+    auto const start = b.now() + us;
+    auto const queue = [&] {
+      r.select(start, 1);
+      r.frame(1, start, 2);
+      r.deselect(start + mhz_frame / 4, 3);
+      r.frame(2, start, 4);
+      r.frame(3, start, 5);
+    };
+    if(queued_first)
+    {
+      queue();
+    }
+    b.run_until(start + mhz_frame / 2);
+    popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+    if(not queued_first)
+    {
+      queue();
+    }
+    b.run_until(start + 4 * mhz_frame);
+    std::vector<lost> later;
+    for(auto const& one : r.sink->drops)
+    {
+      if(one.unit >= 4)
+      {
+        later.push_back(one);
+      }
+    }
+    std::vector<std::uint64_t> ends;
+    for(auto const& one : r.sink->frames)
+    {
+      ends.push_back(one.at.ps);
+    }
+    return std::tuple{later, ends, start};
+  };
+  auto const [later, ends, start] = run(true);
+  CHECK(
+      later
+      == std::vector<lost>{
+          {4, 0xFF, vtime{start + mhz_frame + mhz_frame / 4}}
+  });
+  CHECK(ends == std::vector<std::uint64_t>{start + 2 * mhz_frame + mhz_frame / 4});
+  auto const [other_later, other_ends, other_start] = run(false);
+  CHECK(other_later == later);
+  CHECK(other_ends == ends);
+}
+
+TEST_CASE("a machine reset clears the wire ends of the frames an RCC reset dropped")
+{
+  std::vector<std::string> log;
+  port_rig                 r;
+  r.sink->log = &log;
+  bus b{*r.f};
+  after_system_reset(r, b);
+  target(b, 7, 0);
+  auto const start = b.now() + us;
+  r.select(start, 1);
+  r.frame(1, start, 2);
+  b.run_until(start + mhz_frame / 2);
+  popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  REQUIRE(r.sink->drops.empty());
+  r.reset(popcorn::reset_kind::software);
+  REQUIRE(b.now() < us);
+  auto const again = b.now();
+  r.select(again, 3);
+  r.frame(2, again, 4);
+  b.run_until(again + 2 * mhz_frame);
+  REQUIRE(r.sink->frames.size() == 1);
+  CHECK(r.sink->frames[0].at.ps == again + mhz_frame);
+}
+
 TEST_CASE("every machine reset kind and a power cycle drop the queued port frames, re-armed")
 {
   using popcorn::reset_kind;

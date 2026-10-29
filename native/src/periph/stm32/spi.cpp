@@ -70,13 +70,15 @@ constexpr std::uint8_t port_dropped  = 4;
 
 struct spi_port_entry
 {
-  std::uint64_t due_ps{};
-  std::uint64_t unit{};
-  std::uint64_t frame_ps{};
-  std::uint32_t lane{};
-  std::uint32_t word{};
-  std::uint8_t  kind{};
-  std::uint8_t  bits{};
+  std::uint64_t                due_ps{};
+  std::uint64_t                unit{};
+  std::uint64_t                frame_ps{};
+  std::uint64_t                posted_ps{};
+  std::optional<std::uint64_t> wire_end_ps{};
+  std::uint32_t                lane{};
+  std::uint32_t                word{};
+  std::uint8_t                 kind{};
+  std::uint8_t                 bits{};
 
   friend auto operator==(spi_port_entry const&, spi_port_entry const&) -> bool = default;
 };
@@ -91,6 +93,43 @@ struct spi_port
 
   friend auto operator==(spi_port const&, spi_port const&) -> bool = default;
 };
+
+auto frame_start(std::span<spi_port_entry const> entries, std::uint64_t posted, std::uint64_t unit)
+    -> std::uint64_t
+{
+  auto const earlier = [unit](spi_port_entry const& entry) { return entry.unit < unit; };
+  auto       ahead   = entries | std::views::filter(earlier);
+  auto const below   = std::ranges::fold_left(
+      ahead | std::views::filter([](auto const& entry) {
+        return entry.kind == port_deselect;
+      }) | std::views::transform([](auto const& entry) { return entry.unit; }),
+      std::uint64_t{}, [](std::uint64_t one, std::uint64_t other) { return std::max(one, other); });
+  auto start = posted;
+  for(auto const& entry : ahead)
+  {
+    if(entry.kind == port_deselect)
+    {
+      start = std::max(start, entry.posted_ps);
+    }
+    else if(entry.unit < below)
+    {
+      continue;
+    }
+    else if(entry.kind == port_frame)
+    {
+      start = std::max(start, entry.due_ps + entry.frame_ps);
+    }
+    else if(entry.kind == port_ending)
+    {
+      start = std::max(start, entry.due_ps);
+    }
+    else if(entry.wire_end_ps)
+    {
+      start = std::max(start, *entry.wire_end_ps);
+    }
+  }
+  return start;
+}
 
 struct spi_state
 {
@@ -267,15 +306,24 @@ auto lower(std::string_view name) -> std::string
  *        shifting, a frame cut by the rise neither lands nor counts, the model's rule. A dropped
  *        unit keeps its own report time. An RCC reset of the SPI drops the frames started at or
  *        before its time, re-armed at the later of their end and that time, and keeps the later
- *        frames, which run in the fresh model. A frame queued after that reset with a start at or
- *        before its time is dropped the same way, and a select(), deselect() or drop() queued
- *        after it with a time before it is due at it, so each entry has the outcome it would have
- *        had queued before the reset. A deselect() due at or before that reset leaves the start of
- *        a frame queued after it to the frame's own time. The model keeps the time of the last RCC
- *        reset until the next machine reset. A machine reset of any kind, a power cycle included,
- *        drops every frame, re-armed at their end less the local time of the reset, 0 at the
- *        earliest, which the model takes in before_reset(). Queued level entries and dropped units
- *        survive every reset at the same rebased times. Each dropped unit is reported once, through
+ *        frames, which run in the fresh model at their own starts, as the external master's SCK
+ *        keeps running. Under a board controller, a frame dropped by that reset holds the wire
+ *        until its end, so a frame queued after the reset starts at that end at the earliest. Under
+ *        a link controller, each kept frame starts again from its own time and the entries still
+ *        ahead of it, the dropped frames left out, since the master may have cut them, so it gets
+ *        the start a frame queued at the reset would get, and one whose new start is at or before
+ *        the reset is dropped the same way. Every frame entry saves its own time for this. A frame
+ *        queued after that reset with a start at or before its time is dropped the same way, and a
+ *        select(), deselect() or drop() queued after it with a time before it is due at it, so each
+ *        entry has the outcome it would have had queued before the reset. A deselect() queued
+ *        after that reset with a time before it counts at that time in the start of a frame queued
+ *        after it, as queued before the reset. A frame an RCC reset dropped below a deselect() is
+ *        reported at the later of its end and that reset, where queued before the reset the
+ *        deselect() cuts it at the deselect's time. The model keeps the time of the last RCC reset
+ *        until the next machine reset. A machine reset of any kind, a power cycle included, drops
+ *        every frame, re-armed at their end less the local time of the reset, 0 at the earliest,
+ *        which the model takes in before_reset(). Queued level entries and dropped units survive
+ *        every reset at the same rebased times. Each dropped unit is reported once, through
  *        spi_controller_sink::dropped() from its lane event. The entries, the level, the
  *        generation, the last unit and the time of the last RCC reset are saved with the model.
  *
@@ -376,6 +424,7 @@ public:
   void mute(spi_link_target const& target) override;
   auto unmute(spi_link_target const& target) -> bool override;
   auto muted(spi_link_target const& target) const -> bool override;
+  auto frame_time() const -> std::uint64_t override;
 
   void control_written(std::uint32_t old, std::uint32_t now);
   void clear_written(std::uint32_t old, std::uint32_t now);
@@ -730,19 +779,21 @@ void spi::rethrow_refused()
           get(regs_, polarity_), get(regs_, phase_)));
 }
 
-auto spi::frame_ps() -> std::uint64_t
+auto spi::frame_time() const -> std::uint64_t
 {
   auto const hz  = ctx_.clock.hz(kernel_);
   auto const div = get(regs_, bypass_) != 0 ? 1u : 2u << get(regs_, baud_);
-  if(hz == 0)
+  return hz == 0 ? 0 : std::uint64_t{frame_bits()} * div * ps_per_second / hz;
+}
+
+auto spi::frame_ps() -> std::uint64_t
+{
+  auto const ps = frame_time();
+  if(ps == 0 and not std::exchange(no_clock_logged_, true))
   {
-    if(not std::exchange(no_clock_logged_, true))
-    {
-      warn("SPI_CFG1", "the SPI kernel clock is stopped: no frame is transferred");
-    }
-    return 0;
+    warn("SPI_CFG1", "the SPI kernel clock is stopped: no frame is transferred");
   }
-  return std::uint64_t{frame_bits()} * div * ps_per_second / hz;
+  return ps;
 }
 
 void spi::subscribe()
@@ -1497,20 +1548,24 @@ auto spi::after_model_reset(std::uint64_t due_ps) const -> std::uint64_t
 
 void spi::select(vtime at, std::uint32_t lane, std::uint64_t unit)
 {
+  auto const posted = port_due_ps(at, lane, unit);
   queue_port(
-      {.due_ps = after_model_reset(port_due_ps(at, lane, unit)),
-       .unit   = unit,
-       .lane   = lane,
-       .kind   = port_select});
+      {.due_ps    = after_model_reset(posted),
+       .unit      = unit,
+       .posted_ps = posted,
+       .lane      = lane,
+       .kind      = port_select});
 }
 
 void spi::deselect(vtime at, std::uint32_t lane, std::uint64_t unit)
 {
+  auto const posted = port_due_ps(at, lane, unit);
   queue_port(
-      {.due_ps = after_model_reset(port_due_ps(at, lane, unit)),
-       .unit   = unit,
-       .lane   = lane,
-       .kind   = port_deselect});
+      {.due_ps    = after_model_reset(posted),
+       .unit      = unit,
+       .posted_ps = posted,
+       .lane      = lane,
+       .kind      = port_deselect});
 }
 
 void spi::drop(vtime at, std::uint32_t lane, std::uint64_t unit)
@@ -1537,36 +1592,8 @@ void spi::frame(
     throw std::invalid_argument(
         "an SPI port frame has 4 to 32 bits, a word below 2**bits and at least 1 ps");
   }
-  auto const& entries = state_.port.entries;
-  auto const  below   = std::ranges::fold_left(
-      entries | std::views::filter([](auto const& entry) {
-        return entry.kind == port_deselect;
-      }) | std::views::transform([](auto const& entry) { return entry.unit; }),
-      std::uint64_t{}, [](std::uint64_t one, std::uint64_t other) { return std::max(one, other); });
   auto const last_reset = state_.port.reset_ps;
-  auto       start      = due;
-  for(auto const& entry : entries)
-  {
-    if(entry.kind == port_deselect)
-    {
-      if(not last_reset or entry.due_ps > *last_reset)
-      {
-        start = std::max(start, entry.due_ps);
-      }
-    }
-    else if(entry.unit < below)
-    {
-      continue;
-    }
-    else if(entry.kind == port_frame)
-    {
-      start = std::max(start, entry.due_ps + entry.frame_ps);
-    }
-    else if(entry.kind == port_ending)
-    {
-      start = std::max(start, entry.due_ps);
-    }
-  }
+  auto const start      = frame_start(state_.port.entries, due, unit);
   if(frame_ps > std::numeric_limits<std::uint64_t>::max() - start)
   {
     throw std::invalid_argument("an SPI port frame ends within the 64-bit picosecond range");
@@ -1574,23 +1601,26 @@ void spi::frame(
   if(last_reset and start <= *last_reset)
   {
     queue_port(
-        {.due_ps   = std::max(*last_reset, start + frame_ps),
-         .unit     = unit,
-         .frame_ps = frame_ps,
-         .lane     = lane,
-         .word     = mask_of(bits),
-         .kind     = port_dropped,
-         .bits     = bits});
+        {.due_ps      = std::max(*last_reset, start + frame_ps),
+         .unit        = unit,
+         .frame_ps    = frame_ps,
+         .posted_ps   = due,
+         .wire_end_ps = link_controller_ ? std::nullopt : std::optional{start + frame_ps},
+         .lane        = lane,
+         .word        = mask_of(bits),
+         .kind        = port_dropped,
+         .bits        = bits});
     return;
   }
   queue_port(
-      {.due_ps   = start,
-       .unit     = unit,
-       .frame_ps = frame_ps,
-       .lane     = lane,
-       .word     = word,
-       .kind     = port_frame,
-       .bits     = bits});
+      {.due_ps    = start,
+       .unit      = unit,
+       .frame_ps  = frame_ps,
+       .posted_ps = due,
+       .lane      = lane,
+       .word      = word,
+       .kind      = port_frame,
+       .bits      = bits});
 }
 
 void spi::port_selected()
@@ -1694,7 +1724,14 @@ void spi::run_port(std::uint32_t lane)
         auto const received = state_.host_shift & mask_of(entry.bits);
         end_host_frame(entry.bits, entry.word);
         flags();
-        controller_->frame(entry.word, received, vtime{entry.due_ps});
+        if(link_controller_)
+        {
+          link_controller_->unit_frame(entry.unit, entry.word, received, vtime{entry.due_ps});
+        }
+        else
+        {
+          controller_->frame(entry.word, received, vtime{entry.due_ps});
+        }
         break;
       }
       default:
@@ -1717,23 +1754,56 @@ void spi::rearm_port(
   auto const moved = [&](std::uint64_t due) {
     return std::max(now, due > shift ? due - shift : 0);
   };
+  auto const restart = not kind and link_controller_;
   for(auto& entry : port.entries)
   {
-    if(entry.kind == port_frame and (kind or entry.due_ps <= now))
+    if(kind)
     {
-      entry.due_ps = moved(entry.due_ps + entry.frame_ps);
-      entry.word   = mask_of(entry.bits);
-      entry.kind   = port_dropped;
+      entry.wire_end_ps.reset();
     }
-    else if(entry.kind == port_ending)
+    if(entry.kind == port_frame and (kind or (not restart and entry.due_ps <= now)))
     {
+      entry.due_ps += entry.frame_ps;
+      entry.kind = port_ending;
+    }
+    if(entry.kind == port_ending)
+    {
+      if(not kind and not link_controller_)
+      {
+        entry.wire_end_ps = entry.due_ps;
+      }
       entry.due_ps = moved(entry.due_ps);
       entry.word   = mask_of(entry.bits);
       entry.kind   = port_dropped;
     }
-    else
+    else if(entry.kind != port_frame)
     {
       entry.due_ps = moved(entry.due_ps);
+      if(kind)
+      {
+        entry.posted_ps = entry.due_ps;
+      }
+    }
+  }
+  if(restart)
+  {
+    for(auto& entry : port.entries)
+    {
+      if(entry.kind != port_frame)
+      {
+        continue;
+      }
+      auto const start = frame_start(port.entries, entry.posted_ps, entry.unit);
+      if(start <= now)
+      {
+        entry.due_ps = std::max(now, start + entry.frame_ps);
+        entry.word   = mask_of(entry.bits);
+        entry.kind   = port_dropped;
+      }
+      else
+      {
+        entry.due_ps = start;
+      }
     }
   }
   for(std::size_t index = 0; index < transfers.size(); ++index)
@@ -2132,7 +2202,17 @@ void spi::load(std::span<std::byte const> in)
 
 spi_link_target::~spi_link_target()         = default;
 spi_link_controller::~spi_link_controller() = default;
-spi_link_port::~spi_link_port()             = default;
+
+void spi_link_controller::unit_frame(
+    std::uint64_t,
+    std::uint32_t sent,
+    std::uint32_t received,
+    vtime         at)
+{
+  frame(sent, received, at);
+}
+
+spi_link_port::~spi_link_port() = default;
 
 auto spi_factory(board const& b, spi_variant variant) -> model_factory
 {

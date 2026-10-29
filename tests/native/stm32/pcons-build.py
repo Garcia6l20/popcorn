@@ -319,6 +319,18 @@ for _, target in firmwares.values():
     if target is not None:
         system_uart.depends(target)
 
+spi_medium = add_doctest(
+    "stm32-spi-medium",
+    [here / "test_spi_medium.cpp"],
+    static,
+    env=u575_env,
+    register=u575 is not None,
+)
+spi_medium.private.include_dirs.append(private_dir)
+for _, target in firmwares.values():
+    if target is not None:
+        spi_medium.depends(target)
+
 if u575 is not None:
     bench_system = project.Program(
         "bench-system", project.default_environment, sources=[here / "bench_system.cpp"]
