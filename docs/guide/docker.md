@@ -16,10 +16,11 @@ Mount the suite at `/work`, the working directory, and run as your own uid:
 docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/garcia6l20/popcorn:main pytest
 ```
 
-`pytest` is the default command, so `pytest` and its options can follow the image name. The popcorn
-plugin keeps its boot snapshots in `/work/.pytest_cache`, so `/work` must be writable by the uid
-given with `--user`. Without `--user`, the container runs as uid 1000. To run a suite from a
-read-only mount, turn the cache off with `pytest -p no:cacheprovider`.
+With no command the image runs `pytest`. Options need the command, as in
+`docker run ... ghcr.io/garcia6l20/popcorn:main pytest -q`. The popcorn plugin keeps its boot
+snapshots in `/work/.pytest_cache`, so `/work` must be writable by the uid given with `--user`.
+Without `--user`, the container runs as uid 1000. To run a suite from a read-only mount, turn the
+cache off with `pytest -p no:cacheprovider`.
 
 The examples of a checkout run the same way:
 
@@ -80,7 +81,7 @@ packages install with uv in a derived image, into the image's environment:
 ```dockerfile
 FROM ghcr.io/garcia6l20/popcorn:main
 USER root
-RUN uv pip install pytest-xdist
+RUN uv pip install --no-cache pytest-xdist
 USER popcorn
 ```
 
