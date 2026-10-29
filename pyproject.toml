@@ -1,10 +1,11 @@
 [build-system]
-requires = ["pcons==0.31.0"]
-build-backend = "pcons.pyproject"
+requires = ["pcons==0.31.0", "setuptools-scm==10.3.4", "vcs-versioning==2.6.0"]
+build-backend = "popcorn_build.backend"
+backend-path = ["."]
 
 [project]
 name = "popcorn"
-version = "0.1.0.dev0"
+dynamic = ["version"]
 requires-python = ">=3.14"
 license = "MIT AND GPL-2.0-only AND LGPL-2.1-or-later AND BSD-3-Clause AND Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "LICENSES/*"]
@@ -27,6 +28,7 @@ plugin = [
 [dependency-groups]
 dev = [
     "pcons",
+    "setuptools-scm==10.3.4",
     "pytest",
     "pyright",
     "ruff",
@@ -41,6 +43,14 @@ docs = [
     "mkdocstrings-python==2.0.10",
     "zensical==0.0.71",
 ]
+
+[tool.setuptools_scm]
+version_scheme = "guess-next-dev"
+local_scheme = "no-local-version"
+
+[tool.setuptools_scm.tag]
+prefix = "v"
+strict = true
 
 [tool.pcons]
 variant = "release"
@@ -72,6 +82,10 @@ executionEnvironments = [
 [tool.uv]
 default-groups = ["dev", "docs"]
 no-build-isolation-package = ["popcorn"]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { git = { commit = true, tags = true } },
+]
 
 [tool.pytest.ini_options]
 timeout = 15

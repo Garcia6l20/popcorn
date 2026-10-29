@@ -179,9 +179,7 @@ core_objects, core, core_static = area_library(
         *plugin.sources,
     ],
 )
-core_objects.private.defines.extend(
-    [f'POPCORN_VERSION="{POPCORN_VERSION}"', f'POPCORN_UNICORN_COMMIT="{unicorn_commit}"']
-)
+core_objects.private.defines.append(f'POPCORN_UNICORN_COMMIT="{unicorn_commit}"')
 core.link_private(package("unicorn")).depends(unicorn_archive)
 core_version_script = project_dir / "native" / "src" / "core" / "popcorn_core.map"
 core.private.link_flags.append(f"-Wl,--version-script={core_version_script}")

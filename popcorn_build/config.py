@@ -2,20 +2,18 @@ import os
 import re
 import shutil
 import subprocess
-import tomllib
 from pathlib import Path
 
 from pcons import find_c_toolchain, get_variant
 
 from popcorn_build.gcc_tools import gcc_ar_for
+from popcorn_build.version import popcorn_version
 
 VARIANTS = ("debug", "release", "asan", "tsan")
 GCC_MINIMUM = (16, 1)
 
 project_dir = Path(__file__).resolve().parent.parent
-POPCORN_VERSION: str = tomllib.loads((project_dir / "pyproject.toml").read_text())["project"][
-    "version"
-]
+POPCORN_VERSION: str = popcorn_version(project_dir)
 build_dir = Path(os.environ.get("PCONS_BUILD_DIR", project_dir / "build")).resolve()
 
 VARIANT = get_variant("release")

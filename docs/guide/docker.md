@@ -2,7 +2,7 @@
 
 The image `ghcr.io/garcia6l20/popcorn` runs popcorn tests and scripts with no compiler on the
 host. It holds Python 3.14, popcorn with its `pytest` extra, and uv, on Linux x86_64. The tag
-`main` follows the main branch.
+`main` follows the main branch, `vX.Y.Z` names a release and `latest` the newest one.
 
 ```sh
 docker pull ghcr.io/garcia6l20/popcorn:main

@@ -2,7 +2,7 @@
 
 The digest is the `;sdk` field of the plugin ABI tag. It covers the public headers under
 native/include/popcorn and every reflex header they reach, so a plugin built against other
-headers is refused even though `POPCORN_VERSION` stays the same between commits.
+headers is refused.
 """
 
 from __future__ import annotations

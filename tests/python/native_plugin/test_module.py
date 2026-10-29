@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from popcorn.plugin._sdk import sdk
 
 from .support import copied, run_python
 
@@ -64,7 +65,7 @@ def test_a_mismatched_tag_is_refused_before_its_constructors_run(tmp_path: Path)
     key, expected = ran.stdout.splitlines()[:2]
     assert key == "abi_tag"
     assert "popcorn 0.0.0;gcc edited" in expected
-    assert "popcorn 0.1.0" in expected
+    assert f"popcorn {sdk().version};" in expected
     assert not marker.exists()
 
 

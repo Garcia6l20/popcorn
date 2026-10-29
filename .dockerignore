@@ -12,6 +12,7 @@
 !docker/IMAGE_NOTICE
 !docker/licenses
 !docker/constraints.txt
+!docker/version-requirements.txt
 !.git/modules/third_party/unicorn
 .git/modules/third_party/unicorn/modules
 **/__pycache__

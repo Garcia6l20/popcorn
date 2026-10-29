@@ -26,6 +26,32 @@ compile with the sanitizer and build the native tests only: the Python extension
 so the Python tests run in the release or debug build. An LTO build is on by default for a
 wheel build only, `POPCORN_ENABLE_LTO` switches it.
 
+## The version
+
+The version comes from the git tag through setuptools_scm, with `version_scheme =
+"guess-next-dev"` and `local_scheme = "no-local-version"` under `[tool.setuptools_scm]`. A commit
+tagged `v0.1.0` builds `0.1.0`. A later commit builds the next patch version with a dev segment
+that counts the commits since the tag, `0.1.1.dev3`. The version has no local segment, so every
+wheel is accepted by an index. Only tags of the form `v<version>` count, so tags such as
+`fold-r12-pre` never reach the version (`[tool.setuptools_scm.tag]`). At a tagged commit, a
+modified tracked file gives the next dev version, `0.1.1.dev0`. Untracked files leave the version
+unchanged.
+
+`popcorn_build.version.popcorn_version` computes it for the wheel and sdist metadata, the SDK
+header `POPCORN_VERSION_STRING`, the build info and `pcons-build.py`. `python -m
+popcorn_build.version` prints it. The build backend `popcorn_build.backend` hands it to
+`pcons.pyproject`, which reads a static `[project].version`.
+
+- `SETUPTOOLS_SCM_PRETEND_VERSION` sets the version for a tree without git metadata. The Docker
+  build passes the version the workflow derived from the tags this way.
+- An sdist carries its version in `PKG-INFO`, so a wheel built from it has the same version and
+  needs no git.
+- `uv sync` rebuilds the editable install after a new commit or tag, through `cache-keys` in
+  `[tool.uv]`.
+
+A new commit changes the version string and so the plugin ABI tag: a plugin built before it is
+rebuilt or refused, like one built against other headers.
+
 ## What gets built
 
 ```mermaid

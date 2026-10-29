@@ -5,6 +5,9 @@ COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56
 ENV UV_PYTHON_INSTALL_DIR=/opt/python
 RUN uv python install 3.14.8 && uv venv /opt/build --python 3.14.8 \
     && uv pip install --no-cache --python /opt/build/bin/python pcons==0.31.0
+COPY docker/version-requirements.txt /tmp/version-requirements.txt
+RUN uv pip install --no-cache --python /opt/build/bin/python --require-hashes \
+    -r /tmp/version-requirements.txt
 
 FROM toolchain AS unicorn
 RUN --mount=type=bind,source=.git/modules/third_party/unicorn,target=/raw,rw \
@@ -24,19 +27,21 @@ COPY --from=unicorn /src/third_party/unicorn third_party/unicorn
 RUN git -C third_party/unicorn read-tree HEAD \
     && test -z "$(git -C third_party/unicorn status --porcelain)" \
     && mkdir -p third_party/reflex/core/include \
-    && CMAKE_BUILD_PARALLEL_LEVEL=4 PCONS_BUILD_DIR=/src/build/wheel PCONS_VARIANT=release \
+    && SETUPTOOLS_SCM_PRETEND_VERSION=0 CMAKE_BUILD_PARALLEL_LEVEL=4 PCONS_BUILD_DIR=/src/build/wheel PCONS_VARIANT=release \
        PCONS_VARS='{"POPCORN_BUILD_TESTS":"OFF","POPCORN_BUILD_EXAMPLES":"OFF"}' \
        /opt/build/bin/python -c "import popcorn_build.requirements" \
     && rm -r third_party/reflex
 
 FROM deps AS wheel
 ARG JOBS=4
+ARG POPCORN_VERSION
 COPY pcons-build.py LICENSE NOTICE ./
 COPY LICENSES LICENSES
 COPY native native
 COPY python python
 COPY third_party/reflex third_party/reflex
-RUN CMAKE_BUILD_PARALLEL_LEVEL=${JOBS} uv build --wheel --no-build-isolation \
+RUN test -n "${POPCORN_VERSION}" \
+    && SETUPTOOLS_SCM_PRETEND_VERSION=${POPCORN_VERSION} CMAKE_BUILD_PARALLEL_LEVEL=${JOBS} uv build --wheel --no-build-isolation \
     --python /opt/build/bin/python -C jobs=${JOBS} -o /out
 
 FROM python:3.14.10-slim-trixie@sha256:3cabfd7d7aaf394e6040e79fa1eec6ca1c52b74ed9188650472695d9a9326999 AS runtime
@@ -62,7 +67,7 @@ WORKDIR /work
 VOLUME /cache
 CMD ["pytest"]
 ARG POPCORN_REVISION=unknown
-ARG POPCORN_VERSION=0.1.0.dev0
+ARG POPCORN_VERSION
 LABEL org.opencontainers.image.title="popcorn" \
       org.opencontainers.image.description="STM32 firmware emulation and testing with popcorn and pytest" \
       org.opencontainers.image.source="https://github.com/Garcia6l20/popcorn" \

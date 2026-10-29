@@ -1,8 +1,5 @@
 [build-system]
-requires = [
-    "pcons==0.31.0",
-    "popcorn==0.1.0.dev0",
-]
+requires = ["pcons==0.31.0"]
 build-backend = "pcons.pyproject"
 
 [project]
