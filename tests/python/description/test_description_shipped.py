@@ -163,9 +163,7 @@ def test_a_stale_file_another_user_owns_stays_and_the_lookup_succeeds(
 ) -> None:
     stale = description_path(NAME)
     _age(stale, _shipped.STALE_SECONDS + 86400)
-    (shipped_dir / f"{NAME}.json.xz").write_bytes(
-        lzma.compress(_description_bytes(generator="other"))
-    )
+    write_layers(shipped_dir, {NAME: _description(generator="other")})
     real = Path.unlink
 
     def sticky(self: Path, missing_ok: bool = False) -> None:
