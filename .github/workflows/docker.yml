@@ -20,7 +20,7 @@ on:
       - tests/docs/guide/test_first_machine.py
       - .github/workflows/docker.yml
   push:
-    branches: [main]
+    branches: [main, docker-image]
     tags: ["v*.*.*"]
   workflow_dispatch:
 
@@ -151,6 +151,7 @@ jobs:
           flavor: latest=false
           tags: |
             type=raw,value=main,enable={{is_default_branch}}
+            type=raw,value=test-docker-image,enable=${{ github.ref_name == 'docker-image' }}
             type=ref,event=tag
             type=raw,value=latest,enable=${{ steps.ref.outputs.latest == 'true' }}
 
