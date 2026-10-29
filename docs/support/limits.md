@@ -425,6 +425,9 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   of one or two levels follows the same rule. The measurement covers VOS3 to VOS0 only. FLASH
   checks its latency against the range of the last ready.
 - STM32H5: PWR_USBSCR is storage, the USB model runs whatever USB33DEN and USB33SV hold.
+- STM32H5: `PWR_SCCR` resets with SMPSEN (0x200) on the packages with the SMPS regulator, the
+  part names ending in Q, and with LDOEN (0x100) on the others, RM0481 10.11.11. Both bits are
+  read-only. The supply the model runs is the board's.
 - STM32U5 packages with the SMPS, the part names ending in Q: `PWR_SVMSR.REGS` takes the value
   of `PWR_CR3.REGSEL` after the typical transition time of DS13737 Table 75 for the range
   ACTVOS gives at the REGSEL write: LDO to SMPS 14, 17, 16 and 16 us in range 4 to 1, SMPS to

@@ -1,5 +1,7 @@
 """The H5 patch files against the SVD of each of the six H5 parts."""
 
+import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -8,6 +10,7 @@ from popcorn.stm32.description import _sources
 from popcorn.stm32.description._builder import build_description, build_description_with_report
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._patches import load_patches
+from popcorn.stm32.description._shipped import build_text
 from popcorn.stm32.description._sources import find_sources
 
 PATCHES = Path(_sources.__file__).parent / "patches"
@@ -139,3 +142,112 @@ def test_every_h5_part_reads_sbs_mesr_mclr_1_and_clears_it_by_a_written_1(part: 
             "MCLR": "one_to_clear",
             "IPMEE": "one_to_clear",
         }, unit
+
+
+SMPS_PARTS = [
+    "STM32H563AIIxQ",
+    "STM32H563IIKxQ",
+    "STM32H563IITxQ",
+    "STM32H563LIHxQ",
+    "STM32H563MIYxQ",
+    "STM32H563VITxQ",
+    "STM32H563ZITxQ",
+    "STM32H573AIIxQ",
+    "STM32H573IIKxQ",
+    "STM32H573IITxQ",
+    "STM32H573LIHxQ",
+    "STM32H573MIYxQ",
+    "STM32H573VITxQ",
+    "STM32H573ZITxQ",
+]
+LDO_PARTS = [
+    "STM32H562AGIx",
+    "STM32H562AIIx",
+    "STM32H562IGKx",
+    "STM32H562IGTx",
+    "STM32H562IIKx",
+    "STM32H562IITx",
+    "STM32H562RGTx",
+    "STM32H562RGVx",
+    "STM32H562RITx",
+    "STM32H562RIVx",
+    "STM32H562VGTx",
+    "STM32H562VITx",
+    "STM32H562ZGTx",
+    "STM32H562ZITx",
+    "STM32H563AGIx",
+    "STM32H563AIIx",
+    "STM32H563IGKx",
+    "STM32H563IGTx",
+    "STM32H563IIKx",
+    "STM32H563IITx",
+    "STM32H563RGTx",
+    "STM32H563RGVx",
+    "STM32H563RITx",
+    "STM32H563RIVx",
+    "STM32H563VGTx",
+    "STM32H563VITx",
+    "STM32H563ZGTx",
+    "STM32H563ZITx",
+    "STM32H573AIIx",
+    "STM32H573IIKx",
+    "STM32H573IITx",
+    "STM32H573RITx",
+    "STM32H573RIVx",
+    "STM32H573VITx",
+    "STM32H573ZITx",
+]
+SUPPLY_FILES = ("stm32h56x_smps.toml", "stm32h56x_ldo.toml")
+SUPPLY_BUILD_PARTS = (
+    "STM32H562RGTx",
+    "STM32H563ZITx",
+    "STM32H563ZITxQ",
+    "STM32H573AIIx",
+    "STM32H573ZITxQ",
+)
+SCCR_SMPSEN = 0x200
+SCCR_LDOEN = 0x100
+
+
+def _supply_files_of(part: str) -> list[str]:
+    files = [PATCHES / name for name in SUPPLY_FILES]
+    return [p.path.name for p in load_patches(files, part=part, svd_name="STM32H5xx.svd")]
+
+
+def test_the_supply_files_cover_the_49_h5_group_a_parts_once_each() -> None:
+    assert len(SMPS_PARTS) + len(LDO_PARTS) == 49
+    assert len(set(SMPS_PARTS + LDO_PARTS)) == 49
+    for part in SMPS_PARTS:
+        assert _supply_files_of(part) == ["stm32h56x_smps.toml"], part
+    for part in LDO_PARTS:
+        assert _supply_files_of(part) == ["stm32h56x_ldo.toml"], part
+
+
+@pytest.mark.parametrize("part", OTHER_PARTS)
+def test_the_supply_files_leave_the_h503_h523_h533_parts_alone(part: str) -> None:
+    assert _supply_files_of(part) == []
+
+
+def _sccr_resets(text: str) -> dict[str, tuple[int, int]]:
+    data = json.loads(text)
+    found: dict[str, tuple[int, int]] = {}
+    for peripheral in data["peripherals"]:
+        if peripheral["name"] in ("PWR", "SEC_PWR"):
+            register = next(r for r in peripheral["registers"] if r["name"] == "SCCR")
+            found[peripheral["name"]] = (register["reset"], register["reset_mask"])
+    return found
+
+
+def _pin_data() -> Path:
+    value = os.environ.get("POPCORN_STM32_PIN_DATA")
+    if not value:
+        pytest.skip("set POPCORN_STM32_PIN_DATA to a STM32_open_pin_data checkout")
+    return Path(value)
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("part", SUPPLY_BUILD_PARTS)
+def test_pwr_sccr_resets_to_the_supply_the_package_uses(part: str) -> None:
+    expected = SCCR_SMPSEN if part in SMPS_PARTS else SCCR_LDOEN
+    resets = _sccr_resets(build_text(part, pin_data=_pin_data()))
+    assert resets == {"PWR": (expected, 0xFFFFFFFF), "SEC_PWR": (expected, 0xFFFFFFFF)}
