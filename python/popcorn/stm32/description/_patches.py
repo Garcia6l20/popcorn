@@ -1016,11 +1016,17 @@ _SMPS_SUFFIX = "Q"
 _DSI_IP = "DSIHOST"
 
 
+def is_smps_part(refname: str) -> bool:
+    """Whether the part of RefName @p refname has the SMPS step-down converter, a RefName
+    ending in `Q`, as ST's ordering codes mark it."""
+    return refname.endswith(_SMPS_SUFFIX)
+
+
 def _package_key(part: DbPart) -> str:
     key = part.package
     if any(ip.name == _DSI_IP for ip in part.ips):
         key += " DSI"
-    if part.ref_name.endswith(_SMPS_SUFFIX):
+    if is_smps_part(part.ref_name):
         key += " SMPS"
     return key
 

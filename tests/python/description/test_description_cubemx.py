@@ -7,6 +7,7 @@ from popcorn.stm32.description._cubemx import (
     DbIp,
     DbPart,
     Rzone,
+    bonded_pins,
     gpio_modes_file_name,
     instance_ips,
     read_gpio_alternates,
@@ -186,6 +187,48 @@ def test_u575_part_and_rzone_file_name(u575_part: DbPart) -> None:
     assert u575_part.flash_kib == [1024]
     assert rzone_file_name(u575_part) == "STM32_DIE482_786_1024.xml"
     assert len(u575_part.ips) == 110
+
+
+def test_u575_bonded_pins_follow_the_ufbga132_balls(u575_part: DbPart) -> None:
+    bonded = bonded_pins(u575_part)
+    assert {port: mask.bit_count() for port, mask in bonded.items()} == {
+        "A": 16,
+        "B": 16,
+        "C": 16,
+        "D": 16,
+        "E": 16,
+        "F": 11,
+        "G": 16,
+        "H": 3,
+    }
+    assert bonded["H"] == 0b1011
+
+
+def test_bonded_pins_drop_the_function_after_the_pin_name() -> None:
+    part = DbPart(
+        ref_name="X",
+        family="",
+        line="",
+        die="D",
+        ram_kib=[1],
+        flash_kib=[1],
+        ips=[],
+        pins={
+            name: frozenset()
+            for name in (
+                "PC14-OSC32_IN (PC14)",
+                "PA13 (JTMS/SWDIO)",
+                "PH3-BOOT0",
+                "PB15",
+                "PB16",
+                "PC2_C",
+                "VDD",
+                "PDR_ON",
+                "NRST",
+            )
+        },
+    )
+    assert bonded_pins(part) == {"A": 1 << 13, "B": 1 << 15, "C": 1 << 14, "H": 1 << 3}
 
 
 def test_u575_processor(u575_rzone: Rzone) -> None:

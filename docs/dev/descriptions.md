@@ -202,3 +202,25 @@ digest file make a change of a shipped description visible in review.
 
 `description_digest` is a SHA-256 of the description content. A snapshot stores it and checks it
 on load, so a snapshot only loads into a machine built from the same description.
+
+## Sweeping parts
+
+`popcorn_build.part_sweep` builds the description of many parts and attaches a Machine to each
+at TZEN 0 and 1. Run it from the checkout:
+
+```sh
+uv run python -m popcorn_build.part_sweep --out sweep.json --parts 'STM32U5*' 'STM32H5*' -j 10
+uv run python -m popcorn_build.part_sweep --out shipped.json --source shipped
+```
+
+- `--source local`, the default, builds every CubeMX db part matching the globs from ST's files.
+  `--source shipped` loads the shipped parts.
+- Each part runs in its own child interpreter, at most `-j` at once, 120 s each. A child that
+  crashes or runs out of time gives a row with `error` set to `crashed` or `timeout`.
+- The output is `{"format": 1, "cubemx_db": ..., "popcorn": <git describe>, "parts": [...]}`,
+  rows sorted by part. A row holds the db facts of the part, `line`, `die`, `package`,
+  `flash_kib`, `ram_kib` and `bonded`, the pin mask per GPIO port from `bonded_pins`, each null
+  when the db lacks the part or its file does not read, the latter with `db_error` set. It also holds `smps` from `is_smps_part`, the description digest,
+  the attach result per TZEN value, and the instance counts: total, with a built-in model at
+  TZEN 0 and 1, and the names with no IP version.
+- A failed stage holds the exception type and the first 300 characters of its text.

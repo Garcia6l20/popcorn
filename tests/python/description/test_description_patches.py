@@ -17,6 +17,7 @@ from popcorn.stm32.description._patches import (
     PatchTarget,
     apply_alternate_drops,
     apply_patches,
+    is_smps_part,
     load_patches,
 )
 from popcorn.stm32.description._sources import Sources
@@ -1186,6 +1187,19 @@ def _part(ref_name: str = "TOY1", package: str = "LQFP64", *ips: str) -> DbPart:
         ips=[DbIp(instance=ip, name=ip, version="") for ip in ips],
         package=package,
     )
+
+
+@pytest.mark.parametrize(
+    ("ref_name", "smps"),
+    [
+        ("STM32U575ZITxQ", True),
+        ("STM32U575QGIx", False),
+        ("STM32H563VITxQ", True),
+        ("STM32H573AIIx", False),
+    ],
+)
+def test_an_smps_part_is_a_refname_ending_in_q(ref_name: str, smps: bool) -> None:
+    assert is_smps_part(ref_name) is smps
 
 
 def _signed(tmp_path: Path, part: DbPart | None, *paths: Path) -> PatchTarget:
