@@ -16,7 +16,6 @@ place of `registers`. Three files hold the layers of the parts of one line:
 Family name: RefName[:7] + "xx". Line name: RefName[:9] + "xx". Every function here is pure and
 imports only the standard library and `_errors`, so the build probe can run it without the
 extension.
-
 """
 
 import hashlib

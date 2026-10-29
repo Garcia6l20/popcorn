@@ -153,6 +153,12 @@ def _cmd_ship(args: argparse.Namespace) -> int:
     if args.core and not args.parts:
         print("ship: --core needs a part list", file=sys.stderr)
         return 1
+    if args.out is None and not args.check:
+        print(
+            "ship: --out is required to write, the package data directory of the source tree",
+            file=sys.stderr,
+        )
+        return 1
     out_dir = SHIPPED_DIR if args.out is None else Path(args.out)
     pin_data = Path(args.pin_data)
     goldens = golden_names()
@@ -206,7 +212,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ship.add_argument("--core")
     ship.add_argument("--pin-data", required=True)
     ship.add_argument("--check", action="store_true")
-    ship.add_argument("--out", help="layer directory, the package data by default")
+    ship.add_argument(
+        "--out", help="layer directory, required to write, the package data for --check"
+    )
     ship.add_argument("-j", "--jobs", type=int, default=DEFAULT_JOBS)
     ship.set_defaults(func=_cmd_ship)
 

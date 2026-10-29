@@ -131,10 +131,10 @@ def test_a_ship_build_in_a_process_pool_writes_the_shipped_blocks_and_lines() ->
             assert lzma.decompress(files[file]) == lzma.decompress(expected[file]), file
 
 
-def test_a_failed_build_in_a_process_pool_raises_its_description_error() -> None:
+def test_failed_builds_in_a_process_pool_raise_the_first_failure_in_name_order() -> None:
     pin_data = _pin_data()
     with pytest.raises(DescriptionError) as excinfo:
-        build_layers(["STM32U575QGIx", "STM32U575QQQx"], pin_data=pin_data, jobs=2)
+        build_layers(["STM32U575QQQx", "STM32U575QZZx"], pin_data=pin_data, jobs=2)
     assert excinfo.value.key == "STM32U575QQQx"
 
 

@@ -352,16 +352,32 @@ def build_layers(names: Sequence[str], *, pin_data: Path, jobs: int = 1) -> dict
     return factor({name: json.loads(b.text) for name, b in by_name.items()}, references)
 
 
+_WRITE_ORDER = (".blocks.json.xz", ".line.json.xz", ".parts.json.xz")
+
+
+def _write_rank(file: str) -> tuple[int, str]:
+    kinds = [n for n, suffix in enumerate(_WRITE_ORDER) if file.endswith(suffix)]
+    return (kinds[0] if kinds else len(_WRITE_ORDER), file)
+
+
 def write_layers(
     directory: Path, files: Mapping[str, bytes], families: Collection[str]
 ) -> list[str]:
-    """Writes @p files, file name to bytes, into @p directory, each to `<name>.tmp.<pid>` first,
-    then replaced into place once every file is written, then removes every layer file of
-    @p families that @p files does not hold. Returns the names removed, sorted."""
+    """Writes @p files, file name to bytes, into @p directory and removes every layer file of
+    @p families that @p files does not hold. Returns the names removed, sorted.
+
+    First removes every `<layer file>.tmp.<pid>` of @p families an earlier run left. Each file
+    goes to `<name>.tmp.<pid>`, and once all are written each is replaced into place, blocks
+    files first, then line files, then parts files, so new blocks are in place before a line or
+    parts file names them. A failed write or replace removes the temporary files."""
     directory.mkdir(parents=True, exist_ok=True)
+    for path in directory.glob("*.json.xz.tmp.*"):
+        if layer_family(path.name.partition(".tmp.")[0]) in families:
+            path.unlink(missing_ok=True)
     pending: list[tuple[Path, Path]] = []
     try:
-        for file, data in sorted(files.items()):
+        for file in sorted(files, key=_write_rank):
+            data = files[file]
             tmp_path = directory / f"{file}.tmp.{os.getpid()}"
             pending.append((tmp_path, directory / file))
             tmp_path.write_bytes(data)

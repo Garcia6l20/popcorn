@@ -213,7 +213,8 @@ exists. To add a part, write its golden, then ship:
 
 ```
 uv run python -m popcorn.stm32.description golden STM32U575QGIx --update
-uv run python -m popcorn.stm32.description ship STM32U575QGIx --pin-data <STM32_open_pin_data>
+uv run python -m popcorn.stm32.description ship STM32U575QGIx --pin-data <STM32_open_pin_data> \
+    --out python/popcorn/stm32/data
 uv run python -m popcorn.stm32.description ship --pin-data <STM32_open_pin_data> --check
 ```
 
@@ -224,7 +225,9 @@ reference is its part with the most bonded GPIO pins, then the largest flash, th
 RefName in sorted order. Every file goes to a temporary name first and is renamed once all are
 written. Then every layer file of a touched family that the new set lacks is removed, so a part
 whose golden is deleted leaves no delta and a line with no part leaves no file. Equal inputs give
-equal bytes. `--core` applies to every named part and needs a part list.
+equal bytes. Writing needs `--out`, the package data directory of the source tree: under
+`uv run` the imported package is the staged copy in the build directory. `--core` applies to
+every named part and needs a part list.
 
 `ship --check` composes each shipped part, every golden part without a part list, and compares
 its digest with a fresh build. `golden` without a part checks every golden file.

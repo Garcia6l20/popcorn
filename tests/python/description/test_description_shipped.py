@@ -601,6 +601,50 @@ def test_ship_removes_the_layers_a_deleted_golden_leaves_behind(ship_env: ShipEn
     assert _files(ship_env.out) == {}
 
 
+def test_ship_refuses_to_write_without_out(
+    ship_env: ShipEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    package_data = tmp_path / "package"
+    package_data.mkdir()
+    monkeypatch.setattr(cli, "SHIPPED_DIR", package_data)
+    assert cli.main(["ship", "--pin-data", "unused"]) == 1
+    assert "--out is required to write" in capsys.readouterr().err
+    assert ship_env.built == []
+    assert list(package_data.iterdir()) == []
+
+
+def test_ship_replaces_blocks_then_lines_then_parts(
+    ship_env: ShipEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replaced: list[str] = []
+    replace = os.replace
+
+    def record(source: Path, target: Path) -> None:
+        replaced.append(Path(target).name.split(".", 1)[1])
+        replace(source, target)
+
+    monkeypatch.setattr("popcorn.stm32.description._shipped.os.replace", record)
+    assert ship_env.ship() == 0
+    kinds = ["blocks.json.xz"] * 2 + ["line.json.xz"] * 2 + ["parts.json.xz"] * 2
+    assert replaced == kinds
+
+
+def test_ship_removes_temporary_files_an_earlier_run_left_in_its_families(
+    ship_env: ShipEnv,
+) -> None:
+    ship_env.out.mkdir()
+    left = ship_env.out / f"{PARTS}.tmp.999999"
+    foreign = ship_env.out / "STM32T1xx.blocks.json.xz.tmp.999999"
+    left.write_bytes(b"killed")
+    foreign.write_bytes(b"killed")
+    assert ship_env.ship(NAME) == 0
+    assert not left.exists()
+    assert foreign.exists()
+
+
 def test_ship_leaves_no_temporary_file_when_a_write_fails(
     ship_env: ShipEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
