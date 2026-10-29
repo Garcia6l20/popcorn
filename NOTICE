@@ -97,8 +97,9 @@ Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
     security attribution lookup through the SAU, with v8m_is_sau_exempt from
     upstream QEMU, and replaced its IDAU call by a host callback set with
     UC_CTL_ARM_IDAU. Added UC_CTL_ARM_SECURITY, off by default, which turns
-    the lookup on. Upstream compiles the lookup out, so every address of a
-    core with the Security Extension is Secure.
+    the lookup on. Setting UC_CTL_ARM_IDAU or UC_CTL_ARM_SECURITY flushes
+    the TLB. Upstream compiles the lookup out, so every address of a core
+    with the Security Extension is Secure.
   - include/unicorn/arm.h, qemu/target/arm/unicorn_arm.c, internals.h,
     m_helper.c, qemu/arm.h, qemu/aarch64.h, symbols.sh: added host access to
     the v8-M security state, UC_ARM_REG_SECURE, the SAU registers SAU_CTRL,
@@ -106,9 +107,11 @@ Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
     CPACR_NS, FPCCR_S and FPCCR_NS, NSACR, the special registers MSP, PSP,
     CONTROL, PRIMASK, BASEPRI, FAULTMASK, MSPLIM and PSPLIM of each security
     state with the suffixes _S and _NS, and the read-only abort status and
-    address FAULT_STATUS and FAULT_ADDRESS. A SECURE write switches the
-    security state and its stack pointer banks, an SAU write flushes the
-    TLB. Upstream has no register id for them.
+    address FAULT_STATUS and FAULT_ADDRESS, with the fault status constants
+    UC_ARM_FAULT_NSC_EXEC and UC_ARM_FAULT_SECURE. A SECURE write switches
+    the security state and its stack pointer banks, a write to an SAU
+    register other than SAU_RNR flushes the TLB. Upstream has no register id
+    for them.
   - include/unicorn/unicorn.h, include/uc_priv.h, uc.c,
     qemu/softmmu/memory.c, qemu/include/exec/memory.h,
     qemu/unicorn_common.h, qemu/accel/tcg/cputlb.c: added
@@ -128,8 +131,13 @@ Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
     accesses to no host callback but memory hooks.
   - qemu/accel/tcg/translate-all.c: uc_ctl_remove_cache finds the RAM
     address of an M-profile range through the address space, with no fetch
-    TLB fill. Upstream fills the fetch TLB in the current security state,
-    which faults and removes nothing for a range that state cannot fetch.
+    TLB fill, and restores the exception index when the fetch TLB fill of
+    another profile faults. Upstream finds the address with a fetch TLB
+    fill in the current security state. Once UC_CTL_ARM_SECURITY turns this
+    fork's security lookup on, that fill faults and removes nothing for a
+    range the state cannot fetch. Upstream also leaves the exception index
+    of a caught fill fault set, so a removal from a hook raises a prefetch
+    abort at the next exit.
   - bindings/: regenerated the constant files of the dotnet, go, java,
     pascal, python, ruby and zig bindings with the new ids, and with
     UC_HOOK_BLOCK_ICOUNT and UC_CTL_UC_SLOW_PATH_COUNT, which they lacked.
@@ -154,8 +162,13 @@ Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
     field. Upstream translates past an SAU region boundary inside a page
     and raises the fetch fault of the instruction past it at the first
     instruction of the block.
-  - qemu/accel/tcg/cputlb.c: the bus filter judges a load before its
-    UC_HOOK_MEM_READ hooks, and the load and store helpers look their TLB
+  - qemu/accel/tcg/cputlb.c, include/unicorn/unicorn.h, include/uc_priv.h:
+    the bus filter judges an aligned load before its UC_HOOK_MEM_READ and
+    UC_HOOK_MEM_READ_PROT hooks, and a load it refuses runs neither. An
+    unaligned load has each aligned part judged first and runs its
+    UC_HOOK_MEM_READ hooks only when no part was refused, which a refusal
+    count in the engine tracks. uc_cb_bus_access_t documents the order.
+  - qemu/accel/tcg/cputlb.c: the load and store helpers look their TLB
     entry up again after a memory hook callback ran. Upstream keeps the
     entry pointer across the hooks, which a hook that flushes and resizes
     the TLB leaves pointing into freed memory.
@@ -176,7 +189,9 @@ Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
   - bindings/: regenerated the constant files of the seven bindings with
     the new ids.
   - tests/unit/test_arm.c: added the split page, fetch-each, straddle,
-    read hook flush and translation count tests.
+    read hook flush and translation count tests, test_arm_v8m_nsacr_fp,
+    test_arm_bus_filter_read_hook_order and the UC_CTL_TB_FLUSHES checks of
+    test_arm_tb_translations.
   2026-10-18, Sylvain Garcia <garcia.6l20@gmail.com>:
   - qemu/accel/tcg/cputlb.c: moved the bus filter's load value out of the
     load_helper frame, and built load_helper without the stack protector
@@ -185,11 +200,13 @@ Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
     test_arm_bus_filter_read_hook_installs.
   2026-10-22, Sylvain Garcia <garcia.6l20@gmail.com>:
   - qemu/accel/tcg/cputlb.c, translate-all.c, translate-all.h: a store to
-    a RAM page that holds no translated code cleans its TLB entry, so later
-    stores take the fast path, and the first block translated from the page
-    sends stores through every window over its host memory to the slow path
-    again. Upstream sends every store to executable RAM through the slow
-    path.
+    a RAM page that holds no translated code cleans its TLB entry when no
+    UC_HOOK_MEM_WRITE hook covers the address and no newer snapshot covers
+    the region, so later stores take the fast path. Read, unmapped and
+    protection hooks leave the entry clean. The first block translated from
+    the page sends stores through every window over its host memory to the
+    slow path again. Upstream sends every store to executable RAM through
+    the slow path.
   - tests/unit/test_mem.c: added the store fast path tests.
   2026-10-23, Sylvain Garcia <garcia.6l20@gmail.com>:
   - qemu/accel/tcg/translate-all.c: a block from a page whose code TLB
