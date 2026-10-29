@@ -18,7 +18,7 @@
     "fields": "b60d8a1bbf5310e54c0bcb017fbb0cf4d54c7690a5ad24a0615a7d3407f8ceb5",
     "irqs": "03c827971b858f128ff01140cb03d22c75a532ceb7c45f35af5bffb8d709df0b",
     "peripherals": "911433c7861203a79011aae97da40f09fd136e94eaf3ee75c7b566acf650c11e",
-    "regions": "02be73c299ed6699e62d697003bfc8bebf9caecd9b69c21b4909ae41f5b036f9",
+    "regions": "fa459dec584853f9c5b27ebec2c24d06b791f852740eccd53b3986eb15952f2a",
     "registers": "0563345de9933ebf1e33e702f0c9f4d017fbc862bcc29cb7f1bc7247886fc400"
   }
 }
