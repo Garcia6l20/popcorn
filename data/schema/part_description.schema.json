@@ -378,7 +378,8 @@
     "region_kind": {
       "enum": [
         "rom",
-        "ram"
+        "ram",
+        "bit_band"
       ],
       "type": "string"
     },

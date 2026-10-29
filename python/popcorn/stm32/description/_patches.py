@@ -951,6 +951,30 @@ _ENGINE_PAGE = 0x400
 """Granularity of a memory region, the emulator's page size: the core refuses anything finer."""
 
 
+_BIT_BAND_SIZE = 32 << 20
+"""Size of a Cortex-M bit-band alias window."""
+
+_BIT_BAND_PAIRS = {0x2200_0000: 0x2000_0000, 0x4200_0000: 0x4000_0000}
+"""The architectural windows, alias start onto the target's first byte, DDI0337H 3.7: the lowest
+1 MB of the SRAM region and of the peripheral region."""
+
+
+def _check_bit_band(added: RegionDesc, key: str, *, file: str) -> None:
+    """DescriptionError unless `added` is one of the two architectural 32 MB windows, with no
+    content and no controller."""
+    if added.size != _BIT_BAND_SIZE:
+        raise DescriptionError(file, 0, key, "a bit_band region of 32 MB")
+    if _BIT_BAND_PAIRS.get(added.start) != added.physical:
+        raise DescriptionError(
+            file,
+            0,
+            key,
+            "a bit_band window at 0x22000000 onto 0x20000000 or at 0x42000000 onto 0x40000000",
+        )
+    if added.content is not None or added.controller is not None:
+        raise DescriptionError(file, 0, key, "a bit_band region with no content and no controller")
+
+
 def _apply_memory(
     rule: PatchMemory,
     regions: list[RegionDesc],
@@ -967,7 +991,9 @@ def _apply_memory(
             raise DescriptionError(file, 0, key, "a non-empty range inside the 32-bit space")
         if added.start % _ENGINE_PAGE != 0 or added.size % _ENGINE_PAGE != 0:
             raise DescriptionError(file, 0, key, "a start and size in whole 1 KB pages")
-        if added.physical is not None and not any(
+        if added.kind is RegionKind.BIT_BAND:
+            _check_bit_band(added, key, file=file)
+        elif added.physical is not None and not any(
             region.start <= added.physical
             and added.physical + added.size <= region.start + region.size
             for region in regions

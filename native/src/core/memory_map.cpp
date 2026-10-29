@@ -164,6 +164,8 @@ auto machine::mapped_region::build(
   std::uint32_t page = 0;
   check(uc_ctl_get_page_size(engine, &page), "reading the engine page size");
 
+  constexpr std::uint64_t bit_band_ratio = 32;
+
   std::vector<std::unique_ptr<mapped_region>> memory;
   memory.reserve(description.regions.size() + 1);
   for(auto const& region : description.regions)
@@ -173,6 +175,27 @@ auto machine::mapped_region::build(
       throw config_error(
           description.part, 0, region_key(region),
           std::format("start and size multiples of the engine page size, {} bytes", page));
+    }
+    if(region.kind == region_kind::bit_band)
+    {
+      if(not region.physical or region.content)
+      {
+        throw config_error(
+            description.part, 0, region_key(region) + (region.physical ? ".content" : ".physical"),
+            "a bit_band region with physical, the base of its target range, and no content");
+      }
+      auto const target_end = std::uint64_t{*region.physical} + region.size / bit_band_ratio;
+      if(std::ranges::any_of(description.regions, [&](region_desc const& other) {
+           return other.kind == region_kind::bit_band
+              and *region.physical < other.start + other.size
+              and other.start < target_end;
+         }))
+      {
+        throw config_error(
+            description.part, 0, region_key(region) + ".physical",
+            "a target range clear of every bit_band region");
+      }
+      continue;
     }
     check_content(description.part, region);
     memory.push_back(

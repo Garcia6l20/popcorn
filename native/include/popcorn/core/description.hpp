@@ -66,11 +66,18 @@ enum class[[= reflex::derive{reflex::Format, reflex::Parse}]] cross_effect
   set,
 };
 
-/** @brief Kind of memory region. */
+/**
+ * @brief Kind of memory region.
+ *
+ * A `bit_band` region is a Cortex-M bit-band alias window: each word of it maps one bit of the
+ * 32 times smaller range starting at its `physical`, and CPU and debugger accesses to it read or
+ * read-modify-write that bit through the bus. It holds no bytes of its own.
+ */
 enum class[[= reflex::derive{reflex::Format, reflex::Parse}]] region_kind
 {
   rom,
   ram,
+  bit_band,
 };
 
 /** @brief Bit field of a register. */
@@ -231,7 +238,8 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] region_desc
   region_access acc{};
   /** @brief Region is in the secure address space. */
   bool secure{};
-  /** @brief Start of the region this one aliases and shares storage with. */
+  /** @brief Start of the region this one aliases and shares storage with. On a `bit_band`
+   * region, the base of the range whose bits its words map, 32 alias bytes per target byte. */
   std::optional<address> physical;
   /** @brief Peripheral whose model serves CPU and DMA stores to this read-only region, such as
    * the FLASH interface of a flash bank. */

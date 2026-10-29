@@ -2288,4 +2288,40 @@ TEST_CASE("RM0481 2.3: the Secure LPUART window at 0x54002400 reaches the LPUART
   REQUIRE(r.bus->services().write(0x5400'240cu, 4, 0x300, secure_priv).has_value());
   CHECK(r.peek("LPUART", "BRR") == 0x300);
 }
+
+auto u575_bit_band() -> popcorn::part_description const&
+{
+  static auto const made = [] {
+    auto desc = u575();
+    desc.regions.push_back({
+        .name       = "BB_SRAM",
+        .start      = 0x2200'0000,
+        .size       = 0x0200'0000,
+        .kind       = popcorn::region_kind::bit_band,
+        .acc        = {.read = true, .write = true, .execute = false},
+        .secure     = false,
+        .physical   = 0x2000'0000,
+        .controller = std::nullopt,
+        .content    = std::nullopt
+    });
+    return desc;
+  }();
+  return made;
+}
+
+TEST_CASE("the GTZC memory windows leave out a bit_band region, the target SRAM stays checked")
+{
+  rig const   r{u575_bit_band(), true, "LPGPIO1"};
+  auto* const firewall = dynamic_cast<periph::bus_firewall*>(r.target->model("GTZC1_TZSC"));
+  REQUIRE(firewall != nullptr);
+  CHECK(
+      firewall->check_memory(0x2000'0000, 4, nonsecure_priv, popcorn::arch::memory_op::read)
+      == periph::bus_verdict::read_zero_write_ignore);
+  CHECK(
+      firewall->check_memory(0x2200'0000, 4, nonsecure_priv, popcorn::arch::memory_op::read)
+      == periph::bus_verdict::allow);
+  REQUIRE(r.bus->services().write(0x2000'0000, 4, 1, secure_priv).has_value());
+  CHECK(r.bus->services().read(0x2200'0000, 4, nonsecure_priv) == 0u);
+  CHECK(r.bus->services().read(0x2200'0000, 4, secure_priv) == 1u);
+}
 }

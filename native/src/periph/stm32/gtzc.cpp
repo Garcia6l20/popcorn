@@ -900,6 +900,10 @@ private:
     };
     for(auto const& region : ctx_.part.regions)
     {
+      if(region.kind == region_kind::bit_band)
+      {
+        continue;
+      }
       auto const physical = region.physical.value_or(region.start);
       auto const end      = std::uint64_t{physical} + region.size;
       for(auto const* const sram : srams)

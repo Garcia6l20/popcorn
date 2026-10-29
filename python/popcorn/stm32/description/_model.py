@@ -137,6 +137,7 @@ class RegionContent:
 class RegionKind(StrEnum):
     ROM = "rom"
     RAM = "ram"
+    BIT_BAND = "bit_band"
 
 
 @dataclass(slots=True, kw_only=True)

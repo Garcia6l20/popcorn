@@ -355,7 +355,7 @@ TEST_CASE("JSON Schema defines each enum once under its C++ name and refers to i
   CHECK_FALSE(dumped(document).contains("\"enum\""));
   CHECK(
       canonical_json(dumped(defs.as_object()["region_kind"]))
-      == canonical_json(R"({"type": "string", "enum": ["rom", "ram"]})"));
+      == canonical_json(R"({"type": "string", "enum": ["rom", "ram", "bit_band"]})"));
   auto& field = defs.as_object()["field_desc"].as_object()["properties"].as_object();
   CHECK(canonical_json(dumped(field["acc"])) == canonical_json(R"({"$ref": "#/$defs/access"})"));
   CHECK(

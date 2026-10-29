@@ -106,6 +106,9 @@ test_watches = add_doctest(
 test_memory_grant = add_doctest(
     "core-memory-grant", [here / "test_memory_grant.cpp"], [test_support, core], env=m33_env
 )
+test_bit_band = add_doctest(
+    "core-bit-band", [here / "test_bit_band.cpp"], [test_support, core], env=m33_env
+)
 bench_run_loop = project.Program(
     "bench-run-loop", project.default_environment, sources=[here / "bench_run_loop.cpp"]
 )

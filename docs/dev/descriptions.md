@@ -199,6 +199,36 @@ width leaves the register or overlaps another field. The patch report counts one
 `fields_touched` per property, field and peripheral or alias it sets. `fields_dropped`,
 `fields_renamed` and `fields_added` count each base field once, whatever its aliases.
 
+## Bit-band regions
+
+A region of kind `bit_band` is a Cortex-M bit-band alias window. Its `physical` is the base of
+the target range, and alias word `w` maps bit `w % 8` of target byte `w / 8`. A family patch adds
+the windows with `[memory] add`:
+
+```toml
+[memory]
+source = "RM0038 Rev 18, 2.6: bit-band regions of SRAM and of the peripherals"
+add = [
+  { name = "BB_SRAM", start = 0x22000000, size = 0x02000000, kind = "bit_band", acc = { read = true, write = true, execute = false }, secure = false, physical = 0x20000000 },
+  { name = "BB_PERIPH", start = 0x42000000, size = 0x02000000, kind = "bit_band", acc = { read = true, write = true, execute = false }, secure = false, physical = 0x40000000 },
+]
+```
+
+A `bit_band` region is one of the two architectural windows, 32 MB at 0x22000000 onto 0x20000000
+or at 0x42000000 onto 0x40000000, with no content and no controller. Otherwise the build raises
+`DescriptionError` keyed `memory.add.<name>`. A description file that places a window elsewhere is
+refused when the machine is built if the window's target range overlaps any `bit_band` region.
+
+The machine maps the window as MMIO and holds no bytes for it, so a snapshot carries no image of
+it and a power-on reset leaves it alone. A CPU or debugger access of 1, 2 or 4 bytes reaches the
+target unit of the same size that holds the bit: a read returns the bit as 0 or 1, a write reads
+the unit, sets or clears the bit from bit 0 of the value and writes the unit back. Both target
+accesses go through the bus with the attributes of the alias access, so watches, the firewall, the
+peripheral models, read side effects, the trace ring and coverage see accesses at the target
+address, and a write into memory holding translated code drops that code from the next block on.
+The read and the write run inside one access at one instruction count, and DMA beats run between
+instructions, so the read-modify-write is atomic. A DMA access to an alias address is a bus error.
+
 ## Shipped descriptions
 
 Shipped descriptions live in `python/popcorn/stm32/data` as three kinds of xz-compressed JSON

@@ -792,6 +792,94 @@ def test_memory_add_refuses_a_clash_an_overlap_or_a_bad_range(
     assert target == before
 
 
+_BIT_BAND_PAIRS = "a bit_band window at 0x22000000 onto 0x20000000 or at 0x42000000 onto 0x40000000"
+
+
+def _bit_band(name: str, start: int, size: int, physical: int | None, extra: str = "") -> str:
+    target = ("" if physical is None else f", physical = {physical:#x}") + extra
+    return (
+        f'{{ name = "{name}", start = {start:#x}, size = {size:#x}, kind = "bit_band", '
+        f"acc = {{ read = true, write = true, execute = false }}, secure = false{target} }}"
+    )
+
+
+def test_memory_add_takes_bit_band_windows_onto_sram_and_the_peripheral_range(
+    tmp_path: Path,
+) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    path = _memory_patch(
+        tmp_path,
+        _bit_band("BB_SRAM", 0x2200_0000, 0x0200_0000, 0x2000_0000),
+        _bit_band("BB_PERIPH", 0x4200_0000, 0x0200_0000, 0x4000_0000),
+    )
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.regions_added == 2
+    added = {r.name: r for r in target.regions[1:]}
+    assert [(r.kind, r.size, r.physical) for r in added.values()] == [
+        (RegionKind.BIT_BAND, 0x0200_0000, 0x2000_0000),
+        (RegionKind.BIT_BAND, 0x0200_0000, 0x4000_0000),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("entry", "reason"),
+    [
+        (
+            _bit_band("SMALL", 0x2200_0000, 0x0100_0000, 0x2000_0000),
+            "a bit_band region of 32 MB",
+        ),
+        (
+            _bit_band("SKEW", 0x2200_0000, 0x0200_0000, 0x2008_0000),
+            _BIT_BAND_PAIRS,
+        ),
+        (
+            _bit_band("BARE", 0x2200_0000, 0x0200_0000, None),
+            _BIT_BAND_PAIRS,
+        ),
+        (
+            _bit_band("BB_TOP", 0x4400_0000, 0x0200_0000, 0x5FF0_0000),
+            _BIT_BAND_PAIRS,
+        ),
+        (
+            _bit_band("FLASHED", 0x2200_0000, 0x0200_0000, 0x0800_0000),
+            _BIT_BAND_PAIRS,
+        ),
+        (
+            _bit_band("CROSS", 0x2200_0000, 0x0200_0000, 0x4000_0000),
+            _BIT_BAND_PAIRS,
+        ),
+        (
+            _bit_band(
+                "FILLED",
+                0x2200_0000,
+                0x0200_0000,
+                0x2000_0000,
+                ", content = [{ offset = 0, data = [1] }]",
+            ),
+            "a bit_band region with no content and no controller",
+        ),
+        (
+            _bit_band("CTRL", 0x2200_0000, 0x0200_0000, 0x2000_0000, ', controller = "GTZC"'),
+            "a bit_band region with no content and no controller",
+        ),
+    ],
+)
+def test_memory_add_refuses_a_bit_band_window_of_the_wrong_size_or_target(
+    tmp_path: Path, entry: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    before = copy.deepcopy(target)
+    path = _memory_patch(tmp_path, entry)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key == f"memory.add.{entry.split('"')[1]}"
+    assert excinfo.value.expected == reason
+    assert target == before
+
+
 def test_memory_add_refuses_two_added_regions_that_overlap(tmp_path: Path) -> None:
     target = _synthetic_target()
     path = _memory_patch(tmp_path, _OTP, _OTP.replace('"OTP"', '"OTP2"'))

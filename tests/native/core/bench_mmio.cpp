@@ -11,6 +11,7 @@
 #include <unicorn/unicorn.h>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -22,6 +23,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -31,15 +33,21 @@ using popcorn::address;
 using popcorn::icount;
 using clock_type = std::chrono::steady_clock;
 
-constexpr std::uint32_t loops       = 1'000'000;
-constexpr std::uint32_t slice_loops = 100'000;
-constexpr address       testdev     = 0x4001'0000;
-constexpr address       rw_register = testdev + 0x08;
-constexpr address       data_offset = popcorn::testing::test_model::data_offset;
-constexpr address       ctrl_offset = popcorn::testing::test_model::ctrl_offset;
-constexpr address       sram_data   = 0x2008'0000;
-constexpr std::uint64_t mmio_base   = 0x4001'0000;
-constexpr address       flash_load  = 0x0800'8000;
+constexpr std::uint32_t                loops        = 1'000'000;
+constexpr std::uint32_t                slice_loops  = 100'000;
+constexpr address                      testdev      = 0x4001'0000;
+constexpr address                      rw_register  = testdev + 0x08;
+constexpr address                      data_offset  = popcorn::testing::test_model::data_offset;
+constexpr address                      ctrl_offset  = popcorn::testing::test_model::ctrl_offset;
+constexpr address                      sram_data    = 0x2008'0000;
+constexpr std::uint64_t                mmio_base    = 0x4001'0000;
+constexpr address                      flash_load   = 0x0800'8000;
+constexpr address                      sram_base    = 0x2000'0000;
+constexpr address                      sram_alias   = 0x2200'0000;
+constexpr address                      periph_base  = 0x4000'0000;
+constexpr address                      periph_alias = 0x4200'0000;
+constexpr address                      rmw_code     = 0x200a'0000;
+constexpr std::array<std::uint16_t, 6> rmw_loop{0x6813, 0x430b, 0x6013, 0x3801, 0xd1fa, 0xe7fe};
 
 struct measured
 {
@@ -220,12 +228,61 @@ auto machine_loop(
   return per_access(start, count);
 }
 
+auto bit_band(std::string name, address start, address physical) -> popcorn::region_desc
+{
+  return {
+      .name       = std::move(name),
+      .start      = start,
+      .size       = 0x0200'0000,
+      .kind       = popcorn::region_kind::bit_band,
+      .acc        = {.read = true, .write = true, .execute = false},
+      .secure     = false,
+      .physical   = physical,
+      .controller = std::nullopt,
+      .content    = std::nullopt
+  };
+}
+
+auto bit_store_loop(address target, bool through_alias, bool executable = true) -> measured
+{
+  auto desc     = popcorn::load_description(POPCORN_M33_DESC);
+  desc.core.cpu = "CM3";
+  std::ranges::find(desc.regions, sram_base, &popcorn::region_desc::start)->acc.execute =
+      executable;
+  desc.regions.push_back(bit_band("BB_SRAM", sram_alias, sram_base));
+  desc.regions.push_back(bit_band("BB_PERIPH", periph_alias, periph_base));
+  bench_machine m{std::move(desc)};
+  auto          done = symbol("write_done");
+  if(through_alias)
+  {
+    auto const [alias, base] = target >= periph_base ? std::pair{periph_alias, periph_base}
+                                                     : std::pair{sram_alias, sram_base};
+    m.set("pc", symbol("write_entry"));
+    m.set("r2", alias + (target - base) * 32 + 4);
+  }
+  else
+  {
+    if(not m.target->mem().write_block(rmw_code, std::as_bytes(std::span{rmw_loop})))
+    {
+      throw std::runtime_error{"rmw loop not written"};
+    }
+    m.set("pc", rmw_code);
+    m.set("r1", 2);
+    m.set("r2", target);
+    done = rmw_code + 10;
+  }
+  m.set("r0", loops);
+  auto const start = clock_type::now();
+  m.run_until(done);
+  return per_access(start, loops);
+}
+
 auto dma_writes(bool executable) -> measured
 {
   auto desc = popcorn::load_description(POPCORN_M33_DESC);
   if(not executable)
   {
-    desc.regions[2].acc.execute = false;
+    std::ranges::find(desc.regions, sram_base, &popcorn::region_desc::start)->acc.execute = false;
   }
   bench_machine m{std::move(desc)};
   auto&         services = m.module->attached_services();
@@ -316,23 +373,23 @@ auto main(int argc, char** argv) -> int
     return machine_loop(entry, done, target, loops, prepare);
   };
   std::vector<scenario> scenarios{
-      {"raw-read",               [] { return raw_loop("read_entry", "read_done", mmio_base); }             },
-      {"raw-write",              [] { return raw_loop("write_entry", "write_done", mmio_base); }           },
-      {"storage-read",           [] { return machine_loop("read_entry", "read_done", rw_register, loops); }},
+      {"raw-read",                [] { return raw_loop("read_entry", "read_done", mmio_base); }             },
+      {"raw-write",               [] { return raw_loop("write_entry", "write_done", mmio_base); }           },
+      {"storage-read",            [] { return machine_loop("read_entry", "read_done", rw_register, loops); }},
       {"storage-write",
-       [] { return machine_loop("write_entry", "write_done", rw_register, loops); }                        },
+       [] { return machine_loop("write_entry", "write_done", rw_register, loops); }                         },
       {"model-read",
-       [] { return machine_loop("read_entry", "read_done", testdev + data_offset, loops); }                },
+       [] { return machine_loop("read_entry", "read_done", testdev + data_offset, loops); }                 },
       {"model-write",
-       [] { return machine_loop("write_entry", "write_done", testdev + data_offset, loops); }              },
-      {"dma-write-exec",         [] { return dma_writes(true); }                                           },
-      {"dma-write-data",         [] { return dma_writes(false); }                                          },
+       [] { return machine_loop("write_entry", "write_done", testdev + data_offset, loops); }               },
+      {"dma-write-exec",          [] { return dma_writes(true); }                                           },
+      {"dma-write-data",          [] { return dma_writes(false); }                                          },
       {"write-ctrl",
        [] {
          return machine_loop(
              "write_entry", "write_done", testdev + ctrl_offset, slice_loops,
              [](bench_machine& m) { m.set("primask", 1); });
-       }                                                                                                   },
+       }                                                                                                    },
       {"dma-mid-slice",
        [] {
          return machine_loop(
@@ -341,7 +398,7 @@ auto main(int argc, char** argv) -> int
                m.model().patch_on_go = sram_data;
                m.model().patch_value = 0x1234;
              });
-       }                                                                                                   },
+       }                                                                                                    },
       {"irq-heavy",
        [] {
          return machine_loop(
@@ -349,45 +406,50 @@ auto main(int argc, char** argv) -> int
                m.module->write_system(popcorn::testing::test_arch::timer_period_offset, 1000);
                m.module->write_system(popcorn::testing::test_arch::timer_control_offset, 1);
              });
-       }                                                                                                   },
-      {"store-no-hook",          [] { return raw_loop("store_entry", "store_done", sram_data); }           },
+       }                                                                                                    },
+      {"store-no-hook",           [] { return raw_loop("store_entry", "store_done", sram_data); }           },
       {"store-exact-pc",
-       [acquire] { return raw_loop("store_entry", "store_done", sram_data, acquire); }                     },
+       [acquire] { return raw_loop("store_entry", "store_done", sram_data, acquire); }                      },
       {"store-released",
-       [cycle] { return raw_loop("store_entry", "store_done", sram_data, cycle); }                         },
+       [cycle] { return raw_loop("store_entry", "store_done", sram_data, cycle); }                          },
       {"store-no-hook-warm",
        [] {
          return raw_loop(
              "store_entry", "store_done", sram_data, [](uc_engine*, core::exact_pc_hook&) {}, true);
-       }                                                                                                   },
+       }                                                                                                    },
       {"store-exact-pc-warm",
-       [acquire] { return raw_loop("store_entry", "store_done", sram_data, acquire, true); }               },
+       [acquire] { return raw_loop("store_entry", "store_done", sram_data, acquire, true); }                },
       {"store-released-warm",
-       [cycle] { return raw_loop("store_entry", "store_done", sram_data, cycle, true); }                   },
-      {"load-no-hook",           [] { return flash_loads({}, 0); }                                         },
-      {"load-read-hook",         [] { return flash_loads({flash_load}, 4); }                               },
-      {"load-read-hook-miss",    [] { return flash_loads({flash_load + 0x100}, 2); }                       },
-      {"load-read-hook-far",     [] { return flash_loads({flash_load + 0x1'0000}, 4); }                    },
-      {"load-ranges-1",          [] { return spaced_ranges(1); }                                           },
-      {"load-ranges-8",          [] { return spaced_ranges(8); }                                           },
-      {"load-ranges-64",         [] { return spaced_ranges(64); }                                          },
+       [cycle] { return raw_loop("store_entry", "store_done", sram_data, cycle, true); }                    },
+      {"load-no-hook",            [] { return flash_loads({}, 0); }                                         },
+      {"load-read-hook",          [] { return flash_loads({flash_load}, 4); }                               },
+      {"load-read-hook-miss",     [] { return flash_loads({flash_load + 0x100}, 2); }                       },
+      {"load-read-hook-far",      [] { return flash_loads({flash_load + 0x1'0000}, 4); }                    },
+      {"load-ranges-1",           [] { return spaced_ranges(1); }                                           },
+      {"load-ranges-8",           [] { return spaced_ranges(8); }                                           },
+      {"load-ranges-64",          [] { return spaced_ranges(64); }                                          },
       {"storage-read-cov-hit",
-       [&] { return covered("read_entry", "read_done", rw_register, hit); }                                },
+       [&] { return covered("read_entry", "read_done", rw_register, hit); }                                 },
       {"storage-read-cov-hook",
-       [&] { return covered("read_entry", "read_done", rw_register, hook); }                               },
+       [&] { return covered("read_entry", "read_done", rw_register, hook); }                                },
       {"storage-read-cov-mark",
-       [&] { return covered("read_entry", "read_done", rw_register, mark); }                               },
+       [&] { return covered("read_entry", "read_done", rw_register, mark); }                                },
       {"model-read-cov-hit",
-       [&] { return covered("read_entry", "read_done", testdev + data_offset, hit); }                      },
+       [&] { return covered("read_entry", "read_done", testdev + data_offset, hit); }                       },
       {"model-read-cov-hook",
-       [&] { return covered("read_entry", "read_done", testdev + data_offset, hook); }                     },
+       [&] { return covered("read_entry", "read_done", testdev + data_offset, hook); }                      },
       {"model-read-cov-mark",
-       [&] { return covered("read_entry", "read_done", testdev + data_offset, mark); }                     },
-      {"machine-store",          [] { return machine_loop("store_entry", "store_done", sram_data, loops); }},
+       [&] { return covered("read_entry", "read_done", testdev + data_offset, mark); }                      },
+      {"machine-store",           [] { return machine_loop("store_entry", "store_done", sram_data, loops); }},
       {"machine-store-cov-hit",
-       [&] { return covered("store_entry", "store_done", sram_data, hit); }                                },
+       [&] { return covered("store_entry", "store_done", sram_data, hit); }                                 },
+      {"alias-store-loop",        [] { return bit_store_loop(sram_data, true); }                            },
+      {"alias-store-loop-data",   [] { return bit_store_loop(sram_data, true, false); }                     },
+      {"rmw-store-loop",          [] { return bit_store_loop(sram_data, false); }                           },
+      {"alias-periph-store-loop", [] { return bit_store_loop(rw_register, true); }                          },
+      {"rmw-periph-store-loop",   [] { return bit_store_loop(rw_register, false); }                         },
       {"machine-store-cov-mark",
-       [&] { return covered("store_entry", "store_done", sram_data, mark); }                               },
+       [&] { return covered("store_entry", "store_done", sram_data, mark); }                                },
   };
   if(auto const only = option(args, "--only"))
   {
