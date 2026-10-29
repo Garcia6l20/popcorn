@@ -563,7 +563,7 @@ TEST_CASE("every RCC reset bit of the L1 parts names an instance and holds it in
   CHECK(f.target->held_in_reset("ADC"));
 }
 
-TEST_CASE("no L1 instance is served by a U5 or H5 row: only the L1 RCC and PWR rows attach")
+TEST_CASE("no L1 instance is served by a U5 or H5 row: only the L1 rows attach")
 {
   stm32::register_builtin_models();
   for(auto const* part : {&l152re(), &l152rb()})
@@ -577,7 +577,15 @@ TEST_CASE("no L1 instance is served by a U5 or H5 row: only the L1 RCC and PWR r
         attached.insert(name);
       }
     }
-    CHECK(attached == std::set<std::string>{"PWR", "RCC"});
+    std::set<std::string> expected{"PWR", "RCC", "EXTI", "SYSCFG", "DBGMCU"};
+    for(auto const& peripheral : part->peripherals)
+    {
+      if(peripheral.name.starts_with("GPIO"))
+      {
+        expected.insert(peripheral.name);
+      }
+    }
+    CHECK(attached == expected);
     core::machine target{
         *part, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()};
     for(auto const& peripheral : part->peripherals)

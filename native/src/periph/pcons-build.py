@@ -15,6 +15,7 @@ stm32 = [
         "flash.cpp",
         "gpio.cpp",
         "exti.cpp",
+        "exti_classic.cpp",
         "gpdma.cpp",
         "usart.cpp",
         "uart_wire.cpp",
@@ -37,6 +38,7 @@ stm32 = [
         "rng.cpp",
         "gtzc.cpp",
         "syscfg.cpp",
+        "syscfg_classic.cpp",
         "sbs.cpp",
     )
 ]

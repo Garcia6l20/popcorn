@@ -157,6 +157,31 @@ Source: [dbgmcu.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/
 
 - A freeze bit written while the core is held takes effect at the next hold or release. On
   silicon it takes effect at once.
+- STM32L1: `DBGMCU_CR` is storage, as on the STM32U5. `DBGMCU_IDCODE` reads the description's
+  value of the category, REV_ID 0x1000.
+
+## EXTI
+
+Source: [exti.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/exti.cpp), [exti_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/exti_classic.cpp)
+
+- STM32L1: `EXTI_EMR` is storage, and an EXTI event wakes no WFE.
+- STM32L1: lines 16, 17, 18, 20 and 23 set their PR bit only, from `EXTI_SWIER`. The
+  description gives `PVD_IRQn`, `RTC_Alarm_IRQn`, `USB_FS_WKUP_IRQn`, `RTC_WKUP_IRQn` and
+  `COMP_ACQ_IRQn` to PWR, RTC, USB and COMP. Lines 16 to 23 take their edges from `EXTI_SWIER`
+  only, the PVD, the RTC, the USB and the comparators drive none.
+- STM32L1, inferred rules: an edge or a SWIER write sets PR only while the `EXTI_IMR` bit is set,
+  the NVIC line follows PR whatever IMR holds, a SWIER write of 0 clears the SWIER bit, a write
+  of 1 to a PR bit clears the SWIER bit of the line whether PR was set or not, a
+  `SYSCFG_EXTICRn` write that moves a line to a pin of another level is an edge on the line, and
+  a selector code RM0038 8.5.3 to 8.5.6 does not list selects no pin.
+
+## GPIO
+
+Source: [gpio.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/gpio.cpp)
+
+- STM32L1: `GPIOx_BRR` exists on Cat.4, Cat.5 and Cat.6, RM0038 7.4.11. On Cat.1 to Cat.3 a
+  firmware store to offset 0x28 is an unmodelled access and changes no pin.
+- STM32L1: `GPIOx_OSPEEDR` is storage, as on the STM32U5 and the STM32H5.
 
 ## FLASH
 
@@ -679,6 +704,11 @@ Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/
   `ModelError` before the store. A write while SYSCFGRST holds the unit raises the illegal
   access event the TrustZone rules give and is not noted.
 - `SYSCFG_CSLCKR` stays storage at TZEN 0. RM0456 Table 131 makes it RAZ/WI.
+- STM32L1: `SYSCFG_MEMRMP` is storage. The machine boots from main flash, BOOT_MODE and
+  MEM_MODE read 00, and a MEM_MODE write maps no other memory at 0x00000000. A firmware write
+  logs one `model_warning`. Under `strict` it raises `ModelError` before the store.
+- STM32L1: `SYSCFG_PMC` is storage until the USB model reads `USB_PU`. A firmware write logs one
+  `model_warning`. Under `strict` it raises `ModelError` before the store.
 
 ## TIM
 

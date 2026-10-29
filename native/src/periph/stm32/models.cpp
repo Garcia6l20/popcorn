@@ -32,7 +32,7 @@ struct builtin
   flash_variant    flash         = {};
 };
 
-constexpr std::array<builtin, 77> builtins{
+constexpr std::array<builtin, 82> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -96,6 +96,16 @@ constexpr std::array<builtin, 77> builtins{
          .part_glob       = "STM32U585*"},
      {"GPIO", "STM32U5x_gpio_*", [](board const&) { return gpio_factory(u5_gpio); }, "GPIO?"},
      {"GPIO", "STM32H56x_gpio_*", [](board const&) { return gpio_factory(h56x_gpio); }, "GPIO?"},
+     {.ip              = "GPIO",
+         .ip_version_glob = "STM32L1_gpio_cat13",
+         .make            = [](board const&) { return gpio_factory(l1_gpio_cat13); },
+         .instance_glob   = "GPIO?",
+         .part_glob       = "STM32L1*"},
+     {.ip              = "GPIO",
+         .ip_version_glob = "STM32L1_gpio_cat46",
+         .make            = [](board const&) { return gpio_factory(l1_gpio_cat46); },
+         .instance_glob   = "GPIO?",
+         .part_glob       = "STM32L1*"},
      {.ip              = "EXTI",
          .ip_version_glob = "",
          .make            = [](board const&) { return exti_factory(); },
@@ -106,7 +116,19 @@ constexpr std::array<builtin, 77> builtins{
          .part_glob       = "STM32H5*"},
      {.ip              = "EXTI",
          .ip_version_glob = "",
-         .make            = [](board const&) { return model_factory{}; },
+         .make            = [](board const&) { return exti_classic_factory(l1_exti_24); },
+         .part_glob       = "STM32L1*"},
+     {.ip              = "EXTI",
+         .ip_version_glob = "STM32L1_exti_23",
+         .make            = [](board const&) { return exti_classic_factory(l1_exti_23); },
+         .part_glob       = "STM32L1*"},
+     {.ip              = "SYSCFG",
+         .ip_version_glob = "",
+         .make            = [](board const&) { return syscfg_classic_factory(l1_syscfg); },
+         .part_glob       = "STM32L1*"},
+     {.ip              = "SYSCFG",
+         .ip_version_glob = "STM32L1_exti_23",
+         .make            = [](board const&) { return syscfg_classic_factory(l1_syscfg_cat12); },
          .part_glob       = "STM32L1*"},
      {"GPDMA", "STM32U5_dma3_*", [](board const&) { return gpdma_factory(); }},
      {"GPDMA", "*STM32H5_dma3_*", [](board const&) { return gpdma_h5_factory(); }},
@@ -226,7 +248,7 @@ constexpr std::array<builtin, 77> builtins{
          .part_glob       = "STM32H5*"},
      {.ip              = "DBGMCU",
          .ip_version_glob = "",
-         .make            = [](board const&) { return model_factory{}; },
+         .make            = [](board const&) { return dbgmcu_factory(); },
          .part_glob       = "STM32L1*"},
      {.ip              = "DBG",
          .ip_version_glob = "",
@@ -341,6 +363,15 @@ constexpr auto u5_debug_blocks = std::to_array<debug_block>({
     {.name = "CPU_ROM_TABLE", .start = 0xe00f'f000, .size = 0x1000},
 });
 
+/** @brief External PPB blocks of the STM32L1 without a model, 4 KB each: the TPIU at 0xE0040000,
+ *         RM0038 30.17.9, the ETM at 0xE0041000, RM0038 30.15, and the Cortex-M3 ROM table at
+ *         0xE00FF000, RM0038 30.6. DBGMCU at 0xE0042000 has its own model. */
+constexpr auto l1_debug_blocks = std::to_array<debug_block>({
+    {.name = "TPIU",      .start = 0xe004'0000, .size = 0x1000},
+    {.name = "ETM",       .start = 0xe004'1000, .size = 0x1000},
+    {.name = "ROM_TABLE", .start = 0xe00f'f000, .size = 0x1000},
+});
+
 struct debug_family
 {
   std::string_view             part_glob;
@@ -349,10 +380,11 @@ struct debug_family
 
 // The H5 has the same blocks at the same addresses, RM0481 66.5 Tables 870 and 871. Its DBGMCU
 // sits at 0xE00E4000 for the debugger and 0x44024000 for the CPU, outside these ranges.
-constexpr std::array<debug_family, 2> debug_maps{
+constexpr std::array<debug_family, 3> debug_maps{
     {
      {"STM32U5*", u5_debug_blocks},
      {"STM32H5*", u5_debug_blocks},
+     {"STM32L1*", l1_debug_blocks},
      }
 };
 

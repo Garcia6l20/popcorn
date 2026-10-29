@@ -26,7 +26,6 @@ using popcorn::register_desc;
 constexpr popcorn::address code_at     = 0x2000'0100;
 constexpr std::uint32_t    dbgmcu_base = 0xE004'2000;
 constexpr std::uint32_t    dbgmcu_cr   = dbgmcu_base + 0x04;
-constexpr std::uint32_t    exti_base   = 0x4001'0400;
 constexpr std::uint32_t    uart4_base  = 0x4000'4C00;
 
 auto word(std::string name, std::uint32_t offset) -> register_desc
@@ -70,7 +69,6 @@ auto toy(std::string part) -> part_description
   desc.core.nvic_prio_bits = 4;
   desc.core.num_irqs       = 8;
   desc.peripherals.clear();
-  desc.peripherals.push_back(block("EXTI", "EXTI", "", exti_base, 4));
   desc.peripherals.push_back(block("UART4", "UART", "sci2_v1_2_Cube", uart4_base, 4));
   desc.peripherals.push_back(block("DBGMCU", "DBGMCU", "", dbgmcu_base, 4));
   auto idcode   = word("IDCODE", 0);
@@ -98,15 +96,14 @@ auto machine_of(part_description desc) -> core::machine
 }
 }
 
-TEST_CASE("a Machine over an STM32L1 part attaches no model to the storage rows")
+TEST_CASE("a Machine over an STM32L1 part attaches no model to a storage row, DBGMCU its own")
 {
   auto target = machine_of(toy("STM32L152RETx"));
-  CHECK(target.model("EXTI") == nullptr);
   CHECK(target.model("UART4") == nullptr);
-  CHECK(target.model("DBGMCU") == nullptr);
+  CHECK(target.model("DBGMCU") != nullptr);
 }
 
-TEST_CASE("an STM32L1 DBGMCU is storage until its model, a CPU store to CR reads back whole")
+TEST_CASE("the STM32L1 DBGMCU model keeps the CR fields of a CPU store of all ones")
 {
   auto target = machine_of(toy("STM32L152RETx"));
   REQUIRE(target.mem().write(code_at, 2, 0x6001).has_value());
@@ -119,16 +116,15 @@ TEST_CASE("an STM32L1 DBGMCU is storage until its model, a CPU store to CR reads
   set("r1", 0xFFFF'FFFFu);
   set("pc", code_at | 1u);
   CHECK_FALSE(target.run_slice({.max_instructions = popcorn::icount{2}}).stopped.has_value());
-  CHECK(target.regs().read(*target.regs().find("r2")) == 0xFFFF'FFFFu);
+  CHECK(target.regs().read(*target.regs().find("r2")) == 0xE7u);
 }
 
 TEST_CASE("factories() holds no entry for a storage row")
 {
   stm32::register_builtin_models();
   auto const all = stm32::factories(stm32::board{}, toy("STM32L152RETx"));
-  CHECK_FALSE(all.contains("EXTI"));
   CHECK_FALSE(all.contains("UART4"));
-  CHECK_FALSE(all.contains("DBGMCU"));
+  CHECK(all.contains("DBGMCU"));
 }
 
 TEST_CASE("an instance of a known IP version on a part outside every row glob is refused")

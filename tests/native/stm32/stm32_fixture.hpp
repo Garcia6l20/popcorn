@@ -50,6 +50,14 @@ inline auto l152rb() -> part_description const&
   return desc;
 }
 
+/** @brief The STM32L152RCTx description built from ST's files, `POPCORN_L152RC_DESC`, read once:
+ *         Cat.3 on DIE427, ports without `GPIOx_BRR`. */
+inline auto l152rc() -> part_description const&
+{
+  static auto const desc = description_from("POPCORN_L152RC_DESC");
+  return desc;
+}
+
 /** @brief Machine options of the STM32 tests: faults and spins stop the run. */
 inline auto stm32_options() -> core::machine_options
 {

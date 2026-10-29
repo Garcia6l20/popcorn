@@ -40,3 +40,31 @@ source = "RM0038 Rev 18, 3.2 Tables 9 to 12 (Cat.3 to Cat.6): the system memory 
 add = [
   { name = "SYSTEM_MEMORY", start = 0x1FF00000, size = 0x2000, kind = "rom", acc = { read = true, write = false, execute = true }, secure = false },
 ]
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["IMR", "EMR"]
+fields = ["MR"]
+width = 24
+source = "RM0038 Rev 18, 10.3.1 EXTI_IMR and 10.3.2 EXTI_EMR: MR23 exists in Cat.3, Cat.4, Cat.5 and Cat.6 devices, bits 23:0. The SVDs give 23 bits"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["RTSR", "FTSR"]
+fields = ["TR"]
+width = 24
+source = "RM0038 Rev 18, 10.3.3 EXTI_RTSR and 10.3.4 EXTI_FTSR: TR23 exists in Cat.3, Cat.4, Cat.5 and Cat.6 devices, bits 23:0. The SVDs give 23 bits"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["SWIER"]
+fields = ["SWIER"]
+width = 24
+source = "RM0038 Rev 18, 10.3.5 EXTI_SWIER: SWIER23 exists in Cat.3, Cat.4, Cat.5 and Cat.6 devices. The SVDs give 23 bits"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["PR"]
+fields = ["PR"]
+width = 24
+source = "RM0038 Rev 18, 10.3.6 EXTI_PR: PR23 exists in Cat.3, Cat.4, Cat.5 and Cat.6 devices, bits 23:0. The SVDs give 23 bits"

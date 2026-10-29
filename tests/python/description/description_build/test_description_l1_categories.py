@@ -124,6 +124,19 @@ DEV_ID = {
 }
 
 
+EXTI_IRQS = {
+    "EXTI0_IRQn",
+    "EXTI1_IRQn",
+    "EXTI2_IRQn",
+    "EXTI3_IRQn",
+    "EXTI4_IRQn",
+    "EXTI9_5_IRQn",
+    "EXTI15_10_IRQn",
+    "TAMPER_STAMP_IRQn",
+    "COMP_IRQn",
+}
+
+
 def _category(part: DbPart) -> str:
     flash = part.flash_kib[0]
     if part.die == "DIE416":
@@ -263,6 +276,18 @@ def _check_versions(name: str, category: str) -> None:
     early = category in {"cat1", "cat2"}
     assert (peripherals["EXTI"].ip_version == "STM32L1_exti_23") == early
     assert (peripherals["SYSCFG"].ip_version == "STM32L1_exti_23") == early
+    lines = 23 if early else 24
+    widths = {(r.name, f.name): f.width for r in peripherals["EXTI"].registers for f in r.fields}
+    assert widths == {
+        ("IMR", "MR"): lines,
+        ("EMR", "MR"): lines,
+        ("RTSR", "TR"): lines,
+        ("FTSR", "TR"): lines,
+        ("SWIER", "SWIER"): lines,
+        ("PR", "PR"): lines,
+    }
+    names = {irq.number: irq.name for irq in _built(name).irqs}
+    assert {names[n] for n in peripherals["EXTI"].irqs} == EXTI_IRQS
     assert (peripherals["ADC"].ip_version == "STM32L1_adc_cat12") == early
     assert (peripherals["RTC"].ip_version == "STM32L1_rtc_cat1") == (category == "cat1")
     spi = {peripherals[p].ip_version for p in ("SPI1", "SPI2")}
@@ -297,7 +322,9 @@ def _check_brr_wrpr4_and_timers(name: str, category: str) -> None:
                 register = next(r for r in peripheral.registers if r.name == "BRR")
                 assert (register.offset, register.width, register.reset) == (0x28, 32, 0)
                 assert register.acc.value == "write_only"
-                assert [(f.name, f.lsb, f.width) for f in register.fields] == [("BR", 0, 16)]
+                assert sorted((f.lsb, f.name, f.width) for f in register.fields) == [
+                    (n, f"BR{n}", 1) for n in range(16)
+                ]
     if category == "cat5":
         register = next(r for r in peripherals["FLASH"].registers if r.name == "WRPR4")
         assert (register.offset, register.width, register.reset) == (0x88, 32, 0)

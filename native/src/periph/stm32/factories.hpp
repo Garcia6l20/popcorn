@@ -92,13 +92,20 @@ namespace popcorn::periph::stm32
     -> flash_variant;
 
 /**
- * @brief Factory of the GPIO port model, RM0456 section 13. Returns no model for LPGPIO1.
+ * @brief Factory of the GPIO port model, RM0456 section 13 and RM0038 section 7. Returns no model
+ *        for LPGPIO1.
  * @param variant What differs between the ports of the family the row serves.
  */
 [[nodiscard]] auto gpio_factory(gpio_variant variant) -> model_factory;
 
 /** @brief Factory of the EXTI model, RM0456 section 23. */
 [[nodiscard]] auto exti_factory() -> model_factory;
+
+/**
+ * @brief Factory of the classic EXTI model, RM0038 section 10.2.
+ * @param traits Lines and NVIC lines of the family the row serves.
+ */
+[[nodiscard]] auto exti_classic_factory(exti_classic_traits traits) -> model_factory;
 
 /** @brief Factory of the GPDMA1 model, RM0456 section 17. */
 [[nodiscard]] auto gpdma_factory() -> model_factory;
@@ -200,7 +207,7 @@ namespace popcorn::periph::stm32
 /** @brief Factory of the STM32H5 ADCC common register model, RM0481 section 28.7. */
 [[nodiscard]] auto adc_common_h5_factory() -> model_factory;
 
-/** @brief Factory of the DBGMCU model, RM0456 section 75.12. */
+/** @brief Factory of the DBGMCU model, RM0456 section 75.12 and RM0038 section 30.16. */
 [[nodiscard]] auto dbgmcu_factory() -> model_factory;
 
 /** @brief Factory of the CRC model, RM0456 section 24. */
@@ -211,6 +218,12 @@ namespace popcorn::periph::stm32
 
 /** @brief Factory of the SYSCFG model, RM0456 section 15. */
 [[nodiscard]] auto syscfg_factory() -> model_factory;
+
+/**
+ * @brief Factory of the classic SYSCFG model, RM0038 section 8.5.
+ * @param traits Register roles and EXTI port codes of the family the row serves.
+ */
+[[nodiscard]] auto syscfg_classic_factory(syscfg_classic_traits traits) -> model_factory;
 
 /**
  * @brief Factory of the RNG model, RM0456 section 48.

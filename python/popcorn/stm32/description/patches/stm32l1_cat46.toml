@@ -18,7 +18,24 @@ offset = 0x28
 width = 32
 reset = 0
 acc = "write_only"
-fields = [{ name = "BR", lsb = 0, width = 16 }]
+fields = [
+  { name = "BR0", lsb = 0, width = 1 },
+  { name = "BR1", lsb = 1, width = 1 },
+  { name = "BR2", lsb = 2, width = 1 },
+  { name = "BR3", lsb = 3, width = 1 },
+  { name = "BR4", lsb = 4, width = 1 },
+  { name = "BR5", lsb = 5, width = 1 },
+  { name = "BR6", lsb = 6, width = 1 },
+  { name = "BR7", lsb = 7, width = 1 },
+  { name = "BR8", lsb = 8, width = 1 },
+  { name = "BR9", lsb = 9, width = 1 },
+  { name = "BR10", lsb = 10, width = 1 },
+  { name = "BR11", lsb = 11, width = 1 },
+  { name = "BR12", lsb = 12, width = 1 },
+  { name = "BR13", lsb = 13, width = 1 },
+  { name = "BR14", lsb = 14, width = 1 },
+  { name = "BR15", lsb = 15, width = 1 },
+]
 source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
 
 [[registers]]
@@ -28,7 +45,24 @@ offset = 0x28
 width = 32
 reset = 0
 acc = "write_only"
-fields = [{ name = "BR", lsb = 0, width = 16 }]
+fields = [
+  { name = "BR0", lsb = 0, width = 1 },
+  { name = "BR1", lsb = 1, width = 1 },
+  { name = "BR2", lsb = 2, width = 1 },
+  { name = "BR3", lsb = 3, width = 1 },
+  { name = "BR4", lsb = 4, width = 1 },
+  { name = "BR5", lsb = 5, width = 1 },
+  { name = "BR6", lsb = 6, width = 1 },
+  { name = "BR7", lsb = 7, width = 1 },
+  { name = "BR8", lsb = 8, width = 1 },
+  { name = "BR9", lsb = 9, width = 1 },
+  { name = "BR10", lsb = 10, width = 1 },
+  { name = "BR11", lsb = 11, width = 1 },
+  { name = "BR12", lsb = 12, width = 1 },
+  { name = "BR13", lsb = 13, width = 1 },
+  { name = "BR14", lsb = 14, width = 1 },
+  { name = "BR15", lsb = 15, width = 1 },
+]
 source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
 
 [[registers]]
@@ -38,7 +72,24 @@ offset = 0x28
 width = 32
 reset = 0
 acc = "write_only"
-fields = [{ name = "BR", lsb = 0, width = 16 }]
+fields = [
+  { name = "BR0", lsb = 0, width = 1 },
+  { name = "BR1", lsb = 1, width = 1 },
+  { name = "BR2", lsb = 2, width = 1 },
+  { name = "BR3", lsb = 3, width = 1 },
+  { name = "BR4", lsb = 4, width = 1 },
+  { name = "BR5", lsb = 5, width = 1 },
+  { name = "BR6", lsb = 6, width = 1 },
+  { name = "BR7", lsb = 7, width = 1 },
+  { name = "BR8", lsb = 8, width = 1 },
+  { name = "BR9", lsb = 9, width = 1 },
+  { name = "BR10", lsb = 10, width = 1 },
+  { name = "BR11", lsb = 11, width = 1 },
+  { name = "BR12", lsb = 12, width = 1 },
+  { name = "BR13", lsb = 13, width = 1 },
+  { name = "BR14", lsb = 14, width = 1 },
+  { name = "BR15", lsb = 15, width = 1 },
+]
 source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
 
 [[registers]]
@@ -48,7 +99,24 @@ offset = 0x28
 width = 32
 reset = 0
 acc = "write_only"
-fields = [{ name = "BR", lsb = 0, width = 16 }]
+fields = [
+  { name = "BR0", lsb = 0, width = 1 },
+  { name = "BR1", lsb = 1, width = 1 },
+  { name = "BR2", lsb = 2, width = 1 },
+  { name = "BR3", lsb = 3, width = 1 },
+  { name = "BR4", lsb = 4, width = 1 },
+  { name = "BR5", lsb = 5, width = 1 },
+  { name = "BR6", lsb = 6, width = 1 },
+  { name = "BR7", lsb = 7, width = 1 },
+  { name = "BR8", lsb = 8, width = 1 },
+  { name = "BR9", lsb = 9, width = 1 },
+  { name = "BR10", lsb = 10, width = 1 },
+  { name = "BR11", lsb = 11, width = 1 },
+  { name = "BR12", lsb = 12, width = 1 },
+  { name = "BR13", lsb = 13, width = 1 },
+  { name = "BR14", lsb = 14, width = 1 },
+  { name = "BR15", lsb = 15, width = 1 },
+]
 source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
 
 [[registers]]
@@ -58,7 +126,24 @@ offset = 0x28
 width = 32
 reset = 0
 acc = "write_only"
-fields = [{ name = "BR", lsb = 0, width = 16 }]
+fields = [
+  { name = "BR0", lsb = 0, width = 1 },
+  { name = "BR1", lsb = 1, width = 1 },
+  { name = "BR2", lsb = 2, width = 1 },
+  { name = "BR3", lsb = 3, width = 1 },
+  { name = "BR4", lsb = 4, width = 1 },
+  { name = "BR5", lsb = 5, width = 1 },
+  { name = "BR6", lsb = 6, width = 1 },
+  { name = "BR7", lsb = 7, width = 1 },
+  { name = "BR8", lsb = 8, width = 1 },
+  { name = "BR9", lsb = 9, width = 1 },
+  { name = "BR10", lsb = 10, width = 1 },
+  { name = "BR11", lsb = 11, width = 1 },
+  { name = "BR12", lsb = 12, width = 1 },
+  { name = "BR13", lsb = 13, width = 1 },
+  { name = "BR14", lsb = 14, width = 1 },
+  { name = "BR15", lsb = 15, width = 1 },
+]
 source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
 
 [[registers]]
@@ -68,7 +153,24 @@ offset = 0x28
 width = 32
 reset = 0
 acc = "write_only"
-fields = [{ name = "BR", lsb = 0, width = 16 }]
+fields = [
+  { name = "BR0", lsb = 0, width = 1 },
+  { name = "BR1", lsb = 1, width = 1 },
+  { name = "BR2", lsb = 2, width = 1 },
+  { name = "BR3", lsb = 3, width = 1 },
+  { name = "BR4", lsb = 4, width = 1 },
+  { name = "BR5", lsb = 5, width = 1 },
+  { name = "BR6", lsb = 6, width = 1 },
+  { name = "BR7", lsb = 7, width = 1 },
+  { name = "BR8", lsb = 8, width = 1 },
+  { name = "BR9", lsb = 9, width = 1 },
+  { name = "BR10", lsb = 10, width = 1 },
+  { name = "BR11", lsb = 11, width = 1 },
+  { name = "BR12", lsb = 12, width = 1 },
+  { name = "BR13", lsb = 13, width = 1 },
+  { name = "BR14", lsb = 14, width = 1 },
+  { name = "BR15", lsb = 15, width = 1 },
+]
 source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
 
 [[registers]]
@@ -78,7 +180,24 @@ offset = 0x28
 width = 32
 reset = 0
 acc = "write_only"
-fields = [{ name = "BR", lsb = 0, width = 16 }]
+fields = [
+  { name = "BR0", lsb = 0, width = 1 },
+  { name = "BR1", lsb = 1, width = 1 },
+  { name = "BR2", lsb = 2, width = 1 },
+  { name = "BR3", lsb = 3, width = 1 },
+  { name = "BR4", lsb = 4, width = 1 },
+  { name = "BR5", lsb = 5, width = 1 },
+  { name = "BR6", lsb = 6, width = 1 },
+  { name = "BR7", lsb = 7, width = 1 },
+  { name = "BR8", lsb = 8, width = 1 },
+  { name = "BR9", lsb = 9, width = 1 },
+  { name = "BR10", lsb = 10, width = 1 },
+  { name = "BR11", lsb = 11, width = 1 },
+  { name = "BR12", lsb = 12, width = 1 },
+  { name = "BR13", lsb = 13, width = 1 },
+  { name = "BR14", lsb = 14, width = 1 },
+  { name = "BR15", lsb = 15, width = 1 },
+]
 source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
 
 [[registers]]
@@ -88,5 +207,22 @@ offset = 0x28
 width = 32
 reset = 0
 acc = "write_only"
-fields = [{ name = "BR", lsb = 0, width = 16 }]
+fields = [
+  { name = "BR0", lsb = 0, width = 1 },
+  { name = "BR1", lsb = 1, width = 1 },
+  { name = "BR2", lsb = 2, width = 1 },
+  { name = "BR3", lsb = 3, width = 1 },
+  { name = "BR4", lsb = 4, width = 1 },
+  { name = "BR5", lsb = 5, width = 1 },
+  { name = "BR6", lsb = 6, width = 1 },
+  { name = "BR7", lsb = 7, width = 1 },
+  { name = "BR8", lsb = 8, width = 1 },
+  { name = "BR9", lsb = 9, width = 1 },
+  { name = "BR10", lsb = 10, width = 1 },
+  { name = "BR11", lsb = 11, width = 1 },
+  { name = "BR12", lsb = 12, width = 1 },
+  { name = "BR13", lsb = 13, width = 1 },
+  { name = "BR14", lsb = 14, width = 1 },
+  { name = "BR15", lsb = 15, width = 1 },
+]
 source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"

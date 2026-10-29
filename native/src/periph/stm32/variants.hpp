@@ -7,6 +7,27 @@
 
 namespace popcorn::periph::stm32
 {
+/** @brief Prefixes of the per-pin field names of a GPIO port, the pin number appended. */
+struct gpio_field_names
+{
+  /** @brief `GPIOx_MODER` mode field. */
+  std::string_view mode = "MODE";
+  /** @brief `GPIOx_OTYPER` output type field. */
+  std::string_view type = "OT";
+  /** @brief `GPIOx_OSPEEDR` speed field. */
+  std::string_view speed = "OSPEED";
+  /** @brief `GPIOx_PUPDR` pull field. */
+  std::string_view pull = "PUPD";
+  /** @brief `GPIOx_IDR` input field. */
+  std::string_view input = "ID";
+  /** @brief `GPIOx_ODR` output field. */
+  std::string_view output = "OD";
+  /** @brief `GPIOx_AFRL` alternate function field of pins 0 to 7. */
+  std::string_view alternate_low = "AFSEL";
+  /** @brief `GPIOx_AFRH` alternate function field of pins 8 to 15. */
+  std::string_view alternate_high = "AFSEL";
+};
+
 /**
  * @brief Differences between the GPIO ports of the families a model row serves.
  *        The model throws at attach when the description disagrees.
@@ -17,6 +38,14 @@ struct gpio_variant
   char short_port = 0;
   /** @brief Pins of that port. Its registers carry the per-pin fields of these pins only. */
   std::uint8_t short_port_pins = 16;
+  /** @brief The port has `GPIOx_SECCFGR`, the TrustZone pin security register. */
+  bool secure = true;
+  /** @brief The port has `GPIOx_HSLVR`, the high-speed low-voltage register. */
+  bool slew = true;
+  /** @brief The port has `GPIOx_BRR`, the bit reset register. */
+  bool brr = true;
+  /** @brief Per-pin field names. */
+  gpio_field_names names = {};
 };
 
 /** @brief STM32U5 ports with 16 pins, RM0456 13.4.10. */
@@ -28,6 +57,130 @@ inline constexpr gpio_variant u575_gpio{.short_port = 'I', .short_port_pins = 8}
  *         `GPIOI_MODER` keeps 0x00FFFFFF of 0xFFFFFFFF and `GPIOI_AFRH` holds AFSEL8 to AFSEL11,
  *         as DS14121 Table 17 lists. */
 inline constexpr gpio_variant h56x_gpio{.short_port = 'I', .short_port_pins = 12};
+
+/** @brief STM32L1 per-pin field names, RM0038 7.4: MODERy, OSPEEDRy, PUPDRy, IDRy, ODRy, AFRLy
+ *         and AFRHy. */
+inline constexpr gpio_field_names l1_gpio_names{
+    .mode           = "MODER",
+    .speed          = "OSPEEDR",
+    .pull           = "PUPDR",
+    .input          = "IDR",
+    .output         = "ODR",
+    .alternate_low  = "AFRL",
+    .alternate_high = "AFRH",
+};
+/** @brief STM32L1 Cat.1 to Cat.3 ports, `STM32L1_gpio_cat13`, RM0038 7.4: no `GPIOx_BRR`, which
+ *         RM0038 7.4.11 gives to Cat.4, Cat.5 and Cat.6 only, no TrustZone and no HSLV. */
+inline constexpr gpio_variant l1_gpio_cat13{
+    .secure = false,
+    .slew   = false,
+    .brr    = false,
+    .names  = l1_gpio_names};
+/** @brief STM32L1 Cat.4 to Cat.6 ports, `STM32L1_gpio_cat46`, RM0038 7.4 and 7.4.11. */
+inline constexpr gpio_variant l1_gpio_cat46{
+    .secure = false,
+    .slew   = false,
+    .brr    = true,
+    .names  = l1_gpio_names};
+
+/** @brief NVIC line of the classic EXTI and the EXTI lines first to last that raise it. */
+struct exti_line_group
+{
+  /** @brief First line. */
+  std::uint8_t first;
+  /** @brief Last line, included. */
+  std::uint8_t last;
+  /** @brief IRQ name in the description. */
+  std::string_view irq;
+};
+
+/** @brief Differences between the classic EXTI controllers the model rows serve. */
+struct exti_classic_traits
+{
+  /** @brief Lines, the width of each register's line field. */
+  std::uint8_t lines;
+  /** @brief NVIC lines the EXTI raises. A line in no group sets its pending bit and raises
+   *         nothing. */
+  std::span<exti_line_group const> irqs;
+};
+
+/** @brief STM32L1, RM0038 Tables 49 to 51: EXTI0 to EXTI4 one line each, EXTI9_5, EXTI15_10, line
+ *         19 the RTC tamper and timestamp line, lines 21 and 22 the comparator wakeup line. PVD,
+ *         RTC_Alarm, USB_FS_WKUP, RTC_WKUP and COMP_ACQ, lines 16, 17, 18, 20 and 23, belong to
+ *         PWR, RTC, USB and COMP in the description. */
+inline constexpr auto l1_exti_irqs = std::to_array<exti_line_group>({
+    {0,  0,  "EXTI0_IRQn"       },
+    {1,  1,  "EXTI1_IRQn"       },
+    {2,  2,  "EXTI2_IRQn"       },
+    {3,  3,  "EXTI3_IRQn"       },
+    {4,  4,  "EXTI4_IRQn"       },
+    {5,  9,  "EXTI9_5_IRQn"     },
+    {10, 15, "EXTI15_10_IRQn"   },
+    {19, 19, "TAMPER_STAMP_IRQn"},
+    {21, 22, "COMP_IRQn"        },
+});
+/** @brief STM32L1 Cat.1 and Cat.2, `STM32L1_exti_23`, RM0038 10.2: 23 lines. */
+inline constexpr exti_classic_traits l1_exti_23{.lines = 23, .irqs = l1_exti_irqs};
+/** @brief STM32L1 Cat.3 to Cat.6, RM0038 10.2: 24 lines. */
+inline constexpr exti_classic_traits l1_exti_24{.lines = 24, .irqs = l1_exti_irqs};
+
+/** @brief One code of a `SYSCFG_EXTICRn` selector field. */
+struct exti_port_code
+{
+  /** @brief Field value. */
+  std::uint8_t code;
+  /** @brief Port letter. */
+  char port;
+  /** @brief Lines that take the port at this code, bit n for line n. */
+  std::uint16_t lines = 0xFFFF;
+};
+
+/** @brief Differences between the classic SYSCFG controllers the model rows serve, by register
+ *         role. A role the family lacks is empty. */
+struct syscfg_classic_traits
+{
+  /** @brief Selector codes. A code with no entry, or an entry without the line, selects no
+   *         port. */
+  std::span<exti_port_code const> ports;
+  /** @brief Register of the USB D+ pull-up enable. */
+  std::string_view usb_pull_up_register;
+  /** @brief Field of the USB D+ pull-up enable. */
+  std::string_view usb_pull_up_field;
+  /** @brief Register of the memory remap, kept by a SYSCFGRST pulse. */
+  std::string_view remap_register;
+  /** @brief Registers served as storage the model does not model, with the storage
+   *         diagnostics. */
+  std::span<std::string_view const> storage_registers;
+};
+
+/** @brief RM0038 8.5.3 to 8.5.6, Cat.3 to Cat.6: PA to PE, PH for lines 0 to 2 only, PF and PG. */
+inline constexpr auto l1_exti_ports = std::to_array<exti_port_code>({
+    {0, 'A'},
+    {1, 'B'},
+    {2, 'C'},
+    {3, 'D'},
+    {4, 'E'},
+    {5, 'H', 0x0007},
+    {6, 'F'},
+    {7, 'G'},
+});
+/** @brief STM32L1 storage registers of SYSCFG: MEMRMP, and PMC until a USB model reads USB_PU. */
+inline constexpr auto l1_syscfg_storage = std::to_array<std::string_view>({"MEMRMP", "PMC"});
+/** @brief STM32L1 Cat.3 to Cat.6, RM0038 section 8.5. */
+inline constexpr syscfg_classic_traits l1_syscfg{
+    .ports                = l1_exti_ports,
+    .usb_pull_up_register = "PMC",
+    .usb_pull_up_field    = "USB_PU",
+    .remap_register       = "MEMRMP",
+    .storage_registers    = l1_syscfg_storage};
+/** @brief STM32L1 Cat.1 and Cat.2, `STM32L1_exti_23`, RM0038 8.5.3: codes 0110 and 0111, PF and
+ *         PG, exist on Cat.3 to Cat.6 only. */
+inline constexpr syscfg_classic_traits l1_syscfg_cat12{
+    .ports                = std::span{l1_exti_ports}.first(6),
+    .usb_pull_up_register = "PMC",
+    .usb_pull_up_field    = "USB_PU",
+    .remap_register       = "MEMRMP",
+    .storage_registers    = l1_syscfg_storage};
 
 /** @brief Differences between the STM32U5 FLASH controllers the model rows serve. */
 struct flash_variant

@@ -22,6 +22,7 @@ u575 = cached_st_description("STM32U575QGIx", "POPCORN_U575_DESC")
 h573 = cached_st_description("STM32H573AIIx", "POPCORN_H573_DESC")
 l152re = cached_st_description("STM32L152RETx", "POPCORN_L152RE_DESC")
 l152rb = cached_st_description("STM32L152RBTx", "POPCORN_L152RB_DESC")
+l152rc = cached_st_description("STM32L152RCTx", "POPCORN_L152RC_DESC")
 u575_2m = cached_st_description("STM32U575ZITxQ", "POPCORN_U575_2M_DESC")
 h5_1m = cached_st_description("STM32H563ZGTx", "POPCORN_H5_1M_DESC")
 firmwares = {
@@ -62,11 +63,15 @@ l1_firmwares = {
         "l152xe_l1_rcc_ll",
         "l152xb_l1_rcc_ll",
         "l152xe_l1_pwr_ll",
+        "l152xe_l1_gpio_ll",
+        "l152xe_l1_exti_ll",
+        "l152xb_l1_exti_ll",
     )
 }
 l1_env = {
     "POPCORN_L152RE_DESC": str(l152re),
     "POPCORN_L152RB_DESC": str(l152rb),
+    "POPCORN_L152RC_DESC": str(l152rc),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in l1_firmwares.items()},
 }
 u575_env = {
@@ -211,13 +216,15 @@ for _, target in l1_firmwares.values():
 for program, source in (
     ("stm32-rcc-l1", "test_rcc_l1.cpp"),
     ("stm32-power-l1", "test_power_l1.cpp"),
+    ("stm32-gpio-l1", "test_gpio_l1.cpp"),
+    ("stm32-exti-l1", "test_exti_l1.cpp"),
 ):
     l1_test = add_doctest(
         program,
         [here / source],
         static,
         env=l1_env,
-        register=l152re is not None and l152rb is not None,
+        register=l152re is not None and l152rb is not None and l152rc is not None,
     )
     l1_test.private.include_dirs.append(private_dir)
     for _, target in l1_firmwares.values():
