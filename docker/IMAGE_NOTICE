@@ -10,8 +10,9 @@ popcorn
   is a combined work subject to GPL-2.0-only. The exact source is the popcorn
   git commit named in the image label org.opencontainers.image.revision, at
   https://github.com/Garcia6l20/popcorn, submodules included. The Unicorn
-  source is the third_party/unicorn submodule commit of that revision, from
-  https://github.com/Garcia6l20/unicorn. NOTICE lists the fork's changes.
+  source is the fork commit that the third_party/unicorn submodule of that
+  revision pins, from https://github.com/Garcia6l20/unicorn, branch popcorn.
+  NOTICE lists the fork's changes to upstream Unicorn with their dates.
 
 GCC 16.2.0 runtime libraries
   /usr/local/lib/libstdc++.so.6.0.36, /usr/local/lib/libgcc_s.so.1 and

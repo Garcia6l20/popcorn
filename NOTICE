@@ -14,9 +14,9 @@ and verified by sha256. Everything is compiled on the user's machine. The built
 Python extension links Unicorn statically, so an installed popcorn extension is
 a combined work subject to GPL-2.0-only.
 
-Unicorn CPU emulator, popcorn fork at commit
-60c55f4b34d4290e1abad047eabcf766c9f72623, submodule third_party/unicorn
-  https://github.com/Garcia6l20/unicorn, branch popcorn
+Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
+  https://github.com/Garcia6l20/unicorn, branch popcorn. The fork commit is
+  the one the third_party/unicorn submodule of this popcorn commit pins.
   Upstream: https://github.com/unicorn-engine/unicorn, commit
   938efd13aeab73155f31cf707a2094c6ccaa36dd, modified as follows.
   2026-09-25, Sylvain Garcia <garcia.6l20@gmail.com>:
