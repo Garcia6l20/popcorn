@@ -116,6 +116,9 @@ class PeripheralDesc:
     alias_of: str | None = None
     alternates: list[AlternateDesc] | None = None
     bonded: int | None = field(default=None, metadata={"minimum": 0, "maximum": 65535})
+    bonded_channels: int | None = field(
+        default=None, metadata={"minimum": 0, "maximum": 4294967295}
+    )
 
 
 @dataclass(slots=True, kw_only=True)

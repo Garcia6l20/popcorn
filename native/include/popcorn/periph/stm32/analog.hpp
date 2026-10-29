@@ -47,6 +47,14 @@ public:
    */
   [[nodiscard]] virtual auto external_channels() const -> std::uint32_t = 0;
 
+  /**
+   * @brief The external channels whose pad reaches a package pin, bit n for channel n: the
+   *        description's `bonded_channels`, else every external channel. The board API refuses
+   *        the others, conversions read every external channel. Fixed for the life of the
+   *        model, so any thread may read it.
+   */
+  [[nodiscard]] virtual auto bonded_channels() const -> std::uint32_t = 0;
+
   /** @brief VDDA in millivolts, the reference of every conversion. */
   [[nodiscard]] virtual auto vdda_mv() const -> std::uint32_t = 0;
 

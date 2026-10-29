@@ -1309,7 +1309,8 @@ class PeripheralRef:
         """External channel `channel` of this ADC.
 
         Raises:
-            ConfigError: `channel` is not an external channel of this ADC.
+            ConfigError: `channel` is not an external channel of this ADC, or the part's
+                package does not bond its pad.
             ModelError: The peripheral's model is not the built-in ADC.
         """
         return AnalogRefs(

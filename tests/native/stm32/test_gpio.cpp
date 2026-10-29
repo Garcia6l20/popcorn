@@ -667,12 +667,12 @@ TEST_CASE("bonded_pins() is the description's mask, every pin of the port withou
     REQUIRE(found != desc.peripherals.end());
     return *found;
   };
-  auto const h_mask = unit("GPIOH").bonded;
-  REQUIRE(h_mask.has_value());
+  REQUIRE(unit("GPIOH").bonded == 0x000b);
+  REQUIRE(unit("GPIOI").bonded == 0);
   {
     stm32_fixture const f{desc, "gpio_ll"};
-    CHECK(port(f, "GPIOH").bonded_pins() == *h_mask);
-    CHECK(port(f, "GPIOI").bonded_pins() == unit("GPIOI").bonded.value_or(0xffff));
+    CHECK(port(f, "GPIOH").bonded_pins() == 0x000b);
+    CHECK(port(f, "GPIOI").bonded_pins() == 0);
   }
   unit("GPIOH").bonded.reset();
   unit("GPIOI").bonded.reset();

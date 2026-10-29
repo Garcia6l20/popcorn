@@ -2339,3 +2339,35 @@ TEST_CASE("the ADC1 and ADC12 state mid-scan saves the bytes captured before the
     return std::to_integer<unsigned char>(b);
   }));
 }
+
+TEST_CASE("bonded_channels() is the description's mask, every external channel without one")
+{
+  auto       description = u575();
+  auto const adc1        = std::ranges::find(
+      description.peripherals, std::string_view{"ADC1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(adc1 != description.peripherals.end());
+  {
+    adc_fixture const f{description};
+    REQUIRE(adc1->bonded_channels.has_value());
+    CHECK(f.port().bonded_channels() == *adc1->bonded_channels);
+    CHECK(f.port().bonded_channels() == f.port().external_channels());
+  }
+  adc1->bonded_channels = 0x0000'0060;
+  {
+    adc_fixture const f{description};
+    CHECK(f.port().bonded_channels() == 0x0000'0060);
+  }
+  adc1->bonded_channels.reset();
+  adc_fixture const f{description};
+  CHECK(f.port().bonded_channels() == 0x0003'fffe);
+}
+
+TEST_CASE("a bonded_channels mask naming an internal channel throws config_error")
+{
+  auto       description = u575();
+  auto const adc1        = std::ranges::find(
+      description.peripherals, std::string_view{"ADC1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(adc1 != description.peripherals.end());
+  adc1->bonded_channels = 0x0000'0001;
+  CHECK_THROWS_AS(adc_fixture{description}, popcorn::config_error);
+}

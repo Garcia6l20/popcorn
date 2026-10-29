@@ -854,6 +854,10 @@ public:
   void               drive(std::uint8_t channel, std::uint32_t microvolts) override;
   [[nodiscard]] auto input(std::uint8_t channel) const -> std::uint32_t override;
   [[nodiscard]] auto external_channels() const -> std::uint32_t override;
+  [[nodiscard]] auto bonded_channels() const -> std::uint32_t override
+  {
+    return bonded_channels_;
+  }
   [[nodiscard]] auto vdda_mv() const -> std::uint32_t override;
 
   void cr_written(std::uint32_t old, std::uint32_t now);
@@ -923,6 +927,7 @@ private:
 
   register_file&                                   regs_;
   supply_options                                   supply_;
+  std::uint32_t                                    bonded_channels_{};
   adc_inputs                                       inputs_;
   core::clock_domain                               kernel_;
   core::clock_domain                               hclk_;
@@ -1063,6 +1068,11 @@ adc_model<Traits>::adc_model(model_context& ctx, peripheral_desc const& desc, su
       watchdog1_channel_{field(Traits::config, "AWD1CH")},
       watchdog1_filter_{field(Traits::filter_register, Traits::filter_field)}
 {
+  bonded_channels_ = desc.bonded_channels.value_or(external_channels());
+  if((bonded_channels_ & ~external_channels()) != 0)
+  {
+    throw config_error(desc.name, 0, "bonded_channels", "a mask of external channels");
+  }
   for(std::size_t index = 0; index < Traits::dma_fields.size(); ++index)
   {
     dma_mode_[index] = field(Traits::config, Traits::dma_fields[index]);

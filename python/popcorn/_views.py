@@ -501,7 +501,8 @@ class PeripheralView:
         1 to 17 on the STM32U5 ADC1, 0 to 15, 18 and 19 on the STM32H5 ADC1 and ADC2.
 
         Raises:
-            ConfigError: `channel` is not an external channel of this ADC.
+            ConfigError: `channel` is not an external channel of this ADC, or the part's
+                package does not bond its pad.
             ModelError: The peripheral's model is not the built-in ADC.
         """
         mask = self._access.handle.adc_channels(self._name)
@@ -511,6 +512,14 @@ class PeripheralView:
                 f"{self._name}: no external channel {channel}",
                 key="channel",
                 expected=f"an external channel, one of {external}",
+            )
+        bonded = self._access.handle.adc_bonded_channels(self._name)
+        if not bonded >> channel & 1:
+            listed = " ".join(str(n) for n in range(32) if bonded >> n & 1) or "none"
+            raise ConfigError(
+                f"{self._name}: channel {channel} reaches no package pin",
+                key="channel",
+                expected=f"a bonded channel, one of {listed}",
             )
         return AnalogInput(self._access, self._name, channel)
 
@@ -664,6 +673,8 @@ class AnalogInput:
     12 on the STM32H5 ADC1 and ADC2, floored, saturated at VDDA, VDDA from `SupplyOptions`.
     While the machine is busy, every access raises MachineRunning outside its callbacks:
     `m.write((m.ref.periph.ADC1.input(5).volts, 1.5))` drives it at a block boundary then.
+    Every access raises ConfigError at the call, parked or running, for a channel whose pad the
+    part's package does not bond, outside the ADC's `bonded_channels` in the description.
     """
 
     __slots__ = ("_access", "adc", "channel")

@@ -220,6 +220,11 @@
           "minimum": 0,
           "type": "integer"
         },
+        "bonded_channels": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
         "cross_rules": {
           "items": {
             "$ref": "#/$defs/cross_rule"

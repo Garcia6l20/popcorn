@@ -1,18 +1,19 @@
 # Descriptions
 
 A part description says what a part is: its core, memory regions, peripherals with registers
-and fields, interrupts, GPIO alternate functions and bonded GPIO pins. The machine is built from it and never
-from ad-hoc arguments.
+and fields, interrupts, GPIO alternate functions, bonded GPIO pins and bonded ADC channels. The
+machine is built from it and never from ad-hoc arguments.
 
 ## The data
 
 The native type is `part_description` in `native/include/popcorn/core/description.hpp`. It
 comes with `parse_description`, `load_description`, `dump_description`, `description_digest`
 and a JSON Schema from `description_json_schema`. `description_schema_version`, 2, is part of
-the data, and the digest covers it, so a bump changes every digest. The JSON Schema is committed as `data/schema/part_description.schema.json` and
-`python/popcorn/stm32/description/_codegen.py` generates the Python dataclasses of `_model.py`
-from it. Do not edit `_model.py` by hand. `popcorn_build/schema.py` builds the `popcorn-describe-schema`
-program and rewrites the schema from the native type.
+the data, and the digest covers it, so a bump changes every digest. The JSON Schema is committed
+as `data/schema/part_description.schema.json` and `python/popcorn/stm32/description/_codegen.py`
+generates the Python dataclasses of `_model.py` from it. Do not edit `_model.py` by hand.
+`popcorn_build/schema.py` builds the `popcorn-describe-schema` program and rewrites the schema
+from the native type.
 
 ## The pipeline
 
@@ -95,6 +96,13 @@ board API refuses a pin outside the mask with `ConfigError`: every `Pin` access,
 and an SPI device's chip select at machine construction. The firmware reaches every pin through
 the registers. A hand-written description may leave `bonded` out, every pin of the port then
 counts as bonded.
+
+Each ADC instance carries `bonded_channels`, the mask of its external channels whose pad reaches
+a package pin. `bonded_adc_channels` in `_cubemx.py` reads it from the `ADC<n>_IN<c>` and
+`ADC<n>_INP<c>` signals of the part's pins. The board API refuses a channel outside the mask with
+`ConfigError`: `ADCx.input(n)`, every `AnalogInput` access and its refs. Conversions read every
+external channel. A hand-written description may leave `bonded_channels` out, every external
+channel then counts as bonded.
 
 ## Field drops
 

@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 
 from popcorn.stm32.description._cubemx import (
     Rzone,
+    bonded_adc_channels,
     bonded_pins,
     instance_ips,
     read_gpio_alternates,
@@ -219,10 +220,15 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
     report.alternates_dropped = apply_alternate_drops(loaded_patches, target.peripherals)
     if db_part.pins:
         bonded = bonded_pins(db_part)
+        channels = bonded_adc_channels(db_part)
         for peripheral in target.peripherals:
+            if peripheral.alias_of is not None:
+                continue
             port = _GPIO_PORT_RE.fullmatch(peripheral.name)
-            if port is not None and peripheral.alias_of is None:
+            if port is not None:
                 peripheral.bonded = bonded.get(port.group(1), 0)
+            elif peripheral.ip == "ADC":
+                peripheral.bonded_channels = channels.get(peripheral.name, 0)
 
     description = PartDescription(
         part=sources.part,

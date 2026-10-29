@@ -181,6 +181,10 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] peripheral_desc
   /** @brief Pins of a GPIO port that reach a package pin, bit n for pin n. Absent on other
    * peripherals and on hand-written descriptions, where every pin of the port counts as bonded. */
   std::optional<std::uint16_t> bonded;
+  /** @brief External channels of an ADC whose pad reaches a package pin, bit n for channel n, from
+   * the CubeMX `ADCx_INn` and `ADCx_INPn` pin signals. Absent on other peripherals and on
+   * hand-written descriptions, where every external channel counts as bonded. */
+  std::optional<std::uint32_t> bonded_channels;
 
   /** @brief Member-wise equality. */
   friend auto operator==(peripheral_desc const&, peripheral_desc const&) -> bool = default;

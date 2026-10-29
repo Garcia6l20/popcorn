@@ -499,10 +499,16 @@ void check_bonded_chip_select(
     std::string const&          port,
     std::optional<std::uint8_t> pin)
 {
-  auto const unit = std::ranges::find_if(description.peripherals, [&](peripheral_desc const& p) {
-    return p.name == port and not p.alias_of;
+  auto const named = std::ranges::find(description.peripherals, port, &peripheral_desc::name);
+  if(not pin or named == description.peripherals.end())
+  {
+    return;
+  }
+  auto const target = named->alias_of.value_or(port);
+  auto const unit   = std::ranges::find_if(description.peripherals, [&](peripheral_desc const& p) {
+    return p.name == target and not p.alias_of;
   });
-  if(not pin or unit == description.peripherals.end() or not unit->bonded)
+  if(unit == description.peripherals.end() or not unit->bonded)
   {
     return;
   }

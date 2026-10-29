@@ -11,6 +11,9 @@ from typing import cast
 
 type JsonObject = Mapping[str, object]
 
+_LINE_LENGTH = 100
+"""black's line length in pyproject.toml."""
+
 _HEADER = '''"""Dataclasses and enums generated from data/schema/part_description.schema.json.
 
 Regenerate with ``python -m popcorn.stm32.description._codegen``. Do not edit by hand.
@@ -136,10 +139,11 @@ def _emit_field(prop_name: str, prop_node: JsonObject, *, required: bool) -> str
     if not required:
         if metadata:
             metadata_repr = ", ".join(f'"{k}": {v}' for k, v in metadata.items())
-            return (
-                f"    {prop_name}: {py_type} | None = "
-                f"field(default=None, metadata={{{metadata_repr}}})"
-            )
+            head = f"    {prop_name}: {py_type} | None = field("
+            arguments = f"default=None, metadata={{{metadata_repr}}}"
+            if len(head) + len(arguments) + 1 <= _LINE_LENGTH:
+                return f"{head}{arguments})"
+            return f"{head}\n        {arguments}\n    )"
         return f"    {prop_name}: {py_type} | None = None"
     if metadata:
         metadata_repr = ", ".join(f'"{k}": {v}' for k, v in metadata.items())

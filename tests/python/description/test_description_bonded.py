@@ -43,3 +43,34 @@ def test_the_shipped_h573aiix_bonds_ph15_and_pi11() -> None:
     ports = _ports(compose_shipped("STM32H573AIIx"))
     assert ports["GPIOH"] is not None and ports["GPIOH"] >> 15 & 1
     assert ports["GPIOI"] is not None and ports["GPIOI"] >> 11 & 1
+
+
+def _adcs(text: str) -> dict[str, int | None]:
+    data = cast(dict[str, Any], json.loads(text))
+    return {
+        p["name"]: p.get("bonded_channels")
+        for p in data["peripherals"]
+        if p["ip"] == "ADC" and "alias_of" not in p
+    }
+
+
+@pytest.mark.parametrize("name", shipped_names())
+def test_every_adc_of_a_shipped_part_carries_bonded_channels(name: str) -> None:
+    adcs = _adcs(compose_shipped(name))
+    assert adcs
+    assert [adc for adc, mask in adcs.items() if mask is None] == []
+
+
+@pytest.mark.parametrize("name", PIN_DATA_PARTS)
+def test_every_adc_of_a_pin_data_build_carries_bonded_channels(name: str) -> None:
+    value = os.environ.get(PIN_DATA_VARIABLE)
+    if not value:
+        pytest.skip(f"set {PIN_DATA_VARIABLE} to a STM32_open_pin_data checkout")
+    adcs = _adcs(build_text(name, pin_data=Path(value)))
+    assert adcs
+    assert [adc for adc, mask in adcs.items() if mask is None] == []
+
+
+def test_the_shipped_parts_bond_every_external_channel_of_adc1_and_adc2() -> None:
+    assert _adcs(compose_shipped("STM32U575QGIx"))["ADC1"] == 0x3FFFE
+    assert _adcs(compose_shipped("STM32H573AIIx")) == {"ADC1": 0xCFFFF, "ADC2": 0xCFFFF}
