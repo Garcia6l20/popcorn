@@ -5,13 +5,17 @@ readonly SIZE_LIMIT=350000000
 readonly VOLUME=popcorn-smoke-cache
 
 image=${1:?usage: docker/smoke.sh IMAGE}
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+    echo "image $image is not present locally" >&2
+    exit 2
+fi
 root=$(cd "$(dirname "$0")/.." && pwd)
 examples=$root/examples
 tmp=$(mktemp -d)
 failed=()
 
 cleanup() {
-    docker run --rm --user 0 -v "$tmp:/t" "$image" find /t -mindepth 1 -delete >/dev/null 2>&1 || true
+    docker run --pull=never --rm --user 0 -v "$tmp:/t" "$image" find /t -mindepth 1 -delete >/dev/null 2>&1 || true
     rm -rf "$tmp"
     docker volume rm -f "$VOLUME" >/dev/null 2>&1 || true
 }
@@ -32,35 +36,36 @@ check() {
 
 writable_copy() {
     local dest=$tmp/$1
-    cp -r "$examples/$2" "$dest"
-    chmod -R a+rwX "$dest"
+    cp -r "$examples/$2" "$dest" || return 1
+    rm -rf "$dest/.pytest_cache" || return 1
+    chmod -R a+rwX "$dest" || return 1
     echo "$dest"
 }
 
 import_version() {
     local out
-    out=$(docker run --rm "$image" python -c "import popcorn; print(popcorn.version())")
+    out=$(docker run --pull=never --rm "$image" python -c "import popcorn; print(popcorn.version())") || return 1
     echo "$out"
     [[ $out == *"(unicorn "* && $out != *dirty* ]]
 }
 
 gpio_arbitrary_uid() {
     local work
-    work=$(writable_copy gpio-4242 stm32u575/gpio)
-    docker run --rm --user 4242:4242 -v "$work:/work" "$image" pytest -q
+    work=$(writable_copy gpio-4242 stm32u575/gpio) || return 1
+    docker run --pull=never --rm --user 4242:4242 -v "$work:/work" "$image" pytest -q || return 1
     test -d "$work/.pytest_cache/d/popcorn/boot"
 }
 
 gpio_default_uid_named_cache() {
     local work
-    work=$(writable_copy gpio-default stm32u575/gpio)
-    docker volume rm -f "$VOLUME" >/dev/null
-    docker run --rm -v "$work:/work" -v "$VOLUME:/cache" "$image" pytest -q
-    docker run --rm -v "$VOLUME:/cache" "$image" sh -c 'find /cache/popcorn/mcu -name "STM32U575QGIx*.json" | grep .'
+    work=$(writable_copy gpio-default stm32u575/gpio) || return 1
+    docker volume rm -f "$VOLUME" >/dev/null || return 1
+    docker run --pull=never --rm -v "$work:/work" -v "$VOLUME:/cache" "$image" pytest -q || return 1
+    docker run --pull=never --rm -v "$VOLUME:/cache" "$image" sh -c 'find /cache/popcorn/mcu -name "STM32U575QGIx*.json" | grep .'
 }
 
 h573_read_only() {
-    docker run --rm --user "$(id -u):$(id -g)" -v "$examples/stm32h573/usart:/work:ro" "$image" \
+    docker run --pull=never --rm --user "$(id -u):$(id -g)" -v "$examples/stm32h573/usart:/work:ro" "$image" \
         pytest -q -p no:cacheprovider
 }
 
@@ -71,15 +76,15 @@ script_region() {
         echo 'ELF = Path("/work/prebuilt/usart_echo.elf")'
         sed -n '/\[start:describe\]/,/\[end:describe\]/p' "$snippet"
         sed -n '/\[start:script\]/,/\[end:script\]/p' "$snippet"
-    } >"$tmp/script.py"
+    } >"$tmp/script.py" || return 1
     local out
-    out=$(docker run --rm -i -v "$examples/stm32u575/usart:/work:ro" "$image" python - <"$tmp/script.py")
+    out=$(docker run --pull=never --rm -i -v "$examples/stm32u575/usart:/work:ro" "$image" python - <"$tmp/script.py") || return 1
     echo "$out"
     [[ $out == "popcorn usart example, 115200 baud"* ]]
 }
 
 one_libstdcxx() {
-    docker run --rm -i -v "$examples/stm32u575/gpio:/work:ro" "$image" python - <<'EOF'
+    docker run --pull=never --rm -i -v "$examples/stm32u575/gpio:/work:ro" "$image" python - <<'EOF'
 from pathlib import Path
 
 import popcorn
@@ -97,24 +102,24 @@ EOF
 }
 
 no_compiler() {
-    local name
-    for name in g++ gcc arm-none-eabi-gcc; do
-        if docker run --rm "$image" sh -c "command -v $name"; then
-            echo "$name found"
-            return 1
-        fi
-    done
+    docker run --pull=never --rm "$image" sh -c '
+        for name in g++ gcc arm-none-eabi-gcc; do
+            if command -v "$name"; then
+                echo "$name found"
+                exit 1
+            fi
+        done'
 }
 
 default_uid() {
     local uid
-    uid=$(docker run --rm "$image" id -u)
+    uid=$(docker run --pull=never --rm "$image" id -u) || return 1
     echo "$uid"
     [[ $uid == 1000 ]]
 }
 
 licence_files() {
-    docker run --rm "$image" sh -c '
+    docker run --pull=never --rm "$image" sh -ec '
         cd /usr/share/doc/popcorn
         ls LICENSE NOTICE IMAGE_NOTICE LICENSES/unicorn-COPYING LICENSES/STM32_open_pin_data-LICENSE \
             gcc-runtime/COPYING3 gcc-runtime/COPYING.RUNTIME
@@ -124,13 +129,14 @@ licence_files() {
 
 image_size() {
     local size
-    size=$(docker image inspect --format '{{.Size}}' "$image")
+    size=$(docker image inspect --format '{{.Size}}' "$image") || return 1
     echo "$size bytes, limit $SIZE_LIMIT"
+    [[ $size =~ ^[0-9]+$ ]] || return 1
     ((size <= SIZE_LIMIT))
 }
 
 derived_uv() {
-    docker run --rm --user 0 "$image" uv pip install --dry-run pytest-xdist
+    docker run --pull=never --rm --user 0 "$image" uv pip install --dry-run pytest-xdist
 }
 
 check import_version import_version
