@@ -1372,13 +1372,37 @@ public:
     friend auto operator==(heard const&, heard const&) -> bool = default;
   };
 
+  struct lost
+  {
+    std::uint64_t unit;
+    std::uint32_t sent;
+    vtime         at;
+
+    friend auto operator==(lost const&, lost const&) -> bool = default;
+  };
+
   std::vector<heard>          frames;
+  std::vector<lost>           drops;
+  std::vector<std::string>*   log{};
   std::optional<std::uint8_t> declared;
   mutable int                 mode_calls{};
 
   void frame(std::uint32_t sent, std::uint32_t received, vtime at) override
   {
     frames.push_back({sent, received, at});
+    if(log != nullptr)
+    {
+      log->push_back("frame " + std::to_string(sent));
+    }
+  }
+
+  void dropped(std::uint64_t unit, std::uint32_t sent, vtime at) override
+  {
+    drops.push_back({unit, sent, at});
+    if(log != nullptr)
+    {
+      log->push_back("dropped " + std::to_string(unit));
+    }
   }
 
   auto mode() const -> std::optional<std::uint8_t> override
@@ -2813,12 +2837,16 @@ TEST_CASE("after SPI1RST a completion is refused once, handed before or after th
   CHECK(counts == std::vector<std::int64_t>{1, 1});
 }
 
-TEST_CASE("a completion on lane 0 or one instruction period before the machine time is refused")
+TEST_CASE("a completion on lane 0 or before the last reset is refused, one in the past is kept")
 {
   auto const device = deferred(std::nullopt);
   device->hold      = true;
   deferred_rig r{{device}};
   bus          b{*r.f};
+  b.run_until(30 * us);
+  r.f->target->reset(popcorn::reset_kind::software);
+  r.f->set("pc", sym("spi_ll", "idle"));
+  REQUIRE(r.offset() >= 30 * us);
   b.run_until(start(b, {0x11}, 1) + frame_ps + us);
   REQUIRE(device->asked.size() == 1);
   auto const ticket = device->asked[0].ticket;
@@ -2829,18 +2857,18 @@ TEST_CASE("a completion on lane 0 or one instruction period before the machine t
   CHECK_THROWS_AS(
       device->port->complete(ticket, 0x5A, r.power_on(now + us), 0), std::invalid_argument);
   CHECK_THROWS_AS(
-      device->port->complete(ticket, 0x5A, r.power_on(now - period), 1), std::invalid_argument);
+      device->port->complete(ticket, 0x5A, vtime{r.offset() - 1}, 1), std::invalid_argument);
   CHECK_FALSE(due_of(*r.f, "SPI1", completed_event).has_value());
   CHECK_FALSE(popcorn::testing::saved_integer(*r.f, "SPI1", "completions.0.ticket").has_value());
-  device->port->complete(ticket, 0x5A, r.power_on(now - (period - 1)), 1);
+  device->port->complete(ticket, 0x5A, r.power_on(now - 3 * period), 1);
   auto const pending = r.f->target->snapshot().data().events.pending;
   auto const kept    = std::ranges::find_if(pending, [&](core::event const& event) {
-    return event.id.kind == completed_event and event.due_ps == now - (period - 1);
+    return event.id.kind == completed_event and event.due_ps == now - 3 * period;
   });
   REQUIRE(kept != pending.end());
-  CHECK(kept->at == r.f->target->virtual_clock().now());
+  CHECK(kept->at.value + 3 == r.f->target->virtual_clock().now().value);
   CHECK(kept->lane == 1);
-  b.run_until(now + us);
+  b.run_until(now + period);
   CHECK(b.get("SPI_SR", "RXP") == 1);
   CHECK(r.refused() == 0);
 }
@@ -2874,4 +2902,875 @@ TEST_CASE("a board device hears attached at the model's construction and detache
   CHECK(device->attaches == 1);
   CHECK(device->detaches == 1);
   CHECK(device->port == nullptr);
+}
+
+namespace
+{
+constexpr std::uint32_t wire = 1;
+
+struct port_rig
+{
+  std::shared_ptr<controller_probe> sink = std::make_shared<controller_probe>();
+  stm32::board                      board{};
+  std::unique_ptr<stm32_fixture>    f;
+
+  explicit port_rig(std::shared_ptr<deferred_target> const& spi3 = nullptr)
+  {
+    board.spi_controllers["SPI1"] = sink;
+    if(spi3)
+    {
+      board.spi["SPI3"].push_back({.device = spi3, .cs_port = "GPIOA"});
+    }
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories(board, u575());
+    f              = std::make_unique<stm32_fixture>(u575(), "spi_ll", std::move(options));
+    f->set("pc", sym("spi_ll", "idle"));
+  }
+
+  [[nodiscard]] auto port() const -> periph::spi_controller_port&
+  {
+    auto* const found = dynamic_cast<periph::spi_controller_port*>(f->target->model("SPI1"));
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  [[nodiscard]] auto period() const -> std::uint64_t
+  {
+    auto const hz = f->target->virtual_clock().instruction_hz();
+    REQUIRE(1'000'000'000'000 % hz == 0);
+    return 1'000'000'000'000 / hz;
+  }
+
+  void reset(popcorn::reset_kind kind) const
+  {
+    f->target->reset(kind);
+    f->set("pc", sym("spi_ll", "idle"));
+  }
+
+  void power_cycle() const
+  {
+    f->target->power_cycle();
+    f->set("pc", sym("spi_ll", "idle"));
+  }
+
+  void select(std::uint64_t at, std::uint64_t unit) const
+  {
+    port().select(vtime{at}, wire, unit);
+  }
+
+  void deselect(std::uint64_t at, std::uint64_t unit) const
+  {
+    port().deselect(vtime{at}, wire, unit);
+  }
+
+  void frame(std::uint32_t word, std::uint64_t at, std::uint64_t unit) const
+  {
+    port().frame(word, 8, mhz_frame, vtime{at}, wire, unit);
+  }
+
+  void three_frames(std::uint64_t at) const
+  {
+    select(at, 1);
+    frame(1, at, 2);
+    frame(2, at, 3);
+    frame(3, at, 4);
+  }
+
+  [[nodiscard]] auto sent() const -> std::vector<std::uint32_t>
+  {
+    std::vector<std::uint32_t> out;
+    for(auto const& one : sink->frames)
+    {
+      out.push_back(one.sent);
+    }
+    return out;
+  }
+};
+
+using lost = controller_probe::lost;
+
+void after_system_reset(port_rig const& r, bus const& b)
+{
+  b.run_until(30 * us);
+  r.reset(popcorn::reset_kind::software);
+  REQUIRE(
+      r.f->target->virtual_clock().since_power_on().ps - r.f->target->virtual_clock().time().ps
+      >= 30 * us);
+}
+}
+
+TEST_CASE("select, three port frames and a deselect clock the target as one transfer of three")
+{
+  std::vector<std::vector<controller_probe::heard>> heard;
+  std::vector<std::vector<std::uint32_t>>           landed;
+  for(bool const primitives : {true, false})
+  {
+    CAPTURE(primitives);
+    port_rig r;
+    bus      b{*r.f};
+    target(b, 7, 3);
+    for(std::uint32_t const word : {0xA1u, 0xA2u, 0xA3u})
+    {
+      b.send(word);
+    }
+    auto const start = b.now() + us;
+    if(primitives)
+    {
+      r.three_frames(start);
+      r.deselect(start + 3 * mhz_frame, 5);
+    }
+    else
+    {
+      r.port().transfer(vtime{start}, mhz_frame, 8, std::vector<std::uint32_t>{1, 2, 3});
+    }
+    b.run_until(start + 3 * mhz_frame - mhz_frame / 2);
+    CHECK(b.get("SPI_SR", "EOT") == 0);
+    CHECK(b.get("SPI_SR", "CTSIZE") == 1);
+    b.run_until(start + 3 * mhz_frame + us);
+    CHECK(b.get("SPI_SR", "EOT") == 1);
+    CHECK(b.get("SPI_SR", "TXC") == 1);
+    CHECK(b.get("SPI_SR", "UDR") == 0);
+    CHECK(r.sink->drops.empty());
+    heard.push_back(r.sink->frames);
+    landed.push_back(drain(b));
+  }
+  CHECK(heard[0] == heard[1]);
+  CHECK(landed[0] == landed[1]);
+  CHECK(landed[0] == std::vector<std::uint32_t>{1, 2, 3});
+  REQUIRE(heard[0].size() == 3);
+  CHECK(heard[0][2].received == 0xA3);
+}
+
+TEST_CASE("a port entry in the past keeps its own count, a bad lane or argument throws")
+{
+  port_rig r;
+  bus      b{*r.f};
+  b.run_until(10 * us);
+  auto&      p    = r.port();
+  auto const now  = b.now();
+  auto const past = now - 3 * r.period();
+  target(b, 7, 0);
+  CHECK_THROWS_AS(p.select(vtime{now}, 0, 1), std::invalid_argument);
+  CHECK_THROWS_AS(p.frame(1, 3, mhz_frame, vtime{now}, wire, 1), std::invalid_argument);
+  CHECK_THROWS_AS(p.frame(0x100, 8, mhz_frame, vtime{now}, wire, 1), std::invalid_argument);
+  CHECK_THROWS_AS(p.frame(1, 8, 0, vtime{now}, wire, 1), std::invalid_argument);
+  CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "port.last_unit") == 0);
+  p.select(vtime{past}, wire, 1);
+  p.frame(0x5, 8, mhz_frame, vtime{past}, wire, 2);
+  p.drop(vtime{past}, wire, 3);
+  p.deselect(vtime{past + mhz_frame}, wire, 4);
+  CHECK_THROWS_AS(p.frame(1, 8, mhz_frame, vtime{now}, wire, 2), std::invalid_argument);
+  auto const pending = r.f->target->snapshot().data().events.pending;
+  auto const keys    = std::ranges::count_if(pending, [&](core::event const& event) {
+    return event.due_ps == past
+       and event.lane == wire
+       and event.at.value + 3 == r.f->target->virtual_clock().now().value;
+  });
+  CHECK(keys == 3);
+  b.run_until(now + r.period());
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {3, ~std::uint32_t{}, vtime{past}}
+  });
+  b.run_until(now + mhz_frame + us);
+  REQUIRE(r.sink->frames.size() == 1);
+  CHECK(r.sink->frames[0].at.ps == past + mhz_frame);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {3, ~std::uint32_t{}, vtime{past}}
+  });
+  CHECK(drain(b) == std::vector<std::uint32_t>{5});
+}
+
+TEST_CASE("port primitives need a controller and refuse to mix with a queued transfer")
+{
+  target_rig none{false};
+  bus        n{*none.f};
+  CHECK_THROWS_AS(none.port().select(vtime{n.now()}, wire, 1), popcorn::config_error);
+
+  port_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  r.port().transfer(vtime{b.now() + us}, mhz_frame, 8, std::vector<std::uint32_t>{1});
+  CHECK_THROWS_AS(r.select(b.now(), 1), std::invalid_argument);
+  b.run_until(b.now() + mhz_frame + 2 * us);
+  r.select(b.now(), 1);
+  CHECK_THROWS_AS(
+      r.port().transfer(vtime{b.now() + us}, mhz_frame, 8, std::vector<std::uint32_t>{1}),
+      std::invalid_argument);
+  r.deselect(b.now(), 2);
+  b.run_until(b.now() + us);
+  CHECK(
+      r.port().transfer(vtime{b.now() + us}, mhz_frame, 8, std::vector<std::uint32_t>{1}).ps
+      == b.now() + us);
+}
+
+TEST_CASE(
+    "a port frame end fires after a local event of the same count, its start posted either side")
+{
+  std::vector<std::vector<std::string>> orders;
+  for(bool const started_first : {true, false})
+  {
+    CAPTURE(started_first);
+    std::vector<std::string> log;
+    auto const               local = deferred(std::nullopt);
+    local->log                     = &log;
+    local->name                    = "spi3";
+    port_rig r{local};
+    r.sink->log = &log;
+    bus one{*r.f};
+    bus three{*r.f, "SPI3"};
+    target(one, 7, 0);
+    three.controller(7, 0);
+    three.send(0x33);
+    auto const warm = three.now();
+    three.set("SPI_CR1", "CSTART", 1);
+    auto const due = due_of(*r.f, "SPI3", 0);
+    REQUIRE(due.has_value());
+    auto const span = *due - warm;
+    REQUIRE(span > 2 * us);
+    one.run_until(*due + us);
+    log.clear();
+    auto const base   = one.now();
+    auto const cstart = base + us;
+    auto const end    = cstart + span;
+    if(started_first)
+    {
+      r.port().frame(0x11, 8, end - base, vtime{base}, wire, 1);
+      one.run_until(cstart);
+      three.send(0x34);
+    }
+    else
+    {
+      one.run_until(cstart);
+      three.send(0x34);
+      r.port().frame(0x11, 8, end - (cstart + us), vtime{cstart + us}, wire, 1);
+    }
+    REQUIRE(due_of(*r.f, "SPI3", 0) == end);
+    one.run_until(end + us);
+    orders.push_back(log);
+  }
+  REQUIRE(orders.size() == 2);
+  CHECK(orders[0] == orders[1]);
+  CHECK(orders[0] == std::vector<std::string>{"spi3 exchange", "frame 17"});
+}
+
+TEST_CASE("a deselect due at a chained frame's start runs in unit order, posted before or after")
+{
+  std::vector<std::vector<std::string>> logs;
+  for(bool const posted_early : {true, false})
+  {
+    CAPTURE(posted_early);
+    std::vector<std::string> log;
+    port_rig                 r;
+    r.sink->log = &log;
+    bus b{*r.f};
+    target(b, 7, 0);
+    auto const start = b.now() + us;
+    r.select(start, 1);
+    r.frame(1, start, 2);
+    r.frame(2, start, 3);
+    auto const chained = start + mhz_frame;
+    if(posted_early)
+    {
+      r.deselect(chained, 4);
+    }
+    else
+    {
+      b.run_until(start + mhz_frame / 2);
+      r.deselect(chained, 4);
+    }
+    b.run_until(chained + 2 * mhz_frame);
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {3, 0xFF, vtime{chained}}
+    });
+    logs.push_back(log);
+  }
+  CHECK(logs[0] == logs[1]);
+  CHECK(logs[0] == std::vector<std::string>{"frame 1", "dropped 3"});
+}
+
+TEST_CASE("an RCC reset of the SPI drops the started frame and keeps the unstarted ones")
+{
+  std::vector<std::string> log;
+  port_rig                 r;
+  r.sink->log = &log;
+  bus b{*r.f};
+  target(b, 7, 0);
+  auto const start = b.now() + us;
+  r.three_frames(start);
+  b.run_until(start + mhz_frame + mhz_frame / 2);
+  auto const now        = b.now();
+  auto const generation = popcorn::testing::saved_integer(*r.f, "SPI1", "port.generation");
+  REQUIRE(generation.has_value());
+  popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "port.generation") == *generation + 1);
+  b.run_until(start + 3 * mhz_frame + us);
+  CHECK(log == std::vector<std::string>{"frame 1", "dropped 3", "frame 3"});
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {3, 0xFF, vtime{start + 2 * mhz_frame}}
+  });
+  CHECK(r.sent() == std::vector<std::uint32_t>{1, 3});
+  CHECK(r.sink->frames[1].at.ps == start + 3 * mhz_frame);
+  CHECK(r.sink->frames[1].received == 0xFF);
+  CHECK(now < start + 2 * mhz_frame);
+}
+
+TEST_CASE("an RCC reset during the first port frame drops it, the two unstarted frames run")
+{
+  std::vector<std::string> log;
+  port_rig                 r;
+  r.sink->log = &log;
+  bus b{*r.f};
+  target(b, 7, 0);
+  auto const start = b.now() + us;
+  r.three_frames(start);
+  b.run_until(start + mhz_frame / 2);
+  popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  b.run_until(start + 3 * mhz_frame + us);
+  CHECK(log == std::vector<std::string>{"dropped 2", "frame 2", "frame 3"});
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {2, 0xFF, vtime{start + mhz_frame}}
+  });
+  REQUIRE(r.sink->frames.size() == 2);
+  CHECK(r.sink->frames[0].at.ps == start + 2 * mhz_frame);
+  CHECK(r.sink->frames[1].at.ps == start + 3 * mhz_frame);
+}
+
+TEST_CASE("every machine reset kind and a power cycle drop the queued port frames, re-armed")
+{
+  using popcorn::reset_kind;
+  for(auto const kind :
+      {std::optional{reset_kind::power_on}, std::optional{reset_kind::brown_out},
+       std::optional{reset_kind::pin}, std::optional{reset_kind::software},
+       std::optional{reset_kind::watchdog}, std::optional{reset_kind::window_watchdog},
+       std::optional{reset_kind::low_power}, std::optional{reset_kind::option_load},
+       std::optional<reset_kind>{}})
+  {
+    CAPTURE(kind);
+    std::vector<std::string> log;
+    port_rig                 r;
+    r.sink->log = &log;
+    bus b{*r.f};
+    after_system_reset(r, b);
+    target(b, 7, 0);
+    auto const start = b.now() + us;
+    r.three_frames(start);
+    b.run_until(start + mhz_frame + mhz_frame / 2);
+    auto const at_reset = b.now();
+    if(kind)
+    {
+      r.reset(*kind);
+    }
+    else
+    {
+      r.power_cycle();
+    }
+    REQUIRE(b.now() < us);
+    CHECK(r.sink->drops.empty());
+    b.run_until(start + 3 * mhz_frame - at_reset - us);
+    CHECK(r.sink->drops.size() == 1);
+    b.run_until(start + 3 * mhz_frame - at_reset + us);
+    CHECK(log == std::vector<std::string>{"frame 1", "dropped 3", "dropped 4"});
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {3, 0xFF, vtime{start + 2 * mhz_frame - at_reset}},
+            {4, 0xFF, vtime{start + 3 * mhz_frame - at_reset}}
+    });
+  }
+}
+
+TEST_CASE("a deselect due inside the second port frame drops it and the third at its time")
+{
+  port_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  for(std::uint32_t const word : {0xA1u, 0xA2u, 0xA3u})
+  {
+    b.send(word);
+  }
+  auto const start = b.now() + us;
+  r.three_frames(start);
+  auto const cut = start + mhz_frame + mhz_frame / 2;
+  r.deselect(cut, 5);
+  b.run_until(start + 3 * mhz_frame + us);
+  CHECK(r.sent() == std::vector<std::uint32_t>{1});
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {3, 0xFF, vtime{cut}},
+          {4, 0xFF, vtime{cut}}
+  });
+  CHECK(drain(b) == std::vector<std::uint32_t>{1});
+  CHECK(b.get("SPI_SR", "RXP") == 0);
+}
+
+TEST_CASE("a frame queued after a deselect starts at its time, queued before or after the cut")
+{
+  std::vector<std::pair<std::vector<controller_probe::heard>, std::vector<lost>>> logs;
+  for(bool const after_cut : {false, true})
+  {
+    CAPTURE(after_cut);
+    port_rig r;
+    bus      b{*r.f};
+    target(b, 7, 0);
+    b.send(0xA5);
+    auto const start = b.now() + us;
+    r.select(start, 1);
+    r.port().frame(0x11, 8, 32 * us, vtime{start}, wire, 2);
+    r.deselect(start + 2 * us, 3);
+    r.select(start + 2 * us, 4);
+    auto const queue_last = [&] { r.port().frame(0x5, 8, us, vtime{start + 4 * us}, wire, 5); };
+    if(after_cut)
+    {
+      b.run_until(start + 3 * us);
+      REQUIRE(r.sink->drops.size() == 1);
+    }
+    queue_last();
+    b.run_until(start + 40 * us);
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {2, 0xFF, vtime{start + 2 * us}}
+    });
+    REQUIRE(r.sink->frames.size() == 1);
+    CHECK(r.sink->frames[0].sent == 0x5);
+    CHECK(r.sink->frames[0].at.ps == start + 5 * us);
+    CHECK(drain(b) == std::vector<std::uint32_t>{5});
+    logs.emplace_back(r.sink->frames, r.sink->drops);
+  }
+  CHECK(logs[0] == logs[1]);
+}
+
+TEST_CASE("a frame queued with a time before a queued deselect starts at the deselect")
+{
+  port_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  auto const start = b.now() + us;
+  r.select(start, 1);
+  r.port().frame(0x11, 8, 32 * us, vtime{start}, wire, 2);
+  r.deselect(start + 10 * us, 3);
+  r.select(start + 10 * us, 4);
+  r.port().frame(0x5, 8, us, vtime{start + 4 * us}, wire, 5);
+  b.run_until(start + 40 * us);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {2, 0xFF, vtime{start + 10 * us}}
+  });
+  REQUIRE(r.sink->frames.size() == 1);
+  CHECK(r.sink->frames[0].sent == 0x5);
+  CHECK(r.sink->frames[0].at.ps == start + 11 * us);
+  CHECK(drain(b) == std::vector<std::uint32_t>{5});
+}
+
+TEST_CASE("a drop reports its unit at its time with all ones")
+{
+  port_rig   r;
+  bus        b{*r.f};
+  auto const at = b.now() + 3 * us;
+  r.port().drop(vtime{at}, wire, 7);
+  b.run_until(at + us);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {7, ~std::uint32_t{}, vtime{at}}
+  });
+  CHECK(r.sink->frames.empty());
+}
+
+TEST_CASE("a second reset before the re-armed port entries fire reports each unit once")
+{
+  port_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  auto const start = b.now() + us;
+  r.three_frames(start);
+  b.run_until(start + mhz_frame + mhz_frame / 2);
+  auto const at_reset = b.now();
+  r.reset(popcorn::reset_kind::software);
+  popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  b.run_until(2 * us);
+  REQUIRE(r.sink->drops.empty());
+  r.reset(popcorn::reset_kind::pin);
+  b.run_until(start + 3 * mhz_frame + us);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {3, 0xFF, vtime{start + 2 * mhz_frame - at_reset - 2 * us}},
+          {4, 0xFF, vtime{start + 3 * mhz_frame - at_reset - 2 * us}}
+  });
+  CHECK(r.sent() == std::vector<std::uint32_t>{1});
+}
+
+TEST_CASE("a queued select survives every reset kind and applies at its re-armed time")
+{
+  using popcorn::reset_kind;
+  for(int const how : {0, 1, 2})
+  {
+    CAPTURE(how);
+    port_rig r;
+    bus      b{*r.f};
+    after_system_reset(r, b);
+    target(b, 7, 0);
+    auto const base = b.now();
+    r.select(base + 20 * us, 1);
+    b.run_until(base + us);
+    auto const at_reset = b.now();
+    if(how == 0)
+    {
+      popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+    }
+    else if(how == 1)
+    {
+      r.reset(reset_kind::software);
+    }
+    else
+    {
+      r.power_cycle();
+    }
+    auto const due = how == 0 ? base + 20 * us : base + 20 * us - at_reset;
+    target(b, 7, 0);
+    b.send(0xA1);
+    r.frame(0x42, due - mhz_frame - us, 2);
+    r.frame(0x43, due + us, 3);
+    b.run_until(due + mhz_frame + 2 * us);
+    CHECK(drain(b) == std::vector<std::uint32_t>{0x43});
+    REQUIRE(r.sink->frames.size() == 2);
+    CHECK(r.sink->frames[0].received == 0xFF);
+    CHECK(r.sink->frames[1].received == 0xA1);
+  }
+}
+
+TEST_CASE("a queued deselect survives every reset kind, so a later select is an edge again")
+{
+  using popcorn::reset_kind;
+  for(int const how : {0, 1, 2})
+  {
+    CAPTURE(how);
+    port_rig r;
+    bus      b{*r.f};
+    after_system_reset(r, b);
+    target(b, 7, 0);
+    auto const base = b.now();
+    r.select(base, 1);
+    r.deselect(base + 20 * us, 2);
+    b.run_until(base + us);
+    auto const at_reset = b.now();
+    if(how == 0)
+    {
+      popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+    }
+    else if(how == 1)
+    {
+      r.reset(reset_kind::software);
+    }
+    else
+    {
+      r.power_cycle();
+    }
+    auto const due = how == 0 ? base + 20 * us : base + 20 * us - at_reset;
+    target(b, 7, 0);
+    b.send(0xA1);
+    r.select(due + us, 3);
+    r.frame(0x43, due + 2 * us, 4);
+    b.run_until(due + mhz_frame + 3 * us);
+    CHECK(drain(b) == std::vector<std::uint32_t>{0x43});
+  }
+}
+
+TEST_CASE("a deselect leaves dropped and drop entries at their own report times")
+{
+  port_rig r;
+  bus      b{*r.f};
+  after_system_reset(r, b);
+  target(b, 7, 0);
+  auto const start = b.now() + us;
+  r.three_frames(start);
+  b.run_until(start + mhz_frame / 2);
+  auto const at_reset = b.now();
+  r.reset(popcorn::reset_kind::software);
+  REQUIRE(start + mhz_frame - at_reset > 2 * us);
+  r.deselect(us, 5);
+  r.port().drop(vtime{2 * us}, wire, 6);
+  b.run_until(start + 3 * mhz_frame - at_reset + us);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {6, ~std::uint32_t{}, vtime{2 * us}                          },
+          {2, 0xFF,             vtime{start + mhz_frame - at_reset}    },
+          {3, 0xFF,             vtime{start + 2 * mhz_frame - at_reset}},
+          {4, 0xFF,             vtime{start + 3 * mhz_frame - at_reset}}
+  });
+}
+
+TEST_CASE("the chip select level survives an RCC reset: a controller-mode enable takes MODF")
+{
+  for(bool const selected : {true, false})
+  {
+    CAPTURE(selected);
+    port_rig r;
+    bus      b{*r.f};
+    target(b, 7, 0);
+    if(selected)
+    {
+      r.select(b.now(), 1);
+    }
+    b.run_until(b.now() + us);
+    popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+    b.set("RCC", "RCC_APB2ENR", "SPI1EN", 1);
+    b.set("SPI_CFG2", "SSM", 0);
+    b.set("SPI_CFG2", "SSOE", 0);
+    b.set("SPI_CFG2", "MASTER", 1);
+    b.set("SPI_CR1", "SPE", 1);
+    CHECK(b.get("SPI_SR", "MODF") == (selected ? 1 : 0));
+    CHECK(b.get("SPI_CR1", "SPE") == (selected ? 0 : 1));
+  }
+}
+
+TEST_CASE("after a reset under a held chip select the target ignores frames until the next edge")
+{
+  port_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  auto const start = b.now() + us;
+  r.select(start, 1);
+  b.run_until(start + us);
+  popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  target(b, 7, 0);
+  b.send(0xA1);
+  r.frame(0x41, b.now(), 2);
+  b.run_until(b.now() + mhz_frame + us);
+  CHECK(drain(b).empty());
+  r.deselect(b.now(), 3);
+  r.select(b.now() + us, 4);
+  r.frame(0x42, b.now() + 2 * us, 5);
+  b.run_until(b.now() + mhz_frame + 3 * us);
+  CHECK(drain(b) == std::vector<std::uint32_t>{0x42});
+  CHECK(r.sink->frames.back().received == 0xA1);
+}
+
+TEST_CASE("the last port unit survives a reset")
+{
+  port_rig r;
+  bus      b{*r.f};
+  r.port().drop(vtime{b.now() + us}, wire, 5);
+  r.reset(popcorn::reset_kind::software);
+  popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  CHECK_THROWS_AS(r.port().drop(vtime{b.now()}, wire, 5), std::invalid_argument);
+  r.port().drop(vtime{b.now()}, wire, 6);
+}
+
+TEST_CASE("a reset reports the transfer frames it drops as unit 0 on the host lane")
+{
+  port_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  auto const start = b.now() + us;
+  r.port().transfer(vtime{start}, mhz_frame, 8, std::vector<std::uint32_t>{1, 2, 3});
+  b.run_until(start + mhz_frame + mhz_frame / 2);
+  auto const at_reset = b.now();
+  r.reset(popcorn::reset_kind::software);
+  b.run_until(start + 3 * mhz_frame + us);
+  CHECK(r.sent() == std::vector<std::uint32_t>{1});
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {0, 0xFF, vtime{start + 2 * mhz_frame - at_reset}},
+          {0, 0xFF, vtime{start + 3 * mhz_frame - at_reset}}
+  });
+}
+
+TEST_CASE("a snapshot between port frames with the chip select low and a drop pending restores")
+{
+  port_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  for(std::uint32_t const word : {0xA1u, 0xA2u})
+  {
+    b.send(word);
+  }
+  auto const start = b.now() + us;
+  r.select(start, 1);
+  r.frame(1, start, 2);
+  r.frame(2, start + 3 * mhz_frame, 3);
+  r.port().drop(vtime{start + 2 * mhz_frame}, wire, 4);
+  b.run_until(start + mhz_frame + us);
+  REQUIRE(r.sink->frames.size() == 1);
+  auto const             saved = r.f->target->snapshot();
+  std::vector<std::byte> first;
+  r.f->target->model("SPI1")->save(first);
+  auto const run = [&] {
+    r.sink->frames.clear();
+    r.sink->drops.clear();
+    b.run_until(start + 5 * mhz_frame);
+    return std::pair{r.sink->frames, r.sink->drops};
+  };
+  auto const before = run();
+  auto const landed = drain(b);
+  r.f->target->restore(saved);
+  std::vector<std::byte> second;
+  r.f->target->model("SPI1")->save(second);
+  CHECK(second == first);
+  CHECK(run() == before);
+  CHECK(drain(b) == landed);
+  CHECK(landed == std::vector<std::uint32_t>{1, 2});
+  REQUIRE(before.first.size() == 1);
+  CHECK(before.first[0].received == 0xA2);
+  CHECK(
+      before.second
+      == std::vector<lost>{
+          {4, ~std::uint32_t{}, vtime{start + 2 * mhz_frame}}
+  });
+}
+
+TEST_CASE("1000 port drops leave no entry behind, the port holds at most max_frames entries")
+{
+  port_rig   r;
+  bus        b{*r.f};
+  auto const now = b.now();
+  for(std::uint64_t unit = 1; unit <= 1000; ++unit)
+  {
+    r.port().drop(vtime{now + us}, wire, unit);
+  }
+  b.run_until(now + 2 * us);
+  CHECK(r.sink->drops.size() == 1000);
+  CHECK_FALSE(popcorn::testing::saved_integer(*r.f, "SPI1", "port.entries.0.unit").has_value());
+  auto const later = b.now() + us;
+  for(std::uint64_t unit = 1001; unit < 1001 + periph::spi_controller_port::max_frames; ++unit)
+  {
+    r.port().drop(vtime{later}, wire, unit);
+  }
+  CHECK_THROWS_AS(r.port().drop(vtime{later}, wire, 9000), popcorn::config_error);
+}
+
+TEST_CASE("an RCC store at the count of a port frame end reports that frame exactly once")
+{
+  constexpr std::uint32_t               stub_at = 0x2002'0000;
+  std::vector<std::vector<std::string>> logs;
+  for(bool const store_second : {false, true})
+  {
+    CAPTURE(store_second);
+    std::vector<std::string> log;
+    port_rig                 r;
+    r.sink->log = &log;
+    bus b{*r.f};
+    target(b, 7, 0);
+    auto const period = r.period();
+    auto const base   = b.now();
+    REQUIRE(base % period == 0);
+    auto const end = base + 20 * us;
+    r.select(base, 1);
+    r.frame(0x11, end - mhz_frame, 2);
+    auto const first = store_second ? std::uint32_t{0x6001'BF00} : std::uint32_t{0x6001'E7FF};
+    REQUIRE(r.f->target->mem().write(stub_at, 4, first).has_value());
+    REQUIRE(r.f->target->mem().write(stub_at + 4, 4, 0xE7FE'6002).has_value());
+    b.run_until(end - period);
+    REQUIRE(r.sink->frames.empty());
+    REQUIRE(r.sink->drops.empty());
+    auto const rst = b.bits("RCC", "RCC_APB2RSTR", "SPI1RST");
+    r.f->set("r0", rst.at);
+    r.f->set("r1", std::uint64_t{1} << rst.lsb);
+    r.f->set("r2", 0);
+    r.f->set("pc", stub_at | 1u);
+    b.run_until(end + 10 * period);
+    CHECK(r.sink->frames.size() + r.sink->drops.size() == 1);
+    for(auto const& one : r.sink->frames)
+    {
+      CHECK(one.at.ps == end);
+    }
+    for(auto const& one : r.sink->drops)
+    {
+      CHECK(one.unit == 2);
+      CHECK(one.sent == 0xFF);
+      CHECK(one.at.ps == end + 3 * period);
+    }
+    logs.push_back(log);
+  }
+  CHECK(logs[0] == std::vector<std::string>{"frame 17"});
+  CHECK(logs[1] == std::vector<std::string>{"dropped 2"});
+}
+
+TEST_CASE("a port frame started before an RCC reset is dropped, queued before or after the reset")
+{
+  std::vector<std::vector<std::string>> logs;
+  std::vector<std::vector<lost>>        drops;
+  std::vector<std::vector<std::byte>>   saved;
+  for(bool const after : {false, true})
+  {
+    CAPTURE(after);
+    std::vector<std::string> log;
+    port_rig                 r;
+    r.sink->log = &log;
+    bus b{*r.f};
+    target(b, 7, 0);
+    auto const start = b.now() + 2 * us;
+    auto const reset = start + 3 * us;
+    if(not after)
+    {
+      r.deselect(start - us, 1);
+      r.select(start, 2);
+      r.frame(0x11, start, 3);
+    }
+    b.run_until(reset);
+    popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+    CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "port.reset_ps") == b.now());
+    if(after)
+    {
+      r.deselect(start - us, 1);
+      r.select(start, 2);
+      r.frame(0x11, start, 3);
+    }
+    r.frame(0x22, start + mhz_frame + us, 4);
+    b.run_until(start + 2 * mhz_frame + 2 * us);
+    CHECK(log == std::vector<std::string>{"dropped 3", "frame 34"});
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {3, 0xFF, vtime{start + mhz_frame}}
+    });
+    logs.push_back(log);
+    drops.push_back(r.sink->drops);
+    r.f->target->model("SPI1")->save(saved.emplace_back());
+  }
+  CHECK(logs[0] == logs[1]);
+  CHECK(drops[0] == drops[1]);
+  CHECK(saved[0] == saved[1]);
+}
+
+TEST_CASE("a drop queued after an RCC reset with a time before it reports at the reset")
+{
+  port_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  auto const early = b.now() + us;
+  b.run_until(early + 2 * us);
+  popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  auto const reset = popcorn::testing::saved_integer(*r.f, "SPI1", "port.reset_ps");
+  REQUIRE(reset.has_value());
+  REQUIRE(static_cast<std::uint64_t>(*reset) > early);
+  r.port().drop(vtime{early}, wire, 7);
+  r.select(early, 8);
+  b.run_until(b.now() + us);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {7, ~std::uint32_t{}, vtime{static_cast<std::uint64_t>(*reset)}}
+  });
+  r.reset(popcorn::reset_kind::software);
+  b.run_until(static_cast<std::uint64_t>(*reset) + us);
+  r.port().drop(vtime{0}, wire, 9);
+  b.run_until(b.now() + us);
+  REQUIRE(r.sink->drops.size() == 2);
+  CHECK(r.sink->drops[1] == lost{9, ~std::uint32_t{}, vtime{0}});
 }

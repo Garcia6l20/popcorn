@@ -161,12 +161,10 @@ public:
    *        instant, in the order of @p lane.
    * @param ticket The ticket exchange_deferred() received.
    * @param word Frame the device returns, in wire order, right-aligned.
-   * @param at Virtual time since power-on of the completion. A time before the current time by
-   *        less than one instruction period keeps its own instruction count, as a post a link
-   *        hands at a drain may have.
+   * @param at Virtual time since power-on of the completion. A due time in the past keeps its
+   *        own instruction count, as a post a link hands at a drain may have.
    * @param lane Delivery lane of the completion, 1 and up.
-   * @throws std::invalid_argument When @p at is before the current time by one instruction
-   *         period or more, or before the last reset, or @p lane is 0.
+   * @throws std::invalid_argument When @p at is before the last reset, or @p lane is 0.
    */
   virtual void complete(std::uint64_t ticket, std::uint32_t word, vtime at, std::uint32_t lane) = 0;
 
@@ -207,6 +205,24 @@ public:
   virtual void frame(std::uint32_t sent, std::uint32_t received, vtime at) = 0;
 
   /**
+   * @brief A frame or unit the SPI model will never clock, reported once, on the machine thread,
+   *        from the event of the lane the unit was queued on. A reset of the target, a deselect
+   *        due before the frame's end or spi_controller_port::drop() drops a unit. The default
+   *        does nothing.
+   * @param unit The unit the frame was queued with, 0 for a frame of
+   *        spi_controller_port::transfer().
+   * @param sent All ones masked to the frame size, all ones for a unit of
+   *        spi_controller_port::drop().
+   * @param at Machine time since reset at which the unit is reported: the frame's end, or the
+   *        reset's time when that is later, or the deselect's time, or the time drop() gave.
+   */
+  virtual void dropped(
+      [[maybe_unused]] std::uint64_t unit,
+      [[maybe_unused]] std::uint32_t sent,
+      [[maybe_unused]] vtime         at)
+  {}
+
+  /**
    * @brief The SPI mode the controller clocks in, CPOL << 1 | CPHA. The SPI model reads it once
    *        per transfer, at the first frame the target takes part in, and fails the run with
    *        config_error when the firmware configured another mode. The default declares none,
@@ -240,13 +256,81 @@ public:
    * @throws config_error When no controller is attached to the instance, or the queue would
    *         hold more than max_frames frames.
    * @throws std::invalid_argument When @p start is past, the transfer ends past the time
-   *         range, or an argument is out of its range.
+   *         range, an argument is out of its range, or a unit primitive other than a dropped
+   *         unit is queued or holds the chip select.
    */
   virtual auto transfer(
       vtime                          start,
       std::uint64_t                  frame_ps,
       std::uint8_t                   bits,
       std::span<std::uint32_t const> frames) -> vtime = 0;
+
+  /**
+   * @brief Queues the chip select input falling at @p at, on @p lane. The level stays until a
+   *        deselect() and survives every reset of the target. The unit primitives, select(),
+   *        frame(), deselect() and drop(), each carry a @p unit strictly above the one before.
+   *        The port runs their entries due at one instruction count in unit order, after the
+   *        events of lower lanes, whatever order they were queued in. A due time in the past
+   *        keeps its own instruction count.
+   * @param at Machine time since reset.
+   * @param lane Delivery lane, 1 and up.
+   * @param unit Unit number.
+   * @throws config_error When no controller is attached to the instance, or the port would hold
+   *         more than max_frames entries.
+   * @throws std::invalid_argument When @p lane is 0, @p unit is not above the last unit, or a
+   *         transfer() is queued.
+   */
+  virtual void select(vtime at, std::uint32_t lane, std::uint64_t unit) = 0;
+
+  /**
+   * @brief Queues one frame on @p lane, shifted from the latest of @p at, the end of every frame
+   *        queued before it and the time of every queued deselect() due after the last RCC reset
+   *        of the instance. A frame of a lower unit than a queued deselect() does not count, since
+   *        that deselect() cuts it or follows its end. The controller hears the frame through
+   *        spi_controller_sink::frame() at its end, or through spi_controller_sink::dropped(). A
+   *        frame whose start is at or before the last RCC reset of the instance is dropped,
+   *        reported at the later of its end and that reset.
+   * @param word Frame the controller sends, in wire order, below 2 to the @p bits.
+   * @param bits Frame size, 4 to 32.
+   * @param frame_ps Length of the frame, at least 1.
+   * @param at Machine time since reset of the earliest start.
+   * @param lane Delivery lane, 1 and up.
+   * @param unit Unit number.
+   * @throws config_error As select().
+   * @throws std::invalid_argument As select(), or when an argument is out of its range or the
+   *         frame ends past the time range.
+   */
+  virtual void frame(
+      std::uint32_t word,
+      std::uint8_t  bits,
+      std::uint64_t frame_ps,
+      vtime         at,
+      std::uint32_t lane,
+      std::uint64_t unit) = 0;
+
+  /**
+   * @brief Queues the chip select input rising at the later of @p at and the last RCC reset of
+   *        the instance, on @p lane. Every frame of a lower unit still queued or shifting then is
+   *        dropped and reported at that time. A unit already dropped keeps its own report time.
+   * @param at Machine time since reset.
+   * @param lane Delivery lane, 1 and up.
+   * @param unit Unit number.
+   * @throws config_error As select().
+   * @throws std::invalid_argument As select().
+   */
+  virtual void deselect(vtime at, std::uint32_t lane, std::uint64_t unit) = 0;
+
+  /**
+   * @brief Queues a unit the caller knows is lost, reported through
+   *        spi_controller_sink::dropped() at the later of @p at and the last RCC reset of the
+   *        instance.
+   * @param at Machine time since reset.
+   * @param lane Delivery lane, 1 and up.
+   * @param unit Unit number.
+   * @throws config_error As select().
+   * @throws std::invalid_argument As select().
+   */
+  virtual void drop(vtime at, std::uint32_t lane, std::uint64_t unit) = 0;
 
 protected:
   /** @brief Destroyed through its model only. */

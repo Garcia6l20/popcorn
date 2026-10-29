@@ -97,21 +97,22 @@ inline void update(register_file& regs, field_ref field, std::uint32_t value)
 }
 
 /**
- * @brief Whether a port primitive a link proxy calls at a drain accepts @p due_ps: at or after
- *        the clock's current time, or before it by less than one instruction period at the
- *        current rate. `member_link::drain` hands posts that start up to one sender instruction
- *        period before the previous barrier, and the lane `event_port::schedule_at` keeps such a
- *        time at its own instruction count.
- * @param time The machine's clock.
- * @param due_ps Virtual time since reset.
- * @return True when the due time is accepted.
+ * @brief Due time since reset of a port primitive a link proxy calls at a drain. Every due time
+ *        at or after the last reset is accepted. A due time in the past keeps its own
+ *        instruction count through the lane `event_port::schedule_at`: a post `member_link::drain`
+ *        hands is late by up to one sender instruction period plus the receiver's own stop past
+ *        the barrier, and the receiver knows neither.
+ * @param at_ps The primitive's time, in a base that starts @p reset_ps before the last reset.
+ * @param reset_ps Time of the last reset in the base of @p at_ps, 0 for a time since reset.
+ * @return @p at_ps less @p reset_ps, or empty when @p at_ps is before the last reset.
  */
-inline auto lane_due_accepted(core::clock const& time, std::uint64_t due_ps) -> bool
+inline auto lane_due_ps(std::uint64_t at_ps, std::uint64_t reset_ps) -> std::optional<std::uint64_t>
 {
-  constexpr unsigned __int128 ps_per_second = 1'000'000'000'000ull;
-  auto const                  now           = time.time().ps;
-  return due_ps >= now
-      or static_cast<unsigned __int128>(now - due_ps) * time.instruction_hz() < ps_per_second;
+  if(at_ps < reset_ps)
+  {
+    return std::nullopt;
+  }
+  return at_ps - reset_ps;
 }
 
 /**
