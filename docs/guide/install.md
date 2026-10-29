@@ -1,6 +1,7 @@
 # Install
 
-popcorn installs from source. The native core compiles on your machine.
+popcorn installs from source. The native core compiles on your machine. The
+[Docker image](docker.md) runs popcorn with no compiler on the host.
 
 ## Prerequisites
 

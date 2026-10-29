@@ -1,0 +1,37 @@
+popcorn container image
+
+This image holds the popcorn Python package, its pytest extra and uv, on top of
+the python:3.14-slim-trixie base image.
+
+popcorn
+  The licence of popcorn and of every component it builds in is in LICENSE,
+  NOTICE and LICENSES/ in this directory, the same files as the package's
+  dist-info. The extension links Unicorn statically, so the installed package
+  is a combined work subject to GPL-2.0-only. The exact source is the popcorn
+  git commit named in the image label org.opencontainers.image.revision, at
+  https://github.com/Garcia6l20/popcorn, submodules included. The Unicorn
+  source is the fork commit that the third_party/unicorn submodule of that
+  revision pins, from https://github.com/Garcia6l20/unicorn, branch popcorn.
+  NOTICE lists the fork's changes to upstream Unicorn with their dates.
+
+GCC 16.2.0 runtime libraries
+  /usr/local/lib/libstdc++.so.6.0.36, /usr/local/lib/libgcc_s.so.1 and
+  /usr/local/lib/libatomic.so.1.2.0 are copied unmodified from GCC 16.2.0.
+  They are licensed under the GNU General Public License version 3 with the
+  GCC Runtime Library Exception version 3.1, texts in gcc-runtime/COPYING3 and
+  gcc-runtime/COPYING.RUNTIME. Source:
+  https://ftp.gnu.org/gnu/gcc/gcc-16.2.0/gcc-16.2.0.tar.xz
+
+uv
+  Installed from PyPI into the system Python, dual licensed MIT or Apache-2.0.
+  Texts in /usr/local/lib/python3.14/site-packages/uv-*.dist-info/licenses/.
+
+Base image
+  The Debian packages of the base image carry their copyright files under
+  /usr/share/doc/<package>/copyright.
+
+STM32 data
+  The image holds the two shipped part descriptions inside the popcorn
+  package, with the attribution in NOTICE. It holds no STM32CubeMX database
+  and no copy of STM32_open_pin_data. Other parts are built from an ST
+  installation the user mounts into the container.

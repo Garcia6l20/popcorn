@@ -113,6 +113,27 @@ def test_two_shipped_versions_keep_their_files_in_a_shared_cache(
     assert first.stat().st_mtime > time.time() - 60
 
 
+def test_a_stale_file_another_user_owns_stays_and_the_lookup_succeeds(
+    shipped_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = description_path(NAME)
+    _age(stale, _shipped.STALE_SECONDS + 86400)
+    (shipped_dir / f"{NAME}.json.xz").write_bytes(
+        lzma.compress(_description_bytes(generator="other"))
+    )
+    real = Path.unlink
+
+    def sticky(self: Path, missing_ok: bool = False) -> None:
+        if self == stale:
+            raise PermissionError(1, "Operation not permitted", str(self))
+        real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", sticky)
+    fresh = description_path(NAME)
+    assert fresh != stale
+    assert _cached(tmp_path) == sorted([stale, fresh])
+
+
 def test_a_failed_write_leaves_no_temporary_file(
     shipped_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
