@@ -41,8 +41,9 @@ The modules are in `python/popcorn/stm32/description`:
 - `_cubemx.py` reads the part lookup, the memory regions and processor facts, the IP instance
   join and the GPIO alternate functions.
 - `_patches.py` applies popcorn's own TOML patches: peripheral drops, fields, field drops, cross
-  rules, aliases, IP renames, IRQ changes, GPIO alternate function drops, core overrides, added
-  registers and regions, and the device signature. The patches are in the `patches` directory.
+  rules, aliases, IP renames and versions, register drops, IRQ changes, GPIO alternate function
+  drops, core overrides, added registers and regions, and the device signature. The patches are in
+  the `patches` directory.
 - `_builder.py` assembles the description: expand the SVD, read the db and rzone, apply every
   patch, strip the peripheral prefix of register names, build the IRQ table, then assemble the
   core, regions and peripherals.
@@ -70,6 +71,59 @@ rule names the new name. A renamed peripheral must exist and not be dropped, eac
 renamed once across the files, and the new name must be free, otherwise the build raises
 `DescriptionError` keyed `peripherals.renames.<name>`. The patch report counts them in
 `peripherals_dropped` and `peripherals_renamed`.
+
+## Part matching
+
+A patch applies to a part when its `[match]` selects it. `parts` lists name globs, `svd` lists SVD
+file name globs, `dies` lists die names and `flash_kib` lists flash sizes in KiB. Every key given
+must select. `dies` and `flash_kib` read the part the name resolves to, so a group RefName
+member has its own flash size, and a patch carrying either key never applies without that part.
+One die holds several categories of one line, so die and flash size together select a category:
+
+```toml
+[match]
+parts = ["STM32L15*"]
+dies = ["DIE437"]
+flash_kib = [512]
+```
+
+Patch files apply in file name order, the family file `stm32l1.toml` before its category files
+`stm32l1_cat3.toml`, since `.` sorts before `_`. A family patch and a category patch may both
+apply, the category patch after.
+
+## IP renames, versions and register drops
+
+`[ip] renames` maps a db IP instance to the SVD peripherals that take its IP and version. A key
+that is no db instance of the part and a value that is no SVD peripheral are errors.
+`renames_if_present` takes the same table and skips a key the part's db lacks and a value the SVD
+or the drops removed, for families whose parts differ in instances. The report counts the
+skipped pairs in `ip_renames_skipped`.
+
+`[ip] versions` sets the IP version of every instance whose name matches the glob, after the
+renames and `renames_if_present` of every patch, and needs a `source`:
+
+```toml
+[ip]
+versions = { "FLASH" = "STM32L1_flash_cat46", "GPIO*" = "STM32L1_gpio_cat46" }
+source = "RM0038 7.4.11: BRR exists on Cat.4 to Cat.6 only"
+```
+
+A glob names the instance as every `[peripherals] renames` spells it, matches at least one instance
+and shares no instance with another glob of the table. `ip_version_changes` in the patch report
+lists each instance with the CubeMX version it replaced and the new one. A rule's `source` names the
+CubeMX version it replaces.
+
+`[[register_drops]]` removes registers from a peripheral and from its aliases:
+
+```toml
+[[register_drops]]
+peripheral = "RTC"
+names = ["BKP20R", "BKP21R"]
+source = "RM0038 25.6: Cat.1 has 20 backup registers"
+```
+
+A name the peripheral lacks is an error keyed `register_drops[<n>].names`, and a later rule
+naming a dropped register fails as naming an unknown one.
 
 ## Alternate function drops
 

@@ -36,6 +36,8 @@ from popcorn.stm32.description._model import (
 class PatchMatch:
     parts: list[str]
     svd: list[str] | None = None
+    dies: list[str] | None = None
+    flash_kib: list[int] | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -53,7 +55,17 @@ class PatchAliases:
 
 @dataclass(slots=True, kw_only=True)
 class PatchIp:
-    renames: dict[str, list[str]]
+    renames: dict[str, list[str]] | None = None
+    renames_if_present: dict[str, list[str]] | None = None
+    versions: dict[str, str] | None = None
+    source: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class RegisterDrop:
+    peripheral: str
+    names: list[str]
+    source: str = field(metadata={"min_length": 1})
 
 
 @dataclass(slots=True, kw_only=True)
@@ -210,6 +222,7 @@ class Patch:
     cross: list[CrossRuleSpec] | None = None
     peripheral_sizes: list[PeripheralSizeSet] | None = None
     registers: list[RegisterAdd] | None = None
+    register_drops: list[RegisterDrop] | None = None
     resets: list[ResetSet] | None = None
     memory: PatchMemory | None = None
     signature: PatchSignature | None = None
@@ -230,6 +243,12 @@ class PatchReport:
     peripherals_dropped: int = 0
     peripherals_renamed: int = 0
     ip_renamed: int = 0
+    ip_renames_skipped: int = 0
+    ip_versions_set: int = 0
+    ip_version_changes: list[tuple[str, str, str]] = field(
+        default_factory=list[tuple[str, str, str]]
+    )
+    registers_dropped: int = 0
     aliased: int = 0
     fields_touched: int = 0
     fields_dropped: int = 0
@@ -248,13 +267,17 @@ class PatchReport:
     signature_words: int = 0
 
 
-def _matches(match: PatchMatch, part: str, svd_name: str) -> bool:
+def _matches(match: PatchMatch, part: str, svd_name: str, db_part: DbPart | None) -> bool:
     if not any(fnmatch.fnmatch(part, pattern) for pattern in match.parts):
         return False
     svd_patterns = match.svd or []
-    if not svd_patterns:
-        return True
-    return any(fnmatch.fnmatch(svd_name, pattern) for pattern in svd_patterns)
+    if svd_patterns and not any(fnmatch.fnmatch(svd_name, pattern) for pattern in svd_patterns):
+        return False
+    die_selected = match.dies is None or (db_part is not None and db_part.die in match.dies)
+    flash_selected = match.flash_kib is None or (
+        db_part is not None and bool(db_part.flash_kib) and db_part.flash_kib[0] in match.flash_kib
+    )
+    return die_selected and flash_selected
 
 
 @dataclass(slots=True, kw_only=True)
@@ -263,9 +286,13 @@ class LoadedPatch:
     patch: Patch
 
 
-def load_patches(files: Sequence[Path], part: str, svd_name: str) -> list[LoadedPatch]:
+def load_patches(
+    files: Sequence[Path], part: str, svd_name: str, db_part: DbPart | None = None
+) -> list[LoadedPatch]:
     """Patches whose [match] selects @p part and @p svd_name, in the order @p files lists
-    them (family files before part files is the caller's ordering of @p files)."""
+    them (family files before part files is the caller's ordering of @p files). A patch with
+    `dies` or `flash_kib` in its [match] applies only when @p db_part, the selected expanded
+    name's part, is given and its die is listed and its flash size is listed."""
     result: list[LoadedPatch] = []
     for path in files:
         try:
@@ -273,7 +300,7 @@ def load_patches(files: Sequence[Path], part: str, svd_name: str) -> list[Loaded
         except tomllib.TOMLDecodeError as exc:
             raise DescriptionError(str(path), exc.lineno or 0, "<root>", "valid TOML") from exc
         patch = from_mapping(Patch, data, file=str(path))
-        if _matches(patch.match, part, svd_name):
+        if _matches(patch.match, part, svd_name, db_part):
             result.append(LoadedPatch(path=path, patch=patch))
     return result
 
@@ -330,7 +357,9 @@ def _apply_ip_renames(
     *,
     file: str,
 ) -> None:
-    for db_instance, targets in rule.renames.items():
+    if rule.renames is None and rule.renames_if_present is None and rule.versions is None:
+        raise DescriptionError(file, 0, "ip", "a renames, renames_if_present or versions entry")
+    for db_instance, targets in (rule.renames or {}).items():
         db_ip = db_ips.get(db_instance)
         if db_ip is None:
             raise DescriptionError(file, 0, f"ip.renames.{db_instance}", "a db IP instance")
@@ -343,6 +372,73 @@ def _apply_ip_renames(
             peripheral.ip = db_ip.name
             peripheral.ip_version = db_ip.version
             report.ip_renamed += 1
+    for db_instance, targets in (rule.renames_if_present or {}).items():
+        db_ip = db_ips.get(db_instance)
+        for target_name in targets:
+            peripheral = peripherals.get(target_name)
+            if db_ip is None or peripheral is None:
+                report.ip_renames_skipped += 1
+                continue
+            peripheral.ip = db_ip.name
+            peripheral.ip_version = db_ip.version
+            report.ip_renamed += 1
+
+
+def _apply_ip_versions(
+    rule: PatchIp,
+    peripherals: dict[str, PeripheralDesc],
+    report: PatchReport,
+    *,
+    file: str,
+) -> None:
+    if rule.versions is None:
+        return
+    if not rule.source:
+        raise DescriptionError(file, 0, "ip.source", "a non-empty source")
+    set_here: set[str] = set()
+    for pattern, version in rule.versions.items():
+        key = f"ip.versions.{pattern}"
+        matched = [p for name, p in peripherals.items() if fnmatch.fnmatchcase(name, pattern)]
+        if not matched:
+            raise DescriptionError(file, 0, key, "an instance name matching the glob")
+        for peripheral in matched:
+            if peripheral.name in set_here:
+                raise DescriptionError(file, 0, key, "instances no other glob of the table sets")
+            set_here.add(peripheral.name)
+            report.ip_version_changes.append((peripheral.name, peripheral.ip_version, version))
+            peripheral.ip_version = version
+            report.ip_versions_set += 1
+
+
+def _apply_register_drops(
+    rule: RegisterDrop,
+    peripherals: dict[str, PeripheralDesc],
+    report: PatchReport,
+    *,
+    file: str,
+    key: str,
+) -> None:
+    peripheral = peripherals.get(rule.peripheral)
+    if peripheral is None or peripheral.alias_of is not None:
+        raise DescriptionError(
+            file, 0, f"{key}.peripheral", "a peripheral of the description that is not an alias"
+        )
+    if not rule.names:
+        raise DescriptionError(file, 0, f"{key}.names", "at least one register name")
+    present = {r.name for r in peripheral.registers}
+    seen: set[str] = set()
+    for name in rule.names:
+        if name not in present:
+            raise DescriptionError(
+                file, 0, f"{key}.names", f"a register named {name} in {peripheral.name}"
+            )
+        if name in seen:
+            raise DescriptionError(file, 0, f"{key}.names", "each name once")
+        seen.add(name)
+    for target in peripherals.values():
+        if target is peripheral or target.alias_of == peripheral.name:
+            target.registers = [r for r in target.registers if r.name not in seen]
+    report.registers_dropped += len(seen)
 
 
 def _register_layout_key(peripheral: PeripheralDesc) -> list[object]:
@@ -1101,23 +1197,26 @@ def _apply_signature(
 
 
 def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchReport:
-    """Applies @p patches to @p target in the fixed order: peripheral drops and renames, IP
-    renames, aliases, peripheral sizes, added registers, register resets, fields, cross rules,
-    IRQ drops and adds, core, memory regions and their controllers, the device signature. Drops
-    come first, so a later rule naming a dropped peripheral fails as naming an unknown one. A
-    peripheral rename lands before the aliases, so the alias rule pairs the new name with its
-    base, and a later rule names the new name. A peripheral size, an added
-    register and a register reset land in the named peripheral and in each of its aliases, so
-    fields and cross rules may name the register. A fields rule with `drop` removes its fields
-    from the named peripheral and its aliases, and a later rule naming them fails. A fields rule
-    with `rename` renames fields in the named peripheral and its aliases, and a later rule names
-    the new spelling. A fields rule with `add` adds one field, with its reset value, to the
-    named register of the named peripheral and its aliases, and a later rule names it. A fields
-    rule with `width`, `on_write`, `on_read` or `acc` sets it on the named fields of the named
-    peripheral and each of its aliases, and refuses an alias in `instances`. The report counts
-    each field of the peripheral and of each alias per property in `fields_touched`, and each
-    base field once in `fields_dropped`, `fields_renamed` and `fields_added`.
-    Validates every rule before mutating @p target: an error leaves it exactly as it was."""
+    """Applies @p patches to @p target in the fixed order: peripheral drops and renames, then per
+    patch in file order the IP renames and `renames_if_present`, then the `versions` of every
+    patch in file order, aliases, register drops, peripheral sizes, added registers, register
+    resets, fields, cross rules, IRQ drops and adds, core, memory regions and their controllers,
+    the device signature. Drops come first, so a later rule naming a dropped peripheral fails as
+    naming an unknown one. An `[ip] versions` glob matches the instance names after every
+    `[peripherals] renames`, and a glob matching nothing is an error. A peripheral rename lands
+    before the aliases, so the alias rule pairs the new name with its base, and a later rule names
+    the new name. A peripheral size, an added register and a register reset land in the named
+    peripheral and in each of its aliases, so fields and cross rules may name the register. A
+    fields rule with `drop` removes its fields from the named peripheral and its aliases, and a
+    later rule naming them fails. A fields rule with `rename` renames fields in the named
+    peripheral and its aliases, and a later rule names the new spelling. A fields rule with `add`
+    adds one field, with its reset value, to the named register of the named peripheral and its
+    aliases, and a later rule names it. A fields rule with `width`, `on_write`, `on_read` or `acc`
+    sets it on the named fields of the named peripheral and each of its aliases, and refuses an
+    alias in `instances`. The report counts each field of the peripheral and of each alias per
+    property in `fields_touched`, and each base field once in `fields_dropped`, `fields_renamed`
+    and `fields_added`. Validates every rule before mutating @p target: an error leaves it exactly
+    as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)
     core = copy.deepcopy(target.core)
@@ -1143,8 +1242,18 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
             )
 
     for loaded in patches:
+        if loaded.patch.ip is not None:
+            _apply_ip_versions(loaded.patch.ip, by_name, report, file=str(loaded.path))
+
+    for loaded in patches:
         if loaded.patch.aliases is not None:
             _apply_aliases(loaded.patch.aliases, by_name, report, file=str(loaded.path))
+
+    for loaded in patches:
+        for j, rule in enumerate(loaded.patch.register_drops or []):
+            _apply_register_drops(
+                rule, by_name, report, file=str(loaded.path), key=f"register_drops[{j}]"
+            )
 
     for loaded in patches:
         for j, rule in enumerate(loaded.patch.peripheral_sizes or []):

@@ -1,13 +1,14 @@
 from pathlib import Path
 
 import pytest
-from popcorn.stm32.description import _patches, _sources
+from popcorn.stm32.description import _builder, _patches, _sources
 from popcorn.stm32.description._cubemx import DbPart, expand_refname, read_part, rzone_file_name
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._patches import LoadedPatch
 from popcorn.stm32.description._sources import (
     ResolvedPart,
     SearchPaths,
+    Sources,
     die_ip_sources,
     find_sources,
     resolve_part,
@@ -144,11 +145,16 @@ def test_find_sources_of_a_group_name_uses_its_own_facts_and_name(
     )
     (db_dir / "mcu" / "memory" / "STM32_DIE000_16_128.xml").write_text("<x/>", encoding="utf-8")
     seen: list[str] = []
+    selected: list[list[int]] = []
     real = _patches.load_patches
 
-    def spy(files: list[Path], part: str, svd_name: str) -> list[LoadedPatch]:
+    def spy(
+        files: list[Path], part: str, svd_name: str, db_part: DbPart | None = None
+    ) -> list[LoadedPatch]:
         seen.append(part)
-        return real(files, part=part, svd_name=svd_name)
+        assert db_part is not None
+        selected.append(db_part.flash_kib)
+        return real(files, part=part, svd_name=svd_name, db_part=db_part)
 
     monkeypatch.setattr(_sources, "load_patches", spy)
     sources = find_sources("STM32T001ABT6", search=_svd_dirs(tmp_path), cubemx_db=db_dir)
@@ -157,6 +163,8 @@ def test_find_sources_of_a_group_name_uses_its_own_facts_and_name(
     assert sources.rzone == db_dir / "mcu" / "memory" / "STM32_DIE000_16_128.xml"
     assert seen
     assert set(seen) == {"STM32T001ABTx"}
+    assert selected
+    assert all(flash == [128] for flash in selected)
 
 
 def test_a_group_file_is_a_die_donor_through_its_members(
@@ -165,9 +173,11 @@ def test_a_group_file_is_a_die_donor_through_its_members(
     seen: list[str] = []
     real = _patches.load_patches
 
-    def spy(files: list[Path], part: str, svd_name: str) -> list[LoadedPatch]:
+    def spy(
+        files: list[Path], part: str, svd_name: str, db_part: DbPart | None = None
+    ) -> list[LoadedPatch]:
         seen.append(part)
-        return real(files, part=part, svd_name=svd_name)
+        return real(files, part=part, svd_name=svd_name, db_part=db_part)
 
     monkeypatch.setattr(_sources, "load_patches", spy)
     db_dir = tmp_path / "db"
@@ -211,3 +221,22 @@ def test_the_l1_group_files_expand_to_132_resolvable_names() -> None:
     path = pin_data / "mcu" / "STM32L152R(6-8-B)Tx.xml"
     part = read_part(path.read_bytes(), file=str(path), name="STM32L152RBTx")
     assert (part.flash_kib, part.ram_kib) == ([128], [16])
+
+
+def test_the_builder_passes_the_selected_part_to_the_patch_match(
+    u575_sources: Sources, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[DbPart | None] = []
+    real = _patches.load_patches
+
+    def spy(
+        files: list[Path], part: str, svd_name: str, db_part: DbPart | None = None
+    ) -> list[LoadedPatch]:
+        seen.append(db_part)
+        return real(files, part=part, svd_name=svd_name, db_part=db_part)
+
+    monkeypatch.setattr(_builder, "load_patches", spy)
+    _builder.build_description(u575_sources)
+    [db_part] = seen
+    assert db_part is not None
+    assert db_part.ref_name == u575_sources.part

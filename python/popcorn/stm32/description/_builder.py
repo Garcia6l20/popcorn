@@ -201,7 +201,9 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
         regions=rzone.regions,
         db_part=db_part,
     )
-    loaded_patches = load_patches(sources.patches, part=sources.part, svd_name=sources.svd.name)
+    loaded_patches = load_patches(
+        sources.patches, part=sources.part, svd_name=sources.svd.name, db_part=db_part
+    )
     report = apply_patches(loaded_patches, target)
 
     derived_from = {sp.name: sp.derived_from for sp in svd.peripherals}

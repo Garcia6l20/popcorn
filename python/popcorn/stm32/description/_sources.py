@@ -196,8 +196,10 @@ def _patch_files() -> list[Path]:
     return sorted(_PATCHES_DIR.glob("*.toml"))
 
 
-def _svd_exception(refname: str, *, search: SearchPaths) -> tuple[str, Path] | None:
-    for loaded in load_patches(_patch_files(), part=refname, svd_name=""):
+def _svd_exception(
+    refname: str, db_part: DbPart, *, search: SearchPaths
+) -> tuple[str, Path] | None:
+    for loaded in load_patches(_patch_files(), part=refname, svd_name="", db_part=db_part):
         if loaded.patch.svd is not None:
             name = loaded.patch.svd.name
             for svd_dir in search.svd_dirs:
@@ -255,11 +257,17 @@ def _svd_dirs(svd_dirs: Sequence[Path]) -> list[Path]:
 
 
 def _svd_path(
-    refname: str, *, core: str | None, svd: Path | None, search: SearchPaths, file: str
+    refname: str,
+    db_part: DbPart,
+    *,
+    core: str | None,
+    svd: Path | None,
+    search: SearchPaths,
+    file: str,
 ) -> Path:
     if svd is not None:
         return svd
-    exception = _svd_exception(refname, search=search)
+    exception = _svd_exception(refname, db_part, search=search)
     if exception is not None:
         name, svd_dir = exception
         svd_path = svd_dir / f"{name}.svd"
@@ -350,7 +358,7 @@ def _scan_die_ips(
     for _, donor_path, donor in sorted(ranked, key=lambda entry: entry[0]):
         try:
             resolved = _svd_path(
-                donor.ref_name, core=core, svd=None, search=search, file=str(donor_path)
+                donor.ref_name, donor, core=core, svd=None, search=search, file=str(donor_path)
             )
         except DescriptionError:
             continue
@@ -399,12 +407,12 @@ def find_sources(
     if gpio_modes is not None and not gpio_modes.is_file():
         gpio_modes = None
 
-    svd_path = _svd_path(refname, core=core, svd=svd, search=search, file=str(db_dir))
+    svd_path = _svd_path(refname, db_part, core=core, svd=svd, search=search, file=str(db_dir))
     cmsis_header_path = (
         cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search)
     )
 
-    patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name)
+    patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name, db_part=db_part)
 
     return Sources(
         part=refname,
@@ -455,11 +463,11 @@ def pin_data_sources(
     facts = facts_path(db_part)
     if not facts.is_file():
         raise DescriptionError(str(mcu_db), 0, refname, f"a packaged rzone facts file at {facts}")
-    svd_path = _svd_path(refname, core=core, svd=svd, search=search, file=str(pin_data))
+    svd_path = _svd_path(refname, db_part, core=core, svd=svd, search=search, file=str(pin_data))
     cmsis_header_path = (
         cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search)
     )
-    patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name)
+    patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name, db_part=db_part)
     return Sources(
         part=refname,
         svd=svd_path,
