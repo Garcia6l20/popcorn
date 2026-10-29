@@ -18,7 +18,7 @@ size = 0x00100000
 kind = "rom"
 acc = { read = true, write = false, execute = true }
 secure = false
-source = "RM0481 rev 5, 2.3.2 figure 2: nonsecure FLASH at 0x0800 0000 in the code region. 7.3.10 figure 28: on 1-Mbyte devices bank 1 spans 0x0800 0000 to 0x0807 FFFF and bank 2 0x0808 0000 to 0x080F FFFF. DS14258 rev 6, ordering information: G = 1 Mbyte. RM0481 7.3.5 to 7.3.8: flash is written through the FLASH interface program and erase sequences, not by a plain store"
+source = "RM0481 rev 5, 2.3.2 figure 2: nonsecure FLASH at 0x0800 0000 in the code region. 7.3.10 figure 28: on 1-Mbyte devices bank 1 spans 0x0800 0000 to 0x0807 FFFF and bank 2 0x0808 0000 to 0x080F FFFF. DS14258 rev 6, 7 ordering information: G = 1 Mbyte. RM0481 7.3.5 to 7.3.8: flash is written through the FLASH interface program and erase sequences, not by a plain store"
 
 [[regions]]
 name = "HIGH_CYCLE_FLASH_NS"
@@ -47,7 +47,7 @@ kind = "rom"
 acc = { read = true, write = false, execute = true }
 secure = true
 physical = 0x08000000
-source = "RM0481 rev 5, 2.3.2 figure 2: secure FLASH alias at 0x0C00 0000. 2.2: flash memory is aliased for secure and nonsecure states. 7.3.10 figure 28: on 1-Mbyte devices the secure alias spans 0x0C00 0000 to 0x0C0F FFFF. DS14258 rev 6, ordering information: G = 1 Mbyte"
+source = "RM0481 rev 5, 2.3.2 figure 2: secure FLASH alias at 0x0C00 0000. 2.2: flash memory is aliased for secure and nonsecure states. 7.3.10 figure 28: on 1-Mbyte devices the secure alias spans 0x0C00 0000 to 0x0C0F FFFF. DS14258 rev 6, 7 ordering information: G = 1 Mbyte"
 
 [[regions]]
 name = "HIGH_CYCLE_FLASH_S"

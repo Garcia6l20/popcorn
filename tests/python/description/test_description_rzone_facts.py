@@ -16,7 +16,7 @@ from popcorn.stm32.description._cubemx import (
     read_rzone,
     read_rzone_facts,
 )
-from popcorn.stm32.description._errors import DescriptionError
+from popcorn.stm32.description._errors import MissingSource
 from popcorn.stm32.description._model import RegionDesc
 from popcorn.stm32.description._sources import (
     Sources,
@@ -158,10 +158,8 @@ def _assert_facts_build_has_the_local_content(sources: Sources, stem: str) -> No
 def test_a_part_built_from_its_facts_has_the_content_of_the_local_build(part: str) -> None:
     try:
         sources = find_sources(part)
-    except DescriptionError as exc:
+    except MissingSource as exc:
         pytest.skip(f"{part} sources not found: {exc}")
-    if sources.cmsis_header is None:
-        pytest.skip(f"no CMSIS header for {part}, set POPCORN_CMSIS_DEVICE_DIRS")
     _assert_facts_build_has_the_local_content(sources, FACTS_PARTS[part])
 
 
