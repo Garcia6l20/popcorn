@@ -46,7 +46,7 @@ firmwares = {
 }
 h573_firmwares = {
     name: firmware("periph", name)
-    for name in ("h573_boot_ll", "h573_rcc_ll", "h573_pwr_ll", "h573_flash_ll")
+    for name in ("h573_boot_ll", "h573_rcc_ll", "h573_pwr_ll", "h573_flash_ll", "h573_i2c_ll")
 }
 h573_env = {
     "POPCORN_H573_DESC": str(h573),
@@ -127,7 +127,7 @@ u575_programs = [
 ]
 for program in u575_programs:
     program.private.include_dirs.append(private_dir)
-    for _, target in firmwares.values():
+    for _, target in (*firmwares.values(), h573_firmwares["h573_i2c_ll"]):
         if target is not None:
             program.depends(target)
 

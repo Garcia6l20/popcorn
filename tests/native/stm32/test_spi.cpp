@@ -2915,9 +2915,12 @@ struct port_rig
   stm32::board                      board{};
   std::unique_ptr<stm32_fixture>    f;
 
-  explicit port_rig(std::shared_ptr<deferred_target> const& spi3 = nullptr)
+  explicit port_rig(std::shared_ptr<deferred_target> const& spi3 = nullptr, bool controlled = true)
   {
-    board.spi_controllers["SPI1"] = sink;
+    if(controlled)
+    {
+      board.spi_controllers["SPI1"] = sink;
+    }
     if(spi3)
     {
       board.spi["SPI3"].push_back({.device = spi3, .cs_port = "GPIOA"});
@@ -3377,7 +3380,7 @@ TEST_CASE(
   CHECK(other_ends == ends);
 }
 
-TEST_CASE("a machine reset clears the wire ends of the frames an RCC reset dropped")
+TEST_CASE("a machine reset rebases the wire ends of the frames an RCC reset dropped")
 {
   std::vector<std::string> log;
   port_rig                 r;
@@ -3391,14 +3394,109 @@ TEST_CASE("a machine reset clears the wire ends of the frames an RCC reset dropp
   b.run_until(start + mhz_frame / 2);
   popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
   REQUIRE(r.sink->drops.empty());
+  auto const at_reset = b.now();
   r.reset(popcorn::reset_kind::software);
   REQUIRE(b.now() < us);
-  auto const again = b.now();
+  auto const again   = b.now();
+  auto const rebased = start + mhz_frame - at_reset;
+  REQUIRE(rebased > again);
   r.select(again, 3);
   r.frame(2, again, 4);
-  b.run_until(again + 2 * mhz_frame);
+  b.run_until(rebased + 2 * mhz_frame);
   REQUIRE(r.sink->frames.size() == 1);
-  CHECK(r.sink->frames[0].at.ps == again + mhz_frame);
+  CHECK(r.sink->frames[0].at.ps == rebased + mhz_frame);
+}
+
+TEST_CASE("a frame a machine reset drops holds the wire to its rebased end")
+{
+  port_rig r;
+  bus      b{*r.f};
+  after_system_reset(r, b);
+  target(b, 7, 0);
+  auto const start = b.now() + us;
+  r.select(start, 1);
+  r.frame(1, start, 2);
+  b.run_until(start + mhz_frame / 2);
+  auto const at_reset = b.now();
+  r.reset(popcorn::reset_kind::software);
+  auto const rebased = start + mhz_frame - at_reset;
+  r.frame(2, 0, 3);
+  b.run_until(rebased + 2 * mhz_frame);
+  CHECK(r.sink->drops.at(0).at.ps == rebased);
+  REQUIRE(r.sink->frames.size() == 1);
+  CHECK(r.sink->frames[0].at.ps == rebased + mhz_frame);
+}
+
+auto port_events(stm32_fixture const& f) -> std::size_t
+{
+  auto const& units = f.target->description().peripherals;
+  auto const  found =
+      std::ranges::find(units, std::string_view{"SPI1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(found != units.end());
+  auto const owner   = static_cast<std::uint32_t>(found - units.begin());
+  auto const pending = f.target->snapshot().data().events.pending;
+  return static_cast<std::size_t>(std::ranges::count_if(pending, [&](core::event const& event) {
+    return event.id.owner == owner and event.id.kind == 3;
+  }));
+}
+
+TEST_CASE("a snapshot holding port entries or transfers is refused by an SPI with no controller")
+{
+  for(bool const queued_transfer : {false, true})
+  {
+    CAPTURE(queued_transfer);
+    port_rig r;
+    bus      b{*r.f};
+    target(b, 7, 0);
+    auto const start = b.now() + us;
+    if(queued_transfer)
+    {
+      std::ignore = r.port().transfer(vtime{start}, mhz_frame, 8, std::vector<std::uint32_t>{1, 2});
+    }
+    else
+    {
+      r.select(start, 1);
+      r.frame(0x5A, start, 2);
+      b.run_until(start + mhz_frame / 2);
+    }
+    auto const saved = core::encode_snapshot(r.f->target->snapshot().data());
+    port_rig   none{nullptr, false};
+    bus        other{*none.f};
+    auto const model_bytes = [&] {
+      std::vector<std::byte> out;
+      none.f->target->model("SPI1")->save(out);
+      return out;
+    };
+    auto const own    = core::encode_snapshot(none.f->target->snapshot().data());
+    auto const before = model_bytes();
+    CHECK_THROWS_AS(
+        none.f->target->restore(core::snapshot{core::decode_snapshot(saved)}),
+        popcorn::config_error);
+    CHECK(model_bytes() == before);
+    none.f->target->restore(core::snapshot{core::decode_snapshot(own)});
+    CHECK(model_bytes() == before);
+    other.run_until(other.now() + 3 * mhz_frame);
+    CHECK(none.sink->frames.empty());
+  }
+}
+
+TEST_CASE("each RCC reset leaves one stale port event, gone once the frame's due passes")
+{
+  port_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  auto const start = b.now() + 1'000 * us;
+  r.select(start, 1);
+  r.frame(0x5A, start, 2);
+  REQUIRE(port_events(*r.f) == 2);
+  for(int pulse = 0; pulse < 1000; ++pulse)
+  {
+    popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  }
+  CHECK(port_events(*r.f) == 2 + 2 * 1000);
+  b.run_until(start + 2 * mhz_frame);
+  CHECK(port_events(*r.f) == 0);
+  CHECK(r.sink->frames.size() == 1);
 }
 
 TEST_CASE("every machine reset kind and a power cycle drop the queued port frames, re-armed")

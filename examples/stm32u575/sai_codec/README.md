@@ -106,9 +106,6 @@ before block A.
 - A power-on or brown-out reset returns the clock to the description's wiring, stopped here. Other
   resets keep it running in phase.
 
-`HAL_I2C_Init` sets OA1EN with own address 0, so the I2C model logs that target mode is not
-modelled. The controller transfers are unaffected.
-
 ## Model limits
 
 - A destination burst left partial by a block end gets no DAO and no warning.

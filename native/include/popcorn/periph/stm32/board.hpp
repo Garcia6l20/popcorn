@@ -74,6 +74,9 @@ struct board
    * shared by every machine built from these factories: give each machine its own board and
    * targets. */
   std::map<std::string, std::vector<std::shared_ptr<i2c_target>>, std::less<>> i2c{};
+  /** @brief The controller addressing each I2C instance in target mode, by instance name. An
+   * instance with one takes no target in `i2c`. Shared as the targets are. */
+  std::map<std::string, std::shared_ptr<i2c_controller_sink>, std::less<>> i2c_controllers{};
   /** @brief What each SAI audio block is wired to, keyed by instance and block, such as
    * `SAI1_A`. The SAI model copies the attachments when the machine is built: the endpoints stay
    * shared. */

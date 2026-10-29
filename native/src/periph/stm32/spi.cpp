@@ -322,8 +322,10 @@ auto lower(std::string_view name) -> std::string
  *        deselect() cuts it at the deselect's time. The model keeps the time of the last RCC reset
  *        until the next machine reset. A machine reset of any kind, a power cycle included, drops
  *        every frame, re-armed at their end less the local time of the reset, 0 at the earliest,
- *        which the model takes in before_reset(). Queued level entries and dropped units survive
- *        every reset at the same rebased times. Each dropped unit is reported once, through
+ *        which the model takes in before_reset(). Under a board controller each frame it drops
+ *        holds the wire to that rebased end, and every wire end an RCC reset left is rebased the
+ *        same way. Queued level entries and dropped units survive every reset at the same rebased
+ *        times. Each dropped unit is reported once, through
  *        spi_controller_sink::dropped() from its lane event. The entries, the level, the
  *        generation, the last unit and the time of the last RCC reset are saved with the model.
  *
@@ -1765,9 +1767,9 @@ void spi::rearm_port(
   auto const restart = not kind and link_controller_;
   for(auto& entry : port.entries)
   {
-    if(kind)
+    if(kind and entry.wire_end_ps)
     {
-      entry.wire_end_ps.reset();
+      entry.wire_end_ps = moved(*entry.wire_end_ps);
     }
     if(entry.kind == port_frame and (kind or (not restart and entry.due_ps <= now)))
     {
@@ -1776,9 +1778,9 @@ void spi::rearm_port(
     }
     if(entry.kind == port_ending)
     {
-      if(not kind and not link_controller_)
+      if(not link_controller_)
       {
-        entry.wire_end_ps = entry.due_ps;
+        entry.wire_end_ps = kind ? moved(entry.due_ps) : entry.due_ps;
       }
       entry.due_ps = moved(entry.due_ps);
       entry.word   = mask_of(entry.bits);
@@ -2196,7 +2198,15 @@ void spi::save(std::vector<std::byte>& out) const
 
 void spi::load(std::span<std::byte const> in)
 {
-  state_ = reflex::serde::bson::deserializer{in}.template load<spi_state>();
+  auto loaded = reflex::serde::bson::deserializer{in}.template load<spi_state>();
+  if(not controller_ and (not loaded.port.entries.empty() or not loaded.host.empty()))
+  {
+    throw config_error(
+        ctx_.part.part, 0, std::format("devices.{}", desc_.name),
+        "an SPI controller attached to the instance, the snapshot holds port entries or queued "
+        "transfers");
+  }
+  state_ = std::move(loaded);
   for(std::size_t index = 0; index < attachments_.size() and index < state_.devices.size(); ++index)
   {
     attachments_[index].device->load(state_.devices[index]);

@@ -2,6 +2,7 @@
 #include "factories.hpp"
 #include "stm32_fixture.hpp"
 
+#include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
@@ -2092,4 +2093,1332 @@ TEST_CASE("I2C1RST moves the phase generation past every event queued before it,
     CHECK(*after > *before);
   }
   CHECK(seen[1] > seen[0]);
+}
+
+namespace
+{
+constexpr std::uint32_t wire       = 1;
+constexpr std::uint64_t target_ps  = 9 * period_ps;
+constexpr std::uint8_t  own        = 0x42;
+constexpr std::uint32_t port_event = 3;
+constexpr std::uint32_t addr_log   = 0xADD0'0000;
+constexpr std::uint32_t stop_log   = 0x5709;
+
+struct target_part
+{
+  std::string_view name;
+  auto (*desc)() -> popcorn::part_description const&;
+  std::string_view firmware;
+  std::string_view enable;
+  std::string_view reset;
+  std::uint32_t    event_irq;
+};
+
+constexpr std::array<target_part, 2> target_parts{
+    {
+     {"STM32U575", &u575, "i2c_ll", "RCC_APB1ENR1", "RCC_APB1RSTR1", 55},
+     {"STM32H573", &popcorn::testing::h573, "h573_i2c_ll", "RCC_APB1LENR", "RCC_APB1LRSTR", 51},
+     }
+};
+
+class phase_probe final : public periph::i2c_controller_sink
+{
+public:
+  struct heard
+  {
+    std::uint64_t     unit;
+    periph::i2c_phase phase;
+    bool              ack;
+    std::uint8_t      byte;
+    std::uint64_t     at;
+
+    friend auto operator==(heard const&, heard const&) -> bool = default;
+  };
+
+  struct lost
+  {
+    std::uint64_t     unit;
+    periph::i2c_phase phase;
+    std::uint64_t     at;
+
+    friend auto operator==(lost const&, lost const&) -> bool = default;
+  };
+
+  std::vector<heard>              answers;
+  std::vector<lost>               drops;
+  std::vector<std::string>        log;
+  std::move_only_function<void()> on_answer;
+
+  void answered(std::uint64_t unit, periph::i2c_phase phase, periph::i2c_answer answer, vtime at)
+      override
+  {
+    answers.push_back({unit, phase, answer.ack, answer.byte, at.ps});
+    log.push_back(std::format("answer {} {}", unit, answer.ack ? "ack" : "nack"));
+    if(on_answer)
+    {
+      on_answer();
+    }
+  }
+
+  void dropped(std::uint64_t unit, periph::i2c_phase phase, vtime at) override
+  {
+    drops.push_back({unit, phase, at.ps});
+    log.push_back(std::format("dropped {}", unit));
+  }
+};
+
+using heard = phase_probe::heard;
+using lost  = phase_probe::lost;
+
+struct target_rig
+{
+  target_part                    part;
+  std::shared_ptr<phase_probe>   sink = std::make_shared<phase_probe>();
+  stm32::board                   board{};
+  std::unique_ptr<stm32_fixture> f;
+  std::vector<core::log_record>  logged;
+  core::hook_handle              logs;
+
+  explicit target_rig(
+      target_part const& which      = target_parts[0],
+      bool               strict     = false,
+      bool               controlled = true)
+      : part{which}
+  {
+    if(controlled)
+    {
+      board.i2c_controllers["I2C1"] = sink;
+    }
+    auto options               = popcorn::testing::stm32_options();
+    options.strict_peripherals = strict;
+    options.models             = stm32::factories(board, part.desc());
+    f    = std::make_unique<stm32_fixture>(part.desc(), part.firmware, std::move(options));
+    logs = f->target->add_log_sink(
+        [this](core::log_record const& record) { logged.push_back(record); });
+    idle();
+  }
+
+  void idle() const
+  {
+    f->set("pc", sym(part.firmware, "idle"));
+  }
+
+  [[nodiscard]] auto b() const -> bus
+  {
+    return bus{*f};
+  }
+
+  [[nodiscard]] auto port() const -> periph::i2c_controller_port&
+  {
+    auto* const found = dynamic_cast<periph::i2c_controller_port*>(f->target->model("I2C1"));
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  [[nodiscard]] auto period() const -> std::uint64_t
+  {
+    auto const hz = f->target->virtual_clock().instruction_hz();
+    REQUIRE(1'000'000'000'000 % hz == 0);
+    return 1'000'000'000'000 / hz;
+  }
+
+  [[nodiscard]] auto now() const -> std::uint64_t
+  {
+    return f->target->virtual_clock().time().ps;
+  }
+
+  void run_until(std::uint64_t ps) const
+  {
+    b().run_until(ps);
+  }
+
+  void listen(std::uint8_t address = own) const
+  {
+    auto const on = b();
+    on.set("RCC", part.enable, "I2C1EN", 1);
+    on.set("OAR1", "OA1EN", 0);
+    on.set("OAR1", "OA1", std::uint32_t{address} << 1);
+    on.set("OAR1", "OA1EN", 1);
+    on.set("CR1", "PE", 1);
+  }
+
+  [[nodiscard]] auto get(std::string_view reg, std::string_view field) const -> std::uint32_t
+  {
+    return f->field("I2C1", reg, field);
+  }
+
+  void start(std::uint8_t address, bool read, std::uint64_t at, std::uint64_t unit) const
+  {
+    port().start(address, read, target_ps, vtime{at}, wire, unit);
+  }
+
+  void write(std::uint8_t byte, std::uint64_t at, std::uint64_t unit) const
+  {
+    port().write(byte, target_ps, vtime{at}, wire, unit);
+  }
+
+  void read(bool ack, std::uint64_t at, std::uint64_t unit) const
+  {
+    port().read(ack, target_ps, vtime{at}, wire, unit);
+  }
+
+  void stop(std::uint64_t at, std::uint64_t unit) const
+  {
+    port().stop(vtime{at}, wire, unit);
+  }
+
+  void drop(periph::i2c_phase phase, std::uint64_t at, std::uint64_t unit) const
+  {
+    port().drop(phase, vtime{at}, wire, unit);
+  }
+
+  void reset(popcorn::reset_kind kind) const
+  {
+    f->target->reset(kind);
+    idle();
+  }
+
+  void power_cycle() const
+  {
+    f->target->power_cycle();
+    idle();
+  }
+
+  void rcc_pulse() const
+  {
+    popcorn::testing::rcc_reset_pulse(*f, part.reset, "I2C1RST");
+  }
+
+  [[nodiscard]] auto warnings(std::string_view reg) const -> std::size_t
+  {
+    return static_cast<std::size_t>(std::ranges::count_if(logged, [&](auto const& record) {
+      return record.kind == core::log_kind::model_warning
+         and record.peripheral == "I2C1"
+         and record.reg == reg;
+    }));
+  }
+
+  [[nodiscard]] auto model_bytes() const -> std::vector<std::byte>
+  {
+    std::vector<std::byte> out;
+    f->target->model("I2C1")->save(out);
+    return out;
+  }
+
+  void after_system_reset() const
+  {
+    run_until(now() + 30 * us);
+    reset(popcorn::reset_kind::software);
+    REQUIRE(
+        f->target->virtual_clock().since_power_on().ps - f->target->virtual_clock().time().ps
+        >= 30 * us);
+  }
+};
+
+void write_timing(bus const& b)
+{
+  b.write(b.at("I2C1", "TIMINGR"), 0x0010'0305);
+}
+
+auto port_due(stm32_fixture const& f) -> std::vector<core::event>
+{
+  auto const& units = f.target->description().peripherals;
+  auto const  found =
+      std::ranges::find(units, std::string_view{"I2C1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(found != units.end());
+  auto const               owner = static_cast<std::uint32_t>(found - units.begin());
+  std::vector<core::event> out;
+  for(auto const& event : f.target->snapshot().data().events.pending)
+  {
+    if(event.id.owner == owner and event.id.kind == port_event)
+    {
+      out.push_back(event);
+    }
+  }
+  return out;
+}
+
+auto due_of_kind(stm32_fixture const& f, std::string_view instance, std::uint32_t kind)
+    -> std::optional<std::uint64_t>
+{
+  auto const& units = f.target->description().peripherals;
+  auto const  found = std::ranges::find(units, instance, &popcorn::peripheral_desc::name);
+  REQUIRE(found != units.end());
+  auto const owner = static_cast<std::uint32_t>(found - units.begin());
+  for(auto const& event : f.target->snapshot().data().events.pending)
+  {
+    if(event.id.owner == owner and event.id.kind == kind)
+    {
+      return event.due_ps;
+    }
+  }
+  return std::nullopt;
+}
+
+constexpr auto on_address = periph::i2c_phase::address;
+constexpr auto on_write   = periph::i2c_phase::write;
+constexpr auto on_read    = periph::i2c_phase::read;
+}
+
+TEST_CASE(
+    "the target firmware answers OAR1, OAR2 under its mask and the general call, NACKs others")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.f->set("pc", sym(part.firmware, "target"));
+    r.run_until(r.now() + 200 * us);
+    REQUIRE(r.get("CR1", "PE") == 1);
+    REQUIRE(r.get("OAR2", "OA2MSK") == 2);
+    auto const    base = r.now() + us;
+    auto          at   = base;
+    std::uint64_t unit = 0;
+    for(auto const& [address, read] : std::array<std::pair<std::uint8_t, bool>, 5>{
+            {{own, false}, {0x61, true}, {0x64, false}, {0x00, false}, {0x7F, true}}
+    })
+    {
+      r.start(address, read, at, ++unit);
+      r.stop(at + target_ps, ++unit);
+      at += 2 * target_ps;
+    }
+    r.run_until(at + 50 * us);
+    std::vector<bool> acks;
+    for(auto const& one : r.sink->answers)
+    {
+      acks.push_back(one.ack);
+    }
+    CHECK(acks == std::vector<bool>{true, true, false, true, false});
+    CHECK(r.sink->answers[0].at == base + target_ps);
+    CHECK(r.sink->drops.empty());
+    CHECK(
+        r.f->log()
+        == std::vector<std::uint32_t>{
+            addr_log | 0x84, stop_log, addr_log | 0xC3, stop_log, addr_log, stop_log});
+    CHECK(r.get("ISR", "BUSY") == 0);
+  }
+}
+
+TEST_CASE("the address match reads OAR1, OAR2 and GCEN at the phase end, masks and reserved")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen();
+    auto          at   = r.now() + us;
+    std::uint64_t unit = 0;
+    auto const    ask  = [&](std::uint8_t address) {
+      r.start(address, false, at, ++unit);
+      r.stop(at + target_ps, ++unit);
+      at += 2 * target_ps;
+      r.run_until(at);
+      return r.sink->answers.back().ack;
+    };
+    CHECK(ask(own));
+    CHECK_FALSE(ask(0x43));
+    CHECK_FALSE(ask(0x00));
+    b.set("CR1", "GCEN", 1);
+    CHECK(ask(0x00));
+    b.set("OAR2", "OA2", 0x10);
+    b.set("OAR2", "OA2EN", 1);
+    CHECK(ask(0x10));
+    CHECK_FALSE(ask(0x11));
+    b.set("OAR2", "OA2EN", 0);
+    b.set("OAR2", "OA2MSK", 1);
+    b.set("OAR2", "OA2EN", 1);
+    CHECK(ask(0x11));
+    CHECK_FALSE(ask(0x12));
+    b.set("OAR2", "OA2EN", 0);
+    b.set("OAR2", "OA2MSK", 7);
+    b.set("OAR2", "OA2EN", 1);
+    CHECK(ask(0x55));
+    CHECK_FALSE(ask(0x78));
+    CHECK_FALSE(ask(0x07));
+    b.set("OAR2", "OA2EN", 0);
+    b.set("OAR2", "OA2MSK", 0);
+    b.set("OAR2", "OA2", 0x07);
+    b.set("OAR2", "OA2EN", 1);
+    CHECK(ask(0x07));
+    r.listen(0x50);
+    CHECK_FALSE(ask(own));
+    CHECK(ask(0x50));
+    b.set("OAR1", "OA1EN", 0);
+    CHECK_FALSE(ask(0x50));
+    CHECK(r.get("ISR", "ADDCODE") == 0x50);
+  }
+}
+
+TEST_CASE("ADDR, DIR and ADDCODE are set at the address phase end, the event IRQ with no read")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen();
+    b.set("CR1", "ADDRIE", 1);
+    auto const base = r.now() + us;
+    auto const end  = base + target_ps;
+    r.start(own, true, base, 1);
+    r.run_until(base + r.period());
+    auto const queued = port_due(*r.f);
+    REQUIRE(queued.size() == 1);
+    CHECK(queued[0].due_ps == end);
+    CHECK(queued[0].lane == wire);
+    CHECK(r.get("ISR", "BUSY") == 1);
+    r.run_until(end - r.period());
+    CHECK_FALSE(pending(*r.f, part.event_irq));
+    r.run_until(end + r.period());
+    CHECK(pending(*r.f, part.event_irq));
+    CHECK(r.get("ISR", "ADDR") == 1);
+    CHECK(r.get("ISR", "DIR") == 1);
+    CHECK(r.get("ISR", "ADDCODE") == own);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, true, 0xFF, end}
+    });
+    b.set("ICR", "ADDRCF", 1);
+    CHECK(r.get("ISR", "ADDR") == 0);
+  }
+}
+
+TEST_CASE("ADDRACLR keeps ADDR clear and STOPFACLR keeps STOPF clear, ADDCODE still set")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen();
+    b.set("CR1", "ADDRACLR", 1);
+    b.set("CR1", "STOPFACLR", 1);
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.stop(base + target_ps, 2);
+    r.run_until(base + 2 * target_ps);
+    CHECK(r.sink->answers.at(0).ack);
+    CHECK(r.get("ISR", "ADDR") == 0);
+    CHECK(r.get("ISR", "ADDCODE") == own);
+    CHECK(r.get("ISR", "STOPF") == 0);
+    b.set("CR1", "STOPFACLR", 0);
+    r.start(own, false, base + 2 * target_ps, 3);
+    r.stop(base + 3 * target_ps, 4);
+    r.run_until(base + 4 * target_ps);
+    CHECK(r.get("ISR", "STOPF") == 1);
+  }
+}
+
+TEST_CASE("PE clear, a transfer of the I2C as controller and the I2C held in reset answer NACK")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen();
+    b.set("CR1", "PE", 0);
+    auto at = r.now() + us;
+    r.start(own, false, at, 1);
+    r.run_until(at + target_ps + us);
+    CHECK_FALSE(r.sink->answers.back().ack);
+    CHECK(r.get("ISR", "BUSY") == 0);
+    write_timing(b);
+    b.set("CR1", "PE", 1);
+    b.command(0x38, 1, false, true);
+    at = r.now();
+    r.port().start(own, false, us, vtime{at}, wire, 2);
+    r.run_until(at + 2 * us);
+    REQUIRE(r.sink->answers.size() == 2);
+    CHECK_FALSE(r.sink->answers.back().ack);
+    CHECK(r.get("ISR", "ADDR") == 0);
+    r.run_until(at + 200 * us);
+    popcorn::testing::rcc_reset_write(*r.f, part.reset, "I2C1RST", 1);
+    r.listen();
+    at = r.now() + us;
+    r.start(own, false, at, 3);
+    r.run_until(at + target_ps + us);
+    CHECK_FALSE(r.sink->answers.back().ack);
+    popcorn::testing::rcc_reset_write(*r.f, part.reset, "I2C1RST", 0);
+    CHECK(r.sink->answers.size() == 3);
+  }
+}
+
+TEST_CASE("a port entry in the past keeps its own count, a bad argument or lane throws")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    r.run_until(r.now() + 10 * us);
+    auto const now  = r.now();
+    auto const past = now - 3 * r.period();
+    auto&      p    = r.port();
+    CHECK_THROWS_AS(p.start(own, false, target_ps, vtime{now}, 0, 1), std::invalid_argument);
+    CHECK_THROWS_AS(p.start(0x80, false, target_ps, vtime{now}, wire, 1), std::invalid_argument);
+    CHECK_THROWS_AS(p.start(own, false, 0, vtime{now}, wire, 1), std::invalid_argument);
+    CHECK_THROWS_AS(
+        p.drop(static_cast<periph::i2c_phase>(3), vtime{now}, wire, 1), std::invalid_argument);
+    CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.last_unit") == 0);
+    p.start(own, false, target_ps, vtime{past}, wire, 1);
+    p.drop(on_write, vtime{past}, wire, 2);
+    CHECK_THROWS_AS(p.stop(vtime{now}, wire, 2), std::invalid_argument);
+    auto const queued = port_due(*r.f);
+    auto const keyed  = std::ranges::count_if(queued, [&](core::event const& event) {
+      return event.due_ps == past
+         and event.at.value + 3 == r.f->target->virtual_clock().now().value;
+    });
+    CHECK(keyed == 2);
+    r.run_until(now + r.period());
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {2, on_write, past}
+    });
+    r.run_until(past + target_ps + us);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, true, 0xFF, past + target_ps}
+    });
+  }
+}
+
+TEST_CASE("port primitives need a controller, and a controller next to targets is refused")
+{
+  rig         none{"idle"};
+  auto* const p = dynamic_cast<periph::i2c_controller_port*>(none.f->target->model("I2C1"));
+  REQUIRE(p != nullptr);
+  CHECK_THROWS_AS(p->start(own, false, target_ps, vtime{0}, wire, 1), popcorn::config_error);
+  CHECK_THROWS_AS(p->stop(vtime{0}, wire, 1), popcorn::config_error);
+  stm32::board board{};
+  board.i2c["I2C1"] = {std::make_shared<recorded_target>(std::make_shared<picky_target>())};
+  board.i2c_controllers["I2C1"] = std::make_shared<phase_probe>();
+  auto options                  = popcorn::testing::stm32_options();
+  options.models                = stm32::factories(board, u575());
+  CHECK_THROWS_AS(
+      std::ignore = std::make_unique<stm32_fixture>(u575(), "i2c_ll", std::move(options)),
+      popcorn::config_error);
+}
+
+TEST_CASE("a port phase end fires after a local event of the same count, posted either side")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    std::vector<std::vector<std::string>> orders;
+    for(bool const port_first : {true, false})
+    {
+      CAPTURE(port_first);
+      target_rig r{part};
+      auto const b = r.b();
+      r.listen();
+      b.set("RCC", part.enable, "I2C2EN", 1);
+      b.write(b.at("I2C2", "TIMINGR"), 0x0010'0305);
+      b.set("I2C2", "CR1", "PE", 1);
+      auto const command = [&] {
+        b.write(b.at("I2C2", "CR2"), (0x10u << 1) | (1u << 13) | (1u << 25));
+      };
+      command();
+      auto const due = due_of_kind(*r.f, "I2C2", 0);
+      REQUIRE(due.has_value());
+      auto const span = *due - r.now();
+      r.run_until(r.now() + 4 * span);
+      b.set("I2C2", "ICR", "NACKCF", 1);
+      b.set("I2C2", "ICR", "STOPCF", 1);
+      REQUIRE(r.f->field("I2C2", "ISR", "BUSY") == 0);
+      std::vector<std::string> log;
+      r.sink->on_answer = [&] {
+        log.push_back(r.f->field("I2C2", "ISR", "NACKF") != 0 ? "local first" : "port first");
+      };
+      auto const base = r.now();
+      if(port_first)
+      {
+        r.port().start(own, false, span + us, vtime{base}, wire, 1);
+        r.run_until(base + us);
+        REQUIRE(port_due(*r.f).size() == 1);
+        command();
+      }
+      else
+      {
+        r.run_until(base + us);
+        command();
+        r.port().start(own, false, span + us, vtime{base}, wire, 1);
+      }
+      REQUIRE(due_of_kind(*r.f, "I2C2", 0) == base + us + span);
+      r.run_until(base + 2 * us + span);
+      REQUIRE(r.sink->answers.size() == 1);
+      CHECK(r.sink->answers[0].at == base + us + span);
+      orders.push_back(log);
+    }
+    CHECK(orders[0] == orders[1]);
+    CHECK(orders[0] == std::vector<std::string>{"local first"});
+  }
+}
+
+TEST_CASE("a STOP due at a phase end runs in unit order, posted before or after the start")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    std::vector<std::vector<std::string>> logs;
+    for(bool const early : {true, false})
+    {
+      CAPTURE(early);
+      target_rig r{part};
+      r.listen();
+      auto const base = r.now() + us;
+      r.start(own, false, base, 1);
+      if(not early)
+      {
+        r.run_until(base + target_ps / 2);
+      }
+      r.stop(base + target_ps, 2);
+      r.run_until(base + 2 * target_ps);
+      CHECK(r.get("ISR", "STOPF") == 1);
+      logs.push_back(r.sink->log);
+    }
+    CHECK(logs[0] == logs[1]);
+    CHECK(logs[0] == std::vector<std::string>{"answer 1 ack"});
+  }
+}
+
+TEST_CASE("an RCC reset drops the started phase, the repeated START and STOP run in the reset I2C")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.start(own, true, base, 2);
+    r.stop(base + 2 * target_ps, 3);
+    r.run_until(base + target_ps / 2);
+    auto const generation = popcorn::testing::saved_integer(*r.f, "I2C1", "port.generation");
+    REQUIRE(generation.has_value());
+    r.rcc_pulse();
+    CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.generation") == *generation + 1);
+    r.listen();
+    r.run_until(base + 3 * target_ps);
+    CHECK(r.sink->log == std::vector<std::string>{"dropped 1", "answer 2 ack"});
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {1, on_address, base + target_ps}
+    });
+    CHECK(r.sink->answers.at(0).at == base + 2 * target_ps);
+    CHECK(r.get("ISR", "DIR") == 1);
+    CHECK(r.get("ISR", "STOPF") == 1);
+    CHECK(r.get("ISR", "BUSY") == 0);
+  }
+}
+
+TEST_CASE("a phase started before an RCC reset is dropped, queued before or after the reset")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    std::vector<std::vector<std::string>> logs;
+    std::vector<std::vector<lost>>        drops;
+    std::vector<std::vector<std::byte>>   bytes;
+    std::vector<std::vector<heard>>       answers;
+    for(bool const after : {false, true})
+    {
+      CAPTURE(after);
+      target_rig r{part};
+      r.listen();
+      auto const base  = r.now() + us;
+      auto const queue = [&] {
+        r.stop(base - us, 1);
+        r.start(own, false, base, 2);
+      };
+      if(not after)
+      {
+        queue();
+      }
+      r.run_until(base + 3 * us);
+      r.rcc_pulse();
+      if(after)
+      {
+        queue();
+      }
+      r.start(own, false, base + 3 * us, 3);
+      r.run_until(base + 3 * target_ps);
+      logs.push_back(r.sink->log);
+      drops.push_back(r.sink->drops);
+      bytes.push_back(r.model_bytes());
+      REQUIRE(r.sink->answers.size() == 1);
+      CHECK(r.sink->answers[0].at == base + 2 * target_ps);
+      answers.push_back(r.sink->answers);
+    }
+    CHECK(logs[0] == logs[1]);
+    CHECK(drops[0] == drops[1]);
+    CHECK(bytes[0] == bytes[1]);
+    CHECK(logs[0] == std::vector<std::string>{"dropped 2", "answer 3 nack"});
+    CHECK(answers[0] == answers[1]);
+  }
+}
+
+TEST_CASE("a STOP or a drop queued after an RCC reset with a time before it is due at the reset")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const base = r.now() + us;
+    r.run_until(base + 3 * us);
+    auto const reset = r.now();
+    r.rcc_pulse();
+    r.drop(on_write, base, 1);
+    r.stop(base, 2);
+    auto const stops = port_due(*r.f);
+    REQUIRE(stops.size() == 2);
+    CHECK(stops[0].due_ps == reset);
+    CHECK(stops[1].due_ps == reset);
+    r.run_until(reset + r.period());
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {1, on_write, reset}
+    });
+    r.after_system_reset();
+    r.drop(on_write, 0, 3);
+    r.run_until(r.now() + r.period());
+    CHECK(r.sink->drops.back() == lost{3, on_write, 0});
+  }
+}
+
+TEST_CASE("every machine reset kind and a power cycle drop the queued phases at rebased times")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(auto const kind :
+        {popcorn::reset_kind::software, popcorn::reset_kind::pin, popcorn::reset_kind::watchdog,
+         popcorn::reset_kind::power_on, popcorn::reset_kind::brown_out})
+    {
+      for(bool const cycle : {false, true})
+      {
+        if(cycle and kind != popcorn::reset_kind::power_on)
+        {
+          continue;
+        }
+        CAPTURE(kind);
+        CAPTURE(cycle);
+        target_rig r{part};
+        r.after_system_reset();
+        r.listen();
+        auto const base = r.now() + us;
+        r.start(own, false, base, 1);
+        r.write(0x11, base, 2);
+        r.stop(base + 2 * target_ps, 3);
+        r.run_until(base + target_ps / 2);
+        auto const at_reset = r.now();
+        if(cycle)
+        {
+          r.power_cycle();
+        }
+        else
+        {
+          r.reset(kind);
+        }
+        CHECK(r.sink->drops.empty());
+        CHECK(r.sink->answers.empty());
+        r.listen();
+        r.run_until(base + 3 * target_ps - at_reset);
+        CHECK(
+            r.sink->drops
+            == std::vector<lost>{
+                {1, on_address, base + target_ps - at_reset    },
+                {2, on_write,   base + 2 * target_ps - at_reset}
+        });
+        CHECK(r.sink->answers.empty());
+        CHECK(r.get("ISR", "STOPF") == 0);
+        CHECK(r.get("ISR", "BUSY") == 0);
+      }
+    }
+  }
+}
+
+TEST_CASE("a machine reset removes a queued STOP, the next START starts at its own time")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.stop(base + target_ps + 80 * us, 2);
+    r.run_until(base + target_ps + us);
+    REQUIRE(r.sink->answers.size() == 1);
+    r.reset(popcorn::reset_kind::software);
+    r.listen();
+    auto const next = r.now() + us;
+    r.start(own, false, next, 3);
+    r.run_until(next + target_ps + 100 * us);
+    CHECK(r.sink->answers.back() == heard{3, on_address, true, 0xFF, next + target_ps});
+    CHECK(r.get("ISR", "STOPF") == 0);
+    CHECK(r.get("ISR", "BUSY") == 1);
+  }
+}
+
+TEST_CASE("a STOP inside a written byte drops it at the STOP, sets STOPF and BERR")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.write(0x5A, base, 2);
+    r.write(0x5B, base, 3);
+    r.stop(base + target_ps + target_ps / 2, 4);
+    r.run_until(base + 4 * target_ps);
+    CHECK(r.sink->log == std::vector<std::string>{"answer 1 ack", "dropped 2", "dropped 3"});
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {2, on_write, base + target_ps + target_ps / 2},
+            {3, on_write, base + target_ps + target_ps / 2}
+    });
+    CHECK(r.get("ISR", "STOPF") == 1);
+    CHECK(r.get("ISR", "BERR") == 1);
+    CHECK(r.get("ISR", "BUSY") == 0);
+  }
+}
+
+TEST_CASE("a STOP ending the address phase drops it with no BERR, a drop reports at its time")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.stop(base + target_ps / 2, 2);
+    r.port().drop(on_read, vtime{base + 3 * target_ps}, wire, 3);
+    r.run_until(base + 4 * target_ps);
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {1, on_address, base + target_ps / 2},
+            {3, on_read,    base + 3 * target_ps}
+    });
+    CHECK(r.get("ISR", "BERR") == 0);
+    CHECK(r.get("ISR", "STOPF") == 0);
+  }
+}
+
+TEST_CASE("a second reset before the re-armed entries fire reports each unit once")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.after_system_reset();
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.write(0x11, base, 2);
+    r.run_until(base + target_ps / 2);
+    auto const at_reset = r.now();
+    r.reset(popcorn::reset_kind::software);
+    r.run_until(2 * us);
+    r.rcc_pulse();
+    r.run_until(base + 3 * target_ps);
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {1, on_address, base + target_ps - at_reset    },
+            {2, on_write,   base + 2 * target_ps - at_reset}
+    });
+  }
+}
+
+TEST_CASE("a STOP leaves dropped and drop entries at their own report times")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.write(0x11, base, 2);
+    r.run_until(base + target_ps + target_ps / 2);
+    auto const at_reset = r.now();
+    r.reset(popcorn::reset_kind::software);
+    auto const rearmed = base + 2 * target_ps - at_reset;
+    r.stop(rearmed / 2, 3);
+    r.port().drop(on_write, vtime{rearmed + us}, wire, 4);
+    r.run_until(rearmed + 2 * us);
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {2, on_write, rearmed     },
+            {4, on_write, rearmed + us}
+    });
+    CHECK(r.sink->answers.size() == 1);
+  }
+}
+
+TEST_CASE("an RCC store at the count of an address phase end reports that phase exactly once")
+{
+  constexpr std::uint32_t stub_at = 0x2002'0000;
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    std::vector<std::vector<std::string>> logs;
+    for(bool const store_second : {false, true})
+    {
+      CAPTURE(store_second);
+      target_rig r{part};
+      r.listen();
+      auto const period = r.period();
+      auto const base   = r.now();
+      REQUIRE(base % period == 0);
+      auto const end = base + 40 * us;
+      r.start(own, false, end - target_ps, 1);
+      r.stop(end, 2);
+      auto const first = store_second ? std::uint32_t{0x6001'BF00} : std::uint32_t{0x6001'E7FF};
+      REQUIRE(r.f->target->mem().write(stub_at, 4, first).has_value());
+      REQUIRE(r.f->target->mem().write(stub_at + 4, 4, 0xE7FE'6002).has_value());
+      r.run_until(end - period);
+      REQUIRE(r.sink->log.empty());
+      auto const& desc  = r.f->target->peripheral("RCC").description();
+      auto const* found = popcorn::find_register(desc, part.reset);
+      REQUIRE(found != nullptr);
+      auto const rst =
+          std::ranges::find(found->fields, std::string_view{"I2C1RST"}, &popcorn::field_desc::name);
+      REQUIRE(rst != found->fields.end());
+      r.f->set("r0", desc.base + found->offset);
+      r.f->set("r1", std::uint64_t{1} << rst->lsb);
+      r.f->set("r2", 0);
+      r.f->set("pc", stub_at | 1u);
+      r.run_until(end + 10 * period);
+      CHECK(r.sink->answers.size() + r.sink->drops.size() == 1);
+      for(auto const& one : r.sink->answers)
+      {
+        CHECK(one.at == end);
+      }
+      for(auto const& one : r.sink->drops)
+      {
+        CHECK(one.unit == 1);
+        CHECK(one.at == end + 3 * period);
+      }
+      CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.entries.0.kind") == std::nullopt);
+      logs.push_back(r.sink->log);
+    }
+    CHECK(logs[0] == std::vector<std::string>{"answer 1 ack"});
+    CHECK(logs[1] == std::vector<std::string>{"dropped 1"});
+  }
+}
+
+TEST_CASE("a data phase with no acknowledged address answers NACK or 0xFF and logs nothing")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(0x43, false, base, 1);
+    r.write(0x11, base, 2);
+    r.read(true, base, 3);
+    r.stop(base + 3 * target_ps, 4);
+    r.start(own, false, base + 3 * target_ps, 5);
+    r.run_until(base + 4 * target_ps + us);
+    r.rcc_pulse();
+    r.listen();
+    auto const later = r.now() + us;
+    r.write(0x22, later, 6);
+    r.read(false, later, 7);
+    r.run_until(later + 2 * target_ps + us);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, false, 0xFF, base + target_ps     },
+            {2, on_write,   false, 0xFF, base + 2 * target_ps },
+            {3, on_read,    true,  0xFF, base + 3 * target_ps },
+            {5, on_address, true,  0xFF, base + 4 * target_ps },
+            {6, on_write,   false, 0xFF, later + target_ps    },
+            {7, on_read,    false, 0xFF, later + 2 * target_ps},
+    });
+    CHECK(r.warnings("RXDR") == 0);
+  }
+}
+
+TEST_CASE("data phases after an acknowledged address log once as not modelled, strict refuses")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.write(0x11, base, 2);
+    r.read(true, base, 3);
+    r.run_until(base + 3 * target_ps + us);
+    CHECK(r.sink->log == std::vector<std::string>{"answer 1 ack", "answer 2 nack", "answer 3 ack"});
+    CHECK(r.sink->answers[2].byte == 0xFF);
+    CHECK(r.warnings("RXDR") == 1);
+    target_rig strict{part, true};
+    strict.listen();
+    auto const at = strict.now() + us;
+    strict.start(own, false, at, 1);
+    strict.write(0x11, at, 2);
+    CHECK_THROWS_AS(
+        std::ignore = strict.f->run(
+            {.max_instructions = icount{1'000'000'000}, .until_time = vtime{at + 2 * target_ps}}),
+        popcorn::model_error);
+    CHECK(strict.sink->answers.size() == 2);
+  }
+}
+
+TEST_CASE("a 10-bit own address logs once as not modelled and is never matched, strict refuses")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen();
+    b.set("OAR1", "OA1EN", 0);
+    b.set("OAR1", "OA1MODE", 1);
+    b.set("OAR1", "OA1EN", 1);
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.stop(base + target_ps, 2);
+    r.start(own, false, base + target_ps, 3);
+    r.run_until(base + 2 * target_ps + us);
+    CHECK(r.sink->log == std::vector<std::string>{"answer 1 nack", "answer 3 nack"});
+    CHECK(r.warnings("OAR1") == 1);
+    target_rig strict{part, true};
+    strict.listen();
+    strict.b().set("OAR1", "OA1EN", 0);
+    strict.b().set("OAR1", "OA1MODE", 1);
+    strict.b().set("OAR1", "OA1EN", 1);
+    auto const at = strict.now() + us;
+    strict.start(own, false, at, 1);
+    CHECK_THROWS_AS(
+        std::ignore = strict.f->run(
+            {.max_instructions = icount{1'000'000'000}, .until_time = vtime{at + 2 * target_ps}}),
+        popcorn::model_error);
+  }
+}
+
+TEST_CASE("OAR1 and OAR2 keep their address bits while enabled, one warning, strict refuses")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const strict : {false, true})
+    {
+      CAPTURE(strict);
+      target_rig r{part, strict};
+      auto const b = r.b();
+      r.listen();
+      b.set("OAR2", "OA2", 0x30);
+      b.set("OAR2", "OA2EN", 1);
+      auto&      regs           = r.f->target->peripheral("I2C1");
+      auto*      model          = r.f->target->model("I2C1");
+      auto const firmware_write = [&](std::string_view name, std::uint32_t value) {
+        auto const offset = b.reg("I2C1", name).offset;
+        return model->on_write(
+            regs, offset, 4, regs.peek(offset), value, {.pc = 0, .now = icount{0}});
+      };
+      auto const oar1 = (1u << 15) | (0x50u << 1);
+      auto const oar2 = (1u << 15) | (3u << 8) | (0x31u << 1);
+      if(strict)
+      {
+        CHECK_THROWS_AS(std::ignore = firmware_write("OAR1", oar1), popcorn::model_error);
+        CHECK(r.get("OAR1", "OA1") == own << 1);
+        continue;
+      }
+      REQUIRE(firmware_write("OAR1", oar1).has_value());
+      REQUIRE(firmware_write("OAR2", oar2).has_value());
+      CHECK(r.get("OAR1", "OA1") == own << 1);
+      CHECK(r.get("OAR2", "OA2") == 0x30);
+      CHECK(r.get("OAR2", "OA2MSK") == 0);
+      CHECK(r.warnings("OAR1") + r.warnings("OAR2") == 1);
+      b.write(b.at("I2C1", "OAR1"), oar1);
+      CHECK(r.get("OAR1", "OA1") == own << 1);
+      REQUIRE(firmware_write("OAR1", 0).has_value());
+      REQUIRE(firmware_write("OAR1", oar1).has_value());
+      CHECK(r.get("OAR1", "OA1") == 0x50u << 1);
+      CHECK(r.warnings("OAR1") + r.warnings("OAR2") == 1);
+    }
+  }
+}
+
+TEST_CASE("a START the firmware requests during the controller's transfer is sent at its STOP")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen();
+    write_timing(b);
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.stop(base + target_ps + 20 * us, 2);
+    r.run_until(base + target_ps / 2);
+    b.command(0x38, 0, false, true);
+    CHECK(due_of_kind(*r.f, "I2C1", 0) == std::nullopt);
+    r.run_until(base + target_ps + 10 * us);
+    CHECK(r.get("ISR", "BUSY") == 1);
+    CHECK(due_of_kind(*r.f, "I2C1", 0) == std::nullopt);
+    r.run_until(base + target_ps + 20 * us + r.period());
+    auto const due = due_of_kind(*r.f, "I2C1", 0);
+    REQUIRE(due.has_value());
+    CHECK(*due > base + target_ps + 20 * us);
+    CHECK(r.get("ISR", "BUSY") == 1);
+  }
+}
+
+TEST_CASE("the last port unit survives a reset")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.port().drop(on_write, vtime{r.now()}, wire, 5);
+    r.reset(popcorn::reset_kind::software);
+    CHECK_THROWS_AS(r.port().drop(on_write, vtime{0}, wire, 5), std::invalid_argument);
+    r.port().drop(on_write, vtime{0}, wire, 6);
+    CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.last_unit") == 6);
+  }
+}
+
+TEST_CASE("1000 port drops leave no entry behind, the port holds at most max_entries entries")
+{
+  target_rig r;
+  auto const base = r.now() + us;
+  for(std::uint64_t unit = 1; unit <= 1000; ++unit)
+  {
+    r.port().drop(on_read, vtime{base}, wire, unit);
+  }
+  r.run_until(base + us);
+  CHECK(r.sink->drops.size() == 1000);
+  CHECK(port_due(*r.f).empty());
+  CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.entries.0.unit") == std::nullopt);
+  auto const later = r.now() + us;
+  for(std::uint64_t unit = 1001; unit < 1001 + periph::i2c_controller_port::max_entries; ++unit)
+  {
+    r.port().drop(on_read, vtime{later}, wire, unit);
+  }
+  CHECK_THROWS_AS(r.port().drop(on_read, vtime{later}, wire, 9999), popcorn::config_error);
+}
+
+TEST_CASE("a snapshot mid address phase with a drop pending restores the same answers")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.rcc_pulse();
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.drop(on_read, base + 200 * us, 2);
+    r.stop(base + target_ps, 3);
+    r.run_until(base + target_ps / 2);
+    REQUIRE(r.sink->log.empty());
+    auto const saved = core::encode_snapshot(r.f->target->snapshot().data());
+    auto const bytes = r.model_bytes();
+    r.run_until(base + 300 * us);
+    auto const log = r.sink->log;
+    REQUIRE(log == std::vector<std::string>{"answer 1 ack", "dropped 2"});
+
+    target_rig other{part};
+    other.f->target->restore(core::snapshot{core::decode_snapshot(saved)});
+    CHECK(other.model_bytes() == bytes);
+    other.run_until(base + 300 * us);
+    CHECK(other.sink->log == log);
+    CHECK(other.sink->drops == r.sink->drops);
+    CHECK(other.get("ISR", "STOPF") == 1);
+  }
+}
+
+TEST_CASE("a snapshot holding port entries is refused by an I2C with no controller, unchanged")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.run_until(base + target_ps / 2);
+    auto const saved = core::encode_snapshot(r.f->target->snapshot().data());
+    target_rig none{part, false, false};
+    auto const before = none.model_bytes();
+    auto const own    = core::encode_snapshot(none.f->target->snapshot().data());
+    CHECK_THROWS_AS(
+        none.f->target->restore(core::snapshot{core::decode_snapshot(saved)}),
+        popcorn::config_error);
+    CHECK(none.model_bytes() == before);
+    none.f->target->restore(core::snapshot{core::decode_snapshot(own)});
+    CHECK(none.model_bytes() == before);
+    none.run_until(none.now() + 2 * target_ps);
+    CHECK(none.sink->log.empty());
+  }
+}
+
+TEST_CASE("an RCC reset after a phase end keeps its wire end, a later phase queued either side")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    std::vector<std::vector<lost>>      drops;
+    std::vector<std::vector<std::byte>> bytes;
+    std::uint64_t                       reset_at = 0;
+    std::uint64_t                       end_at   = 0;
+    for(bool const after : {false, true})
+    {
+      CAPTURE(after);
+      target_rig r{part};
+      r.listen();
+      r.run_until(r.now() + 100 * us);
+      auto const now = r.now();
+      auto const end = now - 3 * r.period();
+      reset_at       = now;
+      end_at         = end;
+      r.start(own, false, end - target_ps, 1);
+      if(not after)
+      {
+        r.write(0x11, end - target_ps, 2);
+      }
+      r.rcc_pulse();
+      if(after)
+      {
+        r.write(0x11, end - target_ps, 2);
+      }
+      bytes.push_back(r.model_bytes());
+      r.run_until(end + 3 * target_ps);
+      drops.push_back(r.sink->drops);
+    }
+    CHECK(drops[0] == drops[1]);
+    CHECK(bytes[0] == bytes[1]);
+    CHECK(
+        drops[0]
+        == std::vector<lost>{
+            {1, on_address, reset_at          },
+            {2, on_write,   end_at + target_ps}
+    });
+  }
+}
+
+TEST_CASE("the general call acknowledges the address byte 0b00000000 only, never 0b00000001")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen();
+    b.set("CR1", "ADDRACLR", 0);
+    b.set("CR1", "GCEN", 1);
+    auto const base = r.now() + us;
+    r.start(0x00, true, base, 1);
+    r.stop(base + target_ps, 2);
+    r.start(0x00, false, base + 2 * target_ps, 3);
+    r.run_until(base + 3 * target_ps + us);
+    CHECK(r.sink->log == std::vector<std::string>{"answer 1 nack", "answer 3 ack"});
+    CHECK(r.get("ISR", "DIR") == 0);
+    r.stop(r.now(), 4);
+    r.run_until(r.now() + us);
+    b.set("ICR", "ADDRCF", 1);
+    r.start(0x00, true, r.now() + us, 5);
+    r.run_until(r.now() + target_ps + 2 * us);
+    CHECK(r.sink->log.back() == "answer 5 nack");
+    CHECK(r.get("ISR", "ADDR") == 0);
+  }
+}
+
+TEST_CASE("an address phase whose START came while PE was clear answers NACK")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    auto const b = r.b();
+    r.listen();
+    b.set("CR1", "ADDRACLR", 0);
+    b.set("CR1", "PE", 0);
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.run_until(base + target_ps / 2);
+    b.set("CR1", "PE", 1);
+    r.run_until(base + target_ps + us);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, false, 0xFF, base + target_ps}
+    });
+    CHECK(r.get("ISR", "ADDR") == 0);
+    CHECK(r.get("ISR", "BUSY") == 0);
+  }
+}
+
+TEST_CASE("a phase a machine reset drops holds the wire to its end in the new base")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.after_system_reset();
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.run_until(base + target_ps / 2);
+    auto const at_reset = r.now();
+    r.reset(popcorn::reset_kind::software);
+    r.listen();
+    r.write(0x11, 0, 2);
+    auto const rebased = base + target_ps - at_reset;
+    r.run_until(rebased + target_ps + us);
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {1, on_address, rebased}
+    });
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {2, on_write, false, 0xFF, rebased + target_ps}
+    });
+  }
+}
+
+TEST_CASE("each RCC reset leaves one stale I2C port event, gone once the phase's due passes")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const base = r.now() + 1'000 * us;
+    r.start(own, false, base, 1);
+    REQUIRE(port_due(*r.f).size() == 1);
+    for(int pulse = 0; pulse < 1000; ++pulse)
+    {
+      r.rcc_pulse();
+    }
+    CHECK(port_due(*r.f).size() == 1 + 1000);
+    r.listen();
+    r.run_until(base + target_ps + us);
+    CHECK(port_due(*r.f).empty());
+    CHECK(r.sink->answers.size() == 1);
+  }
 }

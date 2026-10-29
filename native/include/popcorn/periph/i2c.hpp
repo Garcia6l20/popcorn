@@ -138,4 +138,173 @@ public:
    */
   virtual void load(std::span<std::byte const> in) = 0;
 };
+
+/** @brief The bus phase of a unit an i2c_controller_port queues. */
+enum class[[= reflex::derive{reflex::Format}]] i2c_phase : std::uint8_t
+{
+  address,
+  write,
+  read,
+};
+
+/** @brief What the I2C model of an instance answers its controller for one phase. */
+struct i2c_answer
+{
+  /** @brief Whether the MCU acknowledged the address or the written byte. A read phase carries
+   * the acknowledge its controller queued. */
+  bool ack{};
+  /** @brief The byte the MCU sent in a read phase, 0xFF for the other phases. */
+  std::uint8_t byte{0xFF};
+  /** @brief The error the phase ends with, none by default. */
+  i2c_error error{};
+};
+
+/**
+ * @brief A controller on an I2C bus, outside the MCU, addressing an I2C in target mode. It
+ *        queues phases through the instance's i2c_controller_port and hears each phase back
+ *        here, on the machine thread. One per I2C instance, none next to i2c_target targets.
+ *        Times are the machine's time since its last reset.
+ */
+class POPCORN_API i2c_controller_sink
+{
+public:
+  /** @brief Creates the controller. */
+  i2c_controller_sink() = default;
+  /** @brief Not copyable. */
+  i2c_controller_sink(i2c_controller_sink const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(i2c_controller_sink const&) -> i2c_controller_sink& = delete;
+  /** @brief Not movable. */
+  i2c_controller_sink(i2c_controller_sink&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(i2c_controller_sink&&) -> i2c_controller_sink& = delete;
+  /** @brief Destroys the controller. */
+  virtual ~i2c_controller_sink();
+
+  /**
+   * @brief One phase ended and the MCU answered it.
+   * @param unit The unit the phase was queued with.
+   * @param phase The phase.
+   * @param answer The MCU's acknowledge or byte.
+   * @param at Machine time since reset at the end of the phase.
+   */
+  virtual void answered(std::uint64_t unit, i2c_phase phase, i2c_answer answer, vtime at) = 0;
+
+  /**
+   * @brief A phase or unit the I2C model will never answer, reported once, on the machine
+   *        thread, from the event of the lane the unit was queued on. A reset of the target, a
+   *        STOP due before the phase's end or i2c_controller_port::drop() drops a unit. Its
+   *        undriven answer is NACK for an address or a written byte, 0xFF for a read byte. The
+   *        default does nothing.
+   * @param unit The unit the phase was queued with.
+   * @param phase The phase.
+   * @param at Machine time since reset at which the unit is reported: the phase's end, or the
+   *        reset's time when that is later, or the STOP's time, or the time drop() gave.
+   */
+  virtual void dropped(
+      [[maybe_unused]] std::uint64_t unit,
+      [[maybe_unused]] i2c_phase     phase,
+      [[maybe_unused]] vtime         at)
+  {}
+};
+
+/**
+ * @brief What the I2C model of an instance offers the i2c_controller_sink attached to it. Each
+ *        primitive carries a @p unit strictly above the one before. The port runs the entries
+ *        due at one instruction count in unit order, after the events of lower lanes, whatever
+ *        order they were queued in. A due time in the past keeps its own instruction count. SCL
+ *        stays low between phases until the next one starts.
+ */
+class POPCORN_API i2c_controller_port
+{
+public:
+  /** @brief Most entries queued at once. */
+  static constexpr std::size_t max_entries = 4096;
+
+  /**
+   * @brief Queues a START, or a repeated START when no stop() came before it, and the address
+   *        byte, on @p lane, from the latest of @p at, the end of every phase queued before it
+   *        and the time of every queued stop(). A phase whose start is at or before the last RCC
+   *        reset of the instance is dropped, reported at the later of its end and that reset. A
+   *        phase a reset drops still holds the wire until its end, rebased by a machine reset.
+   * @param address 7-bit address, 0 to 0x7F.
+   * @param read Whether the controller reads from the MCU.
+   * @param phase_ps Length of the phase, the START, eight address bits and the acknowledge, at
+   *        least 1.
+   * @param at Machine time since reset of the earliest start.
+   * @param lane Delivery lane, 1 and up.
+   * @param unit Unit number.
+   * @throws config_error When no controller is attached to the instance, or the port would hold
+   *         more than max_entries entries.
+   * @throws std::invalid_argument When @p lane is 0, @p unit is not above the last unit, an
+   *         argument is out of its range or the phase ends past the time range.
+   */
+  virtual void start(
+      std::uint8_t  address,
+      bool          read,
+      std::uint64_t phase_ps,
+      vtime         at,
+      std::uint32_t lane,
+      std::uint64_t unit) = 0;
+
+  /**
+   * @brief Queues one byte the controller writes, as start() places it.
+   * @param byte The byte.
+   * @param phase_ps Length of the phase, eight bits and the acknowledge, at least 1.
+   * @param at Machine time since reset of the earliest start.
+   * @param lane Delivery lane, 1 and up.
+   * @param unit Unit number.
+   * @throws config_error As start().
+   * @throws std::invalid_argument As start().
+   */
+  virtual void write(
+      std::uint8_t  byte,
+      std::uint64_t phase_ps,
+      vtime         at,
+      std::uint32_t lane,
+      std::uint64_t unit) = 0;
+
+  /**
+   * @brief Queues one byte the controller reads, as start() places it.
+   * @param ack The acknowledge the controller gives the byte.
+   * @param phase_ps Length of the phase, eight bits and the acknowledge, at least 1.
+   * @param at Machine time since reset of the earliest start.
+   * @param lane Delivery lane, 1 and up.
+   * @param unit Unit number.
+   * @throws config_error As start().
+   * @throws std::invalid_argument As start().
+   */
+  virtual void
+      read(bool ack, std::uint64_t phase_ps, vtime at, std::uint32_t lane, std::uint64_t unit) = 0;
+
+  /**
+   * @brief Queues a STOP at the later of @p at and the last RCC reset of the instance, on
+   *        @p lane. Every phase of a lower unit still queued or running then is dropped and
+   *        reported at that time. A unit already dropped keeps its own report time. A member or
+   *        machine reset of the target removes every queued STOP.
+   * @param at Machine time since reset.
+   * @param lane Delivery lane, 1 and up.
+   * @param unit Unit number.
+   * @throws config_error As start().
+   * @throws std::invalid_argument When @p lane is 0 or @p unit is not above the last unit.
+   */
+  virtual void stop(vtime at, std::uint32_t lane, std::uint64_t unit) = 0;
+
+  /**
+   * @brief Queues a unit the caller knows is lost, reported through
+   *        i2c_controller_sink::dropped() at the later of @p at and the last RCC reset of the
+   *        instance.
+   * @param phase The phase the unit was.
+   * @param at Machine time since reset.
+   * @param lane Delivery lane, 1 and up.
+   * @param unit Unit number.
+   * @throws config_error As start().
+   * @throws std::invalid_argument As stop(), or when @p phase is out of its range.
+   */
+  virtual void drop(i2c_phase phase, vtime at, std::uint32_t lane, std::uint64_t unit) = 0;
+
+protected:
+  /** @brief Destroyed through its model only. */
+  virtual ~i2c_controller_port();
+};
 }

@@ -1,3 +1,4 @@
+#include "i2c_target.h"
 #include "periph_test.h"
 #include "stm32u5xx_ll_bus.h"
 #include "stm32u5xx_ll_dma.h"
@@ -41,6 +42,11 @@ void idle(void)
 
 void I2C1_EV_IRQHandler(void)
 {
+  if(i2c_target_active)
+  {
+    i2c_target_event();
+    return;
+  }
   ++event_entries;
   if(LL_I2C_IsActiveFlag_NACK(I2C1))
   {
