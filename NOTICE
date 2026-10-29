@@ -91,6 +91,112 @@ Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
   - tests/unit/test_mem.c: added test_mem_write_hook_flush_tlb, the
     test_mem_hook tests, the test_mem_alias tests and the test_mem_slow_path
     tests.
+  2026-10-16, Sylvain Garcia <garcia.6l20@gmail.com>:
+  - qemu/target/arm/helper.c, include/unicorn/unicorn.h,
+    include/unicorn/arm.h, include/uc_priv.h, uc.c: re-enabled the v8-M
+    security attribution lookup through the SAU, with v8m_is_sau_exempt from
+    upstream QEMU, and replaced its IDAU call by a host callback set with
+    UC_CTL_ARM_IDAU. Added UC_CTL_ARM_SECURITY, off by default, which turns
+    the lookup on. Upstream compiles the lookup out, so every address of a
+    core with the Security Extension is Secure.
+  - include/unicorn/arm.h, qemu/target/arm/unicorn_arm.c, internals.h,
+    m_helper.c, qemu/arm.h, qemu/aarch64.h, symbols.sh: added host access to
+    the v8-M security state, UC_ARM_REG_SECURE, the SAU registers SAU_CTRL,
+    SAU_RNR, SAU_RBAR and SAU_RLAR, the FP context registers CPACR_S,
+    CPACR_NS, FPCCR_S and FPCCR_NS, NSACR, the special registers MSP, PSP,
+    CONTROL, PRIMASK, BASEPRI, FAULTMASK, MSPLIM and PSPLIM of each security
+    state with the suffixes _S and _NS, and the read-only abort status and
+    address FAULT_STATUS and FAULT_ADDRESS. A SECURE write switches the
+    security state and its stack pointer banks, an SAU write flushes the
+    TLB. Upstream has no register id for them.
+  - include/unicorn/unicorn.h, include/uc_priv.h, uc.c,
+    qemu/softmmu/memory.c, qemu/include/exec/memory.h,
+    qemu/unicorn_common.h, qemu/accel/tcg/cputlb.c: added
+    uc_mmio_map_attrs, MMIO callbacks that receive the security and
+    privilege attributes of each access, uc_mem_read_attrs and
+    uc_mem_write_attrs, host accesses with given attributes, and
+    UC_CTL_UC_REFUSE_MMIO, with which such a callback refuses the access it
+    serves, raising a precise data abort. Upstream passes no attributes to
+    MMIO callbacks and completes every access.
+  - qemu/accel/tcg/cputlb.c, qemu/target/arm/tlb_helper.c, cpu.c,
+    qemu/include/exec/cpu-defs.h, qemu/include/hw/core/cpu.h,
+    include/unicorn/unicorn.h, include/uc_priv.h, uc.c: added
+    uc_ctl_bus_filter, ARM only, a host policy asked at each TLB fill of a
+    RAM page. Its verdict sends the page's data accesses to a host callback,
+    which allows them, reads them as zero and drops stores, or faults them,
+    and can deny instruction fetches from the page. Upstream sends RAM
+    accesses to no host callback but memory hooks.
+  - qemu/accel/tcg/translate-all.c: uc_ctl_remove_cache finds the RAM
+    address of an M-profile range through the address space, with no fetch
+    TLB fill. Upstream fills the fetch TLB in the current security state,
+    which faults and removes nothing for a range that state cannot fetch.
+  - bindings/: regenerated the constant files of the dotnet, go, java,
+    pascal, python, ruby and zig bindings with the new ids, and with
+    UC_HOOK_BLOCK_ICOUNT and UC_CTL_UC_SLOW_PATH_COUNT, which they lacked.
+  - tests/unit/test_arm.c: added the test_arm_v8m tests, the bus filter
+    tests, the attribute MMIO tests and the test_arm_mmio_refuse tests.
+  2026-10-17, Sylvain Garcia <garcia.6l20@gmail.com>:
+  - qemu/target/arm/helper.c, qemu/target/arm/unicorn_arm.c: a Non-secure
+    FP instruction with NSACR.CP10 clear raises a NOCP UsageFault to Secure
+    state, and a UC_ARM_REG_NSACR write rebuilds the hflags. Upstream runs
+    the instruction on the Secure FP registers.
+  - qemu/accel/tcg/translate-all.c, cpu-exec.c, cputlb.c,
+    qemu/target/arm/translate.c, translate.h, tlb_helper.c, helper.c,
+    internals.h, qemu/include/exec/exec-all.h, cpu-defs.h,
+    qemu/include/tcg/tcg.h, the per-architecture symbol headers in qemu/,
+    symbols.sh, include/unicorn/unicorn.h, include/uc_priv.h: a code page
+    split by a small SAU region or by a bus filter verdict is translated by
+    fetch window, the run of addresses that share one fetch verdict. A
+    block that runs past its window end or into a page with no cached code
+    runs once and is not cached. A fetch generation bumped by each TLB
+    flush retires the blocks of split pages at their next lookup. Added the
+    bus filter verdict UC_BUS_FETCH_EACH and the UC_BUS_FETCH_WINDOW()
+    field. Upstream translates past an SAU region boundary inside a page
+    and raises the fetch fault of the instruction past it at the first
+    instruction of the block.
+  - qemu/accel/tcg/cputlb.c: the bus filter judges a load before its
+    UC_HOOK_MEM_READ hooks, and the load and store helpers look their TLB
+    entry up again after a memory hook callback ran. Upstream keeps the
+    entry pointer across the hooks, which a hook that flushes and resizes
+    the TLB leaves pointing into freed memory.
+  - qemu/accel/tcg/cputlb.c, translate-all.c, qemu/exec.c,
+    qemu/softmmu/memory.c, qemu/target/arm/helper.c, tlb_helper.c,
+    qemu/unicorn_common.h, qemu/include/qemu/compiler.h: placed the TLB
+    fill path in a .text.hot.qemu section on ELF targets, and moved the bus
+    filter's store value out of the store_helper frame, which keeps the
+    stack protector off store_helper.
+  - include/unicorn/unicorn.h, include/uc_priv.h, uc.c,
+    qemu/accel/tcg/translate-all.c: added the read-only
+    UC_CTL_TB_TRANSLATIONS and UC_CTL_TB_FLUSHES, counts of translated
+    blocks and of translation buffer flushes, for tests. Documented that
+    IDAU regions cover whole TLB pages and that a host which changes a
+    fetch verdict, a fetch window or the SAU from a callback ends the run
+    after the change.
+  - bindings/const_generator.py: skips function-like macros.
+  - bindings/: regenerated the constant files of the seven bindings with
+    the new ids.
+  - tests/unit/test_arm.c: added the split page, fetch-each, straddle,
+    read hook flush and translation count tests.
+  2026-10-18, Sylvain Garcia <garcia.6l20@gmail.com>:
+  - qemu/accel/tcg/cputlb.c: moved the bus filter's load value out of the
+    load_helper frame, and built load_helper without the stack protector
+    when UC_LOAD_HELPER_NO_STACK_PROTECTOR is defined.
+  - tests/unit/test_arm.c: added test_arm_read_hook_flush_resize and
+    test_arm_bus_filter_read_hook_installs.
+  2026-10-22, Sylvain Garcia <garcia.6l20@gmail.com>:
+  - qemu/accel/tcg/cputlb.c, translate-all.c, translate-all.h: a store to
+    a RAM page that holds no translated code cleans its TLB entry, so later
+    stores take the fast path, and the first block translated from the page
+    sends stores through every window over its host memory to the slow path
+    again. Upstream sends every store to executable RAM through the slow
+    path.
+  - tests/unit/test_mem.c: added the store fast path tests.
+  2026-10-23, Sylvain Garcia <garcia.6l20@gmail.com>:
+  - qemu/accel/tcg/translate-all.c: a block from a page whose code TLB
+    entry was never filled is left out of the one-instruction limit of
+    split pages.
+  - tests/unit/test_arm.c: test_arm_exit_after_insn_other_arch runs its
+    X86 and ARM64 legs only when those architectures are built.
   License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
   are under LGPL-2.1-or-later, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
   target only and linked statically into the extension with hidden symbols.
