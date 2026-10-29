@@ -1,36 +1,113 @@
-"""Descriptions shipped in the package as `.json.xz`, and the lookup order of a part's
-description: description directories, then the shipped file, then a local build."""
+"""Descriptions shipped in the package as layers, and the lookup order of a part's description:
+description directories, then the shipped layers, then a local build."""
 
 import hashlib
+import json
 import lzma
 import os
 import re
 import time
 from pathlib import Path
+from typing import Any, cast
 
 from popcorn._errors import absent
 from popcorn.stm32.description._binder import check_bounds, dump_json
 from popcorn.stm32.description._builder import build_description
 from popcorn.stm32.description._cache import cached_description, default_cache_dir
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
+from popcorn.stm32.description._layers import (
+    LAYER_FORMAT,
+    compose,
+    dump,
+    family_name,
+    file_names,
+    line_name,
+)
 from popcorn.stm32.description._sources import match_refname, pin_data_sources
 
 SHIPPED_DIR = Path(__file__).parents[1] / "data"
-"""Directory of the shipped `<RefName>[-<core>].json.xz` descriptions."""
+"""Directory of the shipped layers, `<line>.parts.json.xz`, `<line>.line.json.xz` and
+`<family>.blocks.json.xz`, described in `_layers`."""
 
 MAX_SHIPPED_BYTES = 64 * 1024 * 1024
-"""Largest decompressed shipped description, 12 times the 5.1 MB of the STM32U575QGIx one."""
+"""Largest decompressed layer file and largest composed description, 12 times the 5.1 MB of the
+STM32U575QGIx description."""
 
 STALE_SECONDS = 7 * 24 * 3600
-"""Age after which a decompressed shipped description of another xz version is removed."""
+"""Age after which a composed shipped description of other layer versions is removed."""
 
 DESCRIPTION_DIRS_VARIABLE = "POPCORN_STM32_DESCRIPTION_DIRS"
 BUILD_VARIABLE = "POPCORN_STM32_BUILD"
 
+_PARTS_SUFFIX = ".parts.json.xz"
 
-def shipped_names() -> list[str]:
-    """Stems of the shipped descriptions, `<RefName>[-<core>]`, sorted."""
-    return sorted(path.name.removesuffix(".json.xz") for path in SHIPPED_DIR.glob("*.json.xz"))
+
+def _layer(data: bytes, *, file: str, kind: str) -> tuple[dict[str, Any], bytes]:
+    raw = bounded_xz(data, MAX_SHIPPED_BYTES, file=file)
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise DescriptionError(file, 0, "<root>", "valid JSON") from exc
+    if not isinstance(value, dict):
+        raise DescriptionError(file, 0, "<root>", f"a {kind} layer object")
+    layer = cast(dict[str, Any], value)
+    if layer.get("format") != LAYER_FORMAT:
+        raise DescriptionError(file, 0, "format", f"layer format {LAYER_FORMAT}")
+    return layer, raw
+
+
+def _names_in(path: Path) -> list[str]:
+    layer, _ = _layer(path.read_bytes(), file=str(path), kind="parts")
+    deltas = layer.get("parts")
+    if not isinstance(deltas, dict):
+        raise DescriptionError(str(path), 0, "parts", "an object")
+    return list(cast(dict[str, Any], deltas))
+
+
+def shipped_names(directory: Path | None = None) -> list[str]:
+    """Names of the shipped parts, `<RefName>[-<core>]`, the keys of `parts` of every parts
+    layer in @p directory, SHIPPED_DIR by default, sorted."""
+    directory = SHIPPED_DIR if directory is None else directory
+    return sorted(name for path in directory.glob(f"*{_PARTS_SUFFIX}") for name in _names_in(path))
+
+
+def _layer_paths(name: str, directory: Path) -> tuple[Path, Path, Path]:
+    parts, line, family = file_names(line_name(name), family_name(name))
+    return directory / parts, directory / line, directory / family
+
+
+def _read(paths: tuple[Path, Path, Path]) -> tuple[bytes, ...]:
+    packed: list[bytes] = []
+    for path in paths:
+        try:
+            packed.append(path.read_bytes())
+        except FileNotFoundError as exc:
+            raise DescriptionError(str(path), 0, "<root>", "a shipped layer file") from exc
+    return tuple(packed)
+
+
+def _compose_packed(name: str, paths: tuple[Path, Path, Path], packed: tuple[bytes, ...]) -> str:
+    files = cast(tuple[str, str, str], tuple(str(path) for path in paths))
+    parts, _ = _layer(packed[0], file=files[0], kind="parts")
+    line, line_raw = _layer(packed[1], file=files[1], kind="line")
+    family, _ = _layer(packed[2], file=files[2], kind="family")
+    if parts.get("line_sha256") != hashlib.sha256(line_raw).hexdigest():
+        raise DescriptionError(files[0], 0, "line_sha256", f"the SHA-256 of {files[1]}")
+    return dump(compose(name, parts, line, family, limit=MAX_SHIPPED_BYTES, files=files))
+
+
+def compose_shipped(name: str, directory: Path | None = None) -> str:
+    """JSON text of the description of the shipped part @p name, `<RefName>[-<core>]`, its delta
+    in its line's parts layer over its line layer over its family's blocks, in @p directory,
+    SHIPPED_DIR by default. The text is what dump_json writes for the same description.
+
+    DescriptionError naming the file for a layer that is not one complete xz stream of at most
+    MAX_SHIPPED_BYTES, a layer of another format, a `line_sha256` that is not the SHA-256 of the
+    decompressed line layer, and every refusal of `_layers.compose`: a missing or tampered
+    block, an unknown instance, a composition above MAX_SHIPPED_BYTES counted before it is
+    built, a missing layer file."""
+    paths = _layer_paths(name, SHIPPED_DIR if directory is None else directory)
+    return _compose_packed(name, paths, _read(paths))
 
 
 def _match(part: str, core: str | None, stems: list[str], *, file: str) -> str | None:
@@ -66,20 +143,25 @@ def bounded_xz(data: bytes, limit: int, *, file: str) -> bytes:
 def shipped_description(
     part: str, *, core: str | None = None, cache_dir: Path | None = None
 ) -> Path | None:
-    """Path of the decompressed shipped description of @p part, None when none ships.
+    """Path of the composed shipped description of @p part, None when none ships.
 
-    Decompressed once into `<cache>/shipped/<name>-<sha16>.json`, sha16 the first 16 hex digits
-    of the SHA-256 of the `.json.xz`. The cache is shared by every popcorn of the user, so each
-    xz version keeps its own file: a hit refreshes its mtime when the cache is writable, and a
-    write removes the files of the same name and another version unused for STALE_SECONDS, except
-    a file the directory's sticky bit keeps for its owner.
-    Bound: one file per shipped name per xz version used in the last 7 days."""
+    Composed once into `<cache>/shipped/<name>-<sha16>.json`, sha16 the first 16 hex digits of
+    the SHA-256 over the xz bytes of the part's parts, line and family layers, in that order. A
+    change to any part of a line renames the cache file of every part of the line. The cache is
+    shared by every popcorn of the user, so each layer version keeps its own file: a hit
+    refreshes its mtime when the cache is writable, and a write removes the files of the same
+    name and another version unused for STALE_SECONDS, except a file the directory's sticky bit
+    keeps for its owner. Bound: one file per shipped name per layer version used in the last 7
+    days."""
     name = _match(part, core, shipped_names(), file=str(SHIPPED_DIR))
     if name is None:
         return None
-    packed_path = SHIPPED_DIR / f"{name}.json.xz"
-    packed = packed_path.read_bytes()
-    digest = hashlib.sha256(packed).hexdigest()[:16]
+    paths = _layer_paths(name, SHIPPED_DIR)
+    packed = _read(paths)
+    hasher = hashlib.sha256()
+    for data in packed:
+        hasher.update(data)
+    digest = hasher.hexdigest()[:16]
     directory = (cache_dir or default_cache_dir()) / "shipped"
     path = directory / f"{name}-{digest}.json"
     try:
@@ -92,7 +174,7 @@ def shipped_description(
         raise
     else:
         return path
-    data = bounded_xz(packed, MAX_SHIPPED_BYTES, file=str(packed_path))
+    data = _compose_packed(name, paths, packed).encode("ascii")
     directory.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
     try:
@@ -143,7 +225,7 @@ def description_path(
 
     1. `<RefName>[-<core>].json` in a directory of POPCORN_STM32_DESCRIPTION_DIRS, an os.pathsep
        list searched in order, the part matched as the db matches it.
-    2. The shipped description, unless @p svd, @p cubemx_db or @p cmsis_header is given or
+    2. The shipped layers, unless @p svd, @p cubemx_db or @p cmsis_header is given or
        POPCORN_STM32_BUILD is `local`.
     3. A description built from ST's files and cached, cached_description.
 
@@ -202,9 +284,3 @@ def build_shipped(part: str, *, pin_data: Path, core: str | None = None) -> tupl
         text.encode("utf-8"), format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC64, preset=9
     )
     return name, packed
-
-
-def shipped_text(packed: bytes, *, file: str) -> str:
-    """JSON text of the shipped description bytes @p packed, decompressed under
-    MAX_SHIPPED_BYTES, errors naming @p file."""
-    return bounded_xz(packed, MAX_SHIPPED_BYTES, file=file).decode("utf-8")

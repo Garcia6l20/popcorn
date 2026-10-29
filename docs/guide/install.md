@@ -57,7 +57,7 @@ A machine needs the description of its part: memory map, core, peripherals and i
 `popcorn.stm32.mcu(part)` returns it.
 
 Shipped parts need no ST tool. popcorn ships the parts on the [Parts](../support/generated/parts.md)
-page and decompresses each one on first use into `$XDG_CACHE_HOME/popcorn/mcu/shipped`,
+page and writes each one's description on first use into `$XDG_CACHE_HOME/popcorn/mcu/shipped`,
 `~/.cache` when the variable is unset.
 
 For another part, popcorn builds the description from ST's files on first use and caches it

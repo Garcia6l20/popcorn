@@ -1,7 +1,6 @@
 """CLI: python -m popcorn.stm32.description build|sources|golden|ship <part> [options]."""
 
 import argparse
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -10,7 +9,14 @@ from popcorn.stm32.description._builder import build_description_with_report
 from popcorn.stm32.description._cache import cached_description
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._golden import compute_golden, dump_tables, load_golden, write_golden
-from popcorn.stm32.description._shipped import SHIPPED_DIR, build_shipped, shipped_text
+from popcorn.stm32.description._shipped import (
+    MAX_SHIPPED_BYTES,
+    SHIPPED_DIR,
+    bounded_xz,
+    build_shipped,
+    compose_shipped,
+    shipped_names,
+)
 from popcorn.stm32.description._sources import find_sources
 
 
@@ -78,45 +84,32 @@ def _cmd_golden(args: argparse.Namespace) -> int:
 
 
 def _cmd_ship(args: argparse.Namespace) -> int:
-    if args.out is None and not args.check:
-        print(
-            "ship: --out is required to write, the package data directory of the source tree",
-            file=sys.stderr,
-        )
+    if not args.check:
+        print("ship: only --check runs, this version writes no layer files", file=sys.stderr)
         return 1
     try:
         name, packed = build_shipped(args.part, pin_data=Path(args.pin_data), core=args.core)
     except DescriptionError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    out_dir = SHIPPED_DIR if args.out is None else Path(args.out)
-    path = out_dir / f"{name}.json.xz"
-    if args.check:
-        from popcorn._part_description import description_digest, parse_description
+    from popcorn._part_description import description_digest, parse_description
 
-        if not path.is_file():
-            print(f"{path}: no shipped description", file=sys.stderr)
-            return 1
-        fresh = description_digest(
-            parse_description(shipped_text(packed, file="fresh build"), "fresh build")
-        )
-        shipped = description_digest(
-            parse_description(shipped_text(path.read_bytes(), file=str(path)), str(path))
-        )
-        if fresh != shipped:
-            print(f"{path}: shipped {shipped}, fresh build {fresh}", file=sys.stderr)
-            return 1
-        print(path)
-        return 0
-    out_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    out_dir = SHIPPED_DIR if args.out is None else Path(args.out)
+    if name not in shipped_names(out_dir):
+        print(f"{out_dir}: no shipped description of {name}", file=sys.stderr)
+        return 1
     try:
-        tmp_path.write_bytes(packed)
-        os.replace(tmp_path, path)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
-    print(path)
+        fresh_text = bounded_xz(packed, MAX_SHIPPED_BYTES, file="fresh build").decode("utf-8")
+        shipped_text = compose_shipped(name, out_dir)
+    except DescriptionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    fresh = description_digest(parse_description(fresh_text, "fresh build"))
+    shipped = description_digest(parse_description(shipped_text, name))
+    if fresh != shipped:
+        print(f"{out_dir}: {name} shipped {shipped}, fresh build {fresh}", file=sys.stderr)
+        return 1
+    print(f"{out_dir}: {name} {shipped}")
     return 0
 
 
@@ -147,7 +140,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ship.add_argument("--core")
     ship.add_argument("--pin-data", required=True)
     ship.add_argument("--check", action="store_true")
-    ship.add_argument("--out", help="directory to write the .json.xz into, required unless --check")
+    ship.add_argument("--out", help="layer directory to check, the package data by default")
     ship.set_defaults(func=_cmd_ship)
 
     args = parser.parse_args(argv)

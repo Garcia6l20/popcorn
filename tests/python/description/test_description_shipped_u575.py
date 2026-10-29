@@ -12,10 +12,11 @@ import pytest
 from popcorn.stm32.description.__main__ import main
 from popcorn.stm32.description._errors import MissingSource
 from popcorn.stm32.description._shipped import (
-    SHIPPED_DIR,
+    MAX_SHIPPED_BYTES,
+    bounded_xz,
     build_shipped,
+    compose_shipped,
     shipped_names,
-    shipped_text,
 )
 from popcorn.stm32.description._sources import compute_source_digests, pin_data_sources
 
@@ -33,8 +34,8 @@ def _pin_data() -> Path:
     return Path(value)
 
 
-def _sources_of(path: Path) -> dict[str, str]:
-    data = cast(dict[str, object], json.loads(shipped_text(path.read_bytes(), file=str(path))))
+def _sources_of(name: str) -> dict[str, str]:
+    data = cast(dict[str, object], json.loads(compose_shipped(name)))
     return cast(dict[str, str], data["sources"])
 
 
@@ -45,14 +46,13 @@ def test_a_part_ships_exactly_when_it_has_a_golden() -> None:
 @pytest.mark.parametrize("name", shipped_names())
 def test_the_shipped_description_matches_a_fresh_ship_build(name: str) -> None:
     pin_data = _pin_data()
-    path = SHIPPED_DIR / f"{name}.json.xz"
     part, _, core = name.partition("-")
     try:
         sources = pin_data_sources(part, pin_data=pin_data, core=core or None)
     except MissingSource as exc:
         pytest.skip(f"{name} sources not found: {exc}")
     local = compute_source_digests(sources)
-    shipped_sources = _sources_of(path)
+    shipped_sources = _sources_of(name)
     stale = [
         key for key in local if key.startswith("patch:") and local[key] != shipped_sources.get(key)
     ]
@@ -64,8 +64,9 @@ def test_the_shipped_description_matches_a_fresh_ship_build(name: str) -> None:
     if differing:
         pytest.skip(f"{name}: local {', '.join(differing)} differ from the shipped file's")
     _, packed = build_shipped(part, pin_data=pin_data, core=core or None)
-    fresh = popcorn.parse_description(shipped_text(packed, file="fresh"), "fresh")
-    shipped = popcorn.parse_description(shipped_text(path.read_bytes(), file=str(path)), str(path))
+    fresh_text = bounded_xz(packed, MAX_SHIPPED_BYTES, file="fresh").decode()
+    fresh = popcorn.parse_description(fresh_text, "fresh")
+    shipped = popcorn.parse_description(compose_shipped(name), name)
     assert popcorn.description_digest(fresh) == popcorn.description_digest(shipped)
 
 
@@ -82,24 +83,39 @@ def test_ship_refuses_a_part_without_a_cmsis_header(
     empty = tmp_path / "cmsis"
     empty.mkdir()
     monkeypatch.setenv("POPCORN_CMSIS_DEVICE_DIRS", str(empty))
-    out = tmp_path / "out"
-    status = main(["ship", "STM32U575QGIx", "--pin-data", str(pin_data), "--out", str(out)])
+    status = main(["ship", "STM32U575QGIx", "--pin-data", str(pin_data), "--check"])
     assert status == 1
     assert "cmsis_header" in capsys.readouterr().err
-    assert not out.exists()
 
 
-def test_ship_refuses_to_write_without_out(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("extra", [[], ["--out", "out"]])
+def test_ship_without_check_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: list[str],
 ) -> None:
-    status = main(["ship", "STM32U575QGIx", "--pin-data", str(tmp_path / "absent")])
+    monkeypatch.chdir(tmp_path)
+    status = main(["ship", "STM32U575QGIx", "--pin-data", str(tmp_path / "absent"), *extra])
     assert status == 1
-    assert "--out is required" in capsys.readouterr().err
+    assert "only --check runs" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", shipped_names())
+def test_ship_check_passes_on_the_shipped_layers(
+    name: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pin_data = _pin_data()
+    try:
+        pin_data_sources(name, pin_data=pin_data)
+    except MissingSource as exc:
+        pytest.skip(f"{name} sources not found: {exc}")
+    assert main(["ship", name, "--pin-data", str(pin_data), "--check"]) == 0, capsys.readouterr()
 
 
 def test_the_shipped_h573_sec_usb_keeps_the_patched_usb_field_kinds() -> None:
-    path = SHIPPED_DIR / "STM32H573AIIx.json.xz"
-    data = cast(dict[str, object], json.loads(shipped_text(path.read_bytes(), file=str(path))))
+    data = cast(dict[str, object], json.loads(compose_shipped("STM32H573AIIx")))
     peripherals = cast(list[dict[str, object]], data["peripherals"])
     by_name = {cast(str, p["name"]): p for p in peripherals}
     secure = by_name["SEC_USB"]

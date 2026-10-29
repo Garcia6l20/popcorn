@@ -1,39 +1,61 @@
-"""Shipped descriptions and the lookup order of description_path, with no ST file reachable."""
+"""Shipped layers and the lookup order of description_path, with no ST file reachable."""
 
+import hashlib
 import json
 import lzma
 import os
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import popcorn
 import pytest
-from popcorn.stm32.description import _shipped
+from popcorn.stm32.description import _layers, _shipped
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
+from popcorn.stm32.description._layers import dump, factor, pack
 from popcorn.stm32.description._shipped import (
     SHIPPED_DIR,
+    compose_shipped,
     description_path,
     shipped_description,
     shipped_names,
-    shipped_text,
 )
+
+from .conftest import write_layers
 
 M33_JSON = Path(__file__).parents[3] / "tests" / "data" / "core" / "m33.json"
 NAME = "STM32T001ABCx"
+PARTS = "STM32T001xx.parts.json.xz"
+LINE = "STM32T001xx.line.json.xz"
+FAMILY = "STM32T0xx.blocks.json.xz"
 
 
-def _description_bytes(part: str = NAME, generator: str = "hand-written") -> bytes:
-    raw = json.loads(M33_JSON.read_text())
-    return json.dumps(raw | {"part": part, "generator": generator}).encode()
+def _description(part: str = NAME, generator: str = "hand-written") -> dict[str, Any]:
+    raw = cast(dict[str, Any], json.loads(M33_JSON.read_text()))
+    return raw | {"part": part, "generator": generator}
+
+
+def _description_text(part: str = NAME, generator: str = "hand-written") -> str:
+    return dump(_description(part, generator))
+
+
+def _decode(directory: Path, file: str) -> dict[str, Any]:
+    return cast(dict[str, Any], json.loads(lzma.decompress((directory / file).read_bytes())))
+
+
+def _rewrite(directory: Path, file: str, layer: dict[str, Any]) -> None:
+    (directory / file).write_bytes(pack(layer))
+    if file == LINE:
+        parts = _decode(directory, PARTS)
+        parts["line_sha256"] = hashlib.sha256(dump(layer).encode()).hexdigest()
+        (directory / PARTS).write_bytes(pack(parts))
 
 
 @pytest.fixture
 def shipped_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = tmp_path / "data"
-    directory.mkdir()
-    (directory / f"{NAME}.json.xz").write_bytes(lzma.compress(_description_bytes()))
+    write_layers(directory, {NAME: _description()})
     monkeypatch.setattr(_shipped, "SHIPPED_DIR", directory)
     absent = tmp_path / "absent"
     monkeypatch.setenv("HOME", str(absent))
@@ -45,6 +67,19 @@ def shipped_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return directory
 
 
+@pytest.fixture
+def compose_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    real: Callable[..., dict[str, Any]] = _layers.compose
+
+    def counting(name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(name)
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(_shipped, "compose", counting)
+    return calls
+
+
 def _cached(tmp_path: Path) -> list[Path]:
     return sorted((tmp_path / "cache" / "popcorn" / "mcu" / "shipped").glob("*.json"))
 
@@ -52,25 +87,29 @@ def _cached(tmp_path: Path) -> list[Path]:
 def test_a_shipped_part_resolves_with_no_st_files(shipped_dir: Path, tmp_path: Path) -> None:
     exact = description_path(NAME)
     assert exact.parent == tmp_path / "cache" / "popcorn" / "mcu" / "shipped"
-    assert exact.read_bytes() == _description_bytes()
+    assert exact.read_text() == _description_text()
     assert popcorn.load_description(exact).part == NAME
     assert description_path("STM32T001ABC6") == exact
 
 
-def test_a_second_lookup_reuses_the_decompressed_file(
-    shipped_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_second_lookup_reuses_the_composed_file(
+    shipped_dir: Path, compose_calls: list[str]
 ) -> None:
-    calls: list[int] = []
-    real: Callable[..., bytes] = _shipped.bounded_xz
-
-    def counting(data: bytes, limit: int, *, file: str) -> bytes:
-        calls.append(len(data))
-        return real(data, limit, file=file)
-
-    monkeypatch.setattr(_shipped, "bounded_xz", counting)
     first = description_path(NAME)
     assert description_path(NAME) == first
-    assert len(calls) == 1
+    assert compose_calls == [NAME]
+
+
+@pytest.mark.parametrize("file", [PARTS, LINE, FAMILY])
+def test_other_bytes_of_any_layer_file_give_a_new_cache_name(
+    shipped_dir: Path, tmp_path: Path, file: str
+) -> None:
+    first = description_path(NAME)
+    raw = lzma.decompress((shipped_dir / file).read_bytes())
+    (shipped_dir / file).write_bytes(lzma.compress(raw, format=lzma.FORMAT_XZ, preset=0))
+    second = description_path(NAME)
+    assert second != first
+    assert second.read_bytes() == first.read_bytes()
 
 
 def _age(path: Path, seconds: float) -> None:
@@ -78,15 +117,16 @@ def _age(path: Path, seconds: float) -> None:
     os.utime(path, (then, then))
 
 
-def test_a_changed_shipped_file_removes_versions_unused_for_a_week(
+def test_a_changed_shipped_layer_removes_versions_unused_for_a_week(
     shipped_dir: Path, tmp_path: Path
 ) -> None:
-    packed = [lzma.compress(_description_bytes(generator=g)) for g in ("a", "b")]
+    versions = [factor({NAME: _description(generator=g)}, {"STM32T001xx": NAME}) for g in "ab"]
     paths: set[Path] = set()
     for index in range(1000):
         for cached in _cached(tmp_path):
             _age(cached, _shipped.STALE_SECONDS + 86400)
-        (shipped_dir / f"{NAME}.json.xz").write_bytes(packed[index % 2])
+        for file, data in versions[index % 2].items():
+            (shipped_dir / file).write_bytes(data)
         path = description_path(NAME)
         paths.add(path)
         assert _cached(tmp_path) == [path]
@@ -97,10 +137,7 @@ def test_two_shipped_versions_keep_their_files_in_a_shared_cache(
     shipped_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     other_dir = tmp_path / "other-data"
-    other_dir.mkdir()
-    (other_dir / f"{NAME}.json.xz").write_bytes(
-        lzma.compress(_description_bytes(generator="other"))
-    )
+    write_layers(other_dir, {NAME: _description(generator="other")})
     first = description_path(NAME)
     _age(first, _shipped.STALE_SECONDS - 86400)
     monkeypatch.setattr(_shipped, "SHIPPED_DIR", other_dir)
@@ -146,23 +183,49 @@ def test_a_failed_write_leaves_no_temporary_file(
     assert list((tmp_path / "cache" / "popcorn" / "mcu" / "shipped").iterdir()) == []
 
 
-def test_a_core_suffixed_shipped_file_answers_only_for_its_core(shipped_dir: Path) -> None:
-    (shipped_dir / f"{NAME}.json.xz").rename(shipped_dir / f"{NAME}-CM4.json.xz")
+def test_a_core_suffixed_shipped_part_answers_only_for_its_core(
+    shipped_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "core-data"
+    write_layers(directory, {f"{NAME}-CM4": _description()})
+    monkeypatch.setattr(_shipped, "SHIPPED_DIR", directory)
+    assert shipped_names() == [f"{NAME}-CM4"]
     assert shipped_description(NAME) is None
     assert shipped_description(NAME, core="CM7") is None
     found = shipped_description(NAME, core="CM4")
     assert found is not None
     assert found.name.startswith(f"{NAME}-CM4-")
+    assert found.read_text() == _description_text()
 
 
-def test_a_description_directory_wins_over_the_shipped_file(
+def test_only_parts_layers_name_shipped_parts(shipped_dir: Path) -> None:
+    (shipped_dir / "STM32T002xx.line.json.xz").write_bytes((shipped_dir / LINE).read_bytes())
+    (shipped_dir / "STM32T1xx.blocks.json.xz").write_bytes((shipped_dir / FAMILY).read_bytes())
+    (shipped_dir / "STM32T002ABCx.json.xz").write_bytes(lzma.compress(b"{}"))
+    assert shipped_names() == [NAME]
+
+
+def test_parts_of_one_line_share_its_layers(shipped_dir: Path) -> None:
+    other = "STM32T001DEFx"
+    other_description = _description(other)
+    other_description["irqs"] = other_description["irqs"][:-1]
+    files = write_layers(shipped_dir, {NAME: _description(), other: other_description})
+    assert sorted(files) == sorted([PARTS, LINE, FAMILY])
+    deltas = _decode(shipped_dir, PARTS)["parts"]
+    assert [key for key in ("schema_version", "core", "irqs") if key in deltas[other]] == ["irqs"]
+    assert shipped_names() == [NAME, other]
+    assert compose_shipped(other) == dump(other_description)
+    assert compose_shipped(NAME) == _description_text()
+
+
+def test_a_description_directory_wins_over_the_shipped_layers(
     shipped_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"
     for directory in (first, second):
         directory.mkdir()
-        (directory / f"{NAME}.json").write_bytes(_description_bytes(generator=directory.name))
+        (directory / f"{NAME}.json").write_text(_description_text(generator=directory.name))
     monkeypatch.setenv(
         "POPCORN_STM32_DESCRIPTION_DIRS", f"{tmp_path / 'absent-dir'}:{first}:{second}"
     )
@@ -171,7 +234,7 @@ def test_a_description_directory_wins_over_the_shipped_file(
 
 
 @pytest.mark.parametrize("argument", ["svd", "cubemx_db", "cmsis_header"])
-def test_a_local_input_skips_the_shipped_file(
+def test_a_local_input_skips_the_shipped_layers(
     shipped_dir: Path, tmp_path: Path, argument: str
 ) -> None:
     absent = tmp_path / f"absent-{argument}"
@@ -186,7 +249,7 @@ def test_a_local_input_skips_the_shipped_file(
     assert _cached(tmp_path) == []
 
 
-def test_a_local_build_request_skips_the_shipped_file(
+def test_a_local_build_request_skips_the_shipped_layers(
     shipped_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("POPCORN_STM32_BUILD", "local")
@@ -200,7 +263,7 @@ def test_an_unknown_build_request_is_refused_before_any_lookup(
 ) -> None:
     directory = tmp_path / "dir"
     directory.mkdir()
-    (directory / f"{NAME}.json").write_bytes(_description_bytes())
+    (directory / f"{NAME}.json").write_text(_description_text())
     monkeypatch.setenv("POPCORN_STM32_DESCRIPTION_DIRS", str(directory))
     monkeypatch.setenv("POPCORN_STM32_BUILD", "shipped")
     with pytest.raises(DescriptionError) as excinfo:
@@ -226,16 +289,24 @@ def test_a_lookup_with_nothing_shipped_says_so(
     assert "a shipped description, shipped: none, or ST's files" in excinfo.value.expected
 
 
-def test_a_shipped_file_past_the_cap_is_refused(shipped_dir: Path, tmp_path: Path) -> None:
-    (shipped_dir / f"{NAME}.json.xz").write_bytes(
-        lzma.compress(bytes(_shipped.MAX_SHIPPED_BYTES + (1 << 20)), preset=0)
-    )
+def _refused(tmp_path: Path) -> DescriptionError:
     with pytest.raises(DescriptionError) as excinfo:
         description_path(NAME)
-    assert excinfo.value.expected == f"at most {_shipped.MAX_SHIPPED_BYTES} bytes decompressed"
     assert _cached(tmp_path) == []
+    return excinfo.value
 
 
+@pytest.mark.parametrize("file", [PARTS, LINE, FAMILY])
+def test_a_layer_file_past_the_cap_is_refused(shipped_dir: Path, tmp_path: Path, file: str) -> None:
+    (shipped_dir / file).write_bytes(
+        lzma.compress(bytes(_shipped.MAX_SHIPPED_BYTES + (1 << 20)), preset=0)
+    )
+    error = _refused(tmp_path)
+    assert error.file == str(shipped_dir / file)
+    assert error.expected == f"at most {_shipped.MAX_SHIPPED_BYTES} bytes decompressed"
+
+
+@pytest.mark.parametrize("file", [PARTS, LINE, FAMILY])
 @pytest.mark.parametrize(
     ("data", "expected"),
     [
@@ -244,39 +315,186 @@ def test_a_shipped_file_past_the_cap_is_refused(shipped_dir: Path, tmp_path: Pat
         (lzma.compress(b"{}") + b"tail", "one xz stream and nothing after it"),
     ],
 )
-def test_a_broken_shipped_file_is_refused(shipped_dir: Path, data: bytes, expected: str) -> None:
-    (shipped_dir / f"{NAME}.json.xz").write_bytes(data)
+def test_a_broken_layer_file_is_refused(
+    shipped_dir: Path, tmp_path: Path, file: str, data: bytes, expected: str
+) -> None:
+    (shipped_dir / file).write_bytes(data)
+    error = _refused(tmp_path)
+    assert error.file == str(shipped_dir / file)
+    assert error.expected == expected
+
+
+@pytest.mark.parametrize("file", [PARTS, LINE, FAMILY])
+def test_a_layer_of_another_format_is_refused(shipped_dir: Path, tmp_path: Path, file: str) -> None:
+    layer = _decode(shipped_dir, file)
+    _rewrite(shipped_dir, file, layer | {"format": 2})
+    error = _refused(tmp_path)
+    assert error.file == str(shipped_dir / file)
+    assert (error.key, error.expected) == ("format", "layer format 1")
+
+
+@pytest.mark.parametrize("file", [LINE, FAMILY])
+def test_a_missing_layer_file_is_refused(shipped_dir: Path, tmp_path: Path, file: str) -> None:
+    (shipped_dir / file).unlink()
+    error = _refused(tmp_path)
+    assert error.file == str(shipped_dir / file)
+
+
+def test_a_parts_layer_of_another_line_version_is_refused(
+    shipped_dir: Path, tmp_path: Path
+) -> None:
+    line = _decode(shipped_dir, LINE)
+    line["irqs"] = line["irqs"][:-1]
+    (shipped_dir / LINE).write_bytes(pack(line))
+    error = _refused(tmp_path)
+    assert error.file == str(shipped_dir / PARTS)
+    assert error.key == "line_sha256"
+
+
+def test_a_missing_block_is_refused(shipped_dir: Path, tmp_path: Path) -> None:
+    family = _decode(shipped_dir, FAMILY)
+    line = _decode(shipped_dir, LINE)
+    key = line["peripherals"][0]["block"]
+    del family["blocks"][key]
+    (shipped_dir / FAMILY).write_bytes(pack(family))
+    error = _refused(tmp_path)
+    assert error.file == str(shipped_dir / FAMILY)
+    assert (error.key, error.expected) == (f"blocks.{key}", "the block of a header")
+
+
+def test_a_tampered_block_is_refused(shipped_dir: Path, tmp_path: Path) -> None:
+    family = _decode(shipped_dir, FAMILY)
+    line = _decode(shipped_dir, LINE)
+    key = line["peripherals"][0]["block"]
+    family["blocks"][key]["registers"][0]["reset"] ^= 1
+    (shipped_dir / FAMILY).write_bytes(pack(family))
+    error = _refused(tmp_path)
+    assert error.file == str(shipped_dir / FAMILY)
+    assert (error.key, error.expected) == (f"blocks.{key}", "a block hashing to key")
+
+
+def test_a_delta_naming_an_instance_the_line_lacks_is_refused(
+    shipped_dir: Path, tmp_path: Path
+) -> None:
+    parts = _decode(shipped_dir, PARTS)
+    line = _decode(shipped_dir, LINE)
+    parts["parts"][NAME]["peripherals"]["NOSUCH"] = line["peripherals"][0] | {"name": "NOSUCH"}
+    (shipped_dir / PARTS).write_bytes(pack(parts))
+    error = _refused(tmp_path)
+    assert error.file == str(shipped_dir / PARTS)
+    assert error.key == f"parts.{NAME}.peripherals.NOSUCH"
+
+
+def test_a_composition_over_the_cap_is_refused(
+    shipped_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    largest = max(
+        len(lzma.decompress((shipped_dir / f).read_bytes())) for f in (PARTS, LINE, FAMILY)
+    )
+    assert len(_description_text()) > largest
+    monkeypatch.setattr(_shipped, "MAX_SHIPPED_BYTES", largest)
+    error = _refused(tmp_path)
+    assert error.file == str(shipped_dir / PARTS)
+    assert error.expected == f"a composed description of at most {largest} bytes"
+
+
+@pytest.mark.timeout(10)
+def test_one_large_block_referenced_by_every_instance_is_refused_before_composing(
+    shipped_dir: Path, tmp_path: Path
+) -> None:
+    block = {"registers": [{"name": "R", "pad": "x" * (1 << 20)}], "cross_rules": []}
+    key = _layers.block_key(block)
+    headers = [{"name": f"P{index}", "block": key} for index in range(100)]
+    line = _decode(shipped_dir, LINE) | {"peripherals": headers}
+    family = _decode(shipped_dir, FAMILY) | {"blocks": {key: block}}
+    parts = _decode(shipped_dir, PARTS)
+    parts["parts"][NAME]["peripherals"] = {}
+    (shipped_dir / PARTS).write_bytes(pack(parts))
+    (shipped_dir / FAMILY).write_bytes(pack(family))
+    _rewrite(shipped_dir, LINE, line)
+    assert _shipped.MAX_SHIPPED_BYTES == 64 << 20
+    start = time.perf_counter()
+    error = _refused(tmp_path)
+    assert time.perf_counter() - start < 1.0
+    assert error.file == str(shipped_dir / PARTS)
+    assert error.expected == f"a composed description of at most {64 << 20} bytes"
+
+
+def test_a_part_with_its_own_block_composes_back_byte_equal(tmp_path: Path) -> None:
+    reference = cast(dict[str, Any], json.loads(compose_shipped("STM32U575QGIx")))
+    other = json.loads(dump(reference))
+    other["part"] = "STM32U575CGTx"
+    for peripheral in other["peripherals"]:
+        if peripheral["name"] in ("UART5", "SEC_UART5"):
+            assert len(peripheral["cross_rules"]) == 13
+            peripheral["cross_rules"] = []
+    descriptions = {"STM32U575QGIx": reference, "STM32U575CGTx": other}
+    directory = tmp_path / "data"
+    write_layers(directory, descriptions, {"STM32U575xx": "STM32U575QGIx"})
+    parts = _decode(directory, "STM32U575xx.parts.json.xz")
+    line = _decode(directory, "STM32U575xx.line.json.xz")
+    delta = parts["parts"]["STM32U575CGTx"]["peripherals"]
+    assert sorted(delta) == ["SEC_UART5", "UART5"]
+    line_blocks = {h["name"]: h["block"] for h in line["peripherals"]}
+    assert all(delta[name]["block"] != line_blocks[name] for name in delta)
+    assert parts["parts"]["STM32U575QGIx"]["peripherals"] == {}
+    for name, description in descriptions.items():
+        text = compose_shipped(name, directory)
+        same = text == dump(description)
+        assert same, name
+        assert popcorn.description_digest(
+            popcorn.parse_description(text, name)
+        ) == popcorn.description_digest(popcorn.parse_description(dump(description), name))
+
+
+def test_factor_refuses_a_part_whose_instances_differ_from_its_reference() -> None:
+    other = _description("STM32T001DEFx")
+    other["peripherals"] = other["peripherals"][::-1]
     with pytest.raises(DescriptionError) as excinfo:
-        description_path(NAME)
-    assert excinfo.value.expected == expected
+        factor({NAME: _description(), "STM32T001DEFx": other}, {"STM32T001xx": NAME})
+    assert excinfo.value.file == "STM32T001DEFx"
+
+
+def test_factor_refuses_a_description_with_keys_out_of_order() -> None:
+    description = _description()
+    description["part"] = description.pop("part")
+    with pytest.raises(DescriptionError) as excinfo:
+        factor({NAME: description}, {"STM32T001xx": NAME})
+    assert excinfo.value.key == "<root>"
 
 
 def test_a_read_only_cache_still_serves_its_file(
-    shipped_dir: Path, monkeypatch: pytest.MonkeyPatch
+    shipped_dir: Path, monkeypatch: pytest.MonkeyPatch, compose_calls: list[str]
 ) -> None:
     first = description_path(NAME)
-    calls: list[int] = []
-    real: Callable[..., bytes] = _shipped.bounded_xz
-
-    def counting(data: bytes, limit: int, *, file: str) -> bytes:
-        calls.append(len(data))
-        return real(data, limit, file=file)
 
     def read_only(path: object, times: object = None) -> None:
         raise PermissionError("read-only cache")
 
-    monkeypatch.setattr(_shipped, "bounded_xz", counting)
     monkeypatch.setattr("popcorn.stm32.description._shipped.os.utime", read_only)
     assert description_path(NAME) == first
-    assert calls == []
+    assert compose_calls == [NAME]
+
+
+def test_the_shipped_layers_are_what_factor_writes_for_the_shipped_parts() -> None:
+    names = shipped_names()
+    assert names
+    descriptions = {name: json.loads(compose_shipped(name)) for name in names}
+    references: dict[str, str] = {}
+    for path in SHIPPED_DIR.glob("*.line.json.xz"):
+        line = cast(dict[str, Any], json.loads(lzma.decompress(path.read_bytes())))
+        references[line["line"]] = line["reference"]
+    files = factor(descriptions, references)
+    assert sorted(files) == sorted(path.name for path in SHIPPED_DIR.glob("*.json.xz"))
+    for file, data in files.items():
+        assert lzma.decompress((SHIPPED_DIR / file).read_bytes()) == lzma.decompress(data), file
 
 
 @pytest.mark.parametrize("name", shipped_names())
 def test_every_alias_of_a_shipped_description_equals_its_base_register_by_register(
     name: str,
 ) -> None:
-    path = SHIPPED_DIR / f"{name}.json.xz"
-    data = cast(dict[str, object], json.loads(shipped_text(path.read_bytes(), file=str(path))))
+    data = cast(dict[str, object], json.loads(compose_shipped(name)))
     peripherals = cast(list[dict[str, object]], data["peripherals"])
     by_name = {cast(str, p["name"]): p for p in peripherals}
     aliases = [p for p in peripherals if p.get("alias_of")]

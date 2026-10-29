@@ -26,7 +26,7 @@ flowchart LR
     H[CMSIS header] --> B
     B --> J[part description JSON]
     J --> C[build cache]
-    J --> S[shipped json.xz]
+    J --> S[shipped layers]
 ```
 
 The modules are in `python/popcorn/stm32/description`:
@@ -183,13 +183,37 @@ width leaves the register or overlaps another field. The patch report counts one
 
 ## Shipped descriptions
 
-A description can ship in the package as `<RefName>[-<core>].json.xz` under
-`python/popcorn/stm32/data`. `_shipped.py` decompresses it on first use, with a hard limit on
-the decompressed size. The lookup order of `popcorn.stm32.mcu(part)` is:
+Shipped descriptions live in `python/popcorn/stm32/data` as three kinds of xz-compressed JSON
+layer, each `{"format": 1, ...}`:
+
+| file | holds |
+|---|---|
+| `<family>.blocks.json.xz` | `blocks`: every `registers` plus `cross_rules` pair of the family's shipped parts, keyed by the SHA-256 of its canonical JSON |
+| `<line>.line.json.xz` | the `reference` part's `schema_version`, `core`, `irqs` and peripheral headers in order |
+| `<line>.parts.json.xz` | `line_sha256` of the decompressed line file and `parts`: one delta per shipped part, `<RefName>[-<core>]` |
+
+The family is the RefName's first 7 characters plus `xx`, `STM32U5xx`, the line its first 9
+plus `xx`, `STM32U575xx`. A header is a peripheral without `registers` and `cross_rules`, with
+`"block": <key>` in their place. Two instances share a block only when their bytes are equal. A
+delta holds the part's `part`, `generator`, `sources` and `regions`, the full header of every
+instance that differs from the line's, and `schema_version`, `core` or `irqs` where they differ.
+Every part of a line has the line's instances in the line's order.
+
+`_layers.py` holds `factor`, which writes the layers of a set of descriptions, and `compose`, its
+inverse, both pure functions. `compose_shipped` in `_shipped.py` composes a part into the same
+JSON text `dump_json` writes, so the digest, snapshots and the native loader see the same
+description. It refuses with `DescriptionError` naming the file: a layer of another `format`, a
+`line_sha256` mismatch, a missing block or one whose bytes do not hash to its key, an unknown
+instance, and a decompressed layer or composed description above `MAX_SHIPPED_BYTES`. The
+composed size is counted before anything is built. On first use the composed text is cached as
+`<cache>/shipped/<name>-<sha16>.json`, sha16 over the parts, line and family file bytes.
+`ship --check` composes the shipped part and compares its digest with a fresh build.
+
+The lookup order of `popcorn.stm32.mcu(part)` is:
 
 1. `<RefName>[-<core>].json`, uncompressed, in a directory of `POPCORN_STM32_DESCRIPTION_DIRS`,
    searched in order.
-2. The shipped file, skipped when `svd`, `cubemx_db` or `cmsis_header` is passed or
+2. The shipped layers, skipped when `svd`, `cubemx_db` or `cmsis_header` is passed or
    `POPCORN_STM32_BUILD` is `local`. Any other value of that variable raises an error.
 3. A local build from ST's files, cached.
 
