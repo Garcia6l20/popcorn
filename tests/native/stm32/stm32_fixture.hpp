@@ -36,6 +36,20 @@ inline auto h573() -> part_description const&
   return desc;
 }
 
+/** @brief The STM32L152RETx description built from ST's files, `POPCORN_L152RE_DESC`, read once. */
+inline auto l152re() -> part_description const&
+{
+  static auto const desc = description_from("POPCORN_L152RE_DESC");
+  return desc;
+}
+
+/** @brief The STM32L152RBTx description built from ST's files, `POPCORN_L152RB_DESC`, read once. */
+inline auto l152rb() -> part_description const&
+{
+  static auto const desc = description_from("POPCORN_L152RB_DESC");
+  return desc;
+}
+
 /** @brief Machine options of the STM32 tests: faults and spins stop the run. */
 inline auto stm32_options() -> core::machine_options
 {

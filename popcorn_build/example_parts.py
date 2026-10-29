@@ -9,7 +9,7 @@ under at least one example. `python -m popcorn_build.example_parts --list` print
 from __future__ import annotations
 
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Final, NamedTuple
 
@@ -72,6 +72,11 @@ _PACKAGES: Final = {
     ("V", "T"): "LQFP100",
     ("Z", "T"): "LQFP144",
 }
+
+
+def with_part_class(parts: Iterable[str]) -> list[str]:
+    """The names of @p parts whose line `part_class` decodes, in order."""
+    return [part for part in parts if part[5:9] in _DIES]
 
 
 def part_class(part: str) -> PartClass:

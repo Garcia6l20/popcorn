@@ -1,5 +1,5 @@
 format = 1
-source = "STM32L100RCTx, the one value line Cat.3 part: CubeMX lists no TIM5 and no operational amplifier for it, SPI3 is line 47, address 0x0000_00FC (RM0038 Rev 18, Table 50)"
+source = "STM32L100RCTx, the one value line Cat.3 part: CubeMX lists no TIM5 and no operational amplifier for it, SPI3 is line 47 by its address 0x0000_00FC in RM0038 Rev 18 Table 50, whose position column is one low from TIM5"
 
 [match]
 parts = ["STM32L100*"]

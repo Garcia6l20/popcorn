@@ -52,6 +52,7 @@ REFERENCES = {
     "STM32H562xx": "STM32H562IIKx",
     "STM32H563xx": "STM32H563IIKx",
     "STM32H573xx": "STM32H573IIKx",
+    "STM32L152xx": "STM32L152RETx",
 }
 """Reference of each shipped line, the choice of `_layers.choose_reference` over its shipped
 parts."""

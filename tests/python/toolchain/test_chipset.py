@@ -7,9 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from popcorn_build import firmware, stm32_firmware
+from popcorn_build import examples, firmware, stm32_firmware
+from popcorn_build.config import build_dir
 from popcorn_build.stm32_firmware import (
     STM32H573,
+    STM32L152XB,
+    STM32L152XE,
     STM32U575,
     Chipset,
     add_ll_firmware,
@@ -219,3 +222,76 @@ def test_each_preset_links_its_own_libgcc_in_its_own_build_prefix(tmp_path: Path
         assert loaded
         assert all(line.endswith(libgcc) for line in loaded), (prefix, loaded)
         assert (tmp_path / "build" / prefix).is_dir()
+
+
+L1_CHIPSETS = [STM32L152XE, STM32L152XB]
+COMMON = Path(__file__).parents[3] / "tests" / "firmware" / "common"
+
+
+@pytest.mark.parametrize("chipset", L1_CHIPSETS, ids=lambda chipset: chipset.name)
+def test_an_l1_chipset_builds_on_the_cortex_m3_with_the_l1_packages(chipset: Chipset) -> None:
+    stem = chipset.define.lower()
+    assert chipset.name == stem
+    assert chipset.family == "l1"
+    assert chipset.preset is firmware.cortex_m3
+    assert chipset.startup == f"startup_{stem}.s"
+    assert chipset.system == "system_stm32l1xx.c"
+    assert chipset.hal_package == "stm32l1-hal-driver"
+    assert chipset.device_package == "cmsis-device-l1"
+    assert chipset.linker is None
+    assert chipset.test_linker == f"tests/firmware/common/{stem}.ld"
+    assert chipset.prebuilt_dir == stem.removeprefix("stm32")
+    assert chipset.usb_device_sources == STM32H573.usb_device_sources
+    assert chipset.defines == (chipset.define, "USE_FULL_LL_DRIVER")
+    with pytest.raises(SystemExit, match=f"{chipset.name} has no TrustZone firmware files"):
+        chipset.require_trustzone()
+
+
+@pytest.mark.parametrize("chipset", L1_CHIPSETS, ids=lambda chipset: chipset.name)
+def test_an_l1_chipset_has_no_st_linker_script_to_derive_one_from(chipset: Chipset) -> None:
+    with pytest.raises(SystemExit, match=f"{chipset.name} has no ST linker script"):
+        examples.st_linker_script(chipset, Path("device"), "x", 0)
+
+
+@pytest.mark.parametrize("chipset", L1_CHIPSETS, ids=lambda chipset: chipset.name)
+def test_the_l1_prebuilt_smoke_firmware_lives_in_the_chipset_directory(chipset: Chipset) -> None:
+    assert (PREBUILT / chipset.prebuilt_dir / "l1_smoke.elf").is_file()
+
+
+@pytest.mark.parametrize(
+    ("chipset", "flash", "sram"),
+    [(STM32L152XE, "256K", "32K"), (STM32L152XB, "128K", "16K")],
+    ids=lambda value: getattr(value, "name", value),
+)
+def test_an_l1_linker_script_is_sized_for_the_smallest_part_it_runs_on(
+    chipset: Chipset, flash: str, sram: str
+) -> None:
+    text = (Path(__file__).parents[3] / chipset.test_linker).read_text()
+    assert f"FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = {flash}" in text
+    assert f"SRAM  (rwx) : ORIGIN = 0x20000000, LENGTH = {sram}" in text
+    assert "_estack = ORIGIN(SRAM) + LENGTH(SRAM);" in text
+
+
+@pytest.mark.parametrize("chipset", L1_CHIPSETS, ids=lambda chipset: chipset.name)
+def test_an_l1_linker_script_copies_ram_functions_with_the_data(chipset: Chipset) -> None:
+    data = next(
+        line
+        for line in (Path(__file__).parents[3] / chipset.test_linker).read_text().splitlines()
+        if line.strip().startswith(".data")
+    )
+    assert "*(.RamFunc) *(.RamFunc*)" in data
+    assert data.endswith("> SRAM AT > FLASH")
+
+
+@pytest.mark.parametrize("chipset", L1_CHIPSETS, ids=lambda chipset: chipset.name)
+@pytest.mark.skipif(not firmware.toolchain_found, reason="no arm-none-eabi-gcc")
+def test_the_l1_smoke_firmware_links_the_cortex_m3_libgcc(chipset: Chipset) -> None:
+    map_file = (
+        build_dir / "firmware-m3" / "tests" / "firmware" / "periph" / "l1_smoke"
+        / f"{chipset.name.removeprefix('stm32')}_l1_smoke.map"
+    )  # fmt: skip
+    if not map_file.is_file():
+        pytest.skip("the smoke firmware is not built")
+    loaded = [line for line in map_file.read_text().splitlines() if "libgcc.a" in line]
+    assert loaded
+    assert all(line.endswith("thumb/v7-m/nofp/libgcc.a") for line in loaded), loaded

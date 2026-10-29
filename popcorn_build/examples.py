@@ -276,7 +276,13 @@ def _templates(device: Path) -> Path:
     return device / "Source" / "Templates"
 
 
-def _linker_script(chipset: Chipset, device: Path, name: str, flash_offset: int) -> Path:
+def st_linker_script(chipset: Chipset, device: Path, name: str, flash_offset: int) -> Path:
+    """ST's linker script of @p chipset under @p device, moved up by @p flash_offset.
+
+    @throws SystemExit @p chipset has no ST linker script.
+    """
+    if chipset.linker is None:
+        raise SystemExit(f"popcorn: the chipset {chipset.name} has no ST linker script")
     script = _templates(device) / "gcc" / "linker" / chipset.linker
     if flash_offset == 0:
         return script
@@ -351,7 +357,7 @@ def add_example_firmware(
         all_sources += [stack / "class" / name / f"{name}_device.c" for name in tinyusb]
         include_dirs.append(stack)
 
-    script = _linker_script(chipset, device, name, flash_offset)
+    script = st_linker_script(chipset, device, name, flash_offset)
     elf, target = checked_program(
         f"example-{chipset.name}-{name}",
         name,

@@ -12,6 +12,7 @@ from popcorn_build.example_parts import (
     TESTED_PARTS,
     ExampleParts,
     part_class,
+    with_part_class,
 )
 
 ROOT = Path(__file__).parents[2]
@@ -50,7 +51,7 @@ def table_instances(page: str) -> list[str]:
 @pytest.mark.timeout(60)
 def test_every_shipped_part_has_a_page(generated: Path) -> None:
     assert sorted(p.stem for p in generated.glob("*.md")) == sorted(
-        [*popcorn.stm32.shipped_parts(), "cores", "parts"]
+        [*with_part_class(popcorn.stm32.shipped_parts()), "cores", "parts"]
     )
 
 
@@ -134,7 +135,7 @@ def kind(cell: str) -> str:
 @pytest.mark.timeout(60)
 def test_every_shipped_part_has_exactly_one_state_row(generated: Path) -> None:
     rows = state_rows((generated / "parts.md").read_text())
-    assert sorted(rows) == sorted(popcorn.stm32.shipped_parts())
+    assert sorted(rows) == sorted(with_part_class(popcorn.stm32.shipped_parts()))
     assert all(kind(cell) in STATES for cell in rows.values())
     by_state = {state: {n for n, c in rows.items() if kind(c) == state} for state in STATES}
     assert by_state["tested"] == {"STM32U575QGIx", "STM32H573AIIx"}
@@ -207,6 +208,7 @@ def test_an_example_part_that_ships_no_description_fails_the_generator_by_name()
     from popcorn_build import support_pages
 
     shipped = [name for name in popcorn.stm32.shipped_parts() if name != "STM32U575VGTxQ"]
+    shipped = with_part_class(shipped)
     with pytest.raises(ValueError, match="STM32U575VGTxQ"):
         support_pages.part_states(shipped)
 
@@ -226,7 +228,7 @@ def test_a_class_with_no_example_part_shows_attaches() -> None:
         )
         for name, row in EXAMPLE_PARTS.items()
     }
-    shipped = popcorn.stm32.shipped_parts()
+    shipped = with_part_class(popcorn.stm32.shipped_parts())
     states = support_pages.part_states(shipped, examples=table)
     siblings = [n for n in shipped if part_class(n) == part_class(dropped)]
     assert dropped in siblings

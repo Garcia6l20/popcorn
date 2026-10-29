@@ -389,9 +389,12 @@ composed text is cached as `<cache>/shipped/<name>-<sha16>.json`, sha16 over the
 of the parts, line and family files, in order.
 
 A part ships exactly when its golden file `tests/data/stm32/golden/<RefName>[-<core>].json`
-exists. To add a part, write its golden, then ship:
+exists. To add a part, write its golden, then ship. Both read the CMSIS device header of the part,
+so first put the checkout's fetched CMSIS device directories in front of
+`POPCORN_CMSIS_DEVICE_DIRS`, as the description tests do:
 
 ```
+export POPCORN_CMSIS_DEVICE_DIRS="$(uv run python -m popcorn_build.cmsis_dirs)"
 uv run python -m popcorn.stm32.description golden STM32U575QGIx --update
 uv run python -m popcorn.stm32.description ship STM32U575QGIx --pin-data <STM32_open_pin_data> \
     --out python/popcorn/stm32/data

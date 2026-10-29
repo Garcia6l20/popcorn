@@ -1,5 +1,6 @@
 """The STM32L1 category patches over the pin data: each of the 132 names against its category."""
 
+import hashlib
 import os
 from collections import Counter
 from functools import cache
@@ -9,6 +10,7 @@ import pytest
 from popcorn.stm32.description import _cubemx
 from popcorn.stm32.description._builder import build_description
 from popcorn.stm32.description._cubemx import DbPart, expand_refname, read_part
+from popcorn.stm32.description._irqs import read_cmsis_irqs
 from popcorn.stm32.description._model import PartDescription, PeripheralDesc, RegionDesc
 from popcorn.stm32.description._patches import cmsis_suffix, load_patches
 from popcorn.stm32.description._sources import find_sources
@@ -437,3 +439,43 @@ def test_the_tim5_fields_are_corrected_where_tim5_exists() -> None:
     }
     assert widths[("CCMR2_Output", "CC4S")] == 2
     assert widths[("CCMR1_Output", "CC2S")] == 2
+
+
+def _header_irqs(name: str) -> dict[int, str]:
+    header = _sources(name).cmsis_header
+    if header is None:
+        pytest.skip("the L1 CMSIS device Include directory is not in POPCORN_CMSIS_DEVICE_DIRS")
+    return read_cmsis_irqs(header.read_text(encoding="utf-8"), file=str(header))
+
+
+@pytest.mark.parametrize("name", _names())
+def test_every_l1_name_takes_its_irqs_from_the_header_of_its_line_and_category(name: str) -> None:
+    category = _category(_parts()[name])
+    header_irqs = _header_irqs(name)
+    sources = _sources(name)
+    assert sources.cmsis_header is not None
+    assert sources.cmsis_header.name == f"stm32l{name[6:9]}{CMSIS_SUFFIX[category]}.h"
+    built = _built(name)
+    assert {irq.number: irq.name for irq in built.irqs} == header_irqs
+    assert (
+        built.sources["cmsis_header"]
+        == hashlib.sha256(sources.cmsis_header.read_bytes()).hexdigest()
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "lcd"),
+    [
+        ("STM32L100C6Ux", "LCD_IRQn"),
+        ("STM32L100RCTx", "LCD_IRQn"),
+        ("STM32L151RBTx", None),
+        ("STM32L151VDTxX", None),
+        ("STM32L152RBTx", "LCD_IRQn"),
+        ("STM32L162RETx", "LCD_IRQn"),
+    ],
+)
+def test_the_lcd_line_follows_the_header_of_each_line(name: str, lcd: str | None) -> None:
+    assert _header_irqs(name).get(24) == lcd
+    owners = [p.name for p in _built(name).peripherals if 24 in p.irqs]
+    assert owners == (["LCD"] if lcd else [])
+    assert ("LCD" in _peripherals(name)) == (lcd is not None)

@@ -44,6 +44,20 @@ version = "1.7.0"
 build = "none"
 firmware = true
 
+[packages.stm32l1-hal-driver]
+url = "https://github.com/STMicroelectronics/stm32l1xx-hal-driver/archive/refs/tags/v1.4.6.tar.gz"
+sha256 = "638dfa8e06dba674bf9edf9aa08dc7e9a97009c805311a2aed7b55cc5847ace3"
+version = "1.4.6"
+build = "none"
+firmware = true
+
+[packages.cmsis-device-l1]
+url = "https://github.com/STMicroelectronics/cmsis-device-l1/archive/refs/tags/v2.3.4.tar.gz"
+sha256 = "ab821ff203d1cf0cdaa6d4cb11a5079fa0b2a73b819a5d5a41704ad16ea0a12b"
+version = "2.3.4"
+build = "none"
+firmware = true
+
 [packages.cmsis-core]
 url = "https://github.com/ARM-software/CMSIS_5/archive/refs/tags/5.9.0.tar.gz"
 sha256 = "9ce693dd15c41f02506adda79323c077912b3211303ca0d9b28b8ebe735a7031"

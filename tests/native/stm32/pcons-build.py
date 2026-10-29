@@ -20,6 +20,8 @@ periph_data = project_dir / "tests" / "data" / "periph"
 
 u575 = cached_st_description("STM32U575QGIx", "POPCORN_U575_DESC")
 h573 = cached_st_description("STM32H573AIIx", "POPCORN_H573_DESC")
+l152re = cached_st_description("STM32L152RETx", "POPCORN_L152RE_DESC")
+l152rb = cached_st_description("STM32L152RBTx", "POPCORN_L152RB_DESC")
 u575_2m = cached_st_description("STM32U575ZITxQ", "POPCORN_U575_2M_DESC")
 h5_1m = cached_st_description("STM32H563ZGTx", "POPCORN_H5_1M_DESC")
 firmwares = {
@@ -51,6 +53,12 @@ h573_firmwares = {
 h573_env = {
     "POPCORN_H573_DESC": str(h573),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in h573_firmwares.items()},
+}
+l1_firmwares = {name: firmware("periph", name) for name in ("l152xe_l1_smoke", "l152xb_l1_smoke")}
+l1_env = {
+    "POPCORN_L152RE_DESC": str(l152re),
+    "POPCORN_L152RB_DESC": str(l152rb),
+    **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in l1_firmwares.items()},
 }
 u575_env = {
     "POPCORN_U575_DESC": str(u575),
@@ -178,6 +186,18 @@ flash_h573.private.include_dirs.append(private_dir)
 for _, target in h573_firmwares.values():
     if target is not None:
         flash_h573.depends(target)
+
+smoke_l1 = add_doctest(
+    "stm32-smoke-l1",
+    [here / "test_smoke_l1.cpp"],
+    static,
+    env=l1_env,
+    register=l152re is not None and l152rb is not None,
+)
+smoke_l1.private.include_dirs.append(private_dir)
+for _, target in l1_firmwares.values():
+    if target is not None:
+        smoke_l1.depends(target)
 
 flash_geometry = add_doctest(
     "stm32-flash-geometry",

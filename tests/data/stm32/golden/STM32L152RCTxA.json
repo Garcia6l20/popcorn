@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 227,
+    "cross_rules": 0,
+    "fields": 3682,
+    "irqs": 53,
+    "patched_fields": 10,
+    "peripherals": 45,
+    "regions": 7,
+    "registers": 540
+  },
+  "part": "STM32L152RCTxA",
+  "svd_sha256": "ac3fbee1bdf9e50ae69c4807d5fa1af1db92233f91990a07f0aad7060fd1726f",
+  "tables": {
+    "alternates": "2d019a7171027e5529ab4891e8a4c91adc898aef0156f0ed542af8206317ebce",
+    "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
+    "fields": "5dd383b6ba9a50dc9e531f19420389a2709a83d15a139ad7298193113920d9d0",
+    "irqs": "15440d3cfdc20946e055e8a2d53db8fe1c6323f1b668dd8138182f205bbdf7da",
+    "peripherals": "7ae62b189acbfa7f6e8e85e46798ce1691517dde0fd2b6d72a9c1ee51e3c76a2",
+    "regions": "69c63a132322dc5b1ce63a119499a238378d823ef521dc95b437733b46248a0c",
+    "registers": "70027956058b9e83a8735afeb6e67b06c2adea94a11541c8527fd5744891c849"
+  }
+}

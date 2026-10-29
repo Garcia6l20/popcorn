@@ -1,4 +1,5 @@
 import os
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,36 @@ from popcorn.stm32.description._patches import PatchTarget
 from popcorn.stm32.description._sources import Sources, find_sources
 from popcorn.stm32.description._svd import SvdDevice
 
+from popcorn_build.cmsis_dirs import (
+    VARIABLE,
+    cmsis_device_dirs,
+    missing_cmsis_packs,
+    with_checkout_dirs,
+)
+
 PIN_DATA_VARIABLE = "POPCORN_STM32_PIN_DATA"
+
+
+def cmsis_usage_error(missing: list[str], compiler: str | None) -> pytest.UsageError | None:
+    """The error for the CMSIS device packages @p missing from the build directory when the
+    cross compiler @p compiler is found, so the configure would have fetched them. None
+    without a compiler, where the cases needing a header skip."""
+    if not missing or compiler is None:
+        return None
+    return pytest.UsageError(f"run the configure, build/deps lacks {', '.join(missing)}")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Puts the checkout's fetched CMSIS device `Include` directories first in
+    `POPCORN_CMSIS_DEVICE_DIRS`, keeping the entries already set. Raises pytest.UsageError
+    when `arm-none-eabi-gcc` is on PATH and the build directory lacks a listed package."""
+    del config
+    error = cmsis_usage_error(missing_cmsis_packs(), shutil.which("arm-none-eabi-gcc"))
+    if error is not None:
+        raise error
+    dirs = cmsis_device_dirs()
+    if dirs:
+        os.environ[VARIABLE] = with_checkout_dirs(os.environ.get(VARIABLE), dirs)
 
 
 def require_pin_data() -> Path:

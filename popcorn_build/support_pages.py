@@ -21,6 +21,7 @@ from popcorn_build.example_parts import (
     ExampleParts,
     PartClass,
     part_class,
+    with_part_class,
 )
 
 LOCAL_SOURCES = ("POPCORN_STM32_DESCRIPTION_DIRS", "POPCORN_STM32_BUILD")
@@ -290,7 +291,7 @@ def write(out: Path) -> list[Path]:
         os.environ.pop(name, None)
     out.mkdir(parents=True, exist_ok=True)
     parts: dict[str, PartDescription] = {}
-    for name in shipped_parts():
+    for name in with_part_class(shipped_parts()):
         refname, _, core = name.partition("-")
         parts[name] = mcu(refname, core=core or None)
     states = part_states(parts)

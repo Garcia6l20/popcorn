@@ -12,7 +12,13 @@ import popcorn
 import pytest
 from popcorn.stm32 import mcu, shipped_parts
 
-from popcorn_build.example_parts import EXAMPLE_PARTS, PartClass, extra_runs, part_class
+from popcorn_build.example_parts import (
+    EXAMPLE_PARTS,
+    PartClass,
+    extra_runs,
+    part_class,
+    with_part_class,
+)
 
 ROOT = Path(__file__).parents[3]
 EXAMPLES = ROOT / "examples"
@@ -27,7 +33,7 @@ def description(part: str) -> popcorn.PartDescription:
 
 def classes() -> dict[PartClass, list[str]]:
     found: dict[PartClass, list[str]] = collections.defaultdict(list)
-    for part in shipped_parts():
+    for part in with_part_class(shipped_parts()):
         found[part_class(part)].append(part)
     return found
 
@@ -111,3 +117,8 @@ def test_every_example_directory_has_a_row_and_its_conftest_part() -> None:
     assert directories == set(EXAMPLE_PARTS)
     for name, row in EXAMPLE_PARTS.items():
         assert conftest_parts(EXAMPLES / name / "conftest.py") == {row.conftest}, name
+
+
+def test_the_part_class_decodes_the_u5_and_h5_lines_only() -> None:
+    names = ["STM32U575QGIx", "STM32L152RETx", "STM32H573AIIx", "STM32L100C6Ux"]
+    assert with_part_class(names) == ["STM32U575QGIx", "STM32H573AIIx"]
