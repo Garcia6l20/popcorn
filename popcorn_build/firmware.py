@@ -65,8 +65,10 @@ def firmware_env(preset: CrossPreset = cortex_m33) -> Environment | None:
     @throws SystemExit @p preset is not equal to one of cortex_m33, cortex_m3 and cortex_m4f.
     """
     registered = FIRMWARE_PRESETS.get(preset.name)
-    if registered is None or registered[0] != preset:
+    if registered is None:
         raise SystemExit(f"popcorn: no firmware build prefix for the preset {preset.name}")
+    if registered[0] != preset:
+        raise SystemExit(f"popcorn: the registered preset {preset.name}, flags differ")
     prefix = registered[1]
     if preset.name not in _envs and toolchain_found:
         env = context.current_project.Environment(toolchain="gcc", name=prefix)

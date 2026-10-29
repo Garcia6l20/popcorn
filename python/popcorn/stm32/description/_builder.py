@@ -132,7 +132,7 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
     """@ref build_description's PartDescription, paired with the PatchReport of every rule
     apply_patches applied while assembling it."""
     svd = expand_svd(sources.svd.read_bytes(), file=str(sources.svd))
-    db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db))
+    db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db), name=sources.part)
     rzone = _read_rzone_source(sources)
     cmsis = (
         read_cmsis_irqs(

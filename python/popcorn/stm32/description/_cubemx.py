@@ -5,7 +5,7 @@ import re
 import tomllib
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from xml.etree.ElementTree import Element
 
 from popcorn.stm32.description._binder import from_mapping
@@ -18,6 +18,7 @@ _PIN_RE = re.compile(r"P([A-Z])(\d+)")
 _BONDED_PIN_RE = re.compile(r"P([A-Z])(\d+)(?:[^\d_].*)?")
 _ADC_INPUT_RE = re.compile(r"(ADC\d+)_INP?(\d+)")
 _AF_RE = re.compile(r"GPIO_AF(\d+)_")
+_GROUP_RE = re.compile(r"\(([^()]*)\)")
 MAX_GPIO_MODES_BYTES = 8 << 20
 """Largest GPIO modes file read_gpio_alternates parses, 26 times the 311 KiB of the U5 one."""
 
@@ -40,6 +41,24 @@ class DbPart:
     ips: list[DbIp]
     package: str = ""
     pins: dict[str, frozenset[str]] = field(default_factory=dict[str, frozenset[str]])
+
+    def select(self, name: str, *, file: str) -> DbPart:
+        """The part @p name, one of expand_refname(ref_name), as a DbPart named @p name whose
+        `flash_kib` and `ram_kib` hold that name's element only. A Flash or Ram list of one
+        element applies to every name of the group, any other length than the group's is a
+        DescriptionError, as is a @p name outside the group. A part of no group returns itself."""
+        expanded = [expanded for expanded, _ in expand_refname(self.ref_name)]
+        if name not in expanded:
+            raise DescriptionError(file, 0, "Mcu.RefName", f"one of {', '.join(expanded)}")
+        if len(expanded) == 1:
+            return self
+        index = expanded.index(name)
+        return replace(
+            self,
+            ref_name=name,
+            flash_kib=[_element(self.flash_kib, index, len(expanded), file, "Mcu.Flash")],
+            ram_kib=[_element(self.ram_kib, index, len(expanded), file, "Mcu.Ram")],
+        )
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -83,9 +102,39 @@ def _mcu_namespace(root: Element, key: str, *, file: str, local: str | None = No
     return uri
 
 
-def read_part(data: bytes, *, file: str) -> DbPart:
+def expand_refname(ref: str) -> list[tuple[str, int]]:
+    """The names a RefName stands for, each with its element index: a RefName of no group is its
+    own only name, `STM32L151C(6-8-B)Tx` gives `STM32L151C6Tx` 0, `STM32L151C8Tx` 1 and
+    `STM32L151CBTx` 2, the group's options in order. DescriptionError for a RefName with more
+    than one group or an empty option."""
+    groups = list(_GROUP_RE.finditer(ref))
+    if not groups:
+        return [(ref, 0)]
+    if len(groups) > 1:
+        raise DescriptionError(ref, 0, "RefName", "at most one group")
+    group = groups[0]
+    options = group.group(1).split("-")
+    if any(not option for option in options):
+        raise DescriptionError(ref, 0, "RefName", "a group of non-empty options")
+    return [
+        (f"{ref[: group.start()]}{option}{ref[group.end() :]}", index)
+        for index, option in enumerate(options)
+    ]
+
+
+def _element(values: list[int], index: int, count: int, file: str, key: str) -> int:
+    if len(values) == count:
+        return values[index]
+    if len(values) == 1:
+        return values[0]
+    raise DescriptionError(file, 0, key, f"one element or {count} elements")
+
+
+def read_part(data: bytes, *, file: str, name: str | None = None) -> DbPart:
     """DbPart of a `db/mcu/<part>.xml` document, DescriptionError when it is malformed or does
-    not carry the Mcu namespace of CubeMX or of ST's STM32_open_pin_data."""
+    not carry the Mcu namespace of CubeMX or of ST's STM32_open_pin_data. With @p name, one of
+    expand_refname of the document's RefName, the DbPart is DbPart.select of it. Without,
+    a group RefName keeps its group name and every Ram and Flash element."""
     try:
         root = ET.fromstring(data)
     except ET.ParseError as exc:
@@ -116,10 +165,10 @@ def read_part(data: bytes, *, file: str) -> DbPart:
     ips: list[DbIp] = []
     for ip_el in root.findall(q("IP")):
         instance = ip_el.get("InstanceName")
-        name = ip_el.get("Name")
-        if instance is None or name is None:
+        ip_name = ip_el.get("Name")
+        if instance is None or ip_name is None:
             raise DescriptionError(file, 0, "Mcu.IP", "InstanceName and Name")
-        ips.append(DbIp(instance=instance, name=name, version=ip_el.get("Version") or ""))
+        ips.append(DbIp(instance=instance, name=ip_name, version=ip_el.get("Version") or ""))
 
     pins: dict[str, frozenset[str]] = {}
     for pin_el in root.findall(q("Pin")):
@@ -128,7 +177,7 @@ def read_part(data: bytes, *, file: str) -> DbPart:
             signals = {s.get("Name") for s in pin_el.findall(q("Signal"))}
             pins[pin_name] = frozenset(name for name in signals if name is not None)
 
-    return DbPart(
+    part = DbPart(
         ref_name=ref_name,
         family=family,
         line=line,
@@ -139,6 +188,7 @@ def read_part(data: bytes, *, file: str) -> DbPart:
         package=root.get("Package") or "",
         pins=pins,
     )
+    return part if name is None else part.select(name, file=file)
 
 
 def bonded_pins(part: DbPart) -> dict[str, int]:
@@ -196,7 +246,8 @@ def _parse_kib(el: Element, *, file: str, key: str) -> int:
 
 
 def rzone_file_name(part: DbPart) -> str:
-    """Name of the `db/mcu/memory/` rzone file for @p part, first Ram and Flash element."""
+    """Name of the `db/mcu/memory/` rzone file for @p part, first Ram and Flash element, the
+    selected ones of a part read with a name."""
     return f"STM32_{part.die}_{part.ram_kib[0]}_{part.flash_kib[0]}.xml"
 
 

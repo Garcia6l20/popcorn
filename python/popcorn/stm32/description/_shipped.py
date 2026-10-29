@@ -104,8 +104,8 @@ def _names_in(path: Path) -> list[str]:
 
 
 def shipped_names(directory: Path | None = None) -> list[str]:
-    """Names of the shipped parts, `<RefName>[-<core>]`, the keys of `parts` of every parts
-    layer in @p directory, SHIPPED_DIR by default, sorted."""
+    """Names of the shipped parts, `<name>[-<core>]`, <name> the expanded name of a group RefName,
+    the keys of `parts` of every parts layer in @p directory, SHIPPED_DIR by default, sorted."""
     directory = SHIPPED_DIR if directory is None else directory
     return sorted(name for path in directory.glob(f"*{_PARTS_SUFFIX}") for name in _names_in(path))
 
@@ -331,7 +331,7 @@ def known_part(part: str) -> str:
         return found
     db_dir = default_search_paths().cubemx_db
     if (db_dir / "mcu").is_dir():
-        return resolve_part(part, db_dir)
+        return resolve_part(part, db_dir).name
     close = difflib.get_close_matches(part, shipped, n=5)
     expected = "a known part"
     if close:
@@ -356,11 +356,12 @@ class BuiltPart:
     bonded: int
     """Bonded GPIO pins of the part's package, by bonded_pins."""
     flash_kib: int
-    """Flash size in KiB, the db's first Flash element."""
+    """Flash size in KiB of the selected name."""
 
 
 def build_part(name: str, *, pin_data: Path) -> BuiltPart:
-    """BuiltPart of the shipped name @p name, `<RefName>[-<core>]`, built from
+    """BuiltPart of the shipped name @p name, `<name>[-<core>]`, <name> the expanded name of a
+    group RefName, built from
     pin_data_sources. DescriptionError when no CMSIS device header is found: a description
     without its IRQ names would differ from a local build."""
     part, _, core = name.partition("-")
@@ -371,7 +372,7 @@ def build_part(name: str, *, pin_data: Path) -> BuiltPart:
         )
     description = build_description(sources)
     check_bounds(description, file=name)
-    db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db))
+    db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db), name=sources.part)
     return BuiltPart(
         text=dump_json(description),
         bonded=sum(mask.bit_count() for mask in bonded_pins(db_part).values()),

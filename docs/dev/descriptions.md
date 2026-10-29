@@ -33,7 +33,9 @@ flowchart LR
 The modules are in `python/popcorn/stm32/description`:
 
 - `_sources.py` finds the SVD, the CubeMX db, the rzone facts, the GPIO modes file, the CMSIS
-  device header and the patch files of a part.
+  device header and the patch files of a part. A CubeMX range stem such as `STM32L151C(6-8-B)Tx`
+  is no part name. It resolves as `STM32L151C6Tx`, `STM32L151C8Tx` and `STM32L151CBTx`, each with
+  its own flash and RAM size.
 - `_svd.py` expands an SVD: `derivedFrom`, `dim`, clusters and property inheritance. It is a
   pure function of the file bytes.
 - `_cubemx.py` reads the part lookup, the memory regions and processor facts, the IP instance
@@ -321,6 +323,7 @@ uv run python -m popcorn_build.part_sweep --out shipped.json --source shipped
   and the instance counts: total, with a built-in model at TZEN 0 and 1, and the names with no
   IP version.
 - `--source local` takes the db's `mcu/STM32*.xml` files. A range stem such as
-  `STM32C011F(4-6)Px` is one RefName. The run stops with an error when the db has no `mcu/`
+  `STM32C011F(4-6)Px` gives one row per expanded name, `STM32C011F4Px` and `STM32C011F6Px`, each
+  with its own flash and RAM size. The run stops with an error when the db has no `mcu/`
   directory or no part matches.
 - A failed stage holds the exception type and the first 300 characters of its text.

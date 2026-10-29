@@ -14,6 +14,7 @@ from popcorn._errors import absent
 from popcorn.stm32.description._cubemx import (
     DbPart,
     die_ips,
+    expand_refname,
     gpio_modes_file_name,
     read_part,
     reference_rank,
@@ -114,15 +115,38 @@ def match_refname(part: str, refnames: Sequence[str], *, file: str) -> str | Non
     return candidates[0] if candidates else None
 
 
-def resolve_part(part: str, db_dir: Path) -> str:
-    """db RefName for @p part, by match_refname over the db's part files, DescriptionError with
-    difflib close matches when none match, listing every candidate when several do."""
+@dataclass(slots=True, frozen=True)
+class ResolvedPart:
+    """A part name resolved against a db: the expanded `name`, the `ref_name` of the db part
+    file that holds it and its element `index` in that file's group."""
+
+    name: str
+    ref_name: str
+    index: int
+
+
+def resolve_part(part: str, db_dir: Path) -> ResolvedPart:
+    """ResolvedPart for @p part, by match_refname over the expanded names of the db's part
+    files, see expand_refname. DescriptionError with difflib close matches when none match,
+    listing every candidate when several do or when several files expand to the matched name."""
     mcu_dir = db_dir / "mcu"
-    refnames = sorted(p.stem for p in mcu_dir.glob("*.xml"))
-    found = match_refname(part, refnames, file=str(db_dir))
+    expanded: dict[str, list[tuple[str, int]]] = {}
+    for stem in sorted(p.stem for p in mcu_dir.glob("*.xml")):
+        try:
+            names = expand_refname(stem)
+        except DescriptionError:
+            continue
+        for name, index in names:
+            expanded.setdefault(name, []).append((stem, index))
+    found = match_refname(part, list(expanded), file=str(db_dir))
     if found is not None:
-        return found
-    close = difflib.get_close_matches(part, refnames, n=5)
+        sources = expanded[found]
+        if len(sources) > 1:
+            files = ", ".join(ref_name for ref_name, _ in sources)
+            raise DescriptionError(str(db_dir), 0, part, f"exactly one file, found {files}")
+        ref_name, index = sources[0]
+        return ResolvedPart(name=found, ref_name=ref_name, index=index)
+    close = difflib.get_close_matches(part, list(expanded), n=5)
     if close:
         raise DescriptionError(
             str(db_dir), 0, part, f"a known part, close matches: {', '.join(close)}"
@@ -273,8 +297,8 @@ def die_ip_sources(
     patch exception or an explicit SVD of another name has no candidate. A part file that cannot
     be read, that read_part refuses, or whose SVD does not resolve is no candidate. Maps every
     instance die_ips gives, empty when @p db_part is the reference. Results are memoized in the
-    process, 64 entries, keyed on the inputs and the name, size and mtime of every candidate
-    file, so an edit of a candidate file gives a new scan."""
+    process, 64 entries, keyed on the inputs, the selected name and the name, size and mtime of
+    every candidate file, so an edit of a candidate file gives a new scan."""
     base = _CORE_SUFFIX_RE.sub("", svd_path.stem)
     candidates = [
         path
@@ -284,6 +308,7 @@ def die_ip_sources(
     key = (
         mcu_db,
         _stat_key(mcu_db),
+        db_part.ref_name,
         svd_path.name,
         core,
         tuple(search.svd_dirs),
@@ -312,12 +337,16 @@ def _scan_die_ips(
     ranked: list[tuple[tuple[int, int, str], Path, DbPart]] = []
     for path in candidates:
         try:
-            candidate = read_part(path.read_bytes(), file=str(path))
+            group = read_part(path.read_bytes(), file=str(path))
+            members = [
+                group.select(name, file=str(path)) for name, _ in expand_refname(group.ref_name)
+            ]
         except OSError, DescriptionError:
             continue
-        rank = reference_rank(candidate)
-        if candidate.die == db_part.die and rank < own_rank:
-            ranked.append((rank, path, candidate))
+        for candidate in members:
+            rank = reference_rank(candidate)
+            if candidate.die == db_part.die and rank < own_rank:
+                ranked.append((rank, path, candidate))
     for _, donor_path, donor in sorted(ranked, key=lambda entry: entry[0]):
         try:
             resolved = _svd_path(
@@ -356,11 +385,12 @@ def find_sources(
             f"a CubeMX db with an mcu directory at {db_dir}, set POPCORN_CUBEMX_DB",
             path=db_dir,
         )
-    refname = resolve_part(part, db_dir)
+    resolved = resolve_part(part, db_dir)
+    refname = resolved.name
 
-    mcu_db = db_dir / "mcu" / f"{refname}.xml"
+    mcu_db = db_dir / "mcu" / f"{resolved.ref_name}.xml"
     _require(mcu_db, str(db_dir), refname, f"a db file at {mcu_db}")
-    db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db))
+    db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db), name=refname)
 
     rzone = db_dir / "mcu" / "memory" / rzone_file_name(db_part)
     _require(rzone, str(db_dir), refname, f"an rzone file at {rzone}")
@@ -412,10 +442,11 @@ def pin_data_sources(
             f"a STM32_open_pin_data checkout with an mcu directory at {pin_data}",
             path=pin_data,
         )
-    refname = resolve_part(part, pin_data)
-    mcu_db = pin_data / "mcu" / f"{refname}.xml"
+    resolved = resolve_part(part, pin_data)
+    refname = resolved.name
+    mcu_db = pin_data / "mcu" / f"{resolved.ref_name}.xml"
     _require(mcu_db, str(pin_data), refname, f"a part file at {mcu_db}")
-    db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db))
+    db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db), name=refname)
     modes_name = gpio_modes_file_name(db_part)
     if modes_name is None:
         raise DescriptionError(str(mcu_db), 0, "GPIO", "a GPIO IP with a version")

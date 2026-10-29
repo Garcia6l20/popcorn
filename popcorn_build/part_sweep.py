@@ -58,11 +58,19 @@ def _part_facts(refname: str) -> Row:
         "bonded": None,
         "db_error": None,
     }
-    db_file = _db_dir() / "mcu" / f"{refname}.xml"
+    from popcorn.stm32.description._errors import DescriptionError
+    from popcorn.stm32.description._sources import resolve_part
+
+    db_dir = _db_dir()
+    try:
+        resolved = resolve_part(refname, db_dir)
+    except DescriptionError:
+        return facts
+    db_file = db_dir / "mcu" / f"{resolved.ref_name}.xml"
     if not db_file.is_file():
         return facts
     try:
-        part = read_part(db_file.read_bytes(), file=str(db_file))
+        part = read_part(db_file.read_bytes(), file=str(db_file), name=resolved.name)
     except Exception as exc:
         facts["db_error"] = _error(exc)
         return facts
@@ -78,16 +86,16 @@ def _part_facts(refname: str) -> Row:
 
 
 def sweep_part(name: str) -> Row:
-    """The row of part @p name, `<RefName>[-<core>]`, from the description `mcu()` gives it in
-    this environment. A name holding `(`, a CubeMX range stem such as `STM32C011F(4-6)Px`, is a
-    RefName whole. Part facts come from the CubeMX db when it holds the part and its file
-    reads, else they are None, with `db_error` set for a file that does not read. An exception
-    in a stage ends the row there, its type and text in that stage's field."""
+    """The row of part @p name, `<name>[-<core>]`, <name> an expanded RefName, from the
+    description `mcu()` gives it in this environment. Part facts come from the CubeMX db when it
+    holds the part and its file reads, else they are None, with `db_error` set for a file that
+    does not read. An exception in a stage ends the row there, its type and text in that stage's
+    field."""
     import popcorn
     from popcorn.stm32 import mcu, support
     from popcorn.stm32.description._patches import is_smps_part
 
-    refname, _, core_name = (name, "", "") if "(" in name else name.partition("-")
+    refname, _, core_name = name.partition("-")
     core = core_name or None
     row: Row = {"part": name, "error": None, **_part_facts(refname), "smps": is_smps_part(refname)}
     row["attach"] = None
@@ -201,9 +209,12 @@ def sweep(
 
 
 def db_parts(globs: Sequence[str]) -> list[str]:
-    """RefNames of the CubeMX db's `mcu/STM32*.xml` part files matching any of @p globs, every
-    part when @p globs is empty, sorted."""
-    names = sorted(p.stem for p in (_db_dir() / "mcu").glob("STM32*.xml"))
+    """Expanded RefNames of the CubeMX db's `mcu/STM32*.xml` part files matching any of @p globs,
+    every part when @p globs is empty, sorted. A range stem gives one name per option."""
+    from popcorn.stm32.description._cubemx import expand_refname
+
+    stems = (p.stem for p in (_db_dir() / "mcu").glob("STM32*.xml"))
+    names = sorted({name for stem in stems for name, _ in expand_refname(stem)})
     if not globs:
         return names
     return [n for n in names if any(fnmatch.fnmatchcase(n, g) for g in globs)]

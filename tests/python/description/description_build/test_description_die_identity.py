@@ -185,6 +185,37 @@ def _donors(mcu: Path, search: SearchPaths, part: str) -> dict[str, str]:
     return {instance: donor.stem for instance, donor in found.items()}
 
 
+def _member_donors(mcu: Path, search: SearchPaths, member: str) -> dict[str, str]:
+    path = mcu / "STM32T001A(6-B)x.xml"
+    group = read_part(path.read_bytes(), file=str(path))
+    svd = search.svd_dirs[0] / "STM32T001.svd"
+    found = die_ip_sources(
+        group.select(member, file=str(path)), path, svd, core=None, search=search
+    )
+    return {instance: donor.stem for instance, donor in found.items()}
+
+
+@pytest.mark.parametrize(
+    "order", [("STM32T001A6x", "STM32T001ABx"), ("STM32T001ABx", "STM32T001A6x")]
+)
+def test_two_members_of_one_group_file_get_their_own_donor_maps(
+    fake_db: tuple[Path, SearchPaths], order: tuple[str, str]
+) -> None:
+    mcu, search = fake_db
+    _sources.die_ip_memo.clear()
+    (mcu / "STM32T001A(6-B)x.xml").write_text(
+        '<Mcu xmlns="http://mcd.rou.st.com/modules.php?name=mcu" '
+        'RefName="STM32T001A(6-B)x" Family="STM32T0" Line="STM32T0">'
+        "<Die>DIE1</Die><Ram>64</Ram><Flash>32</Flash><Flash>128</Flash>"
+        '<IP InstanceName="UART1" Name="UART" Version="g_v"/></Mcu>',
+        encoding="utf-8",
+    )
+    _part_file(mcu, "STM32T001Qx", "DIE1", 64, 0, ["UART1", "UART2"])
+    expected = {"STM32T001A6x": {"UART2": "STM32T001Qx"}, "STM32T001ABx": {}}
+    for member in order:
+        assert _member_donors(mcu, search, member) == expected[member]
+
+
 def test_the_donor_has_the_most_bonded_pins_then_flash_then_name(
     fake_db: tuple[Path, SearchPaths],
 ) -> None:

@@ -138,7 +138,7 @@ def test_a_preset_with_a_known_name_and_other_flags_is_refused() -> None:
     changed = replace(
         firmware.cortex_m3, extra_compile_flags=(*firmware.cortex_m3.extra_compile_flags, "-DX")
     )
-    with pytest.raises(SystemExit, match="no firmware build prefix for the preset cortex-m3"):
+    with pytest.raises(SystemExit, match="the registered preset cortex-m3-none-eabi, flags differ"):
         firmware.firmware_env(changed)
 
 
