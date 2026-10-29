@@ -216,7 +216,7 @@ description. It refuses with `DescriptionError` naming the file: a layer of anot
 `line_sha256` mismatch, a missing block or one whose bytes do not hash to its key, an unknown
 instance, and a decompressed layer or composed description above `MAX_SHIPPED_BYTES`. The
 composed size is counted before anything is built. On first use the composed text is cached as
-`<cache>/shipped/<name>-<sha16>.json`, sha16 over the parts, line and family file bytes.
+`<cache>/shipped/<name>-<sha16>.json`, sha16 over the SHA-256 of each of the parts, line and family files, in order.
 
 A part ships exactly when its golden file `tests/data/stm32/golden/<RefName>[-<core>].json`
 exists. To add a part, write its golden, then ship:
@@ -225,7 +225,8 @@ exists. To add a part, write its golden, then ship:
 uv run python -m popcorn.stm32.description golden STM32U575QGIx --update
 uv run python -m popcorn.stm32.description ship STM32U575QGIx --pin-data <STM32_open_pin_data> \
     --out python/popcorn/stm32/data
-uv run python -m popcorn.stm32.description ship --pin-data <STM32_open_pin_data> --check
+uv run python -m popcorn.stm32.description ship --pin-data <STM32_open_pin_data> --check \
+    --out python/popcorn/stm32/data
 ```
 
 `ship` builds every golden part of each family it touches from `STM32_open_pin_data`, in a pool

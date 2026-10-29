@@ -41,6 +41,11 @@ MAX_SHIPPED_BYTES = 64 * 1024 * 1024
 """Largest decompressed layer file and largest composed description, 12 times the 5.1 MB of the
 STM32U575QGIx description."""
 
+MAX_LAYER_DEPTH = 64
+"""Deepest JSON nesting a layer file may hold, 7 times the 9 levels of the shipped parts layers.
+Every later step that recurses over a layer, the composition and the JSON encoder, stays within
+it whatever the caller's stack."""
+
 STALE_SECONDS = 7 * 24 * 3600
 """Age after which a composed shipped description of other layer versions is removed."""
 
@@ -50,12 +55,32 @@ BUILD_VARIABLE = "POPCORN_STM32_BUILD"
 _PARTS_SUFFIX = ".parts.json.xz"
 
 
+def _depth_above(value: object, limit: int) -> bool:
+    """True when @p value nests objects and arrays more than @p limit deep, the value itself
+    level 1. Iterative, so any depth the decoder returns is walked."""
+    pending: list[tuple[object, int]] = [(value, 1)]
+    while pending:
+        item, depth = pending.pop()
+        if isinstance(item, dict):
+            children: list[object] = list(cast(dict[str, object], item).values())
+        elif isinstance(item, list):
+            children = cast(list[object], item)
+        else:
+            continue
+        if depth > limit:
+            return True
+        pending.extend((child, depth + 1) for child in children)
+    return False
+
+
 def _layer(data: bytes, *, file: str, kind: str) -> tuple[dict[str, Any], bytes]:
     raw = bounded_xz(data, MAX_SHIPPED_BYTES, file=file)
     try:
         value = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         raise DescriptionError(file, 0, "<root>", "valid JSON") from exc
+    if _depth_above(value, MAX_LAYER_DEPTH):
+        raise DescriptionError(file, 0, "<root>", f"JSON nested at most {MAX_LAYER_DEPTH} deep")
     if not isinstance(value, dict):
         raise DescriptionError(file, 0, "<root>", f"a {kind} layer object")
     layer = cast(dict[str, Any], value)
@@ -158,13 +183,12 @@ def shipped_description(
 
     Composed once into `<cache>/shipped/<name>-<sha16>.json`, sha16 the first 16 hex digits of
     the SHA-256 over the SHA-256 digests of the xz bytes of the part's parts, line and family
-    layers, in that order. A
-    change to any part of a line renames the cache file of every part of the line. The cache is
-    shared by every popcorn of the user, so each layer version keeps its own file: a hit
-    refreshes its mtime when the cache is writable, and a write removes the files of the same
-    name and another version unused for STALE_SECONDS, except a file the directory's sticky bit
-    keeps for its owner. Bound: one file per shipped name per layer version used in the last 7
-    days."""
+    layers, in that order. A change to any part of a line renames the cache file of every part
+    of the line. The cache is shared by every popcorn of the user, so each layer version keeps
+    its own file: a hit refreshes its mtime when the cache is writable, and a write removes the
+    files of the same name and another version unused for STALE_SECONDS, except a file the
+    directory's sticky bit keeps for its owner. Bound: one file per shipped name per layer
+    version used in the last 7 days."""
     name = match_name(part, core, shipped_names(), file=str(SHIPPED_DIR))
     if name is None:
         return None
@@ -364,7 +388,8 @@ def write_layers(
     directory: Path, files: Mapping[str, bytes], families: Collection[str]
 ) -> list[str]:
     """Writes @p files, file name to bytes, into @p directory and removes every layer file of
-    @p families that @p files does not hold. Returns the names removed, sorted.
+    @p families that @p files does not hold, parts files first, then line files, then blocks
+    files, so no parts file is left without its line. Returns the names removed, in that order.
 
     First removes every `<layer file>.tmp.<pid>` of @p families an earlier run left. Each file
     goes to `<name>.tmp.<pid>`, and once all are written each is replaced into place, blocks
@@ -388,10 +413,14 @@ def write_layers(
             tmp_path.unlink(missing_ok=True)
         raise
     removed: list[str] = []
-    for path in sorted(directory.glob("*.json.xz")):
-        if path.name not in files and layer_family(path.name) in families:
-            path.unlink(missing_ok=True)
-            removed.append(path.name)
+    stale = (
+        path
+        for path in directory.glob("*.json.xz")
+        if path.name not in files and layer_family(path.name) in families
+    )
+    for path in sorted(stale, key=lambda path: _write_rank(path.name), reverse=True):
+        path.unlink(missing_ok=True)
+        removed.append(path.name)
     return removed
 
 

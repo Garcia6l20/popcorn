@@ -213,7 +213,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ship.add_argument("--pin-data", required=True)
     ship.add_argument("--check", action="store_true")
     ship.add_argument(
-        "--out", help="layer directory, required to write, the package data for --check"
+        "--out",
+        help="layer directory, required to write, the imported package data for --check by default",
     )
     ship.add_argument("-j", "--jobs", type=int, default=DEFAULT_JOBS)
     ship.set_defaults(func=_cmd_ship)

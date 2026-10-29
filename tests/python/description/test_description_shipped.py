@@ -358,6 +358,38 @@ def test_a_layer_nested_too_deep_for_the_json_parser_is_refused_naming_it(
     assert (error.key, error.expected) == ("<root>", "valid JSON")
 
 
+@pytest.mark.parametrize("file", [PARTS, LINE, FAMILY])
+def test_a_layer_nested_past_the_depth_cap_is_refused_naming_it(
+    shipped_dir: Path, tmp_path: Path, file: str
+) -> None:
+    depth = _shipped.MAX_LAYER_DEPTH
+    (shipped_dir / file).write_bytes(pack(cast(Any, _nested(depth))))
+    assert _refused(tmp_path).expected != f"JSON nested at most {depth} deep"
+    (shipped_dir / file).write_bytes(lzma.compress(b"[" * (depth + 1) + b"]" * (depth + 1)))
+    error = _refused(tmp_path)
+    assert error.file == str(shipped_dir / file)
+    assert (error.key, error.expected) == ("<root>", f"JSON nested at most {depth} deep")
+
+
+def test_a_parts_layer_nested_deeper_than_the_json_encoder_takes_is_refused_naming_it(
+    shipped_dir: Path, tmp_path: Path
+) -> None:
+    layer = _decode(shipped_dir, PARTS)
+    layer["parts"][NAME]["regions"] = "@deep@"
+    text = json.dumps(layer).replace('"@deep@"', "[" * 50000 + "]" * 50000)
+    (shipped_dir / PARTS).write_bytes(lzma.compress(text.encode("ascii")))
+    error = _refused(tmp_path)
+    assert error.file == str(shipped_dir / PARTS)
+    assert error.expected == f"JSON nested at most {_shipped.MAX_LAYER_DEPTH} deep"
+
+
+def _nested(depth: int) -> list[object]:
+    value: list[object] = []
+    for _ in range(depth - 1):
+        value = [value]
+    return value
+
+
 def test_a_parts_layer_of_another_line_version_is_refused(
     shipped_dir: Path, tmp_path: Path
 ) -> None:
@@ -728,3 +760,13 @@ def test_the_reference_of_a_line_is_most_bonded_pins_then_flash_then_name(
 )
 def test_layer_family_names_the_family_of_layer_files_only(file: str, family: str | None) -> None:
     assert layer_family(file) == family
+
+
+def test_write_layers_removes_stale_parts_files_before_their_lines_and_blocks(
+    tmp_path: Path,
+) -> None:
+    stale = ["STM32T0xx.blocks.json.xz", "STM32T001xx.line.json.xz", "STM32T001xx.parts.json.xz"]
+    for file in stale:
+        (tmp_path / file).write_bytes(b"")
+    assert _shipped.write_layers(tmp_path, {}, {"STM32T0xx"}) == stale[::-1]
+    assert list(tmp_path.iterdir()) == []

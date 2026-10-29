@@ -29,3 +29,20 @@ def test_a_missing_stage_prunes_nothing(tmp_path: Path) -> None:
     source = tmp_path / "python" / "popcorn"
     _write(source, "__init__.py")
     assert prune_stage(tmp_path / "absent", source) == []
+
+
+def test_a_removed_subpackage_leaves_no_directory_and_live_caches_stay(tmp_path: Path) -> None:
+    source, stage = tmp_path / "python" / "popcorn", tmp_path / "build" / "popcorn"
+    _write(source, "__init__.py", "y/__init__.py")
+    _write(
+        stage,
+        "__init__.py",
+        "y/__init__.py",
+        "y/__pycache__/__init__.cpython-314.pyc",
+        "x/__init__.py",
+        "x/__pycache__/__init__.cpython-314.pyc",
+        "x/z/__pycache__/m.cpython-314.pyc",
+    )
+    prune_stage(stage, source)
+    assert not (stage / "x").exists()
+    assert (stage / "y" / "__pycache__" / "__init__.cpython-314.pyc").exists()
