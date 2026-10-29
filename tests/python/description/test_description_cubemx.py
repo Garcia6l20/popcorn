@@ -221,14 +221,24 @@ def test_bonded_pins_drop_the_function_after_the_pin_name() -> None:
                 "PH3-BOOT0",
                 "PB15",
                 "PB16",
+                "PA0/WKUP",
+                "PC15OSC32_OUT",
+                "PF11BOOT0",
                 "PC2_C",
+                "PA1_C",
                 "VDD",
                 "PDR_ON",
                 "NRST",
             )
         },
     )
-    assert bonded_pins(part) == {"A": 1 << 13, "B": 1 << 15, "C": 1 << 14, "H": 1 << 3}
+    assert bonded_pins(part) == {
+        "A": 1 << 13 | 1 << 0,
+        "B": 1 << 15,
+        "C": 1 << 14 | 1 << 15,
+        "F": 1 << 11,
+        "H": 1 << 3,
+    }
 
 
 def test_u575_processor(u575_rzone: Rzone) -> None:

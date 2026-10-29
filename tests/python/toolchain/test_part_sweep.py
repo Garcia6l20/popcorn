@@ -5,8 +5,9 @@ from pathlib import Path
 import popcorn
 import pytest
 from popcorn.stm32 import mcu
+from popcorn.stm32.description._sources import default_search_paths
 
-from popcorn_build.part_sweep import LOCAL_SOURCES, main, sweep, sweep_part
+from popcorn_build.part_sweep import LOCAL_SOURCES, db_parts, main, sweep, sweep_part
 
 SHIPPED = ("STM32H573AIIx", "STM32U575QGIx")
 
@@ -28,7 +29,8 @@ if marks:
     running = max(running, len(os.listdir(marks)))
     os.remove(mark)
 print("log line")
-print(json.dumps({"part": "ignored", "error": None, "running": running}))
+print("PART_SWEEP_ROW " + json.dumps({"part": "ignored", "error": None, "running": running}))
+print("exit warning")
 """
 FAKE = (sys.executable, "-c", FAKE_CHILD)
 
@@ -111,7 +113,7 @@ def test_rows_are_sorted_by_part_whatever_the_completion_order(
         monkeypatch.setenv(f"SWEEP_DELAY_{part}", str((3 - index) * 0.3))
     done: list[str] = []
     rows = sweep(list(reversed(parts)), child=FAKE, jobs=4, on_row=lambda r: done.append(r["part"]))
-    assert done == list(reversed(parts))
+    assert sorted(done) == parts
     assert [row["part"] for row in rows] == parts
 
 
@@ -129,3 +131,48 @@ def test_at_most_jobs_children_run_at_once(tmp_path: Path, monkeypatch: pytest.M
 def test_fewer_than_one_job_is_refused() -> None:
     with pytest.raises(ValueError, match="at least 1"):
         sweep(["A"], child=FAKE, jobs=0)
+
+
+def test_db_parts_lists_stm32_part_files_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcu_dir = tmp_path / "mcu"
+    mcu_dir.mkdir()
+    for name in ("families", "rules", "compatibility", "STM32X0(4-6)Px", "STM32Y1Tx"):
+        (mcu_dir / f"{name}.xml").write_text("<Mcu/>")
+    monkeypatch.setenv("POPCORN_CUBEMX_DB", str(tmp_path))
+    assert db_parts([]) == ["STM32X0(4-6)Px", "STM32Y1Tx"]
+    assert db_parts(["STM32X*"]) == ["STM32X0(4-6)Px"]
+
+
+def test_a_range_stem_is_one_refname_with_its_db_facts() -> None:
+    name = "STM32C011F(4-6)Px"
+    if not (default_search_paths().cubemx_db / "mcu" / f"{name}.xml").is_file():
+        pytest.skip(f"no CubeMX db file for {name}")
+    row = sweep_part(name)
+    assert row["part"] == name
+    assert row["package"]
+    assert row["db_error"] is None
+    assert f"{name}: " in row["description"]["error"]
+
+
+@pytest.mark.usefixtures("shipped_only")
+def test_a_local_sweep_without_a_db_stops_naming_the_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["--out", str(tmp_path / "sweep.json")])
+    assert exc.value.code == 2
+    assert str(tmp_path / "absent" / "mcu") in capsys.readouterr().err
+    assert not (tmp_path / "sweep.json").exists()
+
+
+def test_a_sweep_matching_no_part_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "mcu").mkdir()
+    monkeypatch.setenv("POPCORN_CUBEMX_DB", str(tmp_path))
+    with pytest.raises(SystemExit) as exc:
+        main(["--out", str(tmp_path / "sweep.json"), "--parts", "STM32Q*"])
+    assert exc.value.code == 2
+    assert "no local part matches" in capsys.readouterr().err

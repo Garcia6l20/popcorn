@@ -32,6 +32,8 @@ LOCAL_SOURCES = ("POPCORN_STM32_DESCRIPTION_DIRS", "POPCORN_STM32_BUILD")
 _ROOT = Path(__file__).resolve().parent.parent
 CHILD = (sys.executable, "-m", "popcorn_build.part_sweep", "--child")
 """Command of the child that sweeps one part, the part's name appended."""
+ROW_PREFIX = "PART_SWEEP_ROW "
+"""Start of the stdout line that carries a child's JSON row."""
 
 
 def _error(exc: BaseException) -> str:
@@ -77,14 +79,15 @@ def _part_facts(refname: str) -> Row:
 
 def sweep_part(name: str) -> Row:
     """The row of part @p name, `<RefName>[-<core>]`, from the description `mcu()` gives it in
-    this environment. Part facts come from the CubeMX db when it holds the part and its file
+    this environment. A name holding `(`, a CubeMX range stem such as `STM32C011F(4-6)Px`, is a
+    RefName whole. Part facts come from the CubeMX db when it holds the part and its file
     reads, else they are None, with `db_error` set for a file that does not read. An exception
     in a stage ends the row there, its type and text in that stage's field."""
     import popcorn
     from popcorn.stm32 import mcu, support
     from popcorn.stm32.description._patches import is_smps_part
 
-    refname, _, core_name = name.partition("-")
+    refname, _, core_name = (name, "", "") if "(" in name else name.partition("-")
     core = core_name or None
     row: Row = {"part": name, "error": None, **_part_facts(refname), "smps": is_smps_part(refname)}
     row["attach"] = None
@@ -143,11 +146,11 @@ def _run_child(name: str, *, child: Sequence[str], env: dict[str, str], timeout:
         )
     except subprocess.TimeoutExpired:
         return {"part": name, "error": "timeout"}
-    lines = done.stdout.strip().splitlines()
+    lines = [line for line in done.stdout.splitlines() if line.startswith(ROW_PREFIX)]
     row: object = None
     if done.returncode == 0 and lines:
         try:
-            row = json.loads(lines[-1])
+            row = json.loads(lines[-1].removeprefix(ROW_PREFIX))
         except json.JSONDecodeError:
             row = None
     if not isinstance(row, dict):
@@ -181,7 +184,8 @@ def sweep(
     """One row per name of @p parts, sorted by part, each from its own child process. At most
     @p jobs children run at once. A child that exits non-zero or prints no JSON object gives
     `{"part": ..., "error": "crashed"}` with its exit code and stderr tail, one past @p timeout
-    seconds gives `"error": "timeout"`. @p on_row sees each row as it completes."""
+    seconds gives `"error": "timeout"`. A child prints its row as JSON on a stdout line that
+    starts with `ROW_PREFIX`, the last such line counts. @p on_row sees each row as it completes."""
     if jobs < 1:
         raise ValueError(f"jobs must be at least 1, got {jobs}")
     env = child_env(source)
@@ -197,9 +201,9 @@ def sweep(
 
 
 def db_parts(globs: Sequence[str]) -> list[str]:
-    """RefNames of the CubeMX db's `mcu/` part files matching any of @p globs, every part when
-    @p globs is empty, sorted."""
-    names = sorted(p.stem for p in (_db_dir() / "mcu").glob("*.xml"))
+    """RefNames of the CubeMX db's `mcu/STM32*.xml` part files matching any of @p globs, every
+    part when @p globs is empty, sorted."""
+    names = sorted(p.stem for p in (_db_dir() / "mcu").glob("STM32*.xml"))
     if not globs:
         return names
     return [n for n in names if any(fnmatch.fnmatchcase(n, g) for g in globs)]
@@ -242,7 +246,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--child", metavar="PART", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.child is not None:
-        print(json.dumps(sweep_part(args.child)), flush=True)
+        print(ROW_PREFIX + json.dumps(sweep_part(args.child)), flush=True)
         return 0
     if args.out is None:
         parser.error("--out is required")
@@ -256,7 +260,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not args.parts or any(fnmatch.fnmatchcase(n, g) for g in args.parts)
         ]
     else:
+        mcu_dir = _db_dir() / "mcu"
+        if not mcu_dir.is_dir():
+            parser.error(f"no CubeMX db part directory at {mcu_dir}, set POPCORN_CUBEMX_DB")
         names = db_parts(args.parts)
+    if not names:
+        parser.error(f"no {source} part matches {args.parts or 'any glob'}")
 
     def progress(row: Row) -> None:
         print(row["part"], row["error"] or "done", file=sys.stderr, flush=True)

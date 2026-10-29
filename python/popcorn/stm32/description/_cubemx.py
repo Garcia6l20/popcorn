@@ -15,7 +15,7 @@ from popcorn.stm32.description._model import AlternateDesc, RegionAccess, Region
 _MCU_NAMESPACES = ("http://mcd.rou.st.com/modules.php?name=mcu", "http://dummy.com")
 """Namespaces of a part or GPIO modes file: CubeMX's db, then ST's STM32_open_pin_data copy."""
 _PIN_RE = re.compile(r"P([A-Z])(\d+)")
-_BONDED_PIN_RE = re.compile(r"P([A-Z])(\d+)(?:[- (].*)?")
+_BONDED_PIN_RE = re.compile(r"P([A-Z])(\d+)(?:[^\d_].*)?")
 _AF_RE = re.compile(r"GPIO_AF(\d+)_")
 MAX_GPIO_MODES_BYTES = 8 << 20
 """Largest GPIO modes file read_gpio_alternates parses, 26 times the 311 KiB of the U5 one."""
@@ -142,9 +142,10 @@ def read_part(data: bytes, *, file: str) -> DbPart:
 
 def bonded_pins(part: DbPart) -> dict[str, int]:
     """Bonded GPIO pins of @p part's package: port letter -> mask of its pins 0 to 15, sorted by
-    port. A db pin name is `P<port><n>`, alone or followed by a function after `-`, a space or
-    `(`, so `PC14-OSC32_IN (PC14)` is PC14 and `PA13 (JTMS/SWDIO)` is PA13. Supply, reset and
-    other non-GPIO pins are left out."""
+    port. A db pin name is `P<port><n>`, alone or followed by a function that starts with any
+    character other than a digit or `_`, so `PC14-OSC32_IN (PC14)` is PC14, `PA13 (JTMS/SWDIO)`
+    is PA13, `PA0/WKUP` is PA0 and `PC14OSC32_IN` is PC14. An analog pad such as `PC2_C`,
+    supply, reset and other non-GPIO pins are left out."""
     ports: dict[str, int] = {}
     for name in part.pins:
         found = _BONDED_PIN_RE.fullmatch(name)

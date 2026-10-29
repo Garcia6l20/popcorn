@@ -220,7 +220,11 @@ uv run python -m popcorn_build.part_sweep --out shipped.json --source shipped
 - The output is `{"format": 1, "cubemx_db": ..., "popcorn": <git describe>, "parts": [...]}`,
   rows sorted by part. A row holds the db facts of the part, `line`, `die`, `package`,
   `flash_kib`, `ram_kib` and `bonded`, the pin mask per GPIO port from `bonded_pins`, each null
-  when the db lacks the part or its file does not read, the latter with `db_error` set. It also holds `smps` from `is_smps_part`, the description digest,
-  the attach result per TZEN value, and the instance counts: total, with a built-in model at
-  TZEN 0 and 1, and the names with no IP version.
+  when the db lacks the part or its file does not read, the latter with `db_error` set. It also
+  holds `smps` from `is_smps_part`, the description digest, the attach result per TZEN value,
+  and the instance counts: total, with a built-in model at TZEN 0 and 1, and the names with no
+  IP version.
+- `--source local` takes the db's `mcu/STM32*.xml` files. A range stem such as
+  `STM32C011F(4-6)Px` is one RefName. The run stops with an error when the db has no `mcu/`
+  directory or no part matches.
 - A failed stage holds the exception type and the first 300 characters of its text.
