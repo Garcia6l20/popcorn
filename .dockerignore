@@ -11,6 +11,8 @@
 !third_party/reflex
 !docker/IMAGE_NOTICE
 !docker/licenses
+!docker/constraints.txt
 !.git/modules/third_party/unicorn
 .git/modules/third_party/unicorn/modules
 **/__pycache__
+**/CLAUDE.md

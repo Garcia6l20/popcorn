@@ -7,8 +7,8 @@ RUN uv python install 3.14.8 && uv venv /opt/build --python 3.14.8 \
     && uv pip install --no-cache --python /opt/build/bin/python pcons==0.31.0
 
 FROM toolchain AS unicorn
-COPY .git/modules/third_party/unicorn /raw
-RUN git config --file /raw/config --unset core.worktree \
+RUN --mount=type=bind,source=.git/modules/third_party/unicorn,target=/raw,rw \
+    git config --file /raw/config --unset core.worktree \
     && git init -q /src/third_party/unicorn \
     && git -C /src/third_party/unicorn fetch -q --depth 1 --no-tags /raw "$(git --git-dir=/raw rev-parse HEAD)" \
     && git -C /src/third_party/unicorn checkout -q --detach FETCH_HEAD \
@@ -45,9 +45,10 @@ COPY --from=toolchain /usr/local/lib64/libstdc++.so.6.0.36 /usr/local/lib64/libg
 RUN ldconfig
 RUN pip install --no-cache-dir uv==0.13.1
 RUN --mount=type=bind,from=wheel,source=/out,target=/wheels \
+    --mount=type=bind,source=docker/constraints.txt,target=/constraints.txt \
     uv venv /opt/venv --python /usr/local/bin/python3.14 \
     && uv pip install --no-cache --compile-bytecode --python /opt/venv/bin/python \
-       "$(ls /wheels/popcorn-*.whl)[pytest]"
+       -c /constraints.txt "$(ls /wheels/popcorn-*.whl)[pytest]"
 RUN mkdir -p /usr/share/doc/popcorn \
     && cp -r /opt/venv/lib/python3.14/site-packages/popcorn-*.dist-info/licenses/. /usr/share/doc/popcorn/
 COPY docker/IMAGE_NOTICE /usr/share/doc/popcorn/
@@ -68,4 +69,4 @@ LABEL org.opencontainers.image.title="popcorn" \
       org.opencontainers.image.documentation="https://garcia6l20.github.io/popcorn/" \
       org.opencontainers.image.revision="${POPCORN_REVISION}" \
       org.opencontainers.image.version="${POPCORN_VERSION}" \
-      org.opencontainers.image.licenses="MIT AND GPL-2.0-only AND LGPL-2.1-or-later AND BSD-3-Clause AND Apache-2.0"
+      org.opencontainers.image.licenses="MIT AND GPL-2.0-only AND LGPL-2.1-or-later AND BSD-3-Clause AND Apache-2.0 AND GPL-3.0-or-later WITH GCC-exception-3.1 AND (MIT OR Apache-2.0)"
