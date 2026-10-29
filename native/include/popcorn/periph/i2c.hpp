@@ -186,7 +186,8 @@ public:
    * @param unit The unit the phase was queued with.
    * @param phase The phase.
    * @param answer The MCU's acknowledge or byte.
-   * @param at Machine time since reset at the end of the phase.
+   * @param at Machine time since reset at which SCL is released after the phase: its end, or
+   *        the end of the MCU's clock stretch after it.
    */
   virtual void answered(std::uint64_t unit, i2c_phase phase, i2c_answer answer, vtime at) = 0;
 

@@ -14,6 +14,15 @@ void i2c_target_event(void)
         | (LL_I2C_GetTransferDirection(I2C1) >> I2C_ISR_DIR_Pos));
     LL_I2C_ClearFlag_ADDR(I2C1);
   }
+  if(LL_I2C_IsActiveFlag_RXNE(I2C1))
+  {
+    uint8_t const byte = LL_I2C_ReceiveData8(I2C1);
+    LOG(TARGET_DATA | byte);
+    if(byte == TARGET_NACK_NEXT)
+    {
+      LL_I2C_AcknowledgeNextData(I2C1, LL_I2C_NACK);
+    }
+  }
   if(LL_I2C_IsActiveFlag_STOP(I2C1))
   {
     LOG(TARGET_STOP);
@@ -33,6 +42,7 @@ void target(void)
   LL_I2C_EnableOwnAddress2(I2C1);
   LL_I2C_EnableGeneralCall(I2C1);
   LL_I2C_EnableIT_ADDR(I2C1);
+  LL_I2C_EnableIT_RX(I2C1);
   LL_I2C_EnableIT_STOP(I2C1);
   i2c_target_active = 1;
   NVIC_EnableIRQ(I2C1_EV_IRQn);
