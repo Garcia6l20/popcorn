@@ -288,6 +288,14 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
 }
 
 
+TESTED_PARTS: Final = frozenset(row.conftest for row in EXAMPLE_PARTS.values())
+"""The parts that run the whole firmware suites: the `conftest.py` part of every example."""
+
+GEOMETRY_PARTS: Final = frozenset({"STM32U575ZITxQ", "STM32H563ZGTx"})
+"""The parts the FLASH geometry cases of `stm32-flash-geometry` run on, 2 MB on the U5 and 1 MB
+on the H5."""
+
+
 def extra_runs() -> list[tuple[str, str]]:
     """One `(examples/<chip>/<name>, part)` pair per extra run, in table order."""
     return [(f"examples/{name}", part) for name, row in EXAMPLE_PARTS.items() for part in row.extra]

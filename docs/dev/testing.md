@@ -57,14 +57,16 @@ never on wall time or on whether the machine was parked or running.
 
 | Directory | What it holds |
 |---|---|
-| `fresh` | each shipped part against a fresh build from pin data, and `ship --check` |
+| `fresh_u5` | each shipped U5 part against a fresh build from pin data, and the case that the U5 and H5 lists together hold every shipped part |
+| `fresh_h5` | each shipped H5 part against a fresh build from pin data, `ship --check` and `build_each` |
 | `golden` | each committed golden against a build from ST's files |
 | `shipped` | the shipped layers, their lookup, the cache, `bonded` and the aliases |
 | `description_build` | description builds, die identity, facts and the H5 family |
 | `patches` | patches, the binder, the SVD reader, the svd-parser oracle, IRQ names and the schema |
 
-Set `POPCORN_STM32_PIN_DATA` to a STM32_open_pin_data checkout, or the `fresh` cases skip. The
-`golden` cases need CubeMX and ST's SVDs.
+Set `POPCORN_STM32_PIN_DATA` to a STM32_open_pin_data checkout, or the freshness and
+`ship --check` cases of `fresh_u5` and `fresh_h5` skip. The `golden` cases need CubeMX and ST's
+SVDs.
 
 Every test runs under a 15 s pytest-timeout limit, set in `pyproject.toml`. A test that needs
 longer carries `@pytest.mark.timeout(seconds)`, above every wall bound it waits on. The limit uses
