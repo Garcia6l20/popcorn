@@ -1,0 +1,14 @@
+*
+!pyproject.toml
+!deps.toml
+!popcorn_build
+!pcons-build.py
+!LICENSE
+!NOTICE
+!LICENSES
+!native
+!python
+!third_party/reflex
+!.git/modules/third_party/unicorn
+.git/modules/third_party/unicorn/modules
+**/__pycache__
