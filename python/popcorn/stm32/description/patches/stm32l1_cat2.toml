@@ -1,0 +1,29 @@
+format = 1
+source = "RM0038 Rev 18 Cat.2 on DIE429: DBGMCU_IDCODE, the FLASH and SPI versions of Cat.2, the factory information block and the CMSIS header suffix"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L1*.svd"]
+dies = ["DIE429"]
+
+[cmsis]
+suffix = "xba"
+source = "stm32l100xba.h, stm32l151xba.h and stm32l152xba.h are the CMSIS device headers of the Cat.2 devices"
+
+[[resets]]
+peripheral = "DBGMCU"
+register = "IDCODE"
+reset = 0x10000429
+source = "RM0038 Rev 18, 30.6.1 MCU device ID code: DEV_ID[11:0] is 0x429 for Cat.2, REV_ID[15:0] 0x1000 is revision A of every category. One modelled revision"
+
+[ip]
+versions = { "FLASH" = "STM32L1_flash_cat2", "SPI*" = "STM32L1_spi_cat2" }
+source = "RM0038 Rev 18, Cat.2 flash interface and SPI without I2S. FLASH has no CubeMX version, the empty version is replaced. SPI replaces spi2s1_v2_2_Cube"
+
+[signature]
+source = "RM0038 Rev 18, 31.1.1 and 31.2, Cat.1 and Cat.2: F_SIZE at 0x1FF8004C, U_ID(31:0) at 0x1FF80050, U_ID(63:32) at 0x1FF80054 and U_ID(95:64) at 0x1FF80064. The ID words are fixed values: wafer coordinates 0x00320014, wafer 1, lot POPCORN in ASCII. RM0038 has no package register. DEV_ID 0x429: only F_SIZE[7:0] is valid"
+region = "OPTION_FACTORY"
+uid = 0x50
+flash_size = 0x4C
+uid_words = [0x0032_0014, 0x4F52_4E01, 0x504F_5043]
+uid_offsets = [0, 4, 0x14]

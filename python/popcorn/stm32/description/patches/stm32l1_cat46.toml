@@ -1,0 +1,92 @@
+format = 1
+source = "RM0038 Rev 18, 7.4.11: the GPIO ports of Cat.4, Cat.5 and Cat.6 have the bit reset register GPIOx_BRR, which the SVDs lack"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L1*.svd"]
+dies = ["DIE436", "DIE437"]
+flash_kib = [384, 512]
+
+[ip]
+versions = { "GPIO*" = "STM32L1_gpio_cat46" }
+source = "RM0038 Rev 18, 7.4.11: GPIOx_BRR exists on Cat.4, Cat.5 and Cat.6 only. It replaces STM32L162xD_gpio_v1_0 (Cat.4) and STM32L162xE_gpio_v1_0 (Cat.5 and Cat.6)"
+
+[[registers]]
+peripheral = "GPIOA"
+name = "BRR"
+offset = 0x28
+width = 32
+reset = 0
+acc = "write_only"
+fields = [{ name = "BR", lsb = 0, width = 16 }]
+source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
+
+[[registers]]
+peripheral = "GPIOB"
+name = "BRR"
+offset = 0x28
+width = 32
+reset = 0
+acc = "write_only"
+fields = [{ name = "BR", lsb = 0, width = 16 }]
+source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
+
+[[registers]]
+peripheral = "GPIOC"
+name = "BRR"
+offset = 0x28
+width = 32
+reset = 0
+acc = "write_only"
+fields = [{ name = "BR", lsb = 0, width = 16 }]
+source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
+
+[[registers]]
+peripheral = "GPIOD"
+name = "BRR"
+offset = 0x28
+width = 32
+reset = 0
+acc = "write_only"
+fields = [{ name = "BR", lsb = 0, width = 16 }]
+source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
+
+[[registers]]
+peripheral = "GPIOE"
+name = "BRR"
+offset = 0x28
+width = 32
+reset = 0
+acc = "write_only"
+fields = [{ name = "BR", lsb = 0, width = 16 }]
+source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
+
+[[registers]]
+peripheral = "GPIOF"
+name = "BRR"
+offset = 0x28
+width = 32
+reset = 0
+acc = "write_only"
+fields = [{ name = "BR", lsb = 0, width = 16 }]
+source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
+
+[[registers]]
+peripheral = "GPIOG"
+name = "BRR"
+offset = 0x28
+width = 32
+reset = 0
+acc = "write_only"
+fields = [{ name = "BR", lsb = 0, width = 16 }]
+source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
+
+[[registers]]
+peripheral = "GPIOH"
+name = "BRR"
+offset = 0x28
+width = 32
+reset = 0
+acc = "write_only"
+fields = [{ name = "BR", lsb = 0, width = 16 }]
+source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"

@@ -1,0 +1,14 @@
+format = 1
+source = "RM0038 Rev 18, Table 49 and Table 50: Cat.1, Cat.2 and Cat.3 on DIE427 have no UART4, UART5, GPIOF and GPIOG, the L151, L152 and L162 SVDs list them"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L151.svd", "STM32L152.svd", "STM32L162.svd"]
+dies = ["DIE416", "DIE429", "DIE427"]
+
+[peripherals]
+drop = ["UART4", "UART5", "GPIOF", "GPIOG"]
+source = "RM0038 Rev 18, Table 49 and Table 50 list no UART4 and UART5 vector, 7.4 GPIO ports A to E and H on these categories. The pin data of every CubeMX part of these dies has no pin on port F or G"
+
+[irqs]
+drop = ["UART4", "UART5"]

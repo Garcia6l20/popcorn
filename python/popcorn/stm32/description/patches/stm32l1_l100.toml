@@ -1,0 +1,38 @@
+format = 1
+source = "RM0038 Rev 18, STM32L100 value line: five backup registers, USART4 and USART5 spelled as in the L100 SVD, 18 interrupt lines attached to the owner of RM0038 Rev 18 Tables 49 and 50 (the L100 SVD lists them under another peripheral). CubeMX lists neither USART4 nor USART5 for the value line"
+
+[match]
+parts = ["STM32L100*"]
+svd = ["STM32L100.svd"]
+
+[peripherals]
+drop = ["USART4", "USART5"]
+source = "RM0038 Rev 18, Table 49 and Table 50: the vector tables of Cat.1 to Cat.3 have no UART4, UART5 or USART4 and USART5 entries, and the CubeMX parts of the value line list none. The L100 SVD spells them USART4 and USART5"
+
+[irqs]
+drop = ["USART4", "USART5", "WWDG", "ADC1", "USB_HP", "USB_LP", "TIM9", "TIM10", "TIM11", "TIM2", "TIM3", "TIM4", "SPI1", "SPI2", "USART1", "USART2", "USART3", "USB_FS_WKUP", "TIM6", "TIM7"]
+add = [
+  { number = 0, name = "WWDG", peripheral = "WWDG" },
+  { number = 18, name = "ADC1", peripheral = "ADC" },
+  { number = 19, name = "USB_HP", peripheral = "USB" },
+  { number = 20, name = "USB_LP", peripheral = "USB" },
+  { number = 25, name = "TIM9", peripheral = "TIM9" },
+  { number = 26, name = "TIM10", peripheral = "TIM10" },
+  { number = 27, name = "TIM11", peripheral = "TIM11" },
+  { number = 28, name = "TIM2", peripheral = "TIM2" },
+  { number = 29, name = "TIM3", peripheral = "TIM3" },
+  { number = 30, name = "TIM4", peripheral = "TIM4" },
+  { number = 35, name = "SPI1", peripheral = "SPI1" },
+  { number = 36, name = "SPI2", peripheral = "SPI2" },
+  { number = 37, name = "USART1", peripheral = "USART1" },
+  { number = 38, name = "USART2", peripheral = "USART2" },
+  { number = 39, name = "USART3", peripheral = "USART3" },
+  { number = 42, name = "USB_FS_WKUP", peripheral = "USB" },
+  { number = 43, name = "TIM6", peripheral = "TIM6" },
+  { number = 44, name = "TIM7", peripheral = "TIM7" },
+]
+
+[[register_drops]]
+peripheral = "RTC"
+names = ["BKP5R", "BKP6R", "BKP7R", "BKP8R", "BKP9R", "BKP10R", "BKP11R", "BKP12R", "BKP13R", "BKP14R", "BKP15R", "BKP16R", "BKP17R", "BKP18R", "BKP19R", "BKP20R", "BKP21R", "BKP22R", "BKP23R", "BKP24R", "BKP25R", "BKP26R", "BKP27R", "BKP28R", "BKP29R", "BKP30R", "BKP31R"]
+source = "RM0038 Rev 18, 20.2 and 20.6.20 RTC_BKPxR: 5 backup registers (20 bytes) in the value line, address offsets 0x50 to 0x60, on every category the value line has. The L100 SVD lists BKP0R to BKP31R"

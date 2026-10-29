@@ -74,6 +74,9 @@ renamed once across the files, and the new name must be free, otherwise the buil
 `DescriptionError` keyed `peripherals.renames.<name>`. The patch report counts them in
 `peripherals_dropped` and `peripherals_renamed`.
 
+An `[irqs]` rule drops an interrupt by SVD name, then adds one by number to a peripheral. A dropped
+number loses its SVD owner, so a number dropped and added back belongs to the added peripheral only.
+
 ## Part matching
 
 A patch applies to a part when its `[match]` selects it. `parts` lists name globs, `svd` lists SVD
@@ -90,8 +93,23 @@ flash_kib = [512]
 ```
 
 Patch files apply in file name order, the family file `stm32l1.toml` before its category files
-`stm32l1_cat3.toml`, since `.` sorts before `_`. A family patch and a category patch may both
+`stm32l1_cat1.toml`, since `.` sorts before `_`. A family patch and a category patch may both
 apply, the category patch after.
+
+### STM32L1 patch files
+
+The 132 STM32L1 names fall into seven categories by die and flash size. Exactly one of seven
+category files applies to a name: `stm32l1_cat1.toml` (DIE416), `stm32l1_cat2.toml` (DIE429),
+`stm32l1_cat3_die427.toml`, `stm32l1_cat3_die436.toml` (both 256 KB), `stm32l1_cat4.toml` (DIE436,
+384 KB), `stm32l1_cat5.toml` (DIE437, 512 KB) and `stm32l1_cat6.toml` (DIE437, 384 KB). They hold the
+`DBGMCU_IDCODE` reset, the `FLASH` IP version, the CMSIS header suffix and the device signature.
+Group files hold what several categories share: `cat12` and `cat36` for the early and the late
+categories, `cat13` and `cat46` for the GPIO version and `GPIOx_BRR`, `cat123_l15x`, `cat12_l15x`
+and `cat36_l15x` for rules that exclude the STM32L100 SVD. `l100`, `l100_cat3`, `l151`, `noaes` and
+`cat4_rd` drop peripherals by SVD or part name, and `l100` and `l100_cat3` give the interrupt
+lines the L100 SVD lists under another peripheral to their owner, by the `[irqs]` rule of
+"Peripheral drops and renames". A name is dropped once across the files that select it, so a drop
+sits in the one file that covers exactly the parts needing it.
 
 ## IP renames, versions and register drops
 
@@ -331,8 +349,12 @@ a read-only region. `uid_words` are the three ID words in ID order, written litt
 `[0, 4, 8]` when absent, so the words are contiguous. A family whose manual places them apart sets
 them, `[0, 4, 0x14]` puts the third word 0x14 bytes from the base. `package` and `packages` come
 together: both name the package-code word and its table, or neither is set and the region holds no
-package word. A word that overlaps another or leaves the region raises `DescriptionError` keyed
-`signature.<word>`.
+package word. `flash_size_codes` maps a flash size in KiB to the 16-bit value the flash size word
+holds, for a family whose register encodes some sizes as codes: `{ 384 = 0, 256 = 1 }` stores 0
+for a 384 KiB part and 1 for a 256 KiB part. Without the key the word holds the size in KiB, and
+with it a part whose size has no entry raises `DescriptionError` keyed
+`signature.flash_size_codes`. A word that overlaps another or leaves the region raises
+`DescriptionError` keyed `signature.<word>`.
 
 ## Shipped descriptions
 

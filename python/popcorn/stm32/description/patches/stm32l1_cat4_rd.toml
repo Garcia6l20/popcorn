@@ -1,0 +1,12 @@
+format = 1
+source = "Cat.4 parts whose RefName contains RD (the 64-pin STM32L15[12]RD[TY]x and STM32L162RD[TY]x): CubeMX gives FSMC to the 100 pin and larger Cat.4 parts only, the SVDs list it"
+
+[match]
+parts = ["STM32L1*RD*"]
+svd = ["STM32L1*.svd"]
+dies = ["DIE436"]
+flash_kib = [384]
+
+[peripherals]
+drop = ["FSMC"]
+source = "RM0038 Rev 18, 22: the FSMC signals need pins the 64-pin packages lack. CubeMX lists FSMC for the QDHx, VDTx and ZDTx Cat.4 parts only"

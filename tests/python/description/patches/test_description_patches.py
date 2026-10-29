@@ -1548,6 +1548,59 @@ def test_signature_refuses_a_bad_uid_layout_or_half_a_package(
     assert target == before
 
 
+def test_signature_flash_size_codes_replace_the_size_with_the_code_of_the_part(
+    tmp_path: Path,
+) -> None:
+    path = _l1_signature(tmp_path, flash_size_codes="{ 1024 = 7, 512 = 9 }")
+    pieces = dict(_content(_signed(tmp_path, _part(), path), "OTP"))
+    assert pieces[0x4C] == (7).to_bytes(2, "little")
+
+
+def test_signature_flash_size_codes_may_code_the_size_zero(tmp_path: Path) -> None:
+    path = _l1_signature(tmp_path, flash_size_codes="{ 1024 = 0, 256 = 1 }")
+    pieces = dict(_content(_signed(tmp_path, _part(), path), "OTP"))
+    assert pieces[0x4C] == bytes(2)
+
+
+def test_signature_without_flash_size_codes_writes_the_size_in_kib(tmp_path: Path) -> None:
+    pieces = dict(_content(_signed(tmp_path, _part(), _l1_signature(tmp_path)), "OTP"))
+    assert pieces[0x4C] == (1024).to_bytes(2, "little")
+
+
+@pytest.mark.parametrize(
+    ("codes", "key", "reason"),
+    [
+        ("{ 256 = 1 }", "signature.flash_size_codes", "a code for a flash of 1024 KiB"),
+        (
+            "{ 1024 = 65536 }",
+            "signature.flash_size_codes.1024",
+            "a flash size in KiB mapped to a 16-bit code",
+        ),
+        (
+            "{ 1024 = -1 }",
+            "signature.flash_size_codes.1024",
+            "a flash size in KiB mapped to a 16-bit code",
+        ),
+        (
+            "{ 1024 = 1, big = 2 }",
+            "signature.flash_size_codes.big",
+            "a flash size in KiB mapped to a 16-bit code",
+        ),
+    ],
+)
+def test_signature_refuses_flash_size_codes_that_do_not_fit_the_part(
+    tmp_path: Path, codes: str, key: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    target.db_part = _part()
+    before = copy.deepcopy(target)
+    path = _l1_signature(tmp_path, flash_size_codes=codes)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert (excinfo.value.key, excinfo.value.expected) == (key, reason)
+    assert target == before
+
+
 def _reset_patch(tmp_path: Path, peripheral: str, register: str, reset: str) -> Path:
     text = f"""
 format = 1

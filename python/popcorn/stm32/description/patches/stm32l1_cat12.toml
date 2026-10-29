@@ -1,0 +1,29 @@
+format = 1
+source = "RM0038 Rev 18, Cat.1 and Cat.2 (DIE416 and DIE429, 32 to 128 KB flash): what the two categories share. The SVDs are supersets of the line, these devices lack FSMC, SDIO, SPI3, TIM5, the operational amplifiers and DMA2"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L1*.svd"]
+dies = ["DIE416", "DIE429"]
+
+[peripherals]
+drop = ["FSMC", "SDIO", "SPI3", "TIM5", "OPAMP", "DMA2"]
+source = "RM0038 Rev 18, 2.3 memory map and Table 49 (Cat.1 and Cat.2 vector table): no FSMC, SDIO, SPI3, TIM5 and DMA2, the vector table stops at TIM7 (position 44). 1.4 product list: no operational amplifiers on Cat.1 and Cat.2. The CubeMX parts of both categories list none of them"
+
+[irqs]
+drop = ["SDIO", "TIM5", "SPI3", "DMA2_CH1", "DMA2_CH2", "DMA2_CH3", "DMA2_CH4", "DMA2_CH5", "COMP_ACQ"]
+
+[ip]
+versions = { "EXTI" = "STM32L1_exti_23", "SYSCFG" = "STM32L1_exti_23", "ADC" = "STM32L1_adc_cat12" }
+source = "RM0038 Rev 18, 11.3 (EXTI has 23 lines on Cat.1 and Cat.2, 24 from Cat.3, RM0038 lines 13100 to 13222 and 13334 to 13484) and 12 (the ADC of Cat.1 and Cat.2 has 24 channels, 28 from Cat.3). EXTI and SYSCFG have no CubeMX version, the empty version is replaced. ADC replaces aditf3_v1_1_Cube, the version of every category"
+
+[[register_drops]]
+peripheral = "FLASH"
+names = ["WRPR2"]
+source = "RM0038 Rev 18, 3.9.9 FLASH_WRPRx: FLASH_WRPR2 is available in Cat.3 to Cat.6. The SVDs list WRPR2 at 0x80 on every category"
+
+[memory]
+source = "RM0038 Rev 18, 3.2 Table 8 (Cat.1 and Cat.2): the system memory holds the bootloader in pages 0 to 15, 0x1FF00000 to 0x1FF00FFF, 4 KB. Table 7 shows the bootloader memory remapped at 0x00000000"
+add = [
+  { name = "SYSTEM_MEMORY", start = 0x1FF00000, size = 0x1000, kind = "rom", acc = { read = true, write = false, execute = true }, secure = false },
+]

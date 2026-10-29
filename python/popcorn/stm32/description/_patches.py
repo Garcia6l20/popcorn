@@ -120,6 +120,7 @@ class PatchSignature:
     package: int | None = field(default=None, metadata={"minimum": 0})
     packages: dict[str, int] | None = None
     uid_offsets: list[int] | None = None
+    flash_size_codes: dict[str, int] | None = None
     content: list[RegionContent] | None = None
 
 
@@ -1332,9 +1333,24 @@ def _apply_signature(
     flash_kib = part.flash_kib[0]
     if flash_kib >= 1 << 16:
         raise DescriptionError(file, 0, "signature.flash_size", "a flash size below 64 MB")
+    size_word = flash_kib
+    if rule.flash_size_codes is not None:
+        for kib, code in rule.flash_size_codes.items():
+            if not kib.isdecimal() or not 0 <= code < 1 << 16:
+                raise DescriptionError(
+                    file,
+                    0,
+                    f"signature.flash_size_codes.{kib}",
+                    "a flash size in KiB mapped to a 16-bit code",
+                )
+        if str(flash_kib) not in rule.flash_size_codes:
+            raise DescriptionError(
+                file, 0, "signature.flash_size_codes", f"a code for a flash of {flash_kib} KiB"
+            )
+        size_word = rule.flash_size_codes[str(flash_kib)]
     uid_pieces = _uid_pieces(rule.uid, rule.uid_words, offsets)
     words = [
-        ("flash_size", [(rule.flash_size, flash_kib.to_bytes(2, "little"))]),
+        ("flash_size", [(rule.flash_size, size_word.to_bytes(2, "little"))]),
         ("uid", uid_pieces),
     ]
     if rule.package is not None and rule.packages is not None:

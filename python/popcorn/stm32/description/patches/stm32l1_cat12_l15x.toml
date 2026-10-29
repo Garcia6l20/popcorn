@@ -1,0 +1,12 @@
+format = 1
+source = "RM0038 Rev 18, 20.2: Cat.1 and Cat.2 devices other than the value line have 20 RTC backup registers. The L100 SVD is excluded, stm32l1_l100.toml drops its registers"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L151.svd", "STM32L152.svd", "STM32L162.svd"]
+dies = ["DIE416", "DIE429"]
+
+[[register_drops]]
+peripheral = "RTC"
+names = ["BKP20R", "BKP21R", "BKP22R", "BKP23R", "BKP24R", "BKP25R", "BKP26R", "BKP27R", "BKP28R", "BKP29R", "BKP30R", "BKP31R"]
+source = "RM0038 Rev 18, 20.2 and 20.6.20 RTC_BKPxR: 20 backup registers (80 bytes) in Cat.1 and Cat.2 devices, address offsets 0x50 to 0x9C. The SVDs list BKP0R to BKP31R"

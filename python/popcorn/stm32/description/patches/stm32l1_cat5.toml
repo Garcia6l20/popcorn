@@ -1,0 +1,47 @@
+format = 1
+source = "RM0038 Rev 18 Cat.5 on DIE437, 512 KB flash: no FSMC and no SDIO, FLASH_WRPR4, DBGMCU_IDCODE, the FLASH version of Cat.5, the factory information block and the CMSIS header suffix"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L1*.svd"]
+dies = ["DIE437"]
+flash_kib = [512]
+
+[peripherals]
+drop = ["FSMC", "SDIO"]
+source = "RM0038 Rev 18, 3.1 and Table 51: the CubeMX parts of Cat.5 list no FSMC and no SDIO, the SVDs do"
+
+[irqs]
+drop = ["SDIO"]
+
+[[registers]]
+peripheral = "FLASH"
+name = "WRPR4"
+offset = 0x88
+width = 32
+reset = 0
+acc = "read_write"
+fields = [{ name = "WRP4", lsb = 0, width = 32 }]
+source = "RM0038 Rev 18, 3.9.9 FLASH_WRPRx and Table 24: FLASH_WRPR4 at offset 0x88, Cat.5 only, WRP4[31:0] in bits 31:0, reset 0 on a virgin part. The SVDs stop at WRPR3"
+
+[cmsis]
+suffix = "xe"
+source = "stm32l151xe.h, stm32l152xe.h and stm32l162xe.h are the CMSIS device headers of the Cat.5 devices"
+
+[[resets]]
+peripheral = "DBGMCU"
+register = "IDCODE"
+reset = 0x10000437
+source = "RM0038 Rev 18, 30.6.1 MCU device ID code: DEV_ID[11:0] is 0x437 for Cat.5, REV_ID[15:0] 0x1000 is revision A of every category. One modelled revision"
+
+[ip]
+versions = { "FLASH" = "STM32L1_flash_cat5" }
+source = "RM0038 Rev 18, Cat.5 flash interface. FLASH has no CubeMX version, the empty version is replaced"
+
+[signature]
+source = "RM0038 Rev 18, 31.1.1 and 31.2, Cat.3 to Cat.6: F_SIZE at 0x1FF800CC, U_ID(31:0) at 0x1FF800D0, U_ID(63:32) at 0x1FF800D4 and U_ID(95:64) at 0x1FF800E4. The ID words are fixed values: wafer coordinates 0x00320014, wafer 1, lot POPCORN in ASCII. RM0038 has no package register"
+region = "OPTION_FACTORY"
+uid = 0xD0
+flash_size = 0xCC
+uid_words = [0x0032_0014, 0x4F52_4E01, 0x504F_5043]
+uid_offsets = [0, 4, 0x14]

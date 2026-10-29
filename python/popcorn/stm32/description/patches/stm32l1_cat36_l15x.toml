@@ -1,0 +1,27 @@
+format = 1
+source = "RM0038 Rev 18, Cat.3 to Cat.6 of the L151, L152 and L162 SVDs: TIM5 rules. The L100 value line Cat.3 part has no TIM5"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L151.svd", "STM32L152.svd", "STM32L162.svd"]
+dies = ["DIE427", "DIE436", "DIE437"]
+
+[[resets]]
+peripheral = "TIM5"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 17.4.12 TIMx_ARR for TIM2 to TIM5: reset value 0xFFFF. The SVDs give 0 and a 16-bit field. The memory map labels TIM5 32-bits, inferred 0xFFFF"
+
+[[fields]]
+instances = ["TIM5"]
+registers = ["CCMR2_Output"]
+fields = ["CC4S"]
+width = 2
+source = "RM0038 Rev 18, 17.4.8 TIMx_CCMR2: CC4S[1:0] is two bits wide. The SVDs give one bit"
+
+[[fields]]
+instances = ["TIM5"]
+registers = ["CCMR1_Output"]
+fields = ["CC2S"]
+width = 2
+source = "RM0038 Rev 18, 17.4.7 TIMx_CCMR1: CC2S[1:0] in bits 9:8, two bits wide. The SVDs give one bit in the output view and two in the input view"
