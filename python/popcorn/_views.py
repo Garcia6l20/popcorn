@@ -544,7 +544,9 @@ class Pin:
     `drive_at` and `drive_edges` drive it at exact virtual times instead, parked or running. A
     pin in alternate function mode gives its edges to the input its AF selects, such as
     `tim3_ch1` or `tim2_etr`. Every access raises ModelError when the port's model is not a
-    GPIO port.
+    GPIO port, and ConfigError at the call, parked or running, for a pin the part's package does
+    not bond, outside the port's `bonded` mask in the description. The firmware reaches every
+    pin through the registers.
     """
 
     __slots__ = ("_access", "number", "port")

@@ -72,7 +72,8 @@ auto unit(
       .cross_rules = std::move(crosses),
       .irqs        = {},
       .alias_of    = std::nullopt,
-      .alternates  = std::nullopt};
+      .alternates  = std::nullopt,
+      .bonded      = std::nullopt};
 }
 
 struct bench

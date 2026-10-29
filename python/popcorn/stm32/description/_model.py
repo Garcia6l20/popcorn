@@ -115,6 +115,7 @@ class PeripheralDesc:
     irqs: list[int]
     alias_of: str | None = None
     alternates: list[AlternateDesc] | None = None
+    bonded: int | None = field(default=None, metadata={"minimum": 0, "maximum": 65535})
 
 
 @dataclass(slots=True, kw_only=True)
@@ -150,7 +151,7 @@ class RegionDesc:
 
 @dataclass(slots=True, kw_only=True)
 class PartDescription:
-    schema_version: int = field(default=1, metadata={"const": 1})
+    schema_version: int = field(default=2, metadata={"const": 2})
     part: str
     generator: str
     sources: dict[str, str]

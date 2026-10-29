@@ -1,4 +1,5 @@
 #include "devices.hpp"
+#include "../periph/stm32/pin_range.hpp"
 #include "models.hpp"
 #include "python_callable.hpp"
 
@@ -493,7 +494,27 @@ auto stopping(periph::model_factory inner, std::vector<std::shared_ptr<callback_
   };
 }
 
+void check_bonded_chip_select(
+    part_description const&     description,
+    std::string const&          port,
+    std::optional<std::uint8_t> pin)
+{
+  auto const unit = std::ranges::find_if(description.peripherals, [&](peripheral_desc const& p) {
+    return p.name == port and not p.alias_of;
+  });
+  if(not pin or unit == description.peripherals.end() or not unit->bonded)
+  {
+    return;
+  }
+  if(*pin >= 16 or (*unit->bonded >> *pin & 1U) == 0)
+  {
+    throw config_error(
+        port, 0, "pin", stm32::unbonded_pin_text(description.part, port, *pin, *unit->bonded));
+  }
+}
+
 auto spi_attachment_of(
+    part_description const&  description,
     std::string const&       peripheral,
     nb::object const&        object,
     device_cells&            cells,
@@ -511,11 +532,10 @@ auto spi_attachment_of(
         peripheral, "an SPI device with _cs_port and _cs_pin, as popcorn.board.SpiTarget, "
                     "popcorn.devices.At25sf or popcorn.devices.chip_select set them");
   }
-  auto const pin = nb::cast<std::optional<std::uint8_t>>(object.attr("_cs_pin"));
-  return {
-      .device  = std::move(target),
-      .cs_port = nb::cast<std::string>(object.attr("_cs_port")),
-      .cs_pin  = pin};
+  auto const pin  = nb::cast<std::optional<std::uint8_t>>(object.attr("_cs_pin"));
+  auto       port = nb::cast<std::string>(object.attr("_cs_port"));
+  check_bonded_chip_select(description, port, pin);
+  return {.device = std::move(target), .cs_port = std::move(port), .cs_pin = pin};
 }
 }
 
@@ -595,7 +615,8 @@ auto device_factories(
         {
           throw refused(peripheral, "an I2C peripheral for an I2CTarget");
         }
-        board.spi[peripheral].push_back(spi_attachment_of(peripheral, object, cells, python_owned));
+        board.spi[peripheral].push_back(
+            spi_attachment_of(description, peripheral, object, cells, python_owned));
       }
     }
   }

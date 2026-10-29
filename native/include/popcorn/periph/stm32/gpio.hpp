@@ -138,6 +138,13 @@ public:
   [[nodiscard]] virtual auto pin_count() const noexcept -> std::uint8_t = 0;
 
   /**
+   * @brief Pins of the port that reach a package pin, bit n for pin n: the description's
+   *        `bonded`, else every pin below pin_count(). The board API refuses the others, the
+   *        firmware reaches every pin through the registers.
+   */
+  [[nodiscard]] virtual auto bonded_pins() const noexcept -> std::uint16_t = 0;
+
+  /**
    * @brief Level a pin of this port gives to an alternate function input, such as `tim3_ch1`:
    *        high when a pin in alternate function mode whose AFSEL selects that signal reads
    *        high. Every change of it reaches the trigger_sink peers listening to the signal, at

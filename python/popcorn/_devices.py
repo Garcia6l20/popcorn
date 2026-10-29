@@ -437,7 +437,8 @@ class SpiTarget(_core.SpiTargetBase):
 
     Chip select: `cs` names the GPIO pin, such as "PA4", active low. The SPI model follows the
     pin from the machine's first reset or snapshot load on. None selects the device by the SPI
-    hardware SS output, from the start to the end of each transfer.
+    hardware SS output, from the start to the end of each transfer. The machine raises
+    ConfigError at construction for a `cs` pin the part's package does not bond.
 
     Frame format: frames cross in wire order, the first bit on the wire in bit `bits - 1`. With
     CFG2.LSBFRST 0 that is the value the firmware writes and reads. With LSBFRST 1 the device

@@ -23,7 +23,7 @@
 namespace popcorn
 {
 /** @brief Schema version of the part description format, bumped on any breaking change. */
-inline constexpr std::uint32_t description_schema_version = 1;
+inline constexpr std::uint32_t description_schema_version = 2;
 
 /** @brief Access permitted to a register or field, as SVD `access` spells it. */
 enum class[[= reflex::derive{reflex::Format, reflex::Parse}]] access
@@ -178,6 +178,9 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] peripheral_desc
   /** @brief Alternate functions of the pins of a GPIO port, by pin, then function, then signal.
    * Absent on other peripherals and on parts without a GPIO modes table. */
   std::optional<std::vector<alternate_desc>> alternates;
+  /** @brief Pins of a GPIO port that reach a package pin, bit n for pin n. Absent on other
+   * peripherals and on hand-written descriptions, where every pin of the port counts as bonded. */
+  std::optional<std::uint16_t> bonded;
 
   /** @brief Member-wise equality. */
   friend auto operator==(peripheral_desc const&, peripheral_desc const&) -> bool = default;

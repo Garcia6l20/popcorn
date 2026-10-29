@@ -161,6 +161,10 @@ private:
   {
     return port_pins_;
   }
+  [[nodiscard]] auto bonded_pins() const noexcept -> std::uint16_t override
+  {
+    return bonded_;
+  }
   void forward();
   auto sinks() -> std::span<trigger_sink* const>;
 
@@ -172,6 +176,7 @@ private:
   std::array<field_ref, pins>                                            pull_{};
   std::array<field_ref, pins>                                            alternate_{};
   std::uint8_t                                                           port_pins_{};
+  std::uint16_t                                                          bonded_{};
   std::array<field_ref, pins>                                            input_{};
   std::array<field_ref, pins>                                            output_{};
   std::array<field_ref, pins>                                            set_{};
@@ -224,7 +229,14 @@ gpio::gpio(model_context& ctx, peripheral_desc const& desc, gpio_variant const& 
       port_{static_cast<std::uint8_t>(desc.name.back() - 'A')}, lock_key_{field("LCKR", "LCKK")},
       secure_pins_{reg("SECCFGR")}, secure_reset_{describe("SECCFGR").reset}
 {
-  port_pins_ = desc.name.back() == variant.short_port ? variant.short_port_pins : pins;
+  port_pins_          = desc.name.back() == variant.short_port ? variant.short_port_pins : pins;
+  auto const all_pins = static_cast<std::uint16_t>((std::uint32_t{1} << port_pins_) - 1);
+  bonded_             = desc.bonded.value_or(all_pins);
+  if((bonded_ & ~all_pins) != 0)
+  {
+    throw config_error(
+        desc.name, 0, "bonded", std::format("a mask of pins 0 to {}", port_pins_ - 1));
+  }
   expect_register("AFRH", true);
   for(std::size_t pin = 0; pin < pins; ++pin)
   {

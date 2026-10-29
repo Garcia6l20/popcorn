@@ -462,6 +462,13 @@ auto machine_handle::gpio(std::string const& peripheral, std::uint8_t pin) const
   {
     throw config_error(peripheral, 0, "pin", periph::stm32::pin_range_text(port->pin_count()));
   }
+  if((port->bonded_pins() >> pin & 1U) == 0)
+  {
+    throw config_error(
+        peripheral, 0, "pin",
+        periph::stm32::unbonded_pin_text(
+            engine().description().part, peripheral, pin, port->bonded_pins()));
+  }
   return *port;
 }
 

@@ -1,7 +1,7 @@
 """Canonical text dumps of an PartDescription and the golden digest file they round-trip through.
 
 Table format, one line per item, in description order (already deterministic, spec 04):
-  P name base size ip
+  P name base size ip bonded
   R periph reg offset width access reset mask nfields alternate_of aliases
   F periph reg field lsb width access on_write on_read
   I number name
@@ -56,7 +56,11 @@ class GoldenFile(TypedDict):
 
 
 def _dump_peripherals(description: PartDescription) -> str:
-    lines = [f"P {p.name} {p.base:#010x} {p.size:#010x} {p.ip}" for p in description.peripherals]
+    lines = [
+        f"P {p.name} {p.base:#010x} {p.size:#010x} {p.ip} "
+        f"{f'{p.bonded:#06x}' if p.bonded is not None else '-'}"
+        for p in description.peripherals
+    ]
     return "\n".join(lines) + "\n"
 
 

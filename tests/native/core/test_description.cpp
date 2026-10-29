@@ -49,7 +49,7 @@ auto toy_text() -> std::string
 
 auto with_version(std::string text, std::string_view version) -> std::string
 {
-  std::string_view const current = "\"schema_version\": 1";
+  std::string_view const current = "\"schema_version\": 2";
   auto const             at      = text.find(current);
   REQUIRE(at != std::string::npos);
   text.replace(at, current.size(), std::format("\"schema_version\": {}", version));
@@ -248,9 +248,9 @@ TEST_CASE("dump stamps the current schema_version")
 TEST_CASE("a missing schema_version is a config_error")
 {
   auto       text = toy_text();
-  auto const at   = text.find("\"schema_version\": 1,");
+  auto const at   = text.find("\"schema_version\": 2,");
   REQUIRE(at != std::string::npos);
-  text.erase(at, std::string_view{"\"schema_version\": 1,"}.size());
+  text.erase(at, std::string_view{"\"schema_version\": 2,"}.size());
   for(auto const& variant : {text, std::string{text}.insert(1, "\"future_member\": 7,")})
   {
     try
@@ -268,7 +268,7 @@ TEST_CASE("a missing schema_version is a config_error")
 
 TEST_CASE("another schema_version is a config_error naming both versions")
 {
-  for(std::string_view const version : {"2", "0"})
+  for(std::string_view const version : {"3", "1", "0"})
   {
     CAPTURE(version);
     try
@@ -282,14 +282,14 @@ TEST_CASE("another schema_version is a config_error naming both versions")
       CHECK(e.key() == "schema_version");
       CHECK(
           std::string_view{e.what()}.contains(
-              std::format("schema version 1, file has {}", version)));
+              std::format("schema version 2, file has {}", version)));
     }
   }
 }
 
 TEST_CASE("a future schema_version with unknown members still names both versions")
 {
-  auto text = with_version(toy_text(), "2");
+  auto text = with_version(toy_text(), "3");
   text.insert(1, "\"future_member\": 7,");
   try
   {
@@ -299,7 +299,7 @@ TEST_CASE("a future schema_version with unknown members still names both version
   catch(popcorn::config_error const& e)
   {
     CHECK(e.key() == "schema_version");
-    CHECK(std::string_view{e.what()}.contains("schema version 1, file has 2"));
+    CHECK(std::string_view{e.what()}.contains("schema version 2, file has 3"));
   }
 }
 
@@ -381,7 +381,7 @@ TEST_CASE("toy description digest matches the value computed from its content du
   auto const toy = popcorn::load_description(env_path("POPCORN_TOY_DESC"));
   CHECK(
       popcorn::description_digest(toy)
-      == "2874ef8a7b8801ea1b200926bd21158bcdfc333a94f787b6774fb455edb80fdb");
+      == "a7eebbb2d32040356585602e69387618aeb7b7d217943a435ea22b6082dec5be");
 }
 
 TEST_CASE("digest is 64 lower-case hex characters")

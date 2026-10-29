@@ -215,6 +215,11 @@
           "minimum": 0,
           "type": "integer"
         },
+        "bonded": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
         "cross_rules": {
           "items": {
             "$ref": "#/$defs/cross_rule"
@@ -474,7 +479,7 @@
       "type": "array"
     },
     "schema_version": {
-      "const": 1
+      "const": 2
     },
     "sources": {
       "additionalProperties": {

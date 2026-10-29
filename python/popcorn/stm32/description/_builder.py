@@ -1,6 +1,6 @@
 """Assembles an PartDescription from Sources: expand the SVD, read the db and rzone, apply every
 patch, strip the peripheral prefix of register names, build the IRQ table, then assemble core,
-regions and peripherals, GPIO alternate functions included."""
+regions and peripherals, GPIO alternate functions and bonded pins included."""
 
 import logging
 import re
@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 
 from popcorn.stm32.description._cubemx import (
     Rzone,
+    bonded_pins,
     instance_ips,
     read_gpio_alternates,
     read_part,
@@ -216,6 +217,12 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
             if alternates and port is not None and peripheral.alias_of is None:
                 peripheral.alternates = alternates.get(port.group(1), [])
     report.alternates_dropped = apply_alternate_drops(loaded_patches, target.peripherals)
+    if db_part.pins:
+        bonded = bonded_pins(db_part)
+        for peripheral in target.peripherals:
+            port = _GPIO_PORT_RE.fullmatch(peripheral.name)
+            if port is not None and peripheral.alias_of is None:
+                peripheral.bonded = bonded.get(port.group(1), 0)
 
     description = PartDescription(
         part=sources.part,

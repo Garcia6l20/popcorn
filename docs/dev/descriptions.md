@@ -1,15 +1,15 @@
 # Descriptions
 
 A part description says what a part is: its core, memory regions, peripherals with registers
-and fields, interrupts and GPIO alternate functions. The machine is built from it and never
+and fields, interrupts, GPIO alternate functions and bonded GPIO pins. The machine is built from it and never
 from ad-hoc arguments.
 
 ## The data
 
 The native type is `part_description` in `native/include/popcorn/core/description.hpp`. It
 comes with `parse_description`, `load_description`, `dump_description`, `description_digest`
-and a JSON Schema from `description_json_schema`. `description_schema_version` is part of the
-data. The JSON Schema is committed as `data/schema/part_description.schema.json` and
+and a JSON Schema from `description_json_schema`. `description_schema_version`, 2, is part of
+the data, and the digest covers it, so a bump changes every digest. The JSON Schema is committed as `data/schema/part_description.schema.json` and
 `python/popcorn/stm32/description/_codegen.py` generates the Python dataclasses of `_model.py`
 from it. Do not edit `_model.py` by hand. `popcorn_build/schema.py` builds the `popcorn-describe-schema`
 program and rewrites the schema from the native type.
@@ -85,6 +85,16 @@ name and a non-empty `source` naming the document that justifies the drop. The e
 on the port and no rule may repeat it, otherwise the build raises `DescriptionError` with the
 rule's index. The builder applies the rules after it reads the CubeMX modes, validates all of
 them before removing any, and counts the drops in the patch report.
+
+## Bonded pins
+
+Each GPIO port of a description built from CubeMX or pin data carries `bonded`, the mask of its
+pins that reach a package pin, bit n for pin n. `bonded_pins` in `_cubemx.py` reads it from the
+part's pin list. A port the package bonds no pin of carries 0 and keeps its registers. The
+board API refuses a pin outside the mask with `ConfigError`: every `Pin` access, `drive_edges`
+and an SPI device's chip select at machine construction. The firmware reaches every pin through
+the registers. A hand-written description may leave `bonded` out, every pin of the port then
+counts as bonded.
 
 ## Field drops
 
