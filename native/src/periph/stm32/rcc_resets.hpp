@@ -19,10 +19,12 @@ inline constexpr std::array<std::string_view, 8> reset_registers{
     "RCC_APB1RSTR1", "RCC_APB1RSTR2", "RCC_APB2RSTR",  "RCC_APB3RSTR"};
 
 /** @brief Instances whose reset bit is not named `<instance>RST` in at least one family, the
- *         STM32U5 RM0456 11.8.21 to 11.8.28 and the STM32H5 RM0481 11.8.19 to 11.8.25. A name
- *         found in no reset register of a part falls back to `<instance>RST`. */
-inline constexpr std::array<std::pair<std::string_view, std::string_view>, 17> reset_bit_names{
+ *         STM32U5 RM0456 11.8.21 to 11.8.28, the STM32H5 RM0481 11.8.19 to 11.8.25 and the
+ *         STM32L1 RM0038 6.3.6. A name found in no reset register of a part falls back to
+ *         `<instance>RST`. */
+inline constexpr std::array<std::pair<std::string_view, std::string_view>, 18> reset_bit_names{
     {
+     {"ADC", "ADC1RST"},
      {"ADC1", "ADC12RST"},
      {"ADC12", "ADC12RST"},
      {"ADC2", "ADC12RST"},

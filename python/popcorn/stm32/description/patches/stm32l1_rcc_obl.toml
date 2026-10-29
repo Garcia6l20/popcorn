@@ -1,0 +1,12 @@
+format = 1
+source = "RM0038 Rev 18, 6.3.14 RCC_CSR: OBLRSTF in bit 25 on every STM32L1 device. The STM32L152 SVD has it, the STM32L100, STM32L151 and STM32L162 SVDs lack it"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L100.svd", "STM32L151.svd", "STM32L162.svd"]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CSR"]
+add = { name = "OBLRSTF", lsb = 25, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.14 RCC_CSR: OBLRSTF in bit 25, set by an option byte loader reset, cleared by RMVF or a POR"

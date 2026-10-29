@@ -471,6 +471,15 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   `strict_peripherals` it is a `model_error` and `PWR_CR3` keeps its value before the write.
   Otherwise the firmware REGSEL write is stored, an inferred rule.
 - STM32U5: `PWR_CR3.FSTEN` is storage.
+- STM32L1: a VOS write to another range sets `PWR_CSR.VOSF` for the board's `ready_delay`, 50 us
+  by default, in either direction, and the new range applies when VOSF clears, RM0038 5.4.1 and
+  5.4.2. The delay is not a silicon figure. A write of VOS 00 keeps the range, RM0038 5.4.1. A
+  firmware write of it also logs one warning per machine life and is a `model_error` under
+  `strict_peripherals`.
+- STM32L1: the low-power modes `PWR_CR.PDDS` selects are not modelled, the first PDDS change logs
+  one warning. `DBP` does not gate the RTC domain bits of `RCC_CSR` or the RTC registers. LPSDSR,
+  LPRUN, ULP, FWU, the PVD and the wakeup flags are storage. A peripheral reset through
+  `RCC_APB1RSTR.PWRRST` keeps FWU and ULP, RM0038 5.4.1.
 
 ## RCC
 
@@ -543,8 +552,29 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   transition. The model runs one cycle per instruction, so the same load lands 13 cycles after the
   store and reads 1, except for /2 to /1 and /4 to /1, where it reads 0 and HAL takes `HSI_VALUE`
   either way.
+- STM32U5 and STM32H5: `HSEBYP` in `RCC_CR` and `LSEBYP` in `RCC_BDCR` take writes while their
+  oscillator runs, where RM0456 and RM0481 allow a write with the oscillator off only.
+- An oscillator whose ON bit a system reset keeps and whose ready bit is 0, such as an LSE still
+  starting when the reset comes, starts again at the reset and is ready after the board's
+  `ready_delay`.
 - Without TrustZone, a coverage report classes `RCC_CIFR` and `RCC_CICR` as `unimplemented`. The
   RCC sets the `RCC_CIFR` flags `RCC_CIER` enables, and a `RCC_CICR` write clears them.
+- STM32L1: every category runs one clock tree, RM0038 section 6, with the enable, reset and
+  low-power bits of a peripheral the category lacks absent from its description. The RCC sets the
+  `RCC_CIR` ready flags its enables select, a `xxxRDYC` write clears them, and no ready interrupt
+  is raised. A system reset keeps the RTC domain bits of `RCC_CSR`, `RTCPRE` and `HSEBYP`, a power
+  on reset and a BOR reset them, RM0038 6.1.2 and 6.3.14. `RTCRST` resets the RTC domain bits of
+  `RCC_CSR` while it is 1. A software reset sets SFTRSTF only, the PINRSTF of the NRST pulse is not
+  set, an inferred rule. The reset flags of `RCC_CSR` keep their value on a write, only RMVF and a
+  power reset clear them, inferred from RM0038 6.3.14.
+- STM32L1: `RTCPRE` and `HSEBYP` keep their value on a write while `HSEON` is 1 and `LSEBYP` while
+  `LSEON` is 1, RM0038 6.3.1 and 6.3.14. The ON bit is the one before the write, so one store that
+  clears `HSEON` and changes `RTCPRE` keeps `RTCPRE`, an inferred order. `RTCRST` clears `LSEBYP`
+  while the LSE runs, RM0038 6.3.14.
+- STM32L1: `MSIRANGE` 7 and the PLLMUL and PLLDIV codes RM0038 6.3.2 and 6.3.3 do not allow run
+  their output at 0 Hz, an inferred rule. The PLL VCO and SYSCLK limits of each voltage range are
+  not checked. The CSS on HSE and on LSE is storage, and `LSECSSON` can be cleared by firmware.
+  The USB and SDIO 48 MHz clock, PLLVCO / 2, is not a clock domain.
 
 ## RNG
 

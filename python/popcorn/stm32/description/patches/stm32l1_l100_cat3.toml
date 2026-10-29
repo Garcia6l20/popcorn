@@ -13,3 +13,31 @@ source = "The CubeMX part STM32L100RCTx has no TIM5 and no OPAMP IP, the L100 SV
 [irqs]
 drop = ["TIM5", "SPI3"]
 add = [{ number = 47, name = "SPI3", peripheral = "SPI3" }]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR"]
+fields = ["TIM5RST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.7 RCC_APB1RSTR: the TIM5 bits are dropped with TIM5"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR"]
+fields = ["TIM5EN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.10 RCC_APB1ENR: the TIM5 bits are dropped with TIM5"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+fields = ["TIM5LPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: the TIM5 bits are dropped with TIM5"
+
+[[fields]]
+instances = ["DBGMCU"]
+registers = ["APB1_FZ"]
+fields = ["DBG_TIM5_STOP"]
+drop = true
+source = "RM0038 Rev 18, 30.16.4 DBGMCU_APB1_FZ: DBG_TIM5_STOP is dropped with TIM5"

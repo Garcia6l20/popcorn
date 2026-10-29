@@ -45,3 +45,45 @@ uid = 0xD0
 flash_size = 0xCC
 uid_words = [0x0032_0014, 0x4F52_4E01, 0x504F_5043]
 uid_offsets = [0, 4, 0x14]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBRSTR"]
+fields = ["FSMCRST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.5 RCC_AHBRSTR: FSMC and SDIO bits are available in Cat.4 only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+fields = ["FSMCEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: FSMC and SDIO bits are available in Cat.4 only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+fields = ["FSMCLPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: FSMC and SDIO bits are available in Cat.4 only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2RSTR"]
+fields = ["SDIORST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.6 RCC_APB2RSTR: FSMC and SDIO bits are available in Cat.4 only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2ENR"]
+fields = ["SDIOEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.9 RCC_APB2ENR: FSMC and SDIO bits are available in Cat.4 only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2LPENR"]
+fields = ["SDIOLPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.12 RCC_APB2LPENR: FSMC and SDIO bits are available in Cat.4 only"

@@ -398,8 +398,8 @@ struct h5_rcc
   using source = h5::source;
   using signal = h5::signal;
 
-  static constexpr bool msi         = false;
-  static constexpr bool hsi_divider = true;
+  static constexpr bool msi_standby_ranges = false;
+  static constexpr bool hsi_divider        = true;
   /**
    * @brief Cycles of the running HSI rate from an `HSIDIV` write to the `HSIDIVF` clear and to
    *        its set with the new rate, indexed by the running and the new `HSIDIV`. Measured on
@@ -447,6 +447,16 @@ struct h5_rcc
   static constexpr auto const& unit_suffixes    = h5::rcc_unit_suffixes;
   static constexpr auto const& backup_secured   = h5::rcc_backup_secured;
 
+  static constexpr bool                              css_held = true;
+  static constexpr std::array<kept_fields, 0>        system_reset_kept{};
+  static constexpr std::array<reset_kind, 1>         power_resets{reset_kind::power_on};
+  static constexpr std::array<held_field<source>, 0> held_while_on{};
+  static constexpr std::string_view                  control_register = "RCC_CR";
+  static constexpr std::string_view                  flag_register    = "RCC_CIFR";
+  static constexpr std::string_view                  enable_register  = "RCC_CIER";
+  static constexpr std::string_view                  backup_register  = "RCC_BDCR";
+  /** @brief Every field of RCC_BDCR keeps its value through a system reset. */
+  static constexpr std::string_view backup_excluded      = "";
   static constexpr std::string_view reset_flags_register = "RCC_RSR";
   static constexpr std::uint32_t    sw_mask              = 0b11;
 

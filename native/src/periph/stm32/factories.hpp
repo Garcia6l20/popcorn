@@ -28,6 +28,12 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto rcc_h5_factory(rcc_options options) -> model_factory;
 
 /**
+ * @brief Factory of the STM32L1 RCC model, RM0038 section 6.
+ * @param options Board configuration, copied into every model made.
+ */
+[[nodiscard]] auto rcc_l1_factory(rcc_options options) -> model_factory;
+
+/**
  * @brief Factory of the ICACHE model, RM0456 section 8.
  * @param options Board configuration, copied into every model made.
  */
@@ -57,6 +63,12 @@ namespace popcorn::periph::stm32
  * @param options Board configuration, copied into every model made.
  */
 [[nodiscard]] auto pwr_h5_factory(pwr_options options) -> model_factory;
+
+/**
+ * @brief Factory of the STM32L1 PWR model, RM0038 section 5.4.
+ * @param options Board configuration, copied into every model made.
+ */
+[[nodiscard]] auto pwr_l1_factory(pwr_options options) -> model_factory;
 
 /**
  * @brief Factory of the FLASH model, RM0456 section 7.

@@ -36,3 +36,66 @@ flash_size = 0xCC
 uid_words = [0x0032_0014, 0x4F52_4E01, 0x504F_5043]
 uid_offsets = [0, 4, 0x14]
 flash_size_codes = { 384 = 0, 256 = 1 }
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBRSTR"]
+fields = ["FSMCRST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.5 RCC_AHBRSTR: FSMC and SDIO bits are available in Cat.4 only, the UART4 and UART5 bits are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+fields = ["FSMCEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: FSMC and SDIO bits are available in Cat.4 only, the UART4 and UART5 bits are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+fields = ["FSMCLPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: FSMC and SDIO bits are available in Cat.4 only, the UART4 and UART5 bits are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2RSTR"]
+fields = ["SDIORST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.6 RCC_APB2RSTR: FSMC and SDIO bits are available in Cat.4 only, the UART4 and UART5 bits are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2ENR"]
+fields = ["SDIOEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.9 RCC_APB2ENR: FSMC and SDIO bits are available in Cat.4 only, the UART4 and UART5 bits are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2LPENR"]
+fields = ["SDIOLPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.12 RCC_APB2LPENR: FSMC and SDIO bits are available in Cat.4 only, the UART4 and UART5 bits are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR"]
+fields = ["UART4RST", "UART5RST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.7 RCC_APB1RSTR: FSMC and SDIO bits are available in Cat.4 only, the UART4 and UART5 bits are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR"]
+fields = ["UART4EN", "UART5EN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.10 RCC_APB1ENR: FSMC and SDIO bits are available in Cat.4 only, the UART4 and UART5 bits are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+fields = ["UART4LPEN", "UART5LPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: FSMC and SDIO bits are available in Cat.4 only, the UART4 and UART5 bits are dropped with the instances"

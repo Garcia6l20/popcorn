@@ -12,3 +12,45 @@ source = "RM0038 Rev 18, Table 49 and Table 50 list no UART4 and UART5 vector, 7
 
 [irqs]
 drop = ["UART4", "UART5"]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR"]
+fields = ["UART4RST", "UART5RST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.7 RCC_APB1RSTR: the bits of UART4, UART5, GPIOF and GPIOG are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR"]
+fields = ["UART4EN", "UART5EN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.10 RCC_APB1ENR: the bits of UART4, UART5, GPIOF and GPIOG are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+fields = ["UART4LPEN", "UART5LPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: the bits of UART4, UART5, GPIOF and GPIOG are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBRSTR"]
+fields = ["GPIOFRST", "GPIOGRST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.5 RCC_AHBRSTR: the bits of UART4, UART5, GPIOF and GPIOG are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+fields = ["GPIOFEN", "GPIOGEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: the bits of UART4, UART5, GPIOF and GPIOG are dropped with the instances"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+fields = ["GPIOFLPEN", "GPIOGLPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: the bits of UART4, UART5, GPIOF and GPIOG are dropped with the instances"

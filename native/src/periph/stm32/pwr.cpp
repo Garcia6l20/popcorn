@@ -14,6 +14,7 @@
 #include <format>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -31,6 +32,7 @@ constexpr std::uint32_t regulator_ready = 3;
 
 enum class low_power_mode : std::uint8_t
 {
+  stop,
   stop0,
   stop1,
   stop2,
@@ -41,6 +43,12 @@ enum class low_power_mode : std::uint8_t
 
 constexpr std::array<low_power_mode, 2> h5_modes_by_lpms{
     low_power_mode::stop0, low_power_mode::standby};
+
+constexpr std::array<low_power_mode, 2> l1_modes_by_pdds{
+    low_power_mode::stop, low_power_mode::standby};
+
+/** @brief A `vos_levels` entry for a VOS value the manual forbids. */
+constexpr std::uint8_t vos_forbidden = 0xFF;
 
 constexpr std::array<low_power_mode, 8> modes_by_lpms{
     low_power_mode::stop0,    low_power_mode::stop1,   low_power_mode::stop2,
@@ -140,7 +148,10 @@ struct pwr_family
   std::span<named_field<pwr_role> const> fields;
   /** @brief Low-power mode of every value of the mode field. */
   std::span<low_power_mode const> modes;
-  /** @brief Performance level, 0 the highest, of every value of the VOS field. */
+  /** @brief Performance level, 0 the highest, of every value of the VOS field, vos_forbidden
+   *         for a value the manual forbids. A firmware write of a forbidden value keeps VOS,
+   *         logs one warning per machine life and raises model_error under
+   *         strict_peripherals. */
   std::span<std::uint8_t const> vos_levels;
   /** @brief The VOS ready bit reads 1 when the voltage is ready. */
   bool vos_ready_set = true;
@@ -155,6 +166,8 @@ struct pwr_family
    *         warning per machine life and raises model_error under strict_peripherals, and REGS
    *         keeps 0, the LDO. */
   std::optional<regulator_switch> smps{};
+  /** @brief The TrustZone configuration register, empty for a family without TrustZone. */
+  std::string_view secure_register;
   /** @brief Write handlers of every machine. */
   std::span<write_entry<pwr> const> writes;
   /** @brief Write handlers added under TrustZone. */
@@ -166,6 +179,8 @@ struct pwr_family
   /** @brief Voltage scaling fields `RCC_SECCFGR.SYSCLKSEC` secures. An optional one is secured
    * when the description has it, a required one throws config_error when it lacks it. */
   std::span<field_name const> system_clock_fields;
+  /** @brief Fields a peripheral reset of the unit, RCC PWRRST, leaves at their value. */
+  std::span<field_name const> peripheral_reset_kept;
 };
 
 /**
@@ -211,6 +226,13 @@ struct pwr_family
  *        `CWUFx` of `PWR_WUSCR` WI, SYSCLKSEC the `PWR_VOSCR.VOS` field RAZ/WI, and the UCPD1
  *        SEC bit `PWR_UCPDR` RAZ/WI. SCMSEC is the `PWR_SECCFGR` bit the register descriptions
  *        of RM0481 10.11.11 and 10.11.12 name.
+ *
+ *        The STM32L1 follows RM0038 5.4.1 and 5.4.2: a VOS write to another range sets
+ *        PWR_CSR.VOSF until the board's ready delay ends, then the FLASH model is told. VOS 00 is
+ *        forbidden: a firmware write of it keeps the range, logs one warning per machine life and
+ *        raises model_error under strict_peripherals. The first PDDS change logs the low-power
+ *        mode warning. DBP, LPSDSR, LPRUN, ULP, FWU, PVD and the wakeup flags are storage. A
+ *        peripheral reset through RCC PWRRST keeps FWU and ULP.
  */
 class pwr final : public dispatch_model<pwr, pwr_state>,
                   public voltage_range_source,
@@ -228,6 +250,7 @@ public:
 
   void vosr_written(std::uint32_t old, std::uint32_t now);
   void cr1_written(std::uint32_t old, std::uint32_t now);
+  void control_written(std::uint32_t old, std::uint32_t now);
   void cr3_written(std::uint32_t old, std::uint32_t now);
 
   [[nodiscard]] auto secure_function() const -> bool override;
@@ -246,8 +269,9 @@ private:
   field_table<pwr_role>      names_;
   bool                       low_power_logged_{};
   bool                       reserved_select_logged_{};
+  bool                       forbidden_vos_logged_{};
   initiator                  writer_{initiator::cpu};
-  reg_ref                    secure_;
+  std::optional<reg_ref>     secure_;
   reg_ref                    privilege_;
   field_ref                  secure_privileged_;
   field_ref                  nonsecure_privileged_;
@@ -255,6 +279,7 @@ private:
   std::vector<pwr_rule>      rules_;
   std::optional<std::size_t> unit_;
   illegal_event              illegal_;
+  std::vector<field_ref>     peripheral_kept_;
 };
 
 constexpr std::array<write_entry<pwr>, 5> u5_writes{
@@ -405,6 +430,55 @@ constexpr std::array<write_entry<pwr>, 4> h5_writes{
      }
 };
 
+/** @brief STM32L1 PWR, RM0038 5.4: VOS of PWR_CR 01 Range 1, 10 Range 2, 11 Range 3, 00
+ *         forbidden, PWR_CSR.VOSF 1 while the regulator changes and 0 when it is ready, the
+ *         low-power mode by PDDS. The family has no ACTVOS: the applied range is VOS once VOSF
+ *         clears, so the active roles name VOS and VOSF. No booster, no SMPS, no TrustZone. */
+constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> l1_names{
+    {
+     {pwr_role::vos, {"CR", "VOS"}},
+     {pwr_role::vos_ready, {"CSR", "VOSF"}},
+     {pwr_role::active_vos, {"CR", "VOS"}},
+     {pwr_role::active_vos_ready, {"CSR", "VOSF"}},
+     {pwr_role::mode, {"CR", "PDDS"}},
+     {pwr_role::booster, {"", ""}},
+     {pwr_role::booster_ready, {"", ""}},
+     {pwr_role::regulator_select, {"", ""}},
+     {pwr_role::regulator_status, {"", ""}},
+     }
+};
+
+constexpr std::array<std::uint8_t, 4> l1_vos_levels{vos_forbidden, 0, 1, 2};
+
+constexpr std::array<write_entry<pwr>, 2> l1_writes{
+    {
+     {"CR", &pwr::control_written},
+     {"CSR", nullptr},
+     }
+};
+
+constexpr auto l1_peripheral_reset_kept = std::to_array<field_name>({
+    {"CR", "FWU"},
+    {"CR", "ULP"},
+});
+
+constexpr pwr_family l1_pwr{
+    .fields                = l1_names,
+    .modes                 = l1_modes_by_pdds,
+    .vos_levels            = l1_vos_levels,
+    .vos_ready_set         = false,
+    .active_ready_set      = false,
+    .stepping              = std::nullopt,
+    .smps                  = std::nullopt,
+    .secure_register       = {},
+    .writes                = l1_writes,
+    .trustzone_writes      = {},
+    .secured               = {},
+    .wakeup_fields         = {},
+    .system_clock_fields   = {},
+    .peripheral_reset_kept = l1_peripheral_reset_kept,
+};
+
 constexpr pwr_family h5_pwr{
     .fields           = h5_names,
     .modes            = h5_modes_by_lpms,
@@ -416,24 +490,28 @@ constexpr pwr_family h5_pwr{
                      .step   = std::chrono::nanoseconds{10'400},
                      .settle = std::chrono::nanoseconds{15'200},
                      },
-    .writes              = h5_writes,
-    .trustzone_writes    = h5_trustzone_writes,
-    .secured             = h5_secured,
-    .wakeup_fields       = h5_wakeup_fields,
-    .system_clock_fields = h5_system_clock_fields,
+    .secure_register       = "PWR_SECCFGR",
+    .writes                = h5_writes,
+    .trustzone_writes      = h5_trustzone_writes,
+    .secured               = h5_secured,
+    .wakeup_fields         = h5_wakeup_fields,
+    .system_clock_fields   = h5_system_clock_fields,
+    .peripheral_reset_kept = {                                         },
 };
 
 constexpr pwr_family u5_pwr{
-    .fields              = u5_names,
-    .modes               = modes_by_lpms,
-    .vos_levels          = u5_vos_levels,
-    .vos_ready_set       = true,
-    .active_ready_set    = true,
-    .writes              = u5_writes,
-    .trustzone_writes    = u5_trustzone_writes,
-    .secured             = u5_secured,
-    .wakeup_fields       = u5_wakeup_fields,
-    .system_clock_fields = u5_system_clock_fields,
+    .fields                = u5_names,
+    .modes                 = modes_by_lpms,
+    .vos_levels            = u5_vos_levels,
+    .vos_ready_set         = true,
+    .active_ready_set      = true,
+    .secure_register       = "PWR_SECCFGR",
+    .writes                = u5_writes,
+    .trustzone_writes      = u5_trustzone_writes,
+    .secured               = u5_secured,
+    .wakeup_fields         = u5_wakeup_fields,
+    .system_clock_fields   = u5_system_clock_fields,
+    .peripheral_reset_kept = {},
 };
 
 /** @brief DS13737 Rev 10 Table 75, typical tSMPS and tLDO at 3 V and 25 C, to the REGS change. */
@@ -454,6 +532,7 @@ constexpr pwr_family u5_smps_pwr = [] {
 
 static_assert(names_every_role(u5_names));
 static_assert(names_every_role(h5_names));
+static_assert(names_every_role(l1_names));
 
 pwr::pwr(
     model_context&         ctx,
@@ -470,8 +549,16 @@ pwr::pwr(
           [this](std::string_view reg_name, std::string_view name) {
             return has_field(reg_name, name);
           }},
-      secure_{reg("PWR_SECCFGR")}, unit_{unit_named(ctx.part, desc.name)}
+      unit_{unit_named(ctx.part, desc.name)}
 {
+  if(not family.secure_register.empty())
+  {
+    secure_ = reg(family.secure_register);
+  }
+  for(auto const& kept : family.peripheral_reset_kept)
+  {
+    peripheral_kept_.push_back(field(kept.reg, kept.field));
+  }
   if(ctx.trustzone)
   {
     privilege_            = reg("PWR_PRIVCFGR");
@@ -596,7 +683,7 @@ auto pwr::rule_secure(pwr_rule const& rule) const -> bool
 
 auto pwr::secure_word() const -> std::uint32_t
 {
-  return ctx_.trustzone ? regs_.peek(secure_.offset) : 0;
+  return ctx_.trustzone and secure_ ? regs_.peek(secure_->offset) : 0;
 }
 
 auto pwr::secure_function() const -> bool
@@ -611,7 +698,7 @@ auto pwr::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_gu
   {
     writer_ = ctx.by;
   }
-  if(word == secure_.offset)
+  if(secure_ and word == secure_->offset)
   {
     if(not ctx_.trustzone)
     {
@@ -661,11 +748,20 @@ auto pwr::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_gu
   return out;
 }
 
-void pwr::reset(register_file& regs, reset_kind)
+void pwr::reset(register_file& regs, reset_kind kind)
 {
+  auto const kept = kind == reset_kind::peripheral
+                      ? peripheral_kept_ | std::views::transform([&](field_ref const& bits) {
+                          return bits.of(regs.peek(bits.offset));
+                        }) | std::ranges::to<std::vector>()
+                      : std::vector<std::uint32_t>{};
   for(auto const& name : claims())
   {
     regs.poke(reg(name).offset, describe(name).reset);
+  }
+  for(auto const& [bits, value] : std::views::zip(peripheral_kept_, kept))
+  {
+    regs.poke(bits.offset, bits.with(regs.peek(bits.offset), value));
   }
   state_.settled_level = family_.vos_levels[get(regs, names_[pwr_role::active_vos])];
 }
@@ -673,6 +769,26 @@ void pwr::reset(register_file& regs, reset_kind)
 void pwr::vosr_written(std::uint32_t old, std::uint32_t now)
 {
   auto const level = names_[pwr_role::vos];
+  if(family_.vos_levels[level.of(now)] == vos_forbidden)
+  {
+    auto const reg = family_.fields[std::to_underlying(pwr_role::vos)].name.reg;
+    regs_.poke(level.offset, level.with(regs_.peek(level.offset), level.of(old)));
+    if(writer_ == initiator::debugger)
+    {
+      return;
+    }
+    if(not std::exchange(forbidden_vos_logged_, true))
+    {
+      warn(
+          reg,
+          std::format("VOS {:#04b} is forbidden, VOS keeps {:#04b}", level.of(now), level.of(old)));
+    }
+    if(ctx_.strict_peripherals)
+    {
+      throw model_error(desc_.name, std::string{reg}, level.offset);
+    }
+    return;
+  }
   if(level.of(now) != level.of(old))
   {
     if(family_.vos_levels[level.of(now)] < family_.vos_levels[level.of(old)])
@@ -711,8 +827,18 @@ void pwr::cr1_written(std::uint32_t, std::uint32_t now)
   warn(
       family_.fields[std::to_underlying(pwr_role::mode)].name.reg,
       std::format(
-          "LPMS selects {}, not modelled: a deep-sleep WFI idles as a plain WFI",
+          "{} selects {}, not modelled: a deep-sleep WFI idles as a plain WFI",
+          family_.fields[std::to_underlying(pwr_role::mode)].name.field,
           reflex::enum_value_name(family_.modes[names_[pwr_role::mode].of(now)])));
+}
+
+void pwr::control_written(std::uint32_t old, std::uint32_t now)
+{
+  vosr_written(old, now);
+  if(names_[pwr_role::mode].of(now) != names_[pwr_role::mode].of(old))
+  {
+    cr1_written(old, now);
+  }
 }
 
 void pwr::cr3_written(std::uint32_t old, std::uint32_t now)
@@ -836,6 +962,13 @@ auto pwr_smps_factory(pwr_options options) -> model_factory
 {
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<pwr>(ctx, desc, u5_smps_pwr, options);
+  };
+}
+
+auto pwr_l1_factory(pwr_options options) -> model_factory
+{
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<pwr>(ctx, desc, l1_pwr, options);
   };
 }
 

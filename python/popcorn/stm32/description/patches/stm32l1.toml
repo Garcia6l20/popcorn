@@ -129,3 +129,115 @@ add = [
   { name = "BB_SRAM", start = 0x22000000, size = 0x02000000, kind = "bit_band", acc = { read = true, write = true, execute = false }, secure = false, physical = 0x20000000 },
   { name = "BB_PERIPH", start = 0x42000000, size = 0x02000000, kind = "bit_band", acc = { read = true, write = true, execute = false }, secure = false, physical = 0x40000000 },
 ]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2RSTR"]
+rename = { TM10RST = "TIM10RST", TM11RST = "TIM11RST" }
+source = "RM0038 Rev 18, 6.3.6 RCC_APB2RSTR: bits 3 and 4 are TIM10RST and TIM11RST. The four SVDs spell them TM10RST and TM11RST"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR"]
+rename = { WWDRST = "WWDGRST" }
+source = "RM0038 Rev 18, 6.3.7 RCC_APB1RSTR: bit 11 is WWDGRST. The four SVDs spell it WWDRST"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+rename = { GPIOPAEN = "GPIOAEN", GPIOPBEN = "GPIOBEN", GPIOPCEN = "GPIOCEN", GPIOPDEN = "GPIODEN", GPIOPEEN = "GPIOEEN", GPIOPFEN = "GPIOFEN", GPIOPGEN = "GPIOGEN", GPIOPHEN = "GPIOHEN" }
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: bits 0 to 7 are GPIOAEN to GPIOGEN and GPIOHEN. The four SVDs spell them GPIOPxEN"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR"]
+rename = { USART4EN = "UART4EN", USART5EN = "UART5EN" }
+source = "RM0038 Rev 18, 6.3.10 RCC_APB1ENR: bits 19 and 20 are UART4EN and UART5EN. The four SVDs spell them USART4EN and USART5EN"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CSR"]
+rename = { LPWRSTF = "LPWRRSTF" }
+source = "RM0038 Rev 18, 6.3.14 RCC_CSR: bit 31 is LPWRRSTF. The four SVDs spell it LPWRSTF"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CR"]
+fields = ["RTCPRE0", "RTCPRE1"]
+drop = true
+source = "RM0038 Rev 18, 6.3.1 RCC_CR: RTCPRE[1:0] is one field in bits 30:29, the four SVDs split it in RTCPRE0 and RTCPRE1. The field added below replaces them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CR"]
+add = { name = "RTCPRE", lsb = 29, width = 2, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.1 RCC_CR: RTCPRE[1:0] in bits 30:29, HSE divided by 2, 4, 8 or 16 for the RTC and LCD clock, reset by a power on reset"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBRSTR"]
+add = { name = "AESRST", lsb = 27, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.5 RCC_AHBRSTR: AESRST in bit 27, on the STM32L16x devices. The SVDs lack it, the AES-less lines drop it with AES"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+add = { name = "AESEN", lsb = 27, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: AESEN in bit 27, on the STM32L16x devices. The SVDs lack it, the AES-less lines drop it with AES"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+add = { name = "AESLPEN", lsb = 27, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: AESLPEN in bit 27, on the STM32L16x devices. The SVDs lack it, the AES-less lines drop it with AES"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+add = { name = "FSMCLPEN", lsb = 30, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: FSMCLPEN in bit 30. The SVDs lack it, the categories without FSMC drop it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+add = { name = "TIM5LPEN", lsb = 3, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: TIM5LPEN in bit 3, reset 0 in the register reset value 0xB0E6 4A37. The SVDs lack it, the categories without TIM5 drop it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+add = { name = "SPI3LPEN", lsb = 15, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: SPI3LPEN in bit 15, reset 0 in the register reset value 0xB0E6 4A37. The SVDs lack it, the categories without SPI3 drop it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+add = { name = "UART4LPEN", lsb = 19, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: UART4LPEN in bit 19, reset 0 in the register reset value 0xB0E6 4A37. The SVDs lack it, the categories without UART4 drop it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+add = { name = "UART5LPEN", lsb = 20, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: UART5LPEN in bit 20, reset 0 in the register reset value 0xB0E6 4A37. The SVDs lack it, the categories without UART5 drop it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CIR"]
+add = { name = "LSECSSF", lsb = 6, width = 1, acc = "read_only", reset = 0 }
+source = "RM0038 Rev 18, 6.3.4 RCC_CIR: LSECSSF in bit 6, on Cat.2 to Cat.6. The SVDs lack it, the Cat.1 patch drops it"
+
+[[cross]]
+instances = ["RCC"]
+reg = "CIR"
+target_reg = "CIR"
+effect = "clear"
+pairs = { LSIRDYC = "LSIRDYF", LSERDYC = "LSERDYF", HSIRDYC = "HSIRDYF", HSERDYC = "HSERDYF", PLLRDYC = "PLLRDYF", MSIRDYC = "MSIRDYF", CSSC = "CSSF" }
+source = "RM0038 Rev 18, 6.3.4 RCC_CIR: a write of 1 to xxxRDYC clears xxxRDYF and CSSC clears CSSF"
+
+[[fields]]
+instances = ["PWR"]
+registers = ["CR"]
+fields = ["CSBF", "CWUF"]
+acc = "write_only"
+source = "RM0038 Rev 18, 5.4.1 PWR_CR: CSBF and CWUF are rc_w1 and always read as 0"

@@ -10,3 +10,24 @@ flash_kib = [384]
 [peripherals]
 drop = ["FSMC"]
 source = "RM0038 Rev 18, 22: the FSMC signals need pins the 64-pin packages lack. CubeMX lists FSMC for the QDHx, VDTx and ZDTx Cat.4 parts only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBRSTR"]
+fields = ["FSMCRST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.5 RCC_AHBRSTR: the FSMC bits are dropped with FSMC"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+fields = ["FSMCEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: the FSMC bits are dropped with FSMC"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+fields = ["FSMCLPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: the FSMC bits are dropped with FSMC"

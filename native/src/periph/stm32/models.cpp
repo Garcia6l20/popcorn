@@ -32,10 +32,14 @@ struct builtin
   flash_variant    flash         = {};
 };
 
-constexpr std::array<builtin, 75> builtins{
+constexpr std::array<builtin, 77> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
+     {.ip              = "RCC",
+         .ip_version_glob = "STM32L1_rcc_*",
+         .make            = [](board const& b) { return rcc_l1_factory(b.rcc); },
+         .part_glob       = "STM32L1*"},
      {"ICACHE", "Icache_v1_0_0*", [](board const& b) { return icache_factory(b.caches); }},
      {"DCACHE", "STM32U5xx1_v0_0", [](board const& b) { return dcache_factory(b.caches); }},
      {.ip              = "PWR",
@@ -44,6 +48,10 @@ constexpr std::array<builtin, 75> builtins{
          .part_glob       = "STM32U5*Q"},
      {"PWR", "STM32U5_pwr_*", [](board const& b) { return pwr_factory(b.pwr); }},
      {"PWR", "STM32H5_pwr_*", [](board const& b) { return pwr_h5_factory(b.pwr); }},
+     {.ip              = "PWR",
+         .ip_version_glob = "",
+         .make            = [](board const& b) { return pwr_l1_factory(b.pwr); },
+         .part_glob       = "STM32L1*"},
      {.ip              = "flash",
          .ip_version_glob = "v1.0.0_U5_Cube",
          .make            = [](board const& b) { return flash_factory(b.flash); },

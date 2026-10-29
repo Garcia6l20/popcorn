@@ -168,6 +168,30 @@ struct secured_group
 
 using unit_alias = std::pair<std::string_view, std::string_view>;
 
+/** @brief Fields of one register that keep their value through a system reset. */
+struct kept_fields
+{
+  /** @brief Register name. */
+  std::string_view reg;
+  /** @brief Field names, separated by spaces. */
+  std::string_view fields;
+};
+
+/**
+ * @brief Fields of one register that keep their value while an oscillator is on: a write
+ *        changes them only when the oscillator's ON bit was 0 before the write.
+ * @tparam Source Oscillator enumeration of the family.
+ */
+template <typename Source> struct held_field
+{
+  /** @brief Register name. */
+  std::string_view reg;
+  /** @brief Field names, separated by spaces. */
+  std::string_view fields;
+  /** @brief Oscillator whose ON bit holds them. */
+  Source source;
+};
+
 template <std::uint64_t Hz> auto fixed_rate(rate_inputs const&) -> std::uint64_t
 {
   return Hz;

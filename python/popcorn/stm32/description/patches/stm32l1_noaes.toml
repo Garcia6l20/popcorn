@@ -11,3 +11,24 @@ source = "RM0038 Rev 18, 1.4 and 24: AES on the STM32L162xx only"
 
 [irqs]
 drop = ["AES"]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBRSTR"]
+fields = ["AESRST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.5 RCC_AHBRSTR: the AES bits are available on the STM32L16x only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+fields = ["AESEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: the AES bits are available on the STM32L16x only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+fields = ["AESLPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: the AES bits are available on the STM32L16x only"

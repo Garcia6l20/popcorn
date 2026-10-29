@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import re
 from collections import Counter
 from functools import cache
 from pathlib import Path
@@ -364,6 +365,69 @@ def _check_identity(name: str, category: str) -> None:
         assert (opamp.ip, opamp.ip_version) == ("OPAMP", "cmosf9_opamp_v1_0_Cube")
 
 
+RCC_UNIT = re.compile(r"^(.*?)(RST|LPEN|EN)$")
+RCC_UNIT_REGISTERS = {
+    "AHBRSTR",
+    "APB2RSTR",
+    "APB1RSTR",
+    "AHBENR",
+    "APB2ENR",
+    "APB1ENR",
+    "AHBLPENR",
+    "APB2LPENR",
+    "APB1LPENR",
+}
+RCC_UNIT_OWNER = {"ADC1": "ADC", "FLITF": "FLASH"}
+NO_RCC_UNIT = {"RCC", "EXTI", "IWDG", "RTC", "DBGMCU", "RI", "USB_SRAM", "OPAMP"}
+FREEZE = re.compile(r"^DBG_(.*?)_(STOP|SMBUS_TIMEOUT)$")
+LSE_CSS = {
+    ("CIR", "LSECSSF"),
+    ("CIR", "LSECSSIE"),
+    ("CIR", "LSECSSC"),
+    ("CSR", "LSECSSON"),
+    ("CSR", "LSECSSD"),
+}
+
+
+def _fields(peripheral: PeripheralDesc) -> set[tuple[str, str]]:
+    return {(r.name, f.name) for r in peripheral.registers for f in r.fields}
+
+
+def _check_rcc_bits(name: str, category: str) -> None:
+    peripherals = _peripherals(name)
+    rcc = peripherals["RCC"]
+    kinds: dict[str, set[str]] = {}
+    for register in rcc.registers:
+        if register.name in RCC_UNIT_REGISTERS:
+            for bits in register.fields:
+                match = RCC_UNIT.match(bits.name)
+                assert match is not None, bits.name
+                kinds.setdefault(match.group(1), set()).add(match.group(2))
+    owners = {RCC_UNIT_OWNER.get(stem, stem) for stem in kinds if stem != "SRAM"}
+    assert owners == set(peripherals) - NO_RCC_UNIT, sorted(
+        owners ^ (set(peripherals) - NO_RCC_UNIT)
+    )
+    assert all(found == {"RST", "EN", "LPEN"} for stem, found in kinds.items() if stem != "SRAM")
+    freeze = {
+        match.group(1)
+        for register in peripherals["DBGMCU"].registers
+        for bits in register.fields
+        if (match := FREEZE.match(bits.name)) is not None
+    }
+    assert freeze <= set(peripherals), sorted(freeze - set(peripherals))
+    fields = _fields(rcc)
+    assert (fields >= LSE_CSS) == (category != "cat1")
+    assert not (LSE_CSS & fields) or category != "cat1"
+    assert {("CSR", "OBLRSTF"), ("CSR", "LPWRRSTF"), ("CR", "RTCPRE")} <= fields
+    rtcpre = next(
+        f for r in rcc.registers if r.name == "CR" for f in r.fields if f.name == "RTCPRE"
+    )
+    assert (rtcpre.lsb, rtcpre.width) == (29, 2)
+    assert (
+        "DBG_RTC_STOP" in {f.name for r in peripherals["DBGMCU"].registers for f in r.fields}
+    ) == (category != "cat1")
+
+
 @pytest.mark.parametrize("name", _names())
 def test_every_l1_name_follows_its_category(name: str) -> None:
     category = _category(_parts()[name])
@@ -375,6 +439,7 @@ def test_every_l1_name_follows_its_category(name: str) -> None:
     _check_memory(name, category)
     _check_vector_table(name, category)
     _check_identity(name, category)
+    _check_rcc_bits(name, category)
 
 
 def test_the_132_names_fall_into_seven_categories_with_the_expected_counts() -> None:

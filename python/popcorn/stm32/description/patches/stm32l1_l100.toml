@@ -36,3 +36,45 @@ add = [
 peripheral = "RTC"
 names = ["BKP5R", "BKP6R", "BKP7R", "BKP8R", "BKP9R", "BKP10R", "BKP11R", "BKP12R", "BKP13R", "BKP14R", "BKP15R", "BKP16R", "BKP17R", "BKP18R", "BKP19R", "BKP20R", "BKP21R", "BKP22R", "BKP23R", "BKP24R", "BKP25R", "BKP26R", "BKP27R", "BKP28R", "BKP29R", "BKP30R", "BKP31R"]
 source = "RM0038 Rev 18, 20.2 and 20.6.20 RTC_BKPxR: 5 backup registers (20 bytes) in the value line, address offsets 0x50 to 0x60, on every category the value line has. The L100 SVD lists BKP0R to BKP31R"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR"]
+fields = ["UART4RST", "UART5RST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.7 RCC_APB1RSTR: the bits of UART4, UART5, GPIOE, GPIOF and GPIOG are dropped with the instances the value line lacks"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR"]
+fields = ["UART4EN", "UART5EN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.10 RCC_APB1ENR: the bits of UART4, UART5, GPIOE, GPIOF and GPIOG are dropped with the instances the value line lacks"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+fields = ["UART4LPEN", "UART5LPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: the bits of UART4, UART5, GPIOE, GPIOF and GPIOG are dropped with the instances the value line lacks"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBRSTR"]
+fields = ["GPIOERST", "GPIOFRST", "GPIOGRST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.5 RCC_AHBRSTR: the bits of UART4, UART5, GPIOE, GPIOF and GPIOG are dropped with the instances the value line lacks"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+fields = ["GPIOEEN", "GPIOFEN", "GPIOGEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: the bits of UART4, UART5, GPIOE, GPIOF and GPIOG are dropped with the instances the value line lacks"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+fields = ["GPIOELPEN", "GPIOFLPEN", "GPIOGLPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: the bits of UART4, UART5, GPIOE, GPIOF and GPIOG are dropped with the instances the value line lacks"

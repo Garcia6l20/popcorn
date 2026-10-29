@@ -27,3 +27,17 @@ uid = 0x50
 flash_size = 0x4C
 uid_words = [0x0032_0014, 0x4F52_4E01, 0x504F_5043]
 uid_offsets = [0, 4, 0x14]
+
+[[fields]]
+instances = ["DBGMCU"]
+registers = ["APB1_FZ"]
+fields = ["DBG_RTC_STOP"]
+drop = true
+source = "RM0038 Rev 18, 30.16.4 DBGMCU_APB1_FZ: DBG_RTC_STOP is available in Cat.2 to Cat.6 only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CIR"]
+fields = ["LSECSSF"]
+drop = true
+source = "RM0038 Rev 18, 6.3.4 RCC_CIR: LSECSSF is available in Cat.2 to Cat.6 only"

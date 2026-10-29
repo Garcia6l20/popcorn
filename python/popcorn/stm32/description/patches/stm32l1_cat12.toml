@@ -27,3 +27,73 @@ source = "RM0038 Rev 18, 3.2 Table 8 (Cat.1 and Cat.2): the system memory holds 
 add = [
   { name = "SYSTEM_MEMORY", start = 0x1FF00000, size = 0x1000, kind = "rom", acc = { read = true, write = false, execute = true }, secure = false },
 ]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBRSTR"]
+fields = ["FSMCRST", "DMA2RST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.5 RCC_AHBRSTR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+fields = ["FSMCEN", "DMA2EN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+fields = ["FSMCLPEN", "DMA2LPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2RSTR"]
+fields = ["SDIORST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.6 RCC_APB2RSTR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2ENR"]
+fields = ["SDIOEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.9 RCC_APB2ENR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2LPENR"]
+fields = ["SDIOLPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.12 RCC_APB2LPENR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR"]
+fields = ["SPI3RST", "TIM5RST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.7 RCC_APB1RSTR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR"]
+fields = ["SPI3EN", "TIM5EN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.10 RCC_APB1ENR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+fields = ["SPI3LPEN", "TIM5LPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["DBGMCU"]
+registers = ["APB1_FZ"]
+fields = ["DBG_TIM5_STOP"]
+drop = true
+source = "RM0038 Rev 18, 30.16.4 DBGMCU_APB1_FZ: DBG_TIM5_STOP is available in Cat.3 to Cat.6 only"

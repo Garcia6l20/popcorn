@@ -54,7 +54,16 @@ h573_env = {
     "POPCORN_H573_DESC": str(h573),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in h573_firmwares.items()},
 }
-l1_firmwares = {name: firmware("periph", name) for name in ("l152xe_l1_smoke", "l152xb_l1_smoke")}
+l1_firmwares = {
+    name: firmware("periph", name)
+    for name in (
+        "l152xe_l1_smoke",
+        "l152xb_l1_smoke",
+        "l152xe_l1_rcc_ll",
+        "l152xb_l1_rcc_ll",
+        "l152xe_l1_pwr_ll",
+    )
+}
 l1_env = {
     "POPCORN_L152RE_DESC": str(l152re),
     "POPCORN_L152RB_DESC": str(l152rb),
@@ -198,6 +207,22 @@ smoke_l1.private.include_dirs.append(private_dir)
 for _, target in l1_firmwares.values():
     if target is not None:
         smoke_l1.depends(target)
+
+for program, source in (
+    ("stm32-rcc-l1", "test_rcc_l1.cpp"),
+    ("stm32-power-l1", "test_power_l1.cpp"),
+):
+    l1_test = add_doctest(
+        program,
+        [here / source],
+        static,
+        env=l1_env,
+        register=l152re is not None and l152rb is not None,
+    )
+    l1_test.private.include_dirs.append(private_dir)
+    for _, target in l1_firmwares.values():
+        if target is not None:
+            l1_test.depends(target)
 
 flash_geometry = add_doctest(
     "stm32-flash-geometry",
