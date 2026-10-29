@@ -105,6 +105,12 @@ Write it as `--popcorn-trace-on-fail=DIR` or last on the command line: a bare fl
 takes the path as its DIR. `machine_factory` machines are not traced. Kept traces are never
 pruned: `--cache-clear` removes those in the pytest cache.
 
+`--popcorn-part=PART` builds every machine the plugin makes on the shipped part `PART`, the part of
+the selected config of each description replaced: machine fixtures, system members and
+`machine_factory` calls. A description that sets `description=` or `svd=` is refused. The report
+header names the part, the summary prints `N of M tests ran on PART`, and the session exits with
+status 1 when N is 0 and the run would exit 0.
+
 With `--popcorn-cov`, every machine the plugin builds counts coverage. Each process adds
 its machines' counts to one `.pcov` file of a temporary `popcorn-cov-*` directory, the boot of
 each configuration counted once, and the controller merges them at session end into the lcov
@@ -237,7 +243,7 @@ Tests and fixtures anyio's plugin runs, those using its `anyio_backend` fixture,
 Options, registered for `pytest --help`: `--popcorn-cov`, `--popcorn-cov-report`,
 `--popcorn-cov-fail-under`, `--popcorn-cov-include`, `--popcorn-cov-omit`,
 `--popcorn-cov-unmodelled`, `--popcorn-trace-on-fail[=DIR]`, `--popcorn-strict`,
-`--popcorn-budget`, `--popcorn-ring`, `--popcorn-ring-blocks`.
+`--popcorn-budget`, `--popcorn-part`, `--popcorn-ring`, `--popcorn-ring-blocks`.
 
     @pytest.mark.popcorn(budget=1_000_000, strict=True)
     async def test_bounded(controller: popcorn.Machine, linked: popcorn.System) -> None: ...

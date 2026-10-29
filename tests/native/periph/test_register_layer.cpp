@@ -63,16 +63,18 @@ auto unit(
     std::vector<popcorn::cross_rule>    crosses = {}) -> popcorn::peripheral_desc
 {
   return {
-      .name        = "UNIT",
-      .ip          = "test",
-      .ip_version  = "v1",
-      .base        = 0x4000'0000,
-      .size        = 0x40,
-      .registers   = std::move(registers),
-      .cross_rules = std::move(crosses),
-      .irqs        = {},
-      .alias_of    = std::nullopt,
-      .alternates  = std::nullopt};
+      .name            = "UNIT",
+      .ip              = "test",
+      .ip_version      = "v1",
+      .base            = 0x4000'0000,
+      .size            = 0x40,
+      .registers       = std::move(registers),
+      .cross_rules     = std::move(crosses),
+      .irqs            = {},
+      .alias_of        = std::nullopt,
+      .alternates      = std::nullopt,
+      .bonded          = std::nullopt,
+      .bonded_channels = std::nullopt};
 }
 
 struct bench

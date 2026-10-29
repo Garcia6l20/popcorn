@@ -32,6 +32,7 @@ def test_help_lists_the_options_and_marker(pytester: pytest.Pytester) -> None:
             "*--popcorn-trace-on-fail*",
             "*--popcorn-strict*",
             "*--popcorn-budget*",
+            "*--popcorn-part*",
             "*--popcorn-ring*",
         ]
     )

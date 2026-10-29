@@ -1,13 +1,26 @@
+import os
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 from popcorn.stm32.description._cubemx import DbIp
 from popcorn.stm32.description._errors import DescriptionError
+from popcorn.stm32.description._layers import factor, line_name
 from popcorn.stm32.description._model import CoreDesc, IrqDesc, PeripheralDesc
 from popcorn.stm32.description._patches import PatchTarget
 from popcorn.stm32.description._sources import Sources, find_sources
 from popcorn.stm32.description._svd import SvdDevice
+
+PIN_DATA_VARIABLE = "POPCORN_STM32_PIN_DATA"
+
+
+def require_pin_data() -> Path:
+    """The STM32_open_pin_data checkout named by POPCORN_STM32_PIN_DATA, skips when unset."""
+    value = os.environ.get(PIN_DATA_VARIABLE)
+    if not value:
+        pytest.skip(f"set {PIN_DATA_VARIABLE} to a STM32_open_pin_data checkout")
+    return Path(value)
 
 
 @pytest.fixture(scope="session")
@@ -104,3 +117,23 @@ def target_peripheral(target: PatchTarget, name: str) -> PeripheralDesc:
         if p.name == name:
             return p
     raise KeyError(name)
+
+
+def write_layers(
+    directory: Path,
+    descriptions: Mapping[str, Mapping[str, Any]],
+    references: Mapping[str, str] | None = None,
+) -> dict[str, bytes]:
+    """Layer files of @p descriptions written into @p directory by `_layers.factor`, returned by
+    file name. @p references maps a line to its reference part, by default the first name of
+    the line in sorted order."""
+    if references is None:
+        chosen: dict[str, str] = {}
+        for name in sorted(descriptions):
+            chosen.setdefault(line_name(name), name)
+        references = chosen
+    files = factor(descriptions, references)
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, data in files.items():
+        (directory / name).write_bytes(data)
+    return files

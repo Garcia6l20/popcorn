@@ -1,18 +1,19 @@
 # Descriptions
 
 A part description says what a part is: its core, memory regions, peripherals with registers
-and fields, interrupts and GPIO alternate functions. The machine is built from it and never
-from ad-hoc arguments.
+and fields, interrupts, GPIO alternate functions, bonded GPIO pins and bonded ADC channels. The
+machine is built from it and never from ad-hoc arguments.
 
 ## The data
 
 The native type is `part_description` in `native/include/popcorn/core/description.hpp`. It
 comes with `parse_description`, `load_description`, `dump_description`, `description_digest`
-and a JSON Schema from `description_json_schema`. `description_schema_version` is part of the
-data. The JSON Schema is committed as `data/schema/part_description.schema.json` and
-`python/popcorn/stm32/description/_codegen.py` generates the Python dataclasses of `_model.py`
-from it. Do not edit `_model.py` by hand. `popcorn_build/schema.py` builds the `popcorn-describe-schema`
-program and rewrites the schema from the native type.
+and a JSON Schema from `description_json_schema`. `description_schema_version`, 2, is part of
+the data, and the digest covers it, so a bump changes every digest. The JSON Schema is committed
+as `data/schema/part_description.schema.json` and `python/popcorn/stm32/description/_codegen.py`
+generates the Python dataclasses of `_model.py` from it. Do not edit `_model.py` by hand.
+`popcorn_build/schema.py` builds the `popcorn-describe-schema` program and rewrites the schema
+from the native type.
 
 ## The pipeline
 
@@ -26,7 +27,7 @@ flowchart LR
     H[CMSIS header] --> B
     B --> J[part description JSON]
     J --> C[build cache]
-    J --> S[shipped json.xz]
+    J --> S[shipped layers]
 ```
 
 The modules are in `python/popcorn/stm32/description`:
@@ -85,6 +86,23 @@ name and a non-empty `source` naming the document that justifies the drop. The e
 on the port and no rule may repeat it, otherwise the build raises `DescriptionError` with the
 rule's index. The builder applies the rules after it reads the CubeMX modes, validates all of
 them before removing any, and counts the drops in the patch report.
+
+## Bonded pins
+
+Each GPIO port of a description built from CubeMX or pin data carries `bonded`, the mask of its
+pins that reach a package pin, bit n for pin n. `bonded_pins` in `_cubemx.py` reads it from the
+part's pin list. A port the package bonds no pin of carries 0 and keeps its registers. The
+board API refuses a pin outside the mask with `ConfigError`: every `Pin` access, `drive_edges`
+and an SPI device's chip select at machine construction. The firmware reaches every pin through
+the registers. A hand-written description may leave `bonded` out, every pin of the port then
+counts as bonded.
+
+Each ADC instance carries `bonded_channels`, the mask of its external channels whose pad reaches
+a package pin. `bonded_adc_channels` in `_cubemx.py` reads it from the `ADC<n>_IN<c>` and
+`ADC<n>_INP<c>` signals of the part's pins. The board API refuses a channel outside the mask with
+`ConfigError`: `ADCx.input(n)`, every `AnalogInput` access and its refs. Conversions read every
+external channel. A hand-written description may leave `bonded_channels` out, every external
+channel then counts as bonded.
 
 ## Field drops
 
@@ -183,13 +201,61 @@ width leaves the register or overlaps another field. The patch report counts one
 
 ## Shipped descriptions
 
-A description can ship in the package as `<RefName>[-<core>].json.xz` under
-`python/popcorn/stm32/data`. `_shipped.py` decompresses it on first use, with a hard limit on
-the decompressed size. The lookup order of `popcorn.stm32.mcu(part)` is:
+Shipped descriptions live in `python/popcorn/stm32/data` as three kinds of xz-compressed JSON
+layer, each `{"format": 1, ...}`:
+
+| file | holds |
+|---|---|
+| `<family>.blocks.json.xz` | `blocks`: every `registers` plus `cross_rules` pair of the family's shipped parts, keyed by the SHA-256 of its canonical JSON |
+| `<line>.line.json.xz` | the `reference` part's `schema_version`, `core`, `irqs` and peripheral headers in order |
+| `<line>.parts.json.xz` | `line_sha256` of the decompressed line file and `parts`: one delta per shipped part, `<RefName>[-<core>]` |
+
+The family is the RefName's first 7 characters plus `xx`, `STM32U5xx`, the line its first 9
+plus `xx`, `STM32U575xx`. A header is a peripheral without `registers` and `cross_rules`, with
+`"block": <key>` in their place. Two instances share a block only when their bytes are equal. A
+delta holds the part's `part`, `generator`, `sources` and `regions`, the full header of every
+instance that differs from the line's, and `schema_version`, `core` or `irqs` where they differ.
+Every part of a line has the line's instances in the line's order.
+
+`_layers.py` holds `factor`, which writes the layers of a set of descriptions, and `compose`, its
+inverse, both pure functions. `compose_shipped` in `_shipped.py` composes a part into the same
+JSON text `dump_json` writes, so the digest, snapshots and the native loader see the same
+description. It refuses with `DescriptionError` naming the file: a layer of another `format`, a
+`line_sha256` mismatch, a missing block or one whose bytes do not hash to its key, an unknown
+instance, and a decompressed layer or composed description above `MAX_SHIPPED_BYTES`. The
+composed size is counted before anything is built. On first use the composed text is cached as
+`<cache>/shipped/<name>-<sha16>.json`, sha16 over the SHA-256 of each of the parts, line and family files, in order.
+
+A part ships exactly when its golden file `tests/data/stm32/golden/<RefName>[-<core>].json`
+exists. To add a part, write its golden, then ship:
+
+```
+uv run python -m popcorn.stm32.description golden STM32U575QGIx --update
+uv run python -m popcorn.stm32.description ship STM32U575QGIx --pin-data <STM32_open_pin_data> \
+    --out python/popcorn/stm32/data
+uv run python -m popcorn.stm32.description ship --pin-data <STM32_open_pin_data> --check \
+    --out python/popcorn/stm32/data
+```
+
+`ship` builds every golden part of each family it touches from `STM32_open_pin_data`, in a pool
+of `-j` processes, and rewrites all layers of those families. A part named on the command line
+selects its family, no part selects every family with a golden or a layer file. Each line's
+reference is its part with the most bonded GPIO pins, then the largest flash, then the first
+RefName in sorted order. Every file goes to a temporary name first and is renamed once all are
+written. Then every layer file of a touched family that the new set lacks is removed, so a part
+whose golden is deleted leaves no delta and a line with no part leaves no file. Equal inputs give
+equal bytes. Writing needs `--out`, the package data directory of the source tree: under
+`uv run` the imported package is the staged copy in the build directory. `--core` applies to
+every named part and needs a part list.
+
+`ship --check` composes each shipped part, every golden part without a part list, and compares
+its digest with a fresh build. `golden` without a part checks every golden file.
+
+The lookup order of `popcorn.stm32.mcu(part)` is:
 
 1. `<RefName>[-<core>].json`, uncompressed, in a directory of `POPCORN_STM32_DESCRIPTION_DIRS`,
    searched in order.
-2. The shipped file, skipped when `svd`, `cubemx_db` or `cmsis_header` is passed or
+2. The shipped layers, skipped when `svd`, `cubemx_db` or `cmsis_header` is passed or
    `POPCORN_STM32_BUILD` is `local`. Any other value of that variable raises an error.
 3. A local build from ST's files, cached.
 
@@ -202,3 +268,29 @@ digest file make a change of a shipped description visible in review.
 
 `description_digest` is a SHA-256 of the description content. A snapshot stores it and checks it
 on load, so a snapshot only loads into a machine built from the same description.
+
+## Sweeping parts
+
+`popcorn_build.part_sweep` builds the description of many parts and attaches a Machine to each
+at TZEN 0 and 1. Run it from the checkout:
+
+```sh
+uv run python -m popcorn_build.part_sweep --out sweep.json --parts 'STM32U5*' 'STM32H5*' -j 10
+uv run python -m popcorn_build.part_sweep --out shipped.json --source shipped
+```
+
+- `--source local`, the default, builds every CubeMX db part matching the globs from ST's files.
+  `--source shipped` loads the shipped parts.
+- Each part runs in its own child interpreter, at most `-j` at once, 120 s each. A child that
+  crashes or runs out of time gives a row with `error` set to `crashed` or `timeout`.
+- The output is `{"format": 1, "cubemx_db": ..., "popcorn": <git describe>, "parts": [...]}`,
+  rows sorted by part. A row holds the db facts of the part, `line`, `die`, `package`,
+  `flash_kib`, `ram_kib` and `bonded`, the pin mask per GPIO port from `bonded_pins`, each null
+  when the db lacks the part or its file does not read, the latter with `db_error` set. It also
+  holds `smps` from `is_smps_part`, the description digest, the attach result per TZEN value,
+  and the instance counts: total, with a built-in model at TZEN 0 and 1, and the names with no
+  IP version.
+- `--source local` takes the db's `mcu/STM32*.xml` files. A range stem such as
+  `STM32C011F(4-6)Px` is one RefName. The run stops with an error when the db has no `mcu/`
+  directory or no part matches.
+- A failed stage holds the exception type and the first 300 characters of its text.

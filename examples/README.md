@@ -186,7 +186,13 @@ slow = await machine_factory.booted(i2c_description, config="slow-eeprom")
 `i2c_description` is a plain `pytest.fixture` of the conftest that returns the description, as
 `spi_mock_description` does in `spi_mock`.
 
-The examples use the shipped `STM32U575QGIx` description and need no ST tools.
+Each example names one shipped part in its `conftest.py`, `STM32U575QGIx` or `STM32H573AIIx`,
+and needs no ST tools. `--popcorn-part` runs an example on another part of the same die, which the
+gate does for the parts listed in `popcorn_build/example_parts.py`:
+
+```sh
+uv run pytest -q --popcorn-part=STM32U575VGTxQ examples/stm32u575/usart
+```
 
 Run one example from the repository root:
 

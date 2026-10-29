@@ -462,6 +462,13 @@ auto machine_handle::gpio(std::string const& peripheral, std::uint8_t pin) const
   {
     throw config_error(peripheral, 0, "pin", periph::stm32::pin_range_text(port->pin_count()));
   }
+  if((port->bonded_pins() >> pin & 1U) == 0)
+  {
+    throw config_error(
+        peripheral, 0, "pin",
+        periph::stm32::unbonded_pin_text(
+            engine().description().part, peripheral, pin, port->bonded_pins()));
+  }
   return *port;
 }
 
@@ -539,20 +546,42 @@ void machine_handle::adc_drive(
     std::uint32_t      microvolts)
 {
   access([&](core::machine& target) {
-    adc_drive_body(analog(peripheral), channel, microvolts)(target);
+    adc_drive_body(analog(peripheral, channel), channel, microvolts)(target);
   });
 }
 
 auto machine_handle::adc_input(std::string const& peripheral, std::uint8_t channel) const
     -> std::uint32_t
 {
-  return access(
-      [&](core::machine& target) { return adc_input_body(analog(peripheral), channel)(target); });
+  return access([&](core::machine& target) {
+    return adc_input_body(analog(peripheral, channel), channel)(target);
+  });
 }
 
 auto machine_handle::adc_channels(std::string const& peripheral) const -> std::uint32_t
 {
   return analog(peripheral).external_channels();
+}
+
+auto machine_handle::adc_bonded_channels(std::string const& peripheral) const -> std::uint32_t
+{
+  return analog(peripheral).bonded_channels();
+}
+
+auto machine_handle::analog(std::string const& peripheral, std::uint8_t channel) const
+    -> periph::stm32::analog_port&
+{
+  auto& port = analog(peripheral);
+  if(channel < 32
+     and (port.external_channels() >> channel & 1U) != 0
+     and (port.bonded_channels() >> channel & 1U) == 0)
+  {
+    throw config_error(
+        peripheral, 0, "channel",
+        periph::stm32::unbonded_channel_text(
+            engine().description().part, peripheral, channel, port.bonded_channels()));
+  }
+  return port;
 }
 
 auto machine_handle::entropy(std::string const& peripheral) const -> periph::stm32::entropy_source&
@@ -681,7 +710,7 @@ auto machine_handle::op_gpio_alternate(std::string const& peripheral, std::uint8
 auto machine_handle::op_adc_input(std::string const& peripheral, std::uint8_t channel) const
     -> access_op
 {
-  return detail::machine_op(adc_input_body(analog(peripheral), channel));
+  return detail::machine_op(adc_input_body(analog(peripheral, channel), channel));
 }
 
 auto machine_handle::command_i2c_hold(
@@ -794,7 +823,7 @@ auto machine_handle::op_adc_drive(
     std::uint8_t       channel,
     std::uint32_t      microvolts) const -> access_op
 {
-  return detail::machine_op(adc_drive_body(analog(peripheral), channel, microvolts));
+  return detail::machine_op(adc_drive_body(analog(peripheral, channel), channel, microvolts));
 }
 auto uart_queue::predicate_available(std::uint64_t count) const -> native_predicate
 {

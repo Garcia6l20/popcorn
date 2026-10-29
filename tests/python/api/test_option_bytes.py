@@ -441,3 +441,15 @@ def test_optstrt_accepts_the_watermarks_of_a_five_bit_part(
         pytest.skip(f"no STM32U535 description: {error}")
     assert not optstrt_warns(u535, caplog, SECWM1R1, 9 << 16 | 2)
     assert optstrt_warns(u535, caplog, SECWM1R1, 8 << 16 | 2)
+
+
+def test_a_2_mb_u5_accepts_secwm2_up_to_page_127_and_refuses_128() -> None:
+    """RM0456 7.9.17: the 2 MB U575ZITxQ has 128 pages in each bank."""
+    from popcorn.stm32 import mcu
+
+    part = mcu("STM32U575ZITxQ")
+    assert popcorn.Machine(part, option_bytes=OptionBytes(secwm2=(0, 127)))
+    with pytest.raises(ConfigError) as caught:
+        popcorn.Machine(part, option_bytes=OptionBytes(secwm2=(0, 128)))
+    assert caught.value.key == "option_bytes.secwm2"
+    assert "from 0 to 127" in caught.value.expected

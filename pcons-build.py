@@ -18,6 +18,7 @@ from popcorn_build.python import (
     ext_suffix,
     interpreter,
     nanobind_runtime,
+    prune_stage,
 )
 from popcorn_build.requirements import package, prefixes, unicorn_archive, unicorn_commit
 from popcorn_build.sdk import reflex_include_dirs, sdk_inputs
@@ -260,13 +261,18 @@ if VARIANT not in ("asan", "tsan"):
         add_stub(smoke_ext, "popcorn_testing", "_smoke")
 
     python_package = project_dir / "python" / "popcorn"
+    regs_path = build_dir / "popcorn" / "arm" / "_regs.py"
+    prune_stage(
+        build_dir / "popcorn",
+        python_package,
+        keep={regs_path.relative_to(build_dir / "popcorn").as_posix()},
+    )
     staged_sources = add_package_install(
         "popcorn", python_package, name="stage-python", no_prefix=True
     )
     for staged in staged_sources:
         staged.build_tier = "default"
     project.Alias("stage-python", *staged_sources)
-    regs_path = build_dir / "popcorn" / "arm" / "_regs.py"
     regs = project.Command(
         env,
         name="popcorn.arm._regs",

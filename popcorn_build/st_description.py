@@ -25,7 +25,7 @@ except DescriptionError as exc:
 
 def cached_st_description(part: str, variable: str) -> Path | None:
     """Path of the description of @p part, from @p variable when set, else by the lookup of
-    `mcu()`: a description directory, the shipped file, then a build from ST's files.
+    `mcu()`: a description directory, the shipped layers, then a build from ST's files.
 
     The build runs popcorn's description builder in a child interpreter from the source tree, so
     it needs neither the native extension nor a staged package. Returns None, after a warning

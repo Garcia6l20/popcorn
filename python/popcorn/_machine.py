@@ -764,9 +764,9 @@ class Machine:
             ConfigError: No arch module implements the core, an option is out of range, a
                 models key names no peripheral, a model is refused, or devices are refused:
                 a peripheral that is not a built-in bus of their kind or has a board model,
-                a chip select pin the description lacks, a device already serving a live
-                machine or listed twice, an `SpiController` next to another device on its SPI,
-                or two images share a name.
+                a chip select pin the description lacks or the package does not bond, a device
+                already serving a live machine or listed twice, an `SpiController` next to
+                another device on its SPI, or two images share a name.
                 With `rcc`: an HSE outside 4 to 50 MHz, an LSE of 0 Hz or above 1 MHz, an RCC
                 with a Python model or one no built-in model serves.
                 With `audio`: a key that is not an SAI with the built-in model, two keys naming

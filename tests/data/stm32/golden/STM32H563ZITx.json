@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 100,
+    "alternates": 888,
+    "cross_rules": 877,
+    "fields": 38903,
+    "irqs": 128,
+    "patched_fields": 412,
+    "peripherals": 201,
+    "regions": 12,
+    "registers": 4480
+  },
+  "part": "STM32H563ZITx",
+  "svd_sha256": "3daa2bdf5fab3e6995c050489e6033326628fb6471d81e922bd3639b579e740f",
+  "tables": {
+    "alternates": "14dc41d8d982f9080f8d40d5574941d6893c0bb45b16e0599b2042660d05c743",
+    "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
+    "fields": "b60d8a1bbf5310e54c0bcb017fbb0cf4d54c7690a5ad24a0615a7d3407f8ceb5",
+    "irqs": "03c827971b858f128ff01140cb03d22c75a532ceb7c45f35af5bffb8d709df0b",
+    "peripherals": "6acc1f399cca882936558db1f515d3408aeafe4ab833a6ffd0a518d130233d42",
+    "regions": "3a54e840c57e9de6369ab3c8866d677b2715424cd7f6170f85e0e8fb79812850",
+    "registers": "0563345de9933ebf1e33e702f0c9f4d017fbc862bcc29cb7f1bc7247886fc400"
+  }
+}

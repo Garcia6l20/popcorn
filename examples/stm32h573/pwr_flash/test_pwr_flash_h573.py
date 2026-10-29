@@ -23,7 +23,8 @@ DATA_SECTOR = 0x081F_E000
 RECORD = struct.pack("<4I", 0xC0FFEE00, 0x12345678, 0x9ABCDEF0, 0x0BADF00D)
 ERASED = b"\xff" * 16
 AROUND_BSY = us(1)
-UFBGA169 = 0b00110
+PACKAGE_BASE = 0x08FF_F80E
+PACKAGE_MASK = 0x3F
 UID_BASE = 0x08FF_F800
 POPCORN_UID = (0x0032_0014, 0x4F52_4E01, 0x504F_5043)
 
@@ -123,7 +124,7 @@ async def test_the_firmware_reads_the_device_signature(pwr_flash: Machine) -> No
 
     signature = pwr_flash.var("signature")
     assert signature.flash_kb.value == 0x800
-    assert signature.package.value == UFBGA169
+    assert signature.package.value == pwr_flash.mem.u16[PACKAGE_BASE] & PACKAGE_MASK
     uid = tuple(int(signature.uid[word].value) for word in range(3))
     assert uid == struct.unpack("<3I", pwr_flash.mem.read(UID_BASE, 12))
     assert uid == POPCORN_UID

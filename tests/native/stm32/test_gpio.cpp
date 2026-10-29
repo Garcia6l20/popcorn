@@ -658,3 +658,37 @@ TEST_CASE("driving GPIOI pin 8 of the STM32U575 throws config_error, pin 7 and G
   CHECK_NOTHROW(port(f, "GPIOH").drive(8, true));
   CHECK(port(f, "GPIOH").level(8));
 }
+
+TEST_CASE("bonded_pins() is the description's mask, every pin of the port without one")
+{
+  auto desc = u575();
+  auto unit = [&](std::string_view name) -> popcorn::peripheral_desc& {
+    auto const found = std::ranges::find(desc.peripherals, name, &popcorn::peripheral_desc::name);
+    REQUIRE(found != desc.peripherals.end());
+    return *found;
+  };
+  REQUIRE(unit("GPIOH").bonded == 0x000b);
+  REQUIRE(unit("GPIOI").bonded == 0);
+  {
+    stm32_fixture const f{desc, "gpio_ll"};
+    CHECK(port(f, "GPIOH").bonded_pins() == 0x000b);
+    CHECK(port(f, "GPIOI").bonded_pins() == 0);
+  }
+  unit("GPIOH").bonded.reset();
+  unit("GPIOI").bonded.reset();
+  stm32_fixture const f{desc, "gpio_ll"};
+  CHECK(port(f, "GPIOH").bonded_pins() == 0xffff);
+  CHECK(port(f, "GPIOI").bonded_pins() == 0x00ff);
+}
+
+TEST_CASE("a bonded mask naming a pin past the port's pins throws config_error")
+{
+  auto       desc  = u575();
+  auto const found = std::ranges::find(
+      desc.peripherals, std::string_view{"GPIOI"}, &popcorn::peripheral_desc::name);
+  REQUIRE(found != desc.peripherals.end());
+  found->bonded = 0x0100;
+  CHECK_THROWS_AS(stm32_fixture(desc, "gpio_ll"), popcorn::config_error);
+  found->bonded = 0x0080;
+  CHECK_NOTHROW(stm32_fixture(desc, "gpio_ll"));
+}

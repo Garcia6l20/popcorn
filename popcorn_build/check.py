@@ -7,6 +7,7 @@ import click
 from pcons import cli_command
 
 from popcorn_build.config import project_dir
+from popcorn_build.example_parts import EXAMPLE_PARTS
 
 Stage = tuple[str, list[str]]
 
@@ -39,13 +40,16 @@ def _clang_format() -> list[str]:
 
 def _examples() -> list[Stage]:
     examples = sorted(ini.parent for ini in (project_dir / "examples").glob("*/*/pytest.ini"))
-    return [
-        (
-            f"{example.parent.name}/{example.name}",
-            _python_tool("pytest", "-q", str(example.relative_to(project_dir))),
+    stages: list[Stage] = []
+    for example in examples:
+        name = f"{example.parent.name}/{example.name}"
+        path = str(example.relative_to(project_dir))
+        stages.append((name, _python_tool("pytest", "-q", path)))
+        stages.extend(
+            (f"{name}@{part}", _python_tool("pytest", "-q", f"--popcorn-part={part}", path))
+            for part in EXAMPLE_PARTS[name].extra
         )
-        for example in examples
-    ]
+    return stages
 
 
 GATE_VARIABLES = ("POPCORN_BUILD_TESTS=ON", "POPCORN_BUILD_EXAMPLES=ON")

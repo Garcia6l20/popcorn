@@ -15,6 +15,8 @@ from popcorn.stm32.description._model import AlternateDesc, RegionAccess, Region
 _MCU_NAMESPACES = ("http://mcd.rou.st.com/modules.php?name=mcu", "http://dummy.com")
 """Namespaces of a part or GPIO modes file: CubeMX's db, then ST's STM32_open_pin_data copy."""
 _PIN_RE = re.compile(r"P([A-Z])(\d+)")
+_BONDED_PIN_RE = re.compile(r"P([A-Z])(\d+)(?:[^\d_].*)?")
+_ADC_INPUT_RE = re.compile(r"(ADC\d+)_INP?(\d+)")
 _AF_RE = re.compile(r"GPIO_AF(\d+)_")
 MAX_GPIO_MODES_BYTES = 8 << 20
 """Largest GPIO modes file read_gpio_alternates parses, 26 times the 311 KiB of the U5 one."""
@@ -137,6 +139,52 @@ def read_part(data: bytes, *, file: str) -> DbPart:
         package=root.get("Package") or "",
         pins=pins,
     )
+
+
+def bonded_pins(part: DbPart) -> dict[str, int]:
+    """Bonded GPIO pins of @p part's package: port letter -> mask of its pins 0 to 15, sorted by
+    port. A db pin name is `P<port><n>`, alone or followed by a function that starts with any
+    character other than a digit or `_`, so `PC14-OSC32_IN (PC14)` is PC14, `PA13 (JTMS/SWDIO)`
+    is PA13, `PA0/WKUP` is PA0 and `PC14OSC32_IN` is PC14. An analog pad such as `PC2_C`,
+    supply, reset and other non-GPIO pins are left out."""
+    ports: dict[str, int] = {}
+    for name in part.pins:
+        found = _BONDED_PIN_RE.fullmatch(name)
+        if found is None or int(found.group(2)) > 15:
+            continue
+        port = found.group(1)
+        ports[port] = ports.get(port, 0) | 1 << int(found.group(2))
+    return dict(sorted(ports.items()))
+
+
+def bonded_adc_channels(part: DbPart) -> dict[str, int]:
+    """External ADC channels whose pad @p part's package bonds: ADC instance -> mask of its
+    channels, sorted by instance. A pin of the part's pin list carrying the signal `ADC<n>_IN<c>`
+    or `ADC<n>_INP<c>` bonds channel c of ADC<n>. Negative inputs `ADC<n>_INN<c>` and trigger
+    signals such as `ADC1_EXTI11` are left out."""
+    adcs: dict[str, int] = {}
+    for signals in part.pins.values():
+        for signal in signals:
+            found = _ADC_INPUT_RE.fullmatch(signal)
+            if found is None or int(found.group(2)) > 31:
+                continue
+            adc = found.group(1)
+            adcs[adc] = adcs.get(adc, 0) | 1 << int(found.group(2))
+    return dict(sorted(adcs.items()))
+
+
+def reference_rank(part: DbPart) -> tuple[int, int, str]:
+    """Sort key putting the reference of a set of parts first: the most bonded GPIO pins, then
+    the largest first flash size, then the first RefName in sorted order."""
+    bonded = sum(mask.bit_count() for mask in bonded_pins(part).values())
+    return -bonded, -part.flash_kib[0], part.ref_name
+
+
+def die_ips(part: DbPart, donor: DbPart) -> list[DbIp]:
+    """IPs of @p donor whose instance @p part does not list, in @p donor's order: the die IP
+    identity of the instances @p part's package drops. Empty when @p donor is @p part."""
+    listed = {ip.instance for ip in part.ips}
+    return [ip for ip in donor.ips if ip.instance not in listed]
 
 
 def _parse_kib(el: Element, *, file: str, key: str) -> int:

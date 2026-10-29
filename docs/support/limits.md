@@ -28,6 +28,20 @@ The [part pages](generated/parts.md) list the instances with no model.
   reads 0 and drops writes, with one `model_warning` per block. The ROM tables read 0, so a ROM
   table walk ends at its first entry.
 
+## Instances a package drops
+
+A CubeMX part file lists the IPs its package brings out. An SVD instance that the part's file
+leaves out takes the IP name and version of the die reference, the part of the same die and SVD
+with the most bonded GPIO pins, then the largest flash, then the first RefName. The instance then
+gets that IP's patches and built-in model, as on the reference. UART5 and SAI2 on the STM32U575
+and U585 C packages and SPI4, UART8 and USART10 on the 64-pin STM32H5 parts are such instances.
+
+- This rule is inferred from the die. Its supporting reading is on a STM32U575ZITxQ, an LQFP144
+  that bonds no port I pin, where `GPIOI_MODER` reads 0x0000FFFF, the reset value of the 8 pins
+  of port I: an unbonded block keeps its registers.
+- An instance that no part of the die and SVD lists keeps the SVD group as its IP and an empty
+  version, and has no model.
+
 ## Memory map
 
 - Nothing is mapped at address 0, as on the STM32U5. Under the default `faults="stop"`, a load,
@@ -411,6 +425,9 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   of one or two levels follows the same rule. The measurement covers VOS3 to VOS0 only. FLASH
   checks its latency against the range of the last ready.
 - STM32H5: PWR_USBSCR is storage, the USB model runs whatever USB33DEN and USB33SV hold.
+- STM32H5: `PWR_SCCR` resets with SMPSEN (0x200) on the packages with the SMPS regulator, the
+  part names ending in Q, and with LDOEN (0x100) on the others, RM0481 10.11.11. Both bits are
+  read-only. The supply the model runs is the board's.
 - STM32U5 packages with the SMPS, the part names ending in Q: `PWR_SVMSR.REGS` takes the value
   of `PWR_CR3.REGSEL` after the typical transition time of DS13737 Table 75 for the range
   ACTVOS gives at the REGSEL write: LDO to SMPS 14, 17, 16 and 16 us in range 4 to 1, SMPS to

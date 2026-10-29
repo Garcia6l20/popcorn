@@ -1311,7 +1311,8 @@ public:
    * @param peripheral ADC name.
    * @param channel External channel, one of adc_channels().
    * @param microvolts Input voltage in microvolts.
-   * @throws config_error when the ADC is unknown or the channel is not external.
+   * @throws config_error when the ADC is unknown, the channel is not external or its pad is not
+   *         bonded, one of adc_bonded_channels().
    * @throws model_error when the peripheral's model is not the built-in ADC.
    */
   [[= py::doc{"Drive an external ADC channel from outside, in microvolts."}]] void
@@ -1322,7 +1323,8 @@ public:
    * @param peripheral ADC name.
    * @param channel External channel, one of adc_channels().
    * @return The input in microvolts, 0 when never driven.
-   * @throws config_error when the ADC is unknown or the channel is not external.
+   * @throws config_error when the ADC is unknown, the channel is not external or its pad is not
+   *         bonded, one of adc_bonded_channels().
    * @throws model_error when the peripheral's model is not the built-in ADC.
    */
   [[= py::doc{"Voltage driven on an external ADC channel, in microvolts."}]] [[nodiscard]] auto
@@ -1338,6 +1340,18 @@ public:
    */
   [[= py::doc{"External channels of an ADC, bit n for channel n."}]] [[nodiscard]] auto
       adc_channels(std::string const& peripheral) const -> std::uint32_t;
+
+  /**
+   * @brief External channels of an ADC whose pad the package bonds, read on the calling thread:
+   *        the mask is fixed for the life of the model.
+   * @param peripheral ADC name.
+   * @return Bit n set when channel n takes a drive from the board.
+   * @throws config_error when the ADC is unknown.
+   * @throws model_error when the peripheral's model is not the built-in ADC.
+   */
+  [[= py::doc{
+      "External channels of an ADC whose pad is bonded, bit n for channel n."}]] [[nodiscard]] auto
+      adc_bonded_channels(std::string const& peripheral) const -> std::uint32_t;
 
   /**
    * @brief Seed of the RNG word generator.
@@ -1677,6 +1691,8 @@ private:
   [[nodiscard]] auto gpio(std::string const& peripheral, std::uint8_t pin) const
       -> periph::stm32::gpio_port&;
   [[nodiscard]] auto analog(std::string const& peripheral) const -> periph::stm32::analog_port&;
+  [[nodiscard]] auto analog(std::string const& peripheral, std::uint8_t channel) const
+      -> periph::stm32::analog_port&;
   [[nodiscard]] auto entropy(std::string const& peripheral) const -> periph::stm32::entropy_source&;
   [[nodiscard]] auto lock_for_request() const -> core::held_lock;
   [[nodiscard]] auto lock_releasing() const -> core::held_lock;

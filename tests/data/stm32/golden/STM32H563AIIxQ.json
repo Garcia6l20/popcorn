@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 100,
+    "alternates": 989,
+    "cross_rules": 877,
+    "fields": 38903,
+    "irqs": 128,
+    "patched_fields": 412,
+    "peripherals": 201,
+    "regions": 12,
+    "registers": 4480
+  },
+  "part": "STM32H563AIIxQ",
+  "svd_sha256": "3daa2bdf5fab3e6995c050489e6033326628fb6471d81e922bd3639b579e740f",
+  "tables": {
+    "alternates": "c071e453857b8673716b8a9f17dc6811bc9361dd7fde9a9590c04f43e1dcde2b",
+    "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
+    "fields": "b60d8a1bbf5310e54c0bcb017fbb0cf4d54c7690a5ad24a0615a7d3407f8ceb5",
+    "irqs": "03c827971b858f128ff01140cb03d22c75a532ceb7c45f35af5bffb8d709df0b",
+    "peripherals": "4dcfef2c6f34d22554579e3c134cb80e02ae3c323ee3d92f8849e38c399e5d82",
+    "regions": "79edf78bdc2e79f5c848d0725539bca3c60f91fa69089e2a96487c74656aa5cf",
+    "registers": "3da04fc7592dabe474944cf28e99be497517424397e53a0545ad60a21964783f"
+  }
+}

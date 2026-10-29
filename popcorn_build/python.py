@@ -1,6 +1,7 @@
+import shutil
 import sys
 import sysconfig
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 from pcons import Target, context
@@ -118,6 +119,42 @@ def package_files(package_dir: Path) -> list[Path]:
         for pattern in ("*.py", "*.toml", "*.json.xz", "py.typed")
         for path in package_dir.rglob(pattern)
     )
+
+
+def prune_stage(stage_dir: Path, package_dir: Path, keep: Collection[str] = ()) -> list[Path]:
+    """Removes every file under @p stage_dir that matches a package_files pattern and has no
+    source at the same relative path under @p package_dir, except the relative paths in @p keep,
+    files the build generates into the stage, then every directory left holding nothing or only
+    `__pycache__`. Returns the removed files, sorted.
+
+    Run when the build script runs, before the stage is installed, so a source deleted since the
+    last build leaves no staged copy behind.
+    """
+    sources = {path.relative_to(package_dir).as_posix() for path in package_files(package_dir)}
+    removed: list[Path] = []
+    for path in package_files(stage_dir):
+        relative = path.relative_to(stage_dir).as_posix()
+        if relative not in sources and relative not in keep:
+            path.unlink()
+            removed.append(path)
+    _remove_emptied_directories(stage_dir)
+    return removed
+
+
+def _remove_emptied_directories(stage_dir: Path) -> None:
+    """Removes each directory under @p stage_dir that holds nothing or only `__pycache__`,
+    deepest first, so a removed subpackage leaves no namespace package behind."""
+    directories = sorted(
+        (path for path in stage_dir.rglob("*") if path.is_dir() and path.name != "__pycache__"),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for directory in directories:
+        entries = list(directory.iterdir())
+        if all(entry.is_dir() and entry.name == "__pycache__" for entry in entries):
+            for cache in entries:
+                shutil.rmtree(cache)
+            directory.rmdir()
 
 
 def add_package_install(

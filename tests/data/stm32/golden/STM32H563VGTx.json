@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 100,
+    "alternates": 676,
+    "cross_rules": 877,
+    "fields": 38903,
+    "irqs": 128,
+    "patched_fields": 412,
+    "peripherals": 201,
+    "regions": 12,
+    "registers": 4480
+  },
+  "part": "STM32H563VGTx",
+  "svd_sha256": "3daa2bdf5fab3e6995c050489e6033326628fb6471d81e922bd3639b579e740f",
+  "tables": {
+    "alternates": "28d3365a4d06fd17a48e80573fd924ae07f1c1b236ed0172a3cb98515dfb8344",
+    "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
+    "fields": "b60d8a1bbf5310e54c0bcb017fbb0cf4d54c7690a5ad24a0615a7d3407f8ceb5",
+    "irqs": "03c827971b858f128ff01140cb03d22c75a532ceb7c45f35af5bffb8d709df0b",
+    "peripherals": "66e975257be14f638c92765c33a46205f80ea9c44cd9b662ed589dd30017e453",
+    "regions": "459f8a079aaed93b42958c40ff325f65e07edad8e094ac144360ca909c9e5051",
+    "registers": "0563345de9933ebf1e33e702f0c9f4d017fbc862bcc29cb7f1bc7247886fc400"
+  }
+}
