@@ -838,6 +838,10 @@ def test_memory_add_takes_bit_band_windows_onto_sram_and_the_peripheral_range(
             _BIT_BAND_PAIRS,
         ),
         (
+            _bit_band("LOOSE", 0x3000_0000, 0x0200_0000, None),
+            _BIT_BAND_PAIRS,
+        ),
+        (
             _bit_band("BB_TOP", 0x4400_0000, 0x0200_0000, 0x5FF0_0000),
             _BIT_BAND_PAIRS,
         ),
@@ -960,6 +964,20 @@ def test_memory_controller_refuses_a_bad_region_or_peripheral(
     assert excinfo.value.file == str(path)
     assert excinfo.value.key == f"memory.controller.{region}"
     assert excinfo.value.expected == reason
+    assert target == before
+
+
+def test_memory_controller_refuses_a_bit_band_region(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    before = copy.deepcopy(target)
+    bit_band = _bit_band("BB", 0x2200_0000, 0x0200_0000, 0x2000_0000)
+    path = _controller_patch(tmp_path, 'BB = "A"', bit_band)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key == "memory.controller.BB"
+    assert excinfo.value.expected == "a region of a kind other than bit_band"
     assert target == before
 
 

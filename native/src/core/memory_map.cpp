@@ -187,7 +187,7 @@ auto machine::mapped_region::build(
       auto const target_end = std::uint64_t{*region.physical} + region.size / bit_band_ratio;
       if(std::ranges::any_of(description.regions, [&](region_desc const& other) {
            return other.kind == region_kind::bit_band
-              and *region.physical < other.start + other.size
+              and *region.physical < region_end(other)
               and other.start < target_end;
          }))
       {

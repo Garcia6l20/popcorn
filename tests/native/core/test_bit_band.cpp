@@ -237,6 +237,13 @@ TEST_CASE("a bit_band window mapping onto itself is refused at build, not recurs
   CHECK_THROWS_AS(rig{std::move(desc)}, popcorn::config_error);
 }
 
+TEST_CASE("a bit_band window ending at the top of the address space mapping onto itself is refused")
+{
+  auto desc = banded();
+  desc.regions.push_back(band("BB_TOP", 0xFE00'0000, 0xFE00'0000));
+  CHECK_THROWS_AS(rig{std::move(desc)}, popcorn::config_error);
+}
+
 TEST_CASE("two bit_band windows mapping onto each other are refused at build")
 {
   auto desc = banded();
@@ -385,20 +392,38 @@ TEST_CASE("a watch on the target sees the alias read-modify-write as a read and 
 {
   rig const                    r;
   std::vector<core::watch_hit> hits;
-  auto const                   watch = r.target->add_watch(
-      rw_register, 4, core::watch_kind::access, [&](core::watch_hit const& hit) {
-        hits.push_back(hit);
-        return core::watch_action::resume;
-      });
-  std::ignore = r.cpu(str_r2_r1, alias_of(periph_alias, periph, rw_register, 4), 1, 2);
-  REQUIRE(hits.size() == 2);
-  CHECK_FALSE(hits[0].write);
-  CHECK(hits[0].addr == rw_register);
-  CHECK(hits[0].pc == code + 4);
-  CHECK(hits[1].write);
-  CHECK(hits[1].addr == rw_register);
-  CHECK(hits[1].value == 0x10);
-  CHECK(hits[1].by == initiator::cpu);
+  auto const                   observe = [&](core::watch_hit const& hit) {
+    hits.push_back(hit);
+    return core::watch_action::resume;
+  };
+
+  SUBCASE("a peripheral register")
+  {
+    auto const watch = r.target->add_watch(rw_register, 4, core::watch_kind::access, observe);
+    std::ignore      = r.cpu(str_r2_r1, alias_of(periph_alias, periph, rw_register, 4), 1, 2);
+    REQUIRE(hits.size() == 2);
+    CHECK_FALSE(hits[0].write);
+    CHECK(hits[0].addr == rw_register);
+    CHECK(hits[0].pc == code + 4);
+    CHECK(hits[1].write);
+    CHECK(hits[1].addr == rw_register);
+    CHECK(hits[1].value == 0x10);
+    CHECK(hits[1].by == initiator::cpu);
+  }
+
+  SUBCASE("an SRAM word")
+  {
+    auto const watch = r.target->add_watch(target_word, 4, core::watch_kind::access, observe);
+    std::ignore      = r.cpu(str_r2_r1, alias_of(sram_alias, sram, target_word + 1, 2), 1, 2);
+    REQUIRE(hits.size() == 2);
+    CHECK_FALSE(hits[0].write);
+    CHECK(hits[0].addr == target_word);
+    CHECK(hits[0].pc == code + 4);
+    CHECK(hits[1].write);
+    CHECK(hits[1].addr == target_word);
+    CHECK(hits[1].value == 0x400);
+    CHECK(hits[1].by == initiator::cpu);
+  }
 }
 
 TEST_CASE("coverage credits the alias accesses to the target register")

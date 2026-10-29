@@ -32,7 +32,7 @@ struct builtin
   flash_variant    flash         = {};
 };
 
-constexpr std::array<builtin, 67> builtins{
+constexpr std::array<builtin, 75> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -88,7 +88,18 @@ constexpr std::array<builtin, 67> builtins{
          .part_glob       = "STM32U585*"},
      {"GPIO", "STM32U5x_gpio_*", [](board const&) { return gpio_factory(u5_gpio); }, "GPIO?"},
      {"GPIO", "STM32H56x_gpio_*", [](board const&) { return gpio_factory(h56x_gpio); }, "GPIO?"},
-     {"EXTI", "", [](board const&) { return exti_factory(); }},
+     {.ip              = "EXTI",
+         .ip_version_glob = "",
+         .make            = [](board const&) { return exti_factory(); },
+         .part_glob       = "STM32U5*"},
+     {.ip              = "EXTI",
+         .ip_version_glob = "",
+         .make            = [](board const&) { return exti_factory(); },
+         .part_glob       = "STM32H5*"},
+     {.ip              = "EXTI",
+         .ip_version_glob = "",
+         .make            = [](board const&) { return model_factory{}; },
+         .part_glob       = "STM32L1*"},
      {"GPDMA", "STM32U5_dma3_*", [](board const&) { return gpdma_factory(); }},
      {"GPDMA", "*STM32H5_dma3_*", [](board const&) { return gpdma_h5_factory(); }},
      {"LPDMA", "STM32U5_dma3_*", [](board const&) { return lpdma_factory(); }},
@@ -108,6 +119,10 @@ constexpr std::array<builtin, 67> builtins{
          .ip_version_glob = "sci2_*",
          .make            = [](board const& b) { return usart_factory(b, with_views_usart); },
          .part_glob       = "STM32H5*"},
+     {.ip              = "UART",
+         .ip_version_glob = "sci2_*",
+         .make            = [](board const&) { return model_factory{}; },
+         .part_glob       = "STM32L1*"},
      {.ip              = "LPUART",
          .ip_version_glob = "sci3_v1*",
          .make            = [](board const& b) { return usart_factory(b, u5_lpuart); },
@@ -177,7 +192,14 @@ constexpr std::array<builtin, 67> builtins{
      {"USB_OTG_FS", "otgfs1_v3_0_Cube", [](board const& b) { return otg_fs_factory(b); }},
      {"USB", "usbfs_v1*", [](board const& b) { return usb_drd_factory(b); }},
      {"ADC", "aditf5_40v1_U5_Cube", [](board const& b) { return adc_factory(b.supply); }},
-     {"ADC12", "*", [](board const&) { return adc_common_factory(); }},
+     {.ip              = "ADC12",
+         .ip_version_glob = "*",
+         .make            = [](board const&) { return adc_common_factory(); },
+         .part_glob       = "STM32U5*"},
+     {.ip              = "ADC12",
+         .ip_version_glob = "*",
+         .make            = [](board const&) { return adc_common_factory(); },
+         .part_glob       = "STM32H5*"},
      {.ip              = "ADC",
          .ip_version_glob = "aditf5_v3_0_H5*",
          .make            = [](board const& b) { return adc_h5_factory(b.supply); },
@@ -186,8 +208,26 @@ constexpr std::array<builtin, 67> builtins{
          .ip_version_glob = "*",
          .make            = [](board const&) { return adc_common_h5_factory(); },
          .part_glob       = "STM32H5*"},
-     {"DBGMCU", "", [](board const&) { return dbgmcu_factory(); }},
-     {"DBG", "", [](board const&) { return dbgmcu_factory(); }},
+     {.ip              = "DBGMCU",
+         .ip_version_glob = "",
+         .make            = [](board const&) { return dbgmcu_factory(); },
+         .part_glob       = "STM32U5*"},
+     {.ip              = "DBGMCU",
+         .ip_version_glob = "",
+         .make            = [](board const&) { return dbgmcu_factory(); },
+         .part_glob       = "STM32H5*"},
+     {.ip              = "DBGMCU",
+         .ip_version_glob = "",
+         .make            = [](board const&) { return model_factory{}; },
+         .part_glob       = "STM32L1*"},
+     {.ip              = "DBG",
+         .ip_version_glob = "",
+         .make            = [](board const&) { return dbgmcu_factory(); },
+         .part_glob       = "STM32U5*"},
+     {.ip              = "DBG",
+         .ip_version_glob = "",
+         .make            = [](board const&) { return dbgmcu_factory(); },
+         .part_glob       = "STM32H5*"},
      {"CRC", "integtest1_v2_0", [](board const&) { return crc_factory(); }},
      {"HASH", "hash1_v2_2*", [](board const&) { return hash_factory(); }},
      {.ip              = "HASH",
@@ -225,7 +265,14 @@ constexpr std::array<builtin, 67> builtins{
          .make            = [](board const&) { return gtzc_factory(h5_gtzc); },
          .part_glob       = "STM32H5*"},
      {"SBS", "sbs_v1_1*", [](board const&) { return sbs_factory(); }},
-     {"CRS", "", [](board const&) { return crs_factory(); }},
+     {.ip              = "CRS",
+         .ip_version_glob = "",
+         .make            = [](board const&) { return crs_factory(); },
+         .part_glob       = "STM32U5*"},
+     {.ip              = "CRS",
+         .ip_version_glob = "",
+         .make            = [](board const&) { return crs_factory(); },
+         .part_glob       = "STM32H5*"},
      }
 };
 
@@ -421,7 +468,12 @@ void register_builtin_models()
           entry.ip, entry.ip_version_glob,
           [made](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
             auto const* const row = select_row(desc.ip, desc.ip_version, ctx.part.part, desc.name);
-            return row == nullptr ? nullptr : (*made)[row - builtins.data()](ctx, desc);
+            if(row == nullptr)
+            {
+              return nullptr;
+            }
+            auto& make = (*made)[row - builtins.data()];
+            return make ? make(ctx, desc) : nullptr;
           });
     }
   });
@@ -439,7 +491,10 @@ auto factories(board const& b, part_description const& part)
     }
     if(auto const* const row = select_row(unit.ip, unit.ip_version, part.part, unit.name))
     {
-      out.emplace(unit.name, row->make(b));
+      if(auto made = row->make(b))
+      {
+        out.emplace(unit.name, std::move(made));
+      }
     }
   }
   return out;

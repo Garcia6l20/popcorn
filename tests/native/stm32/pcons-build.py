@@ -196,6 +196,18 @@ for target in (firmwares["flash_ll"][1], h573_firmwares["h573_flash_ll"][1]):
     if target is not None:
         flash_geometry.depends(target)
 
+family_rows = add_doctest(
+    "stm32-family-rows",
+    [here / "test_family_rows.cpp"],
+    static,
+    env={
+        "POPCORN_M33_DESC": str(project_dir / "tests" / "data" / "core" / "m33.json"),
+        "POPCORN_U575_2M_DESC": str(u575_2m),
+        "POPCORN_H573_DESC": str(h573),
+    },
+    register=u575_2m is not None and h573 is not None,
+)
+
 class_a_h573 = add_doctest(
     "stm32-class-a-h573",
     [here / "test_class_a_h573.cpp"],

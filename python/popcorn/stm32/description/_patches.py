@@ -964,7 +964,7 @@ def _check_bit_band(added: RegionDesc, key: str, *, file: str) -> None:
     content and no controller."""
     if added.size != _BIT_BAND_SIZE:
         raise DescriptionError(file, 0, key, "a bit_band region of 32 MB")
-    if _BIT_BAND_PAIRS.get(added.start) != added.physical:
+    if added.start not in _BIT_BAND_PAIRS or added.physical != _BIT_BAND_PAIRS[added.start]:
         raise DescriptionError(
             file,
             0,
@@ -1012,6 +1012,8 @@ def _apply_memory(
         region = by_name.get(name)
         if region is None:
             raise DescriptionError(file, 0, key, "an existing region")
+        if region.kind is RegionKind.BIT_BAND:
+            raise DescriptionError(file, 0, key, "a region of a kind other than bit_band")
         if region.acc.write:
             raise DescriptionError(file, 0, key, "a read-only region")
         if region.controller is not None:
