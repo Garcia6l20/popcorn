@@ -20,6 +20,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -34,6 +35,7 @@ namespace
 constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 constexpr std::uint32_t frame_done    = 0;
 constexpr std::uint32_t host_edge     = 1;
+constexpr std::uint32_t completed     = 2;
 constexpr std::uint32_t full_duplex   = 0;
 constexpr std::uint32_t simplex_tx    = 1;
 constexpr std::uint32_t simplex_rx    = 2;
@@ -46,6 +48,15 @@ struct spi_host_transfer
   std::vector<std::uint32_t> frames;
 
   friend auto operator==(spi_host_transfer const&, spi_host_transfer const&) -> bool = default;
+};
+
+struct spi_completion
+{
+  std::uint64_t ticket{};
+  std::uint32_t word{};
+  std::uint64_t at_ps{};
+
+  friend auto operator==(spi_completion const&, spi_completion const&) -> bool = default;
 };
 
 struct spi_state
@@ -74,6 +85,10 @@ struct spi_state
   std::uint8_t                        host_synced{};
   std::vector<std::uint8_t>           mode_checked;
   std::uint8_t                        host_mode_checked{};
+  std::uint32_t                       owed{};
+  std::uint32_t                       reply{};
+  std::vector<spi_completion>         completions;
+  std::uint64_t                       refused{};
 
   friend auto operator==(spi_state const&, spi_state const&) -> bool = default;
 };
@@ -190,11 +205,27 @@ auto lower(std::string_view name) -> std::string
  *        counts. The controller attached to an instance is its only device. The queue is saved
  *        with the model, a reset drops it.
  *
+ *        Deferred replies, controller mode: the model exchanges each frame with
+ *        spi_target::exchange_deferred() at the end of its shift, with the frame's generation as
+ *        ticket. A device that leaves the reply pending completes it through
+ *        spi_target_port::complete(), one event on the lane it names. A completion due less
+ *        than one instruction period before the current time keeps its own instruction count,
+ *        and its time stays the one the device gave. The frame ends at the latest completion of
+ *        every selected device, with the AND of every reply, and its RX FIFO entry, RXP, TXC, EOT,
+ *        the hardware SS release, a CSUSP or MASRX suspension and the next frame follow that
+ *        time. SCK stays idle until then. Clearing SPE or a reset of any
+ *        kind drops the pending frame and moves the generation, so its later completions are
+ *        refused when they fall due and counted in the saved `refused`. The pending frame and
+ *        every completion not yet due are saved with the model. A completion event survives an
+ *        RCC reset with its record, a machine reset clears both. Each device is attached to the
+ *        model at its construction and detached at its destruction.
+ *
  *        Not modelled, logged once: half duplex, CRC, TI mode, the autonomous trigger, the SS pulse
  *        and timing options.
  */
 class spi final : public dispatch_model<spi, spi_state>,
                   public spi_controller_port,
+                  public spi_target_port,
                   public bus_reset_listener
 {
 public:
@@ -203,6 +234,11 @@ public:
       std::vector<spi_attachment>          attachments,
       std::shared_ptr<spi_controller_sink> controller,
       spi_variant                          variant);
+  spi(spi const&)                    = delete;
+  auto operator=(spi const&) -> spi& = delete;
+  spi(spi&&)                         = delete;
+  auto operator=(spi&&) -> spi&      = delete;
+  ~spi() override;
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -224,6 +260,7 @@ public:
       std::uint64_t                  frame_ps,
       std::uint8_t                   bits,
       std::span<std::uint32_t const> frames) -> vtime override;
+  void complete(std::uint64_t ticket, std::uint32_t word, vtime at, std::uint32_t lane) override;
 
   void control_written(std::uint32_t old, std::uint32_t now);
   void clear_written(std::uint32_t old, std::uint32_t now);
@@ -251,6 +288,8 @@ private:
   void               subscribe();
   void               start_frame(std::uint64_t from_ps);
   void               finish_frame();
+  void               land_frame();
+  void               completion_due(std::uint64_t ticket);
   void               stop(bool completed);
   void               hardware_select(bool selected);
   void               flags();
@@ -429,6 +468,18 @@ spi::spi(
   if(variant.autocr)
   {
     unsupported_.push_back(field("SPI_AUTOCR", "TRIGEN"));
+  }
+  for(auto const& attached : attachments_)
+  {
+    attached.device->attached(*this);
+  }
+}
+
+spi::~spi()
+{
+  for(auto const& attached : attachments_)
+  {
+    attached.device->detached();
   }
 }
 
@@ -616,9 +667,13 @@ void spi::restore_reset_values(std::optional<reset_kind> kind)
   auto const generation      = state_.generation + 1;
   auto const host_generation = state_.host_generation + (state_.host.empty() ? 0u : 1u);
   auto       selected        = state_.selected;
+  auto       completions     = kind ? std::vector<spi_completion>{} : state_.completions;
+  auto const refused         = state_.refused;
   state_                     = {};
   state_.generation          = generation;
   state_.host_generation     = host_generation;
+  state_.completions         = std::move(completions);
+  state_.refused             = refused;
   selected.resize(attachments_.size());
   state_.selected = selected;
   state_.mode_checked.resize(attachments_.size());
@@ -711,18 +766,64 @@ void spi::start_frame(std::uint64_t from_ps)
 
 void spi::finish_frame()
 {
-  state_.busy    = 0;
-  auto const at  = vtime{state_.frame_end_ps + power_on_offset()};
-  auto const out = wire_frame(state_.shift);
-  auto       in  = frame_mask();
+  auto const at   = vtime{state_.frame_end_ps + power_on_offset()};
+  auto const out  = wire_frame(state_.shift);
+  auto       in   = frame_mask();
+  auto       owed = std::uint32_t{};
   for(std::size_t index = 0; index < attachments_.size(); ++index)
   {
     if(state_.selected[index] != 0)
     {
       check_device(index);
-      in &= attachments_[index].device->exchange(out, static_cast<std::uint8_t>(frame_bits()), at);
+      auto const reply = attachments_[index].device->exchange_deferred(
+          out, static_cast<std::uint8_t>(frame_bits()), at, state_.generation);
+      if(reply)
+      {
+        in &= *reply;
+      }
+      else
+      {
+        ++owed;
+      }
     }
   }
+  state_.reply = in;
+  state_.owed  = owed;
+  if(owed == 0)
+  {
+    land_frame();
+  }
+}
+
+void spi::completion_due(std::uint64_t ticket)
+{
+  auto of_ticket = state_.completions | std::views::filter([ticket](spi_completion const& record) {
+                     return record.ticket == ticket;
+                   });
+  auto const found = std::ranges::min_element(of_ticket, {}, &spi_completion::at_ps);
+  if(found == of_ticket.end() or state_.owed == 0 or ticket != state_.generation)
+  {
+    ++state_.refused;
+    if(found != of_ticket.end())
+    {
+      state_.completions.erase(found.base());
+    }
+    return;
+  }
+  auto const done = *found;
+  state_.completions.erase(found.base());
+  state_.reply &= done.word;
+  state_.frame_end_ps = std::max(state_.frame_end_ps, done.at_ps);
+  if(--state_.owed == 0)
+  {
+    land_frame();
+  }
+}
+
+void spi::land_frame()
+{
+  state_.busy   = 0;
+  auto const in = std::exchange(state_.reply, 0);
   if(communication() != simplex_tx)
   {
     if(state_.rx_fifo.size() < capacity())
@@ -836,6 +937,8 @@ void spi::disable()
   state_.tx_fifo.clear();
   state_.rx_fifo.clear();
   state_.busy        = 0;
+  state_.owed        = 0;
+  state_.reply       = 0;
   state_.suspending  = 0;
   state_.done        = 0;
   state_.written     = 0;
@@ -989,6 +1092,13 @@ auto spi::on_write(
 
 void spi::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if(kind == completed)
+  {
+    completion_due(payload);
+    flags();
+    rethrow_refused();
+    return;
+  }
   if(kind == host_edge)
   {
     if(payload == state_.host_generation)
@@ -1070,6 +1180,26 @@ auto spi::transfer(
         vtime{from}, host_edge, state_.host_generation, core::host_lane, ctx_.clock);
   }
   return vtime{from};
+}
+
+void spi::complete(std::uint64_t ticket, std::uint32_t word, vtime at, std::uint32_t lane)
+{
+  if(lane == 0)
+  {
+    throw std::invalid_argument("an SPI completion goes on a lane of 1 and up");
+  }
+  auto const offset = power_on_offset();
+  if(at.ps < offset or not lane_due_accepted(ctx_.clock, at.ps - offset))
+  {
+    throw std::invalid_argument(
+        std::format(
+            "an SPI completion at {} ps since power-on falls one instruction period or more "
+            "before the machine time {} ps",
+            at.ps, ctx_.clock.time().ps + offset));
+  }
+  auto const due = at.ps - offset;
+  state_.completions.push_back({.ticket = ticket, .word = word, .at_ps = due});
+  ctx_.events.schedule_at(vtime{due}, completed, ticket, lane, ctx_.clock);
 }
 
 auto spi::faults_on_select() const -> bool

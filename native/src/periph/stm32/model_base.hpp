@@ -97,6 +97,24 @@ inline void update(register_file& regs, field_ref field, std::uint32_t value)
 }
 
 /**
+ * @brief Whether a port primitive a link proxy calls at a drain accepts @p due_ps: at or after
+ *        the clock's current time, or before it by less than one instruction period at the
+ *        current rate. `member_link::drain` hands posts that start up to one sender instruction
+ *        period before the previous barrier, and the lane `event_port::schedule_at` keeps such a
+ *        time at its own instruction count.
+ * @param time The machine's clock.
+ * @param due_ps Virtual time since reset.
+ * @return True when the due time is accepted.
+ */
+inline auto lane_due_accepted(core::clock const& time, std::uint64_t due_ps) -> bool
+{
+  constexpr unsigned __int128 ps_per_second = 1'000'000'000'000ull;
+  auto const                  now           = time.time().ps;
+  return due_ps >= now
+      or static_cast<unsigned __int128>(now - due_ps) * time.instruction_hz() < ps_per_second;
+}
+
+/**
  * @brief Model told when the RCC model changes a clock rate it publishes. Found by
  *        `dynamic_cast` over the machine's peers. Never called from a model's reset.
  */

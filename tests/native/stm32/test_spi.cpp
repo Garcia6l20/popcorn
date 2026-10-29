@@ -2263,3 +2263,615 @@ TEST_CASE("SPI1RST moves the host generation past a host transfer queued before 
   }
   CHECK(seen[1] > seen[0]);
 }
+
+namespace
+{
+constexpr std::uint32_t completed_event = 2;
+
+class deferred_target final : public periph::spi_target
+{
+public:
+  struct asked_frame
+  {
+    std::uint32_t out;
+    vtime         at;
+    std::uint64_t ticket;
+  };
+
+  periph::spi_target_port*            port{};
+  int                                 attaches{};
+  int                                 detaches{};
+  std::optional<std::uint64_t>        delay;
+  bool                                hold{};
+  std::uint32_t                       word{0x5A};
+  std::uint32_t                       lane{1};
+  std::optional<std::uint8_t>         declared;
+  std::vector<asked_frame>            asked;
+  std::vector<std::pair<bool, vtime>> selects;
+  std::vector<std::string>*           log{};
+  std::string                         name;
+
+  auto mode() const -> std::optional<std::uint8_t> override
+  {
+    return declared;
+  }
+
+  void attached(periph::spi_target_port& to) override
+  {
+    port = &to;
+    ++attaches;
+  }
+
+  void detached() noexcept override
+  {
+    port = nullptr;
+    ++detaches;
+  }
+
+  void select(bool selected, vtime at) override
+  {
+    selects.emplace_back(selected, at);
+    if(log != nullptr)
+    {
+      log->push_back(name + (selected ? " select" : " deselect"));
+    }
+  }
+
+  auto exchange(std::uint32_t, std::uint8_t, vtime) -> std::uint32_t override
+  {
+    return word;
+  }
+
+  auto exchange_deferred(std::uint32_t out, std::uint8_t, vtime at, std::uint64_t ticket)
+      -> std::optional<std::uint32_t> override
+  {
+    asked.push_back({.out = out, .at = at, .ticket = ticket});
+    if(log != nullptr)
+    {
+      log->push_back(name + " exchange");
+    }
+    if(delay)
+    {
+      port->complete(ticket, word, vtime{at.ps + *delay}, lane);
+      return std::nullopt;
+    }
+    if(hold)
+    {
+      return std::nullopt;
+    }
+    return word;
+  }
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+};
+
+auto deferred(std::optional<std::uint64_t> delay, std::uint32_t word = 0x5A)
+    -> std::shared_ptr<deferred_target>
+{
+  auto made   = std::make_shared<deferred_target>();
+  made->delay = delay;
+  made->word  = word;
+  return made;
+}
+
+struct deferred_rig
+{
+  stm32::board                   board{};
+  std::unique_ptr<stm32_fixture> f;
+
+  explicit deferred_rig(
+      std::vector<std::shared_ptr<deferred_target>> const& spi1,
+      std::vector<std::shared_ptr<deferred_target>> const& spi3 = {})
+  {
+    for(auto const& device : spi1)
+    {
+      board.spi["SPI1"].push_back({.device = device, .cs_port = "GPIOA"});
+    }
+    for(auto const& device : spi3)
+    {
+      board.spi["SPI3"].push_back({.device = device, .cs_port = "GPIOA"});
+    }
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories(board, u575());
+    f              = std::make_unique<stm32_fixture>(u575(), "spi_ll", std::move(options));
+    f->set("pc", sym("spi_ll", "idle"));
+  }
+
+  [[nodiscard]] auto offset() const -> std::uint64_t
+  {
+    auto const& clock = f->target->virtual_clock();
+    return clock.since_power_on().ps - clock.time().ps;
+  }
+
+  [[nodiscard]] auto power_on(std::uint64_t local_ps) const -> vtime
+  {
+    return vtime{local_ps + offset()};
+  }
+
+  [[nodiscard]] auto refused() const -> std::int64_t
+  {
+    return popcorn::testing::saved_integer(*f, "SPI1", "refused").value_or(-1);
+  }
+};
+
+auto due_of(
+    stm32_fixture const&         f,
+    std::string_view             instance,
+    std::uint32_t                kind,
+    std::optional<std::uint64_t> payload = std::nullopt) -> std::optional<std::uint64_t>
+{
+  auto const& units = f.target->description().peripherals;
+  auto const  found = std::ranges::find(units, instance, &popcorn::peripheral_desc::name);
+  REQUIRE(found != units.end());
+  auto const owner = static_cast<std::uint32_t>(found - units.begin());
+  for(auto const& event : f.target->snapshot().data().events.pending)
+  {
+    if(event.id.owner == owner
+       and event.id.kind == kind
+       and (not payload or event.payload == *payload))
+    {
+      return event.due_ps;
+    }
+  }
+  return std::nullopt;
+}
+
+auto start(bus const& b, std::vector<std::uint32_t> const& frames, std::uint32_t tsize)
+    -> std::uint64_t
+{
+  b.set("SPI_CR1", "SPE", 0);
+  b.controller(7, tsize);
+  for(auto const frame : frames)
+  {
+    b.send(frame);
+  }
+  auto const at = b.now();
+  b.set("SPI_CR1", "CSTART", 1);
+  return at;
+}
+}
+
+TEST_CASE("a deferred reply ends the frame at its completion, the next frame starts after it")
+{
+  auto const   device = deferred(10 * us);
+  deferred_rig r{{device}};
+  bus          b{*r.f};
+  auto const   t0    = start(b, {0x9F, 0x01}, 2);
+  auto const   shift = t0 + frame_ps;
+  b.run_until(shift + us);
+  REQUIRE(device->asked.size() == 1);
+  CHECK(device->asked[0].out == 0x9F);
+  CHECK(device->asked[0].at == r.power_on(shift));
+  CHECK(due_of(*r.f, "SPI1", completed_event, device->asked[0].ticket) == shift + 10 * us);
+  CHECK(b.get("SPI_SR", "RXP") == 0);
+  CHECK(b.get("SPI_SR", "TXC") == 0);
+  CHECK(b.get("SPI_SR", "CTSIZE") == 2);
+  b.run_until(shift + 10 * us + us);
+  CHECK(b.get("SPI_SR", "RXP") == 1);
+  CHECK(b.get("SPI_SR", "CTSIZE") == 1);
+  CHECK(device->asked.size() == 1);
+  b.run_until(shift + 10 * us + frame_ps + us);
+  REQUIRE(device->asked.size() == 2);
+  CHECK(device->asked[1].at == r.power_on(shift + 10 * us + frame_ps));
+  CHECK(device->asked[1].ticket != device->asked[0].ticket);
+  b.run_until(shift + 2 * (10 * us + frame_ps));
+  CHECK(b.get("SPI_SR", "EOT") == 1);
+  CHECK(b.receive() == 0x5A);
+  CHECK(b.receive() == 0x5A);
+  REQUIRE(device->selects.size() == 2);
+  CHECK_FALSE(device->selects.back().first);
+  CHECK(r.refused() == 0);
+}
+
+TEST_CASE("several selected devices, some deferred, give the AND of every reply at the latest")
+{
+  SUBCASE("one synchronous and one deferred")
+  {
+    auto const   now   = deferred(std::nullopt, 0xF0);
+    auto const   later = deferred(10 * us, 0x3C);
+    deferred_rig r{
+        {now, later}
+    };
+    bus        b{*r.f};
+    auto const shift = start(b, {1, 2}, 2) + frame_ps;
+    b.run_until(shift + 5 * us);
+    CHECK(b.get("SPI_SR", "RXP") == 0);
+    b.run_until(shift + 11 * us);
+    CHECK(b.get("SPI_SR", "RXP") == 1);
+    CHECK(b.receive() == 0x30);
+    b.run_until(shift + 10 * us + frame_ps + us);
+    REQUIRE(later->asked.size() == 2);
+    CHECK(later->asked[1].at == r.power_on(shift + 10 * us + frame_ps));
+  }
+  SUBCASE("both deferred")
+  {
+    auto const   first  = deferred(10 * us, 0x3C);
+    auto const   second = deferred(20 * us, 0x1E);
+    deferred_rig r{
+        {first, second}
+    };
+    bus        b{*r.f};
+    auto const shift = start(b, {1, 2}, 2) + frame_ps;
+    b.run_until(shift + 15 * us);
+    CHECK(b.get("SPI_SR", "RXP") == 0);
+    CHECK(first->asked.size() == 1);
+    b.run_until(shift + 21 * us);
+    CHECK(b.get("SPI_SR", "RXP") == 1);
+    CHECK(b.receive() == 0x1C);
+    b.run_until(shift + 20 * us + frame_ps + us);
+    REQUIRE(second->asked.size() == 2);
+    CHECK(second->asked[1].at == r.power_on(shift + 20 * us + frame_ps));
+    CHECK(r.refused() == 0);
+  }
+}
+
+TEST_CASE("clearing SPE drops a pending frame, its late completion is refused, the next completes")
+{
+  auto const device = deferred(std::nullopt);
+  device->hold      = true;
+  deferred_rig r{{device}};
+  bus          b{*r.f};
+  b.run_until(start(b, {0x11}, 1) + frame_ps + us);
+  REQUIRE(device->asked.size() == 1);
+  auto const stale = device->asked[0].ticket;
+  b.set("SPI_CR1", "SPE", 0);
+  CHECK(b.get("SPI_SR", "RXP") == 0);
+  auto const t1 = start(b, {0x22}, 1);
+  b.run_until(t1 + frame_ps + us);
+  REQUIRE(device->asked.size() == 2);
+  auto const now = b.now();
+  device->port->complete(stale, 0x00, r.power_on(now + 5 * us), 1);
+  device->port->complete(device->asked[1].ticket, 0x5A, r.power_on(now + 10 * us), 1);
+  b.run_until(now + 7 * us);
+  CHECK(r.refused() == 1);
+  CHECK(b.get("SPI_SR", "RXP") == 0);
+  b.run_until(now + 11 * us);
+  CHECK(b.get("SPI_SR", "RXP") == 1);
+  CHECK(b.receive() == 0x5A);
+  CHECK(b.get("SPI_SR", "RXP") == 0);
+  CHECK(r.refused() == 1);
+}
+
+TEST_CASE("CSUSP during a pending frame suspends once the frame completed")
+{
+  auto const   device = deferred(10 * us);
+  deferred_rig r{{device}};
+  bus          b{*r.f};
+  auto const   shift = start(b, {1, 2}, 0) + frame_ps;
+  b.run_until(shift + us);
+  b.set("SPI_CR1", "CSUSP", 1);
+  CHECK(b.get("SPI_SR", "SUSP") == 0);
+  CHECK(b.get("SPI_CR1", "CSTART") == 1);
+  b.run_until(shift + 11 * us);
+  CHECK(b.get("SPI_SR", "SUSP") == 1);
+  CHECK(b.get("SPI_CR1", "CSTART") == 0);
+  CHECK(b.get("SPI_SR", "RXP") == 1);
+  b.run_until(shift + 40 * us);
+  CHECK(device->asked.size() == 1);
+}
+
+TEST_CASE("MASRX suspends the frame after the deferred completion that fills the RX FIFO")
+{
+  auto const   device = deferred(10 * us, 0xA5A5'A5A5);
+  deferred_rig r{{device}};
+  bus          b{*r.f};
+  b.controller(31, 0);
+  b.set("SPI_CR1", "MASRX", 1);
+  for(std::uint32_t frame = 1; frame <= 4; ++frame)
+  {
+    b.send(frame, 4);
+  }
+  auto const t0 = b.now();
+  b.set("SPI_CR1", "CSTART", 1);
+  b.run_until(t0 + us);
+  b.send(5, 4);
+  auto constexpr wide = 4 * frame_ps;
+  auto const last     = t0 + 4 * wide + 4 * 10 * us;
+  b.run_until(last - us);
+  CHECK(device->asked.size() == 4);
+  CHECK(b.get("SPI_SR", "SUSP") == 0);
+  b.run_until(last + us);
+  CHECK(b.get("SPI_SR", "SUSP") == 1);
+  b.run_until(last + 4 * wide);
+  CHECK(device->asked.size() == 4);
+  CHECK(b.receive(4) == 0xA5A5'A5A5);
+}
+
+TEST_CASE("a mode check at a deferred frame fails the run, the frame completes once resumed")
+{
+  auto const device = deferred(10 * us);
+  device->declared  = 3;
+  deferred_rig r{{device}};
+  bus          b{*r.f};
+  auto const   shift   = start(b, {0x42}, 1) + frame_ps;
+  auto const   refused = refusal(b, shift + us);
+  CHECK(refused.contains("the SPI mode 3 the device on SS declares, not mode 0"));
+  CHECK(b.get("SPI_SR", "RXP") == 0);
+  CHECK(refusal(b, shift + 11 * us).empty());
+  CHECK(b.get("SPI_SR", "RXP") == 1);
+  CHECK(b.get("SPI_SR", "EOT") == 1);
+  CHECK(b.receive() == 0x5A);
+}
+
+TEST_CASE("simplex receive clocks deferred frames of an idle MOSI, each after the last completion")
+{
+  auto const   device = deferred(10 * us);
+  deferred_rig r{{device}};
+  bus          b{*r.f};
+  b.controller(7, 2, 0, 0, 2);
+  auto const t0 = b.now();
+  b.set("SPI_CR1", "CSTART", 1);
+  b.run_until(t0 + 2 * (frame_ps + 10 * us) + us);
+  REQUIRE(device->asked.size() == 2);
+  CHECK(device->asked[0].out == 0xFF);
+  CHECK(device->asked[1].at.ps - device->asked[0].at.ps == 10 * us + frame_ps);
+  CHECK(b.get("SPI_SR", "EOT") == 1);
+  CHECK(b.receive() == 0x5A);
+  CHECK(b.receive() == 0x5A);
+}
+
+TEST_CASE("a completion fires after a local event due at the same count, posted before or after it")
+{
+  std::vector<std::vector<std::string>> orders;
+  for(bool const posted_first : {true, false})
+  {
+    CAPTURE(posted_first);
+    std::vector<std::string> log;
+    auto const               held = deferred(std::nullopt);
+    held->hold                    = true;
+    held->log                     = &log;
+    held->name                    = "spi1";
+    auto const local              = deferred(std::nullopt);
+    local->log                    = &log;
+    local->name                   = "spi3";
+    deferred_rig r{{held}, {local}};
+    bus          one{*r.f};
+    bus          three{*r.f, "SPI3"};
+    three.controller(7, 0);
+    three.send(0x33);
+    auto const warm = three.now();
+    three.set("SPI_CR1", "CSTART", 1);
+    auto const due = due_of(*r.f, "SPI3", 0);
+    REQUIRE(due.has_value());
+    auto const span = *due - warm;
+    one.run_until(start(one, {0x11}, 1) + std::max(frame_ps, span) + us);
+    REQUIRE(held->asked.size() == 1);
+    log.clear();
+    auto const now  = one.now();
+    auto const post = [&] {
+      held->port->complete(held->asked[0].ticket, 0x5A, r.power_on(now + span), 1);
+    };
+    if(posted_first)
+    {
+      post();
+    }
+    three.send(0x34);
+    REQUIRE(due_of(*r.f, "SPI3", 0) == now + span);
+    if(not posted_first)
+    {
+      post();
+    }
+    one.run_until(now + span + us);
+    orders.push_back(log);
+  }
+  REQUIRE(orders.size() == 2);
+  CHECK(orders[0] == orders[1]);
+  CHECK(orders[0] == std::vector<std::string>{"spi3 exchange", "spi1 deselect"});
+}
+
+TEST_CASE("a deferred completion is due in the time base of the last reset, after a system reset")
+{
+  using popcorn::reset_kind;
+  auto const   device = deferred(10 * us);
+  deferred_rig r{{device}};
+  bus          b{*r.f};
+  b.run_until(50 * us);
+  for(auto const kind : {reset_kind::software, reset_kind::power_on})
+  {
+    CAPTURE(kind);
+    r.f->target->reset(kind);
+    r.f->set("pc", sym("spi_ll", "idle"));
+    if(kind == reset_kind::software)
+    {
+      REQUIRE(r.offset() >= 50 * us);
+    }
+    else
+    {
+      REQUIRE(r.offset() == 0);
+    }
+    device->asked.clear();
+    auto const shift = start(b, {0x9F}, 1) + frame_ps;
+    b.run_until(shift + us);
+    REQUIRE(device->asked.size() == 1);
+    CHECK(device->asked[0].at == r.power_on(shift));
+    CHECK(due_of(*r.f, "SPI1", completed_event, device->asked[0].ticket) == shift + 10 * us);
+    b.run_until(shift + 11 * us);
+    CHECK(b.get("SPI_SR", "RXP") == 1);
+    CHECK(b.receive() == 0x5A);
+  }
+}
+
+TEST_CASE("a snapshot of a pending frame restores the same completion time and word")
+{
+  auto const   device = deferred(10 * us, 0x3C);
+  deferred_rig r{{device}};
+  bus          b{*r.f};
+  auto const   shift = start(b, {1, 2}, 2) + frame_ps;
+  b.run_until(shift + us);
+  REQUIRE(device->asked.size() == 1);
+  auto const             saved = r.f->target->snapshot();
+  std::vector<std::byte> first;
+  r.f->target->model("SPI1")->save(first);
+  auto const run = [&] {
+    b.run_until(shift + 2 * (10 * us + frame_ps));
+    std::vector<std::uint64_t> out{b.get("SPI_SR", "EOT")};
+    out.push_back(b.receive());
+    out.push_back(b.receive());
+    for(auto const& one : device->asked)
+    {
+      out.push_back(one.at.ps);
+    }
+    return out;
+  };
+  auto const before = run();
+  r.f->target->restore(saved);
+  std::vector<std::byte> second;
+  r.f->target->model("SPI1")->save(second);
+  CHECK(second == first);
+  device->asked.resize(1);
+  CHECK(run() == before);
+  CHECK(before[0] == 1);
+  CHECK(before[1] == 0x3C);
+  CHECK(r.refused() == 0);
+}
+
+TEST_CASE("every reset kind and a power cycle drop a pending frame, its late completion refused")
+{
+  using popcorn::reset_kind;
+  auto const device = deferred(std::nullopt);
+  device->hold      = true;
+  deferred_rig r{{device}};
+  bus          b{*r.f};
+  auto         expected = std::int64_t{0};
+  auto const   leg      = [&](auto&& drop) {
+    device->asked.clear();
+    b.run_until(start(b, {0x11}, 1) + frame_ps + us);
+    REQUIRE(device->asked.size() == 1);
+    auto const stale = device->asked[0].ticket;
+    device->port->complete(stale, 0x00, r.power_on(b.now() + 50 * us), 1);
+    REQUIRE(due_of(*r.f, "SPI1", completed_event, stale).has_value());
+    drop();
+    r.f->set("pc", sym("spi_ll", "idle"));
+    CHECK_FALSE(due_of(*r.f, "SPI1", completed_event).has_value());
+    CHECK_FALSE(popcorn::testing::saved_integer(*r.f, "SPI1", "completions.0.ticket").has_value());
+    b.run_until(start(b, {0x22}, 1) + frame_ps + us);
+    REQUIRE(device->asked.size() == 2);
+    auto const now = b.now();
+    device->port->complete(stale, 0x00, r.power_on(now + 5 * us), 1);
+    device->port->complete(device->asked[1].ticket, 0x5A, r.power_on(now + 10 * us), 1);
+    b.run_until(now + 7 * us);
+    CHECK(r.refused() == ++expected);
+    CHECK(b.get("SPI_SR", "RXP") == 0);
+    b.run_until(now + 11 * us);
+    CHECK(b.get("SPI_SR", "RXP") == 1);
+    CHECK(b.receive() == 0x5A);
+  };
+  for(auto const kind :
+      {reset_kind::power_on, reset_kind::brown_out, reset_kind::pin, reset_kind::software,
+       reset_kind::watchdog, reset_kind::window_watchdog, reset_kind::low_power,
+       reset_kind::option_load})
+  {
+    CAPTURE(kind);
+    leg([&] { r.f->target->reset(kind); });
+  }
+  leg([&] { r.f->target->power_cycle(); });
+}
+
+TEST_CASE("after SPI1RST a completion is refused once, handed before or after the reset")
+{
+  std::vector<std::int64_t> counts;
+  for(bool const before : {true, false})
+  {
+    CAPTURE(before);
+    auto const device = deferred(std::nullopt);
+    device->hold      = true;
+    deferred_rig r{{device}};
+    bus          b{*r.f};
+    b.run_until(start(b, {0x11}, 1) + frame_ps + us);
+    REQUIRE(device->asked.size() == 1);
+    auto const stale = device->asked[0].ticket;
+    auto const now   = b.now();
+    auto const post  = [&] { device->port->complete(stale, 0x00, r.power_on(now + 20 * us), 1); };
+    if(before)
+    {
+      post();
+    }
+    rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+    CHECK(b.get("SPI_SR", "RXP") == 0);
+    if(not before)
+    {
+      post();
+    }
+    CHECK(due_of(*r.f, "SPI1", completed_event, stale) == now + 20 * us);
+    b.controller(7, 1);
+    b.send(0x22);
+    b.set("SPI_CR1", "CSTART", 1);
+    b.run_until(now + frame_ps + us);
+    REQUIRE(device->asked.size() == 2);
+    device->port->complete(device->asked[1].ticket, 0x5A, r.power_on(now + 30 * us), 1);
+    b.run_until(now + 25 * us);
+    CHECK(b.get("SPI_SR", "RXP") == 0);
+    counts.push_back(r.refused());
+    b.run_until(now + 31 * us);
+    CHECK(b.get("SPI_SR", "RXP") == 1);
+    CHECK(b.receive() == 0x5A);
+  }
+  CHECK(counts == std::vector<std::int64_t>{1, 1});
+}
+
+TEST_CASE("a completion on lane 0 or one instruction period before the machine time is refused")
+{
+  auto const device = deferred(std::nullopt);
+  device->hold      = true;
+  deferred_rig r{{device}};
+  bus          b{*r.f};
+  b.run_until(start(b, {0x11}, 1) + frame_ps + us);
+  REQUIRE(device->asked.size() == 1);
+  auto const ticket = device->asked[0].ticket;
+  auto const now    = b.now();
+  auto const hz     = r.f->target->virtual_clock().instruction_hz();
+  REQUIRE(1'000'000'000'000 % hz == 0);
+  auto const period = 1'000'000'000'000 / hz;
+  CHECK_THROWS_AS(
+      device->port->complete(ticket, 0x5A, r.power_on(now + us), 0), std::invalid_argument);
+  CHECK_THROWS_AS(
+      device->port->complete(ticket, 0x5A, r.power_on(now - period), 1), std::invalid_argument);
+  CHECK_FALSE(due_of(*r.f, "SPI1", completed_event).has_value());
+  CHECK_FALSE(popcorn::testing::saved_integer(*r.f, "SPI1", "completions.0.ticket").has_value());
+  device->port->complete(ticket, 0x5A, r.power_on(now - (period - 1)), 1);
+  auto const pending = r.f->target->snapshot().data().events.pending;
+  auto const kept    = std::ranges::find_if(pending, [&](core::event const& event) {
+    return event.id.kind == completed_event and event.due_ps == now - (period - 1);
+  });
+  REQUIRE(kept != pending.end());
+  CHECK(kept->at == r.f->target->virtual_clock().now());
+  CHECK(kept->lane == 1);
+  b.run_until(now + us);
+  CHECK(b.get("SPI_SR", "RXP") == 1);
+  CHECK(r.refused() == 0);
+}
+
+TEST_CASE("1000 refused completions leave no record behind")
+{
+  auto const device = deferred(std::nullopt);
+  device->hold      = true;
+  deferred_rig r{{device}};
+  bus          b{*r.f};
+  auto const   now = b.now();
+  for(std::uint64_t index = 0; index < 1000; ++index)
+  {
+    device->port->complete(index + 1'000'000, 0, r.power_on(now + us + index), 1);
+  }
+  CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "completions.999.ticket").has_value());
+  b.run_until(now + 2 * us);
+  CHECK(r.refused() == 1000);
+  CHECK_FALSE(popcorn::testing::saved_integer(*r.f, "SPI1", "completions.0.ticket").has_value());
+}
+
+TEST_CASE("a board device hears attached at the model's construction and detached at its end")
+{
+  auto const device = deferred(std::nullopt);
+  {
+    deferred_rig r{{device}};
+    CHECK(device->attaches == 1);
+    CHECK(device->port != nullptr);
+    CHECK(device->detaches == 0);
+  }
+  CHECK(device->attaches == 1);
+  CHECK(device->detaches == 1);
+  CHECK(device->port == nullptr);
+}

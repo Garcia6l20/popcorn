@@ -16,6 +16,8 @@
 
 namespace popcorn::periph
 {
+class spi_target_port;
+
 /**
  * @brief A device on an SPI bus, driven by the SPI model of the controller it is attached to.
  *        Full duplex: every frame out returns a frame in. Frames cross in wire order,
@@ -54,6 +56,45 @@ public:
    */
   [[nodiscard]] virtual auto exchange(std::uint32_t out, std::uint8_t bits, vtime at)
       -> std::uint32_t = 0;
+
+  /**
+   * @brief Exchanges one frame, with a reply the device may give later. The SPI model calls
+   *        only this form, at the end of the frame's shift. A reply given here completes the
+   *        frame at once, as exchange() does. An empty result leaves the frame pending: the
+   *        device completes it through spi_target_port::complete() with @p ticket. The frame's
+   *        end, its RX FIFO entry, its flags and the next frame then follow the latest
+   *        completion of every selected device, and SCK stays idle until then. The default
+   *        returns exchange().
+   * @param out Frame the controller sends, in wire order, right-aligned.
+   * @param bits Frame size, 1 to 32, the size the firmware configured.
+   * @param at Virtual time since power-on at the end of the frame's shift.
+   * @param ticket Identifies this frame to spi_target_port::complete().
+   * @return Frame the device returns, as for exchange(), or empty while the reply is pending.
+   */
+  [[nodiscard]] virtual auto
+      exchange_deferred(std::uint32_t out, std::uint8_t bits, vtime at, std::uint64_t ticket)
+          -> std::optional<std::uint32_t>
+  {
+    static_cast<void>(ticket);
+    return exchange(out, bits, at);
+  }
+
+  /**
+   * @brief The device was attached to the SPI model of an instance, at the model's
+   *        construction for a board device. The port stays valid until detached(). The default
+   *        does nothing.
+   * @param port The model the device completes deferred frames through.
+   */
+  virtual void attached([[maybe_unused]] spi_target_port& port)
+  {}
+
+  /**
+   * @brief The device was detached from the port attached() gave, when the model is destroyed
+   *        for a board device. The device keeps no reference to that port after the call. The
+   *        default does nothing.
+   */
+  virtual void detached() noexcept
+  {}
 
   /**
    * @brief The SPI mode the device works in, CPOL << 1 | CPHA. The SPI model reads it once per
@@ -102,6 +143,36 @@ public:
    * @param in Bytes of one save() call.
    */
   virtual void load(std::span<std::byte const> in) = 0;
+};
+
+/**
+ * @brief What the SPI model of an instance offers the spi_target devices attached to it, to
+ *        complete the frames they left pending in spi_target::exchange_deferred().
+ */
+class POPCORN_API spi_target_port
+{
+public:
+  /**
+   * @brief Completes a pending frame at @p at with @p word. The call only schedules the
+   *        completion. When it falls due, a completion whose @p ticket is not the frame still
+   *        pending, after a reset, after SPE was cleared or for a frame already complete, is
+   *        refused and counted in the model's saved state, never applied. Each completion is
+   *        one event on @p lane, so it fires after the model's own events due at the same
+   *        instant, in the order of @p lane.
+   * @param ticket The ticket exchange_deferred() received.
+   * @param word Frame the device returns, in wire order, right-aligned.
+   * @param at Virtual time since power-on of the completion. A time before the current time by
+   *        less than one instruction period keeps its own instruction count, as a post a link
+   *        hands at a drain may have.
+   * @param lane Delivery lane of the completion, 1 and up.
+   * @throws std::invalid_argument When @p at is before the current time by one instruction
+   *         period or more, or before the last reset, or @p lane is 0.
+   */
+  virtual void complete(std::uint64_t ticket, std::uint32_t word, vtime at, std::uint32_t lane) = 0;
+
+protected:
+  /** @brief Destroyed through its model only. */
+  virtual ~spi_target_port();
 };
 
 /**
