@@ -67,6 +67,12 @@ def test_notice_change_list_reaches_the_pinned_commit() -> None:
     submodule = ROOT / "third_party" / "unicorn"
     if not (submodule / ".git").exists():
         pytest.skip("third_party/unicorn is not initialised")
+    present = subprocess.run(
+        ["git", "-C", str(submodule), "cat-file", "-e", f"{commit}^{{commit}}"],
+        capture_output=True,
+    )
+    if present.returncode != 0:
+        pytest.skip(f"third_party/unicorn does not hold the pinned commit {commit}")
     pinned = git("-C", str(submodule), "log", "-1", "--format=%as", commit)
     dates = ENTRY_DATE.findall(unicorn_block())
     assert dates, "NOTICE lists no dated Unicorn change"
