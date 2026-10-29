@@ -16,26 +16,34 @@ from popcorn.stm32.description._cubemx import (
     read_rzone,
     read_rzone_facts,
 )
+from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._model import RegionDesc
-from popcorn.stm32.description._sources import Sources, default_search_paths, facts_path
+from popcorn.stm32.description._sources import (
+    Sources,
+    default_search_paths,
+    facts_path,
+    find_sources,
+)
 
 FACTS_DIR = Path(_cubemx.__file__).parent / "rzone"
 FACTS = sorted(FACTS_DIR.glob("*.toml"))
 
 EXPECTED_DIFFERENCES: dict[str, dict[str, tuple[object, object]]] = {
     "STM32_DIE482_786_1024": {"num_interrupts": (125, 126)},
+    "STM32_DIE482_786_2048": {"num_interrupts": (125, 126)},
 }
 """Per facts file, each value allowed to differ, as (local rzone, facts). RM0456 table 186 gives
-the U575 126 vector positions where the rzone counts 125. Table 186 note 2: position 125 is
+the U575 and U585 126 vector positions where the rzone counts 125. Table 186 note 2: position 125 is
 reserved on STM32U575/585 rev. X and present on every other revision, so DS13737 3.20.1 counts
 125."""
 
 
 EXPECTED_REGION_DIFFERENCES: dict[str, dict[str, dict[str, tuple[object, object]]]] = {
-    "STM32_DIE484_640_2048": {
+    stem: {
         "HIGH_CYCLE_FLASH_NS": {"execute": (True, False)},
         "HIGH_CYCLE_FLASH_S": {"execute": (True, False)},
-    },
+    }
+    for stem in ("STM32_DIE484_640_1024", "STM32_DIE484_640_2048")
 }
 """Per facts file and region name, each access flag allowed to differ, as (local rzone, facts).
 RM0481 7.3.10 lists an instruction fetch from the flash high-cycle data area as a bus error,
@@ -75,9 +83,10 @@ def test_every_expected_difference_names_a_facts_file() -> None:
     assert set(EXPECTED_REGION_DIFFERENCES) <= {facts.stem for facts in FACTS}
 
 
+@pytest.mark.parametrize("stem", ["STM32_DIE484_640_1024", "STM32_DIE484_640_2048"])
 @pytest.mark.parametrize("name", ["HIGH_CYCLE_FLASH_NS", "HIGH_CYCLE_FLASH_S"])
-def test_the_h573_high_cycle_flash_refuses_instruction_fetch(name: str) -> None:
-    facts = FACTS_DIR / "STM32_DIE484_640_2048.toml"
+def test_the_h5_high_cycle_flash_refuses_instruction_fetch(stem: str, name: str) -> None:
+    facts = FACTS_DIR / f"{stem}.toml"
     regions = {r.name: r for r in read_rzone_facts(facts.read_bytes(), file=str(facts)).regions}
     assert (regions[name].acc.read, regions[name].acc.execute) == (True, False)
 
@@ -105,10 +114,24 @@ def test_facts_match_the_local_rzone(facts: Path) -> None:
         assert replace(written_region, acc=local_region.acc) == local_region, local_region.name
 
 
-def _assert_facts_build_has_the_local_content(sources: Sources) -> None:
+FACTS_PARTS: dict[str, str] = {
+    "STM32U575QGIx": "STM32_DIE482_786_1024",
+    "STM32U575AIIx": "STM32_DIE482_786_2048",
+    "STM32H562RGTx": "STM32_DIE484_640_1024",
+    "STM32H573AIIx": "STM32_DIE484_640_2048",
+}
+"""One part per facts file, built from its facts and from its local rzone."""
+
+
+def test_every_facts_file_has_a_part_built_from_it() -> None:
+    assert sorted(FACTS_PARTS.values()) == [facts.stem for facts in FACTS]
+
+
+def _assert_facts_build_has_the_local_content(sources: Sources, stem: str) -> None:
     part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db))
     facts = facts_path(part)
     assert facts.is_file()
+    assert facts.stem == stem
     shipped = build_description(replace(sources, rzone=None, rzone_facts=facts))
     local = build_description(sources)
     assert "rzone" not in shipped.sources
@@ -131,17 +154,15 @@ def _assert_facts_build_has_the_local_content(sources: Sources) -> None:
 
 
 @pytest.mark.timeout(60)
-def test_the_u575_built_from_its_facts_has_the_content_of_the_local_build(
-    u575_sources: Sources,
-) -> None:
-    _assert_facts_build_has_the_local_content(u575_sources)
-
-
-@pytest.mark.timeout(60)
-def test_the_h573_built_from_its_facts_has_the_content_of_the_local_build(
-    h573_sources: Sources,
-) -> None:
-    _assert_facts_build_has_the_local_content(h573_sources)
+@pytest.mark.parametrize("part", FACTS_PARTS)
+def test_a_part_built_from_its_facts_has_the_content_of_the_local_build(part: str) -> None:
+    try:
+        sources = find_sources(part)
+    except DescriptionError as exc:
+        pytest.skip(f"{part} sources not found: {exc}")
+    if sources.cmsis_header is None:
+        pytest.skip(f"no CMSIS header for {part}, set POPCORN_CMSIS_DEVICE_DIRS")
+    _assert_facts_build_has_the_local_content(sources, FACTS_PARTS[part])
 
 
 def test_a_local_build_reads_the_rzone_and_never_the_facts(
