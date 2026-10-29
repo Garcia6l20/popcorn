@@ -1037,7 +1037,7 @@ source = "probe"
     with pytest.raises(DescriptionError) as excinfo:
         apply_patches(patches, _synthetic_target())
     assert excinfo.value.key == "memory"
-    assert excinfo.value.expected == "an add or a controller entry"
+    assert excinfo.value.expected == "an add, eeprom or a controller entry"
 
 
 def test_memory_controller_refuses_an_alias(tmp_path: Path) -> None:

@@ -21,7 +21,8 @@ from popcorn.stm32.description._cubemx import (
     rzone_file_name,
 )
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
-from popcorn.stm32.description._patches import load_patches
+from popcorn.stm32.description._layers import line_name
+from popcorn.stm32.description._patches import cmsis_suffix, load_patches
 
 _PATCHES_DIR = Path(__file__).parent / "patches"
 _RZONE_FACTS_DIR = Path(__file__).parent / "rzone"
@@ -209,8 +210,8 @@ def _svd_exception(
     return None
 
 
-def _cmsis_header_path(refname: str, search: SearchPaths) -> Path | None:
-    stem = f"{refname[:9].lower()}xx.h"
+def _cmsis_header_path(refname: str, search: SearchPaths, suffix: str | None = None) -> Path | None:
+    stem = f"{line_name(refname).removesuffix('xx').lower()}{suffix or 'xx'}.h"
     if search.cmsis_device_dirs is not None:
         for device_dir in search.cmsis_device_dirs:
             candidate = device_dir / stem
@@ -230,9 +231,11 @@ def _cmsis_header_path(refname: str, search: SearchPaths) -> Path | None:
     return None
 
 
-def _require(path: Path, file: str, key: str, expected: str) -> None:
+def _require(
+    path: Path, file: str, key: str, expected: str, *, missing: Path | None = None
+) -> None:
     if absent(path):
-        raise MissingSource(file, key, expected, path=path)
+        raise MissingSource(file, key, expected, path=path if missing is None else missing)
     if not path.is_file():
         raise DescriptionError(file, 0, key, expected)
 
@@ -376,14 +379,17 @@ def find_sources(
     cmsis_header: Path | None = None,
     search: SearchPaths | None = None,
 ) -> Sources:
-    """Sources of @p part: db files by exact db lookup, SVD by family-prefix matching across
-    @p search's directories (or the spec 04 defaults, when @p search is None), CMSIS header
-    optionally, every patch file in the package whose [match] selects this part and the resolved
-    SVD file name, the GPIO modes file of the part's GPIO IP version when it exists, None
-    otherwise, and the die_ip_sources donors. MissingSource, a MissingInput and a
-    DescriptionError, naming the path when a required source does not exist: no CubeMX db, no
-    existing SVD directory, an absent db, rzone or SVD file. DescriptionError for an unknown part
-    in an existing db, or a source that exists but is not a file."""
+    """Sources of @p part: db files by exact db lookup, the rzone file of the db or, when the db
+    has none for the part, the packaged rzone facts file (`Sources.rzone_facts`), SVD by
+    family-prefix matching across @p search's directories (or the spec 04 defaults, when
+    @p search is None), CMSIS header optionally, named `<line><suffix>.h` by the `[cmsis]
+    suffix` of the part's patches and `<line>xx.h` without one, every patch file in the package
+    whose [match] selects this part and the resolved SVD file name, the GPIO modes file of the
+    part's GPIO IP version when it exists, None otherwise, and the die_ip_sources donors.
+    MissingSource, a MissingInput and a DescriptionError, naming the path when a required source
+    does not exist: no CubeMX db, no existing SVD directory, an absent db or SVD file, an absent
+    rzone file with no packaged facts file, whose path it names. DescriptionError for an unknown
+    part in an existing db, or a source that exists but is not a file."""
     search = search or default_search_paths()
     db_dir = cubemx_db or search.cubemx_db
     if absent(db_dir / "mcu"):
@@ -400,19 +406,27 @@ def find_sources(
     _require(mcu_db, str(db_dir), refname, f"a db file at {mcu_db}")
     db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db), name=refname)
 
-    rzone = db_dir / "mcu" / "memory" / rzone_file_name(db_part)
-    _require(rzone, str(db_dir), refname, f"an rzone file at {rzone}")
+    rzone_file = db_dir / "mcu" / "memory" / rzone_file_name(db_part)
+    rzone: Path | None = rzone_file
+    facts: Path | None = None
+    if absent(rzone_file):
+        facts = facts_path(db_part)
+        expected = f"an rzone file at {rzone_file} or a packaged rzone facts file at {facts}"
+        _require(facts, str(db_dir), refname, expected, missing=rzone_file)
+        rzone = None
+    else:
+        _require(rzone_file, str(db_dir), refname, f"an rzone file at {rzone_file}")
     modes_name = gpio_modes_file_name(db_part)
     gpio_modes = db_dir / "mcu" / "IP" / modes_name if modes_name is not None else None
     if gpio_modes is not None and not gpio_modes.is_file():
         gpio_modes = None
 
     svd_path = _svd_path(refname, db_part, core=core, svd=svd, search=search, file=str(db_dir))
-    cmsis_header_path = (
-        cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search)
-    )
-
     patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name, db_part=db_part)
+    suffix = cmsis_suffix(patches)
+    cmsis_header_path = (
+        cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search, suffix)
+    )
 
     return Sources(
         part=refname,
@@ -422,6 +436,7 @@ def find_sources(
         cmsis_header=cmsis_header_path,
         patches=[loaded.path for loaded in patches],
         gpio_modes=gpio_modes,
+        rzone_facts=facts,
         die_ip=die_ip_sources(db_part, mcu_db, svd_path, core=core, search=search),
     )
 
@@ -464,10 +479,11 @@ def pin_data_sources(
     if not facts.is_file():
         raise DescriptionError(str(mcu_db), 0, refname, f"a packaged rzone facts file at {facts}")
     svd_path = _svd_path(refname, db_part, core=core, svd=svd, search=search, file=str(pin_data))
-    cmsis_header_path = (
-        cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search)
-    )
     patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name, db_part=db_part)
+    suffix = cmsis_suffix(patches)
+    cmsis_header_path = (
+        cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search, suffix)
+    )
     return Sources(
         part=refname,
         svd=svd_path,

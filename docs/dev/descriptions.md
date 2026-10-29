@@ -35,7 +35,9 @@ The modules are in `python/popcorn/stm32/description`:
 - `_sources.py` finds the SVD, the CubeMX db, the rzone facts, the GPIO modes file, the CMSIS
   device header and the patch files of a part. A CubeMX range stem such as `STM32L151C(6-8-B)Tx`
   is no part name. It resolves as `STM32L151C6Tx`, `STM32L151C8Tx` and `STM32L151CBTx`, each with
-  its own flash and RAM size.
+  its own flash and RAM size. A local build takes the rzone file of the db when it has one for
+  the part and the packaged rzone facts file otherwise. The CMSIS header is `<line>xx.h`, or
+  `<line><suffix>.h` for a part whose patch sets `[cmsis] suffix`.
 - `_svd.py` expands an SVD: `derivedFrom`, `dim`, clusters and property inheritance. It is a
   pure function of the file bytes.
 - `_cubemx.py` reads the part lookup, the memory regions and processor facts, the IP instance
@@ -284,6 +286,28 @@ peripheral models, read side effects, the trace ring and coverage see accesses a
 address, and a write into memory holding translated code drops that code from the next block on.
 The read and the write run inside one access at one instruction count, and DMA beats run between
 instructions, so the read-modify-write is atomic. A DMA access to an alias address is a bus error.
+
+## Data EEPROM
+
+A CubeMX part file with an `<E2prom>` element gives the data EEPROM size in bytes, per expanded
+name for a range stem. `[memory] eeprom` adds a read-only region `DATA_EEPROM` of that size at
+`start`, with an optional `controller` peripheral:
+
+```toml
+[memory]
+source = "RM0038 Rev 18, Table 8: data EEPROM at 0x08080000"
+eeprom = { start = 0x08080000, controller = "FLASH" }
+```
+
+The size is a whole number of 1 KB pages, or the build raises `DescriptionError` keyed
+`memory.eeprom`, as it does for a part without the element, for a range that overlaps another
+region, and for a `controller` table entry naming `DATA_EEPROM` beside the `eeprom` one.
+
+## CMSIS header names
+
+`[cmsis] suffix = "xe"` in a patch names the CMSIS device header `<line>xe.h`, `stm32l152xe.h`
+for `STM32L152RETx`. The suffix is `x` followed by at least one lowercase letter or digit. At most
+one matching patch sets it. A part with no such patch uses `<line>xx.h`.
 
 ## Shipped descriptions
 

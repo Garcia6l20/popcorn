@@ -41,6 +41,12 @@ class DbPart:
     ips: list[DbIp]
     package: str = ""
     pins: dict[str, frozenset[str]] = field(default_factory=dict[str, frozenset[str]])
+    eeprom: list[int] = field(default_factory=list[int])
+
+    @property
+    def eeprom_bytes(self) -> int | None:
+        """Data EEPROM size in bytes, the first `E2prom` element, None without the element."""
+        return self.eeprom[0] if self.eeprom else None
 
     def select(self, name: str, *, file: str) -> DbPart:
         """The part @p name, one of expand_refname(ref_name), as a DbPart named @p name whose
@@ -58,6 +64,11 @@ class DbPart:
             ref_name=name,
             flash_kib=[_element(self.flash_kib, index, len(expanded), file, "Mcu.Flash")],
             ram_kib=[_element(self.ram_kib, index, len(expanded), file, "Mcu.Ram")],
+            eeprom=(
+                [_element(self.eeprom, index, len(expanded), file, "Mcu.E2prom")]
+                if self.eeprom
+                else []
+            ),
         )
 
 
@@ -155,12 +166,14 @@ def read_part(data: bytes, *, file: str, name: str | None = None) -> DbPart:
     if die is None:
         raise DescriptionError(file, 0, "Mcu.Die", "required")
 
-    ram_kib = [_parse_kib(e, file=file, key="Mcu.Ram") for e in root.findall(q("Ram"))]
+    ram_kib = [_parse_int(e, file=file, key="Mcu.Ram") for e in root.findall(q("Ram"))]
     if not ram_kib:
         raise DescriptionError(file, 0, "Mcu.Ram", "required")
-    flash_kib = [_parse_kib(e, file=file, key="Mcu.Flash") for e in root.findall(q("Flash"))]
+    flash_kib = [_parse_int(e, file=file, key="Mcu.Flash") for e in root.findall(q("Flash"))]
     if not flash_kib:
         raise DescriptionError(file, 0, "Mcu.Flash", "required")
+
+    eeprom = [_parse_int(e, file=file, key="Mcu.E2prom") for e in root.findall(q("E2prom"))]
 
     ips: list[DbIp] = []
     for ip_el in root.findall(q("IP")):
@@ -187,6 +200,7 @@ def read_part(data: bytes, *, file: str, name: str | None = None) -> DbPart:
         ips=ips,
         package=root.get("Package") or "",
         pins=pins,
+        eeprom=eeprom,
     )
     return part if name is None else part.select(name, file=file)
 
@@ -237,7 +251,7 @@ def die_ips(part: DbPart, donor: DbPart) -> list[DbIp]:
     return [ip for ip in donor.ips if ip.instance not in listed]
 
 
-def _parse_kib(el: Element, *, file: str, key: str) -> int:
+def _parse_int(el: Element, *, file: str, key: str) -> int:
     text = (el.text or "").strip()
     try:
         return int(text)

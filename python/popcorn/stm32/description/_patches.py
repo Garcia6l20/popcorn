@@ -6,6 +6,7 @@ schema type."""
 
 import copy
 import fnmatch
+import re
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -24,6 +25,7 @@ from popcorn.stm32.description._model import (
     IrqDesc,
     PeripheralDesc,
     ReadEffect,
+    RegionAccess,
     RegionContent,
     RegionDesc,
     RegionKind,
@@ -81,10 +83,23 @@ class PatchPeripherals:
 
 
 @dataclass(slots=True, kw_only=True)
+class PatchEeprom:
+    start: int = field(metadata={"minimum": 0, "maximum": 4294967295})
+    controller: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
 class PatchMemory:
     source: str
     add: list[RegionDesc] | None = None
     controller: dict[str, str] | None = None
+    eeprom: PatchEeprom | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class PatchCmsis:
+    suffix: str
+    source: str
 
 
 @dataclass(slots=True, kw_only=True)
@@ -226,6 +241,7 @@ class Patch:
     resets: list[ResetSet] | None = None
     memory: PatchMemory | None = None
     signature: PatchSignature | None = None
+    cmsis: PatchCmsis | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -303,6 +319,31 @@ def load_patches(
         if _matches(patch.match, part, svd_name, db_part):
             result.append(LoadedPatch(path=path, patch=patch))
     return result
+
+
+_CMSIS_SUFFIX_RE = re.compile(r"x[a-z0-9]+")
+
+
+def cmsis_suffix(patches: Sequence[LoadedPatch]) -> str | None:
+    """The `[cmsis] suffix` of the one patch in @p patches that sets it, None when none does.
+    DescriptionError for a suffix that is not `x` followed by lowercase letters and digits, and
+    for a second patch setting it."""
+    found: tuple[str, str] | None = None
+    for loaded in patches:
+        rule = loaded.patch.cmsis
+        if rule is None:
+            continue
+        file = str(loaded.path)
+        if _CMSIS_SUFFIX_RE.fullmatch(rule.suffix) is None:
+            raise DescriptionError(
+                file, 0, "cmsis.suffix", "x followed by lowercase letters or digits"
+            )
+        if not rule.source.strip():
+            raise DescriptionError(file, 0, "cmsis.source", "a non-empty source")
+        if found is not None:
+            raise DescriptionError(file, 0, "cmsis", f"no other patch setting it, {found[1]} does")
+        found = (rule.suffix, file)
+    return found[0] if found is not None else None
 
 
 def _selector_targets(
@@ -1071,39 +1112,71 @@ def _check_bit_band(added: RegionDesc, key: str, *, file: str) -> None:
         raise DescriptionError(file, 0, key, "a bit_band region with no content and no controller")
 
 
+_EEPROM_REGION = "DATA_EEPROM"
+
+
+def _add_region(
+    added: RegionDesc, regions: list[RegionDesc], report: PatchReport, *, file: str, key: str
+) -> None:
+    if added.size == 0 or added.start + added.size > 1 << 32:
+        raise DescriptionError(file, 0, key, "a non-empty range inside the 32-bit space")
+    if added.start % _ENGINE_PAGE != 0 or added.size % _ENGINE_PAGE != 0:
+        raise DescriptionError(file, 0, key, "a start and size in whole 1 KB pages")
+    if added.kind is RegionKind.BIT_BAND:
+        _check_bit_band(added, key, file=file)
+    elif added.physical is not None and not any(
+        region.start <= added.physical and added.physical + added.size <= region.start + region.size
+        for region in regions
+    ):
+        raise DescriptionError(file, 0, key, "a physical range inside an existing region")
+    for region in regions:
+        if region.name == added.name:
+            raise DescriptionError(file, 0, key, "a region name not already used")
+        if added.start < region.start + region.size and region.start < added.start + added.size:
+            raise DescriptionError(file, 0, key, f"a range clear of region {region.name}")
+    regions.append(copy.deepcopy(added))
+    report.regions_added += 1
+
+
 def _apply_memory(
     rule: PatchMemory,
     regions: list[RegionDesc],
     peripherals: Mapping[str, PeripheralDesc],
+    part: DbPart | None,
     report: PatchReport,
     *,
     file: str,
 ) -> None:
-    if not rule.add and not rule.controller:
-        raise DescriptionError(file, 0, "memory", "an add or a controller entry")
+    if not rule.add and not rule.controller and rule.eeprom is None:
+        raise DescriptionError(file, 0, "memory", "an add, eeprom or a controller entry")
     for added in rule.add or []:
-        key = f"memory.add.{added.name}"
-        if added.size == 0 or added.start + added.size > 1 << 32:
-            raise DescriptionError(file, 0, key, "a non-empty range inside the 32-bit space")
-        if added.start % _ENGINE_PAGE != 0 or added.size % _ENGINE_PAGE != 0:
-            raise DescriptionError(file, 0, key, "a start and size in whole 1 KB pages")
-        if added.kind is RegionKind.BIT_BAND:
-            _check_bit_band(added, key, file=file)
-        elif added.physical is not None and not any(
-            region.start <= added.physical
-            and added.physical + added.size <= region.start + region.size
-            for region in regions
-        ):
-            raise DescriptionError(file, 0, key, "a physical range inside an existing region")
-        for region in regions:
-            if region.name == added.name:
-                raise DescriptionError(file, 0, key, "a region name not already used")
-            if added.start < region.start + region.size and region.start < added.start + added.size:
-                raise DescriptionError(file, 0, key, f"a range clear of region {region.name}")
-        regions.append(copy.deepcopy(added))
-        report.regions_added += 1
+        _add_region(added, regions, report, file=file, key=f"memory.add.{added.name}")
+    controllers = dict(rule.controller or {})
+    if rule.eeprom is not None:
+        key = "memory.eeprom"
+        size = part.eeprom_bytes if part is not None else None
+        if size is None:
+            raise DescriptionError(file, 0, key, "a part with an E2prom element in the CubeMX db")
+        if _EEPROM_REGION in controllers:
+            raise DescriptionError(file, 0, key, f"no controller entry for {_EEPROM_REGION}")
+        _add_region(
+            RegionDesc(
+                name=_EEPROM_REGION,
+                start=rule.eeprom.start,
+                size=size,
+                kind=RegionKind.ROM,
+                acc=RegionAccess(read=True, write=False, execute=False),
+                secure=False,
+            ),
+            regions,
+            report,
+            file=file,
+            key=key,
+        )
+        if rule.eeprom.controller is not None:
+            controllers[_EEPROM_REGION] = rule.eeprom.controller
     by_name = {region.name: region for region in regions}
-    for name, peripheral in (rule.controller or {}).items():
+    for name, peripheral in controllers.items():
         key = f"memory.controller.{name}"
         region = by_name.get(name)
         if region is None:
@@ -1311,7 +1384,14 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
 
     for loaded in patches:
         if loaded.patch.memory is not None:
-            _apply_memory(loaded.patch.memory, regions, by_name, report, file=str(loaded.path))
+            _apply_memory(
+                loaded.patch.memory,
+                regions,
+                by_name,
+                target.db_part,
+                report,
+                file=str(loaded.path),
+            )
 
     for loaded in patches:
         if loaded.patch.signature is not None:
