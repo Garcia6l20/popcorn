@@ -25,6 +25,7 @@
 #include <expected>
 #include <format>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <span>
@@ -353,6 +354,61 @@ void check_shape(wire_spec const& spec, std::size_t members)
 }
 }
 
+detail::uart_medium::uart_medium(
+    std::shared_ptr<periph::stm32::uart_wire> wire,
+    std::size_t                               sender,
+    host_ref                                  slot,
+    periph::uart_port&                        port,
+    std::shared_ptr<periph::uart_endpoint>    own)
+    : wire_{std::move(wire)}, sender_{sender}, slot_{std::move(slot)}, port_{&port},
+      own_{std::move(own)}
+{}
+
+auto detail::uart_medium::links() const -> std::vector<std::shared_ptr<core::member_link>>
+{
+  return {wire_};
+}
+
+void detail::uart_medium::attach()
+{
+  host_access(slot_, [&] { port_->attach(wire_); });
+}
+
+void detail::uart_medium::give_back() noexcept
+{
+  retire(slot_, [weak = std::weak_ptr<host_slot const>{slot_}, port = port_, own = own_] {
+    auto const owner = weak.lock();
+    if(owner == nullptr)
+    {
+      return;
+    }
+    if(auto const on = owner->host.lock(); on != nullptr and not on->abandoned())
+    {
+      port->attach(own);
+    }
+  });
+}
+
+auto detail::uart_medium::wire() const noexcept -> periph::stm32::uart_wire&
+{
+  return *wire_;
+}
+
+auto detail::uart_medium::sender() const noexcept -> std::size_t
+{
+  return sender_;
+}
+
+auto detail::uart_medium::linked() const noexcept -> bool
+{
+  return linked_;
+}
+
+void detail::uart_medium::link() noexcept
+{
+  linked_ = true;
+}
+
 system_handle::system_handle(std::uint64_t slice_instructions, std::int64_t slice_wall_ns)
 {
   if(slice_instructions == 0)
@@ -440,11 +496,10 @@ auto system_handle::add_wire(
           .log    = [machine](core::log_record record) { machine->log(std::move(record)); },
           .strict = spec.strict},
       sender.endpoint(), tap_capacity_);
-  wires_.push_back(
-      {.wire        = std::move(wire),
-       .sender_port = &port,
-       .own         = sender.endpoint(),
-       .sender      = spec.sender});
+  auto& added = media_.emplace_back(
+      std::in_place_type<detail::uart_medium>, std::move(wire), spec.sender,
+      members_[spec.sender].slot, port, sender.endpoint());
+  wires_.push_back(static_cast<detail::uart_medium*>(&*added));
   return index;
 }
 
@@ -458,22 +513,24 @@ auto system_handle::add_link(std::size_t forth, std::size_t back) -> std::size_t
   {
     throw std::invalid_argument("a link names a wire the system does not have");
   }
-  auto& one   = wires_[forth];
-  auto& other = wires_[back];
-  if(forth == back or one.sender != other.wire->receiver() or other.sender != one.wire->receiver())
+  auto& one   = *wires_[forth];
+  auto& other = *wires_[back];
+  if(forth == back
+     or one.sender() != other.wire().receiver()
+     or other.sender() != one.wire().receiver())
   {
     throw std::invalid_argument("a link pairs the two directions between two members");
   }
-  if(one.linked or other.linked)
+  if(one.linked() or other.linked())
   {
     throw std::invalid_argument("a wire is in a link already");
   }
   auto registration = std::make_shared<periph::stm32::link_registration>();
-  one.wire->share_registration(registration);
-  other.wire->share_registration(std::move(registration));
-  one.linked   = true;
-  other.linked = true;
-  links_.emplace_back(forth, back, one.sender);
+  one.wire().share_registration(registration);
+  other.wire().share_registration(std::move(registration));
+  one.link();
+  other.link();
+  links_.emplace_back(forth, back, one.sender());
   return links_.size() - 1;
 }
 
@@ -483,7 +540,7 @@ void system_handle::start(std::vector<std::int64_t> const& offsets_ps)
   {
     throw std::logic_error("the system was started already");
   }
-  if(members_.empty() or wires_.empty())
+  if(members_.empty() or media_.empty())
   {
     throw std::logic_error("a linked system needs a member and a wire");
   }
@@ -503,10 +560,10 @@ void system_handle::start(std::vector<std::int64_t> const& offsets_ps)
   std::vector<std::shared_ptr<core::member_link>> links;
   try
   {
-    for(auto const& one : wires_)
+    for(auto& one : media_)
     {
-      detail::host_access(members_[one.sender].slot, [&one] { one.sender_port->attach(one.wire); });
-      links.push_back(one.wire);
+      one->attach();
+      std::ranges::copy(one->links(), std::back_inserter(links));
     }
     system_ = [&] {
       nb::gil_scoped_release const released;
@@ -562,7 +619,7 @@ auto system_handle::wire(std::size_t index) const -> periph::stm32::uart_wire&
   {
     throw std::out_of_range("no such wire");
   }
-  return *wires_[index].wire;
+  return wires_[index]->wire();
 }
 
 auto system_handle::link(std::size_t index) const -> link_entry const&
@@ -843,22 +900,9 @@ void system_handle::close()
 
 void system_handle::give_back() noexcept
 {
-  for(auto const& one : wires_)
+  for(auto& one : media_)
   {
-    auto const& slot = members_[one.sender].slot;
-    detail::retire(
-        slot, [weak = std::weak_ptr<detail::host_slot const>{slot}, port = one.sender_port,
-               own = one.own] {
-          auto const owner = weak.lock();
-          if(owner == nullptr)
-          {
-            return;
-          }
-          if(auto const on = owner->host.lock(); on != nullptr and not on->abandoned())
-          {
-            port->attach(own);
-          }
-        });
+    one->give_back();
   }
 }
 
@@ -1084,8 +1128,8 @@ auto system_handle::change_cut(
   {
     return refused(locked(sys, [&](core::held_system const& held) {
       auto const now = std::max(
-          sys.time_of(held, wires_[entry.forth].sender),
-          sys.time_of(held, wires_[entry.back].sender));
+          sys.time_of(held, wires_[entry.forth]->sender()),
+          sys.time_of(held, wires_[entry.back]->sender()));
       return change(forth, back, now);
     }));
   }

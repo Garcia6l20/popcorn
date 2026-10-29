@@ -78,6 +78,85 @@ struct[[= py::rename{"TapRecord"}]] tap_record
   [[= py::readonly]] bool cut{};
 };
 
+namespace detail
+{
+/**
+ * @brief One medium a system_handle declares: the member_links it adds to the system, how it
+ *        attaches its ends at start() and how it gives them back at close. Each medium class
+ *        owns its own state.
+ */
+class medium
+{
+public:
+  /** @brief Destroys the medium. */
+  virtual ~medium() = default;
+
+  /** @brief The member_links the medium adds to the system, in core order. */
+  [[nodiscard]] virtual auto links() const -> std::vector<std::shared_ptr<core::member_link>> = 0;
+
+  /** @brief Attaches the medium's ends to their members, at start(). */
+  virtual void attach() = 0;
+
+  /**
+   * @brief Gives the ends back to the members that owned them before attach(). Called after a
+   *        failed start() and at close, any number of times.
+   */
+  virtual void give_back() noexcept = 0;
+
+protected:
+  medium()                                     = default;
+  medium(medium const&)                        = default;
+  medium(medium&&) noexcept                    = default;
+  auto operator=(medium const&) -> medium&     = default;
+  auto operator=(medium&&) noexcept -> medium& = default;
+};
+
+/**
+ * @brief One UART wire, one direction from the sender's UART to the receiver's. A
+ *        `popcorn.UartLink` gives two uart_medium records, one per wire, in add_wire order, so
+ *        the wire index is the index of the record among the UART media.
+ */
+class uart_medium final : public medium
+{
+public:
+  /**
+   * @brief Holds a wire and the sender's UART it attaches to.
+   * @param wire The wire.
+   * @param sender Member index of the sender.
+   * @param slot Host slot of the sender.
+   * @param port The sender's UART port.
+   * @param own The endpoint the sender's UART had before the wire, given back at close.
+   */
+  uart_medium(
+      std::shared_ptr<periph::stm32::uart_wire> wire,
+      std::size_t                               sender,
+      host_ref                                  slot,
+      periph::uart_port&                        port,
+      std::shared_ptr<periph::uart_endpoint>    own);
+
+  [[nodiscard]] auto links() const -> std::vector<std::shared_ptr<core::member_link>> override;
+  void               attach() override;
+  void               give_back() noexcept override;
+
+  /** @brief The wire. */
+  [[nodiscard]] auto wire() const noexcept -> periph::stm32::uart_wire&;
+  /** @brief Member index of the sender. */
+  [[nodiscard]] auto sender() const noexcept -> std::size_t;
+  /** @brief Whether add_link paired the wire already. */
+  [[nodiscard]] auto linked() const noexcept -> bool;
+  /** @brief Marks the wire paired by add_link. */
+  void link() noexcept;
+
+private:
+  std::shared_ptr<periph::stm32::uart_wire> wire_;
+  std::size_t                               sender_{};
+  host_ref                                  slot_;
+  periph::uart_port*                        port_;
+  std::shared_ptr<periph::uart_endpoint>    own_;
+  bool                                      linked_{};
+};
+}
+
 /**
  * @brief Owner of one core::system over the hosts of MachineHandles, the object
  *        `popcorn.System` wraps. Members and wires are added, then start() builds and
@@ -419,15 +498,6 @@ private:
     detail::host_ref            slot;
   };
 
-  struct wire_entry
-  {
-    std::shared_ptr<periph::stm32::uart_wire> wire;
-    periph::uart_port*                        sender_port{};
-    std::shared_ptr<periph::uart_endpoint>    own;
-    std::size_t                               sender{};
-    bool                                      linked{};
-  };
-
   struct link_entry
   {
     std::size_t              forth{};
@@ -452,14 +522,15 @@ private:
       cut_change       change) -> cut_outcome;
   void give_back() noexcept;
 
-  core::slice_bounds                          bounds_;
-  std::size_t                                 tap_capacity_ = std::size_t{1} << 20;
-  std::vector<member_entry>                   members_;
-  std::vector<wire_entry>                     wires_;
-  std::deque<link_entry>                      links_;
-  std::vector<reflex::py::nb::object>         handles_;
-  std::shared_ptr<core::system>               system_;
-  std::shared_ptr<std::atomic<std::uint64_t>> sleeps_ =
+  core::slice_bounds                            bounds_;
+  std::size_t                                   tap_capacity_ = std::size_t{1} << 20;
+  std::vector<member_entry>                     members_;
+  std::vector<std::polymorphic<detail::medium>> media_;
+  std::vector<detail::uart_medium*>             wires_;
+  std::deque<link_entry>                        links_;
+  std::vector<reflex::py::nb::object>           handles_;
+  std::shared_ptr<core::system>                 system_;
+  std::shared_ptr<std::atomic<std::uint64_t>>   sleeps_ =
       std::make_shared<std::atomic<std::uint64_t>>(0);
   bool closed_{};
 };

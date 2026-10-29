@@ -268,6 +268,48 @@ def test_a_member_runs_alone_only_once_the_system_is_closed(
     assert linked.handle.posted(0) == posted
 
 
+def test_a_failed_start_gives_the_attached_ends_back_and_close_gives_them_back_again(
+    u575: popcorn.PartDescription,
+) -> None:
+    a = member(u575, "link_ping", "a")
+    b = member(u575, "link_echo", "b")
+    c = member(u575, "link_echo", "c")
+    holder = _core.SystemHandle(1_000_000, 1_000_000)
+    holder.add_member(b._handle, "b", False)  # pyright: ignore[reportPrivateUsage]
+    holder.add_member(c._handle, "c", False)  # pyright: ignore[reportPrivateUsage]
+    holder.add_wire(
+        spec(0, 1, "USART2"),
+        b._ports.link("USART2"),  # pyright: ignore[reportPrivateUsage]
+        c._ports.link("USART2"),  # pyright: ignore[reportPrivateUsage]
+    )
+    holder.start([0, 0])
+    running = holder.resume(None)
+    handle = _core.SystemHandle(1_000_000, 1_000_000)
+    handle.add_member(a._handle, "a", False)  # pyright: ignore[reportPrivateUsage]
+    handle.add_member(b._handle, "b", False)  # pyright: ignore[reportPrivateUsage]
+    a_link = a._ports.link("USART1")  # pyright: ignore[reportPrivateUsage]
+    b_link = b._ports.link("USART1")  # pyright: ignore[reportPrivateUsage]
+    handle.add_wire(spec(0, 1, "USART1"), a_link, b_link)
+    handle.add_wire(spec(1, 0, "USART1"), b_link, a_link)
+    with pytest.raises(popcorn.MachineRunning):
+        handle.start([0, 0])
+    a.reg.pc = a.sym("link_tx_count")
+    stop = asyncio.run(a.run(budget=100_000_000))
+    assert stop.reason is popcorn.StopReason.USER, stop
+    assert a.periph.USART1.port.available >= 512
+    assert handle.posted(0) == 0
+    holder.close()
+    del running
+    handle.close()
+    before = a.periph.USART1.port.available
+    a.reg.pc = a.sym("link_tx_count")
+    stop = asyncio.run(a.run(budget=100_000_000))
+    assert stop.reason is popcorn.StopReason.USER, stop
+    assert a.periph.USART1.port.available >= before + 512
+    assert handle.posted(0) == 0
+    handle.close()
+
+
 def test_wires_and_members_are_checked_before_start(u575: popcorn.PartDescription) -> None:
     a = member(u575, "link_ping", "a")
     b = member(u575, "link_echo", "b")

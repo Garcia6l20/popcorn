@@ -210,3 +210,22 @@ def test_a_system_of_one_member_linked_to_itself_runs(u575: popcorn.PartDescript
             assert all(frame.arrival.ps == frame.end.ps + L.ps for frame in frames)
 
     asyncio.run(run())
+
+
+def test_a_foreign_medium_is_refused_at_its_index_by_description_and_system(
+    u575: popcorn.PartDescription,
+) -> None:
+    del u575
+    foreign = ("a.USART1", "b.USART1")
+    with pytest.raises(ConfigError) as declared:
+        spec(links=[link(), foreign])
+    a, b = PROJECT.machine(name="a"), PROJECT.machine(name="b")
+    with pytest.raises(ConfigError) as built:
+        popcorn.System({"a": a, "b": b}, [link(), foreign])  # pyright: ignore[reportArgumentType]
+    for caught in (declared, built):
+        assert caught.value.key == "links[1]"
+        assert caught.value.expected == "a popcorn.UartLink"
+        assert str(caught.value).startswith("links[1]: a tuple, not a UartLink")
+    with popcorn.System({"a": a, "b": b}, [link()]) as system:
+        assert system.quantum == L
+        assert system.tap("b.USART1").ends == ("a.USART1", "b.USART1")

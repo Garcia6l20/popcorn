@@ -76,6 +76,30 @@ class UartLink:
     parity: Literal["none", "even", "odd"] = "none"
 
 
+type _Medium = UartLink
+_MEDIA: tuple[type[_Medium], ...] = (UartLink,)
+
+
+def _medium(index: int, link: object) -> _Medium:
+    """Return `links[index]` as a medium, or raise ConfigError at `links[index]`."""
+    if not isinstance(link, _MEDIA):
+        raise ConfigError(
+            f"links[{index}]: a {type(link).__qualname__}, not a "
+            + " or ".join(kind.__name__ for kind in _MEDIA),
+            key=f"links[{index}]",
+            expected=" or ".join(f"a popcorn.{kind.__name__}" for kind in _MEDIA),
+        )
+    return link
+
+
+def _check_medium(index: int, link: _Medium) -> tuple[str, ...]:
+    """Check the values of `links[index]`, return the names of its end fields."""
+    match link:
+        case UartLink():
+            _check_line(index, link)
+            return ("a", "b")
+
+
 @dataclass(frozen=True, slots=True)
 class SystemDescription:
     """Members and links of a linked system, as data: what `System` runs.
@@ -114,13 +138,12 @@ class SystemDescription:
 
     Raises:
         ConfigError: A check fails, its key naming the field: `members` empty, `members.<name>`
-            a bad name or no MachineDescription, `links` empty, `links[i].a` or `.b` naming no
-            member's
-            peripheral as `"<member>.<UART>"`, or a UART in two links, `links[i].latency`,
-            `.baud`, `.data_bits`, `.stop_bits` or `.parity` out of range, `offsets.<name>`
-            naming no member or below 0, `goal_cap` not above 0, or `on_member_reset` neither
-            "reset" nor "stop". Whether a link end is a UART of the member's part is checked by
-            `link`, which has the description.
+            a bad name or no MachineDescription, `links` empty, `links[i]` no `UartLink`,
+            `links[i].a` or `.b` naming no member's peripheral as `"<member>.<UART>"`, or a UART
+            in two links, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits` or `.parity`
+            out of range, `offsets.<name>` naming no member or below 0, `goal_cap` not above 0,
+            or `on_member_reset` neither "reset" nor "stop". Whether a link end is a UART of the
+            member's part is checked by `link`, which has the description.
     """
 
     members: Mapping[str, MachineDescription]
@@ -155,14 +178,7 @@ class SystemDescription:
             raise ConfigError("a linked system needs a link", key="links", expected="a link")
         used: set[str] = set()
         for index, link in enumerate(cast(tuple[object, ...], self.links)):
-            if not isinstance(link, UartLink):
-                raise ConfigError(
-                    f"links[{index}]: a {type(link).__qualname__}, not a UartLink",
-                    key=f"links[{index}]",
-                    expected="a popcorn.UartLink",
-                )
-            _check_line(index, link)
-            for side in ("a", "b"):
+            for side in _check_medium(index, _medium(index, link)):
                 self._check_end(index, side, used)
         _offsets(list(self.members), self.offsets)
         cap = cast(object, self.goal_cap)
@@ -360,6 +376,9 @@ class _LinkWires:
     link: int
 
 
+type _Wired = _LinkWires
+
+
 @dataclass(frozen=True)
 class _Pause:
     reason: _core.PauseReason
@@ -538,9 +557,9 @@ class System:
         "_handle",
         "_index",
         "_kicking",
-        "_links",
         "_loop",
         "_machines",
+        "_media",
         "_names",
         "_native",
         "_opens",
@@ -591,13 +610,13 @@ class System:
 
         Raises:
             ConfigError: A member named apart from its key, `members.<name>`, already in a
-                linked system, or no link, `links`, or a link end that is not a UART of a
-                member, a UART in two links or bridged to a pty, or whose CTS input
-                `UartStream.set_cts` left not ready or with a change pending, or whose model
-                takes no frames from a wire, such as a plugin UART implementing only
-                `periph::uart_port`, `links[i].a` or `links[i].b`,
-                a value out of range, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits`
-                or `.parity`, or an offset of no member or below 0, `offsets.<name>`.
+                linked system, or no link, `links`, or a link that is no `UartLink`, `links[i]`,
+                or a link end that is not a UART of a member, a UART in two links or bridged to
+                a pty, or whose CTS input `UartStream.set_cts` left not ready or with a change
+                pending, or whose model takes no frames from a wire, such as a plugin UART
+                implementing only `periph::uart_port`, `links[i].a` or `links[i].b`, a value out
+                of range, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits` or `.parity`,
+                or an offset of no member or below 0, `offsets.<name>`.
             MachineBusy: A member is busy.
             ValueError: `slice_instructions`, `slice_wall_budget` or `goal_cap` not above 0.
             TypeError: `goal_cap` is no VirtualDuration.
@@ -625,8 +644,9 @@ class System:
             _check_member(name, machine)
         if not links:
             raise ConfigError("a linked system needs a link", key="links", expected="a link")
+        media = [_medium(index, link) for index, link in enumerate(cast(Sequence[object], links))]
         offset_ps = _offsets(self._names, offsets or {})
-        self._links: list[_LinkWires] = []
+        self._media: list[_Wired] = []
         self._taps: dict[int, UartTap] = {}
         self._handle = _core.SystemHandle(
             slice_instructions, max(1, round(slice_wall_budget * 1e9))
@@ -635,8 +655,8 @@ class System:
             native = self._machines[name]._handle  # pyright: ignore[reportPrivateUsage]
             self._handle.add_member(native, name, on_member_reset == "stop")
         used: set[tuple[str, str]] = set()
-        for index, link in enumerate(links):
-            self._add_link(index, link, used)
+        for index, link in enumerate(media):
+            self._media.append(self._build(index, link, used))
         self._handle.start(offset_ps)
         self._unlink = weakref.finalize(self, _unmark, self._mark_linked())
         self._origin = max(offset_ps)
@@ -673,7 +693,12 @@ class System:
             machine._system = cast(Any, weakref.ref(self))  # pyright: ignore[reportPrivateUsage]
         watch_awaits(self)
 
-    def _add_link(self, index: int, link: UartLink, used: set[tuple[str, str]]) -> None:
+    def _build(self, index: int, link: _Medium, used: set[tuple[str, str]]) -> _Wired:
+        match link:
+            case UartLink():
+                return self._add_uart(index, link, used)
+
+    def _add_uart(self, index: int, link: UartLink, used: set[tuple[str, str]]) -> _LinkWires:
         word_bits = _check_line(index, link)
         ends = [self._end(index, side, end, used) for side, end in (("a", link.a), ("b", link.b))]
         wires: list[int] = []
@@ -706,27 +731,27 @@ class System:
                     key=key,
                     expected=error.expected,
                 ) from error
-        self._links.append(
-            _LinkWires(
-                (
-                    f"{self._names[ends[0][0]]}.{ends[0][2]}",
-                    f"{self._names[ends[1][0]]}.{ends[1][2]}",
-                ),
-                (wires[0], wires[1]),
-                self._handle.add_link(wires[0], wires[1]),
-            )
+        return _LinkWires(
+            (
+                f"{self._names[ends[0][0]]}.{ends[0][2]}",
+                f"{self._names[ends[1][0]]}.{ends[1][2]}",
+            ),
+            (wires[0], wires[1]),
+            self._handle.add_link(wires[0], wires[1]),
         )
 
     def _mark_linked(self) -> list[tuple[UartPorts, str]]:
         """Mark each linked UART on its member's ports, so its stream and pty refuse, and
         return the marks for `_unmark`."""
         marked: list[tuple[UartPorts, str]] = []
-        for wired in self._links:
-            for end in wired.ends:
-                name, _, unit = end.partition(".")
-                ports = self._machines[name]._ports  # pyright: ignore[reportPrivateUsage]
-                ports.linked.add(unit)
-                marked.append((ports, unit))
+        for wired in self._media:
+            match wired:
+                case _LinkWires():
+                    for end in wired.ends:
+                        name, _, unit = end.partition(".")
+                        ports = self._machines[name]._ports  # pyright: ignore[reportPrivateUsage]
+                        ports.linked.add(unit)
+                        marked.append((ports, unit))
         return marked
 
     def _end(
@@ -866,12 +891,14 @@ class System:
             ValueError: No link has the end `end`.
         """
         named = self._end_name(end)
-        for index, wired in enumerate(self._links):
-            if named in wired.ends:
-                tap = self._taps.get(index)
-                if tap is None:
-                    tap = self._taps[index] = UartTap(self, wired)
-                return tap
+        for index, wired in enumerate(self._media):
+            match wired:
+                case _LinkWires():
+                    if named in wired.ends:
+                        tap = self._taps.get(index)
+                        if tap is None:
+                            tap = self._taps[index] = UartTap(self, wired)
+                        return tap
         raise ValueError(f"{end!r} is no end of a link of {self!r}")
 
     def _end_name(self, end: object) -> str | None:
@@ -1345,13 +1372,15 @@ class System:
         self._failed = None
         self._undecided.clear()
         self._target = None if snapshot.target is None else snapshot.target.ps
-        for index, wired in enumerate(self._links):
+        for index, wired in enumerate(self._media):
             tap = self._taps.get(index)
             if tap is not None:
                 tap._discard()  # pyright: ignore[reportPrivateUsage]
-            else:
-                for wire in wired.wires:
-                    self._handle.tap_take(wire)
+                continue
+            match wired:
+                case _LinkWires():
+                    for wire in wired.wires:
+                        self._handle.tap_take(wire)
 
     def _require_halted(self, what: str) -> None:
         if self._flight is not None or self._free or self._halting:
