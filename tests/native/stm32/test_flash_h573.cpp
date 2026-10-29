@@ -208,7 +208,7 @@ struct rig
 
   void guest_store(address to, std::uint32_t value) const
   {
-    constexpr address stub = 0x2000'0200;
+    constexpr address stub = 0x2000'0600;
     REQUIRE(f.target->mem().write(stub, 4, 0xE7FE'6001).has_value());
     f.set("r0", to);
     f.set("r1", value);
