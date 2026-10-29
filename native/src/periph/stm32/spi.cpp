@@ -425,6 +425,7 @@ public:
   auto unmute(spi_link_target const& target) -> bool override;
   auto muted(spi_link_target const& target) const -> bool override;
   auto frame_time() const -> std::uint64_t override;
+  auto board_use() const -> spi_board_use override;
 
   void control_written(std::uint32_t old, std::uint32_t now);
   void clear_written(std::uint32_t old, std::uint32_t now);
@@ -777,6 +778,13 @@ void spi::rethrow_refused()
       std::format(
           "{}, not mode {} the firmware set, CPOL {} CPHA {}", joined, bus_mode(),
           get(regs_, polarity_), get(regs_, phase_)));
+}
+
+auto spi::board_use() const -> spi_board_use
+{
+  return {
+      .controller = controller_ != nullptr and link_controller_ == nullptr,
+      .devices    = not attachments_.empty()};
 }
 
 auto spi::frame_time() const -> std::uint64_t

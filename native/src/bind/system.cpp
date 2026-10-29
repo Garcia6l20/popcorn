@@ -1,9 +1,11 @@
 #include "system.hpp"
 
+#include "chip_select.hpp"
 #include "gil_locks.hpp"
 #include "python_callable.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 
 #include <reflex/enum.hpp>
 
@@ -409,6 +411,55 @@ void detail::uart_medium::link() noexcept
   linked_ = true;
 }
 
+detail::spi_bus_medium::spi_bus_medium(
+    std::shared_ptr<periph::stm32::spi_medium> bus,
+    host_ref                                   master,
+    std::vector<host_ref>                      slaves)
+    : bus_{std::move(bus)}, master_{std::move(master)}, slaves_{std::move(slaves)}
+{}
+
+auto detail::spi_bus_medium::links() const -> std::vector<std::shared_ptr<core::member_link>>
+{
+  return bus_->links();
+}
+
+void detail::spi_bus_medium::attach()
+{
+  host_access(master_, [&] { bus_->attach_master(); });
+  for(std::size_t index = 0; index < slaves_.size(); ++index)
+  {
+    host_access(slaves_[index], [&] { bus_->attach_slave(index); });
+  }
+}
+
+void detail::spi_bus_medium::give_back() noexcept
+{
+  auto const hand_back = [&](host_ref const& slot, auto body) {
+    retire(slot, [weak = std::weak_ptr<host_slot const>{slot}, bus = bus_, body = std::move(body)] {
+      auto const owner = weak.lock();
+      if(owner == nullptr)
+      {
+        return;
+      }
+      if(auto const on = owner->host.lock(); on != nullptr and not on->abandoned())
+      {
+        body(*bus);
+      }
+    });
+  };
+  hand_back(master_, [](periph::stm32::spi_medium& bus) { bus.give_back_master(); });
+  for(std::size_t index = 0; index < slaves_.size(); ++index)
+  {
+    hand_back(
+        slaves_[index], [index](periph::stm32::spi_medium& bus) { bus.give_back_slave(index); });
+  }
+}
+
+auto detail::spi_bus_medium::bus() const noexcept -> periph::stm32::spi_medium&
+{
+  return *bus_;
+}
+
 system_handle::system_handle(std::uint64_t slice_instructions, std::int64_t slice_wall_ns)
 {
   if(slice_instructions == 0)
@@ -478,7 +529,7 @@ auto system_handle::add_wire(
     throw config_error(spec.receiver_unit, 0, "wire", "a UART model that takes frames from a wire");
   }
   auto const index   = wires_.size();
-  auto const lane    = static_cast<std::uint32_t>(2 * index + 1);
+  auto const lane    = std::exchange(next_lane_, next_lane_ + 2);
   auto*      machine = &members_[spec.receiver].handle->native();
   auto&      port    = sender.native_port();
   auto       wire    = std::make_shared<periph::stm32::uart_wire>(
@@ -532,6 +583,148 @@ auto system_handle::add_link(std::size_t forth, std::size_t back) -> std::size_t
   other.link();
   links_.emplace_back(forth, back, one.sender());
   return links_.size() - 1;
+}
+
+namespace
+{
+auto spi_port_of(core::machine& target, std::string const& unit) -> periph::stm32::spi_link_port*
+{
+  auto const& peripherals = target.description().peripherals;
+  auto const  named       = std::ranges::find(peripherals, unit, &peripheral_desc::name);
+  if(named == peripherals.end())
+  {
+    return nullptr;
+  }
+  return dynamic_cast<periph::stm32::spi_link_port*>(target.model(named->alias_of.value_or(unit)));
+}
+
+auto spi_end_of(machine_handle& member, std::string const& unit, std::string key)
+    -> periph::stm32::spi_link_port&
+{
+  auto* const port = spi_port_of(member.native(), unit);
+  if(port == nullptr)
+  {
+    throw config_error(unit, 0, std::move(key), "an SPI instance of the member");
+  }
+  return *port;
+}
+
+void check_chip_select(
+    machine_handle&    master,
+    std::string const& port,
+    std::uint8_t       pin,
+    std::string        key)
+{
+  auto&       target = master.native();
+  auto* const gpio   = [&]() -> periph::stm32::gpio_port* {
+    auto const& peripherals = target.description().peripherals;
+    if(std::ranges::find(peripherals, port, &peripheral_desc::name) == peripherals.end())
+    {
+      return nullptr;
+    }
+    return dynamic_cast<periph::stm32::gpio_port*>(target.model(port));
+  }();
+  if(gpio == nullptr)
+  {
+    throw config_error(port, 0, std::move(key), "a GPIO port of the master's part");
+  }
+  if(pin >= gpio->pin_count())
+  {
+    throw config_error(port, 0, "pin", periph::stm32::pin_range_text(gpio->pin_count()));
+  }
+  detail::check_bonded_chip_select(target.description(), port, pin);
+}
+}
+
+auto system_handle::add_spi_bus(spi_bus_spec const& spec) -> std::size_t
+{
+  if(system_ != nullptr or closed_)
+  {
+    throw std::logic_error("buses are added before start()");
+  }
+  if(spec.master >= members_.size() or spec.slaves.empty() or spec.latency_ps <= 0)
+  {
+    throw std::invalid_argument("a bus needs a master member, a slave and a latency above 0");
+  }
+  for(auto const& slave : spec.slaves)
+  {
+    if(slave.member >= members_.size() or slave.member == spec.master)
+    {
+      throw std::invalid_argument("a slave is a member other than the master");
+    }
+  }
+  auto& master      = *members_[spec.master].handle;
+  auto& master_port = spi_end_of(master, spec.master_unit, "master");
+  if(host_access(members_[spec.master].slot, [&] { return master_port.board_use().controller; }))
+  {
+    throw config_error(spec.master_unit, 0, "master", "an SPI instance with no board controller");
+  }
+  std::vector<periph::stm32::spi_slave_end> ends;
+  std::vector<detail::host_ref>             slots;
+  for(std::size_t index = 0; index < spec.slaves.size(); ++index)
+  {
+    auto const& slave = spec.slaves[index];
+    auto const  key   = std::format("slaves[{}]", index);
+    if(slave.cs_pin)
+    {
+      check_chip_select(master, slave.cs_port, *slave.cs_pin, key);
+    }
+    auto&      port = spi_end_of(*members_[slave.member].handle, slave.unit, key);
+    auto const use  = host_access(members_[slave.member].slot, [&] { return port.board_use(); });
+    if(use.controller or use.devices)
+    {
+      throw config_error(
+          slave.unit, 0, key, "an SPI instance with no board controller and no board device");
+    }
+    ends.push_back(
+        {.member     = slave.member,
+         .port       = &port,
+         .cs_port    = slave.cs_port,
+         .cs_pin     = slave.cs_pin,
+         .forth_lane = next_lane_,
+         .back_lane  = next_lane_ + 1});
+    next_lane_ += 2;
+    slots.push_back(members_[slave.member].slot);
+  }
+  auto bus = std::make_shared<periph::stm32::spi_medium>(
+      spec.master, master_port, core::sys_time{spec.latency_ps}, std::move(ends), tap_capacity_);
+  auto& added = media_.emplace_back(
+      std::in_place_type<detail::spi_bus_medium>, std::move(bus), members_[spec.master].slot,
+      std::move(slots));
+  buses_.push_back(static_cast<detail::spi_bus_medium*>(&*added));
+  return buses_.size() - 1;
+}
+
+auto system_handle::spi_tap_take(std::size_t bus) -> std::vector<spi_tap_record>
+{
+  if(bus >= buses_.size())
+  {
+    throw std::out_of_range("no such SPI bus");
+  }
+  std::vector<spi_tap_record> out;
+  for(auto const& frame : buses_[bus]->bus().tap().take())
+  {
+    out.push_back(
+        {.slave    = frame.slave,
+         .unit     = frame.unit,
+         .cs_pin   = frame.cs_pin,
+         .at_ps    = frame.at.ps,
+         .reply_ps = frame.reply.ps,
+         .mosi     = frame.mosi,
+         .miso     = frame.miso,
+         .bits     = frame.bits,
+         .dropped  = frame.dropped});
+  }
+  return out;
+}
+
+auto system_handle::spi_tap_dropped(std::size_t bus) -> std::uint64_t
+{
+  if(bus >= buses_.size())
+  {
+    throw std::out_of_range("no such SPI bus");
+  }
+  return buses_[bus]->bus().tap().dropped();
 }
 
 void system_handle::start(std::vector<std::int64_t> const& offsets_ps)

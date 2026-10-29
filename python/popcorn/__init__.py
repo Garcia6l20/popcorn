@@ -72,6 +72,9 @@ from popcorn._stop import Fault, FrameReturn, Stop
 from popcorn._support import arch_modules
 from popcorn._system import (
     LineState,
+    SpiBus,
+    SpiTap,
+    SpiTapFrame,
     System,
     SystemDescription,
     SystemSnapshot,
@@ -155,6 +158,9 @@ __all__ = [
     "ScalarView",
     "Segment",
     "Snapshot",
+    "SpiBus",
+    "SpiTap",
+    "SpiTapFrame",
     "Stack",
     "Stop",
     "StopReason",

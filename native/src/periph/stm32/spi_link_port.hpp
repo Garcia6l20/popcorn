@@ -70,6 +70,15 @@ public:
   ~spi_link_controller() override;
 };
 
+/** @brief What the board attached to an SPI instance, which no link controller shares. */
+struct spi_board_use
+{
+  /** @brief Whether the board attached a controller. */
+  bool controller{};
+  /** @brief Whether the board attached at least one device. */
+  bool devices{};
+};
+
 /**
  * @brief The side of the STM32 SPI model an SPI link attaches its proxies to, at run time. Reach
  *        it with `dynamic_cast<spi_link_port*>(machine.model(name))`. Every call runs on the
@@ -161,6 +170,12 @@ public:
    * @return Picoseconds, 0 while the kernel clock is stopped.
    */
   [[nodiscard]] virtual auto frame_time() const -> std::uint64_t = 0;
+
+  /**
+   * @brief What the board attached to the instance, a controller and devices, link attachments
+   *        apart.
+   */
+  [[nodiscard]] virtual auto board_use() const -> spi_board_use = 0;
 
 protected:
   /** @brief Destroyed through its model only. */

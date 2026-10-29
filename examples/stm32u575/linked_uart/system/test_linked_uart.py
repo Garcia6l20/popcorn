@@ -175,7 +175,11 @@ async def test_every_block_comes_back_with_its_checksum(system: System) -> None:
 async def test_idle_is_one_frame_after_the_last_byte_arrives(
     system: System, system_description: popcorn.SystemDescription
 ) -> None:
-    latency = {link.b.partition(".")[0]: link.latency for link in system_description.links}
+    latency = {
+        link.b.partition(".")[0]: link.latency
+        for link in system_description.links
+        if isinstance(link, popcorn.UartLink)
+    }
     idles = record_idles(system)
     await run_for(system, s(1))
     frames = tapped(system)

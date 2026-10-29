@@ -1,5 +1,5 @@
 #include "devices.hpp"
-#include "../periph/stm32/pin_range.hpp"
+#include "chip_select.hpp"
 #include "models.hpp"
 #include "python_callable.hpp"
 
@@ -492,31 +492,6 @@ auto stopping(periph::model_factory inner, std::vector<std::shared_ptr<callback_
     }
     return inner(ctx, desc);
   };
-}
-
-void check_bonded_chip_select(
-    part_description const&     description,
-    std::string const&          port,
-    std::optional<std::uint8_t> pin)
-{
-  auto const named = std::ranges::find(description.peripherals, port, &peripheral_desc::name);
-  if(not pin or named == description.peripherals.end())
-  {
-    return;
-  }
-  auto const target = named->alias_of.value_or(port);
-  auto const unit   = std::ranges::find_if(description.peripherals, [&](peripheral_desc const& p) {
-    return p.name == target and not p.alias_of;
-  });
-  if(unit == description.peripherals.end() or not unit->bonded)
-  {
-    return;
-  }
-  if(*pin >= 16 or (*unit->bonded >> *pin & 1U) == 0)
-  {
-    throw config_error(
-        port, 0, "pin", stm32::unbonded_pin_text(description.part, port, *pin, *unit->bonded));
-  }
 }
 
 auto spi_attachment_of(

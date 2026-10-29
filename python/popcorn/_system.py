@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import heapq
 import logging
 import threading
 import weakref
@@ -12,9 +13,10 @@ from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, overload
 
 from popcorn import _core
+from popcorn._devices import chip_select
 from popcorn._enums import ResetKind, StopReason
 from popcorn._errors import ConfigError, EmulationError, MachineBusy, MachineRunning
 from popcorn._host import awaited, watch_awaits
@@ -76,28 +78,80 @@ class UartLink:
     parity: Literal["none", "even", "odd"] = "none"
 
 
-type _Medium = UartLink
-_MEDIA: tuple[type[_Medium], ...] = (UartLink,)
+@dataclass(frozen=True)
+class SpiBus:
+    """An SPI bus of a `System`: one master SPI and one slave SPI per slave, on other members.
+
+    The master's SPI model runs as with a board device per slave, each selected by a chip
+    select pin of the master or by its SS output. A frame the master finishes at system time t
+    is clocked by the slave over [t + `latency`, t + `latency` + one frame time], and the slave's
+    reply completes the master's frame at t + 2 * `latency` + one frame time, whatever the
+    slicing, the thread timing or the system's quantum. SCK pauses for 2 * `latency` between
+    frames. A chip select edge reaches the slave `latency` after the master drove it. A frame
+    the slave never clocks, dropped by a reset of the slave or cut by a deselect, completes
+    with all ones. The master keeps its own board devices on the same SPI, the slaves' SPIs take
+    no board controller and no board device.
+
+        popcorn.SpiBus(
+            master="a.SPI1",
+            slaves={"a.PA4": "b.SPI2", "a.NSS": "c.SPI1"},
+            latency=us(5),
+        )
+
+    Attributes:
+        master: The master's SPI, `"<member>.<SPI>"`, such as `"a.SPI1"`.
+        slaves: Each slave's SPI by the master's chip select: `"<master member>.<pin>"`, a GPIO
+            pin of the master such as `"a.PA4"` selecting the slave while low, or
+            `"<master member>.NSS"` for the master's SS output. Slaves are on members other than
+            the master's. A master drives at most one slave through its SS output.
+        latency: The bus's latency L, above 0. No default: the system's quantum is the smallest
+            L, so L is part of every link's declaration.
+    """
+
+    master: str
+    slaves: Mapping[str, str]
+    latency: VirtualDuration
+
+    def __post_init__(self) -> None:
+        slaves = cast(object, self.slaves)
+        if not isinstance(slaves, Mapping):
+            raise ConfigError(
+                f"slaves: {slaves!r} is no mapping of a chip select to a slave",
+                key="slaves",
+                expected="a mapping of a chip select to a slave SPI",
+            )
+        object.__setattr__(self, "slaves", _FrozenMap(cast(Mapping[str, str], slaves)))
+
+
+type _Medium = UartLink | SpiBus
+_MEDIA: tuple[type[_Medium], ...] = (UartLink, SpiBus)
+
+
+def _named(kind: type) -> str:
+    """`kind`'s name with its article, such as "a UartLink" or "an SpiBus"."""
+    return f"{'an' if kind.__name__.startswith('Spi') else 'a'} {kind.__name__}"
 
 
 def _medium(index: int, link: object) -> _Medium:
     """Return `links[index]` as a medium, or raise ConfigError at `links[index]`."""
     if not isinstance(link, _MEDIA):
         raise ConfigError(
-            f"links[{index}]: a {type(link).__qualname__}, not a "
-            + " or ".join(kind.__name__ for kind in _MEDIA),
+            f"links[{index}]: a {type(link).__qualname__}, not "
+            + " or ".join(_named(kind) for kind in _MEDIA),
             key=f"links[{index}]",
             expected=" or ".join(f"a popcorn.{kind.__name__}" for kind in _MEDIA),
         )
     return link
 
 
-def _check_medium(index: int, link: _Medium) -> tuple[str, ...]:
-    """Check the values of `links[index]`, return the names of its end fields."""
+def _check_medium(index: int, link: _Medium) -> list[tuple[str, object, str]]:
+    """Check the values of `links[index]`, return its ends as (key, value, unit kind)."""
     match link:
         case UartLink():
             _check_line(index, link)
-            return ("a", "b")
+            return [(f"links[{index}].{side}", getattr(link, side), "UART") for side in ("a", "b")]
+        case SpiBus():
+            return _check_bus(index, link).ends
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,8 +182,9 @@ class SystemDescription:
             `Machine` name: not empty, no whitespace, no dot. Members may share a machine
             description: each is its own machine. A member's config and strictness are part of its
             machine description, `CONTROLLER.config("audio")`, `RESPONDER.replace(strict=True)`.
-        links: The links, at least one. Their order is part of the system: it fixes the order
-            of frames arriving at one receiver at the same instant on several links.
+        links: The links, `UartLink` or `SpiBus`, at least one. Their order is part of the
+            system: it fixes the order of frames arriving at one receiver at the same instant on
+            several links.
         offsets: System time of each member's local time at the start, 0 for an absent one.
         goal_cap: Virtual time a member goal may run from its start, None for no cap, as
             `System(goal_cap=)`.
@@ -138,16 +193,19 @@ class SystemDescription:
 
     Raises:
         ConfigError: A check fails, its key naming the field: `members` empty, `members.<name>`
-            a bad name or no MachineDescription, `links` empty, `links[i]` no `UartLink`,
-            `links[i].a` or `.b` naming no member's peripheral as `"<member>.<UART>"`, or a UART
-            in two links, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits` or `.parity`
-            out of range, `offsets.<name>` naming no member or below 0, `goal_cap` not above 0,
-            or `on_member_reset` neither "reset" nor "stop". Whether a link end is a UART of the
-            member's part is checked by `link`, which has the description.
+            a bad name or no MachineDescription, `links` empty, `links[i]` neither `UartLink` nor
+            `SpiBus`, `links[i].a` or `.b` naming no member's peripheral as
+            `"<member>.<UART>"`, `links[i].master` or `links[i].slaves[<chip select>]` naming
+            none as `"<member>.<SPI>"`, a chip select that is not `"<master member>.<pin>"` or
+            `"<master member>.NSS"`, a slave on the master's member, or a UART or SPI in two
+            links, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits` or `.parity` out of
+            range, `offsets.<name>` naming no member or below 0, `goal_cap` not above 0, or
+            `on_member_reset` neither "reset" nor "stop". Whether a link end is a UART or SPI of
+            the member's part is checked by `link`, which has the description.
     """
 
     members: Mapping[str, MachineDescription]
-    links: Sequence[UartLink]
+    links: Sequence[UartLink | SpiBus]
     offsets: Mapping[str, VirtualDuration] = field(default_factory=_FrozenMap[str, VirtualDuration])
     goal_cap: VirtualDuration | None = None
     on_member_reset: Literal["reset", "stop"] = "reset"
@@ -178,8 +236,8 @@ class SystemDescription:
             raise ConfigError("a linked system needs a link", key="links", expected="a link")
         used: set[str] = set()
         for index, link in enumerate(cast(tuple[object, ...], self.links)):
-            for side in _check_medium(index, _medium(index, link)):
-                self._check_end(index, side, used)
+            for key, end, kind in _check_medium(index, _medium(index, link)):
+                self._check_end(key, end, kind, used)
         _offsets(list(self.members), self.offsets)
         cap = cast(object, self.goal_cap)
         if cap is not None and (not isinstance(cap, VirtualDuration) or cap.ps <= 0):
@@ -195,23 +253,23 @@ class SystemDescription:
                 expected="'reset' or 'stop'",
             )
 
-    def _check_end(self, index: int, side: str, used: set[str]) -> None:
-        """Check end `side` of `links[index]` and mark it used."""
-        key = f"links[{index}].{side}"
-        end = cast(object, getattr(self.links[index], side))
+    def _check_end(self, key: str, end: object, kind: str, used: set[str]) -> None:
+        """Check one end of a link, a `"<member>.<kind>"` string, and mark it used."""
         if not isinstance(end, str):
             raise ConfigError(
                 f"{key}: a {type(end).__qualname__}, not a str",
                 key=key,
-                expected="'<member>.<UART>'",
+                expected=f"'<member>.<{kind}>'",
             )
         name, dot, unit = end.partition(".")
         if not dot or not unit or name not in self.members:
             raise ConfigError(
-                f"{key}: {end!r} names no member UART", key=key, expected="'<member>.<UART>'"
+                f"{key}: {end!r} names no member {kind}",
+                key=key,
+                expected=f"'<member>.<{kind}>'",
             )
         if end in used:
-            raise ConfigError(f"{key}: {end} is in two links", key=key, expected="a free UART")
+            raise ConfigError(f"{key}: {end} is in two links", key=key, expected=f"a free {kind}")
         used.add(end)
 
     @property
@@ -370,13 +428,51 @@ class TapFrame:
 
 
 @dataclass(frozen=True)
+class SpiTapFrame:
+    """One frame on an SPI bus, as `SpiTap` shows it. Times are system times.
+
+    Attributes:
+        slave: The slave's SPI, `"<member>.<SPI>"`.
+        cs: The chip select pin of the master that selected the slave, such as `"PA4"`, None for
+            the master's SS output.
+        unit: Number the master's side gave the frame on this slave's link, increasing per
+            slave: chip select edges of that slave take numbers from the same counter.
+        at: End of the master's frame at the master: the stamp the slave sees `latency` later.
+        reply: Stamp of the slave's reply, `at` + `latency` + one frame time, or the time the
+            frame was dropped. The master completes the frame `latency` after `reply`.
+        mosi: The frame the master sent, in wire order, first bit on the wire in bit `bits - 1`.
+        miso: The frame the slave returned, in wire order, all ones when `dropped`.
+        bits: Frame size, 4 to 32.
+        dropped: Whether the slave never clocked the frame, a reset of the slave dropped it or a
+            deselect cut it, and the master got all ones.
+    """
+
+    slave: str
+    cs: str | None
+    unit: int
+    at: VirtualTime
+    reply: VirtualTime
+    mosi: int
+    miso: int
+    bits: int
+    dropped: bool
+
+
+@dataclass(frozen=True)
 class _LinkWires:
     ends: tuple[str, str]
     wires: tuple[int, int]
     link: int
 
 
-type _Wired = _LinkWires
+@dataclass(frozen=True)
+class _SpiWired:
+    ends: tuple[str, ...]
+    selects: tuple[str | None, ...]
+    bus: int
+
+
+type _Wired = _LinkWires | _SpiWired
 
 
 @dataclass(frozen=True)
@@ -581,7 +677,7 @@ class System:
     def __init__(
         self,
         members: Mapping[str, Machine],
-        links: Sequence[UartLink],
+        links: Sequence[UartLink | SpiBus],
         *,
         offsets: Mapping[str, VirtualDuration] | None = None,
         on_member_reset: Literal["reset", "stop"] = "reset",
@@ -610,10 +706,14 @@ class System:
 
         Raises:
             ConfigError: A member named apart from its key, `members.<name>`, already in a
-                linked system, or no link, `links`, or a link that is no `UartLink`, `links[i]`,
-                or a link end that is not a UART of a member, a UART in two links or bridged to
-                a pty, or whose CTS input `UartStream.set_cts` left not ready or with a change
-                pending, or whose model takes no frames from a wire, such as a plugin UART
+                linked system, or no link, `links`, or a link that is neither a `UartLink` nor
+                an `SpiBus`, `links[i]`, or an SPI end, `links[i].master` or
+                `links[i].slaves[<chip select>]`, that is not an SPI of a member, a master SPI
+                with a board controller, a slave SPI with a board controller or a board device,
+                an SPI in two links, a chip select on an unbonded pad of the master's package,
+                key `pin`, or a link end that is not a UART of a member, a UART in two links or
+                bridged to a pty, or whose CTS input `UartStream.set_cts` left not ready or with a
+                change pending, or whose model takes no frames from a wire, such as a plugin UART
                 implementing only `periph::uart_port`, `links[i].a` or `links[i].b`, a value out
                 of range, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits` or `.parity`,
                 or an offset of no member or below 0, `offsets.<name>`.
@@ -647,7 +747,7 @@ class System:
         media = [_medium(index, link) for index, link in enumerate(cast(Sequence[object], links))]
         offset_ps = _offsets(self._names, offsets or {})
         self._media: list[_Wired] = []
-        self._taps: dict[int, UartTap] = {}
+        self._taps: dict[int, UartTap | SpiTap] = {}
         self._handle = _core.SystemHandle(
             slice_instructions, max(1, round(slice_wall_budget * 1e9))
         )
@@ -697,6 +797,69 @@ class System:
         match link:
             case UartLink():
                 return self._add_uart(index, link, used)
+            case SpiBus():
+                return self._add_spi(index, link, used)
+
+    def _add_spi(self, index: int, bus: SpiBus, used: set[tuple[str, str]]) -> _SpiWired:
+        lines = _check_bus(index, bus).lines
+        master, master_unit = self._spi_end(f"links[{index}].master", bus.master, used)
+        spec = _core.SpiBusSpec()
+        spec.master = master
+        spec.master_unit = master_unit
+        spec.latency_ps = bus.latency.ps
+        keys: list[str] = []
+        ends: list[str] = [f"{self._names[master]}.{master_unit}"]
+        selects: list[str | None] = []
+        slaves: list[_core.SpiSlaveSpec] = []
+        for select, end in bus.slaves.items():
+            key = f"links[{index}].slaves[{select!r}]"
+            member, unit = self._spi_end(key, end, used)
+            port, pin = lines[select]
+            slave = _core.SpiSlaveSpec()
+            slave.member = member
+            slave.unit = unit
+            slave.cs_port = port
+            slave.cs_pin = pin
+            slaves.append(slave)
+            keys.append(key)
+            ends.append(f"{self._names[member]}.{unit}")
+            selects.append(None if pin is None else select.partition(".")[2])
+        spec.slaves = slaves
+        try:
+            number = self._handle.add_spi_bus(spec)
+        except ConfigError as error:
+            if error.key == "master":
+                key = f"links[{index}].master"
+            elif error.key.startswith("slaves["):
+                key = keys[int(error.key[len("slaves[") : -1])]
+            else:
+                raise
+            raise ConfigError(
+                f"{key}: {error.file} is not {error.expected}",
+                file=error.file,
+                key=key,
+                expected=error.expected,
+            ) from error
+        return _SpiWired(tuple(ends), tuple(selects), number)
+
+    def _spi_end(self, key: str, end: str, used: set[tuple[str, str]]) -> tuple[int, str]:
+        if not isinstance(cast(object, end), str):
+            raise ConfigError(
+                f"{key}: {end!r} names no member SPI", key=key, expected="'<member>.<SPI>'"
+            )
+        name, _, unit = end.partition(".")
+        machine = self._machines.get(name)
+        if machine is None:
+            raise ConfigError(
+                f"{key}: {end!r} names no member SPI", key=key, expected="'<member>.<SPI>'"
+            )
+        serving = machine._ports.serving(unit)  # pyright: ignore[reportPrivateUsage]
+        if (name, serving) in used:
+            raise ConfigError(
+                f"{key}: {name}.{serving} is in two links", key=key, expected="a free SPI"
+            )
+        used.add((name, serving))
+        return self._index[name], serving
 
     def _add_uart(self, index: int, link: UartLink, used: set[tuple[str, str]]) -> _LinkWires:
         word_bits = _check_line(index, link)
@@ -752,6 +915,8 @@ class System:
                         ports = self._machines[name]._ports  # pyright: ignore[reportPrivateUsage]
                         ports.linked.add(unit)
                         marked.append((ports, unit))
+                case _SpiWired():
+                    pass
         return marked
 
     def _end(
@@ -883,22 +1048,44 @@ class System:
         self._require_stopped()
         return VirtualTime(self._handle.time_of_ps(index))
 
-    def tap(self, end: str) -> UartTap:
-        """The tap of the link with end `end`, `"<member>.<UART>"`, either end or an alias of
-        its UART: the same `UartTap` for both ends. It stays readable after `close()`.
+    @overload
+    def tap(self, end: str, /) -> UartTap: ...
+
+    @overload
+    def tap[T: UartTap | SpiTap](self, end: str, kind: type[T], /) -> T: ...
+
+    def tap(self, end: str, kind: type[UartTap | SpiTap] | None = None, /) -> UartTap | SpiTap:
+        """The tap of the link or bus with end `end`, `"<member>.<UART>"` or
+        `"<member>.<SPI>"`, either end or an alias of its peripheral: the same tap for every end.
+        `tap(end)` gives the `UartTap` of a `UartLink` end, `tap(end, SpiTap)` the `SpiTap` of an
+        `SpiBus` end. It stays readable after `close()`.
+
+        Args:
+            end: A link end.
+            kind: `UartTap` or `SpiTap`, the class of the tap the end has. Static checkers type
+                the result by it, and the call raises TypeError for another class.
 
         Raises:
             ValueError: No link has the end `end`.
+            TypeError: The tap of `end` is no `kind`, or no `UartTap` when `kind` is None.
         """
         named = self._end_name(end)
         for index, wired in enumerate(self._media):
-            match wired:
-                case _LinkWires():
-                    if named in wired.ends:
-                        tap = self._taps.get(index)
-                        if tap is None:
-                            tap = self._taps[index] = UartTap(self, wired)
-                        return tap
+            if named not in wired.ends:
+                continue
+            tap = self._taps.get(index)
+            if tap is None:
+                match wired:
+                    case _LinkWires():
+                        tap = UartTap(self, wired)
+                    case _SpiWired():
+                        tap = SpiTap(self, wired)
+                self._taps[index] = tap
+            if kind is None and not isinstance(tap, UartTap):
+                raise TypeError(f"{end!r} has {_named(type(tap))}, pass {type(tap).__name__}")
+            if kind is not None and not isinstance(tap, kind):
+                raise TypeError(f"{end!r} has {_named(type(tap))}, not {_named(kind)}")
+            return tap
         raise ValueError(f"{end!r} is no end of a link of {self!r}")
 
     def _end_name(self, end: object) -> str | None:
@@ -1381,6 +1568,8 @@ class System:
                 case _LinkWires():
                     for wire in wired.wires:
                         self._handle.tap_take(wire)
+                case _SpiWired():
+                    self._handle.spi_tap_take(wired.bus)
 
     def _require_halted(self, what: str) -> None:
         if self._flight is not None or self._free or self._halting:
@@ -2546,6 +2735,147 @@ class UartTap:
         return f"UartTap({self._ends[0]} <-> {self._ends[1]})"
 
 
+class SpiTap:
+    """Every frame on one `SpiBus` of a `System`, `system.tap("a.SPI1", SpiTap)`, with its system
+    times.
+
+    The tap gets a frame when the master's side takes the slave's reply, in the master's drain
+    that follows the reply's stamp. After a member stop, an IDLE pause, an error or a TIME stop
+    it holds the frames whose reply the master's drains reached, which depends on the quantum
+    for a frame whose reply lies near the pause point. After `close()` it holds every frame the
+    master took. A frame's content never depends on the quantum, the slicing or the wall
+    timing. It keeps up to 1 Mi frames not read yet, the oldest dropped and counted in
+    `dropped`: take them with `frames()`. The frames one call takes are in the order of `at`, by
+    slave index for frames of one `at`. Frames taken by separate calls can come out of order of
+    `at`, since the master takes a slow frame's reply after a later fast one's. Reading never
+    changes what the master or the slaves get.
+    """
+
+    __slots__ = (
+        "__weakref__",
+        "_buffer",
+        "_bus",
+        "_dropped_base",
+        "_ends",
+        "_lock",
+        "_overflow",
+        "_selects",
+        "_system",
+    )
+
+    def __init__(self, system: System, wired: _SpiWired) -> None:
+        """Wrap a bus of `system`. Use `System.tap` instead."""
+        self._system = system
+        self._ends = wired.ends
+        self._selects = wired.selects
+        self._bus = wired.bus
+        self._buffer = deque[SpiTapFrame](maxlen=_TAP_KEEP)
+        self._overflow = 0
+        self._dropped_base = 0
+        self._lock = threading.Lock()
+
+    @property
+    def ends(self) -> tuple[str, ...]:
+        """The bus's ends, `"<member>.<SPI>"`, each named by the SPI serving it: the master,
+        then the slaves in the order of `SpiBus.slaves`."""
+        return self._ends
+
+    @property
+    def available(self) -> int:
+        """Frames the tap holds, not read yet."""
+        with self._lock:
+            self._pull()
+            return len(self._buffer)
+
+    @property
+    def dropped(self) -> int:
+        """Frames the tap dropped because it held its limit, since system start or the last
+        `System.restore`."""
+        return self._dropped_total() - self._dropped_base
+
+    def _dropped_total(self) -> int:
+        return self._overflow + self._native.spi_tap_dropped(self._bus)
+
+    def frames(self, *, slave: str | None = None) -> list[SpiTapFrame]:
+        """Take every frame the tap holds, of slave `slave` only when given, oldest first.
+        Never runs the system, allowed stopped and running, from any thread.
+
+        Args:
+            slave: A slave's SPI, `"<member>.<SPI>"` or an alias of its SPI, None for all.
+
+        Returns:
+            The frames, in the order of `at`, by slave index for frames of one `at`.
+
+        Raises:
+            TypeError: `slave` is no str.
+            ValueError: `slave` is no slave of this bus.
+        """
+        index = None if slave is None else self._slave(slave)
+        with self._lock:
+            self._pull()
+            if index is None:
+                taken = list(self._buffer)
+                self._buffer.clear()
+            else:
+                named = self._ends[index + 1]
+                taken = [frame for frame in self._buffer if frame.slave == named]
+                kept = [frame for frame in self._buffer if frame.slave != named]
+                self._buffer.clear()
+                self._buffer.extend(kept)
+        return taken
+
+    @property
+    def _native(self) -> _core.SystemHandle:
+        return self._system._handle  # pyright: ignore[reportPrivateUsage]
+
+    def _slave(self, slave: str) -> int:
+        if not isinstance(cast(object, slave), str):
+            raise TypeError(f"slave must be a str, not {type(slave).__name__}")
+        named = self._system._end_name(slave)  # pyright: ignore[reportPrivateUsage]
+        if named in self._ends[1:]:
+            return self._ends.index(named) - 1
+        raise ValueError(f"slave {slave!r} is no slave of {', '.join(self._ends[1:])}")
+
+    def _discard(self) -> None:
+        """Drop every frame held, native and buffered, for a restore."""
+        with self._lock:
+            self._native.spi_tap_take(self._bus)
+            self._buffer.clear()
+            self._dropped_base = self._dropped_total()
+
+    def _pull(self) -> None:
+        """Move the native tap's frames into the buffer, with `_lock` held."""
+        records = sorted(
+            self._native.spi_tap_take(self._bus), key=lambda record: (record.at_ps, record.slave)
+        )
+        self._overflow += max(0, len(self._buffer) + len(records) - _TAP_KEEP)
+        pulled = [
+            SpiTapFrame(
+                slave=self._ends[record.slave + 1],
+                cs=self._selects[record.slave],
+                unit=record.unit,
+                at=VirtualTime(record.at_ps),
+                reply=VirtualTime(record.reply_ps),
+                mosi=record.mosi,
+                miso=record.miso,
+                bits=record.bits,
+                dropped=record.dropped,
+            )
+            for record in records
+        ]
+        if self._buffer and pulled and self._order(self._buffer[-1]) > self._order(pulled[0]):
+            merged = heapq.merge(self._buffer, pulled, key=self._order)
+            self._buffer = deque(merged, maxlen=_TAP_KEEP)
+        else:
+            self._buffer.extend(pulled)
+
+    def _order(self, frame: SpiTapFrame) -> tuple[int, int]:
+        return frame.at.ps, self._ends.index(frame.slave)
+
+    def __repr__(self) -> str:
+        return f"SpiTap({self._ends[0]} -> {', '.join(self._ends[1:])})"
+
+
 def _check_time(name: str, value: VirtualTime) -> None:
     if not isinstance(cast(object, value), VirtualTime):
         raise TypeError(f"{name} must be a VirtualTime, not {type(value).__name__}")
@@ -2681,6 +3011,79 @@ def _check_line(index: int, link: UartLink) -> int:
                 f"{key}: {getattr(link, name)!r} is no UART line value", key=key, expected=expected
             )
     return word_bits
+
+
+class _CheckedBus(NamedTuple):
+    """What `_check_bus` found: the ends as (key, value, unit kind), the master, then each
+    slave, and the GPIO port and pin of each chip select."""
+
+    ends: list[tuple[str, object, str]]
+    lines: dict[object, tuple[str, int | None]]
+
+
+def _check_bus(index: int, bus: SpiBus) -> _CheckedBus:
+    """Check the values of `links[index]`, an `SpiBus`, return its ends and chip selects."""
+    latency = cast(object, bus.latency)
+    if not isinstance(latency, VirtualDuration) or latency.ps <= 0:
+        raise ConfigError(
+            f"links[{index}].latency: {bus.latency!r} is no duration above 0",
+            key=f"links[{index}].latency",
+            expected="a VirtualDuration above 0",
+        )
+    master = cast(object, bus.master)
+    ends: list[tuple[str, object, str]] = [(f"links[{index}].master", master, "SPI")]
+    lines: dict[object, tuple[str, int | None]] = {}
+    if not isinstance(master, str) or "." not in master:
+        return _CheckedBus(ends, lines)
+    owner = master.partition(".")[0]
+    slaves = cast(object, bus.slaves)
+    if not isinstance(slaves, Mapping) or not slaves:
+        raise ConfigError(
+            f"links[{index}].slaves: {slaves!r} is no mapping of a chip select to a slave",
+            key=f"links[{index}].slaves",
+            expected="a mapping of a chip select to a slave SPI, at least one",
+        )
+    for select, slave in cast(Mapping[object, object], slaves).items():
+        key = f"links[{index}].slaves[{select!r}]"
+        line = _chip_select(owner, select)
+        if line is None:
+            raise ConfigError(
+                f"{key}: {select!r} is no chip select of {owner or 'the master'}",
+                key=key,
+                expected="'<master member>.<pin>', such as 'a.PA4', or '<master member>.NSS'",
+            )
+        if line in lines.values():
+            raise ConfigError(
+                f"{key}: {select!r} names a chip select another slave of the bus uses",
+                key=key,
+                expected="a chip select no other slave of the bus uses",
+            )
+        lines[select] = line
+        if isinstance(slave, str) and slave.partition(".")[0] == owner:
+            raise ConfigError(
+                f"{key}: {slave} is on the master's member",
+                key=key,
+                expected="an SPI of another member",
+            )
+        ends.append((key, slave, "SPI"))
+    return _CheckedBus(ends, lines)
+
+
+def _chip_select(owner: str, select: object) -> tuple[str, int | None] | None:
+    """The GPIO port and pin of chip select `select`, `"<owner>.<pin>"` or `"<owner>.NSS"`
+    for the SS output, None when it is neither."""
+    if not isinstance(select, str):
+        return None
+    name, dot, pin = select.partition(".")
+    if not dot or name != owner:
+        return None
+    if pin == "NSS":
+        return "", None
+    try:
+        port, number = chip_select(pin)
+    except ValueError:
+        return None
+    return port, number
 
 
 def _is_machine_name(name: str) -> bool:

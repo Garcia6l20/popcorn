@@ -224,8 +224,8 @@ def test_a_foreign_medium_is_refused_at_its_index_by_description_and_system(
         popcorn.System({"a": a, "b": b}, [link(), foreign])  # pyright: ignore[reportArgumentType]
     for caught in (declared, built):
         assert caught.value.key == "links[1]"
-        assert caught.value.expected == "a popcorn.UartLink"
-        assert str(caught.value).startswith("links[1]: a tuple, not a UartLink")
+        assert caught.value.expected == "a popcorn.UartLink or a popcorn.SpiBus"
+        assert str(caught.value).startswith("links[1]: a tuple, not a UartLink or an SpiBus")
     with popcorn.System({"a": a, "b": b}, [link()]) as system:
         assert system.quantum == L
         assert system.tap("b.USART1").ends == ("a.USART1", "b.USART1")

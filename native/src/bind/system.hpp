@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../periph/stm32/spi_medium.hpp"
 #include "board.hpp"
 #include "host_future.hpp"
 #include "machine.hpp"
@@ -76,6 +77,55 @@ struct[[= py::rename{"TapRecord"}]] tap_record
   [[= py::readonly]] bool injected{};
   /** @brief Whether a line cut touched it. */
   [[= py::readonly]] bool cut{};
+};
+
+/** @brief One slave of an SPI bus, as System declares it to SystemHandle. */
+struct[[= py::rename{"SpiSlaveSpec"}]] spi_slave_spec
+{
+  /** @brief Index of the slave's member. */
+  std::size_t member{};
+  /** @brief Name of the slave's SPI instance. */
+  std::string unit{};
+  /** @brief Chip select GPIO port on the master, such as `GPIOA`, empty for the SS output. */
+  std::string cs_port{};
+  /** @brief Chip select pin on the master, empty for the SS output. */
+  std::optional<std::uint8_t> cs_pin{};
+};
+
+/** @brief One SPI bus, as System declares it to SystemHandle. */
+struct[[= py::rename{"SpiBusSpec"}]] spi_bus_spec
+{
+  /** @brief Index of the master's member. */
+  std::size_t master{};
+  /** @brief Name of the master's SPI instance. */
+  std::string master_unit{};
+  /** @brief Latency L in picoseconds, above 0. */
+  std::int64_t latency_ps{};
+  /** @brief The slaves, at least one. */
+  std::vector<spi_slave_spec> slaves{};
+};
+
+/** @brief One frame an SPI bus's tap kept, times in picoseconds of system time. */
+struct[[= py::rename{"SpiTapRecord"}]] spi_tap_record
+{
+  /** @brief Index of the slave among the bus's slaves. */
+  [[= py::readonly]] std::size_t slave{};
+  /** @brief Unit number the master side gave the frame. */
+  [[= py::readonly]] std::uint64_t unit{};
+  /** @brief Chip select pin on the master, empty for the SS output. */
+  [[= py::readonly]] std::optional<std::uint8_t> cs_pin{};
+  /** @brief End of the master's frame. */
+  [[= py::readonly]] std::int64_t at_ps{};
+  /** @brief Stamp of the slave's reply, or the time the frame was dropped. */
+  [[= py::readonly]] std::int64_t reply_ps{};
+  /** @brief Frame the master sent. */
+  [[= py::readonly]] std::uint32_t mosi{};
+  /** @brief Frame the slave returned. */
+  [[= py::readonly]] std::uint32_t miso{};
+  /** @brief Frame size in bits. */
+  [[= py::readonly]] std::uint8_t bits{};
+  /** @brief Whether the slave never clocked the frame. */
+  [[= py::readonly]] bool dropped{};
 };
 
 namespace detail
@@ -155,6 +205,36 @@ private:
   std::shared_ptr<periph::uart_endpoint>    own_;
   bool                                      linked_{};
 };
+
+/**
+ * @brief One SPI bus: a spi_medium over a master member and its slave members, attached at
+ *        start() and given back at close.
+ */
+class spi_bus_medium final : public medium
+{
+public:
+  /**
+   * @param bus The medium.
+   * @param master Host slot of the master.
+   * @param slaves Host slot of each slave, in the medium's slave order.
+   */
+  spi_bus_medium(
+      std::shared_ptr<periph::stm32::spi_medium> bus,
+      host_ref                                   master,
+      std::vector<host_ref>                      slaves);
+
+  [[nodiscard]] auto links() const -> std::vector<std::shared_ptr<core::member_link>> override;
+  void               attach() override;
+  void               give_back() noexcept override;
+
+  /** @brief The medium. */
+  [[nodiscard]] auto bus() const noexcept -> periph::stm32::spi_medium&;
+
+private:
+  std::shared_ptr<periph::stm32::spi_medium> bus_;
+  host_ref                                   master_;
+  std::vector<host_ref>                      slaves_;
+};
 }
 
 /**
@@ -230,6 +310,32 @@ public:
    */
   [[= py::doc{"Pair two wires as one link before start(), return its index."}]] auto
       add_link(std::size_t forth, std::size_t back) -> std::size_t;
+
+  /**
+   * @brief Adds an SPI bus before start(): the master's SPI frames reach the slaves' SPIs L
+   *        later and their replies the master L after that. The bus holds two links per
+   *        slave, added to the system in slave order.
+   * @param spec The bus.
+   * @return The bus's index among the SPI buses.
+   * @throws std::logic_error after start().
+   * @throws std::invalid_argument for a member index out of range, a slave on the master's
+   *         member, no slave or a latency of 0.
+   * @throws config_error with key `master` or `slaves[i]` and the offending unit as file when an
+   *         end is no SPI instance of its member, the master's SPI has a board controller, a
+   *         slave's SPI has a board controller or device, or a chip select names no GPIO port or
+   *         pin of the master. With key `pin` when the chip select is an unbonded pad of the
+   *         master's package.
+   */
+  [[= py::doc{"Add an SPI bus before start(), return its index."}]] auto
+      add_spi_bus(spi_bus_spec const& spec) -> std::size_t;
+
+  /** @brief Takes every frame the tap of SPI bus @p bus holds, oldest first. */
+  [[= py::doc{"Take the frames an SPI bus's tap holds."}]] auto spi_tap_take(std::size_t bus)
+      -> std::vector<spi_tap_record>;
+
+  /** @brief Frames the tap of SPI bus @p bus dropped because it was full. */
+  [[= py::doc{"Frames an SPI bus's tap dropped."}]] auto spi_tap_dropped(std::size_t bus)
+      -> std::uint64_t;
 
   /**
    * @brief Attaches the wires, builds the system and fixes each member's base: member i's local
@@ -527,6 +633,8 @@ private:
   std::vector<member_entry>                     members_;
   std::vector<std::polymorphic<detail::medium>> media_;
   std::vector<detail::uart_medium*>             wires_;
+  std::vector<detail::spi_bus_medium*>          buses_;
+  std::uint32_t                                 next_lane_ = 1;
   std::deque<link_entry>                        links_;
   std::vector<reflex::py::nb::object>           handles_;
   std::shared_ptr<core::system>                 system_;

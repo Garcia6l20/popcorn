@@ -19,6 +19,7 @@
 #define LINK_REPEAT   9u
 #define LINK_KICK     10u
 #define LINK_FORMAT   11u
+#define LINK_ABORT    12u
 #define LINK_BOOT     0xB0000000u
 
 typedef struct
@@ -634,6 +635,10 @@ void link_run(void)
         break;
       case LINK_FORMAT:
         link_format(arg >> 8, arg & 0x7u);
+        break;
+      case LINK_ABORT:
+        LL_SPI_Disable(SPI1);
+        LL_SPI_Enable(SPI1);
         break;
       default:
         LINK_AREA->pc--;
