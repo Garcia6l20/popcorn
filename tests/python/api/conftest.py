@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import os
 import struct
 import threading
+import time
+import weakref
 from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +47,22 @@ def run_bounded[T](coroutine: Coroutine[object, object, T], seconds: float = 2) 
         return task.result()
 
     return asyncio.run(bounded())
+
+
+def collected[T](watch: weakref.ref[T], rounds: int = 100) -> bool:
+    """Whether the object of `watch` is gone after full collections, at most `rounds` of them.
+
+    `gc.collect()` returns 0 at once while a collection runs on another thread, such as an
+    automatic one on a pytest-timeout timer thread that finalizes an earlier machine. That
+    machine's handle releases the GIL to halt its thread, so the collection is still running.
+    Each round sleeps 10 ms, which lets that thread finish it.
+    """
+    for _ in range(rounds):
+        gc.collect()
+        if watch() is None:
+            return True
+        time.sleep(0.01)
+    return False
 
 
 def holds_pty(path: str) -> bool:

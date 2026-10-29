@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import struct
+import threading
 import weakref
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -18,7 +19,7 @@ from popcorn.model import Model
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
 from . import models_example
-from .conftest import run_bounded, stall, stalled
+from .conftest import collected, run_bounded, stall, stalled
 from .devices_example import Eeprom24, JedecDevice
 from .projects import DEVICES
 
@@ -709,13 +710,51 @@ def test_a_device_board_without_a_live_machine_is_refused(
     kept = codec.board
     watch = weakref.ref(m)
     del m
-    gc.collect()
-    assert watch() is None
+    assert collected(watch)
     with pytest.raises(ConfigError):
         kept.set_audio_clock("SAI1", "A", 16_000)
     again = clocked_machine(u575, codec)
     kept.set_audio_clock("SAI1", "A", 16_000)
     assert again.periph.SAI1.audio("A").external_frame_hz == 16_000
+
+
+class _Finalized:
+    def __init__(self, on_del: Callable[[], None]) -> None:
+        self.own = self
+        self.on_del = on_del
+
+    def __del__(self) -> None:
+        self.on_del()
+
+
+def test_collected_waits_for_a_collection_running_on_another_thread(
+    u575: popcorn.PartDescription,
+) -> None:
+    entered, release = threading.Event(), threading.Event()
+
+    def blocked() -> None:
+        entered.set()
+        release.wait(5)
+
+    gc.disable()
+    try:
+        _Finalized(blocked)
+        collector = threading.Thread(target=gc.collect)
+        collector.start()
+        try:
+            assert entered.wait(5)
+            m = clocked_machine(u575, I2CTarget(0x38))
+            watch = weakref.ref(m)
+            del m
+            assert gc.collect() == 0
+            assert watch() is not None
+        finally:
+            release.set()
+    finally:
+        gc.enable()
+    assert collected(watch)
+    collector.join(5)
+    assert not collector.is_alive()
 
 
 @pytest.mark.parametrize(
