@@ -127,6 +127,20 @@ source = "RM0038 25.6: Cat.1 has 20 backup registers"
 A name the peripheral lacks is an error keyed `register_drops[<n>].names`, and a later rule
 naming a dropped register fails as naming an unknown one.
 
+`[[register_renames]]` renames registers of the peripherals that match its `peripherals` globs and
+of their aliases, each glob matching at least one peripheral that is not an alias, left after the
+drops:
+
+```toml
+[[register_renames]]
+peripherals = ["GPIO?"]
+renames = { OSPEEDER = "OSPEEDR" }
+source = "RM0038 7.4.3: the register is GPIOx_OSPEEDR, the SVD spells it OSPEEDER"
+```
+
+An old name an instance lacks and a new name it already has are errors keyed
+`register_renames[<n>].renames.<old>`, and a later rule names the new spelling.
+
 ## Alternate function drops
 
 The CubeMX GPIO modes file can list an alternate function a part cannot route. A patch removes
@@ -308,6 +322,17 @@ region, and for a `controller` table entry naming `DATA_EEPROM` beside the `eepr
 `[cmsis] suffix = "xe"` in a patch names the CMSIS device header `<line>xe.h`, `stm32l152xe.h`
 for `STM32L152RETx`. The suffix is `x` followed by at least one lowercase letter or digit. At most
 one matching patch sets it. A part with no such patch uses `<line>xx.h`.
+
+## Device signature
+
+`[signature]` writes the flash size, the 96-bit unique ID and, optionally, the package code into
+a read-only region. `uid_words` are the three ID words in ID order, written little endian at
+`uid` plus the matching entry of `uid_offsets`. `uid_offsets` is three byte offsets from `uid`,
+`[0, 4, 8]` when absent, so the words are contiguous. A family whose manual places them apart sets
+them, `[0, 4, 0x14]` puts the third word 0x14 bytes from the base. `package` and `packages` come
+together: both name the package-code word and its table, or neither is set and the region holds no
+package word. A word that overlaps another or leaves the region raises `DescriptionError` keyed
+`signature.<word>`.
 
 ## Shipped descriptions
 

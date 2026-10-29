@@ -443,3 +443,122 @@ def test_an_empty_ip_table_is_an_error(tmp_path: Path) -> None:
         _apply(_target(), path)
     assert excinfo.value.key == "ip"
     assert excinfo.value.expected == "a renames, renames_if_present or versions entry"
+
+
+def _rename_patch(tmp_path: Path, entry: str, extra: str = "") -> Path:
+    return _ip_patch(tmp_path, f'{extra}\n[[register_renames]]\n{entry}\nsource = "probe"\n')
+
+
+def test_register_renames_rename_the_register_of_every_matching_peripheral(tmp_path: Path) -> None:
+    target = _target()
+    before = [r.offset for r in target_peripheral(target, "A").registers if r.name == "SR2"]
+    report = _apply(
+        target, _rename_patch(tmp_path, 'peripherals = ["A", "B"]\nrenames = { SR2 = "SRX" }')
+    )
+    names = {r.name: r.offset for r in target_peripheral(target, "A").registers}
+    assert "SR2" not in names
+    assert [names["SRX"]] == before
+    assert report.registers_renamed == 1 * 2
+
+
+def test_register_renames_glob_matches_several_peripherals(tmp_path: Path) -> None:
+    target = _target()
+    _apply(target, _rename_patch(tmp_path, 'peripherals = ["*D"]\nrenames = { CR = "CTL" }'))
+    assert "CTL" in {r.name for r in target_peripheral(target, "D").registers}
+    assert "CTL" in {r.name for r in target_peripheral(target, "SEC_D").registers}
+
+
+def test_register_renames_leave_unmatched_peripherals_alone(tmp_path: Path) -> None:
+    target = _target()
+    _apply(target, _rename_patch(tmp_path, 'peripherals = ["D"]\nrenames = { CR = "CTL" }'))
+    assert "CR" in {r.name for r in target_peripheral(target, "SEC_D").registers}
+
+
+def test_register_renames_reach_the_aliases_of_the_peripheral(tmp_path: Path) -> None:
+    target = _target()
+    report = _apply(
+        target,
+        _rename_patch(tmp_path, 'peripherals = ["D"]\nrenames = { CR = "CTL" }', _ALIASES),
+    )
+    assert "CTL" in {r.name for r in target_peripheral(target, "D").registers}
+    assert "CTL" in {r.name for r in target_peripheral(target, "SEC_D").registers}
+    assert "CR" not in {r.name for r in target_peripheral(target, "SEC_D").registers}
+    assert report.registers_renamed == 1
+
+
+def test_register_renames_with_a_glob_naming_base_and_alias_rename_both_once(
+    tmp_path: Path,
+) -> None:
+    target = _target()
+    report = _apply(
+        target,
+        _rename_patch(tmp_path, 'peripherals = ["*D"]\nrenames = { CR = "CTL" }', _ALIASES),
+    )
+    for name in ("D", "SEC_D"):
+        assert [r.name for r in target_peripheral(target, name).registers] == ["CTL"]
+    assert report.registers_renamed == 1
+
+
+def test_register_renames_refuse_a_glob_matching_only_aliases(tmp_path: Path) -> None:
+    target = _target()
+    with pytest.raises(DescriptionError) as excinfo:
+        _apply(
+            target,
+            _rename_patch(tmp_path, 'peripherals = ["SEC_D"]\nrenames = { CR = "CTL" }', _ALIASES),
+        )
+    assert excinfo.value.key == "register_renames[0].peripherals"
+    assert excinfo.value.expected == "a peripheral that is not an alias matching SEC_D"
+
+
+@pytest.mark.parametrize(
+    ("entry", "key", "expected"),
+    [
+        (
+            'peripherals = ["A"]\nrenames = { NOPE = "X" }',
+            "register_renames[0].renames.NOPE",
+            "a register named NOPE in A",
+        ),
+        (
+            'peripherals = ["A"]\nrenames = { SR2 = "SR" }',
+            "register_renames[0].renames.SR2",
+            "a name not used in A, not SR",
+        ),
+        (
+            'peripherals = ["ZZ*"]\nrenames = { SR2 = "X" }',
+            "register_renames[0].peripherals",
+            "a peripheral matching ZZ*",
+        ),
+        (
+            'peripherals = []\nrenames = { SR2 = "X" }',
+            "register_renames[0].peripherals",
+            "at least one peripheral glob",
+        ),
+        (
+            'peripherals = ["A"]\nrenames = {}',
+            "register_renames[0].renames",
+            "at least one register to rename",
+        ),
+    ],
+)
+def test_register_renames_refuse_a_bad_rule_and_leave_the_target_whole(
+    tmp_path: Path, entry: str, key: str, expected: str
+) -> None:
+    target = _target()
+    before = copy.deepcopy(target)
+    with pytest.raises(DescriptionError) as excinfo:
+        _apply(target, _rename_patch(tmp_path, entry))
+    assert (excinfo.value.key, excinfo.value.expected) == (key, expected)
+    assert target == before
+
+
+def test_core_mpu_sets_the_flag_once(tmp_path: Path) -> None:
+    target = _target()
+    target.core.mpu = False
+    path = _ip_patch(tmp_path, '[core]\nmpu = true\nsource = "probe"\n')
+    report = _apply(target, path)
+    assert target.core.mpu
+    assert report.core_fields_set == 1
+    second = _ip_patch(tmp_path, '[core]\nmpu = false\nsource = "probe"\n', "second.toml")
+    with pytest.raises(DescriptionError) as excinfo:
+        _apply(_target(), path, second)
+    assert excinfo.value.key == "core.mpu"

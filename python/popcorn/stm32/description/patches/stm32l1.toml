@@ -1,0 +1,127 @@
+format = 1
+source = "RM0038 Rev 18 and the STM32L1 CubeMX db against ST's STM32L100, L151, L152 and L162 SVDs: SVD naming, shared registers and memory of the whole family. Category rules live in the category patches"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L1*.svd"]
+
+[peripherals]
+renames = { Flash = "FLASH" }
+source = "RM0038 Rev 18, 3.9 register description: the flash interface registers are FLASH_xxx, the four SVDs spell the peripheral Flash"
+
+[[register_renames]]
+peripherals = ["GPIO?"]
+renames = { OSPEEDER = "OSPEEDR" }
+source = "RM0038 Rev 18, 7.4.3 GPIO port output speed register (GPIOx_OSPEEDR): the register is OSPEEDR, the four SVDs spell it OSPEEDER"
+
+[[register_drops]]
+peripheral = "USB_SRAM"
+names = ["USB_EP0R", "USB_EP1R", "USB_EP2R", "USB_EP3R", "USB_EP4R", "USB_EP5R", "USB_EP6R", "USB_EP7R", "USB_CNTR", "ISTR", "FNR", "DADDR", "BTABLE"]
+source = "RM0038 Rev 18, 2.3 memory map: USB device FS SRAM at 0x4000 6000 is the packet memory, a plain memory, and 24.5.4 lists the USB registers at 0x4000 5C00. The SVDs derive USB_SRAM from USB, so it repeats the 13 USB registers at 0x4000 6000. The 1 KB window 0x4000 6000 to 0x4000 63FF stays as a peripheral with no registers and no IP"
+
+[core]
+reset_clock_hz = 2_097_152
+mpu = true
+source = "RM0038 Rev 18, 6.3.2 RCC_ICSCR: MSIRANGE resets to 101, range 5, and 6.2.3: the MSI is the system clock after reset and range n runs at 32768 x 2^(n+1) Hz, 2_097_152 Hz for range 5, as the CMSIS SystemCoreClockUpdate computes it. mpu: the CMSIS device headers define __MPU_PRESENT 1 and DDI0337H 2.1 gives the optional MPU eight regions, the four SVDs say mpuPresent false and RM0038 does not state the MPU, inferred"
+
+[[resets]]
+peripheral = "RCC"
+register = "APB2LPENR"
+reset = 0x0000521D
+source = "RM0038 Rev 18, 6.3.12 RCC_APB2LPENR: reset value 0x0000 521D. The SVDs give 0"
+
+[[resets]]
+peripheral = "RCC"
+register = "APB1LPENR"
+reset = 0xB0E64A37
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: reset value 0xB0E6 4A37. The SVDs give 0"
+
+[[resets]]
+peripheral = "SPI1"
+register = "CR2"
+reset = 0
+source = "RM0038 Rev 18, 28.5.2 SPI_CR2: reset value 0x0000. The STM32L152 SVD gives 0x700"
+
+[[resets]]
+peripheral = "SPI2"
+register = "CR2"
+reset = 0
+source = "RM0038 Rev 18, 28.5.2 SPI_CR2: reset value 0x0000. The STM32L152 SVD gives 0x700"
+
+[[resets]]
+peripheral = "TIM2"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 17.4.12 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM3"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 17.4.12 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM4"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 17.4.12 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM6"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 19.4.8 TIM6 and TIM7 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM7"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 19.4.8 TIM6 and TIM7 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM9"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 18.4.11 TIM9 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM10"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 18.5.10 TIM10 and TIM11 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM11"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 18.5.10 TIM10 and TIM11 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4"]
+registers = ["CCMR2_Output"]
+fields = ["CC4S"]
+width = 2
+source = "RM0038 Rev 18, 17.4.8 TIMx_CCMR2: CC4S[1:0] is two bits wide. The SVDs give one bit"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM9"]
+registers = ["CCMR1_Output"]
+fields = ["CC2S"]
+width = 2
+source = "RM0038 Rev 18, 17.4.7 and 18.4.7 TIMx_CCMR1: CC2S[1:0] in bits 9:8, two bits wide. The SVDs give one bit in the output view and two in the input view"
+
+[[fields]]
+instances = ["ADC"]
+registers = ["SQR1"]
+fields = ["L"]
+width = 5
+source = "RM0038 Rev 18, 12.15.10 ADC_SQR1: L[4:0] in bits 24:20, five bits. The SVDs give four bits"
+
+[memory]
+source = "RM0038 Rev 18, 2.6 and DDI0337H 3.7: the Cortex-M3 bit-band alias of the SRAM at 0x2200 0000 onto 0x2000 0000 and of the peripherals at 0x4200 0000 onto 0x4000 0000, 32 MB each, for the CPU only. RM0038 Rev 18, 3.2 Table 8 and Table 9: the data EEPROM starts at 0x0808 0000 in every category. 3.4.2 and 3.4.3: the flash interface erases and programs the flash and the data EEPROM, so FLASH controls the Flash regions and DATA_EEPROM. Cat.6 has a second flash region the Cat.6 patch gives its controller"
+controller = { Flash = "FLASH" }
+eeprom = { start = 0x08080000, controller = "FLASH" }
+add = [
+  { name = "BB_SRAM", start = 0x22000000, size = 0x02000000, kind = "bit_band", acc = { read = true, write = true, execute = false }, secure = false, physical = 0x20000000 },
+  { name = "BB_PERIPH", start = 0x42000000, size = 0x02000000, kind = "bit_band", acc = { read = true, write = true, execute = false }, secure = false, physical = 0x40000000 },
+]

@@ -1466,6 +1466,88 @@ def test_a_second_signature_over_the_same_bytes_is_refused(tmp_path: Path) -> No
     assert (excinfo.value.file, excinfo.value.key) == (str(second), "signature.flash_size")
 
 
+def _l1_signature(tmp_path: Path, **overrides: str) -> Path:
+    keys = {
+        "region": '"OTP"',
+        "uid": "0x50",
+        "flash_size": "0x4C",
+        "uid_words": "[0x11, 0x22, 0x33]",
+        "uid_offsets": "[0, 4, 0x14]",
+        "source": '"probe"',
+    } | overrides
+    body = "\n".join(f"{key} = {value}" for key, value in keys.items())
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+{_SIG_REGIONS}
+[signature]
+{body}
+"""
+    return _write_patch(tmp_path, text)
+
+
+def test_signature_uid_words_land_at_their_offsets_from_the_base(tmp_path: Path) -> None:
+    target = _signed(tmp_path, _part(), _l1_signature(tmp_path))
+    assert _content(target, "OTP") == [
+        (0x4C, (1024).to_bytes(2, "little")),
+        (0x50, bytes.fromhex("1100000022000000")),
+        (0x64, bytes.fromhex("33000000")),
+    ]
+
+
+def test_signature_uid_words_are_contiguous_without_offsets(tmp_path: Path) -> None:
+    path = _signature_patch(tmp_path)
+    assert "uid_offsets" not in path.read_text()
+    assert dict(_content(_signed(tmp_path, _part(), path), "OTP"))[0x300] == bytes.fromhex(
+        "110000002200000033000000"
+    )
+
+
+def test_signature_uid_offsets_reorder_the_words(tmp_path: Path) -> None:
+    path = _l1_signature(tmp_path, uid_offsets="[8, 0, 4]")
+    pieces = dict(_content(_signed(tmp_path, _part(), path), "OTP"))
+    assert pieces[0x50] == bytes.fromhex("220000003300000011000000")
+
+
+def test_signature_without_package_writes_no_package_word(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    target.db_part = _part("TOY1Q")
+    report = apply_patches(
+        load_patches([_l1_signature(tmp_path)], part="TOY1", svd_name="synthetic.svd"), target
+    )
+    assert report.signature_words == 2
+
+
+@pytest.mark.parametrize(
+    ("overrides", "key", "reason"),
+    [
+        ({"uid_offsets": "[0, 4]"}, "signature.uid_offsets", "three offsets, 0 to 0xffff"),
+        ({"uid_offsets": "[0, 4, 0x10000]"}, "signature.uid_offsets", "three offsets, 0 to 0xffff"),
+        ({"uid_offsets": "[0, 4, -1]"}, "signature.uid_offsets", "three offsets, 0 to 0xffff"),
+        ({"uid_offsets": "[0, 2, 8]"}, "signature.uid", "bytes clear of the content at 0x50"),
+        ({"uid_offsets": "[0, 4, 0x3C0]"}, "signature.uid", "an offset leaving 4 bytes inside OTP"),
+        ({"package": "0x100"}, "signature.packages", "packages with package, or neither"),
+        (
+            {"packages": '{ "LQFP64" = 0 }'},
+            "signature.packages",
+            "packages with package, or neither",
+        ),
+    ],
+)
+def test_signature_refuses_a_bad_uid_layout_or_half_a_package(
+    tmp_path: Path, overrides: dict[str, str], key: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    target.db_part = _part()
+    before = copy.deepcopy(target)
+    path = _l1_signature(tmp_path, **overrides)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert (excinfo.value.key, excinfo.value.expected) == (key, reason)
+    assert target == before
+
+
 def _reset_patch(tmp_path: Path, peripheral: str, register: str, reset: str) -> Path:
     text = f"""
 format = 1

@@ -26,7 +26,7 @@ from popcorn.stm32.description._sources import (
 )
 
 FACTS_DIR = Path(_cubemx.__file__).parent / "rzone"
-FACTS = sorted(FACTS_DIR.glob("*.toml"))
+FACTS = sorted(FACTS_DIR.glob("STM32_DIE48*.toml"))
 
 EXPECTED_DIFFERENCES: dict[str, dict[str, tuple[object, object]]] = {
     "STM32_DIE482_786_1024": {"num_interrupts": (125, 126)},

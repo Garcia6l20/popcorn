@@ -46,6 +46,7 @@ class PatchMatch:
 class PatchCore:
     source: str
     reset_clock_hz: int | None = None
+    mpu: bool | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -67,6 +68,13 @@ class PatchIp:
 class RegisterDrop:
     peripheral: str
     names: list[str]
+    source: str = field(metadata={"min_length": 1})
+
+
+@dataclass(slots=True, kw_only=True)
+class RegisterRename:
+    peripherals: list[str]
+    renames: dict[str, str]
     source: str = field(metadata={"min_length": 1})
 
 
@@ -106,11 +114,12 @@ class PatchCmsis:
 class PatchSignature:
     region: str
     flash_size: int = field(metadata={"minimum": 0})
-    package: int = field(metadata={"minimum": 0})
     uid: int = field(metadata={"minimum": 0})
     uid_words: list[int]
-    packages: dict[str, int]
     source: str
+    package: int | None = field(default=None, metadata={"minimum": 0})
+    packages: dict[str, int] | None = None
+    uid_offsets: list[int] | None = None
     content: list[RegionContent] | None = None
 
 
@@ -238,6 +247,7 @@ class Patch:
     peripheral_sizes: list[PeripheralSizeSet] | None = None
     registers: list[RegisterAdd] | None = None
     register_drops: list[RegisterDrop] | None = None
+    register_renames: list[RegisterRename] | None = None
     resets: list[ResetSet] | None = None
     memory: PatchMemory | None = None
     signature: PatchSignature | None = None
@@ -265,6 +275,7 @@ class PatchReport:
         default_factory=list[tuple[str, str, str]]
     )
     registers_dropped: int = 0
+    registers_renamed: int = 0
     aliased: int = 0
     fields_touched: int = 0
     fields_dropped: int = 0
@@ -480,6 +491,49 @@ def _apply_register_drops(
         if target is peripheral or target.alias_of == peripheral.name:
             target.registers = [r for r in target.registers if r.name not in seen]
     report.registers_dropped += len(seen)
+
+
+def _apply_register_renames(
+    rule: RegisterRename,
+    peripherals: dict[str, PeripheralDesc],
+    report: PatchReport,
+    *,
+    file: str,
+    key: str,
+) -> None:
+    if not rule.renames:
+        raise DescriptionError(file, 0, f"{key}.renames", "at least one register to rename")
+    targets: list[PeripheralDesc] = []
+    for pattern in rule.peripherals:
+        named = [p for p in peripherals.values() if fnmatch.fnmatchcase(p.name, pattern)]
+        matched = [p for p in named if p.alias_of is None]
+        if not matched:
+            expected = (
+                f"a peripheral that is not an alias matching {pattern}"
+                if named
+                else f"a peripheral matching {pattern}"
+            )
+            raise DescriptionError(file, 0, f"{key}.peripherals", expected)
+        targets.extend(p for p in matched if all(p is not t for t in targets))
+    if not targets:
+        raise DescriptionError(file, 0, f"{key}.peripherals", "at least one peripheral glob")
+    for target in targets:
+        present = {r.name for r in target.registers}
+        for old, new in rule.renames.items():
+            if old not in present:
+                raise DescriptionError(
+                    file, 0, f"{key}.renames.{old}", f"a register named {old} in {target.name}"
+                )
+            if new in present:
+                raise DescriptionError(
+                    file, 0, f"{key}.renames.{old}", f"a name not used in {target.name}, not {new}"
+                )
+    names = {t.name for t in targets}
+    for peripheral in peripherals.values():
+        if peripheral.name in names or peripheral.alias_of in names:
+            for register in peripheral.registers:
+                register.name = rule.renames.get(register.name, register.name)
+    report.registers_renamed += len(rule.renames) * len(targets)
 
 
 def _register_layout_key(peripheral: PeripheralDesc) -> list[object]:
@@ -1082,6 +1136,12 @@ def _apply_core(
         touched.add("reset_clock_hz")
         core.reset_clock_hz = rule.reset_clock_hz
         report.core_fields_set += 1
+    if rule.mpu is not None:
+        if "mpu" in touched:
+            raise DescriptionError(file, 0, "core.mpu", "not already patched")
+        touched.add("mpu")
+        core.mpu = rule.mpu
+        report.core_fields_set += 1
 
 
 _ENGINE_PAGE = 0x400
@@ -1228,6 +1288,22 @@ def _package_key(part: DbPart) -> str:
     return key
 
 
+_UID_OFFSETS = [0, 4, 8]
+
+
+def _uid_pieces(base: int, words: Sequence[int], offsets: Sequence[int]) -> list[tuple[int, bytes]]:
+    """The 32-bit @p words at @p base plus their @p offsets as content pieces, little endian, words
+    that follow each other in one piece."""
+    pieces: list[tuple[int, bytes]] = []
+    for offset, word in sorted(zip(offsets, words, strict=True)):
+        data = word.to_bytes(4, "little")
+        if pieces and pieces[-1][0] + len(pieces[-1][1]) == base + offset:
+            pieces[-1] = (pieces[-1][0], pieces[-1][1] + data)
+        else:
+            pieces.append((base + offset, data))
+    return pieces
+
+
 def _apply_signature(
     rule: PatchSignature,
     regions: list[RegionDesc],
@@ -1245,51 +1321,58 @@ def _apply_signature(
         raise DescriptionError(file, 0, "signature", "the CubeMX part of the description")
     if len(rule.uid_words) != 3 or any(not 0 <= word < 1 << 32 for word in rule.uid_words):
         raise DescriptionError(file, 0, "signature.uid_words", "three 32-bit words")
-    for name, value in rule.packages.items():
+    if (rule.package is None) != (rule.packages is None):
+        raise DescriptionError(file, 0, "signature.packages", "packages with package, or neither")
+    offsets = _UID_OFFSETS if rule.uid_offsets is None else rule.uid_offsets
+    if len(offsets) != 3 or any(not 0 <= offset < 1 << 16 for offset in offsets):
+        raise DescriptionError(file, 0, "signature.uid_offsets", "three offsets, 0 to 0xffff")
+    for name, value in (rule.packages or {}).items():
         if not 0 <= value <= 0x1F:
             raise DescriptionError(file, 0, f"signature.packages.{name}", "a PKG code, 0 to 0x1f")
     flash_kib = part.flash_kib[0]
     if flash_kib >= 1 << 16:
         raise DescriptionError(file, 0, "signature.flash_size", "a flash size below 64 MB")
+    uid_pieces = _uid_pieces(rule.uid, rule.uid_words, offsets)
     words = [
-        ("flash_size", rule.flash_size, flash_kib.to_bytes(2, "little")),
-        ("uid", rule.uid, b"".join(word.to_bytes(4, "little") for word in rule.uid_words)),
+        ("flash_size", [(rule.flash_size, flash_kib.to_bytes(2, "little"))]),
+        ("uid", uid_pieces),
     ]
-    code = rule.packages.get(_package_key(part))
-    if code is not None:
-        words.append(("package", rule.package, code.to_bytes(2, "little")))
+    if rule.package is not None and rule.packages is not None:
+        code = rule.packages.get(_package_key(part))
+        if code is not None:
+            words.append(("package", [(rule.package, code.to_bytes(2, "little"))]))
     for index, piece in enumerate(rule.content or []):
         if not piece.data or any(not 0 <= byte <= 0xFF for byte in piece.data):
             raise DescriptionError(
                 file, 0, f"signature.content[{index}].data", "bytes, at least one"
             )
-        words.append((f"content[{index}]", piece.offset, bytes(piece.data)))
-    for name, offset, data in words:
-        _add_content(region, offset, data, file=file, key=f"signature.{name}")
+        words.append((f"content[{index}]", [(piece.offset, bytes(piece.data))]))
+    for name, pieces in words:
+        for offset, data in pieces:
+            _add_content(region, offset, data, file=file, key=f"signature.{name}")
         report.signature_words += 1
 
 
 def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchReport:
     """Applies @p patches to @p target in the fixed order: peripheral drops and renames, then per
-    patch in file order the IP renames and `renames_if_present`, then the `versions` of every
-    patch in file order, aliases, register drops, peripheral sizes, added registers, register
-    resets, fields, cross rules, IRQ drops and adds, core, memory regions and their controllers,
-    the device signature. Drops come first, so a later rule naming a dropped peripheral fails as
-    naming an unknown one. An `[ip] versions` glob matches the instance names after every
+    patch in file order the IP renames and `renames_if_present`, then the `versions` of every patch
+    in file order, aliases, register drops, register renames, peripheral sizes, added registers,
+    register resets, fields, cross rules, IRQ drops and adds, core, memory regions and their
+    controllers, the device signature. Drops come first, so a later rule naming a dropped peripheral
+    fails as naming an unknown one. An `[ip] versions` glob matches the instance names after every
     `[peripherals] renames`, and a glob matching nothing is an error. A peripheral rename lands
     before the aliases, so the alias rule pairs the new name with its base, and a later rule names
     the new name. A peripheral size, an added register and a register reset land in the named
-    peripheral and in each of its aliases, so fields and cross rules may name the register. A
-    fields rule with `drop` removes its fields from the named peripheral and its aliases, and a
-    later rule naming them fails. A fields rule with `rename` renames fields in the named
-    peripheral and its aliases, and a later rule names the new spelling. A fields rule with `add`
-    adds one field, with its reset value, to the named register of the named peripheral and its
-    aliases, and a later rule names it. A fields rule with `width`, `on_write`, `on_read` or `acc`
-    sets it on the named fields of the named peripheral and each of its aliases, and refuses an
-    alias in `instances`. The report counts each field of the peripheral and of each alias per
-    property in `fields_touched`, and each base field once in `fields_dropped`, `fields_renamed`
-    and `fields_added`. Validates every rule before mutating @p target: an error leaves it exactly
-    as it was."""
+    peripheral and in each of its aliases, so fields and cross rules may name the register. A fields
+    rule with `drop` removes its fields from the named peripheral and its aliases, and a later rule
+    naming them fails. A fields rule with `rename` renames fields in the named peripheral and its
+    aliases, and a later rule names the new spelling. A fields rule with `add` adds one field, with
+    its reset value, to the named register of the named peripheral and its aliases, and a later rule
+    names it. A fields rule with `width`, `on_write`, `on_read` or `acc` sets it on the named fields
+    of the named peripheral and each of its aliases, and refuses an alias in `instances`. The report
+    counts each field of the peripheral and of each alias per property in `fields_touched`, and each
+    base field once in `fields_dropped`, `fields_renamed` and `fields_added`. Validates every rule
+    before mutating @p target: an error leaves it exactly as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)
     core = copy.deepcopy(target.core)
@@ -1326,6 +1409,12 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
         for j, rule in enumerate(loaded.patch.register_drops or []):
             _apply_register_drops(
                 rule, by_name, report, file=str(loaded.path), key=f"register_drops[{j}]"
+            )
+
+    for loaded in patches:
+        for j, rule in enumerate(loaded.patch.register_renames or []):
+            _apply_register_renames(
+                rule, by_name, report, file=str(loaded.path), key=f"register_renames[{j}]"
             )
 
     for loaded in patches:

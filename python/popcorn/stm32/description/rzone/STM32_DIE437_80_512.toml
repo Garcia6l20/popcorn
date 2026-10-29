@@ -1,0 +1,30 @@
+format = 1
+rzone = "STM32_DIE437_80_512.xml"
+
+[core]
+fpu_double = false
+dsp = false
+trustzone = false
+mpu_regions = 8
+mpu_regions_secure = 0
+sau_regions = 0
+num_interrupts = 57
+source = "Cortex-M3 with no FPU, no DSP extension and no TrustZone: RM0038 Rev 18, 1.1 (the devices embed an Arm Cortex-M3 core) and DDI0337H, which has no FPU, DSP or security extension. mpu_regions 8: DDI0337H 2.1 gives an optional MPU of eight memory regions, the CMSIS device headers define __MPU_PRESENT 1, RM0038 does not state the MPU and the ST SVD says mpuPresent false, inferred. RM0038 Rev 18, 10.1.2 Table 51 (Cat.4, Cat.5 and Cat.6 vector table): highest vector position 56 by the Address column and the CMSIS IRQn_Type of stm32l152xe.h and stm32l151xdx.h, so 57 lines"
+
+[[regions]]
+name = "Flash"
+start = 0x08000000
+size = 0x00080000
+kind = "rom"
+acc = { read = true, write = false, execute = true }
+secure = false
+source = "RM0038 Rev 18 3.2 Table 11 (NVM module organization, Cat.5): two banks of 256 Kbytes, contiguous, 0x0800 0000 to 0x0807 FFFF. The flash interface writes it, the region is read-only to a plain store"
+
+[[regions]]
+name = "SRAM"
+start = 0x20000000
+size = 0x00014000
+kind = "ram"
+acc = { read = true, write = true, execute = true }
+secure = false
+source = "RM0038 Rev 18 2.4 embedded SRAM: starts at 0x2000 0000, read and write at CPU speed, and the CPU executes from it through the system bus. Size 80 Kbytes from the CubeMX Ram element of the part. ARMv7-M ARM B3.1: the SRAM region 0x2000 0000 to 0x3FFF FFFF is executable"
