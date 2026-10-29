@@ -13,8 +13,9 @@ place of `registers`. Three files hold the layers of the parts of one line:
   `sources` and `regions`, the headers that differ from the line's by instance name, and
   `schema_version`, `core` and `irqs` when they differ.
 
-Family name: RefName[:7] + "xx". Line name: RefName[:9] + "xx". Every function here is pure, no
-file access, no native import.
+Family name: RefName[:7] + "xx". Line name: RefName[:9] + "xx". Every function here is pure and
+imports only the standard library and `_errors`, so the build probe can run it without the
+extension.
 
 """
 

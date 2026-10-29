@@ -54,7 +54,7 @@ def _layer(data: bytes, *, file: str, kind: str) -> tuple[dict[str, Any], bytes]
     raw = bounded_xz(data, MAX_SHIPPED_BYTES, file=file)
     try:
         value = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         raise DescriptionError(file, 0, "<root>", "valid JSON") from exc
     if not isinstance(value, dict):
         raise DescriptionError(file, 0, "<root>", f"a {kind} layer object")
@@ -109,11 +109,11 @@ def compose_shipped(name: str, directory: Path | None = None) -> str:
     in its line's parts layer over its line layer over its family's blocks, in @p directory,
     SHIPPED_DIR by default. The text is what dump_json writes for the same description.
 
-    DescriptionError naming the file for a layer that is not one complete xz stream of at most
-    MAX_SHIPPED_BYTES, a layer of another format, a `line_sha256` that is not the SHA-256 of the
-    decompressed line layer, and every refusal of `_layers.compose`: a missing or tampered
-    block, an unknown instance, a composition above MAX_SHIPPED_BYTES counted before it is
-    built, a missing layer file."""
+    DescriptionError naming the file for a missing layer file, a layer that is not one complete
+    xz stream of at most MAX_SHIPPED_BYTES or not valid JSON, a layer of another format, a
+    `line_sha256` that is not the SHA-256 of the decompressed line layer, and every refusal of
+    `_layers.compose`: a missing or tampered block, an unknown instance, a composition above
+    MAX_SHIPPED_BYTES counted before it is built."""
     paths = _layer_paths(name, SHIPPED_DIR if directory is None else directory)
     return _compose_packed(name, paths, _read(paths))
 
@@ -157,7 +157,8 @@ def shipped_description(
     """Path of the composed shipped description of @p part, None when none ships.
 
     Composed once into `<cache>/shipped/<name>-<sha16>.json`, sha16 the first 16 hex digits of
-    the SHA-256 over the xz bytes of the part's parts, line and family layers, in that order. A
+    the SHA-256 over the SHA-256 digests of the xz bytes of the part's parts, line and family
+    layers, in that order. A
     change to any part of a line renames the cache file of every part of the line. The cache is
     shared by every popcorn of the user, so each layer version keeps its own file: a hit
     refreshes its mtime when the cache is writable, and a write removes the files of the same
@@ -171,7 +172,7 @@ def shipped_description(
     packed = _read(paths)
     hasher = hashlib.sha256()
     for data in packed:
-        hasher.update(data)
+        hasher.update(hashlib.sha256(data).digest())
     digest = hasher.hexdigest()[:16]
     directory = (cache_dir or default_cache_dir()) / "shipped"
     path = directory / f"{name}-{digest}.json"

@@ -348,6 +348,16 @@ def test_a_missing_layer_file_is_refused(shipped_dir: Path, tmp_path: Path, file
     assert error.file == str(shipped_dir / file)
 
 
+@pytest.mark.parametrize("file", [PARTS, LINE, FAMILY])
+def test_a_layer_nested_too_deep_for_the_json_parser_is_refused_naming_it(
+    shipped_dir: Path, tmp_path: Path, file: str
+) -> None:
+    (shipped_dir / file).write_bytes(lzma.compress(b"[" * 200000, format=lzma.FORMAT_XZ))
+    error = _refused(tmp_path)
+    assert error.file == str(shipped_dir / file)
+    assert (error.key, error.expected) == ("<root>", "valid JSON")
+
+
 def test_a_parts_layer_of_another_line_version_is_refused(
     shipped_dir: Path, tmp_path: Path
 ) -> None:

@@ -1,6 +1,6 @@
 import sys
 import sysconfig
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 from pcons import Target, context
@@ -118,6 +118,24 @@ def package_files(package_dir: Path) -> list[Path]:
         for pattern in ("*.py", "*.toml", "*.json.xz", "py.typed")
         for path in package_dir.rglob(pattern)
     )
+
+
+def prune_stage(stage_dir: Path, package_dir: Path, keep: Collection[str] = ()) -> list[Path]:
+    """Removes every file under @p stage_dir that matches a package_files pattern and has no
+    source at the same relative path under @p package_dir, except the relative paths in @p keep,
+    files the build generates into the stage. Returns the removed paths, sorted.
+
+    Run when the build script runs, before the stage is installed, so a source deleted since the
+    last build leaves no staged copy behind.
+    """
+    sources = {path.relative_to(package_dir).as_posix() for path in package_files(package_dir)}
+    removed: list[Path] = []
+    for path in package_files(stage_dir):
+        relative = path.relative_to(stage_dir).as_posix()
+        if relative not in sources and relative not in keep:
+            path.unlink()
+            removed.append(path)
+    return removed
 
 
 def add_package_install(
