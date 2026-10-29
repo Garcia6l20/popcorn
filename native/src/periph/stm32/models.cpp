@@ -31,12 +31,16 @@ struct builtin
   std::string_view part_glob     = "*";
 };
 
-constexpr std::array<builtin, 60> builtins{
+constexpr std::array<builtin, 61> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
      {"ICACHE", "Icache_v1_0_0*", [](board const& b) { return icache_factory(b.caches); }},
      {"DCACHE", "STM32U5xx1_v0_0", [](board const& b) { return dcache_factory(b.caches); }},
+     {.ip              = "PWR",
+         .ip_version_glob = "STM32U5_pwr_*",
+         .make            = [](board const& b) { return pwr_smps_factory(b.pwr); },
+         .part_glob       = "STM32U5*Q"},
      {"PWR", "STM32U5_pwr_*", [](board const& b) { return pwr_factory(b.pwr); }},
      {"PWR", "STM32H5_pwr_*", [](board const& b) { return pwr_h5_factory(b.pwr); }},
      {"flash", "v1.0.0_U5_Cube", [](board const& b) { return flash_factory(b.flash); }},

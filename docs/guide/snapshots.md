@@ -45,7 +45,7 @@ another configuration, and the error names the digest that differs.
 A snapshot restores only into a machine with the same set of peripheral models. One taken by a
 popcorn build that lacked a model the current build has is refused. Take it again.
 
-A saved snapshot carries its format version. popcorn reads format 8 and raises `ConfigError` on
+A saved snapshot carries its format version. popcorn reads format 9 and raises `ConfigError` on
 the key `format` for a file of any other format. Take the snapshot again with the current build.
 
 ## What a restore leaves out
