@@ -42,7 +42,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      imageid: ${{ steps.build.outputs.imageid }}
+      digest: ${{ steps.build.outputs.digest }}
       version: ${{ steps.version.outputs.version }}
       jobs: ${{ steps.version.outputs.jobs }}
     steps:
@@ -177,18 +177,17 @@ jobs:
 
       - name: Check that the pushed image is the smoke-tested one
         env:
-          TESTED: ${{ needs.image.outputs.imageid }}
-          PUSHED: ${{ steps.push.outputs.imageid }}
+          TESTED: ${{ needs.image.outputs.digest }}
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
-          echo "tested $TESTED, pushed $PUSHED"
+          echo "tested manifest $TESTED, pushed $DIGEST"
           docker buildx imagetools inspect --raw "$IMAGE@$DIGEST" | python3 -c '
           import json
           import os
           import sys
 
           tested = os.environ["TESTED"]
-          pushed = os.environ["PUSHED"]
+          pushed = os.environ["DIGEST"]
           index = json.load(sys.stdin)
           amd64 = [
               m["digest"]
