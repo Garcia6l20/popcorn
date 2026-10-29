@@ -312,7 +312,7 @@ one matching patch sets it. A part with no such patch uses `<line>xx.h`.
 ## Shipped descriptions
 
 Shipped descriptions live in `python/popcorn/stm32/data` as three kinds of xz-compressed JSON
-layer, each `{"format": 1, ...}`:
+layer, each `{"format": 2, ...}`:
 
 | file | holds |
 |---|---|
@@ -323,18 +323,23 @@ layer, each `{"format": 1, ...}`:
 The family is the RefName's first 7 characters plus `xx`, `STM32U5xx`, the line its first 9
 plus `xx`, `STM32U575xx`. A header is a peripheral without `registers` and `cross_rules`, with
 `"block": <key>` in their place. Two instances share a block only when their bytes are equal. A
-delta holds the part's `part`, `generator`, `sources` and `regions`, the full header of every
-instance that differs from the line's, and `schema_version`, `core` or `irqs` where they differ.
-Every part of a line has the line's instances in the line's order.
+delta holds the part's `part`, `generator`, `sources` and `regions`, `dropped`, the reference
+instances the part lacks in the reference's order, the full header of every kept instance that
+differs from the line's, and `schema_version`, `core` or `irqs` where they differ. A part has
+the line's instances in the line's order minus its `dropped` ones and no instance the reference
+lacks. The reference of a line is the part with the most instances, then the most bonded pins,
+then the largest flash, then the first name.
 
 `_layers.py` holds `factor`, which writes the layers of a set of descriptions, and `compose`, its
 inverse, both pure functions. `compose_shipped` in `_shipped.py` composes a part into the same
 JSON text `dump_json` writes, so the digest, snapshots and the native loader see the same
 description. It refuses with `DescriptionError` naming the file: a layer of another `format`, a
 `line_sha256` mismatch, a missing block or one whose bytes do not hash to its key, an unknown
-instance, and a decompressed layer or composed description above `MAX_SHIPPED_BYTES`. The
-composed size is counted before anything is built. On first use the composed text is cached as
-`<cache>/shipped/<name>-<sha16>.json`, sha16 over the SHA-256 of each of the parts, line and family files, in order.
+instance, a `dropped` entry that is no line instance or is repeated or out of the line's order,
+an override of a dropped instance, and a decompressed layer or composed description above
+`MAX_SHIPPED_BYTES`. The composed size is counted before anything is built. On first use the
+composed text is cached as `<cache>/shipped/<name>-<sha16>.json`, sha16 over the SHA-256 of each
+of the parts, line and family files, in order.
 
 A part ships exactly when its golden file `tests/data/stm32/golden/<RefName>[-<core>].json`
 exists. To add a part, write its golden, then ship:
@@ -350,13 +355,13 @@ uv run python -m popcorn.stm32.description ship --pin-data <STM32_open_pin_data>
 `ship` builds every golden part of each family it touches from `STM32_open_pin_data`, in a pool
 of `-j` processes, and rewrites all layers of those families. A part named on the command line
 selects its family, no part selects every family with a golden or a layer file. Each line's
-reference is its part with the most bonded GPIO pins, then the largest flash, then the first
-RefName in sorted order. Every file goes to a temporary name first and is renamed once all are
-written. Then every layer file of a touched family that the new set lacks is removed, so a part
-whose golden is deleted leaves no delta and a line with no part leaves no file. Equal inputs give
-equal bytes. Writing needs `--out`, the package data directory of the source tree: under
-`uv run` the imported package is the staged copy in the build directory. `--core` applies to
-every named part and needs a part list.
+reference is its part with the most instances, then the most bonded GPIO pins, then the largest
+flash, then the first RefName in sorted order. Every file goes to a temporary name first and is
+renamed once all are written. Then every layer file of a touched family that the new set lacks is
+removed, so a part whose golden is deleted leaves no delta and a line with no part leaves no file.
+Equal inputs give equal bytes. Writing needs `--out`, the package data directory of the source
+tree: under `uv run` the imported package is the staged copy in the build directory. `--core`
+applies to every named part and needs a part list.
 
 `ship --check` composes each shipped part, every golden part without a part list, and compares
 its digest with a fresh build. `golden` without a part checks every golden file.

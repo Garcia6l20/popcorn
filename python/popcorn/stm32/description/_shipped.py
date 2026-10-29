@@ -427,8 +427,14 @@ def build_layers(names: Sequence[str], *, pin_data: Path, jobs: int = 1) -> dict
             raise result
         built.append(result)
     by_name = dict(zip(names, built, strict=True))
-    references = choose_reference({name: (b.bonded, b.flash_kib) for name, b in by_name.items()})
-    return factor({name: json.loads(b.text) for name, b in by_name.items()}, references)
+    descriptions = {name: json.loads(b.text) for name, b in by_name.items()}
+    references = choose_reference(
+        {
+            name: (len(descriptions[name]["peripherals"]), b.bonded, b.flash_kib)
+            for name, b in by_name.items()
+        }
+    )
+    return factor(descriptions, references)
 
 
 _WRITE_ORDER = (".blocks.json.xz", ".line.json.xz", ".parts.json.xz")

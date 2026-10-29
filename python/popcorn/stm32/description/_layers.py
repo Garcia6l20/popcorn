@@ -10,8 +10,9 @@ place of `registers`. Three files hold the layers of the parts of one line:
   "irqs", "peripherals": [header, ...]}`, the reference part's values.
 - `<line>.parts.json.xz`: `{"format", "line", "family", "line_sha256", "parts": {name: delta}}`,
   `line_sha256` the SHA-256 of the decompressed line file. A delta holds `part`, `generator`,
-  `sources` and `regions`, the headers that differ from the line's by instance name, and
-  `schema_version`, `core` and `irqs` when they differ.
+  `sources` and `regions`, `dropped`, the line instances the part lacks in the line's order,
+  the headers that differ from the line's by instance name, and `schema_version`, `core` and
+  `irqs` when they differ.
 
 Family name: RefName[:7] + "xx". Line name: RefName[:9] + "xx". Every function here is pure and
 imports only the standard library and `_errors`, so the build probe can run it without the
@@ -26,7 +27,7 @@ from typing import Any, cast
 
 from popcorn.stm32.description._errors import DescriptionError
 
-LAYER_FORMAT = 1
+LAYER_FORMAT = 2
 """Format number of every layer file, independent of the description's schema_version."""
 
 TOP_KEYS = (
@@ -105,12 +106,14 @@ def layer_family(file: str) -> str | None:
     return None
 
 
-def choose_reference(ranks: Mapping[str, tuple[int, int]]) -> dict[str, str]:
-    """Line to reference part of the shipped names in @p ranks, each mapped to its bonded GPIO
-    pin count and flash size in KiB: per line the part with the most bonded pins, then the
-    largest flash, then the first name in sorted order."""
+def choose_reference(ranks: Mapping[str, tuple[int, int, int]]) -> dict[str, str]:
+    """Line to reference part of the shipped names in @p ranks, each mapped to its instance
+    count, bonded GPIO pin count and flash size in KiB: per line the part with the most
+    instances, then the most bonded pins, then the largest flash, then the first name in sorted
+    order. The reference then holds every instance any part of its line has, when one part holds
+    them all."""
     references: dict[str, str] = {}
-    for name in sorted(ranks, key=lambda name: (-ranks[name][0], -ranks[name][1], name)):
+    for name in sorted(ranks, key=lambda name: (*(-rank for rank in ranks[name]), name)):
         references.setdefault(line_name(name), name)
     return dict(sorted(references.items()))
 
@@ -149,7 +152,9 @@ def factor(
     Returns file name to xz bytes: one blocks file per family, one line and one parts file per
     line, parts sorted by name. Equal inputs give equal bytes. DescriptionError naming the part
     when a description's top-level keys are not TOP_KEYS in order, when a line has no reference
-    among @p descriptions, or when a part's instance names or order differ from its reference's.
+    among @p descriptions, or when a part has an instance its reference lacks or lists its
+    instances in another order than its reference. A part lacking reference instances lists them
+    in its delta's `dropped`.
     """
     split = {name: _split(name, descriptions[name]) for name in sorted(descriptions)}
     members: dict[str, list[str]] = {}
@@ -188,15 +193,17 @@ def factor(
         for name in names:
             description = descriptions[name]
             headers = split[name][0]
-            if [header["name"] for header in headers] != line_order:
+            kept = {header["name"] for header in headers}
+            if [header["name"] for header in headers] != [n for n in line_order if n in kept]:
                 raise DescriptionError(
-                    name, 0, "peripherals", f"the instances of {reference} in its order"
+                    name, 0, "peripherals", f"instances of {reference} in its order"
                 )
             delta: dict[str, Json] = {
                 "part": description["part"],
                 "generator": description["generator"],
                 "sources": description["sources"],
                 "regions": description["regions"],
+                "dropped": [instance for instance in line_order if instance not in kept],
                 "peripherals": {
                     header["name"]: header
                     for header in headers
@@ -243,10 +250,11 @@ def compose(
     @p files names the parts, line and family files in errors. The caller checks each layer's
     `format` and the parts layer's `line_sha256`. DescriptionError naming the file when the
     layers name another line or family, @p name has no delta, a delta names an instance the line
-    lacks, a block is missing or its bytes do not hash to its key, or the composed JSON would
-    exceed @p limit bytes. The size is counted before any peripheral is built, from each
-    referenced block's length counted once, so one call's work is bounded by @p limit and the
-    layer sizes whatever the reference pattern."""
+    lacks or overrides an instance it drops, `dropped` is no list of line instances, a block is
+    missing or its bytes do not hash to its key, or the composed JSON would exceed @p limit
+    bytes. The size is counted before any peripheral is built, from each referenced block's
+    length counted once, so one call's work is bounded by @p limit and the layer sizes whatever
+    the reference pattern."""
     parts_file, line_file, family_file = files
     line_id = line.get("line")
     family_id = line.get("family")
@@ -259,7 +267,8 @@ def compose(
         raise DescriptionError(parts_file, 0, f"parts.{name}", "a delta for the part")
     delta = _object(deltas[name], parts_file, f"parts.{name}")
     overrides = _object(delta.get("peripherals"), parts_file, f"parts.{name}.peripherals")
-    missing = [key for key in ("part", "generator", "sources", "regions") if key not in delta]
+    keys = ("part", "generator", "sources", "regions", "dropped")
+    missing = [key for key in keys if key not in delta]
     if missing:
         raise DescriptionError(parts_file, 0, f"parts.{name}.{missing[0]}", "a delta key")
     blocks = _object(family.get("blocks"), family_file, "blocks")
@@ -273,7 +282,29 @@ def compose(
         raise DescriptionError(
             parts_file, 0, f"parts.{name}.peripherals.{unknown[0]}", f"an instance of {line_id}"
         )
-    headers = [overrides.get(header["name"], header) for header in line_headers]
+    if not isinstance(delta["dropped"], list):
+        raise DescriptionError(parts_file, 0, f"parts.{name}.dropped", "a list of instances")
+    dropped = cast(list[Json], delta["dropped"])
+    for instance in dropped:
+        if not isinstance(instance, str) or instance not in known:
+            raise DescriptionError(
+                parts_file, 0, f"parts.{name}.dropped.{instance}", f"an instance of {line_id}"
+            )
+    gone = set(dropped)
+    if dropped != [header["name"] for header in line_headers if header["name"] in gone]:
+        raise DescriptionError(
+            parts_file, 0, f"parts.{name}.dropped", "line instances in the line's order"
+        )
+    clash = sorted(set(overrides) & gone)
+    if clash:
+        raise DescriptionError(
+            parts_file, 0, f"parts.{name}.peripherals.{clash[0]}", "an instance the part keeps"
+        )
+    headers = [
+        overrides.get(header["name"], header)
+        for header in line_headers
+        if header["name"] not in gone
+    ]
     sizes: dict[str, int] = {}
     total = len(dump(delta)) + sum(len(dump(line[key])) for key in DELTA_OPTIONAL)
     for header in headers:

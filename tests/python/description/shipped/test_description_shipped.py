@@ -333,10 +333,10 @@ def test_a_broken_layer_file_is_refused(
 @pytest.mark.parametrize("file", [PARTS, LINE, FAMILY])
 def test_a_layer_of_another_format_is_refused(shipped_dir: Path, tmp_path: Path, file: str) -> None:
     layer = _decode(shipped_dir, file)
-    _rewrite(shipped_dir, file, layer | {"format": 2})
+    _rewrite(shipped_dir, file, layer | {"format": 1})
     error = _refused(tmp_path)
     assert error.file == str(shipped_dir / file)
-    assert (error.key, error.expected) == ("format", "layer format 1")
+    assert (error.key, error.expected) == ("format", "layer format 2")
 
 
 @pytest.mark.parametrize("file", [LINE, FAMILY])
@@ -734,16 +734,16 @@ def test_ship_check_refuses_a_tampered_block(
 @pytest.mark.parametrize(
     ("ranks", "reference"),
     [
-        ({NAME: (100, 1024), SIBLING: (90, 2048)}, NAME),
-        ({NAME: (90, 1024), SIBLING: (90, 2048)}, SIBLING),
-        ({SIBLING: (90, 2048), NAME: (90, 2048)}, NAME),
+        ({NAME: (5, 100, 1024), SIBLING: (5, 90, 2048)}, NAME),
+        ({NAME: (5, 90, 1024), SIBLING: (5, 90, 2048)}, SIBLING),
+        ({SIBLING: (5, 90, 2048), NAME: (5, 90, 2048)}, NAME),
     ],
     ids=["bonded pins first", "flash second", "name last"],
 )
-def test_the_reference_of_a_line_is_most_bonded_pins_then_flash_then_name(
-    ranks: dict[str, tuple[int, int]], reference: str
+def test_the_reference_of_equal_instance_counts_is_most_bonded_pins_then_flash_then_name(
+    ranks: dict[str, tuple[int, int, int]], reference: str
 ) -> None:
-    other = {OTHER: (1, 1)}
+    other = {OTHER: (5, 1, 1)}
     assert choose_reference(ranks | other) == {"STM32T001xx": reference, "STM32T101xx": OTHER}
 
 

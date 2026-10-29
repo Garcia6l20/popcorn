@@ -9,7 +9,7 @@ import pytest
 from popcorn.stm32.description.__main__ import main
 from popcorn.stm32.description._cubemx import bonded_pins, read_part
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
-from popcorn.stm32.description._layers import choose_reference, factor
+from popcorn.stm32.description._layers import choose_reference, factor, line_name
 from popcorn.stm32.description._shipped import (
     SHIPPED_DIR,
     build_layers,
@@ -60,7 +60,14 @@ parts."""
 @pytest.mark.timeout(60)
 def test_each_shipped_line_has_the_reference_the_rule_picks_from_the_db() -> None:
     pin_data = require_pin_data()
-    ranks: dict[str, tuple[int, int]] = {}
+    ranks: dict[str, tuple[int, int, int]] = {}
+    counts = {
+        cast(str, line["line"]): len(cast(list[object], line["peripherals"]))
+        for line in (
+            cast(dict[str, object], json.loads(lzma.decompress(path.read_bytes())))
+            for path in SHIPPED_DIR.glob("*.line.json.xz")
+        )
+    }
     for name in shipped_names():
         part, _, core = name.partition("-")
         try:
@@ -69,7 +76,7 @@ def test_each_shipped_line_has_the_reference_the_rule_picks_from_the_db() -> Non
             pytest.skip(f"{name} sources not found: {exc}")
         db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db))
         bonded = sum(mask.bit_count() for mask in bonded_pins(db_part).values())
-        ranks[name] = (bonded, db_part.flash_kib[0])
+        ranks[name] = (counts[line_name(name)], bonded, db_part.flash_kib[0])
     assert choose_reference(ranks) == REFERENCES
     for path in SHIPPED_DIR.glob("*.line.json.xz"):
         line = cast(dict[str, object], json.loads(lzma.decompress(path.read_bytes())))
