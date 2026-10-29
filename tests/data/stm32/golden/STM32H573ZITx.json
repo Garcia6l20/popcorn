@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 104,
+    "alternates": 888,
+    "cross_rules": 877,
+    "fields": 39333,
+    "irqs": 131,
+    "patched_fields": 412,
+    "peripherals": 209,
+    "regions": 12,
+    "registers": 4676
+  },
+  "part": "STM32H573ZITx",
+  "svd_sha256": "c0eef483c65d36fabb58f59f0d8428a6bb81758761ff4cd68ef340c21b65efcd",
+  "tables": {
+    "alternates": "14dc41d8d982f9080f8d40d5574941d6893c0bb45b16e0599b2042660d05c743",
+    "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
+    "fields": "a48d15c0264ab7482fd43c5e264d17547bf57d24ec81f812917281fcfd7e2543",
+    "irqs": "ccd22f69b74a688059d1ca98d417404a1cbaead9ec19549611bab07a6f46ff86",
+    "peripherals": "aa12283cd8bb325b7e47a90af99cd01178a95c2aaff39f9853c3d9a1676e8e22",
+    "regions": "3a54e840c57e9de6369ab3c8866d677b2715424cd7f6170f85e0e8fb79812850",
+    "registers": "94d58fffd9570e70489972b869253cf624126919638ae54c9bacbb71823c959a"
+  }
+}

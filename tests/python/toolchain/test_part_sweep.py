@@ -67,7 +67,7 @@ def test_shipped_parts_sweep_ok_with_their_shipped_digests() -> None:
 @pytest.mark.usefixtures("shipped_only")
 def test_main_writes_the_table_of_the_shipped_parts(tmp_path: Path) -> None:
     out = tmp_path / "sweep.json"
-    assert main(["--out", str(out), "--source", "shipped", "--parts", "STM32U575*"]) == 0
+    assert main(["--out", str(out), "--source", "shipped", "--parts", "STM32U575QGIx"]) == 0
     doc = json.loads(out.read_text())
     assert doc["format"] == 1
     assert doc["cubemx_db"] is None

@@ -355,22 +355,40 @@ def _build_or_failure(name: str, pin_data: Path) -> BuiltPart | _Failure:
         return _Failure(exc.file, exc.line, exc.key, exc.expected)
 
 
+def _build_or_error(name: str, pin_data: Path) -> BuiltPart | DescriptionError:
+    try:
+        return build_part(name, pin_data=pin_data)
+    except DescriptionError as exc:
+        return exc
+
+
+def build_each(
+    names: Sequence[str], *, pin_data: Path, jobs: int = 1
+) -> list[BuiltPart | DescriptionError]:
+    """build_part of each of @p names, in order, in a pool of @p jobs processes, in this
+    process when @p jobs is 1. A name whose build fails gives its DescriptionError: the
+    exception itself in this process, one with the same file, line, key and expected from a
+    pool."""
+    if jobs <= 1 or len(names) <= 1:
+        return [_build_or_error(name, pin_data) for name in names]
+    with ProcessPoolExecutor(max_workers=min(jobs, len(names))) as pool:
+        results = list(pool.map(partial(_build_or_failure, pin_data=pin_data), names))
+    return [
+        DescriptionError(r.file, r.line, r.key, r.expected) if isinstance(r, _Failure) else r
+        for r in results
+    ]
+
+
 def build_layers(names: Sequence[str], *, pin_data: Path, jobs: int = 1) -> dict[str, bytes]:
     """Layer files, file name to xz bytes, of the shipped names @p names, each built by
-    build_part in a pool of @p jobs processes, in this process when @p jobs is 1, then
-    `_layers.factor` with each line's reference chosen by `_layers.choose_reference`. Equal
-    inputs give equal bytes. DescriptionError of the first name in @p names whose build fails,
-    and every refusal of `factor`."""
-    if jobs <= 1 or len(names) <= 1:
-        built = [build_part(name, pin_data=pin_data) for name in names]
-    else:
-        with ProcessPoolExecutor(max_workers=min(jobs, len(names))) as pool:
-            results = list(pool.map(partial(_build_or_failure, pin_data=pin_data), names))
-        built: list[BuiltPart] = []
-        for result in results:
-            if isinstance(result, _Failure):
-                raise DescriptionError(result.file, result.line, result.key, result.expected)
-            built.append(result)
+    build_each with @p jobs processes, then `_layers.factor` with each line's reference chosen
+    by `_layers.choose_reference`. Equal inputs give equal bytes. DescriptionError of the first
+    name in @p names whose build fails, and every refusal of `factor`."""
+    built: list[BuiltPart] = []
+    for result in build_each(names, pin_data=pin_data, jobs=jobs):
+        if isinstance(result, DescriptionError):
+            raise result
+        built.append(result)
     by_name = dict(zip(names, built, strict=True))
     references = choose_reference({name: (b.bonded, b.flash_kib) for name, b in by_name.items()})
     return factor({name: json.loads(b.text) for name, b in by_name.items()}, references)

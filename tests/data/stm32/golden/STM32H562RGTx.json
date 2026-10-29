@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 98,
+    "alternates": 395,
+    "cross_rules": 877,
+    "fields": 37667,
+    "irqs": 125,
+    "patched_fields": 412,
+    "peripherals": 197,
+    "regions": 12,
+    "registers": 4156
+  },
+  "part": "STM32H562RGTx",
+  "svd_sha256": "c868fff8bc10dc6dabcf06b205f175dbf71db240c0d0a484cc0070c62e916882",
+  "tables": {
+    "alternates": "a78ab4171616defbe53da3cbe48444cd578299df370a08dd8c24116240e7a48a",
+    "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
+    "fields": "0305420e98067a52dfa002b69a3ade9afa53dd20b82edba4d96cc9ea4465340f",
+    "irqs": "d341d08eaf9cf0a649296b79e672a60a1ff56200de3e399adb1d7ba8499dba98",
+    "peripherals": "6accdf9b74a925c0d50f99ad0a0efe8f64b18a007b9510375d739ea3b261a4e3",
+    "regions": "b7158ca56c1df82074b98267c2bf7fe672c30e7c650e2d2fa5b89fd65d68bbfb",
+    "registers": "d54092c38f131cad6a80fe93990d6dc6e834cfa6aaca33a42d41535c4bd99f8b"
+  }
+}

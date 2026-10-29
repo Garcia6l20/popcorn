@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 100,
+    "alternates": 1031,
+    "cross_rules": 877,
+    "fields": 38903,
+    "irqs": 128,
+    "patched_fields": 412,
+    "peripherals": 201,
+    "regions": 12,
+    "registers": 4480
+  },
+  "part": "STM32H563LIHxQ",
+  "svd_sha256": "3daa2bdf5fab3e6995c050489e6033326628fb6471d81e922bd3639b579e740f",
+  "tables": {
+    "alternates": "ca02355acff0fd1ff301768aaaf07604e08876b3d42f474979ad6f21bc221a55",
+    "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
+    "fields": "b60d8a1bbf5310e54c0bcb017fbb0cf4d54c7690a5ad24a0615a7d3407f8ceb5",
+    "irqs": "03c827971b858f128ff01140cb03d22c75a532ceb7c45f35af5bffb8d709df0b",
+    "peripherals": "911433c7861203a79011aae97da40f09fd136e94eaf3ee75c7b566acf650c11e",
+    "regions": "02be73c299ed6699e62d697003bfc8bebf9caecd9b69c21b4909ae41f5b036f9",
+    "registers": "3da04fc7592dabe474944cf28e99be497517424397e53a0545ad60a21964783f"
+  }
+}

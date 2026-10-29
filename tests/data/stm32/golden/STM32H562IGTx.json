@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 98,
+    "alternates": 959,
+    "cross_rules": 877,
+    "fields": 37667,
+    "irqs": 125,
+    "patched_fields": 412,
+    "peripherals": 197,
+    "regions": 12,
+    "registers": 4156
+  },
+  "part": "STM32H562IGTx",
+  "svd_sha256": "c868fff8bc10dc6dabcf06b205f175dbf71db240c0d0a484cc0070c62e916882",
+  "tables": {
+    "alternates": "939f106a788e69bd559feccf51d47c1647f0f282f06c35b075be5b433beec418",
+    "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
+    "fields": "0305420e98067a52dfa002b69a3ade9afa53dd20b82edba4d96cc9ea4465340f",
+    "irqs": "d341d08eaf9cf0a649296b79e672a60a1ff56200de3e399adb1d7ba8499dba98",
+    "peripherals": "6a3c2e780ddec5b251056eb5ef4f59a14788915709c8f6cdd1a488774d84ef89",
+    "regions": "b03dd7b6f7fd7cf34d3e8f4eaa2b825c4ecc3ba2d9252f5344dc5373f308558b",
+    "registers": "d54092c38f131cad6a80fe93990d6dc6e834cfa6aaca33a42d41535c4bd99f8b"
+  }
+}

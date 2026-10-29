@@ -39,18 +39,21 @@ def table_instances(page: str) -> list[str]:
     return [name for row in rows for name in row.split("|")[3].strip().split(", ")]
 
 
+@pytest.mark.timeout(60)
 def test_every_shipped_part_has_a_page(generated: Path) -> None:
     assert sorted(p.stem for p in generated.glob("*.md")) == sorted(
         [*popcorn.stm32.shipped_parts(), "cores", "parts"]
     )
 
 
+@pytest.mark.timeout(60)
 def test_the_u575_page_lists_each_instance_once(generated: Path) -> None:
     part = popcorn.stm32.mcu("STM32U575QGIx")
     listed = table_instances((generated / "STM32U575QGIx.md").read_text())
     assert sorted(listed) == sorted(p.name for p in part.peripherals if p.alias_of is None)
 
 
+@pytest.mark.timeout(60)
 def test_the_u575_page_shows_the_rng_builtin(generated: Path) -> None:
     page = (generated / "STM32U575QGIx.md").read_text()
     assert "| `RNG` | `rng1_v4_1` | RNG | built-in |" in page

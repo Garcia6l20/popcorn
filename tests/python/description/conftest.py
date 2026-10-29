@@ -1,3 +1,4 @@
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,16 @@ from popcorn.stm32.description._model import CoreDesc, IrqDesc, PeripheralDesc
 from popcorn.stm32.description._patches import PatchTarget
 from popcorn.stm32.description._sources import Sources, find_sources
 from popcorn.stm32.description._svd import SvdDevice
+
+PIN_DATA_VARIABLE = "POPCORN_STM32_PIN_DATA"
+
+
+def require_pin_data() -> Path:
+    """The STM32_open_pin_data checkout named by POPCORN_STM32_PIN_DATA, skips when unset."""
+    value = os.environ.get(PIN_DATA_VARIABLE)
+    if not value:
+        pytest.skip(f"set {PIN_DATA_VARIABLE} to a STM32_open_pin_data checkout")
+    return Path(value)
 
 
 @pytest.fixture(scope="session")

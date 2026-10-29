@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 98,
+    "alternates": 625,
+    "cross_rules": 584,
+    "fields": 47922,
+    "irqs": 121,
+    "patched_fields": 424,
+    "peripherals": 197,
+    "regions": 14,
+    "registers": 4742
+  },
+  "part": "STM32U575VITx",
+  "svd_sha256": "4ce0b4cb8b856dd49870042b21fde552576ec48c9d2a10a3edb0662231175976",
+  "tables": {
+    "alternates": "8505c225032375d7cd9ebf4c9dd5a40613436338674740228575c9065dedbfda",
+    "core": "452574cc5eb4c03734648f2a71227735ca06bcbea982ba302664ee5b3a42a2c5",
+    "fields": "11796245309e0eb2663e81b8c3d5a924f38f0a7dd6fc63ea39867591ddc4ca53",
+    "irqs": "1f2b069e14b9a63774a9253409af92c496534882683dac44bdc3e4d099409e27",
+    "peripherals": "04e9b158e2c6f361ebf0982017af4408b680df4b83c865de28cb1f2d1483b6f0",
+    "regions": "8f4c87badf7a46ccc3403be86ddfcac13f9b189ba2e216a563e4e9c95d18d34a",
+    "registers": "4c3b5b961da2c649479db55da28db85f7dd177b3a90e39427dc9809a3403f1e4"
+  }
+}

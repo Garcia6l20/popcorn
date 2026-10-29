@@ -14,8 +14,8 @@ from popcorn.stm32.description._golden import compute_golden, dump_tables, load_
 from popcorn.stm32.description._layers import family_name
 from popcorn.stm32.description._shipped import (
     SHIPPED_DIR,
+    build_each,
     build_layers,
-    build_text,
     compose_shipped,
     layer_families,
     match_name,
@@ -123,29 +123,37 @@ def _named(args: argparse.Namespace, goldens: list[str]) -> list[str]:
     return names
 
 
-def _check(names: list[str], out_dir: Path, pin_data: Path) -> int:
+def _check(names: list[str], out_dir: Path, pin_data: Path, jobs: int) -> int:
     from popcorn._part_description import description_digest, parse_description
 
     status = 0
+    shipped = shipped_names(out_dir)
+    present = [name for name in names if name in shipped]
     for name in names:
+        if name not in shipped:
+            print(f"{out_dir}: no shipped description of {name}", file=sys.stderr)
+            status = 1
+    for name, result in zip(
+        present, build_each(present, pin_data=pin_data, jobs=jobs), strict=True
+    ):
         try:
-            if name not in shipped_names(out_dir):
-                print(f"{out_dir}: no shipped description of {name}", file=sys.stderr)
-                status = 1
-                continue
-            fresh_text = build_text(name, pin_data=pin_data)
+            if isinstance(result, DescriptionError):
+                raise result
             shipped_text = compose_shipped(name, out_dir)
         except DescriptionError as exc:
             print(str(exc), file=sys.stderr)
             status = 1
             continue
-        fresh = description_digest(parse_description(fresh_text, "fresh build"))
-        shipped = description_digest(parse_description(shipped_text, name))
-        if fresh != shipped:
-            print(f"{out_dir}: {name} shipped {shipped}, fresh build {fresh}", file=sys.stderr)
+        fresh_digest = description_digest(parse_description(result.text, "fresh build"))
+        shipped_digest = description_digest(parse_description(shipped_text, name))
+        if fresh_digest != shipped_digest:
+            print(
+                f"{out_dir}: {name} shipped {shipped_digest}, fresh build {fresh_digest}",
+                file=sys.stderr,
+            )
             status = 1
             continue
-        print(f"{out_dir}: {name} {shipped}")
+        print(f"{out_dir}: {name} {shipped_digest}")
     return status
 
 
@@ -165,7 +173,7 @@ def _cmd_ship(args: argparse.Namespace) -> int:
     try:
         named = _named(args, goldens)
         if args.check:
-            return _check(named or goldens, out_dir, pin_data)
+            return _check(named or goldens, out_dir, pin_data, args.jobs)
         if named:
             families = {family_name(name) for name in named}
         else:

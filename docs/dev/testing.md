@@ -53,6 +53,19 @@ restores a snapshot per test. The suites in `tests/python/api` cover the public 
 run the machine must not depend on host load: a result may depend on the emulated input only,
 never on wall time or on whether the machine was parked or running.
 
+`tests/python/description` is split so that each directory runs under 120 s at `-n 6`:
+
+| Directory | What it holds |
+|---|---|
+| `fresh` | each shipped part against a fresh build from pin data, and `ship --check` |
+| `golden` | each committed golden against a build from ST's files |
+| `shipped` | the shipped layers, their lookup, the cache, `bonded` and the aliases |
+| `description_build` | description builds, die identity, facts and the H5 family |
+| `patches` | patches, the binder, the SVD reader, the svd-parser oracle, IRQ names and the schema |
+
+Set `POPCORN_STM32_PIN_DATA` to a STM32_open_pin_data checkout, or the `fresh` cases skip. The
+`golden` cases need CubeMX and ST's SVDs.
+
 Every test runs under a 15 s pytest-timeout limit, set in `pyproject.toml`. A test that needs
 longer carries `@pytest.mark.timeout(seconds)`, above every wall bound it waits on. The limit uses
 the thread method, so a test that exceeds it dumps every thread's stack and ends its worker

@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 100,
+    "alternates": 852,
+    "cross_rules": 584,
+    "fields": 48120,
+    "irqs": 128,
+    "patched_fields": 424,
+    "peripherals": 201,
+    "regions": 14,
+    "registers": 4836
+  },
+  "part": "STM32U585AIIx",
+  "svd_sha256": "722e5a40b1f07c11e28417b3438da1eaa2017835cfdebcb41f9a41abacf4bd3e",
+  "tables": {
+    "alternates": "822c2cf2f9f9e3dcd9ad4ab69f637da776c8416749c5af1084f9afcd82cacf3a",
+    "core": "b3670836dc9d6be886bf59e3220dd97aaece14de3970c6ea09acef64cca6938c",
+    "fields": "17ea74226fd9b6383b2446a4136d73d7c4c38972926a3e0b4449bd5b5e3c33e4",
+    "irqs": "dd7dadcefc8962285e9defab79d899d232aad31ecf7ee22e7eaf550ce2a1277b",
+    "peripherals": "553ab400b3e38885770b6513bbc98317f325611a9a4eb8eae5038ff4a1bb1e76",
+    "regions": "ceed4d7d6aeefba5ac31e69c364b83d80ef47d600fadbc0f055f73c5235f6a10",
+    "registers": "cf87e417c8fe041c3e991f4173c7a807c59d2f6d6de7a9631f69fab98e50be34"
+  }
+}

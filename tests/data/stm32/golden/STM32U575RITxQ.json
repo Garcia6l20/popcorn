@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 98,
+    "alternates": 348,
+    "cross_rules": 584,
+    "fields": 47922,
+    "irqs": 121,
+    "patched_fields": 424,
+    "peripherals": 197,
+    "regions": 14,
+    "registers": 4742
+  },
+  "part": "STM32U575RITxQ",
+  "svd_sha256": "4ce0b4cb8b856dd49870042b21fde552576ec48c9d2a10a3edb0662231175976",
+  "tables": {
+    "alternates": "10866e45c3532746e9abe27d0f4f8eb54a9ff2122f73ea0dd74a00db85b75779",
+    "core": "452574cc5eb4c03734648f2a71227735ca06bcbea982ba302664ee5b3a42a2c5",
+    "fields": "11796245309e0eb2663e81b8c3d5a924f38f0a7dd6fc63ea39867591ddc4ca53",
+    "irqs": "1f2b069e14b9a63774a9253409af92c496534882683dac44bdc3e4d099409e27",
+    "peripherals": "a5da8effa09acb571b8dfa52c34d660084a78042d890dabfec6d8c8afd979851",
+    "regions": "fbd3bde0177731dad26aa9a5639d271cf27d0f4948a899f33eb6177de6626777",
+    "registers": "4c3b5b961da2c649479db55da28db85f7dd177b3a90e39427dc9809a3403f1e4"
+  }
+}

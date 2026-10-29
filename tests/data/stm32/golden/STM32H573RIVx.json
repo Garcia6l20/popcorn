@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 104,
+    "alternates": 470,
+    "cross_rules": 877,
+    "fields": 39333,
+    "irqs": 131,
+    "patched_fields": 412,
+    "peripherals": 209,
+    "regions": 12,
+    "registers": 4676
+  },
+  "part": "STM32H573RIVx",
+  "svd_sha256": "c0eef483c65d36fabb58f59f0d8428a6bb81758761ff4cd68ef340c21b65efcd",
+  "tables": {
+    "alternates": "8b3887524efdc1298efccd350ddcaa1842bdb54c334429fe6a23649d5bb0640b",
+    "core": "7b8cda5cfefa02a757623e72ed833ec9b446c46491ebc1ce0ec57dfb8ffc2c34",
+    "fields": "a48d15c0264ab7482fd43c5e264d17547bf57d24ec81f812917281fcfd7e2543",
+    "irqs": "ccd22f69b74a688059d1ca98d417404a1cbaead9ec19549611bab07a6f46ff86",
+    "peripherals": "eed4892ca9d72cf4a08ae5de344ef435c39909c72fe075782b104410ca68f9ca",
+    "regions": "68be6fc6e8bc076c7b025e46a3c36ab2a3645aa7de18f382f77ee3947b9c1ef3",
+    "registers": "94d58fffd9570e70489972b869253cf624126919638ae54c9bacbb71823c959a"
+  }
+}
