@@ -48,6 +48,10 @@ RUN --mount=type=bind,from=wheel,source=/out,target=/wheels \
     uv venv /opt/venv --python /usr/local/bin/python3.14 \
     && uv pip install --no-cache --compile-bytecode --python /opt/venv/bin/python \
        "$(ls /wheels/popcorn-*.whl)[pytest]"
+RUN mkdir -p /usr/share/doc/popcorn \
+    && cp -r /opt/venv/lib/python3.14/site-packages/popcorn-*.dist-info/licenses/. /usr/share/doc/popcorn/
+COPY docker/IMAGE_NOTICE /usr/share/doc/popcorn/
+COPY docker/licenses/gcc /usr/share/doc/popcorn/gcc-runtime
 RUN useradd --create-home --uid 1000 popcorn && mkdir -p /work /cache \
     && chown popcorn /work && chmod 1777 /cache
 ENV VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH XDG_CACHE_HOME=/cache UV_CACHE_DIR=/cache/uv \
@@ -56,3 +60,12 @@ USER popcorn
 WORKDIR /work
 VOLUME /cache
 CMD ["pytest"]
+ARG POPCORN_REVISION=unknown
+ARG POPCORN_VERSION=0.1.0.dev0
+LABEL org.opencontainers.image.title="popcorn" \
+      org.opencontainers.image.description="STM32 firmware emulation and testing with popcorn and pytest" \
+      org.opencontainers.image.source="https://github.com/Garcia6l20/popcorn" \
+      org.opencontainers.image.documentation="https://garcia6l20.github.io/popcorn/" \
+      org.opencontainers.image.revision="${POPCORN_REVISION}" \
+      org.opencontainers.image.version="${POPCORN_VERSION}" \
+      org.opencontainers.image.licenses="MIT AND GPL-2.0-only AND LGPL-2.1-or-later AND BSD-3-Clause AND Apache-2.0"

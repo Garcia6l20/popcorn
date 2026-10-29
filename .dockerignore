@@ -9,6 +9,8 @@
 !native
 !python
 !third_party/reflex
+!docker/IMAGE_NOTICE
+!docker/licenses
 !.git/modules/third_party/unicorn
 .git/modules/third_party/unicorn/modules
 **/__pycache__
