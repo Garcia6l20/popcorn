@@ -15,6 +15,7 @@ place of `registers`. Three files hold the layers of the parts of one line:
 
 Family name: RefName[:7] + "xx". Line name: RefName[:9] + "xx". Every function here is pure, no
 file access, no native import.
+
 """
 
 import hashlib
@@ -45,6 +46,8 @@ BLOCK_KEYS = ("registers", "cross_rules")
 
 DELTA_OPTIONAL = ("schema_version", "core", "irqs")
 """Description keys a delta holds only where they differ from the line's."""
+
+_LAYER_SUFFIXES = {".blocks.json.xz": False, ".line.json.xz": True, ".parts.json.xz": True}
 
 Json = Any
 
@@ -90,6 +93,26 @@ def line_name(name: str) -> str:
 def file_names(line: str, family: str) -> tuple[str, str, str]:
     """File names of the parts, line and family layers of @p line in @p family."""
     return f"{line}.parts.json.xz", f"{line}.line.json.xz", f"{family}.blocks.json.xz"
+
+
+def layer_family(file: str) -> str | None:
+    """Family whose layers include the file named @p file, None for a name that is no layer
+    file: `STM32U5xx` for `STM32U5xx.blocks.json.xz` and for `STM32U575xx.line.json.xz`."""
+    for suffix, of_line in _LAYER_SUFFIXES.items():
+        if file.endswith(suffix):
+            stem = file.removesuffix(suffix)
+            return family_name(stem) if of_line else stem
+    return None
+
+
+def choose_reference(ranks: Mapping[str, tuple[int, int]]) -> dict[str, str]:
+    """Line to reference part of the shipped names in @p ranks, each mapped to its bonded GPIO
+    pin count and flash size in KiB: per line the part with the most bonded pins, then the
+    largest flash, then the first name in sorted order."""
+    references: dict[str, str] = {}
+    for name in sorted(ranks, key=lambda name: (-ranks[name][0], -ranks[name][1], name)):
+        references.setdefault(line_name(name), name)
+    return dict(sorted(references.items()))
 
 
 def _split(name: str, description: Mapping[str, Json]) -> tuple[list[Json], dict[str, Json]]:

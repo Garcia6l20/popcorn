@@ -7,6 +7,10 @@ import lzma
 import os
 import re
 import time
+from collections.abc import Collection, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,13 +18,17 @@ from popcorn._errors import absent
 from popcorn.stm32.description._binder import check_bounds, dump_json
 from popcorn.stm32.description._builder import build_description
 from popcorn.stm32.description._cache import cached_description, default_cache_dir
+from popcorn.stm32.description._cubemx import bonded_pins, read_part
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
 from popcorn.stm32.description._layers import (
     LAYER_FORMAT,
+    choose_reference,
     compose,
     dump,
+    factor,
     family_name,
     file_names,
+    layer_family,
     line_name,
 )
 from popcorn.stm32.description._sources import match_refname, pin_data_sources
@@ -110,7 +118,10 @@ def compose_shipped(name: str, directory: Path | None = None) -> str:
     return _compose_packed(name, paths, _read(paths))
 
 
-def _match(part: str, core: str | None, stems: list[str], *, file: str) -> str | None:
+def match_name(part: str, core: str | None, stems: list[str], *, file: str) -> str | None:
+    """The one of the names @p stems, `<RefName>[-<core>]`, with core @p core whose RefName
+    @p part names by match_refname, None when none does. DescriptionError naming @p file when
+    several do."""
     refnames: list[str] = []
     for stem in stems:
         refname, _, stem_core = stem.partition("-")
@@ -153,7 +164,7 @@ def shipped_description(
     name and another version unused for STALE_SECONDS, except a file the directory's sticky bit
     keeps for its owner. Bound: one file per shipped name per layer version used in the last 7
     days."""
-    name = _match(part, core, shipped_names(), file=str(SHIPPED_DIR))
+    name = match_name(part, core, shipped_names(), file=str(SHIPPED_DIR))
     if name is None:
         return None
     paths = _layer_paths(name, SHIPPED_DIR)
@@ -239,7 +250,7 @@ def description_path(
         if absent(directory):
             continue
         stems = sorted(path.stem for path in directory.glob("*.json"))
-        name = _match(part, core, stems, file=str(directory))
+        name = match_name(part, core, stems, file=str(directory))
         if name is not None:
             return directory / f"{name}.json"
     if not local_only:
@@ -267,20 +278,110 @@ def description_path(
         ) from exc
 
 
-def build_shipped(part: str, *, pin_data: Path, core: str | None = None) -> tuple[str, bytes]:
-    """Name, `<RefName>[-<core>]`, and xz bytes of the shipped description of @p part, built
-    from pin_data_sources. Equal inputs give equal bytes. DescriptionError when no CMSIS device
-    header is found: a description without its IRQ names would differ from a local build."""
-    sources = pin_data_sources(part, pin_data=pin_data, core=core)
+@dataclass(frozen=True)
+class _Failure:
+    file: str
+    line: int
+    key: str
+    expected: str
+
+
+@dataclass(frozen=True)
+class BuiltPart:
+    """A description built for shipping and the inputs of its line's reference choice."""
+
+    text: str
+    """JSON text as dump_json writes it."""
+    bonded: int
+    """Bonded GPIO pins of the part's package, by bonded_pins."""
+    flash_kib: int
+    """Flash size in KiB, the db's first Flash element."""
+
+
+def build_part(name: str, *, pin_data: Path) -> BuiltPart:
+    """BuiltPart of the shipped name @p name, `<RefName>[-<core>]`, built from
+    pin_data_sources. DescriptionError when no CMSIS device header is found: a description
+    without its IRQ names would differ from a local build."""
+    part, _, core = name.partition("-")
+    sources = pin_data_sources(part, pin_data=pin_data, core=core or None)
     if sources.cmsis_header is None:
         raise DescriptionError(
             sources.part, 0, "cmsis_header", "a CMSIS device header for the IRQ names"
         )
-    name = f"{sources.part}-{core}" if core else sources.part
     description = build_description(sources)
     check_bounds(description, file=name)
-    text = dump_json(description)
-    packed = lzma.compress(
-        text.encode("utf-8"), format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC64, preset=9
+    db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db))
+    return BuiltPart(
+        text=dump_json(description),
+        bonded=sum(mask.bit_count() for mask in bonded_pins(db_part).values()),
+        flash_kib=db_part.flash_kib[0],
     )
-    return name, packed
+
+
+def build_text(name: str, *, pin_data: Path) -> str:
+    """JSON text, as dump_json writes it, of build_part for @p name."""
+    return build_part(name, pin_data=pin_data).text
+
+
+def _build_or_failure(name: str, pin_data: Path) -> BuiltPart | _Failure:
+    try:
+        return build_part(name, pin_data=pin_data)
+    except DescriptionError as exc:
+        return _Failure(exc.file, exc.line, exc.key, exc.expected)
+
+
+def build_layers(names: Sequence[str], *, pin_data: Path, jobs: int = 1) -> dict[str, bytes]:
+    """Layer files, file name to xz bytes, of the shipped names @p names, each built by
+    build_part in a pool of @p jobs processes, in this process when @p jobs is 1, then
+    `_layers.factor` with each line's reference chosen by `_layers.choose_reference`. Equal
+    inputs give equal bytes. DescriptionError of the first name in @p names whose build fails,
+    and every refusal of `factor`."""
+    if jobs <= 1 or len(names) <= 1:
+        built = [build_part(name, pin_data=pin_data) for name in names]
+    else:
+        with ProcessPoolExecutor(max_workers=min(jobs, len(names))) as pool:
+            results = list(pool.map(partial(_build_or_failure, pin_data=pin_data), names))
+        built: list[BuiltPart] = []
+        for result in results:
+            if isinstance(result, _Failure):
+                raise DescriptionError(result.file, result.line, result.key, result.expected)
+            built.append(result)
+    by_name = dict(zip(names, built, strict=True))
+    references = choose_reference({name: (b.bonded, b.flash_kib) for name, b in by_name.items()})
+    return factor({name: json.loads(b.text) for name, b in by_name.items()}, references)
+
+
+def write_layers(
+    directory: Path, files: Mapping[str, bytes], families: Collection[str]
+) -> list[str]:
+    """Writes @p files, file name to bytes, into @p directory, each to `<name>.tmp.<pid>` first,
+    then replaced into place once every file is written, then removes every layer file of
+    @p families that @p files does not hold. Returns the names removed, sorted."""
+    directory.mkdir(parents=True, exist_ok=True)
+    pending: list[tuple[Path, Path]] = []
+    try:
+        for file, data in sorted(files.items()):
+            tmp_path = directory / f"{file}.tmp.{os.getpid()}"
+            pending.append((tmp_path, directory / file))
+            tmp_path.write_bytes(data)
+        for tmp_path, path in pending:
+            os.replace(tmp_path, path)
+    except BaseException:
+        for tmp_path, _ in pending:
+            tmp_path.unlink(missing_ok=True)
+        raise
+    removed: list[str] = []
+    for path in sorted(directory.glob("*.json.xz")):
+        if path.name not in files and layer_family(path.name) in families:
+            path.unlink(missing_ok=True)
+            removed.append(path.name)
+    return removed
+
+
+def layer_families(directory: Path) -> set[str]:
+    """Families with a layer file in @p directory."""
+    return {
+        family
+        for path in directory.glob("*.json.xz")
+        if (family := layer_family(path.name)) is not None
+    }

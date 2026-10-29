@@ -11,11 +11,19 @@ from typing import Any, cast
 
 import popcorn
 import pytest
+from popcorn.stm32.description import __main__ as cli
 from popcorn.stm32.description import _layers, _shipped
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
-from popcorn.stm32.description._layers import dump, factor, pack
+from popcorn.stm32.description._layers import (
+    choose_reference,
+    dump,
+    factor,
+    layer_family,
+    pack,
+)
 from popcorn.stm32.description._shipped import (
     SHIPPED_DIR,
+    BuiltPart,
     compose_shipped,
     description_path,
     shipped_description,
@@ -502,3 +510,167 @@ def test_every_alias_of_a_shipped_description_equals_its_base_register_by_regist
     for alias in aliases:
         base = by_name[cast(str, alias["alias_of"])]
         assert alias["registers"] == base["registers"], alias["name"]
+
+
+SIBLING = "STM32T001ABDx"
+OTHER = "STM32T101ABCx"
+BONDED = {NAME: 80, SIBLING: 90, OTHER: 10}
+"""Bonded pins of the toy parts, SIBLING the reference of their line."""
+
+
+class ShipEnv:
+    def __init__(self, root: Path) -> None:
+        self.goldens = root / "golden"
+        self.out = root / "out"
+        self.built: list[str] = []
+
+    def ship(self, *args: str) -> int:
+        return cli.main(["ship", *args, "--pin-data", "unused", "--out", str(self.out), "-j", "1"])
+
+
+@pytest.fixture
+def ship_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ShipEnv:
+    env = ShipEnv(tmp_path)
+    env.goldens.mkdir()
+    for name in (NAME, SIBLING, OTHER):
+        (env.goldens / f"{name}.json").write_text("{}")
+
+    def build(name: str, *, pin_data: Path) -> BuiltPart:
+        env.built.append(name)
+        text = _description_text(name, generator=f"built {name}")
+        return BuiltPart(text=text, bonded=BONDED[name], flash_kib=1024)
+
+    monkeypatch.setattr(cli, "GOLDEN_DIR", env.goldens)
+    monkeypatch.setattr(_shipped, "build_part", build)
+    return env
+
+
+def _files(directory: Path) -> dict[str, bytes]:
+    return {path.name: path.read_bytes() for path in sorted(directory.iterdir())}
+
+
+def test_ship_writes_what_factor_writes_for_every_golden_part_and_the_same_bytes_twice(
+    ship_env: ShipEnv,
+) -> None:
+    assert ship_env.ship() == 0
+    expected = factor(
+        {name: _description(name, f"built {name}") for name in (NAME, SIBLING, OTHER)},
+        {"STM32T001xx": SIBLING, "STM32T101xx": OTHER},
+    )
+    first = _files(ship_env.out)
+    assert first == expected
+    assert ship_env.ship() == 0
+    assert _files(ship_env.out) == first
+    assert ship_env.built == sorted([NAME, SIBLING, OTHER]) * 2
+
+
+def test_ship_of_one_part_rewrites_its_whole_family_and_leaves_other_families(
+    ship_env: ShipEnv,
+) -> None:
+    ship_env.out.mkdir()
+    foreign = ship_env.out / "STM32T1xx.blocks.json.xz"
+    foreign.write_bytes(b"other family")
+    assert ship_env.ship(SIBLING) == 0
+    assert ship_env.built == [NAME, SIBLING]
+    assert foreign.read_bytes() == b"other family"
+    assert sorted(_files(ship_env.out)) == sorted([PARTS, LINE, FAMILY, foreign.name])
+    assert shipped_names(ship_env.out) == [NAME, SIBLING]
+
+
+def test_ship_removes_the_layers_a_deleted_golden_leaves_behind(ship_env: ShipEnv) -> None:
+    assert ship_env.ship() == 0
+    (ship_env.goldens / f"{SIBLING}.json").unlink()
+    assert ship_env.ship(NAME) == 0
+    assert shipped_names(ship_env.out) == [NAME, OTHER]
+    assert _decode(ship_env.out, LINE)["reference"] == NAME
+    (ship_env.goldens / f"{OTHER}.json").unlink()
+    assert ship_env.ship() == 0
+    assert sorted(_files(ship_env.out)) == sorted([PARTS, LINE, FAMILY])
+    (ship_env.goldens / f"{NAME}.json").unlink()
+    assert ship_env.ship() == 0
+    assert _files(ship_env.out) == {}
+
+
+def test_ship_leaves_no_temporary_file_when_a_write_fails(
+    ship_env: ShipEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(source: object, target: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("popcorn.stm32.description._shipped.os.replace", refuse)
+    with pytest.raises(OSError, match="disk full"):
+        ship_env.ship()
+    assert _files(ship_env.out) == {}
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--core", "cm33"], "--core needs a part list"),
+        (["STM32T001ABEx"], "STM32T001ABEx: a golden file"),
+        ([NAME, "--core", "cm33"], "a golden file of the part core cm33"),
+    ],
+)
+def test_ship_refuses_parts_without_a_golden_and_a_core_without_parts(
+    ship_env: ShipEnv, capsys: pytest.CaptureFixture[str], args: list[str], message: str
+) -> None:
+    assert ship_env.ship(*args) == 1
+    assert message in capsys.readouterr().err
+    assert ship_env.built == []
+
+
+def test_ship_check_compares_the_composed_digest_with_a_fresh_build(
+    ship_env: ShipEnv, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert ship_env.ship() == 0
+    capsys.readouterr()
+    assert ship_env.ship("--check") == 0
+    assert len(capsys.readouterr().out.splitlines()) == 3
+    line = _decode(ship_env.out, LINE)
+    line["peripherals"][0]["base"] += 0x1000
+    _rewrite(ship_env.out, LINE, line)
+    assert ship_env.ship(NAME, "--check") == 1
+    assert f"{NAME} shipped " in capsys.readouterr().err
+
+
+def test_ship_check_refuses_a_tampered_block(
+    ship_env: ShipEnv, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert ship_env.ship() == 0
+    family = _decode(ship_env.out, FAMILY)
+    block = next(block for block in family["blocks"].values() if block["registers"])
+    block["registers"][0]["offset"] += 4
+    (ship_env.out / FAMILY).write_bytes(pack(family))
+    capsys.readouterr()
+    assert ship_env.ship(NAME, "--check") == 1
+    assert "a block hashing to key" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("ranks", "reference"),
+    [
+        ({NAME: (100, 1024), SIBLING: (90, 2048)}, NAME),
+        ({NAME: (90, 1024), SIBLING: (90, 2048)}, SIBLING),
+        ({SIBLING: (90, 2048), NAME: (90, 2048)}, NAME),
+    ],
+    ids=["bonded pins first", "flash second", "name last"],
+)
+def test_the_reference_of_a_line_is_most_bonded_pins_then_flash_then_name(
+    ranks: dict[str, tuple[int, int]], reference: str
+) -> None:
+    other = {OTHER: (1, 1)}
+    assert choose_reference(ranks | other) == {"STM32T001xx": reference, "STM32T101xx": OTHER}
+
+
+@pytest.mark.parametrize(
+    ("file", "family"),
+    [
+        ("STM32U5xx.blocks.json.xz", "STM32U5xx"),
+        ("STM32U575xx.line.json.xz", "STM32U5xx"),
+        ("STM32H573xx.parts.json.xz", "STM32H5xx"),
+        ("STM32U575QGIx.json.xz", None),
+        ("STM32U5xx.blocks.json.xz.tmp.12", None),
+    ],
+)
+def test_layer_family_names_the_family_of_layer_files_only(file: str, family: str | None) -> None:
+    assert layer_family(file) == family

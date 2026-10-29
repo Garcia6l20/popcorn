@@ -1,6 +1,8 @@
-"""CLI: python -m popcorn.stm32.description build|sources|golden|ship <part> [options]."""
+"""CLI: python -m popcorn.stm32.description build|sources <part> | golden|ship [<part> ...]
+[options]."""
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -9,13 +11,16 @@ from popcorn.stm32.description._builder import build_description_with_report
 from popcorn.stm32.description._cache import cached_description
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._golden import compute_golden, dump_tables, load_golden, write_golden
+from popcorn.stm32.description._layers import family_name
 from popcorn.stm32.description._shipped import (
-    MAX_SHIPPED_BYTES,
     SHIPPED_DIR,
-    bounded_xz,
-    build_shipped,
+    build_layers,
+    build_text,
     compose_shipped,
+    layer_families,
+    match_name,
     shipped_names,
+    write_layers,
 )
 from popcorn.stm32.description._sources import find_sources
 
@@ -50,20 +55,28 @@ def _cmd_sources(args: argparse.Namespace) -> int:
     return 0
 
 
-def _golden_path(part: str) -> Path:
-    return Path(__file__).parents[4] / "tests" / "data" / "stm32" / "golden" / f"{part}.json"
+GOLDEN_DIR = Path(__file__).parents[4] / "tests" / "data" / "stm32" / "golden"
+"""Golden files, `<RefName>[-<core>].json`. A part ships exactly when its golden exists."""
+
+DEFAULT_JOBS = min(10, os.cpu_count() or 1)
 
 
-def _cmd_golden(args: argparse.Namespace) -> int:
+def golden_names() -> list[str]:
+    """Shipped names with a golden file in GOLDEN_DIR, sorted."""
+    return sorted(path.stem for path in GOLDEN_DIR.glob("*.json"))
+
+
+def _golden_one(name: str, args: argparse.Namespace) -> int:
+    part, _, core = name.partition("-")
     try:
-        sources = find_sources(args.part, core=args.core)
+        sources = find_sources(part, core=core or None)
         description, report = build_description_with_report(sources)
     except DescriptionError as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
     golden = compute_golden(description, report, svd_sha256=description.sources["svd"])
-    path = _golden_path(sources.part)
+    path = GOLDEN_DIR / f"{sources.part}{'-' + core if core else ''}.json"
 
     if args.dump is not None:
         dump_tables(Path(args.dump), description)
@@ -83,33 +96,84 @@ def _cmd_golden(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_ship(args: argparse.Namespace) -> int:
-    if not args.check:
-        print("ship: only --check runs, this version writes no layer files", file=sys.stderr)
+def _cmd_golden(args: argparse.Namespace) -> int:
+    if args.core and not args.parts:
+        print("golden: --core needs a part list", file=sys.stderr)
         return 1
-    try:
-        name, packed = build_shipped(args.part, pin_data=Path(args.pin_data), core=args.core)
-    except DescriptionError as exc:
-        print(str(exc), file=sys.stderr)
+    if args.dump is not None and len(args.parts) != 1:
+        print("golden: --dump needs exactly one part", file=sys.stderr)
         return 1
+    names = [f"{part}-{args.core}" if args.core else part for part in args.parts]
+    status = 0
+    for name in names or golden_names():
+        status = max(status, _golden_one(name, args))
+    return status
+
+
+def _named(args: argparse.Namespace, goldens: list[str]) -> list[str]:
+    names: list[str] = []
+    for part in args.parts:
+        name = match_name(part, args.core, goldens, file=str(GOLDEN_DIR))
+        if name is None:
+            core = f" core {args.core}" if args.core else ""
+            raise DescriptionError(
+                str(GOLDEN_DIR), 0, part, f"a golden file of the part{core}, golden --update"
+            )
+        names.append(name)
+    return names
+
+
+def _check(names: list[str], out_dir: Path, pin_data: Path) -> int:
     from popcorn._part_description import description_digest, parse_description
 
-    out_dir = SHIPPED_DIR if args.out is None else Path(args.out)
-    if name not in shipped_names(out_dir):
-        print(f"{out_dir}: no shipped description of {name}", file=sys.stderr)
+    status = 0
+    for name in names:
+        try:
+            if name not in shipped_names(out_dir):
+                print(f"{out_dir}: no shipped description of {name}", file=sys.stderr)
+                status = 1
+                continue
+            fresh_text = build_text(name, pin_data=pin_data)
+            shipped_text = compose_shipped(name, out_dir)
+        except DescriptionError as exc:
+            print(str(exc), file=sys.stderr)
+            status = 1
+            continue
+        fresh = description_digest(parse_description(fresh_text, "fresh build"))
+        shipped = description_digest(parse_description(shipped_text, name))
+        if fresh != shipped:
+            print(f"{out_dir}: {name} shipped {shipped}, fresh build {fresh}", file=sys.stderr)
+            status = 1
+            continue
+        print(f"{out_dir}: {name} {shipped}")
+    return status
+
+
+def _cmd_ship(args: argparse.Namespace) -> int:
+    if args.core and not args.parts:
+        print("ship: --core needs a part list", file=sys.stderr)
         return 1
+    out_dir = SHIPPED_DIR if args.out is None else Path(args.out)
+    pin_data = Path(args.pin_data)
+    goldens = golden_names()
     try:
-        fresh_text = bounded_xz(packed, MAX_SHIPPED_BYTES, file="fresh build").decode("utf-8")
-        shipped_text = compose_shipped(name, out_dir)
+        named = _named(args, goldens)
+        if args.check:
+            return _check(named or goldens, out_dir, pin_data)
+        if named:
+            families = {family_name(name) for name in named}
+        else:
+            families = {family_name(name) for name in goldens} | layer_families(out_dir)
+        names = [name for name in goldens if family_name(name) in families]
+        files = build_layers(names, pin_data=pin_data, jobs=args.jobs)
     except DescriptionError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    fresh = description_digest(parse_description(fresh_text, "fresh build"))
-    shipped = description_digest(parse_description(shipped_text, name))
-    if fresh != shipped:
-        print(f"{out_dir}: {name} shipped {shipped}, fresh build {fresh}", file=sys.stderr)
-        return 1
-    print(f"{out_dir}: {name} {shipped}")
+    removed = write_layers(out_dir, files, families)
+    for file in sorted(files):
+        print(out_dir / file)
+    for file in removed:
+        print(f"removed {out_dir / file}")
     return 0
 
 
@@ -128,19 +192,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     sources_cmd.add_argument("--core")
     sources_cmd.set_defaults(func=_cmd_sources)
 
-    golden = subparsers.add_parser("golden")
-    golden.add_argument("part")
+    golden = subparsers.add_parser("golden", help="no part: every golden")
+    golden.add_argument("parts", nargs="*", metavar="part")
     golden.add_argument("--core")
     golden.add_argument("--update", action="store_true")
     golden.add_argument("--dump")
     golden.set_defaults(func=_cmd_golden)
 
-    ship = subparsers.add_parser("ship")
-    ship.add_argument("part")
+    ship = subparsers.add_parser(
+        "ship", help="rewrites every layer of the named parts' families, no part: every golden"
+    )
+    ship.add_argument("parts", nargs="*", metavar="part")
     ship.add_argument("--core")
     ship.add_argument("--pin-data", required=True)
     ship.add_argument("--check", action="store_true")
-    ship.add_argument("--out", help="layer directory to check, the package data by default")
+    ship.add_argument("--out", help="layer directory, the package data by default")
+    ship.add_argument("-j", "--jobs", type=int, default=DEFAULT_JOBS)
     ship.set_defaults(func=_cmd_ship)
 
     args = parser.parse_args(argv)

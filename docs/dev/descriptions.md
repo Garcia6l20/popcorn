@@ -207,7 +207,27 @@ description. It refuses with `DescriptionError` naming the file: a layer of anot
 instance, and a decompressed layer or composed description above `MAX_SHIPPED_BYTES`. The
 composed size is counted before anything is built. On first use the composed text is cached as
 `<cache>/shipped/<name>-<sha16>.json`, sha16 over the parts, line and family file bytes.
-`ship --check` composes the shipped part and compares its digest with a fresh build.
+
+A part ships exactly when its golden file `tests/data/stm32/golden/<RefName>[-<core>].json`
+exists. To add a part, write its golden, then ship:
+
+```
+uv run python -m popcorn.stm32.description golden STM32U575QGIx --update
+uv run python -m popcorn.stm32.description ship STM32U575QGIx --pin-data <STM32_open_pin_data>
+uv run python -m popcorn.stm32.description ship --pin-data <STM32_open_pin_data> --check
+```
+
+`ship` builds every golden part of each family it touches from `STM32_open_pin_data`, in a pool
+of `-j` processes, and rewrites all layers of those families. A part named on the command line
+selects its family, no part selects every family with a golden or a layer file. Each line's
+reference is its part with the most bonded GPIO pins, then the largest flash, then the first
+RefName in sorted order. Every file goes to a temporary name first and is renamed once all are
+written. Then every layer file of a touched family that the new set lacks is removed, so a part
+whose golden is deleted leaves no delta and a line with no part leaves no file. Equal inputs give
+equal bytes. `--core` applies to every named part and needs a part list.
+
+`ship --check` composes each shipped part, every golden part without a part list, and compares
+its digest with a fresh build. `golden` without a part checks every golden file.
 
 The lookup order of `popcorn.stm32.mcu(part)` is:
 
