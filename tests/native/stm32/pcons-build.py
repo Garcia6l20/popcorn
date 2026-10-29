@@ -20,6 +20,8 @@ periph_data = project_dir / "tests" / "data" / "periph"
 
 u575 = cached_st_description("STM32U575QGIx", "POPCORN_U575_DESC")
 h573 = cached_st_description("STM32H573AIIx", "POPCORN_H573_DESC")
+u575_2m = cached_st_description("STM32U575ZITxQ", "POPCORN_U575_2M_DESC")
+h5_1m = cached_st_description("STM32H563ZGTx", "POPCORN_H5_1M_DESC")
 firmwares = {
     name: firmware("periph", name)
     for name in (
@@ -176,6 +178,23 @@ flash_h573.private.include_dirs.append(private_dir)
 for _, target in h573_firmwares.values():
     if target is not None:
         flash_h573.depends(target)
+
+flash_geometry = add_doctest(
+    "stm32-flash-geometry",
+    [here / "test_flash_geometry.cpp"],
+    static,
+    env={
+        "POPCORN_U575_2M_DESC": str(u575_2m),
+        "POPCORN_H5_1M_DESC": str(h5_1m),
+        "POPCORN_FW_FLASH_LL": str(firmwares["flash_ll"][0]),
+        "POPCORN_FW_H573_FLASH_LL": str(h573_firmwares["h573_flash_ll"][0]),
+    },
+    register=u575_2m is not None and h5_1m is not None,
+)
+flash_geometry.private.include_dirs.append(private_dir)
+for target in (firmwares["flash_ll"][1], h573_firmwares["h573_flash_ll"][1]):
+    if target is not None:
+        flash_geometry.depends(target)
 
 class_a_h573 = add_doctest(
     "stm32-class-a-h573",

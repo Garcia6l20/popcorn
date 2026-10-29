@@ -39,7 +39,7 @@ using popcorn::testing::sym;
 constexpr std::string_view firmware   = "h573_flash_ll";
 constexpr address          bank2      = 0x0810'0000;
 constexpr address          sector2    = bank2 + 0x4000;
-constexpr address          loop_at    = 0x2000'0100;
+constexpr address          loop_at    = 0x2000'0500;
 constexpr std::uint32_t    lock       = 1u << 0;
 constexpr std::uint32_t    pg         = 1u << 1;
 constexpr std::uint32_t    ser        = 1u << 2;
