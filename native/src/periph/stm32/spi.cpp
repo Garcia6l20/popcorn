@@ -1,6 +1,7 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
+#include "spi_link_port.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
@@ -145,6 +146,15 @@ static_assert(reversed(0x01, 8) == 0x80);
 static_assert(reversed(0x001, 12) == 0x800);
 static_assert(reversed(0x1234'5678, 32) == 0x1E6A'2C48);
 
+struct spi_link_attachment
+{
+  std::shared_ptr<spi_link_target> device;
+  gpio_port*                       cs{};
+  std::uint8_t                     pin{};
+  subscription                     listener;
+  bool                             muted{};
+};
+
 struct heard_frame
 {
   std::uint32_t sent;
@@ -283,6 +293,25 @@ auto lower(std::string_view name) -> std::string
  *        with its record, a machine reset clears both. Each device is attached to the model at its
  *        construction and detached at its destruction.
  *
+ *        Link attachments, through spi_link_port: a link target is exchanged with after every
+ *        board device, in attachment order, and its replies join the AND. It is selected at each
+ *        frame end by the level gpio_port::level() reads on its chip select pin, or by the SS
+ *        output, from CSTART to the end of the transfer while CFG2.SSOE is set. Its pin's edges
+ *        and the SS output's edges reach it through spi_target::select(), and every machine reset
+ *        and power cut reaches it as it reaches a board device. The SS release at the end of a
+ *        transfer is stamped at the last frame's end, the other SS edges at the register write or
+ *        reset that makes them. A proxy attached while its chip select is active hears
+ *        select(true) at the attach. The model runs no mode check on it. A link controller drives
+ *        a target-mode instance as a board controller does. The model's saved state holds the
+ *        board attachments only, so a member snapshot has the same bytes with and without link
+ *        attachments and their mute flags.
+ *
+ *        SPI_CFG1 and SPI_CFG2 are write-protected while CR1.SPE is set, RM0456 68.8.3 and 68.8.4,
+ *        RM0481 58.11.3 and 58.11.4: a write then keeps the old value of every protected bit, for
+ *        every initiator, and a firmware write that changes one logs one warning per instance,
+ *        a model_error under strict_peripherals. On the STM32U5 TXDMAEN and RXDMAEN of SPI_CFG1
+ *        stay writable. The model's own update of MASTER at a mode fault is outside the rule.
+ *
  *        Not modelled, logged once: half duplex, CRC, TI mode, the autonomous trigger, the SS pulse
  *        and timing options.
  */
@@ -290,7 +319,8 @@ class spi final : public dispatch_model<spi, spi_state>,
                   public spi_controller_port,
                   public spi_target_port,
                   public reset_listener,
-                  public bus_reset_listener
+                  public bus_reset_listener,
+                  public spi_link_port
 {
 public:
   spi(model_context&                       ctx,
@@ -336,6 +366,16 @@ public:
       std::uint64_t unit) override;
   void deselect(vtime at, std::uint32_t lane, std::uint64_t unit) override;
   void drop(vtime at, std::uint32_t lane, std::uint64_t unit) override;
+  void attach_target(
+      std::shared_ptr<spi_link_target> target,
+      std::string                      cs_port,
+      std::optional<std::uint8_t>      cs_pin) override;
+  void detach_target(spi_link_target& target) noexcept override;
+  void attach_controller(std::shared_ptr<spi_link_controller> controller) override;
+  void detach_controller(spi_link_controller& controller) noexcept override;
+  void mute(spi_link_target const& target) override;
+  auto unmute(spi_link_target const& target) -> bool override;
+  auto muted(spi_link_target const& target) const -> bool override;
 
   void control_written(std::uint32_t old, std::uint32_t now);
   void clear_written(std::uint32_t old, std::uint32_t now);
@@ -365,7 +405,7 @@ private:
   void               finish_frame();
   void               land_frame();
   void               completion_due(std::uint64_t ticket);
-  void               stop(bool completed);
+  void               stop(bool completed, vtime at);
   void               hardware_select(bool selected);
   void               flags();
   void               warn_unsupported();
@@ -390,10 +430,16 @@ private:
   void               port_selected();
   void               port_deselected(spi_port_entry const& entry);
   [[nodiscard]] auto faults_on_select() const -> bool;
+  [[nodiscard]] auto ss_output() const -> bool;
+  [[nodiscard]] auto link_selected(spi_link_attachment const& link) const -> bool;
+  [[nodiscard]] auto link_of(this auto& self, spi_link_target const& target) -> auto&;
+  void               link_ss_changed(bool was, vtime at);
 
   register_file&                               regs_;
   std::vector<spi_attachment>                  attachments_;
   std::shared_ptr<spi_controller_sink>         controller_;
+  std::vector<spi_link_attachment>             links_;
+  std::shared_ptr<spi_link_controller>         link_controller_;
   std::vector<subscription>                    subscriptions_;
   bool                                         subscribed_{};
   bool                                         limited_;
@@ -449,10 +495,14 @@ private:
   field_ref                                    lsb_first_;
   field_ref                                    polarity_;
   field_ref                                    phase_;
+  reg_ref                                      config1_;
+  reg_ref                                      config2_;
+  std::uint32_t                                config1_kept_;
   std::vector<std::string>                     mismatched_;
   bool                                         unsupported_logged_{};
   bool                                         no_clock_logged_{};
   bool                                         size_logged_{};
+  bool                                         protect_logged_{};
   std::optional<std::uint64_t>                 reset_at_;
 };
 
@@ -503,7 +553,10 @@ spi::spi(
       select_polarity_{field("SPI_CFG2", "SSIOP")}, underrun_{field("SPI_SR", "UDR")},
       underrun_config_{field("SPI_CFG1", "UDRCFG")}, underrun_data_{field("SPI_UDRDR", "UDRDR")},
       lsb_first_{field("SPI_CFG2", "LSBFRST")}, polarity_{field("SPI_CFG2", "CPOL")},
-      phase_{field("SPI_CFG2", "CPHA")}
+      phase_{field("SPI_CFG2", "CPHA")}, config1_{reg("SPI_CFG1")}, config2_{reg("SPI_CFG2")},
+      config1_kept_{
+          variant.dma_enables_writable ? ~(tx_dma_enable_.mask() | rx_dma_enable_.mask())
+                                       : ~std::uint32_t{}}
 {
   if(controller_ and not attachments_.empty())
   {
@@ -571,6 +624,14 @@ spi::~spi()
   for(auto const& attached : attachments_)
   {
     attached.device->detached();
+  }
+  for(auto const& link : links_)
+  {
+    link.device->detached();
+  }
+  if(link_controller_)
+  {
+    link_controller_->unlinked();
   }
 }
 
@@ -756,6 +817,7 @@ void spi::on_bus_reset()
 
 void spi::restore_reset_values(std::optional<reset_kind> kind)
 {
+  auto const ss_was = ss_output();
   for(auto const& name : claims())
   {
     regs_.poke(reg(name).offset, describe(name).reset);
@@ -783,6 +845,10 @@ void spi::restore_reset_values(std::optional<reset_kind> kind)
     {
       attached.device->reset(*kind);
     }
+    for(auto const& link : links_)
+    {
+      link.device->reset(*kind);
+    }
   }
   for(std::size_t index = 0; index < attachments_.size(); ++index)
   {
@@ -792,6 +858,7 @@ void spi::restore_reset_values(std::optional<reset_kind> kind)
       attachments_[index].device->select(false, ctx_.clock.since_power_on());
     }
   }
+  link_ss_changed(ss_was, ctx_.clock.since_power_on());
   subscribe();
   tx_dma_.resolve();
   rx_dma_.resolve();
@@ -802,11 +869,10 @@ void spi::power_cut()
 {
   auto const         at = ctx_.clock.since_power_on();
   std::exception_ptr first;
-  for(auto const& attached : attachments_)
-  {
+  auto const         cut = [&](spi_target& device) {
     try
     {
-      attached.device->power_cut(at);
+      device.power_cut(at);
     }
     catch(...)
     {
@@ -815,6 +881,14 @@ void spi::power_cut()
         first = std::current_exception();
       }
     }
+  };
+  for(auto const& attached : attachments_)
+  {
+    cut(*attached.device);
+  }
+  for(auto const& link : links_)
+  {
+    cut(*link.device);
   }
   if(first)
   {
@@ -887,6 +961,22 @@ void spi::finish_frame()
       }
     }
   }
+  for(auto const& link : links_)
+  {
+    if(link_selected(link))
+    {
+      auto const reply = link.device->exchange_deferred(
+          out, static_cast<std::uint8_t>(frame_bits()), at, state_.generation);
+      if(reply)
+      {
+        in &= *reply;
+      }
+      else
+      {
+        ++owed;
+      }
+    }
+  }
   state_.reply = in;
   state_.owed  = owed;
   if(owed == 0)
@@ -939,21 +1029,22 @@ void spi::land_frame()
   auto const size = transfer_size();
   if(size != 0 and state_.done >= size)
   {
-    stop(true);
+    stop(true, vtime{state_.frame_end_ps + power_on_offset()});
     return;
   }
   if(state_.suspending != 0)
   {
     state_.suspending = 0;
     update(regs_, suspended_, 1);
-    stop(false);
+    stop(false, vtime{state_.frame_end_ps + power_on_offset()});
     return;
   }
   start_frame(state_.frame_end_ps);
 }
 
-void spi::stop(bool completed)
+void spi::stop(bool completed, vtime at)
 {
+  auto const ss_was     = ss_output();
   state_.running        = 0;
   state_.auto_suspended = 0;
   update(regs_, start_, 0);
@@ -962,6 +1053,7 @@ void spi::stop(bool completed)
     update(regs_, end_, 1);
   }
   hardware_select(false);
+  link_ss_changed(ss_was, at);
 }
 
 void spi::flags()
@@ -1045,7 +1137,7 @@ void spi::disable()
   state_.host_synced = 0;
   state_.host_taking = 0;
   state_.host_shift  = ~std::uint32_t{};
-  stop(false);
+  stop(false, ctx_.clock.since_power_on());
 }
 
 void spi::control_written(std::uint32_t old, std::uint32_t now)
@@ -1091,7 +1183,7 @@ void spi::control_written(std::uint32_t old, std::uint32_t now)
       {
         state_.suspending = 0;
         update(regs_, suspended_, 1);
-        stop(false);
+        stop(false, ctx_.clock.since_power_on());
       }
     }
   }
@@ -1102,10 +1194,12 @@ void spi::control_written(std::uint32_t old, std::uint32_t now)
     {
       return;
     }
-    state_.running = 1;
-    state_.done    = 0;
+    auto const ss_was = ss_output();
+    state_.running    = 1;
+    state_.done       = 0;
     std::ranges::fill(state_.mode_checked, 0);
     hardware_select(true);
+    link_ss_changed(ss_was, ctx_.clock.since_power_on());
     start_frame(ctx_.clock.time().ps);
   }
 }
@@ -1185,7 +1279,33 @@ auto spi::on_write(
     flags();
     return {};
   }
+  auto const word = offset & ~3u;
+  auto const protected_ =
+      (word == config1_.offset or word == config2_.offset) and get(regs_, enable_) != 0;
+  auto const before = regs_.peek(word);
   auto const result = dispatch_model::on_write(regs, offset, size, old, value, access);
+  auto const now    = regs_.peek(word);
+  auto const kept   = word == config1_.offset ? config1_kept_ : ~std::uint32_t{};
+  if(protected_ and ((now ^ before) & kept) != 0)
+  {
+    regs_.poke(word, (now & ~kept) | (before & kept));
+    if(access.by != initiator::debugger)
+    {
+      auto const name = word == config1_.offset ? "SPI_CFG1" : "SPI_CFG2";
+      if(not std::exchange(protect_logged_, true))
+      {
+        warn(
+            name, std::format(
+                      "{} {} written while SPE = 1, the old value of its write-protected bits is "
+                      "kept, RM0456 68.8.3 and 68.8.4, RM0481 58.11.3 and 58.11.4",
+                      desc_.name, name));
+      }
+      if(ctx_.strict_peripherals)
+      {
+        throw model_error(desc_.name, name, word);
+      }
+    }
+  }
   flags();
   return result;
 }
@@ -1638,6 +1758,195 @@ void spi::rearm_port(
   }
 }
 
+auto spi::ss_output() const -> bool
+{
+  return state_.running != 0 and get(regs_, ss_output_) != 0;
+}
+
+auto spi::link_selected(spi_link_attachment const& link) const -> bool
+{
+  return link.cs != nullptr ? not link.cs->level(link.pin) : ss_output();
+}
+
+void spi::link_ss_changed(bool was, vtime at)
+{
+  auto const now = ss_output();
+  if(now == was)
+  {
+    return;
+  }
+  for(auto const& link : links_)
+  {
+    if(link.cs == nullptr)
+    {
+      link.device->select(now, at);
+    }
+  }
+}
+
+auto spi::link_of(this auto& self, spi_link_target const& target) -> auto&
+{
+  auto const found = std::ranges::find(
+      self.links_, &target, [](spi_link_attachment const& link) { return link.device.get(); });
+  if(found == self.links_.end())
+  {
+    throw std::invalid_argument(
+        std::format("the device is not a link target attached to {}", self.desc_.name));
+  }
+  return *found;
+}
+
+void spi::attach_target(
+    std::shared_ptr<spi_link_target> target,
+    std::string                      cs_port,
+    std::optional<std::uint8_t>      cs_pin)
+{
+  if(not target)
+  {
+    throw std::invalid_argument("an SPI link target is a device");
+  }
+  if(std::ranges::contains(
+         links_, target.get(), [](spi_link_attachment const& link) { return link.device.get(); }))
+  {
+    throw std::invalid_argument(
+        std::format("the link target is attached to {} already", desc_.name));
+  }
+  if(controller_)
+  {
+    throw config_error(
+        ctx_.part.part, 0, std::format("links.{}", desc_.name),
+        "an SPI instance with no controller, for a link target");
+  }
+  auto* const cs = cs_pin ? dynamic_cast<gpio_port*>(ctx_.peers.find(cs_port)) : nullptr;
+  if(cs_pin and cs == nullptr)
+  {
+    throw config_error(
+        ctx_.part.part, 0, std::format("links.{}.cs_port", desc_.name),
+        std::format("a GPIO port the chip select of a {} link target names", desc_.name));
+  }
+  if(cs_pin and *cs_pin >= cs->pin_count())
+  {
+    throw std::invalid_argument(std::format("{} has no chip select pin {}", cs_port, *cs_pin));
+  }
+  spi_link_attachment link{
+      .device = target, .cs = cs, .pin = cs_pin.value_or(0), .listener = {}, .muted = false};
+  if(cs != nullptr)
+  {
+    link.listener = cs->on_change(
+        [this, device = target.get(), pin = *cs_pin](std::uint8_t changed, bool level) {
+          if(changed == pin)
+          {
+            device->select(not level, ctx_.clock.since_power_on());
+          }
+        });
+  }
+  links_.push_back(std::move(link));
+  auto const by_device = [](spi_link_attachment const& one) { return one.device.get(); };
+  try
+  {
+    target->linked(*this, ctx_.clock);
+    target->attached(*this);
+  }
+  catch(...)
+  {
+    std::erase_if(links_, [&](spi_link_attachment const& one) { return one.device == target; });
+    throw;
+  }
+  auto const found = std::ranges::find(links_, target.get(), by_device);
+  if(found != links_.end() and link_selected(*found))
+  {
+    target->select(true, ctx_.clock.since_power_on());
+  }
+}
+
+void spi::detach_target(spi_link_target& target) noexcept
+{
+  auto const found = std::ranges::find(
+      links_, &target, [](spi_link_attachment const& link) { return link.device.get(); });
+  if(found == links_.end())
+  {
+    return;
+  }
+  auto const device = found->device;
+  device->detached();
+  links_.erase(std::ranges::find(links_, device.get(), [](spi_link_attachment const& link) {
+    return link.device.get();
+  }));
+}
+
+void spi::attach_controller(std::shared_ptr<spi_link_controller> controller)
+{
+  if(not controller)
+  {
+    throw std::invalid_argument("an SPI link controller is a controller");
+  }
+  if(link_controller_)
+  {
+    throw std::invalid_argument(
+        std::format("a link controller is attached to {} already", desc_.name));
+  }
+  if(controller_ or not attachments_.empty() or not links_.empty())
+  {
+    throw config_error(
+        ctx_.part.part, 0, std::format("links.{}", desc_.name),
+        "an SPI instance with no board controller, no board device and no link target, for a "
+        "link controller");
+  }
+  state_.port.last_unit = 0;
+  state_.port.level     = 0;
+  controller_           = controller;
+  link_controller_      = std::move(controller);
+  link_controller_->linked(*this, ctx_.clock);
+}
+
+void spi::detach_controller(spi_link_controller& controller) noexcept
+{
+  if(link_controller_.get() != &controller)
+  {
+    return;
+  }
+  auto& port         = state_.port;
+  state_.host_busy   = 0;
+  state_.host_taking = 0;
+  state_.host_shift  = ~std::uint32_t{};
+  if(not port.entries.empty())
+  {
+    port.entries.clear();
+    ++port.generation;
+  }
+  if(not state_.host.empty())
+  {
+    state_.host.clear();
+    state_.host_next = 0;
+    ++state_.host_generation;
+  }
+  port.last_unit       = 0;
+  port.level           = 0;
+  state_.host_selected = 0;
+  state_.host_synced   = 0;
+  controller_.reset();
+  auto const gone = std::move(link_controller_);
+  flags();
+  gone->unlinked();
+}
+
+void spi::mute(spi_link_target const& target)
+{
+  link_of(target).muted = true;
+}
+
+auto spi::unmute(spi_link_target const& target) -> bool
+{
+  auto& link = link_of(target);
+  link.muted = false;
+  return not link_selected(link);
+}
+
+auto spi::muted(spi_link_target const& target) const -> bool
+{
+  return link_of(target).muted;
+}
+
 auto spi::faults_on_select() const -> bool
 {
   return get(regs_, master_) != 0
@@ -1820,6 +2129,10 @@ void spi::load(std::span<std::byte const> in)
   subscribe();
 }
 }
+
+spi_link_target::~spi_link_target()         = default;
+spi_link_controller::~spi_link_controller() = default;
+spi_link_port::~spi_link_port()             = default;
 
 auto spi_factory(board const& b, spi_variant variant) -> model_factory
 {

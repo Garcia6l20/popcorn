@@ -887,3 +887,22 @@ TEST_CASE("coverage classifies SPI_CFG2 as served and SPI_I2SCFGR as unimplement
   CHECK(found.front().reg == "I2SCFGR");
   CHECK(found.front().reason == core::unmodelled_reason::unimplemented);
 }
+
+TEST_CASE("SPI1 on the H573 keeps the whole SPI_CFG1 while SPE is set, TXDMAEN included")
+{
+  spis s{"SPI1"};
+  s.controller("SPI1", 7, 1);
+  auto&      regs   = s.f->target->peripheral("SPI1");
+  auto const offset = s.reg("SPI1", "SPI_CFG1").offset;
+  auto const cfg1   = s.read("SPI1", "SPI_CFG1");
+  auto const fields = s.reg("SPI1", "SPI_CFG1").fields;
+  auto const tx =
+      std::ranges::find(fields, std::string_view{"TXDMAEN"}, &popcorn::field_desc::name);
+  REQUIRE(tx != fields.end());
+  auto const result = s.f->target->model("SPI1")->on_write(
+      regs, offset, 4, cfg1, cfg1 | (1u << tx->lsb), {.pc = 0, .now = icount{0}});
+  REQUIRE(result.has_value());
+  CHECK(s.get("SPI1", "SPI_CFG1", "TXDMAEN") == 0);
+  s.run_until(s.now() + 1'000'000);
+  CHECK(s.warnings() == 1);
+}

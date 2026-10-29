@@ -1,4 +1,5 @@
 #include "dma.hpp"
+#include "spi_link_port.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -3773,4 +3774,790 @@ TEST_CASE("a drop queued after an RCC reset with a time before it reports at the
   b.run_until(b.now() + us);
   REQUIRE(r.sink->drops.size() == 2);
   CHECK(r.sink->drops[1] == lost{9, ~std::uint32_t{}, vtime{0}});
+}
+
+namespace
+{
+std::vector<std::string> cut_order;
+
+class cut_board final : public periph::spi_target
+{
+public:
+  void select(bool, vtime) override
+  {}
+
+  auto exchange(std::uint32_t, std::uint8_t, vtime) -> std::uint32_t override
+  {
+    return 0xFF;
+  }
+
+  void power_cut(vtime) override
+  {
+    cut_order.emplace_back("board");
+  }
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+};
+
+class link_proxy final : public stm32::spi_link_target
+{
+public:
+  struct asked_frame
+  {
+    std::uint32_t out;
+    vtime         at;
+    std::uint64_t ticket;
+    std::uint64_t local_ps;
+  };
+
+  stm32::spi_link_port*               link{};
+  core::clock const*                  clock{};
+  periph::spi_target_port*            port{};
+  int                                 links{};
+  int                                 attaches{};
+  int                                 detaches{};
+  std::optional<std::uint32_t>        reply{0xFF};
+  std::vector<std::string>            posts;
+  std::vector<std::pair<bool, vtime>> selects;
+  std::vector<popcorn::reset_kind>    resets;
+  std::vector<asked_frame>            asked;
+  std::vector<vtime>                  cuts;
+  std::vector<bool>                   muted_in_hooks;
+
+  void linked(stm32::spi_link_port& to, core::clock const& machine) override
+  {
+    link  = &to;
+    clock = &machine;
+    ++links;
+  }
+
+  void attached(periph::spi_target_port& to) override
+  {
+    port = &to;
+    ++attaches;
+    muted_in_hooks.push_back(link->muted(*this));
+  }
+
+  void detached() noexcept override
+  {
+    muted_in_hooks.push_back(link->muted(*this));
+    link  = nullptr;
+    clock = nullptr;
+    port  = nullptr;
+    ++detaches;
+  }
+
+  void select(bool selected, vtime at) override
+  {
+    selects.emplace_back(selected, at);
+    post(selected ? "select" : "deselect");
+  }
+
+  auto exchange(std::uint32_t, std::uint8_t, vtime) -> std::uint32_t override
+  {
+    return reply.value_or(0xFF);
+  }
+
+  auto exchange_deferred(std::uint32_t out, std::uint8_t, vtime at, std::uint64_t ticket)
+      -> std::optional<std::uint32_t> override
+  {
+    auto const offset = clock->since_power_on().ps - clock->time().ps;
+    asked.push_back({.out = out, .at = at, .ticket = ticket, .local_ps = at.ps - offset});
+    post("frame");
+    return reply;
+  }
+
+  void reset(popcorn::reset_kind kind) override
+  {
+    resets.push_back(kind);
+    post("reset");
+  }
+
+  void power_cut(vtime at) override
+  {
+    cuts.push_back(at);
+    cut_order.emplace_back("link");
+  }
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+private:
+  void post(std::string const& what)
+  {
+    if(link != nullptr and link->muted(*this))
+    {
+      return;
+    }
+    posts.push_back(what);
+  }
+};
+
+class link_sink final : public stm32::spi_link_controller
+{
+public:
+  periph::spi_controller_port*        port{};
+  core::clock const*                  clock{};
+  int                                 links{};
+  int                                 unlinks{};
+  std::vector<std::uint32_t>          sent;
+  std::vector<controller_probe::lost> drops;
+
+  void linked(periph::spi_controller_port& to, core::clock const& machine) override
+  {
+    port  = &to;
+    clock = &machine;
+    ++links;
+  }
+
+  void unlinked() noexcept override
+  {
+    port  = nullptr;
+    clock = nullptr;
+    ++unlinks;
+  }
+
+  void frame(std::uint32_t out, std::uint32_t, vtime) override
+  {
+    sent.push_back(out);
+  }
+
+  void dropped(std::uint64_t unit, std::uint32_t word, vtime at) override
+  {
+    drops.push_back({unit, word, at});
+  }
+};
+
+struct link_rig
+{
+  stm32::board                   board{};
+  std::unique_ptr<stm32_fixture> f;
+
+  explicit link_rig(
+      std::shared_ptr<periph::spi_target> const&   device     = nullptr,
+      std::optional<std::uint8_t>                  cs_pin     = std::nullopt,
+      std::shared_ptr<periph::spi_controller_sink> controller = nullptr,
+      bool                                         strict     = false)
+  {
+    if(device)
+    {
+      board.spi["SPI1"].push_back({.device = device, .cs_port = "GPIOA", .cs_pin = cs_pin});
+    }
+    if(controller)
+    {
+      board.spi_controllers["SPI1"] = controller;
+    }
+    auto options               = popcorn::testing::stm32_options();
+    options.models             = stm32::factories(board, u575());
+    options.strict_peripherals = strict;
+    f = std::make_unique<stm32_fixture>(u575(), "spi_ll", std::move(options));
+    f->set("pc", sym("spi_ll", "idle"));
+  }
+
+  [[nodiscard]] auto link() const -> stm32::spi_link_port&
+  {
+    auto* const found = dynamic_cast<stm32::spi_link_port*>(f->target->model("SPI1"));
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  [[nodiscard]] auto saved() const -> std::vector<std::byte>
+  {
+    return core::encode_snapshot(f->target->snapshot().data());
+  }
+};
+
+void chip_select(bus const& b, std::uint8_t pin, bool high)
+{
+  auto const index = std::to_string(pin);
+  b.set("RCC", "RCC_AHB2ENR1", "GPIOAEN", 1);
+  b.set("GPIOA", "GPIO_BSRR", "BS" + index, 1);
+  b.set("GPIOA", "GPIO_MODER", "MODE" + index, 1);
+  if(not high)
+  {
+    b.set("GPIOA", "GPIO_BSRR", "BR" + index, 1);
+  }
+}
+
+auto proxy(std::optional<std::uint32_t> reply = 0xFF) -> std::shared_ptr<link_proxy>
+{
+  auto made   = std::make_shared<link_proxy>();
+  made->reply = reply;
+  return made;
+}
+}
+
+TEST_CASE("a link target next to a board device is selected by its pin and joins the AND")
+{
+  auto const board = deferred(std::nullopt, 0xF0);
+  auto const link  = proxy(0x3C);
+  link_rig   r{board, 4};
+  bus        b{*r.f};
+  chip_select(b, 4, false);
+  r.link().attach_target(link, "GPIOA", 5);
+  chip_select(b, 5, false);
+  CHECK(link->links == 1);
+  CHECK(link->attaches == 1);
+  CHECK(link->clock == &r.f->target->virtual_clock());
+  auto const selects = link->selects.size();
+  b.set("GPIOA", "GPIO_BSRR", "BS4", 1);
+  b.set("GPIOA", "GPIO_BSRR", "BR4", 1);
+  CHECK(link->selects.size() == selects);
+  b.run_until(start(b, {0x11}, 1) + frame_ps + us);
+  CHECK(b.receive() == 0x30);
+  REQUIRE(link->asked.size() == 1);
+  CHECK(link->asked[0].out == 0x11);
+  chip_select(b, 5, true);
+  b.run_until(start(b, {0x22}, 1) + frame_ps + us);
+  CHECK(b.receive() == 0xF0);
+  CHECK(link->asked.size() == 1);
+  CHECK(
+      link->posts == std::vector<std::string>{"select", "deselect", "select", "frame", "deselect"});
+  chip_select(b, 5, false);
+  r.link().detach_target(*link);
+  CHECK(link->detaches == 1);
+  CHECK(link->port == nullptr);
+  CHECK(link->clock == nullptr);
+  b.run_until(start(b, {0x33}, 1) + frame_ps + us);
+  CHECK(b.receive() == 0xF0);
+  CHECK(link->asked.size() == 1);
+  CHECK(link->selects.size() == 5);
+  CHECK(board->asked.size() == 3);
+}
+
+TEST_CASE("a member snapshot has the same bytes with link targets or a link controller attached")
+{
+  std::vector<std::vector<std::byte>> saved;
+  for(bool const linked : {false, true})
+  {
+    CAPTURE(linked);
+    auto const board = deferred(std::nullopt, 0xF0);
+    link_rig   r{board, 4};
+    bus        b{*r.f};
+    chip_select(b, 4, false);
+    chip_select(b, 5, true);
+    auto const by_pin = proxy(0x0F);
+    auto const by_ss  = proxy(0xFF);
+    if(linked)
+    {
+      r.link().attach_target(by_pin, "GPIOA", 5);
+      r.link().attach_target(by_ss, "GPIOA", std::nullopt);
+    }
+    b.run_until(start(b, {0x11, 0x22}, 2) + 2 * frame_ps + us);
+    CHECK(b.receive() == 0xF0);
+    CHECK(by_ss->asked.size() == (linked ? 2u : 0u));
+    if(linked)
+    {
+      CHECK(by_ss->posts == std::vector<std::string>{"select", "frame", "frame", "deselect"});
+    }
+    CHECK(by_pin->asked.empty());
+    saved.push_back(r.saved());
+  }
+  CHECK(saved[0] == saved[1]);
+  saved.clear();
+  for(bool const linked : {false, true})
+  {
+    CAPTURE(linked);
+    link_rig   r;
+    auto const sink = std::make_shared<link_sink>();
+    if(linked)
+    {
+      r.link().attach_controller(sink);
+    }
+    bus b{*r.f};
+    target(b, 7, 0);
+    b.run_until(b.now() + us);
+    saved.push_back(r.saved());
+  }
+  CHECK(saved[0] == saved[1]);
+}
+
+TEST_CASE("attach then detach twice leaves no reference and no listener behind")
+{
+  link_rig                  r;
+  bus                       b{*r.f};
+  std::weak_ptr<link_proxy> target_gone;
+  std::weak_ptr<link_sink>  sink_gone;
+  {
+    auto const link = proxy();
+    target_gone     = link;
+    for(int round = 1; round <= 2; ++round)
+    {
+      CAPTURE(round);
+      r.link().attach_target(link, "GPIOA", 5);
+      CHECK(link->links == round);
+      CHECK(link->attaches == round);
+      chip_select(b, 5, round == 1);
+      r.link().detach_target(*link);
+      CHECK(link->detaches == round);
+      CHECK(link->link == nullptr);
+      CHECK(link->clock == nullptr);
+      CHECK(link->port == nullptr);
+      auto const heard = link->selects.size();
+      chip_select(b, 5, round != 1);
+      CHECK(link->selects.size() == heard);
+    }
+    r.link().detach_target(*link);
+    CHECK(link->detaches == 2);
+  }
+  CHECK(target_gone.expired());
+  {
+    auto const sink = std::make_shared<link_sink>();
+    sink_gone       = sink;
+    for(int round = 1; round <= 2; ++round)
+    {
+      CAPTURE(round);
+      r.link().attach_controller(sink);
+      CHECK(sink->port != nullptr);
+      r.link().detach_controller(*sink);
+      CHECK(sink->unlinks == round);
+      CHECK(sink->port == nullptr);
+      CHECK(sink->clock == nullptr);
+    }
+  }
+  CHECK(sink_gone.expired());
+}
+
+TEST_CASE("a link controller drives the target, and after a detach its units start from 1 again")
+{
+  link_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  for(int round = 1; round <= 2; ++round)
+  {
+    CAPTURE(round);
+    auto const sink = std::make_shared<link_sink>();
+    r.link().attach_controller(sink);
+    auto const at = b.now() + us;
+    sink->port->select(vtime{at}, wire, 1);
+    sink->port->frame(0x11, 8, mhz_frame, vtime{at}, wire, 2);
+    sink->port->frame(0x22, 8, mhz_frame, vtime{at}, wire, 3);
+    b.run_until(at + 2 * mhz_frame + us);
+    CHECK(sink->sent == std::vector<std::uint32_t>{0x11, 0x22});
+    CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "port.last_unit") == 3);
+    CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "port.level") == 1);
+    r.link().detach_controller(*sink);
+    CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "port.last_unit") == 0);
+    CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "port.level") == 0);
+  }
+}
+
+TEST_CASE("a link detach drops the queued port entries without a report")
+{
+  link_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  auto const sink = std::make_shared<link_sink>();
+  r.link().attach_controller(sink);
+  auto const at = b.now() + us;
+  sink->port->select(vtime{at}, wire, 1);
+  sink->port->frame(0x11, 8, mhz_frame, vtime{at}, wire, 2);
+  sink->port->drop(vtime{at + 2 * mhz_frame}, wire, 3);
+  b.run_until(at + mhz_frame / 2);
+  r.link().detach_controller(*sink);
+  b.run_until(at + 3 * mhz_frame);
+  CHECK(sink->sent.empty());
+  CHECK(sink->drops.empty());
+  CHECK(b.get("SPI_SR", "TXC") == 1);
+  auto const again = std::make_shared<link_sink>();
+  r.link().attach_controller(again);
+  auto const later = b.now() + us;
+  again->port->select(vtime{later}, wire, 1);
+  again->port->frame(0x22, 8, mhz_frame, vtime{later}, wire, 2);
+  b.run_until(later + mhz_frame + us);
+  CHECK(again->sent == std::vector<std::uint32_t>{0x22});
+}
+
+TEST_CASE("link attaches are refused before any change, the instance keeps working")
+{
+  SUBCASE("a link controller next to a board controller")
+  {
+    auto const board = std::make_shared<controller_probe>();
+    link_rig   r{nullptr, std::nullopt, board};
+    auto const sink = std::make_shared<link_sink>();
+    CHECK_THROWS_AS(r.link().attach_controller(sink), popcorn::config_error);
+    CHECK_THROWS_AS(r.link().attach_target(proxy(), "GPIOA", 5), popcorn::config_error);
+    CHECK(sink->links == 0);
+    bus b{*r.f};
+    target(b, 7, 1);
+    auto* const port = dynamic_cast<periph::spi_controller_port*>(r.f->target->model("SPI1"));
+    REQUIRE(port != nullptr);
+    auto const at =
+        port->transfer(vtime{b.now() + us}, mhz_frame, 8, std::vector<std::uint32_t>{7});
+    b.run_until(at.ps + mhz_frame + us);
+    CHECK(board->frames.size() == 1);
+  }
+  SUBCASE("a link controller next to a board device or a link target")
+  {
+    auto const board = deferred(std::nullopt);
+    link_rig   with_device{board, 4};
+    CHECK_THROWS_AS(
+        with_device.link().attach_controller(std::make_shared<link_sink>()), popcorn::config_error);
+    link_rig   with_target;
+    auto const link = proxy();
+    with_target.link().attach_target(link, "GPIOA", 5);
+    auto const sink = std::make_shared<link_sink>();
+    CHECK_THROWS_AS(with_target.link().attach_controller(sink), popcorn::config_error);
+    CHECK(sink->links == 0);
+    with_target.link().detach_target(*link);
+    with_target.link().attach_controller(sink);
+    CHECK(sink->links == 1);
+  }
+  SUBCASE("an end attached twice, a link target next to a link controller")
+  {
+    link_rig   r;
+    auto const sink = std::make_shared<link_sink>();
+    r.link().attach_controller(sink);
+    CHECK_THROWS_AS(r.link().attach_controller(sink), std::invalid_argument);
+    CHECK_THROWS_AS(
+        r.link().attach_controller(std::make_shared<link_sink>()), std::invalid_argument);
+    auto const link = proxy();
+    CHECK_THROWS_AS(r.link().attach_target(link, "GPIOA", 5), popcorn::config_error);
+    CHECK(link->links == 0);
+    CHECK(sink->links == 1);
+    CHECK(sink->port != nullptr);
+    r.link().detach_controller(*sink);
+    r.link().attach_target(link, "GPIOA", 5);
+    CHECK_THROWS_AS(r.link().attach_target(link, "GPIOA", 5), std::invalid_argument);
+    CHECK(link->links == 1);
+  }
+  SUBCASE("a bad chip select, an empty end, an unknown target")
+  {
+    link_rig   r;
+    auto const link = proxy();
+    CHECK_THROWS_AS(r.link().attach_target(link, "GPIOZ", 5), popcorn::config_error);
+    CHECK_THROWS_AS(r.link().attach_target(link, "GPIOA", 16), std::invalid_argument);
+    CHECK_THROWS_AS(r.link().attach_target(nullptr, "GPIOA", 5), std::invalid_argument);
+    CHECK_THROWS_AS(r.link().attach_controller(nullptr), std::invalid_argument);
+    CHECK_THROWS_AS(r.link().mute(*link), std::invalid_argument);
+    CHECK_THROWS_AS(static_cast<void>(r.link().unmute(*link)), std::invalid_argument);
+    CHECK(link->links == 0);
+    r.link().attach_target(link, "GPIOA", 5);
+    CHECK(link->links == 1);
+  }
+}
+
+TEST_CASE("a link target selected by its pin between frames hears the next frame after a restore")
+{
+  auto const first = proxy(0x3C);
+  link_rig   r;
+  bus        b{*r.f};
+  chip_select(b, 5, false);
+  r.link().attach_target(first, "GPIOA", 5);
+  auto const shift = start(b, {0x11, 0x22}, 2) + frame_ps;
+  b.run_until(shift + frame_ps / 2);
+  REQUIRE(first->asked.size() == 1);
+  auto const saved = core::decode_snapshot(core::encode_snapshot(r.f->target->snapshot().data()));
+  b.run_until(shift + frame_ps + us);
+  REQUIRE(first->asked.size() == 2);
+
+  auto const second = proxy(0x3C);
+  link_rig   fresh;
+  fresh.link().attach_target(second, "GPIOA", 5);
+  fresh.f->target->restore(core::snapshot{saved});
+  bus restored{*fresh.f};
+  restored.run_until(shift + frame_ps + us);
+  REQUIRE(second->asked.size() == 1);
+  CHECK(second->asked[0].out == 0x22);
+  CHECK(second->asked[0].at == first->asked[1].at);
+  CHECK(restored.receive() == 0x3C);
+  CHECK(restored.receive() == 0x3C);
+}
+
+TEST_CASE("a muted link target posts nothing at a machine reset, unmute reads its chip select")
+{
+  auto const by_pin = proxy(std::nullopt);
+  auto const by_ss  = proxy(std::nullopt);
+  link_rig   r;
+  bus        b{*r.f};
+  chip_select(b, 5, false);
+  r.link().attach_target(by_pin, "GPIOA", 5);
+  r.link().attach_target(by_ss, "GPIOA", std::nullopt);
+  b.run_until(start(b, {0x11}, 1) + frame_ps + us);
+  REQUIRE(by_ss->asked.size() == 1);
+  REQUIRE(by_pin->asked.size() == 1);
+  CHECK_FALSE(r.link().unmute(*by_pin));
+  CHECK_FALSE(r.link().unmute(*by_ss));
+  by_pin->posts.clear();
+  by_ss->posts.clear();
+  r.link().mute(*by_pin);
+  r.link().mute(*by_ss);
+  CHECK(r.link().muted(*by_pin));
+  r.f->target->reset(popcorn::reset_kind::software);
+  r.f->set("pc", sym("spi_ll", "idle"));
+  CHECK(by_pin->resets == std::vector{popcorn::reset_kind::software});
+  CHECK(by_ss->resets == std::vector{popcorn::reset_kind::software});
+  REQUIRE_FALSE(by_ss->selects.empty());
+  CHECK_FALSE(by_ss->selects.back().first);
+  chip_select(b, 5, true);
+  CHECK_FALSE(by_pin->selects.back().first);
+  CHECK(by_pin->posts.empty());
+  CHECK(by_ss->posts.empty());
+  CHECK(r.link().unmute(*by_pin));
+  CHECK(r.link().unmute(*by_ss));
+  CHECK_FALSE(r.link().muted(*by_pin));
+  r.link().mute(*by_pin);
+  r.f->target->reset(popcorn::reset_kind::software);
+  CHECK_FALSE(r.link().unmute(*by_pin));
+}
+
+TEST_CASE("an RCC reset under a running SS transfer posts the link target's deselect")
+{
+  auto const by_ss = proxy(std::nullopt);
+  link_rig   r;
+  bus        b{*r.f};
+  r.link().attach_target(by_ss, "GPIOA", std::nullopt);
+  b.run_until(start(b, {0x11}, 1) + frame_ps + us);
+  REQUIRE(by_ss->asked.size() == 1);
+  popcorn::testing::rcc_reset_pulse(*r.f, "RCC_APB2RSTR", "SPI1RST");
+  CHECK(by_ss->posts == std::vector<std::string>{"select", "frame", "deselect"});
+  CHECK(by_ss->resets.empty());
+}
+
+TEST_CASE("a link target reads the power-on offset from its clock and completes through its port")
+{
+  auto const link = proxy(std::nullopt);
+  link_rig   r;
+  bus        b{*r.f};
+  b.run_until(30 * us);
+  r.f->target->reset(popcorn::reset_kind::software);
+  r.f->set("pc", sym("spi_ll", "idle"));
+  r.link().attach_target(link, "GPIOA", std::nullopt);
+  auto const shift = start(b, {0x11}, 1) + frame_ps;
+  b.run_until(shift + us);
+  REQUIRE(link->asked.size() == 1);
+  CHECK(link->asked[0].local_ps == shift);
+  CHECK(link->asked[0].at.ps > shift);
+  CHECK(b.get("SPI_SR", "RXP") == 0);
+  link->port->complete(link->asked[0].ticket, 0x5A, vtime{link->asked[0].at.ps + 5 * us}, 1);
+  b.run_until(shift + 6 * us);
+  CHECK(b.get("SPI_SR", "RXP") == 1);
+  CHECK(b.receive() == 0x5A);
+}
+
+TEST_CASE("the SS release of a link target is stamped at the last frame end under a busy loop")
+{
+  auto const by_ss = proxy(0x5A);
+  link_rig   r;
+  r.f->set("pc", sym("spi_ll", "hw_ss"));
+  r.link().attach_target(by_ss, "GPIOA", std::nullopt);
+  REQUIRE(r.f->run_to_stop({.max_instructions = icount{1'000'000}}).reason == stop_reason::user);
+  REQUIRE(by_ss->asked.size() == 4);
+  REQUIRE(by_ss->selects.size() == 2);
+  CHECK(by_ss->selects[0].first);
+  CHECK_FALSE(by_ss->selects[1].first);
+  CHECK(by_ss->selects[1].second == by_ss->asked.back().at);
+  CHECK(r.f->log() == std::vector<std::uint32_t>{0x5A, 0x5A, 0x5A, 0x5A});
+}
+
+TEST_CASE("a link target attached while its chip select is active hears select at the attach")
+{
+  SUBCASE("pin low")
+  {
+    auto const link = proxy();
+    link_rig   r;
+    bus        b{*r.f};
+    chip_select(b, 5, false);
+    r.link().attach_target(link, "GPIOA", 5);
+    REQUIRE(link->selects.size() == 1);
+    CHECK(link->selects[0] == std::pair{true, r.f->target->virtual_clock().since_power_on()});
+    CHECK(link->posts == std::vector<std::string>{"select"});
+    CHECK(link->muted_in_hooks == std::vector<bool>{false});
+  }
+  SUBCASE("pin high")
+  {
+    auto const link = proxy();
+    link_rig   r;
+    bus        b{*r.f};
+    chip_select(b, 5, true);
+    r.link().attach_target(link, "GPIOA", 5);
+    CHECK(link->selects.empty());
+  }
+  SUBCASE("SS output during a running transfer")
+  {
+    auto const link = proxy();
+    link_rig   r;
+    bus        b{*r.f};
+    auto const shift = start(b, {0x11, 0x22}, 2) + frame_ps;
+    b.run_until(shift - frame_ps / 2);
+    r.link().attach_target(link, "GPIOA", std::nullopt);
+    REQUIRE(link->selects.size() == 1);
+    CHECK(link->selects[0].first);
+    b.run_until(shift + frame_ps + us);
+    CHECK(link->posts == std::vector<std::string>{"select", "frame", "frame", "deselect"});
+  }
+}
+
+TEST_CASE(
+    "a link target owing a reply completes it before its detach, else the frame stays pending")
+{
+  for(bool const completes : {true, false})
+  {
+    CAPTURE(completes);
+    auto const link = proxy(std::nullopt);
+    link_rig   r;
+    bus        b{*r.f};
+    r.link().attach_target(link, "GPIOA", std::nullopt);
+    auto const shift = start(b, {0x11}, 1) + frame_ps;
+    b.run_until(shift + us);
+    REQUIRE(link->asked.size() == 1);
+    CHECK(b.get("SPI_SR", "RXP") == 0);
+    if(completes)
+    {
+      link->port->complete(
+          link->asked[0].ticket, 0xFF, r.f->target->virtual_clock().since_power_on(), 1);
+    }
+    r.link().detach_target(*link);
+    CHECK(link->muted_in_hooks == std::vector<bool>{false, false});
+    b.run_until(b.now() + 2 * us);
+    CHECK(b.get("SPI_SR", "RXP") == (completes ? 1u : 0u));
+    CHECK(b.get("SPI_SR", "EOT") == (completes ? 1u : 0u));
+    if(completes)
+    {
+      CHECK(b.receive() == 0xFF);
+    }
+    b.set("SPI_CR1", "SPE", 0);
+    CHECK(b.get("SPI_SR", "RXP") == 0);
+  }
+}
+
+TEST_CASE("a link detach mid-transfer leaves TXC set")
+{
+  link_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  auto const sink = std::make_shared<link_sink>();
+  r.link().attach_controller(sink);
+  auto const                         at = b.now() + us;
+  std::array<std::uint32_t, 2> const frames{0x11, 0x22};
+  std::ignore = sink->port->transfer(vtime{at}, mhz_frame, 8, frames);
+  b.run_until(at + mhz_frame / 2);
+  CHECK(b.get("SPI_SR", "TXC") == 0);
+  r.link().detach_controller(*sink);
+  CHECK(b.get("SPI_SR", "TXC") == 1);
+  b.run_until(at + 3 * mhz_frame);
+  CHECK(b.get("SPI_SR", "TXC") == 1);
+  CHECK(sink->sent.empty());
+}
+
+TEST_CASE("a power cut reaches a link target after the board devices")
+{
+  cut_order.clear();
+  auto const board = std::make_shared<cut_board>();
+  auto const link  = proxy();
+  link_rig   r{board, 4};
+  r.link().attach_target(link, "GPIOA", 5);
+  bus b{*r.f};
+  b.run_until(20 * us);
+  r.f->target->power_cycle();
+  CHECK(cut_order == std::vector<std::string>{"board", "link"});
+  REQUIRE(link->cuts.size() == 1);
+  CHECK(link->cuts[0] == vtime{20 * us});
+}
+
+TEST_CASE("SPI_CFG1 and SPI_CFG2 keep their protected bits while SPE is set")
+{
+  auto const firmware_write = [](bus const& b, std::string_view name, std::uint32_t value,
+                                 popcorn::initiator by = popcorn::initiator::cpu) {
+    auto&      regs   = b.f.target->peripheral("SPI1");
+    auto const offset = b.reg("SPI1", name).offset;
+    auto const result = b.f.target->model("SPI1")->on_write(
+        regs, offset, 4, regs.peek(offset), value, {.pc = 0, .now = icount{0}, .by = by});
+    REQUIRE(result.has_value());
+  };
+  SUBCASE("an SSOE write mid-transfer keeps the SS-bound link target's edges")
+  {
+    auto const                    by_ss = proxy();
+    link_rig                      r;
+    bus                           b{*r.f};
+    std::vector<core::log_record> warnings;
+    auto const sink = r.f->target->add_log_sink([&](core::log_record const& one) {
+      if(one.kind == core::log_kind::model_warning)
+      {
+        warnings.push_back(one);
+      }
+    });
+    r.link().attach_target(by_ss, "GPIOA", std::nullopt);
+    auto const shift = start(b, {0x11, 0x22}, 2) + frame_ps;
+    b.run_until(shift - frame_ps / 2);
+    auto const cfg2 = b.read(b.at("SPI1", "SPI_CFG2"));
+    firmware_write(b, "SPI_CFG2", cfg2 & ~(1u << b.bits("SPI1", "SPI_CFG2", "SSOE").lsb));
+    firmware_write(b, "SPI_CFG2", cfg2 & ~(1u << b.bits("SPI1", "SPI_CFG2", "SSOE").lsb));
+    CHECK(b.get("SPI_CFG2", "SSOE") == 1);
+    b.run_until(shift + frame_ps + us);
+    CHECK(by_ss->posts == std::vector<std::string>{"select", "frame", "frame", "deselect"});
+    CHECK(warnings.size() == 1);
+  }
+  SUBCASE("a DMA write that changes a protected bit warns as a CPU write does")
+  {
+    link_rig                      r;
+    bus                           b{*r.f};
+    std::vector<core::log_record> warnings;
+    auto const sink = r.f->target->add_log_sink([&](core::log_record const& one) {
+      if(one.kind == core::log_kind::model_warning)
+      {
+        warnings.push_back(one);
+      }
+    });
+    std::ignore     = start(b, {0x11}, 1);
+    auto const cfg2 = b.read(b.at("SPI1", "SPI_CFG2"));
+    firmware_write(
+        b, "SPI_CFG2", cfg2 & ~(1u << b.bits("SPI1", "SPI_CFG2", "SSOE").lsb),
+        popcorn::initiator::dma);
+    CHECK(b.get("SPI_CFG2", "SSOE") == 1);
+    b.run_until(b.now() + us);
+    CHECK(warnings.size() == 1);
+  }
+  SUBCASE("a debugger write is kept out silently, an equal write is silent")
+  {
+    link_rig                      r;
+    bus                           b{*r.f};
+    std::vector<core::log_record> warnings;
+    auto const sink = r.f->target->add_log_sink([&](core::log_record const& one) {
+      if(one.kind == core::log_kind::model_warning)
+      {
+        warnings.push_back(one);
+      }
+    });
+    std::ignore     = start(b, {0x11}, 1);
+    b.set("SPI_CFG2", "SSOE", 0);
+    CHECK(b.get("SPI_CFG2", "SSOE") == 1);
+    firmware_write(b, "SPI_CFG2", b.read(b.at("SPI1", "SPI_CFG2")));
+    b.run_until(b.now() + us);
+    CHECK(warnings.empty());
+  }
+  SUBCASE("SPI_CFG1 keeps MBR and lets TXDMAEN through on the U575")
+  {
+    link_rig r;
+    bus      b{*r.f};
+    std::ignore     = start(b, {0x11}, 1);
+    auto const cfg1 = b.read(b.at("SPI1", "SPI_CFG1"));
+    auto const mbr  = b.bits("SPI1", "SPI_CFG1", "MBR");
+    auto const tx   = b.bits("SPI1", "SPI_CFG1", "TXDMAEN");
+    firmware_write(b, "SPI_CFG1", cfg1 | (mbr.mask << mbr.lsb) | (1u << tx.lsb));
+    CHECK(b.get("SPI_CFG1", "MBR") == 0);
+    CHECK(b.get("SPI_CFG1", "TXDMAEN") == 1);
+  }
+  SUBCASE("under strict_peripherals the write throws and the register keeps SSOE")
+  {
+    link_rig r{nullptr, std::nullopt, nullptr, true};
+    bus      b{*r.f};
+    std::ignore     = start(b, {0x11}, 1);
+    auto const cfg2 = b.read(b.at("SPI1", "SPI_CFG2"));
+    auto&      regs = r.f->target->peripheral("SPI1");
+    auto const at   = b.reg("SPI1", "SPI_CFG2").offset;
+    CHECK_THROWS_AS(
+        std::ignore = r.f->target->model("SPI1")->on_write(
+            regs, at, 4, cfg2, cfg2 & ~(1u << b.bits("SPI1", "SPI_CFG2", "SSOE").lsb),
+            {.pc = 0, .now = icount{0}}),
+        popcorn::model_error);
+    CHECK(b.get("SPI_CFG2", "SSOE") == 1);
+  }
 }

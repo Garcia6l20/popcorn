@@ -194,16 +194,25 @@ struct spi_variant
   bool limited_counter = false;
   /** @brief The peripheral has the `SPI_AUTOCR` register and its trigger field. */
   bool autocr = true;
+  /** @brief `SPI_CFG1` TXDMAEN and RXDMAEN stay writable while SPE = 1, the rest of the register
+   * is write-protected then. Otherwise the whole register is. */
+  bool dma_enables_writable = true;
 };
 
 inline constexpr auto u5_limited = std::to_array<std::string_view>({"SPI3"});
-/** @brief STM32U5 SPI, RM0456 68.3: SPI3 has an 8-byte FIFO and no `CTSIZE`. */
+/** @brief STM32U5 SPI, RM0456 68.3: SPI3 has an 8-byte FIFO and no `CTSIZE`. RM0456 68.8.3:
+ *         `SPI_CFG1` is write-protected while SPE = 1 except TXDMAEN and RXDMAEN. */
 inline constexpr spi_variant u5_spi{u5_limited};
 
 inline constexpr auto h5_limited = std::to_array<std::string_view>({"SPI4", "SPI5", "SPI6"});
 /** @brief STM32H5 SPI, RM0481 Table 645: SPI4 to SPI6 have an 8-byte FIFO and keep TSIZE up to
- *         65535, so `CTSIZE` counts there. RM0481 section 58.11 has no `SPI_AUTOCR`. */
-inline constexpr spi_variant h5_spi{h5_limited, true, false};
+ *         65535, so `CTSIZE` counts there. RM0481 section 58.11 has no `SPI_AUTOCR`. RM0481
+ *         58.11.3: the whole `SPI_CFG1` is write-protected while SPE = 1. */
+inline constexpr spi_variant h5_spi{
+    .limited              = h5_limited,
+    .limited_counter      = true,
+    .autocr               = false,
+    .dma_enables_writable = false};
 
 /** @brief A TZSC `<STEM>SEC` or TZIC `<STEM>IE` stem whose peripheral has another name. */
 struct gtzc_rename
