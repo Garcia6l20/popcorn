@@ -3,12 +3,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pcons import Target
+from pcons.toolchains.presets import CrossPreset
 
 from popcorn_build.config import project_dir
 from popcorn_build.firmware import (
     LINKER_SCRIPT,
     add_firmware,
     add_trustzone_firmware,
+    cortex_m33,
     firmware_env,
 )
 from popcorn_build.requirements import firmware_source
@@ -23,7 +25,7 @@ SECTION_BOUNDS = (
 SUPPORT_DIR = project_dir / "tests" / "firmware" / AREA
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Chipset:
     """The ST packages and files that build firmware for one STM32 part.
 
@@ -36,13 +38,15 @@ class Chipset:
     @var startup Startup file under the device package's `Source/Templates/gcc`.
     @var system System file under `Source/Templates`.
     @var linker ST's single-world linker script under `Source/Templates/gcc/linker`.
-    @var secure_linker ST's Secure linker script, same directory.
-    @var nonsecure_linker ST's Non-secure linker script, same directory.
-    @var nonsecure_system The Non-secure system file under `Source/Templates`.
     @var test_linker Project-relative linker script of the LL test firmware.
     @var usb_device_sources TinyUSB device controller driver sources under `src`.
     @var prebuilt_dir Subdirectory of `prebuilt` holding the committed ELFs of this chipset,
     empty for the U575.
+    @var preset The CPU preset the chipset's firmware builds with.
+    @var secure_linker ST's Secure linker script, same directory, None without TrustZone.
+    @var nonsecure_linker ST's Non-secure linker script, same directory, None without TrustZone.
+    @var nonsecure_system The Non-secure system file under `Source/Templates`, None without
+    TrustZone.
     """
 
     name: str
@@ -53,16 +57,30 @@ class Chipset:
     startup: str
     system: str
     linker: str
-    secure_linker: str
-    nonsecure_linker: str
-    nonsecure_system: str
     test_linker: str
     usb_device_sources: tuple[str, ...]
     prebuilt_dir: str = ""
+    preset: CrossPreset = cortex_m33
+    secure_linker: str | None = None
+    nonsecure_linker: str | None = None
+    nonsecure_system: str | None = None
 
     @property
     def defines(self) -> tuple[str, str]:
         return (self.define, LL_DEFINE)
+
+    def require_trustzone(self) -> tuple[str, str, str]:
+        """The Secure linker script, the Non-secure linker script and the Non-secure system file.
+
+        @throws SystemExit The chipset lacks one of the three.
+        """
+        if (
+            self.secure_linker is None
+            or self.nonsecure_linker is None
+            or self.nonsecure_system is None
+        ):
+            raise SystemExit(f"popcorn: the chipset {self.name} has no TrustZone firmware files")
+        return self.secure_linker, self.nonsecure_linker, self.nonsecure_system
 
 
 STM32U575 = Chipset(
@@ -121,13 +139,14 @@ def add_ll_firmware(
     garbage collection. Without arm-none-eabi-gcc, the ST and ARM packages are not fetched and the
     committed prebuilt ELF is used.
     """
-    if firmware_env() is None:
+    if firmware_env(chipset.preset) is None:
         return add_firmware(
             AREA,
             name,
             sources,
             subdir=chipset.prebuilt_dir,
             linker_script=chipset.test_linker,
+            preset=chipset.preset,
         )
     hal = firmware_source(chipset.hal_package)
     device = firmware_source(chipset.device_package)
@@ -145,6 +164,7 @@ def add_ll_firmware(
         ],
         subdir=chipset.prebuilt_dir,
         linker_script=chipset.test_linker,
+        preset=chipset.preset,
     )
     assert target is not None
     target.private.include_dirs.extend(
@@ -174,7 +194,10 @@ def add_trustzone_cmsis_firmware(
     The prebuilt copies live in the chipset's `prebuilt_dir`, declared as
     `<prebuilt_dir>_<name>_s` and `<prebuilt_dir>_<name>`. Without arm-none-eabi-gcc the
     packages are not fetched and the committed copies are used.
+
+    @throws SystemExit @p chipset has no TrustZone files.
     """
+    chipset.require_trustzone()
     if firmware_env() is None:
         return add_trustzone_firmware(
             AREA,

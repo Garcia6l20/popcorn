@@ -48,11 +48,11 @@ SECURE_CPU_FLAGS = tuple(
 )
 
 
-def _newlib_preset(name: str, cpu_flags: Sequence[str]) -> CrossPreset:
+def _newlib_preset(name: str, base: CrossPreset, cpu_flags: Sequence[str]) -> CrossPreset:
     return CrossPreset(
         name=name,
-        arch=cortex_m33.arch,
-        triple=cortex_m33.triple,
+        arch=base.arch,
+        triple=base.triple,
         extra_compile_flags=(*cpu_flags, "-ffunction-sections", "-fdata-sections"),
         extra_link_flags=(
             *cpu_flags,
@@ -60,12 +60,14 @@ def _newlib_preset(name: str, cpu_flags: Sequence[str]) -> CrossPreset:
             "-specs=nosys.specs",
             "-Wl,--gc-sections",
         ),
-        tool_cmds=cortex_m33.tool_cmds,
+        tool_cmds=base.tool_cmds,
     )
 
 
-cortex_m33_newlib = _newlib_preset("cortex-m33-none-eabi-newlib", CPU_FLAGS)
-cortex_m33_newlib_softfp = _newlib_preset("cortex-m33-none-eabi-newlib-softfp", SECURE_CPU_FLAGS)
+cortex_m33_newlib = _newlib_preset("cortex-m33-none-eabi-newlib", cortex_m33, CPU_FLAGS)
+cortex_m33_newlib_softfp = _newlib_preset(
+    "cortex-m33-none-eabi-newlib-softfp", cortex_m33, SECURE_CPU_FLAGS
+)
 
 _envs: dict[str, Environment] = {}
 
@@ -408,6 +410,7 @@ def add_trustzone_example_firmware(
     from popcorn_build.requirements import firmware_source
 
     chipset = STM32U575
+    secure_linker, nonsecure_linker, nonsecure_system = chipset.require_trustzone()
     device = firmware_source(chipset.device_package)
     cmsis = firmware_source("cmsis-core")
     templates = _templates(device)
@@ -416,12 +419,12 @@ def add_trustzone_example_firmware(
     secure_ld = _derived_script(
         chipset,
         f"{name}_s",
-        secure_linker_script((linker / chipset.secure_linker).read_text(), layout),
+        secure_linker_script((linker / secure_linker).read_text(), layout),
     )
     nonsecure_ld = _derived_script(
         chipset,
         name,
-        nonsecure_linker_script((linker / chipset.nonsecure_linker).read_text(), layout),
+        nonsecure_linker_script((linker / nonsecure_linker).read_text(), layout),
     )
     secure_path, secure, nonsecure_path, nonsecure = trustzone_pair(
         f"example-{chipset.name}-{name}",
@@ -429,7 +432,7 @@ def add_trustzone_example_firmware(
         secure_env,
         env,
         [*secure_sources, startup],
-        [*nonsecure_sources, startup, templates / chipset.nonsecure_system],
+        [*nonsecure_sources, startup, templates / nonsecure_system],
         secure_ld,
         nonsecure_ld,
         prebuilt,
