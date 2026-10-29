@@ -59,6 +59,24 @@ Put it on a module as `pytestmark = pytest.mark.popcorn(budget=...)`. The closes
 whole: a function's marker replaces its module's. On the command line, `--popcorn-budget` and
 `--popcorn-strict` apply where no marker sets the value.
 
+## Running on another part
+
+`--popcorn-part=PART` builds every machine the plugin makes on the shipped part `PART` instead of
+the part its description names: machine fixtures, system members and `machine_factory` calls, a
+selected config included. `PART` is a part of the description's die. The image runs on it when it
+fits that part's flash and its pins are bonded.
+
+```sh
+pytest --popcorn-part=STM32U575VGTxQ examples/stm32u575/usart
+```
+
+The report header names the part and the summary prints `N of M tests ran on PART`. A test
+that builds its own `popcorn.Machine` from a part description keeps that description's part and
+is not counted in N. The session exits with status 1 when the option is set, the run would
+otherwise exit 0 and N is 0. A machine description that sets `description=` or `svd=` is
+refused, as the replaced part would not match the file. A `PART` that no description directory,
+shipped layer or ST install names is a usage error.
+
 ## More machines in one test
 
 ```python

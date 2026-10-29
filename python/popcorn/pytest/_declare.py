@@ -84,7 +84,9 @@ def machine(
                     name, MachineDescription, await cast(Awaitable[object], call(kwargs))
                 )
                 test = item_settings(item_of(request), session)
-                key = session.key(description, config, test.strict)
+                key = session.key(
+                    description, config, test.strict, item_of(request), f"fixture {name!r}"
+                )
                 with booting(item_of(request), session, key, name):
                     await session.booted_async(key)
                 with lending(request, session, test, key, name) as m:
@@ -96,7 +98,9 @@ def machine(
             request, session = _own(kwargs)
             description = _checked(name, MachineDescription, call(kwargs))
             test = item_settings(item_of(request), session)
-            key = session.key(description, config, test.strict)
+            key = session.key(
+                description, config, test.strict, item_of(request), f"fixture {name!r}"
+            )
             with lending(request, session, test, key, name) as m:
                 yield m
 

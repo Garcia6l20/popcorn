@@ -201,7 +201,13 @@ class MachineFactory(_Factory):
                 f"{type(description).__name__}"
             )
         check_machine_name(name)
-        return self._session.key(description, config, self._strict if strict is None else strict)
+        return self._session.key(
+            description,
+            config,
+            self._strict if strict is None else strict,
+            self._item,
+            "machine_factory",
+        )
 
     def _label(self) -> str:
         return f"machine_factory #{len(self._machines) + 1}"
@@ -227,8 +233,8 @@ class SystemFactory(_Factory):
     async def member(self, name: str, project: MachineDescription) -> Machine:
         """A new machine named `name` of the base config of `project`, booted from its key,
         reported as `<fixture> member <name>`."""
-        key = self._session.key(project, None, self._strict)
         label = f"{self._fixture} member {name}"
+        key = self._session.key(project, None, self._strict, self._item, label)
         with _skipping_missing(self._session.project(key)):
             try:
                 snapshot = (await self._session.booted_async(key)).decoded()

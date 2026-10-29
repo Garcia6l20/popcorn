@@ -1,6 +1,7 @@
 """Descriptions shipped in the package as layers, and the lookup order of a part's description:
 description directories, then the shipped layers, then a local build."""
 
+import difflib
 import hashlib
 import json
 import lzma
@@ -31,7 +32,12 @@ from popcorn.stm32.description._layers import (
     layer_family,
     line_name,
 )
-from popcorn.stm32.description._sources import match_refname, pin_data_sources
+from popcorn.stm32.description._sources import (
+    default_search_paths,
+    match_refname,
+    pin_data_sources,
+    resolve_part,
+)
 
 SHIPPED_DIR = Path(__file__).parents[1] / "data"
 """Directory of the shipped layers, `<line>.parts.json.xz`, `<line>.line.json.xz` and
@@ -301,6 +307,36 @@ def description_path(
             f"a shipped description, shipped: {shipped_parts}, or ST's files: {exc.expected}",
             path=exc.path,
         ) from exc
+
+
+def known_part(part: str) -> str:
+    """The name @p part resolves to, by the lookup `description_path` runs and without building
+    anything: a description directory of POPCORN_STM32_DESCRIPTION_DIRS, then the shipped
+    layers unless POPCORN_STM32_BUILD is `local`, then the part files of the CubeMX db when it
+    has an `mcu` directory.
+    POPCORN_STM32_BUILD is checked first, and DescriptionError when it holds anything but
+    `local`. DescriptionError listing the close matches when none names @p part, and every
+    candidate when several do. Under `local` the error names the CubeMX db as its file."""
+    local_only = _local_build_forced()
+    for directory in _env_dirs():
+        if absent(directory):
+            continue
+        stems = sorted(path.stem for path in directory.glob("*.json"))
+        name = match_name(part, None, stems, file=str(directory))
+        if name is not None:
+            return name
+    shipped = [] if local_only else shipped_names()
+    found = match_refname(part, shipped, file="shipped parts")
+    if found is not None:
+        return found
+    db_dir = default_search_paths().cubemx_db
+    if (db_dir / "mcu").is_dir():
+        return resolve_part(part, db_dir)
+    close = difflib.get_close_matches(part, shipped, n=5)
+    expected = "a known part"
+    if close:
+        expected += f", close matches: {', '.join(close)}"
+    raise DescriptionError(str(db_dir) if local_only else "shipped parts", 0, part, expected)
 
 
 @dataclass(frozen=True)

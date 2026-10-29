@@ -47,6 +47,10 @@ class Settings:
         strict: Whether unmodelled peripheral accesses raise, `--popcorn-strict`.
         budget: The default instruction budget of `run`, `wait_for` and `call`,
             `--popcorn-budget`.
+        part: The part every machine of the session is built on instead of its description's,
+            `--popcorn-part`, None for each description's own. It replaces the part of the
+            selected config of every machine fixture, system member and `machine_factory` call,
+            and refuses a description that sets `description=` or `svd=`.
         ring: How many lines of the collapsed trace ring a failure report shows, 0 for none,
             `--popcorn-ring`.
         ring_blocks: Whether every popcorn machine's trace ring keeps BLOCK records,
@@ -59,6 +63,7 @@ class Settings:
     trace_dir: Path | None
     strict: bool
     budget: int | None
+    part: str | None = None
     ring: int = 0
     ring_blocks: bool = False
     cache_max_age_days: int = DEFAULT_CACHE_MAX_AGE_DAYS
@@ -82,12 +87,14 @@ class Settings:
         trace = config.getoption("popcorn_trace_on_fail")
         budget = config.getoption("popcorn_budget")
         ring = config.getoption("popcorn_ring")
+        part = config.getoption("popcorn_part")
         cov = _coverage_settings(config)
         return cls(
             trace_on_fail=trace is not None,
             trace_dir=_path(trace, here) if trace else None,
             strict=config.getoption("popcorn_strict") is True,
             budget=budget if isinstance(budget, int) else None,
+            part=part if isinstance(part, str) and part else None,
             ring=ring if isinstance(ring, int) else 0,
             ring_blocks=config.getoption("popcorn_ring_blocks") is True,
             cache_max_age_days=_age_days(config.getini("popcorn_cache_max_age_days")),
@@ -341,6 +348,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="default instruction budget of run, wait_for and call",
     )
     group.addoption(
+        "--popcorn-part",
+        metavar="PART",
+        help="build every popcorn machine on PART, of the description's die, in place of the "
+        "part its description names. A description with "
+        "description= or svd= set is refused. The session exits with status 1 when no test "
+        "built a machine on PART",
+    )
+    group.addoption(
         "--popcorn-ring",
         type=int,
         default=0,
@@ -362,7 +377,9 @@ def pytest_configure(config: pytest.Config) -> None:
     """Register the `popcorn` marker and parse the options.
 
     Raises:
-        pytest.UsageError: `--popcorn-budget` is not above 0, or `--popcorn-ring` is below 0.
+        pytest.UsageError: `--popcorn-budget` is not above 0, `--popcorn-ring` is below 0, or
+            `--popcorn-part` names no part of a description directory, the shipped layers or
+            an ST install.
     """
     config.addinivalue_line("markers", MARKER)
     settings = Settings.from_config(config)
@@ -370,7 +387,24 @@ def pytest_configure(config: pytest.Config) -> None:
         raise pytest.UsageError(f"--popcorn-budget must be above 0, not {settings.budget}")
     if settings.ring < 0:
         raise pytest.UsageError(f"--popcorn-ring must be 0 or above, not {settings.ring}")
+    if settings.part is not None:
+        from popcorn.stm32.description import DescriptionError
+        from popcorn.stm32.description._shipped import known_part
+
+        try:
+            known_part(settings.part)
+        except DescriptionError as exc:
+            raise pytest.UsageError(f"--popcorn-part: {exc}") from exc
+        from popcorn.pytest._session import SkipRecorder
+
+        config.pluginmanager.register(SkipRecorder(config), "popcorn-skips")
     config.stash[SETTINGS] = settings
+
+
+def pytest_report_header(config: pytest.Config) -> str | None:
+    """The part `--popcorn-part` puts every machine on."""
+    part = config.stash[SETTINGS].part
+    return None if part is None else f"popcorn: part {part} (--popcorn-part)"
 
 
 class Unset(enum.Enum):

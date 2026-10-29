@@ -102,6 +102,7 @@ file and run only the test that should catch it. Python tests import the package
 ## The check command
 
 `uv run pcons run check` is the whole gate, in this order: build, native tests, pytest on
-`tests/python` and `tests/docs`, each example, the examples together, the docs stage, pyright,
+`tests/python` and `tests/docs`, each example followed by its runs on the extra parts of
+`popcorn_build/example_parts.py`, the examples together, the docs stage, pyright,
 ruff, black, clang-format and the layering check. It stops at the first failing stage. `-j N` caps
 the parallelism, and `--asan` runs the native suite in the asan variant only.

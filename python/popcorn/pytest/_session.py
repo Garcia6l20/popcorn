@@ -160,6 +160,7 @@ class PopcornSession:
     cache_hits: int = 0
     cache_dropped: int = 0
     rebuilds: int = 0
+    part_tests: set[str] = field(default_factory=set[str])
     _projects: dict[str, MachineDescription] = field(default_factory=dict[str, MachineDescription])
     _booted: dict[Key, Booted] = field(default_factory=dict[Key, Booted])
     _failed: dict[Key, BaseException] = field(default_factory=dict[Key, BaseException])
@@ -174,14 +175,43 @@ class PopcornSession:
         """The keys booted or tried in this process."""
         return [*self._booted, *self._failed, *self._device_keys]
 
-    def key(self, project: MachineDescription, config: str | None, strict: bool | None) -> Key:
-        """The key of the config `config` of `project`, strictness from that config when
-        `strict` is None.
+    def key(
+        self,
+        project: MachineDescription,
+        config: str | None,
+        strict: bool | None,
+        item: pytest.Item,
+        requester: str,
+    ) -> Key:
+        """The key of the config `config` of `project` for the test `item`, strictness from that
+        config when `strict` is None. With `--popcorn-part` the part of that config is the
+        option's, and `item` is recorded as a test that ran on it.
+
+        Args:
+            project: The machine description.
+            config: The config to select, None for the base machine description.
+            strict: Whether unmodelled peripheral accesses raise, None for the config's.
+            item: The test the key is for.
+            requester: What asks for the key, named in a refusal.
 
         Raises:
-            ConfigError: `project` has no config `config`.
+            ConfigError: `project` has no config `config`, or `--popcorn-part` is set and the
+                selected config sets `description` or `svd`.
         """
         selected = project.config(config)
+        part = self.settings.part
+        if part is not None:
+            for field_name in ("description", "svd"):
+                if getattr(selected, field_name) is not None:
+                    raise ConfigError(
+                        f"{requester}: --popcorn-part {part} cannot replace the part of a machine "
+                        f"description that sets {field_name}=",
+                        key=field_name,
+                        expected="None under --popcorn-part",
+                    )
+            selected = selected.replace(part=part)
+            if selected.part == part:
+                self.part_tests.add(item.nodeid)
         digest = selected.digest
         self._projects.setdefault(digest, selected)
         if strict is None:
@@ -567,6 +597,7 @@ def summary(session: PopcornSession) -> dict[str, object]:
         "cache_hits": session.cache_hits,
         "cache_dropped": session.cache_dropped,
         "coverage_failures": list(session.coverage_failures),
+        "part_tests": sorted(session.part_tests),
     }
 
 
@@ -579,6 +610,14 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     finally:
         if not hasattr(config, "workerinput"):
             sweep_directory(config, config.stash[SETTINGS].cache_max_age_days)
+            settings = config.stash[SETTINGS]
+            if (
+                settings.part is not None
+                and session.exitstatus == pytest.ExitCode.OK
+                and not part_tests(config)
+            ):
+                session.exitstatus = pytest.ExitCode.TESTS_FAILED
+                config.stash[PART_REFUSED] = True
 
 
 def _finish(session: pytest.Session) -> None:
@@ -595,6 +634,38 @@ def _finish(session: pytest.Session) -> None:
 
 
 WORKER_SUMMARIES = pytest.StashKey[list[dict[str, object]]]()
+SKIPPED = pytest.StashKey[set[str]]()
+PART_REFUSED = pytest.StashKey[bool]()
+
+
+class SkipRecorder:
+    """Notes the tests that skipped, for the `--popcorn-part` count."""
+
+    def __init__(self, config: pytest.Config) -> None:
+        """Record into the stash of `config`."""
+        self._config = config
+
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        """Note a test that skipped, in any phase, on the process that gets the reports: the
+        xdist controller, or the single process. Expected failures and subtest reports do not
+        count."""
+        if report.skipped and not hasattr(report, "wasxfail") and type(report) is pytest.TestReport:
+            self._config.stash.setdefault(SKIPPED, set()).add(report.nodeid)
+
+
+def part_tests(config: pytest.Config) -> set[str]:
+    """The ids of the tests that built a machine on the `--popcorn-part` part and did not skip,
+    over this process and every xdist worker."""
+    found: set[str] = set()
+    state = config.stash.get(SESSION, None)
+    if state is not None:
+        found.update(state.part_tests)
+    for one in config.stash.get(WORKER_SUMMARIES, list[dict[str, object]]()):
+        found.update(str(node) for node in cast(list[object], one.get("part_tests", [])))
+    return found - config.stash.get(SKIPPED, set[str]())
+
+
+_RAN = ("passed", "failed", "skipped", "error", "xfailed", "xpassed")
 
 
 def summary_line(summaries: list[dict[str, object]]) -> str | None:
@@ -620,6 +691,19 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
     line = summary_line(summaries)
     if line is not None:
         terminalreporter.write_line(line)
+    part = config.stash[SETTINGS].part
+    if part is not None:
+        ran = {
+            report.nodeid
+            for kind in _RAN
+            for report in terminalreporter.stats.get(kind, [])
+            if hasattr(report, "nodeid")
+        }
+        terminalreporter.write_line(
+            f"popcorn: {len(part_tests(config))} of {len(ran)} tests ran on {part}"
+        )
+        if config.stash.get(PART_REFUSED, False):
+            terminalreporter.write_line(f"popcorn: no test ran on {part}, exit status 1")
     dropped = sum(cast(int, one.get("cache_dropped", 0)) for one in summaries)
     if dropped:
         terminalreporter.write_line(
