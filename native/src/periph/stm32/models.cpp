@@ -29,9 +29,10 @@ struct builtin
   auto (*make)(board const& b) -> model_factory;
   std::string_view instance_glob = "*";
   std::string_view part_glob     = "*";
+  flash_variant    flash         = {};
 };
 
-constexpr std::array<builtin, 61> builtins{
+constexpr std::array<builtin, 67> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -43,6 +44,36 @@ constexpr std::array<builtin, 61> builtins{
          .part_glob       = "STM32U5*Q"},
      {"PWR", "STM32U5_pwr_*", [](board const& b) { return pwr_factory(b.pwr); }},
      {"PWR", "STM32H5_pwr_*", [](board const& b) { return pwr_h5_factory(b.pwr); }},
+     {.ip              = "flash",
+         .ip_version_glob = "v1.0.0_U5_Cube",
+         .make            = [](board const& b) { return flash_factory(b.flash); },
+         .part_glob       = "STM32U535*",
+         .flash           = flash_5bit},
+     {.ip              = "flash",
+         .ip_version_glob = "v1.0.0_U5_Cube",
+         .make            = [](board const& b) { return flash_factory(b.flash); },
+         .part_glob       = "STM32U545*",
+         .flash           = flash_5bit},
+     {.ip              = "flash",
+         .ip_version_glob = "v1.0.0_U5_Cube",
+         .make            = [](board const& b) { return flash_factory(b.flash); },
+         .part_glob       = "STM32U59*",
+         .flash           = flash_8bit},
+     {.ip              = "flash",
+         .ip_version_glob = "v1.0.0_U5_Cube",
+         .make            = [](board const& b) { return flash_factory(b.flash); },
+         .part_glob       = "STM32U5A*",
+         .flash           = flash_8bit},
+     {.ip              = "flash",
+         .ip_version_glob = "v1.0.0_U5_Cube",
+         .make            = [](board const& b) { return flash_factory(b.flash); },
+         .part_glob       = "STM32U5F*",
+         .flash           = flash_8bit},
+     {.ip              = "flash",
+         .ip_version_glob = "v1.0.0_U5_Cube",
+         .make            = [](board const& b) { return flash_factory(b.flash); },
+         .part_glob       = "STM32U5G*",
+         .flash           = flash_8bit},
      {"flash", "v1.0.0_U5_Cube", [](board const& b) { return flash_factory(b.flash); }},
      {"flash", "v1.0.0_H5_Cube", [](board const& b) { return flash_h5_factory(b.flash); }},
      {.ip              = "GPIO",
@@ -412,6 +443,12 @@ auto factories(board const& b, part_description const& part)
     }
   }
   return out;
+}
+
+auto flash_variant_of(part_description const& part, peripheral_desc const& unit) -> flash_variant
+{
+  auto const* const row = select_row(unit.ip, unit.ip_version, part.part, unit.name);
+  return row == nullptr ? flash_variant{} : row->flash;
 }
 
 auto idau_map(part_description const& part) -> std::optional<std::span<idau_region const>>

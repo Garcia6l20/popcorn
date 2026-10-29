@@ -546,25 +546,6 @@ constexpr std::uint32_t secwm_r1_reserved      = 0xff00'ff00;
 constexpr std::uint32_t secwm_r2_reserved      = 0x7f00'7f00;
 constexpr std::uint32_t hdp_enable             = 1u << 31;
 
-auto watermark_bits(std::string_view part) -> std::uint32_t
-{
-  for(std::string_view const line : {"STM32U535", "STM32U545"})
-  {
-    if(part.starts_with(line))
-    {
-      return 5;
-    }
-  }
-  for(std::string_view const line : {"STM32U59", "STM32U5A", "STM32U5F", "STM32U5G"})
-  {
-    if(part.starts_with(line))
-    {
-      return 8;
-    }
-  }
-  return 7;
-}
-
 constexpr std::uint64_t mhz = 1'000'000;
 
 constexpr std::array<std::array<std::uint64_t, 5>, 4> normal_read_max_mhz{
@@ -754,23 +735,23 @@ struct u5_flash
   }
 
   /**
-   * @brief Highest page number of a SECWM, HDP or WRP field of @p part, RM0456 7.9.17.
-   * @param part Part name.
+   * @brief Highest page number of a SECWM, HDP or WRP field, RM0456 7.9.17.
+   * @param variant Field widths of the part.
    */
-  [[nodiscard]] static auto watermark_top(std::string_view part) -> std::uint32_t
+  [[nodiscard]] static constexpr auto watermark_top(flash_variant variant) -> std::uint32_t
   {
-    return (1u << watermark_bits(part)) - 1;
+    return (1u << variant.watermark_bits) - 1;
   }
 
   /**
    * @brief Bits of an option register a firmware write is compared on, the fields of the part.
    * @param name Register name.
-   * @param part Part name.
+   * @param variant Field widths of the part.
    */
-  [[nodiscard]] static auto option_mask(std::string_view name, std::string_view part)
+  [[nodiscard]] static auto option_mask(std::string_view name, flash_variant variant)
       -> std::uint32_t
   {
-    auto const top = watermark_top(part);
+    auto const top = watermark_top(variant);
     if(name == "FLASH_SECWM1R1" or name == "FLASH_SECWM2R1")
     {
       return top | top << 16;
@@ -792,21 +773,21 @@ struct u5_flash
 
   /**
    * @brief Production value of a write protection register: PSTRT at the field maximum, PEND 0.
-   * @param part Part name.
+   * @param variant Field widths of the part.
    */
-  [[nodiscard]] static auto wrp_production(std::string_view part) -> std::uint32_t
+  [[nodiscard]] static auto wrp_production(flash_variant variant) -> std::uint32_t
   {
-    return ~(watermark_top(part) << 16);
+    return ~(watermark_top(variant) << 16);
   }
 
   /**
    * @brief A written write protection word as the register stores it, other bits read 1.
    * @param word Written word.
-   * @param part Part name.
+   * @param variant Field widths of the part.
    */
-  [[nodiscard]] static auto wrp_normal(std::uint32_t word, std::string_view part) -> std::uint32_t
+  [[nodiscard]] static auto wrp_normal(std::uint32_t word, flash_variant variant) -> std::uint32_t
   {
-    auto const top    = watermark_top(part);
+    auto const top    = watermark_top(variant);
     auto const fields = wrp_unlock | top << 16 | top;
     return (word & fields) | ~fields;
   }
@@ -827,15 +808,15 @@ struct u5_flash
    * @param words Loaded words, wrp_registers order.
    * @param bank Bank of the page, 0 or 1, following SWAP_BANK.
    * @param page Page in its bank.
-   * @param part Part name.
+   * @param variant Field widths of the part.
    */
   [[nodiscard]] static auto wrp_covers(
       std::span<std::uint32_t const> words,
       std::uint32_t                  bank,
       std::uint32_t                  page,
-      std::string_view               part) -> bool
+      flash_variant                  variant) -> bool
   {
-    auto const top = watermark_top(part);
+    auto const top = watermark_top(variant);
     return std::ranges::any_of(words.subspan(bank * 2, 2), [&](std::uint32_t word) {
       return (word & top) <= page and page <= (word >> 16 & top);
     });
@@ -921,13 +902,13 @@ struct u5_flash
   /**
    * @brief Encodes option bytes into the U5 option registers, after the checks of the class
    *        documentation.
-   * @param part Part name, which selects the width of the page fields.
+   * @param variant Field widths of the part.
    * @param flash_size Size of the flash, both banks.
    * @param wanted Option bytes to encode.
    * @return The register values and the boot address, or the first refusal in field order.
    */
   [[nodiscard]] static auto
-      encode_options(std::string_view part, std::uint32_t flash_size, option_bytes const& wanted)
+      encode_options(flash_variant variant, std::uint32_t flash_size, option_bytes const& wanted)
           -> std::expected<option_words<option_registers.size()>, option_refusal>;
 };
 
@@ -1116,27 +1097,25 @@ struct h5_flash
   /**
    * @brief Highest sector number of a SECWM or HDP field, RM0481 7.11.33.
    */
-  [[nodiscard]] static constexpr auto watermark_top(std::string_view) -> std::uint32_t
+  [[nodiscard]] static constexpr auto watermark_top(flash_variant) -> std::uint32_t
   {
     return sector_top;
   }
 
   /** @brief Bits of an option register a firmware write is compared on: all of them. */
-  [[nodiscard]] static constexpr auto option_mask(std::string_view, std::string_view)
-      -> std::uint32_t
+  [[nodiscard]] static constexpr auto option_mask(std::string_view, flash_variant) -> std::uint32_t
   {
     return ~0u;
   }
 
   /** @brief Delivery value of a WRPSG register, no group protected, RM0481 Table 55. */
-  [[nodiscard]] static constexpr auto wrp_production(std::string_view) -> std::uint32_t
+  [[nodiscard]] static constexpr auto wrp_production(flash_variant) -> std::uint32_t
   {
     return ~0u;
   }
 
   /** @brief A written WRPSG word, all 32 bits stored. */
-  [[nodiscard]] static constexpr auto wrp_normal(std::uint32_t word, std::string_view)
-      -> std::uint32_t
+  [[nodiscard]] static constexpr auto wrp_normal(std::uint32_t word, flash_variant) -> std::uint32_t
   {
     return word;
   }
@@ -1158,7 +1137,7 @@ struct h5_flash
       std::span<std::uint32_t const> words,
       std::uint32_t                  bank,
       std::uint32_t                  page,
-      std::string_view) -> bool
+      flash_variant) -> bool
   {
     return (words[bank] >> (page / 4) & 1u) == 0;
   }
@@ -1254,7 +1233,7 @@ struct h5_flash
    * @return The register values and the boot address, or the first refusal in field order.
    */
   [[nodiscard]] static auto
-      encode_options(std::string_view, std::uint32_t flash_size, option_bytes const& wanted)
+      encode_options(flash_variant, std::uint32_t flash_size, option_bytes const& wanted)
           -> std::expected<option_words<option_registers.size()>, option_refusal>;
 };
 
@@ -1686,6 +1665,7 @@ private:
   [[nodiscard]] auto        active_range() const -> std::uint32_t;
 
   flash_options                                                     options_;
+  flash_variant                                                     variant_;
   register_file&                                                    regs_;
   region_desc const*                                                storage_{};
   field_table<unit_role>                                            unit_;
@@ -1828,7 +1808,8 @@ flash_model<Traits>::flash_model(
     peripheral_desc const& desc,
     flash_options const&   options)
     : base{ctx, desc, "FLASH", flash_table<Traits>(desc, options, ctx.trustzone)},
-      options_{options}, regs_{ctx.regs}, unit_{make_table<unit_role>(Traits::unit_fields)},
+      options_{options}, variant_{flash_variant_of(ctx.part, desc)}, regs_{ctx.regs},
+      unit_{make_table<unit_role>(Traits::unit_fields)},
       sets_{[this]<std::size_t... index>(std::index_sequence<index...>) {
         return std::array{make_set(index)...};
       }(std::make_index_sequence<Traits::set_registers.size()>{})},
@@ -1876,7 +1857,7 @@ flash_model<Traits>::flash_model(
         option_offsets_.push_back(reg(names.active).offset);
       }
     }
-    state_.wrp.assign(wrp_offsets_.size(), Traits::wrp_production(ctx.part.part));
+    state_.wrp.assign(wrp_offsets_.size(), Traits::wrp_production(variant_));
     state_.wrp_active = state_.wrp;
   }
   for(auto const name : Traits::secure_block_registers)
@@ -1938,7 +1919,7 @@ flash_model<Traits>::flash_model(
     throw config_error(
         desc.name, 0, "option_bytes", "a flash region that names FLASH as its controller");
   }
-  auto const words = Traits::encode_options(ctx.part.part, storage_->size, *options_.option_bytes);
+  auto const words = Traits::encode_options(variant_, storage_->size, *options_.option_bytes);
   if(not words)
   {
     throw config_error(desc.name, 0, words.error().key, words.error().expected);
@@ -2022,7 +2003,7 @@ auto flash_model<Traits>::make_set(std::size_t index) const -> register_set
 }
 
 auto u5_flash::encode_options(
-    std::string_view    part,
+    flash_variant       variant,
     std::uint32_t       flash_size,
     option_bytes const& wanted)
     -> std::expected<option_words<option_registers.size()>, option_refusal>
@@ -2034,7 +2015,7 @@ auto u5_flash::encode_options(
     };
   };
   auto const pages  = flash_size / 2 / page_bytes;
-  auto const top    = (1u << watermark_bits(part)) - 1;
+  auto const top    = watermark_top(variant);
   auto const unused = 0xffu & ~top;
   struct area
   {
@@ -2154,10 +2135,7 @@ auto u5_flash::encode_options(
   };
 }
 
-auto h5_flash::encode_options(
-    std::string_view,
-    std::uint32_t       flash_size,
-    option_bytes const& wanted)
+auto h5_flash::encode_options(flash_variant, std::uint32_t flash_size, option_bytes const& wanted)
     -> std::expected<option_words<option_registers.size()>, option_refusal>
 {
   auto const refuse = [](std::string_view field, std::string expected) {
@@ -2338,7 +2316,7 @@ void flash_model<Traits>::option_written(std::uint32_t old, std::uint32_t now)
 template <typename Traits>
 void flash_model<Traits>::wrp_written(std::uint32_t old, std::uint32_t now)
 {
-  regs_.poke(written_word_, option_locked() ? old : Traits::wrp_normal(now, ctx_.part.part));
+  regs_.poke(written_word_, option_locked() ? old : Traits::wrp_normal(now, variant_));
 }
 
 template <typename Traits>
@@ -2388,7 +2366,7 @@ auto flash_model<Traits>::option_mask(std::uint32_t offset) const -> std::uint32
   {
     if(has_register(name) and reg(name).offset == offset)
     {
-      return Traits::option_mask(name, ctx_.part.part);
+      return Traits::option_mask(name, variant_);
     }
   }
   return ~0u;
@@ -2435,8 +2413,7 @@ auto flash_model<Traits>::wrp_protected(std::uint32_t from, std::uint32_t length
       continue;
     }
     if(Traits::wrp_covers(
-           state_.wrp_active, bank_of(at), (at - bank_base(at)) / Traits::page_bytes,
-           ctx_.part.part))
+           state_.wrp_active, bank_of(at), (at - bank_base(at)) / Traits::page_bytes, variant_))
     {
       return true;
     }
@@ -2479,7 +2456,7 @@ template <typename Traits> void flash_model<Traits>::program_options()
   for(auto const [index, offset] : std::views::enumerate(wrp_offsets_))
   {
     auto const programmed = wrp_programmed(static_cast<std::size_t>(index));
-    auto const word       = Traits::wrp_normal(regs_.peek(offset), ctx_.part.part);
+    auto const word       = Traits::wrp_normal(regs_.peek(offset), variant_);
     requested.push_back(word);
     violation = violation or Traits::wrp_refused(programmed, word);
   }
@@ -2727,7 +2704,7 @@ template <typename Traits> auto flash_model<Traits>::rule_of(std::uint32_t at) c
   auto const bank        = bank_of(at);
   auto const page        = (at - bank_base(at)) / Traits::page_bytes;
   auto const first       = option_words_[Traits::watermark_words[bank]].second;
-  auto const top         = Traits::watermark_top(ctx_.part.part);
+  auto const top         = Traits::watermark_top(variant_);
   auto const watermarked = (first & top) <= page and page <= (first >> 16 & top);
   auto const hide        = unit_.find(bank == 0 ? unit_role::hide_bank1 : unit_role::hide_bank2);
   auto const extension =
@@ -3914,11 +3891,13 @@ auto check_option_bytes(part_description const& part, option_bytes const& wanted
   auto const boot    = [](auto const& words) { return words.boot; };
   if(storage != part.regions.end() and unit->ip_version == u5_ip_version)
   {
-    return u5_flash::encode_options(part.part, storage->size, wanted).transform(boot);
+    return u5_flash::encode_options(flash_variant_of(part, *unit), storage->size, wanted)
+        .transform(boot);
   }
   if(storage != part.regions.end() and unit->ip_version == h5_ip_version)
   {
-    return h5_flash::encode_options(part.part, storage->size, wanted).transform(boot);
+    return h5_flash::encode_options(flash_variant_of(part, *unit), storage->size, wanted)
+        .transform(boot);
   }
   return std::unexpected{
       option_refusal{

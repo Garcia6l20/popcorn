@@ -29,6 +29,18 @@ inline constexpr gpio_variant u575_gpio{.short_port = 'I', .short_port_pins = 8}
  *         as DS14121 Table 17 lists. */
 inline constexpr gpio_variant h56x_gpio{.short_port = 'I', .short_port_pins = 12};
 
+/** @brief Differences between the STM32U5 FLASH controllers the model rows serve. */
+struct flash_variant
+{
+  /** @brief Width of the SECWM, HDP and WRP page fields, RM0456 7.9.17. */
+  std::uint8_t watermark_bits = 7;
+};
+
+/** @brief STM32U535 and STM32U545, 5 bits. */
+inline constexpr flash_variant flash_5bit{.watermark_bits = 5};
+/** @brief STM32U59x, U5Ax, U5Fx and U5Gx, 8 bits. */
+inline constexpr flash_variant flash_8bit{.watermark_bits = 8};
+
 /** @brief Differences between the STM32H5 HASH processors the model rows serve, RM0481 40.3.
  *         A code outside the variant's set reads 0000 after a CR write and the hash runs SHA-1,
  *         as read back on an STM32H573. */

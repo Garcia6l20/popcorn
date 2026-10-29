@@ -1,4 +1,5 @@
 #include "../../../native/src/core/machine_impl.hpp"
+#include "gtzc.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -224,6 +225,41 @@ auto board_options(
   return options;
 }
 
+auto rig_options(
+    popcorn::part_description const& desc,
+    periph::stm32::board const&      board,
+    bool                             strict,
+    std::shared_ptr<services_probe>* probe) -> core::machine_options
+{
+  auto options = board_options(board, strict, probe);
+  if(desc.part != u575().part)
+  {
+    for(auto const& unit : desc.peripherals)
+    {
+      if(unit.name.contains("MPCBB") or unit.name.starts_with("GPIO"))
+      {
+        options.models.insert_or_assign(
+            unit.name,
+            [](periph::model_context& ctx,
+               popcorn::peripheral_desc const&) -> std::shared_ptr<periph::model> {
+              return std::make_shared<services_probe>(ctx);
+            });
+      }
+    }
+  }
+  return options;
+}
+
+auto rig_fixture(
+    popcorn::part_description        desc,
+    periph::stm32::board const&      board,
+    bool                             strict,
+    std::shared_ptr<services_probe>* probe) -> stm32_fixture
+{
+  auto options = rig_options(desc, board, strict, probe);
+  return stm32_fixture{std::move(desc), "flash_ll", std::move(options)};
+}
+
 struct flash_rig
 {
   std::shared_ptr<services_probe> probe{};
@@ -234,7 +270,11 @@ struct flash_rig
   bool secure_set{};
 
   explicit flash_rig(periph::stm32::board const& board = {}, bool strict = false)
-      : f{u575(), "flash_ll", board_options(board, strict, &probe)},
+      : flash_rig{u575(), board, strict}
+  {}
+
+  flash_rig(popcorn::part_description desc, periph::stm32::board const& board, bool strict = false)
+      : f{rig_fixture(std::move(desc), board, strict, &probe)},
         secure_set{board.flash.option_bytes and board.flash.option_bytes->tzen}
   {
     sink = f.target->add_log_sink(
@@ -2954,5 +2994,73 @@ TEST_CASE(
       CHECK_NOTHROW(
           core::machine(desc, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()));
     }
+  }
+}
+
+TEST_CASE("the FLASH row of a part gives it a watermark width of 5 or 7 or 8 bits")
+{
+  for(auto const& [name, bits] : {
+          std::pair{std::string_view{"STM32U535CBTx"},  5u},
+          std::pair{std::string_view{"STM32U545RETx"},  5u},
+          std::pair{std::string_view{"STM32U575QGIx"},  7u},
+          std::pair{std::string_view{"STM32U585AIIx"},  7u},
+          std::pair{std::string_view{"STM32U595AIHxQ"}, 8u},
+          std::pair{std::string_view{"STM32U5A5ZJTxQ"}, 8u},
+          std::pair{std::string_view{"STM32U5F9ZIJxQ"}, 8u},
+          std::pair{std::string_view{"STM32U5G9ZJTxQ"}, 8u},
+  })
+  {
+    std::string const which{name};
+    CAPTURE(which);
+    auto desc       = u575();
+    desc.part       = which;
+    auto const top  = (1u << bits) - 1;
+    auto const last = std::min(top, 63u);
+    flash_rig  rig{
+        desc,
+        option_board({.tzen = true, .secwm1 = periph::stm32::page_range{.first = 0, .last = 9}}
+        )
+    };
+    auto const* const pages =
+        dynamic_cast<periph::stm32::secure_page_controller*>(rig.f.target->model("FLASH"));
+    REQUIRE(pages != nullptr);
+    for(auto const reg : {"FLASH_WRP1AR", "FLASH_WRP1BR", "FLASH_WRP2AR", "FLASH_WRP2BR"})
+    {
+      CAPTURE(reg);
+      CHECK(rig.read(reg) == ~(top << 16));
+    }
+    CHECK(pages->page_secure(page_at(bank1, 5)) == true);
+    CHECK(pages->page_secure(page_at(bank1, 10)) == false);
+
+    rig.logged.clear();
+    rig.write("FLASH_NSKEYR", 0x4567'0123u);
+    rig.write("FLASH_NSKEYR", 0xcdef'89abu);
+    rig.unlock_options();
+    auto const watermark = rig.read("FLASH_SECWM1R1");
+    if(bits < 8)
+    {
+      rig.write("FLASH_SECWM1R1", watermark ^ (1u << bits));
+      rig.write("FLASH_NSCR", optstrt);
+      CHECK(rig.logged.empty());
+    }
+    rig.write("FLASH_SECWM1R1", watermark ^ (1u << (bits - 1)));
+    rig.write("FLASH_NSCR", optstrt);
+    REQUIRE(rig.logged.size() == 1);
+    CHECK(rig.logged[0].reg == "FLASH_SECWM1R1");
+
+    flash_rig plain{desc, {}};
+    plain.unlock_options();
+    plain.write("FLASH_WRP1AR", 0);
+    CHECK(plain.read("FLASH_WRP1AR") == ~(lock_bit | top << 16 | top));
+
+    plain.set_wrp("FLASH_WRP1AR", last - 2, last);
+    plain.program_options();
+    plain.load_options();
+    plain.clear_errors();
+    plain.program(page_at(bank1, last - 1), {1, 2, 3, 4});
+    CHECK(plain.status("WRPERR") == 1);
+    plain.clear_errors();
+    plain.program(page_at(bank1, last - 3), {1, 2, 3, 4});
+    CHECK(plain.status("WRPERR") == 0);
   }
 }

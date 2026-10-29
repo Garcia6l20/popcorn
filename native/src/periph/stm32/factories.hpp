@@ -71,6 +71,15 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto flash_h5_factory(flash_options options) -> model_factory;
 
 /**
+ * @brief The FLASH variant of the model row that serves a unit of @p part.
+ * @param part Description the machine is built from.
+ * @param unit FLASH unit of @p part.
+ * @return The row's variant, the default one when no row serves the unit.
+ */
+[[nodiscard]] auto flash_variant_of(part_description const& part, peripheral_desc const& unit)
+    -> flash_variant;
+
+/**
  * @brief Factory of the GPIO port model, RM0456 section 13. Returns no model for LPGPIO1.
  * @param variant What differs between the ports of the family the row serves.
  */
