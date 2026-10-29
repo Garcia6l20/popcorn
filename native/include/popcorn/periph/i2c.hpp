@@ -304,6 +304,25 @@ public:
    */
   virtual void drop(i2c_phase phase, vtime at, std::uint32_t lane, std::uint64_t unit) = 0;
 
+  /**
+   * @brief The unit of the last entry queued, kept across resets and snapshots, so the next
+   *        primitive takes a unit above it. The default returns 0, for a port that queues no
+   *        entry: a port that queues entries overrides last_unit() and queued().
+   */
+  [[nodiscard]] virtual auto last_unit() const -> std::uint64_t
+  {
+    return 0;
+  }
+
+  /**
+   * @brief The entries queued now, at most max_entries. The default returns 0, for a port that
+   *        queues no entry: a port that queues entries overrides last_unit() and queued().
+   */
+  [[nodiscard]] virtual auto queued() const -> std::size_t
+  {
+    return 0;
+  }
+
 protected:
   /** @brief Destroyed through its model only. */
   virtual ~i2c_controller_port();

@@ -4,6 +4,8 @@
 #include "machine.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/core/scheduler.hpp>
+#include <popcorn/periph/i2c.hpp>
 #include <popcorn/periph/spi.hpp>
 #include <popcorn/periph/stm32/i2c.hpp>
 
@@ -22,6 +24,15 @@
 
 namespace popcorn::bind
 {
+namespace
+{
+constexpr std::uint8_t  i2c_start     = 0;
+constexpr std::uint8_t  i2c_write     = 1;
+constexpr std::uint8_t  i2c_read      = 2;
+constexpr std::uint8_t  i2c_stop      = 3;
+constexpr std::uint64_t i2c_latest_ps = std::uint64_t{1} << 63;
+}
+
 uart_queue::uart_queue(
     periph::uart_port&  port,
     core::reset_counter resets,
@@ -763,6 +774,88 @@ auto machine_handle::command_spi_transfer(
         auto const from = at_ps.value_or(target.virtual_clock().time().ps);
         return port->transfer(vtime{from}, frame_ps, bits, frames).ps;
       });
+}
+
+auto machine_handle::command_i2c_phases(
+    std::string const&           peripheral,
+    std::optional<std::uint64_t> at_ps,
+    std::uint64_t                phase_ps,
+    std::vector<std::uint8_t>    kinds,
+    std::vector<std::uint8_t>    values) const -> access_op
+{
+  auto* const port = dynamic_cast<periph::i2c_controller_port*>(engine().model(peripheral));
+  if(port == nullptr)
+  {
+    throw config_error(peripheral, 0, "devices", "a built-in I2C model");
+  }
+  if(kinds.empty() or kinds.size() > periph::i2c_controller_port::max_entries)
+  {
+    throw std::invalid_argument(
+        std::format(
+            "an I2C controller call queues 1 to {} phases, not {}",
+            periph::i2c_controller_port::max_entries, kinds.size()));
+  }
+  if(values.size() != kinds.size())
+  {
+    throw std::invalid_argument("an I2C phase list has one value per phase");
+  }
+  if(std::ranges::any_of(kinds, [](std::uint8_t kind) { return kind > i2c_stop; }))
+  {
+    throw std::invalid_argument("an I2C phase is a START, a write, a read or a STOP");
+  }
+  if(phase_ps == 0 or phase_ps >= i2c_latest_ps / periph::i2c_controller_port::max_entries)
+  {
+    throw std::invalid_argument("an I2C phase lasts at least 1 ps and less than 2**51 ps");
+  }
+  if(at_ps and *at_ps > i2c_latest_ps)
+  {
+    throw std::invalid_argument("an I2C phase starts at 2**63 ps at the latest");
+  }
+  return detail::machine_op([port, peripheral, at_ps, phase_ps, kinds = std::move(kinds),
+                             values = std::move(values)](core::machine& target) {
+    auto const now  = target.virtual_clock().time().ps;
+    auto const from = at_ps.value_or(now);
+    if(from < now)
+    {
+      throw std::invalid_argument(
+          std::format("an I2C phase at {} ps starts before the machine time {} ps", from, now));
+    }
+    if(from > i2c_latest_ps)
+    {
+      throw std::invalid_argument("an I2C phase starts at 2**63 ps at the latest");
+    }
+    if(port->queued() + kinds.size() > periph::i2c_controller_port::max_entries)
+    {
+      throw config_error(
+          peripheral, 0, std::format("devices.{}", peripheral),
+          std::format(
+              "at most {} I2C port entries queued", periph::i2c_controller_port::max_entries));
+    }
+    auto       unit = port->last_unit();
+    auto const at   = vtime{from};
+    for(std::size_t index = 0; index < kinds.size(); ++index)
+    {
+      auto const value = values[index];
+      switch(kinds[index])
+      {
+        case i2c_start:
+          port->start(
+              static_cast<std::uint8_t>(value >> 1), (value & 1u) != 0, phase_ps, at,
+              core::host_lane, ++unit);
+          break;
+        case i2c_write:
+          port->write(value, phase_ps, at, core::host_lane, ++unit);
+          break;
+        case i2c_read:
+          port->read(value != 0, phase_ps, at, core::host_lane, ++unit);
+          break;
+        default:
+          port->stop(at, core::host_lane, ++unit);
+          break;
+      }
+    }
+    return from;
+  });
 }
 
 auto machine_handle::command_gpio_edges(

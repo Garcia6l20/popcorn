@@ -37,6 +37,7 @@ from popcorn._call import (
 )
 from popcorn._devices import (
     BusDevice,
+    I2CController,
     I2CTarget,
     SpiController,
     SpiTarget,
@@ -121,6 +122,7 @@ from popcorn.arm import Registers
 from popcorn.devices import (
     At25sf,
     Eeprom24xx,
+    I2CControllerBase,
     I2CTargetBase,
     SpiControllerBase,
     SpiTargetBase,
@@ -735,8 +737,9 @@ class Machine:
             devices: Bus devices per I2C or SPI peripheral name, `popcorn.board` targets,
                 `popcorn.devices` devices or native plugin devices derived from the same bases,
                 of one bus kind, in attachment order, or one `popcorn.board.SpiController`
-                alone on an SPI. The built-in bus model of the peripheral serves them. A device
-                serves one live machine at a time.
+                alone on an SPI, or one `popcorn.board.I2CController` alone on an I2C. The
+                built-in bus model of the peripheral serves them. A device serves one live
+                machine at a time.
             rcc: Clock sources the board gives the built-in RCC model, None for its defaults,
                 a 16 MHz HSE and a 32.768 kHz LSE.
             audio: Options of SAI audio blocks by SAI instance and block, such as
@@ -765,8 +768,8 @@ class Machine:
                 models key names no peripheral, a model is refused, or devices are refused:
                 a peripheral that is not a built-in bus of their kind or has a board model,
                 a chip select pin the description lacks or the package does not bond, a device
-                already serving a live machine or listed twice, an `SpiController` next to
-                another device on its SPI, or two images share a name.
+                already serving a live machine or listed twice, an `SpiController` or an
+                `I2CController` next to another device on its bus, or two images share a name.
                 With `rcc`: an HSE outside 4 to 50 MHz, an LSE of 0 Hz or above 1 MHz, an RCC
                 with a Python model or one no built-in model serves.
                 With `audio`: a key that is not an SAI with the built-in model, two keys naming
@@ -882,6 +885,7 @@ class Machine:
                     self._device_audio_clock,
                     self._device_bus_hold,
                     self._device_spi_transfer,
+                    self._device_i2c_phases,
                     peripheral,
                 )
         self._board = Board(
@@ -3340,6 +3344,20 @@ class Machine:
         )
         return self._post(command).mapped(lambda done: VirtualTime(cast(int, done[0])))
 
+    def _device_i2c_phases(
+        self,
+        peripheral: str,
+        at: VirtualTime | None,
+        phase_ps: int,
+        kinds: list[int],
+        values: list[int],
+    ) -> Pending[VirtualTime]:
+        self._refuse_on_host()
+        command = self._handle.command_i2c_phases(
+            peripheral, None if at is None else at.ps, phase_ps, kinds, values
+        )
+        return self._post(command).mapped(lambda done: VirtualTime(cast(int, done[0])))
+
     def _require_stopped(self) -> None:
         if self.busy and not self._handle.owns_engine():
             raise MachineRunning(_RUNNING)
@@ -3453,17 +3471,37 @@ type AttachedDevice = (
     I2CTarget
     | SpiTarget
     | SpiController
+    | I2CController
     | At25sf
     | Eeprom24xx
     | TableTarget
     | I2CTargetBase
     | SpiTargetBase
     | SpiControllerBase
+    | I2CControllerBase
 )
 """A device `Machine(devices=)` takes, of `popcorn.board`, of `popcorn.devices`, or of a native
 plugin, derived from the bases the native bus models serve."""
 
-_BUS_IPS = {I2CTarget: "I2C", SpiTarget: "SPI", SpiController: "SPI"}
+_BUS_IPS = {I2CTarget: "I2C", SpiTarget: "SPI", SpiController: "SPI", I2CController: "I2C"}
+
+
+_CONTROLLERS: tuple[tuple[type, str], ...] = (
+    (_core.SpiControllerBase, "SpiController"),
+    (_core.I2CControllerBase, "I2CController"),
+)
+
+
+def _device_kind(
+    device: BusDevice,
+) -> type[I2CTarget] | type[SpiTarget] | type[SpiController] | type[I2CController]:
+    if isinstance(device, _core.I2CTargetBase):
+        return I2CTarget
+    if isinstance(device, _core.SpiControllerBase):
+        return SpiController
+    if isinstance(device, _core.I2CControllerBase):
+        return I2CController
+    return SpiTarget
 
 
 def _is_u32(value: object, lowest: int) -> bool:
@@ -3590,19 +3628,19 @@ def _checked_devices(
         listed: list[BusDevice] = []
         for candidate in cast(Sequence[object], targets):
             if not isinstance(
-                candidate, _core.I2CTargetBase | _core.SpiTargetBase | _core.SpiControllerBase
+                candidate,
+                _core.I2CTargetBase
+                | _core.SpiTargetBase
+                | _core.SpiControllerBase
+                | _core.I2CControllerBase,
             ):
                 raise refuse(
                     name,
-                    "popcorn.board.I2CTarget, SpiTarget or SpiController or popcorn.devices"
-                    " instances",
+                    "popcorn.board.I2CTarget, SpiTarget, SpiController or I2CController or"
+                    " popcorn.devices instances",
                 )
             target = candidate
-            kind = (
-                I2CTarget
-                if isinstance(target, _core.I2CTargetBase)
-                else SpiController if isinstance(target, _core.SpiControllerBase) else SpiTarget
-            )
+            kind = _device_kind(target)
             listed.append(target)
             if peripheral.ip != _BUS_IPS[kind]:
                 raise refuse(name, f"an {_BUS_IPS[kind]} peripheral for an {kind.__name__}")
@@ -3616,9 +3654,9 @@ def _checked_devices(
                 port = f"GPIO{cs[1]}"
                 if port not in peripherals:
                     raise refuse(name, f"a chip select on a GPIO port of {description.part}")
-        controllers = sum(isinstance(d, _core.SpiControllerBase) for d in listed)
-        if controllers and len(listed) > 1:
-            raise refuse(name, f"one SpiController alone on {name}, no other device next to it")
+        for base, named in _CONTROLLERS:
+            if any(isinstance(d, base) for d in listed) and len(listed) > 1:
+                raise refuse(name, f"one {named} alone on {name}, no other device next to it")
         if listed:
             out[name] = tuple(listed)
     return out

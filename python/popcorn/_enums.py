@@ -76,7 +76,8 @@ class PinMode(enum.Enum):
 
 
 class I2CError(enum.Enum):
-    """An error an `I2CTarget` hook returns for the byte it answers, RM0456 65.4.17."""
+    """An error an `I2CTarget` hook returns for the byte it answers, or an `I2CAnswer` carries,
+    RM0456 65.4.17."""
 
     BUS_ERROR = 1
     """ISR.BERR: a misplaced START or STOP. The byte completes as if acknowledged."""
@@ -86,6 +87,17 @@ class I2CError(enum.Enum):
     OVERRUN = 3
     """ISR.OVR: an overrun or underrun. Set on silicon only in target mode with NOSTRETCH, so
     this exercises firmware handlers. The byte completes as if acknowledged."""
+
+
+class I2CPhase(enum.Enum):
+    """The bus phase an `I2CController` answer is for."""
+
+    ADDRESS = 0
+    """A START or repeated START and its address byte."""
+    WRITE = 1
+    """A byte the controller writes."""
+    READ = 2
+    """A byte the controller reads."""
 
 
 class UartError(enum.Enum):

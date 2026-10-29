@@ -392,6 +392,8 @@ public:
       override;
   void stop(vtime at, std::uint32_t lane, std::uint64_t unit) override;
   void drop(i2c_phase phase, vtime at, std::uint32_t lane, std::uint64_t unit) override;
+  [[nodiscard]] auto last_unit() const -> std::uint64_t override;
+  [[nodiscard]] auto queued() const -> std::size_t override;
 
   void enable_written(std::uint32_t old, std::uint32_t now);
   void command_written(std::uint32_t old, std::uint32_t now);
@@ -1441,6 +1443,16 @@ void i2c::drop(i2c_phase phase, vtime at, std::uint32_t lane, std::uint64_t unit
        .lane      = lane,
        .kind      = entry_dropped,
        .phase     = static_cast<std::uint8_t>(phase)});
+}
+
+auto i2c::last_unit() const -> std::uint64_t
+{
+  return state_.port.last_unit;
+}
+
+auto i2c::queued() const -> std::size_t
+{
+  return state_.port.entries.size();
 }
 
 void i2c::run_port(std::uint32_t lane)

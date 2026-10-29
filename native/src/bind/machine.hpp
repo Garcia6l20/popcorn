@@ -985,6 +985,32 @@ public:
           std::uint8_t                 bits,
           std::vector<std::uint32_t>   frames) const -> access_op;
   /**
+   * @brief A command queuing phases of the instance's I2C controller on core::host_lane, each
+   *        with the unit after the port's last unit, through i2c_controller_port, checked now
+   *        and when it runs: it queues every phase or none. Its value is the earliest start in
+   *        picoseconds.
+   * @param peripheral I2C instance name.
+   * @param at_ps Earliest start, machine time since reset, empty for the time the command runs
+   *        at, at most 2**63.
+   * @param phase_ps Length of each START, write and read phase, at least 1, below 2**51.
+   * @param kinds Each phase: 0 START, 1 write, 2 read, 3 STOP, 1 to
+   *        i2c_controller_port::max_entries of them.
+   * @param values Per phase: the address << 1 | read bit for a START, the byte for a write,
+   *        the acknowledge for a read, ignored for a STOP.
+   * @throws config_error now, when the peripheral's model is no built-in I2C, when the command
+   *         runs and the port would hold more than i2c_controller_port::max_entries entries.
+   * @throws std::invalid_argument now for lists out of range or of another length or a phase
+   *         length out of range, when the command runs for a start already past.
+   */
+  [[= py::doc{
+      "Command queuing I2C controller phases, its value the earliest start."}]] [[nodiscard]] auto
+      command_i2c_phases(
+          std::string const&           peripheral,
+          std::optional<std::uint64_t> at_ps,
+          std::uint64_t                phase_ps,
+          std::vector<std::uint8_t>    kinds,
+          std::vector<std::uint8_t>    values) const -> access_op;
+  /**
    * @brief A command scheduling edges of a GPIO pin, gpio_port::drive_at for each, checked now
    *        and when it runs: it schedules every edge or none.
    * @param peripheral GPIO port name.

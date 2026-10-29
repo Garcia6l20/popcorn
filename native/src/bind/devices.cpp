@@ -302,6 +302,64 @@ private:
 };
 
 /**
+ * @brief The phase answer `_answered` takes, the undriven one for a dropped phase: NACK for an
+ *        address or a written byte, 0xFF with ack false for a read byte.
+ */
+template <typename Trampoline>
+void answer(
+    Trampoline const&    self,
+    callback_cell const& through,
+    std::uint64_t        unit,
+    periph::i2c_phase    phase,
+    periph::i2c_answer   reply,
+    vtime                at)
+{
+  gil_entry const gil;
+  call(
+      self, through, "_answered", unit, static_cast<std::uint8_t>(phase), reply.ack, reply.byte,
+      static_cast<std::uint8_t>(reply.error), at.ps);
+}
+
+/**
+ * @brief nanobind trampoline letting a Python class implement periph::i2c_controller_sink
+ *        through the private method `_answered` that `popcorn.board.I2CController` defines. One
+ *        hook name, so one trampoline slot: dropped() calls `_answered` with the undriven answer
+ *        at its report time. Every call takes the GIL, one per phase. Times cross as
+ *        picoseconds since reset. Once its machine's Python side is collected no method is
+ *        called: the run is asked to stop.
+ */
+class python_i2c_controller final : public periph::i2c_controller_sink
+{
+public:
+  NB_TRAMPOLINE(periph::i2c_controller_sink, 1);
+
+  void answered(std::uint64_t unit, periph::i2c_phase phase, periph::i2c_answer reply, vtime at)
+      override
+  {
+    answer(nb_trampoline, cell, unit, phase, reply, at);
+  }
+
+  void dropped(std::uint64_t unit, periph::i2c_phase phase, vtime at) override
+  {
+    answer(nb_trampoline, cell, unit, phase, {}, at);
+  }
+
+  /** @brief Calls `_answered` in @p through, the cell of one attachment. */
+  void answer_via(
+      callback_cell const& through,
+      std::uint64_t        unit,
+      periph::i2c_phase    phase,
+      periph::i2c_answer   reply,
+      vtime                at) const
+  {
+    answer(nb_trampoline, through, unit, phase, reply, at);
+  }
+
+  /** @brief The cell its calls run in. */
+  callback_cell cell;
+};
+
+/**
  * @brief One machine's attachment of a Python I2C target: the machine's engine calls it, and
  *        it calls the device in its own cell. A device reattached to another machine gets a
  *        new attachment, so an old engine still running never calls it in the new machine's
@@ -449,6 +507,33 @@ private:
   std::shared_ptr<python_spi_controller> device_;
 };
 
+/** @brief One machine's attachment of a Python I2C controller, as attached_i2c_target. */
+class attached_i2c_controller final : public periph::i2c_controller_sink
+{
+public:
+  /** @brief Attaches @p device. */
+  explicit attached_i2c_controller(std::shared_ptr<python_i2c_controller> device) noexcept
+      : device_{std::move(device)}
+  {}
+
+  void answered(std::uint64_t unit, periph::i2c_phase phase, periph::i2c_answer reply, vtime at)
+      override
+  {
+    device_->answer_via(cell, unit, phase, reply, at);
+  }
+
+  void dropped(std::uint64_t unit, periph::i2c_phase phase, vtime at) override
+  {
+    device_->answer_via(cell, unit, phase, {}, at);
+  }
+
+  /** @brief The cell of this attachment. */
+  callback_cell cell;
+
+private:
+  std::shared_ptr<python_i2c_controller> device_;
+};
+
 auto refused(std::string const& peripheral, std::string expected) -> config_error
 {
   return config_error("devices", 0, std::format("devices.{}", peripheral), std::move(expected));
@@ -534,6 +619,10 @@ void bind_device_bases(nb::module_ scope)
       scope, "SpiControllerBase",
       "Native side of popcorn.board.SpiController: an SPI controller implemented in Python.")
       .def(nb::init<nb::handle>(), nb::arg("mode") = nb::none());
+  nb::class_<periph::i2c_controller_sink, python_i2c_controller>(
+      scope, "I2CControllerBase",
+      "Native side of popcorn.board.I2CController: an I2C controller implemented in Python.")
+      .def(nb::init<>());
 }
 
 auto device_factories(
@@ -568,7 +657,27 @@ auto device_factories(
         {
           throw refused(peripheral, "an SPI peripheral for an SpiTarget, not an I2CTarget");
         }
+        if(board.i2c_controllers.contains(peripheral))
+        {
+          throw refused(peripheral, "one I2CController alone on the I2C instance");
+        }
         board.i2c[peripheral].push_back(std::move(target));
+      }
+      else if(
+          std::shared_ptr<periph::i2c_controller_sink> controller;
+          nb::try_cast(object, controller) and controller)
+      {
+        if(unit->ip != "I2C")
+        {
+          throw refused(peripheral, "an I2C peripheral for an I2CController");
+        }
+        if(board.i2c_controllers.contains(peripheral) or board.i2c.contains(peripheral))
+        {
+          throw refused(peripheral, "one I2CController alone on the I2C instance");
+        }
+        adopt<python_i2c_controller, attached_i2c_controller>(
+            controller, object, peripheral, cells, python_owned);
+        board.i2c_controllers[peripheral] = std::move(controller);
       }
       else if(
           std::shared_ptr<periph::spi_controller_sink> controller;

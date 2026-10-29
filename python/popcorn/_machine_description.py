@@ -222,12 +222,12 @@ class Use:
 @dataclass(frozen=True, slots=True, init=False)
 class Device(Use):
     """A bus device class with its constructor keywords: an I2C target by `address`, an SPI
-    device by its chip select `cs`, None for the hardware SS output, or an SPI controller with
-    neither, such as `Device(SpiController, sck_hz=1_000_000)`.
+    device by its chip select `cs`, None for the hardware SS output, or an SPI or I2C
+    controller with neither, such as `Device(SpiController, sck_hz=1_000_000)`.
 
     Attributes:
-        address: 7-bit address of an I2C target, None for an SPI device or controller.
-        cs: Chip select pin of an SPI device, such as "PA4", active low, None for an SPI
+        address: 7-bit address of an I2C target, None for an SPI device or a controller.
+        cs: Chip select pin of an SPI device, such as "PA4", active low, None for a
             controller.
     """
 
@@ -665,14 +665,15 @@ class MachineDescription:
         Raises:
             ValueError: `name` is empty or holds whitespace or a dot.
             ConfigError: As `part_description`, a model is not a `popcorn.model.Model` or a
-                device not a `popcorn.board.I2CTarget`, `SpiTarget` or `SpiController`, a class
-                refuses its parameters, a model replaces no peripheral of the description, a
-                plugin fails to build or load or its library names another plugin, as
-                `plugins[i]`, a `PluginModel` names no model its plugin registers, a device of
-                `devices` comes from a plugin not in `plugins`, as `devices.<P>[i]`, a
-                memory_init symbol or range is invalid, an I2C target sits on a peripheral that
-                is not an I2C bus or an SPI device or controller on one that is not an SPI bus,
-                an SPI controller has an address or a cs, two `devices` keys name
+                device not a `popcorn.board.I2CTarget`, `SpiTarget`, `SpiController` or
+                `I2CController`, a class refuses its parameters, a model replaces no peripheral
+                of the description, a plugin fails to build or load or its library names
+                another plugin, as `plugins[i]`, a `PluginModel` names no model its plugin
+                registers, a device of `devices` comes from a plugin not in `plugins`, as
+                `devices.<P>[i]`, a memory_init symbol or range is invalid, an I2C target or
+                controller sits on a peripheral that is not an I2C bus or an SPI device or
+                controller on one that is not an SPI bus, a controller has an address or a
+                cs, two `devices` keys name
                 one peripheral, `Machine(devices=)` refuses them, `audio` is on a peripheral
                 that is not an SAI with the built-in model, or `host` on one that is not a USB
                 device controller with the built-in model. `Machine(option_bytes=)` refuses
@@ -853,9 +854,16 @@ class MachineDescription:
                 at = f"{key}.devices[{index}]"
                 cls = device.cls
                 if not issubclass(
-                    cls, _core.I2CTargetBase | _core.SpiTargetBase | _core.SpiControllerBase
+                    cls,
+                    _core.I2CTargetBase
+                    | _core.SpiTargetBase
+                    | _core.SpiControllerBase
+                    | _core.I2CControllerBase,
                 ):
-                    expected = "a popcorn.board.I2CTarget, SpiTarget or SpiController subclass"
+                    expected = (
+                        "a popcorn.board.I2CTarget, SpiTarget, SpiController or I2CController"
+                        " subclass"
+                    )
                     raise _plain_error(f"{at}.model", f"{expected}, not {_reference(device.cls)}")
                 params = dict(device.params)
                 if issubclass(cls, _core.I2CTargetBase):
@@ -864,11 +872,12 @@ class MachineDescription:
                     if device.address is None:
                         raise _plain_error(f"{at}.address", "the address of an I2C target")
                     self._check_params(cls, (device.address,), params, at)
-                elif issubclass(cls, _core.SpiControllerBase):
+                elif issubclass(cls, _core.SpiControllerBase | _core.I2CControllerBase):
+                    bus = "an SPI" if issubclass(cls, _core.SpiControllerBase) else "an I2C"
                     if device.address is not None:
-                        raise _plain_error(f"{at}.address", "no address for an SPI controller")
+                        raise _plain_error(f"{at}.address", f"no address for {bus} controller")
                     if device.cs is not None:
-                        raise _plain_error(f"{at}.cs", "no cs for an SPI controller")
+                        raise _plain_error(f"{at}.cs", f"no cs for {bus} controller")
                     self._check_params(cls, (), params, at)
                 else:
                     if device.address is not None:
@@ -913,6 +922,10 @@ class MachineDescription:
                 elif issubclass(cls, _core.SpiControllerBase):
                     if ip != "SPI":
                         raise _plain_error(f"{at}.model", f"an SPI bus of {description.part}")
+                    built.append(make(**params))
+                elif issubclass(cls, _core.I2CControllerBase):
+                    if ip != "I2C":
+                        raise _plain_error(f"{at}.model", f"an I2C bus of {description.part}")
                     built.append(make(**params))
             except (ValueError, TypeError) as error:
                 raise _plain_error(at, f"arguments {cls.__qualname__} accepts: {error}") from error

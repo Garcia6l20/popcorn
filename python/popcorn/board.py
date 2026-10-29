@@ -1,12 +1,19 @@
 """What is wired to the MCU: UART streams, SAI audio streams, PDM microphones and digital filter
-outputs, USB hosts, host ptys, GPIO pins, ADC inputs, the NVIC, I2C and SPI devices, SPI
+outputs, USB hosts, host ptys, GPIO pins, ADC inputs, the NVIC, I2C and SPI devices, SPI and I2C
 controllers, the clock sources of the RCC, the supply voltages and the RNG word source."""
 
 from __future__ import annotations
 
 from popcorn._audio import AudioFrame, AudioLayout, AudioOptions, AudioStream
-from popcorn._devices import DeviceBoard, I2CTarget, SpiController, SpiTarget
-from popcorn._enums import I2CError, PinMode, UartError
+from popcorn._devices import (
+    DeviceBoard,
+    I2CAnswer,
+    I2CController,
+    I2CTarget,
+    SpiController,
+    SpiTarget,
+)
+from popcorn._enums import I2CError, I2CPhase, PinMode, UartError
 from popcorn._nvic import Irqs, Nvic
 from popcorn._pdm import FilterSample, FilterTap, PdmMic
 from popcorn._rcc import RccOptions
@@ -53,7 +60,10 @@ __all__ = [
     "Frame",
     "HidReport",
     "HidStream",
+    "I2CAnswer",
+    "I2CController",
     "I2CError",
+    "I2CPhase",
     "I2CTarget",
     "Irqs",
     "Nvic",

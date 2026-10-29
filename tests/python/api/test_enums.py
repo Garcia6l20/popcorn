@@ -18,6 +18,7 @@ PAIRS: list[tuple[type[enum.Enum], type[enum.Enum]]] = [
     (popcorn.WatchAction, _core.WatchAction),
     (popcorn.Initiator, _core.Initiator),
     (popcorn.board.PinMode, _core.PinMode),
+    (popcorn.board.I2CPhase, _core.I2CPhase),
 ]
 
 

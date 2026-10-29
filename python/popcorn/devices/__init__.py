@@ -16,9 +16,9 @@ serves parked, or a call from one of its callbacks: while it is busy they raise
 `MachineRunning`. A device that serves no machine has no such limit. `restore()` on an attached
 device sets its state behind the bus model, which keeps its own transfer state.
 
-`SpiTargetBase`, `I2CTargetBase` and `SpiControllerBase` are the native bases a plugin's device
-classes derive from. `chip_select` gives an SPI device class a native plugin binds its chip
-select.
+`SpiTargetBase`, `I2CTargetBase`, `SpiControllerBase` and `I2CControllerBase` are the native
+bases a plugin's device classes derive from. `chip_select` gives an SPI device class a native
+plugin binds its chip select.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from popcorn.units import VirtualDuration, ms, s, us
 __all__ = [
     "At25sf",
     "Eeprom24xx",
+    "I2CControllerBase",
     "I2CTargetBase",
     "SpiControllerBase",
     "SpiTargetBase",
@@ -61,6 +62,12 @@ SpiControllerBase = _core.SpiControllerBase
 `popcorn::periph::spi_controller_sink` derives from it, and a `TYPE_CHECKING` declaration of that
 class names it as its base. A controller written in Python subclasses
 `popcorn.board.SpiController`."""
+
+I2CControllerBase = _core.I2CControllerBase
+"""The base to subclass for a native plugin's I2C controller: the class a plugin binds on
+`popcorn::periph::i2c_controller_sink` derives from it, and a `TYPE_CHECKING` declaration of that
+class names it as its base. A controller written in Python subclasses
+`popcorn.board.I2CController`."""
 
 _T_PP = us(600)
 _T_SE = ms(60)
