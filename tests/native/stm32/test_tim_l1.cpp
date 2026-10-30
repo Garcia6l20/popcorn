@@ -1,0 +1,763 @@
+#include "stm32_fixture.hpp"
+
+#include <popcorn/core/description.hpp>
+#include <popcorn/core/errors.hpp>
+#include <popcorn/core/intercept.hpp>
+#include <popcorn/core/log.hpp>
+#include <popcorn/core/machine.hpp>
+#include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
+
+#include <doctest/doctest.h>
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace
+{
+namespace core  = popcorn::core;
+namespace stm32 = popcorn::periph::stm32;
+using popcorn::icount;
+using popcorn::part_description;
+using popcorn::stop_reason;
+using popcorn::vtime;
+using popcorn::testing::l152rb;
+using popcorn::testing::l152rc;
+using popcorn::testing::l152re;
+using popcorn::testing::stm32_fixture;
+using popcorn::testing::sym;
+
+constexpr std::string_view firmware      = "l152xe_l1_tim_ll";
+constexpr std::string_view firmware_b    = "l152xb_l1_tim_ll";
+constexpr std::uint64_t    ps_per_second = 1'000'000'000'000;
+constexpr std::uint64_t    us            = 1'000'000;
+constexpr std::uint64_t    ms            = 1'000 * us;
+constexpr std::uint64_t    msi_hz        = 2'097'152;
+constexpr std::uint32_t    sms_trigger   = 6;
+constexpr std::uint32_t    sms_external  = 7;
+constexpr std::uint32_t    master_update = 2;
+
+auto ticks_ps(std::uint64_t ticks) -> std::uint64_t
+{
+  return (ticks * ps_per_second + msi_hz - 1) / msi_hz;
+}
+
+struct rig
+{
+  part_description const&        part;
+  std::unique_ptr<stm32_fixture> f;
+  std::string                    elf;
+  std::vector<core::log_record>  logged;
+  core::hook_handle              sink;
+  std::uint64_t                  start{};
+
+  explicit rig(
+      part_description const& desc   = l152re(),
+      std::string_view        image  = firmware,
+      bool                    strict = false)
+      : part{desc}, elf{image}
+  {
+    auto options               = popcorn::testing::stm32_options();
+    options.models             = stm32::factories({}, desc);
+    options.strict_peripherals = strict;
+    f                          = std::make_unique<stm32_fixture>(desc, image, std::move(options));
+    f->set("pc", sym(elf, "idle"));
+    sink = f->target->add_log_sink(
+        [this](core::log_record const& record) { logged.push_back(record); });
+    start = now();
+  }
+
+  [[nodiscard]] auto has(std::string_view unit) const -> bool
+  {
+    return std::ranges::contains(part.peripherals, unit, &popcorn::peripheral_desc::name);
+  }
+
+  [[nodiscard]] auto reg(std::string_view unit, std::string_view name) const
+      -> popcorn::register_desc const&
+  {
+    auto const* found =
+        popcorn::find_register(f->target->peripheral(unit).description(), std::string{name});
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  [[nodiscard]] auto at(std::string_view unit, std::string_view name) const -> popcorn::address
+  {
+    return f->target->peripheral(unit).description().base + reg(unit, name).offset;
+  }
+
+  [[nodiscard]] auto read(std::string_view unit, std::string_view name) const -> std::uint32_t
+  {
+    auto const value = f->target->mem().read(at(unit, name), 4);
+    REQUIRE(value.has_value());
+    return static_cast<std::uint32_t>(*value);
+  }
+
+  void write(std::string_view unit, std::string_view name, std::uint32_t value) const
+  {
+    REQUIRE(f->target->mem().write(at(unit, name), 4, value).has_value());
+  }
+
+  [[nodiscard]] auto get(std::string_view unit, std::string_view name, std::string_view field) const
+      -> std::uint32_t
+  {
+    auto const& fields = reg(unit, name).fields;
+    auto const  found  = std::ranges::find(fields, field, &popcorn::field_desc::name);
+    REQUIRE(found != fields.end());
+    auto const mask =
+        found->width >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << found->width) - 1u;
+    return (read(unit, name) >> found->lsb) & mask;
+  }
+
+  void
+      set(std::string_view unit,
+          std::string_view name,
+          std::string_view field,
+          std::uint32_t    value) const
+  {
+    auto const& fields = reg(unit, name).fields;
+    auto const  found  = std::ranges::find(fields, field, &popcorn::field_desc::name);
+    REQUIRE(found != fields.end());
+    auto const mask =
+        found->width >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << found->width) - 1u;
+    write(unit, name, (read(unit, name) & ~(mask << found->lsb)) | ((value & mask) << found->lsb));
+  }
+
+  [[nodiscard]] auto now() const -> std::uint64_t
+  {
+    return f->target->virtual_clock().time().ps;
+  }
+
+  void run_until(std::uint64_t ps) const
+  {
+    for(;;)
+    {
+      auto const result = f->run(
+          {.max_instructions = icount{1'000'000},
+           .wall_budget      = std::chrono::seconds{60},
+           .until_time       = vtime{ps}});
+      if(result.stopped)
+      {
+        REQUIRE(result.stopped->reason == stop_reason::time);
+        return;
+      }
+    }
+  }
+
+  void at_tick(std::uint64_t ticks) const
+  {
+    run_until(start + ticks_ps(ticks));
+  }
+
+  [[nodiscard]] auto warnings() const -> std::size_t
+  {
+    return static_cast<std::size_t>(
+        std::ranges::count(logged, core::log_kind::model_warning, &core::log_record::kind));
+  }
+
+  void clock(std::string_view unit) const
+  {
+    set("RCC", "APB1ENR", std::string{unit} + "EN", 1);
+  }
+
+  void base(std::string_view unit, std::uint32_t reload) const
+  {
+    clock(unit);
+    write(unit, "PSC", 0);
+    write(unit, "ARR", reload);
+    write(unit, "EGR", 1);
+    write(unit, "SR", 0);
+  }
+
+  void master(std::string_view unit) const
+  {
+    write(unit, "CR2", master_update << 4);
+  }
+
+  void slave(std::string_view unit, std::uint32_t select, std::uint32_t mode = sms_trigger) const
+  {
+    write(unit, "SMCR", mode | (select << 4));
+  }
+
+  void enable(std::string_view unit) const
+  {
+    write(unit, "CR1", read(unit, "CR1") | 1u);
+  }
+};
+
+struct firmware_run
+{
+  std::unique_ptr<stm32_fixture>      f;
+  std::string                         elf;
+  std::vector<std::uint64_t>          updates;
+  std::vector<std::uint64_t>          compares;
+  std::vector<core::intercept_handle> hooks;
+
+  firmware_run(std::string_view entry, part_description const& desc, std::string_view image)
+      : elf{image}
+  {
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories({}, desc);
+    f              = std::make_unique<stm32_fixture>(desc, image, std::move(options));
+    REQUIRE(
+        f->run_to_stop({.max_instructions = icount{1'000'000}, .until = sym(elf, "main")}).reason
+        == stop_reason::address);
+    f->set("pc", sym(elf, entry));
+    record("on_update", updates);
+    record("on_compare", compares);
+  }
+
+  void record(std::string_view symbol, std::vector<std::uint64_t>& into)
+  {
+    hooks.push_back(
+        f->target->add_intercept(sym(elf, symbol), [&into](core::intercept_call const& c) {
+          into.push_back(c.target().virtual_clock().time().ps);
+          return core::intercept_result::proceed();
+        }));
+  }
+
+  auto started() const -> std::uint64_t
+  {
+    auto const stopped =
+        f->run_to_stop({.max_instructions = icount{1'000'000}, .until = sym(elf, "on_started")});
+    REQUIRE(stopped.reason == stop_reason::address);
+    return f->target->virtual_clock().time().ps;
+  }
+
+  auto finish(std::uint64_t instructions = 2'000'000) const -> std::vector<std::uint32_t>
+  {
+    auto const stopped = f->run_to_stop({.max_instructions = icount{instructions}});
+    CAPTURE(stopped.detail);
+    REQUIRE(stopped.reason == stop_reason::user);
+    return f->log();
+  }
+};
+
+auto gaps(std::vector<std::uint64_t> const& at) -> std::vector<std::uint64_t>
+{
+  std::vector<std::uint64_t> out;
+  for(std::size_t index = 1; index < at.size(); ++index)
+  {
+    out.push_back(at[index] - at[index - 1]);
+  }
+  return out;
+}
+
+auto with_field(
+    part_description          desc,
+    std::string_view          unit,
+    std::string_view          reg,
+    popcorn::field_desc const added) -> part_description
+{
+  auto const timer =
+      std::ranges::find(desc.peripherals, std::string{unit}, &popcorn::peripheral_desc::name);
+  REQUIRE(timer != desc.peripherals.end());
+  auto const found =
+      std::ranges::find(timer->registers, std::string{reg}, &popcorn::register_desc::name);
+  REQUIRE(found != timer->registers.end());
+  found->fields.push_back(added);
+  return desc;
+}
+
+void constructs_throw(part_description const& desc)
+{
+  auto options   = popcorn::testing::stm32_options();
+  options.models = stm32::factories({}, desc);
+  CHECK_THROWS_AS(stm32_fixture(desc, firmware, std::move(options)), popcorn::config_error);
+}
+}
+
+TEST_CASE("RM0038 17.1: TIM2 to TIM4 have a model on every category, TIM5 on Cat.3 and up only")
+{
+  for(auto const* desc : {&l152rb(), &l152rc(), &l152re()})
+  {
+    CAPTURE(desc->part);
+    rig const r{*desc, desc == &l152rb() ? firmware_b : firmware};
+    for(auto const* unit : {"TIM2", "TIM3", "TIM4"})
+    {
+      CAPTURE(unit);
+      CHECK(r.f->target->model(unit) != nullptr);
+    }
+    CHECK(r.has("TIM5") == (desc != &l152rb()));
+    if(r.has("TIM5"))
+    {
+      CHECK(r.f->target->model("TIM5") != nullptr);
+    }
+  }
+}
+
+TEST_CASE("TIM2 at 1 kHz on HSI 16 MHz raises 100 update IRQs exactly 1 ms apart, firmware")
+{
+  for(auto const& [desc, image] : {
+          std::pair{&l152re(), firmware  },
+          std::pair{&l152rb(), firmware_b}
+  })
+  {
+    CAPTURE(image);
+    firmware_run run{"tim2_update", *desc, image};
+    auto const   started = run.started();
+    CHECK(run.finish() == std::vector<std::uint32_t>{100});
+    REQUIRE(run.updates.size() == 100);
+    CHECK(run.updates.front() - started > ms);
+    CHECK(run.updates.front() - started < ms + 2 * us);
+    CHECK(gaps(run.updates) == std::vector<std::uint64_t>(99, ms));
+  }
+}
+
+TEST_CASE("TIM2 PWM mode 1 on CH1 flags CC1 250 us into each 1 ms period, firmware")
+{
+  firmware_run run{"tim2_pwm", l152re(), firmware};
+  auto const   started = run.started();
+  auto const   logged  = run.finish();
+  REQUIRE(run.updates.size() == 10);
+  REQUIRE(run.compares.size() >= 10);
+  CHECK(logged == std::vector<std::uint32_t>{static_cast<std::uint32_t>(run.compares.size())});
+  CHECK(run.compares.front() - started > 250 * us);
+  CHECK(run.compares.front() - started < 252 * us);
+  auto const compare_gaps = gaps(run.compares);
+  CHECK(std::ranges::all_of(compare_gaps, [](std::uint64_t gap) { return gap == ms; }));
+  for(std::size_t period = 0; period + 1 < run.updates.size(); ++period)
+  {
+    CAPTURE(period);
+    CHECK(run.compares[period + 1] - run.updates[period] == run.compares[1] - run.updates[0]);
+  }
+  CHECK(run.compares[1] - run.updates[0] > 249 * us);
+  CHECK(run.compares[1] - run.updates[0] < 251 * us);
+}
+
+TEST_CASE("RM0038 17.4.7: TIM3 captures PA6 edges into CCR1, IC1PSC 01 every second edge, firmware")
+{
+  constexpr std::array<std::uint64_t, 8> rising{100, 300, 700, 1500, 3100, 6300, 12700, 25500};
+  struct leg
+  {
+    std::string_view           entry;
+    std::array<std::size_t, 4> edges;
+  };
+  for(auto const& [entry, edges] : {
+          leg{"tim3_capture",      {0, 1, 2, 3}},
+          leg{"tim3_capture_div2", {1, 3, 5, 7}}
+  })
+  {
+    CAPTURE(entry);
+    firmware_run run{entry, l152re(), firmware};
+    auto* const  porta = run.f->model_of<stm32::gpio_port>("GPIOA");
+    REQUIRE(porta != nullptr);
+    porta->drive(6, false);
+    auto const started = run.started();
+    for(auto const offset : rising)
+    {
+      porta->drive_at(6, true, vtime{started + offset * us});
+      porta->drive_at(6, false, vtime{started + (offset + 50) * us});
+    }
+    auto const logged = run.finish(4'000'000);
+    REQUIRE(logged.size() == 4);
+    for(std::size_t index = 1; index < 4; ++index)
+    {
+      CAPTURE(index);
+      CHECK(logged[index] - logged[0] == rising[edges[index]] - rising[edges[0]]);
+    }
+  }
+}
+
+TEST_CASE("RM0038 Table 80: TIM3 in external clock mode 1 on ITR1 counts TIM2 updates, firmware")
+{
+  for(auto const& [desc, image] : {
+          std::pair{&l152re(), firmware  },
+          std::pair{&l152rb(), firmware_b}
+  })
+  {
+    CAPTURE(image);
+    firmware_run run{"tim2_clocks_tim3", *desc, image};
+    auto const   started = run.started();
+    CHECK(run.finish() == std::vector<std::uint32_t>{10});
+    auto const done = run.f->target->virtual_clock().time().ps;
+    CHECK(done - started > ms);
+    CHECK(done - started < ms + 2 * us);
+  }
+}
+
+TEST_CASE("RM0038 17.4.19: LL_TIM_SetRemap gives TIM2 ITR1 the TIM5 TRGO, firmware")
+{
+  firmware_run run{"tim5_remap_tim2", l152re(), firmware};
+  auto const   started = run.started();
+  CHECK(run.finish() == std::vector<std::uint32_t>{10, 1});
+  auto const done = run.f->target->virtual_clock().time().ps;
+  CHECK(done - started > ms);
+  CHECK(done - started < ms + 2 * us);
+}
+
+TEST_CASE("every entry of RM0038 Table 80 reaches its own source and no other")
+{
+  struct row
+  {
+    std::string_view slave;
+    std::uint32_t    select;
+    std::uint32_t    remap;
+    std::string_view source;
+  };
+  constexpr std::array<row, 14> cat3{
+      {{"TIM2", 0, 0, "TIM9"},
+       {"TIM2", 1, 0, "TIM10"},
+       {"TIM2", 1, 1, "TIM5"},
+       {"TIM2", 2, 0, "TIM3"},
+       {"TIM2", 3, 0, "TIM4"},
+       {"TIM3", 0, 0, "TIM9"},
+       {"TIM3", 1, 0, "TIM2"},
+       {"TIM3", 2, 0, "TIM11"},
+       {"TIM3", 2, 1, "TIM5"},
+       {"TIM3", 3, 0, "TIM4"},
+       {"TIM4", 0, 0, "TIM10"},
+       {"TIM4", 1, 0, "TIM2"},
+       {"TIM4", 2, 0, "TIM3"},
+       {"TIM4", 3, 0, "TIM9"}}
+  };
+  constexpr std::array<std::string_view, 4> modelled{"TIM2", "TIM3", "TIM4", "TIM5"};
+  for(auto const* desc : {&l152re(), &l152rc(), &l152rb()})
+  {
+    CAPTURE(desc->part);
+    auto const cat12 = desc == &l152rb();
+    for(auto const& [slave, select, remap, source] : cat3)
+    {
+      if(cat12 and remap != 0)
+      {
+        continue;
+      }
+      CAPTURE(slave);
+      CAPTURE(select);
+      CAPTURE(remap);
+      rig              r{*desc, cat12 ? firmware_b : firmware};
+      auto const       has_source = std::ranges::contains(modelled, source);
+      std::string_view bystander{};
+      for(auto const unit : modelled)
+      {
+        if(unit != slave and unit != source and r.has(unit))
+        {
+          bystander = unit;
+        }
+      }
+      REQUIRE(not bystander.empty());
+      r.base(bystander, 99);
+      r.master(bystander);
+      if(has_source)
+      {
+        r.base(source, 199);
+        r.master(source);
+      }
+      r.base(slave, 0xffff);
+      if(remap != 0)
+      {
+        r.write(slave, "OR", 1);
+      }
+      r.slave(slave, select);
+      r.enable(bystander);
+      if(has_source)
+      {
+        r.enable(source);
+      }
+      r.at_tick(250);
+      if(has_source)
+      {
+        CHECK(r.get(slave, "CR1", "CEN") == 1);
+        CHECK(r.read(slave, "CNT") == 50);
+      }
+      else
+      {
+        CHECK(r.get(slave, "CR1", "CEN") == 0);
+        CHECK(r.warnings() == 1);
+      }
+    }
+  }
+}
+
+TEST_CASE("RM0038 Table 80 has no TIM5 row: every TS of TIM5 holds and logs once")
+{
+  for(std::uint32_t select = 0; select < 4; ++select)
+  {
+    CAPTURE(select);
+    rig r;
+    for(auto const* unit : {"TIM2", "TIM3", "TIM4"})
+    {
+      r.base(unit, 99);
+      r.master(unit);
+    }
+    r.base("TIM5", 0xffff);
+    r.slave("TIM5", select);
+    for(auto const* unit : {"TIM2", "TIM3", "TIM4"})
+    {
+      r.enable(unit);
+    }
+    r.at_tick(250);
+    CHECK(r.get("TIM5", "CR1", "CEN") == 0);
+    CHECK(r.warnings() == 1);
+  }
+}
+
+TEST_CASE("a TIM2_OR write moves TIM2 ITR1 between TIM10 OC1 and TIM5 from the write on")
+{
+  rig r;
+  r.base("TIM5", 99);
+  r.master("TIM5");
+  r.base("TIM2", 0xffff);
+  r.slave("TIM2", 1, sms_external);
+  r.enable("TIM2");
+  r.enable("TIM5");
+  r.at_tick(550);
+  CHECK(r.read("TIM2", "CNT") == 0);
+  r.write("TIM2", "OR", 1);
+  r.at_tick(1050);
+  CHECK(r.read("TIM2", "CNT") == 5);
+  r.write("TIM2", "OR", 0);
+  r.at_tick(1550);
+  CHECK(r.read("TIM2", "CNT") == 5);
+  r.write("TIM3", "OR", 1);
+  r.at_tick(2050);
+  CHECK(r.read("TIM2", "CNT") == 5);
+}
+
+TEST_CASE("RM0038 Table 82: TIM5 counts on 32 bits from its 0xFFFFFFFF ARR reset, TIM2 on 16")
+{
+  rig r;
+  CHECK(r.read("TIM5", "ARR") == 0xffff'ffffu);
+  CHECK(r.read("TIM2", "ARR") == 0xffffu);
+  for(auto const* unit : {"TIM2", "TIM5"})
+  {
+    r.clock(unit);
+    r.write(unit, "CCR1", 0x1'0005);
+    r.enable(unit);
+  }
+  r.at_tick(70'000);
+  CHECK(r.read("TIM5", "CNT") == 70'000);
+  CHECK(r.get("TIM5", "SR", "UIF") == 0);
+  CHECK(r.get("TIM5", "SR", "CC1IF") == 1);
+  CHECK(r.read("TIM5", "CCR1") == 0x1'0005);
+  CHECK(r.read("TIM2", "CNT") == 70'000 - 65'536);
+  CHECK(r.get("TIM2", "SR", "UIF") == 1);
+  CHECK(r.read("TIM2", "CCR1") == 0x0005);
+}
+
+TEST_CASE("RM0038 17.3.3: TIM3 external clock mode 2 counts TIM3_ETR edges on PD2, ETP inverts")
+{
+  for(std::uint32_t const inverted : {0u, 1u})
+  {
+    CAPTURE(inverted);
+    rig r;
+    r.set("RCC", "AHBENR", "GPIODEN", 1);
+    auto* const portd = r.f->model_of<stm32::gpio_port>("GPIOD");
+    REQUIRE(portd != nullptr);
+    portd->drive(2, false);
+    r.set("GPIOD", "MODER", "MODER2", 2);
+    r.set("GPIOD", "AFRL", "AFRL2", 2);
+    r.base("TIM3", 0xffff);
+    r.set("TIM3", "SMCR", "ETP", inverted);
+    r.set("TIM3", "SMCR", "ECE", 1);
+    r.enable("TIM3");
+    auto const t0 = r.now();
+    for(std::uint64_t edge = 0; edge < 5; ++edge)
+    {
+      portd->drive_at(2, true, vtime{t0 + (20 * edge + 10) * us});
+      portd->drive_at(2, false, vtime{t0 + (20 * edge + 20) * us});
+    }
+    r.run_until(t0 + 95 * us);
+    CHECK(r.read("TIM3", "CNT") == (inverted == 0 ? 5u : 4u));
+    CHECK(r.warnings() == 0);
+  }
+}
+
+TEST_CASE("with DBG_TIM2_STOP a held TIM2 keeps its count, without it TIM2 counts on")
+{
+  for(bool const frozen : {true, false})
+  {
+    CAPTURE(frozen);
+    rig r;
+    r.clock("TIM2");
+    r.enable("TIM2");
+    r.at_tick(1000);
+    popcorn::testing::set_debug_freeze(*r.f, "DBG_TIM2_STOP", frozen);
+    r.f->target->hold_core(true);
+    r.at_tick(6000);
+    CHECK(r.read("TIM2", "CNT") == (frozen ? 1000u : 6000u));
+    r.f->target->hold_core(false);
+  }
+}
+
+TEST_CASE("an L1 timer description with a field the l1_tim variant lacks throws at construction")
+{
+  struct leg
+  {
+    std::string_view reg;
+    std::string_view field;
+    std::uint8_t     lsb;
+  };
+  for(auto const& [reg, field, lsb] : {
+          leg{"SMCR", "SMS_1",    16},
+          leg{"SMCR", "TS_1",     20},
+          leg{"CR1",  "UIFREMAP", 11},
+          leg{"CNT",  "UIFCPY",   31},
+          leg{"CR2",  "MMS_1",    25}
+  })
+  {
+    CAPTURE(field);
+    for(auto const* desc : {&l152re(), &l152rb()})
+    {
+      CAPTURE(desc->part);
+      auto const changed = with_field(
+          *desc, "TIM3", reg,
+          {.name = std::string{field}, .lsb = lsb, .width = 1, .acc = popcorn::access::read_write});
+      constructs_throw(changed);
+    }
+  }
+}
+
+TEST_CASE("a Cat.3 TIM2 or TIM3 description without OR throws at construction, TIM4 needs none")
+{
+  for(auto const* unit : {"TIM2", "TIM3"})
+  {
+    CAPTURE(unit);
+    auto       desc = l152re();
+    auto const timer =
+        std::ranges::find(desc.peripherals, std::string{unit}, &popcorn::peripheral_desc::name);
+    REQUIRE(timer != desc.peripherals.end());
+    REQUIRE(
+        std::erase_if(
+            timer->registers, [](popcorn::register_desc const& reg) { return reg.name == "OR"; })
+        == 1);
+    constructs_throw(desc);
+  }
+  rig const r;
+  CHECK(not r.f->target->peripheral("TIM4").description().registers.empty());
+  CHECK(popcorn::find_register(r.f->target->peripheral("TIM4").description(), "OR") == nullptr);
+}
+
+TEST_CASE("RM0038 17.3.3: TIM2_ETR is the TIM2_CH1 pad, PA0 at AF1 counts in external clock 2")
+{
+  rig r;
+  r.set("RCC", "AHBENR", "GPIOAEN", 1);
+  auto* const porta = r.f->model_of<stm32::gpio_port>("GPIOA");
+  REQUIRE(porta != nullptr);
+  porta->drive(0, false);
+  r.set("GPIOA", "MODER", "MODER0", 2);
+  r.set("GPIOA", "AFRL", "AFRL0", 1);
+  r.base("TIM2", 0xffff);
+  r.set("TIM2", "CCMR1_Input", "CC1S", 1);
+  r.set("TIM2", "CCER", "CC1E", 1);
+  r.set("TIM2", "SMCR", "ECE", 1);
+  r.enable("TIM2");
+  auto const t0 = r.now();
+  for(std::uint64_t edge = 0; edge < 5; ++edge)
+  {
+    porta->drive_at(0, true, vtime{t0 + (20 * edge + 10) * us});
+    porta->drive_at(0, false, vtime{t0 + (20 * edge + 20) * us});
+  }
+  r.run_until(t0 + 95 * us);
+  CHECK(r.read("TIM2", "CNT") == 5);
+  CHECK(r.read("TIM2", "CCR1") == 4);
+  CHECK(r.get("TIM2", "SR", "CC1OF") == 1);
+  CHECK(r.warnings() == 0);
+}
+
+TEST_CASE("an L1 TIM3 description with IC1F and no IC1PSC throws at construction")
+{
+  auto       desc = l152re();
+  auto const timer =
+      std::ranges::find(desc.peripherals, std::string{"TIM3"}, &popcorn::peripheral_desc::name);
+  REQUIRE(timer != desc.peripherals.end());
+  auto const view = std::ranges::find(
+      timer->registers, std::string{"CCMR1_Input"}, &popcorn::register_desc::name);
+  REQUIRE(view != timer->registers.end());
+  REQUIRE(
+      std::erase_if(
+          view->fields, [](popcorn::field_desc const& bits) { return bits.name == "IC1PSC"; })
+      == 1);
+  constructs_throw(desc);
+}
+
+TEST_CASE("under strict_peripherals an SMCR or OR write that selects an unmodelled ITR throws")
+{
+  {
+    rig r{l152re(), firmware, true};
+    r.base("TIM3", 0xffff);
+    CHECK_THROWS_AS(
+        (void)r.f->target->mem().write(r.at("TIM3", "SMCR"), 4, sms_external),
+        popcorn::model_error);
+    CHECK(r.read("TIM3", "SMCR") == 0);
+    CHECK(r.warnings() == 1);
+    r.slave("TIM3", 1, sms_external);
+    CHECK(r.read("TIM3", "SMCR") == (sms_external | (1u << 4)));
+  }
+  {
+    rig r{l152re(), firmware, true};
+    r.base("TIM2", 0xffff);
+    r.write("TIM2", "OR", 1);
+    r.slave("TIM2", 1, sms_external);
+    CHECK_THROWS_AS((void)r.f->target->mem().write(r.at("TIM2", "OR"), 4, 0), popcorn::model_error);
+    CHECK(r.read("TIM2", "OR") == 1);
+  }
+}
+
+TEST_CASE("a TIM2_OR write opens the TIM2 gate on a high TIM5 enable at the write")
+{
+  rig r;
+  r.base("TIM5", 0xffff);
+  r.write("TIM5", "CR2", 1u << 4);
+  r.base("TIM2", 0xffff);
+  r.slave("TIM2", 1, 5);
+  r.enable("TIM2");
+  r.enable("TIM5");
+  r.at_tick(300);
+  CHECK(r.read("TIM2", "CNT") == 0);
+  r.write("TIM2", "OR", 1);
+  r.at_tick(800);
+  auto const opened = r.read("TIM2", "CNT");
+  CHECK(opened >= 499);
+  CHECK(opened <= 500);
+  r.at_tick(1300);
+  CHECK(r.read("TIM2", "CNT") - opened == 500);
+}
+
+TEST_CASE("a TIM2RST pulse with TIM2_OR 1 clears OR, and TIM2 ITR1 then reaches TIM10 OC1")
+{
+  rig r;
+  r.base("TIM5", 99);
+  r.master("TIM5");
+  r.base("TIM2", 0xffff);
+  r.write("TIM2", "OR", 1);
+  r.slave("TIM2", 1, sms_external);
+  r.enable("TIM2");
+  r.enable("TIM5");
+  r.at_tick(550);
+  CHECK(r.read("TIM2", "CNT") == 5);
+  popcorn::testing::rcc_reset_pulse(*r.f, "APB1RSTR", "TIM2RST");
+  CHECK(r.read("TIM2", "OR") == 0);
+  CHECK(r.read("TIM2", "SMCR") == 0);
+  r.slave("TIM2", 1, sms_external);
+  r.enable("TIM2");
+  r.at_tick(1550);
+  CHECK(r.read("TIM2", "CNT") == 0);
+  CHECK(r.read("TIM5", "CNT") == 50);
+}
+
+TEST_CASE("an L1 TIM3 description with an AF1.ETRSEL field throws at construction")
+{
+  auto       desc = l152re();
+  auto const timer =
+      std::ranges::find(desc.peripherals, std::string{"TIM3"}, &popcorn::peripheral_desc::name);
+  REQUIRE(timer != desc.peripherals.end());
+  popcorn::register_desc af1;
+  af1.name   = "AF1";
+  af1.offset = 0x60;
+  af1.width  = 32;
+  af1.fields = {
+      {.name = "ETRSEL", .lsb = 14, .width = 4, .acc = popcorn::access::read_write}
+  };
+  timer->registers.push_back(af1);
+  constructs_throw(desc);
+}

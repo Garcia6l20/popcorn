@@ -132,6 +132,18 @@ width = 2
 source = "RM0038 Rev 18, 17.4.7 and 18.4.7 TIMx_CCMR1: CC2S[1:0] in bits 9:8, two bits wide. The SVDs give one bit in the output view and two in the input view"
 
 [[fields]]
+instances = ["TIM2", "TIM3", "TIM4"]
+registers = ["CCMR1_Input"]
+rename = { ICPCS = "IC1PSC", IC2PCS = "IC2PSC" }
+source = "RM0038 Rev 18, 17.4.7 TIMx_CCMR1 input capture mode: IC1PSC[1:0] in bits 3:2 and IC2PSC[1:0] in bits 11:10. The four SVDs spell them ICPCS and IC2PCS"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4"]
+registers = ["CCR3"]
+rename = { CCR1 = "CCR3" }
+source = "RM0038 Rev 18, 17.4.15 TIMx_CCR3: the field is CCR3[15:0]. The four SVDs name it CCR1"
+
+[[fields]]
 instances = ["ADC"]
 registers = ["SQR1"]
 fields = ["L"]

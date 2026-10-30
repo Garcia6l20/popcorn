@@ -80,6 +80,8 @@ l1_firmwares = {
         "l152xb_l1_spi_ll",
         "l152xe_l1_i2c_ll",
         "l152xb_l1_i2c_ll",
+        "l152xe_l1_tim_ll",
+        "l152xb_l1_tim_ll",
     )
 }
 l1_env = {
@@ -240,6 +242,7 @@ for program, source in (
     ("stm32-usart-l1", "test_usart_l1.cpp"),
     ("stm32-spi-l1", "test_spi_l1.cpp"),
     ("stm32-i2c-l1", "test_i2c_l1.cpp"),
+    ("stm32-tim-l1", "test_tim_l1.cpp"),
 ):
     l1_test = add_doctest(
         program,

@@ -937,6 +937,17 @@ Differs from RM0456:
 - UIFREMAP puts UIFCPY in bit 31 only where the description names a UIFCPY field, not on the
   32-bit TIM2 to TIM5.
 
+STM32L1 TIM2 to TIM5:
+
+- TIM5 has no row in RM0038 Table 80, so every TS value of TIM5 reaches nothing and logs once,
+  inferred.
+- TIM9 TRGO and the OC1 outputs of TIM10 and TIM11 have no model. The ITRs that carry them reach
+  nothing and log once, and under strict_peripherals the SMCR or OR write that selects one raises
+  model_error.
+- TIM2_ETR is the TIM2_CH1 pad at AF1, PA0, PA5 or PA15, which also carries TI1. TIM3_ETR is PD2.
+  TIM4_ETR and TIM5_ETR are on PE0 and PE9, pads the shipped 64-pin packages lack, so their
+  tim_etr_in stays low.
+
 ## USART, UART and LPUART
 
 Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/usart.cpp)

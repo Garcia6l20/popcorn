@@ -590,6 +590,16 @@ TEST_CASE("no L1 instance is served by a U5 or H5 row: only the L1 rows attach")
         expected.insert(peripheral.name);
       }
     }
+    for(auto const& peripheral : part->peripherals)
+    {
+      if(peripheral.name == "TIM2"
+         or peripheral.name == "TIM3"
+         or peripheral.name == "TIM4"
+         or peripheral.name == "TIM5")
+      {
+        expected.insert(peripheral.name);
+      }
+    }
     CHECK(attached == expected);
     core::machine target{
         *part, popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()};

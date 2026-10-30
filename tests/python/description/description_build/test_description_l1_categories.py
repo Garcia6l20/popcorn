@@ -340,18 +340,42 @@ def _check_brr_wrpr4_and_timers(name: str, category: str) -> None:
         assert (register.offset, register.width, register.reset) == (0x88, 32, 0)
         assert register.acc.value == "read_write"
         assert [(f.name, f.lsb, f.width) for f in register.fields] == [("WRP4", 0, 32)]
+    for timer in ("TIM2", "TIM3", "TIM4", "TIM5"):
+        if timer in peripherals:
+            assert _timer_input_fields(peripherals[timer]) == {
+                "IC1PSC": (2, 2),
+                "IC2PSC": (10, 2),
+            }
+            ccr3 = next(r for r in peripherals[timer].registers if r.name == "CCR3")
+            assert [f.name for f in ccr3.fields] == ["CCR3"]
+    assert _timer_widths(peripherals["TIM2"]) == dict.fromkeys(
+        ("CNT", "ARR", "CCR1", "CCR2", "CCR3", "CCR4"), 16
+    )
     if category in {"cat1", "cat2"}:
         assert "TIM5" not in peripherals and "OR" not in _register_names(name, "TIM2")
         return
     if name.startswith("STM32L100"):
         assert "TIM5" not in peripherals
     else:
-        assert _register_reset(name, "TIM5", "ARR") == 0xFFFF
+        assert _register_reset(name, "TIM5", "ARR") == 0xFFFF_FFFF
+        assert _timer_widths(peripherals["TIM5"]) == dict.fromkeys(
+            ("CNT", "ARR", "CCR1", "CCR2", "CCR3", "CCR4"), 32
+        )
     assert _register_reset(name, "SPI3", "CR2") == 0
     for timer, field in (("TIM2", "ITR1_RMP"), ("TIM3", "ITR2_RMP")):
         register = next(r for r in peripherals[timer].registers if r.name == "OR")
         assert (register.offset, register.width, register.reset) == (0x50, 16, 0)
         assert [(f.name, f.lsb, f.width) for f in register.fields] == [(field, 0, 1)]
+
+
+def _timer_input_fields(timer: PeripheralDesc) -> dict[str, tuple[int, int]]:
+    register = next(r for r in timer.registers if r.name == "CCMR1_Input")
+    return {f.name: (f.lsb, f.width) for f in register.fields if f.name.endswith("PSC")}
+
+
+def _timer_widths(timer: PeripheralDesc) -> dict[str, int]:
+    names = ("CNT", "ARR", "CCR1", "CCR2", "CCR3", "CCR4")
+    return {r.name: r.fields[0].width for r in timer.registers if r.name in names}
 
 
 def _check_memory(name: str, category: str) -> None:

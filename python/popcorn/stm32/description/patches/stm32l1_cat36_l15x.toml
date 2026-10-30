@@ -1,16 +1,70 @@
 format = 1
-source = "RM0038 Rev 18, Cat.3 to Cat.6 of the L151, L152 and L162 SVDs: TIM5 rules. The L100 value line Cat.3 part has no TIM5"
+source = "RM0038 Rev 18, Cat.3 to Cat.6 of the L151, L152 and L162 SVDs: TIM5 rules, a 32-bit timer. The L100 value line Cat.3 part has no TIM5"
 
 [match]
 parts = ["STM32L1*"]
 svd = ["STM32L151.svd", "STM32L152.svd", "STM32L162.svd"]
 dies = ["DIE427", "DIE436", "DIE437"]
 
+[[fields]]
+instances = ["TIM5"]
+registers = ["CCMR1_Input"]
+rename = { ICPCS = "IC1PSC", IC2PCS = "IC2PSC" }
+source = "RM0038 Rev 18, 17.4.7 TIMx_CCMR1 input capture mode: IC1PSC[1:0] in bits 3:2 and IC2PSC[1:0] in bits 11:10. The SVDs spell them ICPCS and IC2PCS"
+
+[[fields]]
+instances = ["TIM5"]
+registers = ["CCR3"]
+rename = { CCR1 = "CCR3" }
+source = "RM0038 Rev 18, 17.4.15 TIMx_CCR3: the field is CCR3. The SVDs name it CCR1"
+
+[[fields]]
+instances = ["TIM5"]
+registers = ["CNT"]
+fields = ["CNT"]
+width = 32
+source = "RM0038 Rev 18, 17.4.10 TIMx_CNT: CNT[31:16] is the high counter value on TIM5, and Table 82 gives CNT[31:16] on TIM5 only. 2.3 memory map: TIM5 (32-bits). The SVDs give 16 bits"
+
+[[fields]]
+instances = ["TIM5"]
+registers = ["ARR"]
+fields = ["ARR"]
+width = 32
+source = "RM0038 Rev 18, Table 82 TIMx register map: ARR[31:16] on TIM5 only. The SVDs give 16 bits"
+
+[[fields]]
+instances = ["TIM5"]
+registers = ["CCR1"]
+fields = ["CCR1"]
+width = 32
+source = "RM0038 Rev 18, Table 82 TIMx register map: CCR1[31:16] on TIM5 only. The SVDs give 16 bits"
+
+[[fields]]
+instances = ["TIM5"]
+registers = ["CCR2"]
+fields = ["CCR2"]
+width = 32
+source = "RM0038 Rev 18, Table 82 TIMx register map: CCR2[31:16] on TIM5 only. The SVDs give 16 bits"
+
+[[fields]]
+instances = ["TIM5"]
+registers = ["CCR3"]
+fields = ["CCR3"]
+width = 32
+source = "RM0038 Rev 18, Table 82 TIMx register map: CCR3[31:16] on TIM5 only. The SVDs give 16 bits"
+
+[[fields]]
+instances = ["TIM5"]
+registers = ["CCR4"]
+fields = ["CCR4"]
+width = 32
+source = "RM0038 Rev 18, Table 82 TIMx register map: CCR4[31:16] on TIM5 only. The SVDs give 16 bits"
+
 [[resets]]
 peripheral = "TIM5"
 register = "ARR"
-reset = 0xFFFF
-source = "RM0038 Rev 18, 17.4.12 TIMx_ARR for TIM2 to TIM5: reset value 0xFFFF. The SVDs give 0 and a 16-bit field. The memory map labels TIM5 32-bits, inferred 0xFFFF"
+reset = 0xFFFFFFFF
+source = "RM0038 Rev 18, Table 82 TIMx register map: TIMx_ARR resets to all ones over bits 31:0, ARR[31:16] on TIM5 only. 17.4.12 shows the 16-bit view, 0xFFFF. The SVDs give 0"
 
 [[fields]]
 instances = ["TIM5"]
