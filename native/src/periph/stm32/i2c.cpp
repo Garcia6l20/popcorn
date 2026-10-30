@@ -40,10 +40,18 @@ constexpr std::uint32_t phase_done     = 0;
 constexpr std::uint32_t hold_begin     = 1;
 constexpr std::uint32_t hold_end       = 2;
 constexpr std::uint32_t port_due       = 3;
+constexpr std::uint32_t timeout_due    = 4;
 constexpr std::uint32_t no_target      = ~std::uint32_t{};
+constexpr std::uint64_t low_cycles     = 2048;
+constexpr std::uint64_t idle_cycles    = 4;
 constexpr std::uint32_t address_length = 10;
 constexpr std::uint32_t byte_length    = 9;
 constexpr std::uint32_t stop_length    = 1;
+
+constexpr std::string_view unsupported_text =
+    "10-bit addressing, SBC or NOSTRETCH in controller mode, the SMBus host or device address, "
+    "ALERT, PEC or the autonomous trigger is configured: not modelled, the I2C runs as a plain "
+    "7-bit controller and target";
 
 enum class phase : std::uint8_t
 {
@@ -194,6 +202,35 @@ struct i2c_transmit
   friend auto operator==(i2c_transmit const&, i2c_transmit const&) -> bool = default;
 };
 
+struct i2c_timer
+{
+  std::optional<std::uint64_t> low_ps;
+  std::optional<std::uint64_t> low_end_ps;
+  std::optional<std::uint64_t> own_ps;
+  std::uint64_t                extended_ps{};
+  std::optional<std::uint64_t> idle_ps;
+  std::uint8_t                 idle_spent{};
+  std::uint64_t                a_from_ps{};
+  std::uint64_t                b_from_ps{};
+  std::optional<std::uint64_t> armed_ps;
+  std::uint64_t                seq{};
+
+  friend auto operator==(i2c_timer const&, i2c_timer const&) -> bool = default;
+};
+
+enum class expiry : std::uint8_t
+{
+  low,
+  extend,
+  idle,
+};
+
+struct i2c_expiry
+{
+  std::uint64_t at{};
+  expiry        kind{};
+};
+
 struct i2c_state
 {
   std::uint32_t                       generation{};
@@ -215,6 +252,7 @@ struct i2c_state
   std::uint8_t                        involved{};
   std::uint8_t                        wire_busy{};
   i2c_transmit                        tx;
+  i2c_timer                           timer;
   i2c_port                            port;
   std::vector<std::vector<std::byte>> devices;
 
@@ -264,8 +302,8 @@ auto lower(std::string_view name) -> std::string
  *        ARLO releases the bus: CR2.START cleared, the byte read dropped, no NACKF, TC or STOPF,
  *        BUSY kept 1 for one STOP length, the other controller's STOP, which clears BUSY and
  *        CR2.STOP, ends the target's transfer and sends a START requested meanwhile. PE = 0 in
- *        that window ends it at once, the target's STOP at the time of the write. PECERR, TIMEOUT
- *        and ALERT are never set. DMA requests, RM0456 section 65.7, through the GPDMA
+ *        that window ends it at once, the target's STOP at the time of the write. PECERR and
+ *        ALERT are never set. DMA requests, RM0456 section 65.7, through the GPDMA
  *        peer, low while PE is clear since PE = 0 clears their flags: `<instance>_tx_dma` follows
  *        TXIS with CR1.TXDMAEN, `<instance>_rx_dma` RXNE with CR1.RXDMAEN, `<instance>_evc_dma` TC
  *        with AUTOCR.TCDMAEN or TCR with AUTOCR.TCRDMAEN. The targets are saved and loaded with
@@ -342,7 +380,36 @@ auto lower(std::string_view name) -> std::string
  *        through i2c_controller_sink::dropped(). The port entries, stretched ones included, the
  *        last unit, the generation and the time of the last RCC reset are saved with the model. Not
  *        modelled, logged once: 10-bit addressing, SBC or NOSTRETCH in controller mode, SBC with
- *        NOSTRETCH in target mode, SMBus and PEC, the autonomous trigger.
+ *        NOSTRETCH in target mode, the SMBus host and device addresses, ALERT and PEC, the
+ *        autonomous trigger. A START as controller or a target address phase with one of them
+ *        set raises model_error under strict_peripherals. A write of I2C_AUTOCR only warns, since
+ *        a modelled target setup with SBC or NOSTRETCH writes it too, and the refusal comes at
+ *        the next controller START.
+ *
+ *        SMBus timeouts, RM0456 65.4.12 "Timeout detection" and 65.4.17 "Timeout error", RM0481
+ *        53.4.12 and 53.4.17, run while PE is set and the kernel clock runs, at the kernel clock
+ *        rate the model reads at each of its events and register accesses. With TIMOUTEN set and
+ *        TIDLE clear, TIMEOUT sets once SCL has been low for (TIMEOUTA + 1) x 2048 kernel periods,
+ *        counted from the later of the SCL fall and the TIMOUTEN set. As a controller SCL is low
+ *        from the end of an address or data phase to the start of the next phase or STOP, a
+ *        target's stretch and the TXIS, RXNE, TCR and TC waits included. As a target SCL is low
+ *        while the I2C stretches it, from the stretch start to its release: the port carries no
+ *        SCL level between the controller's phases. With TIMOUTEN and TIDLE set, TIMEOUT sets once
+ *        the bus has been idle, PE set and BUSY 0, for (TIMEOUTA + 1) x 4 kernel periods, once per
+ *        idle period, which starts at the end of the STOP or of the host hold that frees the bus,
+ *        or at the PE set. With TEXTEN set, TIMEOUT sets once the I2C's own stretches of one
+ *        transfer, START to STOP, add up to (TIMEOUTB + 1) x 2048 kernel periods, each counted
+ *        from the later of its start and the TEXTEN set: the waits as a controller, each starting
+ *        once the target's stretch before it ends, the held phases as a target. The sum
+ *        restarts at 0 then, at each STOP and at each TEXTEN set. A timeout of SCL low or of the
+ *        stretch sum ends the transfer. As a controller the I2C sends a STOP, at once or after
+ *        the stretch of the target when one runs. As a target it releases its stretch as PE = 0
+ *        does, an ADDR stretch with ACK, a written byte with NACK and a held read byte as 0xFF,
+ *        and leaves the transfer: later phases answer NACK or 0xFF until the next address
+ *        match. TIMEOUT raises the error IRQ with ERRIE and is cleared by TIMOUTCF and by PE = 0.
+ *        While TIMOUTEN is set TIMEOUTR keeps TIMEOUTA and TIDLE, and while TEXTEN is set it
+ *        keeps TIMEOUTB, RM0456 65.9.6, RM0481 53.9.6: one warning per instance, model_error
+ *        under strict_peripherals. The timer state is saved with the model.
  */
 class i2c final : public dispatch_model<i2c, i2c_state>,
                   public i2c_bus,
@@ -400,6 +467,7 @@ public:
   void status_written(std::uint32_t old, std::uint32_t now);
   void clear_written(std::uint32_t old, std::uint32_t now);
   void plain_written(std::uint32_t old, std::uint32_t now);
+  void timeout_written(std::uint32_t old, std::uint32_t now);
   void trigger_written(std::uint32_t old, std::uint32_t now);
 
 private:
@@ -430,7 +498,7 @@ private:
   [[nodiscard]] auto failed(i2c_error error) -> bool;
   void               abort();
   void               flags();
-  void               warn_unsupported();
+  [[nodiscard]] auto unsupported() const -> bool;
   [[nodiscard]] auto bus_taken() const -> bool;
   void               stop_flag();
 
@@ -469,6 +537,13 @@ private:
   void               port_stopped(i2c_port_entry const& entry);
   [[nodiscard]] auto matches(std::uint8_t address, bool read) const -> bool;
   void               warn_target_unsupported();
+  [[nodiscard]] auto cycles_ps(std::uint64_t cycles) const -> std::optional<std::uint64_t>;
+  [[nodiscard]] auto held_since() const -> std::optional<std::uint64_t>;
+  [[nodiscard]] auto expiry_due() const -> std::optional<i2c_expiry>;
+  void               arm_timeout();
+  void               stretch_ended(std::uint64_t since);
+  void               transfer_ended();
+  void               timed_out();
   void               unmodelled(std::string_view reg_name, bool& logged, std::string message);
   void               rethrow_strict();
 
@@ -518,8 +593,15 @@ private:
   field_ref                                    nack_;
   field_ref                                    no_stretch_;
   field_ref                                    byte_control_;
+  field_ref                                    timeout_a_;
+  field_ref                                    idle_mode_;
+  field_ref                                    timeout_enable_;
+  field_ref                                    timeout_b_;
+  field_ref                                    extend_enable_;
+  field_ref                                    timeout_flag_;
   reg_ref                                      own1_reg_;
   reg_ref                                      own2_reg_;
+  reg_ref                                      timeout_reg_;
   std::vector<field_ref>                       target_unsupported_;
   std::uint32_t                                command_set_only_{};
   std::uint32_t                                status_reset_mask_{};
@@ -542,6 +624,7 @@ private:
   bool                                         no_clock_logged_{};
   bool                                         target_logged_{};
   bool                                         protect_logged_{};
+  bool                                         timeout_protect_logged_{};
   std::optional<std::uint64_t>                 reset_at_;
   std::optional<std::string>                   strict_refused_;
 };
@@ -553,7 +636,7 @@ constexpr std::array<write_entry<i2c>, 11> i2c_writes{
      {"OAR1", &i2c::plain_written},
      {"OAR2", &i2c::plain_written},
      {"TIMINGR", &i2c::plain_written},
-     {"TIMEOUTR", &i2c::plain_written},
+     {"TIMEOUTR", &i2c::timeout_written},
      {"ISR", &i2c::status_written},
      {"ICR", &i2c::clear_written},
      {"RXDR", &i2c::plain_written},
@@ -597,10 +680,14 @@ i2c::i2c(
       own2_enable_{field("OAR2", "OA2EN")}, general_call_{field("CR1", "GCEN")},
       address_auto_clear_{field("CR1", "ADDRACLR")}, stop_auto_clear_{field("CR1", "STOPFACLR")},
       nack_{field("CR2", "NACK")}, no_stretch_{field("CR1", "NOSTRETCH")},
-      byte_control_{field("CR1", "SBC")}, own1_reg_{reg("OAR1")}, own2_reg_{reg("OAR2")},
-      error_enable_{field("CR1", "ERRIE")}, kernel_{ctx.clock.domain(lower(desc.name))},
-      event_line_{irq(desc.name + "_EV_IRQn")}, error_line_{irq(desc.name + "_ER_IRQn")},
-      tx_dma_enable_{field("CR1", "TXDMAEN")}, rx_dma_enable_{field("CR1", "RXDMAEN")},
+      byte_control_{field("CR1", "SBC")}, timeout_a_{field("TIMEOUTR", "TIMEOUTA")},
+      idle_mode_{field("TIMEOUTR", "TIDLE")}, timeout_enable_{field("TIMEOUTR", "TIMOUTEN")},
+      timeout_b_{field("TIMEOUTR", "TIMEOUTB")}, extend_enable_{field("TIMEOUTR", "TEXTEN")},
+      timeout_flag_{field("ISR", "TIMEOUT")}, own1_reg_{reg("OAR1")}, own2_reg_{reg("OAR2")},
+      timeout_reg_{reg("TIMEOUTR")}, error_enable_{field("CR1", "ERRIE")},
+      kernel_{ctx.clock.domain(lower(desc.name))}, event_line_{irq(desc.name + "_EV_IRQn")},
+      error_line_{irq(desc.name + "_ER_IRQn")}, tx_dma_enable_{field("CR1", "TXDMAEN")},
+      rx_dma_enable_{field("CR1", "RXDMAEN")},
       complete_dma_enable_{
           variant.autocr ? std::optional{field("I2C_AUTOCR", "TCDMAEN")} : std::nullopt},
       reload_dma_enable_{
@@ -673,6 +760,14 @@ auto i2c::step() const -> phase
 void i2c::enter(phase next)
 {
   state_.step = static_cast<std::uint8_t>(next);
+  if(next == phase::wait_tx
+     or next == phase::wait_rx
+     or next == phase::wait_reload
+     or next == phase::wait_end)
+  {
+    auto& timer  = state_.timer;
+    timer.own_ps = timer.own_ps.value_or(state_.end_ps);
+  }
 }
 
 auto i2c::enabled() const -> bool
@@ -715,6 +810,15 @@ auto i2c::released() const -> std::uint64_t
 
 void i2c::begin(phase next, std::uint32_t periods, std::uint64_t from_ps)
 {
+  auto& timer = state_.timer;
+  if(timer.low_ps and not timer.low_end_ps)
+  {
+    timer.low_end_ps = from_ps;
+  }
+  if(auto const own = std::exchange(timer.own_ps, std::nullopt))
+  {
+    stretch_ended(*own);
+  }
   enter(next);
   ++state_.generation;
   auto const ps = length_ps(periods);
@@ -728,7 +832,10 @@ void i2c::begin(phase next, std::uint32_t periods, std::uint64_t from_ps)
 
 void i2c::begin_start(std::uint64_t from_ps)
 {
-  warn_unsupported();
+  if(unsupported())
+  {
+    unmodelled("CR1", unsupported_logged_, std::string{unsupported_text});
+  }
   update(regs_, busy_, 1);
   begin(phase::address, address_length, from_ps);
 }
@@ -869,9 +976,11 @@ void i2c::byte_done()
 
 void i2c::stop_done()
 {
+  transfer_ended();
   enter(phase::idle);
   update(regs_, stop_, 0);
   update(regs_, busy_, 0);
+  state_.timer.idle_ps = state_.end_ps;
   stop_flag();
   state_.left = 0;
   if(state_.target != no_target)
@@ -917,9 +1026,11 @@ void i2c::lose()
 
 void i2c::lost_done()
 {
+  transfer_ended();
   enter(phase::idle);
   update(regs_, stop_, 0);
   update(regs_, busy_, 0);
+  state_.timer.idle_ps = state_.end_ps;
   if(state_.target != no_target)
   {
     auto const target = std::exchange(state_.target, no_target);
@@ -1016,6 +1127,7 @@ void i2c::hold_ended(std::uint32_t id)
     return;
   }
   update(regs_, busy_, 0);
+  state_.timer.idle_ps = until;
   if(enabled() and get(regs_, start_) != 0)
   {
     begin_start(until);
@@ -1037,6 +1149,9 @@ void i2c::abort()
     begin_read(*held, 0xFF);
   }
   state_.tx = {};
+  transfer_ended();
+  state_.timer.idle_ps.reset();
+  state_.timer.idle_spent = 0;
   ++state_.generation;
   auto const lost = step() == phase::lost;
   enter(phase::idle);
@@ -1076,6 +1191,10 @@ void i2c::on_bus_reset()
 
 void i2c::restore_reset_values(std::optional<reset_kind> kind)
 {
+  if(state_.timer.armed_ps)
+  {
+    ctx_.events.cancel(state_.timer.seq);
+  }
   for(auto const& name : claims())
   {
     regs_.poke(reg(name).offset, describe(name).reset);
@@ -1165,22 +1284,13 @@ void i2c::flags()
   tx_dma_.set(get(regs_, tx_dma_enable_) != 0 and get(regs_, tx_interrupt_) != 0);
   rx_dma_.set(get(regs_, rx_dma_enable_) != 0 and get(regs_, rx_full_) != 0);
   event_dma_.set(complete or reload);
+  arm_timeout();
 }
 
-void i2c::warn_unsupported()
+auto i2c::unsupported() const -> bool
 {
-  auto const ten_bit = get(regs_, ten_bit_) != 0;
-  auto const other =
-      std::ranges::any_of(unsupported_, [&](field_ref bits) { return get(regs_, bits) != 0; });
-  auto const used = ten_bit or other;
-  if(used and not std::exchange(unsupported_logged_, true))
-  {
-    warn(
-        "CR1",
-        "10-bit addressing, SBC or NOSTRETCH in controller mode, SMBus, PEC or the autonomous "
-        "trigger is configured: not modelled, the I2C runs as a plain 7-bit controller and "
-        "target");
-  }
+  return get(regs_, ten_bit_) != 0
+      or std::ranges::any_of(unsupported_, [&](field_ref bits) { return get(regs_, bits) != 0; });
 }
 
 void i2c::enable_written(std::uint32_t old, std::uint32_t now)
@@ -1296,7 +1406,10 @@ void i2c::plain_written(std::uint32_t, std::uint32_t)
 
 void i2c::trigger_written(std::uint32_t, std::uint32_t)
 {
-  warn_unsupported();
+  if(unsupported() and not std::exchange(unsupported_logged_, true))
+  {
+    warn("CR1", std::string{unsupported_text});
+  }
 }
 
 void i2c::port_check(std::uint32_t lane, std::uint64_t unit) const
@@ -1750,6 +1863,7 @@ auto i2c::read_ended(i2c_port_entry const& entry) -> i2c_answer
 
 void i2c::begin_read(i2c_port_entry& entry, std::uint8_t byte)
 {
+  stretch_ended(entry.due_ps);
   auto const now  = ctx_.clock.time().ps;
   entry.kind      = entry_ending;
   entry.data      = byte;
@@ -1798,6 +1912,7 @@ auto i2c::held_entry(std::uint8_t phase) -> i2c_port_entry*
 
 void i2c::release(i2c_port_entry& entry, bool ack)
 {
+  stretch_ended(entry.due_ps);
   auto const now  = ctx_.clock.time().ps;
   entry.kind      = entry_released;
   entry.ack       = ack ? 1 : 0;
@@ -1866,13 +1981,18 @@ void i2c::port_stopped(i2c_port_entry const& entry)
     if(state_.wire_busy != 0 and not held())
     {
       update(regs_, busy_, 0);
+      state_.timer.idle_ps = entry.due_ps;
     }
   }
   auto const waited = state_.wire_busy != 0;
-  state_.tx         = {.ask = state_.tx.ask};
-  state_.addressed  = 0;
-  state_.involved   = 0;
-  state_.wire_busy  = 0;
+  if(step() == phase::idle)
+  {
+    transfer_ended();
+  }
+  state_.tx        = {.ask = state_.tx.ask};
+  state_.addressed = 0;
+  state_.involved  = 0;
+  state_.wire_busy = 0;
   if(waited and enabled() and step() == phase::idle and get(regs_, start_) != 0 and not held())
   {
     begin_start(ctx_.clock.time().ps);
@@ -1961,8 +2081,214 @@ void i2c::warn_target_unsupported()
   {
     unmodelled(
         ten_bit ? "OAR1" : "CR1", target_logged_,
-        "a 10-bit own address, SBC with NOSTRETCH, SMBus or PEC in target mode: not modelled, the "
-        "I2C matches 7-bit addresses only, without target byte control");
+        "a 10-bit own address, SBC with NOSTRETCH, the SMBus host or device address, ALERT or PEC "
+        "in target mode: not modelled, the I2C matches 7-bit addresses only, without target "
+        "byte control");
+  }
+}
+
+auto i2c::cycles_ps(std::uint64_t cycles) const -> std::optional<std::uint64_t>
+{
+  auto const hz = ctx_.clock.hz(kernel_);
+  if(hz == 0)
+  {
+    return std::nullopt;
+  }
+  return cycles * ps_per_second / hz;
+}
+
+auto i2c::held_since() const -> std::optional<std::uint64_t>
+{
+  auto const unit = held_unit(state_.port.entries);
+  if(not unit)
+  {
+    return std::nullopt;
+  }
+  auto const found = std::ranges::find(state_.port.entries, *unit, &i2c_port_entry::unit);
+  return found->due_ps;
+}
+
+auto i2c::expiry_due() const -> std::optional<i2c_expiry>
+{
+  auto const& timer = state_.timer;
+  if(not enabled())
+  {
+    return std::nullopt;
+  }
+  std::optional<i2c_expiry> out;
+  auto const                keep = [&](std::uint64_t at, expiry kind) {
+    if(not out or at < out->at)
+    {
+      out = i2c_expiry{.at = at, .kind = kind};
+    }
+  };
+  auto const held = held_since();
+  if(get(regs_, timeout_enable_) != 0)
+  {
+    auto const units = std::uint64_t{get(regs_, timeout_a_)} + 1;
+    if(get(regs_, idle_mode_) != 0)
+    {
+      auto const length = cycles_ps(units * idle_cycles);
+      if(length and timer.idle_ps)
+      {
+        keep(std::max(*timer.idle_ps, timer.a_from_ps) + *length, expiry::idle);
+      }
+    }
+    else if(auto const length = cycles_ps(units * low_cycles))
+    {
+      if(held)
+      {
+        keep(std::max(*held, timer.a_from_ps) + *length, expiry::low);
+      }
+      else if(timer.low_ps)
+      {
+        auto const at = std::max(*timer.low_ps, timer.a_from_ps) + *length;
+        if(not timer.low_end_ps or *timer.low_end_ps > at)
+        {
+          keep(at, expiry::low);
+        }
+      }
+    }
+  }
+  if(get(regs_, extend_enable_) != 0)
+  {
+    auto const own    = held ? held : timer.own_ps;
+    auto const length = cycles_ps((std::uint64_t{get(regs_, timeout_b_)} + 1) * low_cycles);
+    if(own and length)
+    {
+      auto const left = *length > timer.extended_ps ? *length - timer.extended_ps : 0;
+      keep(std::max(*own, timer.b_from_ps) + left, expiry::extend);
+    }
+  }
+  return out;
+}
+
+void i2c::arm_timeout()
+{
+  auto&      timer = state_.timer;
+  auto const now   = ctx_.clock.time().ps;
+  if(enabled() and get(regs_, busy_) == 0)
+  {
+    if(not timer.idle_ps and timer.idle_spent == 0)
+    {
+      timer.idle_ps = now;
+    }
+  }
+  else
+  {
+    timer.idle_ps.reset();
+    timer.idle_spent = 0;
+  }
+  auto const due = expiry_due();
+  auto const at  = due ? std::optional{due->at} : std::nullopt;
+  if(at == timer.armed_ps)
+  {
+    return;
+  }
+  if(timer.armed_ps)
+  {
+    ctx_.events.cancel(timer.seq);
+  }
+  timer.armed_ps = at;
+  if(at)
+  {
+    timer.seq = ctx_.events.schedule_at(vtime{std::max(*at, now)}, timeout_due, 0, ctx_.clock);
+  }
+}
+
+void i2c::stretch_ended(std::uint64_t since)
+{
+  auto&      timer = state_.timer;
+  auto const now   = ctx_.clock.time().ps;
+  auto const from  = std::max(since, timer.b_from_ps);
+  if(get(regs_, extend_enable_) != 0 and now > from)
+  {
+    timer.extended_ps += now - from;
+  }
+}
+
+void i2c::transfer_ended()
+{
+  auto& timer = state_.timer;
+  timer.low_ps.reset();
+  timer.low_end_ps.reset();
+  timer.own_ps.reset();
+  timer.extended_ps = 0;
+}
+
+void i2c::timed_out()
+{
+  auto&      timer = state_.timer;
+  auto const now   = ctx_.clock.time().ps;
+  timer.armed_ps.reset();
+  auto const due = expiry_due();
+  if(not due or due->at > now)
+  {
+    return;
+  }
+  update(regs_, timeout_flag_, 1);
+  if(due->kind == expiry::idle)
+  {
+    timer.idle_ps.reset();
+    timer.idle_spent = 1;
+    return;
+  }
+  if(held_unit(state_.port.entries))
+  {
+    if(auto* const held = held_entry(static_cast<std::uint8_t>(i2c_phase::address)))
+    {
+      release(*held, true);
+    }
+    if(auto* const held = held_entry(static_cast<std::uint8_t>(i2c_phase::write)))
+    {
+      release(*held, false);
+    }
+    if(auto* const held = held_entry(static_cast<std::uint8_t>(i2c_phase::read)))
+    {
+      begin_read(*held, 0xFF);
+    }
+    state_.addressed = 0;
+    state_.tx        = {.ask = state_.tx.ask};
+  }
+  else
+  {
+    switch(step())
+    {
+      case phase::address:
+      case phase::byte:
+      case phase::wait_tx:
+      case phase::wait_rx:
+      case phase::wait_reload:
+      case phase::wait_end:
+        state_.rx_held = 0;
+        begin_stop(timer.low_end_ps ? std::max(now, *timer.low_end_ps) : released());
+        break;
+      case phase::idle:
+      case phase::stop:
+      case phase::lost:
+        break;
+    }
+  }
+  timer.low_ps.reset();
+  timer.low_end_ps.reset();
+  if(due->kind == expiry::extend)
+  {
+    timer.extended_ps = 0;
+  }
+}
+
+void i2c::timeout_written(std::uint32_t old, std::uint32_t now)
+{
+  auto const time = ctx_.clock.time().ps;
+  if(timeout_enable_.of(old) == 0 and timeout_enable_.of(now) != 0)
+  {
+    state_.timer.a_from_ps  = time;
+    state_.timer.idle_spent = 0;
+  }
+  if(extend_enable_.of(old) == 0 and extend_enable_.of(now) != 0)
+  {
+    state_.timer.b_from_ps   = time;
+    state_.timer.extended_ps = 0;
   }
 }
 
@@ -2014,6 +2340,7 @@ auto i2c::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
     }
   }
   flags();
+  rethrow_strict();
   return value;
 }
 
@@ -2045,21 +2372,42 @@ auto i2c::on_write(
       }
     }
     flags();
+    rethrow_strict();
     return {};
   }
-  auto const word   = offset & ~3u;
-  auto const kept   = word == own1_reg_.offset and get(regs_, own1_enable_) != 0
-                        ? own1_.mask() | own1_mode_.mask()
-                    : word == own2_reg_.offset and get(regs_, own2_enable_) != 0
-                        ? own2_.mask() | own2_mask_.mask()
-                        : 0u;
+  auto const word  = offset & ~3u;
+  auto const timed = word == timeout_reg_.offset;
+  auto const kept =
+      word == own1_reg_.offset and get(regs_, own1_enable_) != 0 ? own1_.mask() | own1_mode_.mask()
+      : word == own2_reg_.offset and get(regs_, own2_enable_) != 0
+          ? own2_.mask() | own2_mask_.mask()
+      : timed ? (get(regs_, timeout_enable_) != 0 ? timeout_a_.mask() | idle_mode_.mask() : 0u)
+                    | (get(regs_, extend_enable_) != 0 ? timeout_b_.mask() : 0u)
+              : 0u;
   auto const before = regs_.peek(word);
   auto const result = dispatch_model::on_write(regs, offset, size, old, value, access);
   auto const now    = regs_.peek(word);
   if(((now ^ before) & kept) != 0)
   {
     regs_.poke(word, (now & ~kept) | (before & kept));
-    if(access.by != initiator::debugger)
+    if(access.by != initiator::debugger and timed)
+    {
+      if(not std::exchange(timeout_protect_logged_, true))
+      {
+        warn(
+            "TIMEOUTR",
+            std::format(
+                "{} TIMEOUTR written while TIMOUTEN or TEXTEN is set, TIMEOUTA and TIDLE are "
+                "kept while TIMOUTEN is set and TIMEOUTB while TEXTEN is set, RM0456 65.9.6, "
+                "RM0481 53.9.6",
+                desc_.name));
+      }
+      if(ctx_.strict_peripherals)
+      {
+        throw model_error(desc_.name, "TIMEOUTR", word);
+      }
+    }
+    else if(access.by != initiator::debugger)
     {
       auto const name = word == own1_reg_.offset ? "OAR1" : "OAR2";
       if(not std::exchange(protect_logged_, true))
@@ -2077,6 +2425,7 @@ auto i2c::on_write(
     }
   }
   flags();
+  rethrow_strict();
   return result;
 }
 
@@ -2091,6 +2440,12 @@ void i2c::on_event(std::uint32_t kind, std::uint64_t payload)
     }
     return;
   }
+  if(kind == timeout_due)
+  {
+    timed_out();
+    flags();
+    return;
+  }
   if(kind == hold_begin and payload == state_.pending.id)
   {
     hold_begun();
@@ -2101,11 +2456,17 @@ void i2c::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     hold_ended(static_cast<std::uint32_t>(payload));
     flags();
+    rethrow_strict();
     return;
   }
   if(kind != phase_done or payload != state_.generation)
   {
     return;
+  }
+  if(step() == phase::address or step() == phase::byte)
+  {
+    state_.timer.low_ps = state_.end_ps;
+    state_.timer.low_end_ps.reset();
   }
   switch(step())
   {
@@ -2129,6 +2490,7 @@ void i2c::on_event(std::uint32_t kind, std::uint64_t payload)
       return;
   }
   flags();
+  rethrow_strict();
 }
 
 void i2c::save(std::vector<std::byte>& out) const

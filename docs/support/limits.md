@@ -294,9 +294,21 @@ Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/i2c.cpp)
 
 - The I2C runs as a 7-bit controller and as a 7-bit target on OAR1, OAR2 with its mask and the
-  general call, with clock stretching, NOSTRETCH and SBC. 10-bit addressing, SMBus, PEC, the
-  autonomous trigger, SBC or NOSTRETCH in controller mode and SBC with NOSTRETCH in target mode
-  warn once as unmodelled, `model_error` under strict peripherals.
+  general call, with clock stretching, NOSTRETCH, SBC and the SMBus timeouts of TIMEOUTR. 10-bit
+  addressing, the SMBus host and device addresses, ALERT, PEC, the autonomous trigger, SBC or
+  NOSTRETCH in controller mode and SBC with NOSTRETCH in target mode warn once as unmodelled,
+  `model_error` under strict peripherals at the next controller START or target address phase.
+  A write of I2C_AUTOCR only warns, since a modelled target setup with SBC or NOSTRETCH writes
+  it too.
+- As a target, the SCL low timeout counts the I2C's own stretches, since the controller side
+  carries its phases only. The bus idle timeout counts while PE is set and BUSY is 0, from the
+  STOP or the PE set. Timeout lengths follow the kernel clock rate the model reads at its last
+  event or register access.
+- Inferred, unmeasured on a board: TEXTEN sums the I2C's own stretches from START to STOP, a
+  controller's waits included, each from the end of the target's stretch before it, and the sum
+  restarts after a timeout and at each TEXTEN set. A target timeout releases
+  its stretch as PE = 0 does and leaves the transfer until the next address match. A controller
+  timeout during a target's stretch sends its STOP once the target releases SCL.
 - A target stretches before a written byte's acknowledge after the byte instead: the acknowledge
   and the release come at the end of the byte or at the RXDR read, up to one SCL period and the
   acknowledge bit later than on silicon.

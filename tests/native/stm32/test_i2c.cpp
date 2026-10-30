@@ -4564,3 +4564,991 @@ TEST_CASE("the target firmware sends bytes on TXIS, logs the NACK of the last an
     CHECK(r.f->log() == std::vector<std::uint32_t>{addr_log | 0x85, nacked_log, stop_log});
   }
 }
+
+namespace
+{
+constexpr std::uint32_t timeout_kind = 4;
+constexpr std::uint32_t timoutens    = 1u << 15;
+constexpr std::uint32_t tidle        = 1u << 12;
+constexpr std::uint32_t textens      = 1u << 31;
+
+auto timeout_b(std::uint32_t value) -> std::uint32_t
+{
+  return value << 16;
+}
+
+auto kernel_ps(stm32_fixture const& f, std::uint64_t cycles) -> std::uint64_t
+{
+  auto&      clock = const_cast<core::clock&>(f.target->virtual_clock());
+  auto const hz    = clock.hz(clock.domain("i2c1"));
+  REQUIRE(hz != 0);
+  return cycles * 1'000'000'000'000 / hz;
+}
+
+auto timeout_events(stm32_fixture const& f) -> std::vector<std::uint64_t>
+{
+  auto const& units = f.target->description().peripherals;
+  auto const  found =
+      std::ranges::find(units, std::string_view{"I2C1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(found != units.end());
+  auto const                 owner = static_cast<std::uint32_t>(found - units.begin());
+  std::vector<std::uint64_t> out;
+  for(auto const& event : f.target->snapshot().data().events.pending)
+  {
+    if(event.id.owner == owner and event.id.kind == timeout_kind)
+    {
+      out.push_back(event.due_ps);
+    }
+  }
+  return out;
+}
+
+struct timer_rig
+{
+  target_part                    part;
+  std::shared_ptr<faulty_target> faulty = std::make_shared<faulty_target>();
+  stm32::board                   board{};
+  std::unique_ptr<stm32_fixture> f;
+  std::vector<core::log_record>  logged;
+  core::hook_handle              logs;
+
+  explicit timer_rig(target_part const& which, bool strict = false) : part{which}
+  {
+    board.i2c["I2C1"]          = {faulty};
+    auto options               = popcorn::testing::stm32_options();
+    options.strict_peripherals = strict;
+    options.models             = stm32::factories(board, part.desc());
+    f    = std::make_unique<stm32_fixture>(part.desc(), part.firmware, std::move(options));
+    logs = f->target->add_log_sink(
+        [this](core::log_record const& record) { logged.push_back(record); });
+    f->set("pc", sym(part.firmware, "idle"));
+    auto const on = b();
+    on.set("RCC", part.enable, "I2C1EN", 1);
+    write_timing(on);
+    on.set("CR1", "ERRIE", 1);
+    on.set("CR1", "PE", 1);
+  }
+
+  [[nodiscard]] auto b() const -> bus
+  {
+    return bus{*f};
+  }
+
+  [[nodiscard]] auto cycles(std::uint64_t count) const -> std::uint64_t
+  {
+    return kernel_ps(*f, count);
+  }
+
+  [[nodiscard]] auto period() const -> std::uint64_t
+  {
+    return cycles(10);
+  }
+
+  [[nodiscard]] auto now() const -> std::uint64_t
+  {
+    return b().now();
+  }
+
+  void run_until(std::uint64_t ps) const
+  {
+    b().run_until(ps);
+  }
+
+  void timeout(std::uint32_t value) const
+  {
+    b().write(b().at("I2C1", "TIMEOUTR"), value);
+  }
+
+  [[nodiscard]] auto flag() const -> std::uint32_t
+  {
+    return b().get("ISR", "TIMEOUT");
+  }
+
+  [[nodiscard]] auto error_pending() const -> bool
+  {
+    return pending(*f, part.event_irq + 1);
+  }
+
+  [[nodiscard]] auto warnings(std::string_view reg) const -> std::size_t
+  {
+    return static_cast<std::size_t>(std::ranges::count_if(logged, [&](auto const& record) {
+      return record.kind == core::log_kind::model_warning
+         and record.peripheral == "I2C1"
+         and record.reg == reg;
+    }));
+  }
+
+  [[nodiscard]] auto model_bytes() const -> std::vector<std::byte>
+  {
+    std::vector<std::byte> out;
+    f->target->model("I2C1")->save(out);
+    return out;
+  }
+};
+
+auto target_cycles(target_rig const& r, std::uint64_t count) -> std::uint64_t
+{
+  return kernel_ps(*r.f, count);
+}
+
+void target_timeout(target_rig const& r, std::uint32_t value)
+{
+  auto const b = r.b();
+  b.write(b.at("I2C1", "TIMEOUTR"), value);
+  b.set("CR1", "ERRIE", 1);
+}
+}
+
+TEST_CASE("TIMEOUT sets (TIMEOUTA + 1) x 2048 kernel periods after SCL falls into a TXDR wait")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(std::uint32_t const units : {1u, 2u})
+    {
+      CAPTURE(units);
+      timer_rig  r{part};
+      auto const b = r.b();
+      r.timeout(timoutens | (units - 1));
+      b.command(0x33, 2, false, true);
+      auto const fall  = r.now() + 10 * r.period();
+      auto const limit = r.cycles(2048 * units);
+      r.run_until(fall + limit - r.period());
+      CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{fall + limit});
+      CHECK(r.flag() == 0);
+      CHECK_FALSE(r.error_pending());
+      CHECK(b.get("ISR", "BUSY") == 1);
+      r.run_until(fall + limit + r.period() / 2);
+      CHECK(r.flag() == 1);
+      CHECK(r.error_pending());
+      CHECK(timeout_events(*r.f).empty());
+      r.run_until(fall + limit + 3 * r.period());
+      CHECK(b.get("ISR", "STOPF") == 1);
+      CHECK(b.get("ISR", "BUSY") == 0);
+      REQUIRE_FALSE(r.faulty->events.empty());
+      CHECK(r.faulty->events.back().kind == 'P');
+      CHECK(of_kind(r.faulty->events, 'w').empty());
+      b.set("ICR", "TIMOUTCF", 1);
+      CHECK(r.flag() == 0);
+    }
+  }
+}
+
+TEST_CASE("TIMOUTEN set during a wait counts SCL low from the set, TIMOUTEN clear stops it")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    timer_rig  r{part};
+    auto const b = r.b();
+    b.command(0x33, 2, false, true);
+    auto const fall  = r.now() + 10 * r.period();
+    auto const limit = r.cycles(2048);
+    r.run_until(fall + limit / 2);
+    auto const set = r.now();
+    r.timeout(timoutens);
+    CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{set + limit});
+    r.run_until(set + limit - r.period());
+    r.timeout(0);
+    CHECK(timeout_events(*r.f).empty());
+    r.run_until(set + 2 * limit);
+    CHECK(r.flag() == 0);
+    CHECK(b.get("ISR", "BUSY") == 1);
+    auto const again = r.now();
+    r.timeout(timoutens);
+    r.run_until(again + limit + r.period() / 2);
+    CHECK(r.flag() == 1);
+  }
+}
+
+TEST_CASE("a target's stretch counts as SCL low: below the limit no flag, above it a STOP after it")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const over : {false, true})
+    {
+      CAPTURE(over);
+      timer_rig  r{part};
+      auto const b           = r.b();
+      auto const limit       = r.cycles(2048);
+      auto const extend      = over ? limit + 40 * r.period() : limit - 40 * r.period();
+      r.faulty->stretch_call = 0;
+      r.faulty->stretch_ps   = extend;
+      r.timeout(timoutens);
+      b.command(0x33, 1, false, true);
+      b.send(0x5A);
+      auto const fall = r.now() + 10 * r.period();
+      r.run_until(fall + extend + 20 * r.period());
+      if(not over)
+      {
+        CHECK(r.flag() == 0);
+        CHECK(of_kind(r.faulty->events, 'w').size() == 1);
+        CHECK(b.get("ISR", "STOPF") == 1);
+        CHECK(timeout_events(*r.f).empty());
+        continue;
+      }
+      CHECK(r.flag() == 1);
+      CHECK(of_kind(r.faulty->events, 'w').empty());
+      CHECK(b.get("ISR", "STOPF") == 1);
+      REQUIRE(r.faulty->events.size() == 2);
+      auto const offset = r.f->target->virtual_clock().since_power_on().ps - r.now();
+      CHECK(r.faulty->events[1].at == offset + fall + extend + r.period());
+    }
+  }
+}
+
+TEST_CASE("the existing 10 us stretch with the RM0456 25 ms and 8 ms settings trips nothing")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    timer_rig  r{part};
+    auto const b       = r.b();
+    auto const unit    = r.cycles(2048);
+    auto const a_units = (25'000 * us + unit - 1) / unit;
+    auto const b_units = (8'000 * us) / unit;
+    REQUIRE(b_units >= 1);
+    r.timeout(
+        timoutens
+        | static_cast<std::uint32_t>(a_units - 1)
+        | textens
+        | timeout_b(static_cast<std::uint32_t>(b_units - 1)));
+    r.faulty->stretch_call = 1;
+    r.faulty->stretch_ps   = stretch_ps;
+    b.command(0x33, 3, false, true);
+    for(int index = 0; index < 3; ++index)
+    {
+      r.run_until(r.now() + 10 * r.period());
+      b.send(static_cast<std::uint8_t>(0x10 + index));
+    }
+    r.run_until(r.now() + 40 * r.period() + stretch_ps);
+    CHECK(b.get("ISR", "STOPF") == 1);
+    CHECK(of_kind(r.faulty->events, 'w').size() == 3);
+    CHECK(r.flag() == 0);
+    CHECK(timeout_events(*r.f).empty());
+  }
+}
+
+TEST_CASE("TEXTEN sums the controller's own waits of one transfer, not the target's stretch")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    SUBCASE("two waits of one transfer add up")
+    {
+      timer_rig  r{part};
+      auto const b     = r.b();
+      auto const limit = r.cycles(2048);
+      r.timeout(textens);
+      b.command(0x33, 2, false, true);
+      auto const fall = r.now() + 10 * r.period();
+      auto const one  = limit * 3 / 4;
+      r.run_until(fall + one);
+      auto const sent = r.now();
+      b.send(0x11);
+      auto const second = sent + 9 * r.period();
+      r.run_until(second + r.period() / 2);
+      CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{second + limit - (sent - fall)});
+      r.run_until(second + limit - (sent - fall) - r.period());
+      CHECK(r.flag() == 0);
+      r.run_until(second + limit - (sent - fall) + r.period() / 2);
+      CHECK(r.flag() == 1);
+      r.run_until(r.now() + 3 * r.period());
+      CHECK(b.get("ISR", "BUSY") == 0);
+    }
+    SUBCASE("TIMOUTEN alone does not trip on either wait")
+    {
+      timer_rig  r{part};
+      auto const b     = r.b();
+      auto const limit = r.cycles(2048);
+      r.timeout(timoutens);
+      b.command(0x33, 2, false, true);
+      auto const fall = r.now() + 10 * r.period();
+      r.run_until(fall + limit * 3 / 4);
+      b.send(0x11);
+      r.run_until(r.now() + 9 * r.period() + limit * 3 / 4);
+      b.send(0x22);
+      r.run_until(r.now() + 20 * r.period());
+      CHECK(r.flag() == 0);
+      CHECK(b.get("ISR", "STOPF") == 1);
+    }
+    SUBCASE("a STOP restarts the sum")
+    {
+      timer_rig  r{part};
+      auto const b     = r.b();
+      auto const limit = r.cycles(2048);
+      r.timeout(textens);
+      for(int round = 0; round < 2; ++round)
+      {
+        b.command(0x33, 1, false, true);
+        r.run_until(r.now() + 10 * r.period() + limit * 3 / 4);
+        b.send(0x11);
+        r.run_until(r.now() + 20 * r.period());
+        CHECK(b.get("ISR", "STOPF") == 1);
+        b.set("ICR", "STOPCF", 1);
+      }
+      CHECK(r.flag() == 0);
+    }
+    SUBCASE("a target's stretch above the limit is not the I2C's own")
+    {
+      timer_rig  r{part};
+      auto const b     = r.b();
+      auto const limit = r.cycles(2048);
+      r.timeout(textens);
+      r.faulty->stretch_call = 0;
+      r.faulty->stretch_ps   = 2 * limit;
+      b.command(0x33, 1, false, true);
+      b.send(0x5A);
+      r.run_until(r.now() + 2 * limit + 30 * r.period());
+      CHECK(r.flag() == 0);
+      CHECK(of_kind(r.faulty->events, 'w').size() == 1);
+    }
+    SUBCASE("a TEXTEN clear and set restarts the sum")
+    {
+      timer_rig  r{part};
+      auto const b     = r.b();
+      auto const limit = r.cycles(2048);
+      r.timeout(textens);
+      b.command(0x33, 2, false, true);
+      r.run_until(r.now() + 10 * r.period() + limit * 3 / 4);
+      b.send(0x11);
+      r.run_until(r.now() + 9 * r.period() + r.period() / 2);
+      r.timeout(0);
+      auto const set = r.now();
+      r.timeout(textens);
+      CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{set + limit});
+      r.run_until(set + limit / 2);
+      CHECK(r.flag() == 0);
+      r.run_until(set + limit + r.period() / 2);
+      CHECK(r.flag() == 1);
+    }
+    SUBCASE("a wait after a target's address stretch starts at the stretch end")
+    {
+      timer_rig  r{part};
+      auto const b     = r.b();
+      auto const limit = r.cycles(2048);
+      r.timeout(textens);
+      r.faulty->stretch_call = 0;
+      r.faulty->stretch_ps   = 2 * limit;
+      b.command(0x33, 2, false, true);
+      auto const released = r.now() + 10 * r.period() + 2 * limit;
+      r.run_until(released + limit / 4);
+      CHECK(r.flag() == 0);
+      auto const sent = r.now();
+      b.send(0x11);
+      auto const second = sent + 9 * r.period();
+      r.run_until(second + r.period() / 2);
+      auto const due = second + limit - (sent - released);
+      CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{due});
+      r.run_until(due - r.period());
+      CHECK(r.flag() == 0);
+      r.run_until(due + r.period() / 2);
+      CHECK(r.flag() == 1);
+    }
+    SUBCASE("a TC wait after a target's last-byte stretch starts at the stretch end")
+    {
+      timer_rig  r{part};
+      auto const b     = r.b();
+      auto const limit = r.cycles(2048);
+      r.timeout(textens);
+      r.faulty->stretch_call = 1;
+      r.faulty->stretch_ps   = 2 * limit;
+      b.command(0x33, 1, false, false);
+      b.send(0x5A);
+      auto const released = r.now() + 10 * r.period() + 9 * r.period() + 2 * limit;
+      r.run_until(released - limit / 2);
+      CHECK(b.get("ISR", "TC") == 1);
+      CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{released + limit});
+      r.run_until(released + limit - r.period());
+      CHECK(r.flag() == 0);
+      r.run_until(released + limit + r.period() / 2);
+      CHECK(r.flag() == 1);
+    }
+  }
+}
+
+TEST_CASE("an unmodelled controller field at a START logs once, strict refuses at the START")
+{
+  struct unmodelled_field
+  {
+    std::string_view reg;
+    std::string_view field;
+  };
+  constexpr std::uint32_t start_bit = 1u << 13;
+  constexpr std::uint32_t add10_bit = 1u << 11;
+  constexpr std::uint32_t autoend   = 1u << 25;
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(auto const [reg, field] : std::array<unmodelled_field, 8>{
+            {{"CR1", "PECEN"},
+             {"CR1", "ALERTEN"},
+             {"CR1", "SMBHEN"},
+             {"CR1", "SMBDEN"},
+             {"CR1", "SBC"},
+             {"CR1", "NOSTRETCH"},
+             {"CR2", "ADD10"},
+             {"I2C_AUTOCR", "TRIGEN"}}
+    })
+    {
+      CAPTURE(field);
+      for(bool const strict : {false, true})
+      {
+        CAPTURE(strict);
+        timer_rig  r{part, strict};
+        auto const b = r.b();
+        if(popcorn::find_register(r.f->target->peripheral("I2C1").description(), reg) == nullptr)
+        {
+          continue;
+        }
+        auto const extra = reg == "CR2" ? add10_bit : 0u;
+        if(reg != "CR2")
+        {
+          b.set(reg, field, 1);
+        }
+        auto const word = (0x33u << 1) | start_bit | autoend | extra;
+        auto const cr2  = b.at("I2C1", "CR2");
+        if(strict)
+        {
+          CHECK_THROWS_AS(
+              std::ignore = r.f->target->mem().write(cr2, 4, word), popcorn::model_error);
+          continue;
+        }
+        b.write(cr2, word);
+        r.run_until(r.now() + 20 * r.period());
+        b.write(cr2, word);
+        r.run_until(r.now() + 20 * r.period());
+        CHECK(b.get("ISR", "STOPF") == 1);
+        CHECK(r.warnings("CR1") == 1);
+      }
+    }
+  }
+}
+
+TEST_CASE("an unmodelled controller field refuses a START sent from a hold end, a STOP or a read")
+{
+  constexpr std::uint32_t start_bit = 1u << 13;
+  constexpr std::uint32_t stop_bit  = 1u << 14;
+  constexpr std::uint32_t read_bit  = 1u << 10;
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    timer_rig  r{part, true};
+    auto const b   = r.b();
+    auto const p   = r.period();
+    auto const cr2 = b.at("I2C1", "CR2");
+    b.set("CR1", "PECEN", 1);
+    auto const write_cr2 = [&](std::uint32_t word) {
+      std::ignore = r.f->target->mem().write(cr2, 4, word);
+    };
+    auto const run_to = [&](std::uint64_t ps) {
+      std::ignore =
+          r.f->run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = vtime{ps}});
+    };
+    SUBCASE("hold end")
+    {
+      auto* const held = dynamic_cast<stm32::i2c_bus*>(r.f->target->model("I2C1"));
+      REQUIRE(held != nullptr);
+      auto const until = r.now() + 20 * p;
+      held->hold(vtime{r.now() + p}, vtime{until});
+      r.run_until(r.now() + 2 * p);
+      REQUIRE(b.get("ISR", "BUSY") == 1);
+      CHECK_NOTHROW(write_cr2((0x33u << 1) | start_bit | (1u << 25)));
+      CHECK_THROWS_AS(run_to(until + 2 * p), popcorn::model_error);
+      CHECK(b.get("ISR", "BUSY") == 1);
+    }
+    SUBCASE("STOP then START")
+    {
+      CHECK_THROWS_AS(write_cr2((0x33u << 1) | start_bit | (1u << 16)), popcorn::model_error);
+      b.send(0x5A);
+      r.run_until(r.now() + 25 * p);
+      REQUIRE(b.get("ISR", "TC") == 1);
+      CHECK_NOTHROW(write_cr2((0x33u << 1) | start_bit | stop_bit | (1u << 16)));
+      CHECK_THROWS_AS(run_to(r.now() + 5 * p), popcorn::model_error);
+    }
+    SUBCASE("RXDR read")
+    {
+      CHECK_THROWS_AS(
+          write_cr2((0x33u << 1) | read_bit | start_bit | (2u << 16)), popcorn::model_error);
+      r.run_until(r.now() + 35 * p);
+      REQUIRE(b.get("ISR", "RXNE") == 1);
+      CHECK_NOTHROW(write_cr2((0x33u << 1) | read_bit | start_bit | (2u << 16)));
+      r.run_until(r.now() + 5 * p);
+      CHECK_THROWS_AS(std::ignore = b.receive(), popcorn::model_error);
+    }
+  }
+}
+
+TEST_CASE("TIDLE times the idle bus, once per idle period, from the STOP or the TIMOUTEN set")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    timer_rig  r{part};
+    auto const b    = r.b();
+    auto const idle = r.cycles(4 * 10);
+    auto const set  = r.now();
+    r.timeout(timoutens | tidle | 9);
+    CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{set + idle});
+    r.run_until(set + idle - r.period() / 4);
+    CHECK(r.flag() == 0);
+    r.run_until(set + idle + r.period());
+    CHECK(r.flag() == 1);
+    CHECK(r.error_pending());
+    b.set("ICR", "TIMOUTCF", 1);
+    r.run_until(r.now() + 4 * idle);
+    CHECK(r.flag() == 0);
+    CHECK(timeout_events(*r.f).empty());
+    b.command(0x33, 0, false, true);
+    auto const begun = r.now();
+    CHECK(timeout_events(*r.f).empty());
+    auto const stop_end = begun + 11 * r.period();
+    r.run_until(stop_end + r.period() / 4);
+    REQUIRE(b.get("ISR", "BUSY") == 0);
+    CHECK(r.flag() == 0);
+    REQUIRE(timeout_events(*r.f).size() == 1);
+    auto const due = timeout_events(*r.f).front();
+    CHECK(due == stop_end + idle);
+    r.run_until(due + r.period());
+    CHECK(r.flag() == 1);
+    b.set("ICR", "TIMOUTCF", 1);
+    r.timeout(0);
+    auto const reset_at = r.now();
+    r.timeout(timoutens | tidle | 9);
+    CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{reset_at + idle});
+    r.run_until(reset_at + idle + r.period());
+    CHECK(r.flag() == 1);
+  }
+}
+
+TEST_CASE("the TIDLE period starts at the end of the STOP off the instruction grid too")
+{
+  timer_rig  r{target_parts[0]};
+  auto const b = r.b();
+  b.set("RCC", "RCC_CR", "HSION", 1);
+  r.run_until(r.now() + 200 * us);
+  REQUIRE(r.f->field("RCC", "RCC_CR", "HSIRDY") == 1);
+  b.set("RCC", "RCC_CCIPR1", "I2C1SEL", 2);
+  auto const idle = r.cycles(4 * 10);
+  r.timeout(timoutens | tidle | 9);
+  r.run_until(r.now() + idle + r.period());
+  REQUIRE(r.flag() == 1);
+  b.set("ICR", "TIMOUTCF", 1);
+  b.command(0x33, 0, false, true);
+  auto const stop_end    = r.now() + 11 * r.period();
+  auto const instruction = 1'000'000'000'000 / r.f->target->virtual_clock().instruction_hz();
+  REQUIRE(stop_end % instruction != 0);
+  r.run_until(stop_end + r.period());
+  REQUIRE(b.get("ISR", "BUSY") == 0);
+  CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{stop_end + idle});
+}
+
+TEST_CASE("the TIDLE period starts at a host hold's end and a target STOP's time, off the grid")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    SUBCASE("host hold")
+    {
+      timer_rig  r{part};
+      auto const b    = r.b();
+      auto const idle = r.cycles(4 * 10);
+      r.timeout(timoutens | tidle | 9);
+      r.run_until(r.now() + idle + r.period());
+      REQUIRE(r.flag() == 1);
+      b.set("ICR", "TIMOUTCF", 1);
+      auto* const held = dynamic_cast<stm32::i2c_bus*>(r.f->target->model("I2C1"));
+      REQUIRE(held != nullptr);
+      auto const from  = r.now() + 2 * idle;
+      auto const until = from + 4 * idle + 123;
+      held->hold(vtime{from}, vtime{until});
+      r.run_until(until + r.period());
+      REQUIRE(b.get("ISR", "BUSY") == 0);
+      CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{until + idle});
+    }
+    SUBCASE("target STOP")
+    {
+      target_rig r{part};
+      r.listen();
+      auto const idle = target_cycles(r, 4 * 10);
+      target_timeout(r, timoutens | tidle | 9);
+      auto const base = r.now() + 2 * idle;
+      r.start(own, false, base, 1);
+      auto const stopped = base + 2 * target_ps + 123;
+      r.stop(stopped, 2);
+      r.run_until(stopped + r.period());
+      REQUIRE(r.b().get("ISR", "BUSY") == 0);
+      CHECK(r.b().get("ISR", "STOPF") == 1);
+      CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{stopped + idle});
+    }
+  }
+}
+
+TEST_CASE("TIMEOUTR keeps TIMEOUTA and TIDLE while TIMOUTEN is set, TIMEOUTB while TEXTEN is set")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const strict : {false, true})
+    {
+      CAPTURE(strict);
+      target_rig r{part, strict};
+      auto const b = r.b();
+      r.listen();
+      auto&      regs           = r.f->target->peripheral("I2C1");
+      auto*      model          = r.f->target->model("I2C1");
+      auto const offset         = b.reg("I2C1", "TIMEOUTR").offset;
+      auto const firmware_write = [&](std::uint32_t value) {
+        return model->on_write(
+            regs, offset, 4, regs.peek(offset), value, {.pc = 0, .now = icount{0}});
+      };
+      REQUIRE(firmware_write(timoutens | 5 | textens | timeout_b(7)).has_value());
+      CHECK(regs.peek(offset) == (timoutens | 5 | textens | timeout_b(7)));
+      if(strict)
+      {
+        CHECK_THROWS_AS(
+            std::ignore = firmware_write(timoutens | tidle | 6 | textens | timeout_b(7)),
+            popcorn::model_error);
+        CHECK(regs.peek(offset) == (timoutens | 5 | textens | timeout_b(7)));
+        continue;
+      }
+      REQUIRE(firmware_write(timoutens | tidle | 6 | textens | timeout_b(8)).has_value());
+      CHECK(regs.peek(offset) == (timoutens | 5 | textens | timeout_b(7)));
+      CHECK(r.warnings("TIMEOUTR") == 1);
+      REQUIRE(firmware_write(textens | timeout_b(8)).has_value());
+      CHECK(regs.peek(offset) == (5 | textens | timeout_b(7)));
+      REQUIRE(firmware_write(tidle | 6).has_value());
+      CHECK(regs.peek(offset) == (tidle | 6 | timeout_b(7)));
+      REQUIRE(firmware_write(textens | timeout_b(9) | timoutens | 3).has_value());
+      CHECK(regs.peek(offset) == (textens | timeout_b(9) | timoutens | 3));
+      CHECK(r.warnings("TIMEOUTR") == 1);
+    }
+  }
+}
+
+TEST_CASE("a target stretch past TIMEOUTA releases SCL as PE clear does and leaves the transfer")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(auto const held : {on_address, on_write, on_read})
+    {
+      CAPTURE(static_cast<int>(held));
+      target_rig r{part};
+      r.listen(own, held == on_address);
+      target_timeout(r, timoutens);
+      auto const limit = target_cycles(r, 2048);
+      auto const base  = r.now() + us;
+      auto       fall  = base + target_ps;
+      r.start(own, held == on_read, base, 1);
+      if(held == on_write)
+      {
+        r.write(0x11, base, 2);
+        r.write(0x22, base, 3);
+        r.write(0x33, base, 4);
+        fall = base + 3 * target_ps;
+      }
+      else if(held == on_read)
+      {
+        r.read(true, base, 2);
+        r.read(true, base, 3);
+        r.read(true, base, 4);
+      }
+      else
+      {
+        r.write(0x44, base, 2);
+        r.write(0x55, base, 3);
+        r.write(0x66, base, 4);
+      }
+      r.stop(fall + limit + 4 * target_ps + 5 * us, 5);
+      r.run_until(fall + limit - us);
+      CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{fall + limit});
+      CHECK(r.get("ISR", "TIMEOUT") == 0);
+      auto const answered = r.sink->answers.size();
+      r.run_until(fall + limit + 4 * target_ps + 10 * us);
+      CHECK(r.get("ISR", "TIMEOUT") == 1);
+      CHECK(pending(*r.f, part.event_irq + 1));
+      REQUIRE(r.sink->answers.size() == 4);
+      auto const& released    = r.sink->answers[answered];
+      auto const  answered_at = fall + limit + (held == on_read ? target_ps : 0);
+      CHECK(released.at >= answered_at);
+      CHECK(released.at < answered_at + r.period());
+      if(held == on_address)
+      {
+        CHECK(released == heard{1, on_address, true, 0xFF, released.at});
+      }
+      else if(held == on_write)
+      {
+        CHECK(released.unit == 3);
+        CHECK_FALSE(released.ack);
+      }
+      else
+      {
+        CHECK(released.unit == 2);
+        CHECK(released.byte == 0xFF);
+      }
+      for(auto const& later : r.sink->answers | std::views::drop(answered + 1))
+      {
+        CAPTURE(later.unit);
+        CHECK_FALSE((later.ack and later.phase == on_write));
+        if(later.phase == on_read)
+        {
+          CHECK(later.byte == 0xFF);
+        }
+      }
+      CHECK(r.sink->drops.empty());
+      CHECK(timeout_events(*r.f).empty());
+      CHECK(r.get("ISR", "STOPF") == 1);
+    }
+  }
+}
+
+TEST_CASE("TEXTEN sums a target's stretches of one transfer, each released before the limit")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    target_timeout(r, textens);
+    auto const limit = target_cycles(r, 2048);
+    auto const base  = r.now() + us;
+    r.start(own, false, base, 1);
+    r.write(0x11, base, 2);
+    r.write(0x22, base, 3);
+    r.write(0x33, base, 4);
+    auto const fall = base + 3 * target_ps;
+    r.run_until(fall + limit * 3 / 4);
+    auto const read_at = r.now();
+    CHECK(r.b().receive() == 0x11);
+    CHECK(r.get("ISR", "TIMEOUT") == 0);
+    auto const second = read_at + target_ps;
+    r.run_until(second + us);
+    auto const due = second + limit - (read_at - fall);
+    CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{due});
+    r.run_until(due + target_ps + us);
+    CHECK(r.get("ISR", "TIMEOUT") == 1);
+    REQUIRE(r.sink->answers.size() == 4);
+    CHECK(r.sink->answers[3].unit == 4);
+    CHECK_FALSE(r.sink->answers[3].ack);
+  }
+}
+
+TEST_CASE("a snapshot with the timer running restores the same TIMEOUT time, bytes re-dumped equal")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    timer_rig  r{part};
+    auto const b = r.b();
+    r.timeout(timoutens | textens | timeout_b(3));
+    b.command(0x33, 2, false, true);
+    auto const fall  = r.now() + 10 * r.period();
+    auto const limit = r.cycles(2048);
+    r.run_until(fall + limit / 2);
+    auto const saved = core::encode_snapshot(r.f->target->snapshot().data());
+    auto const bytes = r.model_bytes();
+    auto const due   = timeout_events(*r.f);
+    REQUIRE(due == std::vector<std::uint64_t>{fall + limit});
+    timer_rig other{part};
+    other.f->target->restore(core::snapshot{core::decode_snapshot(saved)});
+    CHECK(other.model_bytes() == bytes);
+    CHECK(timeout_events(*other.f) == due);
+    for(auto const* one : {&r, &other})
+    {
+      one->run_until(fall + limit - one->period());
+      CHECK(one->flag() == 0);
+      one->run_until(fall + limit + one->period() / 2);
+      CHECK(one->flag() == 1);
+    }
+    CHECK(other.model_bytes() == r.model_bytes());
+  }
+}
+
+TEST_CASE("an RCC reset or a machine reset with the timer running leaves no TIMEOUT behind")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const machine : {false, true})
+    {
+      CAPTURE(machine);
+      timer_rig  r{part};
+      auto const b = r.b();
+      r.timeout(timoutens);
+      b.command(0x33, 2, false, true);
+      auto const fall  = r.now() + 10 * r.period();
+      auto const limit = r.cycles(2048);
+      r.run_until(fall + limit / 2);
+      REQUIRE(timeout_events(*r.f).size() == 1);
+      if(machine)
+      {
+        r.f->target->reset(popcorn::reset_kind::software);
+        r.f->set("pc", sym(part.firmware, "idle"));
+      }
+      else
+      {
+        popcorn::testing::rcc_reset_pulse(*r.f, part.reset, "I2C1RST");
+      }
+      CHECK(timeout_events(*r.f).empty());
+      CHECK(b.get("TIMEOUTR", "TIMOUTEN") == 0);
+      b.set("RCC", part.enable, "I2C1EN", 1);
+      write_timing(b);
+      b.set("CR1", "ERRIE", 1);
+      b.set("CR1", "PE", 1);
+      r.timeout(timoutens);
+      b.command(0x33, 2, false, true);
+      auto const again = r.now() + 10 * r.period();
+      r.run_until(again + limit / 2);
+      CHECK(r.flag() == 0);
+      CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{again + limit});
+      r.run_until(again + limit - r.period());
+      CHECK(r.flag() == 0);
+      r.run_until(again + limit + r.period() / 2);
+      CHECK(r.flag() == 1);
+    }
+  }
+}
+
+TEST_CASE("PE clear clears TIMEOUT and stops every timer")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    timer_rig  r{part};
+    auto const b = r.b();
+    r.timeout(timoutens | textens);
+    b.command(0x33, 2, false, true);
+    auto const limit = r.cycles(2048);
+    r.run_until(r.now() + 10 * r.period() + limit + r.period());
+    REQUIRE(r.flag() == 1);
+    b.command(0x33, 2, false, true);
+    r.run_until(r.now() + 10 * r.period() + limit / 2);
+    REQUIRE(timeout_events(*r.f).size() == 1);
+    b.set("CR1", "PE", 0);
+    CHECK(r.flag() == 0);
+    CHECK(timeout_events(*r.f).empty());
+    r.run_until(r.now() + 2 * limit);
+    CHECK(r.flag() == 0);
+  }
+}
+
+TEST_CASE("200 waits each below the limit leave at most one TIMEOUT event pending")
+{
+  timer_rig  r{target_parts[0]};
+  auto const b     = r.b();
+  auto const limit = r.cycles(2048);
+  r.timeout(timoutens | textens | timeout_b(4095));
+  b.command(0x33, 200, false, true);
+  r.run_until(r.now() + 10 * r.period());
+  for(int index = 0; index < 200; ++index)
+  {
+    r.run_until(r.now() + limit / 4);
+    CHECK(timeout_events(*r.f).size() == 1);
+    b.send(static_cast<std::uint8_t>(index));
+    r.run_until(r.now() + 9 * r.period() + r.period() / 2);
+  }
+  r.run_until(r.now() + 4 * r.period());
+  CHECK(r.flag() == 0);
+  CHECK(of_kind(r.faulty->events, 'w').size() == 200);
+  CHECK(timeout_events(*r.f).empty());
+}
+
+TEST_CASE("PEC in target mode still logs once as not modelled and strict refuses")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const strict : {false, true})
+    {
+      CAPTURE(strict);
+      target_rig r{part, strict};
+      r.b().set("CR1", "PECEN", 1);
+      r.listen();
+      auto const base = r.now() + us;
+      r.start(own, false, base, 1);
+      r.stop(base + target_ps, 2);
+      r.start(own, false, base + 2 * target_ps, 3);
+      if(strict)
+      {
+        CHECK_THROWS_AS(
+            std::ignore = r.f->run(
+                {.max_instructions = icount{1'000'000'000},
+                 .until_time       = vtime{base + 4 * target_ps}}),
+            popcorn::model_error);
+        continue;
+      }
+      r.run_until(base + 4 * target_ps);
+      CHECK(r.warnings("CR1") == 1);
+    }
+  }
+}
+
+TEST_CASE("an RXNE, TCR or TC wait holds SCL low too, TIMEOUT sends the STOP from there")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(std::string_view const wait : {"RXNE", "TCR", "TC"})
+    {
+      CAPTURE(wait);
+      timer_rig  r{part};
+      auto const b = r.b();
+      r.timeout(timoutens);
+      auto const start = r.now();
+      auto       fall  = start + 19 * r.period();
+      if(wait == "RXNE")
+      {
+        b.command(0x33, 2, true, true);
+        fall = start + 28 * r.period();
+      }
+      else
+      {
+        b.command(0x33, 1, false, false, wait == "TCR");
+        b.send(0x5A);
+      }
+      auto const limit = r.cycles(2048);
+      r.run_until(fall + limit - r.period());
+      CHECK(r.flag() == 0);
+      CHECK(b.get("ISR", std::string{wait}) == 1);
+      CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{fall + limit});
+      r.run_until(fall + limit + 3 * r.period());
+      CHECK(r.flag() == 1);
+      CHECK(b.get("ISR", "STOPF") == 1);
+      CHECK(b.get("ISR", "BUSY") == 0);
+      CHECK(timeout_events(*r.f).empty());
+    }
+  }
+}
+
+TEST_CASE(
+    "a TEXTEN timeout restarts the stretch sum, a repeated START stretch gets the whole limit")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen(own, true);
+    target_timeout(r, textens);
+    auto const limit = target_cycles(r, 2048);
+    auto const base  = r.now() + us;
+    r.start(own, false, base, 1);
+    auto const fall = base + target_ps;
+    r.run_until(fall + limit + 10 * us);
+    REQUIRE(r.get("ISR", "TIMEOUT") == 1);
+    REQUIRE(r.sink->answers.size() == 1);
+    r.b().set("ICR", "TIMOUTCF", 1);
+    r.b().set("ICR", "ADDRCF", 1);
+    auto const again = r.now() + us;
+    r.start(own, false, again, 2);
+    auto const second = again + target_ps;
+    r.run_until(second + us);
+    CHECK(r.get("ISR", "ADDR") == 1);
+    CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{second + limit});
+    r.run_until(second + limit - us);
+    CHECK(r.get("ISR", "TIMEOUT") == 0);
+    r.run_until(second + limit + us);
+    CHECK(r.get("ISR", "TIMEOUT") == 1);
+  }
+}
