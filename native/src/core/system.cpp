@@ -8,9 +8,11 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <expected>
 #include <format>
 #include <limits>
+#include <mutex>
 #include <ranges>
 #include <stdexcept>
 #include <utility>
@@ -214,6 +216,7 @@ struct system::impl
   std::move_only_function<void(std::size_t)> before_arrival;
   std::move_only_function<void(std::size_t)> before_sleep;
   std::mutex                                 mutex;
+  std::mutex                                 finishing;
   std::uint64_t                              window{};
   sys_time                                   pending{};
   std::optional<sys_time>                    until{};
@@ -1218,6 +1221,7 @@ void system::impl::deliver(entry const& head) noexcept
 
 void system::impl::finish_pause() noexcept
 {
+  std::scoped_lock const tail{finishing};
   merge_found();
   auto const completing = promise;
   auto       ended      = result;
@@ -1324,6 +1328,9 @@ system::~system()
   if(impl_->future.valid())
   {
     std::ignore = impl_->future.wait_for(std::chrono::hours{24 * 365});
+  }
+  {
+    std::scoped_lock const tail{impl_->finishing};
   }
   impl_->members_released.store(true, std::memory_order_release);
   for(auto& one : impl_->slots)
@@ -1530,7 +1537,9 @@ auto system::resume(held_system const&, std::optional<sys_time> system_until) ->
     one.rep.quiescent = false;
     one.driver->restart();
   }
-  auto const future = self.future;
+  auto const         future = self.future;
+  std::exception_ptr refused;
+  std::size_t        unstarted = 0;
   for(auto& one : self.slots)
   {
     auto const               held_host = one.ref.on->lock();
@@ -1541,14 +1550,9 @@ auto system::resume(held_system const&, std::optional<sys_time> system_until) ->
     }
     catch(...)
     {
-      self.host_closed.store(true);
-      self.barrier.abort();
-      auto const unstarted = self.slots.size() - static_cast<std::size_t>(&one - self.slots.data());
-      if(self.outstanding.fetch_sub(unstarted) == unstarted)
-      {
-        self.finish_pause();
-      }
-      throw;
+      refused   = std::current_exception();
+      unstarted = self.slots.size() - static_cast<std::size_t>(&one - self.slots.data());
+      break;
     }
     running.on_done([&self, running]() noexcept {
       if(not running.done())
@@ -1569,6 +1573,16 @@ auto system::resume(held_system const&, std::optional<sys_time> system_until) ->
         self.finish_pause();
       }
     });
+  }
+  if(refused)
+  {
+    self.host_closed.store(true);
+    self.barrier.abort();
+    if(self.outstanding.fetch_sub(unstarted) == unstarted)
+    {
+      self.finish_pause();
+    }
+    std::rethrow_exception(refused);
   }
   return future;
 }

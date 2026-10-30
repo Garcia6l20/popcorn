@@ -12,13 +12,17 @@
 
 #include <doctest/doctest.h>
 
+#include <fcntl.h>
 #include <sched.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -49,6 +53,28 @@ constexpr std::int64_t ms_ps = 1'000'000'000;
 struct test_failure : std::runtime_error
 {
   using std::runtime_error::runtime_error;
+};
+
+std::atomic<int> counted_alive{0};
+
+struct counted_failure : std::runtime_error
+{
+  counted_failure() : std::runtime_error{"counted"}
+  {
+    ++counted_alive;
+  }
+
+  counted_failure(counted_failure const& other) : std::runtime_error{other}
+  {
+    ++counted_alive;
+  }
+
+  auto operator=(counted_failure const&) -> counted_failure& = delete;
+
+  ~counted_failure() override
+  {
+    --counted_alive;
+  }
 };
 
 class throwing_arch final : public popcorn::testing::test_arch
@@ -2579,6 +2605,145 @@ TEST_CASE("a resume that cannot start a member parks the members it started")
   }
   auto const held = r.sys->lock();
   CHECK_THROWS_AS(std::ignore = r.sys->resume(held), core::machine_closed);
+}
+
+TEST_CASE("a resume its first member refuses completes the pause with no host mutex held")
+{
+  std::latch registered{1};
+  rig        r{.members = sleeper_and_runner()};
+  r.arrival = [&registered](std::size_t) { registered.wait(); };
+  r.build(variants()[0]);
+  core::host_future<core::pause> first;
+  {
+    auto const held = r.sys->lock();
+    first           = r.sys->resume(held, core::sys_time{ms_ps});
+  }
+  std::atomic<bool> closed{false};
+  std::latch        go{1};
+  first.on_done([&r, &closed, &go]() noexcept {
+    r.members[0].on->close();
+    closed.store(true);
+    closed.notify_all();
+    go.wait();
+    r.sys->request_pause();
+  });
+  registered.count_down();
+  REQUIRE(first.wait_for(std::chrono::seconds{10}));
+  closed.wait(false);
+  std::jthread const opener{[&go] {
+    std::this_thread::sleep_for(std::chrono::milliseconds{200});
+    go.count_down();
+  }};
+  auto const         held = r.sys->lock();
+  CHECK_THROWS_AS(std::ignore = r.sys->resume(held), core::machine_closed);
+}
+
+TEST_CASE("the system destructor returns after the last pause's callbacks released its error")
+{
+  std::latch        registered{1};
+  std::atomic<bool> thrown{false};
+  rig               r{.members = sleeper_and_runner()};
+  r.arrival = [&registered, &thrown](std::size_t index) {
+    if(index == 1)
+    {
+      registered.wait();
+      if(not thrown.exchange(true))
+      {
+        throw counted_failure{};
+      }
+    }
+  };
+  r.build(variants()[0]);
+  {
+    core::host_future<core::pause> pending;
+    {
+      auto const held = r.sys->lock();
+      pending         = r.sys->resume(held, core::sys_time{2 * ms_ps});
+    }
+    pending.on_done([]() noexcept { std::this_thread::sleep_for(std::chrono::milliseconds{200}); });
+    registered.count_down();
+    REQUIRE(pending.wait_for(std::chrono::seconds{10}));
+    CHECK(pending.get().reason == core::pause_reason::error);
+    CHECK(counted_alive.load() == 1);
+  }
+  r.sys.reset();
+  CHECK(counted_alive.load() == 0);
+}
+
+TEST_CASE("the system destructor fails its contract on a host thread or under a host mutex")
+{
+  struct death
+  {
+    int         signal = 0;
+    std::string said;
+  };
+  auto const dies = [](bool on_host_thread) {
+    std::array<int, 2> said{};
+    REQUIRE(pipe(said.data()) == 0);
+    auto const child = fork();
+    REQUIRE(child >= 0);
+    if(child == 0)
+    {
+      close(said[0]);
+      auto const quiet = open("/dev/null", O_WRONLY);
+      dup2(quiet, STDOUT_FILENO);
+      dup2(said[1], STDERR_FILENO);
+      rlimit const no_core{};
+      setrlimit(RLIMIT_CORE, &no_core);
+      std::signal(SIGABRT, SIG_DFL);
+      alarm(10);
+      std::latch registered{1};
+      rig        r{.members = sleeper_and_runner()};
+      r.arrival = [&registered](std::size_t) { registered.wait(); };
+      r.build(variants()[0]);
+      if(on_host_thread)
+      {
+        core::host_future<core::pause> pending;
+        {
+          auto const held = r.sys->lock();
+          pending         = r.sys->resume(held, core::sys_time{ms_ps});
+        }
+        pending.on_done([&r]() noexcept { r.sys.reset(); });
+        registered.count_down();
+        std::this_thread::sleep_for(std::chrono::seconds{20});
+      }
+      else
+      {
+        registered.count_down();
+        auto const held_host = r.members[0].on->lock();
+        r.sys.reset();
+      }
+      _exit(0);
+    }
+    close(said[1]);
+    death                  out;
+    std::array<char, 4096> chunk{};
+    for(;;)
+    {
+      auto const got = read(said[0], chunk.data(), chunk.size());
+      if(got <= 0)
+      {
+        break;
+      }
+      out.said.append(chunk.data(), static_cast<std::size_t>(got));
+    }
+    close(said[0]);
+    int status = 0;
+    REQUIRE(waitpid(child, &status, 0) == child);
+    REQUIRE(WIFSIGNALED(status));
+    out.signal = WTERMSIG(status);
+    return out;
+  };
+  constexpr std::string_view host_thread = ": not detail::on_host_thread\n";
+  constexpr std::string_view host_locks  = ": detail::host_locks_held == 0\n";
+  auto const                 on_host     = dies(true);
+  CHECK(on_host.signal == SIGABRT);
+  CHECK(on_host.said.contains(host_thread));
+  CHECK_FALSE(on_host.said.contains(host_locks));
+  auto const under_lock = dies(false);
+  CHECK(under_lock.signal == SIGABRT);
+  CHECK(under_lock.said.contains(host_locks));
+  CHECK_FALSE(under_lock.said.contains(host_thread));
 }
 
 TEST_CASE("a halted member whose next event lies past the barrier runs no slice per window")

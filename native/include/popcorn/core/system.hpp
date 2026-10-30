@@ -188,9 +188,9 @@ public:
       std::move_only_function<void(std::size_t)> before_sleep   = {}) pre(not members.empty())
       pre(not links.empty());
 
-  /** @brief Closes, waits for every member to park, then unlinks the hosts. Not on a host
-   * thread, holding no host mutex. */
-  ~system();
+  /** @brief Closes, waits for every member to park and for the last pause's callbacks to
+   *         return, then unlinks the hosts. Not on a host thread, holding no host mutex. */
+  ~system() pre(not detail::on_host_thread) pre(detail::host_locks_held == 0);
   /** @brief Not copyable. */
   system(system const&) = delete;
   /** @brief Not copy-assignable. */
