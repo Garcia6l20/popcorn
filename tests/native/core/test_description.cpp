@@ -116,7 +116,8 @@ TEST_CASE("optional members and every effect round-trip")
       true,
       popcorn::address{0x2000'0000},
       std::string{"TIM1"},
-      std::vector<popcorn::region_content>{{.offset = 0x10, .data = {0x00, 0x04}}}
+      std::vector<popcorn::region_content>{{.offset = 0x10, .data = {0x00, 0x04}}},
+      std::uint8_t{0}
   });
   popcorn::peripheral_desc sec;
   sec.name     = "SEC_TIM1";

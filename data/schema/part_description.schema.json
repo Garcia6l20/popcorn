@@ -340,6 +340,11 @@
         "controller": {
           "type": "string"
         },
+        "fill": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
         "kind": {
           "$ref": "#/$defs/region_kind"
         },

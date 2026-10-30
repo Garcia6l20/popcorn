@@ -239,7 +239,8 @@ auto bit_band(std::string name, address start, address physical) -> popcorn::reg
       .secure     = false,
       .physical   = physical,
       .controller = std::nullopt,
-      .content    = std::nullopt
+      .content    = std::nullopt,
+      .fill       = std::nullopt
   };
 }
 

@@ -102,6 +102,7 @@ class PatchMemory:
     add: list[RegionDesc] | None = None
     controller: dict[str, str] | None = None
     eeprom: PatchEeprom | None = None
+    fill: dict[str, int] | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -292,6 +293,7 @@ class PatchReport:
     core_fields_set: int = 0
     regions_added: int = 0
     controllers_set: int = 0
+    fills_set: int = 0
     signature_words: int = 0
 
 
@@ -1208,8 +1210,8 @@ def _apply_memory(
     *,
     file: str,
 ) -> None:
-    if not rule.add and not rule.controller and rule.eeprom is None:
-        raise DescriptionError(file, 0, "memory", "an add, eeprom or a controller entry")
+    if not rule.add and not rule.controller and rule.eeprom is None and not rule.fill:
+        raise DescriptionError(file, 0, "memory", "an add, eeprom, controller or fill entry")
     for added in rule.add or []:
         _add_region(added, regions, report, file=file, key=f"memory.add.{added.name}")
     controllers = dict(rule.controller or {})
@@ -1254,6 +1256,17 @@ def _apply_memory(
             )
         region.controller = peripheral
         report.controllers_set += 1
+    for name, value in (rule.fill or {}).items():
+        key = f"memory.fill.{name}"
+        region = by_name.get(name)
+        if region is None:
+            raise DescriptionError(file, 0, key, "an existing region")
+        if region.kind is not RegionKind.ROM or region.physical is not None:
+            raise DescriptionError(file, 0, key, "a rom region that is not an alias")
+        if not 0 <= value <= 0xFF:
+            raise DescriptionError(file, 0, key, "a byte value, 0 to 255")
+        region.fill = value
+        report.fills_set += 1
 
 
 def _add_content(region: RegionDesc, offset: int, data: bytes, *, file: str, key: str) -> None:

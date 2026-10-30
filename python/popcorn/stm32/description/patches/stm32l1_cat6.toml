@@ -15,8 +15,9 @@ source = "RM0038 Rev 18, 3.1 and Table 51: the CubeMX parts of Cat.6 list no FSM
 drop = ["SDIO"]
 
 [memory]
-source = "RM0038 Rev 18, 3.2 Table 12 and 3.4: the flash interface programs and erases both banks, the family patch gives the first bank its controller"
+source = "RM0038 Rev 18, 3.2 Table 12 and 3.4: the flash interface programs and erases both banks, the family patch gives the first bank its controller and its erased value 0, the second bank takes the same"
 controller = { Flash_Bank2 = "FLASH" }
+fill = { Flash_Bank2 = 0 }
 
 [cmsis]
 suffix = "xdx"

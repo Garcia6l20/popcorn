@@ -13,6 +13,7 @@ stm32 = [
         "caches.cpp",
         "pwr.cpp",
         "flash.cpp",
+        "flash_l1.cpp",
         "gpio.cpp",
         "exti.cpp",
         "exti_classic.cpp",

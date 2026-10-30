@@ -32,7 +32,7 @@ struct builtin
   flash_variant    flash         = {};
 };
 
-constexpr std::array<builtin, 82> builtins{
+constexpr std::array<builtin, 87> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -84,6 +84,26 @@ constexpr std::array<builtin, 82> builtins{
          .flash           = flash_8bit},
      {"flash", "v1.0.0_U5_Cube", [](board const& b) { return flash_factory(b.flash); }},
      {"flash", "v1.0.0_H5_Cube", [](board const& b) { return flash_h5_factory(b.flash); }},
+     {.ip              = "Flash",
+         .ip_version_glob = "STM32L1_flash_cat1",
+         .make            = [](board const&) { return flash_l1_factory(l1_flash_cat1); },
+         .part_glob       = "STM32L1*"},
+     {.ip              = "Flash",
+         .ip_version_glob = "STM32L1_flash_cat2",
+         .make            = [](board const&) { return flash_l1_factory(l1_flash_cat2); },
+         .part_glob       = "STM32L1*"},
+     {.ip              = "Flash",
+         .ip_version_glob = "STM32L1_flash_cat3",
+         .make            = [](board const&) { return flash_l1_factory(l1_flash_cat3); },
+         .part_glob       = "STM32L1*"},
+     {.ip              = "Flash",
+         .ip_version_glob = "STM32L1_flash_cat46",
+         .make            = [](board const&) { return flash_l1_factory(l1_flash_cat46); },
+         .part_glob       = "STM32L1*"},
+     {.ip              = "Flash",
+         .ip_version_glob = "STM32L1_flash_cat5",
+         .make            = [](board const&) { return flash_l1_factory(l1_flash_cat5); },
+         .part_glob       = "STM32L1*"},
      {.ip              = "GPIO",
          .ip_version_glob = "STM32U5x_gpio_*",
          .make            = [](board const&) { return gpio_factory(u575_gpio); },

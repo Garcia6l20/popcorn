@@ -358,6 +358,7 @@ TEST_CASE("a description alias never lands in the scratch region")
       .physical   = arena,
       .controller = std::nullopt,
       .content    = std::nullopt,
+      .fill       = std::nullopt,
   });
   CHECK(
       config_key([&] {

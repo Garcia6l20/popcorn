@@ -2302,7 +2302,8 @@ auto u575_bit_band() -> popcorn::part_description const&
         .secure     = false,
         .physical   = 0x2000'0000,
         .controller = std::nullopt,
-        .content    = std::nullopt
+        .content    = std::nullopt,
+        .fill       = std::nullopt
     });
     return desc;
   }();

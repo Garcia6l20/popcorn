@@ -116,7 +116,7 @@ def _dump_regions(description: PartDescription) -> str:
         lines.append(
             f"G {r.name} {r.start:#010x} {r.size:#010x} {r.kind.value} "
             f"{int(r.acc.read)} {int(r.acc.write)} {int(r.acc.execute)} {int(r.secure)} {physical} "
-            f"{content}"
+            f"{content}{f' fill {r.fill:#04x}' if r.fill is not None else ''}"
         )
     return "\n".join(lines) + "\n"
 

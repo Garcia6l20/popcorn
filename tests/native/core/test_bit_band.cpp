@@ -68,6 +68,7 @@ auto band(std::string name, address start, address physical) -> region_desc
       .physical   = physical,
       .controller = std::nullopt,
       .content    = std::nullopt,
+      .fill       = std::nullopt,
   };
 }
 

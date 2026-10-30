@@ -185,7 +185,7 @@ Source: [gpio.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 
 ## FLASH
 
-Source: [flash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/flash.cpp)
+Source: [flash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/flash.cpp), [flash_l1.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/flash_l1.cpp)
 
 Not modelled:
 
@@ -237,6 +237,36 @@ Differs from RM0481:
 - A program over a word that is not erased writes the new data as given.
 - Without TrustZone the FLASH_PRIVBBxRy bits are stored and gate no access. RM0481 3.7.2 keeps
   the privileged protection with TZEN = 0xC3.
+
+On the STM32L1, RM0038 section 3:
+
+- A program memory word write holds BSY for one tprog of 3.28 ms, the datasheet typical, and
+  the word reads its new value from the store on. Code and data reads of the bank complete
+  during BSY, and the core keeps running from it. RM0038 3.4.3 stalls code run from the bank
+  for one tprog.
+- A store while BSY is set is decided against FLASH_PECR at its own time, writes its word at once
+  and adds one tprog to BSY. EOP sets at the end of each tprog. Silicon stalls the store until
+  the program before it ends.
+- A program over a word that is not erased writes the word as given. A never-programmed word
+  reads 0, the erased value.
+- A store with FLASH_PECR.ERASE or FPRG set programs nothing, logs one `model_warning` and raises
+  `ModelError` under `strict`. A store to the data EEPROM or the option bytes is a bus error.
+- A program in voltage range 3 completes, logs one `model_warning` and raises `ModelError` under
+  `strict`. RM0038 3.6 allows programming in ranges 1 and 2 only.
+- FLASH_ACR.RUN_PD powers nothing down: the flash stays readable and fetchable, and
+  FLASH_SR.READY reads the inverse of RUN_PD. SLEEP_PD and PRFTEN are storage.
+- FLASH_PECR.OBL_LAUNCH is stored while OPTLOCK is clear and loads no option byte. FLASH_OBR and
+  FLASH_WRPRx read their description reset and protect no sector.
+- An RCC FLITFRST pulse resets the FLASH registers only while FLASH_ACR.RUN_PD is set, RM0038
+  6.3.5. While FLITFRST is held, FLASH register writes are ignored whatever RUN_PD holds.
+- A supply cut during a program leaves the word as the store wrote it.
+- Inferred rules: a wrong key, a third key write after the unlock, or a write to FLASH_PRGKEYR or
+  FLASH_OPTKEYR while PELOCK is set is a bus error that sets the lock it targets until the next
+  reset, a rejected FLASH_PEKEYR write also sets PRGLOCK and OPTLOCK, a wrong FLASH_PDKEYR key
+  restarts the sequence, RUN_PD takes only the first FLASH_ACR write after the PDKEYR pair, a
+  FLASH_ACR write that changes ACC64 keeps LATENCY and PRFTEN, so ACC64 clears while LATENCY or
+  PRFTEN is 1, a byte or halfword store to program memory sets SIZERR and an unaligned word store
+  PGAERR, and FLASH_SR.READY reads 1 after a reset, where RM0038 3.9.7 gives 0.
 
 ## GPDMA and LPDMA
 

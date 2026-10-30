@@ -247,6 +247,9 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] region_desc
   /** @brief Bytes the region holds from power-on, such as a factory-programmed device
    * signature, in offset order and not overlapping. Only on a rom region without physical. */
   std::optional<std::vector<region_content>> content;
+  /** @brief Byte every address of the region holds from power-on where no content gives one, the
+   * erased value of a flash. Without it a rom region holds 0xFF and a ram region 0. */
+  std::optional<std::uint8_t> fill;
 
   /** @brief Member-wise equality. */
   friend auto operator==(region_desc const&, region_desc const&) -> bool = default;

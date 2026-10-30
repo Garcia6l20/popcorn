@@ -83,6 +83,12 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto flash_h5_factory(flash_options options) -> model_factory;
 
 /**
+ * @brief Factory of the STM32L1 FLASH and data EEPROM model, RM0038 section 3.
+ * @param traits What differs between the categories the row serves.
+ */
+[[nodiscard]] auto flash_l1_factory(flash_l1_traits traits) -> model_factory;
+
+/**
  * @brief The FLASH variant of the model row that serves a unit of @p part.
  * @param part Description the machine is built from.
  * @param unit FLASH unit of @p part.

@@ -550,7 +550,7 @@ TEST_CASE("every RCC reset bit of the L1 parts names an instance and holds it in
           auto const found = stm32::reset_bit_of(rcc, peripheral.name);
           return found and found->field == bits.name;
         });
-        CHECK((owner != part->peripherals.end() or bits.name == "FLITFRST"));
+        CHECK(owner != part->peripherals.end());
       }
     }
   }
@@ -577,7 +577,7 @@ TEST_CASE("no L1 instance is served by a U5 or H5 row: only the L1 rows attach")
         attached.insert(name);
       }
     }
-    std::set<std::string> expected{"PWR", "RCC", "EXTI", "SYSCFG", "DBGMCU"};
+    std::set<std::string> expected{"PWR", "RCC", "EXTI", "SYSCFG", "DBGMCU", "FLASH"};
     for(auto const& peripheral : part->peripherals)
     {
       if(peripheral.name.starts_with("GPIO"))

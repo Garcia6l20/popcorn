@@ -22,26 +22,15 @@ inline constexpr std::array<std::string_view, 8> reset_registers{
  *         STM32U5 RM0456 11.8.21 to 11.8.28, the STM32H5 RM0481 11.8.19 to 11.8.25 and the
  *         STM32L1 RM0038 6.3.6. A name found in no reset register of a part falls back to
  *         `<instance>RST`. */
-inline constexpr std::array<std::pair<std::string_view, std::string_view>, 18> reset_bit_names{
+inline constexpr std::array<std::pair<std::string_view, std::string_view>, 19> reset_bit_names{
     {
-     {"ADC", "ADC1RST"},
-     {"ADC1", "ADC12RST"},
-     {"ADC12", "ADC12RST"},
-     {"ADC2", "ADC12RST"},
-     {"ADCC", "ADC12RST"},
-     {"OTG_FS", "OTGRST"},
-     {"USB", "USBFSRST"},
-     {"DCMI", "DCMI_PSSIRST"},
-     {"PSSI", "DCMI_PSSIRST"},
-     {"VREFBUF", "VREFRST"},
-     {"FMC", "FSMCRST"},
-     {"LPUART", "LPUART1RST"},
-     {"DAC", "DAC12RST"},
-     {"FDCAN1", "FDCAN12RST"},
-     {"FDCAN2", "FDCAN12RST"},
-     {"OCTOSPI", "OCTOSPI1RST"},
-     {"UCPD1", "UCPDRST"},
-     {"I3C", "I3C1RST"},
+     {"ADC", "ADC1RST"},         {"ADC1", "ADC12RST"},     {"ADC12", "ADC12RST"},
+     {"ADC2", "ADC12RST"},       {"ADCC", "ADC12RST"},     {"OTG_FS", "OTGRST"},
+     {"USB", "USBFSRST"},        {"DCMI", "DCMI_PSSIRST"}, {"PSSI", "DCMI_PSSIRST"},
+     {"VREFBUF", "VREFRST"},     {"FMC", "FSMCRST"},       {"LPUART", "LPUART1RST"},
+     {"DAC", "DAC12RST"},        {"FDCAN1", "FDCAN12RST"}, {"FDCAN2", "FDCAN12RST"},
+     {"OCTOSPI", "OCTOSPI1RST"}, {"UCPD1", "UCPDRST"},     {"I3C", "I3C1RST"},
+     {"FLASH", "FLITFRST"},
      }
 };
 

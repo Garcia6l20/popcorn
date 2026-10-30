@@ -88,7 +88,7 @@ auto allocate(region_desc const& region) -> std::shared_ptr<host_buffer>
       static_cast<std::byte*>(::operator new[](region.size, host_alignment))};
   std::ranges::fill_n(
       buffer->bytes.get(), region.size,
-      region.kind == region_kind::rom ? std::byte{0xff} : std::byte{0});
+      std::byte{region.fill.value_or(region.kind == region_kind::rom ? 0xff : 0)});
   if(region.content)
   {
     for(auto const& piece : *region.content)
@@ -145,6 +145,7 @@ auto machine::mapped_region::scratch_region(
       .physical   = std::nullopt,
       .controller = std::nullopt,
       .content    = std::nullopt,
+      .fill       = std::nullopt,
   });
   auto const* const desc  = owned.get();
   return std::make_unique<mapped_region>(

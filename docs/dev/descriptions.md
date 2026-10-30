@@ -335,6 +335,21 @@ The size is a whole number of 1 KB pages, or the build raises `DescriptionError`
 `memory.eeprom`, as it does for a part without the element, for a range that overlaps another
 region, and for a `controller` table entry naming `DATA_EEPROM` beside the `eeprom` one.
 
+## Erased value
+
+A region holds 0xFF bytes from power-on when it is `rom` and 0 when it is `ram`, where no
+`content` gives a byte. `[memory] fill` sets another byte for a `rom` region that is not an
+alias, the erased value of a flash that erases to 0:
+
+```toml
+[memory]
+source = "RM0038 Rev 18, 3.4.2: a page erase writes 0"
+fill = { Flash = 0 }
+```
+
+The build raises `DescriptionError` keyed `memory.fill.<region>` for a region the description
+lacks, a region of another kind or an alias, and a value outside 0 to 255.
+
 ## CMSIS header names
 
 `[cmsis] suffix = "xe"` in a patch names the CMSIS device header `<line>xe.h`, `stm32l152xe.h`

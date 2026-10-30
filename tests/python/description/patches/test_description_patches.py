@@ -967,6 +967,56 @@ def test_memory_controller_refuses_a_bad_region_or_peripheral(
     assert target == before
 
 
+def _fill_patch(tmp_path: Path, fill: str, *entries: str) -> Path:
+    lines = ",\n".join(f"  {entry}" for entry in entries)
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+[memory]
+source = "probe"
+fill = {{ {fill} }}
+add = [
+{lines}
+]
+"""
+    return _write_patch(tmp_path, text)
+
+
+def test_memory_fill_sets_the_erased_byte_of_a_rom_region(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    path = _fill_patch(tmp_path, "OTP = 0", _OTP)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fills_set == 1
+    assert [(r.name, r.fill) for r in target.regions] == [("SRAM", None), ("OTP", 0)]
+
+
+@pytest.mark.parametrize(
+    ("fill", "region", "reason"),
+    [
+        ("NOWHERE = 0", "NOWHERE", "an existing region"),
+        ("SRAM = 0", "SRAM", "a rom region that is not an alias"),
+        ("OTP_S = 0", "OTP_S", "a rom region that is not an alias"),
+        ("OTP = 256", "OTP", "a byte value, 0 to 255"),
+    ],
+)
+def test_memory_fill_refuses_a_bad_region_or_value(
+    tmp_path: Path, fill: str, region: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    before = copy.deepcopy(target)
+    path = _fill_patch(tmp_path, fill, _OTP, _OTP_ALIAS)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.file == str(path)
+    assert excinfo.value.key == f"memory.fill.{region}"
+    assert excinfo.value.expected == reason
+    assert target == before
+
+
 def test_memory_controller_refuses_a_bit_band_region(tmp_path: Path) -> None:
     target = _synthetic_target()
     target.regions = [copy.deepcopy(_RAM)]
@@ -1024,7 +1074,7 @@ add = [{_OTP}]
     assert excinfo.value.expected == "a peripheral of the description that is not an alias"
 
 
-def test_memory_without_add_or_controller_is_refused(tmp_path: Path) -> None:
+def test_memory_without_add_controller_or_fill_is_refused(tmp_path: Path) -> None:
     text = """
 format = 1
 [match]
@@ -1037,7 +1087,7 @@ source = "probe"
     with pytest.raises(DescriptionError) as excinfo:
         apply_patches(patches, _synthetic_target())
     assert excinfo.value.key == "memory"
-    assert excinfo.value.expected == "an add, eeprom or a controller entry"
+    assert excinfo.value.expected == "an add, eeprom, controller or fill entry"
 
 
 def test_memory_controller_refuses_an_alias(tmp_path: Path) -> None:

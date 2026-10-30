@@ -150,6 +150,7 @@ class RegionDesc:
     secure: bool
     content: list[RegionContent] | None = None
     controller: str | None = None
+    fill: int | None = field(default=None, metadata={"minimum": 0, "maximum": 255})
     physical: int | None = field(default=None, metadata={"minimum": 0, "maximum": 4294967295})
 
 

@@ -97,7 +97,8 @@ auto with_nsc_ram() -> popcorn::part_description
       .secure     = true,
       .physical   = std::nullopt,
       .controller = std::nullopt,
-      .content    = std::nullopt
+      .content    = std::nullopt,
+      .fill       = std::nullopt
   });
   return desc;
 }

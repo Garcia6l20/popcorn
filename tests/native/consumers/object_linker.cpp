@@ -30,6 +30,7 @@ auto with_linker_regions(part_description description) -> part_description
       .physical   = std::nullopt,
       .controller = std::nullopt,
       .content    = std::nullopt,
+      .fill       = std::nullopt,
   });
   description.regions.push_back({
       .name       = "arena",
@@ -41,6 +42,7 @@ auto with_linker_regions(part_description description) -> part_description
       .physical   = std::nullopt,
       .controller = std::nullopt,
       .content    = std::nullopt,
+      .fill       = std::nullopt,
   });
   return description;
 }

@@ -182,6 +182,43 @@ inline constexpr syscfg_classic_traits l1_syscfg_cat12{
     .remap_register       = "MEMRMP",
     .storage_registers    = l1_syscfg_storage};
 
+/** @brief Differences between the STM32L1 FLASH controllers the model rows serve, by the
+ *         `STM32L1_flash_<category>` version the category patches set. */
+struct flash_l1_traits
+{
+  /** @brief Highest HCLK in kHz at 0 and 1 wait state in voltage ranges 1, 2 and 3, RM0038
+   *         Table 13. */
+  std::array<std::array<std::uint32_t, 2>, 3> max_khz;
+  /** @brief Whether the part has two banks, FLASH_PECR.PARALLELBANK, RM0038 3.9.2. */
+  bool dual_bank = false;
+  /** @brief FLASH_WRPRx registers the category has, RM0038 3.9.9. */
+  std::uint8_t wrp_registers = 1;
+};
+
+/** @brief Table 13 on Cat.2 to Cat.6: Range 3 up to 4.2 MHz at 0 WS and 8 MHz at 1 WS. */
+inline constexpr std::array<std::array<std::uint32_t, 2>, 3> l1_flash_wait_khz{
+    {{16'000, 32'000}, {8'000, 16'000}, {4'200, 8'000}}
+};
+/** @brief STM32L1 Cat.1, `STM32L1_flash_cat1`: Range 3 up to 2.1 MHz at 0 WS and 4.2 MHz at
+ *         1 WS, RM0038 Table 13. */
+inline constexpr flash_l1_traits l1_flash_cat1{
+    .max_khz = {{{16'000, 32'000}, {8'000, 16'000}, {2'100, 4'200}}}};
+/** @brief STM32L1 Cat.2, `STM32L1_flash_cat2`. */
+inline constexpr flash_l1_traits l1_flash_cat2{.max_khz = l1_flash_wait_khz};
+/** @brief STM32L1 Cat.3, `STM32L1_flash_cat3`: FLASH_WRPR2. */
+inline constexpr flash_l1_traits l1_flash_cat3{.max_khz = l1_flash_wait_khz, .wrp_registers = 2};
+/** @brief STM32L1 Cat.4 and Cat.6, `STM32L1_flash_cat46`: two banks, FLASH_WRPR2 and
+ *         FLASH_WRPR3. */
+inline constexpr flash_l1_traits l1_flash_cat46{
+    .max_khz       = l1_flash_wait_khz,
+    .dual_bank     = true,
+    .wrp_registers = 3};
+/** @brief STM32L1 Cat.5, `STM32L1_flash_cat5`: two banks, FLASH_WRPR2 to FLASH_WRPR4. */
+inline constexpr flash_l1_traits l1_flash_cat5{
+    .max_khz       = l1_flash_wait_khz,
+    .dual_bank     = true,
+    .wrp_registers = 4};
+
 /** @brief Differences between the STM32U5 FLASH controllers the model rows serve. */
 struct flash_variant
 {
