@@ -52,6 +52,14 @@ struct i2c_read_reply
  * @brief A target on an I2C bus, addressed by its 7-bit address, driven by the I2C model of the
  *        controller it is attached to. Each call happens at the end of its bus phase. Times are
  *        the machine's virtual time since power-on, which a system reset does not restart.
+ *
+ *        Every attached target whose matches() is true takes part in a transfer, and the I2C
+ *        model combines their answers as the open-drain bus does: the address or a written byte
+ *        is acknowledged when one target acknowledges it, a read byte is the bitwise AND of the
+ *        bytes the targets that acknowledged the address send, the stretch is the longest, and
+ *        the error is the one of the first target in attachment order whose answer carries one.
+ *        The model calls matches(), start_address() and read_acked(), whose defaults call
+ *        address(), start() and read().
  */
 class POPCORN_API i2c_target
 {
@@ -97,7 +105,52 @@ public:
   [[nodiscard]] virtual auto read(vtime at) -> i2c_read_reply = 0;
 
   /**
-   * @brief A STOP ended the transfer the target took part in.
+   * @brief The address phase observer: a 7-bit address phase to @p address ended on the bus, and
+   *        the result says whether the target takes part in it. The I2C model calls it exactly
+   *        once per address phase for each attached target, in attachment order, so a target may
+   *        use it to observe every address phase, those to other addresses included. The default
+   *        compares @p address with address().
+   * @param address The 7-bit address the controller sent.
+   * @param at Virtual time since power-on at the end of the address byte.
+   * @return Whether the target answers the address phase.
+   */
+  [[nodiscard]] virtual auto matches(std::uint8_t address, [[maybe_unused]] vtime at) -> bool
+  {
+    return this->address() == address;
+  }
+
+  /**
+   * @brief A START or repeated START addressed the target, which matches() accepted. The default
+   *        calls start().
+   * @param address The 7-bit address the controller sent.
+   * @param read Whether the controller reads from the target.
+   * @param at Virtual time since power-on at the end of the address byte.
+   * @return Whether the target acknowledges the address, and the error the address byte ends
+   *         with.
+   */
+  [[nodiscard]] virtual auto
+      start_address([[maybe_unused]] std::uint8_t address, bool read, vtime at) -> i2c_reply
+  {
+    return start(read, at);
+  }
+
+  /**
+   * @brief The controller reads one byte from the target and acknowledges it or not at its
+   *        ninth clock. The default calls read().
+   * @param at Virtual time since power-on at the end of the byte.
+   * @param ack Whether the controller acknowledges the byte: false for the last byte of its
+   *        transfer.
+   * @return The byte the target sends, and the error the byte ends with.
+   */
+  [[nodiscard]] virtual auto read_acked(vtime at, [[maybe_unused]] bool ack) -> i2c_read_reply
+  {
+    return read(at);
+  }
+
+  /**
+   * @brief A STOP ended the transfer the target took part in. A transfer runs from its START to
+   *        its STOP across every repeated START, so a target an earlier address of the transfer
+   *        matched hears the STOP too.
    * @param at Virtual time since power-on of the STOP condition.
    */
   virtual void stop(vtime at) = 0;

@@ -150,6 +150,19 @@ auto eeprom_24xx::address() const -> std::uint8_t
   return impl_->options.address;
 }
 
+auto eeprom_24xx::matches(std::uint8_t sent, vtime) -> bool
+{
+  auto& self = *impl_;
+  if(sent == self.options.address)
+  {
+    return true;
+  }
+  self.state.buffer.clear();
+  self.state.data_count = 0;
+  self.enter(phase::idle);
+  return false;
+}
+
 auto eeprom_24xx::start(bool read, vtime at) -> i2c_reply
 {
   auto& self = *impl_;

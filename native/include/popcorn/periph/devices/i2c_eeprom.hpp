@@ -41,7 +41,10 @@ struct eeprom_24xx_options
  *        virtual time the device acknowledges neither its address nor anything else, the
  *        acknowledge polling of 24xx drivers. A read transfer returns bytes from the address
  *        pointer, which advances and wraps from the last byte to 0. A write of the word address
- *        only, then a repeated START in read, is a random read. Not modelled: write protection,
+ *        only, then a repeated START in read, is a random read. A START or repeated START to
+ *        another address ends the operation in progress with no write cycle, as a Start ends the
+ *        write operation in Microchip 24AA256/24LC256/24FC256 DS20001203W section 8.2 "Random
+ *        Read", so the STOP of that transfer commits nothing. Not modelled: write protection,
  *        identification pages, the chip address bits some small parts take from the word
  *        address.
  */
@@ -59,6 +62,11 @@ public:
   ~eeprom_24xx() override;
 
   [[nodiscard]] auto address() const -> std::uint8_t override;
+  /**
+   * @brief Whether @p sent is the device's address. Any other address ends the operation in
+   *        progress, which the device sees on the bus, without a write cycle.
+   */
+  [[nodiscard]] auto matches(std::uint8_t sent, vtime at) -> bool override;
   [[nodiscard]] auto start(bool read, vtime at) -> i2c_reply override;
   [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> i2c_reply override;
   [[nodiscard]] auto read(vtime at) -> i2c_read_reply override;

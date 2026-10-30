@@ -69,10 +69,10 @@ struct board
    * instance with one takes no device in `spi`. Shared as the devices are. */
   std::map<std::string, std::shared_ptr<spi_controller_sink>, std::less<>> spi_controllers{};
   /** @brief Targets on each I2C instance by instance name, such as `I2C1`. The I2C model copies
-   * the list when the machine is built, addresses the first target answering an address, saves
-   * and loads each target with its own state, and resets it with the machine. A target object is
-   * shared by every machine built from these factories: give each machine its own board and
-   * targets. */
+   * the list when the machine is built, sends each address to every target whose matches()
+   * accepts it, as the class doc of i2c_target states, saves and loads each target with its own
+   * state, and resets it with the machine. A target object is shared by every machine built from
+   * these factories: give each machine its own board and targets. */
   std::map<std::string, std::vector<std::shared_ptr<i2c_target>>, std::less<>> i2c{};
   /** @brief The controller addressing each I2C instance in target mode, by instance name. An
    * instance with one takes no target in `i2c`. Shared as the targets are. */

@@ -84,7 +84,8 @@ Each `m.description.peripherals` entry has `register(name)`, which finds a regis
 A device is a class that gets bus events from a built-in I2C, SPI or UART model:
 
 - `popcorn.board.I2CTarget` answers an I2C address. `on_start(read, at)` ACKs or NACKs, and
-  `on_write(byte, at)` and `on_read(at)` exchange the bytes.
+  `on_write(byte, at)` and `on_read(at)` exchange the bytes. Targets on one address answer
+  together, as the open-drain bus combines them: an ACK from one acknowledges, read bytes AND.
 - `popcorn.board.SpiTarget` answers an SPI transfer behind a chip select. `on_select(selected,
   at)` sees the chip select edges and `on_exchange(out, bits, at)` each frame, full duplex.
 - The host end of a UART is `m.periph.USART1.port`, used from the test as in

@@ -1116,33 +1116,6 @@ TEST_CASE("an event of a transfer PE ended does not complete one started on a st
   CHECK(b.get("ISR", "BUSY") == 1);
 }
 
-TEST_CASE("a repeated START to another target leaves the table write pending until its next STOP")
-{
-  rig r{"idle"};
-  bus b{*r.f};
-  b.controller();
-  b.command(0x38, 3, false, false);
-  b.run_until(b.now() + address_ps + period_ps / 2);
-  b.send(0x00);
-  b.send(0x07);
-  b.run_until(b.now() + byte_ps);
-  b.send(0x99);
-  b.run_until(b.now() + 2 * byte_ps + period_ps / 2);
-  REQUIRE(b.get("ISR", "TC") == 1);
-  b.command(0x50, 1, true, true);
-  b.run_until(b.now() + address_ps + byte_ps + period_ps + period_ps / 2);
-  REQUIRE(b.get("ISR", "STOPF") == 1);
-  CHECK(r.memory->events.front().kind == 'R');
-  CHECK(r.memory->events.back().kind == 'P');
-  CHECK(r.table->events.back().kind == 'w');
-  CHECK(r.script->writes().empty());
-  b.set("ICR", "STOPCF", 1);
-  b.command(0x38, 0, false, true);
-  b.run_until(b.now() + address_ps + period_ps + period_ps / 2);
-  REQUIRE(r.script->writes().size() == 1);
-  CHECK(r.script->writes()[0] == devices::table_write{.reg = 0x07, .bytes = {0x99}});
-}
-
 TEST_CASE("TXIS stays low during TCR and comes back once NBYTES is written again")
 {
   rig r{"idle"};
@@ -2112,12 +2085,14 @@ struct target_part
   std::string_view enable;
   std::string_view reset;
   std::uint32_t    event_irq;
+  bool             autocr;
 };
 
 constexpr std::array<target_part, 2> target_parts{
     {
-     {"STM32U575", &u575, "i2c_ll", "RCC_APB1ENR1", "RCC_APB1RSTR1", 55},
-     {"STM32H573", &popcorn::testing::h573, "h573_i2c_ll", "RCC_APB1LENR", "RCC_APB1LRSTR", 51},
+     {"STM32U575", &u575, "i2c_ll", "RCC_APB1ENR1", "RCC_APB1RSTR1", 55, true},
+     {"STM32H573", &popcorn::testing::h573, "h573_i2c_ll", "RCC_APB1LENR", "RCC_APB1LRSTR", 51,
+         false},
      }
 };
 
@@ -4996,12 +4971,14 @@ TEST_CASE("an unmodelled controller field at a START logs once, strict refuses a
       for(bool const strict : {false, true})
       {
         CAPTURE(strict);
-        timer_rig  r{part, strict};
-        auto const b = r.b();
-        if(popcorn::find_register(r.f->target->peripheral("I2C1").description(), reg) == nullptr)
+        if(reg == "I2C_AUTOCR" and not part.autocr)
         {
           continue;
         }
+        timer_rig  r{part, strict};
+        auto const b = r.b();
+        REQUIRE(
+            popcorn::find_register(r.f->target->peripheral("I2C1").description(), reg) != nullptr);
         auto const extra = reg == "CR2" ? add10_bit : 0u;
         if(reg != "CR2")
         {
@@ -5550,5 +5527,571 @@ TEST_CASE(
     CHECK(r.get("ISR", "TIMEOUT") == 0);
     r.run_until(second + limit + us);
     CHECK(r.get("ISR", "TIMEOUT") == 1);
+  }
+}
+
+namespace
+{
+class voter final : public periph::i2c_target
+{
+public:
+  explicit voter(std::uint8_t own) : own_{own}
+  {}
+
+  std::optional<std::uint8_t> live;
+  bool                        ack_address{true};
+  std::uint8_t                byte{0xFF};
+  std::uint64_t               stretch_ps{};
+  periph::i2c_error           error{};
+  std::uint32_t               error_call{~0u};
+  std::uint32_t               calls{};
+  std::vector<bus_event>      events;
+  std::vector<std::uint64_t>  asked;
+
+  [[nodiscard]] auto address() const -> std::uint8_t override
+  {
+    return own_;
+  }
+
+  [[nodiscard]] auto matches(std::uint8_t sent, vtime at) -> bool override
+  {
+    asked.push_back(at.ps);
+    return live ? sent == *live : i2c_target::matches(sent, at);
+  }
+
+  auto start_address(std::uint8_t sent, bool read, vtime at) -> periph::i2c_reply override
+  {
+    calls = 0;
+    events.push_back({read ? 'R' : 'W', sent, at.ps});
+    return {.ack = ack_address, .error = pick(), .stretch_ps = stretch_ps};
+  }
+
+  auto start(bool, vtime at) -> periph::i2c_reply override
+  {
+    events.push_back({'S', 0, at.ps});
+    return {};
+  }
+
+  auto write(std::uint8_t value, vtime at) -> periph::i2c_reply override
+  {
+    ++calls;
+    events.push_back({'w', value, at.ps});
+    return {.ack = true, .error = pick(), .stretch_ps = stretch_ps};
+  }
+
+  auto read(vtime at) -> periph::i2c_read_reply override
+  {
+    events.push_back({'?', 0, at.ps});
+    return {};
+  }
+
+  auto read_acked(vtime at, bool ack) -> periph::i2c_read_reply override
+  {
+    ++calls;
+    events.push_back({ack ? 'a' : 'n', byte, at.ps});
+    return {.byte = byte, .error = pick(), .stretch_ps = stretch_ps};
+  }
+
+  void stop(vtime at) override
+  {
+    events.push_back({'P', 0, at.ps});
+  }
+
+  void save(std::vector<std::byte>& out) const override
+  {
+    out.push_back(static_cast<std::byte>(calls));
+  }
+
+  void load(std::span<std::byte const> in) override
+  {
+    REQUIRE(in.size() == 1);
+    calls = std::to_integer<std::uint32_t>(in.front());
+  }
+
+  [[nodiscard]] auto kinds() const -> std::string
+  {
+    std::string out;
+    for(auto const& event : events)
+    {
+      out.push_back(event.kind);
+    }
+    return out;
+  }
+
+private:
+  [[nodiscard]] auto pick() const -> periph::i2c_error
+  {
+    return calls == error_call ? error : periph::i2c_error::none;
+  }
+
+  std::uint8_t own_;
+};
+
+auto voters(std::initializer_list<std::uint8_t> owns) -> std::vector<std::shared_ptr<voter>>
+{
+  std::vector<std::shared_ptr<voter>> out;
+  for(auto const own : owns)
+  {
+    out.push_back(std::make_shared<voter>(own));
+  }
+  return out;
+}
+
+template <class Target = voter> struct fan_rig
+{
+  target_part                          part;
+  std::vector<std::shared_ptr<Target>> targets;
+  stm32::board                         board{};
+  std::unique_ptr<stm32_fixture>       f;
+
+  fan_rig(target_part const& which, std::vector<std::shared_ptr<Target>> attached)
+      : part{which}, targets{std::move(attached)}
+  {
+    for(auto const& target : targets)
+    {
+      board.i2c["I2C1"].push_back(target);
+    }
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories(board, part.desc());
+    f = std::make_unique<stm32_fixture>(part.desc(), part.firmware, std::move(options));
+    f->set("pc", sym(part.firmware, "idle"));
+    enable();
+  }
+
+  void enable() const
+  {
+    auto const on = b();
+    on.set("RCC", part.enable, "I2C1EN", 1);
+    write_timing(on);
+    on.set("CR1", "PE", 1);
+  }
+
+  [[nodiscard]] auto b() const -> bus
+  {
+    return bus{*f};
+  }
+
+  [[nodiscard]] auto period() const -> std::uint64_t
+  {
+    return kernel_ps(*f, 10);
+  }
+
+  [[nodiscard]] auto drive(std::uint64_t span, std::uint8_t first = 0x10) const
+      -> std::vector<std::uint32_t>
+  {
+    auto const                 on   = b();
+    auto                       next = first;
+    std::vector<std::uint32_t> received;
+    auto const                 until = on.now() + span;
+    for(auto at = on.now() + period() / 2; at < until; at += period() / 2)
+    {
+      on.run_until(at);
+      if(on.get("ISR", "TXIS") == 1)
+      {
+        on.send(next++);
+      }
+      if(on.get("ISR", "RXNE") == 1)
+      {
+        received.push_back(on.receive());
+      }
+    }
+    return received;
+  }
+
+  [[nodiscard]] auto model_bytes() const -> std::vector<std::byte>
+  {
+    std::vector<std::byte> out;
+    f->target->model("I2C1")->save(out);
+    return out;
+  }
+};
+}
+
+TEST_CASE(
+    "an address one target acknowledges and one refuses is acknowledged, bytes reach the first")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const refuser_first : {false, true})
+    {
+      CAPTURE(refuser_first);
+      fan_rig     r{part, voters({0x50, 0x50, 0x51})};
+      auto const& acker    = r.targets[refuser_first ? 1 : 0];
+      auto const& refuser  = r.targets[refuser_first ? 0 : 1];
+      refuser->ack_address = false;
+      r.b().command(0x50, 2, false, true);
+      std::ignore = r.drive(40 * r.period());
+      CHECK(r.b().get("ISR", "NACKF") == 0);
+      CHECK(r.b().get("ISR", "STOPF") == 1);
+      REQUIRE(acker->kinds() == "WwwP");
+      CHECK(acker->events[1].value == 0x10);
+      CHECK(acker->events[2].value == 0x11);
+      CHECK(refuser->kinds() == "WP");
+      CHECK(r.targets[2]->events.empty());
+    }
+    for(bool const refuser_first : {false, true})
+    {
+      CAPTURE(refuser_first);
+      fan_rig     r{part, voters({0x50, 0x50})};
+      auto const& acker    = r.targets[refuser_first ? 1 : 0];
+      auto const& refuser  = r.targets[refuser_first ? 0 : 1];
+      refuser->ack_address = false;
+      acker->byte          = 0xF0;
+      refuser->byte        = 0x0F;
+      r.b().command(0x50, 2, true, true);
+      CHECK(r.drive(40 * r.period()) == std::vector<std::uint32_t>{0xF0, 0xF0});
+      CHECK(acker->kinds() == "RanP");
+      CHECK(refuser->kinds() == "RP");
+    }
+    {
+      fan_rig r{part, voters({0x50, 0x50})};
+      r.targets[0]->ack_address = false;
+      r.targets[1]->ack_address = false;
+      r.b().command(0x50, 2, false, true);
+      std::ignore = r.drive(40 * r.period());
+      CHECK(r.b().get("ISR", "NACKF") == 1);
+      CHECK(r.targets[0]->kinds() == "WP");
+      CHECK(r.targets[1]->kinds() == "WP");
+    }
+  }
+}
+
+TEST_CASE("targets on one address read as the AND of their bytes, SCL held for the longer stretch")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(auto const& [read, longer_first] : {
+            std::pair{true,  false},
+            std::pair{true,  true },
+            std::pair{false, false}
+    })
+    {
+      CAPTURE(read);
+      CAPTURE(longer_first);
+      fan_rig    r{part, voters({0x50, 0x50})};
+      auto const p             = r.period();
+      r.targets[0]->byte       = 0xF0;
+      r.targets[0]->stretch_ps = (longer_first ? 5 : 3) * p;
+      r.targets[1]->byte       = 0x3C;
+      r.targets[1]->stretch_ps = (longer_first ? 3 : 5) * p;
+      r.b().command(0x50, 2, read, true);
+      auto const begun    = r.b().now();
+      auto const received = r.drive(80 * p);
+      if(read)
+      {
+        CHECK(received == std::vector<std::uint32_t>{0x30, 0x30});
+      }
+      for(auto const& target : r.targets)
+      {
+        REQUIRE(target->events.size() == 4);
+        CHECK(target->events[0].at == begun + 10 * p);
+        CHECK(target->events[1].at - target->events[0].at == 5 * p + 9 * p);
+        CHECK(target->events[2].at - target->events[1].at == 5 * p + 9 * p);
+      }
+      CHECK(r.targets[0]->kinds() == (read ? "RanP" : "WwwP"));
+      CHECK(r.targets[1]->kinds() == r.targets[0]->kinds());
+    }
+  }
+}
+
+TEST_CASE("over several targets a byte ends with the first error in attachment order")
+{
+  using periph::i2c_error;
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const swapped : {false, true})
+    {
+      CAPTURE(swapped);
+      fan_rig r{part, voters({0x50, 0x50})};
+      r.targets[0]->error      = swapped ? i2c_error::overrun : i2c_error::bus_error;
+      r.targets[0]->error_call = 1;
+      r.targets[1]->error      = swapped ? i2c_error::bus_error : i2c_error::overrun;
+      r.targets[1]->error_call = 1;
+      r.b().command(0x50, 2, false, true);
+      std::ignore = r.drive(40 * r.period());
+      CHECK(r.b().get("ISR", "BERR") == (swapped ? 0 : 1));
+      CHECK(r.b().get("ISR", "OVR") == (swapped ? 1 : 0));
+      CHECK(r.targets[0]->kinds() == "WwwP");
+    }
+    {
+      fan_rig r{part, voters({0x50, 0x50})};
+      r.targets[1]->error      = i2c_error::arbitration_lost;
+      r.targets[1]->error_call = 0;
+      r.b().command(0x50, 2, false, true);
+      std::ignore = r.drive(40 * r.period());
+      CHECK(r.b().get("ISR", "ARLO") == 1);
+      CHECK(r.b().get("ISR", "NACKF") == 0);
+      CHECK(r.b().get("ISR", "STOPF") == 0);
+      CHECK(r.targets[0]->kinds() == "WP");
+      CHECK(r.targets[1]->kinds() == "WP");
+    }
+    {
+      fan_rig r{part, voters({0x50, 0x50})};
+      r.targets[0]->error      = i2c_error::bus_error;
+      r.targets[0]->error_call = 0;
+      r.targets[1]->error      = i2c_error::arbitration_lost;
+      r.targets[1]->error_call = 0;
+      r.b().command(0x50, 1, false, true);
+      std::ignore = r.drive(40 * r.period());
+      CHECK(r.b().get("ISR", "BERR") == 1);
+      CHECK(r.b().get("ISR", "ARLO") == 0);
+      CHECK(r.targets[1]->kinds() == "WwP");
+    }
+  }
+}
+
+TEST_CASE("a target matching a live address is selected with the address sent, its address() not")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    fan_rig r{part, voters({0x50, 0x50})};
+    r.targets[0]->live = 0x61;
+    r.b().command(0x61, 1, false, true);
+    std::ignore = r.drive(30 * r.period());
+    REQUIRE(r.targets[0]->kinds() == "WwP");
+    CHECK(r.targets[0]->events[0].value == 0x61);
+    REQUIRE(r.targets[0]->asked.size() == 1);
+    CHECK(r.targets[0]->asked.front() == r.targets[0]->events[0].at);
+    CHECK(r.targets[1]->asked == r.targets[0]->asked);
+    CHECK(r.targets[1]->events.empty());
+    r.targets[0]->events.clear();
+    r.b().command(0x50, 1, false, true);
+    std::ignore = r.drive(30 * r.period());
+    CHECK(r.targets[0]->events.empty());
+    REQUIRE(r.targets[1]->kinds() == "WwP");
+    CHECK(r.targets[1]->events[0].value == 0x50);
+  }
+}
+
+TEST_CASE("the controller NACKs the byte that ends NBYTES with RELOAD clear, read_acked hears it")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    {
+      fan_rig r{part, voters({0x50})};
+      r.b().command(0x50, 3, true, true);
+      CHECK(r.drive(60 * r.period()).size() == 3);
+      CHECK(r.targets[0]->kinds() == "RaanP");
+    }
+    {
+      fan_rig    r{part, voters({0x50})};
+      auto const b = r.b();
+      b.command(0x50, 2, true, false, true);
+      CHECK(r.drive(40 * r.period()).size() == 2);
+      REQUIRE(b.get("ISR", "TCR") == 1);
+      CHECK(r.targets[0]->kinds() == "Raa");
+      auto const cr2 = b.at("I2C1", "CR2");
+      b.write(cr2, (b.read(cr2) & ~(0xFFu << 16 | 1u << 24)) | 1u << 16 | 1u << 25);
+      CHECK(r.drive(30 * r.period()).size() == 1);
+      CHECK(r.targets[0]->kinds() == "RaanP");
+    }
+  }
+}
+
+TEST_CASE("a reset ends the fan-out, the next address reaches every matching target again")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const machine : {false, true})
+    {
+      CAPTURE(machine);
+      fan_rig r{part, voters({0x50, 0x50})};
+      r.b().command(0x50, 3, false, true);
+      r.b().send(0x10);
+      r.b().run_until(r.b().now() + 25 * r.period());
+      REQUIRE(r.targets[1]->kinds() == "Ww");
+      if(machine)
+      {
+        r.f->target->reset(popcorn::reset_kind::software);
+        r.f->set("pc", sym(part.firmware, "idle"));
+      }
+      else
+      {
+        rcc_reset_pulse(*r.f, part.reset, "I2C1RST");
+      }
+      r.enable();
+      r.b().run_until(r.b().now() + 30 * r.period());
+      for(auto const& target : r.targets)
+      {
+        CHECK(target->kinds() == "Ww");
+      }
+      r.b().command(0x50, 1, false, true);
+      std::ignore = r.drive(30 * r.period());
+      for(auto const& target : r.targets)
+      {
+        CHECK(target->kinds() == "WwWwP");
+      }
+    }
+  }
+}
+
+TEST_CASE(
+    "a snapshot inside a fan-out transfer restores every acknowledging target, bytes re-dumped")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    auto const setup = [](fan_rig<>& r) {
+      r.targets[1]->ack_address = false;
+      r.targets[3]->ack_address = true;
+    };
+    fan_rig r{part, voters({0x50, 0x50, 0x51, 0x50})};
+    setup(r);
+    r.b().command(0x50, 2, false, true);
+    r.b().send(0x10);
+    r.b().run_until(r.b().now() + 25 * r.period());
+    REQUIRE(r.targets[3]->kinds() == "Ww");
+    auto const saved = r.f->target->snapshot();
+    auto const bytes = r.model_bytes();
+
+    fan_rig other{part, voters({0x50, 0x50, 0x51, 0x50})};
+    setup(other);
+    other.f->target->restore(
+        core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+    CHECK(other.model_bytes() == bytes);
+    std::ignore = other.drive(30 * other.period(), 0x11);
+    CHECK(other.targets[0]->kinds() == "wP");
+    CHECK(other.targets[1]->kinds() == "P");
+    CHECK(other.targets[2]->events.empty());
+    REQUIRE(other.targets[3]->kinds() == "wP");
+    CHECK(other.targets[3]->events[0].value == 0x11);
+
+    fan_rig    fewer{part, voters({0x50, 0x50})};
+    auto const before = fewer.model_bytes();
+    CHECK_THROWS_AS(
+        fewer.f->target->restore(
+            core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))}),
+        popcorn::config_error);
+    CHECK(fewer.model_bytes() == before);
+  }
+}
+
+TEST_CASE("a STOP after a repeated START to another address reaches every target of the transfer")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    {
+      fan_rig    r{part, voters({0x50, 0x51})};
+      auto const b = r.b();
+      b.command(0x50, 2, false, false);
+      std::ignore = r.drive(30 * r.period());
+      REQUIRE(b.get("ISR", "TC") == 1);
+      CHECK(r.targets[0]->kinds() == "Www");
+      b.command(0x51, 2, true, true);
+      b.run_until(b.now() + 10 * r.period() + r.period() / 2);
+      REQUIRE(r.targets[1]->kinds() == "R");
+      auto const saved = r.f->target->snapshot();
+      auto const bytes = r.model_bytes();
+      CHECK(r.drive(40 * r.period()).size() == 2);
+      CHECK(b.get("ISR", "STOPF") == 1);
+      CHECK(r.targets[0]->kinds() == "WwwP");
+      CHECK(r.targets[1]->kinds() == "RanP");
+      CHECK(r.targets[0]->events.back().at == r.targets[1]->events.back().at);
+
+      fan_rig other{part, voters({0x50, 0x51})};
+      other.f->target->restore(
+          core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+      CHECK(other.model_bytes() == bytes);
+      CHECK(other.drive(40 * other.period()).size() == 2);
+      CHECK(other.b().get("ISR", "STOPF") == 1);
+      CHECK(other.targets[0]->kinds() == "P");
+      CHECK(other.targets[1]->kinds() == "anP");
+    }
+    {
+      auto const table = std::make_shared<devices::table_target>(
+          devices::table_target_options{.address = 0x38, .register_bytes = 2});
+      auto const other = std::make_shared<voter>(0x50);
+      fan_rig    r{
+          part, std::vector<std::shared_ptr<periph::i2c_target>>{table, other}
+      };
+      auto const b = r.b();
+      b.command(0x38, 3, false, false);
+      std::ignore = r.drive(40 * r.period(), 0x00);
+      REQUIRE(b.get("ISR", "TC") == 1);
+      b.command(0x50, 1, true, false);
+      std::ignore = r.drive(20 * r.period());
+      REQUIRE(b.get("ISR", "TC") == 1);
+      CHECK(other->kinds() == "Rn");
+      CHECK(table->writes().empty());
+      b.set("CR2", "STOP", 1);
+      b.run_until(b.now() + 5 * r.period());
+      CHECK(b.get("ISR", "STOPF") == 1);
+      REQUIRE(table->writes().size() == 1);
+      CHECK(table->writes()[0] == devices::table_write{.reg = 0x0001, .bytes = {0x02}});
+    }
+  }
+}
+
+TEST_CASE("an EEPROM write cut by a repeated START to another address commits nothing at the STOP")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const cut : {false, true})
+    {
+      CAPTURE(cut);
+      auto const eeprom = std::make_shared<devices::eeprom_24xx>(eeprom_options());
+      auto const other  = std::make_shared<voter>(0x51);
+      fan_rig    r{
+          part, std::vector<std::shared_ptr<periph::i2c_target>>{eeprom, other}
+      };
+      auto const b      = r.b();
+      auto const before = std::to_integer<std::uint8_t>(eeprom->contents()[0x0102]);
+      REQUIRE(before != 0x03);
+      b.command(0x50, 4, false, not cut);
+      std::ignore = r.drive(60 * r.period(), 0x01);
+      if(cut)
+      {
+        REQUIRE(b.get("ISR", "TC") == 1);
+        b.command(0x51, 1, true, true);
+        std::ignore = r.drive(30 * r.period());
+        CHECK(other->kinds() == "RnP");
+      }
+      REQUIRE(b.get("ISR", "STOPF") == 1);
+      CHECK(
+          std::to_integer<std::uint8_t>(eeprom->contents()[0x0102])
+          == (cut ? before : std::uint8_t{0x03}));
+      b.set("ICR", "STOPCF", 1);
+      b.command(0x50, 0, false, true);
+      b.run_until(b.now() + 20 * r.period());
+      CHECK(b.get("ISR", "NACKF") == (cut ? 0u : 1u));
+    }
+  }
+}
+
+TEST_CASE("a target an address of the transfer adds keeps its attachment order in the transfer")
+{
+  using periph::i2c_error;
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    fan_rig    r{part, voters({0x51, 0x52, 0x50})};
+    auto const b             = r.b();
+    r.targets[0]->error      = i2c_error::bus_error;
+    r.targets[0]->error_call = 1;
+    r.targets[2]->error      = i2c_error::overrun;
+    r.targets[2]->error_call = 1;
+    b.command(0x50, 1, false, false);
+    r.targets[2]->error_call = ~0u;
+    std::ignore              = r.drive(30 * r.period());
+    REQUIRE(b.get("ISR", "TC") == 1);
+    REQUIRE(r.targets[2]->kinds() == "Ww");
+    r.targets[0]->live       = 0x50;
+    r.targets[2]->error_call = 1;
+    b.command(0x50, 1, false, true);
+    std::ignore = r.drive(30 * r.period());
+    CHECK(b.get("ISR", "STOPF") == 1);
+    CHECK(b.get("ISR", "BERR") == 1);
+    CHECK(b.get("ISR", "OVR") == 0);
+    CHECK(r.targets[0]->kinds() == "WwP");
+    CHECK(r.targets[1]->events.empty());
+    CHECK(r.targets[2]->kinds() == "WwWwP");
   }
 }

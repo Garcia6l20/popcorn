@@ -234,8 +234,10 @@ class I2CTarget(_core.I2CTargetBase):
     Attach it with `Machine(devices={"I2C1": [target]})` or a machine description's
     `Periph(devices=[Device(cls, address=...)])`. The I2C model calls the `on_` methods at the end
     of each bus phase, one byte at a time: the controller decides how many bytes it reads, so a
-    target never knows a transfer's length in advance. Of two targets answering one address, the
-    first attached answers.
+    target never knows a transfer's length in advance. Every target on the address takes part,
+    as on the open-drain bus: the address or a written byte is acknowledged when one of them
+    acknowledges, each written byte reaches every target that acknowledged the address, a read
+    byte is the AND of their bytes, and the longest stretch holds SCL.
 
     Time: `at` is the virtual time since power-on, as a VirtualTime. Only POWER_ON restarts
     it: after a reset of another kind it keeps counting while the machine's own time restarts
@@ -320,7 +322,9 @@ class I2CTarget(_core.I2CTargetBase):
         return 0xFF
 
     def on_stop(self, at: VirtualTime) -> None:
-        """A STOP ended the transfer the target took part in."""
+        """A STOP ended the transfer the target took part in. The transfer runs from its START to
+        its STOP across every repeated START, so a target an earlier address of the transfer
+        reached hears the STOP too."""
 
     def stretch(self, for_: VirtualDuration) -> None:
         """Hold SCL low for `for_` after the byte the running `on_start`, `on_write` or `on_read`

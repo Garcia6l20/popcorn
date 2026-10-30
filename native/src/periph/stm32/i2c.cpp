@@ -41,7 +41,6 @@ constexpr std::uint32_t hold_begin     = 1;
 constexpr std::uint32_t hold_end       = 2;
 constexpr std::uint32_t port_due       = 3;
 constexpr std::uint32_t timeout_due    = 4;
-constexpr std::uint32_t no_target      = ~std::uint32_t{};
 constexpr std::uint64_t low_cycles     = 2048;
 constexpr std::uint64_t idle_cycles    = 4;
 constexpr std::uint32_t address_length = 10;
@@ -188,6 +187,30 @@ auto held_unit(std::span<i2c_port_entry const> entries) -> std::optional<std::ui
   return out;
 }
 
+struct i2c_answering
+{
+  std::uint32_t index{};
+  std::uint8_t  acked{};
+
+  friend auto operator==(i2c_answering const&, i2c_answering const&) -> bool = default;
+};
+
+auto joined(i2c_reply const& into, i2c_reply const& reply) -> i2c_reply
+{
+  return {
+      .ack        = into.ack or reply.ack,
+      .error      = into.error != i2c_error::none ? into.error : reply.error,
+      .stretch_ps = std::max(into.stretch_ps, reply.stretch_ps)};
+}
+
+auto joined(i2c_read_reply const& into, i2c_read_reply const& reply) -> i2c_read_reply
+{
+  return {
+      .byte       = static_cast<std::uint8_t>(into.byte & reply.byte),
+      .error      = into.error != i2c_error::none ? into.error : reply.error,
+      .stretch_ps = std::max(into.stretch_ps, reply.stretch_ps)};
+}
+
 struct i2c_transmit
 {
   std::uint8_t  target{};
@@ -236,7 +259,7 @@ struct i2c_state
   std::uint32_t                       generation{};
   std::uint8_t                        step{};
   std::uint8_t                        read{};
-  std::uint32_t                       target{no_target};
+  std::vector<i2c_answering>          targets;
   std::uint32_t                       left{};
   std::uint8_t                        tx_full{};
   std::uint8_t                        tx_data{};
@@ -274,8 +297,20 @@ auto lower(std::string_view name) -> std::string
  *        tSYNC delays of the SCL edges, which depend on the board. A START and the address byte
  *        take 10 periods, a data byte 9, a STOP 1. A phase keeps the duration it started with
  *        across a clock change. CR2.START sends a START, or a repeated START after the NBYTES
- *        transfer, and the address: the target answering SADD acknowledges or not, and a NACK
- *        sets NACKF and sends a STOP. Transmit: TXIS while TXDR is empty and a byte of NBYTES is
+ *        transfer, and the address. Every board target whose i2c_target::matches() takes SADD
+ *        answers through i2c_target::start_address(), in attachment order, and the targets share
+ *        the open-drain SDA and SCL, I2C-bus specification UM10204 "SDA and SCL signals": an
+ *        address or a written byte is acknowledged when one target acknowledges it, written
+ *        bytes reach every target that acknowledged the address, a read byte is the AND of the
+ *        bytes those targets send, SCL stays low for the longest stretch, and the byte ends with
+ *        the error of the first target in attachment order whose reply carries one. A repeated
+ *        START to another address keeps the targets of the earlier addresses in the transfer,
+ *        and a STOP or a lost arbitration reaches every target an address of the transfer
+ *        matched, as an STM32 target sets STOPF for a transfer it was addressed in, RM0456
+ *        65.9.7 STOPF, RM0481 53.9.7. The controller acknowledges each read byte except the one
+ *        that ends NBYTES with RELOAD clear, RM0456 65.4.9 "Controller receiver", RM0481 53.4.9,
+ *        and passes that acknowledge to i2c_target::read_acked(). A NACK of the address sets
+ *        NACKF and sends a STOP. Transmit: TXIS while TXDR is empty and a byte of NBYTES is
  *        still to be written, TXDR copied into the shift register as soon as the bus is free for
  *        it, SCL stretched while TXDR is empty, a NACKed byte sets NACKF and sends a STOP.
  *        Receive: each byte lands in RXDR and sets RXNE, SCL stretched while RXDR is full. After
@@ -306,8 +341,8 @@ auto lower(std::string_view name) -> std::string
  *        ALERT are never set. DMA requests, RM0456 section 65.7, through the GPDMA
  *        peer, low while PE is clear since PE = 0 clears their flags: `<instance>_tx_dma` follows
  *        TXIS with CR1.TXDMAEN, `<instance>_rx_dma` RXNE with CR1.RXDMAEN, `<instance>_evc_dma` TC
- *        with AUTOCR.TCDMAEN or TCR with AUTOCR.TCRDMAEN. The targets are saved and loaded with
- *        the model.
+ *        with AUTOCR.TCDMAEN or TCR with AUTOCR.TCRDMAEN. The targets and the set of targets
+ *        the current address matched are saved and loaded with the model.
  *
  *        Target mode, address, write and read phases, RM0456 65.4.8 and RM0481 53.4.8: the
  *        controller of board::i2c_controllers queues i2c_controller_port entries on the lane it
@@ -489,6 +524,7 @@ private:
   void               address_done();
   void               byte_done();
   void               stop_done();
+  void               stop_targets(vtime at);
   void               lost_done();
   void               hold_begun();
   void               hold_ended(std::uint32_t id);
@@ -904,18 +940,28 @@ void i2c::address_done()
   update(regs_, start_, 0);
   state_.read        = static_cast<std::uint8_t>(get(regs_, direction_));
   state_.left        = get(regs_, count_);
-  state_.target      = no_target;
   auto const address = static_cast<std::uint8_t>((get(regs_, address_) >> 1) & 0x7Fu);
   auto       reply   = i2c_reply{.ack = false};
+  for(auto& answering : state_.targets)
+  {
+    answering.acked = 0;
+  }
   if(get(regs_, ten_bit_) == 0)
   {
+    auto const at = target_at();
     for(std::size_t index = 0; index < targets_.size(); ++index)
     {
-      if(targets_[index]->address() == address)
+      if(targets_[index]->matches(address, at))
       {
-        state_.target = static_cast<std::uint32_t>(index);
-        reply         = targets_[index]->start(state_.read != 0, target_at());
-        break;
+        auto const answer = targets_[index]->start_address(address, state_.read != 0, at);
+        auto const slot   = static_cast<std::uint32_t>(index);
+        auto const place =
+            std::ranges::lower_bound(state_.targets, slot, {}, &i2c_answering::index);
+        auto& entry = place != state_.targets.end() and place->index == slot
+                        ? *place
+                        : *state_.targets.insert(place, {.index = slot});
+        entry.acked = answer.ack ? std::uint8_t{1} : std::uint8_t{0};
+        reply       = joined(reply, answer);
       }
     }
   }
@@ -936,11 +982,17 @@ void i2c::address_done()
 void i2c::byte_done()
 {
   --state_.left;
-  auto* const target = state_.target != no_target ? targets_[state_.target].get() : nullptr;
+  auto const at = target_at();
   if(state_.read == 0)
   {
-    auto const reply =
-        target != nullptr ? target->write(state_.shift, target_at()) : i2c_reply{.ack = false};
+    auto reply = i2c_reply{.ack = false};
+    for(auto const& answering : state_.targets)
+    {
+      if(answering.acked != 0)
+      {
+        reply = joined(reply, targets_[answering.index]->write(state_.shift, at));
+      }
+    }
     if(failed(reply.error))
     {
       return;
@@ -955,7 +1007,15 @@ void i2c::byte_done()
     after_byte(state_.end_ps);
     return;
   }
-  auto const reply = target != nullptr ? target->read(target_at()) : i2c_read_reply{};
+  auto const ack   = state_.left != 0 or get(regs_, reload_) != 0;
+  auto       reply = i2c_read_reply{};
+  for(auto const& answering : state_.targets)
+  {
+    if(answering.acked != 0)
+    {
+      reply = joined(reply, targets_[answering.index]->read_acked(at, ack));
+    }
+  }
   if(failed(reply.error))
   {
     return;
@@ -983,11 +1043,7 @@ void i2c::stop_done()
   state_.timer.idle_ps = state_.end_ps;
   stop_flag();
   state_.left = 0;
-  if(state_.target != no_target)
-  {
-    auto const target = std::exchange(state_.target, no_target);
-    targets_[target]->stop(target_at());
-  }
+  stop_targets(target_at());
   if(state_.pending_waits != 0)
   {
     take_bus();
@@ -995,6 +1051,14 @@ void i2c::stop_done()
   if(get(regs_, start_) != 0 and not bus_taken())
   {
     begin_start(state_.end_ps);
+  }
+}
+
+void i2c::stop_targets(vtime at)
+{
+  for(auto const& answering : std::exchange(state_.targets, {}))
+  {
+    targets_[answering.index]->stop(at);
   }
 }
 
@@ -1031,11 +1095,7 @@ void i2c::lost_done()
   update(regs_, stop_, 0);
   update(regs_, busy_, 0);
   state_.timer.idle_ps = state_.end_ps;
-  if(state_.target != no_target)
-  {
-    auto const target = std::exchange(state_.target, no_target);
-    targets_[target]->stop(target_at());
-  }
+  stop_targets(target_at());
   if(state_.pending_waits != 0)
   {
     take_bus();
@@ -1158,11 +1218,11 @@ void i2c::abort()
   state_.left    = 0;
   state_.tx_full = 0;
   state_.rx_held = 0;
-  if(lost && state_.target != no_target)
+  if(lost)
   {
-    targets_[state_.target]->stop(vtime{ctx_.clock.since_power_on().ps});
+    stop_targets(vtime{ctx_.clock.since_power_on().ps});
   }
-  state_.target    = no_target;
+  state_.targets.clear();
   state_.addressed = 0;
   state_.involved  = 0;
   state_.wire_busy = 0;
@@ -2512,6 +2572,20 @@ void i2c::load(std::span<std::byte const> in)
     throw config_error(
         ctx_.part.part, 0, std::format("devices.{}", desc_.name),
         "an I2C controller attached to the instance, the snapshot holds port entries");
+  }
+  auto const needed = std::ranges::fold_left(
+      loaded.targets | std::views::transform([](i2c_answering const& answering) {
+        return std::size_t{answering.index} + 1;
+      }),
+      std::size_t{}, [](std::size_t one, std::size_t other) { return std::max(one, other); });
+  if(needed > targets_.size())
+  {
+    throw config_error(
+        ctx_.part.part, 0, std::format("devices.{}", desc_.name),
+        std::format(
+            "at least {} board targets attached to the instance, the snapshot's transfer names "
+            "target {}",
+            needed, needed - 1));
   }
   state_ = std::move(loaded);
   for(std::size_t index = 0; index < targets_.size() and index < state_.devices.size(); ++index)

@@ -1127,6 +1127,59 @@ def test_a_stretching_hook_takes_the_gil_once_per_call(u575: popcorn.PartDescrip
     assert gil_entries(m) - before == len(target.events) + starts
 
 
+def test_two_targets_on_one_address_both_answer_and_each_takes_the_gil(
+    u575: popcorn.PartDescription,
+) -> None:
+    alone = Stretching()
+    alone_log = stretched_table(u575, alone)
+    first, second = Stretching(), Stretching()
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [first, second]})
+    enter(m, "table")
+    before = gil_entries(m)
+    assert finish(m) == alone_log
+    assert first.events == alone.events
+    assert second.events == alone.events
+    starts = sum(kind == "on_start" for kind, _ in first.events)
+    assert gil_entries(m) - before == 2 * (len(first.events) + starts)
+
+
+class Listening(I2CTarget):
+    """Acknowledges `address` and records each start and stop."""
+
+    def __init__(self, address: int) -> None:
+        super().__init__(address)
+        self.events: list[str] = []
+
+    def on_start(self, read: bool, at: VirtualTime) -> bool:
+        self.events.append("read" if read else "write")
+        return True
+
+    def on_stop(self, at: VirtualTime) -> None:
+        self.events.append("stop")
+
+
+def test_a_stop_after_a_repeated_start_to_another_address_reaches_both_targets(
+    u575: popcorn.PartDescription,
+) -> None:
+    first, second = Listening(0x50), Listening(0x51)
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [first, second]})
+    enter(m, "idle")
+    m.periph["RCC"].RCC_APB1ENR1.I2C1EN = 1
+    i2c = m.periph["I2C1"]
+    i2c.TIMINGR.write(0x0010_0305)
+    i2c.CR1.PE = 1
+    start, read, autoend = 1 << 13, 1 << 10, 1 << 25
+    i2c.CR2.write(0x50 << 1 | start)
+    asyncio.run(m.run(for_=us(100)))
+    assert i2c.ISR.TC == 1
+    assert first.events == ["write"]
+    i2c.CR2.write(0x51 << 1 | read | autoend | start)
+    asyncio.run(m.run(for_=us(100)))
+    assert i2c.ISR.STOPF == 1
+    assert first.events == ["write", "stop"]
+    assert second.events == ["read", "stop"]
+
+
 HOLD_AT = ms(2)
 HOLD_FOR = ms(1)
 ADDRESS_PS = 10 * 2_500_000

@@ -43,12 +43,11 @@ struct table_target_options
 /**
  * @brief I2C target scripted by a table, for a device whose initialization a firmware writes
  *        and whose answers a board declares. A write transfer starts with the register address,
- *        and each one with data bytes is recorded when the next START or the STOP ends it. A
- *        read transfer returns the reply of the last register address written, then 0xFF past
- *        its end, or is not acknowledged for a register without a reply when @p nack_unknown is
- *        set. Writes never change the replies. Every byte is acknowledged. A repeated START
- *        addressing another target ends nothing here: the pending write is recorded at this
- *        target's own next START or STOP, and writes() misses it until then.
+ *        and each one with data bytes is recorded when the next START to this target or the
+ *        STOP of the transfer ends it, the STOP after a repeated START to another target
+ *        included. A read transfer returns the reply of the last register address written, then
+ *        0xFF past its end, or is not acknowledged for a register without a reply when
+ *        @p nack_unknown is set. Writes never change the replies. Every byte is acknowledged.
  */
 class POPCORN_API table_target final : public i2c_target
 {
