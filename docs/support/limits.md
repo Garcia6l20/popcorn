@@ -870,3 +870,9 @@ Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/p
 - Mute mode, RWU, is logged as not modelled. LBD never sets.
 - UART4 and UART5 have no hardware flow control, RM0038 Table 157: CTSE and RTSE set there log
   one `model_warning` and transmission and reception ignore them.
+- The STM32L1 SR-then-DR clear: a CPU or DMA read of USART_SR notes the IDLE, ORE, NF, FE, PE
+  and TC flags it reads set, any later DR read clears the noted IDLE, ORE, NF, FE and PE, and
+  any later DR write the noted TC and PE, whatever other accesses lie between, inferred. A flag
+  set after the SR read stays set, and a DR write with no SR read since TC rose sends the word
+  and leaves TC set, RM0038 27.6.1.
+- STM32L1 EIE raises the interrupt on ORE, NF or FE only while DMAR is 1, RM0038 27.6.6.

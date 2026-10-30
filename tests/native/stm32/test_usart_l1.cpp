@@ -3,6 +3,9 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/services.hpp>
+#include <popcorn/core/snapshot.hpp>
+#include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/uart.hpp>
 #include <popcorn/periph/uart.hpp>
@@ -13,6 +16,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <memory>
 #include <span>
 #include <string>
@@ -54,6 +58,49 @@ constexpr std::uint32_t    re            = 1u << 2;
 constexpr std::uint32_t    ue            = 1u << 13;
 constexpr address          cr3           = 0x14;
 constexpr std::uint64_t    frame         = 10 * ps_per_second / (msi_hz / 18);
+constexpr std::uint32_t    ore           = 1u << 3;
+constexpr std::uint32_t    idle_flag     = 1u << 4;
+constexpr std::uint32_t    eie           = 1u << 0;
+constexpr std::uint32_t    dmar          = 1u << 6;
+constexpr address          nvic_ispr1    = 0xE000'E204;
+constexpr std::uint32_t    usart1_irq    = 1u << (37 - 32);
+
+class bus_probe final : public periph::model
+{
+public:
+  explicit bus_probe(periph::model_context& ctx) : context{ctx}
+  {}
+
+  periph::model_context& context;
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
 
 class recording_endpoint final : public periph::uart_endpoint
 {
@@ -89,7 +136,11 @@ struct rig
     board.uarts.emplace("UART4", uart4);
     auto options   = popcorn::testing::stm32_options();
     options.models = stm32::factories(board, desc);
-    f              = std::make_unique<stm32_fixture>(desc, elf, std::move(options));
+    options.models.insert_or_assign(
+        "DAC", [](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+          return std::make_shared<bus_probe>(ctx);
+        });
+    f = std::make_unique<stm32_fixture>(desc, elf, std::move(options));
     if(entry != "main")
     {
       REQUIRE(
@@ -131,6 +182,40 @@ struct rig
     REQUIRE(
         f->run_to_stop({.max_instructions = icount{1'000'000}, .until_time = vtime{ps}}).reason
         == stop_reason::time);
+  }
+
+  auto cpu_read(address at) const -> std::uint32_t
+  {
+    auto* const probe = f->model_of<bus_probe>("DAC");
+    REQUIRE(probe != nullptr);
+    auto const word = probe->context.services.read(at, 4, popcorn::initiator::cpu);
+    REQUIRE(word.has_value());
+    return static_cast<std::uint32_t>(*word);
+  }
+
+  void cpu_write(address at, std::uint32_t value) const
+  {
+    auto* const probe = f->model_of<bus_probe>("DAC");
+    REQUIRE(probe != nullptr);
+    REQUIRE(probe->context.services.write(at, 4, value, popcorn::initiator::cpu).has_value());
+  }
+
+  void parked_receiver(std::uint32_t control3 = 0) const
+  {
+    f->set("pc", sym(name, "idle"));
+    write(::usart1 + 0x08, 18);
+    write(::usart1 + cr3, control3);
+    write(::usart1 + cr1, ue | te | re);
+  }
+
+  void queue(std::span<periph::host_frame const> frames) const
+  {
+    port("USART1").receive_frames(frames);
+  }
+
+  [[nodiscard]] auto pending() const -> bool
+  {
+    return (read(nvic_ispr1) & usart1_irq) != 0;
   }
 
   [[nodiscard]] auto now_ps() const -> std::uint64_t
@@ -374,6 +459,7 @@ TEST_CASE("RM0038 27.6.4: UE written 0 mid-frame stops the output at the end of 
   r.f->set("pc", sym(firmware, "idle"));
   r.write(usart1 + 0x08, 18);
   r.write(usart1 + cr1, ue | te);
+  r.write(usart1 + sr, ~tc);
   auto const t0 = r.now_ps();
   r.write(usart1 + dr, 0x41);
   r.write(usart1 + dr, 0x42);
@@ -454,4 +540,247 @@ TEST_CASE("UartLink: USART1 posts its frame shape at the start bit, USART2 takes
   r.idle_to(sent.end.ps + 1'000'000);
   CHECK((r.read(usart2 + sr) & rxne) != 0);
   CHECK(r.read(usart2 + dr) == 0x5A);
+}
+
+TEST_CASE("RM0038 27.3.13: DMA1 channel 4 feeds USART1 from TXE, TC rises after the last frame")
+{
+  rig r{"dma_tx"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0, 0, 1});
+  CHECK(text(*r.usart1) == hello);
+  back_to_back(*r.usart1, frame);
+}
+
+TEST_CASE("RM0038 27.3.13: DMA1 channel 5 takes each received word from RXNE")
+{
+  rig r{"dma_rx"};
+  r.idle_to(r.now_ps() + 1'000'000'000);
+  std::array<periph::host_frame, 4> frames{
+      {{.data = 'k'}, {.data = 'l'}, {.data = 'm'}, {.data = 'n'}}
+  };
+  r.queue(frames);
+  CHECK(r.finish() == std::vector<std::uint32_t>{'k', 'n', 0, 0});
+}
+
+TEST_CASE("RM0038 27.6.1: IDLE rises one frame after the last frame, SR then DR clears it")
+{
+  rig r{"main"};
+  r.parked_receiver();
+  std::array<periph::host_frame, 1> frames{{{.data = 'q'}}};
+  auto const                        t0 = r.now_ps();
+  r.queue(frames);
+  r.idle_to(t0 + 2 * frame - 1'000'000);
+  CHECK((r.read(usart1 + sr) & (rxne | idle_flag)) == rxne);
+  r.idle_to(t0 + 2 * frame + 1'000'000);
+  CHECK((r.read(usart1 + sr) & (rxne | idle_flag)) == (rxne | idle_flag));
+  CHECK(r.cpu_read(usart1 + dr) == 'q');
+  CHECK((r.read(usart1 + sr) & idle_flag) == idle_flag);
+  CHECK((r.cpu_read(usart1 + sr) & idle_flag) == idle_flag);
+  static_cast<void>(r.read(usart1 + dr));
+  CHECK((r.read(usart1 + sr) & idle_flag) == idle_flag);
+  CHECK(r.cpu_read(usart1 + dr) == 0);
+  CHECK((r.read(usart1 + sr) & (rxne | idle_flag)) == 0);
+}
+
+TEST_CASE("RM0038 27.6.1: the LL IDLE clear in firmware, after polling it")
+{
+  rig r{"idle_clear"};
+  r.idle_to(r.now_ps() + 1'000'000'000);
+  std::array<periph::host_frame, 1> frames{{{.data = 'q'}}};
+  r.queue(frames);
+  CHECK(r.finish() == std::vector<std::uint32_t>{rxne | idle_flag, 'q', 0});
+}
+
+TEST_CASE("RM0038 27.6.1: a DR read clears only the flags the SR read before it saw")
+{
+  rig r{"late_idle"};
+  r.idle_to(r.now_ps() + 1'000'000'000);
+  std::array<periph::host_frame, 1> frames{{{.data = 'z'}}};
+  auto const                        t0 = r.now_ps();
+  r.queue(frames);
+  r.idle_to(t0 + 2 * frame + 1'000'000);
+  REQUIRE((r.read(usart1 + sr) & idle_flag) != 0);
+  r.write(sym(firmware, "release"), 1);
+  CHECK(r.finish() == std::vector<std::uint32_t>{0, 'z', idle_flag, 0});
+}
+
+TEST_CASE(
+    "RM0038 27.6.1: a word arriving with RXNE set sets ORE, DR keeps the first, SR then DR clears")
+{
+  rig r{"overrun"};
+  r.idle_to(r.now_ps() + 1'000'000'000);
+  std::array<periph::host_frame, 2> frames{
+      {{.data = 'a'}, {.data = 'b'}}
+  };
+  r.queue(frames);
+  CHECK(r.finish() == std::vector<std::uint32_t>{rxne | ore, 'a', 0});
+}
+
+TEST_CASE("RM0038 27.6.6: EIE raises USART1_IRQn on ORE only with DMAR")
+{
+  rig r{"main"};
+  r.parked_receiver(eie);
+  std::array<periph::host_frame, 2> frames{
+      {{.data = 'a'}, {.data = 'b'}}
+  };
+  auto const t0 = r.now_ps();
+  r.queue(frames);
+  r.idle_to(t0 + 2 * frame + 1'000'000);
+  REQUIRE((r.read(usart1 + sr) & ore) != 0);
+  CHECK_FALSE(r.pending());
+  r.write(usart1 + cr3, eie | dmar);
+  CHECK(r.pending());
+}
+
+TEST_CASE("a snapshot between the SR read and the DR read keeps the clear sequence")
+{
+  rig r{"main"};
+  r.parked_receiver();
+  std::array<periph::host_frame, 1> frames{{{.data = 'q'}}};
+  auto const                        t0 = r.now_ps();
+  r.queue(frames);
+  r.idle_to(t0 + 2 * frame + 1'000'000);
+  REQUIRE((r.cpu_read(usart1 + sr) & idle_flag) != 0);
+  auto const saved = r.f->target->snapshot();
+  rig        other{"main"};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  for(auto const* one : {&r, &other})
+  {
+    CHECK(one->cpu_read(usart1 + dr) == 'q');
+    CHECK((one->read(usart1 + sr) & (rxne | idle_flag)) == 0);
+  }
+}
+
+TEST_CASE("HAL_UART_Transmit sends hello, HAL_UART_Receive_IT takes 4 words on USART1_IRQn")
+{
+  for(auto const& [desc, elf] : {
+          std::pair{&l152re(), firmware  },
+          std::pair{&l152rb(), firmware_b}
+  })
+  {
+    CAPTURE(elf);
+    rig r{"hal_tx_rx", *desc, elf};
+    for(int step = 0; step < 100 and r.f->log().empty(); ++step)
+    {
+      r.idle_to(r.now_ps() + 1'000'000'000);
+    }
+    REQUIRE(r.f->log() == std::vector<std::uint32_t>{0x5A5A});
+    CHECK(text(*r.usart1) == hello);
+    std::array<periph::host_frame, 4> frames{
+        {{.data = '1'}, {.data = '2'}, {.data = '3'}, {.data = '4'}}
+    };
+    r.queue(frames);
+    CHECK(r.finish() == std::vector<std::uint32_t>{0x5A5A, '1', '4', 0});
+  }
+}
+
+TEST_CASE(
+    "RM0038 27.6.1: an SR read then a DR write clears TC and PE, without the read or by the "
+    "debugger neither")
+{
+  constexpr std::uint32_t pce = 1u << 10;
+  constexpr std::uint32_t pe  = 1u << 0;
+  for(bool const read_first : {true, false})
+  {
+    CAPTURE(read_first);
+    rig r{"main"};
+    r.f->set("pc", sym(firmware, "idle"));
+    r.write(usart1 + 0x08, 18);
+    r.write(usart1 + cr1, ue | re | pce);
+    std::array<periph::host_frame, 1> frames{{{.data = 0x31, .error = periph::uart_error::parity}}};
+    auto const                        t0 = r.now_ps();
+    r.queue(frames);
+    r.idle_to(t0 + frame + 1'000'000);
+    REQUIRE((r.read(usart1 + sr) & (tc | pe)) == (tc | pe));
+    if(read_first)
+    {
+      static_cast<void>(r.cpu_read(usart1 + sr));
+      r.write(usart1 + dr, 0x00);
+      CHECK((r.read(usart1 + sr) & (tc | pe)) == (tc | pe));
+    }
+    r.cpu_write(usart1 + dr, 0x00);
+    CHECK((r.read(usart1 + sr) & (tc | pe)) == (read_first ? 0 : (tc | pe)));
+  }
+}
+
+TEST_CASE("RM0038 27.6.1: an SR read then a DR read clears PE, FE and NF and keeps TC")
+{
+  constexpr std::uint32_t pce = 1u << 10;
+  constexpr std::uint32_t pe  = 1u << 0;
+  constexpr std::uint32_t fe  = 1u << 1;
+  constexpr std::uint32_t nf  = 1u << 2;
+  for(auto const& [error, flag] : {
+          std::pair{periph::uart_error::parity,  pe},
+          std::pair{periph::uart_error::framing, fe},
+          std::pair{periph::uart_error::noise,   nf}
+  })
+  {
+    CAPTURE(flag);
+    rig r{"main"};
+    r.f->set("pc", sym(firmware, "idle"));
+    r.write(usart1 + 0x08, 18);
+    r.write(usart1 + cr1, ue | re | pce);
+    std::array<periph::host_frame, 1> frames{{{.data = 0x31, .error = error}}};
+    auto const                        t0 = r.now_ps();
+    r.queue(frames);
+    r.idle_to(t0 + frame + 1'000'000);
+    REQUIRE((r.read(usart1 + sr) & (tc | flag)) == (tc | flag));
+    static_cast<void>(r.cpu_read(usart1 + sr));
+    static_cast<void>(r.cpu_read(usart1 + dr));
+    CHECK((r.read(usart1 + sr) & (tc | pe | fe | nf | rxne)) == tc);
+  }
+}
+
+TEST_CASE("RM0038 27.6.1: a DR write with no SR read since TC rose sends and leaves TC set")
+{
+  for(bool const read_first : {true, false})
+  {
+    CAPTURE(read_first);
+    rig r{"main"};
+    r.f->set("pc", sym(firmware, "idle"));
+    r.write(usart1 + 0x08, 18);
+    r.write(usart1 + cr1, ue | te);
+    REQUIRE((r.read(usart1 + sr) & tc) == tc);
+    if(read_first)
+    {
+      static_cast<void>(r.cpu_read(usart1 + sr));
+    }
+    auto const t0 = r.now_ps();
+    r.cpu_write(usart1 + dr, 0x41);
+    r.idle_to(t0 + frame / 2);
+    CHECK((r.read(usart1 + sr) & tc) == (read_first ? 0 : tc));
+    r.idle_to(t0 + 2 * frame);
+    REQUIRE(r.usart1->frames.size() == 1);
+    CHECK((r.read(usart1 + sr) & tc) == tc);
+  }
+}
+
+TEST_CASE("RM0038 27.6.1: a write of 0 over a set ORE and IDLE leaves both, clears RXNE")
+{
+  auto writable = l152re();
+  auto unit     = std::ranges::find(
+      writable.peripherals, std::string_view{"USART1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(unit != writable.peripherals.end());
+  auto status =
+      std::ranges::find(unit->registers, std::string_view{"SR"}, &popcorn::register_desc::name);
+  REQUIRE(status != unit->registers.end());
+  for(auto& bits : status->fields)
+  {
+    bits.acc = popcorn::access::read_write;
+  }
+  for(part_description const* desc : {&l152re(), static_cast<part_description const*>(&writable)})
+  {
+    CAPTURE(desc == &writable);
+    rig r{"main", *desc};
+    r.parked_receiver();
+    std::array<periph::host_frame, 2> frames{
+        {{.data = 'a'}, {.data = 'b'}}
+    };
+    auto const t0 = r.now_ps();
+    r.queue(frames);
+    r.idle_to(t0 + 3 * frame + 1'000'000);
+    REQUIRE((r.read(usart1 + sr) & (ore | idle_flag | rxne)) == (ore | idle_flag | rxne));
+    r.write(usart1 + sr, 0);
+    CHECK((r.read(usart1 + sr) & (ore | idle_flag | rxne)) == (ore | idle_flag));
+  }
 }

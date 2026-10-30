@@ -210,6 +210,12 @@ struct usart_state
   friend auto operator==(usart_state const&, usart_state const&) -> bool = default;
 };
 
+struct sci2_saved
+{
+  usart_state   usart;
+  std::uint32_t sequence{};
+};
+
 struct locked_fields
 {
   std::string_view                  reg;
@@ -340,15 +346,20 @@ struct lock
  *        ORE, NF, FE, PE, LBD and the CTS change flag, DR writes TDR and reads RDR, CR1.M picks 8
  *        or 9 data bits, BRR is DIV_Mantissa and DIV_Fraction, with OVER8 the fraction counts
  *        eighths in its bits 2:0. A write to SR clears TC, RXNE, LBD and CTS where it writes 0
- *        and leaves every other bit, a cleared RXNE drops the received word. CR1.SBK requests a
- *        break while UE and TE are 1, a write of 0 before the break starts cancels it, RM0038
- *        27.3.2. Once the low part runs SBK reads 1 until it ends, a write of 0 meanwhile keeps
- *        it, inferred, and the line stays high `usart_variant::break_stop_half_bits` before the
- *        next frame. A write with UE 0 clears SBK and lets the frame in flight end before the
- *        output stops, RM0038 27.6.4. The kernel clock is the APB clock of the bus the
- *        instance's address lies on, `usart_variant::kernel_buses`. Without
- *        `usart_variant::flow_control` CTSE and RTSE log one warning and change nothing. Nothing
- *        is locked while UE is 1, RWU mute mode is logged as not modelled, LBD never sets.
+ *        and leaves every other bit, a cleared RXNE drops the received word. A CPU or DMA read
+ *        of SR notes which of IDLE, ORE, NF, FE, PE and TC are set, a following DR read clears
+ *        the noted IDLE, ORE, NF, FE and PE, a following DR write the noted TC and PE, RM0038
+ *        27.6.1: a flag set after the SR read stays. The note is saved with the model state.
+ *        EIE raises the line on ORE, NF or FE only while CR3.DMAR is 1, RM0038 27.6.6. CR1.SBK
+ *        requests a break while UE and TE are 1, a write of 0 before the break starts cancels
+ *        it, RM0038 27.3.2. Once the low part runs SBK reads 1 until it ends, a write of 0
+ *        meanwhile keeps it, inferred, and the line stays high
+ *        `usart_variant::break_stop_half_bits` before the next frame. A write with UE 0 clears
+ *        SBK and lets the frame in flight end before the output stops, RM0038 27.6.4. The
+ *        kernel clock is the APB clock of the bus the instance's address lies on,
+ *        `usart_variant::kernel_buses`. Without `usart_variant::flow_control` CTSE and RTSE log
+ *        one warning and change nothing. Nothing is locked while UE is 1, RWU mute mode is
+ *        logged as not modelled, LBD never sets.
  */
 class usart final : public dispatch_model<usart, usart_state>,
                     public uart_link_port,
@@ -374,6 +385,8 @@ public:
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
 
+  void               save(std::vector<std::byte>& out) const override;
+  void               load(std::span<std::byte const> in) override;
   void               receive_frames(std::span<host_frame const> frames) override;
   [[nodiscard]] auto queued() const -> std::size_t override;
   void               set_cts(bool ready, vtime at) override;
@@ -392,6 +405,7 @@ public:
   void transmit_written(std::uint32_t old, std::uint32_t now);
   void plain_written(std::uint32_t old, std::uint32_t now);
   void status_written(std::uint32_t old, std::uint32_t now);
+  void clear_sequence(std::uint32_t flags);
   void break_written();
 
 private:
@@ -508,6 +522,9 @@ private:
   std::uint32_t                                break_stop_half_bits_;
   bool                                         flow_control_;
   bool                                         flow_logged_{};
+  std::uint32_t                                read_clears_{};
+  std::uint32_t                                write_clears_{};
+  std::uint32_t                                sequence_{};
   std::optional<field_ref>                     auto_baud_;
   std::optional<field_ref>                     auto_baud_mode_;
   std::optional<field_ref>                     retransmissions_;
@@ -717,6 +734,9 @@ usart::usart(
     unsupported_.push_back(field(cr1_, "RWU"));
     status_clears_ =
         complete_.mask() | rx_not_empty_.mask() | cts_flag_.mask() | field(isr_, "LBD").mask();
+    read_clears_ =
+        idle_.mask() | overrun_.mask() | noise_.mask() | framing_.mask() | parity_.mask();
+    write_clears_ = complete_.mask() | parity_.mask();
   }
 }
 
@@ -728,7 +748,11 @@ auto usart::on_write(
     std::uint32_t  value,
     access_ctx     access) -> std::expected<void, bus_error>
 {
-  auto const word  = offset & ~3u;
+  auto const word = offset & ~3u;
+  if(sci2_ and access.by != initiator::debugger and word == tdr_.offset)
+  {
+    clear_sequence(write_clears_);
+  }
   auto const found = std::ranges::find(locks_, word, &lock::offset);
   if(found == locks_.end() or access.by == initiator::debugger or not enabled())
   {
@@ -815,6 +839,7 @@ void usart::restore_reset_values(bool keep_host)
   state_.tx_end_ps        = 0;
   state_.idle_pending     = false;
   state_.cts_hold_from_ps = 0;
+  sequence_               = 0;
   tx_dma_.resolve();
   rx_dma_.resolve();
   flags();
@@ -1043,18 +1068,19 @@ void usart::interrupts()
   };
   auto const errors =
       get(regs_, overrun_) != 0 or get(regs_, noise_) != 0 or get(regs_, framing_) != 0;
-  auto const level = on(tx_not_full_, tx_not_full_ie_)
-                  or on(tx_empty_, tx_empty_ie_)
-                  or on(complete_, complete_ie_)
-                  or on(rx_not_empty_, rx_not_empty_ie_)
-                  or on(rx_full_, rx_full_ie_)
-                  or on(idle_, idle_ie_)
-                  or on(parity_, parity_ie_)
-                  or on(cts_flag_, cts_ie_)
-                  or on(overrun_, rx_not_empty_ie_)
-                  or on(tx_threshold_flag_, tx_threshold_ie_)
-                  or on(rx_threshold_flag_, rx_threshold_ie_)
-                  or (errors and get(regs_, error_ie_) != 0);
+  auto const level =
+      on(tx_not_full_, tx_not_full_ie_)
+      or on(tx_empty_, tx_empty_ie_)
+      or on(complete_, complete_ie_)
+      or on(rx_not_empty_, rx_not_empty_ie_)
+      or on(rx_full_, rx_full_ie_)
+      or on(idle_, idle_ie_)
+      or on(parity_, parity_ie_)
+      or on(cts_flag_, cts_ie_)
+      or on(overrun_, rx_not_empty_ie_)
+      or on(tx_threshold_flag_, tx_threshold_ie_)
+      or on(rx_threshold_flag_, rx_threshold_ie_)
+      or (errors and get(regs_, error_ie_) != 0 and (not sci2_ or get(regs_, dma_receive_) != 0));
   if(level)
   {
     line_.raise();
@@ -1132,6 +1158,39 @@ void usart::break_written()
   }
 }
 
+void usart::clear_sequence(std::uint32_t flags)
+{
+  auto const seen = sequence_ & flags;
+  sequence_ &= ~flags;
+  if(seen != 0)
+  {
+    regs_.poke(complete_.offset, regs_.peek(complete_.offset) & ~seen);
+    this->flags();
+  }
+}
+
+void usart::save(std::vector<std::byte>& out) const
+{
+  if(not sci2_)
+  {
+    dispatch_model::save(out);
+    return;
+  }
+  reflex::serde::bson::serializer{out}.dump(sci2_saved{.usart = state_, .sequence = sequence_});
+}
+
+void usart::load(std::span<std::byte const> in)
+{
+  if(not sci2_)
+  {
+    dispatch_model::load(in);
+    return;
+  }
+  auto saved = reflex::serde::bson::deserializer{in}.load<sci2_saved>();
+  state_     = std::move(saved.usart);
+  sequence_  = saved.sequence;
+}
+
 void usart::status_written(std::uint32_t old, std::uint32_t now)
 {
   auto const cleared = status_clears_ & ~now;
@@ -1153,7 +1212,10 @@ void usart::transmit_written(std::uint32_t, std::uint32_t now)
   if(enabled() and get(regs_, transmit_) != 0 and state_.tx_fifo.size() < depth)
   {
     state_.tx_fifo.push_back(static_cast<std::uint16_t>(now & word_mask()));
-    update(regs_, complete_, 0);
+    if(not sci2_)
+    {
+      update(regs_, complete_, 0);
+    }
     start_frame(std::max(ctx_.clock.time().ps, state_.tx_end_ps));
   }
   flags();
@@ -1195,9 +1257,18 @@ void usart::request_written(std::uint32_t, std::uint32_t now)
 auto usart::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
     -> std::expected<std::uint32_t, bus_error>
 {
-  if((offset & ~3u) != rdr_.offset)
+  auto const word = offset & ~3u;
+  if(sci2_ and ctx.by != initiator::debugger and word == complete_.offset)
+  {
+    sequence_ = regs.peek(word) & (read_clears_ | write_clears_);
+  }
+  if(word != rdr_.offset)
   {
     return dispatch_model::on_read(regs, offset, size, ctx);
+  }
+  if(sci2_ and ctx.by != initiator::debugger)
+  {
+    clear_sequence(read_clears_);
   }
   if(ctx.by == initiator::debugger or state_.rx_fifo.empty())
   {
