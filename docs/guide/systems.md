@@ -1,8 +1,10 @@
 # Systems and links
 
-A `popcorn.System` runs several machines on one virtual clock and links their UARTs. Each
-machine, a member, has its own firmware. A byte one member sends on a UART arrives on the
-other member's UART as the line would carry it, with a latency you choose.
+A `popcorn.System` runs several machines on one virtual clock and links them over UART, SPI
+and I2C. Each machine, a member, has its own firmware. A byte one member sends on a UART
+arrives on the other member's UART as the line would carry it, with a latency you choose. An SPI
+master clocks slaves on other members and an I2C controller addresses targets on other members,
+each with the latency of its bus.
 
 ## Describe a system
 
@@ -166,15 +168,111 @@ Each member runs on its own native host thread, and the Python callbacks of diff
 run at the same wall time. Keep callback state per member and couple members through links.
 Shared Python state sees an order that depends on thread timing.
 
+## SPI buses
+
+```python
+--8<-- "guide/test_systems.py:spi"
+```
+
+`SpiBus(master=, slaves=, latency=)` joins the SPI of one member to the SPI of each slave
+member. `slaves` maps the master's chip select to the slave's SPI: `"a.PA4"` is a GPIO pin of
+the master that selects the slave while low, `"a.NSS"` is the master's SS output. The master
+member runs its SPI as it does with a board device per slave, and keeps its own board devices on
+the same SPI. The slave members run their SPI in target mode, with no board controller and no
+board device on it. A master drives at most one slave through its SS output.
+
+A frame the master finishes at system time `t` is clocked by the slave over
+`[t + L, t + L + fp]`, with `fp` the frame time. The slave's reply is stamped `t + L + fp` and
+completes the master's frame at `t + 2 L + fp`. A chip select edge reaches the slave `L` after the
+master drove it. SCK stays idle from a frame's end to its completion, `2 L + fp` later, and the
+next frame starts at the completion when the TX FIFO holds it. The frame ends of a transfer are
+at least `2 L + 2 fp` apart and `n` frames take at least `n * (2 L + 2 fp)`, which is `2 L + fp`
+more per frame than on a board. The firmware's own work between two frames adds to the spacing.
+
+A frame the slave never clocks completes with all ones at the master. A reset of the slave
+drops the frames it has not clocked, and a deselect cuts a frame in flight.
+
+`system.tap("a.SPI1", popcorn.SpiTap)` names the bus by any of its ends. `tap.frames()` takes
+the `SpiTapFrame`s the tap holds, oldest first, each with its slave, chip select pin, `mosi`,
+`miso`, `bits`, the master's frame end `at`, the slave's `reply` stamp and whether it was
+`dropped`. A frame's content does not depend on the quantum, the slicing or the thread timing.
+The tap keeps up to 1 Mi frames not read yet and counts the older ones in `tap.dropped`.
+
+## I2C buses
+
+```python
+--8<-- "guide/test_systems.py:i2c"
+```
+
+`I2CBus(ports=, latency=)` joins the I2C of the controller member, listed first, to the I2C of
+each target member. The controller's I2C runs as it does with a board target per remote target,
+and keeps its own board targets on the same I2C. The target members run their I2C in target
+mode, with no board controller and no board target on it. The firmware of a target member
+configures OAR1, OAR2 or the general call as on a board, and the address match is decided there.
+
+An address phase, a written byte or a read byte the controller ends at system time `t` is
+replayed by each target over `[t + L, t + L + p]`, with `p` the phase as the controller clocked
+it. A target answers at `t + L + p + s`, `s` being its clock stretch, and the controller's phase
+completes `L` after the last answer. SCL stays low for `2 L + p + s` per phase, which is
+`2 L + p` more per phase than the same transfer on a board, where it stays low for `s`. Two byte
+phases of a transfer end `2 L + 2 p` apart when no target stretches.
+
+- Targets on one address answer together as the open-drain bus combines them: the address or
+  written byte is acknowledged when any target acknowledges it, read bytes are the AND of the
+  targets' bytes, and the phase waits for the longest stretch. A local board target on the
+  controller's I2C takes part, and the controller waits for the remote answers.
+- A written or read byte reaches only the targets that acknowledged the transfer's last address.
+- A STOP reaches the targets `L` after the controller drove it.
+- A phase a target never answers gets the undriven reply: NACK for an address or a written byte,
+  `0xFF` for a read byte. A reset of the target drops its unanswered phases and a STOP cuts a
+  phase in flight.
+
+The SMBus timeouts follow the longer phases. The controller's I2C trips TIMEOUT when
+`2 L + p + s` reaches the firmware's TIMEOUTA, so a transfer that runs in time on a board can trip
+TIMEOUT on the controller's I2C across a bus with a large `L`. Only a target the transfer addressed
+counts SCL low from the end of each phase to the start of the next phase or STOP the controller
+queued, the remote waits included, until a reset of the controller's I2C releases the bus.
+
+`system.tap("a.I2C1", popcorn.I2CTap)` names the bus by any of its ends. `tap.phases(target=)`
+takes the `I2CTapPhase`s the tap holds, oldest first, one per target and phase, each with its
+`target`, `phase` as an `I2CPhase`, `unit`, `byte`, `ack`, the controller's phase
+end `at`, the target's `answer` stamp and whether it was `dropped`. An address phase gives a
+record per target, a byte phase one per target that acknowledged the address. The tap keeps up to
+1 Mi phases not read yet and counts the older ones in `tap.dropped`.
+
+### A host controller on one machine
+
+A single machine whose firmware runs its I2C in target mode is tested with
+`popcorn.board.I2CController`, a Python controller outside the MCU on the I2C:
+
+```python
+--8<-- "guide/test_systems.py:controller"
+```
+
+`start`, `write`, `read` and `stop` queue phases at the clock of `scl_hz`. Each phase gets one
+`I2CAnswer` in `host.answers`, the undriven reply when the I2C drops it. A target that stretches
+SCL holds the phases after it.
+
+## Buses and taps
+
+- A UART, an SPI or an I2C belongs to one link or bus. The targets of a bus are on members
+  other than the controller's.
+- Every link and bus declares its latency. `system.quantum` is the smallest of them, and the
+  results of every medium are the same at any quantum, slicing and thread timing.
+- `system.tap(end, kind)` takes `UartTap`, `SpiTap` or `I2CTap`. The tap of any end of a bus is
+  the same object.
+
 ## Snapshot a system
 
 ```python
 --8<-- "guide/test_systems.py:snapshot"
 ```
 
-`system.snapshot()` takes every member and every link, frames in flight included.
-`system.restore()` puts them back together. A member's own `snapshot()` and `restore()` raise
-`MachineBusy`, so use the system's. A restored system replays the same frames.
+`system.snapshot()` takes every member and every link and bus, frames, frames of an SPI transfer
+and phases of an I2C transfer in flight included. `system.restore()` puts them back together. A
+member's own `snapshot()` and `restore()` raise `MachineBusy`, so use the system's. A restored
+system replays the same frames, SPI frames and I2C phases. A restore discards what the taps hold
+and restarts their `dropped` counts.
 
 The [linked_uart example](examples.md#serial-and-dma) runs a controller and two responders with
 DMA, a watchdog reset of one member and a pulled cable.

@@ -1,13 +1,79 @@
 # Systems
 
-A `core::system` runs several machines on one virtual clock and links their UARTs. The type is
-declared in `native/include/popcorn/core/system.hpp`. The Python `System` wraps it.
+A `core::system` runs several machines on one virtual clock and links them over UART, SPI and
+I2C. The type is declared in `native/include/popcorn/core/system.hpp`. The Python `System` wraps
+it.
 
 ## Members and hosts
 
 Each member is a machine served by its own host, which owns a native thread, see
 [Threads](threads.md). The system links the hosts of its members with `member_link` wires. A
 wire is one direction of a link. It has a sender, a receiver and a latency `L` above zero.
+
+## Media
+
+Every medium is a set of `member_link` pairs, so the barrier, the mailbox and the resets treat
+all media alike. The binding keeps one `detail::medium` per `links=` entry: `uart_medium`,
+`spi_bus_medium` and `i2c_bus_medium`, the last two over `periph::stm32::spi_medium` and
+`i2c_medium`. A medium owns its links, its proxies and its tap, and `System` hands out the tap
+by any end of the medium.
+
+- A UART link is one `uart_wire` per direction.
+- An SPI bus is a pair of links per slave. `spi_forth`, the M->S link, carries the master's
+  select, frame and deselect posts and `spi_back`, the S->M link, the slave's replies. The star
+  has the master at its centre, so each slave links to the master only.
+- An I2C bus is a pair of links per target, the same star with the controller at its centre.
+  `i2c_forth` carries the controller's address, write, read and STOP posts and `i2c_back` the
+  target's answers. Each link's saved bytes start with a kind tag, and a link refuses the bytes
+  of another kind with `config_error`.
+
+Each end is a proxy on the board-device interface of the peripheral model. On the master side the
+proxy is a board device of the SPI or I2C model, on the slave side it drives the model as a board
+master does, through the model's link port. A device is a port of the medium and never a member.
+
+### Link ports
+
+`spi_link_port` and `i2c_link_port` are the attach route of a proxy, as `uart_link_port` is for
+a UART. They live in internal headers and `spi.cpp` and `i2c.cpp` implement them.
+
+- `attach_target` and `attach_controller` give a proxy the model's `core::clock`. A target is
+  added after the board devices. `attach_controller` takes an instance with no board controller,
+  no board target and no link target. `detach_target` and `detach_controller` take it back.
+- `mute` and `unmute` stop a proxy posting while its member resets.
+- A target proxy hears every address and answers through the target port's `complete`, on a lane
+  of its link. The model reports each phase's answer or drop to the controller proxy through
+  `answered` and `dropped`.
+
+### Stamps and replies
+
+- A proxy stamps a post with the time the SDK call carries or the phase end it computes.
+- Posts made at a drain go on their link's lane.
+- The reply per accepted unit rule: every SPI frame and every I2C address, write or read phase a
+  link accepts gets exactly one reply. Select, deselect and STOP posts are ordered by their unit
+  number. A reply a reset or a give-back cuts off gets the undriven reply at the time the model
+  reports it: all ones for an SPI frame, NACK for an I2C address or written byte and `0xFF` for
+  a read byte.
+- A reply decided at the receiver depends on the stamp and `L`, never on `Q`: a frame or phase
+  ending at `t` is delivered at `t + L`, whichever barrier hands it.
+
+### SPI reply rule
+
+The master's frame stalls until the slave's reply returns. A frame ending at `t` is clocked by the
+slave over `[t + L, t + L + fp]` and the master completes it at `t + 2 L + fp`. The reply is the
+word the slave shifted out for that frame. A select edge posted at its stamp applies at the slave
+`L` later. TXC, EOT, RXP and the hardware SS release follow the completion.
+
+### I2C reply rule
+
+The controller holds SCL low across a phase. An address, written byte or read byte ending at `t`
+is replayed at the target over `[t + L, t + L + p]` and the target answers at `t + L + p + s`.
+The controller continues `L` after the last answer, with the answers of several targets joined as
+the open-drain bus does: ACK by OR, read byte by AND, the longest stretch and the first error of a
+board target in attachment order. A remote target's answer carries its acknowledge and byte. A
+deferred answer reaches the model through `i2c_target_port::complete` or `complete_read` with the
+ticket it was given, and the model refuses a second completion of one answer.
+The hold of a phase is `2 L + p + s`, TIMEOUT sets when it reaches TIMEOUTA,
+and a completion due at the TIMEOUT instant comes after it.
 
 ## Windows and the barrier
 
@@ -34,7 +100,8 @@ sequenceDiagram
 - A sender appends a frame to the mailbox of its current window. After barrier `k` the
   receiver drains the mailbox of window `k` on its own thread. The sender writes that mailbox
   again only in window `k + 2`, which holds only while every member arrives at every barrier.
-- A frame that ends at sender time `t` is delivered at `t + L`.
+- A frame that ends at sender time `t` is delivered at `t + L`. An SPI frame or I2C phase is a
+  post of the same kind, stamped at its end.
 - `member_link::sender_reset` and `receiver_reset` tell a link that a member reset. A frame in
   flight at a sender reset is aborted, and a receiver reset drops the frames whose arrival is
   still on the line, so the dropped set depends on the reset time and `L` only.
@@ -96,6 +163,6 @@ it takes at most one host mutex at a time. Host threads never take the system mu
 
 ## Determinism
 
-The frames, their times and every member's state do not depend on `Q`, on the slicing or on
-the thread timing. The barrier and the mailbox rules above give that property, and the
-linked_uart example tests it at several quanta, slicings and CPU counts.
+The frames, SPI frames, I2C phases, their times and every member's state do not depend on `Q`,
+on the slicing or on the thread timing. The barrier and the mailbox rules above give that
+property, and the linked_uart example tests it at several quanta, slicings and CPU counts.
