@@ -583,7 +583,8 @@ TEST_CASE("no L1 instance is served by a U5 or H5 row: only the L1 rows attach")
       if(peripheral.name.starts_with("GPIO")
          or peripheral.name.starts_with("DMA")
          or peripheral.name.starts_with("USART")
-         or peripheral.name.starts_with("UART"))
+         or peripheral.name.starts_with("UART")
+         or peripheral.name.starts_with("SPI"))
       {
         expected.insert(peripheral.name);
       }

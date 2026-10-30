@@ -173,6 +173,15 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto spi_factory(board const& b, spi_variant variant) -> model_factory;
 
 /**
+ * @brief Factory of the classic SPI model, RM0038 section 28.
+ * @param b Board whose `spi` lists each instance's devices and `spi_controllers` its controller,
+ *        copied when a model is made.
+ * @param variant What differs between the peripherals of the family the row serves.
+ */
+[[nodiscard]] auto spi_classic_factory(board const& b, spi_classic_variant variant)
+    -> model_factory;
+
+/**
  * @brief Factory of the I2C model, RM0456 section 65.
  * @param b Board whose `i2c` lists each instance's targets, copied when a model is made.
  * @param variant What differs between the peripherals of the family the row serves.

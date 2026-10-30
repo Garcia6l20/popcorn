@@ -151,6 +151,23 @@ struct bus_window
   std::string_view clock = {};
 };
 
+/**
+ * @brief The window of @p windows holding @p address.
+ * @return The window, or null when none holds it.
+ */
+[[nodiscard]] constexpr auto window_of(std::span<bus_window const> windows, std::uint32_t address)
+    -> bus_window const*
+{
+  for(auto const& window : windows)
+  {
+    if(address >= window.first and address <= window.last)
+    {
+      return &window;
+    }
+  }
+  return nullptr;
+}
+
 /** @brief Differences between the classic DMA controllers the model rows serve. */
 struct dma_classic_traits
 {
@@ -638,6 +655,20 @@ inline constexpr spi_variant h5_spi{
     .limited_counter      = true,
     .autocr               = false,
     .dma_enables_writable = false};
+
+/** @brief Differences between the classic SPI peripherals the model rows serve. */
+struct spi_classic_variant
+{
+  /** @brief The peripheral has the TI frame format, `CR2.FRF`. Without it the bit is storage. */
+  bool ti_mode;
+  /** @brief Buses whose clock is the clock of an instance in their window. */
+  std::span<bus_window const> kernel_buses;
+};
+
+/** @brief STM32L1 SPI of Cat.3 to Cat.6, RM0038 28.2.1: the TI mode. */
+inline constexpr spi_classic_variant l1_spi_ti{.ti_mode = true, .kernel_buses = l1_apb_windows};
+/** @brief STM32L1 SPI of Cat.1 and Cat.2, RM0038 28.2.1 and 28.5.2 FRF: no TI mode. */
+inline constexpr spi_classic_variant l1_spi{.ti_mode = false, .kernel_buses = l1_apb_windows};
 
 /** @brief A TZSC `<STEM>SEC` or TZIC `<STEM>IE` stem whose peripheral has another name. */
 struct gtzc_rename

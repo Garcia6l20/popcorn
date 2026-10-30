@@ -32,7 +32,7 @@ struct builtin
   flash_variant    flash         = {};
 };
 
-constexpr std::array<builtin, 92> builtins{
+constexpr std::array<builtin, 95> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -257,6 +257,18 @@ constexpr std::array<builtin, 92> builtins{
          .ip_version_glob = "spi2s3_v2*",
          .make            = [](board const& b) { return spi_factory(b, h5_spi); },
          .part_glob       = "STM32H5*"},
+     {.ip              = "SPI",
+         .ip_version_glob = "spi2s1_v2_*",
+         .make            = [](board const& b) { return spi_classic_factory(b, l1_spi_ti); },
+         .part_glob       = "STM32L1*"},
+     {.ip              = "SPI",
+         .ip_version_glob = "spi2s1_v1_*",
+         .make            = [](board const& b) { return spi_classic_factory(b, l1_spi); },
+         .part_glob       = "STM32L1*"},
+     {.ip              = "SPI",
+         .ip_version_glob = "STM32L1_spi_cat2*",
+         .make            = [](board const& b) { return spi_classic_factory(b, l1_spi); },
+         .part_glob       = "STM32L1*"},
      {.ip              = "I2C",
          .ip_version_glob = "i2c2_v1_1U5*",
          .make            = [](board const& b) { return i2c_factory(b, u5_i2c); },

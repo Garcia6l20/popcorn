@@ -76,6 +76,8 @@ l1_firmwares = {
         "l152xb_l1_dma_ll",
         "l152xe_l1_usart_ll",
         "l152xb_l1_usart_ll",
+        "l152xe_l1_spi_ll",
+        "l152xb_l1_spi_ll",
     )
 }
 l1_env = {
@@ -234,6 +236,7 @@ for program, source in (
     ("stm32-flash-l1", "test_flash_l1.cpp"),
     ("stm32-dma-l1", "test_dma_l1.cpp"),
     ("stm32-usart-l1", "test_usart_l1.cpp"),
+    ("stm32-spi-l1", "test_spi_l1.cpp"),
 ):
     l1_test = add_doctest(
         program,
@@ -243,7 +246,10 @@ for program, source in (
         register=l152re is not None
         and l152rb is not None
         and l152rc is not None
-        and (program != "stm32-flash-l1" or (l152rba is not None and l152rca is not None)),
+        and (
+            program not in ("stm32-flash-l1", "stm32-spi-l1")
+            or (l152rba is not None and l152rca is not None)
+        ),
     )
     l1_test.private.include_dirs.append(private_dir)
     for _, target in l1_firmwares.values():

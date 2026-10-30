@@ -596,10 +596,8 @@ auto kernel_name(peripheral_desc const& desc, usart_variant const& variant) -> s
   {
     return lower(desc.name);
   }
-  auto const bus = std::ranges::find_if(variant.kernel_buses, [&](bus_window const& window) {
-    return desc.base >= window.first and desc.base <= window.last;
-  });
-  if(bus == variant.kernel_buses.end())
+  auto const* const bus = window_of(variant.kernel_buses, static_cast<std::uint32_t>(desc.base));
+  if(bus == nullptr)
   {
     throw config_error(
         desc.name, 0, "base", "an address on one of the buses that clock the USART model");

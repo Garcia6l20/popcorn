@@ -753,16 +753,57 @@ Source: [sai.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 
 ## SPI
 
-Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/spi.cpp)
+Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/spi.cpp), [spi_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/spi_classic.cpp)
 
-- Half duplex, CRC, TI mode, the autonomous trigger and SS timing are not modelled. The SPI runs
-  as a plain full-duplex or simplex SPI. One model_warning per machine comes at the first transfer
+- STM32U5 and STM32H5: half duplex, CRC, TI mode, the autonomous trigger and SS timing are not
+  modelled. The SPI runs as a plain full-duplex or simplex SPI. One model_warning per machine comes at the first transfer
   started with SPI_CFG2.SP, MIDI or MSSI or SPI_CFG1.CRCEN set.
 - The dummy frame RM0456 Figure 858 shows ahead of the UDRDR pattern is UDRDR too, and UDR rises
   at once, with no propagation latency.
 - RM0481 Table 645 limits SPI4 to SPI6 of the STM32H5 to DSIZE of 16 bits and CRC of 17 bits.
   The model accepts the DSIZE values of SPI1 to SPI3 there, and the CRC is not modelled.
 - SPI_I2SCFGR of the STM32H5 SPI1 to SPI3 is storage: the I2S mode is not modelled.
+- STM32L1 SPI1 to SPI3, RM0038 section 28, run SPI mode with one transmit buffer, one receive
+  buffer and frames of 8 or 16 bits by CR1.DFF. The frame time is DFF bits of the APB clock of
+  the instance, PCLK2 for SPI1, PCLK1 for SPI2 and SPI3, divided by 2 << BR, whatever
+  `RCC_APBxENR` holds. A frame starts at the DR write, without the 2 APB clock delay of the
+  RM0038 28.3.5 note.
+- `SPI_I2SCFGR` and `SPI_I2SPR` are storage: the I2S mode is not modelled. On Cat.3 to Cat.6
+  CR2.FRF 1 logs one `model_warning` and the SPI runs the Motorola format. On Cat.1 and Cat.2 FRF
+  is storage, RM0038 28.5.2. TIFRFE, UDR and CHSIDE stay 0.
+- Clearing SPE lets the frame in flight finish and land with BSY 1, then no frame starts,
+  RM0038 28.3.8 for the receive-only modes, inferred for the others. Both buffers keep their
+  word across SPE 0, and a word written with SPE 0 is sent once SPE and MSTR are 1, inferred.
+- A target whose transmit buffer is empty at a frame start sends the last frame it received, 0
+  after a reset, inferred.
+- The CRC runs serially over the frame bits in wire order, RM0038 28.3.6: with LSBFIRST 1 it
+  takes the DR value LSB first. The CRC frame shifts TXCRCR out as a data word, bit reversed with
+  LSBFIRST 1, inferred. The CRC frame clears CRCNEXT at its end, inferred from ST's HAL, which
+  never clears it. With DMA, the completed transmit transfer arms the CRC frame after the last
+  data. In receive-only mode, controller or target, the completed receive transfer makes the
+  frame in flight the CRC frame, inferred, or the next frame when none is in flight.
+- While OVR is set, every frame received is lost, also after the DR read of the clear sequence
+  and up to its SR read, RM0038 28.3.10.
+- RXCRCR takes every frame received, also those lost while OVR is set, inferred from RM0038
+  28.3.6.
+- A target, MSTR 0 with CRCEN 1, folds into RXCRCR every frame its controller clocks, also with
+  NSS high or SPE 0, RM0038 28.3.6. Such a frame lands nowhere else.
+- A target keeps BSY 1 from one frame to the next of a continuous transfer. RM0038 28.3.7 gives
+  a slave a BSY low of one SPI clock between frames.
+- SPI_DR takes byte accesses as well as the half-word and word accesses RM0038 28.5 requires: a
+  byte write merges into the DR value and sends it, a byte read returns its byte.
+- The CR1 write that ends the MODF clear sequence leaves SPE and MSTR clear, inferred: RM0038
+  28.3.10 restores them after the sequence.
+- The SPI IRQ and the DMA requests follow their flags and enables with SPE 0 too, RM0038
+  Table 159 and 28.3.9 name no SPE term.
+- The STM32L1 SPI takes a controller's frames through `spi_controller_port::transfer()` only.
+  `select()`, `frame()`, `deselect()` and `drop()` throw `config_error`, so an STM32L1 SPI is a
+  link end of no linked system.
+- An STM32L1 SPI device replies at the frame's end. The model calls
+  `spi_target::exchange_deferred()` with the frame's generation as ticket, offers no
+  `spi_target_port` and calls neither `attached()` nor `detached()`. A device that leaves its
+  reply pending drives all ones in that frame, and the frame's end fails the run with
+  `config_error`.
 
 ## SBS
 
