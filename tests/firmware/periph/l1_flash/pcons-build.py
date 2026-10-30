@@ -7,14 +7,21 @@ from popcorn_build.stm32_firmware import STM32L152XB, STM32L152XE, add_ll_firmwa
 here = Path(__file__).resolve().parent
 
 for chipset in (STM32L152XE, STM32L152XB):
-    ramfunc = (
-        [firmware_source(chipset.hal_package) / "Src" / "stm32l1xx_hal_flash_ramfunc.c"]
+    hal = (
+        [
+            firmware_source(chipset.hal_package) / "Src" / name
+            for name in (
+                "stm32l1xx_hal_flash_ramfunc.c",
+                "stm32l1xx_hal_flash.c",
+                "stm32l1xx_hal_flash_ex.c",
+            )
+        ]
         if firmware_env(chipset.preset) is not None
         else []
     )
     _, target = add_ll_firmware(
         "l1_flash_ll",
-        [here / "l1_flash_ll.c", *ramfunc],
+        [here / "l1_flash_ll.c", *hal],
         entries=[
             "idle",
             "wrong_key",
@@ -32,8 +39,10 @@ for chipset in (STM32L152XE, STM32L152XB):
             "parallel_half_hal",
             "copy_words_flash",
             "store_pair",
+            "eeprom_hal",
         ],
         chipset=chipset,
     )
     if target is not None:
         target.private.include_dirs.append(here)
+        target.private.compile_flags.append("-Wno-unused-parameter")

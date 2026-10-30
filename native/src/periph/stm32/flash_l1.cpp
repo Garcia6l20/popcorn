@@ -43,6 +43,12 @@ constexpr std::uint32_t lowest_range    = 2;
 constexpr std::uint64_t hz_per_khz      = 1000;
 constexpr std::uint32_t page_bytes      = 256;
 constexpr std::uint32_t half_page_words = 32;
+constexpr std::uint32_t sector_bytes    = 4096;
+constexpr std::uint32_t option_bytes    = 32;
+constexpr std::uint32_t second_options  = 0x80;
+constexpr std::uint32_t mass_erase_cost = 3;
+constexpr std::uint32_t level_0         = 0xaa;
+constexpr std::uint32_t level_2         = 0xcc;
 constexpr auto          tprog           = std::chrono::nanoseconds{3'280'000};
 
 struct flash_store
@@ -52,6 +58,14 @@ struct flash_store
   std::uint32_t value{};
 
   friend auto operator==(flash_store const&, flash_store const&) -> bool = default;
+};
+
+struct queued_run
+{
+  std::uint32_t tprogs{};
+  std::uint32_t count{};
+
+  friend auto operator==(queued_run const&, queued_run const&) -> bool = default;
 };
 
 struct flash_l1_state
@@ -64,15 +78,25 @@ struct flash_l1_state
   bool                         program_locked_up{};
   bool                         option_locked_up{};
   std::uint32_t                generation{};
-  std::uint32_t                queued{};
+  std::vector<queued_run>      queued{};
   std::vector<std::uint32_t>   loaded{};
   std::uint32_t                first_half{};
   std::uint32_t                second_half{};
   std::optional<std::uint32_t> erase_first{};
   std::uint8_t                 locked{};
   std::uint32_t                lock_ends{};
+  bool                         options_invalid{};
+  bool                         user_invalid{};
 
   friend auto operator==(flash_l1_state const&, flash_l1_state const&) -> bool = default;
+};
+
+/** @brief A region the bank filter covers, with the start of its bank 2 part, if any. */
+struct bank_window
+{
+  address                      start{};
+  std::uint32_t                size{};
+  std::optional<std::uint32_t> second{};
 };
 
 /**
@@ -84,17 +108,9 @@ struct flash_l1_state
 class bank_filter final : public bus_firewall
 {
 public:
-  bank_filter(
-      std::span<region_desc const* const> regions,
-      std::optional<std::uint32_t>        second_bank,
-      std::uint8_t const&                 locked)
-      : second_bank_{second_bank}, locked_{locked}
-  {
-    for(auto const* const region : regions)
-    {
-      windows_.emplace_back(region->start, region->size);
-    }
-  }
+  bank_filter(std::vector<bank_window> windows, std::uint8_t const& locked)
+      : windows_{std::move(windows)}, locked_{locked}
+  {}
 
   [[nodiscard]] auto check_peripheral(std::size_t, bus_attrs, arch::memory_op)
       -> bus_verdict override
@@ -136,16 +152,16 @@ public:
     }
     std::uint64_t first = 0;
     std::uint64_t last  = ~address{};
-    for(auto const& [start, size] : windows_)
+    for(auto const& [start, size, second] : windows_)
     {
       auto const end = std::uint64_t{start} + size;
       if(at >= start and at < end)
       {
-        if(second_bank_ and at >= *second_bank_)
+        if(second and at >= *second)
         {
-          return {.first = *second_bank_, .last = static_cast<address>(end - 1)};
+          return {.first = *second, .last = static_cast<address>(end - 1)};
         }
-        auto const top = second_bank_ and *second_bank_ < end ? std::uint64_t{*second_bank_} : end;
+        auto const top = second and *second < end ? std::uint64_t{*second} : end;
         return {.first = start, .last = static_cast<address>(top - 1)};
       }
       if(end <= at)
@@ -167,15 +183,18 @@ private:
     {
       return false;
     }
-    auto const inside = std::ranges::any_of(
-        windows_, [at](auto const& w) { return at >= w.first and at - w.first < w.second; });
-    auto const bank = second_bank_ and at >= *second_bank_ ? 2u : 1u;
-    return inside and (locked_ & bank) != 0;
+    auto const found = std::ranges::find_if(
+        windows_, [at](bank_window const& w) { return at >= w.start and at - w.start < w.size; });
+    if(found == windows_.end())
+    {
+      return false;
+    }
+    auto const bank = found->second and at >= *found->second ? 2u : 1u;
+    return (locked_ & bank) != 0;
   }
 
-  std::optional<std::uint32_t>                   second_bank_;
-  std::uint8_t const&                            locked_;
-  std::vector<std::pair<address, std::uint32_t>> windows_;
+  std::vector<bank_window> windows_;
+  std::uint8_t const&      locked_;
 };
 
 /** @brief FLASH_PECR fields, RM0038 3.9.2. */
@@ -230,8 +249,8 @@ struct status_fields
  *        registers read 0. While PELOCK is set a FLASH_PECR write changes nothing. The lock bits
  *        are set by a write of 1 only, and setting PELOCK sets PRGLOCK and OPTLOCK and clears PROG,
  *        DATA, FTDW, ERASE and FPRG. PROG, DATA, FTDW, ERASE, FPRG and PARALLELBANK keep their
- *        value while BSY is set, PARALLELBANK reads 0 on a part with one bank. OBL_LAUNCH is stored
- *        while OPTLOCK is clear and loads no option byte.
+ *        value while BSY is set, PARALLELBANK reads 0 on a part with one bank. Setting OBL_LAUNCH
+ *        while OPTLOCK is clear requests an option byte loader reset, reset_kind::option_load.
  *
  *        FLASH_ACR, RM0038 3.9.1: LATENCY and PRFTEN take a write only while ACC64 is set and the
  *        write leaves ACC64 unchanged. RUN_PD takes the first FLASH_ACR write after PDKEY1 then
@@ -258,20 +277,48 @@ struct status_fields
  *        under strict_peripherals, and programs nothing. An operation in voltage range 3
  *        completes and logs a model_warning once, model_error under strict_peripherals, RM0038
  *        3.6. A store while BSY is set is decided against FLASH_PECR at once, writes at once, and
- *        an operation it completes adds one tprog to BSY, EOP setting at the end of each. The
- *        core runs on during BSY, except that from the first store of a half page sequence to
- *        the end of its tprog a CPU or DMA load of the bank written is a bus error and a fetch
- *        from it a BusFault, both banks for a parallel operation, RM0038 3.4.3 note 2, through the
- *        model's bus firewall. While such an operation is BSY a store to the other bank sets
- *        WRPERR and writes nothing, RM0038 3.4.4. A store to a data EEPROM or option byte region
- *        is a bus error.
+ *        an operation it completes adds its tprogs to BSY, EOP setting at the end of each tprog.
+ *        The core runs on during BSY, except that from the first store of a half page sequence to
+ *        the end of its tprog a CPU or DMA load of the bank written, its program memory and its
+ *        half of the data EEPROM, is a bus error and a fetch from it a BusFault, both banks for a
+ *        parallel operation, RM0038 3.4.3 note 2 and Table 15 note 3, through the model's bus
+ *        firewall. A data EEPROM double word locks its bank the same way. While such an operation
+ *        is BSY a program memory or data EEPROM store to the other bank sets WRPERR and writes
+ *        nothing, RM0038 3.4.4 and 3.7.3. A store to a write protected sector, 16 pages per bit
+ *        of FLASH_WRPRx counted over the Flash regions in address order, sets WRPERR, RM0038
+ *        3.7.2.
  *
- *        FLASH_SR: EOP, WRPERR, PGAERR, SIZERR, OPTVERR and OPTVERRUSR clear on a write of 1.
- *        FLASH_IRQn is raised while EOP and EOPIE, or an error flag and ERRIE, are set, RM0038
- *        3.8. Every reset, and an RCC FLITFRST pulse while FLASH_ACR.RUN_PD is set, RM0038
- *        6.3.5, bring the registers to their description reset with READY set, set every lock
- *        and end the operation in flight and the queued ones. A pulse with RUN_PD clear changes
- *        nothing. FLASH_OBR and FLASH_WRPRx are left to the register file.
+ *        Data EEPROM, RM0038 3.4.2, 3.4.3 and Table 15: with PELOCK clear, a byte, halfword or
+ *        word store writes as given. A word store of 0 at a word boundary is a word erase of one
+ *        tprog. Any other store takes one tprog per word it touches, two when FTDW is set or the
+ *        word did not read 0. With ERASE and DATA set, two word stores from an 8-byte boundary
+ *        erase a double word, with FPRG and DATA set they program it, one tprog. A first store
+ *        off the boundary or a second store not at the next word sets PGAERR, a byte or
+ *        halfword store SIZERR. On Cat.1 a byte or halfword store of 0 programs nothing, logs a
+ *        model_warning once and raises model_error under strict_peripherals, Table 20 note 7. A
+ *        store while PELOCK is set sets WRPERR.
+ *
+ *        Option bytes, RM0038 3.5, 3.5.1 and 3.7.1: with PELOCK and OPTLOCK clear, a word store to
+ *        the option words of OPTION_FACTORY, offsets 0x00 to 0x1F and on a part with two banks
+ *        0x80 to 0x9F, writes as given, one or two tprog as the data EEPROM. A byte or halfword
+ *        store sets SIZERR, a store elsewhere in the region, to the factory information, or any
+ *        store at RDP level 2 sets WRPERR. At RDP level 1 a store of RDP 0xAA to offset 0 first
+ *        erases to 0 the Flash regions, the data EEPROM, the option words and the RTC backup
+ *        registers, and takes three tprog. A power-on, brown-out or option load reset loads
+ *        FLASH_OBR and FLASH_WRPRx from the option words: RDPRT from RDP, bits 23 to 16 from USER,
+ *        WRPRx from WRPx. A byte or halfword whose complement is wrong loads 0 and sets OPTVERR,
+ *        and OPTVERRUSR as well for USER on Cat.3 to Cat.6. FLASH_OBR and FLASH_WRPRx ignore
+ *        writes. RDPRT 0xAA is level 0, 0xCC level 2, any other value level 1.
+ *
+ *        FLASH_SR: EOP, WRPERR, PGAERR, SIZERR, OPTVERR and OPTVERRUSR clear on a write of 1. EOP
+ *        sets once at the end of each operation, after all of its tprogs. FLASH_IRQn is raised
+ *        while EOP and EOPIE, or an error flag and ERRIE, are set, RM0038 3.8. Every reset, and an
+ *        RCC FLITFRST pulse while FLASH_ACR.RUN_PD is set, RM0038 6.3.5, bring the registers to
+ *        their description reset with READY set, set every lock and end the operation in flight
+ *        and the queued ones. A pulse with RUN_PD clear changes nothing. FLASH_OBR and FLASH_WRPRx
+ *        keep their loaded value at every other reset and at every pulse. OPTVERR and OPTVERRUSR
+ *        set again at every reset and pulse after a load that set them, RM0038 3.9.7, the
+ *        write-1 clear lasting until then, inferred.
  */
 class flash_l1 final : public dispatch_model<flash_l1, flash_l1_state>,
                        public clock_listener,
@@ -309,6 +356,7 @@ public:
   void program_key_written(std::uint32_t old, std::uint32_t now);
   void option_key_written(std::uint32_t old, std::uint32_t now);
   void status_written(std::uint32_t old, std::uint32_t now);
+  void option_register_written(std::uint32_t old, std::uint32_t now);
 
 private:
   [[nodiscard]] auto busy() const -> bool;
@@ -316,23 +364,37 @@ private:
   void               restore(reset_kind kind);
   void               lock(std::uint32_t& control);
   void               program(flash_store const& word);
-  void               erase_page(std::uint32_t addr);
-  void               load_half_page(std::uint32_t addr, std::uint32_t value);
-  void               start(std::span<std::byte const> bytes, std::uint32_t at);
-  void               abort_sequence();
-  void               lock_banks(std::uint8_t banks);
-  void               release_banks();
-  [[nodiscard]] auto bank_of(std::uint32_t addr) const -> std::uint8_t;
-  void               begin_locked();
-  [[nodiscard]] auto in_second_bank(std::uint32_t addr) const -> bool;
-  [[nodiscard]] auto parallel() const -> bool;
-  void               begin();
-  void               fail(field_ref flag);
-  void               finish();
-  void               interrupts();
-  void               check_latency(std::string_view trigger);
-  void               note_once(bool& logged, std::string_view reg, std::string message);
-  auto               key_step(
+  void               program_data(flash_store const& word);
+  void               program_option(flash_store const& word);
+  void               double_word(std::uint32_t addr, std::uint32_t value);
+  void               write_timed(flash_store const& word);
+  void               mass_erase();
+  void               load_options();
+  void               note_range(std::uint32_t addr);
+  [[nodiscard]] auto rdp_level() const -> std::uint32_t;
+  [[nodiscard]] auto write_protected(std::uint32_t addr) const -> bool;
+  [[nodiscard]] auto read_word(std::uint32_t addr) const -> std::uint32_t;
+  [[nodiscard]] auto option_word(std::uint32_t offset) const -> bool;
+  [[nodiscard]] auto data_bank(region_desc const& region) const -> std::optional<std::uint32_t>;
+  [[nodiscard]] static auto loads_options(reset_kind kind) -> bool;
+  void                      erase_page(std::uint32_t addr);
+  void                      load_half_page(std::uint32_t addr, std::uint32_t value);
+  void                      start(std::span<std::byte const> bytes, std::uint32_t at);
+  void                      abort_sequence();
+  void                      lock_banks(std::uint8_t banks);
+  void                      release_banks();
+  [[nodiscard]] auto        bank_of(std::uint32_t addr) const -> std::uint8_t;
+  void                      begin_locked();
+  [[nodiscard]] auto        in_second_bank(std::uint32_t addr) const -> bool;
+  [[nodiscard]] auto        parallel() const -> bool;
+  [[nodiscard]] auto        other_bank_busy(std::uint32_t addr) const -> bool;
+  void                      begin(std::uint32_t tprogs = 1);
+  void                      fail(field_ref flag);
+  void                      finish();
+  void                      interrupts();
+  void                      check_latency(std::string_view trigger);
+  void                      note_once(bool& logged, std::string_view reg, std::string message);
+  auto                      key_step(
       std::uint8_t& keys,
       bool&         locked_up,
       bool          armed,
@@ -351,15 +413,33 @@ private:
   control_fields                                                    control_;
   status_fields                                                     status_;
   std::array<reg_ref, 4>                                            keys_{};
+  reg_ref                                                           options_;
+  field_ref                                                         rdp_;
+  std::vector<reg_ref>                                              protection_;
+  std::vector<region_desc const*>                                   program_regions_;
+  std::vector<region_desc const*>                                   data_regions_;
+  region_desc const*                                                option_region_{};
   std::optional<std::uint32_t>                                      second_bank_;
   std::unique_ptr<bank_filter>                                      filter_;
   irq_line&                                                         line_;
   core::clock_domain                                                hclk_;
   std::uint32_t                                                     written_{};
+  std::uint32_t                                                     written_offset_{};
   bool                                                              rejected_{};
   bool                                                              mode_logged_{};
   bool                                                              range_logged_{};
+  bool                                                              null_logged_{};
   std::set<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>> latency_logged_;
+};
+
+constexpr std::array<write_entry<flash_l1>, 5> flash_l1_option_writes{
+    {
+     {"OBR", &flash_l1::option_register_written},
+     {"WRPR1", &flash_l1::option_register_written},
+     {"WRPR2", &flash_l1::option_register_written},
+     {"WRPR3", &flash_l1::option_register_written},
+     {"WRPR4", &flash_l1::option_register_written},
+     }
 };
 
 constexpr std::array<write_entry<flash_l1>, 7> flash_l1_writes{
@@ -402,30 +482,51 @@ flash_l1::flash_l1(model_context& ctx, peripheral_desc const& desc, flash_l1_tra
           .size_error        = field("SR", "SIZERR"),
           .option_error      = field("SR", "OPTVERR"),
           .user_option_error = field("SR", "OPTVERRUSR")},
-      keys_{reg("PDKEYR"), reg("PEKEYR"), reg("PRGKEYR"), reg("OPTKEYR")}, line_{irq("FLASH_IRQn")},
-      hclk_{ctx.clock.domain("hclk")}
+      keys_{reg("PDKEYR"), reg("PEKEYR"), reg("PRGKEYR"), reg("OPTKEYR")}, options_{reg("OBR")},
+      rdp_{field("OBR", "RDPRT")}, line_{irq("FLASH_IRQn")}, hclk_{ctx.clock.domain("hclk")}
 {
   for(std::uint8_t index = 1; index <= 4; ++index)
   {
     expect_register(std::format("WRPR{}", index), index <= traits.wrp_registers);
   }
-  std::vector<region_desc const*> program_regions;
+  bind(std::span{flash_l1_option_writes}.first(1u + traits.wrp_registers));
+  for(auto const& entry : std::span{flash_l1_option_writes}.subspan(1, traits.wrp_registers))
+  {
+    protection_.push_back(reg(entry.reg));
+  }
   for(auto const& region : ctx.part.regions)
   {
-    if(region.controller == desc.name and region.acc.execute and not region.physical)
+    if(region.controller != desc.name or region.physical)
     {
-      program_regions.push_back(&region);
+      continue;
+    }
+    if(region.acc.execute)
+    {
+      program_regions_.push_back(&region);
+    }
+    else if(region.name == "OPTION_FACTORY")
+    {
+      option_region_ = &region;
+    }
+    else
+    {
+      data_regions_.push_back(&region);
     }
   }
-  std::ranges::sort(program_regions, {}, &region_desc::start);
-  if(traits.dual_bank and program_regions.size() == 1)
+  if(option_region_ == nullptr)
+  {
+    throw config_error(
+        ctx.part.part, 0, "regions", "an OPTION_FACTORY region that names FLASH as its controller");
+  }
+  std::ranges::sort(program_regions_, {}, &region_desc::start);
+  if(traits.dual_bank and program_regions_.size() == 1)
   {
     second_bank_ =
-        static_cast<std::uint32_t>(program_regions[0]->start + program_regions[0]->size / 2);
+        static_cast<std::uint32_t>(program_regions_[0]->start + program_regions_[0]->size / 2);
   }
-  else if(traits.dual_bank and program_regions.size() == 2)
+  else if(traits.dual_bank and program_regions_.size() == 2)
   {
-    second_bank_ = static_cast<std::uint32_t>(program_regions[1]->start);
+    second_bank_ = static_cast<std::uint32_t>(program_regions_[1]->start);
   }
   else if(traits.dual_bank)
   {
@@ -433,8 +534,26 @@ flash_l1::flash_l1(model_context& ctx, peripheral_desc const& desc, flash_l1_tra
         ctx.part.part, 0, "regions",
         "one or two Flash regions that name FLASH as their controller, the two banks");
   }
-  filter_ = std::make_unique<bank_filter>(program_regions, second_bank_, state_.locked);
+  std::vector<bank_window> windows;
+  for(auto const* const region : program_regions_)
+  {
+    windows.push_back({.start = region->start, .size = region->size, .second = second_bank_});
+  }
+  for(auto const* const region : data_regions_)
+  {
+    windows.push_back({.start = region->start, .size = region->size, .second = data_bank(*region)});
+  }
+  filter_ = std::make_unique<bank_filter>(std::move(windows), state_.locked);
   ctx.install_firewall(*filter_);
+}
+
+auto flash_l1::data_bank(region_desc const& region) const -> std::optional<std::uint32_t>
+{
+  if(not traits_.dual_bank)
+  {
+    return std::nullopt;
+  }
+  return static_cast<std::uint32_t>(region.start + region.size / 2);
 }
 
 auto flash_l1::bank_of(std::uint32_t addr) const -> std::uint8_t
@@ -466,14 +585,30 @@ void flash_l1::release_banks()
 
 void flash_l1::begin_locked()
 {
-  auto const ends  = busy() ? state_.queued + 2 : 1;
+  auto const ends  = busy() ? std::ranges::fold_left(
+                                  state_.queued, 2u,
+                                  [](std::uint32_t sum, queued_run run) { return sum + run.count; })
+                            : 1u;
   state_.lock_ends = std::max(state_.lock_ends, ends);
   begin();
 }
 
 auto flash_l1::in_second_bank(std::uint32_t addr) const -> bool
 {
+  for(auto const* const region : data_regions_)
+  {
+    if(addr >= region->start and addr - region->start < region->size)
+    {
+      auto const second = data_bank(*region);
+      return second and addr >= *second;
+    }
+  }
   return second_bank_ and addr >= *second_bank_;
+}
+
+auto flash_l1::other_bank_busy(std::uint32_t addr) const -> bool
+{
+  return busy() and state_.lock_ends != 0 and (state_.locked & bank_of(addr)) == 0;
 }
 
 auto flash_l1::parallel() const -> bool
@@ -594,17 +729,40 @@ auto flash_l1::range() const -> std::uint32_t
   return std::min(level, lowest_range);
 }
 
-void flash_l1::restore(reset_kind)
+auto flash_l1::loads_options(reset_kind kind) -> bool
 {
-  for(auto const& name : claims())
+  return kind == reset_kind::power_on
+      or kind == reset_kind::brown_out
+      or kind == reset_kind::option_load;
+}
+
+void flash_l1::restore(reset_kind kind)
+{
+  for(auto const& entry : flash_l1_writes)
   {
-    regs_.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(entry.reg).offset, describe(entry.reg).reset);
   }
   update(regs_, status_.ready, 1);
-  auto const generation = state_.generation;
-  auto const locked     = state_.locked;
-  state_                = {};
-  state_.generation     = generation;
+  if(loads_options(kind))
+  {
+    load_options();
+  }
+  auto const generation   = state_.generation;
+  auto const locked       = state_.locked;
+  auto const invalid      = state_.options_invalid;
+  auto const user_invalid = state_.user_invalid;
+  state_                  = {};
+  state_.generation       = generation;
+  state_.options_invalid  = invalid;
+  state_.user_invalid     = user_invalid;
+  if(invalid)
+  {
+    update(regs_, status_.option_error, 1);
+  }
+  if(user_invalid)
+  {
+    update(regs_, status_.user_option_error, 1);
+  }
   if(locked != 0)
   {
     ctx_.services.memory_policy_changed();
@@ -632,6 +790,7 @@ void flash_l1::load(std::span<std::byte const> in)
   latency_logged_.clear();
   mode_logged_  = false;
   range_logged_ = false;
+  null_logged_  = false;
 }
 
 void flash_l1::on_event(std::uint32_t kind, std::uint64_t payload)
@@ -649,10 +808,14 @@ void flash_l1::finish()
   {
     release_banks();
   }
-  if(state_.queued != 0)
+  if(not state_.queued.empty())
   {
-    --state_.queued;
-    schedule_in(tprog, operation_end, ++state_.generation);
+    auto const tprogs = state_.queued.front().tprogs;
+    if(--state_.queued.front().count == 0)
+    {
+      state_.queued.erase(state_.queued.begin());
+    }
+    schedule_in(tprog * tprogs, operation_end, ++state_.generation);
   }
   else
   {
@@ -701,8 +864,14 @@ void flash_l1::program(flash_store const& word)
   auto const control = regs_.peek(control_.pe_lock.offset);
   if(control_.pe_lock.of(control) != 0
      or control_.program_lock.of(control) != 0
-     or (busy() and state_.lock_ends != 0 and (state_.locked & bank_of(word.addr)) == 0))
+     or other_bank_busy(word.addr))
   {
+    fail(status_.protection_error);
+    return;
+  }
+  if(write_protected(word.addr))
+  {
+    abort_sequence();
     fail(status_.protection_error);
     return;
   }
@@ -730,15 +899,7 @@ void flash_l1::program(flash_store const& word)
             word.addr));
     return;
   }
-  if(range() == lowest_range)
-  {
-    note_once(
-        range_logged_, "PECR",
-        std::format(
-            "a program of 0x{:08x} in voltage range 3, RM0038 3.6 allows programming in ranges 1 "
-            "and 2 only",
-            word.addr));
-  }
+  note_range(word.addr);
   if(erase)
   {
     erase_page(word.addr);
@@ -753,16 +914,279 @@ void flash_l1::program(flash_store const& word)
   begin();
 }
 
-void flash_l1::begin()
+void flash_l1::note_range(std::uint32_t addr)
+{
+  if(range() == lowest_range)
+  {
+    note_once(
+        range_logged_, "PECR",
+        std::format(
+            "a program of 0x{:08x} in voltage range 3, RM0038 3.6 allows programming in ranges 1 "
+            "and 2 only",
+            addr));
+  }
+}
+
+void flash_l1::begin(std::uint32_t tprogs)
 {
   if(busy())
   {
-    ++state_.queued;
+    if(state_.queued.empty() or state_.queued.back().tprogs != tprogs)
+    {
+      state_.queued.push_back({.tprogs = tprogs});
+    }
+    ++state_.queued.back().count;
     return;
   }
   update(regs_, status_.busy, 1);
   update(regs_, status_.high_voltage_end, 0);
-  schedule_in(tprog, operation_end, ++state_.generation);
+  schedule_in(tprog * tprogs, operation_end, ++state_.generation);
+}
+
+auto flash_l1::read_word(std::uint32_t addr) const -> std::uint32_t
+{
+  std::array<std::byte, 4> bytes{};
+  static_cast<void>(ctx_.services.read_block(addr, bytes, initiator::debugger));
+  return std::bit_cast<std::uint32_t>(bytes);
+}
+
+auto flash_l1::write_protected(std::uint32_t addr) const -> bool
+{
+  std::uint32_t before = 0;
+  for(auto const* const region : program_regions_)
+  {
+    if(addr >= region->start and addr - region->start < region->size)
+    {
+      auto const sector =
+          (before + static_cast<std::uint32_t>(addr - region->start)) / sector_bytes;
+      auto const index = sector / 32;
+      return index < protection_.size()
+         and (regs_.peek(protection_[index].offset) >> (sector % 32) & 1u) != 0;
+    }
+    before += region->size;
+  }
+  return false;
+}
+
+auto flash_l1::rdp_level() const -> std::uint32_t
+{
+  auto const rdp = get(regs_, rdp_);
+  return rdp == level_0 ? 0 : rdp == level_2 ? 2 : 1;
+}
+
+auto flash_l1::option_word(std::uint32_t offset) const -> bool
+{
+  return offset < option_bytes
+      or (traits_.dual_bank
+          and offset >= second_options
+          and offset < second_options + option_bytes);
+}
+
+void flash_l1::write_timed(flash_store const& word)
+{
+  auto const    fixed  = get(regs_, control_.fixed_time) != 0;
+  std::uint32_t tprogs = 0;
+  if(word.size == 4 and word.addr % 4 == 0 and word.value == 0)
+  {
+    tprogs = 1;
+  }
+  else
+  {
+    for(auto at = word.addr & ~3u; at < word.addr + word.size; at += 4)
+    {
+      tprogs += fixed or read_word(at) != 0 ? 2 : 1;
+    }
+  }
+  auto const bytes = std::bit_cast<std::array<std::byte, 4>>(word.value);
+  start(std::span{bytes}.first(word.size), word.addr);
+  begin(tprogs);
+}
+
+void flash_l1::double_word(std::uint32_t addr, std::uint32_t value)
+{
+  if(state_.loaded.empty())
+  {
+    if(addr % 8 != 0)
+    {
+      fail(status_.alignment_error);
+      return;
+    }
+    state_.first_half = addr;
+    state_.loaded.push_back(value);
+    lock_banks(bank_of(addr));
+    return;
+  }
+  if(addr != state_.first_half + 4)
+  {
+    abort_sequence();
+    fail(status_.alignment_error);
+    return;
+  }
+  std::array<std::uint32_t, 2> const words{state_.loaded.front(), value};
+  state_.loaded.clear();
+  start(std::as_bytes(std::span{words}), state_.first_half);
+  begin_locked();
+}
+
+void flash_l1::program_data(flash_store const& word)
+{
+  auto const control = regs_.peek(control_.pe_lock.offset);
+  if(control_.pe_lock.of(control) != 0 or other_bank_busy(word.addr))
+  {
+    fail(status_.protection_error);
+    return;
+  }
+  auto const erase     = control_.erase.of(control) != 0;
+  auto const half_page = control_.half_page.of(control) != 0;
+  if(erase or half_page)
+  {
+    if(erase == half_page or control_.data.of(control) == 0 or control_.program.of(control) != 0)
+    {
+      note_once(
+          mode_logged_, "PECR",
+          std::format(
+              "a data EEPROM store to 0x{:08x} with ERASE or FPRG set and DATA clear or PROG "
+              "set, or with both set: nothing is programmed",
+              word.addr));
+      return;
+    }
+    if(word.size != 4)
+    {
+      abort_sequence();
+      fail(status_.size_error);
+      return;
+    }
+    note_range(word.addr);
+    double_word(word.addr, erase ? 0 : word.value);
+    return;
+  }
+  auto const mask = word.size == 4 ? ~std::uint32_t{} : (std::uint32_t{1} << (8 * word.size)) - 1;
+  if(word.size < 4 and (word.value & mask) == 0 and not traits_.null_partial_writes)
+  {
+    note_once(
+        null_logged_, "PECR",
+        std::format(
+            "a {}-byte store of 0 to the data EEPROM at 0x{:08x}, RM0038 Table 20 note 7 allows "
+            "only a non-zero byte or halfword on Cat.1: nothing is programmed",
+            word.size, word.addr));
+    return;
+  }
+  note_range(word.addr);
+  write_timed(word);
+}
+
+void flash_l1::program_option(flash_store const& word)
+{
+  auto const control = regs_.peek(control_.pe_lock.offset);
+  if(control_.pe_lock.of(control) != 0 or control_.option_lock.of(control) != 0)
+  {
+    fail(status_.protection_error);
+    return;
+  }
+  if(word.size != 4)
+  {
+    fail(status_.size_error);
+    return;
+  }
+  if(word.addr % 4 != 0)
+  {
+    fail(status_.alignment_error);
+    return;
+  }
+  auto const offset = static_cast<std::uint32_t>(word.addr - option_region_->start);
+  if(not option_word(offset) or rdp_level() == 2)
+  {
+    fail(status_.protection_error);
+    return;
+  }
+  if(control_.erase.of(control) != 0 or control_.half_page.of(control) != 0)
+  {
+    note_once(
+        mode_logged_, "PECR",
+        std::format(
+            "an option byte store to 0x{:08x} with ERASE or FPRG set: nothing is programmed, "
+            "RM0038 3.5.1 allows word writes and word erases only",
+            word.addr));
+    return;
+  }
+  note_range(word.addr);
+  if(offset == 0 and rdp_level() == 1 and (word.value & 0xffu) == level_0)
+  {
+    mass_erase();
+    start(std::bit_cast<std::array<std::byte, 4>>(word.value), word.addr);
+    begin(mass_erase_cost);
+    return;
+  }
+  write_timed(word);
+}
+
+void flash_l1::mass_erase()
+{
+  std::uint32_t largest = option_bytes;
+  for(auto const* const region : program_regions_)
+  {
+    largest = std::max(largest, region->size);
+  }
+  for(auto const* const region : data_regions_)
+  {
+    largest = std::max(largest, region->size);
+  }
+  std::vector<std::byte> const zeros(largest);
+  auto const                   erase = [&](address at, std::uint32_t size) {
+    start(std::span{zeros}.first(size), static_cast<std::uint32_t>(at));
+  };
+  for(auto const* const region : program_regions_)
+  {
+    erase(region->start, region->size);
+  }
+  for(auto const* const region : data_regions_)
+  {
+    erase(region->start, region->size);
+  }
+  erase(option_region_->start, option_bytes);
+  if(traits_.dual_bank)
+  {
+    erase(option_region_->start + second_options, option_bytes);
+  }
+  auto const rtc =
+      std::ranges::find(ctx_.part.peripherals, std::string_view{"RTC"}, &peripheral_desc::name);
+  if(rtc == ctx_.part.peripherals.end())
+  {
+    return;
+  }
+  for(auto const& backup : rtc->registers)
+  {
+    if(backup.name.starts_with("BKP"))
+    {
+      static_cast<void>(ctx_.services.write_block(
+          rtc->base + backup.offset, std::span{zeros}.first(4), initiator::debugger));
+    }
+  }
+}
+
+void flash_l1::load_options()
+{
+  auto const base = static_cast<std::uint32_t>(option_region_->start);
+  auto const pair = [this, base](std::uint32_t offset, std::uint32_t bits) {
+    auto const word = read_word(base + offset);
+    auto const mask = (std::uint32_t{1} << bits) - 1;
+    auto const low  = word & mask;
+    return ((word >> 16) & mask) == (~low & mask) ? std::optional{low} : std::nullopt;
+  };
+  auto const rdp    = pair(0, 8);
+  auto const user   = pair(4, 8);
+  auto       failed = not rdp or not user;
+  regs_.poke(options_.offset, (user.value_or(0) << 16) | rdp.value_or(0));
+  for(std::uint32_t index = 0; index < protection_.size(); ++index)
+  {
+    auto const offset = index < 3 ? 8 + 8 * index : second_options;
+    auto const low    = pair(offset, 16);
+    auto const high   = pair(offset + 4, 16);
+    failed            = failed or not low or not high;
+    regs_.poke(protection_[index].offset, (high.value_or(0) << 16) | low.value_or(0));
+  }
+  state_.options_invalid = failed;
+  state_.user_invalid    = not user and traits_.user_option_flag;
 }
 
 auto flash_l1::on_memory_write(
@@ -772,11 +1196,19 @@ auto flash_l1::on_memory_write(
     std::uint32_t      value,
     access_ctx) -> std::expected<void, bus_error>
 {
-  if(not region.acc.execute)
+  flash_store const word{.addr = static_cast<std::uint32_t>(addr), .size = size, .value = value};
+  if(region.acc.execute)
   {
-    return std::unexpected{bus_error::denied};
+    program(word);
   }
-  program({.addr = static_cast<std::uint32_t>(addr), .size = size, .value = value});
+  else if(region.start == option_region_->start)
+  {
+    program_option(word);
+  }
+  else
+  {
+    program_data(word);
+  }
   return {};
 }
 
@@ -789,6 +1221,7 @@ auto flash_l1::on_write(
     access_ctx     ctx) -> std::expected<void, bus_error>
 {
   written_        = merge_write(0, offset, size, value);
+  written_offset_ = offset & ~3u;
   auto const done = dispatch_model::on_write(regs, offset, size, old, value, ctx);
   if(std::exchange(rejected_, false))
   {
@@ -857,6 +1290,7 @@ void flash_l1::control_written(std::uint32_t old, std::uint32_t now)
     word =
         control_.parallel_bank.with(word, traits_.dual_bank ? control_.parallel_bank.of(now) : 0u);
     auto const modes = control_.program.mask()
+                     | control_.data.mask()
                      | control_.erase.mask()
                      | control_.half_page.mask()
                      | control_.parallel_bank.mask();
@@ -889,6 +1323,10 @@ void flash_l1::control_written(std::uint32_t old, std::uint32_t now)
   }
   regs_.poke(control_.pe_lock.offset, word);
   interrupts();
+  if(control_.option_lock.of(old) == 0 and control_.option_launch.of(word) != 0)
+  {
+    ctx_.services.request_reset(reset_kind::option_load);
+  }
 }
 
 void flash_l1::power_key_written(std::uint32_t, std::uint32_t now)
@@ -959,6 +1397,11 @@ void flash_l1::option_key_written(std::uint32_t, std::uint32_t now)
   static_cast<void>(key_step(
       state_.option_keys, state_.option_locked_up, get(regs_, control_.pe_lock) == 0,
       control_.option_lock, option_key1, option_key2, now));
+}
+
+void flash_l1::option_register_written(std::uint32_t old, std::uint32_t)
+{
+  regs_.poke(written_offset_, old);
 }
 
 void flash_l1::status_written(std::uint32_t old, std::uint32_t)

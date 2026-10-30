@@ -9,7 +9,12 @@
 #define PRGKEY2 0x13141516u
 #define TARGET  ((uint32_t volatile*)0x0801F000u)
 
-FLASH_ProcessTypeDef pFlash;
+uint32_t HAL_GetTick(void);
+
+uint32_t HAL_GetTick(void)
+{
+  return 0u;
+}
 
 void idle(void);
 void wrong_key(void);
@@ -214,5 +219,15 @@ __attribute__((noipa)) void store_pair(uint32_t volatile* dst, uint32_t first, u
 {
   dst[0] = first;
   dst[1] = second;
+  DONE();
+}
+
+void eeprom_hal(uint32_t type, uint32_t address, uint32_t data);
+
+__attribute__((noipa)) void eeprom_hal(uint32_t type, uint32_t address, uint32_t data)
+{
+  LOG(HAL_FLASHEx_DATAEEPROM_Unlock());
+  LOG(HAL_FLASHEx_DATAEEPROM_Program(type, address, data));
+  LOG(FLASH->SR);
   DONE();
 }

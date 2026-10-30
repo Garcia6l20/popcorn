@@ -240,34 +240,53 @@ Differs from RM0481:
 
 On the STM32L1, RM0038 section 3:
 
-- A program memory word write, page erase or half page write holds BSY for one tprog of
-  3.28 ms, the datasheet typical, and the memory reads its new content from the last store of the
-  operation on. During a word write or a page erase, code and data reads of the bank complete and
-  the core keeps running from it. RM0038 3.4.3 stalls code run from the bank for one tprog.
+- A program memory word write, page erase or half page write holds BSY for one tprog of 3.28 ms, the
+  typical of the STM32L15x datasheets, and the memory reads its new content from the last store of
+  the operation on. During a word write or a page erase, code and data reads of the bank complete
+  and the core keeps running from it. RM0038 3.4.3 stalls code run from the bank for one tprog.
 - From the first store of a half page sequence to the end of its tprog, a CPU or DMA load of the
-  bank written is a bus error and a fetch from it a BusFault, RM0038 3.4.3 note 2. A parallel page
-  erase or parallel half page locks both banks the same way, from the first store, inferred from
-  RM0038 3.4.2 and 3.4.3, which run them from SRAM only. Host and debugger reads complete. A
-  vector read from a locked bank is a bus error too, so an exception entry with VTOR in that
-  bank escalates to HardFault with HFSR.VECTTBL, inferred from RM0038 Table 15 note 3. Firmware
-  runs these operations from SRAM with VTOR in SRAM or in the other bank.
+  bank written, its program memory and its half of the data EEPROM, is a bus error and a fetch from
+  it a BusFault, RM0038 3.4.3 note 2 and Table 15 note 3. A data EEPROM double word erase or write
+  locks its bank the same way. A parallel page erase or parallel half page locks both banks the same
+  way, from the first store, inferred from RM0038 3.4.2 and 3.4.3, which run them from SRAM only.
+  Host and debugger reads complete. A vector read from a locked bank is a bus error too, so an
+  exception entry with VTOR in that bank escalates to HardFault with HFSR.VECTTBL, inferred from
+  RM0038 Table 15 note 3. Firmware runs these operations from SRAM with VTOR in SRAM or in the other
+  bank.
 - A store while BSY is set is decided against FLASH_PECR at its own time and writes at once. An
-  operation it completes adds one tprog to BSY. EOP sets at the end of each tprog. Silicon stalls
-  the store until the operation before it ends. While a half page of one bank is BSY, a store to
-  the other bank sets WRPERR and writes nothing, RM0038 3.4.4.
+  operation it completes adds its tprogs to BSY. EOP sets once at the end of each operation.
+  Silicon stalls the store until the operation before it ends. While a half page or a data
+  EEPROM double word of one bank is BSY, a program memory or data EEPROM store to the other bank
+  sets WRPERR and writes nothing, RM0038 3.4.4 and 3.7.3.
 - A program over a word that is not erased writes the word as given. A page erase writes 0, and a
   never-programmed word reads 0, the erased value.
 - A store with FLASH_PECR.ERASE or FPRG set and PROG clear, or with both set, programs nothing,
-  logs one `model_warning` and raises `ModelError` under `strict`. A store to the data EEPROM or
-  the option bytes is a bus error.
+  logs one `model_warning` and raises `ModelError` under `strict`.
+- A data EEPROM byte, halfword or word write takes one tprog when FTDW is clear and the word reads
+  0, else two, RM0038 Table 15. A word store of 0 is a word erase of one tprog. With ERASE or FPRG
+  set, DATA set and PROG clear, two word stores from an 8-byte boundary erase or program a double
+  word in one tprog. A never written data EEPROM byte reads 0.
+- The option words of the information block, offsets 0x00 to 0x1F and 0x80 to 0x9F on Cat.4 to
+  Cat.6, take a word store with PELOCK and OPTLOCK clear, timed as the data EEPROM. A power-on,
+  brown-out or option load reset loads FLASH_OBR and FLASH_WRPRx from them, FLASH_PECR.OBL_LAUNCH
+  requests that reset. A write protected sector, one FLASH_WRPRx bit per 4 KB counted over the
+  Flash regions in address order, refuses a program or erase with WRPERR. RDP level 2 refuses
+  every option store with WRPERR. At level 1, a store of RDP 0xAA erases the Flash regions, the
+  data EEPROM, the option words and the RTC backup registers to 0, then programs the word, in
+  three tprog. A part starts with the virgin option words: FLASH_OBR 0x00F800AA, FLASH_WRPRx 0.
+- At RDP level 1 every read, program and erase completes, the user flash boot of RM0038 3.7.1.
+  BOR_LEV, IWDG_SW, nRST_STOP, nRST_STDBY and nBFB2 read in FLASH_OBR as loaded, and the BOR
+  threshold, the watchdog start, Stop, Standby and the boot address follow the machine's own
+  configuration. FLASH_WRPRx bits are write protection on every category.
+- OPTVERR and OPTVERRUSR set again at every reset and FLITFRST pulse after an option load that
+  set them, RM0038 3.9.7. An option store programs whatever OPTVERR and OPTVERRUSR hold.
 - A program in voltage range 3 completes, logs one `model_warning` and raises `ModelError` under
   `strict`. RM0038 3.6 allows programming in ranges 1 and 2 only.
 - FLASH_ACR.RUN_PD powers nothing down: the flash stays readable and fetchable, and
   FLASH_SR.READY reads the inverse of RUN_PD. SLEEP_PD and PRFTEN are storage.
-- FLASH_PECR.OBL_LAUNCH is stored while OPTLOCK is clear and loads no option byte. FLASH_OBR and
-  FLASH_WRPRx read their description reset and protect no sector.
 - An RCC FLITFRST pulse resets the FLASH registers only while FLASH_ACR.RUN_PD is set, RM0038
-  6.3.5. While FLITFRST is held, FLASH register writes are ignored whatever RUN_PD holds.
+  6.3.5, and keeps FLASH_OBR and FLASH_WRPRx at their loaded values. While FLITFRST is held,
+  FLASH register writes are ignored whatever RUN_PD holds.
 - A supply cut during a program leaves the word as the store wrote it.
 - Inferred rules: a wrong key, a third key write after the unlock, or a write to FLASH_PRGKEYR or
   FLASH_OPTKEYR while PELOCK is set is a bus error that sets the lock it targets until the next
@@ -275,13 +294,21 @@ On the STM32L1, RM0038 section 3:
   restarts the sequence, RUN_PD takes only the first FLASH_ACR write after the PDKEYR pair, a
   FLASH_ACR write that changes ACC64 keeps LATENCY and PRFTEN, so ACC64 clears while LATENCY or
   PRFTEN is 1, a byte or halfword store to program memory sets SIZERR and an unaligned word store
-  PGAERR, a store to a page start with ERASE and PROG set erases the page whatever value it
-  writes, an erase store away from a page start sets PGAERR, a half page store that skips a word
-  inside the half page sets PGAERR, BSY stays 0 while the first 31 half page words load, a
-  parallel operation takes a bank 1 page or half page first and a bank 2 one second and sets
-  PGAERR for any other order, a FLASH_PECR write that ends a half page sequence early, setting
-  PELOCK included, sets PGAERR, a byte or halfword store inside a sequence sets SIZERR and drops
-  it, and FLASH_SR.READY reads 1 after a reset, where RM0038 3.9.7 gives 0.
+  PGAERR, a store to a page start with ERASE and PROG set erases the page whatever value it writes,
+  an erase store away from a page start sets PGAERR, a half page store that skips a word inside the
+  half page sets PGAERR, BSY stays 0 while the first 31 half page words load, a parallel operation
+  takes a bank 1 page or half page first and a bank 2 one second and sets PGAERR for any other
+  order, a FLASH_PECR write that ends a half page sequence early, setting PELOCK included, sets
+  PGAERR, a byte or halfword store inside a sequence sets SIZERR and drops it, FLASH_SR.READY reads
+  1 after a reset, where RM0038 3.9.7 gives 0, the virgin option words hold 0xFF in the upper byte
+  of the RDP and USER words and complement 0xFFFF of WRPx 0, an option word whose complement is
+  wrong loads 0, so after an RDP 1 to 0 regression FLASH_OBR reads USER 0 with OPTVERR and
+  OPTVERRUSR set, a write of 1 to OPTVERR or OPTVERRUSR clears it until the next reset, an option
+  store with OPTVERR or OPTVERRUSR set programs, a data EEPROM store that spans two words counts the
+  tprogs of each word, RM0038 Table 20 note 5, a store to the factory information or at RDP level 2
+  sets WRPERR, an unaligned or a byte or halfword option store sets PGAERR or SIZERR, a byte or
+  halfword store of 0 to the Cat.1 data EEPROM programs nothing and logs one `model_warning`,
+  `ModelError` under `strict`.
 
 ## GPDMA and LPDMA
 

@@ -497,19 +497,21 @@ TEST_CASE(
 
 TEST_CASE("1000 stores while BSY keep the FLASH save size and end 1000 tprog later")
 {
-  auto const f = parked(l152rb(), firmware_b);
-  unlock(f);
-  auto const size = [&f] {
+  auto const size = [](stm32_fixture const& f) {
     auto const saved = f.target->snapshot();
     auto const found = std::ranges::find(
         saved.data().models, std::string_view{"FLASH"}, &core::snapshot_part::owner);
     REQUIRE(found != saved.data().models.end());
     return found->data.size();
   };
-  auto const before = size();
+  auto const two = parked(l152rb(), firmware_b);
+  unlock(two);
+  call(two, "store_loop", {static_cast<std::uint32_t>(target), 2});
+  auto const f = parked(l152rb(), firmware_b);
+  unlock(f);
   call(f, "store_loop", {static_cast<std::uint32_t>(target), 1000});
   auto const start = now_ps(f);
-  CHECK(size() == before);
+  CHECK(size(f) == size(two));
   CHECK(read(f, target + 4 * 999) == 999);
   CHECK(read(f, sr) == (ready | bsy));
   idle_to(f, start + 999 * tprog_ps - 1'000'000'000, icount{8'000'000});
@@ -830,14 +832,6 @@ TEST_CASE("RM0038 3.6: a program in voltage range 3 programs and warns once, mod
   set_range3(f);
   unlock(f);
   CHECK_THROWS_AS((void)memory_write(f, target, 4, 1), popcorn::model_error);
-}
-
-TEST_CASE("a store to the data EEPROM or the option bytes is a bus error")
-{
-  auto const f = parked();
-  unlock(f);
-  CHECK_FALSE(memory_write(f, eeprom, 4, 1));
-  CHECK_FALSE(memory_write(f, 0x1FF8'0000, 4, 1));
 }
 
 TEST_CASE("RM0038 6.3.5: an FLITFRST pulse with RUN_PD 0 changes nothing, a program runs on")
@@ -1391,4 +1385,489 @@ TEST_CASE("checklist 20: the store after the first half page store in the same b
   CHECK(read(f, sr) == (ready | bsy));
   CHECK(read(f, target) == 0x700);
   CHECK(read(f, target + 4) == 0x801);
+}
+
+namespace
+{
+constexpr address       options    = 0x1FF8'0000;
+constexpr address       obr        = flash + 0x1C;
+constexpr address       wrpr1      = flash + 0x20;
+constexpr address       wrpr2      = flash + 0x80;
+constexpr address       wrpr4      = flash + 0x88;
+constexpr std::uint32_t optverr    = 1u << 11;
+constexpr std::uint32_t optverrusr = 1u << 12;
+constexpr std::uint32_t obl_launch = 1u << 18;
+constexpr std::uint32_t virgin_obr = 0x00F8'00AA;
+
+void unlock_data(stm32_fixture const& f)
+{
+  write(f, pekeyr, pe_key1);
+  write(f, pekeyr, pe_key2);
+}
+
+void unlock_options(stm32_fixture const& f)
+{
+  unlock_data(f);
+  write(f, optkeyr, opt_key1);
+  write(f, optkeyr, opt_key2);
+  REQUIRE((read(f, pecr) & locks) == prglock);
+}
+
+auto option_word(std::uint32_t low, std::uint32_t bits) -> std::uint32_t
+{
+  auto const mask = (std::uint32_t{1} << bits) - 1;
+  auto const high = bits == 8 ? 0xFF00'0000u : 0u;
+  return high | ((~low & mask) << 16) | (low & mask);
+}
+
+void end_operations(stm32_fixture const& f)
+{
+  while((read(f, sr) & bsy) != 0)
+  {
+    auto const due = flash_due(f);
+    REQUIRE(due.size() == 1);
+    idle_to(f, std::max(due.front(), now_ps(f)) + 1'000'000);
+  }
+}
+
+void program_option(stm32_fixture const& f, std::uint32_t offset, std::uint32_t value)
+{
+  REQUIRE(memory_write(f, options + offset, 4, value));
+  end_operations(f);
+  write(f, sr, eop);
+}
+
+void reload(stm32_fixture const& f)
+{
+  f.target->reset(reset_kind::option_load);
+  copy_ram_code(f);
+  f.set("pc", sym(f.firmware_name, "idle"));
+}
+}
+
+TEST_CASE("RM0038 Table 15: data EEPROM byte, halfword and word writes take one or two tprog")
+{
+  auto const f = parked();
+  unlock_data(f);
+  auto const timed = [&f](address at, std::uint8_t size, std::uint32_t value) {
+    auto const start = now_ps(f);
+    REQUIRE(memory_write(f, at, size, value));
+    auto const due = flash_due(f);
+    REQUIRE(due.size() == 1);
+    end_operations(f);
+    write(f, sr, eop);
+    return (due.front() - start + tprog_ps / 2) / tprog_ps;
+  };
+  CHECK(read(f, eeprom) == 0);
+  CHECK(timed(eeprom, 4, 0x1122'3344) == 1);
+  CHECK(read(f, eeprom) == 0x1122'3344);
+  CHECK(timed(eeprom, 4, 0x5566'7788) == 2);
+  CHECK(timed(eeprom, 4, 0) == 1);
+  CHECK(read(f, eeprom) == 0);
+  CHECK(timed(eeprom + 5, 1, 0xAB) == 1);
+  CHECK(timed(eeprom + 6, 2, 0xCDEF) == 2);
+  CHECK(read(f, eeprom + 4) == 0xCDEF'AB00);
+  write(f, pecr, ftdw);
+  CHECK(timed(eeprom + 8, 4, 1) == 2);
+  CHECK(read(f, sr) == (ready | endhv));
+}
+
+TEST_CASE("RM0038 3.4.2 and 3.4.3: a data EEPROM double word erases and programs in one tprog")
+{
+  auto const f = parked();
+  unlock_data(f);
+  REQUIRE(memory_write(f, eeprom + 8, 4, 7));
+  REQUIRE(memory_write(f, eeprom + 12, 4, 9));
+  end_operations(f);
+  write(f, sr, eop);
+  write(f, pecr, erase | data);
+  REQUIRE(memory_write(f, eeprom + 8, 4, 0));
+  CHECK(flash_due(f).empty());
+  REQUIRE(memory_write(f, eeprom + 12, 4, 0));
+  CHECK(read(f, sr) == (ready | bsy));
+  CHECK(read(f, eeprom + 8) == 0);
+  CHECK(read(f, eeprom + 12) == 0);
+  end_operations(f);
+  write(f, sr, eop);
+  write(f, pecr, fprg | data);
+  REQUIRE(memory_write(f, eeprom + 16, 4, 0x10));
+  REQUIRE(memory_write(f, eeprom + 20, 4, 0x20));
+  CHECK(read(f, sr) == (ready | bsy));
+  CHECK(read(f, eeprom + 20) == 0x20);
+  end_operations(f);
+  write(f, sr, eop);
+  REQUIRE(memory_write(f, eeprom + 28, 4, 1));
+  CHECK(read(f, sr) == (ready | endhv | pgaerr));
+  write(f, sr, pgaerr);
+  REQUIRE(memory_write(f, eeprom + 24, 4, 1));
+  REQUIRE(memory_write(f, eeprom + 32, 4, 1));
+  CHECK(read(f, sr) == (ready | endhv | pgaerr));
+  write(f, sr, pgaerr);
+  REQUIRE(memory_write(f, eeprom + 24, 2, 1));
+  CHECK(read(f, sr) == (ready | endhv | sizerr));
+  CHECK(read(f, eeprom + 24) == 0);
+  CHECK(flash_due(f).empty());
+}
+
+TEST_CASE("RM0038 3.7.3: a data EEPROM store while PELOCK is set sets WRPERR, PRGLOCK does not")
+{
+  auto const f = parked();
+  REQUIRE(memory_write(f, eeprom, 4, 5));
+  CHECK(read(f, sr) == (ready | endhv | wrperr));
+  CHECK(read(f, eeprom) == 0);
+  write(f, sr, wrperr);
+  unlock_data(f);
+  REQUIRE((read(f, pecr) & prglock) != 0);
+  REQUIRE(memory_write(f, eeprom, 4, 5));
+  CHECK(read(f, eeprom) == 5);
+}
+
+TEST_CASE("RM0038 Table 20 note 7: on Cat.1 a byte or halfword store of 0 programs nothing")
+{
+  {
+    auto const  f = parked(l152rb(), firmware_b);
+    log_capture logged{f};
+    unlock_data(f);
+    REQUIRE(memory_write(f, eeprom, 4, 0x0102'0304));
+    end_operations(f);
+    REQUIRE(memory_write(f, eeprom + 1, 1, 0));
+    REQUIRE(memory_write(f, eeprom + 2, 2, 0));
+    CHECK(read(f, eeprom) == 0x0102'0304);
+    CHECK(logged.count("PECR") == 1);
+    CHECK(flash_due(f).empty());
+  }
+  {
+    auto const f = parked();
+    unlock_data(f);
+    REQUIRE(memory_write(f, eeprom, 4, 0x0102'0304));
+    end_operations(f);
+    REQUIRE(memory_write(f, eeprom + 1, 1, 0));
+    CHECK(read(f, eeprom) == 0x0102'0004);
+  }
+  auto const f = parked(l152rb(), firmware_b, strict());
+  unlock_data(f);
+  CHECK_THROWS_AS((void)memory_write(f, eeprom, 1, 0), popcorn::model_error);
+}
+
+TEST_CASE("HAL_FLASHEx_DATAEEPROM_Program writes a byte, a halfword and a word")
+{
+  stm32_fixture const f{l152re(), firmware};
+  REQUIRE(f.run_to_stop({.max_instructions = icount{100'000}}).reason == stop_reason::user);
+  write(f, sr, wrperr);
+  call(f, "eeprom_hal", {0, static_cast<std::uint32_t>(eeprom + 1), 0x5A});
+  call(f, "eeprom_hal", {1, static_cast<std::uint32_t>(eeprom + 6), 0xBEEF});
+  call(f, "eeprom_hal", {2, static_cast<std::uint32_t>(eeprom + 8), 0x1234'5678});
+  auto const log = f.log();
+  REQUIRE(log.size() == 23);
+  CHECK(
+      std::vector(log.begin() + 14, log.end())
+      == std::vector<std::uint32_t>{0, 0, ready | endhv, 1, 0, ready | endhv, 1, 0, ready | endhv});
+  CHECK(read(f, eeprom) == 0x5A00);
+  CHECK(read(f, eeprom + 4) == 0xBEEF'0000);
+  CHECK(read(f, eeprom + 8) == 0x1234'5678);
+}
+
+TEST_CASE("RM0038 3.9.8 and 3.9.9: a virgin part loads OBR 0x00F800AA and WRPRx 0, no OPTVERR")
+{
+  for(auto const& [desc, name] : {
+          std::pair{&l152re(),                   firmware  },
+          std::pair{&l152rb(),                   firmware_b},
+          std::pair{&popcorn::testing::l152rc(), firmware  }
+  })
+  {
+    CAPTURE(desc->part);
+    auto const f = parked(*desc, name);
+    CHECK(read(f, obr) == virgin_obr);
+    CHECK(read(f, wrpr1) == 0);
+    CHECK(read(f, sr) == (ready | endhv));
+  }
+}
+
+TEST_CASE("RM0038 3.5.1 and 3.7.2: a WRP word loads at OBL_LAUNCH and protects its sectors")
+{
+  auto const f = parked();
+  unlock(f);
+  write(f, optkeyr, opt_key1);
+  write(f, optkeyr, opt_key2);
+  REQUIRE((read(f, pecr) & locks) == 0);
+  auto const start = now_ps(f);
+  REQUIRE(memory_write(f, options + 0x08, 4, option_word(0x0002, 16)));
+  REQUIRE(flash_due(f).size() == 1);
+  CHECK(flash_due(f).front() - start == 2 * tprog_ps);
+  REQUIRE(memory_write(f, options + 0x10, 4, option_word(0x0001, 16)));
+  end_operations(f);
+  CHECK(read(f, wrpr1) == 0);
+  write(f, pecr, obl_launch);
+  auto const stopped = f.run_to_stop({.max_instructions = icount{1'000}});
+  REQUIRE(stopped.reason == stop_reason::reset_request);
+  CHECK(stopped.detail == "option_load");
+  REQUIRE(f.target->apply_reset_request());
+  CHECK(read(f, wrpr1) == 2);
+  CHECK(read(f, wrpr2) == 1);
+  CHECK(read(f, pecr) == locks);
+  unlock(f);
+  REQUIRE(memory_write(f, 0x0800'1000, 4, 1));
+  CHECK(read(f, sr) == (ready | endhv | wrperr));
+  CHECK(read(f, 0x0800'1000) != 1);
+  write(f, sr, wrperr);
+  REQUIRE(memory_write(f, 0x0802'0000, 4, 1));
+  CHECK(read(f, sr) == (ready | endhv | wrperr));
+  write(f, sr, wrperr);
+  REQUIRE(memory_write(f, 0x0800'2000, 4, 1));
+  CHECK(read(f, 0x0800'2000) == 1);
+}
+
+TEST_CASE("RM0038 3.5: OPTLOCK, factory information, byte stores and the Cat.1 bank 2 offsets")
+{
+  {
+    auto const f = parked();
+    unlock_data(f);
+    REQUIRE(memory_write(f, options + 0x08, 4, option_word(1, 16)));
+    CHECK(read(f, sr) == (ready | endhv | wrperr));
+    CHECK(read(f, options + 0x08) == 0xFFFF'0000);
+    write(f, sr, wrperr);
+    write(f, optkeyr, opt_key1);
+    write(f, optkeyr, opt_key2);
+    REQUIRE(memory_write(f, options + 0x20, 4, 1));
+    CHECK(read(f, sr) == (ready | endhv | wrperr));
+    write(f, sr, wrperr);
+    REQUIRE(memory_write(f, options + 0x08, 2, 1));
+    CHECK(read(f, sr) == (ready | endhv | sizerr));
+    write(f, sr, sizerr);
+    program_option(f, 0x80, option_word(4, 16));
+    program_option(f, 0x84, option_word(8, 16));
+    reload(f);
+    CHECK(read(f, wrpr4) == 0x0008'0004);
+  }
+  auto const f = parked(l152rb(), firmware_b);
+  unlock_options(f);
+  auto const factory = read(f, options + 0x80);
+  REQUIRE(memory_write(f, options + 0x80, 4, option_word(4, 16)));
+  CHECK(read(f, sr) == (ready | endhv | wrperr));
+  CHECK(read(f, options + 0x80) == factory);
+}
+
+TEST_CASE("RM0038 3.5: a word whose complement is wrong loads 0 and sets OPTVERR, OPTVERRUSR")
+{
+  for(auto const& [desc, name, user_flag] : {
+          std::tuple{&l152re(), firmware,   true },
+          std::tuple{&l152rb(), firmware_b, false}
+  })
+  {
+    CAPTURE(desc->part);
+    auto const f = parked(*desc, name);
+    unlock_options(f);
+    program_option(f, 0x00, 0xFF00'00BBu);
+    program_option(f, 0x08, 0x0000'0001u);
+    reload(f);
+    CHECK(read(f, obr) == 0x00F8'0000u);
+    CHECK(read(f, wrpr1) == 0);
+    CHECK(read(f, sr) == (ready | endhv | optverr));
+    write(f, sr, optverr);
+    unlock_options(f);
+    program_option(f, 0x00, option_word(0xAA, 8));
+    program_option(f, 0x04, 0xFF00'00F8u);
+    reload(f);
+    CHECK(read(f, obr) == 0xAAu);
+    CHECK(read(f, sr) == (ready | endhv | optverr | (user_flag ? optverrusr : 0u)));
+  }
+}
+
+TEST_CASE("RM0038 3.7.1: RDP level 2 refuses option stores, level 1 to 0 mass erases first")
+{
+  {
+    auto const f = parked();
+    unlock_options(f);
+    program_option(f, 0x00, option_word(0xCC, 8));
+    reload(f);
+    CHECK((read(f, obr) & 0xFFu) == 0xCC);
+    unlock_options(f);
+    REQUIRE(memory_write(f, options + 0x08, 4, option_word(1, 16)));
+    CHECK(read(f, sr) == (ready | endhv | wrperr));
+    CHECK(read(f, options + 0x08) == 0xFFFF'0000);
+  }
+  auto const f = parked();
+  unlock_options(f);
+  write(f, prgkeyr, prg_key1);
+  write(f, prgkeyr, prg_key2);
+  REQUIRE(memory_write(f, target, 4, 0x1111));
+  REQUIRE(memory_write(f, eeprom + 16, 4, 0x2222));
+  end_operations(f);
+  write(f, sr, eop);
+  program_option(f, 0x08, option_word(3, 16));
+  program_option(f, 0x00, option_word(0xBB, 8));
+  auto&      rtc  = f.target->peripheral("RTC");
+  auto const bkp0 = popcorn::find_register(rtc.description(), "BKP0R")->offset;
+  rtc.poke(bkp0, 0x3333);
+  reload(f);
+  REQUIRE((read(f, obr) & 0xFFu) == 0xBB);
+  unlock_options(f);
+  auto const start = now_ps(f);
+  REQUIRE(memory_write(f, options, 4, option_word(0xAA, 8)));
+  CHECK(flash_due(f).front() - start == 3 * tprog_ps);
+  CHECK(read(f, target) == 0);
+  CHECK(read(f, eeprom + 16) == 0);
+  CHECK(read(f, options + 0x08) == 0);
+  CHECK(read(f, options) == option_word(0xAA, 8));
+  CHECK(rtc.peek(bkp0) == 0);
+  end_operations(f);
+  reload(f);
+  CHECK(read(f, obr) == 0xAAu);
+  CHECK(read(f, sr) == (ready | endhv | optverr | optverrusr));
+}
+
+TEST_CASE("R-08a check m4: the HAL_DeInit AHB pulse and an FLITFRST pulse keep OBR and WRPRx")
+{
+  auto const f = parked();
+  unlock_options(f);
+  program_option(f, 0x00, option_word(0xBB, 8));
+  program_option(f, 0x08, option_word(0x40, 16));
+  reload(f);
+  REQUIRE(read(f, obr) == 0x00F8'00BBu);
+  REQUIRE(read(f, wrpr1) == 0x40);
+  auto const& rcc     = f.target->peripheral("RCC").description();
+  auto const  ahbrstr = rcc.base + popcorn::find_register(rcc, "AHBRSTR")->offset;
+  write(f, ahbrstr, 0xFFFF'FFFFu);
+  write(f, ahbrstr, 0);
+  CHECK(read(f, obr) == 0x00F8'00BBu);
+  CHECK(read(f, wrpr1) == 0x40);
+  write(f, pdkeyr, pd_key1);
+  write(f, pdkeyr, pd_key2);
+  write(f, acr, acc64 | run_pd);
+  popcorn::testing::rcc_reset_pulse(f, "AHBRSTR", "FLITFRST");
+  CHECK(read(f, acr) == 0);
+  CHECK(read(f, obr) == 0x00F8'00BBu);
+  CHECK(read(f, wrpr1) == 0x40);
+  write(f, obr, 0);
+  write(f, wrpr1, 0);
+  CHECK(read(f, obr) == 0x00F8'00BBu);
+  CHECK(read(f, wrpr1) == 0x40);
+  f.target->reset(reset_kind::software);
+  CHECK(read(f, wrpr1) == 0x40);
+}
+
+TEST_CASE("a FLASH snapshot keeps PECR unlocked, a double word half loaded and the loaded OBR")
+{
+  auto const f = parked();
+  unlock_options(f);
+  program_option(f, 0x08, option_word(0x10, 16));
+  reload(f);
+  unlock_data(f);
+  write(f, pecr, fprg | data);
+  REQUIRE(memory_write(f, eeprom + 32, 4, 0xAA));
+  auto const saved = f.target->snapshot();
+  f.target->reset(reset_kind::power_on);
+  f.target->restore(saved);
+  CHECK(read(f, pecr) == (prglock | optlock | fprg | data));
+  CHECK(read(f, wrpr1) == 0x10);
+  CHECK(read(f, options + 0x08) == option_word(0x10, 16));
+  REQUIRE(memory_write(f, eeprom + 36, 4, 0xBB));
+  CHECK(read(f, sr) == (ready | bsy));
+  CHECK(read(f, eeprom + 32) == 0xAA);
+  CHECK(read(f, eeprom + 36) == 0xBB);
+}
+
+TEST_CASE("RM0038 Table 15 note 3: the data EEPROM of the bank written reads as a bus error")
+{
+  constexpr address eeprom_bank2 = eeprom + 0x2000;
+  auto const        f            = parked(l152re(), firmware, handler_options());
+  vectors_in_sram(f);
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  REQUIRE(memory_write(f, target, 4, 1));
+  call(f, "load_word", {static_cast<std::uint32_t>(eeprom_bank2)});
+  CHECK(read(f, cfsr) == 0);
+  call(f, "load_word", {static_cast<std::uint32_t>(eeprom + 4)});
+  CHECK((read(f, cfsr) & preciserr) != 0);
+  CHECK(read(f, bfar) == eeprom + 4);
+  auto const g = parked(l152re(), firmware, handler_options());
+  vectors_in_sram(g);
+  unlock_data(g);
+  write(g, pecr, erase | data);
+  REQUIRE(memory_write(g, eeprom_bank2 + 8, 4, 0));
+  call(g, "load_word", {static_cast<std::uint32_t>(eeprom + 4)});
+  CHECK(read(g, cfsr) == 0);
+  call(g, "load_word", {static_cast<std::uint32_t>(0x0805'0000)});
+  CHECK((read(g, cfsr) & preciserr) != 0);
+  CHECK(read(g, bfar) == 0x0805'0000);
+}
+
+TEST_CASE("RM0038 3.7.3: a data EEPROM store to the other bank of a locked operation is WRPERR")
+{
+  constexpr address eeprom_bank2 = eeprom + 0x2000;
+  {
+    auto const f = parked();
+    unlock(f);
+    write(f, pecr, fprg | prog);
+    store_sequence(f, target, 32, 0x100);
+    REQUIRE(read(f, sr) == (ready | bsy));
+    auto const due = flash_due(f);
+    REQUIRE(memory_write(f, eeprom_bank2, 4, 0x55));
+    CHECK(read(f, sr) == (ready | bsy | wrperr));
+    CHECK(read(f, eeprom_bank2) == 0);
+    CHECK(flash_due(f) == due);
+  }
+  auto const f = parked();
+  unlock_data(f);
+  write(f, pecr, fprg | data);
+  REQUIRE(memory_write(f, eeprom_bank2 + 8, 4, 0x11));
+  REQUIRE(memory_write(f, eeprom_bank2 + 12, 4, 0x22));
+  REQUIRE(read(f, sr) == (ready | bsy));
+  auto const due = flash_due(f);
+  REQUIRE(memory_write(f, eeprom + 8, 4, 0x33));
+  CHECK(read(f, sr) == (ready | bsy | wrperr));
+  CHECK(read(f, eeprom + 8) == 0);
+  CHECK(flash_due(f) == due);
+  end_operations(f);
+  CHECK(read(f, eeprom_bank2 + 8) == 0x11);
+  CHECK(read(f, eeprom_bank2 + 12) == 0x22);
+}
+
+TEST_CASE("RM0038 3.9.7: OPTVERR and OPTVERRUSR set again after a software reset and a pulse")
+{
+  auto const f = parked();
+  unlock_options(f);
+  program_option(f, 0x04, 0xFF00'00F8u);
+  reload(f);
+  REQUIRE(read(f, sr) == (ready | endhv | optverr | optverrusr));
+  f.target->reset(reset_kind::software);
+  copy_ram_code(f);
+  f.set("pc", sym(f.firmware_name, "idle"));
+  CHECK(read(f, sr) == (ready | endhv | optverr | optverrusr));
+  write(f, sr, optverr | optverrusr);
+  CHECK(read(f, sr) == (ready | endhv));
+  write(f, pdkeyr, pd_key1);
+  write(f, pdkeyr, pd_key2);
+  write(f, acr, acc64 | run_pd);
+  popcorn::testing::rcc_reset_pulse(f, "AHBRSTR", "FLITFRST");
+  CHECK(read(f, sr) == (ready | endhv | optverr | optverrusr));
+  write(f, sr, optverr | optverrusr);
+  unlock_options(f);
+  program_option(f, 0x04, option_word(0xF8, 8));
+  reload(f);
+  CHECK(read(f, sr) == (ready | endhv));
+  f.target->reset(reset_kind::software);
+  CHECK(read(f, sr) == (ready | endhv));
+}
+
+TEST_CASE("RM0038 3.8: a queued 2-tprog data EEPROM write sets EOP once, at its end")
+{
+  auto const f = parked();
+  unlock_data(f);
+  auto const start = now_ps(f);
+  REQUIRE(memory_write(f, eeprom + 0x40, 4, 1));
+  REQUIRE(memory_write(f, eeprom + 0x40, 4, 2));
+  REQUIRE(flash_due(f) == std::vector<std::uint64_t>{start + tprog_ps});
+  idle_to(f, start + tprog_ps + 1'000'000);
+  CHECK(read(f, sr) == (ready | bsy | eop));
+  auto const due = flash_due(f);
+  REQUIRE(due.size() == 1);
+  CHECK(due.front() >= start + 3 * tprog_ps);
+  CHECK(due.front() < start + 3 * tprog_ps + 1'000'000);
+  write(f, sr, eop);
+  idle_to(f, start + 2 * tprog_ps + 1'000'000);
+  CHECK(read(f, sr) == (ready | bsy));
+  idle_to(f, due.front() + 1'000'000);
+  CHECK(read(f, sr) == (ready | endhv | eop));
+  CHECK(read(f, eeprom + 0x40) == 2);
 }

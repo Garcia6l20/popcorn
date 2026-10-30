@@ -353,6 +353,10 @@ def _check_memory(name: str, category: str) -> None:
     pieces = {piece.offset: bytes(piece.data) for piece in region.content or []}
     code = {384: 0, 256: 1}[flash_kib] if category in {"cat3b", "cat4"} else flash_kib
     assert pieces.pop(size) == code.to_bytes(2, "little")
+    virgin_wrp = bytes.fromhex("0000ffff")
+    assert pieces.pop(0) == bytes.fromhex("aa0055fff80007ff") + virgin_wrp * 6
+    if category == "cat5":
+        assert pieces.pop(0x80) == virgin_wrp * 2
     assert pieces == {
         base: bytes.fromhex("14003200014e524f"),
         base + 0x14: bytes.fromhex("43504f50"),

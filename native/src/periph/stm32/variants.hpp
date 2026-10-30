@@ -195,6 +195,12 @@ struct flash_l1_traits
   bool dual_bank = false;
   /** @brief FLASH_WRPRx registers the category has, RM0038 3.9.9. */
   std::uint8_t wrp_registers = 1;
+  /** @brief A byte or halfword store of 0 to the data EEPROM programs, RM0038 Table 21 note 7.
+   *         Cat.1 programs only a non-zero byte or halfword, Table 20 note 7. */
+  bool null_partial_writes = true;
+  /** @brief FLASH_SR.OPTVERRUSR flags a USER option byte with a wrong complement, RM0038
+   *         3.9.7: Cat.3 to Cat.6. */
+  bool user_option_flag = true;
 };
 
 /** @brief Table 13 on Cat.2 to Cat.6: Range 3 up to 4.2 MHz at 0 WS and 8 MHz at 1 WS. */
@@ -204,9 +210,13 @@ inline constexpr std::array<std::array<std::uint32_t, 2>, 3> l1_flash_wait_khz{
 /** @brief STM32L1 Cat.1, `STM32L1_flash_cat1`: Range 3 up to 2.1 MHz at 0 WS and 4.2 MHz at
  *         1 WS, RM0038 Table 13. */
 inline constexpr flash_l1_traits l1_flash_cat1{
-    .max_khz = {{{16'000, 32'000}, {8'000, 16'000}, {2'100, 4'200}}}};
+    .max_khz             = {{{16'000, 32'000}, {8'000, 16'000}, {2'100, 4'200}}},
+    .null_partial_writes = false,
+    .user_option_flag    = false};
 /** @brief STM32L1 Cat.2, `STM32L1_flash_cat2`. */
-inline constexpr flash_l1_traits l1_flash_cat2{.max_khz = l1_flash_wait_khz};
+inline constexpr flash_l1_traits l1_flash_cat2{
+    .max_khz          = l1_flash_wait_khz,
+    .user_option_flag = false};
 /** @brief STM32L1 Cat.3, `STM32L1_flash_cat3`: FLASH_WRPR2. */
 inline constexpr flash_l1_traits l1_flash_cat3{.max_khz = l1_flash_wait_khz, .wrp_registers = 2};
 /** @brief STM32L1 Cat.4 and Cat.6, `STM32L1_flash_cat46`: two banks, FLASH_WRPR2 and
