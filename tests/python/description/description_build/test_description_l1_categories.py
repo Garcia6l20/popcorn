@@ -348,6 +348,7 @@ def _check_brr_wrpr4_and_timers(name: str, category: str) -> None:
             }
             ccr3 = next(r for r in peripherals[timer].registers if r.name == "CCR3")
             assert [f.name for f in ccr3.fields] == ["CCR3"]
+    _check_tim9(peripherals["TIM9"], up_only=category in {"cat1", "cat2"})
     assert _timer_widths(peripherals["TIM2"]) == dict.fromkeys(
         ("CNT", "ARR", "CCR1", "CCR2", "CCR3", "CCR4"), 16
     )
@@ -366,6 +367,37 @@ def _check_brr_wrpr4_and_timers(name: str, category: str) -> None:
         register = next(r for r in peripherals[timer].registers if r.name == "OR")
         assert (register.offset, register.width, register.reset) == (0x50, 16, 0)
         assert [(f.name, f.lsb, f.width) for f in register.fields] == [(field, 0, 1)]
+
+
+def _fields_of(timer: PeripheralDesc, register: str) -> dict[str, tuple[int, int]]:
+    found = next(r for r in timer.registers if r.name == register)
+    return {f.name: (f.lsb, f.width) for f in found.fields}
+
+
+def _check_tim9(timer: PeripheralDesc, *, up_only: bool) -> None:
+    assert _timer_input_fields(timer) == {"IC1PSC": (2, 2), "IC2PSC": (10, 2)}
+    control = _fields_of(timer, "CR1")
+    assert control["OPM"] == (3, 1) and "OMP" not in control
+    assert ("DIR" in control, "CMS" in control) == (not up_only, not up_only)
+    if not up_only:
+        assert (control["DIR"], control["CMS"]) == ((4, 1), (5, 2))
+    assert _fields_of(timer, "CCER") == {
+        "CC1E": (0, 1),
+        "CC1P": (1, 1),
+        "CC1NP": (3, 1),
+        "CC2E": (4, 1),
+        "CC2P": (5, 1),
+        "CC2NP": (7, 1),
+    }
+    slave = _fields_of(timer, "SMCR")
+    assert {name: slave[name] for name in ("ETF", "ETPS", "ECE", "ETP")} == {
+        "ETF": (8, 4),
+        "ETPS": (12, 2),
+        "ECE": (14, 1),
+        "ETP": (15, 1),
+    }
+    expected = {"TI1_RMP": (0, 2)} if up_only else {"TI1_RMP": (0, 2), "ITR1_RMP": (2, 1)}
+    assert _fields_of(timer, "OR") == expected
 
 
 def _timer_input_fields(timer: PeripheralDesc) -> dict[str, tuple[int, int]]:

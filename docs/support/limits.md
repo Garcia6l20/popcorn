@@ -923,12 +923,17 @@ Not modelled, logged:
 
 - The encoder index, `ECR.IE`.
 - Internal input sources of `TIxSEL` and internal ETR sources of `ETRSEL`. They read low.
-- Master modes above 011 and TRGO2.
+- Master modes above 011 and TRGO2. Under `strict` the CR2 write that selects one raises
+  `ModelError` before the store.
 - A slave mode trigger input that no pin and no routed timer drives. No trigger reaches the slave
-  mode controller.
-- The trigger DMA request, TDE, and COM and trigger burst requests.
+  mode controller. Under `strict` the SMCR or OR write that selects it raises `ModelError` before
+  the store.
+- The trigger DMA request, TDE, and COM and trigger burst requests. Under `strict` the DIER write
+  that sets TDE raises `ModelError` before the store.
 - The slave mode preload, `SMCR.SMSPE` and `SMSPS`. Both are storage and a counter start with
   SMSPE set logs once.
+
+A debugger write raises none of the `strict` errors of this model.
 
 Differs from RM0456:
 
@@ -937,13 +942,18 @@ Differs from RM0456:
 - UIFREMAP puts UIFCPY in bit 31 only where the description names a UIFCPY field, not on the
   32-bit TIM2 to TIM5.
 
-STM32L1 TIM2 to TIM5:
+STM32L1 TIM2 to TIM7 and TIM9:
 
 - TIM5 has no row in RM0038 Table 80, so every TS value of TIM5 reaches nothing and logs once,
   inferred.
-- TIM9 TRGO and the OC1 outputs of TIM10 and TIM11 have no model. The ITRs that carry them reach
-  nothing and log once, and under strict_peripherals the SMCR or OR write that selects one raises
-  model_error.
+- TIM10, TIM11 and their OC1 outputs have no model, nor has the touch sensing I/O that
+  TIM9_OR.ITR1_RMP gives TIM9 ITR1. The ITRs that carry them reach nothing and log once.
+- TIM9_OR.TI1_RMP 01 connects the LSE to tim_ti1, which then reads low. TIM9 external clock mode 2
+  takes the internal ETR, RM0038 18.3.3, and counts nothing. Each logs once. Under `strict` the
+  write that selects it raises `ModelError` before the store.
+- TIM6, TIM7 and the Cat.1 and Cat.2 TIM9 count up only. On that TIM9 SMS 001 to 011 are
+  reserved: no encoder edge counts and the SMCR write logs once. Under `strict` it raises
+  `ModelError` before the store.
 - TIM2_ETR is the TIM2_CH1 pad at AF1, PA0, PA5 or PA15, which also carries TI1. TIM3_ETR is PD2.
   TIM4_ETR and TIM5_ETR are on PE0 and PE9, pads the shipped 64-pin packages lack, so their
   tim_etr_in stays low.

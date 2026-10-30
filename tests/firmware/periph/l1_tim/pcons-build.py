@@ -16,6 +16,8 @@ for chipset in (STM32L152XE, STM32L152XB):
             "tim3_capture_div2",
             "tim2_clocks_tim3",
             "tim5_remap_tim2",
+            "tim6_update",
+            "tim9_pwm",
             "on_update",
             "on_compare",
             "on_started",

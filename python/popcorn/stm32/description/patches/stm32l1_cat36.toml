@@ -35,6 +35,24 @@ acc = "read_write"
 fields = [{ name = "ITR2_RMP", lsb = 0, width = 1 }]
 source = "RM0038 Rev 18, 17.4.20 TIM3_OR, Cat.3 to Cat.6: offset 0x50, reset 0, ITR2_RMP in bit 0 selects TIM11 OC (0) or TIM5 TRGO (1) for ITR2. The SVDs have no OR"
 
+[[fields]]
+instances = ["TIM9"]
+registers = ["CR1"]
+add = { name = "DIR", lsb = 4, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.2.1 and 18.4.1 TIM9 TIMx_CR1: DIR in bit 4, the TIM9 of Cat.3 to Cat.6 counts up or down, the Cat.1 and Cat.2 bit is reserved. The four SVDs have no DIR"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["CR1"]
+add = { name = "CMS", lsb = 5, width = 2, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.2.1 and 18.4.1 TIM9 TIMx_CR1: CMS[1:0] in bits 6:5, available in Cat.3 to Cat.6 only. The four SVDs have no CMS"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["OR"]
+add = { name = "ITR1_RMP", lsb = 2, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.4.14 TIM9_OR: ITR1_RMP in bit 2 selects TIM3 TRGO (0) or the touch sensing I/O (1) for TIM9 ITR1, Cat.3 to Cat.6 only. The four SVDs have TI1_RMP only"
+
 [memory]
 source = "RM0038 Rev 18, 3.2 Tables 9 to 12 (Cat.3 to Cat.6): the system memory is pages 0 to 15 of 256 bytes and pages 16 to 31 of 4 KB, 0x1FF00000 to 0x1FF01FFF, 8 KB, and Table 7 gives the 8 KB boot memory"
 add = [

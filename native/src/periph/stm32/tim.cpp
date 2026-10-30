@@ -198,6 +198,15 @@ struct trigger_route
   std::uint32_t            value;
 };
 
+struct input_route
+{
+  std::size_t      channel;
+  field_ref        field;
+  std::string      reg;
+  std::string_view name;
+  std::uint32_t    pin_values;
+};
+
 struct interrupt_source
 {
   field_ref   enable;
@@ -217,7 +226,7 @@ auto lower(std::string_view name) -> std::string
  * @brief TIM1, TIM2 to TIM7 and TIM15 to TIM17 of the STM32U5, with TIM12 to TIM14 on the STM32H5,
  *        RM0456 sections 54 "Advanced-control timers (TIM1/TIM8)", 55 "General-purpose timers
  *        (TIM2/TIM3/TIM4/TIM5)", 56 "General purpose timers (TIM15/TIM16/TIM17)" and 57 "Basic
- *        timers (TIM6/TIM7)", and TIM2 to TIM5 of the STM32L1, RM0038 section 17: the
+ *        timers (TIM6/TIM7)", and TIM2 to TIM7 and TIM9 of the STM32L1, RM0038 17 to 19: the
  *        time-base unit on the instance's timer clock. The counter is derived from the virtual time
  *        of its last anchor, never ticked: up, down and the three center-aligned modes, the
  *        prescaler, auto-reload and compare preloads loaded at the update event, the repetition
@@ -234,7 +243,8 @@ auto lower(std::string_view name) -> std::string
  *        010 at each update event, a UG one included whatever URS, 011 at each CC1IF set by a match
  *        or a capture. Each edge carries the time of its event. While a sink listens under MMS 010
  *        or 011, every update or CC1 match is scheduled at its own time instead of being skipped.
- *        MMS 100 and above, MMS2 and TRGO2 log a warning once and pulse nothing. The slave mode
+ *        MMS 100 and above, MMS2 and TRGO2 log a warning once and pulse nothing, and under
+ *        strict_peripherals the CR2 write that selects one raises model_error. The slave mode
  *        controller, RM0456 55.4 "Slave mode" and TIMx_SMCR, listens as a trigger_sink to the
  *        `<instance>_trgo` that TS selects among the internal triggers of the tim_variant, the
  *        input a timer would take from itself being reserved. The STM32U5 has ITR0 TIM1, ITR1 TIM2,
@@ -242,54 +252,61 @@ auto lower(std::string_view name) -> std::string
  *        456, 480, 502 and 514 has ITR0 to ITR12 on TIM1 to TIM5, TIM8, TIM12 and TIM15, TS 8 to 16
  *        selecting ITR4 to ITR12. A source with no model reaches nothing and logs the unrouted
  *        warning: ITR7, ITR8, ITR10 and ITR11 carry the OC1 outputs of TIM13, TIM14, TIM16 and
- *        TIM17, ITR12 carries USBSOF, which TIM2 and TIM5 take and TIM1, TIM3,
- *        TIM4, TIM8, TIM12 and TIM15 reserve. One table serves all of them, since USBSOF has no
- *        producer. The STM32L1 of RM0038 Table 80 gives TIM2, TIM3 and TIM4 each its own ITR0 to
- *        ITR3 among TIM2 to TIM4, TIM9 and the OC1 outputs of TIM10 and TIM11. On Cat.3 and up
- *        TIM2_OR.ITR1_RMP and TIM3_OR.ITR2_RMP select TIM5 TRGO for TIM2 ITR1 and TIM3 ITR2, from
- *        the OR write on. TIM5 has no Table 80 row, so its every TS reaches nothing, inferred. A
- *        modelled slave mode on an input with no model holds the timer and logs once, and under
- *        strict_peripherals the SMCR or OR write that selects it raises model_error. Reset mode
- *        reinitialises the counter and its prescaler at a rising edge, with the update event URS
- *        allows. Trigger mode sets CEN at a rising edge and counts from the
+ *        TIM17, ITR12 carries USBSOF, which TIM2 and TIM5 take and TIM1, TIM3, TIM4, TIM8, TIM12
+ *        and TIM15 reserve. One table serves all of them, since USBSOF has no producer. The STM32L1
+ *        of RM0038 Table 80 gives TIM2, TIM3 and TIM4 each its own ITR0 to ITR3 among TIM2 to TIM4,
+ *        TIM9 and the OC1 outputs of TIM10 and TIM11. On Cat.3 and up TIM2_OR.ITR1_RMP and
+ *        TIM3_OR.ITR2_RMP select TIM5 TRGO for TIM2 ITR1 and TIM3 ITR2, from the OR write on. TIM5
+ *        has no Table 80 row, so its every TS reaches nothing, inferred. A modelled slave mode on
+ *        an input with no model holds the timer and logs once, and under strict_peripherals the
+ *        SMCR or OR write that selects it raises model_error. RM0038 Table 83 gives TIM9 ITR0 TIM2,
+ *        ITR1 TIM3, or the touch sensing I/O with TIM9_OR.ITR1_RMP set on Cat.3 and up, ITR2 and
+ *        ITR3 the OC1 outputs of TIM10 and TIM11. TIM6, TIM7 and the Cat.1 and Cat.2 TIM9 count up
+ *        only, and SMS 001 to 011 count no edge there. TIM9_OR.TI1_RMP 01 gives tim_ti1 the LSE,
+ *        which reads low, and TIM9 ECE counts nothing, its ETR being internal. Each of these three
+ *        logs once and raises model_error under strict_peripherals at the register write that
+ *        selects it. Reset mode reinitialises the counter and its prescaler at a rising edge, with
+ *        the update event URS allows. Trigger mode sets CEN at a rising edge and counts from the
  *        edge's time. Reset + trigger does both. External clock mode 1 counts one tick per PSC + 1
- * rising edges, at the edge's time, and never on the timer clock. Gated mode counts on the timer
- * clock while the master's level is high, a level only an MMS 001 master gives: under a pulsing
- * master the counter holds and one warning is logged at its first rising edge. The gate is sampled
- * again when the timer clock comes back. Gated + reset also reinitialises the counter when the gate
- *        closes. Every slave edge sets TIF, gate openings and closings included. A source with no
- * model, a timer's own ITR and the reserved codes reach nothing: the slave holds and one warning is
- * logged at the SMCR write. Timer input pins: tim_ti1 to tim_ti4 are the `<instance>_ch1` to `_ch4`
- *        signals a GPIO pin in alternate function mode gives, while TIxSEL is 0, through the GPIO
- * peers' signal levels. Another TIxSEL selects comparators, LSE, MCO or RTC: not modelled, the
- * input reads low, logged once at the TISEL write. CR2.TI1S XORs tim_ti1 to tim_ti3 into tim_ti1.
- * Each input transition takes effect at the time of its pin edge, after the ICxF filter below. The
- *        encoder modes, RM0456 55.4 "Encoder interface mode", SMS 0001 to 0011 and 1010 to 1111,
- * count on tim_ti1fp1 and tim_ti2fp2, CC1P and CC2P inverting them, by Table 569 and Table 570 and
- *        the clock plus direction rules, each count pulse through the prescaler, the counter
- * wrapping between 0 and ARR with its update events. DIR follows every transition in the quadrature
- * modes, tim_ti1 in the clock plus direction modes, the counting line in the directional clock
- * modes, and DIRF rises when it changes. Table 569 lists "Down" for a tim_ti2fp2 falling edge in
- * mode 0001 with tim_ti1fp1 low: counted as nothing here, as Table 549, its TIM1/TIM8 copy, gives,
- * since mode 0001 counts tim_ti1 edges only. The encoder index, ECR.IE, and the transition and
- * index error flags are not modelled, IE logs once. tim_etr_in is, on a timer the tim_variant
- * lists in `etr_pins`, the pin signal it names, `tim2_ch1` for the STM32L1 TIM2, and on the
- * others the `<instance>_etr` signal while AF1.ETRSEL is 0, other values read low and log once:
- * ETP inverts it, ETPS divides it by 1, 2, 4 or 8: tim_etrp rises
- * at every 2^ETPS-th rising edge and falls 2^(ETPS-1) rising edges later, then
- * the ETF filter gives tim_etrf. External clock mode 2, ECE 1, counts each tim_etrf rising edge
- * through the prescaler while a gated slave mode's gate is open, and with ECE set external clock
- * mode 1 counts tim_etrf only, whatever TS, its trigger edges setting TIF alone. TS 00100
- * tim_ti1f_ed gives a rising edge at every tim_ti1 transition, TS 00101 tim_ti1fp1 and 00110
- * tim_ti2fp2 their active edge by CCxP and CCxNP, both edges with both set, and their level to
- * gated mode, TS 00111 tim_etrf: each drives the slave mode controller as an ITR edge does. Gated
- * mode on tim_ti1f_ed holds and logs once, TS 00111 on a timer without ETR reaches nothing and logs
- * once. A CCxP or ETP write that flips the polarised level is an edge of it, and so is a CCxNP
- * write that moves the level TS 00101 or 00110 gives the slave mode controller, as the polarity mux
- * output moves on silicon: it counts in an encoder mode, triggers the slave mode controller and is
- * a capture's active edge when the new level is high. Deviations: an ARR written below the count
- * lets the counter run to its maximum and wrap with no update, a count written above ARR in
- *        center-aligned mode does the same, UIFREMAP puts UIFCPY in bit 31 only where the
+ *        rising edges, at the edge's time, and never on the timer clock. Gated mode counts on the
+ *        timer clock while the master's level is high, a level only an MMS 001 master gives: under
+ *        a pulsing master the counter holds and one warning is logged at its first rising edge. The
+ *        gate is sampled again when the timer clock comes back. Gated + reset also reinitialises
+ *        the counter when the gate closes. Every slave edge sets TIF, gate openings and closings
+ *        included. A source with no model, a timer's own ITR and the reserved codes reach nothing:
+ *        the slave holds and one warning is logged at the SMCR write. Timer input pins: tim_ti1 to
+ *        tim_ti4 are the `<instance>_ch1` to `_ch4` signals a GPIO pin in alternate function mode
+ *        gives, while TIxSEL is 0, through the GPIO peers' signal levels. Another TIxSEL selects
+ *        comparators, LSE, MCO or RTC: not modelled, the input reads low, logged once at the TISEL
+ *        write. CR2.TI1S XORs tim_ti1 to tim_ti3 into tim_ti1. Each input transition takes effect
+ *        at the time of its pin edge, after the ICxF filter below. The encoder modes, RM0456 55.4
+ *        "Encoder interface mode", SMS 0001 to 0011 and 1010 to 1111, count on tim_ti1fp1 and
+ *        tim_ti2fp2, CC1P and CC2P inverting them, by Table 569 and Table 570 and the clock plus
+ *        direction rules, each count pulse through the prescaler, the counter wrapping between 0
+ *        and ARR with its update events. DIR follows every transition in the quadrature modes,
+ *        tim_ti1 in the clock plus direction modes, the counting line in the directional clock
+ *        modes, and DIRF rises when it changes. Table 569 lists "Down" for a tim_ti2fp2 falling
+ *        edge in mode 0001 with tim_ti1fp1 low: counted as nothing here, as Table 549, its
+ *        TIM1/TIM8 copy, gives, since mode 0001 counts tim_ti1 edges only. The encoder index,
+ *        ECR.IE, and the transition and index error flags are not modelled, IE logs once.
+ *        tim_etr_in is, on a timer the tim_variant lists in `etr_pins`, the pin signal it names,
+ *        `tim2_ch1` for the STM32L1 TIM2, and on the others the `<instance>_etr` signal while
+ *        AF1.ETRSEL is 0, other values read low and log once: ETP inverts it, ETPS divides it by 1,
+ *        2, 4 or 8: tim_etrp rises at every 2^ETPS-th rising edge and falls 2^(ETPS-1) rising edges
+ *        later, then the ETF filter gives tim_etrf. External clock mode 2, ECE 1, counts each
+ *        tim_etrf rising edge through the prescaler while a gated slave mode's gate is open, and
+ *        with ECE set external clock mode 1 counts tim_etrf only, whatever TS, its trigger edges
+ *        setting TIF alone. TS 00100 tim_ti1f_ed gives a rising edge at every tim_ti1 transition,
+ *        TS 00101 tim_ti1fp1 and 00110 tim_ti2fp2 their active edge by CCxP and CCxNP, both edges
+ *        with both set, and their level to gated mode, TS 00111 tim_etrf: each drives the slave
+ *        mode controller as an ITR edge does. Gated mode on tim_ti1f_ed holds and logs once, TS
+ *        00111 on a timer without ETR reaches nothing and logs once. A CCxP or ETP write that flips
+ *        the polarised level is an edge of it, and so is a CCxNP write that moves the level TS
+ *        00101 or 00110 gives the slave mode controller, as the polarity mux output moves on
+ *        silicon: it counts in an encoder mode, triggers the slave mode controller and is a
+ *        capture's active edge when the new level is high. Deviations: an ARR written below the
+ *        count lets the counter run to its maximum and wrap with no update, a count written above
+ *        ARR in center-aligned mode does the same, UIFREMAP puts UIFCPY in bit 31 only where the
  *        description names a UIFCPY field, not on the 32-bit TIM2 to TIM5, and a trigger cycle
  *        between timers drops the edge that would re-enter a timer still reacting to its own event,
  *        logged once per timer, where hardware would oscillate with a few clocks of
@@ -306,33 +323,35 @@ auto lower(std::string_view name) -> std::string
  *        transition maturing while the timer is frozen by a debug hold applies at the hold, the
  *        filter itself counting on through it as tim_ker_ck does. Not modelled, logged once when
  *        the counter starts: SMSPE, a capture on TRC, CCxS 11, dithering, CCDS. TDE logs once and
- *        raises no trigger DMA request. DMA burst mode, RM0456 55.4 "DMA burst mode" and TIMx_DCR:
- *        every CPU or DMA access to DMAR reaches the register at DBA + index words from CR1, in the
- *        same byte lane, then advances the index, which wraps after DBL + 1 accesses. A debugger
- *        access redirects without advancing, so a test reading DMAR changes nothing the firmware
- *        sees next. CPU and DMA accesses share the index, so a CPU access to DMAR during a DMA
- *        burst moves it and can stretch the burst. A target the model serves runs its write
- *        handler. Any other described register takes the access merged under its writable bits. A
- *        target with no register reads 0, ignores the write and logs once. A DCR write resets the
- *        index, and so does each event of the DBSS source with its DMA enable set, so an event
- *        mid-burst restarts the burst: both are emulation choices RM0456 leaves open. The DBSS
- *        source, update or CC1 to CC4, keeps its request high across the GPDMA's acknowledges until
- *        the index wraps, so a channel moves DBL + 1 transfers per event. COM, trigger and reserved
- *        DBSS values log once and keep one request per event. Reserved DBL values above 11010 run
- *        26 transfers and log once. Traces name DMAR, not the redirected register. While the
- *        machine holds its core with DBGMCU `DBG_<instance>_STOP` set, the counter, its prescaler
- *        phase and its events stop at the time of the hold and resume at the release. Updates and
- *        matches due up to the hold apply at the hold, before any other event still pending at that
- *        instant, lane events included: deterministic, not in event key order. The bit is read at
- *        the hold: without a DBGMCU model or field the timer runs on, a warning logged, a
- *        model_error under strict_peripherals. A slave edge that reaches a frozen timer applies at
- *        the time of the hold: a reset, a trigger, an external clock tick or a gate change made
- *        during the hold acts as if it came at the hold, and the counter resumes from that state at
- *        the release. A frozen timer dates the TRGO edges it gives during the hold at the current
- *        time, never at the hold, so a sink that runs on sees no edge in its past. A frozen sink
- *        clamps it to its own hold. Registers are looked up by their bare names, `CR1` and so on,
- *        and by `TIM1_CR1` and the other `TIM1_` names only on a description that has no `CR1`,
- *        as one written by an older popcorn before TIM1 and TIM8 registers got bare names.
+ *        raises no trigger DMA request, and under strict_peripherals the DIER write that sets it
+ *        raises model_error. A debugger write raises none of the strict_peripherals errors of this
+ *        model. DMA burst mode, RM0456 55.4 "DMA burst mode" and TIMx_DCR: every CPU or DMA access
+ *        to DMAR reaches the register at DBA + index words from CR1, in the same byte lane, then
+ *        advances the index, which wraps after DBL + 1 accesses. A debugger access redirects
+ *        without advancing, so a test reading DMAR changes nothing the firmware sees next. CPU and
+ *        DMA accesses share the index, so a CPU access to DMAR during a DMA burst moves it and can
+ *        stretch the burst. A target the model serves runs its write handler. Any other described
+ *        register takes the access merged under its writable bits. A target with no register reads
+ *        0, ignores the write and logs once. A DCR write resets the index, and so does each event
+ *        of the DBSS source with its DMA enable set, so an event mid-burst restarts the burst: both
+ *        are emulation choices RM0456 leaves open. The DBSS source, update or CC1 to CC4, keeps its
+ *        request high across the GPDMA's acknowledges until the index wraps, so a channel moves DBL
+ *        + 1 transfers per event. COM, trigger and reserved DBSS values log once and keep one
+ *        request per event. Reserved DBL values above 11010 run 26 transfers and log once. Traces
+ *        name DMAR, not the redirected register. While the machine holds its core with DBGMCU
+ *        `DBG_<instance>_STOP` set, the counter, its prescaler phase and its events stop at the
+ *        time of the hold and resume at the release. Updates and matches due up to the hold apply
+ *        at the hold, before any other event still pending at that instant, lane events included:
+ *        deterministic, not in event key order. The bit is read at the hold: without a DBGMCU model
+ *        or field the timer runs on, a warning logged, a model_error under strict_peripherals. A
+ *        slave edge that reaches a frozen timer applies at the time of the hold: a reset, a
+ *        trigger, an external clock tick or a gate change made during the hold acts as if it came
+ *        at the hold, and the counter resumes from that state at the release. A frozen timer dates
+ *        the TRGO edges it gives during the hold at the current time, never at the hold, so a sink
+ *        that runs on sees no edge in its past. A frozen sink clamps it to its own hold. Registers
+ *        are looked up by their bare names, `CR1` and so on, and by `TIM1_CR1` and the other
+ *        `TIM1_` names only on a description that has no `CR1`, as one written by an older popcorn
+ *        before TIM1 and TIM8 registers got bare names.
  */
 class tim final : public dispatch_model<tim, tim_state>,
                   public clock_listener,
@@ -481,6 +500,13 @@ private:
   void               input_transition(std::size_t ch, bool level, std::uint64_t at, bool clocked);
   void               encoder_edge(std::size_t ch, std::uint64_t at);
   void               warn_selects();
+  void               refuse_unmodelled(std::uint32_t word, std::uint32_t merged, access_ctx access);
+  void               unmodelled(
+      std::string_view reg,
+      std::uint32_t    word,
+      bool&            logged,
+      std::string      message,
+      access_ctx       access);
 
   register_file&                               regs_;
   std::string                                  prefix_;
@@ -562,6 +588,11 @@ private:
   std::optional<field_ref>                     etr_prescaler_;
   std::string                                  etr_signal_;
   bool                                         etr_{};
+  bool                                         up_only_{};
+  bool                                         remap_logged_{};
+  bool                                         reserved_logged_{};
+  bool                                         etr_input_logged_{};
+  std::vector<input_route>                     input_remaps_;
   std::optional<field_ref>                     etr_filter_;
   std::optional<field_ref>                     clock_division_;
   std::optional<std::uint32_t>                 capture_word_;
@@ -667,6 +698,14 @@ auto tim_writes(peripheral_desc const& desc, tim_variant const& variant)
       out.push_back({entry.remap->reg, &tim::plain_written});
     }
   }
+  for(auto const& entry : variant.input_remaps)
+  {
+    if(entry.slave == desc.name
+       and not std::ranges::contains(out, entry.reg, &write_entry<tim>::reg))
+    {
+      out.push_back({entry.reg, &tim::plain_written});
+    }
+  }
   return out;
 }
 
@@ -732,6 +771,12 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
       option_word_ = route.remap->offset;
       option_name_ = name(entry.remap->reg);
     }
+  }
+  if(variant.up_only)
+  {
+    up_only_ = std::ranges::contains(*variant.up_only, std::string_view{desc.name});
+    expect_field(name("CR1"), "DIR", not up_only_);
+    expect_field(name("CR1"), "CMS", not up_only_);
   }
   if(std::ranges::contains(variant.no_master, std::string_view{desc.name}))
   {
@@ -961,6 +1006,22 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
     etr_word_   = etr_select_->offset;
     etr_        = true;
     etr_signal_ = instance + "_etr";
+  }
+  for(auto const& entry : variant.input_remaps)
+  {
+    if(entry.slave == desc.name)
+    {
+      if(entry.channel >= channels_.size())
+      {
+        missing(std::format("{}.CCR{}", desc.name, entry.channel + 1));
+      }
+      input_remaps_.push_back(
+          {.channel    = entry.channel,
+           .field      = field(name(entry.reg), entry.field),
+           .reg        = name(entry.reg),
+           .name       = entry.field,
+           .pin_values = entry.pin_values});
+    }
   }
   for(auto const& claimed : claims())
   {
@@ -1923,6 +1984,13 @@ auto tim::raw_input(std::size_t ch) const -> bool
   {
     return false;
   }
+  for(auto const& remap : input_remaps_)
+  {
+    if(remap.channel == ch and ((remap.pin_values >> get(regs_, remap.field)) & 1u) == 0)
+    {
+      return false;
+    }
+  }
   return pin_level(input_signals_[ch]);
 }
 
@@ -2230,6 +2298,10 @@ void tim::polarity_flipped(std::size_t ch, std::uint64_t at)
 void tim::encoder_edge(std::size_t ch, std::uint64_t at)
 {
   using enum slave_mode;
+  if(up_only_)
+  {
+    return;
+  }
   auto const fp1      = polarised(0);
   auto const fp2      = polarised(1);
   auto const rising   = ch == 0 ? fp1 : fp2;
@@ -2289,6 +2361,81 @@ void tim::encoder_edge(std::size_t ch, std::uint64_t at)
   if(count)
   {
     external_tick(at);
+  }
+}
+
+void tim::refuse_unmodelled(std::uint32_t word, std::uint32_t merged, access_ctx access)
+{
+  if(master_ and word == master_->offset)
+  {
+    auto const mode   = master_mode_of(merged);
+    auto const second = master2_ and master2_->of(merged) != 0;
+    if(mode > master_compare_pulse or second)
+    {
+      unmodelled(
+          name("CR2"), word, master_logged_,
+          std::format(
+              "MMS {:#06b}{}: master modes above 011 and TRGO2 are not modelled, no trigger "
+              "pulses",
+              mode, second ? " with MMS2" : ""),
+          access);
+    }
+  }
+  if(trigger_dma_ and word == trigger_dma_->offset and trigger_dma_->of(merged) != 0)
+  {
+    unmodelled(
+        name("DIER"), word, trigger_dma_logged_, "TDE: the trigger DMA request is not modelled",
+        access);
+  }
+  for(auto const& remap : input_remaps_)
+  {
+    auto const value = remap.field.of(merged);
+    if(remap.field.offset == word and ((remap.pin_values >> value) & 1u) == 0)
+    {
+      unmodelled(
+          remap.reg, word, remap_logged_,
+          std::format(
+              "{} {}: the internal tim_ti{} source is not modelled, tim_ti{} reads low", remap.name,
+              value, remap.channel + 1, remap.channel + 1),
+          access);
+    }
+  }
+  if(slave_ and word == slave_->offset and up_only_ and encoding(slave_of(merged)))
+  {
+    unmodelled(
+        name("SMCR"), word, reserved_logged_,
+        std::format(
+            "SMS {}: the encoder modes are reserved on a timer that counts up only, no encoder "
+            "edge counts",
+            slave_of(merged)),
+        access);
+  }
+  if(external_clock2_
+     and not etr_
+     and word == external_clock2_->offset
+     and external_clock2_->of(merged) != 0)
+  {
+    unmodelled(
+        name("SMCR"), word, etr_input_logged_,
+        "ECE 1: the internal ETR source is not modelled, external clock mode 2 counts nothing",
+        access);
+  }
+}
+
+void tim::unmodelled(
+    std::string_view reg,
+    std::uint32_t    word,
+    bool&            logged,
+    std::string      message,
+    access_ctx       access)
+{
+  if(not std::exchange(logged, true))
+  {
+    warn(reg, std::move(message));
+  }
+  if(ctx_.strict_peripherals and access.by != initiator::debugger)
+  {
+    throw model_error(desc_.name, std::string{reg}, word);
   }
 }
 
@@ -2474,10 +2621,14 @@ auto tim::on_write(
   auto const control = slave_ ? regs.peek(slave_->offset) : 0u;
   auto const options = option_word_ ? regs.peek(*option_word_) : 0u;
   auto const merged  = merge_write(regs.peek(word), offset, size, value);
-  auto const before  = smcr ? input_of(control, options) : std::nullopt;
+  refuse_unmodelled(word, merged, access);
+  auto const before = smcr ? input_of(control, options) : std::nullopt;
   auto const after =
       smcr ? input_of(option ? control : merged, option ? merged : options) : std::nullopt;
-  if(smcr and ctx_.strict_peripherals and unrouted(option ? control : merged, after))
+  if(smcr
+     and ctx_.strict_peripherals
+     and access.by != initiator::debugger
+     and unrouted(option ? control : merged, after))
   {
     warn_unrouted(option ? control : merged);
     throw model_error(desc_.name, option ? option_name_ : name("SMCR"), word);
@@ -2552,7 +2703,9 @@ auto tim::on_write(
   if((select_word_ and word == *select_word_)
      or (control2_word_ and word == *control2_word_)
      or (etr_word_ and word == *etr_word_)
-     or smcr)
+     or smcr
+     or std::ranges::any_of(
+         input_remaps_, [&](input_route const& remap) { return remap.field.offset == word; }))
   {
     reacting_scope const reacting{reacting_};
     inputs_changed(ps, ctx_.clock.hz(domain_) != 0);
@@ -2778,7 +2931,7 @@ void tim::control_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-void tim::master_written(std::uint32_t old, std::uint32_t now)
+void tim::master_written(std::uint32_t old, std::uint32_t)
 {
   auto const mode = master_mode();
   auto const was  = master_mode_of(old);
@@ -2787,16 +2940,6 @@ void tim::master_written(std::uint32_t old, std::uint32_t now)
     trgo_->edge(
         mode == master_enable ? trigger_edge::rising : trigger_edge::falling,
         output_time(now_ps()));
-  }
-  auto const second = master2_ and master2_->of(now) != 0;
-  if((mode > master_compare_pulse or second) and not std::exchange(master_logged_, true))
-  {
-    warn(
-        name("CR2"),
-        std::format(
-            "MMS {:#06b}{}: master modes above 011 and TRGO2 are not modelled, no trigger "
-            "pulses",
-            mode, second ? " with MMS2" : ""));
   }
 }
 
@@ -2849,13 +2992,8 @@ void tim::slave_settled(std::optional<std::string_view> before, std::uint32_t sm
   state_.gate = gating(mode) and input_level(smcr).value_or(false) ? 1 : 0;
 }
 
-void tim::interrupts_written(std::uint32_t, std::uint32_t now)
-{
-  if(trigger_dma_ and trigger_dma_->of(now) != 0 and not std::exchange(trigger_dma_logged_, true))
-  {
-    warn(name("DIER"), "TDE: the trigger DMA request is not modelled");
-  }
-}
+void tim::interrupts_written(std::uint32_t, std::uint32_t)
+{}
 
 void tim::status_written(std::uint32_t old, std::uint32_t now)
 {

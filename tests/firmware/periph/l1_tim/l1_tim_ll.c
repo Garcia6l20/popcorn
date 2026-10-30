@@ -24,11 +24,15 @@ void tim3_capture(void);
 void tim3_capture_div2(void);
 void tim2_clocks_tim3(void);
 void tim5_remap_tim2(void);
+void tim6_update(void);
+void tim9_pwm(void);
 void on_update(void);
 void on_compare(void);
 void on_started(void);
 void TIM2_IRQHandler(void);
 void TIM3_IRQHandler(void);
+void TIM6_IRQHandler(void);
+void TIM9_IRQHandler(void);
 
 void idle(void)
 {
@@ -235,6 +239,85 @@ void tim5_remap_tim2(void)
   LOG(LL_TIM_GetCounter(TIM2));
   LOG(TIM2->OR);
 #endif
+  DONE();
+}
+
+void TIM6_IRQHandler(void)
+{
+  if(LL_TIM_IsActiveFlag_UPDATE(TIM6))
+  {
+    LL_TIM_ClearFlag_UPDATE(TIM6);
+    on_update();
+    if(++updates == PWM_PERIODS)
+    {
+      LL_TIM_DisableCounter(TIM6);
+    }
+  }
+}
+
+void TIM9_IRQHandler(void)
+{
+  if(LL_TIM_IsActiveFlag_CC1(TIM9))
+  {
+    LL_TIM_ClearFlag_CC1(TIM9);
+    on_compare();
+    ++compares;
+  }
+  if(LL_TIM_IsActiveFlag_CC2(TIM9))
+  {
+    LL_TIM_ClearFlag_CC2(TIM9);
+    on_compare();
+    ++compares;
+  }
+  if(LL_TIM_IsActiveFlag_UPDATE(TIM9))
+  {
+    LL_TIM_ClearFlag_UPDATE(TIM9);
+    on_update();
+    ++updates;
+  }
+}
+
+void tim6_update(void)
+{
+  hsi_16mhz();
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM6);
+  time_base(TIM6, 15, 999);
+  LL_TIM_EnableIT_UPDATE(TIM6);
+  NVIC_EnableIRQ(TIM6_IRQn);
+  LL_TIM_EnableCounter(TIM6);
+  on_started();
+  wait_for(&updates, PWM_PERIODS);
+  LOG(updates);
+  DONE();
+}
+
+void tim9_pwm(void)
+{
+  hsi_16mhz();
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);
+  LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_2, LL_GPIO_MODE_ALTERNATE);
+  LL_GPIO_SetAFPin_0_7(GPIOA, LL_GPIO_PIN_2, LL_GPIO_AF_3);
+  LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_3, LL_GPIO_MODE_ALTERNATE);
+  LL_GPIO_SetAFPin_0_7(GPIOA, LL_GPIO_PIN_3, LL_GPIO_AF_3);
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_TIM9);
+  time_base(TIM9, 15, 999);
+  LL_TIM_OC_SetMode(TIM9, LL_TIM_CHANNEL_CH1, LL_TIM_OCMODE_PWM1);
+  LL_TIM_OC_SetMode(TIM9, LL_TIM_CHANNEL_CH2, LL_TIM_OCMODE_PWM1);
+  LL_TIM_OC_SetCompareCH1(TIM9, 250);
+  LL_TIM_OC_SetCompareCH2(TIM9, 750);
+  LL_TIM_OC_EnablePreload(TIM9, LL_TIM_CHANNEL_CH1);
+  LL_TIM_OC_EnablePreload(TIM9, LL_TIM_CHANNEL_CH2);
+  LL_TIM_CC_EnableChannel(TIM9, LL_TIM_CHANNEL_CH1 | LL_TIM_CHANNEL_CH2);
+  LL_TIM_EnableIT_CC1(TIM9);
+  LL_TIM_EnableIT_CC2(TIM9);
+  LL_TIM_EnableIT_UPDATE(TIM9);
+  NVIC_EnableIRQ(TIM9_IRQn);
+  LL_TIM_EnableCounter(TIM9);
+  on_started();
+  wait_for(&updates, PWM_PERIODS);
+  LL_TIM_DisableCounter(TIM9);
+  LOG(compares);
+  LOG(TIM9->CCER);
   DONE();
 }
 

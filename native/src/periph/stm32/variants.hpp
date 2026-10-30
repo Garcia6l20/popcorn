@@ -599,6 +599,22 @@ struct etr_pin
   std::string_view signal;
 };
 
+/** @brief An option register field that connects a timer input to its pin or to an internal
+ *         source. */
+struct input_remap
+{
+  /** @brief Instance that has the field. */
+  std::string_view slave;
+  /** @brief Input the field selects for, 0 for tim_ti1. */
+  std::uint8_t channel;
+  /** @brief Register of the field, such as `OR`. */
+  std::string_view reg;
+  /** @brief Field name, such as `TI1_RMP`. */
+  std::string_view field;
+  /** @brief Bit v set when field value v keeps the input on its pin. */
+  std::uint32_t pin_values;
+};
+
 /** @brief Differences between the timer peripherals the model rows serve. */
 struct tim_variant
 {
@@ -619,6 +635,13 @@ struct tim_variant
   /** @brief Instances whose tim_etr_in is a pin signal, with no ETRSEL field. The other timers
    *         have ETR only through `AF1.ETRSEL`. */
   std::span<etr_pin const> etr_pins{};
+  /** @brief When set, the instances that count up only: CR1 has no DIR and no CMS, and SMS 001
+   *         to 011 are reserved. Every other instance of the variant has DIR and CMS. Unset, DIR
+   *         and CMS are what the description gives. */
+  std::optional<std::span<std::string_view const>> up_only{};
+  /** @brief Option register fields that select a timer input's source. A value the entry's
+   *         `pin_values` lacks gives an internal source. */
+  std::span<input_remap const> input_remaps{};
 };
 
 /** @brief RM0456 54.6.2 and 55.5.2, RM0481 43.6.2 and 44.5.2: MMS[3:0] on TIM1, TIM8 and TIM2 to
@@ -690,6 +713,10 @@ inline constexpr auto l1_triggers = std::to_array<trigger_entry>({
     {.select = 1, .source = "tim2",      .slave = "TIM4"},
     {.select = 2, .source = "tim3",      .slave = "TIM4"},
     {.select = 3, .source = "tim9",      .slave = "TIM4"},
+    {.select = 0, .source = "tim2",      .slave = "TIM9"},
+    {.select = 1, .source = "tim3",      .slave = "TIM9"},
+    {.select = 2, .source = "tim10_oc1", .slave = "TIM9"},
+    {.select = 3, .source = "tim11_oc1", .slave = "TIM9"},
 });
 /**
  * @brief RM0038 Table 80 on Cat.3 to Cat.6: TIM2_OR.ITR1_RMP selects TIM10 OC1 (0) or TIM5 TRGO
@@ -723,6 +750,17 @@ inline constexpr auto l1_cat3_triggers = std::to_array<trigger_entry>({
     {.select = 1, .source = "tim2", .slave = "TIM4"},
     {.select = 2, .source = "tim3", .slave = "TIM4"},
     {.select = 3, .source = "tim9", .slave = "TIM4"},
+    {.select = 0, .source = "tim2", .slave = "TIM9"},
+    {.select = 1,
+     .source = "tim3",
+     .slave  = "TIM9",
+     .remap  = trigger_remap{.reg = "OR", .field = "ITR1_RMP", .value = 0}},
+    {.select = 1,
+     .source = "ts_io",
+     .slave  = "TIM9",
+     .remap  = trigger_remap{.reg = "OR", .field = "ITR1_RMP", .value = 1}},
+    {.select = 2, .source = "tim10_oc1", .slave = "TIM9"},
+    {.select = 3, .source = "tim11_oc1", .slave = "TIM9"},
 });
 /**
  * @brief RM0038 17.3.3 and 17.4.3: TIM2 to TIM5 take TIMx_ETR from their ETR pin. The datasheet
@@ -736,24 +774,44 @@ inline constexpr auto l1_etr_pins = std::to_array<etr_pin>({
     {.instance = "TIM5", .signal = "tim5_etr"},
 });
 /**
- * @brief STM32L1 TIM2 to TIM5 of Cat.1 and Cat.2, RM0038 17.4: CR2.MMS[2:0], SMCR.SMS[2:0] and
- *        TS[2:0], no UIFREMAP.
+ * @brief RM0038 18.2.1, 18.4.1 and 19.2: TIM6, TIM7 and the Cat.1 and Cat.2 TIM9 count up only.
+ */
+inline constexpr auto l1_up_only = std::to_array<std::string_view>({"TIM6", "TIM7", "TIM9"});
+/** @brief RM0038 18.2.1 and 19.2: on Cat.3 and up TIM9 counts up, down and centre-aligned. */
+inline constexpr auto l1_cat3_up_only = std::to_array<std::string_view>({"TIM6", "TIM7"});
+/**
+ * @brief RM0038 18.4.14 TIM9_OR: TI1_RMP 01 connects the LSE to tim_ti1, 00, 10 and 11 the
+ *        TIM9_CH1 pin.
+ */
+inline constexpr auto l1_input_remaps = std::to_array<input_remap>({
+    {.slave = "TIM9", .channel = 0, .reg = "OR", .field = "TI1_RMP", .pin_values = 0b1101},
+});
+/**
+ * @brief STM32L1 TIM2 to TIM4, TIM6, TIM7 and TIM9 of Cat.1 and Cat.2, RM0038 17.4, 18.4 and
+ *        19.4: CR2.MMS[2:0], SMCR.SMS[2:0] and TS[2:0], no UIFREMAP.
  */
 inline constexpr tim_variant l1_tim{
-    .triggers    = l1_triggers,
-    .wide_master = {},
-    .no_master   = {},
-    .slave_high  = false,
-    .uif_remap   = false,
-    .etr_pins    = l1_etr_pins};
-/** @brief STM32L1 TIM2 to TIM5 of Cat.3 to Cat.6, with the TIM2_OR and TIM3_OR remaps. */
+    .triggers     = l1_triggers,
+    .wide_master  = {},
+    .no_master    = {},
+    .slave_high   = false,
+    .uif_remap    = false,
+    .etr_pins     = l1_etr_pins,
+    .up_only      = l1_up_only,
+    .input_remaps = l1_input_remaps};
+/**
+ * @brief STM32L1 TIM2 to TIM7 and TIM9 of Cat.3 to Cat.6, with the TIM2_OR, TIM3_OR and TIM9_OR
+ *        remaps.
+ */
 inline constexpr tim_variant l1_cat3_tim{
-    .triggers    = l1_cat3_triggers,
-    .wide_master = {},
-    .no_master   = {},
-    .slave_high  = false,
-    .uif_remap   = false,
-    .etr_pins    = l1_etr_pins};
+    .triggers     = l1_cat3_triggers,
+    .wide_master  = {},
+    .no_master    = {},
+    .slave_high   = false,
+    .uif_remap    = false,
+    .etr_pins     = l1_etr_pins,
+    .up_only      = l1_cat3_up_only,
+    .input_remaps = l1_input_remaps};
 
 /** @brief Differences between the SPI peripherals the model rows serve. */
 struct spi_variant

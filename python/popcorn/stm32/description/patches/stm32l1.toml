@@ -132,10 +132,57 @@ width = 2
 source = "RM0038 Rev 18, 17.4.7 and 18.4.7 TIMx_CCMR1: CC2S[1:0] in bits 9:8, two bits wide. The SVDs give one bit in the output view and two in the input view"
 
 [[fields]]
-instances = ["TIM2", "TIM3", "TIM4"]
+instances = ["TIM2", "TIM3", "TIM4", "TIM9"]
 registers = ["CCMR1_Input"]
 rename = { ICPCS = "IC1PSC", IC2PCS = "IC2PSC" }
-source = "RM0038 Rev 18, 17.4.7 TIMx_CCMR1 input capture mode: IC1PSC[1:0] in bits 3:2 and IC2PSC[1:0] in bits 11:10. The four SVDs spell them ICPCS and IC2PCS"
+source = "RM0038 Rev 18, 17.4.7 and 18.4.7 TIMx_CCMR1 input capture mode: IC1PSC[1:0] in bits 3:2 and IC2PSC[1:0] in bits 11:10. The four SVDs spell them ICPCS and IC2PCS"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["CR1"]
+rename = { OMP = "OPM" }
+source = "RM0038 Rev 18, 18.4.1 TIM9 TIMx_CR1: bit 3 is OPM, one-pulse mode. The four SVDs spell it OMP"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["SMCR"]
+add = { name = "ETF", lsb = 8, width = 4, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.4.3 TIM9 TIMx_SMCR and Table 85: ETF in bits 11:8. The four SVDs give SMCR only MSM, TS and SMS"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["SMCR"]
+add = { name = "ETPS", lsb = 12, width = 2, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.4.3 TIM9 TIMx_SMCR and Table 85: ETPS in bits 13:12. The four SVDs give SMCR only MSM, TS and SMS"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["SMCR"]
+add = { name = "ECE", lsb = 14, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.4.3 TIM9 TIMx_SMCR and Table 85: ECE in bit 14. The four SVDs give SMCR only MSM, TS and SMS"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["SMCR"]
+add = { name = "ETP", lsb = 15, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.4.3 TIM9 TIMx_SMCR and Table 85: ETP in bit 15. The four SVDs give SMCR only MSM, TS and SMS"
+
+[[registers]]
+peripheral = "TIM9"
+name = "CCER"
+offset = 0x20
+width = 16
+reset = 0
+acc = "read_write"
+fields = [
+  { name = "CC1E", lsb = 0, width = 1 },
+  { name = "CC1P", lsb = 1, width = 1 },
+  { name = "CC1NP", lsb = 3, width = 1 },
+  { name = "CC2E", lsb = 4, width = 1 },
+  { name = "CC2P", lsb = 5, width = 1 },
+  { name = "CC2NP", lsb = 7, width = 1 },
+]
+source = "RM0038 Rev 18, 18.4.8 TIM9 TIMx_CCER and Table 85: offset 0x20, reset 0, CC1E, CC1P, CC1NP, CC2E, CC2P and CC2NP in bits 0, 1, 3, 4, 5 and 7. The four SVDs have no TIM9 CCER"
 
 [[fields]]
 instances = ["TIM2", "TIM3", "TIM4"]

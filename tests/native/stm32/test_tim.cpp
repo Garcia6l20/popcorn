@@ -1611,6 +1611,73 @@ TEST_CASE("external clock mode 1 on ITR7, tim16_oc1, holds and logs once")
 
 namespace
 {
+class cpu_port final : public periph::model
+{
+public:
+  explicit cpu_port(periph::model_context& ctx) : context{ctx}
+  {}
+
+  periph::model_context& context;
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+}
+
+TEST_CASE("under strict a CPU SMCR write of the unrouted ITR7 throws, a debugger one stores")
+{
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = true;
+  options.models.insert_or_assign(
+      "CRC", [](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+        return std::make_shared<cpu_port>(ctx);
+      });
+  auto                          f = entered_on(u575(), "idle", std::move(options));
+  bus const                     b{f};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  b.set("RCC", "RCC_APB1ENR1", "TIM3EN", 1);
+  auto* const port = f.model_of<cpu_port>("CRC");
+  REQUIRE(port != nullptr);
+  auto const value = smcr(sms_external, ts_itr7);
+  CHECK_THROWS_AS(
+      static_cast<void>(
+          port->context.services.write(b.at("TIM3", "SMCR"), 4, value, popcorn::initiator::cpu)),
+      popcorn::model_error);
+  CHECK(b.read("TIM3", "SMCR") == 0);
+  CHECK(std::ranges::count(logged, core::log_kind::model_warning, &core::log_record::kind) == 1);
+  b.write("TIM3", "SMCR", value);
+  CHECK(b.read("TIM3", "SMCR") == value);
+}
+
+namespace
+{
 auto svd_named_timers() -> popcorn::part_description
 {
   auto desc = u575();
