@@ -16,6 +16,7 @@ from popcorn import Call, EmulationError, Return, System, TapFrame, UartTap, _co
 from popcorn._refs import Pending
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
+from .conftest import stalled_until_posted
 from .linked import (
     FIRMWARE_BAUD,
     LINK_BYTE,
@@ -148,13 +149,18 @@ def test_an_injection_stopped_is_checked_at_the_call(pair: Build) -> None:
 
 
 async def overlapping(system: System, tap: UartTap) -> None:
-    """Inject, from the free run, a frame at 4010 us overlapping one injected at 4000 us."""
+    """Inject, from the free run with b held in a sample so no window drains meanwhile, a frame
+    at 4010 us overlapping one injected at 4000 us."""
     b = system.members["b"]
     async with system.running():
         await b.elapse(us(100))
         await in_flight(system)
-        tap.inject(b"xy", at=at(4000), towards="b.USART1")
-        tap.inject(b"z", at=at(4010), towards="b.USART1")
+
+        async def post() -> None:
+            tap.inject(b"xy", at=at(4000), towards="b.USART1")
+            tap.inject(b"z", at=at(4010), towards="b.USART1")
+
+        await stalled_until_posted(b, post)
         await b.elapse(ms(1.5))
 
 
