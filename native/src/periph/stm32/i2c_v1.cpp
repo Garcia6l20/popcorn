@@ -128,26 +128,27 @@ auto kernel_name(peripheral_desc const& desc, i2c_v1_variant const& variant) -> 
  *        read after it. A DR write during the address phase or after a data NACK stores DR and
  *        sends nothing.
  *
- *        Controller receiver, RM0038 26.3.3 and Figure 213: an address with the R/W bit set
- *        sets ADDR with TRA 0, and the ADDR clear starts the first byte. Each byte takes 8 data
- *        periods and 1 acknowledge period and reaches the targets that acknowledged the address
- *        through i2c_target::read_deferred() at the end of the acknowledge period, their bytes
- *        combined by AND as the open-drain bus does. The I2C decides the acknowledge at the end of
- *        the eighth period, before the acknowledge pulse, as RM0038 26.3.3 and Figure 213 note 4
- *        order it: with POS 0 as CR1.ACK is then, an ACK write inside the eighth period counting,
+ *        Controller receiver, RM0038 26.3.3 and Figure 213: an address with the R/W bit set sets
+ *        ADDR with TRA 0, and the ADDR clear starts the first byte. Each byte takes 8 data periods
+ *        and 1 acknowledge period and reaches the targets that acknowledged the address through
+ *        i2c_target::read_deferred() at the end of the acknowledge period, their bytes combined by
+ *        AND as the open-drain bus does. The I2C decides the acknowledge at the end of the eighth
+ *        period, before the acknowledge pulse, as RM0038 26.3.3 and Figure 213 note 4 order it:
+ *        with POS 0 as CR1.ACK is then, an ACK write inside the eighth period counting, as Figure
+ *        213 note 4 states. An ACK write during the acknowledge pulse counts for the next byte,
  *        inferred. With POS 1 as ACK was at the decision of the previous byte or at the end of the
- *        address, which the RM0038 26.3.3 2-byte procedure settles for its EV6 write, inferred
- *        for an ACK write during a byte. After a NACKed byte the targets take no part: a byte
- *        clocked after it reads 0xFF and reaches no target. A byte that ends with RxNE 0 goes to
- *        DR, sets RxNE and the next byte starts. One that ends with RxNE 1 stays in the shift
- *        register, sets BTF and SCL stays low. A DR read clears BTF. With BTF set it moves the
- *        shift register to DR, keeps RxNE 1 and starts the next byte, with BTF clear it clears
- *        RxNE. A DR write with TRA 0 clears RxNE and BTF as a DR read does, and with BTF set the
- *        held byte replaces the written value in DR, inferred. A DR write with TRA 1 clears RxNE,
- *        BTF and a byte held from a reception and goes to the transmitter, inferred. CR1.STOP and
- *        START go after the byte that shifts, at once while SCL is held, and at once after the
- *        ADDR clear while ADDR is set, as for the transmitter. A START or a STOP keeps BTF while a
- *        byte waits in the shift register.
+ *        address, which the RM0038 26.3.3 2-byte procedure settles for its EV6 write, inferred for
+ *        an ACK write during a byte. After a NACKed byte the targets take no part: a byte clocked
+ *        after it reads 0xFF and reaches no target. A byte that ends with RxNE 0 goes to DR, sets
+ *        RxNE and the next byte starts. One that ends with RxNE 1 stays in the shift register, sets
+ *        BTF and SCL stays low. A DR read clears BTF. With BTF set it moves the shift register to
+ *        DR, keeps RxNE 1 and starts the next byte, with BTF clear it clears RxNE. A DR write with
+ *        TRA 0 clears RxNE and BTF as a DR read does, and with BTF set the held byte replaces the
+ *        written value in DR, inferred. A DR write with TRA 1 clears RxNE, BTF and a byte held from
+ *        a reception and goes to the transmitter, inferred. CR1.STOP and START go after the byte
+ *        that shifts, at once while SCL is held, and at once after the ADDR clear while ADDR is
+ *        set, as for the transmitter. A START or a STOP keeps BTF while a byte waits in the shift
+ *        register.
  *
  *        SMBus, PEC, ALERT, ARP and CR2.DMAEN log one model_warning per instance when the
  *        firmware uses them, raise model_error under strict_peripherals at the START that uses
@@ -692,7 +693,7 @@ void i2c_v1::address_cleared()
   {
     update(regs_, tx_empty_, 1);
   }
-  if(not pending_condition() and get(regs_, transmitter_) == 0)
+  if(not pending_condition() and get(regs_, transmitter_) == 0 and state_.rx_held == 0)
   {
     begin(wire::receive, data_periods);
   }

@@ -15,6 +15,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -312,6 +313,11 @@ struct rig
     {
       eeprom = std::make_shared<devices::eeprom_24xx>(
           devices::eeprom_24xx_options{.write_cycle = std::chrono::microseconds{100}});
+      board.i2c["I2C1"].push_back(eeprom);
+    }
+    else if(entry.starts_with("hal_"))
+    {
+      eeprom = std::make_shared<devices::eeprom_24xx>();
       board.i2c["I2C1"].push_back(eeprom);
     }
     else
@@ -1199,7 +1205,9 @@ TEST_CASE("RM0038 26.3.3 EV7: RxNE after 9 periods, BTF holds the next byte unti
   CHECK(r.read(i2c1 + sr1) == 0);
 }
 
-TEST_CASE("RM0038 26.3.3: ACK is decided at the end of the eighth period, before the pulse, POS 0")
+TEST_CASE(
+    "RM0038 26.3.3: ACK is decided at the end of the eighth period, before the pulse, POS 0, a "
+    "write during the pulse inferred")
 {
   for(auto const& [written, acks] : {
           std::pair{phase(16) + phase(1) / 2, std::vector<std::uint8_t>{1, 0}},
@@ -1314,6 +1322,35 @@ TEST_CASE("RM0038 26.6.6 BTF: a repeated START while SCL is held keeps BTF, no b
   CHECK(r.target->kinds() == "SRR");
   CHECK(r.cpu_read(i2c1 + dr) == 0xC2);
   CHECK(r.read(i2c1 + sr1) == sb);
+}
+
+TEST_CASE("RM0038 26.3.3: an ADDR clear into a read starts no byte while BTF holds the last one")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1, 0xC2, 0xD1};
+  auto const t0 = r.receiving();
+  r.idle_to(t0 + phase(18));
+  auto const t1 = r.now_ps();
+  r.cpu_write(i2c1 + cr1, pe | ack_bit | start);
+  r.idle_to(t1 + phase(1));
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  auto const t2 = r.now_ps();
+  r.cpu_write(i2c1 + dr, device << 1 | 1u);
+  r.idle_to(t2 + phase(9));
+  CHECK(r.read(i2c1 + sr1) == (addr | rxne | btf));
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  static_cast<void>(r.cpu_read(i2c1 + sr2));
+  r.idle_to(r.now_ps() + phase(20));
+  CHECK(r.target->kinds() == "SRRS");
+  CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+  auto const t3 = r.now_ps();
+  static_cast<void>(r.cpu_read(i2c1 + dr));
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK(r.cpu_read(i2c1 + dr) == 0xC2);
+  r.idle_to(t3 + phase(9));
+  REQUIRE(r.target->kinds() == "SRRSR");
+  CHECK(r.target->log[4].at == t3 + phase(9));
+  CHECK(r.cpu_read(i2c1 + dr) == 0xD1);
 }
 
 TEST_CASE(
@@ -1483,4 +1520,66 @@ TEST_CASE("a write transfer after a repeated START over a held byte drops it and
   r.idle_to(t1 + phase(10));
   CHECK(r.read(i2c1 + sr1) == 0);
   CHECK(r.read(i2c1 + sr2) == 0);
+}
+
+TEST_CASE("HAL_I2C_Mem_Read of 1, 2 and 3 bytes after IsDeviceReady polls the 5 ms write cycle")
+{
+  constexpr std::array                   entries{"hal_read_one", "hal_read_two", "hal_read_three"};
+  constexpr std::array<std::uint32_t, 3> pattern{0xA1, 0xB2, 0xC3};
+  for(auto const& [desc, elf] : {
+          std::pair{&l152re(), firmware  },
+          std::pair{&l152rb(), firmware_b}
+  })
+  {
+    for(std::size_t size = 1; size <= entries.size(); ++size)
+    {
+      CAPTURE(elf);
+      CAPTURE(size);
+      rig        r{entries[size - 1], {}, *desc, elf};
+      auto const logged = r.finish();
+      REQUIRE(logged.size() == size + 2);
+      CHECK(logged.front() == 5);
+      CHECK(std::ranges::equal(std::span{logged}.subspan(1, size), std::span{pattern}.first(size)));
+      CHECK(logged.back() == 0);
+      auto const contents = r.eeprom->contents();
+      for(std::size_t index = 0; index < size; ++index)
+      {
+        CHECK(contents[0x40 + index] == static_cast<std::byte>(pattern[index]));
+      }
+      CHECK(contents[0x40 + size] == std::byte{0xFF});
+      CHECK(std::ranges::none_of(r.logged, [](core::log_record const& one) {
+        return one.peripheral == "I2C1";
+      }));
+    }
+  }
+}
+
+TEST_CASE("HAL_I2C_Mem_Read of 0 bytes leaves RxNE 1 at its STOP, a Mem_Write then sends its bytes")
+{
+  for(auto const& [desc, elf] : {
+          std::pair{&l152re(), firmware  },
+          std::pair{&l152rb(), firmware_b}
+  })
+  {
+    CAPTURE(elf);
+    rig r{"hal_read_none", {}, *desc, elf};
+    CHECK(r.finish() == std::vector<std::uint32_t>{rxne, 0xA1, 0xB2, 0});
+    auto const contents = r.eeprom->contents();
+    CHECK(contents[0x40] == std::byte{0xA1});
+    CHECK(contents[0x41] == std::byte{0xB2});
+    CHECK(contents[0x42] == std::byte{0xFF});
+  }
+}
+
+TEST_CASE("HAL_I2C_IsDeviceReady: HAL_OK on 0x50, HAL_ERROR on 0x51, bus left idle")
+{
+  for(auto const& [desc, elf] : {
+          std::pair{&l152re(), firmware  },
+          std::pair{&l152rb(), firmware_b}
+  })
+  {
+    CAPTURE(elf);
+    rig r{"hal_ready", {}, *desc, elf};
+    CHECK(r.finish() == std::vector<std::uint32_t>{0, 1, 0, 0, 0, 0, 0});
+  }
 }

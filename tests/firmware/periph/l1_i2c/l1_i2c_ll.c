@@ -1,10 +1,15 @@
 #include "periph_test.h"
 #include "stm32l1xx.h"
+#include "stm32l1xx_hal.h"
 #include "stm32l1xx_ll_bus.h"
 #include "stm32l1xx_ll_i2c.h"
 
 #define PCLK1_HZ 2097152u
 #define EEPROM   0x50u
+#define MEMORY   0x0040u
+
+static I2C_HandleTypeDef i2c;
+static uint8_t const     pattern[] = {0xA1u, 0xB2u, 0xC3u};
 
 void idle(void);
 void write_eeprom(void);
@@ -12,6 +17,17 @@ void nack(void);
 void read_one(void);
 void read_two(void);
 void read_four(void);
+void hal_read_one(void);
+void hal_read_two(void);
+void hal_read_three(void);
+void hal_read_none(void);
+void hal_ready(void);
+void SysTick_Handler(void);
+
+void SysTick_Handler(void)
+{
+  HAL_IncTick();
+}
 
 void idle(void)
 {
@@ -165,6 +181,113 @@ void read_four(void)
   LOG(LL_I2C_ReceiveData8(I2C1));
   LOG(LL_I2C_ReceiveData8(I2C1));
   stop();
+  DONE();
+}
+
+static void hal_setup(void)
+{
+  HAL_Init();
+  __HAL_RCC_I2C1_CLK_ENABLE();
+  i2c.Instance             = I2C1;
+  i2c.Init.ClockSpeed      = 100000u;
+  i2c.Init.DutyCycle       = I2C_DUTYCYCLE_2;
+  i2c.Init.OwnAddress1     = 0u;
+  i2c.Init.AddressingMode  = I2C_ADDRESSINGMODE_7BIT;
+  i2c.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  i2c.Init.OwnAddress2     = 0u;
+  i2c.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  i2c.Init.NoStretchMode   = I2C_NOSTRETCH_DISABLE;
+  if(HAL_I2C_Init(&i2c) != HAL_OK)
+  {
+    FAIL(10);
+  }
+}
+
+static void hal_mem_read(uint16_t size)
+{
+  uint8_t got[sizeof pattern] = {0};
+  hal_setup();
+  if(HAL_I2C_Mem_Write(
+         &i2c, EEPROM << 1, MEMORY, I2C_MEMADD_SIZE_16BIT, (uint8_t*)pattern, size, 10u)
+     != HAL_OK)
+  {
+    FAIL(11);
+  }
+  uint32_t const written = HAL_GetTick();
+  if(HAL_I2C_IsDeviceReady(&i2c, EEPROM << 1, 100u, 10u) != HAL_OK)
+  {
+    FAIL(12);
+  }
+  LOG(HAL_GetTick() - written);
+  if(HAL_I2C_Mem_Read(&i2c, EEPROM << 1, MEMORY, I2C_MEMADD_SIZE_16BIT, got, size, 10u) != HAL_OK)
+  {
+    FAIL(13);
+  }
+  for(uint32_t index = 0; index < size; ++index)
+  {
+    LOG(got[index]);
+  }
+  LOG(i2c.ErrorCode);
+  DONE();
+}
+
+void hal_read_one(void)
+{
+  hal_mem_read(1u);
+}
+
+void hal_read_two(void)
+{
+  hal_mem_read(2u);
+}
+
+void hal_read_three(void)
+{
+  hal_mem_read(3u);
+}
+
+void hal_read_none(void)
+{
+  uint8_t got[2] = {0};
+  hal_setup();
+  if(HAL_I2C_Mem_Read(&i2c, EEPROM << 1, MEMORY, I2C_MEMADD_SIZE_16BIT, got, 0u, 10u) != HAL_OK)
+  {
+    FAIL(14);
+  }
+  while(I2C1->SR2 & I2C_SR2_BUSY)
+  {
+  }
+  LOG(I2C1->SR1);
+  if(HAL_I2C_Mem_Write(&i2c, EEPROM << 1, MEMORY, I2C_MEMADD_SIZE_16BIT, (uint8_t*)pattern, 2u, 10u)
+     != HAL_OK)
+  {
+    FAIL(15);
+  }
+  if(HAL_I2C_IsDeviceReady(&i2c, EEPROM << 1, 100u, 10u) != HAL_OK)
+  {
+    FAIL(16);
+  }
+  if(HAL_I2C_Mem_Read(&i2c, EEPROM << 1, MEMORY, I2C_MEMADD_SIZE_16BIT, got, 2u, 10u) != HAL_OK)
+  {
+    FAIL(17);
+  }
+  LOG(got[0]);
+  LOG(got[1]);
+  LOG(i2c.ErrorCode);
+  DONE();
+}
+
+void hal_ready(void)
+{
+  hal_setup();
+  LOG(HAL_I2C_IsDeviceReady(&i2c, EEPROM << 1, 1u, 10u));
+  uint32_t const before = HAL_GetTick();
+  LOG(HAL_I2C_IsDeviceReady(&i2c, (EEPROM + 1u) << 1, 3u, 10u));
+  LOG(HAL_GetTick() - before);
+  LOG(I2C1->SR1);
+  LOG(HAL_I2C_IsDeviceReady(&i2c, EEPROM << 1, 1u, 10u));
+  LOG(I2C1->SR1);
+  LOG(I2C1->SR2);
   DONE();
 }
 

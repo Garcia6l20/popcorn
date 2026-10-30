@@ -476,7 +476,9 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   ENGC and NOSTRETCH are stored, and the instance answers no address as a target. The model
   takes no `board.i2c_controllers` entry.
 - The controller receiver decides a byte's acknowledge at the end of its eighth period, before
-  the acknowledge pulse, from CR1.ACK, an ACK write inside the eighth period counting, inferred.
+  the acknowledge pulse, from CR1.ACK, an ACK write inside the eighth period counting, as RM0038
+  Figure 213 note 4 states. An ACK write during the acknowledge pulse counts for the next byte,
+  inferred.
   With POS 1 it takes ACK as it was at the previous byte's decision or at the end of the address,
   inferred for an ACK write during a byte. A byte clocked after a NACKed byte reads 0xFF and
   reaches no target.
