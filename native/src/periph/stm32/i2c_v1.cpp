@@ -73,6 +73,10 @@ struct i2c_v1_state
   std::uint8_t                        addressed{};
   std::uint8_t                        last_ack{};
   std::uint8_t                        wire_busy{};
+  std::uint8_t                        tx_active{};
+  std::uint8_t                        tx_loaded{};
+  std::uint8_t                        tx_sending{};
+  std::uint8_t                        tx_shift{};
   std::uint64_t                       phase_end_ps{};
   std::uint64_t                       released_ps{};
   std::vector<std::uint8_t>           acked;
@@ -183,44 +187,59 @@ auto kernel_name(peripheral_desc const& desc, i2c_v1_variant const& variant) -> 
  *        above the last one. The port runs the entries of one instruction count in unit order. A
  *        phase starts at the latest of its time, the end of the phases queued before it and the
  *        time of the STOPs queued before it, and is answered at its end, or at the release of the
- *        I2C's stretch, as the target receiver below says. A read byte answers the controller's
- *        acknowledge and 0xFF. A STOP drops the phases of lower units still queued or running, each
- *        reported at its time. An RCC reset, CR1.SWRST included, drops the phases started at or
- *        before it, each reported at the later of its end and the reset, and keeps the later phases
- *        and STOPs. A phase queued after it with a start at or before it is dropped the same way,
- *        and a STOP or a drop queued after it is due no earlier than it. A machine reset of any
- *        kind, the model a reset_listener, drops every queued phase at its end rebased by the
- *        reset's local time and removes every queued STOP. A phase a reset drops holds the wire to
- *        its end. Dropped units survive every reset and are reported once, through
- *        i2c_controller_sink::dropped(). The entries, the last unit, the generation and the time of
- *        the last RCC reset are saved with the model, and an instance with no controller refuses a
- *        snapshot holding entries with config_error.
+ *        I2C's stretch, as the target rules below say. A STOP drops the phases of lower units still
+ *        queued or running, each reported at its time. An RCC reset, CR1.SWRST included, drops the
+ *        phases started at or before it, each reported at the later of its end and the reset, and
+ *        keeps the later phases and STOPs. A phase queued after it with a start at or before it is
+ *        dropped the same way, and a STOP or a drop queued after it is due no earlier than it. A
+ *        machine reset of any kind, the model a reset_listener, drops every queued phase at its end
+ *        rebased by the reset's local time and removes every queued STOP. A phase a reset drops
+ *        holds the wire to its end. Dropped units survive every reset and are reported once,
+ *        through i2c_controller_sink::dropped(). The entries, the last unit, the generation and the
+ *        time of the last RCC reset are saved with the model, and an instance with no controller
+ *        refuses a snapshot holding entries with config_error.
  *
- *        Target receiver, RM0038 26.3.2 and Figure 211: an address phase sets BUSY at its start,
- *        with PE 0 too, as RM0038 26.6.7 BUSY says, and a STOP of the port clears it, the I2C's own
- *        STOP keeping it while the port's transfer runs. At the end of an address phase, while PE
- *        is 1 and no controller transfer of the I2C runs, the address matches OAR1 with ADDMODE 0,
- *        read at that time. Address 0 never matches OAR1, RM0038 26.6.1 ENGC "Address 00h is
- *        NACKed". A match with CR1.ACK 1 sets ADDR with TRA 0 and is acknowledged. SCL stays held,
- *        EV1: the answer reaches the controller once an SR2 read after an SR1 read clears ADDR, and
- *        every later phase and STOP waits for it. A match with CR1.ACK 0 answers NACK at the
- *        address end and sets no ADDR, inferred, the ST HAL clearing ACK to stop listening. Any
- *        other address phase answers NACK. A written byte after an acknowledged write address lands
- *        in DR and sets RxNE, EV2. Popcorn reads CR1.ACK for it at the end of its phase, the
- *        acknowledge period included. A byte that ends with RxNE 1 stays in the shift register with
- *        its acknowledge, sets BTF and holds SCL: a DR read moves it to DR, keeps RxNE 1, clears
- *        BTF and releases SCL. A written byte with no acknowledged address answers NACK. A STOP
- *        clears TRA and sets STOPF when the last acknowledge of the transfer, of the address or of
- *        a byte, was an ACK, RM0038 26.6.6 STOPF "after an acknowledge (if ACK=1)", so no STOPF
- *        after a byte the I2C NACKed. An SR1 read then a CR1 write clears STOPF, EV4, an SR1 read
- *        before STOPF sets arming the clear as RM0038 26.6.7 says for ADDR, inferred. A START the
- *        firmware sets while the bus is busy goes at the STOP, RM0038 26.6.1 START. A repeated
- *        START clears TRA. PE 0, which RM0038 26.6.1 lets act at the end of the communication,
- *        releases a held phase at once with its acknowledge, and later phases answer NACK.
- *        NOSTRETCH at an OAR1 match, a read address, an OAR2 address with ENDUAL, address 0 with
- *        ENGC and a 10-bit header 0b11110xx with ADDMODE 1 each log one model_warning per instance
- *        and raise model_error under strict_peripherals at that address phase, and the last four
- *        answer NACK.
+ *        Target receiver and transmitter, RM0038 26.3.2, Figures 210 and 211: an address phase sets
+ *        BUSY at its start, with PE 0 too, as RM0038 26.6.7 BUSY says, and a STOP of the port
+ *        clears it, the I2C's own STOP keeping it while the port's transfer runs. At the end of an
+ *        address phase, while PE is 1 and no controller transfer of the I2C runs, the address
+ *        matches OAR1 with ADDMODE 0, read at that time. Address 0 never matches OAR1, RM0038
+ *        26.6.1 ENGC "Address 00h is NACKed". A match with CR1.ACK 1 sets ADDR with TRA as the R/W
+ *        bit and is acknowledged. SCL stays held, EV1: the answer reaches the controller once an
+ *        SR2 read after an SR1 read clears ADDR, and every later phase and STOP waits for it. A
+ *        match with CR1.ACK 0 answers NACK at the address end and sets no ADDR, inferred, the ST
+ *        HAL clearing ACK to stop listening. Any other address phase answers NACK. A written byte
+ *        after an acknowledged write address lands in DR and sets RxNE, EV2. Popcorn reads CR1.ACK
+ *        for it at the end of its phase, the acknowledge period included. A byte that ends with
+ *        RxNE 1 stays in the shift register with its acknowledge, sets BTF and holds SCL: a DR read
+ *        moves it to DR, keeps RxNE 1, clears BTF and releases SCL. A written byte with no
+ *        acknowledged write address answers NACK. After an acknowledged read address the ADDR clear
+ *        sets TxE, EV3-1. A DR write with the shift register empty and no byte sending loads the
+ *        shift register and keeps TxE 1, as the RM0038 26.6.6 TxE note says, and starts a read byte
+ *        the I2C holds for it. A DR write with the shift register loaded or a byte sending fills DR
+ *        and clears TxE, EV3. A read byte starts with the shift register loaded, or holds SCL until
+ *        that DR write, EV1 note 1. At the end of a byte the controller acknowledges, DR moves to
+ *        the shift register when full, TxE sets, and with DR empty BTF sets at the byte's end,
+ *        RM0038 26.3.2 "before the end of the next data transmission, the BTF bit is set", so the
+ *        next read byte waits for the DR write that clears BTF. The first read byte after the ADDR
+ *        clear sets no BTF, inferred. A read byte the controller NACKs sets AF, not TxE nor BTF,
+ *        and ends the transmission, and a DR write after it until the STOP clears TxE and sends
+ *        nothing, RM0038 26.6.6 TxE "Cleared by software writing to the DR register". A read byte
+ *        with no transmission or after a NACK answers 0xFF. A STOP clears TRA and sets STOPF when
+ *        the last acknowledge of the transfer, of the address or of a byte, was an ACK, RM0038
+ *        26.6.6 STOPF "after an acknowledge (if ACK=1)" and "not set after a NACK reception", so no
+ *        STOPF after a byte the I2C or the controller NACKed. A STOP or a repeated START clears TxE
+ *        and BTF of a transmission, RM0038 26.6.6 TxE. An SR1 read then a CR1 write clears STOPF,
+ *        EV4, an SR1 read before STOPF sets arming the clear as RM0038 26.6.7 says for ADDR,
+ *        inferred. A START the firmware sets while the bus is busy goes at the STOP, RM0038 26.6.1
+ *        START. A repeated START clears TRA. PE 0, which RM0038 26.6.1 lets act at the end of the
+ *        communication, releases a held phase at once with its acknowledge, starts a held read byte
+ *        as 0xFF, and later phases answer NACK or 0xFF. An RCC reset starts a read byte held for
+ *        DR, dropped at its end, and a machine reset drops it one phase after the reset in the new
+ *        base. NOSTRETCH at an OAR1 match, an OAR2 address with ENDUAL, address 0 with ENGC and a
+ *        10-bit header 0b11110xx with ADDMODE 1 each log one model_warning per instance and raise
+ *        model_error under strict_peripherals at that address phase, and the last three answer
+ *        NACK.
  *
  *        Targets, the STM32L1 I2C on the generic interfaces: each target is attached to the model
  *        at its construction and detached at its destruction, and reset with the machine. A target
@@ -342,6 +361,11 @@ private:
   [[nodiscard]] auto port_answer(i2c_port_entry& entry) -> std::optional<i2c_answer>;
   [[nodiscard]] auto address_answer(i2c_port_entry& entry) -> std::optional<i2c_answer>;
   [[nodiscard]] auto write_answer(i2c_port_entry& entry) -> std::optional<i2c_answer>;
+  [[nodiscard]] auto read_answer(i2c_port_entry const& entry) -> i2c_answer;
+  [[nodiscard]] auto read_begun(i2c_port_entry& entry) -> bool;
+  void               begin_read(i2c_port_entry& entry, std::uint8_t byte);
+  void               target_written(std::uint8_t byte);
+  void               transmission_ended();
   void               phase_begun(i2c_port_entry const& entry);
   [[nodiscard]] auto held_entry() -> i2c_port_entry*;
   void               release(i2c_port_entry& entry, bool ack);
@@ -408,7 +432,6 @@ private:
   bool                                     disable_logged_{};
   bool                                     ending_{};
   bool                                     stretch_logged_{};
-  bool                                     transmit_logged_{};
   bool                                     general_logged_{};
   bool                                     dual_logged_{};
   bool                                     header_logged_{};
@@ -718,9 +741,12 @@ void i2c_v1::status_written(std::uint32_t old, std::uint32_t now)
 
 void i2c_v1::abort()
 {
+  state_.tx_active = 0;
   release_held();
-  state_.addressed = 0;
-  state_.last_ack  = 0;
+  state_.addressed  = 0;
+  state_.last_ack   = 0;
+  state_.tx_loaded  = 0;
+  state_.tx_sending = 0;
   ++state_.generation;
   state_.phase       = static_cast<std::uint8_t>(wire::idle);
   state_.status_read = 0;
@@ -772,6 +798,16 @@ void i2c_v1::data_written()
       update(regs_, byte_finished_, 0);
     }
   }
+  if(not controlling() and state_.tx_active != 0)
+  {
+    target_written(byte);
+    return;
+  }
+  if(not controlling() and state_.addressed != 0 and get(regs_, transmitter_) != 0)
+  {
+    update(regs_, tx_empty_, 0);
+    return;
+  }
   if(not controlling() or get(regs_, transmitter_) == 0 or get(regs_, address_sent_) != 0)
   {
     return;
@@ -817,6 +853,11 @@ void i2c_v1::address_cleared()
   update(regs_, address_sent_, 0);
   if(not controlling())
   {
+    if(get(regs_, transmitter_) != 0 and state_.addressed != 0)
+    {
+      state_.tx_active = 1;
+      update(regs_, tx_empty_, 1);
+    }
     release_held();
     return;
   }
@@ -1312,6 +1353,12 @@ void i2c_v1::run_port(std::uint32_t lane)
     {
       case entry_phase:
         phase_begun(entry);
+        if(phase == i2c_phase::read and not read_begun(entries[*pick]))
+        {
+          entries[*pick].kind = entry_held;
+          flags();
+          break;
+        }
         entries[*pick].kind   = entry_ending;
         entries[*pick].due_ps = entry.due_ps + entry.phase_ps;
         schedule_port(entries[*pick]);
@@ -1356,6 +1403,7 @@ void i2c_v1::phase_begun(i2c_port_entry const& entry)
   }
   if(state_.addressed != 0)
   {
+    transmission_ended();
     update(regs_, transmitter_, 0);
   }
   state_.addressed = 0;
@@ -1375,7 +1423,7 @@ auto i2c_v1::port_answer(i2c_port_entry& entry) -> std::optional<i2c_answer>
     case i2c_phase::read:
       break;
   }
-  return i2c_answer{.ack = entry.ack != 0};
+  return read_answer(entry);
 }
 
 auto i2c_v1::address_answer(i2c_port_entry& entry) -> std::optional<i2c_answer>
@@ -1386,19 +1434,19 @@ auto i2c_v1::address_answer(i2c_port_entry& entry) -> std::optional<i2c_answer>
   {
     return i2c_answer{.ack = false};
   }
-  if(get(regs_, own_mode_) != 0)
-  {
-    if((address & 0x7Cu) == 0x78u)
-    {
-      unmodelled(header_logged_, "OAR1", "10-bit addressing in target mode");
-    }
-    return i2c_answer{.ack = false};
-  }
   if(address == 0)
   {
     if(get(regs_, general_call_) != 0)
     {
       unmodelled(general_logged_, "CR1", "the general call of ENGC");
+    }
+    return i2c_answer{.ack = false};
+  }
+  if(get(regs_, own_mode_) != 0)
+  {
+    if((address & 0x7Cu) == 0x78u)
+    {
+      unmodelled(header_logged_, "OAR1", "10-bit addressing in target mode");
     }
     return i2c_answer{.ack = false};
   }
@@ -1416,17 +1464,12 @@ auto i2c_v1::address_answer(i2c_port_entry& entry) -> std::optional<i2c_answer>
   {
     unmodelled(stretch_logged_, "CR1", "NOSTRETCH in target mode");
   }
-  if(read)
-  {
-    unmodelled(transmit_logged_, "SR2", "the target transmitter");
-    return i2c_answer{.ack = false};
-  }
   if(get(regs_, ack_) == 0)
   {
     return i2c_answer{.ack = false};
   }
   update(regs_, address_sent_, 1);
-  update(regs_, transmitter_, 0);
+  update(regs_, transmitter_, read ? 1 : 0);
   state_.addressed = 1;
   state_.last_ack  = 1;
   entry.ack        = 1;
@@ -1476,10 +1519,110 @@ void i2c_v1::release(i2c_port_entry& entry, bool ack)
 
 void i2c_v1::release_held()
 {
-  if(auto* const held = held_entry())
+  auto* const held = held_entry();
+  if(held == nullptr)
   {
-    release(*held, held->ack != 0);
+    return;
   }
+  if(static_cast<i2c_phase>(held->phase) == i2c_phase::read)
+  {
+    begin_read(*held, 0xFF);
+    return;
+  }
+  release(*held, held->ack != 0);
+}
+
+auto i2c_v1::read_begun(i2c_port_entry& entry) -> bool
+{
+  if(state_.tx_active == 0)
+  {
+    return true;
+  }
+  if(state_.tx_loaded == 0)
+  {
+    return false;
+  }
+  entry.data        = state_.tx_shift;
+  state_.tx_loaded  = 0;
+  state_.tx_sending = 1;
+  return true;
+}
+
+void i2c_v1::begin_read(i2c_port_entry& entry, std::uint8_t byte)
+{
+  auto const now    = ctx_.clock.time().ps;
+  entry.kind        = entry_ending;
+  entry.data        = byte;
+  entry.due_ps      = now + entry.phase_ps;
+  state_.tx_sending = state_.tx_active;
+  auto const unit   = entry.unit;
+  auto const end    = entry.due_ps;
+  schedule_port(entry);
+  for(auto const index : place_after(state_.port.entries, unit, end))
+  {
+    schedule_port(state_.port.entries[index]);
+  }
+}
+
+auto i2c_v1::read_answer(i2c_port_entry const& entry) -> i2c_answer
+{
+  auto const ack = entry.ack != 0;
+  if(std::exchange(state_.tx_sending, 0) == 0 or state_.tx_active == 0)
+  {
+    return {.ack = ack};
+  }
+  state_.last_ack = ack ? 1 : 0;
+  if(not ack)
+  {
+    update(regs_, ack_failure_, 1);
+    state_.tx_active = 0;
+    return {.ack = ack, .byte = entry.data};
+  }
+  if(state_.tx_full != 0)
+  {
+    state_.tx_shift  = static_cast<std::uint8_t>(regs_.peek(data_.offset));
+    state_.tx_loaded = 1;
+    state_.tx_full   = 0;
+  }
+  else
+  {
+    update(regs_, byte_finished_, 1);
+  }
+  update(regs_, tx_empty_, 1);
+  return {.ack = ack, .byte = entry.data};
+}
+
+void i2c_v1::target_written(std::uint8_t byte)
+{
+  update(regs_, byte_finished_, 0);
+  if(state_.tx_loaded == 0 and state_.tx_sending == 0)
+  {
+    state_.tx_shift  = byte;
+    state_.tx_loaded = 1;
+    auto* const held = held_entry();
+    if(held != nullptr and static_cast<i2c_phase>(held->phase) == i2c_phase::read)
+    {
+      state_.tx_loaded = 0;
+      begin_read(*held, byte);
+    }
+    return;
+  }
+  state_.tx_full = 1;
+  update(regs_, tx_empty_, 0);
+}
+
+void i2c_v1::transmission_ended()
+{
+  if(get(regs_, transmitter_) == 0)
+  {
+    return;
+  }
+  state_.tx_active  = 0;
+  state_.tx_loaded  = 0;
+  state_.tx_sending = 0;
+  state_.tx_full    = 0;
+  update(regs_, tx_empty_, 0);
+  update(regs_, byte_finished_, 0);
 }
 
 void i2c_v1::port_stopped(i2c_port_entry const& entry)
@@ -1514,6 +1657,7 @@ void i2c_v1::target_ended()
     {
       update(regs_, stop_detected_, 1);
     }
+    transmission_ended();
     update(regs_, transmitter_, 0);
   }
   state_.addressed = 0;
@@ -1548,6 +1692,10 @@ void i2c_v1::rearm_port(i2c_port port, std::optional<reset_kind> kind)
       if(entry.kind == entry_held)
       {
         entry.due_ps = std::max(entry.due_ps, floor);
+        if(static_cast<i2c_phase>(entry.phase) == i2c_phase::read)
+        {
+          entry.kind = entry_phase;
+        }
       }
     }
     std::ignore = place_after(port.entries, *holding, floor);

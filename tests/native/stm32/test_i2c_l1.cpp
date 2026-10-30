@@ -985,7 +985,7 @@ struct port_rig
   stm32::board                   board{};
   std::unique_ptr<stm32_fixture> f;
 
-  explicit port_rig(bool controlled = true, bool strict = false)
+  explicit port_rig(bool controlled = true, bool strict = false, std::string_view entry = "idle")
   {
     if(controlled)
     {
@@ -1001,7 +1001,14 @@ struct port_rig
     f    = std::make_unique<stm32_fixture>(l152re(), firmware, std::move(options));
     logs = f->target->add_log_sink(
         [this](core::log_record const& record) { logged.push_back(record); });
-    f->set("pc", sym(firmware, "idle"));
+    if(entry != "idle")
+    {
+      REQUIRE(
+          f->run_to_stop({.max_instructions = icount{1'000'000}, .until = sym(firmware, "main")})
+              .reason
+          == stop_reason::address);
+    }
+    f->set("pc", sym(firmware, entry));
     write(apb1enr, i2c1_bit);
   }
 
@@ -1759,8 +1766,8 @@ TEST_CASE("checklist 31: I2C1RST during the BTF stretch drops the held byte at t
 }
 
 TEST_CASE(
-    "checklist 53: NOSTRETCH, a read, an OAR2, a general call and a 10-bit header warn, "
-    "strict raises")
+    "checklist 53: NOSTRETCH, an OAR2, a general call in either ADDMODE and a 10-bit header "
+    "warn, strict raises")
 {
   struct leg
   {
@@ -1773,9 +1780,9 @@ TEST_CASE(
   };
   for(auto const& [control, own1, own2, to, read, held] : {
           leg{pe | ack_bit | nostretch, std::uint32_t{own} << 1,            0,                   own,  false, true },
-          leg{pe | ack_bit,             std::uint32_t{own} << 1,            0,                   own,  true,  false},
           leg{pe | ack_bit,             std::uint32_t{own} << 1,            0x43u << 1 | endual, 0x43, false, false},
           leg{pe | ack_bit | engc,      std::uint32_t{own} << 1,            0,                   0,    false, false},
+          leg{pe | ack_bit | engc,      1u << 15 | std::uint32_t{own} << 1, 0,                   0,    false, false},
           leg{pe | ack_bit,             1u << 15 | std::uint32_t{own} << 1, 0,                   0x78, false, false},
   })
   {
@@ -1818,7 +1825,9 @@ TEST_CASE(
   }
 }
 
-TEST_CASE("the I2C's own STOP keeps BUSY while a port transfer runs, the port STOP clears it")
+TEST_CASE(
+    "the I2C's own STOP keeps BUSY while a port transfer runs, "
+    "a START set with it goes at the port STOP")
 {
   port_rig const r;
   r.write(i2c1 + ccr, 10);
@@ -1830,11 +1839,296 @@ TEST_CASE("the I2C's own STOP keeps BUSY while a port transfer runs, the port ST
   r.stop(t0 + target_ps + 2 * us, 2);
   r.run_until(t0 + phase(1) + us);
   CHECK(r.read(i2c1 + sr1) == sb);
-  r.cpu_write(i2c1 + cr1, pe | ack_bit | stop);
+  r.cpu_write(i2c1 + cr1, pe | ack_bit | stop | start);
   r.run_until(t0 + 3 * phase(1) + us);
   CHECK(r.read(i2c1 + sr2) == busy);
-  r.run_until(t0 + target_ps + 3 * us);
-  CHECK(r.read(i2c1 + sr2) == 0);
+  r.run_until(t0 + target_ps + 2 * us + phase(1) - us);
+  CHECK(r.read(i2c1 + sr2) == busy);
+  r.run_until(t0 + target_ps + 2 * us + phase(1) + 1);
+  CHECK(r.read(i2c1 + sr1) == sb);
+  CHECK(r.read(i2c1 + sr2) == (msl | busy));
+}
+
+TEST_CASE(
+    "RM0038 26.3.2 EV1 and EV3-1: a read address sets TRA, the ADDR clear sets TxE, SCL waits "
+    "for DR with no BTF, inferred")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.read(true, base, 2);
+  r.run_until(base + target_ps + us);
+  CHECK(r.read(i2c1 + sr1) == addr);
+  CHECK(r.read(i2c1 + sr2) == (tra | busy));
+  auto const cleared = r.now();
+  r.clear_address();
+  CHECK(r.read(i2c1 + sr1) == txe);
+  r.run_until(cleared + 2 * target_ps);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, true, 0xFF, cleared}
+  });
+  CHECK(r.read(i2c1 + sr1) == txe);
+  auto const written = r.now();
+  r.cpu_write(i2c1 + dr, 0xB0);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  r.run_until(written + target_ps + us);
+  CHECK(r.sink->answers.back() == heard{2, on_read, true, 0xB0, written + target_ps});
+  CHECK(r.read(i2c1 + sr1) == (txe | btf));
+}
+
+TEST_CASE(
+    "RM0038 26.3.2 EV3: the second DR write clears TxE, the acknowledge moves DR on and sets TxE")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.run_until(base + target_ps);
+  auto const cleared = r.now();
+  r.clear_address();
+  r.cpu_write(i2c1 + dr, 0xB0);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  r.cpu_write(i2c1 + dr, 0xB1);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  auto const t0 = r.now();
+  r.read(true, t0, 2);
+  r.read(true, t0, 3);
+  r.run_until(t0 + target_ps + us);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  r.cpu_write(i2c1 + dr, 0xB2);
+  r.run_until(t0 + 2 * target_ps + us);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, true, 0xFF, cleared           },
+          {2, on_read,    true, 0xB0, t0 + target_ps    },
+          {3, on_read,    true, 0xB1, t0 + 2 * target_ps},
+  });
+}
+
+TEST_CASE(
+    "RM0038 26.3.2 BTF: an acknowledged byte with DR empty sets BTF, the DR write starts the next")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.run_until(base + target_ps);
+  r.clear_address();
+  r.cpu_write(i2c1 + dr, 0xB0);
+  auto const t0 = r.now();
+  r.read(true, t0, 2);
+  r.read(true, t0, 3);
+  r.run_until(t0 + 3 * target_ps);
+  CHECK(r.read(i2c1 + sr1) == (txe | btf));
+  CHECK(r.sink->answers.size() == 2);
+  auto const t1 = r.now();
+  r.cpu_write(i2c1 + dr, 0xB1);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  r.run_until(t1 + target_ps + us);
+  CHECK(r.sink->answers.back() == heard{3, on_read, true, 0xB1, t1 + target_ps});
+}
+
+TEST_CASE(
+    "RM0038 26.6.6: the controller's NACK sets AF, not TxE nor BTF, and the STOP sets no STOPF")
+{
+  for(auto const nack : {true, false})
+  {
+    CAPTURE(nack);
+    port_rig const r;
+    r.listen();
+    r.write(i2c1 + cr2, freq2 | iterren);
+    auto const base = r.now() + us;
+    r.start(own, true, base, 1);
+    r.run_until(base + target_ps);
+    r.clear_address();
+    r.cpu_write(i2c1 + dr, 0xB0);
+    r.cpu_write(i2c1 + dr, 0xB1);
+    auto const t0 = r.now();
+    r.read(not nack, t0, 2);
+    r.stop(t0 + target_ps + us, 3);
+    r.run_until(t0 + target_ps + us / 2);
+    CHECK(r.read(i2c1 + sr1) == (nack ? af : txe));
+    CHECK(((r.read(nvic_ispr1) & error_irq) != 0) == nack);
+    r.run_until(t0 + target_ps + 2 * us);
+    CHECK(r.read(i2c1 + sr1) == (nack ? af : stopf));
+    CHECK(r.read(i2c1 + sr2) == 0);
+    r.cpu_write(i2c1 + sr1, 0);
+    CHECK((r.read(i2c1 + sr1) & af) == 0);
+  }
+}
+
+TEST_CASE("RM0038 26.6.6 TxE: a DR write after the controller's NACK clears TxE and sends nothing")
+{
+  port_rig const r;
+  r.listen();
+  r.write(i2c1 + cr2, freq2 | itevten | itbufen);
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.run_until(base + target_ps);
+  auto const cleared = r.now();
+  r.clear_address();
+  r.cpu_write(i2c1 + dr, 0xB0);
+  auto const t0 = r.now();
+  r.read(false, t0, 2);
+  r.read(true, t0 + target_ps + us, 3);
+  r.stop(t0 + 2 * target_ps + 2 * us, 4);
+  r.run_until(t0 + target_ps + us / 2);
+  CHECK(r.read(i2c1 + sr1) == (af | txe));
+  r.write(nvic_ispr0 + 0x80, event_irq);
+  CHECK((r.read(nvic_ispr0) & event_irq) != 0);
+  r.cpu_write(i2c1 + dr, 0xB1);
+  CHECK(r.read(i2c1 + sr1) == af);
+  r.write(nvic_ispr0 + 0x80, event_irq);
+  CHECK((r.read(nvic_ispr0) & event_irq) == 0);
+  r.run_until(t0 + 2 * target_ps + 3 * us);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, true,  0xFF, cleared                },
+          {2, on_read,    false, 0xB0, t0 + target_ps         },
+          {3, on_read,    true,  0xFF, t0 + 2 * target_ps + us},
+  });
+}
+
+TEST_CASE("RM0038 26.6.7 TRA: a repeated START ends the transmission, TxE and BTF cleared")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.run_until(base + target_ps);
+  r.clear_address();
+  r.cpu_write(i2c1 + dr, 0xB0);
+  auto const t0 = r.now();
+  r.read(true, t0, 2);
+  r.run_until(t0 + target_ps + us);
+  CHECK(r.read(i2c1 + sr1) == (txe | btf));
+  r.start(own, false, r.now(), 3);
+  r.run_until(r.now() + us);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == busy);
+  r.run_until(r.now() + target_ps);
+  CHECK(r.read(i2c1 + sr1) == addr);
+  CHECK(r.read(i2c1 + sr2) == busy);
+}
+
+TEST_CASE(
+    "PE 0 during a read held for DR, which RM0038 26.6.1 ends at the end of the communication: "
+    "popcorn sends it at once as 0xFF until 12b1b")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.run_until(base + target_ps);
+  auto const cleared = r.now();
+  r.clear_address();
+  auto const t0 = r.now();
+  r.read(true, t0, 2);
+  r.read(true, t0, 3);
+  r.run_until(t0 + target_ps);
+  CHECK(r.sink->answers.size() == 1);
+  auto const t1 = r.now();
+  r.cpu_write(i2c1 + cr1, ack_bit);
+  r.run_until(t1 + 2 * target_ps + us);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, true, 0xFF, cleared           },
+          {2, on_read,    true, 0xFF, t1 + target_ps    },
+          {3, on_read,    true, 0xFF, t1 + 2 * target_ps},
+  });
+}
+
+TEST_CASE(
+    "a read held for DR at I2C1RST drops a phase after the reset, at a machine reset "
+    "a phase after 0")
+{
+  for(auto const machine : {false, true})
+  {
+    CAPTURE(machine);
+    port_rig const r;
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(own, true, base, 1);
+    r.run_until(base + target_ps);
+    r.clear_address();
+    auto const t0 = r.now();
+    r.read(true, t0, 2);
+    r.run_until(t0 + target_ps);
+    auto const at_reset = r.now();
+    if(machine)
+    {
+      r.f->target->reset(popcorn::reset_kind::software);
+    }
+    else
+    {
+      r.rcc_pulse();
+    }
+    r.run_until(machine ? 2 * target_ps : at_reset + 2 * target_ps);
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {2, on_read, machine ? target_ps : at_reset + target_ps}
+    });
+  }
+}
+
+TEST_CASE("a snapshot while a read waits for DR restores the wait, the DR write sends it")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.run_until(base + target_ps);
+  r.clear_address();
+  auto const t0 = r.now();
+  r.read(true, t0, 2);
+  r.run_until(t0 + target_ps);
+  auto const     saved = r.f->target->snapshot();
+  port_rig const other;
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  for(auto const* one : {&r, &other})
+  {
+    CHECK(one->read(i2c1 + sr1) == txe);
+    auto const t1 = one->now();
+    one->cpu_write(i2c1 + dr, 0xB0);
+    one->run_until(t1 + target_ps + us);
+    REQUIRE(not one->sink->answers.empty());
+    CHECK(one->sink->answers.back() == heard{2, on_read, true, 0xB0, t1 + target_ps});
+  }
+}
+
+TEST_CASE(
+    "HAL_I2C_Slave_Receive twice: a write NACKed between the calls, ACK 0, the next acknowledged")
+{
+  port_rig const r{true, false, "hal_slave"};
+  auto const     ms   = 1000 * us;
+  auto const     base = r.now() + ms;
+  r.start(own, false, base, 1);
+  r.write(0x11, base, 2);
+  r.write(0x22, base, 3);
+  r.stop(base + 3 * target_ps + 50 * us, 4);
+  auto const gap = base + 3 * target_ps + ms;
+  r.start(own, false, gap, 5);
+  r.stop(gap + target_ps + 10 * us, 6);
+  auto const late = gap + 3 * ms;
+  r.start(own, false, late, 7);
+  r.write(0x33, late, 8);
+  r.write(0x44, late, 9);
+  r.stop(late + 3 * target_ps + 50 * us, 10);
+  static_cast<void>(r.f->run_to_stop(
+      {.max_instructions = icount{1'000'000'000}, .until_time = vtime{late + 30 * ms}}));
+  CHECK(r.f->log() == std::vector<std::uint32_t>{0, 0x11, 0x22, 0, 0x33, 0x44});
+  REQUIRE(r.sink->answers.size() == 7);
+  CHECK(r.sink->answers[3] == heard{5, on_address, false, 0xFF, gap + target_ps});
+  CHECK(r.sink->answers[4].ack);
 }
 
 TEST_CASE("RM0038 Table 139: ADDR and STOPF raise the event line with ITEVTEN, RxNE with ITBUFEN")

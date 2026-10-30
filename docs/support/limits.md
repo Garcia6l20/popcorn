@@ -476,18 +476,23 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   and NOSTRETCH are stored.
 - A `board.i2c_controllers` controller, alone on the instance, queues phases through
   `i2c_controller_port` with the placement, unit order, STOP, drop, reset and snapshot rules of
-  the STM32U5 I2C with a board controller. A read byte answers 0xFF.
-- Target receiver, RM0038 26.3.2: an OAR1 7-bit match with CR1.ACK 1 sets ADDR with TRA 0 and
-  holds SCL until the SR1 then SR2 read. Address 0 never matches OAR1. Written bytes land in DR
-  with RxNE, CR1.ACK read at the end of the byte's phase, the acknowledge period included. A byte
-  ending with RxNE 1 sets BTF and holds SCL until the DR read. BUSY follows the port's START and
-  STOP with PE 0 too. A STOP sets STOPF after an acknowledged address or byte, none after a byte
-  the I2C NACKed. Inferred: a match with CR1.ACK 0 answers NACK at the address end with no ADDR,
-  and an SR1 read before STOPF sets arms its clear by a CR1 write. A firmware START waits for the
-  port's STOP. PE 0 releases a held phase at once with its acknowledge, and later phases answer
-  NACK. NOSTRETCH at an OAR1 match, a read address, an OAR2 address with ENDUAL, address 0 with
-  ENGC and a 10-bit header with ADDMODE 1 log one `model_warning`, raise `model_error` under
-  `strict_peripherals` at the address phase, and the last four answer NACK.
+  the STM32U5 I2C with a board controller.
+- Target receiver and transmitter, RM0038 26.3.2: an OAR1 7-bit match with CR1.ACK 1 sets ADDR with
+  TRA as the R/W bit and holds SCL until the SR1 then SR2 read. Address 0 never matches OAR1.
+  Written bytes land in DR with RxNE, CR1.ACK read at the end of the byte's phase, the acknowledge
+  period included. A byte ending with RxNE 1 sets BTF and holds SCL until the DR read. A read byte
+  sends the shift register, which the first DR write after the ADDR clear loads with TxE kept 1, and
+  waits for that write. The acknowledge of a read byte moves a full DR on and sets TxE, and with DR
+  empty BTF sets at the byte's end, RM0038 26.3.2. The controller's NACK sets AF, and a DR write
+  after it clears TxE and sends nothing. BUSY follows the port's START and STOP with PE 0 too. A
+  STOP sets STOPF after an acknowledged address or byte, none after a NACKed byte. Inferred: a match
+  with CR1.ACK 0 answers NACK at the address end with no ADDR, an SR1 read before STOPF sets arms
+  its clear by a CR1 write, and the first read byte after the ADDR clear sets no BTF. A firmware
+  START waits for the port's STOP. PE 0 releases a held phase at once with its acknowledge, starts a
+  held read byte as 0xFF, and later phases answer NACK or 0xFF. NOSTRETCH at an OAR1 match, an OAR2
+  address with ENDUAL, address 0 with ENGC and a 10-bit header with ADDMODE 1 log one
+  `model_warning`, raise `model_error` under `strict_peripherals` at the address phase, and the last
+  three answer NACK.
 - The controller receiver decides a byte's acknowledge at the end of its eighth period, before
   the acknowledge pulse, from CR1.ACK, an ACK write inside the eighth period counting, as RM0038
   Figure 213 note 4 states. An ACK write during the acknowledge pulse counts for the next byte,

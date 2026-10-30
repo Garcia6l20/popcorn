@@ -10,6 +10,15 @@
 
 static I2C_HandleTypeDef i2c;
 static uint8_t const     pattern[] = {0xA1u, 0xB2u, 0xC3u};
+static uint8_t           next_tx;
+
+#define TARGET_OWN       0x42u
+#define TARGET_ADDRESS   0xADD00000u
+#define TARGET_STOP      0x5709u
+#define TARGET_DATA      0xDA7A0000u
+#define TARGET_NACK_NEXT 0xEEu
+#define TARGET_TX_FIRST  0xB0u
+#define TARGET_NACKED    0x4AC0u
 
 void idle(void);
 void write_eeprom(void);
@@ -22,7 +31,11 @@ void hal_read_two(void);
 void hal_read_three(void);
 void hal_read_none(void);
 void hal_ready(void);
+void hal_slave(void);
 void SysTick_Handler(void);
+void target(void);
+void I2C1_EV_IRQHandler(void);
+void I2C1_ER_IRQHandler(void);
 
 void SysTick_Handler(void)
 {
@@ -184,14 +197,14 @@ void read_four(void)
   DONE();
 }
 
-static void hal_setup(void)
+static void hal_setup_own(uint32_t own)
 {
   HAL_Init();
   __HAL_RCC_I2C1_CLK_ENABLE();
   i2c.Instance             = I2C1;
   i2c.Init.ClockSpeed      = 100000u;
   i2c.Init.DutyCycle       = I2C_DUTYCYCLE_2;
-  i2c.Init.OwnAddress1     = 0u;
+  i2c.Init.OwnAddress1     = own;
   i2c.Init.AddressingMode  = I2C_ADDRESSINGMODE_7BIT;
   i2c.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
   i2c.Init.OwnAddress2     = 0u;
@@ -201,6 +214,11 @@ static void hal_setup(void)
   {
     FAIL(10);
   }
+}
+
+static void hal_setup(void)
+{
+  hal_setup_own(0u);
 }
 
 static void hal_mem_read(uint16_t size)
@@ -277,6 +295,20 @@ void hal_read_none(void)
   DONE();
 }
 
+void hal_slave(void)
+{
+  uint8_t got[2] = {0};
+  hal_setup_own(TARGET_OWN << 1);
+  for(uint32_t call = 0; call < 2u; ++call)
+  {
+    LOG(HAL_I2C_Slave_Receive(&i2c, got, 2u, 20u));
+    LOG(got[0]);
+    LOG(got[1]);
+    HAL_Delay(2u);
+  }
+  DONE();
+}
+
 void hal_ready(void)
 {
   hal_setup();
@@ -289,6 +321,63 @@ void hal_ready(void)
   LOG(I2C1->SR1);
   LOG(I2C1->SR2);
   DONE();
+}
+
+void I2C1_EV_IRQHandler(void)
+{
+  uint32_t const status = I2C1->SR1;
+  if(status & I2C_SR1_ADDR)
+  {
+    uint32_t const transmit = I2C1->SR2 & I2C_SR2_TRA;
+    LOG(TARGET_ADDRESS | (TARGET_OWN << 1) | (transmit ? 1u : 0u));
+    next_tx = TARGET_TX_FIRST;
+    if(transmit)
+    {
+      LL_I2C_TransmitData8(I2C1, next_tx++);
+    }
+  }
+  else if((status & I2C_SR1_TXE) && (I2C1->SR2 & I2C_SR2_TRA))
+  {
+    LL_I2C_TransmitData8(I2C1, next_tx++);
+  }
+  if(status & I2C_SR1_RXNE)
+  {
+    uint8_t const byte = LL_I2C_ReceiveData8(I2C1);
+    LOG(TARGET_DATA | byte);
+    LL_I2C_AcknowledgeNextData(I2C1, byte == TARGET_NACK_NEXT ? LL_I2C_NACK : LL_I2C_ACK);
+  }
+  if(status & I2C_SR1_STOPF)
+  {
+    LOG(TARGET_STOP);
+    LL_I2C_Enable(I2C1);
+  }
+}
+
+void I2C1_ER_IRQHandler(void)
+{
+  if(LL_I2C_IsActiveFlag_AF(I2C1))
+  {
+    LOG(TARGET_NACKED);
+    LL_I2C_ClearFlag_AF(I2C1);
+  }
+}
+
+void target(void)
+{
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_I2C1);
+  LL_I2C_SetPeriphClock(I2C1, PCLK1_HZ);
+  LL_I2C_SetOwnAddress1(I2C1, TARGET_OWN << 1, LL_I2C_OWNADDRESS1_7BIT);
+  LL_I2C_EnableIT_EVT(I2C1);
+  LL_I2C_EnableIT_BUF(I2C1);
+  LL_I2C_EnableIT_ERR(I2C1);
+  NVIC_EnableIRQ(I2C1_EV_IRQn);
+  NVIC_EnableIRQ(I2C1_ER_IRQn);
+  LL_I2C_Enable(I2C1);
+  LL_I2C_AcknowledgeNextData(I2C1, LL_I2C_ACK);
+  for(;;)
+  {
+    __WFI();
+  }
 }
 
 int main(void)

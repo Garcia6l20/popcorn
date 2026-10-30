@@ -1,5 +1,5 @@
 """popcorn.board.I2CController: a host controller addressing an I2C the firmware runs in target
-mode, on the U575 and the H573."""
+mode, on the U575, the H573 and the L152RE."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from popcorn import ConfigError, StopReason
 from popcorn._refs import Pending
 from popcorn.board import I2CAnswer, I2CController, I2CPhase, I2CTarget
 from popcorn.pytest._cache import devices_digest
-from popcorn.units import VirtualDuration, VirtualTime, ms, us
+from popcorn.units import VirtualDuration, VirtualTime, ms, ps, us
 
 from .conftest import run_bounded, stall, stalled
 from .test_host_binding import COLLECTED
@@ -31,6 +31,9 @@ WRITE_LOG = [0xADD00084, 0xDA7A0011, 0xDA7A00EE, 0xDA7A0022, 0x5709]
 READ_LOG = [0xADD00085, 0x4AC0, 0x5709]
 WRITE_ACKS = [True, True, True, False]
 READ_BYTES = [0xB0, 0xB1, 0xB2]
+L152RE_TRACED_ADDR_CLEAR = ps(10_149_383)
+L152RE_MSI_INSTRUCTION = ps(476_837)
+L152RE_ADDR_CLEAR_BLOCK = L152RE_MSI_INSTRUCTION * 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +41,9 @@ class Part:
     description: popcorn.PartDescription
     elf: Path
     reset_register: str
+    write_log: list[int]
+    read_log: list[int]
+    address_clear: VirtualDuration
 
     def machine(self, device: object) -> popcorn.Machine:
         """A machine of this part with `device` on I2C1, the target firmware listening."""
@@ -61,8 +67,23 @@ class Part:
 
 
 PARTS = {
-    "u575": ("STM32U575QGIx", PREBUILT / "i2c_ll.elf", "APB1RSTR1"),
-    "h573": ("STM32H573AIIx", PREBUILT / "h573" / "i2c_ll.elf", "APB1LRSTR"),
+    "u575": ("STM32U575QGIx", PREBUILT / "i2c_ll.elf", "APB1RSTR1", WRITE_LOG, READ_LOG, us(10)),
+    "h573": (
+        "STM32H573AIIx",
+        PREBUILT / "h573" / "i2c_ll.elf",
+        "APB1LRSTR",
+        WRITE_LOG,
+        READ_LOG,
+        us(10),
+    ),
+    "l152re": (
+        "STM32L152RETx",
+        PREBUILT / "l152xe" / "l1_i2c_ll.elf",
+        "APB1RSTR",
+        WRITE_LOG[:-1],
+        READ_LOG[:-1],
+        L152RE_TRACED_ADDR_CLEAR + L152RE_ADDR_CLEAR_BLOCK,
+    ),
 }
 
 
@@ -72,9 +93,9 @@ def part(request: pytest.FixtureRequest) -> Part:
     from popcorn.stm32 import mcu
     from popcorn.stm32.description import DescriptionError
 
-    name, elf, reset_register = PARTS[str(request.param)]
+    name, elf, reset_register, write_log, read_log, address_clear = PARTS[str(request.param)]
     try:
-        return Part(mcu(name), elf, reset_register)
+        return Part(mcu(name), elf, reset_register, write_log, read_log, address_clear)
     except DescriptionError as error:
         pytest.skip(f"no {name} description: {error}")
 
@@ -129,10 +150,10 @@ def test_a_controller_writes_and_reads_the_target_firmware(part: Part) -> None:
         base + PHASE * 4 + us(100)
     ] + [base + PHASE * 4 + us(110)] * 2 + [base + PHASE * 8 + us(210)]
     asyncio.run(m.run(for_=ms(2)))
-    assert log(m) == WRITE_LOG + READ_LOG
+    assert log(m) == part.write_log + part.read_log
     check_answers(device.answers)
     assert device.answers[0].at > base + PHASE
-    assert device.answers[0].at < base + PHASE + us(10)
+    assert device.answers[0].at < base + PHASE + part.address_clear
     assert m.pending_events == events
 
 
@@ -161,7 +182,7 @@ def test_a_transaction_is_alike_parked_and_running(part: Part) -> None:
             await m.wait_until(lambda m: log(m) == parked_log, for_=ms(1))
 
     run_bounded(body(), 10)
-    assert log(m) == parked_log == WRITE_LOG + READ_LOG
+    assert log(m) == parked_log == part.write_log + part.read_log
     assert running.answers == parked.answers
     check_answers(running.answers)
 
@@ -396,7 +417,7 @@ def test_a_controller_on_an_spi_serving_no_machine_or_another_is_refused(part: P
     base = second.time + us(10)
     asyncio.run(gathered(transactions(device, base)))
     asyncio.run(second.run(for_=ms(2)))
-    assert log(second) == WRITE_LOG + READ_LOG
+    assert log(second) == part.write_log + part.read_log
 
 
 def test_a_project_wires_a_controller_and_keys_it_by_its_class(part: Part) -> None:

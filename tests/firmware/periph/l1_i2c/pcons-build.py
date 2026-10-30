@@ -38,6 +38,8 @@ for chipset in (STM32L152XE, STM32L152XB):
             "hal_read_two",
             "hal_read_three",
             "hal_read_none",
+            "target",
+            "hal_slave",
             "hal_ready",
         ],
         chipset=chipset,
