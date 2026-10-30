@@ -331,6 +331,18 @@ for _, target in firmwares.values():
     if target is not None:
         spi_medium.depends(target)
 
+i2c_medium = add_doctest(
+    "stm32-i2c-medium",
+    [here / "test_i2c_medium.cpp"],
+    static_with_devices,
+    env=u575_env,
+    register=u575 is not None,
+)
+i2c_medium.private.include_dirs.append(private_dir)
+for _, target in firmwares.values():
+    if target is not None:
+        i2c_medium.depends(target)
+
 if u575 is not None:
     bench_system = project.Program(
         "bench-system", project.default_environment, sources=[here / "bench_system.cpp"]

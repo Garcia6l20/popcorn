@@ -255,6 +255,10 @@ struct i2c_timer
   std::uint64_t                b_from_ps{};
   std::optional<std::uint64_t> armed_ps;
   std::uint64_t                seq{};
+  std::optional<std::uint64_t> gap_ps;
+  std::uint64_t                gap_unit{};
+  std::optional<std::uint64_t> released_ps;
+  std::uint64_t                released_unit{};
 
   friend auto operator==(i2c_timer const&, i2c_timer const&) -> bool = default;
 };
@@ -290,6 +294,7 @@ struct i2c_state
   std::uint8_t                        rx_held{};
   std::uint8_t                        rx_data{};
   std::uint64_t                       end_ps{};
+  std::uint64_t                       phase_ps{};
   std::uint32_t                       holds{};
   i2c_hold                            pending{};
   std::uint8_t                        pending_waits{};
@@ -488,24 +493,32 @@ auto lower(std::string_view name) -> std::string
  *        TIDLE clear, TIMEOUT sets once SCL has been low for (TIMEOUTA + 1) x 2048 kernel periods,
  *        counted from the later of the SCL fall and the TIMOUTEN set. As a controller SCL is low
  *        from the end of an address or data phase to the start of the next phase or STOP, a
- *        target's stretch and the TXIS, RXNE, TCR and TC waits included. As a target SCL is low
- *        while the I2C stretches it, from the stretch start to its release: the port carries no
- *        SCL level between the controller's phases. With TIMOUTEN and TIDLE set, TIMEOUT sets once
- *        the bus has been idle, PE set and BUSY 0, for (TIMEOUTA + 1) x 4 kernel periods, once per
- *        idle period, which starts at the end of the STOP or of the host hold that frees the bus,
- *        or at the PE set. With TEXTEN set, TIMEOUT sets once the I2C's own stretches of one
- *        transfer, START to STOP, add up to (TIMEOUTB + 1) x 2048 kernel periods, each counted
- *        from the later of its start and the TEXTEN set: the waits as a controller, each starting
- *        once the target's stretch before it ends, the held phases as a target. The sum
- *        restarts at 0 then, at each STOP and at each TEXTEN set. A timeout of SCL low or of the
- *        stretch sum ends the transfer. As a controller the I2C sends a STOP, at once or after
- *        the stretch of the target when one runs. As a target it releases its stretch as PE = 0
- *        does, an ADDR stretch with ACK, a written byte with NACK and a held read byte as 0xFF,
- *        and leaves the transfer: later phases answer NACK or 0xFF until the next address
- *        match. TIMEOUT raises the error IRQ with ERRIE and is cleared by TIMOUTCF and by PE = 0.
- *        While TIMOUTEN is set TIMEOUTR keeps TIMEOUTA and TIDLE, and while TEXTEN is set it
- *        keeps TIMEOUTB, RM0456 65.9.6, RM0481 53.9.6: one warning per instance, model_error
- *        under strict_peripherals. The timer state is saved with the model.
+ *        target's stretch and the TXIS, RXNE, TCR and TC waits included. As a target addressed by
+ *        the last address phase of the controller's transfer, SCL is low from the end of an address
+ *        or data phase to the start of the next phase or STOP the port holds, the I2C's own stretch
+ *        included. A target the last address phase did not match counts no SCL low between the
+ *        controller's phases, for a board controller and a remote one alike, where silicon measures
+ *        SCL on the line whatever the address. A phase or STOP queued with a start at or before the
+ *        timeout's instant releases SCL in time, and so does a release of the bus by the remote
+ *        controller at an RCC reset or a PE clear of its I2C, i2c_link_port::bus_released(), which
+ *        an RCC reset of the target keeps. The system holds every event due at or past a barrier
+ *        until the drains of that barrier ran, so a post a drain hands late is in the port before
+ *        the timeout of its window fires. With TIMOUTEN and TIDLE set, TIMEOUT sets once the bus
+ *        has been idle, PE set and BUSY 0, for (TIMEOUTA + 1) x 4 kernel periods, once per idle
+ *        period, which starts at the end of the STOP or of the host hold that frees the bus, or at
+ *        the PE set. With TEXTEN set, TIMEOUT sets once the I2C's own stretches of one transfer,
+ *        START to STOP, add up to (TIMEOUTB + 1) x 2048 kernel periods, each counted from the later
+ *        of its start and the TEXTEN set: the waits as a controller, each starting once the
+ *        target's stretch before it ends, the held phases as a target. The sum restarts at 0 then,
+ *        at each STOP and at each TEXTEN set. A timeout of SCL low or of the stretch sum ends the
+ *        transfer. As a controller the I2C sends a STOP, at once or after the stretch of the target
+ *        when one runs. As a target it releases its stretch as PE = 0 does, an ADDR stretch with
+ *        ACK, a written byte with NACK and a held read byte as 0xFF, and leaves the transfer: later
+ *        phases answer NACK or 0xFF until the next address match. TIMEOUT raises the error IRQ with
+ *        ERRIE and is cleared by TIMOUTCF and by PE = 0. While TIMOUTEN is set TIMEOUTR keeps
+ *        TIMEOUTA and TIDLE, and while TEXTEN is set it keeps TIMEOUTB, RM0456 65.9.6, RM0481
+ *        53.9.6: one warning per instance, model_error under strict_peripherals. The timer state is
+ *        saved with the model.
  */
 class i2c final : public dispatch_model<i2c, i2c_state>,
                   public i2c_bus,
@@ -574,6 +587,8 @@ public:
   void mute(i2c_link_target const& target) override;
   void unmute(i2c_link_target const& target) override;
   auto muted(i2c_link_target const& target) const -> bool override;
+  auto phase_time() const -> std::uint64_t override;
+  void bus_released(vtime at, std::uint64_t unit) override;
 
   void enable_written(std::uint32_t old, std::uint32_t now);
   void command_written(std::uint32_t old, std::uint32_t now);
@@ -610,6 +625,7 @@ private:
   void               stop_on_timeout(std::uint64_t from_ps);
   void               stop_done();
   void               stop_targets(vtime at);
+  void               release_links();
   void               lost_done();
   void               hold_begun();
   void               hold_ended(std::uint32_t id);
@@ -985,7 +1001,8 @@ void i2c::begin(phase next, std::uint32_t periods, std::uint64_t from_ps)
   }
   enter(next);
   ++state_.generation;
-  auto const ps = length_ps(periods);
+  auto const ps   = length_ps(periods);
+  state_.phase_ps = ps;
   if(ps == 0)
   {
     return;
@@ -1554,6 +1571,7 @@ void i2c::abort()
   transfer_ended();
   state_.timer.idle_ps.reset();
   state_.timer.idle_spent = 0;
+  state_.timer.gap_ps.reset();
   ++state_.generation;
   auto const lost = step() == phase::lost;
   enter(phase::idle);
@@ -1563,6 +1581,10 @@ void i2c::abort()
   if(lost)
   {
     stop_targets(vtime{ctx_.clock.since_power_on().ps});
+  }
+  else
+  {
+    release_links();
   }
   state_.targets.clear();
   state_.addressed = 0;
@@ -1589,6 +1611,7 @@ void i2c::reset(register_file&, reset_kind kind)
 void i2c::on_bus_reset()
 {
   restore_reset_values(std::nullopt);
+  release_links();
 }
 
 void i2c::restore_reset_values(std::optional<reset_kind> kind)
@@ -1601,16 +1624,19 @@ void i2c::restore_reset_values(std::optional<reset_kind> kind)
   {
     regs_.poke(reg(name).offset, describe(name).reset);
   }
-  auto const generation  = state_.generation + 1;
-  auto const holds       = state_.holds;
-  auto       port        = std::move(state_.port);
-  auto       completions = kind ? std::vector<i2c_completion>{} : std::move(state_.completions);
-  auto const refused     = state_.refused;
-  state_                 = {};
-  state_.generation      = generation;
-  state_.holds           = holds;
-  state_.completions     = std::move(completions);
-  state_.refused         = refused;
+  auto const generation      = state_.generation + 1;
+  auto const holds           = state_.holds;
+  auto       port            = std::move(state_.port);
+  auto       completions     = kind ? std::vector<i2c_completion>{} : std::move(state_.completions);
+  auto const refused         = state_.refused;
+  auto const released        = kind ? i2c_timer{} : state_.timer;
+  state_                     = {};
+  state_.generation          = generation;
+  state_.holds               = holds;
+  state_.completions         = std::move(completions);
+  state_.refused             = refused;
+  state_.timer.released_ps   = released.released_ps;
+  state_.timer.released_unit = released.released_unit;
   rearm_port(std::move(port), kind);
   tx_dma_.resolve();
   rx_dma_.resolve();
@@ -2022,6 +2048,7 @@ void i2c::run_port(std::uint32_t lane)
     switch(entry.kind)
     {
       case entry_phase:
+        state_.timer.gap_ps.reset();
         phase_begun(entry);
         if(phase == i2c_phase::read and not read_begun(entries[*pick]))
         {
@@ -2037,6 +2064,11 @@ void i2c::run_port(std::uint32_t lane)
       case entry_ending:
       {
         auto const answer = phase_ended(entry);
+        if(state_.addressed != 0)
+        {
+          state_.timer.gap_ps   = entry.due_ps;
+          state_.timer.gap_unit = entry.unit;
+        }
         if(not answer)
         {
           state_.port.entries[*pick].kind = entry_held;
@@ -2421,6 +2453,8 @@ void i2c::target_transfer_ended(std::uint64_t at_ps)
   state_.addressed = 0;
   state_.involved  = 0;
   state_.wire_busy = 0;
+  state_.timer.gap_ps.reset();
+  state_.timer.released_ps.reset();
   if(waited and enabled() and step() == phase::idle and get(regs_, start_) != 0 and not held())
   {
     begin_start(ctx_.clock.time().ps);
@@ -2647,6 +2681,28 @@ auto i2c::muted(i2c_link_target const& target) const -> bool
   return link_of(target).muted;
 }
 
+auto i2c::phase_time() const -> std::uint64_t
+{
+  return state_.phase_ps;
+}
+
+void i2c::bus_released(vtime at, std::uint64_t unit)
+{
+  auto& timer         = state_.timer;
+  timer.released_ps   = at.ps;
+  timer.released_unit = unit;
+  arm_timeout();
+}
+
+void i2c::release_links()
+{
+  auto const at = vtime{ctx_.clock.since_power_on().ps};
+  for(auto const& link : links_)
+  {
+    link.device->bus_released(at);
+  }
+}
+
 void i2c::warn_target_unsupported()
 {
   auto const ten_bit = get(regs_, own1_enable_) != 0 and get(regs_, own1_mode_) != 0;
@@ -2715,6 +2771,21 @@ auto i2c::expiry_due() const -> std::optional<i2c_expiry>
       if(held)
       {
         keep(std::max(*held, timer.a_from_ps) + *length, expiry::low);
+      }
+      else if(timer.gap_ps)
+      {
+        auto const at       = std::max(*timer.gap_ps, timer.a_from_ps) + *length;
+        auto const released = timer.released_ps
+                          and timer.gap_unit <= timer.released_unit
+                          and *timer.released_ps <= at;
+        auto const rose =
+            released or std::ranges::any_of(state_.port.entries, [at](auto const& entry) {
+              return (entry.kind == entry_phase or entry.kind == entry_stop) and entry.due_ps <= at;
+            });
+        if(not rose)
+        {
+          keep(at, expiry::low);
+        }
       }
       else if(timer.low_ps)
       {
@@ -2825,6 +2896,13 @@ void i2c::timed_out()
     }
     state_.addressed = 0;
     state_.tx        = {.ask = state_.tx.ask};
+    timer.gap_ps.reset();
+  }
+  else if(timer.gap_ps)
+  {
+    state_.addressed = 0;
+    state_.tx        = {.ask = state_.tx.ask};
+    timer.gap_ps.reset();
   }
   else if(state_.owed != 0)
   {
@@ -3136,6 +3214,9 @@ void i2c::load(std::span<std::byte const> in)
   state_.devices.clear();
 }
 }
+
+void i2c_link_target::bus_released(vtime)
+{}
 
 i2c_link_target::~i2c_link_target()         = default;
 i2c_link_controller::~i2c_link_controller() = default;

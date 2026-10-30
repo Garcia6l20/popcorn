@@ -6,9 +6,20 @@ here = Path(__file__).resolve().parent
 
 add_ll_firmware(
     "i2c_ll",
-    [here / "i2c_ll.c", here / "i2c_target.c"],
+    [here / "i2c_ll.c", here / "i2c_target.c", here / "i2c_link.c"],
     ["i2c"],
-    ["idle", "eeprom_rw", "nack", "table", "reload", "dma", "errors", "read_errors", "target"],
+    [
+        "idle",
+        "eeprom_rw",
+        "nack",
+        "table",
+        "reload",
+        "dma",
+        "errors",
+        "read_errors",
+        "target",
+        "link_run",
+    ],
 )
 add_ll_firmware(
     "i2c_ll",

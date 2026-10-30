@@ -4,6 +4,7 @@
 #include <popcorn/export.hpp>
 #include <popcorn/periph/i2c.hpp>
 
+#include <cstdint>
 #include <memory>
 
 namespace popcorn::periph::stm32
@@ -33,6 +34,14 @@ public:
    *        `since_power_on() - time()`.
    */
   virtual void linked(i2c_link_port& port, core::clock const& clock) = 0;
+
+  /**
+   * @brief The instance released SCL and SDA inside a transfer, at an RCC reset of its I2C or a
+   *        PE clear, with no STOP. A proxy tells its remote target, whose SCL low count ends
+   *        there. The default does nothing.
+   * @param at Time since power-on of the release.
+   */
+  virtual void bus_released(vtime at);
 
   /** @brief Destroys the target. */
   ~i2c_link_target() override;
@@ -139,6 +148,26 @@ public:
    * @throws std::invalid_argument When @p target is not attached.
    */
   [[nodiscard]] virtual auto muted(i2c_link_target const& target) const -> bool = 0;
+
+  /**
+   * @brief Length of the controller's current phase as it runs, from the kernel clock and
+   *        TIMINGR read at its start, so a TIMINGR write during the phase leaves it unchanged.
+   *        Read from i2c_target::start_deferred(), i2c_target::write_deferred() and
+   *        i2c_target::read_deferred(), it is the length of the phase they answer.
+   * @return Picoseconds, 0 while the kernel clock is stopped.
+   */
+  [[nodiscard]] virtual auto phase_time() const -> std::uint64_t = 0;
+
+  /**
+   * @brief The remote controller released SCL at @p at, after its phases up to unit @p unit,
+   *        called at a drain by a target-side link. The SCL low after a phase of unit @p unit or
+   *        below ends at @p at, so it times out only at an instant before @p at. The I2C keeps
+   *        BUSY and the transfer, as the release carries no STOP, keeps the release across an RCC
+   *        reset of the instance and forgets it at the transfer's end or a machine reset.
+   * @param at Time of the release in the machine's time base, the far-side time of the post.
+   * @param unit Unit of the last phase the controller posted before the release.
+   */
+  virtual void bus_released(vtime at, std::uint64_t unit) = 0;
 
 protected:
   /** @brief Destroyed through its model only. */

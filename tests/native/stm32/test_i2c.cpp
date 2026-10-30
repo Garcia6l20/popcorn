@@ -5290,6 +5290,40 @@ TEST_CASE("a target stretch past TIMEOUTA releases SCL as PE clear does and leav
   }
 }
 
+TEST_CASE(
+    "a target counts SCL low between the controller's phases, a phase due by then releases it")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(auto const late : {false, true})
+    {
+      CAPTURE(late);
+      target_rig r{part};
+      r.listen();
+      target_timeout(r, timoutens);
+      auto const limit = target_cycles(r, 2048);
+      auto const base  = r.now() + us;
+      auto const fall  = base + target_ps;
+      auto const next  = fall + limit + (late ? r.period() : 0);
+      r.start(own, false, base, 1);
+      r.write(0x11, next, 2);
+      r.stop(next + target_ps + us, 3);
+      r.run_until(fall + limit - us);
+      CHECK(
+          timeout_events(*r.f)
+          == (late ? std::vector<std::uint64_t>{fall + limit} : std::vector<std::uint64_t>{}));
+      r.run_until(next + target_ps + 2 * us);
+      CHECK(r.get("ISR", "TIMEOUT") == (late ? 1u : 0u));
+      REQUIRE(r.sink->answers.size() == 2);
+      CHECK(r.sink->answers[0] == heard{1, on_address, true, 0xFF, fall});
+      CHECK(r.sink->answers[1].ack == not late);
+      CHECK(r.sink->answers[1].at == next + target_ps);
+      CHECK(r.sink->drops.empty());
+    }
+  }
+}
+
 TEST_CASE("TEXTEN sums a target's stretches of one transfer, each released before the limit")
 {
   for(auto const& part : target_parts)
@@ -7378,6 +7412,79 @@ TEST_CASE("an I2C link controller drives the target, and after a detach its unit
       link_port(*r.f).detach_controller(*sink);
       CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.last_unit") == 0);
       std::ignore = r.b().receive();
+    }
+  }
+}
+
+TEST_CASE("a bus release ends a link target's SCL low count until the transfer ends")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part, false, false};
+    r.listen();
+    target_timeout(r, timoutens);
+    auto const limit = target_cycles(r, 2048);
+    for(auto const released : {true, false})
+    {
+      CAPTURE(released);
+      auto const sink = std::make_shared<i2c_link_sink>();
+      link_port(*r.f).attach_controller(sink);
+      auto const t    = r.now() + us;
+      auto const fall = t + target_ps;
+      sink->port->start(own, false, target_ps, vtime{t}, wire, 1);
+      if(released)
+      {
+        link_port(*r.f).bus_released(vtime{fall + us}, 1);
+      }
+      r.run_until(fall + limit - us);
+      CHECK(
+          timeout_events(*r.f)
+          == (released ? std::vector<std::uint64_t>{} : std::vector<std::uint64_t>{fall + limit}));
+      r.run_until(fall + limit + us);
+      CHECK(r.get("ISR", "TIMEOUT") == (released ? 0u : 1u));
+      REQUIRE(sink->answers.size() == 1);
+      CHECK(sink->answers[0].ack);
+      sink->port->stop(vtime{r.now()}, wire, 2);
+      r.run_until(r.now() + us);
+      link_port(*r.f).detach_controller(*sink);
+    }
+  }
+}
+
+TEST_CASE("a link target's RCC reset keeps a bus release stored before or after it")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(auto const release_first : {true, false})
+    {
+      CAPTURE(release_first);
+      target_rig r{part, false, false};
+      r.listen();
+      auto const sink = std::make_shared<i2c_link_sink>();
+      link_port(*r.f).attach_controller(sink);
+      auto const t     = r.now() + 10 * us;
+      auto const fall  = t + target_ps;
+      auto const limit = target_cycles(r, 2048);
+      sink->port->start(own, false, target_ps, vtime{t}, wire, 1);
+      if(release_first)
+      {
+        link_port(*r.f).bus_released(vtime{fall + us}, 1);
+      }
+      r.rcc_pulse();
+      if(not release_first)
+      {
+        link_port(*r.f).bus_released(vtime{fall + us}, 1);
+      }
+      r.listen();
+      target_timeout(r, timoutens);
+      r.run_until(fall + limit + us);
+      CHECK(timeout_events(*r.f).empty());
+      CHECK(r.get("ISR", "TIMEOUT") == 0);
+      REQUIRE(sink->answers.size() == 1);
+      CHECK(sink->answers[0].ack);
+      link_port(*r.f).detach_controller(*sink);
     }
   }
 }

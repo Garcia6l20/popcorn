@@ -300,10 +300,17 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   `model_error` under strict peripherals at the next controller START or target address phase.
   A write of I2C_AUTOCR only warns, since a modelled target setup with SBC or NOSTRETCH writes
   it too.
-- As a target, the SCL low timeout counts the I2C's own stretches, since the controller side
-  carries its phases only. The bus idle timeout counts while PE is set and BUSY is 0, from the
-  STOP or the PE set. Timeout lengths follow the kernel clock rate the model reads at its last
-  event or register access.
+- As a target, the SCL low timeout counts from the end of each address or data phase of a
+  transfer to the start of the next phase or STOP the controller queued, the I2C's own stretch
+  included. Across a System link that gap holds the remote controller's wait of 2L + p + s per
+  phase and its own waits. A target counts it only while the last address phase of the transfer
+  addressed it, for a board controller and a remote one alike. A target the controller does not
+  address counts no SCL low during another target's transfer, a controller stall included, where
+  silicon measures SCL on the line whatever the address, RM0456 65.4.12. An RCC reset or a PE
+  clear of the remote controller's I2C releases the bus at its time plus L and ends the count,
+  with no STOP, and an RCC reset of the target keeps a release it holds. The bus idle timeout
+  counts while PE is set and BUSY is 0, from the STOP or the PE set. Timeout lengths follow the
+  kernel clock rate the model reads at its last event or register access.
 - Inferred, unmeasured on a board: TEXTEN sums the I2C's own stretches from START to STOP, a
   controller's waits included, each from the end of the target's stretch before it, and the sum
   restarts after a timeout and at each TEXTEN set. A target timeout releases

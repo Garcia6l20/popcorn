@@ -1,3 +1,4 @@
+#include "i2c_link.h"
 #include "i2c_target.h"
 #include "periph_test.h"
 #include "stm32u5xx_ll_bus.h"
@@ -42,6 +43,11 @@ void idle(void)
 
 void I2C1_EV_IRQHandler(void)
 {
+  if(link_target_active)
+  {
+    link_target_event();
+    return;
+  }
   if(i2c_target_active)
   {
     i2c_target_event();
@@ -295,6 +301,11 @@ void dma(void)
 
 void I2C1_ER_IRQHandler(void)
 {
+  if(link_target_active)
+  {
+    link_error_event();
+    return;
+  }
   ++error_entries;
   uint32_t const flags = I2C1->ISR & ERROR_FLAGS;
   error_flags |= flags;
@@ -414,5 +425,9 @@ void read_errors(void)
 
 int main(void)
 {
+  if(link_wanted())
+  {
+    link_run();
+  }
   idle();
 }

@@ -24,6 +24,7 @@ stm32 = [
         "spi.cpp",
         "spi_medium.cpp",
         "i2c.cpp",
+        "i2c_medium.cpp",
         "sai.cpp",
         "mdf.cpp",
         "otg_fs.cpp",
