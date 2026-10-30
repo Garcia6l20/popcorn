@@ -978,6 +978,9 @@ constexpr std::uint32_t     stopf      = 1u << 4;
 constexpr std::uint32_t     nostretch  = 1u << 7;
 constexpr std::uint32_t     engc       = 1u << 6;
 constexpr std::uint32_t     endual     = 1u << 0;
+constexpr std::uint8_t      own2       = 0x43;
+constexpr std::uint32_t     dualf      = 1u << 7;
+constexpr std::uint32_t     gencall    = 1u << 4;
 
 struct port_rig
 {
@@ -1543,6 +1546,163 @@ TEST_CASE("RM0038 26.6.1 ENGC: address 0 is NACKed with ENGC 0, an OAR1 of 0 inc
   CHECK(r.warnings("not modelled") == 0);
 }
 
+TEST_CASE(
+    "RM0038 26.6.4 ENDUAL: an OAR2 match sets ADDR and DUALF, "
+    "the STOP clears DUALF, strict runs")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    port_rig const r{true, strict};
+    r.listen();
+    r.write(i2c1 + oar2, std::uint32_t{own2} << 1 | endual);
+    auto const base = r.now() + us;
+    r.start(own2, false, base, 1);
+    r.write(0x11, base, 2);
+    r.run_until(base + target_ps + us);
+    CHECK(r.read(i2c1 + sr1) == addr);
+    CHECK(r.read(i2c1 + sr2) == (busy | dualf));
+    auto const t1 = r.now();
+    r.clear_address();
+    r.stop(t1 + target_ps, 3);
+    r.run_until(t1 + target_ps + us);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, true, 0xFF, t1            },
+            {2, on_write,   true, 0xFF, t1 + target_ps},
+    });
+    CHECK(r.read(i2c1 + dr) == 0x11);
+    CHECK(r.read(i2c1 + sr1) == (rxne | stopf));
+    CHECK(r.read(i2c1 + sr2) == 0);
+    CHECK(r.warnings("not modelled") == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0038 26.6.4: OAR2 matches only with ENDUAL 1 and ADDMODE 0, never address 0, "
+    "and OAR1 before OAR2, inferred")
+{
+  struct leg
+  {
+    std::uint32_t own1;
+    std::uint32_t second;
+    std::uint8_t  to;
+    bool          ack;
+    std::uint32_t status2;
+  };
+  for(auto const& [own1, second, to, ack, status2] : {
+          leg{std::uint32_t{own} << 1,            std::uint32_t{own2} << 1,          own2, false, 0           },
+          leg{1u << 15 | std::uint32_t{own} << 1, std::uint32_t{own2} << 1 | endual, own2, false,
+              0                                                                                               },
+          leg{std::uint32_t{own} << 1,            endual,                            0,    false, 0           },
+          leg{std::uint32_t{own} << 1,            std::uint32_t{own} << 1 | endual,  own,  true,  busy        },
+          leg{std::uint32_t{own} << 1,            std::uint32_t{own2} << 1 | endual, own,  true,  busy        },
+          leg{std::uint32_t{own} << 1,            std::uint32_t{own2} << 1 | endual, own2, true,  busy | dualf},
+  })
+  {
+    CAPTURE(to);
+    CAPTURE(second);
+    port_rig const r;
+    r.listen();
+    r.write(i2c1 + oar1, own1);
+    r.write(i2c1 + oar2, second);
+    auto const base = r.now() + us;
+    r.start(to, false, base, 1);
+    r.run_until(base + target_ps + us);
+    CHECK(r.read(i2c1 + sr1) == (ack ? addr : 0));
+    if(ack)
+    {
+      CHECK(r.read(i2c1 + sr2) == status2);
+      continue;
+    }
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, false, 0xFF, base + target_ps}
+    });
+  }
+}
+
+TEST_CASE(
+    "RM0038 26.6.1 ENGC: a general call with ENGC 1 sets ADDR and GENCALL "
+    "in either ADDMODE, strict runs")
+{
+  for(auto const ten : {false, true})
+  {
+    for(auto const strict : {false, true})
+    {
+      CAPTURE(ten);
+      CAPTURE(strict);
+      port_rig const r{true, strict};
+      r.listen(pe | ack_bit | engc);
+      r.write(i2c1 + oar1, (ten ? 1u << 15 : 0u) | std::uint32_t{own} << 1);
+      auto const base = r.now() + us;
+      r.start(0, false, base, 1);
+      r.write(0x11, base, 2);
+      r.run_until(base + target_ps + us);
+      CHECK(r.read(i2c1 + sr1) == addr);
+      CHECK(r.read(i2c1 + sr2) == (busy | gencall));
+      auto const t1 = r.now();
+      r.clear_address();
+      r.stop(t1 + target_ps, 3);
+      r.run_until(t1 + target_ps + us);
+      CHECK(
+          r.sink->answers
+          == std::vector<heard>{
+              {1, on_address, true, 0xFF, t1            },
+              {2, on_write,   true, 0xFF, t1 + target_ps},
+      });
+      CHECK(r.read(i2c1 + dr) == 0x11);
+      CHECK(r.read(i2c1 + sr1) == (rxne | stopf));
+      CHECK(r.read(i2c1 + sr2) == 0);
+      CHECK(r.warnings("not modelled") == 0);
+    }
+  }
+}
+
+TEST_CASE("address 0 with R/W 1, the I2C-bus START byte, is NACKed with ENGC 1, inferred")
+{
+  port_rig const r;
+  r.listen(pe | ack_bit | engc);
+  auto const base = r.now() + us;
+  r.start(0, true, base, 1);
+  r.run_until(base + target_ps + us);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, false, 0xFF, base + target_ps}
+  });
+  CHECK(r.read(i2c1 + sr1) == 0);
+}
+
+TEST_CASE("RM0038 26.6.7: a repeated START clears DUALF and GENCALL at its start")
+{
+  port_rig const r;
+  r.listen(pe | ack_bit | engc);
+  r.write(i2c1 + oar2, std::uint32_t{own2} << 1 | endual);
+  auto const base = r.now() + us;
+  r.start(own2, false, base, 1);
+  r.run_until(base + target_ps + us);
+  CHECK(r.read(i2c1 + sr2) == (busy | dualf));
+  auto const t1 = r.now();
+  r.clear_address();
+  r.start(0, false, t1, 2);
+  r.run_until(t1 + us);
+  CHECK(r.read(i2c1 + sr2) == busy);
+  r.run_until(t1 + target_ps + us);
+  CHECK(r.read(i2c1 + sr1) == addr);
+  CHECK(r.read(i2c1 + sr2) == (busy | gencall));
+  auto const t2 = r.now();
+  r.clear_address();
+  r.start(own, false, t2, 3);
+  r.run_until(t2 + us);
+  CHECK(r.read(i2c1 + sr2) == busy);
+  r.run_until(t2 + target_ps + us);
+  CHECK(r.read(i2c1 + sr1) == addr);
+  CHECK(r.read(i2c1 + sr2) == busy);
+}
+
 TEST_CASE("a written byte lands in DR with RxNE, popcorn reads CR1.ACK at the end of its phase")
 {
   port_rig const r;
@@ -1711,32 +1871,281 @@ TEST_CASE("RM0038 26.6.1 START: a START the firmware sets while the bus is busy 
 }
 
 TEST_CASE(
-    "PE 0 during the ADDR stretch, which RM0038 26.6.1 ends at the end of the communication: "
-    "popcorn releases it at once until 12b1b, BUSY kept, no STOPF")
+    "RM0038 26.6.1 PE: PE 0 during the ADDR stretch keeps the transfer, the port STOP disables "
+    "the I2C with no STOPF, inferred")
 {
   port_rig const r;
   r.listen();
   auto const base = r.now() + us;
   r.start(own, false, base, 1);
   r.write(0x11, base, 2);
-  r.stop(base + target_ps, 3);
-  r.run_until(base + 2 * target_ps);
-  auto const t0 = r.now();
+  r.write(0x22, base, 3);
+  r.run_until(base + target_ps + us);
   r.cpu_write(i2c1 + cr1, ack_bit);
+  CHECK(r.read(i2c1 + cr1) == ack_bit);
+  CHECK(r.read(i2c1 + sr1) == addr);
   CHECK(r.read(i2c1 + sr2) == busy);
-  r.cpu_write(i2c1 + cr1, pe | ack_bit);
-  r.run_until(t0 + 2 * target_ps);
+  r.run_until(base + 2 * target_ps);
+  CHECK(r.sink->answers.empty());
+  auto const t1 = r.now();
+  r.clear_address();
+  r.run_until(t1 + 2 * target_ps + us);
+  CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+  auto const t2 = r.now();
+  CHECK(r.cpu_read(i2c1 + dr) == 0x11);
+  CHECK(r.cpu_read(i2c1 + dr) == 0x22);
+  r.stop(t2, 4);
+  r.run_until(t2 + us);
   CHECK(
       r.sink->answers
       == std::vector<heard>{
-          {1, on_address, true, 0xFF, t0},
+          {1, on_address, true, 0xFF, t1            },
+          {2, on_write,   true, 0xFF, t1 + target_ps},
+          {3, on_write,   true, 0xFF, t2            },
   });
-  CHECK(
-      r.sink->drops
-      == std::vector<lost>{
-          {2, on_write, t0}
-  });
+  CHECK(r.sink->drops.empty());
+  CHECK(r.read(i2c1 + cr1) == 0);
   CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
+  auto const t3 = r.now();
+  r.start(own, false, t3, 5);
+  r.run_until(t3 + target_ps + us);
+  REQUIRE(not r.sink->answers.empty());
+  CHECK(r.sink->answers.back() == heard{5, on_address, false, 0xFF, t3 + target_ps});
+}
+
+TEST_CASE(
+    "RM0038 26.6.1 PE, inferred: PE 0 keeps the I2C enabled across a repeated START to its own "
+    "address until the STOP")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.run_until(base + target_ps + us);
+  r.cpu_write(i2c1 + cr1, ack_bit);
+  auto const t1 = r.now();
+  r.clear_address();
+  r.start(own, true, t1, 2);
+  r.run_until(t1 + target_ps + us);
+  CHECK(r.read(i2c1 + sr1) == addr);
+  CHECK(r.read(i2c1 + sr2) == (busy | tra));
+  auto const t2 = r.now();
+  r.clear_address();
+  r.stop(t2, 3);
+  r.run_until(t2 + us);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, true, 0xFF, t1},
+          {2, on_address, true, 0xFF, t2},
+  });
+  CHECK(r.read(i2c1 + cr1) == 0);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
+}
+
+TEST_CASE(
+    "RM0038 26.6.1 PE, inferred: PE 0 inside a repeated START's address phase waits for the STOP "
+    "as PE 0 before it")
+{
+  struct seen
+  {
+    std::uint32_t      cr1_written;
+    std::uint32_t      sr1_phase;
+    std::uint32_t      sr2_phase;
+    std::uint32_t      dr;
+    std::vector<heard> answers;
+    std::uint32_t      cr1_stop;
+    std::uint32_t      sr1_stop;
+    std::uint32_t      sr2_stop;
+    heard              after;
+
+    auto operator==(seen const&) const -> bool = default;
+  };
+  for(auto const to : {own, std::uint8_t{own + 1}})
+  {
+    CAPTURE(int{to});
+    std::vector<seen> legs;
+    for(auto const inside : {false, true})
+    {
+      CAPTURE(inside);
+      port_rig const r;
+      r.listen();
+      auto const base = r.now() + us;
+      r.start(own, false, base, 1);
+      r.write(0x11, base, 2);
+      r.run_until(base + target_ps + us);
+      auto const t1 = r.now();
+      r.clear_address();
+      r.run_until(t1 + target_ps + us);
+      CHECK(r.read(i2c1 + sr1) == rxne);
+      auto const t2 = r.now();
+      if(not inside)
+      {
+        r.cpu_write(i2c1 + cr1, ack_bit);
+      }
+      r.start(to, true, t2, 3);
+      if(inside)
+      {
+        r.run_until(t2 + target_ps / 2);
+        r.cpu_write(i2c1 + cr1, ack_bit);
+      }
+      seen leg{};
+      leg.cr1_written = r.read(i2c1 + cr1);
+      r.run_until(t2 + target_ps + us);
+      leg.sr1_phase = r.read(i2c1 + sr1);
+      leg.sr2_phase = r.read(i2c1 + sr2);
+      leg.dr        = r.cpu_read(i2c1 + dr);
+      auto const t3 = r.now();
+      if(to == own)
+      {
+        r.clear_address();
+      }
+      r.stop(t3, 4);
+      r.run_until(t3 + us);
+      leg.answers   = r.sink->answers;
+      leg.cr1_stop  = r.read(i2c1 + cr1);
+      leg.sr1_stop  = r.read(i2c1 + sr1);
+      leg.sr2_stop  = r.read(i2c1 + sr2);
+      auto const t4 = r.now();
+      r.start(own, false, t4, 5);
+      r.run_until(t4 + target_ps + us);
+      REQUIRE(not r.sink->answers.empty());
+      leg.after = r.sink->answers.back();
+      CHECK(leg.cr1_written == ack_bit);
+      CHECK(leg.sr1_phase == (to == own ? (rxne | addr) : rxne));
+      CHECK(leg.sr2_phase == (to == own ? (busy | tra) : busy));
+      CHECK(leg.dr == 0x11);
+      CHECK(
+          leg.answers
+          == std::vector<heard>{
+              {1, on_address, true,      0xFF, t1                             },
+              {2, on_write,   true,      0xFF, t1 + target_ps                 },
+              {3, on_address, to == own, 0xFF, to == own ? t3 : t2 + target_ps},
+      });
+      CHECK(leg.cr1_stop == 0);
+      CHECK(leg.sr1_stop == 0);
+      CHECK(leg.sr2_stop == 0);
+      CHECK(leg.after == heard{5, on_address, false, 0xFF, t4 + target_ps});
+      leg.answers.clear();
+      leg.after = {};
+      legs.push_back(std::move(leg));
+    }
+    CHECK(legs.front() == legs.back());
+  }
+}
+
+TEST_CASE(
+    "checklist 31: I2C1RST during a PE 0 communication clears it, the next own address is NACKed")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.run_until(base + target_ps + us);
+  r.cpu_write(i2c1 + cr1, ack_bit);
+  REQUIRE(r.read(i2c1 + sr1) == addr);
+  r.rcc_pulse();
+  r.listen(ack_bit);
+  CHECK(r.read(i2c1 + cr1) == ack_bit);
+  auto const t1 = r.now() + us;
+  r.start(own, false, t1, 2);
+  r.stop(t1 + target_ps, 3);
+  r.run_until(t1 + target_ps + us);
+  REQUIRE(not r.sink->answers.empty());
+  CHECK(r.sink->answers.back() == heard{2, on_address, false, 0xFF, t1 + target_ps});
+  CHECK(r.read(i2c1 + cr1) == ack_bit);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
+}
+
+TEST_CASE("RM0038 26.6.1 PE, inferred: a PE 1 write before the STOP keeps the I2C enabled")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.write(0x11, base, 2);
+  r.run_until(base + target_ps + us);
+  r.cpu_write(i2c1 + cr1, ack_bit);
+  r.cpu_write(i2c1 + cr1, pe | ack_bit);
+  auto const t1 = r.now();
+  r.clear_address();
+  r.stop(t1 + target_ps, 3);
+  r.run_until(t1 + target_ps + us);
+  CHECK(r.read(i2c1 + cr1) == (pe | ack_bit));
+  CHECK(r.read(i2c1 + sr1) == (rxne | stopf));
+  CHECK(r.read(i2c1 + dr) == 0x11);
+}
+
+TEST_CASE(
+    "RM0038 26.6.1 PE, inferred: PE 0 with no address of the I2C matched since the last STOP "
+    "disables it at once")
+{
+  for(auto const earlier : {false, true})
+  {
+    CAPTURE(earlier);
+    port_rig const r;
+    r.listen();
+    auto       base = r.now() + us;
+    auto const unit = std::uint64_t{earlier ? 3u : 1u};
+    if(earlier)
+    {
+      r.start(own, false, base, 1);
+      r.run_until(base + target_ps + us);
+      r.clear_address();
+      auto const t0 = r.now();
+      r.stop(t0, 2);
+      r.run_until(t0 + us);
+      REQUIRE(r.read(i2c1 + sr1) == stopf);
+      static_cast<void>(r.cpu_read(i2c1 + sr1));
+      r.cpu_write(i2c1 + cr1, pe | ack_bit);
+      REQUIRE(r.read(i2c1 + sr1) == 0);
+      base = r.now() + us;
+    }
+    r.start(own + 1, false, base, unit);
+    r.run_until(base + target_ps + us);
+    r.cpu_write(i2c1 + cr1, ack_bit);
+    CHECK(r.read(i2c1 + cr1) == 0);
+    CHECK(r.read(i2c1 + sr2) == busy);
+    auto const t1 = r.now();
+    r.start(own, false, t1, unit + 1);
+    r.run_until(t1 + target_ps + us);
+    REQUIRE(not r.sink->answers.empty());
+    CHECK(r.sink->answers.back() == heard{unit + 1, on_address, false, 0xFF, t1 + target_ps});
+    CHECK(r.read(i2c1 + sr1) == 0);
+  }
+}
+
+TEST_CASE("a snapshot during a PE 0 transfer restores it, the STOP then disables the I2C")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.write(0x11, base, 2);
+  r.run_until(base + target_ps + us);
+  r.cpu_write(i2c1 + cr1, ack_bit);
+  auto const     saved = r.f->target->snapshot();
+  port_rig const other;
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  for(auto const* one : {&r, &other})
+  {
+    auto const t1 = one->now();
+    one->clear_address();
+    one->stop(t1 + target_ps, 3);
+    one->run_until(t1 + target_ps + us);
+    CHECK(
+        one->sink->answers
+        == std::vector<heard>{
+            {1, on_address, true, 0xFF, t1            },
+            {2, on_write,   true, 0xFF, t1 + target_ps},
+    });
+    CHECK(one->read(i2c1 + cr1) == 0);
+    CHECK(one->read(i2c1 + sr1) == 0);
+  }
 }
 
 TEST_CASE("checklist 31: I2C1RST during the BTF stretch drops the held byte at the reset")
@@ -1765,9 +2174,7 @@ TEST_CASE("checklist 31: I2C1RST during the BTF stretch drops the held byte at t
   CHECK(r.read(i2c1 + sr1) == 0);
 }
 
-TEST_CASE(
-    "checklist 53: NOSTRETCH, an OAR2, a general call in either ADDMODE and a 10-bit header "
-    "warn, strict raises")
+TEST_CASE("checklist 53: NOSTRETCH and a 10-bit header warn, strict raises")
 {
   struct leg
   {
@@ -1779,11 +2186,8 @@ TEST_CASE(
     bool          held;
   };
   for(auto const& [control, own1, own2, to, read, held] : {
-          leg{pe | ack_bit | nostretch, std::uint32_t{own} << 1,            0,                   own,  false, true },
-          leg{pe | ack_bit,             std::uint32_t{own} << 1,            0x43u << 1 | endual, 0x43, false, false},
-          leg{pe | ack_bit | engc,      std::uint32_t{own} << 1,            0,                   0,    false, false},
-          leg{pe | ack_bit | engc,      1u << 15 | std::uint32_t{own} << 1, 0,                   0,    false, false},
-          leg{pe | ack_bit,             1u << 15 | std::uint32_t{own} << 1, 0,                   0x78, false, false},
+          leg{pe | ack_bit | nostretch, std::uint32_t{own} << 1,            0, own,  false, true },
+          leg{pe | ack_bit,             1u << 15 | std::uint32_t{own} << 1, 0, 0x78, false, false},
   })
   {
     CAPTURE(to);
@@ -2018,8 +2422,8 @@ TEST_CASE("RM0038 26.6.7 TRA: a repeated START ends the transmission, TxE and BT
 }
 
 TEST_CASE(
-    "PE 0 during a read held for DR, which RM0038 26.6.1 ends at the end of the communication: "
-    "popcorn sends it at once as 0xFF until 12b1b")
+    "RM0038 26.6.1 PE: PE 0 during a read held for DR keeps it held, DR writes send it, "
+    "the port STOP disables the I2C, inferred")
 {
   port_rig const r;
   r.listen();
@@ -2030,19 +2434,29 @@ TEST_CASE(
   r.clear_address();
   auto const t0 = r.now();
   r.read(true, t0, 2);
-  r.read(true, t0, 3);
+  r.read(false, t0, 3);
+  r.stop(t0, 4);
   r.run_until(t0 + target_ps);
+  r.cpu_write(i2c1 + cr1, ack_bit);
+  r.run_until(t0 + 2 * target_ps);
   CHECK(r.sink->answers.size() == 1);
   auto const t1 = r.now();
-  r.cpu_write(i2c1 + cr1, ack_bit);
-  r.run_until(t1 + 2 * target_ps + us);
+  r.cpu_write(i2c1 + dr, 0x5A);
+  r.run_until(t1 + target_ps + us);
+  CHECK(r.read(i2c1 + sr1) == (txe | btf));
+  auto const t2 = r.now();
+  r.cpu_write(i2c1 + dr, 0xA5);
+  r.run_until(t2 + target_ps + us);
   CHECK(
       r.sink->answers
       == std::vector<heard>{
-          {1, on_address, true, 0xFF, cleared           },
-          {2, on_read,    true, 0xFF, t1 + target_ps    },
-          {3, on_read,    true, 0xFF, t1 + 2 * target_ps},
+          {1, on_address, true,  0xFF, cleared       },
+          {2, on_read,    true,  0x5A, t1 + target_ps},
+          {3, on_read,    false, 0xA5, t2 + target_ps},
   });
+  CHECK(r.read(i2c1 + cr1) == 0);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
 }
 
 TEST_CASE(
