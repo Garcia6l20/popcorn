@@ -140,6 +140,15 @@ struct dma_classic_request
   std::uint8_t channel;
 };
 
+/** @brief An address window, both ends included. */
+struct dma_classic_window
+{
+  /** @brief First address. */
+  std::uint32_t first;
+  /** @brief Last address. */
+  std::uint32_t last;
+};
+
 /** @brief Differences between the classic DMA controllers the model rows serve. */
 struct dma_classic_traits
 {
@@ -147,12 +156,70 @@ struct dma_classic_traits
   std::uint8_t channels;
   /** @brief Hardware requests, each ORed into its channel. */
   std::span<dma_classic_request const> requests = {};
+  /**
+   * @brief APB windows behind a 32-bit AHB/APB bridge that ignores HSIZE: a byte or halfword
+   *        write there is a word write with the item on every lane, RM0038 11.3.4.
+   */
+  std::span<dma_classic_window const> apb_windows = {};
+};
+
+/** @brief STM32L1 APB1 and APB2, RM0038 Table 5. */
+inline constexpr std::array<dma_classic_window, 2> l1_apb_windows{
+    {
+     {.first = 0x4000'0000, .last = 0x4000'7FFF},
+     {.first = 0x4001'0000, .last = 0x4001'3FFF},
+     }
+};
+
+/**
+ * @brief STM32L1 DMA1 requests, RM0038 11.3.7 Table 55. Signal names follow the requester models,
+ *        `<instance>_<request>_dma` with the instance as the description names it.
+ */
+inline constexpr std::array<dma_classic_request, 33> l1_dma1_requests{
+    {
+     {"adc_dma", 1},       {"tim2_cc3_dma", 1}, {"tim4_cc1_dma", 1},  {"spi1_rx_dma", 2},
+     {"usart3_tx_dma", 2}, {"tim2_upd_dma", 2}, {"tim3_cc3_dma", 2},  {"tim6_upd_dma", 2},
+     {"dac_ch1_dma", 2},   {"spi1_tx_dma", 3},  {"usart3_rx_dma", 3}, {"tim3_cc4_dma", 3},
+     {"tim3_upd_dma", 3},  {"tim7_upd_dma", 3}, {"dac_ch2_dma", 3},   {"spi2_rx_dma", 4},
+     {"usart1_tx_dma", 4}, {"i2c2_tx_dma", 4},  {"tim4_cc2_dma", 4},  {"spi2_tx_dma", 5},
+     {"usart1_rx_dma", 5}, {"i2c2_rx_dma", 5},  {"tim2_cc1_dma", 5},  {"tim4_cc3_dma", 5},
+     {"usart2_rx_dma", 6}, {"i2c1_tx_dma", 6},  {"tim3_cc1_dma", 6},  {"tim3_trg_dma", 6},
+     {"usart2_tx_dma", 7}, {"i2c1_rx_dma", 7},  {"tim2_cc2_dma", 7},  {"tim2_cc4_dma", 7},
+     {"tim4_upd_dma", 7},
+     }
+};
+
+/** @brief STM32L1 DMA2 requests, RM0038 11.3.7 Table 56, named as for DMA1. */
+inline constexpr std::array<dma_classic_request, 15> l1_dma2_requests{
+    {
+     {"spi3_rx_dma", 1},
+     {"uart5_tx_dma", 1},
+     {"tim5_cc4_dma", 1},
+     {"tim5_trg_dma", 1},
+     {"spi3_tx_dma", 2},
+     {"uart5_rx_dma", 2},
+     {"tim5_cc3_dma", 2},
+     {"tim5_upd_dma", 2},
+     {"uart4_rx_dma", 3},
+     {"aes_out_dma", 3},
+     {"tim5_cc2_dma", 4},
+     {"sdio_dma", 4},
+     {"uart4_tx_dma", 5},
+     {"tim5_cc1_dma", 5},
+     {"aes_in_dma", 5},
+     }
 };
 
 /** @brief STM32L1 DMA1, RM0038 11.1: 7 channels. */
-inline constexpr dma_classic_traits l1_dma1{.channels = 7};
+inline constexpr dma_classic_traits l1_dma1{
+    .channels    = 7,
+    .requests    = l1_dma1_requests,
+    .apb_windows = l1_apb_windows};
 /** @brief STM32L1 DMA2, RM0038 11.1 and the 11.4 note: 5 channels, on Cat.3 to Cat.6. */
-inline constexpr dma_classic_traits l1_dma2{.channels = 5};
+inline constexpr dma_classic_traits l1_dma2{
+    .channels    = 5,
+    .requests    = l1_dma2_requests,
+    .apb_windows = l1_apb_windows};
 
 /** @brief One code of a `SYSCFG_EXTICRn` selector field. */
 struct exti_port_code

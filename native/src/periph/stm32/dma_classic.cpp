@@ -91,42 +91,43 @@ enum class unsupported : std::uint8_t
 };
 
 /**
- * @brief Classic channel DMA of the STM32L1, DMA1 and DMA2, RM0038 section 11: 1 to 7 channels
- *        from the traits, `CCRx`, `CNDTRx`, `CPARx` and `CMARx` per channel, `ISR` and `IFCR`
- *        shared. A channel is ready while `EN` is set, `NDT` is not 0, and `MEM2MEM` is set or
- *        one of the hardware requests ORed into it is high. One transfer at a time runs for the
- *        whole controller, an event 4 HCLK cycles after the controller was last idle or after
- *        the previous transfer: the arbiter gives it to the ready channel of the highest `PL`,
- *        the lowest channel number among equals, RM0038 11.3.2, and re-arbitrates after every
- *        transfer, so a channel of higher priority enabled mid-copy takes the next transfer. No
- *        transfer runs inside a register or request callback. Each transfer reads one item of
- *        the source width at the source's current address and writes one item of the
- *        destination width, 0-padded when wider and its low bytes when narrower, RM0038 11.3.4
- *        Table 53. `DIR` 0 reads at the peripheral address and writes at the memory address,
- *        1 the other way, under `MEM2MEM` too. The current addresses start at `CPARx` and
- *        `CMARx` when `EN` goes from 0 to 1, are aligned down to their item size, RM0038 11.4.5
- *        and 11.4.6, and move by the item size under `PINC` and `MINC`. Writes to `CPARx` and
- *        `CMARx` while the channel runs reach the next enable or the next circular reload.
- *        `CNDTRx` takes writes only while `EN` is clear, RM0038 11.4.4, and counts down once per
- *        transfer. `HTIF` sets once per pass, when the items left are at most half the count
- *        latched at the enable, `TCIF` when they reach 0. Then a `CIRC` channel reloads the count
- *        and both addresses and runs on, any other keeps `EN` set and serves nothing until it is
- *        disabled and programmed again, RM0038 11.3.3. A read or write the bus refuses sets
- *        `TEIF` and clears `EN`, RM0038 11.3.5, with the count and the addresses left at the
- *        failed item. `GIFx` reads as the OR of `TEIFx`, `HTIFx` and `TCIFx`, inferred: RM0038
- *        11.4.1 sets it on any of them and clears it with `CGIFx`. A write of 1 to `CGIFx` clears
- *        all four flags, to `CTCIFx`, `CHTIFx` or `CTEIFx` one. The channel's
- *        `<instance>_Channel<n>_IRQn` is high while a flag is set with its enable bit, RM0038
- *        Table 54. A reserved `PSIZE` or `MSIZE` of 3 transfers words, and `CIRC` with
+ * @brief Classic channel DMA of the STM32L1, DMA1 and DMA2, RM0038 section 11: 1 to 7 channels from
+ *        the traits, `CCRx`, `CNDTRx`, `CPARx` and `CMARx` per channel, `ISR` and `IFCR` shared. A
+ *        channel is ready while `EN` is set, `NDT` is not 0, and `MEM2MEM` is set or one of the
+ *        hardware requests ORed into it is high. One transfer at a time runs for the whole
+ *        controller, an event 4 HCLK cycles after the controller was last idle or after the
+ *        previous transfer: the arbiter gives it to the ready channel of the highest `PL`, the
+ *        lowest channel number among equals, RM0038 11.3.2, and re-arbitrates after every transfer,
+ *        so a channel of higher priority enabled mid-copy takes the next transfer. No transfer runs
+ *        inside a register or request callback. Each transfer reads one item of the source width at
+ *        the source's current address and writes one item of the destination width, 0-padded when
+ *        wider and its low bytes when narrower, RM0038 11.3.4 Table 53. A byte or halfword write
+ *        into an APB window of the traits writes the word at the address aligned down to 4, with
+ *        the item repeated on every lane, as the AHB/APB bridge of RM0038 11.3.4 does. `DIR` 0
+ *        reads at the peripheral address and writes at the memory address, 1 the other way, under
+ *        `MEM2MEM` too. The current addresses start at `CPARx` and `CMARx` when `EN` goes from 0 to
+ *        1, are aligned down to their item size, RM0038 11.4.5 and 11.4.6, and move by the item
+ *        size under `PINC` and `MINC`. Writes to `CPARx` and `CMARx` while the channel runs reach
+ *        the next enable or the next circular reload. `CNDTRx` takes writes only while `EN` is
+ *        clear, RM0038 11.4.4, and counts down once per transfer. `HTIF` sets once per pass, when
+ *        the items left are at most half the count latched at the enable, `TCIF` when they reach 0.
+ *        Then a `CIRC` channel reloads the count and both addresses and runs on, any other keeps
+ *        `EN` set and serves nothing until it is disabled and programmed again, RM0038 11.3.3. A
+ *        read or write the bus refuses sets `TEIF` and clears `EN`, RM0038 11.3.5, with the count
+ *        and the addresses left at the failed item. `GIFx` reads as the OR of `TEIFx`, `HTIFx` and
+ *        `TCIFx`, inferred: RM0038 11.4.1 sets it on any of them and clears it with `CGIFx`. A
+ *        write of 1 to `CGIFx` clears all four flags, to `CTCIFx`, `CHTIFx` or `CTEIFx` one. The
+ *        channel's `<instance>_Channel<n>_IRQn` is high while a flag is set with its enable bit,
+ *        RM0038 Table 54. A reserved `PSIZE` or `MSIZE` of 3 transfers words, and `CIRC` with
  *        `MEM2MEM`, which RM0038 11.3.3 forbids, runs the copy once: each logs one warning, a
- *        model_error under strict_peripherals, from the write that sets `EN`, or from the
- *        transfer for a `PSIZE` or `MSIZE` written while the channel runs. Every
- *        transfer goes through a core::memory_grant per channel for reads and one for writes,
- *        so the bus firewall is asked once per extent it allows rather than once per item. A
- *        hardware-requested transfer acknowledges every request of its channel that is high,
- *        and the end of a non-circular one tells every `dma_requester` peer each request of
- *        the channel. A request held high across a machine reset is cleared, one held across
- *        the RCC reset of the controller is kept.
+ *        model_error under strict_peripherals, from the write that sets `EN`, or from the transfer
+ *        for a `PSIZE` or `MSIZE` written while the channel runs. Every transfer goes through a
+ *        core::memory_grant per channel for reads and one for writes, so the bus firewall is asked
+ *        once per extent it allows rather than once per item. A hardware-requested transfer
+ *        acknowledges every request of its channel that is high, and the end of a non-circular one
+ *        tells every `dma_requester` peer each request of the channel, inferred. A request held
+ *        high across a machine reset is cleared, one held across the RCC reset of the controller
+ *        is kept.
  */
 class dma_classic final : public dispatch_model<dma_classic, dma_classic_state>,
                           public dma_controller
@@ -154,6 +155,7 @@ private:
   [[nodiscard]] auto requested(std::size_t ch) const -> bool;
   [[nodiscard]] auto winner() const -> std::optional<std::size_t>;
   [[nodiscard]] auto width(std::size_t ch, field_ref size) -> std::uint8_t;
+  [[nodiscard]] auto on_apb(std::uint32_t at) const -> bool;
   void               schedule();
   void               start(std::size_t ch);
   void               transfer(std::size_t ch);
@@ -222,6 +224,20 @@ dma_classic::dma_classic(
     : dispatch_model{ctx, desc, "DMA", table}, regs_{ctx.regs}, traits_{traits},
       hclk_{ctx.clock.domain("hclk")}
 {
+  auto const unserved = std::ranges::any_of(traits_.requests, [&](dma_classic_request const& row) {
+    return row.channel == 0 or row.channel > traits_.channels;
+  });
+  if(traits_.channels == 0
+     or traits_.channels > max_channels
+     or traits_.requests.size() > max_requests
+     or unserved)
+  {
+    throw config_error(
+        desc.name, 0, "traits",
+        std::format(
+            "1 to {} channels and at most {} requests, each on one of the channels", max_channels,
+            max_requests));
+  }
   for(std::size_t ch = 0; ch < traits_.channels; ++ch)
   {
     auto const n           = ch + 1;
@@ -391,6 +407,13 @@ auto dma_classic::width(std::size_t ch, field_ref size) -> std::uint8_t
   return static_cast<std::uint8_t>(1u << code);
 }
 
+auto dma_classic::on_apb(std::uint32_t at) const -> bool
+{
+  return std::ranges::any_of(traits_.apb_windows, [at](dma_classic_window const& window) {
+    return at >= window.first and at <= window.last;
+  });
+}
+
 void dma_classic::start(std::size_t ch)
 {
   auto const& c   = ch_[ch];
@@ -420,9 +443,21 @@ void dma_classic::transfer(std::size_t ch)
   auto const write_size  = from_memory ? psize : msize;
   constexpr bus_attrs by_dma{.by = initiator::dma};
   auto const          value = ctx_.services.read(source, read_size, by_dma, c.read_grant);
-  if(not value
-     or not ctx_.services.write(
-         target, write_size, resize(*value, read_size, write_size, 0), by_dma, c.write_grant))
+  if(not value)
+  {
+    fail(ch);
+    return;
+  }
+  auto item = static_cast<std::uint32_t>(resize(*value, read_size, write_size, 0));
+  auto at   = target;
+  auto size = write_size;
+  if(size < 4 and on_apb(target))
+  {
+    item = size == 1 ? item * 0x0101'0101u : item * 0x0001'0001u;
+    at   = target & ~3u;
+    size = 4;
+  }
+  if(not ctx_.services.write(at, size, item, by_dma, c.write_grant))
   {
     fail(ch);
     return;

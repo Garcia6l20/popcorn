@@ -1,4 +1,8 @@
+#include "dma.hpp"
+#include "dma_signal.hpp"
+#include "factories.hpp"
 #include "stm32_fixture.hpp"
+#include "variants.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
@@ -12,9 +16,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <map>
 #include <memory>
 #include <span>
 #include <string>
@@ -26,6 +32,7 @@ namespace
 {
 namespace core   = popcorn::core;
 namespace periph = popcorn::periph;
+namespace stm32  = popcorn::periph::stm32;
 using popcorn::address;
 using popcorn::bus_attrs;
 using popcorn::icount;
@@ -592,4 +599,437 @@ TEST_CASE("the DMA2 model refuses a description with channel 6 registers or chan
   REQUIRE(isr2 != two.registers.end());
   *isr2 = *isr1;
   CHECK_THROWS_AS(stm32_fixture(desc, firmware), popcorn::config_error);
+}
+
+TEST_CASE("the DMA model refuses traits past its request slots or naming a channel it lacks")
+{
+  auto const refused = [](stm32::dma_classic_traits const& traits) {
+    auto options = popcorn::testing::stm32_options();
+    options.models.insert_or_assign("DMA1", stm32::dma_classic_factory(traits));
+    CHECK_THROWS_AS(parked(l152re(), firmware, std::move(options)), popcorn::config_error);
+  };
+  std::array<stm32::dma_classic_request, 49> many{};
+  std::ranges::fill(many, stm32::dma_classic_request{.signal = "usart1_tx_dma", .channel = 4});
+  refused({.channels = 7, .requests = many});
+  refused({.channels = 3, .requests = std::span{many}.first(48)});
+  constexpr std::array<stm32::dma_classic_request, 1> zero{
+      {{.signal = "usart1_tx_dma", .channel = 0}}};
+  refused({.channels = 7, .requests = zero});
+  auto options = popcorn::testing::stm32_options();
+  options.models.insert_or_assign(
+      "DMA1", stm32::dma_classic_factory({.channels = 7, .requests = std::span{many}.first(48)}));
+  CHECK_NOTHROW(parked(l152re(), firmware, std::move(options)));
+}
+
+namespace
+{
+class requester final : public periph::model, public stm32::dma_requester
+{
+public:
+  requester(
+      periph::model_context&   ctx,
+      std::vector<std::string> names,
+      std::vector<std::string> claimed)
+      : names_{std::move(names)}, claimed_{std::move(claimed)}
+  {
+    for(auto const& name : names_)
+    {
+      signals_.emplace_back(ctx.peers, name);
+    }
+  }
+
+  struct bus_write
+  {
+    std::uint32_t offset;
+    std::uint8_t  size;
+    std::uint32_t value;
+
+    auto operator==(bus_write const&) const -> bool = default;
+  };
+
+  std::vector<std::string> acks;
+  std::vector<std::string> completions;
+  std::vector<bus_write>   writes;
+  bool                     drop_on_ack = true;
+  std::uint32_t            next_data{};
+
+  void set(std::string_view name, bool level)
+  {
+    signal(name).set(level);
+  }
+
+  void acknowledged(stm32::dma_controller const& by, std::uint32_t request) override
+  {
+    for(std::size_t index = 0; index < signals_.size(); ++index)
+    {
+      if(signals_[index].carries(by, request))
+      {
+        acks.push_back(names_[index]);
+        if(drop_on_ack)
+        {
+          signals_[index].set(false);
+        }
+      }
+    }
+  }
+
+  void transfer_completed(stm32::dma_controller const& by, std::uint32_t request) override
+  {
+    for(std::size_t index = 0; index < signals_.size(); ++index)
+    {
+      if(signals_[index].carries(by, request))
+      {
+        completions.push_back(names_[index]);
+      }
+    }
+  }
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return claimed_;
+  }
+  void reset(periph::register_file&, reset_kind) override
+  {
+    for(auto& one : signals_)
+    {
+      one.resolve();
+    }
+  }
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return next_data++;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t offset,
+      std::uint8_t  size,
+      std::uint32_t,
+      std::uint32_t value,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    writes.push_back({.offset = offset, .size = size, .value = value});
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+
+private:
+  auto signal(std::string_view name) -> stm32::dma_signal&
+  {
+    auto const found = std::ranges::find(names_, name);
+    REQUIRE(found != names_.end());
+    return signals_[static_cast<std::size_t>(found - names_.begin())];
+  }
+
+  std::vector<std::string>       names_;
+  std::vector<stm32::dma_signal> signals_;
+  std::vector<std::string>       claimed_;
+};
+
+struct table_row
+{
+  std::string_view instance;
+  std::uint32_t    channel;
+  std::string_view signal;
+};
+
+constexpr std::array<table_row, 48> rm0038_requests{
+    {
+     {"DMA1", 1, "adc_dma"},       {"DMA1", 1, "tim2_cc3_dma"},  {"DMA1", 1, "tim4_cc1_dma"},
+     {"DMA1", 2, "spi1_rx_dma"},   {"DMA1", 2, "usart3_tx_dma"}, {"DMA1", 2, "tim2_upd_dma"},
+     {"DMA1", 2, "tim3_cc3_dma"},  {"DMA1", 2, "tim6_upd_dma"},  {"DMA1", 2, "dac_ch1_dma"},
+     {"DMA1", 3, "spi1_tx_dma"},   {"DMA1", 3, "usart3_rx_dma"}, {"DMA1", 3, "tim3_cc4_dma"},
+     {"DMA1", 3, "tim3_upd_dma"},  {"DMA1", 3, "tim7_upd_dma"},  {"DMA1", 3, "dac_ch2_dma"},
+     {"DMA1", 4, "spi2_rx_dma"},   {"DMA1", 4, "usart1_tx_dma"}, {"DMA1", 4, "i2c2_tx_dma"},
+     {"DMA1", 4, "tim4_cc2_dma"},  {"DMA1", 5, "spi2_tx_dma"},   {"DMA1", 5, "usart1_rx_dma"},
+     {"DMA1", 5, "i2c2_rx_dma"},   {"DMA1", 5, "tim2_cc1_dma"},  {"DMA1", 5, "tim4_cc3_dma"},
+     {"DMA1", 6, "usart2_rx_dma"}, {"DMA1", 6, "i2c1_tx_dma"},   {"DMA1", 6, "tim3_cc1_dma"},
+     {"DMA1", 6, "tim3_trg_dma"},  {"DMA1", 7, "usart2_tx_dma"}, {"DMA1", 7, "i2c1_rx_dma"},
+     {"DMA1", 7, "tim2_cc2_dma"},  {"DMA1", 7, "tim2_cc4_dma"},  {"DMA1", 7, "tim4_upd_dma"},
+     {"DMA2", 1, "spi3_rx_dma"},   {"DMA2", 1, "uart5_tx_dma"},  {"DMA2", 1, "tim5_cc4_dma"},
+     {"DMA2", 1, "tim5_trg_dma"},  {"DMA2", 2, "spi3_tx_dma"},   {"DMA2", 2, "uart5_rx_dma"},
+     {"DMA2", 2, "tim5_cc3_dma"},  {"DMA2", 2, "tim5_upd_dma"},  {"DMA2", 3, "uart4_rx_dma"},
+     {"DMA2", 3, "aes_out_dma"},   {"DMA2", 4, "tim5_cc2_dma"},  {"DMA2", 4, "sdio_dma"},
+     {"DMA2", 5, "uart4_tx_dma"},  {"DMA2", 5, "tim5_cc1_dma"},  {"DMA2", 5, "aes_in_dma"},
+     }
+};
+
+auto instance_of(std::string_view signal) -> std::string
+{
+  std::string out{signal.substr(0, signal.find('_'))};
+  std::ranges::transform(out, out.begin(), [](char c) {
+    return static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  });
+  return out;
+}
+
+auto has_unit(part_description const& desc, std::string_view name) -> bool
+{
+  return std::ranges::any_of(
+      desc.peripherals, [name](popcorn::peripheral_desc const& unit) { return unit.name == name; });
+}
+
+using names_by_unit = std::map<std::string, std::vector<std::string>>;
+
+auto with_requesters(
+    part_description const& desc,
+    names_by_unit const&    by_unit,
+    names_by_unit const&    claims = {}) -> core::machine_options
+{
+  auto options = popcorn::testing::stm32_options();
+  for(auto const& [unit, names] : by_unit)
+  {
+    if(has_unit(desc, unit))
+    {
+      auto const claimed = claims.find(unit);
+      options.models.emplace(
+          unit,
+          [names,
+           registers = claimed == claims.end() ? std::vector<std::string>{} : claimed->second](
+              periph::model_context& ctx,
+              popcorn::peripheral_desc const&) -> std::shared_ptr<periph::model> {
+            return std::make_shared<requester>(ctx, names, registers);
+          });
+    }
+  }
+  return options;
+}
+
+auto peer(stm32_fixture const& f, std::string_view unit) -> requester&
+{
+  auto* const found = f.model_of<requester>(unit);
+  REQUIRE(found != nullptr);
+  return *found;
+}
+
+constexpr std::uint32_t word_sizes = psize_word | msize_word;
+}
+
+TEST_CASE("RM0038 Tables 55 and 56: the DMA1 and DMA2 traits hold every request on its channel")
+{
+  auto const listed = [](stm32::dma_classic_traits const& traits, std::string_view instance) {
+    std::vector<std::pair<std::string_view, std::uint32_t>> out;
+    for(auto const& request : traits.requests)
+    {
+      CAPTURE(request.signal);
+      out.emplace_back(request.signal, request.channel);
+    }
+    std::vector<std::pair<std::string_view, std::uint32_t>> expected;
+    for(auto const& row : rm0038_requests)
+    {
+      if(row.instance == instance)
+      {
+        expected.emplace_back(row.signal, row.channel);
+      }
+    }
+    std::ranges::sort(out);
+    std::ranges::sort(expected);
+    CHECK(out == expected);
+  };
+  listed(stm32::l1_dma1, "DMA1");
+  listed(stm32::l1_dma2, "DMA2");
+}
+
+TEST_CASE("RM0038 11.3.7: every request of a peripheral the part has moves one item on its channel")
+{
+  constexpr address source      = 0x2000'2000;
+  constexpr address destination = 0x2000'2400;
+  struct leg
+  {
+    part_description const&       desc;
+    std::string_view              name;
+    std::vector<std::string_view> unrouted;
+  };
+  std::vector<std::string_view> dma2_rows;
+  for(auto const& row : rm0038_requests)
+  {
+    if(row.instance == "DMA2")
+    {
+      dma2_rows.push_back(row.signal);
+    }
+  }
+  for(auto const& [desc, name, unrouted] : {
+          leg{l152re(), firmware,   {"aes_out_dma", "sdio_dma", "aes_in_dma"}},
+          leg{l152rb(), firmware_b, dma2_rows                                },
+          leg{l152rc(),
+              firmware,             {"uart5_tx_dma", "uart5_rx_dma", "uart4_rx_dma", "aes_out_dma", "sdio_dma",
+               "uart4_tx_dma", "aes_in_dma"}          }
+  })
+  {
+    CAPTURE(name);
+    names_by_unit by_unit;
+    for(auto const& row : rm0038_requests)
+    {
+      by_unit[instance_of(row.signal)].emplace_back(row.signal);
+    }
+    auto const                    f = parked(desc, name, with_requesters(desc, by_unit));
+    std::vector<std::string_view> skipped;
+    for(auto const& row : rm0038_requests)
+    {
+      auto const unit = instance_of(row.signal);
+      if(not has_unit(desc, row.instance) or not has_unit(desc, unit))
+      {
+        skipped.push_back(row.signal);
+        continue;
+      }
+      CAPTURE(row.signal);
+      std::vector<std::string> sharing;
+      for(auto const& other : rm0038_requests)
+      {
+        if(other.instance == row.instance
+           and other.channel == row.channel
+           and instance_of(other.signal) == unit)
+        {
+          sharing.emplace_back(other.signal);
+        }
+      }
+      auto const dma = row.instance == "DMA1" ? dma1 : dma2;
+      auto&      p   = peer(f, unit);
+      p.acks.clear();
+      p.completions.clear();
+      write(f, source, 0x5A00'0000u + row.channel);
+      write(f, destination, 0);
+      write(f, dma + ifcr, 0x0FFF'FFFFu);
+      program(f, dma, row.channel, word_sizes | en, source, destination, 1);
+      idle_to(f, now_ps(f) + 2 * latency_ps);
+      REQUIRE(read(f, dma + cndtr(row.channel)) == 1);
+      p.set(row.signal, true);
+      idle_to(f, now_ps(f) + 2 * latency_ps);
+      CHECK(read(f, dma + cndtr(row.channel)) == 0);
+      CHECK(read(f, destination) == 0x5A00'0000u + row.channel);
+      CHECK(flags(read(f, dma + isr), row.channel) == (gif | tcif | htif));
+      CHECK(p.acks == std::vector<std::string>{std::string{row.signal}});
+      CHECK(p.completions == sharing);
+      write(f, dma + ccr(row.channel), 0);
+    }
+    CHECK(skipped == unrouted);
+  }
+}
+
+TEST_CASE(
+    "RM0038 11.3.7: two requests ORed into DMA1 channel 4, each peer takes only its own "
+    "acknowledge and completion")
+{
+  names_by_unit const by_unit{
+      {"USART1", {"usart1_tx_dma"}},
+      {"SPI2",   {"spi2_rx_dma"}  },
+  };
+  auto const f     = parked(l152re(), firmware, with_requesters(l152re(), by_unit));
+  auto&      usart = peer(f, "USART1");
+  auto&      spi   = peer(f, "SPI2");
+  fill(f, 2);
+  program(f, dma1, 4, word_sizes | minc | pinc | en, from, to, 2);
+  usart.set("usart1_tx_dma", true);
+  idle_to(f, now_ps(f) + 3 * latency_ps);
+  CHECK(read(f, dma1 + cndtr(4)) == 1);
+  CHECK(usart.acks == std::vector<std::string>{"usart1_tx_dma"});
+  CHECK(spi.acks.empty());
+  spi.set("spi2_rx_dma", true);
+  idle_to(f, now_ps(f) + 3 * latency_ps);
+  CHECK(read(f, dma1 + cndtr(4)) == 0);
+  CHECK(copied(f, 2) == std::vector<std::uint32_t>{source_word(0), source_word(1)});
+  CHECK(usart.acks == std::vector<std::string>{"usart1_tx_dma"});
+  CHECK(spi.acks == std::vector<std::string>{"spi2_rx_dma"});
+  CHECK(usart.completions == std::vector<std::string>{"usart1_tx_dma"});
+  CHECK(spi.completions == std::vector<std::string>{"spi2_rx_dma"});
+}
+
+TEST_CASE(
+    "RM0038 11.3.3: a circular peripheral-to-memory channel reloads and raises "
+    "HT and TC each pass")
+{
+  constexpr address       usart1_dr = 0x4001'3804;
+  constexpr std::uint32_t irq       = 15;
+  constexpr address       ispr0     = 0xE000'E200;
+  names_by_unit const     by_unit{
+      {"USART1", {"usart1_rx_dma"}}
+  };
+  auto const f = parked(
+      l152re(), firmware,
+      with_requesters(
+          l152re(), by_unit,
+          {
+              {"USART1", {"DR"}}
+  }));
+  auto& p       = peer(f, "USART1");
+  p.drop_on_ack = false;
+  write(f, to, 0);
+  write(f, to + 4, 0);
+  auto const t0 = now_ps(f);
+  program(f, dma1, 5, circ | minc | htie | tcie | en, usart1_dr, to, 4);
+  p.set("usart1_rx_dma", true);
+  idle_to(f, t0 + 4 * latency_ps + latency_ps / 2);
+  CHECK(read(f, dma1 + cndtr(5)) == 4);
+  CHECK(flags(read(f, dma1 + isr), 5) == (gif | tcif | htif));
+  CHECK((read(f, ispr0) >> irq & 1u) == 1);
+  CHECK(read(f, to) == 0x0302'0100u);
+  write(f, dma1 + ifcr, gif << 16);
+  write(f, 0xE000'E280, 1u << irq);
+  idle_to(f, t0 + 6 * latency_ps + latency_ps / 2);
+  CHECK(read(f, dma1 + cndtr(5)) == 2);
+  CHECK(flags(read(f, dma1 + isr), 5) == (gif | htif));
+  CHECK((read(f, ispr0) >> irq & 1u) == 1);
+  CHECK(read(f, to) == 0x0302'0504u);
+  idle_to(f, t0 + 8 * latency_ps + latency_ps / 2);
+  CHECK(read(f, dma1 + cndtr(5)) == 4);
+  CHECK(flags(read(f, dma1 + isr), 5) == (gif | tcif | htif));
+  CHECK(read(f, to) == 0x0706'0504u);
+  CHECK(read(f, to + 4) == 0);
+  CHECK(p.completions.empty());
+  CHECK(p.acks.size() == 8);
+}
+
+TEST_CASE(
+    "RM0038 11.3.4: a byte or halfword DMA write into APB is a word write with the item on "
+    "every lane, into AHB it stays narrow")
+{
+  using write_seen                  = requester::bus_write;
+  constexpr address       tim5_arr  = 0x4000'0C2C;
+  constexpr address       rtc_bkp0r = 0x4000'2850;
+  constexpr address       gpioa_odr = 0x4002'0014;
+  constexpr std::uint32_t to_periph = mem2mem | (1u << 4);
+  constexpr std::uint32_t halves    = (1u << 10) | (1u << 8);
+  auto const              f         = parked(
+      l152re(), firmware,
+      with_requesters(
+          l152re(),
+          {
+              {"TIM5", {}},
+              {"RTC",  {}}
+  },
+          {{"TIM5", {"ARR"}}, {"RTC", {"BKP0R"}}}));
+  auto&      tim5 = peer(f, "TIM5");
+  auto&      rtc  = peer(f, "RTC");
+  auto const copy = [&](std::uint32_t sizes, address at, std::uint32_t item) {
+    write(f, from, item);
+    write(f, dma1 + ifcr, 0x0FFF'FFFFu);
+    program(f, dma1, 1, to_periph | sizes | en, at, from, 1);
+    idle_to(f, now_ps(f) + 2 * latency_ps);
+    CHECK(flags(read(f, dma1 + isr), 1) == (gif | tcif | htif));
+    write(f, dma1 + ccr(1), 0);
+  };
+  copy(halves, tim5_arr, 0xABCD);
+  copy(halves, tim5_arr + 2, 0x1234);
+  CHECK(
+      tim5.writes
+      == std::vector<write_seen>{
+          {.offset = 0x2C, .size = 4, .value = 0xABCD'ABCDu},
+          {.offset = 0x2C, .size = 4, .value = 0x1234'1234u}
+  });
+  copy(0, rtc_bkp0r + 1, 0xB0);
+  copy(0, rtc_bkp0r + 3, 0x5C);
+  CHECK(
+      rtc.writes
+      == std::vector<write_seen>{
+          {.offset = 0x50, .size = 4, .value = 0xB0B0'B0B0u},
+          {.offset = 0x50, .size = 4, .value = 0x5C5C'5C5Cu}
+  });
+  write(f, gpioa_odr, 0);
+  copy(0, gpioa_odr + 1, 0xB0);
+  CHECK(read(f, gpioa_odr) == 0x0000'B000u);
 }
