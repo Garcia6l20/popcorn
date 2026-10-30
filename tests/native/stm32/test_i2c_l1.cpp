@@ -1,0 +1,1087 @@
+#include "i2c_link_port.hpp"
+#include "stm32_fixture.hpp"
+
+#include <popcorn/core/errors.hpp>
+#include <popcorn/core/log.hpp>
+#include <popcorn/core/machine.hpp>
+#include <popcorn/core/services.hpp>
+#include <popcorn/core/snapshot.hpp>
+#include <popcorn/periph/devices/i2c_eeprom.hpp>
+#include <popcorn/periph/i2c.hpp>
+#include <popcorn/periph/model.hpp>
+#include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/i2c.hpp>
+
+#include <doctest/doctest.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace
+{
+namespace core    = popcorn::core;
+namespace periph  = popcorn::periph;
+namespace stm32   = popcorn::periph::stm32;
+namespace devices = popcorn::periph::devices;
+using popcorn::address;
+using popcorn::icount;
+using popcorn::part_description;
+using popcorn::stop_reason;
+using popcorn::vtime;
+using popcorn::testing::l152rb;
+using popcorn::testing::l152re;
+using popcorn::testing::stm32_fixture;
+using popcorn::testing::sym;
+
+constexpr std::string_view firmware   = "l152xe_l1_i2c_ll";
+constexpr std::string_view firmware_b = "l152xb_l1_i2c_ll";
+constexpr address          i2c1       = 0x4000'5400;
+constexpr address          i2c2       = 0x4000'5800;
+constexpr address          cr1        = 0x00;
+constexpr address          cr2        = 0x04;
+constexpr address          oar1       = 0x08;
+constexpr address          oar2       = 0x0C;
+constexpr address          dr         = 0x10;
+constexpr address          sr1        = 0x14;
+constexpr address          sr2        = 0x18;
+constexpr address          ccr        = 0x1C;
+constexpr address          trise      = 0x20;
+constexpr std::uint32_t    pe         = 1u << 0;
+constexpr std::uint32_t    smbus      = 1u << 1;
+constexpr std::uint32_t    enarp      = 1u << 4;
+constexpr std::uint32_t    enpec      = 1u << 5;
+constexpr std::uint32_t    pec        = 1u << 12;
+constexpr std::uint32_t    alert      = 1u << 13;
+constexpr std::uint32_t    start      = 1u << 8;
+constexpr std::uint32_t    stop       = 1u << 9;
+constexpr std::uint32_t    swrst      = 1u << 15;
+constexpr std::uint32_t    freq2      = 2;
+constexpr std::uint32_t    iterren    = 1u << 8;
+constexpr std::uint32_t    itevten    = 1u << 9;
+constexpr std::uint32_t    itbufen    = 1u << 10;
+constexpr std::uint32_t    dmaen      = 1u << 11;
+constexpr std::uint32_t    sb         = 1u << 0;
+constexpr std::uint32_t    addr       = 1u << 1;
+constexpr std::uint32_t    btf        = 1u << 2;
+constexpr std::uint32_t    txe        = 1u << 7;
+constexpr std::uint32_t    af         = 1u << 10;
+constexpr std::uint32_t    msl        = 1u << 0;
+constexpr std::uint32_t    busy       = 1u << 1;
+constexpr std::uint32_t    tra        = 1u << 2;
+constexpr std::uint32_t    fast       = 1u << 15;
+constexpr std::uint32_t    duty       = 1u << 14;
+constexpr address          rcc        = 0x4002'3800;
+constexpr address          apb1rstr   = rcc + 0x18;
+constexpr address          apb1enr    = rcc + 0x24;
+constexpr std::uint32_t    i2c1_bit   = 1u << 21;
+constexpr std::uint32_t    i2c2_bit   = 1u << 22;
+constexpr address          nvic_ispr0 = 0xE000'E200;
+constexpr address          nvic_ispr1 = nvic_ispr0 + 4;
+constexpr std::uint32_t    event_irq  = 1u << 31;
+constexpr std::uint32_t    error_irq  = 1u << 0;
+constexpr std::uint64_t    pclk1      = 2'097'152;
+constexpr std::uint8_t     device     = 0x50;
+constexpr std::uint64_t    margin     = 1'000'000;
+
+constexpr auto phase(std::uint64_t periods, std::uint64_t cycles = 20) -> std::uint64_t
+{
+  return periods * cycles * 1'000'000'000'000 / pclk1;
+}
+
+class probe_target final : public periph::i2c_target
+{
+public:
+  struct heard
+  {
+    char          kind;
+    std::uint8_t  byte;
+    std::uint64_t at;
+  };
+
+  explicit probe_target(std::uint8_t at = device) : address_{at}
+  {}
+
+  std::vector<heard>         log;
+  std::optional<std::size_t> nack_byte;
+  std::uint64_t              stretch_ps{};
+  periph::i2c_error          error{};
+  bool                       defer{};
+  int                        matched{};
+  int                        attaches{};
+  int                        detaches{};
+
+  [[nodiscard]] auto address() const -> std::uint8_t override
+  {
+    return address_;
+  }
+
+  auto matches(std::uint8_t sent, vtime at) -> bool override
+  {
+    ++matched;
+    return i2c_target::matches(sent, at);
+  }
+
+  auto start(bool read, vtime at) -> periph::i2c_reply override
+  {
+    log.push_back({'S', static_cast<std::uint8_t>(read ? 1 : 0), at.ps});
+    return {.ack = true, .error = error, .stretch_ps = stretch_ps};
+  }
+
+  auto write(std::uint8_t byte, vtime at) -> periph::i2c_reply override
+  {
+    auto const index = bytes().size();
+    log.push_back({'W', byte, at.ps});
+    return {.ack = nack_byte != index, .stretch_ps = stretch_ps};
+  }
+
+  auto read(vtime at) -> periph::i2c_read_reply override
+  {
+    log.push_back({'R', 0, at.ps});
+    return {};
+  }
+
+  auto start_deferred(std::uint8_t sent, bool read, vtime at, std::uint64_t ticket)
+      -> std::optional<periph::i2c_reply> override
+  {
+    if(defer)
+    {
+      log.push_back({'D', sent, at.ps});
+      return std::nullopt;
+    }
+    return i2c_target::start_deferred(sent, read, at, ticket);
+  }
+
+  void stop(vtime at) override
+  {
+    log.push_back({'P', 0, at.ps});
+  }
+
+  void attached(periph::i2c_target_port&) override
+  {
+    ++attaches;
+  }
+
+  void detached() noexcept override
+  {
+    ++detaches;
+  }
+
+  void save(std::vector<std::byte>& out) const override
+  {
+    for(auto const& one : log)
+    {
+      out.push_back(static_cast<std::byte>(one.kind));
+    }
+  }
+
+  void load(std::span<std::byte const> in) override
+  {
+    log.clear();
+    for(auto const one : in)
+    {
+      log.push_back({static_cast<char>(one), 0, 0});
+    }
+  }
+
+  [[nodiscard]] auto bytes() const -> std::vector<std::uint8_t>
+  {
+    std::vector<std::uint8_t> out;
+    for(auto const& one : log)
+    {
+      if(one.kind == 'W')
+      {
+        out.push_back(one.byte);
+      }
+    }
+    return out;
+  }
+
+  [[nodiscard]] auto kinds() const -> std::string
+  {
+    std::string out;
+    for(auto const& one : log)
+    {
+      out.push_back(one.kind);
+    }
+    return out;
+  }
+
+private:
+  std::uint8_t address_;
+};
+
+class bus_probe final : public periph::model
+{
+public:
+  explicit bus_probe(periph::model_context& ctx) : context{ctx}
+  {}
+
+  periph::model_context& context;
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
+
+struct rig
+{
+  std::shared_ptr<probe_target>         target = std::make_shared<probe_target>();
+  std::shared_ptr<devices::eeprom_24xx> eeprom;
+  stm32::board                          board{};
+  std::unique_ptr<stm32_fixture>        f;
+  std::vector<core::log_record>         logged;
+  core::hook_handle                     log_hook;
+
+  explicit rig(
+      std::string_view                                 entry,
+      std::vector<std::shared_ptr<periph::i2c_target>> extra  = {},
+      part_description const&                          desc   = l152re(),
+      std::string_view                                 elf    = firmware,
+      bool                                             strict = false)
+  {
+    if(entry == "write_eeprom" or entry == "nack")
+    {
+      eeprom = std::make_shared<devices::eeprom_24xx>(
+          devices::eeprom_24xx_options{.write_cycle = std::chrono::microseconds{100}});
+      board.i2c["I2C1"].push_back(eeprom);
+    }
+    else
+    {
+      board.i2c["I2C1"].push_back(target);
+    }
+    for(auto& one : extra)
+    {
+      board.i2c["I2C1"].push_back(std::move(one));
+    }
+    auto options               = popcorn::testing::stm32_options();
+    options.models             = stm32::factories(board, desc);
+    options.strict_peripherals = strict;
+    options.models.insert_or_assign(
+        "DAC", [](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+          return std::make_shared<bus_probe>(ctx);
+        });
+    f        = std::make_unique<stm32_fixture>(desc, elf, std::move(options));
+    log_hook = f->target->add_log_sink(
+        [this](core::log_record const& record) { logged.push_back(record); });
+    if(entry == "parked")
+    {
+      f->set("pc", sym(elf, "idle"));
+      write(apb1enr, i2c1_bit | i2c2_bit);
+      write(i2c1 + cr2, freq2);
+      write(i2c1 + ccr, 10);
+      write(i2c1 + trise, 3);
+      write(i2c1 + cr1, pe);
+      return;
+    }
+    REQUIRE(
+        f->run_to_stop({.max_instructions = icount{1'000'000}, .until = sym(elf, "main")}).reason
+        == stop_reason::address);
+    f->set("pc", sym(elf, entry));
+  }
+
+  auto finish() const -> std::vector<std::uint32_t>
+  {
+    auto const stopped = f->run_to_stop({.max_instructions = icount{2'000'000}});
+    CAPTURE(stopped.detail);
+    REQUIRE(stopped.reason == stop_reason::user);
+    return f->log();
+  }
+
+  auto read(address at) const -> std::uint32_t
+  {
+    auto const value = f->target->mem().read(at, 4);
+    REQUIRE(value.has_value());
+    return static_cast<std::uint32_t>(*value);
+  }
+
+  void write(address at, std::uint32_t value) const
+  {
+    REQUIRE(f->target->mem().write(at, 4, value).has_value());
+  }
+
+  [[nodiscard]] auto services() const -> popcorn::core::machine_services&
+  {
+    auto* const probe = f->model_of<bus_probe>("DAC");
+    REQUIRE(probe != nullptr);
+    return probe->context.services;
+  }
+
+  auto cpu_read(address at) const -> std::uint32_t
+  {
+    auto* const probe = f->model_of<bus_probe>("DAC");
+    REQUIRE(probe != nullptr);
+    auto const word = probe->context.services.read(at, 4, popcorn::initiator::cpu);
+    REQUIRE(word.has_value());
+    return static_cast<std::uint32_t>(*word);
+  }
+
+  void cpu_write(address at, std::uint32_t value) const
+  {
+    auto* const probe = f->model_of<bus_probe>("DAC");
+    REQUIRE(probe != nullptr);
+    REQUIRE(probe->context.services.write(at, 4, value, popcorn::initiator::cpu).has_value());
+  }
+
+  void idle_to(std::uint64_t ps) const
+  {
+    REQUIRE(
+        f->run_to_stop({.max_instructions = icount{1'000'000}, .until_time = vtime{ps}}).reason
+        == stop_reason::time);
+  }
+
+  [[nodiscard]] auto now_ps() const -> std::uint64_t
+  {
+    return f->target->virtual_clock().time().ps;
+  }
+
+  [[nodiscard]] auto warnings(std::string_view text) const -> std::ptrdiff_t
+  {
+    return std::ranges::count_if(logged, [&](core::log_record const& record) {
+      return record.message.find(text) != std::string::npos;
+    });
+  }
+
+  auto started(std::uint32_t control = pe) const -> std::uint64_t
+  {
+    auto const t0 = now_ps();
+    cpu_write(i2c1 + cr1, control | start);
+    idle_to(t0 + phase(1));
+    return t0 + phase(1);
+  }
+
+  auto addressed(std::uint8_t to = device, bool read_bit = false, std::uint32_t control = pe) const
+      -> std::uint64_t
+  {
+    static_cast<void>(started(control));
+    static_cast<void>(cpu_read(i2c1 + sr1));
+    auto const t1 = now_ps();
+    cpu_write(i2c1 + dr, static_cast<std::uint32_t>(to << 1 | (read_bit ? 1 : 0)));
+    idle_to(t1 + phase(9));
+    return t1 + phase(9);
+  }
+
+  void transmitting() const
+  {
+    static_cast<void>(addressed());
+    static_cast<void>(cpu_read(i2c1 + sr1));
+    static_cast<void>(cpu_read(i2c1 + sr2));
+  }
+};
+
+auto refusal(auto&& call) -> std::string
+{
+  try
+  {
+    call();
+  }
+  catch(popcorn::config_error const& error)
+  {
+    return error.what();
+  }
+  return {};
+}
+
+TEST_CASE("RM0038 Table 140: TRISE 0x0002, every other I2C register 0 after reset")
+{
+  for(auto const& [desc, elf] : {
+          std::pair{&l152re(), firmware  },
+          std::pair{&l152rb(), firmware_b}
+  })
+  {
+    rig r{"idle", {}, *desc, elf};
+    r.f->target->reset();
+    for(auto const base : {i2c1, i2c2})
+    {
+      CAPTURE(base);
+      for(auto const offset : {cr1, cr2, oar1, oar2, dr, sr1, sr2, ccr})
+      {
+        CHECK(r.read(base + offset) == 0);
+      }
+      CHECK(r.read(base + trise) == 2);
+    }
+  }
+}
+
+TEST_CASE("RM0038 26.3.3 Figure 212: LL writes the word address and three bytes to a 24xx EEPROM")
+{
+  rig r{"write_eeprom"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{msl | busy | tra, txe | btf, 0, 0});
+  r.f->set("pc", sym(firmware, "idle"));
+  r.idle_to(r.now_ps() + 200'000'000);
+  auto const contents = r.eeprom->contents();
+  CHECK(contents[0x10] == std::byte{0xA5});
+  CHECK(contents[0x11] == std::byte{0x5A});
+  CHECK(contents[0x12] == std::byte{0x3C});
+  CHECK(std::ranges::none_of(r.logged, [](core::log_record const& one) {
+    return one.peripheral == "I2C1";
+  }));
+}
+
+TEST_CASE("RM0038 26.3.4 AF: LL addresses 0x51, no target acknowledges, AF kept by the STOP")
+{
+  rig r{"nack"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{af, msl | busy, af, 0, 0});
+}
+
+TEST_CASE("RM0038 26.6.8: START 1 SCL period, address 9, Sm 2 x CCR, Fm 3 x CCR and 25 x CCR")
+{
+  for(auto const& [mode, cycles] : {
+          std::pair{0u,          20ull },
+          std::pair{fast,        30ull },
+          std::pair{fast | duty, 250ull}
+  })
+  {
+    CAPTURE(mode);
+    rig r{"parked"};
+    r.write(i2c1 + cr1, 0);
+    r.write(i2c1 + ccr, mode | 10);
+    r.write(i2c1 + cr1, pe);
+    auto const t0 = r.now_ps();
+    r.cpu_write(i2c1 + cr1, pe | start);
+    CHECK((r.read(i2c1 + sr2) & busy) == busy);
+    r.idle_to(t0 + phase(1, cycles) - margin);
+    CHECK((r.read(i2c1 + sr1) & sb) == 0);
+    r.idle_to(t0 + phase(1, cycles));
+    CHECK(r.read(i2c1 + sr1) == sb);
+    CHECK(r.read(i2c1 + sr2) == (msl | busy));
+    CHECK((r.read(i2c1 + cr1) & start) == 0);
+    static_cast<void>(r.cpu_read(i2c1 + sr1));
+    auto const t1 = r.now_ps();
+    r.cpu_write(i2c1 + dr, device << 1);
+    CHECK(r.read(i2c1 + sr1) == 0);
+    r.idle_to(t1 + phase(9, cycles) - margin);
+    CHECK(r.target->log.empty());
+    r.idle_to(t1 + phase(9, cycles));
+    REQUIRE(r.target->kinds() == "S");
+    CHECK(r.target->log[0].at == t1 + phase(9, cycles));
+    CHECK(r.read(i2c1 + sr1) == addr);
+    CHECK(r.read(i2c1 + sr2) == (msl | busy | tra));
+  }
+}
+
+TEST_CASE("RM0038 26.6.7 EV6: ADDR clears by an SR1 read then an SR2 read, debugger reads aside")
+{
+  rig r{"parked"};
+  static_cast<void>(r.addressed());
+  CHECK((r.cpu_read(i2c1 + sr2) & msl) == msl);
+  CHECK((r.read(i2c1 + sr1) & addr) == addr);
+  CHECK((r.cpu_read(i2c1 + sr1) & addr) == addr);
+  CHECK((r.cpu_read(i2c1 + sr1) & addr) == addr);
+  static_cast<void>(r.read(i2c1 + sr2));
+  CHECK((r.read(i2c1 + sr1) & addr) == addr);
+  CHECK((r.cpu_read(i2c1 + sr2) & tra) == tra);
+  CHECK(r.read(i2c1 + sr1) == txe);
+}
+
+TEST_CASE("RM0038 26.6.7: an SR1 read before ADDR sets arms the SR2 read that clears it")
+{
+  rig r{"parked"};
+  static_cast<void>(r.started());
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  auto const t1 = r.now_ps();
+  r.cpu_write(i2c1 + dr, device << 1);
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  r.idle_to(t1 + phase(9));
+  CHECK((r.read(i2c1 + sr1) & addr) == addr);
+  static_cast<void>(r.cpu_read(i2c1 + sr2));
+  CHECK(r.read(i2c1 + sr1) == txe);
+}
+
+TEST_CASE("RM0038 26.6.6 SB, inferred: a DR write with no SR1 read since keeps SB, sends nothing")
+{
+  rig r{"parked"};
+  static_cast<void>(r.started());
+  r.cpu_write(i2c1 + dr, device << 1);
+  r.idle_to(r.now_ps() + phase(20));
+  CHECK(r.read(i2c1 + sr1) == sb);
+  CHECK(r.target->log.empty());
+  static_cast<void>(r.read(i2c1 + sr1));
+  r.cpu_write(i2c1 + dr, device << 1);
+  r.idle_to(r.now_ps() + phase(20));
+  CHECK(r.target->log.empty());
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  r.cpu_write(i2c1 + dr, device << 1);
+  r.idle_to(r.now_ps() + phase(9));
+  CHECK(r.target->kinds() == "S");
+}
+
+TEST_CASE("RM0038 26.3.3 EV8_1 EV8: TxE kept by the first DR write, DR moves at the acknowledge")
+{
+  rig r{"parked"};
+  r.transmitting();
+  auto const t0 = r.now_ps();
+  r.cpu_write(i2c1 + dr, 0x11);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  r.cpu_write(i2c1 + dr, 0x22);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  r.idle_to(t0 + phase(9) - margin);
+  CHECK(r.target->bytes().empty());
+  r.idle_to(t0 + phase(9));
+  CHECK(r.target->bytes() == std::vector<std::uint8_t>{0x11});
+  CHECK(r.target->log.back().at == t0 + phase(9));
+  CHECK(r.read(i2c1 + sr1) == txe);
+  r.idle_to(t0 + phase(18));
+  CHECK(r.target->bytes() == std::vector<std::uint8_t>{0x11, 0x22});
+  CHECK(r.read(i2c1 + sr1) == (txe | btf));
+  r.idle_to(t0 + phase(30));
+  CHECK(r.target->bytes().size() == 2);
+  auto const t1 = r.now_ps();
+  r.cpu_write(i2c1 + dr, 0x33);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  r.idle_to(t1 + phase(9));
+  CHECK(r.target->bytes() == std::vector<std::uint8_t>{0x11, 0x22, 0x33});
+}
+
+TEST_CASE("RM0038 26.6.6 BTF: a DR read clears BTF, SCL stays low until a DR write")
+{
+  rig r{"parked"};
+  r.transmitting();
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.idle_to(r.now_ps() + phase(9));
+  CHECK(r.read(i2c1 + sr1) == (txe | btf));
+  static_cast<void>(r.cpu_read(i2c1 + dr));
+  CHECK(r.read(i2c1 + sr1) == txe);
+  r.idle_to(r.now_ps() + phase(20));
+  CHECK(r.target->bytes().size() == 1);
+}
+
+TEST_CASE("RM0038 26.3.3 EV8_2: STOP after BTF lasts 1 period, clears TxE, BTF, MSL, BUSY, TRA")
+{
+  rig r{"parked"};
+  r.transmitting();
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.idle_to(r.now_ps() + phase(9));
+  auto const t0 = r.now_ps();
+  r.cpu_write(i2c1 + cr1, pe | stop);
+  r.idle_to(t0 + phase(1) - margin);
+  CHECK(r.target->kinds() == "SW");
+  CHECK(r.read(i2c1 + sr2) == (msl | busy | tra));
+  r.idle_to(t0 + phase(1));
+  CHECK(r.target->kinds() == "SWP");
+  CHECK(r.target->log.back().at == t0 + phase(1));
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
+  CHECK(r.read(i2c1 + cr1) == pe);
+}
+
+TEST_CASE("RM0038 26.6.1 STOP: a STOP set while a byte shifts goes after it, DR is not sent")
+{
+  rig r{"parked"};
+  r.transmitting();
+  auto const t0 = r.now_ps();
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.cpu_write(i2c1 + dr, 0x22);
+  r.cpu_write(i2c1 + cr1, pe | stop);
+  r.idle_to(t0 + phase(9) + phase(1));
+  CHECK(r.target->kinds() == "SWP");
+  CHECK(r.target->bytes() == std::vector<std::uint8_t>{0x11});
+  CHECK(r.target->log.back().at == t0 + phase(9) + phase(1));
+  CHECK(r.read(i2c1 + sr1) == 0);
+  r.idle_to(t0 + phase(30));
+  CHECK(r.target->kinds() == "SWP");
+}
+
+TEST_CASE(
+    "RM0038 26.6.6 AF: a NACKed byte sets AF, BTF 0, TxE kept and a DR write unsent, inferred")
+{
+  rig r{"parked"};
+  r.target->nack_byte = 1;
+  r.write(i2c1 + cr2, freq2 | iterren);
+  r.transmitting();
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.idle_to(r.now_ps() + phase(9));
+  CHECK((r.read(nvic_ispr1) & error_irq) == 0);
+  r.cpu_write(i2c1 + dr, 0x22);
+  r.idle_to(r.now_ps() + phase(9));
+  CHECK(r.read(i2c1 + sr1) == (txe | af));
+  CHECK((r.read(nvic_ispr1) & error_irq) == error_irq);
+  r.cpu_write(i2c1 + dr, 0x33);
+  r.idle_to(r.now_ps() + phase(20));
+  CHECK(r.target->bytes() == std::vector<std::uint8_t>{0x11, 0x22});
+  r.cpu_write(i2c1 + cr1, pe | stop);
+  r.idle_to(r.now_ps() + phase(1));
+  CHECK(r.target->kinds() == "SWWP");
+  CHECK(r.read(i2c1 + sr1) == af);
+  CHECK(r.read(i2c1 + sr2) == 0);
+}
+
+TEST_CASE("RM0038 26.6.6: SR1 error flags clear by a write of 0, a write of 1 keeps them")
+{
+  rig r{"parked"};
+  static_cast<void>(r.addressed(0x51));
+  CHECK(r.read(i2c1 + sr1) == af);
+  r.cpu_write(i2c1 + sr1, af);
+  CHECK(r.read(i2c1 + sr1) == af);
+  r.cpu_write(i2c1 + sr1, ~af);
+  CHECK(r.read(i2c1 + sr1) == 0);
+}
+
+TEST_CASE(
+    "RM0038 26.3.3: a repeated START clears TRA, the STOP reaches every target of the transfer")
+{
+  auto other = std::make_shared<probe_target>(0x51);
+  rig  r{"parked", {other}};
+  r.transmitting();
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.idle_to(r.now_ps() + phase(9));
+  auto const t0 = r.now_ps();
+  r.cpu_write(i2c1 + cr1, pe | start);
+  r.idle_to(t0 + phase(1));
+  CHECK(r.read(i2c1 + sr1) == sb);
+  CHECK(r.read(i2c1 + sr2) == (msl | busy));
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  r.cpu_write(i2c1 + dr, 0x51 << 1);
+  r.idle_to(r.now_ps() + phase(9));
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  static_cast<void>(r.cpu_read(i2c1 + sr2));
+  r.cpu_write(i2c1 + dr, 0x22);
+  r.idle_to(r.now_ps() + phase(9));
+  r.cpu_write(i2c1 + cr1, pe | stop);
+  r.idle_to(r.now_ps() + phase(1));
+  CHECK(r.target->kinds() == "SWP");
+  CHECK(other->kinds() == "SWP");
+  CHECK(other->bytes() == std::vector<std::uint8_t>{0x22});
+}
+
+TEST_CASE("RM0038 Table 139: SB and BTF on ITEVTEN, TxE only with ITBUFEN, AF on ITERREN")
+{
+  constexpr address nvic_icpr0 = 0xE000'E280;
+  rig               r{"parked"};
+  r.write(i2c1 + cr2, freq2 | itevten | iterren);
+  static_cast<void>(r.started());
+  CHECK((r.read(nvic_ispr0) & event_irq) == event_irq);
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  r.cpu_write(i2c1 + dr, device << 1);
+  r.write(nvic_icpr0, event_irq);
+  CHECK((r.read(nvic_ispr0) & event_irq) == 0);
+  r.idle_to(r.now_ps() + phase(9));
+  CHECK((r.read(nvic_ispr0) & event_irq) == event_irq);
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  static_cast<void>(r.cpu_read(i2c1 + sr2));
+  r.write(nvic_icpr0, event_irq);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  CHECK((r.read(nvic_ispr0) & event_irq) == 0);
+  r.write(i2c1 + cr2, freq2 | itevten | itbufen | iterren);
+  CHECK((r.read(nvic_ispr0) & event_irq) == event_irq);
+  r.write(i2c1 + cr2, freq2 | itevten | iterren);
+  r.write(nvic_icpr0, event_irq);
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.idle_to(r.now_ps() + phase(9));
+  CHECK(r.read(i2c1 + sr1) == (txe | btf));
+  CHECK((r.read(nvic_ispr0) & event_irq) == event_irq);
+  CHECK((r.read(nvic_ispr1) & error_irq) == 0);
+}
+
+TEST_CASE("a target's stretch_ps holds SCL after its byte, the next phase starts after it")
+{
+  rig r{"parked"};
+  r.target->stretch_ps = 10'000'000;
+  r.transmitting();
+  auto const t0 = r.now_ps();
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.cpu_write(i2c1 + dr, 0x22);
+  r.idle_to(t0 + phase(9) + 5'000'000);
+  CHECK(r.target->bytes().empty());
+  r.idle_to(t0 + 2 * phase(9) + 20'000'000);
+  REQUIRE(r.target->bytes().size() == 2);
+  CHECK(r.target->log[1].at == t0 + phase(9) + 10'000'000);
+  CHECK(r.target->log[2].at == t0 + 2 * phase(9) + 20'000'000);
+}
+
+TEST_CASE("PE 0 mid-byte, which RM0038 26.6.1 forbids in master mode: popcorn ends it at once")
+{
+  rig r{"parked"};
+  r.transmitting();
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.cpu_write(i2c1 + cr1, pe | stop);
+  r.cpu_write(i2c1 + cr1, stop);
+  CHECK(r.read(i2c1 + cr1) == 0);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
+  CHECK(r.warnings("PE 0 during a controller transfer, which RM0038 26.6.1 forbids") == 1);
+  r.idle_to(r.now_ps() + phase(20));
+  CHECK(r.target->kinds() == "S");
+  r.cpu_write(i2c1 + cr1, pe);
+  r.cpu_write(i2c1 + cr1, 0);
+  r.cpu_write(i2c1 + cr1, pe);
+  static_cast<void>(r.addressed());
+  CHECK(r.target->kinds() == "SS");
+  r.cpu_write(i2c1 + cr1, 0);
+  CHECK(r.warnings("PE 0 during a controller transfer") == 1);
+}
+
+TEST_CASE("RM0038 26.6.1 SWRST: SWRST 1 resets the I2C registers and keeps SWRST")
+{
+  rig r{"parked"};
+  static_cast<void>(r.addressed());
+  r.cpu_write(i2c1 + cr1, pe | swrst);
+  CHECK(r.read(i2c1 + cr1) == swrst);
+  CHECK(r.read(i2c1 + cr2) == 0);
+  CHECK(r.read(i2c1 + ccr) == 0);
+  CHECK(r.read(i2c1 + trise) == 2);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
+  r.cpu_write(i2c1 + cr1, 0);
+  CHECK(r.read(i2c1 + cr1) == 0);
+}
+
+TEST_CASE("RM0038 26.6.2 and 26.6.9: FREQ, CCR and TRISE are checked once at the first START")
+{
+  rig r{"parked"};
+  r.write(i2c1 + cr1, 0);
+  r.write(i2c1 + cr2, 8);
+  r.write(i2c1 + ccr, 3);
+  r.write(i2c1 + trise, 5);
+  r.write(i2c1 + cr1, pe);
+  static_cast<void>(r.started());
+  r.cpu_write(i2c1 + cr1, pe | stop);
+  r.idle_to(r.now_ps() + phase(1, 6));
+  r.cpu_write(i2c1 + cr1, pe | start);
+  r.idle_to(r.now_ps() + phase(1, 6));
+  CHECK(r.warnings("FREQ 8 for a PCLK1 of 2097152 Hz, RM0038 26.6.2 asks 2") == 1);
+  CHECK(r.warnings("CCR 3 below the minimum 4 of RM0038 26.6.8") == 1);
+  CHECK(r.warnings("TRISE 5 below the 9 RM0038 26.6.9 asks for FREQ 8 in Sm mode") == 1);
+  CHECK(r.warnings("below the 2 MHz") == 0);
+  CHECK(r.read(i2c1 + sr1) == sb);
+}
+
+TEST_CASE("RM0038 26.3.3: a PCLK1 below 4 MHz in Fm mode and TRISE in Fm mode warn")
+{
+  rig r{"parked"};
+  r.write(i2c1 + cr1, 0);
+  r.write(i2c1 + ccr, fast | 10);
+  r.write(i2c1 + trise, 1);
+  r.write(i2c1 + cr1, pe);
+  r.cpu_write(i2c1 + cr1, pe | start);
+  CHECK(r.warnings("a PCLK1 of 2097152 Hz, below the 4 MHz RM0038 26.3.3 asks in Fm mode") == 1);
+  CHECK(r.warnings("TRISE") == 0);
+  CHECK(r.warnings("FREQ") == 0);
+}
+
+TEST_CASE("unmodelled CR1 and CR2 functions and controller receive each warn once")
+{
+  rig r{"parked"};
+  r.write(i2c1 + cr2, freq2 | dmaen);
+  static_cast<void>(r.addressed(device, true, pe | smbus));
+  CHECK(r.target->log[0].byte == 1);
+  CHECK(r.read(i2c1 + sr2) == (msl | busy));
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  static_cast<void>(r.cpu_read(i2c1 + sr2));
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.warnings("SMBus, PEC, ALERT or ARP: not modelled") == 1);
+  CHECK(r.warnings("the DMA requests of CR2.DMAEN: not modelled") == 1);
+  CHECK(r.warnings("controller receive: not modelled") == 1);
+}
+
+TEST_CASE("an error a target injects warns once, the byte completes as its acknowledge says")
+{
+  rig r{"parked"};
+  r.target->error = periph::i2c_error::bus_error;
+  static_cast<void>(r.addressed());
+  CHECK(r.read(i2c1 + sr1) == addr);
+  CHECK(r.warnings("not modelled, the byte completes as its acknowledge says") == 1);
+}
+
+TEST_CASE("a stopped PCLK1 starts no START and warns once")
+{
+  rig         r{"parked"};
+  auto* const probe = r.f->model_of<bus_probe>("DAC");
+  REQUIRE(probe != nullptr);
+  probe->context.clock.set_hz(probe->context.clock.domain("pclk1"), 0);
+  r.cpu_write(i2c1 + cr1, pe | start);
+  r.cpu_write(i2c1 + cr1, pe | start);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.warnings("the I2C bus clock PCLK1 is stopped") == 1);
+  CHECK(r.warnings("FREQ") == 0);
+  CHECK(r.warnings("below the") == 0);
+}
+
+TEST_CASE("each target is attached at construction and detached at destruction")
+{
+  auto target = std::shared_ptr<probe_target>{};
+  {
+    rig r{"parked"};
+    target = r.target;
+    CHECK(target->attaches == 1);
+    CHECK(target->detaches == 0);
+  }
+  CHECK(target->detaches == 1);
+}
+
+TEST_CASE("a target leaving its address answer pending fails the run, the phase takes a NACK")
+{
+  rig r{"parked"};
+  r.target->defer = true;
+  static_cast<void>(r.started());
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  r.cpu_write(i2c1 + dr, device << 1);
+  auto const refused = refusal([&] {
+    static_cast<void>(r.f->target->run_slice(
+        {.max_instructions = icount{1'000'000}, .until_time = vtime{r.now_ps() + phase(10)}}));
+  });
+  CHECK(refused.contains(
+      "an answer at the phase's end from the target at 0x50, the STM32L1 I2C completes no "
+      "deferred phase"));
+  CHECK(r.target->kinds() == "D");
+  CHECK(r.read(i2c1 + sr1) == af);
+}
+
+TEST_CASE("i2c_target_port::complete() and complete_read() throw config_error on the L1 I2C")
+{
+  rig         r{"parked"};
+  auto* const port = dynamic_cast<periph::i2c_target_port*>(r.f->target->model("I2C1"));
+  REQUIRE(port != nullptr);
+  auto const at = vtime{r.now_ps()};
+  CHECK(refusal([&] {
+          port->complete(1, {}, at, 1);
+        }).contains("the STM32L1 I2C completes no deferred phase"));
+  CHECK(refusal([&] {
+          port->complete_read(1, {}, at, 1);
+        }).contains("the STM32L1 I2C completes no deferred phase"));
+  CHECK(dynamic_cast<periph::i2c_controller_port*>(r.f->target->model("I2C1")) == nullptr);
+}
+
+TEST_CASE("a board.i2c_controllers entry on an L1 I2C is refused with config_error")
+{
+  class sink final : public periph::i2c_controller_sink
+  {
+  public:
+    void answered(std::uint64_t, periph::i2c_phase, periph::i2c_answer, vtime) override
+    {}
+  };
+  stm32::board board{};
+  board.i2c_controllers["I2C1"] = std::make_shared<sink>();
+  auto options                  = popcorn::testing::stm32_options();
+  options.models                = stm32::factories(board, l152re());
+  CHECK(refusal([&] {
+          stm32_fixture{l152re(), firmware, std::move(options)};
+        }).contains("no controller entry, the STM32L1 I2C model runs as a controller"));
+}
+
+TEST_CASE("a snapshot mid-byte restores the byte in flight, the targets and the transfer")
+{
+  rig r{"parked"};
+  r.transmitting();
+  auto const t0 = r.now_ps();
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.cpu_write(i2c1 + dr, 0x22);
+  r.idle_to(t0 + phase(4));
+  auto const saved = r.f->target->snapshot();
+  rig        other{"parked"};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.target->kinds() == "S");
+  for(auto const* one : {&r, &other})
+  {
+    one->idle_to(t0 + phase(18));
+    one->cpu_write(i2c1 + cr1, pe | stop);
+    one->idle_to(t0 + phase(19));
+    CHECK(one->target->bytes() == std::vector<std::uint8_t>{0x11, 0x22});
+    CHECK(one->target->kinds() == "SWWP");
+    CHECK(one->read(i2c1 + sr2) == 0);
+  }
+  CHECK(other.target->log[1].at == t0 + phase(9));
+}
+
+TEST_CASE(
+    "checklist 31: an I2C1RST pulse drops the byte in flight, new phases keep their own times")
+{
+  rig r{"parked"};
+  r.transmitting();
+  auto const t0 = r.now_ps();
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.idle_to(t0 + phase(2));
+  r.write(apb1rstr, i2c1_bit);
+  r.write(apb1rstr, 0);
+  CHECK(r.read(i2c1 + cr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
+  r.write(i2c1 + cr2, freq2);
+  r.write(i2c1 + ccr, 4);
+  r.write(i2c1 + trise, 3);
+  r.write(i2c1 + cr1, pe);
+  auto const t1 = r.now_ps();
+  r.cpu_write(i2c1 + cr1, pe | start);
+  r.idle_to(t1 + phase(1, 8));
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  r.cpu_write(i2c1 + dr, device << 1);
+  r.idle_to(t1 + phase(10, 8));
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  static_cast<void>(r.cpu_read(i2c1 + sr2));
+  r.cpu_write(i2c1 + dr, 0x22);
+  r.cpu_write(i2c1 + dr, 0x33);
+  r.idle_to(t0 + phase(9));
+  CHECK(r.target->kinds() == "SS");
+  CHECK(r.read(i2c1 + sr1) == 0);
+  r.idle_to(t1 + phase(28, 8));
+  REQUIRE(r.target->bytes() == std::vector<std::uint8_t>{0x22, 0x33});
+  CHECK(r.target->log[2].at == t1 + phase(19, 8));
+  CHECK(r.target->log[3].at == t1 + phase(28, 8));
+}
+
+TEST_CASE("checklist 53: under strict_peripherals SMBus, PEC, ALERT, ARP and DMAEN raise at START")
+{
+  for(auto const& [cr1_bits, cr2_bits] : {
+          std::pair{smbus, freq2        },
+          std::pair{enarp, freq2        },
+          std::pair{enpec, freq2        },
+          std::pair{pec,   freq2        },
+          std::pair{alert, freq2        },
+          std::pair{0u,    freq2 | dmaen},
+  })
+  {
+    CAPTURE(cr1_bits);
+    rig r{"parked", {}, l152re(), firmware, true};
+    r.write(i2c1 + cr2, cr2_bits);
+    r.write(i2c1 + cr1, pe | cr1_bits);
+    CHECK_THROWS_AS(
+        static_cast<void>(
+            r.services().write(i2c1 + cr1, 4, pe | cr1_bits | start, popcorn::initiator::cpu)),
+        popcorn::model_error);
+    CHECK(r.read(i2c1 + sr2) == 0);
+    CHECK(r.warnings("not modelled") == 1);
+  }
+}
+
+TEST_CASE("checklist 53: under strict_peripherals controller receive raises at the ADDR clear")
+{
+  rig r{"parked", {}, l152re(), firmware, true};
+  static_cast<void>(r.addressed(device, true));
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  CHECK_THROWS_AS(
+      static_cast<void>(r.services().read(i2c1 + sr2, 4, popcorn::initiator::cpu)),
+      popcorn::model_error);
+  CHECK(r.read(i2c1 + sr1) == addr);
+  CHECK(r.warnings("controller receive: not modelled") == 1);
+}
+
+TEST_CASE("checklist 14: target times count from power-on after a software reset")
+{
+  rig r{"parked"};
+  r.idle_to(r.now_ps() + 1'000'000'000);
+  r.f->target->reset(popcorn::reset_kind::software);
+  r.f->set("pc", sym(firmware, "idle"));
+  r.write(apb1enr, i2c1_bit);
+  r.write(i2c1 + cr2, freq2);
+  r.write(i2c1 + ccr, 10);
+  r.write(i2c1 + trise, 3);
+  r.write(i2c1 + cr1, pe);
+  auto const end = r.addressed();
+  REQUIRE(r.target->kinds() == "S");
+  auto const since = r.f->target->virtual_clock().since_power_on().ps;
+  CHECK(since > end);
+  CHECK(r.target->log[0].at == since);
+}
+
+TEST_CASE("RM0038 26.6.9: a new PE period checks the timing again, TRISE above the rule passes")
+{
+  rig r{"parked"};
+  static_cast<void>(r.started());
+  r.cpu_write(i2c1 + cr1, pe | stop);
+  r.idle_to(r.now_ps() + phase(1));
+  CHECK(r.warnings("CCR") == 0);
+  r.cpu_write(i2c1 + cr1, 0);
+  r.write(i2c1 + ccr, 3);
+  r.write(i2c1 + trise, 7);
+  r.cpu_write(i2c1 + cr1, pe);
+  r.cpu_write(i2c1 + cr1, pe | start);
+  CHECK(r.warnings("CCR 3 below the minimum 4 of RM0038 26.6.8") == 1);
+  CHECK(r.warnings("TRISE") == 0);
+}
+
+TEST_CASE("PE 0 drops a target's stretch, the next START runs one period after its write")
+{
+  rig r{"parked"};
+  r.transmitting();
+  r.target->stretch_ps = 50'000'000;
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.idle_to(r.now_ps() + phase(9));
+  r.cpu_write(i2c1 + cr1, 0);
+  r.cpu_write(i2c1 + cr1, pe);
+  auto const t0 = r.now_ps();
+  r.cpu_write(i2c1 + cr1, pe | start);
+  r.idle_to(t0 + phase(1));
+  CHECK(r.read(i2c1 + sr1) == sb);
+}
+
+TEST_CASE("the L1 I2C offers no i2c_link_port and no i2c_bus host hold")
+{
+  rig         r{"parked"};
+  auto* const model = r.f->target->model("I2C1");
+  REQUIRE(model != nullptr);
+  CHECK(dynamic_cast<stm32::i2c_link_port*>(model) == nullptr);
+  CHECK(dynamic_cast<stm32::i2c_bus*>(model) == nullptr);
+}
+
+TEST_CASE("a snapshot with another number of targets is refused, a matching one restores")
+{
+  rig        r{"parked"};
+  auto const saved = r.f->target->snapshot();
+  rig        other{"parked", {std::make_shared<probe_target>(0x51)}};
+  auto const own = other.f->target->snapshot();
+  CHECK(refusal([&] {
+          other.f->target->restore(
+              core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+        }).contains("a snapshot with 1 targets, the machine has 2"));
+  other.f->target->restore(own);
+  static_cast<void>(other.addressed());
+  CHECK(other.target->kinds() == "S");
+}
+
+TEST_CASE("RM0038 26.6.1 SWRST: while SWRST is 1 a CR1 write changes nothing but the SWRST clear")
+{
+  rig r{"parked"};
+  r.cpu_write(i2c1 + cr1, pe | swrst);
+  r.cpu_write(i2c1 + cr1, pe | start | swrst);
+  CHECK(r.read(i2c1 + cr1) == swrst);
+  CHECK(r.read(i2c1 + sr2) == 0);
+  r.cpu_write(i2c1 + cr1, pe | start);
+  CHECK(r.read(i2c1 + cr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
+}
+
+TEST_CASE("a 10-bit header address byte takes the NACK path and reaches no matches()")
+{
+  rig r{"parked"};
+  static_cast<void>(r.addressed(0x78));
+  CHECK(r.read(i2c1 + sr1) == af);
+  CHECK(r.target->matched == 0);
+  r.cpu_write(i2c1 + cr1, pe | stop);
+  r.idle_to(r.now_ps() + phase(1));
+  static_cast<void>(r.addressed());
+  CHECK(r.target->matched == 1);
+}
+}

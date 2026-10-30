@@ -425,7 +425,7 @@ Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 
 ## I2C
 
-Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/i2c.cpp)
+Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/i2c.cpp), [i2c_v1.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/i2c_v1.cpp)
 
 - The I2C runs as a 7-bit controller and as a 7-bit target on OAR1, OAR2 with its mask and the
   general call, with clock stretching, NOSTRETCH, SBC and the SMBus timeouts of TIMEOUTR. 10-bit
@@ -465,6 +465,26 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - PE set during a bus hold reads BUSY 1 at once. Silicon waits for the next START.
 - A transfer that meets a hold waits. On silicon it would lose arbitration. A target's ARLO reply
   models that case.
+- STM32L1 I2C1 and I2C2, RM0038 section 26, run as a 7-bit controller transmitter on board
+  targets. The SCL period is Thigh + Tlow from CCR and PCLK1, RM0038 26.6.8, without the rise time
+  and the noise filter delay: a START takes 1 period, a byte 9, a STOP 1. FREQ, CCR, TRISE and the
+  PCLK1 rate are checked at the first START after PE is set with PCLK1 running, and each rule a
+  configuration breaks logs one `model_warning`. TRISE passes at or above the rise time.
+- Controller receive, SMBus, PEC, ALERT, ARP and CR2.DMAEN log one `model_warning`, raise
+  `model_error` under `strict_peripherals` at the START or the ADDR clear that uses them, and the
+  bus stays idle for them. An address with the R/W bit set ends its address phase with ADDR and
+  TRA 0, and no byte follows. OAR1, OAR2, ENGC and NOSTRETCH are stored, and the instance answers
+  no address as a target. The model takes no `board.i2c_controllers` entry.
+- PE 0 during a controller transfer, which RM0038 26.6.1 forbids, ends it at once and logs one
+  `model_warning`. The SB clear by an SR1 read then a DR write follows RM0038 26.6.6 SB and Figure
+  212 EV5. Inferred: a DR write with SB set and no SR1 read since the last SB or ADDR clear sends
+  nothing, and the DR write that clears SB takes the SR1 read, so the ADDR clear needs an SR1 read
+  after it. A DR write while ADDR is set, during the address phase or after a data NACK sends
+  nothing, inferred.
+- An STM32L1 I2C target answers at the phase's end. A target that leaves its answer pending is
+  taken as NACK and fails the run with `config_error`, and `i2c_target_port::complete()` and
+  `complete_read()` throw `config_error`. The STM32L1 I2C is a link end of no linked system and
+  takes no host bus hold. An `i2c_error` in a target's answer logs one `model_warning`.
 
 ## IWDG
 
@@ -769,7 +789,8 @@ Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   `RCC_APBxENR` holds. A frame starts at the DR write, without the 2 APB clock delay of the
   RM0038 28.3.5 note.
 - `SPI_I2SCFGR` and `SPI_I2SPR` are storage: the I2S mode is not modelled. On Cat.3 to Cat.6
-  CR2.FRF 1 logs one `model_warning` and the SPI runs the Motorola format. On Cat.1 and Cat.2 FRF
+  CR2.FRF 1 with SPE 1 logs one `model_warning`, raises `model_error` under `strict_peripherals`
+  at the CR1 or CR2 write, and the SPI runs the Motorola format. On Cat.1 and Cat.2 FRF
   is storage, RM0038 28.5.2. TIFRFE, UDR and CHSIDE stay 0.
 - Clearing SPE lets the frame in flight finish and land with BSY 1, then no frame starts,
   RM0038 28.3.8 for the receive-only modes, inferred for the others. Both buffers keep their

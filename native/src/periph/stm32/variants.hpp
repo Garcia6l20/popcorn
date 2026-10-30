@@ -463,6 +463,16 @@ inline constexpr i2c_variant u5_i2c{};
 /** @brief STM32H5 I2C, RM0481 has no `I2C_AUTOCR`. */
 inline constexpr i2c_variant h5_i2c{.autocr = false};
 
+/** @brief Differences between the I2C peripherals of RM0038 section 26 the model rows serve. */
+struct i2c_v1_variant
+{
+  /** @brief Buses whose clock is the clock of an instance in their window. */
+  std::span<bus_window const> kernel_buses;
+};
+
+/** @brief STM32L1 I2C1 and I2C2 on APB1, RM0038 Table 5. */
+inline constexpr i2c_v1_variant l1_i2c{.kernel_buses = l1_apb_windows};
+
 /** @brief Register set of a USART IP version. */
 enum class usart_registers : std::uint8_t
 {

@@ -189,6 +189,14 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto i2c_factory(board const& b, i2c_variant variant) -> model_factory;
 
 /**
+ * @brief Factory of the STM32L1 I2C model, RM0038 section 26.
+ * @param b Board whose `i2c` lists each instance's targets, copied when a model is made. An
+ *        instance with a `i2c_controllers` entry is refused with config_error.
+ * @param variant What differs between the peripherals of the family the row serves.
+ */
+[[nodiscard]] auto i2c_v1_factory(board const& b, i2c_v1_variant variant) -> model_factory;
+
+/**
  * @brief Factory of the SAI model, RM0456 section 69.
  * @param b Board whose `audio` wires each audio block, copied: the endpoints stay shared.
  * @param variant What differs between the peripherals of the family the row serves.

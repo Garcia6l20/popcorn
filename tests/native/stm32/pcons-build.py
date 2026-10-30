@@ -78,6 +78,8 @@ l1_firmwares = {
         "l152xb_l1_usart_ll",
         "l152xe_l1_spi_ll",
         "l152xb_l1_spi_ll",
+        "l152xe_l1_i2c_ll",
+        "l152xb_l1_i2c_ll",
     )
 }
 l1_env = {
@@ -237,11 +239,12 @@ for program, source in (
     ("stm32-dma-l1", "test_dma_l1.cpp"),
     ("stm32-usart-l1", "test_usart_l1.cpp"),
     ("stm32-spi-l1", "test_spi_l1.cpp"),
+    ("stm32-i2c-l1", "test_i2c_l1.cpp"),
 ):
     l1_test = add_doctest(
         program,
         [here / source],
-        static,
+        static_with_devices if program == "stm32-i2c-l1" else static,
         env=l1_env,
         register=l152re is not None
         and l152rb is not None

@@ -247,7 +247,8 @@ struct rig
       std::string_view        entry,
       part_description const& desc       = l152re(),
       std::string_view        elf        = firmware,
-      bool                    controlled = false)
+      bool                    controlled = false,
+      bool                    strict     = false)
       : name{elf}
   {
     if(controlled)
@@ -258,8 +259,9 @@ struct rig
     {
       board.spi["SPI1"].push_back({.device = device});
     }
-    auto options   = popcorn::testing::stm32_options();
-    options.models = stm32::factories(board, desc);
+    auto options               = popcorn::testing::stm32_options();
+    options.models             = stm32::factories(board, desc);
+    options.strict_peripherals = strict;
     options.models.insert_or_assign(
         "DAC", [](periph::model_context& ctx, popcorn::peripheral_desc const&) {
           return std::make_shared<bus_probe>(ctx);
@@ -1027,6 +1029,20 @@ TEST_CASE(
     r.idle_to(r.now_ps() + 2 * frame8);
     CHECK(r.device->outs() == std::vector<std::uint32_t>{0x5A});
   }
+}
+
+TEST_CASE(
+    "checklist 53: under strict_peripherals FRF 1 raises model_error at the write setting SPE")
+{
+  rig r{"parked", l152re(), firmware, false, true};
+  r.write(spi1 + cr2, frf | ssoe);
+  auto* const probe = r.f->model_of<bus_probe>("DAC");
+  REQUIRE(probe != nullptr);
+  CHECK_THROWS_AS(
+      static_cast<void>(
+          probe->context.services.write(spi1 + cr1, 4, master | spe, popcorn::initiator::cpu)),
+      popcorn::model_error);
+  CHECK(r.warnings("TI frame format") == 1);
 }
 
 TEST_CASE("checklist 39: the TI row needs FRF, the Cat.1 row builds without it, no row takes FRXTH")

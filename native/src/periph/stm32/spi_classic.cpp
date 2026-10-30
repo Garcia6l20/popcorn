@@ -139,7 +139,8 @@ auto kernel_name(peripheral_desc const& desc, spi_classic_variant const& variant
  *        clear, a debugger DR write sends nothing and a debugger SR write takes no part in the
  *        MODF clear. A write of 0 to CRCERR clears it from the CPU and the debugger alike.
  *        `SPI_I2SCFGR` and `SPI_I2SPR` are not claimed and stay storage. With the TI mode of the
- *        spi_classic_variant, FRF 1 is logged once and the SPI runs the Motorola format. The
+ *        spi_classic_variant, FRF 1 with SPE 1 is logged once, raises model_error under
+ *        strict_peripherals at each CR1 or CR2 write, and the SPI runs the Motorola format. The
  *        devices, the controller queue and both buffers are saved with the model, a reset drops
  *        the queue.
  *
@@ -790,12 +791,17 @@ void spi_classic::control2_written(std::uint32_t, std::uint32_t)
 
 void spi_classic::warn_ti()
 {
-  if(ti_format_
-     and get(regs_, enable_) != 0
-     and get(regs_, *ti_format_) != 0
-     and not std::exchange(ti_logged_, true))
+  if(not ti_format_ or get(regs_, enable_) == 0 or get(regs_, *ti_format_) == 0)
+  {
+    return;
+  }
+  if(not std::exchange(ti_logged_, true))
   {
     warn("CR2", "the TI frame format, CR2.FRF 1: not modelled, the SPI runs the Motorola format");
+  }
+  if(ctx_.strict_peripherals)
+  {
+    throw model_error(std::string{desc_.name}, "CR2", reg("CR2").offset);
   }
 }
 
