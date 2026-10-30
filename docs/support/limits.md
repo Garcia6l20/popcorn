@@ -473,14 +473,16 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   time.
 - SMBus, PEC, ALERT, ARP and CR2.DMAEN log one `model_warning`, raise `model_error` under
   `strict_peripherals` at the START that uses them, and the bus stays idle for them. OAR1, OAR2,
-  ENGC and NOSTRETCH are stored, and the instance answers no address as a target. The model
-  takes no `board.i2c_controllers` entry.
+  ENGC and NOSTRETCH are stored.
+- A `board.i2c_controllers` controller, alone on the instance, queues phases through
+  `i2c_controller_port` with the placement, unit order, STOP, drop, reset and snapshot rules of
+  the STM32U5 I2C with a board controller. The instance matches no address: every address and
+  written byte answers NACK, every read byte 0xFF.
 - The controller receiver decides a byte's acknowledge at the end of its eighth period, before
   the acknowledge pulse, from CR1.ACK, an ACK write inside the eighth period counting, as RM0038
   Figure 213 note 4 states. An ACK write during the acknowledge pulse counts for the next byte,
-  inferred.
-  With POS 1 it takes ACK as it was at the previous byte's decision or at the end of the address,
-  inferred for an ACK write during a byte. A byte clocked after a NACKed byte reads 0xFF and
+  inferred. With POS 1 it takes ACK as it was at the previous byte's decision or at the end of the
+  address, inferred for an ACK write during a byte. A byte clocked after a NACKed byte reads 0xFF and
   reaches no target.
 - A DR write in reception clears RxNE, and with BTF set the held byte replaces the written value
   in DR, inferred. A DR write with TRA 1 clears RxNE, BTF and a byte held from a reception, and

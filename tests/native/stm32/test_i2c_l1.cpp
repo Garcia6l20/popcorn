@@ -20,9 +20,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -921,24 +923,449 @@ TEST_CASE("i2c_target_port::complete() and complete_read() throw config_error on
   CHECK(refusal([&] {
           port->complete_read(1, {}, at, 1);
         }).contains("the STM32L1 I2C completes no deferred phase"));
-  CHECK(dynamic_cast<periph::i2c_controller_port*>(r.f->target->model("I2C1")) == nullptr);
+  CHECK(dynamic_cast<periph::i2c_controller_port*>(r.f->target->model("I2C1")) != nullptr);
 }
 
-TEST_CASE("a board.i2c_controllers entry on an L1 I2C is refused with config_error")
+class phase_probe final : public periph::i2c_controller_sink
 {
-  class sink final : public periph::i2c_controller_sink
+public:
+  struct heard
   {
-  public:
-    void answered(std::uint64_t, periph::i2c_phase, periph::i2c_answer, vtime) override
-    {}
+    std::uint64_t     unit;
+    periph::i2c_phase phase;
+    bool              ack;
+    std::uint8_t      byte;
+    std::uint64_t     at;
+
+    friend auto operator==(heard const&, heard const&) -> bool = default;
   };
+
+  struct lost
+  {
+    std::uint64_t     unit;
+    periph::i2c_phase phase;
+    std::uint64_t     at;
+
+    friend auto operator==(lost const&, lost const&) -> bool = default;
+  };
+
+  std::vector<heard> answers;
+  std::vector<lost>  drops;
+
+  void answered(std::uint64_t unit, periph::i2c_phase phase, periph::i2c_answer answer, vtime at)
+      override
+  {
+    answers.push_back({unit, phase, answer.ack, answer.byte, at.ps});
+  }
+
+  void dropped(std::uint64_t unit, periph::i2c_phase phase, vtime at) override
+  {
+    drops.push_back({unit, phase, at.ps});
+  }
+};
+
+using heard = phase_probe::heard;
+using lost  = phase_probe::lost;
+
+constexpr std::uint32_t     lane       = 1;
+constexpr std::uint64_t     us         = 1'000'000;
+constexpr std::uint64_t     target_ps  = 90 * us;
+constexpr periph::i2c_phase on_address = periph::i2c_phase::address;
+constexpr periph::i2c_phase on_write   = periph::i2c_phase::write;
+constexpr periph::i2c_phase on_read    = periph::i2c_phase::read;
+
+struct port_rig
+{
+  std::shared_ptr<phase_probe>   sink = std::make_shared<phase_probe>();
+  stm32::board                   board{};
+  std::unique_ptr<stm32_fixture> f;
+
+  explicit port_rig(bool controlled = true)
+  {
+    if(controlled)
+    {
+      board.i2c_controllers["I2C1"] = sink;
+    }
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories(board, l152re());
+    f              = std::make_unique<stm32_fixture>(l152re(), firmware, std::move(options));
+    f->set("pc", sym(firmware, "idle"));
+    REQUIRE(f->target->mem().write(apb1enr, 4, i2c1_bit).has_value());
+  }
+
+  [[nodiscard]] auto port() const -> periph::i2c_controller_port&
+  {
+    auto* const found = dynamic_cast<periph::i2c_controller_port*>(f->target->model("I2C1"));
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  [[nodiscard]] auto now() const -> std::uint64_t
+  {
+    return f->target->virtual_clock().time().ps;
+  }
+
+  void run_until(std::uint64_t ps) const
+  {
+    REQUIRE(
+        f->run_to_stop({.max_instructions = icount{1'000'000}, .until_time = vtime{ps}}).reason
+        == stop_reason::time);
+  }
+
+  void rcc_pulse() const
+  {
+    REQUIRE(f->target->mem().write(apb1rstr, 4, i2c1_bit).has_value());
+    REQUIRE(f->target->mem().write(apb1rstr, 4, 0).has_value());
+  }
+
+  void start(std::uint8_t to, bool read, std::uint64_t at, std::uint64_t unit) const
+  {
+    port().start(to, read, target_ps, vtime{at}, lane, unit);
+  }
+
+  void write(std::uint8_t byte, std::uint64_t at, std::uint64_t unit) const
+  {
+    port().write(byte, target_ps, vtime{at}, lane, unit);
+  }
+
+  void read(bool ack, std::uint64_t at, std::uint64_t unit) const
+  {
+    port().read(ack, target_ps, vtime{at}, lane, unit);
+  }
+
+  void stop(std::uint64_t at, std::uint64_t unit) const
+  {
+    port().stop(vtime{at}, lane, unit);
+  }
+};
+
+TEST_CASE(
+    "a board.i2c_controllers entry gives the L1 I2C a controller port, refused next to a target")
+{
+  port_rig const r;
+  CHECK(r.port().last_unit() == 0);
+  CHECK(r.port().queued() == 0);
   stm32::board board{};
-  board.i2c_controllers["I2C1"] = std::make_shared<sink>();
-  auto options                  = popcorn::testing::stm32_options();
-  options.models                = stm32::factories(board, l152re());
+  board.i2c_controllers["I2C1"] = std::make_shared<phase_probe>();
+  board.i2c["I2C1"].push_back(std::make_shared<probe_target>());
+  auto options   = popcorn::testing::stm32_options();
+  options.models = stm32::factories(board, l152re());
   CHECK(refusal([&] {
           stm32_fixture{l152re(), firmware, std::move(options)};
-        }).contains("no controller entry, the STM32L1 I2C model runs as a controller"));
+        }).contains("an I2C controller alone on the instance, no target next to it"));
+}
+
+TEST_CASE("port phases end one after the other: address and written bytes NACK, a read byte 0xFF")
+{
+  port_rig const r;
+  auto const     base = r.now() + us;
+  r.start(0x42, false, base, 1);
+  r.write(0x11, base, 2);
+  r.read(true, base, 3);
+  r.stop(base + 3 * target_ps, 4);
+  r.read(false, base + 4 * target_ps, 5);
+  CHECK(r.port().queued() == 5);
+  r.run_until(base + 6 * target_ps);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, false, 0xFF, base + target_ps    },
+          {2, on_write,   false, 0xFF, base + 2 * target_ps},
+          {3, on_read,    true,  0xFF, base + 3 * target_ps},
+          {5, on_read,    false, 0xFF, base + 5 * target_ps},
+  });
+  CHECK(r.sink->drops.empty());
+  CHECK(r.port().queued() == 0);
+  CHECK(r.port().last_unit() == 5);
+}
+
+TEST_CASE("port phases queued back to back each start at the end of the one before")
+{
+  port_rig const r;
+  auto const     base = r.now() + us;
+  r.start(0x42, true, base, 1);
+  r.read(true, base, 2);
+  r.read(false, base, 3);
+  r.stop(base + 3 * target_ps, 4);
+  r.run_until(base + 4 * target_ps);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, false, 0xFF, base + target_ps    },
+          {2, on_read,    true,  0xFF, base + 2 * target_ps},
+          {3, on_read,    false, 0xFF, base + 3 * target_ps},
+  });
+  CHECK(r.sink->drops.empty());
+}
+
+TEST_CASE("checklist 49: a port entry in the past keeps its own time, a bad argument throws")
+{
+  port_rig const r;
+  r.run_until(r.now() + 10 * us);
+  auto const past = r.now() - 3 * us;
+  r.start(0x42, false, past, 1);
+  r.port().drop(on_write, vtime{past}, lane, 2);
+  r.run_until(r.now() + target_ps + us);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, false, 0xFF, past + target_ps}
+  });
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {2, on_write, past}
+  });
+  auto const at = r.now();
+  CHECK_THROWS_AS(r.port().start(0x42, false, target_ps, vtime{at}, 0, 3), std::invalid_argument);
+  CHECK_THROWS_AS(
+      r.port().start(0x42, false, target_ps, vtime{at}, lane, 2), std::invalid_argument);
+  CHECK_THROWS_AS(
+      r.port().start(0x80, false, target_ps, vtime{at}, lane, 3), std::invalid_argument);
+  CHECK_THROWS_AS(r.port().write(0x11, 0, vtime{at}, lane, 3), std::invalid_argument);
+  CHECK_THROWS_AS(
+      r.port().read(true, std::numeric_limits<std::uint64_t>::max(), vtime{at}, lane, 3),
+      std::invalid_argument);
+  CHECK_THROWS_AS(
+      r.port().drop(static_cast<periph::i2c_phase>(3), vtime{at}, lane, 3), std::invalid_argument);
+  CHECK_THROWS_AS(r.port().stop(vtime{at}, 0, 3), std::invalid_argument);
+  CHECK(r.port().queued() == 0);
+  CHECK(r.port().last_unit() == 2);
+  port_rig const bare{false};
+  CHECK(refusal([&] {
+          bare.port().stop(vtime{bare.now()}, lane, 1);
+        }).contains("an I2C controller attached to the instance"));
+}
+
+TEST_CASE("a STOP drops the lower units still queued or running at its time, later units run")
+{
+  port_rig const r;
+  auto const     base = r.now() + us;
+  r.start(0x42, false, base, 1);
+  r.write(0x11, base, 2);
+  r.stop(base + target_ps / 2, 3);
+  r.start(0x42, false, base + target_ps, 4);
+  r.run_until(base + 3 * target_ps);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {1, on_address, base + target_ps / 2},
+          {2, on_write,   base + target_ps / 2},
+  });
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {4, on_address, false, 0xFF, base + 2 * target_ps}
+  });
+}
+
+TEST_CASE("checklist 31: I2C1RST drops the phase started before it at its end, later phases run")
+{
+  port_rig const r;
+  auto const     base = r.now() + us;
+  r.start(0x42, false, base, 1);
+  r.write(0x11, base, 2);
+  r.run_until(base + target_ps / 2);
+  auto const generation = popcorn::testing::saved_integer(*r.f, "I2C1", "port.generation");
+  REQUIRE(generation.has_value());
+  r.rcc_pulse();
+  CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.generation") == *generation + 1);
+  r.start(0x42, false, base, 3);
+  r.run_until(base + 4 * target_ps);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {1, on_address, base + target_ps}
+  });
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {2, on_write,   false, 0xFF, base + 2 * target_ps},
+          {3, on_address, false, 0xFF, base + 3 * target_ps},
+  });
+}
+
+TEST_CASE("checklist 31: CR1.SWRST resets the port as I2C1RST does")
+{
+  port_rig const r;
+  auto const     base = r.now() + us;
+  r.start(0x42, false, base, 1);
+  r.write(0x11, base, 2);
+  r.run_until(base + target_ps / 2);
+  auto const generation = popcorn::testing::saved_integer(*r.f, "I2C1", "port.generation");
+  REQUIRE(generation.has_value());
+  REQUIRE(r.f->target->mem().write(i2c1 + cr1, 4, swrst).has_value());
+  REQUIRE(r.f->target->mem().write(i2c1 + cr1, 4, 0).has_value());
+  CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.generation") == *generation + 1);
+  r.start(0x42, false, base, 3);
+  r.run_until(base + 4 * target_ps);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {1, on_address, base + target_ps}
+  });
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {2, on_write,   false, 0xFF, base + 2 * target_ps},
+          {3, on_address, false, 0xFF, base + 3 * target_ps},
+  });
+}
+
+TEST_CASE("a drop posted before the last I2C1RST is reported at the reset")
+{
+  port_rig const r;
+  auto const     base = r.now() + us;
+  r.run_until(base + target_ps / 2);
+  r.rcc_pulse();
+  auto const at_reset = r.now();
+  r.port().drop(on_write, vtime{base}, lane, 1);
+  r.run_until(at_reset + us);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {1, on_write, at_reset}
+  });
+}
+
+TEST_CASE("entries due at one time run lane by lane, a lower lane first whatever the unit")
+{
+  port_rig const r;
+  auto const     base = r.now() + us;
+  r.port().drop(on_write, vtime{base}, 2, 1);
+  r.port().drop(on_read, vtime{base}, 1, 2);
+  r.run_until(base + us);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {2, on_read,  base},
+          {1, on_write, base},
+  });
+}
+
+TEST_CASE("after a machine reset a phase posted at 0 starts at the dropped phase's rebased end")
+{
+  port_rig const r;
+  auto const     base = r.now() + us;
+  r.start(0x42, false, base, 1);
+  r.write(0x11, base, 2);
+  r.run_until(base + target_ps + target_ps / 2);
+  auto const at_reset = r.now();
+  r.f->target->reset(popcorn::reset_kind::software);
+  r.start(0x42, false, 0, 3);
+  r.run_until(base + 4 * target_ps - at_reset);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {2, on_write, base + 2 * target_ps - at_reset}
+  });
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, false, 0xFF, base + target_ps               },
+          {3, on_address, false, 0xFF, base + 3 * target_ps - at_reset},
+  });
+}
+
+TEST_CASE("after I2C1RST a phase starting at or before it drops at its end, a STOP is due at it")
+{
+  port_rig const r;
+  auto const     base = r.now() + us;
+  r.run_until(base + target_ps / 2);
+  r.rcc_pulse();
+  auto const at_reset = r.now();
+  r.start(0x42, false, base, 1);
+  r.write(0x11, base, 2);
+  r.stop(base, 3);
+  r.start(0x42, false, at_reset + us, 4);
+  r.run_until(at_reset + us + 2 * target_ps);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {2, on_write,   at_reset        },
+          {1, on_address, base + target_ps},
+  });
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {4, on_address, false, 0xFF, at_reset + us + target_ps}
+  });
+}
+
+TEST_CASE("a machine reset drops every queued phase rebased, removes queued STOPs, keeps the unit")
+{
+  port_rig const r;
+  auto const     base = r.now() + us;
+  r.start(0x42, false, base, 1);
+  r.write(0x11, base, 2);
+  r.stop(base + 4 * target_ps, 3);
+  r.run_until(base + target_ps / 2);
+  auto const at_reset = r.now();
+  r.f->target->reset(popcorn::reset_kind::software);
+  r.run_until(base + 3 * target_ps);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {1, on_address, base + target_ps - at_reset    },
+          {2, on_write,   base + 2 * target_ps - at_reset},
+  });
+  CHECK(r.sink->answers.empty());
+  CHECK(r.port().queued() == 0);
+  CHECK_THROWS_AS(r.port().drop(on_write, vtime{0}, lane, 3), std::invalid_argument);
+  r.port().drop(on_write, vtime{0}, lane, 4);
+  CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.last_unit") == 4);
+}
+
+TEST_CASE("checklist 6: 1000 port drops leave no entry, the port holds at most max_entries")
+{
+  port_rig const r;
+  std::uint64_t  unit = 0;
+  for(int round = 0; round < 1000; ++round)
+  {
+    r.port().drop(on_write, vtime{r.now()}, lane, ++unit);
+    r.run_until(r.now() + us);
+  }
+  CHECK(r.sink->drops.size() == 1000);
+  CHECK(r.port().queued() == 0);
+  auto const at = vtime{r.now() + us};
+  for(std::size_t index = 0; index < periph::i2c_controller_port::max_entries; ++index)
+  {
+    r.port().drop(on_write, at, lane, ++unit);
+  }
+  CHECK(refusal([&] {
+          r.port().drop(on_write, at, lane, unit + 1);
+        }).contains("at most 4096 I2C port entries queued"));
+  r.run_until(at.ps + us);
+  CHECK(r.port().queued() == 0);
+}
+
+TEST_CASE("a snapshot holding port entries restores them, an I2C with no controller refuses it")
+{
+  port_rig const r;
+  auto const     base = r.now() + us;
+  r.start(0x42, false, base, 1);
+  r.write(0x11, base, 2);
+  r.run_until(base + target_ps / 2);
+  auto const     saved   = r.f->target->snapshot();
+  auto const     encoded = core::encode_snapshot(saved.data());
+  port_rig const other;
+  other.f->target->restore(core::snapshot{core::decode_snapshot(encoded)});
+  CHECK(other.port().queued() == 2);
+  CHECK(other.port().last_unit() == 2);
+  for(auto const* one : {&r, &other})
+  {
+    one->run_until(base + 3 * target_ps);
+    CHECK(
+        one->sink->answers
+        == std::vector<heard>{
+            {1, on_address, false, 0xFF, base + target_ps    },
+            {2, on_write,   false, 0xFF, base + 2 * target_ps},
+    });
+  }
+  port_rig const bare{false};
+  CHECK(refusal([&] {
+          bare.f->target->restore(core::snapshot{core::decode_snapshot(encoded)});
+        }).contains("the snapshot holds port entries"));
 }
 
 TEST_CASE("a snapshot mid-byte restores the byte in flight, the targets and the transfer")
