@@ -9,6 +9,6 @@ for chipset in (STM32L152XE, STM32L152XB):
         "l1_i2c_ll",
         [here / "l1_i2c_ll.c"],
         [],
-        ["idle", "write_eeprom", "nack"],
+        ["idle", "write_eeprom", "nack", "read_one", "read_two", "read_four"],
         chipset=chipset,
     )

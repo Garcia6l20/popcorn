@@ -64,6 +64,8 @@ constexpr std::uint32_t    pec        = 1u << 12;
 constexpr std::uint32_t    alert      = 1u << 13;
 constexpr std::uint32_t    start      = 1u << 8;
 constexpr std::uint32_t    stop       = 1u << 9;
+constexpr std::uint32_t    ack_bit    = 1u << 10;
+constexpr std::uint32_t    pos_bit    = 1u << 11;
 constexpr std::uint32_t    swrst      = 1u << 15;
 constexpr std::uint32_t    freq2      = 2;
 constexpr std::uint32_t    iterren    = 1u << 8;
@@ -73,6 +75,7 @@ constexpr std::uint32_t    dmaen      = 1u << 11;
 constexpr std::uint32_t    sb         = 1u << 0;
 constexpr std::uint32_t    addr       = 1u << 1;
 constexpr std::uint32_t    btf        = 1u << 2;
+constexpr std::uint32_t    rxne       = 1u << 6;
 constexpr std::uint32_t    txe        = 1u << 7;
 constexpr std::uint32_t    af         = 1u << 10;
 constexpr std::uint32_t    msl        = 1u << 0;
@@ -112,11 +115,13 @@ public:
   {}
 
   std::vector<heard>         log;
+  std::vector<std::uint8_t>  out;
   std::optional<std::size_t> nack_byte;
   std::uint64_t              stretch_ps{};
   periph::i2c_error          error{};
   bool                       defer{};
   int                        matched{};
+  bool                       defer_read{};
   int                        attaches{};
   int                        detaches{};
 
@@ -146,8 +151,38 @@ public:
 
   auto read(vtime at) -> periph::i2c_read_reply override
   {
-    log.push_back({'R', 0, at.ps});
-    return {};
+    return read_acked(at, true);
+  }
+
+  auto read_acked(vtime at, bool acked) -> periph::i2c_read_reply override
+  {
+    auto const index = static_cast<std::size_t>(std::ranges::count(kinds(), 'R'));
+    log.push_back({'R', static_cast<std::uint8_t>(acked ? 1 : 0), at.ps});
+    return {.byte = index < out.size() ? out[index] : std::uint8_t{0xFF}, .stretch_ps = stretch_ps};
+  }
+
+  auto read_deferred(vtime at, bool acked, std::uint64_t ticket)
+      -> std::optional<periph::i2c_read_reply> override
+  {
+    if(defer_read)
+    {
+      log.push_back({'Q', 0, at.ps});
+      return std::nullopt;
+    }
+    return i2c_target::read_deferred(at, acked, ticket);
+  }
+
+  [[nodiscard]] auto acks() const -> std::vector<std::uint8_t>
+  {
+    std::vector<std::uint8_t> got;
+    for(auto const& one : log)
+    {
+      if(one.kind == 'R')
+      {
+        got.push_back(one.byte);
+      }
+    }
+    return got;
   }
 
   auto start_deferred(std::uint8_t sent, bool read, vtime at, std::uint64_t ticket)
@@ -399,6 +434,14 @@ struct rig
     static_cast<void>(addressed());
     static_cast<void>(cpu_read(i2c1 + sr1));
     static_cast<void>(cpu_read(i2c1 + sr2));
+  }
+
+  auto receiving(std::uint32_t control = pe | ack_bit) const -> std::uint64_t
+  {
+    static_cast<void>(addressed(device, true, control));
+    static_cast<void>(cpu_read(i2c1 + sr1));
+    static_cast<void>(cpu_read(i2c1 + sr2));
+    return now_ps();
   }
 };
 
@@ -792,7 +835,7 @@ TEST_CASE("RM0038 26.3.3: a PCLK1 below 4 MHz in Fm mode and TRISE in Fm mode wa
   CHECK(r.warnings("FREQ") == 0);
 }
 
-TEST_CASE("unmodelled CR1 and CR2 functions and controller receive each warn once")
+TEST_CASE("unmodelled CR1 and CR2 functions each warn once")
 {
   rig r{"parked"};
   r.write(i2c1 + cr2, freq2 | dmaen);
@@ -804,7 +847,7 @@ TEST_CASE("unmodelled CR1 and CR2 functions and controller receive each warn onc
   CHECK(r.read(i2c1 + sr1) == 0);
   CHECK(r.warnings("SMBus, PEC, ALERT or ARP: not modelled") == 1);
   CHECK(r.warnings("the DMA requests of CR2.DMAEN: not modelled") == 1);
-  CHECK(r.warnings("controller receive: not modelled") == 1);
+  CHECK(r.warnings("not modelled") == 2);
 }
 
 TEST_CASE("an error a target injects warns once, the byte completes as its acknowledge says")
@@ -976,18 +1019,6 @@ TEST_CASE("checklist 53: under strict_peripherals SMBus, PEC, ALERT, ARP and DMA
   }
 }
 
-TEST_CASE("checklist 53: under strict_peripherals controller receive raises at the ADDR clear")
-{
-  rig r{"parked", {}, l152re(), firmware, true};
-  static_cast<void>(r.addressed(device, true));
-  static_cast<void>(r.cpu_read(i2c1 + sr1));
-  CHECK_THROWS_AS(
-      static_cast<void>(r.services().read(i2c1 + sr2, 4, popcorn::initiator::cpu)),
-      popcorn::model_error);
-  CHECK(r.read(i2c1 + sr1) == addr);
-  CHECK(r.warnings("controller receive: not modelled") == 1);
-}
-
 TEST_CASE("checklist 14: target times count from power-on after a software reset")
 {
   rig r{"parked"};
@@ -1004,6 +1035,27 @@ TEST_CASE("checklist 14: target times count from power-on after a software reset
   auto const since = r.f->target->virtual_clock().since_power_on().ps;
   CHECK(since > end);
   CHECK(r.target->log[0].at == since);
+}
+
+TEST_CASE("checklist 14: a read byte counts its time from power-on after a software reset")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1};
+  r.idle_to(r.now_ps() + 1'000'000'000);
+  r.f->target->reset(popcorn::reset_kind::software);
+  r.f->set("pc", sym(firmware, "idle"));
+  r.write(apb1enr, i2c1_bit);
+  r.write(i2c1 + cr2, freq2);
+  r.write(i2c1 + ccr, 10);
+  r.write(i2c1 + trise, 3);
+  r.write(i2c1 + cr1, pe);
+  auto const t0 = r.receiving(pe);
+  r.idle_to(t0 + phase(9));
+  REQUIRE(r.target->kinds() == "SR");
+  auto const since  = r.f->target->virtual_clock().since_power_on().ps;
+  auto const offset = since - r.now_ps();
+  CHECK(offset >= 1'000'000'000);
+  CHECK(r.target->log[1].at == t0 + phase(9) + offset);
 }
 
 TEST_CASE("RM0038 26.6.9: a new PE period checks the timing again, TRISE above the rule passes")
@@ -1084,4 +1136,351 @@ TEST_CASE("a 10-bit header address byte takes the NACK path and reaches no match
   static_cast<void>(r.addressed());
   CHECK(r.target->matched == 1);
 }
+
+TEST_CASE("RM0038 26.3.3 1-byte reception: LL clears ACK in EV6, then STOP, the byte is NACKed")
+{
+  rig r{"read_one"};
+  r.target->out = {0xC1};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0xC1, 0, 0});
+  CHECK(r.target->kinds() == "SRP");
+  CHECK(r.target->acks() == std::vector<std::uint8_t>{0});
+  CHECK(std::ranges::none_of(r.logged, [](core::log_record const& one) {
+    return one.peripheral == "I2C1";
+  }));
+}
+
+TEST_CASE("RM0038 26.3.3 2-byte reception: LL sets POS with ACK 0, the first byte is acknowledged")
+{
+  rig r{"read_two"};
+  r.target->out = {0xC1, 0xC2};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0xC1, 0xC2, 0, 0});
+  CHECK(r.target->kinds() == "SRRP");
+  CHECK(r.target->acks() == std::vector<std::uint8_t>{1, 0});
+}
+
+TEST_CASE("RM0038 26.3.3 N-byte reception: LL clears ACK at BTF of N-2, STOP at BTF of N-1")
+{
+  rig r{"read_four"};
+  r.target->out = {0xC1, 0xC2, 0xC3, 0xC4};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0xC1, 0xC2, 0xC3, 0xC4, 0, 0});
+  CHECK(r.target->kinds() == "SRRRRP");
+  CHECK(r.target->acks() == std::vector<std::uint8_t>{1, 1, 1, 0});
+}
+
+TEST_CASE("RM0038 26.3.3 EV7: RxNE after 9 periods, BTF holds the next byte until a DR read")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1, 0xC2, 0xC3};
+  auto const t0 = r.receiving();
+  r.idle_to(t0 + phase(9) - margin);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.target->kinds() == "S");
+  r.idle_to(t0 + phase(9));
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK(r.read(i2c1 + dr) == 0xC1);
+  REQUIRE(r.target->kinds() == "SR");
+  CHECK(r.target->log[1].at == t0 + phase(9));
+  CHECK(r.read(i2c1 + sr2) == (msl | busy));
+  r.idle_to(t0 + phase(18));
+  CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+  CHECK(r.read(i2c1 + dr) == 0xC1);
+  r.idle_to(t0 + phase(40));
+  CHECK(r.target->kinds() == "SRR");
+  auto const t1 = r.now_ps();
+  CHECK(r.cpu_read(i2c1 + dr) == 0xC1);
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK(r.read(i2c1 + dr) == 0xC2);
+  r.idle_to(t1 + phase(9));
+  REQUIRE(r.target->kinds() == "SRRR");
+  CHECK(r.target->log[3].at == t1 + phase(9));
+  CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+  CHECK(r.cpu_read(i2c1 + dr) == 0xC2);
+  CHECK(r.cpu_read(i2c1 + dr) == 0xC3);
+  CHECK(r.read(i2c1 + sr1) == 0);
+}
+
+TEST_CASE("RM0038 26.3.3: ACK is decided at the end of the eighth period, before the pulse, POS 0")
+{
+  for(auto const& [written, acks] : {
+          std::pair{phase(16) + phase(1) / 2, std::vector<std::uint8_t>{1, 0}},
+          std::pair{phase(17) + phase(1) / 2, std::vector<std::uint8_t>{1, 1}}
+  })
+  {
+    CAPTURE(written);
+    rig r{"parked"};
+    r.target->out = {0xC1, 0xC2};
+    auto const t0 = r.receiving();
+    r.idle_to(t0 + phase(9));
+    CHECK(r.cpu_read(i2c1 + dr) == 0xC1);
+    r.idle_to(t0 + written);
+    r.cpu_write(i2c1 + cr1, pe);
+    r.idle_to(t0 + phase(18));
+    CHECK(r.target->acks() == acks);
+  }
+  {
+    rig r{"parked"};
+    r.target->out = {0xC1, 0xC2};
+    auto const t0 = r.receiving();
+    r.idle_to(t0 + phase(9));
+    r.cpu_write(i2c1 + cr1, pe);
+    r.idle_to(t0 + phase(18));
+    CHECK(r.target->acks() == std::vector<std::uint8_t>{1, 0});
+  }
+}
+
+TEST_CASE("RM0038 26.6.1 POS, inferred: with POS 1 a byte takes ACK from the phase before it")
+{
+  for(auto const pos : {0u, pos_bit})
+  {
+    CAPTURE(pos);
+    rig r{"parked"};
+    r.target->out = {0xC1, 0xC2};
+    static_cast<void>(r.addressed(device, true, pe | ack_bit));
+    r.cpu_write(i2c1 + cr1, pe | pos);
+    static_cast<void>(r.cpu_read(i2c1 + sr1));
+    static_cast<void>(r.cpu_read(i2c1 + sr2));
+    auto const t0 = r.now_ps();
+    r.idle_to(t0 + phase(18));
+    if(pos != 0)
+    {
+      CHECK(r.target->acks() == std::vector<std::uint8_t>{1, 0});
+      CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+    }
+    else
+    {
+      CHECK(r.target->acks() == std::vector<std::uint8_t>{0});
+      CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+    }
+  }
+}
+
+TEST_CASE("RM0038 26.3.3 closing: a byte after the NACKed one reads 0xFF and reaches no target")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1, 0xC2};
+  auto const t0 = r.receiving(pe);
+  r.idle_to(t0 + phase(18));
+  CHECK(r.target->kinds() == "SR");
+  CHECK(r.target->acks() == std::vector<std::uint8_t>{0});
+  CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+  auto const t1 = r.now_ps();
+  r.cpu_write(i2c1 + cr1, pe | stop);
+  r.idle_to(t1 + phase(1));
+  CHECK(r.target->kinds() == "SRP");
+  CHECK(r.target->log.back().at == t1 + phase(1));
+  CHECK(r.read(i2c1 + sr2) == 0);
+  CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+  CHECK(r.cpu_read(i2c1 + dr) == 0xC1);
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK(r.cpu_read(i2c1 + dr) == 0xFF);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  r.idle_to(r.now_ps() + phase(20));
+  CHECK(r.target->kinds() == "SRP");
+}
+
+TEST_CASE("RM0038 26.6.1 STOP in reception: after the byte that shifts, the byte goes to DR")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1, 0xC2};
+  auto const t0 = r.receiving(pe);
+  r.idle_to(t0 + phase(4));
+  r.cpu_write(i2c1 + cr1, pe | stop);
+  r.idle_to(t0 + phase(10) - margin);
+  CHECK(r.target->kinds() == "SR");
+  r.idle_to(t0 + phase(10));
+  CHECK(r.target->kinds() == "SRP");
+  CHECK(r.target->log.back().at == t0 + phase(10));
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK(r.read(i2c1 + sr2) == 0);
+  CHECK(r.read(i2c1 + dr) == 0xC1);
+  r.idle_to(t0 + phase(40));
+  CHECK(r.target->kinds() == "SRP");
+}
+
+TEST_CASE("RM0038 26.6.6 BTF: a repeated START while SCL is held keeps BTF, no byte follows")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1, 0xC2};
+  auto const t0 = r.receiving();
+  r.idle_to(t0 + phase(18));
+  auto const t1 = r.now_ps();
+  r.cpu_write(i2c1 + cr1, pe | ack_bit | start);
+  r.idle_to(t1 + phase(1));
+  CHECK(r.read(i2c1 + sr1) == (sb | rxne | btf));
+  CHECK(r.read(i2c1 + sr2) == (msl | busy));
+  CHECK(r.cpu_read(i2c1 + dr) == 0xC1);
+  CHECK(r.read(i2c1 + sr1) == (sb | rxne));
+  r.idle_to(r.now_ps() + phase(20));
+  CHECK(r.target->kinds() == "SRR");
+  CHECK(r.cpu_read(i2c1 + dr) == 0xC2);
+  CHECK(r.read(i2c1 + sr1) == sb);
+}
+
+TEST_CASE(
+    "RM0038 26.6.6 RxNE: a DR write clears RxNE, with BTF the held byte replaces it, inferred")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1, 0xC2, 0xC3};
+  auto const t0 = r.receiving();
+  r.idle_to(t0 + phase(9));
+  r.cpu_write(i2c1 + dr, 0x5A);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  r.idle_to(t0 + phase(18));
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK(r.read(i2c1 + dr) == 0xC2);
+  r.idle_to(t0 + phase(27));
+  CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+  r.cpu_write(i2c1 + dr, 0x5A);
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK(r.read(i2c1 + dr) == 0xC3);
+}
+
+TEST_CASE("RM0038 Table 139: RxNE raises the event line only with ITBUFEN, BTF with ITEVTEN")
+{
+  constexpr address nvic_icpr0 = 0xE000'E280;
+  rig               r{"parked"};
+  r.write(i2c1 + cr2, freq2 | itevten);
+  auto const t0 = r.receiving();
+  r.write(nvic_icpr0, event_irq);
+  r.idle_to(t0 + phase(9));
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK((r.read(nvic_ispr0) & event_irq) == 0);
+  r.write(i2c1 + cr2, freq2 | itevten | itbufen);
+  CHECK((r.read(nvic_ispr0) & event_irq) == event_irq);
+  r.write(i2c1 + cr2, freq2 | itevten);
+  r.write(nvic_icpr0, event_irq);
+  r.idle_to(t0 + phase(18));
+  CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+  CHECK((r.read(nvic_ispr0) & event_irq) == event_irq);
+}
+
+TEST_CASE("the bytes of two targets on one address combine by AND, a read stretch holds SCL")
+{
+  auto other = std::make_shared<probe_target>();
+  rig  r{"parked", {other}};
+  r.target->out     = {0x3C, 0xFF};
+  other->out        = {0x0F, 0xFF};
+  auto const t0     = r.receiving();
+  other->stretch_ps = 10'000'000;
+  r.idle_to(t0 + phase(9));
+  CHECK(r.read(i2c1 + dr) == 0x0C);
+  CHECK(r.target->kinds() == "SR");
+  CHECK(other->kinds() == "SR");
+  r.idle_to(t0 + phase(18) + 10'000'000 - margin);
+  CHECK(r.target->kinds() == "SR");
+  r.idle_to(t0 + phase(18) + 10'000'000);
+  REQUIRE(r.target->kinds() == "SRR");
+  CHECK(r.target->log[2].at == t0 + phase(18) + 10'000'000);
+}
+
+TEST_CASE(
+    "PE 0 while SCL is held, which RM0038 26.6.1 forbids in master mode: popcorn drops RxNE, BTF "
+    "and the held byte")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1, 0xC2, 0xD1};
+  auto const t0 = r.receiving();
+  r.idle_to(t0 + phase(18));
+  r.cpu_write(i2c1 + cr1, 0);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
+  r.cpu_write(i2c1 + cr1, pe);
+  auto const t1 = r.receiving();
+  r.idle_to(t1 + phase(9));
+  CHECK(r.cpu_read(i2c1 + dr) == 0xD1);
+  CHECK(r.read(i2c1 + sr1) == 0);
+}
+
+TEST_CASE("a snapshot while SCL is held restores the byte in the shift register")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1, 0xC2, 0xC3};
+  auto const t0 = r.receiving();
+  r.idle_to(t0 + phase(18));
+  auto const saved = r.f->target->snapshot();
+  rig        other{"parked"};
+  other.target->out = {0xC1, 0xC2, 0xC3};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.target->kinds() == "SRR");
+  for(auto const* one : {&r, &other})
+  {
+    CHECK(one->read(i2c1 + sr1) == (rxne | btf));
+    CHECK(one->cpu_read(i2c1 + dr) == 0xC1);
+    CHECK(one->cpu_read(i2c1 + dr) == 0xC2);
+    one->idle_to(t0 + phase(30));
+    CHECK(one->read(i2c1 + sr1) == rxne);
+    CHECK(one->target->kinds() == "SRRR");
+  }
+}
+
+TEST_CASE("a target leaving a read answer pending fails the run, the byte reads 0xFF")
+{
+  rig        r{"parked"};
+  auto const t0        = r.receiving();
+  r.target->defer_read = true;
+  auto const refused   = refusal([&] {
+    static_cast<void>(r.f->target->run_slice(
+        {.max_instructions = icount{1'000'000}, .until_time = vtime{t0 + phase(10)}}));
+  });
+  CHECK(refused.contains("an answer at the phase's end from the target at 0x50"));
+  CHECK(r.target->kinds() == "SQ");
+  CHECK(r.read(i2c1 + dr) == 0xFF);
+  CHECK(r.read(i2c1 + sr1) == rxne);
+}
+
+TEST_CASE("under strict_peripherals controller receive runs with no model_error")
+{
+  rig r{"parked", {}, l152re(), firmware, true};
+  r.target->out = {0xC1};
+  auto const t0 = r.receiving();
+  r.idle_to(t0 + phase(9));
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK(r.read(i2c1 + dr) == 0xC1);
+  CHECK(r.warnings("not modelled") == 0);
+}
+}
+
+TEST_CASE(
+    "a DR write with TRA 1 after a read left RxNE 1 clears it and sends the written byte, inferred")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1};
+  auto const t0 = r.receiving(pe);
+  r.idle_to(t0 + phase(9));
+  REQUIRE(r.read(i2c1 + sr1) == rxne);
+  r.cpu_write(i2c1 + cr1, pe | stop);
+  CHECK(r.cpu_read(i2c1 + dr) == 0xC1);
+  r.idle_to(t0 + phase(19));
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK(r.read(i2c1 + dr) == 0xFF);
+  CHECK(r.read(i2c1 + sr2) == 0);
+  r.transmitting();
+  auto const t1 = r.now_ps();
+  r.cpu_write(i2c1 + dr, 0x11);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  r.cpu_write(i2c1 + dr, 0x22);
+  r.idle_to(t1 + phase(18));
+  CHECK(r.target->bytes() == std::vector<std::uint8_t>{0x11, 0x22});
+  CHECK(r.read(i2c1 + sr1) == (txe | btf));
+}
+
+TEST_CASE("a write transfer after a repeated START over a held byte drops it and BTF, inferred")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1, 0xC2};
+  auto const t0 = r.receiving();
+  r.idle_to(t0 + phase(18));
+  REQUIRE(r.read(i2c1 + sr1) == (rxne | btf));
+  r.transmitting();
+  auto const t1 = r.now_ps();
+  r.cpu_write(i2c1 + dr, 0x11);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  r.idle_to(t1 + phase(9));
+  CHECK(r.target->bytes() == std::vector<std::uint8_t>{0x11});
+  CHECK(r.read(i2c1 + sr1) == (txe | btf));
+  r.cpu_write(i2c1 + cr1, pe | stop);
+  r.idle_to(t1 + phase(10));
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
 }

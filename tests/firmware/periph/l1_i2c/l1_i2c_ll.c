@@ -9,6 +9,9 @@
 void idle(void);
 void write_eeprom(void);
 void nack(void);
+void read_one(void);
+void read_two(void);
+void read_four(void);
 
 void idle(void)
 {
@@ -93,6 +96,75 @@ void nack(void)
   stop();
   LL_I2C_ClearFlag_AF(I2C1);
   LOG(I2C1->SR1);
+  DONE();
+}
+
+static void address_read(void)
+{
+  start();
+  LL_I2C_AcknowledgeNextData(I2C1, LL_I2C_ACK);
+  LL_I2C_TransmitData8(I2C1, EEPROM << 1 | 1u);
+  while(!LL_I2C_IsActiveFlag_ADDR(I2C1))
+  {
+    if(LL_I2C_IsActiveFlag_AF(I2C1))
+    {
+      FAIL(4);
+    }
+  }
+}
+
+static void wait_btf(void)
+{
+  while(!LL_I2C_IsActiveFlag_BTF(I2C1))
+  {
+  }
+}
+
+void read_one(void)
+{
+  address_read();
+  LL_I2C_AcknowledgeNextData(I2C1, LL_I2C_NACK);
+  LL_I2C_ClearFlag_ADDR(I2C1);
+  LL_I2C_GenerateStopCondition(I2C1);
+  while(!LL_I2C_IsActiveFlag_RXNE(I2C1))
+  {
+  }
+  LOG(LL_I2C_ReceiveData8(I2C1));
+  stop();
+  DONE();
+}
+
+void read_two(void)
+{
+  address_read();
+  LL_I2C_AcknowledgeNextData(I2C1, LL_I2C_NACK);
+  LL_I2C_EnableBitPOS(I2C1);
+  LL_I2C_ClearFlag_ADDR(I2C1);
+  wait_btf();
+  LL_I2C_GenerateStopCondition(I2C1);
+  LOG(LL_I2C_ReceiveData8(I2C1));
+  LOG(LL_I2C_ReceiveData8(I2C1));
+  stop();
+  LL_I2C_DisableBitPOS(I2C1);
+  DONE();
+}
+
+void read_four(void)
+{
+  address_read();
+  LL_I2C_ClearFlag_ADDR(I2C1);
+  while(!LL_I2C_IsActiveFlag_RXNE(I2C1))
+  {
+  }
+  LOG(LL_I2C_ReceiveData8(I2C1));
+  wait_btf();
+  LL_I2C_AcknowledgeNextData(I2C1, LL_I2C_NACK);
+  LOG(LL_I2C_ReceiveData8(I2C1));
+  wait_btf();
+  LL_I2C_GenerateStopCondition(I2C1);
+  LOG(LL_I2C_ReceiveData8(I2C1));
+  LOG(LL_I2C_ReceiveData8(I2C1));
+  stop();
   DONE();
 }
 
