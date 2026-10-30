@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <format>
 #include <initializer_list>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -80,12 +81,26 @@ constexpr std::uint32_t run_pd     = 1u << 4;
 constexpr std::uint32_t flash_irq  = 4;
 constexpr std::uint64_t tprog_ps   = 3'280'000'000;
 
+void copy_ram_code(stm32_fixture const& f)
+{
+  auto const from = sym(f.firmware_name, "_sidata");
+  auto const to   = sym(f.firmware_name, "_sdata");
+  auto const end  = sym(f.firmware_name, "_edata");
+  for(address at = 0; at < end - to; at += 4)
+  {
+    auto const word = f.target->mem().read(from + at, 4);
+    REQUIRE(word.has_value());
+    REQUIRE(f.target->mem().write(to + at, 4, *word).has_value());
+  }
+}
+
 auto parked(
     part_description const& desc    = l152re(),
     std::string_view        name    = firmware,
     core::machine_options   options = popcorn::testing::stm32_options()) -> stm32_fixture
 {
   stm32_fixture f{desc, name, std::move(options)};
+  copy_ram_code(f);
   f.set("pc", sym(name, "idle"));
   return f;
 }
@@ -244,6 +259,7 @@ TEST_CASE("RM0038 3.4.1: a wrong PEKEY2 is a bus error and PECR stays locked unt
   auto options   = popcorn::testing::stm32_options();
   options.faults = arch::fault_policy::enter_handler;
   stm32_fixture f{l152re(), firmware, options};
+  copy_ram_code(f);
   f.set("pc", sym(firmware, "wrong_key"));
   REQUIRE(f.run_to_stop({.max_instructions = icount{10'000}}).reason == stop_reason::user);
   CHECK(f.log() == std::vector<std::uint32_t>{0xfa17u, locks});
@@ -251,6 +267,7 @@ TEST_CASE("RM0038 3.4.1: a wrong PEKEY2 is a bus error and PECR stays locked unt
   CHECK_FALSE(try_write(f, pekeyr, pe_key2));
   CHECK((read(f, pecr) & pelock) != 0);
   f.target->reset();
+  copy_ram_code(f);
   f.set("pc", sym(firmware, "idle"));
   unlock(f);
 }
@@ -297,6 +314,7 @@ TEST_CASE(
   CHECK_FALSE(try_write(f, optkeyr, opt_key1));
   CHECK(read(f, pecr) == (prglock | optlock));
   f.target->reset();
+  copy_ram_code(f);
   f.set("pc", sym(firmware, "idle"));
   write(f, pekeyr, pe_key1);
   write(f, pekeyr, pe_key2);
@@ -578,15 +596,17 @@ TEST_CASE("RM0038 Table 13: Range 3 at 4.194 MHz needs 1 wait state on Cat.1 onl
 }
 
 TEST_CASE(
-    "a store with ERASE or FPRG set warns once and programs nothing, model_error under strict")
+    "a store with ERASE or FPRG and no PROG, or both, warns once and programs nothing, "
+    "model_error under strict")
 {
   {
     auto const  f = parked();
     log_capture logged{f};
     unlock(f);
     auto const old = read(f, target);
-    write(f, pecr, erase | prog);
+    write(f, pecr, erase);
     REQUIRE(memory_write(f, target, 4, 0));
+    write(f, pecr, erase | fprg | prog);
     REQUIRE(memory_write(f, target, 4, 0));
     CHECK(logged.count("PECR") == 1);
     CHECK(read(f, target) == old);
@@ -594,8 +614,197 @@ TEST_CASE(
   }
   auto const f = parked(l152re(), firmware, strict());
   unlock(f);
-  write(f, pecr, fprg | prog);
+  write(f, pecr, fprg);
   CHECK_THROWS_AS((void)memory_write(f, target, 4, 1), popcorn::model_error);
+}
+
+TEST_CASE("RM0038 3.4.2: ERASE and PROG with a store to a page start erase the page to 0")
+{
+  auto const f = parked();
+  unlock(f);
+  for(std::uint32_t at = 0; at < 64; ++at)
+  {
+    REQUIRE(memory_write(f, target + 4 * at, 4, 0xA5A5'0000u | at));
+    idle_to(f, now_ps(f) + tprog_ps + 1'000'000);
+  }
+  REQUIRE(memory_write(f, target + 256, 4, 0x77));
+  idle_to(f, now_ps(f) + tprog_ps + 1'000'000);
+  write(f, sr, eop);
+  call(f, "erase_page", {static_cast<std::uint32_t>(target + 4)});
+  CHECK(read(f, sr) == (ready | endhv | pgaerr));
+  CHECK(read(f, target + 4) == 0xA5A5'0001u);
+  write(f, sr, pgaerr);
+  write(f, pecr, erase | prog);
+  auto const before = now_ps(f);
+  REQUIRE(memory_write(f, target, 4, 0x1234));
+  CHECK(read(f, sr) == (ready | bsy));
+  auto const due = flash_due(f);
+  REQUIRE(due.size() == 1);
+  CHECK(due[0] == before + tprog_ps);
+  for(std::uint32_t at = 0; at < 64; ++at)
+  {
+    CHECK(read(f, target + 4 * at) == 0);
+  }
+  CHECK(read(f, target + 256) == 0x77);
+  write(f, pecr, 0);
+  call(f, "wait_idle", {});
+  CHECK(read(f, sr) == (ready | endhv | eop));
+}
+
+TEST_CASE("RM0038 3.4.2: a page erase stored while BSY erases at once and adds one tprog")
+{
+  auto const f = parked();
+  unlock(f);
+  REQUIRE(memory_write(f, target + 256, 4, 7));
+  idle_to(f, now_ps(f) + tprog_ps + 1'000'000);
+  write(f, sr, eop);
+  write(f, pecr, erase | prog);
+  REQUIRE(memory_write(f, target, 4, 0));
+  REQUIRE(memory_write(f, target + 256, 4, 0));
+  auto const start = now_ps(f);
+  CHECK(read(f, target + 256) == 0);
+  idle_to(f, start + tprog_ps + 1'000'000);
+  CHECK(read(f, sr) == (ready | bsy | eop));
+  idle_to(f, start + 2 * tprog_ps + 1'000'000);
+  CHECK(read(f, sr) == (ready | endhv | eop));
+}
+
+auto load_buffer(stm32_fixture const& f, std::uint32_t count, std::uint32_t seed) -> address
+{
+  auto const buffer = sym(f.firmware_name, "words");
+  for(std::uint32_t i = 0; i < count; ++i)
+  {
+    write(f, buffer + 4 * i, seed + i);
+  }
+  return buffer;
+}
+
+TEST_CASE("RM0038 3.4.3: FPRG and PROG with 32 sequential stores program a half page in one tprog")
+{
+  auto const f = parked();
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  auto const buffer = load_buffer(f, 32, 0x100);
+  call(
+      f, "copy_words",
+      {static_cast<std::uint32_t>(target), static_cast<std::uint32_t>(buffer), 31});
+  CHECK(read(f, sr) == (ready | endhv));
+  CHECK(read(f, target) != 0x100);
+  REQUIRE(memory_write(f, target + 124, 4, 0x11f));
+  CHECK(read(f, sr) == (ready | bsy));
+  CHECK(flash_due(f).size() == 1);
+  for(std::uint32_t at = 0; at < 32; ++at)
+  {
+    CHECK(read(f, target + 4 * at) == 0x100 + at);
+  }
+  call(f, "wait_idle", {});
+  CHECK(read(f, sr) == (ready | endhv | eop));
+}
+
+TEST_CASE("RM0038 3.4.3: a half page out of sequence, off its boundary or cut short sets PGAERR")
+{
+  auto const f = parked();
+  unlock(f);
+  auto const blank = read(f, target + 128);
+  write(f, pecr, fprg | prog);
+  REQUIRE(memory_write(f, target + 132, 4, 1));
+  CHECK(read(f, sr) == (ready | endhv | pgaerr));
+  write(f, sr, pgaerr);
+  REQUIRE(memory_write(f, target + 128, 4, 1));
+  REQUIRE(memory_write(f, target + 136, 4, 1));
+  CHECK(read(f, sr) == (ready | endhv | pgaerr));
+  write(f, sr, pgaerr);
+  for(std::uint32_t at = 0; at < 31; ++at)
+  {
+    REQUIRE(memory_write(f, target + 128 + 4 * at, 4, 2));
+  }
+  write(f, pecr, 0);
+  CHECK(read(f, sr) == (ready | endhv | pgaerr));
+  write(f, sr, pgaerr);
+  write(f, pecr, fprg | prog);
+  REQUIRE(memory_write(f, target + 128, 4, 3));
+  CHECK(read(f, sr) == (ready | endhv));
+  CHECK(read(f, target + 128) == blank);
+  CHECK(flash_due(f).empty());
+}
+
+TEST_CASE(
+    "RM0038 3.4.2 and 3.4.3: PARALLELBANK erases and programs a page and a half page per bank")
+{
+  constexpr address bank2 = 0x0804'0000;
+  auto const        f     = parked();
+  unlock(f);
+  REQUIRE(memory_write(f, target, 4, 9));
+  idle_to(f, now_ps(f) + tprog_ps + 1'000'000);
+  REQUIRE(memory_write(f, bank2, 4, 9));
+  idle_to(f, now_ps(f) + tprog_ps + 1'000'000);
+  write(f, pecr, parallel | erase | prog);
+  REQUIRE(memory_write(f, bank2, 4, 0));
+  CHECK(read(f, sr) == (ready | endhv | eop | pgaerr));
+  write(f, sr, pgaerr | eop);
+  REQUIRE(memory_write(f, target, 4, 0));
+  CHECK(read(f, sr) == (ready | endhv));
+  CHECK(read(f, target) == 9);
+  REQUIRE(memory_write(f, target + 256, 4, 0));
+  CHECK(read(f, sr) == (ready | endhv | pgaerr));
+  write(f, sr, pgaerr);
+  REQUIRE(memory_write(f, target, 4, 0));
+  REQUIRE(memory_write(f, bank2, 4, 0));
+  CHECK(read(f, sr) == (ready | bsy));
+  CHECK(flash_due(f).size() == 1);
+  CHECK(read(f, target) == 0);
+  CHECK(read(f, bank2) == 0);
+  call(f, "wait_idle", {});
+  write(f, sr, eop);
+  write(f, pecr, parallel | fprg | prog);
+  for(std::uint32_t at = 0; at < 32; ++at)
+  {
+    REQUIRE(memory_write(f, target + 4 * at, 4, 0x200 + at));
+  }
+  CHECK((read(f, sr) & bsy) == 0);
+  for(std::uint32_t at = 0; at < 32; ++at)
+  {
+    REQUIRE(memory_write(f, bank2 + 4 * at, 4, 0x300 + at));
+  }
+  CHECK(read(f, sr) == (ready | bsy));
+  CHECK(read(f, target + 124) == 0x21f);
+  CHECK(read(f, bank2 + 124) == 0x31f);
+}
+
+TEST_CASE("RM0038 3.9.2: with one bank PARALLELBANK reads 0 and a page erase runs alone")
+{
+  auto const f = parked(l152rb(), firmware_b);
+  unlock(f);
+  REQUIRE(memory_write(f, target, 4, 9));
+  idle_to(f, now_ps(f) + tprog_ps + 1'000'000);
+  write(f, sr, eop);
+  write(f, pecr, parallel | erase | prog);
+  REQUIRE(memory_write(f, target, 4, 0));
+  CHECK(read(f, sr) == (ready | bsy));
+  CHECK(read(f, target) == 0);
+}
+
+TEST_CASE("HAL_FLASHEx_HalfPageProgram runs from SRAM and programs a half page")
+{
+  stm32_fixture const f{l152re(), firmware};
+  REQUIRE(f.run_to_stop({.max_instructions = icount{100'000}}).reason == stop_reason::user);
+  write(f, sr, wrperr);
+  unlock(f);
+  auto const buffer = load_buffer(f, 32, 0x400);
+  call(
+      f, "half_page_hal", {static_cast<std::uint32_t>(target), static_cast<std::uint32_t>(buffer)});
+  auto const all = f.log();
+  REQUIRE(all.size() == 18);
+  auto const log = std::span{all}.last(4);
+  CHECK((log[0] & 0xFFF0'0000u) == 0x2000'0000u);
+  CHECK(log[1] == 0);
+  CHECK(log[2] == optlock);
+  CHECK(log[3] == (ready | endhv));
+  CHECK(read(f, sr) == (ready | endhv));
+  for(std::uint32_t at = 0; at < 32; ++at)
+  {
+    CHECK(read(f, target + 4 * at) == 0x400 + at);
+  }
 }
 
 TEST_CASE("RM0038 3.6: a program in voltage range 3 programs and warns once, model_error strict")
@@ -690,6 +899,7 @@ TEST_CASE("a FLASH snapshot keeps a PE key lock-up across a power-on reset and r
   CHECK_FALSE(try_write(f, pekeyr, 0x1234'5678u));
   auto const saved = f.target->snapshot();
   f.target->reset(reset_kind::power_on);
+  copy_ram_code(f);
   f.set("pc", sym(firmware, "idle"));
   f.target->restore(saved);
   CHECK_FALSE(try_write(f, pekeyr, pe_key1));
@@ -738,6 +948,7 @@ TEST_CASE("a FLASH snapshot restores the unlock, a key sequence half done and BS
   write(f, pecr, eopie);
   auto const saved = f.target->snapshot();
   f.target->reset(reset_kind::power_on);
+  copy_ram_code(f);
   f.set("pc", sym(firmware, "idle"));
   CHECK(read(f, pecr) == locks);
   f.target->restore(saved);
@@ -809,4 +1020,375 @@ TEST_CASE("every L1 part gets the FLASH model of its category, a mismatched WRPR
   REQUIRE(found != part.peripherals.end());
   found->ip_version = "STM32L1_flash_cat5";
   CHECK_THROWS_AS((stm32_fixture{std::move(part), firmware_b}), popcorn::config_error);
+}
+
+namespace
+{
+constexpr address       bank2       = 0x0804'0000;
+constexpr address       cfsr        = 0xE000'ED28;
+constexpr address       hfsr        = 0xE000'ED2C;
+constexpr address       bfar        = 0xE000'ED38;
+constexpr std::uint32_t ibuserr     = 1u << 8;
+constexpr std::uint32_t preciserr   = 1u << 9;
+constexpr std::uint32_t bfarvalid   = 1u << 15;
+constexpr std::uint32_t forced      = 1u << 30;
+constexpr std::uint32_t vecttbl     = 1u << 1;
+constexpr std::uint32_t fault_mark  = 0xfa17;
+constexpr std::uint32_t hardfault_n = 3;
+
+auto handler_options() -> core::machine_options
+{
+  auto options   = popcorn::testing::stm32_options();
+  options.faults = arch::fault_policy::enter_handler;
+  return options;
+}
+
+void vectors_in_sram(stm32_fixture const& f)
+{
+  constexpr address vtor  = 0xE000'ED08;
+  constexpr address table = 0x2000'C000;
+  for(address at = 0; at < 0x200; at += 4)
+  {
+    write(f, table + at, read(f, 0x0800'0000 + at));
+  }
+  write(f, vtor, static_cast<std::uint32_t>(table));
+}
+
+auto ipsr(stm32_fixture const& f) -> std::uint32_t
+{
+  return static_cast<std::uint32_t>(f.target->regs().read(*f.target->regs().find("xpsr"))) & 0x1ffu;
+}
+
+void store_sequence(stm32_fixture const& f, address at, std::uint32_t count, std::uint32_t seed)
+{
+  for(std::uint32_t i = 0; i < count; ++i)
+  {
+    REQUIRE(memory_write(f, at + 4 * i, 4, seed + i));
+  }
+}
+
+auto split_banks(std::uint32_t regions) -> part_description
+{
+  auto part = cat46_variant();
+  auto flash_region =
+      std::ranges::find(part.regions, std::string_view{"Flash"}, &popcorn::region_desc::name);
+  REQUIRE(flash_region != part.regions.end());
+  flash_region->size = 0x3'0000;
+  auto second        = *flash_region;
+  second.name        = "Flash_Bank2";
+  second.start       = bank2;
+  part.regions.push_back(second);
+  if(regions > 2)
+  {
+    second.name  = "Flash_Bank3";
+    second.start = 0x0807'0000;
+    second.size  = 0x1'0000;
+    part.regions.push_back(second);
+  }
+  return part;
+}
+}
+
+TEST_CASE("RM0038 3.4.3: a half page into bank 2 with PARALLELBANK clear programs in one tprog")
+{
+  auto const f = parked();
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  store_sequence(f, bank2, 32, 0x500);
+  CHECK(read(f, sr) == (ready | bsy));
+  CHECK(flash_due(f).size() == 1);
+  CHECK(read(f, bank2) == 0x500);
+  CHECK(read(f, bank2 + 124) == 0x51f);
+}
+
+TEST_CASE("HAL_FLASHEx_HalfPageProgram into bank 2 from bank 1 code returns HAL_OK")
+{
+  stm32_fixture const f{l152re(), firmware};
+  REQUIRE(f.run_to_stop({.max_instructions = icount{100'000}}).reason == stop_reason::user);
+  write(f, sr, wrperr);
+  unlock(f);
+  auto const buffer = load_buffer(f, 32, 0x600);
+  call(f, "half_page_hal", {static_cast<std::uint32_t>(bank2), static_cast<std::uint32_t>(buffer)});
+  auto const log = f.log();
+  REQUIRE(log.size() == 18);
+  CHECK(log[15] == 0);
+  CHECK(log[17] == (ready | endhv));
+  for(std::uint32_t at = 0; at < 32; ++at)
+  {
+    CHECK(read(f, bank2 + 4 * at) == 0x600 + at);
+  }
+}
+
+TEST_CASE(
+    "RM0038 3.4.3 note 2: during a half page a load of its bank is a BusFault, of the other "
+    "bank it completes")
+{
+  auto const f = parked(l152re(), firmware, handler_options());
+  vectors_in_sram(f);
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  REQUIRE(memory_write(f, target, 4, 1));
+  call(f, "load_word", {static_cast<std::uint32_t>(bank2 + 8)});
+  CHECK(f.log().back() == read(f, bank2 + 8));
+  CHECK(read(f, cfsr) == 0);
+  call(f, "load_word", {static_cast<std::uint32_t>(target + 64)});
+  auto const log = f.log();
+  REQUIRE(log.size() >= 2);
+  CHECK(log[log.size() - 2] == fault_mark);
+  CHECK(ipsr(f) == hardfault_n);
+  CHECK((read(f, hfsr) & forced) != 0);
+  CHECK((read(f, cfsr) & (preciserr | bfarvalid)) == (preciserr | bfarvalid));
+  CHECK(read(f, bfar) == target + 64);
+}
+
+TEST_CASE(
+    "RM0038 3.4.3 note 2: code in the bank a half page writes takes a BusFault, after the "
+    "tprog it runs")
+{
+  {
+    auto const f = parked(l152re(), firmware, handler_options());
+    vectors_in_sram(f);
+    unlock(f);
+    write(f, pecr, fprg | prog);
+    REQUIRE(memory_write(f, target, 4, 1));
+    call(f, "read_flash", {static_cast<std::uint32_t>(target)});
+    auto const log = f.log();
+    REQUIRE(log.size() == 2);
+    CHECK(log[0] == fault_mark);
+    CHECK(ipsr(f) == hardfault_n);
+    CHECK((read(f, hfsr) & forced) != 0);
+    CHECK((read(f, cfsr) & ibuserr) != 0);
+  }
+  auto const f = parked(l152re(), firmware, handler_options());
+  vectors_in_sram(f);
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  store_sequence(f, target, 32, 0x40);
+  idle_to(f, flash_due(f).front() + 1'000'000);
+  REQUIRE(read(f, sr) == (ready | endhv | eop));
+  call(f, "read_flash", {static_cast<std::uint32_t>(target + 4)});
+  CHECK(f.log() == std::vector<std::uint32_t>{0x41});
+}
+
+TEST_CASE("RM0038 3.4.4: a store to bank 2 while a half page in bank 1 is BSY sets WRPERR, aborted")
+{
+  auto const f = parked();
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  store_sequence(f, target, 32, 0x80);
+  REQUIRE(read(f, sr) == (ready | bsy));
+  auto const due = flash_due(f);
+  REQUIRE(memory_write(f, bank2 + 0x100, 4, 7));
+  CHECK(read(f, sr) == (ready | bsy | wrperr));
+  CHECK(read(f, bank2 + 0x100) == 0);
+  CHECK(flash_due(f) == due);
+  idle_to(f, due.front() + 1'000'000);
+  CHECK(read(f, sr) == (ready | endhv | eop | wrperr));
+}
+
+TEST_CASE("RM0038 3.4.3: the parallel half page takes bank 1 first, then bank 2")
+{
+  auto const f = parked();
+  unlock(f);
+  write(f, pecr, parallel | fprg | prog);
+  REQUIRE(memory_write(f, bank2, 4, 1));
+  CHECK(read(f, sr) == (ready | endhv | pgaerr));
+  write(f, sr, pgaerr);
+  store_sequence(f, target, 32, 0x900);
+  REQUIRE(memory_write(f, target + 128, 4, 1));
+  CHECK(read(f, sr) == (ready | endhv | pgaerr));
+  CHECK(read(f, target) == 0);
+  CHECK(flash_due(f).empty());
+}
+
+TEST_CASE("RM0038 3.9.2: setting PELOCK or a SIZERR store drops a half page sequence")
+{
+  auto const f = parked();
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  store_sequence(f, target, 5, 0xa00);
+  write(f, pecr, pelock | fprg | prog);
+  CHECK(read(f, sr) == (ready | endhv | pgaerr));
+  write(f, sr, pgaerr);
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  store_sequence(f, target, 5, 0xb00);
+  REQUIRE(memory_write(f, target + 20, 1, 1));
+  CHECK(read(f, sr) == (ready | endhv | sizerr));
+  write(f, sr, sizerr);
+  store_sequence(f, target, 32, 0xc00);
+  CHECK(read(f, sr) == (ready | bsy));
+  CHECK(read(f, target + 20) == 0xc05);
+}
+
+TEST_CASE("a FLASH snapshot keeps 16 loaded half page words and a pending parallel erase")
+{
+  {
+    auto const f = parked();
+    unlock(f);
+    write(f, pecr, fprg | prog);
+    store_sequence(f, target, 16, 0xd00);
+    auto const saved = f.target->snapshot();
+    f.target->reset(reset_kind::power_on);
+    f.target->restore(saved);
+    store_sequence(f, target + 64, 16, 0xd10);
+    CHECK(read(f, sr) == (ready | bsy));
+    CHECK(flash_due(f).size() == 1);
+    CHECK(read(f, target + 124) == 0xd1f);
+  }
+  auto const f = parked();
+  unlock(f);
+  REQUIRE(memory_write(f, target + 8, 4, 5));
+  REQUIRE(memory_write(f, bank2 + 8, 4, 6));
+  idle_to(f, now_ps(f) + 2 * tprog_ps + 1'000'000);
+  write(f, sr, eop);
+  write(f, pecr, parallel | erase | prog);
+  REQUIRE(memory_write(f, target, 4, 0));
+  auto const saved = f.target->snapshot();
+  f.target->reset(reset_kind::power_on);
+  f.target->restore(saved);
+  REQUIRE(memory_write(f, bank2, 4, 0));
+  CHECK(read(f, sr) == (ready | bsy));
+  CHECK(read(f, target + 8) == 0);
+  CHECK(read(f, bank2 + 8) == 0);
+}
+
+TEST_CASE(
+    "Cat.4 bank 2 starts at half the Flash region, a parallel erase pairs the two halves"
+    * doctest::skip(not popcorn::testing::has_l152rd()))
+{
+  constexpr address half = 0x0803'0000;
+  auto const        f    = parked(popcorn::testing::description_from("POPCORN_L152RD_DESC"));
+  unlock(f);
+  write(f, pecr, parallel | erase | prog);
+  REQUIRE(memory_write(f, half, 4, 0));
+  CHECK(read(f, sr) == (ready | endhv | pgaerr));
+  write(f, sr, pgaerr);
+  REQUIRE(memory_write(f, half - 256, 4, 0));
+  REQUIRE(memory_write(f, half, 4, 0));
+  CHECK(read(f, sr) == (ready | bsy));
+}
+
+TEST_CASE("Cat.6 bank 2 starts at the second Flash region, a third region throws config_error")
+{
+  auto const f = parked(split_banks(2));
+  unlock(f);
+  write(f, pecr, parallel | erase | prog);
+  REQUIRE(memory_write(f, 0x0802'FF00, 4, 0));
+  REQUIRE(memory_write(f, bank2, 4, 0));
+  CHECK(read(f, sr) == (ready | bsy));
+  CHECK_THROWS_AS((stm32_fixture{split_banks(3), firmware}), popcorn::config_error);
+}
+
+TEST_CASE("HAL_FLASHEx_EraseParallelPage and HAL_FLASHEx_ProgramParallelHalfPage run from SRAM")
+{
+  stm32_fixture const f{l152re(), firmware};
+  REQUIRE(f.run_to_stop({.max_instructions = icount{100'000}}).reason == stop_reason::user);
+  write(f, sr, wrperr);
+  unlock(f);
+  f.set("pc", sym(firmware, "idle"));
+  REQUIRE(memory_write(f, target + 12, 4, 5));
+  REQUIRE(memory_write(f, bank2 + 12, 4, 6));
+  idle_to(f, now_ps(f) + 2 * tprog_ps + 1'000'000);
+  write(f, sr, eop);
+  call(
+      f, "parallel_erase_hal",
+      {static_cast<std::uint32_t>(target), static_cast<std::uint32_t>(bank2)});
+  auto log = f.log();
+  REQUIRE(log.size() == 17);
+  CHECK(log[14] == 0);
+  CHECK(log[15] == optlock);
+  CHECK(log[16] == (ready | endhv));
+  CHECK(read(f, target + 12) == 0);
+  CHECK(read(f, bank2 + 12) == 0);
+  write(f, sr, eop);
+  auto const buffer = load_buffer(f, 64, 0xe00);
+  call(
+      f, "parallel_half_hal",
+      {static_cast<std::uint32_t>(target), static_cast<std::uint32_t>(bank2),
+       static_cast<std::uint32_t>(buffer)});
+  log = f.log();
+  REQUIRE(log.size() == 20);
+  CHECK(log[17] == 0);
+  CHECK(log[18] == optlock);
+  CHECK(read(f, target + 124) == 0xe1f);
+  CHECK(read(f, bank2 + 124) == 0xe3f);
+}
+
+TEST_CASE(
+    "checklist 20: a half page stored by a loop in bank 1 faults at the fetch after its first "
+    "store")
+{
+  auto const f = parked(l152re(), firmware, handler_options());
+  vectors_in_sram(f);
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  auto const buffer = load_buffer(f, 32, 0x300);
+  call(
+      f, "copy_words_flash",
+      {static_cast<std::uint32_t>(target), static_cast<std::uint32_t>(buffer), 32});
+  auto const log = f.log();
+  REQUIRE(log.size() == 2);
+  CHECK(log[0] == fault_mark);
+  CHECK((read(f, cfsr) & ibuserr) != 0);
+  CHECK(flash_due(f).empty());
+  CHECK(read(f, target + 4) == 0);
+}
+
+TEST_CASE("a FLASH snapshot keeps the bank lock of a loading and of a BSY half page")
+{
+  auto const f = parked(l152re(), firmware, handler_options());
+  vectors_in_sram(f);
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  store_sequence(f, target, 16, 0xf00);
+  auto const loading = f.target->snapshot();
+  f.target->reset(reset_kind::power_on);
+  f.target->restore(loading);
+  call(f, "load_word", {static_cast<std::uint32_t>(target + 0x200)});
+  auto const faulted = f.log();
+  REQUIRE(faulted.size() >= 2);
+  CHECK(faulted[faulted.size() - 2] == fault_mark);
+  CHECK((read(f, cfsr) & preciserr) != 0);
+  f.target->restore(loading);
+  store_sequence(f, target + 64, 16, 0xf10);
+  REQUIRE(read(f, sr) == (ready | bsy));
+  auto const due  = flash_due(f);
+  auto const busy = f.target->snapshot();
+  f.target->reset(reset_kind::power_on);
+  f.target->restore(busy);
+  idle_to(f, due.front() + 1'000'000);
+  REQUIRE(read(f, sr) == (ready | endhv | eop));
+  call(f, "load_word", {static_cast<std::uint32_t>(target + 4)});
+  CHECK(f.log().back() == 0xf01);
+}
+
+TEST_CASE("a vector table in the bank a half page writes fails the exception entry, inferred")
+{
+  auto const f = parked(l152re(), firmware, handler_options());
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  REQUIRE(memory_write(f, target, 4, 1));
+  write(f, 0xE000'ED04, 1u << 31);
+  auto const stopped = f.run_to_stop({.max_instructions = icount{1'000}});
+  CHECK(stopped.reason == stop_reason::fault);
+  CHECK((read(f, hfsr) & vecttbl) != 0);
+  CHECK(f.log().empty());
+}
+
+TEST_CASE("checklist 20: the store after the first half page store in the same block does not run")
+{
+  auto const f = parked(l152re(), firmware, handler_options());
+  vectors_in_sram(f);
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  call(f, "store_pair", {static_cast<std::uint32_t>(target), 0x700, 0x701});
+  auto const log = f.log();
+  REQUIRE(log.size() == 2);
+  CHECK(log[0] == fault_mark);
+  CHECK((read(f, cfsr) & ibuserr) != 0);
+  store_sequence(f, target + 4, 31, 0x801);
+  CHECK(read(f, sr) == (ready | bsy));
+  CHECK(read(f, target) == 0x700);
+  CHECK(read(f, target + 4) == 0x801);
 }

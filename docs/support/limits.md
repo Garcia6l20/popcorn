@@ -240,17 +240,26 @@ Differs from RM0481:
 
 On the STM32L1, RM0038 section 3:
 
-- A program memory word write holds BSY for one tprog of 3.28 ms, the datasheet typical, and
-  the word reads its new value from the store on. Code and data reads of the bank complete
-  during BSY, and the core keeps running from it. RM0038 3.4.3 stalls code run from the bank
-  for one tprog.
-- A store while BSY is set is decided against FLASH_PECR at its own time, writes its word at once
-  and adds one tprog to BSY. EOP sets at the end of each tprog. Silicon stalls the store until
-  the program before it ends.
-- A program over a word that is not erased writes the word as given. A never-programmed word
-  reads 0, the erased value.
-- A store with FLASH_PECR.ERASE or FPRG set programs nothing, logs one `model_warning` and raises
-  `ModelError` under `strict`. A store to the data EEPROM or the option bytes is a bus error.
+- A program memory word write, page erase or half page write holds BSY for one tprog of
+  3.28 ms, the datasheet typical, and the memory reads its new content from the last store of the
+  operation on. During a word write or a page erase, code and data reads of the bank complete and
+  the core keeps running from it. RM0038 3.4.3 stalls code run from the bank for one tprog.
+- From the first store of a half page sequence to the end of its tprog, a CPU or DMA load of the
+  bank written is a bus error and a fetch from it a BusFault, RM0038 3.4.3 note 2. A parallel page
+  erase or parallel half page locks both banks the same way, from the first store, inferred from
+  RM0038 3.4.2 and 3.4.3, which run them from SRAM only. Host and debugger reads complete. A
+  vector read from a locked bank is a bus error too, so an exception entry with VTOR in that
+  bank escalates to HardFault with HFSR.VECTTBL, inferred from RM0038 Table 15 note 3. Firmware
+  runs these operations from SRAM with VTOR in SRAM or in the other bank.
+- A store while BSY is set is decided against FLASH_PECR at its own time and writes at once. An
+  operation it completes adds one tprog to BSY. EOP sets at the end of each tprog. Silicon stalls
+  the store until the operation before it ends. While a half page of one bank is BSY, a store to
+  the other bank sets WRPERR and writes nothing, RM0038 3.4.4.
+- A program over a word that is not erased writes the word as given. A page erase writes 0, and a
+  never-programmed word reads 0, the erased value.
+- A store with FLASH_PECR.ERASE or FPRG set and PROG clear, or with both set, programs nothing,
+  logs one `model_warning` and raises `ModelError` under `strict`. A store to the data EEPROM or
+  the option bytes is a bus error.
 - A program in voltage range 3 completes, logs one `model_warning` and raises `ModelError` under
   `strict`. RM0038 3.6 allows programming in ranges 1 and 2 only.
 - FLASH_ACR.RUN_PD powers nothing down: the flash stays readable and fetchable, and
@@ -266,7 +275,13 @@ On the STM32L1, RM0038 section 3:
   restarts the sequence, RUN_PD takes only the first FLASH_ACR write after the PDKEYR pair, a
   FLASH_ACR write that changes ACC64 keeps LATENCY and PRFTEN, so ACC64 clears while LATENCY or
   PRFTEN is 1, a byte or halfword store to program memory sets SIZERR and an unaligned word store
-  PGAERR, and FLASH_SR.READY reads 1 after a reset, where RM0038 3.9.7 gives 0.
+  PGAERR, a store to a page start with ERASE and PROG set erases the page whatever value it
+  writes, an erase store away from a page start sets PGAERR, a half page store that skips a word
+  inside the half page sets PGAERR, BSY stays 0 while the first 31 half page words load, a
+  parallel operation takes a bank 1 page or half page first and a bank 2 one second and sets
+  PGAERR for any other order, a FLASH_PECR write that ends a half page sequence early, setting
+  PELOCK included, sets PGAERR, a byte or halfword store inside a sequence sets SIZERR and drops
+  it, and FLASH_SR.READY reads 1 after a reset, where RM0038 3.9.7 gives 0.
 
 ## GPDMA and LPDMA
 

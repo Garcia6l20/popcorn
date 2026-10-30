@@ -368,6 +368,8 @@ def _check_memory(name: str, category: str) -> None:
         assert _region(name, "Flash").controller == "FLASH"
         assert _region(name, "Flash_Bank2").controller == "FLASH"
         assert _region(name, "Flash_Bank2").fill == 0
+    filled = {"Flash", "Flash_Bank2", "DATA_EEPROM"}
+    assert all(r.fill is None for r in _built(name).regions if r.name not in filled)
 
 
 def _check_vector_table(name: str, category: str) -> None:

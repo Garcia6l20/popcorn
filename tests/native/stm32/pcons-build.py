@@ -234,8 +234,7 @@ for program, source in (
         register=l152re is not None
         and l152rb is not None
         and l152rc is not None
-        and (program != "stm32-flash-l1" or l152rba is not None)
-        and (program != "stm32-exti-l1" or l152rd is not None),
+        and (program != "stm32-flash-l1" or l152rba is not None),
     )
     l1_test.private.include_dirs.append(private_dir)
     for _, target in l1_firmwares.values():

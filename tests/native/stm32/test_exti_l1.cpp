@@ -493,7 +493,9 @@ TEST_CASE("RM0038 10.3.2: the EXTI model leaves EXTI_EMR unclaimed, a firmware s
   CHECK(read(f, pr) == 0);
 }
 
-TEST_CASE("an unshipped Cat.4 part built at configure attaches, its EXTI lines on NVIC 6 and 22")
+TEST_CASE(
+    "an unshipped Cat.4 part built at configure attaches, its EXTI lines on NVIC 6 and 22"
+    * doctest::skip(not popcorn::testing::has_l152rd()))
 {
   auto const desc = popcorn::testing::description_from("POPCORN_L152RD_DESC");
   REQUIRE(desc.part == "STM32L152RDTx");

@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Literal
 
+from popcorn_build.cmsis_dirs import VARIABLE, cmsis_device_dirs, with_checkout_dirs
+
 Row = dict[str, Any]
 Source = Literal["local", "shipped"]
 
@@ -173,8 +175,11 @@ def _run_child(name: str, *, child: Sequence[str], env: dict[str, str], timeout:
 
 def child_env(source: Source) -> dict[str, str]:
     """Environment of a child: `mcu()` builds from ST's files for `local` and loads the shipped
-    description for `shipped`, with no description directory in either."""
+    description for `shipped`, with no description directory in either. Both get the build's
+    CMSIS device directories first in `POPCORN_CMSIS_DEVICE_DIRS`, as the description probe
+    does."""
     env = {k: v for k, v in os.environ.items() if k not in LOCAL_SOURCES}
+    env[VARIABLE] = with_checkout_dirs(env.get(VARIABLE), cmsis_device_dirs())
     if source == "local":
         env["POPCORN_STM32_BUILD"] = "local"
     return env

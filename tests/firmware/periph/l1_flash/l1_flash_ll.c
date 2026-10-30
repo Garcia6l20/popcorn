@@ -1,5 +1,6 @@
 #include "periph_test.h"
 #include "stm32l1xx.h"
+#include "stm32l1xx_hal.h"
 #include "stm32l1xx_ll_system.h"
 
 #define PEKEY1  0x89ABCDEFu
@@ -8,11 +9,13 @@
 #define PRGKEY2 0x13141516u
 #define TARGET  ((uint32_t volatile*)0x0801F000u)
 
+FLASH_ProcessTypeDef pFlash;
+
 void idle(void);
 void wrong_key(void);
 void HardFault_Handler(void);
 
-void idle(void)
+__attribute__((section(".RamFunc"), noinline)) void idle(void)
 {
   for(;;)
   {
@@ -20,7 +23,7 @@ void idle(void)
   }
 }
 
-void HardFault_Handler(void)
+__attribute__((section(".RamFunc"), noinline)) void HardFault_Handler(void)
 {
   LOG(0xfa17u);
   LOG(FLASH->PECR);
@@ -78,14 +81,15 @@ int main(void)
   DONE();
 }
 
-uint32_t words[32];
+uint32_t words[64];
 
 void copy_words(uint32_t volatile* dst, uint32_t const* src, uint32_t count);
 void store_byte(uint8_t volatile* dst, uint32_t value);
 void store_half(uint16_t volatile* dst, uint32_t value);
 void wait_idle(void);
 
-__attribute__((noipa)) void copy_words(uint32_t volatile* dst, uint32_t const* src, uint32_t count)
+__attribute__((section(".RamFunc"), noipa)) void
+    copy_words(uint32_t volatile* dst, uint32_t const* src, uint32_t count)
 {
   for(uint32_t i = 0; i < count; ++i)
   {
@@ -106,7 +110,7 @@ __attribute__((noipa)) void store_half(uint16_t volatile* dst, uint32_t value)
   DONE();
 }
 
-__attribute__((noipa)) void wait_idle(void)
+__attribute__((section(".RamFunc"), noipa)) void wait_idle(void)
 {
   while(READ_BIT(FLASH->SR, FLASH_SR_BSY) != 0)
   {
@@ -122,5 +126,93 @@ __attribute__((noipa)) void store_loop(uint32_t volatile* dst, uint32_t count)
   {
     dst[i] = i;
   }
+  DONE();
+}
+
+void half_page_hal(uint32_t address, uint32_t* buffer);
+void erase_page(uint32_t volatile* page);
+
+__attribute__((noipa)) void half_page_hal(uint32_t address, uint32_t* buffer)
+{
+  LOG((uint32_t)&HAL_FLASHEx_HalfPageProgram);
+  LOG(HAL_FLASHEx_HalfPageProgram(address, buffer));
+  LOG(FLASH->PECR);
+  LOG(FLASH->SR);
+  DONE();
+}
+
+__attribute__((noipa)) void erase_page(uint32_t volatile* page)
+{
+  SET_BIT(FLASH->PECR, FLASH_PECR_ERASE | FLASH_PECR_PROG);
+  *page = 0u;
+  while(READ_BIT(FLASH->SR, FLASH_SR_BSY) != 0)
+  {
+  }
+  CLEAR_BIT(FLASH->PECR, FLASH_PECR_ERASE | FLASH_PECR_PROG);
+  DONE();
+}
+
+void load_word(uint32_t const volatile* src);
+void read_flash(uint32_t const volatile* src);
+void parallel_erase_hal(uint32_t first, uint32_t second);
+void parallel_half_hal(uint32_t first, uint32_t second, uint32_t* buffer);
+
+__attribute__((section(".RamFunc"), noipa)) void load_word(uint32_t const volatile* src)
+{
+  LOG(*src);
+  DONE();
+}
+
+__attribute__((noipa)) void read_flash(uint32_t const volatile* src)
+{
+  LOG(*src);
+  DONE();
+}
+
+__attribute__((noipa)) void parallel_erase_hal(uint32_t first, uint32_t second)
+{
+#if defined(FLASH_PECR_PARALLBANK)
+  LOG(HAL_FLASHEx_EraseParallelPage(first, second));
+#else
+  (void)first;
+  (void)second;
+#endif
+  LOG(FLASH->PECR);
+  LOG(FLASH->SR);
+  DONE();
+}
+
+__attribute__((noipa)) void parallel_half_hal(uint32_t first, uint32_t second, uint32_t* buffer)
+{
+#if defined(FLASH_PECR_PARALLBANK)
+  LOG(HAL_FLASHEx_ProgramParallelHalfPage(first, buffer, second, buffer + 32));
+#else
+  (void)first;
+  (void)second;
+  (void)buffer;
+#endif
+  LOG(FLASH->PECR);
+  LOG(FLASH->SR);
+  DONE();
+}
+
+void copy_words_flash(uint32_t volatile* dst, uint32_t const* src, uint32_t count);
+
+__attribute__((noipa)) void
+    copy_words_flash(uint32_t volatile* dst, uint32_t const* src, uint32_t count)
+{
+  for(uint32_t i = 0; i < count; ++i)
+  {
+    dst[i] = src[i];
+  }
+  DONE();
+}
+
+void store_pair(uint32_t volatile* dst, uint32_t first, uint32_t second);
+
+__attribute__((noipa)) void store_pair(uint32_t volatile* dst, uint32_t first, uint32_t second)
+{
+  dst[0] = first;
+  dst[1] = second;
   DONE();
 }

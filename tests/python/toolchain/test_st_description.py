@@ -3,7 +3,9 @@ import os
 from pathlib import Path
 
 import pytest
+from popcorn.stm32.description import DescriptionError
 from popcorn.stm32.description._shipped import compose_shipped
+from popcorn.stm32.description._sources import find_sources
 
 from popcorn_build.cmsis_dirs import VARIABLE, cmsis_device_dirs
 from popcorn_build.python import package_files
@@ -58,11 +60,16 @@ def test_the_build_probe_puts_the_checkout_cmsis_dirs_first(
     assert entries == [*(str(path) for path in cmsis_device_dirs()), "/elsewhere"]
 
 
+@pytest.mark.timeout(60)
 def test_the_build_probe_builds_an_unshipped_l1_part_with_the_cmsis_irq_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     if not any(path.parent.name == "cmsis-device-l1" for path in cmsis_device_dirs()):
         pytest.skip("the build directory has no cmsis-device-l1 package")
+    try:
+        find_sources("STM32L152RDTx")
+    except DescriptionError as exc:
+        pytest.skip(f"ST's files for STM32L152RDTx are missing: {exc}")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.delenv(VARIABLE, raising=False)
     monkeypatch.delenv("POPCORN_STM32_DESCRIPTION_DIRS", raising=False)

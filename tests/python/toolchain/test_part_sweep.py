@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from popcorn.stm32 import mcu
 from popcorn.stm32.description._sources import default_search_paths
 
 from popcorn_build import part_sweep
+from popcorn_build.cmsis_dirs import VARIABLE, cmsis_device_dirs
 from popcorn_build.part_sweep import LOCAL_SOURCES, db_parts, main, sweep, sweep_part
 
 SHIPPED = ("STM32H573AIIx", "STM32U575QGIx")
@@ -193,3 +195,11 @@ def test_a_sweep_matching_no_part_stops(
         main(["--out", str(tmp_path / "sweep.json"), "--parts", "STM32Q*"])
     assert exc.value.code == 2
     assert "no local part matches" in capsys.readouterr().err
+
+
+def test_a_child_gets_the_checkout_cmsis_dirs_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(VARIABLE, "/user/include")
+    dirs = cmsis_device_dirs()
+    for source in ("local", "shipped"):
+        entries = part_sweep.child_env(source)[VARIABLE].split(os.pathsep)
+        assert entries == [*map(str, dirs), "/user/include"]

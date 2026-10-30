@@ -57,7 +57,8 @@ def cached_st_description(part: str, variable: str) -> Path | None:
     )
     if probe.returncode != 0:
         print(
-            f"popcorn: warning: {part} tests not registered, the description build failed:\n"
+            f"popcorn: warning: {part} tests not registered or skipped, the description build "
+            f"failed:\n"
             f"{probe.stderr.strip()}",
             file=sys.stderr,
         )

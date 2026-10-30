@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <span>
@@ -56,6 +57,14 @@ inline auto l152rc() -> part_description const&
 {
   static auto const desc = description_from("POPCORN_L152RC_DESC");
   return desc;
+}
+
+/** @brief Whether the configure built the unshipped STM32L152RDTx description, Cat.4: its
+ *         `POPCORN_L152RD_DESC` path is set and not `None`. */
+inline auto has_l152rd() -> bool
+{
+  char const* const path = std::getenv("POPCORN_L152RD_DESC");
+  return path != nullptr and std::string_view{path} != "None";
 }
 
 /** @brief Machine options of the STM32 tests: faults and spins stop the run. */
