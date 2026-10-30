@@ -24,6 +24,7 @@ l152re = cached_st_description("STM32L152RETx", "POPCORN_L152RE_DESC")
 l152rb = cached_st_description("STM32L152RBTx", "POPCORN_L152RB_DESC")
 l152rc = cached_st_description("STM32L152RCTx", "POPCORN_L152RC_DESC")
 l152rba = cached_st_description("STM32L152RBTxA", "POPCORN_L152RBA_DESC")
+l152rd = cached_st_description("STM32L152RDTx", "POPCORN_L152RD_DESC")
 u575_2m = cached_st_description("STM32U575ZITxQ", "POPCORN_U575_2M_DESC")
 h5_1m = cached_st_description("STM32H563ZGTx", "POPCORN_H5_1M_DESC")
 firmwares = {
@@ -76,6 +77,7 @@ l1_env = {
     "POPCORN_L152RB_DESC": str(l152rb),
     "POPCORN_L152RC_DESC": str(l152rc),
     "POPCORN_L152RBA_DESC": str(l152rba),
+    "POPCORN_L152RD_DESC": str(l152rd),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in l1_firmwares.items()},
 }
 u575_env = {
@@ -232,7 +234,8 @@ for program, source in (
         register=l152re is not None
         and l152rb is not None
         and l152rc is not None
-        and (program != "stm32-flash-l1" or l152rba is not None),
+        and (program != "stm32-flash-l1" or l152rba is not None)
+        and (program != "stm32-exti-l1" or l152rd is not None),
     )
     l1_test.private.include_dirs.append(private_dir)
     for _, target in l1_firmwares.values():

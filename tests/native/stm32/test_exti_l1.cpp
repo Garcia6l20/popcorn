@@ -492,3 +492,33 @@ TEST_CASE("RM0038 10.3.2: the EXTI model leaves EXTI_EMR unclaimed, a firmware s
   CHECK(cpu_load(f, exti + 0x04) == 2);
   CHECK(read(f, pr) == 0);
 }
+
+TEST_CASE("an unshipped Cat.4 part built at configure attaches, its EXTI lines on NVIC 6 and 22")
+{
+  auto const desc = popcorn::testing::description_from("POPCORN_L152RD_DESC");
+  REQUIRE(desc.part == "STM32L152RDTx");
+  auto const comp_irq = std::ranges::find(desc.irqs, 22, &popcorn::irq_desc::number);
+  REQUIRE(comp_irq != desc.irqs.end());
+  CHECK(comp_irq->name == "COMP_IRQn");
+  auto const f = parked(desc, "l152xb_l1_exti_ll");
+  write(f, imr, ~std::uint32_t{});
+  write(f, swier, 1u);
+  CHECK(irq_pending(f, 6));
+  write(f, swier, 1u << 21);
+  CHECK(irq_pending(f, comp));
+}
+
+TEST_CASE("the EXTI groups find their NVIC line by number, whatever the description names it")
+{
+  auto part  = l152re();
+  auto named = std::ranges::find(part.irqs, 22, &popcorn::irq_desc::number);
+  REQUIRE(named != part.irqs.end());
+  named->name  = "COMP_CA_IRQn";
+  auto const f = parked(part);
+  write(f, imr, ~std::uint32_t{});
+  write(f, swier, 1u << 22);
+  CHECK(irq_pending(f, comp));
+  auto missing = l152re();
+  std::erase_if(missing.irqs, [](auto const& irq) { return irq.number == 22; });
+  CHECK_THROWS_AS((stm32_fixture{std::move(missing), firmware}), popcorn::config_error);
+}

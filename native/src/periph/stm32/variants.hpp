@@ -90,8 +90,9 @@ struct exti_line_group
   std::uint8_t first;
   /** @brief Last line, included. */
   std::uint8_t last;
-  /** @brief IRQ name in the description. */
-  std::string_view irq;
+  /** @brief NVIC line, the IRQ number in the description. The CMSIS device header and the SVD
+   *         name some of these lines differently, the number is the same in both. */
+  std::uint16_t irq;
 };
 
 /** @brief Differences between the classic EXTI controllers the model rows serve. */
@@ -104,20 +105,21 @@ struct exti_classic_traits
   std::span<exti_line_group const> irqs;
 };
 
-/** @brief STM32L1, RM0038 Tables 49 to 51: EXTI0 to EXTI4 one line each, EXTI9_5, EXTI15_10, line
- *         19 the RTC tamper and timestamp line, lines 21 and 22 the comparator wakeup line. PVD,
- *         RTC_Alarm, USB_FS_WKUP, RTC_WKUP and COMP_ACQ, lines 16, 17, 18, 20 and 23, belong to
- *         PWR, RTC, USB and COMP in the description. */
+/** @brief STM32L1, RM0038 Tables 49 to 51 by NVIC line: EXTI0 to EXTI4 on 6 to 10 one line each,
+ *         EXTI9_5 on 23, EXTI15_10 on 40, line 19 the RTC tamper and timestamp line on 2, lines
+ *         21 and 22 the comparator wakeup line on 22. PVD, RTC_Alarm, USB_FS_WKUP, RTC_WKUP and
+ *         COMP_ACQ, lines 16, 17, 18, 20 and 23, belong to PWR, RTC, USB and COMP in the
+ *         description. */
 inline constexpr auto l1_exti_irqs = std::to_array<exti_line_group>({
-    {0,  0,  "EXTI0_IRQn"       },
-    {1,  1,  "EXTI1_IRQn"       },
-    {2,  2,  "EXTI2_IRQn"       },
-    {3,  3,  "EXTI3_IRQn"       },
-    {4,  4,  "EXTI4_IRQn"       },
-    {5,  9,  "EXTI9_5_IRQn"     },
-    {10, 15, "EXTI15_10_IRQn"   },
-    {19, 19, "TAMPER_STAMP_IRQn"},
-    {21, 22, "COMP_IRQn"        },
+    {0,  0,  6 },
+    {1,  1,  7 },
+    {2,  2,  8 },
+    {3,  3,  9 },
+    {4,  4,  10},
+    {5,  9,  23},
+    {10, 15, 40},
+    {19, 19, 2 },
+    {21, 22, 22},
 });
 /** @brief STM32L1 Cat.1 and Cat.2, `STM32L1_exti_23`, RM0038 10.2: 23 lines. */
 inline constexpr exti_classic_traits l1_exti_23{.lines = 23, .irqs = l1_exti_irqs};

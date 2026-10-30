@@ -1,11 +1,13 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
 from popcorn.stm32.description._shipped import compose_shipped
 
+from popcorn_build.cmsis_dirs import VARIABLE, cmsis_device_dirs
 from popcorn_build.python import package_files
-from popcorn_build.st_description import cached_st_description
+from popcorn_build.st_description import cached_st_description, probe_env
 
 M33_JSON = Path(__file__).parents[3] / "tests" / "data" / "core" / "m33.json"
 NAME = "STM32T001ABCx"
@@ -46,6 +48,29 @@ def test_the_build_probe_composes_a_shipped_part_without_the_extension(
     assert path is not None
     assert path.parent == tmp_path / "cache" / "popcorn" / "mcu" / "shipped"
     assert path.read_text() == compose_shipped("STM32U575QGIx")
+
+
+def test_the_build_probe_puts_the_checkout_cmsis_dirs_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(VARIABLE, "/elsewhere")
+    entries = probe_env()[VARIABLE].split(os.pathsep)
+    assert entries == [*(str(path) for path in cmsis_device_dirs()), "/elsewhere"]
+
+
+def test_the_build_probe_builds_an_unshipped_l1_part_with_the_cmsis_irq_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not any(path.parent.name == "cmsis-device-l1" for path in cmsis_device_dirs()):
+        pytest.skip("the build directory has no cmsis-device-l1 package")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.delenv(VARIABLE, raising=False)
+    monkeypatch.delenv("POPCORN_STM32_DESCRIPTION_DIRS", raising=False)
+    monkeypatch.delenv("POPCORN_PROBE_UNSET", raising=False)
+    path = cached_st_description("STM32L152RDTx", "POPCORN_PROBE_UNSET")
+    assert path is not None
+    irqs = {irq["number"]: irq["name"] for irq in json.loads(path.read_text())["irqs"]}
+    assert irqs[22] == "COMP_IRQn"
 
 
 def test_package_data_includes_shipped_layers(tmp_path: Path) -> None:

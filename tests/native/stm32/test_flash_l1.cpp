@@ -710,6 +710,25 @@ TEST_CASE("RM0038 3.4.2: a never-programmed program memory word reads 0, the L1 
   }
 }
 
+TEST_CASE("a FLASH snapshot restores a queued chain of three programs and ends it on time")
+{
+  auto const f = parked();
+  unlock(f);
+  REQUIRE(memory_write(f, target, 4, 1));
+  REQUIRE(memory_write(f, target + 4, 4, 2));
+  REQUIRE(memory_write(f, target + 8, 4, 3));
+  auto const start = now_ps(f);
+  auto const saved = f.target->snapshot();
+  idle_to(f, start + 3 * tprog_ps + 1'000'000);
+  REQUIRE(read(f, sr) == (ready | endhv | eop));
+  f.target->restore(saved);
+  CHECK(read(f, sr) == (ready | bsy));
+  idle_to(f, start + 2 * tprog_ps + 1'000'000);
+  CHECK((read(f, sr) & bsy) != 0);
+  idle_to(f, start + 3 * tprog_ps + 1'000'000);
+  CHECK(read(f, sr) == (ready | endhv | eop));
+}
+
 TEST_CASE("a FLASH snapshot restores the unlock, a key sequence half done and BSY")
 {
   auto const f = parked();

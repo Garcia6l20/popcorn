@@ -5,6 +5,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -96,7 +97,14 @@ exti_classic::exti_classic(
   for(auto const& group : traits.irqs)
   {
     auto const width = group.last - group.first + 1u;
-    irqs_.emplace_back(((std::uint32_t{1} << width) - 1u) << group.first, &irq(group.irq));
+    auto const named = std::ranges::find(ctx.part.irqs, group.irq, &irq_desc::number);
+    if(named == ctx.part.irqs.end())
+    {
+      throw config_error(
+          ctx.part.part, 0, std::format("peripherals.{}.irqs", desc.name),
+          std::format("NVIC line {}, which the EXTI model raises", group.irq));
+    }
+    irqs_.emplace_back(((std::uint32_t{1} << width) - 1u) << group.first, &irq(named->name));
   }
 }
 
