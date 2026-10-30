@@ -1,5 +1,6 @@
 #include "dma.hpp"
 #include "factories.hpp"
+#include "i2c_link_port.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -4980,9 +4981,17 @@ TEST_CASE("an unmodelled controller field at a START logs once, strict refuses a
         REQUIRE(
             popcorn::find_register(r.f->target->peripheral("I2C1").description(), reg) != nullptr);
         auto const extra = reg == "CR2" ? add10_bit : 0u;
+        if(reg == "CR1")
+        {
+          b.set("CR1", "PE", 0);
+        }
         if(reg != "CR2")
         {
           b.set(reg, field, 1);
+        }
+        if(reg == "CR1")
+        {
+          b.set("CR1", "PE", 1);
         }
         auto const word = (0x33u << 1) | start_bit | autoend | extra;
         auto const cr2  = b.at("I2C1", "CR2");
@@ -6958,4 +6967,867 @@ TEST_CASE("1000 refused I2C completions leave no record behind")
   CHECK(refused_of(*r.f) == 1000);
   CHECK_FALSE(popcorn::testing::saved_integer(*r.f, "I2C1", "completions.0.ticket").has_value());
   CHECK_FALSE(completion_due(*r.f).has_value());
+}
+
+namespace
+{
+class i2c_proxy final : public stm32::i2c_link_target
+{
+public:
+  struct asked
+  {
+    char          kind{};
+    std::uint8_t  value{};
+    std::uint64_t at{};
+    std::uint64_t local_ps{};
+    std::uint64_t ticket{};
+  };
+
+  stm32::i2c_link_port*            link{};
+  core::clock const*               clock{};
+  periph::i2c_target_port*         port{};
+  int                              links{};
+  int                              attaches{};
+  int                              detaches{};
+  bool                             ack{true};
+  bool                             hold{};
+  bool                             refuse_attach{};
+  bool                             acked{};
+  std::uint8_t                     byte{0xFF};
+  std::vector<asked>               heard;
+  std::vector<std::string>         posts;
+  std::vector<popcorn::reset_kind> resets;
+  std::vector<std::uint64_t>       cuts;
+  std::vector<std::uint64_t>       stops;
+  std::vector<bool>                muted_in_hooks;
+
+  void linked(stm32::i2c_link_port& to, core::clock const& machine) override
+  {
+    link  = &to;
+    clock = &machine;
+    ++links;
+  }
+
+  void attached(periph::i2c_target_port& to) override
+  {
+    muted_in_hooks.push_back(link->muted(*this));
+    if(refuse_attach)
+    {
+      link  = nullptr;
+      clock = nullptr;
+      throw std::runtime_error("the proxy refuses its port");
+    }
+    port = &to;
+    ++attaches;
+  }
+
+  void detached() noexcept override
+  {
+    muted_in_hooks.push_back(link->muted(*this));
+    link  = nullptr;
+    clock = nullptr;
+    port  = nullptr;
+    ++detaches;
+  }
+
+  [[nodiscard]] auto address() const -> std::uint8_t override
+  {
+    return 0x7F;
+  }
+
+  [[nodiscard]] auto matches(std::uint8_t, vtime) -> bool override
+  {
+    return true;
+  }
+
+  auto start(bool, vtime) -> periph::i2c_reply override
+  {
+    return {.ack = false};
+  }
+
+  auto write(std::uint8_t, vtime) -> periph::i2c_reply override
+  {
+    return {.ack = false};
+  }
+
+  auto read(vtime) -> periph::i2c_read_reply override
+  {
+    return {};
+  }
+
+  auto start_deferred(std::uint8_t sent, bool read, vtime at, std::uint64_t ticket)
+      -> std::optional<periph::i2c_reply> override
+  {
+    record(read ? 'R' : 'W', sent, at, ticket);
+    post("start");
+    acked = ack;
+    if(hold)
+    {
+      return std::nullopt;
+    }
+    return periph::i2c_reply{.ack = ack};
+  }
+
+  auto write_deferred(std::uint8_t value, vtime at, std::uint64_t ticket)
+      -> std::optional<periph::i2c_reply> override
+  {
+    if(not acked)
+    {
+      record('x', value, at, ticket);
+      return periph::i2c_reply{.ack = false};
+    }
+    record('w', value, at, ticket);
+    post("write");
+    return periph::i2c_reply{};
+  }
+
+  auto read_deferred(vtime at, bool sent_ack, std::uint64_t ticket)
+      -> std::optional<periph::i2c_read_reply> override
+  {
+    if(not acked)
+    {
+      record('y', 0xFF, at, ticket);
+      return periph::i2c_read_reply{};
+    }
+    record(sent_ack ? 'a' : 'n', byte, at, ticket);
+    post("read");
+    return periph::i2c_read_reply{.byte = byte};
+  }
+
+  void stop(vtime at) override
+  {
+    stops.push_back(at.ps);
+    acked = false;
+    post("stop");
+  }
+
+  void reset(popcorn::reset_kind kind) override
+  {
+    resets.push_back(kind);
+    acked = false;
+    post("reset");
+  }
+
+  void power_cut(vtime at) override
+  {
+    cuts.push_back(at.ps);
+  }
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+  [[nodiscard]] auto kinds() const -> std::string
+  {
+    std::string out;
+    for(auto const& one : heard)
+    {
+      out.push_back(one.kind);
+    }
+    return out;
+  }
+
+private:
+  void record(char kind, std::uint8_t value, vtime at, std::uint64_t ticket)
+  {
+    auto const offset = clock->since_power_on().ps - clock->time().ps;
+    heard.push_back(
+        {.kind = kind, .value = value, .at = at.ps, .local_ps = at.ps - offset, .ticket = ticket});
+  }
+
+  void post(std::string const& what)
+  {
+    if(link != nullptr and link->muted(*this))
+    {
+      return;
+    }
+    posts.push_back(what);
+  }
+};
+
+class i2c_link_sink final : public stm32::i2c_link_controller
+{
+public:
+  periph::i2c_controller_port* port{};
+  core::clock const*           clock{};
+  int                          links{};
+  int                          unlinks{};
+  std::vector<heard>           answers;
+  std::vector<lost>            drops;
+  bool                         refuse{};
+
+  void linked(periph::i2c_controller_port& to, core::clock const& machine) override
+  {
+    if(refuse)
+    {
+      throw std::runtime_error("the link controller refuses its port");
+    }
+    port  = &to;
+    clock = &machine;
+    ++links;
+  }
+
+  void unlinked() noexcept override
+  {
+    port  = nullptr;
+    clock = nullptr;
+    ++unlinks;
+  }
+
+  void answered(std::uint64_t unit, periph::i2c_phase phase, periph::i2c_answer answer, vtime at)
+      override
+  {
+    answers.push_back({unit, phase, answer.ack, answer.byte, at.ps});
+  }
+
+  void dropped(std::uint64_t unit, periph::i2c_phase phase, vtime at) override
+  {
+    drops.push_back({unit, phase, at.ps});
+  }
+};
+
+auto link_port(stm32_fixture const& f) -> stm32::i2c_link_port&
+{
+  auto* const found = dynamic_cast<stm32::i2c_link_port*>(f.target->model("I2C1"));
+  REQUIRE(found != nullptr);
+  return *found;
+}
+
+auto encoded(stm32_fixture const& f) -> std::vector<std::byte>
+{
+  return core::encode_snapshot(f.target->snapshot().data());
+}
+
+auto no_targets() -> std::vector<std::shared_ptr<voter>>
+{
+  return {};
+}
+}
+
+TEST_CASE("a link target next to a board target joins the fan-out and the AND, a detach restores")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    fan_rig     r{part, voters({0x50})};
+    auto const& board = r.targets[0];
+    auto const  proxy = std::make_shared<i2c_proxy>();
+    auto const  p     = r.period();
+    board->byte       = 0xF0;
+    proxy->byte       = 0x3C;
+    link_port(*r.f).attach_target(proxy);
+    CHECK(proxy->links == 1);
+    CHECK(proxy->attaches == 1);
+    CHECK(proxy->clock == &r.f->target->virtual_clock());
+    r.b().command(0x50, 2, true, true);
+    CHECK(r.drive(40 * p) == std::vector<std::uint32_t>{0x30, 0x30});
+    CHECK(board->kinds() == "RanP");
+    CHECK(proxy->kinds() == "Ran");
+    CHECK(proxy->posts == std::vector<std::string>{"start", "read", "read", "stop"});
+    CHECK((proxy->heard[0].ticket & 0xFFFF'FFFFu) == 1);
+    proxy->ack = false;
+    r.b().command(0x50, 2, true, true);
+    CHECK(r.drive(40 * p) == std::vector<std::uint32_t>{0xF0, 0xF0});
+    CHECK(proxy->kinds() == "RanRyy");
+    proxy->ack         = true;
+    board->ack_address = false;
+    r.b().command(0x50, 1, false, true);
+    std::ignore = r.drive(40 * p);
+    CHECK(r.b().get("ISR", "NACKF") == 0);
+    CHECK(board->kinds() == "RanPRanPWP");
+    CHECK(proxy->kinds() == "RanRyyWw");
+    board->ack_address = true;
+    link_port(*r.f).detach_target(*proxy);
+    CHECK(proxy->detaches == 1);
+    CHECK(proxy->link == nullptr);
+    CHECK(proxy->clock == nullptr);
+    CHECK(proxy->port == nullptr);
+    r.b().command(0x50, 1, true, true);
+    CHECK(r.drive(40 * p) == std::vector<std::uint32_t>{0xF0});
+    CHECK(proxy->kinds() == "RanRyyWw");
+  }
+}
+
+TEST_CASE(
+    "a member snapshot has the same bytes with an I2C link target or link controller attached")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    std::vector<std::vector<std::byte>> saved;
+    for(bool const linked : {false, true})
+    {
+      CAPTURE(linked);
+      fan_rig    r{part, voters({0x50})};
+      auto const proxy = std::make_shared<i2c_proxy>();
+      auto const p     = r.period();
+      if(linked)
+      {
+        link_port(*r.f).attach_target(proxy);
+      }
+      r.b().command(0x50, 3, false, true);
+      std::ignore = r.drive(15 * p);
+      saved.push_back(encoded(*r.f));
+      std::ignore = r.drive(40 * p);
+      saved.push_back(encoded(*r.f));
+      CHECK(r.targets[0]->kinds() == "WwwwP");
+      CHECK(proxy->kinds() == (linked ? "Wwww" : ""));
+    }
+    CHECK(saved[0] == saved[2]);
+    CHECK(saved[1] == saved[3]);
+    saved.clear();
+    for(bool const linked : {false, true})
+    {
+      CAPTURE(linked);
+      target_rig r{part, false, not linked};
+      auto const sink = std::make_shared<i2c_link_sink>();
+      if(linked)
+      {
+        link_port(*r.f).attach_controller(sink);
+      }
+      r.listen();
+      auto const t = r.now() + us;
+      r.start(own, false, t, 1);
+      r.write(0x11, t + target_ps, 2);
+      r.stop(t + 2 * target_ps, 3);
+      r.run_until(t + target_ps + target_ps / 2);
+      saved.push_back(encoded(*r.f));
+      r.run_until(t + 3 * target_ps);
+      saved.push_back(encoded(*r.f));
+      CHECK((linked ? sink->answers.size() : r.sink->answers.size()) == 2);
+    }
+    CHECK(saved[0] == saved[2]);
+    CHECK(saved[1] == saved[3]);
+  }
+}
+
+TEST_CASE("attaching and detaching I2C link proxies twice leaves no reference behind")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    std::weak_ptr<i2c_proxy>     target_gone;
+    std::weak_ptr<i2c_link_sink> sink_gone;
+    {
+      fan_rig    r{part, no_targets()};
+      auto const proxy = std::make_shared<i2c_proxy>();
+      target_gone      = proxy;
+      for(int round = 1; round <= 2; ++round)
+      {
+        CAPTURE(round);
+        link_port(*r.f).attach_target(proxy);
+        CHECK(proxy->links == round);
+        CHECK(proxy->attaches == round);
+        CHECK(proxy->port != nullptr);
+        link_port(*r.f).detach_target(*proxy);
+        CHECK(proxy->detaches == round);
+        CHECK(proxy->link == nullptr);
+        CHECK(proxy->clock == nullptr);
+        CHECK(proxy->port == nullptr);
+      }
+      link_port(*r.f).detach_target(*proxy);
+      CHECK(proxy->detaches == 2);
+    }
+    CHECK(target_gone.expired());
+    {
+      target_rig r{part, false, false};
+      auto const sink = std::make_shared<i2c_link_sink>();
+      sink_gone       = sink;
+      for(int round = 1; round <= 2; ++round)
+      {
+        CAPTURE(round);
+        link_port(*r.f).attach_controller(sink);
+        CHECK(sink->port != nullptr);
+        CHECK(sink->clock == &r.f->target->virtual_clock());
+        link_port(*r.f).detach_controller(*sink);
+        CHECK(sink->unlinks == round);
+        CHECK(sink->port == nullptr);
+        CHECK(sink->clock == nullptr);
+      }
+    }
+    CHECK(sink_gone.expired());
+  }
+}
+
+TEST_CASE("an I2C link controller drives the target, and after a detach its units start from 1")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part, false, false};
+    r.listen();
+    for(int round = 1; round <= 2; ++round)
+    {
+      CAPTURE(round);
+      auto const sink = std::make_shared<i2c_link_sink>();
+      link_port(*r.f).attach_controller(sink);
+      auto const t = r.now() + us;
+      sink->port->start(own, false, target_ps, vtime{t}, wire, 1);
+      sink->port->write(0x11, target_ps, vtime{t + target_ps}, wire, 2);
+      sink->port->stop(vtime{t + 2 * target_ps}, wire, 3);
+      r.run_until(t + 3 * target_ps);
+      CHECK(
+          sink->answers
+          == std::vector<heard>{
+              {1, on_address, true, 0xFF, t + target_ps    },
+              {2, on_write,   true, 0xFF, t + 2 * target_ps}
+      });
+      CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.last_unit") == 3);
+      link_port(*r.f).detach_controller(*sink);
+      CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.last_unit") == 0);
+      std::ignore = r.b().receive();
+    }
+  }
+}
+
+TEST_CASE("a link controller whose linked() throws leaves the instance as it was")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part, false, false};
+    r.listen();
+    auto const first = std::make_shared<i2c_link_sink>();
+    link_port(*r.f).attach_controller(first);
+    auto const t = r.now() + us;
+    first->port->start(own, false, target_ps, vtime{t}, wire, 1);
+    first->port->write(0x11, target_ps, vtime{t + target_ps}, wire, 2);
+    first->port->stop(vtime{t + 2 * target_ps}, wire, 3);
+    r.run_until(t + 3 * target_ps);
+    std::ignore       = r.b().receive();
+    auto const inside = r.f->target->snapshot();
+    link_port(*r.f).detach_controller(*first);
+    r.f->target->restore(inside);
+    REQUIRE(popcorn::testing::saved_integer(*r.f, "I2C1", "port.last_unit") == 3);
+    auto const refusing = std::make_shared<i2c_link_sink>();
+    refusing->refuse    = true;
+    CHECK_THROWS_AS(link_port(*r.f).attach_controller(refusing), std::runtime_error);
+    CHECK(refusing->port == nullptr);
+    CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.last_unit") == 3);
+    auto const probe = std::make_shared<i2c_proxy>();
+    link_port(*r.f).attach_target(probe);
+    link_port(*r.f).detach_target(*probe);
+    auto const sink = std::make_shared<i2c_link_sink>();
+    link_port(*r.f).attach_controller(sink);
+    CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "port.last_unit") == 0);
+    auto const u = r.now() + us;
+    sink->port->start(own, false, target_ps, vtime{u}, wire, 1);
+    sink->port->stop(vtime{u + target_ps}, wire, 2);
+    r.run_until(u + 2 * target_ps);
+    CHECK(
+        sink->answers
+        == std::vector<heard>{
+            {1, on_address, true, 0xFF, u + target_ps}
+    });
+    link_port(*r.f).detach_controller(*sink);
+  }
+}
+
+TEST_CASE("an I2C link controller detach mid-transfer drops its entries unreported, frees the bus")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part, false, false};
+    auto const sink = std::make_shared<i2c_link_sink>();
+    link_port(*r.f).attach_controller(sink);
+    r.listen();
+    auto const t = r.now() + us;
+    sink->port->start(own, false, target_ps, vtime{t}, wire, 1);
+    sink->port->write(0x11, target_ps, vtime{t + target_ps}, wire, 2);
+    sink->port->stop(vtime{t + 2 * target_ps}, wire, 3);
+    r.run_until(t + target_ps + target_ps / 2);
+    CHECK(r.get("ISR", "BUSY") == 1);
+    REQUIRE(sink->answers.size() == 1);
+    link_port(*r.f).detach_controller(*sink);
+    CHECK(r.get("ISR", "BUSY") == 0);
+    r.run_until(t + 3 * target_ps);
+    CHECK(sink->answers.size() == 1);
+    CHECK(sink->drops.empty());
+    CHECK(r.get("ISR", "STOPF") == 0);
+    CHECK(r.get("ISR", "RXNE") == 0);
+    auto const again = std::make_shared<i2c_link_sink>();
+    link_port(*r.f).attach_controller(again);
+    auto const later = r.now() + us;
+    again->port->start(own, false, target_ps, vtime{later}, wire, 1);
+    r.run_until(later + target_ps + us);
+    CHECK(
+        again->answers
+        == std::vector<heard>{
+            {1, on_address, true, 0xFF, later + target_ps}
+    });
+    CHECK(r.get("ISR", "BUSY") == 1);
+  }
+}
+
+TEST_CASE("I2C link attaches are refused before any change, the instance keeps working")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    SUBCASE("a link proxy next to a board controller")
+    {
+      target_rig r{part};
+      auto const sink  = std::make_shared<i2c_link_sink>();
+      auto const proxy = std::make_shared<i2c_proxy>();
+      CHECK_THROWS_AS(link_port(*r.f).attach_controller(sink), popcorn::config_error);
+      CHECK_THROWS_AS(link_port(*r.f).attach_target(proxy), popcorn::config_error);
+      CHECK(sink->links == 0);
+      CHECK(proxy->links == 0);
+      r.listen();
+      auto const t = r.now() + us;
+      r.start(own, false, t, 1);
+      r.run_until(t + target_ps + us);
+      CHECK(
+          r.sink->answers
+          == std::vector<heard>{
+              {1, on_address, true, 0xFF, t + target_ps}
+      });
+    }
+    SUBCASE("a link controller next to board targets or a link target")
+    {
+      fan_rig    r{part, voters({0x50})};
+      auto const sink = std::make_shared<i2c_link_sink>();
+      CHECK_THROWS_AS(link_port(*r.f).attach_controller(sink), popcorn::config_error);
+      fan_rig    bare{part, no_targets()};
+      auto const proxy = std::make_shared<i2c_proxy>();
+      link_port(*bare.f).attach_target(proxy);
+      CHECK_THROWS_AS(link_port(*bare.f).attach_controller(sink), popcorn::config_error);
+      CHECK(sink->links == 0);
+      r.b().command(0x50, 1, false, true);
+      std::ignore = r.drive(40 * r.period());
+      CHECK(r.targets[0]->kinds() == "WwP");
+    }
+    SUBCASE("an empty, repeated or throwing proxy")
+    {
+      fan_rig    r{part, no_targets()};
+      auto&      link  = link_port(*r.f);
+      auto const proxy = std::make_shared<i2c_proxy>();
+      link.attach_target(proxy);
+      CHECK_THROWS_AS(link.attach_target(proxy), std::invalid_argument);
+      CHECK_THROWS_AS(link.attach_target(nullptr), std::invalid_argument);
+      CHECK(proxy->links == 1);
+      auto const other     = std::make_shared<i2c_proxy>();
+      other->refuse_attach = true;
+      CHECK_THROWS_AS(link.attach_target(other), std::runtime_error);
+      CHECK(other->links == 1);
+      CHECK(other->detaches == 0);
+      CHECK_THROWS_AS(std::ignore = link.muted(*other), std::invalid_argument);
+      CHECK_THROWS_AS(link.mute(*other), std::invalid_argument);
+      CHECK_THROWS_AS(link.unmute(*other), std::invalid_argument);
+      r.b().command(0x50, 1, false, true);
+      std::ignore = r.drive(40 * r.period());
+      CHECK(proxy->kinds() == "Ww");
+      CHECK(other->heard.empty());
+    }
+    SUBCASE("an empty or second link controller")
+    {
+      target_rig r{part, false, false};
+      auto&      link = link_port(*r.f);
+      auto const sink = std::make_shared<i2c_link_sink>();
+      CHECK_THROWS_AS(link.attach_controller(nullptr), std::invalid_argument);
+      link.attach_controller(sink);
+      auto const second = std::make_shared<i2c_link_sink>();
+      CHECK_THROWS_AS(link.attach_controller(second), std::invalid_argument);
+      CHECK_THROWS_AS(link.attach_target(std::make_shared<i2c_proxy>()), popcorn::config_error);
+      CHECK(second->links == 0);
+      r.listen();
+      auto const t = r.now() + us;
+      sink->port->start(own, false, target_ps, vtime{t}, wire, 1);
+      r.run_until(t + target_ps + us);
+      CHECK(sink->answers.size() == 1);
+    }
+    SUBCASE("a snapshot holding a phase a link target owes, restored with no link target")
+    {
+      fan_rig    r{part, no_targets()};
+      auto const proxy = std::make_shared<i2c_proxy>();
+      proxy->hold      = true;
+      link_port(*r.f).attach_target(proxy);
+      r.b().command(0x50, 1, false, true);
+      r.b().run_until(r.b().now() + 11 * r.period());
+      REQUIRE(proxy->kinds() == "W");
+      auto const bytes = r.model_bytes();
+      fan_rig    none{part, no_targets()};
+      auto const before = none.model_bytes();
+      CHECK_THROWS_AS(none.f->target->model("I2C1")->load(bytes), popcorn::config_error);
+      CHECK(none.model_bytes() == before);
+    }
+  }
+}
+
+TEST_CASE("a muted I2C link target posts nothing at a machine reset, unmuted the next phase posts")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    fan_rig    r{part, no_targets()};
+    auto&      link  = link_port(*r.f);
+    auto const proxy = std::make_shared<i2c_proxy>();
+    link.attach_target(proxy);
+    CHECK_FALSE(link.muted(*proxy));
+    r.b().run_until(r.b().now() + 30 * us);
+    link.mute(*proxy);
+    CHECK(link.muted(*proxy));
+    r.f->target->reset(popcorn::reset_kind::software);
+    r.f->set("pc", sym(part.firmware, "idle"));
+    r.enable();
+    CHECK(proxy->resets == std::vector{popcorn::reset_kind::software});
+    CHECK(proxy->posts.empty());
+    link.unmute(*proxy);
+    CHECK_FALSE(link.muted(*proxy));
+    auto const t0 = r.b().now();
+    r.b().command(0x50, 1, false, true);
+    std::ignore = r.drive(40 * r.period());
+    CHECK(proxy->posts == std::vector<std::string>{"start", "write", "stop"});
+    REQUIRE_FALSE(proxy->heard.empty());
+    CHECK(offset_of(*r.f) >= 30 * us);
+    CHECK(proxy->heard[0].local_ps == t0 + 10 * r.period());
+    CHECK(proxy->heard[0].at == t0 + 10 * r.period() + offset_of(*r.f));
+    link.mute(*proxy);
+    link.detach_target(*proxy);
+    link.attach_target(proxy);
+    CHECK_FALSE(link.muted(*proxy));
+    CHECK(proxy->muted_in_hooks == std::vector<bool>{false, true, false});
+  }
+}
+
+TEST_CASE("a power cycle reaches an I2C link target")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    fan_rig    r{part, voters({0x50})};
+    auto const proxy = std::make_shared<i2c_proxy>();
+    link_port(*r.f).attach_target(proxy);
+    r.b().run_until(r.b().now() + 10 * us);
+    r.f->target->power_cycle();
+    CHECK(proxy->cuts.size() == 1);
+    CHECK(proxy->resets == std::vector{popcorn::reset_kind::power_on});
+  }
+}
+
+TEST_CASE("an I2C link target owing an answer completes it before its detach, else the phase holds")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const completes : {false, true})
+    {
+      CAPTURE(completes);
+      fan_rig    r{part, no_targets()};
+      auto const proxy = std::make_shared<i2c_proxy>();
+      proxy->hold      = true;
+      link_port(*r.f).attach_target(proxy);
+      auto const b  = r.b();
+      auto const p  = r.period();
+      auto const t0 = b.now();
+      b.command(0x50, 1, false, true);
+      b.send(0x10);
+      auto const a = t0 + 10 * p;
+      b.run_until(a + p / 2);
+      REQUIRE(proxy->kinds() == "W");
+      if(completes)
+      {
+        proxy->port->complete(
+            proxy->heard[0].ticket, periph::i2c_reply{}, vtime{a + 5 * p + offset_of(*r.f)}, 1);
+      }
+      link_port(*r.f).detach_target(*proxy);
+      b.run_until(a + 60 * p);
+      CHECK(b.get("ISR", "STOPF") == (completes ? 1u : 0u));
+      CHECK(b.get("ISR", "BUSY") == (completes ? 0u : 1u));
+      CHECK(b.get("ISR", "NACKF") == (completes ? 1u : 0u));
+      CHECK(refused_of(*r.f) == 0);
+      b.set("CR1", "PE", 0);
+      CHECK(b.get("ISR", "BUSY") == 0);
+    }
+  }
+}
+
+TEST_CASE("an I2C link target attached during a transfer hears its later bytes unacknowledged")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    fan_rig    r{part, voters({0x50})};
+    auto const proxy = std::make_shared<i2c_proxy>();
+    auto const p     = r.period();
+    r.b().command(0x50, 3, false, true);
+    std::ignore = r.drive(15 * p);
+    link_port(*r.f).attach_target(proxy);
+    std::ignore = r.drive(60 * p);
+    CHECK(r.targets[0]->kinds() == "WwwwP");
+    CHECK(proxy->kinds() == "xxx");
+    CHECK(proxy->posts == std::vector<std::string>{"stop"});
+    CHECK(r.b().get("ISR", "NACKF") == 0);
+    CHECK(r.b().get("ISR", "STOPF") == 1);
+  }
+}
+
+TEST_CASE("an RCC reset restarts the phases a link controller queued from their posted time")
+{
+  auto const p = target_ps;
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const linked : {false, true})
+    {
+      CAPTURE(linked);
+      for(auto const posted : {p / 4, 9 * p / 10})
+      {
+        CAPTURE(posted);
+        std::vector<std::vector<heard>>     answers;
+        std::vector<std::vector<lost>>      drops;
+        std::vector<std::vector<std::byte>> bytes;
+        std::uint64_t                       t{};
+        for(bool const after : {false, true})
+        {
+          CAPTURE(after);
+          target_rig r{part, false, not linked};
+          auto const sink = std::make_shared<i2c_link_sink>();
+          if(linked)
+          {
+            link_port(*r.f).attach_controller(sink);
+          }
+          r.listen();
+          t = r.now() + us;
+          r.start(own, false, t, 1);
+          auto const later = [&] {
+            r.write(0x11, t + posted, 2);
+            r.start(own, false, t + 11 * p / 10, 3);
+          };
+          if(not after)
+          {
+            later();
+          }
+          r.run_until(t + p / 2);
+          r.rcc_pulse();
+          if(after)
+          {
+            later();
+          }
+          r.run_until(t + 4 * p);
+          answers.push_back(linked ? sink->answers : r.sink->answers);
+          drops.push_back(linked ? sink->drops : r.sink->drops);
+          bytes.push_back(r.model_bytes());
+        }
+        CHECK(answers[0] == answers[1]);
+        CHECK(drops[0] == drops[1]);
+        CHECK(bytes[0] == bytes[1]);
+        auto const        early = posted == p / 4;
+        std::vector<lost> expected_drops{
+            {1, on_address, t + p}
+        };
+        std::vector<heard> expected;
+        if(not linked)
+        {
+          expected = {
+              {2, on_write,   false, 0xFF, t + 2 * p},
+              {3, on_address, false, 0xFF, t + 3 * p}
+          };
+        }
+        else if(early)
+        {
+          expected_drops.push_back({2, on_write, t + posted + p});
+          expected = {
+              {3, on_address, false, 0xFF, t + 11 * p / 10 + p}
+          };
+        }
+        else
+        {
+          expected = {
+              {2, on_write,   false, 0xFF, t + posted + p    },
+              {3, on_address, false, 0xFF, t + posted + 2 * p}
+          };
+        }
+        CHECK(drops[0] == expected_drops);
+        CHECK(answers[0] == expected);
+      }
+    }
+  }
+}
+
+TEST_CASE("a read byte held at an RCC reset runs from the reset under a link or a board controller")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const linked : {false, true})
+    {
+      CAPTURE(linked);
+      target_rig r{part, false, not linked};
+      auto const sink = std::make_shared<i2c_link_sink>();
+      if(linked)
+      {
+        link_port(*r.f).attach_controller(sink);
+      }
+      r.listen();
+      auto const t = r.now() + us;
+      r.start(own, true, t, 1);
+      r.read(true, t + target_ps, 2);
+      r.run_until(t + 3 * target_ps);
+      CHECK(r.get("ISR", "TXIS") == 1);
+      auto const reset_at = r.now();
+      r.rcc_pulse();
+      r.run_until(reset_at + 2 * target_ps);
+      auto const& heard_drops = linked ? sink->drops : r.sink->drops;
+      CHECK(
+          heard_drops
+          == std::vector<lost>{
+              {2, on_read, reset_at + target_ps}
+      });
+    }
+  }
+}
+
+TEST_CASE("CR1 keeps NOSTRETCH, ANFOFF and DNF while PE is set, one warning, strict refuses")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const strict : {false, true})
+    {
+      CAPTURE(strict);
+      target_rig r{part, strict};
+      auto const b = r.b();
+      r.listen();
+      auto&      regs           = r.f->target->peripheral("I2C1");
+      auto*      model          = r.f->target->model("I2C1");
+      auto const offset         = b.reg("I2C1", "CR1").offset;
+      auto const firmware_write = [&](std::uint32_t value) {
+        return model->on_write(
+            regs, offset, 4, regs.peek(offset), value, {.pc = 0, .now = icount{0}});
+      };
+      auto const mask = [&](std::string_view name) {
+        auto const& fields = b.reg("I2C1", "CR1").fields;
+        auto const  found  = std::ranges::find(fields, name, &popcorn::field_desc::name);
+        REQUIRE(found != fields.end());
+        return static_cast<std::uint32_t>(((std::uint64_t{1} << found->width) - 1u) << found->lsb);
+      };
+      auto const fixed = mask("NOSTRETCH") | mask("ANFOFF") | mask("DNF");
+      if(strict)
+      {
+        CHECK_THROWS_AS(
+            std::ignore = firmware_write(regs.peek(offset) | fixed), popcorn::model_error);
+        CHECK(r.get("CR1", "NOSTRETCH") == 0);
+        continue;
+      }
+      REQUIRE(firmware_write(regs.peek(offset) | fixed).has_value());
+      CHECK(r.get("CR1", "NOSTRETCH") == 0);
+      CHECK(r.get("CR1", "ANFOFF") == 0);
+      CHECK(r.get("CR1", "DNF") == 0);
+      CHECK(r.get("CR1", "PE") == 1);
+      REQUIRE(firmware_write(regs.peek(offset) | mask("DNF") | mask("ERRIE")).has_value());
+      CHECK(r.get("CR1", "DNF") == 0);
+      CHECK(r.get("CR1", "ERRIE") == 1);
+      CHECK(r.warnings("CR1") == 1);
+      b.set("CR1", "NOSTRETCH", 1);
+      CHECK(r.get("CR1", "NOSTRETCH") == 0);
+      REQUIRE(firmware_write(regs.peek(offset) & ~mask("PE")).has_value());
+      REQUIRE(firmware_write(regs.peek(offset) | mask("NOSTRETCH")).has_value());
+      CHECK(r.get("CR1", "NOSTRETCH") == 1);
+      CHECK(r.warnings("CR1") == 1);
+    }
+  }
 }

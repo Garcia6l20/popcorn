@@ -4186,9 +4186,14 @@ public:
   int                                 unlinks{};
   std::vector<std::uint32_t>          sent;
   std::vector<controller_probe::lost> drops;
+  bool                                refuse{};
 
   void linked(periph::spi_controller_port& to, core::clock const& machine) override
   {
+    if(refuse)
+    {
+      throw std::runtime_error("the link controller refuses its port");
+    }
     port  = &to;
     clock = &machine;
     ++links;
@@ -4424,6 +4429,39 @@ TEST_CASE("a link controller drives the target, and after a detach its units sta
     CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "port.last_unit") == 0);
     CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "port.level") == 0);
   }
+}
+
+TEST_CASE("a link controller whose linked() throws leaves the SPI as it was")
+{
+  link_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  auto const first = std::make_shared<link_sink>();
+  r.link().attach_controller(first);
+  auto const at = b.now() + us;
+  first->port->select(vtime{at}, wire, 1);
+  first->port->frame(0x11, 8, mhz_frame, vtime{at}, wire, 2);
+  b.run_until(at + mhz_frame + us);
+  auto const inside = r.f->target->snapshot();
+  r.link().detach_controller(*first);
+  r.f->target->restore(inside);
+  REQUIRE(popcorn::testing::saved_integer(*r.f, "SPI1", "port.last_unit") == 2);
+  REQUIRE(popcorn::testing::saved_integer(*r.f, "SPI1", "port.level") == 1);
+  auto const refusing = std::make_shared<link_sink>();
+  refusing->refuse    = true;
+  CHECK_THROWS_AS(r.link().attach_controller(refusing), std::runtime_error);
+  CHECK(refusing->port == nullptr);
+  CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "port.last_unit") == 2);
+  CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "port.level") == 1);
+  auto const sink = std::make_shared<link_sink>();
+  r.link().attach_controller(sink);
+  CHECK(popcorn::testing::saved_integer(*r.f, "SPI1", "port.last_unit") == 0);
+  auto const later = b.now() + us;
+  sink->port->select(vtime{later}, wire, 1);
+  sink->port->frame(0x22, 8, mhz_frame, vtime{later}, wire, 2);
+  b.run_until(later + mhz_frame + us);
+  CHECK(sink->sent == std::vector<std::uint32_t>{0x22});
+  r.link().detach_controller(*sink);
 }
 
 TEST_CASE("a link detach drops the queued port entries without a report")

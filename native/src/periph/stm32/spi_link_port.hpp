@@ -124,7 +124,8 @@ public:
   /**
    * @brief Attaches the slave-side proxy as the instance's controller and calls
    *        spi_link_controller::linked(). Clears the port's last unit and chip select level, so
-   *        its units start again from 1.
+   *        its units start again from 1. When linked() throws, the proxy is not attached and the
+   *        last unit and chip select level are kept.
    * @param controller The proxy.
    * @throws config_error When the instance has a board controller or board devices, or a
    *         master-side proxy is attached.

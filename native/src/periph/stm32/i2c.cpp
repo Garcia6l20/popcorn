@@ -1,5 +1,6 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
+#include "i2c_link_port.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -222,6 +223,12 @@ struct i2c_completion
   friend auto operator==(i2c_completion const&, i2c_completion const&) -> bool = default;
 };
 
+struct i2c_link_attachment
+{
+  std::shared_ptr<i2c_link_target> device;
+  bool                             muted{};
+};
+
 struct i2c_transmit
 {
   std::uint8_t  target{};
@@ -383,6 +390,20 @@ auto lower(std::string_view name) -> std::string
  *        RCC reset with its record, a machine reset clears both. Each target is attached to the
  *        model at its construction and detached at its destruction.
  *
+ *        Link attachments, i2c_link_port: a link target answers after every board target, in its
+ *        attachment order, with the ticket index that follows the board targets'. It hears every
+ *        address phase through i2c_target::matches(), every data phase of the transfer and its STOP
+ *        or lost arbitration, and answers a data phase of an address it did not acknowledge with
+ *        NACK or 0xFF and no stretch. The saved acknowledged set holds board targets only. A
+ *        machine reset calls its reset() after the board targets', a power cut its power_cut()
+ *        after theirs. A link controller drives the port as a board controller does. Its phases
+ *        hold the wire only while they run: at an RCC reset a phase that started is dropped at the
+ *        later of its end and the reset, and every phase not started restarts from its posted time
+ *        and the phases and STOPs still queued ahead of it, dropped at the later of its end and the
+ *        reset when that start is at or before the reset. A phase queued after the reset starts the
+ *        same way, so its outcome does not depend on whether it reached the port before or after
+ *        the reset. The model saves no link attachment.
+ *
  *        Target mode, address, write and read phases, RM0456 65.4.8 and RM0481 53.4.8: the
  *        controller of board::i2c_controllers queues i2c_controller_port entries on the lane it
  *        names, each with a unit above the last one. The port runs the entries of one instruction
@@ -441,24 +462,25 @@ auto lower(std::string_view name) -> std::string
  *        sets for a data byte of an acknowledged address it ends, RM0456 65.4.17, RM0481 53.4.17. A
  *        START the firmware requests during the controller's transfer waits for its STOP. While
  *        OA1EN is set, OAR1 keeps OA1 and OA1MODE, and while OA2EN is set OAR2 keeps OA2 and
- *        OA2MSK, RM0456 65.9.3 and 65.9.4, RM0481 53.9.3 and 53.9.4: one warning per instance,
- *        model_error under strict_peripherals. An RCC reset releases a stretch at its time, starts
- *        a held read byte there, and drops the phases started at or before it, each reported at the
- *        later of its end and the reset, and keeps the later phases and STOPs, which run in the
- *        reset model. A phase queued after it with a start at or before it is dropped the same way,
- *        and a STOP or a drop queued after it is due no earlier than it. A machine reset of any
- *        kind, the model a reset_listener, starts a held read byte at the reset and drops every
- *        queued phase at its end rebased by the reset's local time and removes every queued STOP. A
- *        phase a reset drops holds the wire to its end, in the new base after a machine reset, and
- *        a later phase starts no earlier. Dropped units survive every reset and are reported once,
- *        through i2c_controller_sink::dropped(). The port entries, stretched ones included, the
- *        last unit, the generation and the time of the last RCC reset are saved with the model. Not
- *        modelled, logged once: 10-bit addressing, SBC or NOSTRETCH in controller mode, SBC with
- *        NOSTRETCH in target mode, the SMBus host and device addresses, ALERT and PEC, the
- *        autonomous trigger. A START as controller or a target address phase with one of them
- *        set raises model_error under strict_peripherals. A write of I2C_AUTOCR only warns, since
- *        a modelled target setup with SBC or NOSTRETCH writes it too, and the refusal comes at
- *        the next controller START.
+ *        OA2MSK, RM0456 65.9.3 and 65.9.4, RM0481 53.9.3 and 53.9.4, and while PE is set CR1 keeps
+ *        NOSTRETCH, ANFOFF and DNF, RM0456 65.9.1, RM0481 53.9.1: one warning per register kind and
+ *        instance, model_error under strict_peripherals. An RCC reset releases a stretch at its
+ *        time, starts a held read byte there, and drops the phases started at or before it, each
+ *        reported at the later of its end and the reset, and keeps the later phases and STOPs,
+ *        which run in the reset model. A phase queued after it with a start at or before it is
+ *        dropped the same way, and a STOP or a drop queued after it is due no earlier than it. A
+ *        machine reset of any kind, the model a reset_listener, starts a held read byte at the
+ *        reset and drops every queued phase at its end rebased by the reset's local time and
+ *        removes every queued STOP. A phase a reset drops holds the wire to its end, in the new
+ *        base after a machine reset, and a later phase starts no earlier. Dropped units survive
+ *        every reset and are reported once, through i2c_controller_sink::dropped(). The port
+ *        entries, stretched ones included, the last unit, the generation and the time of the last
+ *        RCC reset are saved with the model. Not modelled, logged once: 10-bit addressing, SBC or
+ *        NOSTRETCH in controller mode, SBC with NOSTRETCH in target mode, the SMBus host and device
+ *        addresses, ALERT and PEC, the autonomous trigger. A START as controller or a target
+ *        address phase with one of them set raises model_error under strict_peripherals. A write of
+ *        I2C_AUTOCR only warns, since a modelled target setup with SBC or NOSTRETCH writes it too,
+ *        and the refusal comes at the next controller START.
  *
  *        SMBus timeouts, RM0456 65.4.12 "Timeout detection" and 65.4.17 "Timeout error", RM0481
  *        53.4.12 and 53.4.17, run while PE is set and the kernel clock runs, at the kernel clock
@@ -489,6 +511,7 @@ class i2c final : public dispatch_model<i2c, i2c_state>,
                   public i2c_bus,
                   public i2c_controller_port,
                   public i2c_target_port,
+                  public i2c_link_port,
                   public reset_listener,
                   public bus_reset_listener
 {
@@ -544,6 +567,13 @@ public:
   void complete(std::uint64_t ticket, i2c_reply reply, vtime at, std::uint32_t lane) override;
   void complete_read(std::uint64_t ticket, i2c_read_reply reply, vtime at, std::uint32_t lane)
       override;
+  void attach_target(std::shared_ptr<i2c_link_target> target) override;
+  void detach_target(i2c_link_target& target) noexcept override;
+  void attach_controller(std::shared_ptr<i2c_link_controller> controller) override;
+  void detach_controller(i2c_link_controller& controller) noexcept override;
+  void mute(i2c_link_target const& target) override;
+  void unmute(i2c_link_target const& target) override;
+  auto muted(i2c_link_target const& target) const -> bool override;
 
   void enable_written(std::uint32_t old, std::uint32_t now);
   void command_written(std::uint32_t old, std::uint32_t now);
@@ -626,6 +656,8 @@ private:
   [[nodiscard]] auto held_entry(std::uint8_t phase) -> i2c_port_entry*;
   void               release(i2c_port_entry& entry, bool ack);
   void               port_stopped(i2c_port_entry const& entry);
+  void               target_transfer_ended(std::uint64_t at_ps);
+  auto               link_of(this auto& self, i2c_link_target const& target) -> auto&;
   [[nodiscard]] auto matches(std::uint8_t address, bool read) const -> bool;
   void               warn_target_unsupported();
   [[nodiscard]] auto cycles_ps(std::uint64_t cycles) const -> std::optional<std::uint64_t>;
@@ -641,6 +673,8 @@ private:
   register_file&                               regs_;
   std::vector<std::shared_ptr<i2c_target>>     targets_;
   std::shared_ptr<i2c_controller_sink>         controller_;
+  std::vector<i2c_link_attachment>             links_;
+  std::shared_ptr<i2c_link_controller>         link_controller_;
   reg_ref                                      command_;
   reg_ref                                      status_;
   reg_ref                                      clear_;
@@ -690,6 +724,8 @@ private:
   field_ref                                    timeout_b_;
   field_ref                                    extend_enable_;
   field_ref                                    timeout_flag_;
+  reg_ref                                      control_;
+  std::uint32_t                                fixed_while_enabled_{};
   reg_ref                                      own1_reg_;
   reg_ref                                      own2_reg_;
   reg_ref                                      timeout_reg_;
@@ -716,6 +752,7 @@ private:
   bool                                         target_logged_{};
   bool                                         protect_logged_{};
   bool                                         timeout_protect_logged_{};
+  bool                                         control_protect_logged_{};
   std::optional<std::uint64_t>                 reset_at_;
   std::optional<std::string>                   strict_refused_;
 };
@@ -774,11 +811,15 @@ i2c::i2c(
       byte_control_{field("CR1", "SBC")}, timeout_a_{field("TIMEOUTR", "TIMEOUTA")},
       idle_mode_{field("TIMEOUTR", "TIDLE")}, timeout_enable_{field("TIMEOUTR", "TIMOUTEN")},
       timeout_b_{field("TIMEOUTR", "TIMEOUTB")}, extend_enable_{field("TIMEOUTR", "TEXTEN")},
-      timeout_flag_{field("ISR", "TIMEOUT")}, own1_reg_{reg("OAR1")}, own2_reg_{reg("OAR2")},
-      timeout_reg_{reg("TIMEOUTR")}, error_enable_{field("CR1", "ERRIE")},
-      kernel_{ctx.clock.domain(lower(desc.name))}, event_line_{irq(desc.name + "_EV_IRQn")},
-      error_line_{irq(desc.name + "_ER_IRQn")}, tx_dma_enable_{field("CR1", "TXDMAEN")},
-      rx_dma_enable_{field("CR1", "RXDMAEN")},
+      timeout_flag_{field("ISR", "TIMEOUT")}, control_{reg("CR1")},
+      fixed_while_enabled_{
+          field("CR1", "NOSTRETCH").mask()
+          | field("CR1", "ANFOFF").mask()
+          | field("CR1", "DNF").mask()},
+      own1_reg_{reg("OAR1")}, own2_reg_{reg("OAR2")}, timeout_reg_{reg("TIMEOUTR")},
+      error_enable_{field("CR1", "ERRIE")}, kernel_{ctx.clock.domain(lower(desc.name))},
+      event_line_{irq(desc.name + "_EV_IRQn")}, error_line_{irq(desc.name + "_ER_IRQn")},
+      tx_dma_enable_{field("CR1", "TXDMAEN")}, rx_dma_enable_{field("CR1", "RXDMAEN")},
       complete_dma_enable_{
           variant.autocr ? std::optional{field("I2C_AUTOCR", "TCDMAEN")} : std::nullopt},
       reload_dma_enable_{
@@ -864,6 +905,14 @@ i2c::~i2c()
   for(auto const& target : targets_)
   {
     target->detached();
+  }
+  for(auto const& link : links_)
+  {
+    link.device->detached();
+  }
+  if(link_controller_)
+  {
+    link_controller_->unlinked();
   }
 }
 
@@ -1044,6 +1093,15 @@ void i2c::address_done()
             slot, targets_[index]->start_deferred(address, state_.read != 0, at, ticket_of(slot)));
       }
     }
+    for(std::size_t index = 0; index < links_.size(); ++index)
+    {
+      auto const& device = links_[index].device;
+      if(device->matches(address, at))
+      {
+        auto const slot = static_cast<std::uint32_t>(targets_.size() + index);
+        answer(slot, device->start_deferred(address, state_.read != 0, at, ticket_of(slot)));
+      }
+    }
   }
   if(state_.owed == 0)
   {
@@ -1067,6 +1125,11 @@ void i2c::byte_done()
                                  state_.shift, at, ticket_of(answering.index)));
       }
     }
+    for(std::size_t index = 0; index < links_.size(); ++index)
+    {
+      auto const slot = static_cast<std::uint32_t>(targets_.size() + index);
+      answer(slot, links_[index].device->write_deferred(state_.shift, at, ticket_of(slot)));
+    }
   }
   else
   {
@@ -1079,6 +1142,11 @@ void i2c::byte_done()
             answering.index,
             targets_[answering.index]->read_deferred(at, ack, ticket_of(answering.index)));
       }
+    }
+    for(std::size_t index = 0; index < links_.size(); ++index)
+    {
+      auto const slot = static_cast<std::uint32_t>(targets_.size() + index);
+      answer(slot, links_[index].device->read_deferred(at, ack, ticket_of(slot)));
     }
   }
   if(state_.owed == 0)
@@ -1140,7 +1208,7 @@ void i2c::answered()
     }
     base    = std::max(base, slot.at_ps);
     release = std::max(release, slot.at_ps + slot.stretch_ps);
-    if(address)
+    if(address and slot.index < targets_.size())
     {
       auto const target = std::ranges::find(state_.targets, slot.index, &i2c_answering::index);
       target->acked     = slot.ack;
@@ -1326,6 +1394,10 @@ void i2c::stop_targets(vtime at)
   for(auto const& answering : std::exchange(state_.targets, {}))
   {
     targets_[answering.index]->stop(at);
+  }
+  for(auto const& link : links_)
+  {
+    link.device->stop(at);
   }
 }
 
@@ -1549,6 +1621,10 @@ void i2c::restore_reset_values(std::optional<reset_kind> kind)
     {
       target->reset(*kind);
     }
+    for(auto const& link : links_)
+    {
+      link.device->reset(*kind);
+    }
   }
   flags();
 }
@@ -1557,11 +1633,10 @@ void i2c::power_cut()
 {
   auto const         at = ctx_.clock.since_power_on();
   std::exception_ptr first;
-  for(auto const& target : targets_)
-  {
+  auto const         cut = [&](i2c_target& target) {
     try
     {
-      target->power_cut(at);
+      target.power_cut(at);
     }
     catch(...)
     {
@@ -1570,6 +1645,14 @@ void i2c::power_cut()
         first = std::current_exception();
       }
     }
+  };
+  for(auto const& target : targets_)
+  {
+    cut(*target);
+  }
+  for(auto const& link : links_)
+  {
+    cut(*link.device);
   }
   if(first)
   {
@@ -1825,7 +1908,7 @@ void i2c::queue_phase(
        .unit        = unit,
        .phase_ps    = phase_ps,
        .posted_ps   = at.ps,
-       .wire_end_ps = dropped ? std::optional{end} : std::nullopt,
+       .wire_end_ps = dropped and not link_controller_ ? std::optional{end} : std::nullopt,
        .lane        = lane,
        .kind        = dropped ? entry_dropped : entry_phase,
        .phase       = static_cast<std::uint8_t>(phase),
@@ -2312,11 +2395,22 @@ void i2c::port_stopped(i2c_port_entry const& entry)
     {
       stop_flag();
     }
-    if(state_.wire_busy != 0 and not held())
-    {
-      update(regs_, busy_, 0);
-      state_.timer.idle_ps = entry.due_ps;
-    }
+  }
+  target_transfer_ended(entry.due_ps);
+  std::ranges::sort(reports);
+  flags();
+  for(auto const& [unit, phase] : reports)
+  {
+    controller_->dropped(unit, phase, vtime{entry.due_ps});
+  }
+}
+
+void i2c::target_transfer_ended(std::uint64_t at_ps)
+{
+  if(enabled() and state_.wire_busy != 0 and not held())
+  {
+    update(regs_, busy_, 0);
+    state_.timer.idle_ps = at_ps;
   }
   auto const waited = state_.wire_busy != 0;
   if(step() == phase::idle)
@@ -2331,12 +2425,6 @@ void i2c::port_stopped(i2c_port_entry const& entry)
   {
     begin_start(ctx_.clock.time().ps);
   }
-  std::ranges::sort(reports);
-  flags();
-  for(auto const& [unit, phase] : reports)
-  {
-    controller_->dropped(unit, phase, vtime{entry.due_ps});
-  }
 }
 
 void i2c::rearm_port(i2c_port port, std::optional<reset_kind> kind)
@@ -2346,6 +2434,7 @@ void i2c::rearm_port(i2c_port port, std::optional<reset_kind> kind)
   auto const moved = [&](std::uint64_t due) {
     return std::max(now, due > shift ? due - shift : 0);
   };
+  auto const restart = not kind and link_controller_;
   if(auto const holding = held_unit(port.entries))
   {
     auto const floor = kind ? shift : now;
@@ -2357,6 +2446,11 @@ void i2c::rearm_port(i2c_port port, std::optional<reset_kind> kind)
         if(static_cast<i2c_phase>(entry.phase) == i2c_phase::read)
         {
           entry.kind = entry_phase;
+          if(restart)
+          {
+            entry.due_ps += entry.phase_ps;
+            entry.kind = entry_ending;
+          }
         }
       }
     }
@@ -2372,16 +2466,19 @@ void i2c::rearm_port(i2c_port port, std::optional<reset_kind> kind)
     {
       entry.kind = entry_ending;
     }
-    if(entry.kind == entry_phase and (kind or entry.due_ps <= now))
+    if(entry.kind == entry_phase and (kind or (not restart and entry.due_ps <= now)))
     {
       entry.due_ps += entry.phase_ps;
       entry.kind = entry_ending;
     }
     if(entry.kind == entry_ending)
     {
-      entry.wire_end_ps = kind ? moved(entry.due_ps) : entry.due_ps;
-      entry.due_ps      = moved(entry.due_ps);
-      entry.kind        = entry_dropped;
+      if(not link_controller_)
+      {
+        entry.wire_end_ps = kind ? moved(entry.due_ps) : entry.due_ps;
+      }
+      entry.due_ps = moved(entry.due_ps);
+      entry.kind   = entry_dropped;
     }
     else if(entry.kind != entry_phase)
     {
@@ -2396,6 +2493,26 @@ void i2c::rearm_port(i2c_port port, std::optional<reset_kind> kind)
       }
     }
   }
+  if(restart)
+  {
+    for(auto& entry : port.entries)
+    {
+      if(entry.kind != entry_phase)
+      {
+        continue;
+      }
+      auto const start = phase_start(port.entries, entry.posted_ps, entry.unit);
+      if(start <= now)
+      {
+        entry.due_ps = std::max(now, start + entry.phase_ps);
+        entry.kind   = entry_dropped;
+      }
+      else
+      {
+        entry.due_ps = start;
+      }
+    }
+  }
   port.reset_ps = kind ? std::nullopt : std::optional{now};
   ++port.generation;
   state_.port = std::move(port);
@@ -2403,6 +2520,131 @@ void i2c::rearm_port(i2c_port port, std::optional<reset_kind> kind)
   {
     schedule_port(entry);
   }
+}
+
+auto i2c::link_of(this auto& self, i2c_link_target const& target) -> auto&
+{
+  auto const found = std::ranges::find(
+      self.links_, &target, [](i2c_link_attachment const& link) { return link.device.get(); });
+  if(found == self.links_.end())
+  {
+    throw std::invalid_argument(
+        std::format("the target is not a link target attached to {}", self.desc_.name));
+  }
+  return *found;
+}
+
+void i2c::attach_target(std::shared_ptr<i2c_link_target> target)
+{
+  auto const by_device = [](i2c_link_attachment const& link) { return link.device.get(); };
+  if(not target)
+  {
+    throw std::invalid_argument("an I2C link target is a target");
+  }
+  if(std::ranges::contains(links_, target.get(), by_device))
+  {
+    throw std::invalid_argument(
+        std::format("the link target is attached to {} already", desc_.name));
+  }
+  if(controller_)
+  {
+    throw config_error(
+        ctx_.part.part, 0, std::format("links.{}", desc_.name),
+        "an I2C instance with no controller, for a link target");
+  }
+  links_.push_back({.device = target});
+  try
+  {
+    target->linked(*this, ctx_.clock);
+    target->attached(*this);
+  }
+  catch(...)
+  {
+    std::erase_if(links_, [&](i2c_link_attachment const& one) { return one.device == target; });
+    throw;
+  }
+}
+
+void i2c::detach_target(i2c_link_target& target) noexcept
+{
+  auto const by_device = [](i2c_link_attachment const& link) { return link.device.get(); };
+  auto const found     = std::ranges::find(links_, &target, by_device);
+  if(found == links_.end())
+  {
+    return;
+  }
+  auto const device = found->device;
+  device->detached();
+  links_.erase(std::ranges::find(links_, device.get(), by_device));
+}
+
+void i2c::attach_controller(std::shared_ptr<i2c_link_controller> controller)
+{
+  if(not controller)
+  {
+    throw std::invalid_argument("an I2C link controller is a controller");
+  }
+  if(link_controller_)
+  {
+    throw std::invalid_argument(
+        std::format("a link controller is attached to {} already", desc_.name));
+  }
+  if(controller_ or not targets_.empty() or not links_.empty())
+  {
+    throw config_error(
+        ctx_.part.part, 0, std::format("links.{}", desc_.name),
+        "an I2C instance with no board controller, no board target and no link target, for a "
+        "link controller");
+  }
+  auto const last_unit = std::exchange(state_.port.last_unit, 0);
+  controller_          = controller;
+  link_controller_     = controller;
+  try
+  {
+    controller->linked(*this, ctx_.clock);
+  }
+  catch(...)
+  {
+    controller_.reset();
+    link_controller_.reset();
+    state_.port.last_unit = last_unit;
+    throw;
+  }
+}
+
+void i2c::detach_controller(i2c_link_controller& controller) noexcept
+{
+  if(link_controller_.get() != &controller)
+  {
+    return;
+  }
+  auto& port = state_.port;
+  if(not port.entries.empty())
+  {
+    port.entries.clear();
+    ++port.generation;
+  }
+  port.last_unit = 0;
+  target_transfer_ended(ctx_.clock.time().ps);
+  controller_.reset();
+  auto const gone = std::move(link_controller_);
+  flags();
+  gone->unlinked();
+}
+
+void i2c::mute(i2c_link_target const& target)
+{
+  link_of(target).muted = true;
+}
+
+void i2c::unmute(i2c_link_target const& target)
+{
+  link_of(target).muted = false;
+}
+
+auto i2c::muted(i2c_link_target const& target) const -> bool
+{
+  return link_of(target).muted;
 }
 
 void i2c::warn_target_unsupported()
@@ -2698,10 +2940,13 @@ auto i2c::on_write(
     rethrow_strict();
     return {};
   }
-  auto const word  = offset & ~3u;
-  auto const timed = word == timeout_reg_.offset;
+  auto const word    = offset & ~3u;
+  auto const timed   = word == timeout_reg_.offset;
+  auto const control = word == control_.offset;
   auto const kept =
-      word == own1_reg_.offset and get(regs_, own1_enable_) != 0 ? own1_.mask() | own1_mode_.mask()
+      control ? (enabled() ? fixed_while_enabled_ : 0u)
+      : word == own1_reg_.offset and get(regs_, own1_enable_) != 0
+          ? own1_.mask() | own1_mode_.mask()
       : word == own2_reg_.offset and get(regs_, own2_enable_) != 0
           ? own2_.mask() | own2_mask_.mask()
       : timed ? (get(regs_, timeout_enable_) != 0 ? timeout_a_.mask() | idle_mode_.mask() : 0u)
@@ -2728,6 +2973,21 @@ auto i2c::on_write(
       if(ctx_.strict_peripherals)
       {
         throw model_error(desc_.name, "TIMEOUTR", word);
+      }
+    }
+    else if(access.by != initiator::debugger and control)
+    {
+      if(not std::exchange(control_protect_logged_, true))
+      {
+        warn(
+            "CR1", std::format(
+                       "{} CR1 written while PE is set, NOSTRETCH, ANFOFF and DNF are kept, "
+                       "RM0456 65.9.1, RM0481 53.9.1",
+                       desc_.name));
+      }
+      if(ctx_.strict_peripherals)
+      {
+        throw model_error(desc_.name, "CR1", word);
       }
     }
     else if(access.by != initiator::debugger)
@@ -2857,6 +3117,17 @@ void i2c::load(std::span<std::byte const> in)
             "target {}",
             needed, needed - 1));
   }
+  auto const answering = targets_.size() + links_.size();
+  if(std::ranges::any_of(loaded.answers, [answering](i2c_pending_answer const& slot) {
+       return slot.index >= answering;
+     }))
+  {
+    throw config_error(
+        ctx_.part.part, 0, std::format("devices.{}", desc_.name),
+        std::format(
+            "the targets the snapshot's held phase waits for, {} attached to the instance",
+            answering));
+  }
   state_ = std::move(loaded);
   for(std::size_t index = 0; index < targets_.size() and index < state_.devices.size(); ++index)
   {
@@ -2865,6 +3136,10 @@ void i2c::load(std::span<std::byte const> in)
   state_.devices.clear();
 }
 }
+
+i2c_link_target::~i2c_link_target()         = default;
+i2c_link_controller::~i2c_link_controller() = default;
+i2c_link_port::~i2c_link_port()             = default;
 
 auto i2c_factory(board const& b, i2c_variant variant) -> model_factory
 {

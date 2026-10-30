@@ -1984,11 +1984,22 @@ void spi::attach_controller(std::shared_ptr<spi_link_controller> controller)
         "an SPI instance with no board controller, no board device and no link target, for a "
         "link controller");
   }
-  state_.port.last_unit = 0;
-  state_.port.level     = 0;
-  controller_           = controller;
-  link_controller_      = std::move(controller);
-  link_controller_->linked(*this, ctx_.clock);
+  auto const last_unit = std::exchange(state_.port.last_unit, 0);
+  auto const level     = std::exchange(state_.port.level, 0);
+  controller_          = controller;
+  link_controller_     = controller;
+  try
+  {
+    controller->linked(*this, ctx_.clock);
+  }
+  catch(...)
+  {
+    controller_.reset();
+    link_controller_.reset();
+    state_.port.last_unit = last_unit;
+    state_.port.level     = level;
+    throw;
+  }
 }
 
 void spi::detach_controller(spi_link_controller& controller) noexcept
