@@ -581,8 +581,10 @@ struct trigger_entry
 {
   /** @brief SMCR.TS value that selects the input. */
   std::uint32_t select;
-  /** @brief Timer whose `<name>_trgo` the input carries, or the unmodelled source, such as
-   *         `tim13_oc1`, which no model produces. */
+  /** @brief Source whose `<source>_trgo` the input carries: a timer, such as `tim2`, the OC1
+   *         output of a timer, such as `tim10_oc1`, which that timer drives from OC1 as
+   *         `tim10_oc1_trgo`, or a source no model drives, such as `usbsof`. An OC1 source counts
+   *         up only, its CR1 has no DIR and no CMS. */
   std::string_view source;
   /** @brief Instance whose slave mode controller has the input, empty for every timer. */
   std::string_view slave{};
@@ -669,8 +671,7 @@ inline constexpr tim_variant u5_tim{u5_triggers, wide_master_timers, u5_no_maste
  * @brief TS 0 to 3 are ITR0 to ITR3, 8 to 15 are ITR4 to ITR11 and 16 is ITR12, RM0481 43.6.3
  *        and 44.5.3 TIMx_SMCR. RM0481 Tables 456, 480, 502 and 514 connect the same source to the
  *        same ITR on TIM1, TIM2 to TIM5, TIM8, TIM12 and TIM15. ITR12 is USBSOF on TIM2 and TIM5
- *        and reserved on the other six. Sources with no model: the OC1 outputs of TIM13, TIM14,
- *        TIM16 and TIM17 and USBSOF.
+ *        and reserved on the other six. USBSOF has no model.
  */
 inline constexpr auto h5_triggers = std::to_array<trigger_entry>({
     {0,  "tim1"     },
@@ -774,44 +775,64 @@ inline constexpr auto l1_etr_pins = std::to_array<etr_pin>({
     {.instance = "TIM5", .signal = "tim5_etr"},
 });
 /**
- * @brief RM0038 18.2.1, 18.4.1 and 19.2: TIM6, TIM7 and the Cat.1 and Cat.2 TIM9 count up only.
+ * @brief RM0038 18.2.1, 18.2.2, 18.4.1, 18.5.1 and 19.2: TIM6, TIM7, TIM10, TIM11 and the Cat.1 and
+ *        Cat.2 TIM9 count up only.
  */
-inline constexpr auto l1_up_only = std::to_array<std::string_view>({"TIM6", "TIM7", "TIM9"});
+inline constexpr auto l1_up_only =
+    std::to_array<std::string_view>({"TIM6", "TIM7", "TIM9", "TIM10", "TIM11"});
 /** @brief RM0038 18.2.1 and 19.2: on Cat.3 and up TIM9 counts up, down and centre-aligned. */
-inline constexpr auto l1_cat3_up_only = std::to_array<std::string_view>({"TIM6", "TIM7"});
+inline constexpr auto l1_cat3_up_only =
+    std::to_array<std::string_view>({"TIM6", "TIM7", "TIM10", "TIM11"});
+/** @brief RM0038 18.5: TIM10 and TIM11 have no CR2. */
+inline constexpr auto l1_no_master = std::to_array<std::string_view>({"TIM10", "TIM11"});
 /**
  * @brief RM0038 18.4.14 TIM9_OR: TI1_RMP 01 connects the LSE to tim_ti1, 00, 10 and 11 the
- *        TIM9_CH1 pin.
+ *        TIM9_CH1 pin. 18.5.12 TIM10_OR: TI1_RMP 00 the TIM10_CH1 pin, 01 to 11 the LSI, the LSE
+ *        and the RTC wakeup interrupt. 18.5.13 TIM11_OR: TI1_RMP 00 and 11 the TIM11_CH1 pin, 01
+ *        and 10 the MSI and HSE_RTC.
  */
 inline constexpr auto l1_input_remaps = std::to_array<input_remap>({
-    {.slave = "TIM9", .channel = 0, .reg = "OR", .field = "TI1_RMP", .pin_values = 0b1101},
+    {.slave = "TIM9",  .channel = 0, .reg = "OR", .field = "TI1_RMP", .pin_values = 0b1101},
+    {.slave = "TIM10", .channel = 0, .reg = "OR", .field = "TI1_RMP", .pin_values = 0b0001},
+    {.slave = "TIM11", .channel = 0, .reg = "OR", .field = "TI1_RMP", .pin_values = 0b1001},
 });
 /**
- * @brief STM32L1 TIM2 to TIM4, TIM6, TIM7 and TIM9 of Cat.1 and Cat.2, RM0038 17.4, 18.4 and
- *        19.4: CR2.MMS[2:0], SMCR.SMS[2:0] and TS[2:0], no UIFREMAP.
+ * @brief The Cat.1 and Cat.2 remaps, and RM0038 18.5.12 and 18.5.13 on Cat.3 to Cat.6: TI1_RMP_RI 1
+ *        connects the routing interface to tim_ti1 of TIM10 and TIM11, whatever TI1_RMP.
+ */
+inline constexpr auto l1_cat3_input_remaps = std::to_array<input_remap>({
+    {.slave = "TIM9",  .channel = 0, .reg = "OR", .field = "TI1_RMP",    .pin_values = 0b1101},
+    {.slave = "TIM10", .channel = 0, .reg = "OR", .field = "TI1_RMP",    .pin_values = 0b0001},
+    {.slave = "TIM10", .channel = 0, .reg = "OR", .field = "TI1_RMP_RI", .pin_values = 0b01  },
+    {.slave = "TIM11", .channel = 0, .reg = "OR", .field = "TI1_RMP",    .pin_values = 0b1001},
+    {.slave = "TIM11", .channel = 0, .reg = "OR", .field = "TI1_RMP_RI", .pin_values = 0b01  },
+});
+/**
+ * @brief STM32L1 TIM2 to TIM4, TIM6, TIM7 and TIM9 to TIM11 of Cat.1 and Cat.2, RM0038 17.4, 18.4,
+ *        18.5 and 19.4: CR2.MMS[2:0], SMCR.SMS[2:0] and TS[2:0], no UIFREMAP.
  */
 inline constexpr tim_variant l1_tim{
     .triggers     = l1_triggers,
     .wide_master  = {},
-    .no_master    = {},
+    .no_master    = l1_no_master,
     .slave_high   = false,
     .uif_remap    = false,
     .etr_pins     = l1_etr_pins,
     .up_only      = l1_up_only,
     .input_remaps = l1_input_remaps};
 /**
- * @brief STM32L1 TIM2 to TIM7 and TIM9 of Cat.3 to Cat.6, with the TIM2_OR, TIM3_OR and TIM9_OR
- *        remaps.
+ * @brief STM32L1 TIM2 to TIM7 and TIM9 to TIM11 of Cat.3 to Cat.6, with the TIM2_OR, TIM3_OR,
+ *        TIM9_OR, TIM10_OR and TIM11_OR remaps.
  */
 inline constexpr tim_variant l1_cat3_tim{
     .triggers     = l1_cat3_triggers,
     .wide_master  = {},
-    .no_master    = {},
+    .no_master    = l1_no_master,
     .slave_high   = false,
     .uif_remap    = false,
     .etr_pins     = l1_etr_pins,
     .up_only      = l1_cat3_up_only,
-    .input_remaps = l1_input_remaps};
+    .input_remaps = l1_cat3_input_remaps};
 
 /** @brief Differences between the SPI peripherals the model rows serve. */
 struct spi_variant

@@ -1,0 +1,11 @@
+format = 1
+source = "RM0038 Rev 18, 18.5 and Table 87: TIM10 has no CR2 and one channel. The L151 and L152 SVDs give TIM10 a CR2 with MMS and a CCR2"
+
+[match]
+parts = ["STM32L151*", "STM32L152*"]
+svd = ["STM32L151.svd", "STM32L152.svd"]
+
+[[register_drops]]
+peripheral = "TIM10"
+names = ["CR2", "CCR2"]
+source = "RM0038 Rev 18, 18.5 and Table 87 TIM10/11 register map: offsets 0x04 and 0x38 are reserved. The L151 and L152 SVDs list CR2 and CCR2 on TIM10"

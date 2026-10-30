@@ -1,0 +1,19 @@
+format = 1
+source = "RM0038 Rev 18, 18.5.12 and 18.5.13: TIM10_OR and TIM11_OR have ETR_RMP and TI1_RMP_RI on Cat.3 to Cat.6. The L100 and L162 SVDs give TI1_RMP only"
+
+[match]
+parts = ["STM32L100*", "STM32L162*"]
+svd = ["STM32L100.svd", "STM32L162.svd"]
+dies = ["DIE427", "DIE436", "DIE437"]
+
+[[fields]]
+instances = ["TIM10", "TIM11"]
+registers = ["OR"]
+add = { name = "ETR_RMP", lsb = 2, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.5.12 TIM10_OR and 18.5.13 TIM11_OR: ETR_RMP in bit 2 selects the LSE (0) or TIM9 TRGO (1) for ETR, Cat.3 to Cat.6 only. The L100 and L162 SVDs have no ETR_RMP"
+
+[[fields]]
+instances = ["TIM10", "TIM11"]
+registers = ["OR"]
+add = { name = "TI1_RMP_RI", lsb = 3, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.5.12 TIM10_OR and 18.5.13 TIM11_OR: TI1_RMP_RI in bit 3 connects tim_ti1 to the routing interface, Cat.3 to Cat.6 only. The L100 and L162 SVDs have no TI1_RMP_RI"

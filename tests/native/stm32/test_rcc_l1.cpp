@@ -598,7 +598,9 @@ TEST_CASE("no L1 instance is served by a U5 or H5 row: only the L1 rows attach")
          or peripheral.name == "TIM5"
          or peripheral.name == "TIM6"
          or peripheral.name == "TIM7"
-         or peripheral.name == "TIM9")
+         or peripheral.name == "TIM9"
+         or peripheral.name == "TIM10"
+         or peripheral.name == "TIM11")
       {
         expected.insert(peripheral.name);
       }

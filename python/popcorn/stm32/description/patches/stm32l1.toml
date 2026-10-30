@@ -138,6 +138,12 @@ rename = { ICPCS = "IC1PSC", IC2PCS = "IC2PSC" }
 source = "RM0038 Rev 18, 17.4.7 and 18.4.7 TIMx_CCMR1 input capture mode: IC1PSC[1:0] in bits 3:2 and IC2PSC[1:0] in bits 11:10. The four SVDs spell them ICPCS and IC2PCS"
 
 [[fields]]
+instances = ["TIM11"]
+registers = ["CCMR1_Input"]
+rename = { ICPCS = "IC1PSC" }
+source = "RM0038 Rev 18, 18.5.6 TIM10/11 TIMx_CCMR1 input capture mode: IC1PSC[1:0] in bits 3:2. The four SVDs spell it ICPCS on TIM11"
+
+[[fields]]
 instances = ["TIM9"]
 registers = ["CR1"]
 rename = { OMP = "OPM" }

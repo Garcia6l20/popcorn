@@ -931,9 +931,25 @@ Not modelled, logged:
 - The trigger DMA request, TDE, and COM and trigger burst requests. Under `strict` the DIER write
   that sets TDE raises `ModelError` before the store.
 - The slave mode preload, `SMCR.SMSPE` and `SMSPS`. Both are storage and a counter start with
-  SMSPE set logs once.
+  SMSPE set logs once. Dithering, `CR1.DITHEN`, logs the same way.
+- A capture on TRC, `CCxS` 11. CCxIF never sets. Under `strict` the CCMR1 or CCMR2 write that
+  selects it raises `ModelError` before the store.
+- The reserved `CC1S` 10 and 11 of a one-channel timer, RM0038 18.5.6 and RM0481 TIMx_CCMR1:
+  TIM10 and TIM11 of the L1, TIM13, TIM14, TIM16 and TIM17. CC1IF never sets. Under `strict` the
+  CCMR1 write that selects one raises `ModelError` before the store.
+- The CCx DMA requests at the update event, `CR2.CCDS` 1. They follow the CCx events. Under
+  `strict` the CR2 write that sets CCDS raises `ModelError` before the store.
+- Gated mode on TI1F_ED, TS 00100. The edge detector gives pulses and the counter holds. Under
+  `strict` the SMCR write that selects it raises `ModelError` before the store.
+- OC1 as an ITR source in OC1M values other than 0000, 0100, 0101, 0110 and 0111, or with
+  OC1CE set. OC1 holds low. Under `strict` the CCMR1 write that selects one while a slave
+  listens, and the slave's SMCR or OR write that selects the OC1 output then, raise `ModelError`
+  before the store.
 
 A debugger write raises none of the `strict` errors of this model.
+
+A slave mode reset, trigger start or gate opening at a timer edge counts from the edge's exact
+instant, which can lie between two ps, on any pair of master and slave clocks.
 
 Differs from RM0456:
 
@@ -942,16 +958,35 @@ Differs from RM0456:
 - UIFREMAP puts UIFCPY in bit 31 only where the description names a UIFCPY field, not on the
   32-bit TIM2 to TIM5.
 
-STM32L1 TIM2 to TIM7 and TIM9:
+OC1 as an ITR source, TIM13, TIM14, TIM16 and TIM17 OC1 by RM0481, TIM10 and TIM11 OC1 by RM0038:
+
+- The ITR carries OC1, OC1REF with CC1P inverting it, RM0038 18.5.6 and RM0481 TIMx_CCMR1.
+  The ITR follows OC1 whatever CC1E, and on TIM16 and TIM17 whatever BDTR.MOE and OSSI,
+  inferred. With CC1S other than 00 the ITR reads low, inferred.
+- OC1REF holds low in frozen mode, OC1M 0000, where silicon keeps the level it had.
+- RM0038 takes the comparison of CNT with CCR1 at a PWM mode entry only from frozen, RM0481 from
+  frozen and from the forced modes. The model takes it from every mode, so it differs at a PWM 1
+  to PWM 2 switch, and on the L1 at a forced to PWM switch.
+- Every OC1 edge reaches the slave whatever the pulse width. RM0481 asks for at least two clock
+  cycles of the destination timer.
+- A timer that drives OC1 counts up only. Its CR1 with DIR or CMS throws `ConfigError` at
+  construction.
+
+STM32L1 TIM2 to TIM7 and TIM9 to TIM11:
 
 - TIM5 has no row in RM0038 Table 80, so every TS value of TIM5 reaches nothing and logs once,
   inferred.
-- TIM10, TIM11 and their OC1 outputs have no model, nor has the touch sensing I/O that
-  TIM9_OR.ITR1_RMP gives TIM9 ITR1. The ITRs that carry them reach nothing and log once.
+- The touch sensing I/O that TIM9_OR.ITR1_RMP gives TIM9 ITR1 has no model. The ITR reaches
+  nothing and logs once.
+- TIM10_OR and TIM11_OR TI1_RMP values other than 00, and 11 on TIM11, connect LSI, LSE, the RTC
+  wakeup interrupt, MSI or HSE_RTC to tim_ti1, and TI1_RMP_RI 1 the routing interface. tim_ti1
+  then reads low and the OR write logs once. TIM10 and TIM11 external clock mode 2 counts nothing
+  whatever ETR_RMP, LSE or TIM9 TRGO, and the SMCR write logs once. Under `strict` each write
+  raises `ModelError` before the store.
 - TIM9_OR.TI1_RMP 01 connects the LSE to tim_ti1, which then reads low. TIM9 external clock mode 2
   takes the internal ETR, RM0038 18.3.3, and counts nothing. Each logs once. Under `strict` the
   write that selects it raises `ModelError` before the store.
-- TIM6, TIM7 and the Cat.1 and Cat.2 TIM9 count up only. On that TIM9 SMS 001 to 011 are
+- TIM6, TIM7, TIM10, TIM11 and the Cat.1 and Cat.2 TIM9 count up only. On that TIM9 SMS 001 to 011 are
   reserved: no encoder edge counts and the SMCR write logs once. Under `strict` it raises
   `ModelError` before the store.
 - TIM2_ETR is the TIM2_CH1 pad at AF1, PA0, PA5 or PA15, which also carries TI1. TIM3_ETR is PD2.

@@ -32,7 +32,7 @@ struct builtin
   flash_variant    flash         = {};
 };
 
-constexpr std::array<builtin, 109> builtins{
+constexpr std::array<builtin, 113> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -282,6 +282,16 @@ constexpr std::array<builtin, 109> builtins{
          .make            = [](board const&) { return tim_factory(l1_tim); },
          .instance_glob   = "TIM9",
          .part_glob       = "STM32L1*"},
+     {.ip              = "TIM1_8L1",
+         .ip_version_glob = "gptimer2_v2_x*",
+         .make            = [](board const&) { return tim_factory(l1_tim); },
+         .instance_glob   = "TIM10",
+         .part_glob       = "STM32L1*"},
+     {.ip              = "TIM1_8L1",
+         .ip_version_glob = "gptimer2_v2_x*",
+         .make            = [](board const&) { return tim_factory(l1_tim); },
+         .instance_glob   = "TIM11",
+         .part_glob       = "STM32L1*"},
      {.ip              = "TIM6_7L1Cat345",
          .ip_version_glob = "gptimer2_v2_x*",
          .make            = [](board const&) { return tim_factory(l1_cat3_tim); },
@@ -296,6 +306,16 @@ constexpr std::array<builtin, 109> builtins{
          .ip_version_glob = "gptimer2_v2_x*",
          .make            = [](board const&) { return tim_factory(l1_cat3_tim); },
          .instance_glob   = "TIM9",
+         .part_glob       = "STM32L1*"},
+     {.ip              = "TIM1_8L1Cat345",
+         .ip_version_glob = "gptimer2_v2_x*",
+         .make            = [](board const&) { return tim_factory(l1_cat3_tim); },
+         .instance_glob   = "TIM10",
+         .part_glob       = "STM32L1*"},
+     {.ip              = "TIM1_8L1Cat345",
+         .ip_version_glob = "gptimer2_v2_x*",
+         .make            = [](board const&) { return tim_factory(l1_cat3_tim); },
+         .instance_glob   = "TIM11",
          .part_glob       = "STM32L1*"},
      {"IWDG", "iwdg1_v3*", [](board const&) { return iwdg_factory(); }},
      {.ip              = "RTC",

@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <format>
 #include <memory>
 #include <optional>
 #include <span>
@@ -41,15 +42,21 @@ using popcorn::testing::l152re;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 
-constexpr std::string_view firmware      = "l152xe_l1_tim_ll";
-constexpr std::string_view firmware_b    = "l152xb_l1_tim_ll";
-constexpr std::uint64_t    ps_per_second = 1'000'000'000'000;
-constexpr std::uint64_t    us            = 1'000'000;
-constexpr std::uint64_t    ms            = 1'000 * us;
-constexpr std::uint64_t    msi_hz        = 2'097'152;
-constexpr std::uint32_t    sms_trigger   = 6;
-constexpr std::uint32_t    sms_external  = 7;
-constexpr std::uint32_t    master_update = 2;
+constexpr std::string_view firmware       = "l152xe_l1_tim_ll";
+constexpr std::string_view firmware_b     = "l152xb_l1_tim_ll";
+constexpr std::uint64_t    ps_per_second  = 1'000'000'000'000;
+constexpr std::uint64_t    us             = 1'000'000;
+constexpr std::uint64_t    ms             = 1'000 * us;
+constexpr std::uint64_t    msi_hz         = 2'097'152;
+constexpr std::uint32_t    sms_trigger    = 6;
+constexpr std::uint32_t    sms_external   = 7;
+constexpr std::uint32_t    master_update  = 2;
+constexpr std::uint32_t    master_compare = 3;
+constexpr std::uint32_t    pwm1           = 6u << 4;
+constexpr std::uint32_t    pwm2           = 7u << 4;
+constexpr std::uint32_t    toggle         = 3u << 4;
+constexpr std::uint32_t    sms_gated      = 5;
+constexpr std::uint32_t    sms_reset      = 4;
 
 auto ticks_ps(std::uint64_t ticks) -> std::uint64_t
 {
@@ -484,7 +491,7 @@ TEST_CASE("every entry of RM0038 Tables 80 and 83 reaches its own source and no 
        {"TIM9", 2, 0, "TIM10"},
        {"TIM9", 3, 0, "TIM11"}}
   };
-  constexpr std::array<std::string_view, 5> modelled{"TIM2", "TIM3", "TIM4", "TIM5", "TIM9"};
+  constexpr std::array<std::string_view, 5> masters{"TIM2", "TIM3", "TIM4", "TIM5", "TIM9"};
   for(auto const* desc : {&l152re(), &l152rc(), &l152rb()})
   {
     CAPTURE(desc->part);
@@ -499,9 +506,10 @@ TEST_CASE("every entry of RM0038 Tables 80 and 83 reaches its own source and no 
       CAPTURE(select);
       CAPTURE(remap);
       rig              r{*desc, cat12 ? firmware_b : firmware};
-      auto const       has_source = std::ranges::contains(modelled, source);
+      auto const       oc1        = source == "TIM10" or source == "TIM11";
+      auto const       has_source = oc1 or std::ranges::contains(masters, source);
       std::string_view bystander{};
-      for(auto const unit : modelled)
+      for(auto const unit : masters)
       {
         if(unit != slave and unit != source and r.has(unit))
         {
@@ -511,7 +519,14 @@ TEST_CASE("every entry of RM0038 Tables 80 and 83 reaches its own source and no 
       REQUIRE(not bystander.empty());
       r.base(bystander, 99);
       r.master(bystander);
-      if(has_source)
+      if(oc1)
+      {
+        r.base(source, 199);
+        r.write(source, "CCR1", 100);
+        r.write(source, "CCMR1_Output", pwm1);
+        r.set(source, "CCER", "CC1E", 1);
+      }
+      else if(has_source)
       {
         r.base(source, 199);
         r.master(source);
@@ -748,20 +763,20 @@ TEST_CASE("under strict_peripherals an SMCR or OR write that selects an unmodell
 {
   {
     rig r{l152re(), firmware, true};
-    r.base("TIM3", 0xffff);
-    CHECK_THROWS_AS(r.cpu_write("TIM3", "SMCR", sms_external | (2u << 4)), popcorn::model_error);
-    CHECK(r.read("TIM3", "SMCR") == 0);
+    r.base("TIM5", 0xffff);
+    CHECK_THROWS_AS(r.cpu_write("TIM5", "SMCR", sms_external), popcorn::model_error);
+    CHECK(r.read("TIM5", "SMCR") == 0);
     CHECK(r.warnings() == 1);
-    r.slave("TIM3", 1, sms_external);
+    r.base("TIM3", 0xffff);
+    r.cpu_write("TIM3", "SMCR", sms_external | (1u << 4));
     CHECK(r.read("TIM3", "SMCR") == (sms_external | (1u << 4)));
   }
   {
     rig r{l152re(), firmware, true};
-    r.base("TIM2", 0xffff);
-    r.write("TIM2", "OR", 1);
-    r.slave("TIM2", 1, sms_external);
-    CHECK_THROWS_AS(r.cpu_write("TIM2", "OR", 0), popcorn::model_error);
-    CHECK(r.read("TIM2", "OR") == 1);
+    r.base("TIM9", 0xffff);
+    r.slave("TIM9", 1, sms_external);
+    CHECK_THROWS_AS(r.cpu_write("TIM9", "OR", 1u << 2), popcorn::model_error);
+    CHECK(r.read("TIM9", "OR") == 0);
   }
 }
 
@@ -782,8 +797,42 @@ TEST_CASE(
   CHECK(r.read("TIM2", "CR2") == (4u << 4));
   r.write("TIM2", "DIER", 1u << 14);
   CHECK(r.read("TIM2", "DIER") == (1u << 14));
-  r.write("TIM3", "SMCR", sms_external | (2u << 4));
-  CHECK(r.read("TIM3", "SMCR") == (sms_external | (2u << 4)));
+  r.clock("TIM5");
+  r.write("TIM5", "SMCR", sms_external);
+  CHECK(r.read("TIM5", "SMCR") == sms_external);
+  CHECK(r.warnings() == 3);
+}
+
+TEST_CASE(
+    "under strict a firmware TRC capture, CCDS or gated TI1F_ED write throws, debugger stores")
+{
+  struct leg
+  {
+    std::string_view reg;
+    std::uint32_t    value;
+    std::size_t      warnings;
+  };
+  auto const legs = std::array{
+      leg{"CCMR1_Input", 3u,                    1},
+      leg{"CR2",         1u << 3,               2},
+      leg{"SMCR",        sms_gated | (4u << 4), 3},
+      leg{"CCMR2_Input", 3u << 8,               3},
+  };
+  rig r{l152re(), firmware, true};
+  r.clock("TIM3");
+  for(auto const& [reg, value, warnings] : legs)
+  {
+    CAPTURE(reg);
+    CHECK_THROWS_AS(r.cpu_write("TIM3", reg, value), popcorn::model_error);
+    CHECK(r.read("TIM3", reg) == 0);
+    CHECK(r.warnings() == warnings);
+  }
+  for(auto const& [reg, value, warnings] : legs)
+  {
+    CAPTURE(reg);
+    r.write("TIM3", reg, value);
+    CHECK(r.read("TIM3", reg) == value);
+  }
   CHECK(r.warnings() == 3);
 }
 
@@ -859,13 +908,13 @@ TEST_CASE("an L1 TIM3 description with an AF1.ETRSEL field throws at constructio
   constructs_throw(desc);
 }
 
-TEST_CASE("RM0038 18.1 and 19.1: TIM6, TIM7 and TIM9 have a model on every category")
+TEST_CASE("RM0038 18.1 and 19.1: TIM6, TIM7 and TIM9 to TIM11 have a model on every category")
 {
   for(auto const* desc : {&l152rb(), &l152rc(), &l152re()})
   {
     CAPTURE(desc->part);
     rig const r{*desc, desc == &l152rb() ? firmware_b : firmware};
-    for(auto const* unit : {"TIM6", "TIM7", "TIM9"})
+    for(auto const* unit : {"TIM6", "TIM7", "TIM9", "TIM10", "TIM11"})
     {
       CAPTURE(unit);
       CHECK(r.f->target->model(unit) != nullptr);
@@ -1061,20 +1110,24 @@ TEST_CASE("RM0038 18.3.3: TIM9 ECE takes the internal ETR, logs once, model_erro
   CHECK(r.read("TIM9", "SMCR") == 0);
 }
 
-TEST_CASE("with DBG_TIM9_STOP a held TIM9 keeps its count, without it TIM9 counts on")
+TEST_CASE("with DBG_TIMx_STOP a held TIM9, TIM10 or TIM11 keeps its count, without it counts on")
 {
-  for(bool const frozen : {true, false})
+  for(std::string_view const unit : {"TIM9", "TIM10", "TIM11"})
   {
-    CAPTURE(frozen);
-    rig r;
-    r.clock("TIM9");
-    r.enable("TIM9");
-    r.at_tick(1000);
-    popcorn::testing::set_debug_freeze(*r.f, "DBG_TIM9_STOP", frozen);
-    r.f->target->hold_core(true);
-    r.at_tick(6000);
-    CHECK(r.read("TIM9", "CNT") == (frozen ? 1000u : 6000u));
-    r.f->target->hold_core(false);
+    for(bool const frozen : {true, false})
+    {
+      CAPTURE(unit);
+      CAPTURE(frozen);
+      rig r;
+      r.clock(unit);
+      r.enable(unit);
+      r.at_tick(1000);
+      popcorn::testing::set_debug_freeze(*r.f, std::format("DBG_{}_STOP", unit), frozen);
+      r.f->target->hold_core(true);
+      r.at_tick(6000);
+      CHECK(r.read(unit, "CNT") == (frozen ? 1000u : 6000u));
+      r.f->target->hold_core(false);
+    }
   }
 }
 
@@ -1109,4 +1162,460 @@ TEST_CASE("an L1 TIM9 description against the up-only rule of its category throw
   REQUIRE(options != timer->registers.end());
   options->fields.clear();
   constructs_throw(desc);
+}
+
+TEST_CASE("RM0038 18.5.6: TIM10 OC1 clocks TIM9 on ITR2 at its wrap in PWM mode 1, its match in 2")
+{
+  for(std::uint32_t const mode : {pwm1, pwm2})
+  {
+    CAPTURE(mode);
+    rig r;
+    r.base("TIM10", 99);
+    r.write("TIM10", "CCR1", 25);
+    r.write("TIM10", "CCMR1_Output", mode);
+    r.set("TIM10", "CCER", "CC1E", 1);
+    r.base("TIM9", 0xffff);
+    r.slave("TIM9", 2, sms_external);
+    r.enable("TIM9");
+    r.enable("TIM10");
+    r.at_tick(1010);
+    CHECK(r.read("TIM9", "CNT") == 10);
+    r.at_tick(1050);
+    CHECK(r.read("TIM9", "CNT") == (mode == pwm1 ? 10u : 11u));
+    CHECK(r.get("TIM9", "SR", "TIF") == 1);
+    CHECK(r.warnings() == 0);
+  }
+}
+
+TEST_CASE("RM0038 18.5.6: TIM11 OC1 in PWM mode 1 gates TIM3 on ITR2, 25 ticks of every 100")
+{
+  for(auto const* desc : {&l152re(), &l152rb()})
+  {
+    CAPTURE(desc->part);
+    rig r{*desc, desc == &l152rb() ? firmware_b : firmware};
+    r.base("TIM11", 99);
+    r.write("TIM11", "CCR1", 25);
+    r.write("TIM11", "CCMR1_Output", pwm1);
+    r.set("TIM11", "CCER", "CC1E", 1);
+    r.base("TIM3", 0xffff);
+    r.slave("TIM3", 2, sms_gated);
+    r.enable("TIM3");
+    r.enable("TIM11");
+    r.at_tick(1000);
+    CHECK(r.read("TIM3", "CNT") == 250);
+    r.at_tick(1010);
+    CHECK(r.read("TIM3", "CNT") == 260);
+    r.at_tick(1050);
+    CHECK(r.read("TIM3", "CNT") == 275);
+  }
+}
+
+TEST_CASE("a CCMR1, CCR1 or CNT write that moves TIM10 OC1 is an edge, CC1S 01 low inferred")
+{
+  rig r;
+  r.clock("TIM10");
+  r.set("TIM10", "CCER", "CC1E", 1);
+  r.base("TIM9", 0xffff);
+  r.slave("TIM9", 2, sms_external);
+  r.enable("TIM9");
+  r.write("TIM10", "CCMR1_Output", 5u << 4);
+  CHECK(r.read("TIM9", "CNT") == 1);
+  r.write("TIM10", "CCMR1_Output", 4u << 4);
+  r.write("TIM10", "CCMR1_Output", 5u << 4);
+  CHECK(r.read("TIM9", "CNT") == 2);
+  r.write("TIM10", "CCMR1_Output", (5u << 4) | 1u);
+  r.write("TIM10", "CCMR1_Output", 5u << 4);
+  CHECK(r.read("TIM9", "CNT") == 3);
+  r.write("TIM10", "CCMR1_Output", 0);
+  r.write("TIM10", "CCMR1_Output", pwm1);
+  CHECK(r.read("TIM9", "CNT") == 3);
+  r.write("TIM10", "CCR1", 10);
+  CHECK(r.read("TIM9", "CNT") == 4);
+  r.write("TIM10", "CNT", 20);
+  r.write("TIM10", "CNT", 5);
+  CHECK(r.read("TIM9", "CNT") == 5);
+  r.write("TIM10", "CCMR1_Output", 0);
+  r.write("TIM10", "CCMR1_Output", pwm2);
+  CHECK(r.read("TIM9", "CNT") == 5);
+  CHECK(r.warnings() == 0);
+}
+
+TEST_CASE("a TIM10RST pulse drops a high TIM10 OC1, TIM9 gated on it stops at the pulse")
+{
+  rig r;
+  r.clock("TIM10");
+  r.write("TIM10", "CCMR1_Output", 5u << 4);
+  r.set("TIM10", "CCER", "CC1E", 1);
+  r.base("TIM9", 0xffff);
+  r.slave("TIM9", 2, sms_gated);
+  r.enable("TIM9");
+  r.at_tick(100);
+  r.set("RCC", "APB2RSTR", "TIM10RST", 1);
+  r.set("RCC", "APB2RSTR", "TIM10RST", 0);
+  r.at_tick(200);
+  CHECK(r.read("TIM9", "CNT") == 100);
+  CHECK(r.read("TIM10", "CCMR1_Output") == 0);
+}
+
+TEST_CASE("RM0038 18.5.6: a TIM10 CC1P write inverts OC1 at the write, TIM9 counts each rise")
+{
+  rig r;
+  r.clock("TIM10");
+  r.write("TIM10", "CCMR1_Output", 4u << 4);
+  r.set("TIM10", "CCER", "CC1E", 1);
+  r.base("TIM9", 0xffff);
+  r.slave("TIM9", 2, sms_external);
+  r.enable("TIM9");
+  r.set("TIM10", "CCER", "CC1P", 1);
+  CHECK(r.read("TIM9", "CNT") == 1);
+  r.set("TIM10", "CCER", "CC1P", 0);
+  CHECK(r.read("TIM9", "CNT") == 1);
+  r.set("TIM10", "CCER", "CC1P", 1);
+  CHECK(r.read("TIM9", "CNT") == 2);
+  CHECK(r.warnings() == 0);
+}
+
+TEST_CASE("RM0038 18.5.6: TIM11 OC1 with CC1P 1 in PWM mode 1 gates TIM3 75 ticks of every 100")
+{
+  rig r;
+  r.base("TIM11", 99);
+  r.write("TIM11", "CCR1", 25);
+  r.write("TIM11", "CCMR1_Output", pwm1);
+  r.set("TIM11", "CCER", "CC1E", 1);
+  r.set("TIM11", "CCER", "CC1P", 1);
+  r.base("TIM3", 0xffff);
+  r.slave("TIM3", 2, sms_gated);
+  r.enable("TIM3");
+  r.enable("TIM11");
+  r.at_tick(1000);
+  CHECK(r.read("TIM3", "CNT") == 750);
+  r.at_tick(1010);
+  CHECK(r.read("TIM3", "CNT") == 750);
+  r.at_tick(1050);
+  CHECK(r.read("TIM3", "CNT") == 775);
+}
+
+TEST_CASE("RM0038 18.5.6: TIM3 reset by TIM11 OC1 sets UIF each period and reads the TIM11 count")
+{
+  rig r;
+  r.base("TIM11", 99);
+  r.write("TIM11", "CCR1", 25);
+  r.write("TIM11", "CCMR1_Output", pwm1);
+  r.set("TIM11", "CCER", "CC1E", 1);
+  r.base("TIM3", 99);
+  r.set("TIM3", "CR1", "URS", 1);
+  r.slave("TIM3", 2, sms_reset);
+  r.enable("TIM3");
+  r.enable("TIM11");
+  std::size_t flagged = 0;
+  std::size_t exact   = 0;
+  for(std::uint64_t period = 1; period <= 100; ++period)
+  {
+    r.at_tick(period * 100 + 50);
+    flagged += r.get("TIM3", "SR", "UIF");
+    exact += r.read("TIM3", "CNT") == r.read("TIM11", "CNT") ? 1u : 0u;
+    r.write("TIM3", "SR", 0);
+  }
+  CHECK(flagged == 100);
+  CHECK(exact == 100);
+  CHECK(r.warnings() == 0);
+}
+
+TEST_CASE("RM0038 18.5.6: TIM3 triggered by a TIM11 OC1 rise counts every TIM11 tick since it")
+{
+  rig r;
+  r.base("TIM11", 99);
+  r.write("TIM11", "CCR1", 50);
+  r.write("TIM11", "CCMR1_Output", pwm2);
+  r.set("TIM11", "CCER", "CC1E", 1);
+  r.base("TIM3", 0xffff);
+  r.slave("TIM3", 2, sms_trigger);
+  r.enable("TIM11");
+  std::size_t exact = 0;
+  for(std::uint64_t period = 1; period <= 100; ++period)
+  {
+    r.at_tick(period * 100);
+    auto const master = period * 100 + r.read("TIM11", "CNT");
+    exact += r.read("TIM3", "CNT") == master - 50 ? 1u : 0u;
+  }
+  CHECK(exact == 100);
+  CHECK(r.get("TIM3", "SR", "TIF") == 1);
+}
+
+TEST_CASE("RM0038 18.5.6: TIM3 gated by TIM11 OC1 with CC1P 1 reads every open tick mid-window")
+{
+  rig r;
+  r.base("TIM11", 99);
+  r.write("TIM11", "CCR1", 25);
+  r.write("TIM11", "CCMR1_Output", pwm1);
+  r.set("TIM11", "CCER", "CC1E", 1);
+  r.set("TIM11", "CCER", "CC1P", 1);
+  r.base("TIM3", 0xffff);
+  r.slave("TIM3", 2, sms_gated);
+  r.enable("TIM3");
+  r.enable("TIM11");
+  std::size_t exact = 0;
+  for(std::uint64_t period = 0; period < 100; ++period)
+  {
+    r.at_tick(period * 100 + 60);
+    auto const open = period * 75 + r.read("TIM11", "CNT") - 25;
+    exact += r.read("TIM3", "CNT") == open ? 1u : 0u;
+  }
+  CHECK(exact == 100);
+}
+
+TEST_CASE("TIM4 reset by a TIM3 update or CC1 match TRGO, TIM3 clocked by TIM11 OC1, sets UIF")
+{
+  struct leg
+  {
+    std::uint32_t mode;
+    std::uint32_t offset;
+  };
+  for(auto const [mode, offset] : {
+          leg{master_update,  50},
+          leg{master_compare, 0 }
+  })
+  {
+    CAPTURE(mode);
+    rig r;
+    r.base("TIM11", 49);
+    r.write("TIM11", "CCR1", 25);
+    r.write("TIM11", "CCMR1_Output", pwm1);
+    r.set("TIM11", "CCER", "CC1E", 1);
+    r.base("TIM3", 1);
+    r.write("TIM3", "CCR1", 1);
+    r.write("TIM3", "CR2", mode << 4);
+    r.slave("TIM3", 2, sms_external);
+    r.base("TIM4", 99);
+    r.set("TIM4", "CR1", "URS", 1);
+    r.slave("TIM4", 2, sms_reset);
+    r.enable("TIM3");
+    r.enable("TIM11");
+    r.at_tick(30);
+    r.enable("TIM4");
+    std::size_t flagged   = 0;
+    std::size_t triggered = 0;
+    std::size_t exact     = 0;
+    for(std::uint64_t period = 2; period <= 101; ++period)
+    {
+      r.at_tick(period * 100 + 75);
+      flagged += r.get("TIM4", "SR", "UIF");
+      triggered += r.get("TIM4", "SR", "TIF");
+      exact += r.read("TIM4", "CNT") == r.read("TIM11", "CNT") + offset ? 1u : 0u;
+      r.write("TIM4", "SR", 0);
+    }
+    CHECK(flagged == 100);
+    CHECK(triggered == 100);
+    CHECK(exact == 100);
+    CHECK(r.warnings() == 0);
+  }
+}
+
+TEST_CASE(
+    "under strict a firmware TIM10 CC1S 10 or 11 write throws as reserved, a debugger one stores")
+{
+  rig r{l152re(), firmware, true};
+  r.clock("TIM10");
+  for(std::uint32_t const select : {0b10u, 0b11u})
+  {
+    CAPTURE(select);
+    CHECK_THROWS_AS(r.cpu_write("TIM10", "CCMR1_Input", select), popcorn::model_error);
+    CHECK(r.read("TIM10", "CCMR1_Input") == 0);
+  }
+  REQUIRE(r.warnings() == 1);
+  CHECK(r.logged.back().message.contains("reserved on a one-channel timer"));
+  r.write("TIM10", "CCMR1_Input", 0b10);
+  CHECK(r.read("TIM10", "CCMR1_Input") == 0b10);
+  CHECK(r.warnings() == 1);
+}
+
+TEST_CASE("TIM3 at half the TIM11 clock, reset by each TIM11 OC1 rise, reads half the TIM11 count")
+{
+  rig r;
+  r.set("RCC", "CFGR", "PPRE1", 0b101);
+  r.base("TIM11", 99);
+  r.write("TIM11", "CCR1", 25);
+  r.write("TIM11", "CCMR1_Output", pwm1);
+  r.set("TIM11", "CCER", "CC1E", 1);
+  r.base("TIM3", 0xffff);
+  r.slave("TIM3", 2, sms_reset);
+  r.enable("TIM3");
+  r.enable("TIM11");
+  std::size_t exact = 0;
+  for(std::uint64_t period = 1; period <= 100; ++period)
+  {
+    r.at_tick(period * 100 + 60);
+    exact += r.read("TIM3", "CNT") == r.read("TIM11", "CNT") / 2 ? 1u : 0u;
+  }
+  CHECK(exact == 100);
+  CHECK(r.read("TIM3", "CNT") < 40);
+}
+
+TEST_CASE("an L1 TIM10 description with a CCMR1_Output field at bit 16 throws at construction")
+{
+  constructs_throw(with_field(
+      l152re(), "TIM10", "CCMR1_Output",
+      {.name = "OC1M_3", .lsb = 16, .width = 1, .acc = popcorn::access::read_write}));
+}
+
+TEST_CASE("TIM10 OC1M 011 or OC1CE 1 holds OC1 low and logs once, under strict the write throws")
+{
+  {
+    rig r;
+    r.base("TIM9", 0xffff);
+    r.slave("TIM9", 2, sms_external);
+    r.enable("TIM9");
+    r.base("TIM10", 9);
+    r.write("TIM10", "CCR1", 5);
+    r.write("TIM10", "CCMR1_Output", toggle);
+    r.enable("TIM10");
+    r.at_tick(100);
+    CHECK(r.read("TIM9", "CNT") == 0);
+    CHECK(r.warnings() == 1);
+  }
+  for(std::uint32_t const unmodelled : {toggle, pwm1 | (1u << 7)})
+  {
+    CAPTURE(unmodelled);
+    rig r{l152re(), firmware, true};
+    r.base("TIM10", 9);
+    r.base("TIM9", 0xffff);
+    r.cpu_write("TIM9", "SMCR", sms_external | (2u << 4));
+    CHECK_THROWS_AS(r.cpu_write("TIM10", "CCMR1_Output", unmodelled), popcorn::model_error);
+    CHECK(r.read("TIM10", "CCMR1_Output") == 0);
+    CHECK(r.warnings() == 1);
+    r.write("TIM9", "SMCR", 0);
+    r.write("TIM10", "CCMR1_Output", unmodelled);
+    CHECK_THROWS_AS(r.cpu_write("TIM9", "SMCR", sms_external | (2u << 4)), popcorn::model_error);
+    CHECK(r.read("TIM9", "SMCR") == 0);
+    CHECK(r.warnings() == 2);
+  }
+}
+
+TEST_CASE(
+    "RM0038 18.5.12, 18.5.13: TI1_RMP keeps TIM10 tim_ti1 on the pin for 00, TIM11 for 00, 11")
+{
+  struct leg
+  {
+    std::string_view unit;
+    std::uint8_t     pin;
+    std::uint32_t    pin_values;
+  };
+  for(auto const& [unit, pin, pin_values] : {
+          leg{"TIM10", 6, 0b0001},
+          leg{"TIM11", 7, 0b1001}
+  })
+  {
+    for(std::uint32_t const remap : {0u, 1u, 2u, 3u})
+    {
+      CAPTURE(unit);
+      CAPTURE(remap);
+      rig r;
+      r.set("RCC", "AHBENR", "GPIOAEN", 1);
+      auto* const porta = r.f->model_of<stm32::gpio_port>("GPIOA");
+      REQUIRE(porta != nullptr);
+      porta->drive(pin, false);
+      r.set("GPIOA", "MODER", std::format("MODER{}", pin), 2);
+      r.set("GPIOA", "AFRL", std::format("AFRL{}", pin), 3);
+      r.base(unit, 0xffff);
+      r.set(unit, "OR", "TI1_RMP", remap);
+      r.set(unit, "CCMR1_Input", "CC1S", 1);
+      r.set(unit, "CCER", "CC1E", 1);
+      r.enable(unit);
+      auto const t0 = r.now();
+      porta->drive_at(pin, true, vtime{t0 + 10 * us});
+      r.run_until(t0 + 20 * us);
+      auto const on_pin = ((pin_values >> remap) & 1u) != 0;
+      CHECK(r.get(unit, "SR", "CC1IF") == (on_pin ? 1u : 0u));
+      CHECK(r.warnings() == (on_pin ? 0u : 1u));
+    }
+  }
+  for(std::string_view const unit : {"TIM10", "TIM11"})
+  {
+    CAPTURE(unit);
+    {
+      rig r;
+      r.set("RCC", "AHBENR", "GPIOAEN", 1);
+      auto* const porta = r.f->model_of<stm32::gpio_port>("GPIOA");
+      REQUIRE(porta != nullptr);
+      auto const pin = unit == "TIM10" ? 6u : 7u;
+      porta->drive(pin, false);
+      r.set("GPIOA", "MODER", std::format("MODER{}", pin), 2);
+      r.set("GPIOA", "AFRL", std::format("AFRL{}", pin), 3);
+      r.base(unit, 0xffff);
+      r.set(unit, "OR", "TI1_RMP_RI", 1);
+      r.set(unit, "CCMR1_Input", "CC1S", 1);
+      r.set(unit, "CCER", "CC1E", 1);
+      r.enable(unit);
+      auto const t0 = r.now();
+      porta->drive_at(pin, true, vtime{t0 + 10 * us});
+      r.run_until(t0 + 20 * us);
+      CHECK(r.get(unit, "SR", "CC1IF") == 0);
+      CHECK(r.warnings() == 1);
+    }
+    rig r{l152re(), firmware, true};
+    r.clock(unit);
+    CHECK_THROWS_AS(r.cpu_write(unit, "OR", 1), popcorn::model_error);
+    CHECK_THROWS_AS(r.cpu_write(unit, "OR", 1u << 3), popcorn::model_error);
+    CHECK(r.read(unit, "OR") == 0);
+    r.cpu_write(unit, "OR", 1u << 2);
+    CHECK(r.read(unit, "OR") == (1u << 2));
+  }
+}
+
+TEST_CASE("RM0038 18.5.12 and 18.5.13: TIM10 and TIM11 ECE count nothing whatever ETR_RMP")
+{
+  for(std::string_view const unit : {"TIM10", "TIM11"})
+  {
+    for(std::uint32_t const etr : {0u, 1u})
+    {
+      CAPTURE(unit);
+      CAPTURE(etr);
+      {
+        rig r;
+        r.base("TIM9", 99);
+        r.master("TIM9");
+        r.enable("TIM9");
+        r.base(unit, 0xffff);
+        r.set(unit, "OR", "ETR_RMP", etr);
+        r.set(unit, "SMCR", "ECE", 1);
+        r.enable(unit);
+        r.at_tick(1000);
+        CHECK(r.read(unit, "CNT") == 0);
+        CHECK(r.warnings() == 1);
+      }
+      rig r{l152re(), firmware, true};
+      r.clock(unit);
+      r.set(unit, "OR", "ETR_RMP", etr);
+      CHECK_THROWS_AS(r.cpu_write(unit, "SMCR", 1u << 14), popcorn::model_error);
+      CHECK(r.read(unit, "SMCR") == 0);
+    }
+  }
+}
+
+TEST_CASE("an L1 TIM10 or TIM11 description with DIR, or a Cat.3 one without TI1_RMP_RI, throws")
+{
+  for(std::string_view const unit : {"TIM10", "TIM11"})
+  {
+    CAPTURE(unit);
+    for(auto const* desc : {&l152re(), &l152rb()})
+    {
+      CAPTURE(desc->part);
+      constructs_throw(with_field(
+          *desc, unit, "CR1",
+          {.name = "DIR", .lsb = 4, .width = 1, .acc = popcorn::access::read_write}));
+    }
+    auto       desc = l152re();
+    auto const timer =
+        std::ranges::find(desc.peripherals, std::string{unit}, &popcorn::peripheral_desc::name);
+    REQUIRE(timer != desc.peripherals.end());
+    auto const options =
+        std::ranges::find(timer->registers, std::string{"OR"}, &popcorn::register_desc::name);
+    REQUIRE(options != timer->registers.end());
+    REQUIRE(
+        std::erase_if(
+            options->fields,
+            [](popcorn::field_desc const& bits) { return bits.name == "TI1_RMP_RI"; })
+        == 1);
+    constructs_throw(desc);
+  }
 }

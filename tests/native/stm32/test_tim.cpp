@@ -1,4 +1,5 @@
 #include "dma.hpp"
+#include "factories.hpp"
 #include "stm32_fixture.hpp"
 #include "trigger_signal.hpp"
 
@@ -7,6 +8,7 @@
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
+#include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
 
 #include <doctest/doctest.h>
@@ -41,6 +43,8 @@ using popcorn::testing::u575;
 
 constexpr std::uint64_t ms = 1'000'000'000;
 constexpr std::uint64_t us = 1'000'000;
+
+using wide = unsigned __int128;
 
 auto entered_on(
     popcorn::part_description desc,
@@ -852,11 +856,12 @@ public:
   explicit trigger_probe(periph::model_context& ctx) : context{ctx}
   {}
 
-  periph::model_context&     context;
-  std::string                watched{"tim15_trgo"};
-  bool                       listening{};
-  std::vector<std::uint64_t> pulses;
-  std::vector<std::uint64_t> falls;
+  periph::model_context&           context;
+  std::string                      watched{"tim15_trgo"};
+  bool                             listening{};
+  std::vector<std::uint64_t>       pulses;
+  std::vector<std::uint64_t>       falls;
+  std::vector<stm32::trigger_time> rises;
 
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
   {
@@ -889,9 +894,13 @@ public:
   {
     return listening and signal == watched;
   }
-  void triggered(std::string_view, stm32::trigger_edge edge, std::uint64_t at_ps) override
+  void triggered(std::string_view, stm32::trigger_edge edge, stm32::trigger_time at) override
   {
-    (edge == stm32::trigger_edge::rising ? pulses : falls).push_back(at_ps);
+    (edge == stm32::trigger_edge::rising ? pulses : falls).push_back(at.ps);
+    if(edge == stm32::trigger_edge::rising)
+    {
+      rises.push_back(at);
+    }
   }
 
   void listen(bool on)
@@ -1674,6 +1683,312 @@ TEST_CASE("under strict a CPU SMCR write of the unrouted ITR7 throws, a debugger
   CHECK(std::ranges::count(logged, core::log_kind::model_warning, &core::log_record::kind) == 1);
   b.write("TIM3", "SMCR", value);
   CHECK(b.read("TIM3", "SMCR") == value);
+}
+
+namespace
+{
+struct strict_leg
+{
+  std::string_view unit;
+  std::string_view reg;
+  std::string_view field;
+  std::uint32_t    value;
+  std::size_t      warnings;
+};
+
+void refused_under_strict(std::span<strict_leg const> legs)
+{
+  auto options               = popcorn::testing::stm32_options();
+  options.strict_peripherals = true;
+  options.models.insert_or_assign(
+      "CRC", [](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+        return std::make_shared<cpu_port>(ctx);
+      });
+  auto                          f = entered_on(u575(), "idle", std::move(options));
+  bus const                     b{f};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      f.target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  b.set("RCC", "RCC_APB2ENR", "TIM1EN", 1);
+  b.set("RCC", "RCC_APB1ENR1", "TIM3EN", 1);
+  auto* const port = f.model_of<cpu_port>("CRC");
+  REQUIRE(port != nullptr);
+  auto const field_value = [&](strict_leg const& leg) {
+    if(leg.field.empty())
+    {
+      return leg.value;
+    }
+    auto const& desc  = f.target->peripheral(leg.unit).description();
+    auto const  found = popcorn::find_register(desc, leg.reg);
+    REQUIRE(found != nullptr);
+    auto const field = std::ranges::find(found->fields, leg.field, &popcorn::field_desc::name);
+    REQUIRE(field != found->fields.end());
+    return leg.value << field->lsb;
+  };
+  auto const warnings = [&] {
+    return static_cast<std::size_t>(
+        std::ranges::count(logged, core::log_kind::model_warning, &core::log_record::kind));
+  };
+  for(auto const& leg : legs)
+  {
+    CAPTURE(leg.unit);
+    CAPTURE(leg.reg);
+    CAPTURE(leg.field);
+    CHECK_THROWS_AS(
+        static_cast<void>(port->context.services.write(
+            b.at(leg.unit, leg.reg), 4, field_value(leg), popcorn::initiator::cpu)),
+        popcorn::model_error);
+    CHECK(b.read(leg.unit, leg.reg) == 0);
+    CHECK(warnings() == leg.warnings);
+  }
+  for(auto const& leg : legs)
+  {
+    CAPTURE(leg.unit);
+    CAPTURE(leg.reg);
+    CAPTURE(leg.field);
+    b.write(leg.unit, leg.reg, field_value(leg));
+    CHECK(b.read(leg.unit, leg.reg) == field_value(leg));
+  }
+  CHECK(warnings() == legs.back().warnings);
+}
+}
+
+TEST_CASE("under strict a CPU write of TIM1 MMS2, TIM3 MMS 100 or TIM3 TDE throws, debugger stores")
+{
+  refused_under_strict(
+      std::array{
+          strict_leg{"TIM1", "CR2",  "MMS2", 0b0010, 1},
+          strict_leg{"TIM3", "CR2",  "MMS",  0b100,  2},
+          strict_leg{"TIM3", "DIER", "TDE",  1,      3},
+  });
+}
+
+TEST_CASE("under strict a CPU TRC capture, CCDS or gated TI1F_ED write throws, debugger stores")
+{
+  refused_under_strict(
+      std::array{
+          strict_leg{"TIM3", "CCMR1_Input", "CC1S", 0b11, 1},
+          strict_leg{"TIM3", "CR2", "CCDS", 1, 2},
+          strict_leg{"TIM3", "SMCR", "", smcr(sms_gated, 4), 3},
+          strict_leg{"TIM3", "CCMR2_Input", "CC4S", 0b11, 3},
+  });
+}
+
+TEST_CASE("under strict a CPU write of the reserved TIM16 CC1S 10 or TIM17 CC1S 11 throws")
+{
+  refused_under_strict(
+      std::array{
+          strict_leg{"TIM16", "CCMR1_Input", "CC1S", 0b10, 1},
+          strict_leg{"TIM17", "CCMR1_Input", "CC1S", 0b11, 2},
+  });
+}
+
+namespace
+{
+struct hse_u575
+{
+  static constexpr std::uint64_t hz = 48'000'000;
+
+  stm32_fixture f;
+  bus           b{f};
+  std::uint64_t from{};
+
+  explicit hse_u575(bool probe = false) : f{entered_on(u575(), "idle", options(probe))}
+  {
+    b.set("RCC", "RCC_CR", "HSEON", 1);
+    run_until(now() + 200 * us);
+    REQUIRE(b.bits("RCC", "RCC_CR", "HSERDY") == 1);
+    b.set("RCC", "RCC_CFGR1", "SW", 2);
+    run_until(now() + 200 * us);
+    REQUIRE(b.bits("RCC", "RCC_CFGR1", "SWS") == 2);
+    b.set("RCC", "RCC_APB1ENR1", "TIM2EN", 1);
+    b.set("RCC", "RCC_APB1ENR1", "TIM3EN", 1);
+  }
+
+  static auto options(bool probe) -> core::machine_options
+  {
+    stm32::board board;
+    board.rcc.hse_hz = hz;
+    auto options     = popcorn::testing::stm32_options();
+    options.models   = stm32::factories(board, u575());
+    if(probe)
+    {
+      options.models.insert_or_assign(
+          "DAC1", [](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+            return std::make_shared<trigger_probe>(ctx);
+          });
+    }
+    return options;
+  }
+
+  [[nodiscard]] auto now() const -> std::uint64_t
+  {
+    return f.target->virtual_clock().time().ps;
+  }
+
+  void run_until(std::uint64_t ps) const
+  {
+    REQUIRE(
+        f.run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = vtime{ps}}).reason
+        == stop_reason::time);
+  }
+
+  void at_tick(std::uint64_t ticks) const
+  {
+    run_until(from + (ticks * 1'000'000'000'000 + hz - 1) / hz);
+  }
+
+  void base(std::string_view tim, std::uint32_t reload) const
+  {
+    b.write(tim, "PSC", 0);
+    b.write(tim, "ARR", reload);
+    b.write(tim, "EGR", 1);
+    b.write(tim, "SR", 0);
+  }
+};
+}
+
+TEST_CASE("a TIM2 update and a CC1 match at 48 MHz HSE give TRGO edges at their exact instant")
+{
+  for(auto const mode : {master_update, master_compare})
+  {
+    CAPTURE(mode);
+    hse_u575    t{true};
+    auto* const probe = t.f.model_of<trigger_probe>("DAC1");
+    REQUIRE(probe != nullptr);
+    probe->watched = "tim2_trgo";
+    probe->listen(true);
+    t.base("TIM2", 99);
+    t.b.write("TIM2", "CCR1", 37);
+    t.b.write("TIM2", "CR2", mode << 4);
+    probe->rises.clear();
+    t.b.write("TIM2", "CR1", 1);
+    t.from = t.now();
+    t.at_tick(150);
+    REQUIRE(not probe->rises.empty());
+    auto const ticks = mode == master_update ? 100u : 37u;
+    auto const exact = wide{t.from} * hse_u575::hz + wide{ticks} * 1'000'000'000'000;
+    auto const ps    = static_cast<std::uint64_t>((exact + hse_u575::hz - 1) / hse_u575::hz);
+    CHECK(probe->rises.front().ps == ps);
+    CHECK(probe->rises.front().hz == hse_u575::hz);
+    CHECK(probe->rises.front().lag == static_cast<std::uint64_t>(wide{ps} * hse_u575::hz - exact));
+    CHECK(probe->rises.front().lag != 0);
+  }
+}
+
+TEST_CASE(
+    "TIM3 in external clock mode 1 passes the exact edge instant to its match and update TRGO")
+{
+  for(auto const mode : {master_compare, master_update})
+  {
+    CAPTURE(mode);
+    hse_u575    t{true};
+    auto* const probe = t.f.model_of<trigger_probe>("DAC1");
+    REQUIRE(probe != nullptr);
+    probe->watched = "tim3_trgo";
+    probe->listen(true);
+    t.base("TIM3", 1);
+    t.b.write("TIM3", "CCR1", 1);
+    t.b.write("TIM3", "CR2", mode << 4);
+    t.b.write("TIM3", "SMCR", smcr(sms_external, ts_itr1));
+    t.b.write("TIM3", "CR1", 1);
+    probe->rises.clear();
+    auto* const sink = dynamic_cast<stm32::trigger_sink*>(t.f.target->model("TIM3"));
+    REQUIRE(sink != nullptr);
+    auto const read = t.now();
+    sink->triggered(
+        "tim2_trgo", stm32::trigger_edge::rising,
+        stm32::trigger_time{read - 1000, hse_u575::hz, 12'345});
+    sink->triggered(
+        "tim2_trgo", stm32::trigger_edge::rising,
+        stm32::trigger_time{read - 500, hse_u575::hz, 23'456});
+    REQUIRE(probe->rises.size() == 1);
+    auto const& rise = probe->rises.front();
+    CHECK(rise.ps == (mode == master_compare ? read - 1000 : read - 500));
+    CHECK(rise.hz == hse_u575::hz);
+    CHECK(rise.lag == (mode == master_compare ? 12'345u : 23'456u));
+  }
+}
+
+TEST_CASE("TIM3 reset by an edge 1/3 ps after its whole ps counts from the exact instant, 48 MHz")
+{
+  hse_u575 t;
+  t.base("TIM3", 0xffff);
+  t.b.write("TIM3", "SMCR", smcr(sms_reset, ts_itr1));
+  t.b.write("TIM3", "CR1", 1);
+  auto const  read = t.now();
+  auto* const sink = dynamic_cast<stm32::trigger_sink*>(t.f.target->model("TIM3"));
+  REQUIRE(sink != nullptr);
+  sink->triggered(
+      "tim2_trgo", stm32::trigger_edge::rising,
+      stm32::trigger_time{read - 208'333, hse_u575::hz, hse_u575::hz / 3 - 1});
+  CHECK(t.b.read("TIM3", "CNT") == 9);
+}
+
+TEST_CASE("TIM3 at 48 MHz reset by an edge of a 7 MHz clock counts from the exact instant")
+{
+  for(auto const& [lag, count] : {
+          std::pair{3'000'000u, 10u},
+          std::pair{1'000'000u, 9u }
+  })
+  {
+    CAPTURE(lag);
+    hse_u575 t;
+    t.base("TIM3", 0xffff);
+    t.b.write("TIM3", "SMCR", smcr(sms_reset, ts_itr1));
+    t.b.write("TIM3", "CR1", 1);
+    auto const  read = t.now();
+    auto* const sink = dynamic_cast<stm32::trigger_sink*>(t.f.target->model("TIM3"));
+    REQUIRE(sink != nullptr);
+    sink->triggered(
+        "tim2_trgo", stm32::trigger_edge::rising,
+        stm32::trigger_time{read - 208'333, 7'000'000, lag});
+    CHECK(t.b.read("TIM3", "CNT") == count);
+  }
+}
+
+TEST_CASE("TIM3 triggered by a TIM2 update on ITR1 at 48 MHz HSE reads every TIM2 tick since it")
+{
+  hse_u575 t;
+  t.base("TIM2", 99);
+  t.base("TIM3", 0xffff);
+  t.b.write("TIM2", "CR2", master_update << 4);
+  t.b.write("TIM3", "SMCR", smcr(sms_trigger, ts_itr1));
+  t.b.write("TIM2", "CR1", 1);
+  t.from            = t.now();
+  std::size_t exact = 0;
+  for(std::uint64_t period = 2; period <= 101; ++period)
+  {
+    t.at_tick(period * 100);
+    auto const master = period * 100 + t.b.read("TIM2", "CNT");
+    exact += t.b.read("TIM3", "CNT") == master - 100 ? 1u : 0u;
+  }
+  CHECK(exact == 100);
+  CHECK(t.b.bits("TIM3", "SR", "TIF") == 1);
+}
+
+TEST_CASE(
+    "TIM3 reset by each TIM2 update on ITR1 at 48 MHz HSE sets UIF at its own overflow, URS 1")
+{
+  hse_u575 t;
+  t.base("TIM2", 99);
+  t.base("TIM3", 99);
+  t.b.write("TIM2", "CR2", master_update << 4);
+  t.b.write("TIM3", "SMCR", smcr(sms_reset, ts_itr1));
+  t.b.write("TIM3", "CR1", 1u | (1u << 2));
+  t.b.write("TIM2", "CR1", 1);
+  t.from              = t.now();
+  std::size_t flagged = 0;
+  std::size_t exact   = 0;
+  for(std::uint64_t period = 1; period <= 100; ++period)
+  {
+    t.at_tick(period * 100 + 50);
+    flagged += t.b.bits("TIM3", "SR", "UIF");
+    exact += t.b.read("TIM3", "CNT") == t.b.read("TIM2", "CNT") ? 1u : 0u;
+    t.b.write("TIM3", "SR", 0);
+  }
+  CHECK(flagged == 100);
+  CHECK(exact == 100);
 }
 
 namespace
@@ -3537,6 +3852,27 @@ TEST_CASE("capture polarity, the neighbour input and CC1E 0")
     t.settle();
     CHECK(t.bits("TIM3", "SR", "CC1IF") == 0);
   }
+}
+
+TEST_CASE("TIM15 keeps IC2F bit 3 of CCMR1, and IC2F 1111 delays a CH2 capture 256 timer clocks")
+{
+  inputs t;
+  t.route(3, 14);
+  t.base("TIM15", 0, 0xffff);
+  t.write("TIM15", "CCMR1_Input", 0xF1F1);
+  CHECK(t.read("TIM15", "CCMR1_Input") == 0xF1F1);
+  CHECK(t.read("TIM15", "CCMR1_Output") == 0xF1F1);
+  t.write("TIM15", "CCER", 1u << 4);
+  t.enable("TIM15");
+  auto const rise = t.next + edge_gap;
+  t.porta->drive_at(3, true, vtime{rise});
+  REQUIRE(
+      t.f.run_to_stop(
+             {.max_instructions = icount{1'000'000'000}, .until_time = vtime{rise + 100 * us}})
+          .reason
+      == stop_reason::time);
+  CHECK(t.bits("TIM15", "SR", "CC2IF") == 1);
+  CHECK(t.read("TIM15", "CCR2") == ticks_at(t, rise + 256 * tick_ps));
 }
 
 TEST_CASE("IC1F with 8 samples drops a 5-sample pulse and passes a 10-sample one 8 samples late")

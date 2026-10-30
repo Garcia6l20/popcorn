@@ -1,10 +1,12 @@
 #include "stm32_fixture.hpp"
+#include "trigger_signal.hpp"
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/devices/at25sf.hpp>
+#include <popcorn/periph/model.hpp>
 #include <popcorn/periph/spi.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/spi.hpp>
@@ -16,6 +18,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <memory>
 #include <span>
 #include <string>
@@ -42,10 +45,52 @@ constexpr std::uint32_t    tim12_irq = 120;
 
 constexpr std::uint32_t sms_trigger   = 6;
 constexpr std::uint32_t master_update = 2;
+constexpr std::uint32_t sms_external  = 7;
+constexpr std::uint32_t sms_gated     = 5;
+constexpr std::uint32_t sms_reset     = 4;
+constexpr std::uint32_t pwm1          = 6u << 4;
+constexpr std::uint32_t pwm2          = 7u << 4;
 constexpr std::uint32_t ts_itr4       = 8;
 constexpr std::uint32_t ts_itr6       = 10;
 constexpr std::uint32_t ts_itr7       = 11;
 constexpr std::uint32_t ts_itr9       = 13;
+
+class cpu_port final : public periph::model
+{
+public:
+  explicit cpu_port(periph::model_context& ctx) : context{ctx}
+  {}
+
+  periph::model_context& context;
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+  void reset(periph::register_file&, popcorn::reset_kind) override
+  {}
+  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
+      -> std::expected<std::uint32_t, popcorn::bus_error> override
+  {
+    return 0u;
+  }
+  auto on_write(
+      periph::register_file&,
+      std::uint32_t,
+      std::uint8_t,
+      std::uint32_t,
+      std::uint32_t,
+      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
+  {
+    return {};
+  }
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+  void save(std::vector<std::byte>&) const override
+  {}
+  void load(std::span<std::byte const>) override
+  {}
+};
 
 class script_target final : public periph::spi_target
 {
@@ -113,11 +158,19 @@ struct rig
   std::vector<core::log_record>  logged;
   core::hook_handle              sink;
 
-  explicit rig(stm32::board const& board = {})
+  explicit rig(stm32::board const& board = {}, bool strict = false)
   {
-    auto options   = popcorn::testing::stm32_options();
-    options.models = stm32::factories(board, h573());
-    f              = std::make_unique<stm32_fixture>(h573(), firmware, std::move(options));
+    auto options               = popcorn::testing::stm32_options();
+    options.models             = stm32::factories(board, h573());
+    options.strict_peripherals = strict;
+    if(strict)
+    {
+      options.models.insert_or_assign(
+          "CRC", [](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+            return std::make_shared<cpu_port>(ctx);
+          });
+    }
+    f = std::make_unique<stm32_fixture>(h573(), firmware, std::move(options));
     f->set("pc", sym(firmware, "idle"));
     sink = f->target->add_log_sink(
         [this](core::log_record const& record) { logged.push_back(record); });
@@ -156,6 +209,23 @@ struct rig
       std::uint8_t     size = 4) const
   {
     REQUIRE(f->target->mem().write(at(unit, name), size, value).has_value());
+  }
+
+  void cpu_write(std::string_view unit, std::string_view name, std::uint32_t value) const
+  {
+    auto* const port = f->model_of<cpu_port>("CRC");
+    REQUIRE(port != nullptr);
+    static_cast<void>(
+        port->context.services.write(at(unit, name), 4, value, popcorn::initiator::cpu));
+  }
+
+  [[nodiscard]] auto lsb(std::string_view unit, std::string_view name, std::string_view field) const
+      -> std::uint32_t
+  {
+    auto const& fields = reg(unit, name).fields;
+    auto const  found  = std::ranges::find(fields, field, &popcorn::field_desc::name);
+    REQUIRE(found != fields.end());
+    return found->lsb;
   }
 
   [[nodiscard]] auto get(std::string_view unit, std::string_view name, std::string_view field) const
@@ -222,13 +292,14 @@ struct timers : rig
 {
   std::uint64_t start{};
 
-  timers()
+  explicit timers(stm32::board const& board = {}, bool strict = false) : rig{board, strict}
   {
-    for(auto const* const bit : {"TIM2EN", "TIM3EN", "TIM4EN", "TIM5EN", "TIM12EN", "TIM13EN"})
+    for(auto const* const bit :
+        {"TIM2EN", "TIM3EN", "TIM4EN", "TIM5EN", "TIM12EN", "TIM13EN", "TIM14EN"})
     {
       set("RCC", "RCC_APB1LENR", bit, 1);
     }
-    for(auto const* const bit : {"TIM1EN", "TIM8EN", "TIM15EN"})
+    for(auto const* const bit : {"TIM1EN", "TIM8EN", "TIM15EN", "TIM16EN", "TIM17EN"})
     {
       set("RCC", "RCC_APB2ENR", bit, 1);
     }
@@ -472,29 +543,36 @@ TEST_CASE("TIM3 on ITR9 follows TIM15")
 
 TEST_CASE("every entry of the H5 trigger table reaches its own source and no other")
 {
+  enum class kind : std::uint8_t
+  {
+    trgo,
+    oc1,
+    none,
+  };
   struct row
   {
     std::uint32_t    select;
     std::string_view source;
-    bool             modelled;
+    kind             by;
   };
   constexpr std::array<row, 13> rows{
-      {{0, "TIM1", true},
-       {1, "TIM2", true},
-       {2, "TIM3", true},
-       {3, "TIM4", true},
-       {8, "TIM5", true},
-       {9, "TIM8", true},
-       {10, "TIM12", true},
-       {11, "TIM13", false},
-       {12, "TIM14", false},
-       {13, "TIM15", true},
-       {14, "TIM16", false},
-       {15, "TIM17", false},
-       {16, "USBSOF", false}}
+      {{0, "TIM1", kind::trgo},
+       {1, "TIM2", kind::trgo},
+       {2, "TIM3", kind::trgo},
+       {3, "TIM4", kind::trgo},
+       {8, "TIM5", kind::trgo},
+       {9, "TIM8", kind::trgo},
+       {10, "TIM12", kind::trgo},
+       {11, "TIM13", kind::oc1},
+       {12, "TIM14", kind::oc1},
+       {13, "TIM15", kind::trgo},
+       {14, "TIM16", kind::oc1},
+       {15, "TIM17", kind::oc1},
+       {16, "USBSOF", kind::none}}
   };
-  for(auto const& [select, source, modelled] : rows)
+  for(auto const& [select, source, by] : rows)
   {
+    auto const modelled = by != kind::none;
     CAPTURE(select);
     CAPTURE(source);
     std::string_view const slave     = source == "TIM3" ? "TIM2" : "TIM3";
@@ -502,7 +580,18 @@ TEST_CASE("every entry of the H5 trigger table reaches its own source and no oth
     timers                 t;
     t.base(bystander, 99);
     t.master(bystander);
-    if(modelled)
+    if(by == kind::oc1)
+    {
+      t.base(source, 199);
+      t.write(source, "CCR1", 100);
+      t.write(source, "CCMR1_Output", pwm1);
+      t.set(source, "CCER", "CC1E", 1);
+      if(source == "TIM16" or source == "TIM17")
+      {
+        t.set(source, "BDTR", "MOE", 1);
+      }
+    }
+    else if(modelled)
     {
       t.base(source, 199);
       t.master(source);
@@ -588,19 +677,234 @@ TEST_CASE("an H573 timer whose CR2.MMS width disagrees with the variant throws a
   }
 }
 
-TEST_CASE("ITR7, the OC1 output of TIM13, reaches nothing and logs the unrouted trigger once")
+TEST_CASE("ITR7, the OC1 output of TIM13, clocks TIM3 at each OC1 rising edge, none in OC1M 1000")
 {
+  {
+    timers t;
+    t.base("TIM5", 99);
+    t.master("TIM5");
+    t.base("TIM13", 99);
+    t.write("TIM13", "CCR1", 25);
+    t.write("TIM13", "CCMR1_Output", pwm1);
+    t.set("TIM13", "CCER", "CC1E", 1);
+    t.base("TIM3", 0xffff);
+    t.slave("TIM3", ts_itr7, sms_external);
+    t.enable("TIM3");
+    t.enable("TIM5");
+    t.enable("TIM13");
+    t.at_tick(1050);
+    CHECK(t.read("TIM3", "CNT") == 10);
+    CHECK(t.warnings() == 0);
+  }
   timers t;
-  t.base("TIM5", 99);
-  t.master("TIM5");
+  t.base("TIM13", 99);
+  t.write("TIM13", "CCMR1_Output", 1u << 16);
   t.base("TIM3", 0xffff);
-  t.slave("TIM3", ts_itr7);
-  t.slave("TIM3", ts_itr7);
-  t.enable("TIM5");
-  t.at_tick(250);
-  CHECK(t.get("TIM3", "CR1", "CEN") == 0);
+  t.slave("TIM3", ts_itr7, sms_external);
+  t.enable("TIM3");
+  t.enable("TIM13");
+  t.at_tick(1050);
   CHECK(t.read("TIM3", "CNT") == 0);
   CHECK(t.warnings() == 1);
+}
+
+namespace
+{
+constexpr std::uint64_t hse_hz = 48'000'000;
+
+auto hse_board() -> stm32::board
+{
+  stm32::board board;
+  board.rcc.hse_hz = hse_hz;
+  return board;
+}
+
+struct hse_timers : timers
+{
+  hse_timers() : timers{hse_board()}
+  {
+    set("RCC", "RCC_CR", "HSEON", 1);
+    run_until(now() + 200'000'000);
+    REQUIRE(get("RCC", "RCC_CR", "HSERDY") == 1);
+    set("RCC", "RCC_CFGR1", "SW", 2);
+    run_until(now() + 200'000'000);
+    REQUIRE(get("RCC", "RCC_CFGR1", "SWS") == 2);
+  }
+
+  void at_hse_tick(std::uint64_t from, std::uint64_t ticks) const
+  {
+    run_until(from + (ticks * 1'000'000'000'000 + hse_hz - 1) / hse_hz);
+  }
+};
+}
+
+TEST_CASE("TIM13 OC1 with CC1P 1 in PWM mode 1 gates TIM3 on ITR7, 75 ticks of every 100 at 48 MHz")
+{
+  hse_timers t;
+  t.base("TIM13", 99);
+  t.write("TIM13", "CCR1", 25);
+  t.write("TIM13", "CCMR1_Output", pwm1);
+  t.set("TIM13", "CCER", "CC1E", 1);
+  t.set("TIM13", "CCER", "CC1P", 1);
+  t.base("TIM3", 0xffff);
+  t.slave("TIM3", ts_itr7, sms_gated);
+  t.enable("TIM3");
+  t.enable("TIM13");
+  auto const from = t.now();
+  t.at_hse_tick(from, 1000);
+  CHECK(t.read("TIM3", "CNT") == 750);
+  t.at_hse_tick(from, 1010);
+  CHECK(t.read("TIM3", "CNT") == 750);
+  t.at_hse_tick(from, 1050);
+  CHECK(t.read("TIM3", "CNT") == 775);
+  std::size_t exact = 0;
+  for(std::uint64_t period = 11; period < 111; ++period)
+  {
+    t.at_hse_tick(from, period * 100 + 60);
+    auto const open = period * 75 + t.read("TIM13", "CNT") - 25;
+    exact += t.read("TIM3", "CNT") == open ? 1u : 0u;
+  }
+  CHECK(exact == 100);
+  CHECK(t.warnings() == 0);
+}
+
+TEST_CASE(
+    "TIM3 at 48 MHz reset by an edge on a 48 MHz or 7 MHz clock counts from its exact instant")
+{
+  struct leg
+  {
+    std::uint64_t hz;
+    std::uint64_t lag;
+    std::uint32_t count;
+  };
+  for(auto const [hz, lag, count] : {
+          leg{hse_hz,    hse_hz / 3 - 1, 9 },
+          leg{7'000'000, 3'000'000,      10},
+          leg{7'000'000, 1'000'000,      9 }
+  })
+  {
+    CAPTURE(hz);
+    hse_timers t;
+    t.base("TIM3", 0xffff);
+    t.slave("TIM3", ts_itr4, sms_reset);
+    t.enable("TIM3");
+    auto const  read = t.now();
+    auto* const sink = dynamic_cast<stm32::trigger_sink*>(t.f->target->model("TIM3"));
+    REQUIRE(sink != nullptr);
+    sink->triggered(
+        "tim5_trgo", stm32::trigger_edge::rising, stm32::trigger_time{read - 208'333, hz, lag});
+    CHECK(t.read("TIM3", "CNT") == count);
+  }
+}
+
+TEST_CASE("TIM3 triggered by a TIM13 OC1 rise on ITR7 at 48 MHz reads every TIM13 tick since it")
+{
+  hse_timers t;
+  t.base("TIM13", 99);
+  t.write("TIM13", "CCR1", 50);
+  t.write("TIM13", "CCMR1_Output", pwm2);
+  t.set("TIM13", "CCER", "CC1E", 1);
+  t.base("TIM3", 0xffff);
+  t.slave("TIM3", ts_itr7, sms_trigger);
+  t.enable("TIM13");
+  auto const  from  = t.now();
+  std::size_t exact = 0;
+  for(std::uint64_t period = 1; period <= 100; ++period)
+  {
+    t.at_hse_tick(from, period * 100);
+    auto const master = period * 100 + t.read("TIM13", "CNT");
+    exact += t.read("TIM3", "CNT") == master - 50 ? 1u : 0u;
+  }
+  CHECK(exact == 100);
+  CHECK(t.get("TIM3", "SR", "TIF") == 1);
+}
+
+TEST_CASE("under strict a CPU MMS2, MMS_1, TRC, CCDS, TI1F_ED or reserved CC1S write throws")
+{
+  struct leg
+  {
+    std::string_view unit;
+    std::string_view reg;
+    std::string_view field;
+    std::uint32_t    value;
+    std::size_t      warnings;
+  };
+  auto const legs = std::array{
+      leg{"TIM1",  "CR2",         "MMS2",  0b0010, 1},
+      leg{"TIM3",  "CR2",         "MMS_1", 1,      2},
+      leg{"TIM3",  "CCMR1_Input", "CC1S",  0b11,   3},
+      leg{"TIM3",  "CR2",         "CCDS",  1,      4},
+      leg{"TIM3",  "SMCR",        "",      0,      5},
+      leg{"TIM3",  "CCMR2_Input", "CC4S",  0b11,   5},
+      leg{"TIM13", "CCMR1_Input", "CC1S",  0b10,   6},
+  };
+  timers     t{{}, true};
+  auto const value = [&](leg const& l) {
+    return l.field.empty() ? sms_gated | (4u << 4) : l.value << t.lsb(l.unit, l.reg, l.field);
+  };
+  for(auto const& l : legs)
+  {
+    CAPTURE(l.unit);
+    CAPTURE(l.reg);
+    CAPTURE(l.field);
+    CHECK_THROWS_AS(t.cpu_write(l.unit, l.reg, value(l)), popcorn::model_error);
+    CHECK(t.read(l.unit, l.reg) == 0);
+    CHECK(t.warnings() == l.warnings);
+  }
+  for(auto const& l : legs)
+  {
+    CAPTURE(l.unit);
+    CAPTURE(l.reg);
+    CAPTURE(l.field);
+    t.write(l.unit, l.reg, value(l));
+    CHECK(t.read(l.unit, l.reg) == value(l));
+  }
+  CHECK(t.warnings() == 6);
+}
+
+TEST_CASE("an H573 TIM13 description with CR1.DIR or CMS, an up-counting OC1 source, throws")
+{
+  for(auto const& added : {
+          popcorn::field_desc{.name = "DIR", .lsb = 4, .width = 1},
+          popcorn::field_desc{.name = "CMS", .lsb = 5, .width = 2}
+  })
+  {
+    CAPTURE(added.name);
+    auto       desc = h573();
+    auto const timer =
+        std::ranges::find(desc.peripherals, std::string{"TIM13"}, &popcorn::peripheral_desc::name);
+    REQUIRE(timer != desc.peripherals.end());
+    auto const cr1 =
+        std::ranges::find(timer->registers, std::string{"CR1"}, &popcorn::register_desc::name);
+    REQUIRE(cr1 != timer->registers.end());
+    cr1->fields.push_back(added);
+    auto options   = popcorn::testing::stm32_options();
+    options.models = stm32::factories({}, desc);
+    CHECK_THROWS_AS(stm32_fixture(desc, firmware, std::move(options)), popcorn::config_error);
+  }
+}
+
+TEST_CASE("TIM12, TIM13 and TIM14 keep the IC1F and IC2F bit 3 of CCMR1 the output view lacks")
+{
+  struct leg
+  {
+    std::string_view unit;
+    std::uint32_t    value;
+  };
+  timers t;
+  for(auto const [unit, value] : {
+          leg{"TIM12", 0xF1F1},
+          leg{"TIM13", 0xF1  },
+          leg{"TIM14", 0xF1  }
+  })
+  {
+    CAPTURE(unit);
+    t.write(unit, "CCMR1_Input", value);
+    CHECK(t.read(unit, "CCMR1_Input") == value);
+    CHECK(t.read(unit, "CCMR1_Output") == value);
+    CHECK(t.get(unit, "CCMR1_Input", "IC1F") == 0b1111);
+  }
+  CHECK(t.get("TIM12", "CCMR1_Input", "IC2F") == 0b1111);
 }
 
 TEST_CASE("TIM12 has two channels, TIM13 one, and an absent channel has no register and no flag")

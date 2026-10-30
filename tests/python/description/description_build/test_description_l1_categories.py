@@ -349,6 +349,8 @@ def _check_brr_wrpr4_and_timers(name: str, category: str) -> None:
             ccr3 = next(r for r in peripherals[timer].registers if r.name == "CCR3")
             assert [f.name for f in ccr3.fields] == ["CCR3"]
     _check_tim9(peripherals["TIM9"], up_only=category in {"cat1", "cat2"})
+    for timer in ("TIM10", "TIM11"):
+        _check_tim10_11(peripherals[timer], cat3=category not in {"cat1", "cat2"})
     assert _timer_widths(peripherals["TIM2"]) == dict.fromkeys(
         ("CNT", "ARR", "CCR1", "CCR2", "CCR3", "CCR4"), 16
     )
@@ -397,6 +399,37 @@ def _check_tim9(timer: PeripheralDesc, *, up_only: bool) -> None:
         "ETP": (15, 1),
     }
     expected = {"TI1_RMP": (0, 2)} if up_only else {"TI1_RMP": (0, 2), "ITR1_RMP": (2, 1)}
+    assert _fields_of(timer, "OR") == expected
+
+
+def _check_tim10_11(timer: PeripheralDesc, *, cat3: bool) -> None:
+    names = {r.name for r in timer.registers}
+    assert "CR2" not in names and "CCR2" not in names
+    assert _fields_of(timer, "CR1") == {
+        "CEN": (0, 1),
+        "UDIS": (1, 1),
+        "URS": (2, 1),
+        "OPM": (3, 1),
+        "ARPE": (7, 1),
+        "CKD": (8, 2),
+    }
+    assert _fields_of(timer, "SMCR") == {
+        "ETF": (8, 4),
+        "ETPS": (12, 2),
+        "ECE": (14, 1),
+        "ETP": (15, 1),
+    }
+    assert _fields_of(timer, "CCMR1_Input") == {"CC1S": (0, 2), "IC1PSC": (2, 2), "IC1F": (4, 4)}
+    assert _fields_of(timer, "CCMR1_Output") == {
+        "CC1S": (0, 2),
+        "OC1FE": (2, 1),
+        "OC1PE": (3, 1),
+        "OC1M": (4, 3),
+        "OC1CE": (7, 1),
+    }
+    expected = {"TI1_RMP": (0, 2)}
+    if cat3:
+        expected |= {"ETR_RMP": (2, 1), "TI1_RMP_RI": (3, 1)}
     assert _fields_of(timer, "OR") == expected
 
 

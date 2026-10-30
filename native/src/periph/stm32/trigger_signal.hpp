@@ -22,6 +22,38 @@ enum class trigger_edge : std::uint8_t
 };
 
 /**
+ * @brief Time of a trigger edge: a whole ps, and the exact instant when the source's clock puts
+ *        the edge between two ps. The exact instant is `ps - lag / hz` ps, with `lag` below `hz`.
+ *        A source whose edge lies on a whole ps gives `lag` 0.
+ */
+struct trigger_time
+{
+  /**
+   * @brief An edge at exactly @p at_ps.
+   * @param at_ps Time of the edge.
+   */
+  constexpr trigger_time(std::uint64_t at_ps) : ps{at_ps}
+  {}
+
+  /**
+   * @brief An edge at `at_ps - lag_units / clock_hz` ps.
+   * @param at_ps Time of the edge rounded up to a whole ps.
+   * @param clock_hz Clock of the source, whose cycles set the instant.
+   * @param lag_units How far before @p at_ps the edge lies, in units of 1 / @p clock_hz ps.
+   */
+  constexpr trigger_time(std::uint64_t at_ps, std::uint64_t clock_hz, std::uint64_t lag_units)
+      : ps{at_ps}, hz{clock_hz}, lag{lag_units}
+  {}
+
+  /** @brief Time of the edge rounded up to a whole ps. */
+  std::uint64_t ps;
+  /** @brief Clock of the source, 0 when @ref ps is exact. */
+  std::uint64_t hz{};
+  /** @brief How far before @ref ps the edge lies, in units of 1 / @ref hz ps. */
+  std::uint64_t lag{};
+};
+
+/**
  * @brief Model that reacts to trigger signals of other models, such as ADC1 to `tim15_trgo`.
  *        Found by `dynamic_cast` over the machine's peers.
  */
@@ -51,10 +83,10 @@ public:
    *        Never calls back into the source.
    * @param signal Signal name.
    * @param edge Which edge.
-   * @param at_ps Time of the edge. A lazy source learns of its own past events late, so it may
-   *        lie before now. The falling edge of a pulse may lie up to its width after now.
+   * @param at Time of the edge. A lazy source learns of its own past events late, so it may lie
+   *        before now. The falling edge of a pulse may lie up to its width after now.
    */
-  virtual void triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps) = 0;
+  virtual void triggered(std::string_view signal, trigger_edge edge, trigger_time at) = 0;
 
   /**
    * @brief Whether the sink takes @p signal from a GPIO pin in alternate function mode, such as a
@@ -149,15 +181,15 @@ public:
   /**
    * @brief Gives one edge of the signal to every sink listening now.
    * @param edge Which edge.
-   * @param at_ps Time of the edge.
+   * @param at Time of the edge.
    */
-  void edge(trigger_edge edge, std::uint64_t at_ps)
+  void edge(trigger_edge edge, trigger_time at)
   {
     for(auto* const sink : sinks())
     {
       if(sink->listens(signal_))
       {
-        sink->triggered(signal_, edge, at_ps);
+        sink->triggered(signal_, edge, at);
       }
     }
   }
@@ -165,13 +197,13 @@ public:
   /**
    * @brief Gives a positive pulse to every sink listening now: its rising edge, then its falling
    *        edge @p width_ps later.
-   * @param at_ps Time of the rising edge.
-   * @param width_ps Width of the pulse.
+   * @param at Time of the rising edge.
+   * @param width_ps Width of the pulse, from @p at rounded up to a whole ps.
    */
-  void pulse(std::uint64_t at_ps, std::uint64_t width_ps)
+  void pulse(trigger_time at, std::uint64_t width_ps)
   {
-    edge(trigger_edge::rising, at_ps);
-    edge(trigger_edge::falling, at_ps + width_ps);
+    edge(trigger_edge::rising, at);
+    edge(trigger_edge::falling, at.ps + width_ps);
   }
 
 private:

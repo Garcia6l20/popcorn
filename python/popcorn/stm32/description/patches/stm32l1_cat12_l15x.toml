@@ -1,5 +1,5 @@
 format = 1
-source = "RM0038 Rev 18, 20.2: Cat.1 and Cat.2 devices other than the value line have 20 RTC backup registers. The L100 SVD is excluded, stm32l1_l100.toml drops its registers"
+source = "RM0038 Rev 18, 20.2: Cat.1 and Cat.2 devices other than the value line have 20 RTC backup registers, 18.5.12 and 18.5.13: TIM10_OR and TIM11_OR have ETR_RMP and TI1_RMP_RI on Cat.3 to Cat.6 only. The L100 SVD is excluded, stm32l1_l100.toml drops its registers. No L162 part is Cat.1 or Cat.2"
 
 [match]
 parts = ["STM32L1*"]
@@ -10,3 +10,10 @@ dies = ["DIE416", "DIE429"]
 peripheral = "RTC"
 names = ["BKP20R", "BKP21R", "BKP22R", "BKP23R", "BKP24R", "BKP25R", "BKP26R", "BKP27R", "BKP28R", "BKP29R", "BKP30R", "BKP31R"]
 source = "RM0038 Rev 18, 20.2 and 20.6.20 RTC_BKPxR: 20 backup registers (80 bytes) in Cat.1 and Cat.2 devices, address offsets 0x50 to 0x9C. The SVDs list BKP0R to BKP31R"
+
+[[fields]]
+instances = ["TIM10", "TIM11"]
+registers = ["OR"]
+fields = ["ETR_RMP", "TI1_RMP_RI"]
+drop = true
+source = "RM0038 Rev 18, 18.5.12 TIM10_OR and 18.5.13 TIM11_OR: ETR_RMP and TI1_RMP_RI are available in Cat.3 to Cat.6 only. The L151 and L152 SVDs give them to every category"

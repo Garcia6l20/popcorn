@@ -226,9 +226,9 @@ auto lower(std::string_view name) -> std::string
  * @brief TIM1, TIM2 to TIM7 and TIM15 to TIM17 of the STM32U5, with TIM12 to TIM14 on the STM32H5,
  *        RM0456 sections 54 "Advanced-control timers (TIM1/TIM8)", 55 "General-purpose timers
  *        (TIM2/TIM3/TIM4/TIM5)", 56 "General purpose timers (TIM15/TIM16/TIM17)" and 57 "Basic
- *        timers (TIM6/TIM7)", and TIM2 to TIM7 and TIM9 of the STM32L1, RM0038 17 to 19: the
- *        time-base unit on the instance's timer clock. The counter is derived from the virtual time
- *        of its last anchor, never ticked: up, down and the three center-aligned modes, the
+ *        timers (TIM6/TIM7)", and TIM2 to TIM7 and TIM9 to TIM11 of the STM32L1, RM0038 17 to 19:
+ *        the time-base unit on the instance's timer clock. The counter is derived from the virtual
+ *        time of its last anchor, never ticked: up, down and the three center-aligned modes, the
  *        prescaler, auto-reload and compare preloads loaded at the update event, the repetition
  *        counter, UDIS, URS, one-pulse mode, EGR event generation. Output compare channels 1 to 4
  *        set their flags when the counter matches, output pins are not driven. The counter width is
@@ -250,50 +250,67 @@ auto lower(std::string_view name) -> std::string
  *        input a timer would take from itself being reserved. The STM32U5 has ITR0 TIM1, ITR1 TIM2,
  *        ITR2 TIM3, ITR3 TIM4, ITR4 TIM5, ITR5 TIM8 and ITR6 TIM15, the STM32H5 of RM0481 Tables
  *        456, 480, 502 and 514 has ITR0 to ITR12 on TIM1 to TIM5, TIM8, TIM12 and TIM15, TS 8 to 16
- *        selecting ITR4 to ITR12. A source with no model reaches nothing and logs the unrouted
- *        warning: ITR7, ITR8, ITR10 and ITR11 carry the OC1 outputs of TIM13, TIM14, TIM16 and
- *        TIM17, ITR12 carries USBSOF, which TIM2 and TIM5 take and TIM1, TIM3, TIM4, TIM8, TIM12
- *        and TIM15 reserve. One table serves all of them, since USBSOF has no producer. The STM32L1
- *        of RM0038 Table 80 gives TIM2, TIM3 and TIM4 each its own ITR0 to ITR3 among TIM2 to TIM4,
- *        TIM9 and the OC1 outputs of TIM10 and TIM11. On Cat.3 and up TIM2_OR.ITR1_RMP and
- *        TIM3_OR.ITR2_RMP select TIM5 TRGO for TIM2 ITR1 and TIM3 ITR2, from the OR write on. TIM5
- *        has no Table 80 row, so its every TS reaches nothing, inferred. A modelled slave mode on
- *        an input with no model holds the timer and logs once, and under strict_peripherals the
- *        SMCR or OR write that selects it raises model_error. RM0038 Table 83 gives TIM9 ITR0 TIM2,
- *        ITR1 TIM3, or the touch sensing I/O with TIM9_OR.ITR1_RMP set on Cat.3 and up, ITR2 and
- *        ITR3 the OC1 outputs of TIM10 and TIM11. TIM6, TIM7 and the Cat.1 and Cat.2 TIM9 count up
- *        only, and SMS 001 to 011 count no edge there. TIM9_OR.TI1_RMP 01 gives tim_ti1 the LSE,
- *        which reads low, and TIM9 ECE counts nothing, its ETR being internal. Each of these three
- *        logs once and raises model_error under strict_peripherals at the register write that
- *        selects it. Reset mode reinitialises the counter and its prescaler at a rising edge, with
- *        the update event URS allows. Trigger mode sets CEN at a rising edge and counts from the
- *        edge's time. Reset + trigger does both. External clock mode 1 counts one tick per PSC + 1
- *        rising edges, at the edge's time, and never on the timer clock. Gated mode counts on the
- *        timer clock while the master's level is high, a level only an MMS 001 master gives: under
- *        a pulsing master the counter holds and one warning is logged at its first rising edge. The
- *        gate is sampled again when the timer clock comes back. Gated + reset also reinitialises
- *        the counter when the gate closes. Every slave edge sets TIF, gate openings and closings
- *        included. A source with no model, a timer's own ITR and the reserved codes reach nothing:
- *        the slave holds and one warning is logged at the SMCR write. Timer input pins: tim_ti1 to
- *        tim_ti4 are the `<instance>_ch1` to `_ch4` signals a GPIO pin in alternate function mode
- *        gives, while TIxSEL is 0, through the GPIO peers' signal levels. Another TIxSEL selects
- *        comparators, LSE, MCO or RTC: not modelled, the input reads low, logged once at the TISEL
- *        write. CR2.TI1S XORs tim_ti1 to tim_ti3 into tim_ti1. Each input transition takes effect
- *        at the time of its pin edge, after the ICxF filter below. The encoder modes, RM0456 55.4
- *        "Encoder interface mode", SMS 0001 to 0011 and 1010 to 1111, count on tim_ti1fp1 and
- *        tim_ti2fp2, CC1P and CC2P inverting them, by Table 569 and Table 570 and the clock plus
- *        direction rules, each count pulse through the prescaler, the counter wrapping between 0
- *        and ARR with its update events. DIR follows every transition in the quadrature modes,
- *        tim_ti1 in the clock plus direction modes, the counting line in the directional clock
- *        modes, and DIRF rises when it changes. Table 569 lists "Down" for a tim_ti2fp2 falling
- *        edge in mode 0001 with tim_ti1fp1 low: counted as nothing here, as Table 549, its
- *        TIM1/TIM8 copy, gives, since mode 0001 counts tim_ti1 edges only. The encoder index,
- *        ECR.IE, and the transition and index error flags are not modelled, IE logs once.
- *        tim_etr_in is, on a timer the tim_variant lists in `etr_pins`, the pin signal it names,
- *        `tim2_ch1` for the STM32L1 TIM2, and on the others the `<instance>_etr` signal while
- *        AF1.ETRSEL is 0, other values read low and log once: ETP inverts it, ETPS divides it by 1,
- *        2, 4 or 8: tim_etrp rises at every 2^ETPS-th rising edge and falls 2^(ETPS-1) rising edges
- *        later, then the ETF filter gives tim_etrf. External clock mode 2, ECE 1, counts each
+ *        selecting ITR4 to ITR12. ITR7, ITR8, ITR10 and ITR11 carry the OC1 outputs of TIM13,
+ *        TIM14, TIM16 and TIM17. ITR12 carries USBSOF, which TIM2 and TIM5 take and TIM1, TIM3,
+ *        TIM4, TIM8, TIM12 and TIM15 reserve, and which has no model, so it reaches nothing and
+ *        logs the unrouted warning. One table serves all of them. The STM32L1 of RM0038 Table 80
+ *        gives TIM2, TIM3 and TIM4 each its own ITR0 to ITR3 among TIM2 to TIM4, TIM9 and the OC1
+ *        outputs of TIM10 and TIM11. On Cat.3 and up TIM2_OR.ITR1_RMP and TIM3_OR.ITR2_RMP select
+ *        TIM5 TRGO for TIM2 ITR1 and TIM3 ITR2, from the OR write on. TIM5 has no Table 80 row, so
+ *        its every TS reaches nothing, inferred. A modelled slave mode on an input with no model
+ *        holds the timer and logs once, and under strict_peripherals the SMCR or OR write that
+ *        selects it raises model_error. RM0038 Table 83 gives TIM9 ITR0 TIM2, ITR1 TIM3, or the
+ *        touch sensing I/O with TIM9_OR.ITR1_RMP set on Cat.3 and up, ITR2 and ITR3 the OC1 outputs
+ *        of TIM10 and TIM11. TIM6, TIM7 and the Cat.1 and Cat.2 TIM9 count up only, and SMS 001 to
+ *        011 count no edge there. TIM9_OR.TI1_RMP 01 gives tim_ti1 the LSE, which reads low, and
+ *        TIM9 ECE counts nothing, its ETR being internal. Each of these three logs once and raises
+ *        model_error under strict_peripherals at the register write that selects it. TIM10 and
+ *        TIM11 count up only and have no master mode. Their OR TI1_RMP values other than the pin
+ *        ones and TI1_RMP_RI 1 give tim_ti1 an internal clock or the routing interface, which reads
+ *        low, and their ECE counts nothing whatever ETR_RMP, both logged and refused as on TIM9. A
+ *        timer whose `<instance>_oc1` a row of its tim_variant's trigger table names drives
+ *        `<instance>_oc1_trgo` from OC1, RM0038 Table 80 and 18.5.6, RM0481 Table 456 and
+ *        TIMx_CCMR1: OC1REF with OC1M 0000 and 0100 low, 0101 high, 0110 and 0111 the PWM
+ *        comparison of an up counter with CCR1, CC1P inverting it, whatever CC1E, MOE and OSSI,
+ *        inferred, and CC1S other than 00 low, inferred. A producer with CR1.DIR or CMS, or with
+ *        OC1M and a CCMR1_Output field at bit 16, throws config_error at construction. Each change
+ *        of level is an edge at its own time, at a match, at the counter's wrap, or at the register
+ *        write that moves it, and gated mode takes the level. While a slave listens every match and
+ *        wrap is scheduled at its own time. The other OC1M values and OC1CE 1 are not modelled and
+ *        hold OC1 low: the CCMR1 write that selects one while a slave listens, and a slave's SMCR
+ *        or OR write that selects the output then, log once and raise model_error under
+ *        strict_peripherals. Reset mode reinitialises the counter and its prescaler at a rising
+ *        edge, with the update event URS allows. Trigger mode sets CEN at a rising edge and counts
+ *        from the edge's time. Reset + trigger does both. External clock mode 1 counts one tick per
+ *        PSC + 1 rising edges, at the edge's time, and never on the timer clock. Gated mode counts
+ *        on the timer clock while the master's level is high, a level only an MMS 001 master gives:
+ *        under a pulsing master the counter holds and one warning is logged at its first rising
+ *        edge. The gate is sampled again when the timer clock comes back. A timer edge carries its
+ *        exact instant, which lies up to 1 ps before its whole ps time. A reset, a trigger start or
+ *        a gate opening at it counts from that instant on any slave clock, so every read and every
+ *        event at a whole ps equals the count from the exact instant. Gated + reset also
+ *        reinitialises the counter when the gate closes. Every slave edge sets TIF, gate openings
+ *        and closings included. A source with no model, a timer's own ITR and the reserved codes
+ *        reach nothing: the slave holds and one warning is logged at the SMCR write. Timer input
+ *        pins: tim_ti1 to tim_ti4 are the `<instance>_ch1` to `_ch4` signals a GPIO pin in
+ *        alternate function mode gives, while TIxSEL is 0, through the GPIO peers' signal levels.
+ *        Another TIxSEL selects comparators, LSE, MCO or RTC: not modelled, the input reads low,
+ *        logged once at the TISEL write. CR2.TI1S XORs tim_ti1 to tim_ti3 into tim_ti1. Each input
+ *        transition takes effect at the time of its pin edge, after the ICxF filter below. The
+ *        encoder modes, RM0456 55.4 "Encoder interface mode", SMS 0001 to 0011 and 1010 to 1111,
+ *        count on tim_ti1fp1 and tim_ti2fp2, CC1P and CC2P inverting them, by Table 569 and Table
+ *        570 and the clock plus direction rules, each count pulse through the prescaler, the
+ *        counter wrapping between 0 and ARR with its update events. DIR follows every transition in
+ *        the quadrature modes, tim_ti1 in the clock plus direction modes, the counting line in the
+ *        directional clock modes, and DIRF rises when it changes. Table 569 lists "Down" for a
+ *        tim_ti2fp2 falling edge in mode 0001 with tim_ti1fp1 low: counted as nothing here, as
+ *        Table 549, its TIM1/TIM8 copy, gives, since mode 0001 counts tim_ti1 edges only. The
+ *        encoder index, ECR.IE, and the transition and index error flags are not modelled, IE logs
+ *        once. tim_etr_in is, on a timer the tim_variant lists in `etr_pins`, the pin signal it
+ *        names, `tim2_ch1` for the STM32L1 TIM2, and on the others the `<instance>_etr` signal
+ *        while AF1.ETRSEL is 0, other values read low and log once: ETP inverts it, ETPS divides it
+ *        by 1, 2, 4 or 8: tim_etrp rises at every 2^ETPS-th rising edge and falls 2^(ETPS-1) rising
+ *        edges later, then the ETF filter gives tim_etrf. External clock mode 2, ECE 1, counts each
  *        tim_etrf rising edge through the prescaler while a gated slave mode's gate is open, and
  *        with ECE set external clock mode 1 counts tim_etrf only, whatever TS, its trigger edges
  *        setting TIF alone. TS 00100 tim_ti1f_ed gives a rising edge at every tim_ti1 transition,
@@ -304,7 +321,12 @@ auto lower(std::string_view name) -> std::string
  *        the polarised level is an edge of it, and so is a CCxNP write that moves the level TS
  *        00101 or 00110 gives the slave mode controller, as the polarity mux output moves on
  *        silicon: it counts in an encoder mode, triggers the slave mode controller and is a
- *        capture's active edge when the new level is high. Deviations: an ARR written below the
+ *        capture's active edge when the new level is high. Deviations: OC1M 0000 holds OC1REF low,
+ *        where silicon keeps the level it had, and the PWM modes take the comparison at the OC1M
+ *        write from every mode, where RM0038 takes it from frozen only and RM0481 from frozen and
+ *        the forced modes, so the level differs at a PWM 1 to PWM 2 switch, and on the STM32L1 at
+ *        a forced to PWM switch. Every OC1 edge reaches the slave whatever its pulse width, where
+ *        RM0481 asks for at least two destination timer clocks. An ARR written below the
  *        count lets the counter run to its maximum and wrap with no update, a count written above
  *        ARR in center-aligned mode does the same, UIFREMAP puts UIFCPY in bit 31 only where the
  *        description names a UIFCPY field, not on the 32-bit TIM2 to TIM5, and a trigger cycle
@@ -322,19 +344,23 @@ auto lower(std::string_view name) -> std::string
  *        clock in force at the edge set its delay, a change before it matures keeping that delay. A
  *        transition maturing while the timer is frozen by a debug hold applies at the hold, the
  *        filter itself counting on through it as tim_ker_ck does. Not modelled, logged once when
- *        the counter starts: SMSPE, a capture on TRC, CCxS 11, dithering, CCDS. TDE logs once and
- *        raises no trigger DMA request, and under strict_peripherals the DIER write that sets it
- *        raises model_error. A debugger write raises none of the strict_peripherals errors of this
- *        model. DMA burst mode, RM0456 55.4 "DMA burst mode" and TIMx_DCR: every CPU or DMA access
- *        to DMAR reaches the register at DBA + index words from CR1, in the same byte lane, then
- *        advances the index, which wraps after DBL + 1 accesses. A debugger access redirects
- *        without advancing, so a test reading DMAR changes nothing the firmware sees next. CPU and
- *        DMA accesses share the index, so a CPU access to DMAR during a DMA burst moves it and can
- *        stretch the burst. A target the model serves runs its write handler. Any other described
- *        register takes the access merged under its writable bits. A target with no register reads
- *        0, ignores the write and logs once. A DCR write resets the index, and so does each event
- *        of the DBSS source with its DMA enable set, so an event mid-burst restarts the burst: both
- *        are emulation choices RM0456 leaves open. The DBSS source, update or CC1 to CC4, keeps its
+ *        the counter starts: SMSPE and dithering. A capture on TRC, CCxS 11, sets no CCxIF, CCDS 1
+ *        leaves the CCx DMA requests on the CCx events, and gated mode on TI1F_ED, TS 00100, holds
+ *        the counter. CC1S 10 and 11 of a one-channel timer are reserved and capture nothing. Each
+ *        logs once at the CCMR1, CCMR2, CR2 or SMCR write that selects it, and under
+ *        strict_peripherals that write raises model_error. TDE logs once and raises no trigger DMA
+ *        request, and under strict_peripherals the DIER write that sets it raises model_error. A
+ *        debugger write raises none of the strict_peripherals errors of this model. DMA burst mode,
+ *        RM0456 55.4 "DMA burst mode" and TIMx_DCR: every CPU or DMA access to DMAR reaches the
+ *        register at DBA + index words from CR1, in the same byte lane, then advances the index,
+ *        which wraps after DBL + 1 accesses. A debugger access redirects without advancing, so a
+ *        test reading DMAR changes nothing the firmware sees next. CPU and DMA accesses share the
+ *        index, so a CPU access to DMAR during a DMA burst moves it and can stretch the burst. A
+ *        target the model serves runs its write handler. Any other described register takes the
+ *        access merged under its writable bits. A target with no register reads 0, ignores the
+ *        write and logs once. A DCR write resets the index, and so does each event of the DBSS
+ *        source with its DMA enable set, so an event mid-burst restarts the burst: both are
+ *        emulation choices RM0456 leaves open. The DBSS source, update or CC1 to CC4, keeps its
  *        request high across the GPDMA's acknowledges until the index wraps, so a channel moves DBL
  *        + 1 transfers per event. COM, trigger and reserved DBSS values log once and keep one
  *        request per event. Reserved DBL values above 11010 run 26 transfers and log once. Traces
@@ -383,7 +409,7 @@ public:
   [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
   [[nodiscard]] auto takes_pin(std::string_view signal) const -> bool override;
-  void triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps) override;
+  void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
   void acknowledged(dma_controller const& by, std::uint32_t request) override;
   void transfer_completed(dma_controller const& by, std::uint32_t request) override;
 
@@ -402,7 +428,7 @@ public:
 private:
   void               restore_reset_values();
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
-  [[nodiscard]] auto output_time(std::uint64_t at) const -> std::uint64_t;
+  [[nodiscard]] auto output_time(trigger_time at) const -> trigger_time;
   [[nodiscard]] auto name(std::string_view reg) const -> std::string;
   [[nodiscard]] auto optional_field(std::string_view reg, std::string_view name) const
       -> std::optional<field_ref>;
@@ -448,16 +474,23 @@ private:
   [[nodiscard]] auto ticks_in(wide span) const -> std::uint64_t;
 
   void start_at(std::uint64_t ps);
-  void rebase(std::uint64_t ps, std::uint64_t hz);
-  void advance(std::uint64_t ticks);
-  void catch_up(std::uint64_t ps);
-  void visit(std::uint64_t ticks, std::optional<std::uint64_t> at = std::nullopt);
-  void wrap(std::uint64_t at);
-  void external_tick(std::uint64_t at);
-  void reinitialise(std::uint64_t at);
-  void begin(std::uint64_t at);
-  void gate(std::optional<bool> level, trigger_edge edge, bool closing_resets, std::uint64_t at);
-  void slave_edge(trigger_edge edge, std::optional<bool> level, std::uint64_t at);
+  /**
+   * @brief Starts the count at the first instant of the timer's 1/hz ps grid at or after the
+   *        exact instant of @p at, so every count read and every event time at a whole ps equals
+   *        the one counted from the exact instant, on the master's clock or any other.
+   */
+  void               start_at_edge(trigger_time at);
+  [[nodiscard]] auto edge_at(wide at) const -> trigger_time;
+  void               rebase(std::uint64_t ps, std::uint64_t hz);
+  void               advance(std::uint64_t ticks);
+  void               catch_up(std::uint64_t ps);
+  void               visit(std::uint64_t ticks, std::optional<trigger_time> at = std::nullopt);
+  void               wrap(trigger_time at);
+  void               external_tick(trigger_time at);
+  void               reinitialise(trigger_time at);
+  void               begin(trigger_time at);
+  void gate(std::optional<bool> level, trigger_edge edge, bool closing_resets, trigger_time at);
+  void slave_edge(trigger_edge edge, std::optional<bool> level, trigger_time at);
   void pin_trigger(std::size_t input, std::uint64_t at, bool polarity = false);
   void etr_transition(bool level, std::uint64_t at, bool clocked);
   void etr_filtered(bool level, std::uint64_t at, bool clocked);
@@ -470,16 +503,22 @@ private:
   [[nodiscard]] auto filter_delay(std::size_t input) const -> std::uint64_t;
   [[nodiscard]] auto input_level_bit(std::size_t input) const -> bool;
   [[nodiscard]] auto pin_trigger_level(std::uint32_t select) const -> std::optional<bool>;
-  void               enable_changed(bool was, std::uint64_t at);
+  void               enable_changed(bool was, trigger_time at);
   void               slave_settled(std::optional<std::string_view> before, std::uint32_t smcr);
   [[nodiscard]] auto unrouted(std::uint32_t smcr, std::optional<std::string_view> input) const
       -> bool;
   void               warn_unrouted(std::uint32_t smcr);
   void               skip_groups(std::uint64_t groups);
-  void               update_event(bool software, std::uint64_t at);
-  void               pulse_trgo(std::uint64_t at);
-  void               enable_edge(trigger_edge edge, std::uint64_t at);
-  void               match(std::size_t ch, std::uint64_t at);
+  void               update_event(bool software, trigger_time at);
+  void               pulse_trgo(trigger_time at);
+  [[nodiscard]] auto oc1_mode_of(std::uint32_t ccmr) const -> std::uint32_t;
+  [[nodiscard]] auto oc1_level(std::uint32_t ccmr) const -> std::optional<bool>;
+  [[nodiscard]] auto oc1_high() const -> bool;
+  [[nodiscard]] auto oc1_events() -> bool;
+  [[nodiscard]] auto drives(std::string_view signal) const -> bool;
+  void               oc1_moved(bool before, trigger_time at);
+  void               enable_edge(trigger_edge edge, trigger_time at);
+  void               match(std::size_t ch, trigger_time at);
   void               capture(std::size_t ch, std::uint64_t at);
   void               request_update();
   void               release(dma_controller const& by, std::uint32_t request);
@@ -538,6 +577,7 @@ private:
   std::vector<interrupt_source>                sources_;
   std::vector<std::pair<field_ref, field_ref>> generated_;
   std::vector<field_ref>                       unsupported_;
+  std::optional<field_ref>                     dma_select_;
   core::clock_domain                           domain_;
   std::optional<field_ref>                     burst_length_;
   std::optional<field_ref>                     burst_base_;
@@ -552,6 +592,11 @@ private:
   std::optional<field_ref>                     master_high_;
   std::optional<field_ref>                     master2_;
   std::optional<trigger_output>                trgo_;
+  std::optional<trigger_output>                oc1_;
+  std::optional<field_ref>                     oc1_mode_;
+  std::optional<field_ref>                     oc1_mode_high_;
+  std::optional<field_ref>                     oc1_clear_;
+  bool                                         oc1_logged_{};
   std::string                                  instance_;
   std::vector<trigger_route>                   triggers_;
   std::optional<std::uint32_t>                 option_word_;
@@ -573,6 +618,8 @@ private:
   bool                                         encoder_logged_{};
   bool                                         etr_logged_{};
   bool                                         pin_logged_{};
+  bool                                         trc_logged_{};
+  bool                                         dma_select_logged_{};
   bool                                         freeze_logged_{};
   bool                                         master_logged_{};
   std::vector<std::string>                     input_signals_;
@@ -704,6 +751,20 @@ auto tim_writes(peripheral_desc const& desc, tim_variant const& variant)
        and not std::ranges::contains(out, entry.reg, &write_entry<tim>::reg))
     {
       out.push_back({entry.reg, &tim::plain_written});
+    }
+  }
+  static constexpr std::array<std::array<std::string_view, 2>, 2> modes{
+      {{"CCMR1_Output", "CCMR1_ALTERNATE1"}, {"CCMR2_Output", "CCMR2_ALTERNATE1"}}
+  };
+  static constexpr std::array<std::array<std::string_view, 2>, 2> prefixed_modes{
+      {{"TIM1_CCMR1_Output", "TIM1_CCMR1_ALTERNATE1"},
+       {"TIM1_CCMR2_Output", "TIM1_CCMR2_ALTERNATE1"}}
+  };
+  for(auto const& views : prefix.empty() ? modes : prefixed_modes)
+  {
+    if(auto const found = std::ranges::find_if(views, has); found != views.end())
+    {
+      out.push_back({*found, &tim::plain_written});
     }
   }
   return out;
@@ -895,6 +956,34 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
       c.signal.emplace(ctx.peers, std::format("{}_cc{}_dma", instance, n));
     }
   }
+  if(not channels_.empty()
+     and std::ranges::contains(variant.triggers, instance + "_oc1", &trigger_entry::source))
+  {
+    expect_field(name("CR1"), "DIR", false);
+    expect_field(name("CR1"), "CMS", false);
+    auto const  view   = name("CCMR1_Output");
+    auto const& fields = describe(view).fields;
+    if(std::ranges::contains(fields, std::string_view{"OC1M1"}, &field_desc::name))
+    {
+      oc1_mode_      = field(view, "OC1M1");
+      oc1_mode_high_ = field(view, "OC1M2");
+    }
+    else
+    {
+      oc1_mode_ = field(view, "OC1M");
+      if(std::ranges::any_of(fields, [](field_desc const& bits) {
+           return bits.lsb <= 16 and bits.lsb + bits.width > 16;
+         }))
+      {
+        throw config_error(
+            ctx.part.part, 0, std::format("peripherals.{}.registers.{}", desc.name, view),
+            "a CCMR1_Output with OC1M and a field at bit 16, which the OC1 output reads only as "
+            "OC1M2");
+      }
+    }
+    oc1_clear_ = optional_field(view, "OC1CE");
+    oc1_.emplace(ctx.peers, instance + "_oc1_trgo");
+  }
   auto const multiline =
       std::ranges::contains(ctx.part.irqs, std::format("{}_UP_IRQn", desc.name), &irq_desc::name);
   std::vector<std::string> groups;
@@ -946,11 +1035,10 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
       generated_.emplace_back(field(name("EGR"), generate_name), field(name("SR"), flag_name));
     }
   }
-  for(auto const& [reg_name, bits] : std::array<std::pair<std::string_view, std::string_view>, 3>{
+  for(auto const& [reg_name, bits] : std::array<std::pair<std::string_view, std::string_view>, 2>{
           {
            {"SMCR", "SMSPE"},
            {"CR1", "DITHEN"},
-           {"CR2", "CCDS"},
            }
   })
   {
@@ -959,6 +1047,7 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
       unsupported_.push_back(*found);
     }
   }
+  dma_select_ = optional_field(name("CR2"), "CCDS");
   if(has_register(name("DMAR")))
   {
     burst_word_ = reg(name("DMAR")).offset;
@@ -1398,7 +1487,9 @@ auto tim::wants_match(std::size_t ch) -> bool
     return false;
   }
   auto const dma = c.dma and get(regs_, *c.dma) != 0 and state_.compare_request[ch] == 0;
-  return get(regs_, c.flag) == 0 or dma or (ch == 0 and trgo_wanted(master_compare_pulse));
+  return get(regs_, c.flag) == 0
+      or dma
+      or (ch == 0 and (trgo_wanted(master_compare_pulse) or oc1_events()));
 }
 
 auto tim::master_mode() const -> std::uint32_t
@@ -1416,18 +1507,18 @@ auto tim::master_mode_of(std::uint32_t cr2) const -> std::uint32_t
   return master_->of(cr2) | (high << master_->width);
 }
 
-auto tim::output_time(std::uint64_t at) const -> std::uint64_t
+auto tim::output_time(trigger_time at) const -> trigger_time
 {
-  return state_.held != 0 ? ctx_.clock.time().ps : at;
+  return state_.held != 0 ? trigger_time{ctx_.clock.time().ps} : at;
 }
 
-void tim::pulse_trgo(std::uint64_t at)
+void tim::pulse_trgo(trigger_time at)
 {
   auto const hz = ctx_.clock.hz(domain_);
   trgo_->pulse(output_time(at), hz == 0 ? 0 : (ps_per_second + hz - 1) / hz);
 }
 
-void tim::enable_edge(trigger_edge edge, std::uint64_t at)
+void tim::enable_edge(trigger_edge edge, trigger_time at)
 {
   if(trgo_ and master_mode() == master_enable)
   {
@@ -1438,6 +1529,76 @@ void tim::enable_edge(trigger_edge edge, std::uint64_t at)
 auto tim::trgo_wanted(std::uint32_t mode) -> bool
 {
   return trgo_ and master_mode() == mode and trgo_->wanted();
+}
+
+auto tim::oc1_mode_of(std::uint32_t ccmr) const -> std::uint32_t
+{
+  auto const high = oc1_mode_high_ ? oc1_mode_high_->of(ccmr) : 0u;
+  return oc1_mode_->of(ccmr) | (high << oc1_mode_->width);
+}
+
+auto tim::oc1_level(std::uint32_t ccmr) const -> std::optional<bool>
+{
+  if(channels_[0].select.of(ccmr) != 0)
+  {
+    return false;
+  }
+  if(oc1_clear_ and oc1_clear_->of(ccmr) != 0)
+  {
+    return std::nullopt;
+  }
+  auto const  below    = state_.count < compare_value(0);
+  auto const& polarity = channels_[0].polarity;
+  auto const  inverted = polarity and get(regs_, *polarity) != 0;
+  switch(oc1_mode_of(ccmr))
+  {
+    case 0b0000:
+    case 0b0100:
+      return inverted;
+    case 0b0101:
+      return not inverted;
+    case 0b0110:
+      return below != inverted;
+    case 0b0111:
+      return below == inverted;
+    default:
+      return std::nullopt;
+  }
+}
+
+auto tim::oc1_high() const -> bool
+{
+  return oc1_level(regs_.peek(oc1_mode_->offset)).value_or(false);
+}
+
+auto tim::oc1_events() -> bool
+{
+  if(not oc1_)
+  {
+    return false;
+  }
+  auto const ccmr = regs_.peek(oc1_mode_->offset);
+  auto const mode = oc1_mode_of(ccmr);
+  return (mode == 0b0110 or mode == 0b0111)
+     and not(oc1_clear_ and oc1_clear_->of(ccmr) != 0)
+     and output(0)
+     and oc1_->wanted();
+}
+
+auto tim::drives(std::string_view signal) const -> bool
+{
+  return not oc1_
+      or signal != oc1_->signal()
+      or oc1_level(regs_.peek(oc1_mode_->offset)).has_value();
+}
+
+void tim::oc1_moved(bool before, trigger_time at)
+{
+  auto const after = oc1_high();
+  if(after != before)
+  {
+    oc1_->edge(after ? trigger_edge::rising : trigger_edge::falling, output_time(at));
+  }
 }
 
 [[gnu::hot]] auto tim::at_ps(wide at) const -> std::uint64_t
@@ -1459,6 +1620,23 @@ void tim::start_at(std::uint64_t ps)
   state_.anchor_frac = 0;
   state_.carry       = 0;
   state_.hz          = ctx_.clock.hz(domain_);
+}
+
+void tim::start_at_edge(trigger_time at)
+{
+  start_at(at.ps);
+  if(at.lag != 0 and at.hz != 0 and state_.hz != 0)
+  {
+    auto const anchor  = wide{at.ps} * state_.hz - wide{at.lag} * state_.hz / at.hz;
+    state_.anchor_ps   = static_cast<std::uint64_t>(anchor / state_.hz);
+    state_.anchor_frac = static_cast<std::uint64_t>(anchor % state_.hz);
+  }
+}
+
+auto tim::edge_at(wide at) const -> trigger_time
+{
+  auto const ps = at_ps(at);
+  return {ps, state_.hz, static_cast<std::uint64_t>(wide{ps} * state_.hz - at)};
 }
 
 void tim::rebase(std::uint64_t ps, std::uint64_t hz)
@@ -1490,7 +1668,7 @@ void tim::advance(std::uint64_t ticks)
   state_.anchor_frac = static_cast<std::uint64_t>(at % state_.hz);
 }
 
-[[gnu::hot]] void tim::visit(std::uint64_t ticks, std::optional<std::uint64_t> at)
+[[gnu::hot]] void tim::visit(std::uint64_t ticks, std::optional<trigger_time> at)
 {
   if(ticks == 0)
   {
@@ -1508,15 +1686,23 @@ void tim::advance(std::uint64_t ticks)
       if(output(ch) and value >= low and value <= high)
       {
         auto const after = up ? value - count : count - value;
-        match(ch, at ? *at : at_ps(anchor() + wide{after} * tick_unit()));
+        auto const when  = at ? *at : edge_at(anchor() + wide{after} * tick_unit());
+        if(ch == 0 and oc1_)
+        {
+          auto const before = oc1_high();
+          state_.count      = static_cast<std::uint32_t>(value);
+          oc1_moved(before, when);
+        }
+        match(ch, when);
       }
     }
   }
   state_.count = static_cast<std::uint32_t>(up ? count + ticks : count - ticks);
 }
 
-void tim::wrap(std::uint64_t at)
+void tim::wrap(trigger_time at)
 {
+  auto const oc1   = oc1_ and oc1_high();
   auto const up    = counting_up();
   bool       event = true;
   auto       next  = std::uint32_t{};
@@ -1560,6 +1746,10 @@ void tim::wrap(std::uint64_t at)
     next = state_.reload;
   }
   state_.count = next;
+  if(oc1_)
+  {
+    oc1_moved(oc1, at);
+  }
   if(flagged_when(up))
   {
     for(std::size_t ch = 0; ch < channels_.size(); ++ch)
@@ -1583,7 +1773,7 @@ void tim::skip_groups(std::uint64_t groups)
       static_cast<std::uint32_t>(updates ? period - 1 - (wraps - left - 1) % period : left - wraps);
   advance(
       groups * (center() ? 2 * std::uint64_t{state_.reload} : state_.reload + std::uint64_t{1}));
-  auto const at = at_ps(anchor());
+  auto const at = edge_at(anchor());
   if(updates and get(regs_, no_update_) == 0)
   {
     update_event(false, at);
@@ -1621,7 +1811,7 @@ void tim::skip_groups(std::uint64_t groups)
       {
         groups = std::min<std::uint64_t>(groups, state_.repetition / (center() ? 2 : 1));
       }
-      if(trgo_wanted(master_update) or trgo_wanted(master_compare_pulse))
+      if(trgo_wanted(master_update) or trgo_wanted(master_compare_pulse) or oc1_events())
       {
         groups = 0;
       }
@@ -1640,11 +1830,11 @@ void tim::skip_groups(std::uint64_t groups)
     }
     visit(to_wrap - 1);
     advance(to_wrap);
-    wrap(at_ps(anchor()));
+    wrap(edge_at(anchor()));
   }
 }
 
-void tim::external_tick(std::uint64_t at)
+void tim::external_tick(trigger_time at)
 {
   if(++state_.edges <= state_.prescaler)
   {
@@ -1661,7 +1851,7 @@ void tim::external_tick(std::uint64_t at)
   }
 }
 
-void tim::reinitialise(std::uint64_t at)
+void tim::reinitialise(trigger_time at)
 {
   if(trgo_ and master_mode() == master_reset)
   {
@@ -1675,10 +1865,10 @@ void tim::reinitialise(std::uint64_t at)
   state_.down       = 0;
   state_.edges      = 0;
   state_.count      = counting_up() or center() ? 0 : state_.reload;
-  start_at(at);
+  start_at_edge(at);
 }
 
-void tim::begin(std::uint64_t at)
+void tim::begin(trigger_time at)
 {
   if(get(regs_, enable_) != 0)
   {
@@ -1687,11 +1877,11 @@ void tim::begin(std::uint64_t at)
   auto const was = counter_enabled();
   update(regs_, enable_, 1);
   warn_unsupported();
-  start_at(at);
+  start_at_edge(at);
   enable_changed(was, at);
 }
 
-void tim::gate(std::optional<bool> level, trigger_edge edge, bool closing_resets, std::uint64_t at)
+void tim::gate(std::optional<bool> level, trigger_edge edge, bool closing_resets, trigger_time at)
 {
   if(not level and edge == trigger_edge::rising and not std::exchange(gate_logged_, true))
   {
@@ -1710,7 +1900,7 @@ void tim::gate(std::optional<bool> level, trigger_edge edge, bool closing_resets
   update(regs_, *trigger_flag_, 1);
   if(open)
   {
-    start_at(at);
+    start_at_edge(at);
   }
   else if(closing_resets)
   {
@@ -1719,7 +1909,7 @@ void tim::gate(std::optional<bool> level, trigger_edge edge, bool closing_resets
   enable_changed(was, at);
 }
 
-void tim::enable_changed(bool was, std::uint64_t at)
+void tim::enable_changed(bool was, trigger_time at)
 {
   auto const now = counter_enabled();
   if(now != was)
@@ -1728,7 +1918,7 @@ void tim::enable_changed(bool was, std::uint64_t at)
   }
 }
 
-void tim::update_event(bool software, std::uint64_t at)
+void tim::update_event(bool software, trigger_time at)
 {
   state_.prescaler = get(regs_, prescaler_);
   state_.reload    = regs_.peek(reload_.offset) & mask_;
@@ -1760,7 +1950,7 @@ void tim::update_event(bool software, std::uint64_t at)
   }
 }
 
-void tim::match(std::size_t ch, std::uint64_t at)
+void tim::match(std::size_t ch, trigger_time at)
 {
   auto& c = channels_[ch];
   update(regs_, c.flag, 1);
@@ -1921,18 +2111,14 @@ void tim::reschedule()
 void tim::warn_unsupported()
 {
   warn_inputs();
-  auto used =
+  auto const used =
       std::ranges::any_of(unsupported_, [&](field_ref bits) { return get(regs_, bits) != 0; });
-  for(std::size_t ch = 0; ch < channels_.size(); ++ch)
-  {
-    used = used or get(regs_, channels_[ch].select) == 3;
-  }
   if(used and not std::exchange(unsupported_logged_, true))
   {
     warn(
         name("CR1"),
-        "the counter started with SMSPE, a capture on TRC, dithering or CCDS configured: not "
-        "modelled, TRC captures nothing, the time base counts on the internal clock");
+        "the counter started with SMSPE or dithering configured: not modelled, the time base "
+        "counts on the internal clock");
   }
 }
 
@@ -1944,14 +2130,9 @@ void tim::warn_inputs()
       warn(name("SMCR"), std::move(message));
     }
   };
-  auto const mode   = slave();
-  auto const select = slave_ ? trigger_select_of(regs_.peek(slave_->offset)) : 0u;
   once(
-      encoder_logged_, encoding(mode) and index_enable_ and get(regs_, *index_enable_) != 0,
+      encoder_logged_, encoding(slave()) and index_enable_ and get(regs_, *index_enable_) != 0,
       "encoder index, ECR.IE: not modelled, the index input resets nothing");
-  once(
-      pin_logged_, modelled(mode) and select == 4 and gating(mode),
-      "gated mode on TI1F_ED, TS 00100: the edge detector gives pulses, the counter holds");
 }
 
 auto tim::input_signal(std::string_view signal) const -> bool
@@ -2381,10 +2562,45 @@ void tim::refuse_unmodelled(std::uint32_t word, std::uint32_t merged, access_ctx
           access);
     }
   }
+  if(dma_select_ and word == dma_select_->offset and dma_select_->of(merged) != 0)
+  {
+    unmodelled(
+        name("CR2"), word, dma_select_logged_,
+        "CCDS 1: the CCx DMA requests at the update event are not modelled, they follow the "
+        "CCx events",
+        access);
+  }
   if(trigger_dma_ and word == trigger_dma_->offset and trigger_dma_->of(merged) != 0)
   {
     unmodelled(
         name("DIER"), word, trigger_dma_logged_, "TDE: the trigger DMA request is not modelled",
+        access);
+  }
+  for(std::size_t ch = 0; ch < channels_.size(); ++ch)
+  {
+    auto const& select = channels_[ch].select;
+    auto const  value  = select.of(merged);
+    auto const  single = channels_.size() == 1;
+    if(select.offset == word and (value == 3 or (single and value == 2)))
+    {
+      unmodelled(
+          name(ch < 2 ? "CCMR1_Input" : "CCMR2_Input"), word, trc_logged_,
+          single ? std::format("CC1S {:02b}: reserved on a one-channel timer", value)
+          : slave_
+              ? std::format(
+                    "CC{}S 11: a capture on TRC is not modelled, CC{}IF never sets", ch + 1, ch + 1)
+              : std::format("CC{}S 11: reserved on a timer with no slave mode", ch + 1),
+          access);
+    }
+  }
+  if(slave_
+     and word == slave_->offset
+     and gating(slave_of(merged))
+     and trigger_select_of(merged) == 4)
+  {
+    unmodelled(
+        name("SMCR"), word, pin_logged_,
+        "gated mode on TI1F_ED, TS 00100: the edge detector gives pulses, the counter holds",
         access);
   }
   for(auto const& remap : input_remaps_)
@@ -2418,6 +2634,15 @@ void tim::refuse_unmodelled(std::uint32_t word, std::uint32_t merged, access_ctx
     unmodelled(
         name("SMCR"), word, etr_input_logged_,
         "ECE 1: the internal ETR source is not modelled, external clock mode 2 counts nothing",
+        access);
+  }
+  if(oc1_ and word == oc1_mode_->offset and not oc1_level(merged) and oc1_->wanted())
+  {
+    unmodelled(
+        name("CCMR1_Output"), word, oc1_logged_,
+        std::format(
+            "OC1M {:#06b}{}: OC1 is not modelled in this mode, {} holds low", oc1_mode_of(merged),
+            oc1_clear_ and oc1_clear_->of(merged) != 0 ? " with OC1CE" : "", oc1_->signal()),
         access);
   }
 }
@@ -2477,6 +2702,7 @@ void tim::on_bus_reset()
     }
   }
   auto const trgo_high = trgo_ and master_mode() == master_enable and counter_enabled();
+  auto const oc1_was   = oc1_ and oc1_high();
   if(update_signal_)
   {
     update_signal_->set(false);
@@ -2497,6 +2723,10 @@ void tim::on_bus_reset()
   if(trgo_high)
   {
     trgo_->edge(trigger_edge::falling, output_time(now_ps()));
+  }
+  if(oc1_was)
+  {
+    oc1_->edge(trigger_edge::falling, output_time(now_ps()));
   }
   if(slave)
   {
@@ -2642,6 +2872,7 @@ auto tim::on_write(
     static_cast<void>(stm32::interest_changed(ctx_.peers, std::format("{}_trgo", *after)));
   }
   catch_up(ps);
+  auto const oc1            = oc1_ and oc1_high();
   auto const was            = running();
   auto const enabled        = counter_enabled();
   auto const ccer_write     = capture_word_ and word == *capture_word_;
@@ -2713,6 +2944,10 @@ auto tim::on_write(
   if(burst)
   {
     advance_burst(access);
+  }
+  if(oc1_)
+  {
+    oc1_moved(oc1, ps);
   }
   settle();
   return result;
@@ -2818,11 +3053,15 @@ void tim::interest_changed()
 
 auto tim::produces(std::string_view signal) const -> bool
 {
-  return trgo_ and trgo_->signal() == signal;
+  return (trgo_ and trgo_->signal() == signal) or (oc1_ and oc1_->signal() == signal);
 }
 
 auto tim::level(std::string_view signal) const -> std::optional<bool>
 {
+  if(oc1_ and oc1_->signal() == signal)
+  {
+    return oc1_high();
+  }
   if(not produces(signal) or master_mode() != master_enable)
   {
     return std::nullopt;
@@ -2841,11 +3080,11 @@ auto tim::listens(std::string_view signal) const -> bool
   return input and signal.starts_with(*input) and signal.substr(input->size()) == "_trgo";
 }
 
-void tim::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps)
+void tim::triggered(std::string_view signal, trigger_edge edge, trigger_time at_edge)
 {
   if(input_signal(signal))
   {
-    input_edge(at_ps);
+    input_edge(at_edge.ps);
     return;
   }
   if(not listens(signal) or ctx_.clock.hz(domain_) == 0)
@@ -2861,14 +3100,15 @@ void tim::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at
     return;
   }
   reacting_scope const reacting{reacting_};
-  auto const           at = state_.held != 0 ? std::min(at_ps, state_.held_ps) : at_ps;
-  catch_up(std::min(at, now_ps()));
+  auto const           at =
+      state_.held != 0 and state_.held_ps < at_edge.ps ? trigger_time{state_.held_ps} : at_edge;
+  catch_up(std::min(at.ps, now_ps()));
   auto const* const source = trigger_source_of(ctx_.peers, signal);
   slave_edge(edge, source != nullptr ? source->level(signal) : std::nullopt, at);
   settle();
 }
 
-void tim::slave_edge(trigger_edge edge, std::optional<bool> level, std::uint64_t at)
+void tim::slave_edge(trigger_edge edge, std::optional<bool> level, trigger_time at)
 {
   auto const rising = edge == trigger_edge::rising;
   auto const mode   = static_cast<slave_mode>(slave());
@@ -2954,8 +3194,12 @@ void tim::slave_written(std::uint32_t old, std::uint32_t now)
 auto tim::unrouted(std::uint32_t smcr, std::optional<std::string_view> input) const -> bool
 {
   auto const select = trigger_select_of(smcr);
+  auto const signal = input ? std::format("{}_trgo", *input) : std::string{};
+  auto const source = input ? trigger_source_of(ctx_.peers, signal) : nullptr;
+  auto const timer  = dynamic_cast<tim const*>(source);
+  auto const routed = source != nullptr and (timer == nullptr or timer->drives(signal));
   return modelled(slave_of(smcr))
-     and not(input and trigger_source_of(ctx_.peers, std::format("{}_trgo", *input)) != nullptr)
+     and not routed
      and not(pin_select(select) and (select != 7 or etr_));
 }
 

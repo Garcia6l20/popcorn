@@ -3,22 +3,22 @@
     "aliases": 0,
     "alternates": 223,
     "cross_rules": 8,
-    "fields": 3316,
+    "fields": 3314,
     "irqs": 53,
     "patched_fields": 31,
     "peripherals": 43,
     "regions": 7,
-    "registers": 513
+    "registers": 511
   },
   "part": "STM32L152RCTx",
   "svd_sha256": "ac3fbee1bdf9e50ae69c4807d5fa1af1db92233f91990a07f0aad7060fd1726f",
   "tables": {
     "alternates": "7d5711bf08b0fbc9863d7c878636730fcbcd29ce1e3c3a1732bc69387b7abc44",
     "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
-    "fields": "50a8442ff49d803a14062a745f7b43914f853b759df8255dca7c14cd32f45986",
+    "fields": "d62280b9246911c7ce29d32398e70040de8f2754835e725c32272a6f30f46f7c",
     "irqs": "15440d3cfdc20946e055e8a2d53db8fe1c6323f1b668dd8138182f205bbdf7da",
     "peripherals": "69265295927acf5075b0da7172cc819fdd3c3225019a5e1fd0aea9395db62440",
     "regions": "2bd3942e07e84bb000e861fa5f0fa327a907ac0311bda47ee4404ca12c3744a2",
-    "registers": "b47e01c3a4639db356c95e1b2c0724fd7ab7f098c3762371fcb88e3a4f6a8f7d"
+    "registers": "1700d10f4268d5a2c1a4f3a81eaffd2bcfceb2c25222e3e33bb71154136a3f17"
   }
 }

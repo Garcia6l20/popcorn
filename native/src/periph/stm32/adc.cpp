@@ -839,7 +839,7 @@ public:
   void               on_clock_change() override;
   void               transfer_completed(dma_controller const& by, std::uint32_t request) override;
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
-  void triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps) override;
+  void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
 
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
       -> std::expected<std::uint32_t, bus_error> override;
@@ -1882,7 +1882,7 @@ template <typename Traits> auto adc_model<Traits>::listens(std::string_view sign
 }
 
 template <typename Traits>
-void adc_model<Traits>::triggered(std::string_view signal, trigger_edge edge, std::uint64_t at_ps)
+void adc_model<Traits>::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
 {
   auto const polarity = get(regs_, trigger_);
   auto const detected = edge == trigger_edge::rising ? (polarity & exten_rising) != 0
@@ -1891,7 +1891,7 @@ void adc_model<Traits>::triggered(std::string_view signal, trigger_edge edge, st
   {
     return;
   }
-  begin_sequence(at_ps + trigger_latency_ps(at_ps));
+  begin_sequence(at.ps + trigger_latency_ps(at.ps));
 }
 
 template <typename Traits>
