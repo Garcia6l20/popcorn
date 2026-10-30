@@ -140,13 +140,15 @@ struct dma_classic_request
   std::uint8_t channel;
 };
 
-/** @brief An address window, both ends included. */
-struct dma_classic_window
+/** @brief A bus address window, both ends included, and the clock domain of the bus. */
+struct bus_window
 {
   /** @brief First address. */
   std::uint32_t first;
   /** @brief Last address. */
   std::uint32_t last;
+  /** @brief Clock domain of the bus, as the RCC model names it, such as `pclk1`. */
+  std::string_view clock = {};
 };
 
 /** @brief Differences between the classic DMA controllers the model rows serve. */
@@ -160,14 +162,14 @@ struct dma_classic_traits
    * @brief APB windows behind a 32-bit AHB/APB bridge that ignores HSIZE: a byte or halfword
    *        write there is a word write with the item on every lane, RM0038 11.3.4.
    */
-  std::span<dma_classic_window const> apb_windows = {};
+  std::span<bus_window const> apb_windows = {};
 };
 
 /** @brief STM32L1 APB1 and APB2, RM0038 Table 5. */
-inline constexpr std::array<dma_classic_window, 2> l1_apb_windows{
+inline constexpr std::array<bus_window, 2> l1_apb_windows{
     {
-     {.first = 0x4000'0000, .last = 0x4000'7FFF},
-     {.first = 0x4001'0000, .last = 0x4001'3FFF},
+     {.first = 0x4000'0000, .last = 0x4000'7FFF, .clock = "pclk1"},
+     {.first = 0x4001'0000, .last = 0x4001'3FFF, .clock = "pclk2"},
      }
 };
 
@@ -444,6 +446,21 @@ inline constexpr i2c_variant u5_i2c{};
 /** @brief STM32H5 I2C, RM0481 has no `I2C_AUTOCR`. */
 inline constexpr i2c_variant h5_i2c{.autocr = false};
 
+/** @brief Register set of a USART IP version. */
+enum class usart_registers : std::uint8_t
+{
+  /**
+   * @brief `sci3`: ISR, ICR, RQR, RDR, TDR and PRESC, FIFO flags and thresholds, TEACK, REACK
+   *        and BUSY, RM0456 66.8.
+   */
+  sci3,
+  /**
+   * @brief `sci2`: SR with `rc_w0` flags, one DR for both directions, SBK in CR1, the word length
+   *        in CR1.M, BRR as DIV_Mantissa and DIV_Fraction, RM0038 27.6.
+   */
+  sci2,
+};
+
 /** @brief Differences between the USART, UART and LPUART peripherals the model rows serve. */
 struct usart_variant
 {
@@ -454,6 +471,23 @@ struct usart_variant
   bool fifo = true;
   /** @brief Name of the IRQ line, empty for `<instance>_IRQn`. */
   std::string_view irq_name = {};
+  /** @brief Register set of the IP version. */
+  usart_registers registers = usart_registers::sci3;
+  /**
+   * @brief Buses whose clock is the kernel clock of an instance in their window. Empty: the RCC
+   *        model names the kernel clock after the instance, such as `usart1`.
+   */
+  std::span<bus_window const> kernel_buses = {};
+  /**
+   * @brief High time after a break before the next frame, in half bits: 2 bits on `sci3`,
+   *        RM0456 66.5.7, 1 bit on `sci2`, RM0038 27.3.2.
+   */
+  std::uint8_t break_stop_half_bits = 4;
+  /**
+   * @brief The instance has CTS and RTS flow control. Without it CTSE and RTSE are logged once
+   *        and leave transmission and reception unchanged.
+   */
+  bool flow_control = true;
 };
 
 /** @brief STM32U5 USART and UART, RM0456 66.8, and every STM32H5 USART and UART, RM0481 56.8. */
@@ -463,6 +497,21 @@ inline constexpr usart_variant u5_lpuart{.mode_views = false};
 /** @brief STM32H5 LPUART, RM0481 57.7: the register views of the USART, and the CMSIS header
  *         names its line `LPUART1_IRQn` for the peripheral `LPUART`. */
 inline constexpr usart_variant h5_lpuart{.irq_name = "LPUART1_IRQn"};
+/** @brief STM32L1 USART and UART, RM0038 27.6, clocked by the APB bus of their address. */
+inline constexpr usart_variant l1_usart{
+    .mode_views           = false,
+    .fifo                 = false,
+    .registers            = usart_registers::sci2,
+    .kernel_buses         = l1_apb_windows,
+    .break_stop_half_bits = 2};
+/** @brief STM32L1 UART4 and UART5: the L1 USART with no flow control, RM0038 Table 157. */
+inline constexpr usart_variant l1_uart{
+    .mode_views           = false,
+    .fifo                 = false,
+    .registers            = usart_registers::sci2,
+    .kernel_buses         = l1_apb_windows,
+    .break_stop_half_bits = 2,
+    .flow_control         = false};
 
 /** @brief Differences between the RTC and TAMP peripherals the model rows serve. */
 struct rtc_variant

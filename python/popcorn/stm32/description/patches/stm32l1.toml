@@ -99,6 +99,24 @@ register = "ARR"
 reset = 0xFFFF
 source = "RM0038 Rev 18, 18.5.10 TIM10 and TIM11 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
 
+[[resets]]
+peripheral = "USART1"
+register = "SR"
+reset = 0x000000C0
+source = "RM0038 Rev 18, Table 158 USART register map: SR reset TXE 1 and TC 1, 0x000000C0. The 27.6.1 header and the four SVDs give 0x00C00000"
+
+[[resets]]
+peripheral = "USART2"
+register = "SR"
+reset = 0x000000C0
+source = "RM0038 Rev 18, Table 158 USART register map: SR reset TXE 1 and TC 1, 0x000000C0. The 27.6.1 header and the four SVDs give 0x00C00000"
+
+[[resets]]
+peripheral = "USART3"
+register = "SR"
+reset = 0x000000C0
+source = "RM0038 Rev 18, Table 158 USART register map: SR reset TXE 1 and TC 1, 0x000000C0. The 27.6.1 header and the four SVDs give 0x00C00000"
+
 [[fields]]
 instances = ["TIM2", "TIM3", "TIM4"]
 registers = ["CCMR2_Output"]

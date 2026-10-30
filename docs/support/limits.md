@@ -854,3 +854,19 @@ Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/p
   truncated frame and FE.
 - A frame from another machine still being sampled when a link holds the line low becomes the
   break character, data 0. Silicon keeps the bits before the hold.
+- STM32L1 USART and UART, RM0038 section 27, run the same frame engine with one data word each
+  way. USART_SR resets to 0x000000C0, TXE and TC set, RM0038 Table 158.
+- The STM32L1 kernel clock is the APB clock of the instance, PCLK2 for USART1, PCLK1 for USART2,
+  USART3, UART4 and UART5, whatever `RCC_APBxENR` holds.
+- The first frame after TE is set starts at its DR write, without the idle preamble and the
+  1 bit-time delay of the RM0038 27.6.4 TE note. Clearing UE lets the frame in flight end, then
+  stops the output, RM0038 27.6.4, and drops the word waiting in TDR.
+- A write of 0 to RXNE drops the received word, and DR reads 0 while RXNE is 0, inferred.
+- A write of 0 to SBK before the break starts cancels it, RM0038 27.3.2. Once the break's low
+  part runs, SBK reads 1 until it ends, a write of 0 meanwhile keeps it, inferred. The line stays
+  high 1 bit after the break before the next frame, RM0038 27.3.2.
+- SBK written with TE 0 and UE 1 sends the break once TE is 1. A write with UE 0 clears SBK,
+  inferred.
+- Mute mode, RWU, is logged as not modelled. LBD never sets.
+- UART4 and UART5 have no hardware flow control, RM0038 Table 157: CTSE and RTSE set there log
+  one `model_warning` and transmission and reception ignore them.

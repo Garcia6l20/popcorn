@@ -409,7 +409,7 @@ auto dma_classic::width(std::size_t ch, field_ref size) -> std::uint8_t
 
 auto dma_classic::on_apb(std::uint32_t at) const -> bool
 {
-  return std::ranges::any_of(traits_.apb_windows, [at](dma_classic_window const& window) {
+  return std::ranges::any_of(traits_.apb_windows, [at](bus_window const& window) {
     return at >= window.first and at <= window.last;
   });
 }

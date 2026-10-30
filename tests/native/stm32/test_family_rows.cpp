@@ -58,7 +58,7 @@ auto block(
   return unit;
 }
 
-auto toy(std::string part) -> part_description
+auto toy(std::string part, bool with_uart4 = true) -> part_description
 {
   auto desc                = popcorn::testing::m33();
   desc.part                = std::move(part);
@@ -69,7 +69,10 @@ auto toy(std::string part) -> part_description
   desc.core.nvic_prio_bits = 4;
   desc.core.num_irqs       = 8;
   desc.peripherals.clear();
-  desc.peripherals.push_back(block("UART4", "UART", "sci2_v1_2_Cube", uart4_base, 4));
+  if(with_uart4)
+  {
+    desc.peripherals.push_back(block("UART4", "UART", "sci2_v1_2_Cube", uart4_base, 4));
+  }
   desc.peripherals.push_back(block("DBGMCU", "DBGMCU", "", dbgmcu_base, 4));
   auto idcode   = word("IDCODE", 0);
   idcode.fields = {
@@ -96,16 +99,20 @@ auto machine_of(part_description desc) -> core::machine
 }
 }
 
-TEST_CASE("a Machine over an STM32L1 part attaches no model to a storage row, DBGMCU its own")
+TEST_CASE("a Machine over an STM32L1 part attaches the L1 DBGMCU model")
 {
-  auto target = machine_of(toy("STM32L152RETx"));
-  CHECK(target.model("UART4") == nullptr);
+  auto target = machine_of(toy("STM32L152RETx", false));
   CHECK(target.model("DBGMCU") != nullptr);
+}
+
+TEST_CASE("a UART4 of sci2 on an STM32L1 part takes the USART model, which needs its registers")
+{
+  CHECK_THROWS_AS((void)machine_of(toy("STM32L152RETx")), config_error);
 }
 
 TEST_CASE("the STM32L1 DBGMCU model keeps the CR fields of a CPU store of all ones")
 {
-  auto target = machine_of(toy("STM32L152RETx"));
+  auto target = machine_of(toy("STM32L152RETx", false));
   REQUIRE(target.mem().write(code_at, 2, 0x6001).has_value());
   REQUIRE(target.mem().write(code_at + 2, 2, 0x6802).has_value());
   auto const set = [&](std::string_view name, std::uint64_t value) {
@@ -119,11 +126,11 @@ TEST_CASE("the STM32L1 DBGMCU model keeps the CR fields of a CPU store of all on
   CHECK(target.regs().read(*target.regs().find("r2")) == 0xE7u);
 }
 
-TEST_CASE("factories() holds no entry for a storage row")
+TEST_CASE("factories() of an STM32L1 part holds the sci2 UART4 and the DBGMCU")
 {
   stm32::register_builtin_models();
   auto const all = stm32::factories(stm32::board{}, toy("STM32L152RETx"));
-  CHECK_FALSE(all.contains("UART4"));
+  CHECK(all.contains("UART4"));
   CHECK(all.contains("DBGMCU"));
 }
 

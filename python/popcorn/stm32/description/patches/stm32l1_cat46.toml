@@ -226,3 +226,15 @@ fields = [
   { name = "BR15", lsb = 15, width = 1 },
 ]
 source = "RM0038 Rev 18, 7.4.11 GPIOx_BRR (x = A..H), Cat.4 to Cat.6: offset 0x28, reset 0, BR15 to BR0 in bits 15:0 write-only and read as 0. The SVDs have no BRR"
+
+[[resets]]
+peripheral = "UART4"
+register = "SR"
+reset = 0x000000C0
+source = "RM0038 Rev 18, Table 158 USART register map: SR reset TXE 1 and TC 1, 0x000000C0. The 27.6.1 header and the four SVDs give 0x00C00000. UART4 and UART5 exist on Cat.4 to Cat.6"
+
+[[resets]]
+peripheral = "UART5"
+register = "SR"
+reset = 0x000000C0
+source = "RM0038 Rev 18, Table 158 USART register map: SR reset TXE 1 and TC 1, 0x000000C0. The 27.6.1 header and the four SVDs give 0x00C00000. UART4 and UART5 exist on Cat.4 to Cat.6"

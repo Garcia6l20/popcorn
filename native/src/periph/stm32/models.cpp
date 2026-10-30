@@ -32,7 +32,7 @@ struct builtin
   flash_variant    flash         = {};
 };
 
-constexpr std::array<builtin, 91> builtins{
+constexpr std::array<builtin, 92> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -200,9 +200,13 @@ constexpr std::array<builtin, 91> builtins{
          .ip_version_glob = "sci2_*",
          .make            = [](board const& b) { return usart_factory(b, with_views_usart); },
          .part_glob       = "STM32H5*"},
+     {.ip              = "USART",
+         .ip_version_glob = "sci2_*",
+         .make            = [](board const& b) { return usart_factory(b, l1_usart); },
+         .part_glob       = "STM32L1*"},
      {.ip              = "UART",
          .ip_version_glob = "sci2_*",
-         .make            = [](board const&) { return model_factory{}; },
+         .make            = [](board const& b) { return usart_factory(b, l1_uart); },
          .part_glob       = "STM32L1*"},
      {.ip              = "LPUART",
          .ip_version_glob = "sci3_v1*",
