@@ -542,6 +542,7 @@ def test_a_host_polling_the_tap_of_a_sleeping_free_run_sees_each_echo_and_inject
 
     echoes = asyncio.run(body())
     assert [frame.data for frame in echoes] == [ord("q"), ord("r")]
+    asyncio.run(to(system, echoes[-1].end + L + us(50)))
     assert received(system.members["a"]) == [ord("q"), ord("r")]
 
 
