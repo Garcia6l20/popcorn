@@ -1,6 +1,6 @@
 # Links and taps
 
-Linked systems of machines, UART links, SPI buses and taps.
+Linked systems of machines, UART links, SPI and I2C buses and taps.
 
 ::: popcorn.System
 
@@ -21,5 +21,11 @@ Linked systems of machines, UART links, SPI buses and taps.
 ::: popcorn.SpiTap
 
 ::: popcorn.SpiTapFrame
+
+::: popcorn.I2CBus
+
+::: popcorn.I2CTap
+
+::: popcorn.I2CTapPhase
 
 ::: popcorn.LineState

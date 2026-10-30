@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../periph/stm32/i2c_medium.hpp"
 #include "../periph/stm32/spi_medium.hpp"
 #include "board.hpp"
 #include "host_future.hpp"
@@ -128,6 +129,49 @@ struct[[= py::rename{"SpiTapRecord"}]] spi_tap_record
   [[= py::readonly]] bool dropped{};
 };
 
+/** @brief One target of an I2C bus, as System declares it to SystemHandle. */
+struct[[= py::rename{"I2CTargetSpec"}]] i2c_target_spec
+{
+  /** @brief Index of the target's member. */
+  std::size_t member{};
+  /** @brief Name of the target's I2C instance. */
+  std::string unit{};
+};
+
+/** @brief One I2C bus, as System declares it to SystemHandle. */
+struct[[= py::rename{"I2CBusSpec"}]] i2c_bus_spec
+{
+  /** @brief Index of the controller's member. */
+  std::size_t controller{};
+  /** @brief Name of the controller's I2C instance. */
+  std::string controller_unit{};
+  /** @brief Latency L in picoseconds, above 0. */
+  std::int64_t latency_ps{};
+  /** @brief The targets, at least one. */
+  std::vector<i2c_target_spec> targets{};
+};
+
+/** @brief One phase an I2C bus's tap kept, times in picoseconds of system time. */
+struct[[= py::rename{"I2CTapRecord"}]] i2c_tap_record
+{
+  /** @brief Index of the target among the bus's targets. */
+  [[= py::readonly]] std::size_t target{};
+  /** @brief Unit number the controller side gave the phase. */
+  [[= py::readonly]] std::uint64_t unit{};
+  /** @brief The phase, the value of periph::i2c_phase. */
+  [[= py::readonly]] std::uint8_t phase{};
+  /** @brief The address byte, the byte the controller wrote or the byte the target sent. */
+  [[= py::readonly]] std::uint8_t byte{};
+  /** @brief The target's acknowledge, the controller's for a read byte. */
+  [[= py::readonly]] bool ack{};
+  /** @brief End of the controller's phase. */
+  [[= py::readonly]] std::int64_t at_ps{};
+  /** @brief Stamp of the target's answer, or the time the phase was dropped. */
+  [[= py::readonly]] std::int64_t answer_ps{};
+  /** @brief Whether the target never answered and the controller got the undriven answer. */
+  [[= py::readonly]] bool dropped{};
+};
+
 namespace detail
 {
 /**
@@ -235,6 +279,36 @@ private:
   host_ref                                   master_;
   std::vector<host_ref>                      slaves_;
 };
+
+/**
+ * @brief One I2C bus: an i2c_medium over a controller member and its target members, attached
+ *        at start() and given back at close.
+ */
+class i2c_bus_medium final : public medium
+{
+public:
+  /**
+   * @param bus The medium.
+   * @param controller Host slot of the controller.
+   * @param targets Host slot of each target, in the medium's target order.
+   */
+  i2c_bus_medium(
+      std::shared_ptr<periph::stm32::i2c_medium> bus,
+      host_ref                                   controller,
+      std::vector<host_ref>                      targets);
+
+  [[nodiscard]] auto links() const -> std::vector<std::shared_ptr<core::member_link>> override;
+  void               attach() override;
+  void               give_back() noexcept override;
+
+  /** @brief The medium. */
+  [[nodiscard]] auto bus() const noexcept -> periph::stm32::i2c_medium&;
+
+private:
+  std::shared_ptr<periph::stm32::i2c_medium> bus_;
+  host_ref                                   controller_;
+  std::vector<host_ref>                      targets_;
+};
 }
 
 /**
@@ -335,6 +409,30 @@ public:
 
   /** @brief Frames the tap of SPI bus @p bus dropped because it was full. */
   [[= py::doc{"Frames an SPI bus's tap dropped."}]] auto spi_tap_dropped(std::size_t bus)
+      -> std::uint64_t;
+
+  /**
+   * @brief Adds an I2C bus before start(): the controller's phases reach the targets' I2Cs L
+   *        later and their answers the controller L after that. The bus holds two links per
+   *        target, added to the system in target order.
+   * @param spec The bus.
+   * @return The bus's index among the I2C buses.
+   * @throws std::logic_error after start().
+   * @throws std::invalid_argument for a member index out of range, a target on the controller's
+   *         member, no target or a latency of 0.
+   * @throws config_error with key `controller` or `targets[i]` and the offending unit as file
+   *         when an end is no I2C instance of its member, the controller's I2C has a board
+   *         controller, or a target's I2C has a board controller or a board target.
+   */
+  [[= py::doc{"Add an I2C bus before start(), return its index."}]] auto
+      add_i2c_bus(i2c_bus_spec const& spec) -> std::size_t;
+
+  /** @brief Takes every phase the tap of I2C bus @p bus holds, oldest first. */
+  [[= py::doc{"Take the phases an I2C bus's tap holds."}]] auto i2c_tap_take(std::size_t bus)
+      -> std::vector<i2c_tap_record>;
+
+  /** @brief Phases the tap of I2C bus @p bus dropped because it was full. */
+  [[= py::doc{"Phases an I2C bus's tap dropped."}]] auto i2c_tap_dropped(std::size_t bus)
       -> std::uint64_t;
 
   /**
@@ -634,6 +732,7 @@ private:
   std::vector<std::polymorphic<detail::medium>> media_;
   std::vector<detail::uart_medium*>             wires_;
   std::vector<detail::spi_bus_medium*>          buses_;
+  std::vector<detail::i2c_bus_medium*>          i2c_buses_;
   std::uint32_t                                 next_lane_ = 1;
   std::deque<link_entry>                        links_;
   std::vector<reflex::py::nb::object>           handles_;

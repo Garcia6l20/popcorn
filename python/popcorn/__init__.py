@@ -71,6 +71,9 @@ from popcorn._snapshot import Snapshot
 from popcorn._stop import Fault, FrameReturn, Stop
 from popcorn._support import arch_modules
 from popcorn._system import (
+    I2CBus,
+    I2CTap,
+    I2CTapPhase,
     LineState,
     SpiBus,
     SpiTap,
@@ -118,6 +121,9 @@ __all__ = [
     "FrameReturn",
     "HandlerCallWarning",
     "Hex",
+    "I2CBus",
+    "I2CTap",
+    "I2CTapPhase",
     "Image",
     "ImageError",
     "ImageFile",

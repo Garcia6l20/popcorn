@@ -432,30 +432,75 @@ void detail::spi_bus_medium::attach()
   }
 }
 
+namespace
+{
+template <typename Bus, typename Body>
+void hand_back(detail::host_ref const& slot, std::shared_ptr<Bus> const& bus, Body body)
+{
+  detail::retire(
+      slot, [weak = std::weak_ptr<detail::host_slot const>{slot}, bus, body = std::move(body)] {
+        auto const owner = weak.lock();
+        if(owner == nullptr)
+        {
+          return;
+        }
+        if(auto const on = owner->host.lock(); on != nullptr and not on->abandoned())
+        {
+          body(*bus);
+        }
+      });
+}
+}
+
 void detail::spi_bus_medium::give_back() noexcept
 {
-  auto const hand_back = [&](host_ref const& slot, auto body) {
-    retire(slot, [weak = std::weak_ptr<host_slot const>{slot}, bus = bus_, body = std::move(body)] {
-      auto const owner = weak.lock();
-      if(owner == nullptr)
-      {
-        return;
-      }
-      if(auto const on = owner->host.lock(); on != nullptr and not on->abandoned())
-      {
-        body(*bus);
-      }
-    });
-  };
-  hand_back(master_, [](periph::stm32::spi_medium& bus) { bus.give_back_master(); });
+  hand_back(master_, bus_, [](periph::stm32::spi_medium& bus) { bus.give_back_master(); });
   for(std::size_t index = 0; index < slaves_.size(); ++index)
   {
-    hand_back(
-        slaves_[index], [index](periph::stm32::spi_medium& bus) { bus.give_back_slave(index); });
+    hand_back(slaves_[index], bus_, [index](periph::stm32::spi_medium& bus) {
+      bus.give_back_slave(index);
+    });
   }
 }
 
 auto detail::spi_bus_medium::bus() const noexcept -> periph::stm32::spi_medium&
+{
+  return *bus_;
+}
+
+detail::i2c_bus_medium::i2c_bus_medium(
+    std::shared_ptr<periph::stm32::i2c_medium> bus,
+    host_ref                                   controller,
+    std::vector<host_ref>                      targets)
+    : bus_{std::move(bus)}, controller_{std::move(controller)}, targets_{std::move(targets)}
+{}
+
+auto detail::i2c_bus_medium::links() const -> std::vector<std::shared_ptr<core::member_link>>
+{
+  return bus_->links();
+}
+
+void detail::i2c_bus_medium::attach()
+{
+  host_access(controller_, [&] { bus_->attach_controller(); });
+  for(std::size_t index = 0; index < targets_.size(); ++index)
+  {
+    host_access(targets_[index], [&] { bus_->attach_target(index); });
+  }
+}
+
+void detail::i2c_bus_medium::give_back() noexcept
+{
+  hand_back(controller_, bus_, [](periph::stm32::i2c_medium& bus) { bus.give_back_controller(); });
+  for(std::size_t index = 0; index < targets_.size(); ++index)
+  {
+    hand_back(targets_[index], bus_, [index](periph::stm32::i2c_medium& bus) {
+      bus.give_back_target(index);
+    });
+  }
+}
+
+auto detail::i2c_bus_medium::bus() const noexcept -> periph::stm32::i2c_medium&
 {
   return *bus_;
 }
@@ -587,7 +632,7 @@ auto system_handle::add_link(std::size_t forth, std::size_t back) -> std::size_t
 
 namespace
 {
-auto spi_port_of(core::machine& target, std::string const& unit) -> periph::stm32::spi_link_port*
+template <typename Port> auto link_port_of(core::machine& target, std::string const& unit) -> Port*
 {
   auto const& peripherals = target.description().peripherals;
   auto const  named       = std::ranges::find(peripherals, unit, &peripheral_desc::name);
@@ -595,18 +640,31 @@ auto spi_port_of(core::machine& target, std::string const& unit) -> periph::stm3
   {
     return nullptr;
   }
-  return dynamic_cast<periph::stm32::spi_link_port*>(target.model(named->alias_of.value_or(unit)));
+  return dynamic_cast<Port*>(target.model(named->alias_of.value_or(unit)));
+}
+
+template <typename Port>
+auto link_end_of(machine_handle& member, std::string const& unit, std::string key, char const* kind)
+    -> Port&
+{
+  auto* const port = link_port_of<Port>(member.native(), unit);
+  if(port == nullptr)
+  {
+    throw config_error(unit, 0, std::move(key), std::format("an {} instance of the member", kind));
+  }
+  return *port;
 }
 
 auto spi_end_of(machine_handle& member, std::string const& unit, std::string key)
     -> periph::stm32::spi_link_port&
 {
-  auto* const port = spi_port_of(member.native(), unit);
-  if(port == nullptr)
-  {
-    throw config_error(unit, 0, std::move(key), "an SPI instance of the member");
-  }
-  return *port;
+  return link_end_of<periph::stm32::spi_link_port>(member, unit, std::move(key), "SPI");
+}
+
+auto i2c_end_of(machine_handle& member, std::string const& unit, std::string key)
+    -> periph::stm32::i2c_link_port&
+{
+  return link_end_of<periph::stm32::i2c_link_port>(member, unit, std::move(key), "I2C");
 }
 
 void check_chip_select(
@@ -725,6 +783,93 @@ auto system_handle::spi_tap_dropped(std::size_t bus) -> std::uint64_t
     throw std::out_of_range("no such SPI bus");
   }
   return buses_[bus]->bus().tap().dropped();
+}
+
+auto system_handle::add_i2c_bus(i2c_bus_spec const& spec) -> std::size_t
+{
+  if(system_ != nullptr or closed_)
+  {
+    throw std::logic_error("buses are added before start()");
+  }
+  if(spec.controller >= members_.size() or spec.targets.empty() or spec.latency_ps <= 0)
+  {
+    throw std::invalid_argument("a bus needs a controller member, a target and a latency above 0");
+  }
+  for(auto const& target : spec.targets)
+  {
+    if(target.member >= members_.size() or target.member == spec.controller)
+    {
+      throw std::invalid_argument("a target is a member other than the controller");
+    }
+  }
+  auto& controller_port =
+      i2c_end_of(*members_[spec.controller].handle, spec.controller_unit, "controller");
+  if(host_access(
+         members_[spec.controller].slot, [&] { return controller_port.board_use().controller; }))
+  {
+    throw config_error(
+        spec.controller_unit, 0, "controller", "an I2C instance with no board controller");
+  }
+  std::vector<periph::stm32::i2c_target_end> ends;
+  std::vector<detail::host_ref>              slots;
+  for(std::size_t index = 0; index < spec.targets.size(); ++index)
+  {
+    auto const& target = spec.targets[index];
+    auto const  key    = std::format("targets[{}]", index);
+    auto&       port   = i2c_end_of(*members_[target.member].handle, target.unit, key);
+    auto const  use = host_access(members_[target.member].slot, [&] { return port.board_use(); });
+    if(use.controller or use.targets)
+    {
+      throw config_error(
+          target.unit, 0, key, "an I2C instance with no board controller and no board target");
+    }
+    ends.push_back(
+        {.member     = target.member,
+         .port       = &port,
+         .forth_lane = next_lane_,
+         .back_lane  = next_lane_ + 1});
+    next_lane_ += 2;
+    slots.push_back(members_[target.member].slot);
+  }
+  auto bus = std::make_shared<periph::stm32::i2c_medium>(
+      spec.controller, controller_port, core::sys_time{spec.latency_ps}, std::move(ends),
+      tap_capacity_);
+  auto& added = media_.emplace_back(
+      std::in_place_type<detail::i2c_bus_medium>, std::move(bus), members_[spec.controller].slot,
+      std::move(slots));
+  i2c_buses_.push_back(static_cast<detail::i2c_bus_medium*>(&*added));
+  return i2c_buses_.size() - 1;
+}
+
+auto system_handle::i2c_tap_take(std::size_t bus) -> std::vector<i2c_tap_record>
+{
+  if(bus >= i2c_buses_.size())
+  {
+    throw std::out_of_range("no such I2C bus");
+  }
+  std::vector<i2c_tap_record> out;
+  for(auto const& phase : i2c_buses_[bus]->bus().tap().take())
+  {
+    out.push_back(
+        {.target    = phase.target,
+         .unit      = phase.unit,
+         .phase     = static_cast<std::uint8_t>(phase.phase),
+         .byte      = phase.byte,
+         .ack       = phase.ack,
+         .at_ps     = phase.at.ps,
+         .answer_ps = phase.answer.ps,
+         .dropped   = phase.dropped});
+  }
+  return out;
+}
+
+auto system_handle::i2c_tap_dropped(std::size_t bus) -> std::uint64_t
+{
+  if(bus >= i2c_buses_.size())
+  {
+    throw std::out_of_range("no such I2C bus");
+  }
+  return i2c_buses_[bus]->bus().tap().dropped();
 }
 
 void system_handle::start(std::vector<std::int64_t> const& offsets_ps)

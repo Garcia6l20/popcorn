@@ -1,4 +1,4 @@
-"""Several machines on one virtual clock, their UARTs linked machine to machine."""
+"""Several machines on one virtual clock, their UARTs, SPIs and I2Cs linked machine to machine."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, overload
 
 from popcorn import _core
 from popcorn._devices import chip_select
-from popcorn._enums import ResetKind, StopReason
+from popcorn._enums import I2CPhase, ResetKind, StopReason
 from popcorn._errors import ConfigError, EmulationError, MachineBusy, MachineRunning
 from popcorn._host import awaited, watch_awaits
 from popcorn._machine_description import (
@@ -123,13 +123,59 @@ class SpiBus:
         object.__setattr__(self, "slaves", _FrozenMap(cast(Mapping[str, str], slaves)))
 
 
-type _Medium = UartLink | SpiBus
-_MEDIA: tuple[type[_Medium], ...] = (UartLink, SpiBus)
+@dataclass(frozen=True)
+class I2CBus:
+    """An I2C bus of a `System`: one controller I2C and one I2C per target, on other members.
+
+    The controller's I2C model runs as with a board target per remote target, which takes every
+    address: the address match is decided at the target. An address, write or read phase the
+    controller ends at system time t is replayed by each target's I2C over [t + `latency`,
+    t + `latency` + p], p the phase as the controller clocked it, ten SCL periods for an address
+    and nine for a byte. The target's answer is stamped t + `latency` + p + s, s its clock
+    stretch, and the controller's phase completes `latency` after the last answer, whatever the
+    slicing, the thread timing or the system's quantum. SCL stays low for 2 * `latency` + p + s
+    per phase. An address or a written byte is acknowledged when any target or board target
+    acknowledges it. The controller acknowledges a read byte. A write or read phase reaches only
+    the targets that acknowledged the transfer's last address. A STOP reaches the targets
+    `latency` after the controller drove it. A phase a target never answers, dropped by a reset
+    of the target or cut by a STOP, gets NACK for an address or a written byte and 0xFF for a
+    read byte. The controller keeps its own board targets on the same I2C, the targets' I2Cs take
+    no board controller and no board target.
+
+        popcorn.I2CBus(ports=["a.I2C1", "b.I2C1", "c.I2C2"], latency=us(5))
+
+    Attributes:
+        ports: The I2Cs, `"<member>.<I2C>"`, the controller's first, then each target's, on
+            members other than the controller's, at least one target.
+        latency: The bus's latency L, above 0. No default: the system's quantum is the smallest
+            L, so L is part of every link's declaration.
+    """
+
+    ports: Sequence[str]
+    latency: VirtualDuration
+
+    def __post_init__(self) -> None:
+        ports = cast(object, self.ports)
+        if isinstance(ports, str | bytes) or not isinstance(ports, Sequence):
+            raise ConfigError(
+                f"ports: {ports!r} is no sequence of I2Cs",
+                key="ports",
+                expected="a sequence of '<member>.<I2C>', the controller's first",
+            )
+        object.__setattr__(self, "ports", tuple(cast(Sequence[str], ports)))
+
+
+type _Medium = UartLink | SpiBus | I2CBus
+_MEDIA: tuple[type[_Medium], ...] = (UartLink, SpiBus, I2CBus)
 
 
 def _named(kind: type) -> str:
-    """`kind`'s name with its article, such as "a UartLink" or "an SpiBus"."""
-    return f"{'an' if kind.__name__.startswith('Spi') else 'a'} {kind.__name__}"
+    """`kind`'s name with its article, such as "a UartLink", "an SpiBus" or "an I2CBus"."""
+    return f"{'an' if kind.__name__.startswith(('Spi', 'I2C')) else 'a'} {kind.__name__}"
+
+
+def _joined(names: list[str]) -> str:
+    return ", ".join(names[:-1]) + " or " + names[-1]
 
 
 def _medium(index: int, link: object) -> _Medium:
@@ -137,9 +183,9 @@ def _medium(index: int, link: object) -> _Medium:
     if not isinstance(link, _MEDIA):
         raise ConfigError(
             f"links[{index}]: a {type(link).__qualname__}, not "
-            + " or ".join(_named(kind) for kind in _MEDIA),
+            + _joined([_named(kind) for kind in _MEDIA]),
             key=f"links[{index}]",
-            expected=" or ".join(f"a popcorn.{kind.__name__}" for kind in _MEDIA),
+            expected=_joined([f"a popcorn.{kind.__name__}" for kind in _MEDIA]),
         )
     return link
 
@@ -152,6 +198,8 @@ def _check_medium(index: int, link: _Medium) -> list[tuple[str, object, str]]:
             return [(f"links[{index}].{side}", getattr(link, side), "UART") for side in ("a", "b")]
         case SpiBus():
             return _check_bus(index, link).ends
+        case I2CBus():
+            return _check_i2c(index, link)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +230,7 @@ class SystemDescription:
             `Machine` name: not empty, no whitespace, no dot. Members may share a machine
             description: each is its own machine. A member's config and strictness are part of its
             machine description, `CONTROLLER.config("audio")`, `RESPONDER.replace(strict=True)`.
-        links: The links, `UartLink` or `SpiBus`, at least one. Their order is part of the
+        links: The links, `UartLink`, `SpiBus` or `I2CBus`, at least one. Their order is part of the
             system: it fixes the order of frames arriving at one receiver at the same instant on
             several links.
         offsets: System time of each member's local time at the start, 0 for an absent one.
@@ -193,19 +241,21 @@ class SystemDescription:
 
     Raises:
         ConfigError: A check fails, its key naming the field: `members` empty, `members.<name>`
-            a bad name or no MachineDescription, `links` empty, `links[i]` neither `UartLink` nor
-            `SpiBus`, `links[i].a` or `.b` naming no member's peripheral as
+            a bad name or no MachineDescription, `links` empty, `links[i]` neither `UartLink`,
+            `SpiBus` nor `I2CBus`, `links[i].a` or `.b` naming no member's peripheral as
             `"<member>.<UART>"`, `links[i].master` or `links[i].slaves[<chip select>]` naming
             none as `"<member>.<SPI>"`, a chip select that is not `"<master member>.<pin>"` or
-            `"<master member>.NSS"`, a slave on the master's member, or a UART or SPI in two
-            links, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits` or `.parity` out of
-            range, `offsets.<name>` naming no member or below 0, `goal_cap` not above 0, or
-            `on_member_reset` neither "reset" nor "stop". Whether a link end is a UART or SPI of
-            the member's part is checked by `link`, which has the description.
+            `"<master member>.NSS"`, a slave on the master's member, `links[i].ports` with no
+            target, `links[i].ports[j]` naming none as `"<member>.<I2C>"` or a target on the
+            controller's member, or a UART, SPI or I2C in two links, `links[i].latency`,
+            `.baud`, `.data_bits`, `.stop_bits` or `.parity` out of range, `offsets.<name>`
+            naming no member or below 0, `goal_cap` not above 0, or `on_member_reset` neither
+            "reset" nor "stop". Whether a link end is a UART, SPI or I2C of the member's part is
+            checked by `link`, which has the description.
     """
 
     members: Mapping[str, MachineDescription]
-    links: Sequence[UartLink | SpiBus]
+    links: Sequence[UartLink | SpiBus | I2CBus]
     offsets: Mapping[str, VirtualDuration] = field(default_factory=_FrozenMap[str, VirtualDuration])
     goal_cap: VirtualDuration | None = None
     on_member_reset: Literal["reset", "stop"] = "reset"
@@ -459,6 +509,41 @@ class SpiTapFrame:
 
 
 @dataclass(frozen=True)
+class I2CTapPhase:
+    """One phase on an I2C bus between the controller and one target, as `I2CTap` shows it.
+    Times are system times. An address phase gives one record per target. A write or read phase
+    gives one per target that acknowledged the transfer's last address.
+
+    Attributes:
+        target: The target's I2C, `"<member>.<I2C>"`.
+        unit: Number the controller's side gave the phase on this target's link, increasing per
+            target.
+        phase: `I2CPhase.ADDRESS`, `WRITE` or `READ`.
+        byte: For an address phase the address byte, the 7-bit address in bits 7 to 1 and the
+            read bit in bit 0. For a write phase the byte the controller wrote. For a read phase
+            the byte the target sent, 0xFF when `dropped`.
+        ack: The target's acknowledge of an address or a written byte, the controller's
+            acknowledge of a read byte.
+        at: End of the controller's phase at the controller: the stamp the target sees `latency`
+            later.
+        answer: Stamp of the target's answer, `at` + `latency` + the phase time + the target's
+            stretch, or the time the phase was dropped. The controller completes the phase
+            `latency` after the last target's answer.
+        dropped: Whether the target never answered the phase, a reset of the target dropped it
+            or a STOP cut it, and the controller got NACK or 0xFF.
+    """
+
+    target: str
+    unit: int
+    phase: I2CPhase
+    byte: int
+    ack: bool
+    at: VirtualTime
+    answer: VirtualTime
+    dropped: bool
+
+
+@dataclass(frozen=True)
 class _LinkWires:
     ends: tuple[str, str]
     wires: tuple[int, int]
@@ -472,7 +557,13 @@ class _SpiWired:
     bus: int
 
 
-type _Wired = _LinkWires | _SpiWired
+@dataclass(frozen=True)
+class _I2CWired:
+    ends: tuple[str, ...]
+    bus: int
+
+
+type _Wired = _LinkWires | _SpiWired | _I2CWired
 
 
 @dataclass(frozen=True)
@@ -677,7 +768,7 @@ class System:
     def __init__(
         self,
         members: Mapping[str, Machine],
-        links: Sequence[UartLink | SpiBus],
+        links: Sequence[UartLink | SpiBus | I2CBus],
         *,
         offsets: Mapping[str, VirtualDuration] | None = None,
         on_member_reset: Literal["reset", "stop"] = "reset",
@@ -705,18 +796,21 @@ class System:
             slice_wall_budget: Wall seconds after which it does, above 0.
 
         Raises:
-            ConfigError: A member named apart from its key, `members.<name>`, already in a
-                linked system, or no link, `links`, or a link that is neither a `UartLink` nor
-                an `SpiBus`, `links[i]`, or an SPI end, `links[i].master` or
-                `links[i].slaves[<chip select>]`, that is not an SPI of a member, a master SPI
-                with a board controller, a slave SPI with a board controller or a board device,
-                an SPI in two links, a chip select on an unbonded pad of the master's package,
-                key `pin`, or a link end that is not a UART of a member, a UART in two links or
-                bridged to a pty, or whose CTS input `UartStream.set_cts` left not ready or with a
-                change pending, or whose model takes no frames from a wire, such as a plugin UART
-                implementing only `periph::uart_port`, `links[i].a` or `links[i].b`, a value out
-                of range, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits` or `.parity`,
-                or an offset of no member or below 0, `offsets.<name>`.
+            ConfigError: A member named apart from its key, `members.<name>`, already in a linked
+                system, or no link, `links`, or a link that is neither a `UartLink` nor an `SpiBus`
+                nor an `I2CBus`, `links[i]`, or an SPI end, `links[i].master` or
+                `links[i].slaves[<chip select>]`, that is not an SPI of a member, a master SPI with
+                a board controller, a slave SPI with a board controller or a board device, an SPI in
+                two links, a chip select on an unbonded pad of the master's package, key `pin`, or
+                an I2C end, `links[i].ports[j]`, that is not an I2C of a member, a controller I2C
+                with a board controller, a target I2C with a board controller or a board target, a
+                target on the controller's member, an I2C in two links, or a bus with no target,
+                `links[i].ports`, or a link end that is not a UART of a member, a UART in two links
+                or bridged to a pty, or whose CTS input `UartStream.set_cts` left not ready or with
+                a change pending, or whose model takes no frames from a wire, such as a plugin UART
+                implementing only `periph::uart_port`, `links[i].a` or `links[i].b`, a value out of
+                range, `links[i].latency`, `.baud`, `.data_bits`, `.stop_bits` or `.parity`, or an
+                offset of no member or below 0, `offsets.<name>`.
             MachineBusy: A member is busy.
             ValueError: `slice_instructions`, `slice_wall_budget` or `goal_cap` not above 0.
             TypeError: `goal_cap` is no VirtualDuration.
@@ -747,7 +841,7 @@ class System:
         media = [_medium(index, link) for index, link in enumerate(cast(Sequence[object], links))]
         offset_ps = _offsets(self._names, offsets or {})
         self._media: list[_Wired] = []
-        self._taps: dict[int, UartTap | SpiTap] = {}
+        self._taps: dict[int, UartTap | SpiTap | I2CTap] = {}
         self._handle = _core.SystemHandle(
             slice_instructions, max(1, round(slice_wall_budget * 1e9))
         )
@@ -799,10 +893,12 @@ class System:
                 return self._add_uart(index, link, used)
             case SpiBus():
                 return self._add_spi(index, link, used)
+            case I2CBus():
+                return self._add_i2c(index, link, used)
 
     def _add_spi(self, index: int, bus: SpiBus, used: set[tuple[str, str]]) -> _SpiWired:
         lines = _check_bus(index, bus).lines
-        master, master_unit = self._spi_end(f"links[{index}].master", bus.master, used)
+        master, master_unit = self._bus_end(f"links[{index}].master", bus.master, used, "SPI")
         spec = _core.SpiBusSpec()
         spec.master = master
         spec.master_unit = master_unit
@@ -813,7 +909,7 @@ class System:
         slaves: list[_core.SpiSlaveSpec] = []
         for select, end in bus.slaves.items():
             key = f"links[{index}].slaves[{select!r}]"
-            member, unit = self._spi_end(key, end, used)
+            member, unit = self._bus_end(key, end, used, "SPI")
             port, pin = lines[select]
             slave = _core.SpiSlaveSpec()
             slave.member = member
@@ -829,34 +925,51 @@ class System:
             number = self._handle.add_spi_bus(spec)
         except ConfigError as error:
             if error.key == "master":
-                key = f"links[{index}].master"
-            elif error.key.startswith("slaves["):
-                key = keys[int(error.key[len("slaves[") : -1])]
-            else:
-                raise
-            raise ConfigError(
-                f"{key}: {error.file} is not {error.expected}",
-                file=error.file,
-                key=key,
-                expected=error.expected,
-            ) from error
+                raise _end_error(error, f"links[{index}].master") from error
+            if error.key.startswith("slaves["):
+                raise _end_error(error, keys[int(error.key[len("slaves[") : -1])]) from error
+            raise
         return _SpiWired(tuple(ends), tuple(selects), number)
 
-    def _spi_end(self, key: str, end: str, used: set[tuple[str, str]]) -> tuple[int, str]:
-        if not isinstance(cast(object, end), str):
-            raise ConfigError(
-                f"{key}: {end!r} names no member SPI", key=key, expected="'<member>.<SPI>'"
-            )
-        name, _, unit = end.partition(".")
+    def _add_i2c(self, index: int, bus: I2CBus, used: set[tuple[str, str]]) -> _I2CWired:
+        keys = [key for key, _, _ in _check_i2c(index, bus)]
+        ends = [
+            self._bus_end(key, port, used, "I2C") for key, port in zip(keys, bus.ports, strict=True)
+        ]
+        spec = _core.I2CBusSpec()
+        spec.controller, spec.controller_unit = ends[0]
+        spec.latency_ps = bus.latency.ps
+        targets: list[_core.I2CTargetSpec] = []
+        for member, unit in ends[1:]:
+            target = _core.I2CTargetSpec()
+            target.member = member
+            target.unit = unit
+            targets.append(target)
+        spec.targets = targets
+        try:
+            number = self._handle.add_i2c_bus(spec)
+        except ConfigError as error:
+            if error.key == "controller":
+                raise _end_error(error, keys[0]) from error
+            if error.key.startswith("targets["):
+                raise _end_error(error, keys[1 + int(error.key[len("targets[") : -1])]) from error
+            raise
+        return _I2CWired(tuple(f"{self._names[member]}.{unit}" for member, unit in ends), number)
+
+    def _bus_end(
+        self, key: str, end: str, used: set[tuple[str, str]], kind: str
+    ) -> tuple[int, str]:
+        given = cast(object, end)
+        name, _, unit = end.partition(".") if isinstance(given, str) else ("", "", "")
         machine = self._machines.get(name)
         if machine is None:
             raise ConfigError(
-                f"{key}: {end!r} names no member SPI", key=key, expected="'<member>.<SPI>'"
+                f"{key}: {end!r} names no member {kind}", key=key, expected=f"'<member>.<{kind}>'"
             )
         serving = machine._ports.serving(unit)  # pyright: ignore[reportPrivateUsage]
         if (name, serving) in used:
             raise ConfigError(
-                f"{key}: {name}.{serving} is in two links", key=key, expected="a free SPI"
+                f"{key}: {name}.{serving} is in two links", key=key, expected=f"a free {kind}"
             )
         used.add((name, serving))
         return self._index[name], serving
@@ -915,7 +1028,7 @@ class System:
                         ports = self._machines[name]._ports  # pyright: ignore[reportPrivateUsage]
                         ports.linked.add(unit)
                         marked.append((ports, unit))
-                case _SpiWired():
+                case _SpiWired() | _I2CWired():
                     pass
         return marked
 
@@ -1052,18 +1165,21 @@ class System:
     def tap(self, end: str, /) -> UartTap: ...
 
     @overload
-    def tap[T: UartTap | SpiTap](self, end: str, kind: type[T], /) -> T: ...
+    def tap[T: UartTap | SpiTap | I2CTap](self, end: str, kind: type[T], /) -> T: ...
 
-    def tap(self, end: str, kind: type[UartTap | SpiTap] | None = None, /) -> UartTap | SpiTap:
-        """The tap of the link or bus with end `end`, `"<member>.<UART>"` or
-        `"<member>.<SPI>"`, either end or an alias of its peripheral: the same tap for every end.
+    def tap(
+        self, end: str, kind: type[UartTap | SpiTap | I2CTap] | None = None, /
+    ) -> UartTap | SpiTap | I2CTap:
+        """The tap of the link or bus with end `end`, `"<member>.<UART>"`, `"<member>.<SPI>"`
+        or `"<member>.<I2C>"`, any end or an alias of its peripheral: the same tap for every end.
         `tap(end)` gives the `UartTap` of a `UartLink` end, `tap(end, SpiTap)` the `SpiTap` of an
-        `SpiBus` end. It stays readable after `close()`.
+        `SpiBus` end, `tap(end, I2CTap)` the `I2CTap` of an `I2CBus` end. It stays readable
+        after `close()`.
 
         Args:
             end: A link end.
-            kind: `UartTap` or `SpiTap`, the class of the tap the end has. Static checkers type
-                the result by it, and the call raises TypeError for another class.
+            kind: `UartTap`, `SpiTap` or `I2CTap`, the class of the tap the end has. Static
+                checkers type the result by it, and the call raises TypeError for another class.
 
         Raises:
             ValueError: No link has the end `end`.
@@ -1080,6 +1196,8 @@ class System:
                         tap = UartTap(self, wired)
                     case _SpiWired():
                         tap = SpiTap(self, wired)
+                    case _I2CWired():
+                        tap = I2CTap(self, wired)
                 self._taps[index] = tap
             if kind is None and not isinstance(tap, UartTap):
                 raise TypeError(f"{end!r} has {_named(type(tap))}, pass {type(tap).__name__}")
@@ -1570,6 +1688,8 @@ class System:
                         self._handle.tap_take(wire)
                 case _SpiWired():
                     self._handle.spi_tap_take(wired.bus)
+                case _I2CWired():
+                    self._handle.i2c_tap_take(wired.bus)
 
     def _require_halted(self, what: str) -> None:
         if self._flight is not None or self._free or self._halting:
@@ -2876,6 +2996,155 @@ class SpiTap:
         return f"SpiTap({self._ends[0]} -> {', '.join(self._ends[1:])})"
 
 
+class I2CTap:
+    """Every phase on one `I2CBus` of a `System`, `system.tap("a.I2C1", I2CTap)`, with its system
+    times.
+
+    The tap gets a phase when the controller's side takes the target's answer, in the
+    controller's drain that follows the answer's stamp. After a member stop, an IDLE pause, an
+    error or a TIME stop it holds the phases whose answer the controller's drains reached, which
+    depends on the quantum for a phase whose answer lies near the pause point. After `close()`
+    it holds every phase the controller took. A phase's content never depends on the quantum,
+    the slicing or the wall timing. It keeps up to 1 Mi phases not read yet, the oldest dropped
+    and counted in `dropped`: take them with `phases()`. The phases one call takes are in the
+    order of `at`, by target index for phases of one `at`. Phases taken by separate calls can
+    come out of the order of `at`: the controller can take the answer of a phase it gave up, by
+    a reset or a PE clear, after the answer of a later phase. Reading never changes what the
+    controller or the targets get.
+    """
+
+    __slots__ = (
+        "__weakref__",
+        "_buffer",
+        "_bus",
+        "_dropped_base",
+        "_ends",
+        "_lock",
+        "_overflow",
+        "_system",
+    )
+
+    def __init__(self, system: System, wired: _I2CWired) -> None:
+        """Wrap a bus of `system`. Use `System.tap` instead."""
+        self._system = system
+        self._ends = wired.ends
+        self._bus = wired.bus
+        self._buffer = deque[I2CTapPhase](maxlen=_TAP_KEEP)
+        self._overflow = 0
+        self._dropped_base = 0
+        self._lock = threading.Lock()
+
+    @property
+    def ends(self) -> tuple[str, ...]:
+        """The bus's ends, `"<member>.<I2C>"`, each named by the I2C serving it: the controller,
+        then the targets in the order of `I2CBus.ports`."""
+        return self._ends
+
+    @property
+    def available(self) -> int:
+        """Phases the tap holds, not read yet."""
+        with self._lock:
+            self._pull()
+            return len(self._buffer)
+
+    @property
+    def dropped(self) -> int:
+        """Phases the tap dropped because it held its limit, since system start or the last
+        `System.restore`."""
+        return self._dropped_total() - self._dropped_base
+
+    def _dropped_total(self) -> int:
+        return self._overflow + self._native.i2c_tap_dropped(self._bus)
+
+    def phases(self, *, target: str | None = None) -> list[I2CTapPhase]:
+        """Take every phase the tap holds, of target `target` only when given, oldest first.
+        Never runs the system, allowed stopped and running, from any thread.
+
+        Args:
+            target: A target's I2C, `"<member>.<I2C>"` or an alias of its I2C, None for all.
+
+        Returns:
+            The phases, in the order of `at`, by target index for phases of one `at`.
+
+        Raises:
+            TypeError: `target` is no str.
+            ValueError: `target` is no target of this bus.
+        """
+        index = None if target is None else self._target(target)
+        with self._lock:
+            self._pull()
+            if index is None:
+                taken = list(self._buffer)
+                self._buffer.clear()
+            else:
+                named = self._ends[index + 1]
+                taken = [phase for phase in self._buffer if phase.target == named]
+                kept = [phase for phase in self._buffer if phase.target != named]
+                self._buffer.clear()
+                self._buffer.extend(kept)
+        return taken
+
+    @property
+    def _native(self) -> _core.SystemHandle:
+        return self._system._handle  # pyright: ignore[reportPrivateUsage]
+
+    def _target(self, target: str) -> int:
+        if not isinstance(cast(object, target), str):
+            raise TypeError(f"target must be a str, not {type(target).__name__}")
+        named = self._system._end_name(target)  # pyright: ignore[reportPrivateUsage]
+        if named in self._ends[1:]:
+            return self._ends.index(named) - 1
+        raise ValueError(f"target {target!r} is no target of {', '.join(self._ends[1:])}")
+
+    def _discard(self) -> None:
+        """Drop every phase held, native and buffered, for a restore."""
+        with self._lock:
+            self._native.i2c_tap_take(self._bus)
+            self._buffer.clear()
+            self._dropped_base = self._dropped_total()
+
+    def _pull(self) -> None:
+        """Move the native tap's phases into the buffer, with `_lock` held."""
+        records = sorted(
+            self._native.i2c_tap_take(self._bus), key=lambda record: (record.at_ps, record.target)
+        )
+        self._overflow += max(0, len(self._buffer) + len(records) - _TAP_KEEP)
+        pulled = [
+            I2CTapPhase(
+                target=self._ends[record.target + 1],
+                unit=record.unit,
+                phase=I2CPhase(record.phase),
+                byte=record.byte,
+                ack=record.ack,
+                at=VirtualTime(record.at_ps),
+                answer=VirtualTime(record.answer_ps),
+                dropped=record.dropped,
+            )
+            for record in records
+        ]
+        if self._buffer and pulled and self._order(self._buffer[-1]) > self._order(pulled[0]):
+            merged = heapq.merge(self._buffer, pulled, key=self._order)
+            self._buffer = deque(merged, maxlen=_TAP_KEEP)
+        else:
+            self._buffer.extend(pulled)
+
+    def _order(self, phase: I2CTapPhase) -> tuple[int, int]:
+        return phase.at.ps, self._ends.index(phase.target)
+
+    def __repr__(self) -> str:
+        return f"I2CTap({self._ends[0]} -> {', '.join(self._ends[1:])})"
+
+
+def _end_error(error: ConfigError, key: str) -> ConfigError:
+    """`error`, the native refusal of a bus end, keyed by the end's description key `key`."""
+    return ConfigError(
+        f"{key}: {error.file} is not {error.expected}",
+        file=error.file,
+        key=key,
+        expected=error.expected,
+    )
+
+
 def _check_time(name: str, value: VirtualTime) -> None:
     if not isinstance(cast(object, value), VirtualTime):
         raise TypeError(f"{name} must be a VirtualTime, not {type(value).__name__}")
@@ -3067,6 +3336,37 @@ def _check_bus(index: int, bus: SpiBus) -> _CheckedBus:
             )
         ends.append((key, slave, "SPI"))
     return _CheckedBus(ends, lines)
+
+
+def _check_i2c(index: int, bus: I2CBus) -> list[tuple[str, object, str]]:
+    """Check the values of `links[index]`, an `I2CBus`, return its ends as (key, value, unit
+    kind), the controller first."""
+    latency = cast(object, bus.latency)
+    if not isinstance(latency, VirtualDuration) or latency.ps <= 0:
+        raise ConfigError(
+            f"links[{index}].latency: {bus.latency!r} is no duration above 0",
+            key=f"links[{index}].latency",
+            expected="a VirtualDuration above 0",
+        )
+    ports = cast(Sequence[object], bus.ports)
+    if len(ports) < 2:
+        raise ConfigError(
+            f"links[{index}].ports: {ports!r} holds no target",
+            key=f"links[{index}].ports",
+            expected="the controller's I2C, then at least one target's",
+        )
+    ends = [(f"links[{index}].ports[{at}]", port, "I2C") for at, port in enumerate(ports)]
+    controller = ports[0]
+    if isinstance(controller, str) and "." in controller:
+        owner = controller.partition(".")[0]
+        for key, port, _ in ends[1:]:
+            if isinstance(port, str) and port.partition(".")[0] == owner:
+                raise ConfigError(
+                    f"{key}: {port} is on the controller's member",
+                    key=key,
+                    expected="an I2C of another member",
+                )
+    return ends
 
 
 def _chip_select(owner: str, select: object) -> tuple[str, int | None] | None:

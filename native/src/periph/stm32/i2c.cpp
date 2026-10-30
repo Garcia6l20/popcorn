@@ -589,6 +589,7 @@ public:
   auto muted(i2c_link_target const& target) const -> bool override;
   auto phase_time() const -> std::uint64_t override;
   void bus_released(vtime at, std::uint64_t unit) override;
+  auto board_use() const -> i2c_board_use override;
 
   void enable_written(std::uint32_t old, std::uint32_t now);
   void command_written(std::uint32_t old, std::uint32_t now);
@@ -2692,6 +2693,13 @@ void i2c::bus_released(vtime at, std::uint64_t unit)
   timer.released_ps   = at.ps;
   timer.released_unit = unit;
   arm_timeout();
+}
+
+auto i2c::board_use() const -> i2c_board_use
+{
+  return {
+      .controller = controller_ != nullptr and link_controller_ == nullptr,
+      .targets    = not targets_.empty()};
 }
 
 void i2c::release_links()

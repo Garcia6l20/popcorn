@@ -69,6 +69,15 @@ public:
   ~i2c_link_controller() override;
 };
 
+/** @brief What the board attached to an I2C instance, link attachments apart. */
+struct i2c_board_use
+{
+  /** @brief Whether the board attached a controller. */
+  bool controller{};
+  /** @brief Whether the board attached at least one target. */
+  bool targets{};
+};
+
 /**
  * @brief The side of the STM32 I2C model an I2C link attaches its proxies to, at run time. Reach
  *        it with `dynamic_cast<i2c_link_port*>(machine.model(name))`. Every call runs on the
@@ -168,6 +177,12 @@ public:
    * @param unit Unit of the last phase the controller posted before the release.
    */
   virtual void bus_released(vtime at, std::uint64_t unit) = 0;
+
+  /**
+   * @brief What the board attached to the instance, a controller and targets, link attachments
+   *        apart.
+   */
+  [[nodiscard]] virtual auto board_use() const -> i2c_board_use = 0;
 
 protected:
   /** @brief Destroyed through its model only. */
