@@ -2315,6 +2315,7 @@ public:
   std::vector<std::pair<bool, vtime>> selects;
   std::vector<std::string>*           log{};
   std::string                         name;
+  bool                                refuse_attach{};
 
   auto mode() const -> std::optional<std::uint8_t> override
   {
@@ -2323,6 +2324,10 @@ public:
 
   void attached(periph::spi_target_port& to) override
   {
+    if(refuse_attach)
+    {
+      throw std::runtime_error("the device refuses its port");
+    }
     port = &to;
     ++attaches;
   }
@@ -2903,6 +2908,25 @@ TEST_CASE("a board device hears attached at the model's construction and detache
   CHECK(device->attaches == 1);
   CHECK(device->detaches == 1);
   CHECK(device->port == nullptr);
+}
+
+TEST_CASE("a board device whose attached throws detaches the devices attached before it")
+{
+  auto const first      = deferred(std::nullopt);
+  auto const second     = deferred(std::nullopt);
+  auto const third      = deferred(std::nullopt);
+  second->refuse_attach = true;
+  CHECK_THROWS(
+      deferred_rig{
+          {first, second, third}
+  });
+  CHECK(first->attaches == 1);
+  CHECK(first->detaches == 1);
+  CHECK(first->port == nullptr);
+  CHECK(second->attaches == 0);
+  CHECK(second->detaches == 0);
+  CHECK(third->attaches == 0);
+  CHECK(third->detaches == 0);
 }
 
 namespace

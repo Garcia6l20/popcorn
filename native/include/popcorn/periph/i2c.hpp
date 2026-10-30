@@ -7,11 +7,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
 namespace popcorn::periph
 {
+class i2c_target_port;
+
 /**
  * @brief A bus error a target injects for the byte it answers. The I2C model reports it at the
  *        end of that byte, through the flag its controller has for that condition.
@@ -58,8 +61,10 @@ struct i2c_read_reply
  *        is acknowledged when one target acknowledges it, a read byte is the bitwise AND of the
  *        bytes the targets that acknowledged the address send, the stretch is the longest, and
  *        the error is the one of the first target in attachment order whose answer carries one.
- *        The model calls matches(), start_address() and read_acked(), whose defaults call
- *        address(), start() and read().
+ *        The model calls matches(), start_deferred(), write_deferred() and read_deferred(), whose
+ *        defaults call address(), start_address(), write() and read_acked(), and those call
+ *        start() and read(). A phase one target leaves pending ends at the latest completion of
+ *        every answering target, with their answers combined as above in attachment order.
  */
 class POPCORN_API i2c_target
 {
@@ -148,6 +153,78 @@ public:
   }
 
   /**
+   * @brief A START or repeated START addressed the target, which matches() accepted, with an
+   *        answer the target may give later. The I2C model calls only this form for an address
+   *        phase. An answer given here completes the phase at once, as start_address() does. An
+   *        empty result leaves the phase pending: the target completes it through
+   *        i2c_target_port::complete() with @p ticket, and SCL stays low until then. The default
+   *        returns start_address().
+   * @param address The 7-bit address the controller sent.
+   * @param read Whether the controller reads from the target.
+   * @param at Virtual time since power-on at the end of the address byte.
+   * @param ticket Identifies this target's answer to this phase to i2c_target_port::complete().
+   * @return The answer, as for start_address(), or empty while it is pending.
+   */
+  [[nodiscard]] virtual auto
+      start_deferred(std::uint8_t address, bool read, vtime at, std::uint64_t ticket)
+          -> std::optional<i2c_reply>
+  {
+    static_cast<void>(ticket);
+    return start_address(address, read, at);
+  }
+
+  /**
+   * @brief The controller wrote one byte to the target, with an answer the target may give
+   *        later. The I2C model calls only this form for a written byte. An empty result leaves
+   *        the phase pending until i2c_target_port::complete() with @p ticket. The default returns
+   *        write().
+   * @param byte The byte.
+   * @param at Virtual time since power-on at the end of the byte.
+   * @param ticket Identifies this target's answer to this phase to i2c_target_port::complete().
+   * @return The answer, as for write(), or empty while it is pending.
+   */
+  [[nodiscard]] virtual auto write_deferred(std::uint8_t byte, vtime at, std::uint64_t ticket)
+      -> std::optional<i2c_reply>
+  {
+    static_cast<void>(ticket);
+    return write(byte, at);
+  }
+
+  /**
+   * @brief The controller reads one byte from the target, with an answer the target may give
+   *        later. The I2C model calls only this form for a read byte. An empty result leaves the
+   *        phase pending until i2c_target_port::complete_read() with @p ticket. The default
+   *        returns read_acked().
+   * @param at Virtual time since power-on at the end of the byte.
+   * @param ack Whether the controller acknowledges the byte, as for read_acked().
+   * @param ticket Identifies this target's answer to this phase to
+   *        i2c_target_port::complete_read().
+   * @return The byte and error, as for read_acked(), or empty while they are pending.
+   */
+  [[nodiscard]] virtual auto read_deferred(vtime at, bool ack, std::uint64_t ticket)
+      -> std::optional<i2c_read_reply>
+  {
+    static_cast<void>(ticket);
+    return read_acked(at, ack);
+  }
+
+  /**
+   * @brief The target was attached to the I2C model of an instance, at the model's construction
+   *        for a board target. The port stays valid until detached(). The default does nothing.
+   * @param port The model the target completes pending phases through.
+   */
+  virtual void attached([[maybe_unused]] i2c_target_port& port)
+  {}
+
+  /**
+   * @brief The target was detached from the port attached() gave, when the model is destroyed
+   *        for a board target. The target keeps no reference to that port after the call. The
+   *        default does nothing.
+   */
+  virtual void detached() noexcept
+  {}
+
+  /**
    * @brief A STOP ended the transfer the target took part in. A transfer runs from its START to
    *        its STOP across every repeated START, so a target an earlier address of the transfer
    *        matched hears the STOP too.
@@ -190,6 +267,47 @@ public:
    * @param in Bytes of one save() call.
    */
   virtual void load(std::span<std::byte const> in) = 0;
+};
+
+/**
+ * @brief What the I2C model of an instance offers the i2c_target targets attached to it, to
+ *        complete the phases they left pending in i2c_target::start_deferred(),
+ *        i2c_target::write_deferred() and i2c_target::read_deferred(). A call only schedules
+ *        the completion, one event on its lane, which fires after the model's own events due at
+ *        the same instant, in the order of the lanes. When it falls due, a completion whose
+ *        ticket is not a pending answer of the phase still held, after a reset, after PE was
+ *        cleared, for an answer already given or of another kind of phase, is refused and
+ *        counted in the model's saved state, never applied. The target releases SCL at the
+ *        completion's time plus the answer's stretch_ps.
+ */
+class POPCORN_API i2c_target_port
+{
+public:
+  /**
+   * @brief Completes a pending address or write phase at @p at with @p reply.
+   * @param ticket The ticket start_deferred() or write_deferred() received.
+   * @param reply The target's acknowledge, error and stretch.
+   * @param at Virtual time since power-on of the completion. A due time in the past keeps its
+   *        own instruction count, as a post a link hands at a drain may have.
+   * @param lane Delivery lane of the completion, 1 and up.
+   * @throws std::invalid_argument When @p at is before the last reset, or @p lane is 0.
+   */
+  virtual void complete(std::uint64_t ticket, i2c_reply reply, vtime at, std::uint32_t lane) = 0;
+
+  /**
+   * @brief Completes a pending read phase at @p at with @p reply.
+   * @param ticket The ticket read_deferred() received.
+   * @param reply The byte the target sends, its error and stretch.
+   * @param at Virtual time since power-on of the completion, as for complete().
+   * @param lane Delivery lane of the completion, 1 and up.
+   * @throws std::invalid_argument As complete().
+   */
+  virtual void
+      complete_read(std::uint64_t ticket, i2c_read_reply reply, vtime at, std::uint32_t lane) = 0;
+
+protected:
+  /** @brief Destroyed through its model only. */
+  virtual ~i2c_target_port();
 };
 
 /** @brief The bus phase of a unit an i2c_controller_port queues. */

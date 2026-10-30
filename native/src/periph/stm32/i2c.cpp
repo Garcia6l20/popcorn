@@ -41,6 +41,7 @@ constexpr std::uint32_t hold_begin     = 1;
 constexpr std::uint32_t hold_end       = 2;
 constexpr std::uint32_t port_due       = 3;
 constexpr std::uint32_t timeout_due    = 4;
+constexpr std::uint32_t completed      = 5;
 constexpr std::uint64_t low_cycles     = 2048;
 constexpr std::uint64_t idle_cycles    = 4;
 constexpr std::uint32_t address_length = 10;
@@ -195,21 +196,31 @@ struct i2c_answering
   friend auto operator==(i2c_answering const&, i2c_answering const&) -> bool = default;
 };
 
-auto joined(i2c_reply const& into, i2c_reply const& reply) -> i2c_reply
+struct i2c_pending_answer
 {
-  return {
-      .ack        = into.ack or reply.ack,
-      .error      = into.error != i2c_error::none ? into.error : reply.error,
-      .stretch_ps = std::max(into.stretch_ps, reply.stretch_ps)};
-}
+  std::uint32_t index{};
+  std::uint8_t  done{};
+  std::uint8_t  ack{};
+  std::uint8_t  byte{0xFF};
+  std::uint8_t  error{};
+  std::uint64_t at_ps{};
+  std::uint64_t stretch_ps{};
 
-auto joined(i2c_read_reply const& into, i2c_read_reply const& reply) -> i2c_read_reply
+  friend auto operator==(i2c_pending_answer const&, i2c_pending_answer const&) -> bool = default;
+};
+
+struct i2c_completion
 {
-  return {
-      .byte       = static_cast<std::uint8_t>(into.byte & reply.byte),
-      .error      = into.error != i2c_error::none ? into.error : reply.error,
-      .stretch_ps = std::max(into.stretch_ps, reply.stretch_ps)};
-}
+  std::uint64_t ticket{};
+  std::uint64_t at_ps{};
+  std::uint64_t stretch_ps{};
+  std::uint8_t  read{};
+  std::uint8_t  ack{};
+  std::uint8_t  byte{0xFF};
+  std::uint8_t  error{};
+
+  friend auto operator==(i2c_completion const&, i2c_completion const&) -> bool = default;
+};
 
 struct i2c_transmit
 {
@@ -260,6 +271,11 @@ struct i2c_state
   std::uint8_t                        step{};
   std::uint8_t                        read{};
   std::vector<i2c_answering>          targets;
+  std::vector<i2c_pending_answer>     answers;
+  std::uint32_t                       owed{};
+  std::uint8_t                        timeout_stop{};
+  std::vector<i2c_completion>         completions;
+  std::uint64_t                       refused{};
   std::uint32_t                       left{};
   std::uint8_t                        tx_full{};
   std::uint8_t                        tx_data{};
@@ -343,6 +359,29 @@ auto lower(std::string_view name) -> std::string
  *        TXIS with CR1.TXDMAEN, `<instance>_rx_dma` RXNE with CR1.RXDMAEN, `<instance>_evc_dma` TC
  *        with AUTOCR.TCDMAEN or TCR with AUTOCR.TCRDMAEN. The targets and the set of targets
  *        the current address matched are saved and loaded with the model.
+ *
+ *        Deferred answers, controller mode: at the end of an address, write or read phase the
+ *        model asks each answering target through i2c_target::start_deferred(),
+ *        i2c_target::write_deferred() or i2c_target::read_deferred(), with a ticket made of the
+ *        phase's generation and the target's attachment index. A target that leaves its answer
+ *        pending completes it through i2c_target_port::complete() or
+ *        i2c_target_port::complete_read(), one event on the lane it names. A due time in the
+ *        past keeps its own instruction count, and its time stays the one the target gave. SCL
+ *        stays low from the phase's end to the last completion. The phase then runs as for a
+ *        stretch ending at the latest answer time plus that answer's stretch_ps, with the
+ *        answers combined in attachment order as above: NACKF, RXNE, the next phase, the STOP
+ *        and every flag the answer sets follow that time. The hold counts as SCL low for
+ *        TIMOUTEN and as the target's stretch for TEXTEN: TIMEOUT sets once the hold reaches
+ *        TIMEOUTA, a completion due at the TIMEOUT instant comes after it, and the STOP it sends
+ *        leaves at the end of the hold. Across a System link of latency L the hold of a phase is
+ *        2L + p + s, p the phase time and s the remote target's stretch, so TIMEOUT sets when that
+ *        sum reaches TIMEOUTA. Clearing PE or a reset of any
+ *        kind drops the pending phase and moves the generation, so its later completions are
+ *        refused when they fall due and counted in the saved `refused`, as are a second
+ *        completion of one answer and a completion of the wrong kind. The pending answers and
+ *        every completion not yet due are saved with the model. A completion event survives an
+ *        RCC reset with its record, a machine reset clears both. Each target is attached to the
+ *        model at its construction and detached at its destruction.
  *
  *        Target mode, address, write and read phases, RM0456 65.4.8 and RM0481 53.4.8: the
  *        controller of board::i2c_controllers queues i2c_controller_port entries on the lane it
@@ -449,6 +488,7 @@ auto lower(std::string_view name) -> std::string
 class i2c final : public dispatch_model<i2c, i2c_state>,
                   public i2c_bus,
                   public i2c_controller_port,
+                  public i2c_target_port,
                   public reset_listener,
                   public bus_reset_listener
 {
@@ -458,6 +498,11 @@ public:
       std::vector<std::shared_ptr<i2c_target>> targets,
       std::shared_ptr<i2c_controller_sink>     controller,
       i2c_variant const&                       variant);
+  i2c(i2c const&)                    = delete;
+  auto operator=(i2c const&) -> i2c& = delete;
+  i2c(i2c&&)                         = delete;
+  auto operator=(i2c&&) -> i2c&      = delete;
+  ~i2c() override;
 
   void before_reset(reset_kind kind) override;
 
@@ -496,6 +541,9 @@ public:
   void drop(i2c_phase phase, vtime at, std::uint32_t lane, std::uint64_t unit) override;
   [[nodiscard]] auto last_unit() const -> std::uint64_t override;
   [[nodiscard]] auto queued() const -> std::size_t override;
+  void complete(std::uint64_t ticket, i2c_reply reply, vtime at, std::uint32_t lane) override;
+  void complete_read(std::uint64_t ticket, i2c_read_reply reply, vtime at, std::uint32_t lane)
+      override;
 
   void enable_written(std::uint32_t old, std::uint32_t now);
   void command_written(std::uint32_t old, std::uint32_t now);
@@ -523,6 +571,13 @@ private:
   void               transfer_done(std::uint64_t from_ps);
   void               address_done();
   void               byte_done();
+  [[nodiscard]] auto ticket_of(std::uint32_t index) const -> std::uint64_t;
+  void               answer(std::uint32_t index, std::optional<i2c_reply> const& reply);
+  void               answer(std::uint32_t index, std::optional<i2c_read_reply> const& reply);
+  void               answered();
+  void               queue_completion(i2c_completion record, vtime at, std::uint32_t lane);
+  void               completion_due(std::uint64_t ticket);
+  void               stop_on_timeout(std::uint64_t from_ps);
   void               stop_done();
   void               stop_targets(vtime at);
   void               lost_done();
@@ -786,6 +841,30 @@ i2c::i2c(
   {
     unsupported_.push_back(field("I2C_AUTOCR", "TRIGEN"));
   }
+  std::size_t attached = 0;
+  try
+  {
+    for(; attached < targets_.size(); ++attached)
+    {
+      targets_[attached]->attached(*this);
+    }
+  }
+  catch(...)
+  {
+    while(attached > 0)
+    {
+      targets_[--attached]->detached();
+    }
+    throw;
+  }
+}
+
+i2c::~i2c()
+{
+  for(auto const& target : targets_)
+  {
+    target->detached();
+  }
 }
 
 auto i2c::step() const -> phase
@@ -941,11 +1020,12 @@ void i2c::address_done()
   state_.read        = static_cast<std::uint8_t>(get(regs_, direction_));
   state_.left        = get(regs_, count_);
   auto const address = static_cast<std::uint8_t>((get(regs_, address_) >> 1) & 0x7Fu);
-  auto       reply   = i2c_reply{.ack = false};
   for(auto& answering : state_.targets)
   {
     answering.acked = 0;
   }
+  state_.answers.clear();
+  state_.owed = 0;
   if(get(regs_, ten_bit_) == 0)
   {
     auto const at = target_at();
@@ -953,85 +1033,272 @@ void i2c::address_done()
     {
       if(targets_[index]->matches(address, at))
       {
-        auto const answer = targets_[index]->start_address(address, state_.read != 0, at);
-        auto const slot   = static_cast<std::uint32_t>(index);
+        auto const slot = static_cast<std::uint32_t>(index);
         auto const place =
             std::ranges::lower_bound(state_.targets, slot, {}, &i2c_answering::index);
-        auto& entry = place != state_.targets.end() and place->index == slot
-                        ? *place
-                        : *state_.targets.insert(place, {.index = slot});
-        entry.acked = answer.ack ? std::uint8_t{1} : std::uint8_t{0};
-        reply       = joined(reply, answer);
+        if(place == state_.targets.end() or place->index != slot)
+        {
+          state_.targets.insert(place, {.index = slot});
+        }
+        answer(
+            slot, targets_[index]->start_deferred(address, state_.read != 0, at, ticket_of(slot)));
       }
     }
   }
-  if(failed(reply.error))
+  if(state_.owed == 0)
   {
-    return;
+    answered();
   }
-  state_.end_ps += reply.stretch_ps;
-  if(not reply.ack)
-  {
-    update(regs_, nack_received_, 1);
-    begin_stop(state_.end_ps);
-    return;
-  }
-  next_byte(state_.end_ps);
 }
 
 void i2c::byte_done()
 {
-  --state_.left;
   auto const at = target_at();
+  state_.answers.clear();
+  state_.owed = 0;
   if(state_.read == 0)
   {
-    auto reply = i2c_reply{.ack = false};
     for(auto const& answering : state_.targets)
     {
       if(answering.acked != 0)
       {
-        reply = joined(reply, targets_[answering.index]->write(state_.shift, at));
+        answer(
+            answering.index, targets_[answering.index]->write_deferred(
+                                 state_.shift, at, ticket_of(answering.index)));
       }
     }
-    if(failed(reply.error))
+  }
+  else
+  {
+    auto const ack = state_.left > 1 or get(regs_, reload_) != 0;
+    for(auto const& answering : state_.targets)
     {
-      return;
+      if(answering.acked != 0)
+      {
+        answer(
+            answering.index,
+            targets_[answering.index]->read_deferred(at, ack, ticket_of(answering.index)));
+      }
     }
-    state_.end_ps += reply.stretch_ps;
-    if(not reply.ack)
+  }
+  if(state_.owed == 0)
+  {
+    answered();
+  }
+}
+
+auto i2c::ticket_of(std::uint32_t index) const -> std::uint64_t
+{
+  return std::uint64_t{state_.generation} << 32 | index;
+}
+
+void i2c::answer(std::uint32_t index, std::optional<i2c_reply> const& reply)
+{
+  auto& slot =
+      state_.answers.emplace_back(i2c_pending_answer{.index = index, .at_ps = state_.end_ps});
+  if(not reply)
+  {
+    ++state_.owed;
+    return;
+  }
+  slot.done       = 1;
+  slot.ack        = reply->ack ? 1 : 0;
+  slot.error      = static_cast<std::uint8_t>(reply->error);
+  slot.stretch_ps = reply->stretch_ps;
+}
+
+void i2c::answer(std::uint32_t index, std::optional<i2c_read_reply> const& reply)
+{
+  auto& slot =
+      state_.answers.emplace_back(i2c_pending_answer{.index = index, .at_ps = state_.end_ps});
+  if(not reply)
+  {
+    ++state_.owed;
+    return;
+  }
+  slot.done       = 1;
+  slot.byte       = reply->byte;
+  slot.error      = static_cast<std::uint8_t>(reply->error);
+  slot.stretch_ps = reply->stretch_ps;
+}
+
+void i2c::answered()
+{
+  auto const address = step() == phase::address;
+  auto       ack     = false;
+  auto       byte    = std::uint8_t{0xFF};
+  auto       error   = i2c_error::none;
+  auto       base    = state_.end_ps;
+  auto       release = state_.end_ps;
+  for(auto const& slot : std::exchange(state_.answers, {}))
+  {
+    ack  = ack or slot.ack != 0;
+    byte = static_cast<std::uint8_t>(byte & slot.byte);
+    if(error == i2c_error::none)
+    {
+      error = static_cast<i2c_error>(slot.error);
+    }
+    base    = std::max(base, slot.at_ps);
+    release = std::max(release, slot.at_ps + slot.stretch_ps);
+    if(address)
+    {
+      auto const target = std::ranges::find(state_.targets, slot.index, &i2c_answering::index);
+      target->acked     = slot.ack;
+    }
+  }
+  state_.owed   = 0;
+  state_.end_ps = base;
+  if(not address)
+  {
+    --state_.left;
+  }
+  if(failed(error))
+  {
+    state_.timeout_stop = 0;
+    return;
+  }
+  state_.end_ps = release;
+  if(address)
+  {
+    if(not ack)
     {
       update(regs_, nack_received_, 1);
-      begin_stop(state_.end_ps);
-      return;
+      begin_stop(release);
     }
-    after_byte(state_.end_ps);
-    return;
-  }
-  auto const ack   = state_.left != 0 or get(regs_, reload_) != 0;
-  auto       reply = i2c_read_reply{};
-  for(auto const& answering : state_.targets)
-  {
-    if(answering.acked != 0)
+    else
     {
-      reply = joined(reply, targets_[answering.index]->read_acked(at, ack));
+      next_byte(release);
     }
   }
-  if(failed(reply.error))
+  else if(state_.read == 0)
   {
+    if(not ack)
+    {
+      update(regs_, nack_received_, 1);
+      begin_stop(release);
+    }
+    else
+    {
+      after_byte(release);
+    }
+  }
+  else
+  {
+    if(get(regs_, rx_full_) != 0)
+    {
+      state_.rx_held = 1;
+      state_.rx_data = byte;
+      enter(phase::wait_rx);
+    }
+    else
+    {
+      regs_.poke(receive_.offset, byte);
+      update(regs_, rx_full_, 1);
+      after_byte(release);
+    }
+  }
+  if(std::exchange(state_.timeout_stop, 0) != 0)
+  {
+    stop_on_timeout(release);
+  }
+}
+
+void i2c::stop_on_timeout(std::uint64_t from_ps)
+{
+  switch(step())
+  {
+    case phase::address:
+    case phase::byte:
+    case phase::wait_tx:
+    case phase::wait_rx:
+    case phase::wait_reload:
+    case phase::wait_end:
+      state_.rx_held = 0;
+      begin_stop(from_ps);
+      break;
+    case phase::idle:
+    case phase::stop:
+    case phase::lost:
+      break;
+  }
+}
+
+void i2c::complete(std::uint64_t ticket, i2c_reply reply, vtime at, std::uint32_t lane)
+{
+  queue_completion(
+      {.ticket     = ticket,
+       .stretch_ps = reply.stretch_ps,
+       .ack        = reply.ack ? std::uint8_t{1} : std::uint8_t{0},
+       .error      = static_cast<std::uint8_t>(reply.error)},
+      at, lane);
+}
+
+void i2c::complete_read(std::uint64_t ticket, i2c_read_reply reply, vtime at, std::uint32_t lane)
+{
+  queue_completion(
+      {.ticket     = ticket,
+       .stretch_ps = reply.stretch_ps,
+       .read       = 1,
+       .byte       = reply.byte,
+       .error      = static_cast<std::uint8_t>(reply.error)},
+      at, lane);
+}
+
+void i2c::queue_completion(i2c_completion record, vtime at, std::uint32_t lane)
+{
+  if(lane == 0)
+  {
+    throw std::invalid_argument("an I2C completion goes on a lane of 1 and up");
+  }
+  auto const offset = ctx_.clock.since_power_on().ps - ctx_.clock.time().ps;
+  auto const since  = lane_due_ps(at.ps, offset);
+  if(not since)
+  {
+    throw std::invalid_argument(
+        std::format(
+            "an I2C completion at {} ps since power-on falls before the last reset at {} ps", at.ps,
+            offset));
+  }
+  record.at_ps = *since;
+  state_.completions.push_back(record);
+  ctx_.events.schedule_at(vtime{*since}, completed, record.ticket, lane, ctx_.clock);
+}
+
+void i2c::completion_due(std::uint64_t ticket)
+{
+  auto of_ticket = state_.completions | std::views::filter([ticket](i2c_completion const& record) {
+                     return record.ticket == ticket;
+                   });
+  auto const found = std::ranges::min_element(of_ticket, {}, &i2c_completion::at_ps);
+  if(found == of_ticket.end())
+  {
+    ++state_.refused;
     return;
   }
-  state_.end_ps += reply.stretch_ps;
-  auto const data = reply.byte;
-  if(get(regs_, rx_full_) != 0)
+  auto const done = *found;
+  state_.completions.erase(found.base());
+  auto const reading = step() == phase::byte and state_.read != 0;
+  auto const slot    = std::ranges::find_if(state_.answers, [&](i2c_pending_answer const& one) {
+    return one.done == 0 and one.index == static_cast<std::uint32_t>(ticket);
+  });
+  if(state_.owed == 0
+     or ticket >> 32 != state_.generation
+     or slot == state_.answers.end()
+     or (done.read != 0) != reading)
   {
-    state_.rx_held = 1;
-    state_.rx_data = data;
-    enter(phase::wait_rx);
+    ++state_.refused;
     return;
   }
-  regs_.poke(receive_.offset, data);
-  update(regs_, rx_full_, 1);
-  after_byte(state_.end_ps);
+  slot->done       = 1;
+  slot->ack        = done.ack;
+  slot->byte       = done.byte;
+  slot->error      = done.error;
+  slot->at_ps      = done.at_ps;
+  slot->stretch_ps = done.stretch_ps;
+  if(--state_.owed == 0)
+  {
+    answered();
+  }
 }
 
 void i2c::stop_done()
@@ -1209,6 +1476,9 @@ void i2c::abort()
     begin_read(*held, 0xFF);
   }
   state_.tx = {};
+  state_.answers.clear();
+  state_.owed         = 0;
+  state_.timeout_stop = 0;
   transfer_ended();
   state_.timer.idle_ps.reset();
   state_.timer.idle_spent = 0;
@@ -1259,12 +1529,16 @@ void i2c::restore_reset_values(std::optional<reset_kind> kind)
   {
     regs_.poke(reg(name).offset, describe(name).reset);
   }
-  auto const generation = state_.generation + 1;
-  auto const holds      = state_.holds;
-  auto       port       = std::move(state_.port);
-  state_                = {};
-  state_.generation     = generation;
-  state_.holds          = holds;
+  auto const generation  = state_.generation + 1;
+  auto const holds       = state_.holds;
+  auto       port        = std::move(state_.port);
+  auto       completions = kind ? std::vector<i2c_completion>{} : std::move(state_.completions);
+  auto const refused     = state_.refused;
+  state_                 = {};
+  state_.generation      = generation;
+  state_.holds           = holds;
+  state_.completions     = std::move(completions);
+  state_.refused         = refused;
   rearm_port(std::move(port), kind);
   tx_dma_.resolve();
   rx_dma_.resolve();
@@ -2310,24 +2584,13 @@ void i2c::timed_out()
     state_.addressed = 0;
     state_.tx        = {.ask = state_.tx.ask};
   }
+  else if(state_.owed != 0)
+  {
+    state_.timeout_stop = 1;
+  }
   else
   {
-    switch(step())
-    {
-      case phase::address:
-      case phase::byte:
-      case phase::wait_tx:
-      case phase::wait_rx:
-      case phase::wait_reload:
-      case phase::wait_end:
-        state_.rx_held = 0;
-        begin_stop(timer.low_end_ps ? std::max(now, *timer.low_end_ps) : released());
-        break;
-      case phase::idle:
-      case phase::stop:
-      case phase::lost:
-        break;
-    }
+    stop_on_timeout(timer.low_end_ps ? std::max(now, *timer.low_end_ps) : released());
   }
   timer.low_ps.reset();
   timer.low_end_ps.reset();
@@ -2504,6 +2767,13 @@ void i2c::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     timed_out();
     flags();
+    return;
+  }
+  if(kind == completed)
+  {
+    completion_due(payload);
+    flags();
+    rethrow_strict();
     return;
   }
   if(kind == hold_begin and payload == state_.pending.id)

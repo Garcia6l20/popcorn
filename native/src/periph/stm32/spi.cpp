@@ -665,9 +665,21 @@ spi::spi(
   {
     unsupported_.push_back(field("SPI_AUTOCR", "TRIGEN"));
   }
-  for(auto const& attached : attachments_)
+  std::size_t attached = 0;
+  try
   {
-    attached.device->attached(*this);
+    for(; attached < attachments_.size(); ++attached)
+    {
+      attachments_[attached].device->attached(*this);
+    }
+  }
+  catch(...)
+  {
+    while(attached > 0)
+    {
+      attachments_[--attached].device->detached();
+    }
+    throw;
   }
 }
 

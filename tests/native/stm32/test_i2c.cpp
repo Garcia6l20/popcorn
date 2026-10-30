@@ -6095,3 +6095,867 @@ TEST_CASE("a target an address of the transfer adds keeps its attachment order i
     CHECK(r.targets[2]->kinds() == "WwWwP");
   }
 }
+
+namespace
+{
+constexpr std::uint32_t completed_kind = 5;
+
+struct asked_phase
+{
+  char          kind{};
+  std::uint8_t  value{};
+  std::uint64_t at{};
+  std::uint64_t ticket{};
+};
+
+class deferring final : public periph::i2c_target
+{
+public:
+  explicit deferring(std::uint8_t own = 0x50) : own_{own}
+  {}
+
+  periph::i2c_target_port*     port{};
+  int                          attaches{};
+  int                          detaches{};
+  std::optional<std::uint64_t> delay;
+  bool                         hold{};
+  bool                         ack_address{true};
+  std::uint8_t                 byte{0x5A};
+  periph::i2c_error            error{};
+  std::uint32_t                error_call{~0u};
+  std::uint32_t                calls{};
+  std::uint64_t                stretch_ps{};
+  std::uint32_t                lane{1};
+  bool                         refuse_attach{};
+  std::vector<asked_phase>     asked;
+  std::vector<std::uint64_t>   stops;
+
+  [[nodiscard]] auto address() const -> std::uint8_t override
+  {
+    return own_;
+  }
+
+  auto start(bool, vtime) -> periph::i2c_reply override
+  {
+    return {.ack = false};
+  }
+
+  auto write(std::uint8_t, vtime) -> periph::i2c_reply override
+  {
+    return {.ack = false};
+  }
+
+  auto read(vtime) -> periph::i2c_read_reply override
+  {
+    return {};
+  }
+
+  auto start_deferred(std::uint8_t sent, bool read, vtime at, std::uint64_t ticket)
+      -> std::optional<periph::i2c_reply> override
+  {
+    calls = 0;
+    asked.push_back({read ? 'R' : 'W', sent, at.ps, ticket});
+    return given(
+        periph::i2c_reply{.ack = ack_address, .error = pick(), .stretch_ps = stretch_ps}, at,
+        ticket);
+  }
+
+  auto write_deferred(std::uint8_t value, vtime at, std::uint64_t ticket)
+      -> std::optional<periph::i2c_reply> override
+  {
+    ++calls;
+    asked.push_back({'w', value, at.ps, ticket});
+    return given(
+        periph::i2c_reply{.ack = true, .error = pick(), .stretch_ps = stretch_ps}, at, ticket);
+  }
+
+  auto read_deferred(vtime at, bool ack, std::uint64_t ticket)
+      -> std::optional<periph::i2c_read_reply> override
+  {
+    ++calls;
+    asked.push_back({ack ? 'a' : 'n', byte, at.ps, ticket});
+    return given(
+        periph::i2c_read_reply{.byte = byte, .error = pick(), .stretch_ps = stretch_ps}, at,
+        ticket);
+  }
+
+  void stop(vtime at) override
+  {
+    stops.push_back(at.ps);
+  }
+
+  void attached(periph::i2c_target_port& to) override
+  {
+    if(refuse_attach)
+    {
+      throw std::runtime_error("the target refuses its port");
+    }
+    port = &to;
+    ++attaches;
+  }
+
+  void detached() noexcept override
+  {
+    port = nullptr;
+    ++detaches;
+  }
+
+  void save(std::vector<std::byte>& out) const override
+  {
+    out.push_back(static_cast<std::byte>(calls));
+  }
+
+  void load(std::span<std::byte const> in) override
+  {
+    REQUIRE(in.size() == 1);
+    calls = std::to_integer<std::uint32_t>(in.front());
+  }
+
+  void send(std::uint64_t ticket, periph::i2c_reply reply, vtime at) const
+  {
+    port->complete(ticket, reply, at, lane);
+  }
+
+  void send(std::uint64_t ticket, periph::i2c_read_reply reply, vtime at) const
+  {
+    port->complete_read(ticket, reply, at, lane);
+  }
+
+  [[nodiscard]] auto kinds() const -> std::string
+  {
+    std::string out;
+    for(auto const& one : asked)
+    {
+      out.push_back(one.kind);
+    }
+    return out;
+  }
+
+private:
+  [[nodiscard]] auto pick() const -> periph::i2c_error
+  {
+    return calls == error_call ? error : periph::i2c_error::none;
+  }
+
+  template <class Reply>
+  auto given(Reply reply, vtime at, std::uint64_t ticket) -> std::optional<Reply>
+  {
+    if(delay)
+    {
+      send(ticket, reply, vtime{at.ps + *delay});
+      return std::nullopt;
+    }
+    if(hold)
+    {
+      return std::nullopt;
+    }
+    return reply;
+  }
+
+  std::uint8_t own_;
+};
+
+auto offset_of(stm32_fixture const& f) -> std::uint64_t
+{
+  auto const& clock = f.target->virtual_clock();
+  return clock.since_power_on().ps - clock.time().ps;
+}
+
+auto completion_due(stm32_fixture const& f, std::optional<std::uint64_t> ticket = std::nullopt)
+    -> std::optional<std::uint64_t>
+{
+  auto const& units = f.target->description().peripherals;
+  auto const  found =
+      std::ranges::find(units, std::string_view{"I2C1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(found != units.end());
+  auto const owner = static_cast<std::uint32_t>(found - units.begin());
+  for(auto const& event : f.target->snapshot().data().events.pending)
+  {
+    if(event.id.owner == owner
+       and event.id.kind == completed_kind
+       and (not ticket or event.payload == *ticket))
+    {
+      return event.due_ps;
+    }
+  }
+  return std::nullopt;
+}
+
+auto refused_of(stm32_fixture const& f) -> std::int64_t
+{
+  return popcorn::testing::saved_integer(f, "I2C1", "refused").value_or(-1);
+}
+
+auto slow(std::optional<std::uint64_t> delay = std::nullopt) -> std::shared_ptr<deferring>
+{
+  auto made   = std::make_shared<deferring>();
+  made->delay = delay;
+  made->hold  = not delay;
+  return made;
+}
+}
+
+TEST_CASE("a deferred answer holds SCL from the phase end to its completion, the next phase after")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    auto const target = slow();
+    fan_rig    r{part, std::vector{target}};
+    auto const b  = r.b();
+    auto const p  = r.period();
+    auto const d  = 20 * p;
+    target->delay = d;
+    auto const t0 = b.now();
+    b.command(0x50, 1, false, true);
+    b.send(0x10);
+    auto const a = t0 + 10 * p;
+    b.run_until(a + p / 2);
+    REQUIRE(target->kinds() == "W");
+    CHECK(target->asked[0].at == a + offset_of(*r.f));
+    CHECK(completion_due(*r.f, target->asked[0].ticket) == a + d);
+    CHECK_FALSE(due_of_kind(*r.f, "I2C1", 0).has_value());
+    CHECK(b.get("ISR", "BUSY") == 1);
+    b.run_until(a + d + p / 2);
+    CHECK(due_of_kind(*r.f, "I2C1", 0) == a + d + 9 * p);
+    b.run_until(a + d + 9 * p + p / 2);
+    REQUIRE(target->kinds() == "Ww");
+    CHECK(target->asked[1].value == 0x10);
+    CHECK(target->asked[1].at == a + d + 9 * p + offset_of(*r.f));
+    CHECK(target->asked[1].ticket != target->asked[0].ticket);
+    CHECK(completion_due(*r.f, target->asked[1].ticket) == a + 2 * d + 9 * p);
+    b.run_until(a + 2 * d + 10 * p - p / 2);
+    CHECK(b.get("ISR", "STOPF") == 0);
+    b.run_until(a + 2 * d + 10 * p + p / 2);
+    CHECK(b.get("ISR", "STOPF") == 1);
+    REQUIRE(target->stops.size() == 1);
+    CHECK(target->stops[0] == a + 2 * d + 10 * p + offset_of(*r.f));
+    CHECK(refused_of(*r.f) == 0);
+  }
+}
+
+TEST_CASE("a deferred read byte lands in RXDR at its completion, with the stretch after it")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    auto const target = slow();
+    fan_rig    r{part, std::vector{target}};
+    auto const b       = r.b();
+    auto const period  = r.period();
+    auto const d       = 20 * period;
+    target->delay      = d;
+    target->byte       = 0xC3;
+    target->stretch_ps = 3 * period;
+    auto const t0      = b.now();
+    b.command(0x50, 1, true, true);
+    auto const a = t0 + 10 * period;
+    b.run_until(a + d + 3 * period + 9 * period + d - period / 2);
+    CHECK(target->kinds() == "Rn");
+    CHECK(target->asked[1].at == a + d + 3 * period + 9 * period + offset_of(*r.f));
+    CHECK(b.get("ISR", "RXNE") == 0);
+    b.run_until(a + 2 * d + 12 * period + period / 2);
+    CHECK(b.get("ISR", "RXNE") == 1);
+    CHECK(b.receive() == 0xC3);
+    b.run_until(a + 2 * d + 16 * period - period / 2);
+    CHECK(b.get("ISR", "STOPF") == 0);
+    b.run_until(a + 2 * d + 16 * period + period / 2);
+    CHECK(b.get("ISR", "STOPF") == 1);
+  }
+}
+
+TEST_CASE("a deferred NACK, BERR or ARLO takes effect at the completion")
+{
+  using periph::i2c_error;
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    {
+      auto const target = slow();
+      fan_rig    r{part, std::vector{target}};
+      auto const b        = r.b();
+      auto const p        = r.period();
+      auto const d        = 20 * p;
+      target->delay       = d;
+      target->ack_address = false;
+      auto const a        = b.now() + 10 * p;
+      b.command(0x50, 1, false, true);
+      b.run_until(a + d - p / 2);
+      CHECK(b.get("ISR", "NACKF") == 0);
+      CHECK(b.get("ISR", "BUSY") == 1);
+      b.run_until(a + d + p / 2);
+      CHECK(b.get("ISR", "NACKF") == 1);
+      b.run_until(a + d + p + p / 2);
+      CHECK(b.get("ISR", "STOPF") == 1);
+      REQUIRE(target->stops.size() == 1);
+      CHECK(target->stops[0] == a + d + p + offset_of(*r.f));
+    }
+    {
+      auto const target = slow();
+      fan_rig    r{part, std::vector{target}};
+      auto const b       = r.b();
+      auto const p       = r.period();
+      auto const d       = 20 * p;
+      target->delay      = d;
+      target->error      = i2c_error::bus_error;
+      target->error_call = 1;
+      auto const a       = b.now() + 10 * p;
+      b.command(0x50, 1, false, true);
+      b.send(0x10);
+      b.run_until(a + 2 * d + 9 * p - p / 2);
+      CHECK(b.get("ISR", "BERR") == 0);
+      b.run_until(a + 2 * d + 9 * p + p / 2);
+      CHECK(b.get("ISR", "BERR") == 1);
+    }
+    {
+      auto const target = slow();
+      fan_rig    r{part, std::vector{target}};
+      auto const b       = r.b();
+      auto const p       = r.period();
+      auto const d       = 20 * p;
+      target->delay      = d;
+      target->error      = i2c_error::arbitration_lost;
+      target->error_call = 0;
+      auto const a       = b.now() + 10 * p;
+      b.command(0x50, 1, false, true);
+      b.send(0x10);
+      b.run_until(a + d - p / 2);
+      CHECK(b.get("ISR", "ARLO") == 0);
+      b.run_until(a + d + p / 2);
+      CHECK(b.get("ISR", "ARLO") == 1);
+      CHECK(b.get("ISR", "BUSY") == 1);
+      b.run_until(a + d + p + p / 2);
+      CHECK(b.get("ISR", "BUSY") == 0);
+      CHECK(b.get("ISR", "NACKF") == 0);
+      CHECK(b.get("ISR", "STOPF") == 0);
+      CHECK(target->kinds() == "W");
+      REQUIRE(target->stops.size() == 1);
+      CHECK(target->stops[0] == a + d + p + offset_of(*r.f));
+    }
+  }
+}
+
+TEST_CASE("deferred and synchronous answers of one phase join in attachment order at the latest")
+{
+  using periph::i2c_error;
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    {
+      auto const now   = slow();
+      auto const later = slow();
+      now->hold        = false;
+      now->byte        = 0xF0;
+      later->byte      = 0x3C;
+      fan_rig r{
+          part, std::vector{now, later}
+      };
+      auto const b = r.b();
+      auto const p = r.period();
+      auto const d = 20 * p;
+      later->delay = d;
+      auto const a = b.now() + 10 * p;
+      b.command(0x50, 1, true, true);
+      b.run_until(a + 2 * d + 9 * p - p / 2);
+      CHECK(b.get("ISR", "RXNE") == 0);
+      REQUIRE(later->kinds() == "Rn");
+      CHECK(now->asked[1].at == later->asked[1].at);
+      CHECK(now->asked[0].ticket != later->asked[0].ticket);
+      b.run_until(a + 2 * d + 9 * p + p / 2);
+      CHECK(b.get("ISR", "RXNE") == 1);
+      CHECK(b.receive() == 0x30);
+    }
+    {
+      auto const first  = slow();
+      auto const second = slow();
+      fan_rig    r{
+          part, std::vector{first, second}
+      };
+      auto const b       = r.b();
+      auto const p       = r.period();
+      first->delay       = 30 * p;
+      second->delay      = 10 * p;
+      first->error       = i2c_error::overrun;
+      first->error_call  = 1;
+      second->error      = i2c_error::bus_error;
+      second->error_call = 1;
+      auto const a       = b.now() + 10 * p;
+      b.command(0x50, 1, false, true);
+      b.send(0x10);
+      auto const end = a + 30 * p + 9 * p + 30 * p;
+      b.run_until(end - p / 2);
+      CHECK(b.get("ISR", "OVR") == 0);
+      CHECK(b.get("ISR", "BERR") == 0);
+      b.run_until(end + p / 2);
+      CHECK(b.get("ISR", "OVR") == 1);
+      CHECK(b.get("ISR", "BERR") == 0);
+    }
+  }
+}
+
+TEST_CASE("a hold past TIMEOUTA sets TIMEOUT and the STOP leaves at the completion")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    for(bool const over : {false, true})
+    {
+      CAPTURE(over);
+      auto const target = slow();
+      fan_rig    r{part, std::vector{target}};
+      auto const b     = r.b();
+      auto const p     = r.period();
+      auto const limit = kernel_ps(*r.f, 2048);
+      auto const d     = over ? limit + 40 * p : limit - 40 * p;
+      target->delay    = d;
+      b.set("CR1", "ERRIE", 1);
+      b.write(b.at("I2C1", "TIMEOUTR"), timoutens);
+      auto const a = b.now() + 10 * p;
+      b.command(0x50, 1, false, true);
+      b.send(0x10);
+      b.run_until(a + p / 2);
+      CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{a + limit});
+      b.run_until(a + limit + p / 2);
+      CHECK(b.get("ISR", "TIMEOUT") == (over ? 1u : 0u));
+      CHECK(target->stops.empty());
+      b.run_until(a + (over ? d : 2 * d + 9 * p) + 30 * p);
+      CHECK(b.get("ISR", "STOPF") == 1);
+      REQUIRE(target->stops.size() == 1);
+      if(over)
+      {
+        CHECK(target->kinds() == "W");
+        CHECK(target->stops[0] == a + d + p + offset_of(*r.f));
+        continue;
+      }
+      CHECK(b.get("ISR", "TIMEOUT") == 0);
+      CHECK(target->kinds() == "Ww");
+    }
+  }
+}
+
+TEST_CASE("a hold is the target's stretch for TEXTEN, the wait after it counts from its end")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    auto const target = slow();
+    fan_rig    r{part, std::vector{target}};
+    auto const b     = r.b();
+    auto const p     = r.period();
+    auto const limit = kernel_ps(*r.f, 2048);
+    auto const d     = 2 * limit;
+    target->delay    = d;
+    b.set("CR1", "ERRIE", 1);
+    b.write(b.at("I2C1", "TIMEOUTR"), textens | timeout_b(0));
+    auto const a = b.now() + 10 * p;
+    b.command(0x50, 2, false, true);
+    b.run_until(a + d - p);
+    CHECK(timeout_events(*r.f).empty());
+    CHECK(b.get("ISR", "TIMEOUT") == 0);
+    b.run_until(a + d + p / 2);
+    CHECK(b.get("ISR", "TXIS") == 1);
+    CHECK(timeout_events(*r.f) == std::vector<std::uint64_t>{a + d + limit});
+    b.run_until(a + d + limit - p / 2);
+    CHECK(b.get("ISR", "TIMEOUT") == 0);
+    b.run_until(a + d + limit + p / 2);
+    CHECK(b.get("ISR", "TIMEOUT") == 1);
+  }
+}
+
+TEST_CASE("a completion fires after a TIMEOUT due at the same count, posted before or after it")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    std::vector<std::vector<std::uint64_t>> outcomes;
+    for(bool const inside : {true, false})
+    {
+      CAPTURE(inside);
+      auto const target = slow();
+      fan_rig    r{part, std::vector{target}};
+      auto const b     = r.b();
+      auto const p     = r.period();
+      auto const limit = kernel_ps(*r.f, 2048);
+      if(inside)
+      {
+        target->delay = limit;
+      }
+      b.write(b.at("I2C1", "TIMEOUTR"), timoutens);
+      auto const a = b.now() + 10 * p;
+      b.command(0x50, 1, false, true);
+      b.send(0x10);
+      b.run_until(a + p / 2);
+      REQUIRE(target->kinds() == "W");
+      if(not inside)
+      {
+        REQUIRE(timeout_events(*r.f) == std::vector<std::uint64_t>{a + limit});
+        target->send(target->asked[0].ticket, {.ack = true}, vtime{a + limit + offset_of(*r.f)});
+      }
+      REQUIRE(completion_due(*r.f) == a + limit);
+      b.run_until(a + limit + 20 * p);
+      std::vector<std::uint64_t> outcome{b.get("ISR", "TIMEOUT"), target->asked.size()};
+      outcome.insert(outcome.end(), target->stops.begin(), target->stops.end());
+      outcomes.push_back(outcome);
+    }
+    REQUIRE(outcomes.size() == 2);
+    CHECK(outcomes[0] == outcomes[1]);
+    CHECK(outcomes[0][0] == 1);
+    CHECK(outcomes[0][1] == 1);
+  }
+}
+
+TEST_CASE("a deferred completion is due in the time base of the last reset, after a system reset")
+{
+  using popcorn::reset_kind;
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    auto const target = slow();
+    fan_rig    r{part, std::vector{target}};
+    auto const b  = r.b();
+    auto const p  = r.period();
+    auto const d  = 20 * p;
+    target->delay = d;
+    b.run_until(50 * us);
+    for(auto const kind : {reset_kind::software, reset_kind::power_on})
+    {
+      CAPTURE(kind);
+      r.f->target->reset(kind);
+      r.f->set("pc", sym(part.firmware, "idle"));
+      r.enable();
+      auto const offset = offset_of(*r.f);
+      if(kind == reset_kind::software)
+      {
+        REQUIRE(offset >= 50 * us);
+      }
+      else
+      {
+        REQUIRE(offset == 0);
+      }
+      target->asked.clear();
+      target->stops.clear();
+      auto const a = b.now() + 10 * p;
+      b.command(0x50, 0, false, true);
+      b.run_until(a + p / 2);
+      REQUIRE(target->asked.size() == 1);
+      CHECK(target->asked[0].at == a + offset);
+      CHECK(completion_due(*r.f, target->asked[0].ticket) == a + d);
+      b.run_until(a + d + p + p / 2);
+      CHECK(b.get("ISR", "STOPF") == 1);
+      REQUIRE(target->stops.size() == 1);
+      CHECK(target->stops[0] == a + d + p + offset);
+      b.set("ICR", "STOPCF", 1);
+    }
+  }
+}
+
+TEST_CASE("a STOP a TIMEOUT sends during a hold starts at a past-due completion's own time")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    auto const target = slow();
+    fan_rig    r{part, std::vector{target}};
+    auto const b     = r.b();
+    auto const p     = r.period();
+    auto const limit = kernel_ps(*r.f, 2048);
+    auto const hz    = r.f->target->virtual_clock().instruction_hz();
+    REQUIRE(1'000'000'000'000 % hz == 0);
+    auto const instruction = 1'000'000'000'000 / hz;
+    REQUIRE(3 * instruction < p);
+    b.write(b.at("I2C1", "TIMEOUTR"), timoutens);
+    auto const a = b.now() + 10 * p;
+    b.command(0x50, 1, false, true);
+    b.send(0x10);
+    b.run_until(a + limit + p / 2);
+    CHECK(b.get("ISR", "TIMEOUT") == 1);
+    REQUIRE(target->kinds() == "W");
+    auto const x = a + limit + 50 * p;
+    b.run_until(x);
+    auto const at = x - 3 * instruction;
+    target->send(
+        target->asked[0].ticket, periph::i2c_reply{.ack = true}, vtime{at + offset_of(*r.f)});
+    b.run_until(x + 30 * p);
+    CHECK(b.get("ISR", "STOPF") == 1);
+    REQUIRE(target->stops.size() == 1);
+    CHECK(target->stops[0] == at + p + offset_of(*r.f));
+    CHECK(refused_of(*r.f) == 0);
+  }
+}
+
+TEST_CASE("a target whose attached throws detaches the targets attached before it")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    auto const first      = slow();
+    auto const second     = slow();
+    auto const third      = slow();
+    second->refuse_attach = true;
+    CHECK_THROWS(
+        fan_rig{
+            part, std::vector{first, second, third}
+    });
+    CHECK(first->attaches == 1);
+    CHECK(first->detaches == 1);
+    CHECK(first->port == nullptr);
+    CHECK(second->attaches == 0);
+    CHECK(second->detaches == 0);
+    CHECK(third->attaches == 0);
+    CHECK(third->detaches == 0);
+  }
+}
+
+TEST_CASE("a target is attached at the I2C's construction and detached once at its destruction")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    auto const target = slow();
+    {
+      fan_rig r{part, std::vector{target}};
+      CHECK(target->attaches == 1);
+      CHECK(target->port != nullptr);
+      CHECK(target->detaches == 0);
+    }
+    CHECK(target->attaches == 1);
+    CHECK(target->detaches == 1);
+    CHECK(target->port == nullptr);
+  }
+}
+
+TEST_CASE("every reset kind, a power cycle and PE clear drop a held phase, its completion refused")
+{
+  using popcorn::reset_kind;
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    auto const target = slow();
+    fan_rig    r{part, std::vector{target}};
+    auto const b        = r.b();
+    auto const p        = r.period();
+    auto       expected = std::int64_t{0};
+    auto const leg      = [&](auto&& drop) {
+      target->asked.clear();
+      auto const a = b.now() + 10 * p;
+      b.command(0x50, 0, false, true);
+      b.run_until(a + p / 2);
+      REQUIRE(target->asked.size() == 1);
+      auto const stale = target->asked[0].ticket;
+      target->send(stale, {.ack = false}, vtime{b.now() + 40 * p + offset_of(*r.f)});
+      REQUIRE(completion_due(*r.f, stale).has_value());
+      drop();
+      CHECK(b.get("ISR", "BUSY") == 0);
+      auto const kept = completion_due(*r.f).has_value();
+      auto const t1   = b.now() + 10 * p;
+      b.command(0x50, 0, false, true);
+      b.run_until(t1 + p / 2);
+      REQUIRE(target->asked.size() == 2);
+      auto const now = b.now();
+      if(not kept)
+      {
+        CHECK_FALSE(
+            popcorn::testing::saved_integer(*r.f, "I2C1", "completions.0.ticket").has_value());
+        target->send(stale, {.ack = false}, vtime{now + 2 * p + offset_of(*r.f)});
+      }
+      target->send(target->asked[1].ticket, {.ack = true}, vtime{now + 50 * p + offset_of(*r.f)});
+      b.run_until(now + 45 * p);
+      CHECK(refused_of(*r.f) == ++expected);
+      CHECK(b.get("ISR", "NACKF") == 0);
+      CHECK(b.get("ISR", "STOPF") == 0);
+      b.run_until(now + 51 * p + p / 2);
+      CHECK(b.get("ISR", "STOPF") == 1);
+      CHECK(b.get("ISR", "NACKF") == 0);
+      b.set("ICR", "STOPCF", 1);
+    };
+    auto const machine = [&](auto&& reset) {
+      return [&, reset] {
+        reset();
+        CHECK_FALSE(completion_due(*r.f).has_value());
+        r.f->set("pc", sym(part.firmware, "idle"));
+        r.enable();
+      };
+    };
+    for(auto const kind :
+        {reset_kind::power_on, reset_kind::brown_out, reset_kind::pin, reset_kind::software,
+         reset_kind::watchdog, reset_kind::window_watchdog, reset_kind::low_power,
+         reset_kind::option_load})
+    {
+      CAPTURE(kind);
+      leg(machine([&, kind] { r.f->target->reset(kind); }));
+    }
+    leg(machine([&] { r.f->target->power_cycle(); }));
+    leg([&] {
+      b.set("CR1", "PE", 0);
+      b.set("CR1", "PE", 1);
+    });
+  }
+}
+
+TEST_CASE("after I2C1RST a completion is refused once, handed before or after the reset")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    std::vector<std::int64_t> counts;
+    for(bool const before : {true, false})
+    {
+      CAPTURE(before);
+      auto const target = slow();
+      fan_rig    r{part, std::vector{target}};
+      auto const b = r.b();
+      auto const p = r.period();
+      auto const a = b.now() + 10 * p;
+      b.command(0x50, 0, false, true);
+      b.run_until(a + p / 2);
+      REQUIRE(target->asked.size() == 1);
+      auto const stale = target->asked[0].ticket;
+      auto const now   = b.now();
+      auto const post  = [&] {
+        target->send(stale, {.ack = false}, vtime{now + 15 * p + offset_of(*r.f)});
+      };
+      if(before)
+      {
+        post();
+      }
+      rcc_reset_pulse(*r.f, part.reset, "I2C1RST");
+      r.enable();
+      if(not before)
+      {
+        post();
+      }
+      CHECK(completion_due(*r.f, stale) == now + 15 * p);
+      b.command(0x50, 0, false, true);
+      b.run_until(now + 10 * p + p / 2);
+      REQUIRE(target->asked.size() == 2);
+      target->send(target->asked[1].ticket, {.ack = true}, vtime{now + 20 * p + offset_of(*r.f)});
+      b.run_until(now + 17 * p);
+      counts.push_back(refused_of(*r.f));
+      CHECK(b.get("ISR", "NACKF") == 0);
+      b.run_until(now + 21 * p + p / 2);
+      CHECK(b.get("ISR", "STOPF") == 1);
+      CHECK(b.get("ISR", "NACKF") == 0);
+    }
+    CHECK(counts == std::vector<std::int64_t>{1, 1});
+  }
+}
+
+TEST_CASE("a snapshot inside a hold restores the same completion and phases, bytes re-dumped")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    auto const target = slow();
+    fan_rig    r{part, std::vector{target}};
+    auto const b  = r.b();
+    auto const p  = r.period();
+    auto const d  = 20 * p;
+    target->delay = d;
+    auto const a  = b.now() + 10 * p;
+    b.command(0x50, 1, false, true);
+    b.send(0x10);
+    b.run_until(a + p / 2);
+    REQUIRE(target->kinds() == "W");
+    auto const saved = r.f->target->snapshot();
+    auto const first = r.model_bytes();
+    auto const run   = [&] {
+      b.run_until(a + 2 * d + 10 * p + p / 2);
+      std::vector<std::uint64_t> out{b.get("ISR", "STOPF")};
+      for(auto const& one : target->asked)
+      {
+        out.push_back(one.at);
+      }
+      out.insert(out.end(), target->stops.begin(), target->stops.end());
+      return out;
+    };
+    auto const before = run();
+    r.f->target->restore(saved);
+    CHECK(r.model_bytes() == first);
+    target->asked.resize(1);
+    target->stops.clear();
+    CHECK(run() == before);
+    CHECK(before[0] == 1);
+    CHECK(before.size() == 4);
+    CHECK(refused_of(*r.f) == 0);
+  }
+}
+
+TEST_CASE("a completion of the wrong kind or a second one is refused, a bad call throws")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    auto const target = slow();
+    fan_rig    r{part, std::vector{target}};
+    auto const b = r.b();
+    auto const p = r.period();
+    b.run_until(30 * us);
+    r.f->target->reset(popcorn::reset_kind::software);
+    r.f->set("pc", sym(part.firmware, "idle"));
+    r.enable();
+    auto const offset = offset_of(*r.f);
+    REQUIRE(offset >= 30 * us);
+    auto const a = b.now() + 10 * p;
+    b.command(0x50, 0, false, true);
+    b.run_until(a + p / 2);
+    REQUIRE(target->asked.size() == 1);
+    auto const ticket = target->asked[0].ticket;
+    auto const now    = b.now();
+    CHECK_THROWS_AS(
+        target->port->complete(ticket, {}, vtime{now + offset}, 0), std::invalid_argument);
+    CHECK_THROWS_AS(
+        target->send(ticket, periph::i2c_reply{}, vtime{offset - 1}), std::invalid_argument);
+    CHECK_FALSE(completion_due(*r.f).has_value());
+    target->send(ticket, periph::i2c_read_reply{.byte = 0}, vtime{now + p + offset});
+    b.run_until(now + p + p / 2);
+    CHECK(refused_of(*r.f) == 1);
+    CHECK(b.get("ISR", "STOPF") == 0);
+    auto const hz = r.f->target->virtual_clock().instruction_hz();
+    REQUIRE(1'000'000'000'000 % hz == 0);
+    auto const period = 1'000'000'000'000 / hz;
+    auto const late   = b.now();
+    target->send(ticket, {.ack = true}, vtime{late - 3 * period + offset});
+    auto const pending = r.f->target->snapshot().data().events.pending;
+    auto const kept    = std::ranges::find_if(pending, [&](core::event const& event) {
+      return event.id.kind == completed_kind and event.due_ps == late - 3 * period;
+    });
+    REQUIRE(kept != pending.end());
+    CHECK(kept->at.value + 3 == r.f->target->virtual_clock().now().value);
+    CHECK(kept->lane == 1);
+    target->send(ticket, {.ack = false}, vtime{late + 2 * p + offset});
+    b.run_until(late + 3 * p);
+    CHECK(b.get("ISR", "STOPF") == 1);
+    CHECK(b.get("ISR", "NACKF") == 0);
+    CHECK(refused_of(*r.f) == 2);
+    b.set("ICR", "STOPCF", 1);
+
+    auto const c = b.now() + 10 * p;
+    b.command(0x50, 0, false, true);
+    b.run_until(c + p / 2);
+    REQUIRE(target->asked.size() == 2);
+    b.set("CR1", "PE", 0);
+    b.set("CR1", "PE", 1);
+    target->send(target->asked[1].ticket, {.ack = false}, vtime{b.now() + p + offset});
+    b.run_until(b.now() + 2 * p);
+    CHECK(refused_of(*r.f) == 3);
+    CHECK(b.get("ISR", "NACKF") == 0);
+    CHECK(b.get("ISR", "BUSY") == 0);
+  }
+}
+
+TEST_CASE("1000 refused I2C completions leave no record behind")
+{
+  auto const target = slow();
+  fan_rig    r{target_parts[0], std::vector{target}};
+  auto const b   = r.b();
+  auto const now = b.now();
+  for(std::uint64_t index = 0; index < 1000; ++index)
+  {
+    target->send(index + 1'000'000, periph::i2c_reply{}, vtime{now + us + index + offset_of(*r.f)});
+  }
+  CHECK(popcorn::testing::saved_integer(*r.f, "I2C1", "completions.999.ticket").has_value());
+  b.run_until(now + 2 * us);
+  CHECK(refused_of(*r.f) == 1000);
+  CHECK_FALSE(popcorn::testing::saved_integer(*r.f, "I2C1", "completions.0.ticket").has_value());
+  CHECK_FALSE(completion_due(*r.f).has_value());
+}

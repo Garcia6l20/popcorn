@@ -9,6 +9,7 @@ spi_target_port::~spi_target_port()         = default;
 spi_controller_sink::~spi_controller_sink() = default;
 spi_controller_port::~spi_controller_port() = default;
 i2c_target::~i2c_target()                   = default;
+i2c_target_port::~i2c_target_port()         = default;
 i2c_controller_sink::~i2c_controller_sink() = default;
 i2c_controller_port::~i2c_controller_port() = default;
 uart_endpoint::~uart_endpoint()             = default;
