@@ -277,7 +277,15 @@ On the STM32L1, RM0038 section 3:
 - At RDP level 1 every read, program and erase completes, the user flash boot of RM0038 3.7.1.
   BOR_LEV, IWDG_SW, nRST_STOP, nRST_STDBY and nBFB2 read in FLASH_OBR as loaded, and the BOR
   threshold, the watchdog start, Stop, Standby and the boot address follow the machine's own
-  configuration. FLASH_WRPRx bits are write protection on every category.
+  configuration.
+- PCROP on STM32L151, L152 and L162 Cat.2 and Cat.3 on DIE427, RM0038 3.7.4: SPRMOD loads with RDP
+  against nSPRMOD and nRDP. With SPRMOD set a FLASH_WRPRx bit at 0 protects its sector against
+  program and erase, WRPERR, and against a CPU, DMA or filtered debugger data read, which reads 0
+  and sets FLASH_SR.RDERR. A fetch from it runs. Host and unfiltered debugger reads return the
+  content. An option store programs with SPRMOD and every protected WRPx bit kept. The RDP level
+  1 to 0 store programs the SPRMOD bit it carries, and its mass erase clears the WRPx words. The
+  value a PCROP read returns and the absence of a fault are inferred. On every other category and
+  part FLASH_WRPRx bits at 1 are write protection.
 - `Machine(option_bytes=)` selects the boot bank: the flash base, or with `swap_bank` on Cat.4 to
   Cat.6 the bank 2 base, whatever the first word of bank 2 holds. RM0038 Table 19 boots the
   system bootloader, which jumps to bank 2 when its first word is an SRAM address. FLASH_OBR.nBFB2

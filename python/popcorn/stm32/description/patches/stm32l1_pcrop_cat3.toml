@@ -1,0 +1,24 @@
+format = 1
+source = "RM0038 Rev 18, 3.7.4: PCROP on the Cat.3 STM32L151, L152 and L162 devices, FLASH_OBR.SPRMOD and FLASH_SR.RDERR. DS8890 lists the PCROP feature, the CMSIS stm32l151xc.h, stm32l152xc.h and stm32l162xc.h define FLASH_OBR_SPRMOD and FLASH_SR_RDERR, the L1 HAL lists PCROP for the xBA and xC devices only. The value line and the Cat.3 devices on DIE436 have none"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L151.svd", "STM32L152.svd", "STM32L162.svd"]
+dies = ["DIE427"]
+flash_kib = [256]
+
+[ip]
+versions = { "FLASH" = "STM32L1_flash_cat3_pcrop" }
+source = "RM0038 Rev 18, 3.7.4: the Cat.3 flash interface with PCROP. Replaces STM32L1_flash_cat3, which FLASH has from the category patch and which has no CubeMX version"
+
+[[fields]]
+instances = ["FLASH"]
+registers = ["OBR"]
+add = { name = "SPRMOD", lsb = 8, width = 1, acc = "read_only", reset = 0 }
+source = "RM0038 Rev 18, 3.9.8 FLASH_OBR and Table 19: SPRMOD, bit 8, sector protection mode, loaded from the RDP option word. The L1 SVDs omit it"
+
+[[fields]]
+instances = ["FLASH"]
+registers = ["SR"]
+add = { name = "RDERR", lsb = 13, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 3.9.7 FLASH_SR: RDERR, bit 13, set by a Dbus read of a PCROP sector, cleared by writing 1. The L1 SVDs omit it"

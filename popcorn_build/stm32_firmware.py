@@ -155,6 +155,20 @@ STM32L152XB = Chipset(
     preset=cortex_m3,
 )
 
+STM32L152XC = Chipset(
+    name="stm32l152xc",
+    define="STM32L152xC",
+    family="l1",
+    hal_package="stm32l1-hal-driver",
+    device_package="cmsis-device-l1",
+    startup="startup_stm32l152xc.s",
+    system="system_stm32l1xx.c",
+    test_linker="tests/firmware/common/stm32l152xc.ld",
+    usb_device_sources=STM32L152XE.usb_device_sources,
+    prebuilt_dir="l152xc",
+    preset=cortex_m3,
+)
+
 
 def add_ll_firmware(
     name: str,

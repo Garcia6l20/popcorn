@@ -12,6 +12,7 @@ from popcorn_build.config import build_dir
 from popcorn_build.stm32_firmware import (
     STM32H573,
     STM32L152XB,
+    STM32L152XC,
     STM32L152XE,
     STM32U575,
     Chipset,
@@ -224,7 +225,7 @@ def test_each_preset_links_its_own_libgcc_in_its_own_build_prefix(tmp_path: Path
         assert (tmp_path / "build" / prefix).is_dir()
 
 
-L1_CHIPSETS = [STM32L152XE, STM32L152XB]
+L1_CHIPSETS = [STM32L152XE, STM32L152XB, STM32L152XC]
 COMMON = Path(__file__).parents[3] / "tests" / "firmware" / "common"
 
 

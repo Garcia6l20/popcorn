@@ -231,3 +231,39 @@ __attribute__((noipa)) void eeprom_hal(uint32_t type, uint32_t address, uint32_t
   LOG(FLASH->SR);
   DONE();
 }
+
+#if defined(FLASH_OBR_SPRMOD)
+void pcrop_hal(uint32_t writable, uint32_t sectors);
+void pcrop_get(void);
+
+__attribute__((noipa)) void pcrop_hal(uint32_t writable, uint32_t sectors)
+{
+  FLASH_OBProgramInitTypeDef wrp;
+  wrp.OptionType      = OPTIONBYTE_WRP;
+  wrp.WRPState        = OB_WRPSTATE_ENABLE;
+  wrp.WRPSector0To31  = writable;
+  wrp.WRPSector32To63 = 0xFFFFFFFFu;
+  FLASH_AdvOBProgramInitTypeDef pcrop;
+  pcrop.OptionType        = OPTIONBYTE_PCROP;
+  pcrop.PCROPState        = OB_PCROP_STATE_ENABLE;
+  pcrop.PCROPSector0To31  = sectors;
+  pcrop.PCROPSector32To63 = 0;
+  LOG(HAL_FLASH_Unlock());
+  LOG(HAL_FLASH_OB_Unlock());
+  LOG(HAL_FLASHEx_OBProgram(&wrp));
+  LOG(HAL_FLASHEx_OB_SelectPCROP());
+  LOG(HAL_FLASHEx_AdvOBProgram(&pcrop));
+  LOG(FLASH->SR);
+  DONE();
+}
+
+__attribute__((noipa)) void pcrop_get(void)
+{
+  FLASH_AdvOBProgramInitTypeDef read;
+  HAL_FLASHEx_AdvOBGetConfig(&read);
+  LOG(read.PCROPState);
+  LOG(read.PCROPSector0To31);
+  LOG(read.PCROPSector32To63);
+  DONE();
+}
+#endif

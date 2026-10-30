@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
@@ -117,14 +118,21 @@ struct bank_window
 /**
  * @brief The memory filter of the STM32L1 FLASH interface, installed by its model: while a bank
  *        is locked by a half page write or a parallel operation, a CPU or DMA load of it is a
- *        bus error and a fetch from it a BusFault, RM0038 3.4.3 note 2 and Table 15 note 3.
- *        Stores reach the FLASH model, debugger accesses and every other address pass.
+ *        bus error and a fetch from it a BusFault, RM0038 3.4.3 note 2 and Table 15 note 3. A
+ *        CPU, DMA or filtered debugger load of a PCROP sector reads 0 and calls the read
+ *        protection hook, a fetch from it runs, RM0038 3.7.4. Stores reach the FLASH model,
+ *        unfiltered debugger accesses and every other address pass.
  */
 class bank_filter final : public bus_firewall
 {
 public:
-  bank_filter(std::vector<bank_window> windows, std::uint8_t const& locked)
-      : windows_{std::move(windows)}, locked_{locked}
+  bank_filter(
+      std::vector<bank_window>          windows,
+      std::uint8_t const&               locked,
+      std::vector<memory_extent> const& protected_reads,
+      std::move_only_function<void()>   read_protected)
+      : windows_{std::move(windows)}, locked_{locked}, protected_reads_{protected_reads},
+        read_protected_{std::move(read_protected)}
   {}
 
   [[nodiscard]] auto check_peripheral(std::size_t, bus_attrs, arch::memory_op)
@@ -138,28 +146,66 @@ public:
     return true;
   }
 
-  [[nodiscard]] auto memory_page(address, std::uint32_t, address at, bus_attrs, arch::memory_op)
-      -> page_verdict override
+  [[nodiscard]] auto
+      memory_page(address page, std::uint32_t size, address at, bus_attrs, arch::memory_op)
+          -> page_verdict override
   {
-    if(not locked(at))
-    {
-      return {};
-    }
-    return {.filter_data = true, .deny_fetch = true};
+    auto const bank_locked = locked(at);
+    auto const read_ruled  = std::ranges::any_of(protected_reads_, [&](memory_extent const& e) {
+      return e.first < std::uint64_t{page} + size and e.last >= page;
+    });
+    return {.filter_data = bank_locked or read_ruled, .deny_fetch = bank_locked};
   }
 
   [[nodiscard]] auto check_memory(address at, std::uint8_t, bus_attrs attrs, arch::memory_op op)
       -> bus_verdict override
   {
-    if(op == arch::memory_op::write or attrs.by == initiator::debugger or not locked(at))
+    if(op == arch::memory_op::write)
     {
       return bus_verdict::allow;
     }
-    return bus_verdict::bus_error;
+    if(attrs.by != initiator::debugger and locked(at))
+    {
+      return bus_verdict::bus_error;
+    }
+    if(read_protected(at))
+    {
+      read_protected_();
+      return bus_verdict::read_zero_write_ignore;
+    }
+    return bus_verdict::allow;
   }
 
-  [[nodiscard]] auto allowed_extent(address at, std::uint8_t, bus_attrs, arch::memory_op)
+  [[nodiscard]] auto allowed_extent(address at, std::uint8_t, bus_attrs, arch::memory_op op)
       -> memory_extent override
+  {
+    auto extent = bank_extent(at);
+    if(op == arch::memory_op::write)
+    {
+      return extent;
+    }
+    for(auto const& [first, last] : protected_reads_)
+    {
+      if(last < at)
+      {
+        extent.first = std::max(extent.first, last + 1);
+      }
+      else if(first > at)
+      {
+        extent.last = std::min(extent.last, first - 1);
+      }
+    }
+    return extent;
+  }
+
+private:
+  [[nodiscard]] auto read_protected(address at) const -> bool
+  {
+    return std::ranges::any_of(
+        protected_reads_, [at](memory_extent const& e) { return at >= e.first and at <= e.last; });
+  }
+
+  [[nodiscard]] auto bank_extent(address at) const -> memory_extent
   {
     if(locked_ == 0)
     {
@@ -191,7 +237,6 @@ public:
     return {.first = static_cast<address>(first), .last = static_cast<address>(last)};
   }
 
-private:
   [[nodiscard]] auto locked(address at) const -> bool
   {
     if(locked_ == 0)
@@ -208,8 +253,10 @@ private:
     return (locked_ & bank) != 0;
   }
 
-  std::vector<bank_window> windows_;
-  std::uint8_t const&      locked_;
+  std::vector<bank_window>          windows_;
+  std::uint8_t const&               locked_;
+  std::vector<memory_extent> const& protected_reads_;
+  std::move_only_function<void()>   read_protected_;
 };
 
 /** @brief FLASH_PECR fields, RM0038 3.9.2. */
@@ -241,6 +288,7 @@ struct status_fields
   field_ref size_error;
   field_ref option_error;
   field_ref user_option_error;
+  field_ref read_error;
 
   [[nodiscard]] auto errors() const -> std::uint32_t
   {
@@ -248,7 +296,8 @@ struct status_fields
          | alignment_error.mask()
          | size_error.mask()
          | option_error.mask()
-         | user_option_error.mask();
+         | user_option_error.mask()
+         | read_error.mask();
   }
 };
 
@@ -323,9 +372,19 @@ struct status_fields
  *        FLASH_OBR and FLASH_WRPRx from the option words: RDPRT from RDP, bits 23 to 16 from USER,
  *        WRPRx from WRPx. A byte or halfword whose complement is wrong loads 0 and sets OPTVERR,
  *        and OPTVERRUSR as well for USER on Cat.3 to Cat.6. FLASH_OBR and FLASH_WRPRx ignore
- *        writes. RDPRT 0xAA is level 0, 0xCC level 2, any other value level 1. A machine built
- *        with host option bytes on a part with two banks loads nBFB2, FLASH_OBR bit 23, as the
- *        inverse of `swap_bank` at every load, whatever the USER word holds.
+ *        writes. RDPRT 0xAA is level 0, 0xCC level 2, any other value level 1.
+ *
+ *        PCROP, RM0038 3.7.4, on the `pcrop` traits, the L151, L152 and L162 Cat.2 and Cat.3 on
+ *        DIE427: SPRMOD loads with RDP as one pair against nSPRMOD and nRDP. With SPRMOD set a
+ *        FLASH_WRPRx bit at 0 protects its sector: a program or erase of it sets WRPERR, and a
+ *        CPU, DMA or filtered debugger load of it reads 0 and sets FLASH_SR.RDERR, a fetch from
+ *        it runs, inferred. An option store while SPRMOD is set programs with SPRMOD and every
+ *        protected WRPx bit kept. The RDP level 1 to 0 store programs the SPRMOD bit it
+ *        carries, and its mass erase clears the WRPx words.
+ *
+ *        A machine built with host option bytes on a part with two banks loads nBFB2,
+ *        FLASH_OBR bit 23, as the inverse of `swap_bank` at every load, whatever the USER word
+ *        holds.
  *
  *        FLASH_SR: EOP, WRPERR, PGAERR, SIZERR, OPTVERR and OPTVERRUSR clear on a write of 1. EOP
  *        sets once at the end of each operation, after all of its tprogs. FLASH_IRQn is raised
@@ -393,6 +452,12 @@ private:
   void               load_options();
   void               note_range(std::uint32_t addr);
   [[nodiscard]] auto rdp_level() const -> std::uint32_t;
+  [[nodiscard]] auto pcrop_mode() const -> bool;
+  [[nodiscard]] auto sector_of(std::uint32_t addr) const -> std::optional<std::uint32_t>;
+  [[nodiscard]] auto sector_bit(std::uint32_t sector) const -> bool;
+  [[nodiscard]] auto kept_option(std::uint32_t offset, std::uint32_t value) const -> std::uint32_t;
+  void               update_protected_reads();
+  void               read_refused();
   [[nodiscard]] auto write_protected(std::uint32_t addr) const -> bool;
   [[nodiscard]] auto read_word(std::uint32_t addr) const -> std::uint32_t;
   [[nodiscard]] auto option_word(std::uint32_t offset) const -> bool;
@@ -436,6 +501,8 @@ private:
   std::array<reg_ref, 4>                                            keys_{};
   reg_ref                                                           options_;
   field_ref                                                         rdp_;
+  field_ref                                                         sprmod_;
+  std::vector<memory_extent>                                        protected_reads_;
   std::vector<reg_ref>                                              protection_;
   std::vector<region_desc const*>                                   program_regions_;
   std::vector<region_desc const*>                                   data_regions_;
@@ -507,9 +574,11 @@ flash_l1::flash_l1(
           .alignment_error   = field("SR", "PGAERR"),
           .size_error        = field("SR", "SIZERR"),
           .option_error      = field("SR", "OPTVERR"),
-          .user_option_error = field("SR", "OPTVERRUSR")},
+          .user_option_error = field("SR", "OPTVERRUSR"),
+          .read_error        = traits.pcrop ? field("SR", "RDERR") : field_ref{}},
       keys_{reg("PDKEYR"), reg("PEKEYR"), reg("PRGKEYR"), reg("OPTKEYR")}, options_{reg("OBR")},
-      rdp_{field("OBR", "RDPRT")}, line_{irq("FLASH_IRQn")}, hclk_{ctx.clock.domain("hclk")}
+      rdp_{field("OBR", "RDPRT")}, sprmod_{traits.pcrop ? field("OBR", "SPRMOD") : field_ref{}},
+      line_{irq("FLASH_IRQn")}, hclk_{ctx.clock.domain("hclk")}
 {
   for(std::uint8_t index = 1; index <= 4; ++index)
   {
@@ -552,6 +621,19 @@ flash_l1::flash_l1(
         ctx.part.part, 0, "regions",
         "one or two Flash regions that name FLASH as their controller, the two banks");
   }
+  if(options.option_bytes)
+  {
+    auto const encoded = l1_encode_options(
+        traits, {.unit = &desc, .regions = program_regions_}, *options.option_bytes);
+    if(not encoded)
+    {
+      throw config_error(desc.name, 0, encoded.error().key, encoded.error().expected);
+    }
+    if(traits.dual_bank)
+    {
+      boot_bank_2_ = options.option_bytes->swap_bank;
+    }
+  }
   std::vector<bank_window> windows;
   for(auto const* const region : program_regions_)
   {
@@ -561,22 +643,9 @@ flash_l1::flash_l1(
   {
     windows.push_back({.start = region->start, .size = region->size, .second = data_bank(*region)});
   }
-  filter_ = std::make_unique<bank_filter>(std::move(windows), state_.locked);
+  filter_ = std::make_unique<bank_filter>(
+      std::move(windows), state_.locked, protected_reads_, [this] { read_refused(); });
   ctx.install_firewall(*filter_);
-  if(not options.option_bytes)
-  {
-    return;
-  }
-  auto const encoded = l1_encode_options(
-      traits, {.unit = &desc, .regions = program_regions_}, *options.option_bytes);
-  if(not encoded)
-  {
-    throw config_error(desc.name, 0, encoded.error().key, encoded.error().expected);
-  }
-  if(traits.dual_bank)
-  {
-    boot_bank_2_ = options.option_bytes->swap_bank;
-  }
 }
 
 auto flash_l1::data_bank(region_desc const& region) const -> std::optional<std::uint32_t>
@@ -778,6 +847,7 @@ void flash_l1::restore(reset_kind kind)
   if(loads_options(kind))
   {
     load_options();
+    update_protected_reads();
   }
   auto const generation   = state_.generation;
   auto const locked       = state_.locked;
@@ -818,6 +888,8 @@ void flash_l1::on_bus_reset()
 void flash_l1::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
+  protected_reads_.clear();
+  update_protected_reads();
   ctx_.services.memory_policy_changed();
   latency_logged_.clear();
   mode_logged_  = false;
@@ -982,22 +1054,103 @@ auto flash_l1::read_word(std::uint32_t addr) const -> std::uint32_t
   return std::bit_cast<std::uint32_t>(bytes);
 }
 
-auto flash_l1::write_protected(std::uint32_t addr) const -> bool
+auto flash_l1::sector_of(std::uint32_t addr) const -> std::optional<std::uint32_t>
 {
   std::uint32_t before = 0;
   for(auto const* const region : program_regions_)
   {
     if(addr >= region->start and addr - region->start < region->size)
     {
-      auto const sector =
-          (before + static_cast<std::uint32_t>(addr - region->start)) / sector_bytes;
-      auto const index = sector / 32;
-      return index < protection_.size()
-         and (regs_.peek(protection_[index].offset) >> (sector % 32) & 1u) != 0;
+      return (before + static_cast<std::uint32_t>(addr - region->start)) / sector_bytes;
     }
     before += region->size;
   }
-  return false;
+  return std::nullopt;
+}
+
+auto flash_l1::sector_bit(std::uint32_t sector) const -> bool
+{
+  auto const index = sector / 32;
+  return index < protection_.size()
+     and (regs_.peek(protection_[index].offset) >> (sector % 32) & 1u) != 0;
+}
+
+auto flash_l1::pcrop_mode() const -> bool
+{
+  return traits_.pcrop and get(regs_, sprmod_) != 0;
+}
+
+auto flash_l1::write_protected(std::uint32_t addr) const -> bool
+{
+  auto const sector = sector_of(addr);
+  if(not sector or *sector / 32 >= protection_.size())
+  {
+    return false;
+  }
+  return sector_bit(*sector) != pcrop_mode();
+}
+
+void flash_l1::update_protected_reads()
+{
+  std::vector<memory_extent> extents;
+  if(pcrop_mode())
+  {
+    std::uint32_t before = 0;
+    for(auto const* const region : program_regions_)
+    {
+      for(std::uint32_t at = 0; at < region->size; at += sector_bytes)
+      {
+        auto const sector = (before + at) / sector_bytes;
+        if(sector / 32 >= protection_.size() or sector_bit(sector))
+        {
+          continue;
+        }
+        auto const first = static_cast<address>(region->start + at);
+        auto const last  = static_cast<address>(first + sector_bytes - 1);
+        if(not extents.empty() and extents.back().last + 1 == first)
+        {
+          extents.back().last = last;
+        }
+        else
+        {
+          extents.push_back({.first = first, .last = last});
+        }
+      }
+      before += region->size;
+    }
+  }
+  if(extents != protected_reads_)
+  {
+    protected_reads_ = std::move(extents);
+    ctx_.services.memory_policy_changed();
+  }
+}
+
+void flash_l1::read_refused()
+{
+  update(regs_, status_.read_error, 1);
+  interrupts();
+}
+
+auto flash_l1::kept_option(std::uint32_t offset, std::uint32_t value) const -> std::uint32_t
+{
+  if(not pcrop_mode())
+  {
+    return value;
+  }
+  if(offset == 0)
+  {
+    return (value | sprmod_.mask()) & ~(sprmod_.mask() << 16);
+  }
+  if(offset < 8 or offset >= 8 + 8 * protection_.size())
+  {
+    return value;
+  }
+  auto const index    = (offset - 8) / 8;
+  auto const shift    = (offset - 8) % 8 == 0 ? 0u : 16u;
+  auto const loaded   = regs_.peek(protection_[index].offset) >> shift & 0xffffu;
+  auto const kept_low = ~loaded & 0xffffu;
+  return (value & ~kept_low) | (kept_low << 16);
 }
 
 auto flash_l1::rdp_level() const -> std::uint32_t
@@ -1149,7 +1302,7 @@ void flash_l1::program_option(flash_store const& word)
     begin(mass_erase_cost);
     return;
   }
-  write_timed(word);
+  write_timed({.addr = word.addr, .size = word.size, .value = kept_option(offset, word.value)});
 }
 
 void flash_l1::mass_erase()
@@ -1205,7 +1358,7 @@ void flash_l1::load_options()
     auto const low  = word & mask;
     return ((word >> 16) & mask) == (~low & mask) ? std::optional{low} : std::nullopt;
   };
-  auto const rdp    = pair(0, 8);
+  auto const rdp    = pair(0, traits_.pcrop ? 9 : 8);
   auto const user   = pair(4, 8);
   auto       failed = not rdp or not user;
   auto const boot   = boot_bank_2_.transform([](bool bank_2) { return bank_2 ? 0 : boot_bank_1; });

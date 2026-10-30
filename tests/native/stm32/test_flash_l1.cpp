@@ -2053,3 +2053,225 @@ TEST_CASE("option_bytes on STM32L152RETx: the boot bank and FLASH_OBR nBFB2 at e
   reload(plain);
   CHECK((read(plain, obr) & nbfb2) == 0);
 }
+
+namespace
+{
+constexpr auto          firmware_c = std::string_view{"l152xc_l1_flash_ll"};
+constexpr std::uint32_t sprmod     = 1u << 8;
+constexpr std::uint32_t rderr      = 1u << 13;
+constexpr address       pcrop_read = 0x0801'4000;
+constexpr address       pcrop_code = 0x0801'5000;
+constexpr address       open_page  = 0x0801'3000;
+constexpr std::uint32_t pcrop_bits = (1u << 20) | (1u << 21);
+
+void run_entry(
+    stm32_fixture const&                 f,
+    std::string_view                     entry,
+    std::initializer_list<std::uint32_t> args)
+{
+  auto index = 0;
+  for(auto const arg : args)
+  {
+    f.set(std::format("r{}", index++), arg);
+  }
+  f.set("pc", sym(f.firmware_name, entry));
+  REQUIRE(f.run_to_stop({.max_instructions = icount{2'000'000}}).reason == stop_reason::user);
+  f.set("pc", sym(f.firmware_name, "idle"));
+}
+
+auto pcrop_rc() -> stm32_fixture
+{
+  stm32_fixture f{popcorn::testing::l152rc(), firmware_c};
+  REQUIRE(f.run_to_stop({.max_instructions = icount{100'000}}).reason == stop_reason::user);
+  REQUIRE(f.target->mem().write(pcrop_read, 4, 0x1234'5678).has_value());
+  REQUIRE(f.target->mem().write(open_page, 4, 0x0BAD'F00D).has_value());
+  REQUIRE(f.target->mem().write(pcrop_code, 4, 0xBE01'202Au).has_value());
+  write(f, sr, wrperr | pgaerr | sizerr);
+  run_entry(f, "pcrop_hal", {~pcrop_bits, pcrop_bits});
+  reload(f);
+  return f;
+}
+
+auto loaded_log(stm32_fixture const& f, std::size_t count) -> std::vector<std::uint32_t>
+{
+  auto const log = f.log();
+  REQUIRE(log.size() >= count);
+  return {log.end() - static_cast<std::ptrdiff_t>(count), log.end()};
+}
+}
+
+TEST_CASE("RM0038 3.7.4: HAL_FLASHEx_AdvOBProgram sets PCROP on RCTx, AdvOBGetConfig reads it")
+{
+  auto const f   = pcrop_rc();
+  auto const ran = f.log();
+  REQUIRE(ran.size() >= 6);
+  CHECK(std::vector(ran.end() - 6, ran.end() - 1) == std::vector<std::uint32_t>{0, 0, 0, 0, 0});
+  CHECK(ran.back() == (ready | endhv));
+  CHECK((read(f, obr) & sprmod) == sprmod);
+  CHECK(read(f, wrpr1) == ~pcrop_bits);
+  CHECK(read(f, wrpr2) == 0xFFFF'FFFFu);
+  run_entry(f, "pcrop_get", {});
+  CHECK(loaded_log(f, 3) == std::vector<std::uint32_t>{1, ~pcrop_bits, 0xFFFF'FFFFu});
+}
+
+TEST_CASE("RM0038 3.7.4: a data read of a PCROP sector reads 0 and sets RDERR, a fetch runs")
+{
+  auto const f = pcrop_rc();
+  CHECK((read(f, sr) & rderr) == 0);
+  run_entry(f, "read_flash", {static_cast<std::uint32_t>(open_page)});
+  CHECK(loaded_log(f, 1) == std::vector<std::uint32_t>{0x0BAD'F00D});
+  CHECK((read(f, sr) & rderr) == 0);
+  run_entry(f, "read_flash", {static_cast<std::uint32_t>(pcrop_read)});
+  CHECK(loaded_log(f, 1) == std::vector<std::uint32_t>{0});
+  CHECK((read(f, sr) & rderr) == rderr);
+  write(f, sr, rderr);
+  CHECK((read(f, sr) & rderr) == 0);
+  f.set("r0", 0);
+  f.set("pc", pcrop_code | 1u);
+  REQUIRE(f.run_to_stop({.max_instructions = icount{10}}).reason == stop_reason::user);
+  CHECK(f.target->regs().read(*f.target->regs().find("r0")) == 42);
+  CHECK((read(f, sr) & rderr) == 0);
+  unlock(f);
+  REQUIRE(memory_write(f, pcrop_read + 4, 4, 1));
+  CHECK((read(f, sr) & wrperr) == wrperr);
+  write(f, sr, wrperr);
+  REQUIRE(memory_write(f, open_page + 4, 4, 1));
+  CHECK((read(f, sr) & wrperr) == 0);
+  end_operations(f);
+  CHECK(read(f, open_page + 4) == 1);
+}
+
+TEST_CASE(
+    "RM0038 3.7.4: an option store keeps SPRMOD and PCROP sectors, an RDP 1 to 0 store "
+    "with SPRMOD 0 clears them")
+{
+  auto const f = pcrop_rc();
+  unlock_options(f);
+  program_option(f, 0x00, option_word(0xAA, 8));
+  CHECK(read(f, options) == 0xFE55'01AAu);
+  program_option(f, 0x0C, option_word(0xFFFF, 16));
+  CHECK(read(f, options + 0x0C) == 0x0030'FFCFu);
+  program_option(f, 0x00, option_word(0xBB, 8));
+  reload(f);
+  CHECK(read(f, obr) == (0x00F8'00BBu | sprmod));
+  CHECK(read(f, wrpr1) == ~pcrop_bits);
+  CHECK((read(f, sr) & optverr) == 0);
+  unlock_options(f);
+  REQUIRE(memory_write(f, options, 4, option_word(0xAA, 8)));
+  end_operations(f);
+  reload(f);
+  CHECK((read(f, obr) & (sprmod | 0xFFu)) == 0xAAu);
+  CHECK(read(f, wrpr1) == 0);
+  f.target->load(popcorn::testing::elf(f.firmware_name));
+  f.target->reset(reset_kind::software);
+  copy_ram_code(f);
+  REQUIRE(f.target->mem().write(pcrop_read, 4, 0x1234'5678).has_value());
+  run_entry(f, "read_flash", {static_cast<std::uint32_t>(pcrop_read)});
+  CHECK(loaded_log(f, 1) == std::vector<std::uint32_t>{0x1234'5678});
+  CHECK((read(f, sr) & rderr) == 0);
+}
+
+TEST_CASE(
+    "popcorn's result: the RDP 1 to 0 word the HAL writes keeps SPRMOD 1, the erased WRPx words "
+    "load 0 with OPTVERR")
+{
+  auto const f = pcrop_rc();
+  unlock_options(f);
+  program_option(f, 0x00, option_word(0xBB, 8));
+  CHECK(read(f, options) == 0xFE44'01BBu);
+  reload(f);
+  REQUIRE((read(f, obr) & (sprmod | 0xFFu)) == (sprmod | 0xBBu));
+  unlock_options(f);
+  REQUIRE(memory_write(f, options, 4, 0xFE55'01AAu));
+  end_operations(f);
+  reload(f);
+  CHECK((read(f, obr) & (sprmod | 0xFFu)) == (sprmod | 0xAAu));
+  CHECK((read(f, sr) & optverr) == optverr);
+  CHECK(read(f, wrpr1) == 0);
+  CHECK(read(f, wrpr2) == 0);
+}
+
+TEST_CASE("RM0038 3.8: RDERR with ERRIE raises FLASH_IRQn, the handler runs after the load")
+{
+  constexpr address       code  = 0x2000'1000;
+  constexpr std::uint32_t iser0 = 0xE000'E100;
+  constexpr std::uint32_t pcr0  = 0xE000'E280;
+  auto const              f     = pcrop_rc();
+  unlock_data(f);
+  write(f, pecr, read(f, pecr) | errie);
+  write(f, pcr0, 1u << flash_irq);
+  write(f, iser0, 1u << flash_irq);
+  REQUIRE(f.target->mem().write(code, 2, 0x6802).has_value());
+  REQUIRE(f.target->mem().write(code + 2, 2, 0x2301).has_value());
+  f.set("r0", pcrop_read);
+  f.set("r3", 0);
+  f.set("pc", code | 1u);
+  REQUIRE_FALSE(f.run({.max_instructions = icount{2}}).stopped.has_value());
+  CHECK((read(f, sr) & rderr) == rderr);
+  CHECK(ipsr(f) == 16 + flash_irq);
+  CHECK(f.target->regs().read(*f.target->regs().find("r3")) == 0);
+}
+
+TEST_CASE("a FLASH snapshot taken with PCROP loaded restores the read protection")
+{
+  auto const    saved = pcrop_rc().target->snapshot();
+  stm32_fixture other{popcorn::testing::l152rc(), firmware_c};
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  REQUIRE((read(other, sr) & rderr) == 0);
+  run_entry(other, "read_flash", {static_cast<std::uint32_t>(pcrop_read)});
+  CHECK(loaded_log(other, 1) == std::vector<std::uint32_t>{0});
+  CHECK((read(other, sr) & rderr) == rderr);
+}
+
+TEST_CASE("RM0038 3.7.4: RBTxA, Cat.2, loads SPRMOD and refuses a read of a PCROP sector")
+{
+  auto const f = parked(popcorn::testing::description_from("POPCORN_L152RBA_DESC"), firmware_b);
+  REQUIRE(f.target->mem().write(pcrop_read, 4, 0x1234'5678).has_value());
+  unlock_options(f);
+  program_option(f, 0x08, option_word(0xFFFF, 16));
+  program_option(f, 0x0C, option_word(0xFFEF, 16));
+  program_option(f, 0x00, 0xFE55'01AAu);
+  reload(f);
+  CHECK(read(f, obr) == (virgin_obr | sprmod));
+  CHECK(read(f, wrpr1) == 0xFFEF'FFFFu);
+  call(f, "read_flash", {static_cast<std::uint32_t>(pcrop_read)});
+  CHECK(f.log().back() == 0);
+  CHECK((read(f, sr) & rderr) == rderr);
+}
+
+TEST_CASE("RCTxA has no SPRMOD and no RDERR, its WRPx bits are plain write protection")
+{
+  auto const desc  = popcorn::testing::description_from("POPCORN_L152RCA_DESC");
+  auto const flash = std::ranges::find(
+      desc.peripherals, std::string_view{"FLASH"}, &popcorn::peripheral_desc::name);
+  REQUIRE(flash != desc.peripherals.end());
+  CHECK(flash->ip_version == "STM32L1_flash_cat3");
+  for(auto const& [reg, field] : {
+          std::pair{"OBR", "SPRMOD"},
+          std::pair{"SR",  "RDERR" }
+  })
+  {
+    auto const found = popcorn::find_register(*flash, reg);
+    REQUIRE(found != nullptr);
+    CHECK(
+        std::ranges::find(found->fields, std::string_view{field}, &popcorn::field_desc::name)
+        == found->fields.end());
+  }
+  auto const f = parked(desc, firmware_c);
+  REQUIRE(f.target->mem().write(pcrop_read, 4, 0x1234'5678).has_value());
+  unlock_options(f);
+  program_option(f, 0x0C, option_word(0x0010, 16));
+  program_option(f, 0x00, 0xFE55'01AAu);
+  reload(f);
+  CHECK(read(f, obr) == virgin_obr);
+  CHECK(read(f, wrpr1) == 0x0010'0000u);
+  run_entry(f, "read_flash", {static_cast<std::uint32_t>(pcrop_read)});
+  CHECK(loaded_log(f, 1) == std::vector<std::uint32_t>{0x1234'5678});
+  CHECK((read(f, sr) & rderr) == 0);
+  unlock(f);
+  REQUIRE(memory_write(f, pcrop_read + 4, 4, 1));
+  CHECK((read(f, sr) & wrperr) == wrperr);
+  write(f, sr, wrperr);
+  REQUIRE(memory_write(f, open_page, 4, 1));
+  CHECK((read(f, sr) & wrperr) == 0);
+}

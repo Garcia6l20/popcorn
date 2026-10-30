@@ -206,6 +206,10 @@ struct flash_l1_traits
   /** @brief FLASH_SR.OPTVERRUSR flags a USER option byte with a wrong complement, RM0038
    *         3.9.7: Cat.3 to Cat.6. */
   bool user_option_flag = true;
+  /** @brief FLASH_OBR.SPRMOD turns the WRPx bits at 0 into PCROP read and write protection, and
+   *         FLASH_SR.RDERR flags a data read of a PCROP sector, RM0038 3.7.4: the L151, L152
+   *         and L162 Cat.2 and Cat.3 on DIE427. */
+  bool pcrop = false;
 };
 
 /** @brief Table 13 on Cat.2 to Cat.6: Range 3 up to 4.2 MHz at 0 WS and 8 MHz at 1 WS. */
@@ -222,8 +226,19 @@ inline constexpr flash_l1_traits l1_flash_cat1{
 inline constexpr flash_l1_traits l1_flash_cat2{
     .max_khz          = l1_flash_wait_khz,
     .user_option_flag = false};
+/** @brief STM32L151, L152 and L162 Cat.2, `STM32L1_flash_cat2_pcrop`: PCROP. */
+inline constexpr flash_l1_traits l1_flash_cat2_pcrop{
+    .max_khz          = l1_flash_wait_khz,
+    .user_option_flag = false,
+    .pcrop            = true};
 /** @brief STM32L1 Cat.3, `STM32L1_flash_cat3`: FLASH_WRPR2. */
 inline constexpr flash_l1_traits l1_flash_cat3{.max_khz = l1_flash_wait_khz, .wrp_registers = 2};
+/** @brief STM32L151, L152 and L162 Cat.3 on DIE427, `STM32L1_flash_cat3_pcrop`: FLASH_WRPR2 and
+ *         PCROP. */
+inline constexpr flash_l1_traits l1_flash_cat3_pcrop{
+    .max_khz       = l1_flash_wait_khz,
+    .wrp_registers = 2,
+    .pcrop         = true};
 /** @brief STM32L1 Cat.4 and Cat.6, `STM32L1_flash_cat46`: two banks, FLASH_WRPR2 and
  *         FLASH_WRPR3. */
 inline constexpr flash_l1_traits l1_flash_cat46{
@@ -298,8 +313,14 @@ inline constexpr flash_variant flash_h5{.encode_options = h5_encode_options};
 inline constexpr flash_variant flash_l1_cat1{.encode_options = l1_encode_options_of<l1_flash_cat1>};
 /** @brief STM32L1 Cat.2. */
 inline constexpr flash_variant flash_l1_cat2{.encode_options = l1_encode_options_of<l1_flash_cat2>};
+/** @brief STM32L1 Cat.2 with PCROP. */
+inline constexpr flash_variant flash_l1_cat2_pcrop{
+    .encode_options = l1_encode_options_of<l1_flash_cat2_pcrop>};
 /** @brief STM32L1 Cat.3. */
 inline constexpr flash_variant flash_l1_cat3{.encode_options = l1_encode_options_of<l1_flash_cat3>};
+/** @brief STM32L1 Cat.3 with PCROP. */
+inline constexpr flash_variant flash_l1_cat3_pcrop{
+    .encode_options = l1_encode_options_of<l1_flash_cat3_pcrop>};
 /** @brief STM32L1 Cat.4 and Cat.6. */
 inline constexpr flash_variant flash_l1_cat46{
     .encode_options = l1_encode_options_of<l1_flash_cat46>};

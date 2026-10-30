@@ -2,11 +2,11 @@ from pathlib import Path
 
 from popcorn_build.firmware import firmware_env
 from popcorn_build.requirements import firmware_source
-from popcorn_build.stm32_firmware import STM32L152XB, STM32L152XE, add_ll_firmware
+from popcorn_build.stm32_firmware import STM32L152XB, STM32L152XC, STM32L152XE, add_ll_firmware
 
 here = Path(__file__).resolve().parent
 
-for chipset in (STM32L152XE, STM32L152XB):
+for chipset in (STM32L152XE, STM32L152XB, STM32L152XC):
     hal = (
         [
             firmware_source(chipset.hal_package) / "Src" / name
@@ -40,6 +40,7 @@ for chipset in (STM32L152XE, STM32L152XB):
             "copy_words_flash",
             "store_pair",
             "eeprom_hal",
+            *(["pcrop_hal", "pcrop_get"] if chipset is STM32L152XC else []),
         ],
         chipset=chipset,
     )

@@ -225,6 +225,12 @@ def _check_patches(name: str, category: str) -> None:
     assert [CATEGORY_OF_FILE[file] for file in chosen] == [category]
     rd = "stm32l1_cat4_rd.toml" in _patch_names(name)
     assert rd == (category == "cat4" and "RD" in name)
+    pcrop = [file for file in _patch_names(name) if file.startswith("stm32l1_pcrop_")]
+    assert pcrop == ([f"stm32l1_pcrop_{category[:4]}.toml"] if _has_pcrop(name, category) else [])
+
+
+def _has_pcrop(name: str, category: str) -> bool:
+    return category in {"cat2", "cat3a"} and not name.startswith("STM32L100")
 
 
 def _check_peripherals(name: str, category: str) -> None:
@@ -270,7 +276,11 @@ def _check_versions(name: str, category: str) -> None:
         "cat5": ("STM32L1_gpio_cat46", "STM32L1_flash_cat5"),
         "cat6": ("STM32L1_gpio_cat46", "STM32L1_flash_cat46"),
     }[category]
-    assert peripherals["FLASH"].ip_version == flash_version
+    pcrop = _has_pcrop(name, category)
+    assert peripherals["FLASH"].ip_version == flash_version + ("_pcrop" if pcrop else "")
+    pcrop_fields = {("OBR", "SPRMOD"), ("SR", "RDERR")}
+    flash_fields = {(r.name, f.name) for r in peripherals["FLASH"].registers for f in r.fields}
+    assert flash_fields & pcrop_fields == (pcrop_fields if pcrop else set())
     ports = [p for p in peripherals.values() if p.name.startswith("GPIO")]
     assert ports and {p.ip_version for p in ports} == {gpio_version}
     early = category in {"cat1", "cat2"}

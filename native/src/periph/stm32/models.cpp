@@ -32,7 +32,7 @@ struct builtin
   flash_variant    flash         = {};
 };
 
-constexpr std::array<builtin, 87> builtins{
+constexpr std::array<builtin, 89> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -100,6 +100,16 @@ constexpr std::array<builtin, 87> builtins{
          .make            = [](board const& b) { return flash_l1_factory(l1_flash_cat2, b.flash); },
          .part_glob       = "STM32L1*",
          .flash           = flash_l1_cat2},
+     {.ip              = "Flash",
+         .ip_version_glob = "STM32L1_flash_cat2_pcrop",
+         .make      = [](board const& b) { return flash_l1_factory(l1_flash_cat2_pcrop, b.flash); },
+         .part_glob = "STM32L1*",
+         .flash     = flash_l1_cat2_pcrop},
+     {.ip              = "Flash",
+         .ip_version_glob = "STM32L1_flash_cat3_pcrop",
+         .make      = [](board const& b) { return flash_l1_factory(l1_flash_cat3_pcrop, b.flash); },
+         .part_glob = "STM32L1*",
+         .flash     = flash_l1_cat3_pcrop},
      {.ip              = "Flash",
          .ip_version_glob = "STM32L1_flash_cat3",
          .make            = [](board const& b) { return flash_l1_factory(l1_flash_cat3, b.flash); },
