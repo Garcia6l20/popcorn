@@ -973,6 +973,11 @@ constexpr std::uint64_t     target_ps  = 90 * us;
 constexpr periph::i2c_phase on_address = periph::i2c_phase::address;
 constexpr periph::i2c_phase on_write   = periph::i2c_phase::write;
 constexpr periph::i2c_phase on_read    = periph::i2c_phase::read;
+constexpr std::uint8_t      own        = 0x42;
+constexpr std::uint32_t     stopf      = 1u << 4;
+constexpr std::uint32_t     nostretch  = 1u << 7;
+constexpr std::uint32_t     engc       = 1u << 6;
+constexpr std::uint32_t     endual     = 1u << 0;
 
 struct port_rig
 {
@@ -980,17 +985,75 @@ struct port_rig
   stm32::board                   board{};
   std::unique_ptr<stm32_fixture> f;
 
-  explicit port_rig(bool controlled = true)
+  explicit port_rig(bool controlled = true, bool strict = false)
   {
     if(controlled)
     {
       board.i2c_controllers["I2C1"] = sink;
     }
-    auto options   = popcorn::testing::stm32_options();
-    options.models = stm32::factories(board, l152re());
-    f              = std::make_unique<stm32_fixture>(l152re(), firmware, std::move(options));
+    auto options               = popcorn::testing::stm32_options();
+    options.models             = stm32::factories(board, l152re());
+    options.strict_peripherals = strict;
+    options.models.insert_or_assign(
+        "DAC", [](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+          return std::make_shared<bus_probe>(ctx);
+        });
+    f    = std::make_unique<stm32_fixture>(l152re(), firmware, std::move(options));
+    logs = f->target->add_log_sink(
+        [this](core::log_record const& record) { logged.push_back(record); });
     f->set("pc", sym(firmware, "idle"));
-    REQUIRE(f->target->mem().write(apb1enr, 4, i2c1_bit).has_value());
+    write(apb1enr, i2c1_bit);
+  }
+
+  std::vector<core::log_record> logged;
+  core::hook_handle             logs;
+
+  void listen(std::uint32_t control = pe | ack_bit) const
+  {
+    write(i2c1 + cr2, freq2);
+    write(i2c1 + oar1, std::uint32_t{own} << 1);
+    write(i2c1 + cr1, control);
+  }
+
+  [[nodiscard]] auto read(address at) const -> std::uint32_t
+  {
+    auto const value = f->target->mem().read(at, 4);
+    REQUIRE(value.has_value());
+    return static_cast<std::uint32_t>(*value);
+  }
+
+  void write(address at, std::uint32_t value) const
+  {
+    REQUIRE(f->target->mem().write(at, 4, value).has_value());
+  }
+
+  [[nodiscard]] auto cpu_read(address at) const -> std::uint32_t
+  {
+    auto* const probe = f->model_of<bus_probe>("DAC");
+    REQUIRE(probe != nullptr);
+    auto const word = probe->context.services.read(at, 4, popcorn::initiator::cpu);
+    REQUIRE(word.has_value());
+    return static_cast<std::uint32_t>(*word);
+  }
+
+  void cpu_write(address at, std::uint32_t value) const
+  {
+    auto* const probe = f->model_of<bus_probe>("DAC");
+    REQUIRE(probe != nullptr);
+    REQUIRE(probe->context.services.write(at, 4, value, popcorn::initiator::cpu).has_value());
+  }
+
+  void clear_address() const
+  {
+    static_cast<void>(cpu_read(i2c1 + sr1));
+    static_cast<void>(cpu_read(i2c1 + sr2));
+  }
+
+  [[nodiscard]] auto warnings(std::string_view text) const -> std::ptrdiff_t
+  {
+    return std::ranges::count_if(logged, [&](core::log_record const& record) {
+      return record.message.find(text) != std::string::npos;
+    });
   }
 
   [[nodiscard]] auto port() const -> periph::i2c_controller_port&
@@ -1366,6 +1429,472 @@ TEST_CASE("a snapshot holding port entries restores them, an I2C with no control
   CHECK(refusal([&] {
           bare.f->target->restore(core::snapshot{core::decode_snapshot(encoded)});
         }).contains("the snapshot holds port entries"));
+}
+
+TEST_CASE("RM0038 26.3.2: an OAR1 match sets ADDR and BUSY, SCL held until an SR1 then SR2 read")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.write(0x11, base, 2);
+  r.run_until(base + 1);
+  CHECK(r.read(i2c1 + sr2) == busy);
+  r.run_until(base + 3 * target_ps);
+  CHECK(r.read(i2c1 + sr1) == addr);
+  CHECK(r.read(i2c1 + sr2) == busy);
+  CHECK(r.sink->answers.empty());
+  static_cast<void>(r.cpu_read(i2c1 + sr2));
+  CHECK(r.read(i2c1 + sr1) == addr);
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  CHECK(r.read(i2c1 + sr1) == addr);
+  auto const cleared = r.now();
+  static_cast<void>(r.cpu_read(i2c1 + sr2));
+  CHECK(r.read(i2c1 + sr1) == 0);
+  r.run_until(cleared + 2 * target_ps);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, true, 0xFF, cleared            },
+          {2, on_write,   true, 0xFF, cleared + target_ps},
+  });
+  CHECK(r.read(i2c1 + dr) == 0x11);
+  CHECK(r.read(i2c1 + sr1) == rxne);
+}
+
+TEST_CASE(
+    "an address phase answers NACK for another address, PE 0, ADDMODE 1 or the I2C as controller")
+{
+  for(int leg = 0; leg < 4; ++leg)
+  {
+    CAPTURE(leg);
+    port_rig const r;
+    r.listen();
+    if(leg == 1)
+    {
+      r.write(i2c1 + cr1, ack_bit);
+    }
+    if(leg == 2)
+    {
+      r.write(i2c1 + oar1, 1u << 15 | std::uint32_t{own} << 1);
+    }
+    if(leg == 3)
+    {
+      r.write(i2c1 + ccr, 10);
+      r.write(i2c1 + trise, 3);
+      r.cpu_write(i2c1 + cr1, pe | ack_bit | start);
+    }
+    auto const base = r.now() + us;
+    r.start(leg == 0 ? own + 1 : own, false, base, 1);
+    r.run_until(base + target_ps + us);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, false, 0xFF, base + target_ps}
+    });
+    CHECK((r.read(i2c1 + sr1) & addr) == 0);
+  }
+}
+
+TEST_CASE("ACK 0 at a matched address answers NACK at the address end, no ADDR, inferred")
+{
+  port_rig const r;
+  r.listen(pe);
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.write(0x11, base, 2);
+  r.stop(base + target_ps, 3);
+  r.run_until(base + 2 * target_ps);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, false, 0xFF, base + target_ps}
+  });
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {2, on_write, base + target_ps}
+  });
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
+}
+
+TEST_CASE("RM0038 26.6.1 ENGC: address 0 is NACKed with ENGC 0, an OAR1 of 0 included")
+{
+  port_rig const r;
+  r.listen();
+  r.write(i2c1 + oar1, 0);
+  auto const base = r.now() + us;
+  r.start(0, false, base, 1);
+  r.run_until(base + target_ps + us);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, false, 0xFF, base + target_ps}
+  });
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.warnings("not modelled") == 0);
+}
+
+TEST_CASE("a written byte lands in DR with RxNE, popcorn reads CR1.ACK at the end of its phase")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.run_until(base + target_ps);
+  r.clear_address();
+  auto const t0 = r.now();
+  r.write(0x11, t0, 2);
+  r.write(0x22, t0, 3);
+  r.run_until(t0 + target_ps + us);
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK(r.cpu_read(i2c1 + dr) == 0x11);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  r.cpu_write(i2c1 + cr1, pe);
+  r.run_until(t0 + 2 * target_ps);
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK(r.read(i2c1 + dr) == 0x22);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, true,  0xFF, t0                },
+          {2, on_write,   true,  0xFF, t0 + target_ps    },
+          {3, on_write,   false, 0xFF, t0 + 2 * target_ps},
+  });
+  r.cpu_write(i2c1 + cr1, pe | ack_bit);
+  static_cast<void>(r.cpu_read(i2c1 + dr));
+  auto const t1 = r.now();
+  r.write(0x33, t1, 4);
+  r.run_until(t1 + target_ps * 17 / 18);
+  r.cpu_write(i2c1 + cr1, pe);
+  r.run_until(t1 + target_ps + us);
+  CHECK(r.sink->answers.back() == heard{4, on_write, false, 0xFF, t1 + target_ps});
+}
+
+TEST_CASE("RM0038 26.3.2: a byte ending with RxNE 1 sets BTF and holds SCL until the DR read")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.run_until(base + target_ps);
+  r.clear_address();
+  auto const t0 = r.now();
+  r.write(0x11, t0, 2);
+  r.write(0x22, t0, 3);
+  r.write(0x33, t0, 4);
+  r.run_until(t0 + 4 * target_ps);
+  CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+  CHECK(r.sink->answers.size() == 2);
+  auto const t1 = r.now();
+  CHECK(r.cpu_read(i2c1 + dr) == 0x11);
+  CHECK(r.read(i2c1 + sr1) == rxne);
+  CHECK(r.read(i2c1 + dr) == 0x22);
+  r.run_until(t1 + target_ps);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, true, 0xFF, t0            },
+          {2, on_write,   true, 0xFF, t0 + target_ps},
+          {3, on_write,   true, 0xFF, t1            },
+  });
+  CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+}
+
+TEST_CASE(
+    "RM0038 26.6.6 STOPF: a STOP after an acknowledge sets it, an SR1 read then a CR1 "
+    "write clear it")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.run_until(base + target_ps);
+  r.clear_address();
+  auto const t0 = r.now();
+  r.write(0x11, t0, 2);
+  r.stop(t0 + target_ps + us, 3);
+  r.run_until(t0 + target_ps + 2 * us);
+  CHECK(r.read(i2c1 + sr1) == (rxne | stopf));
+  CHECK(r.read(i2c1 + sr2) == 0);
+  r.cpu_write(i2c1 + cr1, pe | ack_bit);
+  CHECK(r.read(i2c1 + sr1) == (rxne | stopf));
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  r.cpu_write(i2c1 + cr1, pe | ack_bit);
+  CHECK(r.read(i2c1 + sr1) == rxne);
+}
+
+TEST_CASE("an SR1 read before STOPF sets arms its clear by the next CR1 write, inferred")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.run_until(base + target_ps);
+  r.clear_address();
+  auto const t0 = r.now();
+  r.write(0x11, t0, 2);
+  r.stop(t0 + target_ps + us, 3);
+  static_cast<void>(r.cpu_read(i2c1 + sr1));
+  r.run_until(t0 + target_ps + 2 * us);
+  CHECK(r.read(i2c1 + sr1) == (rxne | stopf));
+  r.cpu_write(i2c1 + cr1, pe | ack_bit);
+  CHECK(r.read(i2c1 + sr1) == rxne);
+}
+
+TEST_CASE("RM0038 26.6.6 STOPF: no STOPF after a byte the I2C NACKed or for another address")
+{
+  for(auto const other : {false, true})
+  {
+    CAPTURE(other);
+    port_rig const r;
+    r.listen();
+    auto const base = r.now() + us;
+    r.start(other ? own + 1 : own, false, base, 1);
+    r.run_until(base + target_ps);
+    if(not other)
+    {
+      r.clear_address();
+      r.cpu_write(i2c1 + cr1, pe);
+    }
+    auto const t0 = r.now();
+    r.write(0x11, t0, 2);
+    r.stop(t0 + target_ps + us, 3);
+    r.run_until(t0 + target_ps + 2 * us);
+    CHECK((r.read(i2c1 + sr1) & stopf) == 0);
+    CHECK(r.read(i2c1 + sr2) == 0);
+  }
+}
+
+TEST_CASE("RM0038 26.6.7 BUSY: set at a START on the bus with PE 0, cleared at its STOP")
+{
+  port_rig const r;
+  auto const     base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.stop(base + target_ps + us, 2);
+  r.run_until(base + 1);
+  CHECK(r.read(i2c1 + sr2) == busy);
+  r.run_until(base + target_ps + 2 * us);
+  CHECK(r.read(i2c1 + sr2) == 0);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, false, 0xFF, base + target_ps}
+  });
+}
+
+TEST_CASE("RM0038 26.6.1 START: a START the firmware sets while the bus is busy goes at its STOP")
+{
+  port_rig const r;
+  r.write(i2c1 + ccr, 10);
+  r.write(i2c1 + trise, 3);
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own + 1, false, base, 1);
+  r.stop(base + 2 * target_ps, 2);
+  r.run_until(base + target_ps);
+  r.cpu_write(i2c1 + cr1, pe | ack_bit | start);
+  r.run_until(base + 2 * target_ps - us);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == busy);
+  r.run_until(base + 2 * target_ps + phase(1) + 1);
+  CHECK(r.read(i2c1 + sr1) == sb);
+  CHECK(r.read(i2c1 + sr2) == (msl | busy));
+}
+
+TEST_CASE(
+    "PE 0 during the ADDR stretch, which RM0038 26.6.1 ends at the end of the communication: "
+    "popcorn releases it at once until 12b1b, BUSY kept, no STOPF")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.write(0x11, base, 2);
+  r.stop(base + target_ps, 3);
+  r.run_until(base + 2 * target_ps);
+  auto const t0 = r.now();
+  r.cpu_write(i2c1 + cr1, ack_bit);
+  CHECK(r.read(i2c1 + sr2) == busy);
+  r.cpu_write(i2c1 + cr1, pe | ack_bit);
+  r.run_until(t0 + 2 * target_ps);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, true, 0xFF, t0},
+  });
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {2, on_write, t0}
+  });
+  CHECK(r.read(i2c1 + sr1) == 0);
+}
+
+TEST_CASE("checklist 31: I2C1RST during the BTF stretch drops the held byte at the reset")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.run_until(base + target_ps);
+  r.clear_address();
+  auto const t0 = r.now();
+  r.write(0x11, t0, 2);
+  r.write(0x22, t0, 3);
+  r.write(0x33, t0, 4);
+  r.run_until(t0 + 3 * target_ps);
+  r.rcc_pulse();
+  auto const at_reset = r.now();
+  r.run_until(at_reset + 2 * target_ps);
+  CHECK(
+      r.sink->drops
+      == std::vector<lost>{
+          {3, on_write, at_reset            },
+          {4, on_write, at_reset + target_ps},
+  });
+  CHECK(r.sink->answers.size() == 2);
+  CHECK(r.read(i2c1 + sr1) == 0);
+}
+
+TEST_CASE(
+    "checklist 53: NOSTRETCH, a read, an OAR2, a general call and a 10-bit header warn, "
+    "strict raises")
+{
+  struct leg
+  {
+    std::uint32_t control;
+    std::uint32_t own1;
+    std::uint32_t own2;
+    std::uint8_t  to;
+    bool          read;
+    bool          held;
+  };
+  for(auto const& [control, own1, own2, to, read, held] : {
+          leg{pe | ack_bit | nostretch, std::uint32_t{own} << 1,            0,                   own,  false, true },
+          leg{pe | ack_bit,             std::uint32_t{own} << 1,            0,                   own,  true,  false},
+          leg{pe | ack_bit,             std::uint32_t{own} << 1,            0x43u << 1 | endual, 0x43, false, false},
+          leg{pe | ack_bit | engc,      std::uint32_t{own} << 1,            0,                   0,    false, false},
+          leg{pe | ack_bit,             1u << 15 | std::uint32_t{own} << 1, 0,                   0x78, false, false},
+  })
+  {
+    CAPTURE(to);
+    CAPTURE(read);
+    for(auto const strict : {false, true})
+    {
+      CAPTURE(strict);
+      port_rig const r{true, strict};
+      r.listen(control);
+      r.write(i2c1 + oar1, own1);
+      r.write(i2c1 + oar2, own2);
+      auto const base = r.now() + us;
+      r.start(to, read, base, 1);
+      r.start(to, read, base + 2 * target_ps, 2);
+      if(strict)
+      {
+        CHECK_THROWS_AS(
+            r.f->run_to_stop(
+                {.max_instructions = icount{1'000'000},
+                 .until_time       = vtime{base + target_ps + us}}),
+            popcorn::model_error);
+        continue;
+      }
+      r.run_until(base + target_ps + us);
+      if(held)
+      {
+        r.clear_address();
+      }
+      r.run_until(base + 3 * target_ps + us);
+      if(held)
+      {
+        r.clear_address();
+      }
+      r.run_until(base + 3 * target_ps + 2 * us);
+      CHECK(r.warnings("not modelled") == 1);
+      REQUIRE(r.sink->answers.size() == 2);
+      CHECK(r.sink->answers[0].ack == held);
+    }
+  }
+}
+
+TEST_CASE("the I2C's own STOP keeps BUSY while a port transfer runs, the port STOP clears it")
+{
+  port_rig const r;
+  r.write(i2c1 + ccr, 10);
+  r.write(i2c1 + trise, 3);
+  r.listen();
+  auto const t0 = r.now();
+  r.cpu_write(i2c1 + cr1, pe | ack_bit | start);
+  r.start(own + 1, false, t0 + us, 1);
+  r.stop(t0 + target_ps + 2 * us, 2);
+  r.run_until(t0 + phase(1) + us);
+  CHECK(r.read(i2c1 + sr1) == sb);
+  r.cpu_write(i2c1 + cr1, pe | ack_bit | stop);
+  r.run_until(t0 + 3 * phase(1) + us);
+  CHECK(r.read(i2c1 + sr2) == busy);
+  r.run_until(t0 + target_ps + 3 * us);
+  CHECK(r.read(i2c1 + sr2) == 0);
+}
+
+TEST_CASE("RM0038 Table 139: ADDR and STOPF raise the event line with ITEVTEN, RxNE with ITBUFEN")
+{
+  port_rig const r;
+  r.listen();
+  r.write(i2c1 + cr2, freq2 | itevten);
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.run_until(base + target_ps);
+  CHECK((r.read(nvic_ispr0) & event_irq) != 0);
+  r.clear_address();
+  r.write(nvic_ispr0 + 0x80, event_irq);
+  auto const t0 = r.now();
+  r.write(0x11, t0, 2);
+  r.run_until(t0 + target_ps + us);
+  CHECK((r.read(nvic_ispr0) & event_irq) == 0);
+  r.write(i2c1 + cr2, freq2 | itevten | itbufen);
+  CHECK((r.read(nvic_ispr0) & event_irq) != 0);
+  static_cast<void>(r.cpu_read(i2c1 + dr));
+  r.write(nvic_ispr0 + 0x80, event_irq);
+  r.stop(r.now() + us, 3);
+  r.run_until(r.now() + 2 * us);
+  CHECK((r.read(nvic_ispr0) & event_irq) != 0);
+}
+
+TEST_CASE("a snapshot during the BTF stretch restores the held byte and its answer")
+{
+  port_rig const r;
+  r.listen();
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.run_until(base + target_ps);
+  r.clear_address();
+  auto const t0 = r.now();
+  r.write(0x11, t0, 2);
+  r.write(0x22, t0, 3);
+  r.run_until(t0 + 3 * target_ps);
+  auto const     saved = r.f->target->snapshot();
+  port_rig const other;
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  for(auto const* one : {&r, &other})
+  {
+    CHECK(one->read(i2c1 + sr1) == (rxne | btf));
+    auto const t1 = one->now();
+    CHECK(one->cpu_read(i2c1 + dr) == 0x11);
+    CHECK(one->cpu_read(i2c1 + dr) == 0x22);
+    one->run_until(t1 + us);
+    REQUIRE(not one->sink->answers.empty());
+    CHECK(one->sink->answers.back() == heard{3, on_write, true, 0xFF, t1});
+    if(one == &other)
+    {
+      CHECK(
+          one->sink->answers
+          == std::vector<heard>{
+              {3, on_write, true, 0xFF, t1}
+      });
+    }
+  }
 }
 
 TEST_CASE("a snapshot mid-byte restores the byte in flight, the targets and the transfer")
