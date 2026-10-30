@@ -82,28 +82,39 @@ constexpr std::array<builtin, 87> builtins{
          .make            = [](board const& b) { return flash_factory(b.flash); },
          .part_glob       = "STM32U5G*",
          .flash           = flash_8bit},
-     {"flash", "v1.0.0_U5_Cube", [](board const& b) { return flash_factory(b.flash); }},
-     {"flash", "v1.0.0_H5_Cube", [](board const& b) { return flash_h5_factory(b.flash); }},
+     {.ip              = "flash",
+         .ip_version_glob = "v1.0.0_U5_Cube",
+         .make            = [](board const& b) { return flash_factory(b.flash); },
+         .flash           = flash_u5},
+     {.ip              = "flash",
+         .ip_version_glob = "v1.0.0_H5_Cube",
+         .make            = [](board const& b) { return flash_h5_factory(b.flash); },
+         .flash           = flash_h5},
      {.ip              = "Flash",
          .ip_version_glob = "STM32L1_flash_cat1",
-         .make            = [](board const&) { return flash_l1_factory(l1_flash_cat1); },
-         .part_glob       = "STM32L1*"},
+         .make            = [](board const& b) { return flash_l1_factory(l1_flash_cat1, b.flash); },
+         .part_glob       = "STM32L1*",
+         .flash           = flash_l1_cat1},
      {.ip              = "Flash",
          .ip_version_glob = "STM32L1_flash_cat2",
-         .make            = [](board const&) { return flash_l1_factory(l1_flash_cat2); },
-         .part_glob       = "STM32L1*"},
+         .make            = [](board const& b) { return flash_l1_factory(l1_flash_cat2, b.flash); },
+         .part_glob       = "STM32L1*",
+         .flash           = flash_l1_cat2},
      {.ip              = "Flash",
          .ip_version_glob = "STM32L1_flash_cat3",
-         .make            = [](board const&) { return flash_l1_factory(l1_flash_cat3); },
-         .part_glob       = "STM32L1*"},
+         .make            = [](board const& b) { return flash_l1_factory(l1_flash_cat3, b.flash); },
+         .part_glob       = "STM32L1*",
+         .flash           = flash_l1_cat3},
      {.ip              = "Flash",
          .ip_version_glob = "STM32L1_flash_cat46",
-         .make            = [](board const&) { return flash_l1_factory(l1_flash_cat46); },
-         .part_glob       = "STM32L1*"},
+         .make      = [](board const& b) { return flash_l1_factory(l1_flash_cat46, b.flash); },
+         .part_glob = "STM32L1*",
+         .flash     = flash_l1_cat46},
      {.ip              = "Flash",
          .ip_version_glob = "STM32L1_flash_cat5",
-         .make            = [](board const&) { return flash_l1_factory(l1_flash_cat5); },
-         .part_glob       = "STM32L1*"},
+         .make            = [](board const& b) { return flash_l1_factory(l1_flash_cat5, b.flash); },
+         .part_glob       = "STM32L1*",
+         .flash           = flash_l1_cat5},
      {.ip              = "GPIO",
          .ip_version_glob = "STM32U5x_gpio_*",
          .make            = [](board const&) { return gpio_factory(u575_gpio); },
@@ -640,9 +651,14 @@ auto configure_option_bytes(
   {
     return std::unexpected{boot.error()};
   }
-  auto const unit = std::ranges::find_if(part.peripherals, [](peripheral_desc const& p) {
-    return p.ip == "flash" and not p.alias_of;
-  });
+  auto const program = flash_unit(part);
+  if(not program)
+  {
+    return refuse(
+        "option_bytes",
+        std::format("a part with a flash region its FLASH controls, not {}", part.part));
+  }
+  auto const* const unit = program->unit;
   if(options.models.contains(unit->name))
   {
     return refuse(

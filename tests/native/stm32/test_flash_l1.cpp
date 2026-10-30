@@ -1,3 +1,4 @@
+#include "flash_unit.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -5,6 +6,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/model.hpp>
+#include <popcorn/periph/stm32/board.hpp>
 
 #include <doctest/doctest.h>
 
@@ -13,6 +15,7 @@
 #include <cstdint>
 #include <format>
 #include <initializer_list>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -1870,4 +1873,183 @@ TEST_CASE("RM0038 3.8: a queued 2-tprog data EEPROM write sets EOP once, at its 
   idle_to(f, due.front() + 1'000'000);
   CHECK(read(f, sr) == (ready | endhv | eop));
   CHECK(read(f, eeprom + 0x40) == 2);
+}
+
+TEST_CASE("a FLASH snapshot restores a 1-tprog and a 2-tprog write queued, EOP at 3 tprog")
+{
+  auto const f = parked();
+  unlock_data(f);
+  auto const start = now_ps(f);
+  REQUIRE(memory_write(f, eeprom + 0x40, 4, 1));
+  REQUIRE(memory_write(f, eeprom + 0x40, 4, 2));
+  auto const saved = f.target->snapshot();
+  f.target->reset(reset_kind::power_on);
+  f.target->restore(saved);
+  copy_ram_code(f);
+  f.set("pc", sym(f.firmware_name, "idle"));
+  idle_to(f, start + tprog_ps + 1'000'000);
+  CHECK(read(f, sr) == (ready | bsy | eop));
+  auto const due = flash_due(f);
+  REQUIRE(due.size() == 1);
+  CHECK(due.front() >= start + 3 * tprog_ps);
+  CHECK(due.front() < start + 3 * tprog_ps + 1'000'000);
+  write(f, sr, eop);
+  idle_to(f, due.front() + 1'000'000);
+  CHECK(read(f, sr) == (ready | endhv | eop));
+}
+
+TEST_CASE("a FLASH snapshot keeps the OPTVERR verdict of a bad USER load across a software reset")
+{
+  auto const f = parked();
+  unlock_options(f);
+  program_option(f, 0x04, 0xFF00'00F8u);
+  reload(f);
+  REQUIRE(read(f, sr) == (ready | endhv | optverr | optverrusr));
+  auto const saved = f.target->snapshot();
+  unlock_options(f);
+  program_option(f, 0x04, option_word(0xF8, 8));
+  reload(f);
+  REQUIRE(read(f, sr) == (ready | endhv));
+  f.target->restore(saved);
+  f.target->reset(reset_kind::software);
+  CHECK(read(f, sr) == (ready | endhv | optverr | optverrusr));
+}
+
+namespace
+{
+namespace stm32 = popcorn::periph::stm32;
+
+auto refusal_key(part_description const& desc, stm32::option_bytes const& wanted) -> std::string
+{
+  auto const result = stm32::check_option_bytes(desc, wanted);
+  REQUIRE_FALSE(result.has_value());
+  return result.error().key;
+}
+
+auto resized(std::uint32_t size) -> part_description
+{
+  auto part = cat46_variant();
+  auto region =
+      std::ranges::find(part.regions, std::string_view{"Flash"}, &popcorn::region_desc::name);
+  REQUIRE(region != part.regions.end());
+  region->size = size;
+  return part;
+}
+}
+
+TEST_CASE("flash_unit on an STM32L1 part gives FLASH and its Flash regions, no data or options")
+{
+  for(auto const& [desc, regions] : {
+          std::pair{l152re(),       std::vector<address>{0x0800'0000}             },
+          std::pair{split_banks(2), std::vector<address>{0x0800'0000, 0x0804'0000}}
+  })
+  {
+    CAPTURE(desc.part);
+    auto const program = stm32::flash_unit(desc);
+    REQUIRE(program.has_value());
+    CHECK(program->unit->name == "FLASH");
+    auto const starts = program->regions
+                      | std::views::transform([](auto const* r) { return r->start; })
+                      | std::ranges::to<std::vector>();
+    CHECK(starts == regions);
+  }
+}
+
+TEST_CASE("RM0038 Table 19: L1 option bytes boot from the flash base, swap_bank from bank 2")
+{
+  CHECK(stm32::check_option_bytes(l152re(), {}) == address{0x0800'0000});
+  CHECK(stm32::check_option_bytes(l152re(), {.swap_bank = true}) == address{0x0804'0000});
+  CHECK(stm32::check_option_bytes(resized(0x6'0000), {.swap_bank = true}) == address{0x0803'0000});
+  CHECK(stm32::check_option_bytes(split_banks(2), {.swap_bank = true}) == address{0x0804'0000});
+  CHECK(stm32::check_option_bytes(l152rb(), {}) == address{0x0800'0000});
+  CHECK(refusal_key(popcorn::testing::l152rc(), {.swap_bank = true}) == "option_bytes.swap_bank");
+  CHECK(refusal_key(l152rb(), {.swap_bank = true}) == "option_bytes.swap_bank");
+  CHECK(refusal_key(l152re(), {.tzen = true}) == "option_bytes.tzen");
+  CHECK(refusal_key(l152re(), {.secwm1 = stm32::no_area{}}) == "option_bytes.secwm1");
+  CHECK(
+      refusal_key(
+          l152re(),
+          {
+              .secwm2 = stm32::page_range{.first = 0, .last = 1}
+  })
+      == "option_bytes.secwm2");
+  CHECK(refusal_key(l152re(), {.hdp1 = stm32::page_range{}}) == "option_bytes.hdp1");
+  CHECK(refusal_key(l152re(), {.hdp2 = stm32::page_range{}}) == "option_bytes.hdp2");
+  CHECK(refusal_key(l152re(), {.secboot = 0x0800'0000}) == "option_bytes.secboot");
+  CHECK(refusal_key(l152re(), {.nsboot = 0x0800'0000}) == "option_bytes.nsboot");
+  CHECK(refusal_key(l152re(), {.dualbank = true}) == "option_bytes.dualbank");
+  CHECK(refusal_key(l152re(), {.dualbank = false}) == "option_bytes.dualbank");
+  auto       options = popcorn::testing::stm32_options();
+  auto const refused = stm32::configure_option_bytes(l152re(), {.tzen = true}, options);
+  REQUIRE_FALSE(refused.has_value());
+  CHECK(refused.error().key == "option_bytes.tzen");
+  CHECK(options.models.empty());
+}
+
+TEST_CASE("the L1 FLASH factory refuses host option bytes its encoder refuses")
+{
+  stm32::register_builtin_models();
+  auto const refused = [](part_description const& desc, stm32::option_bytes const& wanted) {
+    stm32::board board;
+    board.flash.option_bytes = wanted;
+    auto options             = popcorn::testing::stm32_options();
+    options.models           = stm32::factories(board, desc);
+    try
+    {
+      core::machine target{desc, arch::armv8m::factory(), std::move(options)};
+    }
+    catch(popcorn::config_error const& error)
+    {
+      return std::string{error.key()};
+    }
+    return std::string{};
+  };
+  CHECK(refused(popcorn::testing::l152rc(), {.swap_bank = true}) == "option_bytes.swap_bank");
+  CHECK(refused(l152re(), {.tzen = true}) == "option_bytes.tzen");
+  CHECK(refused(l152re(), {.secwm1 = stm32::no_area{}}) == "option_bytes.secwm1");
+  CHECK(refused(l152re(), {.swap_bank = true}).empty());
+}
+
+TEST_CASE("option_bytes on STM32L152RETx: the boot bank and FLASH_OBR nBFB2 at every load")
+{
+  constexpr std::uint32_t nbfb2 = 1u << 23;
+  for(auto const swap : {false, true})
+  {
+    CAPTURE(swap);
+    auto       options    = popcorn::testing::stm32_options();
+    auto const configured = stm32::configure_option_bytes(l152re(), {.swap_bank = swap}, options);
+    REQUIRE(configured.has_value());
+    CHECK(options.vector_table == address{swap ? 0x0804'0000u : 0x0800'0000u});
+    CHECK_FALSE(options.trustzone);
+    stm32_fixture const f{l152re(), firmware, std::move(options)};
+    auto const          handler = read(f, 0x0800'0004);
+    REQUIRE(f.target->mem().write(0x0804'0000, 4, 0x2000'4000).has_value());
+    REQUIRE(f.target->mem().write(0x0804'0004, 4, handler).has_value());
+    f.target->reset(reset_kind::power_on);
+    auto const reg = [&f](std::string_view name) {
+      return static_cast<std::uint32_t>(f.target->regs().read(*f.target->regs().find(name)));
+    };
+    CHECK(reg("pc") == (handler & ~1u));
+    CHECK(reg("sp") == (swap ? 0x2000'4000u : read(f, 0x0800'0000)));
+    CHECK((read(f, obr) & nbfb2) == (swap ? 0u : nbfb2));
+    f.target->reset(reset_kind::option_load);
+    CHECK((read(f, obr) & nbfb2) == (swap ? 0u : nbfb2));
+    f.target->reset(reset_kind::software);
+    CHECK((read(f, obr) & nbfb2) == (swap ? 0u : nbfb2));
+    copy_ram_code(f);
+    f.set("pc", sym(f.firmware_name, "idle"));
+    auto const user = swap ? 0xF8u : 0x78u;
+    unlock_options(f);
+    program_option(f, 0x04, option_word(user, 8));
+    reload(f);
+    CHECK(read(f, 0x1FF8'0004) == option_word(user, 8));
+    CHECK((read(f, obr) & nbfb2) == (swap ? 0u : nbfb2));
+    CHECK((read(f, sr) & optverr) == 0);
+  }
+  auto const plain = parked();
+  CHECK((read(plain, obr) & nbfb2) == nbfb2);
+  unlock_options(plain);
+  program_option(plain, 0x04, option_word(0x78, 8));
+  reload(plain);
+  CHECK((read(plain, obr) & nbfb2) == 0);
 }

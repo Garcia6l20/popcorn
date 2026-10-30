@@ -961,9 +961,6 @@ constexpr std::array<error_enable, 4> h5_error_enables{
      }
 };
 
-constexpr std::string_view u5_ip_version = "v1.0.0_U5_Cube";
-constexpr std::string_view h5_ip_version = "v1.0.0_H5_Cube";
-
 constexpr std::uint32_t optsr_production  = 0x2d30'edf8;
 constexpr std::uint32_t optsr_swap_bank   = 1u << 31;
 constexpr std::uint32_t optsr2_production = 0x0000'017c;
@@ -3877,34 +3874,71 @@ void flash_model<Traits>::ecc_written(std::uint32_t old, std::uint32_t now)
 }
 }
 
+auto flash_unit(part_description const& part) -> std::optional<flash_program>
+{
+  auto const program = [](region_desc const& region) {
+    return region.controller and not region.physical and region.acc.execute;
+  };
+  auto       controlled = part.regions | std::views::filter(program);
+  auto const lowest     = std::ranges::min_element(controlled, {}, &region_desc::start);
+  if(lowest == controlled.end())
+  {
+    return std::nullopt;
+  }
+  auto const& name = *lowest->controller;
+  auto const  unit = std::ranges::find_if(part.peripherals, [&name](peripheral_desc const& p) {
+    return p.name == name and not p.alias_of;
+  });
+  if(unit == part.peripherals.end())
+  {
+    return std::nullopt;
+  }
+  auto regions = controlled
+               | std::views::filter([&name](region_desc const& r) { return *r.controller == name; })
+               | std::views::transform([](region_desc const& r) { return &r; })
+               | std::ranges::to<std::vector>();
+  std::ranges::sort(regions, {}, &region_desc::start);
+  return flash_program{.unit = &*unit, .regions = std::move(regions)};
+}
+
+auto u5_encode_options(
+    flash_variant const& variant,
+    flash_program const& program,
+    option_bytes const&  wanted) -> std::expected<address, option_refusal>
+{
+  return u5_flash::encode_options(variant, program.regions.front()->size, wanted)
+      .transform([](auto const& words) { return words.boot; });
+}
+
+auto h5_encode_options(
+    flash_variant const& variant,
+    flash_program const& program,
+    option_bytes const&  wanted) -> std::expected<address, option_refusal>
+{
+  return h5_flash::encode_options(variant, program.regions.front()->size, wanted)
+      .transform([](auto const& words) { return words.boot; });
+}
+
 auto check_option_bytes(part_description const& part, option_bytes const& wanted)
     -> std::expected<address, option_refusal>
 {
-  auto const unit    = std::ranges::find_if(part.peripherals, [](peripheral_desc const& candidate) {
-    return candidate.ip == "flash" and not candidate.alias_of;
-  });
-  auto const storage = unit == part.peripherals.end()
-                         ? part.regions.end()
-                         : std::ranges::find_if(part.regions, [&unit](region_desc const& region) {
-                             return region.controller == unit->name and not region.physical;
-                           });
-  auto const boot    = [](auto const& words) { return words.boot; };
-  if(storage != part.regions.end() and unit->ip_version == u5_ip_version)
-  {
-    return u5_flash::encode_options(flash_variant_of(part, *unit), storage->size, wanted)
-        .transform(boot);
-  }
-  if(storage != part.regions.end() and unit->ip_version == h5_ip_version)
-  {
-    return h5_flash::encode_options(flash_variant_of(part, *unit), storage->size, wanted)
-        .transform(boot);
-  }
-  return std::unexpected{
-      option_refusal{
-                     .key      = "option_bytes",
-                     .expected = std::format(
-              "an STM32U5 or STM32H5 part with a flash region its FLASH controls, not {}", part.part)}
+  auto const refuse = [&part](std::string_view expected) {
+    return std::unexpected{
+        option_refusal{
+                       .key = "option_bytes", .expected = std::format("{}, not {}", expected, part.part)}
+    };
   };
+  auto const program = flash_unit(part);
+  if(not program)
+  {
+    return refuse("a part with a flash region its FLASH controls");
+  }
+  auto const variant = flash_variant_of(part, *program->unit);
+  if(variant.encode_options == nullptr)
+  {
+    return refuse("a part whose FLASH row encodes option bytes");
+  }
+  return variant.encode_options(variant, *program, wanted);
 }
 
 auto flash_factory(flash_options options) -> model_factory

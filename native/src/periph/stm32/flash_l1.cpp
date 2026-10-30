@@ -23,6 +23,7 @@
 #include <string_view>
 #include <tuple>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace popcorn::periph::stm32
@@ -44,11 +45,12 @@ constexpr std::uint64_t hz_per_khz      = 1000;
 constexpr std::uint32_t page_bytes      = 256;
 constexpr std::uint32_t half_page_words = 32;
 constexpr std::uint32_t sector_bytes    = 4096;
-constexpr std::uint32_t option_bytes    = 32;
+constexpr std::uint32_t option_words    = 32;
 constexpr std::uint32_t second_options  = 0x80;
 constexpr std::uint32_t mass_erase_cost = 3;
 constexpr std::uint32_t level_0         = 0xaa;
 constexpr std::uint32_t level_2         = 0xcc;
+constexpr std::uint32_t boot_bank_1     = 1u << 7;
 constexpr auto          tprog           = std::chrono::nanoseconds{3'280'000};
 
 struct flash_store
@@ -67,6 +69,19 @@ struct queued_run
 
   friend auto operator==(queued_run const&, queued_run const&) -> bool = default;
 };
+
+auto second_bank_of(std::span<region_desc const* const> program) -> std::optional<std::uint32_t>
+{
+  if(program.size() == 1)
+  {
+    return static_cast<std::uint32_t>(program[0]->start + program[0]->size / 2);
+  }
+  if(program.size() == 2)
+  {
+    return static_cast<std::uint32_t>(program[1]->start);
+  }
+  return std::nullopt;
+}
 
 struct flash_l1_state
 {
@@ -308,7 +323,9 @@ struct status_fields
  *        FLASH_OBR and FLASH_WRPRx from the option words: RDPRT from RDP, bits 23 to 16 from USER,
  *        WRPRx from WRPx. A byte or halfword whose complement is wrong loads 0 and sets OPTVERR,
  *        and OPTVERRUSR as well for USER on Cat.3 to Cat.6. FLASH_OBR and FLASH_WRPRx ignore
- *        writes. RDPRT 0xAA is level 0, 0xCC level 2, any other value level 1.
+ *        writes. RDPRT 0xAA is level 0, 0xCC level 2, any other value level 1. A machine built
+ *        with host option bytes on a part with two banks loads nBFB2, FLASH_OBR bit 23, as the
+ *        inverse of `swap_bank` at every load, whatever the USER word holds.
  *
  *        FLASH_SR: EOP, WRPERR, PGAERR, SIZERR, OPTVERR and OPTVERRUSR clear on a write of 1. EOP
  *        sets once at the end of each operation, after all of its tprogs. FLASH_IRQn is raised
@@ -326,7 +343,11 @@ class flash_l1 final : public dispatch_model<flash_l1, flash_l1_state>,
                        public bus_reset_listener
 {
 public:
-  flash_l1(model_context& ctx, peripheral_desc const& desc, flash_l1_traits const& traits);
+  flash_l1(
+      model_context&         ctx,
+      peripheral_desc const& desc,
+      flash_l1_traits const& traits,
+      flash_options const&   options);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -420,6 +441,7 @@ private:
   std::vector<region_desc const*>                                   data_regions_;
   region_desc const*                                                option_region_{};
   std::optional<std::uint32_t>                                      second_bank_;
+  std::optional<bool>                                               boot_bank_2_;
   std::unique_ptr<bank_filter>                                      filter_;
   irq_line&                                                         line_;
   core::clock_domain                                                hclk_;
@@ -454,7 +476,11 @@ constexpr std::array<write_entry<flash_l1>, 7> flash_l1_writes{
      }
 };
 
-flash_l1::flash_l1(model_context& ctx, peripheral_desc const& desc, flash_l1_traits const& traits)
+flash_l1::flash_l1(
+    model_context&         ctx,
+    peripheral_desc const& desc,
+    flash_l1_traits const& traits,
+    flash_options const&   options)
     : dispatch_model{ctx, desc, "FLASH", flash_l1_writes}, regs_{ctx.regs}, traits_{traits},
       latency_{field("ACR", "LATENCY")}, prefetch_{field("ACR", "PRFTEN")},
       wide_{field("ACR", "ACC64")}, sleep_down_{field("ACR", "SLEEP_PD")},
@@ -519,16 +545,8 @@ flash_l1::flash_l1(model_context& ctx, peripheral_desc const& desc, flash_l1_tra
         ctx.part.part, 0, "regions", "an OPTION_FACTORY region that names FLASH as its controller");
   }
   std::ranges::sort(program_regions_, {}, &region_desc::start);
-  if(traits.dual_bank and program_regions_.size() == 1)
-  {
-    second_bank_ =
-        static_cast<std::uint32_t>(program_regions_[0]->start + program_regions_[0]->size / 2);
-  }
-  else if(traits.dual_bank and program_regions_.size() == 2)
-  {
-    second_bank_ = static_cast<std::uint32_t>(program_regions_[1]->start);
-  }
-  else if(traits.dual_bank)
+  second_bank_ = traits.dual_bank ? second_bank_of(program_regions_) : std::nullopt;
+  if(traits.dual_bank and not second_bank_)
   {
     throw config_error(
         ctx.part.part, 0, "regions",
@@ -545,6 +563,20 @@ flash_l1::flash_l1(model_context& ctx, peripheral_desc const& desc, flash_l1_tra
   }
   filter_ = std::make_unique<bank_filter>(std::move(windows), state_.locked);
   ctx.install_firewall(*filter_);
+  if(not options.option_bytes)
+  {
+    return;
+  }
+  auto const encoded = l1_encode_options(
+      traits, {.unit = &desc, .regions = program_regions_}, *options.option_bytes);
+  if(not encoded)
+  {
+    throw config_error(desc.name, 0, encoded.error().key, encoded.error().expected);
+  }
+  if(traits.dual_bank)
+  {
+    boot_bank_2_ = options.option_bytes->swap_bank;
+  }
 }
 
 auto flash_l1::data_bank(region_desc const& region) const -> std::optional<std::uint32_t>
@@ -976,10 +1008,10 @@ auto flash_l1::rdp_level() const -> std::uint32_t
 
 auto flash_l1::option_word(std::uint32_t offset) const -> bool
 {
-  return offset < option_bytes
+  return offset < option_words
       or (traits_.dual_bank
           and offset >= second_options
-          and offset < second_options + option_bytes);
+          and offset < second_options + option_words);
 }
 
 void flash_l1::write_timed(flash_store const& word)
@@ -1122,7 +1154,7 @@ void flash_l1::program_option(flash_store const& word)
 
 void flash_l1::mass_erase()
 {
-  std::uint32_t largest = option_bytes;
+  std::uint32_t largest = option_words;
   for(auto const* const region : program_regions_)
   {
     largest = std::max(largest, region->size);
@@ -1143,10 +1175,10 @@ void flash_l1::mass_erase()
   {
     erase(region->start, region->size);
   }
-  erase(option_region_->start, option_bytes);
+  erase(option_region_->start, option_words);
   if(traits_.dual_bank)
   {
-    erase(option_region_->start + second_options, option_bytes);
+    erase(option_region_->start + second_options, option_words);
   }
   auto const rtc =
       std::ranges::find(ctx_.part.peripherals, std::string_view{"RTC"}, &peripheral_desc::name);
@@ -1176,7 +1208,9 @@ void flash_l1::load_options()
   auto const rdp    = pair(0, 8);
   auto const user   = pair(4, 8);
   auto       failed = not rdp or not user;
-  regs_.poke(options_.offset, (user.value_or(0) << 16) | rdp.value_or(0));
+  auto const boot   = boot_bank_2_.transform([](bool bank_2) { return bank_2 ? 0 : boot_bank_1; });
+  auto const loaded = boot ? (user.value_or(0) & ~boot_bank_1) | *boot : user.value_or(0);
+  regs_.poke(options_.offset, (loaded << 16) | rdp.value_or(0));
   for(std::uint32_t index = 0; index < protection_.size(); ++index)
   {
     auto const offset = index < 3 ? 8 + 8 * index : second_options;
@@ -1454,10 +1488,73 @@ void flash_l1::on_voltage_range_change()
 }
 }
 
-auto flash_l1_factory(flash_l1_traits traits) -> model_factory
+auto flash_l1_factory(flash_l1_traits traits, flash_options const& options) -> model_factory
 {
-  return [traits](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<flash_l1>(ctx, desc, traits);
+  return
+      [traits, options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+        return std::make_shared<flash_l1>(ctx, desc, traits, options);
+      };
+}
+
+auto l1_encode_options(
+    flash_l1_traits const& traits,
+    flash_program const&   program,
+    option_bytes const&    wanted) -> std::expected<address, option_refusal>
+{
+  auto const refuse = [](std::string_view field, std::string expected) {
+    return std::unexpected{
+        option_refusal{
+                       .key = std::format("option_bytes.{}", field), .expected = std::move(expected)}
+    };
   };
+  auto const unset = [](std::string_view what) {
+    return std::format("unset on an STM32L1, RM0038 has no {}", what);
+  };
+  if(wanted.tzen)
+  {
+    return refuse("tzen", unset("TrustZone"));
+  }
+  if(not std::holds_alternative<whole_bank>(wanted.secwm1))
+  {
+    return refuse("secwm1", unset("secure watermark"));
+  }
+  if(not std::holds_alternative<whole_bank>(wanted.secwm2))
+  {
+    return refuse("secwm2", unset("secure watermark"));
+  }
+  if(wanted.hdp1)
+  {
+    return refuse("hdp1", unset("hide protection"));
+  }
+  if(wanted.hdp2)
+  {
+    return refuse("hdp2", unset("hide protection"));
+  }
+  if(wanted.secboot)
+  {
+    return refuse("secboot", unset("boot address option byte"));
+  }
+  if(wanted.nsboot)
+  {
+    return refuse("nsboot", unset("boot address option byte"));
+  }
+  if(wanted.dualbank)
+  {
+    return refuse("dualbank", unset("bank organization option, the part fixes it"));
+  }
+  auto const base = program.regions.front()->start;
+  if(not wanted.swap_bank)
+  {
+    return base;
+  }
+  auto const second = traits.dual_bank ? second_bank_of(program.regions) : std::nullopt;
+  if(not second)
+  {
+    return refuse(
+        "swap_bank",
+        "false on an STM32L1 with one bank, nBFB2 exists on Cat.4, Cat.5 and Cat.6 only, RM0038 "
+        "Table 19");
+  }
+  return address{*second};
 }
 }

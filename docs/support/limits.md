@@ -278,6 +278,11 @@ On the STM32L1, RM0038 section 3:
   BOR_LEV, IWDG_SW, nRST_STOP, nRST_STDBY and nBFB2 read in FLASH_OBR as loaded, and the BOR
   threshold, the watchdog start, Stop, Standby and the boot address follow the machine's own
   configuration. FLASH_WRPRx bits are write protection on every category.
+- `Machine(option_bytes=)` selects the boot bank: the flash base, or with `swap_bank` on Cat.4 to
+  Cat.6 the bank 2 base, whatever the first word of bank 2 holds. RM0038 Table 19 boots the
+  system bootloader, which jumps to bank 2 when its first word is an SRAM address. FLASH_OBR.nBFB2
+  then loads as the inverse of `swap_bank` at every option load, whatever the USER word holds. Any
+  other field away from its default is refused as `option_bytes.<field>`.
 - OPTVERR and OPTVERRUSR set again at every reset and FLITFRST pulse after an option load that
   set them, RM0038 3.9.7. An option store programs whatever OPTVERR and OPTVERRUSR hold.
 - A program in voltage range 3 completes, logs one `model_warning` and raises `ModelError` under

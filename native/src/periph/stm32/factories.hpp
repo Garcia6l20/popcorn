@@ -85,8 +85,11 @@ namespace popcorn::periph::stm32
 /**
  * @brief Factory of the STM32L1 FLASH and data EEPROM model, RM0038 section 3.
  * @param traits What differs between the categories the row serves.
+ * @param options Board configuration: only `option_bytes` applies, the boot bank of a part with
+ *        two banks.
  */
-[[nodiscard]] auto flash_l1_factory(flash_l1_traits traits) -> model_factory;
+[[nodiscard]] auto flash_l1_factory(flash_l1_traits traits, flash_options const& options)
+    -> model_factory;
 
 /**
  * @brief The FLASH variant of the model row that serves a unit of @p part.
