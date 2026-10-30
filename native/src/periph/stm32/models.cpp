@@ -32,7 +32,7 @@ struct builtin
   flash_variant    flash         = {};
 };
 
-constexpr std::array<builtin, 89> builtins{
+constexpr std::array<builtin, 91> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -174,6 +174,16 @@ constexpr std::array<builtin, 89> builtins{
      {"GPDMA", "STM32U5_dma3_*", [](board const&) { return gpdma_factory(); }},
      {"GPDMA", "*STM32H5_dma3_*", [](board const&) { return gpdma_h5_factory(); }},
      {"LPDMA", "STM32U5_dma3_*", [](board const&) { return lpdma_factory(); }},
+     {.ip              = "DMA",
+         .ip_version_glob = "STM32L1*_dma_*",
+         .make            = [](board const&) { return dma_classic_factory(l1_dma1); },
+         .instance_glob   = "DMA1",
+         .part_glob       = "STM32L1*"},
+     {.ip              = "DMA",
+         .ip_version_glob = "STM32L1*_dma_*",
+         .make            = [](board const&) { return dma_classic_factory(l1_dma2); },
+         .instance_glob   = "DMA2",
+         .part_glob       = "STM32L1*"},
      {.ip              = "USART",
          .ip_version_glob = "sci3_v2*",
          .make            = [](board const& b) { return usart_factory(b, with_views_usart); },

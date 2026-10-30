@@ -2275,3 +2275,107 @@ TEST_CASE("RCTxA has no SPRMOD and no RDERR, its WRPx bits are plain write prote
   REQUIRE(memory_write(f, open_page, 4, 1));
   CHECK((read(f, sr) & wrperr) == 0);
 }
+
+namespace
+{
+constexpr address       dma1      = 0x4002'6000;
+constexpr address       dma_buf   = 0x2000'2000;
+constexpr std::uint32_t word_copy = (1u << 14) | (2u << 10) | (2u << 8) | (1u << 7) | (1u << 6);
+
+auto dma_copy(stm32_fixture const& f, std::uint32_t ch, address from, std::uint32_t items)
+    -> std::uint32_t
+{
+  auto const base = dma1 + 20 * (ch - 1);
+  for(std::uint32_t index = 0; index < items; ++index)
+  {
+    write(f, dma_buf + 0x100 * ch + 4 * index, 0xDEAD'BEEFu);
+  }
+  write(f, base + 0x10, static_cast<std::uint32_t>(from));
+  write(f, base + 0x14, static_cast<std::uint32_t>(dma_buf + 0x100 * ch));
+  write(f, base + 0x0C, items);
+  write(f, base + 0x08, word_copy | 1u);
+  idle_to(f, now_ps(f) + 50'000'000);
+  return read(f, dma1) >> (4 * (ch - 1)) & 0xFu;
+}
+
+auto dma_copied(stm32_fixture const& f, std::uint32_t ch, std::uint32_t index) -> std::uint32_t
+{
+  return read(f, dma_buf + 0x100 * ch + 4 * index);
+}
+}
+
+TEST_CASE(
+    "RM0038 3.4.3 note 2: during a half page a DMA read of its bank sets TEIF, "
+    "of bank 2 it completes")
+{
+  auto const f = parked();
+  REQUIRE(f.target->mem().write(target + 64, 4, 0x1111'2222u).has_value());
+  REQUIRE(f.target->mem().write(bank2 + 8, 4, 0x3333'4444u).has_value());
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  REQUIRE(memory_write(f, target, 4, 1));
+  CHECK(dma_copy(f, 1, target + 64, 1) == 0x9u);
+  CHECK((read(f, dma1 + 0x08) & 1u) == 0);
+  CHECK(read(f, dma1 + 0x0C) == 1);
+  CHECK(dma_copied(f, 1, 0) == 0xDEAD'BEEFu);
+  CHECK(dma_copy(f, 2, bank2 + 8, 1) == 0x7u);
+  CHECK(dma_copied(f, 2, 0) == 0x3333'4444u);
+}
+
+TEST_CASE("bank_filter: a DMA grant from bank 1 stops at the bank boundary while bank 2 is locked")
+{
+  auto const f = parked();
+  REQUIRE(f.target->mem().write(bank2 - 8, 4, 0x0101'0101u).has_value());
+  REQUIRE(f.target->mem().write(bank2 - 4, 4, 0x0202'0202u).has_value());
+  REQUIRE(f.target->mem().write(bank2, 4, 0x0303'0303u).has_value());
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  REQUIRE(memory_write(f, bank2 + 0x80, 4, 1));
+  CHECK(dma_copy(f, 1, bank2 - 8, 3) == 0xDu);
+  CHECK(read(f, dma1 + 0x0C) == 1);
+  CHECK(dma_copied(f, 1, 0) == 0x0101'0101u);
+  CHECK(dma_copied(f, 1, 1) == 0x0202'0202u);
+  CHECK(dma_copied(f, 1, 2) == 0xDEAD'BEEFu);
+}
+
+TEST_CASE("RM0038 3.7.4: a DMA read entering a PCROP sector reads 0 and sets RDERR, inferred")
+{
+  auto const f = pcrop_rc();
+  REQUIRE(f.target->mem().write(pcrop_read - 8, 4, 0x0505'0505u).has_value());
+  REQUIRE(f.target->mem().write(pcrop_read - 4, 4, 0x0606'0606u).has_value());
+  REQUIRE((read(f, sr) & rderr) == 0);
+  CHECK(dma_copy(f, 1, pcrop_read - 8, 3) == 0x7u);
+  CHECK(dma_copied(f, 1, 0) == 0x0505'0505u);
+  CHECK(dma_copied(f, 1, 1) == 0x0606'0606u);
+  CHECK(dma_copied(f, 1, 2) == 0);
+  CHECK((read(f, sr) & rderr) == rderr);
+}
+
+TEST_CASE("RM0038 3.4.3 note 2: a half page started mid-copy fails the next DMA read of its bank")
+{
+  constexpr std::uint64_t dma_latency_ps = 4'000'000'000'000 / 2'097'152;
+  auto const              f              = parked();
+  for(std::uint32_t index = 0; index < 8; ++index)
+  {
+    REQUIRE(f.target->mem().write(target + 64 + 4 * index, 4, 0x1000u + index).has_value());
+    write(f, dma_buf + 0x100 + 4 * index, 0xDEAD'BEEFu);
+  }
+  unlock(f);
+  write(f, pecr, fprg | prog);
+  auto const base = dma1 + 0x08;
+  write(f, base + 0x08, static_cast<std::uint32_t>(target + 64));
+  write(f, base + 0x0C, static_cast<std::uint32_t>(dma_buf + 0x100));
+  write(f, base + 0x04, 8);
+  auto const t0 = now_ps(f);
+  write(f, base, word_copy | 1u);
+  idle_to(f, t0 + 2 * dma_latency_ps + dma_latency_ps / 2);
+  REQUIRE(read(f, base + 0x04) == 6);
+  REQUIRE(memory_write(f, target, 4, 1));
+  idle_to(f, now_ps(f) + 50'000'000);
+  CHECK((read(f, dma1) & 0xFu) == 0x9u);
+  CHECK((read(f, base) & 1u) == 0);
+  CHECK(read(f, base + 0x04) == 6);
+  CHECK(dma_copied(f, 1, 0) == 0x1000u);
+  CHECK(dma_copied(f, 1, 1) == 0x1001u);
+  CHECK(dma_copied(f, 1, 2) == 0xDEAD'BEEFu);
+}

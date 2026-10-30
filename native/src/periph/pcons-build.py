@@ -18,6 +18,7 @@ stm32 = [
         "exti.cpp",
         "exti_classic.cpp",
         "gpdma.cpp",
+        "dma_classic.cpp",
         "usart.cpp",
         "uart_wire.cpp",
         "tim.cpp",

@@ -68,3 +68,22 @@ registers = ["PR"]
 fields = ["PR"]
 width = 24
 source = "RM0038 Rev 18, 10.3.6 EXTI_PR: PR23 exists in Cat.3, Cat.4, Cat.5 and Cat.6 devices, bits 23:0. The SVDs give 23 bits"
+
+[[register_drops]]
+peripheral = "DMA2"
+names = ["CCR6", "CNDTR6", "CPAR6", "CMAR6", "CCR7", "CNDTR7", "CPAR7", "CMAR7"]
+source = "RM0038 Rev 18, 11.1 and the note of 11.4: DMA2 has 5 channels, the bits of channels 6 and 7 are not relevant for DMA2. The SVDs give DMA2 the 7 channels of DMA1"
+
+[[fields]]
+instances = ["DMA2"]
+registers = ["ISR"]
+fields = ["GIF6", "TCIF6", "HTIF6", "TEIF6", "GIF7", "TCIF7", "HTIF7", "TEIF7"]
+drop = true
+source = "RM0038 Rev 18, 11.4 note and 11.4.1 DMA_ISR: DMA2 has 5 channels, the flags of channels 6 and 7 are dropped with them"
+
+[[fields]]
+instances = ["DMA2"]
+registers = ["IFCR"]
+fields = ["CGIF6", "CTCIF6", "CHTIF6", "CTEIF6", "CGIF7", "CTCIF7", "CHTIF7", "CTEIF7"]
+drop = true
+source = "RM0038 Rev 18, 11.4 note and 11.4.2 DMA_IFCR: DMA2 has 5 channels, the clear bits of channels 6 and 7 are dropped with them"

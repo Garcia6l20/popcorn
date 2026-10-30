@@ -116,6 +116,12 @@ namespace popcorn::periph::stm32
  */
 [[nodiscard]] auto exti_classic_factory(exti_classic_traits traits) -> model_factory;
 
+/**
+ * @brief Factory of the classic channel DMA model, RM0038 section 11.
+ * @param traits Channels and requests of the controller the row serves.
+ */
+[[nodiscard]] auto dma_classic_factory(dma_classic_traits traits) -> model_factory;
+
 /** @brief Factory of the GPDMA1 model, RM0456 section 17. */
 [[nodiscard]] auto gpdma_factory() -> model_factory;
 

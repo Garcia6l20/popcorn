@@ -323,6 +323,25 @@ On the STM32L1, RM0038 section 3:
   halfword store of 0 to the Cat.1 data EEPROM programs nothing and logs one `model_warning`,
   `ModelError` under `strict`.
 
+## DMA
+
+Source: [dma_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/dma_classic.cpp)
+
+- STM32L1 DMA1 and DMA2, RM0038 section 11. One transfer runs at a time per controller, 4 HCLK
+  cycles after the previous one, inferred. RM0038 gives no transfer time.
+- `GIFx` reads as the OR of `TEIFx`, `HTIFx` and `TCIFx`, inferred.
+- `HTIFx` sets once per pass, when the items left are at most half the count latched at the
+  enable. For an odd count the rounding is inferred.
+- `CPARx` and `CMARx` take writes while the channel runs, and the running transfer keeps the
+  addresses it latched at the enable until the next circular reload reads them again. `CCRx` fields take writes while the channel
+  runs and apply from the next item, inferred. `CNDTRx` ignores writes while `EN` is set, RM0038 11.4.4.
+- A transfer error leaves the count and the current addresses at the failed item, inferred.
+- A reserved `PSIZE` or `MSIZE` of 3 transfers words, and `CIRC` with `MEM2MEM` runs the copy
+  once. Each logs one `model_warning`.
+- A byte or halfword DMA write to an APB register is a byte or halfword write. RM0038 11.3.4
+  turns it into a word write with the data repeated on every lane.
+- The channels run whatever `RCC_AHBENR.DMAxEN` holds.
+
 ## GPDMA and LPDMA
 
 Source: [gpdma.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/gpdma.cpp)

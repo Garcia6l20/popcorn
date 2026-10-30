@@ -131,6 +131,29 @@ inline constexpr exti_classic_traits l1_exti_23{.lines = 23, .irqs = l1_exti_irq
 /** @brief STM32L1 Cat.3 to Cat.6, RM0038 10.2: 24 lines. */
 inline constexpr exti_classic_traits l1_exti_24{.lines = 24, .irqs = l1_exti_irqs};
 
+/** @brief One hardware request of a classic DMA controller: its signal and its channel. */
+struct dma_classic_request
+{
+  /** @brief Signal name, as dma_signal spells it, such as `usart1_tx_dma`. */
+  std::string_view signal;
+  /** @brief Channel the request is ORed into, 1 for channel 1 as the reference manual counts. */
+  std::uint8_t channel;
+};
+
+/** @brief Differences between the classic DMA controllers the model rows serve. */
+struct dma_classic_traits
+{
+  /** @brief Channels, numbered from 1. */
+  std::uint8_t channels;
+  /** @brief Hardware requests, each ORed into its channel. */
+  std::span<dma_classic_request const> requests = {};
+};
+
+/** @brief STM32L1 DMA1, RM0038 11.1: 7 channels. */
+inline constexpr dma_classic_traits l1_dma1{.channels = 7};
+/** @brief STM32L1 DMA2, RM0038 11.1 and the 11.4 note: 5 channels, on Cat.3 to Cat.6. */
+inline constexpr dma_classic_traits l1_dma2{.channels = 5};
+
 /** @brief One code of a `SYSCFG_EXTICRn` selector field. */
 struct exti_port_code
 {

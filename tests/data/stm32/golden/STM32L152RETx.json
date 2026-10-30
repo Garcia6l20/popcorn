@@ -3,22 +3,22 @@
     "aliases": 0,
     "alternates": 259,
     "cross_rules": 8,
-    "fields": 3913,
+    "fields": 3867,
     "irqs": 55,
     "patched_fields": 25,
     "peripherals": 47,
     "regions": 7,
-    "registers": 564
+    "registers": 556
   },
   "part": "STM32L152RETx",
   "svd_sha256": "ac3fbee1bdf9e50ae69c4807d5fa1af1db92233f91990a07f0aad7060fd1726f",
   "tables": {
     "alternates": "cec5e7c914c13c288e6a9ddb58fc451bec2084a5742a32c0789cef329abde5dd",
     "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
-    "fields": "8eadb5bce05b34a1b1455aef68e96c9b23db3f1c17039a96f404a92da9c5b405",
+    "fields": "149023bcc2bd9c57eebf463bb05bc9a7db2c39a3aeac468e8012f419573cad14",
     "irqs": "cabd4da4d6ecf254b1d4a508fa868178ccb43c10e9adff318c174c6480316dfc",
     "peripherals": "c737bc62953d78537f45376302acc49c2b9e5c27f4c6db49f43aa1dd47fa39a4",
     "regions": "6aa0de883a6a508cd14ff99473b72906d1d7968c73b5a9fae012310d5b0aab52",
-    "registers": "95a964ac83d8ff1165d85f1cf6a3f5ff9ad22786fc422c4f5d2f2ccdb9cae0d3"
+    "registers": "58f3fc9fd49d157bc97f1a0c2c82243c1aa5c345e50a8ab72e0d3088f98fbb8a"
   }
 }

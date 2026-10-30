@@ -72,6 +72,8 @@ l1_firmwares = {
         "l152xe_l1_flash_ll",
         "l152xb_l1_flash_ll",
         "l152xc_l1_flash_ll",
+        "l152xe_l1_dma_ll",
+        "l152xb_l1_dma_ll",
     )
 }
 l1_env = {
@@ -228,6 +230,7 @@ for program, source in (
     ("stm32-gpio-l1", "test_gpio_l1.cpp"),
     ("stm32-exti-l1", "test_exti_l1.cpp"),
     ("stm32-flash-l1", "test_flash_l1.cpp"),
+    ("stm32-dma-l1", "test_dma_l1.cpp"),
 ):
     l1_test = add_doctest(
         program,
