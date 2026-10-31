@@ -276,3 +276,9 @@ IWDG refresh and a watchdog reset on the 37 kHz LSI, HAL. [Sources and tests](ht
 The fixed CRC-32/MPEG-2 unit, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/crc).
 
 --8<-- "stm32l152/crc/README.md:3:13"
+
+### l152 spi
+
+A three-axis accelerometer mocked in Python on SPI1, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/spi).
+
+--8<-- "stm32l152/spi/README.md:3:17"
