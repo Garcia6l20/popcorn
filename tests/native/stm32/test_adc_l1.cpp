@@ -333,15 +333,15 @@ TEST_CASE("RM0038 12.15: the L1 ADC model serves SR to SMPR0, CSR and CCR on L15
 {
   adc_rig const re;
   REQUIRE(re.f.target->model("ADC") != nullptr);
-  CHECK(re.port().external_channels() == 0xFBFC'FFFF);
-  CHECK(re.port().bonded_channels() == 0x003C'FFFF);
+  CHECK(re.port().external_channels(stm32::analog_bank::a) == 0xFBFC'FFFF);
+  CHECK(re.port().bonded_channels(stm32::analog_bank::a) == 0x003C'FFFF);
   CHECK(re.read(sr) == 0);
   CHECK(re.read(smpr0) == 0);
 
   adc_rig const rb{l152rb()};
   REQUIRE(rb.f.target->model("ADC") != nullptr);
-  CHECK(rb.port().external_channels() == 0x03FC'FFFF);
-  CHECK(rb.port().bonded_channels() == 0x003C'FFFF);
+  CHECK(rb.port().external_channels(stm32::analog_bank::a) == 0x03FC'FFFF);
+  CHECK(rb.port().bonded_channels(stm32::analog_bank::a) == 0x003C'FFFF);
   auto const& desc = rb.f.target->peripheral("ADC").description();
   CHECK(popcorn::find_register(desc, "SMPR0") == nullptr);
   CHECK(re.logged.empty());
@@ -690,24 +690,149 @@ TEST_CASE("RM0038 12.7.2: an SQR write during a conversion drops it until the ne
   CHECK((r.read(sr) & eoc) != 0);
 }
 
-TEST_CASE("RM0038 12.3.3: bank B channels on a shared pad read it, others log as unmodelled")
+TEST_CASE(
+    "RM0038 12.3.3 and Table 41: bank B reads its own pad's drive, a shared pad its bank A "
+    "drive, VCOMP logs as unmodelled")
 {
   adc_rig const r;
   r.port().drive(13, 1'500'000);
-  r.port().drive(0, 1'500'000);
+  r.port().drive(0, 750'000);
+  r.port().drive({0, stm32::analog_bank::b}, 1'500'000);
   r.power();
   CHECK(r.convert(13, bank_b) == 2048);
-  CHECK(r.convert(0) == 2048);
+  CHECK(r.convert(0) == 1024);
+  CHECK(r.convert(0, bank_b) == 2048);
   CHECK(r.logged.empty());
-  CHECK(r.convert(0, bank_b) == 0);
-  CHECK(r.convert(0, bank_b) == 0);
+  CHECK(r.convert(26, bank_b) == 0);
+  CHECK(r.convert(26) == 0);
   CHECK(r.warnings() == 1);
 
   adc_rig const strict{l152re(), true};
   strict.power();
-  strict.write(sqr5, 0);
+  strict.write(sqr5, 26);
   CHECK_THROWS_AS(strict.attempt(cr2, adon | bank_b | swstart), popcorn::model_error);
   CHECK((strict.read(sr) & strt) == 0);
+}
+
+TEST_CASE(
+    "RM0038 Table 41: each of the 11 own pads of bank B reads its bank B drive, bank A its own")
+{
+  adc_rig const r;
+  r.power();
+  for(std::uint8_t channel = 0; channel < 13; ++channel)
+  {
+    if((0x1FCFu >> channel & 1u) == 0)
+    {
+      continue;
+    }
+    CAPTURE(channel);
+    auto const own = 100'000u * (channel + 1u);
+    r.port().drive({channel, stm32::analog_bank::b}, own);
+    r.port().drive(channel, 2'900'000);
+    CHECK(r.port().input({channel, stm32::analog_bank::b}) == own);
+    CHECK(r.convert(channel, bank_b) == std::uint64_t{own} * 4096u / 3'000'000u);
+    CHECK(r.convert(channel) == 3959);
+  }
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE(
+    "a bank B drive while bank A is selected is stored and read by the next "
+    "ADC_CFG 1 conversion")
+{
+  adc_rig const r;
+  r.power();
+  CHECK(r.convert(1) == 0);
+  r.port().drive({1, stm32::analog_bank::b}, 2'250'000);
+  CHECK(r.convert(1) == 0);
+  CHECK(r.convert(1, bank_b) == 3072);
+}
+
+TEST_CASE("checklist 26: a bank B drive after the sampling of 1b leaves the held code")
+{
+  adc_rig const r;
+  r.port().drive({1, stm32::analog_bank::b}, 1'500'000);
+  r.power();
+  r.write(smpr3, 7u << 3);
+  r.write(sqr5, 1);
+  auto const start = r.now();
+  r.write(cr2, adon | bank_b | swstart);
+  r.run_until(start + 385 * cycle);
+  r.port().drive({1, stm32::analog_bank::b}, 750'000);
+  r.run_until(start + 396 * cycle + us);
+  REQUIRE((r.read(sr) & eoc) != 0);
+  CHECK(r.read(dr) == 2048);
+  r.write(cr2, adon | bank_b | swstart);
+  r.run_until(r.now() + 396 * cycle + us);
+  CHECK(r.read(dr) == 1024);
+}
+
+TEST_CASE("the bank B drives are board state: kept by a reset, restored by a snapshot")
+{
+  adc_rig const r;
+  r.port().drive({3, stm32::analog_bank::b}, 1'000'000);
+  r.port().drive(3, 2'000'000);
+  r.f.target->reset();
+  CHECK(r.port().input({3, stm32::analog_bank::b}) == 1'000'000);
+  CHECK(r.port().input(3) == 2'000'000);
+  auto const saved = r.f.target->snapshot();
+  r.port().drive({3, stm32::analog_bank::b}, 0);
+  r.f.target->restore(saved);
+  CHECK(r.port().input({3, stm32::analog_bank::b}) == 1'000'000);
+  adc_rig const other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.port().input({3, stm32::analog_bank::b}) == 1'000'000);
+  CHECK(other.port().input(3) == 2'000'000);
+}
+
+TEST_CASE(
+    "a bank B channel sharing its pad, absent or on Cat.1 and Cat.2 is a config_error, "
+    "both banks left unchanged")
+{
+  adc_rig const r;
+  r.port().drive(13, 1'000'000);
+  r.port().drive({0, stm32::analog_bank::b}, 2'000'000);
+  for(std::uint8_t channel : {4, 5, 13, 15, 18, 25, 27, 31})
+  {
+    CAPTURE(channel);
+    CHECK_THROWS_AS(
+        r.port().drive({channel, stm32::analog_bank::b}, 500'000), popcorn::config_error);
+    CHECK_THROWS_AS(
+        static_cast<void>(r.port().input({channel, stm32::analog_bank::b})), popcorn::config_error);
+  }
+  for(std::uint8_t channel : {16, 17, 26, 32})
+  {
+    CAPTURE(channel);
+    CHECK_THROWS_AS(
+        r.port().drive({channel, stm32::analog_bank::b}, 500'000), popcorn::config_error);
+  }
+  CHECK(r.port().input(13) == 1'000'000);
+  CHECK(r.port().input({0, stm32::analog_bank::b}) == 2'000'000);
+  CHECK(r.port().external_channels(stm32::analog_bank::b) == 0x0000'1FCF);
+  CHECK(r.port().bonded_channels(stm32::analog_bank::b) == 0x0000'0001);
+
+  adc_rig const rb{l152rb()};
+  CHECK(rb.port().external_channels(stm32::analog_bank::b) == 0);
+  CHECK(rb.port().bonded_channels(stm32::analog_bank::b) == 0);
+  CHECK_THROWS_AS(rb.port().drive({0, stm32::analog_bank::b}, 500'000), popcorn::config_error);
+}
+
+TEST_CASE(
+    "bonded_channels_b is the description's mask, every own pad without one, a wider mask throws")
+{
+  auto       description = l152re();
+  auto const adc         = std::ranges::find(
+      description.peripherals, std::string_view{"ADC"}, &popcorn::peripheral_desc::name);
+  REQUIRE(adc != description.peripherals.end());
+  REQUIRE(adc->bonded_channels_b == std::optional<std::uint32_t>{0x0000'0001});
+  adc->bonded_channels_b.reset();
+  {
+    adc_rig const r{description};
+    CHECK(r.port().bonded_channels(stm32::analog_bank::b) == 0x0000'1FCF);
+  }
+  adc->bonded_channels_b = 0x0000'0010;
+  CHECK_THROWS_AS(adc_rig{description}, popcorn::config_error);
 }
 
 TEST_CASE("checklist 53: each function the L1 ADC does not model raises model_error when strict")
@@ -1964,25 +2089,18 @@ TEST_CASE("a snapshot during an injection over a regular conversion ends both at
   check(other);
 }
 
-TEST_CASE(
-    "an injected bank B channel on a pad of its own reads 0 and logs once, "
-    "a model_error when strict")
+TEST_CASE("an injected bank B channel on a pad of its own reads its bank B drive, no log")
 {
-  adc_rig const r;
-  r.port().drive(0, 1'500'000);
+  adc_rig const r{l152re(), true};
+  r.port().drive(0, 750'000);
+  r.port().drive({0, stm32::analog_bank::b}, 1'500'000);
   r.power();
   r.write(cr2, adon | bank_b);
   r.write(cr2, adon | bank_b | jswstart);
   r.run_until(r.now() + 40 * us);
   CHECK((r.read(sr) & jeoc) != 0);
-  CHECK(r.read(jdr1) == 0);
-  CHECK(r.warnings() == 1);
-
-  adc_rig const strict{l152re(), true};
-  strict.power();
-  strict.write(cr2, adon | bank_b);
-  CHECK_THROWS_AS(strict.attempt(cr2, adon | bank_b | jswstart), popcorn::model_error);
-  CHECK((strict.read(sr) & jstrt) == 0);
+  CHECK(r.read(jdr1) == 2048);
+  CHECK(r.logged.empty());
 }
 
 TEST_CASE("LL ADC: JSWSTART injects ADC_IN5 over a regular conversion, JOFR1 0x400, DR after it")

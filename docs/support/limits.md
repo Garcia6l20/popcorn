@@ -187,9 +187,13 @@ On the STM32L1, RM0038 section 12:
   written with `ADON` 1 apply from the next conversion.
 - With `EOCS` 1, a result that finds `ADC_DR` unread sets `OVR` and is lost, and the group goes
   on, inferred.
-- On Cat.3 to Cat.6, bank B channels on a pad of their own, ADC_IN0b to ADC_IN3b and ADC_IN6b to
-  ADC_IN12b, have no analog input and read 0, logged once. The other bank B channels read their
-  bank A pad. VCOMP, channel 26, reads 0, logged once.
+- On Cat.3 to Cat.6, the bank B channels on a pad of their own, ADC_IN0b to ADC_IN3b and
+  ADC_IN6b to ADC_IN12b, read their bank B input, `ADC.input(n, bank="B")`. The other bank B
+  channels read their bank A pad and take no bank B drive. VCOMP, channel 26, reads 0, logged
+  once.
+- A package bonds a bank B channel on a pad of its own when it bonds that pad, RM0038 Table 41
+  and the DS10002, DS10764, DS8890, DS10262 and DS8576 pin tables: PB2 for ADC_IN0b on every
+  Cat.3 to Cat.6 package.
 - The factory TS_CAL1, TS_CAL2 and VREFINT_CAL words are datasheet typical values. TS_CAL1 is
   derived from two typicals, inferred. The L100 parts carry the words though their datasheets
   give no TS_CAL, inferred.

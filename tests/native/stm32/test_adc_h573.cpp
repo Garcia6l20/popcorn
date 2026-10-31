@@ -1144,3 +1144,20 @@ TEST_CASE("ADC_CSR reads ADC1 ADC_ISR bits 10:0 at 10:0 and ADC2's at 26:16")
   r.write("ADC2", "ADC_ISR", 0x7FE);
   CHECK(r.read("ADCC", "ADC_CSR") == (1u | 1u << 16));
 }
+
+TEST_CASE("the H573 ADC1 and ADC2 have bank A only: bank B is a config_error, its masks 0")
+{
+  rig const r;
+  for(auto const unit : {"ADC1", "ADC2"})
+  {
+    CAPTURE(unit);
+    r.port(unit).drive(3, 1'000'000);
+    CHECK_THROWS_AS(
+        r.port(unit).drive({3, stm32::analog_bank::b}, 2'000'000), popcorn::config_error);
+    CHECK_THROWS_AS(
+        static_cast<void>(r.port(unit).input({3, stm32::analog_bank::b})), popcorn::config_error);
+    CHECK(r.port(unit).input(3) == 1'000'000);
+    CHECK(r.port(unit).external_channels(stm32::analog_bank::b) == 0);
+    CHECK(r.port(unit).bonded_channels(stm32::analog_bank::b) == 0);
+  }
+}

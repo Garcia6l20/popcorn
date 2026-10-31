@@ -194,6 +194,16 @@ a package pin. `bonded_adc_channels` in `_cubemx.py` reads it from the `ADC<n>_I
 external channel. A hand-written description may leave `bonded_channels` out, every external
 channel then counts as bonded.
 
+An ADC with the two channel banks of the STM32L1 Cat.3 to Cat.6, the ADCs whose `CR2` has the
+`ADC_CFG` field, also carries `bonded_channels_b`: bit c for the bank B channel c on a pad of its
+own whose pad reaches a package pin. `bonded_bank_b` in `_adc_banks.py` reads it from the pad table
+of the IP version, RM0038 Table 41, and the part's bonded GPIO pins. An `ADC_CFG` ADC of an IP
+version with no pad table fails the build. The `ADC_IN<c>b` signals of the pin data, read by
+`bonded_adc_channels_b`, lie inside that mask on every L1 part. The board API refuses the others,
+`ADC.input(c, bank="B")`. The field is absent on every other ADC and the golden `P` line then ends
+at `bonded_channels`, else it adds `bonded_b` and the mask. A hand-written description may leave it
+out, every bank B channel on a pad of its own then counts as bonded.
+
 ## Field drops
 
 An SVD can describe fields a part does not implement, such as the per-pin fields of pins a port

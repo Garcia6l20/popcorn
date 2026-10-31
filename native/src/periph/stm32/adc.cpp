@@ -737,7 +737,8 @@ struct adc_clock
  *        enable.
  *
  *        Codes against VDDA, the board's `supply_options`: an external channel 1 to 17 reads
- *        its driven input, `analog_port`, as V x 16384 / VDDA, floored and saturated. VREFINT
+ *        its driven input, `analog_port` bank A, as V x 16384 / VDDA, floored and saturated. A
+ *        bank B channel of the port is a config_error, the ADC has one bank. VREFINT
  *        reads the factory VREFINT_CAL and the temperature sensor TS_CAL1, at 30 C, both scaled
  *        by 3000 / VDDA, when ADC12_CCR connects them, and 0 otherwise. Each word is read from
  *        the description's signature content when a sequence converting its channel starts, a
@@ -851,12 +852,12 @@ public:
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
 
-  void               drive(std::uint8_t channel, std::uint32_t microvolts) override;
-  [[nodiscard]] auto input(std::uint8_t channel) const -> std::uint32_t override;
-  [[nodiscard]] auto external_channels() const -> std::uint32_t override;
-  [[nodiscard]] auto bonded_channels() const -> std::uint32_t override
+  void               drive(analog_channel channel, std::uint32_t microvolts) override;
+  [[nodiscard]] auto input(analog_channel channel) const -> std::uint32_t override;
+  [[nodiscard]] auto external_channels(analog_bank bank) const -> std::uint32_t override;
+  [[nodiscard]] auto bonded_channels(analog_bank bank) const -> std::uint32_t override
   {
-    return bonded_channels_;
+    return bank == analog_bank::a ? bonded_channels_ : 0;
   }
   [[nodiscard]] auto vdda_mv() const -> std::uint32_t override;
 
@@ -891,7 +892,7 @@ private:
   [[nodiscard]] auto channel_at(std::size_t rank) const -> std::uint32_t;
   [[nodiscard]] auto length() const -> std::size_t;
   [[nodiscard]] auto busy() const -> bool;
-  [[nodiscard]] auto external(std::uint8_t channel) const -> std::size_t;
+  [[nodiscard]] auto external(analog_channel channel) const -> std::size_t;
   [[nodiscard]] auto calibration(address at, std::string_view name) const -> std::uint16_t;
   [[nodiscard]] auto sample(std::uint32_t channel) const -> std::uint32_t;
   [[nodiscard]] auto dma() const -> dma_mode;
@@ -1068,10 +1069,14 @@ adc_model<Traits>::adc_model(model_context& ctx, peripheral_desc const& desc, su
       watchdog1_channel_{field(Traits::config, "AWD1CH")},
       watchdog1_filter_{field(Traits::filter_register, Traits::filter_field)}
 {
-  bonded_channels_ = desc.bonded_channels.value_or(external_channels());
-  if((bonded_channels_ & ~external_channels()) != 0)
+  bonded_channels_ = desc.bonded_channels.value_or(external_channels(analog_bank::a));
+  if((bonded_channels_ & ~external_channels(analog_bank::a)) != 0)
   {
     throw config_error(desc.name, 0, "bonded_channels", "a mask of external channels");
+  }
+  if(desc.bonded_channels_b.value_or(0) != 0)
+  {
+    throw config_error(desc.name, 0, "bonded_channels_b", "0 or absent, the ADC has one bank");
   }
   for(std::size_t index = 0; index < Traits::dma_fields.size(); ++index)
   {
@@ -1257,19 +1262,25 @@ template <typename Traits> auto adc_model<Traits>::busy() const -> bool
 }
 
 template <typename Traits>
-auto adc_model<Traits>::external(std::uint8_t channel) const -> std::size_t
+auto adc_model<Traits>::external(analog_channel channel) const -> std::size_t
 {
-  if(not Traits::external(channel))
+  if(channel.bank != analog_bank::a)
+  {
+    throw config_error(
+        desc_.name, 0, "bank",
+        std::format("bank A, the ADC has one bank, not channel {}b", channel.number));
+  }
+  if(not Traits::external(channel.number))
   {
     throw config_error(
         desc_.name, 0, "channel",
-        std::format("an external channel {}, not {}", Traits::externals, channel));
+        std::format("an external channel {}, not {}", Traits::externals, channel.number));
   }
-  return channel;
+  return channel.number;
 }
 
 template <typename Traits>
-void adc_model<Traits>::drive(std::uint8_t channel, std::uint32_t microvolts)
+void adc_model<Traits>::drive(analog_channel channel, std::uint32_t microvolts)
 {
   auto const at = external(channel);
   if(state_.converting)
@@ -1280,12 +1291,13 @@ void adc_model<Traits>::drive(std::uint8_t channel, std::uint32_t microvolts)
 }
 
 template <typename Traits>
-auto adc_model<Traits>::input(std::uint8_t channel) const -> std::uint32_t
+auto adc_model<Traits>::input(analog_channel channel) const -> std::uint32_t
 {
   return state_.input_uv[external(channel)];
 }
 
-template <typename Traits> auto adc_model<Traits>::external_channels() const -> std::uint32_t
+template <typename Traits>
+auto adc_model<Traits>::external_channels(analog_bank bank) const -> std::uint32_t
 {
   static constexpr auto mask = [] {
     std::uint32_t bits = 0;
@@ -1298,7 +1310,7 @@ template <typename Traits> auto adc_model<Traits>::external_channels() const -> 
     }
     return bits;
   }();
-  return mask;
+  return bank == analog_bank::a ? mask : 0;
 }
 
 template <typename Traits> auto adc_model<Traits>::vdda_mv() const -> std::uint32_t

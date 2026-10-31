@@ -10,6 +10,7 @@ from pathlib import Path
 
 import popcorn
 import pytest
+from popcorn import _core
 from popcorn.board import SpiTarget
 from popcorn.stm32.description._shipped import build_text
 from popcorn.units import ms
@@ -216,10 +217,10 @@ def test_an_adc_channel_on_an_unbonded_pad_is_refused_at_every_entry(
         "5 6 7 8 9 10 11 12 15 16 17"
     )
     for access in (
-        lambda: handle.adc_drive("ADC1", 1, 1_000_000),
-        lambda: handle.adc_input("ADC1", 1),
-        lambda: handle.op_adc_drive("ADC1", 1, 1_000_000),
-        lambda: handle.op_adc_input("ADC1", 1),
+        lambda: handle.adc_drive("ADC1", 1, _core.AdcBank.a, 1_000_000),
+        lambda: handle.adc_input("ADC1", 1, _core.AdcBank.a),
+        lambda: handle.op_adc_drive("ADC1", 1, _core.AdcBank.a, 1_000_000),
+        lambda: handle.op_adc_input("ADC1", 1, _core.AdcBank.a),
     ):
         with pytest.raises(popcorn.ConfigError, match=refused):
             access()

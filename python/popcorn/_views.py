@@ -14,6 +14,22 @@ from popcorn._errors import ConfigError
 from popcorn._rng import MAX_QUEUED, checked_int
 from popcorn.units import VirtualTime
 
+type AnalogBank = Literal["A", "B"]
+"""Channel bank of an ADC input: "B" names the STM32L1 Cat.3 to Cat.6 bank B channels on a pad
+of their own, `ADC_IN12b` for channel 12."""
+
+_BANKS: dict[str, _core.AdcBank] = {"A": _core.AdcBank.a, "B": _core.AdcBank.b}
+
+
+def native_bank(bank: AnalogBank) -> _core.AdcBank:
+    """`bank` as the native binding takes it."""
+    return _BANKS[bank]
+
+
+def _channel_list(mask: int, suffix: str, separator: str) -> str:
+    return separator.join(f"{n}{suffix}" for n in range(32) if mask >> n & 1) or "none"
+
+
 if TYPE_CHECKING:
     from popcorn._audio import AudioStream
     from popcorn._part_description import PartDescription
@@ -496,33 +512,62 @@ class PeripheralView:
             )
         return Pin(self._access, self._name, number)
 
-    def input(self, channel: int) -> AnalogInput:
-        """External channel `channel` of this ADC. The ADC model gives the external channels:
-        1 to 17 on the STM32U5 ADC1, 0 to 15, 18 and 19 on the STM32H5 ADC1 and ADC2, 0 to 15
-        and 18 to 25 on the STM32L1 Cat.1 and Cat.2 ADC, with 27 to 31 from Cat.3, bank A.
+    def input(self, channel: int, *, bank: AnalogBank = "A") -> AnalogInput:
+        """External channel `channel` of bank `bank` of this ADC. The ADC model gives the
+        external channels: 1 to 17 on the STM32U5 ADC1, 0 to 15, 18 and 19 on the STM32H5 ADC1
+        and ADC2, 0 to 15 and 18 to 25 on the STM32L1 Cat.1 and Cat.2 ADC, with 27 to 31 from
+        Cat.3. Bank "B" holds the STM32L1 Cat.3 to Cat.6 channels on a pad of their own, 0 to 3
+        and 6 to 12, `input(12, bank="B")` for ADC_IN12b. Every other ADC has bank A only. A bank
+        B channel sharing its pad with bank A is driven as that bank A channel.
 
         Raises:
-            ConfigError: `channel` is not an external channel of this ADC, or the part's
-                package does not bond its pad.
+            ConfigError: `bank` is not "A" or "B", `channel` is not an external channel of the
+                bank, a bank B channel shares its pad with bank A, or the part's package does not
+                bond its pad.
             ModelError: The peripheral's model is not the built-in ADC.
         """
-        mask = self._access.handle.adc_channels(self._name)
+        if bank not in _BANKS:
+            raise ConfigError(f"{self._name}: no bank {bank!r}", key="bank", expected='"A" or "B"')
+        handle = self._access.handle
+        native = _BANKS[bank]
+        suffix = "b" if bank == "B" else ""
+        mask = handle.adc_channels(self._name, native)
         if not 0 <= channel < 32 or not mask >> channel & 1:
-            external = ", ".join(str(n) for n in range(32) if mask >> n & 1)
-            raise ConfigError(
-                f"{self._name}: no external channel {channel}",
-                key="channel",
-                expected=f"an external channel, one of {external}",
+            if bank == "B" and mask == 0:
+                raise ConfigError(
+                    f"{self._name}: no bank B", key="bank", expected="bank A, the ADC has one bank"
+                )
+            shared = (
+                bank == "B"
+                and 0 <= channel < 32
+                and handle.adc_channels(self._name, _BANKS["A"]) >> channel & 1
             )
-        bonded = self._access.handle.adc_bonded_channels(self._name)
+            raise ConfigError(
+                (
+                    f"{self._name}: channel {channel}b shares the pad of bank A channel {channel}"
+                    if shared
+                    else f"{self._name}: no external channel {channel}{suffix}"
+                ),
+                key="channel",
+                expected=(
+                    f"an external channel, one of {_channel_list(mask, '', ', ')}"
+                    if bank == "A"
+                    else "a bank B channel on a pad of its own, one of "
+                    + _channel_list(mask, "b", ", ")
+                ),
+            )
+        bonded = handle.adc_bonded_channels(self._name, native)
         if not bonded >> channel & 1:
-            listed = " ".join(str(n) for n in range(32) if bonded >> n & 1) or "none"
             raise ConfigError(
-                f"{self._name}: channel {channel} reaches no package pin",
+                f"{self._name}: channel {channel}{suffix} reaches no package pin",
                 key="channel",
-                expected=f"a bonded channel, one of {listed}",
+                expected=(
+                    f"a bonded channel, one of {_channel_list(bonded, '', ' ')}"
+                    if bank == "A"
+                    else f"a bonded bank B channel, one of {_channel_list(bonded, 'b', ' ')}"
+                ),
             )
-        return AnalogInput(self._access, self._name, channel)
+        return AnalogInput(self._access, self._name, channel, bank)
 
     @property
     def entropy(self) -> RngEntropy:
@@ -666,7 +711,8 @@ class Pin:
 
 
 class AnalogInput:
-    """One external ADC channel, `m.periph.ADC1.input(5)`, through the ADC model.
+    """One external ADC channel, `m.periph.ADC1.input(5)`, or of bank B,
+    `m.periph.ADC.input(12, bank="B")`, through the ADC model.
 
     Setting `volts` drives the channel from outside the MCU, in whole microvolts. The drive is
     board state, kept across an MCU reset and restored by snapshots. A conversion reads the value
@@ -676,28 +722,34 @@ class AnalogInput:
     While the machine is busy, every access raises MachineRunning outside its callbacks:
     `m.write((m.ref.periph.ADC1.input(5).volts, 1.5))` drives it at a block boundary then.
     Every access raises ConfigError at the call, parked or running, for a channel whose pad the
-    part's package does not bond, outside the ADC's `bonded_channels` in the description.
+    part's package does not bond, outside the ADC's `bonded_channels` in the description, or
+    `bonded_channels_b` for bank B. On the STM32L1 a conversion with ADC_CFG 1 reads the bank B
+    drive of a channel on a pad of its own, the bank A drive of every other channel.
     """
 
-    __slots__ = ("_access", "adc", "channel")
+    __slots__ = ("_access", "adc", "bank", "channel")
 
-    def __init__(self, access: ViewAccess, adc: str, channel: int) -> None:
+    def __init__(self, access: ViewAccess, adc: str, channel: int, bank: AnalogBank = "A") -> None:
         """View a channel. Use `m.periph.<ADCx>.input(n)` instead."""
         self._access = access
         self.adc = adc
         self.channel = channel
+        self.bank: AnalogBank = bank
 
     @property
     def volts(self) -> float:
         """Voltage driven on the channel, 0.0 when never driven."""
-        return self._access.handle.adc_input(self.adc, self.channel) / 1e6
+        return self._access.handle.adc_input(self.adc, self.channel, native_bank(self.bank)) / 1e6
 
     @volts.setter
     def volts(self, value: float) -> None:
-        self._access.handle.adc_drive(self.adc, self.channel, microvolts_of(value))
+        self._access.handle.adc_drive(
+            self.adc, self.channel, native_bank(self.bank), microvolts_of(value)
+        )
 
     def __repr__(self) -> str:
-        return f"AnalogInput({self.adc}, {self.channel})"
+        suffix = "b" if self.bank == "B" else ""
+        return f"AnalogInput({self.adc}, {self.channel}{suffix})"
 
 
 class RngEntropy:

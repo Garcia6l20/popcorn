@@ -2349,17 +2349,19 @@ TEST_CASE("bonded_channels() is the description's mask, every external channel w
   {
     adc_fixture const f{description};
     REQUIRE(adc1->bonded_channels.has_value());
-    CHECK(f.port().bonded_channels() == *adc1->bonded_channels);
-    CHECK(f.port().bonded_channels() == f.port().external_channels());
+    CHECK(f.port().bonded_channels(stm32::analog_bank::a) == *adc1->bonded_channels);
+    CHECK(
+        f.port().bonded_channels(stm32::analog_bank::a)
+        == f.port().external_channels(stm32::analog_bank::a));
   }
   adc1->bonded_channels = 0x0000'0060;
   {
     adc_fixture const f{description};
-    CHECK(f.port().bonded_channels() == 0x0000'0060);
+    CHECK(f.port().bonded_channels(stm32::analog_bank::a) == 0x0000'0060);
   }
   adc1->bonded_channels.reset();
   adc_fixture const f{description};
-  CHECK(f.port().bonded_channels() == 0x0003'fffe);
+  CHECK(f.port().bonded_channels(stm32::analog_bank::a) == 0x0003'fffe);
 }
 
 TEST_CASE("a bonded_channels mask naming an internal channel throws config_error")
@@ -2369,5 +2371,34 @@ TEST_CASE("a bonded_channels mask naming an internal channel throws config_error
       description.peripherals, std::string_view{"ADC1"}, &popcorn::peripheral_desc::name);
   REQUIRE(adc1 != description.peripherals.end());
   adc1->bonded_channels = 0x0000'0001;
+  CHECK_THROWS_AS(adc_fixture{description}, popcorn::config_error);
+}
+
+TEST_CASE(
+    "the U575 ADCs have bank A only: bank B is a config_error, its masks 0, "
+    "a bonded_channels_b mask throws")
+{
+  adc_fixture const f;
+  f.port().drive(5, 1'000'000);
+  for(std::uint8_t channel : {0, 1, 5, 17})
+  {
+    CAPTURE(channel);
+    CHECK_THROWS_AS(
+        f.port().drive({channel, stm32::analog_bank::b}, 2'000'000), popcorn::config_error);
+    CHECK_THROWS_AS(
+        static_cast<void>(f.port().input({channel, stm32::analog_bank::b})), popcorn::config_error);
+  }
+  CHECK(f.port().input(5) == 1'000'000);
+  CHECK(f.port().external_channels(stm32::analog_bank::b) == 0);
+  CHECK(f.port().bonded_channels(stm32::analog_bank::b) == 0);
+
+  auto       description = u575();
+  auto const adc1        = std::ranges::find(
+      description.peripherals, std::string_view{"ADC1"}, &popcorn::peripheral_desc::name);
+  REQUIRE(adc1 != description.peripherals.end());
+  CHECK_FALSE(adc1->bonded_channels_b.has_value());
+  adc1->bonded_channels_b = 0;
+  CHECK_NOTHROW(adc_fixture{description});
+  adc1->bonded_channels_b = 0x0000'0002;
   CHECK_THROWS_AS(adc_fixture{description}, popcorn::config_error);
 }

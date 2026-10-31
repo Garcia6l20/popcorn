@@ -42,9 +42,10 @@ from popcorn._usb import (
     UsbState,
     UsbTransferType,
 )
-from popcorn._views import AnalogInput, Pin, RngEntropy
+from popcorn._views import AnalogBank, AnalogInput, Pin, RngEntropy
 
 __all__ = [
+    "AnalogBank",
     "AnalogInput",
     "AudioFrame",
     "AudioLayout",

@@ -237,15 +237,16 @@ def bonded_adc_channels(part: DbPart) -> dict[str, int]:
     """External ADC channels whose pad @p part's package bonds: ADC instance -> mask of its
     channels, sorted by instance. A pin of the part's pin list carrying the signal `ADC<n>_IN<c>`
     or `ADC<n>_INP<c>` bonds channel c of ADC<n>, `ADC_IN<c>` channel c of the single instance
-    `ADC` of the STM32L1. Negative inputs `ADC<n>_INN<c>`, the STM32L1 bank B inputs, read by
-    bonded_adc_channels_b, and trigger signals such as `ADC1_EXTI11` are left out."""
+    `ADC` of the STM32L1. Negative inputs `ADC<n>_INN<c>`, the STM32L1 bank B inputs and trigger
+    signals such as `ADC1_EXTI11` are left out."""
     return _adc_inputs(part, bank_b=False)
 
 
 def bonded_adc_channels_b(part: DbPart) -> dict[str, int]:
-    """STM32L1 bank B channels on a pad of their own that @p part's package bonds: ADC instance
-    -> mask, bit c for the signal `ADC_IN<c>b` on a pin of the part's pin list, sorted by
-    instance. Empty on a part without such signals."""
+    """STM32L1 bank B channels on a pad of their own whose signal @p part's pin list names: ADC
+    instance -> mask, bit c for the signal `ADC_IN<c>b` on a pin, sorted by instance. The
+    description takes the mask from the pads, `_adc_banks.bonded_bank_b`, this reading checks
+    it."""
     return _adc_inputs(part, bank_b=True)
 
 

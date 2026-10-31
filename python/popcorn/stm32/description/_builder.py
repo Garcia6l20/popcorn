@@ -9,12 +9,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
+from popcorn.stm32.description._adc_banks import bank_b_pads, bonded_bank_b
 from popcorn.stm32.description._cubemx import (
     DbIp,
     DbPart,
     Rzone,
     bonded_adc_channels,
-    bonded_adc_channels_b,
     bonded_pins,
     instance_ips,
     read_gpio_alternates,
@@ -96,6 +96,37 @@ def _has_field(peripheral: PeripheralDesc, register: str, field: str) -> bool:
     return any(
         r.name == register and any(f.name == field for f in r.fields) for r in peripheral.registers
     )
+
+
+def apply_bonding(
+    part: str,
+    peripherals: Sequence[PeripheralDesc],
+    bonded: Mapping[str, int],
+    channels: Mapping[str, int],
+) -> None:
+    """Set `bonded` on each GPIO port of @p peripherals from @p bonded, a port letter to its pin
+    mask, and `bonded_channels` on each ADC from @p channels, by instance name. An ADC whose `CR2`
+    has `ADC_CFG` also gets `bonded_channels_b` from the bank B pad table of its IP version.
+
+    @throws DescriptionError An ADC has `CR2.ADC_CFG` and its IP version has no bank B pad table.
+    """
+    for peripheral in peripherals:
+        if peripheral.alias_of is not None:
+            continue
+        port = _GPIO_PORT_RE.fullmatch(peripheral.name)
+        if port is not None:
+            peripheral.bonded = bonded.get(port.group(1), 0)
+        elif peripheral.ip == "ADC":
+            peripheral.bonded_channels = channels.get(peripheral.name, 0)
+            if _has_field(peripheral, "CR2", "ADC_CFG"):
+                if not bank_b_pads(peripheral.ip_version):
+                    raise DescriptionError(
+                        part,
+                        0,
+                        f"{peripheral.name}.CR2.ADC_CFG",
+                        f"a bank B pad table for the IP version {peripheral.ip_version}",
+                    )
+                peripheral.bonded_channels_b = bonded_bank_b(peripheral.ip_version, bonded)
 
 
 def _ancestors(name: str, derived_from: Mapping[str, str | None]) -> list[str]:
@@ -248,19 +279,9 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
                 peripheral.alternates = alternates.get(port.group(1), [])
     report.alternates_dropped = apply_alternate_drops(loaded_patches, target.peripherals)
     if db_part.pins:
-        bonded = bonded_pins(db_part)
-        channels = bonded_adc_channels(db_part)
-        channels_b = bonded_adc_channels_b(db_part)
-        for peripheral in target.peripherals:
-            if peripheral.alias_of is not None:
-                continue
-            port = _GPIO_PORT_RE.fullmatch(peripheral.name)
-            if port is not None:
-                peripheral.bonded = bonded.get(port.group(1), 0)
-            elif peripheral.ip == "ADC":
-                peripheral.bonded_channels = channels.get(peripheral.name, 0)
-                if _has_field(peripheral, "CR2", "ADC_CFG"):
-                    peripheral.bonded_channels_b = channels_b.get(peripheral.name, 0)
+        apply_bonding(
+            sources.part, target.peripherals, bonded_pins(db_part), bonded_adc_channels(db_part)
+        )
 
     description = PartDescription(
         part=sources.part,

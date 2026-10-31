@@ -506,14 +506,14 @@ auto gpio_alternate_body(periph::stm32::gpio_port& port, std::uint8_t pin)
 }
 
 auto adc_drive_body(
-    periph::stm32::analog_port& port,
-    std::uint8_t                channel,
-    std::uint32_t               microvolts)
+    periph::stm32::analog_port&   port,
+    periph::stm32::analog_channel channel,
+    std::uint32_t                 microvolts)
 {
   return [port = &port, channel, microvolts](core::machine&) { port->drive(channel, microvolts); };
 }
 
-auto adc_input_body(periph::stm32::analog_port& port, std::uint8_t channel)
+auto adc_input_body(periph::stm32::analog_port& port, periph::stm32::analog_channel channel)
 {
   return [port = &port, channel](core::machine&) { return port->input(channel); };
 }
@@ -552,45 +552,74 @@ auto machine_handle::analog(std::string const& peripheral) const -> periph::stm3
 }
 
 void machine_handle::adc_drive(
-    std::string const& peripheral,
-    std::uint8_t       channel,
-    std::uint32_t      microvolts)
+    std::string const&         peripheral,
+    std::uint8_t               channel,
+    periph::stm32::analog_bank bank,
+    std::uint32_t              microvolts)
 {
   access([&](core::machine& target) {
-    adc_drive_body(analog(peripheral, channel), channel, microvolts)(target);
+    auto const key = periph::stm32::analog_channel{channel, bank};
+    adc_drive_body(analog(peripheral, key), key, microvolts)(target);
   });
 }
 
-auto machine_handle::adc_input(std::string const& peripheral, std::uint8_t channel) const
-    -> std::uint32_t
+auto machine_handle::adc_input(
+    std::string const&         peripheral,
+    std::uint8_t               channel,
+    periph::stm32::analog_bank bank) const -> std::uint32_t
 {
   return access([&](core::machine& target) {
-    return adc_input_body(analog(peripheral, channel), channel)(target);
+    auto const key = periph::stm32::analog_channel{channel, bank};
+    return adc_input_body(analog(peripheral, key), key)(target);
   });
 }
 
-auto machine_handle::adc_channels(std::string const& peripheral) const -> std::uint32_t
+auto machine_handle::adc_channels(std::string const& peripheral, periph::stm32::analog_bank bank)
+    const -> std::uint32_t
 {
-  return analog(peripheral).external_channels();
+  return analog(peripheral).external_channels(bank);
 }
 
-auto machine_handle::adc_bonded_channels(std::string const& peripheral) const -> std::uint32_t
+auto machine_handle::adc_bonded_channels(
+    std::string const&         peripheral,
+    periph::stm32::analog_bank bank) const -> std::uint32_t
 {
-  return analog(peripheral).bonded_channels();
+  return analog(peripheral).bonded_channels(bank);
 }
 
-auto machine_handle::analog(std::string const& peripheral, std::uint8_t channel) const
-    -> periph::stm32::analog_port&
+auto machine_handle::analog(std::string const& peripheral, periph::stm32::analog_channel channel)
+    const -> periph::stm32::analog_port&
 {
-  auto& port = analog(peripheral);
-  if(channel < 32
-     and (port.external_channels() >> channel & 1U) != 0
-     and (port.bonded_channels() >> channel & 1U) == 0)
+  auto&      port     = analog(peripheral);
+  auto const bank_b   = channel.bank == periph::stm32::analog_bank::b;
+  auto const suffix   = bank_b ? "b" : "";
+  auto const external = port.external_channels(channel.bank);
+  if(bank_b and external == 0)
+  {
+    throw config_error(peripheral, 0, "bank", "bank A, the ADC has one bank");
+  }
+  if(channel.number >= 32 or (external >> channel.number & 1U) == 0)
+  {
+    auto const shared =
+        bank_b
+        and channel.number < 32
+        and (port.external_channels(periph::stm32::analog_bank::a) >> channel.number & 1U) != 0;
+    throw config_error(
+        peripheral, 0, "channel",
+        std::format(
+            "{}, one of {}, not {}{}{}",
+            bank_b ? "a bank B channel on a pad of its own" : "an external channel",
+            periph::stm32::bit_list_text(external, suffix), channel.number, suffix,
+            shared ? std::format(", which shares the pad of bank A channel {}", channel.number)
+                   : ""));
+  }
+  auto const bonded = port.bonded_channels(channel.bank);
+  if((bonded >> channel.number & 1U) == 0)
   {
     throw config_error(
         peripheral, 0, "channel",
         periph::stm32::unbonded_channel_text(
-            engine().description().part, peripheral, channel, port.bonded_channels()));
+            engine().description().part, peripheral, channel, bonded));
   }
   return port;
 }
@@ -718,10 +747,13 @@ auto machine_handle::op_gpio_alternate(std::string const& peripheral, std::uint8
   return detail::machine_op(gpio_alternate_body(gpio(peripheral, pin), pin));
 }
 
-auto machine_handle::op_adc_input(std::string const& peripheral, std::uint8_t channel) const
-    -> access_op
+auto machine_handle::op_adc_input(
+    std::string const&         peripheral,
+    std::uint8_t               channel,
+    periph::stm32::analog_bank bank) const -> access_op
 {
-  return detail::machine_op(adc_input_body(analog(peripheral, channel), channel));
+  auto const key = periph::stm32::analog_channel{channel, bank};
+  return detail::machine_op(adc_input_body(analog(peripheral, key), key));
 }
 
 auto machine_handle::command_i2c_hold(
@@ -912,11 +944,13 @@ auto machine_handle::command_gpio_edges(
 }
 
 auto machine_handle::op_adc_drive(
-    std::string const& peripheral,
-    std::uint8_t       channel,
-    std::uint32_t      microvolts) const -> access_op
+    std::string const&         peripheral,
+    std::uint8_t               channel,
+    periph::stm32::analog_bank bank,
+    std::uint32_t              microvolts) const -> access_op
 {
-  return detail::machine_op(adc_drive_body(analog(peripheral, channel), channel, microvolts));
+  auto const key = periph::stm32::analog_channel{channel, bank};
+  return detail::machine_op(adc_drive_body(analog(peripheral, key), key, microvolts));
 }
 auto uart_queue::predicate_available(std::uint64_t count) const -> native_predicate
 {

@@ -89,6 +89,7 @@ using wide = unsigned __int128;
 struct adc_l1_state
 {
   std::array<std::uint32_t, channels> input_uv{};
+  std::array<std::uint32_t, channels> input_b_uv{};
   std::uint32_t                       generation{};
   std::uint32_t                       ready_generation{};
   std::uint64_t                       start_ps{};
@@ -176,10 +177,11 @@ struct trigger_selection
  *        scaled by 3000 / VDDA, from the TSVREFE write on, with no sensor tSTART, and 0 with
  *        TSVREFE clear, inferred from 12.12. A group converting one of them
  *        reads the word from the description's factory content when it starts, a config_error
- *        when absent. On Cat.3 to Cat.6 ADC_CFG 1 selects bank B: its channels sharing a bank A
- *        pad, RM0038 Table 41, read that pad's input, channels 16 and 17 as in bank A. A group
- *        converting a bank B channel on a pad of its own, VCOMP on channel 26 or a channel the
- *        category lacks reads 0 and logs once, a model_error under strict_peripherals.
+ *        when absent. On Cat.3 to Cat.6 ADC_CFG 1 selects bank B: its channels on a pad of their
+ *        own, RM0038 Table 41, read the bank B input of the analog port, `analog_bank::b`, and
+ *        the channels sharing a bank A pad read that pad's input, channels 16 and 17 as in bank
+ *        A. A group converting VCOMP on channel 26 or a channel the category lacks reads 0 and
+ *        logs once, a model_error under strict_peripherals.
  *
  *        Injected group, RM0038 12.3.9 and 12.15.15: JSWSTART with ADONS set, or a JEXTEN
  *        edge, starts the group. With SCAN 1 its JL + 1 conversions run in the order of the
@@ -306,15 +308,15 @@ public:
   void transfer_completed(dma_controller const& by, std::uint32_t request) override;
   void count_ended(dma_controller const& by, std::uint32_t request) override;
 
-  void               drive(std::uint8_t channel, std::uint32_t microvolts) override;
-  [[nodiscard]] auto input(std::uint8_t channel) const -> std::uint32_t override;
-  [[nodiscard]] auto external_channels() const -> std::uint32_t override
+  void               drive(analog_channel channel, std::uint32_t microvolts) override;
+  [[nodiscard]] auto input(analog_channel channel) const -> std::uint32_t override;
+  [[nodiscard]] auto external_channels(analog_bank bank) const -> std::uint32_t override
   {
-    return variant_.external;
+    return bank == analog_bank::a ? variant_.external : variant_.bank_b_only;
   }
-  [[nodiscard]] auto bonded_channels() const -> std::uint32_t override
+  [[nodiscard]] auto bonded_channels(analog_bank bank) const -> std::uint32_t override
   {
-    return bonded_channels_;
+    return bank == analog_bank::a ? bonded_channels_ : bonded_channels_b_;
   }
   [[nodiscard]] auto vdda_mv() const -> std::uint32_t override
   {
@@ -366,7 +368,7 @@ private:
   [[nodiscard]] auto readable(std::uint32_t channel) const -> bool;
   [[nodiscard]] auto calibration(std::uint32_t at, std::string_view name) const -> std::uint16_t;
   [[nodiscard]] auto code(std::uint32_t channel) const -> std::uint32_t;
-  void               external(std::uint8_t channel) const;
+  [[nodiscard]] auto external(analog_channel channel) const -> std::size_t;
   void               hold_until(std::uint64_t ps);
   void               power_up();
   void               check_common();
@@ -394,6 +396,7 @@ private:
   supply_options                                  supply_;
   adc_l1_variant                                  variant_;
   std::uint32_t                                   bonded_channels_{};
+  std::uint32_t                                   bonded_channels_b_{};
   core::clock_domain                              hsi_;
   core::clock_domain                              pclk2_;
   irq_line&                                       line_;
@@ -584,6 +587,12 @@ adc_l1_model::adc_l1_model(
   {
     throw config_error(desc.name, 0, "bonded_channels", "a mask of external channels");
   }
+  bonded_channels_b_ = desc.bonded_channels_b.value_or(variant.bank_b_only);
+  if((bonded_channels_b_ & ~variant.bank_b_only) != 0)
+  {
+    throw config_error(
+        desc.name, 0, "bonded_channels_b", "a mask of bank B channels on a pad of their own");
+  }
 }
 
 void adc_l1_model::reset(register_file&, reset_kind)
@@ -687,11 +696,7 @@ auto adc_l1_model::regular_busy() const -> bool
 
 auto adc_l1_model::readable(std::uint32_t channel) const -> bool
 {
-  if((variant_.external >> channel & 1u) == 0)
-  {
-    return false;
-  }
-  return not bank_b() or (variant_.bank_b_only >> channel & 1u) == 0;
+  return (variant_.external >> channel & 1u) != 0;
 }
 
 auto adc_l1_model::calibration(std::uint32_t at, std::string_view name) const -> std::uint16_t
@@ -726,36 +731,61 @@ auto adc_l1_model::code(std::uint32_t channel) const -> std::uint32_t
   {
     return 0;
   }
-  auto const scaled = std::uint64_t{state_.input_uv[channel]}
-                    * full_scale
-                    / (std::uint64_t{supply_.vdda_mv} * 1000u);
+  auto const own_pad = bank_b() and (variant_.bank_b_only >> channel & 1u) != 0;
+  auto const scaled  = std::uint64_t{(own_pad ? state_.input_b_uv : state_.input_uv)[channel]}
+                     * full_scale
+                     / (std::uint64_t{supply_.vdda_mv} * 1000u);
   return static_cast<std::uint32_t>(std::min<std::uint64_t>(full_scale - 1u, scaled)) >> shift;
 }
 
-void adc_l1_model::external(std::uint8_t channel) const
+auto adc_l1_model::external(analog_channel channel) const -> std::size_t
 {
-  if(channel >= channels or (variant_.external >> channel & 1u) == 0)
+  auto const number = channel.number;
+  auto const listed = number < channels;
+  if(channel.bank == analog_bank::a)
+  {
+    if(not listed or (variant_.external >> number & 1u) == 0)
+    {
+      throw config_error(
+          desc_.name, 0, "channel",
+          std::format("an external channel of mask {:#010x}, not {}", variant_.external, number));
+    }
+    return number;
+  }
+  if(listed and (variant_.bank_b_only >> number & 1u) != 0)
+  {
+    return number;
+  }
+  if(listed and variant_.banks and (variant_.external >> number & 1u) != 0)
   {
     throw config_error(
         desc_.name, 0, "channel",
-        std::format("an external channel of mask {:#010x}, not {}", variant_.external, channel));
+        std::format(
+            "a bank B channel on a pad of its own, mask {:#010x}, not {}b, which shares the pad "
+            "of bank A channel {}",
+            variant_.bank_b_only, number, number));
   }
+  throw config_error(
+      desc_.name, 0, "channel",
+      std::format(
+          "a bank B channel on a pad of its own, mask {:#010x}, not {}b", variant_.bank_b_only,
+          number));
 }
 
-void adc_l1_model::drive(std::uint8_t channel, std::uint32_t microvolts)
+void adc_l1_model::drive(analog_channel channel, std::uint32_t microvolts)
 {
-  external(channel);
+  auto const at = external(channel);
   if(state_.converting)
   {
     hold_until(ctx_.clock.time().ps);
   }
-  state_.input_uv[channel] = microvolts;
+  (channel.bank == analog_bank::a ? state_.input_uv : state_.input_b_uv)[at] = microvolts;
 }
 
-auto adc_l1_model::input(std::uint8_t channel) const -> std::uint32_t
+auto adc_l1_model::input(analog_channel channel) const -> std::uint32_t
 {
-  external(channel);
-  return state_.input_uv[channel];
+  auto const at = external(channel);
+  return (channel.bank == analog_bank::a ? state_.input_uv : state_.input_b_uv)[at];
 }
 
 void adc_l1_model::hold_until(std::uint64_t ps)
@@ -1286,11 +1316,9 @@ void adc_l1_model::check_channel(std::uint32_t channel, std::string_view name)
   {
     return;
   }
-  auto const what =
-      channel == vcomp_channel ? std::string{"channel 26, VCOMP,"}
-      : bank_b() and (variant_.external >> channel & 1u) != 0
-          ? std::format("bank B channel {}b on its own pad, outside the analog port,", channel)
-          : std::format("channel {}, absent from this category,", channel);
+  auto const what = channel == vcomp_channel
+                      ? std::string{"channel 26, VCOMP,"}
+                      : std::format("channel {}, absent from this category,", channel);
   unmodelled(channel_logged_[channel], name, std::format("{} read as 0", what));
 }
 
