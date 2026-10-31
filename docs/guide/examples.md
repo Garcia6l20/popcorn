@@ -288,3 +288,9 @@ A three-axis accelerometer mocked in Python on SPI1, HAL. [Sources and tests](ht
 A temperature sensor mocked in Python on I2C1, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/i2c).
 
 --8<-- "stm32l152/i2c/README.md:3:14"
+
+### l152 tim
+
+A 1 kHz timer interrupt, a one-pulse timer and an input capture on the 16 MHz HSI, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/tim).
+
+--8<-- "stm32l152/tim/README.md:3:13"
