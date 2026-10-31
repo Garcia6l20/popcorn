@@ -1,13 +1,12 @@
 # Boot counter in data EEPROM and a flash page program, HAL
 
-An STM32L152 application raises its clock to 32 MHz from HSI and the PLL in voltage range 1
-with one flash wait state, RM0038 Table 13. It reads a boot counter from the first word of the
-data EEPROM at 0x08080000 and writes it back incremented with `HAL_FLASHEx_DATAEEPROM_Unlock`,
+An STM32L152 application raises its clock to 32 MHz from HSI and the PLL in voltage range 1 with
+one flash wait state, RM0038 Table 13. It reads a boot counter from the first word of the data
+EEPROM at 0x08080000 and writes it back incremented with `HAL_FLASHEx_DATAEEPROM_Unlock`,
 `HAL_FLASHEx_DATAEEPROM_Program` and `HAL_FLASHEx_DATAEEPROM_Lock`. Then it erases the 256-byte
 page holding its `data_page` array with `HAL_FLASHEx_Erase` and programs a 4-word record there
 with `HAL_FLASH_Program`. An erased STM32L1 flash or EEPROM word reads 0, RM0038 3.4.2. Each test
-runs twice:
-on the xe build on an STM32L152RETx and on the xb build on the Cat.1 STM32L152RBTx.
+runs twice: on the xe build on an STM32L152RETx and on the xb build on the Cat.1 STM32L152RBTx.
 
 It ports `stm32u575/pwr_flash`. The L1 FLASH unlocks through PEKEYR and PRGKEYR in FLASH_PECR,
 erases 256-byte pages and programs words.

@@ -34,6 +34,7 @@ SINGLE_RUN_DIES = frozenset({"U575/U585", "H56x/H573"})
 L1_XE_EXTRA = ("STM32L152RCTxA", "STM32L152RCTx")
 L1_XB_EXTRA = (*L1_XE_EXTRA, "STM32L152RBTxA")
 VECTOR_TABLE = "g_pfnVectors"
+PROGRAM_FLASH = frozenset({"Flash", "Flash_NS", "Flash_S"})
 
 
 @cache
@@ -232,5 +233,6 @@ def test_each_elf_of_an_example_fits_each_part_it_runs_on(
     assert ram, f"{example}: the stack top {top:#x} of {elf.name} is outside the SRAM of {part}"
     for start, end in loaded_ranges(elf):
         assert any(
-            r.kind.name == "rom" and r.start <= start and end <= r.start + r.size for r in regions
+            r.name in PROGRAM_FLASH and r.start <= start and end <= r.start + r.size
+            for r in regions
         ), f"{example}: {elf.name} loads {start:#x}-{end:#x} outside the flash of {part}"

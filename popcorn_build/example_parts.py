@@ -107,9 +107,9 @@ def part_class(part: str) -> PartClass:
 
     The pin-count letter and the package letter are read together: `R` with `T` is LQFP64 and
     `R` with `V` is VFQFPN68, `M` with `Y` is WLCSP80 and `O` with `Y` is WLCSP90. On the U5 and
-    H5 the die and flash size come from the name letters. On the STM32L1 the flash letter and the
-    suffix do not fix the die, so the die is the DEV_ID of the shipped description's
-    DBGMCU_IDCODE reset value and the flash size its `Flash` region. The decoding only groups
+    H5 the die and flash size come from the name letters. On the STM32L1 the die is the DEV_ID of
+    the shipped description's DBGMCU_IDCODE reset value and the flash size its `Flash` region,
+    since one die carries several flash letters and categories. The decoding only groups
     parts, no model reads it.
 
     Raises:
@@ -323,6 +323,9 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         adc_channels=(),
         flash_kib=None,
     ),
+    "stm32l152/crc": ExampleParts(
+        "STM32L152RETx", _L1_XE_EXTRA, pins=(), adc_channels=(), flash_kib=None
+    ),
     "stm32l152/gpio": ExampleParts(
         "STM32L152RETx",
         _L1_XB_EXTRA,
@@ -330,6 +333,9 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         adc_channels=(),
         flash_kib=None,
         also=("STM32L152RBTx",),
+    ),
+    "stm32l152/iwdg": ExampleParts(
+        "STM32L152RETx", _L1_XE_EXTRA, pins=(), adc_channels=(), flash_kib=None
     ),
     "stm32l152/pwr_flash": ExampleParts(
         "STM32L152RETx",

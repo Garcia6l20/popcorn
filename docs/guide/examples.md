@@ -239,7 +239,7 @@ CDC ACM device on the USB full-speed controller enumerated by a virtual host, Ti
 
 ## STM32L152
 
-The same layout on the STM32L152, a Cortex-M3 without TrustZone, from `examples/stm32l152/<name>`. The firmware is HAL, which sets RCC and PWR bits through the bit-band aliases. The examples marked xb also build for the Cat.1 STM32L152RBTx and run each test on both builds.
+The same layout on the STM32L152, a Cortex-M3 without TrustZone, from `examples/stm32l152/<name>`. The firmware is HAL. The rcc and pwr_flash clock setups set the RCC_CR enable bits through their bit-band aliases. The examples marked xb also build for the Cat.1 STM32L152RBTx and run each test on both builds.
 
 ### l152 rcc
 
@@ -251,7 +251,7 @@ The same layout on the STM32L152, a Cortex-M3 without TrustZone, from `examples/
 
 Voltage range 1, one wait state, a boot counter in data EEPROM, a page erase and program, HAL, xe and xb. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/pwr_flash).
 
---8<-- "stm32l152/pwr_flash/README.md:3:17"
+--8<-- "stm32l152/pwr_flash/README.md:3:16"
 
 ### l152 gpio
 
@@ -264,3 +264,15 @@ A push button on PC13 toggling an LED on PA5 through EXTI, HAL, xe and xb. [Sour
 printf banner and line echo on USART2, HAL, xe and xb. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/usart).
 
 --8<-- "stm32l152/usart/README.md:3:11"
+
+### l152 iwdg
+
+IWDG refresh and a watchdog reset on the 37 kHz LSI, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/iwdg).
+
+--8<-- "stm32l152/iwdg/README.md:3:9"
+
+### l152 crc
+
+The fixed CRC-32/MPEG-2 unit, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/crc).
+
+--8<-- "stm32l152/crc/README.md:3:13"
