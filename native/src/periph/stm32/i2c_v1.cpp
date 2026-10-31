@@ -1,3 +1,5 @@
+#include "dma.hpp"
+#include "dma_signal.hpp"
 #include "factories.hpp"
 #include "i2c_port_queue.hpp"
 #include "model_base.hpp"
@@ -11,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -79,6 +82,7 @@ struct i2c_v1_state
   std::uint8_t                        tx_loaded{};
   std::uint8_t                        tx_sending{};
   std::uint8_t                        tx_shift{};
+  std::uint8_t                        dma_last{};
   std::uint64_t                       phase_end_ps{};
   std::uint64_t                       released_ps{};
   std::vector<std::uint8_t>           acked;
@@ -88,6 +92,14 @@ struct i2c_v1_state
 
   friend auto operator==(i2c_v1_state const&, i2c_v1_state const&) -> bool = default;
 };
+
+auto lower(std::string_view name) -> std::string
+{
+  std::string out{name};
+  std::ranges::transform(
+      out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return out;
+}
 
 auto kernel_name(peripheral_desc const& desc, i2c_v1_variant const& variant) -> std::string
 {
@@ -167,10 +179,22 @@ auto kernel_name(peripheral_desc const& desc, i2c_v1_variant const& variant) -> 
  *        set, as for the transmitter. A START or a STOP keeps BTF while a byte waits in the shift
  *        register.
  *
- *        SMBus, PEC, ALERT, ARP and CR2.DMAEN log one model_warning per instance when the firmware
- *        uses them, raise model_error under strict_peripherals at the START that uses them, and the
- *        bus stays idle for them. ADD10 stays 0: no i2c_target answers a 10-bit header, so a header
- *        address byte takes the NACK path and reaches no i2c_target::matches().
+ *        DMA, RM0038 26.3.7: with CR2.DMAEN 1 the `<instance>_tx_dma` request follows TxE and the
+ *        `<instance>_rx_dma` request follows RxNE, in every mode and whatever ITBUFEN holds. A DMA
+ *        access to DR acts as a CPU access. When the channel serving the receive request moves the
+ *        last but one item of its count, the EOT_1 signal, with CR2.LAST 1, the controller
+ *        receiver NACKs the next byte it decides, RM0038 26.3.7 "I2C automatically sends a NACK
+ *        after the next byte following EOT_1". Inferred: LAST is read at EOT_1, the byte is the
+ *        first whose acknowledge the I2C decides after it, the end of a START drops a pending
+ *        EOT_1, so none reaches the next transfer, an EOT_1 with DMAEN 0 changes nothing, since
+ *        RM0038 26.3.7 and 26.3.8 name EOT_1 for DMA mode only, and LAST has no effect in target
+ *        mode, its CR2 note naming the master receiver only. The DMA end of transfer, EOT, changes
+ *        nothing: the firmware sets STOP.
+ *
+ *        SMBus, PEC, ALERT and ARP log one model_warning per instance when the firmware uses them,
+ *        raise model_error under strict_peripherals at the START that uses them, and the bus stays
+ *        idle for them. ADD10 stays 0: no i2c_target answers a 10-bit header, so a header address
+ *        byte takes the NACK path and reaches no i2c_target::matches().
  *
  *        Interrupts, RM0038 Table 139 and Figure 214: the event line follows SB, ADDR, ADD10, STOPF
  *        and BTF with CR2.ITEVTEN, TxE and RxNE with ITEVTEN and ITBUFEN, the error line BERR,
@@ -268,7 +292,8 @@ class i2c_v1 final : public dispatch_model<i2c_v1, i2c_v1_state>,
                      public i2c_target_port,
                      public i2c_controller_port,
                      public reset_listener,
-                     public bus_reset_listener
+                     public bus_reset_listener,
+                     public dma_requester
 {
 public:
   i2c_v1(
@@ -321,6 +346,8 @@ public:
   void drop(i2c_phase phase, vtime at, std::uint32_t lane, std::uint64_t unit) override;
   [[nodiscard]] auto last_unit() const -> std::uint64_t override;
   [[nodiscard]] auto queued() const -> std::size_t override;
+  void               transfer_completed(dma_controller const& by, std::uint32_t request) override;
+  void               last_but_one(dma_controller const& by, std::uint32_t request) override;
 
   void control_written(std::uint32_t old, std::uint32_t now);
   void control2_written(std::uint32_t old, std::uint32_t now);
@@ -408,6 +435,7 @@ private:
   field_ref                                buffer_ie_;
   field_ref                                error_ie_;
   field_ref                                dma_enable_;
+  field_ref                                dma_last_;
   field_ref                                fast_;
   field_ref                                duty_;
   field_ref                                divider_;
@@ -430,6 +458,8 @@ private:
   field_ref                                own2_;
   field_ref                                dual_flag_;
   field_ref                                general_flag_;
+  dma_signal                               tx_dma_;
+  dma_signal                               rx_dma_;
   std::uint32_t                            cleared_by_disable_{};
   std::uint32_t                            status1_events_{};
   std::uint32_t                            status1_errors_{};
@@ -443,7 +473,6 @@ private:
   bool                                     timing_checked_{};
   bool                                     error_logged_{};
   bool                                     control_logged_{};
-  bool                                     dma_logged_{};
   bool                                     disable_logged_{};
   bool                                     ending_{};
   bool                                     stretch_logged_{};
@@ -477,8 +506,8 @@ i2c_v1::i2c_v1(
       ack_{field("CR1", "ACK")}, pos_{field("CR1", "POS")}, frequency_{field("CR2", "FREQ")},
       event_ie_{field("CR2", "ITEVTEN")}, buffer_ie_{field("CR2", "ITBUFEN")},
       error_ie_{field("CR2", "ITERREN")}, dma_enable_{field("CR2", "DMAEN")},
-      fast_{field("CCR", "F_S")}, duty_{field("CCR", "DUTY")}, divider_{field("CCR", "CCR")},
-      rise_{field("TRISE", "TRISE")}, start_bit_{field("SR1", "SB")},
+      dma_last_{field("CR2", "LAST")}, fast_{field("CCR", "F_S")}, duty_{field("CCR", "DUTY")},
+      divider_{field("CCR", "CCR")}, rise_{field("TRISE", "TRISE")}, start_bit_{field("SR1", "SB")},
       address_sent_{field("SR1", "ADDR")}, byte_finished_{field("SR1", "BTF")},
       tx_empty_{field("SR1", "TxE")}, rx_full_{field("SR1", "RxNE")},
       ack_failure_{field("SR1", "AF")}, master_{field("SR2", "MSL")}, busy_{field("SR2", "BUSY")},
@@ -487,6 +516,8 @@ i2c_v1::i2c_v1(
       no_stretch_{field("CR1", "NOSTRETCH")}, general_call_{field("CR1", "ENGC")},
       dual_{field("OAR2", "ENDUAL")}, own2_{field("OAR2", "ADD2")},
       dual_flag_{field("SR2", "DUALF")}, general_flag_{field("SR2", "GENCALL")},
+      tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
+      rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"},
       kernel_{ctx.clock.domain(kernel_name(desc, variant))},
       event_line_{irq(desc.name + "_EV_IRQn")}, error_line_{irq(desc.name + "_ER_IRQn")}
 {
@@ -644,10 +675,6 @@ void i2c_v1::check_unmodelled()
   if((regs_.peek(control_.offset) & unmodelled_control_) != 0)
   {
     unmodelled(control_logged_, "CR1", "SMBus, PEC, ALERT or ARP");
-  }
-  if(get(regs_, dma_enable_) != 0)
-  {
-    unmodelled(dma_logged_, "CR2", "the DMA requests of CR2.DMAEN");
   }
 }
 
@@ -942,7 +969,8 @@ void i2c_v1::start_ended()
   update(regs_, transmitter_, 0);
   update(regs_, tx_empty_, 0);
   update(regs_, byte_finished_, state_.rx_held);
-  state_.tx_full = 0;
+  state_.tx_full  = 0;
+  state_.dma_last = 0;
   std::ranges::fill(state_.acked, 0);
   if(get(regs_, stop_) != 0)
   {
@@ -1042,7 +1070,8 @@ void i2c_v1::stop_ended()
 void i2c_v1::receive_ended()
 {
   auto const now   = get(regs_, ack_) != 0;
-  state_.ack_pulse = get(regs_, pos_) != 0 ? state_.ack_next : (now ? 1 : 0);
+  auto const last  = std::exchange(state_.dma_last, 0) != 0;
+  state_.ack_pulse = last ? 0 : (get(regs_, pos_) != 0 ? state_.ack_next : (now ? 1 : 0));
   state_.ack_next  = now ? 1 : 0;
   begin(wire::acknowledge, 1);
 }
@@ -1140,6 +1169,20 @@ void i2c_v1::flags()
   else
   {
     error_line_.lower();
+  }
+  auto const dma = get(regs_, dma_enable_) != 0;
+  tx_dma_.set(dma and tx_empty_.of(sr1) != 0);
+  rx_dma_.set(dma and rx_full_.of(sr1) != 0);
+}
+
+void i2c_v1::transfer_completed(dma_controller const&, std::uint32_t)
+{}
+
+void i2c_v1::last_but_one(dma_controller const& by, std::uint32_t request)
+{
+  if(rx_dma_.carries(by, request) and get(regs_, dma_enable_) != 0 and get(regs_, dma_last_) != 0)
+  {
+    state_.dma_last = 1;
   }
 }
 
@@ -1384,6 +1427,7 @@ void i2c_v1::run_port(std::uint32_t lane)
           flags();
           break;
         }
+        flags();
         entries[*pick].kind   = entry_ending;
         entries[*pick].due_ps = entry.due_ps + entry.phase_ps;
         schedule_port(entries[*pick]);
@@ -1773,6 +1817,8 @@ void i2c_v1::before_reset(reset_kind)
 
 void i2c_v1::reset(register_file&, reset_kind kind)
 {
+  tx_dma_.resolve();
+  rx_dma_.resolve();
   restore_reset_values(kind);
 }
 

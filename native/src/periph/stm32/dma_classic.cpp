@@ -125,9 +125,11 @@ enum class unsupported : std::uint8_t
  *        core::memory_grant per channel for reads and one for writes, so the bus firewall is asked
  *        once per extent it allows rather than once per item. A hardware-requested transfer
  *        acknowledges every request of its channel that is high, and the end of a non-circular one
- *        tells every `dma_requester` peer each request of the channel, inferred. A request held
- *        high across a machine reset is cleared, one held across the RCC reset of the controller
- *        is kept.
+ *        tells every `dma_requester` peer each request of the channel, inferred. A
+ *        hardware-requested transfer that leaves one item tells every `dma_requester` peer each
+ *        request of the channel through dma_requester::last_but_one(), the EOT_1 signal of RM0038
+ *        26.3.7, once per pass of a circular channel. A request held high across a machine reset
+ *        is cleared, one held across the RCC reset of the controller is kept.
  */
 class dma_classic final : public dispatch_model<dma_classic, dma_classic_state>,
                           public dma_controller
@@ -160,11 +162,12 @@ private:
   void               start(std::size_t ch);
   void               transfer(std::size_t ch);
   void               fail(std::size_t ch);
-  void               raise(std::size_t ch, field_ref flag);
-  void               interrupts(std::size_t ch);
-  void               warn_once(std::size_t ch, unsupported what);
-  void               drop_grants();
-  auto               requesters() -> std::span<dma_requester* const>;
+  void tell(std::size_t ch, void (dma_requester::*signal)(dma_controller const&, std::uint32_t));
+  void raise(std::size_t ch, field_ref flag);
+  void interrupts(std::size_t ch);
+  void warn_once(std::size_t ch, unsupported what);
+  void drop_grants();
+  auto requesters() -> std::span<dma_requester* const>;
 
   register_file&                           regs_;
   dma_classic_traits                       traits_;
@@ -485,6 +488,10 @@ void dma_classic::transfer(std::size_t ch)
         }
       }
     }
+    if(left == 1)
+    {
+      tell(ch, &dma_requester::last_but_one);
+    }
   }
   if(not s.half_reported and left * 2u <= s.programmed)
   {
@@ -504,17 +511,23 @@ void dma_classic::transfer(std::size_t ch)
     s.half_reported = false;
     return;
   }
-  if(not hardware)
+  if(hardware)
   {
-    return;
+    tell(ch, &dma_requester::transfer_completed);
   }
+}
+
+void dma_classic::tell(
+    std::size_t ch,
+    void (dma_requester::*signal)(dma_controller const&, std::uint32_t))
+{
   for(std::size_t r = 0; r < traits_.requests.size() and r < max_requests; ++r)
   {
     if(traits_.requests[r].channel == ch + 1)
     {
       for(auto* const requester : requesters())
       {
-        requester->transfer_completed(*this, static_cast<std::uint32_t>(r));
+        (requester->*signal)(*this, static_cast<std::uint32_t>(r));
       }
     }
   }

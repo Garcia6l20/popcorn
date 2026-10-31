@@ -9,6 +9,8 @@
 #define MEMORY   0x0040u
 
 static I2C_HandleTypeDef i2c;
+static DMA_HandleTypeDef dma_rx;
+static uint8_t           dma_buffer[4];
 static uint8_t const     pattern[] = {0xA1u, 0xB2u, 0xC3u};
 static uint8_t           next_tx;
 
@@ -32,6 +34,10 @@ void hal_read_three(void);
 void hal_read_none(void);
 void hal_ready(void);
 void hal_slave(void);
+void dma_write(void);
+void dma_read(void);
+void dma_hal_read(void);
+void DMA1_Channel7_IRQHandler(void);
 void SysTick_Handler(void);
 void target(void);
 void I2C1_EV_IRQHandler(void);
@@ -320,6 +326,115 @@ void hal_ready(void)
   LOG(HAL_I2C_IsDeviceReady(&i2c, EEPROM << 1, 1u, 10u));
   LOG(I2C1->SR1);
   LOG(I2C1->SR2);
+  DONE();
+}
+
+static void dma_channel(
+    DMA_Channel_TypeDef* channel,
+    uint32_t             control,
+    uint8_t const*       memory,
+    uint32_t             items)
+{
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_DMA1);
+  channel->CCR   = 0u;
+  channel->CPAR  = (uint32_t)&I2C1->DR;
+  channel->CMAR  = (uint32_t)memory;
+  channel->CNDTR = items;
+  channel->CCR   = control | DMA_CCR_MINC | DMA_CCR_EN;
+}
+
+void dma_write(void)
+{
+  static uint8_t const out[] = {0xD1u, 0xD2u, 0xD3u};
+  dma_channel(DMA1_Channel6, DMA_CCR_DIR, out, sizeof out);
+  start();
+  LL_I2C_TransmitData8(I2C1, EEPROM << 1);
+  while(!LL_I2C_IsActiveFlag_ADDR(I2C1))
+  {
+    if(LL_I2C_IsActiveFlag_AF(I2C1))
+    {
+      FAIL(30);
+    }
+  }
+  LL_I2C_EnableDMAReq_TX(I2C1);
+  LL_I2C_ClearFlag_ADDR(I2C1);
+  while(!(DMA1->ISR & DMA_ISR_TCIF6))
+  {
+  }
+  LL_I2C_DisableDMAReq_TX(I2C1);
+  wait_btf();
+  LOG(I2C1->SR1);
+  stop();
+  DONE();
+}
+
+void dma_read(void)
+{
+  dma_channel(DMA1_Channel7, 0u, dma_buffer, sizeof dma_buffer);
+  address_read();
+  LL_I2C_EnableDMAReq_RX(I2C1);
+  LL_I2C_EnableLastDMA(I2C1);
+  LL_I2C_ClearFlag_ADDR(I2C1);
+  while(!(DMA1->ISR & DMA_ISR_TCIF7))
+  {
+  }
+  LL_I2C_GenerateStopCondition(I2C1);
+  LL_I2C_DisableDMAReq_RX(I2C1);
+  LL_I2C_DisableLastDMA(I2C1);
+  while(LL_I2C_IsActiveFlag_BUSY(I2C1))
+  {
+  }
+  for(uint32_t index = 0; index < sizeof dma_buffer; ++index)
+  {
+    LOG(dma_buffer[index]);
+  }
+  LOG(I2C1->SR2);
+  DONE();
+}
+
+void DMA1_Channel7_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&dma_rx);
+}
+
+void dma_hal_read(void)
+{
+  static uint8_t got[2];
+  hal_setup();
+  __HAL_RCC_DMA1_CLK_ENABLE();
+  dma_rx.Instance                 = DMA1_Channel7;
+  dma_rx.Init.Direction           = DMA_PERIPH_TO_MEMORY;
+  dma_rx.Init.PeriphInc           = DMA_PINC_DISABLE;
+  dma_rx.Init.MemInc              = DMA_MINC_ENABLE;
+  dma_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+  dma_rx.Init.MemDataAlignment    = DMA_MDATAALIGN_BYTE;
+  dma_rx.Init.Mode                = DMA_NORMAL;
+  dma_rx.Init.Priority            = DMA_PRIORITY_LOW;
+  if(HAL_DMA_Init(&dma_rx) != HAL_OK)
+  {
+    FAIL(31);
+  }
+  __HAL_LINKDMA(&i2c, hdmarx, dma_rx);
+  NVIC_EnableIRQ(DMA1_Channel7_IRQn);
+  if(HAL_I2C_Mem_Read_DMA(&i2c, EEPROM << 1, MEMORY, I2C_MEMADD_SIZE_16BIT, got, sizeof got)
+     != HAL_OK)
+  {
+    FAIL(32);
+  }
+  uint32_t const begun = HAL_GetTick();
+  while(HAL_I2C_GetState(&i2c) != HAL_I2C_STATE_READY)
+  {
+    if(HAL_GetTick() - begun > 10u)
+    {
+      FAIL(33);
+    }
+  }
+  while(I2C1->SR2 & I2C_SR2_BUSY)
+  {
+  }
+  LOG(got[0]);
+  LOG(got[1]);
+  LOG(i2c.ErrorCode);
   DONE();
 }
 

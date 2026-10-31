@@ -1,3 +1,5 @@
+#include "dma.hpp"
+#include "dma_signal.hpp"
 #include "i2c_link_port.hpp"
 #include "stm32_fixture.hpp"
 
@@ -258,20 +260,29 @@ private:
   std::uint8_t address_;
 };
 
-class bus_probe final : public periph::model
+class bus_probe final : public periph::model, public stm32::dma_requester
 {
 public:
-  explicit bus_probe(periph::model_context& ctx) : context{ctx}
+  explicit bus_probe(periph::model_context& ctx)
+      : context{ctx}, channel_6{ctx.peers, "usart2_rx_dma"}, channel_7{ctx.peers, "usart2_tx_dma"}
   {}
 
   periph::model_context& context;
+  stm32::dma_signal      channel_6;
+  stm32::dma_signal      channel_7;
+
+  void transfer_completed(stm32::dma_controller const&, std::uint32_t) override
+  {}
 
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
   {
     return {};
   }
   void reset(periph::register_file&, popcorn::reset_kind) override
-  {}
+  {
+    channel_6.resolve();
+    channel_7.resolve();
+  }
   auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
       -> std::expected<std::uint32_t, popcorn::bus_error> override
   {
@@ -843,7 +854,7 @@ TEST_CASE("RM0038 26.3.3: a PCLK1 below 4 MHz in Fm mode and TRISE in Fm mode wa
   CHECK(r.warnings("FREQ") == 0);
 }
 
-TEST_CASE("unmodelled CR1 and CR2 functions each warn once")
+TEST_CASE("unmodelled CR1 functions warn once")
 {
   rig r{"parked"};
   r.write(i2c1 + cr2, freq2 | dmaen);
@@ -854,8 +865,7 @@ TEST_CASE("unmodelled CR1 and CR2 functions each warn once")
   static_cast<void>(r.cpu_read(i2c1 + sr2));
   CHECK(r.read(i2c1 + sr1) == 0);
   CHECK(r.warnings("SMBus, PEC, ALERT or ARP: not modelled") == 1);
-  CHECK(r.warnings("the DMA requests of CR2.DMAEN: not modelled") == 1);
-  CHECK(r.warnings("not modelled") == 2);
+  CHECK(r.warnings("not modelled") == 1);
 }
 
 TEST_CASE("an error a target injects warns once, the byte completes as its acknowledge says")
@@ -2665,15 +2675,14 @@ TEST_CASE(
   CHECK(r.target->log[3].at == t1 + phase(28, 8));
 }
 
-TEST_CASE("checklist 53: under strict_peripherals SMBus, PEC, ALERT, ARP and DMAEN raise at START")
+TEST_CASE("checklist 53: under strict_peripherals SMBus, PEC, ALERT and ARP raise at START")
 {
   for(auto const& [cr1_bits, cr2_bits] : {
-          std::pair{smbus, freq2        },
-          std::pair{enarp, freq2        },
-          std::pair{enpec, freq2        },
-          std::pair{pec,   freq2        },
-          std::pair{alert, freq2        },
-          std::pair{0u,    freq2 | dmaen},
+          std::pair{smbus, freq2},
+          std::pair{enarp, freq2},
+          std::pair{enpec, freq2},
+          std::pair{pec,   freq2},
+          std::pair{alert, freq2},
   })
   {
     CAPTURE(cr1_bits);
@@ -3246,4 +3255,461 @@ TEST_CASE("HAL_I2C_IsDeviceReady: HAL_OK on 0x50, HAL_ERROR on 0x51, bus left id
     rig r{"hal_ready", {}, *desc, elf};
     CHECK(r.finish() == std::vector<std::uint32_t>{0, 1, 0, 0, 0, 0, 0});
   }
+}
+
+namespace
+{
+constexpr address       dma1        = 0x4002'6000;
+constexpr std::uint32_t tx_channel  = 6;
+constexpr std::uint32_t rx_channel  = 7;
+constexpr std::uint32_t last_bit    = 1u << 12;
+constexpr std::uint32_t channel_en  = 1u << 0;
+constexpr std::uint32_t from_memory = 1u << 4;
+constexpr std::uint32_t minc        = 1u << 7;
+constexpr address       buffer      = 0x2000'8000;
+constexpr std::uint64_t latency     = 4'000'000'000'000 / pclk1;
+
+constexpr auto channel_reg(std::uint32_t ch, address offset) -> address
+{
+  return dma1 + offset + 20 * (ch - 1);
+}
+
+constexpr auto tc_flag(std::uint32_t ch) -> std::uint32_t
+{
+  return 1u << (4 * (ch - 1) + 1);
+}
+
+void program_dma(auto const& r, std::uint32_t ch, std::uint32_t control, std::uint32_t items)
+{
+  r.write(channel_reg(ch, 0x08), 0);
+  r.write(channel_reg(ch, 0x10), static_cast<std::uint32_t>(i2c1 + dr));
+  r.write(channel_reg(ch, 0x14), static_cast<std::uint32_t>(buffer));
+  r.write(channel_reg(ch, 0x0C), items);
+  r.write(channel_reg(ch, 0x08), control | minc | channel_en);
+}
+
+auto dma_left(auto const& r, std::uint32_t ch) -> std::uint32_t
+{
+  return r.read(channel_reg(ch, 0x0C));
+}
+
+auto in_buffer(auto const& r, std::size_t count) -> std::vector<std::uint8_t>
+{
+  std::vector<std::uint8_t> out;
+  for(std::size_t index = 0; index < count; ++index)
+  {
+    auto const value = r.f->target->mem().read(buffer + index, 1);
+    REQUIRE(value.has_value());
+    out.push_back(static_cast<std::uint8_t>(*value));
+  }
+  return out;
+}
+}
+
+TEST_CASE(
+    "RM0038 26.3.7: with DMAEN the tx request follows TxE, EV8_1 takes two DMA writes, "
+    "bytes leave at their acknowledges")
+{
+  rig r{"parked"};
+  r.write(buffer, 0x0033'2211);
+  r.write(i2c1 + cr2, freq2 | dmaen);
+  program_dma(r, tx_channel, from_memory, 3);
+  r.transmitting();
+  auto const t0 = r.now_ps();
+  CHECK(dma_left(r, tx_channel) == 3);
+  r.idle_to(t0 + 3 * latency);
+  CHECK(dma_left(r, tx_channel) == 1);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.target->bytes().empty());
+  r.idle_to(t0 + latency + phase(9) + 3 * latency);
+  REQUIRE(r.target->bytes() == std::vector<std::uint8_t>{0x11});
+  auto const first = r.target->log.back().at;
+  CHECK(first >= t0 + latency + phase(9));
+  CHECK(first <= t0 + 2 * latency + phase(9));
+  CHECK(dma_left(r, tx_channel) == 0);
+  CHECK((r.read(dma1) & tc_flag(tx_channel)) != 0);
+  r.idle_to(first + phase(18));
+  CHECK(r.target->bytes() == std::vector<std::uint8_t>{0x11, 0x22, 0x33});
+  CHECK(r.target->log.back().at == first + phase(18));
+  CHECK(r.read(i2c1 + sr1) == (txe | btf));
+  CHECK((r.read(nvic_ispr1) & error_irq) == 0);
+  CHECK((r.read(nvic_ispr0) & event_irq) == 0);
+}
+
+TEST_CASE(
+    "RM0038 26.3.7: DMA reception with LAST 1 NACKs the byte after EOT_1, "
+    "LAST 0 acknowledges every byte, the rx request follows RxNE whatever ITBUFEN holds")
+{
+  struct leg
+  {
+    std::uint32_t             count;
+    std::uint32_t             control2;
+    std::vector<std::uint8_t> acks;
+  };
+  for(auto const& [count, control2, acks] : {
+          leg{3, last_bit,           {1, 1, 0}},
+          leg{3, 0,                  {1, 1, 1}},
+          leg{2, last_bit,           {1, 0}   },
+          leg{2, 0,                  {1, 1}   },
+          leg{3, last_bit | itbufen, {1, 1, 0}},
+  })
+  {
+    CAPTURE(count);
+    CAPTURE(control2);
+    rig r{"parked"};
+    r.target->out = {0xC1, 0xC2, 0xC3};
+    r.write(i2c1 + cr2, freq2 | dmaen | control2);
+    program_dma(r, rx_channel, 0, count);
+    auto const t0 = r.receiving();
+    r.idle_to(t0 + phase(9 * count) + 2 * latency);
+    CHECK(r.target->acks() == acks);
+    CHECK(dma_left(r, rx_channel) == 0);
+    CHECK((r.read(dma1) & tc_flag(rx_channel)) != 0);
+    CHECK(
+        in_buffer(r, count)
+        == std::vector<std::uint8_t>(std::begin(r.target->out), std::begin(r.target->out) + count));
+    CHECK((r.read(i2c1 + sr1) & rxne) == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0038 26.3.7, inferred: LAST counts as it is at EOT_1, "
+    "a LAST write after it changes nothing")
+{
+  for(auto const& [before, after, acks] : {
+          std::tuple{0u,       last_bit, std::vector<std::uint8_t>{1, 1, 1}},
+          std::tuple{last_bit, 0u,       std::vector<std::uint8_t>{1, 1, 0}},
+  })
+  {
+    CAPTURE(before);
+    rig r{"parked"};
+    r.target->out = {0xC1, 0xC2, 0xC3};
+    r.write(i2c1 + cr2, freq2 | dmaen | before);
+    program_dma(r, rx_channel, 0, 3);
+    auto const t0 = r.receiving();
+    r.idle_to(t0 + phase(18) + 3 * latency);
+    REQUIRE(dma_left(r, rx_channel) == 1);
+    r.cpu_write(i2c1 + cr2, freq2 | dmaen | after);
+    r.idle_to(t0 + phase(27) + 2 * latency);
+    CHECK(r.target->acks() == acks);
+  }
+}
+
+TEST_CASE("RM0038 26.3.7: with DMAEN 0 neither TxE nor RxNE requests the DMA")
+{
+  {
+    rig r{"parked"};
+    r.target->out = {0xC1, 0xC2};
+    r.write(i2c1 + cr2, freq2 | last_bit);
+    program_dma(r, rx_channel, 0, 2);
+    auto const t0 = r.receiving();
+    r.idle_to(t0 + phase(18) + 2 * latency);
+    CHECK(dma_left(r, rx_channel) == 2);
+    CHECK(r.read(i2c1 + sr1) == (rxne | btf));
+    CHECK(r.read(i2c1 + dr) == 0xC1);
+    CHECK(r.target->acks() == std::vector<std::uint8_t>{1, 1});
+  }
+  {
+    rig r{"parked"};
+    program_dma(r, tx_channel, from_memory, 2);
+    r.transmitting();
+    r.idle_to(r.now_ps() + phase(9));
+    CHECK(dma_left(r, tx_channel) == 2);
+    CHECK(r.read(i2c1 + sr1) == txe);
+    CHECK(r.target->bytes().empty());
+  }
+}
+
+TEST_CASE(
+    "a pending EOT_1 is dropped by the next START end and by I2C1RST, inferred, and with neither "
+    "the byte decided after it is NACKed, inferred")
+{
+  {
+    rig r{"parked"};
+    r.target->out = {0xC1, 0xC2, 0xC3};
+    r.write(i2c1 + cr2, freq2 | last_bit);
+    program_dma(r, rx_channel, 0, 2);
+    auto const t0 = r.receiving();
+    r.idle_to(t0 + phase(17) + phase(1) / 2);
+    CHECK(r.target->acks() == std::vector<std::uint8_t>{1});
+    r.cpu_write(i2c1 + cr2, freq2 | dmaen | last_bit);
+    r.idle_to(r.now_ps() + 2 * latency);
+    REQUIRE(dma_left(r, rx_channel) == 1);
+    r.idle_to(t0 + phase(27) + 2 * latency);
+    CHECK(r.target->acks() == std::vector<std::uint8_t>{1, 1, 0});
+    CHECK(dma_left(r, rx_channel) == 0);
+  }
+  for(std::string_view const how : {"start", "stop", "pe", "reset"})
+  {
+    CAPTURE(how);
+    rig r{"parked"};
+    r.target->out = {0xC1, 0xC2, 0xC3, 0xC4};
+    r.write(i2c1 + cr2, freq2 | last_bit);
+    program_dma(r, rx_channel, 0, 2);
+    auto const t0 = r.receiving();
+    r.idle_to(t0 + phase(17) + phase(1) / 2);
+    CHECK(r.target->acks() == std::vector<std::uint8_t>{1});
+    r.cpu_write(i2c1 + cr2, freq2 | dmaen | last_bit);
+    if(how == "start")
+    {
+      r.cpu_write(i2c1 + cr1, pe | ack_bit | start);
+    }
+    else if(how == "stop")
+    {
+      r.cpu_write(i2c1 + cr1, pe | ack_bit | stop);
+    }
+    r.idle_to(r.now_ps() + 2 * latency);
+    REQUIRE(dma_left(r, rx_channel) == 1);
+    if(how == "pe")
+    {
+      r.cpu_write(i2c1 + cr1, 0);
+      r.cpu_write(i2c1 + cr1, pe);
+    }
+    else if(how == "reset")
+    {
+      r.write(apb1rstr, i2c1_bit);
+      r.write(apb1rstr, 0);
+      r.write(i2c1 + cr2, freq2);
+      r.write(i2c1 + ccr, 10);
+      r.write(i2c1 + trise, 3);
+      r.write(i2c1 + cr1, pe);
+    }
+    r.idle_to(t0 + phase(20));
+    if(how == "start")
+    {
+      CHECK(r.read(i2c1 + sr1) == sb);
+      static_cast<void>(r.cpu_read(i2c1 + sr1));
+      r.cpu_write(i2c1 + dr, std::uint32_t{device} << 1 | 1u);
+      r.idle_to(r.now_ps() + phase(9));
+      static_cast<void>(r.cpu_read(i2c1 + sr1));
+      static_cast<void>(r.cpu_read(i2c1 + sr2));
+    }
+    else
+    {
+      static_cast<void>(r.receiving());
+    }
+    r.idle_to(r.now_ps() + phase(9));
+    auto const ended = how == "start" or how == "stop";
+    CHECK(
+        r.target->acks()
+        == (ended ? std::vector<std::uint8_t>{1, 1, 1} : std::vector<std::uint8_t>{1, 1}));
+  }
+}
+
+TEST_CASE("a snapshot with an EOT_1 pending restores it, the next byte is NACKed in both rigs")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1, 0xC2, 0xC3};
+  r.write(i2c1 + cr2, freq2 | dmaen | last_bit);
+  program_dma(r, rx_channel, 0, 3);
+  auto const t0 = r.receiving();
+  r.idle_to(t0 + phase(18) + 3 * latency);
+  REQUIRE(dma_left(r, rx_channel) == 1);
+  r.write(i2c1 + cr2, freq2 | dmaen);
+  auto const saved = r.f->target->snapshot();
+  rig        other{"parked"};
+  other.target->out = {0xC1, 0xC2, 0xC3};
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  for(auto const* one : {&r, &other})
+  {
+    one->idle_to(t0 + phase(27) + 2 * latency);
+    auto const got = one->target->acks();
+    REQUIRE(not got.empty());
+    CHECK(got.back() == 0);
+    CHECK(dma_left(*one, rx_channel) == 0);
+  }
+  CHECK(r.target->acks() == std::vector<std::uint8_t>{1, 1, 0});
+}
+
+TEST_CASE("RM0038 26.3.7: target receive by DMA, LAST 1 has no effect in target mode, inferred")
+{
+  port_rig const r;
+  r.listen();
+  r.write(i2c1 + cr2, freq2 | dmaen | last_bit);
+  program_dma(r, rx_channel, 0, 2);
+  auto const base = r.now() + us;
+  r.start(own, false, base, 1);
+  r.write(0x11, base, 2);
+  r.write(0x22, base, 3);
+  r.write(0x33, base, 4);
+  r.run_until(base + target_ps + us);
+  r.clear_address();
+  auto const cleared = r.now();
+  r.run_until(cleared + 4 * target_ps);
+  REQUIRE(r.sink->answers.size() == 4);
+  for(auto const& one : r.sink->answers)
+  {
+    CAPTURE(one.unit);
+    CHECK(one.ack);
+  }
+  CHECK(dma_left(r, rx_channel) == 0);
+  CHECK(in_buffer(r, 2) == std::vector<std::uint8_t>{0x11, 0x22});
+  CHECK(r.read(i2c1 + dr) == 0x33);
+  CHECK(r.read(i2c1 + sr1) == rxne);
+}
+
+TEST_CASE("RM0038 26.3.7: target transmit by DMA, the tx request follows TxE in target mode")
+{
+  port_rig const r;
+  r.listen();
+  r.write(buffer, 0x00B2'B1B0);
+  r.write(i2c1 + cr2, freq2 | dmaen);
+  program_dma(r, tx_channel, from_memory, 3);
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.read(true, base, 2);
+  r.read(true, base, 3);
+  r.read(false, base, 4);
+  r.run_until(base + target_ps + us);
+  r.clear_address();
+  auto const cleared = r.now();
+  r.run_until(cleared + 4 * target_ps);
+  REQUIRE(r.sink->answers.size() == 4);
+  CHECK(r.sink->answers[1].byte == 0xB0);
+  CHECK(r.sink->answers[2].byte == 0xB1);
+  CHECK(r.sink->answers[3].byte == 0xB2);
+  CHECK(dma_left(r, tx_channel) == 0);
+}
+
+TEST_CASE(
+    "RM0038 26.6.6 TxE: a repeated START that clears TxE in target mode drops the tx request and "
+    "the event line")
+{
+  port_rig const r;
+  r.listen();
+  r.write(buffer, 0xB0);
+  r.write(i2c1 + cr2, freq2 | dmaen | itevten | itbufen);
+  program_dma(r, tx_channel, from_memory, 1);
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.run_until(base + target_ps + us);
+  r.clear_address();
+  r.run_until(r.now() + 3 * latency);
+  REQUIRE(dma_left(r, tx_channel) == 0);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  CHECK((r.read(nvic_ispr0) & event_irq) != 0);
+  auto const again = r.now() + us;
+  r.start(own + 1, false, again, 2);
+  r.run_until(again + us);
+  CHECK((r.read(i2c1 + sr1) & txe) == 0);
+  r.write(nvic_ispr0 + 0x80, event_irq);
+  CHECK((r.read(nvic_ispr0) & event_irq) == 0);
+  program_dma(r, tx_channel, from_memory, 1);
+  r.run_until(r.now() + 3 * latency);
+  CHECK(dma_left(r, tx_channel) == 1);
+  CHECK((r.read(nvic_ispr0) & event_irq) == 0);
+}
+
+TEST_CASE(
+    "RM0038 26.6.1 PE: target transmit by DMA during a PE 0 communication carries every byte, "
+    "the port STOP disables the I2C")
+{
+  port_rig const r;
+  r.listen();
+  r.write(buffer, 0x00B2'B1B0);
+  r.write(i2c1 + cr2, freq2 | dmaen);
+  program_dma(r, tx_channel, from_memory, 3);
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.read(true, base, 2);
+  r.read(true, base, 3);
+  r.read(false, base, 4);
+  r.run_until(base + target_ps + us);
+  r.cpu_write(i2c1 + cr1, ack_bit);
+  CHECK(r.read(i2c1 + cr1) == ack_bit);
+  r.clear_address();
+  auto const cleared = r.now();
+  r.stop(cleared + 4 * target_ps, 5);
+  r.run_until(cleared + 4 * target_ps + us);
+  REQUIRE(r.sink->answers.size() == 4);
+  CHECK(r.sink->answers[1].byte == 0xB0);
+  CHECK(r.sink->answers[2].byte == 0xB1);
+  CHECK(r.sink->answers[3].byte == 0xB2);
+  CHECK(dma_left(r, tx_channel) == 0);
+  CHECK(r.read(i2c1 + cr1) == 0);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.read(i2c1 + sr2) == 0);
+}
+
+TEST_CASE("LL DMA write: DMAEN in EV6, TCIF6, DMAEN off, BTF, then STOP")
+{
+  rig r{"dma_write"};
+  CHECK(r.finish() == std::vector<std::uint32_t>{txe | btf, 0, 0});
+  CHECK(r.target->bytes() == std::vector<std::uint8_t>{0xD1, 0xD2, 0xD3});
+  CHECK(r.target->kinds() == "SWWWP");
+}
+
+TEST_CASE("LL DMA read of 4 bytes with LAST: the fourth byte is NACKed, STOP after TCIF7")
+{
+  rig r{"dma_read"};
+  r.target->out = {0xC1, 0xC2, 0xC3, 0xC4};
+  CHECK(r.finish() == std::vector<std::uint32_t>{0xC1, 0xC2, 0xC3, 0xC4, 0});
+  CHECK(r.target->kinds() == "SRRRRP");
+  CHECK(r.target->acks() == std::vector<std::uint8_t>{1, 1, 1, 0});
+}
+
+TEST_CASE("HAL_I2C_Mem_Read_DMA of 2 bytes sets LAST, the second byte is NACKed, HAL_OK")
+{
+  for(auto const& [desc, elf] : {
+          std::pair{&l152re(), firmware  },
+          std::pair{&l152rb(), firmware_b}
+  })
+  {
+    CAPTURE(elf);
+    rig r{"dma_hal_read", {}, *desc, elf};
+    r.target->out = {0xC1, 0xC2};
+    CHECK(r.finish() == std::vector<std::uint32_t>{0xC1, 0xC2, 0});
+    CHECK(r.target->bytes() == std::vector<std::uint8_t>{0x00, 0x40});
+    CHECK(r.target->acks() == std::vector<std::uint8_t>{1, 0});
+  }
+}
+
+TEST_CASE("an EOT_1 of another channel leaves the I2C receiver's next byte acknowledged")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1, 0xC2, 0xC3};
+  r.write(i2c1 + cr2, freq2 | dmaen | last_bit);
+  program_dma(r, rx_channel, 0, 5);
+  r.write(channel_reg(tx_channel, 0x08), 0);
+  r.write(channel_reg(tx_channel, 0x10), static_cast<std::uint32_t>(buffer + 0x10));
+  r.write(channel_reg(tx_channel, 0x14), static_cast<std::uint32_t>(buffer + 0x20));
+  r.write(channel_reg(tx_channel, 0x0C), 2);
+  r.write(channel_reg(tx_channel, 0x08), channel_en);
+  auto const t0    = r.receiving();
+  auto*      probe = r.f->model_of<bus_probe>("DAC");
+  REQUIRE(probe != nullptr);
+  probe->channel_6.set(true);
+  r.idle_to(t0 + 3 * latency);
+  probe->channel_6.set(false);
+  REQUIRE(dma_left(r, tx_channel) == 0);
+  r.idle_to(t0 + phase(27) + 2 * latency);
+  CHECK(r.target->acks() == std::vector<std::uint8_t>{1, 1, 1});
+  CHECK(dma_left(r, rx_channel) == 2);
+}
+
+TEST_CASE("an EOT_1 on the I2C's rx channel with DMAEN 0 changes nothing, inferred")
+{
+  rig r{"parked"};
+  r.target->out = {0xC1, 0xC2, 0xC3};
+  r.write(i2c1 + cr2, freq2 | last_bit);
+  r.write(channel_reg(rx_channel, 0x08), 0);
+  r.write(channel_reg(rx_channel, 0x10), static_cast<std::uint32_t>(buffer + 0x10));
+  r.write(channel_reg(rx_channel, 0x14), static_cast<std::uint32_t>(buffer + 0x20));
+  r.write(channel_reg(rx_channel, 0x0C), 2);
+  r.write(channel_reg(rx_channel, 0x08), channel_en);
+  auto const t0    = r.receiving();
+  auto*      probe = r.f->model_of<bus_probe>("DAC");
+  REQUIRE(probe != nullptr);
+  probe->channel_7.set(true);
+  r.idle_to(t0 + 3 * latency);
+  probe->channel_7.set(false);
+  REQUIRE(dma_left(r, rx_channel) == 0);
+  r.idle_to(t0 + phase(9) + latency);
+  CHECK(r.cpu_read(i2c1 + dr) == 0xC1);
+  r.idle_to(t0 + phase(18) + latency);
+  CHECK(r.cpu_read(i2c1 + dr) == 0xC2);
+  r.idle_to(t0 + phase(27) + latency);
+  CHECK(r.cpu_read(i2c1 + dr) == 0xC3);
+  CHECK(r.target->acks() == std::vector<std::uint8_t>{1, 1, 1});
 }

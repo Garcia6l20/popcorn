@@ -345,6 +345,9 @@ Source: [dma_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native
 - The requests of a channel are ORed, RM0038 11.3.7. Each item acknowledges every request of
   the channel that is high, and the end of a non-circular transfer tells every request of the
   channel, inferred.
+- A peripheral-requested transfer that leaves one item tells every request of the channel, once
+  per pass of a circular channel. This is the EOT_1 signal the I2C reads with CR2.LAST, RM0038
+  26.3.7. A memory-to-memory copy tells none.
 - The channels run whatever `RCC_AHBENR.DMAxEN` holds.
 
 ## GPDMA and LPDMA
@@ -471,8 +474,15 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   TRISE and the PCLK1 rate are checked at the first START after PE is set with PCLK1 running, and
   each rule a configuration breaks logs one `model_warning`. TRISE passes at or above the rise
   time.
-- SMBus, PEC, ALERT, ARP and CR2.DMAEN log one `model_warning`, raise `model_error` under
+- SMBus, PEC, ALERT and ARP log one `model_warning`, raise `model_error` under
   `strict_peripherals` at the START that uses them, and the bus stays idle for them.
+- DMA, RM0038 26.3.7: with CR2.DMAEN 1 the TX request follows TxE and the RX request follows
+  RxNE, in controller and target mode and whatever ITBUFEN holds. A DMA access to DR acts as a CPU
+  access. With CR2.LAST 1 at the EOT_1 of the channel serving the RX request, the controller
+  receiver NACKs the next byte. Inferred: LAST counts as it is at EOT_1, the NACKed byte is the
+  first whose acknowledge the I2C decides after EOT_1, the end of a START drops a pending EOT_1,
+  an EOT_1 with DMAEN 0 changes nothing, and LAST has no effect in target mode. The end of the DMA transfer sends no STOP: the firmware
+  sets it.
 - A `board.i2c_controllers` controller, alone on the instance, queues phases through
   `i2c_controller_port` with the placement, unit order, STOP, drop, reset and snapshot rules of
   the STM32U5 I2C with a board controller.

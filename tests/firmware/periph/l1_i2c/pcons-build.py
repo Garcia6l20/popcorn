@@ -41,6 +41,9 @@ for chipset in (STM32L152XE, STM32L152XB):
             "target",
             "hal_slave",
             "hal_ready",
+            "dma_write",
+            "dma_read",
+            "dma_hal_read",
         ],
         chipset=chipset,
     )
