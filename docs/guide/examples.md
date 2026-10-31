@@ -252,3 +252,9 @@ The same layout on the STM32L152, a Cortex-M3 without TrustZone, from `examples/
 A push button on PC13 toggling an LED on PA5 through EXTI, HAL, xe and xb. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/gpio).
 
 --8<-- "stm32l152/gpio/README.md:3:11"
+
+### l152 usart
+
+printf banner and line echo on USART2, HAL, xe and xb. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/usart).
+
+--8<-- "stm32l152/usart/README.md:3:11"
