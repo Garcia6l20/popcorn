@@ -266,6 +266,18 @@ for program, source in (
         if target is not None:
             l1_test.depends(target)
 
+unregistered = add_doctest(
+    "stm32-unregistered",
+    [here / "test_unregistered.cpp"],
+    static,
+    env={**u575_env, **l1_env},
+    register=u575 is not None and h573 is not None and l152re is not None,
+)
+unregistered.private.include_dirs.append(private_dir)
+for _, target in (*firmwares.values(), *h573_firmwares.values(), *l1_firmwares.values()):
+    if target is not None:
+        unregistered.depends(target)
+
 flash_geometry = add_doctest(
     "stm32-flash-geometry",
     [here / "test_flash_geometry.cpp"],

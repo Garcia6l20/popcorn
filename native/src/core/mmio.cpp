@@ -760,7 +760,8 @@ auto machine::run_state::dispatch_write(
   {
     count_unmodelled(window, word, true);
   }
-  if(word >= slot.layout.words())
+  auto const* const rules = word < slot.layout.words() ? slot.layout.find(word) : nullptr;
+  if(rules == nullptr and (word >= slot.layout.words() or slot.claimed[word] == 0))
   {
     warn_unregistered(window, offset, true, by);
     note_watched(window.base + offset, size, value, true, by);
@@ -799,13 +800,6 @@ auto machine::run_state::dispatch_write(
       note_watched(window.base + offset, size, value, true, by);
     }
     return done;
-  }
-  auto const* const rules = slot.layout.find(word);
-  if(rules == nullptr)
-  {
-    warn_unregistered(window, offset, true, by);
-    note_watched(window.base + offset, size, value, true, by);
-    return {};
   }
   if(not slot.model and (slot.logged[word] == 0 or owner.options_.strict_peripherals))
   {
@@ -1119,22 +1113,30 @@ void machine::run_state::warn_unregistered(
     mmio_window const& window,
     std::uint32_t      offset,
     bool               write,
-    initiator)
+    initiator          by)
 {
-  if(not window.slot->warned.insert(offset).second)
+  auto const strict = owner.options_.strict_peripherals;
+  if(by == initiator::debugger and strict)
   {
     return;
   }
-  owner.hooks_->log(
-      {.kind       = log_kind::model_warning,
-       .pc         = arch->pc(),
-       .peripheral = window.unit->name,
-       .reg        = {},
-       .offset     = offset,
-       .write      = write,
-       .message    = std::format(
-           "{} of {} at offset {:#x}, no register there", write ? "write" : "read",
-           window.unit->name, offset)});
+  if(window.slot->warned.insert(offset).second)
+  {
+    owner.hooks_->log(
+        {.kind       = log_kind::model_warning,
+         .pc         = arch->pc(),
+         .peripheral = window.unit->name,
+         .reg        = {},
+         .offset     = offset,
+         .write      = write,
+         .message    = std::format(
+             "{} of {} at offset {:#x}, no register there", write ? "write" : "read",
+             window.unit->name, offset)});
+  }
+  if(strict)
+  {
+    throw model_error(window.unit->name, "", offset);
+  }
 }
 
 auto machine::run_state::on_mmio_read(

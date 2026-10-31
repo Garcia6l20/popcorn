@@ -1535,7 +1535,11 @@ struct machine::run_state
   [[nodiscard]] auto unmodelled_accesses() const -> std::vector<unmodelled_access>;
   [[nodiscard]] auto raz_name(std::size_t index) const -> std::string;
 
-  /** @brief Logs the first access to an offset without register. */
+  /**
+   * @brief Logs the first access to an offset without register, once per offset. An arch or
+   *        model debugger access under strict_peripherals is neither logged nor refused.
+   * @throws model_error under strict_peripherals, on every CPU or DMA access.
+   */
   void warn_unregistered(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
 
   /**

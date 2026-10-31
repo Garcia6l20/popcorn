@@ -24,6 +24,10 @@ The [part pages](generated/parts.md) list the instances with no model.
   `ModelError` and logs nothing, with or without `strict`.
 - The `value` getter, the field getters and `poke()` reach the register storage without a model.
 - An offset no register covers inside a modelled peripheral counts as unmodelled data too.
+- A firmware or DMA access to an offset no register covers, in a peripheral with or without a
+  model and held in RCC reset or not, reads 0, drops a write and logs one `model_warning` per
+  offset. Under `strict` it raises `ModelError`. A native model's or plugin's debugger access
+  through the services there under `strict` reads 0, drops a write and logs nothing.
 - The debug blocks TPIU, ETM, CTI and the ROM tables have no model. A firmware or DMA access
   reads 0 and drops writes, with one `model_warning` per block. The ROM tables read 0, so a ROM
   table walk ends at its first entry.
@@ -133,13 +137,13 @@ Source: [crc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - A write narrower than 32 bits to any register but `CRC_DR`, and on the STM32L1 `CRC_IDR`, is
   ignored and logged. Such a read is logged.
 - The RCC clock gate is not modelled. The CRC works with its RCC enable bit clear.
-- The STM32L1 CRC, RM0038 4, computes CRC-32 over the fixed polynomial 0x04C11DB7 from
-  0xFFFFFFFF, with no INIT, POL or reversal. A byte or half-word CRC_DR write feeds the word its
-  byte lanes repeat, 0xB0B0B0B0 for the byte 0xB0, and logs once. For a DMA write RM0038 11.3.4
-  states the repeated lanes. For a CPU store the repeated lanes, and the unit ignoring the access
-  size, are inferred. A DR write completes with no stall, where RM0038 4.3 stalls it for the 4
-  HCLK of the computation. A narrow read of CRC_DR or CRC_CR and a narrow write to CRC_CR log once, as RM0038 4.4
-  asks for words. CRC_IDR takes byte and half-word accesses with no log, as ST's CMSIS header
+- The STM32L1 CRC, RM0038 4, computes CRC-32 over the fixed polynomial 0x04C11DB7 from 0xFFFFFFFF,
+  with no INIT, POL or reversal. A byte or half-word CRC_DR write feeds the word its byte lanes
+  repeat, 0xB0B0B0B0 for the byte 0xB0, and logs once. For a DMA write RM0038 11.3.4 states the
+  repeated lanes. For a CPU store the repeated lanes, and the unit ignoring the access size, are
+  inferred. A DR write completes with no stall, where RM0038 4.3 stalls it for the 4 HCLK of the
+  computation. A narrow read of CRC_DR or CRC_CR and a narrow write to CRC_CR log once, as RM0038
+  4.4 asks for words. CRC_IDR takes byte and half-word accesses with no log, as ST's CMSIS header
   declares it a byte. Under `strict` each logged access raises `ModelError`.
 
 ## CRS

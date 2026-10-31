@@ -710,10 +710,11 @@ class Machine:
             cpi: Core cycles per instruction, above 0.
             trace_capacity: Records the always-on trace ring keeps, above 0.
             spin_threshold: Iterations of a loop making no progress before a SPIN stop, 0 off.
-            strict_peripherals: Whether a firmware or DMA access to an unmodelled register raises
-                ModelError, an access to an STM32U5 or STM32H5 debug block without a model too,
-                such as the CTI. A host access through `m.mem`, `m.ref.mem` or a register's
-                bus `read()` and writes raises ModelError for both whatever this flag says.
+            strict_peripherals: Whether a firmware or DMA access to an unmodelled register or to
+                an offset no register covers raises ModelError, an access to an STM32U5 or
+                STM32H5 debug block without a model too, such as the CTI. A host access through
+                `m.mem`, `m.ref.mem` or a register's bus `read()` and writes raises ModelError for
+                both whatever this flag says.
             faults: What a processor fault does. "stop" ends the run with a FAULT stop at the
                 faulting instruction. "handler" enters the firmware's handler as the core
                 does, HardFault, MemManage, BusFault, UsageFault or SecureFault, and the run
