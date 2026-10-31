@@ -35,6 +35,7 @@ constexpr std::uint32_t factory_vdda_mv = 3000;
 constexpr std::uint32_t conversion_end  = 0;
 constexpr std::uint32_t ready_end       = 1;
 constexpr std::uint32_t start_due       = 2;
+constexpr std::uint32_t edge_due        = 3;
 constexpr std::uint32_t exten_rising    = 1;
 constexpr std::uint32_t exten_falling   = 2;
 constexpr std::uint64_t latency_halves  = 7;
@@ -86,6 +87,17 @@ using wide = unsigned __int128;
   return std::nullopt;
 }
 
+struct adc_l1_edge
+{
+  bool          pending{};
+  bool          falling{};
+  std::uint8_t  selection{};
+  std::uint64_t ps{};
+  std::uint64_t queued{};
+
+  friend auto operator==(adc_l1_edge const&, adc_l1_edge const&) -> bool = default;
+};
+
 struct adc_l1_state
 {
   std::array<std::uint32_t, channels> input_uv{};
@@ -117,6 +129,8 @@ struct adc_l1_state
   std::uint8_t                        injected_left{};
   std::uint64_t                       queued{};
   bool                                dma_done{};
+  adc_l1_edge                         regular_edge{};
+  adc_l1_edge                         injected_edge{};
 
   friend auto operator==(adc_l1_state const&, adc_l1_state const&) -> bool = default;
 };
@@ -213,16 +227,23 @@ struct trigger_selection
  *        while no conversion runs, starts or waits and outside a DELS delay starts the group, or
  *        the next DISCEN subgroup, tlatr = 3.5 ADC clock cycles later, the DS10002 maximum.
  *        SWSTART starts the group too. JEXTEN and JEXTSEL do the same for the injected group with
- *        RM0038 Table 62 and the same tlatr, inferred. The selections with a source model are
- *        the TRGO ones, TIM9, TIM3, TIM2, TIM4 and TIM6 for EXTSEL, TIM9, TIM2, TIM4 and TIM7
- *        for JEXTSEL. One edge of a signal both groups select starts both, the injected group
- *        first. A selection no model produces, the compare events and EXTI lines 11 and 15, and
- *        the reserved 1011 to 1110 log once when the model starts listening, a model_error under
+ *        RM0038 Table 62 and the same tlatr, inferred. The TRGO selections take the timer's
+ *        `timx_trgo`, the TIMx_CCy selections its `timx_ccy` capture/compare event pulse, and
+ *        EXTI11 and EXTI15 the EXTI's `exti11` and `exti15` line inputs, inferred, a pin edge
+ *        counting at its own time. One edge of a signal both groups select starts both, the
+ *        injected group first. A selection whose source has no model on the part, and the
+ *        reserved 1011 to 1110, log once when the model starts listening, a model_error under
  *        strict_peripherals, and start nothing. A model_error of a selection surfaces from the
  *        ADC_CR2 write or the ADONS event that starts the listening. A config_error or
  *        model_error of the group checks raised at a trigger surfaces from the source's event or
  *        register access that gave the edge. Trigger detection stays on across an EXTSEL change,
- *        RM0038 12.6 blanks it for 2 PCLK cycles.
+ *        RM0038 12.6 blanks it for 2 PCLK cycles. An edge first completes the ADC's own
+ *        conversion end or start due at or before the edge, so an edge and a conversion end in
+ *        one core cycle are taken in time order. An edge its source gives ahead of the machine
+ *        time, the falling edge of a pulse, is taken at its own time if the group that detected
+ *        it still selects and detects it then, and a reset drops it. Each group holds one such
+ *        edge: a second one ahead for a group already holding one, two pulses of its signal
+ *        inside one timer clock, is decided when it arrives.
  *
  *        Discontinuous mode, RM0038 12.3.10: with DISCEN each trigger or SWSTART converts the
  *        next DISCNUM + 1 ranks, fewer in the last subgroup, the next one starting over at rank
@@ -304,6 +325,7 @@ public:
       access_ctx     ctx) -> std::expected<void, bus_error> override;
 
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
+  [[nodiscard]] auto can_listen(std::string_view signal) const -> bool override;
   void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
   void transfer_completed(dma_controller const& by, std::uint32_t request) override;
   void count_ended(dma_controller const& by, std::uint32_t request) override;
@@ -386,6 +408,16 @@ private:
       -> bool;
   void store_injected(std::size_t index, std::uint32_t result);
   void stop_engine();
+  void run_due(std::uint64_t ps);
+  void take_edge(bool regular, bool injected, std::uint64_t at_ps);
+  void defer_edge(
+      adc_l1_edge&  slot,
+      std::uint32_t group,
+      std::uint32_t selection,
+      trigger_edge  edge,
+      std::uint64_t at_ps);
+  void fire_edge(std::uint32_t group);
+  void drop_edge();
   void abort_regular();
   void abort();
   void signal();
@@ -615,6 +647,7 @@ void adc_l1_model::restore_reset_values()
     regs_.poke(reg(name).offset, describe(name).reset);
   }
   abort();
+  drop_edge();
   ++state_.ready_generation;
   state_.ready_waiting = false;
   state_.unread        = false;
@@ -869,6 +902,12 @@ auto adc_l1_model::listened() const -> trigger_selection
   return selected(regs_.peek(trigger_.offset), get(regs_, ready_) != 0);
 }
 
+auto adc_l1_model::can_listen(std::string_view signal) const -> bool
+{
+  return not signal.empty()
+     and (std::ranges::contains(regular_triggers, signal) or std::ranges::contains(injected_triggers, signal));
+}
+
 auto adc_l1_model::listens(std::string_view signal) const -> bool
 {
   auto const now = listened();
@@ -938,31 +977,123 @@ void adc_l1_model::triggered(std::string_view signal, trigger_edge edge, trigger
     return edge == trigger_edge::rising ? (polarity & exten_rising) != 0
                                         : (polarity & exten_falling) != 0;
   };
-  auto const hz       = adc_hz();
-  auto const start    = at.ps + (hz == 0 ? 0 : cycles_ps(latency_halves, 2 * hz));
   auto const injected = now.injected
                     and injected_triggers[*now.injected] == signal
                     and detects(get(regs_, injected_trigger_))
                     and get(regs_, auto_injected_) == 0;
   auto const regular =
       now.regular and regular_triggers[*now.regular] == signal and detects(get(regs_, trigger_));
+  if(not injected and not regular)
+  {
+    return;
+  }
+  auto const ahead          = at.ps > ctx_.clock.time().ps;
+  auto const defer_regular  = ahead and regular and not state_.regular_edge.pending;
+  auto const defer_injected = ahead and injected and not state_.injected_edge.pending;
+  if(defer_regular)
+  {
+    defer_edge(state_.regular_edge, 0, *now.regular, edge, at.ps);
+  }
+  if(defer_injected)
+  {
+    defer_edge(state_.injected_edge, 1, *now.injected, edge, at.ps);
+  }
+  if((regular and not defer_regular) or (injected and not defer_injected))
+  {
+    take_edge(regular and not defer_regular, injected and not defer_injected, at.ps);
+  }
+}
+
+void adc_l1_model::take_edge(bool regular, bool injected, std::uint64_t at_ps)
+{
+  auto const hz    = adc_hz();
+  auto const start = at_ps + (hz == 0 ? 0 : cycles_ps(latency_halves, 2 * hz));
+  run_due(std::min(at_ps, ctx_.clock.time().ps));
   if(injected
      and regular
      and not state_.injecting
-     and not injected_blocked(at.ps)
+     and not injected_blocked(at_ps)
      and not regular_busy()
-     and not blocked(at.ps))
+     and not blocked(at_ps))
   {
     check_injected();
     check_group();
   }
   if(injected)
   {
-    injected_start(start, at.ps, false);
+    injected_start(start, at_ps, false);
   }
   if(regular)
   {
-    regular_start(start, at.ps, false);
+    regular_start(start, at_ps, false);
+  }
+}
+
+void adc_l1_model::defer_edge(
+    adc_l1_edge&  slot,
+    std::uint32_t group,
+    std::uint32_t selection,
+    trigger_edge  edge,
+    std::uint64_t at_ps)
+{
+  slot.pending   = true;
+  slot.falling   = edge == trigger_edge::falling;
+  slot.selection = static_cast<std::uint8_t>(selection);
+  slot.ps        = at_ps;
+  slot.queued    = ctx_.events.schedule_at(vtime{at_ps}, edge_due, group, ctx_.clock) + 1;
+}
+
+void adc_l1_model::fire_edge(std::uint32_t group)
+{
+  auto& regular_slot  = state_.regular_edge;
+  auto& injected_slot = state_.injected_edge;
+  auto& slot          = group == 0 ? regular_slot : injected_slot;
+  auto& other         = group == 0 ? injected_slot : regular_slot;
+  if(not slot.pending)
+  {
+    return;
+  }
+  slot.pending = false;
+  slot.queued  = 0;
+  auto const joint =
+      other.pending
+      and other.ps == slot.ps
+      and other.falling == slot.falling
+      and regular_triggers[regular_slot.selection] == injected_triggers[injected_slot.selection];
+  if(joint)
+  {
+    if(auto const seq = std::exchange(other.queued, 0); seq != 0)
+    {
+      ctx_.events.cancel(seq - 1);
+    }
+    other.pending = false;
+  }
+  auto const now     = listened();
+  auto const detects = [](std::uint32_t polarity, bool falling) {
+    return (polarity & (falling ? exten_falling : exten_rising)) != 0;
+  };
+  auto const regular = (group == 0 or joint)
+                   and now.regular == std::optional<std::uint32_t>{regular_slot.selection}
+                   and detects(get(regs_, trigger_), regular_slot.falling);
+  auto const injected = (group == 1 or joint)
+                    and now.injected == std::optional<std::uint32_t>{injected_slot.selection}
+                    and detects(get(regs_, injected_trigger_), injected_slot.falling)
+                    and get(regs_, auto_injected_) == 0;
+  if(injected or regular)
+  {
+    take_edge(regular, injected, slot.ps);
+  }
+}
+
+void adc_l1_model::drop_edge()
+{
+  for(auto* const slot : {&state_.regular_edge, &state_.injected_edge})
+  {
+    if(auto const seq = std::exchange(slot->queued, 0); seq != 0)
+    {
+      ctx_.events.cancel(seq - 1);
+    }
+    slot->pending = false;
   }
 }
 
@@ -1551,6 +1682,32 @@ void adc_l1_model::store_injected(std::size_t index, std::uint32_t result)
   update(regs_, injected_data_[index], static_cast<std::uint32_t>(value) & 0xFFFFu);
 }
 
+void adc_l1_model::run_due(std::uint64_t ps)
+{
+  for(;;)
+  {
+    auto const ends   = state_.converting and state_.end_ps <= ps;
+    auto const starts = state_.start_pending and state_.start_ps <= ps;
+    if(not ends and not starts)
+    {
+      return;
+    }
+    if(auto const seq = std::exchange(state_.queued, 0); seq != 0)
+    {
+      ctx_.events.cancel(seq - 1);
+    }
+    if(ends)
+    {
+      finish();
+    }
+    else
+    {
+      state_.start_pending = false;
+      start_now(state_.start_ps);
+    }
+  }
+}
+
 void adc_l1_model::stop_engine()
 {
   if(auto const seq = std::exchange(state_.queued, 0); seq != 0)
@@ -1622,6 +1779,11 @@ void adc_l1_model::on_event(std::uint32_t kind, std::uint64_t payload)
       check_selection(was, listened());
       retune(was);
     }
+    return;
+  }
+  if(kind == edge_due)
+  {
+    fire_edge(static_cast<std::uint32_t>(payload));
     return;
   }
   if(kind == start_due and payload == state_.generation and state_.start_pending)

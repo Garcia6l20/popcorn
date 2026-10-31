@@ -6,6 +6,7 @@
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/stm32/analog.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 #include <popcorn/periph/stm32/supply.hpp>
 
 #include <doctest/doctest.h>
@@ -91,6 +92,15 @@ constexpr std::uint64_t us       = 1'000'000;
 constexpr std::uint64_t cycle    = 62'500;
 constexpr std::uint32_t vrefint  = 1671;
 constexpr std::uint32_t ts_cal1  = 680;
+
+auto without_unit(part_description desc, std::string_view unit) -> part_description
+{
+  REQUIRE(
+      std::erase_if(
+          desc.peripherals, [&](popcorn::peripheral_desc const& p) { return p.name == unit; })
+      == 1);
+  return desc;
+}
 
 auto options(part_description const& desc, bool strict, stm32::supply_options supply)
     -> core::machine_options
@@ -210,6 +220,19 @@ struct adc_rig
     auto const value = f.target->mem().read(at, 4);
     REQUIRE(value.has_value());
     return static_cast<std::uint32_t>(*value);
+  }
+
+  void timer_compares(
+      std::string_view unit,
+      std::uint32_t    enable_offset,
+      std::uint32_t    enable,
+      std::uint32_t    channel,
+      std::uint32_t    ccr) const
+  {
+    poke("RCC", enable_offset, enable);
+    poke(unit, 0x2C, 209);
+    poke(unit, 0x34 + 4 * (channel - 1), ccr);
+    poke(unit, 0x00, 1);
   }
 
   void tim2_updates(std::uint32_t arr) const
@@ -844,7 +867,6 @@ TEST_CASE("checklist 53: each function the L1 ADC does not model raises model_er
     bool          at_start;
   };
   for(auto const& [reg, value, at_start] : {
-          row{cr2,  adon | (1u << 28),               false},
           row{cr2,  adon | (1u << 28) | (11u << 24), false},
           row{cr1,  1u << 17,                        true },
           row{cr1,  1u << 16,                        true },
@@ -1160,18 +1182,19 @@ TEST_CASE("RM0038 12.6: a TRGO edge during a conversion is ignored, the next one
   CHECK(conversions == 3);
 }
 
-TEST_CASE("an EXTSEL no model produces logs once and starts nothing, a model_error when strict")
+TEST_CASE(
+    "an EXTSEL whose source has no model, tim2_cc3 on a part without TIM2, logs once and starts "
+    "nothing, a model_error when strict")
 {
-  adc_rig const r;
+  adc_rig const r{without_unit(l152re(), "TIM2")};
   r.power();
   r.write(cr2, adon | (1u << 28) | (2u << 24));
-  r.tim2_updates(209);
   r.run_until(r.now() + 300 * us);
   CHECK((r.read(sr) & strt) == 0);
   REQUIRE(r.warnings() == 1);
   CHECK(r.logged.front().message.contains("tim2_cc3"));
 
-  adc_rig const strict{l152re(), true};
+  adc_rig const strict{without_unit(l152re(), "TIM2"), true};
   strict.power();
   CHECK_THROWS_AS(strict.attempt(cr2, adon | (1u << 28) | (2u << 24)), popcorn::model_error);
   CHECK((strict.read(cr2) >> 28) == 0);
@@ -1335,10 +1358,10 @@ TEST_CASE("the ADONS event starts the listening: TRGO wraps from before it start
 }
 
 TEST_CASE(
-    "an EXTSEL no model produces written with ADON 0 logs once at the ADONS event, "
+    "an EXTSEL whose source has no model written with ADON 0 logs once at the ADONS event, "
     "a model_error when strict")
 {
-  adc_rig const r;
+  adc_rig const r{without_unit(l152re(), "TIM2")};
   r.write(cr2, (1u << 28) | (2u << 24));
   r.write(cr2, adon | (1u << 28) | (2u << 24));
   CHECK(r.warnings() == 0);
@@ -1346,7 +1369,7 @@ TEST_CASE(
   REQUIRE((r.read(sr) & adons) != 0);
   CHECK(r.warnings() == 1);
 
-  adc_rig const strict{l152re(), true};
+  adc_rig const strict{without_unit(l152re(), "TIM2"), true};
   strict.write(cr2, (1u << 28) | (2u << 24));
   strict.write(cr2, adon | (1u << 28) | (2u << 24));
   CHECK_THROWS_AS(
@@ -1948,17 +1971,18 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "a JEXTSEL no model produces or reserved logs once and starts nothing, "
+    "a JEXTSEL whose source has no model or a reserved one logs once and starts nothing, "
     "a model_error when strict")
 {
-  for(auto const& [selection, named] : {
-          std::pair{0u,  std::string_view{"tim9_cc1"}},
-          std::pair{15u, std::string_view{"exti15"}  },
-          std::pair{11u, std::string_view{"reserved"}},
+  for(auto const& [selection, named, dropped] : {
+          std::tuple{0u,  std::string_view{"tim9_cc1"}, std::string_view{"TIM9"}},
+          std::tuple{15u, std::string_view{"exti15"},   std::string_view{"EXTI"}},
+          std::tuple{11u, std::string_view{"reserved"}, std::string_view{}      },
   })
   {
     CAPTURE(selection);
-    adc_rig const r;
+    auto const    desc = dropped.empty() ? l152re() : without_unit(l152re(), dropped);
+    adc_rig const r{desc};
     r.power();
     r.write(cr2, adon | (1u << 20) | (selection << 16));
     r.write(cr2, adon | (1u << 20) | (selection << 16));
@@ -1967,7 +1991,7 @@ TEST_CASE(
     REQUIRE(r.warnings() == 1);
     CHECK(r.logged.front().message.contains(named));
 
-    adc_rig const strict{l152re(), true};
+    adc_rig const strict{desc, true};
     strict.power();
     CHECK_THROWS_AS(
         strict.attempt(cr2, adon | (1u << 20) | (selection << 16)), popcorn::model_error);
@@ -2743,4 +2767,278 @@ TEST_CASE("RM0038 12.11.1: with DMA 1 and AWDEN a result an overrun loses still 
   CHECK((r.read(sr) & ovr) != 0);
   CHECK(r.read(dr) == 2048);
   CHECK((r.read(sr) & awd) != 0);
+}
+
+TEST_CASE(
+    "RM0038 Table 61: EXTSEL 0000, 0010, 0011, 0101, 0111 and 1000 start on the TIM9 CC2, "
+    "TIM2 CC3, TIM2 CC2, TIM4 CC4, TIM3 CC1 and TIM3 CC3 events")
+{
+  for(auto const& [selection, unit, enable_offset, enable, channel] : {
+          std::tuple{0u, std::string_view{"TIM9"}, 0x20u, 1u << 2, 2u},
+          std::tuple{2u, std::string_view{"TIM2"}, 0x24u, 1u << 0, 3u},
+          std::tuple{3u, std::string_view{"TIM2"}, 0x24u, 1u << 0, 2u},
+          std::tuple{5u, std::string_view{"TIM4"}, 0x24u, 1u << 2, 4u},
+          std::tuple{7u, std::string_view{"TIM3"}, 0x24u, 1u << 1, 1u},
+          std::tuple{8u, std::string_view{"TIM3"}, 0x24u, 1u << 1, 3u},
+  })
+  {
+    CAPTURE(selection);
+    adc_rig const r;
+    r.power();
+    r.write(cr2, adon | (1u << 28) | (selection << 24));
+    r.timer_compares(unit, enable_offset, enable, channel, 100);
+    auto const match = r.due(unit);
+    r.run_until(match + 600 * ns);
+    CHECK((r.read(sr) & strt) != 0);
+    CHECK(r.due() == match + 218'750 + 16 * cycle);
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE(
+    "RM0038 Table 62: JEXTSEL 0000, 0011, 0100, 0110 to 1000 and 1001 start on the TIM9 CC1, "
+    "TIM2 CC1, TIM3 CC4, TIM4 CC1 to CC3 and TIM10 CC1 events")
+{
+  for(auto const& [selection, unit, enable_offset, enable, channel] : {
+          std::tuple{0u, std::string_view{"TIM9"},  0x20u, 1u << 2, 1u},
+          std::tuple{3u, std::string_view{"TIM2"},  0x24u, 1u << 0, 1u},
+          std::tuple{4u, std::string_view{"TIM3"},  0x24u, 1u << 1, 4u},
+          std::tuple{6u, std::string_view{"TIM4"},  0x24u, 1u << 2, 1u},
+          std::tuple{7u, std::string_view{"TIM4"},  0x24u, 1u << 2, 2u},
+          std::tuple{8u, std::string_view{"TIM4"},  0x24u, 1u << 2, 3u},
+          std::tuple{9u, std::string_view{"TIM10"}, 0x20u, 1u << 3, 1u},
+  })
+  {
+    CAPTURE(selection);
+    adc_rig const r;
+    r.power();
+    r.write(cr2, adon | (1u << 20) | (selection << 16));
+    r.timer_compares(unit, enable_offset, enable, channel, 100);
+    auto const match = r.due(unit);
+    r.run_until(match + 600 * ns);
+    CHECK((r.read(sr) & jstrt) != 0);
+    CHECK(r.due() == match + 218'750 + 16 * cycle);
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE(
+    "RM0038 Tables 61 and 62 inferred: EXTI line 11 on PC11 starts the regular group and line 15 "
+    "on PB15 the injected group, 3.5 ADC cycles after the pin edge's own time, whatever EXTI_IMR")
+{
+  struct leg
+  {
+    std::uint32_t    control;
+    std::uint32_t    exticr;
+    std::uint32_t    code;
+    std::string_view port;
+    std::uint8_t     pin;
+    std::uint32_t    started;
+  };
+  for(auto const& [control, exticr, code, port, pin, started] : {
+          leg{(1u << 28) | (15u << 24), 0x10, 2u << 12, "GPIOC", 11, strt },
+          leg{(1u << 20) | (15u << 16), 0x14, 1u << 12, "GPIOB", 15, jstrt},
+  })
+  {
+    CAPTURE(pin);
+    adc_rig const r;
+    r.power();
+    r.poke("SYSCFG", exticr, code);
+    r.write(cr2, adon | control);
+    auto* const gpio = r.f.model_of<stm32::gpio_port>(port);
+    REQUIRE(gpio != nullptr);
+    auto const edge = r.now() + 10 * us + 123;
+    gpio->drive_at(pin, true, vtime{edge});
+    r.run_until(edge + 600 * ns);
+    CHECK((r.read(sr) & started) != 0);
+    CHECK(r.due() == edge + 218'750 + 16 * cycle);
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE(
+    "a TIM2 CC2 trigger 1.43 us after the last, its conversion over at 1.22 us, starts each time "
+    "though both fall in one core cycle")
+{
+  adc_rig const r;
+  r.power();
+  r.write(cr2, adon | (1u << 28) | (3u << 24));
+  r.write(sr, 0);
+  r.poke("RCC", 0x24, 1);
+  r.poke("TIM2", 0x2C, 2);
+  r.poke("TIM2", 0x38, 1);
+  auto const from = r.now();
+  r.poke("TIM2", 0x00, 1);
+  constexpr std::uint64_t    tick = 476'837;
+  std::vector<std::uint32_t> started;
+  for(std::uint64_t k = 0; k < 20; ++k)
+  {
+    r.run_until(from + (3 * k + 1) * tick + 2 * tick - 1);
+    started.push_back((r.read(sr) & strt) != 0 ? 1u : 0u);
+    r.write(sr, 0);
+    static_cast<void>(r.cpu_read(dr));
+  }
+  CHECK(started == std::vector<std::uint32_t>(20, 1u));
+}
+
+namespace
+{
+constexpr std::uint64_t half_msi_tick = 953'674;
+
+void falling_cc2_triggers(adc_rig const& r)
+{
+  r.power();
+  r.write(smpr3, 1);
+  r.write(cr2, adon | (2u << 28) | (3u << 24));
+  r.write(sr, 0);
+  r.poke("RCC", 0x08, 5u << 8);
+  r.poke("RCC", 0x24, 1);
+  r.poke("TIM2", 0x2C, 1);
+  r.poke("TIM2", 0x38, 1);
+}
+}
+
+TEST_CASE(
+    "a TIM2 CC2 falling edge 1.91 us after the last, its conversion over at 1.53 us, starts each "
+    "time though the edge comes one timer clock ahead of the machine time")
+{
+  adc_rig const r;
+  falling_cc2_triggers(r);
+  auto const from = r.now();
+  r.poke("TIM2", 0x00, 1);
+  std::vector<std::uint32_t> started;
+  for(std::uint64_t k = 0; k < 20; ++k)
+  {
+    r.run_until(from + (8 * k + 11) * half_msi_tick / 4);
+    started.push_back((r.read(sr) & strt) != 0 ? 1u : 0u);
+    r.write(sr, 0);
+    static_cast<void>(r.cpu_read(dr));
+  }
+  CHECK(started == std::vector<std::uint32_t>(20, 1u));
+}
+
+TEST_CASE("a falling edge pending ahead of the machine time survives a snapshot, ADC1RST drops it")
+{
+  adc_rig const r;
+  falling_cc2_triggers(r);
+  auto const from = r.now();
+  r.poke("TIM2", 0x00, 1);
+  r.run_until(from + 3 * half_msi_tick / 2);
+  auto const edge = r.due();
+  REQUIRE(edge > r.now());
+  REQUIRE(edge < from + 2 * half_msi_tick + ns);
+  CHECK((r.read(sr) & strt) == 0);
+  auto const saved = r.f.target->snapshot();
+  auto const check = [&](adc_rig const& g) {
+    CHECK(g.due() == edge);
+    g.run_until(edge + 300 * ns);
+    CHECK((g.read(sr) & strt) != 0);
+  };
+  check(r);
+  adc_rig const other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  check(other);
+
+  r.f.target->restore(saved);
+  rcc_reset_pulse(r.f, "APB2RSTR", "ADC1RST");
+  CHECK(r.due() == ~std::uint64_t{});
+}
+
+TEST_CASE("a pending edge ahead of the machine time starts nothing once EXTEN is cleared before it")
+{
+  adc_rig const r;
+  falling_cc2_triggers(r);
+  auto const from = r.now();
+  r.poke("TIM2", 0x00, 1);
+  r.run_until(from + 3 * half_msi_tick / 2);
+  auto const edge = r.due();
+  REQUIRE(edge > r.now());
+  r.write(cr2, adon | (3u << 24));
+  r.run_until(edge + 300 * ns);
+  CHECK((r.read(sr) & strt) == 0);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE(
+    "TIM2 CC1 and CC2 falling edges at one match, ahead of the machine time, start the injected "
+    "group on tim2_cc1 and the regular group on tim2_cc2 each time")
+{
+  adc_rig const r;
+  r.power();
+  r.write(smpr3, 1);
+  r.write(jsqr, 1u << 15);
+  r.write(cr2, adon | (2u << 28) | (3u << 24) | (2u << 20) | (3u << 16));
+  r.write(sr, 0);
+  r.poke("RCC", 0x08, 5u << 8);
+  r.poke("RCC", 0x24, 1);
+  r.poke("TIM2", 0x2C, 2);
+  r.poke("TIM2", 0x34, 1);
+  r.poke("TIM2", 0x38, 1);
+  auto const from = r.now();
+  r.poke("TIM2", 0x00, 1);
+  std::vector<std::uint32_t> regular;
+  std::vector<std::uint32_t> injected;
+  for(std::uint64_t k = 0; k < 20; ++k)
+  {
+    r.run_until(from + (30 * k + 41) * half_msi_tick / 10);
+    regular.push_back((r.read(sr) & strt) != 0 ? 1u : 0u);
+    injected.push_back((r.read(sr) & jstrt) != 0 ? 1u : 0u);
+    r.write(sr, 0);
+    static_cast<void>(r.cpu_read(dr));
+  }
+  CHECK(injected == std::vector<std::uint32_t>(20, 1u));
+  CHECK(regular == std::vector<std::uint32_t>(20, 1u));
+}
+
+TEST_CASE("a pending falling edge starts nothing once EXTEN or JEXTEN detects rising edges only")
+{
+  for(bool const injected_group : {false, true})
+  {
+    CAPTURE(injected_group);
+    adc_rig const r;
+    falling_cc2_triggers(r);
+    auto const cc = injected_group ? (2u << 20) | (3u << 16) : (2u << 28) | (3u << 24);
+    r.write(cr2, adon | cc);
+    r.poke("TIM2", 0x34, 1);
+    auto const from = r.now();
+    r.poke("TIM2", 0x00, 1);
+    r.run_until(from + 3 * half_msi_tick / 2);
+    auto const edge = r.due();
+    REQUIRE(edge > r.now());
+    REQUIRE(edge < from + 2 * half_msi_tick + ns);
+    r.write(cr2, adon | (injected_group ? (1u << 20) | (3u << 16) : (1u << 28) | (3u << 24)));
+    r.run_until(edge + 300 * ns);
+    CHECK((r.read(sr) & (strt | jstrt)) == 0);
+  }
+}
+
+TEST_CASE(
+    "a JEXTEN 10 edge on tim2_cc1 ahead of the machine time survives a snapshot and starts the "
+    "injected group at its time, none once JAUTO is set before it")
+{
+  adc_rig const r;
+  falling_cc2_triggers(r);
+  r.write(cr2, adon | (2u << 20) | (3u << 16));
+  r.poke("TIM2", 0x34, 1);
+  auto const from = r.now();
+  r.poke("TIM2", 0x00, 1);
+  r.run_until(from + 3 * half_msi_tick / 2);
+  auto const edge = r.due();
+  REQUIRE(edge > r.now());
+  REQUIRE(edge < from + 2 * half_msi_tick + ns);
+  CHECK((r.read(sr) & jstrt) == 0);
+  auto const    saved = r.f.target->snapshot();
+  adc_rig const other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  for(auto const* g : {&r, &other})
+  {
+    g->run_until(edge + 300 * ns);
+    CHECK((g->read(sr) & jstrt) != 0);
+  }
+  r.f.target->restore(saved);
+  r.write(cr1, jauto);
+  r.run_until(edge + 300 * ns);
+  CHECK((r.read(sr) & jstrt) == 0);
 }

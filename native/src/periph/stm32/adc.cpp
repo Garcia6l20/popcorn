@@ -35,6 +35,7 @@ constexpr std::uint64_t ps_per_second      = 1'000'000'000'000;
 constexpr std::uint32_t conversion_end     = 0;
 constexpr std::uint32_t sampling_end       = 1;
 constexpr std::uint32_t ready_end          = 2;
+constexpr std::uint32_t edge_due           = 3;
 constexpr std::size_t   trigger_selections = 32;
 constexpr std::uint32_t exten_rising       = 1;
 constexpr std::uint32_t exten_falling      = 2;
@@ -128,6 +129,30 @@ template <typename Enum> [[nodiscard]] auto trigger_name(std::uint32_t selection
   return std::format("adc_ext_trg{}", selection);
 }
 
+template <typename Enum> [[nodiscard]] auto trigger_signal(std::uint32_t selection) -> std::string
+{
+  auto       name = trigger_name<Enum>(selection);
+  auto const at   = name.find("_oc");
+  if(name.starts_with("tim") and at != std::string::npos)
+  {
+    name.replace(at, 3, "_cc");
+  }
+  return name;
+}
+
+template <typename Enum> [[nodiscard]] auto trigger_signals() -> std::array<std::string, 32> const&
+{
+  static auto const signals = [] {
+    std::array<std::string, 32> out;
+    for(std::uint32_t selection = 0; selection < out.size(); ++selection)
+    {
+      out[selection] = trigger_signal<Enum>(selection);
+    }
+    return out;
+  }();
+  return signals;
+}
+
 struct adc_inputs
 {
   std::string_view             instance;
@@ -182,7 +207,7 @@ private:
 /**
  * @brief Family traits of the STM32U5 ADC1 and ADC2, `aditf5_40v1_U5_Cube`, RM0456 section 33:
  *        register names, 14-bit codes, the sampling and SAR times in half ADC clock cycles, the
- *        EXTSEL map of Table 308, tLATR, the factory words and the eight-result FIFO.
+ *        EXTSEL map of Table 307, tLATR, the factory words and the eight-result FIFO.
  */
 struct u5_adc
 {
@@ -414,6 +439,18 @@ struct h5_adc
   }
 };
 
+struct adc_edge
+{
+  bool          pending{};
+  bool          falling{};
+  bool          reposted{};
+  std::uint8_t  selection{};
+  std::uint32_t generation{};
+  std::uint64_t ps{};
+
+  friend auto operator==(adc_edge const&, adc_edge const&) -> bool = default;
+};
+
 struct adc_state
 {
   std::array<std::uint32_t, channels> input_uv{};
@@ -431,6 +468,8 @@ struct adc_state
   std::vector<std::uint32_t>          data;
   bool                                dma_stopped{};
   std::uint8_t                        filter_count{};
+  std::array<adc_edge, 2>             edges{};
+  std::uint32_t                       edge_generation{};
 
   friend auto operator==(adc_state const&, adc_state const&) -> bool = default;
 };
@@ -701,7 +740,7 @@ struct adc_clock
  *        the subgroup and ignores CONT.
  *
  *        Hardware triggers, RM0456 33.4.19: with EXTEN not 0, the ADSTART write starts nothing
- *        and ADC1 listens, as a trigger_sink, to the signal EXTSEL selects in RM0456 Table 308,
+ *        and ADC1 listens, as a trigger_sink, to the signal EXTSEL selects in RM0456 Table 307,
  *        such as `tim15_trgo` for 14, while ADEN and ADSTART are set. EXTEN 01 detects the
  *        signal's rising edges, 10 its falling edges, 11 both: a timer's TRGO pulse rises at its
  *        event and falls one timer kernel clock later. Each detected edge while no conversion
@@ -709,9 +748,16 @@ struct adc_clock
  *        clock cycles for PRESC 0, 1 or 2, datasheet DS13737 table 103. The datasheet gives no
  *        value for a larger PRESC: a divider D of 4 or more takes 3 x D + 1 cycles, the rule its
  *        values for D 2 and 4 follow, unverified. An edge during a conversion or the latency is
- *        ignored. ADSTART stays set at the end of a sequence or subgroup, RM0456
+ *        ignored. An edge its source gives ahead of the machine time, the falling edge of a
+ *        pulse, is taken at its own time if ADC1 still selects and detects it then, after the
+ *        ADC's own events due at that time, and a reset drops it. Two such edges are held: a
+ *        third one ahead, three pulses inside one timer clock, is decided when it arrives.
+ *        ADSTART stays set at the end of a sequence or subgroup, RM0456
  *        33.4.16, and clears with ADSTP or ADDIS only. ADC1 tells the selected signal's source
- *        when its listening starts or stops. A selection no model produces, the reserved EXTSEL
+ *        when its listening starts or stops. The `timx_ocy` selections of RM0456 Table 307 and
+ *        RM0481 Table 282 take the timer's `timx_ccy`, its capture/compare event pulse, as the LL
+ *        driver names them "channel y event (capture compare)", inferred. The EXTI lines 11 and
+ *        15 have no source on these families. A selection no model produces, the reserved EXTSEL
  *        17 and 22 to 31 included, logs a warning once per selection when ADC1 starts listening
  *        to it, a model_error under strict_peripherals, and no conversion starts. A
  *        config_error or model_error the per-sequence checks raise at a trigger surfaces from
@@ -840,6 +886,7 @@ public:
   void               on_clock_change() override;
   void               transfer_completed(dma_controller const& by, std::uint32_t request) override;
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
+  [[nodiscard]] auto can_listen(std::string_view signal) const -> bool override;
   void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
 
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
@@ -903,6 +950,7 @@ private:
   void               require_factory_word(std::uint32_t channel) const;
   void               prepare();
   void               begin_sequence(std::uint64_t start_ps);
+  void               fire_edge(adc_edge& slot);
   void               begin_rank(std::uint64_t start_ps);
   void               schedule(std::uint64_t start_ps);
   void               schedule_sampling_end(std::uint64_t not_before_ps);
@@ -1342,7 +1390,7 @@ template <typename Traits> void adc_model<Traits>::on_bus_reset()
   if(was)
   {
     static_cast<void>(
-        interest_changed(ctx_.peers, trigger_name<typename Traits::trigger_enum>(*was)));
+        interest_changed(ctx_.peers, trigger_signal<typename Traits::trigger_enum>(*was)));
   }
   restore_reset_values();
   retune(was);
@@ -1358,6 +1406,8 @@ template <typename Traits> void adc_model<Traits>::restore_reset_values()
   state_.data.clear();
   state_.dma_stopped  = false;
   state_.filter_count = 0;
+  state_.edges        = {};
+  ++state_.edge_generation;
   request_.resolve();
   signal();
 }
@@ -1894,8 +1944,12 @@ template <typename Traits> auto adc_model<Traits>::listened() const -> std::opti
 template <typename Traits> auto adc_model<Traits>::listens(std::string_view signal) const -> bool
 {
   auto const selected = listened();
-  auto const named    = reflex::to_enum_value<typename Traits::trigger_enum>(signal);
-  return selected and named and std::to_underlying(*named) == *selected;
+  return selected and trigger_signals<typename Traits::trigger_enum>()[*selected & 31u] == signal;
+}
+
+template <typename Traits> auto adc_model<Traits>::can_listen(std::string_view signal) const -> bool
+{
+  return std::ranges::contains(trigger_signals<typename Traits::trigger_enum>(), signal);
 }
 
 template <typename Traits>
@@ -1904,11 +1958,52 @@ void adc_model<Traits>::triggered(std::string_view signal, trigger_edge edge, tr
   auto const polarity = get(regs_, trigger_);
   auto const detected = edge == trigger_edge::rising ? (polarity & exten_rising) != 0
                                                      : (polarity & exten_falling) != 0;
-  if(not detected or busy() or not listens(signal))
+  if(not detected or not listens(signal))
+  {
+    return;
+  }
+  auto const free = std::ranges::find(state_.edges, false, &adc_edge::pending);
+  if(at.ps > ctx_.clock.time().ps and free != state_.edges.end())
+  {
+    *free = {
+        .pending    = true,
+        .falling    = edge == trigger_edge::falling,
+        .reposted   = false,
+        .selection  = static_cast<std::uint8_t>(*listened()),
+        .generation = ++state_.edge_generation,
+        .ps         = at.ps};
+    ctx_.events.schedule_at(vtime{at.ps}, edge_due, free->generation, ctx_.clock);
+    return;
+  }
+  if(busy())
   {
     return;
   }
   begin_sequence(at.ps + trigger_latency_ps(at.ps));
+}
+
+template <typename Traits> void adc_model<Traits>::fire_edge(adc_edge& slot)
+{
+  auto const polarity  = get(regs_, trigger_);
+  auto const detected  = (polarity & (slot.falling ? exten_falling : exten_rising)) != 0;
+  auto const selection = listened();
+  if(not detected or selection != std::optional<std::uint32_t>{slot.selection})
+  {
+    slot.pending = false;
+    return;
+  }
+  if(busy())
+  {
+    if(not std::exchange(slot.reposted, true))
+    {
+      ctx_.events.schedule_at(vtime{slot.ps}, edge_due, slot.generation, ctx_.clock);
+      return;
+    }
+    slot.pending = false;
+    return;
+  }
+  slot.pending = false;
+  begin_sequence(slot.ps + trigger_latency_ps(slot.ps));
 }
 
 template <typename Traits>
@@ -1954,12 +2049,12 @@ auto adc_model<Traits>::on_write(
   if(external)
   {
     static_cast<void>(interest_changed(
-        ctx_.peers, trigger_name<typename Traits::trigger_enum>(trigger_select_.of(config))));
+        ctx_.peers, trigger_signal<typename Traits::trigger_enum>(trigger_select_.of(config))));
   }
   if(trigger_.of(next) != 0 and (not external or moved))
   {
     static_cast<void>(interest_changed(
-        ctx_.peers, trigger_name<typename Traits::trigger_enum>(trigger_select_.of(next))));
+        ctx_.peers, trigger_signal<typename Traits::trigger_enum>(trigger_select_.of(next))));
   }
   auto const was    = listened();
   auto const result = base::on_write(regs, offset, size, old, value, access);
@@ -1977,14 +2072,14 @@ template <typename Traits> void adc_model<Traits>::retune(std::optional<std::uin
   if(was)
   {
     static_cast<void>(
-        interest_changed(ctx_.peers, trigger_name<typename Traits::trigger_enum>(*was)));
+        interest_changed(ctx_.peers, trigger_signal<typename Traits::trigger_enum>(*was)));
   }
   if(not now)
   {
     return;
   }
   auto const signal = trigger_name<typename Traits::trigger_enum>(*now);
-  if(not interest_changed(ctx_.peers, signal))
+  if(not interest_changed(ctx_.peers, trigger_signal<typename Traits::trigger_enum>(*now)))
   {
     unmodelled(
         unproduced_logged_[*now], Traits::config,
@@ -2019,6 +2114,17 @@ void adc_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
     {
       update(regs_, ready_, 1);
       signal();
+    }
+    return;
+  }
+  if(kind == edge_due)
+  {
+    auto const found = std::ranges::find_if(state_.edges, [payload](adc_edge const& slot) {
+      return slot.pending and slot.generation == payload;
+    });
+    if(found != state_.edges.end())
+    {
+      fire_edge(*found);
     }
     return;
   }

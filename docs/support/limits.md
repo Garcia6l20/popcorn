@@ -94,6 +94,8 @@ Not modelled, logged once each:
 - Differential conversions, the `ADC_DIFSEL` bit of a converted channel: the channel converts
   single-ended.
 - Reserved trigger selections in `EXTSEL`.
+- The EXTI line 11 and 15 selections, `EXTSEL` 6 and 16: the STM32U5 and STM32H5 EXTI drives no
+  trigger signal, so they start nothing.
 - A reserved prescaler in `ADC12_CCR.PRESC` divides by 256.
 - ADC4 has no model.
 
@@ -144,13 +146,12 @@ On the STM32L1, RM0038 section 12:
   `DMA` is 1, at the end of a normal channel or at a circular reload, stops the requests and the
   ADC converts as with `DMA` 0, no overrun, until `DMA` is written 0, then 1, inferred from the
   RM0038 12.11.1 "avoids generating an overrun error".
-- Hardware triggers start conversions from the TRGO selections of `EXTSEL`, TIM9, TIM3, TIM2,
-  TIM4 and TIM6, and of `JEXTSEL`, TIM9, TIM2, TIM4 and TIM7. The compare event selections,
-  TIM9_CC2, TIM2_CC3, TIM2_CC2, TIM4_CC4, TIM3_CC1 and TIM3_CC3 for `EXTSEL`, TIM9_CC1, TIM2_CC1,
-  TIM3_CC4, TIM4_CC1 to TIM4_CC3 and TIM10_CC1 for `JEXTSEL`, and EXTI lines 11 and 15 have no
-  source model: selecting one is logged once, a model_error under strict_peripherals, and starts
-  nothing. tlatr is 3.5 ADC clock cycles, the
-  datasheet maximum. Trigger detection stays on across an `EXTSEL` change, RM0038 12.6 blanks it
+- Hardware triggers start conversions from every selection of `EXTSEL` and `JEXTSEL`: the TRGO
+  selections from the timer's TRGO, the TIMx_CCy selections from the timer's capture/compare
+  event, and EXTI lines 11 and 15 from the line input, a pin edge counting at its own time,
+  inferred. A selection whose source has no model on the part is logged once, a model_error
+  under strict_peripherals, and starts nothing. tlatr is 3.5 ADC clock cycles, the datasheet
+  maximum. Trigger detection stays on across an `EXTSEL` change, RM0038 12.6 blanks it
   for 2 PCLK cycles. A model_error of a selection surfaces from the `ADC_CR2` write or the `ADONS`
   event that starts the listening.
 - `DELS` 010 to 111 add 1 PCLK2 cycle and 3 ADC clock cycles of synchronisation to the delay, the
@@ -253,6 +254,10 @@ Source: [exti.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
   description gives `PVD_IRQn`, `RTC_Alarm_IRQn`, `USB_FS_WKUP_IRQn`, `RTC_WKUP_IRQn` and
   `COMP_ACQ_IRQn` to PWR, RTC, USB and COMP. Lines 16 to 23 take their edges from `EXTI_SWIER`
   only, the PVD, the RTC, the USB and the comparators drive none.
+- STM32L1: lines 0 to 15 drive the trigger signals `exti0` to `exti15` the ADC selects, the input
+  of the line before its edge detection: an edge at each change of the selected pin, at the pin
+  edge's own time, and at a `SYSCFG_EXTICRn` write that moves the line to a pin of another level,
+  whatever `EXTI_IMR`, `RTSR` and `FTSR` hold, inferred.
 - STM32L1, inferred rules: an edge or a SWIER write sets PR only while the `EXTI_IMR` bit is set,
   the NVIC line follows PR whatever IMR holds, a SWIER write of 0 clears the SWIER bit, a write
   of 1 to a PR bit clears the SWIER bit of the line whether PR was set or not, a
@@ -1144,6 +1149,15 @@ Differs from RM0456:
   A count written above ARR in center-aligned mode does the same.
 - UIFREMAP puts UIFCPY in bit 31 only where the description names a UIFCPY field, not on the
   32-bit TIM2 to TIM5.
+
+Capture/compare event outputs, the ADC triggers:
+
+- Each channel x drives `<instance>_ccx`, a pulse one timer clock wide at each CCxIF set by a
+  match, a capture or `EGR.CCxG`, at the event's exact instant, the width and the capture and
+  CCxG events inferred. RM0038 Tables 61 and 62 name it TIMx_CCx.
+- The STM32U5 and STM32H5 ADC tables select `tim_ocx`, the channel output in the RM0456 TIM
+  chapter. The ADC takes the CC event for it, as ST's LL driver describes the selection,
+  inferred.
 
 OC1 as an ITR source, TIM13, TIM14, TIM16 and TIM17 OC1 by RM0481, TIM10 and TIM11 OC1 by RM0038:
 

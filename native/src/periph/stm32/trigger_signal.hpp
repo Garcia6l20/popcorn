@@ -89,6 +89,18 @@ public:
   virtual void triggered(std::string_view signal, trigger_edge edge, trigger_time at) = 0;
 
   /**
+   * @brief Whether the sink can react to @p signal under any register state. Fixed for the sink's
+   *        life: a trigger_output keeps only the sinks that can, so it asks no other sink whether
+   *        it listens().
+   * @param signal Signal name.
+   */
+  [[nodiscard]] virtual auto can_listen(std::string_view signal) const -> bool
+  {
+    static_cast<void>(signal);
+    return true;
+  }
+
+  /**
    * @brief Whether the sink takes @p signal from a GPIO pin in alternate function mode, such as a
    *        timer its own `tim3_ch1`. Fixed for the sink's life, unlike listens(): a GPIO port
    *        forwards a pin signal only to the sinks that take it, through triggered().
@@ -147,6 +159,35 @@ public:
 protected:
   /** @brief Destroys the interface, only through its model. */
   ~trigger_source() = default;
+};
+
+/**
+ * @brief GPIO port as a model that reacts to its pin edges sees it, found by `dynamic_cast` over
+ *        the machine's peers: the time of the pin edge the port is applying.
+ */
+class pin_edge_clock
+{
+public:
+  /** @brief Creates the interface. */
+  pin_edge_clock() = default;
+  /** @brief Not copyable. */
+  pin_edge_clock(pin_edge_clock const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(pin_edge_clock const&) -> pin_edge_clock& = delete;
+  /** @brief Not movable. */
+  pin_edge_clock(pin_edge_clock&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(pin_edge_clock&&) -> pin_edge_clock& = delete;
+
+  /**
+   * @brief Time of the pin edge the port is applying: the scheduled time of a board edge, which
+   *        can lie before now, or now for any other change.
+   */
+  [[nodiscard]] virtual auto edge_ps() const -> std::uint64_t = 0;
+
+protected:
+  /** @brief Destroys the interface, only through its model. */
+  ~pin_edge_clock() = default;
 };
 
 /**
@@ -214,7 +255,8 @@ private:
       resolved_ = true;
       for(auto* const peer : peers_->all())
       {
-        if(auto* const sink = dynamic_cast<trigger_sink*>(peer))
+        if(auto* const sink = dynamic_cast<trigger_sink*>(peer);
+           sink != nullptr and sink->can_listen(signal_))
         {
           sinks_.push_back(sink);
         }
@@ -231,7 +273,8 @@ private:
 
 /**
  * @brief Source model of @p signal: the peer named by the signal's prefix up to its first
- *        underscore, in upper case, `TIM15` for `tim15_trgo`.
+ *        underscore, in upper case, `TIM15` for `tim15_trgo`. A signal with no underscore drops
+ *        its trailing digits, `EXTI` for `exti11`.
  * @param peers Models of the machine.
  * @param signal Signal name.
  * @return The source, or null when that peer is absent, is not a trigger_source, or does not
@@ -240,7 +283,14 @@ private:
 [[nodiscard]] inline auto trigger_source_of(peer_directory const& peers, std::string_view signal)
     -> trigger_source*
 {
-  std::string name{signal.substr(0, signal.find('_'))};
+  auto const cut = signal.find('_');
+  auto       end = cut;
+  if(cut == std::string_view::npos)
+  {
+    auto const last = signal.find_last_not_of("0123456789");
+    end             = last == std::string_view::npos ? 0 : last + 1;
+  }
+  std::string name{signal.substr(0, end)};
   std::ranges::transform(
       name, name.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
   auto* const source = dynamic_cast<trigger_source*>(peers.find(name));

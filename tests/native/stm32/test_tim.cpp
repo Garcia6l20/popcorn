@@ -1,6 +1,7 @@
 #include "dma.hpp"
 #include "factories.hpp"
 #include "stm32_fixture.hpp"
+#include "trigger_probe.hpp"
 #include "trigger_signal.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -850,66 +851,7 @@ TEST_CASE("selecting DMA burst mode logs once")
 
 namespace
 {
-class trigger_probe final : public periph::model, public stm32::trigger_sink
-{
-public:
-  explicit trigger_probe(periph::model_context& ctx) : context{ctx}
-  {}
-
-  periph::model_context&           context;
-  std::string                      watched{"tim15_trgo"};
-  bool                             listening{};
-  std::vector<std::uint64_t>       pulses;
-  std::vector<std::uint64_t>       falls;
-  std::vector<stm32::trigger_time> rises;
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
-  [[nodiscard]] auto listens(std::string_view signal) const -> bool override
-  {
-    return listening and signal == watched;
-  }
-  void triggered(std::string_view, stm32::trigger_edge edge, stm32::trigger_time at) override
-  {
-    (edge == stm32::trigger_edge::rising ? pulses : falls).push_back(at.ps);
-    if(edge == stm32::trigger_edge::rising)
-    {
-      rises.push_back(at);
-    }
-  }
-
-  void listen(bool on)
-  {
-    static_cast<void>(stm32::interest_changed(context.peers, watched));
-    listening = on;
-    CHECK(stm32::interest_changed(context.peers, watched));
-  }
-};
+using popcorn::testing::trigger_probe;
 
 auto with_probe() -> core::machine_options
 {
@@ -1874,6 +1816,100 @@ TEST_CASE("a TIM2 update and a CC1 match at 48 MHz HSE give TRGO edges at their 
     CHECK(probe->rises.front().lag == static_cast<std::uint64_t>(wide{ps} * hse_u575::hz - exact));
     CHECK(probe->rises.front().lag != 0);
   }
+}
+
+TEST_CASE(
+    "TIM2 CC1 and CC4 matches at 48 MHz HSE pulse tim2_cc1 and tim2_cc4 at their exact instant")
+{
+  for(auto const& [signal, ccr] : {
+          std::pair{std::string_view{"tim2_cc1"}, std::string_view{"CCR1"}},
+          std::pair{std::string_view{"tim2_cc4"}, std::string_view{"CCR4"}},
+  })
+  {
+    CAPTURE(signal);
+    hse_u575    t{true};
+    auto* const probe = t.f.model_of<trigger_probe>("DAC1");
+    REQUIRE(probe != nullptr);
+    probe->watched = signal;
+    probe->listen(true);
+    t.base("TIM2", 99);
+    t.b.write("TIM2", ccr, 37);
+    t.b.write("TIM2", "CR1", 1);
+    t.from = t.now();
+    t.at_tick(350);
+    REQUIRE(probe->rises.size() == 4);
+    CHECK(probe->falls.size() == 4);
+    for(std::uint64_t k = 0; k < 4; ++k)
+    {
+      CAPTURE(k);
+      auto const exact = wide{t.from} * hse_u575::hz + wide{37 + 100 * k} * 1'000'000'000'000;
+      auto const ps    = static_cast<std::uint64_t>((exact + hse_u575::hz - 1) / hse_u575::hz);
+      CHECK(probe->rises[k].ps == ps);
+      CHECK(probe->rises[k].hz == hse_u575::hz);
+      CHECK(probe->rises[k].lag == static_cast<std::uint64_t>(wide{ps} * hse_u575::hz - exact));
+    }
+  }
+}
+
+TEST_CASE(
+    "a TIM2 match with CC1IF set is scheduled only while a sink listens to tim2_cc1, else "
+    "the wrap alone, 48 MHz")
+{
+  for(bool const listening : {false, true})
+  {
+    CAPTURE(listening);
+    hse_u575    t{true};
+    auto* const probe = t.f.model_of<trigger_probe>("DAC1");
+    REQUIRE(probe != nullptr);
+    probe->watched = "tim2_cc1";
+    t.base("TIM2", 99);
+    t.b.write("TIM2", "CCR1", 30);
+    t.b.write("TIM2", "CR1", 1);
+    t.from = t.now();
+    t.at_tick(105);
+    REQUIRE(t.b.bits("TIM2", "SR", "CC1IF") == 1);
+    probe->listen(listening);
+    t.b.write("TIM2", "SR", ~1u);
+    auto const& units = t.f.target->description().peripherals;
+    auto const  owner = static_cast<std::uint32_t>(
+        std::ranges::find(units, std::string_view{"TIM2"}, &popcorn::peripheral_desc::name)
+        - units.begin());
+    std::vector<std::uint64_t> due;
+    for(auto const& event : t.f.target->snapshot().data().events.pending)
+    {
+      if(event.id.owner == owner and event.due_ps >= t.now())
+      {
+        due.push_back(event.due_ps);
+      }
+    }
+    auto const ticks = listening ? 130u : 200u;
+    auto const exact = wide{t.from} * hse_u575::hz + wide{ticks} * 1'000'000'000'000;
+    CHECK(
+        due
+        == std::vector<std::uint64_t>{
+            static_cast<std::uint64_t>((exact + hse_u575::hz - 1) / hse_u575::hz)});
+  }
+}
+
+TEST_CASE("TIM2 in center-aligned mode 1 pulses tim2_cc1 only at the match counting down, 48 MHz")
+{
+  hse_u575    t{true};
+  auto* const probe = t.f.model_of<trigger_probe>("DAC1");
+  REQUIRE(probe != nullptr);
+  probe->watched = "tim2_cc1";
+  probe->listen(true);
+  t.base("TIM2", 100);
+  t.b.write("TIM2", "CCR1", 30);
+  t.b.write("TIM2", "CR1", (1u << 5) | 1u);
+  t.from = t.now();
+  t.at_tick(400);
+  std::vector<std::uint64_t> expected;
+  for(std::uint64_t const ticks : {170u, 370u})
+  {
+    auto const exact = wide{t.from} * hse_u575::hz + wide{ticks} * 1'000'000'000'000;
+    expected.push_back(static_cast<std::uint64_t>((exact + hse_u575::hz - 1) / hse_u575::hz));
+  }
+  CHECK(probe->pulses == expected);
 }
 
 TEST_CASE(

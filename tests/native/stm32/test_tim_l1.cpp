@@ -1,5 +1,7 @@
 #include "factories.hpp"
 #include "stm32_fixture.hpp"
+#include "trigger_probe.hpp"
+#include "trigger_signal.hpp"
 #include "variants.hpp"
 
 #include <popcorn/core/description.hpp>
@@ -7,6 +9,7 @@
 #include <popcorn/core/intercept.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
@@ -113,16 +116,23 @@ struct rig
   std::uint64_t                  start{};
 
   explicit rig(
-      part_description const& desc   = l152re(),
-      std::string_view        image  = firmware,
-      bool                    strict = false)
+      part_description const& desc    = l152re(),
+      std::string_view        image   = firmware,
+      bool                    strict  = false,
+      bool                    trigger = false)
       : part{desc}, elf{image}
   {
     auto options               = popcorn::testing::stm32_options();
     options.models             = stm32::factories({}, desc);
     options.strict_peripherals = strict;
     options.models.insert_or_assign(
-        "DAC", [](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
+        "DAC",
+        [trigger](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&)
+            -> std::shared_ptr<popcorn::periph::model> {
+          if(trigger)
+          {
+            return std::make_shared<popcorn::testing::trigger_probe>(ctx);
+          }
           return std::make_shared<bus_probe>(ctx);
         });
     f = std::make_unique<stm32_fixture>(desc, image, std::move(options));
@@ -130,6 +140,14 @@ struct rig
     sink = f->target->add_log_sink(
         [this](core::log_record const& record) { logged.push_back(record); });
     start = now();
+  }
+
+  [[nodiscard]] auto probe(std::string_view signal) const -> popcorn::testing::trigger_probe&
+  {
+    auto* const found = f->model_of<popcorn::testing::trigger_probe>("DAC");
+    REQUIRE(found != nullptr);
+    found->watched = signal;
+    return *found;
   }
 
   [[nodiscard]] auto has(std::string_view unit) const -> bool
@@ -1617,5 +1635,153 @@ TEST_CASE("an L1 TIM10 or TIM11 description with DIR, or a Cat.3 one without TI1
             [](popcorn::field_desc const& bits) { return bits.name == "TI1_RMP_RI"; })
         == 1);
     constructs_throw(desc);
+  }
+}
+
+namespace
+{
+using wide = unsigned __int128;
+
+constexpr std::uint64_t msi_clock_ps = (ps_per_second + msi_hz - 1) / msi_hz;
+
+auto exact_at(std::uint64_t from, std::uint64_t ticks) -> wide
+{
+  return wide{from} * msi_hz + wide{ticks} * ps_per_second;
+}
+
+auto exact_ps(std::uint64_t from, std::uint64_t ticks) -> std::uint64_t
+{
+  return static_cast<std::uint64_t>((exact_at(from, ticks) + msi_hz - 1) / msi_hz);
+}
+}
+
+TEST_CASE(
+    "RM0038 Table 61 inferred: TIM2 CC3 pulses tim2_cc3 one timer clock wide at each match's "
+    "exact instant")
+{
+  rig   r{l152re(), firmware, false, true};
+  auto& probe = r.probe("tim2_cc3");
+  probe.listen(true);
+  r.base("TIM2", 99);
+  r.write("TIM2", "CCR3", 30);
+  auto const from = r.now();
+  r.enable("TIM2");
+  r.run_until(from + ticks_ps(450));
+  REQUIRE(probe.rises.size() == 5);
+  REQUIRE(probe.falls.size() == 5);
+  std::size_t lagged = 0;
+  for(std::uint64_t k = 0; k < 5; ++k)
+  {
+    CAPTURE(k);
+    auto const ps = exact_ps(from, 30 + 100 * k);
+    CHECK(probe.rises[k].ps == ps);
+    CHECK(probe.rises[k].hz == msi_hz);
+    CHECK(
+        probe.rises[k].lag
+        == static_cast<std::uint64_t>(wide{ps} * msi_hz - exact_at(from, 30 + 100 * k)));
+    CHECK(probe.falls[k] == ps + msi_clock_ps);
+    lagged += probe.rises[k].lag != 0 ? 1u : 0u;
+  }
+  CHECK(lagged > 0);
+  CHECK(r.get("TIM2", "SR", "CC3IF") == 1);
+}
+
+TEST_CASE(
+    "a TIM2 CNT read five periods after a sink listens unscheduled pulses tim2_cc1 at each match")
+{
+  rig   r{l152re(), firmware, false, true};
+  auto& probe = r.probe("tim2_cc1");
+  r.base("TIM2", 99);
+  r.write("TIM2", "CCR1", 30);
+  auto const from = r.now();
+  r.enable("TIM2");
+  r.run_until(from + ticks_ps(250));
+  static_cast<void>(r.read("TIM2", "CNT"));
+  probe.listening = true;
+  r.run_until(from + ticks_ps(750));
+  CHECK(probe.pulses.empty());
+  static_cast<void>(r.read("TIM2", "CNT"));
+  std::vector<std::uint64_t> expected;
+  for(std::uint64_t k = 3; k <= 7; ++k)
+  {
+    expected.push_back(exact_ps(from, 30 + 100 * k));
+  }
+  CHECK(probe.pulses == expected);
+}
+
+TEST_CASE(
+    "TIM2 CC2G pulses tim2_cc2 at the EGR write, on an output and on an input channel, inferred")
+{
+  rig   r{l152re(), firmware, false, true};
+  auto& probe = r.probe("tim2_cc2");
+  probe.listen(true);
+  r.clock("TIM2");
+  auto const first = r.now();
+  r.write("TIM2", "EGR", 1u << 2);
+  r.run_until(first + 10 * us);
+  r.write("TIM2", "CCMR1_Input", 1u << 8);
+  auto const second = r.now();
+  r.write("TIM2", "EGR", 1u << 2);
+  CHECK(probe.pulses == std::vector<std::uint64_t>{first, second});
+  CHECK(r.get("TIM2", "SR", "CC2IF") == 1);
+  CHECK(r.get("TIM2", "SR", "CC2OF") == 1);
+}
+
+TEST_CASE(
+    "a timer produces tim<n>_ccx for each of its channels, TIM10 cc1 only, TIM6 none, and a CC "
+    "event has no level")
+{
+  rig         r{l152re(), firmware, false, true};
+  auto const& peers = r.probe("tim2_cc1").context.peers;
+  for(auto const* const signal :
+      {"tim2_cc1", "tim2_cc4", "tim3_cc3", "tim4_cc2", "tim9_cc2", "tim10_cc1"})
+  {
+    CAPTURE(signal);
+    CHECK(stm32::trigger_source_of(peers, signal) != nullptr);
+  }
+  for(auto const* const signal : {"tim9_cc3", "tim10_cc2", "tim6_cc1", "tim2_cc5"})
+  {
+    CAPTURE(signal);
+    CHECK(stm32::trigger_source_of(peers, signal) == nullptr);
+  }
+  r.clock("TIM2");
+  r.write("TIM2", "CR2", 1u << 4);
+  r.enable("TIM2");
+  auto* const source = stm32::trigger_source_of(peers, "tim2_cc1");
+  REQUIRE(source != nullptr);
+  CHECK(source->level("tim2_trgo") == std::optional<bool>{true});
+  CHECK_FALSE(source->level("tim2_cc1").has_value());
+}
+
+TEST_CASE(
+    "a TIM2 match with CC1IF set is scheduled only while a sink listens to tim2_cc1, "
+    "else the wrap alone")
+{
+  for(bool const listening : {false, true})
+  {
+    CAPTURE(listening);
+    rig   r{l152re(), firmware, false, true};
+    auto& probe = r.probe("tim2_cc1");
+    r.base("TIM2", 99);
+    r.write("TIM2", "CCR1", 30);
+    auto const from = r.now();
+    r.enable("TIM2");
+    r.run_until(from + ticks_ps(105));
+    REQUIRE(r.get("TIM2", "SR", "CC1IF") == 1);
+    probe.listen(listening);
+    r.write("TIM2", "SR", ~1u);
+    auto const& units = r.f->target->description().peripherals;
+    auto const  owner = static_cast<std::uint32_t>(
+        std::ranges::find(units, std::string_view{"TIM2"}, &popcorn::peripheral_desc::name)
+        - units.begin());
+    std::vector<std::uint64_t> due;
+    for(auto const& event : r.f->target->snapshot().data().events.pending)
+    {
+      if(event.id.owner == owner and event.due_ps >= r.now())
+      {
+        due.push_back(event.due_ps);
+      }
+    }
+    CHECK(due == std::vector<std::uint64_t>{exact_ps(from, listening ? 130 : 200)});
   }
 }

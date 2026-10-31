@@ -173,21 +173,22 @@ struct tim_state
 
 struct channel
 {
-  reg_ref                   ccr;
-  std::optional<field_ref>  input_select;
-  std::optional<field_ref>  polarity;
-  std::optional<field_ref>  polarity_n;
-  std::optional<field_ref>  capture_enable;
-  std::optional<field_ref>  input_filter;
-  std::optional<field_ref>  capture_prescaler;
-  field_ref                 select;
-  std::optional<field_ref>  preload;
-  field_ref                 flag;
-  std::optional<field_ref>  overcapture;
-  field_ref                 interrupt;
-  std::optional<field_ref>  dma;
-  field_ref                 generate;
-  std::optional<dma_signal> signal;
+  reg_ref                       ccr;
+  std::optional<field_ref>      input_select;
+  std::optional<field_ref>      polarity;
+  std::optional<field_ref>      polarity_n;
+  std::optional<field_ref>      capture_enable;
+  std::optional<field_ref>      input_filter;
+  std::optional<field_ref>      capture_prescaler;
+  field_ref                     select;
+  std::optional<field_ref>      preload;
+  field_ref                     flag;
+  std::optional<field_ref>      overcapture;
+  field_ref                     interrupt;
+  std::optional<field_ref>      dma;
+  field_ref                     generate;
+  std::optional<dma_signal>     signal;
+  std::optional<trigger_output> event;
 };
 
 struct trigger_route
@@ -243,6 +244,13 @@ auto lower(std::string_view name) -> std::string
  *        010 at each update event, a UG one included whatever URS, 011 at each CC1IF set by a match
  *        or a capture. Each edge carries the time of its event. While a sink listens under MMS 010
  *        or 011, every update or CC1 match is scheduled at its own time instead of being skipped.
+ *        Each channel x drives `<instance>_ccx`, its capture/compare event: a positive pulse one
+ *        timer kernel clock wide at each CCxIF set by a match, a capture or CCxG, whatever CCxIF
+ *        held, carrying the exact instant of its event as TRGO does, the width and the capture and
+ *        CCxG events inferred. While a sink listens to it, every match of the channel is
+ *        scheduled at its own time. RM0038 Tables 61 and 62 name it TIMx_CCx. The STM32U5 and
+ *        STM32H5 ADC tables select `tim_ocx`, the channel output in the RM0456 TIM chapter. The
+ *        ADC takes the CC event for it, as ST's LL driver describes the selection, inferred.
  *        MMS 100 and above, MMS2 and TRGO2 log a warning once and pulse nothing, and under
  *        strict_peripherals the CR2 write that selects one raises model_error. The slave mode
  *        controller, RM0456 55.4 "Slave mode" and TIMx_SMCR, listens as a trigger_sink to the
@@ -408,6 +416,7 @@ public:
   [[nodiscard]] auto produces(std::string_view signal) const -> bool override;
   [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
+  [[nodiscard]] auto can_listen(std::string_view signal) const -> bool override;
   [[nodiscard]] auto takes_pin(std::string_view signal) const -> bool override;
   void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
   void acknowledged(dma_controller const& by, std::uint32_t request) override;
@@ -467,6 +476,7 @@ private:
   [[nodiscard]] auto repetition_reload() const -> std::uint32_t;
   [[nodiscard]] auto wants_update() -> bool;
   [[nodiscard]] auto wants_match(std::size_t ch) -> bool;
+  [[nodiscard]] auto events_wanted() -> bool;
   [[nodiscard]] auto master_mode() const -> std::uint32_t;
   [[nodiscard]] auto master_mode_of(std::uint32_t cr2) const -> std::uint32_t;
   [[nodiscard]] auto trgo_wanted(std::uint32_t mode) -> bool;
@@ -510,7 +520,7 @@ private:
   void               warn_unrouted(std::uint32_t smcr);
   void               skip_groups(std::uint64_t groups);
   void               update_event(bool software, trigger_time at);
-  void               pulse_trgo(trigger_time at);
+  void               pulse_output(trigger_output& output, trigger_time at);
   [[nodiscard]] auto oc1_mode_of(std::uint32_t ccmr) const -> std::uint32_t;
   [[nodiscard]] auto oc1_level(std::uint32_t ccmr) const -> std::optional<bool>;
   [[nodiscard]] auto oc1_high() const -> bool;
@@ -951,6 +961,7 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
       }
     }
     input_signals_.push_back(std::format("{}_ch{}", instance, n));
+    c.event.emplace(ctx.peers, std::format("{}_cc{}", instance, n));
     if(c.dma)
     {
       c.signal.emplace(ctx.peers, std::format("{}_cc{}_dma", instance, n));
@@ -1481,7 +1492,7 @@ auto tim::wants_update() -> bool
 
 auto tim::wants_match(std::size_t ch) -> bool
 {
-  auto const& c = channels_[ch];
+  auto& c = channels_[ch];
   if(not output(ch) or compare_value(ch) > state_.reload)
   {
     return false;
@@ -1489,7 +1500,20 @@ auto tim::wants_match(std::size_t ch) -> bool
   auto const dma = c.dma and get(regs_, *c.dma) != 0 and state_.compare_request[ch] == 0;
   return get(regs_, c.flag) == 0
       or dma
+      or c.event->wanted()
       or (ch == 0 and (trgo_wanted(master_compare_pulse) or oc1_events()));
+}
+
+auto tim::events_wanted() -> bool
+{
+  for(std::size_t ch = 0; ch < channels_.size(); ++ch)
+  {
+    if(output(ch) and channels_[ch].event->wanted())
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 auto tim::master_mode() const -> std::uint32_t
@@ -1512,10 +1536,14 @@ auto tim::output_time(trigger_time at) const -> trigger_time
   return state_.held != 0 ? trigger_time{ctx_.clock.time().ps} : at;
 }
 
-void tim::pulse_trgo(trigger_time at)
+void tim::pulse_output(trigger_output& output, trigger_time at)
 {
+  if(not output.wanted())
+  {
+    return;
+  }
   auto const hz = ctx_.clock.hz(domain_);
-  trgo_->pulse(output_time(at), hz == 0 ? 0 : (ps_per_second + hz - 1) / hz);
+  output.pulse(output_time(at), hz == 0 ? 0 : (ps_per_second + hz - 1) / hz);
 }
 
 void tim::enable_edge(trigger_edge edge, trigger_time at)
@@ -1811,7 +1839,10 @@ void tim::skip_groups(std::uint64_t groups)
       {
         groups = std::min<std::uint64_t>(groups, state_.repetition / (center() ? 2 : 1));
       }
-      if(trgo_wanted(master_update) or trgo_wanted(master_compare_pulse) or oc1_events())
+      if(trgo_wanted(master_update)
+         or trgo_wanted(master_compare_pulse)
+         or oc1_events()
+         or events_wanted())
       {
         groups = 0;
       }
@@ -1855,7 +1886,7 @@ void tim::reinitialise(trigger_time at)
 {
   if(trgo_ and master_mode() == master_reset)
   {
-    pulse_trgo(at);
+    pulse_output(*trgo_, at);
   }
   if(get(regs_, no_update_) == 0)
   {
@@ -1940,7 +1971,7 @@ void tim::update_event(bool software, trigger_time at)
   }
   if(trgo_ and master_mode() == master_update)
   {
-    pulse_trgo(at);
+    pulse_output(*trgo_, at);
   }
   if(get(regs_, one_pulse_) != 0 and get(regs_, enable_) != 0)
   {
@@ -1965,8 +1996,9 @@ void tim::match(std::size_t ch, trigger_time at)
   }
   if(ch == 0 and trgo_ and master_mode() == master_compare_pulse)
   {
-    pulse_trgo(at);
+    pulse_output(*trgo_, at);
   }
+  pulse_output(*c.event, at);
 }
 
 void tim::capture(std::size_t ch, std::uint64_t at)
@@ -3053,7 +3085,10 @@ void tim::interest_changed()
 
 auto tim::produces(std::string_view signal) const -> bool
 {
-  return (trgo_ and trgo_->signal() == signal) or (oc1_ and oc1_->signal() == signal);
+  return (trgo_ and trgo_->signal() == signal)
+      or (oc1_ and oc1_->signal() == signal)
+      or std::ranges::any_of(
+             channels_, [&](channel const& c) { return c.event->signal() == signal; });
 }
 
 auto tim::level(std::string_view signal) const -> std::optional<bool>
@@ -3062,7 +3097,7 @@ auto tim::level(std::string_view signal) const -> std::optional<bool>
   {
     return oc1_high();
   }
-  if(not produces(signal) or master_mode() != master_enable)
+  if(not trgo_ or trgo_->signal() != signal or master_mode() != master_enable)
   {
     return std::nullopt;
   }
@@ -3072,6 +3107,11 @@ auto tim::level(std::string_view signal) const -> std::optional<bool>
 auto tim::takes_pin(std::string_view signal) const -> bool
 {
   return input_signal(signal);
+}
+
+auto tim::can_listen(std::string_view signal) const -> bool
+{
+  return signal.ends_with("_trgo");
 }
 
 auto tim::listens(std::string_view signal) const -> bool

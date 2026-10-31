@@ -132,6 +132,7 @@ struct listener_table
  */
 class gpio final : public dispatch_model<gpio, gpio_state>,
                    public gpio_port,
+                   public pin_edge_clock,
                    public trustzone_aware,
                    public bus_reset_listener
 {
@@ -151,6 +152,7 @@ public:
   [[nodiscard]] auto on_change(std::move_only_function<void(std::uint8_t pin, bool level)> listener)
       -> subscription override;
   [[nodiscard]] auto signal_level(std::string_view signal) const -> std::optional<bool> override;
+  [[nodiscard]] auto edge_ps() const -> std::uint64_t override;
   void               load(std::span<std::byte const> in) override;
   [[nodiscard]] auto secure_function() const -> bool override;
   [[nodiscard]] auto secure_word() const -> std::uint32_t override;
@@ -601,7 +603,7 @@ void gpio::forward()
   {
     return;
   }
-  auto const at = edge_at_.value_or(ctx_.clock.time().ps);
+  auto const at = edge_ps();
   for(std::size_t signal = 0; signal < signals_.size(); ++signal)
   {
     if(before[signal] == after[signal])
@@ -617,6 +619,11 @@ void gpio::forward()
       }
     }
   }
+}
+
+auto gpio::edge_ps() const -> std::uint64_t
+{
+  return edge_at_.value_or(ctx_.clock.time().ps);
 }
 
 auto gpio::signal_level(std::string_view signal) const -> std::optional<bool>

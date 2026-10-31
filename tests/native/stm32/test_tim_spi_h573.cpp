@@ -1,4 +1,5 @@
 #include "stm32_fixture.hpp"
+#include "trigger_probe.hpp"
 #include "trigger_signal.hpp"
 
 #include <popcorn/core/description.hpp>
@@ -158,11 +159,18 @@ struct rig
   std::vector<core::log_record>  logged;
   core::hook_handle              sink;
 
-  explicit rig(stm32::board const& board = {}, bool strict = false)
+  explicit rig(stm32::board const& board = {}, bool strict = false, bool trigger = false)
   {
     auto options               = popcorn::testing::stm32_options();
     options.models             = stm32::factories(board, h573());
     options.strict_peripherals = strict;
+    if(trigger)
+    {
+      options.models.insert_or_assign(
+          "RNG", [](periph::model_context& ctx, popcorn::peripheral_desc const&) {
+            return std::make_shared<popcorn::testing::trigger_probe>(ctx);
+          });
+    }
     if(strict)
     {
       options.models.insert_or_assign(
@@ -292,7 +300,8 @@ struct timers : rig
 {
   std::uint64_t start{};
 
-  explicit timers(stm32::board const& board = {}, bool strict = false) : rig{board, strict}
+  explicit timers(stm32::board const& board = {}, bool strict = false, bool trigger = false)
+      : rig{board, strict, trigger}
   {
     for(auto const* const bit :
         {"TIM2EN", "TIM3EN", "TIM4EN", "TIM5EN", "TIM12EN", "TIM13EN", "TIM14EN"})
@@ -721,7 +730,7 @@ auto hse_board() -> stm32::board
 
 struct hse_timers : timers
 {
-  hse_timers() : timers{hse_board()}
+  explicit hse_timers(bool trigger = false) : timers{hse_board(), false, trigger}
   {
     set("RCC", "RCC_CR", "HSEON", 1);
     run_until(now() + 200'000'000);
@@ -736,6 +745,43 @@ struct hse_timers : timers
     run_until(from + (ticks * 1'000'000'000'000 + hse_hz - 1) / hse_hz);
   }
 };
+}
+
+TEST_CASE(
+    "RM0481 Table 282: TIM1 CC2 and TIM13 CC1 pulse tim1_cc2 and tim13_cc1 at each match, 48 MHz")
+{
+  for(auto const& [unit, signal, ccr] : {
+          std::tuple{
+                     std::string_view{"TIM1"},  std::string_view{"tim1_cc2"},  std::string_view{"CCR2"}},
+          std::tuple{
+                     std::string_view{"TIM13"}, std::string_view{"tim13_cc1"}, std::string_view{"CCR1"}},
+  })
+  {
+    CAPTURE(signal);
+    hse_timers  t{true};
+    auto* const probe = t.f->model_of<popcorn::testing::trigger_probe>("RNG");
+    REQUIRE(probe != nullptr);
+    probe->watched = signal;
+    probe->listen(true);
+    t.base(unit, 99);
+    t.write(unit, ccr, 41);
+    t.enable(unit);
+    auto const from = t.now();
+    t.at_hse_tick(from, 350);
+    REQUIRE(probe->rises.size() == 4);
+    for(std::uint64_t k = 0; k < 4; ++k)
+    {
+      CAPTURE(k);
+      auto const exact = static_cast<unsigned __int128>(from) * hse_hz
+                       + static_cast<unsigned __int128>(41 + 100 * k) * 1'000'000'000'000;
+      auto const ps    = static_cast<std::uint64_t>((exact + hse_hz - 1) / hse_hz);
+      CHECK(probe->rises[k].ps == ps);
+      CHECK(probe->rises[k].hz == hse_hz);
+      CHECK(
+          probe->rises[k].lag
+          == static_cast<std::uint64_t>(static_cast<unsigned __int128>(ps) * hse_hz - exact));
+    }
+  }
 }
 
 TEST_CASE("TIM13 OC1 with CC1P 1 in PWM mode 1 gates TIM3 on ITR7, 75 ticks of every 100 at 48 MHz")

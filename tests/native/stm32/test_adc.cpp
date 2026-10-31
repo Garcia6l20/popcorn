@@ -1166,23 +1166,35 @@ struct step04_adc_state
   bool                          dma_stopped{};
 };
 
+struct step06_adc_edge
+{
+  bool          pending{};
+  bool          falling{};
+  bool          reposted{};
+  std::uint8_t  selection{};
+  std::uint32_t generation{};
+  std::uint64_t ps{};
+};
+
 struct step06_adc_state
 {
-  std::array<std::uint32_t, 20> input_uv{};
-  std::uint32_t                 generation{};
-  std::uint32_t                 ready_generation{};
-  std::uint64_t                 start_ps{};
-  std::uint64_t                 clock_hz{};
-  std::uint32_t                 divider{};
-  std::uint32_t                 held{};
-  std::uint32_t                 sum{};
-  bool                          converting{};
-  bool                          waiting_clock{};
-  std::uint8_t                  rank{};
-  std::uint8_t                  subgroup_left{};
-  std::vector<std::uint32_t>    data;
-  bool                          dma_stopped{};
-  std::uint8_t                  filter_count{};
+  std::array<std::uint32_t, 20>  input_uv{};
+  std::uint32_t                  generation{};
+  std::uint32_t                  ready_generation{};
+  std::uint64_t                  start_ps{};
+  std::uint64_t                  clock_hz{};
+  std::uint32_t                  divider{};
+  std::uint32_t                  held{};
+  std::uint32_t                  sum{};
+  bool                           converting{};
+  bool                           waiting_clock{};
+  std::uint8_t                   rank{};
+  std::uint8_t                   subgroup_left{};
+  std::vector<std::uint32_t>     data;
+  bool                           dma_stopped{};
+  std::uint8_t                   filter_count{};
+  std::array<step06_adc_edge, 2> edges{};
+  std::uint32_t                  edge_generation{};
 };
 
 auto live_state(adc_fixture const& f) -> step06_adc_state
@@ -1623,6 +1635,49 @@ TEST_CASE("EXTSEL 14 starts the scan at each TIM15 update, ADSTART stays set")
   CHECK(f.cr("ADSTART") == 1);
 }
 
+TEST_CASE(
+    "RM0456 Table 307 inferred: each tim_oc selection starts the scan at its timer's CC event, the "
+    "capture/compare event of the LL driver")
+{
+  struct leg
+  {
+    std::uint32_t    selection;
+    std::string_view unit;
+    std::string_view enable_register;
+    std::string_view enable;
+    std::string_view ccr;
+  };
+  for(auto const& [selection, unit, enable_register, enable, ccr] : {
+          leg{0,  "TIM1", "RCC_APB2ENR",  "TIM1EN", "CCR1"},
+          leg{1,  "TIM1", "RCC_APB2ENR",  "TIM1EN", "CCR2"},
+          leg{2,  "TIM1", "RCC_APB2ENR",  "TIM1EN", "CCR3"},
+          leg{3,  "TIM2", "RCC_APB1ENR1", "TIM2EN", "CCR2"},
+          leg{5,  "TIM4", "RCC_APB1ENR1", "TIM4EN", "CCR4"},
+          leg{15, "TIM3", "RCC_APB1ENR1", "TIM3EN", "CCR4"},
+  })
+  {
+    CAPTURE(selection);
+    adc_fixture const             f;
+    std::vector<core::log_record> logged;
+    auto const                    sink = recorder(f, logged);
+    downstream_scan(f, ovrmod | exten_rising | extsel(selection));
+    f.put("RCC", enable_register, enable, 1);
+    f.write(unit, "PSC", 124);
+    f.write(unit, "ARR", 15'999);
+    f.write(unit, ccr, 8'000);
+    f.write(unit, "EGR", 1);
+    f.write(unit, "SR", 0);
+    auto const start = f.now();
+    f.put(unit, "CR1", "CEN", 1);
+    static_cast<void>(start_scan(f));
+    f.run_until(start + tim15_period / 2 - us);
+    CHECK(f.isr("EOSMP") == 0);
+    read_scan(f, start + tim15_period / 2);
+    read_scan(f, start + 3 * tim15_period / 2);
+    CHECK(logged.empty());
+  }
+}
+
 TEST_CASE("a TIM15 update during a scan is ignored, the next one after it starts a scan")
 {
   adc_fixture const f;
@@ -1673,7 +1728,7 @@ TEST_CASE(
   };
   for(auto const [value, signal] : {
           selection{6,  "trigger exti11"    },
-          selection{0,  "trigger tim1_oc1"  },
+          selection{16, "trigger exti15"    },
           selection{10, "trigger tim1_trgo2"},
           selection{17, "reserved"          },
           selection{31, "reserved"          },
@@ -2290,7 +2345,7 @@ TEST_CASE(
 TEST_CASE("the ADC1 and ADC12 state mid-scan saves the bytes captured before the template")
 {
   constexpr auto expected_adc = std::to_array<unsigned char>(
-      {0xe8, 0x01, 0x00, 0x00, 0x04, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x5f, 0x75, 0x76, 0x00, 0xeb,
+      {0xb9, 0x02, 0x00, 0x00, 0x04, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x5f, 0x75, 0x76, 0x00, 0xeb,
        0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12,
        0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x32, 0x00, 0x40, 0x0d,
        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x33, 0x00, 0xe0, 0x93, 0x04, 0x00, 0x00, 0x00,
@@ -2322,7 +2377,21 @@ TEST_CASE("the ADC1 and ADC12 state mid-scan saves the bytes captured before the
        0x61, 0x74, 0x61, 0x00, 0x10, 0x00, 0x00, 0x00, 0x12, 0x30, 0x00, 0x22, 0x02, 0x00, 0x00,
        0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x64, 0x6d, 0x61, 0x5f, 0x73, 0x74, 0x6f, 0x70, 0x70,
        0x65, 0x64, 0x00, 0x00, 0x10, 0x66, 0x69, 0x6c, 0x74, 0x65, 0x72, 0x5f, 0x63, 0x6f, 0x75,
-       0x6e, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+       0x6e, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x65, 0x64, 0x67, 0x65, 0x73, 0x00, 0xb1,
+       0x00, 0x00, 0x00, 0x03, 0x30, 0x00, 0x53, 0x00, 0x00, 0x00, 0x08, 0x70, 0x65, 0x6e, 0x64,
+       0x69, 0x6e, 0x67, 0x00, 0x00, 0x08, 0x66, 0x61, 0x6c, 0x6c, 0x69, 0x6e, 0x67, 0x00, 0x00,
+       0x08, 0x72, 0x65, 0x70, 0x6f, 0x73, 0x74, 0x65, 0x64, 0x00, 0x00, 0x10, 0x73, 0x65, 0x6c,
+       0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x67, 0x65, 0x6e,
+       0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+       0x00, 0x12, 0x70, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+       0x31, 0x00, 0x53, 0x00, 0x00, 0x00, 0x08, 0x70, 0x65, 0x6e, 0x64, 0x69, 0x6e, 0x67, 0x00,
+       0x00, 0x08, 0x66, 0x61, 0x6c, 0x6c, 0x69, 0x6e, 0x67, 0x00, 0x00, 0x08, 0x72, 0x65, 0x70,
+       0x6f, 0x73, 0x74, 0x65, 0x64, 0x00, 0x00, 0x10, 0x73, 0x65, 0x6c, 0x65, 0x63, 0x74, 0x69,
+       0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74,
+       0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x70, 0x73,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x65, 0x64, 0x67,
+       0x65, 0x5f, 0x67, 0x65, 0x6e, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x01, 0x00,
+       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
   constexpr auto    expected_common = std::to_array<unsigned char>({0x05, 0x00, 0x00, 0x00, 0x00});
   adc_fixture const f;
   downstream_scan(f, ovrmod);
@@ -2401,4 +2470,175 @@ TEST_CASE(
   CHECK_NOTHROW(adc_fixture{description});
   adc1->bonded_channels_b = 0x0000'0002;
   CHECK_THROWS_AS(adc_fixture{description}, popcorn::config_error);
+}
+
+TEST_CASE(
+    "a TIM1 CC1 trigger 1.75 us after the last, its conversion over at 1.5625 us, starts each "
+    "time, the rise in one core cycle with the end, the fall given ahead of the machine time, U5")
+{
+  for(auto const edge : {exten_rising, exten_falling})
+  {
+    CAPTURE(edge);
+    adc_fixture const f;
+    f.port().drive(5, 1'000'000);
+    f.enable();
+    f.write("ADC1", "ADC_CFGR1", ovrmod | edge | extsel(0));
+    f.write("ADC1", "ADC_SQR1", 5u << 6);
+    f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+    f.put("RCC", "RCC_APB2ENR", "TIM1EN", 1);
+    f.write("TIM1", "ARR", 6);
+    f.write("TIM1", "CCR1", 1);
+    f.write("TIM1", "EGR", 1);
+    f.write("TIM1", "SR", 0);
+    auto const from = f.now();
+    f.put("TIM1", "CR1", "CEN", 1);
+    constexpr std::uint64_t    tick = 250'000;
+    std::vector<std::uint32_t> sampled;
+    for(std::uint64_t k = 0; k < 20; ++k)
+    {
+      f.run_until(from + (1 + 7 * k + 4) * tick);
+      sampled.push_back(f.isr("EOSMP"));
+      f.write("ADC1", "ADC_ISR", eosmp);
+      static_cast<void>(f.cpu_read("ADC_DR"));
+    }
+    CHECK(sampled == std::vector<std::uint32_t>(20, 1u));
+  }
+}
+
+TEST_CASE(
+    "a falling edge pending ahead of the machine time survives a snapshot, starts nothing after "
+    "ADSTP, ADC12RST drops it, U5")
+{
+  auto const pend = [](adc_fixture const& f) {
+    f.port().drive(5, 1'000'000);
+    f.enable();
+    f.write("ADC1", "ADC_CFGR1", ovrmod | exten_falling | extsel(0));
+    f.write("ADC1", "ADC_SQR1", 5u << 6);
+    f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+    f.put("RCC", "RCC_CFGR2", "PPRE2", 5);
+    f.put("RCC", "RCC_APB2ENR", "TIM1EN", 1);
+    f.write("TIM1", "ARR", 6);
+    f.write("TIM1", "CCR1", 1);
+    f.write("TIM1", "EGR", 1);
+    f.write("TIM1", "SR", 0);
+    auto const from = f.now();
+    f.put("TIM1", "CR1", "CEN", 1);
+    return from;
+  };
+  constexpr std::uint64_t tick = 500'000;
+  adc_fixture const       f;
+  auto const              from = pend(f);
+  f.run_until(from + tick + tick / 2);
+  auto const saved  = f.target->snapshot();
+  auto const starts = [&](adc_fixture const& g) {
+    CHECK(g.isr("EOSMP") == 0);
+    g.run_until(from + 4 * tick);
+    CHECK(g.isr("EOSMP") == 1);
+  };
+  starts(f);
+  f.target->restore(saved);
+  f.write("ADC1", "ADC_CR", advregen | aden | adstp);
+  f.run_until(from + 4 * tick);
+  CHECK(f.isr("EOSMP") == 0);
+  adc_fixture const other;
+  other.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  starts(other);
+
+  f.target->restore(saved);
+  rcc_reset_pulse(f, "RCC_AHB2RSTR1", "ADC12RST");
+  f.write("ADC1", "ADC_CFGR1", ovrmod | exten_falling | extsel(0));
+  f.write("ADC1", "ADC_SQR1", 5u << 6);
+  f.enable();
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+  f.run_until(from + 4 * tick);
+  CHECK(f.isr("EOSMP") == 0);
+}
+
+namespace
+{
+constexpr std::uint64_t slow_tick = 2'000'000;
+
+auto slow_tim1(adc_fixture const& f, std::uint32_t reload) -> std::uint64_t
+{
+  f.put("RCC", "RCC_CFGR2", "PPRE2", 7);
+  f.put("RCC", "RCC_APB2ENR", "TIM1EN", 1);
+  f.write("TIM1", "ARR", reload);
+  f.write("TIM1", "CCR1", 1);
+  f.write("TIM1", "EGR", 1);
+  f.write("TIM1", "SR", 0);
+  return f.now();
+}
+}
+
+TEST_CASE(
+    "a falling edge pending ahead of the machine time starts nothing once EXTEN detects rising "
+    "edges only, U5")
+{
+  adc_fixture const f;
+  f.port().drive(5, 1'000'000);
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", ovrmod | exten_falling | extsel(0));
+  f.write("ADC1", "ADC_SQR1", 5u << 6);
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+  auto const from = slow_tim1(f, 9);
+  f.put("TIM1", "CR1", "CEN", 1);
+  f.run_until(from + slow_tick + slow_tick / 2);
+  f.write("ADC1", "ADC_CR", advregen | aden | adstp);
+  f.write("ADC1", "ADC_CFGR1", ovrmod | exten_rising | extsel(0));
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+  f.run_until(from + 3 * slow_tick);
+  CHECK(f.isr("EOSMP") == 0);
+}
+
+TEST_CASE(
+    "a falling edge whose ADC1 two-rank sequence ends in the same core cycle, its end posted "
+    "after the edge, starts the next sequence each time, U5")
+{
+  adc_fixture const f;
+  f.port().drive(5, 1'000'000);
+  f.port().drive(6, 1'000'000);
+  f.enable();
+  f.write("ADC1", "ADC_SMPR1", 3u << 15);
+  f.write("ADC1", "ADC_CFGR1", ovrmod | exten_falling | extsel(0));
+  f.write("ADC1", "ADC_SQR1", 1u | (5u << 6) | (6u << 12));
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+  auto const from = slow_tim1(f, 1);
+  f.put("TIM1", "CR1", "CEN", 1);
+  std::vector<std::uint32_t> sampled;
+  for(std::uint64_t k = 0; k < 20; ++k)
+  {
+    f.run_until(from + (2 + 2 * k) * slow_tick + 1'750'000);
+    sampled.push_back(f.isr("EOSMP"));
+    f.run_until(from + (2 + 2 * k) * slow_tick + 3'000'000);
+    f.write("ADC1", "ADC_ISR", eosmp);
+    while(f.isr("EOC") != 0)
+    {
+      static_cast<void>(f.cpu_read("ADC_DR"));
+    }
+  }
+  CHECK(sampled == std::vector<std::uint32_t>(20, 1u));
+}
+
+TEST_CASE(
+    "two CC1G falling edges 1.75 us apart, both ahead of the machine time, each start a "
+    "conversion, U5")
+{
+  adc_fixture const f;
+  f.port().drive(5, 1'000'000);
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", ovrmod | exten_falling | extsel(0));
+  f.write("ADC1", "ADC_SQR1", 5u << 6);
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+  static_cast<void>(slow_tim1(f, 99));
+  auto const first = f.now();
+  f.write("TIM1", "EGR", 1u << 1);
+  f.run_until(first + 1'750'000);
+  auto const second = f.now();
+  f.write("TIM1", "EGR", 1u << 1);
+  f.run_until(first + slow_tick + us);
+  CHECK(f.isr("EOSMP") == 1);
+  f.write("ADC1", "ADC_ISR", eosmp);
+  static_cast<void>(f.cpu_read("ADC_DR"));
+  f.run_until(second + slow_tick + us);
+  CHECK(f.isr("EOSMP") == 1);
 }

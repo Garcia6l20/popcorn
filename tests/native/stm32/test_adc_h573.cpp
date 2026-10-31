@@ -677,6 +677,44 @@ TEST_CASE(
   }
 }
 
+TEST_CASE(
+    "RM0481 Table 282 inferred: EXTSEL 0 tim1_oc1 and 15 tim3_oc4 start a conversion at the "
+    "timer's CC event, tLATR after it")
+{
+  struct leg
+  {
+    std::uint32_t    selection;
+    std::string_view unit;
+    std::string_view enable_register;
+    std::string_view enable;
+    std::string_view ccr;
+  };
+  for(auto const& [selection, unit, enable_register, enable, ccr] : {
+          leg{0,  "TIM1", "RCC_APB2ENR",  "TIM1EN", "CCR1"},
+          leg{15, "TIM3", "RCC_APB1LENR", "TIM3EN", "CCR4"},
+  })
+  {
+    CAPTURE(selection);
+    rig const r;
+    r.enable();
+    r.port().drive(3, 1'000'000);
+    r.write("ADC1", "ADC_CFGR", (1u << 10) | (selection << 5));
+    r.set("RCC", enable_register, enable, 1);
+    r.write(unit, "PSC", 31);
+    r.write(unit, "ARR", 999);
+    r.write(unit, ccr, 400);
+    r.write(unit, "EGR", 1);
+    r.write(unit, "SR", 0);
+    auto const start = r.now();
+    r.write(unit, "CR1", 1u);
+    static_cast<void>(r.start(3));
+    auto const trigger = start + 400 * us;
+    auto const edge    = (trigger + cycle_ps - 1) / cycle_ps * cycle_ps - trigger;
+    r.ends_at(trigger + edge + (18 + 4 * 15) * cycle_ps / 4);
+    CHECK(r.warnings().empty());
+  }
+}
+
 TEST_CASE("EXTSEL 20 and 21 are reserved on the H5: one warning each, no conversion")
 {
   rig const r;
@@ -1160,4 +1198,31 @@ TEST_CASE("the H573 ADC1 and ADC2 have bank A only: bank B is a config_error, it
     CHECK(r.port(unit).external_channels(stm32::analog_bank::b) == 0);
     CHECK(r.port(unit).bonded_channels(stm32::analog_bank::b) == 0);
   }
+}
+
+TEST_CASE(
+    "a TIM1 CC1 falling edge given one timer clock ahead of the machine time starts a conversion "
+    "that ended before it, 20 of 20, H5")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(3, 1'000'000);
+  r.write("ADC1", "ADC_CFGR", (1u << 12) | (2u << 10));
+  r.set("RCC", "RCC_APB2ENR", "TIM1EN", 1);
+  r.write("TIM1", "ARR", 19);
+  r.write("TIM1", "CCR1", 1);
+  r.write("TIM1", "EGR", 1);
+  r.write("TIM1", "SR", 0);
+  auto const from = r.now();
+  r.write("TIM1", "CR1", 1u);
+  static_cast<void>(r.start(3));
+  std::vector<std::uint32_t> sampled;
+  for(std::uint64_t k = 0; k < 20; ++k)
+  {
+    r.run_until(from + (1 + 20 * k + 12) * cycle_ps);
+    sampled.push_back(r.isr("EOSMP"));
+    r.write("ADC1", "ADC_ISR", 1u << 1);
+    static_cast<void>(r.cpu_read("ADC1", "ADC_DR"));
+  }
+  CHECK(sampled == std::vector<std::uint32_t>(20, 1u));
 }

@@ -1,5 +1,7 @@
 #include "exti_classic.hpp"
 #include "stm32_fixture.hpp"
+#include "trigger_probe.hpp"
+#include "trigger_signal.hpp"
 
 #include <popcorn/core/coverage.hpp>
 #include <popcorn/core/errors.hpp>
@@ -533,4 +535,69 @@ TEST_CASE("the EXTI groups find their NVIC line by number, whatever the descript
   auto missing = l152re();
   std::erase_if(missing.irqs, [](auto const& irq) { return irq.number == 22; });
   CHECK_THROWS_AS((stm32_fixture{std::move(missing), firmware}), popcorn::config_error);
+}
+
+namespace
+{
+auto with_trigger_probe() -> core::machine_options
+{
+  auto options = popcorn::testing::stm32_options();
+  options.models.insert_or_assign(
+      "DAC", [](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
+        return std::make_shared<popcorn::testing::trigger_probe>(ctx);
+      });
+  return options;
+}
+}
+
+TEST_CASE(
+    "EXTI line 11 drives exti11 inferred: each PC11 edge at its own time, whatever IMR, RTSR and "
+    "FTSR, and an EXTICR3 write that moves the line to a pin of another level")
+{
+  auto const  f     = parked(l152re(), firmware, with_trigger_probe());
+  auto* const probe = f.model_of<popcorn::testing::trigger_probe>("DAC");
+  REQUIRE(probe != nullptr);
+  probe->watched = "exti11";
+  probe->listen(true);
+  constexpr std::uint32_t exticr3 = syscfg + 0x10;
+  write(f, exticr3, 2u << 12);
+  auto const rise = f.target->virtual_clock().time().ps + 5'000'123;
+  auto const fall = rise + 7'000'456;
+  port(f, "GPIOC").drive_at(11, true, popcorn::vtime{rise});
+  port(f, "GPIOC").drive_at(11, false, popcorn::vtime{fall});
+  f.run_to_stop(
+      {.max_instructions = icount{1'000'000}, .until_time = popcorn::vtime{fall + 1'000'000}});
+  CHECK(probe->pulses == std::vector<std::uint64_t>{rise});
+  CHECK(probe->falls == std::vector<std::uint64_t>{fall});
+  CHECK(read(f, pr) == 0);
+  auto* const source = stm32::trigger_source_of(probe->context.peers, "exti11");
+  REQUIRE(source != nullptr);
+  CHECK(source->level("exti11") == std::optional<bool>{false});
+  port(f, "GPIOA").drive(11, true);
+  CHECK(source->level("exti11") == std::optional<bool>{false});
+  auto const moved = f.target->virtual_clock().time().ps;
+  write(f, exticr3, 0);
+  CHECK(source->level("exti11") == std::optional<bool>{true});
+  CHECK(probe->pulses == std::vector<std::uint64_t>{rise, moved});
+}
+
+TEST_CASE("trigger_source_of finds EXTI for exti0 to exti15, no source for exti16 or usbsof")
+{
+  auto const  f     = parked(l152re(), firmware, with_trigger_probe());
+  auto* const probe = f.model_of<popcorn::testing::trigger_probe>("DAC");
+  REQUIRE(probe != nullptr);
+  auto const& peers = probe->context.peers;
+  for(auto const* const signal : {"exti0", "exti11", "exti15"})
+  {
+    CAPTURE(signal);
+    CHECK(
+        stm32::trigger_source_of(peers, signal)
+        == dynamic_cast<stm32::trigger_source*>(f.target->model("EXTI")));
+    CHECK(stm32::trigger_source_of(peers, signal) != nullptr);
+  }
+  for(auto const* const signal : {"exti16", "exti", "usbsof", "11"})
+  {
+    CAPTURE(signal);
+    CHECK(stm32::trigger_source_of(peers, signal) == nullptr);
+  }
 }

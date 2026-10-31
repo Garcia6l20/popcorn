@@ -1,6 +1,7 @@
 #include "exti_classic.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
+#include "trigger_signal.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/stm32/gpio.hpp>
@@ -12,6 +13,8 @@
 #include <cstdint>
 #include <format>
 #include <memory>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -43,11 +46,17 @@ static_assert(std::is_empty_v<exti_classic_state>);
  *        one of its lines is set, the pending register feeding the NVIC, RM0038 Figure 32. A line
  *        in no NVIC group of the traits sets its PR bit and raises nothing. EXTI_EMR is storage
  *        the model leaves unclaimed, and an EXTI event wakes no WFE. Every reset brings the
- *        registers to their description reset, PR 0. The model is stateless.
+ *        registers to their description reset, PR 0. Each GPIO line n drives the trigger signal
+ *        `extin`, the input of the line before its edge detection: an edge at each change of the
+ *        selected pin, at the time of the pin edge, and at a `SYSCFG_EXTICRn` write that moves the
+ *        line to a pin of another level, whatever IMR, RTSR and FTSR hold, inferred. Its level is
+ *        the selected pin's. RM0038 Tables 61 and 62 name lines 11 and 15 as ADC triggers. The
+ *        model is stateless.
  */
 class exti_classic final : public dispatch_model<exti_classic, exti_classic_state>,
                            public exti_input,
-                           public exti_line_input
+                           public exti_line_input,
+                           public trigger_source
 {
 public:
   exti_classic(model_context& ctx, peripheral_desc const& desc, exti_classic_traits const& traits);
@@ -57,6 +66,9 @@ public:
   void               pin_changed(std::uint8_t port, std::uint8_t pin, bool level) override;
   void               line_changed(std::uint8_t line, bool level) override;
   [[nodiscard]] auto stateless() const -> bool override;
+  void               interest_changed() override;
+  [[nodiscard]] auto produces(std::string_view signal) const -> bool override;
+  [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
 
   void software_written(std::uint32_t old, std::uint32_t now);
   void pending_written(std::uint32_t old, std::uint32_t now);
@@ -64,6 +76,7 @@ public:
 private:
   [[nodiscard]] auto line_field(std::string_view reg, std::string_view name) const -> field_ref;
   void               interrupts();
+  [[nodiscard]] auto output_of(std::string_view signal) const -> std::optional<std::uint8_t>;
 
   register_file&                                   regs_;
   std::uint32_t                                    lines_;
@@ -73,6 +86,8 @@ private:
   field_ref                                        software_;
   field_ref                                        pending_;
   std::vector<std::pair<std::uint32_t, irq_line*>> irqs_;
+  std::vector<trigger_output>                      outputs_;
+  std::optional<std::uint64_t>                     edge_ps_;
 };
 
 constexpr std::array<write_entry<exti_classic>, 5> exti_classic_writes{
@@ -105,6 +120,10 @@ exti_classic::exti_classic(
           std::format("NVIC line {}, which the EXTI model raises", group.irq));
     }
     irqs_.emplace_back(((std::uint32_t{1} << width) - 1u) << group.first, &irq(named->name));
+  }
+  for(std::uint8_t line = 0; line < gpio_lines; ++line)
+  {
+    outputs_.emplace_back(ctx.peers, std::format("exti{}", line));
   }
 }
 
@@ -158,7 +177,19 @@ void exti_classic::pin_changed(std::uint8_t port, std::uint8_t pin, bool level)
   auto const* const selector = dynamic_cast<exti_selector const*>(ctx_.peers.find("SYSCFG"));
   if(selector != nullptr and selector->selected_port(pin) == port)
   {
-    line_changed(pin, level);
+    auto const* const clock = dynamic_cast<pin_edge_clock const*>(
+        ctx_.peers.find(std::format("GPIO{}", static_cast<char>('A' + port))));
+    edge_ps_ = clock != nullptr ? clock->edge_ps() : ctx_.clock.time().ps;
+    try
+    {
+      line_changed(pin, level);
+    }
+    catch(...)
+    {
+      edge_ps_.reset();
+      throw;
+    }
+    edge_ps_.reset();
   }
 }
 
@@ -168,6 +199,12 @@ void exti_classic::line_changed(std::uint8_t line, bool level)
   if(line >= 32 or (lines_ & bit) == 0)
   {
     return;
+  }
+  if(line < gpio_lines)
+  {
+    outputs_[line].edge(
+        level ? trigger_edge::rising : trigger_edge::falling,
+        edge_ps_.value_or(ctx_.clock.time().ps));
   }
   auto const edge = get(regs_, level ? rising_ : falling_);
   if((edge & get(regs_, unmasked_) & bit) == 0)
@@ -196,6 +233,42 @@ void exti_classic::pending_written(std::uint32_t old, std::uint32_t now)
 auto exti_classic::stateless() const -> bool
 {
   return true;
+}
+
+void exti_classic::interest_changed()
+{}
+
+auto exti_classic::output_of(std::string_view signal) const -> std::optional<std::uint8_t>
+{
+  auto const found = std::ranges::find(outputs_, signal, &trigger_output::signal);
+  if(found == outputs_.end())
+  {
+    return std::nullopt;
+  }
+  return static_cast<std::uint8_t>(found - outputs_.begin());
+}
+
+auto exti_classic::produces(std::string_view signal) const -> bool
+{
+  return output_of(signal).has_value();
+}
+
+auto exti_classic::level(std::string_view signal) const -> std::optional<bool>
+{
+  auto const line = output_of(signal);
+  if(not line)
+  {
+    return std::nullopt;
+  }
+  auto const* const selector = dynamic_cast<exti_selector const*>(ctx_.peers.find("SYSCFG"));
+  auto const        port     = selector != nullptr ? selector->selected_port(*line) : std::nullopt;
+  if(not port)
+  {
+    return false;
+  }
+  auto const* const gpio = dynamic_cast<gpio_port const*>(
+      ctx_.peers.find(std::format("GPIO{}", static_cast<char>('A' + *port))));
+  return gpio != nullptr and gpio->level(*line);
 }
 }
 
