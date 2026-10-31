@@ -369,6 +369,15 @@ def read_patch(path: Path) -> Patch:
     return _patch_of(path, _parsed(path))
 
 
+def patch_contents(files: Sequence[Path]) -> tuple[tuple[Path, bytes], ...]:
+    """The resolved path and the bytes of each of @p files, read and parsed as read_patch reads
+    them, in the order of @p files. DescriptionError for a file that is not TOML."""
+    result: list[tuple[Path, bytes]] = []
+    for path in files:
+        result.append((path.resolve(), _parsed(path).content))
+    return tuple(result)
+
+
 def load_patches(
     files: Sequence[Path], part: str, svd_name: str, db_part: DbPart | None = None
 ) -> list[LoadedPatch]:

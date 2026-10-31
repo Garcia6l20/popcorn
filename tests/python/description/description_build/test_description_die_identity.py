@@ -424,6 +424,33 @@ def test_an_edited_part_facts_row_or_die_gives_a_new_scan(
     assert die_ip_sources(other_die, path, svd, core=None, search=search) == {}
 
 
+_DONOR_SVD = """
+format = 1
+[match]
+parts = ["STM32T001Ax"]
+
+[svd]
+name = "{name}"
+"""
+
+
+def test_an_edited_svd_exception_gives_a_new_scan(
+    fake_db: tuple[Path, SearchPaths], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mcu, search = fake_db
+    _sources.die_ip_memo.clear()
+    patches = tmp_path / "patches"
+    patches.mkdir()
+    monkeypatch.setattr(_sources, "_PATCHES_DIR", patches)
+    exception = patches / "svd.toml"
+    exception.write_text(_DONOR_SVD.format(name="STM32T001"), encoding="utf-8")
+    _part_file(mcu, "STM32T001Cx", "DIE1", 64, 4, ["UART1"])
+    _part_file(mcu, "STM32T001Ax", "DIE1", 64, 9, ["UART1", "UART2"])
+    assert _donors(mcu, search, "STM32T001Cx") == {"UART2": "STM32T001Ax"}
+    exception.write_text(_DONOR_SVD.format(name="STM32T0015"), encoding="utf-8")
+    assert _donors(mcu, search, "STM32T001Cx") == {}
+
+
 def test_the_memo_holds_at_most_64_lookups(fake_db: tuple[Path, SearchPaths]) -> None:
     mcu, search = fake_db
     _sources.die_ip_memo.clear()

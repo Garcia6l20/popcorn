@@ -28,6 +28,7 @@ from popcorn.stm32.description._patches import (
     corrected_part,
     load_patches,
     part_facts,
+    patch_contents,
     with_part_facts,
 )
 
@@ -322,31 +323,31 @@ def die_ip_sources(
     patch exception or an explicit SVD of another name has no candidate. A part file that cannot
     be read, that read_part refuses, or whose SVD does not resolve is no candidate. Maps every
     instance die_ips gives, empty when @p db_part is the reference. Results are memoized in the
-    process, 64 entries, keyed on the inputs, the selected name, the die of @p db_part, the
-    `[[part_facts]]` rows of the package patches and the name, size and mtime of every candidate
-    file, so an edit of a candidate file or of a part_facts row gives a new scan."""
+    process, 64 entries, keyed on the inputs, the selected name, the die of @p db_part, the bytes
+    of every package patch file, which hold the `[[part_facts]]` rows and the `[svd]` exceptions
+    the scan reads, and the name, size and mtime of every candidate file, so an edit of a
+    candidate file or of a patch file gives a new scan."""
     base = _CORE_SUFFIX_RE.sub("", svd_path.stem)
     candidates = [
         path
         for path in sorted(mcu_db.parent.glob("*.xml"))
         if path != mcu_db and _wildcard_prefix_matches(base, path.stem)
     ]
+    files = _patch_files()
     facts: dict[str, PartFact] | None
+    patches_key: tuple[tuple[Path, bytes], ...] | None
     try:
-        facts = part_facts(_patch_files())
+        patches_key = patch_contents(files)
+        facts = part_facts(files)
     except OSError, DescriptionError:
         facts = None
-    facts_key = (
-        None
-        if facts is None
-        else tuple(sorted((name, fact.die, fact.ram_kib) for name, fact in facts.items()))
-    )
+        patches_key = None
     key = (
         mcu_db,
         _stat_key(mcu_db),
         db_part.ref_name,
         db_part.die,
-        facts_key,
+        patches_key,
         svd_path.name,
         core,
         tuple(search.svd_dirs),
