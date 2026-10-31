@@ -1078,7 +1078,7 @@ inline constexpr auto h5_gtzc_companions = std::to_array<gtzc_companion>({
     {"OCTOSPI", "DLYBOS1"},
 });
 /** @brief Names a USB full-speed device controller gives the register fields whose spelling
- *         differs between the variants. */
+ *         differs between the variants. An empty name is a field the variant lacks. */
 struct usb_drd_names
 {
   /** @brief Endpoint register prefix, the register of endpoint n is `<prefix><n>R`. */
@@ -1128,18 +1128,46 @@ struct usb_drd_variant
   std::span<std::string_view const> status_clears;
   /** @brief NVIC line of every enabled ISTR flag. */
   std::string_view irq;
-  /** @brief LPM register. */
+  /** @brief NVIC line of a transfer done on an isochronous or double-buffered bulk endpoint,
+   *         whatever CNTR.CTRM holds, empty for none. */
+  std::string_view priority_irq;
+  /** @brief LPM register, empty for none. */
   std::string_view lpm_register;
-  /** @brief Battery charging detection register. */
+  /** @brief Battery charging detection register, empty for none. */
   std::string_view charging_register;
-  /** @brief Register of the D+ pull-up enable. */
+  /** @brief Register of the D+ pull-up enable inside the controller, empty when a peer gives
+   *         it. */
   std::string_view pull_up_register;
-  /** @brief Field of the D+ pull-up enable. */
+  /** @brief Field of the D+ pull-up enable inside the controller. */
   std::string_view pull_up_field;
-  /** @brief Offset of the packet memory window in the controller's block. */
+  /** @brief Peer whose usb_pull_up_source gives the pull-up enable, with no pull-up register. */
+  std::string_view pull_up_peer;
+  /** @brief Register holding the buffer descriptor table address, its field of the same name,
+   *         empty for a table at packet memory address 0. */
+  std::string_view descriptor_register;
+  /** @brief Peripheral whose window is the packet memory, empty for a window inside the
+   *         controller's own block. */
+  std::string_view pma_peripheral;
+  /** @brief Offset of the packet memory window in its peripheral. */
   std::uint32_t pma_offset;
   /** @brief Packet memory bytes as the controller addresses them. */
   std::uint32_t pma_bytes;
+  /** @brief Packet memory bytes behind each 32-bit word of the CPU window, from its low lane
+   *         up. */
+  std::uint32_t pma_unit;
+  /** @brief Bits of a buffer address the controller uses. */
+  std::uint32_t address_mask;
+  /** @brief CPU access sizes the manual allows on the packet memory, bit n for n bytes. */
+  std::uint8_t pma_sizes;
+  /** @brief EXTI line that follows ISTR.WKUP, none for no line. */
+  std::optional<std::uint8_t> wakeup_line;
+  /** @brief Whether the hardware owns the suspend bit: a written 0 keeps it, setting it clears
+   *         FNR.LSOF, the ready bit follows it, a wake-up clears both. Otherwise the firmware owns
+   *         it and a wake-up clears the low-power bit only. */
+  bool hardware_suspend;
+  /** @brief Whether the forced reset acts as a bus reset: endpoints and DADDR cleared and the
+   *         bus reset flag set. Otherwise it clears the endpoints only. */
+  bool forced_bus_reset;
   /** @brief Manual section of the registers, for configuration errors. */
   std::string_view manual;
 };
@@ -1149,8 +1177,8 @@ inline constexpr auto h5_usb_endpoint_clears = std::to_array<std::string_view>(
 inline constexpr auto h5_usb_status_clears = std::to_array<std::string_view>(
     {"L1REQ", "ESOF", "SOF", "RST_DCON", "SUSP", "WKUP", "ERR", "PMAOVR", "THR512", "DDISC"});
 /** @brief STM32H5 USB, `usbfs_v1`, RM0481 section 61: CHEPnR, 2048 bytes of packet memory at
- *         offsets 0x400 to 0xBFF read by word, the pull-up in BCDR, LPM, battery charging
- *         detection and host mode. */
+ *         offsets 0x400 to 0xBFF read by word, the descriptor table at address 0, the pull-up in
+ *         BCDR, LPM, battery charging detection and host mode. */
 inline constexpr usb_drd_variant h5_usb{
     .names =
         {.endpoint      = "CHEP",
@@ -1170,16 +1198,76 @@ inline constexpr usb_drd_variant h5_usb{
                 .l1_resume     = "L1RES",
                 .l2_resume     = "L2RES",
                 .host_mode     = "HOST"},
-    .endpoint_clears   = h5_usb_endpoint_clears,
-    .status_clears     = h5_usb_status_clears,
-    .irq               = "USB_DRD_FS_IRQn",
-    .lpm_register      = "LPMCSR",
-    .charging_register = "BCDR",
-    .pull_up_register  = "BCDR",
-    .pull_up_field     = "DPPU_DPD",
-    .pma_offset        = 0x400,
-    .pma_bytes         = 0x800,
-    .manual            = "RM0481 61.6"
+    .endpoint_clears     = h5_usb_endpoint_clears,
+    .status_clears       = h5_usb_status_clears,
+    .irq                 = "USB_DRD_FS_IRQn",
+    .priority_irq        = "",
+    .lpm_register        = "LPMCSR",
+    .charging_register   = "BCDR",
+    .pull_up_register    = "BCDR",
+    .pull_up_field       = "DPPU_DPD",
+    .pull_up_peer        = "",
+    .descriptor_register = "",
+    .pma_peripheral      = "",
+    .pma_offset          = 0x400,
+    .pma_bytes           = 0x800,
+    .pma_unit            = 4,
+    .address_mask        = 0xFFFC,
+    .pma_sizes           = 1u << 4,
+    .wakeup_line         = std::nullopt,
+    .hardware_suspend    = true,
+    .forced_bus_reset    = false,
+    .manual              = "RM0481 61.6"
+};
+
+inline constexpr auto l1_usb_endpoint_clears =
+    std::to_array<std::string_view>({"CTR_TX", "CTR_RX"});
+inline constexpr auto l1_usb_status_clears =
+    std::to_array<std::string_view>({"ESOF", "SOF", "RESET", "SUSP", "WKUP", "ERR", "PMAOVR"});
+/** @brief STM32L1 USB, `usb1_v1_2_STM32L1_Cube`, RM0038 section 24: EPnR, 512 bytes of packet
+ *         memory as 256 half-words, each in the low half of a word of the `USB_SRAM` window,
+ *         RM0038 24.5.3, read by half-word or word, the descriptor table at BTABLE, the pull-up
+ *         in SYSCFG_PMC.USB_PU, RM0038 24.4.2, USB_LP and USB_HP, RM0038 24.3.1, ISTR.WKUP on
+ *         EXTI line 18, RM0038 Table 51. No LPM, battery charging detection or host mode. */
+inline constexpr usb_drd_variant l1_usb{
+    .names =
+        {.endpoint      = "EP",
+                .stat_tx       = "STAT_TX",
+                .dtog_tx       = "DTOG_TX",
+                .done_tx       = "CTR_TX",
+                .kind          = "EP_KIND",
+                .type          = "EP_TYPE",
+                .stat_rx       = "STAT_RX",
+                .dtog_rx       = "DTOG_RX",
+                .done_rx       = "CTR_RX",
+                .endpoint_id   = "EP_ID",
+                .reset_done    = "RESET",
+                .core_reset    = "FRES",
+                .suspend       = "FSUSP",
+                .suspend_ready = "LPMODE",
+                .l1_resume     = "",
+                .l2_resume     = "RESUME",
+                .host_mode     = ""},
+    .endpoint_clears     = l1_usb_endpoint_clears,
+    .status_clears       = l1_usb_status_clears,
+    .irq                 = "USB_LP_IRQn",
+    .priority_irq        = "USB_HP_IRQn",
+    .lpm_register        = "",
+    .charging_register   = "",
+    .pull_up_register    = "",
+    .pull_up_field       = "",
+    .pull_up_peer        = "SYSCFG",
+    .descriptor_register = "BTABLE",
+    .pma_peripheral      = "USB_SRAM",
+    .pma_offset          = 0,
+    .pma_bytes           = 0x200,
+    .pma_unit            = 2,
+    .address_mask        = 0xFFFE,
+    .pma_sizes           = (1u << 2) | (1u << 4),
+    .wakeup_line         = 18,
+    .hardware_suspend    = false,
+    .forced_bus_reset    = true,
+    .manual              = "RM0038 24.5"
 };
 
 /** @brief STM32H562, H563 and H573 GTZC1, RM0481 5.7.4 to 5.7.6 and 5.8: the SVD names

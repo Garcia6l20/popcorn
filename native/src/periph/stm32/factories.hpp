@@ -228,11 +228,19 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto otg_fs_factory(board const& b) -> model_factory;
 
 /**
- * @brief Factory of the USB full-speed device controller model of the STM32H5, RM0481 section 61.
+ * @brief Factory of the USB full-speed device controller model, RM0481 section 61 on the STM32H5,
+ *        RM0038 section 24 on the STM32L1.
  * @param b Board whose `usb_hosts` gives each instance its virtual host, copied.
- * @param variant Register names and packet memory of the controller, copied.
+ * @param variant Register names, packet memory and pull-up of the controller, copied.
  */
 [[nodiscard]] auto usb_drd_factory(board const& b, usb_drd_variant const& variant) -> model_factory;
+
+/**
+ * @brief Factory of the packet memory window of a USB device controller held in a peripheral of
+ *        its own, `USB_SRAM` on the STM32L1, served by the controller's model.
+ * @param controller Peripheral name of the controller.
+ */
+[[nodiscard]] auto usb_packet_memory_factory(std::string_view controller) -> model_factory;
 
 /**
  * @brief Factory of the ADC1 model, RM0456 section 33.

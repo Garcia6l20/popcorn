@@ -32,7 +32,7 @@ struct builtin
   flash_variant    flash         = {};
 };
 
-constexpr std::array<builtin, 119> builtins{
+constexpr std::array<builtin, 121> builtins{
     {
      {"RCC", "STM32U5_rcc_*", [](board const& b) { return rcc_factory(b.rcc); }},
      {"RCC", "STM32H5_rcc_*", [](board const& b) { return rcc_h5_factory(b.rcc); }},
@@ -389,6 +389,14 @@ constexpr std::array<builtin, 119> builtins{
      {"MDF", "v1_0_Cube", [](board const&) { return mdf_factory(); }},
      {"USB_OTG_FS", "otgfs1_v3_0_Cube", [](board const& b) { return otg_fs_factory(b); }},
      {"USB", "usbfs_v1*", [](board const& b) { return usb_drd_factory(b, h5_usb); }},
+     {.ip              = "USB",
+         .ip_version_glob = "usb1_v1_2*",
+         .make            = [](board const& b) { return usb_drd_factory(b, l1_usb); },
+         .part_glob       = "STM32L1*"},
+     {.ip              = "USB_SRAM",
+         .ip_version_glob = "",
+         .make            = [](board const&) { return usb_packet_memory_factory("USB"); },
+         .part_glob       = "STM32L1*"},
      {"ADC", "aditf5_40v1_U5_Cube", [](board const& b) { return adc_factory(b.supply); }},
      {.ip              = "ADC12",
          .ip_version_glob = "*",

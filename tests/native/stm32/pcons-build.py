@@ -253,6 +253,7 @@ for program, source in (
     ("stm32-crc-l1", "test_crc_l1.cpp"),
     ("stm32-rtc-l1", "test_rtc_l1.cpp"),
     ("stm32-adc-l1", "test_adc_l1.cpp"),
+    ("stm32-usb-l1", "test_usb_l1.cpp"),
 ):
     l1_test = add_doctest(
         program,

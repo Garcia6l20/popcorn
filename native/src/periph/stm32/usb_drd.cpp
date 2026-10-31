@@ -1,3 +1,4 @@
+#include "exti_classic.hpp"
 #include "factories.hpp"
 #include "frame_signal.hpp"
 #include "model_base.hpp"
@@ -203,9 +204,34 @@ struct interrupt_pair
  * first ESOF time and the 1 us window are inferred.
  * Clearing DPPU_DPD stops the timer, and FN, LCK, LSOF and the ISTR flags keep their values, as
  * read on the part with a PC host.
+ *
+ * STM32L1, CubeMX IP `USB` `usb1_v1_2`, RM0038 section 24, through the l1_usb variant, with the
+ * rules above that were measured on an STM32H573 applied as inferred: EPnR with STAT_TX, DTOG_TX,
+ * CTR_TX, EP_KIND, EP_TYPE, STAT_RX, DTOG_RX and CTR_RX in the places of the H5 fields, ISTR.RESET
+ * and EP_ID, CNTR.FRES, FSUSP, LPMODE and RESUME in the places of RST_DCON, IDN, USBRST, SUSPEN,
+ * SUSPRDY and L2RES. A bus reset clears every EPnR but CTR_RX and CTR_TX, RM0038 24.5.2, and DADDR,
+ * RM0038 24.5.1 ISTR.RESET, when SE0 starts, inferred as on the H5, and sets RESET when SE0 ends,
+ * RM0038 24.4.5. FRES written from 0 to 1 does the same and sets RESET at the write, RM0038 24.5.1
+ * CNTR.FRES, the flag at the write inferred. Packet memory, RM0038 24.5.3: 512 bytes as 256
+ * half-words in the `USB_SRAM` peripheral, half-word k in the low half of the word at offset 4k,
+ * the upper half reading 0 and ignoring writes, inferred. A half-word or word access of the low
+ * half is the one the 16-bit memory takes. The buffer descriptor table starts at BTABLE, the entry
+ * of endpoint n at local address BTABLE + 8n, RM0038 24.5.3, and a buffer address ignores bit 0,
+ * inferred. The D+ pull-up is SYSCFG_PMC.USB_PU, RM0038 24.4.2, read through the SYSCFG peer, which
+ * tells every change. FSUSP and LPMODE are the firmware's: a written 0 clears FSUSP and LPMODE
+ * keeps what is written, RM0038 24.5.1. The suspend check stops while FSUSP is set, RM0038 24.5.1
+ * ISTR.SUSP. A bus reset, a SOF or a resume while FSUSP is set raises WKUP and clears LPMODE, and
+ * FSUSP stays set until the firmware clears it, RM0038 24.4.5 and 24.5.1 ISTR.WKUP. USB_LP_IRQn is
+ * any ISTR flag whose CNTR mask is set, USB_HP_IRQn a CTR_RX or CTR_TX of an isochronous or
+ * double-buffered bulk endpoint whatever CTRM holds, RM0038 24.3.1 and 24.5.2 CTR_RX, the CTRM rule
+ * inferred. EXTI line 18 follows ISTR.WKUP, rising when WKUP sets and falling when it clears,
+ * RM0038 24.5.1 ISTR.WKUP and Table 51, the level inferred. Not modelled, logged once and a
+ * model_error under strict_peripherals: remote wake-up CNTR.RESUME, and a CPU byte access or an
+ * access of the upper half of a packet memory word.
  */
 class usb_drd final : public dispatch_model<usb_drd, usb_drd_state>,
                       public usb_device_link<usb_drd>,
+                      public usb_pull_up_listener,
                       public bus_reset_listener
 {
   friend usb_device_link<usb_drd>;
@@ -252,6 +278,10 @@ public:
   void suspend(vtime at) override;
   void resume(vtime at) override;
   [[nodiscard]] auto now() const -> vtime override;
+  void               usb_pull_up_changed() override;
+  auto               pma_read(std::uint32_t offset, std::uint8_t size, access_ctx ctx)
+      -> std::expected<std::uint32_t, bus_error>;
+  void pma_write(std::uint32_t offset, std::uint8_t size, std::uint32_t value, access_ctx ctx);
 
   void plain_written(std::uint32_t old, std::uint32_t now);
   void endpoint_written(std::uint32_t old, std::uint32_t now);
@@ -263,7 +293,16 @@ public:
 private:
   [[nodiscard]] auto endpoint_name(std::size_t n) const -> std::string;
   [[nodiscard]] auto endpoint_fields_of(std::size_t n) const -> endpoint_fields;
-  [[nodiscard]] auto in_window(std::uint32_t offset) const -> bool;
+  [[nodiscard]] auto optional_field(std::string_view reg, std::string_view name) const
+      -> std::optional<field_ref>;
+  [[nodiscard]] auto pull_up_enabled() const -> bool;
+  [[nodiscard]] auto window_bytes() const -> std::uint32_t;
+  [[nodiscard]] auto pma_allowed(std::uint32_t offset, std::uint8_t size) const -> bool;
+  [[nodiscard]] auto pma_byte(std::uint32_t at) const -> std::byte;
+  void               set_pma_byte(std::uint32_t at, std::byte value);
+  [[nodiscard]] auto descriptor_base() const -> std::uint32_t;
+  void               set_wake_flag(std::uint32_t value);
+  void               tell_wake_line(bool before);
   [[nodiscard]] auto kind_mask(std::span<std::string_view const> names, write_effect effect) const
       -> std::uint32_t;
   [[nodiscard]] auto
@@ -298,6 +337,7 @@ private:
   register_file&                         regs_;
   frame_output                           frames_;
   irq_line&                              line_;
+  irq_line*                              priority_line_{};
   std::array<endpoint_fields, endpoints> ep_;
   std::uint32_t                          endpoint_clears_{};
   std::uint32_t                          endpoint_toggles_{};
@@ -315,9 +355,9 @@ private:
   field_ref                              power_down_;
   field_ref                              suspend_enable_;
   field_ref                              suspend_ready_;
-  field_ref                              l1_resume_;
+  std::optional<field_ref>               l1_resume_;
   field_ref                              l2_resume_;
-  field_ref                              host_mode_;
+  std::optional<field_ref>               host_mode_;
   field_ref                              frame_number_;
   field_ref                              lost_frames_;
   field_ref                              locked_;
@@ -325,30 +365,48 @@ private:
   field_ref                              line_minus_;
   field_ref                              address_;
   field_ref                              function_enable_;
-  field_ref                              lpm_enable_;
-  field_ref                              charging_enable_;
-  field_ref                              pull_up_;
+  std::optional<field_ref>               lpm_enable_;
+  std::optional<field_ref>               charging_enable_;
+  std::optional<field_ref>               pull_up_;
+  std::optional<field_ref>               btable_;
   std::uint32_t                          access_offset_{};
   std::uint32_t                          warned_{};
 };
 
-auto usb_drd_writes(peripheral_desc const& desc, usb_drd_variant const& variant)
-    -> std::vector<write_entry<usb_drd>>
+auto usb_drd_writes(
+    std::string_view       part,
+    peripheral_desc const& desc,
+    usb_drd_variant const& variant) -> std::vector<write_entry<usb_drd>>
 {
   std::vector<write_entry<usb_drd>> out;
   for(std::size_t n = 0; n < endpoints; ++n)
   {
-    auto const* const found = find_register(desc, std::format("{}{}R", variant.names.endpoint, n));
-    out.push_back(
-        {found != nullptr ? std::string_view{found->name} : variant.names.endpoint,
-         &usb_drd::endpoint_written});
+    auto const        name  = std::format("{}{}R", variant.names.endpoint, n);
+    auto const* const found = find_register(desc, name);
+    if(found == nullptr)
+    {
+      throw config_error(
+          std::string{part}, 0, std::format("peripherals.{}.registers.{}", desc.name, name),
+          std::format("the endpoint register {} of {}", name, variant.manual));
+    }
+    out.push_back({std::string_view{found->name}, &usb_drd::endpoint_written});
   }
   out.push_back({"CNTR", &usb_drd::control_written});
   out.push_back({"ISTR", &usb_drd::status_written});
   out.push_back({"FNR", &usb_drd::plain_written});
   out.push_back({"DADDR", &usb_drd::plain_written});
-  out.push_back({variant.lpm_register, &usb_drd::link_power_written});
-  out.push_back({variant.charging_register, &usb_drd::charging_written});
+  if(not variant.descriptor_register.empty())
+  {
+    out.push_back({variant.descriptor_register, &usb_drd::plain_written});
+  }
+  if(not variant.lpm_register.empty())
+  {
+    out.push_back({variant.lpm_register, &usb_drd::link_power_written});
+  }
+  if(not variant.charging_register.empty())
+  {
+    out.push_back({variant.charging_register, &usb_drd::charging_written});
+  }
   return out;
 }
 
@@ -357,8 +415,8 @@ usb_drd::usb_drd(
     peripheral_desc const&          desc,
     std::optional<usb_host_options> wired,
     usb_drd_variant const&          variant)
-    : dispatch_model{ctx, desc, "USB", usb_drd_writes(desc, variant)}, variant_{variant},
-      regs_{ctx.regs}, frames_{ctx.peers}, line_{irq(variant.irq)},
+    : dispatch_model{ctx, desc, "USB", usb_drd_writes(ctx.part.part, desc, variant)},
+      variant_{variant}, regs_{ctx.regs}, frames_{ctx.peers}, line_{irq(variant.irq)},
       ep_{[this]<std::size_t... n>(std::index_sequence<n...>) {
         return std::array<endpoint_fields, endpoints>{endpoint_fields_of(n)...};
       }(std::make_index_sequence<endpoints>{})},
@@ -369,16 +427,38 @@ usb_drd::usb_drd(
       wake_flag_{field("ISTR", "WKUP")}, core_reset_{field("CNTR", variant.names.core_reset)},
       power_down_{field("CNTR", "PDWN")}, suspend_enable_{field("CNTR", variant.names.suspend)},
       suspend_ready_{field("CNTR", variant.names.suspend_ready)},
-      l1_resume_{field("CNTR", variant.names.l1_resume)},
+      l1_resume_{optional_field("CNTR", variant.names.l1_resume)},
       l2_resume_{field("CNTR", variant.names.l2_resume)},
-      host_mode_{field("CNTR", variant.names.host_mode)}, frame_number_{field("FNR", "FN")},
-      lost_frames_{field("FNR", "LSOF")}, locked_{field("FNR", "LCK")},
-      line_plus_{field("FNR", "RXDP")}, line_minus_{field("FNR", "RXDM")},
-      address_{field("DADDR", "ADD")}, function_enable_{field("DADDR", "EF")},
-      lpm_enable_{field(variant.lpm_register, "LPMEN")},
-      charging_enable_{field(variant.charging_register, "BCDEN")},
-      pull_up_{field(variant.pull_up_register, variant.pull_up_field)}
+      host_mode_{optional_field("CNTR", variant.names.host_mode)},
+      frame_number_{field("FNR", "FN")}, lost_frames_{field("FNR", "LSOF")},
+      locked_{field("FNR", "LCK")}, line_plus_{field("FNR", "RXDP")},
+      line_minus_{field("FNR", "RXDM")}, address_{field("DADDR", "ADD")},
+      function_enable_{field("DADDR", "EF")},
+      lpm_enable_{optional_field(variant.lpm_register, "LPMEN")},
+      charging_enable_{optional_field(variant.charging_register, "BCDEN")},
+      pull_up_{optional_field(variant.pull_up_register, variant.pull_up_field)},
+      btable_{optional_field(variant.descriptor_register, variant.descriptor_register)}
 {
+  expect_register("LPMCSR", variant.lpm_register == "LPMCSR");
+  expect_register("BCDR", variant.charging_register == "BCDR");
+  expect_register("BTABLE", variant.descriptor_register == "BTABLE");
+  if(not variant.priority_irq.empty())
+  {
+    priority_line_ = &irq(variant.priority_irq);
+  }
+  if(not variant.pma_peripheral.empty())
+  {
+    auto const window =
+        std::ranges::find(ctx.part.peripherals, variant.pma_peripheral, &peripheral_desc::name);
+    if(window == ctx.part.peripherals.end() or window->size < window_bytes())
+    {
+      throw config_error(
+          ctx.part.part, 0, std::format("peripherals.{}.size", variant.pma_peripheral),
+          std::format(
+              "a peripheral of at least {} bytes holding the packet memory of {}", window_bytes(),
+              desc.name));
+    }
+  }
   state_.pma.assign(variant_.pma_bytes, std::byte{});
   auto const toggles = std::to_array<std::string_view>(
       {variant.names.stat_tx, variant.names.dtog_tx, variant.names.stat_rx, variant.names.dtog_rx});
@@ -405,6 +485,16 @@ usb_drd::usb_drd(
     }
   }
   wire(std::move(wired));
+}
+
+auto usb_drd::optional_field(std::string_view reg, std::string_view name) const
+    -> std::optional<field_ref>
+{
+  if(reg.empty() or name.empty())
+  {
+    return std::nullopt;
+  }
+  return field(reg, name);
 }
 
 auto usb_drd::endpoint_name(std::size_t n) const -> std::string
@@ -457,16 +547,20 @@ auto usb_drd::kind_mask(std::span<std::string_view const> names, write_effect ef
   return mask;
 }
 
-auto usb_drd::served_ranges() const -> std::vector<std::pair<std::uint32_t, std::uint32_t>>
+auto usb_drd::window_bytes() const -> std::uint32_t
 {
-  return {
-      {variant_.pma_offset, variant_.pma_offset + variant_.pma_bytes}
-  };
+  return variant_.pma_bytes / variant_.pma_unit * 4;
 }
 
-auto usb_drd::in_window(std::uint32_t offset) const -> bool
+auto usb_drd::served_ranges() const -> std::vector<std::pair<std::uint32_t, std::uint32_t>>
 {
-  return offset >= variant_.pma_offset and offset < variant_.pma_offset + variant_.pma_bytes;
+  if(not variant_.pma_peripheral.empty())
+  {
+    return {};
+  }
+  return {
+      {variant_.pma_offset, variant_.pma_offset + window_bytes()}
+  };
 }
 
 auto usb_drd::link_state() -> usb_link_state&
@@ -491,6 +585,7 @@ void usb_drd::on_bus_reset()
 
 void usb_drd::restore_reset_values(std::optional<reset_kind> kind)
 {
+  auto const woken = get(regs_, wake_flag_) != 0;
   for(auto const& name : claims())
   {
     regs_.poke(reg(name).offset, describe(name).reset);
@@ -513,6 +608,7 @@ void usb_drd::restore_reset_values(std::optional<reset_kind> kind)
     state_.pma.assign(variant_.pma_bytes, std::byte{});
   }
   keep_link(kept, kind);
+  tell_wake_line(woken);
   link(false);
   refresh();
 }
@@ -522,9 +618,26 @@ auto usb_drd::now() const -> vtime
   return ctx_.clock.time();
 }
 
+auto usb_drd::pull_up_enabled() const -> bool
+{
+  if(pull_up_)
+  {
+    return get(regs_, *pull_up_) != 0;
+  }
+  auto const* const source =
+      dynamic_cast<usb_pull_up_source const*>(ctx_.peers.find(variant_.pull_up_peer));
+  return source != nullptr and source->usb_pull_up();
+}
+
 auto usb_drd::pulled_up() const -> bool
 {
-  return host() != nullptr and get(regs_, pull_up_) != 0;
+  return host() != nullptr and pull_up_enabled();
+}
+
+void usb_drd::usb_pull_up_changed()
+{
+  link(true);
+  refresh();
 }
 
 auto usb_drd::on_bus(std::uint8_t address) const -> bool
@@ -548,7 +661,7 @@ void usb_drd::time_frames()
   {
     state_.in_reset = false;
   }
-  auto const running = get(regs_, pull_up_) != 0
+  auto const running = pull_up_enabled()
                    and get(regs_, power_down_) == 0
                    and get(regs_, core_reset_) == 0
                    and get(regs_, suspend_enable_) == 0
@@ -589,6 +702,7 @@ void usb_drd::refresh()
   update(regs_, line_plus_, attached and not pulled_up() ? 0u : 1u);
   update(regs_, line_minus_, attached ? 0u : 1u);
   std::optional<std::size_t> first;
+  auto                       priority_pending = false;
   for(auto const priority : {true, false})
   {
     for(std::size_t n = 0; n < endpoints and not first; ++n)
@@ -599,8 +713,20 @@ void usb_drd::refresh()
       auto const pending  = ep_[n].vtrx.of(word) != 0 or ep_[n].vttx.of(word) != 0;
       if(pending and buffered == priority)
       {
-        first = n;
+        first            = n;
+        priority_pending = priority;
       }
+    }
+  }
+  if(priority_line_ != nullptr)
+  {
+    if(priority_pending)
+    {
+      priority_line_->raise();
+    }
+    else
+    {
+      priority_line_->lower();
     }
   }
   update(regs_, transfer_, first ? 1 : 0);
@@ -647,34 +773,49 @@ void usb_drd::unmodelled(
   }
 }
 
+auto usb_drd::pma_byte(std::uint32_t at) const -> std::byte
+{
+  return state_.pma[at % variant_.pma_bytes];
+}
+
+void usb_drd::set_pma_byte(std::uint32_t at, std::byte value)
+{
+  state_.pma[at % variant_.pma_bytes] = value;
+}
+
 auto usb_drd::pma_word(std::uint32_t at) const -> std::uint32_t
 {
-  auto const    base = at & (variant_.pma_bytes - 4);
+  auto const    base = at & ~3u;
   std::uint32_t word = 0;
   for(std::uint32_t lane = 0; lane < 4; ++lane)
   {
-    word |= std::to_integer<std::uint32_t>(state_.pma[base + lane]) << (8 * lane);
+    word |= std::to_integer<std::uint32_t>(pma_byte(base + lane)) << (8 * lane);
   }
   return word;
 }
 
 void usb_drd::set_pma_word(std::uint32_t at, std::uint32_t word)
 {
-  auto const base = at & (variant_.pma_bytes - 4);
+  auto const base = at & ~3u;
   for(std::uint32_t lane = 0; lane < 4; ++lane)
   {
-    state_.pma[base + lane] = static_cast<std::byte>(word >> (8 * lane));
+    set_pma_byte(base + lane, static_cast<std::byte>(word >> (8 * lane)));
   }
+}
+
+auto usb_drd::descriptor_base() const -> std::uint32_t
+{
+  return btable_ ? get(regs_, *btable_) << btable_->lsb : 0;
 }
 
 auto usb_drd::descriptor(std::size_t n, std::uint32_t which) const -> std::uint32_t
 {
-  return pma_word(static_cast<std::uint32_t>(8 * n + 4 * which));
+  return pma_word(descriptor_base() + static_cast<std::uint32_t>(8 * n + 4 * which));
 }
 
 void usb_drd::set_count(std::size_t n, std::uint32_t which, std::size_t bytes)
 {
-  auto const at   = static_cast<std::uint32_t>(8 * n + 4 * which);
+  auto const at   = descriptor_base() + static_cast<std::uint32_t>(8 * n + 4 * which);
   auto const word = pma_word(at);
   set_pma_word(at, (word & ~0x03ff'0000u) | ((static_cast<std::uint32_t>(bytes) & 0x3ffu) << 16));
 }
@@ -682,37 +823,86 @@ void usb_drd::set_count(std::size_t n, std::uint32_t which, std::size_t bytes)
 auto usb_drd::load_bytes(std::uint32_t descriptor) const -> std::vector<std::uint8_t>
 {
   auto const                count = (descriptor >> 16) & 0x3ffu;
-  auto const                start = descriptor & 0xfffcu;
+  auto const                start = descriptor & variant_.address_mask;
   std::vector<std::uint8_t> bytes(count);
   for(std::uint32_t index = 0; index < count; ++index)
   {
-    bytes[index] = std::to_integer<std::uint8_t>(state_.pma[(start + index) % variant_.pma_bytes]);
+    bytes[index] = std::to_integer<std::uint8_t>(pma_byte(start + index));
   }
   return bytes;
 }
 
 void usb_drd::store_bytes(std::uint32_t descriptor, std::span<std::uint8_t const> bytes)
 {
-  auto const start = descriptor & 0xfffcu;
+  auto const start = descriptor & variant_.address_mask;
   for(std::size_t index = 0; index < bytes.size(); ++index)
   {
-    state_.pma[(start + index) % variant_.pma_bytes] = static_cast<std::byte>(bytes[index]);
+    set_pma_byte(start + static_cast<std::uint32_t>(index), static_cast<std::byte>(bytes[index]));
+  }
+}
+
+auto usb_drd::pma_allowed(std::uint32_t offset, std::uint8_t size) const -> bool
+{
+  return ((variant_.pma_sizes >> size) & 1u) != 0 and offset % 4 == 0;
+}
+
+auto usb_drd::pma_read(std::uint32_t offset, std::uint8_t size, access_ctx ctx)
+    -> std::expected<std::uint32_t, bus_error>
+{
+  if(not pma_allowed(offset, size) and ctx.by != initiator::debugger)
+  {
+    unmodelled(
+        "USBSRAM", offset & ~3u,
+        std::format("a {}-byte read of the packet memory reads its lanes of the word", size),
+        pma_width);
+  }
+  auto const    first = offset / 4 * variant_.pma_unit;
+  std::uint32_t word  = 0;
+  for(std::uint32_t lane = 0; lane < variant_.pma_unit; ++lane)
+  {
+    word |= std::to_integer<std::uint32_t>(pma_byte(first + lane)) << (8 * lane);
+  }
+  return read_lanes(word, offset, size);
+}
+
+void usb_drd::pma_write(
+    std::uint32_t offset,
+    std::uint8_t  size,
+    std::uint32_t value,
+    access_ctx    ctx)
+{
+  auto const upper = offset % 4 >= variant_.pma_unit;
+  if(not pma_allowed(offset, size) and ctx.by != initiator::debugger)
+  {
+    unmodelled(
+        "USBSRAM", offset & ~3u,
+        upper
+            ? std::format(
+                  "a {}-byte write of the upper half of a packet memory word is ignored", size)
+            : std::format(
+                  "a {}-byte write of the packet memory zeroes the other lanes of the word", size),
+        pma_width);
+  }
+  if(upper)
+  {
+    return;
+  }
+  auto const word  = merge_write(0, offset, size, value);
+  auto const first = offset / 4 * variant_.pma_unit;
+  for(std::uint32_t lane = 0; lane < variant_.pma_unit; ++lane)
+  {
+    set_pma_byte(first + lane, static_cast<std::byte>(word >> (8 * lane)));
   }
 }
 
 auto usb_drd::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
     -> std::expected<std::uint32_t, bus_error>
 {
-  if(in_window(offset))
+  if(variant_.pma_peripheral.empty()
+     and offset >= variant_.pma_offset
+     and offset < variant_.pma_offset + window_bytes())
   {
-    if(size != 4 and ctx.by != initiator::debugger)
-    {
-      unmodelled(
-          "USBSRAM", offset & ~3u,
-          std::format("a {}-byte read of the packet memory reads its lanes of the word", size),
-          pma_width);
-    }
-    return read_lanes(pma_word(offset - variant_.pma_offset), offset, size);
+    return pma_read(offset - variant_.pma_offset, size, ctx);
   }
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
@@ -725,17 +915,11 @@ auto usb_drd::on_write(
     std::uint32_t  value,
     access_ctx     ctx) -> std::expected<void, bus_error>
 {
-  if(in_window(offset))
+  if(variant_.pma_peripheral.empty()
+     and offset >= variant_.pma_offset
+     and offset < variant_.pma_offset + window_bytes())
   {
-    if(size != 4 and ctx.by != initiator::debugger)
-    {
-      unmodelled(
-          "USBSRAM", offset & ~3u,
-          std::format(
-              "a {}-byte write of the packet memory zeroes the other lanes of the word", size),
-          pma_width);
-    }
-    set_pma_word(offset - variant_.pma_offset, merge_write(0, offset, size, value));
+    pma_write(offset - variant_.pma_offset, size, value, ctx);
     return {};
   }
   access_offset_ = offset & ~3u;
@@ -772,41 +956,77 @@ void usb_drd::endpoint_written(std::uint32_t old, std::uint32_t now)
 void usb_drd::status_written(std::uint32_t old, std::uint32_t now)
 {
   regs_.poke(access_offset_, applied(old, now, status_clears_, 0));
+  tell_wake_line(wake_flag_.of(old) != 0);
   refresh();
+}
+
+void usb_drd::set_wake_flag(std::uint32_t value)
+{
+  auto const before = get(regs_, wake_flag_) != 0;
+  update(regs_, wake_flag_, value);
+  tell_wake_line(before);
+}
+
+void usb_drd::tell_wake_line(bool before)
+{
+  auto const level = get(regs_, wake_flag_) != 0;
+  if(not variant_.wakeup_line or level == before)
+  {
+    return;
+  }
+  if(auto* const exti = dynamic_cast<exti_line_input*>(ctx_.peers.find("EXTI")))
+  {
+    exti->line_changed(*variant_.wakeup_line, level);
+  }
 }
 
 void usb_drd::control_written(std::uint32_t old, std::uint32_t now)
 {
-  if(host_mode_.of(now) != 0)
+  if(host_mode_ and host_mode_->of(now) != 0)
   {
     unmodelled("CNTR", access_offset_, "host mode, CNTR.HOST, is not modelled", host_mode);
   }
-  auto const resume_bits = l1_resume_.mask() | l2_resume_.mask();
+  auto const resume_bits = (l1_resume_ ? l1_resume_->mask() : 0u) | l2_resume_.mask();
   if((now & resume_bits & ~old) != 0)
   {
     unmodelled(
-        "CNTR", access_offset_, "remote wake-up signalling, CNTR.L1RES and L2RES, is not modelled",
+        "CNTR", access_offset_,
+        l1_resume_
+            ? std::format(
+                  "remote wake-up signalling, CNTR.{} and {}, is not modelled",
+                  variant_.names.l1_resume, variant_.names.l2_resume)
+            : std::format(
+                  "remote wake-up signalling, CNTR.{}, is not modelled", variant_.names.l2_resume),
         remote_wakeup);
   }
   if(core_reset_.of(now) != 0 and core_reset_.of(old) == 0)
   {
-    clear_endpoints(false);
+    clear_endpoints(variant_.forced_bus_reset);
+    if(variant_.forced_bus_reset)
+    {
+      update(regs_, reset_done_, 1);
+      update(regs_, locked_, 0);
+      state_.frames = 0;
+    }
   }
-  if(suspend_enable_.of(old) != 0)
+  if(variant_.hardware_suspend)
   {
-    update(regs_, suspend_enable_, 1);
+    if(suspend_enable_.of(old) != 0)
+    {
+      update(regs_, suspend_enable_, 1);
+    }
+    else if(suspend_enable_.of(now) != 0)
+    {
+      update(regs_, lost_frames_, 0);
+    }
+    update(regs_, suspend_ready_, get(regs_, suspend_enable_));
   }
-  else if(suspend_enable_.of(now) != 0)
-  {
-    update(regs_, lost_frames_, 0);
-  }
-  update(regs_, suspend_ready_, get(regs_, suspend_enable_));
   refresh();
 }
 
 void usb_drd::link_power_written(std::uint32_t, std::uint32_t now)
 {
-  if(lpm_enable_.of(now) != 0)
+  if(lpm_enable_ and lpm_enable_->of(now) != 0)
   {
     unmodelled("LPMCSR", access_offset_, "LPM, LPMCSR.LPMEN, is not modelled", link_power);
   }
@@ -814,7 +1034,7 @@ void usb_drd::link_power_written(std::uint32_t, std::uint32_t now)
 
 void usb_drd::charging_written(std::uint32_t, std::uint32_t now)
 {
-  if(charging_enable_.of(now) != 0)
+  if(charging_enable_ and charging_enable_->of(now) != 0)
   {
     unmodelled(
         "BCDR", access_offset_, "battery charging detection, BCDR.BCDEN, is not modelled",
@@ -1161,9 +1381,12 @@ void usb_drd::wake()
 {
   if(get(regs_, suspend_enable_) != 0)
   {
-    update(regs_, wake_flag_, 1);
+    set_wake_flag(1);
   }
-  update(regs_, suspend_enable_, 0);
+  if(variant_.hardware_suspend)
+  {
+    update(regs_, suspend_enable_, 0);
+  }
   update(regs_, suspend_ready_, 0);
 }
 
@@ -1175,15 +1398,106 @@ void usb_drd::resume(vtime)
   }
   state_.suspended = false;
   state_.missed    = 0;
-  update(regs_, suspend_enable_, 0);
-  update(regs_, suspend_ready_, 0);
-  update(regs_, wake_flag_, 1);
+  if(variant_.hardware_suspend)
+  {
+    update(regs_, suspend_enable_, 0);
+    update(regs_, suspend_ready_, 0);
+    set_wake_flag(1);
+  }
+  else
+  {
+    wake();
+  }
   refresh();
 }
+
+/**
+ * @brief The packet memory window of a USB device controller held in a peripheral of its own,
+ *        `USB_SRAM` on the STM32L1: every access of the window goes to the controller's model,
+ *        which owns the memory. The window keeps no state. An access with no controller model
+ *        attached raises model_error.
+ */
+class usb_packet_memory final : public model
+{
+public:
+  usb_packet_memory(model_context& ctx, peripheral_desc const& desc, std::string_view controller)
+      : ctx_{ctx}, desc_{desc}, controller_{controller}
+  {}
+
+  [[nodiscard]] auto claims() const -> std::vector<std::string> override
+  {
+    return {};
+  }
+
+  [[nodiscard]] auto served_ranges() const
+      -> std::vector<std::pair<std::uint32_t, std::uint32_t>> override
+  {
+    return {
+        {0, static_cast<std::uint32_t>(desc_.size)}
+    };
+  }
+
+  void reset(register_file&, reset_kind) override
+  {}
+
+  auto on_read(register_file&, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
+      -> std::expected<std::uint32_t, bus_error> override
+  {
+    return owner(offset).pma_read(offset, size, ctx);
+  }
+
+  auto on_write(
+      register_file&,
+      std::uint32_t offset,
+      std::uint8_t  size,
+      std::uint32_t,
+      std::uint32_t value,
+      access_ctx    ctx) -> std::expected<void, bus_error> override
+  {
+    owner(offset).pma_write(offset, size, value, ctx);
+    return {};
+  }
+
+  void on_event(std::uint32_t, std::uint64_t) override
+  {}
+
+  void save(std::vector<std::byte>&) const override
+  {}
+
+  void load(std::span<std::byte const>) override
+  {}
+
+  [[nodiscard]] auto stateless() const -> bool override
+  {
+    return true;
+  }
+
+private:
+  [[nodiscard]] auto owner(std::uint32_t offset) const -> usb_drd&
+  {
+    auto* const found = dynamic_cast<usb_drd*>(ctx_.peers.find(controller_));
+    if(found == nullptr)
+    {
+      throw model_error(desc_.name, std::string{controller_}, offset & ~3u);
+    }
+    return *found;
+  }
+
+  model_context&         ctx_;
+  peripheral_desc const& desc_;
+  std::string_view       controller_;
+};
 }
 
 auto usb_drd_factory(board const& b, usb_drd_variant const& variant) -> model_factory
 {
   return usb_device_factory<usb_drd>(b, variant);
+}
+
+auto usb_packet_memory_factory(std::string_view controller) -> model_factory
+{
+  return [controller](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<usb_packet_memory>(ctx, desc, controller);
+  };
 }
 }

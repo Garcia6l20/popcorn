@@ -731,6 +731,40 @@ Not modelled, logged:
 - Battery charging detection, `BCDR.BCDEN`.
 - Remote wake-up signalling, `CNTR.L1RES` and `CNTR.L2RES`.
 
+On the STM32L1, RM0038 section 24, the same model runs with the L1 register names: `EPnR` with
+`STAT_TX`, `DTOG_TX`, `CTR_TX`, `EP_KIND`, `EP_TYPE`, `STAT_RX`, `DTOG_RX` and `CTR_RX`,
+`ISTR.RESET` and `EP_ID`, and `CNTR.FRES`, `FSUSP`, `LPMODE` and `RESUME`.
+
+- The rules above that were measured on an STM32H573 apply as inferred: the narrow register
+  write, the suspend timer, `FNR.LCK`, `FNR.RXDP` and `RXDM`, and the first transaction of a
+  double-buffered bulk endpoint.
+- The packet memory is 512 bytes in the `USB_SRAM` peripheral, local half-word k in the low
+  half of the word at offset 4k, RM0038 24.5.3. The upper half reads 0 and ignores writes,
+  inferred. Half-word and word accesses of the low half pass. A CPU byte access or an access of
+  the upper half logs once and raises `ModelError` under `strict`. Debugger accesses of any
+  width pass.
+- The descriptor table starts at `BTABLE`, and a buffer address ignores bit 0, inferred from
+  RM0038 24.5.3, which says bit 0 must be written 0.
+- The D+ pull-up is `SYSCFG_PMC.USB_PU`, RM0038 24.4.2. A write or a SYSCFG reset that changes
+  it tells the host at once. `LCD_CAPA` in the same register is storage: a CPU write that sets a
+  bit of it logs once and raises `ModelError` under `strict`.
+- `FRES` written from 0 to 1 clears every `EPnR` but `CTR_RX` and `CTR_TX` and clears `DADDR`,
+  RM0038 24.5.1 `CNTR.FRES`, which resets the peripheral like a USB reset, and `ISTR.RESET`,
+  which resets the function address and endpoint registers at a USB reset. `ISTR.RESET` sets at
+  the write, inferred.
+- `FSUSP` and `LPMODE` keep what the firmware writes. While `FSUSP` is set the suspend timer
+  stops. A bus reset, a SOF or a resume while `FSUSP` is set raises `WKUP` and clears `LPMODE`,
+  and `FSUSP` stays set, RM0038 24.4.5.
+- `USB_LP` is any `ISTR` flag whose `CNTR` mask is set. `USB_HP` is a `CTR_RX` or `CTR_TX` of an
+  isochronous or double-buffered bulk endpoint whatever `CNTR.CTRM` holds, inferred from RM0038
+  24.3.1 and the endpoint interrupt condition of 24.5.2.
+- EXTI line 18 follows `ISTR.WKUP`: it rises when `WKUP` sets and falls when the firmware clears
+  it, inferred from RM0038 24.5.1, so `USB_FS_WKUP` needs the line's EXTI rising edge and mask.
+
+Not modelled on the STM32L1, logged, `ModelError` under `strict`:
+
+- Remote wake-up signalling, `CNTR.RESUME`.
+
 ## PWR
 
 Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/pwr.cpp)
