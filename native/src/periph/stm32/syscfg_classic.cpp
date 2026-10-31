@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <memory>
 #include <optional>
 #include <string>
@@ -36,12 +37,14 @@ static_assert(std::is_empty_v<syscfg_classic_state>);
  *        through the codes of the traits, a code with no port for that line selects none, and the
  *        EXTI peer reads them. A selector write that moves a line to a pin of another level hands
  *        the EXTI peer that edge, as the line input changes on the switch. The USB D+ pull-up
- *        enable, `SYSCFG_PMC.USB_PU`, is published through usb_pull_up_source. The registers the
- *        traits list as storage, `SYSCFG_MEMRMP` and `SYSCFG_PMC` on the STM32L1, are storage the
- *        model does not model: the machine boots from main flash, which BOOT_MODE and MEM_MODE 00
- *        give, and USB_PU drives no pull-up until a USB model reads it. A firmware write that lands
- *        on one logs one model_warning per register, and raises model_error under
- *        strict_peripherals before it is stored. Every reset brings the registers to their
+ *        enable, `SYSCFG_PMC.USB_PU`, is published through usb_pull_up_source, and every change
+ *        of it, by a write or a reset, is told to the USB peer through usb_pull_up_listener. The
+ *        other fields of its register, `LCD_CAPA` on the STM32L1, and the registers the traits
+ *        list as storage, `SYSCFG_MEMRMP` on the STM32L1, are storage the model does not model:
+ *        the machine boots from main flash, which BOOT_MODE and MEM_MODE 00 give. A firmware write
+ *        that sets a bit of those fields or lands on such a register logs one model_warning per
+ *        register, and raises model_error under strict_peripherals before it is stored. Every
+ *        reset brings the registers to their
  *        description reset, a SYSCFGRST pulse except the memory remap register, RM0038 8.5.1. The
  *        model is stateless.
  */
@@ -65,6 +68,13 @@ public:
   [[nodiscard]] auto stateless() const -> bool override;
   [[nodiscard]] auto storage_only(std::uint32_t offset) const -> bool override;
   [[nodiscard]] auto guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard;
+  auto               on_write(
+      register_file& regs,
+      std::uint32_t  offset,
+      std::uint8_t   size,
+      std::uint32_t  old,
+      std::uint32_t  value,
+      access_ctx     ctx) -> std::expected<void, bus_error> override;
 
   template <std::size_t Register> void selector_written(std::uint32_t old, std::uint32_t now);
 
@@ -74,11 +84,13 @@ private:
   [[nodiscard]] auto level_of(std::optional<std::uint8_t> port, std::uint8_t line) const -> bool;
   void               reselect(std::uint32_t offset, std::uint32_t old, std::uint32_t now);
   void               restore_reset_values();
+  void               tell_pull_up(bool before);
 
   register_file&                        regs_;
   syscfg_classic_traits                 traits_;
   std::array<field_ref, selected_lines> selectors_{};
   std::optional<field_ref>              pull_up_;
+  std::uint32_t                         pull_up_storage_{};
   std::optional<reg_ref>                remap_;
   std::vector<std::uint32_t>            storage_;
   storage_notes                         notes_;
@@ -124,6 +136,13 @@ syscfg_classic::syscfg_classic(
   if(not traits.usb_pull_up_register.empty())
   {
     pull_up_ = field(traits.usb_pull_up_register, traits.usb_pull_up_field);
+    for(auto const& other : describe(traits.usb_pull_up_register).fields)
+    {
+      if(other.name != traits.usb_pull_up_field)
+      {
+        pull_up_storage_ |= field(traits.usb_pull_up_register, other.name).mask();
+      }
+    }
   }
   if(not traits.remap_register.empty())
   {
@@ -145,7 +164,21 @@ void syscfg_classic::restore_reset_values()
 
 void syscfg_classic::reset(register_file&, reset_kind)
 {
+  auto const before = usb_pull_up();
   restore_reset_values();
+  tell_pull_up(before);
+}
+
+void syscfg_classic::tell_pull_up(bool before)
+{
+  if(usb_pull_up() == before)
+  {
+    return;
+  }
+  if(auto* const usb = dynamic_cast<usb_pull_up_listener*>(ctx_.peers.find(traits_.usb_peer)))
+  {
+    usb->usb_pull_up_changed();
+  }
 }
 
 void syscfg_classic::on_bus_reset()
@@ -158,7 +191,8 @@ void syscfg_classic::on_bus_reset()
       selectors.emplace_back(bits.offset, regs_.peek(bits.offset));
     }
   }
-  auto const remap = remap_ ? std::optional{regs_.peek(remap_->offset)} : std::nullopt;
+  auto const remap  = remap_ ? std::optional{regs_.peek(remap_->offset)} : std::nullopt;
+  auto const before = usb_pull_up();
   restore_reset_values();
   if(remap)
   {
@@ -168,6 +202,7 @@ void syscfg_classic::on_bus_reset()
   {
     reselect(offset, old, regs_.peek(offset));
   }
+  tell_pull_up(before);
 }
 
 void syscfg_classic::on_event(std::uint32_t, std::uint64_t)
@@ -251,6 +286,27 @@ auto syscfg_classic::stateless() const -> bool
 auto syscfg_classic::storage_only(std::uint32_t offset) const -> bool
 {
   return std::ranges::contains(storage_, offset);
+}
+
+auto syscfg_classic::on_write(
+    register_file& regs,
+    std::uint32_t  offset,
+    std::uint8_t   size,
+    std::uint32_t  old,
+    std::uint32_t  value,
+    access_ctx     ctx) -> std::expected<void, bus_error>
+{
+  auto const word = offset & ~3u;
+  if(pull_up_
+     and word == pull_up_->offset
+     and (merge_write(regs.peek(word), offset, size, value) & pull_up_storage_) != 0)
+  {
+    notes_.written(ctx_, desc_, "SYSCFG", word, ctx, {});
+  }
+  auto const before = usb_pull_up();
+  auto       result = dispatch_model::on_write(regs, offset, size, old, value, ctx);
+  tell_pull_up(before);
+  return result;
 }
 
 auto syscfg_classic::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard

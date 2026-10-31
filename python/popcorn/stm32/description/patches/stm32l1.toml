@@ -13,10 +13,11 @@ renames = { Flash = "FLASH" }
 source = "RM0038 Rev 18, 3.9 register description: the flash interface registers are FLASH_xxx, the four SVDs spell the peripheral Flash"
 
 [irqs]
-drop = ["RTC_Alarm", "RTC_WKUP"]
+drop = ["RTC_Alarm", "RTC_WKUP", "USB_FS_WKUP"]
 add = [
   { number = 41, name = "RTC_Alarm", peripheral = "EXTI" },
   { number = 3, name = "RTC_WKUP", peripheral = "EXTI" },
+  { number = 42, name = "USB_FS_WKUP", peripheral = "EXTI" },
 ]
 
 [[register_renames]]
@@ -339,3 +340,42 @@ registers = ["CR"]
 fields = ["CSBF", "CWUF"]
 acc = "write_only"
 source = "RM0038 Rev 18, 5.4.1 PWR_CR: CSBF and CWUF are rc_w1 and always read as 0"
+
+[[fields]]
+ip = "USB"
+registers = ["USB_EP{n}R"]
+each = { n = [0, 7] }
+fields = ["STAT_TX", "DTOG_TX", "STAT_RX", "DTOG_RX"]
+acc = "read_write"
+on_write = "one_to_toggle"
+source = "RM0038 Rev 18, 24.5.2 USB endpoint n register (USB_EPnR): STAT_TX, DTOG_TX, STAT_RX and DTOG_RX are t, toggled by writing 1. ST's four L1 SVDs give plain read-write"
+
+[[fields]]
+ip = "USB"
+registers = ["USB_EP{n}R"]
+each = { n = [0, 7] }
+fields = ["CTR_TX", "CTR_RX"]
+on_write = "zero_to_clear"
+source = "RM0038 Rev 18, 24.5.2 USB endpoint n register (USB_EPnR): CTR_TX and CTR_RX are rc_w0. ST's four L1 SVDs give plain read-write"
+
+[[fields]]
+ip = "USB"
+registers = ["USB_EP{n}R"]
+each = { n = [0, 7] }
+fields = ["SETUP"]
+acc = "read_only"
+source = "RM0038 Rev 18, 24.5.2 USB endpoint n register (USB_EPnR): SETUP is r, set by the hardware. ST's four L1 SVDs give plain read-write"
+
+[[fields]]
+ip = "USB"
+registers = ["ISTR"]
+fields = ["ESOF", "SOF", "RESET", "SUSP", "WKUP", "ERR", "PMAOVR"]
+on_write = "zero_to_clear"
+source = "RM0038 Rev 18, 24.5.1 USB interrupt status register (USB_ISTR): ESOF to PMAOVR are rc_w0. ST's four L1 SVDs give plain read-write"
+
+[[fields]]
+ip = "USB"
+registers = ["ISTR"]
+fields = ["EP_ID", "DIR", "CTR"]
+acc = "read_only"
+source = "RM0038 Rev 18, 24.5.1 USB interrupt status register (USB_ISTR): EP_ID, DIR and CTR are r. ST's four L1 SVDs give plain read-write"

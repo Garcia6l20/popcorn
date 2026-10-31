@@ -1048,8 +1048,9 @@ Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/
 - STM32L1: `SYSCFG_MEMRMP` is storage. The machine boots from main flash, BOOT_MODE and
   MEM_MODE read 00, and a MEM_MODE write maps no other memory at 0x00000000. A firmware write
   logs one `model_warning`. Under `strict` it raises `ModelError` before the store.
-- STM32L1: `SYSCFG_PMC` is storage until the USB model reads `USB_PU`. A firmware write logs one
-  `model_warning`. Under `strict` it raises `ModelError` before the store.
+- STM32L1: `SYSCFG_PMC.USB_PU` drives the USB D+ pull-up. `LCD_CAPA` is storage: a firmware
+  write that sets a bit of it logs one `model_warning`, and under `strict` raises `ModelError`
+  before the store.
 
 ## TIM
 

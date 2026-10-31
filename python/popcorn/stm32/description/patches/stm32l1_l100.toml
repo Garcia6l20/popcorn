@@ -1,5 +1,5 @@
 format = 1
-source = "RM0038 Rev 18, STM32L100 value line: five backup registers, USART4 and USART5 spelled as in the L100 SVD, 18 interrupt lines attached to the owner of RM0038 Rev 18 Tables 49 and 50 (the L100 SVD lists them under another peripheral). CubeMX lists neither USART4 nor USART5 for the value line"
+source = "RM0038 Rev 18, STM32L100 value line: five backup registers, USART4 and USART5 spelled as in the L100 SVD, 17 interrupt lines attached to the owner of RM0038 Rev 18 Tables 49 and 50 (the L100 SVD lists them under another peripheral). CubeMX lists neither USART4 nor USART5 for the value line"
 
 [match]
 parts = ["STM32L100*"]
@@ -10,7 +10,7 @@ drop = ["USART4", "USART5"]
 source = "RM0038 Rev 18, Table 49 and Table 50: the vector tables of Cat.1 to Cat.3 have no UART4, UART5 or USART4 and USART5 entries, and the CubeMX parts of the value line list none. The L100 SVD spells them USART4 and USART5"
 
 [irqs]
-drop = ["USART4", "USART5", "WWDG", "ADC1", "USB_HP", "USB_LP", "TIM9", "TIM10", "TIM11", "TIM2", "TIM3", "TIM4", "SPI1", "SPI2", "USART1", "USART2", "USART3", "USB_FS_WKUP", "TIM6", "TIM7"]
+drop = ["USART4", "USART5", "WWDG", "ADC1", "USB_HP", "USB_LP", "TIM9", "TIM10", "TIM11", "TIM2", "TIM3", "TIM4", "SPI1", "SPI2", "USART1", "USART2", "USART3", "TIM6", "TIM7"]
 add = [
   { number = 0, name = "WWDG", peripheral = "WWDG" },
   { number = 18, name = "ADC1", peripheral = "ADC" },
@@ -27,7 +27,6 @@ add = [
   { number = 37, name = "USART1", peripheral = "USART1" },
   { number = 38, name = "USART2", peripheral = "USART2" },
   { number = 39, name = "USART3", peripheral = "USART3" },
-  { number = 42, name = "USB_FS_WKUP", peripheral = "USB" },
   { number = 43, name = "TIM6", peripheral = "TIM6" },
   { number = 44, name = "TIM7", peripheral = "TIM7" },
 ]

@@ -59,12 +59,12 @@ IP_TO_SVD = {
 OWNER_OF_LINE = {
     0: "WWDG",
     1: "PWR",
-    **dict.fromkeys((2, 3, 6, 7, 8, 9, 10, 22, 23, 40, 41), "EXTI"),
+    **dict.fromkeys((2, 3, 6, 7, 8, 9, 10, 22, 23, 40, 41, 42), "EXTI"),
     4: "FLASH",
     5: "RCC",
     **dict.fromkeys(range(11, 18), "DMA1"),
     18: "ADC",
-    **dict.fromkeys((19, 20, 42), "USB"),
+    **dict.fromkeys((19, 20), "USB"),
     21: "DAC",
     24: "LCD",
     25: "TIM9",
@@ -135,6 +135,7 @@ EXTI_IRQS = {
     "COMP_IRQn",
     "RTC_Alarm_IRQn",
     "RTC_WKUP_IRQn",
+    "USB_FS_WKUP_IRQn",
 }
 
 

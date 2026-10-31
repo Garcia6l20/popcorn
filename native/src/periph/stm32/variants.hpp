@@ -114,8 +114,8 @@ struct exti_classic_traits
 /** @brief STM32L1, RM0038 Tables 49 to 51 by NVIC line: EXTI0 to EXTI4 on 6 to 10 one line each,
  *         EXTI9_5 on 23, EXTI15_10 on 40, line 17 RTC_Alarm on 41, line 19 the RTC tamper and
  *         timestamp line on 2, line 20 RTC_WKUP on 3, lines 21 and 22 the comparator wakeup line
- *         on 22, RM0038 20.5. PVD, USB_FS_WKUP and COMP_ACQ, lines 16, 18 and 23, belong to PWR,
- *         USB and COMP in the description. */
+ *         on 22, RM0038 20.5, line 18 USB_FS_WKUP on 42, RM0038 24.3.1. PVD and COMP_ACQ, lines
+ *         16 and 23, belong to PWR and COMP in the description. */
 inline constexpr auto l1_exti_irqs = std::to_array<exti_line_group>({
     {0,  0,  6 },
     {1,  1,  7 },
@@ -125,6 +125,7 @@ inline constexpr auto l1_exti_irqs = std::to_array<exti_line_group>({
     {5,  9,  23},
     {10, 15, 40},
     {17, 17, 41},
+    {18, 18, 42},
     {19, 19, 2 },
     {20, 20, 3 },
     {21, 22, 22},
@@ -263,8 +264,11 @@ struct syscfg_classic_traits
   std::span<exti_port_code const> ports;
   /** @brief Register of the USB D+ pull-up enable. */
   std::string_view usb_pull_up_register;
-  /** @brief Field of the USB D+ pull-up enable. */
+  /** @brief Field of the USB D+ pull-up enable. The other fields of its register are storage
+   *         with the storage diagnostics. */
   std::string_view usb_pull_up_field;
+  /** @brief Peer told of every change of the pull-up enable through usb_pull_up_listener. */
+  std::string_view usb_peer;
   /** @brief Register of the memory remap, kept by a SYSCFGRST pulse. */
   std::string_view remap_register;
   /** @brief Registers served as storage the model does not model, with the storage
@@ -283,13 +287,14 @@ inline constexpr auto l1_exti_ports = std::to_array<exti_port_code>({
     {6, 'F'},
     {7, 'G'},
 });
-/** @brief STM32L1 storage registers of SYSCFG: MEMRMP, and PMC until a USB model reads USB_PU. */
-inline constexpr auto l1_syscfg_storage = std::to_array<std::string_view>({"MEMRMP", "PMC"});
+/** @brief STM32L1 storage registers of SYSCFG: MEMRMP. */
+inline constexpr auto l1_syscfg_storage = std::to_array<std::string_view>({"MEMRMP"});
 /** @brief STM32L1 Cat.3 to Cat.6, RM0038 section 8.5. */
 inline constexpr syscfg_classic_traits l1_syscfg{
     .ports                = l1_exti_ports,
     .usb_pull_up_register = "PMC",
     .usb_pull_up_field    = "USB_PU",
+    .usb_peer             = "USB",
     .remap_register       = "MEMRMP",
     .storage_registers    = l1_syscfg_storage};
 /** @brief STM32L1 Cat.1 and Cat.2, `STM32L1_exti_23`, RM0038 8.5.3: codes 0110 and 0111, PF and
@@ -298,6 +303,7 @@ inline constexpr syscfg_classic_traits l1_syscfg_cat12{
     .ports                = std::span{l1_exti_ports}.first(6),
     .usb_pull_up_register = "PMC",
     .usb_pull_up_field    = "USB_PU",
+    .usb_peer             = "USB",
     .remap_register       = "MEMRMP",
     .storage_registers    = l1_syscfg_storage};
 

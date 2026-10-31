@@ -231,7 +231,7 @@ TEST_CASE("RM0038 Tables 49 to 51: every EXTI line 0 to 23 raises its NVIC line 
        "EXTI15_10_IRQn",
        "",
        "RTC_Alarm_IRQn",
-       "",
+       "USB_FS_WKUP_IRQn",
        "TAMPER_STAMP_IRQn",
        "RTC_WKUP_IRQn",
        "COMP_IRQn",
@@ -414,8 +414,11 @@ TEST_CASE("RM0038 8.5.1: MEMRMP is storage, one warning per machine, model_error
   CHECK(f.target->peripheral("SYSCFG").peek(0) == 0);
 }
 
-TEST_CASE("RM0038 8.5.2: PMC is storage, one warning, model_error under strict, coverage reason")
+TEST_CASE(
+    "RM0038 8.5.2: USB_PU is modelled, LCD_CAPA is storage: "
+    "one warning, model_error under strict")
 {
+  constexpr std::uint32_t lcd_capa = 1u << 1;
   {
     auto const                    f = parked();
     std::vector<core::log_record> logged;
@@ -428,24 +431,31 @@ TEST_CASE("RM0038 8.5.2: PMC is storage, one warning, model_error under strict, 
     CHECK(source->usb_pull_up());
     cpu_store(f, pmc, 0);
     CHECK_FALSE(source->usb_pull_up());
+    CHECK(logged.empty());
+    CHECK_FALSE(f.target->model("SYSCFG")->storage_only(pmc - syscfg));
+    cpu_store(f, pmc, lcd_capa | 1);
+    cpu_store(f, pmc, lcd_capa);
+    CHECK(cpu_load(f, pmc) == lcd_capa);
     REQUIRE(logged.size() == 1);
     CHECK(logged[0].kind == core::log_kind::model_warning);
     CHECK(logged[0].reg == "PMC");
-    CHECK(f.target->model("SYSCFG")->storage_only(pmc - syscfg));
-    auto const found = f.target->coverage().unmodelled;
-    REQUIRE(found.size() == 1);
-    CHECK(found.front().peripheral == "SYSCFG");
-    CHECK(found.front().reg == "PMC");
-    CHECK(found.front().reason == core::unmodelled_reason::storage_only);
+    CHECK(f.target->coverage().unmodelled.empty());
   }
   auto options               = popcorn::testing::stm32_options();
   options.strict_peripherals = true;
   auto const f               = parked(l152re(), firmware, std::move(options));
+  REQUIRE(
+      f.target->model("SYSCFG")
+          ->on_write(
+              f.target->peripheral("SYSCFG"), pmc - syscfg, 4, 0, 1, {.pc = 0, .now = icount{0}})
+          .has_value());
+  CHECK(f.target->peripheral("SYSCFG").peek(pmc - syscfg) == 1);
   CHECK_THROWS_AS(
       (void)f.target->model("SYSCFG")->on_write(
-          f.target->peripheral("SYSCFG"), pmc - syscfg, 4, 0, 1, {.pc = 0, .now = icount{0}}),
+          f.target->peripheral("SYSCFG"), pmc - syscfg, 4, 1, lcd_capa | 1,
+          {.pc = 0, .now = icount{0}}),
       popcorn::model_error);
-  CHECK(f.target->peripheral("SYSCFG").peek(pmc - syscfg) == 0);
+  CHECK(f.target->peripheral("SYSCFG").peek(pmc - syscfg) == 1);
 }
 
 TEST_CASE("RM0038 30.16: DBGMCU IDCODE reads 0x10000437, CR and the freeze registers keep to a POR")

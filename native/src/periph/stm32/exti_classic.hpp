@@ -92,4 +92,30 @@ protected:
   /** @brief Destroys the interface, only through its model. */
   ~usb_pull_up_source() = default;
 };
+
+/**
+ * @brief The USB device model as the SYSCFG model sees it, found by `dynamic_cast` over the
+ *        machine's peers: told of every change of the internal D+ pull-up enable.
+ */
+class usb_pull_up_listener
+{
+public:
+  /** @brief Creates the interface. */
+  usb_pull_up_listener() = default;
+  /** @brief Not copyable. */
+  usb_pull_up_listener(usb_pull_up_listener const&) = delete;
+  /** @brief Not copy-assignable. */
+  auto operator=(usb_pull_up_listener const&) -> usb_pull_up_listener& = delete;
+  /** @brief Not movable. */
+  usb_pull_up_listener(usb_pull_up_listener&&) = delete;
+  /** @brief Not move-assignable. */
+  auto operator=(usb_pull_up_listener&&) -> usb_pull_up_listener& = delete;
+
+  /** @brief The pull-up enable changed, read it again through usb_pull_up_source. */
+  virtual void usb_pull_up_changed() = 0;
+
+protected:
+  /** @brief Destroys the interface, only through its model. */
+  ~usb_pull_up_listener() = default;
+};
 }
