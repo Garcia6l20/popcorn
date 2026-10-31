@@ -686,9 +686,6 @@ TEST_CASE(
     bool             cat1;
   };
   for(auto const& [reg, value, init, cat1] : {
-          row{"CR",     1u << 8,  false, true },
-          row{"CR",     1u << 9,  false, true },
-          row{"CR",     1u << 10, false, true },
           row{"CR",     1u << 11, false, true },
           row{"CR",     1u << 7,  true,  true },
           row{"CR",     1u << 23, false, true },
@@ -833,4 +830,498 @@ TEST_CASE("coverage reports CPU reads of TSTR, CALIBR and TAFCR as storage_only 
   }
   std::ranges::sort(names);
   CHECK(names == std::vector<std::string>{"CALIBR", "TAFCR", "TSTR"});
+}
+
+namespace
+{
+constexpr std::uint32_t alraf      = 1u << 8;
+constexpr std::uint32_t alrbf      = 1u << 9;
+constexpr std::uint32_t wutf       = 1u << 10;
+constexpr std::uint32_t alrawf     = 1u << 0;
+constexpr std::uint32_t alrbwf     = 1u << 1;
+constexpr std::uint32_t wutwf      = 1u << 2;
+constexpr std::uint32_t alrae      = 1u << 8;
+constexpr std::uint32_t alrbe      = 1u << 9;
+constexpr std::uint32_t wute       = 1u << 10;
+constexpr std::uint32_t alraie     = 1u << 12;
+constexpr std::uint32_t alrbie     = 1u << 13;
+constexpr std::uint32_t wutie      = 1u << 14;
+constexpr std::uint32_t date_any   = 1u << 31;
+constexpr std::uint32_t hour_any   = 1u << 23;
+constexpr std::uint32_t minute_any = 1u << 15;
+constexpr std::uint32_t second_any = 1u << 7;
+constexpr std::uint32_t exti_base  = 0x4001'0400;
+constexpr std::uint32_t alarm_irq  = 41;
+constexpr std::uint32_t wakeup_irq = 3;
+
+void exti_write(rig const& r, std::uint32_t offset, std::uint32_t value)
+{
+  REQUIRE(r.probe()
+              .services.write(exti_base + offset, 4, value, popcorn::initiator::debugger)
+              .has_value());
+}
+
+auto exti_read(rig const& r, std::uint32_t offset) -> std::uint32_t
+{
+  auto const value = r.probe().services.read(exti_base + offset, 4, popcorn::initiator::debugger);
+  REQUIRE(value.has_value());
+  return *value;
+}
+
+auto nvic_pending(rig const& r, std::uint32_t irq) -> bool
+{
+  auto const value =
+      r.probe().services.read(0xE000'E200u + 4 * (irq / 32), 4, popcorn::initiator::debugger);
+  REQUIRE(value.has_value());
+  return (*value >> (irq % 32) & 1u) != 0;
+}
+
+void exti_rising(rig const& r, std::uint8_t line)
+{
+  exti_write(r, 0x00, exti_read(r, 0x00) | (1u << line));
+  exti_write(r, 0x08, exti_read(r, 0x08) | (1u << line));
+}
+
+void midnight(rig const& r)
+{
+  r.start_clock();
+  r.enter_init();
+  r.write("TR", 0);
+  r.write("DR", feb_28);
+}
+}
+
+TEST_CASE(
+    "RM0038 20.3.3 and 20.5: alarm A or B on 00:00:05 sets ALRxF and raises RTC_Alarm on EXTI 17, "
+    "strict or not")
+{
+  for(auto const b : {false, true})
+  {
+    for(auto const strict : {false, true})
+    {
+      for(auto const unmasked : {false, true})
+      {
+        CAPTURE(b);
+        CAPTURE(strict);
+        CAPTURE(unmasked);
+        auto const flag = b ? alrbf : alraf;
+        rig        r{l152re(), idle_image, strict};
+        midnight(r);
+        r.write(b ? "ALRMBR" : "ALRMAR", date_any | 0x05);
+        if(unmasked)
+        {
+          exti_rising(r, 17);
+        }
+        r.cpu_write("CR", b ? alrbe | alrbie : alrae | alraie);
+        r.write("ISR", 0);
+        auto const exited = r.now();
+        auto const cycles = std::uint64_t{5} * 256 * 128;
+        r.run_until(exited + (3 + cycles) * rtc_cycle - us);
+        CHECK_FALSE(nvic_pending(r, alarm_irq));
+        CHECK((exti_read(r, 0x14) & (1u << 17)) == 0);
+        CHECK((r.read("ISR") & (alraf | alrbf)) == 0);
+        r.run_until(exited + (4 + cycles) * rtc_cycle + us);
+        CHECK(nvic_pending(r, alarm_irq) == unmasked);
+        CHECK((exti_read(r, 0x14) & (1u << 17)) == (unmasked ? 1u << 17 : 0));
+        CHECK((r.read("ISR") & (alraf | alrbf)) == flag);
+        CHECK(r.read("TR") == 0x00'0005);
+        CHECK(r.warnings() == 0);
+      }
+    }
+  }
+}
+
+TEST_CASE("RM0038 20.3.3: alarm B with every field masked sets ALRBF every second")
+{
+  rig r;
+  midnight(r);
+  r.write("ALRMBR", date_any | hour_any | minute_any | second_any);
+  r.write("CR", alrbe);
+  r.write("ISR", 0);
+  auto const exited = r.now();
+  for(std::uint64_t second = 1; second <= 3; ++second)
+  {
+    CAPTURE(second);
+    r.run_until(exited + (3 + second * 256 * 128) * rtc_cycle - us);
+    CHECK((r.read("ISR") & alrbf) == 0);
+    r.run_until(exited + (4 + second * 256 * 128) * rtc_cycle + us);
+    CHECK((r.read("ISR") & alrbf) == alrbf);
+    r.write("ISR", ~alrbf & ~init_bit);
+  }
+}
+
+TEST_CASE("RM0038 20.3.3: an alarm on seconds 30 with minutes masked fires once a minute")
+{
+  rig r;
+  midnight(r);
+  r.write("ALRMAR", date_any | minute_any | 0x30);
+  r.write("CR", alrae);
+  r.write("ISR", 0);
+  auto const exited = r.now();
+  r.run_until(exited + (4 + 30ULL * 256 * 128) * rtc_cycle + us);
+  CHECK((r.read("ISR") & alraf) == alraf);
+  r.write("ISR", ~alraf & ~init_bit);
+  r.run_until(exited + (3 + 90ULL * 256 * 128) * rtc_cycle - us);
+  CHECK((r.read("ISR") & alraf) == 0);
+  r.run_until(exited + (4 + 90ULL * 256 * 128) * rtc_cycle + us);
+  CHECK((r.read("ISR") & alraf) == alraf);
+  CHECK(r.read("TR") == 0x00'0130);
+}
+
+TEST_CASE("RM0038 20.6.18: alarm A with MASKSS 8 compares SS[7:0] inside a matching second")
+{
+  rig r;
+  midnight(r);
+  r.write("ALRMAR", date_any | 0x02);
+  r.write("ALRMASSR", (8u << 24) | 0xC0);
+  r.write("CR", alrae);
+  r.write("ISR", 0);
+  auto const exited = r.now();
+  auto const tick   = 2ULL * 256 + (255 - 0xC0);
+  r.run_until(exited + (3 + tick * 128) * rtc_cycle - us);
+  CHECK((r.read("ISR") & alraf) == 0);
+  r.run_until(exited + (4 + tick * 128) * rtc_cycle + us);
+  CHECK((r.read("ISR") & alraf) == alraf);
+  CHECK(r.read("SSR") == 0xC0);
+}
+
+TEST_CASE("RM0038 20.6.18: MASKSS 15 with an SS above PREDIV_S never matches")
+{
+  rig r;
+  midnight(r);
+  r.write("ALRMAR", date_any | hour_any | minute_any | second_any);
+  r.write("ALRMASSR", (15u << 24) | 0x1000);
+  r.write("CR", alrae);
+  r.write("ISR", 0);
+  r.later(3 * second);
+  CHECK((r.read("ISR") & alraf) == 0);
+}
+
+TEST_CASE("RM0038 20.6.18: Cat.2 to Cat.6 keep ALRxWF 1, ALRMxSSR refuses writes with ALRxE 1")
+{
+  for(auto const b : {false, true})
+  {
+    CAPTURE(b);
+    auto const alarm   = b ? "ALRMBR" : "ALRMAR";
+    auto const sub     = b ? "ALRMBSSR" : "ALRMASSR";
+    auto const written = b ? alrbwf : alrawf;
+    rig        r;
+    r.start_clock();
+    r.unlock();
+    r.write("CR", b ? alrbe : alrae);
+    CHECK((r.read("ISR") & written) == written);
+    r.write(alarm, 0x12);
+    CHECK(r.read(alarm) == 0x12);
+    r.write(sub, 0x05);
+    CHECK(r.read(sub) == 0);
+    r.write(b ? "ALRMASSR" : "ALRMBSSR", 0x05);
+    CHECK(r.read(b ? "ALRMASSR" : "ALRMBSSR") == 0x05);
+    r.write("CR", 0);
+    r.write(sub, 0x05);
+    CHECK(r.read(sub) == 0x05);
+  }
+}
+
+TEST_CASE(
+    "RM0038 20.3.5, board check 76 inferred: on Cat.1 ALRxWF clears with ALRxE and in init mode, "
+    "sets 2 cycles after")
+{
+  for(auto const b : {false, true})
+  {
+    CAPTURE(b);
+    auto const alarm   = b ? "ALRMBR" : "ALRMAR";
+    auto const written = b ? alrbwf : alrawf;
+    rig        r{l152rb(), idle_image_b};
+    r.start_clock();
+    r.unlock();
+    CHECK((r.read("ISR") & written) == written);
+    r.write("CR", b ? alrbe : alrae);
+    CHECK((r.read("ISR") & written) == 0);
+    CHECK((r.read("ISR") & (alrawf | alrbwf)) == (alrawf | alrbwf) - written);
+    r.write(alarm, 0x12);
+    CHECK(r.read(alarm) == 0);
+    r.write("CR", 0);
+    auto const cleared = r.now();
+    r.run_until(cleared + rtc_cycle - us);
+    CHECK((r.read("ISR") & written) == 0);
+    r.run_until(cleared + 2 * rtc_cycle + us);
+    CHECK((r.read("ISR") & written) == written);
+    r.write(alarm, 0x12);
+    CHECK(r.read(alarm) == 0x12);
+    r.write("ISR", ~0u);
+    r.later(3 * rtc_cycle);
+    CHECK((r.read("ISR") & written) == 0);
+    r.write(alarm, 0x34);
+    CHECK(r.read(alarm) == 0x34);
+  }
+}
+
+TEST_CASE(
+    "RM0038 20.6.4, board check 151 inferred: a system reset 1 cycle after WUTE or a Cat.1 ALRxE "
+    "clears keeps the WF")
+{
+  struct leg
+  {
+    bool          cat1;
+    std::uint32_t enable;
+    std::uint32_t written;
+  };
+  for(auto const& [cat1, enable, written] : {
+          leg{false, wute,  wutwf },
+          leg{true,  wute,  wutwf },
+          leg{true,  alrae, alrawf},
+          leg{true,  alrbe, alrbwf}
+  })
+  {
+    CAPTURE(cat1);
+    CAPTURE(enable);
+    rig r{cat1 ? l152rb() : l152re(), cat1 ? idle_image_b : idle_image};
+    r.start_clock();
+    r.unlock();
+    r.write("CR", enable);
+    r.later(3 * rtc_cycle);
+    REQUIRE((r.read("ISR") & written) == 0);
+    r.write("CR", 0);
+    auto const cleared = r.now();
+    r.run_until(cleared + rtc_cycle - us);
+    r.f->target->reset(reset_kind::software);
+    r.f->set("pc", sym(r.elf, "idle"));
+    auto const reset_at = r.now();
+    CHECK((r.read("ISR") & written) == 0);
+    r.run_until(reset_at + rtc_cycle - 2 * us);
+    CHECK((r.read("ISR") & written) == 0);
+    r.run_until(reset_at + rtc_cycle + 2 * us);
+    CHECK((r.read("ISR") & written) == written);
+  }
+}
+
+TEST_CASE(
+    "RM0038 20.3.5, board check 150 inferred: on Cat.1 a system reset in init mode sets ALRxWF "
+    "for a disabled alarm")
+{
+  rig r{l152rb(), idle_image_b};
+  r.start_clock();
+  r.unlock();
+  r.write("CR", alrbe);
+  r.enter_init();
+  REQUIRE((r.read("ISR") & (alrawf | alrbwf)) == 0);
+  r.f->target->reset(reset_kind::software);
+  r.f->set("pc", sym(r.elf, "idle"));
+  CHECK((r.read("ISR") & init_bit) == 0);
+  CHECK((r.read("ISR") & (alrawf | alrbwf)) == alrawf);
+  r.write("ALRMAR", 0x12);
+  CHECK(r.read("ALRMAR") == 0x12);
+  r.write("ALRMBR", 0x12);
+  CHECK(r.read("ALRMBR") == 0);
+}
+
+TEST_CASE(
+    "RM0038 20.3.4, board check 150 inferred: a ck_spre wakeup counts its period from the restart "
+    "of an init exit or a system reset in init mode")
+{
+  for(auto const reset : {false, true})
+  {
+    CAPTURE(reset);
+    rig r;
+    r.start_clock();
+    r.unlock();
+    r.write("WUTR", 3);
+    r.write("CR", 4);
+    r.write("CR", 4u | wute);
+    r.later(2 * second);
+    r.enter_init();
+    if(reset)
+    {
+      r.f->target->reset(reset_kind::software);
+      r.f->set("pc", sym(r.elf, "idle"));
+    }
+    else
+    {
+      r.write("ISR", 0);
+    }
+    auto const restarted = r.now();
+    r.run_until(restarted + 4 * second - 20 * ms);
+    CHECK((r.read("ISR") & wutf) == 0);
+    r.run_until(restarted + 4 * second + 20 * ms);
+    CHECK((r.read("ISR") & wutf) == wutf);
+  }
+}
+
+TEST_CASE(
+    "RM0038 20.3.4, board check 77 inferred: wakeup on RTCCLK / 16 sets WUTF every 16 x (WUT + 1) "
+    "cycles, EXTI 20, strict or not")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    rig r{l152re(), idle_image, strict};
+    r.start_clock();
+    r.unlock();
+    exti_rising(r, 20);
+    r.write("WUTR", 99);
+    r.cpu_write("CR", wute | wutie);
+    auto const enabled = r.now();
+    for(std::uint64_t n = 1; n <= 2; ++n)
+    {
+      CAPTURE(n);
+      r.run_until(enabled + (n * 1600 - 1) * rtc_cycle - us);
+      CHECK_FALSE(nvic_pending(r, wakeup_irq));
+      CHECK((r.read("ISR") & wutf) == 0);
+      r.run_until(enabled + n * 1600 * rtc_cycle + us);
+      CHECK(nvic_pending(r, wakeup_irq));
+      CHECK((r.read("ISR") & wutf) == wutf);
+      r.write("ISR", ~wutf & ~init_bit);
+      exti_write(r, 0x14, 1u << 20);
+      REQUIRE(r.probe()
+                  .services.write(0xE000'E280u, 4, 1u << wakeup_irq, popcorn::initiator::debugger)
+                  .has_value());
+    }
+    CHECK(r.warnings() == 0);
+  }
+}
+
+TEST_CASE("RM0038 20.3.4: a ck_spre wakeup with WUCKSEL 110 adds 2^16 to WUT")
+{
+  rig r;
+  r.start_clock();
+  r.unlock();
+  r.write("WUTR", 1);
+  r.write("CR", 6);
+  r.write("CR", 6u | wute);
+  r.later((0x1'0002 - 1) * second);
+  CHECK((r.read("ISR") & wutf) == 0);
+  r.later(second + 10 * ms);
+  CHECK((r.read("ISR") & wutf) == wutf);
+}
+
+TEST_CASE(
+    "RM0038 20.6.4: WUTWF clears 1 to 2 cycles after WUTE sets, WUTR and WUCKSEL refuse writes "
+    "until it sets")
+{
+  rig r;
+  r.start_clock();
+  r.unlock();
+  r.write("CR", wute);
+  auto const enabled = r.now();
+  CHECK((r.read("ISR") & wutwf) == wutwf);
+  r.run_until(enabled + 2 * rtc_cycle + us);
+  CHECK((r.read("ISR") & wutwf) == 0);
+  r.write("WUTR", 7);
+  r.write("CR", wute | 3);
+  CHECK(r.read("WUTR") == 0xFFFF);
+  CHECK((r.read("CR") & 7u) == 0);
+  r.write("CR", 0);
+  r.write("WUTR", 7);
+  CHECK(r.read("WUTR") == 0xFFFF);
+  auto const disabled = r.now();
+  r.run_until(disabled + rtc_cycle - us);
+  CHECK((r.read("ISR") & wutwf) == 0);
+  r.run_until(disabled + 2 * rtc_cycle + us);
+  CHECK((r.read("ISR") & wutwf) == wutwf);
+  r.write("WUTR", 7);
+  r.write("CR", 3);
+  CHECK(r.read("WUTR") == 7);
+  CHECK((r.read("CR") & 7u) == 3);
+}
+
+TEST_CASE(
+    "RM0038 20.5, board check 74 inferred: ALRAF with ALRAIE 0 leaves EXTI 17 low, an ALRAIE "
+    "write raises it")
+{
+  rig r;
+  midnight(r);
+  exti_rising(r, 17);
+  r.write("ALRMAR", date_any | 0x01);
+  r.write("CR", alrae);
+  r.write("ISR", 0);
+  r.later(2 * second);
+  REQUIRE((r.read("ISR") & alraf) == alraf);
+  CHECK((exti_read(r, 0x14) & (1u << 17)) == 0);
+  CHECK_FALSE(nvic_pending(r, alarm_irq));
+  r.write("CR", alrae | alraie);
+  CHECK((exti_read(r, 0x14) & (1u << 17)) == 1u << 17);
+  CHECK(nvic_pending(r, alarm_irq));
+}
+
+TEST_CASE("RM0038 10.2.4 and 20.5: clearing WUTF is a falling edge on EXTI 20")
+{
+  rig r;
+  r.start_clock();
+  r.unlock();
+  exti_write(r, 0x00, 1u << 20);
+  exti_write(r, 0x0C, 1u << 20);
+  r.write("WUTR", 0);
+  r.write("CR", wute | wutie);
+  r.later(32 * rtc_cycle);
+  REQUIRE((r.read("ISR") & wutf) == wutf);
+  CHECK((exti_read(r, 0x14) & (1u << 20)) == 0);
+  r.write("CR", wutie);
+  r.write("ISR", ~wutf & ~init_bit);
+  CHECK((exti_read(r, 0x14) & (1u << 20)) == 1u << 20);
+}
+
+TEST_CASE("RM0038 20.3.4 and 20.3.7: a system reset keeps the wakeup timer on its period")
+{
+  for(auto const reset : {false, true})
+  {
+    CAPTURE(reset);
+    rig r;
+    r.start_clock();
+    r.unlock();
+    r.write("WUTR", 99);
+    r.write("CR", wute);
+    auto const enabled = r.now();
+    r.later(500 * rtc_cycle);
+    auto const reset_at = r.now();
+    if(reset)
+    {
+      r.f->target->reset(reset_kind::software);
+      r.f->set("pc", sym(r.elf, "idle"));
+    }
+    auto const due = enabled + 1600 * rtc_cycle - (reset ? reset_at : 0);
+    r.run_until(due - rtc_cycle - us);
+    CHECK((r.read("ISR") & wutf) == 0);
+    r.run_until(due + us);
+    CHECK((r.read("ISR") & wutf) == wutf);
+  }
+}
+
+TEST_CASE("RM0038 6.3.14: RTCRST drops a pending wakeup, a new one fires on its own reload only")
+{
+  rig r;
+  r.start_clock();
+  r.unlock();
+  r.write("WUTR", 99);
+  r.write("CR", wute);
+  r.later(100 * rtc_cycle);
+  r.write("CSR", r.read("CSR", "RCC") | (1u << 23), "RCC");
+  r.write("CSR", r.read("CSR", "RCC") & ~(1u << 23), "RCC");
+  r.start_clock();
+  r.unlock();
+  r.write("WUTR", 199);
+  r.write("CR", wute);
+  auto const enabled = r.now();
+  r.run_until(enabled + 3199 * rtc_cycle - us);
+  CHECK((r.read("ISR") & wutf) == 0);
+  r.run_until(enabled + 3200 * rtc_cycle + us);
+  CHECK((r.read("ISR") & wutf) == wutf);
+}
+
+TEST_CASE("with DBG_RTC_STOP a wakeup due during a held span comes one held span later")
+{
+  rig r;
+  r.start_clock();
+  popcorn::testing::set_debug_freeze(*r.f, "DBG_RTC_STOP", true);
+  r.unlock();
+  r.write("WUTR", 99);
+  r.write("CR", wute);
+  auto const enabled = r.now();
+  r.later(800 * rtc_cycle);
+  r.f->target->hold_core(true);
+  r.later(1000 * rtc_cycle);
+  r.f->target->hold_core(false);
+  r.run_until(enabled + 2599 * rtc_cycle - us);
+  CHECK((r.read("ISR") & wutf) == 0);
+  r.run_until(enabled + 2601 * rtc_cycle + us);
+  CHECK((r.read("ISR") & wutf) == wutf);
 }

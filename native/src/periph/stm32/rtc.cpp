@@ -111,13 +111,14 @@ struct alarm_refs
  *        RTCCLK cycles, scheduled in virtual time, re-derived when RTCCLK changes rate. A reset
  *        other than power-on keeps the calendar, the configuration, the wake-up timer and the
  *        alarms, and resets the shadow registers. A backup domain reset, RCC_BDCR.BDRST, brings
- *        everything to its reset values. A ck_spre wake-up period restarts when INIT clears. A
- *        change of the RTC clock rate floors the partial RTCCLK cycle, an error under one cycle,
- *        31 us at 32768 Hz. The RTC counts in the machine's virtual time since power-on, which a
- *        system reset does not restart. An alarm field holding a digit the hardware never matches,
- * such as seconds 79, never fires. Not modelled: PWR_DBPR.DBP does not gate writes. Not modelled,
- *        logged once: binary and mixed modes, subsecond alarm comparison, smooth calibration, the
- *        shift register, WUTOCLR, ALRAFCLR, ALRBFCLR, SSRUIE, timestamps and the outputs.
+ *        everything to its reset values. A ck_spre wake-up period restarts when INIT clears and,
+ *        inferred, at a system reset in init mode. A change of the RTC clock rate floors the
+ *        partial RTCCLK cycle, an error under one cycle, 31 us at 32768 Hz. The RTC counts in the
+ *        machine's virtual time since power-on, which a system reset does not restart. An alarm
+ *        field holding a digit the hardware never matches, such as seconds 79, never fires. Not
+ *        modelled: PWR_DBPR.DBP does not gate writes. Not modelled, logged once: binary and mixed
+ *        modes, subsecond alarm comparison, smooth calibration, the shift register, WUTOCLR,
+ *        ALRAFCLR, ALRBFCLR, SSRUIE, timestamps and the outputs.
  *        While the machine holds its core with DBGMCU `DBG_RTC_STOP` set, the calendar, the
  *        prescalers, the wake-up timer, the alarms and the init and shadow timings stop at the
  *        time of the hold and resume at the release. A reset that clears DBGMCU while the core
@@ -512,6 +513,11 @@ void rtc::reset(register_file& regs, reset_kind kind)
   if(state_.counting == 0)
   {
     count_.restart(cycle, get(regs, prediv_a_), get(regs, prediv_s_));
+    if(rtc_calendar::wakeup_on_spre(get(regs, wakeup_clock_)))
+    {
+      state_.wakeup_base  = state_.seconds;
+      state_.wakeup_fired = 0;
+    }
   }
   auto icsr = regs.peek(init_.offset);
   icsr      = init_.with(icsr, 0);

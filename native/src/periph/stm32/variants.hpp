@@ -112,10 +112,10 @@ struct exti_classic_traits
 };
 
 /** @brief STM32L1, RM0038 Tables 49 to 51 by NVIC line: EXTI0 to EXTI4 on 6 to 10 one line each,
- *         EXTI9_5 on 23, EXTI15_10 on 40, line 19 the RTC tamper and timestamp line on 2, lines
- *         21 and 22 the comparator wakeup line on 22. PVD, RTC_Alarm, USB_FS_WKUP, RTC_WKUP and
- *         COMP_ACQ, lines 16, 17, 18, 20 and 23, belong to PWR, RTC, USB and COMP in the
- *         description. */
+ *         EXTI9_5 on 23, EXTI15_10 on 40, line 17 RTC_Alarm on 41, line 19 the RTC tamper and
+ *         timestamp line on 2, line 20 RTC_WKUP on 3, lines 21 and 22 the comparator wakeup line
+ *         on 22, RM0038 20.5. PVD, USB_FS_WKUP and COMP_ACQ, lines 16, 18 and 23, belong to PWR,
+ *         USB and COMP in the description. */
 inline constexpr auto l1_exti_irqs = std::to_array<exti_line_group>({
     {0,  0,  6 },
     {1,  1,  7 },
@@ -124,7 +124,9 @@ inline constexpr auto l1_exti_irqs = std::to_array<exti_line_group>({
     {4,  4,  10},
     {5,  9,  23},
     {10, 15, 40},
+    {17, 17, 41},
     {19, 19, 2 },
+    {20, 20, 3 },
     {21, 22, 22},
 });
 /** @brief STM32L1 Cat.1 and Cat.2, `STM32L1_exti_23`, RM0038 10.2: 23 lines. */
@@ -651,17 +653,27 @@ struct rtc_classic_variant
   /** @brief Whether a brown-out resets the RTC domain as a power-on does, RM0038 6.1.2 and
    *         6.1.3 on a part with no VBAT supply. */
   bool brown_out_resets = true;
+  /** @brief Whether ALRAWF and ALRBWF clear while their alarm is enabled and in init mode, and
+   *         set up to 2 RTCCLK cycles after the alarm is disabled, RM0038 20.3.5 on Cat.1. Without
+   *         it they read 1. */
+  bool alarm_write_wait = false;
+  /** @brief EXTI line of the alarm interrupt, RM0038 20.5. */
+  std::uint8_t alarm_line = 17;
+  /** @brief EXTI line of the wakeup interrupt, RM0038 20.5. */
+  std::uint8_t wakeup_line = 20;
 };
 
 /** @brief STM32L1 Cat.2 to Cat.6 RTC, `rtc2_v2_5_Cube`, RM0038 section 20. */
 inline constexpr rtc_classic_variant l1_rtc{};
-/** @brief STM32L1 Cat.1 RTC, RM0038 20.2, 20.3.1 and 30.16.4: no subseconds, no smooth
- *         calibration, one tamper input and no DBG_RTC_STOP. */
+/** @brief STM32L1 Cat.1 RTC, RM0038 20.2, 20.3.1, 20.3.5 and 30.16.4: no subseconds, no smooth
+ *         calibration, one tamper input, no DBG_RTC_STOP and alarm write flags that follow the
+ *         alarm enables. */
 inline constexpr rtc_classic_variant l1_cat1_rtc{
     .subseconds         = false,
     .smooth_calibration = false,
     .three_tampers      = false,
-    .debug_freeze       = false};
+    .debug_freeze       = false,
+    .alarm_write_wait   = true};
 
 /** @brief Differences between the SAI peripherals the model rows serve. */
 struct sai_variant

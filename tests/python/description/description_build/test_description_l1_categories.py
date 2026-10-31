@@ -59,8 +59,7 @@ IP_TO_SVD = {
 OWNER_OF_LINE = {
     0: "WWDG",
     1: "PWR",
-    **dict.fromkeys((2, 6, 7, 8, 9, 10, 22, 23, 40), "EXTI"),
-    **dict.fromkeys((3, 41), "RTC"),
+    **dict.fromkeys((2, 3, 6, 7, 8, 9, 10, 22, 23, 40, 41), "EXTI"),
     4: "FLASH",
     5: "RCC",
     **dict.fromkeys(range(11, 18), "DMA1"),
@@ -134,6 +133,8 @@ EXTI_IRQS = {
     "EXTI15_10_IRQn",
     "TAMPER_STAMP_IRQn",
     "COMP_IRQn",
+    "RTC_Alarm_IRQn",
+    "RTC_WKUP_IRQn",
 }
 
 

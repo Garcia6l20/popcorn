@@ -230,10 +230,10 @@ TEST_CASE("RM0038 Tables 49 to 51: every EXTI line 0 to 23 raises its NVIC line 
        "EXTI15_10_IRQn",
        "EXTI15_10_IRQn",
        "",
-       "",
+       "RTC_Alarm_IRQn",
        "",
        "TAMPER_STAMP_IRQn",
-       "",
+       "RTC_WKUP_IRQn",
        "COMP_IRQn",
        "COMP_IRQn",
        ""});

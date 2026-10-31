@@ -834,12 +834,51 @@ TEST_CASE("alarm B with every field masked sets ALRBF every second")
   unlock(f);
   write(f, "RTC", "ALRMBR", (1u << 31) | (1u << 23) | (1u << 15) | (1u << 7));
   write(f, "RTC", "CR", read(f, "RTC", "CR") | (1u << 9));
-  for(int round = 0; round < 3; ++round)
+  auto const sync     = (read(f, "RTC", "SSR") & 0xFFFFu) + 1;
+  auto const top      = (read(f, "RTC", "PRER") & 0x7FFFu) + 1;
+  auto const boundary = f.target->virtual_clock().time().ps + sync * second / top;
+  for(std::uint64_t round = 0; round < 3; ++round)
   {
     CAPTURE(round);
-    later(f, second);
+    run_until(f, boundary + round * second - second / top - 5 * ms);
+    CHECK(flag(f, 1) == 0);
+    run_until(f, boundary + round * second + 5 * ms);
     CHECK(flag(f, 1) == 1);
     write(f, "RTC", "SCR", 1u << 1);
     CHECK(flag(f, 1) == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0456 63.3.10, inferred: a ck_spre wake-up counts its period from the restart of an init "
+    "exit or a system reset in init mode")
+{
+  using namespace std::chrono;
+  for(auto const reset : {false, true})
+  {
+    CAPTURE(reset);
+    auto f = booted(sys_days{year{2026} / 1 / 1});
+    unlock(f);
+    write(f, "RTC", "WUTR", 3);
+    write(f, "RTC", "CR", read(f, "RTC", "CR") | 4u);
+    write(f, "RTC", "CR", read(f, "RTC", "CR") | (1u << 10));
+    later(f, 2 * second);
+    write(f, "RTC", "ICSR", 1u << 7);
+    later(f, ms);
+    REQUIRE((read(f, "RTC", "ICSR") >> 6 & 1u) == 1);
+    if(reset)
+    {
+      f.target->reset(popcorn::reset_kind::software);
+      f.set("pc", sym("rtc_ll", "idle"));
+    }
+    else
+    {
+      write(f, "RTC", "ICSR", 0);
+    }
+    auto const restarted = f.target->virtual_clock().time().ps;
+    run_until(f, restarted + 4 * second - 20 * ms);
+    CHECK(flag(f, 2) == 0);
+    run_until(f, restarted + 4 * second + 20 * ms);
+    CHECK(flag(f, 2) == 1);
   }
 }

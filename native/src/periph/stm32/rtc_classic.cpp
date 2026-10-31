@@ -1,4 +1,5 @@
 #include "backup_domain.hpp"
+#include "exti_classic.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
 #include "rtc_calendar.hpp"
@@ -37,6 +38,12 @@ enum classic_event : std::uint8_t
 {
   init_ready,
   shadow_ready,
+  wakeup_ready,
+  wakeup,
+  alarm_a,
+  alarm_b,
+  alarm_a_write,
+  alarm_b_write,
   classic_events,
 };
 
@@ -57,6 +64,9 @@ struct rtc_classic_state
   std::uint8_t                              latched_valid{};
   std::uint64_t                             latched{};
   std::uint8_t                              shadow_reset{};
+  std::uint64_t                             wakeup_base{};
+  std::uint64_t                             wakeup_fired{};
+  std::uint8_t                              lines{};
   std::array<std::uint64_t, classic_events> due{};
   std::array<std::uint8_t, classic_events>  armed{};
   std::array<std::uint32_t, classic_events> generation{};
@@ -66,11 +76,12 @@ struct rtc_classic_state
   friend auto operator==(rtc_classic_state const&, rtc_classic_state const&) -> bool = default;
 };
 
+constexpr std::array<std::string_view, 5> locked_names{
+    "WUTR", "ALRMAR", "ALRMBR", "ALRMASSR", "ALRMBSSR"};
+constexpr std::array<std::string_view, 4> read_only_names{"SSR", "TSTR", "TSDR", "TSSSR"};
+
 enum unmodelled_function : std::uint8_t
 {
-  alarm_a_function,
-  alarm_b_function,
-  wakeup_function,
   timestamp_function,
   tamper_function,
   coarse_function,
@@ -81,9 +92,35 @@ enum unmodelled_function : std::uint8_t
   unmodelled_functions,
 };
 
-constexpr std::array<std::string_view, 5> locked_names{
-    "WUTR", "ALRMAR", "ALRMBR", "ALRMASSR", "ALRMBSSR"};
-constexpr std::array<std::string_view, 4> read_only_names{"SSR", "TSTR", "TSDR", "TSSSR"};
+struct alarm_names
+{
+  std::string_view reg;
+  std::string_view subseconds;
+  std::string_view enable;
+  std::string_view interrupt;
+  std::string_view flag;
+  std::string_view write;
+};
+
+constexpr std::array<alarm_names, 2> classic_alarms{
+    {
+     {"ALRMAR", "ALRMASSR", "ALRAE", "ALRAIE", "ALRAF", "ALRAWF"},
+     {"ALRMBR", "ALRMBSSR", "ALRBE", "ALRBIE", "ALRBF", "ALRBWF"},
+     }
+};
+
+struct classic_alarm
+{
+  reg_ref                   reg;
+  std::optional<reg_ref>    subseconds;
+  field_ref                 enable;
+  field_ref                 interrupt;
+  field_ref                 flag;
+  field_ref                 write;
+  field_ref                 mask_ss;
+  field_ref                 ss;
+  rtc_calendar::alarm_match match;
+};
 
 struct unmodelled_entry
 {
@@ -117,13 +154,29 @@ struct unmodelled_entry
  *        calendar to their reset values, the board's `rtc_initial` loaded at power-on only. While
  *        the machine holds its core with DBGMCU `DBG_RTC_STOP` set, the calendar and the init and
  *        shadow timings stop at the time of the hold and resume at the release, on a variant whose
- *        DBGMCU has the bit. Logged once, a model_error under strict_peripherals at the CPU or DMA
- *        write that selects them before the store, a debugger write stored with neither: alarms A
- *        and B, the wakeup timer, timestamps, tamper detection, coarse and smooth calibration, the
- *        shift register, the RTC outputs and the reference clock detection. WUTR, ALRMAR, ALRMBR,
- *        ALRMASSR, ALRMBSSR, TSTR, TSDR, TSSSR, CALIBR, CALR, SHIFTR and TAFCR are storage the
- *        model claims for the key and the read-only rules, `storage_only` to coverage and host
- *        views. PWR_CR.DBP gates no write.
+ *        DBGMCU has the bit. Alarms A and B on seconds, minutes, hours and date or weekday with
+ *        their masks, and on Cat.2 to Cat.6 on SS[MASKSS-1:0] inside a matching second, RM0038
+ *        20.3.3 and 20.6.18. ALRMxR takes writes with ALRxWF set or in init mode, ALRMxSSR with
+ *        ALRxE clear or in init mode. On Cat.1 ALRxWF clears when ALRxE sets and in init mode, sets
+ *        at the second RTCCLK edge after ALRxE clears and at the end of init mode with ALRxE clear,
+ *        inferred from RM0038 20.3.5, which keeps them set on the other categories. The wakeup
+ *        timer on RTCCLK / 16 to / 2 or on ck_spre, with 2^16 added for WUCKSEL 11x, counting from
+ *        the write that sets WUTE, inferred, WUTWF clearing and setting at the second RTCCLK edge
+ *        after WUTE changes, WUTR and WUCKSEL taking writes only with WUTE clear and WUTWF set,
+ *        RM0038 20.3.4 and 20.6.4. A system reset keeps the alarms, the wakeup timer and, inferred
+ *        from the bit text of RM0038 20.6.4, a pending set of WUTWF or ALRxWF. A system reset in
+ *        init mode restarts the calendar as the end of init mode does, inferred: on Cat.1 ALRxWF
+ *        reads 1 for an alarm with ALRxE clear, and a ck_spre wakeup counts its period from the
+ *        restart. The alarm interrupt, ALRAF and ALRAIE or ALRBF and ALRBIE, drives the alarm EXTI
+ *        line of the variant, WUTF and WUTIE the wakeup line, each change of the level an edge for
+ *        the EXTI, RM0038 20.5, the flag gated by its interrupt enable inferred from Table 90.
+ *        Logged once, a model_error under strict_peripherals at the CPU or DMA write that selects
+ *        them before the store, a debugger write stored with neither: timestamps, tamper detection,
+ *        coarse and smooth calibration, the shift register, the RTC outputs and the reference clock
+ *        detection.
+ *        TSTR, TSDR, TSSSR, CALIBR, CALR, SHIFTR and TAFCR are storage the model claims for the key
+ *        and the read-only rules, `storage_only` to coverage and host views. PWR_CR.DBP gates no
+ *        write.
  */
 class rtc_classic final : public dispatch_model<rtc_classic, rtc_classic_state>,
                           public clock_listener,
@@ -148,9 +201,9 @@ public:
       std::uint32_t  old,
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
-  void on_clock_change() override;
-  void backup_reset() override;
-  void on_core_hold(bool held) override;
+  void               on_clock_change() override;
+  void               backup_reset() override;
+  void               on_core_hold(bool held) override;
   [[nodiscard]] auto storage_only(std::uint32_t offset) const -> bool override;
 
   void                              time_written(std::uint32_t old, std::uint32_t now);
@@ -174,8 +227,16 @@ private:
   [[nodiscard]] auto bypassed() const -> bool;
   [[nodiscard]] auto keep_locked(reg_ref target, std::uint32_t old) -> bool;
 
+  [[nodiscard]] auto next_alarm(std::size_t which, std::uint64_t after) const
+      -> std::optional<std::uint64_t>;
+
   void clear_backup(register_file& regs, bool board_calendar);
-  void restart_shadow(std::uint64_t cycle);
+  void restart_timers(std::uint64_t cycle);
+  void plan_wakeup();
+  void plan_alarm(std::size_t which);
+  void plan_all();
+  void update_lines();
+  void alarm_enables_changed(std::uint32_t old, std::uint32_t now, std::uint64_t cycle);
   void arm(classic_event kind, std::uint64_t cycle);
   void schedule(classic_event kind);
   void schedule_all();
@@ -205,6 +266,13 @@ private:
   std::uint32_t                                      open_flags_{};
   std::uint32_t                                      keyed_flags_{};
   std::vector<std::uint32_t>                         storage_;
+  std::array<classic_alarm, 2>                       alarms_{};
+  field_ref                                          wakeup_reload_;
+  field_ref                                          wakeup_clock_;
+  field_ref                                          wakeup_enable_;
+  field_ref                                          wakeup_interrupt_;
+  field_ref                                          wakeup_flag_;
+  field_ref                                          wakeup_write_;
   std::array<unmodelled_entry, unmodelled_functions> unmodelled_{};
   std::array<bool, unmodelled_functions>             logged_{};
   rtc_calendar::counter<rtc_classic_state>           count_;
@@ -255,10 +323,31 @@ rtc_classic::rtc_classic(
       init_status_{field("ISR", "INITS")}, shadow_flag_{field("ISR", "RSF")},
       prediv_a_{field("PRER", "PREDIV_A")}, prediv_s_{field("PRER", "PREDIV_S")},
       format_{field("CR", "FMT")}, add_hour_{field("CR", "ADD1H")}, sub_hour_{field("CR", "SUB1H")},
+      wakeup_reload_{field("WUTR", "WUT")}, wakeup_clock_{field("CR", "WCKSEL")},
+      wakeup_enable_{field("CR", "WUTE")}, wakeup_interrupt_{field("CR", "WUTIE")},
+      wakeup_flag_{field("ISR", "WUTF")}, wakeup_write_{field("ISR", "WUTWF")},
       count_{
           state_, ctx.regs, [this](std::string_view r, std::string_view f) { return field(r, f); }},
       domain_{ctx.clock.domain("rtc")}
 {
+  for(std::size_t which = 0; which < alarms_.size(); ++which)
+  {
+    auto const& names = classic_alarms[which];
+    auto&       a     = alarms_[which];
+    a.reg             = reg(names.reg);
+    a.enable          = field("CR", names.enable);
+    a.interrupt       = field("CR", names.interrupt);
+    a.flag            = field("ISR", names.flag);
+    a.write           = field("ISR", names.write);
+    a.match           = rtc_calendar::alarm_match_of(
+        [this](std::string_view r, std::string_view f) { return field(r, f); }, names.reg);
+    if(variant.subseconds)
+    {
+      a.subseconds = reg(names.subseconds);
+      a.mask_ss    = field(names.subseconds, "MASKSS");
+      a.ss         = field(names.subseconds, "SS");
+    }
+  }
   for(auto const& name : {"SSR", "SHIFTR", "TSSSR", "ALRMASSR", "ALRMBSSR"})
   {
     expect_register(name, variant.subseconds);
@@ -294,9 +383,7 @@ rtc_classic::rtc_classic(
     }
   }
   bind(backups);
-  for(auto const& name :
-      {"WUTR", "ALRMAR", "ALRMBR", "ALRMASSR", "ALRMBSSR", "TSTR", "TSDR", "TSSSR", "CALIBR", "CALR",
-       "SHIFTR", "TAFCR"})
+  for(auto const& name : {"TSTR", "TSDR", "TSSSR", "CALIBR", "CALR", "SHIFTR", "TAFCR"})
   {
     if(has_register(name))
     {
@@ -329,9 +416,6 @@ rtc_classic::rtc_classic(
   {
     tampers |= bits("TAFCR", {"TAMP2E", "TAMP3E"});
   }
-  unmodelled_[alarm_a_function]   = {"CR", "alarm A", bits("CR", {"ALRAE"})};
-  unmodelled_[alarm_b_function]   = {"CR", "alarm B", bits("CR", {"ALRBE"})};
-  unmodelled_[wakeup_function]    = {"CR", "the wakeup timer", bits("CR", {"WUTE"})};
   unmodelled_[timestamp_function] = {"CR", "timestamps", bits("CR", {"TSE"})};
   unmodelled_[tamper_function]    = {"TAFCR", "tamper detection", tampers};
   unmodelled_[coarse_function]    = {"CR", "coarse digital calibration", bits("CR", {"DCE"})};
@@ -461,14 +545,165 @@ void rtc_classic::clear_backup(register_file& regs, bool board_calendar)
   state_.generation = generation;
 }
 
-void rtc_classic::restart_shadow(std::uint64_t cycle)
+auto rtc_classic::next_alarm(std::size_t which, std::uint64_t after) const
+    -> std::optional<std::uint64_t>
+{
+  auto const& a      = alarms_[which];
+  auto const  word   = regs_.peek(a.reg.offset);
+  auto const  ticks  = count_.sync_ticks();
+  auto const  second = after / ticks;
+  auto const  masked = a.subseconds ? std::min(get(regs_, a.mask_ss), 15u) : 0u;
+  if(masked == 0)
+  {
+    auto const next = count_.next_alarm(a.match, word, second);
+    return next.transform([&](std::uint64_t at) { return at * ticks; });
+  }
+  auto const bits   = (std::uint64_t{1} << masked) - 1u;
+  auto const target = std::uint64_t{get(regs_, a.ss)} & bits;
+  auto const top    = std::uint64_t{state_.prediv_s};
+  auto const first  = [&](std::uint64_t from) -> std::optional<std::uint64_t> {
+    if(from > top)
+    {
+      return std::nullopt;
+    }
+    auto value = ((top - from) & ~bits) | target;
+    if(value > top - from)
+    {
+      if(value < bits + 1)
+      {
+        return std::nullopt;
+      }
+      value -= bits + 1;
+    }
+    return top - value;
+  };
+  if(not first(0))
+  {
+    return std::nullopt;
+  }
+  auto const matches = [&](std::uint64_t at) {
+    return at == 0 ? count_.next_alarm(a.match, word, ~std::uint64_t{}) == 0
+                   : count_.next_alarm(a.match, word, at - 1) == at;
+  };
+  if(matches(second))
+  {
+    if(auto const tick = first(after % ticks + 1))
+    {
+      return second * ticks + *tick;
+    }
+  }
+  auto const next = count_.next_alarm(a.match, word, second);
+  if(not next)
+  {
+    return std::nullopt;
+  }
+  return *next * ticks + *first(0);
+}
+
+void rtc_classic::plan_wakeup()
+{
+  state_.armed[wakeup] = 0;
+  ++state_.generation[wakeup];
+  if(get(regs_, wakeup_enable_) == 0)
+  {
+    return;
+  }
+  if(auto const due = count_.wakeup_due(get(regs_, wakeup_clock_), get(regs_, wakeup_reload_)))
+  {
+    arm(wakeup, *due);
+  }
+}
+
+void rtc_classic::plan_alarm(std::size_t which)
+{
+  auto const kind    = static_cast<classic_event>(alarm_a + which);
+  state_.armed[kind] = 0;
+  ++state_.generation[kind];
+  if(get(regs_, alarms_[which].enable) == 0 or state_.counting == 0)
+  {
+    return;
+  }
+  auto const position = count_.position_at(count_.cycle_at(now_ps()));
+  if(auto const next = next_alarm(which, position))
+  {
+    arm(kind, count_.cycle_of(*next));
+  }
+}
+
+void rtc_classic::plan_all()
+{
+  plan_wakeup();
+  plan_alarm(0);
+  plan_alarm(1);
+}
+
+void rtc_classic::update_lines()
+{
+  auto const raised = [&](field_ref flag, field_ref enable) {
+    return get(regs_, flag) != 0 and get(regs_, enable) != 0;
+  };
+  auto levels = std::uint8_t{};
+  if(raised(alarms_[0].flag, alarms_[0].interrupt) or raised(alarms_[1].flag, alarms_[1].interrupt))
+  {
+    levels |= 1u;
+  }
+  if(raised(wakeup_flag_, wakeup_interrupt_))
+  {
+    levels |= 2u;
+  }
+  auto const changed = static_cast<std::uint8_t>(levels ^ state_.lines);
+  state_.lines       = levels;
+  if(changed == 0)
+  {
+    return;
+  }
+  auto* const exti = dynamic_cast<exti_line_input*>(ctx_.peers.find("EXTI"));
+  if(exti == nullptr)
+  {
+    return;
+  }
+  if((changed & 1u) != 0)
+  {
+    exti->line_changed(variant_.alarm_line, (levels & 1u) != 0);
+  }
+  if((changed & 2u) != 0)
+  {
+    exti->line_changed(variant_.wakeup_line, (levels & 2u) != 0);
+  }
+}
+
+void rtc_classic::alarm_enables_changed(std::uint32_t old, std::uint32_t now, std::uint64_t cycle)
+{
+  if(not variant_.alarm_write_wait)
+  {
+    return;
+  }
+  for(std::size_t which = 0; which < alarms_.size(); ++which)
+  {
+    auto const& a    = alarms_[which];
+    auto const  kind = static_cast<classic_event>(alarm_a_write + which);
+    if(a.enable.of(old) == 0 and a.enable.of(now) != 0)
+    {
+      update(regs_, a.write, 0);
+      state_.armed[kind] = 0;
+    }
+    else if(a.enable.of(old) != 0 and a.enable.of(now) == 0 and get(regs_, init_) == 0)
+    {
+      arm(kind, cycle + shadow_cycles);
+    }
+  }
+}
+
+void rtc_classic::restart_timers(std::uint64_t cycle)
 {
   if(not bypassed())
   {
     arm(shadow_ready, cycle + shadow_cycles);
   }
+  plan_all();
   schedule_all();
   settle(cycle);
+  update_lines();
 }
 
 void rtc_classic::reset(register_file& regs, reset_kind kind)
@@ -478,7 +713,7 @@ void rtc_classic::reset(register_file& regs, reset_kind kind)
     clear_backup(regs, kind == reset_kind::power_on);
     state_.hz        = ctx_.clock.hz(domain_);
     state_.anchor_ps = now_ps();
-    restart_shadow(state_.cycle0);
+    restart_timers(state_.cycle0);
     return;
   }
   auto const ps = now_ps();
@@ -490,35 +725,51 @@ void rtc_classic::reset(register_file& regs, reset_kind kind)
   if(state_.counting == 0)
   {
     count_.restart(cycle, get(regs, prediv_a_), get(regs, prediv_s_));
+    if(rtc_calendar::wakeup_on_spre(get(regs, wakeup_clock_)))
+    {
+      state_.wakeup_base  = state_.seconds;
+      state_.wakeup_fired = 0;
+    }
   }
-  auto isr = regs.peek(status_.offset);
-  isr      = init_.with(isr, 0);
-  isr      = init_flag_.with(isr, 0);
-  isr      = shadow_flag_.with(isr, 0);
+  auto       isr      = regs.peek(status_.offset);
+  auto const was_init = init_.of(isr) != 0;
+  isr                 = init_.with(isr, 0);
+  isr                 = init_flag_.with(isr, 0);
+  isr                 = shadow_flag_.with(isr, 0);
   regs.poke(status_.offset, isr);
-  state_.armed         = {};
-  state_.latched_valid = 0;
-  state_.shadow_reset  = bypassed() ? 0 : 1;
+  if(was_init and variant_.alarm_write_wait)
+  {
+    for(auto const& a : alarms_)
+    {
+      update(regs, a.write, get(regs, a.enable) != 0 ? 0 : 1);
+    }
+  }
+  state_.armed[init_ready]   = 0;
+  state_.armed[shadow_ready] = 0;
+  state_.latched_valid       = 0;
+  state_.shadow_reset        = bypassed() ? 0 : 1;
   for(auto& value : state_.generation)
   {
     ++value;
   }
-  restart_shadow(cycle);
+  restart_timers(cycle);
 }
 
 void rtc_classic::backup_reset()
 {
   auto const held_ps = state_.held_ps;
+  auto const lines   = state_.lines;
   auto const frozen  = state_.held != 0 and variant_.debug_freeze and debug_frozen(freeze_logged_);
   clear_backup(regs_, false);
-  state_.hz = ctx_.clock.hz(domain_);
+  state_.lines = lines;
+  state_.hz    = ctx_.clock.hz(domain_);
   if(frozen)
   {
     state_.held    = 1;
     state_.held_ps = held_ps;
   }
   state_.anchor_ps = now_ps();
-  restart_shadow(state_.cycle0);
+  restart_timers(state_.cycle0);
 }
 
 auto rtc_classic::on_read(
@@ -601,10 +852,37 @@ void rtc_classic::on_event(std::uint32_t kind, std::uint64_t payload)
         state_.shadow_reset = 0;
       }
       break;
+    case wakeup_ready:
+      update(regs_, wakeup_write_, get(regs_, wakeup_enable_) != 0 ? 0 : 1);
+      break;
+    case wakeup:
+      update(regs_, wakeup_flag_, 1);
+      ++state_.wakeup_fired;
+      plan_wakeup();
+      break;
+    case alarm_a:
+    case alarm_b:
+    {
+      auto const which = static_cast<std::size_t>(kind - alarm_a);
+      update(regs_, alarms_[which].flag, 1);
+      plan_alarm(which);
+      break;
+    }
+    case alarm_a_write:
+    case alarm_b_write:
+    {
+      auto const& a = alarms_[static_cast<std::size_t>(kind - alarm_a_write)];
+      if(get(regs_, a.enable) == 0 and get(regs_, init_) == 0)
+      {
+        update(regs_, a.write, 1);
+      }
+      break;
+    }
     case classic_events:
       break;
   }
   settle(cycle);
+  update_lines();
 }
 
 void rtc_classic::on_core_hold(bool held)
@@ -717,6 +995,16 @@ void rtc_classic::status_written(std::uint32_t old, std::uint32_t now)
     update(regs_, shadow_flag_, 0);
     state_.armed[shadow_ready] = 0;
     arm(init_ready, cycle + init_cycles);
+    if(variant_.alarm_write_wait)
+    {
+      for(std::size_t which = 0; which < alarms_.size(); ++which)
+      {
+        update(regs_, alarms_[which].write, 0);
+        state_.armed[alarm_a_write + which] = 0;
+      }
+    }
+    plan_all();
+    update_lines();
     return;
   }
   if(init_.of(old) != 0 and init_.of(word) == 0)
@@ -730,6 +1018,20 @@ void rtc_classic::status_written(std::uint32_t old, std::uint32_t now)
     {
       arm(shadow_ready, state_.start + shadow_cycles);
     }
+    if(variant_.alarm_write_wait)
+    {
+      for(auto const& a : alarms_)
+      {
+        update(regs_, a.write, get(regs_, a.enable) != 0 ? 0 : 1);
+      }
+    }
+    if(rtc_calendar::wakeup_on_spre(get(regs_, wakeup_clock_)))
+    {
+      state_.wakeup_base  = state_.seconds;
+      state_.wakeup_fired = 0;
+    }
+    plan_all();
+    update_lines();
     return;
   }
   if(shadow_flag_.of(old) != 0
@@ -739,6 +1041,7 @@ void rtc_classic::status_written(std::uint32_t old, std::uint32_t now)
   {
     arm(shadow_ready, std::max(cycle, state_.start) + shadow_cycles);
   }
+  update_lines();
 }
 
 void rtc_classic::prescaler_written(std::uint32_t old, std::uint32_t)
@@ -760,12 +1063,29 @@ void rtc_classic::control_written(std::uint32_t old, std::uint32_t now)
   {
     word = (word & ~init_only_) | (old & init_only_);
   }
+  if(wakeup_enable_.of(old) != 0 or get(regs_, wakeup_write_) == 0)
+  {
+    word = wakeup_clock_.with(word, wakeup_clock_.of(old));
+  }
   word = add_hour_.with(word, 0);
   word = sub_hour_.with(word, 0);
   regs_.poke(control_.offset, word);
   refuse_unmodelled("CR", old, word);
   auto const cycle = count_.cycle_at(now_ps());
   count_.shift_hour(cycle, add_hour_.of(now) != 0, sub_hour_.of(now) != 0);
+  if(wakeup_enable_.of(old) != wakeup_enable_.of(word))
+  {
+    arm(wakeup_ready, cycle + shadow_cycles);
+    if(wakeup_enable_.of(word) != 0)
+    {
+      auto const spre     = rtc_calendar::wakeup_on_spre(wakeup_clock_.of(word));
+      state_.wakeup_base  = spre ? count_.position_at(cycle) / count_.sync_ticks() : cycle;
+      state_.wakeup_fired = 0;
+    }
+  }
+  alarm_enables_changed(old, word, cycle);
+  plan_all();
+  update_lines();
   if(not bypass_)
   {
     return;
@@ -837,7 +1157,30 @@ void rtc_classic::tamper_written(std::uint32_t old, std::uint32_t now)
 
 template <std::size_t Index> void rtc_classic::locked_written(std::uint32_t old, std::uint32_t)
 {
-  static_cast<void>(keep_locked(reg(locked_names[Index]), old));
+  auto const target = reg(locked_names[Index]);
+  if(keep_locked(target, old))
+  {
+    return;
+  }
+  auto allowed = initializing();
+  if constexpr(Index == 0)
+  {
+    allowed = get(regs_, wakeup_write_) != 0;
+  }
+  else if constexpr(Index <= 2)
+  {
+    allowed = allowed or get(regs_, alarms_[Index - 1].write) != 0;
+  }
+  else
+  {
+    allowed = allowed or get(regs_, alarms_[Index - 3].enable) == 0;
+  }
+  if(not allowed)
+  {
+    regs_.poke(target.offset, old);
+    return;
+  }
+  plan_all();
 }
 
 template <std::size_t Index> void rtc_classic::read_only_written(std::uint32_t old, std::uint32_t)

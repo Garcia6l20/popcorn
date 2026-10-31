@@ -12,6 +12,13 @@ renames_if_present = { GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPI
 renames = { Flash = "FLASH" }
 source = "RM0038 Rev 18, 3.9 register description: the flash interface registers are FLASH_xxx, the four SVDs spell the peripheral Flash"
 
+[irqs]
+drop = ["RTC_Alarm", "RTC_WKUP"]
+add = [
+  { number = 41, name = "RTC_Alarm", peripheral = "EXTI" },
+  { number = 3, name = "RTC_WKUP", peripheral = "EXTI" },
+]
+
 [[register_renames]]
 peripherals = ["GPIO?"]
 renames = { OSPEEDER = "OSPEEDR" }

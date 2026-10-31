@@ -878,16 +878,30 @@ The STM32L1 RTC:
   until DR is read, and after a system reset they read their reset values until RSF sets.
 - TAMP2F and TAMP3F clear by a 0 under the `RTC_WPR` key only, RM0038 20.3.5 and the note
   under 20.6.4, which exempt `RTC_ISR[13:8]`.
-- `RTC_WUTR`, `RTC_ALRMxR`, `RTC_ALRMxSSR`, `RTC_TSTR`, `RTC_TSDR`, `RTC_TSSSR`, `RTC_CALIBR`,
-  `RTC_CALR`, `RTC_SHIFTR` and `RTC_TAFCR` are storage: coverage reports them `storage_only`, and
-  `m.mem` and the register views refuse them as they refuse a peripheral without a model.
+- `RTC_TSTR`, `RTC_TSDR`, `RTC_TSSSR`, `RTC_CALIBR`, `RTC_CALR`, `RTC_SHIFTR` and `RTC_TAFCR`
+  are storage: coverage reports them `storage_only`, and `m.mem` and the register views refuse
+  them as they refuse a peripheral without a model.
 - ADD1H and SUB1H move the calendar at the write.
 - RTC writes land whatever `PWR_CR.DBP` holds.
 - On Cat.1 a PREDIV_A of 0 divides by 1.
+- The alarm interrupt, ALRxF with ALRxIE, drives EXTI line 17 and RTC_Alarm, and WUTF with
+  WUTIE drives EXTI line 20 and RTC_WKUP, RM0038 20.5. The flag gated by its interrupt enable is
+  inferred from RM0038 Table 90. A flag set while its enable is 0 raises the line when the
+  enable sets.
+- On Cat.1 ALRAWF and ALRBWF clear when their alarm is enabled and in init mode, and set at the
+  second RTCCLK edge after the alarm is disabled, inferred from RM0038 20.3.5. On Cat.2 to Cat.6
+  they read 1, so `RTC_ALRMxR` takes writes while its alarm is enabled, inferred.
+- The wakeup timer counts from the write that sets WUTE, inferred. WUTWF clears and sets at the
+  second RTCCLK edge after WUTE changes, the upper bound of RM0038 20.6.4.
+- A system reset keeps a pending set of WUTWF, ALRAWF or ALRBWF, inferred from the bit text of
+  RM0038 20.6.4. A system reset in init mode restarts the calendar as the end of init mode does,
+  inferred: on Cat.1 ALRxWF reads 1 at once for an alarm with ALRxE clear, and a ck_spre wakeup
+  counts its period from the restart. The U5 and H5 RTC rebase a ck_spre wakeup the same way,
+  inferred.
 - Logged once, `ModelError` under `strict` at the CPU or DMA write that selects them, before
-  the store: alarms A and B, the wakeup timer, timestamps, tamper detection, coarse and smooth
-  calibration, the shift control, the RTC_CALIB and RTC_ALARM outputs and the reference clock
-  detection. A debugger write stores them with neither.
+  the store: timestamps, tamper detection, coarse and smooth calibration, the shift control, the
+  RTC_CALIB and RTC_ALARM outputs and the reference clock detection. A debugger write stores
+  them with neither.
 
 ## SAI
 
