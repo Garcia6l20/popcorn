@@ -853,8 +853,11 @@ The STM32L1 RTC:
   system reset, inferred from the copy every two RTCCLK periods of RM0038 20.3.2.
 - TR, DR and SSR read the calendar at the time of the read. A read of SSR or TR holds TR and DR
   until DR is read, and after a system reset they read their reset values until RSF sets.
-- TAMP2F and TAMP3F clear by a 0 under the `RTC_WPR` key only, inferred from RM0038 20.6.4,
-  which exempts `RTC_ISR[13:8]`.
+- TAMP2F and TAMP3F clear by a 0 under the `RTC_WPR` key only, RM0038 20.3.5 and the note
+  under 20.6.4, which exempt `RTC_ISR[13:8]`.
+- `RTC_WUTR`, `RTC_ALRMxR`, `RTC_ALRMxSSR`, `RTC_TSTR`, `RTC_TSDR`, `RTC_TSSSR`, `RTC_CALIBR`,
+  `RTC_CALR`, `RTC_SHIFTR` and `RTC_TAFCR` are storage: coverage reports them `storage_only`, and
+  `m.mem` and the register views refuse them as they refuse a peripheral without a model.
 - ADD1H and SUB1H move the calendar at the write.
 - RTC writes land whatever `PWR_CR.DBP` holds.
 - On Cat.1 a PREDIV_A of 0 divides by 1.

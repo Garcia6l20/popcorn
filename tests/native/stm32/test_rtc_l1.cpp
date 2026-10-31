@@ -2,6 +2,7 @@
 #include "stm32_fixture.hpp"
 #include "variants.hpp"
 
+#include <popcorn/core/coverage.hpp>
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
@@ -137,14 +138,15 @@ struct rig
   [[nodiscard]] auto read(std::string_view name, std::string_view unit = "RTC") const
       -> std::uint32_t
   {
-    auto const value = f->target->mem().read(at(unit, name), 4);
+    auto const value = probe().services.read(at(unit, name), 4, popcorn::initiator::debugger);
     REQUIRE(value.has_value());
-    return static_cast<std::uint32_t>(*value);
+    return *value;
   }
 
   void write(std::string_view name, std::uint32_t value, std::string_view unit = "RTC") const
   {
-    REQUIRE(f->target->mem().write(at(unit, name), 4, value).has_value());
+    REQUIRE(
+        probe().services.write(at(unit, name), 4, value, popcorn::initiator::debugger).has_value());
   }
 
   [[nodiscard]] auto probe() const -> popcorn::periph::model_context&
@@ -234,6 +236,36 @@ struct rig
   }
 };
 
+auto entered(part_description const& desc, std::string_view name, std::string_view entry)
+    -> stm32_fixture
+{
+  stm32_fixture f{desc, name};
+  f.set("pc", sym(name, entry));
+  return f;
+}
+
+auto run_to_idle(stm32_fixture const& f) -> void
+{
+  auto const stopped = f.run_to_stop({.max_instructions = icount{20'000}});
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::idle);
+}
+
+auto finish(stm32_fixture const& f) -> std::vector<std::uint32_t>
+{
+  auto const stopped = f.run_to_stop({.max_instructions = icount{10'000}});
+  CAPTURE(stopped.detail);
+  REQUIRE(stopped.reason == stop_reason::user);
+  return f.log();
+}
+
+void run_until(stm32_fixture const& f, std::uint64_t ps)
+{
+  REQUIRE(
+      f.run_to_stop({.max_instructions = icount{1'000'000'000}, .until_time = vtime{ps}}).reason
+      == stop_reason::time);
+}
+
 auto without_register(part_description desc, std::string_view name) -> part_description
 {
   auto& rtc = *std::ranges::find(
@@ -256,6 +288,32 @@ auto make_machine(part_description desc) -> std::unique_ptr<core::machine>
   return std::make_unique<core::machine>(
       std::move(desc), popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options());
 }
+}
+
+TEST_CASE("RM0038 20.3.5: the LL init sets 2026-02-28 23:59:58 and 3 s later reads March 1st")
+{
+  for(auto const cat1 : {false, true})
+  {
+    CAPTURE(cat1);
+    auto const name = cat1 ? firmware_b : firmware;
+    auto       f    = entered(cat1 ? l152rb() : l152re(), name, "calendar");
+    run_to_idle(f);
+    auto const log = f.log();
+    REQUIRE(log.size() == (cat1 ? 6u : 7u));
+    CHECK(std::vector(log.begin(), log.begin() + 4) == std::vector<std::uint32_t>{0, 0, 0, 1});
+    CHECK(std::vector(log.end() - 2, log.end()) == std::vector<std::uint32_t>{0x23'5958, feb_28});
+    if(not cat1)
+    {
+      CHECK(log[4] <= 255);
+    }
+    run_until(f, f.target->virtual_clock().time().ps + 3 * second);
+    f.set("pc", sym(name, "read_calendar"));
+    auto const after = finish(f);
+    REQUIRE(after.size() == log.size() + (cat1 ? 2u : 3u));
+    CHECK(
+        std::vector(after.end() - 2, after.end())
+        == std::vector<std::uint32_t>{0x00'0001, march_1});
+  }
 }
 
 TEST_CASE("RM0038 20.3.5: TR, DR, PRER, CALIBR and CR.FMT take writes under the key with INITF set")
@@ -300,6 +358,8 @@ TEST_CASE(
   r.write("ISR", init_bit);
   auto const entered_at = r.now();
   r.run_until(entered_at + rtc_cycle - us);
+  CHECK(r.isr(initf_bit) == 0);
+  r.run_until(entered_at + rtc_cycle + us);
   CHECK(r.isr(initf_bit) == 0);
   r.run_until(entered_at + 2 * rtc_cycle + us);
   CHECK(r.isr(initf_bit) == 1);
@@ -429,6 +489,35 @@ TEST_CASE("RM0038 20.3.6: an SSR or TR read holds TR and DR until DR is read")
   CHECK(r.read("TR") == 0);
 }
 
+TEST_CASE("RM0038 20.6.1 and 20.6.2: after a system reset TR and DR read reset values until RSF")
+{
+  for(auto const cat1 : {false, true})
+  {
+    CAPTURE(cat1);
+    auto const name = cat1 ? firmware_b : firmware;
+    auto       f    = entered(cat1 ? l152rb() : l152re(), name, "calendar");
+    run_to_idle(f);
+    auto const before = f.log().size();
+    f.target->reset(reset_kind::software);
+    f.set("pc", sym(name, "read_after_reset"));
+    auto const log  = finish(f);
+    auto const tail = std::vector(log.begin() + static_cast<std::ptrdiff_t>(before), log.end());
+    if(cat1)
+    {
+      CHECK(tail == std::vector<std::uint32_t>{0, 0, 0x2101, 0x23'5958, feb_28});
+    }
+    else
+    {
+      REQUIRE(tail.size() == 7);
+      CHECK(
+          std::vector(tail.begin(), tail.begin() + 4)
+          == std::vector<std::uint32_t>{0, 0, 0, 0x2101});
+      CHECK(tail[5] == 0x23'5958);
+      CHECK(tail[6] == feb_28);
+    }
+  }
+}
+
 TEST_CASE(
     "RM0038 20.6.3: BYPSHAD reads the counters with RSF clear, RSF sets at the second edge after")
 {
@@ -484,12 +573,25 @@ TEST_CASE("RM0038 20.6.5: PREDIV_S has 13 bits on Cat.1 and 15 from Cat.2")
   }
 }
 
-TEST_CASE("RM0038 20.6.11: Cat.1 has no RTC_SSR, a CPU read of offset 0x28 reads 0 and logs once")
+TEST_CASE(
+    "RM0038 20.6.11: Cat.1 has no RTC_SSR, a CPU read of offset 0x28 logs once, strict raises")
 {
-  rig        r{l152rb(), idle_image_b};
-  auto const at = r.f->target->peripheral("RTC").description().base + 0x28;
-  CHECK(r.cpu_read_at(at) == 0);
-  CHECK(r.cpu_read_at(at) == 0);
+  {
+    rig        r{l152rb(), idle_image_b};
+    auto const at = r.f->target->peripheral("RTC").description().base + 0x28;
+    CHECK(r.cpu_read_at(at) == 0);
+    CHECK(r.cpu_read_at(at) == 0);
+    CHECK(r.warnings() == 1);
+  }
+  rig        r{l152rb(), idle_image_b, true};
+  auto const at          = r.f->target->peripheral("RTC").description().base + 0x28;
+  auto const by_debugger = r.probe().services.read(at, 4, popcorn::initiator::debugger);
+  REQUIRE(by_debugger.has_value());
+  CHECK(*by_debugger == 0);
+  CHECK(r.warnings() == 0);
+  CHECK_THROWS_AS(
+      static_cast<void>(r.probe().services.read(at, 4, popcorn::initiator::cpu)),
+      popcorn::model_error);
   CHECK(r.warnings() == 1);
 }
 
@@ -507,6 +609,23 @@ TEST_CASE("checklist 39: each RTC variant refuses a description that disagrees w
   CHECK_THROWS_AS(
       static_cast<void>(make_machine(with_version(l152rb(), "rtc2_v2_5_Cube"))),
       popcorn::config_error);
+}
+
+TEST_CASE(
+    "RM0038 20.3.7: BKP0R and BKP19R keep their value through a system reset, RTCRST clears them")
+{
+  for(auto const cat1 : {false, true})
+  {
+    CAPTURE(cat1);
+    auto const name = cat1 ? firmware_b : firmware;
+    auto       f    = entered(cat1 ? l152rb() : l152re(), name, "backup_write");
+    run_to_idle(f);
+    f.target->reset(reset_kind::software);
+    f.set("pc", sym(name, "backup_read"));
+    CHECK(finish(f) == std::vector<std::uint32_t>{0xCAFE'1234, 0x5EED'0019});
+    f.set("pc", sym(name, "backup_reset"));
+    CHECK(finish(f) == std::vector<std::uint32_t>{0xCAFE'1234, 0x5EED'0019, 0, 0});
+  }
 }
 
 TEST_CASE("RM0038 6.1.2: a power-on and a brown-out reset the calendar and the backup registers")
@@ -544,6 +663,7 @@ TEST_CASE("RM0038 20.6.3: ADD1H adds an hour, SUB1H subtracts one except at hour
   r.start_clock();
   r.enter_init();
   r.write("TR", 0x00'3000);
+  r.write("DR", feb_28);
   r.write("ISR", 0);
   r.later(ms);
   r.write("CR", 1u << 17);
@@ -644,4 +764,73 @@ TEST_CASE("Cat.1 has no DBG_RTC_STOP: a held core under strict leaves the calend
   CHECK(r.read("TR") == 0x00'0002);
   CHECK(r.warnings() == before);
   r.f->target->hold_core(false);
+}
+
+TEST_CASE("RM0038 20.6.5: a system reset in init mode restarts the calendar on the PRER it holds")
+{
+  rig r;
+  r.start_clock();
+  r.enter_init();
+  r.write("PRER", 0x7F'007F);
+  REQUIRE(r.read("PRER") == 0x7F'007F);
+  r.f->target->reset(reset_kind::software);
+  r.f->set("pc", sym(r.elf, "idle"));
+  CHECK(r.isr(init_bit) == 0);
+  r.later(600 * ms);
+  CHECK(r.read("SSR") < 128);
+  CHECK(r.read("TR") == 0x00'0001);
+}
+
+TEST_CASE(
+    "RM0038 20.3.6: after a system reset CPU reads of TR, DR and SSR give reset values until RSF")
+{
+  rig r;
+  r.start_clock();
+  r.enter_init();
+  r.write("TR", 0x12'3456);
+  r.write("DR", feb_28);
+  r.write("ISR", 0);
+  r.later(ms);
+  r.f->target->reset(reset_kind::software);
+  r.f->set("pc", sym(r.elf, "idle"));
+  REQUIRE(r.isr(rsf_bit) == 0);
+  CHECK(r.cpu_read("SSR") == 0);
+  CHECK(r.cpu_read("TR") == 0);
+  CHECK(r.cpu_read("DR") == 0x00'2101);
+  r.later(3 * rtc_cycle);
+  REQUIRE(r.isr(rsf_bit) == 1);
+  CHECK(r.cpu_read("TR") == 0x12'3456);
+  CHECK(r.cpu_read("DR") == feb_28);
+}
+
+TEST_CASE("RM0038 20.3.7 and 6.1.3: BKP0R keeps its value through a system reset, RTCRST clears it")
+{
+  rig r;
+  r.cpu_write("BKP0R", 0xCAFE'0000);
+  r.f->target->reset(reset_kind::software);
+  r.f->set("pc", sym(r.elf, "idle"));
+  CHECK(r.cpu_read("BKP0R") == 0xCAFE'0000);
+  r.write("CSR", r.read("CSR", "RCC") | (1u << 23), "RCC");
+  r.write("CSR", r.read("CSR", "RCC") & ~(1u << 23), "RCC");
+  CHECK(r.cpu_read("BKP0R") == 0);
+}
+
+TEST_CASE("coverage reports CPU reads of TSTR, CALIBR and TAFCR as storage_only and TR as served")
+{
+  rig r;
+  r.f->target->enable_coverage({}, true);
+  for(auto const* name : {"TSTR", "CALIBR", "TAFCR", "TR"})
+  {
+    static_cast<void>(r.cpu_read(name));
+  }
+  auto const               found = r.f->target->coverage().unmodelled;
+  std::vector<std::string> names;
+  for(auto const& entry : found)
+  {
+    CHECK(entry.peripheral == "RTC");
+    CHECK(entry.reason == popcorn::core::unmodelled_reason::storage_only);
+    names.push_back(entry.reg);
+  }
+  std::ranges::sort(names);
+  CHECK(names == std::vector<std::string>{"CALIBR", "TAFCR", "TSTR"});
 }

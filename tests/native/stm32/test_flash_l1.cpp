@@ -1713,6 +1713,8 @@ TEST_CASE("RM0038 3.7.1: RDP level 2 refuses option stores, level 1 to 0 mass er
   CHECK(read(f, options + 0x08) == 0);
   CHECK(read(f, options) == option_word(0xAA, 8));
   CHECK(rtc.peek(bkp0) == 0);
+  CHECK(f.field("PWR", "CR", "DBP") == 0);
+  CHECK(read(f, rtc.description().base + bkp0) == 0);
   end_operations(f);
   reload(f);
   CHECK(read(f, obr) == 0xAAu);

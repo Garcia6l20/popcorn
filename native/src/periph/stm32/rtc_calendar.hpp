@@ -217,6 +217,22 @@ public:
     state_.anchor_frac = 0;
   }
 
+  /**
+   * @brief Starts the stopped calendar from its second at a whole tick, with the prescalers
+   *        taken from PRER, as the end of init mode does.
+   * @param start RTCCLK cycle of the first prescaler edge.
+   * @param prediv_a PRER.PREDIV_A.
+   * @param prediv_s PRER.PREDIV_S.
+   */
+  void restart(std::uint64_t start, std::uint32_t prediv_a, std::uint32_t prediv_s)
+  {
+    state_.phase    = 0;
+    state_.prediv_a = prediv_a;
+    state_.prediv_s = prediv_s;
+    state_.counting = 1;
+    state_.start    = start;
+  }
+
   /** @brief Stops the calendar at its position at an RTCCLK cycle. */
   void freeze(std::uint64_t cycle)
   {

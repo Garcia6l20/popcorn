@@ -104,23 +104,26 @@ struct unmodelled_entry
  *        again, and a system reset keeps the lock state. CR.FMT, CR.DCE, CR.REFCKON, RTC_CALIBR,
  *        TR, DR and PRER take writes in init mode only. RTC_ISR: INIT and RSF under the key, ALRAF,
  *        ALRBF, WUTF, TSF, TSOVF and TAMP1F cleared by a 0 whatever the key, TAMP2F and TAMP3F
- *        cleared by a 0 under the key, inferred from RM0038 20.6.4, which exempts bits 13:8 only.
- *        Shadow registers: an SSR or TR read latches TR and DR until DR is read, RSF sets at the
- *        second RTCCLK edge after a clear, the end of init mode, a BYPSHAD clear or a system reset,
- *        inferred from the copy every two RTCCLK periods of RM0038 20.3.2, and is cleared in init
- *        mode and while CR.BYPSHAD is set, RM0038 20.6.4. A system reset clears INIT, INITF and
- *        RSF, and with BYPSHAD 0 TR, DR and SSR read their reset values until the next copy sets
- *        RSF, RM0038 20.6.1, 20.6.2 and 20.6.11. ADD1H and SUB1H apply at the write. The backup
- *        registers, as many as the description lists, keep their value on a system reset and take
- *        every write, a debugger write included, with no key. A power-on reset, a brown-out on a
- *        part whose variant says so and RCC_CSR.RTCRST bring every register and the calendar to
- *        their reset values, the board's `rtc_initial` loaded at power-on only. While the machine
- *        holds its core with DBGMCU `DBG_RTC_STOP` set, the calendar and the init and shadow
- *        timings stop at the time of the hold and resume at the release, on a variant whose DBGMCU
- *        has the bit. Logged once, a model_error under strict_peripherals at the CPU or DMA write
- *        that selects them before the store, a debugger write stored with neither: alarms A and B,
- *        the wakeup timer, timestamps, tamper detection, coarse and smooth calibration, the shift
- *        register, the RTC outputs and the reference clock detection. PWR_CR.DBP gates no write.
+ *        cleared by a 0 under the key, RM0038 20.3.5 and the note under 20.6.4, which exempt bits
+ *        13:8 only. Shadow registers: an SSR or TR read latches TR and DR until DR is read, RSF
+ *        sets at the second RTCCLK edge after a clear, the end of init mode, a BYPSHAD clear or a
+ *        system reset, inferred from the copy every two RTCCLK periods of RM0038 20.3.2, and is
+ *        cleared in init mode and while CR.BYPSHAD is set, RM0038 20.6.4. A system reset clears
+ *        INIT, INITF and RSF, and with BYPSHAD 0 TR, DR and SSR read their reset values until the
+ *        next copy sets RSF, RM0038 20.6.1, 20.6.2 and 20.6.11. ADD1H and SUB1H apply at the write.
+ *        The backup registers, as many as the description lists, keep their value on a system reset
+ *        and take every write, a debugger write included, with no key. A power-on reset, a brown-
+ *        out on a part whose variant says so and RCC_CSR.RTCRST bring every register and the
+ *        calendar to their reset values, the board's `rtc_initial` loaded at power-on only. While
+ *        the machine holds its core with DBGMCU `DBG_RTC_STOP` set, the calendar and the init and
+ *        shadow timings stop at the time of the hold and resume at the release, on a variant whose
+ *        DBGMCU has the bit. Logged once, a model_error under strict_peripherals at the CPU or DMA
+ *        write that selects them before the store, a debugger write stored with neither: alarms A
+ *        and B, the wakeup timer, timestamps, tamper detection, coarse and smooth calibration, the
+ *        shift register, the RTC outputs and the reference clock detection. WUTR, ALRMAR, ALRMBR,
+ *        ALRMASSR, ALRMBSSR, TSTR, TSDR, TSSSR, CALIBR, CALR, SHIFTR and TAFCR are storage the
+ *        model claims for the key and the read-only rules, `storage_only` to coverage and host
+ *        views. PWR_CR.DBP gates no write.
  */
 class rtc_classic final : public dispatch_model<rtc_classic, rtc_classic_state>,
                           public clock_listener,
@@ -148,6 +151,7 @@ public:
   void on_clock_change() override;
   void backup_reset() override;
   void on_core_hold(bool held) override;
+  [[nodiscard]] auto storage_only(std::uint32_t offset) const -> bool override;
 
   void                              time_written(std::uint32_t old, std::uint32_t now);
   void                              date_written(std::uint32_t old, std::uint32_t now);
@@ -200,6 +204,7 @@ private:
   std::uint32_t                                      init_only_{};
   std::uint32_t                                      open_flags_{};
   std::uint32_t                                      keyed_flags_{};
+  std::vector<std::uint32_t>                         storage_;
   std::array<unmodelled_entry, unmodelled_functions> unmodelled_{};
   std::array<bool, unmodelled_functions>             logged_{};
   rtc_calendar::counter<rtc_classic_state>           count_;
@@ -289,6 +294,15 @@ rtc_classic::rtc_classic(
     }
   }
   bind(backups);
+  for(auto const& name :
+      {"WUTR", "ALRMAR", "ALRMBR", "ALRMASSR", "ALRMBSSR", "TSTR", "TSDR", "TSSSR", "CALIBR", "CALR",
+       "SHIFTR", "TAFCR"})
+  {
+    if(has_register(name))
+    {
+      storage_.push_back(reg(name).offset);
+    }
+  }
   for(auto const& name : {"FMT", "DCE", "REFCKON"})
   {
     init_only_ |= field("CR", name).mask();
@@ -475,8 +489,7 @@ void rtc_classic::reset(register_file& regs, reset_kind kind)
   auto const cycle = count_.cycle_at(ps);
   if(state_.counting == 0)
   {
-    state_.counting = 1;
-    state_.start    = cycle;
+    count_.restart(cycle, get(regs, prediv_a_), get(regs, prediv_s_));
   }
   auto isr = regs.peek(status_.offset);
   isr      = init_.with(isr, 0);
@@ -648,6 +661,11 @@ void rtc_classic::on_core_hold(bool held)
   settle(count_.cycle_at(now_ps()));
 }
 
+auto rtc_classic::storage_only(std::uint32_t offset) const -> bool
+{
+  return std::ranges::contains(storage_, offset);
+}
+
 void rtc_classic::on_clock_change()
 {
   auto const hz = ctx_.clock.hz(domain_);
@@ -705,12 +723,8 @@ void rtc_classic::status_written(std::uint32_t old, std::uint32_t now)
   {
     update(regs_, init_flag_, 0);
     state_.armed[init_ready] = 0;
-    state_.phase             = 0;
-    state_.prediv_a          = get(regs_, prediv_a_);
-    state_.prediv_s          = get(regs_, prediv_s_);
-    state_.counting          = 1;
-    state_.start             = cycle + exit_cycles;
-    state_.latched_valid     = 0;
+    count_.restart(cycle + exit_cycles, get(regs_, prediv_a_), get(regs_, prediv_s_));
+    state_.latched_valid = 0;
     update(regs_, shadow_flag_, 0);
     if(not bypassed())
     {

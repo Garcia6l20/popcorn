@@ -628,8 +628,7 @@ void rtc::reset(register_file& regs, reset_kind kind)
   auto const cycle = count_.cycle_at(ps);
   if(state_.counting == 0)
   {
-    state_.counting = 1;
-    state_.start    = cycle;
+    count_.restart(cycle, get(regs, prediv_a_), get(regs, prediv_s_));
   }
   auto icsr = regs.peek(init_.offset);
   icsr      = init_.with(icsr, 0);
@@ -866,12 +865,8 @@ void rtc::status_written(std::uint32_t old, std::uint32_t now)
   {
     update(regs_, init_flag_, 0);
     state_.armed[init_ready] = 0;
-    state_.phase             = 0;
-    state_.prediv_a          = get(regs_, prediv_a_);
-    state_.prediv_s          = get(regs_, prediv_s_);
-    state_.counting          = 1;
-    state_.start             = cycle + exit_cycles;
-    state_.latched_valid     = 0;
+    count_.restart(cycle + exit_cycles, get(regs_, prediv_a_), get(regs_, prediv_s_));
+    state_.latched_valid = 0;
     update(regs_, shadow_flag_, 0);
     arm(shadow_ready, state_.start + 1);
     if(wakeup_on_spre())

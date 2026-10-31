@@ -807,3 +807,22 @@ TEST_CASE("a backup domain reset of a frozen RTC leaves it frozen until the rele
   held_later(f, 2 * second);
   CHECK(read(f, "RTC", "TR") != reset[1]);
 }
+
+TEST_CASE("RM0456 63.6.5: a system reset in init mode restarts the calendar on the PRER it holds")
+{
+  auto f = entered("clock_only");
+  CHECK(finish(f) == std::vector<std::uint32_t>{0});
+  f.set("pc", sym("rtc_ll", "idle"));
+  unlock(f);
+  write(f, "RTC", "ICSR", 1u << 7);
+  later(f, ms);
+  REQUIRE((read(f, "RTC", "ICSR") >> 6 & 1u) == 1);
+  write(f, "RTC", "PRER", 0x7F'007F);
+  REQUIRE(read(f, "RTC", "PRER") == 0x7F'007F);
+  f.target->reset(popcorn::reset_kind::software);
+  f.set("pc", sym("rtc_ll", "idle"));
+  CHECK((read(f, "RTC", "ICSR") >> 7 & 1u) == 0);
+  later(f, 600 * ms);
+  CHECK(read(f, "RTC", "SSR") < 128);
+  CHECK(read(f, "RTC", "TR") == 0x00'0001);
+}
