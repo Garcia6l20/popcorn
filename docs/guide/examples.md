@@ -247,6 +247,12 @@ The same layout on the STM32L152, a Cortex-M3 without TrustZone, from `examples/
 
 --8<-- "stm32l152/rcc/README.md:3:15"
 
+### l152 pwr_flash
+
+Voltage range 1, one wait state, a boot counter in data EEPROM, a page erase and program, HAL, xe and xb. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/pwr_flash).
+
+--8<-- "stm32l152/pwr_flash/README.md:3:17"
+
 ### l152 gpio
 
 A push button on PC13 toggling an LED on PA5 through EXTI, HAL, xe and xb. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/gpio).
