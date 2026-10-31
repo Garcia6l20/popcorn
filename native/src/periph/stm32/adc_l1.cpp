@@ -112,6 +112,7 @@ struct adc_l1_state
   std::uint64_t                       injected_delay_until_ps{};
   std::uint8_t                        injected_rank{};
   std::uint8_t                        injected_left{};
+  std::uint64_t                       queued{};
 
   friend auto operator==(adc_l1_state const&, adc_l1_state const&) -> bool = default;
 };
@@ -180,7 +181,8 @@ struct trigger_selection
  *        Injected group, RM0038 12.3.9 and 12.15.15: JSWSTART with ADONS set, or a JEXTEN
  *        edge, starts the group. With SCAN 1 its JL + 1 conversions run in the order of the
  *        ADC_JSQR note, JSQ4 alone for JL 0, JSQ3 then JSQ4 for JL 1, up to JSQ1 to JSQ4 for JL
- *        3. With SCAN 0 the group is the first of them, JSQ(4 - JL), inferred. The k-th
+ *        3. With SCAN 0 the group is the first of them, JSQ(4 - JL), also over a regular
+ *        conversion, inferred against the 12.3.9 "switches to Scan-once mode". The k-th
  *        conversion of the group lands in ADC_JDRk less the JOFFSET of ADC_JOFRk, inferred from
  *        the HAL rank order. JSTRT sets at each injected conversion start, JSWSTART clearing, and
  *        JEOC at the end of the group. An injection drops a regular conversion in progress or
@@ -189,8 +191,10 @@ struct trigger_selection
  *        injected group starts the regular group at its end. A JSWSTART or an injected trigger
  *        while the injected group runs is ignored, JSWSTART cleared, inferred. A write of
  *        ADC_JSQR during the injected group drops it and resumes an interrupted regular
- *        conversion, 12.7.1. JSWSTART with ADONS clear logs a warning once, a model_error under
- *        strict_peripherals, and is ignored.
+ *        conversion, 12.7.1. A write of ADC_JSQR, or of ADC_SQR1 to ADC_SQR5, between JDISCEN or
+ *        DISCEN subgroups starts the next trigger's group at its first conversion, inferred.
+ *        JSWSTART with ADONS clear logs a warning once, a model_error under strict_peripherals,
+ *        and is ignored.
  *
  *        Injected data, RM0038 12.4 Figures 44 to 46: the code less the offset as a 16-bit two's
  *        complement value, right-aligned, or with ALIGN 1 one bit below a regular result, the
@@ -223,6 +227,12 @@ struct trigger_selection
  *        last, inferred. DISCEN with JDISCEN, against 12.3.10, logs once, a model_error under
  *        strict_peripherals, each group following its own bit.
  *
+ *        Auto-injection, RM0038 12.3.9: with JAUTO the injected group converts after the last
+ *        regular rank, whole, and with CONT the regular group starts over after it. JSWSTART is
+ *        then ignored. At the regular group start JAUTO logs once, a model_error under
+ *        strict_peripherals, with JEXTEN not 0 or with DISCEN or JDISCEN, against 12.3.9, and
+ *        converts the whole injected group, its edges ignored, inferred.
+ *
  *        Delay insertion, RM0038 12.9: DELS 001 holds the next conversion at each EOC, after
  *        each conversion with EOCS 1 and after the group with EOCS 0, inferred for EOCS 0,
  *        until ADC_DR is read or EOC cleared. DELS 010 to 111 apply after each regular
@@ -236,7 +246,8 @@ struct trigger_selection
  *
  *        Not modelled, each logged once, a model_error under strict_peripherals: DMA other than 0
  *        at the ADC_CR2 write, AWDEN and JAWDEN at the ADC_CR1 write, at the regular group start
- *        DMA, PDI, PDD, JAUTO and AWDEN, and at the injected group start PDI, PDD and JAWDEN.
+ *        DMA, PDI, PDD, AWDEN and DELS with JAUTO, and at the injected group start PDI, PDD and
+ *        JAWDEN.
  */
 class adc_l1_model final : public dispatch_model<adc_l1_model, adc_l1_state>,
                            public analog_port,
@@ -404,7 +415,10 @@ private:
   std::array<bool, selections>                    selection_logged_{};
   std::array<bool, selections>                    injected_selection_logged_{};
   bool                                            injected_refused_logged_{};
-  bool                                            auto_injected_logged_{};
+  bool                                            auto_start_logged_{};
+  bool                                            auto_trigger_logged_{};
+  bool                                            auto_discontinuous_logged_{};
+  bool                                            auto_delay_logged_{};
   bool                                            both_discontinuous_logged_{};
   bool                                            injected_watchdog_logged_{};
   bool                                            discontinuous_continuous_logged_{};
@@ -850,15 +864,29 @@ void adc_l1_model::triggered(std::string_view signal, trigger_edge edge, trigger
     return edge == trigger_edge::rising ? (polarity & exten_rising) != 0
                                         : (polarity & exten_falling) != 0;
   };
-  auto const hz    = adc_hz();
-  auto const start = at.ps + (hz == 0 ? 0 : cycles_ps(latency_halves, 2 * hz));
-  if(now.injected
-     and injected_triggers[*now.injected] == signal
-     and detects(get(regs_, injected_trigger_)))
+  auto const hz       = adc_hz();
+  auto const start    = at.ps + (hz == 0 ? 0 : cycles_ps(latency_halves, 2 * hz));
+  auto const injected = now.injected
+                    and injected_triggers[*now.injected] == signal
+                    and detects(get(regs_, injected_trigger_))
+                    and get(regs_, auto_injected_) == 0;
+  auto const regular =
+      now.regular and regular_triggers[*now.regular] == signal and detects(get(regs_, trigger_));
+  if(injected
+     and regular
+     and not state_.injecting
+     and not injected_blocked(at.ps)
+     and not regular_busy()
+     and not blocked(at.ps))
+  {
+    check_injected();
+    check_group();
+  }
+  if(injected)
   {
     injected_start(start, at.ps, false);
   }
-  if(now.regular and regular_triggers[*now.regular] == signal and detects(get(regs_, trigger_)))
+  if(regular)
   {
     regular_start(start, at.ps, false);
   }
@@ -950,11 +978,11 @@ void adc_l1_model::cr2_written(std::uint32_t old, std::uint32_t now)
   {
     power_up();
   }
-  if(start_.of(now) != 0)
+  if(start_.of(now) != 0 and start_.of(old) == 0)
   {
     software_start();
   }
-  if(injected_start_.of(now) != 0)
+  if(injected_start_.of(now) != 0 and injected_start_.of(old) == 0)
   {
     injected_software_start();
   }
@@ -984,6 +1012,15 @@ void adc_l1_model::injected_software_start()
         "JSWSTART with ADONS clear, forbidden by RM0038 12.15.3: ignored");
     return;
   }
+  if(get(regs_, auto_injected_) != 0)
+  {
+    update(regs_, injected_start_, 0);
+    forbidden(
+        auto_start_logged_, "CR2",
+        "JSWSTART with JAUTO, against RM0038 12.3.9: ignored, the injected group follows the "
+        "regular group");
+    return;
+  }
   auto const now = ctx_.clock.time().ps;
   injected_start(now, now, true);
 }
@@ -998,7 +1035,18 @@ void adc_l1_model::regular_start(std::uint64_t start_ps, std::uint64_t edge_ps, 
     }
     return;
   }
-  arm_group();
+  try
+  {
+    arm_group();
+  }
+  catch(...)
+  {
+    if(software)
+    {
+      update(regs_, start_, 0);
+    }
+    throw;
+  }
   if(state_.injecting)
   {
     state_.regular_resume = true;
@@ -1017,7 +1065,18 @@ void adc_l1_model::injected_start(std::uint64_t start_ps, std::uint64_t edge_ps,
     }
     return;
   }
-  check_injected();
+  try
+  {
+    check_injected();
+  }
+  catch(...)
+  {
+    if(software)
+    {
+      update(regs_, injected_start_, 0);
+    }
+    throw;
+  }
   suspend_regular();
   start_injected(start_ps);
 }
@@ -1034,7 +1093,9 @@ void adc_l1_model::arm_group()
 
 void adc_l1_model::start_injected(std::uint64_t start_ps)
 {
-  if(get(regs_, injected_discontinuous_) == 0 or state_.injected_rank >= injected_length())
+  if(get(regs_, injected_discontinuous_) == 0
+     or get(regs_, auto_injected_) != 0
+     or state_.injected_rank >= injected_length())
   {
     state_.injected_rank = 0;
   }
@@ -1059,13 +1120,16 @@ void adc_l1_model::sequence_written(std::uint32_t, std::uint32_t)
   {
     abort_regular();
     update(regs_, start_, 0);
+    return;
   }
+  state_.rank = 0;
 }
 
 void adc_l1_model::injected_sequence_written(std::uint32_t, std::uint32_t)
 {
   if(not state_.injecting)
   {
+    state_.injected_rank = 0;
     return;
   }
   stop_engine();
@@ -1143,10 +1207,28 @@ void adc_l1_model::check_group()
   {
     check_channel(channel_at(rank), "SQR1");
   }
-  if(get(regs_, auto_injected_) != 0)
+  if(get(regs_, auto_injected_) == 0)
   {
-    unmodelled(auto_injected_logged_, "CR1", "JAUTO: the auto-injected group");
+    return;
   }
+  if(get(regs_, discontinuous_) != 0 or get(regs_, injected_discontinuous_) != 0)
+  {
+    forbidden(
+        auto_discontinuous_logged_, "CR1",
+        "JAUTO with DISCEN or JDISCEN, against RM0038 12.3.9: the whole injected group follows "
+        "the last regular rank");
+  }
+  if(get(regs_, injected_trigger_) != 0)
+  {
+    forbidden(
+        auto_trigger_logged_, "CR2",
+        "JEXTEN with JAUTO, against RM0038 12.3.9: the injected triggers are ignored");
+  }
+  if(get(regs_, delay_) != 0)
+  {
+    unmodelled(auto_delay_logged_, "CR2", "DELS with JAUTO: the delay of auto-injected sequences");
+  }
+  check_injected();
 }
 
 void adc_l1_model::check_injected()
@@ -1194,7 +1276,8 @@ void adc_l1_model::begin(std::uint64_t start_ps)
     state_.start_pending = true;
     state_.start_ps      = start_ps;
     ++state_.generation;
-    ctx_.events.schedule_at(vtime{start_ps}, start_due, state_.generation, ctx_.clock);
+    state_.queued =
+        ctx_.events.schedule_at(vtime{start_ps}, start_due, state_.generation, ctx_.clock) + 1;
     return;
   }
   start_now(start_ps);
@@ -1228,7 +1311,9 @@ void adc_l1_model::schedule(std::uint64_t start_ps)
   ++state_.generation;
   update(regs_, state_.injecting ? injected_start_ : start_, 0);
   update(regs_, state_.injecting ? injected_started_ : started_, 1);
-  ctx_.events.schedule_at(vtime{state_.end_ps}, conversion_end, state_.generation, ctx_.clock);
+  state_.queued =
+      ctx_.events.schedule_at(vtime{state_.end_ps}, conversion_end, state_.generation, ctx_.clock)
+      + 1;
 }
 
 void adc_l1_model::hold(std::uint64_t end_ps, bool& frozen, std::uint64_t& until_ps)
@@ -1278,7 +1363,19 @@ void adc_l1_model::finish()
   {
     hold(end, state_.frozen, state_.delay_until_ps);
   }
-  if(more)
+  if(last and get(regs_, auto_injected_) != 0)
+  {
+    if(more and state_.frozen)
+    {
+      state_.resume_frozen = true;
+    }
+    else
+    {
+      state_.regular_resume = more;
+    }
+    start_injected(end);
+  }
+  else if(more)
   {
     if(state_.frozen)
     {
@@ -1301,8 +1398,8 @@ void adc_l1_model::finish_injected()
   auto const last   = index + 1u >= injected_length();
   store_injected(index, result);
   state_.injected_rank = last ? std::uint8_t{0} : static_cast<std::uint8_t>(index + 1u);
-  auto const whole     = get(regs_, injected_discontinuous_) == 0;
-  auto const more      = whole ? not last : not last and --state_.injected_left > 0;
+  auto const whole = get(regs_, injected_discontinuous_) == 0 or get(regs_, auto_injected_) != 0;
+  auto const more  = whole ? not last : not last and --state_.injected_left > 0;
   if(last)
   {
     update(regs_, injected_end_, 1);
@@ -1352,6 +1449,10 @@ void adc_l1_model::store_injected(std::size_t index, std::uint32_t result)
 
 void adc_l1_model::stop_engine()
 {
+  if(auto const seq = std::exchange(state_.queued, 0); seq != 0)
+  {
+    ctx_.events.cancel(seq - 1);
+  }
   ++state_.generation;
   state_.converting    = false;
   state_.waiting_clock = false;
@@ -1420,12 +1521,14 @@ void adc_l1_model::on_event(std::uint32_t kind, std::uint64_t payload)
   }
   if(kind == start_due and payload == state_.generation and state_.start_pending)
   {
+    state_.queued        = 0;
     state_.start_pending = false;
     start_now(state_.start_ps);
     return;
   }
   if(kind == conversion_end and payload == state_.generation and state_.converting)
   {
+    state_.queued = 0;
     finish();
   }
 }

@@ -9,6 +9,7 @@ void idle(void);
 void single(void);
 void scan3(void);
 void triggered(void);
+void injected(void);
 void factory(void);
 
 void idle(void)
@@ -105,6 +106,28 @@ void triggered(void)
   LL_TIM_EnableCounter(TIM2);
   log_ranks(6u);
   LOG(LL_ADC_IsActiveFlag_OVR(ADC1));
+  DONE();
+}
+
+void injected(void)
+{
+  enable();
+  LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, LL_ADC_CHANNEL_1);
+  LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_1, LL_ADC_SAMPLINGTIME_384CYCLES);
+  LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_5, LL_ADC_SAMPLINGTIME_16CYCLES);
+  LL_ADC_INJ_SetSequencerRanks(ADC1, LL_ADC_INJ_RANK_4, LL_ADC_CHANNEL_5);
+  LL_ADC_INJ_SetOffset(ADC1, LL_ADC_INJ_RANK_1, 0x400u);
+  LL_ADC_REG_StartConversionSWStart(ADC1);
+  LL_ADC_INJ_StartConversionSWStart(ADC1);
+  while(LL_ADC_IsActiveFlag_JEOS(ADC1) == 0u)
+  {
+  }
+  LOG(LL_ADC_INJ_ReadConversionData12(ADC1, LL_ADC_INJ_RANK_1));
+  LOG(LL_ADC_IsActiveFlag_EOCS(ADC1));
+  while(LL_ADC_IsActiveFlag_EOCS(ADC1) == 0u)
+  {
+  }
+  LOG(LL_ADC_REG_ReadConversionData12(ADC1));
   DONE();
 }
 

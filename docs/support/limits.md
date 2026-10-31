@@ -129,8 +129,8 @@ On the STM32H5, RM0481 section 28:
 
 On the STM32L1, RM0038 section 12:
 
-- The auto-injected group, `JAUTO`, the analog watchdog, `AWDEN` and `JAWDEN`, DMA requests,
-  `DMA`, and the automatic power-down, `PDI` and `PDD`, are logged once, a model_error under
+- The analog watchdog, `AWDEN` and `JAWDEN`, DMA requests, `DMA`, the automatic power-down,
+  `PDI` and `PDD`, and `DELS` with `JAUTO` are logged once, a model_error under
   strict_peripherals.
 - Hardware triggers start conversions from the TRGO selections of `EXTSEL`, TIM9, TIM3, TIM2,
   TIM4 and TIM6, and of `JEXTSEL`, TIM9, TIM2, TIM4 and TIM7. The compare event selections,
@@ -153,7 +153,9 @@ On the STM32L1, RM0038 section 12:
 - A `SWSTART` while a conversion runs is cleared and ignored, inferred. A `JSWSTART` or an
   injected trigger while the injected group runs is cleared and ignored, inferred.
 - With `SCAN` 0 the injected group is one conversion of JSQ(4 - `JL`), the first of the `JL`
-  order, inferred. The k-th conversion of the injected group lands in `ADC_JDRk` less the offset
+  order, also over a regular conversion, inferred. An `ADC_JSQR` write, or an `ADC_SQR1` to
+  `ADC_SQR5` write, between `JDISCEN` or `DISCEN` subgroups starts the next group at its first
+  conversion, inferred. The k-th conversion of the injected group lands in `ADC_JDRk` less the offset
   of `ADC_JOFRk`, inferred from the HAL rank order. Below 12 bits `JOFFSET` counts from bit 11 and
   its bits under the resolution are ignored, inferred from the LL driver note, and a left-aligned
   injected result sits one bit below the regular one at every resolution, RM0038 Figures 45 and
@@ -162,7 +164,9 @@ On the STM32L1, RM0038 section 12:
   after the injected group, once the delay of the regular conversion before it has passed. A
   regular trigger or `SWSTART` during the injected group starts the regular group after it. One
   edge of a signal both groups select starts both.
-- `DISCEN` with `JDISCEN` is logged once, a model_error under strict_peripherals.
+- `JAUTO` with `JEXTEN` not 0, `DISCEN` or `JDISCEN`, a `JSWSTART` with `JAUTO`, and `DISCEN`
+  with `JDISCEN` are logged once, a model_error under strict_peripherals. With `JAUTO` the whole
+  injected group follows the last regular rank and injected triggers are ignored, inferred.
 - With `JDISCEN` the last subgroup sets `JEOC` alone, inferred: the RM0038 12.3.10 example also
   names `EOC`. The injected tlatr is the regular 3.5 ADC clock cycles, inferred.
 - Channels 16 and 17 read their TS_CAL1 and VREFINT_CAL values from the `TSVREFE` write on,
