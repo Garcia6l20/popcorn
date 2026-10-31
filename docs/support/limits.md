@@ -554,7 +554,14 @@ Source: [iwdg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
   the old prescaled clock.
 - A refresh reloads at the key write, not one period later.
 - EWIC acknowledges without the 0x5555 key, as `LL_IWDG_ClearFlag_EWIF` expects.
-- The hardware watchdog option is not modelled.
+- The IWDG starts at the first `KR` 0xCCCC whatever the hardware watchdog option holds:
+  FLASH_OPTR.IWDG_SW on the STM32U5, FLASH_OPTSR_CUR.IWDG_SW on the STM32H5, FLASH_OBR.IWDG_SW on
+  the STM32L1. RM0456 61.4.3 and RM0038 21.3.1 start it at power-on with IWDG_SW 0.
+- The STM32L1 IWDG, RM0038 21, has KR, PR, RLR and SR with PVU and RVU. A refresh reloads at any
+  counter value. PR 110 and 111 both divide by 256. PVU and RVU fall 5 LSI cycles after the
+  write, the "up to 5" of RM0038 21.4.4 taken as 5, inferred, 6 on the STM32U5 and STM32H5.
+- An update flag falls only while the LSI runs: a PR, RLR, WINR or EWCR write before the LSI
+  starts keeps its flag set until the LSI is ready, inferred.
 
 ## MDF and ADF
 

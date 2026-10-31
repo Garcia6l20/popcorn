@@ -148,8 +148,11 @@ namespace popcorn::periph::stm32
  */
 [[nodiscard]] auto tim_factory(tim_variant variant) -> model_factory;
 
-/** @brief Factory of the IWDG model, RM0456 section 61. */
-[[nodiscard]] auto iwdg_factory() -> model_factory;
+/**
+ * @brief Factory of the IWDG model, RM0456 section 61, RM0038 section 21.
+ * @param variant What differs between the IWDG of the family the row serves.
+ */
+[[nodiscard]] auto iwdg_factory(iwdg_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the RTC model, RM0456 section 63.
