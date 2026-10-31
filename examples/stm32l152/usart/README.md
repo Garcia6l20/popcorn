@@ -8,7 +8,7 @@ back as `echo: <line>`. The main loop sleeps in WFI. Each test runs twice: on th
 STM32L152RETx and on the xb build on the Cat.1 STM32L152RBTx.
 
 It ports `stm32u575/usart`. USART2 runs from PCLK1 at the 2.097 MHz MSI reset clock, so the
-classic USART BRR, mantissa and fraction, is 218 and the rate 9619 baud.
+classic USART BRR, mantissa and fraction, is 218 and the rate 9620 baud.
 
 ## Run
 

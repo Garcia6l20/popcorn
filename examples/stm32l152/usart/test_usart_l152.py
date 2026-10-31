@@ -6,8 +6,9 @@ sent with the virtual time each frame ended, `write` queues bytes for its RX lin
 
 USART2 runs from PCLK1 at the MSI reset clock. The HAL computes BRR from MSI_VALUE, 2.097 MHz,
 while the MSI range 5 of the model runs at 65536 << 5, 2.097152 MHz, as RM0038 gives it. BRR is
-218, USARTDIV 13.625. The model sends at the whole baud rate PCLK1 / BRR, 9619 baud, so a 10-bit
-frame lasts 10 / 9619 s, about 1.0396 ms. The frame check allows 1 ns.
+218, USARTDIV 13.625, so the rate is 9620.0 baud. A frame lasts 10 times BRR kernel clocks,
+10 * 218 / 2097152 s, about 1.0395 ms, rounded down to the picosecond, and the frames are exactly
+that far apart.
 """
 
 import itertools
@@ -15,7 +16,7 @@ import itertools
 import pytest
 from popcorn import Machine, MachineDescription, StopReason
 from popcorn.pytest import MachineFactory
-from popcorn.units import ms, ns
+from popcorn.units import ms
 
 pytestmark = pytest.mark.popcorn(budget=4_000_000)
 
@@ -31,9 +32,9 @@ async def test_the_banner_comes_out_at_the_brr_rate(usart: Machine) -> None:
     assert bytes(frame.data for frame in frames) == BANNER
 
     assert usart.periph.USART2.BRR.value == BRR
-    frame_ps = 10 * 10**12 // (PCLK1_HZ // BRR)
+    frame_ps = 10 * BRR * 10**12 // PCLK1_HZ
     for earlier, later in itertools.pairwise(frames):
-        assert abs((later.at - earlier.at).ps - frame_ps) < ns(1).ps
+        assert (later.at - earlier.at).ps == frame_ps
 
 
 async def test_the_pins_are_pa2_and_pa3_on_af7(usart: Machine) -> None:

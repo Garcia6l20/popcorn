@@ -33,6 +33,8 @@ loopback_endpoint::~loopback_endpoint() = default;
 
 namespace
 {
+using wide = unsigned __int128;
+
 constexpr std::uint32_t transmit_done = 0;
 constexpr std::uint32_t receive_due   = 1;
 constexpr std::uint32_t idle_due      = 2;
@@ -250,7 +252,9 @@ struct lock
 /**
  * @brief USART, UART and LPUART of the STM32U5, RM0456 sections 66 and 67, asynchronous mode.
  *        Frames leave and arrive one frame time apart at the baud the kernel clock, PRESC and BRR
- *        give, read when each frame starts. FIFO mode, 8 frames each way, or single registers.
+ *        give, read when each frame starts. A frame lasts its bit count times USARTDIV periods of
+ *        the kernel clock divided by PRESC, one exact product rounded down to the picosecond.
+ *        FIFO mode, 8 frames each way, or single registers.
  *        TX frames reach the port's endpoint when their stop bit ends. RX frames the board queues
  *        arrive one frame time apart, an overrun drops the frame and sets ORE, IDLE follows one
  *        idle frame. With CR3.DMAT the `<instance>_tx_dma` request follows TXE, with CR3.DMAR the
@@ -884,27 +888,31 @@ auto usart::fifo() const -> bool
 
 auto usart::frame_ps() -> std::uint64_t
 {
-  auto const code = bit(prescaler_);
-  auto const hz   = ctx_.clock.hz(kernel_) / (code < prescalers.size() ? prescalers[code] : 256u);
+  auto const code  = bit(prescaler_);
+  auto const hz    = ctx_.clock.hz(kernel_);
+  auto const presc = std::uint64_t{code < prescalers.size() ? prescalers[code] : 256u};
   auto const brr =
       baud_fraction_ ? get(regs_, baud_) << 4 | get(regs_, *baud_fraction_) : get(regs_, baud_);
-  std::uint64_t baud = 0;
+  std::uint64_t clocks_per_bit = 0;
+  std::uint64_t bit_divider    = 1;
   if(brr != 0 and hz != 0)
   {
     if(low_power_)
     {
-      baud = brr < 0x300 ? 0 : 256 * hz / brr;
+      clocks_per_bit = brr < 0x300 ? 0 : brr;
+      bit_divider    = 256;
     }
     else if(get(regs_, *oversampling_) != 0)
     {
-      baud = 2 * hz / ((brr & 0xfff0u) | ((brr & 7u) << 1));
+      clocks_per_bit = (brr & 0xfff0u) | ((brr & 7u) << 1);
+      bit_divider    = 2;
     }
     else
     {
-      baud = hz / brr;
+      clocks_per_bit = brr;
     }
   }
-  if(baud == 0)
+  if(clocks_per_bit == 0)
   {
     auto const in_use = enabled() and (get(regs_, transmit_) != 0 or get(regs_, receive_) != 0);
     if(in_use and not std::exchange(no_baud_logged_, true))
@@ -916,7 +924,8 @@ auto usart::frame_ps() -> std::uint64_t
   auto const                             word = word_bits();
   constexpr std::array<std::uint32_t, 4> half_stops{2, 1, 4, 3};
   auto const                             half_bits = 2 * (1 + word) + half_stops[get(regs_, stop_)];
-  return half_bits * ps_per_second / (2 * baud);
+  return static_cast<std::uint64_t>(
+      wide{half_bits} * clocks_per_bit * presc * ps_per_second / (2 * bit_divider * hz));
 }
 
 auto usart::schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t

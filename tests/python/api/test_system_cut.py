@@ -517,12 +517,21 @@ def test_a_stopped_break_takes_the_later_end_s_system_time(pair: Build, swap: bo
     assert tap.break_line() == at(2990.5)
 
 
+def later_end(system: System, until: VirtualTime) -> VirtualTime:
+    """The later member's system time after `to(system, until)`: a busy member stops at the first
+    block boundary at or after the target, less than 1 us past it."""
+    later = max(system.time_of("a"), system.time_of("b"))
+    assert until <= later
+    assert later.ps - until.ps < us(1).ps
+    return later
+
+
 def snapshot_run(system: System, restored: popcorn.SystemSnapshot | None) -> Outcome:
     tap = system.tap("a.USART1")
     if restored is not None:
         system.restore(restored)
     asyncio.run(to(system, at(905)))
-    assert tap.restore_line() == at(905)
+    assert tap.restore_line() == later_end(system, at(905))
     return finish(system)
 
 
@@ -532,7 +541,7 @@ def test_an_open_cut_is_in_a_snapshot_and_the_owner_is_kept_across_a_restore(
     system = pair()
     tap = system.tap("a.USART1")
     asyncio.run(to(system, at(400)))
-    assert tap.break_line() == at(400)
+    assert tap.break_line() == later_end(system, at(400))
     saved = system.snapshot()
     tap.frames()
     first = snapshot_run(system, None)

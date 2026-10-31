@@ -2457,7 +2457,8 @@ TEST_CASE("a strict fault on a frame starting in the last cycle before a barrier
 {
   constexpr std::int64_t period = 250'000;
   constexpr std::int64_t until  = 20 * ms_ps;
-  auto const point = barrier_after_last_cycle_end("link_tx_bursts", period, until, 20 * latency_20);
+  auto const             point =
+      barrier_after_last_cycle_end("link_tx_bursts_hsi", period, until, 20 * latency_20);
   CAPTURE(point.latency);
   CAPTURE(point.barrier);
   CAPTURE(point.end);
@@ -2471,7 +2472,7 @@ TEST_CASE("a strict fault on a frame starting in the last cycle before a barrier
       CAPTURE(lowered);
       world w;
       w.strict = true;
-      w.add("link_tx_bursts");
+      w.add("link_tx_bursts_hsi");
       w.add("idle");
       auto& link = w.link(0, 1, point.latency);
       if(lowered != 1)

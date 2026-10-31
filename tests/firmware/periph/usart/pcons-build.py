@@ -37,6 +37,7 @@ add_ll_firmware(
         "link_tx_long",
         "link_rx_quiet",
         "link_tx_bursts",
+        "link_tx_bursts_hsi",
         "dma_ring",
         "link_ping",
         "link_echo",

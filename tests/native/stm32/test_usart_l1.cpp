@@ -57,7 +57,7 @@ constexpr std::uint32_t    te            = 1u << 3;
 constexpr std::uint32_t    re            = 1u << 2;
 constexpr std::uint32_t    ue            = 1u << 13;
 constexpr address          cr3           = 0x14;
-constexpr std::uint64_t    frame         = 10 * ps_per_second / (msi_hz / 18);
+constexpr std::uint64_t    frame         = 10 * ps_per_second * 18 / msi_hz;
 constexpr std::uint32_t    ore           = 1u << 3;
 constexpr std::uint32_t    idle_flag     = 1u << 4;
 constexpr std::uint32_t    eie           = 1u << 0;
@@ -239,9 +239,10 @@ auto brr(rig const& r, std::string_view unit) -> std::uint32_t
   return r.f->field(unit, "BRR", "DIV_Mantissa") << 4 | r.f->field(unit, "BRR", "DIV_Fraction");
 }
 
-auto frame_ps(std::uint64_t baud, std::uint64_t bits = 10) -> std::uint64_t
+auto frame_ps(std::uint64_t clocks_per_bit, std::uint64_t hz, std::uint64_t bits = 10)
+    -> std::uint64_t
 {
-  return bits * ps_per_second / baud;
+  return bits * ps_per_second * clocks_per_bit / hz;
 }
 
 void back_to_back(periph::capture_endpoint const& capture, std::uint64_t frame)
@@ -290,7 +291,7 @@ TEST_CASE("RM0038 27.3.2: polled USART1 sends hello back to back at PCLK2 over B
     CHECK(r.finish() == std::vector<std::uint32_t>{txe | tc, 1});
     CHECK(text(*r.usart1) == hello);
     CHECK(brr(r, "USART1") == 18);
-    back_to_back(*r.usart1, frame_ps(msi_hz / 18));
+    back_to_back(*r.usart1, frame_ps(18, msi_hz));
     rig again{"main", *desc, elf};
     again.finish();
     CHECK(again.usart1->frames == r.usart1->frames);
@@ -302,7 +303,7 @@ TEST_CASE("RM0038 27.4: TXEIE drives the same hello from USART1_IRQn")
   rig r{"tx_irq"};
   CHECK(r.finish() == std::vector<std::uint32_t>{7});
   CHECK(text(*r.usart1) == hello);
-  back_to_back(*r.usart1, frame_ps(msi_hz / 18));
+  back_to_back(*r.usart1, frame_ps(18, msi_hz));
 }
 
 TEST_CASE(
@@ -318,12 +319,12 @@ TEST_CASE(
     r.write(rcc_cfgr, ppre);
     r.finish();
     CHECK(text(*r.usart1) == hello);
-    back_to_back(*r.usart1, frame_ps(usart1_hz / 18));
+    back_to_back(*r.usart1, frame_ps(18, usart1_hz));
     rig u{"uart4_poll"};
     u.write(rcc_cfgr, ppre);
     u.finish();
     CHECK(text(*u.uart4) == hello);
-    back_to_back(*u.uart4, frame_ps(uart4_hz / 218));
+    back_to_back(*u.uart4, frame_ps(218, uart4_hz));
   }
 }
 
@@ -345,7 +346,7 @@ TEST_CASE("RM0038 27.3.4: OVER8 takes DIV_Fraction[2:0] as eighths, USART2 at 11
   REQUIRE(log.size() == 1);
   CHECK(log[0] == 0x22);
   CHECK(text(*r.usart2) == hello);
-  back_to_back(*r.usart2, frame_ps(2 * msi_hz / ((0x22u & 0xFFF0u) | ((0x22u & 7u) << 1))));
+  back_to_back(*r.usart2, frame_ps((0x22u & 0xFFF0u) | ((0x22u & 7u) << 1), 2 * msi_hz));
 }
 
 TEST_CASE("RM0038 27.6.1: a write of 0 clears TC, TXE ignores the write")
@@ -364,13 +365,13 @@ TEST_CASE("RM0038 27.6.1: a write of 0 to RXNE drops the received word, the next
       {{.data = 'x'}, {.data = 'y'}}
   };
   r.port("USART1").receive_frames(std::span{frames}.first(1));
-  r.idle_to(r.now_ps() + frame_ps(msi_hz / 18) + 1'000'000);
+  r.idle_to(r.now_ps() + frame_ps(18, msi_hz) + 1'000'000);
   REQUIRE((r.read(usart1 + sr) & rxne) != 0);
   CHECK(r.read(usart1 + dr) == 'x');
   r.write(usart1 + sr, ~rxne);
   CHECK((r.read(usart1 + sr) & (rxne | tc)) == tc);
   r.port("USART1").receive_frames(std::span{frames}.subspan(1));
-  r.idle_to(r.now_ps() + frame_ps(msi_hz / 18) + 1'000'000);
+  r.idle_to(r.now_ps() + frame_ps(18, msi_hz) + 1'000'000);
   CHECK((r.read(usart1 + sr) & (rxne | (1u << 3))) == rxne);
   CHECK(r.read(usart1 + dr) == 'y');
 }
@@ -382,7 +383,7 @@ TEST_CASE("RM0038 27.6.4: M with STOP 2 sends a 9-bit word in a 12-bit frame")
   REQUIRE(r.usart1->frames.size() == 2);
   CHECK(r.usart1->frames[0].data == 0x1A5);
   CHECK(r.usart1->frames[1].data == 0x0FF);
-  back_to_back(*r.usart1, frame_ps(msi_hz / 18, 12));
+  back_to_back(*r.usart1, frame_ps(18, msi_hz, 12));
 }
 
 TEST_CASE("RM0038 27.3.2: SBK written 0 before the break starts cancels it")
@@ -498,7 +499,7 @@ TEST_CASE("RM0038 27.5: UART4 sends hello at 9600 on PCLK1 on RETx")
   CHECK(text(*r.uart4) == hello);
   auto const div = brr(r, "UART4");
   CHECK(div == 218);
-  back_to_back(*r.uart4, frame_ps(msi_hz / div));
+  back_to_back(*r.uart4, frame_ps(div, msi_hz));
 }
 
 TEST_CASE("the sci2 model refuses an instance outside the L1 APB windows")
@@ -530,7 +531,7 @@ TEST_CASE("UartLink: USART1 posts its frame shape at the start bit, USART2 takes
   CHECK(sent.data == 0x5A);
   CHECK(sent.word_bits == 8);
   CHECK(sent.half_stops == 2);
-  CHECK(sent.frame_ps == frame_ps(msi_hz / 18));
+  CHECK(sent.frame_ps == frame_ps(18, msi_hz));
   CHECK(sent.start.ps == start);
   CHECK(sent.end.ps == start + sent.frame_ps);
   r.port("USART2").receive_at(sent, 1);

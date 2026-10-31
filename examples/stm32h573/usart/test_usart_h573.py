@@ -4,7 +4,8 @@
 sent with the virtual time each frame ended, `write` queues bytes for its RX line.
 
 UART9 runs from PCLK1 at the 32 MHz reset clock, HSI divided by 2, so BRR is 35 and a 10-bit
-frame lasts 10.9375 us, 914286 baud. The frame check allows 1 ns.
+frame lasts 10 times BRR kernel clocks, 10.9375 us, 914286 baud. The frames are exactly that far
+apart.
 """
 
 import itertools
@@ -12,7 +13,7 @@ import itertools
 import pytest
 from popcorn import Machine, MachineDescription, StopReason
 from popcorn.pytest import MachineFactory
-from popcorn.units import ms, ns
+from popcorn.units import ms
 
 pytestmark = pytest.mark.popcorn(budget=2_000_000)
 
@@ -29,7 +30,7 @@ async def test_the_banner_comes_out_at_the_brr_rate(usart: Machine) -> None:
     assert brr == round(PCLK1_HZ / 921_600)
     frame_ps = 10 * brr * 10**12 // PCLK1_HZ
     for earlier, later in itertools.pairwise(frames):
-        assert abs((later.at - earlier.at).ps - frame_ps) < ns(1).ps
+        assert (later.at - earlier.at).ps == frame_ps
 
 
 async def test_the_pins_are_pg0_and_pg1_on_af11(usart: Machine) -> None:

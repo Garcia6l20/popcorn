@@ -4,8 +4,8 @@
 firmware sent with the virtual time each frame ended, `write` queues bytes for its RX line.
 
 USART1 runs from PCLK2 at the 4 MHz reset clock, so BRR is 35 and a 10-bit frame lasts
-87.5 us, 114286 baud. The frame check allows 1 ns: the model derives an integer baud from BRR
-first, which adds 546 ps per frame.
+87.5 us, 114286 baud. A frame lasts 10 times BRR kernel clocks, so the frames are exactly
+87.5 us apart.
 """
 
 import itertools
@@ -13,7 +13,7 @@ import itertools
 import pytest
 from popcorn import Machine, MachineDescription, StopReason
 from popcorn.pytest import MachineFactory
-from popcorn.units import ms, ns
+from popcorn.units import ms
 
 pytestmark = pytest.mark.popcorn(budget=2_000_000)
 
@@ -29,7 +29,7 @@ async def test_the_banner_comes_out_at_the_brr_rate(usart: Machine) -> None:
     assert brr == round(PCLK2_HZ / 115_200)
     frame_ps = 10 * brr * 10**12 // PCLK2_HZ
     for earlier, later in itertools.pairwise(frames):
-        assert abs((later.at - earlier.at).ps - frame_ps) < ns(1).ps
+        assert (later.at - earlier.at).ps == frame_ps
 
 
 async def test_a_line_comes_back_prefixed(usart: Machine) -> None:
