@@ -17,8 +17,8 @@
     "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
     "fields": "6d8cd9e833ec5de87528a4ca3f731ea43651261180f54eae4d9b135a83d7b770",
     "irqs": "cabd4da4d6ecf254b1d4a508fa868178ccb43c10e9adff318c174c6480316dfc",
-    "peripherals": "c737bc62953d78537f45376302acc49c2b9e5c27f4c6db49f43aa1dd47fa39a4",
-    "regions": "6aa0de883a6a508cd14ff99473b72906d1d7968c73b5a9fae012310d5b0aab52",
+    "peripherals": "fd72b0127b9311b731f45d6d564fa2a40ad6c9884074bb4adcaba158fb9243c7",
+    "regions": "db79ccf69840262e6f99eee618bee0c9854d502f6263fcc0eab5dd4d3701a49e",
     "registers": "676f0ebef0b59f853ec3ac36b70c10986e6a5ddd04e26a35d319f0c179831efd"
   }
 }

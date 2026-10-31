@@ -18,6 +18,11 @@ versions = { "EXTI" = "STM32L1_exti_23", "SYSCFG" = "STM32L1_exti_23", "ADC" = "
 source = "RM0038 Rev 18, 11.3 (EXTI has 23 lines on Cat.1 and Cat.2, 24 from Cat.3, RM0038 lines 13100 to 13222 and 13334 to 13484) and 12 (the ADC of Cat.1 and Cat.2 has 24 channels, 28 from Cat.3). EXTI and SYSCFG have no CubeMX version, the empty version is replaced. ADC replaces aditf3_v1_1_Cube, the version of every category"
 
 [[register_drops]]
+peripheral = "ADC"
+names = ["SMPR0"]
+source = "RM0038 Rev 18, 12.15.18 ADC_SMPR0: available in Cat.3, Cat.4, Cat.5 and Cat.6 devices only. The four SVDs list SMPR0 at 0x5C on every category"
+
+[[register_drops]]
 peripheral = "FLASH"
 names = ["WRPR2"]
 source = "RM0038 Rev 18, 3.9.9 FLASH_WRPRx: FLASH_WRPR2 is available in Cat.3 to Cat.6. The SVDs list WRPR2 at 0x80 on every category"
@@ -97,3 +102,17 @@ registers = ["APB1_FZ"]
 fields = ["DBG_TIM5_STOP"]
 drop = true
 source = "RM0038 Rev 18, 30.16.4 DBGMCU_APB1_FZ: DBG_TIM5_STOP is available in Cat.3 to Cat.6 only"
+
+[[fields]]
+instances = ["ADC"]
+registers = ["CR2"]
+fields = ["ADC_CFG"]
+drop = true
+source = "RM0038 Rev 18, 12.15.3 ADC_CR2: ADC_CFG, the channel bank, is available in Cat.3, Cat.4, Cat.5 and Cat.6 devices only, 12.3.3: Cat.1 and Cat.2 have one bank of 26 channels. The four SVDs list it on every category"
+
+[[fields]]
+instances = ["ADC"]
+registers = ["SQR1"]
+fields = ["SQ28"]
+drop = true
+source = "RM0038 Rev 18, 12.15.10 ADC_SQR1: SQ28 is available in Cat.3, Cat.4, Cat.5 and Cat.6 devices only, L 11011 (28 conversions) likewise. The four SVDs list it on every category"

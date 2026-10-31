@@ -66,6 +66,11 @@ def test_every_adc_of_a_pin_data_build_carries_bonded_channels(name: str) -> Non
     assert [adc for adc, mask in adcs.items() if mask is None] == []
 
 
+def test_the_shipped_l152_parts_bond_their_bank_a_adc_in_pads() -> None:
+    assert _adcs(compose_shipped("STM32L152RETx")) == {"ADC": 0x003CFFFF}
+    assert _adcs(compose_shipped("STM32L152RBTx")) == {"ADC": 0x003CFFFF}
+
+
 def test_the_shipped_parts_bond_every_external_channel_of_adc1_and_adc2() -> None:
     assert _adcs(compose_shipped("STM32U575QGIx"))["ADC1"] == 0x3FFFE
     assert _adcs(compose_shipped("STM32H573AIIx")) == {"ADC1": 0xCFFFF, "ADC2": 0xCFFFF}

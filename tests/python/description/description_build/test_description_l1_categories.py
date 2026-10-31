@@ -456,6 +456,9 @@ def _check_memory(name: str, category: str) -> None:
     assert pieces.pop(0) == bytes.fromhex("aa0055fff80007ff") + virgin_wrp * 6
     if category == "cat5":
         assert pieces.pop(0x80) == virgin_wrp * 2
+    calibration = 0x78 if category in {"cat1", "cat2"} else 0xF8
+    assert pieces.pop(calibration) == (1671).to_bytes(2, "little") + (680).to_bytes(2, "little")
+    assert pieces.pop(calibration + 6) == (856).to_bytes(2, "little")
     assert pieces == {
         base: bytes.fromhex("14003200014e524f"),
         base + 0x14: bytes.fromhex("43504f50"),
