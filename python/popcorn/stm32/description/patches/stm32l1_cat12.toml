@@ -15,7 +15,7 @@ drop = ["SDIO", "TIM5", "SPI3", "DMA2_CH1", "DMA2_CH2", "DMA2_CH3", "DMA2_CH4", 
 
 [ip]
 versions = { "EXTI" = "STM32L1_exti_23", "SYSCFG" = "STM32L1_exti_23", "ADC" = "STM32L1_adc_cat12" }
-source = "RM0038 Rev 18, 11.3 (EXTI has 23 lines on Cat.1 and Cat.2, 24 from Cat.3, RM0038 lines 13100 to 13222 and 13334 to 13484) and 12 (the ADC of Cat.1 and Cat.2 has 24 channels, 28 from Cat.3). EXTI and SYSCFG have no CubeMX version, the empty version is replaced. ADC replaces aditf3_v1_1_Cube, the version of every category"
+source = "RM0038 Rev 18, 11.3 (EXTI has 23 lines on Cat.1 and Cat.2, 24 from Cat.3, RM0038 lines 13100 to 13222 and 13334 to 13484) and 12 (the ADC of Cat.1 and Cat.2 has 26 channels, ADC_IN0 to ADC_IN25, up to 42 in two banks from Cat.3, 12.3.3). EXTI and SYSCFG have no CubeMX version, the empty version is replaced. ADC replaces aditf3_v1_1_Cube, the version of every category"
 
 [[register_drops]]
 peripheral = "ADC"

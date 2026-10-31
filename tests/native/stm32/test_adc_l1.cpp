@@ -344,8 +344,8 @@ TEST_CASE("RM0038 12.8: RES shortens TCONV to 11, 9 and 7 cycles and drops two b
     CAPTURE(res);
     adc_rig const r;
     r.port().drive(5, 1'500'000);
-    r.power();
     r.write(cr1, res << 24);
+    r.power();
     r.write(sqr5, 5);
     auto const start = r.now();
     r.write(cr2, adon | swstart);
@@ -380,7 +380,7 @@ TEST_CASE("RM0038 12.5: each channel's SMP field of SMPR3 to SMPR0 sets its samp
   }
 }
 
-TEST_CASE("RM0038 12.4: ALIGN 1 puts a 12-bit code on bit 15, a 6-bit code on bit 7, inferred")
+TEST_CASE("RM0038 12.4: ALIGN 1 puts a 12-bit code on bit 15, a 6-bit code on bit 7, Figure 46")
 {
   adc_rig const r;
   r.port().drive(5, 1'500'000);
@@ -399,13 +399,13 @@ TEST_CASE("RM0038 12.15.10 to 12.15.14: rank n reads SQn across SQR5 to SQR1, 28
   {
     r.port().drive(channel, 100'000u * channel);
   }
+  r.write(cr1, scan);
   r.power();
   r.write(sqr5, (1u << 25) | (2u << 0));
   r.write(sqr4, 3u << 0);
   r.write(sqr3, (4u << 25) | (5u << 0));
   r.write(sqr2, (6u << 25) | (7u << 0));
   r.write(sqr1, (27u << 20) | (8u << 15) | (9u << 10) | (10u << 0));
-  r.write(cr1, scan);
   auto const start = r.now();
   r.write(cr2, adon | swstart);
   std::vector<std::uint32_t> seen;
@@ -435,8 +435,8 @@ TEST_CASE("RM0038 12.3.8: EOCS 0 sets EOC at the end of the scan, EOCS 1 after e
   {
     CAPTURE(control);
     adc_rig const r;
-    r.power();
     r.write(cr1, scan);
+    r.power();
     r.write(sqr1, 2u << 20);
     auto const start = r.now();
     r.write(cr2, adon | control | swstart);
@@ -454,7 +454,8 @@ TEST_CASE("RM0038 12.3.8: EOCS 0 sets EOC at the end of the scan, EOCS 1 after e
 }
 
 TEST_CASE(
-    "RM0038 12.3.5: CONT starts the group over until ADON clears, a SWSTART meanwhile is ignored")
+    "RM0038 12.3.5: CONT starts the group over until ADON clears, a SWSTART meanwhile is "
+    "ignored, inferred")
 {
   adc_rig const r;
   r.power();
@@ -535,7 +536,9 @@ TEST_CASE("RM0038 12.15.1: SR flags clear on a write of 0, keep on 1, ADONS igno
   CHECK(r.read(sr) == adons);
 }
 
-TEST_CASE("RM0038 12.12: TSVREFE connects TS_CAL1 on 16 and VREFINT_CAL on 17, scaled by VDDA")
+TEST_CASE(
+    "RM0038 12.12: TSVREFE connects TS_CAL1 on 16 and VREFINT_CAL on 17, scaled by VDDA, 0 "
+    "with TSVREFE clear, inferred")
 {
   adc_rig const r;
   r.power();
@@ -649,13 +652,13 @@ TEST_CASE("checklist 53: each function the L1 ADC does not model raises model_er
           row{cr2,  adon | (1u << 22), false},
           row{cr2,  adon | (1u << 28), false},
           row{cr2,  adon | (1u << 20), false},
-          row{cr2,  adon | (1u << 8),  true },
+          row{cr2,  adon | (1u << 8),  false},
           row{cr2,  adon | (1u << 4),  true },
           row{cr1,  1u << 17,          true },
           row{cr1,  1u << 16,          true },
           row{cr1,  1u << 11,          true },
           row{cr1,  1u << 10,          true },
-          row{cr1,  1u << 23,          true },
+          row{cr1,  1u << 23,          false},
           row{sqr5, 26,                true },
           row{ccr,  3u << 16,          true },
   })
@@ -715,11 +718,11 @@ TEST_CASE("Cat.1 and Cat.2: L 27 converts 27 ranks and channel 27 reads 0, each 
 {
   adc_rig const r{l152rb()};
   r.port().drive(25, 1'500'000);
+  r.write(cr1, scan);
   r.power();
   CHECK(r.convert(25) == 2048);
   CHECK(r.convert(27) == 0);
   CHECK(r.warnings() == 1);
-  r.write(cr1, scan);
   r.write(sqr1, 27u << 20);
   auto const start = r.now();
   r.write(cr2, adon | swstart);
@@ -809,4 +812,105 @@ TEST_CASE(
   rcc_reset_pulse(pending.f, "APB2RSTR", "ADC1RST");
   pending.run_until(pending.now() + 10 * us);
   CHECK(pending.read(sr) == 0);
+}
+
+TEST_CASE("LL ADC: a single conversion of ADC_IN5 at 1.5 V gives 2048, STRT, EOC read clear")
+{
+  for(auto const& desc : {l152re(), l152rb()})
+  {
+    CAPTURE(desc.part);
+    adc_rig const r{desc, true, false, {}, "l1_adc_ll"};
+    r.port().drive(5, 1'500'000);
+    CHECK(r.run("single") == std::vector<std::uint32_t>{2048, adons | strt});
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE("LL ADC: a scan of ADC_IN1, ADC_IN18 and ADC_IN5 with EOCS 1 reads each rank, no OVR")
+{
+  for(auto const& desc : {l152re(), l152rb()})
+  {
+    CAPTURE(desc.part);
+    adc_rig const r{desc, true, false, {}, "l1_adc_ll"};
+    r.port().drive(1, 750'000);
+    r.port().drive(18, 1'500'000);
+    r.port().drive(5, 2'250'000);
+    CHECK(r.run("scan3") == std::vector<std::uint32_t>{1024, 2048, 3072, 0});
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE(
+    "LL ADC: VREFINT gives 3000 mV and the sensor 30 C through the LL macros on both categories")
+{
+  for(auto const& desc : {l152re(), l152rb()})
+  {
+    CAPTURE(desc.part);
+    adc_rig const r{desc, true, false, {}, "l1_adc_ll"};
+    CHECK(r.run("factory") == std::vector<std::uint32_t>{vrefint, 3000, ts_cal1, 30});
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE("DMA and AWDEN set during a continuous run raise model_error at the write when strict")
+{
+  adc_rig const strict{l152re(), true};
+  strict.power();
+  strict.write(cr2, adon | cont | swstart);
+  strict.run_until(strict.now() + 3 * us);
+  CHECK_THROWS_AS(strict.attempt(cr2, adon | cont | (1u << 8)), popcorn::model_error);
+  CHECK_THROWS_AS(strict.attempt(cr1, 1u << 23), popcorn::model_error);
+}
+
+TEST_CASE(
+    "a RES write during a conversion applies from the next one, an SMPR write keeps it running")
+{
+  adc_rig const r;
+  r.port().drive(5, 1'500'000);
+  r.write(smpr3, 2u << 15);
+  r.write(sqr5, 5);
+  r.power();
+  auto const start = r.now();
+  r.write(cr2, adon | cont | swstart);
+  r.run_until(start + 300 * ns);
+  r.write(cr1, 3u << 24);
+  CHECK(r.due() == start + 28 * cycle);
+  r.run_until(start + 28 * cycle + 100 * ns);
+  CHECK(r.read(dr) == 2048);
+  CHECK(r.due() == start + 51 * cycle);
+  r.write(smpr3, 7u << 15);
+  CHECK(r.due() == start + 51 * cycle);
+  r.run_until(start + 51 * cycle + 100 * ns);
+  CHECK(r.read(dr) == 32);
+}
+
+TEST_CASE("ADON 0 while SWSTART waits for HSI16 clears SWSTART, no model_error when strict")
+{
+  adc_rig const r{l152re(), true};
+  r.power();
+  auto const rcc = r.f.target->peripheral("RCC").description().base;
+  REQUIRE(r.f.target->mem().write(rcc, 4, 0x0000'0300u).has_value());
+  r.write(cr2, adon | swstart);
+  REQUIRE((r.read(cr2) & swstart) != 0);
+  CHECK_NOTHROW(r.write(cr2, r.read(cr2) & ~adon));
+  CHECK((r.read(cr2) & swstart) == 0);
+}
+
+TEST_CASE("from Cat.3 an L of 28 to 31 converts 28 ranks and logs once, a model_error when strict")
+{
+  adc_rig const r;
+  r.write(cr1, scan);
+  r.write(sqr1, 30u << 20);
+  r.power();
+  auto const start = r.now();
+  r.write(cr2, adon | swstart);
+  CHECK(r.warnings() == 1);
+  r.run_until(start + 27 * 16 * cycle + 500 * ns);
+  CHECK(r.due() == start + 28 * 16 * cycle);
+
+  adc_rig const strict{l152re(), true};
+  strict.write(cr1, scan);
+  strict.write(sqr1, 30u << 20);
+  strict.power();
+  CHECK_THROWS_AS(strict.attempt(cr2, adon | swstart), popcorn::model_error);
 }

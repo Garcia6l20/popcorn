@@ -134,11 +134,15 @@ On the STM32L1, RM0038 section 12:
   the delay insertion, `DELS`, the automatic power-down, `PDI` and `PDD`, and discontinuous
   mode, `DISCEN`, are logged once, a model_error under strict_peripherals.
 - `ADONS` sets 3.5 us after the `ADON` edge, the datasheet tSTAB maximum, and clears at once
-  with `ADON`. `RCNR` and `JCNR` read 0. `ADC1EN` is not checked: the ADC runs from HSI16
-  whatever its RCC enable.
+  with `ADON`. `RCNR` and `JCNR` read 0. The ADC runs from HSI16 whatever `ADC1EN` of
+  `RCC_APB2ENR` holds.
+- A `SWSTART` while a conversion runs is cleared and ignored, inferred.
+- Channels 16 and 17 read their TS_CAL1 and VREFINT_CAL values from the `TSVREFE` write on,
+  with no sensor tSTART, and 0 while `TSVREFE` is clear, inferred.
+- A conversion keeps the end time, sampling end and resolution it started with. `RES` and `SMPx`
+  written with `ADON` 1 apply from the next conversion.
 - With `EOCS` 1, a result that finds `ADC_DR` unread sets `OVR` and is lost, and the group goes
   on, inferred.
-- `ALIGN` 1 puts a 6-bit code on bit 7, inferred.
 - On Cat.3 to Cat.6, bank B channels on a pad of their own, ADC_IN0b to ADC_IN3b and ADC_IN6b to
   ADC_IN12b, have no analog input and read 0, logged once. The other bank B channels read their
   bank A pad. VCOMP, channel 26, reads 0, logged once.

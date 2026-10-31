@@ -86,6 +86,8 @@ l1_firmwares = {
         "l152xe_l1_crc_ll",
         "l152xe_l1_rtc_ll",
         "l152xb_l1_rtc_ll",
+        "l152xe_l1_adc_ll",
+        "l152xb_l1_adc_ll",
     )
 }
 l1_env = {

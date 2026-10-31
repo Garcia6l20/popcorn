@@ -670,8 +670,9 @@ class AnalogInput:
 
     Setting `volts` drives the channel from outside the MCU, in whole microvolts. The drive is
     board state, kept across an MCU reset and restored by snapshots. A conversion reads the value
-    in force when it ends: V x 2**N / VDDA at the N bits of the ADC, 14 on the STM32U5 ADC1 and
-    12 on the STM32H5 ADC1 and ADC2, floored, saturated at VDDA, VDDA from `SupplyOptions`.
+    in force when it ends: V x 2**N / VDDA at the N bits of the ADC, 14 on the STM32U5 ADC1, 12
+    on the STM32H5 ADC1 and ADC2, and 12, 10, 8 or 6 by RES on the STM32L1 ADC, floored,
+    saturated at VDDA, VDDA from `SupplyOptions`.
     While the machine is busy, every access raises MachineRunning outside its callbacks:
     `m.write((m.ref.periph.ADC1.input(5).volts, 1.5))` drives it at a block boundary then.
     Every access raises ConfigError at the call, parked or running, for a channel whose pad the

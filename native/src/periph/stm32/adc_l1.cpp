@@ -71,6 +71,8 @@ struct adc_l1_state
   std::uint32_t                       generation{};
   std::uint32_t                       ready_generation{};
   std::uint64_t                       start_ps{};
+  std::uint64_t                       sample_end_ps{};
+  std::uint64_t                       end_ps{};
   std::uint64_t                       clock_hz{};
   std::uint32_t                       held_code{};
   bool                                held{};
@@ -79,6 +81,7 @@ struct adc_l1_state
   bool                                ready_waiting{};
   bool                                unread{};
   std::uint8_t                        rank{};
+  std::uint8_t                        resolution{};
 
   friend auto operator==(adc_l1_state const&, adc_l1_state const&) -> bool = default;
 };
@@ -94,26 +97,31 @@ struct adc_l1_state
  *        ADC_CCR, 12.3.2: without HSI the power-up and each conversion wait for it, logged once,
  *        and a conversion keeps the clock it started with. ADCPRE 11 is reserved: it divides by
  *        4 and logs once, a model_error under strict_peripherals. ADON 0 clears ADONS at once
- *        and drops a conversion in progress. ADC1EN of RCC_APB2ENR is not checked.
+ *        and drops a conversion in progress, clearing SWSTART. The ADC runs from HSI16 whatever
+ *        ADC1EN of RCC_APB2ENR holds.
  *
- *        Regular group, RM0038 12.3.4 to 12.3.8: an ADC_CR2 write setting SWSTART with ADONS
- *        set and no conversion running starts the group, SWSTART clearing when the first
- *        conversion starts. With SCAN 0 the group is SQ1 of ADC_SQR5, with SCAN 1 the L + 1 ranks
- *        of SQ1 to SQ28 across ADC_SQR5 to ADC_SQR1, 27 ranks at most on Cat.1 and Cat.2, where L
- *        26 and above converts 27, logged once, a model_error under strict_peripherals. Each
+ *        Regular group, RM0038 12.3.4 to 12.3.8: an ADC_CR2 write setting SWSTART with ADONS set
+ *        and no conversion running starts the group, SWSTART clearing when the first conversion
+ *        starts. With SCAN 0 the group is SQ1 of ADC_SQR5, with SCAN 1 the L + 1 ranks of SQ1 to
+ *        SQ28 across ADC_SQR5 to ADC_SQR1, 27 ranks at most on Cat.1 and Cat.2, 28 from Cat.3. An L
+ *        above the category's ranks converts all of them, logged once, a model_error under
+ *        strict_peripherals: L 27 and above on Cat.1 and Cat.2, L 28 and above from Cat.3. Each
  *        conversion takes SMP + TCONV ADC clock cycles, SMP 4, 9, 16, 24, 48, 96, 192 or 384 from
- *        the channel's field in ADC_SMPR3 to ADC_SMPR0, TCONV 12, 11, 9 and 7 for RES 12, 10, 8
- *        and 6 bits, 12.8. A conversion starts when the one before ends. STRT sets at each
+ *        the channel's field in ADC_SMPR3 to ADC_SMPR0, TCONV 12, 11, 9 and 7 for RES 12, 10, 8 and
+ *        6 bits, 12.8. A conversion keeps the end time, the sampling end and the resolution it
+ *        started with: RES and SMPx, written with ADON 1 against 12.15.2 and 12.15.4, apply from
+ *        the next conversion. A conversion starts when the one before ends. STRT sets at each
  *        conversion start, EOC at the end of each conversion with EOCS 1 and at the end of the
  *        group with EOCS 0. CONT 1 starts the group over after its last rank. A SWSTART while a
- *        conversion runs is ignored. A write of ADC_SQR1 to ADC_SQR5 during a conversion drops it,
- *        12.7.2, and the group waits for a new SWSTART. RCNR and JCNR read 0. SWSTART with ADONS
- *        clear logs a warning once, a model_error under strict_peripherals, and is ignored.
+ *        conversion runs is cleared and ignored, inferred. A write of ADC_SQR1 to ADC_SQR5 during a
+ *        conversion drops it, 12.7.2, and the group waits for a new SWSTART. RCNR and JCNR read 0.
+ *        SWSTART with ADONS clear logs a warning once, a model_error under strict_peripherals, and
+ *        is ignored.
  *
  *        Results, RM0038 12.4 and 12.11: ADC_DR holds the latest result, right-aligned, or with
- *        ALIGN 1 left-aligned on bit 15, a 6-bit code on bit 7, inferred. A CPU or DMA read of
- *        ADC_DR clears EOC, a debugger read clears nothing. With EOCS 1, a result finding ADC_DR
- *        unread, neither read nor its EOC cleared, sets OVR and is lost, the group going on,
+ *        ALIGN 1 left-aligned on bit 15, a 6-bit code on bit 7, 12.4 Figure 46. A CPU or DMA
+ *        read of ADC_DR clears EOC, a debugger read clears nothing. With EOCS 1, a result finding
+ *        ADC_DR unread, neither read nor its EOC cleared, sets OVR and is lost, the group going on,
  *        inferred. With EOCS 0 a result overwrites ADC_DR. ADC_SR flags OVR, STRT, JSTRT, JEOC,
  *        EOC and AWD clear on a write of 0 and keep on a write of 1. ADC1_IRQn is high while EOC,
  *        JEOC, AWD or OVR is set with EOCIE, JEOCIE, AWDIE or OVRIE. ADC_CSR reads ADC_SR bits 6
@@ -123,7 +131,8 @@ struct adc_l1_state
  *        input, `analog_port`, as V x 4096 / VDDA, floored and saturated, two bits fewer per RES
  *        step. A conversion holds the input at the end of its sampling phase. With TSVREFE of
  *        ADC_CCR set, channel 16 reads the factory TS_CAL1 and channel 17 VREFINT_CAL, both
- *        scaled by 3000 / VDDA, and 0 with TSVREFE clear, 12.12. A group converting one of them
+ *        scaled by 3000 / VDDA, from the TSVREFE write on, with no sensor tSTART, and 0 with
+ *        TSVREFE clear, inferred from 12.12. A group converting one of them
  *        reads the word from the description's factory content when it starts, a config_error
  *        when absent. On Cat.3 to Cat.6 ADC_CFG 1 selects bank B: its channels sharing a bank A
  *        pad, RM0038 Table 41, read that pad's input, channels 16 and 17 as in bank A. A group
@@ -131,8 +140,8 @@ struct adc_l1_state
  *        category lacks reads 0 and logs once, a model_error under strict_peripherals.
  *
  *        Not modelled, each logged once, a model_error under strict_peripherals: JSWSTART, which
- *        clears, and EXTEN or JEXTEN other than 0 at the ADC_CR2 write, and at the group start
- *        DMA, DELS, PDI, PDD, DISCEN, JAUTO and AWDEN.
+ *        clears, and EXTEN, JEXTEN or DMA other than 0 at the ADC_CR2 write, AWDEN at the ADC_CR1
+ *        write, and at the group start DMA, DELS, PDI, PDD, DISCEN, JAUTO and AWDEN.
  */
 class adc_l1_model final : public dispatch_model<adc_l1_model, adc_l1_state>,
                            public analog_port,
@@ -172,6 +181,7 @@ public:
   }
 
   void sr_written(std::uint32_t old, std::uint32_t now);
+  void cr1_written(std::uint32_t old, std::uint32_t now);
   void cr2_written(std::uint32_t old, std::uint32_t now);
   void sequence_written(std::uint32_t, std::uint32_t);
   void plain_written(std::uint32_t, std::uint32_t)
@@ -263,18 +273,18 @@ private:
 constexpr std::array<write_entry<adc_l1_model>, 13> banked_writes{
     {
      {"SR", &adc_l1_model::sr_written},
-     {"CR1", &adc_l1_model::plain_written},
+     {"CR1", &adc_l1_model::cr1_written},
      {"CR2", &adc_l1_model::cr2_written},
-     {"SMPR1", &adc_l1_model::sequence_written},
-     {"SMPR2", &adc_l1_model::sequence_written},
-     {"SMPR3", &adc_l1_model::sequence_written},
+     {"SMPR1", &adc_l1_model::plain_written},
+     {"SMPR2", &adc_l1_model::plain_written},
+     {"SMPR3", &adc_l1_model::plain_written},
      {"SQR1", &adc_l1_model::sequence_written},
      {"SQR2", &adc_l1_model::sequence_written},
      {"SQR3", &adc_l1_model::sequence_written},
      {"SQR4", &adc_l1_model::sequence_written},
      {"SQR5", &adc_l1_model::sequence_written},
      {"DR", nullptr},
-     {"SMPR0", &adc_l1_model::sequence_written},
+     {"SMPR0", &adc_l1_model::plain_written},
      }
 };
 
@@ -415,7 +425,7 @@ auto adc_l1_model::conversion_cycles() const -> std::uint64_t
 
 auto adc_l1_model::sample_end_ps() const -> std::uint64_t
 {
-  return state_.start_ps + cycles_ps(sampling(channel_at(state_.rank)), state_.clock_hz);
+  return state_.sample_end_ps;
 }
 
 auto adc_l1_model::busy() const -> bool
@@ -447,7 +457,7 @@ auto adc_l1_model::calibration(std::uint32_t at, std::string_view name) const ->
 auto adc_l1_model::code(std::uint32_t channel) const -> std::uint32_t
 {
   constexpr std::uint32_t full_scale = 4096;
-  auto const              shift      = 2 * get(regs_, resolution_);
+  auto const              shift      = 2u * state_.resolution;
   if(channel == sensor_channel or channel == vrefint_channel)
   {
     if(get(regs_, sensors_) == 0)
@@ -537,8 +547,21 @@ void adc_l1_model::sr_written(std::uint32_t old, std::uint32_t now)
   signal();
 }
 
+void adc_l1_model::cr1_written(std::uint32_t old, std::uint32_t now)
+{
+  signal();
+  if(watchdog_.of(now) != 0 and watchdog_.of(old) == 0)
+  {
+    unmodelled(watchdog_logged_, "CR1", "AWDEN: the analog watchdog");
+  }
+}
+
 void adc_l1_model::cr2_written(std::uint32_t old, std::uint32_t now)
 {
+  if(dma_.of(now) != 0 and dma_.of(old) == 0)
+  {
+    unmodelled(dma_logged_, "CR2", "DMA: regular DMA requests");
+  }
   if(injected_start_.of(now) != 0)
   {
     update(regs_, injected_start_, 0);
@@ -555,10 +578,12 @@ void adc_l1_model::cr2_written(std::uint32_t old, std::uint32_t now)
   if(power_.of(now) == 0 and power_.of(old) != 0)
   {
     update(regs_, ready_, 0);
+    update(regs_, start_, 0);
     ++state_.ready_generation;
     state_.ready_waiting = false;
     abort();
     signal();
+    return;
   }
   else if(power_.of(now) != 0 and power_.of(old) == 0)
   {
@@ -645,13 +670,14 @@ void adc_l1_model::check_group()
   {
     unmodelled(watchdog_logged_, "CR1", "AWDEN: the analog watchdog");
   }
-  if(get(regs_, scan_) != 0 and not variant_.banks and get(regs_, length_) + 1u >= max_ranks)
+  auto const ranks = variant_.banks ? max_ranks : max_ranks - 1;
+  if(get(regs_, scan_) != 0 and get(regs_, length_) + 1u > ranks)
   {
     forbidden(
         length_logged_, "SQR1",
         std::format(
-            "L {:#07b}: 28 conversions, available from Cat.3 only: 27 converted",
-            get(regs_, length_)));
+            "L {:#07b}: {} conversions, above the {} ranks of the category: {} converted",
+            get(regs_, length_), get(regs_, length_) + 1u, ranks, ranks));
   }
   for(std::size_t rank = 0; rank < length(); ++rank)
   {
@@ -665,7 +691,9 @@ void adc_l1_model::check_channel(std::uint32_t channel)
   {
     if(get(regs_, sensors_) != 0)
     {
-      static_cast<void>(code(channel));
+      static_cast<void>(calibration(
+          channel == sensor_channel ? variant_.ts_cal1 : variant_.vrefint_cal,
+          channel == sensor_channel ? "TS_CAL1" : "VREFINT_CAL"));
     }
     return;
   }
@@ -700,20 +728,21 @@ void adc_l1_model::begin(std::uint64_t start_ps)
 void adc_l1_model::schedule(std::uint64_t start_ps)
 {
   state_.start_ps      = start_ps;
+  state_.resolution    = static_cast<std::uint8_t>(get(regs_, resolution_));
+  state_.sample_end_ps = start_ps + cycles_ps(sampling(channel_at(state_.rank)), state_.clock_hz);
+  state_.end_ps        = start_ps + cycles_ps(conversion_cycles(), state_.clock_hz);
   state_.held          = false;
   state_.waiting_clock = false;
   state_.converting    = true;
   ++state_.generation;
   update(regs_, start_, 0);
   update(regs_, started_, 1);
-  ctx_.events.schedule_at(
-      vtime{start_ps + cycles_ps(conversion_cycles(), state_.clock_hz)}, conversion_end,
-      state_.generation, ctx_.clock);
+  ctx_.events.schedule_at(vtime{state_.end_ps}, conversion_end, state_.generation, ctx_.clock);
 }
 
 void adc_l1_model::finish()
 {
-  auto const end    = state_.start_ps + cycles_ps(conversion_cycles(), state_.clock_hz);
+  auto const end    = state_.end_ps;
   auto const result = state_.held ? state_.held_code : code(channel_at(state_.rank));
   state_.converting = false;
   auto const last   = std::size_t{state_.rank} + 1u >= length();
@@ -739,7 +768,7 @@ void adc_l1_model::land(std::uint32_t result)
   }
   if(get(regs_, align_) != 0)
   {
-    auto const resolution = get(regs_, resolution_);
+    auto const resolution = std::uint32_t{state_.resolution};
     result <<= resolution == 3 ? 2u : 4u + 2u * resolution;
   }
   update(regs_, data_, result);
