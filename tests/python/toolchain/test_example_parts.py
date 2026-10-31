@@ -35,6 +35,7 @@ L1_XE_EXTRA = ("STM32L152RCTxA", "STM32L152RCTx")
 L1_XB_EXTRA = (*L1_XE_EXTRA, "STM32L152RBTxA")
 VECTOR_TABLE = "g_pfnVectors"
 PROGRAM_FLASH = frozenset({"Flash", "Flash_NS", "Flash_S"})
+FIRST_ADC = frozenset({"ADC1", "ADC"})
 
 
 @cache
@@ -130,7 +131,7 @@ def test_a_part_fits_the_example_it_runs(example: str, part: str) -> None:
     assert family(part) == family(row.conftest)
     assert [pin for pin in row.pins if not bonded(part, pin)] == []
     if row.adc_channels:
-        adc = next(p for p in description(part).peripherals if p.name == "ADC1")
+        adc = next(p for p in description(part).peripherals if p.name in FIRST_ADC)
         assert adc.bonded_channels is not None
         assert [c for c in row.adc_channels if not adc.bonded_channels >> c & 1] == []
     if row.flash_kib is not None:

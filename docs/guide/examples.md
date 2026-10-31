@@ -294,3 +294,9 @@ A temperature sensor mocked in Python on I2C1, HAL. [Sources and tests](https://
 A 1 kHz timer interrupt, a one-pulse timer and an input capture on the 16 MHz HSI, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/tim).
 
 --8<-- "stm32l152/tim/README.md:3:13"
+
+### l152 adc
+
+The ADC internal channels and PA0 against VDDA, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/adc).
+
+--8<-- "stm32l152/adc/README.md:3:13"

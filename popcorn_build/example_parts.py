@@ -27,7 +27,8 @@ class ExampleParts:
             on one part per other category its builds fit, since the models differ by category:
             the xe build on Cat.3 of both dies, the xb build also on Cat.2.
         pins: The GPIO pins its tests and firmware use, such as `PA5`, bonded on every part.
-        adc_channels: The ADC1 external channels it uses, in `bonded_channels` of every part.
+        adc_channels: The external channels of ADC1, the single `ADC` on the STM32L1, that it
+            uses, in `bonded_channels` of every part.
         flash_kib: The flash size its firmware requires, None for any.
         also: The parts of the other descriptions its `conftest.py` names, each with an ELF of
             its own, such as the Cat.1 build of an STM32L1 example.
@@ -322,6 +323,9 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         pins=("PA11", "PA12"),
         adc_channels=(),
         flash_kib=None,
+    ),
+    "stm32l152/adc": ExampleParts(
+        "STM32L152RETx", _L1_XE_EXTRA, pins=("PA0",), adc_channels=(0,), flash_kib=None
     ),
     "stm32l152/crc": ExampleParts(
         "STM32L152RETx", _L1_XE_EXTRA, pins=(), adc_channels=(), flash_kib=None
