@@ -281,7 +281,7 @@ The fixed CRC-32/MPEG-2 unit, HAL. [Sources and tests](https://github.com/Garcia
 
 A three-axis accelerometer mocked in Python on SPI1, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/spi).
 
---8<-- "stm32l152/spi/README.md:3:17"
+--8<-- "stm32l152/spi/README.md:3:18"
 
 ### l152 i2c
 
@@ -305,4 +305,10 @@ The ADC internal channels and PA0 against VDDA, HAL. [Sources and tests](https:/
 
 The RTC calendar, wakeup timer, alarm and a backup register on the LSE, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/rtc).
 
---8<-- "stm32l152/rtc/README.md:3:14"
+--8<-- "stm32l152/rtc/README.md:3:15"
+
+### l152 usb_cdc
+
+CDC ACM device on the USB full-speed controller enumerated by a virtual host, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/usb_cdc).
+
+--8<-- "stm32l152/usb_cdc/README.md:3:13"

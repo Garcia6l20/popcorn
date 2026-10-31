@@ -9,8 +9,12 @@ wakeup callback counts and reads the calendar into `seconds_of_day` and `date_bc
 callback into `alarm_seconds_of_day`.
 
 A software reset keeps the backup domain: the calendar runs on, BKP0R holds the boot count, and
-the firmware skips the calendar setup. A power-on reset clears the backup domain, so the next
-boot sets the calendar again. The project sets `MachineDescription(strict=True)`.
+the firmware skips the calendar setup. It also skips `HAL_RTC_Init` while RTC_ISR.INITS is set,
+as the RM0038 20.3.5 note suggests, since the init mode it enters stops the calendar, and waits
+for RSF with `HAL_RTC_WaitForSynchro` before it reads the calendar, since TR and DR read their
+reset values after a system reset until RSF sets, RM0038 20.3.6. A power-on
+reset clears the backup domain, so the next boot sets the calendar again. The project sets
+`MachineDescription(strict=True)`.
 """
 
 import itertools
@@ -27,6 +31,7 @@ NEW_YEAR = 27 << 16 | 1 << 8 | 1
 OLD_YEAR = 26 << 16 | 12 << 8 | 31
 FRIDAY = 5
 RTCSEL_LSE = 1
+RSF_BIT = 5
 
 
 def interrupts(machine: Machine) -> list[tuple[str, VirtualTime]]:
@@ -98,7 +103,30 @@ async def test_alarm_a_fires_once_at_five_past_midnight(rtc: Machine) -> None:
 
 async def test_a_software_reset_keeps_the_calendar_and_the_boot_count(rtc: Machine) -> None:
     await run_for(rtc, 3_000)
+    inits: list[VirtualTime] = []
+
+    def record(call: Call) -> Return:
+        inits.append(rtc.time)
+        return call.proceed()
+
+    synchronised: list[VirtualTime] = []
+    shadows_ready: list[int] = []
+
+    def synchro(call: Call) -> Return:
+        synchronised.append(rtc.time)
+        return call.proceed()
+
+    def get_time(call: Call) -> Return:
+        shadows_ready.append(rtc.periph.RTC.ISR.read() >> RSF_BIT & 1)
+        return call.proceed()
+
+    rtc.intercept("HAL_RTC_Init", record)
+    rtc.intercept("HAL_RTC_WaitForSynchro", synchro)
+    rtc.intercept("HAL_RTC_GetTime", get_time)
     await reboot(rtc, ResetKind.SOFTWARE)
+    assert inits == []
+    assert len(synchronised) == 1
+    assert shadows_ready == [1]
     assert value(rtc, "boot_count") == 2
     assert value(rtc, "calendar_set") == 0
     assert value(rtc, "seconds_of_day") == SET_SECONDS + 3

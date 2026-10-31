@@ -365,7 +365,7 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         also=("STM32L152RBTx",),
     ),
     "stm32l152/rtc": ExampleParts(
-        "STM32L152RETx", _L1_XE_EXTRA, pins=(), adc_channels=(), flash_kib=None
+        "STM32L152RETx", _L1_XE_EXTRA, pins=("PC14", "PC15"), adc_channels=(), flash_kib=None
     ),
     "stm32l152/spi": ExampleParts(
         "STM32L152RETx",
@@ -384,6 +384,13 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         adc_channels=(),
         flash_kib=None,
         also=("STM32L152RBTx",),
+    ),
+    "stm32l152/usb_cdc": ExampleParts(
+        "STM32L152RETx",
+        _L1_XE_EXTRA,
+        pins=("PA11", "PA12", "PH0"),
+        adc_channels=(),
+        flash_kib=None,
     ),
 }
 

@@ -5,7 +5,8 @@ MOSI on AF5, with a software chip select on PB6, in SPI mode 3 and 8-bit frames.
 transfer is one chip select period sent with `HAL_SPI_TransmitReceive` in polling mode: a
 command frame with the read and auto-increment bits and the register address, then one frame
 per register. The firmware reads WHO_AM_I, writes CTRL_REG1, then reads the six output
-registers 8 times, once per millisecond of SysTick time, into `accel_result.samples`.
+registers 8 times into `accel_result.samples`, with `HAL_Delay(1)` between them, one to two
+milliseconds of SysTick time apart.
 
 The accelerometer is `accel.Accelerometer`, a `popcorn.board.SpiTarget` written next to the
 test, on the common LIS3DH register layout. Its X axis is a ramp in virtual time, Y its

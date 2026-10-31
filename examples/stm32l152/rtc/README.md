@@ -9,9 +9,10 @@ sleeps in WFI.
 
 It shows the STM32L1 RTC with its backup registers inside the RTC. The tests cross midnight
 into 2027, count the wakeups and the alarm, and reset the machine: a software reset keeps the
-backup domain and the running calendar, a power-on reset clears it.
-`MachineDescription(strict=True)` makes any register access the models do not serve fail the
-run.
+backup domain and the running calendar, a power-on reset clears it. While RTC_ISR.INITS is set
+the firmware skips `HAL_RTC_Init`, whose init mode would stop the calendar, as the RM0038 20.3.5
+note suggests. `MachineDescription(strict=True)` makes any register access the models do not
+serve fail the run.
 
 ## Run
 
