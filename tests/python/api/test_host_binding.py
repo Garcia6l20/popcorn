@@ -577,14 +577,28 @@ def test_a_machine_never_run_starts_no_thread(machines: Machines) -> None:
     assert _core.host_threads() == before
 
 
+def _text(data: str | bytes | None) -> str:
+    if data is None:
+        return ""
+    return data.decode(errors="replace") if isinstance(data, bytes) else data
+
+
 def run_child(script: str, timeout: float) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(script)],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    started = time.monotonic()
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(script)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as expired:
+        pytest.fail(
+            f"child timed out after {timeout} s, elapsed {time.monotonic() - started:.2f} s\n"
+            f"stdout:\n{_text(expired.stdout)}\nstderr:\n{_text(expired.stderr)}",
+            pytrace=False,
+        )
 
 
 def test_an_interpreter_exits_with_a_live_machine_thread() -> None:
@@ -2275,6 +2289,7 @@ def test_a_child_forked_from_a_running_machine_exits_and_refuses_it(mode: str) -
 
 @pytest.mark.usefixtures("u575")
 def test_a_child_forked_from_a_parent_with_a_run_system_drops_it() -> None:
+    started = time.monotonic()
     child = run_child(
         f"""
         import asyncio
@@ -2316,8 +2331,9 @@ def test_a_child_forked_from_a_parent_with_a_run_system_drops_it() -> None:
         """,
         timeout=10,
     )
-    assert child.returncode == 0, child.stderr
-    assert child.stderr == ""
+    elapsed = time.monotonic() - started
+    assert child.returncode == 0, f"elapsed {elapsed:.2f} s, stderr:\n{child.stderr}"
+    assert child.stderr == "", f"elapsed {elapsed:.2f} s, stderr:\n{child.stderr}"
     assert child.stdout.strip().splitlines()[-1] == "child 0"
 
 
