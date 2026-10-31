@@ -8,6 +8,7 @@ import copy
 import fnmatch
 import re
 import tomllib
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -325,37 +326,69 @@ class LoadedPatch:
     patch: Patch
 
 
+@dataclass(slots=True)
+class _ParsedFile:
+    content: bytes
+    data: dict[str, object]
+    patch: Patch | None = None
+    facts: list[PartFact] | None = None
+
+
+_PARSED_MEMO_SIZE = 256
+parsed_patch_memo: OrderedDict[Path, _ParsedFile] = OrderedDict()
+
+
+def _parsed(path: Path) -> _ParsedFile:
+    content = path.read_bytes()
+    key = path.resolve()
+    entry = parsed_patch_memo.pop(key, None)
+    if entry is None or entry.content != content:
+        text = content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise DescriptionError(str(path), exc.lineno or 0, "<root>", "valid TOML") from exc
+        entry = _ParsedFile(content=content, data=data)
+    parsed_patch_memo[key] = entry
+    if len(parsed_patch_memo) > _PARSED_MEMO_SIZE:
+        parsed_patch_memo.popitem(last=False)
+    return entry
+
+
+def _patch_of(path: Path, entry: _ParsedFile) -> Patch:
+    if entry.patch is None:
+        entry.patch = from_mapping(Patch, entry.data, file=str(path))
+    return entry.patch
+
+
+def read_patch(path: Path) -> Patch:
+    """The patch in the file @p path, parsed once per process: an entry is keyed on the resolved
+    path and reused while the file's bytes equal the bytes it was parsed from, so an edited file
+    is parsed again at its next read. At most 256 files are kept, least recently read dropped
+    first. DescriptionError for a file that is not TOML or not a patch."""
+    return _patch_of(path, _parsed(path))
+
+
 def load_patches(
     files: Sequence[Path], part: str, svd_name: str, db_part: DbPart | None = None
 ) -> list[LoadedPatch]:
     """Patches whose [match] selects @p part and @p svd_name, in the order @p files lists
     them (family files before part files is the caller's ordering of @p files). A patch with
     `dies` or `flash_kib` in its [match] applies only when @p db_part, the selected expanded
-    name's part, is given and its die is listed and its flash size is listed."""
+    name's part, is given and its die is listed and its flash size is listed. Each file is read
+    through read_patch."""
     result: list[LoadedPatch] = []
     for path in files:
-        try:
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-        except tomllib.TOMLDecodeError as exc:
-            raise DescriptionError(str(path), exc.lineno or 0, "<root>", "valid TOML") from exc
-        patch = from_mapping(Patch, data, file=str(path))
+        patch = read_patch(path)
         if _matches(patch.match, part, svd_name, db_part):
             result.append(LoadedPatch(path=path, patch=patch))
     return result
 
 
-_PartFactKey = tuple[tuple[str, int, int], ...]
-_part_facts_memo: dict[_PartFactKey, dict[str, PartFact]] = {}
-
-
-def _part_facts_of(path: Path) -> list[PartFact]:
-    try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as exc:
-        raise DescriptionError(str(path), exc.lineno or 0, "<root>", "valid TOML") from exc
-    if "part_facts" not in data:
+def _checked_facts(path: Path, entry: _ParsedFile) -> list[PartFact]:
+    if "part_facts" not in entry.data:
         return []
-    patch = from_mapping(Patch, data, file=str(path))
+    patch = _patch_of(path, entry)
     file = str(path)
     match = patch.match
     if match.svd is not None or match.dies is not None or match.flash_kib is not None:
@@ -370,19 +403,19 @@ def _part_facts_of(path: Path) -> list[PartFact]:
     return facts
 
 
+def _part_facts_of(path: Path) -> list[PartFact]:
+    entry = _parsed(path)
+    if entry.facts is None:
+        entry.facts = _checked_facts(path, entry)
+    return entry.facts
+
+
 def part_facts(files: Sequence[Path]) -> dict[str, PartFact]:
     """The `[[part_facts]]` rows of @p files by part name, the corrections of the db part facts
-    that a manual or a datasheet states otherwise. Memoized on the name, size and mtime of every
-    file. DescriptionError for a patch with part_facts whose [match] has more than `parts`, a row
+    that a manual or a datasheet states otherwise. Each file is parsed as read_patch parses it.
+    DescriptionError for a patch with part_facts whose [match] has more than `parts`, a row
     whose part the [match] does not select, a row with neither `die` nor `ram_kib`, and a second
     row for one part."""
-    stats = [path.stat() for path in files]
-    key = tuple(
-        (str(path), stat.st_size, stat.st_mtime_ns) for path, stat in zip(files, stats, strict=True)
-    )
-    memoized = _part_facts_memo.get(key)
-    if memoized is not None:
-        return memoized
     found: dict[str, PartFact] = {}
     owners: dict[str, str] = {}
     for path in files:
@@ -396,15 +429,13 @@ def part_facts(files: Sequence[Path]) -> dict[str, PartFact]:
                 )
             found[fact.part] = fact
             owners[fact.part] = str(path)
-    _part_facts_memo.clear()
-    _part_facts_memo[key] = found
     return found
 
 
-def corrected_part(part: DbPart, files: Sequence[Path]) -> DbPart:
-    """@p part, a selected expanded name's part, with the die and the SRAM size of its
-    `[[part_facts]]` row in @p files, see part_facts. @p part itself without a row."""
-    fact = part_facts(files).get(part.ref_name)
+def with_part_facts(part: DbPart, facts: Mapping[str, PartFact]) -> DbPart:
+    """@p part, a selected expanded name's part, with the die and the SRAM size of its row in
+    @p facts, a part_facts result. @p part itself without a row."""
+    fact = facts.get(part.ref_name)
     if fact is None:
         return part
     return replace(
@@ -412,6 +443,12 @@ def corrected_part(part: DbPart, files: Sequence[Path]) -> DbPart:
         die=fact.die if fact.die is not None else part.die,
         ram_kib=[fact.ram_kib] if fact.ram_kib is not None else part.ram_kib,
     )
+
+
+def corrected_part(part: DbPart, files: Sequence[Path]) -> DbPart:
+    """@p part, a selected expanded name's part, with the die and the SRAM size of its
+    `[[part_facts]]` row in @p files, see part_facts and with_part_facts."""
+    return with_part_facts(part, part_facts(files))
 
 
 _CMSIS_SUFFIX_RE = re.compile(r"x[a-z0-9]+")

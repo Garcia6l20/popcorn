@@ -21,6 +21,7 @@ from popcorn.stm32.description._cache import cached_description
 from popcorn.stm32.description._cubemx import DbPart, read_part
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._layers import BLOCK_KEYS, block_key
+from popcorn.stm32.description._patches import PartFact, part_facts
 from popcorn.stm32.description._shipped import build_text
 from popcorn.stm32.description._sources import (
     SearchPaths,
@@ -363,6 +364,64 @@ def test_a_repeated_lookup_reads_no_candidate_file_until_one_changes(
     os.utime(own, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
     assert _donors(mcu, search, "STM32T001Cx") == first
     assert reads == ["STM32T001Ax"]
+
+
+def test_a_scan_reads_the_part_facts_once(
+    fake_db: tuple[Path, SearchPaths], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcu, search = fake_db
+    _sources.die_ip_memo.clear()
+    _part_file(mcu, "STM32T001Cx", "DIE1", 64, 4, ["UART1"])
+    for name in ("STM32T001Ax", "STM32T001Bx", "STM32T001Dx"):
+        _part_file(mcu, name, "DIE1", 64, 9, ["UART1", "UART2"])
+    calls: list[int] = []
+    real = part_facts
+
+    def counting(files: list[Path]) -> dict[str, PartFact]:
+        calls.append(len(files))
+        return real(files)
+
+    monkeypatch.setattr(_sources, "part_facts", counting)
+    assert _donors(mcu, search, "STM32T001Cx") == {"UART2": "STM32T001Ax"}
+    assert len(calls) == 1
+
+
+_DONOR_FACTS = """
+format = 1
+[match]
+parts = ["STM32T001Ax"]
+
+[[part_facts]]
+part = "STM32T001Ax"
+die = "{die}"
+source = "probe"
+"""
+
+
+def test_an_edited_part_facts_row_or_die_gives_a_new_scan(
+    fake_db: tuple[Path, SearchPaths], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mcu, search = fake_db
+    _sources.die_ip_memo.clear()
+    patches = tmp_path / "patches"
+    patches.mkdir()
+    monkeypatch.setattr(_sources, "_PATCHES_DIR", patches)
+    facts = patches / "facts.toml"
+    facts.write_text(_DONOR_FACTS.format(die="DIE1"), encoding="utf-8")
+    _part_file(mcu, "STM32T001Cx", "DIE1", 64, 4, ["UART1"])
+    _part_file(mcu, "STM32T001Ax", "DIE2", 64, 9, ["UART1", "UART2"])
+    assert _donors(mcu, search, "STM32T001Cx") == {"UART2": "STM32T001Ax"}
+    facts.write_text(_DONOR_FACTS.format(die="DIE3"), encoding="utf-8")
+    assert _donors(mcu, search, "STM32T001Cx") == {}
+    facts.write_text(_DONOR_FACTS.format(die="DIE1"), encoding="utf-8")
+    path = mcu / "STM32T001Cx.xml"
+    own = read_part(path.read_bytes(), file=str(path))
+    svd = search.svd_dirs[0] / "STM32T001.svd"
+    assert die_ip_sources(own, path, svd, core=None, search=search) == {
+        "UART2": mcu / "STM32T001Ax.xml"
+    }
+    other_die = replace(own, die="DIE3")
+    assert die_ip_sources(other_die, path, svd, core=None, search=search) == {}
 
 
 def test_the_memo_holds_at_most_64_lookups(fake_db: tuple[Path, SearchPaths]) -> None:

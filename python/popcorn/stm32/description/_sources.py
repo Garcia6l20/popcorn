@@ -22,7 +22,14 @@ from popcorn.stm32.description._cubemx import (
 )
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
 from popcorn.stm32.description._layers import line_name
-from popcorn.stm32.description._patches import cmsis_suffix, corrected_part, load_patches
+from popcorn.stm32.description._patches import (
+    PartFact,
+    cmsis_suffix,
+    corrected_part,
+    load_patches,
+    part_facts,
+    with_part_facts,
+)
 
 _PATCHES_DIR = Path(__file__).parent / "patches"
 _RZONE_FACTS_DIR = Path(__file__).parent / "rzone"
@@ -315,18 +322,31 @@ def die_ip_sources(
     patch exception or an explicit SVD of another name has no candidate. A part file that cannot
     be read, that read_part refuses, or whose SVD does not resolve is no candidate. Maps every
     instance die_ips gives, empty when @p db_part is the reference. Results are memoized in the
-    process, 64 entries, keyed on the inputs, the selected name and the name, size and mtime of
-    every candidate file, so an edit of a candidate file gives a new scan."""
+    process, 64 entries, keyed on the inputs, the selected name, the die of @p db_part, the
+    `[[part_facts]]` rows of the package patches and the name, size and mtime of every candidate
+    file, so an edit of a candidate file or of a part_facts row gives a new scan."""
     base = _CORE_SUFFIX_RE.sub("", svd_path.stem)
     candidates = [
         path
         for path in sorted(mcu_db.parent.glob("*.xml"))
         if path != mcu_db and _wildcard_prefix_matches(base, path.stem)
     ]
+    facts: dict[str, PartFact] | None
+    try:
+        facts = part_facts(_patch_files())
+    except OSError, DescriptionError:
+        facts = None
+    facts_key = (
+        None
+        if facts is None
+        else tuple(sorted((name, fact.die, fact.ram_kib) for name, fact in facts.items()))
+    )
     key = (
         mcu_db,
         _stat_key(mcu_db),
         db_part.ref_name,
+        db_part.die,
+        facts_key,
         svd_path.name,
         core,
         tuple(search.svd_dirs),
@@ -336,7 +356,7 @@ def die_ip_sources(
     if memoized is not None:
         die_ip_memo[key] = memoized
         return dict(memoized)
-    found = _scan_die_ips(db_part, svd_path, candidates, core=core, search=search)
+    found = _scan_die_ips(db_part, svd_path, candidates, facts, core=core, search=search)
     die_ip_memo[key] = found
     if len(die_ip_memo) > _DIE_IP_MEMO_SIZE:
         die_ip_memo.popitem(last=False)
@@ -347,17 +367,20 @@ def _scan_die_ips(
     db_part: DbPart,
     svd_path: Path,
     candidates: Sequence[Path],
+    facts: Mapping[str, PartFact] | None,
     *,
     core: str | None,
     search: SearchPaths,
 ) -> dict[str, Path]:
+    if facts is None:
+        return {}
     own_rank = reference_rank(db_part)
     ranked: list[tuple[tuple[int, int, str], Path, DbPart]] = []
     for path in candidates:
         try:
             group = read_part(path.read_bytes(), file=str(path))
             members = [
-                corrected_part(group.select(name, file=str(path)), _patch_files())
+                with_part_facts(group.select(name, file=str(path)), facts)
                 for name, _ in expand_refname(group.ref_name)
             ]
         except OSError, DescriptionError:
