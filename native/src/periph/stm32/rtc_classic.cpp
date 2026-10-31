@@ -66,9 +66,31 @@ struct rtc_classic_state
   friend auto operator==(rtc_classic_state const&, rtc_classic_state const&) -> bool = default;
 };
 
+enum unmodelled_function : std::uint8_t
+{
+  alarm_a_function,
+  alarm_b_function,
+  wakeup_function,
+  timestamp_function,
+  tamper_function,
+  coarse_function,
+  smooth_function,
+  shift_function,
+  output_function,
+  reference_function,
+  unmodelled_functions,
+};
+
 constexpr std::array<std::string_view, 5> locked_names{
     "WUTR", "ALRMAR", "ALRMBR", "ALRMASSR", "ALRMBSSR"};
 constexpr std::array<std::string_view, 4> read_only_names{"SSR", "TSTR", "TSDR", "TSSSR"};
+
+struct unmodelled_entry
+{
+  std::string_view reg;
+  std::string_view what;
+  std::uint32_t    mask{};
+};
 
 /**
  * @brief Classic RTC of the STM32L1, RM0038 section 20, BCD calendar. The calendar is derived from
@@ -95,8 +117,10 @@ constexpr std::array<std::string_view, 4> read_only_names{"SSR", "TSTR", "TSDR",
  *        their reset values, the board's `rtc_initial` loaded at power-on only. While the machine
  *        holds its core with DBGMCU `DBG_RTC_STOP` set, the calendar and the init and shadow
  *        timings stop at the time of the hold and resume at the release, on a variant whose DBGMCU
- *        has the bit. Alarms, the wakeup timer, timestamps, tamper detection, calibration, the
- *        shift register and the outputs are storage. PWR_CR.DBP gates no write.
+ *        has the bit. Logged once, a model_error under strict_peripherals at the CPU or DMA write
+ *        that selects them before the store, a debugger write stored with neither: alarms A and B,
+ *        the wakeup timer, timestamps, tamper detection, coarse and smooth calibration, the shift
+ *        register, the RTC outputs and the reference clock detection. PWR_CR.DBP gates no write.
  */
 class rtc_classic final : public dispatch_model<rtc_classic, rtc_classic_state>,
                           public clock_listener,
@@ -134,6 +158,7 @@ public:
   void                              coarse_written(std::uint32_t old, std::uint32_t now);
   void                              smooth_written(std::uint32_t old, std::uint32_t now);
   void                              shift_written(std::uint32_t old, std::uint32_t now);
+  void                              tamper_written(std::uint32_t old, std::uint32_t now);
   template <std::size_t Index> void locked_written(std::uint32_t old, std::uint32_t now);
   template <std::size_t Index> void read_only_written(std::uint32_t old, std::uint32_t now);
   void                              plain_written(std::uint32_t old, std::uint32_t now);
@@ -151,32 +176,36 @@ private:
   void schedule(classic_event kind);
   void schedule_all();
   void settle(std::uint64_t cycle);
+  void refuse_unmodelled(std::string_view name, std::uint32_t old, std::uint32_t now);
 
-  std::optional<std::chrono::sys_seconds>  initial_;
-  rtc_classic_variant                      variant_;
-  register_file&                           regs_;
-  reg_ref                                  time_;
-  reg_ref                                  date_;
-  std::optional<reg_ref>                   subsecond_;
-  reg_ref                                  status_;
-  reg_ref                                  control_;
-  reg_ref                                  key_;
-  field_ref                                init_;
-  field_ref                                init_flag_;
-  field_ref                                init_status_;
-  field_ref                                shadow_flag_;
-  std::optional<field_ref>                 bypass_;
-  field_ref                                prediv_a_;
-  field_ref                                prediv_s_;
-  field_ref                                format_;
-  field_ref                                add_hour_;
-  field_ref                                sub_hour_;
-  std::uint32_t                            init_only_{};
-  std::uint32_t                            open_flags_{};
-  std::uint32_t                            keyed_flags_{};
-  rtc_calendar::counter<rtc_classic_state> count_;
-  core::clock_domain                       domain_;
-  bool                                     freeze_logged_ = false;
+  std::optional<std::chrono::sys_seconds>            initial_;
+  rtc_classic_variant                                variant_;
+  register_file&                                     regs_;
+  reg_ref                                            time_;
+  reg_ref                                            date_;
+  std::optional<reg_ref>                             subsecond_;
+  reg_ref                                            status_;
+  reg_ref                                            control_;
+  reg_ref                                            key_;
+  field_ref                                          init_;
+  field_ref                                          init_flag_;
+  field_ref                                          init_status_;
+  field_ref                                          shadow_flag_;
+  std::optional<field_ref>                           bypass_;
+  field_ref                                          prediv_a_;
+  field_ref                                          prediv_s_;
+  field_ref                                          format_;
+  field_ref                                          add_hour_;
+  field_ref                                          sub_hour_;
+  std::uint32_t                                      init_only_{};
+  std::uint32_t                                      open_flags_{};
+  std::uint32_t                                      keyed_flags_{};
+  std::array<unmodelled_entry, unmodelled_functions> unmodelled_{};
+  std::array<bool, unmodelled_functions>             logged_{};
+  rtc_calendar::counter<rtc_classic_state>           count_;
+  core::clock_domain                                 domain_;
+  bool                                               freeze_logged_  = false;
+  bool                                               debugger_write_ = false;
 };
 
 constexpr std::array<write_entry<rtc_classic>, 13> classic_writes{
@@ -193,7 +222,7 @@ constexpr std::array<write_entry<rtc_classic>, 13> classic_writes{
      {"WPR", &rtc_classic::key_written},
      {"TSTR", &rtc_classic::read_only_written<1>},
      {"TSDR", &rtc_classic::read_only_written<2>},
-     {"TAFCR", &rtc_classic::plain_written},
+     {"TAFCR", &rtc_classic::tamper_written},
      }
 };
 
@@ -273,6 +302,31 @@ rtc_classic::rtc_classic(
   {
     keyed_flags_ |= field("ISR", "TAMP2F").mask() | field("ISR", "TAMP3F").mask();
   }
+  auto const bits = [&](std::string_view r, std::initializer_list<std::string_view> names) {
+    auto mask = std::uint32_t{};
+    for(auto const name : names)
+    {
+      mask |= field(r, name).mask();
+    }
+    return mask;
+  };
+  auto tampers = bits("TAFCR", {"TAMP1E"});
+  if(variant.three_tampers)
+  {
+    tampers |= bits("TAFCR", {"TAMP2E", "TAMP3E"});
+  }
+  unmodelled_[alarm_a_function]   = {"CR", "alarm A", bits("CR", {"ALRAE"})};
+  unmodelled_[alarm_b_function]   = {"CR", "alarm B", bits("CR", {"ALRBE"})};
+  unmodelled_[wakeup_function]    = {"CR", "the wakeup timer", bits("CR", {"WUTE"})};
+  unmodelled_[timestamp_function] = {"CR", "timestamps", bits("CR", {"TSE"})};
+  unmodelled_[tamper_function]    = {"TAFCR", "tamper detection", tampers};
+  unmodelled_[coarse_function]    = {"CR", "coarse digital calibration", bits("CR", {"DCE"})};
+  unmodelled_[smooth_function]    = {"CALR", "smooth digital calibration", ~std::uint32_t{}};
+  unmodelled_[shift_function]     = {"SHIFTR", "the shift control", ~std::uint32_t{}};
+  unmodelled_[output_function]    = {
+      "CR", "the RTC_CALIB and RTC_ALARM outputs", bits("CR", {"COE", "OSEL"})};
+  unmodelled_[reference_function] = {
+      "CR", "the reference clock detection", bits("CR", {"REFCKON"})};
 }
 
 auto rtc_classic::now_ps() const -> std::uint64_t
@@ -343,6 +397,32 @@ void rtc_classic::settle(std::uint64_t cycle)
     regs_.poke(subsecond_->offset, count_.subsecond_register(position));
   }
   update(regs_, init_status_, count_.calendar(position / count_.sync_ticks()).year != 0 ? 1 : 0);
+}
+
+void rtc_classic::refuse_unmodelled(std::string_view name, std::uint32_t old, std::uint32_t now)
+{
+  if(debugger_write_)
+  {
+    return;
+  }
+  for(std::size_t index = 0; index < unmodelled_.size(); ++index)
+  {
+    auto const& entry = unmodelled_[index];
+    if(entry.reg != name or (now & entry.mask) == 0)
+    {
+      continue;
+    }
+    if(not std::exchange(logged_[index], true))
+    {
+      warn(entry.reg, std::format("{}: not modelled, the bits are storage", entry.what));
+    }
+    if(ctx_.strict_peripherals)
+    {
+      auto const target = reg(name);
+      regs_.poke(target.offset, old);
+      throw model_error(std::string{desc_.name}, std::string{name}, target.offset);
+    }
+  }
 }
 
 void rtc_classic::clear_backup(register_file& regs, bool board_calendar)
@@ -479,6 +559,7 @@ auto rtc_classic::on_write(
     access_ctx     access) -> std::expected<void, bus_error>
 {
   settle(count_.cycle_at(now_ps()));
+  debugger_write_   = access.by == initiator::debugger;
   auto const result = dispatch_model::on_write(regs, offset, size, old, value, access);
   settle(count_.cycle_at(now_ps()));
   return result;
@@ -668,6 +749,7 @@ void rtc_classic::control_written(std::uint32_t old, std::uint32_t now)
   word = add_hour_.with(word, 0);
   word = sub_hour_.with(word, 0);
   regs_.poke(control_.offset, word);
+  refuse_unmodelled("CR", old, word);
   auto const cycle = count_.cycle_at(now_ps());
   count_.shift_hour(cycle, add_hour_.of(now) != 0, sub_hour_.of(now) != 0);
   if(not bypass_)
@@ -714,14 +796,29 @@ void rtc_classic::coarse_written(std::uint32_t old, std::uint32_t)
   }
 }
 
-void rtc_classic::smooth_written(std::uint32_t old, std::uint32_t)
+void rtc_classic::smooth_written(std::uint32_t old, std::uint32_t now)
 {
-  static_cast<void>(keep_locked(reg("CALR"), old));
+  auto const target = reg("CALR");
+  if(keep_locked(target, old))
+  {
+    return;
+  }
+  refuse_unmodelled("CALR", old, now);
 }
 
-void rtc_classic::shift_written(std::uint32_t, std::uint32_t)
+void rtc_classic::shift_written(std::uint32_t old, std::uint32_t now)
 {
-  regs_.poke(reg("SHIFTR").offset, 0);
+  auto const target = reg("SHIFTR");
+  if(not keep_locked(target, old))
+  {
+    refuse_unmodelled("SHIFTR", old, now);
+  }
+  regs_.poke(target.offset, 0);
+}
+
+void rtc_classic::tamper_written(std::uint32_t old, std::uint32_t now)
+{
+  refuse_unmodelled("TAFCR", old, now);
 }
 
 template <std::size_t Index> void rtc_classic::locked_written(std::uint32_t old, std::uint32_t)

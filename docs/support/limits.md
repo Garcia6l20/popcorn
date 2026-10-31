@@ -858,9 +858,10 @@ The STM32L1 RTC:
 - ADD1H and SUB1H move the calendar at the write.
 - RTC writes land whatever `PWR_CR.DBP` holds.
 - On Cat.1 a PREDIV_A of 0 divides by 1.
-- Alarms, the wakeup timer, timestamps, tamper detection, coarse and smooth calibration, the
-  shift control, the RTC_CALIB and RTC_ALARM outputs and the reference clock detection are
-  storage.
+- Logged once, `ModelError` under `strict` at the CPU or DMA write that selects them, before
+  the store: alarms A and B, the wakeup timer, timestamps, tamper detection, coarse and smooth
+  calibration, the shift control, the RTC_CALIB and RTC_ALARM outputs and the reference clock
+  detection. A debugger write stores them with neither.
 
 ## SAI
 

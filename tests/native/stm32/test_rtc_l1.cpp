@@ -527,6 +527,57 @@ TEST_CASE("RM0038 20.6.3: ADD1H adds an hour, SUB1H subtracts one except at hour
   CHECK(r.read("TR") == 0x00'3000);
 }
 
+TEST_CASE(
+    "each unmodelled RTC function logs once and raises model_error at the CPU write under strict")
+{
+  struct row
+  {
+    std::string_view reg;
+    std::uint32_t    value;
+    bool             init;
+  };
+  for(auto const& [reg, value, init] : {
+          row{"CR",     1u << 8,  false},
+          row{"CR",     1u << 9,  false},
+          row{"CR",     1u << 10, false},
+          row{"CR",     1u << 11, false},
+          row{"CR",     1u << 7,  true },
+          row{"CR",     1u << 23, false},
+          row{"CR",     1u << 21, false},
+          row{"CR",     1u << 4,  true },
+          row{"TAFCR",  1u << 0,  false},
+          row{"TAFCR",  1u << 3,  false},
+          row{"TAFCR",  1u << 5,  false},
+          row{"CALR",   0x100,    false},
+          row{"SHIFTR", 0x10,     false}
+  })
+  {
+    CAPTURE(reg);
+    CAPTURE(value);
+    {
+      rig r;
+      r.start_clock();
+      init ? r.enter_init() : r.unlock();
+      auto const before = r.warnings();
+      r.cpu_write(reg, value);
+      r.cpu_write(reg, value);
+      CHECK(r.warnings() == before + 1);
+      CHECK(r.read(reg) == (reg == "SHIFTR" ? 0 : value));
+    }
+    rig r{l152re(), idle_image, true};
+    r.start_clock();
+    init ? r.enter_init() : r.unlock();
+    auto const old = r.read(reg);
+    CHECK_THROWS_AS(
+        static_cast<void>(
+            r.probe().services.write(r.at("RTC", reg), 4, value, popcorn::initiator::cpu)),
+        popcorn::model_error);
+    CHECK(r.read(reg) == old);
+    r.write(reg, value);
+    CHECK(r.read(reg) == (reg == "SHIFTR" ? 0 : value));
+  }
+}
+
 TEST_CASE("with DBG_RTC_STOP a held core stops the calendar until the release")
 {
   rig r;
