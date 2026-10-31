@@ -2642,3 +2642,117 @@ TEST_CASE(
   f.run_until(second + slow_tick + us);
   CHECK(f.isr("EOSMP") == 1);
 }
+
+namespace
+{
+constexpr std::uint64_t tim1_tick = 250'000;
+
+auto tim1_flagged(adc_fixture const& f) -> std::uint64_t
+{
+  f.put("RCC", "RCC_APB2ENR", "TIM1EN", 1);
+  f.write("TIM1", "ARR", 99);
+  f.write("TIM1", "CCR1", 30);
+  f.write("TIM1", "EGR", 1);
+  f.write("TIM1", "SR", 0);
+  auto const from = f.now();
+  f.put("TIM1", "CR1", "CEN", 1);
+  f.run_until(from + 105 * tim1_tick);
+  f.write("TIM1", "SR", ~1u);
+  return from;
+}
+
+auto tim1_due(adc_fixture const& f) -> std::optional<std::int64_t>
+{
+  if(popcorn::testing::saved_integer(*f.target, "TIM1", "scheduled") == 0)
+  {
+    return std::nullopt;
+  }
+  return popcorn::testing::saved_integer(*f.target, "TIM1", "due_ps");
+}
+
+void listening_to_tim1_cc1(adc_fixture const& f)
+{
+  f.port().drive(5, 1'000'000);
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", ovrmod | exten_rising | extsel(0));
+  f.write("ADC1", "ADC_SQR1", 5u << 6);
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+}
+}
+
+TEST_CASE(
+    "TIM1 schedules its flagged CC1 match from the ADSTART write that makes ADC1 listen to "
+    "tim1_cc1 and only its wrap after ADSTP, U5")
+{
+  adc_fixture const f;
+  f.port().drive(5, 1'000'000);
+  f.enable();
+  f.write("ADC1", "ADC_CFGR1", ovrmod | exten_rising | extsel(0));
+  f.write("ADC1", "ADC_SQR1", 5u << 6);
+  auto const from = tim1_flagged(f);
+  CHECK(tim1_due(f) == static_cast<std::int64_t>(from + 200 * tim1_tick));
+  f.write("ADC1", "ADC_CR", advregen | aden | adstart);
+  CHECK(tim1_due(f) == static_cast<std::int64_t>(from + 130 * tim1_tick));
+  f.write("ADC1", "ADC_CR", advregen | aden | adstp);
+  CHECK(tim1_due(f) == static_cast<std::int64_t>(from + 200 * tim1_tick));
+}
+
+TEST_CASE(
+    "a snapshot of ADC1 listening to tim1_cc1, restored into a machine whose TIM1 ran with no "
+    "listener, converts at the next CC1 match, U5")
+{
+  adc_fixture const a;
+  listening_to_tim1_cc1(a);
+  auto const from = tim1_flagged(a);
+  a.write("ADC1", "ADC_ISR", eosmp);
+  static_cast<void>(a.cpu_read("ADC_DR"));
+  REQUIRE(a.isr("EOSMP") == 0);
+  auto const        saved = a.target->snapshot();
+  adc_fixture const b;
+  static_cast<void>(tim1_flagged(b));
+  CHECK(tim1_due(b) != tim1_due(a));
+  b.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  b.run_until(from + 130 * tim1_tick + us);
+  CHECK(b.isr("EOSMP") == 1);
+}
+
+TEST_CASE(
+    "after a machine reset of ADC1 listening to tim1_cc1, TIM1 run again with CC1IF set "
+    "schedules only its wrap, U5")
+{
+  adc_fixture const f;
+  listening_to_tim1_cc1(f);
+  auto const first = tim1_flagged(f);
+  REQUIRE(tim1_due(f) == static_cast<std::int64_t>(first + 130 * tim1_tick));
+  f.target->reset(popcorn::reset_kind::software);
+  auto const from = tim1_flagged(f);
+  CHECK(tim1_due(f) == static_cast<std::int64_t>(from + 200 * tim1_tick));
+}
+
+TEST_CASE(
+    "a TIM1 CC1 match that the next update's ARR or CCR1 preload makes reachable converts with "
+    "UIF left set and no TIM1 access after the write, U5")
+{
+  for(bool const arr_leg : {true, false})
+  {
+    CAPTURE(arr_leg);
+    adc_fixture const f;
+    listening_to_tim1_cc1(f);
+    f.put("RCC", "RCC_APB2ENR", "TIM1EN", 1);
+    f.write("TIM1", "CR1", arr_leg ? 0x80u : 0u);
+    f.write("TIM1", "TIM1_CCMR1_ALTERNATE1", arr_leg ? 0u : 1u << 3);
+    f.write("TIM1", "ARR", arr_leg ? 20u : 99u);
+    f.write("TIM1", "CCR1", arr_leg ? 30u : 150u);
+    f.write("TIM1", "EGR", 1);
+    f.write("TIM1", "SR", 0);
+    auto const from = f.now();
+    f.write("TIM1", "CR1", arr_leg ? 0x81u : 1u);
+    f.run_until(from + (arr_leg ? 25u : 110u) * tim1_tick);
+    REQUIRE(f.isr("EOSMP") == 0);
+    f.write("TIM1", arr_leg ? "ARR" : "CCR1", arr_leg ? 99u : 30u);
+    auto const update = arr_leg ? 42u : 200u;
+    CHECK(tim1_due(f) == static_cast<std::int64_t>(from + update * tim1_tick));
+    f.run_until(from + (update + 30) * tim1_tick + us);
+    CHECK(f.isr("EOSMP") == 1);
+  }
+}

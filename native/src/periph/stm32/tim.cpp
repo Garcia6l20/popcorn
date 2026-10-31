@@ -189,6 +189,7 @@ struct channel
   field_ref                     generate;
   std::optional<dma_signal>     signal;
   std::optional<trigger_output> event;
+  std::optional<bool>           event_listened;
 };
 
 struct trigger_route
@@ -248,35 +249,36 @@ auto lower(std::string_view name) -> std::string
  *        timer kernel clock wide at each CCxIF set by a match, a capture or CCxG, whatever CCxIF
  *        held, carrying the exact instant of its event as TRGO does, the width and the capture and
  *        CCxG events inferred. While a sink listens to it, every match of the channel is
- *        scheduled at its own time. RM0038 Tables 61 and 62 name it TIMx_CCx. The STM32U5 and
- *        STM32H5 ADC tables select `tim_ocx`, the channel output in the RM0456 TIM chapter. The
- *        ADC takes the CC event for it, as ST's LL driver describes the selection, inferred.
- *        MMS 100 and above, MMS2 and TRGO2 log a warning once and pulse nothing, and under
- *        strict_peripherals the CR2 write that selects one raises model_error. The slave mode
- *        controller, RM0456 55.4 "Slave mode" and TIMx_SMCR, listens as a trigger_sink to the
- *        `<instance>_trgo` that TS selects among the internal triggers of the tim_variant, the
- *        input a timer would take from itself being reserved. The STM32U5 has ITR0 TIM1, ITR1 TIM2,
- *        ITR2 TIM3, ITR3 TIM4, ITR4 TIM5, ITR5 TIM8 and ITR6 TIM15, the STM32H5 of RM0481 Tables
- *        456, 480, 502 and 514 has ITR0 to ITR12 on TIM1 to TIM5, TIM8, TIM12 and TIM15, TS 8 to 16
- *        selecting ITR4 to ITR12. ITR7, ITR8, ITR10 and ITR11 carry the OC1 outputs of TIM13,
- *        TIM14, TIM16 and TIM17. ITR12 carries USBSOF, which TIM2 and TIM5 take and TIM1, TIM3,
- *        TIM4, TIM8, TIM12 and TIM15 reserve, and which has no model, so it reaches nothing and
- *        logs the unrouted warning. One table serves all of them. The STM32L1 of RM0038 Table 80
- *        gives TIM2, TIM3 and TIM4 each its own ITR0 to ITR3 among TIM2 to TIM4, TIM9 and the OC1
- *        outputs of TIM10 and TIM11. On Cat.3 and up TIM2_OR.ITR1_RMP and TIM3_OR.ITR2_RMP select
- *        TIM5 TRGO for TIM2 ITR1 and TIM3 ITR2, from the OR write on. TIM5 has no Table 80 row, so
- *        its every TS reaches nothing, inferred. A modelled slave mode on an input with no model
- *        holds the timer and logs once, and under strict_peripherals the SMCR or OR write that
- *        selects it raises model_error. RM0038 Table 83 gives TIM9 ITR0 TIM2, ITR1 TIM3, or the
- *        touch sensing I/O with TIM9_OR.ITR1_RMP set on Cat.3 and up, ITR2 and ITR3 the OC1 outputs
- *        of TIM10 and TIM11. TIM6, TIM7 and the Cat.1 and Cat.2 TIM9 count up only, and SMS 001 to
- *        011 count no edge there. TIM9_OR.TI1_RMP 01 gives tim_ti1 the LSE, which reads low, and
- *        TIM9 ECE counts nothing, its ETR being internal. Each of these three logs once and raises
- *        model_error under strict_peripherals at the register write that selects it. TIM10 and
- *        TIM11 count up only and have no master mode. Their OR TI1_RMP values other than the pin
- *        ones and TI1_RMP_RI 1 give tim_ti1 an internal clock or the routing interface, which reads
- *        low, and their ECE counts nothing whatever ETR_RMP, both logged and refused as on TIM9. A
- *        timer whose `<instance>_oc1` a row of its tim_variant's trigger table names drives
+ *        scheduled at its own time, and so is the update whose ARR or CCRx preload transfer
+ *        makes a match reachable, as for the CCx DMA request and MMS 011. RM0038 Tables 61 and
+ *        62 name it TIMx_CCx. The STM32U5 and STM32H5 ADC tables select `tim_ocx`, the channel
+ *        output in the RM0456 TIM chapter. The ADC takes the CC event for it, as ST's LL driver
+ *        describes the selection, inferred. MMS 100 and above, MMS2 and TRGO2 log a warning once
+ *        and pulse nothing, and under strict_peripherals the CR2 write that selects one raises
+ *        model_error. The slave mode controller, RM0456 55.4 "Slave mode" and TIMx_SMCR, listens as
+ *        a trigger_sink to the `<instance>_trgo` that TS selects among the internal triggers of the
+ *        tim_variant, the input a timer would take from itself being reserved. The STM32U5 has ITR0
+ *        TIM1, ITR1 TIM2, ITR2 TIM3, ITR3 TIM4, ITR4 TIM5, ITR5 TIM8 and ITR6 TIM15, the STM32H5 of
+ *        RM0481 Tables 456, 480, 502 and 514 has ITR0 to ITR12 on TIM1 to TIM5, TIM8, TIM12 and
+ *        TIM15, TS 8 to 16 selecting ITR4 to ITR12. ITR7, ITR8, ITR10 and ITR11 carry the OC1
+ *        outputs of TIM13, TIM14, TIM16 and TIM17. ITR12 carries USBSOF, which TIM2 and TIM5 take
+ *        and TIM1, TIM3, TIM4, TIM8, TIM12 and TIM15 reserve, and which has no model, so it reaches
+ *        nothing and logs the unrouted warning. One table serves all of them. The STM32L1 of RM0038
+ *        Table 80 gives TIM2, TIM3 and TIM4 each its own ITR0 to ITR3 among TIM2 to TIM4, TIM9 and
+ *        the OC1 outputs of TIM10 and TIM11. On Cat.3 and up TIM2_OR.ITR1_RMP and TIM3_OR.ITR2_RMP
+ *        select TIM5 TRGO for TIM2 ITR1 and TIM3 ITR2, from the OR write on. TIM5 has no Table 80
+ *        row, so its every TS reaches nothing, inferred. A modelled slave mode on an input with no
+ *        model holds the timer and logs once, and under strict_peripherals the SMCR or OR write
+ *        that selects it raises model_error. RM0038 Table 83 gives TIM9 ITR0 TIM2, ITR1 TIM3, or
+ *        the touch sensing I/O with TIM9_OR.ITR1_RMP set on Cat.3 and up, ITR2 and ITR3 the OC1
+ *        outputs of TIM10 and TIM11. TIM6, TIM7 and the Cat.1 and Cat.2 TIM9 count up only, and SMS
+ *        001 to 011 count no edge there. TIM9_OR.TI1_RMP 01 gives tim_ti1 the LSE, which reads low,
+ *        and TIM9 ECE counts nothing, its ETR being internal. Each of these three logs once and
+ *        raises model_error under strict_peripherals at the register write that selects it. TIM10
+ *        and TIM11 count up only and have no master mode. Their OR TI1_RMP values other than the
+ *        pin ones and TI1_RMP_RI 1 give tim_ti1 an internal clock or the routing interface, which
+ *        reads low, and their ECE counts nothing whatever ETR_RMP, both logged and refused as on
+ *        TIM9. A timer whose `<instance>_oc1` a row of its tim_variant's trigger table names drives
  *        `<instance>_oc1_trgo` from OC1, RM0038 Table 80 and 18.5.6, RM0481 Table 456 and
  *        TIMx_CCMR1: OC1REF with OC1M 0000 and 0100 low, 0101 high, 0110 and 0111 the PWM
  *        comparison of an up counter with CCR1, CC1P inverting it, whatever CC1E, MOE and OSSI,
@@ -399,6 +401,7 @@ public:
   tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void load(std::span<std::byte const> in) override;
   void on_bus_reset() override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
@@ -475,8 +478,11 @@ private:
   [[nodiscard]] auto compare_value(std::size_t ch) const -> std::uint32_t;
   [[nodiscard]] auto repetition_reload() const -> std::uint32_t;
   [[nodiscard]] auto wants_update() -> bool;
+  [[nodiscard]] auto preload_wants_match() -> bool;
   [[nodiscard]] auto wants_match(std::size_t ch) -> bool;
   [[nodiscard]] auto events_wanted() -> bool;
+  [[nodiscard]] auto event_wanted(std::size_t ch) -> bool;
+  void               forget_listeners();
   [[nodiscard]] auto master_mode() const -> std::uint32_t;
   [[nodiscard]] auto master_mode_of(std::uint32_t cr2) const -> std::uint32_t;
   [[nodiscard]] auto trgo_wanted(std::uint32_t mode) -> bool;
@@ -1487,7 +1493,39 @@ auto tim::wants_update() -> bool
   }
   auto const dma   = update_dma_ and get(regs_, *update_dma_) != 0 and state_.update_request == 0;
   auto const pulse = get(regs_, one_pulse_) != 0;
-  return get(regs_, update_flag_) == 0 or dma or pulse or trgo_wanted(master_update);
+  return get(regs_, update_flag_) == 0
+      or dma
+      or pulse
+      or trgo_wanted(master_update)
+      or preload_wants_match();
+}
+
+auto tim::preload_wants_match() -> bool
+{
+  if(not pending())
+  {
+    return false;
+  }
+  auto const reload = regs_.peek(reload_.offset) & mask_;
+  for(std::size_t ch = 0; ch < channels_.size(); ++ch)
+  {
+    auto const& c = channels_[ch];
+    if(not output(ch)
+       or (regs_.peek(c.ccr.offset) & mask_) > reload
+       or compare_value(ch) <= state_.reload)
+    {
+      continue;
+    }
+    auto const dma = c.dma and get(regs_, *c.dma) != 0 and state_.compare_request[ch] == 0;
+    if(get(regs_, c.flag) == 0
+       or dma
+       or event_wanted(ch)
+       or (ch == 0 and (trgo_wanted(master_compare_pulse) or oc1_events())))
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 auto tim::wants_match(std::size_t ch) -> bool
@@ -1500,7 +1538,7 @@ auto tim::wants_match(std::size_t ch) -> bool
   auto const dma = c.dma and get(regs_, *c.dma) != 0 and state_.compare_request[ch] == 0;
   return get(regs_, c.flag) == 0
       or dma
-      or c.event->wanted()
+      or event_wanted(ch)
       or (ch == 0 and (trgo_wanted(master_compare_pulse) or oc1_events()));
 }
 
@@ -1508,7 +1546,7 @@ auto tim::events_wanted() -> bool
 {
   for(std::size_t ch = 0; ch < channels_.size(); ++ch)
   {
-    if(output(ch) and channels_[ch].event->wanted())
+    if(output(ch) and event_wanted(ch))
     {
       return true;
     }
@@ -1998,7 +2036,10 @@ void tim::match(std::size_t ch, trigger_time at)
   {
     pulse_output(*trgo_, at);
   }
-  pulse_output(*c.event, at);
+  if(event_wanted(ch))
+  {
+    pulse_output(*c.event, at);
+  }
 }
 
 void tim::capture(std::size_t ch, std::uint64_t at)
@@ -2721,7 +2762,32 @@ void tim::warn_selects()
 
 void tim::reset(register_file&, reset_kind)
 {
+  forget_listeners();
   restore_reset_values();
+}
+
+void tim::load(std::span<std::byte const> in)
+{
+  dispatch_model::load(in);
+  forget_listeners();
+}
+
+auto tim::event_wanted(std::size_t ch) -> bool
+{
+  auto& c = channels_[ch];
+  if(not c.event_listened)
+  {
+    c.event_listened = c.event->wanted();
+  }
+  return *c.event_listened;
+}
+
+void tim::forget_listeners()
+{
+  for(auto& c : channels_)
+  {
+    c.event_listened.reset();
+  }
 }
 
 void tim::on_bus_reset()
@@ -3079,6 +3145,7 @@ void tim::on_core_hold(bool held)
 
 void tim::interest_changed()
 {
+  forget_listeners();
   catch_up(now_ps());
   settle();
 }

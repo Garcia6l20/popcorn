@@ -3042,3 +3042,133 @@ TEST_CASE(
   r.run_until(edge + 300 * ns);
   CHECK((r.read(sr) & jstrt) == 0);
 }
+
+namespace
+{
+constexpr std::uint64_t msi_hz = 2'097'152;
+
+auto msi_tick_ps(std::uint64_t from, std::uint64_t ticks) -> std::uint64_t
+{
+  auto const exact = static_cast<unsigned __int128>(from) * msi_hz
+                   + static_cast<unsigned __int128>(ticks) * 1'000'000'000'000u;
+  return static_cast<std::uint64_t>((exact + msi_hz - 1) / msi_hz);
+}
+
+auto tim2_flagged(adc_rig const& r) -> std::uint64_t
+{
+  r.poke("RCC", 0x24, 1);
+  r.poke("TIM2", 0x2C, 99);
+  r.poke("TIM2", 0x38, 30);
+  auto const from = r.now();
+  r.poke("TIM2", 0x00, 1);
+  r.run_until(msi_tick_ps(from, 105));
+  r.poke("TIM2", 0x10, ~1u);
+  return from;
+}
+
+auto tim2_due(adc_rig const& r) -> std::optional<std::int64_t>
+{
+  if(popcorn::testing::saved_integer(*r.f.target, "TIM2", "scheduled") == 0)
+  {
+    return std::nullopt;
+  }
+  return popcorn::testing::saved_integer(*r.f.target, "TIM2", "due_ps");
+}
+}
+
+TEST_CASE(
+    "TIM2 schedules its flagged CC2 match from the CR2 write that makes the ADC listen to "
+    "tim2_cc2 and only its wrap after the write that stops it")
+{
+  adc_rig const r;
+  r.power();
+  auto const from = tim2_flagged(r);
+  CHECK(tim2_due(r) == static_cast<std::int64_t>(msi_tick_ps(from, 200)));
+  r.write(cr2, adon | (1u << 28) | (3u << 24));
+  CHECK(tim2_due(r) == static_cast<std::int64_t>(msi_tick_ps(from, 130)));
+  r.write(cr2, adon);
+  CHECK(tim2_due(r) == static_cast<std::int64_t>(msi_tick_ps(from, 200)));
+}
+
+TEST_CASE(
+    "a snapshot of an ADC listening to tim2_cc2, restored into a machine whose TIM2 ran with no "
+    "listener, starts the ADC at the next CC2 match")
+{
+  adc_rig const a;
+  a.power();
+  a.write(cr2, adon | (1u << 28) | (3u << 24));
+  auto const from = tim2_flagged(a);
+  a.write(sr, 0);
+  static_cast<void>(a.cpu_read(dr));
+  REQUIRE((a.read(sr) & strt) == 0);
+  auto const    saved = a.f.target->snapshot();
+  adc_rig const b;
+  b.power();
+  static_cast<void>(tim2_flagged(b));
+  CHECK(tim2_due(b) != tim2_due(a));
+  b.f.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  b.run_until(msi_tick_ps(from, 130) + 600 * ns);
+  CHECK((b.read(sr) & strt) != 0);
+}
+
+TEST_CASE(
+    "after a machine reset of an ADC listening to tim2_cc2, TIM2 run again with CC2IF set "
+    "schedules only its wrap")
+{
+  adc_rig const r;
+  r.power();
+  r.write(cr2, adon | (1u << 28) | (3u << 24));
+  static_cast<void>(tim2_flagged(r));
+  REQUIRE(tim2_due(r).has_value());
+  r.f.target->reset(popcorn::reset_kind::software);
+  r.f.set("pc", sym(r.firmware, "idle"));
+  auto const from = tim2_flagged(r);
+  CHECK(tim2_due(r) == static_cast<std::int64_t>(msi_tick_ps(from, 200)));
+}
+
+TEST_CASE(
+    "a TIM2 CC2 match that the next update's ARR or CCR2 preload makes reachable starts the ADC "
+    "with UIF left set and no TIM2 access after the write")
+{
+  for(bool const arr_leg : {true, false})
+  {
+    CAPTURE(arr_leg);
+    adc_rig const r;
+    r.power();
+    r.write(cr2, adon | (1u << 28) | (3u << 24));
+    r.poke("RCC", 0x24, 1);
+    r.poke("TIM2", 0x00, arr_leg ? 0x80u : 0u);
+    r.poke("TIM2", 0x18, arr_leg ? 0u : 1u << 11);
+    r.poke("TIM2", 0x2C, arr_leg ? 20u : 99u);
+    r.poke("TIM2", 0x38, arr_leg ? 30u : 150u);
+    r.poke("TIM2", 0x14, 1);
+    r.poke("TIM2", 0x10, 0);
+    auto const from = r.now();
+    r.poke("TIM2", 0x00, arr_leg ? 0x81u : 1u);
+    r.run_until(msi_tick_ps(from, arr_leg ? 25 : 110));
+    r.write(sr, 0);
+    r.poke("TIM2", arr_leg ? 0x2Cu : 0x38u, arr_leg ? 99u : 30u);
+    auto const update = arr_leg ? 42u : 200u;
+    CHECK(tim2_due(r) == static_cast<std::int64_t>(msi_tick_ps(from, update)));
+    r.run_until(msi_tick_ps(from, update + 30) + 600 * ns);
+    CHECK((r.read(sr) & strt) != 0);
+  }
+}
+
+TEST_CASE(
+    "one TRGO falling edge both groups select, given ahead of the machine time, converts the "
+    "injected group, then the regular group")
+{
+  adc_rig const r;
+  r.power();
+  r.write(cr2, adon | (2u << 28) | (6u << 24) | (2u << 20) | (2u << 16));
+  r.tim2_updates(209);
+  auto const fall  = r.due("TIM2") + 476'838;
+  auto const begin = fall + 218'750;
+  r.run_until(fall + 600 * ns);
+  CHECK((r.read(sr) & (jstrt | strt)) == jstrt);
+  CHECK(r.due() == begin + 16 * cycle);
+  r.run_until(begin + 16 * cycle + ns);
+  CHECK((r.read(sr) & (jeoc | eoc | strt)) == (jeoc | strt));
+  CHECK(r.due() == begin + 32 * cycle);
+}

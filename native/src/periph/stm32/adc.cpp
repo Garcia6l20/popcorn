@@ -751,7 +751,9 @@ struct adc_clock
  *        ignored. An edge its source gives ahead of the machine time, the falling edge of a
  *        pulse, is taken at its own time if ADC1 still selects and detects it then, after the
  *        ADC's own events due at that time, and a reset drops it. Two such edges are held: a
- *        third one ahead, three pulses inside one timer clock, is decided when it arrives.
+ *        third one ahead, three pulses inside one timer clock, is decided against the ADC state
+ *        at its arrival, so its conversion starts at its own time and the held edges then find
+ *        the ADC busy.
  *        ADSTART stays set at the end of a sequence or subgroup, RM0456
  *        33.4.16, and clears with ADSTP or ADDIS only. ADC1 tells the selected signal's source
  *        when its listening starts or stops. The `timx_ocy` selections of RM0456 Table 307 and
@@ -2100,7 +2102,14 @@ void adc_model<Traits>::transfer_completed(dma_controller const& by, std::uint32
   abort();
   if constexpr(Traits::dma_end_stops)
   {
+    auto const was = listened();
+    if(was)
+    {
+      static_cast<void>(
+          interest_changed(ctx_.peers, trigger_signal<typename Traits::trigger_enum>(*was)));
+    }
     update(regs_, start_, 0);
+    retune(was);
   }
   signal();
 }

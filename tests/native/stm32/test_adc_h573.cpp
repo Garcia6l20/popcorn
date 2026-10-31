@@ -1226,3 +1226,27 @@ TEST_CASE(
   }
   CHECK(sampled == std::vector<std::uint32_t>(20, 1u));
 }
+
+TEST_CASE(
+    "the one-shot DMA end that clears ADSTART stops TIM1 scheduling its flagged CC1 match for "
+    "ADC1 on the H5")
+{
+  rig const r;
+  r.enable();
+  r.port().drive(3, 1'000'000);
+  r.write("ADC1", "ADC_CFGR", dmaen | ovrmod | (1u << 10));
+  r.dma(4);
+  r.set("RCC", "RCC_APB2ENR", "TIM1EN", 1);
+  r.write("TIM1", "PSC", 31);
+  r.write("TIM1", "ARR", 999);
+  r.write("TIM1", "CCR1", 400);
+  r.write("TIM1", "EGR", 1);
+  r.write("TIM1", "SR", 0);
+  auto const from = r.now();
+  r.write("TIM1", "CR1", 1u);
+  static_cast<void>(r.start(3));
+  r.run_until(from + 1'100 * us);
+  CHECK(r.dma_left() == 0);
+  CHECK(r.get("ADC1", "ADC_CR", "ADSTART") == 0);
+  CHECK(popcorn::testing::saved_integer(*r.f->target, "TIM1", "scheduled") == 0);
+}

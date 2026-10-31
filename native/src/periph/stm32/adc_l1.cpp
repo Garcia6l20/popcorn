@@ -243,7 +243,8 @@ struct trigger_selection
  *        time, the falling edge of a pulse, is taken at its own time if the group that detected
  *        it still selects and detects it then, and a reset drops it. Each group holds one such
  *        edge: a second one ahead for a group already holding one, two pulses of its signal
- *        inside one timer clock, is decided when it arrives.
+ *        inside one timer clock, is decided against the ADC state at its arrival, so its
+ *        conversion starts at its own time and the held edge then finds the group busy.
  *
  *        Discontinuous mode, RM0038 12.3.10: with DISCEN each trigger or SWSTART converts the
  *        next DISCNUM + 1 ranks, fewer in the last subgroup, the next one starting over at rank

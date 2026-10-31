@@ -73,7 +73,9 @@ public:
 
   /**
    * @brief Whether the sink reacts to @p signal now. Derived from its registers only, so the
-   *        answer survives a snapshot without state.
+   *        answer survives a snapshot without state. Every change of the answer outside a machine
+   *        reset and a snapshot restore is told to the source through interest_changed() on both
+   *        sides, and a source may keep the answer until then.
    * @param signal Signal name as the reference manual spells it, such as `tim15_trgo`.
    */
   [[nodiscard]] virtual auto listens(std::string_view signal) const -> bool = 0;

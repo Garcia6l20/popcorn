@@ -60,6 +60,8 @@ constexpr std::uint32_t    pwm2           = 7u << 4;
 constexpr std::uint32_t    toggle         = 3u << 4;
 constexpr std::uint32_t    sms_gated      = 5;
 constexpr std::uint32_t    sms_reset      = 4;
+constexpr std::uint32_t    arpe           = 1u << 7;
+constexpr std::uint32_t    tim2_irq       = 28;
 
 auto ticks_ps(std::uint64_t ticks) -> std::uint64_t
 {
@@ -239,6 +241,13 @@ struct rig
   void at_tick(std::uint64_t ticks) const
   {
     run_until(start + ticks_ps(ticks));
+  }
+
+  [[nodiscard]] auto pending(std::uint32_t irq) const -> bool
+  {
+    auto const word = f->target->mem().read(0xe000'e200u + 4 * (irq / 32), 4);
+    REQUIRE(word.has_value());
+    return (*word >> (irq % 32) & 1u) != 0;
   }
 
   [[nodiscard]] auto warnings() const -> std::size_t
@@ -1687,7 +1696,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "a TIM2 CNT read five periods after a sink listens unscheduled pulses tim2_cc1 at each match")
+    "a sink that starts listening to tim2_cc1 after two periods with CC1IF set gets each later "
+    "match at its own time, with no register read")
 {
   rig   r{l152re(), firmware, false, true};
   auto& probe = r.probe("tim2_cc1");
@@ -1696,11 +1706,9 @@ TEST_CASE(
   auto const from = r.now();
   r.enable("TIM2");
   r.run_until(from + ticks_ps(250));
-  static_cast<void>(r.read("TIM2", "CNT"));
-  probe.listening = true;
+  REQUIRE(r.get("TIM2", "SR", "CC1IF") == 1);
+  probe.listen(true);
   r.run_until(from + ticks_ps(750));
-  CHECK(probe.pulses.empty());
-  static_cast<void>(r.read("TIM2", "CNT"));
   std::vector<std::uint64_t> expected;
   for(std::uint64_t k = 3; k <= 7; ++k)
   {
@@ -1784,4 +1792,81 @@ TEST_CASE(
     }
     CHECK(due == std::vector<std::uint64_t>{exact_ps(from, listening ? 130 : 200)});
   }
+}
+
+TEST_CASE(
+    "a TIM2 CC2 match that the next update's ARR preload makes reachable pends the TIM2 IRQ with "
+    "CC2IE, CC2IF clear, UIF left set and no TIM2 access after the write")
+{
+  rig r;
+  r.clock("TIM2");
+  r.write("TIM2", "CR1", arpe);
+  r.write("TIM2", "ARR", 20);
+  r.write("TIM2", "CCR2", 30);
+  r.write("TIM2", "DIER", 1u << 2);
+  r.write("TIM2", "EGR", 1);
+  r.write("TIM2", "SR", 0);
+  auto const from = r.now();
+  r.write("TIM2", "CR1", arpe | 1u);
+  r.run_until(exact_ps(from, 25));
+  REQUIRE(r.get("TIM2", "SR", "UIF") == 1);
+  REQUIRE(r.get("TIM2", "SR", "CC2IF") == 0);
+  r.write("TIM2", "ARR", 99);
+  r.run_until(exact_ps(from, 71));
+  CHECK_FALSE(r.pending(tim2_irq));
+  r.run_until(exact_ps(from, 73));
+  CHECK(r.pending(tim2_irq));
+}
+
+TEST_CASE(
+    "a TIM2 CC2 match that the next update's ARR preload makes reachable makes a DMA1 channel 7 "
+    "transfer with CC2DE, CC2IF and UIF left set and no TIM2 access after the write")
+{
+  rig r;
+  r.set("RCC", "AHBENR", "DMA1EN", 1);
+  r.clock("TIM2");
+  r.write("TIM2", "CR1", arpe);
+  r.write("TIM2", "ARR", 20);
+  r.write("TIM2", "CCR2", 30);
+  r.write("TIM2", "EGR", 1u | (1u << 2));
+  r.write("TIM2", "SR", 1u << 2);
+  r.write("DMA1", "CPAR7", static_cast<std::uint32_t>(r.at("TIM2", "CNT")));
+  r.write("DMA1", "CMAR7", 0x2000'1000u);
+  r.write("DMA1", "CNDTR7", 4);
+  r.write("DMA1", "CCR7", (2u << 10) | (2u << 8) | (1u << 7) | 1u);
+  r.write("TIM2", "DIER", 1u << 10);
+  auto const from = r.now();
+  r.write("TIM2", "CR1", arpe | 1u);
+  r.run_until(exact_ps(from, 25));
+  REQUIRE(r.get("TIM2", "SR", "UIF") == 1);
+  REQUIRE(r.get("TIM2", "SR", "CC2IF") == 1);
+  r.write("TIM2", "ARR", 99);
+  r.run_until(exact_ps(from, 71));
+  CHECK(r.read("DMA1", "CNDTR7") == 4);
+  r.run_until(exact_ps(from, 80));
+  CHECK(r.read("DMA1", "CNDTR7") == 3);
+}
+
+TEST_CASE(
+    "a TIM2 CC1 match that the next update's ARR preload makes reachable pulses tim2_trgo under "
+    "MMS 011 at its own time, CC1IF and UIF left set and no TIM2 access after the write")
+{
+  rig r{l152re(), firmware, false, true};
+  r.clock("TIM2");
+  r.write("TIM2", "CR1", arpe);
+  r.write("TIM2", "ARR", 20);
+  r.write("TIM2", "CCR1", 30);
+  r.write("TIM2", "EGR", 1u | (1u << 1));
+  r.write("TIM2", "SR", 1u << 1);
+  r.write("TIM2", "CR2", master_compare << 4);
+  auto& probe = r.probe("tim2_trgo");
+  probe.listen(true);
+  auto const from = r.now();
+  r.write("TIM2", "CR1", arpe | 1u);
+  r.run_until(exact_ps(from, 25));
+  REQUIRE(r.get("TIM2", "SR", "UIF") == 1);
+  REQUIRE(r.get("TIM2", "SR", "CC1IF") == 1);
+  r.write("TIM2", "ARR", 99);
+  r.run_until(exact_ps(from, 80));
+  CHECK(probe.pulses == std::vector<std::uint64_t>{exact_ps(from, 72)});
 }
