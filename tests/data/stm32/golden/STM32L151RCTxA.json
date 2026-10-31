@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 183,
+    "cross_rules": 8,
+    "fields": 3358,
+    "irqs": 52,
+    "patched_fields": 130,
+    "peripherals": 44,
+    "regions": 7,
+    "registers": 519
+  },
+  "part": "STM32L151RCTxA",
+  "svd_sha256": "03123338476d3ae4ff311c3bf879ce4db5610522670a6a767d6146df49c874fa",
+  "tables": {
+    "alternates": "855a2c1aa5bbe65aa419eb889c40b4125c1eb06f06328815f03dab3ec8f8cea0",
+    "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
+    "fields": "d5ef0661630c5905b93782620d2b46f0be1e6de826d574178c6dc3df7a948850",
+    "irqs": "fc5db188f0598a163276655cfc9e30369f5f5f169a3e0e7e2b02c7ad5684a076",
+    "peripherals": "9039e3ab1e8f9b50d3769d014bc826a659deaf0ed6720251df9c2a58bacefd49",
+    "regions": "f6c5584dd27c430db9f4d6f885eae72a0776ab89f3c7a6320298d79ff02afbf2",
+    "registers": "a1e0b2e64ca1d3918d711f041534fb5cb061c17b77926a9e8bf2e7b0226b9f08"
+  }
+}

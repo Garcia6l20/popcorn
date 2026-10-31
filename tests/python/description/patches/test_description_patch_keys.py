@@ -6,7 +6,13 @@ import pytest
 from popcorn.stm32.description import _sources
 from popcorn.stm32.description._cubemx import DbIp, DbPart
 from popcorn.stm32.description._errors import DescriptionError
-from popcorn.stm32.description._patches import PatchReport, PatchTarget, apply_patches, load_patches
+from popcorn.stm32.description._patches import (
+    PatchReport,
+    PatchTarget,
+    apply_patches,
+    corrected_part,
+    load_patches,
+)
 from popcorn.stm32.description._svd import expand_svd
 
 from ..conftest import target_from_svd, target_peripheral
@@ -562,3 +568,72 @@ def test_core_mpu_sets_the_flag_once(tmp_path: Path) -> None:
     with pytest.raises(DescriptionError) as excinfo:
         _apply(_target(), path, second)
     assert excinfo.value.key == "core.mpu"
+
+
+_FACTS_PARTS = 'parts = ["STM32L151RCYx", "STM32L100C6UxA"]'
+_FACTS = """
+format = 1
+[match]
+parts = ["STM32L151RCYx", "STM32L100C6UxA"]
+
+[[part_facts]]
+part = "STM32L151RCYx"
+die = "DIE436"
+source = "RM0038 30.6.1 note 1"
+
+[[part_facts]]
+part = "STM32L100C6UxA"
+ram_kib = 4
+source = "DS10193 Table 2"
+"""
+
+
+def test_a_part_facts_row_sets_the_die_and_the_sram_of_its_part_only(tmp_path: Path) -> None:
+    files = [_write(tmp_path, _FACTS)]
+    die = corrected_part(_part("STM32L151RCYx", "DIE427", 256), files)
+    assert (die.die, die.ram_kib) == ("DIE436", [64])
+    ram = corrected_part(_part("STM32L100C6UxA", "DIE429", 32), files)
+    assert (ram.die, ram.ram_kib) == ("DIE429", [4])
+    other = _part("STM32L151RCTx", "DIE427", 256)
+    assert corrected_part(other, files) is other
+
+
+def test_part_facts_apply_before_the_die_match(tmp_path: Path) -> None:
+    files = [_write(tmp_path, _FACTS, "facts.toml")]
+    files.append(_match_patch(tmp_path, 'dies = ["DIE436"]'))
+    part = corrected_part(_part("STM32L151RCYx", "DIE427", 256), files)
+    loaded = load_patches(files[1:], part="STM32L151RCYx", svd_name="x.svd", db_part=part)
+    assert [p.path.name for p in loaded] == ["patch.toml"]
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "key"),
+    [
+        (
+            'parts = ["STM32L151RCYx", "STM32L100C6UxA"]',
+            'parts = ["STM32L151RCYx", "STM32L100C6UxA"]\ndies = ["DIE427"]',
+            "match",
+        ),
+        (
+            'parts = ["STM32L151RCYx", "STM32L100C6UxA"]',
+            'parts = ["STM32L151RCYx"]',
+            "part_facts[1].part",
+        ),
+        ("ram_kib = 4\n", "", "part_facts[1]"),
+        ('source = "DS10193 Table 2"', 'source = ""', "part_facts[1].source"),
+    ],
+)
+def test_a_bad_part_facts_patch_is_refused(tmp_path: Path, old: str, new: str, key: str) -> None:
+    assert old in _FACTS
+    files = [_write(tmp_path, _FACTS.replace(old, new))]
+    with pytest.raises(DescriptionError) as excinfo:
+        corrected_part(_part("STM32L151RCYx", "DIE427", 256), files)
+    assert excinfo.value.key == key
+
+
+def test_a_second_part_facts_row_for_one_part_is_refused(tmp_path: Path) -> None:
+    files = [_write(tmp_path, _FACTS, "a.toml"), _write(tmp_path, _FACTS, "b.toml")]
+    with pytest.raises(DescriptionError) as excinfo:
+        corrected_part(_part("STM32L151RCYx", "DIE427", 256), files)
+    assert excinfo.value.key == "part_facts[0].part"
+    assert "a.toml" in str(excinfo.value)

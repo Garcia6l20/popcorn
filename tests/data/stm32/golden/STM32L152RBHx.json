@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 194,
+    "cross_rules": 7,
+    "fields": 2944,
+    "irqs": 45,
+    "patched_fields": 117,
+    "peripherals": 39,
+    "regions": 7,
+    "registers": 435
+  },
+  "part": "STM32L152RBHx",
+  "svd_sha256": "ac3fbee1bdf9e50ae69c4807d5fa1af1db92233f91990a07f0aad7060fd1726f",
+  "tables": {
+    "alternates": "23612e32d0001a15f9161cbc697bbddacd1112c493366b4ec4a6041b5df7e5ed",
+    "core": "a43e273a3fabc4e46812f735df5f325160f11a7bbab2ca49ae14fc022414e7f9",
+    "fields": "5917e1b6accae1b11b19d698c5d055692004141a5f77f056c19d4a59d7dbe181",
+    "irqs": "4a7ca3ef7dd4e964a523e1288620bf899efb970a0bd39150d52270712e995bf7",
+    "peripherals": "12cbedf7affb5ad03bf82e19902667d20867f614090fb19581111c56201f2a50",
+    "regions": "132bf25538443c36e2eb0b86dbf29c07420622f4676edb64aa7e9686986df3fc",
+    "registers": "35705cfa57284389b3505df052e10871a000e2488f406734c9f55c1ca21cd695"
+  }
+}

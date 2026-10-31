@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 128,
+    "cross_rules": 8,
+    "fields": 2697,
+    "irqs": 44,
+    "patched_fields": 116,
+    "peripherals": 38,
+    "regions": 7,
+    "registers": 429
+  },
+  "part": "STM32L151C8UxA",
+  "svd_sha256": "03123338476d3ae4ff311c3bf879ce4db5610522670a6a767d6146df49c874fa",
+  "tables": {
+    "alternates": "2f7262a410a3458e9934557222eb54335ff0d475eaecc19e630fb3c4ebca73b0",
+    "core": "a43e273a3fabc4e46812f735df5f325160f11a7bbab2ca49ae14fc022414e7f9",
+    "fields": "0b088b9e498e79bc86120034bacad79277ce716636fbb8776f7c8fceee7783b8",
+    "irqs": "cef9d1f2f0596500ef0a73f779cc10e9a45d03c579ef5ec28d9b87caccd796d0",
+    "peripherals": "e0da723225df79a849aeeb694c8ebdc7fb5a915b7a12c79ac94315d578d12f4d",
+    "regions": "56e219491a8d27796e422b4a91fee5f14e9b1d3411229662e992cbc80392977b",
+    "registers": "30c231e0b0b5b3a1202e9f33d7ce29defcdfed6f78f2e4bab4e1929599b6c452"
+  }
+}

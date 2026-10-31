@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 352,
+    "cross_rules": 8,
+    "fields": 3903,
+    "irqs": 56,
+    "patched_fields": 130,
+    "peripherals": 48,
+    "regions": 8,
+    "registers": 566
+  },
+  "part": "STM32L162VDYxX",
+  "svd_sha256": "0f8a4bea28a57c54507b81bbefa05716641e4900cf6bb204511b9a5457ea501b",
+  "tables": {
+    "alternates": "348b36361bcfffd424bf2ab3f91a13f120082addf17c8b556685f8f749e6a258",
+    "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
+    "fields": "20530f0e6c60f016c2983c175120a024fc0308825b90c727728a6885739b7264",
+    "irqs": "8ac426b25b6a4545f25929c722defdf52ad069d4347c2a555a598d65bf5f3208",
+    "peripherals": "363bd2c248370c0f6f8be7b57dc6dd0b519814544bcae52253baa79f4df1b05e",
+    "regions": "f88fbae8bbda6b801180d04dfc39af7776afadaf232700b0a9a8d1bea9bd91d8",
+    "registers": "2e74ed4352c1f135619c6a192ac142f7a4b336f29b33cd99ca1b07b1590df86d"
+  }
+}

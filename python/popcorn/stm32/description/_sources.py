@@ -22,7 +22,7 @@ from popcorn.stm32.description._cubemx import (
 )
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
 from popcorn.stm32.description._layers import line_name
-from popcorn.stm32.description._patches import cmsis_suffix, load_patches
+from popcorn.stm32.description._patches import cmsis_suffix, corrected_part, load_patches
 
 _PATCHES_DIR = Path(__file__).parent / "patches"
 _RZONE_FACTS_DIR = Path(__file__).parent / "rzone"
@@ -197,6 +197,13 @@ def _patch_files() -> list[Path]:
     return sorted(_PATCHES_DIR.glob("*.toml"))
 
 
+def read_db_part(mcu_db: Path, name: str) -> DbPart:
+    """read_part of the part file @p mcu_db for the expanded name @p name, corrected by the
+    `[[part_facts]]` rows of the package patches, see corrected_part."""
+    part = read_part(mcu_db.read_bytes(), file=str(mcu_db), name=name)
+    return corrected_part(part, _patch_files())
+
+
 def _svd_exception(
     refname: str, db_part: DbPart, *, search: SearchPaths
 ) -> tuple[str, Path] | None:
@@ -350,7 +357,8 @@ def _scan_die_ips(
         try:
             group = read_part(path.read_bytes(), file=str(path))
             members = [
-                group.select(name, file=str(path)) for name, _ in expand_refname(group.ref_name)
+                corrected_part(group.select(name, file=str(path)), _patch_files())
+                for name, _ in expand_refname(group.ref_name)
             ]
         except OSError, DescriptionError:
             continue
@@ -404,7 +412,7 @@ def find_sources(
 
     mcu_db = db_dir / "mcu" / f"{resolved.ref_name}.xml"
     _require(mcu_db, str(db_dir), refname, f"a db file at {mcu_db}")
-    db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db), name=refname)
+    db_part = read_db_part(mcu_db, refname)
 
     rzone_file = db_dir / "mcu" / "memory" / rzone_file_name(db_part)
     rzone: Path | None = rzone_file
@@ -469,7 +477,7 @@ def pin_data_sources(
     refname = resolved.name
     mcu_db = pin_data / "mcu" / f"{resolved.ref_name}.xml"
     _require(mcu_db, str(pin_data), refname, f"a part file at {mcu_db}")
-    db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db), name=refname)
+    db_part = read_db_part(mcu_db, refname)
     modes_name = gpio_modes_file_name(db_part)
     if modes_name is None:
         raise DescriptionError(str(mcu_db), 0, "GPIO", "a GPIO IP with a version")

@@ -32,7 +32,12 @@ from popcorn.stm32.description._patches import (
     apply_patches,
     load_patches,
 )
-from popcorn.stm32.description._sources import Sources, compute_source_digests, generator_string
+from popcorn.stm32.description._sources import (
+    Sources,
+    compute_source_digests,
+    generator_string,
+    read_db_part,
+)
 from popcorn.stm32.description._svd import expand_svd
 
 _LOG = logging.getLogger("popcorn")
@@ -170,7 +175,7 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
     """@ref build_description's PartDescription, paired with the PatchReport of every rule
     apply_patches applied while assembling it."""
     svd = expand_svd(sources.svd.read_bytes(), file=str(sources.svd))
-    db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db), name=sources.part)
+    db_part = read_db_part(sources.mcu_db, sources.part)
     rzone = _read_rzone_source(sources)
     cmsis = (
         read_cmsis_irqs(

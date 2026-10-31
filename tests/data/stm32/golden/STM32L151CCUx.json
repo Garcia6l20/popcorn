@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 144,
+    "cross_rules": 8,
+    "fields": 3032,
+    "irqs": 52,
+    "patched_fields": 130,
+    "peripherals": 42,
+    "regions": 7,
+    "registers": 499
+  },
+  "part": "STM32L151CCUx",
+  "svd_sha256": "03123338476d3ae4ff311c3bf879ce4db5610522670a6a767d6146df49c874fa",
+  "tables": {
+    "alternates": "b6ca5e7887c37aaa0d6cbfcb9c73cda916eefb743a409572dca7e00d87dd921d",
+    "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
+    "fields": "bcafe1efde8fa3abe166f4315e7648a86e452bbe7d54a874e43a72ce5078c315",
+    "irqs": "fc5db188f0598a163276655cfc9e30369f5f5f169a3e0e7e2b02c7ad5684a076",
+    "peripherals": "beec48f16c3a82ab7674c0248fd2ff2ccf9de386092e08fb06a72a0ed1e42e8c",
+    "regions": "89470ecb55f9875a0bb1fad964373baa4eeb0d5332275f29953cdbd778872822",
+    "registers": "9a51523363f740d5b51ad6a97cd9b387e70a1495cce55d96d6fd7fe3166da3e4"
+  }
+}

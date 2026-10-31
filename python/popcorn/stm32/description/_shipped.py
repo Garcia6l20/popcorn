@@ -19,7 +19,7 @@ from popcorn._errors import absent
 from popcorn.stm32.description._binder import check_bounds, dump_json
 from popcorn.stm32.description._builder import build_description
 from popcorn.stm32.description._cache import cached_description, default_cache_dir
-from popcorn.stm32.description._cubemx import bonded_pins, read_part
+from popcorn.stm32.description._cubemx import bonded_pins
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
 from popcorn.stm32.description._layers import (
     LAYER_FORMAT,
@@ -36,6 +36,7 @@ from popcorn.stm32.description._sources import (
     default_search_paths,
     match_refname,
     pin_data_sources,
+    read_db_part,
     resolve_part,
 )
 
@@ -372,7 +373,7 @@ def build_part(name: str, *, pin_data: Path) -> BuiltPart:
         )
     description = build_description(sources)
     check_bounds(description, file=name)
-    db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db), name=sources.part)
+    db_part = read_db_part(sources.mcu_db, sources.part)
     return BuiltPart(
         text=dump_json(description),
         bonded=sum(mask.bit_count() for mask in bonded_pins(db_part).values()),

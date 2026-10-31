@@ -1,10 +1,12 @@
 """Which parts each shipped example runs on, and the class decoding behind that choice.
 
 The gate runs every example on its `conftest.py` part, then once more on each extra part of
-`EXAMPLE_PARTS` through `--popcorn-part`. Together the runs put every class of the shipped parts
-under at least one example. An extra run moves every machine of the example onto its part, so
-each of the example's ELFs fits each extra part. `python -m popcorn_build.example_parts --list`
-prints one `examples/<chip>/<name> <part>` line per extra run.
+`EXAMPLE_PARTS` through `--popcorn-part`. Together the runs put every class of the shipped U5 and
+H5 parts, and of the STM32L1 parts of `L1_GROUP_A`, under at least one example. The other shipped
+STM32L1 names, every order code of the line, carry attach and reach evidence only. An extra run
+moves every machine of the example onto its part, so each of the example's ELFs fits each extra
+part. `python -m popcorn_build.example_parts --list` prints one `examples/<chip>/<name> <part>`
+line per extra run.
 """
 
 from __future__ import annotations
@@ -67,8 +69,8 @@ _DIES: Final = {
 }
 _FLASH_KIB: Final = {"G": 1024, "I": 2048}
 _DESCRIBED_FAMILY: Final = "L1"
-_DESCRIBED_SUFFIXES: Final = ("x", "xA")
-FLASH_REGION: Final = "Flash"
+_DESCRIBED_SUFFIXES: Final = ("x", "xA", "xX")
+FLASH_REGIONS: Final = ("Flash", "Flash_Bank2")
 DEV_ID_MASK: Final = 0xFFF
 _PACKAGES: Final = {
     ("A", "I"): "UFBGA169",
@@ -79,10 +81,16 @@ _PACKAGES: Final = {
     ("L", "H"): "TFBGA225",
     ("M", "Y"): "WLCSP80",
     ("O", "Y"): "WLCSP90",
+    ("Q", "H"): "UFBGA132",
     ("Q", "I"): "UFBGA132",
+    ("R", "H"): "TFBGA64",
     ("R", "T"): "LQFP64",
     ("R", "V"): "VFQFPN68",
+    ("R", "Y"): "WLCSP64",
+    ("U", "Y"): "WLCSP63",
+    ("V", "H"): "UFBGA100",
     ("V", "T"): "LQFP100",
+    ("V", "Y"): "WLCSP104",
     ("Z", "T"): "LQFP144",
 }
 
@@ -97,10 +105,10 @@ def _described_class(part: str, package: str) -> PartClass:
     from popcorn.stm32 import mcu
 
     description = mcu(part)
-    flash = next(region for region in description.regions if region.name == FLASH_REGION)
+    flash = sum(region.size for region in description.regions if region.name in FLASH_REGIONS)
     dbgmcu = next(unit for unit in description.peripherals if unit.name == "DBGMCU")
     idcode = next(register for register in dbgmcu.registers if register.name.endswith("IDCODE"))
-    return PartClass(f"DIE{idcode.reset & DEV_ID_MASK:03X}", flash.size // 1024, package, False)
+    return PartClass(f"DIE{idcode.reset & DEV_ID_MASK:03X}", flash // 1024, package, False)
 
 
 def part_class(part: str) -> PartClass:
@@ -109,9 +117,9 @@ def part_class(part: str) -> PartClass:
     The pin-count letter and the package letter are read together: `R` with `T` is LQFP64 and
     `R` with `V` is VFQFPN68, `M` with `Y` is WLCSP80 and `O` with `Y` is WLCSP90. On the U5 and
     H5 the die and flash size come from the name letters. On the STM32L1 the die is the DEV_ID of
-    the shipped description's DBGMCU_IDCODE reset value and the flash size its `Flash` region,
-    since one die carries several flash letters and categories. The decoding only groups
-    parts, no model reads it.
+    the shipped description's DBGMCU_IDCODE reset value and the flash size its `Flash` and
+    `Flash_Bank2` regions, since one die carries several flash letters and categories. The
+    decoding only groups parts, no model reads it.
 
     Raises:
         ValueError: `part` is not an ordering code of the shipped lines. An STM32L1 name raises
@@ -134,6 +142,15 @@ def part_class(part: str) -> PartClass:
         raise ValueError(f"{part!r} is not an ordering code of a shipped part")
     return PartClass(die, size, name, part.endswith("Q"))
 
+
+L1_GROUP_A: Final = (
+    "STM32L152RETx",
+    "STM32L152RCTxA",
+    "STM32L152RCTx",
+    "STM32L152RBTxA",
+    "STM32L152RBTx",
+)
+"""The STM32L1 parts the examples cover, one LQFP64 part per die."""
 
 _L1_XE_EXTRA: Final = ("STM32L152RCTxA", "STM32L152RCTx")
 _L1_XB_EXTRA: Final = (*_L1_XE_EXTRA, "STM32L152RBTxA")

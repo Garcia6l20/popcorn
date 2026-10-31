@@ -10,9 +10,9 @@ import pytest
 from popcorn.stm32.description import _cubemx
 from popcorn.stm32.description._binder import dump_json
 from popcorn.stm32.description._builder import build_description
-from popcorn.stm32.description._cubemx import expand_refname, read_part, read_rzone_facts
+from popcorn.stm32.description._cubemx import expand_refname, read_rzone_facts
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
-from popcorn.stm32.description._sources import facts_path, find_sources
+from popcorn.stm32.description._sources import facts_path, find_sources, read_db_part
 
 from ..conftest import require_pin_data
 
@@ -21,7 +21,7 @@ PATCH = FACTS_DIR.parent / "patches" / "stm32l1.toml"
 
 PAIRS: dict[str, list[tuple[int, int]]] = {
     "DIE416": [(4, 32), (8, 64), (10, 32), (10, 64), (10, 128), (16, 128)],
-    "DIE429": [(10, 32), (10, 64), (10, 128), (16, 32), (32, 64), (32, 128)],
+    "DIE429": [(4, 32), (8, 64), (16, 32), (16, 128), (32, 64), (32, 128)],
     "DIE427": [(16, 256), (32, 256)],
     "DIE436": [(32, 256), (48, 384)],
     "DIE437": [(80, 384), (80, 512)],
@@ -89,7 +89,7 @@ def test_every_l1_name_of_the_db_selects_one_of_the_facts_files() -> None:
     count = 0
     for path in sorted((pin_data / "mcu").glob("STM32L1*.xml")):
         for name, _ in expand_refname(path.stem):
-            part = read_part(path.read_bytes(), file=str(path), name=name)
+            part = read_db_part(path, name)
             stem = facts_path(part).stem
             assert (FACTS_DIR / f"{stem}.toml").is_file(), name
             assert _die(stem) == part.die

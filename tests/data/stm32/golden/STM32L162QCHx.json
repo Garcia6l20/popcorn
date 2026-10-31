@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 335,
+    "cross_rules": 8,
+    "fields": 3666,
+    "irqs": 54,
+    "patched_fields": 130,
+    "peripherals": 46,
+    "regions": 7,
+    "registers": 543
+  },
+  "part": "STM32L162QCHx",
+  "svd_sha256": "0f8a4bea28a57c54507b81bbefa05716641e4900cf6bb204511b9a5457ea501b",
+  "tables": {
+    "alternates": "d0113face545a61e5931b628a41e7f9b0323fbf44e89213fa639a29afa1810bc",
+    "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
+    "fields": "dbf89a36d0afc94a33e520b3cd68b12e2fae4856eb14d26475dc10dfa0863b76",
+    "irqs": "54e87cc98ba72ed97935a677e2f0e593b86132b78bf159b1949dd8c97aa9cbcd",
+    "peripherals": "ba08142e18c88f4500c550d2e4fd5c235f3cd1f2529de04f059b19d4382f7bb9",
+    "regions": "f6c5584dd27c430db9f4d6f885eae72a0776ab89f3c7a6320298d79ff02afbf2",
+    "registers": "8b5552d3da6351d27e819933335c9de8763083ff3cf90df5ec25c390bfda94be"
+  }
+}

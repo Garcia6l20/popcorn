@@ -96,6 +96,26 @@ Patch files apply in file name order, the family file `stm32l1.toml` before its 
 `stm32l1_cat1.toml`, since `.` sorts before `_`. A family patch and a category patch may both
 apply, the category patch after.
 
+### Part facts
+
+A `[[part_facts]]` row sets the die or the SRAM size of one expanded name where the db and a
+manual or datasheet disagree. The row applies to the db part before the build reads it, so the
+rzone facts file name, the `dies` match and the die IP donors follow it.
+
+```toml
+[match]
+parts = ["STM32L151RCYx"]
+
+[[part_facts]]
+part = "STM32L151RCYx"
+die = "DIE436"
+source = "RM0038 Rev 18 30.6.1 note 1"
+```
+
+A row sets `die`, `ram_kib` or both, with a non-empty `source`. The patch's `[match]` holds
+`parts` only and selects every row's part, and one part has at most one row across the patch
+files, or the build raises `DescriptionError`. `stm32l1_part_facts.toml` holds the STM32L1 rows.
+
 ### STM32L1 patch files
 
 The 132 STM32L1 names fall into seven categories by die and flash size. Exactly one of seven

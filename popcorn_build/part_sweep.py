@@ -49,7 +49,7 @@ def _db_dir() -> Path:
 
 
 def _part_facts(refname: str) -> Row:
-    from popcorn.stm32.description._cubemx import bonded_pins, read_part
+    from popcorn.stm32.description._cubemx import bonded_pins
 
     facts: Row = {
         "line": None,
@@ -61,7 +61,7 @@ def _part_facts(refname: str) -> Row:
         "db_error": None,
     }
     from popcorn.stm32.description._errors import DescriptionError
-    from popcorn.stm32.description._sources import resolve_part
+    from popcorn.stm32.description._sources import read_db_part, resolve_part
 
     db_dir = _db_dir()
     try:
@@ -72,7 +72,7 @@ def _part_facts(refname: str) -> Row:
     if not db_file.is_file():
         return facts
     try:
-        part = read_part(db_file.read_bytes(), file=str(db_file), name=resolved.name)
+        part = read_db_part(db_file, resolved.name)
     except Exception as exc:
         facts["db_error"] = _error(exc)
         return facts

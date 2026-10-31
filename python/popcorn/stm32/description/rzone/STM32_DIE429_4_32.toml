@@ -1,5 +1,5 @@
 format = 1
-rzone = "STM32_DIE429_10_64.xml"
+rzone = "STM32_DIE429_4_32.xml"
 
 [core]
 fpu_double = false
@@ -14,7 +14,7 @@ source = "Cortex-M3 with no FPU, no DSP extension and no TrustZone: RM0038 Rev 1
 [[regions]]
 name = "Flash"
 start = 0x08000000
-size = 0x00010000
+size = 0x00008000
 kind = "rom"
 acc = { read = true, write = false, execute = true }
 secure = false
@@ -23,8 +23,8 @@ source = "RM0038 Rev 18 3.2 Table 8 (NVM module organization, Cat.1 and Cat.2): 
 [[regions]]
 name = "SRAM"
 start = 0x20000000
-size = 0x00002800
+size = 0x00001000
 kind = "ram"
 acc = { read = true, write = true, execute = true }
 secure = false
-source = "RM0038 Rev 18 2.4 embedded SRAM: starts at 0x2000 0000, read and write at CPU speed, and the CPU executes from it through the system bus. Size 10 Kbytes from the CubeMX Ram element of the part. ARMv7-M ARM B3.1: the SRAM region 0x2000 0000 to 0x3FFF FFFF is executable"
+source = "RM0038 Rev 18 2.4 embedded SRAM: starts at 0x2000 0000, read and write at CPU speed, and the CPU executes from it through the system bus. Size 4 Kbytes from DS10193 Rev 6 Table 2, the STM32L100x6/8/B-A RAM. The CubeMX Ram element of the part gives 10, corrected by the part_facts patch. ARMv7-M ARM B3.1: the SRAM region 0x2000 0000 to 0x3FFF FFFF is executable"

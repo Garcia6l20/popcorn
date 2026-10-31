@@ -10,11 +10,11 @@ from pathlib import Path
 import pytest
 from popcorn.stm32.description import _cubemx
 from popcorn.stm32.description._builder import build_description
-from popcorn.stm32.description._cubemx import DbPart, expand_refname, read_part
+from popcorn.stm32.description._cubemx import DbPart, expand_refname
 from popcorn.stm32.description._irqs import read_cmsis_irqs
 from popcorn.stm32.description._model import PartDescription, PeripheralDesc, RegionDesc
 from popcorn.stm32.description._patches import cmsis_suffix, load_patches
-from popcorn.stm32.description._sources import find_sources
+from popcorn.stm32.description._sources import find_sources, read_db_part
 
 from ..conftest import PIN_DATA_VARIABLE, require_pin_data
 
@@ -158,7 +158,7 @@ def _parts() -> dict[str, DbPart]:
     parts: dict[str, DbPart] = {}
     for path in sorted((pin_data / "mcu").glob("STM32L1*.xml")):
         for name, _ in expand_refname(path.stem):
-            parts[name] = read_part(path.read_bytes(), file=str(path), name=name)
+            parts[name] = read_db_part(path, name)
     return parts
 
 

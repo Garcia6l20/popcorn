@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 186,
+    "cross_rules": 8,
+    "fields": 2976,
+    "irqs": 52,
+    "patched_fields": 122,
+    "peripherals": 40,
+    "regions": 7,
+    "registers": 451
+  },
+  "part": "STM32L100RCTx",
+  "svd_sha256": "3024df564f62dc8a12b20018861add4df13d5e4b1272eb3ebf9b52a254e3e897",
+  "tables": {
+    "alternates": "d1cf5a40ba509e2b4daaf7dd81fa4f338314a3f992023422e6e6101139637fb9",
+    "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
+    "fields": "85304c2b62cf60aeb83043cb70a816f106635b2182c6b260464d87b97025302d",
+    "irqs": "f26da91402c4090aa2c0a49171c146aea36d693f3c42a0ab5f6a34ec9e51a555",
+    "peripherals": "7accfeb7a39af5662d07c771349ec9f17248fef34676d943b041614fe032b495",
+    "regions": "f62f2c5ac5dcb4cc8e69894d6d8b60e7d6a2efcfbdc8c5971d5af39f0bee4b1c",
+    "registers": "c15fa6690534f33e211c28f161f94038524f7f42bbfee7081fd93e49a5b75fa0"
+  }
+}

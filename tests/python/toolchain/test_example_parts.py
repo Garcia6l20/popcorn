@@ -20,6 +20,7 @@ from popcorn.stm32 import mcu, shipped_parts
 
 from popcorn_build.example_parts import (
     EXAMPLE_PARTS,
+    L1_GROUP_A,
     PartClass,
     extra_runs,
     part_class,
@@ -29,7 +30,7 @@ from popcorn_build.example_parts import (
 ROOT = Path(__file__).parents[3]
 EXAMPLES = ROOT / "examples"
 SUITE_PARTS = ("STM32U575QGIx", "STM32H573AIIx")
-FLASH_REGIONS = ("Flash_NS", "Flash")
+FLASH_REGIONS = ("Flash_NS", "Flash", "Flash_Bank2")
 SINGLE_RUN_DIES = frozenset({"U575/U585", "H56x/H573"})
 L1_XE_EXTRA = ("STM32L152RCTxA", "STM32L152RCTx")
 L1_XB_EXTRA = (*L1_XE_EXTRA, "STM32L152RBTxA")
@@ -43,9 +44,14 @@ def description(part: str) -> popcorn.PartDescription:
     return mcu(part)
 
 
+def example_scope() -> list[str]:
+    """The shipped parts the examples cover: every U5 and H5 part and the STM32L1 group A."""
+    return [p for p in shipped_parts() if not p.startswith("STM32L1") or p in L1_GROUP_A]
+
+
 def classes() -> dict[PartClass, list[str]]:
     found: dict[PartClass, list[str]] = collections.defaultdict(list)
-    for part in shipped_parts():
+    for part in example_scope():
         found[part_class(part)].append(part)
     return found
 
@@ -67,8 +73,7 @@ def bonded(part: str, pin: str) -> bool:
 
 
 def flash_kib(part: str) -> int:
-    region = next(r for r in description(part).regions if r.name in FLASH_REGIONS)
-    return region.size // 1024
+    return sum(r.size for r in description(part).regions if r.name in FLASH_REGIONS) // 1024
 
 
 def test_the_classes_of_the_shipped_parts_number_56_on_seven_dies() -> None:
@@ -160,7 +165,16 @@ def test_an_l1_part_class_is_the_die_and_flash_of_its_description(part: str) -> 
     idcode = next(r for r in dbgmcu.registers if r.name == "IDCODE")
     assert found.die == f"DIE{idcode.reset & 0xFFF:03X}"
     assert found.flash_kib == flash_kib(part)
-    assert (found.package, found.smps) == ("LQFP64", False)
+    assert found.smps is False
+
+
+@pytest.mark.timeout(60)
+def test_the_l1_group_a_is_one_lqfp64_part_per_die_of_the_shipped_l1_names() -> None:
+    shipped = [p for p in shipped_parts() if p.startswith("STM32L1")]
+    assert set(L1_GROUP_A) <= set(shipped)
+    assert {part_class(p).package for p in L1_GROUP_A} == {"LQFP64"}
+    assert {part_class(p).die for p in L1_GROUP_A} == {part_class(p).die for p in shipped}
+    assert len({part_class(p).die for p in L1_GROUP_A}) == len(L1_GROUP_A)
 
 
 def test_the_l1_part_classes_split_the_cat3_parts_by_die() -> None:
@@ -169,6 +183,11 @@ def test_the_l1_part_classes_split_the_cat3_parts_by_die() -> None:
     assert part_class("STM32L152RBTx").die == "DIE416"
     assert part_class("STM32L152RBTxA").die == "DIE429"
     assert part_class("STM32L152RETx") == PartClass("DIE437", 512, "LQFP64", False)
+
+
+def test_a_cat6_part_class_counts_both_flash_banks() -> None:
+    assert part_class("STM32L151VDTxX") == PartClass("DIE437", 384, "LQFP100", False)
+    assert part_class("STM32L162VDYxX") == PartClass("DIE437", 384, "WLCSP104", False)
 
 
 def conftest_descriptions(example: str) -> list[popcorn.MachineDescription]:
