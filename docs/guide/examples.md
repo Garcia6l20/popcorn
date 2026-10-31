@@ -282,3 +282,9 @@ The fixed CRC-32/MPEG-2 unit, HAL. [Sources and tests](https://github.com/Garcia
 A three-axis accelerometer mocked in Python on SPI1, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/spi).
 
 --8<-- "stm32l152/spi/README.md:3:17"
+
+### l152 i2c
+
+A temperature sensor mocked in Python on I2C1, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/i2c).
+
+--8<-- "stm32l152/i2c/README.md:3:14"

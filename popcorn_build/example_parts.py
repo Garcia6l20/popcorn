@@ -334,6 +334,13 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         flash_kib=None,
         also=("STM32L152RBTx",),
     ),
+    "stm32l152/i2c": ExampleParts(
+        "STM32L152RETx",
+        _L1_XE_EXTRA,
+        pins=("PA5", "PB8", "PB9"),
+        adc_channels=(),
+        flash_kib=None,
+    ),
     "stm32l152/iwdg": ExampleParts(
         "STM32L152RETx", _L1_XE_EXTRA, pins=(), adc_channels=(), flash_kib=None
     ),
