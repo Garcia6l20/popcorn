@@ -832,7 +832,7 @@ noise source. The model differs from RM0456 Rev 7 chapter 48 here:
 
 ## RTC and TAMP
 
-Source: [rtc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rtc.cpp)
+Source: [rtc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rtc.cpp), [rtc_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rtc_classic.cpp)
 
 Not modelled, logged:
 
@@ -844,6 +844,23 @@ Not modelled, logged:
 - Subsecond alarm comparison. MASKSS reads as 0.
 - The security and privilege `RTC_SECCFGR`, `RTC_PRIVCR`, `TAMP_SECCFGR` and `TAMP_PRIVCR`
   select. They are storage.
+
+The STM32L1 RTC:
+
+- INITF sets at the second RTCCLK edge after INIT, and the calendar restarts at the fourth
+  edge after INIT clears, the upper bounds of RM0038 20.3.5.
+- RSF sets at the second RTCCLK edge after a clear, the end of init mode, a BYPSHAD clear or a
+  system reset, inferred from the copy every two RTCCLK periods of RM0038 20.3.2.
+- TR, DR and SSR read the calendar at the time of the read. A read of SSR or TR holds TR and DR
+  until DR is read, and after a system reset they read their reset values until RSF sets.
+- TAMP2F and TAMP3F clear by a 0 under the `RTC_WPR` key only, inferred from RM0038 20.6.4,
+  which exempts `RTC_ISR[13:8]`.
+- ADD1H and SUB1H move the calendar at the write.
+- RTC writes land whatever `PWR_CR.DBP` holds.
+- On Cat.1 a PREDIV_A of 0 divides by 1.
+- Alarms, the wakeup timer, timestamps, tamper detection, coarse and smooth calibration, the
+  shift control, the RTC_CALIB and RTC_ALARM outputs and the reference clock detection are
+  storage.
 
 ## SAI
 

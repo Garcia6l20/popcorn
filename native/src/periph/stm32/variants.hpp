@@ -608,6 +608,25 @@ inline constexpr rtc_variant u5_rtc{};
 /** @brief STM32H5 RTC and TAMP, RM0481 51.6.8 and 52.7.10. */
 inline constexpr rtc_variant h5_rtc{.privilege_register = "PRIVCFGR"};
 
+/** @brief Differences between the classic RTC peripherals the model rows serve, RM0038 20. */
+struct rtc_classic_variant
+{
+  /** @brief Whether the RTC has subseconds and the shadow bypass: RTC_SSR, RTC_SHIFTR,
+   *         RTC_TSSSR, RTC_ALRMASSR, RTC_ALRMBSSR, RTC_CR.BYPSHAD and RTC_ISR.SHPF. */
+  bool subseconds = true;
+  /** @brief Whether the RTC has smooth calibration: RTC_CALR and RTC_ISR.RECALPF. */
+  bool smooth_calibration = true;
+  /** @brief Whether the RTC has tamper inputs 2 and 3: TAMP2E, TAMP3E and their flags. */
+  bool three_tampers = true;
+  /** @brief Whether DBGMCU has DBG_RTC_STOP, so a held core can freeze the RTC. */
+  bool debug_freeze = true;
+  /** @brief Whether a brown-out resets the RTC domain as a power-on does, RM0038 6.1.2 and
+   *         6.1.3 on a part with no VBAT supply. */
+  bool brown_out_resets = true;
+};
+
+/** @brief STM32L1 Cat.2 to Cat.6 RTC, `rtc2_v2_5_Cube`, RM0038 section 20. */
+inline constexpr rtc_classic_variant l1_rtc{};
 /** @brief Differences between the SAI peripherals the model rows serve. */
 struct sai_variant
 {

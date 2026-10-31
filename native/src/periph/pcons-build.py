@@ -24,6 +24,7 @@ stm32 = [
         "tim.cpp",
         "iwdg.cpp",
         "rtc.cpp",
+        "rtc_classic.cpp",
         "spi.cpp",
         "spi_medium.cpp",
         "spi_classic.cpp",

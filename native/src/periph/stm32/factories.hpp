@@ -163,6 +163,15 @@ namespace popcorn::periph::stm32
     -> model_factory;
 
 /**
+ * @brief Factory of the classic RTC model, RM0038 section 20.
+ * @param initial Calendar at power-on, the board's `rtc_initial`, copied.
+ * @param variant What differs between the RTC of the category the row serves.
+ */
+[[nodiscard]] auto rtc_classic_factory(
+    std::optional<std::chrono::sys_seconds> initial,
+    rtc_classic_variant                     variant) -> model_factory;
+
+/**
  * @brief Factory of the TAMP backup register model, RM0456 section 64.
  * @param variant What differs between the TAMP of the family the row serves.
  */
