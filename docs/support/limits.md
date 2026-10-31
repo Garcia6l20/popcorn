@@ -506,9 +506,26 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   BTF, the communication PE 0 waits for runs from the match to the port's STOP, repeated STARTs and
   their address phases included, a repeated START inside it matches the I2C's addresses, the STOP
   that ends it sets no STOPF, and a PE 1 write before that STOP keeps the I2C enabled. A firmware START
-  waits for the port's STOP. NOSTRETCH at an address match and a 10-bit header with ADDMODE 1 log
-  one `model_warning`, raise `model_error` under `strict_peripherals` at the address phase, and the
-  header answers NACK.
+  waits for the port's STOP. A 10-bit header with ADDMODE 1 logs one `model_warning`, raises
+  `model_error` under `strict_peripherals` at the address phase, and answers NACK.
+- Target with NOSTRETCH 1, RM0038 26.3.4 and 26.3.5: an address match answers at its end with ADDR
+  set and no SCL hold. A written byte that ends with RxNE 1 is lost and sets OVR, and a read byte
+  that starts with the shift register empty sends the DR byte again and sets OVR. BTF never sets.
+  A read byte NACKed before the ADDR clear ends the transmission, RM0038 26.3.4 AF. Inferred: the
+  lost byte is acknowledged as CR1.ACK says, a read byte before the ADDR clear sends DR as it is,
+  TxE sets only with ADDR clear, and the ADDR clear after that NACK sets no TxE.
+- Errors, RM0038 26.3.4: a target's `bus_error` sets BERR and its `overrun` sets OVR at the end of
+  the byte, which completes as its acknowledge says. On silicon OVR sets in slave mode with
+  NOSTRETCH only, the injection exercises firmware handlers. With several targets the byte takes
+  the error of the first in attachment order. An `arbitration_lost` sets ARLO, clears MSL and
+  TRA, RM0038 26.6.7, ignores the reply's acknowledge and stretch, drops a read byte and sends no
+  DR byte the firmware wrote, RM0038 26.3.4 ARLO. Inferred: TxE clears and BTF follows a byte
+  still held, as at a START end. Inferred: BUSY stays 1 for one SCL period, then the winner's STOP
+  reaches the targets, clears BUSY and CR1.STOP and sends a START CR1.START holds. PE 0 in that
+  window leaves BUSY 1 until that STOP. In target mode a port STOP inside a running data byte of
+  the I2C's acknowledged address, or inside a running address phase while the I2C is enabled,
+  sets BERR and drops the byte, RM0038 26.3.4 BERR. Inferred: a STOP inside another address's
+  byte or before a queued phase starts sets no BERR.
 - The controller receiver decides a byte's acknowledge at the end of its eighth period, before
   the acknowledge pulse, from CR1.ACK, an ACK write inside the eighth period counting, as RM0038
   Figure 213 note 4 states. An ACK write during the acknowledge pulse counts for the next byte,
@@ -527,8 +544,7 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - An STM32L1 I2C target answers at the phase's end. A target that leaves its answer pending is
   taken as NACK or as a byte of 0xFF and fails the run with `config_error`, and
   `i2c_target_port::complete()` and `complete_read()` throw `config_error`. The STM32L1 I2C is a
-  link end of no linked system and takes no host bus hold. An `i2c_error` in a target's answer
-  logs one `model_warning`.
+  link end of no linked system and takes no host bus hold.
 
 ## IWDG
 

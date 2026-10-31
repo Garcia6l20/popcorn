@@ -83,6 +83,9 @@ constexpr std::uint32_t    btf        = 1u << 2;
 constexpr std::uint32_t    rxne       = 1u << 6;
 constexpr std::uint32_t    txe        = 1u << 7;
 constexpr std::uint32_t    af         = 1u << 10;
+constexpr std::uint32_t    berr       = 1u << 8;
+constexpr std::uint32_t    arlo       = 1u << 9;
+constexpr std::uint32_t    ovr        = 1u << 11;
 constexpr std::uint32_t    msl        = 1u << 0;
 constexpr std::uint32_t    busy       = 1u << 1;
 constexpr std::uint32_t    tra        = 1u << 2;
@@ -124,6 +127,8 @@ public:
   std::optional<std::size_t> nack_byte;
   std::uint64_t              stretch_ps{};
   periph::i2c_error          error{};
+  std::optional<std::size_t> error_byte;
+  periph::i2c_error          byte_error{};
   bool                       defer{};
   int                        matched{};
   bool                       defer_read{};
@@ -151,7 +156,10 @@ public:
   {
     auto const index = bytes().size();
     log.push_back({'W', byte, at.ps});
-    return {.ack = nack_byte != index, .stretch_ps = stretch_ps};
+    return {
+        .ack        = nack_byte != index,
+        .error      = error_byte == index ? byte_error : periph::i2c_error::none,
+        .stretch_ps = stretch_ps};
   }
 
   auto read(vtime at) -> periph::i2c_read_reply override
@@ -163,7 +171,10 @@ public:
   {
     auto const index = static_cast<std::size_t>(std::ranges::count(kinds(), 'R'));
     log.push_back({'R', static_cast<std::uint8_t>(acked ? 1 : 0), at.ps});
-    return {.byte = index < out.size() ? out[index] : std::uint8_t{0xFF}, .stretch_ps = stretch_ps};
+    return {
+        .byte       = index < out.size() ? out[index] : std::uint8_t{0xFF},
+        .error      = error_byte == index ? byte_error : periph::i2c_error::none,
+        .stretch_ps = stretch_ps};
   }
 
   auto read_deferred(vtime at, bool acked, std::uint64_t ticket)
@@ -868,13 +879,194 @@ TEST_CASE("unmodelled CR1 functions warn once")
   CHECK(r.warnings("not modelled") == 1);
 }
 
-TEST_CASE("an error a target injects warns once, the byte completes as its acknowledge says")
+TEST_CASE(
+    "RM0038 26.3.4 BERR in master mode: a target's bus_error sets BERR at the end of its byte, the "
+    "transfer runs on as its acknowledge says")
+{
+  {
+    rig r{"parked"};
+    r.target->error = periph::i2c_error::bus_error;
+    r.write(i2c1 + cr2, freq2 | iterren);
+    static_cast<void>(r.addressed());
+    CHECK(r.read(i2c1 + sr1) == (addr | berr));
+    CHECK(r.read(i2c1 + sr2) == (msl | busy | tra));
+    CHECK((r.read(nvic_ispr1) & error_irq) == error_irq);
+    static_cast<void>(r.cpu_read(i2c1 + sr1));
+    static_cast<void>(r.cpu_read(i2c1 + sr2));
+    r.cpu_write(i2c1 + dr, 0x11);
+    r.idle_to(r.now_ps() + phase(9));
+    CHECK(r.target->bytes() == std::vector<std::uint8_t>{0x11});
+    CHECK(r.read(i2c1 + sr1) == (txe | btf | berr));
+    CHECK(r.warnings("not modelled") == 0);
+  }
+  {
+    rig r{"parked"};
+    r.target->error_byte = 0;
+    r.target->byte_error = periph::i2c_error::bus_error;
+    r.transmitting();
+    r.cpu_write(i2c1 + dr, 0x11);
+    r.idle_to(r.now_ps() + phase(9));
+    CHECK(r.read(i2c1 + sr1) == (txe | btf | berr));
+  }
+  {
+    rig r{"parked"};
+    r.target->out        = {0xC1, 0xC2};
+    r.target->error_byte = 0;
+    r.target->byte_error = periph::i2c_error::bus_error;
+    auto const t0        = r.receiving();
+    r.idle_to(t0 + phase(9));
+    CHECK(r.read(i2c1 + sr1) == (rxne | berr));
+    CHECK(r.read(i2c1 + dr) == 0xC1);
+  }
+}
+
+TEST_CASE(
+    "an overrun a target injects in master mode sets OVR at the end of its byte, the byte "
+    "completes as its acknowledge says")
 {
   rig r{"parked"};
-  r.target->error = periph::i2c_error::bus_error;
-  static_cast<void>(r.addressed());
-  CHECK(r.read(i2c1 + sr1) == addr);
-  CHECK(r.warnings("not modelled, the byte completes as its acknowledge says") == 1);
+  r.target->error_byte = 0;
+  r.target->byte_error = periph::i2c_error::overrun;
+  r.write(i2c1 + cr2, freq2 | iterren);
+  r.transmitting();
+  r.cpu_write(i2c1 + dr, 0x11);
+  r.idle_to(r.now_ps() + phase(9));
+  CHECK(r.target->bytes() == std::vector<std::uint8_t>{0x11});
+  CHECK(r.read(i2c1 + sr1) == (txe | btf | ovr));
+  CHECK((r.read(nvic_ispr1) & error_irq) == error_irq);
+}
+
+TEST_CASE(
+    "RM0038 26.3.4 ARLO: a lost address sets ARLO and MSL 0, no ADDR nor AF, the acknowledge and "
+    "the stretch ignored, BUSY until the winner's STOP one period later, inferred")
+{
+  rig r{"parked"};
+  r.target->error      = periph::i2c_error::arbitration_lost;
+  r.target->stretch_ps = 10'000'000;
+  r.write(i2c1 + cr2, freq2 | iterren);
+  auto const t1 = r.addressed();
+  CHECK(r.read(i2c1 + sr1) == arlo);
+  CHECK(r.read(i2c1 + sr2) == busy);
+  CHECK((r.read(nvic_ispr1) & error_irq) == error_irq);
+  r.idle_to(t1 + phase(1) - margin);
+  CHECK(r.target->kinds() == "S");
+  CHECK(r.read(i2c1 + sr2) == busy);
+  r.idle_to(t1 + phase(1));
+  CHECK(r.target->kinds() == "SP");
+  CHECK(r.target->log.back().at == t1 + phase(1));
+  CHECK(r.read(i2c1 + sr1) == arlo);
+  CHECK(r.read(i2c1 + sr2) == 0);
+  r.cpu_write(i2c1 + sr1, 0);
+  CHECK(r.read(i2c1 + sr1) == 0);
+  CHECK(r.warnings("not modelled") == 0);
+}
+
+TEST_CASE(
+    "RM0038 26.3.4 ARLO on a data byte: TxE, BTF and TRA cleared, DR unsent, STOP cleared at the "
+    "winner's STOP and a START set sent there, inferred")
+{
+  for(auto const control : {stop, start})
+  {
+    CAPTURE(control);
+    rig r{"parked"};
+    r.target->error_byte = 0;
+    r.target->byte_error = periph::i2c_error::arbitration_lost;
+    r.transmitting();
+    auto const t0 = r.now_ps();
+    r.cpu_write(i2c1 + dr, 0x11);
+    if(control == start)
+    {
+      r.cpu_write(i2c1 + dr, 0x22);
+    }
+    CHECK(r.read(i2c1 + sr1) == (control == start ? 0 : txe));
+    r.cpu_write(i2c1 + cr1, pe | control);
+    r.idle_to(t0 + phase(9));
+    CHECK(r.read(i2c1 + sr1) == arlo);
+    CHECK(r.read(i2c1 + sr2) == busy);
+    r.cpu_write(i2c1 + cr1, pe | control);
+    r.idle_to(t0 + phase(10));
+    CHECK(r.target->kinds() == "SWP");
+    CHECK(r.target->bytes() == std::vector<std::uint8_t>{0x11});
+    if(control == stop)
+    {
+      CHECK(r.read(i2c1 + cr1) == pe);
+      CHECK(r.read(i2c1 + sr2) == 0);
+      r.idle_to(t0 + phase(30));
+      CHECK(r.target->kinds() == "SWP");
+      continue;
+    }
+    CHECK(r.read(i2c1 + sr2) == busy);
+    r.idle_to(t0 + phase(11));
+    CHECK(r.read(i2c1 + sr1) == (arlo | sb));
+    CHECK(r.read(i2c1 + sr2) == (msl | busy));
+  }
+}
+
+TEST_CASE("RM0038 26.3.4 ARLO on a read byte drops the byte: no RxNE, DR unchanged, inferred")
+{
+  rig r{"parked"};
+  r.target->out        = {0xC1, 0xC2};
+  r.target->error_byte = 0;
+  r.target->byte_error = periph::i2c_error::arbitration_lost;
+  auto const t0        = r.receiving();
+  r.idle_to(t0 + phase(9));
+  CHECK(r.read(i2c1 + sr1) == arlo);
+  CHECK(r.read(i2c1 + dr) == (std::uint32_t{device} << 1 | 1u));
+  r.idle_to(t0 + phase(30));
+  CHECK(r.target->kinds() == "SRP");
+  CHECK(r.read(i2c1 + sr2) == 0);
+}
+
+TEST_CASE(
+    "RM0038 26.6.7 BUSY: PE 0 after a lost arbitration clears ARLO, BUSY stays 1 to the winner's "
+    "STOP, a PE 1 and START written back before it start one period after it, inferred")
+{
+  for(auto const rearm : {false, true})
+  {
+    CAPTURE(rearm);
+    rig r{"parked"};
+    r.target->error = periph::i2c_error::arbitration_lost;
+    auto const t1   = r.addressed();
+    r.cpu_write(i2c1 + cr1, start);
+    CHECK(r.read(i2c1 + cr1) == 0);
+    CHECK(r.read(i2c1 + sr1) == 0);
+    CHECK(r.read(i2c1 + sr2) == busy);
+    if(rearm)
+    {
+      r.cpu_write(i2c1 + cr1, pe);
+      r.cpu_write(i2c1 + cr1, pe | start);
+      CHECK(r.read(i2c1 + sr1) == 0);
+      CHECK(r.read(i2c1 + sr2) == busy);
+    }
+    r.idle_to(t1 + phase(1));
+    CHECK(r.target->kinds() == "SP");
+    if(rearm)
+    {
+      CHECK(r.read(i2c1 + sr1) == 0);
+      r.idle_to(t1 + phase(2));
+      CHECK(r.read(i2c1 + sr1) == sb);
+      CHECK(r.read(i2c1 + sr2) == (msl | busy));
+      continue;
+    }
+    CHECK(r.read(i2c1 + sr2) == 0);
+    r.idle_to(t1 + phase(5));
+    CHECK(r.read(i2c1 + sr1) == 0);
+  }
+}
+
+TEST_CASE("two targets on one address: the error of the first in attachment order is the byte's")
+{
+  for(auto const first_lost : {false, true})
+  {
+    CAPTURE(first_lost);
+    auto other = std::make_shared<probe_target>();
+    rig  r{"parked", {other}};
+    r.target->error =
+        first_lost ? periph::i2c_error::arbitration_lost : periph::i2c_error::bus_error;
+    other->error = first_lost ? periph::i2c_error::bus_error : periph::i2c_error::arbitration_lost;
+    static_cast<void>(r.addressed());
+    CHECK(r.read(i2c1 + sr1) == (first_lost ? arlo : addr | berr));
+  }
 }
 
 TEST_CASE("a stopped PCLK1 starts no START and warns once")
@@ -2184,59 +2376,255 @@ TEST_CASE("checklist 31: I2C1RST during the BTF stretch drops the held byte at t
   CHECK(r.read(i2c1 + sr1) == 0);
 }
 
-TEST_CASE("checklist 53: NOSTRETCH and a 10-bit header warn, strict raises")
+TEST_CASE("checklist 53: a 10-bit header warns, strict raises")
 {
-  struct leg
+  for(auto const strict : {false, true})
   {
-    std::uint32_t control;
-    std::uint32_t own1;
-    std::uint32_t own2;
-    std::uint8_t  to;
-    bool          read;
-    bool          held;
-  };
-  for(auto const& [control, own1, own2, to, read, held] : {
-          leg{pe | ack_bit | nostretch, std::uint32_t{own} << 1,            0, own,  false, true },
-          leg{pe | ack_bit,             1u << 15 | std::uint32_t{own} << 1, 0, 0x78, false, false},
-  })
-  {
-    CAPTURE(to);
-    CAPTURE(read);
-    for(auto const strict : {false, true})
+    CAPTURE(strict);
+    port_rig const r{true, strict};
+    r.listen();
+    r.write(i2c1 + oar1, 1u << 15 | std::uint32_t{own} << 1);
+    auto const base = r.now() + us;
+    r.start(0x78, false, base, 1);
+    r.start(0x78, false, base + 2 * target_ps, 2);
+    if(strict)
     {
-      CAPTURE(strict);
-      port_rig const r{true, strict};
-      r.listen(control);
-      r.write(i2c1 + oar1, own1);
-      r.write(i2c1 + oar2, own2);
-      auto const base = r.now() + us;
-      r.start(to, read, base, 1);
-      r.start(to, read, base + 2 * target_ps, 2);
-      if(strict)
-      {
-        CHECK_THROWS_AS(
-            r.f->run_to_stop(
-                {.max_instructions = icount{1'000'000},
-                 .until_time       = vtime{base + target_ps + us}}),
-            popcorn::model_error);
-        continue;
-      }
-      r.run_until(base + target_ps + us);
-      if(held)
-      {
-        r.clear_address();
-      }
-      r.run_until(base + 3 * target_ps + us);
-      if(held)
-      {
-        r.clear_address();
-      }
-      r.run_until(base + 3 * target_ps + 2 * us);
-      CHECK(r.warnings("not modelled") == 1);
-      REQUIRE(r.sink->answers.size() == 2);
-      CHECK(r.sink->answers[0].ack == held);
+      CHECK_THROWS_AS(
+          r.f->run_to_stop(
+              {.max_instructions = icount{1'000'000}, .until_time = vtime{base + target_ps + us}}),
+          popcorn::model_error);
+      continue;
     }
+    r.run_until(base + 3 * target_ps + us);
+    CHECK(r.warnings("not modelled") == 1);
+    REQUIRE(r.sink->answers.size() == 2);
+    CHECK(not r.sink->answers[0].ack);
   }
+}
+
+TEST_CASE(
+    "RM0038 26.3.4 BERR in slave mode: a port STOP inside a data byte of the I2C's transfer or "
+    "inside an address phase with PE 1 sets BERR, the byte is dropped and STOPF sets after an "
+    "acknowledge, inferred for another address's byte and a phase not started")
+{
+  enum class where : std::uint8_t
+  {
+    own_byte,
+    other_byte,
+    address,
+    other_address,
+    disabled_address,
+    read_byte,
+    queued,
+  };
+  for(auto const at :
+      {where::own_byte, where::other_byte, where::address, where::other_address,
+       where::disabled_address, where::read_byte, where::queued})
+  {
+    CAPTURE(static_cast<int>(at));
+    port_rig const r;
+    r.listen(at == where::disabled_address ? 0 : pe | ack_bit);
+    r.write(i2c1 + cr2, freq2 | iterren);
+    auto const base = r.now() + us;
+    if(at == where::disabled_address)
+    {
+      r.start(own, false, base, 1);
+      r.stop(base + target_ps / 2, 2);
+      r.run_until(base + target_ps + us);
+      CHECK(r.read(i2c1 + sr1) == 0);
+      CHECK((r.read(nvic_ispr1) & error_irq) == 0);
+      CHECK(r.read(i2c1 + sr2) == 0);
+      continue;
+    }
+    if(at == where::address or at == where::other_address)
+    {
+      r.start(at == where::address ? own : own + 1, false, base, 1);
+      r.stop(base + target_ps / 2, 2);
+      r.run_until(base + target_ps + us);
+      CHECK(
+          r.sink->drops
+          == std::vector<lost>{
+              {1, on_address, base + target_ps / 2}
+      });
+      CHECK(r.read(i2c1 + sr1) == berr);
+      CHECK((r.read(nvic_ispr1) & error_irq) == error_irq);
+      CHECK(r.read(i2c1 + sr2) == 0);
+      continue;
+    }
+    if(at == where::read_byte)
+    {
+      r.start(own, true, base, 1);
+      r.run_until(base + target_ps + us);
+      r.clear_address();
+      r.cpu_write(i2c1 + dr, 0x5A);
+      auto const t0 = r.now();
+      r.read(true, t0, 2);
+      r.stop(t0 + target_ps / 2, 3);
+      r.run_until(t0 + target_ps + us);
+      CHECK(
+          r.sink->drops
+          == std::vector<lost>{
+              {2, on_read, t0 + target_ps / 2}
+      });
+      CHECK(r.read(i2c1 + sr1) == (berr | stopf));
+      CHECK((r.read(nvic_ispr1) & error_irq) == error_irq);
+      CHECK(r.read(i2c1 + sr2) == 0);
+      continue;
+    }
+    r.start(at == where::other_byte ? own + 1 : own, false, base, 1);
+    r.run_until(base + target_ps + us);
+    if(at != where::other_byte)
+    {
+      r.clear_address();
+    }
+    auto const t0 = r.now();
+    r.write(0x11, at == where::queued ? t0 + target_ps : t0, 2);
+    r.stop(t0 + target_ps / 2, 3);
+    r.run_until(t0 + target_ps + us);
+    CHECK(
+        r.sink->drops
+        == std::vector<lost>{
+            {2, on_write, t0 + target_ps / 2}
+    });
+    if(at == where::own_byte)
+    {
+      CHECK(r.read(i2c1 + sr1) == (berr | stopf));
+      CHECK((r.read(nvic_ispr1) & error_irq) == error_irq);
+      CHECK(r.read(i2c1 + dr) == 0);
+    }
+    else
+    {
+      CHECK(r.read(i2c1 + sr1) == (at == where::queued ? stopf : 0));
+    }
+    CHECK(r.read(i2c1 + sr2) == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0038 26.3.4 OVR, NOSTRETCH receiver: the address answers at its end, a byte ending with "
+    "RxNE 1 is lost and sets OVR, no BTF, ACK as CR1.ACK, inferred")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    port_rig const r{true, strict};
+    r.listen(pe | ack_bit | nostretch);
+    r.write(i2c1 + cr2, freq2 | iterren);
+    auto const base = r.now() + us;
+    r.start(own, false, base, 1);
+    r.write(0x11, base, 2);
+    r.write(0x22, base, 3);
+    r.run_until(base + 3 * target_ps + us);
+    CHECK(
+        r.sink->answers
+        == std::vector<heard>{
+            {1, on_address, true, 0xFF, base + target_ps    },
+            {2, on_write,   true, 0xFF, base + 2 * target_ps},
+            {3, on_write,   true, 0xFF, base + 3 * target_ps},
+    });
+    CHECK(r.read(i2c1 + sr1) == (addr | rxne | ovr));
+    CHECK(r.read(i2c1 + dr) == 0x11);
+    CHECK((r.read(nvic_ispr1) & error_irq) == error_irq);
+    r.clear_address();
+    CHECK(r.cpu_read(i2c1 + dr) == 0x11);
+    r.cpu_write(i2c1 + sr1, ~ovr);
+    auto const t0 = r.now();
+    r.write(0x33, t0, 4);
+    r.run_until(t0 + target_ps + us);
+    CHECK(r.read(i2c1 + sr1) == rxne);
+    CHECK(r.read(i2c1 + dr) == 0x33);
+    CHECK(r.warnings("not modelled") == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0038 26.3.4 OVR, NOSTRETCH transmitter: a read byte with no byte loaded sends DR again and "
+    "sets OVR, TxE waits for the ADDR clear, no BTF, inferred")
+{
+  port_rig const r;
+  r.listen(pe | ack_bit | nostretch);
+  r.write(i2c1 + cr2, freq2 | iterren);
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.read(true, base, 2);
+  r.run_until(base + 2 * target_ps + us);
+  CHECK(
+      r.sink->answers
+      == std::vector<heard>{
+          {1, on_address, true, 0xFF, base + target_ps    },
+          {2, on_read,    true, 0x00, base + 2 * target_ps},
+  });
+  CHECK(r.read(i2c1 + sr1) == (addr | ovr));
+  CHECK(r.read(i2c1 + sr2) == (busy | tra));
+  r.clear_address();
+  CHECK(r.read(i2c1 + sr1) == (txe | ovr));
+  r.cpu_write(i2c1 + sr1, 0);
+  r.cpu_write(i2c1 + dr, 0xB0);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  auto const t0 = r.now();
+  r.read(true, t0, 3);
+  r.read(true, t0, 4);
+  r.read(false, t0, 5);
+  r.run_until(t0 + target_ps - us);
+  CHECK(r.read(i2c1 + sr1) == txe);
+  r.run_until(t0 + target_ps + us);
+  CHECK(r.read(i2c1 + sr1) == (txe | ovr));
+  r.run_until(t0 + 3 * target_ps + us);
+  CHECK(
+      std::vector<heard>(r.sink->answers.begin() + 2, r.sink->answers.end())
+      == std::vector<heard>{
+          {3, on_read, true,  0xB0, t0 + target_ps    },
+          {4, on_read, true,  0xB0, t0 + 2 * target_ps},
+          {5, on_read, false, 0xB0, t0 + 3 * target_ps},
+  });
+  CHECK(r.read(i2c1 + sr1) == (af | ovr | txe));
+}
+
+TEST_CASE(
+    "NOSTRETCH transmitter: two DR writes before the ADDR clear fill DR, "
+    "the clear keeps TxE 0, inferred")
+{
+  port_rig const r;
+  r.listen(pe | ack_bit | nostretch);
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.run_until(base + target_ps + us);
+  r.cpu_write(i2c1 + dr, 0xB0);
+  r.cpu_write(i2c1 + dr, 0xB1);
+  CHECK(r.read(i2c1 + sr1) == addr);
+  r.clear_address();
+  CHECK(r.read(i2c1 + sr1) == 0);
+  auto const t0 = r.now();
+  r.read(true, t0, 2);
+  r.read(false, t0, 3);
+  r.run_until(t0 + 2 * target_ps + us);
+  CHECK(
+      std::vector<heard>(r.sink->answers.begin() + 1, r.sink->answers.end())
+      == std::vector<heard>{
+          {2, on_read, true,  0xB0, t0 + target_ps    },
+          {3, on_read, false, 0xB1, t0 + 2 * target_ps},
+  });
+  CHECK(r.read(i2c1 + sr1) == (af | txe));
+}
+
+TEST_CASE(
+    "NOSTRETCH transmitter: a read byte NACKed before the ADDR clear sets AF and ends the "
+    "transmission, the clear sets no TxE, inferred")
+{
+  port_rig const r;
+  r.listen(pe | ack_bit | nostretch);
+  auto const base = r.now() + us;
+  r.start(own, true, base, 1);
+  r.read(false, base, 2);
+  r.run_until(base + 2 * target_ps + us);
+  CHECK(r.read(i2c1 + sr1) == (addr | af | ovr));
+  r.clear_address();
+  CHECK(r.read(i2c1 + sr1) == (af | ovr));
+  r.cpu_write(i2c1 + dr, 0xB0);
+  r.read(true, r.now(), 3);
+  r.run_until(r.now() + target_ps + us);
+  REQUIRE(r.sink->answers.size() == 3);
+  CHECK(r.sink->answers[2].byte == 0xFF);
 }
 
 TEST_CASE(

@@ -93,6 +93,23 @@ struct i2c_v1_state
   friend auto operator==(i2c_v1_state const&, i2c_v1_state const&) -> bool = default;
 };
 
+struct answers
+{
+  bool          ack{};
+  std::uint8_t  byte{0xFF};
+  i2c_error     error{};
+  std::uint64_t stretch_ps{};
+
+  void note(i2c_error first, std::uint64_t stretch)
+  {
+    if(error == i2c_error::none)
+    {
+      error = first;
+    }
+    stretch_ps = std::max(stretch_ps, stretch);
+  }
+};
+
 auto lower(std::string_view name) -> std::string
 {
   std::string out{name};
@@ -128,29 +145,27 @@ auto kernel_name(peripheral_desc const& desc, i2c_v1_variant const& variant) -> 
  *        filter value on top allowed, and logs one model_warning per rule and instance. The SCL
  *        period follows CCR and PCLK1 whatever FREQ and TRISE hold.
  *
- *        Controller transmitter, RM0038 26.3.3 and Figure 212: CR1.START with PE 1 sends a
- *        START, BUSY 1 from its start. At its end SB, MSL and BUSY are 1 and START is cleared.
- *        A DR write after an SR1 read clears SB and sends DR as the address byte, EV5. At the end
- *        of the address byte every target is asked i2c_target::matches(), in attachment order,
- *        and those it matches answer through i2c_target::start_deferred(): one acknowledge sets
- *        ADDR, TRA follows the R/W bit, and with none AF is set. The I2C keeps SCL low until an
- *        SR2 read after an SR1 read clears ADDR, EV6, as RM0038 26.6.7 says, an SR1 read before
- *        ADDR is set included. TxE then sets. The first DR write goes to the shift register with
- *        TxE kept 1, EV8_1, and each byte reaches the targets that acknowledged the address
- *        through i2c_target::write_deferred() at its end. A DR write while a byte shifts fills
- *        DR and clears TxE, EV8, and at the acknowledge DR moves to the shift register with TxE
- *        1. A byte acknowledged with DR empty sets BTF and SCL stays low until a DR write, which
- *        clears BTF and starts the byte with TxE kept 1. A DR read clears BTF too. A NACK sets
- *        AF, neither TxE nor BTF. CR1.STOP sends a STOP at once while SB is set or SCL is held
- *        after a byte or a NACK, after the current byte while one shifts, and after the ADDR
- *        clear while ADDR is set. CR1.START with MSL 1 sends a repeated START by the same rule.
- *        The STOP's end clears STOP, BUSY, MSL, TRA, TxE and BTF and reaches every target an
- *        address of the transfer matched through i2c_target::stop(). A repeated START clears TRA,
- *        TxE and BTF. A target's stretch_ps holds SCL after its byte: the next phase starts at
- *        the byte's end plus the longest stretch. Targets share the open-drain bus: one
- *        acknowledge acknowledges. The answer of a target that carries an i2c_error logs one
- *        model_warning per instance and the byte completes as its acknowledge says. An SR1 read
- *        arms both clear sequences until the SR2 read that clears ADDR or the DR write that
+ *        Controller transmitter, RM0038 26.3.3 and Figure 212: CR1.START with PE 1 sends a START,
+ *        BUSY 1 from its start. At its end SB, MSL and BUSY are 1 and START is cleared. A DR write
+ *        after an SR1 read clears SB and sends DR as the address byte, EV5. At the end of the
+ *        address byte every target is asked i2c_target::matches(), in attachment order, and those
+ *        it matches answer through i2c_target::start_deferred(): one acknowledge sets ADDR, TRA
+ *        follows the R/W bit, and with none AF is set. The I2C keeps SCL low until an SR2 read
+ *        after an SR1 read clears ADDR, EV6, as RM0038 26.6.7 says, an SR1 read before ADDR is set
+ *        included. TxE then sets. The first DR write goes to the shift register with TxE kept 1,
+ *        EV8_1, and each byte reaches the targets that acknowledged the address through
+ *        i2c_target::write_deferred() at its end. A DR write while a byte shifts fills DR and
+ *        clears TxE, EV8, and at the acknowledge DR moves to the shift register with TxE 1. A byte
+ *        acknowledged with DR empty sets BTF and SCL stays low until a DR write, which clears BTF
+ *        and starts the byte with TxE kept 1. A DR read clears BTF too. A NACK sets AF, neither TxE
+ *        nor BTF. CR1.STOP sends a STOP at once while SB is set or SCL is held after a byte or a
+ *        NACK, after the current byte while one shifts, and after the ADDR clear while ADDR is set.
+ *        CR1.START with MSL 1 sends a repeated START by the same rule. The STOP's end clears STOP,
+ *        BUSY, MSL, TRA, TxE and BTF and reaches every target an address of the transfer matched
+ *        through i2c_target::stop(). A repeated START clears TRA, TxE and BTF. A target's
+ *        stretch_ps holds SCL after its byte: the next phase starts at the byte's end plus the
+ *        longest stretch. Targets share the open-drain bus: one acknowledge acknowledges. An SR1
+ *        read arms both clear sequences until the SR2 read that clears ADDR or the DR write that
  *        clears SB, an SR2 read with ADDR clear leaving it armed. Inferred: a DR write with SB set
  *        and no SR1 read since the last SB or ADDR clear, or with ADDR set, stores DR and sends
  *        nothing. The DR write that clears SB takes the SR1 read, so the ADDR clear needs an SR1
@@ -190,6 +205,31 @@ auto kernel_name(peripheral_desc const& desc, i2c_v1_variant const& variant) -> 
  *        RM0038 26.3.7 and 26.3.8 name EOT_1 for DMA mode only, and LAST has no effect in target
  *        mode, its CR2 note naming the master receiver only. The DMA end of transfer, EOT, changes
  *        nothing: the firmware sets STOP.
+ *
+ *        Errors, RM0038 26.3.4: a target's reply carries an i2c_error for its byte, and with
+ *        several targets the byte takes the error of the first in attachment order whose reply
+ *        carries one. bus_error sets BERR and overrun sets OVR at the end of the byte, which
+ *        completes as its acknowledge and stretch say, RM0038 26.3.4 BERR "In Master mode: the
+ *        lines are not released and the state of the current transmission is not affected". OVR
+ *        exists on silicon in slave mode with NOSTRETCH only, the injection exercises firmware
+ *        handlers. arbitration_lost sets ARLO and clears MSL, RM0038 26.6.7 MSL "Cleared by
+ *        hardware after detecting ... a loss of arbitration", and TRA, RM0038 26.6.7 TRA, and the
+ *        reply's acknowledge and stretch are ignored, as i2c_reply says: no ADDR, AF or RxNE
+ *        follows, a read byte is dropped with DR unchanged, and DR bytes the firmware wrote are
+ *        not sent, RM0038 26.3.4 ARLO "the I2C Interface goes automatically back to slave
+ *        mode" and "lines are released by hardware". Inferred: TxE clears, and BTF follows a
+ *        byte still held, as at a START end. Inferred: BUSY stays 1 for one SCL period, then the
+ *        winner's STOP reaches every target an address of the transfer matched through
+ *        i2c_target::stop(), clears BUSY and CR1.STOP, RM0038 26.6.1 STOP "cleared by hardware
+ *        when a Stop condition is detected", and sends a START CR1.START holds, RM0038 26.6.1
+ *        START "Start generation when the bus is free". PE 0 in that window clears ARLO and the
+ *        bits PE 0 clears and leaves BUSY 1 to the winner's STOP, RM0038 26.6.7 BUSY "still
+ *        updated when the interface is disabled". In target mode a port STOP that ends a running
+ *        data phase of the I2C's acknowledged address, or a running address phase while the I2C is
+ *        enabled, whatever the address, sets BERR, RM0038 26.3.4 BERR "an external Stop or Start
+ *        condition during an address or a data transfer" and "in case of a misplaced Stop, the
+ *        slave behaves like for a Stop condition", and the byte is dropped. Inferred: a STOP inside
+ *        a byte of another address's transfer, or before a queued phase starts, sets no BERR.
  *
  *        SMBus, PEC, ALERT and ARP log one model_warning per instance when the firmware uses them,
  *        raise model_error under strict_peripherals at the START that uses them, and the bus stays
@@ -263,19 +303,30 @@ auto kernel_name(peripheral_desc const& desc, i2c_v1_variant const& variant) -> 
  *        26.6.6 TxE. An SR1 read then a CR1 write clears STOPF, EV4, an SR1 read before STOPF sets
  *        arming the clear as RM0038 26.6.7 says for ADDR, inferred. A START the firmware sets while
  *        the bus is busy goes at the STOP, RM0038 26.6.1 START. A repeated START clears TRA. PE 0
- *        written between a match of the I2C's address and the port's STOP disables it at that
- *        STOP, RM0038 26.6.1 PE "disabled at the end of the current communication" and "All bit
- *        resets due to PE=0 occur at the end of the communication": until then the I2C answers,
- *        stretches and takes DR accesses as with PE 1, and the STOP clears the bits PE 0 clears.
- *        PE 0 with no address of the I2C matched since the last STOP disables it at once.
- *        Inferred: the communication runs from the match to the port's STOP, repeated STARTs and
- *        their address phases included, a repeated START inside it matches the I2C's addresses,
- *        PE 0 with no address matched is outside it, the STOP that ends it sets no STOPF, and a
- *        PE 1 write before that STOP keeps the I2C enabled. An RCC reset starts a read byte held
- *        for DR, dropped at its end, and a machine reset drops it one phase after the reset in
- *        the new base. NOSTRETCH at an address match and a 10-bit header 0b11110xx with ADDMODE 1
- *        each log one model_warning per instance and raise model_error under strict_peripherals
- *        at that address phase, and the header answers NACK.
+ *        written between a match of the I2C's address and the port's STOP disables it at that STOP,
+ *        RM0038 26.6.1 PE "disabled at the end of the current communication" and "All bit resets
+ *        due to PE=0 occur at the end of the communication": until then the I2C answers, stretches
+ *        and takes DR accesses as with PE 1, and the STOP clears the bits PE 0 clears. PE 0 with no
+ *        address of the I2C matched since the last STOP disables it at once. Inferred: the
+ *        communication runs from the match to the port's STOP, repeated STARTs and their address
+ *        phases included, a repeated START inside it matches the I2C's addresses, PE 0 with no
+ *        address matched is outside it, the STOP that ends it sets no STOPF, and a PE 1 write
+ *        before that STOP keeps the I2C enabled. An RCC reset starts a read byte held for DR,
+ *        dropped at its end, and a machine reset drops it one phase after the reset in the new
+ *        base. A 10-bit header 0b11110xx with ADDMODE 1 logs one model_warning per instance, raises
+ *        model_error under strict_peripherals at that address phase, and answers NACK.
+ *
+ *        Target without clock stretching, CR1.NOSTRETCH 1, read at each decision, RM0038 26.3.4
+ *        and 26.3.5: an address match answers at the address end with ADDR set and holds no SCL,
+ *        and a read address starts the transmission at once. A written byte that ends with RxNE 1
+ *        is lost and sets OVR, DR keeps its byte and BTF stays 0, RM0038 26.6.6 OVR "New received
+ *        byte is lost" and BTF "Set by hardware when NOSTRETCH=0". A read byte that starts with the
+ *        shift register empty sends the DR byte again and sets OVR, RM0038 26.6.6 OVR "The same
+ *        byte is sent twice", and BTF stays 0. Inferred: the lost byte is acknowledged as CR1.ACK
+ *        says, a read byte before the ADDR clear sends DR as it is, the acknowledge of a read byte
+ *        sets TxE only with ADDR clear, the ADDR clear sets TxE when DR is empty, and the ADDR
+ *        clear after a read byte the controller NACKed sets no TxE. That NACK ends the
+ *        transmission, RM0038 26.3.4 AF "If Slave: lines are released by hardware".
  *
  *        Targets, the STM32L1 I2C on the generic interfaces: each target is attached to the model
  *        at its construction and detached at its destruction, and reset with the machine. A target
@@ -379,10 +430,12 @@ private:
   void               received_taken();
   void               shift_out(std::uint8_t byte);
   [[nodiscard]] auto receiving() const -> bool;
+  [[nodiscard]] auto stretchless() const -> bool;
   [[nodiscard]] auto pending_condition() -> bool;
-  void               answered(i2c_error error, std::uint64_t stretch_ps);
-  void               take(std::size_t index, std::optional<i2c_reply> const& reply, bool& ack);
-  void take_read(std::size_t index, std::optional<i2c_read_reply> const& reply, std::uint8_t& byte);
+  [[nodiscard]] auto answered(answers const& all) -> bool;
+  auto take(std::size_t index, std::optional<i2c_reply> const& reply, answers& all) -> bool;
+  void take_read(std::size_t index, std::optional<i2c_read_reply> const& reply, answers& all);
+  void lose();
   void abort();
   void port_check(std::uint32_t lane, std::uint64_t unit) const;
   void queue_port(i2c_port_entry entry);
@@ -446,6 +499,9 @@ private:
   field_ref                                tx_empty_;
   field_ref                                rx_full_;
   field_ref                                ack_failure_;
+  field_ref                                bus_error_;
+  field_ref                                arbitration_lost_;
+  field_ref                                overrun_;
   field_ref                                master_;
   field_ref                                busy_;
   field_ref                                transmitter_;
@@ -471,11 +527,9 @@ private:
   std::optional<std::uint64_t>             reset_at_;
   std::uint8_t                             timing_logged_{};
   bool                                     timing_checked_{};
-  bool                                     error_logged_{};
   bool                                     control_logged_{};
   bool                                     disable_logged_{};
   bool                                     ending_{};
-  bool                                     stretch_logged_{};
   bool                                     header_logged_{};
 };
 
@@ -510,13 +564,14 @@ i2c_v1::i2c_v1(
       divider_{field("CCR", "CCR")}, rise_{field("TRISE", "TRISE")}, start_bit_{field("SR1", "SB")},
       address_sent_{field("SR1", "ADDR")}, byte_finished_{field("SR1", "BTF")},
       tx_empty_{field("SR1", "TxE")}, rx_full_{field("SR1", "RxNE")},
-      ack_failure_{field("SR1", "AF")}, master_{field("SR2", "MSL")}, busy_{field("SR2", "BUSY")},
-      transmitter_{field("SR2", "TRA")}, stop_detected_{field("SR1", "STOPF")},
-      own_mode_{field("OAR1", "ADDMODE")}, own_address_{field("OAR1", "ADD_1_7")},
-      no_stretch_{field("CR1", "NOSTRETCH")}, general_call_{field("CR1", "ENGC")},
-      dual_{field("OAR2", "ENDUAL")}, own2_{field("OAR2", "ADD2")},
-      dual_flag_{field("SR2", "DUALF")}, general_flag_{field("SR2", "GENCALL")},
-      tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
+      ack_failure_{field("SR1", "AF")}, bus_error_{field("SR1", "BERR")},
+      arbitration_lost_{field("SR1", "ARLO")}, overrun_{field("SR1", "OVR")},
+      master_{field("SR2", "MSL")}, busy_{field("SR2", "BUSY")}, transmitter_{field("SR2", "TRA")},
+      stop_detected_{field("SR1", "STOPF")}, own_mode_{field("OAR1", "ADDMODE")},
+      own_address_{field("OAR1", "ADD_1_7")}, no_stretch_{field("CR1", "NOSTRETCH")},
+      general_call_{field("CR1", "ENGC")}, dual_{field("OAR2", "ENDUAL")},
+      own2_{field("OAR2", "ADD2")}, dual_flag_{field("SR2", "DUALF")},
+      general_flag_{field("SR2", "GENCALL")}, tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
       rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"},
       kernel_{ctx.clock.domain(kernel_name(desc, variant))},
       event_line_{irq(desc.name + "_EV_IRQn")}, error_line_{irq(desc.name + "_ER_IRQn")}
@@ -794,26 +849,30 @@ void i2c_v1::status_written(std::uint32_t old, std::uint32_t now)
 
 void i2c_v1::abort()
 {
+  auto const lost   = step() == wire::stop and not controlling();
   state_.tx_active  = 0;
   state_.addressed  = 0;
   state_.last_ack   = 0;
   state_.tx_loaded  = 0;
   state_.tx_sending = 0;
-  ++state_.generation;
-  state_.phase       = static_cast<std::uint8_t>(wire::idle);
+  if(not lost)
+  {
+    ++state_.generation;
+    state_.phase = static_cast<std::uint8_t>(wire::idle);
+    std::ranges::fill(state_.in_transfer, 0);
+  }
   state_.status_read = 0;
   state_.tx_full     = 0;
   state_.rx_held     = 0;
   state_.released_ps = 0;
   std::ranges::fill(state_.acked, 0);
-  std::ranges::fill(state_.in_transfer, 0);
   regs_.poke(control_.offset, regs_.peek(control_.offset) & ~cleared_by_disable_);
   regs_.poke(status1_.offset, 0);
   for(auto const& bit : {master_, transmitter_, dual_flag_, general_flag_})
   {
     update(regs_, bit, 0);
   }
-  update(regs_, busy_, state_.wire_busy);
+  update(regs_, busy_, lost ? 1 : state_.wire_busy);
 }
 
 void i2c_v1::shift_out(std::uint8_t byte)
@@ -876,6 +935,11 @@ void i2c_v1::data_written()
   }
 }
 
+auto i2c_v1::stretchless() const -> bool
+{
+  return get(regs_, no_stretch_) != 0;
+}
+
 auto i2c_v1::receiving() const -> bool
 {
   return controlling()
@@ -905,10 +969,10 @@ void i2c_v1::address_cleared()
   update(regs_, address_sent_, 0);
   if(not controlling())
   {
-    if(get(regs_, transmitter_) != 0 and state_.addressed != 0)
+    if(get(regs_, transmitter_) != 0 and state_.addressed != 0 and state_.last_ack != 0)
     {
       state_.tx_active = 1;
-      update(regs_, tx_empty_, 1);
+      update(regs_, tx_empty_, state_.tx_full == 0 ? 1 : 0);
     }
     release_held();
     return;
@@ -923,42 +987,59 @@ void i2c_v1::address_cleared()
   }
 }
 
-void i2c_v1::answered(i2c_error error, std::uint64_t stretch_ps)
+auto i2c_v1::answered(answers const& all) -> bool
 {
-  if(error != i2c_error::none and not std::exchange(error_logged_, true))
+  switch(all.error)
   {
-    warn(
-        "SR1", std::format(
-                   "the {} a target injects: not modelled, the byte completes as its acknowledge "
-                   "says",
-                   error));
+    case i2c_error::none:
+      break;
+    case i2c_error::bus_error:
+      update(regs_, bus_error_, 1);
+      break;
+    case i2c_error::overrun:
+      update(regs_, overrun_, 1);
+      break;
+    case i2c_error::arbitration_lost:
+      lose();
+      return true;
   }
-  state_.released_ps = std::max(state_.released_ps, state_.phase_end_ps + stretch_ps);
+  state_.released_ps = std::max(state_.released_ps, state_.phase_end_ps + all.stretch_ps);
+  return false;
 }
 
-void i2c_v1::take(std::size_t index, std::optional<i2c_reply> const& reply, bool& ack)
+void i2c_v1::lose()
+{
+  update(regs_, arbitration_lost_, 1);
+  update(regs_, master_, 0);
+  update(regs_, transmitter_, 0);
+  update(regs_, tx_empty_, 0);
+  update(regs_, byte_finished_, state_.rx_held);
+  state_.tx_full = 0;
+  std::ranges::fill(state_.acked, 0);
+  begin(wire::stop, 1);
+}
+
+auto i2c_v1::take(std::size_t index, std::optional<i2c_reply> const& reply, answers& all) -> bool
+{
+  if(not reply)
+  {
+    deferred_.push_back(std::format("the target at {:#04x}", targets_[index]->address()));
+    return false;
+  }
+  all.note(reply->error, reply->stretch_ps);
+  all.ack = all.ack or reply->ack;
+  return reply->ack;
+}
+
+void i2c_v1::take_read(std::size_t index, std::optional<i2c_read_reply> const& reply, answers& all)
 {
   if(not reply)
   {
     deferred_.push_back(std::format("the target at {:#04x}", targets_[index]->address()));
     return;
   }
-  answered(reply->error, reply->stretch_ps);
-  ack = ack or reply->ack;
-}
-
-void i2c_v1::take_read(
-    std::size_t                          index,
-    std::optional<i2c_read_reply> const& reply,
-    std::uint8_t&                        byte)
-{
-  if(not reply)
-  {
-    deferred_.push_back(std::format("the target at {:#04x}", targets_[index]->address()));
-    return;
-  }
-  answered(reply->error, reply->stretch_ps);
-  byte &= reply->byte;
+  all.note(reply->error, reply->stretch_ps);
+  all.byte &= reply->byte;
 }
 
 void i2c_v1::start_ended()
@@ -984,7 +1065,7 @@ void i2c_v1::address_ended()
   auto const address = static_cast<std::uint8_t>(state_.address >> 1);
   auto const read    = (state_.address & 1u) != 0;
   auto const header  = (state_.address & 0xF8u) == 0xF0u;
-  auto       ack     = false;
+  auto       all     = answers{};
   state_.ack_next    = static_cast<std::uint8_t>(get(regs_, ack_));
   for(std::size_t index = 0; index < targets_.size() and not header; ++index)
   {
@@ -993,13 +1074,14 @@ void i2c_v1::address_ended()
       continue;
     }
     state_.in_transfer[index] = 1;
-    auto       acked          = false;
-    auto const reply = targets_[index]->start_deferred(address, read, at, ticket_of(index));
-    take(index, reply, acked);
-    state_.acked[index] = acked ? 1 : 0;
-    ack                 = ack or acked;
+    auto const reply    = targets_[index]->start_deferred(address, read, at, ticket_of(index));
+    state_.acked[index] = take(index, reply, all) ? 1 : 0;
   }
-  if(ack)
+  if(answered(all))
+  {
+    return;
+  }
+  if(all.ack)
   {
     update(regs_, address_sent_, 1);
     update(regs_, transmitter_, read ? 0 : 1);
@@ -1012,15 +1094,19 @@ void i2c_v1::address_ended()
 void i2c_v1::data_ended()
 {
   auto const at  = vtime{state_.phase_end_ps + power_on_offset()};
-  auto       ack = false;
+  auto       all = answers{};
   for(std::size_t index = 0; index < targets_.size(); ++index)
   {
     if(state_.acked[index] != 0)
     {
-      take(index, targets_[index]->write_deferred(state_.shift, at, ticket_of(index)), ack);
+      take(index, targets_[index]->write_deferred(state_.shift, at, ticket_of(index)), all);
     }
   }
-  if(not ack)
+  if(answered(all))
+  {
+    return;
+  }
+  if(not all.ack)
   {
     update(regs_, ack_failure_, 1);
     static_cast<void>(pending_condition());
@@ -1078,16 +1164,21 @@ void i2c_v1::receive_ended()
 
 void i2c_v1::acknowledge_ended()
 {
-  auto const at   = vtime{state_.phase_end_ps + power_on_offset()};
-  auto const ack  = state_.ack_pulse != 0;
-  auto       byte = std::uint8_t{0xFF};
+  auto const at  = vtime{state_.phase_end_ps + power_on_offset()};
+  auto const ack = state_.ack_pulse != 0;
+  auto       all = answers{};
   for(std::size_t index = 0; index < targets_.size(); ++index)
   {
     if(state_.acked[index] != 0)
     {
-      take_read(index, targets_[index]->read_deferred(at, ack, ticket_of(index)), byte);
+      take_read(index, targets_[index]->read_deferred(at, ack, ticket_of(index)), all);
     }
   }
+  if(answered(all))
+  {
+    return;
+  }
+  auto const byte = all.byte;
   if(not ack)
   {
     std::ranges::fill(state_.acked, 0);
@@ -1522,10 +1613,6 @@ auto i2c_v1::address_answer(i2c_port_entry& entry) -> std::optional<i2c_answer>
     return i2c_answer{.ack = false};
   }
   check_unmodelled();
-  if(get(regs_, no_stretch_) != 0)
-  {
-    unmodelled(stretch_logged_, "CR1", "NOSTRETCH in target mode");
-  }
   if(get(regs_, ack_) == 0)
   {
     return i2c_answer{.ack = false};
@@ -1538,6 +1625,11 @@ auto i2c_v1::address_answer(i2c_port_entry& entry) -> std::optional<i2c_answer>
   state_.matched   = 1;
   state_.last_ack  = 1;
   entry.ack        = 1;
+  if(stretchless())
+  {
+    state_.tx_active = read ? 1 : 0;
+    return i2c_answer{.ack = true};
+  }
   return std::nullopt;
 }
 
@@ -1553,6 +1645,11 @@ auto i2c_v1::write_answer(i2c_port_entry& entry) -> std::optional<i2c_answer>
   {
     regs_.poke(data_.offset, entry.data);
     update(regs_, rx_full_, 1);
+    return i2c_answer{.ack = ack};
+  }
+  if(stretchless())
+  {
+    update(regs_, overrun_, 1);
     return i2c_answer{.ack = ack};
   }
   state_.shift   = entry.data;
@@ -1599,7 +1696,14 @@ auto i2c_v1::read_begun(i2c_port_entry& entry) -> bool
   }
   if(state_.tx_loaded == 0)
   {
-    return false;
+    if(not stretchless())
+    {
+      return false;
+    }
+    entry.data        = static_cast<std::uint8_t>(regs_.peek(data_.offset));
+    state_.tx_sending = 1;
+    update(regs_, overrun_, 1);
+    return true;
   }
   entry.data        = state_.tx_shift;
   state_.tx_loaded  = 0;
@@ -1643,11 +1747,14 @@ auto i2c_v1::read_answer(i2c_port_entry const& entry) -> i2c_answer
     state_.tx_loaded = 1;
     state_.tx_full   = 0;
   }
-  else
+  else if(not stretchless())
   {
     update(regs_, byte_finished_, 1);
   }
-  update(regs_, tx_empty_, 1);
+  if(get(regs_, address_sent_) == 0)
+  {
+    update(regs_, tx_empty_, 1);
+  }
   return {.ack = ack, .byte = entry.data};
 }
 
@@ -1690,14 +1797,23 @@ void i2c_v1::port_stopped(i2c_port_entry const& entry)
     return (queued.kind == entry_phase or queued.kind == entry_ending) and queued.unit < entry.unit;
   };
   std::vector<std::pair<std::uint64_t, i2c_phase>> reports;
+  auto                                             misplaced = false;
   for(auto const& queued : state_.port.entries)
   {
     if(cut(queued))
     {
-      reports.emplace_back(queued.unit, static_cast<i2c_phase>(queued.phase));
+      auto const phase = static_cast<i2c_phase>(queued.phase);
+      misplaced        = misplaced
+                      or (queued.kind == entry_ending
+                          and (state_.addressed != 0 or (phase == i2c_phase::address and enabled())));
+      reports.emplace_back(queued.unit, phase);
     }
   }
   std::erase_if(state_.port.entries, cut);
+  if(misplaced)
+  {
+    update(regs_, bus_error_, 1);
+  }
   target_ended();
   std::ranges::sort(reports);
   flags();
