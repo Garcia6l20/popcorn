@@ -8,6 +8,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <initializer_list>
 #include <string_view>
@@ -424,4 +425,50 @@ TEST_CASE("CRCRST held ignores a DR write, DR reads the reset value after releas
   r.write(dr, 0x1234'5678);
   rcc_reset_write(r.f, "RCC_AHB1RSTR", "CRCRST", 0);
   CHECK(r.read(dr) == 0xFFFF'FFFF);
+}
+
+TEST_CASE("RM0456 24.4: a narrow DR read is served with no log, strict included")
+{
+  crc_rig const r;
+  r.write(dr, 0x1234'5678);
+  CHECK(r.f.target->mem().read(crc_base + dr + 2, 2) == one_word >> 16);
+  CHECK(r.f.target->mem().read(crc_base + dr + 1, 1) == ((one_word >> 8) & 0xFFu));
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("checklist 39: the U5 CRC row needs INIT, POL, POLYSIZE, REV_IN and REV_OUT")
+{
+  auto const without = [](std::string_view reg, std::string_view field) {
+    auto desc = u575();
+    auto unit = std::ranges::find(
+        desc.peripherals, std::string_view{"CRC"}, &popcorn::peripheral_desc::name);
+    REQUIRE(unit != desc.peripherals.end());
+    if(field.empty())
+    {
+      std::erase_if(
+          unit->registers, [&](popcorn::register_desc const& one) { return one.name == reg; });
+      return desc;
+    }
+    for(auto& one : unit->registers)
+    {
+      if(one.name == reg)
+      {
+        std::erase_if(
+            one.fields, [&](popcorn::field_desc const& bits) { return bits.name == field; });
+      }
+    }
+    return desc;
+  };
+  for(auto const& [reg, field] : {
+          std::pair{std::string_view{"INIT"}, std::string_view{}          },
+          std::pair{std::string_view{"POL"},  std::string_view{}          },
+          std::pair{std::string_view{"CR"},   std::string_view{"POLYSIZE"}},
+          std::pair{std::string_view{"CR"},   std::string_view{"REV_IN"}  },
+          std::pair{std::string_view{"CR"},   std::string_view{"REV_OUT"} }
+  })
+  {
+    CAPTURE(reg);
+    CAPTURE(field);
+    CHECK_THROWS_AS(stm32_fixture(without(reg, field), "rcc_ll"), popcorn::config_error);
+  }
 }

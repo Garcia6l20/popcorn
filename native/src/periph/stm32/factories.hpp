@@ -245,8 +245,11 @@ namespace popcorn::periph::stm32
 /** @brief Factory of the DBGMCU model, RM0456 section 75.12 and RM0038 section 30.16. */
 [[nodiscard]] auto dbgmcu_factory() -> model_factory;
 
-/** @brief Factory of the CRC model, RM0456 section 24. */
-[[nodiscard]] auto crc_factory() -> model_factory;
+/**
+ * @brief Factory of the CRC model, RM0456 section 24, RM0038 section 4.
+ * @param variant What differs between the CRC of the family the row serves.
+ */
+[[nodiscard]] auto crc_factory(crc_variant variant) -> model_factory;
 
 /** @brief Factory of the CRS model, RM0456 and RM0481 section 12. */
 [[nodiscard]] auto crs_factory() -> model_factory;

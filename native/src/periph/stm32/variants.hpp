@@ -568,6 +568,34 @@ inline constexpr iwdg_variant l1_iwdg{
     .prescaler_top = 6,
     .update_cycles = 5};
 
+/** @brief Differences between the CRC peripherals the model rows serve. */
+struct crc_variant
+{
+  /** @brief The unit has CRC_INIT, CRC_POL and the CR fields POLYSIZE, REV_IN and REV_OUT.
+   *         Without them the unit computes CRC-32 over the polynomial 0x04C11DB7 from
+   *         0xFFFFFFFF, with no reversal. */
+  bool programmable = true;
+  /** @brief A CRC_DR write narrower than 32 bits feeds the word its byte lanes repeat, such as
+   *         0xB0B0B0B0 for the byte 0xB0, logs once and raises model_error under strict
+   *         peripherals. Otherwise a right-aligned narrow write feeds its own width. */
+  bool word_input = false;
+  /** @brief A byte or half-word access to CRC_IDR is served as is, the CMSIS device header
+   *         declaring it a byte. Otherwise a narrow access to it is a forbidden access. */
+  bool byte_idr = false;
+  /** @brief Manual section that states the access rules, named in the log records. */
+  std::string_view access_rule = "RM0456 24.4";
+};
+
+/** @brief STM32U5 and STM32H5 CRC, RM0456 section 24. */
+inline constexpr crc_variant u5_crc{};
+/** @brief STM32L1 CRC, RM0038 section 4: DR, IDR and CR.RESET only, word accesses, the CMSIS
+ *         `CRC_TypeDef` declaring IDR an `uint8_t`. */
+inline constexpr crc_variant l1_crc{
+    .programmable = false,
+    .word_input   = true,
+    .byte_idr     = true,
+    .access_rule  = "RM0038 4.4"};
+
 /** @brief Differences between the RTC and TAMP peripherals the model rows serve. */
 struct rtc_variant
 {

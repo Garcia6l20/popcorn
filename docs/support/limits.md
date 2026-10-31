@@ -127,11 +127,20 @@ On the STM32H5, RM0481 section 28:
 
 Source: [crc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/crc.cpp)
 
-- A `CRC_DR` write that is not right-aligned is ignored and logged, RM0456 24.4.
+- On the STM32U5 and STM32H5 a `CRC_DR` write that is not right-aligned is ignored and logged,
+  RM0456 24.4.
 - An even polynomial, which RM0456 24.3.3 does not support, is computed anyway and logged.
-- A write narrower than 32 bits to any register but `CRC_DR` is ignored and logged. Such a read
-  is logged.
+- A write narrower than 32 bits to any register but `CRC_DR`, and on the STM32L1 `CRC_IDR`, is
+  ignored and logged. Such a read is logged.
 - The RCC clock gate is not modelled. The CRC works with its RCC enable bit clear.
+- The STM32L1 CRC, RM0038 4, computes CRC-32 over the fixed polynomial 0x04C11DB7 from
+  0xFFFFFFFF, with no INIT, POL or reversal. A byte or half-word CRC_DR write feeds the word its
+  byte lanes repeat, 0xB0B0B0B0 for the byte 0xB0, and logs once. For a DMA write RM0038 11.3.4
+  states the repeated lanes. For a CPU store the repeated lanes, and the unit ignoring the access
+  size, are inferred. A DR write completes with no stall, where RM0038 4.3 stalls it for the 4
+  HCLK of the computation. A narrow read of CRC_DR or CRC_CR and a narrow write to CRC_CR log once, as RM0038 4.4
+  asks for words. CRC_IDR takes byte and half-word accesses with no log, as ST's CMSIS header
+  declares it a byte. Under `strict` each logged access raises `ModelError`.
 
 ## CRS
 

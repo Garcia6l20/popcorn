@@ -118,6 +118,13 @@ reset = 0x000000C0
 source = "RM0038 Rev 18, Table 158 USART register map: SR reset TXE 1 and TC 1, 0x000000C0. The 27.6.1 header and the four SVDs give 0x00C00000"
 
 [[fields]]
+instances = ["CRC"]
+registers = ["IDR"]
+fields = ["Independent_data_register"]
+width = 8
+source = "RM0038 Rev 18, 4.4.2 CRC_IDR: IDR[7:0], a general-purpose 8-bit register, and CRC_IDR_IDR_Msk 0xFF in the CMSIS device headers. The four SVDs give 7 bits"
+
+[[fields]]
 instances = ["TIM2", "TIM3", "TIM4"]
 registers = ["CCMR2_Output"]
 fields = ["CC4S"]
