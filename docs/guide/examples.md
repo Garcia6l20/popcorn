@@ -300,3 +300,9 @@ A 1 kHz timer interrupt, a one-pulse timer and an input capture on the 16 MHz HS
 The ADC internal channels and PA0 against VDDA, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/adc).
 
 --8<-- "stm32l152/adc/README.md:3:13"
+
+### l152 rtc
+
+The RTC calendar, wakeup timer, alarm and a backup register on the LSE, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/rtc).
+
+--8<-- "stm32l152/rtc/README.md:3:14"
