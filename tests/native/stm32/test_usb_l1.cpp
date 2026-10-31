@@ -859,3 +859,184 @@ TEST_CASE(
     CHECK(r.pending(wakeup_irq));
   }
 }
+
+namespace
+{
+struct scripted_firmware
+{
+  std::vector<usb::setup_packet> requests;
+  std::optional<std::uint8_t>    address;
+  std::vector<std::uint8_t>      pending;
+  std::size_t                    sent{};
+};
+
+auto firmware_device() -> std::vector<std::uint8_t>
+{
+  return {18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x83, 0x04, 0x40, 0x57, 0x00, 0x01, 1, 2, 0, 1};
+}
+
+auto firmware_configuration() -> std::vector<std::uint8_t>
+{
+  return {9, 2, 32, 0, 1,    1, 0,  0x80, 50, 9, 4, 0,    0, 2,  0xff, 0,
+          0, 0, 7,  5, 0x01, 2, 64, 0,    0,  7, 5, 0x81, 2, 64, 0,    0};
+}
+
+auto firmware_reply(usb::setup_packet const& setup) -> std::optional<std::vector<std::uint8_t>>
+{
+  if(setup.request_type != 0x80 or setup.request != 6)
+  {
+    return std::nullopt;
+  }
+  std::vector<std::uint8_t> reply;
+  switch(setup.value)
+  {
+    case 0x0100:
+      reply = firmware_device();
+      break;
+    case 0x0200:
+      reply = firmware_configuration();
+      break;
+    case 0x0300:
+      reply = {4, 3, 0x09, 0x04};
+      break;
+    case 0x0301:
+      reply = {6, 3, 'l', 0, '1', 0};
+      break;
+    case 0x0302:
+      reply = {6, 3, 'f', 0, 's', 0};
+      break;
+    default:
+      return std::nullopt;
+  }
+  reply.resize(std::min<std::size_t>(reply.size(), setup.length));
+  return reply;
+}
+
+void send_packet(rig const& r, scripted_firmware& fw)
+{
+  auto const size = std::min<std::size_t>(64, fw.pending.size() - fw.sent);
+  r.put_bytes(0x40, std::span{fw.pending}.subspan(fw.sent, size));
+  r.tx_buffer(0, 0x40, static_cast<std::uint32_t>(size));
+  fw.sent += size;
+  auto const word = r.read("EP0R");
+  r.write(
+      "EP0R", (word
+               & ~(r.mask("EP0R", "STAT_RX", 3)
+                   | r.mask("EP0R", "STAT_TX", 3)
+                   | r.mask("EP0R", "DTOG_TX")
+                   | r.mask("EP0R", "DTOG_RX")))
+                  | r.mask("EP0R", "STAT_TX", valid ^ r.get("EP0R", "STAT_TX"))
+                  | r.mask("EP0R", "CTR_RX")
+                  | r.mask("EP0R", "CTR_TX"));
+}
+
+void arm_rx(rig const& r)
+{
+  auto const word = r.read("EP0R");
+  r.write(
+      "EP0R", (word
+               & ~(r.mask("EP0R", "STAT_TX", 3)
+                   | r.mask("EP0R", "STAT_RX", 3)
+                   | r.mask("EP0R", "DTOG_TX")
+                   | r.mask("EP0R", "DTOG_RX")))
+                  | r.mask("EP0R", "STAT_RX", valid ^ r.get("EP0R", "STAT_RX"))
+                  | r.mask("EP0R", "CTR_RX")
+                  | r.mask("EP0R", "CTR_TX"));
+}
+
+void service(rig const& r, scripted_firmware& fw)
+{
+  if(r.get("ISTR", "RESET") != 0)
+  {
+    r.write("ISTR", ~r.mask("ISTR", "RESET"));
+    r.write("DADDR", r.mask("DADDR", "EF"));
+    r.open_control();
+  }
+  while(r.get("ISTR", "CTR") != 0)
+  {
+    auto const n    = r.get("ISTR", "EP_ID");
+    auto const name = std::format("EP{}R", n);
+    if(r.get(name, "CTR_RX") != 0)
+    {
+      auto const setup = r.get(name, "SETUP") != 0;
+      auto const count = r.rx_count(n);
+      auto const bytes = r.bytes_at(0x80, count);
+      r.clear_ep(n, "CTR_RX");
+      if(setup)
+      {
+        usb::setup_packet const packet{
+            .request_type = bytes[0],
+            .request      = bytes[1],
+            .value        = static_cast<std::uint16_t>(bytes[2] | (bytes[3] << 8)),
+            .index        = static_cast<std::uint16_t>(bytes[4] | (bytes[5] << 8)),
+            .length       = static_cast<std::uint16_t>(bytes[6] | (bytes[7] << 8))};
+        fw.requests.push_back(packet);
+        fw.pending.clear();
+        fw.sent = 0;
+        if(auto const reply = firmware_reply(packet))
+        {
+          fw.pending = *reply;
+          send_packet(r, fw);
+          arm_rx(r);
+        }
+        else
+        {
+          if(packet.request_type == 0 and packet.request == 5)
+          {
+            fw.address = static_cast<std::uint8_t>(packet.value);
+          }
+          send_packet(r, fw);
+        }
+      }
+      else
+      {
+        arm_rx(r);
+      }
+    }
+    if(r.get(name, "CTR_TX") != 0)
+    {
+      r.clear_ep(n, "CTR_TX");
+      if(n == 0 and fw.address)
+      {
+        r.write("DADDR", r.mask("DADDR", "EF") | r.mask("DADDR", "ADD", *fw.address));
+        fw.address.reset();
+      }
+      else if(n == 0 and fw.sent < fw.pending.size())
+      {
+        send_packet(r, fw);
+      }
+    }
+  }
+}
+}
+
+TEST_CASE("the virtual host enumerates the L1 USB model run by a register-level firmware, strict")
+{
+  rig const                r;
+  std::vector<std::string> warnings;
+  usb::host_options        options;
+  options.warn           = [&](std::string const& message) { warnings.push_back(message); };
+  auto const        host = std::make_shared<usb::host>(r.port(), std::move(options));
+  scripted_firmware fw;
+  r.power_up();
+  r.port().attach(host);
+  r.pull_up(true);
+  CHECK(host->state() == usb::device_state::powered);
+  for(std::size_t slice = 0; slice < 20'000 and host->state() != usb::device_state::configured;
+      ++slice)
+  {
+    r.run_for(25 * us);
+    service(r, fw);
+  }
+  REQUIRE(host->state() == usb::device_state::configured);
+  CHECK(warnings.empty());
+  CHECK(host->address() == 1);
+  CHECK(r.get("DADDR", "ADD") == 1);
+  CHECK(std::ranges::equal(host->device_bytes(), firmware_device()));
+  CHECK(std::ranges::equal(host->configuration_bytes(), firmware_configuration()));
+  CHECK(host->strings().size() == 3);
+  REQUIRE_FALSE(fw.requests.empty());
+  CHECK(fw.requests.front().value == 0x0100);
+  CHECK(fw.requests.back().request == 9);
+  CHECK(r.warnings() == 0);
+}
