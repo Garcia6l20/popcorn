@@ -2,6 +2,7 @@
 #include "frame_signal.hpp"
 #include "model_base.hpp"
 #include "usb_device_link.hpp"
+#include "variants.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/stm32/usb.hpp>
@@ -32,9 +33,6 @@ constexpr std::uint32_t frame_timer   = 2;
 constexpr std::uint64_t frame_ps      = 1'000'000'000;
 constexpr std::uint64_t sof_window_ps = 1'000'000;
 constexpr std::uint8_t  idle_frames   = 3;
-constexpr std::uint32_t pma_first     = 0x400;
-constexpr std::uint32_t pma_bytes     = 0x800;
-constexpr std::uint32_t pma_last      = pma_first + pma_bytes;
 
 constexpr std::uint32_t stat_disabled = 0;
 constexpr std::uint32_t stat_stall    = 1;
@@ -46,12 +44,6 @@ constexpr std::uint32_t type_iso     = 2;
 
 constexpr std::uint32_t tx_descriptor = 0;
 constexpr std::uint32_t rx_descriptor = 1;
-
-constexpr std::array<std::string_view, 4> endpoint_toggles{"STATTX", "DTOGTX", "STATRX", "DTOGRX"};
-constexpr std::array<std::string_view, 7> endpoint_clears{
-    "VTTX", "VTRX", "NAK", "ERR_TX", "ERR_RX", "THREE_ERR_TX", "THREE_ERR_RX"};
-constexpr std::array<std::string_view, 10> status_clears{
-    "L1REQ", "ESOF", "SOF", "RST_DCON", "SUSP", "WKUP", "ERR", "PMAOVR", "THR512", "DDISC"};
 
 enum warning : std::uint32_t
 {
@@ -65,7 +57,7 @@ enum warning : std::uint32_t
 struct usb_drd_state
 {
   std::array<std::uint32_t, 3> generation{};
-  std::vector<std::byte>       pma = std::vector<std::byte>(pma_bytes);
+  std::vector<std::byte>       pma;
   usb_link_state               link;
   std::uint8_t                 frames{};
   std::uint8_t                 armed{};
@@ -222,7 +214,11 @@ public:
   static constexpr std::uint32_t host_wake_event    = host_wake;
   static constexpr std::uint32_t idle_suspend_event = idle_suspend;
 
-  usb_drd(model_context& ctx, peripheral_desc const& desc, std::optional<usb_host_options> wired);
+  usb_drd(
+      model_context&                  ctx,
+      peripheral_desc const&          desc,
+      std::optional<usb_host_options> wired,
+      usb_drd_variant const&          variant);
 
   [[nodiscard]] auto served_ranges() const
       -> std::vector<std::pair<std::uint32_t, std::uint32_t>> override;
@@ -265,7 +261,9 @@ public:
   void charging_written(std::uint32_t old, std::uint32_t now);
 
 private:
+  [[nodiscard]] auto endpoint_name(std::size_t n) const -> std::string;
   [[nodiscard]] auto endpoint_fields_of(std::size_t n) const -> endpoint_fields;
+  [[nodiscard]] auto in_window(std::uint32_t offset) const -> bool;
   [[nodiscard]] auto kind_mask(std::span<std::string_view const> names, write_effect effect) const
       -> std::uint32_t;
   [[nodiscard]] auto
@@ -296,6 +294,7 @@ private:
   [[nodiscard]] auto link_state() -> usb_link_state&;
   [[nodiscard]] auto link_state() const -> usb_link_state const&;
 
+  usb_drd_variant                        variant_;
   register_file&                         regs_;
   frame_output                           frames_;
   irq_line&                              line_;
@@ -333,50 +332,59 @@ private:
   std::uint32_t                          warned_{};
 };
 
-constexpr std::array<write_entry<usb_drd>, 14> usb_drd_writes{
-    {
-     {"CHEP0R", &usb_drd::endpoint_written},
-     {"CHEP1R", &usb_drd::endpoint_written},
-     {"CHEP2R", &usb_drd::endpoint_written},
-     {"CHEP3R", &usb_drd::endpoint_written},
-     {"CHEP4R", &usb_drd::endpoint_written},
-     {"CHEP5R", &usb_drd::endpoint_written},
-     {"CHEP6R", &usb_drd::endpoint_written},
-     {"CHEP7R", &usb_drd::endpoint_written},
-     {"CNTR", &usb_drd::control_written},
-     {"ISTR", &usb_drd::status_written},
-     {"FNR", &usb_drd::plain_written},
-     {"DADDR", &usb_drd::plain_written},
-     {"LPMCSR", &usb_drd::link_power_written},
-     {"BCDR", &usb_drd::charging_written},
-     }
-};
+auto usb_drd_writes(peripheral_desc const& desc, usb_drd_variant const& variant)
+    -> std::vector<write_entry<usb_drd>>
+{
+  std::vector<write_entry<usb_drd>> out;
+  for(std::size_t n = 0; n < endpoints; ++n)
+  {
+    auto const* const found = find_register(desc, std::format("{}{}R", variant.names.endpoint, n));
+    out.push_back(
+        {found != nullptr ? std::string_view{found->name} : variant.names.endpoint,
+         &usb_drd::endpoint_written});
+  }
+  out.push_back({"CNTR", &usb_drd::control_written});
+  out.push_back({"ISTR", &usb_drd::status_written});
+  out.push_back({"FNR", &usb_drd::plain_written});
+  out.push_back({"DADDR", &usb_drd::plain_written});
+  out.push_back({variant.lpm_register, &usb_drd::link_power_written});
+  out.push_back({variant.charging_register, &usb_drd::charging_written});
+  return out;
+}
 
 usb_drd::usb_drd(
     model_context&                  ctx,
     peripheral_desc const&          desc,
-    std::optional<usb_host_options> wired)
-    : dispatch_model{ctx, desc, "USB", usb_drd_writes}, regs_{ctx.regs}, frames_{ctx.peers},
-      line_{irq("USB_DRD_FS_IRQn")}, ep_{[this]<std::size_t... n>(std::index_sequence<n...>) {
+    std::optional<usb_host_options> wired,
+    usb_drd_variant const&          variant)
+    : dispatch_model{ctx, desc, "USB", usb_drd_writes(desc, variant)}, variant_{variant},
+      regs_{ctx.regs}, frames_{ctx.peers}, line_{irq(variant.irq)},
+      ep_{[this]<std::size_t... n>(std::index_sequence<n...>) {
         return std::array<endpoint_fields, endpoints>{endpoint_fields_of(n)...};
       }(std::make_index_sequence<endpoints>{})},
       transfer_{field("ISTR", "CTR")}, direction_{field("ISTR", "DIR")},
-      endpoint_id_{field("ISTR", "IDN")}, reset_done_{field("ISTR", "RST_DCON")},
-      frame_flag_{field("ISTR", "SOF")}, suspend_flag_{field("ISTR", "SUSP")},
-      expected_flag_{field("ISTR", "ESOF")}, wake_flag_{field("ISTR", "WKUP")},
-      core_reset_{field("CNTR", "USBRST")}, power_down_{field("CNTR", "PDWN")},
-      suspend_enable_{field("CNTR", "SUSPEN")}, suspend_ready_{field("CNTR", "SUSPRDY")},
-      l1_resume_{field("CNTR", "L1RES")}, l2_resume_{field("CNTR", "L2RES")},
-      host_mode_{field("CNTR", "HOST")}, frame_number_{field("FNR", "FN")},
+      endpoint_id_{field("ISTR", variant.names.endpoint_id)},
+      reset_done_{field("ISTR", variant.names.reset_done)}, frame_flag_{field("ISTR", "SOF")},
+      suspend_flag_{field("ISTR", "SUSP")}, expected_flag_{field("ISTR", "ESOF")},
+      wake_flag_{field("ISTR", "WKUP")}, core_reset_{field("CNTR", variant.names.core_reset)},
+      power_down_{field("CNTR", "PDWN")}, suspend_enable_{field("CNTR", variant.names.suspend)},
+      suspend_ready_{field("CNTR", variant.names.suspend_ready)},
+      l1_resume_{field("CNTR", variant.names.l1_resume)},
+      l2_resume_{field("CNTR", variant.names.l2_resume)},
+      host_mode_{field("CNTR", variant.names.host_mode)}, frame_number_{field("FNR", "FN")},
       lost_frames_{field("FNR", "LSOF")}, locked_{field("FNR", "LCK")},
       line_plus_{field("FNR", "RXDP")}, line_minus_{field("FNR", "RXDM")},
       address_{field("DADDR", "ADD")}, function_enable_{field("DADDR", "EF")},
-      lpm_enable_{field("LPMCSR", "LPMEN")}, charging_enable_{field("BCDR", "BCDEN")},
-      pull_up_{field("BCDR", "DPPU_DPD")}
+      lpm_enable_{field(variant.lpm_register, "LPMEN")},
+      charging_enable_{field(variant.charging_register, "BCDEN")},
+      pull_up_{field(variant.pull_up_register, variant.pull_up_field)}
 {
-  endpoint_toggles_ = kind_mask(endpoint_toggles, write_effect::one_to_toggle);
-  endpoint_clears_  = kind_mask(endpoint_clears, write_effect::zero_to_clear);
-  for(auto const name : status_clears)
+  state_.pma.assign(variant_.pma_bytes, std::byte{});
+  auto const toggles = std::to_array<std::string_view>(
+      {variant.names.stat_tx, variant.names.dtog_tx, variant.names.stat_rx, variant.names.dtog_rx});
+  endpoint_toggles_ = kind_mask(toggles, write_effect::one_to_toggle);
+  endpoint_clears_  = kind_mask(variant.endpoint_clears, write_effect::zero_to_clear);
+  for(auto const name : variant.status_clears)
   {
     auto const& found = std::ranges::find(describe("ISTR").fields, name, &field_desc::name);
     if(found == describe("ISTR").fields.end() or found->on_write != write_effect::zero_to_clear)
@@ -384,7 +392,7 @@ usb_drd::usb_drd(
       throw config_error(
           ctx_.part.part, 0,
           std::format("peripherals.{}.registers.ISTR.fields.{}.on_write", desc_.name, name),
-          "zero_to_clear, rc_w0 in RM0481 61.6.2");
+          std::format("zero_to_clear, rc_w0 in {}", variant.manual));
     }
     status_clears_ |= field("ISTR", name).mask();
   }
@@ -399,21 +407,27 @@ usb_drd::usb_drd(
   wire(std::move(wired));
 }
 
+auto usb_drd::endpoint_name(std::size_t n) const -> std::string
+{
+  return std::format("{}{}R", variant_.names.endpoint, n);
+}
+
 auto usb_drd::endpoint_fields_of(std::size_t n) const -> endpoint_fields
 {
-  auto const name = std::format("CHEP{}R", n);
+  auto const  name  = endpoint_name(n);
+  auto const& names = variant_.names;
   return {
       .offset  = reg(name).offset,
       .address = field(name, "EA"),
-      .stat_tx = field(name, "STATTX"),
-      .dtog_tx = field(name, "DTOGTX"),
-      .vttx    = field(name, "VTTX"),
-      .kind    = field(name, "EPKIND"),
-      .type    = field(name, "UTYPE"),
+      .stat_tx = field(name, names.stat_tx),
+      .dtog_tx = field(name, names.dtog_tx),
+      .vttx    = field(name, names.done_tx),
+      .kind    = field(name, names.kind),
+      .type    = field(name, names.type),
       .setup   = field(name, "SETUP"),
-      .stat_rx = field(name, "STATRX"),
-      .dtog_rx = field(name, "DTOGRX"),
-      .vtrx    = field(name, "VTRX")};
+      .stat_rx = field(name, names.stat_rx),
+      .dtog_rx = field(name, names.dtog_rx),
+      .vtrx    = field(name, names.done_rx)};
 }
 
 auto usb_drd::kind_mask(std::span<std::string_view const> names, write_effect effect) const
@@ -422,7 +436,7 @@ auto usb_drd::kind_mask(std::span<std::string_view const> names, write_effect ef
   std::uint32_t mask = 0;
   for(std::size_t n = 0; n < endpoints; ++n)
   {
-    auto const  reg_name = std::format("CHEP{}R", n);
+    auto const  reg_name = endpoint_name(n);
     auto const& fields   = describe(reg_name).fields;
     for(auto const name : names)
     {
@@ -435,7 +449,7 @@ auto usb_drd::kind_mask(std::span<std::string_view const> names, write_effect ef
             ctx_.part.part, 0,
             std::format(
                 "peripherals.{}.registers.{}.fields.{}.on_write", desc_.name, reg_name, name),
-            std::format("{}, read_write, the bit kind of RM0481 61.6.7", effect));
+            std::format("{}, read_write, the bit kind of {}", effect, variant_.manual));
       }
       mask |= field(reg_name, name).mask();
     }
@@ -446,8 +460,13 @@ auto usb_drd::kind_mask(std::span<std::string_view const> names, write_effect ef
 auto usb_drd::served_ranges() const -> std::vector<std::pair<std::uint32_t, std::uint32_t>>
 {
   return {
-      {pma_first, pma_last}
+      {variant_.pma_offset, variant_.pma_offset + variant_.pma_bytes}
   };
+}
+
+auto usb_drd::in_window(std::uint32_t offset) const -> bool
+{
+  return offset >= variant_.pma_offset and offset < variant_.pma_offset + variant_.pma_bytes;
 }
 
 auto usb_drd::link_state() -> usb_link_state&
@@ -488,6 +507,10 @@ void usb_drd::restore_reset_values(std::optional<reset_kind> kind)
   if(kind != reset_kind::power_on)
   {
     state_.pma = std::move(memory);
+  }
+  else
+  {
+    state_.pma.assign(variant_.pma_bytes, std::byte{});
   }
   keep_link(kept, kind);
   link(false);
@@ -626,7 +649,7 @@ void usb_drd::unmodelled(
 
 auto usb_drd::pma_word(std::uint32_t at) const -> std::uint32_t
 {
-  auto const    base = at & (pma_bytes - 4);
+  auto const    base = at & (variant_.pma_bytes - 4);
   std::uint32_t word = 0;
   for(std::uint32_t lane = 0; lane < 4; ++lane)
   {
@@ -637,7 +660,7 @@ auto usb_drd::pma_word(std::uint32_t at) const -> std::uint32_t
 
 void usb_drd::set_pma_word(std::uint32_t at, std::uint32_t word)
 {
-  auto const base = at & (pma_bytes - 4);
+  auto const base = at & (variant_.pma_bytes - 4);
   for(std::uint32_t lane = 0; lane < 4; ++lane)
   {
     state_.pma[base + lane] = static_cast<std::byte>(word >> (8 * lane));
@@ -663,7 +686,7 @@ auto usb_drd::load_bytes(std::uint32_t descriptor) const -> std::vector<std::uin
   std::vector<std::uint8_t> bytes(count);
   for(std::uint32_t index = 0; index < count; ++index)
   {
-    bytes[index] = std::to_integer<std::uint8_t>(state_.pma[(start + index) % pma_bytes]);
+    bytes[index] = std::to_integer<std::uint8_t>(state_.pma[(start + index) % variant_.pma_bytes]);
   }
   return bytes;
 }
@@ -673,14 +696,14 @@ void usb_drd::store_bytes(std::uint32_t descriptor, std::span<std::uint8_t const
   auto const start = descriptor & 0xfffcu;
   for(std::size_t index = 0; index < bytes.size(); ++index)
   {
-    state_.pma[(start + index) % pma_bytes] = static_cast<std::byte>(bytes[index]);
+    state_.pma[(start + index) % variant_.pma_bytes] = static_cast<std::byte>(bytes[index]);
   }
 }
 
 auto usb_drd::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
     -> std::expected<std::uint32_t, bus_error>
 {
-  if(offset >= pma_first and offset < pma_last)
+  if(in_window(offset))
   {
     if(size != 4 and ctx.by != initiator::debugger)
     {
@@ -689,7 +712,7 @@ auto usb_drd::on_read(register_file& regs, std::uint32_t offset, std::uint8_t si
           std::format("a {}-byte read of the packet memory reads its lanes of the word", size),
           pma_width);
     }
-    return read_lanes(pma_word(offset - pma_first), offset, size);
+    return read_lanes(pma_word(offset - variant_.pma_offset), offset, size);
   }
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
@@ -702,7 +725,7 @@ auto usb_drd::on_write(
     std::uint32_t  value,
     access_ctx     ctx) -> std::expected<void, bus_error>
 {
-  if(offset >= pma_first and offset < pma_last)
+  if(in_window(offset))
   {
     if(size != 4 and ctx.by != initiator::debugger)
     {
@@ -712,7 +735,7 @@ auto usb_drd::on_write(
               "a {}-byte write of the packet memory zeroes the other lanes of the word", size),
           pma_width);
     }
-    set_pma_word(offset - pma_first, merge_write(0, offset, size, value));
+    set_pma_word(offset - variant_.pma_offset, merge_write(0, offset, size, value));
     return {};
   }
   access_offset_ = offset & ~3u;
@@ -831,7 +854,7 @@ void usb_drd::save(std::vector<std::byte>& out) const
 void usb_drd::load(std::span<std::byte const> in)
 {
   dispatch_model::load(in);
-  state_.pma.resize(pma_bytes);
+  state_.pma.resize(variant_.pma_bytes);
   loaded();
 }
 
@@ -1159,8 +1182,8 @@ void usb_drd::resume(vtime)
 }
 }
 
-auto usb_drd_factory(board const& b) -> model_factory
+auto usb_drd_factory(board const& b, usb_drd_variant const& variant) -> model_factory
 {
-  return usb_device_factory<usb_drd>(b);
+  return usb_device_factory<usb_drd>(b, variant);
 }
 }

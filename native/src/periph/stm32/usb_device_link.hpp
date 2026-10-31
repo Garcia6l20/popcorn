@@ -262,18 +262,21 @@ private:
 /**
  * @brief The factory of a USB device controller model, given the board's host options for its
  *        peripheral when the board wires a host to it.
- * @tparam Model The controller model, constructed from the context, the description and the
- *         optional host options.
+ * @tparam Model The controller model, constructed from the context, the description, the
+ *         optional host options and @p extra.
  * @param b The board, whose usb_hosts are copied.
+ * @param extra Further constructor arguments, copied into the factory.
  */
-template <typename Model> auto usb_device_factory(board const& b) -> model_factory
+template <typename Model, typename... Extra>
+auto usb_device_factory(board const& b, Extra... extra) -> model_factory
 {
-  return [hosts = b.usb_hosts](
+  return [hosts = b.usb_hosts, ... extra = std::move(extra)](
              model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     auto const found = hosts.find(desc.name);
     return std::make_shared<Model>(
         ctx, desc,
-        found == hosts.end() ? std::nullopt : std::optional<usb_host_options>{found->second});
+        found == hosts.end() ? std::nullopt : std::optional<usb_host_options>{found->second},
+        extra...);
   };
 }
 }

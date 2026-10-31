@@ -388,7 +388,7 @@ constexpr std::array<builtin, 119> builtins{
          .part_glob       = "STM32H5*"},
      {"MDF", "v1_0_Cube", [](board const&) { return mdf_factory(); }},
      {"USB_OTG_FS", "otgfs1_v3_0_Cube", [](board const& b) { return otg_fs_factory(b); }},
-     {"USB", "usbfs_v1*", [](board const& b) { return usb_drd_factory(b); }},
+     {"USB", "usbfs_v1*", [](board const& b) { return usb_drd_factory(b, h5_usb); }},
      {"ADC", "aditf5_40v1_U5_Cube", [](board const& b) { return adc_factory(b.supply); }},
      {.ip              = "ADC12",
          .ip_version_glob = "*",

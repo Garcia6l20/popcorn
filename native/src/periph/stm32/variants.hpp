@@ -1071,6 +1071,111 @@ inline constexpr auto h5_gtzc_companions = std::to_array<gtzc_companion>({
     {"SDMMC2",  "DLYBSD2"},
     {"OCTOSPI", "DLYBOS1"},
 });
+/** @brief Names a USB full-speed device controller gives the register fields whose spelling
+ *         differs between the variants. */
+struct usb_drd_names
+{
+  /** @brief Endpoint register prefix, the register of endpoint n is `<prefix><n>R`. */
+  std::string_view endpoint;
+  /** @brief Transmit status, toggled by a written 1. */
+  std::string_view stat_tx;
+  /** @brief Transmit data toggle, toggled by a written 1. */
+  std::string_view dtog_tx;
+  /** @brief Transmit transfer done, cleared by a written 0. */
+  std::string_view done_tx;
+  /** @brief Endpoint kind. */
+  std::string_view kind;
+  /** @brief Endpoint type. */
+  std::string_view type;
+  /** @brief Receive status, toggled by a written 1. */
+  std::string_view stat_rx;
+  /** @brief Receive data toggle, toggled by a written 1. */
+  std::string_view dtog_rx;
+  /** @brief Receive transfer done, cleared by a written 0. */
+  std::string_view done_rx;
+  /** @brief ISTR endpoint identifier. */
+  std::string_view endpoint_id;
+  /** @brief ISTR bus reset flag. */
+  std::string_view reset_done;
+  /** @brief CNTR forced reset. */
+  std::string_view core_reset;
+  /** @brief CNTR suspend. */
+  std::string_view suspend;
+  /** @brief CNTR suspend ready or low-power mode. */
+  std::string_view suspend_ready;
+  /** @brief CNTR LPM L1 resume request. */
+  std::string_view l1_resume;
+  /** @brief CNTR L2 resume request. */
+  std::string_view l2_resume;
+  /** @brief CNTR host mode. */
+  std::string_view host_mode;
+};
+
+/** @brief Differences between the USB full-speed device controllers the usb_drd rows serve. */
+struct usb_drd_variant
+{
+  /** @brief Field names. */
+  usb_drd_names names;
+  /** @brief Endpoint register fields cleared by a written 0. */
+  std::span<std::string_view const> endpoint_clears;
+  /** @brief ISTR fields cleared by a written 0. */
+  std::span<std::string_view const> status_clears;
+  /** @brief NVIC line of every enabled ISTR flag. */
+  std::string_view irq;
+  /** @brief LPM register. */
+  std::string_view lpm_register;
+  /** @brief Battery charging detection register. */
+  std::string_view charging_register;
+  /** @brief Register of the D+ pull-up enable. */
+  std::string_view pull_up_register;
+  /** @brief Field of the D+ pull-up enable. */
+  std::string_view pull_up_field;
+  /** @brief Offset of the packet memory window in the controller's block. */
+  std::uint32_t pma_offset;
+  /** @brief Packet memory bytes as the controller addresses them. */
+  std::uint32_t pma_bytes;
+  /** @brief Manual section of the registers, for configuration errors. */
+  std::string_view manual;
+};
+
+inline constexpr auto h5_usb_endpoint_clears = std::to_array<std::string_view>(
+    {"VTTX", "VTRX", "NAK", "ERR_TX", "ERR_RX", "THREE_ERR_TX", "THREE_ERR_RX"});
+inline constexpr auto h5_usb_status_clears = std::to_array<std::string_view>(
+    {"L1REQ", "ESOF", "SOF", "RST_DCON", "SUSP", "WKUP", "ERR", "PMAOVR", "THR512", "DDISC"});
+/** @brief STM32H5 USB, `usbfs_v1`, RM0481 section 61: CHEPnR, 2048 bytes of packet memory at
+ *         offsets 0x400 to 0xBFF read by word, the pull-up in BCDR, LPM, battery charging
+ *         detection and host mode. */
+inline constexpr usb_drd_variant h5_usb{
+    .names =
+        {.endpoint      = "CHEP",
+                .stat_tx       = "STATTX",
+                .dtog_tx       = "DTOGTX",
+                .done_tx       = "VTTX",
+                .kind          = "EPKIND",
+                .type          = "UTYPE",
+                .stat_rx       = "STATRX",
+                .dtog_rx       = "DTOGRX",
+                .done_rx       = "VTRX",
+                .endpoint_id   = "IDN",
+                .reset_done    = "RST_DCON",
+                .core_reset    = "USBRST",
+                .suspend       = "SUSPEN",
+                .suspend_ready = "SUSPRDY",
+                .l1_resume     = "L1RES",
+                .l2_resume     = "L2RES",
+                .host_mode     = "HOST"},
+    .endpoint_clears   = h5_usb_endpoint_clears,
+    .status_clears     = h5_usb_status_clears,
+    .irq               = "USB_DRD_FS_IRQn",
+    .lpm_register      = "LPMCSR",
+    .charging_register = "BCDR",
+    .pull_up_register  = "BCDR",
+    .pull_up_field     = "DPPU_DPD",
+    .pma_offset        = 0x400,
+    .pma_bytes         = 0x800,
+    .manual            = "RM0481 61.6"
+};
+
 /** @brief STM32H562, H563 and H573 GTZC1, RM0481 5.7.4 to 5.7.6 and 5.8: the SVD names
  *         `DAC`, `I3C`, `LPUART`, `OCTOSPI` and `UCPD1` of the stems `DAC1`, `I3C1`,
  *         `LPUART1`, `OCTOSPI1` and `UCPD`, and `ADC12SEC` covering ADC1, ADC2 and their common
