@@ -129,13 +129,15 @@ On the STM32H5, RM0481 section 28:
 
 On the STM32L1, RM0038 section 12:
 
-- The injected group, `JSWSTART`, `JEXTEN` and `JAUTO`, the analog watchdog, `AWDEN`, DMA
-  requests, `DMA`, and the automatic power-down, `PDI` and `PDD`, are logged once, a model_error
-  under strict_peripherals.
-- Regular hardware triggers start conversions from the TRGO selections of `EXTSEL`, TIM9, TIM3,
-  TIM2, TIM4 and TIM6. The compare event selections, TIM9_CC2, TIM2_CC3, TIM2_CC2, TIM4_CC4,
-  TIM3_CC1 and TIM3_CC3, and EXTI line 11 have no source model: selecting one is logged once, a
-  model_error under strict_peripherals, and starts nothing. tlatr is 3.5 ADC clock cycles, the
+- The auto-injected group, `JAUTO`, the analog watchdog, `AWDEN` and `JAWDEN`, DMA requests,
+  `DMA`, and the automatic power-down, `PDI` and `PDD`, are logged once, a model_error under
+  strict_peripherals.
+- Hardware triggers start conversions from the TRGO selections of `EXTSEL`, TIM9, TIM3, TIM2,
+  TIM4 and TIM6, and of `JEXTSEL`, TIM9, TIM2, TIM4 and TIM7. The compare event selections,
+  TIM9_CC2, TIM2_CC3, TIM2_CC2, TIM4_CC4, TIM3_CC1 and TIM3_CC3 for `EXTSEL`, TIM9_CC1, TIM2_CC1,
+  TIM3_CC4, TIM4_CC1 to TIM4_CC3 and TIM10_CC1 for `JEXTSEL`, and EXTI lines 11 and 15 have no
+  source model: selecting one is logged once, a model_error under strict_peripherals, and starts
+  nothing. tlatr is 3.5 ADC clock cycles, the
   datasheet maximum. Trigger detection stays on across an `EXTSEL` change, RM0038 12.6 blanks it
   for 2 PCLK cycles. A model_error of a selection surfaces from the `ADC_CR2` write or the `ADONS`
   event that starts the listening.
@@ -148,7 +150,21 @@ On the STM32L1, RM0038 section 12:
 - `ADONS` sets 3.5 us after the `ADON` edge, the datasheet tSTAB maximum, and clears at once
   with `ADON`. `RCNR` and `JCNR` read 0. The ADC runs from HSI16 whatever `ADC1EN` of
   `RCC_APB2ENR` holds.
-- A `SWSTART` while a conversion runs is cleared and ignored, inferred.
+- A `SWSTART` while a conversion runs is cleared and ignored, inferred. A `JSWSTART` or an
+  injected trigger while the injected group runs is cleared and ignored, inferred.
+- With `SCAN` 0 the injected group is one conversion of JSQ(4 - `JL`), the first of the `JL`
+  order, inferred. The k-th conversion of the injected group lands in `ADC_JDRk` less the offset
+  of `ADC_JOFRk`, inferred from the HAL rank order. Below 12 bits `JOFFSET` counts from bit 11 and
+  its bits under the resolution are ignored, inferred from the LL driver note, and a left-aligned
+  injected result sits one bit below the regular one at every resolution, RM0038 Figures 45 and
+  46 for 12 and 6 bits, inferred for 10 and 8 bits.
+- An injection drops a regular conversion in progress or due, and the same rank converts again
+  after the injected group, once the delay of the regular conversion before it has passed. A
+  regular trigger or `SWSTART` during the injected group starts the regular group after it. One
+  edge of a signal both groups select starts both.
+- `DISCEN` with `JDISCEN` is logged once, a model_error under strict_peripherals.
+- With `JDISCEN` the last subgroup sets `JEOC` alone, inferred: the RM0038 12.3.10 example also
+  names `EOC`. The injected tlatr is the regular 3.5 ADC clock cycles, inferred.
 - Channels 16 and 17 read their TS_CAL1 and VREFINT_CAL values from the `TSVREFE` write on,
   with no sensor tSTART, and 0 while `TSVREFE` is clear, inferred.
 - A conversion keeps the end time, sampling end and resolution it started with. `RES` and `SMPx`

@@ -33,41 +33,50 @@ using popcorn::testing::rcc_reset_pulse;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 
-constexpr std::uint32_t base    = 0x4001'2400;
-constexpr std::uint32_t sr      = 0x00;
-constexpr std::uint32_t cr1     = 0x04;
-constexpr std::uint32_t cr2     = 0x08;
-constexpr std::uint32_t smpr1   = 0x0C;
-constexpr std::uint32_t smpr2   = 0x10;
-constexpr std::uint32_t smpr3   = 0x14;
-constexpr std::uint32_t sqr1    = 0x30;
-constexpr std::uint32_t sqr2    = 0x34;
-constexpr std::uint32_t sqr3    = 0x38;
-constexpr std::uint32_t sqr4    = 0x3C;
-constexpr std::uint32_t sqr5    = 0x40;
-constexpr std::uint32_t dr      = 0x58;
-constexpr std::uint32_t smpr0   = 0x5C;
-constexpr std::uint32_t csr     = 0x300;
-constexpr std::uint32_t ccr     = 0x304;
-constexpr std::uint32_t adon    = 1u << 0;
-constexpr std::uint32_t cont    = 1u << 1;
-constexpr std::uint32_t bank_b  = 1u << 2;
-constexpr std::uint32_t eocs    = 1u << 10;
-constexpr std::uint32_t align   = 1u << 11;
-constexpr std::uint32_t swstart = 1u << 30;
-constexpr std::uint32_t scan    = 1u << 8;
-constexpr std::uint32_t eocie   = 1u << 5;
-constexpr std::uint32_t ovrie   = 1u << 26;
-constexpr std::uint32_t eoc     = 1u << 1;
-constexpr std::uint32_t strt    = 1u << 4;
-constexpr std::uint32_t ovr     = 1u << 5;
-constexpr std::uint32_t adons   = 1u << 6;
-constexpr std::uint32_t tsvrefe = 1u << 23;
-constexpr std::uint64_t ns      = 1'000;
-constexpr std::uint64_t us      = 1'000'000;
-constexpr std::uint64_t cycle   = 62'500;
-constexpr std::uint32_t vrefint = 1671;
-constexpr std::uint32_t ts_cal1 = 680;
+constexpr std::uint32_t base     = 0x4001'2400;
+constexpr std::uint32_t sr       = 0x00;
+constexpr std::uint32_t cr1      = 0x04;
+constexpr std::uint32_t cr2      = 0x08;
+constexpr std::uint32_t smpr1    = 0x0C;
+constexpr std::uint32_t smpr2    = 0x10;
+constexpr std::uint32_t smpr3    = 0x14;
+constexpr std::uint32_t sqr1     = 0x30;
+constexpr std::uint32_t sqr2     = 0x34;
+constexpr std::uint32_t sqr3     = 0x38;
+constexpr std::uint32_t sqr4     = 0x3C;
+constexpr std::uint32_t sqr5     = 0x40;
+constexpr std::uint32_t dr       = 0x58;
+constexpr std::uint32_t smpr0    = 0x5C;
+constexpr std::uint32_t jofr1    = 0x18;
+constexpr std::uint32_t jsqr     = 0x44;
+constexpr std::uint32_t jdr1     = 0x48;
+constexpr std::uint32_t jswstart = 1u << 22;
+constexpr std::uint32_t jdiscen  = 1u << 12;
+constexpr std::uint32_t discen   = 1u << 11;
+constexpr std::uint32_t jeocie   = 1u << 7;
+constexpr std::uint32_t jeoc     = 1u << 2;
+constexpr std::uint32_t jstrt    = 1u << 3;
+constexpr std::uint32_t csr      = 0x300;
+constexpr std::uint32_t ccr      = 0x304;
+constexpr std::uint32_t adon     = 1u << 0;
+constexpr std::uint32_t cont     = 1u << 1;
+constexpr std::uint32_t bank_b   = 1u << 2;
+constexpr std::uint32_t eocs     = 1u << 10;
+constexpr std::uint32_t align    = 1u << 11;
+constexpr std::uint32_t swstart  = 1u << 30;
+constexpr std::uint32_t scan     = 1u << 8;
+constexpr std::uint32_t eocie    = 1u << 5;
+constexpr std::uint32_t ovrie    = 1u << 26;
+constexpr std::uint32_t eoc      = 1u << 1;
+constexpr std::uint32_t strt     = 1u << 4;
+constexpr std::uint32_t ovr      = 1u << 5;
+constexpr std::uint32_t adons    = 1u << 6;
+constexpr std::uint32_t tsvrefe  = 1u << 23;
+constexpr std::uint64_t ns       = 1'000;
+constexpr std::uint64_t us       = 1'000'000;
+constexpr std::uint64_t cycle    = 62'500;
+constexpr std::uint32_t vrefint  = 1671;
+constexpr std::uint32_t ts_cal1  = 680;
 
 auto options(part_description const& desc, bool strict, stm32::supply_options supply)
     -> core::machine_options
@@ -671,15 +680,14 @@ TEST_CASE("checklist 53: each function the L1 ADC does not model raises model_er
     bool          at_start;
   };
   for(auto const& [reg, value, at_start] : {
-          row{cr2,  adon | (1u << 22),               false},
           row{cr2,  adon | (1u << 28),               false},
-          row{cr2,  adon | (1u << 20),               false},
           row{cr2,  adon | (1u << 8),                false},
           row{cr2,  adon | (1u << 28) | (11u << 24), false},
           row{cr1,  1u << 17,                        true },
           row{cr1,  1u << 16,                        true },
           row{cr1,  1u << 10,                        true },
           row{cr1,  1u << 23,                        false},
+          row{cr1,  1u << 22,                        false},
           row{sqr5, 26,                              true },
           row{ccr,  3u << 16,                        true },
   })
@@ -1285,4 +1293,627 @@ TEST_CASE("DELS 001 with EOCS 0 converts a scan back to back and holds after its
   auto const again = r.now();
   r.write(cr2, adon | (1u << 4) | swstart);
   CHECK(r.due() == again + 16 * cycle);
+}
+
+namespace
+{
+auto code_of(std::uint64_t microvolts) -> std::uint32_t
+{
+  return static_cast<std::uint32_t>(microvolts * 4096u / 3'000'000u);
+}
+
+auto jdr(std::uint32_t rank) -> std::uint32_t
+{
+  return jdr1 + 4u * rank;
+}
+}
+
+TEST_CASE("RM0038 12.3.9: JSWSTART converts JSQ4 with JL 0 into JDR1, JSTRT, then JEOC and JEOCIE")
+{
+  adc_rig const r;
+  r.port().drive(5, 1'500'000);
+  r.power();
+  r.write(cr1, jeocie);
+  r.write(jsqr, 5u << 15);
+  auto const start = r.now();
+  r.write(cr2, adon | jswstart);
+  CHECK((r.read(cr2) & jswstart) == 0);
+  CHECK(r.read(sr) == (adons | jstrt));
+  CHECK(r.due() == start + 16 * cycle);
+  CHECK_FALSE(r.pending());
+  r.run_until(start + 16 * cycle + ns);
+  CHECK(r.read(sr) == (adons | jstrt | jeoc));
+  CHECK(r.read(jdr1) == 2048);
+  CHECK(r.cpu_read(jdr1) == 2048);
+  CHECK(r.read(dr) == 0);
+  CHECK(r.pending());
+  r.write(sr, ~jeoc);
+  r.unpend();
+  CHECK_FALSE(r.pending());
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE(
+    "RM0038 12.15.15: JL 3 converts JSQ1 to JSQ4 and JL 1 JSQ3 and JSQ4, into JDR1 onward, "
+    "inferred, JEOC after the group")
+{
+  adc_rig const r;
+  for(std::uint8_t channel = 1; channel <= 4; ++channel)
+  {
+    r.port().drive(channel, 300'000u * channel);
+  }
+  r.write(cr1, scan);
+  r.power();
+  r.write(jsqr, (3u << 20) | 1u | (2u << 5) | (3u << 10) | (4u << 15));
+  auto const start = r.now();
+  r.write(cr2, adon | jswstart);
+  r.run_until(start + 48 * cycle + ns);
+  CHECK((r.read(sr) & jeoc) == 0);
+  CHECK(r.due() == start + 64 * cycle);
+  r.run_until(start + 64 * cycle + ns);
+  CHECK((r.read(sr) & jeoc) != 0);
+  for(std::uint32_t rank = 0; rank < 4; ++rank)
+  {
+    CAPTURE(rank);
+    CHECK(r.read(jdr(rank)) == code_of(300'000u * (rank + 1)));
+  }
+  r.write(sr, 0);
+  r.write(jsqr, (1u << 20) | 9u | (9u << 5) | (3u << 10) | (4u << 15));
+  r.write(cr2, adon | jswstart);
+  r.run_until(r.now() + 40 * us);
+  CHECK(r.read(jdr(0)) == code_of(900'000));
+  CHECK(r.read(jdr(1)) == code_of(1'200'000));
+  CHECK(r.read(jdr(2)) == code_of(900'000));
+}
+
+TEST_CASE("with SCAN 0 the injected group is one conversion of JSQ(4 - JL) into JDR1, inferred")
+{
+  for(auto const& [length, channel] : {
+          std::pair{3u, 1u},
+          std::pair{1u, 3u},
+          std::pair{0u, 4u}
+  })
+  {
+    CAPTURE(length);
+    adc_rig const r;
+    for(std::uint8_t pad = 1; pad <= 4; ++pad)
+    {
+      r.port().drive(pad, 300'000u * pad);
+    }
+    r.power();
+    r.write(jsqr, (length << 20) | 1u | (2u << 5) | (3u << 10) | (4u << 15));
+    auto const start = r.now();
+    r.write(cr2, adon | jswstart);
+    CHECK(r.due() == start + 16 * cycle);
+    r.run_until(start + 16 * cycle + ns);
+    CHECK((r.read(sr) & jeoc) != 0);
+    CHECK(r.read(jdr1) == code_of(300'000u * channel));
+    CHECK(r.read(jdr(1)) == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0038 12.4: JOFRk subtracts from the k-th injected code, sign-extended right-aligned, "
+    "SEXT on bit 15 left-aligned, inferred rank order")
+{
+  for(auto const& [offset, control, expected] : {
+          std::tuple{1024u, 0u,    1024u  },
+          std::tuple{3072u, 0u,    0xFC00u},
+          std::tuple{1024u, align, 8192u  },
+          std::tuple{3072u, align, 0xE000u},
+  })
+  {
+    CAPTURE(offset);
+    CAPTURE(control);
+    adc_rig const r;
+    r.port().drive(5, 1'500'000);
+    r.power();
+    r.write(jsqr, 5u << 15);
+    r.write(jofr1, offset);
+    r.write(cr2, adon | control | jswstart);
+    r.run_until(r.now() + 40 * us);
+    CHECK(r.read(jdr1) == expected);
+  }
+  adc_rig const r;
+  r.port().drive(5, 1'500'000);
+  r.write(cr1, scan);
+  r.power();
+  r.write(jsqr, (1u << 20) | (5u << 10) | (5u << 15));
+  r.write(jofr1, 1000);
+  r.write(jofr1 + 12, 2000);
+  r.write(cr2, adon | jswstart);
+  r.run_until(r.now() + 40 * us);
+  CHECK(r.read(jdr(0)) == 1048);
+  CHECK(r.read(jdr(1)) == 2048);
+}
+
+TEST_CASE(
+    "below 12 bits JOFFSET counts from bit 11 and the injected result keeps the regular "
+    "alignment less one bit, inferred")
+{
+  for(auto const& [res, offset, control, expected] : {
+          std::tuple{3u, 0xC3Fu, 0u,    0xFFF0u},
+          std::tuple{3u, 0xC3Fu, align, 0xFFE0u},
+          std::tuple{2u, 0x40Fu, 0u,    64u    },
+          std::tuple{2u, 0x40Fu, align, 8192u  },
+  })
+  {
+    CAPTURE(res);
+    CAPTURE(control);
+    adc_rig const r;
+    r.port().drive(5, 1'500'000);
+    r.write(cr1, res << 24);
+    r.power();
+    r.write(jsqr, 5u << 15);
+    r.write(jofr1, offset);
+    r.write(cr2, adon | control | jswstart);
+    r.run_until(r.now() + 40 * us);
+    CHECK(r.read(jdr1) == expected);
+  }
+}
+
+TEST_CASE("an injected conversion holds its input at the end of its sampling phase")
+{
+  adc_rig const r;
+  r.port().drive(9, 1'500'000);
+  r.power();
+  r.write(smpr3, 7u << 27);
+  r.write(jsqr, 9u << 15);
+  auto const start = r.now();
+  r.write(cr2, adon | jswstart);
+  REQUIRE(r.due() == start + 396 * cycle);
+  r.run_until(start + 23 * us);
+  r.port().drive(9, 750'000);
+  r.run_until(start + 24'050 * ns);
+  REQUIRE(r.due() == start + 396 * cycle);
+  r.port().drive(9, 0);
+  r.run_until(start + 396 * cycle + ns);
+  CHECK(r.read(jdr1) == 1024);
+}
+
+TEST_CASE(
+    "RM0038 12.3.9: a JSWSTART during a regular conversion drops it, that rank converts again "
+    "after the injected group")
+{
+  adc_rig const r;
+  r.port().drive(1, 750'000);
+  r.port().drive(2, 1'500'000);
+  r.port().drive(5, 2'250'000);
+  r.write(cr1, scan);
+  r.power();
+  r.write(smpr3, 7u << 3);
+  r.write(sqr1, 1u << 20);
+  r.write(sqr5, 2u | (1u << 5));
+  r.write(jsqr, 5u << 15);
+  auto const start = r.now();
+  r.write(cr2, adon | swstart);
+  r.run_until(start + 16 * cycle + ns);
+  CHECK(r.read(dr) == 2048);
+  r.run_until(start + 100 * cycle);
+  auto const injected = r.now();
+  r.write(cr2, adon | jswstart);
+  CHECK(r.due() == injected + 16 * cycle);
+  r.run_until(injected + 16 * cycle + ns);
+  CHECK((r.read(sr) & (jeoc | eoc)) == jeoc);
+  CHECK(r.read(jdr1) == 3072);
+  r.run_until(start + 420 * cycle);
+  CHECK((r.read(sr) & eoc) == 0);
+  CHECK(r.due() == injected + 16 * cycle + 396 * cycle);
+  r.run_until(injected + 412 * cycle + ns);
+  CHECK(r.read(dr) == 1024);
+  CHECK((r.read(sr) & eoc) != 0);
+  CHECK(r.due() == ~std::uint64_t{});
+}
+
+TEST_CASE(
+    "RM0038 12.3.9: a SWSTART during an injected conversion starts the regular group after it")
+{
+  adc_rig const r;
+  r.power();
+  r.write(smpr3, 7u << 27);
+  r.write(jsqr, 9u << 15);
+  auto const start = r.now();
+  r.write(cr2, adon | jswstart);
+  r.run_until(start + 10 * cycle);
+  r.write(cr2, adon | swstart);
+  CHECK((r.read(cr2) & swstart) != 0);
+  CHECK((r.read(sr) & strt) == 0);
+  CHECK(r.due() == start + 396 * cycle);
+  r.run_until(start + 396 * cycle + ns);
+  CHECK((r.read(sr) & (jeoc | strt)) == (jeoc | strt));
+  CHECK((r.read(cr2) & swstart) == 0);
+  CHECK(r.due() == start + 412 * cycle);
+  r.run_until(start + 412 * cycle + ns);
+  CHECK((r.read(sr) & eoc) != 0);
+}
+
+TEST_CASE("a JSWSTART during an injected conversion is cleared and ignored, inferred")
+{
+  adc_rig const r;
+  r.power();
+  r.write(smpr3, 7u << 27);
+  r.write(jsqr, 9u << 15);
+  auto const start = r.now();
+  r.write(cr2, adon | jswstart);
+  r.run_until(start + 10 * cycle);
+  r.write(cr2, adon | jswstart);
+  CHECK((r.read(cr2) & jswstart) == 0);
+  CHECK(r.due() == start + 396 * cycle);
+  r.run_until(start + 396 * cycle + ns);
+  CHECK((r.read(sr) & jeoc) != 0);
+  CHECK(r.due() == ~std::uint64_t{});
+}
+
+TEST_CASE(
+    "RM0038 12.7.1: a JSQR write during the injected group drops it and resumes the interrupted "
+    "regular conversion")
+{
+  adc_rig const r;
+  r.port().drive(1, 750'000);
+  r.port().drive(9, 1'500'000);
+  r.power();
+  r.write(smpr3, (7u << 3) | (7u << 27));
+  r.write(sqr5, 1);
+  r.write(jsqr, 9u << 15);
+  auto const start = r.now();
+  r.write(cr2, adon | swstart);
+  r.run_until(start + 100 * cycle);
+  r.write(cr2, adon | jswstart);
+  r.run_until(r.now() + 10 * cycle);
+  auto const dropped = r.now();
+  r.write(jsqr, 9u << 15);
+  r.run_until(start + 500 * cycle);
+  CHECK((r.read(sr) & (eoc | jeoc)) == 0);
+  CHECK(r.due() == dropped + 396 * cycle);
+  r.run_until(dropped + 396 * cycle + ns);
+  CHECK((r.read(sr) & (eoc | jeoc)) == eoc);
+  CHECK(r.read(dr) == 1024);
+  CHECK(r.read(jdr1) == 0);
+}
+
+TEST_CASE(
+    "RM0038 12.6: JEXTEN 01 with JEXTSEL 0010 starts the injected group tlatr after TIM2 "
+    "TRGO, inferred")
+{
+  adc_rig const r;
+  r.power();
+  r.write(jsqr, 5u << 15);
+  r.port().drive(5, 1'500'000);
+  r.write(cr2, adon | (1u << 20) | (2u << 16));
+  r.tim2_updates(209);
+  auto const update = r.due("TIM2");
+  r.run_until(update + 600 * ns);
+  CHECK((r.read(sr) & (jstrt | strt)) == jstrt);
+  CHECK(r.due() == update + 218'750 + 16 * cycle);
+  r.run_until(update + 218'750 + 16 * cycle + ns);
+  CHECK((r.read(sr) & jeoc) != 0);
+  CHECK(r.read(jdr1) == 2048);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("RM0038 12.6: JEXTEN 10 starts the injected group at the TRGO falling edge")
+{
+  adc_rig const r;
+  r.power();
+  r.write(cr2, adon | (2u << 20) | (2u << 16));
+  r.tim2_updates(209);
+  auto const update = r.due("TIM2");
+  r.run_until(update + 300 * ns);
+  CHECK((r.read(sr) & jstrt) == 0);
+  r.run_until(update + 476'837 + 600 * ns);
+  auto const end = r.due();
+  CHECK(end >= update + 476'836 + 218'750 + 16 * cycle);
+  CHECK(end <= update + 476'838 + 218'750 + 16 * cycle);
+}
+
+TEST_CASE("RM0038 Table 62: JEXTSEL 0001, 0101 and 1010 start on TIM9, TIM4 and TIM7 TRGO")
+{
+  for(auto const& [selection, unit, enable_offset, enable] : {
+          std::tuple{1u,  std::string_view{"TIM9"}, 0x20u, 1u << 2},
+          std::tuple{5u,  std::string_view{"TIM4"}, 0x24u, 1u << 2},
+          std::tuple{10u, std::string_view{"TIM7"}, 0x24u, 1u << 5},
+  })
+  {
+    CAPTURE(unit);
+    adc_rig const r;
+    r.power();
+    r.write(cr2, adon | (1u << 20) | (selection << 16));
+    r.timer_updates(unit, enable_offset, enable, 209);
+    auto const update = r.due(unit);
+    r.run_until(update + 600 * ns);
+    CHECK((r.read(sr) & jstrt) != 0);
+    CHECK(r.due() == update + 218'750 + 16 * cycle);
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE("one TRGO edge both groups select converts the injected group, then the regular group")
+{
+  adc_rig const r;
+  r.power();
+  r.write(cr2, adon | (1u << 28) | (6u << 24) | (1u << 20) | (2u << 16));
+  r.tim2_updates(209);
+  auto const update = r.due("TIM2");
+  auto const begin  = update + 218'750;
+  r.run_until(update + 600 * ns);
+  CHECK((r.read(sr) & (jstrt | strt)) == jstrt);
+  CHECK(r.due() == begin + 16 * cycle);
+  r.run_until(begin + 16 * cycle + ns);
+  CHECK((r.read(sr) & (jeoc | eoc | strt)) == (jeoc | strt));
+  CHECK(r.due() == begin + 32 * cycle);
+  r.run_until(begin + 32 * cycle + ns);
+  CHECK((r.read(sr) & eoc) != 0);
+}
+
+TEST_CASE(
+    "RM0038 12.9: a JSWSTART during a regular DELS delay starts at once, the regular group "
+    "resumes when that delay ends")
+{
+  adc_rig const r;
+  r.power();
+  r.write(jsqr, 5u << 15);
+  auto const start = r.now();
+  r.write(cr2, adon | cont | (5u << 4) | swstart);
+  r.run_until(start + 16 * cycle + ns);
+  REQUIRE((r.read(sr) & eoc) != 0);
+  auto const resume = start + 16 * cycle + 30'517'579 + 3 * cycle;
+  REQUIRE(r.due() == resume);
+  r.run_until(r.now() + us);
+  auto const injected = r.now();
+  r.write(cr2, adon | cont | (5u << 4) | jswstart);
+  CHECK(r.due() == injected + 16 * cycle);
+  r.run_until(injected + 16 * cycle + ns);
+  CHECK((r.read(sr) & jeoc) != 0);
+  CHECK(r.due() == resume);
+}
+
+TEST_CASE(
+    "RM0038 12.9: DELS 001 holds the next injected group until JEOC clears, "
+    "not the regular group")
+{
+  adc_rig const r;
+  r.power();
+  r.write(cr2, adon | (1u << 4) | jswstart);
+  r.run_until(r.now() + 2 * us);
+  REQUIRE((r.read(sr) & jeoc) != 0);
+  r.write(cr2, adon | (1u << 4) | jswstart);
+  CHECK((r.read(cr2) & jswstart) == 0);
+  CHECK(r.due() == ~std::uint64_t{});
+  auto const regular = r.now();
+  r.write(cr2, adon | (1u << 4) | swstart);
+  CHECK(r.due() == regular + 16 * cycle);
+  r.run_until(r.now() + 2 * us);
+  r.write(sr, ~jeoc);
+  auto const release = r.now();
+  r.write(cr2, adon | (1u << 4) | jswstart);
+  CHECK(r.due() == release + 16 * cycle);
+}
+
+TEST_CASE(
+    "RM0038 12.9: DELS 010 delays the next injected group 7 + 1 PCLK2 and 3 ADC cycles, inferred")
+{
+  adc_rig const r;
+  r.power();
+  auto const start = r.now();
+  r.write(cr2, adon | (2u << 4) | jswstart);
+  r.run_until(start + 16 * cycle + us);
+  REQUIRE((r.read(sr) & jeoc) != 0);
+  r.write(cr2, adon | (2u << 4) | jswstart);
+  CHECK(r.due() == ~std::uint64_t{});
+  r.run_until(start + 16 * cycle + 3'814'698 + 3 * cycle + ns);
+  auto const again = r.now();
+  r.write(cr2, adon | (2u << 4) | jswstart);
+  CHECK(r.due() == again + 16 * cycle);
+}
+
+TEST_CASE(
+    "RM0038 12.3.10: JDISCEN with DISCNUM 1 converts 2, then 1 injected conversions per JSWSTART, "
+    "JEOC alone after the last, inferred, then over")
+{
+  adc_rig const r;
+  for(std::uint8_t channel = 2; channel <= 4; ++channel)
+  {
+    r.port().drive(channel, 300'000u * channel);
+  }
+  r.write(cr1, scan | jdiscen | (1u << 13));
+  r.power();
+  r.write(jsqr, (2u << 20) | (2u << 5) | (3u << 10) | (4u << 15));
+  r.write(cr2, adon | jswstart);
+  r.run_until(r.now() + 40 * us);
+  CHECK(r.read(jdr(0)) == code_of(600'000));
+  CHECK(r.read(jdr(1)) == code_of(900'000));
+  CHECK(r.read(jdr(2)) == 0);
+  CHECK((r.read(sr) & jeoc) == 0);
+  r.write(cr2, adon | jswstart);
+  r.run_until(r.now() + 40 * us);
+  CHECK(r.read(jdr(2)) == code_of(1'200'000));
+  CHECK((r.read(sr) & jeoc) != 0);
+  r.write(sr, 0);
+  r.port().drive(2, 0);
+  r.write(cr2, adon | jswstart);
+  r.run_until(r.now() + 40 * us);
+  CHECK(r.read(jdr(0)) == 0);
+  CHECK((r.read(sr) & jeoc) == 0);
+}
+
+TEST_CASE("DISCEN with JDISCEN logs once at the injected start, a model_error when strict")
+{
+  adc_rig const lax;
+  lax.write(cr1, discen | jdiscen);
+  lax.power();
+  lax.write(cr2, adon | jswstart);
+  lax.run_until(lax.now() + 40 * us);
+  CHECK((lax.read(sr) & jeoc) != 0);
+  lax.write(cr2, adon | jswstart);
+  CHECK(lax.warnings() == 1);
+
+  adc_rig const strict{l152re(), true};
+  strict.write(cr1, discen | jdiscen);
+  strict.power();
+  CHECK_THROWS_AS(strict.attempt(cr2, adon | jswstart), popcorn::model_error);
+  CHECK((strict.read(sr) & jstrt) == 0);
+}
+
+TEST_CASE(
+    "a JEXTSEL no model produces or reserved logs once and starts nothing, "
+    "a model_error when strict")
+{
+  for(auto const& [selection, named] : {
+          std::pair{0u,  std::string_view{"tim9_cc1"}},
+          std::pair{15u, std::string_view{"exti15"}  },
+          std::pair{11u, std::string_view{"reserved"}},
+  })
+  {
+    CAPTURE(selection);
+    adc_rig const r;
+    r.power();
+    r.write(cr2, adon | (1u << 20) | (selection << 16));
+    r.write(cr2, adon | (1u << 20) | (selection << 16));
+    r.run_until(r.now() + 40 * us);
+    CHECK((r.read(sr) & jstrt) == 0);
+    REQUIRE(r.warnings() == 1);
+    CHECK(r.logged.front().message.contains(named));
+
+    adc_rig const strict{l152re(), true};
+    strict.power();
+    CHECK_THROWS_AS(
+        strict.attempt(cr2, adon | (1u << 20) | (selection << 16)), popcorn::model_error);
+    CHECK(((strict.read(cr2) >> 20) & 3u) == 0);
+  }
+}
+
+TEST_CASE(
+    "JEXTEN set after TIM2 wrapped lazily: no past TRGO starts the injected group, the next does")
+{
+  adc_rig const r;
+  r.power();
+  r.tim2_updates(209);
+  r.run_until(r.now() + 350 * us);
+  r.write(cr2, adon | (1u << 20) | (2u << 16));
+  r.run_until(r.now() + us);
+  CHECK((r.read(sr) & (jstrt | jeoc)) == 0);
+  CHECK(r.due() == ~std::uint64_t{});
+  r.run_until(r.now() + 101 * us);
+  CHECK((r.read(sr) & jeoc) != 0);
+}
+
+TEST_CASE("JSWSTART with ADONS clear is ignored and logs once, a model_error when strict")
+{
+  adc_rig const r;
+  r.write(cr2, adon | jswstart);
+  CHECK((r.read(cr2) & jswstart) == 0);
+  r.run_until(r.now() + 40 * us);
+  CHECK((r.read(sr) & (jeoc | jstrt)) == 0);
+  CHECK(r.warnings() == 1);
+
+  adc_rig const strict{l152re(), true};
+  CHECK_THROWS_AS(strict.attempt(cr2, adon | jswstart), popcorn::model_error);
+}
+
+TEST_CASE("JSWSTART waits for HSI16 set, ADON 0 clears it, no model_error when strict")
+{
+  adc_rig const r{l152re(), true};
+  r.port().drive(5, 1'500'000);
+  r.power();
+  r.write(jsqr, 5u << 15);
+  auto const rcc = r.f.target->peripheral("RCC").description().base;
+  REQUIRE(r.f.target->mem().write(rcc, 4, 0x0000'0300u).has_value());
+  r.write(cr2, adon | jswstart);
+  r.run_until(r.now() + 20 * us);
+  CHECK((r.read(cr2) & jswstart) != 0);
+  CHECK((r.read(sr) & jstrt) == 0);
+  r.hsi_on();
+  CHECK((r.read(sr) & jeoc) != 0);
+  CHECK(r.read(jdr1) == 2048);
+  CHECK((r.read(cr2) & jswstart) == 0);
+  REQUIRE(r.f.target->mem().write(rcc, 4, 0x0000'0300u).has_value());
+  r.write(cr2, adon | jswstart);
+  REQUIRE((r.read(cr2) & jswstart) != 0);
+  CHECK_NOTHROW(r.write(cr2, r.read(cr2) & ~adon));
+  CHECK((r.read(cr2) & jswstart) == 0);
+}
+
+TEST_CASE(
+    "checklist 31: ADC1RST drops an injection over a regular conversion, a SWSTART after it "
+    "starts at once")
+{
+  adc_rig const r;
+  r.power();
+  r.write(smpr3, (7u << 3) | (7u << 27));
+  r.write(sqr5, 1);
+  r.write(jsqr, 9u << 15);
+  r.write(cr2, adon | swstart);
+  r.run_until(r.now() + 100 * cycle);
+  r.write(cr2, adon | jswstart);
+  r.run_until(r.now() + 10 * cycle);
+  rcc_reset_pulse(r.f, "APB2RSTR", "ADC1RST");
+  CHECK(r.read(jsqr) == 0);
+  r.power();
+  auto const regular = r.now();
+  r.write(cr2, adon | swstart);
+  CHECK((r.read(sr) & strt) != 0);
+  CHECK(r.due() == regular + 16 * cycle);
+  r.run_until(regular + 16 * cycle + ns);
+  CHECK((r.read(sr) & eoc) != 0);
+  auto const injected = r.now();
+  r.write(cr2, adon | jswstart);
+  CHECK(r.due() == injected + 16 * cycle);
+  r.run_until(injected + 16 * cycle + ns);
+  CHECK((r.read(sr) & jeoc) != 0);
+}
+
+TEST_CASE("a snapshot during an injection over a regular conversion ends both at the same times")
+{
+  adc_rig const r;
+  r.port().drive(1, 750'000);
+  r.port().drive(9, 1'500'000);
+  r.power();
+  r.write(smpr3, (7u << 3) | (7u << 27));
+  r.write(sqr5, 1);
+  r.write(jsqr, 9u << 15);
+  r.write(cr2, adon | swstart);
+  r.run_until(r.now() + 100 * cycle);
+  auto const injected = r.now();
+  r.write(cr2, adon | jswstart);
+  r.run_until(injected + 100 * cycle);
+  auto const saved = r.f.target->snapshot();
+  auto const check = [&](adc_rig const& g) {
+    g.run_until(injected + 300 * cycle);
+    CHECK(g.due() == injected + 396 * cycle);
+    g.run_until(injected + 396 * cycle + ns);
+    CHECK((g.read(sr) & (jeoc | eoc)) == jeoc);
+    CHECK(g.read(jdr1) == 2048);
+    CHECK(g.due() == injected + 792 * cycle);
+    g.run_until(injected + 792 * cycle + ns);
+    CHECK((g.read(sr) & eoc) != 0);
+    CHECK(g.read(dr) == 1024);
+  };
+  r.run_until(injected + 500 * cycle);
+  r.f.target->restore(saved);
+  check(r);
+  adc_rig const other;
+  other.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  check(other);
+}
+
+TEST_CASE(
+    "an injected bank B channel on a pad of its own reads 0 and logs once, "
+    "a model_error when strict")
+{
+  adc_rig const r;
+  r.port().drive(0, 1'500'000);
+  r.power();
+  r.write(cr2, adon | bank_b);
+  r.write(cr2, adon | bank_b | jswstart);
+  r.run_until(r.now() + 40 * us);
+  CHECK((r.read(sr) & jeoc) != 0);
+  CHECK(r.read(jdr1) == 0);
+  CHECK(r.warnings() == 1);
+
+  adc_rig const strict{l152re(), true};
+  strict.power();
+  strict.write(cr2, adon | bank_b);
+  CHECK_THROWS_AS(strict.attempt(cr2, adon | bank_b | jswstart), popcorn::model_error);
+  CHECK((strict.read(sr) & jstrt) == 0);
 }

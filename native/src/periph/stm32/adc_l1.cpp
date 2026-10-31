@@ -39,11 +39,16 @@ constexpr std::uint64_t latency_halves  = 7;
 constexpr std::uint64_t sync_adc_cycles = 3;
 constexpr std::uint64_t sync_pclk       = 1;
 constexpr std::size_t   selections      = 16;
+constexpr std::size_t   injected_ranks  = 4;
 
 constexpr std::array<std::string_view, selections> regular_triggers{
     "tim9_cc2",  "tim9_trgo", "tim2_cc3", "tim2_cc2",  "tim3_trgo", "tim4_cc4",
     "tim2_trgo", "tim3_cc1",  "tim3_cc3", "tim4_trgo", "tim6_trgo", {},
     {},          {},          {},         "exti11"};
+constexpr std::array<std::string_view, selections> injected_triggers{
+    "tim9_cc1", "tim9_trgo", "tim2_trgo", "tim2_cc1",  "tim3_cc4",  "tim4_trgo",
+    "tim4_cc1", "tim4_cc2",  "tim4_cc3",  "tim10_cc1", "tim7_trgo", {},
+    {},         {},          {},          "exti15"};
 constexpr std::array<std::uint32_t, 8> delay_pclk{0, 0, 7, 15, 31, 63, 127, 255};
 
 constexpr std::array<std::uint32_t, 8> sampling_cycles{4, 9, 16, 24, 48, 96, 192, 384};
@@ -101,15 +106,29 @@ struct adc_l1_state
   std::uint8_t                        rank{};
   std::uint8_t                        resolution{};
   std::uint8_t                        subgroup_left{};
+  bool                                injecting{};
+  bool                                regular_resume{};
+  bool                                injected_frozen{};
+  std::uint64_t                       injected_delay_until_ps{};
+  std::uint8_t                        injected_rank{};
+  std::uint8_t                        injected_left{};
 
   friend auto operator==(adc_l1_state const&, adc_l1_state const&) -> bool = default;
+};
+
+struct trigger_selection
+{
+  std::optional<std::uint32_t> regular;
+  std::optional<std::uint32_t> injected;
+
+  friend auto operator==(trigger_selection const&, trigger_selection const&) -> bool = default;
 };
 
 /**
  * @brief The ADC of the STM32L1, `aditf3_v1_1_Cube`, RM0038 section 12, one instance `ADC` with
  *        the common ADC_CSR and ADC_CCR at offsets 0x300 and 0x304: power-up, the regular group
- *        in single, continuous and scan mode, resolution, alignment, EOC, OVR and the channel
- *        banks, converted in virtual time.
+ *        in single, continuous and scan mode, the injected group, resolution, alignment, EOC,
+ *        JEOC, OVR and the channel banks, converted in virtual time.
  *
  *        Power, RM0038 12.3.1: an ADC_CR2 write taking ADON from 0 to 1 sets ADONS tSTAB = 3.5 us
  *        later, the DS10002 and DS6876 maximum. The ADC clock is HSI16 divided by ADCPRE of
@@ -158,24 +177,51 @@ struct adc_l1_state
  *        converting a bank B channel on a pad of its own, VCOMP on channel 26 or a channel the
  *        category lacks reads 0 and logs once, a model_error under strict_peripherals.
  *
+ *        Injected group, RM0038 12.3.9 and 12.15.15: JSWSTART with ADONS set, or a JEXTEN
+ *        edge, starts the group. With SCAN 1 its JL + 1 conversions run in the order of the
+ *        ADC_JSQR note, JSQ4 alone for JL 0, JSQ3 then JSQ4 for JL 1, up to JSQ1 to JSQ4 for JL
+ *        3. With SCAN 0 the group is the first of them, JSQ(4 - JL), inferred. The k-th
+ *        conversion of the group lands in ADC_JDRk less the JOFFSET of ADC_JOFRk, inferred from
+ *        the HAL rank order. JSTRT sets at each injected conversion start, JSWSTART clearing, and
+ *        JEOC at the end of the group. An injection drops a regular conversion in progress or
+ *        due, and that rank converts again when the injected group ends, once the delay of the
+ *        regular conversion before it has passed, 12.9. A regular trigger or SWSTART during the
+ *        injected group starts the regular group at its end. A JSWSTART or an injected trigger
+ *        while the injected group runs is ignored, JSWSTART cleared, inferred. A write of
+ *        ADC_JSQR during the injected group drops it and resumes an interrupted regular
+ *        conversion, 12.7.1. JSWSTART with ADONS clear logs a warning once, a model_error under
+ *        strict_peripherals, and is ignored.
+ *
+ *        Injected data, RM0038 12.4 Figures 44 to 46: the code less the offset as a 16-bit two's
+ *        complement value, right-aligned, or with ALIGN 1 one bit below a regular result, the
+ *        sign on bit 15 at 12 bits and on bit 7 and above at 6 bits, inferred at 10 and 8 bits.
+ *        Below 12 bits JOFFSET counts from bit 11 and its bits under the resolution are ignored,
+ *        inferred from the LL_ADC_INJ_SetOffset note. A JDRx read clears nothing.
+ *
  *        Hardware triggers, RM0038 12.6: with EXTEN not 0, ADON and ADONS set, the model listens,
  *        as a trigger_sink, to the signal EXTSEL selects in RM0038 Table 61, such as `tim2_trgo`
  *        for 0110. EXTEN 01 detects rising edges, 10 falling edges, 11 both. A detected edge
  *        while no conversion runs, starts or waits and outside a DELS delay starts the group, or
  *        the next DISCEN subgroup, tlatr = 3.5 ADC clock cycles later, the DS10002 maximum.
- *        SWSTART starts the group too. The selections with a source model are the TRGO ones,
- *        TIM9, TIM3, TIM2, TIM4 and TIM6. A selection no model produces, the compare events and
- *        EXTI line 11, and the reserved 1011 to 1110 log once when the model starts listening,
- *        a model_error under strict_peripherals, and start nothing. A model_error of a
- *        selection surfaces from the ADC_CR2 write or the ADONS event that starts the
- *        listening. A config_error or model_error of the group checks raised at a trigger
- *        surfaces from the source's event or register access that gave the edge. Trigger
- *        detection stays on across an EXTSEL change, RM0038 12.6 blanks it for 2 PCLK cycles.
+ *        SWSTART starts the group too. JEXTEN and JEXTSEL do the same for the injected group with
+ *        RM0038 Table 62 and the same tlatr, inferred. The selections with a source model are
+ *        the TRGO ones, TIM9, TIM3, TIM2, TIM4 and TIM6 for EXTSEL, TIM9, TIM2, TIM4 and TIM7
+ *        for JEXTSEL. One edge of a signal both groups select starts both, the injected group
+ *        first. A selection no model produces, the compare events and EXTI lines 11 and 15, and
+ *        the reserved 1011 to 1110 log once when the model starts listening, a model_error under
+ *        strict_peripherals, and start nothing. A model_error of a selection surfaces from the
+ *        ADC_CR2 write or the ADONS event that starts the listening. A config_error or
+ *        model_error of the group checks raised at a trigger surfaces from the source's event or
+ *        register access that gave the edge. Trigger detection stays on across an EXTSEL change,
+ *        RM0038 12.6 blanks it for 2 PCLK cycles.
  *
  *        Discontinuous mode, RM0038 12.3.10: with DISCEN each trigger or SWSTART converts the
  *        next DISCNUM + 1 ranks, fewer in the last subgroup, the next one starting over at rank
  *        1. DISCEN with CONT converts as DISCEN alone, logged once, a model_error under
- *        strict_peripherals, inferred.
+ *        strict_peripherals, inferred. With JDISCEN each JSWSTART or injected trigger converts
+ *        the next DISCNUM + 1 conversions of the injected group, JEOC alone setting after the
+ *        last, inferred. DISCEN with JDISCEN, against 12.3.10, logs once, a model_error under
+ *        strict_peripherals, each group following its own bit.
  *
  *        Delay insertion, RM0038 12.9: DELS 001 holds the next conversion at each EOC, after
  *        each conversion with EOCS 1 and after the group with EOCS 0, inferred for EOCS 0,
@@ -184,11 +230,13 @@ struct adc_l1_state
  *        31, 63, 127 or 255 PCLK2 cycles after the end of the conversion, plus 1 PCLK2 cycle
  *        and 3 ADC clock cycles of synchronisation, the maxima of the RM0038 Figure 48 note,
  *        inferred, at the PCLK2 rate of the conversion end. A trigger or SWSTART during the
- *        hold is ignored, 12.9 and the hardware or software trigger of Figure 47.
+ *        hold is ignored, 12.9 and the hardware or software trigger of Figure 47. The same holds
+ *        apply after each injected group, DELS 001 until JEOC clears, and ignore injected
+ *        triggers and JSWSTART only. An injected trigger during a regular hold starts at once.
  *
- *        Not modelled, each logged once, a model_error under strict_peripherals: JSWSTART, which
- *        clears, and JEXTEN or DMA other than 0 at the ADC_CR2 write, AWDEN at the ADC_CR1
- *        write, and at the group start DMA, PDI, PDD, JAUTO and AWDEN.
+ *        Not modelled, each logged once, a model_error under strict_peripherals: DMA other than 0
+ *        at the ADC_CR2 write, AWDEN and JAWDEN at the ADC_CR1 write, at the regular group start
+ *        DMA, PDI, PDD, JAUTO and AWDEN, and at the injected group start PDI, PDD and JAWDEN.
  */
 class adc_l1_model final : public dispatch_model<adc_l1_model, adc_l1_state>,
                            public analog_port,
@@ -242,6 +290,7 @@ public:
   void cr1_written(std::uint32_t old, std::uint32_t now);
   void cr2_written(std::uint32_t old, std::uint32_t now);
   void sequence_written(std::uint32_t, std::uint32_t);
+  void injected_sequence_written(std::uint32_t, std::uint32_t);
   void plain_written(std::uint32_t, std::uint32_t)
   {
     signal();
@@ -249,34 +298,54 @@ public:
 
 private:
   void               restore_reset_values();
-  [[nodiscard]] auto listened() const -> std::optional<std::uint32_t>;
+  [[nodiscard]] auto selected(std::uint32_t control, bool ready) const -> trigger_selection;
+  [[nodiscard]] auto listened() const -> trigger_selection;
   [[nodiscard]] auto blocked(std::uint64_t ps) const -> bool;
-  void               check_selection(std::uint32_t selection);
-  void               retune(std::optional<std::uint32_t> was);
-  void               notify(std::optional<std::uint32_t> selection);
-  void               start_group(std::uint64_t start_ps);
+  [[nodiscard]] auto injected_blocked(std::uint64_t ps) const -> bool;
+  void               check_selection(trigger_selection const& was, trigger_selection const& will);
+  void               retune(trigger_selection const& was);
+  void               notify(trigger_selection const& selection);
+  void               software_start();
+  void               injected_software_start();
+  void               regular_start(std::uint64_t start_ps, std::uint64_t edge_ps, bool software);
+  void               injected_start(std::uint64_t start_ps, std::uint64_t edge_ps, bool software);
+  void               arm_group();
+  void               start_injected(std::uint64_t start_ps);
+  void               suspend_regular();
+  void               resume_regular(std::uint64_t start_ps);
   void               start_now(std::uint64_t start_ps);
   void               release_freeze();
+  void               hold(std::uint64_t end_ps, bool& frozen, std::uint64_t& until_ps);
   [[nodiscard]] auto adc_hz() -> std::uint64_t;
   [[nodiscard]] auto length() const -> std::size_t;
+  [[nodiscard]] auto injected_length() const -> std::size_t;
   [[nodiscard]] auto channel_at(std::size_t rank) const -> std::uint32_t;
+  [[nodiscard]] auto injected_channel(std::size_t rank) const -> std::uint32_t;
+  [[nodiscard]] auto current_channel() const -> std::uint32_t;
   [[nodiscard]] auto bank_b() const -> bool;
   [[nodiscard]] auto sampling(std::uint32_t channel) const -> std::uint32_t;
   [[nodiscard]] auto conversion_cycles() const -> std::uint64_t;
   [[nodiscard]] auto sample_end_ps() const -> std::uint64_t;
-  [[nodiscard]] auto busy() const -> bool;
+  [[nodiscard]] auto engine_busy() const -> bool;
+  [[nodiscard]] auto regular_busy() const -> bool;
   [[nodiscard]] auto readable(std::uint32_t channel) const -> bool;
   [[nodiscard]] auto calibration(std::uint32_t at, std::string_view name) const -> std::uint16_t;
   [[nodiscard]] auto code(std::uint32_t channel) const -> std::uint32_t;
   void               external(std::uint8_t channel) const;
   void               hold_until(std::uint64_t ps);
   void               power_up();
+  void               check_common();
   void               check_group();
-  void               check_channel(std::uint32_t channel);
+  void               check_injected();
+  void               check_channel(std::uint32_t channel, std::string_view reg);
   void               begin(std::uint64_t start_ps);
   void               schedule(std::uint64_t start_ps);
   void               finish();
+  void               finish_injected();
   void               land(std::uint32_t result);
+  void               store_injected(std::size_t index, std::uint32_t result);
+  void               stop_engine();
+  void               abort_regular();
   void               abort();
   void               signal();
   void               unmodelled(bool& logged, std::string_view name, std::string_view what);
@@ -322,14 +391,25 @@ private:
   std::array<std::optional<field_ref>, max_ranks> sequence_;
   std::array<reg_ref, 4>                          sampling_regs_;
   std::array<std::pair<field_ref, field_ref>, 4>  interrupts_;
+  field_ref                                       injected_started_;
+  field_ref                                       injected_end_;
+  field_ref                                       injected_select_;
+  field_ref                                       injected_discontinuous_;
+  field_ref                                       injected_watchdog_;
+  field_ref                                       injected_length_;
+  std::array<field_ref, injected_ranks>           injected_sequence_;
+  std::array<field_ref, injected_ranks>           offsets_;
+  std::array<field_ref, injected_ranks>           injected_data_;
   std::uint32_t                                   clearable_{};
-  bool                                            injected_logged_{};
   std::array<bool, selections>                    selection_logged_{};
+  std::array<bool, selections>                    injected_selection_logged_{};
+  bool                                            injected_refused_logged_{};
+  bool                                            auto_injected_logged_{};
+  bool                                            both_discontinuous_logged_{};
+  bool                                            injected_watchdog_logged_{};
   bool                                            discontinuous_continuous_logged_{};
-  bool                                            injected_trigger_logged_{};
   bool                                            dma_logged_{};
   bool                                            power_down_logged_{};
-  bool                                            auto_injected_logged_{};
   bool                                            watchdog_logged_{};
   bool                                            start_refused_logged_{};
   bool                                            length_logged_{};
@@ -338,7 +418,7 @@ private:
   std::array<bool, channels>                      channel_logged_{};
 };
 
-constexpr std::array<write_entry<adc_l1_model>, 13> banked_writes{
+constexpr std::array<write_entry<adc_l1_model>, 22> banked_writes{
     {
      {"SR", &adc_l1_model::sr_written},
      {"CR1", &adc_l1_model::cr1_written},
@@ -346,11 +426,20 @@ constexpr std::array<write_entry<adc_l1_model>, 13> banked_writes{
      {"SMPR1", &adc_l1_model::plain_written},
      {"SMPR2", &adc_l1_model::plain_written},
      {"SMPR3", &adc_l1_model::plain_written},
+     {"JOFR1", nullptr},
+     {"JOFR2", nullptr},
+     {"JOFR3", nullptr},
+     {"JOFR4", nullptr},
      {"SQR1", &adc_l1_model::sequence_written},
      {"SQR2", &adc_l1_model::sequence_written},
      {"SQR3", &adc_l1_model::sequence_written},
      {"SQR4", &adc_l1_model::sequence_written},
      {"SQR5", &adc_l1_model::sequence_written},
+     {"JSQR", &adc_l1_model::injected_sequence_written},
+     {"JDR1", nullptr},
+     {"JDR2", nullptr},
+     {"JDR3", nullptr},
+     {"JDR4", nullptr},
      {"DR", nullptr},
      {"SMPR0", &adc_l1_model::plain_written},
      }
@@ -412,9 +501,21 @@ adc_l1_model::adc_l1_model(
       sampling_regs_[index] = reg(std::format("SMPR{}", index));
     }
   }
+  injected_started_       = field("SR", "JSTRT");
+  injected_end_           = field("SR", "JEOC");
+  injected_select_        = field("CR2", "JEXTSEL");
+  injected_discontinuous_ = field("CR1", "JDISCEN");
+  injected_watchdog_      = field("CR1", "JAWDEN");
+  injected_length_        = field("JSQR", "JL");
+  for(std::size_t rank = 0; rank < injected_ranks; ++rank)
+  {
+    injected_sequence_[rank] = field("JSQR", std::format("JSQ{}", rank + 1));
+    offsets_[rank] = field(std::format("JOFR{}", rank + 1), std::format("JOFFSET{}", rank + 1));
+    injected_data_[rank] = field(std::format("JDR{}", rank + 1), "JDATA");
+  }
   interrupts_ = {
       {{end_of_conversion_, field("CR1", "EOCIE")},
-       {field("SR", "JEOC"), field("CR1", "JEOCIE")},
+       {injected_end_, field("CR1", "JEOCIE")},
        {field("SR", "AWD"), field("CR1", "AWDIE")},
        {overrun_, field("CR1", "OVRIE")}}
   };
@@ -470,9 +571,24 @@ auto adc_l1_model::length() const -> std::size_t
   return std::min<std::size_t>(get(regs_, length_) + 1u, ranks);
 }
 
+auto adc_l1_model::injected_length() const -> std::size_t
+{
+  return get(regs_, scan_) == 0 ? 1 : get(regs_, injected_length_) + 1u;
+}
+
 auto adc_l1_model::channel_at(std::size_t rank) const -> std::uint32_t
 {
   return get(regs_, *sequence_[rank]);
+}
+
+auto adc_l1_model::injected_channel(std::size_t rank) const -> std::uint32_t
+{
+  return get(regs_, injected_sequence_[injected_ranks - 1u - get(regs_, injected_length_) + rank]);
+}
+
+auto adc_l1_model::current_channel() const -> std::uint32_t
+{
+  return state_.injecting ? injected_channel(state_.injected_rank) : channel_at(state_.rank);
 }
 
 auto adc_l1_model::bank_b() const -> bool
@@ -493,7 +609,7 @@ auto adc_l1_model::sampling(std::uint32_t channel) const -> std::uint32_t
 
 auto adc_l1_model::conversion_cycles() const -> std::uint64_t
 {
-  return std::uint64_t{sampling(channel_at(state_.rank))} + sar_cycles[get(regs_, resolution_)];
+  return std::uint64_t{sampling(current_channel())} + sar_cycles[get(regs_, resolution_)];
 }
 
 auto adc_l1_model::sample_end_ps() const -> std::uint64_t
@@ -501,9 +617,14 @@ auto adc_l1_model::sample_end_ps() const -> std::uint64_t
   return state_.sample_end_ps;
 }
 
-auto adc_l1_model::busy() const -> bool
+auto adc_l1_model::engine_busy() const -> bool
 {
-  return state_.converting or state_.waiting_clock or state_.start_pending or state_.resume_frozen;
+  return state_.converting or state_.waiting_clock or state_.start_pending;
+}
+
+auto adc_l1_model::regular_busy() const -> bool
+{
+  return (engine_busy() and not state_.injecting) or state_.resume_frozen or state_.regular_resume;
 }
 
 auto adc_l1_model::readable(std::uint32_t channel) const -> bool
@@ -583,7 +704,7 @@ void adc_l1_model::hold_until(std::uint64_t ps)
 {
   if(not state_.held and sample_end_ps() <= ps)
   {
-    state_.held_code = code(channel_at(state_.rank));
+    state_.held_code = code(current_channel());
     state_.held      = true;
   }
 }
@@ -625,59 +746,81 @@ auto adc_l1_model::on_write(
   }
   auto const next = merge_write(regs_.peek(word), offset, size, value);
   auto const was  = listened();
-  auto const sel  = trigger_select_.of(next);
-  auto const will = power_.of(next) != 0 and get(regs_, ready_) != 0 and trigger_.of(next) != 0;
-  if(will and was != sel)
-  {
-    check_selection(sel);
-  }
+  auto const will = selected(next, get(regs_, ready_) != 0);
+  check_selection(was, will);
   notify(was);
-  if(will and was != sel)
+  if(will != was)
   {
-    notify(sel);
+    notify(will);
   }
   auto const result = base::on_write(regs, offset, size, old, value, ctx);
   retune(was);
   return result;
 }
 
-auto adc_l1_model::listened() const -> std::optional<std::uint32_t>
+auto adc_l1_model::selected(std::uint32_t control, bool ready) const -> trigger_selection
 {
-  if(get(regs_, power_) == 0 or get(regs_, ready_) == 0 or get(regs_, trigger_) == 0)
+  if(power_.of(control) == 0 or not ready)
   {
-    return std::nullopt;
+    return {};
   }
-  return get(regs_, trigger_select_);
+  trigger_selection out;
+  if(trigger_.of(control) != 0)
+  {
+    out.regular = trigger_select_.of(control);
+  }
+  if(injected_trigger_.of(control) != 0)
+  {
+    out.injected = injected_select_.of(control);
+  }
+  return out;
+}
+
+auto adc_l1_model::listened() const -> trigger_selection
+{
+  return selected(regs_.peek(trigger_.offset), get(regs_, ready_) != 0);
 }
 
 auto adc_l1_model::listens(std::string_view signal) const -> bool
 {
-  auto const selected = listened();
-  return selected
-     and not regular_triggers[*selected].empty()
-     and regular_triggers[*selected] == signal;
+  auto const now = listened();
+  return (now.regular and regular_triggers[*now.regular] == signal)
+      or (now.injected and injected_triggers[*now.injected] == signal);
 }
 
-void adc_l1_model::check_selection(std::uint32_t selection)
+void adc_l1_model::check_selection(trigger_selection const& was, trigger_selection const& will)
 {
-  auto const signal = regular_triggers[selection];
-  if(signal.empty())
+  auto const check = [this](
+                         std::span<std::string_view const, selections> table,
+                         std::span<bool, selections> logged, std::string_view name,
+                         std::uint32_t selection) {
+    auto const signal = table[selection];
+    if(signal.empty())
+    {
+      forbidden(
+          logged[selection], "CR2",
+          std::format(
+              "{} {:#06b}: a reserved trigger selection, no conversion starts", name, selection));
+      return;
+    }
+    if(trigger_source_of(ctx_.peers, signal) == nullptr)
+    {
+      unmodelled(
+          logged[selection], "CR2",
+          std::format("{} {:#06b}: trigger {}, which no model produces,", name, selection, signal));
+    }
+  };
+  if(will.regular and will.regular != was.regular)
   {
-    forbidden(
-        selection_logged_[selection], "CR2",
-        std::format(
-            "EXTSEL {:#06b}: a reserved trigger selection, no conversion starts", selection));
-    return;
+    check(regular_triggers, selection_logged_, "EXTSEL", *will.regular);
   }
-  if(trigger_source_of(ctx_.peers, signal) == nullptr)
+  if(will.injected and will.injected != was.injected)
   {
-    unmodelled(
-        selection_logged_[selection], "CR2",
-        std::format("EXTSEL {:#06b}: trigger {}, which no model produces,", selection, signal));
+    check(injected_triggers, injected_selection_logged_, "JEXTSEL", *will.injected);
   }
 }
 
-void adc_l1_model::retune(std::optional<std::uint32_t> was)
+void adc_l1_model::retune(trigger_selection const& was)
 {
   auto const now = listened();
   if(now == was)
@@ -688,30 +831,47 @@ void adc_l1_model::retune(std::optional<std::uint32_t> was)
   notify(now);
 }
 
-void adc_l1_model::notify(std::optional<std::uint32_t> selection)
+void adc_l1_model::notify(trigger_selection const& selection)
 {
-  if(selection and not regular_triggers[*selection].empty())
+  if(selection.regular and not regular_triggers[*selection.regular].empty())
   {
-    static_cast<void>(interest_changed(ctx_.peers, regular_triggers[*selection]));
+    static_cast<void>(interest_changed(ctx_.peers, regular_triggers[*selection.regular]));
+  }
+  if(selection.injected and not injected_triggers[*selection.injected].empty())
+  {
+    static_cast<void>(interest_changed(ctx_.peers, injected_triggers[*selection.injected]));
   }
 }
 
 void adc_l1_model::triggered(std::string_view signal, trigger_edge edge, trigger_time at)
 {
-  auto const polarity = get(regs_, trigger_);
-  auto const detected = edge == trigger_edge::rising ? (polarity & exten_rising) != 0
-                                                     : (polarity & exten_falling) != 0;
-  if(not detected or not listens(signal) or busy() or blocked(at.ps))
+  auto const now     = listened();
+  auto const detects = [edge](std::uint32_t polarity) {
+    return edge == trigger_edge::rising ? (polarity & exten_rising) != 0
+                                        : (polarity & exten_falling) != 0;
+  };
+  auto const hz    = adc_hz();
+  auto const start = at.ps + (hz == 0 ? 0 : cycles_ps(latency_halves, 2 * hz));
+  if(now.injected
+     and injected_triggers[*now.injected] == signal
+     and detects(get(regs_, injected_trigger_)))
   {
-    return;
+    injected_start(start, at.ps, false);
   }
-  auto const hz = adc_hz();
-  start_group(at.ps + (hz == 0 ? 0 : cycles_ps(latency_halves, 2 * hz)));
+  if(now.regular and regular_triggers[*now.regular] == signal and detects(get(regs_, trigger_)))
+  {
+    regular_start(start, at.ps, false);
+  }
 }
 
 auto adc_l1_model::blocked(std::uint64_t ps) const -> bool
 {
   return state_.frozen or ps < state_.delay_until_ps;
+}
+
+auto adc_l1_model::injected_blocked(std::uint64_t ps) const -> bool
+{
+  return state_.injected_frozen or ps < state_.injected_delay_until_ps;
 }
 
 void adc_l1_model::release_freeze()
@@ -722,8 +882,18 @@ void adc_l1_model::release_freeze()
   }
   if(std::exchange(state_.resume_frozen, false))
   {
-    begin(ctx_.clock.time().ps);
+    resume_regular(ctx_.clock.time().ps);
   }
+}
+
+void adc_l1_model::resume_regular(std::uint64_t start_ps)
+{
+  if(state_.injecting)
+  {
+    state_.regular_resume = true;
+    return;
+  }
+  begin(start_ps);
 }
 
 void adc_l1_model::sr_written(std::uint32_t old, std::uint32_t now)
@@ -735,6 +905,10 @@ void adc_l1_model::sr_written(std::uint32_t old, std::uint32_t now)
     state_.unread = false;
   }
   signal();
+  if(injected_end_.of(old) != 0 and injected_end_.of(kept) == 0)
+  {
+    state_.injected_frozen = false;
+  }
   if(end_of_conversion_.of(old) != 0 and end_of_conversion_.of(kept) == 0)
   {
     release_freeze();
@@ -748,6 +922,11 @@ void adc_l1_model::cr1_written(std::uint32_t old, std::uint32_t now)
   {
     unmodelled(watchdog_logged_, "CR1", "AWDEN: the analog watchdog");
   }
+  if(injected_watchdog_.of(now) != 0 and injected_watchdog_.of(old) == 0)
+  {
+    unmodelled(
+        injected_watchdog_logged_, "CR1", "JAWDEN: the analog watchdog on injected channels");
+  }
 }
 
 void adc_l1_model::cr2_written(std::uint32_t old, std::uint32_t now)
@@ -756,33 +935,33 @@ void adc_l1_model::cr2_written(std::uint32_t old, std::uint32_t now)
   {
     unmodelled(dma_logged_, "CR2", "DMA: regular DMA requests");
   }
-  if(injected_start_.of(now) != 0)
-  {
-    update(regs_, injected_start_, 0);
-    unmodelled(injected_logged_, "CR2", "JSWSTART: injected conversions");
-  }
-  if(injected_trigger_.of(now) != 0 and injected_trigger_.of(old) == 0)
-  {
-    unmodelled(injected_trigger_logged_, "CR2", "JEXTEN: injected hardware triggers");
-  }
   if(power_.of(now) == 0 and power_.of(old) != 0)
   {
     update(regs_, ready_, 0);
     update(regs_, start_, 0);
+    update(regs_, injected_start_, 0);
     ++state_.ready_generation;
     state_.ready_waiting = false;
     abort();
     signal();
     return;
   }
-  else if(power_.of(now) != 0 and power_.of(old) == 0)
+  if(power_.of(now) != 0 and power_.of(old) == 0)
   {
     power_up();
   }
-  if(start_.of(now) == 0)
+  if(start_.of(now) != 0)
   {
-    return;
+    software_start();
   }
+  if(injected_start_.of(now) != 0)
+  {
+    injected_software_start();
+  }
+}
+
+void adc_l1_model::software_start()
+{
   if(get(regs_, ready_) == 0)
   {
     update(regs_, start_, 0);
@@ -791,18 +970,59 @@ void adc_l1_model::cr2_written(std::uint32_t old, std::uint32_t now)
         "SWSTART with ADONS clear, forbidden by RM0038 12.15.3: ignored");
     return;
   }
-  if(busy() or blocked(ctx_.clock.time().ps))
+  auto const now = ctx_.clock.time().ps;
+  regular_start(now, now, true);
+}
+
+void adc_l1_model::injected_software_start()
+{
+  if(get(regs_, ready_) == 0)
   {
-    if(not state_.waiting_clock)
+    update(regs_, injected_start_, 0);
+    forbidden(
+        injected_refused_logged_, "CR2",
+        "JSWSTART with ADONS clear, forbidden by RM0038 12.15.3: ignored");
+    return;
+  }
+  auto const now = ctx_.clock.time().ps;
+  injected_start(now, now, true);
+}
+
+void adc_l1_model::regular_start(std::uint64_t start_ps, std::uint64_t edge_ps, bool software)
+{
+  if(regular_busy() or blocked(edge_ps))
+  {
+    if(software and not(state_.waiting_clock and not state_.injecting))
     {
       update(regs_, start_, 0);
     }
     return;
   }
-  start_group(ctx_.clock.time().ps);
+  arm_group();
+  if(state_.injecting)
+  {
+    state_.regular_resume = true;
+    return;
+  }
+  begin(start_ps);
 }
 
-void adc_l1_model::start_group(std::uint64_t start_ps)
+void adc_l1_model::injected_start(std::uint64_t start_ps, std::uint64_t edge_ps, bool software)
+{
+  if(state_.injecting or injected_blocked(edge_ps))
+  {
+    if(software and not(state_.waiting_clock and state_.injecting))
+    {
+      update(regs_, injected_start_, 0);
+    }
+    return;
+  }
+  check_injected();
+  suspend_regular();
+  start_injected(start_ps);
+}
+
+void adc_l1_model::arm_group()
 {
   check_group();
   if(get(regs_, discontinuous_) == 0 or state_.rank >= length())
@@ -810,15 +1030,51 @@ void adc_l1_model::start_group(std::uint64_t start_ps)
     state_.rank = 0;
   }
   state_.subgroup_left = static_cast<std::uint8_t>(get(regs_, discontinuous_count_) + 1u);
+}
+
+void adc_l1_model::start_injected(std::uint64_t start_ps)
+{
+  if(get(regs_, injected_discontinuous_) == 0 or state_.injected_rank >= injected_length())
+  {
+    state_.injected_rank = 0;
+  }
+  state_.injected_left = static_cast<std::uint8_t>(get(regs_, discontinuous_count_) + 1u);
+  state_.injecting     = true;
   begin(start_ps);
+}
+
+void adc_l1_model::suspend_regular()
+{
+  if(not engine_busy())
+  {
+    return;
+  }
+  stop_engine();
+  state_.regular_resume = true;
 }
 
 void adc_l1_model::sequence_written(std::uint32_t, std::uint32_t)
 {
-  if(busy())
+  if(regular_busy())
   {
-    abort();
+    abort_regular();
     update(regs_, start_, 0);
+  }
+}
+
+void adc_l1_model::injected_sequence_written(std::uint32_t, std::uint32_t)
+{
+  if(not state_.injecting)
+  {
+    return;
+  }
+  stop_engine();
+  state_.injecting     = false;
+  state_.injected_rank = 0;
+  update(regs_, injected_start_, 0);
+  if(std::exchange(state_.regular_resume, false))
+  {
+    begin(std::max(ctx_.clock.time().ps, state_.delay_until_ps));
   }
 }
 
@@ -839,29 +1095,36 @@ void adc_l1_model::power_up()
       vtime{ctx_.clock.time().ps + power_up_ps}, ready_end, state_.ready_generation, ctx_.clock);
 }
 
-void adc_l1_model::check_group()
+void adc_l1_model::check_common()
 {
   if(get(regs_, prescaler_) == 3)
   {
     forbidden(prescaler_logged_, "CCR", "ADCPRE 11: a reserved prescaler, divided by 4");
   }
-  if(get(regs_, dma_) != 0)
-  {
-    unmodelled(dma_logged_, "CR2", "DMA: regular DMA requests");
-  }
   if(get(regs_, power_down_idle_) != 0 or get(regs_, power_down_delay_) != 0)
   {
     unmodelled(power_down_logged_, "CR1", "PDI and PDD: the automatic power-down");
+  }
+  if(get(regs_, discontinuous_) != 0 and get(regs_, injected_discontinuous_) != 0)
+  {
+    forbidden(
+        both_discontinuous_logged_, "CR1",
+        "DISCEN with JDISCEN, against RM0038 12.3.10: each group follows its own bit");
+  }
+}
+
+void adc_l1_model::check_group()
+{
+  check_common();
+  if(get(regs_, dma_) != 0)
+  {
+    unmodelled(dma_logged_, "CR2", "DMA: regular DMA requests");
   }
   if(get(regs_, discontinuous_) != 0 and get(regs_, continuous_) != 0)
   {
     forbidden(
         discontinuous_continuous_logged_, "CR1",
         "DISCEN with CONT: converted as DISCEN alone, inferred");
-  }
-  if(get(regs_, auto_injected_) != 0)
-  {
-    unmodelled(auto_injected_logged_, "CR1", "JAUTO: the auto-injected group");
   }
   if(get(regs_, watchdog_) != 0)
   {
@@ -878,11 +1141,29 @@ void adc_l1_model::check_group()
   }
   for(std::size_t rank = 0; rank < length(); ++rank)
   {
-    check_channel(channel_at(rank));
+    check_channel(channel_at(rank), "SQR1");
+  }
+  if(get(regs_, auto_injected_) != 0)
+  {
+    unmodelled(auto_injected_logged_, "CR1", "JAUTO: the auto-injected group");
   }
 }
 
-void adc_l1_model::check_channel(std::uint32_t channel)
+void adc_l1_model::check_injected()
+{
+  check_common();
+  if(get(regs_, injected_watchdog_) != 0)
+  {
+    unmodelled(
+        injected_watchdog_logged_, "CR1", "JAWDEN: the analog watchdog on injected channels");
+  }
+  for(std::size_t rank = 0; rank < injected_length(); ++rank)
+  {
+    check_channel(injected_channel(rank), "JSQR");
+  }
+}
+
+void adc_l1_model::check_channel(std::uint32_t channel, std::string_view name)
 {
   if(channel == sensor_channel or channel == vrefint_channel)
   {
@@ -903,7 +1184,7 @@ void adc_l1_model::check_channel(std::uint32_t channel)
       : bank_b() and (variant_.external >> channel & 1u) != 0
           ? std::format("bank B channel {}b on its own pad, outside the analog port,", channel)
           : std::format("channel {}, absent from this category,", channel);
-  unmodelled(channel_logged_[channel], "SQR1", std::format("{} read as 0", what));
+  unmodelled(channel_logged_[channel], name, std::format("{} read as 0", what));
 }
 
 void adc_l1_model::begin(std::uint64_t start_ps)
@@ -939,45 +1220,63 @@ void adc_l1_model::schedule(std::uint64_t start_ps)
 {
   state_.start_ps      = start_ps;
   state_.resolution    = static_cast<std::uint8_t>(get(regs_, resolution_));
-  state_.sample_end_ps = start_ps + cycles_ps(sampling(channel_at(state_.rank)), state_.clock_hz);
+  state_.sample_end_ps = start_ps + cycles_ps(sampling(current_channel()), state_.clock_hz);
   state_.end_ps        = start_ps + cycles_ps(conversion_cycles(), state_.clock_hz);
   state_.held          = false;
   state_.waiting_clock = false;
   state_.converting    = true;
   ++state_.generation;
-  update(regs_, start_, 0);
-  update(regs_, started_, 1);
+  update(regs_, state_.injecting ? injected_start_ : start_, 0);
+  update(regs_, state_.injecting ? injected_started_ : started_, 1);
   ctx_.events.schedule_at(vtime{state_.end_ps}, conversion_end, state_.generation, ctx_.clock);
+}
+
+void adc_l1_model::hold(std::uint64_t end_ps, bool& frozen, std::uint64_t& until_ps)
+{
+  auto const delay = get(regs_, delay_);
+  auto const pclk  = ctx_.clock.hz(pclk2_);
+  if(delay == 1)
+  {
+    frozen = true;
+  }
+  else if(delay >= 2 and pclk != 0)
+  {
+    until_ps = end_ps
+             + cycles_ps(delay_pclk[delay] + sync_pclk, pclk)
+             + cycles_ps(sync_adc_cycles, state_.clock_hz);
+  }
 }
 
 void adc_l1_model::finish()
 {
+  if(state_.injecting)
+  {
+    finish_injected();
+    return;
+  }
   auto const end    = state_.end_ps;
-  auto const result = state_.held ? state_.held_code : code(channel_at(state_.rank));
+  auto const result = state_.held ? state_.held_code : code(current_channel());
   state_.converting = false;
   auto const last   = std::size_t{state_.rank} + 1u >= length();
   land(result);
-  if(get(regs_, end_selection_) != 0 or last)
+  auto const each = get(regs_, end_selection_) != 0;
+  if(each or last)
   {
     update(regs_, end_of_conversion_, 1);
   }
-  state_.rank      = last ? std::uint8_t{0} : static_cast<std::uint8_t>(state_.rank + 1u);
-  auto const more  = get(regs_, discontinuous_) != 0 ? not last and --state_.subgroup_left > 0
-                                                     : not last or get(regs_, continuous_) != 0;
-  auto const delay = get(regs_, delay_);
-  if(delay == 1 and (get(regs_, end_selection_) != 0 or last))
+  state_.rank     = last ? std::uint8_t{0} : static_cast<std::uint8_t>(state_.rank + 1u);
+  auto const more = get(regs_, discontinuous_) != 0 ? not last and --state_.subgroup_left > 0
+                                                    : not last or get(regs_, continuous_) != 0;
+  if(get(regs_, delay_) == 1)
   {
-    state_.frozen = true;
-  }
-  if(get(regs_, end_selection_) == 0 or last)
-  {
-    auto const pclk = ctx_.clock.hz(pclk2_);
-    if(delay >= 2 and pclk != 0)
+    if(each or last)
     {
-      state_.delay_until_ps = end
-                            + cycles_ps(delay_pclk[delay] + sync_pclk, pclk)
-                            + cycles_ps(sync_adc_cycles, state_.clock_hz);
+      state_.frozen = true;
     }
+  }
+  else if(not each or last)
+  {
+    hold(end, state_.frozen, state_.delay_until_ps);
   }
   if(more)
   {
@@ -989,6 +1288,36 @@ void adc_l1_model::finish()
     {
       begin(std::max(end, state_.delay_until_ps));
     }
+  }
+  signal();
+}
+
+void adc_l1_model::finish_injected()
+{
+  auto const end    = state_.end_ps;
+  auto const result = state_.held ? state_.held_code : code(current_channel());
+  state_.converting = false;
+  auto const index  = std::size_t{state_.injected_rank};
+  auto const last   = index + 1u >= injected_length();
+  store_injected(index, result);
+  state_.injected_rank = last ? std::uint8_t{0} : static_cast<std::uint8_t>(index + 1u);
+  auto const whole     = get(regs_, injected_discontinuous_) == 0;
+  auto const more      = whole ? not last : not last and --state_.injected_left > 0;
+  if(last)
+  {
+    update(regs_, injected_end_, 1);
+    hold(end, state_.injected_frozen, state_.injected_delay_until_ps);
+  }
+  if(more)
+  {
+    begin(end);
+    signal();
+    return;
+  }
+  state_.injecting = false;
+  if(std::exchange(state_.regular_resume, false))
+  {
+    begin(std::max(end, state_.delay_until_ps));
   }
   signal();
 }
@@ -1009,16 +1338,51 @@ void adc_l1_model::land(std::uint32_t result)
   state_.unread = get(regs_, end_selection_) != 0;
 }
 
-void adc_l1_model::abort()
+void adc_l1_model::store_injected(std::size_t index, std::uint32_t result)
+{
+  auto const resolution = std::uint32_t{state_.resolution};
+  auto const offset     = get(regs_, offsets_[index]) >> (2u * resolution);
+  auto       value      = static_cast<std::int32_t>(result) - static_cast<std::int32_t>(offset);
+  if(get(regs_, align_) != 0)
+  {
+    value *= std::int32_t{1} << ((resolution == 3 ? 2u : 4u + 2u * resolution) - 1u);
+  }
+  update(regs_, injected_data_[index], static_cast<std::uint32_t>(value) & 0xFFFFu);
+}
+
+void adc_l1_model::stop_engine()
 {
   ++state_.generation;
-  state_.converting     = false;
-  state_.waiting_clock  = false;
-  state_.start_pending  = false;
+  state_.converting    = false;
+  state_.waiting_clock = false;
+  state_.start_pending = false;
+}
+
+void adc_l1_model::abort_regular()
+{
+  if(not state_.injecting)
+  {
+    stop_engine();
+  }
+  state_.regular_resume = false;
   state_.frozen         = false;
   state_.resume_frozen  = false;
   state_.delay_until_ps = 0;
   state_.rank           = 0;
+}
+
+void adc_l1_model::abort()
+{
+  stop_engine();
+  state_.injecting               = false;
+  state_.regular_resume          = false;
+  state_.frozen                  = false;
+  state_.resume_frozen           = false;
+  state_.delay_until_ps          = 0;
+  state_.rank                    = 0;
+  state_.injected_frozen         = false;
+  state_.injected_delay_until_ps = 0;
+  state_.injected_rank           = 0;
 }
 
 void adc_l1_model::signal()
@@ -1042,18 +1406,14 @@ void adc_l1_model::on_event(std::uint32_t kind, std::uint64_t payload)
   {
     if(payload == state_.ready_generation and get(regs_, power_) != 0)
     {
-      auto const was = listened();
-      auto const will =
-          get(regs_, trigger_) != 0 ? std::optional{get(regs_, trigger_select_)} : std::nullopt;
+      auto const was  = listened();
+      auto const will = selected(regs_.peek(trigger_.offset), true);
       if(will != was)
       {
         notify(will);
       }
       update(regs_, ready_, 1);
-      if(auto const now = listened())
-      {
-        check_selection(*now);
-      }
+      check_selection(was, listened());
       retune(was);
     }
     return;
