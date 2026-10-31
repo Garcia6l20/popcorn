@@ -650,6 +650,7 @@ public:
   std::vector<std::string> acks;
   std::vector<std::string> completions;
   std::vector<std::string> last_but_ones;
+  std::vector<std::string> count_ends;
   std::vector<bus_write>   writes;
   bool                     drop_on_ack = true;
   std::uint32_t            next_data{};
@@ -692,6 +693,17 @@ public:
       if(signals_[index].carries(by, request))
       {
         last_but_ones.push_back(names_[index]);
+      }
+    }
+  }
+
+  void count_ended(stm32::dma_controller const& by, std::uint32_t request) override
+  {
+    for(std::size_t index = 0; index < signals_.size(); ++index)
+    {
+      if(signals_[index].carries(by, request))
+      {
+        count_ends.push_back(names_[index]);
       }
     }
   }
@@ -967,8 +979,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0038 11.3.3: a circular peripheral-to-memory channel reloads and raises "
-    "HT and TC and tells EOT_1 each pass")
+    "RM0038 11.3.3: a circular peripheral-to-memory channel reloads, raises HT and TC and tells "
+    "EOT_1 and the count end each pass, a memory-to-memory copy tells neither")
 {
   constexpr address       usart1_dr = 0x4001'3804;
   constexpr std::uint32_t irq       = 15;
@@ -1011,6 +1023,17 @@ TEST_CASE(
   CHECK(p.completions.empty());
   CHECK(p.acks.size() == 8);
   CHECK(p.last_but_ones == std::vector<std::string>{"usart1_rx_dma", "usart1_rx_dma"});
+  CHECK(p.count_ends == std::vector<std::string>{"usart1_rx_dma", "usart1_rx_dma"});
+  write(f, dma1 + ccr(5), 0);
+  p.set("usart1_rx_dma", false);
+  write(f, dma1 + ifcr, 0x0FFF'FFFFu);
+  write(f, from, 0x1234'5678u);
+  program(f, dma1, 5, mem2mem | minc | pinc | en, from, to + 8, 2);
+  idle_to(f, now_ps(f) + 4 * latency_ps);
+  CHECK(flags(read(f, dma1 + isr), 5) == (gif | tcif | htif));
+  CHECK(read(f, to + 8) == 0x5678u);
+  CHECK(p.count_ends.size() == 2);
+  CHECK(p.last_but_ones.size() == 2);
 }
 
 TEST_CASE(

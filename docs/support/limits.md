@@ -129,9 +129,21 @@ On the STM32H5, RM0481 section 28:
 
 On the STM32L1, RM0038 section 12:
 
-- The analog watchdog, `AWDEN` and `JAWDEN`, DMA requests, `DMA`, the automatic power-down,
-  `PDI` and `PDD`, and `DELS` with `JAUTO` are logged once, a model_error under
-  strict_peripherals.
+- The automatic power-down, `PDI` and `PDD`, and `DELS` with `JAUTO` are logged once, a
+  model_error under strict_peripherals.
+- The analog watchdog compares an injected code before its offset, a code below 12 bits shifted
+  to 12 bits, and a result an overrun loses, each inferred. `ADC_HTR` and `ADC_LTR` are read at
+  the end of each conversion.
+- With `SCAN` and `AWDIE` set, a conversion that sets `AWD` aborts the scan, RM0038 12.15.2. Its
+  result is the group's last: `EOC` or `JEOC` sets, `CONT`, `DISCEN` and `JAUTO` do not go on,
+  and the next start begins at the first rank, inferred.
+- With `DMA` 1, `adc_dma` on DMA1 channel 1 requests each regular result until `ADC_DR` is read
+  or 0 is written to `EOC`. An overrun with `DMA` 1 aborts the regular conversion and further
+  regular triggers are ignored, RM0038 12.11.1. They stay ignored until `OVR` is cleared,
+  `SWSTART` counting as a trigger, inferred. With `DDS` 0 the end of the channel's count while
+  `DMA` is 1, at the end of a normal channel or at a circular reload, stops the requests and the
+  ADC converts as with `DMA` 0, no overrun, until `DMA` is written 0, then 1, inferred from the
+  RM0038 12.11.1 "avoids generating an overrun error".
 - Hardware triggers start conversions from the TRGO selections of `EXTSEL`, TIM9, TIM3, TIM2,
   TIM4 and TIM6, and of `JEXTSEL`, TIM9, TIM2, TIM4 and TIM7. The compare event selections,
   TIM9_CC2, TIM2_CC3, TIM2_CC2, TIM4_CC4, TIM3_CC1 and TIM3_CC3 for `EXTSEL`, TIM9_CC1, TIM2_CC1,

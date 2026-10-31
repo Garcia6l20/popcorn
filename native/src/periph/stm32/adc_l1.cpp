@@ -1,3 +1,5 @@
+#include "dma.hpp"
+#include "dma_signal.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
@@ -113,6 +115,7 @@ struct adc_l1_state
   std::uint8_t                        injected_rank{};
   std::uint8_t                        injected_left{};
   std::uint64_t                       queued{};
+  bool                                dma_done{};
 
   friend auto operator==(adc_l1_state const&, adc_l1_state const&) -> bool = default;
 };
@@ -244,15 +247,34 @@ struct trigger_selection
  *        apply after each injected group, DELS 001 until JEOC clears, and ignore injected
  *        triggers and JSWSTART only. An injected trigger during a regular hold starts at once.
  *
- *        Not modelled, each logged once, a model_error under strict_peripherals: DMA other than 0
- *        at the ADC_CR2 write, AWDEN and JAWDEN at the ADC_CR1 write, at the regular group start
- *        DMA, PDI, PDD, AWDEN and DELS with JAUTO, and at the injected group start PDI, PDD and
- *        JAWDEN.
+ *        Analog watchdog, RM0038 12.3.7 and Table 59: AWDEN guards the regular conversions,
+ *        JAWDEN the injected ones, all channels or with AWDSGL the AWDCH channel only. A guarded
+ *        conversion sets AWD when its code, before alignment and offset, is above HT of ADC_HTR
+ *        or below LT of ADC_LTR, at the end of the conversion, the thresholds read then, 12.15.8.
+ *        The code before the offset, below 12 bits the code shifted to 12 bits, and a result lost
+ *        to an overrun are compared, each inferred. With SCAN and AWDIE set, a guarded conversion
+ *        that sets AWD aborts the scan, RM0038 12.15.2: its result lands as the group's last, EOC
+ *        and JEOC set as at the group end, and the next trigger or SWSTART starts at the first
+ *        rank. CONT, the next DISCEN subgroup and JAUTO do not go on. The rank, the flags and the
+ *        injected group are inferred.
+ *
+ *        DMA, RM0038 12.11.1: with DMA 1 each regular result requests `adc_dma`, DMA1 channel 1,
+ *        until ADC_DR is read or a write of 0 to EOC, and a result finding ADC_DR unread sets
+ *        OVR and is lost as with EOCS 1. With DMA 1 an overrun aborts the regular conversion and
+ *        further regular triggers are ignored, 12.11.1. They stay ignored until OVR is cleared,
+ *        SWSTART counting as a trigger, inferred. With DDS 0 the end of the count of the channel
+ *        while DMA is 1, at the end of a normal channel or at a circular reload, stops the
+ *        requests and the ADC converts as with DMA 0 until DMA is written 0, then 1, inferred.
+ *        DDS 1 keeps the requests going.
+ *
+ *        Not modelled, each logged once, a model_error under strict_peripherals: at the regular
+ *        group start PDI, PDD and DELS with JAUTO, and at the injected group start PDI and PDD.
  */
 class adc_l1_model final : public dispatch_model<adc_l1_model, adc_l1_state>,
                            public analog_port,
                            public clock_listener,
                            public trigger_sink,
+                           public dma_requester,
                            public bus_reset_listener
 {
   using base = dispatch_model<adc_l1_model, adc_l1_state>;
@@ -281,6 +303,8 @@ public:
 
   [[nodiscard]] auto listens(std::string_view signal) const -> bool override;
   void triggered(std::string_view signal, trigger_edge edge, trigger_time at) override;
+  void transfer_completed(dma_controller const& by, std::uint32_t request) override;
+  void count_ended(dma_controller const& by, std::uint32_t request) override;
 
   void               drive(std::uint8_t channel, std::uint32_t microvolts) override;
   [[nodiscard]] auto input(std::uint8_t channel) const -> std::uint32_t override;
@@ -353,14 +377,18 @@ private:
   void               schedule(std::uint64_t start_ps);
   void               finish();
   void               finish_injected();
-  void               land(std::uint32_t result);
-  void               store_injected(std::size_t index, std::uint32_t result);
-  void               stop_engine();
-  void               abort_regular();
-  void               abort();
-  void               signal();
-  void               unmodelled(bool& logged, std::string_view name, std::string_view what);
-  void               forbidden(bool& logged, std::string_view name, std::string message);
+  [[nodiscard]] auto land(std::uint32_t result) -> bool;
+  [[nodiscard]] auto dma_active() const -> bool;
+  [[nodiscard]] auto scan_aborted() const -> bool;
+  [[nodiscard]] auto guard(std::uint32_t channel, std::uint32_t result, field_ref const& enable)
+      -> bool;
+  void store_injected(std::size_t index, std::uint32_t result);
+  void stop_engine();
+  void abort_regular();
+  void abort();
+  void signal();
+  void unmodelled(bool& logged, std::string_view name, std::string_view what);
+  void forbidden(bool& logged, std::string_view name, std::string message);
 
   register_file&                                  regs_;
   supply_options                                  supply_;
@@ -388,6 +416,7 @@ private:
   field_ref                                       delay_;
   std::optional<field_ref>                        bank_;
   field_ref                                       scan_;
+  field_ref                                       watchdog_interrupt_;
   field_ref                                       resolution_;
   field_ref                                       discontinuous_;
   field_ref                                       discontinuous_count_;
@@ -407,6 +436,13 @@ private:
   field_ref                                       injected_select_;
   field_ref                                       injected_discontinuous_;
   field_ref                                       injected_watchdog_;
+  field_ref                                       watchdog_single_;
+  field_ref                                       watchdog_channel_;
+  field_ref                                       watchdog_flag_;
+  field_ref                                       high_;
+  field_ref                                       low_;
+  field_ref                                       dma_continue_;
+  dma_signal                                      request_;
   field_ref                                       injected_length_;
   std::array<field_ref, injected_ranks>           injected_sequence_;
   std::array<field_ref, injected_ranks>           offsets_;
@@ -420,11 +456,8 @@ private:
   bool                                            auto_discontinuous_logged_{};
   bool                                            auto_delay_logged_{};
   bool                                            both_discontinuous_logged_{};
-  bool                                            injected_watchdog_logged_{};
   bool                                            discontinuous_continuous_logged_{};
-  bool                                            dma_logged_{};
   bool                                            power_down_logged_{};
-  bool                                            watchdog_logged_{};
   bool                                            start_refused_logged_{};
   bool                                            length_logged_{};
   bool                                            prescaler_logged_{};
@@ -432,7 +465,7 @@ private:
   std::array<bool, channels>                      channel_logged_{};
 };
 
-constexpr std::array<write_entry<adc_l1_model>, 22> banked_writes{
+constexpr std::array<write_entry<adc_l1_model>, 24> banked_writes{
     {
      {"SR", &adc_l1_model::sr_written},
      {"CR1", &adc_l1_model::cr1_written},
@@ -454,6 +487,8 @@ constexpr std::array<write_entry<adc_l1_model>, 22> banked_writes{
      {"JDR2", nullptr},
      {"JDR3", nullptr},
      {"JDR4", nullptr},
+     {"HTR", nullptr},
+     {"LTR", nullptr},
      {"DR", nullptr},
      {"SMPR0", &adc_l1_model::plain_written},
      }
@@ -488,12 +523,13 @@ adc_l1_model::adc_l1_model(
       injected_trigger_{field("CR2", "JEXTEN")}, continuous_{field("CR2", "CONT")},
       end_selection_{field("CR2", "EOCS")}, align_{field("CR2", "ALIGN")},
       dma_{field("CR2", "DMA")}, delay_{field("CR2", "DELS")}, scan_{field("CR1", "SCAN")},
-      resolution_{field("CR1", "RES")}, discontinuous_{field("CR1", "DISCEN")},
-      discontinuous_count_{field("CR1", "DISCNUM")}, auto_injected_{field("CR1", "JAUTO")},
-      watchdog_{field("CR1", "AWDEN")}, power_down_idle_{field("CR1", "PDI")},
-      power_down_delay_{field("CR1", "PDD")}, length_{field("SQR1", "L")},
-      data_{field("DR", "RegularDATA")}, sensors_{field("CCR", "TSVREFE")},
-      prescaler_{field("CCR", "ADCPRE")}
+      watchdog_interrupt_{field("CR1", "AWDIE")}, resolution_{field("CR1", "RES")},
+      discontinuous_{field("CR1", "DISCEN")}, discontinuous_count_{field("CR1", "DISCNUM")},
+      auto_injected_{field("CR1", "JAUTO")}, watchdog_{field("CR1", "AWDEN")},
+      power_down_idle_{field("CR1", "PDI")}, power_down_delay_{field("CR1", "PDD")},
+      length_{field("SQR1", "L")}, data_{field("DR", "RegularDATA")},
+      sensors_{field("CCR", "TSVREFE")}, prescaler_{field("CCR", "ADCPRE")},
+      request_{ctx.peers, "adc_dma"}
 {
   bind(common_writes);
   expect_register("SMPR0", variant.banks);
@@ -520,6 +556,12 @@ adc_l1_model::adc_l1_model(
   injected_select_        = field("CR2", "JEXTSEL");
   injected_discontinuous_ = field("CR1", "JDISCEN");
   injected_watchdog_      = field("CR1", "JAWDEN");
+  watchdog_single_        = field("CR1", "AWDSGL");
+  watchdog_channel_       = field("CR1", "AWDCH");
+  watchdog_flag_          = field("SR", "AWD");
+  high_                   = field("HTR", "HT");
+  low_                    = field("LTR", "LT");
+  dma_continue_           = field("CR2", "DDS");
   injected_length_        = field("JSQR", "JL");
   for(std::size_t rank = 0; rank < injected_ranks; ++rank)
   {
@@ -530,7 +572,7 @@ adc_l1_model::adc_l1_model(
   interrupts_ = {
       {{end_of_conversion_, field("CR1", "EOCIE")},
        {injected_end_, field("CR1", "JEOCIE")},
-       {field("SR", "AWD"), field("CR1", "AWDIE")},
+       {watchdog_flag_, watchdog_interrupt_},
        {overrun_, field("CR1", "OVRIE")}}
   };
   for(auto const& name : {"OVR", "STRT", "JSTRT", "JEOC", "EOC", "AWD"})
@@ -567,6 +609,8 @@ void adc_l1_model::restore_reset_values()
   ++state_.ready_generation;
   state_.ready_waiting = false;
   state_.unread        = false;
+  state_.dma_done      = false;
+  request_.resolve();
   signal();
 }
 
@@ -894,7 +938,9 @@ void adc_l1_model::triggered(std::string_view signal, trigger_edge edge, trigger
 
 auto adc_l1_model::blocked(std::uint64_t ps) const -> bool
 {
-  return state_.frozen or ps < state_.delay_until_ps;
+  return state_.frozen
+      or ps < state_.delay_until_ps
+      or (get(regs_, overrun_) != 0 and dma_active());
 }
 
 auto adc_l1_model::injected_blocked(std::uint64_t ps) const -> bool
@@ -928,7 +974,7 @@ void adc_l1_model::sr_written(std::uint32_t old, std::uint32_t now)
 {
   auto const kept = old & (now | ~clearable_);
   regs_.poke(status_.offset, kept);
-  if(end_of_conversion_.of(kept) == 0)
+  if(end_of_conversion_.of(now) == 0)
   {
     state_.unread = false;
   }
@@ -943,26 +989,18 @@ void adc_l1_model::sr_written(std::uint32_t old, std::uint32_t now)
   }
 }
 
-void adc_l1_model::cr1_written(std::uint32_t old, std::uint32_t now)
+void adc_l1_model::cr1_written(std::uint32_t, std::uint32_t)
 {
   signal();
-  if(watchdog_.of(now) != 0 and watchdog_.of(old) == 0)
-  {
-    unmodelled(watchdog_logged_, "CR1", "AWDEN: the analog watchdog");
-  }
-  if(injected_watchdog_.of(now) != 0 and injected_watchdog_.of(old) == 0)
-  {
-    unmodelled(
-        injected_watchdog_logged_, "CR1", "JAWDEN: the analog watchdog on injected channels");
-  }
 }
 
 void adc_l1_model::cr2_written(std::uint32_t old, std::uint32_t now)
 {
-  if(dma_.of(now) != 0 and dma_.of(old) == 0)
+  if(dma_.of(now) != dma_.of(old))
   {
-    unmodelled(dma_logged_, "CR2", "DMA: regular DMA requests");
+    state_.dma_done = false;
   }
+  signal();
   if(power_.of(now) == 0 and power_.of(old) != 0)
   {
     update(regs_, ready_, 0);
@@ -1180,19 +1218,11 @@ void adc_l1_model::check_common()
 void adc_l1_model::check_group()
 {
   check_common();
-  if(get(regs_, dma_) != 0)
-  {
-    unmodelled(dma_logged_, "CR2", "DMA: regular DMA requests");
-  }
   if(get(regs_, discontinuous_) != 0 and get(regs_, continuous_) != 0)
   {
     forbidden(
         discontinuous_continuous_logged_, "CR1",
         "DISCEN with CONT: converted as DISCEN alone, inferred");
-  }
-  if(get(regs_, watchdog_) != 0)
-  {
-    unmodelled(watchdog_logged_, "CR1", "AWDEN: the analog watchdog");
   }
   auto const ranks = variant_.banks ? max_ranks : max_ranks - 1;
   if(get(regs_, scan_) != 0 and get(regs_, length_) + 1u > ranks)
@@ -1234,11 +1264,6 @@ void adc_l1_model::check_group()
 void adc_l1_model::check_injected()
 {
   check_common();
-  if(get(regs_, injected_watchdog_) != 0)
-  {
-    unmodelled(
-        injected_watchdog_logged_, "CR1", "JAWDEN: the analog watchdog on injected channels");
-  }
   for(std::size_t rank = 0; rank < injected_length(); ++rank)
   {
     check_channel(injected_channel(rank), "JSQR");
@@ -1339,18 +1364,26 @@ void adc_l1_model::finish()
     finish_injected();
     return;
   }
-  auto const end    = state_.end_ps;
-  auto const result = state_.held ? state_.held_code : code(current_channel());
-  state_.converting = false;
-  auto const last   = std::size_t{state_.rank} + 1u >= length();
-  land(result);
+  auto const end     = state_.end_ps;
+  auto const result  = state_.held ? state_.held_code : code(current_channel());
+  state_.converting  = false;
+  auto const crossed = guard(current_channel(), result, watchdog_);
+  if(not land(result) and dma_active())
+  {
+    abort_regular();
+    signal();
+    return;
+  }
+  auto const cut  = crossed and scan_aborted();
+  auto const last = cut or std::size_t{state_.rank} + 1u >= length();
   auto const each = get(regs_, end_selection_) != 0;
   if(each or last)
   {
     update(regs_, end_of_conversion_, 1);
   }
   state_.rank     = last ? std::uint8_t{0} : static_cast<std::uint8_t>(state_.rank + 1u);
-  auto const more = get(regs_, discontinuous_) != 0 ? not last and --state_.subgroup_left > 0
+  auto const more = cut                             ? false
+                  : get(regs_, discontinuous_) != 0 ? not last and --state_.subgroup_left > 0
                                                     : not last or get(regs_, continuous_) != 0;
   if(get(regs_, delay_) == 1)
   {
@@ -1363,7 +1396,7 @@ void adc_l1_model::finish()
   {
     hold(end, state_.frozen, state_.delay_until_ps);
   }
-  if(last and get(regs_, auto_injected_) != 0)
+  if(last and not cut and get(regs_, auto_injected_) != 0)
   {
     if(more and state_.frozen)
     {
@@ -1395,11 +1428,12 @@ void adc_l1_model::finish_injected()
   auto const result = state_.held ? state_.held_code : code(current_channel());
   state_.converting = false;
   auto const index  = std::size_t{state_.injected_rank};
-  auto const last   = index + 1u >= injected_length();
+  auto const cut    = guard(current_channel(), result, injected_watchdog_) and scan_aborted();
+  auto const last   = cut or index + 1u >= injected_length();
   store_injected(index, result);
   state_.injected_rank = last ? std::uint8_t{0} : static_cast<std::uint8_t>(index + 1u);
   auto const whole = get(regs_, injected_discontinuous_) == 0 or get(regs_, auto_injected_) != 0;
-  auto const more  = whole ? not last : not last and --state_.injected_left > 0;
+  auto const more  = cut ? false : whole ? not last : not last and --state_.injected_left > 0;
   if(last)
   {
     update(regs_, injected_end_, 1);
@@ -1419,12 +1453,13 @@ void adc_l1_model::finish_injected()
   signal();
 }
 
-void adc_l1_model::land(std::uint32_t result)
+auto adc_l1_model::land(std::uint32_t result) -> bool
 {
-  if(get(regs_, end_selection_) != 0 and state_.unread)
+  auto const tracked = get(regs_, end_selection_) != 0 or dma_active();
+  if(tracked and state_.unread)
   {
     update(regs_, overrun_, 1);
-    return;
+    return false;
   }
   if(get(regs_, align_) != 0)
   {
@@ -1432,7 +1467,48 @@ void adc_l1_model::land(std::uint32_t result)
     result <<= resolution == 3 ? 2u : 4u + 2u * resolution;
   }
   update(regs_, data_, result);
-  state_.unread = get(regs_, end_selection_) != 0;
+  state_.unread = tracked;
+  return true;
+}
+
+auto adc_l1_model::dma_active() const -> bool
+{
+  return get(regs_, dma_) != 0 and not state_.dma_done;
+}
+
+auto adc_l1_model::guard(std::uint32_t channel, std::uint32_t result, field_ref const& enable)
+    -> bool
+{
+  if(get(regs_, enable) == 0
+     or (get(regs_, watchdog_single_) != 0 and get(regs_, watchdog_channel_) != channel))
+  {
+    return false;
+  }
+  auto const value = result << (2u * state_.resolution);
+  if(value > get(regs_, high_) or value < get(regs_, low_))
+  {
+    update(regs_, watchdog_flag_, 1);
+    return true;
+  }
+  return false;
+}
+
+auto adc_l1_model::scan_aborted() const -> bool
+{
+  return get(regs_, scan_) != 0 and get(regs_, watchdog_interrupt_) != 0;
+}
+
+void adc_l1_model::transfer_completed(dma_controller const&, std::uint32_t)
+{}
+
+void adc_l1_model::count_ended(dma_controller const& by, std::uint32_t request)
+{
+  if(not request_.carries(by, request) or get(regs_, dma_) == 0 or get(regs_, dma_continue_) != 0)
+  {
+    return;
+  }
+  state_.dma_done = true;
+  signal();
 }
 
 void adc_l1_model::store_injected(std::size_t index, std::uint32_t result)
@@ -1499,6 +1575,7 @@ void adc_l1_model::signal()
   {
     line_.lower();
   }
+  request_.set(dma_active() and state_.unread);
 }
 
 void adc_l1_model::on_event(std::uint32_t kind, std::uint64_t payload)

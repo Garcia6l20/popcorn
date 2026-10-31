@@ -100,6 +100,20 @@ public:
     static_cast<void>(request);
   }
 
+  /**
+   * @brief A hardware-requested channel of @p by moved the last item of its count, at the end of
+   *        a normal channel and at each reload of a circular one. Called from a controller event
+   *        or the core hold, never inside a requester's register callback, by the STM32L1
+   *        classic DMA. The default ignores it.
+   * @param by Controller of the channel.
+   * @param request Request number of the channel on @p by.
+   */
+  virtual void count_ended(dma_controller const& by, std::uint32_t request)
+  {
+    static_cast<void>(by);
+    static_cast<void>(request);
+  }
+
 protected:
   /** @brief Destroys the interface, only through its model. */
   ~dma_requester() = default;

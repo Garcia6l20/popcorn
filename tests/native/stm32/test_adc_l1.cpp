@@ -48,6 +48,19 @@ constexpr std::uint32_t sqr5     = 0x40;
 constexpr std::uint32_t dr       = 0x58;
 constexpr std::uint32_t smpr0    = 0x5C;
 constexpr std::uint32_t jofr1    = 0x18;
+constexpr std::uint32_t htr      = 0x28;
+constexpr std::uint32_t ltr      = 0x2C;
+constexpr std::uint32_t awd      = 1u << 0;
+constexpr std::uint32_t awdie    = 1u << 6;
+constexpr std::uint32_t awdsgl   = 1u << 9;
+constexpr std::uint32_t jawden   = 1u << 22;
+constexpr std::uint32_t awden    = 1u << 23;
+constexpr std::uint32_t dma      = 1u << 8;
+constexpr std::uint32_t dds      = 1u << 9;
+constexpr std::uint32_t buffer   = 0x2000'2000;
+constexpr std::uint32_t dma_en   = 1u << 0;
+constexpr std::uint32_t dma_circ = 1u << 5;
+constexpr std::uint32_t dma_half = (1u << 7) | (1u << 8) | (1u << 10);
 constexpr std::uint32_t jsqr     = 0x44;
 constexpr std::uint32_t jdr1     = 0x48;
 constexpr std::uint32_t jswstart = 1u << 22;
@@ -172,6 +185,31 @@ struct adc_rig
     poke(unit, 0x2C, arr);
     poke(unit, 0x04, 2u << 4);
     poke(unit, 0x00, 1);
+  }
+
+  void dma_channel1(std::uint32_t items, std::uint32_t control) const
+  {
+    poke("RCC", 0x1C, 1u << 24);
+    poke("DMA1", 0x08, 0);
+    poke("DMA1", 0x10, base + dr);
+    poke("DMA1", 0x14, buffer);
+    poke("DMA1", 0x0C, items);
+    poke("DMA1", 0x08, control);
+  }
+
+  [[nodiscard]] auto memory(std::uint32_t index) const -> std::uint32_t
+  {
+    auto const value = f.target->mem().read(buffer + 2 * index, 2);
+    REQUIRE(value.has_value());
+    return static_cast<std::uint32_t>(*value);
+  }
+
+  [[nodiscard]] auto dma1(std::uint32_t offset) const -> std::uint32_t
+  {
+    auto const at    = f.target->peripheral("DMA1").description().base + offset;
+    auto const value = f.target->mem().read(at, 4);
+    REQUIRE(value.has_value());
+    return static_cast<std::uint32_t>(*value);
   }
 
   void tim2_updates(std::uint32_t arr) const
@@ -682,12 +720,9 @@ TEST_CASE("checklist 53: each function the L1 ADC does not model raises model_er
   };
   for(auto const& [reg, value, at_start] : {
           row{cr2,  adon | (1u << 28),               false},
-          row{cr2,  adon | (1u << 8),                false},
           row{cr2,  adon | (1u << 28) | (11u << 24), false},
           row{cr1,  1u << 17,                        true },
           row{cr1,  1u << 16,                        true },
-          row{cr1,  1u << 23,                        false},
-          row{cr1,  1u << 22,                        false},
           row{sqr5, 26,                              true },
           row{ccr,  3u << 16,                        true },
   })
@@ -805,6 +840,12 @@ TEST_CASE("a snapshot mid-conversion ends it at the same time with the same code
   other.f.target->restore(
       core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
   check(other);
+  adc_rig const aborted;
+  aborted.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  REQUIRE(aborted.due() == start + 396 * cycle);
+  aborted.write(sqr5, 5);
+  CHECK(aborted.due() == ~std::uint64_t{});
 }
 
 TEST_CASE(
@@ -879,16 +920,6 @@ TEST_CASE(
     CHECK(r.run("factory") == std::vector<std::uint32_t>{vrefint, 3000, ts_cal1, 30});
     CHECK(r.logged.empty());
   }
-}
-
-TEST_CASE("DMA and AWDEN set during a continuous run raise model_error at the write when strict")
-{
-  adc_rig const strict{l152re(), true};
-  strict.power();
-  strict.write(cr2, adon | cont | swstart);
-  strict.run_until(strict.now() + 3 * us);
-  CHECK_THROWS_AS(strict.attempt(cr2, adon | cont | (1u << 8)), popcorn::model_error);
-  CHECK_THROWS_AS(strict.attempt(cr1, 1u << 23), popcorn::model_error);
 }
 
 TEST_CASE(
@@ -2119,4 +2150,479 @@ TEST_CASE("a strict refusal at SWSTART or JSWSTART clears the bit, the fixed set
   strict.write(jsqr, 5u << 15);
   strict.write(cr2, adon | jswstart);
   CHECK((strict.read(sr) & jstrt) != 0);
+}
+
+TEST_CASE(
+    "RM0038 12.11.1: with DMA 1 a scan of 3 ranks fills memory through DMA1 channel 1, each "
+    "transfer clearing EOC, no OVR")
+{
+  for(auto const& desc : {l152re(), l152rb()})
+  {
+    CAPTURE(desc.part);
+    adc_rig const r{desc};
+    r.port().drive(1, 750'000);
+    r.port().drive(2, 1'500'000);
+    r.port().drive(3, 2'250'000);
+    r.write(cr1, scan);
+    r.power();
+    r.write(smpr3, (7u << 3) | (7u << 6) | (7u << 9));
+    r.write(sqr1, 2u << 20);
+    r.write(sqr5, 1u | (2u << 5) | (3u << 10));
+    r.dma_channel1(3, dma_half | dma_en);
+    auto const start = r.now();
+    r.write(cr2, adon | eocs | dma | swstart);
+    r.run_until(start + 3 * 396 * cycle + 10 * us);
+    CHECK(r.memory(0) == 1024);
+    CHECK(r.memory(1) == 2048);
+    CHECK(r.memory(2) == 3072);
+    CHECK(r.dma1(0x0C) == 0);
+    CHECK((r.read(sr) & (eoc | ovr)) == 0);
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE(
+    "RM0038 12.11.1: with DMA 1 an unread result makes the next an overrun, the group stops and "
+    "SWSTART waits for OVR to clear, inferred, the valid result still transfers")
+{
+  adc_rig const r;
+  r.port().drive(0, 1'500'000);
+  r.power();
+  auto const start = r.now();
+  r.write(cr2, adon | cont | dma | swstart);
+  r.run_until(start + 32 * cycle + ns);
+  CHECK((r.read(sr) & ovr) != 0);
+  r.port().drive(0, 750'000);
+  r.run_until(start + 80 * cycle);
+  CHECK(r.due() == ~std::uint64_t{});
+  CHECK(r.read(dr) == 2048);
+  r.write(sr, ~strt);
+  r.write(cr2, adon | cont | dma | swstart);
+  CHECK((r.read(sr) & strt) == 0);
+  CHECK((r.read(cr2) & swstart) == 0);
+  r.dma_channel1(1, dma_half | dma_en);
+  r.run_until(r.now() + 10 * us);
+  CHECK(r.memory(0) == 2048);
+  r.write(sr, ~ovr);
+  auto const again = r.now();
+  r.write(cr2, adon | dma | swstart);
+  CHECK(r.due() == again + 16 * cycle);
+}
+
+TEST_CASE(
+    "RM0038 12.11.1: DDS 0 stops the requests after the last transfer until DMA is written 0 "
+    "then 1, DDS 1 keeps requesting, inferred")
+{
+  for(auto const selection : {0u, dds})
+  {
+    CAPTURE(selection);
+    adc_rig const r;
+    r.port().drive(1, 750'000);
+    r.power();
+    r.write(smpr3, 7u << 3);
+    r.write(sqr5, 1);
+    r.dma_channel1(1, dma_half | dma_en);
+    auto const start = r.now();
+    r.write(cr2, adon | cont | dma | selection | swstart);
+    r.run_until(start + 396 * cycle + 10 * us);
+    REQUIRE(r.memory(0) == 1024);
+    r.port().drive(1, 1'500'000);
+    r.run_until(start + 3 * 396 * cycle + 10 * us);
+    CHECK(((r.read(sr) & ovr) != 0) == (selection != 0));
+    if(selection != 0)
+    {
+      continue;
+    }
+    CHECK(r.read(dr) == 2048);
+    r.port().drive(1, 2'250'000);
+    r.dma_channel1(1, dma_half | dma_en);
+    r.write(cr2, adon | cont | swstart);
+    r.write(cr2, adon | cont | dma);
+    r.run_until(r.now() + 2 * 396 * cycle);
+    CHECK(r.memory(0) == 3072);
+  }
+}
+
+TEST_CASE("a DMA bit set while a result waits unread raises the request at once")
+{
+  adc_rig const r;
+  r.port().drive(5, 1'500'000);
+  r.power();
+  r.write(sqr5, 5);
+  r.write(cr2, adon | eocs | swstart);
+  r.run_until(r.now() + 2 * us);
+  REQUIRE((r.read(sr) & eoc) != 0);
+  r.dma_channel1(1, dma_half | dma_en);
+  r.run_until(r.now() + 10 * us);
+  CHECK(r.memory(0) == 0);
+  r.write(cr2, adon | eocs | dma);
+  r.run_until(r.now() + 10 * us);
+  CHECK(r.memory(0) == 2048);
+  CHECK((r.read(sr) & eoc) == 0);
+}
+
+TEST_CASE("ADC1RST ends the DDS 0 stop: DMA requests start again after the reset")
+{
+  adc_rig const r;
+  r.power();
+  r.dma_channel1(1, dma_half | dma_en);
+  r.write(cr2, adon | dma | swstart);
+  r.run_until(r.now() + 10 * us);
+  REQUIRE(r.dma1(0x0C) == 0);
+  rcc_reset_pulse(r.f, "APB2RSTR", "ADC1RST");
+  r.port().drive(0, 1'500'000);
+  r.power();
+  r.dma_channel1(1, dma_half | dma_en);
+  r.write(cr2, adon | dma | swstart);
+  r.run_until(r.now() + 10 * us);
+  CHECK(r.memory(0) == 2048);
+}
+
+TEST_CASE(
+    "RM0038 12.3.7: AWDEN sets AWD for a code above HT or below LT, before alignment, AWDIE "
+    "raises the line")
+{
+  for(auto const& [microvolts, control, flagged] : {
+          std::tuple{1'500'000u, 0u,    false},
+          std::tuple{2'500'000u, 0u,    true },
+          std::tuple{300'000u,   0u,    true },
+          std::tuple{1'500'000u, align, false},
+  })
+  {
+    CAPTURE(microvolts);
+    CAPTURE(control);
+    adc_rig const r;
+    r.port().drive(5, microvolts);
+    r.write(cr1, awden | awdie);
+    r.power();
+    r.write(htr, 3000);
+    r.write(ltr, 1000);
+    CHECK(r.read(htr) == 3000);
+    static_cast<void>(r.convert(5, control));
+    CHECK(((r.read(sr) & awd) != 0) == flagged);
+    CHECK(r.pending() == flagged);
+  }
+}
+
+TEST_CASE("RM0038 Table 59: AWDSGL guards the AWDCH channel only")
+{
+  for(auto const& [channel, flagged] : {
+          std::pair{2u, false},
+          std::pair{1u, true }
+  })
+  {
+    CAPTURE(channel);
+    adc_rig const r;
+    r.port().drive(1, 2'900'000);
+    r.port().drive(2, 1'500'000);
+    r.write(cr1, scan | awden | awdsgl | channel);
+    r.power();
+    r.write(htr, 3000);
+    r.write(sqr1, 1u << 20);
+    r.write(sqr5, 1u | (2u << 5));
+    r.write(cr2, adon | swstart);
+    r.run_until(r.now() + 40 * us);
+    CHECK((r.read(sr) & eoc) != 0);
+    CHECK(((r.read(sr) & awd) != 0) == flagged);
+  }
+}
+
+TEST_CASE(
+    "RM0038 Table 59: JAWDEN guards injected conversions before their offset, "
+    "AWDEN the regular ones only, inferred")
+{
+  for(auto const& [control, injected, flagged] : {
+          std::tuple{awden,  true,  false},
+          std::tuple{jawden, true,  true },
+          std::tuple{jawden, false, false},
+          std::tuple{awden,  false, true },
+  })
+  {
+    CAPTURE(control);
+    CAPTURE(injected);
+    adc_rig const r;
+    r.port().drive(5, 2'500'000);
+    r.write(cr1, control);
+    r.power();
+    r.write(htr, 3000);
+    r.write(jofr1, 2000);
+    r.write(sqr5, 5);
+    r.write(jsqr, 5u << 15);
+    r.write(cr2, adon | (injected ? jswstart : swstart));
+    r.run_until(r.now() + 40 * us);
+    CHECK(((r.read(sr) & awd) != 0) == flagged);
+  }
+}
+
+TEST_CASE("below 12 bits the watchdog compares the code shifted to 12 bits, inferred")
+{
+  for(auto const& [high, flagged] : {
+          std::pair{3000u, true },
+          std::pair{3300u, false}
+  })
+  {
+    CAPTURE(high);
+    adc_rig const r;
+    r.port().drive(5, 2'400'000);
+    r.write(cr1, awden | (2u << 24));
+    r.power();
+    r.write(htr, high);
+    CHECK(r.convert(5) == 204);
+    CHECK(((r.read(sr) & awd) != 0) == flagged);
+  }
+}
+
+TEST_CASE("LL ADC: DMA1 channel 1 takes a scan of ADC_IN1, ADC_IN18 and ADC_IN5, no OVR")
+{
+  for(auto const& desc : {l152re(), l152rb()})
+  {
+    CAPTURE(desc.part);
+    adc_rig const r{desc, true, false, {}, "l1_adc_ll"};
+    r.port().drive(1, 750'000);
+    r.port().drive(18, 1'500'000);
+    r.port().drive(5, 2'250'000);
+    CHECK(r.run("dma3") == std::vector<std::uint32_t>{1024, 2048, 3072, 0});
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE("LL ADC: the watchdog on ADC_IN5 flags a 3072 code above HT 3000")
+{
+  for(auto const& desc : {l152re(), l152rb()})
+  {
+    CAPTURE(desc.part);
+    adc_rig const r{desc, true, false, {}, "l1_adc_ll"};
+    r.port().drive(5, 2'250'000);
+    CHECK(r.run("watchdog") == std::vector<std::uint32_t>{3072, 1});
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE(
+    "RM0038 12.11.4: an SR write of 1 to EOC keeps a DMA scan result unread, the late channel "
+    "takes all three, no OVR")
+{
+  adc_rig const r;
+  r.port().drive(1, 750'000);
+  r.port().drive(2, 1'500'000);
+  r.port().drive(3, 2'250'000);
+  r.write(cr1, scan | awden);
+  r.power();
+  r.write(htr, 500);
+  r.write(smpr3, (7u << 3) | (7u << 6) | (7u << 9));
+  r.write(sqr1, 2u << 20);
+  r.write(sqr5, 1u | (2u << 5) | (3u << 10));
+  r.write(cr2, adon | dma | swstart);
+  r.run_until(r.due() + ns);
+  REQUIRE((r.read(sr) & awd) != 0);
+  REQUIRE((r.read(sr) & eoc) == 0);
+  r.write(sr, ~awd);
+  r.dma_channel1(3, dma_half | dma_en);
+  r.run_until(r.now() + 3 * 396 * cycle + 10 * us);
+  CHECK(r.memory(0) == 1024);
+  CHECK(r.memory(1) == 2048);
+  CHECK(r.memory(2) == 3072);
+  CHECK((r.read(sr) & ovr) == 0);
+}
+
+TEST_CASE(
+    "RM0038 12.11.1: a circular channel with DDS 0 takes one pass and the requests stop, DDS 1 "
+    "keeps refilling, inferred")
+{
+  for(auto const selection : {0u, dds})
+  {
+    CAPTURE(selection);
+    adc_rig const r;
+    r.port().drive(1, 750'000);
+    r.power();
+    r.write(smpr3, 7u << 3);
+    r.write(sqr5, 1);
+    r.dma_channel1(3, dma_circ | dma_half | dma_en);
+    auto const start = r.now();
+    r.write(cr2, adon | cont | dma | selection | swstart);
+    r.run_until(start + 3 * 396 * cycle + 10 * us);
+    REQUIRE(r.memory(2) == 1024);
+    r.port().drive(1, 1'500'000);
+    r.run_until(start + 10 * 396 * cycle + 10 * us);
+    auto const refilled = selection != 0 ? 2048u : 1024u;
+    CHECK(r.memory(0) == refilled);
+    CHECK(r.memory(1) == refilled);
+    CHECK(r.memory(2) == refilled);
+    if(selection == 0)
+    {
+      CHECK(r.dma1(0x0C) == 3);
+    }
+    CHECK((r.read(sr) & ovr) == 0);
+  }
+}
+
+TEST_CASE(
+    "RM0038 12.15.2: with SCAN and AWDIE a crossing aborts the regular scan, the next start "
+    "begins at rank 1, rank and flags inferred")
+{
+  for(auto const interrupt : {awdie, 0u})
+  {
+    CAPTURE(interrupt);
+    adc_rig const r;
+    r.port().drive(1, 2'900'000);
+    r.port().drive(2, 1'500'000);
+    r.port().drive(3, 750'000);
+    r.write(cr1, scan | awden | interrupt);
+    r.power();
+    r.write(htr, 3000);
+    r.write(smpr3, (7u << 3) | (7u << 6) | (7u << 9));
+    r.write(sqr1, 2u << 20);
+    r.write(sqr5, 1u | (2u << 5) | (3u << 10));
+    r.dma_channel1(4, dma_half | dma_en);
+    r.write(cr2, adon | cont | dma | dds | swstart);
+    r.run_until(r.now() + 3 * 396 * cycle + 10 * us);
+    CHECK((r.read(sr) & awd) != 0);
+    CHECK(r.memory(0) == 3959);
+    if(interrupt == 0)
+    {
+      CHECK(r.memory(1) == 2048);
+      CHECK(r.memory(2) == 1024);
+      continue;
+    }
+    CHECK(r.memory(1) == 0);
+    CHECK(r.due() == ~std::uint64_t{});
+    CHECK(r.dma1(0x0C) == 3);
+    r.port().drive(1, 750'000);
+    r.write(sr, ~(awd | strt));
+    r.write(cr2, adon | dma | dds | swstart);
+    r.run_until(r.now() + 396 * cycle + 10 * us);
+    CHECK(r.memory(1) == 1024);
+  }
+}
+
+TEST_CASE(
+    "RM0038 12.15.2: with DISCEN an AWDIE crossing at rank 1 ends the subgroup, the next "
+    "trigger converts from rank 1, inferred")
+{
+  adc_rig const r;
+  r.port().drive(1, 2'900'000);
+  r.port().drive(2, 1'500'000);
+  r.port().drive(3, 750'000);
+  r.write(cr1, scan | discen | (2u << 13) | awden | awdie);
+  r.power();
+  r.write(htr, 3000);
+  r.write(smpr3, (7u << 3) | (7u << 6) | (7u << 9));
+  r.write(sqr1, 2u << 20);
+  r.write(sqr5, 1u | (2u << 5) | (3u << 10));
+  r.dma_channel1(4, dma_half | dma_en);
+  r.write(cr2, adon | dma | dds | swstart);
+  r.run_until(r.now() + 3 * 396 * cycle + 10 * us);
+  REQUIRE(r.memory(0) == 3959);
+  REQUIRE(r.memory(1) == 0);
+  r.port().drive(1, 750'000);
+  r.write(sr, ~(awd | strt));
+  r.write(cr2, adon | dma | dds | swstart);
+  r.run_until(r.now() + 396 * cycle + 10 * us);
+  CHECK(r.memory(1) == 1024);
+}
+
+TEST_CASE(
+    "RM0038 12.15.2: with SCAN and AWDIE a crossing ends the injected group "
+    "with JEOC, inferred")
+{
+  for(auto const interrupt : {awdie, 0u})
+  {
+    CAPTURE(interrupt);
+    adc_rig const r;
+    r.port().drive(1, 2'900'000);
+    r.port().drive(2, 1'500'000);
+    r.write(cr1, scan | jawden | interrupt);
+    r.power();
+    r.write(htr, 3000);
+    r.write(jsqr, (1u << 20) | (1u << 10) | (2u << 15));
+    r.write(cr2, adon | jswstart);
+    r.run_until(r.now() + 40 * us);
+    CHECK((r.read(sr) & (jeoc | awd)) == (jeoc | awd));
+    CHECK(r.read(jdr1) == 3959);
+    CHECK(r.read(jdr1 + 4) == (interrupt != 0 ? 0u : 2048u));
+  }
+}
+
+TEST_CASE("with DDS 0 after the last transfer an overrun leaves SWSTART working, as with DMA 0")
+{
+  adc_rig const r;
+  r.port().drive(5, 1'500'000);
+  r.power();
+  r.write(sqr5, 5);
+  r.dma_channel1(1, dma_half | dma_en);
+  for(int start = 0; start < 3; ++start)
+  {
+    r.write(sr, ~strt);
+    r.write(cr2, adon | eocs | dma | swstart);
+    r.run_until(r.now() + 10 * us);
+  }
+  REQUIRE(r.memory(0) == 2048);
+  REQUIRE((r.read(sr) & ovr) != 0);
+  r.write(sr, ~strt);
+  r.write(cr2, adon | eocs | dma | swstart);
+  CHECK((r.read(sr) & strt) != 0);
+}
+
+TEST_CASE(
+    "the end of a TIM2_CC3 count on DMA1 channel 1 while the ADC DMA bit is 0 leaves the "
+    "ADC's later DMA scan requesting")
+{
+  adc_rig const r;
+  r.port().drive(5, 1'500'000);
+  r.power();
+  r.write(sqr5, 5);
+  r.poke("RCC", 0x24, 1);
+  r.poke("TIM2", 0x0C, 1u << 11);
+  r.dma_channel1(1, dma_half | dma_en);
+  r.poke("TIM2", 0x14, 1u << 3);
+  r.run_until(r.now() + 10 * us);
+  REQUIRE(r.dma1(0x0C) == 0);
+  r.dma_channel1(1, dma_half | dma_en);
+  r.write(cr2, adon | dma | swstart);
+  r.run_until(r.now() + 10 * us);
+  CHECK(r.memory(0) == 2048);
+}
+
+TEST_CASE(
+    "the end of a TIM2 update count on DMA1 channel 2 leaves the ADC DDS 0 requests on "
+    "channel 1 going")
+{
+  adc_rig const r;
+  r.port().drive(5, 1'500'000);
+  r.power();
+  r.write(sqr5, 5);
+  r.write(cr2, adon | dma);
+  r.poke("RCC", 0x24, 1);
+  r.poke("TIM2", 0x0C, 1u << 8);
+  r.poke("DMA1", 0x1C, 0);
+  r.poke("DMA1", 0x24, base + dr);
+  r.poke("DMA1", 0x28, buffer + 0x100);
+  r.poke("DMA1", 0x20, 1);
+  r.poke("DMA1", 0x1C, dma_half | dma_en);
+  r.poke("TIM2", 0x14, 1);
+  r.run_until(r.now() + 10 * us);
+  REQUIRE(r.dma1(0x20) == 0);
+  r.dma_channel1(1, dma_half | dma_en);
+  r.write(cr2, adon | dma | swstart);
+  r.run_until(r.now() + 10 * us);
+  CHECK(r.memory(0) == 2048);
+}
+
+TEST_CASE("RM0038 12.11.1: with DMA 1 and AWDEN a result an overrun loses still sets AWD, inferred")
+{
+  adc_rig const r;
+  r.port().drive(0, 1'500'000);
+  r.write(cr1, awden);
+  r.power();
+  r.write(htr, 3000);
+  r.write(smpr3, 7);
+  auto const start = r.now();
+  r.write(cr2, adon | cont | dma | swstart);
+  r.run_until(start + 396 * cycle + ns);
+  REQUIRE((r.read(sr) & awd) == 0);
+  r.port().drive(0, 2'900'000);
+  r.run_until(start + 792 * cycle + ns);
+  CHECK((r.read(sr) & ovr) != 0);
+  CHECK(r.read(dr) == 2048);
+  CHECK((r.read(sr) & awd) != 0);
 }

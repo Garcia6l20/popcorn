@@ -128,8 +128,10 @@ enum class unsupported : std::uint8_t
  *        tells every `dma_requester` peer each request of the channel, inferred. A
  *        hardware-requested transfer that leaves one item tells every `dma_requester` peer each
  *        request of the channel through dma_requester::last_but_one(), the EOT_1 signal of RM0038
- *        26.3.7, once per pass of a circular channel. A request held high across a machine reset
- *        is cleared, one held across the RCC reset of the controller is kept.
+ *        26.3.7, once per pass of a circular channel. The last item of a hardware-requested count
+ *        tells every peer each request of the channel through dma_requester::count_ended(), at
+ *        the end of a normal channel and at each circular reload. A request held high across a
+ *        machine reset is cleared, one held across the RCC reset of the controller is kept.
  */
 class dma_classic final : public dispatch_model<dma_classic, dma_classic_state>,
                           public dma_controller
@@ -503,6 +505,10 @@ void dma_classic::transfer(std::size_t ch)
     return;
   }
   raise(ch, c.complete);
+  if(hardware)
+  {
+    tell(ch, &dma_requester::count_ended);
+  }
   if(get(regs_, c.circular) != 0 and hardware)
   {
     update(regs_, c.count, s.programmed);

@@ -2,6 +2,7 @@
 #include "stm32l1xx.h"
 #include "stm32l1xx_ll_adc.h"
 #include "stm32l1xx_ll_bus.h"
+#include "stm32l1xx_ll_dma.h"
 #include "stm32l1xx_ll_rcc.h"
 #include "stm32l1xx_ll_tim.h"
 
@@ -10,6 +11,8 @@ void single(void);
 void scan3(void);
 void triggered(void);
 void injected(void);
+void dma3(void);
+void watchdog(void);
 void factory(void);
 
 void idle(void)
@@ -128,6 +131,51 @@ void injected(void)
   {
   }
   LOG(LL_ADC_REG_ReadConversionData12(ADC1));
+  DONE();
+}
+
+static uint16_t samples[3];
+
+void dma3(void)
+{
+  enable();
+  three_ranks();
+  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_DMA1);
+  LL_DMA_ConfigTransfer(
+      DMA1, LL_DMA_CHANNEL_1,
+      LL_DMA_DIRECTION_PERIPH_TO_MEMORY
+          | LL_DMA_MODE_NORMAL
+          | LL_DMA_PERIPH_NOINCREMENT
+          | LL_DMA_MEMORY_INCREMENT
+          | LL_DMA_PDATAALIGN_HALFWORD
+          | LL_DMA_MDATAALIGN_HALFWORD
+          | LL_DMA_PRIORITY_HIGH);
+  LL_DMA_ConfigAddresses(
+      DMA1, LL_DMA_CHANNEL_1, LL_ADC_DMA_GetRegAddr(ADC1, LL_ADC_DMA_REG_REGULAR_DATA),
+      (uint32_t)samples, LL_DMA_DIRECTION_PERIPH_TO_MEMORY);
+  LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_1, 3u);
+  LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_1);
+  LL_ADC_REG_SetDMATransfer(ADC1, LL_ADC_REG_DMA_TRANSFER_LIMITED);
+  LL_ADC_REG_StartConversionSWStart(ADC1);
+  while(LL_DMA_IsActiveFlag_TC1(DMA1) == 0u)
+  {
+  }
+  LOG(samples[0]);
+  LOG(samples[1]);
+  LOG(samples[2]);
+  LOG(LL_ADC_IsActiveFlag_OVR(ADC1));
+  DONE();
+}
+
+void watchdog(void)
+{
+  enable();
+  LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, LL_ADC_CHANNEL_5);
+  LL_ADC_SetAnalogWDThresholds(ADC1, LL_ADC_AWD_THRESHOLD_HIGH, 3000u);
+  LL_ADC_SetAnalogWDThresholds(ADC1, LL_ADC_AWD_THRESHOLD_LOW, 1000u);
+  LL_ADC_SetAnalogWDMonitChannels(ADC1, LL_ADC_AWD_CHANNEL_5_REG);
+  LOG(convert());
+  LOG(LL_ADC_IsActiveFlag_AWD1(ADC1));
   DONE();
 }
 
