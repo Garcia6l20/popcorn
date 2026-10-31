@@ -70,10 +70,14 @@ A firmware access logs one `model_warning` per register and raises `ModelError` 
 
 Every code maps the two Cortex-M3 bit-band windows from its description. The alias window at
 0x22000000 maps the SRAM at 0x20000000 and the one at 0x42000000 maps the peripherals at
-0x40000000. A CPU or debugger access of 1, 2 or 4 bytes reaches the bit it names: a read returns
-0 or 1 and a write sets or clears the bit from bit 0 of the value. The peripheral models see the
-access at the target address, so an alias write to `RCC_CR` reaches the RCC model like a plain
-write. ST's HAL sets the RCC enables this way. A DMA access to an alias address is a bus error.
+0x40000000. A CPU access of 1, 2 or 4 bytes reaches the bit it names, and so does a debugger
+access, inferred from the Cortex-M3 bus matrix. A read returns 0 or 1 and a write sets or clears
+the bit from bit 0 of the value. The peripheral models see the access at the target address, so
+an alias write to `RCC_CR` reaches the RCC model like a plain write. ST's HAL sets the RCC
+enables this way. RM0038 2.6 limits alias operations to Cortex-M3 accesses, and a DMA access to
+an alias address is a bus error, an inferred outcome. RM0038 2.6 gives an alias write the effect
+of a read-modify-write, so a write to a register with write-1-to-clear flags clears the other
+set flags, inferred.
 
 ```c
 *(volatile uint32_t *)(0x42000000 + ((0x40023800 - 0x40000000) * 32) + (0 * 4)) = 1;

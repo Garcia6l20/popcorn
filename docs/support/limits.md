@@ -76,6 +76,56 @@ exceptions. They stop the run with a FAULT stop instead:
 - A reset a store requests applies after the instructions that follow the store up to the next
   branch, as for AIRCR.SYSRESETREQ.
 
+## STM32L1 description
+
+Source: [patches](https://github.com/Garcia6l20/popcorn/blob/main/python/popcorn/stm32/description/patches)
+
+The shipped STM32L1 descriptions start from the SVDs and the CubeMX part files. Patches correct
+them from RM0038 and the CMSIS device headers. These corrections are stated by RM0038 or the
+headers:
+
+- The flash size of a code comes from its CubeMX part file, and RM0038 3.2 gives the category
+  maximum only.
+- `RCC_APB2LPENR` resets to 0x521D, RM0038 6.3.12, and `RCC_APB1LPENR` to 0xB0E64A37, RM0038
+  6.3.13, with TIM5LPEN, SPI3LPEN, UART4LPEN and UART5LPEN at 0. The patch applies both to the
+  whole family where the SVDs give 0.
+- `SPI_CR2` resets to 0 on every category, RM0038 28.5.2, where the STM32L152 SVD gives 0x700.
+- `TIM5_ARR` resets to 0xFFFFFFFF, the 32-bit view of RM0038 Table 82. RM0038 17.4.12 shows the
+  16-bit view 0xFFFF.
+- `CC2S` of `TIM2_CCMR1` and `CC4S` of `TIM2_CCMR2` are two bits wide, RM0038 17.4.7 and 17.4.8,
+  where the SVD gives one.
+- `TIM2_OR` and `TIM3_OR` reset to 0, RM0038 17.4.19 and 17.4.20.
+- `FLASH_WRPR4` resets to 0 with its field named WRP4, on Cat.5 only, RM0038 3.9.9.
+- `GPIOx_BRR` reads 0, RM0038 7.4.11.
+- `F_SIZE` of DEV_ID 0x436 is 0 for 384 KiB and 1 for 256 KiB, RM0038 31.1.1.
+- Cat.2 parts that are not value line carry 20 `RTC_BKPxR`, RM0038 20.2. The
+  `stm32l152xba.h` header lists 5.
+- Cat.3 on DIE427 and DIE436 has no UART4 and UART5, so the vectors 48 and 49 and the base
+  0x40004C00 stay unused, RM0038 Table 50 and the CMSIS headers.
+- GPIOF and GPIOG stay in the Cat.6 description with no bonded pin, because the CubeMX part
+  files of DIE437 list none.
+- The CMSIS device header suffix of a category, xb, xba, xc, xca, xd, xe and xdx, is read from
+  the header contents.
+
+These are inferred, not measured on silicon:
+
+- A read past the populated flash inside the 128 KiB window of RM0038 Table 8, the Cat.1 and
+  Cat.2 table, is unmapped.
+- The 64 KiB hole of Cat.6 between the two 192 KiB banks, 0x08030000 to 0x0803FFFF, is unmapped,
+  from RM0038 Table 12 and the CMSIS `FLASH_BANK2_BASE`. Silicon may fault or return a value.
+- `SQ24` sits in bits 29 to 25 of `ADC_SQR2`, five bits wide. RM0038 12.15.11 text gives 29
+  to 26 and the SVD is used.
+- The device unique ID words are fixed values, because RM0038 31.2 documents no layout of the
+  wafer and lot fields. The third word sits at offset 0x14, where the STM32U5 and STM32H5 use
+  0x08.
+- On Cat.1 and Cat.2 `F_SIZE` sits at 0x1FF8004C, inside the factory block 0x1FF80020 to
+  0x1FF800FF of RM0038 Table 8.
+- `FLASH_WRPR4` also exists on Cat.6 at 0x40023C88, from the CMSIS xdx headers. RM0038 3.9.9
+  gives it to Cat.5 only, and whether a Cat.6 access reads zero, faults or returns an option byte
+  value is not known.
+- The Cat.3 vector positions 46 to 55 follow the vector addresses and the CMSIS header. The
+  Position column of RM0038 Table 50 reads 45 to 52.
+
 ## ADC
 
 Source: [adc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc.cpp), [adc_l1.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc_l1.cpp)
@@ -157,6 +207,8 @@ On the STM32L1, RM0038 section 12:
 - `DELS` 010 to 111 add 1 PCLK2 cycle and 3 ADC clock cycles of synchronisation to the delay, the
   maxima RM0038 gives, inferred, at the PCLK2 rate of the conversion end. `DISCEN` with `CONT`
   converts as `DISCEN` alone and is logged once, a model_error under strict_peripherals, inferred.
+  With `EOCS` 1 the `DELS` 010 to 111 delay follows each group though `EOC` sets per conversion,
+  RM0038 12.9.1.
 - `DELS` 001 holds the next conversion at each `EOC`: after each conversion with `EOCS` 1, after
   the group with `EOCS` 0, inferred for `EOCS` 0. A trigger or `SWSTART` during a `DELS` hold is
   ignored, RM0038 12.9 and Figure 47.
@@ -243,7 +295,8 @@ Source: [dbgmcu.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/
 - A freeze bit written while the core is held takes effect at the next hold or release. On
   silicon it takes effect at once.
 - STM32L1: `DBGMCU_CR` is storage, as on the STM32U5. `DBGMCU_IDCODE` reads the description's
-  value of the category, REV_ID 0x1000.
+  value of the category. REV_ID is 0x1000 on every category, the revision A of RM0038 30.6.1,
+  and the choice of one revision is inferred.
 
 ## EXTI
 
@@ -258,6 +311,8 @@ Source: [exti.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
   of the line before its edge detection: an edge at each change of the selected pin, at the pin
   edge's own time, and at a `SYSCFG_EXTICRn` write that moves the line to a pin of another level,
   whatever `EXTI_IMR`, `RTSR` and `FTSR` hold, inferred.
+- STM32L1: line 23 exists on Cat.3 to Cat.6, so `EXTI_IMR` takes 0x00FFFFFF there and 0x007FFFFF on
+  Cat.1 and Cat.2, inferred from RM0038 chapter 10.
 - STM32L1, inferred rules: an edge or a SWIER write sets PR only while the `EXTI_IMR` bit is set,
   the NVIC line follows PR whatever IMR holds, a SWIER write of 0 clears the SWIER bit, a write
   of 1 to a PR bit clears the SWIER bit of the line whether PR was set or not, a
@@ -269,7 +324,8 @@ Source: [exti.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 Source: [gpio.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/gpio.cpp)
 
 - STM32L1: `GPIOx_BRR` exists on Cat.4, Cat.5 and Cat.6, RM0038 7.4.11. On Cat.1 to Cat.3 a
-  firmware store to offset 0x28 is an unmodelled access and changes no pin.
+  firmware store to offset 0x28 is an unmodelled access and changes no pin. The absence on Cat.3
+  is inferred from RM0038 7.4.11 and its revision history.
 - STM32L1: `GPIOx_OSPEEDR` is storage, as on the STM32U5 and the STM32H5.
 
 ## FLASH
@@ -330,13 +386,16 @@ Differs from RM0481:
 On the STM32L1, RM0038 section 3:
 
 - A program memory word write, page erase or half page write holds BSY for one tprog of 3.28 ms, the
-  typical of the STM32L15x datasheets, and the memory reads its new content from the last store of
-  the operation on. During a word write or a page erase, code and data reads of the bank complete
-  and the core keeps running from it. RM0038 3.4.3 stalls code run from the bank for one tprog.
+  typical of the STM32L15x datasheets and inferred for the 2.1 MHz MSI clock, and the memory
+  reads its new content from the last store of the operation on. During a word write or a page
+  erase, code and data reads of the bank complete and the core keeps running from it. RM0038
+  3.4.3 stalls code run from the bank for one tprog.
 - From the first store of a half page sequence to the end of its tprog, a CPU or DMA load of the
   bank written, its program memory and its half of the data EEPROM, is a bus error and a fetch from
-  it a BusFault, RM0038 3.4.3 note 2 and Table 15 note 3. A data EEPROM double word erase or write
-  locks its bank the same way. A parallel page erase or parallel half page locks both banks the same
+  it a BusFault, RM0038 3.4.3 note 2 and Table 15 note 3. The bus error of a load from SRAM code
+  and of a DMA read, and the start of the lock at the first store, are inferred from those notes.
+  A data EEPROM double word erase or write locks its bank the same way, inferred from RM0038
+  3.4.3 note 2 and 3.7.3. A parallel page erase or parallel half page locks both banks the same
   way, from the first store, inferred from RM0038 3.4.2 and 3.4.3, which run them from SRAM only.
   Host and debugger reads complete. A vector read from a locked bank is a bus error too, so an
   exception entry with VTOR in that bank escalates to HardFault with HFSR.VECTTBL, inferred from
@@ -346,8 +405,10 @@ On the STM32L1, RM0038 section 3:
   operation it completes adds its tprogs to BSY. EOP sets once at the end of each operation.
   Silicon stalls the store until the operation before it ends. While a half page or a data
   EEPROM double word of one bank is BSY, a program memory or data EEPROM store to the other bank
-  sets WRPERR and writes nothing, RM0038 3.4.4 and 3.7.3.
-- A program over a word that is not erased writes the word as given. A page erase writes 0, and a
+  sets WRPERR and writes nothing, RM0038 3.4.4 and 3.7.3, inferred. A Cat.5 data EEPROM store to
+  bank 2 during a bank 1 half page does the same.
+- A program memory word written over a word that is not erased holds the word as given, inferred
+  from RM0038 3.4.3, and Table 15 covers the data EEPROM only. A page erase writes 0, and a
   never-programmed word reads 0, the erased value.
 - A store with FLASH_PECR.ERASE or FPRG set and PROG clear, or with both set, programs nothing,
   logs one `model_warning` and raises `ModelError` under `strict`.
@@ -373,7 +434,10 @@ On the STM32L1, RM0038 section 3:
   and sets FLASH_SR.RDERR. A fetch from it runs. Host and unfiltered debugger reads return the
   content. An option store programs with SPRMOD and every protected WRPx bit kept. The RDP level
   1 to 0 store programs the SPRMOD bit it carries, and its mass erase clears the WRPx words. The
-  value a PCROP read returns and the absence of a fault are inferred. On every other category and
+  value a PCROP read returns and the absence of a fault are inferred. So are the option store rule
+  that keeps every protected WRPx bit, the words read back before the next reload, and the load of
+  SPRMOD 1, OPTVERR and WRPR1 and WRPR2 at 0 after an RDP 1 to 0 store and a power-on, RM0038
+  3.7.4. On every other category and
   part FLASH_WRPRx bits at 1 are write protection.
 - `Machine(option_bytes=)` selects the boot bank: the flash base, or with `swap_bank` on Cat.4 to
   Cat.6 the bank 2 base, whatever the first word of bank 2 holds. RM0038 Table 19 boots the
@@ -383,12 +447,13 @@ On the STM32L1, RM0038 section 3:
 - OPTVERR and OPTVERRUSR set again at every reset and FLITFRST pulse after an option load that
   set them, RM0038 3.9.7. An option store programs whatever OPTVERR and OPTVERRUSR hold.
 - A program in voltage range 3 completes, logs one `model_warning` and raises `ModelError` under
-  `strict`. RM0038 3.6 allows programming in ranges 1 and 2 only.
+  `strict`. RM0038 3.6 allows programming in ranges 1 and 2 only. That the program completes
+  is inferred.
 - FLASH_ACR.RUN_PD powers nothing down: the flash stays readable and fetchable, and
   FLASH_SR.READY reads the inverse of RUN_PD. SLEEP_PD and PRFTEN are storage.
-- An RCC FLITFRST pulse resets the FLASH registers only while FLASH_ACR.RUN_PD is set, RM0038
-  6.3.5, and keeps FLASH_OBR and FLASH_WRPRx at their loaded values. While FLITFRST is held,
-  FLASH register writes are ignored whatever RUN_PD holds.
+- An RCC FLITFRST pulse resets the FLASH registers only while FLASH_ACR.RUN_PD is set, inferred
+  from RM0038 6.3.5, and keeps FLASH_OBR and FLASH_WRPRx at their loaded values. While
+  FLITFRST is held, FLASH register writes are ignored whatever RUN_PD holds.
 - A supply cut during a program leaves the word as the store wrote it.
 - Inferred rules: a wrong key, a third key write after the unlock, or a write to FLASH_PRGKEYR or
   FLASH_OPTKEYR while PELOCK is set is a bus error that sets the lock it targets until the next
@@ -425,9 +490,11 @@ Source: [dma_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native
   addresses it latched at the enable until the next circular reload reads them again. `CCRx`
   fields take writes while the channel runs and apply from the next item, inferred. `CNDTRx`
   ignores writes while `EN` is set, RM0038 11.4.4.
-- A transfer error leaves the count and the current addresses at the failed item, inferred.
-- A reserved `PSIZE` or `MSIZE` of 3 transfers words, and `CIRC` with `MEM2MEM` runs the copy
-  once. Each logs one `model_warning`.
+- A transfer error leaves the count and the current addresses at the failed item, inferred. A
+  circular channel disabled mid-copy and enabled again with no `CNDTRx` write restarts from the
+  count left at the disable, inferred.
+- A reserved `PSIZE` or `MSIZE` of 3 transfers words, inferred from RM0038 11.4.3, and `CIRC`
+  with `MEM2MEM` runs the copy once, inferred from RM0038 11.3.3. Each logs one `model_warning`.
 - A byte or halfword DMA write to an APB1 or APB2 address is a word write at the address
   aligned down to 4, with the item repeated on every lane, RM0038 11.3.4. A CPU byte or
   halfword store to the same address writes its own lanes only, inferred.
@@ -586,8 +653,10 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   acknowledge of a read byte moves a full DR on and sets TxE, and with DR empty BTF sets at the
   byte's end, RM0038 26.3.2. The controller's NACK sets AF, and a DR write after it clears TxE and
   sends nothing. BUSY follows the port's START and STOP with PE 0 too. A STOP sets STOPF after an
-  acknowledged address or byte, none after a NACKed byte. PE 0 written between a match of an address
-  of the I2C and the port's STOP disables it at that STOP, RM0038 26.6.1: until then it answers,
+  acknowledged address or byte, none after a NACKed byte. Which acknowledge counts for that rule,
+  the last one sent or CR1.ACK at the STOP, is inferred as the last one sent. PE 0 written
+  between a match of an address of the I2C and the port's STOP disables it at that STOP, RM0038
+  26.6.1: until then it answers,
   stretches and takes DR accesses as with PE 1. Inferred: OAR1 matches before OAR2 for one address,
   PE 0 with no address matched since the last STOP disables the I2C at once, a match with CR1.ACK 0
   answers NACK at the address end with no ADDR, address 0 with R/W 1 matches nothing, an SR1 read
@@ -629,7 +698,10 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   212 EV5. Inferred: a DR write with SB set and no SR1 read since the last SB or ADDR clear sends
   nothing, and the DR write that clears SB takes the SR1 read, so the ADDR clear needs an SR1 read
   after it. A DR write while ADDR is set, during the address phase or after a data NACK sends
-  nothing, inferred.
+  nothing, inferred. An SR2 read between the SR1 read and the DR write that clears SB leaves
+  that clear armed, inferred: RM0038 26.6.7 names the ADDR case only. A CR1.STOP set while ADDR
+  is set sends its STOP after the ADDR clear, inferred where RM0038 26.6.1, Figure 212 and 26.3.3
+  conflict. A byte written with TxE 1 and NACKed leaves TxE 1, inferred from RM0038 26.6.6 TxE.
 - An STM32L1 I2C target answers at the phase's end. A target that leaves its answer pending is
   taken as NACK or as a byte of 0xFF and fails the run with `config_error`, and
   `i2c_target_port::complete()` and `complete_read()` throw `config_error`. The STM32L1 I2C is a
@@ -907,8 +979,11 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   low-power bits of a peripheral the category lacks absent from its description. The RCC sets the
   `RCC_CIR` ready flags its enables select, a `xxxRDYC` write clears them, and no ready interrupt
   is raised. A system reset keeps the RTC domain bits of `RCC_CSR`, `RTCPRE` and `HSEBYP`, a power
-  on reset and a BOR reset them, RM0038 6.1.2 and 6.3.14. `RTCRST` resets the RTC domain bits of
-  `RCC_CSR` while it is 1. A software reset sets SFTRSTF only, the PINRSTF of the NRST pulse is not
+  on reset and a BOR reset them, RM0038 6.1.2 and 6.3.14. A BOR sets PORRSTF and PINRSTF,
+  inferred. `RTCRST` resets the RTC domain bits of
+  `RCC_CSR` while it is 1. The LSE CSS bits exist on the L100, L151 and L162 from Cat.2, and
+  OBLRSTF on every line but the L152, RM0038 6.3.4 and 6.3.14 against the SVDs, inferred. A
+  software reset sets SFTRSTF only, the PINRSTF of the NRST pulse is not
   set, an inferred rule. The reset flags of `RCC_CSR` keep their value on a write, only RMVF and a
   power reset clear them, inferred from RM0038 6.3.14.
 - STM32L1: `RTCPRE` and `HSEBYP` keep their value on a write while `HSEON` is 1 and `LSEBYP` while
@@ -1033,15 +1108,16 @@ Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - RXCRCR takes every frame received, also those lost while OVR is set, inferred from RM0038
   28.3.6.
 - A target, MSTR 0 with CRCEN 1, folds into RXCRCR every frame its controller clocks, also with
-  NSS high or SPE 0, RM0038 28.3.6. Such a frame lands nowhere else.
+  NSS high or SPE 0, RM0038 28.3.6. Such a frame lands nowhere else and leaves TXCRCR as it is,
+  inferred: RM0038 names no calculator for a target that drives no MISO.
 - A target keeps BSY 1 from one frame to the next of a continuous transfer. RM0038 28.3.7 gives
   a slave a BSY low of one SPI clock between frames.
 - SPI_DR takes byte accesses as well as the half-word and word accesses RM0038 28.5 requires: a
   byte write merges into the DR value and sends it, a byte read returns its byte.
 - The CR1 write that ends the MODF clear sequence leaves SPE and MSTR clear, inferred: RM0038
   28.3.10 restores them after the sequence.
-- The SPI IRQ and the DMA requests follow their flags and enables with SPE 0 too, RM0038
-  Table 159 and 28.3.9 name no SPE term.
+- The SPI IRQ and the DMA requests follow their flags and enables with SPE 0 too, inferred:
+  RM0038 Table 159 and 28.3.9 name no SPE term.
 - The STM32L1 SPI takes a controller's frames through `spi_controller_port::transfer()` only.
   `select()`, `frame()`, `deselect()` and `drop()` throw `config_error`, so an STM32L1 SPI is a
   link end of no linked system.
@@ -1185,8 +1261,8 @@ STM32L1 TIM2 to TIM7 and TIM9 to TIM11:
   whatever ETR_RMP, LSE or TIM9 TRGO, and the SMCR write logs once. Under `strict` each write
   raises `ModelError` before the store.
 - TIM9_OR.TI1_RMP 01 connects the LSE to tim_ti1, which then reads low. TIM9 external clock mode 2
-  takes the internal ETR, RM0038 18.3.3, and counts nothing. Each logs once. Under `strict` the
-  write that selects it raises `ModelError` before the store.
+  takes the internal ETR and counts nothing, inferred: RM0038 18.3.3 names no ETR source. Each
+  logs once. Under `strict` the write that selects it raises `ModelError` before the store.
 - TIM6, TIM7, TIM10, TIM11 and the Cat.1 and Cat.2 TIM9 count up only. On that TIM9 SMS 001 to 011 are
   reserved: no encoder edge counts and the SMCR write logs once. Under `strict` it raises
   `ModelError` before the store.
