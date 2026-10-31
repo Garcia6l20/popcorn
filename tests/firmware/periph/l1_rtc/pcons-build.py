@@ -17,6 +17,8 @@ for chipset in (STM32L152XE, STM32L152XB):
             "backup_write",
             "backup_read",
             "backup_reset",
+            "alarm",
+            "wakeup",
         ],
         chipset=chipset,
     )

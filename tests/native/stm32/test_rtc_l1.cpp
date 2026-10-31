@@ -251,9 +251,9 @@ auto run_to_idle(stm32_fixture const& f) -> void
   REQUIRE(stopped.reason == stop_reason::idle);
 }
 
-auto finish(stm32_fixture const& f) -> std::vector<std::uint32_t>
+auto finish(stm32_fixture const& f, std::uint64_t cap = 10'000) -> std::vector<std::uint32_t>
 {
-  auto const stopped = f.run_to_stop({.max_instructions = icount{10'000}});
+  auto const stopped = f.run_to_stop({.max_instructions = icount{cap}});
   CAPTURE(stopped.detail);
   REQUIRE(stopped.reason == stop_reason::user);
   return f.log();
@@ -1324,4 +1324,31 @@ TEST_CASE("with DBG_RTC_STOP a wakeup due during a held span comes one held span
   CHECK((r.read("ISR") & wutf) == 0);
   r.run_until(enabled + 2601 * rtc_cycle + us);
   CHECK((r.read("ISR") & wutf) == wutf);
+}
+
+TEST_CASE("RM0038 20.5: LL alarm A on 00:00:01 runs RTC_Alarm_IRQHandler through EXTI line 17")
+{
+  for(auto const cat1 : {false, true})
+  {
+    CAPTURE(cat1);
+    auto const name = cat1 ? firmware_b : firmware;
+    auto       f    = entered(cat1 ? l152rb() : l152re(), name, "alarm");
+    CHECK(finish(f, 20'000'000) == std::vector<std::uint32_t>{0, 0, 0, 0, 0x00'0001, march_1, 1});
+  }
+}
+
+TEST_CASE(
+    "RM0038 20.5: LL ck_spre wakeup every second runs RTC_WKUP_IRQHandler through EXTI line 20")
+{
+  for(auto const cat1 : {false, true})
+  {
+    CAPTURE(cat1);
+    auto const name = cat1 ? firmware_b : firmware;
+    auto       f    = entered(cat1 ? l152rb() : l152re(), name, "wakeup");
+    auto const log  = finish(f, 20'000'000);
+    REQUIRE(log.size() == (cat1 ? 6u : 7u));
+    CHECK(std::vector(log.begin(), log.begin() + 3) == std::vector<std::uint32_t>{0, 0, 0});
+    CHECK(
+        std::vector(log.end() - 3, log.end()) == std::vector<std::uint32_t>{0x00'0001, march_1, 3});
+  }
 }
