@@ -769,3 +769,56 @@ def test_write_layers_removes_stale_parts_files_before_their_lines_and_blocks(
         (tmp_path / file).write_bytes(b"")
     assert _shipped.write_layers(tmp_path, {}, {"STM32T0xx"}) == stale[::-1]
     assert list(tmp_path.iterdir()) == []
+
+
+def _rename_part(directory: Path, old: str, new: str) -> None:
+    parts = _decode(directory, PARTS)
+    parts["parts"] = {new if key == old else key: value for key, value in parts["parts"].items()}
+    (directory / PARTS).write_bytes(pack(parts))
+
+
+def test_a_rewritten_parts_layer_names_its_new_parts_at_the_next_call(shipped_dir: Path) -> None:
+    assert shipped_names() == [NAME]
+    _rename_part(shipped_dir, NAME, "STM32T001ABDx")
+    assert shipped_names() == ["STM32T001ABDx"]
+
+
+def test_an_unchanged_parts_layer_is_decoded_once(
+    shipped_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert shipped_names() == [NAME]
+    decoded: list[str] = []
+    real = vars(_shipped)["_layer"]
+
+    def counting(data: bytes, *, file: str, kind: str) -> Any:
+        decoded.append(Path(file).name)
+        return real(data, file=file, kind=kind)
+
+    monkeypatch.setattr(_shipped, "_layer", counting)
+    assert shipped_names() == [NAME]
+    assert decoded == []
+
+
+def test_a_refused_parts_layer_is_refused_again_until_it_is_fixed(shipped_dir: Path) -> None:
+    good = (shipped_dir / PARTS).read_bytes()
+    assert shipped_names() == [NAME]
+    (shipped_dir / PARTS).write_bytes(lzma.compress(b"[]"))
+    for _ in range(2):
+        with pytest.raises(DescriptionError) as excinfo:
+            shipped_names()
+        assert excinfo.value.key == "<root>"
+    (shipped_dir / PARTS).write_bytes(good)
+    assert shipped_names() == [NAME]
+
+
+def test_the_names_memo_holds_at_most_64_layer_files(shipped_dir: Path, tmp_path: Path) -> None:
+    _shipped.names_memo.clear()
+    layer = (shipped_dir / PARTS).read_bytes()
+    directories = [tmp_path / f"d{index}" for index in range(70)]
+    for directory in directories:
+        directory.mkdir()
+        (directory / PARTS).write_bytes(layer)
+        assert shipped_names(directory) == [NAME]
+    assert len(_shipped.names_memo) == 64
+    assert (directories[0] / PARTS).resolve() not in _shipped.names_memo
+    assert (directories[-1] / PARTS).resolve() in _shipped.names_memo

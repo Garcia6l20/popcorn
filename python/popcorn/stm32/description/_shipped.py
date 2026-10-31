@@ -8,6 +8,7 @@ import lzma
 import os
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Collection, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -96,17 +97,31 @@ def _layer(data: bytes, *, file: str, kind: str) -> tuple[dict[str, Any], bytes]
     return layer, raw
 
 
+_NAMES_MEMO_SIZE = 64
+names_memo: OrderedDict[Path, tuple[bytes, list[str]]] = OrderedDict()
+
+
 def _names_in(path: Path) -> list[str]:
-    layer, _ = _layer(path.read_bytes(), file=str(path), kind="parts")
-    deltas = layer.get("parts")
-    if not isinstance(deltas, dict):
-        raise DescriptionError(str(path), 0, "parts", "an object")
-    return list(cast(dict[str, Any], deltas))
+    data = path.read_bytes()
+    key = path.resolve()
+    entry = names_memo.pop(key, None)
+    if entry is None or entry[0] != data:
+        layer, _ = _layer(data, file=str(path), kind="parts")
+        deltas = layer.get("parts")
+        if not isinstance(deltas, dict):
+            raise DescriptionError(str(path), 0, "parts", "an object")
+        entry = (data, list(cast(dict[str, Any], deltas)))
+    names_memo[key] = entry
+    if len(names_memo) > _NAMES_MEMO_SIZE:
+        names_memo.popitem(last=False)
+    return list(entry[1])
 
 
 def shipped_names(directory: Path | None = None) -> list[str]:
     """Names of the shipped parts, `<name>[-<core>]`, <name> the expanded name of a group RefName,
-    the keys of `parts` of every parts layer in @p directory, SHIPPED_DIR by default, sorted."""
+    the keys of `parts` of every parts layer in @p directory, SHIPPED_DIR by default, sorted. The
+    names of a layer file are memoized in the process on its resolved path while its bytes are
+    unchanged, 64 files, least recently read dropped first."""
     directory = SHIPPED_DIR if directory is None else directory
     return sorted(name for path in directory.glob(f"*{_PARTS_SUFFIX}") for name in _names_in(path))
 
