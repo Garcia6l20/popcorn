@@ -21,6 +21,7 @@ inline constexpr std::uint32_t first_key        = 0xCA;
 inline constexpr std::uint32_t second_key       = 0x53;
 inline constexpr std::uint64_t init_cycles      = 2;
 inline constexpr std::uint64_t exit_cycles      = 4;
+inline constexpr std::uint64_t search_days      = 4 * 366;
 
 inline constexpr std::array<std::string_view, 7> time_names{"PM",  "HT", "HU", "MNT",
                                                             "MNU", "ST", "SU"};
@@ -45,6 +46,76 @@ struct date_time
   /** @brief Second, 0 to 59. */
   std::uint32_t second{};
 };
+
+/** @brief Fields of an `RTC_ALRMxR` alarm register. */
+struct alarm_match
+{
+  /** @brief MSK4, the date or weekday masked. */
+  field_ref date_mask;
+  /** @brief WDSEL, DU holds a weekday. */
+  field_ref weekday_select;
+  /** @brief DT, date tens. */
+  field_ref date_tens;
+  /** @brief DU, date units or weekday. */
+  field_ref date_units;
+  /** @brief MSK3, the hour masked. */
+  field_ref hour_mask;
+  /** @brief PM. */
+  field_ref pm;
+  /** @brief HT, hour tens. */
+  field_ref hour_tens;
+  /** @brief HU, hour units. */
+  field_ref hour_units;
+  /** @brief MSK2, the minutes masked. */
+  field_ref minute_mask;
+  /** @brief MNT, minute tens. */
+  field_ref minute_tens;
+  /** @brief MNU, minute units. */
+  field_ref minute_units;
+  /** @brief MSK1, the seconds masked. */
+  field_ref second_mask;
+  /** @brief ST, second tens. */
+  field_ref second_tens;
+  /** @brief SU, second units. */
+  field_ref second_units;
+};
+
+/**
+ * @brief Resolves the fields of an alarm register.
+ * @param field Resolver of a field by register and field name, the model's `field`.
+ * @param reg Alarm register name, such as `ALRMAR`.
+ */
+template <typename Resolve>
+auto alarm_match_of(Resolve const& field, std::string_view reg) -> alarm_match
+{
+  return {
+      .date_mask      = field(reg, "MSK4"),
+      .weekday_select = field(reg, "WDSEL"),
+      .date_tens      = field(reg, "DT"),
+      .date_units     = field(reg, "DU"),
+      .hour_mask      = field(reg, "MSK3"),
+      .pm             = field(reg, "PM"),
+      .hour_tens      = field(reg, "HT"),
+      .hour_units     = field(reg, "HU"),
+      .minute_mask    = field(reg, "MSK2"),
+      .minute_tens    = field(reg, "MNT"),
+      .minute_units   = field(reg, "MNU"),
+      .second_mask    = field(reg, "MSK1"),
+      .second_tens    = field(reg, "ST"),
+      .second_units   = field(reg, "SU")};
+}
+
+/** @brief RTCCLK divider of a wakeup clock selection WUCKSEL 0 to 3, 16 down to 2. */
+constexpr auto wakeup_divider(std::uint32_t select) noexcept -> std::uint64_t
+{
+  return std::uint64_t{16} >> (select & 3u);
+}
+
+/** @brief Whether a wakeup clock selection counts ck_spre, WUCKSEL 1xx. */
+constexpr auto wakeup_on_spre(std::uint32_t select) noexcept -> bool
+{
+  return (select & 4u) != 0;
+}
 
 /** @brief Value of two BCD digits. */
 constexpr auto bcd(std::uint32_t tens, std::uint32_t units) noexcept -> std::uint32_t
@@ -81,7 +152,8 @@ inline auto date_of(std::uint64_t days) -> std::chrono::year_month_day
  *        asynchronous and synchronous prescalers, the TR, DR and SSR words in 24 or 12-hour
  *        format and the TR and DR writes. It keeps no state of its own: it reads and writes the
  *        members `anchor_ps`, `anchor_frac`, `hz`, `cycle0`, `seconds`, `phase`, `start`,
- *        `prediv_a`, `prediv_s`, `counting` and `weekday_base` of the model's state.
+ *        `prediv_a`, `prediv_s`, `counting` and `weekday_base` of the model's state, and
+ *        `wakeup_base` and `wakeup_fired` for the wakeup timer.
  * @tparam State State of the model.
  */
 template <typename State> class counter
@@ -206,6 +278,105 @@ public:
       return hour;
     }
     return hour % 12 + (pm ? 12 : 0);
+  }
+
+  /**
+   * @brief First second after @p after the alarm matches, within 4 years. An alarm whose
+   *        unmasked fields hold a value the calendar never takes, such as seconds 79, matches
+   *        nothing.
+   * @param a Fields of the alarm register.
+   * @param word Alarm register word.
+   * @param after Second count from 2000-01-01 the search starts after.
+   */
+  [[nodiscard]] auto next_alarm(alarm_match const& a, std::uint32_t word, std::uint64_t after) const
+      -> std::optional<std::uint64_t>
+  {
+    auto const any_sec = a.second_mask.of(word) != 0;
+    auto const any_min = a.minute_mask.of(word) != 0;
+    auto const any_hr  = a.hour_mask.of(word) != 0;
+    auto const any_day = a.date_mask.of(word) != 0;
+    auto const second  = bcd(a.second_tens.of(word), a.second_units.of(word));
+    auto const minute  = bcd(a.minute_tens.of(word), a.minute_units.of(word));
+    auto const hour    = hour_of(a.hour_tens.of(word), a.hour_units.of(word), a.pm.of(word) != 0);
+    auto const date    = bcd(a.date_tens.of(word), a.date_units.of(word));
+    auto const weekday = a.weekday_select.of(word) != 0;
+    auto const hour_ok =
+        get(regs_, format_) == 0
+            ? a.hour_units.of(word) <= 9 and bcd(a.hour_tens.of(word), a.hour_units.of(word)) <= 23
+            : a.hour_units.of(word) <= 9
+                  and bcd(a.hour_tens.of(word), a.hour_units.of(word)) >= 1
+                  and bcd(a.hour_tens.of(word), a.hour_units.of(word)) <= 12;
+    auto const day_ok = weekday ? a.date_units.of(word) >= 1 and a.date_units.of(word) <= 7
+                                : a.date_units.of(word) <= 9 and date >= 1 and date <= 31;
+    auto const valid  = (any_sec or (a.second_units.of(word) <= 9 and second < 60))
+                   and (any_min or (a.minute_units.of(word) <= 9 and minute < 60))
+                   and (any_hr or hour_ok)
+                   and (any_day or day_ok);
+    if(not valid)
+    {
+      return std::nullopt;
+    }
+    auto const first = (after + 1) / seconds_per_day;
+    for(std::uint64_t day = first; day < first + search_days; ++day)
+    {
+      if(not any_day)
+      {
+        auto const t = calendar(day * seconds_per_day);
+        if(weekday ? a.date_units.of(word) != t.weekday : date != t.day)
+        {
+          continue;
+        }
+      }
+      auto const from = day == first ? (after + 1) % seconds_per_day : 0;
+      for(auto h = from / 3600; h < 24; ++h)
+      {
+        if(not any_hr and h != hour)
+        {
+          continue;
+        }
+        auto const from_minute = h == from / 3600 ? from / 60 % 60 : 0;
+        for(auto m = from_minute; m < 60; ++m)
+        {
+          if(not any_min and m != minute)
+          {
+            continue;
+          }
+          auto const same = h == from / 3600 and m == from / 60 % 60;
+          for(auto sec = same ? from % 60 : 0; sec < 60; ++sec)
+          {
+            if(any_sec or sec == second)
+            {
+              return day * seconds_per_day + h * 3600 + m * 60 + sec;
+            }
+          }
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  /**
+   * @brief RTCCLK cycle of the next wakeup of an enabled timer, from the members
+   *        `wakeup_base` and `wakeup_fired`: every WUT + 1 periods of RTCCLK / 16 to / 2, or of
+   *        ck_spre with 2^16 added for WUCKSEL 11x. A ck_spre timer of a stopped calendar has none.
+   * @param select WUCKSEL.
+   * @param reload WUT.
+   */
+  [[nodiscard]] auto wakeup_due(std::uint32_t select, std::uint32_t reload) const
+      -> std::optional<std::uint64_t>
+  {
+    auto const periods = std::uint64_t{reload} + 1;
+    if(wakeup_on_spre(select))
+    {
+      if(state_.counting == 0)
+      {
+        return std::nullopt;
+      }
+      auto const period = periods + ((select & 2u) != 0 ? 0x1'0000 : 0);
+      auto const second = state_.wakeup_base + (state_.wakeup_fired + 1) * period;
+      return cycle_of(second * sync_ticks());
+    }
+    return state_.wakeup_base + (state_.wakeup_fired + 1) * periods * wakeup_divider(select);
   }
 
   /** @brief Moves the anchor to a time and a new RTCCLK rate, keeping the cycle count. */

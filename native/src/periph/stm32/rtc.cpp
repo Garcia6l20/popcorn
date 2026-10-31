@@ -34,8 +34,6 @@ using rtc_calendar::init_cycles;
 using rtc_calendar::second_key;
 using rtc_calendar::seconds_per_day;
 
-constexpr std::uint64_t search_days = 4 * 366;
-
 enum event_kind : std::uint8_t
 {
   init_ready,
@@ -91,25 +89,12 @@ constexpr std::array<alarm_fields, 2> alarm_names{
 
 struct alarm_refs
 {
-  field_ref enable;
-  field_ref flag;
-  field_ref interrupt;
-  reg_ref   reg;
-  field_ref subsecond_mask;
-  field_ref date_mask;
-  field_ref weekday_select;
-  field_ref date_tens;
-  field_ref date_units;
-  field_ref hour_mask;
-  field_ref pm;
-  field_ref hour_tens;
-  field_ref hour_units;
-  field_ref minute_mask;
-  field_ref minute_tens;
-  field_ref minute_units;
-  field_ref second_mask;
-  field_ref second_tens;
-  field_ref second_units;
+  field_ref                 enable;
+  field_ref                 flag;
+  field_ref                 interrupt;
+  reg_ref                   reg;
+  field_ref                 subsecond_mask;
+  rtc_calendar::alarm_match match;
 };
 
 /**
@@ -191,10 +176,6 @@ private:
   [[nodiscard]] auto now_ps() const -> std::uint64_t;
   [[nodiscard]] auto unlocked() const -> bool;
   [[nodiscard]] auto initializing() const -> bool;
-  [[nodiscard]] auto next_alarm(std::size_t which, std::uint64_t after) const
-      -> std::optional<std::uint64_t>;
-  [[nodiscard]] auto wakeup_divider() const -> std::uint64_t;
-  [[nodiscard]] auto wakeup_on_spre() const -> bool;
 
   void clear_backup(register_file& regs, bool board_calendar);
   void restart_timers(std::uint64_t cycle);
@@ -307,20 +288,8 @@ rtc::rtc(
     a.interrupt       = field("CR", interrupts[which]);
     a.reg             = reg(names.reg);
     a.subsecond_mask  = field(names.subseconds, "MASKSS");
-    a.date_mask       = field(names.reg, "MSK4");
-    a.weekday_select  = field(names.reg, "WDSEL");
-    a.date_tens       = field(names.reg, "DT");
-    a.date_units      = field(names.reg, "DU");
-    a.hour_mask       = field(names.reg, "MSK3");
-    a.pm              = field(names.reg, "PM");
-    a.hour_tens       = field(names.reg, "HT");
-    a.hour_units      = field(names.reg, "HU");
-    a.minute_mask     = field(names.reg, "MSK2");
-    a.minute_tens     = field(names.reg, "MNT");
-    a.minute_units    = field(names.reg, "MNU");
-    a.second_mask     = field(names.reg, "MSK1");
-    a.second_tens     = field(names.reg, "ST");
-    a.second_units    = field(names.reg, "SU");
+    a.match           = rtc_calendar::alarm_match_of(
+        [this](std::string_view r, std::string_view f) { return field(r, f); }, names.reg);
   }
   for(auto const& name : {"CALP", "CALW8", "CALW16", "LPCAL", "CALM"})
   {
@@ -370,84 +339,6 @@ auto rtc::initializing() const -> bool
   return get(regs_, init_flag_) != 0;
 }
 
-auto rtc::next_alarm(std::size_t which, std::uint64_t after) const -> std::optional<std::uint64_t>
-{
-  auto const& a       = alarms_[which];
-  auto const  word    = regs_.peek(a.reg.offset);
-  auto const  any_sec = a.second_mask.of(word) != 0;
-  auto const  any_min = a.minute_mask.of(word) != 0;
-  auto const  any_hr  = a.hour_mask.of(word) != 0;
-  auto const  any_day = a.date_mask.of(word) != 0;
-  auto const  second  = bcd(a.second_tens.of(word), a.second_units.of(word));
-  auto const  minute  = bcd(a.minute_tens.of(word), a.minute_units.of(word));
-  auto const hour = count_.hour_of(a.hour_tens.of(word), a.hour_units.of(word), a.pm.of(word) != 0);
-  auto const date = bcd(a.date_tens.of(word), a.date_units.of(word));
-  auto const weekday = a.weekday_select.of(word) != 0;
-  auto const hour_ok =
-      get(regs_, format_) == 0
-          ? a.hour_units.of(word) <= 9 and bcd(a.hour_tens.of(word), a.hour_units.of(word)) <= 23
-          : a.hour_units.of(word) <= 9
-                and bcd(a.hour_tens.of(word), a.hour_units.of(word)) >= 1
-                and bcd(a.hour_tens.of(word), a.hour_units.of(word)) <= 12;
-  auto const day_ok = weekday ? a.date_units.of(word) >= 1 and a.date_units.of(word) <= 7
-                              : a.date_units.of(word) <= 9 and date >= 1 and date <= 31;
-  auto const valid  = (any_sec or (a.second_units.of(word) <= 9 and second < 60))
-                 and (any_min or (a.minute_units.of(word) <= 9 and minute < 60))
-                 and (any_hr or hour_ok)
-                 and (any_day or day_ok);
-  if(not valid)
-  {
-    return std::nullopt;
-  }
-  auto const first = (after + 1) / seconds_per_day;
-  for(std::uint64_t day = first; day < first + search_days; ++day)
-  {
-    if(not any_day)
-    {
-      auto const t = count_.calendar(day * seconds_per_day);
-      if(weekday ? a.date_units.of(word) != t.weekday : date != t.day)
-      {
-        continue;
-      }
-    }
-    auto const from = day == first ? (after + 1) % seconds_per_day : 0;
-    for(auto h = from / 3600; h < 24; ++h)
-    {
-      if(not any_hr and h != hour)
-      {
-        continue;
-      }
-      auto const from_minute = h == from / 3600 ? from / 60 % 60 : 0;
-      for(auto m = from_minute; m < 60; ++m)
-      {
-        if(not any_min and m != minute)
-        {
-          continue;
-        }
-        auto const same = h == from / 3600 and m == from / 60 % 60;
-        for(auto sec = same ? from % 60 : 0; sec < 60; ++sec)
-        {
-          if(any_sec or sec == second)
-          {
-            return day * seconds_per_day + h * 3600 + m * 60 + sec;
-          }
-        }
-      }
-    }
-  }
-  return std::nullopt;
-}
-
-auto rtc::wakeup_divider() const -> std::uint64_t
-{
-  return std::uint64_t{16} >> (get(regs_, wakeup_clock_) & 3u);
-}
-
-auto rtc::wakeup_on_spre() const -> bool
-{
-  return (get(regs_, wakeup_clock_) & 4u) != 0;
-}
-
 void rtc::arm(event_kind kind, std::uint64_t cycle)
 {
   state_.armed[kind] = 1;
@@ -463,19 +354,10 @@ void rtc::plan_wakeup()
   {
     return;
   }
-  auto const reload = std::uint64_t{get(regs_, wakeup_reload_)} + 1;
-  if(wakeup_on_spre())
+  if(auto const due = count_.wakeup_due(get(regs_, wakeup_clock_), get(regs_, wakeup_reload_)))
   {
-    if(state_.counting == 0)
-    {
-      return;
-    }
-    auto const period = reload + ((get(regs_, wakeup_clock_) & 2u) != 0 ? 0x1'0000 : 0);
-    auto const second = state_.wakeup_base + (state_.wakeup_fired + 1) * period;
-    arm(wakeup, count_.cycle_of(second * count_.sync_ticks()));
-    return;
+    arm(wakeup, *due);
   }
-  arm(wakeup, state_.wakeup_base + (state_.wakeup_fired + 1) * reload * wakeup_divider());
 }
 
 void rtc::plan_alarm(std::size_t which)
@@ -488,7 +370,8 @@ void rtc::plan_alarm(std::size_t which)
     return;
   }
   auto const now_second = count_.position_at(count_.cycle_at(now_ps())) / count_.sync_ticks();
-  if(auto const next = next_alarm(which, now_second))
+  if(auto const next =
+         count_.next_alarm(alarms_[which].match, regs_.peek(alarms_[which].reg.offset), now_second))
   {
     arm(kind, count_.cycle_of(*next * count_.sync_ticks()));
   }
@@ -869,7 +752,7 @@ void rtc::status_written(std::uint32_t old, std::uint32_t now)
     state_.latched_valid = 0;
     update(regs_, shadow_flag_, 0);
     arm(shadow_ready, state_.start + 1);
-    if(wakeup_on_spre())
+    if(rtc_calendar::wakeup_on_spre(get(regs_, wakeup_clock_)))
     {
       state_.wakeup_base  = state_.seconds;
       state_.wakeup_fired = 0;
@@ -922,13 +805,15 @@ void rtc::control_written(std::uint32_t old, std::uint32_t now)
   auto const is_on  = wakeup_enable_.of(word) != 0;
   if(was_on != is_on)
   {
-    auto const settle_cycles =
-        wakeup_on_spre() ? std::uint64_t{state_.prediv_a} + 1 : wakeup_divider();
+    auto const settle_cycles = rtc_calendar::wakeup_on_spre(get(regs_, wakeup_clock_))
+                                 ? std::uint64_t{state_.prediv_a} + 1
+                                 : rtc_calendar::wakeup_divider(get(regs_, wakeup_clock_));
     arm(wakeup_ready, cycle + settle_cycles + 1);
     if(is_on)
     {
-      state_.wakeup_base =
-          wakeup_on_spre() ? count_.position_at(cycle) / count_.sync_ticks() : cycle;
+      state_.wakeup_base  = rtc_calendar::wakeup_on_spre(get(regs_, wakeup_clock_))
+                              ? count_.position_at(cycle) / count_.sync_ticks()
+                              : cycle;
       state_.wakeup_fired = 0;
     }
   }

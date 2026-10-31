@@ -826,3 +826,20 @@ TEST_CASE("RM0456 63.6.5: a system reset in init mode restarts the calendar on t
   CHECK(read(f, "RTC", "SSR") < 128);
   CHECK(read(f, "RTC", "TR") == 0x00'0001);
 }
+
+TEST_CASE("alarm B with every field masked sets ALRBF every second")
+{
+  using namespace std::chrono;
+  auto f = booted(sys_days{year{2026} / 1 / 1} + hours{10});
+  unlock(f);
+  write(f, "RTC", "ALRMBR", (1u << 31) | (1u << 23) | (1u << 15) | (1u << 7));
+  write(f, "RTC", "CR", read(f, "RTC", "CR") | (1u << 9));
+  for(int round = 0; round < 3; ++round)
+  {
+    CAPTURE(round);
+    later(f, second);
+    CHECK(flag(f, 1) == 1);
+    write(f, "RTC", "SCR", 1u << 1);
+    CHECK(flag(f, 1) == 0);
+  }
+}
