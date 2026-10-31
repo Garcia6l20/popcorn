@@ -1,7 +1,7 @@
 """Canonical text dumps of an PartDescription and the golden digest file they round-trip through.
 
 Table format, one line per item, in description order (already deterministic, spec 04):
-  P name base size ip bonded bonded_channels
+  P name base size ip bonded bonded_channels [bonded_b bonded_channels_b]
   R periph reg offset width access reset mask nfields alternate_of aliases
   F periph reg field lsb width access on_write on_read
   I number name
@@ -10,8 +10,8 @@ Table format, one line per item, in description order (already deterministic, sp
   C cpu revision fpu fpu_double mpu mpu_regions mpu_regions_secure sau_regions trustzone dsp
     nvic_prio_bits num_irqs vendor_systick_config reset_clock_hz
 Addresses, offsets, resets and masks are lower-case hex; every other number is decimal; a missing
-optional value is "-". Register aliases are joined by commas. Region content is offset:hexbytes
-pieces joined by commas.
+optional value is "-", a bracketed group is written only when its value is present. Register
+aliases are joined by commas. Region content is offset:hexbytes pieces joined by commas.
 """
 
 import hashlib
@@ -60,6 +60,7 @@ def _dump_peripherals(description: PartDescription) -> str:
         f"P {p.name} {p.base:#010x} {p.size:#010x} {p.ip} "
         f"{f'{p.bonded:#06x}' if p.bonded is not None else '-'} "
         f"{f'{p.bonded_channels:#010x}' if p.bonded_channels is not None else '-'}"
+        f"{f' bonded_b {p.bonded_channels_b:#010x}' if p.bonded_channels_b is not None else ''}"
         for p in description.peripherals
     ]
     return "\n".join(lines) + "\n"

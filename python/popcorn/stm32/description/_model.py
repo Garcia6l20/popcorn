@@ -119,6 +119,9 @@ class PeripheralDesc:
     bonded_channels: int | None = field(
         default=None, metadata={"minimum": 0, "maximum": 4294967295}
     )
+    bonded_channels_b: int | None = field(
+        default=None, metadata={"minimum": 0, "maximum": 4294967295}
+    )
 
 
 @dataclass(slots=True, kw_only=True)

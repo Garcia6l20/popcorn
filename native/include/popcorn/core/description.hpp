@@ -192,6 +192,11 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] peripheral_desc
    * the CubeMX `ADCx_INn` and `ADCx_INPn` pin signals. Absent on other peripherals and on
    * hand-written descriptions, where every external channel counts as bonded. */
   std::optional<std::uint32_t> bonded_channels;
+  /** @brief Bank B channels of an ADC with two channel banks whose pad of their own reaches a
+   * package pin, bit n for ADC_INnb, from the CubeMX `ADC_INnb` pin signals. Absent on every other
+   * ADC, on other peripherals and on hand-written descriptions, where every such channel counts as
+   * bonded. */
+  std::optional<std::uint32_t> bonded_channels_b;
 
   /** @brief Member-wise equality. */
   friend auto operator==(peripheral_desc const&, peripheral_desc const&) -> bool = default;

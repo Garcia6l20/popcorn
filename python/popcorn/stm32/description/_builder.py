@@ -14,6 +14,7 @@ from popcorn.stm32.description._cubemx import (
     DbPart,
     Rzone,
     bonded_adc_channels,
+    bonded_adc_channels_b,
     bonded_pins,
     instance_ips,
     read_gpio_alternates,
@@ -89,6 +90,12 @@ def bare_register_names(peripheral: PeripheralDesc, ancestors: Sequence[str]) ->
         rule.reg = renames.get(rule.reg, rule.reg)
         rule.target_reg = renames.get(rule.target_reg, rule.target_reg)
     return renames
+
+
+def _has_field(peripheral: PeripheralDesc, register: str, field: str) -> bool:
+    return any(
+        r.name == register and any(f.name == field for f in r.fields) for r in peripheral.registers
+    )
 
 
 def _ancestors(name: str, derived_from: Mapping[str, str | None]) -> list[str]:
@@ -243,6 +250,7 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
     if db_part.pins:
         bonded = bonded_pins(db_part)
         channels = bonded_adc_channels(db_part)
+        channels_b = bonded_adc_channels_b(db_part)
         for peripheral in target.peripherals:
             if peripheral.alias_of is not None:
                 continue
@@ -251,6 +259,8 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
                 peripheral.bonded = bonded.get(port.group(1), 0)
             elif peripheral.ip == "ADC":
                 peripheral.bonded_channels = channels.get(peripheral.name, 0)
+                if _has_field(peripheral, "CR2", "ADC_CFG"):
+                    peripheral.bonded_channels_b = channels_b.get(peripheral.name, 0)
 
     description = PartDescription(
         part=sources.part,

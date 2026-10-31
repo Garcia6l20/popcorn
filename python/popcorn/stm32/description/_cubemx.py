@@ -16,7 +16,7 @@ _MCU_NAMESPACES = ("http://mcd.rou.st.com/modules.php?name=mcu", "http://dummy.c
 """Namespaces of a part or GPIO modes file: CubeMX's db, then ST's STM32_open_pin_data copy."""
 _PIN_RE = re.compile(r"P([A-Z])(\d+)")
 _BONDED_PIN_RE = re.compile(r"P([A-Z])(\d+)(?:[^\d_].*)?")
-_ADC_INPUT_RE = re.compile(r"(ADC\d*)_INP?(\d+)")
+_ADC_INPUT_RE = re.compile(r"(ADC\d*)_INP?(\d+)(b?)")
 _AF_RE = re.compile(r"GPIO_AF(\d+)_")
 _GROUP_RE = re.compile(r"\(([^()]*)\)")
 MAX_GPIO_MODES_BYTES = 8 << 20
@@ -221,21 +221,32 @@ def bonded_pins(part: DbPart) -> dict[str, int]:
     return dict(sorted(ports.items()))
 
 
-def bonded_adc_channels(part: DbPart) -> dict[str, int]:
-    """External ADC channels whose pad @p part's package bonds: ADC instance -> mask of its
-    channels, sorted by instance. A pin of the part's pin list carrying the signal `ADC<n>_IN<c>`
-    or `ADC<n>_INP<c>` bonds channel c of ADC<n>, `ADC_IN<c>` channel c of the single instance
-    `ADC` of the STM32L1. Negative inputs `ADC<n>_INN<c>`, the STM32L1 bank B inputs
-    `ADC_IN<c>b` and trigger signals such as `ADC1_EXTI11` are left out."""
+def _adc_inputs(part: DbPart, bank_b: bool) -> dict[str, int]:
     adcs: dict[str, int] = {}
     for signals in part.pins.values():
         for signal in signals:
             found = _ADC_INPUT_RE.fullmatch(signal)
-            if found is None or int(found.group(2)) > 31:
+            if found is None or int(found.group(2)) > 31 or bool(found.group(3)) != bank_b:
                 continue
             adc = found.group(1)
             adcs[adc] = adcs.get(adc, 0) | 1 << int(found.group(2))
     return dict(sorted(adcs.items()))
+
+
+def bonded_adc_channels(part: DbPart) -> dict[str, int]:
+    """External ADC channels whose pad @p part's package bonds: ADC instance -> mask of its
+    channels, sorted by instance. A pin of the part's pin list carrying the signal `ADC<n>_IN<c>`
+    or `ADC<n>_INP<c>` bonds channel c of ADC<n>, `ADC_IN<c>` channel c of the single instance
+    `ADC` of the STM32L1. Negative inputs `ADC<n>_INN<c>`, the STM32L1 bank B inputs, read by
+    bonded_adc_channels_b, and trigger signals such as `ADC1_EXTI11` are left out."""
+    return _adc_inputs(part, bank_b=False)
+
+
+def bonded_adc_channels_b(part: DbPart) -> dict[str, int]:
+    """STM32L1 bank B channels on a pad of their own that @p part's package bonds: ADC instance
+    -> mask, bit c for the signal `ADC_IN<c>b` on a pin of the part's pin list, sorted by
+    instance. Empty on a part without such signals."""
+    return _adc_inputs(part, bank_b=True)
 
 
 def reference_rank(part: DbPart) -> tuple[int, int, str]:
