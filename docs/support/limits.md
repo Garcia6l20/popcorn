@@ -78,7 +78,7 @@ exceptions. They stop the run with a FAULT stop instead:
 
 ## ADC
 
-Source: [adc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc.cpp)
+Source: [adc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc.cpp), [adc_l1.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc_l1.cpp)
 
 Not modelled, logged once each:
 
@@ -126,6 +126,25 @@ On the STM32H5, RM0481 section 28:
   from that edge at every prescaler, as measured on an STM32H573 at /1, /2, /128 and /256.
   DS14121 Table 96 gives 2 cycles. The ADC clock edges fall on multiples of the ADC clock period
   from virtual time 0.
+
+On the STM32L1, RM0038 section 12:
+
+- The regular group converts on `SWSTART` only. Hardware triggers, `EXTEN` and `JEXTEN`, the
+  injected group, `JSWSTART` and `JAUTO`, the analog watchdog, `AWDEN`, DMA requests, `DMA`,
+  the delay insertion, `DELS`, the automatic power-down, `PDI` and `PDD`, and discontinuous
+  mode, `DISCEN`, are logged once, a model_error under strict_peripherals.
+- `ADONS` sets 3.5 us after the `ADON` edge, the datasheet tSTAB maximum, and clears at once
+  with `ADON`. `RCNR` and `JCNR` read 0. `ADC1EN` is not checked: the ADC runs from HSI16
+  whatever its RCC enable.
+- With `EOCS` 1, a result that finds `ADC_DR` unread sets `OVR` and is lost, and the group goes
+  on, inferred.
+- `ALIGN` 1 puts a 6-bit code on bit 7, inferred.
+- On Cat.3 to Cat.6, bank B channels on a pad of their own, ADC_IN0b to ADC_IN3b and ADC_IN6b to
+  ADC_IN12b, have no analog input and read 0, logged once. The other bank B channels read their
+  bank A pad. VCOMP, channel 26, reads 0, logged once.
+- The factory TS_CAL1, TS_CAL2 and VREFINT_CAL words are datasheet typical values. TS_CAL1 is
+  derived from two typicals, inferred. The L100 parts carry the words though their datasheets
+  give no TS_CAL, inferred.
 
 ## CRC
 

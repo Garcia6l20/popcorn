@@ -498,7 +498,8 @@ class PeripheralView:
 
     def input(self, channel: int) -> AnalogInput:
         """External channel `channel` of this ADC. The ADC model gives the external channels:
-        1 to 17 on the STM32U5 ADC1, 0 to 15, 18 and 19 on the STM32H5 ADC1 and ADC2.
+        1 to 17 on the STM32U5 ADC1, 0 to 15, 18 and 19 on the STM32H5 ADC1 and ADC2, 0 to 15
+        and 18 to 25 on the STM32L1 Cat.1 and Cat.2 ADC, with 27 to 31 from Cat.3, bank A.
 
         Raises:
             ConfigError: `channel` is not an external channel of this ADC, or the part's
