@@ -236,3 +236,13 @@ UART9 TX over GPDMA, HAL. [Sources and tests](https://github.com/Garcia6l20/popc
 CDC ACM device on the USB full-speed controller enumerated by a virtual host, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/usb_cdc).
 
 --8<-- "stm32h573/usb_cdc/README.md:3:12"
+
+## STM32L152
+
+The same layout on the STM32L152, a Cortex-M3 without TrustZone, from `examples/stm32l152/<name>`. The firmware is HAL, which sets RCC and PWR bits through the bit-band aliases. The examples marked xb also build for the Cat.1 STM32L152RBTx and run each test on both builds.
+
+### l152 rcc
+
+8 MHz HSE bypass to a 32 MHz PLL in voltage range 1, HAL, xe and xb. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/rcc).
+
+--8<-- "stm32l152/rcc/README.md:3:15"

@@ -133,6 +133,18 @@ def test_the_presets_name_their_cpu_and_have_one_build_prefix_each() -> None:
     }
 
 
+def test_the_example_presets_link_newlib_nano_for_their_cpu() -> None:
+    assert examples.cortex_m3_newlib.arch == "armv7-m"
+    assert "-mcpu=cortex-m3" in examples.cortex_m3_newlib.extra_compile_flags
+    assert "-specs=nano.specs" in examples.cortex_m3_newlib.extra_link_flags
+    assert "-mfloat-abi=soft" in examples.cortex_m3_newlib.extra_link_flags
+
+
+def test_an_example_preset_other_than_the_m33_and_m3_is_refused() -> None:
+    with pytest.raises(SystemExit, match="no example environment for the preset cortex-m4f"):
+        examples.example_env(firmware.cortex_m4f)
+
+
 def test_a_preset_without_a_build_prefix_is_refused() -> None:
     with pytest.raises(SystemExit, match="no firmware build prefix for the preset other"):
         firmware.firmware_env(replace(firmware.cortex_m3, name="other"))
@@ -248,10 +260,43 @@ def test_an_l1_chipset_builds_on_the_cortex_m3_with_the_l1_packages(chipset: Chi
         chipset.require_trustzone()
 
 
-@pytest.mark.parametrize("chipset", L1_CHIPSETS, ids=lambda chipset: chipset.name)
-def test_an_l1_chipset_has_no_st_linker_script_to_derive_one_from(chipset: Chipset) -> None:
-    with pytest.raises(SystemExit, match=f"{chipset.name} has no ST linker script"):
-        examples.st_linker_script(chipset, Path("device"), "x", 0)
+def test_an_l1_chipset_without_an_example_script_has_no_linker_script_to_derive_one_from() -> None:
+    assert STM32L152XC.example_linker is None
+    with pytest.raises(SystemExit, match="stm32l152xc has no ST linker script"):
+        examples.st_linker_script(STM32L152XC, Path("device"), "x", 0)
+
+
+EXAMPLE_SCRIPTS = [(STM32L152XE, "256K", "32K"), (STM32L152XB, "128K", "16K")]
+
+
+@pytest.mark.parametrize(
+    ("chipset", "flash", "sram"),
+    EXAMPLE_SCRIPTS,
+    ids=lambda value: getattr(value, "name", value),
+)
+def test_an_l1_example_links_the_project_script_sized_for_the_smallest_part(
+    chipset: Chipset, flash: str, sram: str
+) -> None:
+    root = Path(__file__).parents[3]
+    expected = f"examples/stm32l152/{chipset.define.upper()}_FLASH.ld"
+    assert chipset.example_linker == expected
+    script = examples.st_linker_script(chipset, Path("device"), "x", 0)
+    assert script == root / expected
+    text = script.read_text()
+    assert f"RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = {sram}" in text
+    assert f"FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = {flash}" in text
+    assert "_estack = ORIGIN(RAM) + LENGTH(RAM);" in text
+    data = text[text.index("  .data :") : text.index("} >RAM AT> FLASH")]
+    assert "*(.RamFunc)" in data
+    assert "PROVIDE(end = .);" in text
+
+
+@pytest.mark.parametrize("chipset", [STM32L152XE, STM32L152XB], ids=lambda chipset: chipset.name)
+def test_an_l1_example_script_moves_by_a_flash_offset(chipset: Chipset) -> None:
+    derived = examples.offset_linker_script(
+        examples.st_linker_script(chipset, Path("device"), "x", 0).read_text(), 0x4000
+    )
+    assert "FLASH (rx)  : ORIGIN = 0x08004000, LENGTH = " in derived
 
 
 @pytest.mark.parametrize("chipset", L1_CHIPSETS, ids=lambda chipset: chipset.name)

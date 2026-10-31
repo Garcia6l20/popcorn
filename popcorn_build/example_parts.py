@@ -2,8 +2,9 @@
 
 The gate runs every example on its `conftest.py` part, then once more on each extra part of
 `EXAMPLE_PARTS` through `--popcorn-part`. Together the runs put every class of the shipped parts
-under at least one example. `python -m popcorn_build.example_parts --list` prints one
-`examples/<chip>/<name> <part>` line per extra run.
+under at least one example. An extra run moves every machine of the example onto its part, so
+each of the example's ELFs fits each extra part. `python -m popcorn_build.example_parts --list`
+prints one `examples/<chip>/<name> <part>` line per extra run.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import cache
 from typing import Final, NamedTuple
 
 
@@ -20,10 +22,15 @@ class ExampleParts:
 
     Attributes:
         conftest: The part its `conftest.py` names.
-        extra: The parts of the same die it also runs on, one per class no other run covers.
+        extra: The parts its ELFs fit that it also runs on, on any die of the family. A U5 or
+            H5 example runs on one part per class no other run covers. An STM32L1 example runs
+            on one part per other category its builds fit, since the models differ by category:
+            the xe build on Cat.3 of both dies, the xb build also on Cat.2.
         pins: The GPIO pins its tests and firmware use, such as `PA5`, bonded on every part.
         adc_channels: The ADC1 external channels it uses, in `bonded_channels` of every part.
         flash_kib: The flash size its firmware requires, None for any.
+        also: The parts of the other descriptions its `conftest.py` names, each with an ELF of
+            its own, such as the Cat.1 build of an STM32L1 example.
     """
 
     conftest: str
@@ -31,14 +38,15 @@ class ExampleParts:
     pins: tuple[str, ...]
     adc_channels: tuple[int, ...]
     flash_kib: int | None
+    also: tuple[str, ...] = ()
 
 
 class PartClass(NamedTuple):
     """What a firmware example can tell parts of one die apart by.
 
     Attributes:
-        die: `U575/U585` or `H56x/H573`.
-        flash_kib: The flash size, 1024 or 2048.
+        die: `U575/U585`, `H56x/H573`, or the DEV_ID of an STM32L1 part such as `DIE437`.
+        flash_kib: The flash size, such as 1024 or 2048.
         package: The package name, such as `LQFP64`.
         smps: Whether the part has the SMPS supply, a trailing `Q` in its ordering code.
     """
@@ -57,6 +65,10 @@ _DIES: Final = {
     "H573": "H56x/H573",
 }
 _FLASH_KIB: Final = {"G": 1024, "I": 2048}
+_DESCRIBED_FAMILY: Final = "L1"
+_DESCRIBED_SUFFIXES: Final = ("x", "xA")
+FLASH_REGION: Final = "Flash"
+DEV_ID_MASK: Final = 0xFFF
 _PACKAGES: Final = {
     ("A", "I"): "UFBGA169",
     ("C", "T"): "LQFP48",
@@ -75,24 +87,42 @@ _PACKAGES: Final = {
 
 
 def with_part_class(parts: Iterable[str]) -> list[str]:
-    """The names of @p parts whose line `part_class` decodes, in order."""
+    """The names of @p parts on the U5 and H5 lines, in order, the parts the support pages list."""
     return [part for part in parts if part[5:9] in _DIES]
+
+
+@cache
+def _described_class(part: str, package: str) -> PartClass:
+    from popcorn.stm32 import mcu
+
+    description = mcu(part)
+    flash = next(region for region in description.regions if region.name == FLASH_REGION)
+    dbgmcu = next(unit for unit in description.peripherals if unit.name == "DBGMCU")
+    idcode = next(register for register in dbgmcu.registers if register.name.endswith("IDCODE"))
+    return PartClass(f"DIE{idcode.reset & DEV_ID_MASK:03X}", flash.size // 1024, package, False)
 
 
 def part_class(part: str) -> PartClass:
     """The class of a shipped part by its ordering code, `STM32<line><pins><flash><package>x[Q]`.
 
     The pin-count letter and the package letter are read together: `R` with `T` is LQFP64 and
-    `R` with `V` is VFQFPN68, `M` with `Y` is WLCSP80 and `O` with `Y` is WLCSP90. The decoding
-    only groups parts, no model reads it.
+    `R` with `V` is VFQFPN68, `M` with `Y` is WLCSP80 and `O` with `Y` is WLCSP90. On the U5 and
+    H5 the die and flash size come from the name letters. On the STM32L1 the flash letter and the
+    suffix do not fix the die, so the die is the DEV_ID of the shipped description's
+    DBGMCU_IDCODE reset value and the flash size its `Flash` region. The decoding only groups
+    parts, no model reads it.
 
     Raises:
-        ValueError: `part` is not an ordering code of the five lines.
+        ValueError: `part` is not an ordering code of the shipped lines. An STM32L1 name raises
+            what `popcorn.stm32.mcu` raises for it.
     """
     line, pins, flash, package = part[5:9], part[9:10], part[10:11], part[11:12]
+    name = _PACKAGES.get((pins, package))
+    described = line.startswith(_DESCRIBED_FAMILY) and part[12:] in _DESCRIBED_SUFFIXES
+    if described and part.startswith("STM32") and name is not None:
+        return _described_class(part, name)
     die = _DIES.get(line)
     size = _FLASH_KIB.get(flash)
-    name = _PACKAGES.get((pins, package))
     if (
         not part.startswith("STM32")
         or die is None
@@ -103,6 +133,9 @@ def part_class(part: str) -> PartClass:
         raise ValueError(f"{part!r} is not an ordering code of a shipped part")
     return PartClass(die, size, name, part.endswith("Q"))
 
+
+_L1_XE_EXTRA: Final = ("STM32L152RCTxA", "STM32L152RCTx")
+_L1_XB_EXTRA: Final = (*_L1_XE_EXTRA, "STM32L152RBTxA")
 
 EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
     "stm32u575/adc": ExampleParts(
@@ -290,11 +323,21 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
         adc_channels=(),
         flash_kib=None,
     ),
+    "stm32l152/rcc": ExampleParts(
+        "STM32L152RETx",
+        _L1_XB_EXTRA,
+        pins=("PH0",),
+        adc_channels=(),
+        flash_kib=None,
+        also=("STM32L152RBTx",),
+    ),
 }
 
 
-TESTED_PARTS: Final = frozenset(row.conftest for row in EXAMPLE_PARTS.values())
-"""The parts that run the whole firmware suites: the `conftest.py` part of every example."""
+TESTED_PARTS: Final = frozenset(
+    part for row in EXAMPLE_PARTS.values() for part in (row.conftest, *row.also)
+)
+"""The parts that run the whole firmware suites: the `conftest.py` parts of every example."""
 
 GEOMETRY_PARTS: Final = frozenset({"STM32U575ZITxQ", "STM32H563ZGTx"})
 """The parts the FLASH geometry cases of `stm32-flash-geometry` run on, 2 MB on the U5 and 1 MB

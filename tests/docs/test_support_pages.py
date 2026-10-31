@@ -14,6 +14,7 @@ from popcorn_build.example_parts import (
     part_class,
     with_part_class,
 )
+from popcorn_build.support_pages import LISTED_EXAMPLES, LISTED_TESTED
 
 ROOT = Path(__file__).parents[2]
 MODELS = ROOT / "native/src/periph/stm32"
@@ -102,7 +103,7 @@ def test_the_h573_page_lists_its_gtzc_as_trustzone_only() -> None:
 
 STATES = ("tested", "examples", "class", "attaches")
 NEGATION = re.compile(r"\b(not|no|never|without|none|cannot|n't)\b", re.IGNORECASE)
-EXTRA_PARTS = {part for row in EXAMPLE_PARTS.values() for part in row.extra}
+EXTRA_PARTS = {part for row in LISTED_EXAMPLES.values() for part in row.extra}
 GEOMETRY_NOTE = "FLASH geometry cases"
 
 
@@ -140,7 +141,7 @@ def test_every_shipped_part_has_exactly_one_state_row(generated: Path) -> None:
     by_state = {state: {n for n, c in rows.items() if kind(c) == state} for state in STATES}
     assert by_state["tested"] == {"STM32U575QGIx", "STM32H573AIIx"}
     assert by_state["examples"] == EXTRA_PARTS
-    assert by_state["class"] | by_state["attaches"] == set(rows) - EXTRA_PARTS - TESTED_PARTS
+    assert by_state["class"] | by_state["attaches"] == set(rows) - EXTRA_PARTS - LISTED_TESTED
     assert len(by_state["examples"]) == 49
     assert len(by_state["class"]) == 43
     assert not by_state["attaches"]
@@ -149,7 +150,7 @@ def test_every_shipped_part_has_exactly_one_state_row(generated: Path) -> None:
 @pytest.mark.timeout(60)
 def test_a_class_row_names_a_part_of_its_class_that_runs_examples(generated: Path) -> None:
     rows = state_rows((generated / "parts.md").read_text())
-    running = TESTED_PARTS | EXTRA_PARTS
+    running = LISTED_TESTED | EXTRA_PARTS
     for name, cell in rows.items():
         if kind(cell) == "class":
             named = cell.split(" of ")[1].split(",")[0]
@@ -226,7 +227,7 @@ def test_a_class_with_no_example_part_shows_attaches() -> None:
             row.adc_channels,
             row.flash_kib,
         )
-        for name, row in EXAMPLE_PARTS.items()
+        for name, row in LISTED_EXAMPLES.items()
     }
     shipped = with_part_class(popcorn.stm32.shipped_parts())
     states = support_pages.part_states(shipped, examples=table)
@@ -250,7 +251,13 @@ def test_a_part_that_only_the_flash_geometry_cases_run_is_never_tested(generated
 
 
 def test_the_tested_parts_are_the_conftest_parts_of_the_examples() -> None:
-    assert {"STM32U575QGIx", "STM32H573AIIx"} == TESTED_PARTS
+    assert {"STM32U575QGIx", "STM32H573AIIx", "STM32L152RETx", "STM32L152RBTx"} == TESTED_PARTS
+    assert {"STM32U575QGIx", "STM32H573AIIx"} == LISTED_TESTED
+    assert all(
+        row.conftest.startswith("STM32L1")
+        for row in EXAMPLE_PARTS.values()
+        if row not in LISTED_EXAMPLES.values()
+    )
 
 
 def test_the_geometry_parts_are_the_ones_the_native_geometry_program_builds() -> None:

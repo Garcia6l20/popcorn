@@ -9,6 +9,7 @@ import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 import popcorn
 from popcorn import PartDescription
@@ -90,11 +91,19 @@ def _table(header: Iterable[str], rows: Iterable[Iterable[str]]) -> list[str]:
     return lines
 
 
+LISTED_EXAMPLES: Final = {
+    name: row for name, row in EXAMPLE_PARTS.items() if with_part_class([row.conftest])
+}
+"""The examples on the lines the pages list."""
+LISTED_TESTED: Final = frozenset(with_part_class(TESTED_PARTS))
+"""The parts of `TESTED_PARTS` on the lines the pages list."""
+
+
 def part_states(
     shipped: Iterable[str],
     *,
-    tested: Iterable[str] = TESTED_PARTS,
-    examples: Mapping[str, ExampleParts] = EXAMPLE_PARTS,
+    tested: Iterable[str] = LISTED_TESTED,
+    examples: Mapping[str, ExampleParts] = LISTED_EXAMPLES,
     geometry: Iterable[str] = GEOMETRY_PARTS,
 ) -> dict[str, PartState]:
     """The state of each of @p shipped, in order.

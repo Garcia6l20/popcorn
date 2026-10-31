@@ -40,6 +40,8 @@ class Chipset:
     @var system System file under `Source/Templates`.
     @var linker ST's single-world linker script under `Source/Templates/gcc/linker`, None when the
     device package ships none.
+    @var example_linker Project-relative linker script of the examples, laid out as ST's, for a
+    chipset whose device package ships none.
     @var test_linker Project-relative linker script of the LL test firmware.
     @var usb_device_sources TinyUSB device controller driver sources under `src`.
     @var prebuilt_dir Subdirectory of `prebuilt` holding the committed ELFs of this chipset,
@@ -61,6 +63,7 @@ class Chipset:
     test_linker: str
     usb_device_sources: tuple[str, ...]
     linker: str | None = None
+    example_linker: str | None = None
     prebuilt_dir: str = ""
     preset: CrossPreset = cortex_m33
     secure_linker: str | None = None
@@ -133,6 +136,7 @@ STM32L152XE = Chipset(
     startup="startup_stm32l152xe.s",
     system="system_stm32l1xx.c",
     test_linker="tests/firmware/common/stm32l152xe.ld",
+    example_linker="examples/stm32l152/STM32L152XE_FLASH.ld",
     usb_device_sources=(
         "portable/st/stm32_fsdev/dcd_stm32_fsdev.c",
         "portable/st/stm32_fsdev/fsdev_common.c",
@@ -150,6 +154,7 @@ STM32L152XB = Chipset(
     startup="startup_stm32l152xb.s",
     system="system_stm32l1xx.c",
     test_linker="tests/firmware/common/stm32l152xb.ld",
+    example_linker="examples/stm32l152/STM32L152XB_FLASH.ld",
     usb_device_sources=STM32L152XE.usb_device_sources,
     prebuilt_dir="l152xb",
     preset=cortex_m3,
