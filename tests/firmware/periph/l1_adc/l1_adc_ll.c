@@ -3,10 +3,12 @@
 #include "stm32l1xx_ll_adc.h"
 #include "stm32l1xx_ll_bus.h"
 #include "stm32l1xx_ll_rcc.h"
+#include "stm32l1xx_ll_tim.h"
 
 void idle(void);
 void single(void);
 void scan3(void);
+void triggered(void);
 void factory(void);
 
 void idle(void)
@@ -52,9 +54,8 @@ void single(void)
   DONE();
 }
 
-void scan3(void)
+static void three_ranks(void)
 {
-  enable();
   LL_ADC_SetSequencersScanMode(ADC1, LL_ADC_SEQ_SCAN_ENABLE);
   LL_ADC_REG_SetSequencerLength(ADC1, LL_ADC_REG_SEQ_SCAN_ENABLE_3RANKS);
   LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, LL_ADC_CHANNEL_1);
@@ -63,6 +64,23 @@ void scan3(void)
   LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_1, LL_ADC_SAMPLINGTIME_384CYCLES);
   LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_18, LL_ADC_SAMPLINGTIME_384CYCLES);
   LL_ADC_SetChannelSamplingTime(ADC1, LL_ADC_CHANNEL_5, LL_ADC_SAMPLINGTIME_384CYCLES);
+}
+
+static void log_ranks(uint32_t count)
+{
+  for(uint32_t rank = 0; rank < count; ++rank)
+  {
+    while(LL_ADC_IsActiveFlag_EOCS(ADC1) == 0u)
+    {
+    }
+    LOG(LL_ADC_REG_ReadConversionData12(ADC1));
+  }
+}
+
+void scan3(void)
+{
+  enable();
+  three_ranks();
   LL_ADC_REG_StartConversionSWStart(ADC1);
   for(uint32_t rank = 0; rank < 3u; ++rank)
   {
@@ -71,6 +89,21 @@ void scan3(void)
     }
     LOG(LL_ADC_REG_ReadConversionData12(ADC1));
   }
+  LOG(LL_ADC_IsActiveFlag_OVR(ADC1));
+  DONE();
+}
+
+void triggered(void)
+{
+  enable();
+  three_ranks();
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM2);
+  LL_TIM_SetAutoReload(TIM2, 1999u);
+  LL_TIM_SetTriggerOutput(TIM2, LL_TIM_TRGO_UPDATE);
+  LL_ADC_REG_SetTriggerSource(ADC1, LL_ADC_REG_TRIG_EXT_TIM2_TRGO);
+  LL_ADC_REG_StartConversionExtTrig(ADC1, LL_ADC_REG_TRIG_EXT_RISING);
+  LL_TIM_EnableCounter(TIM2);
+  log_ranks(6u);
   LOG(LL_ADC_IsActiveFlag_OVR(ADC1));
   DONE();
 }

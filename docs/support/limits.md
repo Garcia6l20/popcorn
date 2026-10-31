@@ -129,10 +129,22 @@ On the STM32H5, RM0481 section 28:
 
 On the STM32L1, RM0038 section 12:
 
-- The regular group converts on `SWSTART` only. Hardware triggers, `EXTEN` and `JEXTEN`, the
-  injected group, `JSWSTART` and `JAUTO`, the analog watchdog, `AWDEN`, DMA requests, `DMA`,
-  the delay insertion, `DELS`, the automatic power-down, `PDI` and `PDD`, and discontinuous
-  mode, `DISCEN`, are logged once, a model_error under strict_peripherals.
+- The injected group, `JSWSTART`, `JEXTEN` and `JAUTO`, the analog watchdog, `AWDEN`, DMA
+  requests, `DMA`, and the automatic power-down, `PDI` and `PDD`, are logged once, a model_error
+  under strict_peripherals.
+- Regular hardware triggers start conversions from the TRGO selections of `EXTSEL`, TIM9, TIM3,
+  TIM2, TIM4 and TIM6. The compare event selections, TIM9_CC2, TIM2_CC3, TIM2_CC2, TIM4_CC4,
+  TIM3_CC1 and TIM3_CC3, and EXTI line 11 have no source model: selecting one is logged once, a
+  model_error under strict_peripherals, and starts nothing. tlatr is 3.5 ADC clock cycles, the
+  datasheet maximum. Trigger detection stays on across an `EXTSEL` change, RM0038 12.6 blanks it
+  for 2 PCLK cycles. A model_error of a selection surfaces from the `ADC_CR2` write or the `ADONS`
+  event that starts the listening.
+- `DELS` 010 to 111 add 1 PCLK2 cycle and 3 ADC clock cycles of synchronisation to the delay, the
+  maxima RM0038 gives, inferred, at the PCLK2 rate of the conversion end. `DISCEN` with `CONT`
+  converts as `DISCEN` alone and is logged once, a model_error under strict_peripherals, inferred.
+- `DELS` 001 holds the next conversion at each `EOC`: after each conversion with `EOCS` 1, after
+  the group with `EOCS` 0, inferred for `EOCS` 0. A trigger or `SWSTART` during a `DELS` hold is
+  ignored, RM0038 12.9 and Figure 47.
 - `ADONS` sets 3.5 us after the `ADON` edge, the datasheet tSTAB maximum, and clears at once
   with `ADON`. `RCNR` and `JCNR` read 0. The ADC runs from HSI16 whatever `ADC1EN` of
   `RCC_APB2ENR` holds.

@@ -1327,6 +1327,11 @@ template <typename Traits> void adc_model<Traits>::reset(register_file&, reset_k
 template <typename Traits> void adc_model<Traits>::on_bus_reset()
 {
   auto const was = listened();
+  if(was)
+  {
+    static_cast<void>(
+        interest_changed(ctx_.peers, trigger_name<typename Traits::trigger_enum>(*was)));
+  }
   restore_reset_values();
   retune(was);
 }

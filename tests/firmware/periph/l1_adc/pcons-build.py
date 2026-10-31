@@ -8,7 +8,7 @@ for chipset in (STM32L152XE, STM32L152XB):
     _, target = add_ll_firmware(
         "l1_adc_ll",
         [here / "l1_adc_ll.c"],
-        entries=["idle", "single", "scan3", "factory"],
+        entries=["idle", "single", "scan3", "triggered", "factory"],
         chipset=chipset,
     )
     if target is not None:

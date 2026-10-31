@@ -130,12 +130,11 @@ struct adc_rig
     static_cast<void>(f.target->mem().write(base + offset, 4, value));
   }
 
-  [[nodiscard]] auto due() const -> std::uint64_t
+  [[nodiscard]] auto due(std::string_view unit = "ADC") const -> std::uint64_t
   {
     auto const& units = f.target->description().peripherals;
     auto const  owner = static_cast<std::uint32_t>(
-        std::ranges::find(units, std::string_view{"ADC"}, &popcorn::peripheral_desc::name)
-        - units.begin());
+        std::ranges::find(units, unit, &popcorn::peripheral_desc::name) - units.begin());
     auto earliest = ~std::uint64_t{};
     for(auto const& event : f.target->snapshot().data().events.pending)
     {
@@ -145,6 +144,29 @@ struct adc_rig
       }
     }
     return earliest;
+  }
+
+  void poke(std::string_view unit, std::uint32_t offset, std::uint32_t value) const
+  {
+    auto const at = f.target->peripheral(unit).description().base + offset;
+    REQUIRE(f.target->mem().write(at, 4, value).has_value());
+  }
+
+  void timer_updates(
+      std::string_view unit,
+      std::uint32_t    enable_offset,
+      std::uint32_t    enable,
+      std::uint32_t    arr) const
+  {
+    poke("RCC", enable_offset, enable);
+    poke(unit, 0x2C, arr);
+    poke(unit, 0x04, 2u << 4);
+    poke(unit, 0x00, 1);
+  }
+
+  void tim2_updates(std::uint32_t arr) const
+  {
+    timer_updates("TIM2", 0x24, 1, arr);
   }
 
   void write(std::uint32_t offset, std::uint32_t value) const
@@ -649,18 +671,17 @@ TEST_CASE("checklist 53: each function the L1 ADC does not model raises model_er
     bool          at_start;
   };
   for(auto const& [reg, value, at_start] : {
-          row{cr2,  adon | (1u << 22), false},
-          row{cr2,  adon | (1u << 28), false},
-          row{cr2,  adon | (1u << 20), false},
-          row{cr2,  adon | (1u << 8),  false},
-          row{cr2,  adon | (1u << 4),  true },
-          row{cr1,  1u << 17,          true },
-          row{cr1,  1u << 16,          true },
-          row{cr1,  1u << 11,          true },
-          row{cr1,  1u << 10,          true },
-          row{cr1,  1u << 23,          false},
-          row{sqr5, 26,                true },
-          row{ccr,  3u << 16,          true },
+          row{cr2,  adon | (1u << 22),               false},
+          row{cr2,  adon | (1u << 28),               false},
+          row{cr2,  adon | (1u << 20),               false},
+          row{cr2,  adon | (1u << 8),                false},
+          row{cr2,  adon | (1u << 28) | (11u << 24), false},
+          row{cr1,  1u << 17,                        true },
+          row{cr1,  1u << 16,                        true },
+          row{cr1,  1u << 10,                        true },
+          row{cr1,  1u << 23,                        false},
+          row{sqr5, 26,                              true },
+          row{ccr,  3u << 16,                        true },
   })
   {
     CAPTURE(reg);
@@ -913,4 +934,355 @@ TEST_CASE("from Cat.3 an L of 28 to 31 converts 28 ranks and logs once, a model_
   strict.write(sqr1, 30u << 20);
   strict.power();
   CHECK_THROWS_AS(strict.attempt(cr2, adon | swstart), popcorn::model_error);
+}
+
+TEST_CASE("RM0038 12.6: EXTEN 01 with EXTSEL 0110 starts the group 3.5 ADC cycles after TIM2 TRGO")
+{
+  adc_rig const r;
+  r.write(cr2, adon | (1u << 28) | (6u << 24));
+  r.run_until(r.now() + 4 * us);
+  REQUIRE((r.read(sr) & adons) != 0);
+  r.tim2_updates(209);
+  auto const update = r.due("TIM2");
+  r.run_until(update + 600 * ns);
+  CHECK((r.read(sr) & strt) != 0);
+  CHECK(r.due() == update + 218'750 + 16 * cycle);
+  r.run_until(update + 218'750 + 16 * cycle + ns);
+  CHECK((r.read(sr) & eoc) != 0);
+  for(int more = 0; more < 3; ++more)
+  {
+    static_cast<void>(r.cpu_read(dr));
+    auto const next = r.due("TIM2");
+    r.run_until(next + 2 * us);
+    CHECK((r.read(sr) & eoc) != 0);
+  }
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("RM0038 12.6: EXTEN 10 starts at the TRGO falling edge, one timer clock after the rise")
+{
+  adc_rig const r;
+  r.power();
+  r.write(cr2, adon | (2u << 28) | (6u << 24));
+  r.tim2_updates(209);
+  auto const update = r.due("TIM2");
+  r.run_until(update + 300 * ns);
+  CHECK((r.read(sr) & strt) == 0);
+  r.run_until(update + 476'837 + 600 * ns);
+  auto const end = r.due();
+  CHECK(end >= update + 476'836 + 218'750 + 16 * cycle);
+  CHECK(end <= update + 476'838 + 218'750 + 16 * cycle);
+}
+
+TEST_CASE("RM0038 12.6: a TRGO edge during a conversion is ignored, the next one after it starts")
+{
+  adc_rig const r;
+  r.power();
+  r.write(smpr3, 7u);
+  r.write(cr2, adon | (1u << 28) | (6u << 24));
+  r.write(sr, 0);
+  auto const start = r.now();
+  r.tim2_updates(20);
+  std::uint32_t conversions = 0;
+  for(std::uint64_t step = 1; step <= 100; ++step)
+  {
+    r.run_until(start + step * us);
+    if((r.read(sr) & eoc) != 0)
+    {
+      ++conversions;
+      static_cast<void>(r.cpu_read(dr));
+    }
+  }
+  CHECK(conversions == 3);
+}
+
+TEST_CASE("an EXTSEL no model produces logs once and starts nothing, a model_error when strict")
+{
+  adc_rig const r;
+  r.power();
+  r.write(cr2, adon | (1u << 28) | (2u << 24));
+  r.tim2_updates(209);
+  r.run_until(r.now() + 300 * us);
+  CHECK((r.read(sr) & strt) == 0);
+  REQUIRE(r.warnings() == 1);
+  CHECK(r.logged.front().message.contains("tim2_cc3"));
+
+  adc_rig const strict{l152re(), true};
+  strict.power();
+  CHECK_THROWS_AS(strict.attempt(cr2, adon | (1u << 28) | (2u << 24)), popcorn::model_error);
+  CHECK((strict.read(cr2) >> 28) == 0);
+}
+
+TEST_CASE("ADC1RST stops the listening: a TRGO after the reset starts nothing")
+{
+  adc_rig const r;
+  r.power();
+  r.write(cr2, adon | (1u << 28) | (6u << 24));
+  r.tim2_updates(209);
+  rcc_reset_pulse(r.f, "APB2RSTR", "ADC1RST");
+  r.run_until(r.now() + 300 * us);
+  CHECK(r.read(sr) == 0);
+}
+
+TEST_CASE("RM0038 12.3.10: DISCEN with DISCNUM 1 converts 2, 2 and 1 ranks per SWSTART, then over")
+{
+  adc_rig const r;
+  for(std::uint8_t channel = 0; channel < 6; ++channel)
+  {
+    r.port().drive(channel, 300'000u * (channel + 1));
+  }
+  r.power();
+  r.write(cr1, scan | (1u << 11) | (1u << 13));
+  r.write(sqr1, 4u << 20);
+  r.write(sqr5, (1u << 0) | (2u << 5) | (3u << 10) | (4u << 15) | (5u << 20));
+  auto const code = [](std::uint64_t channel) {
+    return static_cast<std::uint32_t>(300'000u * (channel + 1) * 4096u / 3'000'000u);
+  };
+  std::vector<std::uint32_t> seen;
+  std::vector<bool>          ends;
+  for(int group = 0; group < 4; ++group)
+  {
+    r.write(cr2, adon | swstart);
+    r.run_until(r.now() + 40 * us);
+    seen.push_back(r.read(dr));
+    ends.push_back((r.read(sr) & eoc) != 0);
+    r.write(sr, 0);
+  }
+  CHECK(seen == std::vector<std::uint32_t>{code(2), code(4), code(5), code(2)});
+  CHECK(ends == std::vector<bool>{false, false, true, false});
+}
+
+TEST_CASE(
+    "DISCEN with CONT converts as DISCEN alone and logs once, a model_error when strict, inferred")
+{
+  adc_rig const r;
+  r.power();
+  r.write(cr1, scan | (1u << 11));
+  r.write(sqr1, 2u << 20);
+  r.write(cr2, adon | cont | swstart);
+  r.run_until(r.now() + 40 * us);
+  CHECK(r.warnings() == 1);
+  CHECK((r.read(sr) & eoc) == 0);
+
+  adc_rig const strict{l152re(), true};
+  strict.power();
+  strict.write(cr1, scan | (1u << 11));
+  CHECK_THROWS_AS(strict.attempt(cr2, adon | cont | swstart), popcorn::model_error);
+}
+
+TEST_CASE("RM0038 12.9: DELS 001 holds the next conversion until ADC_DR is read or EOC cleared")
+{
+  for(bool by_read : {true, false})
+  {
+    CAPTURE(by_read);
+    adc_rig const r;
+    r.power();
+    r.write(cr2, adon | eocs | cont | (1u << 4) | swstart);
+    r.run_until(r.now() + 2 * us);
+    REQUIRE((r.read(sr) & eoc) != 0);
+    r.write(sr, eoc);
+    r.run_until(r.now() + 40 * us);
+    CHECK((r.read(sr) & (strt | ovr)) == 0);
+    auto const release = r.now();
+    if(by_read)
+    {
+      static_cast<void>(r.cpu_read(dr));
+    }
+    else
+    {
+      r.write(sr, 0);
+    }
+    CHECK((r.read(sr) & strt) != 0);
+    CHECK(r.due() == release + 16 * cycle);
+  }
+}
+
+TEST_CASE(
+    "RM0038 12.9: DELS 010 starts the next conversion 7 + 1 PCLK2 and 3 ADC cycles later, inferred")
+{
+  adc_rig const r;
+  r.power();
+  auto const start = r.now();
+  r.write(cr2, adon | cont | (2u << 4) | swstart);
+  r.run_until(start + 16 * cycle + ns);
+  REQUIRE((r.read(sr) & eoc) != 0);
+  CHECK(r.due() == start + 16 * cycle + 3'814'698 + 3 * cycle);
+}
+
+TEST_CASE("RM0038 12.9: a SWSTART during the DELS delay is ignored, one after it starts")
+{
+  adc_rig const r;
+  r.power();
+  auto const start = r.now();
+  r.write(cr2, adon | (5u << 4) | swstart);
+  r.run_until(start + 16 * cycle + ns);
+  REQUIRE((r.read(sr) & eoc) != 0);
+  r.write(sr, 0);
+  r.write(cr2, adon | (5u << 4) | swstart);
+  r.run_until(r.now() + 2 * us);
+  CHECK((r.read(sr) & strt) == 0);
+  r.run_until(start + 40 * us);
+  r.write(cr2, adon | (5u << 4) | swstart);
+  r.run_until(r.now() + 2 * us);
+  CHECK((r.read(sr) & eoc) != 0);
+}
+
+TEST_CASE("LL ADC: TIM2 TRGO starts the three-rank scan at each update, twice, no OVR")
+{
+  for(auto const& desc : {l152re(), l152rb()})
+  {
+    CAPTURE(desc.part);
+    adc_rig const r{desc, true, false, {}, "l1_adc_ll"};
+    r.port().drive(1, 750'000);
+    r.port().drive(18, 1'500'000);
+    r.port().drive(5, 2'250'000);
+    CHECK(r.run("triggered") == std::vector<std::uint32_t>{1024, 2048, 3072, 1024, 2048, 3072, 0});
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE("EXTEN set after TIM2 wrapped lazily: no past TRGO starts the group, the next one does")
+{
+  adc_rig const r;
+  r.power();
+  r.tim2_updates(209);
+  r.run_until(r.now() + 350 * us);
+  r.write(cr2, adon | (1u << 28) | (6u << 24));
+  r.run_until(r.now() + us);
+  CHECK((r.read(sr) & (strt | eoc)) == 0);
+  CHECK(r.due() == ~std::uint64_t{});
+  r.run_until(r.now() + 101 * us);
+  CHECK((r.read(sr) & eoc) != 0);
+}
+
+TEST_CASE("the ADONS event starts the listening: TRGO wraps from before it start nothing")
+{
+  adc_rig const r;
+  r.write(cr2, (1u << 28) | (6u << 24));
+  r.tim2_updates(41);
+  r.run_until(r.now() + 100 * us);
+  r.write(cr2, adon | (1u << 28) | (6u << 24));
+  r.run_until(r.now() + 4'500 * ns);
+  REQUIRE((r.read(sr) & adons) != 0);
+  CHECK((r.read(sr) & (strt | eoc)) == 0);
+  CHECK(r.due() == ~std::uint64_t{});
+  r.run_until(r.now() + 21 * us);
+  CHECK((r.read(sr) & eoc) != 0);
+}
+
+TEST_CASE(
+    "an EXTSEL no model produces written with ADON 0 logs once at the ADONS event, "
+    "a model_error when strict")
+{
+  adc_rig const r;
+  r.write(cr2, (1u << 28) | (2u << 24));
+  r.write(cr2, adon | (1u << 28) | (2u << 24));
+  CHECK(r.warnings() == 0);
+  r.run_until(r.now() + 4 * us);
+  REQUIRE((r.read(sr) & adons) != 0);
+  CHECK(r.warnings() == 1);
+
+  adc_rig const strict{l152re(), true};
+  strict.write(cr2, (1u << 28) | (2u << 24));
+  strict.write(cr2, adon | (1u << 28) | (2u << 24));
+  CHECK_THROWS_AS(
+      strict.f.run_to_stop(
+          {.max_instructions = icount{1'000'000}, .until_time = vtime{strict.now() + 4 * us}}),
+      popcorn::model_error);
+}
+
+TEST_CASE("RM0038 Table 61: EXTSEL 0001, 0100, 1001 and 1010 start on TIM9, TIM3, TIM4, TIM6 TRGO")
+{
+  for(auto const& [selection, unit, enable_offset, enable] : {
+          std::tuple{1u,  std::string_view{"TIM9"}, 0x20u, 1u << 2},
+          std::tuple{4u,  std::string_view{"TIM3"}, 0x24u, 1u << 1},
+          std::tuple{9u,  std::string_view{"TIM4"}, 0x24u, 1u << 2},
+          std::tuple{10u, std::string_view{"TIM6"}, 0x24u, 1u << 4},
+  })
+  {
+    CAPTURE(unit);
+    adc_rig const r;
+    r.power();
+    r.write(cr2, adon | (1u << 28) | (selection << 24));
+    r.timer_updates(unit, enable_offset, enable, 209);
+    auto const update = r.due(unit);
+    r.run_until(update + 600 * ns);
+    CHECK((r.read(sr) & strt) != 0);
+    CHECK(r.due() == update + 218'750 + 16 * cycle);
+    CHECK(r.logged.empty());
+  }
+}
+
+TEST_CASE("RM0038 Table 60: EXTEN 11 starts at both TRGO edges of TIM2 MMS 001, EXTEN 01 at one")
+{
+  for(auto const& [polarity, starts] : {
+          std::pair{3u, 2},
+          std::pair{1u, 1}
+  })
+  {
+    CAPTURE(polarity);
+    adc_rig const r;
+    r.power();
+    r.write(cr2, adon | (polarity << 28) | (6u << 24));
+    r.poke("RCC", 0x24, 1);
+    r.poke("TIM2", 0x04, 1u << 4);
+    int seen = 0;
+    for(auto const control : {1u, 0u})
+    {
+      r.poke("TIM2", 0x00, control);
+      r.run_until(r.now() + 2 * us);
+      if((r.read(sr) & eoc) != 0)
+      {
+        ++seen;
+        static_cast<void>(r.cpu_read(dr));
+      }
+    }
+    CHECK(seen == starts);
+  }
+}
+
+TEST_CASE("RM0038 12.9: DELS 001 with EOCS 1 holds each rank of a scan until its data is read")
+{
+  adc_rig const r;
+  r.power();
+  r.write(cr1, scan);
+  r.write(sqr1, 1u << 20);
+  auto const start = r.now();
+  r.write(cr2, adon | eocs | (1u << 4) | swstart);
+  r.run_until(start + 16 * cycle + ns);
+  REQUIRE((r.read(sr) & eoc) != 0);
+  r.run_until(start + 40 * us);
+  CHECK(r.due() == ~std::uint64_t{});
+  auto const release = r.now();
+  static_cast<void>(r.cpu_read(dr));
+  CHECK(r.due() == release + 16 * cycle);
+  r.run_until(release + 16 * cycle + ns);
+  CHECK((r.read(sr) & eoc) != 0);
+  static_cast<void>(r.cpu_read(dr));
+  CHECK((r.read(sr) & ovr) == 0);
+}
+
+TEST_CASE("DELS 001 with EOCS 0 converts a scan back to back and holds after its EOC, inferred")
+{
+  adc_rig const r;
+  r.power();
+  r.write(cr1, scan);
+  r.write(sqr1, 1u << 20);
+  auto const start = r.now();
+  r.write(cr2, adon | (1u << 4) | swstart);
+  r.run_until(start + 16 * cycle + ns);
+  CHECK((r.read(sr) & eoc) == 0);
+  CHECK(r.due() == start + 32 * cycle);
+  r.run_until(start + 32 * cycle + ns);
+  CHECK((r.read(sr) & eoc) != 0);
+  r.write(sr, ~strt);
+  r.write(cr2, adon | (1u << 4) | swstart);
+  CHECK(r.due() == ~std::uint64_t{});
+  r.run_until(r.now() + 40 * us);
+  CHECK((r.read(sr) & strt) == 0);
+  CHECK((r.read(cr2) & swstart) == 0);
+  static_cast<void>(r.cpu_read(dr));
+  auto const again = r.now();
+  r.write(cr2, adon | (1u << 4) | swstart);
+  CHECK(r.due() == again + 16 * cycle);
 }
