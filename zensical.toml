@@ -27,6 +27,7 @@ nav = [
     "support/index.md",
     "support/generated/parts.md",
     "support/generated/cores.md",
+    "support/stm32l1.md",
     "support/limits.md",
   ] },
   { "Reference" = [

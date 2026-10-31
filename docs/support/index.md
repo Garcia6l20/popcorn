@@ -6,24 +6,27 @@ from the shipped descriptions and the model registry at each docs build, so they
 - [Parts](generated/parts.md): the parts that ship with a description and the state of each, with
   a page per part of its peripheral instances, their models and its bonded pins.
 - [Cores](generated/cores.md): the arch modules and the core of each part.
+- [STM32L1](stm32l1.md): the categories, memory, bit-banding, data EEPROM and option bytes of
+  the STM32L1 family.
 - [Limits](limits.md): what each model leaves out, and where it differs from the reference manual.
 
 ## What the states mean
 
 A part is supported when firmware examples run on its class: its die, flash size, package and
-SMPS supply. The dies are U575/U585 and H56x/H573. The state column of the
-[Parts](generated/parts.md) page names the evidence:
+SMPS supply. The dies are U575/U585 and H56x/H573, and on the STM32L1 the DBGMCU DEV_ID such as
+DIE437. The state column of the [Parts](generated/parts.md) page names the evidence:
 
-- **tested**: the part runs the whole firmware suites of the examples, the STM32U575QGIx and the
-  STM32H573AIIx.
+- **tested**: the tests of the firmware examples name the part and run on it. The STM32U575QGIx,
+  the STM32H573AIIx and the STM32L152RETx run every example of their family, the STM32L152RBTx the
+  `gpio`, `pwr_flash`, `rcc` and `usart` examples.
 - **examples**: the part runs the listed examples itself, as the representative of its class.
 - **class**: the part shares its class with the named part, which runs examples.
 - **attaches**: the part ships and attaches, and its host checks are its evidence.
 
 A note on a row, FLASH geometry cases, marks the two parts the FLASH model's geometry cases run
-on, a 2 MB U5 part and a 1 MB H5 part. Every shipped part attaches at TrustZone 0 and 1, and its
-flash end, SRAM ends and bonded pins are checked on the host, whatever its state. Each part page
-lists the pins its package bonds on every GPIO port.
+on, a 2 MB U5 part and a 1 MB H5 part. Every shipped part attaches, at TrustZone 0 and 1 where
+its core has TrustZone, and its flash end, SRAM ends and bonded pins are checked on the host,
+whatever its state. Each part page lists the pins its package bonds on every GPIO port.
 
 ## What "modelled" means
 

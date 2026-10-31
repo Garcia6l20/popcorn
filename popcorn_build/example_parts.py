@@ -12,7 +12,7 @@ line per extra run.
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
 from typing import Final, NamedTuple
@@ -93,11 +93,6 @@ _PACKAGES: Final = {
     ("V", "Y"): "WLCSP104",
     ("Z", "T"): "LQFP144",
 }
-
-
-def with_part_class(parts: Iterable[str]) -> list[str]:
-    """The names of @p parts on the U5 and H5 lines, in order, the parts the support pages list."""
-    return [part for part in parts if part[5:9] in _DIES]
 
 
 @cache
@@ -415,7 +410,8 @@ EXAMPLE_PARTS: Final[Mapping[str, ExampleParts]] = {
 TESTED_PARTS: Final = frozenset(
     part for row in EXAMPLE_PARTS.values() for part in (row.conftest, *row.also)
 )
-"""The parts that run the whole firmware suites: the `conftest.py` parts of every example."""
+"""The parts the example firmware suites run on: the `conftest.py` part of every example and its
+`also` parts."""
 
 GEOMETRY_PARTS: Final = frozenset({"STM32U575ZITxQ", "STM32H563ZGTx"})
 """The parts the FLASH geometry cases of `stm32-flash-geometry` run on, 2 MB on the U5 and 1 MB

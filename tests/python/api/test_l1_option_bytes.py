@@ -72,9 +72,27 @@ def test_fields_without_an_l1_meaning_are_refused(
     assert caught.value.key == key
 
 
-def test_swap_bank_on_a_one_bank_part_is_refused() -> None:
+SWAP_BANK_ACCEPTED = {"Cat.4": "STM32L152RDTx", "Cat.5": "STM32L152RETx", "Cat.6": "STM32L151VDTxX"}
+"""A part of each category with two banks, RM0038 3.2 Tables 10 to 12."""
+SWAP_BANK_REFUSED = {
+    "Cat.1": "STM32L152RBTx",
+    "Cat.2": "STM32L152RBTxA",
+    "Cat.3 DIE427": "STM32L152RCTx",
+    "Cat.3 DIE436": "STM32L152RCTxA",
+}
+"""A part of each category with one bank, RM0038 3.2 Tables 8 and 9."""
+
+
+@pytest.mark.parametrize("part", SWAP_BANK_ACCEPTED.values(), ids=SWAP_BANK_ACCEPTED.keys())
+def test_swap_bank_on_a_two_bank_part_loads_nbfb2_0(part: str) -> None:
+    m = popcorn.Machine(mcu(part), option_bytes=OptionBytes(swap_bank=True))
+    assert m.mem.u32[OBR] & NBFB2 == 0
+
+
+@pytest.mark.parametrize("part", SWAP_BANK_REFUSED.values(), ids=SWAP_BANK_REFUSED.keys())
+def test_swap_bank_on_a_one_bank_part_is_refused(part: str) -> None:
     with pytest.raises(ConfigError) as caught:
-        popcorn.Machine(mcu("STM32L152RCTx"), option_bytes=OptionBytes(swap_bank=True))
+        popcorn.Machine(mcu(part), option_bytes=OptionBytes(swap_bank=True))
     assert caught.value.key == "option_bytes.swap_bank"
 
 

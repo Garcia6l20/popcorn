@@ -827,7 +827,7 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 
 ## RCC
 
-Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc.cpp)
+Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc.cpp), [rcc_l1.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc_l1.hpp)
 
 - SRAMnEN and SRAMnSMEN stay Non-secure. The MPCBB and INVSECSTATE rule of RM0456 5.4 does not
   apply to them.
@@ -1093,7 +1093,7 @@ Source: [sbs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 
 ## SYSCFG
 
-Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/syscfg.cpp), [secure_config.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/secure_config.hpp)
+Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/syscfg.cpp), [syscfg_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/syscfg_classic.cpp), [secure_config.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/secure_config.hpp)
 
 - Every register but `SYSCFG_SECCFGR` is storage. The functions it selects are not modelled. A
   firmware write lands and logs one `model_warning` per register. Under `strict` it raises

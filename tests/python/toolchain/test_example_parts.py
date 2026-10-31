@@ -24,7 +24,6 @@ from popcorn_build.example_parts import (
     PartClass,
     extra_runs,
     part_class,
-    with_part_class,
 )
 
 ROOT = Path(__file__).parents[3]
@@ -151,11 +150,6 @@ def test_every_example_directory_has_a_row_and_its_conftest_part() -> None:
     for name, row in EXAMPLE_PARTS.items():
         parts = {machine.part for machine in conftest_descriptions(name)}
         assert parts == {row.conftest, *row.also}, name
-
-
-def test_the_support_pages_list_the_u5_and_h5_lines_only() -> None:
-    names = ["STM32U575QGIx", "STM32L152RETx", "STM32H573AIIx", "STM32L100C6Ux"]
-    assert with_part_class(names) == ["STM32U575QGIx", "STM32H573AIIx"]
 
 
 @pytest.mark.parametrize("part", [p for p in shipped_parts() if p.startswith("STM32L1")])
