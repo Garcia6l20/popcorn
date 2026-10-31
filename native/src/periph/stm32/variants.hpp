@@ -627,6 +627,14 @@ struct rtc_classic_variant
 
 /** @brief STM32L1 Cat.2 to Cat.6 RTC, `rtc2_v2_5_Cube`, RM0038 section 20. */
 inline constexpr rtc_classic_variant l1_rtc{};
+/** @brief STM32L1 Cat.1 RTC, RM0038 20.2, 20.3.1 and 30.16.4: no subseconds, no smooth
+ *         calibration, one tamper input and no DBG_RTC_STOP. */
+inline constexpr rtc_classic_variant l1_cat1_rtc{
+    .subseconds         = false,
+    .smooth_calibration = false,
+    .three_tampers      = false,
+    .debug_freeze       = false};
+
 /** @brief Differences between the SAI peripherals the model rows serve. */
 struct sai_variant
 {

@@ -577,12 +577,8 @@ TEST_CASE("no L1 instance is served by a U5 or H5 row: only the L1 rows attach")
         attached.insert(name);
       }
     }
-    std::set<std::string> expected{"PWR",    "RCC",   "EXTI", "SYSCFG",
-                                   "DBGMCU", "FLASH", "IWDG", "CRC"};
-    if(part == &l152re())
-    {
-      expected.insert("RTC");
-    }
+    std::set<std::string> expected{"PWR",   "RCC",  "EXTI", "SYSCFG", "DBGMCU",
+                                   "FLASH", "IWDG", "CRC",  "RTC"};
     for(auto const& peripheral : part->peripherals)
     {
       if(peripheral.name.starts_with("GPIO")

@@ -242,6 +242,14 @@ auto without_register(part_description desc, std::string_view name) -> part_desc
   return desc;
 }
 
+auto with_version(part_description desc, std::string_view version) -> part_description
+{
+  auto& rtc = *std::ranges::find(
+      desc.peripherals, std::string_view{"RTC"}, &popcorn::peripheral_desc::name);
+  rtc.ip_version = std::string{version};
+  return desc;
+}
+
 auto make_machine(part_description desc) -> std::unique_ptr<core::machine>
 {
   stm32::register_builtin_models();
@@ -463,22 +471,42 @@ TEST_CASE("RM0038 20.3.1: SSR counts PREDIV_S down at RTCCLK / (PREDIV_A + 1)")
   CHECK(r.read("TR") == 0x00'0001);
 }
 
-TEST_CASE("RM0038 20.6.5: PREDIV_S has 15 bits from Cat.2")
+TEST_CASE("RM0038 20.6.5: PREDIV_S has 13 bits on Cat.1 and 15 from Cat.2")
 {
-  rig r;
-  r.start_clock();
-  r.enter_init();
-  r.write("PRER", 0x7F'FFFF);
-  CHECK((r.read("PRER") & 0xFFFFu) == 0x7FFFu);
+  for(auto const cat1 : {false, true})
+  {
+    CAPTURE(cat1);
+    rig r{cat1 ? l152rb() : l152re(), cat1 ? idle_image_b : idle_image};
+    r.start_clock();
+    r.enter_init();
+    r.write("PRER", 0x7F'FFFF);
+    CHECK((r.read("PRER") & 0xFFFFu) == (cat1 ? 0x1FFFu : 0x7FFFu));
+  }
 }
 
-TEST_CASE("checklist 39: the RTC variant refuses a description that disagrees with it")
+TEST_CASE("RM0038 20.6.11: Cat.1 has no RTC_SSR, a CPU read of offset 0x28 reads 0 and logs once")
+{
+  rig        r{l152rb(), idle_image_b};
+  auto const at = r.f->target->peripheral("RTC").description().base + 0x28;
+  CHECK(r.cpu_read_at(at) == 0);
+  CHECK(r.cpu_read_at(at) == 0);
+  CHECK(r.warnings() == 1);
+}
+
+TEST_CASE("checklist 39: each RTC variant refuses a description that disagrees with it")
 {
   CHECK_NOTHROW(static_cast<void>(make_machine(l152re())));
+  CHECK_NOTHROW(static_cast<void>(make_machine(l152rb())));
   CHECK_THROWS_AS(
       static_cast<void>(make_machine(without_register(l152re(), "SSR"))), popcorn::config_error);
   CHECK_THROWS_AS(
       static_cast<void>(make_machine(without_register(l152re(), "CALR"))), popcorn::config_error);
+  CHECK_THROWS_AS(
+      static_cast<void>(make_machine(with_version(l152re(), "STM32L1_rtc_cat1"))),
+      popcorn::config_error);
+  CHECK_THROWS_AS(
+      static_cast<void>(make_machine(with_version(l152rb(), "rtc2_v2_5_Cube"))),
+      popcorn::config_error);
 }
 
 TEST_CASE("RM0038 6.1.2: a power-on and a brown-out reset the calendar and the backup registers")
@@ -535,46 +563,57 @@ TEST_CASE(
     std::string_view reg;
     std::uint32_t    value;
     bool             init;
+    bool             cat1;
   };
-  for(auto const& [reg, value, init] : {
-          row{"CR",     1u << 8,  false},
-          row{"CR",     1u << 9,  false},
-          row{"CR",     1u << 10, false},
-          row{"CR",     1u << 11, false},
-          row{"CR",     1u << 7,  true },
-          row{"CR",     1u << 23, false},
-          row{"CR",     1u << 21, false},
-          row{"CR",     1u << 4,  true },
-          row{"TAFCR",  1u << 0,  false},
-          row{"TAFCR",  1u << 3,  false},
-          row{"TAFCR",  1u << 5,  false},
-          row{"CALR",   0x100,    false},
-          row{"SHIFTR", 0x10,     false}
+  for(auto const& [reg, value, init, cat1] : {
+          row{"CR",     1u << 8,  false, true },
+          row{"CR",     1u << 9,  false, true },
+          row{"CR",     1u << 10, false, true },
+          row{"CR",     1u << 11, false, true },
+          row{"CR",     1u << 7,  true,  true },
+          row{"CR",     1u << 23, false, true },
+          row{"CR",     1u << 21, false, true },
+          row{"CR",     1u << 4,  true,  true },
+          row{"TAFCR",  1u << 0,  false, true },
+          row{"TAFCR",  1u << 3,  false, false},
+          row{"TAFCR",  1u << 5,  false, false},
+          row{"CALR",   0x100,    false, false},
+          row{"SHIFTR", 0x10,     false, false}
   })
   {
-    CAPTURE(reg);
-    CAPTURE(value);
+    for(auto const part : {false, true})
     {
-      rig r;
+      if(part and not cat1)
+      {
+        continue;
+      }
+      CAPTURE(reg);
+      CAPTURE(value);
+      CAPTURE(part);
+      auto const& desc  = part ? l152rb() : l152re();
+      auto const  image = part ? idle_image_b : idle_image;
+      {
+        rig r{desc, image};
+        r.start_clock();
+        init ? r.enter_init() : r.unlock();
+        auto const before = r.warnings();
+        r.cpu_write(reg, value);
+        r.cpu_write(reg, value);
+        CHECK(r.warnings() == before + 1);
+        CHECK(r.read(reg) == (reg == "SHIFTR" ? 0 : value));
+      }
+      rig r{desc, image, true};
       r.start_clock();
       init ? r.enter_init() : r.unlock();
-      auto const before = r.warnings();
-      r.cpu_write(reg, value);
-      r.cpu_write(reg, value);
-      CHECK(r.warnings() == before + 1);
+      auto const old = r.read(reg);
+      CHECK_THROWS_AS(
+          static_cast<void>(
+              r.probe().services.write(r.at("RTC", reg), 4, value, popcorn::initiator::cpu)),
+          popcorn::model_error);
+      CHECK(r.read(reg) == old);
+      r.write(reg, value);
       CHECK(r.read(reg) == (reg == "SHIFTR" ? 0 : value));
     }
-    rig r{l152re(), idle_image, true};
-    r.start_clock();
-    init ? r.enter_init() : r.unlock();
-    auto const old = r.read(reg);
-    CHECK_THROWS_AS(
-        static_cast<void>(
-            r.probe().services.write(r.at("RTC", reg), 4, value, popcorn::initiator::cpu)),
-        popcorn::model_error);
-    CHECK(r.read(reg) == old);
-    r.write(reg, value);
-    CHECK(r.read(reg) == (reg == "SHIFTR" ? 0 : value));
   }
 }
 
@@ -592,4 +631,17 @@ TEST_CASE("with DBG_RTC_STOP a held core stops the calendar until the release")
   r.f->target->hold_core(false);
   r.later(second);
   CHECK(r.read("TR") == 0x00'0001);
+}
+
+TEST_CASE("Cat.1 has no DBG_RTC_STOP: a held core under strict leaves the calendar counting")
+{
+  rig r{l152rb(), idle_image_b, true};
+  r.start_clock();
+  r.later(ms);
+  auto const before = r.warnings();
+  r.f->target->hold_core(true);
+  r.later(2 * second);
+  CHECK(r.read("TR") == 0x00'0002);
+  CHECK(r.warnings() == before);
+  r.f->target->hold_core(false);
 }
