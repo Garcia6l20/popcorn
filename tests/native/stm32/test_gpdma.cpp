@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "dma.hpp"
 #include "dma_data.hpp"
 #include "stm32_fixture.hpp"
@@ -1639,47 +1640,10 @@ TEST_CASE("TCEM 3 on a 2D channel raises HT only at the 2D half of the last item
 
 namespace
 {
-class requester_probe final : public popcorn::periph::model,
+class requester_probe final : public popcorn::testing::inert_model,
                               public popcorn::periph::stm32::dma_requester
 {
 public:
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-
-  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
-  {}
-
-  auto on_read(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-
-  auto on_write(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-
-  void save(std::vector<std::byte>&) const override
-  {}
-
-  void load(std::span<std::byte const>) override
-  {}
-
   void transfer_completed(popcorn::periph::stm32::dma_controller const& by, std::uint32_t request)
       override
   {

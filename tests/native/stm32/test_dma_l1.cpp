@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
@@ -187,7 +188,7 @@ auto expected_log() -> std::vector<std::uint32_t>
   return out;
 }
 
-class counting_firewall final : public periph::model, public periph::bus_firewall
+class counting_firewall final : public popcorn::testing::inert_model, public periph::bus_firewall
 {
 public:
   explicit counting_firewall(periph::model_context& ctx)
@@ -195,33 +196,6 @@ public:
     ctx.install_firewall(*this);
   }
 
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
   auto check_peripheral(std::size_t, bus_attrs, memory_op) -> periph::bus_verdict override
   {
     return periph::bus_verdict::allow;
@@ -624,7 +598,7 @@ TEST_CASE("the DMA model refuses a variant past its request slots or naming a ch
 
 namespace
 {
-class requester final : public periph::model, public stm32::dma_requester
+class requester final : public popcorn::testing::inert_model, public stm32::dma_requester
 {
 public:
   requester(
@@ -736,12 +710,6 @@ public:
     writes.push_back({.offset = offset, .size = size, .value = value});
     return {};
   }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 
 private:
   auto signal(std::string_view name) -> stm32::dma_signal&
