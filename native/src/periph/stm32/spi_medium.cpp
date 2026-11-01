@@ -1,7 +1,9 @@
 #include "spi_medium.hpp"
 
+#include "link_medium.hpp"
+#include "spi_bus.hpp"
+
 #include <popcorn/core/errors.hpp>
-#include <popcorn/core/link_guard.hpp>
 
 #include <reflex/serde/bson.hpp>
 
@@ -99,65 +101,6 @@ struct spi_back_state
   friend auto operator==(spi_back_state const&, spi_back_state const&) -> bool = default;
 };
 
-namespace
-{
-auto mask_of(std::uint32_t bits) -> std::uint32_t
-{
-  return bits >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << bits) - 1u;
-}
-
-auto plus(core::sys_time at, std::int64_t ps) -> core::sys_time
-{
-  return {at.ps + ps};
-}
-
-auto latest_after(std::vector<core::sys_time> const& resets, core::sys_time stamp)
-    -> std::optional<core::sys_time>
-{
-  std::optional<core::sys_time> found;
-  for(auto const& reset : resets)
-  {
-    if(reset > stamp and (not found or reset > *found))
-    {
-      found = reset;
-    }
-  }
-  return found;
-}
-
-auto earliest(std::optional<core::link_fault> kept, std::optional<core::link_fault> found)
-    -> std::optional<core::link_fault>
-{
-  if(not kept or (found and found->at < kept->at))
-  {
-    return found;
-  }
-  return kept;
-}
-
-template <typename State> auto decoded(std::span<std::byte const> in) -> State
-{
-  State loaded;
-  try
-  {
-    loaded = reflex::serde::bson::deserializer{in}.load<State>();
-  }
-  catch(std::runtime_error const& failure)
-  {
-    throw config_error(
-        "spi link state", 0, "bytes",
-        std::format("a state an SPI link of kind {} saved: {}", State{}.kind, failure.what()));
-  }
-  if(loaded.kind != State{}.kind)
-  {
-    throw config_error(
-        "spi link state", 0, "kind",
-        std::format("an SPI link state of kind {}, the bytes hold {}", State{}.kind, loaded.kind));
-  }
-  return loaded;
-}
-}
-
 class spi_forth;
 class spi_back;
 
@@ -189,7 +132,7 @@ public:
 
   auto exchange(std::uint32_t, std::uint8_t bits, vtime) -> std::uint32_t override
   {
-    return mask_of(bits);
+    return spi_mask(bits);
   }
 
   auto exchange_deferred(std::uint32_t out, std::uint8_t bits, vtime at, std::uint64_t ticket)
@@ -350,37 +293,9 @@ public:
       core::sys_time const& next,
       core::time_map        receiver) -> std::optional<core::link_fault> override
   {
-    auto const before = state_.last_barrier;
-    std::erase_if(state_.resets, [&](core::sys_time const& reset) {
-      return plus(reset, pair_.latency.ps) <= before;
-    });
-    auto  posts = std::exchange(state_.carried, {});
-    auto& mail  = window % 2 == 0 ? state_.mail_even : state_.mail_odd;
-    posts.insert(posts.end(), mail.begin(), mail.end());
-    mail.clear();
-    std::optional<core::link_fault> fault;
-    for(auto const& post : posts)
-    {
-      if(not state_.carried.empty() or plus(post.stamp, pair_.latency.ps) >= next)
-      {
-        state_.carried.push_back(post);
-        continue;
-      }
-      try
-      {
-        hand(post, receiver);
-      }
-      catch(...)
-      {
-        fault = earliest(
-            fault, core::link_fault{
-                       .at     = std::max(post.stamp, before),
-                       .member = pair_.end.member,
-                       .error  = std::current_exception()});
-      }
-    }
-    state_.last_barrier = barrier;
-    return fault;
+    return drain_mail(
+        state_, window, barrier, next, pair_.latency, pair_.end.member,
+        [&](auto const& post) { hand(post, receiver); });
   }
 
   [[nodiscard]] auto quiet() const -> bool override
@@ -401,7 +316,7 @@ public:
 
   void load(std::span<std::byte const> in) override
   {
-    auto loaded = decoded<spi_forth_state>(in);
+    auto loaded = decoded<spi_forth_state>(in, "spi", "SPI");
     state_      = std::move(loaded);
     auto& proxy = *pair_.master_proxy;
     if(proxy.port() == nullptr)
@@ -479,7 +394,7 @@ public:
       try
       {
         proxy.target()->complete(
-            open.ticket, mask_of(open.bits), proxy.clock()->since_power_on(), pair_.end.back_lane);
+            open.ticket, spi_mask(open.bits), proxy.clock()->since_power_on(), pair_.end.back_lane);
       }
       catch(...)
       {}
@@ -564,43 +479,18 @@ public:
       core::sys_time const& next,
       core::time_map        receiver) -> std::optional<core::link_fault> override
   {
-    auto const before = state_.last_barrier;
-    std::erase_if(state_.resets, [&](core::sys_time const& reset) {
-      return plus(reset, pair_.latency.ps) <= before;
-    });
-    auto  posts = std::exchange(state_.carried, {});
-    auto& mail  = window % 2 == 0 ? state_.mail_even : state_.mail_odd;
-    posts.insert(posts.end(), mail.begin(), mail.end());
-    mail.clear();
-    std::optional<core::link_fault> fault;
-    for(auto const& post : posts)
-    {
-      if(latest_after(state_.resets, post.stamp))
-      {
-        show(post);
-        continue;
-      }
-      if(not state_.carried.empty() or plus(post.stamp, pair_.latency.ps) >= next)
-      {
-        state_.carried.push_back(post);
-        continue;
-      }
-      show(post);
-      try
-      {
-        pair_.forth->reply(post, receiver);
-      }
-      catch(...)
-      {
-        fault = earliest(
-            fault, core::link_fault{
-                       .at     = std::max(post.stamp, before),
-                       .member = pair_.master,
-                       .error  = std::current_exception()});
-      }
-    }
-    state_.last_barrier = barrier;
-    return fault;
+    return drain_mail(
+        state_, window, barrier, next, pair_.latency, pair_.master,
+        [&](auto const& post) { pair_.forth->reply(post, receiver); },
+        [&](auto const& post) {
+          if(latest_after(state_.resets, post.stamp))
+          {
+            show(post);
+            return true;
+          }
+          return false;
+        },
+        [&](auto const& post) { show(post); });
   }
 
   [[nodiscard]] auto quiet() const -> bool override
@@ -618,7 +508,7 @@ public:
 
   void load(std::span<std::byte const> in) override
   {
-    state_ = decoded<spi_back_state>(in);
+    state_ = decoded<spi_back_state>(in, "spi", "SPI");
   }
 
   void owe(spi_owed owed)
@@ -659,7 +549,7 @@ public:
          .stamp   = core::time_map{state_.sender_base}.to_system(at),
          .sent    = owed.sent,
          .mosi    = owed.word,
-         .miso    = mask_of(owed.bits),
+         .miso    = spi_mask(owed.bits),
          .bits    = owed.bits,
          .dropped = 1});
   }
@@ -676,7 +566,7 @@ public:
         .stamp   = owed.end,
         .sent    = owed.sent,
         .mosi    = owed.word,
-        .miso    = mask_of(owed.bits),
+        .miso    = spi_mask(owed.bits),
         .bits    = owed.bits,
         .dropped = 1};
   }
@@ -775,7 +665,7 @@ auto spi_master_proxy::exchange_deferred(
 {
   if(link_.muted() or clock_ == nullptr)
   {
-    return mask_of(bits);
+    return spi_mask(bits);
   }
   link_.post_frame(out, bits, vtime{at.ps - offset()}, ticket, port_->frame_time());
   return std::nullopt;
@@ -805,34 +695,6 @@ spi_pair::spi_pair(
     : index{slave_index}, master{master_member}, master_port{port}, end{std::move(slave)},
       latency{link_latency}, tap{std::move(frames)}
 {}
-}
-
-spi_tap_queue::spi_tap_queue(std::size_t capacity) : capacity_{capacity}
-{}
-
-void spi_tap_queue::push(spi_tap_frame const& frame)
-{
-  core::link_guard const held{mutex_};
-  if(frames_.size() == capacity_)
-  {
-    frames_.pop_front();
-    ++dropped_;
-  }
-  frames_.push_back(frame);
-}
-
-auto spi_tap_queue::take() -> std::vector<spi_tap_frame>
-{
-  core::link_guard const     held{mutex_};
-  std::vector<spi_tap_frame> out{frames_.begin(), frames_.end()};
-  frames_.clear();
-  return out;
-}
-
-auto spi_tap_queue::dropped() const -> std::uint64_t
-{
-  core::link_guard const held{mutex_};
-  return dropped_;
 }
 
 spi_medium::spi_medium(

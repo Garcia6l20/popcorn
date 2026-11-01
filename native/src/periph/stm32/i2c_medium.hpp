@@ -1,15 +1,14 @@
 #pragma once
 
 #include "i2c_link_port.hpp"
+#include "medium_tap_queue.hpp"
 
 #include <popcorn/core/member_link.hpp>
 #include <popcorn/export.hpp>
 
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <memory>
-#include <mutex>
 #include <vector>
 
 namespace popcorn::periph::stm32
@@ -45,27 +44,7 @@ struct i2c_tap_phase
  *        the oldest dropped and counted. A phase enters when the controller's drain takes its
  *        answer, in drain order.
  */
-class POPCORN_API i2c_tap_queue
-{
-public:
-  /** @param capacity Phases kept, above 0. */
-  explicit i2c_tap_queue(std::size_t capacity) pre(capacity > 0);
-
-  /** @brief Appends @p phase, dropping the oldest when full. */
-  void push(i2c_tap_phase const& phase);
-
-  /** @brief Takes every phase held, oldest first. */
-  auto take() -> std::vector<i2c_tap_phase>;
-
-  /** @brief Phases dropped so far because the queue was full. */
-  [[nodiscard]] auto dropped() const -> std::uint64_t;
-
-private:
-  mutable std::mutex        mutex_;
-  std::deque<i2c_tap_phase> phases_;
-  std::size_t               capacity_;
-  std::uint64_t             dropped_{};
-};
+using i2c_tap_queue = medium_tap_queue<i2c_tap_phase>;
 
 /** @brief A target of an I2C medium: its member and its I2C. */
 struct i2c_target_end

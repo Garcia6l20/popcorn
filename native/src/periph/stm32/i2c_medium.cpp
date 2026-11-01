@@ -1,7 +1,8 @@
 #include "i2c_medium.hpp"
 
+#include "link_medium.hpp"
+
 #include <popcorn/core/errors.hpp>
-#include <popcorn/core/link_guard.hpp>
 
 #include <reflex/serde/bson.hpp>
 
@@ -104,60 +105,9 @@ struct i2c_back_state
 
 namespace
 {
-auto plus(core::sys_time at, std::int64_t ps) -> core::sys_time
-{
-  return {at.ps + ps};
-}
-
-auto latest_after(std::vector<core::sys_time> const& resets, core::sys_time stamp)
-    -> std::optional<core::sys_time>
-{
-  std::optional<core::sys_time> found;
-  for(auto const& reset : resets)
-  {
-    if(reset > stamp and (not found or reset > *found))
-    {
-      found = reset;
-    }
-  }
-  return found;
-}
-
-auto earliest(std::optional<core::link_fault> kept, std::optional<core::link_fault> found)
-    -> std::optional<core::link_fault>
-{
-  if(not kept or (found and found->at < kept->at))
-  {
-    return found;
-  }
-  return kept;
-}
-
 auto is_read(std::uint8_t phase) -> bool
 {
   return static_cast<i2c_phase>(phase) == i2c_phase::read;
-}
-
-template <typename State> auto decoded(std::span<std::byte const> in) -> State
-{
-  State loaded;
-  try
-  {
-    loaded = reflex::serde::bson::deserializer{in}.load<State>();
-  }
-  catch(std::runtime_error const& failure)
-  {
-    throw config_error(
-        "i2c link state", 0, "bytes",
-        std::format("a state an I2C link of kind {} saved: {}", State{}.kind, failure.what()));
-  }
-  if(loaded.kind != State{}.kind)
-  {
-    throw config_error(
-        "i2c link state", 0, "kind",
-        std::format("an I2C link state of kind {}, the bytes hold {}", State{}.kind, loaded.kind));
-  }
-  return loaded;
 }
 }
 
@@ -376,37 +326,9 @@ public:
       core::sys_time const& next,
       core::time_map        receiver) -> std::optional<core::link_fault> override
   {
-    auto const before = state_.last_barrier;
-    std::erase_if(state_.resets, [&](core::sys_time const& reset) {
-      return plus(reset, pair_.latency.ps) <= before;
-    });
-    auto  posts = std::exchange(state_.carried, {});
-    auto& mail  = window % 2 == 0 ? state_.mail_even : state_.mail_odd;
-    posts.insert(posts.end(), mail.begin(), mail.end());
-    mail.clear();
-    std::optional<core::link_fault> fault;
-    for(auto const& post : posts)
-    {
-      if(not state_.carried.empty() or plus(post.stamp, pair_.latency.ps) >= next)
-      {
-        state_.carried.push_back(post);
-        continue;
-      }
-      try
-      {
-        hand(post, receiver);
-      }
-      catch(...)
-      {
-        fault = earliest(
-            fault, core::link_fault{
-                       .at     = std::max(post.stamp, before),
-                       .member = pair_.end.member,
-                       .error  = std::current_exception()});
-      }
-    }
-    state_.last_barrier = barrier;
-    return fault;
+    return drain_mail(
+        state_, window, barrier, next, pair_.latency, pair_.end.member,
+        [&](auto const& post) { hand(post, receiver); });
   }
 
   [[nodiscard]] auto quiet() const -> bool override
@@ -427,7 +349,7 @@ public:
 
   void load(std::span<std::byte const> in) override
   {
-    state_      = decoded<i2c_forth_state>(in);
+    state_      = decoded<i2c_forth_state>(in, "i2c", "I2C");
     auto& proxy = *pair_.controller_proxy;
     if(proxy.port() != nullptr)
     {
@@ -618,43 +540,18 @@ public:
       core::sys_time const& next,
       core::time_map        receiver) -> std::optional<core::link_fault> override
   {
-    auto const before = state_.last_barrier;
-    std::erase_if(state_.resets, [&](core::sys_time const& reset) {
-      return plus(reset, pair_.latency.ps) <= before;
-    });
-    auto  posts = std::exchange(state_.carried, {});
-    auto& mail  = window % 2 == 0 ? state_.mail_even : state_.mail_odd;
-    posts.insert(posts.end(), mail.begin(), mail.end());
-    mail.clear();
-    std::optional<core::link_fault> fault;
-    for(auto const& post : posts)
-    {
-      if(latest_after(state_.resets, post.stamp))
-      {
-        show(post);
-        continue;
-      }
-      if(not state_.carried.empty() or plus(post.stamp, pair_.latency.ps) >= next)
-      {
-        state_.carried.push_back(post);
-        continue;
-      }
-      show(post);
-      try
-      {
-        pair_.forth->reply(post, receiver);
-      }
-      catch(...)
-      {
-        fault = earliest(
-            fault, core::link_fault{
-                       .at     = std::max(post.stamp, before),
-                       .member = pair_.controller,
-                       .error  = std::current_exception()});
-      }
-    }
-    state_.last_barrier = barrier;
-    return fault;
+    return drain_mail(
+        state_, window, barrier, next, pair_.latency, pair_.controller,
+        [&](auto const& post) { pair_.forth->reply(post, receiver); },
+        [&](auto const& post) {
+          if(latest_after(state_.resets, post.stamp))
+          {
+            show(post);
+            return true;
+          }
+          return false;
+        },
+        [&](auto const& post) { show(post); });
   }
 
   [[nodiscard]] auto quiet() const -> bool override
@@ -672,7 +569,7 @@ public:
 
   void load(std::span<std::byte const> in) override
   {
-    state_ = decoded<i2c_back_state>(in);
+    state_ = decoded<i2c_back_state>(in, "i2c", "I2C");
   }
 
   void owe(i2c_owed owed)
@@ -903,34 +800,6 @@ i2c_pair::i2c_pair(
     : index{target_index}, controller{controller_member}, end{target}, latency{link_latency},
       tap{std::move(phases)}
 {}
-}
-
-i2c_tap_queue::i2c_tap_queue(std::size_t capacity) : capacity_{capacity}
-{}
-
-void i2c_tap_queue::push(i2c_tap_phase const& phase)
-{
-  core::link_guard const held{mutex_};
-  if(phases_.size() == capacity_)
-  {
-    phases_.pop_front();
-    ++dropped_;
-  }
-  phases_.push_back(phase);
-}
-
-auto i2c_tap_queue::take() -> std::vector<i2c_tap_phase>
-{
-  core::link_guard const     held{mutex_};
-  std::vector<i2c_tap_phase> out{phases_.begin(), phases_.end()};
-  phases_.clear();
-  return out;
-}
-
-auto i2c_tap_queue::dropped() const -> std::uint64_t
-{
-  core::link_guard const held{mutex_};
-  return dropped_;
 }
 
 i2c_medium::i2c_medium(

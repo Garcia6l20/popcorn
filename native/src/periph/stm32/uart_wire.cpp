@@ -1,6 +1,8 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/stm32/uart_wire.hpp>
 
+#include "link_medium.hpp"
+
 #include <reflex/serde/bson.hpp>
 
 #include <algorithm>
@@ -88,15 +90,7 @@ auto inside(detail::line_cut const& cut, core::sys_time at) -> bool
   return cut.start <= at and at < cut.end;
 }
 
-auto earliest(std::optional<core::link_fault> kept, std::optional<core::link_fault> found)
-    -> std::optional<core::link_fault>
-{
-  if(not kept or (found and found->at < kept->at))
-  {
-    return found;
-  }
-  return kept;
-}
+using detail::earliest;
 }
 
 auto line_shape::frame_ps() const noexcept -> std::uint64_t

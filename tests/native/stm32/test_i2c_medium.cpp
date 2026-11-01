@@ -1,4 +1,5 @@
 #include "i2c_medium.hpp"
+#include "link_medium.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/arch/arch.hpp>
@@ -22,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <format>
 #include <fstream>
 #include <functional>
@@ -30,6 +32,7 @@
 #include <random>
 #include <ranges>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -2071,4 +2074,109 @@ TEST_CASE("the proxies detach and attach again under host access between two tra
           w.on(0, [&](core::machine&) { w.medium->attach_controller(); });
           w.on(1, [&](core::machine&) { w.medium->attach_target(0); });
         }}});
+}
+
+TEST_CASE("the tap keeps its newest phases at capacity and counts the oldest it dropped")
+{
+  stm32::i2c_tap_queue tap{2};
+  for(std::uint8_t byte = 0; byte < 5; ++byte)
+  {
+    tap.push({.byte = byte});
+  }
+  auto const taken = tap.take();
+  REQUIRE(taken.size() == 2);
+  CHECK(taken[0].byte == 3);
+  CHECK(taken[1].byte == 4);
+  CHECK(tap.dropped() == 3);
+  CHECK(tap.take().empty());
+}
+
+TEST_CASE("a refused phase is a drain fault on the target and is carried at stamp plus L")
+{
+  auto const posted = [](world& w) {
+    auto const links = w.medium->links();
+    links[0]->enter_window(0, core::time_map{});
+    links[1]->enter_window(0, core::time_map{});
+    auto const& master = *w.nodes[0]->f;
+    auto        end    = w.nodes[0]->origin;
+    while(links[0]->quiet())
+    {
+      end += us_ps;
+      REQUIRE(end < w.nodes[0]->origin + 1'000 * us_ps);
+      REQUIRE(
+          master
+              .run_to_stop(
+                  {.max_instructions = icount{1'000'000},
+                   .until_time       = vtime{static_cast<std::uint64_t>(end)}})
+              .reason
+          == stop_reason::time);
+    }
+    auto* const refusing = w.nodes[1]->f->model_of<periph::i2c_controller_port>("I2C1");
+    REQUIRE(refusing != nullptr);
+    refusing->stop(vtime{static_cast<std::uint64_t>(w.nodes[1]->origin + row_end)}, 1, 1'000'000);
+    return core::sys_time{end};
+  };
+  auto const refused = [](core::link_fault const& fault) {
+    CHECK(fault.member == 1);
+    CHECK_THROWS_AS(std::rethrow_exception(fault.error), std::invalid_argument);
+  };
+  world first{
+      {wait_us(50), kick(0x42, 0x10)},
+      {target_spec{}}
+  };
+  auto const first_end = posted(first);
+  auto const at_once   = first.medium->links()[0]->drain(
+      0, first_end, core::sys_time{first_end.ps + row_end}, core::time_map{});
+  REQUIRE(at_once.has_value());
+  refused(*at_once);
+  auto const stamp = at_once->at;
+
+  world w{
+      {wait_us(50), kick(0x42, 0x10)},
+      {target_spec{}}
+  };
+  auto const end = posted(w);
+  REQUIRE(end == first_end);
+  auto&      forth   = *w.medium->links()[0];
+  auto const barrier = core::sys_time{stamp.ps + latency / 2};
+  auto const tie     = core::sys_time{stamp.ps + latency};
+  CHECK_FALSE(forth.drain(0, barrier, tie, core::time_map{}).has_value());
+  CHECK_FALSE(forth.quiet());
+  auto const late = forth.drain(1, tie, core::sys_time{tie.ps + row_end}, core::time_map{});
+  REQUIRE(late.has_value());
+  CHECK(late->at == barrier);
+  refused(*late);
+  CHECK(forth.quiet());
+}
+
+TEST_CASE("drain faults at one time keep the first post's fault")
+{
+  struct post
+  {
+    core::sys_time stamp{};
+    int            id{};
+  };
+  struct state
+  {
+    std::vector<core::sys_time> resets;
+    std::vector<post>           carried;
+    std::vector<post>           mail_even;
+    std::vector<post>           mail_odd;
+    core::sys_time              last_barrier{};
+  };
+  state mail{
+      .resets       = {},
+      .carried      = {},
+      .mail_even    = {{{10}, 1}, {{30}, 2}, {{5}, 3}},
+      .mail_odd     = {},
+      .last_barrier = {100}
+  };
+  auto const fault = stm32::detail::drain_mail(
+      mail, 0, core::sys_time{200}, core::sys_time{1'000}, core::sys_time{1}, 7,
+      [](post const& handed) { throw std::runtime_error(std::to_string(handed.id)); });
+  REQUIRE(fault.has_value());
+  CHECK(fault->at == core::sys_time{100});
+  CHECK(fault->member == 7);
+  CHECK_THROWS_WITH(std::rethrow_exception(fault->error), "1");
+  CHECK(mail.last_barrier == core::sys_time{200});
 }
