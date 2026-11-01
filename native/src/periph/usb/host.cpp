@@ -1,7 +1,5 @@
 #include <popcorn/periph/usb_host.hpp>
 
-#include "timing.hpp"
-
 #include <reflex/enum.hpp>
 #include <reflex/serde/bson.hpp>
 

@@ -1,6 +1,5 @@
 #pragma once
 
-#include "../usb/timing.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/periph/stm32/board.hpp>

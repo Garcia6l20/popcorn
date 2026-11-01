@@ -12,6 +12,9 @@
 
 namespace popcorn::periph::usb
 {
+/** @brief One USB full-speed frame, 1 ms, in picoseconds. */
+inline constexpr std::uint64_t usb_frame_ps = 1'000'000'000;
+
 /** @brief The 8 bytes of a SETUP transaction's data stage, USB 2.0 section 9.3. */
 struct setup_packet
 {
