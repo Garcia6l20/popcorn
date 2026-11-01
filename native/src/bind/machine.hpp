@@ -1645,10 +1645,12 @@ public:
 
   /**
    * @brief Times the machine's thread entered the GIL: the first creates its Python thread
-   *        state, each later one runs a Python callback or releases a Python reference.
+   *        state, each later one runs a Python callback or releases a Python reference. Only an
+   *        entry with no other gil_entry open on the thread counts, so a destructor a gc pass
+   *        inside a callback runs belongs to the callback's entry.
    */
-  [[= py::doc{"Times the machine thread took the GIL, for tests."}]] [[nodiscard]] auto
-      gil_entries() const noexcept -> std::uint64_t;
+  [[= py::doc{"Times the machine thread took the GIL, outermost entries only, for tests."}]]
+      [[nodiscard]] auto gil_entries() const noexcept -> std::uint64_t;
 
   /**
    * @brief Arms the gate the machine's thread blocks in at its next slice boundary, outside any

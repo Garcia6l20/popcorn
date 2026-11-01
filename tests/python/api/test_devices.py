@@ -1127,6 +1127,51 @@ def test_a_stretching_hook_takes_the_gil_once_per_call(u575: popcorn.PartDescrip
     assert gil_entries(m) - before == len(target.events) + starts
 
 
+class Collecting(Stretching):
+    """Answers like `Stretching`, runs a full gc pass in its first hook call, and records
+    whether `gone` was freed by it."""
+
+    def __init__(self, gone: weakref.ref[popcorn.Machine]) -> None:
+        super().__init__()
+        self.gone = gone
+        self.collected = -1
+        self.freed = False
+
+    def note(self, hook: str, at: VirtualTime) -> None:
+        super().note(hook, at)
+        if len(self.events) == 1:
+            self.collected = gc.collect()
+            self.freed = self.gone() is None
+
+
+def test_a_gc_pass_inside_a_hook_freeing_a_dead_machine_takes_the_gil_once_per_call(
+    u575: popcorn.PartDescription,
+) -> None:
+    dead = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [Stretching()]})
+    enter(dead, "table")
+    finish(dead)
+    gone = weakref.ref(dead)
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        cycle: list[object] = [dead]
+        cycle.append(cycle)
+        del dead, cycle
+        assert gone() is not None
+        target = Collecting(gone)
+        m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [target]})
+        enter(m, "table")
+        before = gil_entries(m)
+        finish(m)
+    finally:
+        if enabled:
+            gc.enable()
+    assert target.collected > 0
+    assert target.freed
+    starts = sum(kind == "on_start" for kind, _ in target.events)
+    assert gil_entries(m) - before == len(target.events) + starts
+
+
 def test_two_targets_on_one_address_both_answer_and_each_takes_the_gil(
     u575: popcorn.PartDescription,
 ) -> None:
