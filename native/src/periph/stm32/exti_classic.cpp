@@ -35,16 +35,16 @@ static_assert(std::is_empty_v<exti_classic_state>);
 
 /**
  * @brief Classic EXTI of the STM32L1, RM0038 section 10.2, one register per role and one bit per
- *        line, 23 or 24 lines from the traits. Lines 0 to 15 take the pin of the GPIO port the
+ *        line, 23 or 24 lines from the variant. Lines 0 to 15 take the pin of the GPIO port the
  *        SYSCFG peer selects in `SYSCFG_EXTICRn`, lines 16 and up the sources that call
  *        exti_line_input::line_changed(). A rising edge of a line with its EXTI_RTSR bit set, or
  *        a falling edge with its EXTI_FTSR bit set, sets its EXTI_PR bit while its EXTI_IMR bit
  *        is set, RM0038 10.2.4. A write of 1 to an EXTI_SWIER bit that reads 0 sets the EXTI_PR
  *        bit of an unmasked line, the SWIER bit reads 1 until a write of 1 to the PR bit, RM0038
  *        10.3.5. A write of 1 to an EXTI_PR bit clears it and the SWIER bit of the line, whether
- *        the PR bit was set or not. Each NVIC line of the traits is raised while the PR bit of
+ *        the PR bit was set or not. Each NVIC line of the variant is raised while the PR bit of
  *        one of its lines is set, the pending register feeding the NVIC, RM0038 Figure 32. A line
- *        in no NVIC group of the traits sets its PR bit and raises nothing. EXTI_EMR is storage
+ *        in no NVIC group of the variant sets its PR bit and raises nothing. EXTI_EMR is storage
  *        the model leaves unclaimed, and an EXTI event wakes no WFE. Every reset brings the
  *        registers to their description reset, PR 0. Each GPIO line n drives the trigger signal
  *        `extin`, the input of the line before its edge detection: an edge at each change of the
@@ -59,7 +59,10 @@ class exti_classic final : public dispatch_model<exti_classic, exti_classic_stat
                            public trigger_source
 {
 public:
-  exti_classic(model_context& ctx, peripheral_desc const& desc, exti_classic_traits const& traits);
+  exti_classic(
+      model_context&              ctx,
+      peripheral_desc const&      desc,
+      exti_classic_variant const& variant);
 
   void               reset(register_file& regs, reset_kind kind) override;
   void               on_event(std::uint32_t kind, std::uint64_t payload) override;
@@ -101,15 +104,15 @@ constexpr std::array<write_entry<exti_classic>, 5> exti_classic_writes{
 };
 
 exti_classic::exti_classic(
-    model_context&             ctx,
-    peripheral_desc const&     desc,
-    exti_classic_traits const& traits)
+    model_context&              ctx,
+    peripheral_desc const&      desc,
+    exti_classic_variant const& variant)
     : dispatch_model{ctx, desc, "EXTI", exti_classic_writes}, regs_{ctx.regs},
-      lines_{(std::uint32_t{1} << traits.lines) - 1u}, unmasked_{line_field("IMR", "MR")},
+      lines_{(std::uint32_t{1} << variant.lines) - 1u}, unmasked_{line_field("IMR", "MR")},
       rising_{line_field("RTSR", "TR")}, falling_{line_field("FTSR", "TR")},
       software_{line_field("SWIER", "SWIER")}, pending_{line_field("PR", "PR")}
 {
-  for(auto const& group : traits.irqs)
+  for(auto const& group : variant.irqs)
   {
     auto const width = group.last - group.first + 1u;
     auto const named = std::ranges::find(ctx.part.irqs, group.irq, &irq_desc::number);
@@ -272,10 +275,10 @@ auto exti_classic::level(std::string_view signal) const -> std::optional<bool>
 }
 }
 
-auto exti_classic_factory(exti_classic_traits traits) -> model_factory
+auto exti_classic_factory(exti_classic_variant variant) -> model_factory
 {
-  return [traits](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<exti_classic>(ctx, desc, traits);
+  return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<exti_classic>(ctx, desc, variant);
   };
 }
 }

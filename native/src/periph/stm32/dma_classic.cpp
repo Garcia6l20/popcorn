@@ -91,7 +91,7 @@ enum class unsupported : std::uint8_t
 
 /**
  * @brief Classic channel DMA of the STM32L1, DMA1 and DMA2, RM0038 section 11: 1 to 7 channels from
- *        the traits, `CCRx`, `CNDTRx`, `CPARx` and `CMARx` per channel, `ISR` and `IFCR` shared. A
+ *        the variant, `CCRx`, `CNDTRx`, `CPARx` and `CMARx` per channel, `ISR` and `IFCR` shared. A
  *        channel is ready while `EN` is set, `NDT` is not 0, and `MEM2MEM` is set or one of the
  *        hardware requests ORed into it is high. One transfer at a time runs for the whole
  *        controller, an event 4 HCLK cycles after the controller was last idle or after the
@@ -101,7 +101,7 @@ enum class unsupported : std::uint8_t
  *        inside a register or request callback. Each transfer reads one item of the source width at
  *        the source's current address and writes one item of the destination width, 0-padded when
  *        wider and its low bytes when narrower, RM0038 11.3.4 Table 53. A byte or halfword write
- *        into an APB window of the traits writes the word at the address aligned down to 4, with
+ *        into an APB window of the variant writes the word at the address aligned down to 4, with
  *        the item repeated on every lane, as the AHB/APB bridge of RM0038 11.3.4 does. `DIR` 0
  *        reads at the peripheral address and writes at the memory address, 1 the other way, under
  *        `MEM2MEM` too. The current addresses start at `CPARx` and `CMARx` when `EN` goes from 0 to
@@ -139,7 +139,7 @@ public:
   dma_classic(
       model_context&                            ctx,
       peripheral_desc const&                    desc,
-      dma_classic_traits const&                 traits,
+      dma_classic_variant const&                variant,
       std::span<write_entry<dma_classic> const> table);
 
   void               reset(register_file& regs, reset_kind kind) override;
@@ -171,7 +171,7 @@ private:
   auto requesters() -> std::span<dma_requester* const>;
 
   register_file&                           regs_;
-  dma_classic_traits                       traits_;
+  dma_classic_variant                      variant_;
   std::array<channel_fields, max_channels> ch_{};
   core::clock_domain                       hclk_;
   std::array<bool, 2>                      unsupported_logged_{};
@@ -223,26 +223,26 @@ auto writes_by_count(std::size_t channels, std::index_sequence<Ch...>)
 dma_classic::dma_classic(
     model_context&                            ctx,
     peripheral_desc const&                    desc,
-    dma_classic_traits const&                 traits,
+    dma_classic_variant const&                variant,
     std::span<write_entry<dma_classic> const> table)
-    : dispatch_model{ctx, desc, "DMA", table}, regs_{ctx.regs}, traits_{traits},
+    : dispatch_model{ctx, desc, "DMA", table}, regs_{ctx.regs}, variant_{variant},
       hclk_{ctx.clock.domain("hclk")}
 {
-  auto const unserved = std::ranges::any_of(traits_.requests, [&](dma_classic_request const& row) {
-    return row.channel == 0 or row.channel > traits_.channels;
+  auto const unserved = std::ranges::any_of(variant_.requests, [&](dma_classic_request const& row) {
+    return row.channel == 0 or row.channel > variant_.channels;
   });
-  if(traits_.channels == 0
-     or traits_.channels > max_channels
-     or traits_.requests.size() > max_requests
+  if(variant_.channels == 0
+     or variant_.channels > max_channels
+     or variant_.requests.size() > max_requests
      or unserved)
   {
     throw config_error(
-        desc.name, 0, "traits",
+        desc.name, 0, "variant",
         std::format(
             "1 to {} channels and at most {} requests, each on one of the channels", max_channels,
             max_requests));
   }
-  for(std::size_t ch = 0; ch < traits_.channels; ++ch)
+  for(std::size_t ch = 0; ch < variant_.channels; ++ch)
   {
     auto const n           = ch + 1;
     auto const ccr         = std::format("CCR{}", n);
@@ -274,10 +274,10 @@ dma_classic::dma_classic(
     c.clear_error          = field("IFCR", std::format("CTEIF{}", n));
     c.line                 = &irq(std::format("{}_Channel{}_IRQn", desc.name, n));
   }
-  if(traits_.channels < max_channels)
+  if(variant_.channels < max_channels)
   {
-    expect_register(std::format("CCR{}", traits_.channels + 1), false);
-    expect_field("ISR", std::format("GIF{}", traits_.channels + 1), false);
+    expect_register(std::format("CCR{}", variant_.channels + 1), false);
+    expect_field("ISR", std::format("GIF{}", variant_.channels + 1), false);
   }
 }
 
@@ -296,7 +296,7 @@ void dma_classic::reset(register_file&, reset_kind kind)
   {
     state_.request = requests;
   }
-  for(std::size_t ch = 0; ch < traits_.channels; ++ch)
+  for(std::size_t ch = 0; ch < variant_.channels; ++ch)
   {
     interrupts(ch);
   }
@@ -319,9 +319,9 @@ void dma_classic::drop_grants()
 
 auto dma_classic::requested(std::size_t ch) const -> bool
 {
-  for(std::size_t r = 0; r < traits_.requests.size() and r < max_requests; ++r)
+  for(std::size_t r = 0; r < variant_.requests.size() and r < max_requests; ++r)
   {
-    if(traits_.requests[r].channel == ch + 1 and state_.request[r] != 0)
+    if(variant_.requests[r].channel == ch + 1 and state_.request[r] != 0)
     {
       return true;
     }
@@ -340,7 +340,7 @@ auto dma_classic::ready(std::size_t ch) const -> bool
 auto dma_classic::winner() const -> std::optional<std::size_t>
 {
   std::optional<std::size_t> best;
-  for(std::size_t ch = 0; ch < traits_.channels; ++ch)
+  for(std::size_t ch = 0; ch < variant_.channels; ++ch)
   {
     if(ready(ch) and (not best or get(regs_, ch_[ch].priority) > get(regs_, ch_[*best].priority)))
     {
@@ -413,7 +413,7 @@ auto dma_classic::width(std::size_t ch, field_ref size) -> std::uint8_t
 
 auto dma_classic::on_apb(std::uint32_t at) const -> bool
 {
-  return std::ranges::any_of(traits_.apb_windows, [at](bus_window const& window) {
+  return std::ranges::any_of(variant_.apb_windows, [at](bus_window const& window) {
     return at >= window.first and at <= window.last;
   });
 }
@@ -479,9 +479,9 @@ void dma_classic::transfer(std::size_t ch)
   update(regs_, c.count, left);
   if(hardware)
   {
-    for(std::size_t r = 0; r < traits_.requests.size() and r < max_requests; ++r)
+    for(std::size_t r = 0; r < variant_.requests.size() and r < max_requests; ++r)
     {
-      if(traits_.requests[r].channel == ch + 1 and state_.request[r] != 0)
+      if(variant_.requests[r].channel == ch + 1 and state_.request[r] != 0)
       {
         for(auto* const requester : requesters())
         {
@@ -526,9 +526,9 @@ void dma_classic::tell(
     std::size_t ch,
     void (dma_requester::*signal)(dma_controller const&, std::uint32_t))
 {
-  for(std::size_t r = 0; r < traits_.requests.size() and r < max_requests; ++r)
+  for(std::size_t r = 0; r < variant_.requests.size() and r < max_requests; ++r)
   {
-    if(traits_.requests[r].channel == ch + 1)
+    if(variant_.requests[r].channel == ch + 1)
     {
       for(auto* const requester : requesters())
       {
@@ -591,7 +591,7 @@ template <std::size_t Ch> void dma_classic::count_written(std::uint32_t old, std
 
 void dma_classic::clear_written(std::uint32_t, std::uint32_t now)
 {
-  for(std::size_t ch = 0; ch < traits_.channels; ++ch)
+  for(std::size_t ch = 0; ch < variant_.channels; ++ch)
   {
     auto const& c   = ch_[ch];
     auto const  all = c.clear_global.of(now) != 0;
@@ -630,17 +630,17 @@ auto dma_classic::requesters() -> std::span<dma_requester* const>
 
 auto dma_classic::request_of(std::string_view signal) const -> std::optional<std::uint32_t>
 {
-  auto const found = std::ranges::find(traits_.requests, signal, &dma_classic_request::signal);
-  if(found == traits_.requests.end())
+  auto const found = std::ranges::find(variant_.requests, signal, &dma_classic_request::signal);
+  if(found == variant_.requests.end())
   {
     return std::nullopt;
   }
-  return static_cast<std::uint32_t>(found - traits_.requests.begin());
+  return static_cast<std::uint32_t>(found - variant_.requests.begin());
 }
 
 void dma_classic::on_request(std::uint32_t request, bool level)
 {
-  if(request >= max_requests or request >= traits_.requests.size())
+  if(request >= max_requests or request >= variant_.requests.size())
   {
     return;
   }
@@ -652,11 +652,11 @@ void dma_classic::on_request(std::uint32_t request, bool level)
 }
 }
 
-auto dma_classic_factory(dma_classic_traits traits) -> model_factory
+auto dma_classic_factory(dma_classic_variant variant) -> model_factory
 {
-  return [traits](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    auto const table = writes_by_count(traits.channels, std::make_index_sequence<max_channels>{});
-    return std::make_shared<dma_classic>(ctx, desc, traits, table);
+  return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    auto const table = writes_by_count(variant.channels, std::make_index_sequence<max_channels>{});
+    return std::make_shared<dma_classic>(ctx, desc, variant, table);
   };
 }
 }

@@ -32,14 +32,14 @@ struct syscfg_classic_state
 static_assert(std::is_empty_v<syscfg_classic_state>);
 
 /**
- * @brief Classic SYSCFG of the STM32L1, RM0038 section 8.5, its register roles from the traits.
+ * @brief Classic SYSCFG of the STM32L1, RM0038 section 8.5, its register roles from the variant.
  *        `SYSCFG_EXTICR1` to `SYSCFG_EXTICR4` select the GPIO port of the EXTI lines 0 to 15
- *        through the codes of the traits, a code with no port for that line selects none, and the
+ *        through the codes of the variant, a code with no port for that line selects none, and the
  *        EXTI peer reads them. A selector write that moves a line to a pin of another level hands
  *        the EXTI peer that edge, as the line input changes on the switch. The USB D+ pull-up
  *        enable, `SYSCFG_PMC.USB_PU`, is published through usb_pull_up_source, and every change of
  *        it, by a write or a reset, is told to the USB peer through usb_pull_up_listener. The other
- *        fields of its register, `LCD_CAPA` on the STM32L1, and the registers the traits list as
+ *        fields of its register, `LCD_CAPA` on the STM32L1, and the registers the variant lists as
  *        storage, `SYSCFG_MEMRMP` on the STM32L1, are storage the model does not model: the machine
  *        boots from main flash, which BOOT_MODE and MEM_MODE 00 give. A firmware write that sets a
  *        bit of those fields or lands on such a register logs one model_warning per register, and
@@ -54,9 +54,9 @@ class syscfg_classic final : public dispatch_model<syscfg_classic, syscfg_classi
 {
 public:
   syscfg_classic(
-      model_context&               ctx,
-      peripheral_desc const&       desc,
-      syscfg_classic_traits const& traits);
+      model_context&                ctx,
+      peripheral_desc const&        desc,
+      syscfg_classic_variant const& variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -86,7 +86,7 @@ private:
   void               tell_pull_up(bool before);
 
   register_file&                        regs_;
-  syscfg_classic_traits                 traits_;
+  syscfg_classic_variant                variant_;
   std::array<field_ref, selected_lines> selectors_{};
   std::optional<field_ref>              pull_up_;
   std::uint32_t                         pull_up_storage_{};
@@ -121,33 +121,33 @@ auto syscfg_classic_writes(peripheral_desc const& desc) -> std::vector<write_ent
 }
 
 syscfg_classic::syscfg_classic(
-    model_context&               ctx,
-    peripheral_desc const&       desc,
-    syscfg_classic_traits const& traits)
+    model_context&                ctx,
+    peripheral_desc const&        desc,
+    syscfg_classic_variant const& variant)
     : dispatch_model{ctx, desc, "SYSCFG", syscfg_classic_writes(desc)}, regs_{ctx.regs},
-      traits_{traits}
+      variant_{variant}
 {
   for(std::size_t line = 0; line < selected_lines; ++line)
   {
     selectors_[line] =
         field("EXTICR" + std::to_string(line / 4 + 1), "EXTI" + std::to_string(line));
   }
-  if(not traits.usb_pull_up_register.empty())
+  if(not variant.usb_pull_up_register.empty())
   {
-    pull_up_ = field(traits.usb_pull_up_register, traits.usb_pull_up_field);
-    for(auto const& other : describe(traits.usb_pull_up_register).fields)
+    pull_up_ = field(variant.usb_pull_up_register, variant.usb_pull_up_field);
+    for(auto const& other : describe(variant.usb_pull_up_register).fields)
     {
-      if(other.name != traits.usb_pull_up_field)
+      if(other.name != variant.usb_pull_up_field)
       {
-        pull_up_storage_ |= field(traits.usb_pull_up_register, other.name).mask();
+        pull_up_storage_ |= field(variant.usb_pull_up_register, other.name).mask();
       }
     }
   }
-  if(not traits.remap_register.empty())
+  if(not variant.remap_register.empty())
   {
-    remap_ = reg(traits.remap_register);
+    remap_ = reg(variant.remap_register);
   }
-  for(auto const name : traits.storage_registers)
+  for(auto const name : variant.storage_registers)
   {
     storage_.push_back(reg(name).offset);
   }
@@ -174,7 +174,7 @@ void syscfg_classic::tell_pull_up(bool before)
   {
     return;
   }
-  if(auto* const usb = dynamic_cast<usb_pull_up_listener*>(ctx_.peers.find(traits_.usb_peer)))
+  if(auto* const usb = dynamic_cast<usb_pull_up_listener*>(ctx_.peers.find(variant_.usb_peer)))
   {
     usb->usb_pull_up_changed();
   }
@@ -210,8 +210,8 @@ void syscfg_classic::on_event(std::uint32_t, std::uint64_t)
 auto syscfg_classic::port_of(std::uint8_t line, std::uint32_t code) const
     -> std::optional<std::uint8_t>
 {
-  auto const found = std::ranges::find(traits_.ports, code, &exti_port_code::code);
-  if(found == traits_.ports.end() or ((found->lines >> line) & 1u) == 0)
+  auto const found = std::ranges::find(variant_.ports, code, &exti_port_code::code);
+  if(found == variant_.ports.end() or ((found->lines >> line) & 1u) == 0)
   {
     return std::nullopt;
   }
@@ -318,10 +318,10 @@ auto syscfg_classic::guard(std::uint32_t word, access_ctx const& ctx, bool write
 }
 }
 
-auto syscfg_classic_factory(syscfg_classic_traits traits) -> model_factory
+auto syscfg_classic_factory(syscfg_classic_variant variant) -> model_factory
 {
-  return [traits](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<syscfg_classic>(ctx, desc, traits);
+  return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<syscfg_classic>(ctx, desc, variant);
   };
 }
 }

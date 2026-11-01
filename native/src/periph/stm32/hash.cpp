@@ -64,7 +64,7 @@ enum class function : std::uint8_t
 };
 
 /**
- * @brief One ALGO code of a HASH family.
+ * @brief One ALGO code of a HASH variant.
  */
 struct algorithm
 {
@@ -86,7 +86,7 @@ struct algorithm
 /**
  * @brief The ALGO codes and register counts of one HASH IP version.
  */
-struct hash_family
+struct hash_ip_variant
 {
   std::span<algorithm const> algorithms;
   std::size_t                hr_count;
@@ -177,9 +177,9 @@ constexpr std::array<algorithm, 16> h5_sha3_codes{
     sha384_code,   sha512_224_code, sha512_256_code, sha512_code,
 };
 
-constexpr hash_family u5_hash{u5_codes, 8, 54};
-constexpr hash_family h5_hash{h5_codes, 42, 103};
-constexpr hash_family h5_sha3_hash{h5_sha3_codes, 42, 103};
+constexpr hash_ip_variant u5_hash{u5_codes, 8, 54};
+constexpr hash_ip_variant h5_hash{h5_codes, 42, 103};
+constexpr hash_ip_variant h5_sha3_hash{h5_sha3_codes, 42, 103};
 
 /**
  * @brief Compresses one 512-bit block into a SHA-1 chaining value, FIPS 180-4 6.1.2.
@@ -335,11 +335,11 @@ constexpr auto state_end(algorithm const& a) noexcept -> std::size_t
   }
 }
 
-constexpr auto inner_clear(hash_family const& family) noexcept -> bool
+constexpr auto inner_clear(hash_ip_variant const& variant) noexcept -> bool
 {
-  return std::ranges::all_of(family.algorithms, [&](algorithm const& a) {
+  return std::ranges::all_of(variant.algorithms, [&](algorithm const& a) {
     return not a.hmac
-        or (a.csr_inner >= state_end(a) and a.csr_inner + inner_width(a) <= family.csr_count);
+        or (a.csr_inner >= state_end(a) and a.csr_inner + inner_width(a) <= variant.csr_count);
   });
 }
 
@@ -546,7 +546,7 @@ public:
   hash(
       model_context&                     ctx,
       peripheral_desc const&             desc,
-      hash_family const&                 family,
+      hash_ip_variant const&             variant,
       std::span<write_entry<hash> const> writes);
 
   void reset(register_file& regs, reset_kind kind) override;
@@ -617,7 +617,7 @@ private:
   void unmodelled(bool& logged, std::string_view name, std::uint32_t offset, std::string message);
 
   register_file&                       regs_;
-  hash_family const&                   family_;
+  hash_ip_variant const&               variant_;
   std::uint32_t                        cr_;
   std::uint32_t                        din_;
   std::uint32_t                        str_;
@@ -656,7 +656,7 @@ private:
   bool                                 swap_logged_{};
 };
 
-template <hash_family const& Family> auto hash_writes() -> std::span<write_entry<hash> const>
+template <hash_ip_variant const& Variant> auto hash_writes() -> std::span<write_entry<hash> const>
 {
   static std::deque<std::string> const names = [] {
     std::deque<std::string> out;
@@ -664,11 +664,11 @@ template <hash_family const& Family> auto hash_writes() -> std::span<write_entry
     {
       out.push_back(std::format("HRA{}", i));
     }
-    for(std::size_t i = 0; i < Family.hr_count; ++i)
+    for(std::size_t i = 0; i < Variant.hr_count; ++i)
     {
       out.push_back(std::format("HR{}", i));
     }
-    for(std::size_t i = 0; i < Family.csr_count; ++i)
+    for(std::size_t i = 0; i < Variant.csr_count; ++i)
     {
       out.push_back(std::format("CSR{}", i));
     }
@@ -694,9 +694,9 @@ template <hash_family const& Family> auto hash_writes() -> std::span<write_entry
 hash::hash(
     model_context&                     ctx,
     peripheral_desc const&             desc,
-    hash_family const&                 family,
+    hash_ip_variant const&             variant,
     std::span<write_entry<hash> const> writes)
-    : dispatch_model{ctx, desc, "HASH", writes}, regs_{ctx.regs}, family_{family},
+    : dispatch_model{ctx, desc, "HASH", writes}, regs_{ctx.regs}, variant_{variant},
       cr_{reg("CR").offset}, din_{reg("DIN").offset}, str_{reg("STR").offset},
       sr_{reg("SR").offset}, csr0_{reg("CSR0").offset}, init_{field("CR", "INIT")},
       dmae_{field("CR", "DMAE")}, mdmat_{field("CR", "MDMAT")}, dmas_{field("SR", "DMAS")},
@@ -707,15 +707,15 @@ hash::hash(
       busy_{field("SR", "BUSY")}, nbwp_{field("SR", "NBWP")}, dinne_{field("SR", "DINNE")},
       nbwe_{field("SR", "NBWE")}, line_{&irq("HASH_IRQn")}, dma_{ctx.peers, "hash_in_dma"}
 {
-  if((std::size_t{1} << algo_.width) > family_.algorithms.size())
+  if((std::size_t{1} << algo_.width) > variant_.algorithms.size())
   {
     throw config_error(
         desc.name, 0, "CR.ALGO",
         std::format(
-            "a field of at most {} bits, the family has {} codes",
-            std::bit_width(family_.algorithms.size() - 1), family_.algorithms.size()));
+            "a field of at most {} bits, the variant has {} codes",
+            std::bit_width(variant_.algorithms.size() - 1), variant_.algorithms.size()));
   }
-  for(std::size_t i = 0; i < family_.hr_count; ++i)
+  for(std::size_t i = 0; i < variant_.hr_count; ++i)
   {
     hr_[i] = reg(std::format("HR{}", i)).offset;
   }
@@ -750,7 +750,7 @@ void hash::restore_reset_values()
 
 auto hash::is_csr(std::uint32_t offset) const -> bool
 {
-  return offset >= csr0_ and offset < csr0_ + 4 * family_.csr_count;
+  return offset >= csr0_ and offset < csr0_ + 4 * variant_.csr_count;
 }
 
 auto hash::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
@@ -850,12 +850,12 @@ auto hash::on_write(
 
 auto hash::alg() const -> algorithm const&
 {
-  return family_.algorithms[state_.algo];
+  return variant_.algorithms[state_.algo];
 }
 
 auto hash::code_of(std::uint32_t control) const -> algorithm const&
 {
-  return family_.algorithms[algo_.of(control)];
+  return variant_.algorithms[algo_.of(control)];
 }
 
 auto hash::keccak_selected() const -> bool
@@ -1700,7 +1700,7 @@ void hash::publish()
 void hash::show_digest(bool visible)
 {
   auto const aliased = alg().kind != function::keccak;
-  for(std::size_t i = 0; i < family_.hr_count; ++i)
+  for(std::size_t i = 0; i < variant_.hr_count; ++i)
   {
     auto const value = visible and i < state_.digest_size ? state_.digest[i] : 0u;
     regs_.poke(hr_[i], value);

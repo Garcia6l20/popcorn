@@ -601,11 +601,11 @@ TEST_CASE("the DMA2 model refuses a description with channel 6 registers or chan
   CHECK_THROWS_AS(stm32_fixture(desc, firmware), popcorn::config_error);
 }
 
-TEST_CASE("the DMA model refuses traits past its request slots or naming a channel it lacks")
+TEST_CASE("the DMA model refuses a variant past its request slots or naming a channel it lacks")
 {
-  auto const refused = [](stm32::dma_classic_traits const& traits) {
+  auto const refused = [](stm32::dma_classic_variant const& variant) {
     auto options = popcorn::testing::stm32_options();
-    options.models.insert_or_assign("DMA1", stm32::dma_classic_factory(traits));
+    options.models.insert_or_assign("DMA1", stm32::dma_classic_factory(variant));
     CHECK_THROWS_AS(parked(l152re(), firmware, std::move(options)), popcorn::config_error);
   };
   std::array<stm32::dma_classic_request, 49> many{};
@@ -834,11 +834,11 @@ auto peer(stm32_fixture const& f, std::string_view unit) -> requester&
 constexpr std::uint32_t word_sizes = psize_word | msize_word;
 }
 
-TEST_CASE("RM0038 Tables 55 and 56: the DMA1 and DMA2 traits hold every request on its channel")
+TEST_CASE("RM0038 Tables 55 and 56: the DMA1 and DMA2 variants hold every request on its channel")
 {
-  auto const listed = [](stm32::dma_classic_traits const& traits, std::string_view instance) {
+  auto const listed = [](stm32::dma_classic_variant const& variant, std::string_view instance) {
     std::vector<std::pair<std::string_view, std::uint32_t>> out;
-    for(auto const& request : traits.requests)
+    for(auto const& request : variant.requests)
     {
       CAPTURE(request.signal);
       out.emplace_back(request.signal, request.channel);

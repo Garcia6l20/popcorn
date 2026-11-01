@@ -84,11 +84,11 @@ namespace popcorn::periph::stm32
 
 /**
  * @brief Factory of the STM32L1 FLASH and data EEPROM model, RM0038 section 3.
- * @param traits What differs between the categories the row serves.
+ * @param variant What differs between the categories the row serves.
  * @param options Board configuration: only `option_bytes` applies, the boot bank of a part with
  *        two banks.
  */
-[[nodiscard]] auto flash_l1_factory(flash_l1_traits traits, flash_options const& options)
+[[nodiscard]] auto flash_l1_factory(flash_l1_variant variant, flash_options const& options)
     -> model_factory;
 
 /**
@@ -112,15 +112,15 @@ namespace popcorn::periph::stm32
 
 /**
  * @brief Factory of the classic EXTI model, RM0038 section 10.2.
- * @param traits Lines and NVIC lines of the family the row serves.
+ * @param variant Lines and NVIC lines of the family the row serves.
  */
-[[nodiscard]] auto exti_classic_factory(exti_classic_traits traits) -> model_factory;
+[[nodiscard]] auto exti_classic_factory(exti_classic_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the classic channel DMA model, RM0038 section 11.
- * @param traits Channels and requests of the controller the row serves.
+ * @param variant Channels and requests of the controller the row serves.
  */
-[[nodiscard]] auto dma_classic_factory(dma_classic_traits traits) -> model_factory;
+[[nodiscard]] auto dma_classic_factory(dma_classic_variant variant) -> model_factory;
 
 /** @brief Factory of the GPDMA1 model, RM0456 section 17. */
 [[nodiscard]] auto gpdma_factory() -> model_factory;
@@ -284,9 +284,9 @@ namespace popcorn::periph::stm32
 
 /**
  * @brief Factory of the classic SYSCFG model, RM0038 section 8.5.
- * @param traits Register roles and EXTI port codes of the family the row serves.
+ * @param variant Register roles and EXTI port codes of the family the row serves.
  */
-[[nodiscard]] auto syscfg_classic_factory(syscfg_classic_traits traits) -> model_factory;
+[[nodiscard]] auto syscfg_classic_factory(syscfg_classic_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the RNG model, RM0456 section 48.

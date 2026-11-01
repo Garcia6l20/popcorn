@@ -102,7 +102,7 @@ struct exti_line_group
 };
 
 /** @brief Differences between the classic EXTI controllers the model rows serve. */
-struct exti_classic_traits
+struct exti_classic_variant
 {
   /** @brief Lines, the width of each register's line field. */
   std::uint8_t lines;
@@ -131,9 +131,9 @@ inline constexpr auto l1_exti_irqs = std::to_array<exti_line_group>({
     {21, 22, 22},
 });
 /** @brief STM32L1 Cat.1 and Cat.2, `STM32L1_exti_23`, RM0038 10.2: 23 lines. */
-inline constexpr exti_classic_traits l1_exti_23{.lines = 23, .irqs = l1_exti_irqs};
+inline constexpr exti_classic_variant l1_exti_23{.lines = 23, .irqs = l1_exti_irqs};
 /** @brief STM32L1 Cat.3 to Cat.6, RM0038 10.2: 24 lines. */
-inline constexpr exti_classic_traits l1_exti_24{.lines = 24, .irqs = l1_exti_irqs};
+inline constexpr exti_classic_variant l1_exti_24{.lines = 24, .irqs = l1_exti_irqs};
 
 /** @brief One hardware request of a classic DMA controller: its signal and its channel. */
 struct dma_classic_request
@@ -173,7 +173,7 @@ struct bus_window
 }
 
 /** @brief Differences between the classic DMA controllers the model rows serve. */
-struct dma_classic_traits
+struct dma_classic_variant
 {
   /** @brief Channels, numbered from 1. */
   std::uint8_t channels;
@@ -234,12 +234,12 @@ inline constexpr std::array<dma_classic_request, 15> l1_dma2_requests{
 };
 
 /** @brief STM32L1 DMA1, RM0038 11.1: 7 channels. */
-inline constexpr dma_classic_traits l1_dma1{
+inline constexpr dma_classic_variant l1_dma1{
     .channels    = 7,
     .requests    = l1_dma1_requests,
     .apb_windows = l1_apb_windows};
 /** @brief STM32L1 DMA2, RM0038 11.1 and the 11.4 note: 5 channels, on Cat.3 to Cat.6. */
-inline constexpr dma_classic_traits l1_dma2{
+inline constexpr dma_classic_variant l1_dma2{
     .channels    = 5,
     .requests    = l1_dma2_requests,
     .apb_windows = l1_apb_windows};
@@ -257,7 +257,7 @@ struct exti_port_code
 
 /** @brief Differences between the classic SYSCFG controllers the model rows serve, by register
  *         role. A role the family lacks is empty. */
-struct syscfg_classic_traits
+struct syscfg_classic_variant
 {
   /** @brief Selector codes. A code with no entry, or an entry without the line, selects no
    *         port. */
@@ -290,7 +290,7 @@ inline constexpr auto l1_exti_ports = std::to_array<exti_port_code>({
 /** @brief STM32L1 storage registers of SYSCFG: MEMRMP. */
 inline constexpr auto l1_syscfg_storage = std::to_array<std::string_view>({"MEMRMP"});
 /** @brief STM32L1 Cat.3 to Cat.6, RM0038 section 8.5. */
-inline constexpr syscfg_classic_traits l1_syscfg{
+inline constexpr syscfg_classic_variant l1_syscfg{
     .ports                = l1_exti_ports,
     .usb_pull_up_register = "PMC",
     .usb_pull_up_field    = "USB_PU",
@@ -299,7 +299,7 @@ inline constexpr syscfg_classic_traits l1_syscfg{
     .storage_registers    = l1_syscfg_storage};
 /** @brief STM32L1 Cat.1 and Cat.2, `STM32L1_exti_23`, RM0038 8.5.3: codes 0110 and 0111, PF and
  *         PG, exist on Cat.3 to Cat.6 only. */
-inline constexpr syscfg_classic_traits l1_syscfg_cat12{
+inline constexpr syscfg_classic_variant l1_syscfg_cat12{
     .ports                = std::span{l1_exti_ports}.first(6),
     .usb_pull_up_register = "PMC",
     .usb_pull_up_field    = "USB_PU",
@@ -309,7 +309,7 @@ inline constexpr syscfg_classic_traits l1_syscfg_cat12{
 
 /** @brief Differences between the STM32L1 FLASH controllers the model rows serve, by the
  *         `STM32L1_flash_<category>` version the category patches set. */
-struct flash_l1_traits
+struct flash_l1_variant
 {
   /** @brief Highest HCLK in kHz at 0 and 1 wait state in voltage ranges 1, 2 and 3, RM0038
    *         Table 13. */
@@ -336,35 +336,35 @@ inline constexpr std::array<std::array<std::uint32_t, 2>, 3> l1_flash_wait_khz{
 };
 /** @brief STM32L1 Cat.1, `STM32L1_flash_cat1`: Range 3 up to 2.1 MHz at 0 WS and 4.2 MHz at
  *         1 WS, RM0038 Table 13. */
-inline constexpr flash_l1_traits l1_flash_cat1{
+inline constexpr flash_l1_variant l1_flash_cat1{
     .max_khz             = {{{16'000, 32'000}, {8'000, 16'000}, {2'100, 4'200}}},
     .null_partial_writes = false,
     .user_option_flag    = false};
 /** @brief STM32L1 Cat.2, `STM32L1_flash_cat2`. */
-inline constexpr flash_l1_traits l1_flash_cat2{
+inline constexpr flash_l1_variant l1_flash_cat2{
     .max_khz          = l1_flash_wait_khz,
     .user_option_flag = false};
 /** @brief STM32L151, L152 and L162 Cat.2, `STM32L1_flash_cat2_pcrop`: PCROP. */
-inline constexpr flash_l1_traits l1_flash_cat2_pcrop{
+inline constexpr flash_l1_variant l1_flash_cat2_pcrop{
     .max_khz          = l1_flash_wait_khz,
     .user_option_flag = false,
     .pcrop            = true};
 /** @brief STM32L1 Cat.3, `STM32L1_flash_cat3`: FLASH_WRPR2. */
-inline constexpr flash_l1_traits l1_flash_cat3{.max_khz = l1_flash_wait_khz, .wrp_registers = 2};
+inline constexpr flash_l1_variant l1_flash_cat3{.max_khz = l1_flash_wait_khz, .wrp_registers = 2};
 /** @brief STM32L151, L152 and L162 Cat.3 on DIE427, `STM32L1_flash_cat3_pcrop`: FLASH_WRPR2 and
  *         PCROP. */
-inline constexpr flash_l1_traits l1_flash_cat3_pcrop{
+inline constexpr flash_l1_variant l1_flash_cat3_pcrop{
     .max_khz       = l1_flash_wait_khz,
     .wrp_registers = 2,
     .pcrop         = true};
 /** @brief STM32L1 Cat.4 and Cat.6, `STM32L1_flash_cat46`: two banks, FLASH_WRPR2 and
  *         FLASH_WRPR3. */
-inline constexpr flash_l1_traits l1_flash_cat46{
+inline constexpr flash_l1_variant l1_flash_cat46{
     .max_khz       = l1_flash_wait_khz,
     .dual_bank     = true,
     .wrp_registers = 3};
 /** @brief STM32L1 Cat.5, `STM32L1_flash_cat5`: two banks, FLASH_WRPR2 to FLASH_WRPR4. */
-inline constexpr flash_l1_traits l1_flash_cat5{
+inline constexpr flash_l1_variant l1_flash_cat5{
     .max_khz       = l1_flash_wait_khz,
     .dual_bank     = true,
     .wrp_registers = 4};
@@ -399,24 +399,24 @@ struct flash_variant
  * @brief The STM32L1 FLASH encoder, RM0038 3.3.2 and Table 19: the flash base, or with
  *        `swap_bank` the bank 2 base, as the nBFB2 option byte at 0 selects on a part with two
  *        banks. Every other field refused when it is not its default, as `option_bytes.<field>`.
- * @param traits Category of the row.
+ * @param variant Category of the row.
  * @param program FLASH unit and its program memory regions.
  * @param wanted Option bytes the machine boots with.
  * @return The boot address, or the refusal.
  */
 [[nodiscard]] auto l1_encode_options(
-    flash_l1_traits const& traits,
-    flash_program const&   program,
-    option_bytes const&    wanted) -> std::expected<address, option_refusal>;
+    flash_l1_variant const& variant,
+    flash_program const&    program,
+    option_bytes const&     wanted) -> std::expected<address, option_refusal>;
 
-/** @brief l1_encode_options() for the category @p Traits, as a flash_variant encoder. */
-template <flash_l1_traits const& Traits>
+/** @brief l1_encode_options() for the category @p Variant, as a flash_variant encoder. */
+template <flash_l1_variant const& Variant>
 [[nodiscard]] auto l1_encode_options_of(
     flash_variant const&,
     flash_program const& program,
     option_bytes const&  wanted) -> std::expected<address, option_refusal>
 {
-  return l1_encode_options(Traits, program, wanted);
+  return l1_encode_options(Variant, program, wanted);
 }
 
 /** @brief STM32U5 parts with 7 bits. */
