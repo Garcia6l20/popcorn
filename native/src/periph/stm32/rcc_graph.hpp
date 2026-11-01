@@ -5,9 +5,12 @@
 
 #include <popcorn/periph/stm32/rcc.hpp>
 
+#include <algorithm>
 #include <array>
+#include <contracts>
 #include <cstddef>
 #include <cstdint>
+#include <meta>
 #include <string_view>
 #include <utility>
 
@@ -223,6 +226,48 @@ constexpr auto hpre_divider(std::uint32_t code) noexcept -> std::uint64_t
 constexpr auto ppre_divider(std::uint32_t code) noexcept -> std::uint64_t
 {
   return code < 4 ? 1 : std::uint64_t{2} << (code - 4);
+}
+
+/** @brief Flags of the reset status register one kind of reset sets, the second empty when one
+ * flag is enough. */
+struct reset_flag_row
+{
+  reset_kind                      kind;
+  std::array<std::string_view, 2> flags;
+};
+
+/**
+ * @brief Whether @p rows holds exactly one row for every `reset_kind` enumerator.
+ * @param rows Reset flag table of one family.
+ */
+template <std::size_t N>
+consteval auto covers_every_reset_kind(std::array<reset_flag_row, N> const& rows) -> bool
+{
+  auto const kinds = std::meta::enumerators_of(^^reset_kind);
+  if(rows.size() != kinds.size())
+  {
+    return false;
+  }
+  for(auto const e : kinds)
+  {
+    if(std::ranges::count(rows, std::meta::extract<reset_kind>(e), &reset_flag_row::kind) != 1)
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * @brief Flags a reset of @p kind sets.
+ * @param rows Reset flag table of one family, checked with covers_every_reset_kind().
+ * @param kind Kind of the reset.
+ */
+template <std::size_t N>
+constexpr auto reset_flags_in(std::array<reset_flag_row, N> const& rows, reset_kind kind) noexcept
+    -> std::array<std::string_view, 2> pre(std::ranges::contains(rows, kind, &reset_flag_row::kind))
+{
+  return std::ranges::find(rows, kind, &reset_flag_row::kind)->flags;
 }
 }
 }

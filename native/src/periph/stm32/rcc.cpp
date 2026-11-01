@@ -1297,7 +1297,7 @@ template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, re
     }
     csr |= kept_flags;
   }
-  for(auto const name : Traits::reset_flags_of(kind))
+  for(auto const name : reset_flags_in(Traits::reset_flag_rows, kind))
   {
     if(not name.empty())
     {

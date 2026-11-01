@@ -763,6 +763,48 @@ TEST_CASE("RM0481 11.8.46: every reset kind leaves its own RCC_RSR flag, RMVF cl
   }
 }
 
+TEST_CASE("RM0481 11.8.46: every machine reset kind sets exactly its own RCC_RSR flags after RMVF")
+{
+  struct row
+  {
+    reset_kind                      kind;
+    std::array<std::string_view, 2> flags;
+  };
+  constexpr auto rows  = std::to_array<row>({
+      {reset_kind::power_on,        {"BORRSTF", "PINRSTF"}},
+      {reset_kind::brown_out,       {"BORRSTF", "PINRSTF"}},
+      {reset_kind::pin,             {"PINRSTF", {}}       },
+      {reset_kind::software,        {"SFTRSTF", {}}       },
+      {reset_kind::watchdog,        {"IWDGRSTF", {}}      },
+      {reset_kind::window_watchdog, {"WWDGRSTF", {}}      },
+      {reset_kind::low_power,       {"LPWRRSTF", {}}      },
+      {reset_kind::option_load,     {}                    },
+  });
+  constexpr auto names = std::to_array<std::string_view>(
+      {"BORRSTF", "PINRSTF", "SFTRSTF", "IWDGRSTF", "WWDGRSTF", "LPWRRSTF"});
+  for(auto const& [kind, flags] : rows)
+  {
+    CAPTURE(static_cast<int>(kind));
+    auto f = idle_fixture();
+    write(f, "RCC_RSR", peek(f, "RCC_RSR") | lsb_of("RCC_RSR", "RMVF"));
+    f.target->reset(kind);
+    for(auto const name : names)
+    {
+      CAPTURE(name);
+      CHECK(f.field("RCC", "RCC_RSR", name) == (name == flags[0] or name == flags[1] ? 1 : 0));
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0481 11.8.46: the RCC_RSR reset value holds the flags of the power_on row, BORRSTF and "
+    "PINRSTF")
+{
+  auto f = idle_fixture();
+  CHECK(f.field("RCC", "RCC_RSR", "BORRSTF") == 1);
+  CHECK(f.field("RCC", "RCC_RSR", "PINRSTF") == 1);
+}
+
 TEST_CASE("RM0481 11.8.1: the oscillator driving SYSCLK stays on, with no log record")
 {
   auto                          f = idle_fixture();

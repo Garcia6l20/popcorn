@@ -467,6 +467,46 @@ TEST_CASE("every machine reset kind leaves its own flag in RCC_CSR, a peripheral
   }
 }
 
+TEST_CASE("every machine reset kind sets exactly its own flags of RCC_CSR after RMVF")
+{
+  struct row
+  {
+    reset_kind                      kind;
+    std::array<std::string_view, 2> flags;
+  };
+  constexpr auto rows  = std::to_array<row>({
+      {reset_kind::power_on,        {"BORRSTF", "PINRSTF"}},
+      {reset_kind::brown_out,       {"BORRSTF", "PINRSTF"}},
+      {reset_kind::pin,             {"PINRSTF", {}}       },
+      {reset_kind::software,        {"SFTRSTF", {}}       },
+      {reset_kind::watchdog,        {"IWDGRSTF", {}}      },
+      {reset_kind::window_watchdog, {"WWDGRSTF", {}}      },
+      {reset_kind::low_power,       {"LPWRRSTF", {}}      },
+      {reset_kind::option_load,     {"OBLRSTF", {}}       },
+  });
+  constexpr auto names = std::to_array<std::string_view>(
+      {"BORRSTF", "PINRSTF", "SFTRSTF", "IWDGRSTF", "WWDGRSTF", "LPWRRSTF", "OBLRSTF"});
+  for(auto const& [kind, flags] : rows)
+  {
+    CAPTURE(static_cast<int>(kind));
+    auto f = idle_fixture();
+    write(f, "RCC_CSR", peek(f, "RCC_CSR") | bit_of("RCC_CSR", "RMVF"));
+    f.target->reset(kind);
+    for(auto const name : names)
+    {
+      CAPTURE(name);
+      CHECK(f.field("RCC", "RCC_CSR", name) == (name == flags[0] or name == flags[1] ? 1 : 0));
+    }
+  }
+}
+
+TEST_CASE("the RCC_CSR reset value holds the flags of the power_on row, BORRSTF and PINRSTF")
+{
+  auto f = idle_fixture();
+  CHECK(f.field("RCC", "RCC_CSR", "BORRSTF") == 1);
+  CHECK(f.field("RCC", "RCC_CSR", "PINRSTF") == 1);
+}
+
 TEST_CASE("HSE off then on inside the delay readies once, the stale event is ignored")
 {
   auto f = idle_fixture();
