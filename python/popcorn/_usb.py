@@ -48,7 +48,7 @@ import logging
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from popcorn import _core
 from popcorn._errors import ConfigError, EmulationError, ModelError, UsbError, UsbStall, UsbTimeout
@@ -638,28 +638,14 @@ class CdcStream:
         where = f"{self.name} CDC function {self.function}"
         if transfer == 0:
             raise UsbError(f"{where}: {label} with no CDC ACM driver bound", status="unbound")
-        self._pending.add(transfer)
-        results: list[_core.UsbTransferStatus] = []
-
-        def ended() -> bool:
-            if not results and transfer in self._pending:
-                status = self._link.take_result(transfer)
-                if status is not None:
-                    results.append(status)
-            return bool(results)
-
-        done_at = posted_at
-        try:
-            if not ended():
-                done_at = (await self._wait(self._link.predicate_ended(transfer), None, None)).time
-                ended()
-        finally:
-            self._pending.discard(transfer)
-            if not results:
-                self._link.forget(transfer)
-        if not results:
-            raise EmulationError(f"{where}: the run ended before {label} did")
-        status = results[0]
+        status, done_at = await _await_result(
+            self._link,
+            self._pending,
+            self._wait,
+            transfer,
+            posted_at,
+            f"{where}: the run ended before {label} did",
+        )
         if status is _core.UsbTransferStatus.completed:
             return done_at
         message = f"{where}: {label} ended {status.name}"
@@ -1006,29 +992,16 @@ class HidStream:
     ) -> tuple[_core.HidReplyRecord, VirtualTime]:
         if transfer == 0:
             raise UsbError(f"{self._where}: {label} with no HID driver bound", status="unbound")
-        self._pending.add(transfer)
-        results: list[_core.HidReplyRecord] = []
-
-        def ended() -> bool:
-            if not results and transfer in self._pending:
-                reply = self._link.take_result(transfer)
-                if reply is not None:
-                    results.append(reply)
-            return bool(results)
-
-        done_at = posted_at
-        try:
-            if not ended():
-                done_at = (await self._wait(self._link.predicate_ended(transfer), None, None)).time
-                ended()
-        finally:
-            self._pending.discard(transfer)
-            if not results:
-                self._link.forget(transfer)
-        if not results:
-            raise EmulationError(f"{self._where}: the run ended before {label} did")
-        _raise_for(results[0].status, f"{self._where}: {label}")
-        return results[0], done_at
+        result, done_at = await _await_result(
+            self._link,
+            self._pending,
+            self._wait,
+            transfer,
+            posted_at,
+            f"{self._where}: the run ended before {label} did",
+        )
+        _raise_for(result.status, f"{self._where}: {label}")
+        return result, done_at
 
     def __repr__(self) -> str:
         return f"HidStream({self.name}, {self.function})"
@@ -1208,28 +1181,15 @@ class UacStream:
             else:
                 status = "busy"
             raise UsbError(f"{self._where}: cannot start, {status}", status=status)
-        self._pending.add(operation)
-        results: list[_core.UsbTransferStatus] = []
-
-        def ended() -> bool:
-            if not results and operation in self._pending:
-                status = self._link.take_result(operation)
-                if status is not None:
-                    results.append(status)
-            return bool(results)
-
-        done_at = posted_at
-        try:
-            if not ended():
-                done_at = (await self._wait(self._link.predicate_ended(operation), None, None)).time
-                ended()
-        finally:
-            self._pending.discard(operation)
-            if not results:
-                self._link.forget(operation)
-        if not results:
-            raise EmulationError(f"{self._where}: the run ended before the start did")
-        _raise_for(results[0], f"{self._where}: start")
+        result, done_at = await _await_result(
+            self._link,
+            self._pending,
+            self._wait,
+            operation,
+            posted_at,
+            f"{self._where}: the run ended before the start did",
+        )
+        _raise_for(result, f"{self._where}: start")
         return done_at
 
     def stop(self, *, at: VirtualTime | None = None) -> Pending[VirtualTime]:
@@ -1632,32 +1592,57 @@ class UacFunction:
         if operation == 0:
             status = "refused" if self._link.bound() else "unbound"
             raise UsbError(f"{where} refused by the driver, {status}", status=status)
-        self._pending.add(operation)
-        results: list[_core.UsbTransferStatus] = []
-
-        def ended() -> bool:
-            if not results and operation in self._pending:
-                status = self._link.take_result(operation)
-                if status is not None:
-                    results.append(status)
-            return bool(results)
-
-        done_at = posted_at
-        try:
-            if not ended():
-                done_at = (await self._wait(self._link.predicate_ended(operation), None, None)).time
-                ended()
-        finally:
-            self._pending.discard(operation)
-            if not results:
-                self._link.forget(operation)
-        if not results:
-            raise EmulationError(f"{where}: the run ended before it did")
-        _raise_for(results[0], where)
+        result, done_at = await _await_result(
+            self._link,
+            self._pending,
+            self._wait,
+            operation,
+            posted_at,
+            f"{where}: the run ended before it did",
+        )
+        _raise_for(result, where)
         return done_at
 
     def __repr__(self) -> str:
         return f"UacFunction({self.name}, {self.function})"
+
+
+class _TransferLink[R](Protocol):
+    def take_result(self, operation: int, /) -> R | None: ...
+    def predicate_ended(self, operation: int, /) -> _core.Predicate: ...
+    def forget(self, operation: int, /) -> None: ...
+
+
+async def _await_result[R](
+    link: _TransferLink[R],
+    pending: set[int],
+    wait: Waiter,
+    operation: int,
+    posted_at: VirtualTime,
+    ended_text: str,
+) -> tuple[R, VirtualTime]:
+    pending.add(operation)
+    results: list[R] = []
+
+    def ended() -> bool:
+        if not results and operation in pending:
+            taken = link.take_result(operation)
+            if taken is not None:
+                results.append(taken)
+        return bool(results)
+
+    done_at = posted_at
+    try:
+        if not ended():
+            done_at = (await wait(link.predicate_ended(operation), None, None)).time
+            ended()
+    finally:
+        pending.discard(operation)
+        if not results:
+            link.forget(operation)
+    if not results:
+        raise EmulationError(ended_text)
+    return results[0], done_at
 
 
 def _raise_for(status: _core.UsbTransferStatus, label: str) -> None:

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from popcorn import _core
 from popcorn._enums import PinMode
 from popcorn._errors import ConfigError
+from popcorn._limits import MAX_PS
 from popcorn._rng import MAX_QUEUED, checked_int
 from popcorn.units import VirtualTime
 
@@ -43,8 +44,6 @@ type Poster = Callable[[_core.AccessOp], Pending[tuple[Any, VirtualTime]]]
 
 MAX_PIN_EDGES = 65536
 """Most edges one `Pin.drive_edges` call takes, and most edges a GPIO port keeps pending."""
-
-_MAX_PS = (1 << 64) - 1
 
 
 class ViewAccess:
@@ -684,7 +683,7 @@ class Pin:
                 raise TypeError(f"a pin edge time is a VirtualTime, not {at!r}")
             if not isinstance(cast(object, level), bool):
                 raise TypeError(f"a pin edge level is a bool, not {level!r}")
-            if not 0 <= at.ps <= _MAX_PS:
+            if not 0 <= at.ps <= MAX_PS:
                 raise ValueError(f"a pin edge at {at} leaves the 64-bit picosecond range")
             if times and at.ps < times[-1]:
                 raise ValueError(f"pin edges are sorted by time, {at} follows a later edge")

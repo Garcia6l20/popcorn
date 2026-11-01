@@ -1356,6 +1356,139 @@ def test_a_control_wait_ended_before_its_result_gives_the_result_up(
     assert host._link.take_results() == []  # pyright: ignore[reportPrivateUsage]
 
 
+class LinkSpy:
+    def __init__(self, link: Any) -> None:
+        self.link = link
+        self.forgotten: list[int] = []
+        self.taken: list[int] = []
+
+    def forget(self, operation: int) -> None:
+        self.forgotten.append(operation)
+        self.link.forget(operation)
+
+    def take_result(self, operation: int) -> Any:
+        self.taken.append(operation)
+        return self.link.take_result(operation)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.link, name)
+
+
+type RequestRig = tuple[popcorn.Machine, Any, Callable[[], Coroutine[Any, Any, VirtualTime]], str]
+
+
+def cdc_request(u575: popcorn.PartDescription) -> RequestRig:
+    m, host = configured(u575)
+    cdc = host.cdc()
+    return (
+        m,
+        cdc,
+        lambda: cdc.set_line_coding(9600),
+        "the run ended before SET_LINE_CODING 9600 8N1 did",
+    )
+
+
+def hid_request(u575: popcorn.PartDescription) -> RequestRig:
+    m, host = configured(u575)
+    hid = host.hid(0)
+    return (
+        m,
+        hid,
+        lambda: hid.set_feature(b"\x01\x02"),
+        "the run ended before SET_REPORT feature 1 did",
+    )
+
+
+def uac_start_request(u575: popcorn.PartDescription) -> RequestRig:
+    m = audio_machine(u575)
+    audio = m.periph.OTG_FS.host.audio()
+    asyncio.run(audio.wait_ready(for_=ms(200)))
+    return m, audio.mic, lambda: audio.mic.start(), "the run ended before the start did"
+
+
+def uac_set_request(u575: popcorn.PartDescription) -> RequestRig:
+    m = audio_machine(u575)
+    audio = m.periph.OTG_FS.host.audio()
+    asyncio.run(audio.wait_ready(for_=ms(200)))
+    return m, audio, lambda: audio.set_mute(2, 0, True), "the run ended before it did"
+
+
+REQUEST_RIGS = {
+    "cdc": cdc_request,
+    "hid": hid_request,
+    "uac-start": uac_start_request,
+    "uac-set": uac_set_request,
+}
+
+
+@pytest.mark.parametrize("kind", list(REQUEST_RIGS))
+def test_a_request_wait_ended_before_its_result_gives_the_request_up(
+    u575: popcorn.PartDescription, kind: str
+) -> None:
+    m, owner, call, text = REQUEST_RIGS[kind](u575)
+    spy = LinkSpy(owner._link)  # pyright: ignore[reportPrivateUsage]
+    owner._link = spy  # pyright: ignore[reportPrivateUsage]
+    now = m.time
+
+    async def idle(ready: Any, for_: Any, deadline: Any) -> Waited:
+        return Waited(now, None)
+
+    owner._wait = idle  # pyright: ignore[reportPrivateUsage]
+
+    async def scenario() -> None:
+        with pytest.raises(popcorn.EmulationError, match=re.escape(text)):
+            await call()
+        await m.run(for_=ms(20))
+
+    run_bounded(scenario(), HANG)
+    assert len(spy.forgotten) == 1
+    assert owner._pending == set()  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("kind", list(REQUEST_RIGS))
+def test_a_request_returns_the_time_its_wait_stopped_at(
+    u575: popcorn.PartDescription, kind: str
+) -> None:
+    m, owner, call, _ = REQUEST_RIGS[kind](u575)
+    wait = owner._wait  # pyright: ignore[reportPrivateUsage]
+    stops: list[VirtualTime] = []
+
+    async def recording(ready: Any, for_: Any, deadline: Any) -> Waited:
+        waited: Waited = await wait(ready, for_, deadline)
+        stops.append(waited.time)
+        return waited
+
+    owner._wait = recording  # pyright: ignore[reportPrivateUsage]
+    posted = m.time
+    done = run_bounded(call(), HANG)
+    assert stops
+    assert done == stops[-1] and done > posted
+    assert owner._pending == set()  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("kind", list(REQUEST_RIGS))
+def test_a_request_discarded_while_it_waits_takes_no_result_and_is_forgotten(
+    u575: popcorn.PartDescription, kind: str
+) -> None:
+    _, owner, call, text = REQUEST_RIGS[kind](u575)
+    spy = LinkSpy(owner._link)  # pyright: ignore[reportPrivateUsage]
+    owner._link = spy  # pyright: ignore[reportPrivateUsage]
+    wait = owner._wait  # pyright: ignore[reportPrivateUsage]
+
+    async def discarding(ready: Any, for_: Any, deadline: Any) -> Waited:
+        owner.discard()
+        return await wait(ready, for_, deadline)
+
+    owner._wait = discarding  # pyright: ignore[reportPrivateUsage]
+
+    async def scenario() -> None:
+        with pytest.raises(popcorn.EmulationError, match=re.escape(text)):
+            await call()
+
+    run_bounded(scenario(), HANG)
+    assert len(spy.forgotten) == 1
+
+
 class FailOnce(logging.Filter):
     """Raises on the first record it sees, passes the others."""
 

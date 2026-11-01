@@ -2983,11 +2983,7 @@ class SpiTap:
             )
             for record in records
         ]
-        if self._buffer and pulled and self._order(self._buffer[-1]) > self._order(pulled[0]):
-            merged = heapq.merge(self._buffer, pulled, key=self._order)
-            self._buffer = deque(merged, maxlen=_TAP_KEEP)
-        else:
-            self._buffer.extend(pulled)
+        self._buffer = _merged(self._buffer, pulled, self._order)
 
     def _order(self, frame: SpiTapFrame) -> tuple[int, int]:
         return frame.at.ps, self._ends.index(frame.slave)
@@ -3122,17 +3118,22 @@ class I2CTap:
             )
             for record in records
         ]
-        if self._buffer and pulled and self._order(self._buffer[-1]) > self._order(pulled[0]):
-            merged = heapq.merge(self._buffer, pulled, key=self._order)
-            self._buffer = deque(merged, maxlen=_TAP_KEEP)
-        else:
-            self._buffer.extend(pulled)
+        self._buffer = _merged(self._buffer, pulled, self._order)
 
     def _order(self, phase: I2CTapPhase) -> tuple[int, int]:
         return phase.at.ps, self._ends.index(phase.target)
 
     def __repr__(self) -> str:
         return f"I2CTap({self._ends[0]} -> {', '.join(self._ends[1:])})"
+
+
+def _merged[T](
+    buffer: deque[T], pulled: list[T], order: Callable[[T], tuple[int, int]]
+) -> deque[T]:
+    if buffer and pulled and order(buffer[-1]) > order(pulled[0]):
+        return deque(heapq.merge(buffer, pulled, key=order), maxlen=_TAP_KEEP)
+    buffer.extend(pulled)
+    return buffer
 
 
 def _end_error(error: ConfigError, key: str) -> ConfigError:

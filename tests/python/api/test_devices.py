@@ -446,6 +446,36 @@ def test_state_of_another_type_needs_its_own_snapshot(u575: popcorn.PartDescript
 
 
 @pytest.mark.parametrize(
+    ("bus", "make"),
+    [("I2C1", lambda: _StrSnapshotI2C(0x50)), ("SPI1", lambda: _StrSnapshotSpi())],
+    ids=["i2c", "spi"],
+)
+def test_a_snapshot_returning_no_bytes_is_a_model_error(
+    u575: popcorn.PartDescription, bus: str, make: Callable[[], I2CTarget | SpiTarget]
+) -> None:
+    m = popcorn.Machine(u575, devices={bus: [make()]})
+    with pytest.raises(ModelError, match=r"snapshot\(\) returned a str, not bytes"):
+        m.snapshot()
+
+
+class _StrSnapshotI2C(I2CTarget):
+    def snapshot(self) -> bytes:
+        return cast(bytes, "text")
+
+
+class _StrSnapshotSpi(SpiTarget):
+    def snapshot(self) -> bytes:
+        return cast(bytes, "text")
+
+
+def test_the_picosecond_bound_is_one_constant_for_every_checking_module() -> None:
+    from popcorn import _devices, _limits, _streams, _views
+
+    assert _limits.MAX_PS == (1 << 64) - 1
+    assert all(vars(module)["MAX_PS"] is _limits.MAX_PS for module in (_devices, _streams, _views))
+
+
+@pytest.mark.parametrize(
     ("peripheral", "device", "reason"),
     [
         ("RCC", lambda: I2CTarget(0x50), "an I2C or SPI peripheral"),
