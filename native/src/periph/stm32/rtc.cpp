@@ -3,6 +3,7 @@
 #include "gtzc.hpp"
 #include "model_base.hpp"
 #include "rtc_calendar.hpp"
+#include "rtc_core.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/periph/core_hold.hpp>
@@ -134,8 +135,13 @@ class rtc final : public dispatch_model<rtc, rtc_state>,
                   public clock_listener,
                   public backup_domain,
                   public core_hold_listener,
-                  public trustzone_aware
+                  public trustzone_aware,
+                  public rtc_core
 {
+  friend rtc_core;
+
+  static constexpr std::uint32_t wakeup_event = wakeup;
+
 public:
   rtc(model_context&                          ctx,
       peripheral_desc const&                  desc,
@@ -156,14 +162,26 @@ public:
   void on_clock_change() override;
   void backup_reset() override;
   void on_core_hold(bool held) override;
+  void time_written(std::uint32_t old, std::uint32_t now)
+  {
+    rtc_core::time_written(old, now);
+  }
+  void date_written(std::uint32_t old, std::uint32_t now)
+  {
+    rtc_core::date_written(old, now);
+  }
+  void prescaler_written(std::uint32_t old, std::uint32_t now)
+  {
+    rtc_core::prescaler_written(old, now);
+  }
+  void key_written(std::uint32_t old, std::uint32_t now)
+  {
+    rtc_core::key_written(old, now);
+  }
 
-  void               time_written(std::uint32_t old, std::uint32_t now);
-  void               date_written(std::uint32_t old, std::uint32_t now);
   void               status_written(std::uint32_t old, std::uint32_t now);
-  void               prescaler_written(std::uint32_t old, std::uint32_t now);
   void               wakeup_written(std::uint32_t old, std::uint32_t now);
   void               control_written(std::uint32_t old, std::uint32_t now);
-  void               key_written(std::uint32_t old, std::uint32_t now);
   void               calibration_written(std::uint32_t old, std::uint32_t now);
   void               shift_written(std::uint32_t old, std::uint32_t now);
   void               alarm_written(std::uint32_t old, std::uint32_t now);
@@ -174,17 +192,9 @@ public:
   [[nodiscard]] auto secure_word() const -> std::uint32_t override;
 
 private:
-  [[nodiscard]] auto now_ps() const -> std::uint64_t;
-  [[nodiscard]] auto unlocked() const -> bool;
-  [[nodiscard]] auto initializing() const -> bool;
-
   void clear_backup(register_file& regs, bool board_calendar);
   void restart_timers(std::uint64_t cycle);
-  void arm(event_kind kind, std::uint64_t cycle);
-  void plan_wakeup();
   void plan_alarm(std::size_t which);
-  void schedule(event_kind kind);
-  void schedule_all();
   void settle(std::uint64_t cycle);
   void warn_once(std::size_t index, std::string_view reg, std::string_view message);
   void unsupported();
@@ -325,42 +335,6 @@ rtc::rtc(
   }
 }
 
-auto rtc::now_ps() const -> std::uint64_t
-{
-  return state_.held != 0 ? state_.held_ps : ctx_.clock.since_power_on().ps;
-}
-
-auto rtc::unlocked() const -> bool
-{
-  return state_.unlock == 2;
-}
-
-auto rtc::initializing() const -> bool
-{
-  return get(regs_, init_flag_) != 0;
-}
-
-void rtc::arm(event_kind kind, std::uint64_t cycle)
-{
-  state_.armed[kind] = 1;
-  state_.due[kind]   = cycle;
-  schedule(kind);
-}
-
-void rtc::plan_wakeup()
-{
-  state_.armed[wakeup] = 0;
-  ++state_.generation[wakeup];
-  if(get(regs_, wakeup_enable_) == 0)
-  {
-    return;
-  }
-  if(auto const due = count_.wakeup_due(get(regs_, wakeup_clock_), get(regs_, wakeup_reload_)))
-  {
-    arm(wakeup, *due);
-  }
-}
-
 void rtc::plan_alarm(std::size_t which)
 {
   auto const kind    = static_cast<event_kind>(alarm_a + which);
@@ -375,27 +349,6 @@ void rtc::plan_alarm(std::size_t which)
          count_.next_alarm(alarms_[which].match, regs_.peek(alarms_[which].reg.offset), now_second))
   {
     arm(kind, count_.cycle_of(*next * count_.sync_ticks()));
-  }
-}
-
-void rtc::schedule(event_kind kind)
-{
-  auto const generation = ++state_.generation[kind];
-  if(state_.armed[kind] == 0 or state_.hz == 0 or state_.held != 0)
-  {
-    return;
-  }
-  auto const now    = now_ps();
-  auto const offset = now - ctx_.clock.time().ps;
-  auto const due    = std::max(count_.time_of(state_.due[kind]), now) - offset;
-  ctx_.events.schedule_at(vtime{due}, kind, generation, ctx_.clock);
-}
-
-void rtc::schedule_all()
-{
-  for(std::size_t kind = 0; kind < event_kinds; ++kind)
-  {
-    schedule(static_cast<event_kind>(kind));
   }
 }
 
@@ -641,85 +594,12 @@ void rtc::on_event(std::uint32_t kind, std::uint64_t payload)
 
 void rtc::on_core_hold(bool held)
 {
-  if(held)
-  {
-    auto const frozen = debug_frozen(freeze_logged_);
-    if(state_.held != 0)
-    {
-      if(not frozen)
-      {
-        on_core_hold(false);
-      }
-      return;
-    }
-    if(not frozen)
-    {
-      return;
-    }
-    auto const cycle = count_.cycle_at(now_ps());
-    for(auto fired = true; fired;)
-    {
-      fired = false;
-      for(std::uint32_t kind = 0; kind < event_kinds; ++kind)
-      {
-        if(state_.armed[kind] != 0 and state_.due[kind] <= cycle)
-        {
-          on_event(kind, state_.generation[kind]);
-          fired = true;
-        }
-      }
-    }
-    settle(cycle);
-    state_.held_ps = ctx_.clock.since_power_on().ps;
-    state_.held    = 1;
-    for(auto& value : state_.generation)
-    {
-      ++value;
-    }
-    return;
-  }
-  if(state_.held == 0)
-  {
-    return;
-  }
-  state_.anchor_ps += ctx_.clock.since_power_on().ps - state_.held_ps;
-  state_.held    = 0;
-  state_.held_ps = 0;
-  schedule_all();
-  settle(count_.cycle_at(now_ps()));
+  hold_core(held);
 }
 
 void rtc::on_clock_change()
 {
-  auto const hz = ctx_.clock.hz(domain_);
-  if(hz == state_.hz)
-  {
-    return;
-  }
-  auto const ps = now_ps();
-  count_.rebase(ps, hz);
-  schedule_all();
-  settle(count_.cycle_at(ps));
-}
-
-void rtc::time_written(std::uint32_t old, std::uint32_t now)
-{
-  if(not unlocked() or not initializing())
-  {
-    regs_.poke(time_.offset, old);
-    return;
-  }
-  count_.set_time(now);
-}
-
-void rtc::date_written(std::uint32_t old, std::uint32_t now)
-{
-  if(not unlocked() or not initializing())
-  {
-    regs_.poke(date_.offset, old);
-    return;
-  }
-  count_.set_date(now);
+  clock_changed();
 }
 
 void rtc::status_written(std::uint32_t old, std::uint32_t now)
@@ -766,14 +646,6 @@ void rtc::status_written(std::uint32_t old, std::uint32_t now)
     plan_wakeup();
     plan_alarm(0);
     plan_alarm(1);
-  }
-}
-
-void rtc::prescaler_written(std::uint32_t old, std::uint32_t)
-{
-  if(not unlocked() or not initializing())
-  {
-    regs_.poke(prediv_a_.offset, old);
   }
 }
 
@@ -826,24 +698,6 @@ void rtc::control_written(std::uint32_t old, std::uint32_t now)
   plan_wakeup();
   plan_alarm(0);
   plan_alarm(1);
-}
-
-void rtc::key_written(std::uint32_t, std::uint32_t now)
-{
-  regs_.poke(key_.offset, 0);
-  auto const key = now & 0xFFu;
-  if(key == first_key)
-  {
-    state_.unlock = 1;
-  }
-  else if(key == second_key and state_.unlock == 1)
-  {
-    state_.unlock = 2;
-  }
-  else
-  {
-    state_.unlock = 0;
-  }
 }
 
 void rtc::calibration_written(std::uint32_t old, std::uint32_t)

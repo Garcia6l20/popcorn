@@ -375,6 +375,14 @@ TEST_CASE(
   CHECK(r.read("TR") == 0x00'0001);
 }
 
+TEST_CASE("RM0038 20.3.5: a key write leaves the stored WPR word at zero")
+{
+  rig r;
+  r.start_clock();
+  r.write("WPR", 0xCA);
+  CHECK(r.f->target->peripheral("RTC").peek(r.reg("RTC", "WPR").offset) == 0);
+}
+
 TEST_CASE("RM0038 20.3.5: 0xCA then 0x53 unlocks, the reverse order or a wrong key locks")
 {
   rig r;
@@ -748,6 +756,22 @@ TEST_CASE("with DBG_RTC_STOP a held core stops the calendar until the release")
   r.f->target->hold_core(false);
   r.later(second);
   CHECK(r.read("TR") == 0x00'0001);
+}
+
+TEST_CASE("a reset of a held core after DBG_RTC_STOP is cleared releases the calendar")
+{
+  rig r;
+  r.start_clock();
+  r.later(ms);
+  popcorn::testing::set_debug_freeze(*r.f, "DBG_RTC_STOP", true);
+  r.f->target->hold_core(true);
+  r.later(2 * second);
+  CHECK(r.read("TR") == 0);
+  popcorn::testing::set_debug_freeze(*r.f, "DBG_RTC_STOP", false);
+  r.f->target->reset(reset_kind::software);
+  r.f->set("pc", sym(r.elf, "idle"));
+  r.later(2 * second);
+  CHECK(r.read("TR") == 0x00'0002);
 }
 
 TEST_CASE("Cat.1 has no DBG_RTC_STOP: a held core under strict leaves the calendar counting")
