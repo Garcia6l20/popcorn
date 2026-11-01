@@ -48,10 +48,7 @@ auto memory_view::read_filtered(address addr, std::span<std::byte> out) const
     {
       return std::unexpected(block_error{.error = value.error(), .at = at});
     }
-    for(std::size_t i = 0; i < size; ++i)
-    {
-      out[done + i] = static_cast<std::byte>(*value >> (8 * i));
-    }
+    scatter_le(out.subspan(done, size), *value);
     done += size;
   }
   return {};
@@ -70,12 +67,8 @@ auto memory_view::write_filtered(address addr, std::span<std::byte const> in) co
     {
       return std::unexpected(block_error{.error = bus_error::denied, .at = at});
     }
-    std::uint32_t value = 0;
-    for(std::size_t i = size; i-- > 0;)
-    {
-      value = value << 8 | std::to_integer<std::uint32_t>(in[done + i]);
-    }
-    if(auto const written = machine_->do_write(at, size, value, *attrs); not written)
+    if(auto const written = machine_->do_write(at, size, gather_le(in.subspan(done, size)), *attrs);
+       not written)
     {
       return std::unexpected(block_error{.error = written.error(), .at = at});
     }

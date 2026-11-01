@@ -1704,3 +1704,22 @@ TEST_CASE_TEMPLATE(
   REQUIRE(r.bus->services().write_block(sram1_secure_block, in, filtered).has_value());
   CHECK(words_at(r, sram1_secure_block, 1) == std::vector<std::uint32_t>{secret});
 }
+
+TEST_CASE_TEMPLATE(
+    "a Secure memory view moves unaligned block bytes in little-endian order",
+    P,
+    on_u575,
+    on_h573)
+{
+  rig const                      r{P{}, true};
+  auto                           view = r.target->mem(true);
+  std::array<std::byte, 7> const in{std::byte{0x11}, std::byte{0x22}, std::byte{0x33},
+                                    std::byte{0x44}, std::byte{0x55}, std::byte{0x66},
+                                    std::byte{0x77}};
+  REQUIRE(view.write_block(sram1_secure_block + 1, in).has_value());
+  CHECK(r.target->mem().read(sram1_secure_block, 4) == 0x3322'1100u);
+  CHECK(r.target->mem().read(sram1_secure_block + 4, 4) == 0x7766'5544u);
+  std::array<std::byte, 7> out{};
+  REQUIRE(view.read_block(sram1_secure_block + 1, out).has_value());
+  CHECK(out == in);
+}

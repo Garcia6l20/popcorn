@@ -427,6 +427,25 @@ void unmodelled_table::count(
  * a block start: a block of n instructions spans at most n times this. */
 inline constexpr address max_insn_bytes = 4;
 
+inline auto gather_le(std::span<std::byte const> from) noexcept -> std::uint32_t
+{
+  std::uint32_t value = 0;
+  for(auto const byte : from | std::views::reverse)
+  {
+    value = value << 8 | std::to_integer<std::uint32_t>(byte);
+  }
+  return value;
+}
+
+inline void scatter_le(std::span<std::byte> to, std::uint32_t value) noexcept
+{
+  for(auto& byte : to)
+  {
+    byte = static_cast<std::byte>(value & 0xff);
+    value >>= 8;
+  }
+}
+
 /** @brief Coverage counters of a machine, cumulative across restores. */
 struct coverage_state
 {

@@ -258,10 +258,7 @@ void machine::run_state::on_sink_access(
       seen = 0;
       if(auto const* const region = mapped_region::find(run.owner.memory_, at, bytes))
       {
-        for(auto const byte : std::span{region->host(at), bytes} | std::views::reverse)
-        {
-          seen = seen << 8 | std::to_integer<std::uint32_t>(byte);
-        }
+        seen = gather_le({region->host(at), bytes});
       }
     }
     auto const pc = run.arch->pc();
