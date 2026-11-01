@@ -6,11 +6,11 @@ import asyncio
 from pathlib import Path
 
 import popcorn
+from derived_data import model_json
 
 from .conftest import DRIVER_ELF, M33_JSON, ROOT, Machines
 from .examples import spec03
 
-MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
 MODEL_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "model.elf"
 
 
@@ -48,7 +48,7 @@ def test_section_6_board(board: popcorn.Machine) -> None:
 
 def test_section_7_model() -> None:
     m = popcorn.Machine(
-        popcorn.load_description(MODEL_JSON),
+        popcorn.load_description(model_json()),
         image=popcorn.Image.elf(MODEL_ELF),
         models={"TIMER": spec03.Counter},
     )

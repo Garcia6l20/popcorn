@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping
 
 import popcorn
 import pytest
+from derived_data import model_json
 from popcorn.model import Model
 
 from .conftest import ROOT
@@ -21,7 +22,6 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("POPCORN_BENCH") != "1", reason="set POPCORN_BENCH=1 on a quiet host"
 )
 
-MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
 MODEL_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "model.elf"
 READS = 200_000
 
@@ -29,7 +29,7 @@ READS = 200_000
 def seconds(models: Mapping[str, Callable[[], Model]]) -> float:
     """Wall time of READS guest reads of TIMER.CNT."""
     m = popcorn.Machine(
-        popcorn.load_description(MODEL_JSON), image=popcorn.Image.elf(MODEL_ELF), models=models
+        popcorn.load_description(model_json()), image=popcorn.Image.elf(MODEL_ELF), models=models
     )
     m.reset()
     asyncio.run(m.run(until=m.sym("ready"), budget=10_000))

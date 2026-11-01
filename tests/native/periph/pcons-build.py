@@ -5,7 +5,7 @@ from pcons import context
 from popcorn_build.config import project_dir
 from popcorn_build.firmware import firmware
 from popcorn_build.st_description import cached_st_description
-from popcorn_build.testing import add_doctest, popcorn_libraries
+from popcorn_build.testing import add_doctest, m33_variants, popcorn_libraries
 
 here = Path(__file__).resolve().parent
 project = context.current_project
@@ -59,9 +59,7 @@ test_shared_page = add_doctest(
     [here / "test_shared_page.cpp"],
     [test_support, core],
     env={
-        "POPCORN_M33_SHARED_DESC": str(
-            project_dir / "tests" / "data" / "core" / "m33_shared_page.json"
-        ),
+        "POPCORN_M33_SHARED_DESC": str(m33_variants()["m33_shared_page"]),
         "POPCORN_FW_PERIPH": str(periph_elf),
         **({"POPCORN_U575_DESC": str(u575)} if u575 is not None else {}),
     },

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import popcorn as popcorn
 import pytest
+from derived_data import model_json
 
 ROOT = Path(__file__).parents[3]
 M33_JSON = ROOT / "tests" / "data" / "core" / "m33.json"
@@ -22,7 +23,6 @@ CALLEE_ELF = PREBUILT / "callee.elf"
 FAULT_ELF = PREBUILT / "fault.elf"
 BOARD_ELF = PREBUILT / "board.elf"
 MODEL_ELF = PREBUILT / "model.elf"
-MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
 
 CONFTEST = 'pytest_plugins = ["popcorn.pytest"]\n'
 
@@ -142,7 +142,7 @@ def write_model_project(pytester: pytest.Pytester, extra: str = "") -> Path:
         pytester.path,
         "popcorn.MachineDescription(\n"
         '    part="POPCORN-M33-TEST",\n'
-        f"    description=Path({str(MODEL_JSON)!r}),\n"
+        f"    description=Path({str(model_json())!r}),\n"
         f"    images=[popcorn.Elf(Path({str(MODEL_ELF)!r}))],\n"
         '    boot=popcorn.Boot(until="ready", budget=10_000),\n'
         "    strict=False,\n"

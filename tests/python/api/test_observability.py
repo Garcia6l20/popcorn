@@ -10,6 +10,7 @@ from pathlib import Path
 
 import popcorn
 import pytest
+from derived_data import model_json
 from popcorn import _obs
 from popcorn._observe import collapsed
 from popcorn.coverage import Coverage, ImageKind
@@ -20,7 +21,6 @@ from .conftest import CORE_FIRMWARE, M33_JSON, ROOT, load_each, run_bounded
 from .models_example import Timer
 
 BRANCHES_ELF = CORE_FIRMWARE / "branches.elf"
-MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
 MODEL_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "model.elf"
 FAULT_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "fault.elf"
 
@@ -136,7 +136,7 @@ def test_a_trace_writes_blocks_to_a_file(tmp_path: Path) -> None:
 
 def modelled(name: str | None = None) -> popcorn.Machine:
     m = popcorn.Machine(
-        popcorn.load_description(MODEL_JSON),
+        popcorn.load_description(model_json()),
         image=popcorn.Image.elf(MODEL_ELF),
         models={"TIMER": Timer},
         name=name,

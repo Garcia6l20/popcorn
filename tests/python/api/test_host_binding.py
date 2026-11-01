@@ -20,6 +20,7 @@ from typing import Any
 
 import popcorn
 import pytest
+from derived_data import model_json
 from popcorn import _core
 from popcorn._hooks import Relay
 from popcorn._host import awaited
@@ -34,7 +35,7 @@ from popcorn.units import VirtualTime, s, us
 from .conftest import BOARD_ELF, DRIVER_ELF, M33_JSON, Machines, load_each_unforwarded, stalled
 from .devices_example import Eeprom24
 from .linked import USART_LL
-from .projects import MODEL_ELF, MODEL_JSON
+from .projects import MODEL_ELF
 
 VALUE: contextvars.ContextVar[str] = contextvars.ContextVar("host_binding_value", default="unset")
 HOLDER: contextvars.ContextVar[list[object]] = contextvars.ContextVar("host_binding_holder")
@@ -78,7 +79,7 @@ class Recorder(Model):
 
 def recorder_machine() -> tuple[popcorn.Machine, Recorder]:
     m = popcorn.Machine(
-        popcorn.load_description(MODEL_JSON),
+        popcorn.load_description(model_json()),
         image=popcorn.Image.elf(MODEL_ELF),
         models={"TIMER": Recorder},
     )
@@ -138,7 +139,7 @@ def timer_started_in_a_free_run() -> popcorn.Machine:
     """A machine of the model firmware with no Python model, parked to run `start_timer(10)`
     then return into the reset loop: its writes of TIMER.ARR and TIMER.CR, two unmodelled
     registers, log two records."""
-    m = popcorn.Machine(popcorn.load_description(MODEL_JSON), image=popcorn.Image.elf(MODEL_ELF))
+    m = popcorn.Machine(popcorn.load_description(model_json()), image=popcorn.Image.elf(MODEL_ELF))
     m.reset()
     asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
     m.reg.r0 = 10
@@ -274,7 +275,7 @@ def test_records_queued_before_a_rename_keep_the_old_name(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     m = popcorn.Machine(
-        popcorn.load_description(MODEL_JSON), image=popcorn.Image.elf(MODEL_ELF), name="old"
+        popcorn.load_description(model_json()), image=popcorn.Image.elf(MODEL_ELF), name="old"
     )
     m.reset()
     asyncio.run(m.run(until=m.sym("ready"), budget=10_000))
@@ -1243,7 +1244,7 @@ def test_a_wait_of_an_earlier_free_run_delivers_nothing_of_the_next(kind: str) -
     script = (
         STALE_WAIT.replace("__KIND__", repr(kind))
         .replace("__API__", repr(str(pathlib.Path(__file__).parent)))
-        .replace("__JSON__", repr(str(MODEL_JSON)))
+        .replace("__JSON__", repr(str(model_json())))
         .replace("__ELF__", repr(str(MODEL_ELF)))
     )
     child = run_child(script, timeout=CHILD_TIMEOUT)
@@ -1311,7 +1312,7 @@ print("ok")
 def test_an_end_a_wait_delivered_is_not_reported_after_a_boundary_stop_read_later() -> None:
     script = (
         TWO_WAITS.replace("__API__", repr(str(pathlib.Path(__file__).parent)))
-        .replace("__JSON__", repr(str(MODEL_JSON)))
+        .replace("__JSON__", repr(str(model_json())))
         .replace("__ELF__", repr(str(MODEL_ELF)))
     )
     child = run_child(script, timeout=CHILD_TIMEOUT)
@@ -1321,7 +1322,7 @@ def test_an_end_a_wait_delivered_is_not_reported_after_a_boundary_stop_read_late
 
 def model_machine() -> popcorn.Machine:
     m = popcorn.Machine(
-        popcorn.load_description(MODEL_JSON),
+        popcorn.load_description(model_json()),
         image=popcorn.Image.elf(MODEL_ELF),
         models={"TIMER": Recorder},
     )
@@ -1452,7 +1453,7 @@ def counted_machine() -> popcorn.Machine:
     def build() -> popcorn.Machine:
         VALUE.set("at construction")
         m = popcorn.Machine(
-            popcorn.load_description(MODEL_JSON),
+            popcorn.load_description(model_json()),
             image=popcorn.Image.elf(MODEL_ELF),
             models={"TIMER": Counted},
         )
@@ -1672,7 +1673,7 @@ def free_run_script(shape: str, rounds: int) -> str:
     return (
         FREE_RUN.replace("__API__", repr(str(pathlib.Path(__file__).parent)))
         .replace("__SHAPE__", repr(shape))
-        .replace("__JSON__", repr(str(MODEL_JSON)))
+        .replace("__JSON__", repr(str(model_json())))
         .replace("__ELF__", repr(str(MODEL_ELF)))
         .replace("__ROUNDS__", str(rounds))
     )
@@ -1730,7 +1731,7 @@ def test_an_interpreter_exits_with_a_free_running_machine_held_by_its_model() ->
         from models_example import Timer
 
         m = popcorn.Machine(
-            popcorn.load_description({str(MODEL_JSON)!r}),
+            popcorn.load_description({str(model_json())!r}),
             image=popcorn.Image.elf({str(MODEL_ELF)!r}),
             models=dict(TIMER=Timer),
         )

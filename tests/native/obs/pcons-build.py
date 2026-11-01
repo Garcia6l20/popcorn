@@ -4,7 +4,7 @@ from pcons import context
 
 from popcorn_build.config import build_dir, project_dir
 from popcorn_build.firmware import firmware
-from popcorn_build.testing import add_doctest, alias_bare_name
+from popcorn_build.testing import add_doctest, alias_bare_name, m33_variants
 
 project = context.current_project
 here = Path(__file__).resolve().parent
@@ -37,7 +37,7 @@ test_tb_ranges = add_doctest(
     [obs_static, test_support_static, core_static],
     env={
         "POPCORN_M33_DESC": str(core_data / "m33.json"),
-        "POPCORN_M33_CODE_ALIAS_DESC": str(core_data / "m33_code_alias.json"),
+        "POPCORN_M33_CODE_ALIAS_DESC": str(m33_variants()["m33_code_alias"]),
         **{f"POPCORN_FW_{name.upper()}": str(elf) for (_, name), (elf, _) in tb_firmware.items()},
     },
 )

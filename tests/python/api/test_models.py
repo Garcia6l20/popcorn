@@ -16,12 +16,13 @@ from pathlib import Path
 
 import popcorn
 import pytest
+from derived_data import model_json
 from popcorn.model import IrqLine, Model, on_read, on_write
 from popcorn.units import VirtualTime, ms, us
 
 from .conftest import run_bounded
 from .models_example import Eeprom, Timer
-from .projects import MODEL_ELF, MODEL_JSON, Plain, model_project
+from .projects import MODEL_ELF, Plain, model_project
 from .projects import Eeprom as FakeEeprom
 from .projects import Timer as FakeTimer
 
@@ -31,7 +32,7 @@ def machine(
 ) -> popcorn.Machine:
     """A machine over the model firmware, booted to `ready` with interrupts enabled."""
     m = popcorn.Machine(
-        popcorn.load_description(MODEL_JSON),
+        popcorn.load_description(model_json()),
         image=popcorn.Image.elf(MODEL_ELF),
         models=models,
         strict_peripherals=strict_peripherals,
@@ -756,7 +757,7 @@ def test_a_model_error_inside_running_raises_at_the_next_wait(failing: type[Time
 
 
 def test_a_model_answers_to_the_aliases_of_its_registers(tmp_path: Path) -> None:
-    data = json.loads(MODEL_JSON.read_text(encoding="utf-8"))
+    data = json.loads(model_json().read_text(encoding="utf-8"))
     timer = next(p for p in data["peripherals"] if p["name"] == "TIMER")
     for register in timer["registers"]:
         register["aliases"] = [f"TIMER_{register['name']}"]
@@ -793,7 +794,7 @@ def test_a_model_answers_to_the_aliases_of_its_registers(tmp_path: Path) -> None
 
 
 def test_a_model_error_names_the_register_an_alias_reached(tmp_path: Path) -> None:
-    data = json.loads(MODEL_JSON.read_text(encoding="utf-8"))
+    data = json.loads(model_json().read_text(encoding="utf-8"))
     timer = next(p for p in data["peripherals"] if p["name"] == "TIMER")
     for register in timer["registers"]:
         register["aliases"] = [f"TIMER_{register['name']}"]

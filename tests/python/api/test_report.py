@@ -11,6 +11,7 @@ from typing import cast
 
 import popcorn
 import pytest
+from derived_data import model_json
 from popcorn import _core
 from popcorn._unwind import (
     MAX_FRAMES,
@@ -250,7 +251,7 @@ class CountingTimer(Timer):
 
 def test_a_report_never_reads_a_peripheral() -> None:
     m = popcorn.Machine(
-        popcorn.load_description(ROOT / "tests" / "data" / "api" / "model.json"),
+        popcorn.load_description(model_json()),
         image=popcorn.Image.elf(ROOT / "tests" / "firmware" / "api" / "prebuilt" / "model.elf"),
         models={"TIMER": CountingTimer},
     )

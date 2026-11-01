@@ -26,6 +26,7 @@ from typing import NoReturn, cast
 
 import popcorn
 import pytest
+from derived_data import model_json
 from popcorn import _core
 from popcorn._host import awaited
 from popcorn.trace import TraceKind
@@ -45,7 +46,7 @@ from .conftest import (
     stalled_until_posted,
 )
 from .models_example import Timer
-from .projects import MODEL_ELF, MODEL_JSON
+from .projects import MODEL_ELF
 
 HANG = 10.0
 
@@ -459,7 +460,7 @@ def test_a_machine_with_a_python_model_runs_under_a_loop_that_yields_for_real() 
     """Its model needs the GIL on the machine's thread: a loop spinning on `asyncio.sleep(0)`
     can starve it, one sleeping 1 ms between turns lets it run."""
     m = popcorn.Machine(
-        popcorn.load_description(MODEL_JSON),
+        popcorn.load_description(model_json()),
         image=popcorn.Image.elf(MODEL_ELF),
         models={"TIMER": Timer},
     )
