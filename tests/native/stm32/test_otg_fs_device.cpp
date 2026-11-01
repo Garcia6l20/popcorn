@@ -500,7 +500,10 @@ TEST_CASE("an EP0 IN of 18 bytes NAKs until the FIFO holds them, then completes"
   r.enumerate();
   REQUIRE(r.port().setup(0, get_device_descriptor, r.now()) == usb::handshake::ack);
   r.start_in0(18);
-  CHECK(r.port().in(0, 0, r.now()).hs == usb::handshake::nak);
+  auto const refusal = r.port().in(0, 0, r.now());
+  CHECK(refusal.hs == usb::handshake::nak);
+  CHECK(refusal.pid == usb::data_pid::data0);
+  CHECK(refusal.data.empty());
   std::array<std::uint8_t, 18> descriptor{};
   for(std::size_t index = 0; index < descriptor.size(); ++index)
   {
@@ -977,7 +980,10 @@ TEST_CASE("a STALLed bulk IN answers STALL, clear stall with SD0PID restarts at 
   r.push("DFIFO1", bytes);
   REQUIRE(r.port().in(0, 1, r.now()).pid == usb::data_pid::data0);
   r.write("DIEPCTL1", r.read("DIEPCTL1") | r.mask("DIEPCTL1", "STALL"));
-  CHECK(r.port().in(0, 1, r.now()).hs == usb::handshake::stall);
+  auto const refusal = r.port().in(0, 1, r.now());
+  CHECK(refusal.hs == usb::handshake::stall);
+  CHECK(refusal.pid == usb::data_pid::data0);
+  CHECK(refusal.data.empty());
   r.write(
       "DIEPCTL1",
       (r.read("DIEPCTL1") & ~r.mask("DIEPCTL1", "STALL")) | r.mask("DIEPCTL1", "SD0PID_SEVNFRM"));

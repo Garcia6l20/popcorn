@@ -1,5 +1,7 @@
 #include <popcorn/periph/usb_hid.hpp>
 
+#include "descriptors.hpp"
+
 #include <reflex/enum.hpp>
 #include <reflex/serde/bson.hpp>
 
@@ -37,18 +39,12 @@ constexpr std::size_t   max_stage              = 0xffff;
 auto find_descriptor(std::span<std::uint8_t const> extra, std::uint8_t type)
     -> std::optional<std::span<std::uint8_t const>>
 {
-  for(std::size_t at = 0; at + 2 <= extra.size();)
+  for(auto const descriptor : descriptors(extra))
   {
-    auto const length = std::size_t{extra[at]};
-    if(length < 2 or at + length > extra.size())
+    if(descriptor[1] == type)
     {
-      break;
+      return descriptor;
     }
-    if(extra[at + 1] == type)
-    {
-      return extra.subspan(at, length);
-    }
-    at += length;
   }
   return std::nullopt;
 }

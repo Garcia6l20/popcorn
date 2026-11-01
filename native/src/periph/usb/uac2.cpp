@@ -1,5 +1,7 @@
 #include <popcorn/periph/usb_uac2.hpp>
 
+#include "descriptors.hpp"
+
 #include <reflex/serde/bson.hpp>
 
 #include <algorithm>
@@ -108,14 +110,9 @@ struct entity
 auto entities_of(std::span<std::uint8_t const> extra) -> std::map<std::uint8_t, entity>
 {
   std::map<std::uint8_t, entity> found;
-  for(std::size_t at = 0; at + 2 <= extra.size();)
+  for(auto const descriptor : descriptors(extra))
   {
-    auto const length = std::size_t{extra[at]};
-    if(length < 2 or at + length > extra.size())
-    {
-      break;
-    }
-    auto const descriptor = extra.subspan(at, length);
+    auto const length = descriptor.size();
     if(descriptor[1] == cs_interface and length >= 4 and descriptor[2] >= input_terminal)
     {
       found.try_emplace(
@@ -124,7 +121,6 @@ auto entities_of(std::span<std::uint8_t const> extra) -> std::map<std::uint8_t, 
               .subtype = descriptor[2], .bytes = {descriptor.begin(), descriptor.end()}
       });
     }
-    at += length;
   }
   return found;
 }
@@ -132,22 +128,17 @@ auto entities_of(std::span<std::uint8_t const> extra) -> std::map<std::uint8_t, 
 auto find_descriptor(std::span<std::uint8_t const> extra, std::uint8_t subtype, std::size_t minimum)
     -> std::optional<std::span<std::uint8_t const>>
 {
-  for(std::size_t at = 0; at + 2 <= extra.size();)
+  for(auto const descriptor : descriptors(extra))
   {
-    auto const length = std::size_t{extra[at]};
-    if(length < 2 or at + length > extra.size())
-    {
-      break;
-    }
-    if(extra[at + 1] == cs_interface and length >= 3 and extra[at + 2] == subtype)
+    auto const length = descriptor.size();
+    if(descriptor[1] == cs_interface and length >= 3 and descriptor[2] == subtype)
     {
       if(length < minimum)
       {
         return std::nullopt;
       }
-      return extra.subspan(at, length);
+      return descriptor;
     }
-    at += length;
   }
   return std::nullopt;
 }
@@ -155,22 +146,14 @@ auto find_descriptor(std::span<std::uint8_t const> extra, std::uint8_t subtype, 
 auto output_terminals(std::span<std::uint8_t const> extra) -> std::vector<std::vector<std::uint8_t>>
 {
   std::vector<std::vector<std::uint8_t>> found;
-  for(std::size_t at = 0; at + 2 <= extra.size();)
+  for(auto const descriptor : descriptors(extra))
   {
-    auto const length = std::size_t{extra[at]};
-    if(length < 2 or at + length > extra.size())
+    if(descriptor[1] == cs_interface
+       and descriptor.size() >= output_length
+       and descriptor[2] == output_terminal)
     {
-      break;
+      found.emplace_back(descriptor.begin(), descriptor.end());
     }
-    if(extra[at + 1] == cs_interface
-       and length >= output_length
-       and extra[at + 2] == output_terminal)
-    {
-      found.emplace_back(
-          extra.begin() + static_cast<std::ptrdiff_t>(at),
-          extra.begin() + static_cast<std::ptrdiff_t>(at + length));
-    }
-    at += length;
   }
   return found;
 }

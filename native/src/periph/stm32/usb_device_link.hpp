@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../usb/timing.hpp"
 #include "model_base.hpp"
 
 #include <popcorn/periph/stm32/board.hpp>
@@ -258,6 +259,12 @@ private:
   std::shared_ptr<usb::host>      board_host_;
   bool                            plugged_at_power_on_{};
 };
+
+/** @brief The answer of a device that refuses a token with @p hs and sends no data. */
+[[nodiscard]] inline auto refused(usb::handshake hs) -> usb::in_result
+{
+  return {.hs = hs, .pid = usb::data_pid::data0, .data = {}};
+}
 
 /**
  * @brief The factory of a USB device controller model, given the board's host options for its

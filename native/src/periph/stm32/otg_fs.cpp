@@ -35,7 +35,6 @@ constexpr std::uint32_t host_wake        = 2;
 constexpr std::uint32_t idle_suspend     = 3;
 constexpr std::uint64_t ps_per_us        = 1'000'000;
 constexpr std::uint64_t enumeration_ps   = 10 * ps_per_us;
-constexpr std::uint64_t frame_ps         = 1000 * ps_per_us;
 constexpr std::uint32_t all_tx_fifos     = 0x10;
 constexpr std::uint32_t full_speed_48mhz = 3;
 constexpr std::uint32_t endpoint_stride  = 0x20;
@@ -170,11 +169,6 @@ struct out_fields
 [[nodiscard]] auto words_for(std::size_t bytes) -> std::size_t
 {
   return (bytes + 3) / 4;
-}
-
-[[nodiscard]] auto refused(usb::handshake hs) -> usb::in_result
-{
-  return {.hs = hs, .pid = usb::data_pid::data0, .data = {}};
 }
 
 [[nodiscard]] auto pack(std::span<std::uint8_t const> bytes) -> std::vector<std::uint32_t>
@@ -1290,7 +1284,9 @@ void otg_fs::start_of_frame(std::uint16_t frame, vtime at)
   }
   update(regs_, frame_number_, frame);
   update(regs_, start_of_frame_, 1);
-  schedule(periodic_end, at.ps + frame_ps * periodic_percent[get(regs_, periodic_interval_)] / 100);
+  schedule(
+      periodic_end,
+      at.ps + usb::usb_frame_ps * periodic_percent[get(regs_, periodic_interval_)] / 100);
   refresh();
 }
 

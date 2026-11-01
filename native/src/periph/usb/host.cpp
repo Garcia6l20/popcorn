@@ -1,5 +1,7 @@
 #include <popcorn/periph/usb_host.hpp>
 
+#include "timing.hpp"
+
 #include <reflex/enum.hpp>
 #include <reflex/serde/bson.hpp>
 
@@ -27,7 +29,6 @@ class_driver::~class_driver() = default;
 namespace
 {
 constexpr std::uint64_t ps_per_ns           = 1000;
-constexpr std::uint64_t frame_ps            = 1'000'000'000;
 constexpr std::uint64_t sof_ps              = 3'000'000;
 constexpr std::uint64_t non_iso_overhead_ps = 9'107'000;
 constexpr std::uint64_t iso_in_overhead_ps  = 7'268'000;
@@ -1017,6 +1018,19 @@ struct host::impl
     return {.time = time};
   }
 
+  auto handshake_outcome(handshake hs, transfer_state& transfer, std::uint64_t time) -> outcome
+  {
+    if(hs == handshake::nak)
+    {
+      return {.time = time};
+    }
+    if(hs == handshake::stall)
+    {
+      return {.time = time, .progress = true, .done = transfer_status::stalled};
+    }
+    return no_answer(transfer, time);
+  }
+
   auto control_transaction(pipe_state& pipe, std::uint64_t at) -> outcome
   {
     auto& transfer = pipe.queue.front();
@@ -1064,10 +1078,7 @@ struct host::impl
           auto const time   = bus_time(transfer_type::control, true, answer.data.size());
           if(answer.hs != handshake::ack)
           {
-            return answer.hs == handshake::nak ? outcome{.time = time}
-                 : answer.hs == handshake::stall
-                     ? outcome{.time = time, .progress = true, .done = transfer_status::stalled}
-                     : no_answer(transfer, time);
+            return handshake_outcome(answer.hs, transfer, time);
           }
           transfer.errors = 0;
           if(answer.pid != pipe.toggle)
@@ -1100,10 +1111,7 @@ struct host::impl
               vtime{at});
           if(hs != handshake::ack)
           {
-            return hs == handshake::nak ? outcome{.time = time}
-                 : hs == handshake::stall
-                     ? outcome{.time = time, .progress = true, .done = transfer_status::stalled}
-                     : no_answer(transfer, time);
+            return handshake_outcome(hs, transfer, time);
           }
           transfer.errors = 0;
           transfer.offset += static_cast<std::uint32_t>(chunk);
@@ -1164,10 +1172,7 @@ struct host::impl
       }
       if(answer.hs != handshake::ack)
       {
-        return answer.hs == handshake::nak ? outcome{.time = time}
-             : answer.hs == handshake::stall
-                 ? outcome{.time = time, .progress = true, .done = transfer_status::stalled}
-                 : no_answer(transfer, time);
+        return handshake_outcome(answer.hs, transfer, time);
       }
       transfer.errors = 0;
       if(answer.pid != pipe.toggle)
@@ -1207,10 +1212,7 @@ struct host::impl
         vtime{at});
     if(hs != handshake::ack)
     {
-      return hs == handshake::nak ? outcome{.time = time}
-           : hs == handshake::stall
-               ? outcome{.time = time, .progress = true, .done = transfer_status::stalled}
-               : no_answer(transfer, time);
+      return handshake_outcome(hs, transfer, time);
     }
     transfer.errors = 0;
     pipe.toggle     = flip(pipe.toggle);
@@ -1326,7 +1328,7 @@ struct host::impl
   void run_frame(std::uint64_t at)
   {
     ++s.frame_index;
-    s.next_frame = at + frame_ps;
+    s.next_frame = at + usb_frame_ps;
     s.nak_streak = 0;
     port.start_of_frame(frame_number(), vtime{at});
     check_timeout(at);
@@ -1342,7 +1344,7 @@ struct host::impl
       }
     }
     auto       cursor = at + sof_ps;
-    auto const limit  = at + frame_ps * options.periodic_percent / 100;
+    auto const limit  = at + usb_frame_ps * options.periodic_percent / 100;
     for(auto const type : {transfer_type::isochronous, transfer_type::interrupt})
     {
       std::vector<pipe_id> ids{};
