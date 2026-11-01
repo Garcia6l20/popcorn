@@ -1937,10 +1937,9 @@ def test_a_finish_failing_after_a_handler_error_chains_both(machines: Machines) 
     assert str(context) == "the handler failed"
 
 
-def test_a_finish_failing_after_a_cancel_is_reported_and_the_task_sees_the_cancel(
-    machines: Machines, monkeypatch: pytest.MonkeyPatch
+def finish_failing_after_a_cancel(
+    m: popcorn.Machine, monkeypatch: pytest.MonkeyPatch, *, forced: bool
 ) -> None:
-    m = machines()
     reported: list[BaseException | None] = []
 
     def report(raised: sys.UnraisableHookArgs) -> None:
@@ -1956,16 +1955,23 @@ def test_a_finish_failing_after_a_cancel_is_reported_and_the_task_sees_the_cance
         return call.proceed()
 
     m.intercept("alu_mark", blocking, once=True)
+    done: list[bool] = []
 
     async def scenario() -> None:
-        future = m._handle.failing_finish_goal(10_000_000)  # pyright: ignore[reportPrivateUsage]
+        future = m._handle.failing_finish_goal(1 << 40)  # pyright: ignore[reportPrivateUsage]
         task = asyncio.create_task(awaited(future, lambda raw: raw))
+        await asyncio.sleep(0)
+        if forced:
+            assert entered.wait(5)
         while not entered.is_set():
             await asyncio.sleep(0.001)
         task.cancel()
         released.set()
+        if forced:
+            time.sleep(0.05)
         with pytest.raises(asyncio.CancelledError):
             await task
+        done.append(future.done())
 
     asyncio.run(scenario())
     assert len(reported) == 1
@@ -1973,6 +1979,20 @@ def test_a_finish_failing_after_a_cancel_is_reported_and_the_task_sees_the_cance
     assert isinstance(raised, popcorn.PopcornError)
     assert "finish failed" in str(raised)
     assert isinstance(raised.__context__, asyncio.CancelledError)
+    if forced:
+        assert done == [True]
+
+
+def test_a_finish_failing_after_a_cancel_is_reported_and_the_task_sees_the_cancel(
+    machines: Machines, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    finish_failing_after_a_cancel(machines(), monkeypatch, forced=False)
+
+
+def test_a_finish_failing_after_a_cancel_is_reported_when_the_hook_and_the_stall_come_first(
+    machines: Machines, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    finish_failing_after_a_cancel(machines(), monkeypatch, forced=True)
 
 
 def test_a_late_command_failure_is_reported_without_the_gil_on_the_machine_thread(
