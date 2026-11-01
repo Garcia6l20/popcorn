@@ -507,7 +507,7 @@ struct host_core
       {
         if(not plan.mail.empty())
         {
-          serve_mail(*slot, plan.mail);
+          run_posted(*slot, plan.mail);
         }
         if(plan.cancel or plan.halt)
         {
@@ -723,12 +723,14 @@ struct host_core
     }
   }
 
-  void serve_mail(member_slot& slot, std::deque<command>& mail)
+  /** @brief Runs each posted body as the engine owner, clears @p batch, then settles each promise
+   *        outside the owner scope. */
+  template <typename Posted> void run_posted(member_slot& slot, Posted& batch)
   {
     std::vector<std::pair<host_promise<vtime>, std::expected<vtime, std::exception_ptr>>> results;
     {
       owner_scope const owning{this};
-      for(auto& posted : mail)
+      for(auto& posted : batch)
       {
         auto const at = slot.engine->virtual_clock().time();
         try
@@ -742,7 +744,7 @@ struct host_core
         }
       }
     }
-    mail.clear();
+    batch.clear();
     for(auto& [promise, outcome] : results)
     {
       if(outcome)
@@ -764,7 +766,7 @@ struct host_core
       auto batch = std::exchange(slot.mail, {});
       auto fresh = std::exchange(slot.incoming, {});
       lock.unlock();
-      serve_mail(slot, batch);
+      run_posted(slot, batch);
       accept_incoming(slot, std::move(fresh));
       apply_due(slot);
       lock.lock();
@@ -911,35 +913,7 @@ struct host_core
     {
       return;
     }
-    std::vector<std::pair<host_promise<vtime>, std::expected<vtime, std::exception_ptr>>> results;
-    {
-      owner_scope const owning{this};
-      for(auto& posted : due)
-      {
-        auto const at = slot.engine->virtual_clock().time();
-        try
-        {
-          posted.body(*slot.engine);
-          results.emplace_back(posted.promise, at);
-        }
-        catch(...)
-        {
-          results.emplace_back(posted.promise, std::unexpected{std::current_exception()});
-        }
-      }
-    }
-    due.clear();
-    for(auto& [promise, outcome] : results)
-    {
-      if(outcome)
-      {
-        promise.set(*outcome);
-      }
-      else
-      {
-        promise.fail(std::move(outcome).error());
-      }
-    }
+    run_posted(slot, due);
   }
 
   auto next_stamp(member_slot const& slot) -> std::optional<vtime>
