@@ -380,11 +380,8 @@ private:
   [[nodiscard]] auto power_on_offset() const -> std::uint64_t;
   [[nodiscard]] auto wire_frame(std::uint32_t value) const -> std::uint32_t;
   [[nodiscard]] auto bus_mode() const -> std::uint8_t;
-  void               check_mode(std::optional<std::uint8_t> declared, auto const& who);
-  void               check_device(std::size_t index);
   void               rethrow_refused();
 
-  void               subscribe();
   void               start_frame(std::uint64_t from_ps);
   void               finish_frame();
   void               land_frame();
@@ -419,12 +416,10 @@ private:
   void               link_ss_changed(bool was, vtime at);
 
   register_file&                               regs_;
-  std::vector<spi_attachment>                  attachments_;
   std::shared_ptr<spi_controller_sink>         controller_;
   std::vector<spi_link_attachment>             links_;
   std::shared_ptr<spi_link_controller>         link_controller_;
-  std::vector<subscription>                    subscriptions_;
-  bool                                         subscribed_{};
+  spi_attachments<spi_state>                   attachments_;
   bool                                         limited_;
   bool                                         counted_;
   std::size_t                                  fifo_bytes_;
@@ -511,7 +506,7 @@ spi::spi(
     std::shared_ptr<spi_controller_sink> controller,
     spi_variant                          variant)
     : dispatch_model{ctx, desc, "SPI", spi_writes}, regs_{ctx.regs},
-      attachments_{std::move(attachments)}, controller_{std::move(controller)},
+      controller_{std::move(controller)}, attachments_{state_, std::move(attachments)},
       limited_{std::ranges::contains(variant.limited, std::string_view{desc.name})},
       counted_{not limited_ or variant.limited_counter}, fifo_bytes_{limited_ ? 8u : 16u},
       status_{reg("SPI_SR")}, clear_{reg("SPI_IFCR")}, transmit_{reg("SPI_TXDR")},
@@ -687,26 +682,6 @@ auto spi::bus_mode() const -> std::uint8_t
   return static_cast<std::uint8_t>(get(regs_, polarity_) << 1 | get(regs_, phase_));
 }
 
-void spi::check_mode(std::optional<std::uint8_t> declared, auto const& who)
-{
-  if(declared and *declared != bus_mode())
-  {
-    mismatched_.push_back(std::format("the SPI mode {} {} declares", *declared, who()));
-  }
-}
-
-void spi::check_device(std::size_t index)
-{
-  if(std::exchange(state_.mode_checked[index], 1) != 0)
-  {
-    return;
-  }
-  auto const& attached = attachments_[index];
-  check_mode(attached.device->mode(), [&] {
-    return std::format("the device on {}", spi_pin_name(attached));
-  });
-}
-
 void spi::rethrow_refused()
 {
   if(mismatched_.empty())
@@ -748,43 +723,6 @@ auto spi::frame_ps() -> std::uint64_t
     warn("SPI_CFG1", "the SPI kernel clock is stopped: no frame is transferred");
   }
   return ps;
-}
-
-void spi::subscribe()
-{
-  if(std::exchange(subscribed_, true))
-  {
-    return;
-  }
-  for(std::size_t index = 0; index < attachments_.size(); ++index)
-  {
-    auto const& attached = attachments_[index];
-    if(not attached.cs_pin)
-    {
-      continue;
-    }
-    auto* const port = dynamic_cast<gpio_port*>(ctx_.peers.find(attached.cs_port));
-    if(port == nullptr)
-    {
-      throw config_error(
-          ctx_.part.part, 0, std::format("board.spi.{}.cs_port", desc_.name),
-          std::format("a GPIO port the chip select of a {} device names", desc_.name));
-    }
-    subscriptions_.push_back(port->on_change([this, index](std::uint8_t pin, bool level) {
-      auto const& at = attachments_[index];
-      if(pin != *at.cs_pin or index >= state_.selected.size())
-      {
-        return;
-      }
-      auto const selected = level ? 0 : 1;
-      if(state_.selected[index] != selected)
-      {
-        state_.selected[index]     = static_cast<std::uint8_t>(selected);
-        state_.mode_checked[index] = 0;
-        at.device->select(selected != 0, ctx_.clock.since_power_on());
-      }
-    }));
-  }
 }
 
 void spi::hardware_select(bool selected)
@@ -864,7 +802,7 @@ void spi::restore_reset_values(std::optional<reset_kind> kind)
     }
   }
   link_ss_changed(ss_was, ctx_.clock.since_power_on());
-  subscribe();
+  attachments_.subscribe(ctx_, desc_.name);
   tx_dma_.resolve();
   rx_dma_.resolve();
   flags();
@@ -953,7 +891,7 @@ void spi::finish_frame()
   {
     if(state_.selected[index] != 0)
     {
-      check_device(index);
+      attachments_.check_device(index, bus_mode(), mismatched_);
       auto const reply = attachments_[index].device->exchange_deferred(
           out, static_cast<std::uint8_t>(frame_bits()), at, state_.generation);
       if(reply)
@@ -1363,64 +1301,23 @@ auto spi::transfer(
         ctx_.part.part, 0, std::format("devices.{}", desc_.name),
         "an SPI controller attached to the instance");
   }
-  if(frame_ps == 0 or bits < 4 or bits > 32 or frames.empty() or frames.size() > max_frames)
-  {
-    throw std::invalid_argument(
-        "an SPI transfer has 1 to 4096 frames of 4 to 32 bits, each at least 1 ps long");
-  }
-  if(std::ranges::any_of(
-         frames, [&](std::uint32_t frame) { return (frame & ~spi_mask(bits)) != 0; }))
-  {
-    throw std::invalid_argument(std::format("an SPI frame of {} bits is below 2**{}", bits, bits));
-  }
-  auto const now = ctx_.clock.time().ps;
-  if(start.ps < now)
-  {
-    throw std::invalid_argument(
-        std::format(
-            "an SPI transfer at {} ps starts before the machine time {} ps", start.ps, now));
-  }
-  if(state_.port.level != 0 or std::ranges::any_of(state_.port.entries, [](auto const& entry) {
-       return entry.kind != port_dropped;
-     }))
-  {
-    throw std::invalid_argument(
-        "an SPI transfer waits until the port entries ran and the chip select is released");
-  }
-  auto queued = std::size_t{};
-  auto from   = start.ps;
-  for(auto const& queued_transfer : state_.host)
-  {
-    queued += queued_transfer.frames.size();
-    from = std::max(
-        from, queued_transfer.start_ps + queued_transfer.frames.size() * queued_transfer.frame_ps);
-  }
-  if(queued + frames.size() > max_frames)
-  {
-    throw config_error(
-        ctx_.part.part, 0, std::format("devices.{}", desc_.name),
-        std::format(
-            "at most {} SPI frames queued, {} are and the transfer adds {}", max_frames, queued,
-            frames.size()));
-  }
-  auto constexpr last = std::numeric_limits<std::uint64_t>::max();
-  if(frame_ps > (last - from) / frames.size())
-  {
-    throw std::invalid_argument("an SPI transfer ends within the 64-bit picosecond range");
-  }
   auto const idle = state_.host.empty();
-  state_.host.push_back({
-      .start_ps = from,
-      .frame_ps = frame_ps,
-      .bits     = bits,
-      .frames   = {frames.begin(), frames.end()}
-  });
+  auto const from = queue_host_transfer(
+      state_.host, ctx_.part.part, desc_.name, ctx_.clock.time().ps, start, frame_ps, bits, frames,
+      [&] {
+        if(state_.port.level != 0
+           or std::ranges::any_of(
+               state_.port.entries, [](auto const& entry) { return entry.kind != port_dropped; }))
+        {
+          throw std::invalid_argument(
+              "an SPI transfer waits until the port entries ran and the chip select is released");
+        }
+      });
   if(idle)
   {
-    ctx_.events.schedule_at(
-        vtime{from}, host_edge, state_.host_generation, core::host_lane, ctx_.clock);
+    ctx_.events.schedule_at(from, host_edge, state_.host_generation, core::host_lane, ctx_.clock);
   }
-  return vtime{from};
+  return from;
 }
 
 void spi::complete(std::uint64_t ticket, std::uint32_t word, vtime at, std::uint32_t lane)
@@ -1973,7 +1870,7 @@ void spi::begin_host_frame()
   state_.host_taking = 1;
   if(std::exchange(state_.host_mode_checked, 1) == 0)
   {
-    check_mode(controller_->mode(), [] { return "the controller"; });
+    spi_check_mode(mismatched_, bus_mode(), controller_->mode(), [] { return "the controller"; });
   }
   auto const comm = communication();
   if(comm == simplex_rx)
@@ -2095,11 +1992,7 @@ void spi::host_edge_reached()
 void spi::save(std::vector<std::byte>& out) const
 {
   auto copy = state_;
-  copy.devices.clear();
-  for(auto const& attached : attachments_)
-  {
-    attached.device->save(copy.devices.emplace_back());
-  }
+  attachments_.save_devices(copy.devices);
   reflex::serde::bson::serializer{out}.dump(copy);
 }
 
@@ -2114,14 +2007,7 @@ void spi::load(std::span<std::byte const> in)
         "transfers");
   }
   state_ = std::move(loaded);
-  for(std::size_t index = 0; index < attachments_.size() and index < state_.devices.size(); ++index)
-  {
-    attachments_[index].device->load(state_.devices[index]);
-  }
-  state_.devices.clear();
-  state_.selected.resize(attachments_.size());
-  state_.mode_checked.resize(attachments_.size());
-  subscribe();
+  attachments_.load_devices(ctx_, desc_.name);
 }
 }
 

@@ -3135,6 +3135,19 @@ TEST_CASE("port primitives need a controller and refuse to mix with a queued tra
       == b.now() + us);
 }
 
+TEST_CASE("a transfer behind pending port entries is refused for them before its end is checked")
+{
+  port_rig r;
+  bus      b{*r.f};
+  target(b, 7, 0);
+  r.select(b.now(), 1);
+  CHECK_THROWS_WITH_AS(
+      r.port().transfer(
+          vtime{b.now() + us}, ~std::uint64_t{} >> 1, 8, std::vector<std::uint32_t>{1, 2, 3, 4}),
+      "an SPI transfer waits until the port entries ran and the chip select is released",
+      std::invalid_argument);
+}
+
 TEST_CASE(
     "a port frame end fires after a local event of the same count, its start posted either side")
 {

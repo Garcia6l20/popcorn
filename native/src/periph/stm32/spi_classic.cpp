@@ -212,11 +212,8 @@ private:
   [[nodiscard]] auto power_on_offset() const -> std::uint64_t;
   [[nodiscard]] auto bus_mode() const -> std::uint8_t;
   [[nodiscard]] auto crc_step(std::uint32_t crc, std::uint32_t frame) const -> std::uint32_t;
-  void               check_mode(std::optional<std::uint8_t> declared, auto const& who);
-  void               check_device(std::size_t index);
   void               rethrow_refused();
   [[noreturn]] void  refuse_unit(std::string_view primitive) const;
-  void               subscribe();
   void               hardware_select(bool selected);
   void               start_frame(std::uint64_t from_ps);
   void               finish_frame();
@@ -230,10 +227,8 @@ private:
   [[nodiscard]] auto host_selects() const -> bool;
 
   register_file&                       regs_;
-  std::vector<spi_attachment>          attachments_;
   std::shared_ptr<spi_controller_sink> controller_;
-  std::vector<subscription>            subscriptions_;
-  bool                                 subscribed_{};
+  spi_attachments<spi_classic_state>   attachments_;
   reg_ref                              control_;
   reg_ref                              status_;
   reg_ref                              data_;
@@ -297,7 +292,7 @@ spi_classic::spi_classic(
     std::shared_ptr<spi_controller_sink> controller,
     spi_classic_variant const&           variant)
     : dispatch_model{ctx, desc, "SPI", spi_classic_writes}, regs_{ctx.regs},
-      attachments_{std::move(attachments)}, controller_{std::move(controller)},
+      controller_{std::move(controller)}, attachments_{state_, std::move(attachments)},
       control_{reg("CR1")}, status_{reg("SR")}, data_{reg("DR")}, tx_crc_{reg("TXCRCR")},
       rx_crc_{reg("RXCRCR")}, phase_{field("CR1", "CPHA")}, polarity_{field("CR1", "CPOL")},
       master_{field("CR1", "MSTR")}, baud_{field("CR1", "BR")}, enable_{field("CR1", "SPE")},
@@ -379,26 +374,6 @@ auto spi_classic::crc_step(std::uint32_t crc, std::uint32_t frame) const -> std:
   return crc;
 }
 
-void spi_classic::check_mode(std::optional<std::uint8_t> declared, auto const& who)
-{
-  if(declared and *declared != bus_mode())
-  {
-    mismatched_.push_back(std::format("the SPI mode {} {} declares", *declared, who()));
-  }
-}
-
-void spi_classic::check_device(std::size_t index)
-{
-  if(std::exchange(state_.mode_checked[index], 1) != 0)
-  {
-    return;
-  }
-  auto const& attached = attachments_[index];
-  check_mode(attached.device->mode(), [&] {
-    return std::format("the device on {}", spi_pin_name(attached));
-  });
-}
-
 void spi_classic::rethrow_refused()
 {
   auto const joined = [](std::vector<std::string> const& names) {
@@ -449,43 +424,6 @@ auto spi_classic::frame_ps() -> std::uint64_t
     return 0;
   }
   return std::uint64_t{frame_bits()} * (2u << get(regs_, baud_)) * ps_per_second / hz;
-}
-
-void spi_classic::subscribe()
-{
-  if(std::exchange(subscribed_, true))
-  {
-    return;
-  }
-  for(std::size_t index = 0; index < attachments_.size(); ++index)
-  {
-    auto const& attached = attachments_[index];
-    if(not attached.cs_pin)
-    {
-      continue;
-    }
-    auto* const port = dynamic_cast<gpio_port*>(ctx_.peers.find(attached.cs_port));
-    if(port == nullptr)
-    {
-      throw config_error(
-          ctx_.part.part, 0, std::format("board.spi.{}.cs_port", desc_.name),
-          std::format("a GPIO port the chip select of a {} device names", desc_.name));
-    }
-    subscriptions_.push_back(port->on_change([this, index](std::uint8_t pin, bool level) {
-      auto const& at = attachments_[index];
-      if(pin != *at.cs_pin or index >= state_.selected.size())
-      {
-        return;
-      }
-      auto const selected = level ? 0 : 1;
-      if(state_.selected[index] != selected)
-      {
-        state_.selected[index]     = static_cast<std::uint8_t>(selected);
-        state_.mode_checked[index] = 0;
-        at.device->select(selected != 0, ctx_.clock.since_power_on());
-      }
-    }));
-  }
 }
 
 void spi_classic::hardware_select(bool selected)
@@ -541,7 +479,7 @@ void spi_classic::restore_reset_values(std::optional<reset_kind> kind)
     }
   }
   hardware_select(false);
-  subscribe();
+  attachments_.subscribe(ctx_, desc_.name);
   tx_dma_.resolve();
   rx_dma_.resolve();
   flags();
@@ -621,7 +559,7 @@ void spi_classic::finish_frame()
   {
     if(state_.selected[index] != 0)
     {
-      check_device(index);
+      attachments_.check_device(index, bus_mode(), mismatched_);
       auto const reply = attachments_[index].device->exchange_deferred(
           out, static_cast<std::uint8_t>(frame_bits()), at, state_.generation);
       if(reply)
@@ -985,7 +923,7 @@ void spi_classic::begin_host_frame()
   state_.host_taking = 1;
   if(std::exchange(state_.host_mode_checked, 1) == 0)
   {
-    check_mode(controller_->mode(), [] { return "the controller"; });
+    spi_check_mode(mismatched_, bus_mode(), controller_->mode(), [] { return "the controller"; });
   }
   if(state_.crc_pending != 0)
   {
@@ -1094,25 +1032,14 @@ void spi_classic::host_edge_reached()
 void spi_classic::save(std::vector<std::byte>& out) const
 {
   auto copy = state_;
-  copy.devices.clear();
-  for(auto const& attached : attachments_)
-  {
-    attached.device->save(copy.devices.emplace_back());
-  }
+  attachments_.save_devices(copy.devices);
   reflex::serde::bson::serializer{out}.dump(copy);
 }
 
 void spi_classic::load(std::span<std::byte const> in)
 {
   state_ = reflex::serde::bson::deserializer{in}.template load<spi_classic_state>();
-  for(std::size_t index = 0; index < attachments_.size() and index < state_.devices.size(); ++index)
-  {
-    attachments_[index].device->load(state_.devices[index]);
-  }
-  state_.devices.clear();
-  state_.selected.resize(attachments_.size());
-  state_.mode_checked.resize(attachments_.size());
-  subscribe();
+  attachments_.load_devices(ctx_, desc_.name);
 }
 }
 
