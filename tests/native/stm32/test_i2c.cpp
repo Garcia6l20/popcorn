@@ -3556,6 +3556,73 @@ TEST_CASE("a STOP queued during a byte stretch runs at the release, after the by
   }
 }
 
+auto last_port_due(stm32_fixture const& f) -> std::uint64_t
+{
+  auto const events = port_due(f);
+  REQUIRE(not events.empty());
+  return std::ranges::max(events, {}, &core::event::seq).due_ps;
+}
+
+TEST_CASE("a phase posted in the past behind an ending, held or released phase starts at its end")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    {
+      target_rig r{part};
+      r.listen();
+      auto const base = r.now() + us;
+      r.start(own, false, base, 1);
+      r.run_until(base + target_ps / 2);
+      r.write(0x11, base, 2);
+      CHECK(last_port_due(*r.f) == base + target_ps);
+      r.run_until(base + 2 * target_ps + us);
+      CHECK(
+          r.sink->answers
+          == std::vector<heard>{
+              {1, on_address, true, 0xFF, base + target_ps    },
+              {2, on_write,   true, 0xFF, base + 2 * target_ps}
+      });
+    }
+    for(bool const released : {false, true})
+    {
+      CAPTURE(released);
+      target_rig r{part};
+      auto const b = r.b();
+      r.listen();
+      auto const base = r.now() + us;
+      r.start(own, false, base, 1);
+      r.write(0x11, base, 2);
+      r.write(0x22, base, 3);
+      r.run_until(base + 3 * target_ps + 20 * us);
+      REQUIRE(r.sink->answers.size() == 2);
+      auto const read_at = r.now();
+      if(released)
+      {
+        CHECK(b.receive() == 0x11);
+      }
+      r.write(0x33, base, 4);
+      CHECK(last_port_due(*r.f) == (released ? read_at : base + 3 * target_ps));
+    }
+  }
+}
+
+TEST_CASE("a phase posted after an RCC reset that ended before it is due at the reset")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const t = r.now() + us;
+    r.run_until(t + 3 * target_ps);
+    auto const reset_ps = r.now();
+    r.rcc_pulse();
+    r.start(own, false, t, 1);
+    CHECK(last_port_due(*r.f) == reset_ps);
+  }
+}
+
 TEST_CASE("PE clear releases an ADDR stretch with ACK and a byte stretch with NACK")
 {
   for(auto const& part : target_parts)

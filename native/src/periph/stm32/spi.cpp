@@ -3,6 +3,7 @@
 #include "model_base.hpp"
 #include "spi_bus.hpp"
 #include "spi_link_port.hpp"
+#include "target_port.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
@@ -83,41 +84,26 @@ struct spi_port
   friend auto operator==(spi_port const&, spi_port const&) -> bool = default;
 };
 
+}
+
+template <> struct port_traits<spi_port_entry>
+{
+  static constexpr auto         span    = &spi_port_entry::frame_ps;
+  static constexpr std::uint8_t stop    = port_deselect;
+  static constexpr std::uint8_t running = port_frame;
+  static constexpr auto         ends_at_due(std::uint8_t kind) -> bool
+  {
+    return kind == port_ending;
+  }
+  static constexpr std::string_view protocol = "SPI";
+};
+
+namespace
+{
 auto frame_start(std::span<spi_port_entry const> entries, std::uint64_t posted, std::uint64_t unit)
     -> std::uint64_t
 {
-  auto const earlier = [unit](spi_port_entry const& entry) { return entry.unit < unit; };
-  auto       ahead   = entries | std::views::filter(earlier);
-  auto const below   = std::ranges::fold_left(
-      ahead | std::views::filter([](auto const& entry) {
-        return entry.kind == port_deselect;
-      }) | std::views::transform([](auto const& entry) { return entry.unit; }),
-      std::uint64_t{}, [](std::uint64_t one, std::uint64_t other) { return std::max(one, other); });
-  auto start = posted;
-  for(auto const& entry : ahead)
-  {
-    if(entry.kind == port_deselect)
-    {
-      start = std::max(start, entry.posted_ps);
-    }
-    else if(entry.unit < below)
-    {
-      continue;
-    }
-    else if(entry.kind == port_frame)
-    {
-      start = std::max(start, entry.due_ps + entry.frame_ps);
-    }
-    else if(entry.kind == port_ending)
-    {
-      start = std::max(start, entry.due_ps);
-    }
-    else if(entry.wire_end_ps)
-    {
-      start = std::max(start, *entry.wire_end_ps);
-    }
-  }
-  return start;
+  return entry_start(entries, posted, unit);
 }
 
 struct spi_state
@@ -416,7 +402,6 @@ private:
   [[nodiscard]] auto port_due_ps(vtime at, std::uint32_t lane, std::uint64_t unit) const
       -> std::uint64_t;
   [[nodiscard]] auto after_model_reset(std::uint64_t due_ps) const -> std::uint64_t;
-  [[nodiscard]] auto count_of(std::uint64_t due_ps) const -> icount;
   void               queue_port(spi_port_entry entry);
   void               schedule_port(spi_port_entry const& entry);
   void               rearm_port(
@@ -1460,28 +1445,7 @@ void spi::complete(std::uint64_t ticket, std::uint32_t word, vtime at, std::uint
 
 auto spi::port_due_ps(vtime at, std::uint32_t lane, std::uint64_t unit) const -> std::uint64_t
 {
-  if(not controller_)
-  {
-    throw config_error(
-        ctx_.part.part, 0, std::format("devices.{}", desc_.name),
-        "an SPI controller attached to the instance");
-  }
-  if(state_.port.entries.size() >= max_frames)
-  {
-    throw config_error(
-        ctx_.part.part, 0, std::format("devices.{}", desc_.name),
-        std::format("at most {} SPI port entries queued", max_frames));
-  }
-  if(lane == 0)
-  {
-    throw std::invalid_argument("an SPI port entry goes on a lane of 1 and up");
-  }
-  if(unit <= state_.port.last_unit)
-  {
-    throw std::invalid_argument(
-        std::format(
-            "an SPI port unit {} is not above the last unit {}", unit, state_.port.last_unit));
-  }
+  check_port_entry(ctx_, desc_.name, controller_ != nullptr, state_.port, max_frames, lane, unit);
   if(not state_.host.empty())
   {
     throw std::invalid_argument("an SPI port entry waits until the queued transfers are done");
@@ -1489,25 +1453,14 @@ auto spi::port_due_ps(vtime at, std::uint32_t lane, std::uint64_t unit) const ->
   return at.ps;
 }
 
-auto spi::count_of(std::uint64_t due_ps) const -> icount
-{
-  auto const& time  = ctx_.clock;
-  auto const  count = time.to_icount(vtime{std::max(due_ps, time.epoch_time().ps)});
-  return count.value < time.now().value ? count : time.now();
-}
-
 void spi::schedule_port(spi_port_entry const& entry)
 {
-  ctx_.events.schedule_at(
-      vtime{entry.due_ps}, port_due, std::uint64_t{state_.port.generation} << 32 | entry.lane,
-      entry.lane, ctx_.clock);
+  stm32::schedule_port(ctx_, port_due, state_.port, entry);
 }
 
 void spi::queue_port(spi_port_entry entry)
 {
-  state_.port.last_unit = entry.unit;
-  state_.port.entries.push_back(entry);
-  schedule_port(entry);
+  stm32::queue_port(ctx_, port_due, state_.port, entry);
 }
 
 auto spi::after_model_reset(std::uint64_t due_ps) const -> std::uint64_t
@@ -1645,25 +1598,9 @@ void spi::run_port(std::uint32_t lane)
   auto const now = ctx_.clock.time().ps;
   for(;;)
   {
-    auto&                      entries = state_.port.entries;
-    std::optional<std::size_t> pick;
-    auto                       pick_count = icount{};
-    for(std::size_t index = 0; index < entries.size(); ++index)
-    {
-      auto const& entry = entries[index];
-      if(entry.lane > lane or entry.due_ps > now)
-      {
-        continue;
-      }
-      auto const count = count_of(entry.due_ps);
-      if(not pick
-         or count.value < pick_count.value
-         or (count.value == pick_count.value and entry.unit < entries[*pick].unit))
-      {
-        pick       = index;
-        pick_count = count;
-      }
-    }
+    auto&      entries = state_.port.entries;
+    auto const pick    = next_due<spi_port_entry>(
+        entries, lane, now, ctx_.clock, [](spi_port_entry const&) { return false; });
     if(not pick)
     {
       return;

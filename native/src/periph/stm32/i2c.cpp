@@ -3,6 +3,7 @@
 #include "i2c_link_port.hpp"
 #include "i2c_port_queue.hpp"
 #include "model_base.hpp"
+#include "target_port.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
@@ -18,7 +19,6 @@
 #include <exception>
 #include <expected>
 #include <format>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <ranges>
@@ -530,7 +530,6 @@ private:
       std::uint64_t unit,
       bool          ack = false);
   [[nodiscard]] auto after_model_reset(std::uint64_t due_ps) const -> std::uint64_t;
-  [[nodiscard]] auto count_of(std::uint64_t due_ps) const -> icount;
   void               queue_port(i2c_port_entry entry);
   void               schedule_port(i2c_port_entry const& entry);
   void               rearm_port(i2c_port port, std::optional<reset_kind> kind);
@@ -1738,28 +1737,7 @@ void i2c::trigger_written(std::uint32_t, std::uint32_t)
 
 void i2c::port_check(std::uint32_t lane, std::uint64_t unit) const
 {
-  if(not controller_)
-  {
-    throw config_error(
-        ctx_.part.part, 0, std::format("devices.{}", desc_.name),
-        "an I2C controller attached to the instance");
-  }
-  if(state_.port.entries.size() >= max_entries)
-  {
-    throw config_error(
-        ctx_.part.part, 0, std::format("devices.{}", desc_.name),
-        std::format("at most {} I2C port entries queued", max_entries));
-  }
-  if(lane == 0)
-  {
-    throw std::invalid_argument("an I2C port entry goes on a lane of 1 and up");
-  }
-  if(unit <= state_.port.last_unit)
-  {
-    throw std::invalid_argument(
-        std::format(
-            "an I2C port unit {} is not above the last unit {}", unit, state_.port.last_unit));
-  }
+  check_port_entry(ctx_, desc_.name, controller_ != nullptr, state_.port, max_entries, lane, unit);
 }
 
 auto i2c::after_model_reset(std::uint64_t due_ps) const -> std::uint64_t
@@ -1767,25 +1745,14 @@ auto i2c::after_model_reset(std::uint64_t due_ps) const -> std::uint64_t
   return std::max(due_ps, state_.port.reset_ps.value_or(0));
 }
 
-auto i2c::count_of(std::uint64_t due_ps) const -> icount
-{
-  auto const& time  = ctx_.clock;
-  auto const  count = time.to_icount(vtime{std::max(due_ps, time.epoch_time().ps)});
-  return count.value < time.now().value ? count : time.now();
-}
-
 void i2c::schedule_port(i2c_port_entry const& entry)
 {
-  ctx_.events.schedule_at(
-      vtime{entry.due_ps}, port_due, std::uint64_t{state_.port.generation} << 32 | entry.lane,
-      entry.lane, ctx_.clock);
+  stm32::schedule_port(ctx_, port_due, state_.port, entry);
 }
 
 void i2c::queue_port(i2c_port_entry entry)
 {
-  state_.port.last_unit = entry.unit;
-  state_.port.entries.push_back(entry);
-  schedule_port(entry);
+  stm32::queue_port(ctx_, port_due, state_.port, entry);
 }
 
 void i2c::queue_phase(
@@ -1798,29 +1765,16 @@ void i2c::queue_phase(
     bool          ack)
 {
   port_check(lane, unit);
-  if(phase_ps == 0)
-  {
-    throw std::invalid_argument("an I2C port phase lasts at least 1 ps");
-  }
-  auto const start = phase_start(state_.port.entries, at.ps, unit);
-  if(phase_ps > std::numeric_limits<std::uint64_t>::max() - start)
-  {
-    throw std::invalid_argument("an I2C port phase ends within the 64-bit picosecond range");
-  }
-  auto const end        = start + phase_ps;
-  auto const last_reset = state_.port.reset_ps;
-  auto const dropped    = last_reset and start <= *last_reset;
-  queue_port(
-      {.due_ps      = dropped ? std::max(*last_reset, end) : start,
-       .unit        = unit,
-       .phase_ps    = phase_ps,
-       .posted_ps   = at.ps,
-       .wire_end_ps = dropped and not link_controller_ ? std::optional{end} : std::nullopt,
-       .lane        = lane,
-       .kind        = dropped ? entry_dropped : entry_phase,
-       .phase       = static_cast<std::uint8_t>(phase),
-       .data        = data,
-       .ack         = static_cast<std::uint8_t>(ack ? 1 : 0)});
+  queue_port(placed_phase(
+      state_.port,
+      {.unit      = unit,
+       .phase_ps  = phase_ps,
+       .posted_ps = at.ps,
+       .lane      = lane,
+       .phase     = static_cast<std::uint8_t>(phase),
+       .data      = data,
+       .ack       = static_cast<std::uint8_t>(ack ? 1 : 0)},
+      link_controller_ != nullptr));
 }
 
 void i2c::start(
@@ -1897,29 +1851,15 @@ void i2c::run_port(std::uint32_t lane)
   auto const now = ctx_.clock.time().ps;
   for(;;)
   {
-    auto&                      entries = state_.port.entries;
-    auto const                 holding = held_unit(entries);
-    std::optional<std::size_t> pick;
-    auto                       pick_count = icount{};
-    for(std::size_t index = 0; index < entries.size(); ++index)
-    {
-      auto const& entry   = entries[index];
-      auto const  waiting = holding
-                        and entry.unit > *holding
-                        and (entry.kind == entry_phase or entry.kind == entry_stop);
-      if(entry.lane > lane or entry.due_ps > now or entry.kind == entry_held or waiting)
-      {
-        continue;
-      }
-      auto const count = count_of(entry.due_ps);
-      if(not pick
-         or count.value < pick_count.value
-         or (count.value == pick_count.value and entry.unit < entries[*pick].unit))
-      {
-        pick       = index;
-        pick_count = count;
-      }
-    }
+    auto&      entries = state_.port.entries;
+    auto const holding = held_unit(entries);
+    auto const pick =
+        next_due<i2c_port_entry>(entries, lane, now, ctx_.clock, [&](auto const& entry) {
+          return entry.kind == entry_held
+              or (holding
+                  and entry.unit > *holding
+                  and (entry.kind == entry_phase or entry.kind == entry_stop));
+        });
     if(not pick)
     {
       return;
