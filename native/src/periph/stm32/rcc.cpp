@@ -19,7 +19,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -37,14 +36,6 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-auto lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(
-      out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return out;
-}
-
 template <typename Traits>
 inline constexpr std::size_t source_count = role_count<typename Traits::source>;
 

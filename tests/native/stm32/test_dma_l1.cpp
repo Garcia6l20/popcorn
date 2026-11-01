@@ -22,6 +22,7 @@
 #include <expected>
 #include <map>
 #include <memory>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -976,6 +977,54 @@ TEST_CASE(
   CHECK(copied(f, 2) == std::vector<std::uint32_t>{source_word(0), source_word(1)});
   CHECK(usart.last_but_ones.size() == 1);
   CHECK(spi.last_but_ones.size() == 1);
+}
+
+TEST_CASE("RM0038 11.3.7: every requester among the last 40 peers is told")
+{
+  std::set<std::string, std::less<>> const core_units{
+      "DMA1", "DMA2", "EXTI", "RCC", "PWR", "SYSCFG", "RI", "DBGMCU", "USB", "USB_SRAM", "FLASH"};
+  names_by_unit by_unit;
+  for(auto const& unit : std::span{l152re().peripherals}.last(40))
+  {
+    if(not core_units.contains(unit.name))
+    {
+      by_unit[unit.name] = {"usart1_tx_dma"};
+    }
+  }
+  auto const f = parked(l152re(), firmware, with_requesters(l152re(), by_unit));
+  fill(f, 2);
+  program(f, dma1, 4, word_sizes | minc | pinc | en, from, to, 2);
+  std::vector<requester*> probes;
+  for(auto const& unit : std::span{l152re().peripherals}.last(40))
+  {
+    if(auto* const found = f.model_of<requester>(unit.name))
+    {
+      found->set("usart1_tx_dma", true);
+      probes.push_back(found);
+    }
+  }
+  REQUIRE(probes.size() > 1);
+  idle_to(f, now_ps(f) + 3 * latency_ps);
+  for(auto* const found : probes)
+  {
+    CHECK(found->acks == std::vector<std::string>{"usart1_tx_dma"});
+  }
+}
+
+TEST_CASE("RM0038 11.3.7: a requester in the first peer slot is told")
+{
+  auto const& first = l152re().peripherals.front().name;
+  REQUIRE(first != "DMA1");
+  REQUIRE(first != "DMA2");
+  names_by_unit by_unit;
+  by_unit[first] = {"usart1_tx_dma"};
+  auto const f   = parked(l152re(), firmware, with_requesters(l152re(), by_unit));
+  fill(f, 2);
+  program(f, dma1, 4, word_sizes | minc | pinc | en, from, to, 2);
+  auto& probe = peer(f, first);
+  probe.set("usart1_tx_dma", true);
+  idle_to(f, now_ps(f) + 3 * latency_ps);
+  CHECK(probe.acks == std::vector<std::string>{"usart1_tx_dma"});
 }
 
 TEST_CASE(

@@ -314,8 +314,8 @@ spi_classic::spi_classic(
       crc_error_{field("SR", "CRCERR")}, fault_{field("SR", "MODF")}, overrun_{field("SR", "OVR")},
       busy_{field("SR", "BSY")}, polynomial_{field("CRCPR", "CRCPOLY")},
       kernel_{ctx.clock.domain(kernel_name(desc, variant))}, line_{irq(desc.name + "_IRQn")},
-      tx_dma_{ctx.peers, spi_lower(desc.name) + "_tx_dma"},
-      rx_dma_{ctx.peers, spi_lower(desc.name) + "_rx_dma"}
+      tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
+      rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"}
 {
   expect_field("CR2", "FRXTH", false);
   if(controller_ and not attachments_.empty())

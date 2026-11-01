@@ -1742,6 +1742,67 @@ TEST_CASE("a finished hardware-requested channel tells each requester its REQSEL
           dynamic_cast<popcorn::periph::stm32::dma_controller const*>(f.target->model("GPDMA1"))});
 }
 
+TEST_CASE("every requester among the peers is told its REQSEL, the last peer included")
+{
+  auto options = popcorn::testing::stm32_options();
+  for(auto const& unit : std::span{u575().peripherals}.last(40))
+  {
+    if(unit.name != "GPDMA1")
+    {
+      options.models[unit.name] =
+          [](popcorn::periph::model_context&,
+             popcorn::peripheral_desc const&) -> std::shared_ptr<popcorn::periph::model> {
+        return std::make_shared<requester_probe>();
+      };
+    }
+  }
+  stm32_fixture f{u575(), "rcc_ll", std::move(options)};
+  f.set("pc", sym("rcc_ll", "idle"));
+  write(f, "GPDMA_C0TR1", bit("GPDMA_C0TR1", "SINC") | bit("GPDMA_C0TR1", "DINC"));
+  write(f, "GPDMA_C0TR2", paced_request * bit("GPDMA_C0TR2", "REQSEL"));
+  write(f, "GPDMA_C0BR1", 8);
+  write(f, "GPDMA_C0SAR", copy_from);
+  write(f, "GPDMA_C0DAR", copy_to);
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+  pace(f, true);
+  idle_for(f, std::chrono::microseconds{50});
+  REQUIRE(f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 1);
+  std::size_t probes = 0;
+  for(auto const& unit : std::span{u575().peripherals}.last(40))
+  {
+    if(auto* const found = dynamic_cast<requester_probe*>(f.target->model(unit.name)))
+    {
+      CAPTURE(unit.name);
+      CHECK(found->completed == std::vector<std::uint32_t>{paced_request});
+      ++probes;
+    }
+  }
+  CHECK(probes > 1);
+}
+
+TEST_CASE("a requester in the first peer slot is told its REQSEL")
+{
+  auto const& first = u575().peripherals.front().name;
+  REQUIRE(first != "GPDMA1");
+  auto options          = popcorn::testing::stm32_options();
+  options.models[first] = [](popcorn::periph::model_context&, popcorn::peripheral_desc const&)
+      -> std::shared_ptr<popcorn::periph::model> { return std::make_shared<requester_probe>(); };
+  stm32_fixture f{u575(), "rcc_ll", std::move(options)};
+  f.set("pc", sym("rcc_ll", "idle"));
+  write(f, "GPDMA_C0TR1", bit("GPDMA_C0TR1", "SINC") | bit("GPDMA_C0TR1", "DINC"));
+  write(f, "GPDMA_C0TR2", paced_request * bit("GPDMA_C0TR2", "REQSEL"));
+  write(f, "GPDMA_C0BR1", 8);
+  write(f, "GPDMA_C0SAR", copy_from);
+  write(f, "GPDMA_C0DAR", copy_to);
+  write(f, "GPDMA_C0CR", bit("GPDMA_C0CR", "EN"));
+  pace(f, true);
+  idle_for(f, std::chrono::microseconds{50});
+  REQUIRE(f.field("GPDMA1", "GPDMA_C0SR", "TCF") == 1);
+  auto* const probe = dynamic_cast<requester_probe*>(f.target->model(first));
+  REQUIRE(probe != nullptr);
+  CHECK(probe->completed == std::vector<std::uint32_t>{paced_request});
+}
+
 namespace
 {
 constexpr std::uint64_t ps_per_ms = 1'000'000'000;

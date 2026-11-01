@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -198,14 +197,6 @@ struct i2c_state
 
   friend auto operator==(i2c_state const&, i2c_state const&) -> bool = default;
 };
-
-auto lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(
-      out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return out;
-}
 
 /**
  * @brief I2C1 to I2C4 of the STM32U5, RM0456 section 65 "Inter-integrated circuit interface

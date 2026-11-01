@@ -614,7 +614,6 @@ private:
   void               context_written(std::size_t index, std::uint32_t value);
   [[nodiscard]] auto config_valid(std::uint32_t value) const -> bool;
   void               load_config(std::uint32_t value);
-  void unmodelled(bool& logged, std::string_view name, std::uint32_t offset, std::string message);
 
   register_file&                       regs_;
   hash_ip_variant const&               variant_;
@@ -793,13 +792,13 @@ auto hash::on_write(
   {
     if(state_.squeezing != 0)
     {
-      unmodelled(
+      warn_once_or_refuse(
           squeeze_logged_, "DIN", offset,
           "a DIN write after a SHAKE digest with no INIT starts a new message");
     }
     if(key_overflows())
     {
-      unmodelled(
+      warn_once_or_refuse(
           long_key_logged_, "DIN", offset,
           std::format(
               "an HMAC key longer than {} bytes needs LKEY 1: the key is hashed as with LKEY 1",
@@ -817,13 +816,13 @@ auto hash::on_write(
   {
     if(dmae_.of(value) != 0 and not dma_.routed())
     {
-      unmodelled(
+      warn_once_or_refuse(
           dma_logged_, "CR", offset,
           "no DMA controller serves hash_in_dma: DMAE 1 requests nothing");
     }
     if(code_of(value).absent)
     {
-      unmodelled(
+      warn_once_or_refuse(
           code_logged_, "CR", offset,
           std::format(
               "ALGO {:#x} selects no algorithm of this part: ALGO reads 0 and the hash runs SHA-1",
@@ -835,7 +834,7 @@ auto hash::on_write(
       auto const& chosen = code_of(value);
       if(mode_.of(value) != 0 and not chosen.hmac)
       {
-        unmodelled(
+        warn_once_or_refuse(
             hmac_logged_, "CR", offset,
             std::format("ALGO {:#x} has no HMAC mode: MODE 1 is ignored", algo_.of(value)));
       }
@@ -966,7 +965,8 @@ void hash::load_config(std::uint32_t value)
 void hash::context_written(std::size_t index, std::uint32_t value)
 {
   auto const refuse = [&](std::string message) {
-    unmodelled(swap_logged_, std::format("CSR{}", index), csr0_ + 4 * index, std::move(message));
+    warn_once_or_refuse(
+        swap_logged_, std::format("CSR{}", index), csr0_ + 4 * index, std::move(message));
     state_.refused = 1;
   };
   if(index == 0)
@@ -1245,7 +1245,7 @@ void hash::start_written(std::uint32_t old, std::uint32_t now)
   regs_.poke(nblw_.offset, dcal_.with(nblw_.with(now, nblw_.of(old)), 0));
   if(state_.busy != 0 and state_.squeezing != 0)
   {
-    unmodelled(
+    warn_once_or_refuse(
         dcal_busy_logged_, "STR", str_,
         "DCAL while BUSY squeezes past a rate the firmware has not read");
   }
@@ -1725,21 +1725,6 @@ void hash::interrupts()
   }
 }
 
-void hash::unmodelled(
-    bool&            logged,
-    std::string_view name,
-    std::uint32_t    offset,
-    std::string      message)
-{
-  if(not std::exchange(logged, true))
-  {
-    warn(name, std::move(message));
-  }
-  if(ctx_.strict_peripherals)
-  {
-    throw model_error(desc_.name, std::string{name}, offset);
-  }
-}
 }
 
 auto hash_factory() -> model_factory

@@ -168,7 +168,6 @@ private:
   void interrupts(std::size_t ch);
   void warn_once(std::size_t ch, unsupported what);
   void drop_grants();
-  auto requesters() -> std::span<dma_requester* const>;
 
   register_file&                           regs_;
   dma_classic_variant                      variant_;
@@ -176,8 +175,7 @@ private:
   core::clock_domain                       hclk_;
   std::array<bool, 2>                      unsupported_logged_{};
   bool                                     stopped_clock_logged_{};
-  std::vector<dma_requester*>              requesters_;
-  bool                                     requesters_resolved_{};
+  dma_requester_list                       requesters_;
 };
 
 template <std::size_t... Ch>
@@ -483,7 +481,7 @@ void dma_classic::transfer(std::size_t ch)
     {
       if(variant_.requests[r].channel == ch + 1 and state_.request[r] != 0)
       {
-        for(auto* const requester : requesters())
+        for(auto* const requester : requesters_.resolve(ctx_.peers))
         {
           requester->acknowledged(*this, static_cast<std::uint32_t>(r));
         }
@@ -530,7 +528,7 @@ void dma_classic::tell(
   {
     if(variant_.requests[r].channel == ch + 1)
     {
-      for(auto* const requester : requesters())
+      for(auto* const requester : requesters_.resolve(ctx_.peers))
       {
         (requester->*signal)(*this, static_cast<std::uint32_t>(r));
       }
@@ -610,22 +608,6 @@ void dma_classic::clear_written(std::uint32_t, std::uint32_t now)
     interrupts(ch);
   }
   regs_.poke(ch_[0].clear_global.offset, 0);
-}
-
-auto dma_classic::requesters() -> std::span<dma_requester* const>
-{
-  if(not requesters_resolved_ and not ctx_.peers.all().empty())
-  {
-    requesters_resolved_ = true;
-    for(auto* const peer : ctx_.peers.all())
-    {
-      if(auto* const requester = dynamic_cast<dma_requester*>(peer); requester != nullptr)
-      {
-        requesters_.push_back(requester);
-      }
-    }
-  }
-  return requesters_;
 }
 
 auto dma_classic::request_of(std::string_view signal) const -> std::optional<std::uint32_t>

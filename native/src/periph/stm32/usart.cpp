@@ -12,7 +12,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstdint>
 #include <expected>
 #include <format>
@@ -583,14 +582,6 @@ auto usart_writes(usart_variant const& variant) -> std::span<write_entry<usart> 
 auto line_name(peripheral_desc const& desc, usart_variant const& variant) -> std::string
 {
   return variant.irq_name.empty() ? desc.name + "_IRQn" : std::string{variant.irq_name};
-}
-
-auto lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(
-      out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return out;
 }
 
 auto kernel_name(peripheral_desc const& desc, usart_variant const& variant) -> std::string

@@ -49,16 +49,6 @@ struct spi_heard_frame
   std::uint64_t at_ps;
 };
 
-/** @brief @p name with ASCII capitals lowered, the SPI clock and DMA request names. */
-[[nodiscard]] inline auto spi_lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(out, out.begin(), [](unsigned char c) {
-    return static_cast<char>(c >= 'A' and c <= 'Z' ? c - 'A' + 'a' : c);
-  });
-  return out;
-}
-
 /** @brief The low @p bits bits set, every bit from 32. */
 [[nodiscard]] constexpr auto spi_mask(std::uint32_t bits) noexcept -> std::uint32_t
 {

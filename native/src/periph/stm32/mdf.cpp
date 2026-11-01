@@ -12,7 +12,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -205,14 +204,6 @@ struct sad_fields
   field_ref     detect_flag;
   std::uint32_t cr_protected{};
 };
-
-auto lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(
-      out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return out;
-}
 
 auto layout_of(peripheral_desc const& desc) -> dfilter_layout
 {

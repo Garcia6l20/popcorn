@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -108,14 +107,6 @@ struct answers
     stretch_ps = std::max(stretch_ps, stretch);
   }
 };
-
-auto lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(
-      out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return out;
-}
 
 auto kernel_name(peripheral_desc const& desc, i2c_v1_variant const& variant) -> std::string
 {
@@ -672,14 +663,9 @@ void i2c_v1::note(std::uint8_t warning, std::string_view reg, std::string messag
 
 void i2c_v1::unmodelled(bool& logged, std::string_view name, std::string_view what)
 {
-  if(not std::exchange(logged, true))
-  {
-    warn(name, std::format("{}: not modelled, nothing is clocked for it", what));
-  }
-  if(ctx_.strict_peripherals)
-  {
-    throw model_error(std::string{desc_.name}, std::string{name}, reg(name).offset);
-  }
+  warn_once_or_refuse(logged, name, ctx_.strict_peripherals ? reg(name).offset : 0u, [&] {
+    return std::format("{}: not modelled, nothing is clocked for it", what);
+  });
 }
 
 void i2c_v1::check_timing()

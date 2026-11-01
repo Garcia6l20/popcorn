@@ -1,8 +1,12 @@
 #pragma once
 
+#include <popcorn/periph/model.hpp>
+
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string_view>
+#include <vector>
 
 namespace popcorn::periph::stm32
 {
@@ -117,5 +121,35 @@ public:
 protected:
   /** @brief Destroys the interface, only through its model. */
   ~dma_requester() = default;
+};
+
+/** @brief The DMA requesters of a machine, found once among its peers in their order. */
+struct dma_requester_list
+{
+  /** @brief Requesters found, empty until resolve() sees a peer. */
+  std::vector<dma_requester*> found;
+  /** @brief Whether found holds the peers' requesters. */
+  bool resolved{};
+
+  /**
+   * @brief The requesters among @p peers. The first call that sees a peer collects them.
+   * @param peers Peers of the machine.
+   * @return The requesters, in peer order.
+   */
+  [[nodiscard]] auto resolve(peer_directory const& peers) -> std::span<dma_requester* const>
+  {
+    if(not resolved and not peers.all().empty())
+    {
+      resolved = true;
+      for(auto* const peer : peers.all())
+      {
+        if(auto* const requester = dynamic_cast<dma_requester*>(peer); requester != nullptr)
+        {
+          found.push_back(requester);
+        }
+      }
+    }
+    return found;
+  }
 };
 }
