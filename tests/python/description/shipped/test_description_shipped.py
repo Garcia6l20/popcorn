@@ -333,10 +333,10 @@ def test_a_broken_layer_file_is_refused(
 @pytest.mark.parametrize("file", [PARTS, LINE, FAMILY])
 def test_a_layer_of_another_format_is_refused(shipped_dir: Path, tmp_path: Path, file: str) -> None:
     layer = _decode(shipped_dir, file)
-    _rewrite(shipped_dir, file, layer | {"format": 2})
+    _rewrite(shipped_dir, file, layer | {"format": 1})
     error = _refused(tmp_path)
     assert error.file == str(shipped_dir / file)
-    assert (error.key, error.expected) == ("format", "layer format 1")
+    assert (error.key, error.expected) == ("format", "layer format 2")
 
 
 @pytest.mark.parametrize("file", [LINE, FAMILY])
@@ -547,7 +547,7 @@ def test_every_alias_of_a_shipped_description_equals_its_base_register_by_regist
     peripherals = cast(list[dict[str, object]], data["peripherals"])
     by_name = {cast(str, p["name"]): p for p in peripherals}
     aliases = [p for p in peripherals if p.get("alias_of")]
-    assert aliases
+    assert bool(aliases) == (not name.startswith("STM32L1"))
     for alias in aliases:
         base = by_name[cast(str, alias["alias_of"])]
         assert alias["registers"] == base["registers"], alias["name"]
@@ -734,16 +734,16 @@ def test_ship_check_refuses_a_tampered_block(
 @pytest.mark.parametrize(
     ("ranks", "reference"),
     [
-        ({NAME: (100, 1024), SIBLING: (90, 2048)}, NAME),
-        ({NAME: (90, 1024), SIBLING: (90, 2048)}, SIBLING),
-        ({SIBLING: (90, 2048), NAME: (90, 2048)}, NAME),
+        ({NAME: (5, 100, 1024), SIBLING: (5, 90, 2048)}, NAME),
+        ({NAME: (5, 90, 1024), SIBLING: (5, 90, 2048)}, SIBLING),
+        ({SIBLING: (5, 90, 2048), NAME: (5, 90, 2048)}, NAME),
     ],
     ids=["bonded pins first", "flash second", "name last"],
 )
-def test_the_reference_of_a_line_is_most_bonded_pins_then_flash_then_name(
-    ranks: dict[str, tuple[int, int]], reference: str
+def test_the_reference_of_equal_instance_counts_is_most_bonded_pins_then_flash_then_name(
+    ranks: dict[str, tuple[int, int, int]], reference: str
 ) -> None:
-    other = {OTHER: (1, 1)}
+    other = {OTHER: (5, 1, 1)}
     assert choose_reference(ranks | other) == {"STM32T001xx": reference, "STM32T101xx": OTHER}
 
 
@@ -769,3 +769,43 @@ def test_write_layers_removes_stale_parts_files_before_their_lines_and_blocks(
         (tmp_path / file).write_bytes(b"")
     assert _shipped.write_layers(tmp_path, {}, {"STM32T0xx"}) == stale[::-1]
     assert list(tmp_path.iterdir()) == []
+
+
+def _rename_part(directory: Path, old: str, new: str) -> None:
+    parts = _decode(directory, PARTS)
+    parts["parts"] = {new if key == old else key: value for key, value in parts["parts"].items()}
+    (directory / PARTS).write_bytes(pack(parts))
+
+
+def test_a_rewritten_parts_layer_names_its_new_parts_at_the_next_call(shipped_dir: Path) -> None:
+    assert shipped_names() == [NAME]
+    _rename_part(shipped_dir, NAME, "STM32T001ABDx")
+    assert shipped_names() == ["STM32T001ABDx"]
+
+
+def test_an_unchanged_parts_layer_is_decoded_once(
+    shipped_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert shipped_names() == [NAME]
+    decoded: list[str] = []
+    real = vars(_shipped)["_layer"]
+
+    def counting(data: bytes, *, file: str, kind: str) -> Any:
+        decoded.append(Path(file).name)
+        return real(data, file=file, kind=kind)
+
+    monkeypatch.setattr(_shipped, "_layer", counting)
+    assert shipped_names() == [NAME]
+    assert decoded == []
+
+
+def test_a_refused_parts_layer_is_refused_again_until_it_is_fixed(shipped_dir: Path) -> None:
+    good = (shipped_dir / PARTS).read_bytes()
+    assert shipped_names() == [NAME]
+    (shipped_dir / PARTS).write_bytes(lzma.compress(b"[]"))
+    for _ in range(2):
+        with pytest.raises(DescriptionError) as excinfo:
+            shipped_names()
+        assert excinfo.value.key == "<root>"
+    (shipped_dir / PARTS).write_bytes(good)
+    assert shipped_names() == [NAME]

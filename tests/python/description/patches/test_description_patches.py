@@ -792,6 +792,98 @@ def test_memory_add_refuses_a_clash_an_overlap_or_a_bad_range(
     assert target == before
 
 
+_BIT_BAND_PAIRS = "a bit_band window at 0x22000000 onto 0x20000000 or at 0x42000000 onto 0x40000000"
+
+
+def _bit_band(name: str, start: int, size: int, physical: int | None, extra: str = "") -> str:
+    target = ("" if physical is None else f", physical = {physical:#x}") + extra
+    return (
+        f'{{ name = "{name}", start = {start:#x}, size = {size:#x}, kind = "bit_band", '
+        f"acc = {{ read = true, write = true, execute = false }}, secure = false{target} }}"
+    )
+
+
+def test_memory_add_takes_bit_band_windows_onto_sram_and_the_peripheral_range(
+    tmp_path: Path,
+) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    path = _memory_patch(
+        tmp_path,
+        _bit_band("BB_SRAM", 0x2200_0000, 0x0200_0000, 0x2000_0000),
+        _bit_band("BB_PERIPH", 0x4200_0000, 0x0200_0000, 0x4000_0000),
+    )
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.regions_added == 2
+    added = {r.name: r for r in target.regions[1:]}
+    assert [(r.kind, r.size, r.physical) for r in added.values()] == [
+        (RegionKind.BIT_BAND, 0x0200_0000, 0x2000_0000),
+        (RegionKind.BIT_BAND, 0x0200_0000, 0x4000_0000),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("entry", "reason"),
+    [
+        (
+            _bit_band("SMALL", 0x2200_0000, 0x0100_0000, 0x2000_0000),
+            "a bit_band region of 32 MB",
+        ),
+        (
+            _bit_band("SKEW", 0x2200_0000, 0x0200_0000, 0x2008_0000),
+            _BIT_BAND_PAIRS,
+        ),
+        (
+            _bit_band("BARE", 0x2200_0000, 0x0200_0000, None),
+            _BIT_BAND_PAIRS,
+        ),
+        (
+            _bit_band("LOOSE", 0x3000_0000, 0x0200_0000, None),
+            _BIT_BAND_PAIRS,
+        ),
+        (
+            _bit_band("BB_TOP", 0x4400_0000, 0x0200_0000, 0x5FF0_0000),
+            _BIT_BAND_PAIRS,
+        ),
+        (
+            _bit_band("FLASHED", 0x2200_0000, 0x0200_0000, 0x0800_0000),
+            _BIT_BAND_PAIRS,
+        ),
+        (
+            _bit_band("CROSS", 0x2200_0000, 0x0200_0000, 0x4000_0000),
+            _BIT_BAND_PAIRS,
+        ),
+        (
+            _bit_band(
+                "FILLED",
+                0x2200_0000,
+                0x0200_0000,
+                0x2000_0000,
+                ", content = [{ offset = 0, data = [1] }]",
+            ),
+            "a bit_band region with no content and no controller",
+        ),
+        (
+            _bit_band("CTRL", 0x2200_0000, 0x0200_0000, 0x2000_0000, ', controller = "GTZC"'),
+            "a bit_band region with no content and no controller",
+        ),
+    ],
+)
+def test_memory_add_refuses_a_bit_band_window_of_the_wrong_size_or_target(
+    tmp_path: Path, entry: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    before = copy.deepcopy(target)
+    path = _memory_patch(tmp_path, entry)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key == f"memory.add.{entry.split('"')[1]}"
+    assert excinfo.value.expected == reason
+    assert target == before
+
+
 def test_memory_add_refuses_two_added_regions_that_overlap(tmp_path: Path) -> None:
     target = _synthetic_target()
     path = _memory_patch(tmp_path, _OTP, _OTP.replace('"OTP"', '"OTP2"'))
@@ -875,6 +967,70 @@ def test_memory_controller_refuses_a_bad_region_or_peripheral(
     assert target == before
 
 
+def _fill_patch(tmp_path: Path, fill: str, *entries: str) -> Path:
+    lines = ",\n".join(f"  {entry}" for entry in entries)
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+[memory]
+source = "probe"
+fill = {{ {fill} }}
+add = [
+{lines}
+]
+"""
+    return _write_patch(tmp_path, text)
+
+
+def test_memory_fill_sets_the_erased_byte_of_a_rom_region(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    path = _fill_patch(tmp_path, "OTP = 0", _OTP)
+    report = apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert report.fills_set == 1
+    assert [(r.name, r.fill) for r in target.regions] == [("SRAM", None), ("OTP", 0)]
+
+
+@pytest.mark.parametrize(
+    ("fill", "region", "reason"),
+    [
+        ("NOWHERE = 0", "NOWHERE", "an existing region"),
+        ("SRAM = 0", "SRAM", "a rom region that is not an alias"),
+        ("OTP_S = 0", "OTP_S", "a rom region that is not an alias"),
+        ("OTP = 256", "OTP", "a byte value, 0 to 255"),
+    ],
+)
+def test_memory_fill_refuses_a_bad_region_or_value(
+    tmp_path: Path, fill: str, region: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    before = copy.deepcopy(target)
+    path = _fill_patch(tmp_path, fill, _OTP, _OTP_ALIAS)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.file == str(path)
+    assert excinfo.value.key == f"memory.fill.{region}"
+    assert excinfo.value.expected == reason
+    assert target == before
+
+
+def test_memory_controller_refuses_a_bit_band_region(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    target.regions = [copy.deepcopy(_RAM)]
+    before = copy.deepcopy(target)
+    bit_band = _bit_band("BB", 0x2200_0000, 0x0200_0000, 0x2000_0000)
+    path = _controller_patch(tmp_path, 'BB = "A"', bit_band)
+    patches = load_patches([path], part="TOY1", svd_name="synthetic.svd")
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(patches, target)
+    assert excinfo.value.key == "memory.controller.BB"
+    assert excinfo.value.expected == "a region of a kind other than bit_band"
+    assert target == before
+
+
 def test_memory_controller_refuses_a_second_controller(tmp_path: Path) -> None:
     target = _synthetic_target()
     first = _controller_patch(tmp_path, 'OTP = "A"', _OTP)
@@ -918,7 +1074,7 @@ add = [{_OTP}]
     assert excinfo.value.expected == "a peripheral of the description that is not an alias"
 
 
-def test_memory_without_add_or_controller_is_refused(tmp_path: Path) -> None:
+def test_memory_without_add_controller_or_fill_is_refused(tmp_path: Path) -> None:
     text = """
 format = 1
 [match]
@@ -931,7 +1087,7 @@ source = "probe"
     with pytest.raises(DescriptionError) as excinfo:
         apply_patches(patches, _synthetic_target())
     assert excinfo.value.key == "memory"
-    assert excinfo.value.expected == "an add or a controller entry"
+    assert excinfo.value.expected == "an add, eeprom, controller or fill entry"
 
 
 def test_memory_controller_refuses_an_alias(tmp_path: Path) -> None:
@@ -1358,6 +1514,141 @@ def test_a_second_signature_over_the_same_bytes_is_refused(tmp_path: Path) -> No
     with pytest.raises(DescriptionError) as excinfo:
         _signed(tmp_path, _part(), first, second)
     assert (excinfo.value.file, excinfo.value.key) == (str(second), "signature.flash_size")
+
+
+def _l1_signature(tmp_path: Path, **overrides: str) -> Path:
+    keys = {
+        "region": '"OTP"',
+        "uid": "0x50",
+        "flash_size": "0x4C",
+        "uid_words": "[0x11, 0x22, 0x33]",
+        "uid_offsets": "[0, 4, 0x14]",
+        "source": '"probe"',
+    } | overrides
+    body = "\n".join(f"{key} = {value}" for key, value in keys.items())
+    text = f"""
+format = 1
+[match]
+parts = ["TOY*"]
+{_SIG_REGIONS}
+[signature]
+{body}
+"""
+    return _write_patch(tmp_path, text)
+
+
+def test_signature_uid_words_land_at_their_offsets_from_the_base(tmp_path: Path) -> None:
+    target = _signed(tmp_path, _part(), _l1_signature(tmp_path))
+    assert _content(target, "OTP") == [
+        (0x4C, (1024).to_bytes(2, "little")),
+        (0x50, bytes.fromhex("1100000022000000")),
+        (0x64, bytes.fromhex("33000000")),
+    ]
+
+
+def test_signature_uid_words_are_contiguous_without_offsets(tmp_path: Path) -> None:
+    path = _signature_patch(tmp_path)
+    assert "uid_offsets" not in path.read_text()
+    assert dict(_content(_signed(tmp_path, _part(), path), "OTP"))[0x300] == bytes.fromhex(
+        "110000002200000033000000"
+    )
+
+
+def test_signature_uid_offsets_reorder_the_words(tmp_path: Path) -> None:
+    path = _l1_signature(tmp_path, uid_offsets="[8, 0, 4]")
+    pieces = dict(_content(_signed(tmp_path, _part(), path), "OTP"))
+    assert pieces[0x50] == bytes.fromhex("220000003300000011000000")
+
+
+def test_signature_without_package_writes_no_package_word(tmp_path: Path) -> None:
+    target = _synthetic_target()
+    target.db_part = _part("TOY1Q")
+    report = apply_patches(
+        load_patches([_l1_signature(tmp_path)], part="TOY1", svd_name="synthetic.svd"), target
+    )
+    assert report.signature_words == 2
+
+
+@pytest.mark.parametrize(
+    ("overrides", "key", "reason"),
+    [
+        ({"uid_offsets": "[0, 4]"}, "signature.uid_offsets", "three offsets, 0 to 0xffff"),
+        ({"uid_offsets": "[0, 4, 0x10000]"}, "signature.uid_offsets", "three offsets, 0 to 0xffff"),
+        ({"uid_offsets": "[0, 4, -1]"}, "signature.uid_offsets", "three offsets, 0 to 0xffff"),
+        ({"uid_offsets": "[0, 2, 8]"}, "signature.uid", "bytes clear of the content at 0x50"),
+        ({"uid_offsets": "[0, 4, 0x3C0]"}, "signature.uid", "an offset leaving 4 bytes inside OTP"),
+        ({"package": "0x100"}, "signature.packages", "packages with package, or neither"),
+        (
+            {"packages": '{ "LQFP64" = 0 }'},
+            "signature.packages",
+            "packages with package, or neither",
+        ),
+    ],
+)
+def test_signature_refuses_a_bad_uid_layout_or_half_a_package(
+    tmp_path: Path, overrides: dict[str, str], key: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    target.db_part = _part()
+    before = copy.deepcopy(target)
+    path = _l1_signature(tmp_path, **overrides)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert (excinfo.value.key, excinfo.value.expected) == (key, reason)
+    assert target == before
+
+
+def test_signature_flash_size_codes_replace_the_size_with_the_code_of_the_part(
+    tmp_path: Path,
+) -> None:
+    path = _l1_signature(tmp_path, flash_size_codes="{ 1024 = 7, 512 = 9 }")
+    pieces = dict(_content(_signed(tmp_path, _part(), path), "OTP"))
+    assert pieces[0x4C] == (7).to_bytes(2, "little")
+
+
+def test_signature_flash_size_codes_may_code_the_size_zero(tmp_path: Path) -> None:
+    path = _l1_signature(tmp_path, flash_size_codes="{ 1024 = 0, 256 = 1 }")
+    pieces = dict(_content(_signed(tmp_path, _part(), path), "OTP"))
+    assert pieces[0x4C] == bytes(2)
+
+
+def test_signature_without_flash_size_codes_writes_the_size_in_kib(tmp_path: Path) -> None:
+    pieces = dict(_content(_signed(tmp_path, _part(), _l1_signature(tmp_path)), "OTP"))
+    assert pieces[0x4C] == (1024).to_bytes(2, "little")
+
+
+@pytest.mark.parametrize(
+    ("codes", "key", "reason"),
+    [
+        ("{ 256 = 1 }", "signature.flash_size_codes", "a code for a flash of 1024 KiB"),
+        (
+            "{ 1024 = 65536 }",
+            "signature.flash_size_codes.1024",
+            "a flash size in KiB mapped to a 16-bit code",
+        ),
+        (
+            "{ 1024 = -1 }",
+            "signature.flash_size_codes.1024",
+            "a flash size in KiB mapped to a 16-bit code",
+        ),
+        (
+            "{ 1024 = 1, big = 2 }",
+            "signature.flash_size_codes.big",
+            "a flash size in KiB mapped to a 16-bit code",
+        ),
+    ],
+)
+def test_signature_refuses_flash_size_codes_that_do_not_fit_the_part(
+    tmp_path: Path, codes: str, key: str, reason: str
+) -> None:
+    target = _synthetic_target()
+    target.db_part = _part()
+    before = copy.deepcopy(target)
+    path = _l1_signature(tmp_path, flash_size_codes=codes)
+    with pytest.raises(DescriptionError) as excinfo:
+        apply_patches(load_patches([path], part="TOY1", svd_name="synthetic.svd"), target)
+    assert (excinfo.value.key, excinfo.value.expected) == (key, reason)
+    assert target == before
 
 
 def _reset_patch(tmp_path: Path, peripheral: str, register: str, reset: str) -> Path:

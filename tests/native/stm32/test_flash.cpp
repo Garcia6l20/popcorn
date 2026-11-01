@@ -1,4 +1,5 @@
 #include "../../../native/src/core/machine_impl.hpp"
+#include "flash_unit.hpp"
 #include "gtzc.hpp"
 #include "stm32_fixture.hpp"
 
@@ -40,6 +41,7 @@ using popcorn::bus_error;
 using popcorn::icount;
 using popcorn::initiator;
 using popcorn::stop_reason;
+using popcorn::testing::h573;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
 using popcorn::testing::u575;
@@ -2291,9 +2293,59 @@ TEST_CASE("check_option_bytes returns the boot address and the refusal of each f
   CHECK(result.error().key == "option_bytes");
   CHECK(
       result.error().expected
-      == std::format(
-          "an STM32U5 or STM32H5 part with a flash region its FLASH controls, not {}",
-          unknown_flash().part));
+      == std::format("a part whose FLASH row encodes option bytes, not {}", unknown_flash().part));
+}
+
+TEST_CASE("flash_unit picks the unit and region the ip flash lookup picks on U5 and H5 parts")
+{
+  for(auto const& desc : {u575(), h573()})
+  {
+    CAPTURE(desc.part);
+    auto const unit = std::ranges::find_if(desc.peripherals, [](popcorn::peripheral_desc const& p) {
+      return p.ip == "flash" and not p.alias_of;
+    });
+    REQUIRE(unit != desc.peripherals.end());
+    auto const region = std::ranges::find_if(desc.regions, [&unit](popcorn::region_desc const& r) {
+      return r.controller == unit->name and not r.physical;
+    });
+    REQUIRE(region != desc.regions.end());
+    auto const program = periph::stm32::flash_unit(desc);
+    REQUIRE(program.has_value());
+    CHECK(program->unit == &*unit);
+    REQUIRE(program->regions.size() == 1);
+    CHECK(program->regions.front() == &*region);
+  }
+}
+
+TEST_CASE("check_option_bytes refuses a unit whose row has no encoder and a part with no unit")
+{
+  using periph::stm32::check_option_bytes;
+  auto by_crc = u575();
+  for(auto& region : by_crc.regions)
+  {
+    if(region.controller == "FLASH")
+    {
+      region.controller = "CRC";
+    }
+  }
+  auto const crc = check_option_bytes(by_crc, {});
+  REQUIRE_FALSE(crc.has_value());
+  CHECK(crc.error().key == "option_bytes");
+  CHECK(
+      crc.error().expected
+      == std::format("a part whose FLASH row encodes option bytes, not {}", by_crc.part));
+  auto none = u575();
+  for(auto& region : none.regions)
+  {
+    region.controller.reset();
+  }
+  auto const missing = check_option_bytes(none, {});
+  REQUIRE_FALSE(missing.has_value());
+  CHECK(missing.error().key == "option_bytes");
+  CHECK(
+      missing.error().expected
+      == std::format("a part with a flash region its FLASH controls, not {}", none.part));
+  CHECK_FALSE(periph::stm32::flash_unit(none).has_value());
 }
 
 TEST_CASE("the U5 and H5 IDAU map is RM0456 2.2 Table 3, other families have none")

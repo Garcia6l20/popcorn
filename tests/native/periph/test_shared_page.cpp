@@ -249,7 +249,7 @@ TEST_CASE("a debugger access to a gap or a hole fires no watch")
   CHECK(hits.empty());
 }
 
-TEST_CASE("a gap read in a shared page under strict_peripherals warns and reads 0")
+TEST_CASE("a gap read in a shared page under strict_peripherals warns once and raises model_error")
 {
   auto                          f = booted(true);
   std::vector<core::log_record> records;
@@ -257,8 +257,7 @@ TEST_CASE("a gap read in a shared page under strict_peripherals warns and reads 
       f.target->add_log_sink([&](core::log_record const& r) { records.push_back(r); });
   REQUIRE(f.target->mem().write(sym("periph", "results"), 4, 0xffff'ffff));
   f.set("pc", sym("periph", "gap_read"));
-  REQUIRE(f.run_to_stop().reason == stop_reason::user);
-  CHECK(results(f)[0] == 0);
+  CHECK_THROWS_AS(static_cast<void>(f.run_to_stop()), popcorn::model_error);
   REQUIRE(records.size() == 1);
   CHECK(records[0].kind == core::log_kind::model_warning);
   CHECK(records[0].peripheral == "SECOND");

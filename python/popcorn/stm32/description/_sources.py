@@ -14,13 +14,23 @@ from popcorn._errors import absent
 from popcorn.stm32.description._cubemx import (
     DbPart,
     die_ips,
+    expand_refname,
     gpio_modes_file_name,
     read_part,
     reference_rank,
     rzone_file_name,
 )
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
-from popcorn.stm32.description._patches import load_patches
+from popcorn.stm32.description._layers import line_name
+from popcorn.stm32.description._patches import (
+    PartFact,
+    cmsis_suffix,
+    corrected_part,
+    load_patches,
+    part_facts,
+    patch_contents,
+    with_part_facts,
+)
 
 _PATCHES_DIR = Path(__file__).parent / "patches"
 _RZONE_FACTS_DIR = Path(__file__).parent / "rzone"
@@ -114,15 +124,38 @@ def match_refname(part: str, refnames: Sequence[str], *, file: str) -> str | Non
     return candidates[0] if candidates else None
 
 
-def resolve_part(part: str, db_dir: Path) -> str:
-    """db RefName for @p part, by match_refname over the db's part files, DescriptionError with
-    difflib close matches when none match, listing every candidate when several do."""
+@dataclass(slots=True, frozen=True)
+class ResolvedPart:
+    """A part name resolved against a db: the expanded `name`, the `ref_name` of the db part
+    file that holds it and its element `index` in that file's group."""
+
+    name: str
+    ref_name: str
+    index: int
+
+
+def resolve_part(part: str, db_dir: Path) -> ResolvedPart:
+    """ResolvedPart for @p part, by match_refname over the expanded names of the db's part
+    files, see expand_refname. DescriptionError with difflib close matches when none match,
+    listing every candidate when several do or when several files expand to the matched name."""
     mcu_dir = db_dir / "mcu"
-    refnames = sorted(p.stem for p in mcu_dir.glob("*.xml"))
-    found = match_refname(part, refnames, file=str(db_dir))
+    expanded: dict[str, list[tuple[str, int]]] = {}
+    for stem in sorted(p.stem for p in mcu_dir.glob("*.xml")):
+        try:
+            names = expand_refname(stem)
+        except DescriptionError:
+            continue
+        for name, index in names:
+            expanded.setdefault(name, []).append((stem, index))
+    found = match_refname(part, list(expanded), file=str(db_dir))
     if found is not None:
-        return found
-    close = difflib.get_close_matches(part, refnames, n=5)
+        sources = expanded[found]
+        if len(sources) > 1:
+            files = ", ".join(ref_name for ref_name, _ in sources)
+            raise DescriptionError(str(db_dir), 0, part, f"exactly one file, found {files}")
+        ref_name, index = sources[0]
+        return ResolvedPart(name=found, ref_name=ref_name, index=index)
+    close = difflib.get_close_matches(part, list(expanded), n=5)
     if close:
         raise DescriptionError(
             str(db_dir), 0, part, f"a known part, close matches: {', '.join(close)}"
@@ -172,8 +205,17 @@ def _patch_files() -> list[Path]:
     return sorted(_PATCHES_DIR.glob("*.toml"))
 
 
-def _svd_exception(refname: str, *, search: SearchPaths) -> tuple[str, Path] | None:
-    for loaded in load_patches(_patch_files(), part=refname, svd_name=""):
+def read_db_part(mcu_db: Path, name: str) -> DbPart:
+    """read_part of the part file @p mcu_db for the expanded name @p name, corrected by the
+    `[[part_facts]]` rows of the package patches, see corrected_part."""
+    part = read_part(mcu_db.read_bytes(), file=str(mcu_db), name=name)
+    return corrected_part(part, _patch_files())
+
+
+def _svd_exception(
+    refname: str, db_part: DbPart, *, search: SearchPaths
+) -> tuple[str, Path] | None:
+    for loaded in load_patches(_patch_files(), part=refname, svd_name="", db_part=db_part):
         if loaded.patch.svd is not None:
             name = loaded.patch.svd.name
             for svd_dir in search.svd_dirs:
@@ -183,8 +225,8 @@ def _svd_exception(refname: str, *, search: SearchPaths) -> tuple[str, Path] | N
     return None
 
 
-def _cmsis_header_path(refname: str, search: SearchPaths) -> Path | None:
-    stem = f"{refname[:9].lower()}xx.h"
+def _cmsis_header_path(refname: str, search: SearchPaths, suffix: str | None = None) -> Path | None:
+    stem = f"{line_name(refname).removesuffix('xx').lower()}{suffix or 'xx'}.h"
     if search.cmsis_device_dirs is not None:
         for device_dir in search.cmsis_device_dirs:
             candidate = device_dir / stem
@@ -204,9 +246,11 @@ def _cmsis_header_path(refname: str, search: SearchPaths) -> Path | None:
     return None
 
 
-def _require(path: Path, file: str, key: str, expected: str) -> None:
+def _require(
+    path: Path, file: str, key: str, expected: str, *, missing: Path | None = None
+) -> None:
     if absent(path):
-        raise MissingSource(file, key, expected, path=path)
+        raise MissingSource(file, key, expected, path=path if missing is None else missing)
     if not path.is_file():
         raise DescriptionError(file, 0, key, expected)
 
@@ -231,11 +275,17 @@ def _svd_dirs(svd_dirs: Sequence[Path]) -> list[Path]:
 
 
 def _svd_path(
-    refname: str, *, core: str | None, svd: Path | None, search: SearchPaths, file: str
+    refname: str,
+    db_part: DbPart,
+    *,
+    core: str | None,
+    svd: Path | None,
+    search: SearchPaths,
+    file: str,
 ) -> Path:
     if svd is not None:
         return svd
-    exception = _svd_exception(refname, search=search)
+    exception = _svd_exception(refname, db_part, search=search)
     if exception is not None:
         name, svd_dir = exception
         svd_path = svd_dir / f"{name}.svd"
@@ -273,17 +323,31 @@ def die_ip_sources(
     patch exception or an explicit SVD of another name has no candidate. A part file that cannot
     be read, that read_part refuses, or whose SVD does not resolve is no candidate. Maps every
     instance die_ips gives, empty when @p db_part is the reference. Results are memoized in the
-    process, 64 entries, keyed on the inputs and the name, size and mtime of every candidate
-    file, so an edit of a candidate file gives a new scan."""
+    process, 64 entries, keyed on the inputs, the selected name, the die of @p db_part, the bytes
+    of every package patch file, which hold the `[[part_facts]]` rows and the `[svd]` exceptions
+    the scan reads, and the name, size and mtime of every candidate file, so an edit of a
+    candidate file or of a patch file gives a new scan."""
     base = _CORE_SUFFIX_RE.sub("", svd_path.stem)
     candidates = [
         path
         for path in sorted(mcu_db.parent.glob("*.xml"))
         if path != mcu_db and _wildcard_prefix_matches(base, path.stem)
     ]
+    files = _patch_files()
+    facts: dict[str, PartFact] | None
+    patches_key: tuple[tuple[Path, bytes], ...] | None
+    try:
+        patches_key = patch_contents(files)
+        facts = part_facts(files)
+    except OSError, DescriptionError:
+        facts = None
+        patches_key = None
     key = (
         mcu_db,
         _stat_key(mcu_db),
+        db_part.ref_name,
+        db_part.die,
+        patches_key,
         svd_path.name,
         core,
         tuple(search.svd_dirs),
@@ -293,7 +357,7 @@ def die_ip_sources(
     if memoized is not None:
         die_ip_memo[key] = memoized
         return dict(memoized)
-    found = _scan_die_ips(db_part, svd_path, candidates, core=core, search=search)
+    found = _scan_die_ips(db_part, svd_path, candidates, facts, core=core, search=search)
     die_ip_memo[key] = found
     if len(die_ip_memo) > _DIE_IP_MEMO_SIZE:
         die_ip_memo.popitem(last=False)
@@ -304,24 +368,32 @@ def _scan_die_ips(
     db_part: DbPart,
     svd_path: Path,
     candidates: Sequence[Path],
+    facts: Mapping[str, PartFact] | None,
     *,
     core: str | None,
     search: SearchPaths,
 ) -> dict[str, Path]:
+    if facts is None:
+        return {}
     own_rank = reference_rank(db_part)
     ranked: list[tuple[tuple[int, int, str], Path, DbPart]] = []
     for path in candidates:
         try:
-            candidate = read_part(path.read_bytes(), file=str(path))
+            group = read_part(path.read_bytes(), file=str(path))
+            members = [
+                with_part_facts(group.select(name, file=str(path)), facts)
+                for name, _ in expand_refname(group.ref_name)
+            ]
         except OSError, DescriptionError:
             continue
-        rank = reference_rank(candidate)
-        if candidate.die == db_part.die and rank < own_rank:
-            ranked.append((rank, path, candidate))
+        for candidate in members:
+            rank = reference_rank(candidate)
+            if candidate.die == db_part.die and rank < own_rank:
+                ranked.append((rank, path, candidate))
     for _, donor_path, donor in sorted(ranked, key=lambda entry: entry[0]):
         try:
             resolved = _svd_path(
-                donor.ref_name, core=core, svd=None, search=search, file=str(donor_path)
+                donor.ref_name, donor, core=core, svd=None, search=search, file=str(donor_path)
             )
         except DescriptionError:
             continue
@@ -339,14 +411,17 @@ def find_sources(
     cmsis_header: Path | None = None,
     search: SearchPaths | None = None,
 ) -> Sources:
-    """Sources of @p part: db files by exact db lookup, SVD by family-prefix matching across
-    @p search's directories (or the spec 04 defaults, when @p search is None), CMSIS header
-    optionally, every patch file in the package whose [match] selects this part and the resolved
-    SVD file name, the GPIO modes file of the part's GPIO IP version when it exists, None
-    otherwise, and the die_ip_sources donors. MissingSource, a MissingInput and a
-    DescriptionError, naming the path when a required source does not exist: no CubeMX db, no
-    existing SVD directory, an absent db, rzone or SVD file. DescriptionError for an unknown part
-    in an existing db, or a source that exists but is not a file."""
+    """Sources of @p part: db files by exact db lookup, the rzone file of the db or, when the db
+    has none for the part, the packaged rzone facts file (`Sources.rzone_facts`), SVD by
+    family-prefix matching across @p search's directories (or the spec 04 defaults, when
+    @p search is None), CMSIS header optionally, named `<line><suffix>.h` by the `[cmsis]
+    suffix` of the part's patches and `<line>xx.h` without one, every patch file in the package
+    whose [match] selects this part and the resolved SVD file name, the GPIO modes file of the
+    part's GPIO IP version when it exists, None otherwise, and the die_ip_sources donors.
+    MissingSource, a MissingInput and a DescriptionError, naming the path when a required source
+    does not exist: no CubeMX db, no existing SVD directory, an absent db or SVD file, an absent
+    rzone file with no packaged facts file, whose path it names. DescriptionError for an unknown
+    part in an existing db, or a source that exists but is not a file."""
     search = search or default_search_paths()
     db_dir = cubemx_db or search.cubemx_db
     if absent(db_dir / "mcu"):
@@ -356,25 +431,34 @@ def find_sources(
             f"a CubeMX db with an mcu directory at {db_dir}, set POPCORN_CUBEMX_DB",
             path=db_dir,
         )
-    refname = resolve_part(part, db_dir)
+    resolved = resolve_part(part, db_dir)
+    refname = resolved.name
 
-    mcu_db = db_dir / "mcu" / f"{refname}.xml"
+    mcu_db = db_dir / "mcu" / f"{resolved.ref_name}.xml"
     _require(mcu_db, str(db_dir), refname, f"a db file at {mcu_db}")
-    db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db))
+    db_part = read_db_part(mcu_db, refname)
 
-    rzone = db_dir / "mcu" / "memory" / rzone_file_name(db_part)
-    _require(rzone, str(db_dir), refname, f"an rzone file at {rzone}")
+    rzone_file = db_dir / "mcu" / "memory" / rzone_file_name(db_part)
+    rzone: Path | None = rzone_file
+    facts: Path | None = None
+    if absent(rzone_file):
+        facts = facts_path(db_part)
+        expected = f"an rzone file at {rzone_file} or a packaged rzone facts file at {facts}"
+        _require(facts, str(db_dir), refname, expected, missing=rzone_file)
+        rzone = None
+    else:
+        _require(rzone_file, str(db_dir), refname, f"an rzone file at {rzone_file}")
     modes_name = gpio_modes_file_name(db_part)
     gpio_modes = db_dir / "mcu" / "IP" / modes_name if modes_name is not None else None
     if gpio_modes is not None and not gpio_modes.is_file():
         gpio_modes = None
 
-    svd_path = _svd_path(refname, core=core, svd=svd, search=search, file=str(db_dir))
+    svd_path = _svd_path(refname, db_part, core=core, svd=svd, search=search, file=str(db_dir))
+    patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name, db_part=db_part)
+    suffix = cmsis_suffix(patches)
     cmsis_header_path = (
-        cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search)
+        cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search, suffix)
     )
-
-    patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name)
 
     return Sources(
         part=refname,
@@ -384,6 +468,7 @@ def find_sources(
         cmsis_header=cmsis_header_path,
         patches=[loaded.path for loaded in patches],
         gpio_modes=gpio_modes,
+        rzone_facts=facts,
         die_ip=die_ip_sources(db_part, mcu_db, svd_path, core=core, search=search),
     )
 
@@ -412,10 +497,11 @@ def pin_data_sources(
             f"a STM32_open_pin_data checkout with an mcu directory at {pin_data}",
             path=pin_data,
         )
-    refname = resolve_part(part, pin_data)
-    mcu_db = pin_data / "mcu" / f"{refname}.xml"
+    resolved = resolve_part(part, pin_data)
+    refname = resolved.name
+    mcu_db = pin_data / "mcu" / f"{resolved.ref_name}.xml"
     _require(mcu_db, str(pin_data), refname, f"a part file at {mcu_db}")
-    db_part = read_part(mcu_db.read_bytes(), file=str(mcu_db))
+    db_part = read_db_part(mcu_db, refname)
     modes_name = gpio_modes_file_name(db_part)
     if modes_name is None:
         raise DescriptionError(str(mcu_db), 0, "GPIO", "a GPIO IP with a version")
@@ -424,11 +510,12 @@ def pin_data_sources(
     facts = facts_path(db_part)
     if not facts.is_file():
         raise DescriptionError(str(mcu_db), 0, refname, f"a packaged rzone facts file at {facts}")
-    svd_path = _svd_path(refname, core=core, svd=svd, search=search, file=str(pin_data))
+    svd_path = _svd_path(refname, db_part, core=core, svd=svd, search=search, file=str(pin_data))
+    patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name, db_part=db_part)
+    suffix = cmsis_suffix(patches)
     cmsis_header_path = (
-        cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search)
+        cmsis_header if cmsis_header is not None else _cmsis_header_path(refname, search, suffix)
     )
-    patches = load_patches(_patch_files(), part=refname, svd_name=svd_path.name)
     return Sources(
         part=refname,
         svd=svd_path,

@@ -24,6 +24,7 @@
 #include <expected>
 #include <format>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
@@ -701,23 +702,29 @@ protected:
   }
 
   /**
-   * @brief Claims the registers of @p table and resolves them by name.
+   * @brief Claims the registers of @p table and resolves them by name. A claimed word stores and
+   *        reads the fields of every register described at its offset and width, so all alias
+   *        views of the word, such as a timer's CCMR1_Input and CCMR1_Output, keep their bits.
    * @param table Registers and their write handlers.
    * @throws config_error when the description lacks a register of @p table, or when an entry
-   *         with no handler claims the source register of a description cross rule or a
-   *         register with a field whose write effect is not `modify`, which the claim would
-   *         silently drop: a claimed word stores the written bits as they are.
+   *         with no handler claims a word one of whose views is the source register of a
+   *         description cross rule or has a field whose write effect is not `modify`, which the
+   *         claim would silently drop: a claimed word stores the written bits as they are.
    */
   void bind(std::span<write_entry<Derived> const> table)
   {
     for(auto const& entry : table)
     {
       auto const& described = this->describe(entry.reg);
+      auto const  view_of   = [&](register_desc const& view) {
+        return view.offset == described.offset and view.width == described.width;
+      };
       if(entry.on_write == nullptr)
       {
         for(auto const& rule : this->desc_.cross_rules)
         {
-          if(find_register(this->desc_, rule.reg) == &described)
+          auto const* const source = find_register(this->desc_, rule.reg);
+          if(source != nullptr and view_of(*source))
           {
             throw config_error(
                 this->ctx_.part.part, 0,
@@ -728,18 +735,21 @@ protected:
                     described.name));
           }
         }
-        for(auto const& field : described.fields)
+        for(auto const& view : this->desc_.registers | std::views::filter(view_of))
         {
-          if(field.on_write != write_effect::modify)
+          for(auto const& field : view.fields)
           {
-            throw config_error(
-                this->ctx_.part.part, 0,
-                std::format(
-                    "peripherals.{}.registers.{}.fields.{}.on_write", this->desc_.name,
-                    described.name, field.name),
-                std::format(
-                    "a write handler for {}, whose field {} has the {} write effect",
-                    described.name, field.name, field.on_write));
+            if(field.on_write != write_effect::modify)
+            {
+              throw config_error(
+                  this->ctx_.part.part, 0,
+                  std::format(
+                      "peripherals.{}.registers.{}.fields.{}.on_write", this->desc_.name, view.name,
+                      field.name),
+                  std::format(
+                      "a write handler for {}, whose field {} has the {} write effect",
+                      described.name, field.name, field.on_write));
+            }
           }
         }
       }
@@ -759,31 +769,34 @@ protected:
         readable =
             described.acc == access::write_only or described.acc == access::write_once ? 0 : whole;
       }
-      for(auto const& field : described.fields)
+      for(auto const& view : this->desc_.registers | std::views::filter(view_of))
       {
-        auto const bits =
-            field_ref{
-                .offset = at.offset,
-                .lsb    = static_cast<std::uint8_t>(at.lsb + field.lsb),
-                .width  = field.width}
-                .mask();
-        if(field.acc != access::read_only)
+        for(auto const& field : view.fields)
         {
-          writable |= bits;
-        }
-        if(field.acc != access::write_only and field.acc != access::write_once)
-        {
-          readable |= bits;
-        }
-        if(field.acc == access::write_only or field.on_write != write_effect::modify)
-        {
-          actions |= bits;
-        }
-        if(field.on_write == write_effect::zero_to_clear
-           or field.on_write == write_effect::zero_to_set
-           or field.on_write == write_effect::zero_to_toggle)
-        {
-          idle |= bits;
+          auto const bits =
+              field_ref{
+                  .offset = at.offset,
+                  .lsb    = static_cast<std::uint8_t>(at.lsb + field.lsb),
+                  .width  = field.width}
+                  .mask();
+          if(field.acc != access::read_only)
+          {
+            writable |= bits;
+          }
+          if(field.acc != access::write_only and field.acc != access::write_once)
+          {
+            readable |= bits;
+          }
+          if(field.acc == access::write_only or field.on_write != write_effect::modify)
+          {
+            actions |= bits;
+          }
+          if(field.on_write == write_effect::zero_to_clear
+             or field.on_write == write_effect::zero_to_set
+             or field.on_write == write_effect::zero_to_toggle)
+          {
+            idle |= bits;
+          }
         }
       }
       bound_.push_back(

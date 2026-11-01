@@ -33,6 +33,8 @@ loopback_endpoint::~loopback_endpoint() = default;
 
 namespace
 {
+using wide = unsigned __int128;
+
 constexpr std::uint32_t transmit_done = 0;
 constexpr std::uint32_t receive_due   = 1;
 constexpr std::uint32_t idle_due      = 2;
@@ -210,6 +212,12 @@ struct usart_state
   friend auto operator==(usart_state const&, usart_state const&) -> bool = default;
 };
 
+struct sci2_saved
+{
+  usart_state   usart;
+  std::uint32_t sequence{};
+};
+
 struct locked_fields
 {
   std::string_view                  reg;
@@ -244,7 +252,9 @@ struct lock
 /**
  * @brief USART, UART and LPUART of the STM32U5, RM0456 sections 66 and 67, asynchronous mode.
  *        Frames leave and arrive one frame time apart at the baud the kernel clock, PRESC and BRR
- *        give, read when each frame starts. FIFO mode, 8 frames each way, or single registers.
+ *        give, read when each frame starts. A frame lasts its bit count times USARTDIV periods of
+ *        the kernel clock divided by PRESC, one exact product rounded down to the picosecond.
+ *        FIFO mode, 8 frames each way, or single registers.
  *        TX frames reach the port's endpoint when their stop bit ends. RX frames the board queues
  *        arrive one frame time apart, an overrun drops the frame and sets ORE, IDLE follows one
  *        idle frame. With CR3.DMAT the `<instance>_tx_dma` request follows TXE, with CR3.DMAR the
@@ -334,6 +344,26 @@ struct lock
  *        while the hold's character is still sampled: silicon reads one garbled character. A
  *        reset ends every hold: nothing after it, and a later release is ignored. Host frames
  *        keep their own path during a hold, a linked UART takes none.
+ *
+ *        The `sci2` register set of the STM32L1 USART and UART, RM0038 27.6, drives the same
+ *        frame engine with one data word each way: SR holds TXE for an empty TDR, TC, RXNE, IDLE,
+ *        ORE, NF, FE, PE, LBD and the CTS change flag, DR writes TDR and reads RDR, CR1.M picks 8
+ *        or 9 data bits, BRR is DIV_Mantissa and DIV_Fraction, with OVER8 the fraction counts
+ *        eighths in its bits 2:0. A write to SR clears TC, RXNE, LBD and CTS where it writes 0
+ *        and leaves every other bit, a cleared RXNE drops the received word. A CPU or DMA read
+ *        of SR notes which of IDLE, ORE, NF, FE, PE and TC are set, a following DR read clears
+ *        the noted IDLE, ORE, NF, FE and PE, a following DR write the noted TC and PE, RM0038
+ *        27.6.1: a flag set after the SR read stays. The note is saved with the model state.
+ *        EIE raises the line on ORE, NF or FE only while CR3.DMAR is 1, RM0038 27.6.6. CR1.SBK
+ *        requests a break while UE and TE are 1, a write of 0 before the break starts cancels
+ *        it, RM0038 27.3.2. Once the low part runs SBK reads 1 until it ends, a write of 0
+ *        meanwhile keeps it, inferred, and the line stays high
+ *        `usart_variant::break_stop_half_bits` before the next frame. A write with UE 0 clears
+ *        SBK and lets the frame in flight end before the output stops, RM0038 27.6.4. The
+ *        kernel clock is the APB clock of the bus the instance's address lies on,
+ *        `usart_variant::kernel_buses`. Without `usart_variant::flow_control` CTSE and RTSE log
+ *        one warning and change nothing. Nothing is locked while UE is 1, RWU mute mode is
+ *        logged as not modelled, LBD never sets.
  */
 class usart final : public dispatch_model<usart, usart_state>,
                     public uart_link_port,
@@ -359,6 +389,8 @@ public:
       std::uint32_t  value,
       access_ctx     ctx) -> std::expected<void, bus_error> override;
 
+  void               save(std::vector<std::byte>& out) const override;
+  void               load(std::span<std::byte const> in) override;
   void               receive_frames(std::span<host_frame const> frames) override;
   [[nodiscard]] auto queued() const -> std::size_t override;
   void               set_cts(bool ready, vtime at) override;
@@ -376,10 +408,15 @@ public:
   void request_written(std::uint32_t old, std::uint32_t now);
   void transmit_written(std::uint32_t old, std::uint32_t now);
   void plain_written(std::uint32_t old, std::uint32_t now);
+  void status_written(std::uint32_t old, std::uint32_t now);
+  void clear_sequence(std::uint32_t flags);
+  void break_written();
 
 private:
   void               restore_reset_values(bool keep_host);
   [[nodiscard]] auto enabled() const -> bool;
+  [[nodiscard]] auto cts_on() const -> bool;
+  [[nodiscard]] auto rts_on() const -> bool;
   [[nodiscard]] auto fifo() const -> bool;
   [[nodiscard]] auto frame_ps() -> std::uint64_t;
   [[nodiscard]] auto word_bits() const -> std::uint32_t;
@@ -406,69 +443,75 @@ private:
   void               flags();
   void               interrupts();
   void               warn_unsupported();
+  [[nodiscard]] auto bit(std::optional<field_ref> const& flag) const -> std::uint32_t;
+  [[nodiscard]] auto sci3_field(std::string_view reg_name, std::string_view name) const
+      -> std::optional<field_ref>;
+  void put(std::optional<field_ref> const& flag, std::uint32_t value);
 
   register_file&                               regs_;
   std::shared_ptr<uart_endpoint>               far_end_;
   bool                                         low_power_;
+  bool                                         sci2_;
   std::string                                  cr1_;
   std::string                                  isr_;
   reg_ref                                      rdr_;
   reg_ref                                      tdr_;
-  reg_ref                                      icr_;
+  std::optional<reg_ref>                       icr_;
   field_ref                                    enable_;
   field_ref                                    transmit_;
   field_ref                                    receive_;
   std::optional<field_ref>                     fifo_enable_;
   field_ref                                    word_low_;
-  field_ref                                    word_high_;
+  std::optional<field_ref>                     word_high_;
   std::optional<field_ref>                     oversampling_;
   field_ref                                    stop_;
-  field_ref                                    overrun_disable_;
+  std::optional<field_ref>                     overrun_disable_;
   field_ref                                    baud_;
-  field_ref                                    prescaler_;
+  std::optional<field_ref>                     baud_fraction_;
+  std::optional<field_ref>                     prescaler_;
   field_ref                                    data_;
   field_ref                                    tx_not_full_;
-  field_ref                                    tx_empty_;
+  std::optional<field_ref>                     tx_empty_;
   field_ref                                    complete_;
   field_ref                                    rx_not_empty_;
-  field_ref                                    rx_full_;
+  std::optional<field_ref>                     rx_full_;
   field_ref                                    idle_;
   field_ref                                    overrun_;
   field_ref                                    noise_;
   field_ref                                    framing_;
   field_ref                                    parity_;
-  field_ref                                    tx_ack_;
-  field_ref                                    rx_ack_;
-  field_ref                                    busy_;
+  std::optional<field_ref>                     tx_ack_;
+  std::optional<field_ref>                     rx_ack_;
+  std::optional<field_ref>                     busy_;
   field_ref                                    tx_not_full_ie_;
-  field_ref                                    tx_empty_ie_;
+  std::optional<field_ref>                     tx_empty_ie_;
   field_ref                                    complete_ie_;
   field_ref                                    rx_not_empty_ie_;
-  field_ref                                    rx_full_ie_;
+  std::optional<field_ref>                     rx_full_ie_;
   field_ref                                    idle_ie_;
   field_ref                                    parity_ie_;
   field_ref                                    error_ie_;
-  field_ref                                    tx_threshold_;
+  std::optional<field_ref>                     tx_threshold_;
   field_ref                                    dma_transmit_;
   field_ref                                    dma_receive_;
   dma_signal                                   tx_dma_;
   dma_signal                                   rx_dma_;
-  field_ref                                    rx_threshold_;
-  field_ref                                    tx_threshold_ie_;
-  field_ref                                    rx_threshold_ie_;
-  field_ref                                    tx_threshold_flag_;
-  field_ref                                    rx_threshold_flag_;
-  field_ref                                    flush_rx_;
-  field_ref                                    flush_tx_;
+  std::optional<field_ref>                     rx_threshold_;
+  std::optional<field_ref>                     tx_threshold_ie_;
+  std::optional<field_ref>                     rx_threshold_ie_;
+  std::optional<field_ref>                     tx_threshold_flag_;
+  std::optional<field_ref>                     rx_threshold_flag_;
+  std::optional<field_ref>                     flush_rx_;
+  std::optional<field_ref>                     flush_tx_;
   field_ref                                    parity_enable_;
   field_ref                                    parity_odd_;
   field_ref                                    break_request_;
   field_ref                                    break_flag_;
   field_ref                                    cts_enable_;
   field_ref                                    rts_enable_;
-  field_ref                                    driver_enable_;
+  std::optional<field_ref>                     driver_enable_;
   field_ref                                    cts_ie_;
-  field_ref                                    cts_;
+  std::optional<field_ref>                     cts_;
   field_ref                                    cts_flag_;
   std::optional<field_ref>                     one_bit_;
   std::vector<std::pair<field_ref, field_ref>> clears_;
@@ -479,6 +522,13 @@ private:
   bool                                         no_baud_logged_{};
   bool                                         parity_tag_logged_{};
   std::vector<lock>                            locks_;
+  std::uint32_t                                status_clears_{};
+  std::uint32_t                                break_stop_half_bits_;
+  bool                                         flow_control_;
+  bool                                         flow_logged_{};
+  std::uint32_t                                read_clears_{};
+  std::uint32_t                                write_clears_{};
+  std::uint32_t                                sequence_{};
   std::optional<field_ref>                     auto_baud_;
   std::optional<field_ref>                     auto_baud_mode_;
   std::optional<field_ref>                     retransmissions_;
@@ -514,6 +564,20 @@ auto usart_writes(usart_variant const& variant) -> std::span<write_entry<usart> 
        {"PRESC", &usart::control_written},
        }
   };
+  static constexpr std::array<write_entry<usart>, 6> sci2{
+      {
+       {"CR1", &usart::control_written},
+       {"CR2", &usart::control_written},
+       {"CR3", &usart::control_written},
+       {"SR", &usart::status_written},
+       {"DR", &usart::transmit_written},
+       {"BRR", &usart::control_written},
+       }
+  };
+  if(variant.registers == usart_registers::sci2)
+  {
+    return sci2;
+  }
   return variant.mode_views ? std::span<write_entry<usart> const>{with_views} : plain;
 }
 
@@ -530,6 +594,21 @@ auto lower(std::string_view name) -> std::string
   return out;
 }
 
+auto kernel_name(peripheral_desc const& desc, usart_variant const& variant) -> std::string
+{
+  if(variant.kernel_buses.empty())
+  {
+    return lower(desc.name);
+  }
+  auto const* const bus = window_of(variant.kernel_buses, static_cast<std::uint32_t>(desc.base));
+  if(bus == nullptr)
+  {
+    throw config_error(
+        desc.name, 0, "base", "an address on one of the buses that clock the USART model");
+  }
+  return std::string{bus->clock};
+}
+
 usart::usart(
     model_context&                 ctx,
     peripheral_desc const&         desc,
@@ -537,36 +616,43 @@ usart::usart(
     usart_variant const&           variant)
     : dispatch_model{ctx, desc, desc.ip, usart_writes(variant)}, regs_{ctx.regs},
       far_end_{std::move(far_end)}, low_power_{desc.ip == "LPUART"},
+      sci2_{variant.registers == usart_registers::sci2},
       cr1_{variant.mode_views ? "CR1_enabled" : "CR1"},
-      isr_{variant.mode_views ? "ISR_enabled" : "ISR"}, rdr_{reg("RDR")}, tdr_{reg("TDR")},
-      icr_{reg("ICR")}, enable_{field(cr1_, "UE")}, transmit_{field(cr1_, "TE")},
-      receive_{field(cr1_, "RE")},
+      isr_{sci2_ ? "SR" : (variant.mode_views ? "ISR_enabled" : "ISR")},
+      rdr_{reg(sci2_ ? "DR" : "RDR")}, tdr_{reg(sci2_ ? "DR" : "TDR")},
+      icr_{sci2_ ? std::nullopt : std::optional{reg("ICR")}}, enable_{field(cr1_, "UE")},
+      transmit_{field(cr1_, "TE")}, receive_{field(cr1_, "RE")},
       fifo_enable_{variant.fifo ? std::optional{field(cr1_, "FIFOEN")} : std::nullopt},
-      word_low_{field(cr1_, "M0")}, word_high_{field(cr1_, "M1")},
+      word_low_{field(cr1_, sci2_ ? "M" : "M0")}, word_high_{sci3_field(cr1_, "M1")},
       oversampling_{low_power_ ? std::nullopt : std::optional{field(cr1_, "OVER8")}},
-      stop_{field("CR2", "STOP")}, overrun_disable_{field("CR3", "OVRDIS")},
-      baud_{field("BRR", "BRR")}, prescaler_{field("PRESC", "PRESCALER")},
-      data_{field("RDR", "RDR")}, tx_not_full_{field(isr_, "TXFNF")},
-      tx_empty_{field(isr_, "TXFE")}, complete_{field(isr_, "TC")},
-      rx_not_empty_{field(isr_, "RXFNE")}, rx_full_{field(isr_, "RXFF")},
-      idle_{field(isr_, "IDLE")}, overrun_{field(isr_, "ORE")}, noise_{field(isr_, "NE")},
-      framing_{field(isr_, "FE")}, parity_{field(isr_, "PE")}, tx_ack_{field(isr_, "TEACK")},
-      rx_ack_{field(isr_, "REACK")}, busy_{field(isr_, "BUSY")},
-      tx_not_full_ie_{field(cr1_, "TXFNFIE")}, tx_empty_ie_{field(cr1_, "TXFEIE")},
-      complete_ie_{field(cr1_, "TCIE")}, rx_not_empty_ie_{field(cr1_, "RXFNEIE")},
-      rx_full_ie_{field(cr1_, "RXFFIE")}, idle_ie_{field(cr1_, "IDLEIE")},
+      stop_{field("CR2", "STOP")}, overrun_disable_{sci3_field("CR3", "OVRDIS")},
+      baud_{field("BRR", sci2_ ? "DIV_Mantissa" : "BRR")},
+      baud_fraction_{sci2_ ? std::optional{field("BRR", "DIV_Fraction")} : std::nullopt},
+      prescaler_{sci3_field("PRESC", "PRESCALER")},
+      data_{field(sci2_ ? "DR" : "RDR", sci2_ ? "DR" : "RDR")},
+      tx_not_full_{field(isr_, sci2_ ? "TXE" : "TXFNF")}, tx_empty_{sci3_field(isr_, "TXFE")},
+      complete_{field(isr_, "TC")}, rx_not_empty_{field(isr_, sci2_ ? "RXNE" : "RXFNE")},
+      rx_full_{sci3_field(isr_, "RXFF")}, idle_{field(isr_, "IDLE")}, overrun_{field(isr_, "ORE")},
+      noise_{field(isr_, sci2_ ? "NF" : "NE")}, framing_{field(isr_, "FE")},
+      parity_{field(isr_, "PE")}, tx_ack_{sci3_field(isr_, "TEACK")},
+      rx_ack_{sci3_field(isr_, "REACK")}, busy_{sci3_field(isr_, "BUSY")},
+      tx_not_full_ie_{field(cr1_, sci2_ ? "TXEIE" : "TXFNFIE")},
+      tx_empty_ie_{sci3_field(cr1_, "TXFEIE")}, complete_ie_{field(cr1_, "TCIE")},
+      rx_not_empty_ie_{field(cr1_, sci2_ ? "RXNEIE" : "RXFNEIE")},
+      rx_full_ie_{sci3_field(cr1_, "RXFFIE")}, idle_ie_{field(cr1_, "IDLEIE")},
       parity_ie_{field(cr1_, "PEIE")}, error_ie_{field("CR3", "EIE")},
-      tx_threshold_{field("CR3", "TXFTCFG")}, dma_transmit_{field("CR3", "DMAT")},
+      tx_threshold_{sci3_field("CR3", "TXFTCFG")}, dma_transmit_{field("CR3", "DMAT")},
       dma_receive_{field("CR3", "DMAR")}, tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
-      rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"}, rx_threshold_{field("CR3", "RXFTCFG")},
-      tx_threshold_ie_{field("CR3", "TXFTIE")}, rx_threshold_ie_{field("CR3", "RXFTIE")},
-      tx_threshold_flag_{field(isr_, "TXFT")}, rx_threshold_flag_{field(isr_, "RXFT")},
-      flush_rx_{field("RQR", "RXFRQ")}, flush_tx_{field("RQR", "TXFRQ")},
+      rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"}, rx_threshold_{sci3_field("CR3", "RXFTCFG")},
+      tx_threshold_ie_{sci3_field("CR3", "TXFTIE")}, rx_threshold_ie_{sci3_field("CR3", "RXFTIE")},
+      tx_threshold_flag_{sci3_field(isr_, "TXFT")}, rx_threshold_flag_{sci3_field(isr_, "RXFT")},
+      flush_rx_{sci3_field("RQR", "RXFRQ")}, flush_tx_{sci3_field("RQR", "TXFRQ")},
       parity_enable_{field(cr1_, "PCE")}, parity_odd_{field(cr1_, "PS")},
-      break_request_{field("RQR", "SBKRQ")}, break_flag_{field(isr_, "SBKF")},
+      break_request_{sci2_ ? field(cr1_, "SBK") : field("RQR", "SBKRQ")},
+      break_flag_{sci2_ ? field(cr1_, "SBK") : field(isr_, "SBKF")},
       cts_enable_{field("CR3", "CTSE")}, rts_enable_{field("CR3", "RTSE")},
-      driver_enable_{field("CR3", "DEM")}, cts_ie_{field("CR3", "CTSIE")}, cts_{field(isr_, "CTS")},
-      cts_flag_{field(isr_, "CTSIF")},
+      driver_enable_{sci3_field("CR3", "DEM")}, cts_ie_{field("CR3", "CTSIE")},
+      cts_{sci3_field(isr_, "CTS")}, cts_flag_{field(isr_, sci2_ ? "CTS" : "CTSIF")},
       one_bit_{
           std::ranges::contains(
               describe("CR3").fields,
@@ -574,41 +660,48 @@ usart::usart(
               &field_desc::name)
               ? std::optional{field("CR3", "ONEBIT")}
               : std::nullopt},
-      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(line_name(desc, variant))}
+      kernel_{ctx.clock.domain(kernel_name(desc, variant))}, line_{irq(line_name(desc, variant))},
+      break_stop_half_bits_{variant.break_stop_half_bits}, flow_control_{variant.flow_control}
 {
   expect_register("CR1_enabled", variant.mode_views);
   expect_field(cr1_, "FIFOEN", variant.fifo);
-  for(auto const& clear : describe("ICR").fields)
+  if(icr_)
   {
-    auto const target = clear.name == "CTSCF"
-                          ? std::string_view{"CTSIF"}
-                          : std::string_view{clear.name}.substr(0, clear.name.size() - 2);
-    if(clear.name.ends_with("CF")
-       and std::ranges::contains(describe(isr_).fields, target, &field_desc::name))
+    for(auto const& clear : describe("ICR").fields)
     {
-      clears_.emplace_back(field("ICR", clear.name), field(isr_, target));
+      auto const target = clear.name == "CTSCF"
+                            ? std::string_view{"CTSIF"}
+                            : std::string_view{clear.name}.substr(0, clear.name.size() - 2);
+      if(clear.name.ends_with("CF")
+         and std::ranges::contains(describe(isr_).fields, target, &field_desc::name))
+      {
+        clears_.emplace_back(field("ICR", clear.name), field(isr_, target));
+      }
     }
   }
-  auto const tables = low_power_ ? std::array<locked_fields, 5>{{{cr1_, lpuart_cr1},
-                                                                 {"CR2", lpuart_cr2},
-                                                                 {"CR3", lpuart_cr3},
-                                                                 {"BRR", whole_brr},
-                                                                 {"PRESC", whole_presc}}}
-                                 : std::array<locked_fields, 5>{{{cr1_, usart_cr1},
-                                                                 {"CR2", usart_cr2},
-                                                                 {"CR3", usart_cr3},
-                                                                 {"BRR", whole_brr},
-                                                                 {"PRESC", whole_presc}}};
-  for(auto const& [reg_name, names] : tables)
+  if(not sci2_)
   {
-    auto& entry  = locks_.emplace_back();
-    entry.reg    = reg_name == cr1_ ? std::string{"CR1"} : std::string{reg_name};
-    entry.offset = reg(reg_name).offset;
-    for(auto const& bits : describe(reg_name).fields)
+    auto const tables = low_power_ ? std::array<locked_fields, 5>{{{cr1_, lpuart_cr1},
+                                                                   {"CR2", lpuart_cr2},
+                                                                   {"CR3", lpuart_cr3},
+                                                                   {"BRR", whole_brr},
+                                                                   {"PRESC", whole_presc}}}
+                                   : std::array<locked_fields, 5>{{{cr1_, usart_cr1},
+                                                                   {"CR2", usart_cr2},
+                                                                   {"CR3", usart_cr3},
+                                                                   {"BRR", whole_brr},
+                                                                   {"PRESC", whole_presc}}};
+    for(auto const& [reg_name, names] : tables)
     {
-      if(std::ranges::contains(names, std::string_view{bits.name}))
+      auto& entry  = locks_.emplace_back();
+      entry.reg    = reg_name == cr1_ ? std::string{"CR1"} : std::string{reg_name};
+      entry.offset = reg(reg_name).offset;
+      for(auto const& bits : describe(reg_name).fields)
       {
-        entry.mask |= field(reg_name, bits.name).mask();
+        if(std::ranges::contains(names, std::string_view{bits.name}))
+        {
+          entry.mask |= field(reg_name, bits.name).mask();
+        }
       }
     }
   }
@@ -638,6 +731,15 @@ usart::usart(
       unsupported_.push_back(field(reg, name));
     }
   }
+  if(sci2_)
+  {
+    unsupported_.push_back(field(cr1_, "RWU"));
+    status_clears_ =
+        complete_.mask() | rx_not_empty_.mask() | cts_flag_.mask() | field(isr_, "LBD").mask();
+    read_clears_ =
+        idle_.mask() | overrun_.mask() | noise_.mask() | framing_.mask() | parity_.mask();
+    write_clears_ = complete_.mask() | parity_.mask();
+  }
 }
 
 auto usart::on_write(
@@ -648,7 +750,11 @@ auto usart::on_write(
     std::uint32_t  value,
     access_ctx     access) -> std::expected<void, bus_error>
 {
-  auto const word  = offset & ~3u;
+  auto const word = offset & ~3u;
+  if(sci2_ and access.by != initiator::debugger and word == tdr_.offset)
+  {
+    clear_sequence(write_clears_);
+  }
   auto const found = std::ranges::find(locks_, word, &lock::offset);
   if(found == locks_.end() or access.by == initiator::debugger or not enabled())
   {
@@ -735,9 +841,39 @@ void usart::restore_reset_values(bool keep_host)
   state_.tx_end_ps        = 0;
   state_.idle_pending     = false;
   state_.cts_hold_from_ps = 0;
+  sequence_               = 0;
   tx_dma_.resolve();
   rx_dma_.resolve();
   flags();
+}
+
+auto usart::bit(std::optional<field_ref> const& flag) const -> std::uint32_t
+{
+  return flag ? get(regs_, *flag) : 0;
+}
+
+void usart::put(std::optional<field_ref> const& flag, std::uint32_t value)
+{
+  if(flag)
+  {
+    update(regs_, *flag, value);
+  }
+}
+
+auto usart::sci3_field(std::string_view reg_name, std::string_view name) const
+    -> std::optional<field_ref>
+{
+  return sci2_ ? std::nullopt : std::optional{field(reg_name, name)};
+}
+
+auto usart::cts_on() const -> bool
+{
+  return flow_control_ and get(regs_, cts_enable_) != 0;
+}
+
+auto usart::rts_on() const -> bool
+{
+  return flow_control_ and get(regs_, rts_enable_) != 0;
 }
 
 auto usart::enabled() const -> bool
@@ -752,26 +888,31 @@ auto usart::fifo() const -> bool
 
 auto usart::frame_ps() -> std::uint64_t
 {
-  auto const    code = get(regs_, prescaler_);
-  auto const    hz  = ctx_.clock.hz(kernel_) / (code < prescalers.size() ? prescalers[code] : 256u);
-  auto const    brr = get(regs_, baud_);
-  std::uint64_t baud = 0;
+  auto const code  = bit(prescaler_);
+  auto const hz    = ctx_.clock.hz(kernel_);
+  auto const presc = std::uint64_t{code < prescalers.size() ? prescalers[code] : 256u};
+  auto const brr =
+      baud_fraction_ ? get(regs_, baud_) << 4 | get(regs_, *baud_fraction_) : get(regs_, baud_);
+  std::uint64_t clocks_per_bit = 0;
+  std::uint64_t bit_divider    = 1;
   if(brr != 0 and hz != 0)
   {
     if(low_power_)
     {
-      baud = brr < 0x300 ? 0 : 256 * hz / brr;
+      clocks_per_bit = brr < 0x300 ? 0 : brr;
+      bit_divider    = 256;
     }
     else if(get(regs_, *oversampling_) != 0)
     {
-      baud = 2 * hz / ((brr & 0xfff0u) | ((brr & 7u) << 1));
+      clocks_per_bit = (brr & 0xfff0u) | ((brr & 7u) << 1);
+      bit_divider    = 2;
     }
     else
     {
-      baud = hz / brr;
+      clocks_per_bit = brr;
     }
   }
-  if(baud == 0)
+  if(clocks_per_bit == 0)
   {
     auto const in_use = enabled() and (get(regs_, transmit_) != 0 or get(regs_, receive_) != 0);
     if(in_use and not std::exchange(no_baud_logged_, true))
@@ -783,7 +924,8 @@ auto usart::frame_ps() -> std::uint64_t
   auto const                             word = word_bits();
   constexpr std::array<std::uint32_t, 4> half_stops{2, 1, 4, 3};
   auto const                             half_bits = 2 * (1 + word) + half_stops[get(regs_, stop_)];
-  return half_bits * ps_per_second / (2 * baud);
+  return static_cast<std::uint64_t>(
+      wide{half_bits} * clocks_per_bit * presc * ps_per_second / (2 * bit_divider * hz));
 }
 
 auto usart::schedule(std::uint32_t kind, std::uint64_t from_ps, std::uint64_t ps) -> std::uint64_t
@@ -823,8 +965,16 @@ void usart::warn_unsupported()
       warn(
           "CR1",
           "a mode other than plain asynchronous is configured: synchronous, smartcard, IrDA, LIN, "
-          "half-duplex, driver enable, auto baud or receiver timeout, not modelled");
+          "half-duplex, driver enable, auto baud, receiver timeout or mute mode, not modelled");
     }
+  }
+  auto const flow = get(regs_, cts_enable_) != 0 or get(regs_, rts_enable_) != 0;
+  if(not flow_control_ and flow and not std::exchange(flow_logged_, true))
+  {
+    warn(
+        "CR3",
+        "CTSE or RTSE set on a UART without hardware flow control, RM0038 Table 157: transmission "
+        "and reception ignore them");
   }
 }
 
@@ -883,7 +1033,7 @@ auto usart::parity() const -> line_parity
 
 auto usart::word_bits() const -> std::uint32_t
 {
-  return get(regs_, word_high_) != 0 ? 7u : (get(regs_, word_low_) != 0 ? 9u : 8u);
+  return bit(word_high_) != 0 ? 7u : (get(regs_, word_low_) != 0 ? 9u : 8u);
 }
 
 auto usart::word_mask() const -> std::uint32_t
@@ -895,20 +1045,20 @@ void usart::flags()
 {
   auto const                           depth = fifo() ? fifo_depth : 1;
   constexpr std::array<std::size_t, 6> eighths{1, 2, 4, 6, 7, 0};
-  auto const                           tx_code = get(regs_, tx_threshold_);
-  auto const                           rx_code = get(regs_, rx_threshold_);
+  auto const                           tx_code = bit(tx_threshold_);
+  auto const                           rx_code = bit(rx_threshold_);
   auto const                           tx_at   = tx_code < eighths.size() ? eighths[tx_code] : 0;
   auto const rx_at = rx_code < eighths.size() ? (rx_code == 5 ? 8 : eighths[rx_code]) : 8;
-  update(regs_, tx_threshold_flag_, fifo() and state_.tx_fifo.size() <= tx_at ? 1 : 0);
-  update(regs_, rx_threshold_flag_, fifo() and state_.rx_fifo.size() >= rx_at ? 1 : 0);
+  put(tx_threshold_flag_, fifo() and state_.tx_fifo.size() <= tx_at ? 1 : 0);
+  put(rx_threshold_flag_, fifo() and state_.rx_fifo.size() >= rx_at ? 1 : 0);
   update(regs_, tx_not_full_, state_.tx_fifo.size() < depth ? 1 : 0);
-  update(regs_, tx_empty_, state_.tx_fifo.empty() ? 1 : 0);
+  put(tx_empty_, state_.tx_fifo.empty() ? 1 : 0);
   update(regs_, rx_not_empty_, state_.rx_fifo.empty() ? 0 : 1);
-  update(regs_, rx_full_, state_.rx_fifo.size() >= depth ? 1 : 0);
-  update(regs_, busy_, state_.receiving ? 1 : 0);
-  update(regs_, tx_ack_, enabled() and get(regs_, transmit_) != 0 ? 1 : 0);
-  update(regs_, rx_ack_, enabled() and get(regs_, receive_) != 0 ? 1 : 0);
-  update(regs_, cts_, get(regs_, cts_enable_) != 0 and state_.cts_ready ? 1 : 0);
+  put(rx_full_, state_.rx_fifo.size() >= depth ? 1 : 0);
+  put(busy_, state_.receiving ? 1 : 0);
+  put(tx_ack_, enabled() and get(regs_, transmit_) != 0 ? 1 : 0);
+  put(rx_ack_, enabled() and get(regs_, receive_) != 0 ? 1 : 0);
+  put(cts_, cts_on() and state_.cts_ready ? 1 : 0);
   regs_.poke(rdr_.offset, state_.rx_fifo.empty() ? 0 : state_.rx_fifo.front().data);
   interrupts();
   auto const up        = enabled();
@@ -920,23 +1070,24 @@ void usart::flags()
 
 void usart::interrupts()
 {
-  auto const on = [&](field_ref flag, field_ref enable) {
-    return get(regs_, flag) != 0 and get(regs_, enable) != 0;
+  auto const on = [&](std::optional<field_ref> flag, std::optional<field_ref> enable) {
+    return bit(flag) != 0 and bit(enable) != 0;
   };
   auto const errors =
       get(regs_, overrun_) != 0 or get(regs_, noise_) != 0 or get(regs_, framing_) != 0;
-  auto const level = on(tx_not_full_, tx_not_full_ie_)
-                  or on(tx_empty_, tx_empty_ie_)
-                  or on(complete_, complete_ie_)
-                  or on(rx_not_empty_, rx_not_empty_ie_)
-                  or on(rx_full_, rx_full_ie_)
-                  or on(idle_, idle_ie_)
-                  or on(parity_, parity_ie_)
-                  or on(cts_flag_, cts_ie_)
-                  or on(overrun_, rx_not_empty_ie_)
-                  or on(tx_threshold_flag_, tx_threshold_ie_)
-                  or on(rx_threshold_flag_, rx_threshold_ie_)
-                  or (errors and get(regs_, error_ie_) != 0);
+  auto const level =
+      on(tx_not_full_, tx_not_full_ie_)
+      or on(tx_empty_, tx_empty_ie_)
+      or on(complete_, complete_ie_)
+      or on(rx_not_empty_, rx_not_empty_ie_)
+      or on(rx_full_, rx_full_ie_)
+      or on(idle_, idle_ie_)
+      or on(parity_, parity_ie_)
+      or on(cts_flag_, cts_ie_)
+      or on(overrun_, rx_not_empty_ie_)
+      or on(tx_threshold_flag_, tx_threshold_ie_)
+      or on(rx_threshold_flag_, rx_threshold_ie_)
+      or (errors and get(regs_, error_ie_) != 0 and (not sci2_ or get(regs_, dma_receive_) != 0));
   if(level)
   {
     line_.raise();
@@ -952,30 +1103,110 @@ void usart::control_written(std::uint32_t, std::uint32_t)
   warn_unsupported();
   if(not enabled())
   {
-    if(state_.shifting and far_end_)
+    auto const finishing = sci2_ and state_.shifting;
+    if(state_.shifting and far_end_ and not finishing)
     {
       far_end_->aborted(ctx_.clock.time());
     }
-    for(auto& generation : state_.generation)
+    for(std::size_t kind = 0; kind < state_.generation.size(); ++kind)
     {
-      ++generation;
+      if(not finishing or kind != transmit_done)
+      {
+        ++state_.generation[kind];
+      }
     }
     state_.tx_fifo.clear();
     state_.rx_fifo.clear();
-    state_.shifting       = false;
-    state_.receiving      = false;
-    state_.idle_pending   = false;
-    state_.break_pending  = false;
-    state_.break_shifting = false;
-    state_.tx_end_ps      = 0;
-    update(regs_, break_flag_, 0);
-    update(regs_, complete_, 1);
+    state_.receiving     = false;
+    state_.idle_pending  = false;
+    state_.break_pending = false;
+    if(not finishing)
+    {
+      state_.shifting       = false;
+      state_.break_shifting = false;
+      state_.tx_end_ps      = 0;
+      update(regs_, complete_, 1);
+    }
+    if(not state_.break_shifting)
+    {
+      update(regs_, break_flag_, 0);
+    }
   }
   else if(get(regs_, receive_) != 0)
   {
     resume_host();
   }
+  if(sci2_)
+  {
+    break_written();
+  }
   start_frame(std::max(ctx_.clock.time().ps, state_.tx_end_ps));
+  flags();
+}
+
+void usart::break_written()
+{
+  auto const requested = get(regs_, break_request_) != 0;
+  if(not requested)
+  {
+    state_.break_pending = false;
+  }
+  else if(
+      not state_.break_pending
+      and not state_.break_shifting
+      and enabled()
+      and get(regs_, transmit_) != 0)
+  {
+    state_.break_pending = true;
+  }
+  if(state_.break_shifting)
+  {
+    update(regs_, break_flag_, 1);
+  }
+}
+
+void usart::clear_sequence(std::uint32_t flags)
+{
+  auto const seen = sequence_ & flags;
+  sequence_ &= ~flags;
+  if(seen != 0)
+  {
+    regs_.poke(complete_.offset, regs_.peek(complete_.offset) & ~seen);
+    this->flags();
+  }
+}
+
+void usart::save(std::vector<std::byte>& out) const
+{
+  if(not sci2_)
+  {
+    dispatch_model::save(out);
+    return;
+  }
+  reflex::serde::bson::serializer{out}.dump(sci2_saved{.usart = state_, .sequence = sequence_});
+}
+
+void usart::load(std::span<std::byte const> in)
+{
+  if(not sci2_)
+  {
+    dispatch_model::load(in);
+    return;
+  }
+  auto saved = reflex::serde::bson::deserializer{in}.load<sci2_saved>();
+  state_     = std::move(saved.usart);
+  sequence_  = saved.sequence;
+}
+
+void usart::status_written(std::uint32_t old, std::uint32_t now)
+{
+  auto const cleared = status_clears_ & ~now;
+  regs_.poke(complete_.offset, old & ~cleared);
+  if(rx_not_empty_.of(cleared) != 0 and not state_.rx_fifo.empty())
+  {
+    state_.rx_fifo.erase(state_.rx_fifo.begin());
+    resume_host();
+  }
   flags();
 }
 
@@ -988,7 +1219,10 @@ void usart::transmit_written(std::uint32_t, std::uint32_t now)
   if(enabled() and get(regs_, transmit_) != 0 and state_.tx_fifo.size() < depth)
   {
     state_.tx_fifo.push_back(static_cast<std::uint16_t>(now & word_mask()));
-    update(regs_, complete_, 0);
+    if(not sci2_)
+    {
+      update(regs_, complete_, 0);
+    }
     start_frame(std::max(ctx_.clock.time().ps, state_.tx_end_ps));
   }
   flags();
@@ -1003,7 +1237,7 @@ void usart::clear_written(std::uint32_t, std::uint32_t now)
       update(regs_, target, 0);
     }
   }
-  regs_.poke(icr_.offset, 0);
+  regs_.poke(icr_->offset, 0);
   flags();
 }
 
@@ -1015,12 +1249,12 @@ void usart::request_written(std::uint32_t, std::uint32_t now)
     state_.break_pending = true;
     start_frame(std::max(ctx_.clock.time().ps, state_.tx_end_ps));
   }
-  if(flush_rx_.of(now) != 0)
+  if(flush_rx_->of(now) != 0)
   {
     state_.rx_fifo.clear();
     resume_host();
   }
-  if(flush_tx_.of(now) != 0)
+  if(flush_tx_->of(now) != 0)
   {
     state_.tx_fifo.clear();
   }
@@ -1030,9 +1264,18 @@ void usart::request_written(std::uint32_t, std::uint32_t now)
 auto usart::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
     -> std::expected<std::uint32_t, bus_error>
 {
-  if((offset & ~3u) != rdr_.offset)
+  auto const word = offset & ~3u;
+  if(sci2_ and ctx.by != initiator::debugger and word == complete_.offset)
+  {
+    sequence_ = regs.peek(word) & (read_clears_ | write_clears_);
+  }
+  if(word != rdr_.offset)
   {
     return dispatch_model::on_read(regs, offset, size, ctx);
+  }
+  if(sci2_ and ctx.by != initiator::debugger)
+  {
+    clear_sequence(read_clears_);
   }
   if(ctx.by == initiator::debugger or state_.rx_fifo.empty())
   {
@@ -1171,7 +1414,9 @@ void usart::on_event(std::uint32_t kind, std::uint64_t payload)
     if(brk)
     {
       update(regs_, break_flag_, 0);
-      next += 4 * frame_ps() / half_bits(word_bits(), half_stop_codes[get(regs_, stop_)]);
+      next += break_stop_half_bits_
+            * frame_ps()
+            / half_bits(word_bits(), half_stop_codes[get(regs_, stop_)]);
       state_.tx_end_ps = next;
     }
     start_frame(next);
@@ -1366,7 +1611,7 @@ void usart::deliver(rx_entry entry)
       expose();
     }
   }
-  else if(get(regs_, overrun_disable_) == 0)
+  else if(bit(overrun_disable_) == 0)
   {
     update(regs_, overrun_, 1);
   }
@@ -1553,12 +1798,12 @@ auto usart::rx_space() const -> bool
 
 auto usart::ready_to_receive() const -> bool
 {
-  return get(regs_, rts_enable_) == 0 or get(regs_, driver_enable_) != 0 or rx_space();
+  return not rts_on() or bit(driver_enable_) != 0 or rx_space();
 }
 
 auto usart::clear_to_send(std::uint64_t start_ps) const -> bool
 {
-  return get(regs_, cts_enable_) == 0 or state_.cts_ready or start_ps < state_.cts_hold_from_ps;
+  return not cts_on() or state_.cts_ready or start_ps < state_.cts_hold_from_ps;
 }
 
 auto usart::board_base() const -> std::uint64_t
@@ -1613,7 +1858,7 @@ void usart::apply_cts(bool ready, std::uint64_t at_ps)
   {
     state_.cts_hold_from_ps = at_ps + 1;
   }
-  if(get(regs_, cts_enable_) != 0)
+  if(cts_on())
   {
     update(regs_, cts_flag_, 1);
   }

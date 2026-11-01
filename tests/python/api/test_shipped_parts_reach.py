@@ -12,6 +12,8 @@ import popcorn
 import pytest
 from popcorn.stm32 import shipped_parts
 
+FAMILIES = ("STM32U5", "STM32H5")
+FAMILY_PARTS = [part for part in shipped_parts() if part.startswith(FAMILIES)]
 FLASH_START = 0x0800_0000
 FLASH_KIB = {"G": 1024, "I": 2048}
 FLASHSIZE_ADDRESS = {"U5": 0x0BFA_07A0, "H5": 0x08FF_F80C}
@@ -52,7 +54,7 @@ def covered(machine: popcorn.Machine, address: int) -> bool:
     )
 
 
-@pytest.mark.parametrize("part", shipped_parts())
+@pytest.mark.parametrize("part", FAMILY_PARTS)
 def test_flashsize_matches_the_flash_region_and_the_ordering_code(part: str) -> None:
     machine = build(part)
     region = next(r for r in machine.description.regions if r.name == "Flash_NS")
@@ -60,7 +62,7 @@ def test_flashsize_matches_the_flash_region_and_the_ordering_code(part: str) -> 
     assert region.size == flash_kib(part) * 1024
 
 
-@pytest.mark.parametrize("part", shipped_parts())
+@pytest.mark.parametrize("part", FAMILY_PARTS)
 def test_the_last_flash_quad_word_round_trips_and_the_next_address_refuses(part: str) -> None:
     machine = build(part)
     end = FLASH_START + flash_kib(part) * 1024
@@ -75,7 +77,7 @@ def test_the_last_flash_quad_word_round_trips_and_the_next_address_refuses(part:
         machine.mem.read(end, 4)
 
 
-@pytest.mark.parametrize("part", shipped_parts())
+@pytest.mark.parametrize("part", FAMILY_PARTS)
 def test_the_last_word_of_every_sram_round_trips(part: str) -> None:
     machine = build(part)
     ram = {
@@ -93,7 +95,7 @@ def test_the_last_word_of_every_sram_round_trips(part: str) -> None:
             machine.mem.u32[end]
 
 
-@pytest.mark.parametrize("part", shipped_parts())
+@pytest.mark.parametrize("part", FAMILY_PARTS)
 def test_every_bonded_pin_drives_and_every_other_pin_refuses(part: str) -> None:
     machine = build(part)
     ports = [
@@ -118,7 +120,7 @@ def test_every_bonded_pin_drives_and_every_other_pin_refuses(part: str) -> None:
                 assert refused.value.key == "pin"
 
 
-@pytest.mark.parametrize("part", shipped_parts())
+@pytest.mark.parametrize("part", FAMILY_PARTS)
 def test_every_adc1_channel_outside_bonded_channels_refuses(part: str) -> None:
     machine = build(part)
     adc = next(p for p in machine.description.peripherals if p.name == "ADC1")

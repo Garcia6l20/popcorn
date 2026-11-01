@@ -1,0 +1,36 @@
+format = 1
+source = "RM0038 Rev 18 Cat.4 on DIE436, 384 KB flash: DBGMCU_IDCODE, the FLASH version of Cat.4 and Cat.6, F_SIZE codes, the factory information block and the CMSIS header suffix"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L1*.svd"]
+dies = ["DIE436"]
+flash_kib = [384]
+
+[cmsis]
+suffix = "xd"
+source = "stm32l151xd.h, stm32l152xd.h and stm32l162xd.h are the CMSIS device headers of the Cat.4 devices"
+
+[[resets]]
+peripheral = "DBGMCU"
+register = "IDCODE"
+reset = 0x10000436
+source = "RM0038 Rev 18, 30.6.1 MCU device ID code: DEV_ID[11:0] is 0x436 for Cat.4, REV_ID[15:0] 0x1000 is revision A of every category. One modelled revision"
+
+[ip]
+versions = { "FLASH" = "STM32L1_flash_cat46" }
+source = "FLASH has no CubeMX version, the empty version is replaced"
+
+[signature]
+source = "RM0038 Rev 18, 31.1.1 and 31.2, Cat.3 to Cat.6: F_SIZE at 0x1FF800CC, U_ID(31:0) at 0x1FF800D0, U_ID(63:32) at 0x1FF800D4 and U_ID(95:64) at 0x1FF800E4. The ID words are fixed values: wafer coordinates 0x00320014, wafer 1, lot POPCORN in ASCII. RM0038 has no package register. F_SIZE of DEV_ID 0x436 is 0 for 384 KB and 1 for 256 KB. The option bytes at offset 0 hold the virgin values of RM0038 3.9.8 and 3.9.9, OBR 0x00F800AA and WRPRx 0, with their complements per Table 18: RDP 0xAA, USER 0xF8, WRPx 0, the upper bytes of the RDP and USER words 0xFF, inferred, board check. Factory calibration words, 12-bit ADC codes at VDDA = VREF+ = 3.0 V, the datasheet typical values as V / 3.0 V x 4095, rounded, DS10764 Table 59: VREFINT_CAL at 0x1FF800F8 = 1671 from VREFINT 1.224 V, TS_CAL1 at 0x1FF800FA = 680 at 30 C from V30 = V110 - 80 x Avg_Slope = 626.8 mV - 80 x 1.61 mV/C = 498.0 mV, derived from two typicals, inferred, TS_CAL2 at 0x1FF800FE = 856 at 110 C from V110 626.8 mV. The ADC model converts its temperature sensor to TS_CAL1 and VREFINT to VREFINT_CAL, so the LL macros give 30 C and 3000 mV. The L100 datasheets DS9496 and DS10193 give VREFINT_CAL and no TS_CAL: the L100 parts share the die and keep the words, inferred, board check"
+region = "OPTION_FACTORY"
+uid = 0xD0
+flash_size = 0xCC
+uid_words = [0x0032_0014, 0x4F52_4E01, 0x504F_5043]
+uid_offsets = [0, 4, 0x14]
+flash_size_codes = { 384 = 0, 256 = 1 }
+content = [
+  { offset = 0x00, data = [0xAA, 0x00, 0x55, 0xFF, 0xF8, 0x00, 0x07, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0xFF, 0xFF] },
+  { offset = 0xF8, data = [0x87, 0x06, 0xA8, 0x02] },
+  { offset = 0xFE, data = [0x58, 0x03] },
+]

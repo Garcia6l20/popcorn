@@ -58,6 +58,8 @@ static_assert(reversed(0x1122'3344, 32) == 0x22CC'4488);
 
 constexpr std::array<unsigned, 4> polynomial_widths{32, 16, 8, 7};
 constexpr std::array<unsigned, 4> input_groups{0, 8, 16, 32};
+constexpr std::uint32_t           fixed_polynomial = 0x04C1'1DB7;
+constexpr std::uint32_t           fixed_initial    = 0xFFFF'FFFF;
 
 struct crc_state
 {
@@ -65,28 +67,39 @@ struct crc_state
 };
 
 /**
- * @brief CRC calculation unit of the STM32U5, RM0456 section 24. A right-aligned 8-, 16- or
- *        32-bit CRC_DR write feeds its bits MSB first through the low POLYSIZE bits of CRC_POL,
- *        after the REV_IN reversal by byte, half-word or word, a group no wider than the
- *        write. The running CRC is kept unreversed in the CRC_DR storage word, REV_OUT reverses
- *        the low POLYSIZE bits of the CRC_DR read only, the bits above read 0. RM0456 gives
- *        both readings for 32-bit data only, unverified on silicon below that. The
- *        computation completes on the write: the input buffer hides the 4 HCLK latency,
- *        24.3.3, so no access stalls. CR.RESET reloads CRC_DR from the low POLYSIZE bits of
- *        CRC_INIT and reads 0. A CRC_INIT write reloads CRC_DR, a CRC_POL write does not.
- *        CRC_IDR is storage, untouched by both. Every reset kind restores the description reset
- *        values. The RCC clock gate is not modelled.
- *        An even polynomial, which RM0456 does not support, logs once, raises model_error
- *        under strict_peripherals, and is computed anyway otherwise. A CRC_DR write that is
- *        not right-aligned and a write narrower than 32 bits to another register, which RM0456
- *        24.4 forbids, log once, raise model_error under strict_peripherals, and are ignored. A
- *        narrow read of another register logs once, raises model_error under
+ * @brief CRC calculation unit of the STM32U5 and STM32H5, RM0456 section 24, and of the
+ *        STM32L1. A right-aligned 8-, 16- or 32-bit CRC_DR write feeds its bits MSB first through
+ *        the low POLYSIZE bits of CRC_POL, after the REV_IN reversal by byte, half-word or word, a
+ *        group no wider than the write. The running CRC is kept unreversed in the CRC_DR storage
+ *        word, REV_OUT reverses the low POLYSIZE bits of the CRC_DR read only, the bits above read
+ *        0. RM0456 gives both readings for 32-bit data only, unverified on silicon below that. The
+ *        computation completes on the write: the input buffer hides the 4 HCLK latency, 24.3.3, so
+ *        no access stalls. CR.RESET reloads CRC_DR from the low POLYSIZE bits of CRC_INIT and
+ *        reads 0. A CRC_INIT write reloads CRC_DR, a CRC_POL write does not. CRC_IDR is storage,
+ *        untouched by both. Every reset kind restores the description reset values. The RCC clock
+ *        gate is not modelled. An even polynomial, which RM0456 does not support, logs once,
+ *        raises model_error under strict_peripherals, and is computed anyway otherwise. A CRC_DR
+ *        write that is not right-aligned and a write narrower than 32 bits to another register,
+ *        which RM0456 24.4 forbids, log once, raise model_error under strict_peripherals, and are
+ *        ignored. A narrow read of another register logs once, raises model_error under
  *        strict_peripherals, and returns the stored bits.
+ *        The STM32L1 unit, RM0038 section 4, has DR, IDR and CR.RESET only: it computes CRC-32
+ *        over the fixed polynomial 0x04C11DB7, RM0038 4.2, and CR.RESET loads 0xFFFFFFFF, 4.3,
+ *        with no reversal. Its accesses are words, RM0038 4.4, so a narrow read of DR or CR logs
+ *        once, raises model_error under strict_peripherals, and returns the stored lanes. A byte
+ *        or half-word DR write does the same and feeds the word its byte lanes repeat: a byte 0xB0
+ *        feeds 0xB0B0B0B0. For the DMA RM0038 11.3.4 states the repeated lanes, "the data are
+ *        duplicated on the unused lanes of the HWDATA[31:0] bus". Inferred: a CPU byte or
+ *        half-word store repeats its lanes the same way, and the unit ignores the access size,
+ *        RM0038 4.3 "CRC computation is done on the whole 32-bit data word". IDR takes byte and
+ *        half-word accesses, as ST's CMSIS header declares it a byte and LL_CRC_Write_IDR stores
+ *        one. Deviation: a DR write completes with no stall, where RM0038 4.3 stalls it until the
+ *        end of the 4 HCLK computation of 4.2.
  */
 class crc final : public dispatch_model<crc, crc_state>, public bus_reset_listener
 {
 public:
-  crc(model_context& ctx, peripheral_desc const& desc);
+  crc(model_context& ctx, peripheral_desc const& desc, crc_variant const& variant);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -116,7 +129,11 @@ private:
   void               set_crc(std::uint32_t value);
   void unmodelled(bool& logged, std::string_view name, std::uint32_t offset, std::string message);
   [[nodiscard]] auto name_at(std::uint32_t offset) const -> std::string_view;
+  [[nodiscard]] auto polynomial() const -> std::uint32_t;
+  [[nodiscard]] auto initial() const -> std::uint32_t;
+  [[nodiscard]] auto served_narrow(std::string_view name) const -> bool;
 
+  crc_variant    variant_;
   register_file& regs_;
   reg_ref        data_;
   reg_ref        init_;
@@ -131,22 +148,56 @@ private:
   bool           narrow_read_logged_{};
 };
 
-constexpr std::array<write_entry<crc>, 5> crc_writes{
+constexpr std::array<write_entry<crc>, 3> crc_writes{
     {
      {"DR", &crc::stored},
      {"IDR", &crc::stored},
      {"CR", &crc::control_written},
+     }
+};
+
+constexpr std::array<write_entry<crc>, 2> crc_programmable_writes{
+    {
      {"INIT", &crc::init_written},
      {"POL", &crc::stored},
      }
 };
 
-crc::crc(model_context& ctx, peripheral_desc const& desc)
-    : dispatch_model{ctx, desc, "CRC", crc_writes}, regs_{ctx.regs}, data_{reg("DR")},
-      init_{reg("INIT")}, poly_{reg("POL")}, reset_{field("CR", "RESET")},
-      polysize_{field("CR", "POLYSIZE")}, rev_in_{field("CR", "REV_IN")},
-      rev_out_{field("CR", "REV_OUT")}
-{}
+crc::crc(model_context& ctx, peripheral_desc const& desc, crc_variant const& variant)
+    : dispatch_model{ctx, desc, "CRC", crc_writes}, variant_{variant}, regs_{ctx.regs},
+      data_{reg("DR")}, reset_{field("CR", "RESET")}
+{
+  expect_register("INIT", variant.programmable);
+  expect_register("POL", variant.programmable);
+  for(auto const name : {"POLYSIZE", "REV_IN", "REV_OUT"})
+  {
+    expect_field("CR", name, variant.programmable);
+  }
+  if(variant.programmable)
+  {
+    bind(crc_programmable_writes);
+    init_     = reg("INIT");
+    poly_     = reg("POL");
+    polysize_ = field("CR", "POLYSIZE");
+    rev_in_   = field("CR", "REV_IN");
+    rev_out_  = field("CR", "REV_OUT");
+  }
+}
+
+auto crc::polynomial() const -> std::uint32_t
+{
+  return variant_.programmable ? regs_.peek(poly_.offset) : fixed_polynomial;
+}
+
+auto crc::initial() const -> std::uint32_t
+{
+  return variant_.programmable ? regs_.peek(init_.offset) : fixed_initial;
+}
+
+auto crc::served_narrow(std::string_view name) const -> bool
+{
+  return variant_.byte_idr and name == "IDR";
+}
 
 auto crc::on_write(
     register_file& regs,
@@ -158,17 +209,29 @@ auto crc::on_write(
 {
   if((offset & ~3u) == data_.offset)
   {
+    if(variant_.word_input and size != 4)
+    {
+      unmodelled(
+          misaligned_logged_, "DR", offset,
+          std::format(
+              "{}-bit CRC_DR write at offset {:#x} fed as the word its byte lanes repeat, only "
+              "32-bit accesses are allowed, {}",
+              8 * size, offset, variant_.access_rule));
+      auto const lanes = size == 1 ? (value & 0xFFu) * 0x0101'0101u : (value & 0xFFFFu) * 0x1'0001u;
+      feed(lanes, 32);
+      return {};
+    }
     if(offset % 4 != 0)
     {
       unmodelled(
           misaligned_logged_, "DR", offset,
           std::format(
-              "{}-bit CRC_DR write at offset {:#x} ignored, not right-aligned, RM0456 24.4",
-              8 * size, offset));
+              "{}-bit CRC_DR write at offset {:#x} ignored, not right-aligned, {}", 8 * size,
+              offset, variant_.access_rule));
       return {};
     }
     auto const width = 8u * size;
-    if((regs_.peek(poly_.offset) & 1u) == 0)
+    if(variant_.programmable and (regs_.peek(poly_.offset) & 1u) == 0)
     {
       unmodelled(
           even_logged_, "POL", poly_.offset,
@@ -177,13 +240,13 @@ auto crc::on_write(
     feed(width >= 32 ? value : value & ((1u << width) - 1u), width);
     return {};
   }
-  if(auto const name = name_at(offset); size != 4 and not name.empty())
+  if(auto const name = name_at(offset); size != 4 and not name.empty() and not served_narrow(name))
   {
     unmodelled(
         narrow_write_logged_, name, offset,
         std::format(
-            "{}-bit write to CRC_{} ignored, only 32-bit accesses are allowed, RM0456 24.4",
-            8 * size, name));
+            "{}-bit write to CRC_{} ignored, only 32-bit accesses are allowed, {}", 8 * size, name,
+            variant_.access_rule));
     return {};
   }
   return dispatch_model::on_write(regs, offset, size, old, value, access);
@@ -192,17 +255,21 @@ auto crc::on_write(
 auto crc::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx ctx)
     -> std::expected<std::uint32_t, bus_error>
 {
-  if((offset & ~3u) == data_.offset)
-  {
-    return read_lanes(output(), offset, size);
-  }
-  if(auto const name = name_at(offset); size != 4 and not name.empty())
+  auto const name = name_at(offset);
+  if(size != 4
+     and not name.empty()
+     and not served_narrow(name)
+     and (variant_.word_input or (offset & ~3u) != data_.offset))
   {
     unmodelled(
         narrow_read_logged_, name, offset,
         std::format(
-            "{}-bit read of CRC_{}, only 32-bit accesses are allowed, RM0456 24.4", 8 * size,
-            name));
+            "{}-bit read of CRC_{}, only 32-bit accesses are allowed, {}", 8 * size, name,
+            variant_.access_rule));
+  }
+  if((offset & ~3u) == data_.offset)
+  {
+    return read_lanes(output(), offset, size);
   }
   return dispatch_model::on_read(regs, offset, size, ctx);
 }
@@ -214,7 +281,7 @@ void crc::control_written(std::uint32_t, std::uint32_t now)
     return;
   }
   regs_.poke(reset_.offset, reset_.with(now, 0));
-  set_crc(regs_.peek(init_.offset));
+  set_crc(initial());
 }
 
 void crc::init_written(std::uint32_t, std::uint32_t now)
@@ -242,7 +309,7 @@ void crc::restore_reset_values()
 
 auto crc::polynomial_width() const -> unsigned
 {
-  return polynomial_widths[get(regs_, polysize_)];
+  return variant_.programmable ? polynomial_widths[get(regs_, polysize_)] : 32;
 }
 
 auto crc::crc_mask() const -> std::uint32_t
@@ -254,7 +321,7 @@ auto crc::crc_mask() const -> std::uint32_t
 auto crc::output() const -> std::uint32_t
 {
   auto const value = regs_.peek(data_.offset);
-  if(get(regs_, rev_out_) == 0)
+  if(not variant_.programmable or get(regs_, rev_out_) == 0)
   {
     return value;
   }
@@ -263,10 +330,11 @@ auto crc::output() const -> std::uint32_t
 
 void crc::feed(std::uint32_t data, unsigned width)
 {
-  auto const top   = polynomial_width() - 1;
-  auto const mask  = crc_mask();
-  auto const poly  = regs_.peek(poly_.offset) & mask;
-  auto const group = std::min(input_groups[get(regs_, rev_in_)], width);
+  auto const top  = polynomial_width() - 1;
+  auto const mask = crc_mask();
+  auto const poly = polynomial() & mask;
+  auto const group =
+      variant_.programmable ? std::min(input_groups[get(regs_, rev_in_)], width) : 0u;
   auto const input = reversed_groups(data, width, group);
   auto       value = regs_.peek(data_.offset);
   for(auto bit = width; bit-- > 0;)
@@ -305,10 +373,10 @@ auto crc::name_at(std::uint32_t offset) const -> std::string_view
 }
 }
 
-auto crc_factory() -> model_factory
+auto crc_factory(crc_variant variant) -> model_factory
 {
-  return [](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<crc>(ctx, desc);
+  return [variant](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<crc>(ctx, desc, variant);
   };
 }
 }

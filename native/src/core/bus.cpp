@@ -105,6 +105,10 @@ auto machine::do_read(address addr, std::uint8_t size, bus_attrs attrs)
     run_->note_raz(*raz, addr - raz->range->start, false, by);
     return 0u;
   }
+  if(auto const* const band = run_->bit_band_at(addr, size))
+  {
+    return run_->bit_band_read(*band, addr, size, attrs);
+  }
   std::uint32_t value = 0;
   if(uc_mem_read_attrs(engine_.get(), addr, &value, size, engine_attrs(attrs)) != UC_ERR_OK)
   {
@@ -199,6 +203,10 @@ auto machine::do_write(address addr, std::uint8_t size, std::uint32_t value, bus
   {
     run_->note_raz(*raz, addr - raz->range->start, true, by);
     return {};
+  }
+  if(auto const* const band = run_->bit_band_at(addr, size))
+  {
+    return run_->bit_band_write(*band, addr, size, value, attrs);
   }
   if(uc_mem_write_attrs(engine_.get(), addr, &value, size, engine_attrs(attrs)) != UC_ERR_OK)
   {

@@ -28,6 +28,12 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto rcc_h5_factory(rcc_options options) -> model_factory;
 
 /**
+ * @brief Factory of the STM32L1 RCC model, RM0038 section 6.
+ * @param options Board configuration, copied into every model made.
+ */
+[[nodiscard]] auto rcc_l1_factory(rcc_options options) -> model_factory;
+
+/**
  * @brief Factory of the ICACHE model, RM0456 section 8.
  * @param options Board configuration, copied into every model made.
  */
@@ -59,6 +65,12 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto pwr_h5_factory(pwr_options options) -> model_factory;
 
 /**
+ * @brief Factory of the STM32L1 PWR model, RM0038 section 5.4.
+ * @param options Board configuration, copied into every model made.
+ */
+[[nodiscard]] auto pwr_l1_factory(pwr_options options) -> model_factory;
+
+/**
  * @brief Factory of the FLASH model, RM0456 section 7.
  * @param options Board configuration, copied into every model made.
  */
@@ -71,6 +83,15 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto flash_h5_factory(flash_options options) -> model_factory;
 
 /**
+ * @brief Factory of the STM32L1 FLASH and data EEPROM model, RM0038 section 3.
+ * @param traits What differs between the categories the row serves.
+ * @param options Board configuration: only `option_bytes` applies, the boot bank of a part with
+ *        two banks.
+ */
+[[nodiscard]] auto flash_l1_factory(flash_l1_traits traits, flash_options const& options)
+    -> model_factory;
+
+/**
  * @brief The FLASH variant of the model row that serves a unit of @p part.
  * @param part Description the machine is built from.
  * @param unit FLASH unit of @p part.
@@ -80,13 +101,26 @@ namespace popcorn::periph::stm32
     -> flash_variant;
 
 /**
- * @brief Factory of the GPIO port model, RM0456 section 13. Returns no model for LPGPIO1.
+ * @brief Factory of the GPIO port model, RM0456 section 13 and RM0038 section 7. Returns no model
+ *        for LPGPIO1.
  * @param variant What differs between the ports of the family the row serves.
  */
 [[nodiscard]] auto gpio_factory(gpio_variant variant) -> model_factory;
 
 /** @brief Factory of the EXTI model, RM0456 section 23. */
 [[nodiscard]] auto exti_factory() -> model_factory;
+
+/**
+ * @brief Factory of the classic EXTI model, RM0038 section 10.2.
+ * @param traits Lines and NVIC lines of the family the row serves.
+ */
+[[nodiscard]] auto exti_classic_factory(exti_classic_traits traits) -> model_factory;
+
+/**
+ * @brief Factory of the classic channel DMA model, RM0038 section 11.
+ * @param traits Channels and requests of the controller the row serves.
+ */
+[[nodiscard]] auto dma_classic_factory(dma_classic_traits traits) -> model_factory;
 
 /** @brief Factory of the GPDMA1 model, RM0456 section 17. */
 [[nodiscard]] auto gpdma_factory() -> model_factory;
@@ -114,8 +148,11 @@ namespace popcorn::periph::stm32
  */
 [[nodiscard]] auto tim_factory(tim_variant variant) -> model_factory;
 
-/** @brief Factory of the IWDG model, RM0456 section 61. */
-[[nodiscard]] auto iwdg_factory() -> model_factory;
+/**
+ * @brief Factory of the IWDG model, RM0456 section 61, RM0038 section 21.
+ * @param variant What differs between the IWDG of the family the row serves.
+ */
+[[nodiscard]] auto iwdg_factory(iwdg_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the RTC model, RM0456 section 63.
@@ -124,6 +161,15 @@ namespace popcorn::periph::stm32
  */
 [[nodiscard]] auto rtc_factory(std::optional<std::chrono::sys_seconds> initial, rtc_variant variant)
     -> model_factory;
+
+/**
+ * @brief Factory of the classic RTC model, RM0038 section 20.
+ * @param initial Calendar at power-on, the board's `rtc_initial`, copied.
+ * @param variant What differs between the RTC of the category the row serves.
+ */
+[[nodiscard]] auto rtc_classic_factory(
+    std::optional<std::chrono::sys_seconds> initial,
+    rtc_classic_variant                     variant) -> model_factory;
 
 /**
  * @brief Factory of the TAMP backup register model, RM0456 section 64.
@@ -139,11 +185,28 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto spi_factory(board const& b, spi_variant variant) -> model_factory;
 
 /**
+ * @brief Factory of the classic SPI model, RM0038 section 28.
+ * @param b Board whose `spi` lists each instance's devices and `spi_controllers` its controller,
+ *        copied when a model is made.
+ * @param variant What differs between the peripherals of the family the row serves.
+ */
+[[nodiscard]] auto spi_classic_factory(board const& b, spi_classic_variant variant)
+    -> model_factory;
+
+/**
  * @brief Factory of the I2C model, RM0456 section 65.
  * @param b Board whose `i2c` lists each instance's targets, copied when a model is made.
  * @param variant What differs between the peripherals of the family the row serves.
  */
 [[nodiscard]] auto i2c_factory(board const& b, i2c_variant variant) -> model_factory;
+
+/**
+ * @brief Factory of the STM32L1 I2C model, RM0038 section 26.
+ * @param b Board whose `i2c` lists each instance's targets, copied when a model is made. An
+ *        instance with a `i2c_controllers` entry is refused with config_error.
+ * @param variant What differs between the peripherals of the family the row serves.
+ */
+[[nodiscard]] auto i2c_v1_factory(board const& b, i2c_v1_variant variant) -> model_factory;
 
 /**
  * @brief Factory of the SAI model, RM0456 section 69.
@@ -165,10 +228,19 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto otg_fs_factory(board const& b) -> model_factory;
 
 /**
- * @brief Factory of the USB full-speed device controller model of the STM32H5, RM0481 section 61.
+ * @brief Factory of the USB full-speed device controller model, RM0481 section 61 on the STM32H5,
+ *        RM0038 section 24 on the STM32L1.
  * @param b Board whose `usb_hosts` gives each instance its virtual host, copied.
+ * @param variant Register names, packet memory and pull-up of the controller, copied.
  */
-[[nodiscard]] auto usb_drd_factory(board const& b) -> model_factory;
+[[nodiscard]] auto usb_drd_factory(board const& b, usb_drd_variant const& variant) -> model_factory;
+
+/**
+ * @brief Factory of the packet memory window of a USB device controller held in a peripheral of
+ *        its own, `USB_SRAM` on the STM32L1, served by the controller's model.
+ * @param controller Peripheral name of the controller.
+ */
+[[nodiscard]] auto usb_packet_memory_factory(std::string_view controller) -> model_factory;
 
 /**
  * @brief Factory of the ADC1 model, RM0456 section 33.
@@ -188,17 +260,33 @@ namespace popcorn::periph::stm32
 /** @brief Factory of the STM32H5 ADCC common register model, RM0481 section 28.7. */
 [[nodiscard]] auto adc_common_h5_factory() -> model_factory;
 
-/** @brief Factory of the DBGMCU model, RM0456 section 75.12. */
+/**
+ * @brief Factory of the STM32L1 ADC model, RM0038 section 12.
+ * @param supply Board supplies, VDDA the conversion reference, copied into every model made.
+ * @param variant What differs between the ADC of the categories the row serves.
+ */
+[[nodiscard]] auto adc_l1_factory(supply_options supply, adc_l1_variant variant) -> model_factory;
+
+/** @brief Factory of the DBGMCU model, RM0456 section 75.12 and RM0038 section 30.16. */
 [[nodiscard]] auto dbgmcu_factory() -> model_factory;
 
-/** @brief Factory of the CRC model, RM0456 section 24. */
-[[nodiscard]] auto crc_factory() -> model_factory;
+/**
+ * @brief Factory of the CRC model, RM0456 section 24, RM0038 section 4.
+ * @param variant What differs between the CRC of the family the row serves.
+ */
+[[nodiscard]] auto crc_factory(crc_variant variant) -> model_factory;
 
 /** @brief Factory of the CRS model, RM0456 and RM0481 section 12. */
 [[nodiscard]] auto crs_factory() -> model_factory;
 
 /** @brief Factory of the SYSCFG model, RM0456 section 15. */
 [[nodiscard]] auto syscfg_factory() -> model_factory;
+
+/**
+ * @brief Factory of the classic SYSCFG model, RM0038 section 8.5.
+ * @param traits Register roles and EXTI port codes of the family the row serves.
+ */
+[[nodiscard]] auto syscfg_classic_factory(syscfg_classic_traits traits) -> model_factory;
 
 /**
  * @brief Factory of the RNG model, RM0456 section 48.

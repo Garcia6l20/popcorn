@@ -1,0 +1,17 @@
+format = 1
+source = "RM0038 Rev 18, 7.4: the GPIO ports of Cat.1 to Cat.3 have no bit reset register GPIOx_BRR and the FLASH has no WRPR3"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L1*.svd"]
+dies = ["DIE416", "DIE429", "DIE427", "DIE436"]
+flash_kib = [32, 64, 128, 256]
+
+[ip]
+versions = { "GPIO*" = "STM32L1_gpio_cat13" }
+source = "RM0038 Rev 18, 7.4.11: GPIOx_BRR is available on Cat.4, Cat.5 and Cat.6 only, so the GPIO of Cat.1 to Cat.3 is one version. It replaces STM32L152x8_gpio_v1_0 (Cat.1), STM32L15xxA_gpio_v1_0 (Cat.2), STM32L152xC_gpio_v1_0 and STM32L162xD_gpio_v1_0 (Cat.3)"
+
+[[register_drops]]
+peripheral = "FLASH"
+names = ["WRPR3"]
+source = "RM0038 Rev 18, 3.9.9 FLASH_WRPRx: FLASH_WRPR3 is available in Cat.4 to Cat.6 only. The SVDs list WRPR3 at 0x84 on every category"

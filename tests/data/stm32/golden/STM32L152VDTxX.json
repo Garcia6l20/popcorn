@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 352,
+    "cross_rules": 8,
+    "fields": 3877,
+    "irqs": 55,
+    "patched_fields": 130,
+    "peripherals": 47,
+    "regions": 8,
+    "registers": 554
+  },
+  "part": "STM32L152VDTxX",
+  "svd_sha256": "ac3fbee1bdf9e50ae69c4807d5fa1af1db92233f91990a07f0aad7060fd1726f",
+  "tables": {
+    "alternates": "348b36361bcfffd424bf2ab3f91a13f120082addf17c8b556685f8f749e6a258",
+    "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
+    "fields": "28449699a87471938ef32d3a0f0644fefaac8f02d4b4c01bbfa819ec3bfa0a9e",
+    "irqs": "cabd4da4d6ecf254b1d4a508fa868178ccb43c10e9adff318c174c6480316dfc",
+    "peripherals": "db9c3159470e29a6c7d14e6757edc9fd0055ed5bff8b8bf37b556825b29b809c",
+    "regions": "f88fbae8bbda6b801180d04dfc39af7776afadaf232700b0a9a8d1bea9bd91d8",
+    "registers": "c093592ad0ea2c052b01e6d819f9430bb9d7fe7eb14f68df048f16c75280478e"
+  }
+}

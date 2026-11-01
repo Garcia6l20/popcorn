@@ -70,6 +70,10 @@ def _golden_one(name: str, args: argparse.Namespace) -> int:
     part, _, core = name.partition("-")
     try:
         sources = find_sources(part, core=core or None)
+        if sources.cmsis_header is None:
+            raise DescriptionError(
+                sources.part, 0, "cmsis_header", "a CMSIS device header for the IRQ names"
+            )
         description, report = build_description_with_report(sources)
     except DescriptionError as exc:
         print(str(exc), file=sys.stderr)

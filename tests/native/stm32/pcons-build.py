@@ -20,6 +20,12 @@ periph_data = project_dir / "tests" / "data" / "periph"
 
 u575 = cached_st_description("STM32U575QGIx", "POPCORN_U575_DESC")
 h573 = cached_st_description("STM32H573AIIx", "POPCORN_H573_DESC")
+l152re = cached_st_description("STM32L152RETx", "POPCORN_L152RE_DESC")
+l152rb = cached_st_description("STM32L152RBTx", "POPCORN_L152RB_DESC")
+l152rc = cached_st_description("STM32L152RCTx", "POPCORN_L152RC_DESC")
+l152rba = cached_st_description("STM32L152RBTxA", "POPCORN_L152RBA_DESC")
+l152rca = cached_st_description("STM32L152RCTxA", "POPCORN_L152RCA_DESC")
+l152rd = cached_st_description("STM32L152RDTx", "POPCORN_L152RD_DESC")
 u575_2m = cached_st_description("STM32U575ZITxQ", "POPCORN_U575_2M_DESC")
 h5_1m = cached_st_description("STM32H563ZGTx", "POPCORN_H5_1M_DESC")
 firmwares = {
@@ -51,6 +57,47 @@ h573_firmwares = {
 h573_env = {
     "POPCORN_H573_DESC": str(h573),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in h573_firmwares.items()},
+}
+l1_firmwares = {
+    name: firmware("periph", name)
+    for name in (
+        "l152xe_l1_smoke",
+        "l152xb_l1_smoke",
+        "l152xe_l1_rcc_ll",
+        "l152xb_l1_rcc_ll",
+        "l152xe_l1_pwr_ll",
+        "l152xe_l1_gpio_ll",
+        "l152xe_l1_exti_ll",
+        "l152xb_l1_exti_ll",
+        "l152xe_l1_flash_ll",
+        "l152xb_l1_flash_ll",
+        "l152xc_l1_flash_ll",
+        "l152xe_l1_dma_ll",
+        "l152xb_l1_dma_ll",
+        "l152xe_l1_usart_ll",
+        "l152xb_l1_usart_ll",
+        "l152xe_l1_spi_ll",
+        "l152xb_l1_spi_ll",
+        "l152xe_l1_i2c_ll",
+        "l152xb_l1_i2c_ll",
+        "l152xe_l1_tim_ll",
+        "l152xb_l1_tim_ll",
+        "l152xe_l1_iwdg_ll",
+        "l152xe_l1_crc_ll",
+        "l152xe_l1_rtc_ll",
+        "l152xb_l1_rtc_ll",
+        "l152xe_l1_adc_ll",
+        "l152xb_l1_adc_ll",
+    )
+}
+l1_env = {
+    "POPCORN_L152RE_DESC": str(l152re),
+    "POPCORN_L152RB_DESC": str(l152rb),
+    "POPCORN_L152RC_DESC": str(l152rc),
+    "POPCORN_L152RBA_DESC": str(l152rba),
+    "POPCORN_L152RCA_DESC": str(l152rca),
+    "POPCORN_L152RD_DESC": str(l152rd),
+    **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in l1_firmwares.items()},
 }
 u575_env = {
     "POPCORN_U575_DESC": str(u575),
@@ -179,6 +226,65 @@ for _, target in h573_firmwares.values():
     if target is not None:
         flash_h573.depends(target)
 
+smoke_l1 = add_doctest(
+    "stm32-smoke-l1",
+    [here / "test_smoke_l1.cpp"],
+    static,
+    env=l1_env,
+    register=l152re is not None and l152rb is not None,
+)
+smoke_l1.private.include_dirs.append(private_dir)
+for _, target in l1_firmwares.values():
+    if target is not None:
+        smoke_l1.depends(target)
+
+for program, source in (
+    ("stm32-rcc-l1", "test_rcc_l1.cpp"),
+    ("stm32-power-l1", "test_power_l1.cpp"),
+    ("stm32-gpio-l1", "test_gpio_l1.cpp"),
+    ("stm32-exti-l1", "test_exti_l1.cpp"),
+    ("stm32-flash-l1", "test_flash_l1.cpp"),
+    ("stm32-dma-l1", "test_dma_l1.cpp"),
+    ("stm32-usart-l1", "test_usart_l1.cpp"),
+    ("stm32-spi-l1", "test_spi_l1.cpp"),
+    ("stm32-i2c-l1", "test_i2c_l1.cpp"),
+    ("stm32-tim-l1", "test_tim_l1.cpp"),
+    ("stm32-iwdg-l1", "test_iwdg_l1.cpp"),
+    ("stm32-crc-l1", "test_crc_l1.cpp"),
+    ("stm32-rtc-l1", "test_rtc_l1.cpp"),
+    ("stm32-adc-l1", "test_adc_l1.cpp"),
+    ("stm32-usb-l1", "test_usb_l1.cpp"),
+):
+    l1_test = add_doctest(
+        program,
+        [here / source],
+        static_with_devices if program == "stm32-i2c-l1" else static,
+        env=l1_env,
+        register=l152re is not None
+        and l152rb is not None
+        and l152rc is not None
+        and (
+            program not in ("stm32-flash-l1", "stm32-spi-l1")
+            or (l152rba is not None and l152rca is not None)
+        ),
+    )
+    l1_test.private.include_dirs.append(private_dir)
+    for _, target in l1_firmwares.values():
+        if target is not None:
+            l1_test.depends(target)
+
+unregistered = add_doctest(
+    "stm32-unregistered",
+    [here / "test_unregistered.cpp"],
+    static,
+    env={**u575_env, **l1_env},
+    register=u575 is not None and h573 is not None and l152re is not None,
+)
+unregistered.private.include_dirs.append(private_dir)
+for _, target in (*firmwares.values(), *h573_firmwares.values(), *l1_firmwares.values()):
+    if target is not None:
+        unregistered.depends(target)
+
 flash_geometry = add_doctest(
     "stm32-flash-geometry",
     [here / "test_flash_geometry.cpp"],
@@ -195,6 +301,18 @@ flash_geometry.private.include_dirs.append(private_dir)
 for target in (firmwares["flash_ll"][1], h573_firmwares["h573_flash_ll"][1]):
     if target is not None:
         flash_geometry.depends(target)
+
+family_rows = add_doctest(
+    "stm32-family-rows",
+    [here / "test_family_rows.cpp"],
+    static,
+    env={
+        "POPCORN_M33_DESC": str(project_dir / "tests" / "data" / "core" / "m33.json"),
+        "POPCORN_U575_2M_DESC": str(u575_2m),
+        "POPCORN_H573_DESC": str(h573),
+    },
+    register=u575_2m is not None and h573 is not None,
+)
 
 class_a_h573 = add_doctest(
     "stm32-class-a-h573",

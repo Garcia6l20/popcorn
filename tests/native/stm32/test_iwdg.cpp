@@ -818,3 +818,69 @@ TEST_CASE("a hold with no freeze field to read warns once and the watchdog runs 
     CHECK(run_for(refused, ms).reason == stop_reason::time);
   }
 }
+
+TEST_CASE("checklist 39: the U5 IWDG row needs WINR, EWCR, WVU, EWU and EWIF")
+{
+  auto const without = [](std::string_view reg, std::string_view field) {
+    auto desc = u575();
+    auto iwdg = std::ranges::find(
+        desc.peripherals, std::string_view{"IWDG"}, &popcorn::peripheral_desc::name);
+    REQUIRE(iwdg != desc.peripherals.end());
+    if(field.empty())
+    {
+      std::erase_if(
+          iwdg->registers, [&](popcorn::register_desc const& one) { return one.name == reg; });
+      return desc;
+    }
+    for(auto& one : iwdg->registers)
+    {
+      if(one.name == reg)
+      {
+        std::erase_if(
+            one.fields, [&](popcorn::field_desc const& bits) { return bits.name == field; });
+      }
+    }
+    return desc;
+  };
+  for(auto const& [reg, field] : {
+          std::pair{std::string_view{"WINR"}, std::string_view{}      },
+          std::pair{std::string_view{"EWCR"}, std::string_view{}      },
+          std::pair{std::string_view{"SR"},   std::string_view{"WVU"} },
+          std::pair{std::string_view{"SR"},   std::string_view{"EWU"} },
+          std::pair{std::string_view{"SR"},   std::string_view{"EWIF"}}
+  })
+  {
+    CAPTURE(reg);
+    CAPTURE(field);
+    CHECK_THROWS_AS(stm32_fixture(without(reg, field), "iwdg_ll"), popcorn::config_error);
+  }
+}
+
+TEST_CASE("RM0456 61.7.2: PR 0111 divides by 512, PR 1000 and above by 1024")
+{
+  for(auto const& [pr, divider] : {
+          std::pair{7u,  512u },
+          std::pair{8u,  1024u},
+          std::pair{15u, 1024u}
+  })
+  {
+    CAPTURE(pr);
+    auto f = entered("idle");
+    bus  b{f};
+    b.write("RCC", "RCC_BDCR", b.read("RCC", "RCC_BDCR") | (1u << 26));
+    REQUIRE(run_for(f, ms).reason == stop_reason::time);
+    REQUIRE(f.field("RCC", "RCC_BDCR", "LSIRDY") == 1);
+    b.write("IWDG", "KR", 0x5555);
+    b.write("IWDG", "PR", pr);
+    REQUIRE(run_for(f, ms).reason == stop_reason::time);
+    REQUIRE(b.read("IWDG", "SR") == 0);
+    b.write("IWDG", "KR", 0xCCCC);
+    auto const started = f.target->virtual_clock().time().ps;
+    auto const stopped = run_for(f, 200'000 * ms);
+    REQUIRE(stopped.reason == stop_reason::reset_request);
+    auto const took     = f.target->virtual_clock().time().ps - started;
+    auto const expected = std::uint64_t{0xFFF} * divider * lsi_cycle;
+    CHECK(took >= expected);
+    CHECK(took < expected + divider * lsi_cycle);
+  }
+}

@@ -9,6 +9,8 @@ import popcorn
 import pytest
 from popcorn.stm32 import shipped_parts
 
+FAMILIES = ("STM32U5", "STM32H5")
+FAMILY_PARTS = [part for part in shipped_parts() if part.startswith(FAMILIES)]
 PACKAGE_OF_NAME = {
     ("A", "I"): "UFBGA169",
     ("C", "T"): "LQFP48",
@@ -99,7 +101,7 @@ def _package_field(machine: popcorn.Machine, refname: str) -> int:
     return word & 0x3F
 
 
-@pytest.mark.parametrize("part", shipped_parts())
+@pytest.mark.parametrize("part", FAMILY_PARTS)
 def test_the_package_register_holds_the_manual_code(part: str) -> None:
     refname = part.split("-")[0]
     machine = popcorn.MachineDescription(part=part, images=[]).machine()

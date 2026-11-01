@@ -87,6 +87,8 @@ model. Firmware and DMA accesses follow other rules:
 
 - A firmware access to a register without a model logs a model warning once per register. Under
   `strict` it raises `ModelError`.
+- A firmware or DMA access to an offset no register covers reads 0, drops writes and logs a model
+  warning once per offset. Under `strict` it raises `ModelError`.
 - A firmware write to a SYSCFG storage register lands and logs one model warning per register.
   Under `strict` it raises `ModelError` before the store.
 - A firmware or DMA access to a debug block without a model reads 0 and drops writes, with one

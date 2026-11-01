@@ -1,6 +1,7 @@
 #include "dma_signal.hpp"
 #include "factories.hpp"
 #include "model_base.hpp"
+#include "spi_bus.hpp"
 #include "spi_link_port.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -13,7 +14,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -42,16 +42,6 @@ constexpr std::uint32_t port_due      = 3;
 constexpr std::uint32_t full_duplex   = 0;
 constexpr std::uint32_t simplex_tx    = 1;
 constexpr std::uint32_t simplex_rx    = 2;
-
-struct spi_host_transfer
-{
-  std::uint64_t              start_ps{};
-  std::uint64_t              frame_ps{};
-  std::uint8_t               bits{};
-  std::vector<std::uint32_t> frames;
-
-  friend auto operator==(spi_host_transfer const&, spi_host_transfer const&) -> bool = default;
-};
 
 struct spi_completion
 {
@@ -166,25 +156,6 @@ struct spi_state
   friend auto operator==(spi_state const&, spi_state const&) -> bool = default;
 };
 
-constexpr auto mask_of(std::uint32_t bits) -> std::uint32_t
-{
-  return bits >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << bits) - 1u;
-}
-
-constexpr auto reversed(std::uint32_t value, std::uint32_t bits) -> std::uint32_t
-{
-  auto out = std::uint32_t{};
-  for(std::uint32_t bit = 0; bit < bits; ++bit)
-  {
-    out = out << 1 | (value >> bit & 1u);
-  }
-  return out;
-}
-
-static_assert(reversed(0x01, 8) == 0x80);
-static_assert(reversed(0x001, 12) == 0x800);
-static_assert(reversed(0x1234'5678, 32) == 0x1E6A'2C48);
-
 struct spi_link_attachment
 {
   std::shared_ptr<spi_link_target> device;
@@ -193,30 +164,6 @@ struct spi_link_attachment
   subscription                     listener;
   bool                             muted{};
 };
-
-struct heard_frame
-{
-  std::uint32_t sent;
-  std::uint32_t received;
-  std::uint64_t at_ps;
-};
-
-auto pin_name(spi_attachment const& attached) -> std::string
-{
-  if(not attached.cs_pin or attached.cs_port.empty())
-  {
-    return "SS";
-  }
-  return std::format("P{}{}", attached.cs_port.back(), *attached.cs_pin);
-}
-
-auto lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(
-      out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return out;
-}
 
 /**
  * @brief SPI1 to SPI3 of the STM32U5 and SPI1 to SPI6 of the STM32H5, RM0456 section 68 and RM0481
@@ -597,15 +544,16 @@ spi::spi(
       tx_complete_{field("SPI_SR", "TXC")}, rx_level_{field("SPI_SR", "RXPLVL")},
       rx_word_{field("SPI_SR", "RXWNE")}, tx_packet_ie_{field("SPI_IER", "TXPIE")},
       duplex_packet_ie_{field("SPI_IER", "DXPIE")}, remaining_{field("SPI_SR", "CTSIZE")},
-      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")},
+      kernel_{ctx.clock.domain(spi_lower(desc.name))}, line_{irq(desc.name + "_IRQn")},
       tx_dma_enable_{field("SPI_CFG1", "TXDMAEN")}, rx_dma_enable_{field("SPI_CFG1", "RXDMAEN")},
-      tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
-      rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"}, mode_fault_flag_{field("SPI_SR", "MODF")},
-      software_select_{field("SPI_CFG2", "SSM")}, select_input_{field("SPI_CR1", "SSI")},
-      select_polarity_{field("SPI_CFG2", "SSIOP")}, underrun_{field("SPI_SR", "UDR")},
-      underrun_config_{field("SPI_CFG1", "UDRCFG")}, underrun_data_{field("SPI_UDRDR", "UDRDR")},
-      lsb_first_{field("SPI_CFG2", "LSBFRST")}, polarity_{field("SPI_CFG2", "CPOL")},
-      phase_{field("SPI_CFG2", "CPHA")}, config1_{reg("SPI_CFG1")}, config2_{reg("SPI_CFG2")},
+      tx_dma_{ctx.peers, spi_lower(desc.name) + "_tx_dma"},
+      rx_dma_{ctx.peers, spi_lower(desc.name) + "_rx_dma"},
+      mode_fault_flag_{field("SPI_SR", "MODF")}, software_select_{field("SPI_CFG2", "SSM")},
+      select_input_{field("SPI_CR1", "SSI")}, select_polarity_{field("SPI_CFG2", "SSIOP")},
+      underrun_{field("SPI_SR", "UDR")}, underrun_config_{field("SPI_CFG1", "UDRCFG")},
+      underrun_data_{field("SPI_UDRDR", "UDRDR")}, lsb_first_{field("SPI_CFG2", "LSBFRST")},
+      polarity_{field("SPI_CFG2", "CPOL")}, phase_{field("SPI_CFG2", "CPHA")},
+      config1_{reg("SPI_CFG1")}, config2_{reg("SPI_CFG2")},
       config1_kept_{
           variant.dma_enables_writable ? ~(tx_dma_enable_.mask() | rx_dma_enable_.mask())
                                        : ~std::uint32_t{}}
@@ -712,7 +660,7 @@ auto spi::frame_bytes() const -> std::uint32_t
 
 auto spi::frame_mask() const -> std::uint32_t
 {
-  return mask_of(frame_bits());
+  return spi_mask(frame_bits());
 }
 
 auto spi::frame_occupancy() const -> std::uint32_t
@@ -748,7 +696,7 @@ auto spi::power_on_offset() const -> std::uint64_t
 auto spi::wire_frame(std::uint32_t value) const -> std::uint32_t
 {
   auto const frame = value & frame_mask();
-  return get(regs_, lsb_first_) != 0 ? reversed(frame, frame_bits()) : frame;
+  return get(regs_, lsb_first_) != 0 ? spi_reversed(frame, frame_bits()) : frame;
 }
 
 auto spi::bus_mode() const -> std::uint8_t
@@ -771,8 +719,9 @@ void spi::check_device(std::size_t index)
     return;
   }
   auto const& attached = attachments_[index];
-  check_mode(
-      attached.device->mode(), [&] { return std::format("the device on {}", pin_name(attached)); });
+  check_mode(attached.device->mode(), [&] {
+    return std::format("the device on {}", spi_pin_name(attached));
+  });
 }
 
 void spi::rethrow_refused()
@@ -1437,7 +1386,7 @@ auto spi::transfer(
         "an SPI transfer has 1 to 4096 frames of 4 to 32 bits, each at least 1 ps long");
   }
   if(std::ranges::any_of(
-         frames, [&](std::uint32_t frame) { return (frame & ~mask_of(bits)) != 0; }))
+         frames, [&](std::uint32_t frame) { return (frame & ~spi_mask(bits)) != 0; }))
   {
     throw std::invalid_argument(std::format("an SPI frame of {} bits is below 2**{}", bits, bits));
   }
@@ -1609,7 +1558,7 @@ void spi::frame(
     std::uint64_t unit)
 {
   auto const due = port_due_ps(at, lane, unit);
-  if(frame_ps == 0 or bits < 4 or bits > 32 or (word & ~mask_of(bits)) != 0)
+  if(frame_ps == 0 or bits < 4 or bits > 32 or (word & ~spi_mask(bits)) != 0)
   {
     throw std::invalid_argument(
         "an SPI port frame has 4 to 32 bits, a word below 2**bits and at least 1 ps");
@@ -1629,7 +1578,7 @@ void spi::frame(
          .posted_ps   = due,
          .wire_end_ps = link_controller_ ? std::nullopt : std::optional{start + frame_ps},
          .lane        = lane,
-         .word        = mask_of(bits),
+         .word        = spi_mask(bits),
          .kind        = port_dropped,
          .bits        = bits});
     return;
@@ -1682,7 +1631,7 @@ void spi::port_deselected(spi_port_entry const& entry)
       state_.host_taking = 0;
       state_.host_shift  = ~std::uint32_t{};
     }
-    reports.emplace_back(queued.unit, mask_of(queued.bits));
+    reports.emplace_back(queued.unit, spi_mask(queued.bits));
   }
   std::erase_if(state_.port.entries, cut);
   std::ranges::sort(reports);
@@ -1743,7 +1692,7 @@ void spi::run_port(std::uint32_t lane)
       case port_ending:
       {
         entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(*pick));
-        auto const received = state_.host_shift & mask_of(entry.bits);
+        auto const received = state_.host_shift & spi_mask(entry.bits);
         end_host_frame(entry.bits, entry.word);
         flags();
         if(link_controller_)
@@ -1795,7 +1744,7 @@ void spi::rearm_port(
         entry.wire_end_ps = kind ? moved(entry.due_ps) : entry.due_ps;
       }
       entry.due_ps = moved(entry.due_ps);
-      entry.word   = mask_of(entry.bits);
+      entry.word   = spi_mask(entry.bits);
       entry.kind   = port_dropped;
     }
     else if(entry.kind != port_frame)
@@ -1819,7 +1768,7 @@ void spi::rearm_port(
       if(start <= now)
       {
         entry.due_ps = std::max(now, start + entry.frame_ps);
-        entry.word   = mask_of(entry.bits);
+        entry.word   = spi_mask(entry.bits);
         entry.kind   = port_dropped;
       }
       else
@@ -1836,7 +1785,7 @@ void spi::rearm_port(
       port.entries.push_back(
           {.due_ps = moved(queued.start_ps + (frame + 1) * queued.frame_ps),
            .lane   = core::host_lane,
-           .word   = mask_of(queued.bits),
+           .word   = spi_mask(queued.bits),
            .kind   = port_dropped,
            .bits   = queued.bits});
     }
@@ -2152,15 +2101,15 @@ void spi::host_edge_reached()
   {
     return;
   }
-  auto heard = std::optional<heard_frame>{};
+  auto heard = std::optional<spi_heard_frame>{};
   auto at_ps = state_.host.front().start_ps;
   if(state_.host_busy != 0)
   {
     auto const& now = state_.host.front();
     at_ps           = now.start_ps + (state_.host_next + 1) * now.frame_ps;
-    heard           = heard_frame{
+    heard           = spi_heard_frame{
         .sent     = now.frames[state_.host_next],
-        .received = state_.host_shift & mask_of(now.bits),
+        .received = state_.host_shift & spi_mask(now.bits),
         .at_ps    = at_ps};
     end_host_frame(now.bits, now.frames[state_.host_next]);
     ++state_.host_next;

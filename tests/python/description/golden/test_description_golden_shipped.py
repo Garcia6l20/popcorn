@@ -15,6 +15,8 @@ def test_every_committed_golden_matches_a_build_from_st_files(name: str) -> None
         sources = find_sources(part, core=core or None)
     except DescriptionError as exc:
         pytest.skip(f"{name} sources not found: {exc}")
+    if sources.cmsis_header is None:
+        pytest.skip(f"{name}: no CMSIS device header found, set POPCORN_CMSIS_DEVICE_DIRS")
     golden = load_golden(cli.GOLDEN_DIR / f"{name}.json")
     description, report = build_description_with_report(sources)
     svd_sha256 = description.sources["svd"]

@@ -999,7 +999,7 @@ def test_a_break_reaches_a_pty_as_a_zero_byte(u575: popcorn.PartDescription) -> 
         os.close(fd)
 
 
-BAUD_115200_FRAME_PS = 10 * 10**12 // (4_000_000 // 35)
+BAUD_115200_FRAME_PS = 10 * 35 * 10**12 // 4_000_000
 
 
 def flow_controlled(board: popcorn.Machine, rtse: bool) -> None:

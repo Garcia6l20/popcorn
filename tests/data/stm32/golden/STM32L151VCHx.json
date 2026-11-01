@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 261,
+    "cross_rules": 8,
+    "fields": 3032,
+    "irqs": 52,
+    "patched_fields": 130,
+    "peripherals": 42,
+    "regions": 7,
+    "registers": 499
+  },
+  "part": "STM32L151VCHx",
+  "svd_sha256": "03123338476d3ae4ff311c3bf879ce4db5610522670a6a767d6146df49c874fa",
+  "tables": {
+    "alternates": "cf901db74610d55a5afc8ab366cb09d8da71021f63f2616573e00d47094f69cf",
+    "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
+    "fields": "bcafe1efde8fa3abe166f4315e7648a86e452bbe7d54a874e43a72ce5078c315",
+    "irqs": "fc5db188f0598a163276655cfc9e30369f5f5f169a3e0e7e2b02c7ad5684a076",
+    "peripherals": "4ab1b8f93ef8c96285d268dc66a58bf868a19c0325c830312f0ebb4116139e2c",
+    "regions": "89470ecb55f9875a0bb1fad964373baa4eeb0d5332275f29953cdbd778872822",
+    "registers": "9a51523363f740d5b51ad6a97cd9b387e70a1495cce55d96d6fd7fe3166da3e4"
+  }
+}

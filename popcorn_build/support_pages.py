@@ -209,14 +209,15 @@ def part_page(part: PartDescription) -> str:
 
 
 def parts_page(parts: dict[str, PartDescription], states: Mapping[str, PartState]) -> str:
-    """The list of shipped parts with line, die, package, memory and state, each linking to its
-    peripheral page."""
+    """The list of shipped parts with family, line, die, package, memory and state, each linking
+    to its peripheral page."""
     rows: list[list[str]] = []
     for name, part in parts.items():
         kind = part_class(name.partition("-")[0])
         rows.append(
             [
                 f"[{name}]({name}.md)",
+                name[:7],
                 name[5:9],
                 kind.die,
                 kind.package,
@@ -232,12 +233,14 @@ def parts_page(parts: dict[str, PartDescription], states: Mapping[str, PartState
         "These parts ship with a description, so `popcorn.stm32.mcu()` loads them from the "
         "shipped description alone. Flash and SRAM count the Non-secure aliases only, backup "
         "SRAM included. A part's class is its die, flash size, package and SMPS supply. The dies "
-        "are U575/U585 and H56x/H573.",
+        "are U575/U585 and H56x/H573, and on the STM32L1 the DBGMCU DEV_ID such as DIE437. "
+        "See [STM32L1](../stm32l1.md) for the categories of that family.",
         "",
-        "Every part attaches at TrustZone 0 and 1, and its flash end, SRAM ends and bonded pins "
-        "are checked on the host, whatever its state. The state names the firmware evidence:",
+        "Every part attaches, at TrustZone 0 and 1 where its core has TrustZone, and its flash "
+        "end, SRAM ends and bonded pins are checked on the host, whatever its state. The state "
+        "names the firmware evidence:",
         "",
-        f"- **{TESTED}**: the part runs the whole firmware suites of the examples.",
+        f"- **{TESTED}**: the tests of the firmware examples name the part and run on it.",
         f"- **{EXAMPLES}**: the part runs the listed examples itself.",
         f"- **{CLASS}**: the part shares its class with the named part, which runs examples.",
         f"- **{ATTACHES}**: the part ships and attaches, and its host checks are its evidence.",
@@ -245,7 +248,9 @@ def parts_page(parts: dict[str, PartDescription], states: Mapping[str, PartState
         "",
         f"A part in the {TESTED}, {EXAMPLES} or {CLASS} state is supported.",
         "",
-        *_table(["Part", "Line", "Die", "Package", "Flash", "SRAM", "SMPS", "State"], rows),
+        *_table(
+            ["Part", "Family", "Line", "Die", "Package", "Flash", "SRAM", "SMPS", "State"], rows
+        ),
         "",
     ]
     return "\n".join(lines)
@@ -254,6 +259,7 @@ def parts_page(parts: dict[str, PartDescription], states: Mapping[str, PartState
 def cores_page(parts: dict[str, PartDescription]) -> str:
     """The arch modules and the core of each shipped part."""
     modules = ", ".join(f"`{m}`" for m in popcorn.arch_modules())
+    cpus = ", ".join(f"`{cpu}`" for cpu in dict.fromkeys(part.core.cpu for part in parts.values()))
     rows = [
         [
             name,
@@ -274,8 +280,10 @@ def cores_page(parts: dict[str, PartDescription]) -> str:
         "# Cores",
         "",
         f"popcorn emulates a core through an arch module. Registered modules: {modules}. A machine "
-        "takes the latest registered module that implements its part's core. MPU regions count "
-        "the Non-secure MPU, plus the Secure one on a part with TrustZone.",
+        "takes the latest registered module that implements its part's core. The shipped parts use "
+        f"the cores {cpus}. `CM3` is an ARMv7-M core without TrustZone, and its machine serves the "
+        "bit-band alias regions of the description. MPU regions count the Non-secure MPU, plus "
+        "the Secure one on a part with TrustZone.",
         "",
         *_table(["Part", "Core", "FPU", "DSP", "TrustZone", "MPU regions", "IRQs"], rows),
         "",

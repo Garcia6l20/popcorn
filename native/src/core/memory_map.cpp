@@ -88,7 +88,7 @@ auto allocate(region_desc const& region) -> std::shared_ptr<host_buffer>
       static_cast<std::byte*>(::operator new[](region.size, host_alignment))};
   std::ranges::fill_n(
       buffer->bytes.get(), region.size,
-      region.kind == region_kind::rom ? std::byte{0xff} : std::byte{0});
+      std::byte{region.fill.value_or(region.kind == region_kind::rom ? 0xff : 0)});
   if(region.content)
   {
     for(auto const& piece : *region.content)
@@ -145,6 +145,7 @@ auto machine::mapped_region::scratch_region(
       .physical   = std::nullopt,
       .controller = std::nullopt,
       .content    = std::nullopt,
+      .fill       = std::nullopt,
   });
   auto const* const desc  = owned.get();
   return std::make_unique<mapped_region>(
@@ -164,6 +165,8 @@ auto machine::mapped_region::build(
   std::uint32_t page = 0;
   check(uc_ctl_get_page_size(engine, &page), "reading the engine page size");
 
+  constexpr std::uint64_t bit_band_ratio = 32;
+
   std::vector<std::unique_ptr<mapped_region>> memory;
   memory.reserve(description.regions.size() + 1);
   for(auto const& region : description.regions)
@@ -173,6 +176,27 @@ auto machine::mapped_region::build(
       throw config_error(
           description.part, 0, region_key(region),
           std::format("start and size multiples of the engine page size, {} bytes", page));
+    }
+    if(region.kind == region_kind::bit_band)
+    {
+      if(not region.physical or region.content)
+      {
+        throw config_error(
+            description.part, 0, region_key(region) + (region.physical ? ".content" : ".physical"),
+            "a bit_band region with physical, the base of its target range, and no content");
+      }
+      auto const target_end = std::uint64_t{*region.physical} + region.size / bit_band_ratio;
+      if(std::ranges::any_of(description.regions, [&](region_desc const& other) {
+           return other.kind == region_kind::bit_band
+              and *region.physical < region_end(other)
+              and other.start < target_end;
+         }))
+      {
+        throw config_error(
+            description.part, 0, region_key(region) + ".physical",
+            "a target range clear of every bit_band region");
+      }
+      continue;
     }
     check_content(description.part, region);
     memory.push_back(

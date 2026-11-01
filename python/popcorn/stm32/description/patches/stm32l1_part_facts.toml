@@ -1,0 +1,25 @@
+format = 1
+source = "Order codes whose die or SRAM size in the CubeMX db and the STM32_open_pin_data part files differs from what RM0038 Rev 18 and the device datasheets state"
+
+[match]
+parts = ["STM32L100C6UxA", "STM32L100R8TxA", "STM32L100RBTxA", "STM32L151RCYx"]
+
+[[part_facts]]
+part = "STM32L100C6UxA"
+ram_kib = 4
+source = "DS10193 Rev 6 Table 2 (STM32L100x6/8/B-A device features and peripheral counts): RAM 4 Kbytes for the 32 Kbyte STM32L100C6xxA. The db gives 10"
+
+[[part_facts]]
+part = "STM32L100R8TxA"
+ram_kib = 8
+source = "DS10193 Rev 6 Table 2 (STM32L100x6/8/B-A device features and peripheral counts): RAM 8 Kbytes for the 64 Kbyte STM32L100R8xxA. The db gives 10"
+
+[[part_facts]]
+part = "STM32L100RBTxA"
+ram_kib = 16
+source = "DS10193 Rev 6 Table 2 (STM32L100x6/8/B-A device features and peripheral counts): RAM 16 Kbytes for the 128 Kbyte STM32L100RBxxA. The db gives 10"
+
+[[part_facts]]
+part = "STM32L151RCYx"
+die = "DIE436"
+source = "RM0038 Rev 18 30.6.1 DBGMCU_IDCODE note 1: DEV_ID 0x436 covers the Cat.3 devices with an RPN ending in A, in WLCSP64 packages or with more than 100 pins. DS10262 Rev 8 Table 1 lists STM32L151RCY6 under STM32L151RC-A. The db gives DIE427"

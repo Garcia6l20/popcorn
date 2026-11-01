@@ -1535,7 +1535,11 @@ struct machine::run_state
   [[nodiscard]] auto unmodelled_accesses() const -> std::vector<unmodelled_access>;
   [[nodiscard]] auto raz_name(std::size_t index) const -> std::string;
 
-  /** @brief Logs the first access to an offset without register. */
+  /**
+   * @brief Logs the first access to an offset without register, once per offset. An arch or
+   *        model debugger access under strict_peripherals is neither logged nor refused.
+   * @throws model_error under strict_peripherals, on every CPU or DMA access.
+   */
   void warn_unregistered(mmio_window const& window, std::uint32_t offset, bool write, initiator by);
 
   /**
@@ -1598,6 +1602,72 @@ struct machine::run_state
 
   /** @brief The machine_options::raz_wi windows, in option order. */
   std::vector<std::unique_ptr<raz_window>> raz_windows{};
+
+  /** @brief A `bit_band` region of the description, its alias window mapped as engine MMIO. */
+  struct bit_band_window
+  {
+    /** @brief Run state serving the accesses. */
+    run_state* run{};
+    /** @brief The region: the alias window and, as `physical`, the target base. */
+    region_desc const* desc{};
+  };
+
+  /** @brief The `bit_band` regions' windows, in description order. */
+  std::vector<std::unique_ptr<bit_band_window>> bit_band_windows{};
+
+  /**
+   * @brief Maps the alias window of every `bit_band` region as engine MMIO.
+   * @return The windows, first and last address each, for the exact pc hook.
+   * @throws emulation_error when the engine refuses a mapping.
+   */
+  auto map_bit_bands() -> std::vector<std::pair<std::uint64_t, std::uint64_t>>;
+
+  /** @brief Alias images of the windows of models that drive the core clock, first and last
+   * address each, for the clock store hook. */
+  [[nodiscard]] auto bit_band_clock_ranges() const
+      -> std::vector<std::pair<std::uint64_t, std::uint64_t>>;
+
+  /** @brief The bit-band window holding [@p addr, @p addr + @p size), null when none. */
+  [[nodiscard]] auto bit_band_at(address addr, std::uint8_t size) const noexcept
+      -> bit_band_window const*;
+
+  /**
+   * @brief Reads the bit an alias access names: the target unit of the access size through
+   *        machine::do_read with @p attrs, so watches, firewalls, models, the trace ring and
+   *        coverage see an access at the target. Its read side effects run.
+   * @return 0 or 1, or bus_error::unmapped for a DMA access, or the target read's error.
+   */
+  auto bit_band_read(bit_band_window const& band, address addr, std::uint8_t size, bus_attrs attrs)
+      -> std::expected<std::uint32_t, bus_error>;
+
+  /**
+   * @brief Sets or clears the bit an alias access names from bit 0 of @p value: reads the target
+   *        unit of the access size, then writes it back with the bit changed, both through the
+   *        bus with @p attrs, inside one access at one instruction count. A write into memory
+   *        holding translated code takes machine::do_write's path, which drops that code from
+   *        the next block on.
+   * @return bus_error::unmapped for a DMA access, or the first error of the read or the write.
+   */
+  auto bit_band_write(
+      bit_band_window const& band,
+      address                addr,
+      std::uint8_t           size,
+      std::uint32_t          value,
+      bus_attrs              attrs) -> std::expected<void, bus_error>;
+
+  static auto on_bit_band_read(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      uc_mem_attrs  attrs,
+      void*         user) noexcept -> std::uint64_t;
+  static void on_bit_band_write(
+      uc_struct*    engine,
+      std::uint64_t offset,
+      unsigned      size,
+      std::uint64_t value,
+      uc_mem_attrs  attrs,
+      void*         user) noexcept;
 
   /**
    * @brief Maps every machine_options::raz_wi range as engine MMIO.

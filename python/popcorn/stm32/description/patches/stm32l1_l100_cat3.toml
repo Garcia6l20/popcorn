@@ -1,0 +1,43 @@
+format = 1
+source = "STM32L100RCTx, the one value line Cat.3 part: CubeMX lists no TIM5 and no operational amplifier for it, SPI3 is line 47 by its address 0x0000_00FC in RM0038 Rev 18 Table 50, whose position column is one low from TIM5"
+
+[match]
+parts = ["STM32L100*"]
+svd = ["STM32L100.svd"]
+dies = ["DIE427"]
+
+[peripherals]
+drop = ["TIM5", "OPAMP"]
+source = "The CubeMX part STM32L100RCTx has no TIM5 and no OPAMP IP, the L100 SVD lists both. RM0038 Rev 18, 1.4: the operational amplifiers belong to the STM32L15x and STM32L16x Cat.3 devices"
+
+[irqs]
+drop = ["TIM5", "SPI3"]
+add = [{ number = 47, name = "SPI3", peripheral = "SPI3" }]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR"]
+fields = ["TIM5RST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.7 RCC_APB1RSTR: the TIM5 bits are dropped with TIM5"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR"]
+fields = ["TIM5EN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.10 RCC_APB1ENR: the TIM5 bits are dropped with TIM5"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+fields = ["TIM5LPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: the TIM5 bits are dropped with TIM5"
+
+[[fields]]
+instances = ["DBGMCU"]
+registers = ["APB1_FZ"]
+fields = ["DBG_TIM5_STOP"]
+drop = true
+source = "RM0038 Rev 18, 30.16.4 DBGMCU_APB1_FZ: DBG_TIM5_STOP is dropped with TIM5"

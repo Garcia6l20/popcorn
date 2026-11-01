@@ -499,6 +499,21 @@ TEST_CASE("the backup domain keeps LSE ready across every reset but power-on")
   CHECK(clocks.hz("lse") == 0);
 }
 
+TEST_CASE("an LSE still starting at a system reset starts again and is ready after the delay")
+{
+  auto f = idle_fixture();
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON"));
+  idle_until(f, std::chrono::microseconds{20});
+  REQUIRE(f.field("RCC", "RCC_BDCR", "LSERDY") == 0);
+  f.target->reset(reset_kind::software);
+  f.set("pc", popcorn::testing::sym("rcc_ll", "idle"));
+  CHECK(f.field("RCC", "RCC_BDCR", "LSEON") == 1);
+  CHECK(f.field("RCC", "RCC_BDCR", "LSERDY") == 0);
+  idle_until(f, std::chrono::microseconds{110});
+  CHECK(f.field("RCC", "RCC_BDCR", "LSERDY") == 1);
+  CHECK(probe(f).hz("lse") == 32'768);
+}
+
 TEST_CASE("a clock listener hears each published change once and never from reset")
 {
   auto  f       = idle_fixture();

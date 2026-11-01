@@ -33,14 +33,19 @@ flowchart LR
 The modules are in `python/popcorn/stm32/description`:
 
 - `_sources.py` finds the SVD, the CubeMX db, the rzone facts, the GPIO modes file, the CMSIS
-  device header and the patch files of a part.
+  device header and the patch files of a part. A CubeMX range stem such as `STM32L151C(6-8-B)Tx`
+  is no part name. It resolves as `STM32L151C6Tx`, `STM32L151C8Tx` and `STM32L151CBTx`, each with
+  its own flash and RAM size. A local build takes the rzone file of the db when it has one for
+  the part and the packaged rzone facts file otherwise. The CMSIS header is `<line>xx.h`, or
+  `<line><suffix>.h` for a part whose patch sets `[cmsis] suffix`.
 - `_svd.py` expands an SVD: `derivedFrom`, `dim`, clusters and property inheritance. It is a
   pure function of the file bytes.
 - `_cubemx.py` reads the part lookup, the memory regions and processor facts, the IP instance
   join and the GPIO alternate functions.
 - `_patches.py` applies popcorn's own TOML patches: peripheral drops, fields, field drops, cross
-  rules, aliases, IP renames, IRQ changes, GPIO alternate function drops, core overrides, added
-  registers and regions, and the device signature. The patches are in the `patches` directory.
+  rules, aliases, IP renames and versions, register drops, IRQ changes, GPIO alternate function
+  drops, core overrides, added registers and regions, and the device signature. The patches are in
+  the `patches` directory.
 - `_builder.py` assembles the description: expand the SVD, read the db and rzone, apply every
   patch, strip the peripheral prefix of register names, build the IRQ table, then assemble the
   core, regions and peripherals.
@@ -68,6 +73,111 @@ rule names the new name. A renamed peripheral must exist and not be dropped, eac
 renamed once across the files, and the new name must be free, otherwise the build raises
 `DescriptionError` keyed `peripherals.renames.<name>`. The patch report counts them in
 `peripherals_dropped` and `peripherals_renamed`.
+
+An `[irqs]` rule drops an interrupt by SVD name, then adds one by number to a peripheral. A dropped
+number loses its SVD owner, so a number dropped and added back belongs to the added peripheral only.
+
+## Part matching
+
+A patch applies to a part when its `[match]` selects it. `parts` lists name globs, `svd` lists SVD
+file name globs, `dies` lists die names and `flash_kib` lists flash sizes in KiB. Every key given
+must select. `dies` and `flash_kib` read the part the name resolves to, so a group RefName
+member has its own flash size, and a patch carrying either key never applies without that part.
+One die holds several categories of one line, so die and flash size together select a category:
+
+```toml
+[match]
+parts = ["STM32L15*"]
+dies = ["DIE437"]
+flash_kib = [512]
+```
+
+Patch files apply in file name order, the family file `stm32l1.toml` before its category files
+`stm32l1_cat1.toml`, since `.` sorts before `_`. A family patch and a category patch may both
+apply, the category patch after.
+
+### Part facts
+
+A `[[part_facts]]` row sets the die or the SRAM size of one expanded name where the db and a
+manual or datasheet disagree. The row applies to the db part before the build reads it, so the
+rzone facts file name, the `dies` match and the die IP donors follow it.
+
+```toml
+[match]
+parts = ["STM32L151RCYx"]
+
+[[part_facts]]
+part = "STM32L151RCYx"
+die = "DIE436"
+source = "RM0038 Rev 18 30.6.1 note 1"
+```
+
+A row sets `die`, `ram_kib` or both, with a non-empty `source`. The patch's `[match]` holds
+`parts` only and selects every row's part, and one part has at most one row across the patch
+files, or the build raises `DescriptionError`. `stm32l1_part_facts.toml` holds the STM32L1 rows.
+
+### STM32L1 patch files
+
+The 132 STM32L1 names fall into seven categories by die and flash size. Exactly one of seven
+category files applies to a name: `stm32l1_cat1.toml` (DIE416), `stm32l1_cat2.toml` (DIE429),
+`stm32l1_cat3_die427.toml`, `stm32l1_cat3_die436.toml` (both 256 KB), `stm32l1_cat4.toml` (DIE436,
+384 KB), `stm32l1_cat5.toml` (DIE437, 512 KB) and `stm32l1_cat6.toml` (DIE437, 384 KB). They hold the
+`DBGMCU_IDCODE` reset, the `FLASH` IP version, the CMSIS header suffix and the device signature.
+Group files hold what several categories share: `cat12` and `cat36` for the early and the late
+categories, `cat13` and `cat46` for the GPIO version and `GPIOx_BRR`, `cat123_l15x`, `cat12_l15x`
+and `cat36_l15x` for rules that exclude the STM32L100 SVD. `l100`, `l100_cat3`, `l151`, `noaes` and
+`cat4_rd` drop peripherals by SVD or part name, and `l100` and `l100_cat3` give the interrupt
+lines the L100 SVD lists under another peripheral to their owner, by the `[irqs]` rule of
+"Peripheral drops and renames". A name is dropped once across the files that select it, so a drop
+sits in the one file that covers exactly the parts needing it.
+
+## IP renames, versions and register drops
+
+`[ip] renames` maps a db IP instance to the SVD peripherals that take its IP and version. A key
+that is no db instance of the part and a value that is no SVD peripheral are errors.
+`renames_if_present` takes the same table and skips a key the part's db lacks and a value the SVD
+or the drops removed, for families whose parts differ in instances. The report counts the
+skipped pairs in `ip_renames_skipped`.
+
+`[ip] versions` sets the IP version of every instance whose name matches the glob, after the
+renames and `renames_if_present` of every patch, and needs a `source`:
+
+```toml
+[ip]
+versions = { "FLASH" = "STM32L1_flash_cat46", "GPIO*" = "STM32L1_gpio_cat46" }
+source = "RM0038 7.4.11: BRR exists on Cat.4 to Cat.6 only"
+```
+
+A glob names the instance as every `[peripherals] renames` spells it, matches at least one instance
+and shares no instance with another glob of the table. `ip_version_changes` in the patch report
+lists each instance with the CubeMX version it replaced and the new one. A rule's `source` names the
+CubeMX version it replaces.
+
+`[[register_drops]]` removes registers from a peripheral and from its aliases:
+
+```toml
+[[register_drops]]
+peripheral = "RTC"
+names = ["BKP20R", "BKP21R"]
+source = "RM0038 25.6: Cat.1 has 20 backup registers"
+```
+
+A name the peripheral lacks is an error keyed `register_drops[<n>].names`, and a later rule
+naming a dropped register fails as naming an unknown one.
+
+`[[register_renames]]` renames registers of the peripherals that match its `peripherals` globs and
+of their aliases, each glob matching at least one peripheral that is not an alias, left after the
+drops:
+
+```toml
+[[register_renames]]
+peripherals = ["GPIO?"]
+renames = { OSPEEDER = "OSPEEDR" }
+source = "RM0038 7.4.3: the register is GPIOx_OSPEEDR, the SVD spells it OSPEEDER"
+```
+
+An old name an instance lacks and a new name it already has are errors keyed
+`register_renames[<n>].renames.<old>`, and a later rule names the new spelling.
 
 ## Alternate function drops
 
@@ -103,6 +213,16 @@ a package pin. `bonded_adc_channels` in `_cubemx.py` reads it from the `ADC<n>_I
 `ConfigError`: `ADCx.input(n)`, every `AnalogInput` access and its refs. Conversions read every
 external channel. A hand-written description may leave `bonded_channels` out, every external
 channel then counts as bonded.
+
+An ADC with the two channel banks of the STM32L1 Cat.3 to Cat.6, the ADCs whose `CR2` has the
+`ADC_CFG` field, also carries `bonded_channels_b`: bit c for the bank B channel c on a pad of its
+own whose pad reaches a package pin. `bonded_bank_b` in `_adc_banks.py` reads it from the pad table
+of the IP version, RM0038 Table 41, and the part's bonded GPIO pins. An `ADC_CFG` ADC of an IP
+version with no pad table fails the build. The `ADC_IN<c>b` signals of the pin data, read by
+`bonded_adc_channels_b`, lie inside that mask on every L1 part. The board API refuses the others,
+`ADC.input(c, bank="B")`. The field is absent on every other ADC and the golden `P` line then ends
+at `bonded_channels`, else it adds `bonded_b` and the mask. A hand-written description may leave it
+out, every bank B channel on a pad of its own then counts as bonded.
 
 ## Field drops
 
@@ -199,10 +319,92 @@ width leaves the register or overlaps another field. The patch report counts one
 `fields_touched` per property, field and peripheral or alias it sets. `fields_dropped`,
 `fields_renamed` and `fields_added` count each base field once, whatever its aliases.
 
+## Bit-band regions
+
+A region of kind `bit_band` is a Cortex-M bit-band alias window. Its `physical` is the base of
+the target range, and alias word `w` maps bit `w % 8` of target byte `w / 8`. A family patch adds
+the windows with `[memory] add`:
+
+```toml
+[memory]
+source = "RM0038 Rev 18, 2.6: bit-band regions of SRAM and of the peripherals"
+add = [
+  { name = "BB_SRAM", start = 0x22000000, size = 0x02000000, kind = "bit_band", acc = { read = true, write = true, execute = false }, secure = false, physical = 0x20000000 },
+  { name = "BB_PERIPH", start = 0x42000000, size = 0x02000000, kind = "bit_band", acc = { read = true, write = true, execute = false }, secure = false, physical = 0x40000000 },
+]
+```
+
+A `bit_band` region is one of the two architectural windows, 32 MB at 0x22000000 onto 0x20000000
+or at 0x42000000 onto 0x40000000, with no content and no controller. Otherwise the build raises
+`DescriptionError` keyed `memory.add.<name>`. A description file that places a window elsewhere is
+refused when the machine is built if the window's target range overlaps any `bit_band` region.
+
+The machine maps the window as MMIO and holds no bytes for it, so a snapshot carries no image of
+it and a power-on reset leaves it alone. A CPU or debugger access of 1, 2 or 4 bytes reaches the
+target unit of the same size that holds the bit: a read returns the bit as 0 or 1, a write reads
+the unit, sets or clears the bit from bit 0 of the value and writes the unit back. Both target
+accesses go through the bus with the attributes of the alias access, so watches, the firewall, the
+peripheral models, read side effects, the trace ring and coverage see accesses at the target
+address, and a write into memory holding translated code drops that code from the next block on.
+The read and the write run inside one access at one instruction count, and DMA beats run between
+instructions, so the read-modify-write is atomic. A DMA access to an alias address is a bus error.
+
+## Data EEPROM
+
+A CubeMX part file with an `<E2prom>` element gives the data EEPROM size in bytes, per expanded
+name for a range stem. `[memory] eeprom` adds a read-only region `DATA_EEPROM` of that size at
+`start`, with an optional `controller` peripheral:
+
+```toml
+[memory]
+source = "RM0038 Rev 18, Table 8: data EEPROM at 0x08080000"
+eeprom = { start = 0x08080000, controller = "FLASH" }
+```
+
+The size is a whole number of 1 KB pages, or the build raises `DescriptionError` keyed
+`memory.eeprom`, as it does for a part without the element, for a range that overlaps another
+region, and for a `controller` table entry naming `DATA_EEPROM` beside the `eeprom` one.
+
+## Erased value
+
+A region holds 0xFF bytes from power-on when it is `rom` and 0 when it is `ram`, where no
+`content` gives a byte. `[memory] fill` sets another byte for a `rom` region that is not an
+alias, the erased value of a flash that erases to 0:
+
+```toml
+[memory]
+source = "RM0038 Rev 18, 3.4.2: a page erase writes 0"
+fill = { Flash = 0 }
+```
+
+The build raises `DescriptionError` keyed `memory.fill.<region>` for a region the description
+lacks, a region of another kind or an alias, and a value outside 0 to 255.
+
+## CMSIS header names
+
+`[cmsis] suffix = "xe"` in a patch names the CMSIS device header `<line>xe.h`, `stm32l152xe.h`
+for `STM32L152RETx`. The suffix is `x` followed by at least one lowercase letter or digit. At most
+one matching patch sets it. A part with no such patch uses `<line>xx.h`.
+
+## Device signature
+
+`[signature]` writes the flash size, the 96-bit unique ID and, optionally, the package code into
+a read-only region. `uid_words` are the three ID words in ID order, written little endian at
+`uid` plus the matching entry of `uid_offsets`. `uid_offsets` is three byte offsets from `uid`,
+`[0, 4, 8]` when absent, so the words are contiguous. A family whose manual places them apart sets
+them, `[0, 4, 0x14]` puts the third word 0x14 bytes from the base. `package` and `packages` come
+together: both name the package-code word and its table, or neither is set and the region holds no
+package word. `flash_size_codes` maps a flash size in KiB to the 16-bit value the flash size word
+holds, for a family whose register encodes some sizes as codes: `{ 384 = 0, 256 = 1 }` stores 0
+for a 384 KiB part and 1 for a 256 KiB part. Without the key the word holds the size in KiB, and
+with it a part whose size has no entry raises `DescriptionError` keyed
+`signature.flash_size_codes`. A word that overlaps another or leaves the region raises
+`DescriptionError` keyed `signature.<word>`.
+
 ## Shipped descriptions
 
 Shipped descriptions live in `python/popcorn/stm32/data` as three kinds of xz-compressed JSON
-layer, each `{"format": 1, ...}`:
+layer, each `{"format": 2, ...}`:
 
 | file | holds |
 |---|---|
@@ -213,23 +415,31 @@ layer, each `{"format": 1, ...}`:
 The family is the RefName's first 7 characters plus `xx`, `STM32U5xx`, the line its first 9
 plus `xx`, `STM32U575xx`. A header is a peripheral without `registers` and `cross_rules`, with
 `"block": <key>` in their place. Two instances share a block only when their bytes are equal. A
-delta holds the part's `part`, `generator`, `sources` and `regions`, the full header of every
-instance that differs from the line's, and `schema_version`, `core` or `irqs` where they differ.
-Every part of a line has the line's instances in the line's order.
+delta holds the part's `part`, `generator`, `sources` and `regions`, `dropped`, the reference
+instances the part lacks in the reference's order, the full header of every kept instance that
+differs from the line's, and `schema_version`, `core` or `irqs` where they differ. A part has
+the line's instances in the line's order minus its `dropped` ones and no instance the reference
+lacks. The reference of a line is the part with the most instances, then the most bonded pins,
+then the largest flash, then the first name.
 
 `_layers.py` holds `factor`, which writes the layers of a set of descriptions, and `compose`, its
 inverse, both pure functions. `compose_shipped` in `_shipped.py` composes a part into the same
 JSON text `dump_json` writes, so the digest, snapshots and the native loader see the same
 description. It refuses with `DescriptionError` naming the file: a layer of another `format`, a
 `line_sha256` mismatch, a missing block or one whose bytes do not hash to its key, an unknown
-instance, and a decompressed layer or composed description above `MAX_SHIPPED_BYTES`. The
-composed size is counted before anything is built. On first use the composed text is cached as
-`<cache>/shipped/<name>-<sha16>.json`, sha16 over the SHA-256 of each of the parts, line and family files, in order.
+instance, a `dropped` entry that is no line instance or is repeated or out of the line's order,
+an override of a dropped instance, and a decompressed layer or composed description above
+`MAX_SHIPPED_BYTES`. The composed size is counted before anything is built. On first use the
+composed text is cached as `<cache>/shipped/<name>-<sha16>.json`, sha16 over the SHA-256 of each
+of the parts, line and family files, in order.
 
 A part ships exactly when its golden file `tests/data/stm32/golden/<RefName>[-<core>].json`
-exists. To add a part, write its golden, then ship:
+exists. To add a part, write its golden, then ship. Both read the CMSIS device header of the part,
+so first put the checkout's fetched CMSIS device directories in front of
+`POPCORN_CMSIS_DEVICE_DIRS`, as the description tests do:
 
 ```
+export POPCORN_CMSIS_DEVICE_DIRS="$(uv run python -m popcorn_build.cmsis_dirs)"
 uv run python -m popcorn.stm32.description golden STM32U575QGIx --update
 uv run python -m popcorn.stm32.description ship STM32U575QGIx --pin-data <STM32_open_pin_data> \
     --out python/popcorn/stm32/data
@@ -240,13 +450,13 @@ uv run python -m popcorn.stm32.description ship --pin-data <STM32_open_pin_data>
 `ship` builds every golden part of each family it touches from `STM32_open_pin_data`, in a pool
 of `-j` processes, and rewrites all layers of those families. A part named on the command line
 selects its family, no part selects every family with a golden or a layer file. Each line's
-reference is its part with the most bonded GPIO pins, then the largest flash, then the first
-RefName in sorted order. Every file goes to a temporary name first and is renamed once all are
-written. Then every layer file of a touched family that the new set lacks is removed, so a part
-whose golden is deleted leaves no delta and a line with no part leaves no file. Equal inputs give
-equal bytes. Writing needs `--out`, the package data directory of the source tree: under
-`uv run` the imported package is the staged copy in the build directory. `--core` applies to
-every named part and needs a part list.
+reference is its part with the most instances, then the most bonded GPIO pins, then the largest
+flash, then the first RefName in sorted order. Every file goes to a temporary name first and is
+renamed once all are written. Then every layer file of a touched family that the new set lacks is
+removed, so a part whose golden is deleted leaves no delta and a line with no part leaves no file.
+Equal inputs give equal bytes. Writing needs `--out`, the package data directory of the source
+tree: under `uv run` the imported package is the staged copy in the build directory. `--core`
+applies to every named part and needs a part list.
 
 `ship --check` composes each shipped part, every golden part without a part list, and compares
 its digest with a fresh build. `golden` without a part checks every golden file.
@@ -291,6 +501,7 @@ uv run python -m popcorn_build.part_sweep --out shipped.json --source shipped
   and the instance counts: total, with a built-in model at TZEN 0 and 1, and the names with no
   IP version.
 - `--source local` takes the db's `mcu/STM32*.xml` files. A range stem such as
-  `STM32C011F(4-6)Px` is one RefName. The run stops with an error when the db has no `mcu/`
+  `STM32C011F(4-6)Px` gives one row per expanded name, `STM32C011F4Px` and `STM32C011F6Px`, each
+  with its own flash and RAM size. The run stops with an error when the db has no `mcu/`
   directory or no part matches.
 - A failed stage holds the exception type and the first 300 characters of its text.

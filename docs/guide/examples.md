@@ -236,3 +236,79 @@ UART9 TX over GPDMA, HAL. [Sources and tests](https://github.com/Garcia6l20/popc
 CDC ACM device on the USB full-speed controller enumerated by a virtual host, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32h573/usb_cdc).
 
 --8<-- "stm32h573/usb_cdc/README.md:3:12"
+
+## STM32L152
+
+The same layout on the STM32L152, a Cortex-M3 without TrustZone, from `examples/stm32l152/<name>`. The firmware is HAL. The rcc and pwr_flash clock setups set the RCC_CR enable bits through their bit-band aliases. The examples marked xb also build for the Cat.1 STM32L152RBTx and run each test on both builds.
+
+### l152 rcc
+
+8 MHz HSE bypass to a 32 MHz PLL in voltage range 1, HAL, xe and xb. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/rcc).
+
+--8<-- "stm32l152/rcc/README.md:3:15"
+
+### l152 pwr_flash
+
+Voltage range 1, one wait state, a boot counter in data EEPROM, a page erase and program, HAL, xe and xb. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/pwr_flash).
+
+--8<-- "stm32l152/pwr_flash/README.md:3:16"
+
+### l152 gpio
+
+A push button on PC13 toggling an LED on PA5 through EXTI, HAL, xe and xb. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/gpio).
+
+--8<-- "stm32l152/gpio/README.md:3:11"
+
+### l152 usart
+
+printf banner and line echo on USART2, HAL, xe and xb. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/usart).
+
+--8<-- "stm32l152/usart/README.md:3:11"
+
+### l152 iwdg
+
+IWDG refresh and a watchdog reset on the 37 kHz LSI, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/iwdg).
+
+--8<-- "stm32l152/iwdg/README.md:3:9"
+
+### l152 crc
+
+The fixed CRC-32/MPEG-2 unit, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/crc).
+
+--8<-- "stm32l152/crc/README.md:3:13"
+
+### l152 spi
+
+A three-axis accelerometer mocked in Python on SPI1, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/spi).
+
+--8<-- "stm32l152/spi/README.md:3:18"
+
+### l152 i2c
+
+A temperature sensor mocked in Python on I2C1, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/i2c).
+
+--8<-- "stm32l152/i2c/README.md:3:14"
+
+### l152 tim
+
+A 1 kHz timer interrupt, a one-pulse timer and an input capture on the 16 MHz HSI, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/tim).
+
+--8<-- "stm32l152/tim/README.md:3:13"
+
+### l152 adc
+
+The ADC internal channels and PA0 against VDDA, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/adc).
+
+--8<-- "stm32l152/adc/README.md:3:13"
+
+### l152 rtc
+
+The RTC calendar, wakeup timer, alarm and a backup register on the LSE, HAL. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/rtc).
+
+--8<-- "stm32l152/rtc/README.md:3:15"
+
+### l152 usb_cdc
+
+CDC ACM device on the USB full-speed controller enumerated by a virtual host, TinyUSB. [Sources and tests](https://github.com/Garcia6l20/popcorn/tree/main/examples/stm32l152/usb_cdc).
+
+--8<-- "stm32l152/usb_cdc/README.md:3:13"

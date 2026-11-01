@@ -631,6 +631,7 @@ TEST_CASE("a guest store through one rwx window reaches code running at the othe
       .physical   = 0x2000'0000,
       .controller = std::nullopt,
       .content    = std::nullopt,
+      .fill       = std::nullopt,
   });
   auto const ram_fn   = sym("run", "ram_fn");
   auto const aliased  = ram_fn - 0x2000'0000 + 0x1000'0000;
@@ -665,6 +666,7 @@ TEST_CASE("guest stores through an execute-never window keep reaching retranslat
       .physical   = 0x2000'0000,
       .controller = std::nullopt,
       .content    = std::nullopt,
+      .fill       = std::nullopt,
   });
   constexpr address                             code_at = 0x2001'0000;
   constexpr std::array<std::uint16_t, 14> const code{
@@ -699,6 +701,7 @@ TEST_CASE("a guest store through a partial window reaches code at the other thro
       .physical   = 0x2000'0000,
       .controller = std::nullopt,
       .content    = std::nullopt,
+      .fill       = std::nullopt,
   });
   auto const ram_fn   = sym("run", "ram_fn");
   auto const aliased  = ram_fn - 0x2000'0000 + 0x1000'0000;

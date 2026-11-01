@@ -5,7 +5,7 @@ import re
 import tomllib
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from xml.etree.ElementTree import Element
 
 from popcorn.stm32.description._binder import from_mapping
@@ -16,8 +16,9 @@ _MCU_NAMESPACES = ("http://mcd.rou.st.com/modules.php?name=mcu", "http://dummy.c
 """Namespaces of a part or GPIO modes file: CubeMX's db, then ST's STM32_open_pin_data copy."""
 _PIN_RE = re.compile(r"P([A-Z])(\d+)")
 _BONDED_PIN_RE = re.compile(r"P([A-Z])(\d+)(?:[^\d_].*)?")
-_ADC_INPUT_RE = re.compile(r"(ADC\d+)_INP?(\d+)")
+_ADC_INPUT_RE = re.compile(r"(ADC\d*)_INP?(\d+)(b?)")
 _AF_RE = re.compile(r"GPIO_AF(\d+)_")
+_GROUP_RE = re.compile(r"\(([^()]*)\)")
 MAX_GPIO_MODES_BYTES = 8 << 20
 """Largest GPIO modes file read_gpio_alternates parses, 26 times the 311 KiB of the U5 one."""
 
@@ -40,6 +41,35 @@ class DbPart:
     ips: list[DbIp]
     package: str = ""
     pins: dict[str, frozenset[str]] = field(default_factory=dict[str, frozenset[str]])
+    eeprom: list[int] = field(default_factory=list[int])
+
+    @property
+    def eeprom_bytes(self) -> int | None:
+        """Data EEPROM size in bytes, the first `E2prom` element, None without the element."""
+        return self.eeprom[0] if self.eeprom else None
+
+    def select(self, name: str, *, file: str) -> DbPart:
+        """The part @p name, one of expand_refname(ref_name), as a DbPart named @p name whose
+        `flash_kib` and `ram_kib` hold that name's element only. A Flash or Ram list of one
+        element applies to every name of the group, any other length than the group's is a
+        DescriptionError, as is a @p name outside the group. A part of no group returns itself."""
+        expanded = [expanded for expanded, _ in expand_refname(self.ref_name)]
+        if name not in expanded:
+            raise DescriptionError(file, 0, "Mcu.RefName", f"one of {', '.join(expanded)}")
+        if len(expanded) == 1:
+            return self
+        index = expanded.index(name)
+        return replace(
+            self,
+            ref_name=name,
+            flash_kib=[_element(self.flash_kib, index, len(expanded), file, "Mcu.Flash")],
+            ram_kib=[_element(self.ram_kib, index, len(expanded), file, "Mcu.Ram")],
+            eeprom=(
+                [_element(self.eeprom, index, len(expanded), file, "Mcu.E2prom")]
+                if self.eeprom
+                else []
+            ),
+        )
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -83,9 +113,39 @@ def _mcu_namespace(root: Element, key: str, *, file: str, local: str | None = No
     return uri
 
 
-def read_part(data: bytes, *, file: str) -> DbPart:
+def expand_refname(ref: str) -> list[tuple[str, int]]:
+    """The names a RefName stands for, each with its element index: a RefName of no group is its
+    own only name, `STM32L151C(6-8-B)Tx` gives `STM32L151C6Tx` 0, `STM32L151C8Tx` 1 and
+    `STM32L151CBTx` 2, the group's options in order. DescriptionError for a RefName with more
+    than one group or an empty option."""
+    groups = list(_GROUP_RE.finditer(ref))
+    if not groups:
+        return [(ref, 0)]
+    if len(groups) > 1:
+        raise DescriptionError(ref, 0, "RefName", "at most one group")
+    group = groups[0]
+    options = group.group(1).split("-")
+    if any(not option for option in options):
+        raise DescriptionError(ref, 0, "RefName", "a group of non-empty options")
+    return [
+        (f"{ref[: group.start()]}{option}{ref[group.end() :]}", index)
+        for index, option in enumerate(options)
+    ]
+
+
+def _element(values: list[int], index: int, count: int, file: str, key: str) -> int:
+    if len(values) == count:
+        return values[index]
+    if len(values) == 1:
+        return values[0]
+    raise DescriptionError(file, 0, key, f"one element or {count} elements")
+
+
+def read_part(data: bytes, *, file: str, name: str | None = None) -> DbPart:
     """DbPart of a `db/mcu/<part>.xml` document, DescriptionError when it is malformed or does
-    not carry the Mcu namespace of CubeMX or of ST's STM32_open_pin_data."""
+    not carry the Mcu namespace of CubeMX or of ST's STM32_open_pin_data. With @p name, one of
+    expand_refname of the document's RefName, the DbPart is DbPart.select of it. Without,
+    a group RefName keeps its group name and every Ram and Flash element."""
     try:
         root = ET.fromstring(data)
     except ET.ParseError as exc:
@@ -106,20 +166,22 @@ def read_part(data: bytes, *, file: str) -> DbPart:
     if die is None:
         raise DescriptionError(file, 0, "Mcu.Die", "required")
 
-    ram_kib = [_parse_kib(e, file=file, key="Mcu.Ram") for e in root.findall(q("Ram"))]
+    ram_kib = [_parse_int(e, file=file, key="Mcu.Ram") for e in root.findall(q("Ram"))]
     if not ram_kib:
         raise DescriptionError(file, 0, "Mcu.Ram", "required")
-    flash_kib = [_parse_kib(e, file=file, key="Mcu.Flash") for e in root.findall(q("Flash"))]
+    flash_kib = [_parse_int(e, file=file, key="Mcu.Flash") for e in root.findall(q("Flash"))]
     if not flash_kib:
         raise DescriptionError(file, 0, "Mcu.Flash", "required")
+
+    eeprom = [_parse_int(e, file=file, key="Mcu.E2prom") for e in root.findall(q("E2prom"))]
 
     ips: list[DbIp] = []
     for ip_el in root.findall(q("IP")):
         instance = ip_el.get("InstanceName")
-        name = ip_el.get("Name")
-        if instance is None or name is None:
+        ip_name = ip_el.get("Name")
+        if instance is None or ip_name is None:
             raise DescriptionError(file, 0, "Mcu.IP", "InstanceName and Name")
-        ips.append(DbIp(instance=instance, name=name, version=ip_el.get("Version") or ""))
+        ips.append(DbIp(instance=instance, name=ip_name, version=ip_el.get("Version") or ""))
 
     pins: dict[str, frozenset[str]] = {}
     for pin_el in root.findall(q("Pin")):
@@ -128,7 +190,7 @@ def read_part(data: bytes, *, file: str) -> DbPart:
             signals = {s.get("Name") for s in pin_el.findall(q("Signal"))}
             pins[pin_name] = frozenset(name for name in signals if name is not None)
 
-    return DbPart(
+    part = DbPart(
         ref_name=ref_name,
         family=family,
         line=line,
@@ -138,7 +200,9 @@ def read_part(data: bytes, *, file: str) -> DbPart:
         ips=ips,
         package=root.get("Package") or "",
         pins=pins,
+        eeprom=eeprom,
     )
+    return part if name is None else part.select(name, file=file)
 
 
 def bonded_pins(part: DbPart) -> dict[str, int]:
@@ -157,20 +221,33 @@ def bonded_pins(part: DbPart) -> dict[str, int]:
     return dict(sorted(ports.items()))
 
 
-def bonded_adc_channels(part: DbPart) -> dict[str, int]:
-    """External ADC channels whose pad @p part's package bonds: ADC instance -> mask of its
-    channels, sorted by instance. A pin of the part's pin list carrying the signal `ADC<n>_IN<c>`
-    or `ADC<n>_INP<c>` bonds channel c of ADC<n>. Negative inputs `ADC<n>_INN<c>` and trigger
-    signals such as `ADC1_EXTI11` are left out."""
+def _adc_inputs(part: DbPart, bank_b: bool) -> dict[str, int]:
     adcs: dict[str, int] = {}
     for signals in part.pins.values():
         for signal in signals:
             found = _ADC_INPUT_RE.fullmatch(signal)
-            if found is None or int(found.group(2)) > 31:
+            if found is None or int(found.group(2)) > 31 or bool(found.group(3)) != bank_b:
                 continue
             adc = found.group(1)
             adcs[adc] = adcs.get(adc, 0) | 1 << int(found.group(2))
     return dict(sorted(adcs.items()))
+
+
+def bonded_adc_channels(part: DbPart) -> dict[str, int]:
+    """External ADC channels whose pad @p part's package bonds: ADC instance -> mask of its
+    channels, sorted by instance. A pin of the part's pin list carrying the signal `ADC<n>_IN<c>`
+    or `ADC<n>_INP<c>` bonds channel c of ADC<n>, `ADC_IN<c>` channel c of the single instance
+    `ADC` of the STM32L1. Negative inputs `ADC<n>_INN<c>`, the STM32L1 bank B inputs and trigger
+    signals such as `ADC1_EXTI11` are left out."""
+    return _adc_inputs(part, bank_b=False)
+
+
+def bonded_adc_channels_b(part: DbPart) -> dict[str, int]:
+    """STM32L1 bank B channels on a pad of their own whose signal @p part's pin list names: ADC
+    instance -> mask, bit c for the signal `ADC_IN<c>b` on a pin, sorted by instance. The
+    description takes the mask from the pads, `_adc_banks.bonded_bank_b`, this reading checks
+    it."""
+    return _adc_inputs(part, bank_b=True)
 
 
 def reference_rank(part: DbPart) -> tuple[int, int, str]:
@@ -187,7 +264,7 @@ def die_ips(part: DbPart, donor: DbPart) -> list[DbIp]:
     return [ip for ip in donor.ips if ip.instance not in listed]
 
 
-def _parse_kib(el: Element, *, file: str, key: str) -> int:
+def _parse_int(el: Element, *, file: str, key: str) -> int:
     text = (el.text or "").strip()
     try:
         return int(text)
@@ -196,7 +273,8 @@ def _parse_kib(el: Element, *, file: str, key: str) -> int:
 
 
 def rzone_file_name(part: DbPart) -> str:
-    """Name of the `db/mcu/memory/` rzone file for @p part, first Ram and Flash element."""
+    """Name of the `db/mcu/memory/` rzone file for @p part, first Ram and Flash element, the
+    selected ones of a part read with a name."""
     return f"STM32_{part.die}_{part.ram_kib[0]}_{part.flash_kib[0]}.xml"
 
 

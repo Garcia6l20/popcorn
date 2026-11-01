@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, override
 from popcorn import _core
 from popcorn._enums import PinMode
 from popcorn._host import awaited
-from popcorn._views import microvolts_of, space_of
+from popcorn._views import microvolts_of, native_bank, space_of
 from popcorn.units import VirtualTime
 
 if TYPE_CHECKING:
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from popcorn._streams import UartStream
     from popcorn._usb import UsbHost, UsbRequest, UsbState
     from popcorn._views import (
+        AnalogBank,
         AnalogInput,
         Memory,
         Peripherals,
@@ -1039,7 +1040,8 @@ class PinRefs:
 
 
 class AnalogRefs:
-    """References to one external ADC channel, `m.ref.periph.ADC1.input(5)`."""
+    """References to one external ADC channel, `m.ref.periph.ADC1.input(5)` or
+    `m.ref.periph.ADC.input(12, bank="B")`."""
 
     __slots__ = ("_input", "_label", "_owner")
 
@@ -1069,10 +1071,10 @@ class AnalogRefs:
             lambda: analog.volts,
             put,
             check,
-            read=lambda: handle.op_adc_input(analog.adc, analog.channel),
+            read=lambda: handle.op_adc_input(analog.adc, analog.channel, native_bank(analog.bank)),
             decode=lambda raw: cast(int, raw) / 1e6,
             write=lambda value: handle.op_adc_drive(
-                analog.adc, analog.channel, microvolts_of(value)
+                analog.adc, analog.channel, native_bank(analog.bank), microvolts_of(value)
             ),
         )
 
@@ -1305,16 +1307,18 @@ class PeripheralRef:
         """
         return PinRefs(self._owner, f"periph.{self._name}.pin({number})", self._view.pin(number))
 
-    def input(self, channel: int) -> AnalogRefs:
-        """External channel `channel` of this ADC.
+    def input(self, channel: int, *, bank: AnalogBank = "A") -> AnalogRefs:
+        """External channel `channel` of bank `bank` of this ADC, as `PeripheralView.input`.
 
         Raises:
-            ConfigError: `channel` is not an external channel of this ADC, or the part's
-                package does not bond its pad.
+            ConfigError: `bank` is not "A" or "B", `channel` is not an external channel of the
+                bank, a bank B channel shares its pad with bank A, or the part's package does not
+                bond its pad.
             ModelError: The peripheral's model is not the built-in ADC.
         """
+        label = f"input({channel})" if bank == "A" else f'input({channel}, bank="{bank}")'
         return AnalogRefs(
-            self._owner, f"periph.{self._name}.input({channel})", self._view.input(channel)
+            self._owner, f"periph.{self._name}.{label}", self._view.input(channel, bank=bank)
         )
 
     def audio(self, block: Any) -> AudioRefs:

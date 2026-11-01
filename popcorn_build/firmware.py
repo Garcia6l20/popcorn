@@ -10,41 +10,73 @@ from pcons.toolchains.presets import CrossPreset
 from popcorn_build.config import project_dir
 
 CPU_FLAGS = ("-mcpu=cortex-m33", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-sp-d16")
+CPU_FLAGS_M3 = ("-mcpu=cortex-m3", "-mthumb", "-mfloat-abi=soft")
+CPU_FLAGS_M4F = ("-mcpu=cortex-m4", "-mthumb", "-mfpu=fpv4-sp-d16", "-mfloat-abi=hard")
 LINKER_SCRIPT = "tests/firmware/common/m33.ld"
 FIRMWARE_PREFIX = "firmware"
 
-cortex_m33 = CrossPreset(
-    name="cortex-m33-none-eabi",
-    arch="armv8-m.main",
-    triple="arm-none-eabi",
-    extra_compile_flags=(*CPU_FLAGS, "-ffreestanding", "-ffunction-sections", "-fdata-sections"),
-    extra_link_flags=(*CPU_FLAGS, "-nostdlib", "-Wl,--gc-sections"),
-    tool_cmds={
-        "cc": "arm-none-eabi-gcc",
-        "cxx": "arm-none-eabi-g++",
-        "link": "arm-none-eabi-gcc",
-        "ar": "arm-none-eabi-ar",
-    },
-)
+
+def _preset(name: str, arch: str, cpu_flags: Sequence[str]) -> CrossPreset:
+    return CrossPreset(
+        name=name,
+        arch=arch,
+        triple="arm-none-eabi",
+        extra_compile_flags=(
+            *cpu_flags,
+            "-ffreestanding",
+            "-ffunction-sections",
+            "-fdata-sections",
+        ),
+        extra_link_flags=(*cpu_flags, "-nostdlib", "-Wl,--gc-sections"),
+        tool_cmds={
+            "cc": "arm-none-eabi-gcc",
+            "cxx": "arm-none-eabi-g++",
+            "link": "arm-none-eabi-gcc",
+            "ar": "arm-none-eabi-ar",
+        },
+    )
+
+
+cortex_m33 = _preset("cortex-m33-none-eabi", "armv8-m.main", CPU_FLAGS)
+cortex_m3 = _preset("cortex-m3-none-eabi", "armv7-m", CPU_FLAGS_M3)
+cortex_m4f = _preset("cortex-m4f-none-eabi", "armv7e-m", CPU_FLAGS_M4F)
+
+FIRMWARE_PRESETS = {
+    cortex_m33.name: (cortex_m33, FIRMWARE_PREFIX),
+    cortex_m3.name: (cortex_m3, f"{FIRMWARE_PREFIX}-m3"),
+    cortex_m4f.name: (cortex_m4f, f"{FIRMWARE_PREFIX}-m4f"),
+}
 
 toolchain_found = all(
     shutil.which(tool) is not None for tool in ("arm-none-eabi-gcc", "arm-none-eabi-objcopy")
 )
 
-_env: Environment | None = None
+_envs: dict[str, Environment] = {}
 _declared: dict[tuple[str, str], tuple[Path, Target | None]] = {}
 
 
-def firmware_env() -> Environment | None:
-    """The arm-none-eabi environment, or None when the cross toolchain is not on PATH."""
-    global _env
-    if _env is None and toolchain_found:
-        project = context.current_project
-        _env = project.Environment(toolchain="gcc", name="firmware")
-        _env.apply_cross_preset(cortex_m33)
-        _env.build_prefix = FIRMWARE_PREFIX
-        add_c_flags(_env)
-    return _env
+def firmware_env(preset: CrossPreset = cortex_m33) -> Environment | None:
+    """The arm-none-eabi environment of @p preset, or None when the cross toolchain is not on PATH.
+
+    Each preset has its own environment and its own build prefix, `firmware` for the Cortex-M33,
+    `firmware-m3` and `firmware-m4f` for the others, so a source built for two CPUs gets one
+    object path per CPU.
+
+    @throws SystemExit @p preset is not equal to one of cortex_m33, cortex_m3 and cortex_m4f.
+    """
+    registered = FIRMWARE_PRESETS.get(preset.name)
+    if registered is None:
+        raise SystemExit(f"popcorn: no firmware build prefix for the preset {preset.name}")
+    if registered[0] != preset:
+        raise SystemExit(f"popcorn: the registered preset {preset.name}, flags differ")
+    prefix = registered[1]
+    if preset.name not in _envs and toolchain_found:
+        env = context.current_project.Environment(toolchain="gcc", name=prefix)
+        env.apply_cross_preset(preset)
+        env.build_prefix = prefix
+        add_c_flags(env)
+        _envs[preset.name] = env
+    return _envs.get(preset.name)
 
 
 def add_c_flags(env: Environment) -> None:
@@ -111,12 +143,13 @@ def add_firmware(
     sources: Sequence[str | Path],
     subdir: str = "",
     linker_script: str = LINKER_SCRIPT,
+    preset: CrossPreset = cortex_m33,
 ) -> tuple[Path, Target | None]:
     """Build tests/firmware/@p area/@p name.elf, or fall back to its committed prebuilt copy.
 
     With a @p subdir the prebuilt copy is prebuilt/@p subdir/@p name.elf, the target is
     firmware-@p area-@p subdir_@p name and `firmware` finds it as @p subdir_@p name. The firmware
-    links with @p linker_script, a project-relative path.
+    links with @p linker_script, a project-relative path, in the environment of @p preset.
 
     @return The ELF path tests load and the target building it, None when the prebuilt copy is used.
     With the toolchain, a firmware-check-@p name target fails when the loadable content of the
@@ -124,7 +157,7 @@ def add_firmware(
     """
     prebuilt = project_dir / "tests" / "firmware" / area / "prebuilt" / subdir / f"{name}.elf"
     declared = f"{subdir}_{name}" if subdir else name
-    env = firmware_env()
+    env = firmware_env(preset)
     if env is None:
         _declared[area, declared] = (prebuilt_only(prebuilt), None)
         return prebuilt, None

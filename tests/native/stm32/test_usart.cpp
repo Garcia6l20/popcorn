@@ -161,9 +161,8 @@ auto frame_of(
     std::uint64_t        kernel_hz,
     bool                 low_power) -> std::uint64_t
 {
-  auto const brr  = f.field(name, "BRR", "BRR");
-  auto const baud = low_power ? 256 * kernel_hz / brr : kernel_hz / brr;
-  return 10 * ps_per_second / baud;
+  auto const brr = std::uint64_t{f.field(name, "BRR", "BRR")};
+  return 10 * ps_per_second * brr / (low_power ? 256 * kernel_hz : kernel_hz);
 }
 }
 
@@ -704,13 +703,23 @@ struct member
   std::uint64_t                  origin{};
   std::uint64_t                  slice{1'000'000'000};
 
-  explicit member(std::string_view entry, std::uint64_t instructions = 1'000'000'000)
+  explicit member(
+      std::string_view entry,
+      std::uint64_t    instructions = 1'000'000'000,
+      bool             probe        = false)
       : slice{instructions}
   {
     board.uarts.emplace("USART1", box);
     auto options   = popcorn::testing::stm32_options();
     options.models = stm32::factories(board, u575());
-    f              = std::make_unique<stm32_fixture>(u575(), "usart_ll", std::move(options));
+    if(probe)
+    {
+      options.models.insert_or_assign(
+          "DAC1", [](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
+            return std::make_shared<bus_probe>(ctx);
+          });
+    }
+    f = std::make_unique<stm32_fixture>(u575(), "usart_ll", std::move(options));
     REQUIRE(
         f->run_to_stop({.max_instructions = icount{100'000'000}, .until = sym("usart_ll", "main")})
             .reason
@@ -974,6 +983,54 @@ TEST_CASE("each frame reaches RDR at its sender's stop-bit end plus L, at the in
   CHECK(b.f->field("USART1", "ISR_enabled", "RXFNE") == 1);
 }
 
+TEST_CASE("a PRESC divisor of 6 stays exact in the frame time, RM0456 66.5.8")
+{
+  member a{"link_tx", 1'000'000'000, true};
+  REQUIRE(
+      a.f->run_to_stop({.max_instructions = icount{100'000'000},
+                        .stop_when        = [&] { return not a.box->posts.empty(); }})
+          .reason
+      == stop_reason::user);
+  auto const hz = a.f->target->virtual_clock().core_hz();
+  REQUIRE(hz == 160'000'000);
+  auto const brr = std::uint64_t{a.f->field("USART1", "BRR", "BRR")};
+  REQUIRE(brr == 347);
+  CHECK(a.box->posts.front().frame.frame_ps == 10 * brr * ps_per_second / hz);
+
+  auto* const probe = a.f->model_of<bus_probe>("DAC1");
+  REQUIRE(probe != nullptr);
+  auto const cpu = [&](std::string_view reg, std::uint32_t value) {
+    REQUIRE(probe->context.services
+                .write(address_of(*a.f, "USART1", reg), 4, value, popcorn::initiator::cpu)
+                .has_value());
+  };
+  auto const cr1 = a.f->target->mem().read(address_of(*a.f, "USART1", "CR1_enabled"), 4);
+  REQUIRE(cr1.has_value());
+  auto const enabled = static_cast<std::uint32_t>(*cr1);
+  REQUIRE((enabled & ue) != 0);
+  cpu("CR1_enabled", enabled & ~ue);
+  cpu("PRESC", 3);
+  cpu("CR1_enabled", enabled);
+  REQUIRE(a.f->field("USART1", "PRESC", "PRESCALER") == 3);
+
+  auto const before = a.box->posts.size();
+  auto const later  = [&] {
+    return std::ranges::count_if(
+        a.box->posts | std::views::drop(before),
+        [](line_post const& post) { return not post.abort; });
+  };
+  REQUIRE(
+      a.f->run_to_stop(
+             {.max_instructions = icount{100'000'000}, .stop_when = [&] { return later() >= 2; }})
+          .reason
+      == stop_reason::user);
+  auto const& frame = a.box->posts.back().frame;
+  REQUIRE_FALSE(a.box->posts.back().abort);
+  CHECK(frame.frame_ps == 10 * brr * 6 * ps_per_second / hz);
+  CHECK(frame.frame_ps == 130'125'000);
+  CHECK(frame.end.ps - frame.start.ps == frame.frame_ps);
+}
+
 TEST_CASE("an aborted frame never reaches RDR, the next one does, whatever the window")
 {
   constexpr auto             latency   = 20 * us_ps;
@@ -1146,7 +1203,7 @@ TEST_CASE("a frame landing on the count of a host frame orders the same whatever
   REQUIRE(probe.to(before) == stop_reason::time);
   auto const t0   = probe.f->target->virtual_clock().time().ps;
   auto const brr  = probe.f->field("USART1", "BRR", "BRR");
-  auto const f_rx = 22 * ps_per_second / (2 * (160'000'000 / brr));
+  auto const f_rx = 22 * ps_per_second * brr / (2 * 160'000'000);
   deliver(first, a, probe, 0);
   auto const pending = probe.f->target->snapshot().data().events.pending;
   auto const linked  = std::ranges::find(pending, std::uint32_t{1}, &core::event::lane);
@@ -1340,7 +1397,7 @@ TEST_CASE("a linked frame ending during a host frame leaves the IDLE to the host
   auto const start = 2 * ms_ps;
   REQUIRE(b.to(start) == stop_reason::time);
   auto const                       brr   = b.f->field("USART1", "BRR", "BRR");
-  auto const                       frame = 20 * ps_per_second / (2 * (160'000'000 / brr));
+  auto const                       frame = 20 * ps_per_second * brr / (2 * 160'000'000);
   auto const                       now   = b.f->target->virtual_clock().time().ps;
   std::vector<std::uint16_t> const one{0x99};
   b.port().receive(one);
@@ -2303,7 +2360,7 @@ TEST_CASE("512 bytes back to back then a gap give exactly one IDLE at any window
   REQUIRE(b.to(horizon_of(a.box->posts, a, latency)) == stop_reason::time);
   REQUIRE(entries(b.f->log()).size() == 1);
   auto const brr     = b.f->field("USART1", "BRR", "BRR");
-  auto const f_rx    = 20 * ps_per_second / (2 * (160'000'000 / brr));
+  auto const f_rx    = 20 * ps_per_second * brr / (2 * 160'000'000);
   auto const idle_at = shifted(a.box->posts.back().frame.end, a, b, latency).ps + f_rx;
   auto const now     = b.f->target->virtual_clock().time().ps;
   auto const cyccnt  = b.f->target->mem().read(0xe000'1004, 4);
@@ -3036,14 +3093,15 @@ TEST_CASE("a TDR write, a break request or a control write during a break's 2-bi
 
 namespace
 {
-constexpr std::uint64_t hold_slack  = 200'000;
-constexpr std::uint32_t cr1_over8   = 1u << 15;
-constexpr std::uint32_t icr_idlecf  = 1u << 4;
-constexpr std::uint64_t usart1_baud = 4'000'000 / 35;
+constexpr std::uint64_t hold_slack = instruction_ps + 50'000;
+constexpr std::uint32_t cr1_over8  = 1u << 15;
+constexpr std::uint32_t icr_idlecf = 1u << 4;
+constexpr std::uint64_t usart1_hz  = 4'000'000;
+constexpr std::uint64_t usart1_brr = 35;
 
-auto frame_at(std::uint64_t baud) -> std::uint64_t
+auto frame_at(std::uint64_t clocks_per_bit, std::uint64_t hz) -> std::uint64_t
 {
-  return 20 * ps_per_second / (2 * baud);
+  return 20 * ps_per_second * clocks_per_bit / (2 * hz);
 }
 
 auto sample_of(std::uint64_t frame, std::uint32_t bit, std::uint32_t sixteenths) -> std::uint64_t
@@ -3104,7 +3162,7 @@ TEST_CASE("a line held three frames gives one break character at its stop-bit sa
     CAPTURE(over8);
     parity_rig p{{}, 35, over8 ? cr1_over8 : 0u};
     p.t.cpu("USART1", "ICR", icr_idlecf);
-    auto const frame = frame_at(over8 ? 2 * 4'000'000 / 38 : usart1_baud);
+    auto const frame = over8 ? frame_at(38, 2 * usart1_hz) : frame_at(usart1_brr, usart1_hz);
     auto const from  = p.now() + 10 * us_ps;
     auto const until = from + 3 * frame;
     auto const stop  = from + sample_of(frame, 9, over8 ? 10 : 9);
@@ -3165,7 +3223,7 @@ TEST_CASE("a hold shorter than a frame gives the sampled byte, or nothing before
     std::uint64_t        until{};
     std::vector<rx_view> expected;
   };
-  auto const frame = frame_at(usart1_baud);
+  auto const frame = frame_at(usart1_brr, usart1_hz);
   for(auto const& one : std::array<short_case, 3>{
           {
            {.until = 3 * frame / 10, .expected = {{.word = 0xfc}}},
@@ -3195,7 +3253,7 @@ TEST_CASE("a USART saved during a hold and restored ends the hold the same")
 {
   parity_rig p{{}};
   p.t.cpu("USART1", "ICR", icr_idlecf);
-  auto const frame = frame_at(usart1_baud);
+  auto const frame = frame_at(usart1_brr, usart1_hz);
   auto const from  = p.now() + 10 * us_ps;
   auto const until = from + 3 * frame;
   p.t.r.port("USART1").hold_line(vtime{from}, 1);
@@ -3219,7 +3277,7 @@ TEST_CASE("a USART saved during a hold and restored ends the hold the same")
 TEST_CASE("a break character tying with a local delivery comes after it, on the hold's lane")
 {
   parity_rig p{{}, 35, cr1_fifoen};
-  auto const frame = frame_at(usart1_baud);
+  auto const frame = frame_at(usart1_brr, usart1_hz);
   auto const now   = p.now();
   auto const from  = now + frame - sample_of(frame, 9, 9);
   REQUIRE(from >= now);
@@ -3248,7 +3306,7 @@ auto linked_frame_at(std::uint64_t start, std::uint64_t frame, std::uint16_t dat
 TEST_CASE("an aborted frame whose stop bit was sampled before the line fell is left alone")
 {
   parity_rig p{{}, 35, cr1_fifoen};
-  auto const frame = frame_at(usart1_baud);
+  auto const frame = frame_at(usart1_brr, usart1_hz);
   auto const tail  = frame - sample_of(frame, 9, 9);
   auto const start = p.now() + 10 * us_ps;
   auto const stop  = start + sample_of(frame, 9, 9);
@@ -3275,7 +3333,7 @@ TEST_CASE("a frame is turned into the break up to its stop-bit sample, received 
   {
     CAPTURE(after);
     parity_rig p{{}, 35, cr1_fifoen};
-    auto const frame = frame_at(usart1_baud);
+    auto const frame = frame_at(usart1_brr, usart1_hz);
     auto const start = p.now() + 10 * us_ps;
     auto const stop  = start + sample_of(frame, 9, 9);
     auto const from  = stop + after;
@@ -3300,7 +3358,7 @@ TEST_CASE("a frame is turned into the break up to its stop-bit sample, received 
 TEST_CASE("a frame handed after a hold it crosses becomes the break at its own stop sample")
 {
   parity_rig p{{}, 35, cr1_fifoen};
-  auto const frame = frame_at(usart1_baud);
+  auto const frame = frame_at(usart1_brr, usart1_hz);
   auto const start = p.now() + 10 * us_ps;
   auto const from  = start + frame / 2;
   auto&      port  = p.t.r.port("USART1");
@@ -3322,7 +3380,7 @@ TEST_CASE("a hold starting where the last one is released continues it, no new c
 {
   parity_rig p{{}, 35, cr1_fifoen};
   p.t.cpu("USART1", "ICR", icr_idlecf);
-  auto const frame = frame_at(usart1_baud);
+  auto const frame = frame_at(usart1_brr, usart1_hz);
   auto const from  = p.now() + 10 * us_ps;
   auto const join  = from + 2 * frame;
   auto const until = join + 2 * frame;
@@ -3349,7 +3407,7 @@ TEST_CASE("two holds handed before either is sampled are each released at their 
 {
   parity_rig p{{}, 35, cr1_fifoen};
   p.t.cpu("USART1", "ICR", icr_idlecf);
-  auto const frame  = frame_at(usart1_baud);
+  auto const frame  = frame_at(usart1_brr, usart1_hz);
   auto const first  = p.now() + 10 * us_ps;
   auto const second = first + 6 * frame;
   auto&      port   = p.t.r.port("USART1");

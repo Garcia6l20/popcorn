@@ -116,7 +116,8 @@ TEST_CASE("optional members and every effect round-trip")
       true,
       popcorn::address{0x2000'0000},
       std::string{"TIM1"},
-      std::vector<popcorn::region_content>{{.offset = 0x10, .data = {0x00, 0x04}}}
+      std::vector<popcorn::region_content>{{.offset = 0x10, .data = {0x00, 0x04}}},
+      std::uint8_t{0}
   });
   popcorn::peripheral_desc sec;
   sec.name     = "SEC_TIM1";
@@ -355,7 +356,7 @@ TEST_CASE("JSON Schema defines each enum once under its C++ name and refers to i
   CHECK_FALSE(dumped(document).contains("\"enum\""));
   CHECK(
       canonical_json(dumped(defs.as_object()["region_kind"]))
-      == canonical_json(R"({"type": "string", "enum": ["rom", "ram"]})"));
+      == canonical_json(R"({"type": "string", "enum": ["rom", "ram", "bit_band"]})"));
   auto& field = defs.as_object()["field_desc"].as_object()["properties"].as_object();
   CHECK(canonical_json(dumped(field["acc"])) == canonical_json(R"({"$ref": "#/$defs/access"})"));
   CHECK(

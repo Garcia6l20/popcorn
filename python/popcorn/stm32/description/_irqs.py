@@ -72,7 +72,7 @@ def build_irq_table(
     """IrqTable of @p svd, reconciled against @p cmsis (None when no header was found) and
     @p patches (drop by SVD name, then add), DescriptionError on a duplicate SVD number, an
     unknown drop name, an add on a number already in use, or a CMSIS number no SVD interrupt or
-    patch add covers."""
+    patch add covers. A dropped number loses its SVD owner, only an add gives it one."""
     numbers: dict[int, str] = {}
     for peripheral in svd.peripherals:
         for number, name in peripheral.interrupts:
@@ -83,6 +83,7 @@ def build_irq_table(
                 )
             numbers[number] = name
 
+    dropped: set[int] = set()
     for patch in patches:
         for name in patch.drop or []:
             matching = [n for n, nm in numbers.items() if nm == name]
@@ -90,6 +91,7 @@ def build_irq_table(
                 raise DescriptionError("irqs", 0, f"drop.{name}", "a known SVD IRQ name")
             for number in matching:
                 del numbers[number]
+                dropped.add(number)
 
     for patch in patches:
         for add in patch.add or []:
@@ -125,7 +127,7 @@ def build_irq_table(
     by_peripheral: dict[str, list[int]] = {p.name: [] for p in svd.peripherals}
     for peripheral in svd.peripherals:
         for number, _ in peripheral.interrupts:
-            if number in numbers:
+            if number in numbers and number not in dropped:
                 by_peripheral[peripheral.name].append(number)
     for patch in patches:
         for add in patch.add or []:

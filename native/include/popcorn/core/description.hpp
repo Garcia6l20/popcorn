@@ -66,11 +66,18 @@ enum class[[= reflex::derive{reflex::Format, reflex::Parse}]] cross_effect
   set,
 };
 
-/** @brief Kind of memory region. */
+/**
+ * @brief Kind of memory region.
+ *
+ * A `bit_band` region is a Cortex-M bit-band alias window: each word of it maps one bit of the
+ * 32 times smaller range starting at its `physical`, and CPU and debugger accesses to it read or
+ * read-modify-write that bit through the bus. It holds no bytes of its own.
+ */
 enum class[[= reflex::derive{reflex::Format, reflex::Parse}]] region_kind
 {
   rom,
   ram,
+  bit_band,
 };
 
 /** @brief Bit field of a register. */
@@ -185,6 +192,11 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] peripheral_desc
    * the CubeMX `ADCx_INn` and `ADCx_INPn` pin signals. Absent on other peripherals and on
    * hand-written descriptions, where every external channel counts as bonded. */
   std::optional<std::uint32_t> bonded_channels;
+  /** @brief Bank B channels of an ADC with two channel banks whose pad of their own reaches a
+   * package pin, bit n for ADC_INnb, from the CubeMX `ADC_INnb` pin signals. Absent on every other
+   * ADC, on other peripherals and on hand-written descriptions, where every such channel counts as
+   * bonded. */
+  std::optional<std::uint32_t> bonded_channels_b;
 
   /** @brief Member-wise equality. */
   friend auto operator==(peripheral_desc const&, peripheral_desc const&) -> bool = default;
@@ -231,7 +243,8 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] region_desc
   region_access acc{};
   /** @brief Region is in the secure address space. */
   bool secure{};
-  /** @brief Start of the region this one aliases and shares storage with. */
+  /** @brief Start of the region this one aliases and shares storage with. On a `bit_band`
+   * region, the base of the range whose bits its words map, 32 alias bytes per target byte. */
   std::optional<address> physical;
   /** @brief Peripheral whose model serves CPU and DMA stores to this read-only region, such as
    * the FLASH interface of a flash bank. */
@@ -239,6 +252,9 @@ struct[[= reflex::serde::omit_if_empty{^^std::optional}]] region_desc
   /** @brief Bytes the region holds from power-on, such as a factory-programmed device
    * signature, in offset order and not overlapping. Only on a rom region without physical. */
   std::optional<std::vector<region_content>> content;
+  /** @brief Byte every address of the region holds from power-on where no content gives one, the
+   * erased value of a flash. Without it a rom region holds 0xFF and a ram region 0. */
+  std::optional<std::uint8_t> fill;
 
   /** @brief Member-wise equality. */
   friend auto operator==(region_desc const&, region_desc const&) -> bool = default;

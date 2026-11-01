@@ -1,4 +1,5 @@
 #include "machine.hpp"
+#include "../periph/stm32/flash_unit.hpp"
 #include "devices.hpp"
 #include "errors.hpp"
 #include "held_python_end.hpp"
@@ -161,13 +162,12 @@ auto option_bytes_of(option_bytes_config const& config) -> periph::stm32::option
 
 void refuse_replaced_flash(part_description const& description, machine_config const& config)
 {
-  auto const unit = std::ranges::find_if(description.peripherals, [](peripheral_desc const& p) {
-    return p.ip == "flash" and not p.alias_of;
-  });
-  if(unit == description.peripherals.end())
+  auto const program = periph::stm32::flash_unit(description);
+  if(not program)
   {
     return;
   }
+  auto const* const unit = program->unit;
   if(config.python_models.contains(unit->name) or config.plugin_models.contains(unit->name))
   {
     throw config_error(

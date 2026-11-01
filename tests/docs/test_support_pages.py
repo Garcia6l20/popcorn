@@ -1,6 +1,10 @@
+import fcntl
+import os
 import re
 import subprocess
 import sys
+import tempfile
+from functools import cache
 from pathlib import Path
 
 import popcorn.stm32
@@ -33,12 +37,44 @@ def test_the_query_runs() -> None:
     assert "RNG" not in unmodelled
 
 
-@pytest.fixture(scope="module")
-def generated(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    out = tmp_path_factory.mktemp("generated")
-    subprocess.run(
-        [sys.executable, "-m", "popcorn_build.support_pages", str(out)], cwd=ROOT, check=True
+def _generate(out: Path) -> str | None:
+    result = subprocess.run(
+        [sys.executable, "-m", "popcorn_build.support_pages", str(out)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
     )
+    if result.returncode == 0:
+        return None
+    return f"popcorn_build.support_pages exited {result.returncode}\n{result.stderr}"
+
+
+@pytest.fixture(scope="session")
+def generated(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The generated pages, written once per session. Under xdist the first worker to take the
+    lock in the session's shared temporary directory generates into a fresh directory there,
+    renames it to `support_pages`, or writes the generator's error to `support_pages.failed`,
+    which every worker then reports without generating again."""
+    if os.environ.get("PYTEST_XDIST_WORKER") is None:
+        out = tmp_path_factory.mktemp("generated")
+        error = _generate(out)
+        if error is not None:
+            pytest.fail(error, pytrace=False)
+        return out
+    shared = tmp_path_factory.getbasetemp().parent
+    out = shared / "support_pages"
+    failed = shared / "support_pages.failed"
+    with (shared / "support_pages.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not out.exists() and not failed.exists():
+            work = Path(tempfile.mkdtemp(dir=shared))
+            error = _generate(work)
+            if error is None:
+                work.rename(out)
+            else:
+                failed.write_text(error, encoding="utf-8")
+    if failed.exists():
+        pytest.fail(failed.read_text(encoding="utf-8"), pytrace=False)
     return out
 
 
@@ -99,6 +135,9 @@ def test_the_h573_page_lists_its_gtzc_as_trustzone_only() -> None:
     )
 
 
+L1_NAMES = [name for name in popcorn.stm32.shipped_parts() if name.startswith("STM32L1")]
+L1_CLASS = 11
+L1_ATTACHES = 116
 STATES = ("tested", "examples", "class", "attaches")
 NEGATION = re.compile(r"\b(not|no|never|without|none|cannot|n't)\b", re.IGNORECASE)
 EXTRA_PARTS = {part for row in EXAMPLE_PARTS.values() for part in row.extra}
@@ -110,10 +149,10 @@ def state_rows(page: str) -> dict[str, str]:
     found: dict[str, str] = {}
     for line in page.splitlines():
         cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if line.startswith("| [") and len(cells) == 8:
+        if line.startswith("| [") and len(cells) == 9:
             name = cells[0][1 : cells[0].index("]")]
             assert name not in found, name
-            found[name] = cells[7]
+            found[name] = cells[8]
     return found
 
 
@@ -122,7 +161,7 @@ def part_cells(page: str) -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
     for line in page.splitlines():
         cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if line.startswith("| [") and len(cells) == 8:
+        if line.startswith("| [") and len(cells) == 9:
             found[cells[0][1 : cells[0].index("]")]] = cells
     return found
 
@@ -137,12 +176,20 @@ def test_every_shipped_part_has_exactly_one_state_row(generated: Path) -> None:
     assert sorted(rows) == sorted(popcorn.stm32.shipped_parts())
     assert all(kind(cell) in STATES for cell in rows.values())
     by_state = {state: {n for n, c in rows.items() if kind(c) == state} for state in STATES}
-    assert by_state["tested"] == {"STM32U575QGIx", "STM32H573AIIx"}
+    assert by_state["tested"] == TESTED_PARTS
     assert by_state["examples"] == EXTRA_PARTS
     assert by_state["class"] | by_state["attaches"] == set(rows) - EXTRA_PARTS - TESTED_PARTS
-    assert len(by_state["examples"]) == 49
-    assert len(by_state["class"]) == 43
-    assert not by_state["attaches"]
+    in_family = {
+        state: {n for n in names if not n.startswith("STM32L1")}
+        for state, names in by_state.items()
+    }
+    assert len(in_family["examples"]) == 49
+    assert len(in_family["class"]) == 43
+    assert not in_family["attaches"]
+    assert by_state["tested"] & set(L1_NAMES) == {"STM32L152RETx", "STM32L152RBTx"}
+    assert len(by_state["examples"] & set(L1_NAMES)) == 3
+    assert len(by_state["class"] & set(L1_NAMES)) == L1_CLASS
+    assert len(by_state["attaches"]) == L1_ATTACHES
 
 
 @pytest.mark.timeout(60)
@@ -162,18 +209,20 @@ def test_the_parts_page_prints_the_line_of_the_name_and_the_die_of_the_class(
 ) -> None:
     page = (generated / "parts.md").read_text()
     cells = part_cells(page)
-    assert "| Part | Line | Die | Package |" in page
-    assert cells["STM32U585QIIx"][1:3] == ["U585", "U575/U585"]
-    assert cells["STM32H562RGTx"][1:3] == ["H562", "H56x/H573"]
+    assert "| Part | Family | Line | Die | Package |" in page
+    assert cells["STM32U585QIIx"][1:4] == ["STM32U5", "U585", "U575/U585"]
+    assert cells["STM32H562RGTx"][1:4] == ["STM32H5", "H562", "H56x/H573"]
+    assert cells["STM32L152RETx"][1:4] == ["STM32L1", "L152", "DIE437"]
     for name, row in cells.items():
-        assert row[1] == name[5:9], name
-        assert row[2] == part_class(name.partition("-")[0]).die, name
+        assert row[1] == name[:7], name
+        assert row[2] == name[5:9], name
+        assert row[3] == part_class(name.partition("-")[0]).die, name
     other_line = 0
     for name, cell in state_rows(page).items():
         if kind(cell) == "class":
             named = cell.split(" of ")[1].split(",")[0]
-            other_line += cells[named][1] != cells[name][1]
-            assert cells[named][2] == cells[name][2], name
+            other_line += cells[named][2] != cells[name][2] and not name.startswith("STM32L1")
+            assert cells[named][3] == cells[name][3], name
     assert other_line == 43
 
 
@@ -248,7 +297,10 @@ def test_a_part_that_only_the_flash_geometry_cases_run_is_never_tested(generated
 
 
 def test_the_tested_parts_are_the_conftest_parts_of_the_examples() -> None:
-    assert {"STM32U575QGIx", "STM32H573AIIx"} == TESTED_PARTS
+    assert {"STM32U575QGIx", "STM32H573AIIx", "STM32L152RETx", "STM32L152RBTx"} == TESTED_PARTS
+    assert {
+        part for row in EXAMPLE_PARTS.values() for part in (row.conftest, *row.also)
+    } == TESTED_PARTS
 
 
 def test_the_geometry_parts_are_the_ones_the_native_geometry_program_builds() -> None:
@@ -291,3 +343,176 @@ def test_a_part_page_lists_the_bonded_pins_of_each_port(generated: Path) -> None
         assert rows[port.name][1] == str(mask.bit_count())
     assert rows["GPIOA"][0] == "PA0-PA15"
     assert rows["GPIOB"][0] == "PB0-PB10, PB12-PB15"
+
+
+@pytest.mark.timeout(60)
+def test_the_parts_page_lists_every_l1_name_with_its_family_and_state(generated: Path) -> None:
+    cells = part_cells((generated / "parts.md").read_text())
+    assert len(L1_NAMES) == 132
+    assert [name for name in cells if name.startswith("STM32L1")] == L1_NAMES
+    assert {cells[name][1] for name in L1_NAMES} == {"STM32L1"}
+    assert {cells[name][1] for name in cells if name not in L1_NAMES} == {"STM32U5", "STM32H5"}
+    assert cells["STM32L152RETx"][8] == "tested"
+    assert cells["STM32L152RCTxA"][8].startswith("examples: ")
+
+
+@pytest.mark.timeout(60)
+def test_an_l1_page_lists_each_instance_once_with_its_model(generated: Path) -> None:
+    part = popcorn.stm32.mcu("STM32L152RETx")
+    page = (generated / "STM32L152RETx.md").read_text()
+    assert sorted(table_instances(page)) == sorted(
+        p.name for p in part.peripherals if p.alias_of is None
+    )
+    assert "| `Flash` | `STM32L1_flash_cat5` | FLASH | built-in |" in page
+    assert "Core CM3." in page
+
+
+@pytest.mark.timeout(60)
+def test_the_cores_page_lists_the_cortex_m3_parts(generated: Path) -> None:
+    page = (generated / "cores.md").read_text()
+    assert "| STM32L152RETx | CM3 | no | no | no | 8 | 57 |" in page
+    assert "`CM33`, `CM3`" in page
+    assert (
+        sum(line.startswith("| STM32L1") and "| CM3 |" in line for line in page.splitlines()) == 132
+    )
+
+
+L1_MODEL_SOURCES = (
+    "adc_l1.cpp",
+    "flash_l1.cpp",
+    "exti_classic.cpp",
+    "dma_classic.cpp",
+    "i2c_v1.cpp",
+    "rtc_classic.cpp",
+    "spi_classic.cpp",
+    "syscfg_classic.cpp",
+    "crc.cpp",
+    "dbgmcu.cpp",
+    "gpio.cpp",
+    "iwdg.cpp",
+    "pwr.cpp",
+    "rcc.cpp",
+    "rcc_l1.hpp",
+    "tim.cpp",
+    "usart.cpp",
+    "usb_drd.cpp",
+)
+
+
+def section_bodies() -> dict[str, str]:
+    return {
+        heading: body
+        for section in LIMITS.read_text().split("\n## ")[1:]
+        for heading, _, body in [section.partition("\n")]
+    }
+
+
+@pytest.mark.parametrize("model", L1_MODEL_SOURCES)
+def test_each_l1_model_has_a_limits_section_that_covers_the_stm32l1(model: str) -> None:
+    link = f"native/src/periph/stm32/{model})"
+    bodies = [body for body in section_bodies().values() if link in body.split("\n\n")[0]]
+    assert len(bodies) == 1
+    assert "STM32L1" in bodies[0]
+
+
+@pytest.mark.timeout(60)
+def test_the_l1_page_states_the_option_bytes_the_family_accepts() -> None:
+    page = (ROOT / "docs/support/stm32l1.md").read_text()
+    assert "| `swap_bank` | Cat.4, Cat.5 and Cat.6 codes |" in page
+    assert "option_bytes.<field>" in page
+    assert "[STM32L1](stm32l1.md)" in (ROOT / "docs/support/index.md").read_text()
+    assert "support/stm32l1.md" in (ROOT / "zensical.toml").read_text()
+
+
+L1_PAGE = ROOT / "docs/support/stm32l1.md"
+L1_CATEGORY = {
+    ("DIE416", 32): "Cat.1",
+    ("DIE416", 64): "Cat.1",
+    ("DIE416", 128): "Cat.1",
+    ("DIE429", 32): "Cat.2",
+    ("DIE429", 64): "Cat.2",
+    ("DIE429", 128): "Cat.2",
+    ("DIE427", 256): "Cat.3",
+    ("DIE436", 256): "Cat.3",
+    ("DIE436", 384): "Cat.4",
+    ("DIE437", 512): "Cat.5",
+    ("DIE437", 384): "Cat.6",
+}
+"""Category of a die and flash size, RM0038 Rev 18 1.4 and 30.6.1 DEV_ID."""
+
+
+@cache
+def _l1_classes() -> dict[str, tuple[str, int]]:
+    return {name: (part_class(name).die, part_class(name).flash_kib) for name in L1_NAMES}
+
+
+def _l1_categories() -> dict[str, list[str]]:
+    categories: dict[str, list[str]] = {}
+    for name, found in _l1_classes().items():
+        categories.setdefault(L1_CATEGORY[found], []).append(name)
+    return categories
+
+
+def _region_kib(part: popcorn.PartDescription, name: str) -> int:
+    return sum(r.size for r in part.regions if r.name == name) // 1024
+
+
+def _kib(values: set[int], joiner: str) -> str:
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return f"{ordered[0]} KiB"
+    if joiner == ", ":
+        return f"{', '.join(str(v) for v in ordered)} KiB"
+    return f"{ordered[0]} {joiner} {ordered[-1]} KiB"
+
+
+def _page_text() -> str:
+    return " ".join(L1_PAGE.read_text().split())
+
+
+@pytest.mark.timeout(60)
+def test_the_l1_category_table_is_the_shipped_data() -> None:
+    rows = {
+        cells[0]: cells[1:]
+        for line in L1_PAGE.read_text().splitlines()
+        if line.startswith("| Cat.")
+        for cells in [[cell.strip() for cell in line.strip("|").split("|")]]
+    }
+    expected: dict[str, list[str]] = {}
+    for category, names in sorted(_l1_categories().items()):
+        parts = [popcorn.stm32.mcu(name) for name in names]
+        expected[category] = [
+            ", ".join(sorted({_l1_classes()[name][0] for name in names})),
+            _kib({_l1_classes()[name][1] for name in names}, ", "),
+            _kib({_region_kib(part, "SRAM") for part in parts}, "to"),
+            _kib({_region_kib(part, "DATA_EEPROM") for part in parts}, "or"),
+            str(len(names)),
+        ]
+    assert rows == expected
+
+
+def test_the_l1_page_gives_the_cat6_banks_of_the_shipped_data() -> None:
+    for name in _l1_categories()["Cat.6"]:
+        banks = [r for r in popcorn.stm32.mcu(name).regions if r.name.startswith("Flash")]
+        first, second = banks
+        hole = (second.start - first.start - first.size) // 1024
+        sentence = (
+            f"Cat.6 codes carry two flash regions, `{first.name}` of {first.size // 1024} KiB at "
+            f"{first.start:#010x} and `{second.name}` of {second.size // 1024} KiB at "
+            f"{second.start:#010x}. The {hole} KiB between them is unmapped."
+        )
+        assert sentence in _page_text(), name
+
+
+def test_the_l1_page_names_the_categories_that_accept_swap_bank() -> None:
+    accepted: list[str] = []
+    for category, names in sorted(_l1_categories().items()):
+        try:
+            popcorn.Machine(
+                popcorn.stm32.mcu(names[0]), option_bytes=popcorn.OptionBytes(swap_bank=True)
+            )
+        except popcorn.ConfigError:
+            continue
+        accepted.append(category)
+    cell = f"{', '.join(accepted[:-1])} and {accepted[-1]} codes"
+    assert f"| `swap_bank` | {cell} |" in L1_PAGE.read_text()

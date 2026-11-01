@@ -124,6 +124,9 @@ the committed ELF in `prebuilt/`. When both exist, a
 committed one, so a source change that is not copied over is caught. The examples build the same
 way with `popcorn_build/examples.py`, as an STM32 Cube project would.
 
+Each CPU preset, `cortex_m33`, `cortex_m3` and `cortex_m4f`, builds in its own environment under
+`build/firmware`, `build/firmware-m3` or `build/firmware-m4f`. A `Chipset` names its preset.
+
 ## The documentation build
 
 ```sh

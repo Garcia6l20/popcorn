@@ -21,6 +21,7 @@ from popcorn.stm32.description._cache import cached_description
 from popcorn.stm32.description._cubemx import DbPart, read_part
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._layers import BLOCK_KEYS, block_key
+from popcorn.stm32.description._patches import PartFact, part_facts
 from popcorn.stm32.description._shipped import build_text
 from popcorn.stm32.description._sources import (
     SearchPaths,
@@ -185,6 +186,37 @@ def _donors(mcu: Path, search: SearchPaths, part: str) -> dict[str, str]:
     return {instance: donor.stem for instance, donor in found.items()}
 
 
+def _member_donors(mcu: Path, search: SearchPaths, member: str) -> dict[str, str]:
+    path = mcu / "STM32T001A(6-B)x.xml"
+    group = read_part(path.read_bytes(), file=str(path))
+    svd = search.svd_dirs[0] / "STM32T001.svd"
+    found = die_ip_sources(
+        group.select(member, file=str(path)), path, svd, core=None, search=search
+    )
+    return {instance: donor.stem for instance, donor in found.items()}
+
+
+@pytest.mark.parametrize(
+    "order", [("STM32T001A6x", "STM32T001ABx"), ("STM32T001ABx", "STM32T001A6x")]
+)
+def test_two_members_of_one_group_file_get_their_own_donor_maps(
+    fake_db: tuple[Path, SearchPaths], order: tuple[str, str]
+) -> None:
+    mcu, search = fake_db
+    _sources.die_ip_memo.clear()
+    (mcu / "STM32T001A(6-B)x.xml").write_text(
+        '<Mcu xmlns="http://mcd.rou.st.com/modules.php?name=mcu" '
+        'RefName="STM32T001A(6-B)x" Family="STM32T0" Line="STM32T0">'
+        "<Die>DIE1</Die><Ram>64</Ram><Flash>32</Flash><Flash>128</Flash>"
+        '<IP InstanceName="UART1" Name="UART" Version="g_v"/></Mcu>',
+        encoding="utf-8",
+    )
+    _part_file(mcu, "STM32T001Qx", "DIE1", 64, 0, ["UART1", "UART2"])
+    expected = {"STM32T001A6x": {"UART2": "STM32T001Qx"}, "STM32T001ABx": {}}
+    for member in order:
+        assert _member_donors(mcu, search, member) == expected[member]
+
+
 def test_the_donor_has_the_most_bonded_pins_then_flash_then_name(
     fake_db: tuple[Path, SearchPaths],
 ) -> None:
@@ -332,6 +364,91 @@ def test_a_repeated_lookup_reads_no_candidate_file_until_one_changes(
     os.utime(own, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
     assert _donors(mcu, search, "STM32T001Cx") == first
     assert reads == ["STM32T001Ax"]
+
+
+def test_a_scan_reads_the_part_facts_once(
+    fake_db: tuple[Path, SearchPaths], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcu, search = fake_db
+    _sources.die_ip_memo.clear()
+    _part_file(mcu, "STM32T001Cx", "DIE1", 64, 4, ["UART1"])
+    for name in ("STM32T001Ax", "STM32T001Bx", "STM32T001Dx"):
+        _part_file(mcu, name, "DIE1", 64, 9, ["UART1", "UART2"])
+    calls: list[int] = []
+    real = part_facts
+
+    def counting(files: list[Path]) -> dict[str, PartFact]:
+        calls.append(len(files))
+        return real(files)
+
+    monkeypatch.setattr(_sources, "part_facts", counting)
+    assert _donors(mcu, search, "STM32T001Cx") == {"UART2": "STM32T001Ax"}
+    assert len(calls) == 1
+
+
+_DONOR_FACTS = """
+format = 1
+[match]
+parts = ["STM32T001Ax"]
+
+[[part_facts]]
+part = "STM32T001Ax"
+die = "{die}"
+source = "probe"
+"""
+
+
+def test_an_edited_part_facts_row_or_die_gives_a_new_scan(
+    fake_db: tuple[Path, SearchPaths], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mcu, search = fake_db
+    _sources.die_ip_memo.clear()
+    patches = tmp_path / "patches"
+    patches.mkdir()
+    monkeypatch.setattr(_sources, "_PATCHES_DIR", patches)
+    facts = patches / "facts.toml"
+    facts.write_text(_DONOR_FACTS.format(die="DIE1"), encoding="utf-8")
+    _part_file(mcu, "STM32T001Cx", "DIE1", 64, 4, ["UART1"])
+    _part_file(mcu, "STM32T001Ax", "DIE2", 64, 9, ["UART1", "UART2"])
+    assert _donors(mcu, search, "STM32T001Cx") == {"UART2": "STM32T001Ax"}
+    facts.write_text(_DONOR_FACTS.format(die="DIE3"), encoding="utf-8")
+    assert _donors(mcu, search, "STM32T001Cx") == {}
+    facts.write_text(_DONOR_FACTS.format(die="DIE1"), encoding="utf-8")
+    path = mcu / "STM32T001Cx.xml"
+    own = read_part(path.read_bytes(), file=str(path))
+    svd = search.svd_dirs[0] / "STM32T001.svd"
+    assert die_ip_sources(own, path, svd, core=None, search=search) == {
+        "UART2": mcu / "STM32T001Ax.xml"
+    }
+    other_die = replace(own, die="DIE3")
+    assert die_ip_sources(other_die, path, svd, core=None, search=search) == {}
+
+
+_DONOR_SVD = """
+format = 1
+[match]
+parts = ["STM32T001Ax"]
+
+[svd]
+name = "{name}"
+"""
+
+
+def test_an_edited_svd_exception_gives_a_new_scan(
+    fake_db: tuple[Path, SearchPaths], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mcu, search = fake_db
+    _sources.die_ip_memo.clear()
+    patches = tmp_path / "patches"
+    patches.mkdir()
+    monkeypatch.setattr(_sources, "_PATCHES_DIR", patches)
+    exception = patches / "svd.toml"
+    exception.write_text(_DONOR_SVD.format(name="STM32T001"), encoding="utf-8")
+    _part_file(mcu, "STM32T001Cx", "DIE1", 64, 4, ["UART1"])
+    _part_file(mcu, "STM32T001Ax", "DIE1", 64, 9, ["UART1", "UART2"])
+    assert _donors(mcu, search, "STM32T001Cx") == {"UART2": "STM32T001Ax"}
+    exception.write_text(_DONOR_SVD.format(name="STM32T0015"), encoding="utf-8")
+    assert _donors(mcu, search, "STM32T001Cx") == {}
 
 
 def test_the_memo_holds_at_most_64_lookups(fake_db: tuple[Path, SearchPaths]) -> None:

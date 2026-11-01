@@ -1,5 +1,7 @@
 #pragma once
 
+#include <popcorn/periph/stm32/analog.hpp>
+
 #include <cstdint>
 #include <format>
 #include <string>
@@ -19,15 +21,17 @@ namespace popcorn::periph::stm32
 /**
  * @brief The set bits of @p mask as decimal numbers joined by spaces, `none` when it has none.
  * @param mask Bit mask.
+ * @param suffix Text after each number, such as `b` for a bank B channel.
  */
-[[nodiscard]] inline auto bit_list_text(std::uint32_t mask) -> std::string
+[[nodiscard]] inline auto bit_list_text(std::uint32_t mask, std::string_view suffix = {})
+    -> std::string
 {
   std::string bits;
   for(std::uint32_t n = 0; n < 32; ++n)
   {
     if((mask >> n & 1U) != 0)
     {
-      bits += std::format("{}{}", bits.empty() ? "" : " ", n);
+      bits += std::format("{}{}{}", bits.empty() ? "" : " ", n, suffix);
     }
   }
   return bits.empty() ? "none" : bits;
@@ -56,17 +60,18 @@ namespace popcorn::periph::stm32
  *        the package does not bond.
  * @param part Part name, such as `STM32U575CGTx`.
  * @param adc ADC instance name, such as `ADC1`.
- * @param channel External channel number.
- * @param bonded Bonded external channels of the ADC, bit n for channel n.
+ * @param channel External channel, named `12b` for channel 12 of bank B.
+ * @param bonded Bonded external channels of the channel's bank, bit n for channel n.
  */
 [[nodiscard]] inline auto unbonded_channel_text(
     std::string_view part,
     std::string_view adc,
-    std::uint8_t     channel,
+    analog_channel   channel,
     std::uint32_t    bonded) -> std::string
 {
+  auto const bank = channel.bank == analog_bank::b ? "b" : "";
   return std::format(
-      "a bonded channel of {}, {} channel {} reaches no package pin, bonded: {}", part, adc,
-      channel, bit_list_text(bonded));
+      "a bonded channel of {}, {} channel {}{} reaches no package pin, bonded: {}", part, adc,
+      channel.number, bank, bit_list_text(bonded, bank));
 }
 }

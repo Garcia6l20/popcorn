@@ -148,6 +148,7 @@ void machine::run_state::map_peripherals()
     contract_assert(std::uint64_t{before->base} + before->size <= after->base);
   }
   ranges.append_range(map_raz_wi(page));
+  ranges.append_range(map_bit_bands());
   std::ranges::sort(ranges);
   if(not ranges.empty())
   {
@@ -173,6 +174,7 @@ void machine::run_state::map_peripherals()
       clock_ranges.emplace_back(window->base, std::uint64_t{window->base} + window->size - 1);
     }
   }
+  clock_ranges.append_range(bit_band_clock_ranges());
   if(not clock_ranges.empty())
   {
     clock_pc.configure(engine, std::move(clock_ranges), UC_HOOK_MEM_WRITE);
@@ -238,6 +240,154 @@ auto machine::run_state::map_raz_wi(std::uint32_t page)
     mapped.emplace_back(start, end - 1);
   }
   return mapped;
+}
+
+auto machine::run_state::map_bit_bands() -> std::vector<std::pair<std::uint64_t, std::uint64_t>>
+{
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> mapped;
+  for(auto const& region : owner.description_.regions)
+  {
+    if(region.kind != region_kind::bit_band)
+    {
+      continue;
+    }
+    auto& band = *bit_band_windows.emplace_back(
+        std::make_unique<bit_band_window>(bit_band_window{.run = this, .desc = &region}));
+    check(
+        uc_mmio_map_attrs(
+            engine, region.start, region.size, &on_bit_band_read, &band, &on_bit_band_write, &band),
+        std::format("mapping the bit-band region {}", region.name));
+    mapped.emplace_back(region.start, std::uint64_t{region.start} + region.size - 1);
+  }
+  return mapped;
+}
+
+auto machine::run_state::bit_band_clock_ranges() const
+    -> std::vector<std::pair<std::uint64_t, std::uint64_t>>
+{
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+  for(auto const& band : bit_band_windows)
+  {
+    auto const target = std::uint64_t{*band->desc->physical};
+    auto const end    = target + band->desc->size / 32;
+    for(auto const& window : windows)
+    {
+      if(not window->slot->model or not window->slot->model->drives_core_clock())
+      {
+        continue;
+      }
+      auto const low  = std::max<std::uint64_t>(window->base, target);
+      auto const high = std::min<std::uint64_t>(std::uint64_t{window->base} + window->size, end);
+      if(low < high)
+      {
+        auto const alias = std::uint64_t{band->desc->start};
+        ranges.emplace_back(alias + (low - target) * 32, alias + (high - target) * 32 - 1);
+      }
+    }
+  }
+  return ranges;
+}
+
+auto machine::run_state::bit_band_at(address addr, std::uint8_t size) const noexcept
+    -> bit_band_window const*
+{
+  auto const found = std::ranges::find_if(bit_band_windows, [&](auto const& band) {
+    auto const start = std::uint64_t{band->desc->start};
+    return addr >= start and std::uint64_t{addr} + size <= start + band->desc->size;
+  });
+  return found == bit_band_windows.end() ? nullptr : found->get();
+}
+
+auto machine::run_state::bit_band_read(
+    bit_band_window const& band,
+    address                addr,
+    std::uint8_t           size,
+    bus_attrs              attrs) -> std::expected<std::uint32_t, bus_error>
+{
+  if(attrs.by == initiator::dma)
+  {
+    return std::unexpected(bus_error::unmapped);
+  }
+  auto const [unit, bit] = bit_band_target(*band.desc, addr, size);
+  return owner.do_read(unit, size, attrs).transform([bit](std::uint32_t value) {
+    return value >> bit & 1u;
+  });
+}
+
+auto machine::run_state::bit_band_write(
+    bit_band_window const& band,
+    address                addr,
+    std::uint8_t           size,
+    std::uint32_t          value,
+    bus_attrs              attrs) -> std::expected<void, bus_error>
+{
+  if(attrs.by == initiator::dma)
+  {
+    return std::unexpected(bus_error::unmapped);
+  }
+  auto const [unit, bit] = bit_band_target(*band.desc, addr, size);
+  auto const old         = owner.do_read(unit, size, attrs);
+  if(not old)
+  {
+    return std::unexpected(old.error());
+  }
+  auto const mask = std::uint32_t{1} << bit;
+  return owner.do_write(unit, size, (value & 1u) != 0 ? *old | mask : *old & ~mask, attrs);
+}
+
+auto machine::run_state::on_bit_band_read(
+    uc_struct*,
+    std::uint64_t offset,
+    unsigned      size,
+    uc_mem_attrs  attrs,
+    void*         user) noexcept -> std::uint64_t
+{
+  auto const& band    = *static_cast<bit_band_window const*>(user);
+  auto&       run     = *band.run;
+  run.access          = attrs;
+  auto const    addr  = static_cast<address>(band.desc->start + offset);
+  std::uint32_t value = 0;
+  run.guarded([&] {
+    auto const read = run.raising_access([&] {
+      return run.bit_band_read(band, addr, static_cast<std::uint8_t>(size), cpu_attrs(attrs));
+    });
+    if(read)
+    {
+      value = *read;
+    }
+    else
+    {
+      run.cpu_bus_error(addr, arch::memory_op::read);
+    }
+    return false;
+  });
+  return value;
+}
+
+void machine::run_state::on_bit_band_write(
+    uc_struct*,
+    std::uint64_t offset,
+    unsigned      size,
+    std::uint64_t value,
+    uc_mem_attrs  attrs,
+    void*         user) noexcept
+{
+  auto const& band = *static_cast<bit_band_window const*>(user);
+  auto&       run  = *band.run;
+  run.access       = attrs;
+  auto const addr  = static_cast<address>(band.desc->start + offset);
+  run.guarded([&] {
+    auto const done = run.raising_access([&] {
+      return run.bit_band_write(
+          band, addr, static_cast<std::uint8_t>(size), static_cast<std::uint32_t>(value),
+          cpu_attrs(attrs));
+    });
+    if(not done)
+    {
+      run.cpu_bus_error(addr, arch::memory_op::write);
+    }
+    return false;
+  });
 }
 
 void machine::run_state::note_raz(
@@ -610,7 +760,8 @@ auto machine::run_state::dispatch_write(
   {
     count_unmodelled(window, word, true);
   }
-  if(word >= slot.layout.words())
+  auto const* const rules = word < slot.layout.words() ? slot.layout.find(word) : nullptr;
+  if(rules == nullptr and (word >= slot.layout.words() or slot.claimed[word] == 0))
   {
     warn_unregistered(window, offset, true, by);
     note_watched(window.base + offset, size, value, true, by);
@@ -649,13 +800,6 @@ auto machine::run_state::dispatch_write(
       note_watched(window.base + offset, size, value, true, by);
     }
     return done;
-  }
-  auto const* const rules = slot.layout.find(word);
-  if(rules == nullptr)
-  {
-    warn_unregistered(window, offset, true, by);
-    note_watched(window.base + offset, size, value, true, by);
-    return {};
   }
   if(not slot.model and (slot.logged[word] == 0 or owner.options_.strict_peripherals))
   {
@@ -969,22 +1113,30 @@ void machine::run_state::warn_unregistered(
     mmio_window const& window,
     std::uint32_t      offset,
     bool               write,
-    initiator)
+    initiator          by)
 {
-  if(not window.slot->warned.insert(offset).second)
+  auto const strict = owner.options_.strict_peripherals;
+  if(by == initiator::debugger and strict)
   {
     return;
   }
-  owner.hooks_->log(
-      {.kind       = log_kind::model_warning,
-       .pc         = arch->pc(),
-       .peripheral = window.unit->name,
-       .reg        = {},
-       .offset     = offset,
-       .write      = write,
-       .message    = std::format(
-           "{} of {} at offset {:#x}, no register there", write ? "write" : "read",
-           window.unit->name, offset)});
+  if(window.slot->warned.insert(offset).second)
+  {
+    owner.hooks_->log(
+        {.kind       = log_kind::model_warning,
+         .pc         = arch->pc(),
+         .peripheral = window.unit->name,
+         .reg        = {},
+         .offset     = offset,
+         .write      = write,
+         .message    = std::format(
+             "{} of {} at offset {:#x}, no register there", write ? "write" : "read",
+             window.unit->name, offset)});
+  }
+  if(strict)
+  {
+    throw model_error(window.unit->name, "", offset);
+  }
 }
 
 auto machine::run_state::on_mmio_read(

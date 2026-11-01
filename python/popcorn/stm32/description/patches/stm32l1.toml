@@ -1,0 +1,381 @@
+format = 1
+source = "RM0038 Rev 18 and the STM32L1 CubeMX db against ST's STM32L100, L151, L152 and L162 SVDs: SVD naming, shared registers and memory of the whole family. Category rules live in the category patches"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L1*.svd"]
+
+[ip]
+renames_if_present = { GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPIOF", "GPIOG", "GPIOH"], DMA = ["DMA1", "DMA2"], COMP1 = ["COMP"], COMP2 = ["COMP"] }
+
+[peripherals]
+renames = { Flash = "FLASH" }
+source = "RM0038 Rev 18, 3.9 register description: the flash interface registers are FLASH_xxx, the four SVDs spell the peripheral Flash"
+
+[irqs]
+drop = ["RTC_Alarm", "RTC_WKUP", "USB_FS_WKUP"]
+add = [
+  { number = 41, name = "RTC_Alarm", peripheral = "EXTI" },
+  { number = 3, name = "RTC_WKUP", peripheral = "EXTI" },
+  { number = 42, name = "USB_FS_WKUP", peripheral = "EXTI" },
+]
+
+[[register_renames]]
+peripherals = ["GPIO?"]
+renames = { OSPEEDER = "OSPEEDR" }
+source = "RM0038 Rev 18, 7.4.3 GPIO port output speed register (GPIOx_OSPEEDR): the register is OSPEEDR, the four SVDs spell it OSPEEDER"
+
+[[register_drops]]
+peripheral = "USB_SRAM"
+names = ["USB_EP0R", "USB_EP1R", "USB_EP2R", "USB_EP3R", "USB_EP4R", "USB_EP5R", "USB_EP6R", "USB_EP7R", "USB_CNTR", "ISTR", "FNR", "DADDR", "BTABLE"]
+source = "RM0038 Rev 18, 2.3 memory map: USB device FS SRAM at 0x4000 6000 is the packet memory, a plain memory, and 24.5.4 lists the USB registers at 0x4000 5C00. The SVDs derive USB_SRAM from USB, so it repeats the 13 USB registers at 0x4000 6000. The 1 KB window 0x4000 6000 to 0x4000 63FF stays as a peripheral with no registers and no IP"
+
+[core]
+reset_clock_hz = 2_097_152
+mpu = true
+source = "RM0038 Rev 18, 6.3.2 RCC_ICSCR: MSIRANGE resets to 101, range 5, and 6.2.3: the MSI is the system clock after reset and range n runs at 32768 x 2^(n+1) Hz, 2_097_152 Hz for range 5, as the CMSIS SystemCoreClockUpdate computes it. mpu: the CMSIS device headers define __MPU_PRESENT 1 and DDI0337H 2.1 gives the optional MPU eight regions, the four SVDs say mpuPresent false and RM0038 does not state the MPU, inferred"
+
+[[resets]]
+peripheral = "RCC"
+register = "APB2LPENR"
+reset = 0x0000521D
+source = "RM0038 Rev 18, 6.3.12 RCC_APB2LPENR: reset value 0x0000 521D. The SVDs give 0"
+
+[[resets]]
+peripheral = "RCC"
+register = "APB1LPENR"
+reset = 0xB0E64A37
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: reset value 0xB0E6 4A37. The SVDs give 0"
+
+[[resets]]
+peripheral = "SPI1"
+register = "CR2"
+reset = 0
+source = "RM0038 Rev 18, 28.5.2 SPI_CR2: reset value 0x0000. The STM32L152 SVD gives 0x700"
+
+[[resets]]
+peripheral = "SPI2"
+register = "CR2"
+reset = 0
+source = "RM0038 Rev 18, 28.5.2 SPI_CR2: reset value 0x0000. The STM32L152 SVD gives 0x700"
+
+[[resets]]
+peripheral = "TIM2"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 17.4.12 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM3"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 17.4.12 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM4"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 17.4.12 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM6"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 19.4.8 TIM6 and TIM7 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM7"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 19.4.8 TIM6 and TIM7 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM9"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 18.4.11 TIM9 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM10"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 18.5.10 TIM10 and TIM11 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "TIM11"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0038 Rev 18, 18.5.10 TIM10 and TIM11 TIMx_ARR: reset value 0xFFFF. The SVDs give 0"
+
+[[resets]]
+peripheral = "USART1"
+register = "SR"
+reset = 0x000000C0
+source = "RM0038 Rev 18, Table 158 USART register map: SR reset TXE 1 and TC 1, 0x000000C0. The 27.6.1 header and the four SVDs give 0x00C00000"
+
+[[resets]]
+peripheral = "USART2"
+register = "SR"
+reset = 0x000000C0
+source = "RM0038 Rev 18, Table 158 USART register map: SR reset TXE 1 and TC 1, 0x000000C0. The 27.6.1 header and the four SVDs give 0x00C00000"
+
+[[resets]]
+peripheral = "USART3"
+register = "SR"
+reset = 0x000000C0
+source = "RM0038 Rev 18, Table 158 USART register map: SR reset TXE 1 and TC 1, 0x000000C0. The 27.6.1 header and the four SVDs give 0x00C00000"
+
+[[fields]]
+instances = ["CRC"]
+registers = ["IDR"]
+fields = ["Independent_data_register"]
+width = 8
+source = "RM0038 Rev 18, 4.4.2 CRC_IDR: IDR[7:0], a general-purpose 8-bit register, and CRC_IDR_IDR_Msk 0xFF in the CMSIS device headers. The four SVDs give 7 bits"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4"]
+registers = ["CCMR2_Output"]
+fields = ["CC4S"]
+width = 2
+source = "RM0038 Rev 18, 17.4.8 TIMx_CCMR2: CC4S[1:0] is two bits wide. The SVDs give one bit"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM9"]
+registers = ["CCMR1_Output"]
+fields = ["CC2S"]
+width = 2
+source = "RM0038 Rev 18, 17.4.7 and 18.4.7 TIMx_CCMR1: CC2S[1:0] in bits 9:8, two bits wide. The SVDs give one bit in the output view and two in the input view"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM9"]
+registers = ["CCMR1_Input"]
+rename = { ICPCS = "IC1PSC", IC2PCS = "IC2PSC" }
+source = "RM0038 Rev 18, 17.4.7 and 18.4.7 TIMx_CCMR1 input capture mode: IC1PSC[1:0] in bits 3:2 and IC2PSC[1:0] in bits 11:10. The four SVDs spell them ICPCS and IC2PCS"
+
+[[fields]]
+instances = ["TIM11"]
+registers = ["CCMR1_Input"]
+rename = { ICPCS = "IC1PSC" }
+source = "RM0038 Rev 18, 18.5.6 TIM10/11 TIMx_CCMR1 input capture mode: IC1PSC[1:0] in bits 3:2. The four SVDs spell it ICPCS on TIM11"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["CR1"]
+rename = { OMP = "OPM" }
+source = "RM0038 Rev 18, 18.4.1 TIM9 TIMx_CR1: bit 3 is OPM, one-pulse mode. The four SVDs spell it OMP"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["SMCR"]
+add = { name = "ETF", lsb = 8, width = 4, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.4.3 TIM9 TIMx_SMCR and Table 85: ETF in bits 11:8. The four SVDs give SMCR only MSM, TS and SMS"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["SMCR"]
+add = { name = "ETPS", lsb = 12, width = 2, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.4.3 TIM9 TIMx_SMCR and Table 85: ETPS in bits 13:12. The four SVDs give SMCR only MSM, TS and SMS"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["SMCR"]
+add = { name = "ECE", lsb = 14, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.4.3 TIM9 TIMx_SMCR and Table 85: ECE in bit 14. The four SVDs give SMCR only MSM, TS and SMS"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["SMCR"]
+add = { name = "ETP", lsb = 15, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.4.3 TIM9 TIMx_SMCR and Table 85: ETP in bit 15. The four SVDs give SMCR only MSM, TS and SMS"
+
+[[registers]]
+peripheral = "TIM9"
+name = "CCER"
+offset = 0x20
+width = 16
+reset = 0
+acc = "read_write"
+fields = [
+  { name = "CC1E", lsb = 0, width = 1 },
+  { name = "CC1P", lsb = 1, width = 1 },
+  { name = "CC1NP", lsb = 3, width = 1 },
+  { name = "CC2E", lsb = 4, width = 1 },
+  { name = "CC2P", lsb = 5, width = 1 },
+  { name = "CC2NP", lsb = 7, width = 1 },
+]
+source = "RM0038 Rev 18, 18.4.8 TIM9 TIMx_CCER and Table 85: offset 0x20, reset 0, CC1E, CC1P, CC1NP, CC2E, CC2P and CC2NP in bits 0, 1, 3, 4, 5 and 7. The four SVDs have no TIM9 CCER"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4"]
+registers = ["CCR3"]
+rename = { CCR1 = "CCR3" }
+source = "RM0038 Rev 18, 17.4.15 TIMx_CCR3: the field is CCR3[15:0]. The four SVDs name it CCR1"
+
+[[fields]]
+instances = ["ADC"]
+registers = ["SQR1"]
+fields = ["L"]
+width = 5
+source = "RM0038 Rev 18, 12.15.10 ADC_SQR1: L[4:0] in bits 24:20, five bits. The SVDs give four bits"
+
+[memory]
+source = "RM0038 Rev 18, 2.6 and DDI0337H 3.7: the Cortex-M3 bit-band alias of the SRAM at 0x2200 0000 onto 0x2000 0000 and of the peripherals at 0x4200 0000 onto 0x4000 0000, 32 MB each, for the CPU only. RM0038 Rev 18, 3.2 Table 8 and Table 9: the data EEPROM starts at 0x0808 0000 in every category. 3.4.2 and 3.4.3: the flash interface erases and programs the flash and the data EEPROM, so FLASH controls the Flash regions and DATA_EEPROM. Cat.6 has a second flash region the Cat.6 patch gives its controller. RM0038 Rev 18, 3.2 Tables 8 to 12: the information block holds the option bytes at 0x1FF80000 (32 bytes, a second set at 0x1FF80080 on Cat.4 to Cat.6) and the factory information up to 0x1FF800FF. The engine maps 1 KB pages, so the block is one 1 KB read-only region OPTION_FACTORY, written by the flash interface and holding the device signature words. 3.4.2: a page erase writes 0x0000 0000 and RM0038 never gives another erased value, so a never-programmed Flash or data EEPROM byte reads 0, inferred, board check"
+controller = { Flash = "FLASH", OPTION_FACTORY = "FLASH" }
+eeprom = { start = 0x08080000, controller = "FLASH" }
+fill = { Flash = 0, DATA_EEPROM = 0 }
+add = [
+  { name = "OPTION_FACTORY", start = 0x1FF80000, size = 0x400, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },
+  { name = "BB_SRAM", start = 0x22000000, size = 0x02000000, kind = "bit_band", acc = { read = true, write = true, execute = false }, secure = false, physical = 0x20000000 },
+  { name = "BB_PERIPH", start = 0x42000000, size = 0x02000000, kind = "bit_band", acc = { read = true, write = true, execute = false }, secure = false, physical = 0x40000000 },
+]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2RSTR"]
+rename = { TM10RST = "TIM10RST", TM11RST = "TIM11RST" }
+source = "RM0038 Rev 18, 6.3.6 RCC_APB2RSTR: bits 3 and 4 are TIM10RST and TIM11RST. The four SVDs spell them TM10RST and TM11RST"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR"]
+rename = { WWDRST = "WWDGRST" }
+source = "RM0038 Rev 18, 6.3.7 RCC_APB1RSTR: bit 11 is WWDGRST. The four SVDs spell it WWDRST"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+rename = { GPIOPAEN = "GPIOAEN", GPIOPBEN = "GPIOBEN", GPIOPCEN = "GPIOCEN", GPIOPDEN = "GPIODEN", GPIOPEEN = "GPIOEEN", GPIOPFEN = "GPIOFEN", GPIOPGEN = "GPIOGEN", GPIOPHEN = "GPIOHEN" }
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: bits 0 to 7 are GPIOAEN to GPIOGEN and GPIOHEN. The four SVDs spell them GPIOPxEN"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR"]
+rename = { USART4EN = "UART4EN", USART5EN = "UART5EN" }
+source = "RM0038 Rev 18, 6.3.10 RCC_APB1ENR: bits 19 and 20 are UART4EN and UART5EN. The four SVDs spell them USART4EN and USART5EN"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CSR"]
+rename = { LPWRSTF = "LPWRRSTF" }
+source = "RM0038 Rev 18, 6.3.14 RCC_CSR: bit 31 is LPWRRSTF. The four SVDs spell it LPWRSTF"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CR"]
+fields = ["RTCPRE0", "RTCPRE1"]
+drop = true
+source = "RM0038 Rev 18, 6.3.1 RCC_CR: RTCPRE[1:0] is one field in bits 30:29, the four SVDs split it in RTCPRE0 and RTCPRE1. The field added below replaces them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CR"]
+add = { name = "RTCPRE", lsb = 29, width = 2, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.1 RCC_CR: RTCPRE[1:0] in bits 30:29, HSE divided by 2, 4, 8 or 16 for the RTC and LCD clock, reset by a power on reset"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBRSTR"]
+add = { name = "AESRST", lsb = 27, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.5 RCC_AHBRSTR: AESRST in bit 27, on the STM32L16x devices. The SVDs lack it, the AES-less lines drop it with AES"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+add = { name = "AESEN", lsb = 27, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: AESEN in bit 27, on the STM32L16x devices. The SVDs lack it, the AES-less lines drop it with AES"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+add = { name = "AESLPEN", lsb = 27, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: AESLPEN in bit 27, on the STM32L16x devices. The SVDs lack it, the AES-less lines drop it with AES"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+add = { name = "FSMCLPEN", lsb = 30, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: FSMCLPEN in bit 30. The SVDs lack it, the categories without FSMC drop it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+add = { name = "TIM5LPEN", lsb = 3, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: TIM5LPEN in bit 3, reset 0 in the register reset value 0xB0E6 4A37. The SVDs lack it, the categories without TIM5 drop it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+add = { name = "SPI3LPEN", lsb = 15, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: SPI3LPEN in bit 15, reset 0 in the register reset value 0xB0E6 4A37. The SVDs lack it, the categories without SPI3 drop it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+add = { name = "UART4LPEN", lsb = 19, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: UART4LPEN in bit 19, reset 0 in the register reset value 0xB0E6 4A37. The SVDs lack it, the categories without UART4 drop it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+add = { name = "UART5LPEN", lsb = 20, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: UART5LPEN in bit 20, reset 0 in the register reset value 0xB0E6 4A37. The SVDs lack it, the categories without UART5 drop it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CIR"]
+add = { name = "LSECSSF", lsb = 6, width = 1, acc = "read_only", reset = 0 }
+source = "RM0038 Rev 18, 6.3.4 RCC_CIR: LSECSSF in bit 6, on Cat.2 to Cat.6. The SVDs lack it, the Cat.1 patch drops it"
+
+[[cross]]
+instances = ["RCC"]
+reg = "CIR"
+target_reg = "CIR"
+effect = "clear"
+pairs = { LSIRDYC = "LSIRDYF", LSERDYC = "LSERDYF", HSIRDYC = "HSIRDYF", HSERDYC = "HSERDYF", PLLRDYC = "PLLRDYF", MSIRDYC = "MSIRDYF", CSSC = "CSSF" }
+source = "RM0038 Rev 18, 6.3.4 RCC_CIR: a write of 1 to xxxRDYC clears xxxRDYF and CSSC clears CSSF"
+
+[[fields]]
+instances = ["PWR"]
+registers = ["CR"]
+fields = ["CSBF", "CWUF"]
+acc = "write_only"
+source = "RM0038 Rev 18, 5.4.1 PWR_CR: CSBF and CWUF are rc_w1 and always read as 0"
+
+[[fields]]
+ip = "USB"
+registers = ["USB_EP{n}R"]
+each = { n = [0, 7] }
+fields = ["STAT_TX", "DTOG_TX", "STAT_RX", "DTOG_RX"]
+acc = "read_write"
+on_write = "one_to_toggle"
+source = "RM0038 Rev 18, 24.5.2 USB endpoint n register (USB_EPnR): STAT_TX, DTOG_TX, STAT_RX and DTOG_RX are t, toggled by writing 1. ST's four L1 SVDs give plain read-write"
+
+[[fields]]
+ip = "USB"
+registers = ["USB_EP{n}R"]
+each = { n = [0, 7] }
+fields = ["CTR_TX", "CTR_RX"]
+on_write = "zero_to_clear"
+source = "RM0038 Rev 18, 24.5.2 USB endpoint n register (USB_EPnR): CTR_TX and CTR_RX are rc_w0. ST's four L1 SVDs give plain read-write"
+
+[[fields]]
+ip = "USB"
+registers = ["USB_EP{n}R"]
+each = { n = [0, 7] }
+fields = ["SETUP"]
+acc = "read_only"
+source = "RM0038 Rev 18, 24.5.2 USB endpoint n register (USB_EPnR): SETUP is r, set by the hardware. ST's four L1 SVDs give plain read-write"
+
+[[fields]]
+ip = "USB"
+registers = ["ISTR"]
+fields = ["ESOF", "SOF", "RESET", "SUSP", "WKUP", "ERR", "PMAOVR"]
+on_write = "zero_to_clear"
+source = "RM0038 Rev 18, 24.5.1 USB interrupt status register (USB_ISTR): ESOF to PMAOVR are rc_w0. ST's four L1 SVDs give plain read-write"
+
+[[fields]]
+ip = "USB"
+registers = ["ISTR"]
+fields = ["EP_ID", "DIR", "CTR"]
+acc = "read_only"
+source = "RM0038 Rev 18, 24.5.1 USB interrupt status register (USB_ISTR): EP_ID, DIR and CTR are r. ST's four L1 SVDs give plain read-write"

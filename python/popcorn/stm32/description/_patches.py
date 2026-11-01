@@ -6,6 +6,8 @@ schema type."""
 
 import copy
 import fnmatch
+import functools
+import re
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -24,6 +26,7 @@ from popcorn.stm32.description._model import (
     IrqDesc,
     PeripheralDesc,
     ReadEffect,
+    RegionAccess,
     RegionContent,
     RegionDesc,
     RegionKind,
@@ -36,12 +39,15 @@ from popcorn.stm32.description._model import (
 class PatchMatch:
     parts: list[str]
     svd: list[str] | None = None
+    dies: list[str] | None = None
+    flash_kib: list[int] | None = None
 
 
 @dataclass(slots=True, kw_only=True)
 class PatchCore:
     source: str
     reset_clock_hz: int | None = None
+    mpu: bool | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -53,7 +59,24 @@ class PatchAliases:
 
 @dataclass(slots=True, kw_only=True)
 class PatchIp:
-    renames: dict[str, list[str]]
+    renames: dict[str, list[str]] | None = None
+    renames_if_present: dict[str, list[str]] | None = None
+    versions: dict[str, str] | None = None
+    source: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class RegisterDrop:
+    peripheral: str
+    names: list[str]
+    source: str = field(metadata={"min_length": 1})
+
+
+@dataclass(slots=True, kw_only=True)
+class RegisterRename:
+    peripherals: list[str]
+    renames: dict[str, str]
+    source: str = field(metadata={"min_length": 1})
 
 
 @dataclass(slots=True, kw_only=True)
@@ -69,21 +92,37 @@ class PatchPeripherals:
 
 
 @dataclass(slots=True, kw_only=True)
+class PatchEeprom:
+    start: int = field(metadata={"minimum": 0, "maximum": 4294967295})
+    controller: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
 class PatchMemory:
     source: str
     add: list[RegionDesc] | None = None
     controller: dict[str, str] | None = None
+    eeprom: PatchEeprom | None = None
+    fill: dict[str, int] | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class PatchCmsis:
+    suffix: str
+    source: str
 
 
 @dataclass(slots=True, kw_only=True)
 class PatchSignature:
     region: str
     flash_size: int = field(metadata={"minimum": 0})
-    package: int = field(metadata={"minimum": 0})
     uid: int = field(metadata={"minimum": 0})
     uid_words: list[int]
-    packages: dict[str, int]
     source: str
+    package: int | None = field(default=None, metadata={"minimum": 0})
+    packages: dict[str, int] | None = None
+    uid_offsets: list[int] | None = None
+    flash_size_codes: dict[str, int] | None = None
     content: list[RegionContent] | None = None
 
 
@@ -195,6 +234,14 @@ class ResetSet:
 
 
 @dataclass(slots=True, kw_only=True)
+class PartFact:
+    part: str
+    source: str = field(metadata={"min_length": 1})
+    die: str | None = None
+    ram_kib: int | None = field(default=None, metadata={"minimum": 1})
+
+
+@dataclass(slots=True, kw_only=True)
 class Patch:
     format: int = field(default=1, metadata={"const": 1})
     match: PatchMatch
@@ -210,9 +257,13 @@ class Patch:
     cross: list[CrossRuleSpec] | None = None
     peripheral_sizes: list[PeripheralSizeSet] | None = None
     registers: list[RegisterAdd] | None = None
+    register_drops: list[RegisterDrop] | None = None
+    register_renames: list[RegisterRename] | None = None
     resets: list[ResetSet] | None = None
     memory: PatchMemory | None = None
     signature: PatchSignature | None = None
+    cmsis: PatchCmsis | None = None
+    part_facts: list[PartFact] | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -230,6 +281,13 @@ class PatchReport:
     peripherals_dropped: int = 0
     peripherals_renamed: int = 0
     ip_renamed: int = 0
+    ip_renames_skipped: int = 0
+    ip_versions_set: int = 0
+    ip_version_changes: list[tuple[str, str, str]] = field(
+        default_factory=list[tuple[str, str, str]]
+    )
+    registers_dropped: int = 0
+    registers_renamed: int = 0
     aliased: int = 0
     fields_touched: int = 0
     fields_dropped: int = 0
@@ -245,16 +303,21 @@ class PatchReport:
     core_fields_set: int = 0
     regions_added: int = 0
     controllers_set: int = 0
+    fills_set: int = 0
     signature_words: int = 0
 
 
-def _matches(match: PatchMatch, part: str, svd_name: str) -> bool:
+def _matches(match: PatchMatch, part: str, svd_name: str, db_part: DbPart | None) -> bool:
     if not any(fnmatch.fnmatch(part, pattern) for pattern in match.parts):
         return False
     svd_patterns = match.svd or []
-    if not svd_patterns:
-        return True
-    return any(fnmatch.fnmatch(svd_name, pattern) for pattern in svd_patterns)
+    if svd_patterns and not any(fnmatch.fnmatch(svd_name, pattern) for pattern in svd_patterns):
+        return False
+    die_selected = match.dies is None or (db_part is not None and db_part.die in match.dies)
+    flash_selected = match.flash_kib is None or (
+        db_part is not None and bool(db_part.flash_kib) and db_part.flash_kib[0] in match.flash_kib
+    )
+    return die_selected and flash_selected
 
 
 @dataclass(slots=True, kw_only=True)
@@ -263,19 +326,158 @@ class LoadedPatch:
     patch: Patch
 
 
-def load_patches(files: Sequence[Path], part: str, svd_name: str) -> list[LoadedPatch]:
+@dataclass(slots=True)
+class _ParsedFile:
+    content: bytes
+    data: dict[str, object]
+    patch: Patch | None = None
+    facts: list[PartFact] | None = None
+
+
+@functools.lru_cache(maxsize=256)
+def parsed_patch(key: Path, content: bytes) -> _ParsedFile:
+    """The TOML of the patch file at the resolved path @p key holding @p content, cached on both,
+    256 files, least recently used dropped first. tomllib.TOMLDecodeError for bytes that are not
+    TOML, raised again at every call."""
+    text = content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return _ParsedFile(content=content, data=tomllib.loads(text))
+
+
+def _parsed(path: Path) -> _ParsedFile:
+    try:
+        return parsed_patch(path.resolve(), path.read_bytes())
+    except tomllib.TOMLDecodeError as exc:
+        raise DescriptionError(str(path), exc.lineno or 0, "<root>", "valid TOML") from exc
+
+
+def _patch_of(path: Path, entry: _ParsedFile) -> Patch:
+    if entry.patch is None:
+        entry.patch = from_mapping(Patch, entry.data, file=str(path))
+    return entry.patch
+
+
+def read_patch(path: Path) -> Patch:
+    """The patch in the file @p path, parsed once per process: an entry is keyed on the resolved
+    path and reused while the file's bytes equal the bytes it was parsed from, so an edited file
+    is parsed again at its next read. At most 256 files are kept, see parsed_patch.
+    DescriptionError for a file that is not TOML or not a patch."""
+    return _patch_of(path, _parsed(path))
+
+
+def patch_contents(files: Sequence[Path]) -> tuple[tuple[Path, bytes], ...]:
+    """The resolved path and the bytes of each of @p files, read and parsed as read_patch reads
+    them, in the order of @p files. DescriptionError for a file that is not TOML."""
+    result: list[tuple[Path, bytes]] = []
+    for path in files:
+        result.append((path.resolve(), _parsed(path).content))
+    return tuple(result)
+
+
+def load_patches(
+    files: Sequence[Path], part: str, svd_name: str, db_part: DbPart | None = None
+) -> list[LoadedPatch]:
     """Patches whose [match] selects @p part and @p svd_name, in the order @p files lists
-    them (family files before part files is the caller's ordering of @p files)."""
+    them (family files before part files is the caller's ordering of @p files). A patch with
+    `dies` or `flash_kib` in its [match] applies only when @p db_part, the selected expanded
+    name's part, is given and its die is listed and its flash size is listed. Each file is read
+    through read_patch."""
     result: list[LoadedPatch] = []
     for path in files:
-        try:
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-        except tomllib.TOMLDecodeError as exc:
-            raise DescriptionError(str(path), exc.lineno or 0, "<root>", "valid TOML") from exc
-        patch = from_mapping(Patch, data, file=str(path))
-        if _matches(patch.match, part, svd_name):
+        patch = read_patch(path)
+        if _matches(patch.match, part, svd_name, db_part):
             result.append(LoadedPatch(path=path, patch=patch))
     return result
+
+
+def _checked_facts(path: Path, entry: _ParsedFile) -> list[PartFact]:
+    if "part_facts" not in entry.data:
+        return []
+    patch = _patch_of(path, entry)
+    file = str(path)
+    match = patch.match
+    if match.svd is not None or match.dies is not None or match.flash_kib is not None:
+        raise DescriptionError(file, 0, "match", "parts only in a patch with part_facts")
+    facts = patch.part_facts or []
+    for index, fact in enumerate(facts):
+        key = f"part_facts[{index}]"
+        if not any(fnmatch.fnmatch(fact.part, pattern) for pattern in match.parts):
+            raise DescriptionError(file, 0, f"{key}.part", "a part the [match] selects")
+        if fact.die is None and fact.ram_kib is None:
+            raise DescriptionError(file, 0, key, "a die or a ram_kib")
+    return facts
+
+
+def _part_facts_of(path: Path) -> list[PartFact]:
+    entry = _parsed(path)
+    if entry.facts is None:
+        entry.facts = _checked_facts(path, entry)
+    return entry.facts
+
+
+def part_facts(files: Sequence[Path]) -> dict[str, PartFact]:
+    """The `[[part_facts]]` rows of @p files by part name, the corrections of the db part facts
+    that a manual or a datasheet states otherwise. Each file is parsed as read_patch parses it.
+    DescriptionError for a patch with part_facts whose [match] has more than `parts`, a row
+    whose part the [match] does not select, a row with neither `die` nor `ram_kib`, and a second
+    row for one part."""
+    found: dict[str, PartFact] = {}
+    owners: dict[str, str] = {}
+    for path in files:
+        for index, fact in enumerate(_part_facts_of(path)):
+            if fact.part in found:
+                raise DescriptionError(
+                    str(path),
+                    0,
+                    f"part_facts[{index}].part",
+                    f"one row per part, {owners[fact.part]} has one",
+                )
+            found[fact.part] = fact
+            owners[fact.part] = str(path)
+    return found
+
+
+def with_part_facts(part: DbPart, facts: Mapping[str, PartFact]) -> DbPart:
+    """@p part, a selected expanded name's part, with the die and the SRAM size of its row in
+    @p facts, a part_facts result. @p part itself without a row."""
+    fact = facts.get(part.ref_name)
+    if fact is None:
+        return part
+    return replace(
+        part,
+        die=fact.die if fact.die is not None else part.die,
+        ram_kib=[fact.ram_kib] if fact.ram_kib is not None else part.ram_kib,
+    )
+
+
+def corrected_part(part: DbPart, files: Sequence[Path]) -> DbPart:
+    """@p part, a selected expanded name's part, with the die and the SRAM size of its
+    `[[part_facts]]` row in @p files, see part_facts and with_part_facts."""
+    return with_part_facts(part, part_facts(files))
+
+
+_CMSIS_SUFFIX_RE = re.compile(r"x[a-z0-9]+")
+
+
+def cmsis_suffix(patches: Sequence[LoadedPatch]) -> str | None:
+    """The `[cmsis] suffix` of the one patch in @p patches that sets it, None when none does.
+    DescriptionError for a suffix that is not `x` followed by lowercase letters and digits, and
+    for a second patch setting it."""
+    found: tuple[str, str] | None = None
+    for loaded in patches:
+        rule = loaded.patch.cmsis
+        if rule is None:
+            continue
+        file = str(loaded.path)
+        if _CMSIS_SUFFIX_RE.fullmatch(rule.suffix) is None:
+            raise DescriptionError(
+                file, 0, "cmsis.suffix", "x followed by lowercase letters or digits"
+            )
+        if not rule.source.strip():
+            raise DescriptionError(file, 0, "cmsis.source", "a non-empty source")
+        if found is not None:
+            raise DescriptionError(file, 0, "cmsis", f"no other patch setting it, {found[1]} does")
+        found = (rule.suffix, file)
+    return found[0] if found is not None else None
 
 
 def _selector_targets(
@@ -330,7 +532,9 @@ def _apply_ip_renames(
     *,
     file: str,
 ) -> None:
-    for db_instance, targets in rule.renames.items():
+    if rule.renames is None and rule.renames_if_present is None and rule.versions is None:
+        raise DescriptionError(file, 0, "ip", "a renames, renames_if_present or versions entry")
+    for db_instance, targets in (rule.renames or {}).items():
         db_ip = db_ips.get(db_instance)
         if db_ip is None:
             raise DescriptionError(file, 0, f"ip.renames.{db_instance}", "a db IP instance")
@@ -343,6 +547,116 @@ def _apply_ip_renames(
             peripheral.ip = db_ip.name
             peripheral.ip_version = db_ip.version
             report.ip_renamed += 1
+    for db_instance, targets in (rule.renames_if_present or {}).items():
+        db_ip = db_ips.get(db_instance)
+        for target_name in targets:
+            peripheral = peripherals.get(target_name)
+            if db_ip is None or peripheral is None:
+                report.ip_renames_skipped += 1
+                continue
+            peripheral.ip = db_ip.name
+            peripheral.ip_version = db_ip.version
+            report.ip_renamed += 1
+
+
+def _apply_ip_versions(
+    rule: PatchIp,
+    peripherals: dict[str, PeripheralDesc],
+    report: PatchReport,
+    *,
+    file: str,
+) -> None:
+    if rule.versions is None:
+        return
+    if not rule.source:
+        raise DescriptionError(file, 0, "ip.source", "a non-empty source")
+    set_here: set[str] = set()
+    for pattern, version in rule.versions.items():
+        key = f"ip.versions.{pattern}"
+        matched = [p for name, p in peripherals.items() if fnmatch.fnmatchcase(name, pattern)]
+        if not matched:
+            raise DescriptionError(file, 0, key, "an instance name matching the glob")
+        for peripheral in matched:
+            if peripheral.name in set_here:
+                raise DescriptionError(file, 0, key, "instances no other glob of the table sets")
+            set_here.add(peripheral.name)
+            report.ip_version_changes.append((peripheral.name, peripheral.ip_version, version))
+            peripheral.ip_version = version
+            report.ip_versions_set += 1
+
+
+def _apply_register_drops(
+    rule: RegisterDrop,
+    peripherals: dict[str, PeripheralDesc],
+    report: PatchReport,
+    *,
+    file: str,
+    key: str,
+) -> None:
+    peripheral = peripherals.get(rule.peripheral)
+    if peripheral is None or peripheral.alias_of is not None:
+        raise DescriptionError(
+            file, 0, f"{key}.peripheral", "a peripheral of the description that is not an alias"
+        )
+    if not rule.names:
+        raise DescriptionError(file, 0, f"{key}.names", "at least one register name")
+    present = {r.name for r in peripheral.registers}
+    seen: set[str] = set()
+    for name in rule.names:
+        if name not in present:
+            raise DescriptionError(
+                file, 0, f"{key}.names", f"a register named {name} in {peripheral.name}"
+            )
+        if name in seen:
+            raise DescriptionError(file, 0, f"{key}.names", "each name once")
+        seen.add(name)
+    for target in peripherals.values():
+        if target is peripheral or target.alias_of == peripheral.name:
+            target.registers = [r for r in target.registers if r.name not in seen]
+    report.registers_dropped += len(seen)
+
+
+def _apply_register_renames(
+    rule: RegisterRename,
+    peripherals: dict[str, PeripheralDesc],
+    report: PatchReport,
+    *,
+    file: str,
+    key: str,
+) -> None:
+    if not rule.renames:
+        raise DescriptionError(file, 0, f"{key}.renames", "at least one register to rename")
+    targets: list[PeripheralDesc] = []
+    for pattern in rule.peripherals:
+        named = [p for p in peripherals.values() if fnmatch.fnmatchcase(p.name, pattern)]
+        matched = [p for p in named if p.alias_of is None]
+        if not matched:
+            expected = (
+                f"a peripheral that is not an alias matching {pattern}"
+                if named
+                else f"a peripheral matching {pattern}"
+            )
+            raise DescriptionError(file, 0, f"{key}.peripherals", expected)
+        targets.extend(p for p in matched if all(p is not t for t in targets))
+    if not targets:
+        raise DescriptionError(file, 0, f"{key}.peripherals", "at least one peripheral glob")
+    for target in targets:
+        present = {r.name for r in target.registers}
+        for old, new in rule.renames.items():
+            if old not in present:
+                raise DescriptionError(
+                    file, 0, f"{key}.renames.{old}", f"a register named {old} in {target.name}"
+                )
+            if new in present:
+                raise DescriptionError(
+                    file, 0, f"{key}.renames.{old}", f"a name not used in {target.name}, not {new}"
+                )
+    names = {t.name for t in targets}
+    for peripheral in peripherals.values():
+        if peripheral.name in names or peripheral.alias_of in names:
+            for register in peripheral.registers:
+                register.name = rule.renames.get(register.name, register.name)
+    report.registers_renamed += len(rule.renames) * len(targets)
 
 
 def _register_layout_key(peripheral: PeripheralDesc) -> list[object]:
@@ -945,47 +1259,113 @@ def _apply_core(
         touched.add("reset_clock_hz")
         core.reset_clock_hz = rule.reset_clock_hz
         report.core_fields_set += 1
+    if rule.mpu is not None:
+        if "mpu" in touched:
+            raise DescriptionError(file, 0, "core.mpu", "not already patched")
+        touched.add("mpu")
+        core.mpu = rule.mpu
+        report.core_fields_set += 1
 
 
 _ENGINE_PAGE = 0x400
 """Granularity of a memory region, the emulator's page size: the core refuses anything finer."""
 
 
+_BIT_BAND_SIZE = 32 << 20
+"""Size of a Cortex-M bit-band alias window."""
+
+_BIT_BAND_PAIRS = {0x2200_0000: 0x2000_0000, 0x4200_0000: 0x4000_0000}
+"""The architectural windows, alias start onto the target's first byte, DDI0337H 3.7: the lowest
+1 MB of the SRAM region and of the peripheral region."""
+
+
+def _check_bit_band(added: RegionDesc, key: str, *, file: str) -> None:
+    """DescriptionError unless `added` is one of the two architectural 32 MB windows, with no
+    content and no controller."""
+    if added.size != _BIT_BAND_SIZE:
+        raise DescriptionError(file, 0, key, "a bit_band region of 32 MB")
+    if added.start not in _BIT_BAND_PAIRS or added.physical != _BIT_BAND_PAIRS[added.start]:
+        raise DescriptionError(
+            file,
+            0,
+            key,
+            "a bit_band window at 0x22000000 onto 0x20000000 or at 0x42000000 onto 0x40000000",
+        )
+    if added.content is not None or added.controller is not None:
+        raise DescriptionError(file, 0, key, "a bit_band region with no content and no controller")
+
+
+_EEPROM_REGION = "DATA_EEPROM"
+
+
+def _add_region(
+    added: RegionDesc, regions: list[RegionDesc], report: PatchReport, *, file: str, key: str
+) -> None:
+    if added.size == 0 or added.start + added.size > 1 << 32:
+        raise DescriptionError(file, 0, key, "a non-empty range inside the 32-bit space")
+    if added.start % _ENGINE_PAGE != 0 or added.size % _ENGINE_PAGE != 0:
+        raise DescriptionError(file, 0, key, "a start and size in whole 1 KB pages")
+    if added.kind is RegionKind.BIT_BAND:
+        _check_bit_band(added, key, file=file)
+    elif added.physical is not None and not any(
+        region.start <= added.physical and added.physical + added.size <= region.start + region.size
+        for region in regions
+    ):
+        raise DescriptionError(file, 0, key, "a physical range inside an existing region")
+    for region in regions:
+        if region.name == added.name:
+            raise DescriptionError(file, 0, key, "a region name not already used")
+        if added.start < region.start + region.size and region.start < added.start + added.size:
+            raise DescriptionError(file, 0, key, f"a range clear of region {region.name}")
+    regions.append(copy.deepcopy(added))
+    report.regions_added += 1
+
+
 def _apply_memory(
     rule: PatchMemory,
     regions: list[RegionDesc],
     peripherals: Mapping[str, PeripheralDesc],
+    part: DbPart | None,
     report: PatchReport,
     *,
     file: str,
 ) -> None:
-    if not rule.add and not rule.controller:
-        raise DescriptionError(file, 0, "memory", "an add or a controller entry")
+    if not rule.add and not rule.controller and rule.eeprom is None and not rule.fill:
+        raise DescriptionError(file, 0, "memory", "an add, eeprom, controller or fill entry")
     for added in rule.add or []:
-        key = f"memory.add.{added.name}"
-        if added.size == 0 or added.start + added.size > 1 << 32:
-            raise DescriptionError(file, 0, key, "a non-empty range inside the 32-bit space")
-        if added.start % _ENGINE_PAGE != 0 or added.size % _ENGINE_PAGE != 0:
-            raise DescriptionError(file, 0, key, "a start and size in whole 1 KB pages")
-        if added.physical is not None and not any(
-            region.start <= added.physical
-            and added.physical + added.size <= region.start + region.size
-            for region in regions
-        ):
-            raise DescriptionError(file, 0, key, "a physical range inside an existing region")
-        for region in regions:
-            if region.name == added.name:
-                raise DescriptionError(file, 0, key, "a region name not already used")
-            if added.start < region.start + region.size and region.start < added.start + added.size:
-                raise DescriptionError(file, 0, key, f"a range clear of region {region.name}")
-        regions.append(copy.deepcopy(added))
-        report.regions_added += 1
+        _add_region(added, regions, report, file=file, key=f"memory.add.{added.name}")
+    controllers = dict(rule.controller or {})
+    if rule.eeprom is not None:
+        key = "memory.eeprom"
+        size = part.eeprom_bytes if part is not None else None
+        if size is None:
+            raise DescriptionError(file, 0, key, "a part with an E2prom element in the CubeMX db")
+        if _EEPROM_REGION in controllers:
+            raise DescriptionError(file, 0, key, f"no controller entry for {_EEPROM_REGION}")
+        _add_region(
+            RegionDesc(
+                name=_EEPROM_REGION,
+                start=rule.eeprom.start,
+                size=size,
+                kind=RegionKind.ROM,
+                acc=RegionAccess(read=True, write=False, execute=False),
+                secure=False,
+            ),
+            regions,
+            report,
+            file=file,
+            key=key,
+        )
+        if rule.eeprom.controller is not None:
+            controllers[_EEPROM_REGION] = rule.eeprom.controller
     by_name = {region.name: region for region in regions}
-    for name, peripheral in (rule.controller or {}).items():
+    for name, peripheral in controllers.items():
         key = f"memory.controller.{name}"
         region = by_name.get(name)
         if region is None:
             raise DescriptionError(file, 0, key, "an existing region")
+        if region.kind is RegionKind.BIT_BAND:
+            raise DescriptionError(file, 0, key, "a region of a kind other than bit_band")
         if region.acc.write:
             raise DescriptionError(file, 0, key, "a read-only region")
         if region.controller is not None:
@@ -996,6 +1376,17 @@ def _apply_memory(
             )
         region.controller = peripheral
         report.controllers_set += 1
+    for name, value in (rule.fill or {}).items():
+        key = f"memory.fill.{name}"
+        region = by_name.get(name)
+        if region is None:
+            raise DescriptionError(file, 0, key, "an existing region")
+        if region.kind is not RegionKind.ROM or region.physical is not None:
+            raise DescriptionError(file, 0, key, "a rom region that is not an alias")
+        if not 0 <= value <= 0xFF:
+            raise DescriptionError(file, 0, key, "a byte value, 0 to 255")
+        region.fill = value
+        report.fills_set += 1
 
 
 def _add_content(region: RegionDesc, offset: int, data: bytes, *, file: str, key: str) -> None:
@@ -1031,6 +1422,22 @@ def _package_key(part: DbPart) -> str:
     return key
 
 
+_UID_OFFSETS = [0, 4, 8]
+
+
+def _uid_pieces(base: int, words: Sequence[int], offsets: Sequence[int]) -> list[tuple[int, bytes]]:
+    """The 32-bit @p words at @p base plus their @p offsets as content pieces, little endian, words
+    that follow each other in one piece."""
+    pieces: list[tuple[int, bytes]] = []
+    for offset, word in sorted(zip(offsets, words, strict=True)):
+        data = word.to_bytes(4, "little")
+        if pieces and pieces[-1][0] + len(pieces[-1][1]) == base + offset:
+            pieces[-1] = (pieces[-1][0], pieces[-1][1] + data)
+        else:
+            pieces.append((base + offset, data))
+    return pieces
+
+
 def _apply_signature(
     rule: PatchSignature,
     regions: list[RegionDesc],
@@ -1048,48 +1455,73 @@ def _apply_signature(
         raise DescriptionError(file, 0, "signature", "the CubeMX part of the description")
     if len(rule.uid_words) != 3 or any(not 0 <= word < 1 << 32 for word in rule.uid_words):
         raise DescriptionError(file, 0, "signature.uid_words", "three 32-bit words")
-    for name, value in rule.packages.items():
+    if (rule.package is None) != (rule.packages is None):
+        raise DescriptionError(file, 0, "signature.packages", "packages with package, or neither")
+    offsets = _UID_OFFSETS if rule.uid_offsets is None else rule.uid_offsets
+    if len(offsets) != 3 or any(not 0 <= offset < 1 << 16 for offset in offsets):
+        raise DescriptionError(file, 0, "signature.uid_offsets", "three offsets, 0 to 0xffff")
+    for name, value in (rule.packages or {}).items():
         if not 0 <= value <= 0x1F:
             raise DescriptionError(file, 0, f"signature.packages.{name}", "a PKG code, 0 to 0x1f")
     flash_kib = part.flash_kib[0]
     if flash_kib >= 1 << 16:
         raise DescriptionError(file, 0, "signature.flash_size", "a flash size below 64 MB")
+    size_word = flash_kib
+    if rule.flash_size_codes is not None:
+        for kib, code in rule.flash_size_codes.items():
+            if not kib.isdecimal() or not 0 <= code < 1 << 16:
+                raise DescriptionError(
+                    file,
+                    0,
+                    f"signature.flash_size_codes.{kib}",
+                    "a flash size in KiB mapped to a 16-bit code",
+                )
+        if str(flash_kib) not in rule.flash_size_codes:
+            raise DescriptionError(
+                file, 0, "signature.flash_size_codes", f"a code for a flash of {flash_kib} KiB"
+            )
+        size_word = rule.flash_size_codes[str(flash_kib)]
+    uid_pieces = _uid_pieces(rule.uid, rule.uid_words, offsets)
     words = [
-        ("flash_size", rule.flash_size, flash_kib.to_bytes(2, "little")),
-        ("uid", rule.uid, b"".join(word.to_bytes(4, "little") for word in rule.uid_words)),
+        ("flash_size", [(rule.flash_size, size_word.to_bytes(2, "little"))]),
+        ("uid", uid_pieces),
     ]
-    code = rule.packages.get(_package_key(part))
-    if code is not None:
-        words.append(("package", rule.package, code.to_bytes(2, "little")))
+    if rule.package is not None and rule.packages is not None:
+        code = rule.packages.get(_package_key(part))
+        if code is not None:
+            words.append(("package", [(rule.package, code.to_bytes(2, "little"))]))
     for index, piece in enumerate(rule.content or []):
         if not piece.data or any(not 0 <= byte <= 0xFF for byte in piece.data):
             raise DescriptionError(
                 file, 0, f"signature.content[{index}].data", "bytes, at least one"
             )
-        words.append((f"content[{index}]", piece.offset, bytes(piece.data)))
-    for name, offset, data in words:
-        _add_content(region, offset, data, file=file, key=f"signature.{name}")
+        words.append((f"content[{index}]", [(piece.offset, bytes(piece.data))]))
+    for name, pieces in words:
+        for offset, data in pieces:
+            _add_content(region, offset, data, file=file, key=f"signature.{name}")
         report.signature_words += 1
 
 
 def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchReport:
-    """Applies @p patches to @p target in the fixed order: peripheral drops and renames, IP
-    renames, aliases, peripheral sizes, added registers, register resets, fields, cross rules,
-    IRQ drops and adds, core, memory regions and their controllers, the device signature. Drops
-    come first, so a later rule naming a dropped peripheral fails as naming an unknown one. A
-    peripheral rename lands before the aliases, so the alias rule pairs the new name with its
-    base, and a later rule names the new name. A peripheral size, an added
-    register and a register reset land in the named peripheral and in each of its aliases, so
-    fields and cross rules may name the register. A fields rule with `drop` removes its fields
-    from the named peripheral and its aliases, and a later rule naming them fails. A fields rule
-    with `rename` renames fields in the named peripheral and its aliases, and a later rule names
-    the new spelling. A fields rule with `add` adds one field, with its reset value, to the
-    named register of the named peripheral and its aliases, and a later rule names it. A fields
-    rule with `width`, `on_write`, `on_read` or `acc` sets it on the named fields of the named
-    peripheral and each of its aliases, and refuses an alias in `instances`. The report counts
-    each field of the peripheral and of each alias per property in `fields_touched`, and each
-    base field once in `fields_dropped`, `fields_renamed` and `fields_added`.
-    Validates every rule before mutating @p target: an error leaves it exactly as it was."""
+    """Applies @p patches to @p target in the fixed order: peripheral drops and renames, then per
+    patch in file order the IP renames and `renames_if_present`, then the `versions` of every patch
+    in file order, aliases, register drops, register renames, peripheral sizes, added registers,
+    register resets, fields, cross rules, IRQ drops and adds, core, memory regions and their
+    controllers, the device signature. Drops come first, so a later rule naming a dropped peripheral
+    fails as naming an unknown one. An `[ip] versions` glob matches the instance names after every
+    `[peripherals] renames`, and a glob matching nothing is an error. A peripheral rename lands
+    before the aliases, so the alias rule pairs the new name with its base, and a later rule names
+    the new name. A peripheral size, an added register and a register reset land in the named
+    peripheral and in each of its aliases, so fields and cross rules may name the register. A fields
+    rule with `drop` removes its fields from the named peripheral and its aliases, and a later rule
+    naming them fails. A fields rule with `rename` renames fields in the named peripheral and its
+    aliases, and a later rule names the new spelling. A fields rule with `add` adds one field, with
+    its reset value, to the named register of the named peripheral and its aliases, and a later rule
+    names it. A fields rule with `width`, `on_write`, `on_read` or `acc` sets it on the named fields
+    of the named peripheral and each of its aliases, and refuses an alias in `instances`. The report
+    counts each field of the peripheral and of each alias per property in `fields_touched`, and each
+    base field once in `fields_dropped`, `fields_renamed` and `fields_added`. Validates every rule
+    before mutating @p target: an error leaves it exactly as it was."""
     peripherals = copy.deepcopy(target.peripherals)
     irqs = copy.deepcopy(target.irqs)
     core = copy.deepcopy(target.core)
@@ -1115,8 +1547,24 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
             )
 
     for loaded in patches:
+        if loaded.patch.ip is not None:
+            _apply_ip_versions(loaded.patch.ip, by_name, report, file=str(loaded.path))
+
+    for loaded in patches:
         if loaded.patch.aliases is not None:
             _apply_aliases(loaded.patch.aliases, by_name, report, file=str(loaded.path))
+
+    for loaded in patches:
+        for j, rule in enumerate(loaded.patch.register_drops or []):
+            _apply_register_drops(
+                rule, by_name, report, file=str(loaded.path), key=f"register_drops[{j}]"
+            )
+
+    for loaded in patches:
+        for j, rule in enumerate(loaded.patch.register_renames or []):
+            _apply_register_renames(
+                rule, by_name, report, file=str(loaded.path), key=f"register_renames[{j}]"
+            )
 
     for loaded in patches:
         for j, rule in enumerate(loaded.patch.peripheral_sizes or []):
@@ -1174,7 +1622,14 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
 
     for loaded in patches:
         if loaded.patch.memory is not None:
-            _apply_memory(loaded.patch.memory, regions, by_name, report, file=str(loaded.path))
+            _apply_memory(
+                loaded.patch.memory,
+                regions,
+                by_name,
+                target.db_part,
+                report,
+                file=str(loaded.path),
+            )
 
     for loaded in patches:
         if loaded.patch.signature is not None:

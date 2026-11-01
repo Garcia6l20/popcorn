@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -7,6 +8,8 @@ import pytest
 from popcorn.stm32 import mcu
 from popcorn.stm32.description._sources import default_search_paths
 
+from popcorn_build import part_sweep
+from popcorn_build.cmsis_dirs import VARIABLE, cmsis_device_dirs
 from popcorn_build.part_sweep import LOCAL_SOURCES, db_parts, main, sweep, sweep_part
 
 SHIPPED = ("STM32H573AIIx", "STM32U575QGIx")
@@ -141,13 +144,29 @@ def test_db_parts_lists_stm32_part_files_only(
     for name in ("families", "rules", "compatibility", "STM32X0(4-6)Px", "STM32Y1Tx"):
         (mcu_dir / f"{name}.xml").write_text("<Mcu/>")
     monkeypatch.setenv("POPCORN_CUBEMX_DB", str(tmp_path))
-    assert db_parts([]) == ["STM32X0(4-6)Px", "STM32Y1Tx"]
-    assert db_parts(["STM32X*"]) == ["STM32X0(4-6)Px"]
+    assert db_parts([]) == ["STM32X04Px", "STM32X06Px", "STM32Y1Tx"]
+    assert db_parts(["STM32X*"]) == ["STM32X04Px", "STM32X06Px"]
 
 
-def test_a_range_stem_is_one_refname_with_its_db_facts() -> None:
-    name = "STM32C011F(4-6)Px"
-    if not (default_search_paths().cubemx_db / "mcu" / f"{name}.xml").is_file():
+def test_part_facts_of_a_group_member_are_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcu_dir = tmp_path / "mcu"
+    mcu_dir.mkdir()
+    (mcu_dir / "STM32X0(4-6)Px.xml").write_text(
+        '<Mcu xmlns="http://mcd.rou.st.com/modules.php?name=mcu" RefName="STM32X0(4-6)Px" '
+        'Family="STM32X" Line="STM32X0"><Die>DIE1</Die><Ram>4</Ram><Ram>8</Ram>'
+        "<Flash>16</Flash><Flash>32</Flash></Mcu>"
+    )
+    monkeypatch.setenv("POPCORN_CUBEMX_DB", str(tmp_path))
+    facts = vars(part_sweep)["_part_facts"]
+    names = ("STM32X04Px", "STM32X06Px")
+    assert [(facts(n)["flash_kib"], facts(n)["ram_kib"]) for n in names] == [(16, 4), (32, 8)]
+
+
+def test_an_expanded_range_stem_name_has_its_db_facts() -> None:
+    name = "STM32C011F4Px"
+    if not (default_search_paths().cubemx_db / "mcu" / "STM32C011F(4-6)Px.xml").is_file():
         pytest.skip(f"no CubeMX db file for {name}")
     row = sweep_part(name)
     assert row["part"] == name
@@ -176,3 +195,11 @@ def test_a_sweep_matching_no_part_stops(
         main(["--out", str(tmp_path / "sweep.json"), "--parts", "STM32Q*"])
     assert exc.value.code == 2
     assert "no local part matches" in capsys.readouterr().err
+
+
+def test_a_child_gets_the_checkout_cmsis_dirs_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(VARIABLE, "/user/include")
+    dirs = cmsis_device_dirs()
+    for source in ("local", "shipped"):
+        entries = part_sweep.child_env(source)[VARIABLE].split(os.pathsep)
+        assert entries == [*map(str, dirs), "/user/include"]

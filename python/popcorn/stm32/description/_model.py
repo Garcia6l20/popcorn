@@ -119,6 +119,9 @@ class PeripheralDesc:
     bonded_channels: int | None = field(
         default=None, metadata={"minimum": 0, "maximum": 4294967295}
     )
+    bonded_channels_b: int | None = field(
+        default=None, metadata={"minimum": 0, "maximum": 4294967295}
+    )
 
 
 @dataclass(slots=True, kw_only=True)
@@ -137,6 +140,7 @@ class RegionContent:
 class RegionKind(StrEnum):
     ROM = "rom"
     RAM = "ram"
+    BIT_BAND = "bit_band"
 
 
 @dataclass(slots=True, kw_only=True)
@@ -149,6 +153,7 @@ class RegionDesc:
     secure: bool
     content: list[RegionContent] | None = None
     controller: str | None = None
+    fill: int | None = field(default=None, metadata={"minimum": 0, "maximum": 255})
     physical: int | None = field(default=None, metadata={"minimum": 0, "maximum": 4294967295})
 
 

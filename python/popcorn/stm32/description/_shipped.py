@@ -2,6 +2,7 @@
 description directories, then the shipped layers, then a local build."""
 
 import difflib
+import functools
 import hashlib
 import json
 import lzma
@@ -19,7 +20,7 @@ from popcorn._errors import absent
 from popcorn.stm32.description._binder import check_bounds, dump_json
 from popcorn.stm32.description._builder import build_description
 from popcorn.stm32.description._cache import cached_description, default_cache_dir
-from popcorn.stm32.description._cubemx import bonded_pins, read_part
+from popcorn.stm32.description._cubemx import bonded_pins
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
 from popcorn.stm32.description._layers import (
     LAYER_FORMAT,
@@ -36,6 +37,7 @@ from popcorn.stm32.description._sources import (
     default_search_paths,
     match_refname,
     pin_data_sources,
+    read_db_part,
     resolve_part,
 )
 
@@ -95,17 +97,30 @@ def _layer(data: bytes, *, file: str, kind: str) -> tuple[dict[str, Any], bytes]
     return layer, raw
 
 
-def _names_in(path: Path) -> list[str]:
-    layer, _ = _layer(path.read_bytes(), file=str(path), kind="parts")
+@functools.lru_cache(maxsize=64)
+def layer_names(key: Path, data: bytes) -> tuple[str, ...]:
+    """The keys of `parts` of the parts layer at the resolved path @p key holding @p data, cached
+    on both, 64 files, least recently used dropped first. DescriptionError for a refused layer,
+    raised again at every call."""
+    layer, _ = _layer(data, file=str(key), kind="parts")
     deltas = layer.get("parts")
     if not isinstance(deltas, dict):
-        raise DescriptionError(str(path), 0, "parts", "an object")
-    return list(cast(dict[str, Any], deltas))
+        raise DescriptionError(str(key), 0, "parts", "an object")
+    return tuple(cast(dict[str, Any], deltas))
+
+
+def _names_in(path: Path) -> tuple[str, ...]:
+    try:
+        return layer_names(path.resolve(), path.read_bytes())
+    except DescriptionError as exc:
+        raise DescriptionError(str(path), exc.line, exc.key, exc.expected) from exc
 
 
 def shipped_names(directory: Path | None = None) -> list[str]:
-    """Names of the shipped parts, `<RefName>[-<core>]`, the keys of `parts` of every parts
-    layer in @p directory, SHIPPED_DIR by default, sorted."""
+    """Names of the shipped parts, `<name>[-<core>]`, <name> the expanded name of a group RefName,
+    the keys of `parts` of every parts layer in @p directory, SHIPPED_DIR by default, sorted. The
+    names of a layer file are read through layer_names, so a layer is decoded again only when its
+    bytes change."""
     directory = SHIPPED_DIR if directory is None else directory
     return sorted(name for path in directory.glob(f"*{_PARTS_SUFFIX}") for name in _names_in(path))
 
@@ -331,7 +346,7 @@ def known_part(part: str) -> str:
         return found
     db_dir = default_search_paths().cubemx_db
     if (db_dir / "mcu").is_dir():
-        return resolve_part(part, db_dir)
+        return resolve_part(part, db_dir).name
     close = difflib.get_close_matches(part, shipped, n=5)
     expected = "a known part"
     if close:
@@ -356,11 +371,12 @@ class BuiltPart:
     bonded: int
     """Bonded GPIO pins of the part's package, by bonded_pins."""
     flash_kib: int
-    """Flash size in KiB, the db's first Flash element."""
+    """Flash size in KiB of the selected name."""
 
 
 def build_part(name: str, *, pin_data: Path) -> BuiltPart:
-    """BuiltPart of the shipped name @p name, `<RefName>[-<core>]`, built from
+    """BuiltPart of the shipped name @p name, `<name>[-<core>]`, <name> the expanded name of a
+    group RefName, built from
     pin_data_sources. DescriptionError when no CMSIS device header is found: a description
     without its IRQ names would differ from a local build."""
     part, _, core = name.partition("-")
@@ -371,7 +387,7 @@ def build_part(name: str, *, pin_data: Path) -> BuiltPart:
         )
     description = build_description(sources)
     check_bounds(description, file=name)
-    db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db))
+    db_part = read_db_part(sources.mcu_db, sources.part)
     return BuiltPart(
         text=dump_json(description),
         bonded=sum(mask.bit_count() for mask in bonded_pins(db_part).values()),
@@ -426,8 +442,14 @@ def build_layers(names: Sequence[str], *, pin_data: Path, jobs: int = 1) -> dict
             raise result
         built.append(result)
     by_name = dict(zip(names, built, strict=True))
-    references = choose_reference({name: (b.bonded, b.flash_kib) for name, b in by_name.items()})
-    return factor({name: json.loads(b.text) for name, b in by_name.items()}, references)
+    descriptions = {name: json.loads(b.text) for name, b in by_name.items()}
+    references = choose_reference(
+        {
+            name: (len(descriptions[name]["peripherals"]), b.bonded, b.flash_kib)
+            for name, b in by_name.items()
+        }
+    )
+    return factor(descriptions, references)
 
 
 _WRITE_ORDER = (".blocks.json.xz", ".line.json.xz", ".parts.json.xz")

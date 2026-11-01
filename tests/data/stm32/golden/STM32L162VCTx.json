@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 317,
+    "cross_rules": 8,
+    "fields": 3340,
+    "irqs": 54,
+    "patched_fields": 130,
+    "peripherals": 44,
+    "regions": 7,
+    "registers": 523
+  },
+  "part": "STM32L162VCTx",
+  "svd_sha256": "0f8a4bea28a57c54507b81bbefa05716641e4900cf6bb204511b9a5457ea501b",
+  "tables": {
+    "alternates": "d6d91ba4b6ac878a965751b12c0a60746087660a49fd4f4a1c725b9b0c472899",
+    "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
+    "fields": "eb7f004e42ee7b843f2870d482269f936ede8b23a8f32a4bed3e97a61031cf23",
+    "irqs": "54e87cc98ba72ed97935a677e2f0e593b86132b78bf159b1949dd8c97aa9cbcd",
+    "peripherals": "f07dc5cfb659cc707dbc1caf80a483a21990c56702822311217336cffc5573e6",
+    "regions": "89470ecb55f9875a0bb1fad964373baa4eeb0d5332275f29953cdbd778872822",
+    "registers": "b70222bf1254666b1589d0ffcaaf61f7c28f445c0f26e0c019fdd6d72a158705"
+  }
+}

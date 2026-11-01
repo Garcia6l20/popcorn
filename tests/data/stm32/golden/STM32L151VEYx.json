@@ -1,0 +1,24 @@
+{
+  "counts": {
+    "aliases": 0,
+    "alternates": 296,
+    "cross_rules": 8,
+    "fields": 3596,
+    "irqs": 54,
+    "patched_fields": 130,
+    "peripherals": 46,
+    "regions": 7,
+    "registers": 543
+  },
+  "part": "STM32L151VEYx",
+  "svd_sha256": "03123338476d3ae4ff311c3bf879ce4db5610522670a6a767d6146df49c874fa",
+  "tables": {
+    "alternates": "ded4b4ad7ed837650964b48378751559347c6b3d05b9dda7f5becaf644f67c38",
+    "core": "676e04650cd20d6ca04da6a085ecc41ff15edc18cfbd10a661d38fbba0129b20",
+    "fields": "32f5b515f792521caafd68075db9336f820dab19548d2f9fd5dc4b1ae44c9752",
+    "irqs": "57057cf9c12e4c3985108a673b0bffaab66a9f3df92e0b2a5ab2c5b888545ea7",
+    "peripherals": "ebe610eb0be7029e6fdd4ed63debcfb6d601ad9005651eaa4dac886dde209aec",
+    "regions": "db79ccf69840262e6f99eee618bee0c9854d502f6263fcc0eab5dd4d3701a49e",
+    "registers": "7ff20c1131c13de549c94b1851dc2eddc3b49636c42846dd4e761ff7388dd8c6"
+  }
+}

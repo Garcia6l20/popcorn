@@ -20,7 +20,8 @@ struct dbgmcu_state
 };
 
 /**
- * @brief DBGMCU of the STM32U5, RM0456 section 75.12. DBGMCU_IDCODE reads the description's
+ * @brief DBGMCU of the STM32U5, RM0456 section 75.12, and of the STM32L1, RM0038 section 30.16,
+ *        with its IDCODE, CR, APB1_FZ and APB2_FZ. DBGMCU_IDCODE reads the description's
  *        reset value, read-only, reserved bits 15:12 included, as RM0456 gives it as
  *        0xXXXX6XXX. ST's HAL reads it to pick the ADC calibration sequence. The base read
  *        handler of a dispatch_model returns only the bits that fields cover, and the fields
@@ -30,8 +31,8 @@ struct dbgmcu_state
  *        hold and release. Deviation: a freeze write while the core is held takes effect at the
  *        next hold or release, on silicon at once. DBGMCU_CR is storage: no low-power debug or
  *        trace behaviour follows it. The registers are "not reset by a system reset, only by a
- *        power-on reset", 75.12: a power-on or brown-out reset restores them, other resets keep
- *        them.
+ *        power-on reset", RM0456 75.12, "not reset by system reset", RM0038 30.16.3 and
+ *        30.16.4: a power-on or brown-out reset restores them, other resets keep them.
  */
 class dbgmcu final : public dispatch_model<dbgmcu, dbgmcu_state>, public debug_freeze
 {

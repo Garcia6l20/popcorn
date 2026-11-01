@@ -6,6 +6,7 @@ from popcorn.stm32.description import _sources
 from popcorn.stm32.description._cubemx import read_part
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._sources import (
+    ResolvedPart,
     SearchPaths,
     Sources,
     builder_digest,
@@ -31,8 +32,10 @@ def _synthetic_svd_dir(tmp_path: Path) -> Path:
 
 
 def test_resolve_part_exact_and_cpn(st_cubemx_db: Path) -> None:
-    assert resolve_part("STM32U575QGIx", st_cubemx_db) == "STM32U575QGIx"
-    assert resolve_part("STM32U575QGI6", st_cubemx_db) == "STM32U575QGIx"
+    assert resolve_part("STM32U575QGIx", st_cubemx_db) == ResolvedPart(
+        name="STM32U575QGIx", ref_name="STM32U575QGIx", index=0
+    )
+    assert resolve_part("STM32U575QGI6", st_cubemx_db).name == "STM32U575QGIx"
 
 
 def test_resolve_part_unknown_lists_close_matches(st_cubemx_db: Path) -> None:

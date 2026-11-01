@@ -2,8 +2,8 @@ popcorn
 Copyright (c) 2026 Sylvain Garcia
 
 popcorn source code is released under the MIT License, see LICENSE. This
-repository contains no third-party source code. It contains one data file per
-shipped STM32 part description, derived from the ST files listed under "STM32
+repository contains no third-party source code. It contains the layer files of the
+shipped STM32 part descriptions, derived from the ST files listed under "STM32
 part descriptions". The prebuilt test firmware
 under tests/firmware/periph/prebuilt and the prebuilt example firmware under
 examples/*/*/prebuilt contain object code compiled from the firmware-only
@@ -248,27 +248,52 @@ counts come from popcorn's own facts files under
 python/popcorn/stm32/description/rzone, written from ST's reference manual and
 datasheet, not from these files.
 
-python/popcorn/stm32/data/STM32U575QGIx.json.xz:
-  STM32U575.svd, version 2.2, Copyright (c) 2025 STMicroelectronics, from
-  STM32CubeCLT 1.20.0
+python/popcorn/stm32/data/STM32U5xx.blocks.json.xz, STM32U575xx.*.json.xz and
+STM32U585xx.*.json.xz:
+  STM32U575.svd and STM32U585.svd, version 2.2, Copyright (c) 2025
+  STMicroelectronics, from STM32CubeCLT 1.20.0
     License: Apache-2.0, see LICENSES/Apache-2.0.txt.
-  stm32u575xx.h, STM32Cube_FW_U5 V1.8.0, Copyright (c) 2021 STMicroelectronics
+  stm32u575xx.h and stm32u585xx.h, STM32Cube_FW_U5 V1.8.0, Copyright (c) 2021
+  STMicroelectronics
     License: Apache-2.0, see LICENSES/Apache-2.0.txt.
-  mcu/STM32U575QGIx.xml and mcu/IP/GPIO-STM32U5x_gpio_v1_0_Modes.xml,
-  Copyright (c) 2020, 2025 STMicroelectronics
+  mcu/STM32U575*.xml, mcu/STM32U585*.xml and
+  mcu/IP/GPIO-STM32U5x_gpio_v1_0_Modes.xml, Copyright (c) 2020, 2025
+  STMicroelectronics
     https://github.com/STMicroelectronics/STM32_open_pin_data, commit
     7d1f1514ed5583ec5007ad91236b4e1d377295b1
     License: BSD-3-Clause, see LICENSES/STM32_open_pin_data-LICENSE.
 
-python/popcorn/stm32/data/STM32H573AIIx.json.xz:
-  STM32H573.svd, version 1.7, Copyright (c) 2025 STMicroelectronics, from
-  STM32CubeCLT 1.20.0
+python/popcorn/stm32/data/STM32H5xx.blocks.json.xz, STM32H562xx.*.json.xz,
+STM32H563xx.*.json.xz and STM32H573xx.*.json.xz:
+  STM32H562.svd, STM32H563.svd and STM32H573.svd, version 1.7, Copyright (c)
+  2025 STMicroelectronics, from STM32CubeCLT 1.20.0
     License: Apache-2.0, see LICENSES/Apache-2.0.txt.
-  stm32h573xx.h, cmsis-device-h5 v1.7.0, Copyright (c) 2023 STMicroelectronics
+  stm32h562xx.h, stm32h563xx.h and stm32h573xx.h, cmsis-device-h5 v1.7.0,
+  Copyright (c) 2023 STMicroelectronics
     https://github.com/STMicroelectronics/cmsis-device-h5
     License: Apache-2.0, see LICENSES/Apache-2.0.txt.
-  mcu/STM32H573AIIx.xml and mcu/IP/GPIO-STM32H56x_gpio_v1_0_Modes.xml,
-  Copyright (c) 2026 STMicroelectronics
+  mcu/STM32H562*.xml, mcu/STM32H563*.xml, mcu/STM32H573*.xml and
+  mcu/IP/GPIO-STM32H56x_gpio_v1_0_Modes.xml, Copyright (c) 2026
+  STMicroelectronics
+    https://github.com/STMicroelectronics/STM32_open_pin_data, commit
+    7d1f1514ed5583ec5007ad91236b4e1d377295b1
+    License: BSD-3-Clause, see LICENSES/STM32_open_pin_data-LICENSE.
+
+python/popcorn/stm32/data/STM32L1xx.blocks.json.xz and STM32L152xx.*.json.xz:
+  STM32L152.svd, version 1.2, Copyright (c) 2023 STMicroelectronics, from
+  STM32CubeCLT 1.20.0
+    License: Apache-2.0, see LICENSES/Apache-2.0.txt.
+  stm32l152xb.h, stm32l152xba.h, stm32l152xc.h, stm32l152xca.h and
+  stm32l152xe.h, cmsis-device-l1 v2.3.4, Copyright (c) 2017-2021
+  STMicroelectronics
+    https://github.com/STMicroelectronics/cmsis-device-l1
+    License: Apache-2.0, see LICENSES/Apache-2.0.txt.
+  mcu/STM32L152R(6-8-B)Tx.xml, mcu/STM32L152R(6-8-B)TxA.xml,
+  mcu/STM32L152RCTx.xml, mcu/STM32L152RCTxA.xml, mcu/STM32L152RETx.xml and the
+  mcu/IP/GPIO-<version>_Modes.xml files of their GPIO versions
+  STM32L152x8_gpio_v1_0, STM32L15xxA_gpio_v1_0, STM32L152xC_gpio_v1_0,
+  STM32L162xD_gpio_v1_0 and STM32L162xE_gpio_v1_0, Copyright (c) 2021, 2022
+  STMicroelectronics
     https://github.com/STMicroelectronics/STM32_open_pin_data, commit
     7d1f1514ed5583ec5007ad91236b4e1d377295b1
     License: BSD-3-Clause, see LICENSES/STM32_open_pin_data-LICENSE.
@@ -286,6 +311,26 @@ CMSIS device STM32U5, v1.4.2, Copyright STMicroelectronics
   https://github.com/STMicroelectronics/cmsis-device-u5
   License: Apache-2.0, see LICENSES/Apache-2.0.txt. The device headers and the
   STM32U575 startup file, system file and linker script are used.
+
+STM32H5 HAL and LL drivers, v1.7.0, Copyright 2021 STMicroelectronics
+  https://github.com/STMicroelectronics/stm32h5xx-hal-driver
+  License: BSD-3-Clause, see LICENSES/stm32h5xx-hal-driver-LICENSE.md. The HAL
+  and LL drivers are used.
+
+CMSIS device STM32H5, v1.7.0, Copyright STMicroelectronics
+  https://github.com/STMicroelectronics/cmsis-device-h5
+  License: Apache-2.0, see LICENSES/Apache-2.0.txt. The device headers and the
+  STM32H573 startup file, system file and linker script are used.
+
+STM32L1 HAL and LL drivers, v1.4.6, Copyright 2017 STMicroelectronics
+  https://github.com/STMicroelectronics/stm32l1xx-hal-driver
+  License: BSD-3-Clause, see LICENSES/stm32l1xx-hal-driver-LICENSE.md. The LL
+  drivers are used.
+
+CMSIS device STM32L1, v2.3.4, Copyright STMicroelectronics
+  https://github.com/STMicroelectronics/cmsis-device-l1
+  License: Apache-2.0, see LICENSES/Apache-2.0.txt. The device headers and the
+  STM32L152xB and STM32L152xE startup files and system file are used.
 
 CMSIS 5, v5.9.0, Copyright Arm Limited
   https://github.com/ARM-software/CMSIS_5

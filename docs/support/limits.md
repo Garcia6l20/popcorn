@@ -24,6 +24,10 @@ The [part pages](generated/parts.md) list the instances with no model.
   `ModelError` and logs nothing, with or without `strict`.
 - The `value` getter, the field getters and `poke()` reach the register storage without a model.
 - An offset no register covers inside a modelled peripheral counts as unmodelled data too.
+- A firmware or DMA access to an offset no register covers, in a peripheral with or without a
+  model and held in RCC reset or not, reads 0, drops a write and logs one `model_warning` per
+  offset. Under `strict` it raises `ModelError`. A native model's or plugin's debugger access
+  through the services there under `strict` reads 0, drops a write and logs nothing.
 - The debug blocks TPIU, ETM, CTI and the ROM tables have no model. A firmware or DMA access
   reads 0 and drops writes, with one `model_warning` per block. The ROM tables read 0, so a ROM
   table walk ends at its first entry.
@@ -72,9 +76,59 @@ exceptions. They stop the run with a FAULT stop instead:
 - A reset a store requests applies after the instructions that follow the store up to the next
   branch, as for AIRCR.SYSRESETREQ.
 
+## STM32L1 description
+
+Source: [patches](https://github.com/Garcia6l20/popcorn/blob/main/python/popcorn/stm32/description/patches)
+
+The shipped STM32L1 descriptions start from the SVDs and the CubeMX part files. Patches correct
+them from RM0038 and the CMSIS device headers. These corrections are stated by RM0038 or the
+headers:
+
+- The flash size of a code comes from its CubeMX part file, and RM0038 3.2 gives the category
+  maximum only.
+- `RCC_APB2LPENR` resets to 0x521D, RM0038 6.3.12, and `RCC_APB1LPENR` to 0xB0E64A37, RM0038
+  6.3.13, with TIM5LPEN, SPI3LPEN, UART4LPEN and UART5LPEN at 0. The patch applies both to the
+  whole family where the SVDs give 0.
+- `SPI_CR2` resets to 0 on every category, RM0038 28.5.2, where the STM32L152 SVD gives 0x700.
+- `TIM5_ARR` resets to 0xFFFFFFFF, the 32-bit view of RM0038 Table 82. RM0038 17.4.12 shows the
+  16-bit view 0xFFFF.
+- `CC2S` of `TIM2_CCMR1` and `CC4S` of `TIM2_CCMR2` are two bits wide, RM0038 17.4.7 and 17.4.8,
+  where the SVD gives one.
+- `TIM2_OR` and `TIM3_OR` reset to 0, RM0038 17.4.19 and 17.4.20.
+- `FLASH_WRPR4` resets to 0 with its field named WRP4, on Cat.5 only, RM0038 3.9.9.
+- `GPIOx_BRR` reads 0, RM0038 7.4.11.
+- `F_SIZE` of DEV_ID 0x436 is 0 for 384 KiB and 1 for 256 KiB, RM0038 31.1.1.
+- Cat.2 parts that are not value line carry 20 `RTC_BKPxR`, RM0038 20.2. The
+  `stm32l152xba.h` header lists 5.
+- Cat.3 on DIE427 and DIE436 has no UART4 and UART5, so the vectors 48 and 49 and the base
+  0x40004C00 stay unused, RM0038 Table 50 and the CMSIS headers.
+- GPIOF and GPIOG stay in the Cat.6 description with no bonded pin, because the CubeMX part
+  files of DIE437 list none.
+- The CMSIS device header suffix of a category, xb, xba, xc, xca, xd, xe and xdx, is read from
+  the header contents.
+
+These are inferred, not measured on silicon:
+
+- A read past the populated flash inside the 128 KiB window of RM0038 Table 8, the Cat.1 and
+  Cat.2 table, is unmapped.
+- The 64 KiB hole of Cat.6 between the two 192 KiB banks, 0x08030000 to 0x0803FFFF, is unmapped,
+  from RM0038 Table 12 and the CMSIS `FLASH_BANK2_BASE`. Silicon may fault or return a value.
+- `SQ24` sits in bits 29 to 25 of `ADC_SQR2`, five bits wide. RM0038 12.15.11 text gives 29
+  to 26 and the SVD is used.
+- The device unique ID words are fixed values, because RM0038 31.2 documents no layout of the
+  wafer and lot fields. The third word sits at offset 0x14, where the STM32U5 and STM32H5 use
+  0x08.
+- On Cat.1 and Cat.2 `F_SIZE` sits at 0x1FF8004C, inside the factory block 0x1FF80020 to
+  0x1FF800FF of RM0038 Table 8.
+- `FLASH_WRPR4` also exists on Cat.6 at 0x40023C88, from the CMSIS xdx headers. RM0038 3.9.9
+  gives it to Cat.5 only, and whether a Cat.6 access reads zero, faults or returns an option byte
+  value is not known.
+- The Cat.3 vector positions 46 to 55 follow the vector addresses and the CMSIS header. The
+  Position column of RM0038 Table 50 reads 45 to 52.
+
 ## ADC
 
-Source: [adc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc.cpp)
+Source: [adc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc.cpp), [adc_l1.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/adc_l1.cpp)
 
 Not modelled, logged once each:
 
@@ -90,6 +144,8 @@ Not modelled, logged once each:
 - Differential conversions, the `ADC_DIFSEL` bit of a converted channel: the channel converts
   single-ended.
 - Reserved trigger selections in `EXTSEL`.
+- The EXTI line 11 and 15 selections, `EXTSEL` 6 and 16: the STM32U5 and STM32H5 EXTI drives no
+  trigger signal, so they start nothing.
 - A reserved prescaler in `ADC12_CCR.PRESC` divides by 256.
 - ADC4 has no model.
 
@@ -123,15 +179,96 @@ On the STM32H5, RM0481 section 28:
   DS14121 Table 96 gives 2 cycles. The ADC clock edges fall on multiples of the ADC clock period
   from virtual time 0.
 
+On the STM32L1, RM0038 section 12:
+
+- The automatic power-down, `PDI` and `PDD`, and `DELS` with `JAUTO` are logged once, a
+  model_error under strict_peripherals.
+- The analog watchdog compares an injected code before its offset, a code below 12 bits shifted
+  to 12 bits, and a result an overrun loses, each inferred. `ADC_HTR` and `ADC_LTR` are read at
+  the end of each conversion.
+- With `SCAN` and `AWDIE` set, a conversion that sets `AWD` aborts the scan, RM0038 12.15.2. Its
+  result is the group's last: `EOC` or `JEOC` sets, `CONT`, `DISCEN` and `JAUTO` do not go on,
+  and the next start begins at the first rank, inferred.
+- With `DMA` 1, `adc_dma` on DMA1 channel 1 requests each regular result until `ADC_DR` is read
+  or 0 is written to `EOC`. An overrun with `DMA` 1 aborts the regular conversion and further
+  regular triggers are ignored, RM0038 12.11.1. They stay ignored until `OVR` is cleared,
+  `SWSTART` counting as a trigger, inferred. With `DDS` 0 the end of the channel's count while
+  `DMA` is 1, at the end of a normal channel or at a circular reload, stops the requests and the
+  ADC converts as with `DMA` 0, no overrun, until `DMA` is written 0, then 1, inferred from the
+  RM0038 12.11.1 "avoids generating an overrun error".
+- Hardware triggers start conversions from every selection of `EXTSEL` and `JEXTSEL`: the TRGO
+  selections from the timer's TRGO, the TIMx_CCy selections from the timer's capture/compare
+  event, and EXTI lines 11 and 15 from the line input, a pin edge counting at its own time,
+  inferred. A selection whose source has no model on the part is logged once, a model_error
+  under strict_peripherals, and starts nothing. tlatr is 3.5 ADC clock cycles, the datasheet
+  maximum. Trigger detection stays on across an `EXTSEL` change, RM0038 12.6 blanks it
+  for 2 PCLK cycles. A model_error of a selection surfaces from the `ADC_CR2` write or the `ADONS`
+  event that starts the listening.
+- `DELS` 010 to 111 add 1 PCLK2 cycle and 3 ADC clock cycles of synchronisation to the delay, the
+  maxima RM0038 gives, inferred, at the PCLK2 rate of the conversion end. `DISCEN` with `CONT`
+  converts as `DISCEN` alone and is logged once, a model_error under strict_peripherals, inferred.
+  With `EOCS` 1 the `DELS` 010 to 111 delay follows each group though `EOC` sets per conversion,
+  RM0038 12.9.1.
+- `DELS` 001 holds the next conversion at each `EOC`: after each conversion with `EOCS` 1, after
+  the group with `EOCS` 0, inferred for `EOCS` 0. A trigger or `SWSTART` during a `DELS` hold is
+  ignored, RM0038 12.9 and Figure 47.
+- `ADONS` sets 3.5 us after the `ADON` edge, the datasheet tSTAB maximum, and clears at once
+  with `ADON`. `RCNR` and `JCNR` read 0. The ADC runs from HSI16 whatever `ADC1EN` of
+  `RCC_APB2ENR` holds.
+- A `SWSTART` while a conversion runs is cleared and ignored, inferred. A `JSWSTART` or an
+  injected trigger while the injected group runs is cleared and ignored, inferred.
+- With `SCAN` 0 the injected group is one conversion of JSQ(4 - `JL`), the first of the `JL`
+  order, also over a regular conversion, inferred. An `ADC_JSQR` write, or an `ADC_SQR1` to
+  `ADC_SQR5` write, between `JDISCEN` or `DISCEN` subgroups starts the next group at its first
+  conversion, inferred. The k-th conversion of the injected group lands in `ADC_JDRk` less the offset
+  of `ADC_JOFRk`, inferred from the HAL rank order. Below 12 bits `JOFFSET` counts from bit 11 and
+  its bits under the resolution are ignored, inferred from the LL driver note, and a left-aligned
+  injected result sits one bit below the regular one at every resolution, RM0038 Figures 45 and
+  46 for 12 and 6 bits, inferred for 10 and 8 bits.
+- An injection drops a regular conversion in progress or due, and the same rank converts again
+  after the injected group, once the delay of the regular conversion before it has passed. A
+  regular trigger or `SWSTART` during the injected group starts the regular group after it. One
+  edge of a signal both groups select starts both.
+- `JAUTO` with `JEXTEN` not 0, `DISCEN` or `JDISCEN`, a `JSWSTART` with `JAUTO`, and `DISCEN`
+  with `JDISCEN` are logged once, a model_error under strict_peripherals. With `JAUTO` the whole
+  injected group follows the last regular rank and injected triggers are ignored, inferred.
+- With `JDISCEN` the last subgroup sets `JEOC` alone, inferred: the RM0038 12.3.10 example also
+  names `EOC`. The injected tlatr is the regular 3.5 ADC clock cycles, inferred.
+- Channels 16 and 17 read their TS_CAL1 and VREFINT_CAL values from the `TSVREFE` write on,
+  with no sensor tSTART, and 0 while `TSVREFE` is clear, inferred.
+- A conversion keeps the end time, sampling end and resolution it started with. `RES` and `SMPx`
+  written with `ADON` 1 apply from the next conversion.
+- With `EOCS` 1, a result that finds `ADC_DR` unread sets `OVR` and is lost, and the group goes
+  on, inferred.
+- On Cat.3 to Cat.6, the bank B channels on a pad of their own, ADC_IN0b to ADC_IN3b and
+  ADC_IN6b to ADC_IN12b, read their bank B input, `ADC.input(n, bank="B")`. The other bank B
+  channels read their bank A pad and take no bank B drive. VCOMP, channel 26, reads 0, logged
+  once.
+- A package bonds a bank B channel on a pad of its own when it bonds that pad, RM0038 Table 41
+  and the DS10002, DS10764, DS8890, DS10262 and DS8576 pin tables: PB2 for ADC_IN0b on every
+  Cat.3 to Cat.6 package.
+- The factory TS_CAL1, TS_CAL2 and VREFINT_CAL words are datasheet typical values. TS_CAL1 is
+  derived from two typicals, inferred. The L100 parts carry the words though their datasheets
+  give no TS_CAL, inferred.
+
 ## CRC
 
 Source: [crc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/crc.cpp)
 
-- A `CRC_DR` write that is not right-aligned is ignored and logged, RM0456 24.4.
+- On the STM32U5 and STM32H5 a `CRC_DR` write that is not right-aligned is ignored and logged,
+  RM0456 24.4.
 - An even polynomial, which RM0456 24.3.3 does not support, is computed anyway and logged.
-- A write narrower than 32 bits to any register but `CRC_DR` is ignored and logged. Such a read
-  is logged.
+- A write narrower than 32 bits to any register but `CRC_DR`, and on the STM32L1 `CRC_IDR`, is
+  ignored and logged. Such a read is logged.
 - The RCC clock gate is not modelled. The CRC works with its RCC enable bit clear.
+- The STM32L1 CRC, RM0038 4, computes CRC-32 over the fixed polynomial 0x04C11DB7 from 0xFFFFFFFF,
+  with no INIT, POL or reversal. A byte or half-word CRC_DR write feeds the word its byte lanes
+  repeat, 0xB0B0B0B0 for the byte 0xB0, and logs once. For a DMA write RM0038 11.3.4 states the
+  repeated lanes. For a CPU store the repeated lanes, and the unit ignoring the access size, are
+  inferred. A DR write completes with no stall, where RM0038 4.3 stalls it for the 4 HCLK of the
+  computation. A narrow read of CRC_DR or CRC_CR and a narrow write to CRC_CR log once, as RM0038
+  4.4 asks for words. CRC_IDR takes byte and half-word accesses with no log, as ST's CMSIS header
+  declares it a byte. Under `strict` each logged access raises `ModelError`.
 
 ## CRS
 
@@ -157,10 +294,43 @@ Source: [dbgmcu.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/
 
 - A freeze bit written while the core is held takes effect at the next hold or release. On
   silicon it takes effect at once.
+- STM32L1: `DBGMCU_CR` is storage, as on the STM32U5. `DBGMCU_IDCODE` reads the description's
+  value of the category. REV_ID is 0x1000 on every category, the revision A of RM0038 30.6.1,
+  and the choice of one revision is inferred.
+
+## EXTI
+
+Source: [exti.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/exti.cpp), [exti_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/exti_classic.cpp)
+
+- STM32L1: `EXTI_EMR` is storage, and an EXTI event wakes no WFE.
+- STM32L1: lines 16, 17, 18, 20 and 23 set their PR bit only, from `EXTI_SWIER`. The
+  description gives `PVD_IRQn`, `RTC_Alarm_IRQn`, `USB_FS_WKUP_IRQn`, `RTC_WKUP_IRQn` and
+  `COMP_ACQ_IRQn` to PWR, RTC, USB and COMP. Lines 16 to 23 take their edges from `EXTI_SWIER`
+  only, the PVD, the RTC, the USB and the comparators drive none.
+- STM32L1: lines 0 to 15 drive the trigger signals `exti0` to `exti15` the ADC selects, the input
+  of the line before its edge detection: an edge at each change of the selected pin, at the pin
+  edge's own time, and at a `SYSCFG_EXTICRn` write that moves the line to a pin of another level,
+  whatever `EXTI_IMR`, `RTSR` and `FTSR` hold, inferred.
+- STM32L1: line 23 exists on Cat.3 to Cat.6, so `EXTI_IMR` takes 0x00FFFFFF there and 0x007FFFFF on
+  Cat.1 and Cat.2, inferred from RM0038 chapter 10.
+- STM32L1, inferred rules: an edge or a SWIER write sets PR only while the `EXTI_IMR` bit is set,
+  the NVIC line follows PR whatever IMR holds, a SWIER write of 0 clears the SWIER bit, a write
+  of 1 to a PR bit clears the SWIER bit of the line whether PR was set or not, a
+  `SYSCFG_EXTICRn` write that moves a line to a pin of another level is an edge on the line, and
+  a selector code RM0038 8.5.3 to 8.5.6 does not list selects no pin.
+
+## GPIO
+
+Source: [gpio.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/gpio.cpp)
+
+- STM32L1: `GPIOx_BRR` exists on Cat.4, Cat.5 and Cat.6, RM0038 7.4.11. On Cat.1 to Cat.3 a
+  firmware store to offset 0x28 is an unmodelled access and changes no pin. The absence on Cat.3
+  is inferred from RM0038 7.4.11 and its revision history.
+- STM32L1: `GPIOx_OSPEEDR` is storage, as on the STM32U5 and the STM32H5.
 
 ## FLASH
 
-Source: [flash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/flash.cpp)
+Source: [flash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/flash.cpp), [flash_l1.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/flash_l1.cpp)
 
 Not modelled:
 
@@ -212,6 +382,129 @@ Differs from RM0481:
 - A program over a word that is not erased writes the new data as given.
 - Without TrustZone the FLASH_PRIVBBxRy bits are stored and gate no access. RM0481 3.7.2 keeps
   the privileged protection with TZEN = 0xC3.
+
+On the STM32L1, RM0038 section 3:
+
+- A program memory word write, page erase or half page write holds BSY for one tprog of 3.28 ms, the
+  typical of the STM32L15x datasheets and inferred for the 2.1 MHz MSI clock, and the memory
+  reads its new content from the last store of the operation on. During a word write or a page
+  erase, code and data reads of the bank complete and the core keeps running from it. RM0038
+  3.4.3 stalls code run from the bank for one tprog.
+- From the first store of a half page sequence to the end of its tprog, a CPU or DMA load of the
+  bank written, its program memory and its half of the data EEPROM, is a bus error and a fetch from
+  it a BusFault, RM0038 3.4.3 note 2 and Table 15 note 3. The bus error of a load from SRAM code
+  and of a DMA read, and the start of the lock at the first store, are inferred from those notes.
+  A data EEPROM double word erase or write locks its bank the same way, inferred from RM0038
+  3.4.3 note 2 and 3.7.3. A parallel page erase or parallel half page locks both banks the same
+  way, from the first store, inferred from RM0038 3.4.2 and 3.4.3, which run them from SRAM only.
+  Host and debugger reads complete. A vector read from a locked bank is a bus error too, so an
+  exception entry with VTOR in that bank escalates to HardFault with HFSR.VECTTBL, inferred from
+  RM0038 Table 15 note 3. Firmware runs these operations from SRAM with VTOR in SRAM or in the other
+  bank.
+- A store while BSY is set is decided against FLASH_PECR at its own time and writes at once. An
+  operation it completes adds its tprogs to BSY. EOP sets once at the end of each operation.
+  Silicon stalls the store until the operation before it ends. While a half page or a data
+  EEPROM double word of one bank is BSY, a program memory or data EEPROM store to the other bank
+  sets WRPERR and writes nothing, RM0038 3.4.4 and 3.7.3, inferred. A Cat.5 data EEPROM store to
+  bank 2 during a bank 1 half page does the same.
+- A program memory word written over a word that is not erased holds the word as given, inferred
+  from RM0038 3.4.3, and Table 15 covers the data EEPROM only. A page erase writes 0, and a
+  never-programmed word reads 0, the erased value.
+- A store with FLASH_PECR.ERASE or FPRG set and PROG clear, or with both set, programs nothing,
+  logs one `model_warning` and raises `ModelError` under `strict`.
+- A data EEPROM byte, halfword or word write takes one tprog when FTDW is clear and the word reads
+  0, else two, RM0038 Table 15. A word store of 0 is a word erase of one tprog. With ERASE or FPRG
+  set, DATA set and PROG clear, two word stores from an 8-byte boundary erase or program a double
+  word in one tprog. A never written data EEPROM byte reads 0.
+- The option words of the information block, offsets 0x00 to 0x1F and 0x80 to 0x9F on Cat.4 to
+  Cat.6, take a word store with PELOCK and OPTLOCK clear, timed as the data EEPROM. A power-on,
+  brown-out or option load reset loads FLASH_OBR and FLASH_WRPRx from them, FLASH_PECR.OBL_LAUNCH
+  requests that reset. A write protected sector, one FLASH_WRPRx bit per 4 KB counted over the
+  Flash regions in address order, refuses a program or erase with WRPERR. RDP level 2 refuses
+  every option store with WRPERR. At level 1, a store of RDP 0xAA erases the Flash regions, the
+  data EEPROM, the option words and the RTC backup registers to 0, then programs the word, in
+  three tprog. A part starts with the virgin option words: FLASH_OBR 0x00F800AA, FLASH_WRPRx 0.
+- At RDP level 1 every read, program and erase completes, the user flash boot of RM0038 3.7.1.
+  BOR_LEV, IWDG_SW, nRST_STOP, nRST_STDBY and nBFB2 read in FLASH_OBR as loaded, and the BOR
+  threshold, the watchdog start, Stop, Standby and the boot address follow the machine's own
+  configuration.
+- PCROP on STM32L151, L152 and L162 Cat.2 and Cat.3 on DIE427, RM0038 3.7.4: SPRMOD loads with RDP
+  against nSPRMOD and nRDP. With SPRMOD set a FLASH_WRPRx bit at 0 protects its sector against
+  program and erase, WRPERR, and against a CPU, DMA or filtered debugger data read, which reads 0
+  and sets FLASH_SR.RDERR. A fetch from it runs. Host and unfiltered debugger reads return the
+  content. An option store programs with SPRMOD and every protected WRPx bit kept. The RDP level
+  1 to 0 store programs the SPRMOD bit it carries, and its mass erase clears the WRPx words. The
+  value a PCROP read returns and the absence of a fault are inferred. So are the option store rule
+  that keeps every protected WRPx bit, the words read back before the next reload, and the load of
+  SPRMOD 1, OPTVERR and WRPR1 and WRPR2 at 0 after an RDP 1 to 0 store and a power-on, RM0038
+  3.7.4. On every other category and
+  part FLASH_WRPRx bits at 1 are write protection.
+- `Machine(option_bytes=)` selects the boot bank: the flash base, or with `swap_bank` on Cat.4 to
+  Cat.6 the bank 2 base, whatever the first word of bank 2 holds. RM0038 Table 19 boots the
+  system bootloader, which jumps to bank 2 when its first word is an SRAM address. FLASH_OBR.nBFB2
+  then loads as the inverse of `swap_bank` at every option load, whatever the USER word holds. Any
+  other field away from its default is refused as `option_bytes.<field>`.
+- OPTVERR and OPTVERRUSR set again at every reset and FLITFRST pulse after an option load that
+  set them, RM0038 3.9.7. An option store programs whatever OPTVERR and OPTVERRUSR hold.
+- A program in voltage range 3 completes, logs one `model_warning` and raises `ModelError` under
+  `strict`. RM0038 3.6 allows programming in ranges 1 and 2 only. That the program completes
+  is inferred.
+- FLASH_ACR.RUN_PD powers nothing down: the flash stays readable and fetchable, and
+  FLASH_SR.READY reads the inverse of RUN_PD. SLEEP_PD and PRFTEN are storage.
+- An RCC FLITFRST pulse resets the FLASH registers only while FLASH_ACR.RUN_PD is set, inferred
+  from RM0038 6.3.5, and keeps FLASH_OBR and FLASH_WRPRx at their loaded values. While
+  FLITFRST is held, FLASH register writes are ignored whatever RUN_PD holds.
+- A supply cut during a program leaves the word as the store wrote it.
+- Inferred rules: a wrong key, a third key write after the unlock, or a write to FLASH_PRGKEYR or
+  FLASH_OPTKEYR while PELOCK is set is a bus error that sets the lock it targets until the next
+  reset, a rejected FLASH_PEKEYR write also sets PRGLOCK and OPTLOCK, a wrong FLASH_PDKEYR key
+  restarts the sequence, RUN_PD takes only the first FLASH_ACR write after the PDKEYR pair, a
+  FLASH_ACR write that changes ACC64 keeps LATENCY and PRFTEN, so ACC64 clears while LATENCY or
+  PRFTEN is 1, a byte or halfword store to program memory sets SIZERR and an unaligned word store
+  PGAERR, a store to a page start with ERASE and PROG set erases the page whatever value it writes,
+  an erase store away from a page start sets PGAERR, a half page store that skips a word inside the
+  half page sets PGAERR, BSY stays 0 while the first 31 half page words load, a parallel operation
+  takes a bank 1 page or half page first and a bank 2 one second and sets PGAERR for any other
+  order, a FLASH_PECR write that ends a half page sequence early, setting PELOCK included, sets
+  PGAERR, a byte or halfword store inside a sequence sets SIZERR and drops it, FLASH_SR.READY reads
+  1 after a reset, where RM0038 3.9.7 gives 0, the virgin option words hold 0xFF in the upper byte
+  of the RDP and USER words and complement 0xFFFF of WRPx 0, an option word whose complement is
+  wrong loads 0, so after an RDP 1 to 0 regression FLASH_OBR reads USER 0 with OPTVERR and
+  OPTVERRUSR set, a write of 1 to OPTVERR or OPTVERRUSR clears it until the next reset, an option
+  store with OPTVERR or OPTVERRUSR set programs, a data EEPROM store that spans two words counts the
+  tprogs of each word, RM0038 Table 20 note 5, a store to the factory information or at RDP level 2
+  sets WRPERR, an unaligned or a byte or halfword option store sets PGAERR or SIZERR, a byte or
+  halfword store of 0 to the Cat.1 data EEPROM programs nothing and logs one `model_warning`,
+  `ModelError` under `strict`.
+
+## DMA
+
+Source: [dma_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/dma_classic.cpp)
+
+- STM32L1 DMA1 and DMA2, RM0038 section 11. One transfer runs at a time per controller, 4 HCLK
+  cycles after the previous one, inferred. RM0038 gives no transfer time.
+- `GIFx` reads as the OR of `TEIFx`, `HTIFx` and `TCIFx`, inferred.
+- `HTIFx` sets once per pass, when the items left are at most half the count latched at the
+  enable. For an odd count the rounding is inferred.
+- `CPARx` and `CMARx` take writes while the channel runs, and the running transfer keeps the
+  addresses it latched at the enable until the next circular reload reads them again. `CCRx`
+  fields take writes while the channel runs and apply from the next item, inferred. `CNDTRx`
+  ignores writes while `EN` is set, RM0038 11.4.4.
+- A transfer error leaves the count and the current addresses at the failed item, inferred. A
+  circular channel disabled mid-copy and enabled again with no `CNDTRx` write restarts from the
+  count left at the disable, inferred.
+- A reserved `PSIZE` or `MSIZE` of 3 transfers words, inferred from RM0038 11.4.3, and `CIRC`
+  with `MEM2MEM` runs the copy once, inferred from RM0038 11.3.3. Each logs one `model_warning`.
+- A byte or halfword DMA write to an APB1 or APB2 address is a word write at the address
+  aligned down to 4, with the item repeated on every lane, RM0038 11.3.4. A CPU byte or
+  halfword store to the same address writes its own lanes only, inferred.
+- The requests of a channel are ORed, RM0038 11.3.7. Each item acknowledges every request of
+  the channel that is high, and the end of a non-circular transfer tells every request of the
+  channel, inferred.
+- A peripheral-requested transfer that leaves one item tells every request of the channel, once
+  per pass of a circular channel. This is the EOT_1 signal the I2C reads with CR2.LAST, RM0038
+  26.3.7. A memory-to-memory copy tells none.
+- The channels run whatever `RCC_AHBENR.DMAxEN` holds.
 
 ## GPDMA and LPDMA
 
@@ -291,7 +584,7 @@ Source: [hash.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 
 ## I2C
 
-Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/i2c.cpp)
+Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/i2c.cpp), [i2c_v1.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/i2c_v1.cpp)
 
 - The I2C runs as a 7-bit controller and as a 7-bit target on OAR1, OAR2 with its mask and the
   general call, with clock stretching, NOSTRETCH, SBC and the SMBus timeouts of TIMEOUTR. 10-bit
@@ -331,6 +624,88 @@ Source: [i2c.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 - PE set during a bus hold reads BUSY 1 at once. Silicon waits for the next START.
 - A transfer that meets a hold waits. On silicon it would lose arbitration. A target's ARLO reply
   models that case.
+- STM32L1 I2C1 and I2C2, RM0038 section 26, run as a 7-bit controller transmitter and receiver
+  on board targets. The SCL period is Thigh + Tlow from CCR and PCLK1, RM0038 26.6.8, without the
+  rise time and the noise filter delay: a START takes 1 period, a byte 9, a STOP 1. FREQ, CCR,
+  TRISE and the PCLK1 rate are checked at the first START after PE is set with PCLK1 running, and
+  each rule a configuration breaks logs one `model_warning`. TRISE passes at or above the rise
+  time.
+- SMBus, PEC, ALERT and ARP log one `model_warning`, raise `model_error` under
+  `strict_peripherals` at the START that uses them, and the bus stays idle for them.
+- DMA, RM0038 26.3.7: with CR2.DMAEN 1 the TX request follows TxE and the RX request follows
+  RxNE, in controller and target mode and whatever ITBUFEN holds. A DMA access to DR acts as a CPU
+  access. With CR2.LAST 1 at the EOT_1 of the channel serving the RX request, the controller
+  receiver NACKs the next byte. Inferred: LAST counts as it is at EOT_1, the NACKed byte is the
+  first whose acknowledge the I2C decides after EOT_1, the end of a START drops a pending EOT_1,
+  an EOT_1 with DMAEN 0 changes nothing, and LAST has no effect in target mode. The end of the DMA transfer sends no STOP: the firmware
+  sets it.
+- A `board.i2c_controllers` controller, alone on the instance, queues phases through
+  `i2c_controller_port` with the placement, unit order, STOP, drop, reset and snapshot rules of
+  the STM32U5 I2C with a board controller.
+- Target receiver and transmitter, RM0038 26.3.2: a 7-bit match of OAR1, of OAR2 with ENDUAL 1, or
+  the general call with ENGC 1, with CR1.ACK 1, sets ADDR with TRA as the R/W bit, DUALF for OAR2
+  and GENCALL for the general call, and holds SCL until the SR1 then SR2 read. OAR2 matches with
+  ADDMODE 0 only, the general call in either ADDMODE. Address 0 never matches OAR1 nor OAR2. A STOP,
+  a repeated START and the disable clear DUALF and GENCALL. Written bytes land in DR with RxNE,
+  CR1.ACK read at the end of the byte's phase, the acknowledge period included. A byte ending with
+  RxNE 1 sets BTF and holds SCL until the DR read. A read byte sends the shift register, which the
+  first DR write after the ADDR clear loads with TxE kept 1, and waits for that write. The
+  acknowledge of a read byte moves a full DR on and sets TxE, and with DR empty BTF sets at the
+  byte's end, RM0038 26.3.2. The controller's NACK sets AF, and a DR write after it clears TxE and
+  sends nothing. BUSY follows the port's START and STOP with PE 0 too. A STOP sets STOPF after an
+  acknowledged address or byte, none after a NACKed byte. Which acknowledge counts for that rule,
+  the last one sent or CR1.ACK at the STOP, is inferred as the last one sent. PE 0 written
+  between a match of an address of the I2C and the port's STOP disables it at that STOP, RM0038
+  26.6.1: until then it answers,
+  stretches and takes DR accesses as with PE 1. Inferred: OAR1 matches before OAR2 for one address,
+  PE 0 with no address matched since the last STOP disables the I2C at once, a match with CR1.ACK 0
+  answers NACK at the address end with no ADDR, address 0 with R/W 1 matches nothing, an SR1 read
+  before STOPF sets arms its clear by a CR1 write, the first read byte after the ADDR clear sets no
+  BTF, the communication PE 0 waits for runs from the match to the port's STOP, repeated STARTs and
+  their address phases included, a repeated START inside it matches the I2C's addresses, the STOP
+  that ends it sets no STOPF, and a PE 1 write before that STOP keeps the I2C enabled. A firmware START
+  waits for the port's STOP. A 10-bit header with ADDMODE 1 logs one `model_warning`, raises
+  `model_error` under `strict_peripherals` at the address phase, and answers NACK.
+- Target with NOSTRETCH 1, RM0038 26.3.4 and 26.3.5: an address match answers at its end with ADDR
+  set and no SCL hold. A written byte that ends with RxNE 1 is lost and sets OVR, and a read byte
+  that starts with the shift register empty sends the DR byte again and sets OVR. BTF never sets.
+  A read byte NACKed before the ADDR clear ends the transmission, RM0038 26.3.4 AF. Inferred: the
+  lost byte is acknowledged as CR1.ACK says, a read byte before the ADDR clear sends DR as it is,
+  TxE sets only with ADDR clear, and the ADDR clear after that NACK sets no TxE.
+- Errors, RM0038 26.3.4: a target's `bus_error` sets BERR and its `overrun` sets OVR at the end of
+  the byte, which completes as its acknowledge says. On silicon OVR sets in slave mode with
+  NOSTRETCH only, the injection exercises firmware handlers. With several targets the byte takes
+  the error of the first in attachment order. An `arbitration_lost` sets ARLO, clears MSL and
+  TRA, RM0038 26.6.7, ignores the reply's acknowledge and stretch, drops a read byte and sends no
+  DR byte the firmware wrote, RM0038 26.3.4 ARLO. Inferred: TxE clears and BTF follows a byte
+  still held, as at a START end. Inferred: BUSY stays 1 for one SCL period, then the winner's STOP
+  reaches the targets, clears BUSY and CR1.STOP and sends a START CR1.START holds. PE 0 in that
+  window leaves BUSY 1 until that STOP. In target mode a port STOP inside a running data byte of
+  the I2C's acknowledged address, or inside a running address phase while the I2C is enabled,
+  sets BERR and drops the byte, RM0038 26.3.4 BERR. Inferred: a STOP inside another address's
+  byte or before a queued phase starts sets no BERR.
+- The controller receiver decides a byte's acknowledge at the end of its eighth period, before
+  the acknowledge pulse, from CR1.ACK, an ACK write inside the eighth period counting, as RM0038
+  Figure 213 note 4 states. An ACK write during the acknowledge pulse counts for the next byte,
+  inferred. With POS 1 it takes ACK as it was at the previous byte's decision or at the end of the
+  address, inferred for an ACK write during a byte. A byte clocked after a NACKed byte reads 0xFF and
+  reaches no target.
+- A DR write in reception clears RxNE, and with BTF set the held byte replaces the written value
+  in DR, inferred. A DR write with TRA 1 clears RxNE, BTF and a byte held from a reception, and
+  the transmitter sends it, inferred.
+- PE 0 during a controller transfer, which RM0038 26.6.1 forbids, ends it at once and logs one
+  `model_warning`. The SB clear by an SR1 read then a DR write follows RM0038 26.6.6 SB and Figure
+  212 EV5. Inferred: a DR write with SB set and no SR1 read since the last SB or ADDR clear sends
+  nothing, and the DR write that clears SB takes the SR1 read, so the ADDR clear needs an SR1 read
+  after it. A DR write while ADDR is set, during the address phase or after a data NACK sends
+  nothing, inferred. An SR2 read between the SR1 read and the DR write that clears SB leaves
+  that clear armed, inferred: RM0038 26.6.7 names the ADDR case only. A CR1.STOP set while ADDR
+  is set sends its STOP after the ADDR clear, inferred where RM0038 26.6.1, Figure 212 and 26.3.3
+  conflict. A byte written with TxE 1 and NACKed leaves TxE 1, inferred from RM0038 26.6.6 TxE.
+- An STM32L1 I2C target answers at the phase's end. A target that leaves its answer pending is
+  taken as NACK or as a byte of 0xFF and fails the run with `config_error`, and
+  `i2c_target_port::complete()` and `complete_read()` throw `config_error`. The STM32L1 I2C is a
+  link end of no linked system and takes no host bus hold.
 
 ## IWDG
 
@@ -340,7 +715,14 @@ Source: [iwdg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
   the old prescaled clock.
 - A refresh reloads at the key write, not one period later.
 - EWIC acknowledges without the 0x5555 key, as `LL_IWDG_ClearFlag_EWIF` expects.
-- The hardware watchdog option is not modelled.
+- The IWDG starts at the first `KR` 0xCCCC whatever the hardware watchdog option holds:
+  FLASH_OPTR.IWDG_SW on the STM32U5, FLASH_OPTSR_CUR.IWDG_SW on the STM32H5, FLASH_OBR.IWDG_SW on
+  the STM32L1. RM0456 61.4.3 and RM0038 21.3.1 start it at power-on with IWDG_SW 0.
+- The STM32L1 IWDG, RM0038 21, has KR, PR, RLR and SR with PVU and RVU. A refresh reloads at any
+  counter value. PR 110 and 111 both divide by 256. PVU and RVU fall 5 LSI cycles after the
+  write, the "up to 5" of RM0038 21.4.4 taken as 5, inferred, 6 on the STM32U5 and STM32H5.
+- An update flag falls only while the LSI runs: a PR, RLR, WINR or EWCR write before the LSI
+  starts keeps its flag set until the LSI is ready, inferred.
 
 ## MDF and ADF
 
@@ -442,6 +824,40 @@ Not modelled, logged:
 - Battery charging detection, `BCDR.BCDEN`.
 - Remote wake-up signalling, `CNTR.L1RES` and `CNTR.L2RES`.
 
+On the STM32L1, RM0038 section 24, the same model runs with the L1 register names: `EPnR` with
+`STAT_TX`, `DTOG_TX`, `CTR_TX`, `EP_KIND`, `EP_TYPE`, `STAT_RX`, `DTOG_RX` and `CTR_RX`,
+`ISTR.RESET` and `EP_ID`, and `CNTR.FRES`, `FSUSP`, `LPMODE` and `RESUME`.
+
+- The rules above that were measured on an STM32H573 apply as inferred: the narrow register
+  write, the suspend timer, `FNR.LCK`, `FNR.RXDP` and `RXDM`, and the first transaction of a
+  double-buffered bulk endpoint.
+- The packet memory is 512 bytes in the `USB_SRAM` peripheral, local half-word k in the low
+  half of the word at offset 4k, RM0038 24.5.3. The upper half reads 0 and ignores writes,
+  inferred. Half-word and word accesses of the low half pass. A CPU byte access or an access of
+  the upper half logs once and raises `ModelError` under `strict`. Debugger accesses of any
+  width pass.
+- The descriptor table starts at `BTABLE`, and a buffer address ignores bit 0, inferred from
+  RM0038 24.5.3, which says bit 0 must be written 0.
+- The D+ pull-up is `SYSCFG_PMC.USB_PU`, RM0038 24.4.2. A write or a SYSCFG reset that changes
+  it tells the host at once. `LCD_CAPA` in the same register is storage: a CPU write that sets a
+  bit of it logs once and raises `ModelError` under `strict`.
+- `FRES` written from 0 to 1 clears every `EPnR` but `CTR_RX` and `CTR_TX` and clears `DADDR`,
+  RM0038 24.5.1 `CNTR.FRES`, which resets the peripheral like a USB reset, and `ISTR.RESET`,
+  which resets the function address and endpoint registers at a USB reset. `ISTR.RESET` sets at
+  the write, inferred.
+- `FSUSP` and `LPMODE` keep what the firmware writes. While `FSUSP` is set the suspend timer
+  stops. A bus reset, a SOF or a resume while `FSUSP` is set raises `WKUP` and clears `LPMODE`,
+  and `FSUSP` stays set, RM0038 24.4.5.
+- `USB_LP` is any `ISTR` flag whose `CNTR` mask is set. `USB_HP` is a `CTR_RX` or `CTR_TX` of an
+  isochronous or double-buffered bulk endpoint whatever `CNTR.CTRM` holds, inferred from RM0038
+  24.3.1 and the endpoint interrupt condition of 24.5.2.
+- EXTI line 18 follows `ISTR.WKUP`: it rises when `WKUP` sets and falls when the firmware clears
+  it, inferred from RM0038 24.5.1, so `USB_FS_WKUP` needs the line's EXTI rising edge and mask.
+
+Not modelled on the STM32L1, logged, `ModelError` under `strict`:
+
+- Remote wake-up signalling, `CNTR.RESUME`.
+
 ## PWR
 
 Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/pwr.cpp)
@@ -471,10 +887,19 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   `strict_peripherals` it is a `model_error` and `PWR_CR3` keeps its value before the write.
   Otherwise the firmware REGSEL write is stored, an inferred rule.
 - STM32U5: `PWR_CR3.FSTEN` is storage.
+- STM32L1: a VOS write to another range sets `PWR_CSR.VOSF` for the board's `ready_delay`, 50 us
+  by default, in either direction, and the new range applies when VOSF clears, RM0038 5.4.1 and
+  5.4.2. The delay is not a silicon figure. A write of VOS 00 keeps the range, RM0038 5.4.1. A
+  firmware write of it also logs one warning per machine life and is a `model_error` under
+  `strict_peripherals`.
+- STM32L1: the low-power modes `PWR_CR.PDDS` selects are not modelled, the first PDDS change logs
+  one warning. `DBP` does not gate the RTC domain bits of `RCC_CSR` or the RTC registers. LPSDSR,
+  LPRUN, ULP, FWU, the PVD and the wakeup flags are storage. A peripheral reset through
+  `RCC_APB1RSTR.PWRRST` keeps FWU and ULP, RM0038 5.4.1.
 
 ## RCC
 
-Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc.cpp)
+Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc.cpp), [rcc_l1.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rcc_l1.hpp)
 
 - SRAMnEN and SRAMnSMEN stay Non-secure. The MPCBB and INVSECSTATE rule of RM0456 5.4 does not
   apply to them.
@@ -543,8 +968,32 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   transition. The model runs one cycle per instruction, so the same load lands 13 cycles after the
   store and reads 1, except for /2 to /1 and /4 to /1, where it reads 0 and HAL takes `HSI_VALUE`
   either way.
+- STM32U5 and STM32H5: `HSEBYP` in `RCC_CR` and `LSEBYP` in `RCC_BDCR` take writes while their
+  oscillator runs, where RM0456 and RM0481 allow a write with the oscillator off only.
+- An oscillator whose ON bit a system reset keeps and whose ready bit is 0, such as an LSE still
+  starting when the reset comes, starts again at the reset and is ready after the board's
+  `ready_delay`.
 - Without TrustZone, a coverage report classes `RCC_CIFR` and `RCC_CICR` as `unimplemented`. The
   RCC sets the `RCC_CIFR` flags `RCC_CIER` enables, and a `RCC_CICR` write clears them.
+- STM32L1: every category runs one clock tree, RM0038 section 6, with the enable, reset and
+  low-power bits of a peripheral the category lacks absent from its description. The RCC sets the
+  `RCC_CIR` ready flags its enables select, a `xxxRDYC` write clears them, and no ready interrupt
+  is raised. A system reset keeps the RTC domain bits of `RCC_CSR`, `RTCPRE` and `HSEBYP`, a power
+  on reset and a BOR reset them, RM0038 6.1.2 and 6.3.14. A BOR sets PORRSTF and PINRSTF,
+  inferred. `RTCRST` resets the RTC domain bits of
+  `RCC_CSR` while it is 1. The LSE CSS bits exist on the L100, L151 and L162 from Cat.2, and
+  OBLRSTF on every line but the L152, RM0038 6.3.4 and 6.3.14 against the SVDs, inferred. A
+  software reset sets SFTRSTF only, the PINRSTF of the NRST pulse is not
+  set, an inferred rule. The reset flags of `RCC_CSR` keep their value on a write, only RMVF and a
+  power reset clear them, inferred from RM0038 6.3.14.
+- STM32L1: `RTCPRE` and `HSEBYP` keep their value on a write while `HSEON` is 1 and `LSEBYP` while
+  `LSEON` is 1, RM0038 6.3.1 and 6.3.14. The ON bit is the one before the write, so one store that
+  clears `HSEON` and changes `RTCPRE` keeps `RTCPRE`, an inferred order. `RTCRST` clears `LSEBYP`
+  while the LSE runs, RM0038 6.3.14.
+- STM32L1: `MSIRANGE` 7 and the PLLMUL and PLLDIV codes RM0038 6.3.2 and 6.3.3 do not allow run
+  their output at 0 Hz, an inferred rule. The PLL VCO and SYSCLK limits of each voltage range are
+  not checked. The CSS on HSE and on LSE is storage, and `LSECSSON` can be cleared by firmware.
+  The USB and SDIO 48 MHz clock, PLLVCO / 2, is not a clock domain.
 
 ## RNG
 
@@ -568,7 +1017,7 @@ noise source. The model differs from RM0456 Rev 7 chapter 48 here:
 
 ## RTC and TAMP
 
-Source: [rtc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rtc.cpp)
+Source: [rtc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rtc.cpp), [rtc_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/rtc_classic.cpp)
 
 Not modelled, logged:
 
@@ -581,6 +1030,41 @@ Not modelled, logged:
 - The security and privilege `RTC_SECCFGR`, `RTC_PRIVCR`, `TAMP_SECCFGR` and `TAMP_PRIVCR`
   select. They are storage.
 
+The STM32L1 RTC:
+
+- INITF sets at the second RTCCLK edge after INIT, and the calendar restarts at the fourth
+  edge after INIT clears, the upper bounds of RM0038 20.3.5.
+- RSF sets at the second RTCCLK edge after a clear, the end of init mode, a BYPSHAD clear or a
+  system reset, inferred from the copy every two RTCCLK periods of RM0038 20.3.2.
+- TR, DR and SSR read the calendar at the time of the read. A read of SSR or TR holds TR and DR
+  until DR is read, and after a system reset they read their reset values until RSF sets.
+- TAMP2F and TAMP3F clear by a 0 under the `RTC_WPR` key only, RM0038 20.3.5 and the note
+  under 20.6.4, which exempt `RTC_ISR[13:8]`.
+- `RTC_TSTR`, `RTC_TSDR`, `RTC_TSSSR`, `RTC_CALIBR`, `RTC_CALR`, `RTC_SHIFTR` and `RTC_TAFCR`
+  are storage: coverage reports them `storage_only`, and `m.mem` and the register views refuse
+  them as they refuse a peripheral without a model.
+- ADD1H and SUB1H move the calendar at the write.
+- RTC writes land whatever `PWR_CR.DBP` holds.
+- On Cat.1 a PREDIV_A of 0 divides by 1.
+- The alarm interrupt, ALRxF with ALRxIE, drives EXTI line 17 and RTC_Alarm, and WUTF with
+  WUTIE drives EXTI line 20 and RTC_WKUP, RM0038 20.5. The flag gated by its interrupt enable is
+  inferred from RM0038 Table 90. A flag set while its enable is 0 raises the line when the
+  enable sets.
+- On Cat.1 ALRAWF and ALRBWF clear when their alarm is enabled and in init mode, and set at the
+  second RTCCLK edge after the alarm is disabled, inferred from RM0038 20.3.5. On Cat.2 to Cat.6
+  they read 1, so `RTC_ALRMxR` takes writes while its alarm is enabled, inferred.
+- The wakeup timer counts from the write that sets WUTE, inferred. WUTWF clears and sets at the
+  second RTCCLK edge after WUTE changes, the upper bound of RM0038 20.6.4.
+- A system reset keeps a pending set of WUTWF, ALRAWF or ALRBWF, inferred from the bit text of
+  RM0038 20.6.4. A system reset in init mode restarts the calendar as the end of init mode does,
+  inferred: on Cat.1 ALRxWF reads 1 at once for an alarm with ALRxE clear, and a ck_spre wakeup
+  counts its period from the restart. The U5 and H5 RTC rebase a ck_spre wakeup the same way,
+  inferred.
+- Logged once, `ModelError` under `strict` at the CPU or DMA write that selects them, before
+  the store: timestamps, tamper detection, coarse and smooth calibration, the shift control, the
+  RTC_CALIB and RTC_ALARM outputs and the reference clock detection. A debugger write stores
+  them with neither.
+
 ## SAI
 
 Source: [sai.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/sai.cpp)
@@ -589,16 +1073,59 @@ Source: [sai.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 
 ## SPI
 
-Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/spi.cpp)
+Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/spi.cpp), [spi_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/spi_classic.cpp)
 
-- Half duplex, CRC, TI mode, the autonomous trigger and SS timing are not modelled. The SPI runs
-  as a plain full-duplex or simplex SPI. One model_warning per machine comes at the first transfer
+- STM32U5 and STM32H5: half duplex, CRC, TI mode, the autonomous trigger and SS timing are not
+  modelled. The SPI runs as a plain full-duplex or simplex SPI. One model_warning per machine comes at the first transfer
   started with SPI_CFG2.SP, MIDI or MSSI or SPI_CFG1.CRCEN set.
 - The dummy frame RM0456 Figure 858 shows ahead of the UDRDR pattern is UDRDR too, and UDR rises
   at once, with no propagation latency.
 - RM0481 Table 645 limits SPI4 to SPI6 of the STM32H5 to DSIZE of 16 bits and CRC of 17 bits.
   The model accepts the DSIZE values of SPI1 to SPI3 there, and the CRC is not modelled.
 - SPI_I2SCFGR of the STM32H5 SPI1 to SPI3 is storage: the I2S mode is not modelled.
+- STM32L1 SPI1 to SPI3, RM0038 section 28, run SPI mode with one transmit buffer, one receive
+  buffer and frames of 8 or 16 bits by CR1.DFF. The frame time is DFF bits of the APB clock of
+  the instance, PCLK2 for SPI1, PCLK1 for SPI2 and SPI3, divided by 2 << BR, whatever
+  `RCC_APBxENR` holds. A frame starts at the DR write, without the 2 APB clock delay of the
+  RM0038 28.3.5 note.
+- `SPI_I2SCFGR` and `SPI_I2SPR` are storage: the I2S mode is not modelled. On Cat.3 to Cat.6
+  CR2.FRF 1 with SPE 1 logs one `model_warning`, raises `model_error` under `strict_peripherals`
+  at the CR1 or CR2 write, and the SPI runs the Motorola format. On Cat.1 and Cat.2 FRF
+  is storage, RM0038 28.5.2. TIFRFE, UDR and CHSIDE stay 0.
+- Clearing SPE lets the frame in flight finish and land with BSY 1, then no frame starts,
+  RM0038 28.3.8 for the receive-only modes, inferred for the others. Both buffers keep their
+  word across SPE 0, and a word written with SPE 0 is sent once SPE and MSTR are 1, inferred.
+- A target whose transmit buffer is empty at a frame start sends the last frame it received, 0
+  after a reset, inferred.
+- The CRC runs serially over the frame bits in wire order, RM0038 28.3.6: with LSBFIRST 1 it
+  takes the DR value LSB first. The CRC frame shifts TXCRCR out as a data word, bit reversed with
+  LSBFIRST 1, inferred. The CRC frame clears CRCNEXT at its end, inferred from ST's HAL, which
+  never clears it. With DMA, the completed transmit transfer arms the CRC frame after the last
+  data. In receive-only mode, controller or target, the completed receive transfer makes the
+  frame in flight the CRC frame, inferred, or the next frame when none is in flight.
+- While OVR is set, every frame received is lost, also after the DR read of the clear sequence
+  and up to its SR read, RM0038 28.3.10.
+- RXCRCR takes every frame received, also those lost while OVR is set, inferred from RM0038
+  28.3.6.
+- A target, MSTR 0 with CRCEN 1, folds into RXCRCR every frame its controller clocks, also with
+  NSS high or SPE 0, RM0038 28.3.6. Such a frame lands nowhere else and leaves TXCRCR as it is,
+  inferred: RM0038 names no calculator for a target that drives no MISO.
+- A target keeps BSY 1 from one frame to the next of a continuous transfer. RM0038 28.3.7 gives
+  a slave a BSY low of one SPI clock between frames.
+- SPI_DR takes byte accesses as well as the half-word and word accesses RM0038 28.5 requires: a
+  byte write merges into the DR value and sends it, a byte read returns its byte.
+- The CR1 write that ends the MODF clear sequence leaves SPE and MSTR clear, inferred: RM0038
+  28.3.10 restores them after the sequence.
+- The SPI IRQ and the DMA requests follow their flags and enables with SPE 0 too, inferred:
+  RM0038 Table 159 and 28.3.9 name no SPE term.
+- The STM32L1 SPI takes a controller's frames through `spi_controller_port::transfer()` only.
+  `select()`, `frame()`, `deselect()` and `drop()` throw `config_error`, so an STM32L1 SPI is a
+  link end of no linked system.
+- An STM32L1 SPI device replies at the frame's end. The model calls
+  `spi_target::exchange_deferred()` with the frame's generation as ticket, offers no
+  `spi_target_port` and calls neither `attached()` nor `detached()`. A device that leaves its
+  reply pending drives all ones in that frame, and the frame's end fails the run with
+  `config_error`.
 
 ## SBS
 
@@ -642,13 +1169,19 @@ Source: [sbs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
 
 ## SYSCFG
 
-Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/syscfg.cpp), [secure_config.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/secure_config.hpp)
+Source: [syscfg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/syscfg.cpp), [syscfg_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/syscfg_classic.cpp), [secure_config.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/secure_config.hpp)
 
 - Every register but `SYSCFG_SECCFGR` is storage. The functions it selects are not modelled. A
   firmware write lands and logs one `model_warning` per register. Under `strict` it raises
   `ModelError` before the store. A write while SYSCFGRST holds the unit raises the illegal
   access event the TrustZone rules give and is not noted.
 - `SYSCFG_CSLCKR` stays storage at TZEN 0. RM0456 Table 131 makes it RAZ/WI.
+- STM32L1: `SYSCFG_MEMRMP` is storage. The machine boots from main flash, BOOT_MODE and
+  MEM_MODE read 00, and a MEM_MODE write maps no other memory at 0x00000000. A firmware write
+  logs one `model_warning`. Under `strict` it raises `ModelError` before the store.
+- STM32L1: `SYSCFG_PMC.USB_PU` drives the USB D+ pull-up. `LCD_CAPA` is storage: a firmware
+  write that sets a bit of it logs one `model_warning`, and under `strict` raises `ModelError`
+  before the store.
 
 ## TIM
 
@@ -658,12 +1191,33 @@ Not modelled, logged:
 
 - The encoder index, `ECR.IE`.
 - Internal input sources of `TIxSEL` and internal ETR sources of `ETRSEL`. They read low.
-- Master modes above 011 and TRGO2.
+- Master modes above 011 and TRGO2. Under `strict` the CR2 write that selects one raises
+  `ModelError` before the store.
 - A slave mode trigger input that no pin and no routed timer drives. No trigger reaches the slave
-  mode controller.
-- The trigger DMA request, TDE, and COM and trigger burst requests.
+  mode controller. Under `strict` the SMCR or OR write that selects it raises `ModelError` before
+  the store.
+- The trigger DMA request, TDE, and COM and trigger burst requests. Under `strict` the DIER write
+  that sets TDE raises `ModelError` before the store.
 - The slave mode preload, `SMCR.SMSPE` and `SMSPS`. Both are storage and a counter start with
-  SMSPE set logs once.
+  SMSPE set logs once. Dithering, `CR1.DITHEN`, logs the same way.
+- A capture on TRC, `CCxS` 11. CCxIF never sets. Under `strict` the CCMR1 or CCMR2 write that
+  selects it raises `ModelError` before the store.
+- The reserved `CC1S` 10 and 11 of a one-channel timer, RM0038 18.5.6 and RM0481 TIMx_CCMR1:
+  TIM10 and TIM11 of the L1, TIM13, TIM14, TIM16 and TIM17. CC1IF never sets. Under `strict` the
+  CCMR1 write that selects one raises `ModelError` before the store.
+- The CCx DMA requests at the update event, `CR2.CCDS` 1. They follow the CCx events. Under
+  `strict` the CR2 write that sets CCDS raises `ModelError` before the store.
+- Gated mode on TI1F_ED, TS 00100. The edge detector gives pulses and the counter holds. Under
+  `strict` the SMCR write that selects it raises `ModelError` before the store.
+- OC1 as an ITR source in OC1M values other than 0000, 0100, 0101, 0110 and 0111, or with
+  OC1CE set. OC1 holds low. Under `strict` the CCMR1 write that selects one while a slave
+  listens, and the slave's SMCR or OR write that selects the OC1 output then, raise `ModelError`
+  before the store.
+
+A debugger write raises none of the `strict` errors of this model.
+
+A slave mode reset, trigger start or gate opening at a timer edge counts from the edge's exact
+instant, which can lie between two ps, on any pair of master and slave clocks.
 
 Differs from RM0456:
 
@@ -671,6 +1225,50 @@ Differs from RM0456:
   A count written above ARR in center-aligned mode does the same.
 - UIFREMAP puts UIFCPY in bit 31 only where the description names a UIFCPY field, not on the
   32-bit TIM2 to TIM5.
+
+Capture/compare event outputs, the ADC triggers:
+
+- Each channel x drives `<instance>_ccx`, a pulse one timer clock wide at each CCxIF set by a
+  match, a capture or `EGR.CCxG`, at the event's exact instant, the width and the capture and
+  CCxG events inferred. RM0038 Tables 61 and 62 name it TIMx_CCx.
+- The STM32U5 and STM32H5 ADC tables select `tim_ocx`, the channel output in the RM0456 TIM
+  chapter. The ADC takes the CC event for it, as ST's LL driver describes the selection,
+  inferred.
+
+OC1 as an ITR source, TIM13, TIM14, TIM16 and TIM17 OC1 by RM0481, TIM10 and TIM11 OC1 by RM0038:
+
+- The ITR carries OC1, OC1REF with CC1P inverting it, RM0038 18.5.6 and RM0481 TIMx_CCMR1.
+  The ITR follows OC1 whatever CC1E, and on TIM16 and TIM17 whatever BDTR.MOE and OSSI,
+  inferred. With CC1S other than 00 the ITR reads low, inferred.
+- OC1REF holds low in frozen mode, OC1M 0000, where silicon keeps the level it had.
+- RM0038 takes the comparison of CNT with CCR1 at a PWM mode entry only from frozen, RM0481 from
+  frozen and from the forced modes. The model takes it from every mode, so it differs at a PWM 1
+  to PWM 2 switch, and on the L1 at a forced to PWM switch.
+- Every OC1 edge reaches the slave whatever the pulse width. RM0481 asks for at least two clock
+  cycles of the destination timer.
+- A timer that drives OC1 counts up only. Its CR1 with DIR or CMS throws `ConfigError` at
+  construction.
+
+STM32L1 TIM2 to TIM7 and TIM9 to TIM11:
+
+- TIM5 has no row in RM0038 Table 80, so every TS value of TIM5 reaches nothing and logs once,
+  inferred.
+- The touch sensing I/O that TIM9_OR.ITR1_RMP gives TIM9 ITR1 has no model. The ITR reaches
+  nothing and logs once.
+- TIM10_OR and TIM11_OR TI1_RMP values other than 00, and 11 on TIM11, connect LSI, LSE, the RTC
+  wakeup interrupt, MSI or HSE_RTC to tim_ti1, and TI1_RMP_RI 1 the routing interface. tim_ti1
+  then reads low and the OR write logs once. TIM10 and TIM11 external clock mode 2 counts nothing
+  whatever ETR_RMP, LSE or TIM9 TRGO, and the SMCR write logs once. Under `strict` each write
+  raises `ModelError` before the store.
+- TIM9_OR.TI1_RMP 01 connects the LSE to tim_ti1, which then reads low. TIM9 external clock mode 2
+  takes the internal ETR and counts nothing, inferred: RM0038 18.3.3 names no ETR source. Each
+  logs once. Under `strict` the write that selects it raises `ModelError` before the store.
+- TIM6, TIM7, TIM10, TIM11 and the Cat.1 and Cat.2 TIM9 count up only. On that TIM9 SMS 001 to 011 are
+  reserved: no encoder edge counts and the SMCR write logs once. Under `strict` it raises
+  `ModelError` before the store.
+- TIM2_ETR is the TIM2_CH1 pad at AF1, PA0, PA5 or PA15, which also carries TI1. TIM3_ETR is PD2.
+  TIM4_ETR and TIM5_ETR are on PE0 and PE9, pads the shipped 64-pin packages lack, so their
+  tim_etr_in stays low.
 
 ## USART, UART and LPUART
 
@@ -685,3 +1283,25 @@ Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/p
   truncated frame and FE.
 - A frame from another machine still being sampled when a link holds the line low becomes the
   break character, data 0. Silicon keeps the bits before the hold.
+- STM32L1 USART and UART, RM0038 section 27, run the same frame engine with one data word each
+  way. USART_SR resets to 0x000000C0, TXE and TC set, RM0038 Table 158.
+- The STM32L1 kernel clock is the APB clock of the instance, PCLK2 for USART1, PCLK1 for USART2,
+  USART3, UART4 and UART5, whatever `RCC_APBxENR` holds.
+- The first frame after TE is set starts at its DR write, without the idle preamble and the
+  1 bit-time delay of the RM0038 27.6.4 TE note. Clearing UE lets the frame in flight end, then
+  stops the output, RM0038 27.6.4, and drops the word waiting in TDR.
+- A write of 0 to RXNE drops the received word, and DR reads 0 while RXNE is 0, inferred.
+- A write of 0 to SBK before the break starts cancels it, RM0038 27.3.2. Once the break's low
+  part runs, SBK reads 1 until it ends, a write of 0 meanwhile keeps it, inferred. The line stays
+  high 1 bit after the break before the next frame, RM0038 27.3.2.
+- SBK written with TE 0 and UE 1 sends the break once TE is 1. A write with UE 0 clears SBK,
+  inferred.
+- Mute mode, RWU, is logged as not modelled. LBD never sets.
+- UART4 and UART5 have no hardware flow control, RM0038 Table 157: CTSE and RTSE set there log
+  one `model_warning` and transmission and reception ignore them.
+- The STM32L1 SR-then-DR clear: a CPU or DMA read of USART_SR notes the IDLE, ORE, NF, FE, PE
+  and TC flags it reads set, any later DR read clears the noted IDLE, ORE, NF, FE and PE, and
+  any later DR write the noted TC and PE, whatever other accesses lie between, inferred. A flag
+  set after the SR read stays set, and a DR write with no SR read since TC rose sends the word
+  and leaves TC set, RM0038 27.6.1.
+- STM32L1 EIE raises the interrupt on ORE, NF or FE only while DMAR is 1, RM0038 27.6.6.

@@ -99,7 +99,9 @@ def injected_run(system: System, running: bool) -> tuple[tuple[int, ...], tuple[
 
 def lone_written(u575: popcorn.PartDescription) -> tuple[int, ...]:
     """The last log words of a lone link_rx machine whose port writes b"xyz" at 4 ms of system
-    time: three bytes and an IDLE, each with its cycle count."""
+    time: three bytes and an IDLE, each with its cycle count. The port's frames last 10 * BRR
+    kernel clocks, 10 * 347 / 160 MHz, and the tap's frames 10 bits at the declared 461095 baud,
+    4 ps longer, so a cycle count is equal to the lone run's or one above it."""
     lone = member(u575, "link_rx", "b")
     boot = lone.time
 
@@ -124,7 +126,11 @@ def test_frames_injected_running_equal_those_injected_stopped_and_a_lone_write(
     assert injected_run(pair(slice_instructions, third, baud=FIRMWARE_BAUD), False) == reference
     assert injected_run(pair(slice_instructions, third, baud=FIRMWARE_BAUD), True) == reference
     log, shown = reference
-    assert log[-8:] == lone_written(u575)
+    lone = lone_written(u575)
+    assert log[-8::2] == lone[::2]
+    assert all(
+        0 <= tapped - written <= 1 for tapped, written in zip(log[-7::2], lone[1::2], strict=True)
+    )
     words = [word for word in log[::2] if word >> 16 == LINK_BYTE]
     assert [word & 0xFFFF for word in words] == [*TX_BYTES, *b"xyz"]
     assert [(f.data, f.index, f.injected, f.towards) for f in shown] == [

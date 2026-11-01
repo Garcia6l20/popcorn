@@ -1,0 +1,118 @@
+format = 1
+source = "RM0038 Rev 18, Cat.1 and Cat.2 (DIE416 and DIE429, 32 to 128 KB flash): what the two categories share. The SVDs are supersets of the line, these devices lack FSMC, SDIO, SPI3, TIM5, the operational amplifiers and DMA2"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L1*.svd"]
+dies = ["DIE416", "DIE429"]
+
+[peripherals]
+drop = ["FSMC", "SDIO", "SPI3", "TIM5", "OPAMP", "DMA2"]
+source = "RM0038 Rev 18, 2.3 memory map and Table 49 (Cat.1 and Cat.2 vector table): no FSMC, SDIO, SPI3, TIM5 and DMA2, the vector table stops at TIM7 (position 44). 1.4 product list: no operational amplifiers on Cat.1 and Cat.2. The CubeMX parts of both categories list none of them"
+
+[irqs]
+drop = ["SDIO", "TIM5", "SPI3", "DMA2_CH1", "DMA2_CH2", "DMA2_CH3", "DMA2_CH4", "DMA2_CH5", "COMP_ACQ"]
+
+[ip]
+versions = { "EXTI" = "STM32L1_exti_23", "SYSCFG" = "STM32L1_exti_23", "ADC" = "STM32L1_adc_cat12" }
+source = "RM0038 Rev 18, 11.3 (EXTI has 23 lines on Cat.1 and Cat.2, 24 from Cat.3, RM0038 lines 13100 to 13222 and 13334 to 13484) and 12 (the ADC of Cat.1 and Cat.2 has 26 channels, ADC_IN0 to ADC_IN25, up to 42 in two banks from Cat.3, 12.3.3). EXTI and SYSCFG have no CubeMX version, the empty version is replaced. ADC replaces aditf3_v1_1_Cube, the version of every category"
+
+[[register_drops]]
+peripheral = "ADC"
+names = ["SMPR0"]
+source = "RM0038 Rev 18, 12.15.18 ADC_SMPR0: available in Cat.3, Cat.4, Cat.5 and Cat.6 devices only. The four SVDs list SMPR0 at 0x5C on every category"
+
+[[register_drops]]
+peripheral = "FLASH"
+names = ["WRPR2"]
+source = "RM0038 Rev 18, 3.9.9 FLASH_WRPRx: FLASH_WRPR2 is available in Cat.3 to Cat.6. The SVDs list WRPR2 at 0x80 on every category"
+
+[memory]
+source = "RM0038 Rev 18, 3.2 Table 8 (Cat.1 and Cat.2): the system memory holds the bootloader in pages 0 to 15, 0x1FF00000 to 0x1FF00FFF, 4 KB. Table 7 shows the bootloader memory remapped at 0x00000000"
+add = [
+  { name = "SYSTEM_MEMORY", start = 0x1FF00000, size = 0x1000, kind = "rom", acc = { read = true, write = false, execute = true }, secure = false },
+]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBRSTR"]
+fields = ["FSMCRST", "DMA2RST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.5 RCC_AHBRSTR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+fields = ["FSMCEN", "DMA2EN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+fields = ["FSMCLPEN", "DMA2LPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2RSTR"]
+fields = ["SDIORST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.6 RCC_APB2RSTR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2ENR"]
+fields = ["SDIOEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.9 RCC_APB2ENR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2LPENR"]
+fields = ["SDIOLPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.12 RCC_APB2LPENR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR"]
+fields = ["SPI3RST", "TIM5RST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.7 RCC_APB1RSTR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR"]
+fields = ["SPI3EN", "TIM5EN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.10 RCC_APB1ENR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1LPENR"]
+fields = ["SPI3LPEN", "TIM5LPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.13 RCC_APB1LPENR: the bits of FSMC, SDIO, SPI3, TIM5 and DMA2, which Cat.1 and Cat.2 lack, are dropped with them"
+
+[[fields]]
+instances = ["DBGMCU"]
+registers = ["APB1_FZ"]
+fields = ["DBG_TIM5_STOP"]
+drop = true
+source = "RM0038 Rev 18, 30.16.4 DBGMCU_APB1_FZ: DBG_TIM5_STOP is available in Cat.3 to Cat.6 only"
+
+[[fields]]
+instances = ["ADC"]
+registers = ["CR2"]
+fields = ["ADC_CFG"]
+drop = true
+source = "RM0038 Rev 18, 12.15.3 ADC_CR2: ADC_CFG, the channel bank, is available in Cat.3, Cat.4, Cat.5 and Cat.6 devices only, 12.3.3: Cat.1 and Cat.2 have one bank of 26 channels. The four SVDs list it on every category"
+
+[[fields]]
+instances = ["ADC"]
+registers = ["SQR1"]
+fields = ["SQ28"]
+drop = true
+source = "RM0038 Rev 18, 12.15.10 ADC_SQR1: SQ28 is available in Cat.3, Cat.4, Cat.5 and Cat.6 devices only, L 11011 (28 conversions) likewise. The four SVDs list it on every category"

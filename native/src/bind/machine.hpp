@@ -945,8 +945,10 @@ public:
   [[= py::doc{"Op of gpio_alternate."}]] [[nodiscard]] auto
       op_gpio_alternate(std::string const& peripheral, std::uint8_t pin) const -> access_op;
   /** @brief adc_input() as an op of submit_ops(), checked now. */
-  [[= py::doc{"Op of adc_input."}]] [[nodiscard]] auto
-      op_adc_input(std::string const& peripheral, std::uint8_t channel) const -> access_op;
+  [[= py::doc{"Op of adc_input."}]] [[nodiscard]] auto op_adc_input(
+      std::string const&         peripheral,
+      std::uint8_t               channel,
+      periph::stm32::analog_bank bank) const -> access_op;
   /**
    * @brief A command holding an I2C bus as another controller would, i2c_bus::hold, checked
    *        now. Its value is the hold's start in picoseconds.
@@ -1031,9 +1033,10 @@ public:
       std::vector<std::uint8_t>  levels) const -> access_op;
   /** @brief adc_drive() as an op of submit_ops(), checked now. */
   [[= py::doc{"Op of adc_drive."}]] [[nodiscard]] auto op_adc_drive(
-      std::string const& peripheral,
-      std::uint8_t       channel,
-      std::uint32_t      microvolts) const -> access_op;
+      std::string const&         peripheral,
+      std::uint8_t               channel,
+      periph::stm32::analog_bank bank,
+      std::uint32_t              microvolts) const -> access_op;
 
   /**
    * @brief Runs @p ops in order as one command: at once on this thread while parked, at the
@@ -1335,49 +1338,61 @@ public:
   /**
    * @brief Drives an external ADC channel from outside the MCU.
    * @param peripheral ADC name.
-   * @param channel External channel, one of adc_channels().
+   * @param channel External channel of @p bank, one of adc_channels().
+   * @param bank Channel bank, `b` for the bank B channels on a pad of their own.
    * @param microvolts Input voltage in microvolts.
-   * @throws config_error when the ADC is unknown, the channel is not external or its pad is not
-   *         bonded, one of adc_bonded_channels().
+   * @throws config_error when the ADC is unknown, the channel is not external, a bank B channel
+   *         shares its pad with bank A, or its pad is not bonded, one of adc_bonded_channels().
    * @throws model_error when the peripheral's model is not the built-in ADC.
    */
-  [[= py::doc{"Drive an external ADC channel from outside, in microvolts."}]] void
-      adc_drive(std::string const& peripheral, std::uint8_t channel, std::uint32_t microvolts);
+  [[= py::doc{"Drive an external ADC channel from outside, in microvolts."}]] void adc_drive(
+      std::string const&         peripheral,
+      std::uint8_t               channel,
+      periph::stm32::analog_bank bank,
+      std::uint32_t              microvolts);
 
   /**
    * @brief Voltage driven on an external ADC channel.
    * @param peripheral ADC name.
-   * @param channel External channel, one of adc_channels().
+   * @param channel External channel of @p bank, one of adc_channels().
+   * @param bank Channel bank, `b` for the bank B channels on a pad of their own.
    * @return The input in microvolts, 0 when never driven.
-   * @throws config_error when the ADC is unknown, the channel is not external or its pad is not
-   *         bonded, one of adc_bonded_channels().
+   * @throws config_error as adc_drive().
    * @throws model_error when the peripheral's model is not the built-in ADC.
    */
   [[= py::doc{"Voltage driven on an external ADC channel, in microvolts."}]] [[nodiscard]] auto
-      adc_input(std::string const& peripheral, std::uint8_t channel) const -> std::uint32_t;
+      adc_input(
+          std::string const&         peripheral,
+          std::uint8_t               channel,
+          periph::stm32::analog_bank bank) const -> std::uint32_t;
 
   /**
-   * @brief External channels of an ADC, read on the calling thread: the mask is fixed for the
-   *        life of the model.
+   * @brief External channels of a bank of an ADC, read on the calling thread: the mask is fixed
+   *        for the life of the model.
    * @param peripheral ADC name.
-   * @return Bit n set when channel n takes a drive.
+   * @param bank Channel bank, `b` for the bank B channels on a pad of their own, 0 on an ADC
+   *        with one bank.
+   * @return Bit n set when channel n of @p bank takes a drive.
    * @throws config_error when the ADC is unknown.
    * @throws model_error when the peripheral's model is not the built-in ADC.
    */
-  [[= py::doc{"External channels of an ADC, bit n for channel n."}]] [[nodiscard]] auto
-      adc_channels(std::string const& peripheral) const -> std::uint32_t;
+  [[= py::doc{"External channels of a bank of an ADC, bit n for channel n."}]] [[nodiscard]] auto
+      adc_channels(std::string const& peripheral, periph::stm32::analog_bank bank) const
+      -> std::uint32_t;
 
   /**
-   * @brief External channels of an ADC whose pad the package bonds, read on the calling thread:
-   *        the mask is fixed for the life of the model.
+   * @brief External channels of a bank of an ADC whose pad the package bonds, read on the
+   *        calling thread: the mask is fixed for the life of the model.
    * @param peripheral ADC name.
-   * @return Bit n set when channel n takes a drive from the board.
+   * @param bank Channel bank.
+   * @return Bit n set when channel n of @p bank takes a drive from the board.
    * @throws config_error when the ADC is unknown.
    * @throws model_error when the peripheral's model is not the built-in ADC.
    */
-  [[= py::doc{
-      "External channels of an ADC whose pad is bonded, bit n for channel n."}]] [[nodiscard]] auto
-      adc_bonded_channels(std::string const& peripheral) const -> std::uint32_t;
+  [[= py::doc{"External channels of a bank of an ADC whose pad is bonded, bit n for channel "
+              "n."}]] [[nodiscard]] auto
+      adc_bonded_channels(std::string const& peripheral, periph::stm32::analog_bank bank) const
+      -> std::uint32_t;
 
   /**
    * @brief Seed of the RNG word generator.
@@ -1717,7 +1732,8 @@ private:
   [[nodiscard]] auto gpio(std::string const& peripheral, std::uint8_t pin) const
       -> periph::stm32::gpio_port&;
   [[nodiscard]] auto analog(std::string const& peripheral) const -> periph::stm32::analog_port&;
-  [[nodiscard]] auto analog(std::string const& peripheral, std::uint8_t channel) const
+  [[nodiscard]] auto
+      analog(std::string const& peripheral, periph::stm32::analog_channel channel) const
       -> periph::stm32::analog_port&;
   [[nodiscard]] auto entropy(std::string const& peripheral) const -> periph::stm32::entropy_source&;
   [[nodiscard]] auto lock_for_request() const -> core::held_lock;

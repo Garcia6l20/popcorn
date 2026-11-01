@@ -1,0 +1,54 @@
+format = 1
+source = "RM0038 Rev 18, 18.5: the TIM10 and TIM11 registers of every L1 device. The L100 and L162 SVDs lack CR1.OPM, SMCR and CCMR1.OC1CE and spell the TIM10 IC1PSC ICPCS"
+
+[match]
+parts = ["STM32L100*", "STM32L162*"]
+svd = ["STM32L100.svd", "STM32L162.svd"]
+
+[[fields]]
+instances = ["TIM10"]
+registers = ["CCMR1_Input"]
+rename = { ICPCS = "IC1PSC" }
+source = "RM0038 Rev 18, 18.5.6 TIM10/11 TIMx_CCMR1 input capture mode: IC1PSC[1:0] in bits 3:2. The L100 and L162 SVDs spell it ICPCS on TIM10"
+
+[[fields]]
+instances = ["TIM10", "TIM11"]
+registers = ["CR1"]
+add = { name = "OPM", lsb = 3, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.5.1 TIM10/11 TIMx_CR1: OPM in bit 3. The L100 and L162 SVDs have no OPM"
+
+[[fields]]
+instances = ["TIM10", "TIM11"]
+registers = ["CCMR1_Output"]
+add = { name = "OC1CE", lsb = 7, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.5.6 TIM10/11 TIMx_CCMR1 output compare mode: OC1CE in bit 7. The L100 and L162 SVDs have no OC1CE"
+
+[[registers]]
+peripheral = "TIM10"
+name = "SMCR"
+offset = 0x08
+width = 16
+reset = 0
+acc = "read_write"
+fields = [
+  { name = "ETF", lsb = 8, width = 4 },
+  { name = "ETPS", lsb = 12, width = 2 },
+  { name = "ECE", lsb = 14, width = 1 },
+  { name = "ETP", lsb = 15, width = 1 },
+]
+source = "RM0038 Rev 18, 18.5.2 TIM10/11 TIMx_SMCR and Table 87: offset 0x08, reset 0, ETF, ETPS, ECE and ETP in bits 11:8, 13:12, 14 and 15. The L100 and L162 SVDs have no TIM10 SMCR"
+
+[[registers]]
+peripheral = "TIM11"
+name = "SMCR"
+offset = 0x08
+width = 16
+reset = 0
+acc = "read_write"
+fields = [
+  { name = "ETF", lsb = 8, width = 4 },
+  { name = "ETPS", lsb = 12, width = 2 },
+  { name = "ECE", lsb = 14, width = 1 },
+  { name = "ETP", lsb = 15, width = 1 },
+]
+source = "RM0038 Rev 18, 18.5.2 TIM10/11 TIMx_SMCR and Table 87: offset 0x08, reset 0, ETF, ETPS, ECE and ETP in bits 11:8, 13:12, 14 and 15. The L100 and L162 SVDs have no TIM11 SMCR"

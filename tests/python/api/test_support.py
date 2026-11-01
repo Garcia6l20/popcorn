@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 
 import popcorn
 import pytest
@@ -188,6 +190,17 @@ def test_without_a_registration_wwdg_has_no_model() -> None:
 def test_trustzone_on_a_part_without_it_is_refused(m33: popcorn.PartDescription) -> None:
     with pytest.raises(ConfigError) as caught:
         support(m33, trustzone=True)
+    assert caught.value.key == "option_bytes.tzen"
+
+
+def test_trustzone_on_an_stm32l1_part_is_refused(m33_json: Path, tmp_path: Path) -> None:
+    raw = json.loads(m33_json.read_text())
+    raw["part"] = "STM32L152RETx"
+    raw["core"]["cpu"] = "CM3"
+    path = tmp_path / "l1.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ConfigError) as caught:
+        support(popcorn.load_description(path), trustzone=True)
     assert caught.value.key == "option_bytes.tzen"
 
 

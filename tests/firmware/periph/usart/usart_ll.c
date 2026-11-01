@@ -46,6 +46,7 @@ void break_gap(void);
 void link_tx_long(void);
 void link_rx_quiet(void);
 void link_tx_bursts(void);
+void link_tx_bursts_hsi(void);
 void dma_ring(void);
 void link_ping(void);
 void link_echo(void);
@@ -776,10 +777,8 @@ void link_rx_quiet(void)
   idle();
 }
 
-void link_tx_bursts(void)
+static void send_bursts(void)
 {
-  start_usart1();
-  enable(USART1);
   uint8_t  next = 0;
   unsigned sent = 0;
   while(sent < 200)
@@ -794,6 +793,26 @@ void link_tx_bursts(void)
     }
   }
   DONE();
+}
+
+void link_tx_bursts(void)
+{
+  start_usart1();
+  enable(USART1);
+  send_bursts();
+}
+
+void link_tx_bursts_hsi(void)
+{
+  LL_RCC_HSI_Enable();
+  while(LL_RCC_HSI_IsReady() == 0)
+  {
+  }
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_USART1);
+  LL_RCC_SetUSARTClockSource(LL_RCC_USART1_CLKSOURCE_HSI);
+  init(USART1, 115200);
+  enable(USART1);
+  send_bursts();
 }
 
 void USART2_IRQHandler(void)

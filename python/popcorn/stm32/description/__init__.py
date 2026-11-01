@@ -27,7 +27,7 @@ from popcorn.stm32.description._model import (
     WriteEffect,
 )
 from popcorn.stm32.description._shipped import description_path
-from popcorn.stm32.description._sources import Sources, find_sources, resolve_part
+from popcorn.stm32.description._sources import ResolvedPart, Sources, find_sources, resolve_part
 
 __all__ = [
     "Access",
@@ -44,6 +44,7 @@ __all__ = [
     "RegionDesc",
     "RegionKind",
     "RegisterDesc",
+    "ResolvedPart",
     "Sources",
     "WriteEffect",
     "build_description",

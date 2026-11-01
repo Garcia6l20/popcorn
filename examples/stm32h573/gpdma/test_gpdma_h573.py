@@ -5,8 +5,8 @@ then re-initializes the channel in linked-list mode with two nodes, 64 bytes of 
 of `tail`, and sends again. Each transfer ends in `HAL_UART_TxCpltCallback`. The CPU waits in
 WFI while the DMA feeds the USART.
 
-UART9 runs from PCLK1 at the 32 MHz reset clock: a frame lasts 10 * BRR / PCLK1. The frame check
-allows 1 ns.
+UART9 runs from PCLK1 at the 32 MHz reset clock: a frame lasts 10 * BRR / PCLK1, and back-to-back
+frames are exactly that far apart.
 
 The whole run executes about 1050 translated blocks, the WFI wait sleeping between DMA and
 UART interrupts. Busy-polling the UART for the 3.85 ms the 352 frames take would run tens of
@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from popcorn import Machine, StopReason
 from popcorn.trace import Block, TraceKind, read
-from popcorn.units import ms, ns
+from popcorn.units import ms
 
 pytestmark = pytest.mark.popcorn(budget=10_000_000)
 
@@ -55,7 +55,7 @@ async def test_the_dma_keeps_the_usart_busy_back_to_back(gpdma: Machine) -> None
     first, second = frames[: len(BLOCK)], frames[len(BLOCK) :]
     for transfer in (first, second):
         for earlier, later in itertools.pairwise(transfer):
-            assert abs((later.at - earlier.at).ps - frame_ps) < ns(1).ps
+            assert (later.at - earlier.at).ps == frame_ps
 
 
 async def test_the_cpu_sleeps_while_the_dma_moves_the_data(gpdma: Machine, tmp_path: Path) -> None:

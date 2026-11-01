@@ -61,6 +61,34 @@ struct host_buffer
   std::vector<buffer_window> mappings;
 };
 
+/** @brief Target of one bit-band alias access. */
+struct bit_band_bit
+{
+  /** @brief Address of the target unit, aligned to the access size. */
+  address unit{};
+  /** @brief Index of the bit in the unit. */
+  unsigned bit{};
+};
+
+/**
+ * @brief Target of the alias access at @p addr of @p bytes bytes into the `bit_band` region
+ *        @p band: alias word `w` maps bit `w % 8` of target byte `w / 8`, so the unit is that
+ *        byte rounded down to the access size and the bit counts from the unit's first byte.
+ * @param band A `bit_band` region, `physical` set.
+ * @param addr Alias address inside @p band.
+ * @param bytes Access size, 1, 2 or 4.
+ */
+constexpr auto bit_band_target(region_desc const& band, address addr, std::uint8_t bytes) noexcept
+    -> bit_band_bit
+{
+  auto const offset = addr - band.start;
+  auto const byte   = offset >> 5;
+  auto const unit   = byte & ~address{bytes - 1u};
+  return {
+      .unit = *band.physical + unit,
+      .bit  = static_cast<unsigned>((byte - unit) * 8 + ((offset >> 2) & 7))};
+}
+
 /** @brief One description region as mapped in the engine. */
 struct machine::mapped_region
 {
@@ -81,13 +109,15 @@ struct machine::mapped_region
    *        engine, aliases onto their target's buffer, then the scratch region as RAM,
    *        read-write, not executable. An alias over the whole of its target is mapped with
    *        `uc_mem_map_alias`, after every other region, so it shares the target's engine
-   *        memory.
+   *        memory. A `bit_band` region has no entry: run_state maps its window as MMIO.
    * @param engine Engine to map into.
    * @param description Description whose regions are mapped, which must outlive the result.
    * @param scratch `machine_options::scratch`.
-   * @return One entry per region, in description order, then the scratch region.
+   * @return One entry per region other than `bit_band`, in description order, then the scratch
+   *         region.
    * @throws config_error naming a region that is not page aligned, or whose `physical` does not
-   *         fall inside another region, or key `scratch` when the scratch region is empty, not
+   *         fall inside another region, a `bit_band` region without `physical` or with content,
+   *         or key `scratch` when the scratch region is empty, not
    *         page aligned, overlaps a region or a peripheral, or shares a region's name.
    * @throws emulation_error when the engine refuses a mapping.
    */

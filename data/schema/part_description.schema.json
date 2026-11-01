@@ -225,6 +225,11 @@
           "minimum": 0,
           "type": "integer"
         },
+        "bonded_channels_b": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
         "cross_rules": {
           "items": {
             "$ref": "#/$defs/cross_rule"
@@ -340,6 +345,11 @@
         "controller": {
           "type": "string"
         },
+        "fill": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
         "kind": {
           "$ref": "#/$defs/region_kind"
         },
@@ -378,7 +388,8 @@
     "region_kind": {
       "enum": [
         "rom",
-        "ram"
+        "ram",
+        "bit_band"
       ],
       "type": "string"
     },

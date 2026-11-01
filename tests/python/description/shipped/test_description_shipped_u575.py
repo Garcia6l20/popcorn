@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from popcorn.stm32.description import _patches
 from popcorn.stm32.description.__main__ import main
-from popcorn.stm32.description._cubemx import bonded_pins, read_part
+from popcorn.stm32.description._cubemx import DbPart, bonded_pins, expand_refname, read_part
 from popcorn.stm32.description._errors import DescriptionError, MissingSource
 from popcorn.stm32.description._layers import choose_reference, factor
+from popcorn.stm32.description._patches import corrected_part
 from popcorn.stm32.description._shipped import (
     SHIPPED_DIR,
     build_layers,
@@ -21,6 +23,7 @@ from popcorn.stm32.description._sources import pin_data_sources
 from ..conftest import require_pin_data
 
 GOLDEN_DIR = Path(__file__).parents[4] / "tests" / "data" / "stm32" / "golden"
+PATCH_FILES = sorted((Path(_patches.__file__).parent / "patches").glob("*.toml"))
 
 
 def test_a_part_ships_exactly_when_it_has_a_golden() -> None:
@@ -52,24 +55,51 @@ REFERENCES = {
     "STM32H562xx": "STM32H562IIKx",
     "STM32H563xx": "STM32H563IIKx",
     "STM32H573xx": "STM32H573IIKx",
+    "STM32L100xx": "STM32L100RCTx",
+    "STM32L151xx": "STM32L151ZDTx",
+    "STM32L152xx": "STM32L152ZDTx",
+    "STM32L162xx": "STM32L162ZDTx",
 }
 """Reference of each shipped line, the choice of `_layers.choose_reference` over its shipped
-parts."""
+parts: the most instances, which on the STM32L1 differ between the parts of a line, then the most
+bonded pins, then the largest flash."""
+
+
+def _db_parts(pin_data: Path, parts: set[str]) -> dict[str, DbPart]:
+    """The corrected db part of each of @p parts, reading each part file of @p pin_data once."""
+    files: dict[str, Path] = {}
+    for path in sorted((pin_data / "mcu").glob("STM32*.xml")):
+        try:
+            expanded = expand_refname(path.stem)
+        except DescriptionError:
+            continue
+        for name, _ in expanded:
+            if name in parts:
+                files[name] = path
+    missing = parts - set(files)
+    if missing:
+        pytest.skip(f"no part file in {pin_data} for {', '.join(sorted(missing))}")
+    read: dict[Path, DbPart] = {}
+    result: dict[str, DbPart] = {}
+    for name, path in files.items():
+        group = read.get(path)
+        if group is None:
+            group = read[path] = read_part(path.read_bytes(), file=str(path))
+        result[name] = corrected_part(group.select(name, file=str(path)), PATCH_FILES)
+    return result
 
 
 @pytest.mark.timeout(60)
 def test_each_shipped_line_has_the_reference_the_rule_picks_from_the_db() -> None:
     pin_data = require_pin_data()
-    ranks: dict[str, tuple[int, int]] = {}
-    for name in shipped_names():
-        part, _, core = name.partition("-")
-        try:
-            sources = pin_data_sources(part, pin_data=pin_data, core=core or None)
-        except MissingSource as exc:
-            pytest.skip(f"{name} sources not found: {exc}")
-        db_part = read_part(sources.mcu_db.read_bytes(), file=str(sources.mcu_db))
+    names = shipped_names()
+    db_parts = _db_parts(pin_data, {name.partition("-")[0] for name in names})
+    ranks: dict[str, tuple[int, int, int]] = {}
+    for name in names:
+        db_part = db_parts[name.partition("-")[0]]
         bonded = sum(mask.bit_count() for mask in bonded_pins(db_part).values())
-        ranks[name] = (bonded, db_part.flash_kib[0])
+        composed = cast(dict[str, list[object]], json.loads(compose_shipped(name)))
+        ranks[name] = (len(composed["peripherals"]), bonded, db_part.flash_kib[0])
     assert choose_reference(ranks) == REFERENCES
     for path in SHIPPED_DIR.glob("*.line.json.xz"):
         line = cast(dict[str, object], json.loads(lzma.decompress(path.read_bytes())))

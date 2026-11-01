@@ -7,6 +7,7 @@
 #include "lsi_source.hpp"
 #include "model_base.hpp"
 #include "rcc_h5.hpp"
+#include "rcc_l1.hpp"
 #include "rcc_resets.hpp"
 #include "rcc_u5.hpp"
 
@@ -262,9 +263,17 @@ template <typename Signal> struct timer
  *        `RCC_CIFR` flags of the description's cross rules, the flags of a Secure oscillator only
  *        for a Secure write. Under TZEN=0 `RCC_SECCFGR` is RAZ/WI, RM0456 11.8.51, and
  *        `RCC_PRIVCFGR` is storage.
- * @tparam Traits Family clock tree, u5_rcc or h5_rcc: the sources and signals, the oscillator,
- *         mux, timer and enable tables, the source maps of the PLLs, SYSCLK and RTC, the names
- *         of the single fields, and the TrustZone tables.
+ *
+ *        STM32L1, RM0038 section 6, through `l1_rcc`: one PLL in RCC_CFGR, whose PLLSRC, PLLMUL
+ *        and PLLDIV hold while it is on or ready, RM0038 6.3.3, the ready flags and enables in
+ *        RCC_CIR, the LSI, the LSE, the RTC clock and the reset flags in RCC_CSR. CSSON is set and
+ *        cleared by software, RM0038 6.3.1. A system reset keeps the RTC domain bits of RCC_CSR
+ *        and RTCPRE and HSEBYP of RCC_CR, a power on reset and a BOR reset them, RM0038 6.1.2 and
+ *        6.1.3. RTCRST holds the RTC domain bits of RCC_CSR at 0 and keeps LSION, LSIRDY and the
+ *        reset flags. A PLLMUL, PLLDIV or MSIRANGE code RM0038 does not allow runs at 0 Hz.
+ * @tparam Traits Family clock tree, u5_rcc, h5_rcc or l1_rcc: the sources and signals, the
+ *         oscillator, mux, timer and enable tables, the source maps of the PLLs, SYSCLK and RTC,
+ *         the names of the single fields, and the TrustZone tables.
  */
 template <typename Traits>
 class rcc_model final : public dispatch_model<rcc_model<Traits>, rcc_state<Traits>>,
@@ -342,6 +351,9 @@ public:
   template <std::size_t Pll> void pll_dividers_written(std::uint32_t old, std::uint32_t now);
   void                            bdcr_written(std::uint32_t old, std::uint32_t now);
   void                            csr_written(std::uint32_t old, std::uint32_t now);
+  [[nodiscard]] auto flags_written(std::uint32_t old, std::uint32_t now) const -> std::uint32_t;
+  [[nodiscard]] auto held(std::uint32_t word, std::uint32_t old, std::uint32_t now) const
+      -> std::uint32_t;
   void                            cicr_written(std::uint32_t old, std::uint32_t now);
   template <std::size_t Reg> void resets_written(std::uint32_t old, std::uint32_t now);
   [[nodiscard]] auto              secure_function() const -> bool override;
@@ -387,7 +399,10 @@ private:
   std::array<field_ref, Traits::signal_muxes.size()>   selects_{};
   std::array<field_ref, Traits::reset_flags.size()>    flags_{};
   reg_ref                                              bdcr_;
+  std::uint32_t                                        backup_mask_{};
   reg_ref                                              csr_;
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> kept_;
+  std::vector<std::pair<field_ref, source>>            held_;
   std::vector<std::pair<core::clock_domain, signal>>   signals_;
   std::vector<kernel<signal>>                          kernels_;
   std::vector<reset_entry>                             resets_;
@@ -521,6 +536,25 @@ template <> struct rcc_tables<h5_rcc>
   });
 };
 
+template <> struct rcc_tables<l1_rcc>
+{
+  using model = rcc_model<l1_rcc>;
+
+  static constexpr std::array<write_entry<model>, 7> writes{
+      {
+       {"CR", &model::cr_written},
+       {"ICSCR", &model::tree_written},
+       {"CFGR", &model::pll_config_written<0>},
+       {"AHBENR", &model::tree_written},
+       {"APB2ENR", &model::tree_written},
+       {"APB1ENR", &model::tree_written},
+       {"CSR", &model::bdcr_written},
+       }
+  };
+
+  static constexpr std::array<write_entry<model>, 0> trustzone_writes{};
+};
+
 constexpr std::size_t max_reset_registers = 16;
 
 template <typename Model, std::size_t... Reg>
@@ -545,12 +579,32 @@ rcc_model<Traits>::rcc_model(
           [this](std::string_view reg_name, std::string_view name) {
             return has_field(reg_name, name);
           }},
-      bdcr_{reg("RCC_BDCR")}, csr_{reg(Traits::reset_flags_register)},
+      bdcr_{reg(Traits::backup_register)}, csr_{reg(Traits::reset_flags_register)},
       unit_{unit_named(ctx.part, desc.name)}
 {
   for(auto const& [index, entry] : std::views::enumerate(Traits::signal_muxes))
   {
     selects_[index] = field(entry.reg, entry.field);
+  }
+  backup_mask_ = ~std::uint32_t{};
+  for(auto const name : std::views::split(Traits::backup_excluded, ' '))
+  {
+    backup_mask_ &= ~field(Traits::backup_register, std::string_view{name}).mask();
+  }
+  for(auto const& group : Traits::system_reset_kept)
+  {
+    for(auto const name : std::views::split(group.fields, ' '))
+    {
+      auto const bits = field(group.reg, std::string_view{name});
+      kept_.emplace_back(bits.offset, bits.mask());
+    }
+  }
+  for(auto const& group : Traits::held_while_on)
+  {
+    for(auto const name : std::views::split(group.fields, ' '))
+    {
+      held_.emplace_back(field(group.reg, std::string_view{name}), group.source);
+    }
   }
   for(auto const& described : desc.registers)
   {
@@ -607,8 +661,17 @@ rcc_model<Traits>::rcc_model(
     osc_[index] = {
         .on     = field(names.reg, names.on),
         .ready  = field(names.reg, names.ready),
-        .flag   = field("RCC_CIFR", names.flag),
-        .enable = field("RCC_CIER", names.enable)};
+        .flag   = field(Traits::flag_register, names.flag),
+        .enable = field(Traits::enable_register, names.enable)};
+  }
+  for(auto const& [bits, which] : held_)
+  {
+    if(bits.offset != osc_[std::to_underlying(which)].on.offset)
+    {
+      throw config_error(
+          ctx.part.part, 0, "peripherals.RCC.registers",
+          "a field held while an oscillator is on in the register of its ON bit");
+    }
   }
   for(auto const& [index, node] : std::views::enumerate(Traits::pll_nodes))
   {
@@ -634,6 +697,10 @@ rcc_model<Traits>::rcc_model(
   for(auto const& [index, name] : std::views::enumerate(Traits::reset_flags))
   {
     flags_[index] = field(Traits::reset_flags_register, name);
+    if(flags_[index].offset == bdcr_.offset)
+    {
+      backup_mask_ &= ~flags_[index].mask();
+    }
   }
   auto& clock = ctx.clock;
   template for(constexpr auto e :
@@ -827,14 +894,32 @@ void rcc_model<Traits>::oscillators_written(
   settle(true);
 }
 
+template <typename Traits>
+auto rcc_model<Traits>::held(std::uint32_t word, std::uint32_t old, std::uint32_t now) const
+    -> std::uint32_t
+{
+  for(auto const& [bits, which] : held_)
+  {
+    if(bits.offset == word and osc_[std::to_underlying(which)].on.of(old) != 0)
+    {
+      now = bits.with(now, bits.of(old));
+    }
+  }
+  return now;
+}
+
 template <typename Traits> void rcc_model<Traits>::cr_written(std::uint32_t old, std::uint32_t now)
 {
-  now |= old & names_[rcc_role::css_on].mask();
+  now = held(names_[rcc_role::css_on].offset, old, now);
+  if constexpr(Traits::css_held)
+  {
+    now |= old & names_[rcc_role::css_on].mask();
+  }
   if constexpr(Traits::hsi_divider)
   {
     now = divider_written(old, now);
   }
-  oscillators_written("RCC_CR", names_[rcc_role::css_on].offset, old, now);
+  oscillators_written(Traits::control_register, names_[rcc_role::css_on].offset, old, now);
 }
 
 template <typename Traits>
@@ -892,6 +977,14 @@ void rcc_model<Traits>::pll_config_written(std::uint32_t old, std::uint32_t now)
         now = kept->with(now, kept->of(old));
       }
     }
+    if constexpr(Traits::pll_nodes[Pll].config == Traits::pll_nodes[Pll].dividers)
+    {
+      now = fields.n.with(now, fields.n.of(old));
+      for(std::size_t output = 0; output < Traits::pll_nodes[Pll].outputs; ++output)
+      {
+        now = fields.divider[output].with(now, fields.divider[output].of(old));
+      }
+    }
     if constexpr(Traits::pll_nodes[Pll].outputs_held_while_on)
     {
       for(auto const& kept : fields.output_enable)
@@ -941,7 +1034,7 @@ template <typename Traits> void rcc_model<Traits>::refuse_stopped_clock()
     return;
   }
   warn(
-      "RCC_CFGR1",
+      std::ranges::find(Traits::names, rcc_role::sw, &named_field<rcc_role>::role)->name.reg,
       std::format(
           "the selected system clock source runs at 0 Hz, the core clock stays at {} Hz",
           ctx_.clock.core_hz()));
@@ -956,15 +1049,20 @@ template <typename Traits> auto rcc_model<Traits>::locked(std::size_t pll) const
 template <typename Traits>
 void rcc_model<Traits>::bdcr_written(std::uint32_t old, std::uint32_t now)
 {
+  now = held(bdcr_.offset, old, now);
+  if constexpr(Traits::backup_register == Traits::reset_flags_register)
+  {
+    now = flags_written(old, now);
+  }
   if(names_[rcc_role::backup_reset].of(now) != 0)
   {
-    now = names_[rcc_role::backup_reset].with(0, 1);
+    now = names_[rcc_role::backup_reset].with(now & ~backup_mask_, 1);
   }
   else if(names_[rcc_role::rtc_select].of(old) != 0)
   {
     now = names_[rcc_role::rtc_select].with(now, names_[rcc_role::rtc_select].of(old));
   }
-  oscillators_written("RCC_BDCR", bdcr_.offset, old, now);
+  oscillators_written(Traits::backup_register, bdcr_.offset, old, now);
   if(names_[rcc_role::backup_reset].of(old) == 0 and names_[rcc_role::backup_reset].of(now) != 0)
   {
     for(auto* const peer : ctx_.peers.all())
@@ -979,7 +1077,13 @@ void rcc_model<Traits>::bdcr_written(std::uint32_t old, std::uint32_t now)
 
 template <typename Traits> void rcc_model<Traits>::csr_written(std::uint32_t old, std::uint32_t now)
 {
-  if constexpr(Traits::msi)
+  regs_.poke(csr_.offset, flags_written(old, now));
+}
+
+template <typename Traits>
+auto rcc_model<Traits>::flags_written(std::uint32_t old, std::uint32_t now) const -> std::uint32_t
+{
+  if constexpr(Traits::msi_standby_ranges)
   {
     if(read(rcc_role::msi_select) == 0)
     {
@@ -996,7 +1100,7 @@ template <typename Traits> void rcc_model<Traits>::csr_written(std::uint32_t old
       now = flag.with(now, 0);
     }
   }
-  regs_.poke(csr_.offset, names_[rcc_role::remove_flags].with(now, 0));
+  return names_[rcc_role::remove_flags].with(now, 0);
 }
 
 template <typename Traits>
@@ -1093,11 +1197,10 @@ auto rcc_model<Traits>::rates() const -> std::array<std::uint64_t, signal_count>
             : 0;
     for(std::size_t output = 0; output < node.outputs; ++output)
     {
-      auto const& enable = fields.output_enable[output];
+      auto const& enable  = fields.output_enable[output];
+      auto const  divider = node.output_decode[output](get(regs_, fields.divider[output]));
       at(node.out[output]) =
-          not enable or get(regs_, *enable) != 0
-              ? vco / node.output_decode[output](get(regs_, fields.divider[output]))
-              : 0;
+          (not enable or get(regs_, *enable) != 0) and divider != 0 ? vco / divider : 0;
     }
   }
   at(signal::sysclk) = at(Traits::system_sources[read(rcc_role::sws) & Traits::sw_mask]);
@@ -1179,7 +1282,13 @@ template <typename Traits> void rcc_model<Traits>::publish(bool notify)
 
 template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, reset_kind kind)
 {
-  auto const kept_bdcr  = regs.peek(bdcr_.offset);
+  auto const power      = std::ranges::contains(Traits::power_resets, kind);
+  auto const kept_bdcr  = regs.peek(bdcr_.offset) & backup_mask_;
+  auto       kept_words = kept_
+                        | std::views::transform([&](auto const& bits) {
+                      return std::pair{bits.first, regs.peek(bits.first) & bits.second};
+                          })
+                        | std::ranges::to<std::vector>();
   auto       kept_flags = std::uint32_t{};
   for(auto const& flag : flags_)
   {
@@ -1190,9 +1299,8 @@ template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, re
     regs.poke(reg(name).offset, describe(name).reset);
   }
   auto csr = describe(Traits::reset_flags_register).reset;
-  if(kind != reset_kind::power_on)
+  if(not power)
   {
-    regs.poke(bdcr_.offset, kept_bdcr);
     for(auto const& flag : flags_)
     {
       csr = flag.with(csr, 0);
@@ -1207,6 +1315,14 @@ template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, re
     }
   }
   regs.poke(csr_.offset, csr);
+  if(not power)
+  {
+    regs.poke(bdcr_.offset, (regs.peek(bdcr_.offset) & ~backup_mask_) | kept_bdcr);
+    for(auto const& [kept, value] : std::views::zip(kept_, kept_words))
+    {
+      regs.poke(kept.first, (regs.peek(kept.first) & ~kept.second) | value.second);
+    }
+  }
   for(auto& generation : state_.generation)
   {
     ++generation;
@@ -1222,6 +1338,14 @@ template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, re
   if(not is_on(source::lsi))
   {
     update(regs_, osc_[std::to_underlying(source::lsi)].ready, 0);
+  }
+  for(std::size_t index = 0; index < std::to_underlying(source::pll1); ++index)
+  {
+    auto const which = static_cast<source>(index);
+    if(is_on(which) and not is_ready(which))
+    {
+      start(which);
+    }
   }
   publish(false);
 }
@@ -1487,6 +1611,13 @@ auto rcc_h5_factory(rcc_options options) -> model_factory
 {
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<rcc_model<h5_rcc>>(ctx, desc, options);
+  };
+}
+
+auto rcc_l1_factory(rcc_options options) -> model_factory
+{
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<rcc_model<l1_rcc>>(ctx, desc, options);
   };
 }
 }

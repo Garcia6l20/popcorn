@@ -118,6 +118,15 @@ def test_drop_removes_the_number_from_the_table_and_every_peripheral() -> None:
     assert table.by_peripheral["B"] == [6]
 
 
+def test_drop_then_add_of_one_number_leaves_only_the_added_owner() -> None:
+    device = _device([_peripheral("A", [(5, "FOO")]), _peripheral("B", [])])
+    patch = PatchIrqs(drop=["FOO"], add=[IrqAdd(number=5, name="FOO", peripheral="B")])
+    table = build_irq_table(device, None, [patch], rzone_num=None)
+    assert [irq.number for irq in table.irqs] == [5]
+    assert table.by_peripheral["A"] == []
+    assert table.by_peripheral["B"] == [5]
+
+
 def test_add_appends_a_new_irq_and_peripheral_entry() -> None:
     device = _device([_peripheral("A", [(5, "FOO")]), _peripheral("B", [])])
     add = IrqAdd(number=9, name="NEWIRQ", peripheral="B")

@@ -7,11 +7,13 @@ from pcons import PathToken, Target, context
 from pcons.core.environment import Environment
 from pcons.toolchains.presets import CrossPreset
 
-from popcorn_build.config import build_dir
+from popcorn_build.config import build_dir, project_dir
 from popcorn_build.firmware import (
     CPU_FLAGS,
+    CPU_FLAGS_M3,
     add_c_flags,
     checked_program,
+    cortex_m3,
     cortex_m33,
     prebuilt_only,
     toolchain_found,
@@ -48,11 +50,11 @@ SECURE_CPU_FLAGS = tuple(
 )
 
 
-def _newlib_preset(name: str, cpu_flags: Sequence[str]) -> CrossPreset:
+def _newlib_preset(name: str, base: CrossPreset, cpu_flags: Sequence[str]) -> CrossPreset:
     return CrossPreset(
         name=name,
-        arch=cortex_m33.arch,
-        triple=cortex_m33.triple,
+        arch=base.arch,
+        triple=base.triple,
         extra_compile_flags=(*cpu_flags, "-ffunction-sections", "-fdata-sections"),
         extra_link_flags=(
             *cpu_flags,
@@ -60,30 +62,49 @@ def _newlib_preset(name: str, cpu_flags: Sequence[str]) -> CrossPreset:
             "-specs=nosys.specs",
             "-Wl,--gc-sections",
         ),
-        tool_cmds=cortex_m33.tool_cmds,
+        tool_cmds=base.tool_cmds,
     )
 
 
-cortex_m33_newlib = _newlib_preset("cortex-m33-none-eabi-newlib", CPU_FLAGS)
-cortex_m33_newlib_softfp = _newlib_preset("cortex-m33-none-eabi-newlib-softfp", SECURE_CPU_FLAGS)
+cortex_m33_newlib = _newlib_preset("cortex-m33-none-eabi-newlib", cortex_m33, CPU_FLAGS)
+cortex_m33_newlib_softfp = _newlib_preset(
+    "cortex-m33-none-eabi-newlib-softfp", cortex_m33, SECURE_CPU_FLAGS
+)
+cortex_m3_newlib = _newlib_preset("cortex-m3-none-eabi-newlib", cortex_m3, CPU_FLAGS_M3)
+
+_NEWLIB_PRESETS = {
+    cortex_m33.name: ("examples", cortex_m33_newlib, EXAMPLES_PREFIX),
+    cortex_m3.name: ("examples-m3", cortex_m3_newlib, f"{EXAMPLES_PREFIX}-m3"),
+}
 
 _envs: dict[str, Environment] = {}
 
 
-def _newlib_env(name: str, preset: CrossPreset) -> Environment | None:
+def _newlib_env(
+    name: str, preset: CrossPreset, prefix: str = EXAMPLES_PREFIX
+) -> Environment | None:
     if name not in _envs and toolchain_found:
         env = context.current_project.Environment(toolchain="gcc", name=name)
         env.apply_cross_preset(preset)
-        env.build_prefix = EXAMPLES_PREFIX
+        env.build_prefix = prefix
         add_c_flags(env)
         _envs[name] = env
     return _envs.get(name)
 
 
-def example_env() -> Environment | None:
-    """The arm-none-eabi environment of the examples, newlib-nano linked, None without the
-    cross toolchain."""
-    return _newlib_env("examples", cortex_m33_newlib)
+def example_env(preset: CrossPreset = cortex_m33) -> Environment | None:
+    """The arm-none-eabi environment of the examples built for @p preset, newlib-nano linked,
+    None without the cross toolchain.
+
+    The Cortex-M33 environment builds under `example-firmware`, the Cortex-M3 one under
+    `example-firmware-m3`.
+
+    @throws SystemExit @p preset is neither cortex_m33 nor cortex_m3.
+    """
+    entry = _NEWLIB_PRESETS.get(preset.name)
+    if entry is None:
+        raise SystemExit(f"popcorn: no example environment for the preset {preset.name}")
+    return _newlib_env(*entry)
 
 
 def secure_example_env() -> Environment | None:
@@ -274,8 +295,18 @@ def _templates(device: Path) -> Path:
     return device / "Source" / "Templates"
 
 
-def _linker_script(chipset: Chipset, device: Path, name: str, flash_offset: int) -> Path:
-    script = _templates(device) / "gcc" / "linker" / chipset.linker
+def st_linker_script(chipset: Chipset, device: Path, name: str, flash_offset: int) -> Path:
+    """ST's linker script of @p chipset under @p device, or its project `example_linker` when the
+    device package ships none, moved up by @p flash_offset.
+
+    @throws SystemExit @p chipset has neither.
+    """
+    if chipset.linker is not None:
+        script = _templates(device) / "gcc" / "linker" / chipset.linker
+    elif chipset.example_linker is not None:
+        script = project_dir / chipset.example_linker
+    else:
+        raise SystemExit(f"popcorn: the chipset {chipset.name} has no ST linker script")
     if flash_offset == 0:
         return script
     return _derived_script(chipset, name, offset_linker_script(script.read_text(), flash_offset))
@@ -312,7 +343,7 @@ def add_example_firmware(
     loadable content.
     """
     prebuilt = prebuilt_elf(example_dir, name)
-    env = example_env()
+    env = example_env(chipset.preset)
     if env is None:
         return prebuilt_only(prebuilt), None
 
@@ -349,7 +380,7 @@ def add_example_firmware(
         all_sources += [stack / "class" / name / f"{name}_device.c" for name in tinyusb]
         include_dirs.append(stack)
 
-    script = _linker_script(chipset, device, name, flash_offset)
+    script = st_linker_script(chipset, device, name, flash_offset)
     elf, target = checked_program(
         f"example-{chipset.name}-{name}",
         name,
@@ -408,6 +439,7 @@ def add_trustzone_example_firmware(
     from popcorn_build.requirements import firmware_source
 
     chipset = STM32U575
+    secure_linker, nonsecure_linker, nonsecure_system = chipset.require_trustzone()
     device = firmware_source(chipset.device_package)
     cmsis = firmware_source("cmsis-core")
     templates = _templates(device)
@@ -416,12 +448,12 @@ def add_trustzone_example_firmware(
     secure_ld = _derived_script(
         chipset,
         f"{name}_s",
-        secure_linker_script((linker / chipset.secure_linker).read_text(), layout),
+        secure_linker_script((linker / secure_linker).read_text(), layout),
     )
     nonsecure_ld = _derived_script(
         chipset,
         name,
-        nonsecure_linker_script((linker / chipset.nonsecure_linker).read_text(), layout),
+        nonsecure_linker_script((linker / nonsecure_linker).read_text(), layout),
     )
     secure_path, secure, nonsecure_path, nonsecure = trustzone_pair(
         f"example-{chipset.name}-{name}",
@@ -429,7 +461,7 @@ def add_trustzone_example_firmware(
         secure_env,
         env,
         [*secure_sources, startup],
-        [*nonsecure_sources, startup, templates / chipset.nonsecure_system],
+        [*nonsecure_sources, startup, templates / nonsecure_system],
         secure_ld,
         nonsecure_ld,
         prebuilt,

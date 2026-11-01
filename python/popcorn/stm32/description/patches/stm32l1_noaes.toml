@@ -1,0 +1,34 @@
+format = 1
+source = "RM0038 Rev 18, 1.4: the AES processor is on the STM32L162 only. The L100, L151 and L152 SVDs list it, CubeMX gives it to no part of those lines"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L100.svd", "STM32L151.svd", "STM32L152.svd"]
+
+[peripherals]
+drop = ["AES"]
+source = "RM0038 Rev 18, 1.4 and 24: AES on the STM32L162xx only"
+
+[irqs]
+drop = ["AES"]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBRSTR"]
+fields = ["AESRST"]
+drop = true
+source = "RM0038 Rev 18, 6.3.5 RCC_AHBRSTR: the AES bits are available on the STM32L16x only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBENR"]
+fields = ["AESEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.8 RCC_AHBENR: the AES bits are available on the STM32L16x only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHBLPENR"]
+fields = ["AESLPEN"]
+drop = true
+source = "RM0038 Rev 18, 6.3.11 RCC_AHBLPENR: the AES bits are available on the STM32L16x only"

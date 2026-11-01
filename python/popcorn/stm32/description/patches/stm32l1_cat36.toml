@@ -1,0 +1,107 @@
+format = 1
+source = "RM0038 Rev 18, Cat.3 to Cat.6 (DIE427, DIE436, DIE437): what the four categories share, the SPI3 reset, the TIM2 and TIM3 option registers, the operational amplifier identity and the 8 KB system memory"
+
+[match]
+parts = ["STM32L1*"]
+svd = ["STM32L1*.svd"]
+dies = ["DIE427", "DIE436", "DIE437"]
+
+[ip]
+renames_if_present = { OPAMP1 = ["OPAMP"], OPAMP2 = ["OPAMP"] }
+
+[[resets]]
+peripheral = "SPI3"
+register = "CR2"
+reset = 0
+source = "RM0038 Rev 18, 28.5.2 SPI_CR2: reset value 0x0000. The STM32L152 SVD gives 0x700"
+
+[[registers]]
+peripheral = "TIM2"
+name = "OR"
+offset = 0x50
+width = 16
+reset = 0
+acc = "read_write"
+fields = [{ name = "ITR1_RMP", lsb = 0, width = 1 }]
+source = "RM0038 Rev 18, 17.4.19 TIM2_OR, Cat.3 to Cat.6: offset 0x50, reset 0, ITR1_RMP in bit 0 selects TIM10 OC (0) or TIM5 TRGO (1) for ITR1. The SVDs have no OR"
+
+[[registers]]
+peripheral = "TIM3"
+name = "OR"
+offset = 0x50
+width = 16
+reset = 0
+acc = "read_write"
+fields = [{ name = "ITR2_RMP", lsb = 0, width = 1 }]
+source = "RM0038 Rev 18, 17.4.20 TIM3_OR, Cat.3 to Cat.6: offset 0x50, reset 0, ITR2_RMP in bit 0 selects TIM11 OC (0) or TIM5 TRGO (1) for ITR2. The SVDs have no OR"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["CR1"]
+add = { name = "DIR", lsb = 4, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.2.1 and 18.4.1 TIM9 TIMx_CR1: DIR in bit 4, the TIM9 of Cat.3 to Cat.6 counts up or down, the Cat.1 and Cat.2 bit is reserved. The four SVDs have no DIR"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["CR1"]
+add = { name = "CMS", lsb = 5, width = 2, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.2.1 and 18.4.1 TIM9 TIMx_CR1: CMS[1:0] in bits 6:5, available in Cat.3 to Cat.6 only. The four SVDs have no CMS"
+
+[[fields]]
+instances = ["TIM9"]
+registers = ["OR"]
+add = { name = "ITR1_RMP", lsb = 2, width = 1, acc = "read_write", reset = 0 }
+source = "RM0038 Rev 18, 18.4.14 TIM9_OR: ITR1_RMP in bit 2 selects TIM3 TRGO (0) or the touch sensing I/O (1) for TIM9 ITR1, Cat.3 to Cat.6 only. The four SVDs have TI1_RMP only"
+
+[memory]
+source = "RM0038 Rev 18, 3.2 Tables 9 to 12 (Cat.3 to Cat.6): the system memory is pages 0 to 15 of 256 bytes and pages 16 to 31 of 4 KB, 0x1FF00000 to 0x1FF01FFF, 8 KB, and Table 7 gives the 8 KB boot memory"
+add = [
+  { name = "SYSTEM_MEMORY", start = 0x1FF00000, size = 0x2000, kind = "rom", acc = { read = true, write = false, execute = true }, secure = false },
+]
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["IMR", "EMR"]
+fields = ["MR"]
+width = 24
+source = "RM0038 Rev 18, 10.3.1 EXTI_IMR and 10.3.2 EXTI_EMR: MR23 exists in Cat.3, Cat.4, Cat.5 and Cat.6 devices, bits 23:0. The SVDs give 23 bits"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["RTSR", "FTSR"]
+fields = ["TR"]
+width = 24
+source = "RM0038 Rev 18, 10.3.3 EXTI_RTSR and 10.3.4 EXTI_FTSR: TR23 exists in Cat.3, Cat.4, Cat.5 and Cat.6 devices, bits 23:0. The SVDs give 23 bits"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["SWIER"]
+fields = ["SWIER"]
+width = 24
+source = "RM0038 Rev 18, 10.3.5 EXTI_SWIER: SWIER23 exists in Cat.3, Cat.4, Cat.5 and Cat.6 devices. The SVDs give 23 bits"
+
+[[fields]]
+instances = ["EXTI"]
+registers = ["PR"]
+fields = ["PR"]
+width = 24
+source = "RM0038 Rev 18, 10.3.6 EXTI_PR: PR23 exists in Cat.3, Cat.4, Cat.5 and Cat.6 devices, bits 23:0. The SVDs give 23 bits"
+
+[[register_drops]]
+peripheral = "DMA2"
+names = ["CCR6", "CNDTR6", "CPAR6", "CMAR6", "CCR7", "CNDTR7", "CPAR7", "CMAR7"]
+source = "RM0038 Rev 18, 11.1 and the note of 11.4: DMA2 has 5 channels, the bits of channels 6 and 7 are not relevant for DMA2. The SVDs give DMA2 the 7 channels of DMA1"
+
+[[fields]]
+instances = ["DMA2"]
+registers = ["ISR"]
+fields = ["GIF6", "TCIF6", "HTIF6", "TEIF6", "GIF7", "TCIF7", "HTIF7", "TEIF7"]
+drop = true
+source = "RM0038 Rev 18, 11.4 note and 11.4.1 DMA_ISR: DMA2 has 5 channels, the flags of channels 6 and 7 are dropped with them"
+
+[[fields]]
+instances = ["DMA2"]
+registers = ["IFCR"]
+fields = ["CGIF6", "CTCIF6", "CHTIF6", "CTEIF6", "CGIF7", "CTCIF7", "CHTIF7", "CTEIF7"]
+drop = true
+source = "RM0038 Rev 18, 11.4 note and 11.4.2 DMA_IFCR: DMA2 has 5 channels, the clear bits of channels 6 and 7 are dropped with them"
