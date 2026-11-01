@@ -1,6 +1,9 @@
+import fcntl
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from functools import cache
 from pathlib import Path
 
@@ -34,12 +37,44 @@ def test_the_query_runs() -> None:
     assert "RNG" not in unmodelled
 
 
-@pytest.fixture(scope="module")
-def generated(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    out = tmp_path_factory.mktemp("generated")
-    subprocess.run(
-        [sys.executable, "-m", "popcorn_build.support_pages", str(out)], cwd=ROOT, check=True
+def _generate(out: Path) -> str | None:
+    result = subprocess.run(
+        [sys.executable, "-m", "popcorn_build.support_pages", str(out)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
     )
+    if result.returncode == 0:
+        return None
+    return f"popcorn_build.support_pages exited {result.returncode}\n{result.stderr}"
+
+
+@pytest.fixture(scope="session")
+def generated(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The generated pages, written once per session. Under xdist the first worker to take the
+    lock in the session's shared temporary directory generates into a fresh directory there,
+    renames it to `support_pages`, or writes the generator's error to `support_pages.failed`,
+    which every worker then reports without generating again."""
+    if os.environ.get("PYTEST_XDIST_WORKER") is None:
+        out = tmp_path_factory.mktemp("generated")
+        error = _generate(out)
+        if error is not None:
+            pytest.fail(error, pytrace=False)
+        return out
+    shared = tmp_path_factory.getbasetemp().parent
+    out = shared / "support_pages"
+    failed = shared / "support_pages.failed"
+    with (shared / "support_pages.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not out.exists() and not failed.exists():
+            work = Path(tempfile.mkdtemp(dir=shared))
+            error = _generate(work)
+            if error is None:
+                work.rename(out)
+            else:
+                failed.write_text(error, encoding="utf-8")
+    if failed.exists():
+        pytest.fail(failed.read_text(encoding="utf-8"), pytrace=False)
     return out
 
 
