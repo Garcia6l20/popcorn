@@ -203,6 +203,15 @@ enum class[[= py::rename{"MemorySpace"}]] memory_space : std::uint8_t
 
 namespace detail
 {
+/** @brief Accepts every port, the default filter of machine_handle::port_names(). */
+struct keep_every_port
+{
+  [[nodiscard]] constexpr auto operator()(auto const&) const noexcept -> bool
+  {
+    return true;
+  }
+};
+
 /**
  * @brief Gives a machine's host up for a Python caller interrupted while a handler blocks the
  *        host thread: the borrowed handles of the machine's Python models are dropped first, so
@@ -1740,6 +1749,31 @@ private:
   [[nodiscard]] auto lock_releasing() const -> core::held_lock;
   void               apply_reset_request(core::held_lock const& held);
   [[nodiscard]] auto engine() const -> core::machine&;
+
+  /**
+   * @brief Names of the non-alias peripherals whose model is a @p Port that @p keep accepts.
+   * @tparam Port The port type the model is cast to.
+   * @param keep Predicate on the port.
+   * @return The names in description order.
+   */
+  template <typename Port, typename Keep = detail::keep_every_port>
+  [[nodiscard]] auto port_names(Keep keep = {}) const -> std::vector<std::string>
+  {
+    std::vector<std::string> names;
+    for(auto const& unit : engine().description().peripherals)
+    {
+      if(unit.alias_of)
+      {
+        continue;
+      }
+      auto* const port = dynamic_cast<Port*>(engine().model(unit.name));
+      if(port != nullptr and keep(*port))
+      {
+        names.push_back(unit.name);
+      }
+    }
+    return names;
+  }
   [[nodiscard]] auto abandoner() const -> detail::host_abandon;
   void               flush_logs_unraisable() const noexcept;
   auto open_pty(std::string name, std::unique_ptr<detail::pty_link> link) -> pty_handle;

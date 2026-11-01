@@ -1503,6 +1503,63 @@ def test_forgetting_on_the_links_of_a_dead_machine_does_nothing(
     assert hid.release_written(1) is None
 
 
+type Orphan = Callable[[Any], Any]
+
+ORPHAN_OPS: dict[str, Orphan] = {
+    "cdc-queued": lambda o: o.cdc.queued(),
+    "cdc-send": lambda o: o.cdc.send(b"x"),
+    "cdc-command-send": lambda o: o.cdc.command_send(b"x"),
+    "cdc-command-line-coding": lambda o: o.cdc.command_set_line_coding(9600, 0, 0, 8),
+    "cdc-line-coding": lambda o: o.cdc.set_line_coding(9600, 0, 0, 8),
+    "cdc-predicate": lambda o: o.cdc.predicate_available(1),
+    "hid-queued": lambda o: o.hid.queued(),
+    "hid-command-write": lambda o: o.hid.command_write(b"\x01\x02"),
+    "hid-command-get-report": lambda o: o.hid.command_get_report(1, 0, 4),
+    "hid-get-report": lambda o: o.hid.get_report(1, 0, 4),
+    "hid-write-claim": lambda o: o.hid.write_claim(),
+    "hid-predicate": lambda o: o.hid.predicate_available(1),
+    "usb-state": lambda o: o.usb.state(),
+    "usb-control": lambda o: o.usb.control(0x80, 6, 0x100, 0, 18, b""),
+    "usb-op-settled": lambda o: o.usb.op_settled(),
+    "usb-op-take-result": lambda o: o.usb.op_take_result(o.ticket),
+    "usb-command-control": lambda o: o.usb.command_control(o.ticket, 0x80, 6, 0x100, 0, 18, b""),
+    "usb-predicate-settled": lambda o: o.usb.predicate_settled(),
+    "usb-predicate-control": lambda o: o.usb.predicate_control_ended(1),
+    "uac-queued": lambda o: o.uac.queued(),
+    "uac-start": lambda o: o.uac.start(False),
+    "uac-command-start": lambda o: o.uac.command_start(False),
+    "uac-stream": lambda o: o.uac.stream(False),
+    "uac-units": lambda o: o.uac.units(),
+    "uac-write": lambda o: o.uac.write([0]),
+    "uac-predicate": lambda o: o.uac.predicate_available(1),
+}
+
+
+class Orphans:
+    def __init__(self, cdc: Any, hid: Any, usb: Any, uac: Any, ticket: Any) -> None:
+        self.cdc, self.hid, self.usb, self.uac, self.ticket = cdc, hid, usb, uac, ticket
+
+
+@pytest.fixture
+def orphans(u575: popcorn.PartDescription) -> Orphans:
+    m, host = configured(u575)
+    usb = usb_link_of(host)
+    cdc, hid, ticket = usb.cdc(0), usb.hid(0), usb.ticket()
+    audio_m = audio_machine(u575)
+    audio_host = audio_m.periph.OTG_FS.host
+    asyncio.run(audio_host.wait_configured(for_=s(2)))
+    uac = usb_link_of(audio_host).audio(0)
+    del m, host, audio_m, audio_host
+    gc.collect()
+    return Orphans(cdc, hid, usb, uac, ticket)
+
+
+@pytest.mark.parametrize("op", ORPHAN_OPS)
+def test_a_usb_link_kept_past_its_machine_refuses_access(orphans: Orphans, op: str) -> None:
+    with pytest.raises(popcorn.ConfigError, match="a USB host whose machine still exists"):
+        ORPHAN_OPS[op](orphans)
+
+
 def test_a_dropped_report_write_leaves_no_result_behind(
     u575: popcorn.PartDescription,
 ) -> None:

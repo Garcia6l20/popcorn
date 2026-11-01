@@ -46,10 +46,7 @@ uart_queue::uart_queue(
 
 auto uart_queue::port() const -> periph::uart_port&
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("uart", 0, "machine", "a UART whose machine still exists");
-  }
+  detail::require_alive(alive_, "uart", "a UART whose machine still exists");
   return *port_;
 }
 
@@ -127,10 +124,7 @@ namespace
 template <typename Port>
 auto live_port(Port* port, detail::alive_flag const& alive, char const* what) -> Port&
 {
-  if(not detail::is_alive(alive))
-  {
-    throw config_error(what, 0, "machine", "a link whose machine still exists");
-  }
+  detail::require_alive(alive, what, "a link whose machine still exists");
   return *port;
 }
 }
@@ -241,19 +235,13 @@ audio_link::audio_link(
 
 auto audio_link::endpoint() const -> detail::audio_queue_endpoint&
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("audio", 0, "machine", "an SAI whose machine still exists");
-  }
+  detail::require_alive(alive_, "audio", "an SAI whose machine still exists");
   return *endpoint_;
 }
 
 auto audio_link::port() const -> periph::stm32::audio_port&
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("audio", 0, "machine", "an SAI whose machine still exists");
-  }
+  detail::require_alive(alive_, "audio", "an SAI whose machine still exists");
   return *port_;
 }
 
@@ -400,16 +388,7 @@ void audio_link::set_frame_limit(std::uint64_t limit)
 
 auto machine_handle::audio_names() const -> std::vector<std::string>
 {
-  std::vector<std::string> names;
-  for(auto const& unit : engine().description().peripherals)
-  {
-    if(not unit.alias_of
-       and dynamic_cast<periph::stm32::audio_port*>(engine().model(unit.name)) != nullptr)
-    {
-      names.push_back(unit.name);
-    }
-  }
-  return names;
+  return port_names<periph::stm32::audio_port>();
 }
 
 auto machine_handle::attach_audio(
@@ -438,15 +417,7 @@ auto machine_handle::attach_audio(
 
 auto machine_handle::uart_names() const -> std::vector<std::string>
 {
-  std::vector<std::string> names;
-  for(auto const& unit : engine().description().peripherals)
-  {
-    if(not unit.alias_of and dynamic_cast<periph::uart_port*>(engine().model(unit.name)) != nullptr)
-    {
-      names.push_back(unit.name);
-    }
-  }
-  return names;
+  return port_names<periph::uart_port>();
 }
 
 auto machine_handle::attach_uart(std::string const& peripheral) -> uart_queue

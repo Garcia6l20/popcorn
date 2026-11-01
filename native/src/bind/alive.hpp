@@ -1,7 +1,11 @@
 #pragma once
 
+#include <popcorn/core/errors.hpp>
+
 #include <atomic>
 #include <memory>
+#include <string>
+#include <string_view>
 
 namespace popcorn::bind::detail
 {
@@ -31,5 +35,20 @@ using alive_flag = std::shared_ptr<std::atomic<bool> const>;
 inline void clear_alive(std::atomic<bool>& flag) noexcept
 {
   flag.store(false, std::memory_order_release);
+}
+
+/**
+ * @brief Refuses use of something whose machine is gone.
+ * @param flag The flag.
+ * @param key The config_error key.
+ * @param what What was expected, as the config_error expectation.
+ * @throws config_error when the flag is cleared.
+ */
+inline void require_alive(alive_flag const& flag, std::string_view key, std::string_view what)
+{
+  if(not is_alive(flag))
+  {
+    throw config_error(std::string{key}, 0, "machine", std::string{what});
+  }
 }
 }
