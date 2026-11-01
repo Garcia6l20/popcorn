@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import popcorn
+from derived_data import model_json
 from popcorn.board import I2CTarget
 from popcorn.devices import At25sf
 from popcorn.model import Model
@@ -14,7 +15,6 @@ from .devices_example import Eeprom24
 
 ROOT = Path(__file__).parents[3]
 PREBUILT = ROOT / "tests" / "firmware" / "periph" / "prebuilt"
-MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
 MODEL_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "model.elf"
 BUDGET = 100_000_000
 
@@ -69,7 +69,7 @@ NATIVE_DEVICES = popcorn.MachineDescription(
 def model_project(board: dict[str, popcorn.Periph]) -> popcorn.MachineDescription:
     return popcorn.MachineDescription(
         part="POPCORN-M33-TEST",
-        description=MODEL_JSON,
+        description=model_json(),
         images=[popcorn.Elf(MODEL_ELF)],
         board=board,
     )

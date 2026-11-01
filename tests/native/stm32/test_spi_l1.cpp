@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -81,6 +82,10 @@ constexpr address          apb1enr    = rcc + 0x24;
 constexpr address          ahbenr     = rcc + 0x1C;
 constexpr std::uint32_t    dma1_bit   = 1u << 24;
 constexpr address          dma1       = 0x4002'6000;
+constexpr address          gpioa      = 0x4002'0000;
+constexpr address          moder      = 0x00;
+constexpr address          bsrr       = 0x18;
+constexpr std::uint32_t    gpioa_bit  = 1u << 0;
 constexpr address          ccr2       = dma1 + 0x1C;
 constexpr address          cndtr2     = dma1 + 0x20;
 constexpr address          cpar2      = dma1 + 0x24;
@@ -125,6 +130,7 @@ public:
   std::optional<std::uint8_t> declared;
   std::vector<std::uint64_t>  tickets;
   bool                        defer{};
+  std::optional<std::size_t>  restored;
   int                         attaches{};
   int                         detaches{};
 
@@ -171,8 +177,10 @@ public:
     out.push_back(static_cast<std::byte>(frames.size()));
   }
 
-  void load(std::span<std::byte const>) override
-  {}
+  void load(std::span<std::byte const> in) override
+  {
+    restored = static_cast<std::size_t>(in.front());
+  }
 
   [[nodiscard]] auto outs() const -> std::vector<std::uint32_t>
   {
@@ -196,41 +204,13 @@ public:
   }
 };
 
-class bus_probe final : public periph::model
+class bus_probe final : public popcorn::testing::inert_model
 {
 public:
   explicit bus_probe(periph::model_context& ctx) : context{ctx}
   {}
 
   periph::model_context& context;
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 struct rig
@@ -244,11 +224,12 @@ struct rig
   core::hook_handle                 log_hook;
 
   explicit rig(
-      std::string_view        entry,
-      part_description const& desc       = l152re(),
-      std::string_view        elf        = firmware,
-      bool                    controlled = false,
-      bool                    strict     = false)
+      std::string_view            entry,
+      part_description const&     desc       = l152re(),
+      std::string_view            elf        = firmware,
+      bool                        controlled = false,
+      bool                        strict     = false,
+      std::optional<std::uint8_t> cs_pin     = std::nullopt)
       : name{elf}
   {
     if(controlled)
@@ -257,7 +238,8 @@ struct rig
     }
     else
     {
-      board.spi["SPI1"].push_back({.device = device});
+      board.spi["SPI1"].push_back(
+          {.device = device, .cs_port = cs_pin ? "GPIOA" : "", .cs_pin = cs_pin});
     }
     auto options               = popcorn::testing::stm32_options();
     options.models             = stm32::factories(board, desc);
@@ -895,6 +877,35 @@ TEST_CASE("RM0038 28.3.8 inferred: SPE 0 mid-frame lets the frame land, the buff
   r.write(spi1 + cr1, master | spe);
   r.idle_to(r.now_ps() + 2 * frame8);
   CHECK(r.device->outs() == std::vector<std::uint32_t>{0x01, 0x02});
+}
+
+TEST_CASE("a chip select pin on GPIOA selects the device low and releases it high")
+{
+  rig r{"parked", l152re(), firmware, false, false, 4};
+  r.write(ahbenr, gpioa_bit);
+  r.write(gpioa + bsrr, 1u << 4);
+  r.write(gpioa + moder, 1u << 8);
+  CHECK(r.device->selects.empty());
+  r.write(gpioa + bsrr, 1u << (16 + 4));
+  CHECK(r.device->selects == std::vector<bool>{true});
+  r.write(gpioa + bsrr, 1u << 4);
+  CHECK(r.device->selects == std::vector<bool>{true, false});
+}
+
+TEST_CASE("a snapshot restores the state each attached device saved")
+{
+  rig r{"parked"};
+  r.write(spi1 + cr1, master | spe);
+  auto const t0 = r.now_ps();
+  r.cpu_write(spi1 + dr, 0x01);
+  r.idle_to(t0 + 2 * frame8);
+  REQUIRE(r.device->frames.size() == 1);
+  auto const saved = r.f->target->snapshot();
+  rig        other{"parked"};
+  REQUIRE_FALSE(other.device->restored.has_value());
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(other.device->restored == 1);
 }
 
 TEST_CASE("a snapshot mid-frame restores the frame in flight and both buffers")

@@ -2728,6 +2728,28 @@ TEST_CASE("the report descriptor length comes from the HID descriptor as usbhid_
   CHECK_FALSE(usb::hid_report_descriptor_length(hid_interface({})));
 }
 
+TEST_CASE("the class descriptor walk passes a 2 byte descriptor and stops at a malformed length")
+{
+  std::vector<std::uint8_t> const valid{9, 0x21, 0x11, 0x01, 0, 1, 0x22, 25, 0};
+  auto const                      after = [&](std::vector<std::uint8_t> head) {
+    head.append_range(valid);
+    return hid_interface(std::move(head));
+  };
+  CHECK(usb::hid_report_descriptor_length(after({2, 0x05})) == std::optional<std::uint16_t>{25});
+  CHECK_FALSE(usb::hid_report_descriptor_length(after({1})));
+  CHECK_FALSE(usb::hid_report_descriptor_length(after({0, 0})));
+  CHECK_FALSE(usb::hid_report_descriptor_length(after({1, 9})));
+  CHECK_FALSE(usb::hid_report_descriptor_length(after({200, 0x05})));
+
+  auto truncated = valid;
+  truncated.pop_back();
+  CHECK_FALSE(usb::hid_report_descriptor_length(hid_interface(truncated)));
+
+  auto setting  = hid_interface(valid, true);
+  setting.extra = {2, 0x21};
+  CHECK_FALSE(usb::hid_report_descriptor_length(setting));
+}
+
 TEST_CASE("a binding empties the report descriptor until the new device's one is read")
 {
   auto const hub = std::make_shared<usb::hid_hub>();

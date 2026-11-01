@@ -1,8 +1,8 @@
 #pragma once
 
-#include <popcorn/core/link_guard.hpp>
 #include <popcorn/core/types.hpp>
 #include <popcorn/export.hpp>
+#include <popcorn/periph/usb_function_hub.hpp>
 #include <popcorn/periph/usb_host.hpp>
 
 #include <cstddef>
@@ -11,7 +11,6 @@
 #include <limits>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <set>
 #include <span>
@@ -217,30 +216,9 @@ struct POPCORN_API uac2_channel
  *        control interface in the configuration's interface order. Created empty with the
  *        host's factories, its channels created on first use, by the driver or by the binding.
  */
-class POPCORN_API uac2_hub
+class POPCORN_API uac2_hub : public function_hub<uac2_channel>
 {
 public:
-  /** @brief Takes the hub's link lock, blocking. It covers the channel map and every channel. */
-  [[nodiscard]] auto lock() const -> core::link_guard
-  {
-    return core::link_guard{mutex_};
-  }
-
-  /** @brief Takes the hub's link lock if it is free. */
-  [[nodiscard]] auto try_lock() const -> core::link_guard
-  {
-    return core::link_guard{mutex_, std::try_to_lock};
-  }
-
-  /**
-   * @brief The channel of a function, created empty on first use. The reference is valid while
-   *        the hub lives, touched only under the hub's lock.
-   * @param held The hub's lock.
-   * @param function Function index.
-   */
-  [[nodiscard]] auto channel(core::link_guard const& held, std::size_t function)
-      -> uac2_channel& pre(held.guards(mutex_));
-
   /**
    * @brief Appends the speaker samples of the channels no driver is bound to. A bound driver
    *        saves its own channel's.
@@ -254,14 +232,6 @@ public:
    * @param in Bytes of one save() call, or empty for none.
    */
   void load(std::span<std::byte const> in);
-
-  /** @brief Calls uac2_channel::discard() on every channel under the hub's lock. Call it before
-   * the host loads a snapshot. */
-  void discard();
-
-private:
-  mutable std::mutex                  mutex_;
-  std::map<std::size_t, uac2_channel> channels_{};
 };
 
 /**

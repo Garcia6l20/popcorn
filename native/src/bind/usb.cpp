@@ -61,6 +61,24 @@ auto packet_record(usb::cdc_packet const& packet) -> cdc_packet_record
 {
   return {.data = packet.data, .at_ps = packet.at.ps};
 }
+
+void require_usb_alive(detail::alive_flag const& alive)
+{
+  detail::require_alive(alive, "usb", "a USB host whose machine still exists");
+}
+
+template <typename Link, typename Request>
+auto detached_request(
+    Link                      link,
+    Request                   request,
+    usb::setup_packet         setup,
+    std::vector<std::uint8_t> data) -> access_op
+{
+  return detail::link_op([link = std::move(link), request, setup, data = std::move(data)] mutable {
+    usb::deferred_warnings const deferred;
+    return (link.*request)(setup, data);
+  });
+}
 }
 
 cdc_link::cdc_link(
@@ -75,10 +93,7 @@ cdc_link::cdc_link(
 
 template <typename Body> auto cdc_link::locked(Body&& body) const
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   return detail::link_locked(*hub_, [&](core::link_guard const& held) {
     return std::invoke(std::forward<Body>(body), hub_->channel(held, function_));
   });
@@ -146,10 +161,7 @@ void cdc_link::send_bytes(std::vector<std::uint8_t> const& bytes) const
 
 auto cdc_link::command_send(reflex::py::nb::bytes const& data) const -> access_op
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   auto link = *this;
   link.host_.reset();
   return detail::link_op(
@@ -159,16 +171,10 @@ auto cdc_link::command_send(reflex::py::nb::bytes const& data) const -> access_o
 auto cdc_link::request_command(usb::setup_packet setup, std::vector<std::uint8_t> data) const
     -> access_op
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   auto link = *this;
   link.host_.reset();
-  return detail::link_op([link = std::move(link), setup, data = std::move(data)] mutable {
-    usb::deferred_warnings const deferred;
-    return link.request_locked(setup, data);
-  });
+  return detached_request(std::move(link), &cdc_link::request_locked, setup, std::move(data));
 }
 
 auto cdc_link::command_set_line_coding(
@@ -267,10 +273,7 @@ auto cdc_link::ready() const -> bool
 auto cdc_link::request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
     -> std::uint32_t
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   return detail::host_access(host_, [&] {
     usb::deferred_warnings const deferred;
     return request_locked(setup, std::move(data));
@@ -385,10 +388,7 @@ hid_link::hid_link(
 
 template <typename Body> auto hid_link::locked(Body&& body) const
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   return detail::link_locked(*hub_, [&](core::link_guard const& held) {
     return std::invoke(std::forward<Body>(body), hub_->channel(held, function_));
   });
@@ -428,10 +428,7 @@ auto hid_link::write_bytes(std::vector<std::uint8_t> const& bytes) const -> std:
 
 auto hid_link::command_write(reflex::py::nb::bytes const& data) const -> access_op
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   auto link = *this;
   link.host_.reset();
   return detail::link_op(
@@ -441,16 +438,10 @@ auto hid_link::command_write(reflex::py::nb::bytes const& data) const -> access_
 auto hid_link::request_command(usb::setup_packet setup, std::vector<std::uint8_t> data) const
     -> access_op
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   auto link = *this;
   link.host_.reset();
-  return detail::link_op([link = std::move(link), setup, data = std::move(data)] mutable {
-    usb::deferred_warnings const deferred;
-    return link.request_locked(setup, data);
-  });
+  return detached_request(std::move(link), &hid_link::request_locked, setup, std::move(data));
 }
 
 auto hid_link::command_get_report(std::uint8_t type, std::uint8_t id, std::uint16_t length) const
@@ -518,10 +509,7 @@ auto hid_link::release_written(std::uint64_t id) -> std::optional<periph::usb::t
 
 auto hid_link::write_claim() const -> hid_write_claim
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   auto link = *this;
   link.host_.reset();
   return hid_write_claim{std::move(link)};
@@ -629,10 +617,7 @@ auto hid_link::report_descriptor() const -> reflex::py::nb::bytes
 auto hid_link::request(periph::usb::setup_packet setup, std::vector<std::uint8_t> data)
     -> std::uint32_t
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   return detail::host_access(host_, [&] {
     usb::deferred_warnings const deferred;
     return request_locked(setup, std::move(data));
@@ -721,10 +706,7 @@ uac_link::uac_link(
 
 template <typename Body> auto uac_link::locked(Body&& body) const
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   return detail::link_locked(*hub_, [&](core::link_guard const& held) {
     return std::invoke(std::forward<Body>(body), hub_->channel(held, function_));
   });
@@ -732,27 +714,18 @@ template <typename Body> auto uac_link::locked(Body&& body) const
 
 template <typename Body> auto uac_link::engine(Body&& body) const
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   return detail::host_access(host_, std::forward<Body>(body));
 }
 
 void uac_link::require_alive() const
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
 }
 
 auto uac_link::host() const -> periph::usb::host*
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   return port_->board_host();
 }
 
@@ -1038,10 +1011,7 @@ template <typename Body> auto usb_link::engine(Body&& body) const
 
 auto usb_link::port() const -> periph::stm32::usb_host_port&
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive_);
   return *port_;
 }
 
@@ -1280,10 +1250,7 @@ auto requests_of(usb::host const& on) -> std::vector<usb_request_record>
 
 auto board_host(periph::stm32::usb_host_port* port, detail::alive_flag const& alive) -> usb::host&
 {
-  if(not detail::is_alive(alive))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive);
   return *port->board_host();
 }
 }
@@ -1376,16 +1343,8 @@ auto usb_link::audio(std::uint64_t function) const -> uac_link
 
 auto machine_handle::usb_names() const -> std::vector<std::string>
 {
-  std::vector<std::string> names;
-  for(auto const& unit : engine().description().peripherals)
-  {
-    auto* const port = dynamic_cast<periph::stm32::usb_host_port*>(engine().model(unit.name));
-    if(not unit.alias_of and port != nullptr and port->board_host() != nullptr)
-    {
-      names.push_back(unit.name);
-    }
-  }
-  return names;
+  return port_names<periph::stm32::usb_host_port>(
+      [](periph::stm32::usb_host_port& port) { return port.board_host() != nullptr; });
 }
 
 auto machine_handle::attach_usb(std::string const& peripheral) -> usb_link
@@ -1408,10 +1367,7 @@ auto channel_predicate(
     detail::host_ref          machine,
     Test                      test) -> native_predicate
 {
-  if(not detail::is_alive(alive))
-  {
-    throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-  }
+  require_usb_alive(alive);
   return native_predicate{
       [hub = std::move(hub), function, alive, test = std::move(test)] {
         return not detail::is_alive(alive)
@@ -1568,10 +1524,7 @@ auto usb_link::op_settled() const -> access_op
 {
   std::ignore = port();
   return detail::link_op([port = port_, alive = alive_] {
-    if(not detail::is_alive(alive))
-    {
-      throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-    }
+    require_usb_alive(alive);
     auto const&                on     = *port->board_host();
     auto const                 state  = std::to_underlying(on.state());
     auto const                 failed = on.failed_step();
@@ -1589,10 +1542,7 @@ auto usb_link::op_take_result(usb_control_ticket const& ticket) const -> access_
 {
   std::ignore = port();
   return detail::link_op([port = port_, alive = alive_, claim = ticket.claim()] {
-    if(not detail::is_alive(alive))
-    {
-      throw config_error("usb", 0, "machine", "a USB host whose machine still exists");
-    }
+    require_usb_alive(alive);
     std::optional<usb_control_result> found;
     auto&                             on = *port->board_host();
     auto const                        taken =

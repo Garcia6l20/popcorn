@@ -20,15 +20,14 @@ namespace
 {
 using wide = unsigned __int128;
 
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
-constexpr std::uint32_t expiry        = 0;
-constexpr std::uint32_t early_wakeup  = 1;
-constexpr std::uint32_t first_update  = 2;
-constexpr std::size_t   updates       = 4;
-constexpr std::uint32_t start_key     = 0xCCCC;
-constexpr std::uint32_t refresh_key   = 0xAAAA;
-constexpr std::uint32_t unlock_key    = 0x5555;
-constexpr std::uint32_t counter_top   = 0xFFF;
+constexpr std::uint32_t expiry       = 0;
+constexpr std::uint32_t early_wakeup = 1;
+constexpr std::uint32_t first_update = 2;
+constexpr std::size_t   updates      = 4;
+constexpr std::uint32_t start_key    = 0xCCCC;
+constexpr std::uint32_t refresh_key  = 0xAAAA;
+constexpr std::uint32_t unlock_key   = 0x5555;
+constexpr std::uint32_t counter_top  = 0xFFF;
 
 enum update_index : std::uint8_t
 {

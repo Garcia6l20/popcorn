@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "kernel_gate.hpp"
 #include "model_base.hpp"
 #include "stm32_fixture.hpp"
@@ -96,39 +97,9 @@ auto words_from(std::uint64_t start, std::uint64_t count, std::uint64_t seed = 0
   return out;
 }
 
-class clock_probe : public popcorn::periph::model
+class clock_probe : public popcorn::testing::inert_model
 {
 public:
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 class reset_probe final : public clock_probe, public popcorn::periph::bus_reset_listener

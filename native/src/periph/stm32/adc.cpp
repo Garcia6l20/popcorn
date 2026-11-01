@@ -1,6 +1,7 @@
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
+#include "factory_data.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -12,7 +13,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -31,7 +31,6 @@ namespace
 {
 constexpr std::size_t   channels           = 20;
 constexpr std::size_t   offsets            = 4;
-constexpr std::uint64_t ps_per_second      = 1'000'000'000'000;
 constexpr std::uint32_t conversion_end     = 0;
 constexpr std::uint32_t sampling_end       = 1;
 constexpr std::uint32_t ready_end          = 2;
@@ -479,28 +478,6 @@ struct adc_common_state
   friend auto operator==(adc_common_state const&, adc_common_state const&) -> bool = default;
 };
 
-[[nodiscard]] auto factory_halfword(part_description const& part, address at)
-    -> std::optional<std::uint16_t>
-{
-  for(auto const& region : part.regions)
-  {
-    if(not region.content)
-    {
-      continue;
-    }
-    for(auto const& piece : *region.content)
-    {
-      auto const first = region.start + piece.offset;
-      if(at >= first and at + 2 <= first + piece.data.size())
-      {
-        auto const index = static_cast<std::size_t>(at - first);
-        return static_cast<std::uint16_t>(piece.data[index] | (piece.data[index + 1] << 8));
-      }
-    }
-  }
-  return std::nullopt;
-}
-
 template <typename Traits> [[nodiscard]] auto wiring(std::string const& instance) -> adc_inputs
 {
   auto const found =
@@ -529,14 +506,6 @@ template <typename Traits>
 {
   constexpr std::uint32_t full_scale = 1u << Traits::bits;
   return std::min<std::uint32_t>(full_scale - 1u, factory_code * Traits::factory_vdda_mv / vdda_mv);
-}
-
-auto lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(
-      out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return out;
 }
 
 /**
@@ -2215,24 +2184,16 @@ void adc_model<Traits>::warn_once(bool& logged, std::string_view reg, std::strin
 template <typename Traits>
 void adc_model<Traits>::forbidden(bool& logged, std::string_view name, std::string message)
 {
-  if(not std::exchange(logged, true))
-  {
-    warn(name, std::move(message));
-  }
-  if(ctx_.strict_peripherals)
-  {
-    throw model_error(desc_.name, std::string{name}, reg(name).offset);
-  }
+  this->warn_once_or_refuse(
+      logged, name, ctx_.strict_peripherals ? reg(name).offset : 0u, std::move(message));
 }
 
 template <typename Traits>
 void adc_model<Traits>::unmodelled(bool& logged, std::string_view name, std::string_view what)
 {
-  warn_once(logged, name, what);
-  if(ctx_.strict_peripherals)
-  {
-    throw model_error(desc_.name, std::string{name}, reg(name).offset);
-  }
+  this->warn_once_or_refuse(logged, name, ctx_.strict_peripherals ? reg(name).offset : 0u, [&] {
+    return std::format("{} not modelled", what);
+  });
 }
 
 template <typename Traits> auto adc_common_model<Traits>::status() const -> std::uint32_t

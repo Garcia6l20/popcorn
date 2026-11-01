@@ -130,6 +130,44 @@ struct first_dies
   std::size_t            abbrev_tables_parsed{};
 };
 
+struct unit_header
+{
+  std::size_t   next_cu{};
+  bool          is64{};
+  std::uint64_t abbrev_offset{};
+};
+
+auto read_unit_header(dwarf_cursor& cursor, debug_sections const& sections)
+    -> std::optional<unit_header>
+{
+  unit_header header;
+  auto const  unit_length = read_initial_length(cursor, header.is64);
+  header.next_cu = checked_unit_end(cursor.pos(), unit_length, sections.info.size(), ".debug_info");
+
+  auto const version = cursor.u16();
+  if(version < 2 || version > 5)
+  {
+    throw image_error{".debug_info", 0, "unsupported compile unit version"};
+  }
+  if(version >= 5)
+  {
+    auto const unit_type = cursor.u8();
+    std::ignore          = cursor.u8();
+    header.abbrev_offset = read_offset(cursor, header.is64);
+    if(unit_type != dw_ut_compile && unit_type != dw_ut_partial)
+    {
+      cursor.seek(header.next_cu);
+      return std::nullopt;
+    }
+  }
+  else
+  {
+    header.abbrev_offset = read_offset(cursor, header.is64);
+    std::ignore          = cursor.u8();
+  }
+  return header;
+}
+
 auto read_first_dies(debug_sections const& sections) -> first_dies
 {
   first_dies                                                                        scan;
@@ -138,33 +176,12 @@ auto read_first_dies(debug_sections const& sections) -> first_dies
   dwarf_cursor cursor{sections.info, ".debug_info"};
   while(!cursor.at_end())
   {
-    bool       is64        = false;
-    auto const unit_length = read_initial_length(cursor, is64);
-    auto const next_cu =
-        checked_unit_end(cursor.pos(), unit_length, sections.info.size(), ".debug_info");
-
-    auto const    version = cursor.u16();
-    std::uint64_t abbrev_offset{};
-    if(version < 2 || version > 5)
+    auto const header = read_unit_header(cursor, sections);
+    if(not header)
     {
-      throw image_error{".debug_info", 0, "unsupported compile unit version"};
+      continue;
     }
-    if(version >= 5)
-    {
-      auto const unit_type = cursor.u8();
-      std::ignore          = cursor.u8();
-      abbrev_offset        = read_offset(cursor, is64);
-      if(unit_type != dw_ut_compile && unit_type != dw_ut_partial)
-      {
-        cursor.seek(next_cu);
-        continue;
-      }
-    }
-    else
-    {
-      abbrev_offset = read_offset(cursor, is64);
-      std::ignore   = cursor.u8();
-    }
+    auto const [next_cu, is64, abbrev_offset] = *header;
 
     auto const [cache_it, inserted] = abbrev_cache.try_emplace(abbrev_offset);
     if(inserted)
@@ -346,34 +363,14 @@ auto scan_functions(debug_sections const& sections) -> std::vector<function_die>
   dwarf_cursor cursor{sections.info, ".debug_info"};
   while(!cursor.at_end())
   {
-    auto const unit_start  = cursor.pos();
-    bool       is64        = false;
-    auto const unit_length = read_initial_length(cursor, is64);
-    auto const next_cu =
-        checked_unit_end(cursor.pos(), unit_length, sections.info.size(), ".debug_info");
-    auto const version = cursor.u16();
-    if(version < 2 || version > 5)
+    auto const unit_start = cursor.pos();
+    auto const header     = read_unit_header(cursor, sections);
+    if(not header)
     {
-      throw image_error{".debug_info", 0, "unsupported compile unit version"};
+      continue;
     }
-    std::uint64_t abbrev_offset{};
-    if(version >= 5)
-    {
-      auto const unit_type = cursor.u8();
-      std::ignore          = cursor.u8();
-      abbrev_offset        = read_offset(cursor, is64);
-      if(unit_type != dw_ut_compile && unit_type != dw_ut_partial)
-      {
-        cursor.seek(next_cu);
-        continue;
-      }
-    }
-    else
-    {
-      abbrev_offset = read_offset(cursor, is64);
-      std::ignore   = cursor.u8();
-    }
-    auto const [cache_it, inserted] = abbrev_cache.try_emplace(abbrev_offset);
+    auto const [next_cu, is64, abbrev_offset] = *header;
+    auto const [cache_it, inserted]           = abbrev_cache.try_emplace(abbrev_offset);
     if(inserted)
     {
       cache_it->second = parse_abbrev_table(sections.abbrev, abbrev_offset);

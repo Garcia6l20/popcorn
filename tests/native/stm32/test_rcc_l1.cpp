@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "rcc_resets.hpp"
 #include "stm32_fixture.hpp"
 
@@ -38,7 +39,7 @@ constexpr std::uint64_t hse_hz   = 8 * mhz;
 constexpr std::uint64_t hsi_hz   = 16 * mhz;
 constexpr auto          firmware = std::string_view{"l152xe_l1_rcc_ll"};
 
-class listener final : public periph::model
+class listener final : public popcorn::testing::inert_model
 {
 public:
   explicit listener(periph::model_context& ctx) : context{ctx}
@@ -50,33 +51,6 @@ public:
   {
     return context.clock.hz(context.clock.domain(name));
   }
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 auto with_listener() -> core::machine_options
@@ -437,6 +411,48 @@ TEST_CASE("RM0038 6.3.14: a CSR write of 0 keeps the reset flags, RMVF clears th
   CHECK(f.field("RCC", "CSR", "PINRSTF") == 1);
   set(f, "CSR", "RMVF", 1);
   CHECK((peek(f, "CSR") & 0xFE00'0000u) == 0);
+}
+
+TEST_CASE("RM0038 6.3.14: every machine reset kind sets exactly its own RCC_CSR flags after RMVF")
+{
+  struct row
+  {
+    reset_kind                      kind;
+    std::array<std::string_view, 2> flags;
+  };
+  constexpr auto rows  = std::to_array<row>({
+      {reset_kind::power_on,        {"PORRSTF", "PINRSTF"}},
+      {reset_kind::brown_out,       {"PORRSTF", "PINRSTF"}},
+      {reset_kind::pin,             {"PINRSTF", {}}       },
+      {reset_kind::software,        {"SFTRSTF", {}}       },
+      {reset_kind::watchdog,        {"IWDGRSTF", {}}      },
+      {reset_kind::window_watchdog, {"WWDGRSTF", {}}      },
+      {reset_kind::low_power,       {"LPWRRSTF", {}}      },
+      {reset_kind::option_load,     {"OBLRSTF", {}}       },
+  });
+  constexpr auto names = std::to_array<std::string_view>(
+      {"PORRSTF", "PINRSTF", "SFTRSTF", "IWDGRSTF", "WWDGRSTF", "LPWRRSTF", "OBLRSTF"});
+  for(auto const& [kind, flags] : rows)
+  {
+    CAPTURE(static_cast<int>(kind));
+    auto f = idle_fixture();
+    set(f, "CSR", "RMVF", 1);
+    f.target->reset(kind);
+    for(auto const name : names)
+    {
+      CAPTURE(name);
+      CHECK(f.field("RCC", "CSR", name) == (name == flags[0] or name == flags[1] ? 1 : 0));
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0038 6.3.14: the RCC_CSR reset value holds the flags of the power_on and brown_out rows, "
+    "PORRSTF and PINRSTF")
+{
+  auto f = idle_fixture();
+  CHECK(f.field("RCC", "CSR", "PORRSTF") == 1);
+  CHECK(f.field("RCC", "CSR", "PINRSTF") == 1);
 }
 
 TEST_CASE("RM0038 6.3.4: LSECSSC clears LSECSSF")

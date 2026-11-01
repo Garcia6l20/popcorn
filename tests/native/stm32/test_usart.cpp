@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -45,44 +46,13 @@ constexpr std::uint64_t    ps_per_second  = 1'000'000'000'000;
 constexpr std::uint64_t    instruction_ps = 250'000;
 constexpr std::string_view hello          = "hello\r\n";
 
-class bus_probe final : public popcorn::periph::model
+class bus_probe final : public popcorn::testing::inert_model
 {
 public:
   explicit bus_probe(popcorn::periph::model_context& ctx) : context{ctx}
   {}
 
   popcorn::periph::model_context& context;
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 struct rig

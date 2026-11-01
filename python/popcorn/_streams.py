@@ -12,9 +12,8 @@ from popcorn import _core
 from popcorn._devices import BusDevice
 from popcorn._enums import UartError
 from popcorn._errors import ConfigError
+from popcorn._limits import MAX_PS
 from popcorn.units import VirtualDuration, VirtualTime
-
-_MAX_PS = (1 << 64) - 1
 
 if TYPE_CHECKING:
     from popcorn._machine import AttachedDevice
@@ -426,7 +425,7 @@ class UartStream:
         when = cast(object, at)
         if not isinstance(when, VirtualTime | None):
             raise TypeError(f"at must be a VirtualTime or None, not {type(when).__name__}")
-        if at is not None and not 0 <= at.ps <= _MAX_PS:
+        if at is not None and not 0 <= at.ps <= MAX_PS:
             raise ValueError(f"a CTS change at {at} leaves the 64-bit picosecond range")
         if self.name in self._linked:
             raise RuntimeError(

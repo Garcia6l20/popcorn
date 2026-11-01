@@ -432,21 +432,7 @@ public:
     auto const* const found = window_at(at);
     if(found == nullptr)
     {
-      std::uint64_t first = 0;
-      std::uint64_t last  = ~address{};
-      for(auto const& w : windows_)
-      {
-        auto const end = std::uint64_t{w.start} + w.size;
-        if(end <= at)
-        {
-          first = std::max(first, end);
-        }
-        else if(w.start > at)
-        {
-          last = std::min<std::uint64_t>(last, w.start - 1u);
-        }
-      }
-      return {.first = static_cast<address>(first), .last = static_cast<address>(last)};
+      return gap_extent(windows_, at);
     }
     auto const window_last = static_cast<address>(found->start + (found->size - 1u));
     if(op == arch::memory_op::write and attrs.by != initiator::debugger)

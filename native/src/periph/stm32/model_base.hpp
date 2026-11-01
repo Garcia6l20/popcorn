@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <functional>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -34,6 +35,16 @@
 
 namespace popcorn::periph::stm32
 {
+/** @brief @p name with ASCII capitals lowered, the clock domain and DMA request names. */
+[[nodiscard]] inline auto lower(std::string_view name) -> std::string
+{
+  std::string out{name};
+  std::ranges::transform(out, out.begin(), [](unsigned char c) {
+    return static_cast<char>(c >= 'A' and c <= 'Z' ? c - 'A' + 'a' : c);
+  });
+  return out;
+}
+
 /** @brief Register, resolved by name from the description, within its storage word. */
 struct reg_ref
 {
@@ -303,6 +314,44 @@ protected:
          .peripheral = desc_.name,
          .reg        = std::string{reg},
          .message    = std::move(message)});
+  }
+
+  /**
+   * @brief Warns once through @p logged, then throws model_error under strict_peripherals.
+   * @param logged The warning's flag, set by the first call.
+   * @param reg Register named in the warning and the error.
+   * @param offset Offset named in the error.
+   * @param message Warning text, formatted by the caller.
+   * @throws model_error under strict_peripherals, at every call.
+   */
+  void warn_once_or_refuse(
+      bool&            logged,
+      std::string_view reg,
+      std::uint32_t    offset,
+      std::string      message)
+  {
+    warn_once_or_refuse(
+        logged, reg, offset, std::function_ref<std::string()>{[&] { return std::move(message); }});
+  }
+
+  /**
+   * @brief As above, with the warning text formatted only by the first call.
+   * @param message Called once, for the first warning.
+   */
+  void warn_once_or_refuse(
+      bool&                            logged,
+      std::string_view                 reg,
+      std::uint32_t                    offset,
+      std::function_ref<std::string()> message)
+  {
+    if(not std::exchange(logged, true))
+    {
+      warn(reg, message());
+    }
+    if(ctx_.strict_peripherals)
+    {
+      throw model_error(desc_.name, std::string{reg}, offset);
+    }
   }
 
   /**

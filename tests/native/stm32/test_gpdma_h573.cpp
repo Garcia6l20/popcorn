@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "dma_signal.hpp"
 #include "stm32_fixture.hpp"
 
@@ -39,7 +40,7 @@ constexpr popcorn::address target    = 0x2001'4000;
 constexpr std::uint64_t    ps_per_ms = 1'000'000'000;
 constexpr std::uint32_t    spi4_tx   = 48;
 
-class requester final : public periph::model, public stm32::dma_requester
+class requester final : public popcorn::testing::inert_model, public stm32::dma_requester
 {
 public:
   explicit requester(periph::model_context& ctx) : tx{ctx.peers, "spi4_tx_dma"}
@@ -50,35 +51,10 @@ public:
   void transfer_completed(stm32::dma_controller const&, std::uint32_t) override
   {}
 
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
   void reset(periph::register_file&, popcorn::reset_kind) override
   {
     tx.resolve();
   }
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 auto machine(bool with_requester = false) -> stm32_fixture

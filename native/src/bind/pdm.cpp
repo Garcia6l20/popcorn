@@ -19,10 +19,7 @@ namespace
 template <typename Queue>
 auto live(std::shared_ptr<Queue> const& queue, detail::alive_flag const& alive) -> Queue&
 {
-  if(not detail::is_alive(alive))
-  {
-    throw config_error("pdm", 0, "machine", "an MDF or ADF whose machine still exists");
-  }
+  detail::require_alive(alive, "pdm", "an MDF or ADF whose machine still exists");
   return *queue;
 }
 }
@@ -271,16 +268,7 @@ void check_index(
 
 auto machine_handle::pdm_names() const -> std::vector<std::string>
 {
-  std::vector<std::string> names;
-  for(auto const& unit : engine().description().peripherals)
-  {
-    if(not unit.alias_of
-       and dynamic_cast<periph::stm32::pdm_port*>(engine().model(unit.name)) != nullptr)
-    {
-      names.push_back(unit.name);
-    }
-  }
-  return names;
+  return port_names<periph::stm32::pdm_port>();
 }
 
 auto machine_handle::pdm_sitfs(std::string const& peripheral) const -> std::size_t

@@ -446,6 +446,36 @@ def test_state_of_another_type_needs_its_own_snapshot(u575: popcorn.PartDescript
 
 
 @pytest.mark.parametrize(
+    ("bus", "make"),
+    [("I2C1", lambda: _StrSnapshotI2C(0x50)), ("SPI1", lambda: _StrSnapshotSpi())],
+    ids=["i2c", "spi"],
+)
+def test_a_snapshot_returning_no_bytes_is_a_model_error(
+    u575: popcorn.PartDescription, bus: str, make: Callable[[], I2CTarget | SpiTarget]
+) -> None:
+    m = popcorn.Machine(u575, devices={bus: [make()]})
+    with pytest.raises(ModelError, match=r"snapshot\(\) returned a str, not bytes"):
+        m.snapshot()
+
+
+class _StrSnapshotI2C(I2CTarget):
+    def snapshot(self) -> bytes:
+        return cast(bytes, "text")
+
+
+class _StrSnapshotSpi(SpiTarget):
+    def snapshot(self) -> bytes:
+        return cast(bytes, "text")
+
+
+def test_the_picosecond_bound_is_one_constant_for_every_checking_module() -> None:
+    from popcorn import _devices, _limits, _streams, _views
+
+    assert _limits.MAX_PS == (1 << 64) - 1
+    assert all(vars(module)["MAX_PS"] is _limits.MAX_PS for module in (_devices, _streams, _views))
+
+
+@pytest.mark.parametrize(
     ("peripheral", "device", "reason"),
     [
         ("RCC", lambda: I2CTarget(0x50), "an I2C or SPI peripheral"),
@@ -1123,6 +1153,51 @@ def test_a_stretching_hook_takes_the_gil_once_per_call(u575: popcorn.PartDescrip
     before = gil_entries(m)
     finish(m)
     assert target.stretched_at >= 0
+    starts = sum(kind == "on_start" for kind, _ in target.events)
+    assert gil_entries(m) - before == len(target.events) + starts
+
+
+class Collecting(Stretching):
+    """Answers like `Stretching`, runs a full gc pass in its first hook call, and records
+    whether `gone` was freed by it."""
+
+    def __init__(self, gone: weakref.ref[popcorn.Machine]) -> None:
+        super().__init__()
+        self.gone = gone
+        self.collected = -1
+        self.freed = False
+
+    def note(self, hook: str, at: VirtualTime) -> None:
+        super().note(hook, at)
+        if len(self.events) == 1:
+            self.collected = gc.collect()
+            self.freed = self.gone() is None
+
+
+def test_a_gc_pass_inside_a_hook_freeing_a_dead_machine_takes_the_gil_once_per_call(
+    u575: popcorn.PartDescription,
+) -> None:
+    dead = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [Stretching()]})
+    enter(dead, "table")
+    finish(dead)
+    gone = weakref.ref(dead)
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        cycle: list[object] = [dead]
+        cycle.append(cycle)
+        del dead, cycle
+        assert gone() is not None
+        target = Collecting(gone)
+        m = popcorn.Machine(u575, image=popcorn.Image.elf(I2C_ELF), devices={"I2C1": [target]})
+        enter(m, "table")
+        before = gil_entries(m)
+        finish(m)
+    finally:
+        if enabled:
+            gc.enable()
+    assert target.collected > 0
+    assert target.freed
     starts = sum(kind == "on_start" for kind, _ in target.events)
     assert gil_entries(m) - before == len(target.events) + starts
 

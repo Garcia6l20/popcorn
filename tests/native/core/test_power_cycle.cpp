@@ -4,6 +4,7 @@
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/reset_listener.hpp>
 
+#include "../support/inert_model.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 
@@ -58,7 +59,7 @@ struct supply_event
 
 using journal = std::vector<supply_event>;
 
-class supply_model : public periph::model
+class supply_model : public popcorn::testing::inert_model
 {
 public:
   supply_model(
@@ -70,11 +71,6 @@ public:
       : ctx_{ctx}, name_{std::move(name)}, events_{events}, throws_{throws},
         reset_throws_{reset_throws}
   {}
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
 
   void reset(periph::register_file&, reset_kind kind) override
   {
@@ -93,32 +89,6 @@ public:
       throw popcorn::model_error(name_, "CUT", 0);
     }
   }
-
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-
-  void save(std::vector<std::byte>&) const override
-  {}
-
-  void load(std::span<std::byte const>) override
-  {}
 
 private:
   periph::model_context& ctx_;

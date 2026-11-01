@@ -133,14 +133,7 @@ public:
   void save(std::vector<std::byte>& out) const override
   {
     gil_entry const gil;
-    auto const      result = call("_save");
-    if(not result)
-    {
-      return;
-    }
-    auto const bytes = nb::cast<nb::bytes>(*result);
-    auto const data  = static_cast<std::byte const*>(bytes.data());
-    out.insert(out.end(), data, data + bytes.size());
+    append(call("_save"), out);
   }
 
   void load(std::span<std::byte const> in) override

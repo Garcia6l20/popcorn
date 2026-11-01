@@ -12,7 +12,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -30,7 +29,6 @@ namespace
 {
 using wide = unsigned __int128;
 
-constexpr std::uint64_t ps_per_second        = 1'000'000'000'000;
 constexpr std::uint32_t tick_due             = 0;
 constexpr std::size_t   max_channels         = 4;
 constexpr std::uint32_t master_reset         = 0;
@@ -215,14 +213,6 @@ struct interrupt_source
   field_ref   flag;
   std::size_t line;
 };
-
-auto lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(
-      out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return out;
-}
 
 /**
  * @brief TIM1, TIM2 to TIM7 and TIM15 to TIM17 of the STM32U5, with TIM12 to TIM14 on the STM32H5,

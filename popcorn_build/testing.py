@@ -1,13 +1,21 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from pcons import Target, context, write_file
 
 from popcorn_build.config import VARIANT, build_dir, project_dir
 from popcorn_build.core_links import both_flavours, reached
+from popcorn_build.python import interpreter
 from popcorn_build.requirements import package
 
 _doctest_main: Target | None = None
+_generated: dict[str, Target] = {}
+
+M33_VARIANT_NAMES = ("m33_code_alias", "m33_shared_page", "model")
+"""The descriptors tests/data/core/m33_variants.py derives from tests/data/core/m33.json.
+
+The build rule declares these as its outputs and passes them to the generator, which writes
+exactly these. tests/python/toolchain/test_m33_variants.py holds them equal to its VARIANTS."""
 
 DEFAULT_CASE_TIMEOUT = 300.0
 """Seconds a native test case may run before it is killed and failed, unless its suite sets
@@ -44,6 +52,39 @@ def _doctest_with_main() -> Target:
         _doctest_main.private.defines.append("DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN")
         _doctest_main.link(package("doctest"))
     return _doctest_main
+
+
+def m33_variants() -> dict[str, Path]:
+    """The build-tree path of each descriptor of M33_VARIANT_NAMES, by name.
+
+    The first call declares the build rule that writes them, with the generator and m33.json as
+    its inputs. A doctest program whose env names one of the paths depends on that rule, other
+    programs call depend_on_generated.
+    """
+    out_dir = build_dir / "test-data" / "m33"
+    paths = {name: out_dir / f"{name}.json" for name in M33_VARIANT_NAMES}
+    if str(paths[M33_VARIANT_NAMES[0]]) not in _generated:
+        project = context.current_project
+        core_data = project_dir / "tests" / "data" / "core"
+        generator = core_data / "m33_variants.py"
+        base = core_data / "m33.json"
+        rule = project.Command(
+            project.default_environment,
+            name="popcorn-test-m33-variants",
+            target=list(paths.values()),
+            source=[generator, base],
+            command=[interpreter, str(generator), str(base), str(out_dir), *M33_VARIANT_NAMES],
+            cwd=project_dir,
+            restat=True,
+        )
+        _generated.update((str(path), rule) for path in paths.values())
+    return paths
+
+
+def depend_on_generated(program: Target, values: Iterable[str]) -> None:
+    """Make @p program depend on the build rule of each generated file named in @p values."""
+    for rule in {_generated[value] for value in values if value in _generated}:
+        program.depends(rule)
 
 
 def alias_bare_name(target: Target) -> None:
@@ -92,6 +133,7 @@ def add_doctest(
         program.private.defines.append(f'POPCORN_TSAN_SUPPRESSIONS="{TSAN_SUPPRESSIONS}"')
     for dep in [*deps, package("doctest"), _doctest_with_main()]:
         program.link(dep)
+    depend_on_generated(program, (env or {}).values())
     if register:
         project.Test(
             f"{group}.{name}",

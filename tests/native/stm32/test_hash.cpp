@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "dma.hpp"
 #include "stm32_fixture.hpp"
 
@@ -130,7 +131,7 @@ constexpr std::uint32_t hash_request = 89;
 constexpr std::uint32_t cr_mdmat     = 1u << 13;
 constexpr std::uint32_t sr_dmas      = 1u << 2;
 
-class recorder final : public periph::model, public stm32::dma_controller
+class recorder final : public popcorn::testing::inert_model, public stm32::dma_controller
 {
 public:
   explicit recorder(bool knows_hash) : knows_hash_{knows_hash}
@@ -138,33 +139,6 @@ public:
 
   std::vector<std::pair<std::uint32_t, bool>> levels;
 
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
   void on_request(std::uint32_t request, bool level) override
   {
     levels.emplace_back(request, level);

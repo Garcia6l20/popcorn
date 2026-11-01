@@ -303,7 +303,7 @@ struct status_fields
 
 /**
  * @brief FLASH and data EEPROM interface of the STM32L1, RM0038 section 3, the category
- *        differences from the traits.
+ *        differences from the variant.
  *
  *        Locks, RM0038 3.4.1: FLASH_PECR.PELOCK, PRGLOCK and OPTLOCK are set after every reset.
  *        PEKEY1 then PEKEY2 in FLASH_PEKEYR clears PELOCK, PRGKEY1 then PRGKEY2 in FLASH_PRGKEYR
@@ -374,7 +374,7 @@ struct status_fields
  *        and OPTVERRUSR as well for USER on Cat.3 to Cat.6. FLASH_OBR and FLASH_WRPRx ignore
  *        writes. RDPRT 0xAA is level 0, 0xCC level 2, any other value level 1.
  *
- *        PCROP, RM0038 3.7.4, on the `pcrop` traits, the L151, L152 and L162 Cat.2 and Cat.3 on
+ *        PCROP, RM0038 3.7.4, on the `pcrop` variant, the L151, L152 and L162 Cat.2 and Cat.3 on
  *        DIE427: SPRMOD loads with RDP as one pair against nSPRMOD and nRDP. With SPRMOD set a
  *        FLASH_WRPRx bit at 0 protects its sector: a program or erase of it sets WRPERR, and a
  *        CPU, DMA or filtered debugger load of it reads 0 and sets FLASH_SR.RDERR, a fetch from
@@ -403,10 +403,10 @@ class flash_l1 final : public dispatch_model<flash_l1, flash_l1_state>,
 {
 public:
   flash_l1(
-      model_context&         ctx,
-      peripheral_desc const& desc,
-      flash_l1_traits const& traits,
-      flash_options const&   options);
+      model_context&          ctx,
+      peripheral_desc const&  desc,
+      flash_l1_variant const& variant,
+      flash_options const&    options);
 
   void reset(register_file& regs, reset_kind kind) override;
   void on_bus_reset() override;
@@ -490,7 +490,7 @@ private:
       std::uint32_t now) -> bool;
 
   register_file&                                                    regs_;
-  flash_l1_traits                                                   traits_;
+  flash_l1_variant                                                  variant_;
   field_ref                                                         latency_;
   field_ref                                                         prefetch_;
   field_ref                                                         wide_;
@@ -544,11 +544,11 @@ constexpr std::array<write_entry<flash_l1>, 7> flash_l1_writes{
 };
 
 flash_l1::flash_l1(
-    model_context&         ctx,
-    peripheral_desc const& desc,
-    flash_l1_traits const& traits,
-    flash_options const&   options)
-    : dispatch_model{ctx, desc, "FLASH", flash_l1_writes}, regs_{ctx.regs}, traits_{traits},
+    model_context&          ctx,
+    peripheral_desc const&  desc,
+    flash_l1_variant const& variant,
+    flash_options const&    options)
+    : dispatch_model{ctx, desc, "FLASH", flash_l1_writes}, regs_{ctx.regs}, variant_{variant},
       latency_{field("ACR", "LATENCY")}, prefetch_{field("ACR", "PRFTEN")},
       wide_{field("ACR", "ACC64")}, sleep_down_{field("ACR", "SLEEP_PD")},
       run_down_{field("ACR", "RUN_PD")},
@@ -575,17 +575,17 @@ flash_l1::flash_l1(
           .size_error        = field("SR", "SIZERR"),
           .option_error      = field("SR", "OPTVERR"),
           .user_option_error = field("SR", "OPTVERRUSR"),
-          .read_error        = traits.pcrop ? field("SR", "RDERR") : field_ref{}},
+          .read_error        = variant.pcrop ? field("SR", "RDERR") : field_ref{}},
       keys_{reg("PDKEYR"), reg("PEKEYR"), reg("PRGKEYR"), reg("OPTKEYR")}, options_{reg("OBR")},
-      rdp_{field("OBR", "RDPRT")}, sprmod_{traits.pcrop ? field("OBR", "SPRMOD") : field_ref{}},
+      rdp_{field("OBR", "RDPRT")}, sprmod_{variant.pcrop ? field("OBR", "SPRMOD") : field_ref{}},
       line_{irq("FLASH_IRQn")}, hclk_{ctx.clock.domain("hclk")}
 {
   for(std::uint8_t index = 1; index <= 4; ++index)
   {
-    expect_register(std::format("WRPR{}", index), index <= traits.wrp_registers);
+    expect_register(std::format("WRPR{}", index), index <= variant.wrp_registers);
   }
-  bind(std::span{flash_l1_option_writes}.first(1u + traits.wrp_registers));
-  for(auto const& entry : std::span{flash_l1_option_writes}.subspan(1, traits.wrp_registers))
+  bind(std::span{flash_l1_option_writes}.first(1u + variant.wrp_registers));
+  for(auto const& entry : std::span{flash_l1_option_writes}.subspan(1, variant.wrp_registers))
   {
     protection_.push_back(reg(entry.reg));
   }
@@ -614,8 +614,8 @@ flash_l1::flash_l1(
         ctx.part.part, 0, "regions", "an OPTION_FACTORY region that names FLASH as its controller");
   }
   std::ranges::sort(program_regions_, {}, &region_desc::start);
-  second_bank_ = traits.dual_bank ? second_bank_of(program_regions_) : std::nullopt;
-  if(traits.dual_bank and not second_bank_)
+  second_bank_ = variant.dual_bank ? second_bank_of(program_regions_) : std::nullopt;
+  if(variant.dual_bank and not second_bank_)
   {
     throw config_error(
         ctx.part.part, 0, "regions",
@@ -624,12 +624,12 @@ flash_l1::flash_l1(
   if(options.option_bytes)
   {
     auto const encoded = l1_encode_options(
-        traits, {.unit = &desc, .regions = program_regions_}, *options.option_bytes);
+        variant, {.unit = &desc, .regions = program_regions_}, *options.option_bytes);
     if(not encoded)
     {
       throw config_error(desc.name, 0, encoded.error().key, encoded.error().expected);
     }
-    if(traits.dual_bank)
+    if(variant.dual_bank)
     {
       boot_bank_2_ = options.option_bytes->swap_bank;
     }
@@ -650,7 +650,7 @@ flash_l1::flash_l1(
 
 auto flash_l1::data_bank(region_desc const& region) const -> std::optional<std::uint32_t>
 {
-  if(not traits_.dual_bank)
+  if(not variant_.dual_bank)
   {
     return std::nullopt;
   }
@@ -1077,7 +1077,7 @@ auto flash_l1::sector_bit(std::uint32_t sector) const -> bool
 
 auto flash_l1::pcrop_mode() const -> bool
 {
-  return traits_.pcrop and get(regs_, sprmod_) != 0;
+  return variant_.pcrop and get(regs_, sprmod_) != 0;
 }
 
 auto flash_l1::write_protected(std::uint32_t addr) const -> bool
@@ -1162,7 +1162,7 @@ auto flash_l1::rdp_level() const -> std::uint32_t
 auto flash_l1::option_word(std::uint32_t offset) const -> bool
 {
   return offset < option_words
-      or (traits_.dual_bank
+      or (variant_.dual_bank
           and offset >= second_options
           and offset < second_options + option_words);
 }
@@ -1246,7 +1246,7 @@ void flash_l1::program_data(flash_store const& word)
     return;
   }
   auto const mask = word.size == 4 ? ~std::uint32_t{} : (std::uint32_t{1} << (8 * word.size)) - 1;
-  if(word.size < 4 and (word.value & mask) == 0 and not traits_.null_partial_writes)
+  if(word.size < 4 and (word.value & mask) == 0 and not variant_.null_partial_writes)
   {
     note_once(
         null_logged_, "PECR",
@@ -1329,7 +1329,7 @@ void flash_l1::mass_erase()
     erase(region->start, region->size);
   }
   erase(option_region_->start, option_words);
-  if(traits_.dual_bank)
+  if(variant_.dual_bank)
   {
     erase(option_region_->start + second_options, option_words);
   }
@@ -1358,7 +1358,7 @@ void flash_l1::load_options()
     auto const low  = word & mask;
     return ((word >> 16) & mask) == (~low & mask) ? std::optional{low} : std::nullopt;
   };
-  auto const rdp    = pair(0, traits_.pcrop ? 9 : 8);
+  auto const rdp    = pair(0, variant_.pcrop ? 9 : 8);
   auto const user   = pair(4, 8);
   auto       failed = not rdp or not user;
   auto const boot   = boot_bank_2_.transform([](bool bank_2) { return bank_2 ? 0 : boot_bank_1; });
@@ -1373,7 +1373,7 @@ void flash_l1::load_options()
     regs_.poke(protection_[index].offset, (high.value_or(0) << 16) | low.value_or(0));
   }
   state_.options_invalid = failed;
-  state_.user_invalid    = not user and traits_.user_option_flag;
+  state_.user_invalid    = not user and variant_.user_option_flag;
 }
 
 auto flash_l1::on_memory_write(
@@ -1475,7 +1475,7 @@ void flash_l1::control_written(std::uint32_t old, std::uint32_t now)
       word = bits.with(word, bits.of(now));
     }
     word =
-        control_.parallel_bank.with(word, traits_.dual_bank ? control_.parallel_bank.of(now) : 0u);
+        control_.parallel_bank.with(word, variant_.dual_bank ? control_.parallel_bank.of(now) : 0u);
     auto const modes = control_.program.mask()
                      | control_.data.mask()
                      | control_.erase.mask()
@@ -1607,7 +1607,7 @@ void flash_l1::check_latency(std::string_view trigger)
   }
   auto const level   = range();
   auto const latency = get(regs_, latency_);
-  auto const limits  = traits_.max_khz[level];
+  auto const limits  = variant_.max_khz[level];
   if(hclk <= limits[latency] * hz_per_khz)
   {
     return;
@@ -1641,18 +1641,18 @@ void flash_l1::on_voltage_range_change()
 }
 }
 
-auto flash_l1_factory(flash_l1_traits traits, flash_options const& options) -> model_factory
+auto flash_l1_factory(flash_l1_variant variant, flash_options const& options) -> model_factory
 {
-  return
-      [traits, options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-        return std::make_shared<flash_l1>(ctx, desc, traits, options);
-      };
+  return [variant,
+          options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<flash_l1>(ctx, desc, variant, options);
+  };
 }
 
 auto l1_encode_options(
-    flash_l1_traits const& traits,
-    flash_program const&   program,
-    option_bytes const&    wanted) -> std::expected<address, option_refusal>
+    flash_l1_variant const& variant,
+    flash_program const&    program,
+    option_bytes const&     wanted) -> std::expected<address, option_refusal>
 {
   auto const refuse = [](std::string_view field, std::string expected) {
     return std::unexpected{
@@ -1700,7 +1700,7 @@ auto l1_encode_options(
   {
     return base;
   }
-  auto const second = traits.dual_bank ? second_bank_of(program.regions) : std::nullopt;
+  auto const second = variant.dual_bank ? second_bank_of(program.regions) : std::nullopt;
   if(not second)
   {
     return refuse(

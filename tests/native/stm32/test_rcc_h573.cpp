@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "h573_secure_rig.hpp"
 #include "kernel_gate.hpp"
 #include "model_base.hpp"
@@ -41,7 +42,7 @@ using popcorn::testing::stm32_fixture;
 
 constexpr std::uint64_t mhz = 1'000'000;
 
-class listener final : public periph::model
+class listener final : public popcorn::testing::inert_model
 {
 public:
   explicit listener(periph::model_context& ctx) : context{ctx}
@@ -53,36 +54,9 @@ public:
   {
     return context.clock.hz(context.clock.domain(name));
   }
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
-class reset_counter final : public periph::model, public periph::bus_reset_listener
+class reset_counter final : public popcorn::testing::inert_model, public periph::bus_reset_listener
 {
 public:
   int resets{};
@@ -91,33 +65,6 @@ public:
   {
     ++resets;
   }
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 auto with_listener(core::machine_options options = popcorn::testing::stm32_options())
@@ -763,6 +710,48 @@ TEST_CASE("RM0481 11.8.46: every reset kind leaves its own RCC_RSR flag, RMVF cl
   }
 }
 
+TEST_CASE("RM0481 11.8.46: every machine reset kind sets exactly its own RCC_RSR flags after RMVF")
+{
+  struct row
+  {
+    reset_kind                      kind;
+    std::array<std::string_view, 2> flags;
+  };
+  constexpr auto rows  = std::to_array<row>({
+      {reset_kind::power_on,        {"BORRSTF", "PINRSTF"}},
+      {reset_kind::brown_out,       {"BORRSTF", "PINRSTF"}},
+      {reset_kind::pin,             {"PINRSTF", {}}       },
+      {reset_kind::software,        {"SFTRSTF", {}}       },
+      {reset_kind::watchdog,        {"IWDGRSTF", {}}      },
+      {reset_kind::window_watchdog, {"WWDGRSTF", {}}      },
+      {reset_kind::low_power,       {"LPWRRSTF", {}}      },
+      {reset_kind::option_load,     {}                    },
+  });
+  constexpr auto names = std::to_array<std::string_view>(
+      {"BORRSTF", "PINRSTF", "SFTRSTF", "IWDGRSTF", "WWDGRSTF", "LPWRRSTF"});
+  for(auto const& [kind, flags] : rows)
+  {
+    CAPTURE(static_cast<int>(kind));
+    auto f = idle_fixture();
+    write(f, "RCC_RSR", peek(f, "RCC_RSR") | lsb_of("RCC_RSR", "RMVF"));
+    f.target->reset(kind);
+    for(auto const name : names)
+    {
+      CAPTURE(name);
+      CHECK(f.field("RCC", "RCC_RSR", name) == (name == flags[0] or name == flags[1] ? 1 : 0));
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0481 11.8.46: the RCC_RSR reset value holds the flags of the power_on row, BORRSTF and "
+    "PINRSTF")
+{
+  auto f = idle_fixture();
+  CHECK(f.field("RCC", "RCC_RSR", "BORRSTF") == 1);
+  CHECK(f.field("RCC", "RCC_RSR", "PINRSTF") == 1);
+}
+
 TEST_CASE("RM0481 11.8.1: the oscillator driving SYSCLK stays on, with no log record")
 {
   auto                          f = idle_fixture();
@@ -1177,6 +1166,45 @@ TEST_CASE(
     r.write("RCC", reg, r.peek("RCC", reg) & ~bits, false);
     CHECK((r.peek("RCC", reg) & bits) == 0);
   }
+}
+
+TEST_CASE("RM0481: RCC_PRIVCFGR needs a privileged access and its SPRIV bit a Secure one")
+{
+  popcorn::testing::h573_secure_rig const r;
+  using popcorn::bus_attrs;
+  using popcorn::initiator;
+  constexpr bus_attrs secure_priv{.by = initiator::cpu, .secure = true, .privileged = true};
+  constexpr bus_attrs nonsecure_priv{.by = initiator::cpu, .secure = false, .privileged = true};
+  constexpr bus_attrs nonsecure_unpriv{.by = initiator::cpu, .secure = false, .privileged = false};
+  r.write_as("RCC", "RCC_PRIVCFGR", 0x3, nonsecure_unpriv);
+  CHECK(r.peek("RCC", "RCC_PRIVCFGR") == 0);
+  r.write_as("RCC", "RCC_PRIVCFGR", 0x3, nonsecure_priv);
+  CHECK(r.peek("RCC", "RCC_PRIVCFGR") == 0x2);
+  r.write_as("RCC", "RCC_PRIVCFGR", 0x3, secure_priv);
+  CHECK(r.peek("RCC", "RCC_PRIVCFGR") == 0x3);
+}
+
+TEST_CASE("RM0481: RCC_SECCFGR is privileged with SPRIV, a Non-secure write raises RCCF")
+{
+  popcorn::testing::h573_secure_rig const r;
+  using popcorn::bus_attrs;
+  using popcorn::initiator;
+  constexpr bus_attrs secure_priv{.by = initiator::cpu, .secure = true, .privileged = true};
+  constexpr bus_attrs secure_unpriv{.by = initiator::cpu, .secure = true, .privileged = false};
+  constexpr bus_attrs nonsecure_priv{.by = initiator::cpu, .secure = false, .privileged = true};
+  auto const          bits = std::uint32_t{1};
+  CHECK(r.read_as("RCC", "RCC_SECCFGR", nonsecure_priv) == 0);
+  CHECK_FALSE(r.illegal_flag("RCCF"));
+  r.write_as("RCC", "RCC_SECCFGR", bits, secure_unpriv);
+  CHECK(r.peek("RCC", "RCC_SECCFGR") == bits);
+  r.write_as("RCC", "RCC_SECCFGR", 0, secure_unpriv);
+  r.write_as("RCC", "RCC_PRIVCFGR", 0x1, secure_priv);
+  r.write_as("RCC", "RCC_SECCFGR", bits, secure_unpriv);
+  CHECK(r.peek("RCC", "RCC_SECCFGR") == 0);
+  CHECK_FALSE(r.illegal_flag("RCCF"));
+  r.write_as("RCC", "RCC_SECCFGR", bits, nonsecure_priv);
+  CHECK(r.peek("RCC", "RCC_SECCFGR") == 0);
+  CHECK(r.illegal_flag("RCCF"));
 }
 
 TEST_CASE("an H573 description without RCC_CR.HSEEXT builds at TZEN=0 and throws at TZEN=1")

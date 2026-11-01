@@ -3,19 +3,15 @@
 import hashlib
 import json
 import os
-from dataclasses import fields
 from pathlib import Path
 
-from popcorn.stm32.description._binder import check_bounds, dump_json
+from popcorn.stm32.description._binder import SCHEMA_VERSION, check_bounds, dump_json
 from popcorn.stm32.description._builder import build_description
-from popcorn.stm32.description._model import PartDescription
 from popcorn.stm32.description._sources import (
     compute_source_digests,
     find_sources,
     generator_string,
 )
-
-_SCHEMA_VERSION = next(f.default for f in fields(PartDescription) if f.name == "schema_version")
 
 
 def default_cache_dir() -> Path:
@@ -29,7 +25,7 @@ def cache_key(part: str, core: str | None, generator: str, digests: dict[str, st
     payload = {
         "part": part,
         "core": core,
-        "schema_version": _SCHEMA_VERSION,
+        "schema_version": SCHEMA_VERSION,
         "generator": generator,
         "sources": digests,
     }

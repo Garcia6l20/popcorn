@@ -2105,6 +2105,62 @@ TEST_CASE("a stamp posted to an idle free run applies exactly at its time")
   CHECK(h.now() == t);
 }
 
+TEST_CASE("a throwing stamp fails its own future and the next stamp at its time applies")
+{
+  hosted     h{idle_forever()};
+  auto const start  = h.now();
+  auto const t      = vtime{start.ps + 1'000'000'000};
+  auto const thrown = h.post([](core::machine&) { throw test_failure{"stamp"}; }, t);
+  auto const next   = h.post([](core::machine&) {}, t);
+  auto const got    = h.run({.until_time = vtime{start.ps + 2'000'000'000}}).get();
+  CHECK(got.stopped.reason == stop_reason::time);
+  CHECK_THROWS_AS(std::ignore = thrown.get(), test_failure);
+  CHECK(next.get() == t);
+}
+
+TEST_CASE("a throwing command mailed to a free run fails its own future and the next one runs")
+{
+  hosted     h{idle_forever()};
+  auto const start = h.now();
+  h.start();
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  auto const [thrown, next] = [&h] {
+    auto held = h.on->lock();
+    return std::pair{
+        h.on->post(held, 0, [](core::machine&) { throw test_failure{"mail"}; }),
+        h.on->post(held, 0, [](core::machine&) {})};
+  }();
+  CHECK_THROWS_AS(std::ignore = thrown.get(), test_failure);
+  CHECK(next.get() >= start);
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  CHECK_FALSE(h.on->halt(0).has_value());
+}
+
+TEST_CASE("a stamp owns the engine, so access inside it runs inline")
+{
+  hosted     h{idle_forever()};
+  auto const start = h.now();
+  auto const t     = vtime{start.ps + 1'000'000'000};
+  auto       seen  = std::make_shared<std::optional<vtime>>();
+  auto const stamp = h.post([&h, seen](core::machine&) { *seen = h.now(); }, t);
+  std::ignore      = h.run({.until_time = vtime{start.ps + 2'000'000'000}}).get();
+  CHECK(stamp.get() == t);
+  CHECK(*seen == t);
+}
+
+TEST_CASE("a command mailed to a free run owns the engine, so access inside it runs inline")
+{
+  hosted h{idle_forever()};
+  auto   seen = std::make_shared<std::optional<vtime>>();
+  h.start();
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  auto const mailed = h.post([&h, seen](core::machine&) { *seen = h.now(); });
+  auto const at     = mailed.get();
+  CHECK(*seen == at);
+  REQUIRE(settles([&] { return h.on->state(0) == core::host_state::idle_wait; }));
+  CHECK_FALSE(h.on->halt(0).has_value());
+}
+
 TEST_CASE("a stamp on a running core lands within one block of its time")
 {
   hosted     h{alu(0)};

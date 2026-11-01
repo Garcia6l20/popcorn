@@ -1,6 +1,8 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/periph/stm32/uart_wire.hpp>
 
+#include "link_medium.hpp"
+
 #include <reflex/serde/bson.hpp>
 
 #include <algorithm>
@@ -16,8 +18,6 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
-
 auto half_bits(std::uint32_t word, std::uint32_t half_stops) -> std::uint64_t
 {
   return 2 * (1 + std::uint64_t{word}) + half_stops;
@@ -90,15 +90,7 @@ auto inside(detail::line_cut const& cut, core::sys_time at) -> bool
   return cut.start <= at and at < cut.end;
 }
 
-auto earliest(std::optional<core::link_fault> kept, std::optional<core::link_fault> found)
-    -> std::optional<core::link_fault>
-{
-  if(not kept or (found and found->at < kept->at))
-  {
-    return found;
-  }
-  return kept;
-}
+using detail::earliest;
 }
 
 auto line_shape::frame_ps() const noexcept -> std::uint64_t

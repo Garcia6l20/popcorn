@@ -1,4 +1,5 @@
 #include "../../../native/src/core/machine_impl.hpp"
+#include "../support/inert_model.hpp"
 #include "gtzc.hpp"
 #include "stm32_fixture.hpp"
 
@@ -47,18 +48,10 @@ constexpr bus_attrs secure_unpriv{.by = initiator::cpu, .secure = true, .privile
 constexpr bus_attrs nonsecure_priv{.by = initiator::cpu, .secure = false, .privileged = true};
 constexpr bus_attrs nonsecure_unpriv{.by = initiator::cpu, .secure = false, .privileged = false};
 
-class probe final : public periph::model
+class probe final : public popcorn::testing::inert_model
 {
 public:
   explicit probe(periph::model_context& ctx) : ctx_{ctx}
-  {}
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-
-  void reset(periph::register_file&, popcorn::reset_kind) override
   {}
 
   auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
@@ -66,26 +59,6 @@ public:
   {
     return 0;
   }
-
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-
-  void save(std::vector<std::byte>&) const override
-  {}
-
-  void load(std::span<std::byte const>) override
-  {}
 
   [[nodiscard]] auto services() const -> core::machine_services&
   {
@@ -2324,5 +2297,43 @@ TEST_CASE("the GTZC memory windows leave out a bit_band region, the target SRAM 
   REQUIRE(r.bus->services().write(0x2000'0000, 4, 1, secure_priv).has_value());
   CHECK(r.bus->services().read(0x2200'0000, 4, nonsecure_priv) == 0u);
   CHECK(r.bus->services().read(0x2200'0000, 4, secure_priv) == 1u);
+}
+
+TEST_CASE("gap_extent spans from the nearest window below to the byte before the nearest above")
+{
+  struct window
+  {
+    address       start;
+    std::uint32_t size;
+  };
+  auto const ascending = std::array<window, 2>{
+      window{0x1000, 0x1000},
+      window{0x4000, 0x1000}
+  };
+  auto const descending = std::array<window, 2>{
+      window{0x4000, 0x1000},
+      window{0x1000, 0x1000}
+  };
+  for(auto const& windows : {ascending, descending})
+  {
+    auto const between = stm32::gap_extent(windows, 0x3000);
+    CHECK(between.first == 0x2000);
+    CHECK(between.last == 0x3fff);
+    auto const at_end = stm32::gap_extent(windows, 0x2000);
+    CHECK(at_end.first == 0x2000);
+    CHECK(at_end.last == 0x3fff);
+    auto const before = stm32::gap_extent(windows, 0x100);
+    CHECK(before.first == 0);
+    CHECK(before.last == 0xfff);
+    auto const after = stm32::gap_extent(windows, 0x9000);
+    CHECK(after.first == 0x5000);
+    CHECK(after.last == 0xffff'ffff);
+  }
+  auto const top = std::array<window, 1>{
+      window{0xffff'0000, 0x1'0000}
+  };
+  auto const below = stm32::gap_extent(top, 0x1000);
+  CHECK(below.first == 0);
+  CHECK(below.last == 0xfffe'ffff);
 }
 }

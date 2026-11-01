@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "i2c_link_port.hpp"
@@ -271,7 +272,7 @@ private:
   std::uint8_t address_;
 };
 
-class bus_probe final : public periph::model, public stm32::dma_requester
+class bus_probe final : public popcorn::testing::inert_model, public stm32::dma_requester
 {
 public:
   explicit bus_probe(periph::model_context& ctx)
@@ -285,36 +286,11 @@ public:
   void transfer_completed(stm32::dma_controller const&, std::uint32_t) override
   {}
 
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
   void reset(periph::register_file&, popcorn::reset_kind) override
   {
     channel_6.resolve();
     channel_7.resolve();
   }
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 struct rig

@@ -1,6 +1,7 @@
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
+#include "factory_data.hpp"
 #include "model_base.hpp"
 #include "trigger_signal.hpp"
 
@@ -29,7 +30,6 @@ constexpr std::size_t   max_ranks       = 28;
 constexpr std::uint32_t sensor_channel  = 16;
 constexpr std::uint32_t vrefint_channel = 17;
 constexpr std::uint32_t vcomp_channel   = 26;
-constexpr std::uint64_t ps_per_second   = 1'000'000'000'000;
 constexpr std::uint64_t power_up_ps     = 3'500'000;
 constexpr std::uint32_t factory_vdda_mv = 3000;
 constexpr std::uint32_t conversion_end  = 0;
@@ -63,28 +63,6 @@ using wide = unsigned __int128;
 [[nodiscard]] constexpr auto cycles_ps(std::uint64_t cycles, std::uint64_t hz) -> std::uint64_t
 {
   return static_cast<std::uint64_t>((wide{cycles} * ps_per_second + hz - 1u) / hz);
-}
-
-[[nodiscard]] auto calibration_word(part_description const& part, std::uint32_t at)
-    -> std::optional<std::uint16_t>
-{
-  for(auto const& region : part.regions)
-  {
-    if(not region.content)
-    {
-      continue;
-    }
-    for(auto const& piece : *region.content)
-    {
-      auto const first = region.start + piece.offset;
-      if(at >= first and at + 2 <= first + piece.data.size())
-      {
-        auto const index = static_cast<std::size_t>(at - first);
-        return static_cast<std::uint16_t>(piece.data[index] | (piece.data[index + 1] << 8));
-      }
-    }
-  }
-  return std::nullopt;
 }
 
 struct adc_l1_edge
@@ -735,7 +713,7 @@ auto adc_l1_model::readable(std::uint32_t channel) const -> bool
 
 auto adc_l1_model::calibration(std::uint32_t at, std::string_view name) const -> std::uint16_t
 {
-  auto const word = calibration_word(ctx_.part, at);
+  auto const word = factory_halfword(ctx_.part, at);
   if(not word)
   {
     throw config_error(
@@ -1819,26 +1797,15 @@ void adc_l1_model::on_clock_change()
 
 void adc_l1_model::unmodelled(bool& logged, std::string_view name, std::string_view what)
 {
-  if(not std::exchange(logged, true))
-  {
-    warn(name, std::format("{} not modelled", what));
-  }
-  if(ctx_.strict_peripherals)
-  {
-    throw model_error(desc_.name, std::string{name}, reg(name).offset);
-  }
+  warn_once_or_refuse(logged, name, ctx_.strict_peripherals ? reg(name).offset : 0u, [&] {
+    return std::format("{} not modelled", what);
+  });
 }
 
 void adc_l1_model::forbidden(bool& logged, std::string_view name, std::string message)
 {
-  if(not std::exchange(logged, true))
-  {
-    warn(name, std::move(message));
-  }
-  if(ctx_.strict_peripherals)
-  {
-    throw model_error(desc_.name, std::string{name}, reg(name).offset);
-  }
+  warn_once_or_refuse(
+      logged, name, ctx_.strict_peripherals ? reg(name).offset : 0u, std::move(message));
 }
 }
 

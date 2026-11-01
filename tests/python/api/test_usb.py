@@ -1356,6 +1356,139 @@ def test_a_control_wait_ended_before_its_result_gives_the_result_up(
     assert host._link.take_results() == []  # pyright: ignore[reportPrivateUsage]
 
 
+class LinkSpy:
+    def __init__(self, link: Any) -> None:
+        self.link = link
+        self.forgotten: list[int] = []
+        self.taken: list[int] = []
+
+    def forget(self, operation: int) -> None:
+        self.forgotten.append(operation)
+        self.link.forget(operation)
+
+    def take_result(self, operation: int) -> Any:
+        self.taken.append(operation)
+        return self.link.take_result(operation)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.link, name)
+
+
+type RequestRig = tuple[popcorn.Machine, Any, Callable[[], Coroutine[Any, Any, VirtualTime]], str]
+
+
+def cdc_request(u575: popcorn.PartDescription) -> RequestRig:
+    m, host = configured(u575)
+    cdc = host.cdc()
+    return (
+        m,
+        cdc,
+        lambda: cdc.set_line_coding(9600),
+        "the run ended before SET_LINE_CODING 9600 8N1 did",
+    )
+
+
+def hid_request(u575: popcorn.PartDescription) -> RequestRig:
+    m, host = configured(u575)
+    hid = host.hid(0)
+    return (
+        m,
+        hid,
+        lambda: hid.set_feature(b"\x01\x02"),
+        "the run ended before SET_REPORT feature 1 did",
+    )
+
+
+def uac_start_request(u575: popcorn.PartDescription) -> RequestRig:
+    m = audio_machine(u575)
+    audio = m.periph.OTG_FS.host.audio()
+    asyncio.run(audio.wait_ready(for_=ms(200)))
+    return m, audio.mic, lambda: audio.mic.start(), "the run ended before the start did"
+
+
+def uac_set_request(u575: popcorn.PartDescription) -> RequestRig:
+    m = audio_machine(u575)
+    audio = m.periph.OTG_FS.host.audio()
+    asyncio.run(audio.wait_ready(for_=ms(200)))
+    return m, audio, lambda: audio.set_mute(2, 0, True), "the run ended before it did"
+
+
+REQUEST_RIGS = {
+    "cdc": cdc_request,
+    "hid": hid_request,
+    "uac-start": uac_start_request,
+    "uac-set": uac_set_request,
+}
+
+
+@pytest.mark.parametrize("kind", list(REQUEST_RIGS))
+def test_a_request_wait_ended_before_its_result_gives_the_request_up(
+    u575: popcorn.PartDescription, kind: str
+) -> None:
+    m, owner, call, text = REQUEST_RIGS[kind](u575)
+    spy = LinkSpy(owner._link)  # pyright: ignore[reportPrivateUsage]
+    owner._link = spy  # pyright: ignore[reportPrivateUsage]
+    now = m.time
+
+    async def idle(ready: Any, for_: Any, deadline: Any) -> Waited:
+        return Waited(now, None)
+
+    owner._wait = idle  # pyright: ignore[reportPrivateUsage]
+
+    async def scenario() -> None:
+        with pytest.raises(popcorn.EmulationError, match=re.escape(text)):
+            await call()
+        await m.run(for_=ms(20))
+
+    run_bounded(scenario(), HANG)
+    assert len(spy.forgotten) == 1
+    assert owner._pending == set()  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("kind", list(REQUEST_RIGS))
+def test_a_request_returns_the_time_its_wait_stopped_at(
+    u575: popcorn.PartDescription, kind: str
+) -> None:
+    m, owner, call, _ = REQUEST_RIGS[kind](u575)
+    wait = owner._wait  # pyright: ignore[reportPrivateUsage]
+    stops: list[VirtualTime] = []
+
+    async def recording(ready: Any, for_: Any, deadline: Any) -> Waited:
+        waited: Waited = await wait(ready, for_, deadline)
+        stops.append(waited.time)
+        return waited
+
+    owner._wait = recording  # pyright: ignore[reportPrivateUsage]
+    posted = m.time
+    done = run_bounded(call(), HANG)
+    assert stops
+    assert done == stops[-1] and done > posted
+    assert owner._pending == set()  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("kind", list(REQUEST_RIGS))
+def test_a_request_discarded_while_it_waits_takes_no_result_and_is_forgotten(
+    u575: popcorn.PartDescription, kind: str
+) -> None:
+    _, owner, call, text = REQUEST_RIGS[kind](u575)
+    spy = LinkSpy(owner._link)  # pyright: ignore[reportPrivateUsage]
+    owner._link = spy  # pyright: ignore[reportPrivateUsage]
+    wait = owner._wait  # pyright: ignore[reportPrivateUsage]
+
+    async def discarding(ready: Any, for_: Any, deadline: Any) -> Waited:
+        owner.discard()
+        return await wait(ready, for_, deadline)
+
+    owner._wait = discarding  # pyright: ignore[reportPrivateUsage]
+
+    async def scenario() -> None:
+        with pytest.raises(popcorn.EmulationError, match=re.escape(text)):
+            await call()
+
+    run_bounded(scenario(), HANG)
+    assert len(spy.forgotten) == 1
+
+
 class FailOnce(logging.Filter):
     """Raises on the first record it sees, passes the others."""
 
@@ -1501,6 +1634,63 @@ def test_forgetting_on_the_links_of_a_dead_machine_does_nothing(
     cdc.forget(1)
     hid.forget(1)
     assert hid.release_written(1) is None
+
+
+type Orphan = Callable[[Any], Any]
+
+ORPHAN_OPS: dict[str, Orphan] = {
+    "cdc-queued": lambda o: o.cdc.queued(),
+    "cdc-send": lambda o: o.cdc.send(b"x"),
+    "cdc-command-send": lambda o: o.cdc.command_send(b"x"),
+    "cdc-command-line-coding": lambda o: o.cdc.command_set_line_coding(9600, 0, 0, 8),
+    "cdc-line-coding": lambda o: o.cdc.set_line_coding(9600, 0, 0, 8),
+    "cdc-predicate": lambda o: o.cdc.predicate_available(1),
+    "hid-queued": lambda o: o.hid.queued(),
+    "hid-command-write": lambda o: o.hid.command_write(b"\x01\x02"),
+    "hid-command-get-report": lambda o: o.hid.command_get_report(1, 0, 4),
+    "hid-get-report": lambda o: o.hid.get_report(1, 0, 4),
+    "hid-write-claim": lambda o: o.hid.write_claim(),
+    "hid-predicate": lambda o: o.hid.predicate_available(1),
+    "usb-state": lambda o: o.usb.state(),
+    "usb-control": lambda o: o.usb.control(0x80, 6, 0x100, 0, 18, b""),
+    "usb-op-settled": lambda o: o.usb.op_settled(),
+    "usb-op-take-result": lambda o: o.usb.op_take_result(o.ticket),
+    "usb-command-control": lambda o: o.usb.command_control(o.ticket, 0x80, 6, 0x100, 0, 18, b""),
+    "usb-predicate-settled": lambda o: o.usb.predicate_settled(),
+    "usb-predicate-control": lambda o: o.usb.predicate_control_ended(1),
+    "uac-queued": lambda o: o.uac.queued(),
+    "uac-start": lambda o: o.uac.start(False),
+    "uac-command-start": lambda o: o.uac.command_start(False),
+    "uac-stream": lambda o: o.uac.stream(False),
+    "uac-units": lambda o: o.uac.units(),
+    "uac-write": lambda o: o.uac.write([0]),
+    "uac-predicate": lambda o: o.uac.predicate_available(1),
+}
+
+
+class Orphans:
+    def __init__(self, cdc: Any, hid: Any, usb: Any, uac: Any, ticket: Any) -> None:
+        self.cdc, self.hid, self.usb, self.uac, self.ticket = cdc, hid, usb, uac, ticket
+
+
+@pytest.fixture
+def orphans(u575: popcorn.PartDescription) -> Orphans:
+    m, host = configured(u575)
+    usb = usb_link_of(host)
+    cdc, hid, ticket = usb.cdc(0), usb.hid(0), usb.ticket()
+    audio_m = audio_machine(u575)
+    audio_host = audio_m.periph.OTG_FS.host
+    asyncio.run(audio_host.wait_configured(for_=s(2)))
+    uac = usb_link_of(audio_host).audio(0)
+    del m, host, audio_m, audio_host
+    gc.collect()
+    return Orphans(cdc, hid, usb, uac, ticket)
+
+
+@pytest.mark.parametrize("op", ORPHAN_OPS)
+def test_a_usb_link_kept_past_its_machine_refuses_access(orphans: Orphans, op: str) -> None:
+    with pytest.raises(popcorn.ConfigError, match="a USB host whose machine still exists"):
+        ORPHAN_OPS[op](orphans)
 
 
 def test_a_dropped_report_write_leaves_no_result_behind(

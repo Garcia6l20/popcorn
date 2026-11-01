@@ -14,7 +14,6 @@ namespace popcorn::periph::stm32::rtc_calendar
 {
 using wide = unsigned __int128;
 
-inline constexpr std::uint64_t ps_per_second    = 1'000'000'000'000;
 inline constexpr std::uint64_t seconds_per_day  = 86'400;
 inline constexpr std::uint64_t days_per_century = 36'525;
 inline constexpr std::uint32_t first_key        = 0xCA;

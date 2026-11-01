@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "factories.hpp"
 #include "stm32_fixture.hpp"
 #include "variants.hpp"
@@ -54,44 +55,13 @@ constexpr std::uint32_t    rsf_bit      = 1u << 5;
 constexpr std::uint32_t    feb_28       = 0x26'C228;
 constexpr std::uint32_t    march_1      = 0x26'E301;
 
-class bus_probe final : public popcorn::periph::model
+class bus_probe final : public popcorn::testing::inert_model
 {
 public:
   explicit bus_probe(popcorn::periph::model_context& ctx) : context{ctx}
   {}
 
   popcorn::periph::model_context& context;
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 struct rig
@@ -373,6 +343,14 @@ TEST_CASE(
   CHECK(r.read("TR") == 0x00'0000);
   r.run_until(exited + 5 * rtc_cycle + rtc_cycle / 2);
   CHECK(r.read("TR") == 0x00'0001);
+}
+
+TEST_CASE("RM0038 20.3.5: a key write leaves the stored WPR word at zero")
+{
+  rig r;
+  r.start_clock();
+  r.write("WPR", 0xCA);
+  CHECK(r.f->target->peripheral("RTC").peek(r.reg("RTC", "WPR").offset) == 0);
 }
 
 TEST_CASE("RM0038 20.3.5: 0xCA then 0x53 unlocks, the reverse order or a wrong key locks")
@@ -748,6 +726,22 @@ TEST_CASE("with DBG_RTC_STOP a held core stops the calendar until the release")
   r.f->target->hold_core(false);
   r.later(second);
   CHECK(r.read("TR") == 0x00'0001);
+}
+
+TEST_CASE("a reset of a held core after DBG_RTC_STOP is cleared releases the calendar")
+{
+  rig r;
+  r.start_clock();
+  r.later(ms);
+  popcorn::testing::set_debug_freeze(*r.f, "DBG_RTC_STOP", true);
+  r.f->target->hold_core(true);
+  r.later(2 * second);
+  CHECK(r.read("TR") == 0);
+  popcorn::testing::set_debug_freeze(*r.f, "DBG_RTC_STOP", false);
+  r.f->target->reset(reset_kind::software);
+  r.f->set("pc", sym(r.elf, "idle"));
+  r.later(2 * second);
+  CHECK(r.read("TR") == 0x00'0002);
 }
 
 TEST_CASE("Cat.1 has no DBG_RTC_STOP: a held core under strict leaves the calendar counting")

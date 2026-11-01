@@ -590,3 +590,30 @@ TEST_CASE("a kernel change mid-sample keeps the fraction of the PCM sample alrea
   source.clock(last, fast);
   CHECK(source.queued_samples(source.lock()) == 3);
 }
+
+TEST_CASE("a UART queue and a PDM tap lowered to a limit drop their oldest at once")
+{
+  detail::queue_endpoint queue;
+  detail::pdm_queue_tap  tap;
+  for(std::uint16_t at = 0; at < 6; ++at)
+  {
+    queue.transmitted(at, vtime{at}, false);
+    tap.wrote(at, vtime{at}, false, true);
+  }
+  {
+    auto const held = queue.lock();
+    queue.set_limit(held, 2);
+    CHECK(queue.available(held) == 2);
+    CHECK(queue.dropped(held) == 4);
+    auto const kept = queue.take(held, 8);
+    REQUIRE(kept.size() == 2);
+    CHECK(kept.front().data == 4);
+  }
+  auto const held = tap.lock();
+  tap.set_limit(held, 3);
+  CHECK(tap.available(held) == 3);
+  CHECK(tap.dropped(held) == 3);
+  auto const kept = tap.take(held, 8);
+  REQUIRE(kept.size() == 3);
+  CHECK(kept.front().pcm == 3);
+}

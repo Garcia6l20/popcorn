@@ -458,7 +458,8 @@ auto place_of(image::image const& source, image::symbol const& function, image::
   };
 }
 
-void add_functions(group_view const& view, image::image const& source, file_records& out)
+template <typename Body>
+void for_each_function(group_view const& view, image::image const& source, Body body)
 {
   for(auto const& function : source.symbols)
   {
@@ -471,21 +472,30 @@ void add_functions(group_view const& view, image::image const& source, file_reco
     {
       continue;
     }
-    if(auto const place = place_of(source, function, *code))
-    {
-      auto const hits          = view.entries(function.value);
-      auto&      record        = out[source.files.at(place->file)];
-      auto const [held, fresh] = record.functions.try_emplace(
-          function.name, function_count{.line = place->line, .end = place->end, .hits = hits});
-      if(not fresh)
-      {
-        held->second.hits = add(held->second.hits, hits);
-        held->second.end  = std::max(held->second.end, place->end);
-      }
-      auto& entered = record.lines[place->line];
-      entered       = std::max(entered, hits);
-    }
+    body(function, *code);
   }
+}
+
+void add_functions(group_view const& view, image::image const& source, file_records& out)
+{
+  for_each_function(view, source, [&](image::symbol const& function, image::segment const& code) {
+    auto const place = place_of(source, function, code);
+    if(not place)
+    {
+      return;
+    }
+    auto const hits          = view.entries(function.value);
+    auto&      record        = out[source.files.at(place->file)];
+    auto const [held, fresh] = record.functions.try_emplace(
+        function.name, function_count{.line = place->line, .end = place->end, .hits = hits});
+    if(not fresh)
+    {
+      held->second.hits = add(held->second.hits, hits);
+      held->second.end  = std::max(held->second.end, place->end);
+    }
+    auto& entered = record.lines[place->line];
+    entered       = std::max(entered, hits);
+  });
 }
 
 void add_branches(
@@ -494,20 +504,10 @@ void add_branches(
     arch::code_analysis const& analysis,
     file_records&              out)
 {
-  for(auto const& function : source.symbols)
-  {
-    if(function.kind != image::symbol_kind::function or not view.in_scope(function.value))
-    {
-      continue;
-    }
-    auto const* code = executable_segment(source, function.value);
-    if(code == nullptr)
-    {
-      continue;
-    }
+  for_each_function(view, source, [&](image::symbol const& function, image::segment const& code) {
     auto const    low  = function.value;
-    auto const    high = function_end(source, function, *code);
-    branch_finder finder{*code, low, high, analysis};
+    auto const    high = function_end(source, function, code);
+    branch_finder finder{code, low, high, analysis};
     finder.walk(low, true);
     auto const first_row = std::ranges::lower_bound(source.lines, low, {}, &image::line_row::addr);
     auto const last_row  = std::ranges::lower_bound(source.lines, high, {}, &image::line_row::addr);
@@ -536,7 +536,7 @@ void add_branches(
         covered                        = std::max(covered, view.instructions(at));
       }
     }
-  }
+  });
 }
 
 auto merge_optional(std::optional<count> into, std::optional<count> from) -> std::optional<count>

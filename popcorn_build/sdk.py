@@ -14,7 +14,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-_INCLUDE = re.compile(r'^\s*#\s*include\s*([<"])([^>"]+)[>"]', re.MULTILINE)
+INCLUDE = re.compile(r'^\s*#\s*include\s*([<"])([^>"]+)[>"]', re.MULTILINE)
 
 _BLANKS = " \t\r\f\v"
 
@@ -80,7 +80,7 @@ def _reflex_closure(roots: Sequence[Path], include_dirs: Sequence[Path]) -> set[
     pending = list(roots)
     while pending:
         source = pending.pop()
-        for kind, name in _INCLUDE.findall(source.read_text()):
+        for kind, name in INCLUDE.findall(source.read_text()):
             candidates = [source.parent / name] if kind == '"' else []
             if name.startswith("reflex/"):
                 candidates.extend(directory / name for directory in include_dirs)

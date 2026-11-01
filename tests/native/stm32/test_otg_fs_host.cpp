@@ -184,16 +184,12 @@ struct rig
 
   [[nodiscard]] auto now() const -> vtime
   {
-    return f->target->virtual_clock().time();
+    return f->now();
   }
 
   void run_for(std::uint64_t ps) const
   {
-    REQUIRE(
-        f->run_to_stop(
-             {.max_instructions = icount{4'000'000'000}, .until_time = vtime{now().ps + ps}})
-            .reason
-        == stop_reason::time);
+    f->run_for(ps, icount{4'000'000'000});
   }
 
   auto control(usb::setup_packet setup) const -> usb::transfer_result

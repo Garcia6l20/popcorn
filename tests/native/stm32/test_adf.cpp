@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "dfilter_chain.hpp"
 #include "dma.hpp"
 #include "gpdma_requests.hpp"
@@ -45,7 +46,7 @@ constexpr std::uint32_t lpdma_adf       = 10;
 constexpr std::uint32_t sad_level_flag  = 1u << 13;
 constexpr std::uint32_t sad_detect_flag = 1u << 12;
 
-class request_probe final : public popcorn::periph::model, public stm32::dma_controller
+class request_probe final : public popcorn::testing::inert_model, public stm32::dma_controller
 {
 public:
   explicit request_probe(std::span<stm32::gpdma_request const> table) : table_{table}
@@ -72,37 +73,6 @@ public:
     }
     return found->request;
   }
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 
 private:
   std::span<stm32::gpdma_request const> table_;

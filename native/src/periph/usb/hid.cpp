@@ -1,5 +1,7 @@
 #include <popcorn/periph/usb_hid.hpp>
 
+#include "descriptors.hpp"
+
 #include <reflex/enum.hpp>
 #include <reflex/serde/bson.hpp>
 
@@ -37,18 +39,12 @@ constexpr std::size_t   max_stage              = 0xffff;
 auto find_descriptor(std::span<std::uint8_t const> extra, std::uint8_t type)
     -> std::optional<std::span<std::uint8_t const>>
 {
-  for(std::size_t at = 0; at + 2 <= extra.size();)
+  for(auto const descriptor : descriptors(extra))
   {
-    auto const length = std::size_t{extra[at]};
-    if(length < 2 or at + length > extra.size())
+    if(descriptor[1] == type)
     {
-      break;
+      return descriptor;
     }
-    if(extra[at + 1] == type)
-    {
-      return extra.subspan(at, length);
-    }
-    at += length;
   }
   return std::nullopt;
 }
@@ -455,16 +451,11 @@ void hid_channel::discard()
   results.clear();
 }
 
-auto hid_hub::channel(core::link_guard const&, std::size_t function) -> hid_channel&
-{
-  return channels_[function];
-}
-
 void hid_hub::save(std::vector<std::byte>& out) const
 {
   auto const held = lock();
   hub_state  saved;
-  for(auto const& [function, channel] : channels_)
+  for(auto const& [function, channel] : channels(held))
   {
     if(not channel.interface and (not channel.out.empty() or not channel.report_descriptor.empty()))
     {
@@ -480,7 +471,7 @@ void hid_hub::save(std::vector<std::byte>& out) const
 void hid_hub::load(std::span<std::byte const> in)
 {
   auto const held = lock();
-  for(auto& channel : channels_ | std::views::values)
+  for(auto& channel : channels(held) | std::views::values)
   {
     channel.out.clear();
     channel.report_descriptor.clear();
@@ -495,15 +486,6 @@ void hid_hub::load(std::span<std::byte const> in)
     auto& restored = channel(held, static_cast<std::size_t>(pending.function));
     restore_writes(restored, pending.writes);
     restored.report_descriptor = as_octets(pending.descriptor);
-  }
-}
-
-void hid_hub::discard()
-{
-  auto const held = lock();
-  for(auto& channel : channels_ | std::views::values)
-  {
-    channel.discard();
   }
 }
 

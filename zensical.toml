@@ -50,6 +50,7 @@ nav = [
     "dev/systems.md",
     "dev/threads.md",
     "dev/peripherals.md",
+    "dev/part_loading.md",
     "dev/descriptions.md",
     "dev/images.md",
     "dev/build.md",

@@ -74,3 +74,22 @@ def test_xdg_cache_home_honoured(
     assert xdg in path.parents
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["part"] == "STM32U575QGIx"
+
+
+def test_the_cache_key_and_the_dump_carry_the_models_schema_version() -> None:
+    import hashlib
+    from dataclasses import fields
+
+    from popcorn.stm32.description import _binder
+
+    default = next(f.default for f in fields(PartDescription) if f.name == "schema_version")
+    assert default == _binder.SCHEMA_VERSION
+    payload = {
+        "part": "P",
+        "core": None,
+        "schema_version": default,
+        "generator": "g",
+        "sources": {"a": "b"},
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    assert cache_key("P", None, "g", {"a": "b"}) == hashlib.sha256(canonical.encode()).hexdigest()

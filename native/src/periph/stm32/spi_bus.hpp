@@ -7,18 +7,23 @@
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/periph/model.hpp>
 #include <popcorn/periph/spi.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 #include <popcorn/periph/stm32/spi.hpp>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <functional>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace popcorn::periph::stm32
@@ -48,16 +53,6 @@ struct spi_heard_frame
   /** @brief Machine time since reset of the frame end. */
   std::uint64_t at_ps;
 };
-
-/** @brief @p name with ASCII capitals lowered, the SPI clock and DMA request names. */
-[[nodiscard]] inline auto spi_lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(out, out.begin(), [](unsigned char c) {
-    return static_cast<char>(c >= 'A' and c <= 'Z' ? c - 'A' + 'a' : c);
-  });
-  return out;
-}
 
 /** @brief The low @p bits bits set, every bit from 32. */
 [[nodiscard]] constexpr auto spi_mask(std::uint32_t bits) noexcept -> std::uint32_t
@@ -101,6 +96,7 @@ static_assert(spi_reversed(0x1234'5678, 32) == 0x1E6A'2C48);
  * @param frame_ps Length of one frame.
  * @param bits Frame size.
  * @param frames The frames in wire order.
+ * @param before_queue Called after the start-time check and before the queued frames are counted.
  * @return Start of the transfer: the later of @p start and the end of the queued transfers.
  * @throws config_error When the queue would hold more than spi_controller_port::max_frames.
  * @throws std::invalid_argument As spi_controller_port::transfer() states.
@@ -113,7 +109,8 @@ inline auto queue_host_transfer(
     vtime                           start,
     std::uint64_t                   frame_ps,
     std::uint8_t                    bits,
-    std::span<std::uint32_t const>  frames) -> vtime
+    std::span<std::uint32_t const>  frames,
+    std::function_ref<void()>       before_queue) -> vtime
 {
   constexpr auto max_frames = spi_controller_port::max_frames;
   if(frame_ps == 0 or bits < 4 or bits > 32 or frames.empty() or frames.size() > max_frames)
@@ -132,6 +129,7 @@ inline auto queue_host_transfer(
         std::format(
             "an SPI transfer at {} ps starts before the machine time {} ps", start.ps, now_ps));
   }
+  before_queue();
   auto queued = std::size_t{};
   auto from   = start.ps;
   for(auto const& queued_transfer : queue)
@@ -161,4 +159,185 @@ inline auto queue_host_transfer(
   });
   return vtime{from};
 }
+
+/** @brief queue_host_transfer() with no step before the queued frames are counted. */
+inline auto queue_host_transfer(
+    std::vector<spi_host_transfer>& queue,
+    std::string_view                part,
+    std::string_view                instance,
+    std::uint64_t                   now_ps,
+    vtime                           start,
+    std::uint64_t                   frame_ps,
+    std::uint8_t                    bits,
+    std::span<std::uint32_t const>  frames) -> vtime
+{
+  return queue_host_transfer(queue, part, instance, now_ps, start, frame_ps, bits, frames, [] {});
+}
+
+/**
+ * @brief Records a mode refusal when @p declared differs from @p bus_mode.
+ * @param mismatched Refusals the model raises at the next check.
+ * @param bus_mode CPOL and CPHA the firmware set, `CPOL << 1 | CPHA`.
+ * @param declared Mode a device or controller declares.
+ * @param who Returns the name of the one that declares it.
+ */
+template <typename Who>
+void spi_check_mode(
+    std::vector<std::string>&   mismatched,
+    std::uint8_t                bus_mode,
+    std::optional<std::uint8_t> declared,
+    Who&&                       who)
+{
+  if(declared and *declared != bus_mode)
+  {
+    mismatched.push_back(std::format("the SPI mode {} {} declares", *declared, who()));
+  }
+}
+
+/**
+ * @brief The devices attached to one SPI instance: their chip select subscriptions, mode checks
+ *        and snapshot. The instance owns it as a direct member and keeps its address.
+ * @tparam State The model's serialized state, holding `selected`, `mode_checked` and `devices`.
+ */
+template <typename State> class spi_attachments
+{
+public:
+  /**
+   * @param state The model's state, which outlives this object.
+   * @param attached The devices, in board order.
+   */
+  spi_attachments(State& state, std::vector<spi_attachment> attached)
+      : state_{&state}, attached_{std::move(attached)}
+  {}
+
+  /** @brief Not copyable, the chip select listeners hold its address. */
+  spi_attachments(spi_attachments const&) = delete;
+  /** @brief Not assignable. */
+  auto operator=(spi_attachments const&) -> spi_attachments& = delete;
+
+  /** @brief Number of devices. */
+  [[nodiscard]] auto size() const -> std::size_t
+  {
+    return attached_.size();
+  }
+
+  /** @brief True when no device is attached. */
+  [[nodiscard]] auto empty() const -> bool
+  {
+    return attached_.empty();
+  }
+
+  /** @brief The device at @p index. */
+  [[nodiscard]] auto operator[](std::size_t index) const -> spi_attachment const&
+  {
+    return attached_[index];
+  }
+
+  /** @brief First device. */
+  [[nodiscard]] auto begin() const
+  {
+    return attached_.begin();
+  }
+
+  /** @brief End of the devices. */
+  [[nodiscard]] auto end() const
+  {
+    return attached_.end();
+  }
+
+  /**
+   * @brief Listens to the chip select pin of every device that has one. Runs once.
+   * @param ctx Context of the owning model, which outlives this object.
+   * @param instance SPI instance name for configuration errors.
+   * @throws config_error When a chip select names no GPIO port.
+   */
+  void subscribe(model_context& ctx, std::string_view instance)
+  {
+    if(std::exchange(subscribed_, true))
+    {
+      return;
+    }
+    for(std::size_t index = 0; index < attached_.size(); ++index)
+    {
+      auto const& attached = attached_[index];
+      if(not attached.cs_pin)
+      {
+        continue;
+      }
+      auto* const port = dynamic_cast<gpio_port*>(ctx.peers.find(attached.cs_port));
+      if(port == nullptr)
+      {
+        throw config_error(
+            ctx.part.part, 0, std::format("board.spi.{}.cs_port", instance),
+            std::format("a GPIO port the chip select of a {} device names", instance));
+      }
+      subscriptions_.push_back(port->on_change([this, &ctx, index](std::uint8_t pin, bool level) {
+        auto const& at = attached_[index];
+        if(pin != *at.cs_pin or index >= state_->selected.size())
+        {
+          return;
+        }
+        auto const selected = level ? 0 : 1;
+        if(state_->selected[index] != selected)
+        {
+          state_->selected[index]     = static_cast<std::uint8_t>(selected);
+          state_->mode_checked[index] = 0;
+          at.device->select(selected != 0, ctx.clock.since_power_on());
+        }
+      }));
+    }
+  }
+
+  /**
+   * @brief Checks the mode the device at @p index declares, once per selection.
+   * @param index Device index.
+   * @param bus_mode CPOL and CPHA the firmware set, `CPOL << 1 | CPHA`.
+   * @param mismatched Receives the refusal.
+   */
+  void check_device(std::size_t index, std::uint8_t bus_mode, std::vector<std::string>& mismatched)
+  {
+    if(std::exchange(state_->mode_checked[index], 1) != 0)
+    {
+      return;
+    }
+    auto const& attached = attached_[index];
+    spi_check_mode(mismatched, bus_mode, attached.device->mode(), [&] {
+      return std::format("the device on {}", spi_pin_name(attached));
+    });
+  }
+
+  /** @brief Replaces @p out with the saved state of every device. */
+  void save_devices(std::vector<std::vector<std::byte>>& out) const
+  {
+    out.clear();
+    for(auto const& attached : attached_)
+    {
+      attached.device->save(out.emplace_back());
+    }
+  }
+
+  /**
+   * @brief Restores the devices from the state's `devices`, sizes the selection vectors and
+   *        subscribes.
+   * @param ctx Context of the owning model.
+   * @param instance SPI instance name for configuration errors.
+   */
+  void load_devices(model_context& ctx, std::string_view instance)
+  {
+    for(std::size_t index = 0; index < attached_.size() and index < state_->devices.size(); ++index)
+    {
+      attached_[index].device->load(state_->devices[index]);
+    }
+    state_->devices.clear();
+    state_->selected.resize(attached_.size());
+    state_->mode_checked.resize(attached_.size());
+    subscribe(ctx, instance);
+  }
+
+private:
+  State*                      state_;
+  std::vector<spi_attachment> attached_;
+  std::vector<subscription>   subscriptions_;
+  bool                        subscribed_{};
+};
 }

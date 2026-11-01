@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "dma.hpp"
 #include "stm32_fixture.hpp"
 
@@ -47,7 +48,7 @@ constexpr std::uint32_t adf_irq      = 112;
 constexpr std::uint32_t sec_offset   = 0x1000'0000;
 constexpr std::uint32_t flt0_request = 92;
 
-class request_probe final : public popcorn::periph::model, public stm32::dma_controller
+class request_probe final : public popcorn::testing::inert_model, public stm32::dma_controller
 {
 public:
   std::map<std::uint32_t, std::vector<bool>> levels;
@@ -70,37 +71,6 @@ public:
     }
     return std::nullopt;
   }
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 auto options_for(bool strict, bool probe = false) -> core::machine_options

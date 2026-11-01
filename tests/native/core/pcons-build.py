@@ -4,7 +4,7 @@ from pcons import context
 
 from popcorn_build.config import project_dir
 from popcorn_build.firmware import firmware
-from popcorn_build.testing import add_doctest, alias_bare_name
+from popcorn_build.testing import add_doctest, alias_bare_name, depend_on_generated, m33_variants
 
 project = context.current_project
 here = Path(__file__).resolve().parent
@@ -75,7 +75,7 @@ core_firmware = {
 }
 m33_env = {
     "POPCORN_M33_DESC": str(core_data / "m33.json"),
-    "POPCORN_M33_CODE_ALIAS_DESC": str(core_data / "m33_code_alias.json"),
+    "POPCORN_M33_CODE_ALIAS_DESC": str(m33_variants()["m33_code_alias"]),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in core_firmware.items()},
 }
 basic_firmware = core_firmware["basic"][1]
@@ -118,6 +118,7 @@ bench_run_loop.private.defines.extend(
     f'{variable}="{value}"' for variable, value in m33_env.items()
 )
 alias_bare_name(bench_run_loop)
+depend_on_generated(bench_run_loop, m33_env.values())
 for _, target in core_firmware.values():
     if target is not None:
         test_run_loop.depends(target)
@@ -135,6 +136,7 @@ bench_mmio.link(test_support_static)
 bench_mmio.link(core_static)
 bench_mmio.private.defines.extend(f'{variable}="{value}"' for variable, value in m33_env.items())
 alias_bare_name(bench_mmio)
+depend_on_generated(bench_mmio, m33_env.values())
 for _, target in core_firmware.values():
     if target is not None:
         bench_mmio.depends(target)
@@ -154,6 +156,7 @@ bench_snapshot.private.defines.extend(
     f'{variable}="{value}"' for variable, value in m33_env.items()
 )
 alias_bare_name(bench_snapshot)
+depend_on_generated(bench_snapshot, m33_env.values())
 for _, target in core_firmware.values():
     if target is not None:
         test_machine_snapshot.depends(target)
@@ -223,6 +226,7 @@ bench_window_barrier.private.defines.extend(
     f'{variable}="{value}"' for variable, value in m33_env.items()
 )
 alias_bare_name(bench_window_barrier)
+depend_on_generated(bench_window_barrier, m33_env.values())
 for _, target in core_firmware.values():
     if target is not None:
         bench_window_barrier.depends(target)

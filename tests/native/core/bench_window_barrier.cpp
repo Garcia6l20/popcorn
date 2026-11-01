@@ -1,3 +1,5 @@
+#include "../support/bench.hpp"
+
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/window_barrier.hpp>
@@ -12,7 +14,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
-#include <fstream>
 #include <map>
 #include <memory>
 #include <print>
@@ -26,6 +27,8 @@ namespace
 {
 namespace core = popcorn::core;
 using popcorn::icount;
+using popcorn::testing::bench::first_line;
+using popcorn::testing::bench::median;
 using clock_type = std::chrono::steady_clock;
 
 constexpr int members = 3;
@@ -147,21 +150,6 @@ auto run_barrier(work_size size, int warmup) -> outcome
     out.executed.push_back(m.executed);
   }
   return out;
-}
-
-auto median(std::vector<double> values) -> double
-{
-  std::ranges::sort(values);
-  auto const n = values.size();
-  return n % 2 != 0 ? values[n / 2] : (values[n / 2 - 1] + values[n / 2]) / 2;
-}
-
-auto first_line(char const* path) -> std::string
-{
-  std::ifstream file{path};
-  std::string   line;
-  std::getline(file, line);
-  return line;
 }
 
 void env_line()

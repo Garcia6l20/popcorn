@@ -455,34 +455,21 @@ struct u5_rcc
     return ppre_divider(in.read(prescaler)) == 1 ? 1 : 2;
   }
 
-  /**
-   * @brief Flags of `RCC_CSR` a reset of @p kind sets, RM0456 11.8.50.
-   * @param kind Kind of the reset.
+  /** @brief Flags of `RCC_CSR` each kind of reset sets, one row per `reset_kind`, RM0456 11.8.50.
    */
-  static constexpr auto reset_flags_of(reset_kind kind) noexcept -> std::array<std::string_view, 2>
-  {
-    switch(kind)
-    {
-      case reset_kind::power_on:
-      case reset_kind::brown_out:
-        return {"BORRSTF", "PINRSTF"};
-      case reset_kind::pin:
-        return {"PINRSTF", {}};
-      case reset_kind::software:
-        return {"SFTRSTF", {}};
-      case reset_kind::watchdog:
-        return {"IWDGRSTF", {}};
-      case reset_kind::window_watchdog:
-        return {"WWDGRSTF", {}};
-      case reset_kind::low_power:
-        return {"LPWRRSTF", {}};
-      case reset_kind::option_load:
-        return {"OBLRSTF", {}};
-      case reset_kind::peripheral:
-        return {};
-    }
-    return {};
-  }
+  static constexpr auto reset_flag_rows = std::to_array<reset_flag_row>({
+      {reset_kind::power_on,        {"BORRSTF", "PINRSTF"}},
+      {reset_kind::brown_out,       {"BORRSTF", "PINRSTF"}},
+      {reset_kind::pin,             {"PINRSTF", {}}       },
+      {reset_kind::software,        {"SFTRSTF", {}}       },
+      {reset_kind::watchdog,        {"IWDGRSTF", {}}      },
+      {reset_kind::window_watchdog, {"WWDGRSTF", {}}      },
+      {reset_kind::low_power,       {"LPWRRSTF", {}}      },
+      {reset_kind::option_load,     {"OBLRSTF", {}}       },
+      {reset_kind::peripheral,      {}                    },
+  });
+
+  static_assert(covers_every_reset_kind(reset_flag_rows));
 };
 }
 }

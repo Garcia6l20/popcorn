@@ -11,13 +11,13 @@ from pathlib import Path
 
 import popcorn
 import pytest
+from derived_data import model_json
 from popcorn.board import UsbHost, UsbHostOptions
 from popcorn.units import ms, s
 
 from .conftest import DRIVER_ELF, M33_JSON, ROOT, Machines
 from .models_example import Timer
 
-MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
 MODEL_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "model.elf"
 USB_ELF = ROOT / "examples" / "stm32u575" / "usb_cdc" / "prebuilt" / "usb_cdc.elf"
 MDF1_SITF0CR = 0x4002_5080
@@ -87,7 +87,7 @@ def unknown_model_peripheral(_: Path, __: Machines) -> object:
 
 def strict_unmodelled(_: Path, __: Machines) -> object:
     m = popcorn.Machine(
-        popcorn.load_description(MODEL_JSON),
+        popcorn.load_description(model_json()),
         image=popcorn.Image.elf(MODEL_ELF),
         strict_peripherals=True,
     )

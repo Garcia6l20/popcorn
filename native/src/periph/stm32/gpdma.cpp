@@ -27,10 +27,9 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::size_t   max_channels  = 16;
-constexpr std::size_t   requests      = 256;
-constexpr std::uint32_t burst_done    = 0;
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
+constexpr std::size_t   max_channels = 16;
+constexpr std::size_t   requests     = 256;
+constexpr std::uint32_t burst_done   = 0;
 
 struct channel_state
 {
@@ -376,7 +375,6 @@ private:
   void               interrupts(std::size_t ch);
   void               warn_once(std::size_t ch, unsupported feature);
   void               check_reach(std::size_t ch, reach_kind kind, popcorn::address at);
-  auto               requesters() -> std::span<dma_requester* const>;
   [[nodiscard]] auto or_zero(std::optional<field_ref> field) const -> std::uint32_t;
   [[nodiscard]] auto channel_reg(std::size_t ch, std::string_view reg) const -> std::string;
   [[nodiscard]] auto channel_secure(std::size_t ch) const -> bool;
@@ -396,8 +394,7 @@ private:
   core::clock_domain                                  hclk_;
   std::array<bool, 1>                                 unsupported_logged_{};
   bool                                                stopped_clock_logged_{};
-  std::vector<dma_requester*>                         requesters_;
-  bool                                                requesters_resolved_{};
+  dma_requester_list                                  requesters_;
   bool                                                freeze_logged_{};
   std::vector<address_range>                          reach_;
   std::array<std::uint8_t, max_channels>              reach_logged_{};
@@ -1084,7 +1081,7 @@ void gpdma::burst(std::size_t ch)
   }
   if(get(regs_, c.software) == 0)
   {
-    for(auto* const requester : requesters())
+    for(auto* const requester : requesters_.resolve(ctx_.peers))
     {
       requester->acknowledged(*this, request);
     }
@@ -1278,26 +1275,10 @@ void gpdma::finish(std::size_t ch, flag_index flag)
     return;
   }
   auto const request = get(regs_, c.request);
-  for(auto* const requester : requesters())
+  for(auto* const requester : requesters_.resolve(ctx_.peers))
   {
     requester->transfer_completed(*this, request);
   }
-}
-
-auto gpdma::requesters() -> std::span<dma_requester* const>
-{
-  if(not requesters_resolved_ and not ctx_.peers.all().empty())
-  {
-    requesters_resolved_ = true;
-    for(auto* const peer : ctx_.peers.all())
-    {
-      if(auto* const requester = dynamic_cast<dma_requester*>(peer); requester != nullptr)
-      {
-        requesters_.push_back(requester);
-      }
-    }
-  }
-  return requesters_;
 }
 
 void gpdma::raise_flag(std::size_t ch, flag_index flag)

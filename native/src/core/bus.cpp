@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <ranges>
 
 namespace popcorn::core
 {
@@ -21,16 +20,6 @@ auto writable_by(region_desc const& region, initiator by) noexcept -> bool
 {
   return by == initiator::debugger or (region.acc.write and region.kind != region_kind::rom);
 }
-
-auto read_host(std::byte const* bytes, std::uint8_t size) noexcept -> std::uint32_t
-{
-  std::uint32_t value = 0;
-  for(auto const byte : std::span{bytes, size} | std::views::reverse)
-  {
-    value = value << 8 | std::to_integer<std::uint32_t>(byte);
-  }
-  return value;
-}
 }
 
 [[gnu::always_inline]] inline auto machine::read_memory(
@@ -43,7 +32,7 @@ auto read_host(std::byte const* bytes, std::uint8_t size) noexcept -> std::uint3
   {
     run_->note_controller_read(region, addr, size, attrs);
   }
-  auto const value = read_host(region.host(addr), size);
+  auto const value = gather_le({region.host(addr), size});
   run_->note_watched(addr, size, value, false, attrs.by);
   return value;
 }
@@ -132,12 +121,7 @@ auto machine::do_read(address addr, std::uint8_t size, bus_attrs attrs)
     }
     return std::unexpected(bus_error::denied);
   }
-  auto bits = value;
-  for(auto& byte : std::span{region.host(addr), size})
-  {
-    byte = static_cast<std::byte>(bits & 0xff);
-    bits >>= 8;
-  }
+  scatter_le({region.host(addr), size}, value);
   region.host_wrote(*run_, addr, size);
   run_->note_watched(addr, size, value, true, attrs.by);
   return {};
@@ -245,10 +229,7 @@ auto machine::do_read_block(address addr, std::span<std::byte> out, bus_attrs at
     {
       return std::unexpected(block_error{.error = value.error(), .at = at});
     }
-    for(std::size_t i = 0; i < size; ++i)
-    {
-      out[done + i] = static_cast<std::byte>(*value >> (8 * i));
-    }
+    scatter_le(out.subspan(done, size), *value);
     done += size;
   }
   return {};
@@ -281,7 +262,7 @@ auto machine::do_write_block(address addr, std::span<std::byte const> in, bus_at
       continue;
     }
     auto const size       = block_access_size(at, in.size() - done);
-    auto const done_write = do_write(at, size, read_host(in.data() + done, size), attrs);
+    auto const done_write = do_write(at, size, gather_le(in.subspan(done, size)), attrs);
     if(not done_write)
     {
       return std::unexpected(block_error{.error = done_write.error(), .at = at});

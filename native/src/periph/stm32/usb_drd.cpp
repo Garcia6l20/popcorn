@@ -31,7 +31,6 @@ constexpr std::size_t   endpoints     = 8;
 constexpr std::uint32_t host_wake     = 0;
 constexpr std::uint32_t idle_suspend  = 1;
 constexpr std::uint32_t frame_timer   = 2;
-constexpr std::uint64_t frame_ps      = 1'000'000'000;
 constexpr std::uint64_t sof_window_ps = 1'000'000;
 constexpr std::uint8_t  idle_frames   = 3;
 
@@ -94,11 +93,6 @@ struct interrupt_pair
 [[nodiscard]] auto pid_of(std::uint32_t toggle) -> usb::data_pid
 {
   return toggle != 0 ? usb::data_pid::data1 : usb::data_pid::data0;
-}
-
-[[nodiscard]] auto refused(usb::handshake hs) -> usb::in_result
-{
-  return {.hs = hs, .pid = usb::data_pid::data0, .data = {}};
 }
 
 [[nodiscard]] auto allocated(std::uint32_t descriptor) -> std::size_t
@@ -674,7 +668,7 @@ void usb_drd::time_frames()
   state_.missed = 0;
   if(running)
   {
-    schedule(frame_timer, now().ps + frame_ps);
+    schedule(frame_timer, now().ps + usb::usb_frame_ps);
   }
   else
   {
@@ -692,7 +686,7 @@ void usb_drd::frame_missed()
   {
     raise_suspend();
   }
-  schedule(frame_timer, now().ps + frame_ps);
+  schedule(frame_timer, now().ps + usb::usb_frame_ps);
 }
 
 void usb_drd::refresh()
@@ -1105,7 +1099,7 @@ void usb_drd::bus_reset_end(vtime at)
   state_.missed = 0;
   if(state_.timing)
   {
-    schedule(frame_timer, at.ps + frame_ps);
+    schedule(frame_timer, at.ps + usb::usb_frame_ps);
   }
   refresh();
 }
@@ -1152,7 +1146,7 @@ void usb_drd::start_of_frame(std::uint16_t frame, vtime at)
   state_.suspended = false;
   if(state_.timing)
   {
-    schedule(frame_timer, at.ps + frame_ps + sof_window_ps);
+    schedule(frame_timer, at.ps + usb::usb_frame_ps + sof_window_ps);
   }
   refresh();
 }

@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -30,10 +29,9 @@ audio_source_endpoint::~audio_source_endpoint()   = default;
 
 namespace
 {
-constexpr std::size_t   blocks        = 2;
-constexpr std::size_t   fifo_depth    = 8;
-constexpr std::int8_t   no_slot       = -1;
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
+constexpr std::size_t blocks     = 2;
+constexpr std::size_t fifo_depth = 8;
+constexpr std::int8_t no_slot    = -1;
 
 using wide = unsigned __int128;
 
@@ -132,14 +130,6 @@ struct grid_point
 constexpr auto index_of(audio_block block) -> std::size_t
 {
   return block == audio_block::a ? 0 : 1;
-}
-
-auto lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(
-      out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return out;
 }
 
 auto requests_of(peer_directory const& peers, std::string_view instance)

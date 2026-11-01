@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -65,41 +66,13 @@ constexpr std::uint32_t    dmar          = 1u << 6;
 constexpr address          nvic_ispr1    = 0xE000'E204;
 constexpr std::uint32_t    usart1_irq    = 1u << (37 - 32);
 
-class bus_probe final : public periph::model
+class bus_probe final : public popcorn::testing::inert_model
 {
 public:
   explicit bus_probe(periph::model_context& ctx) : context{ctx}
   {}
 
   periph::model_context& context;
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 class recording_endpoint final : public periph::uart_endpoint

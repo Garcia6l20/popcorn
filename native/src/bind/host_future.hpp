@@ -221,7 +221,7 @@ auto python_exception(std::exception_ptr const& error) -> reflex::py::nb::object
  *        state, its first gil_entry creates the persistent one, released when the thread stops,
  *        and the GIL is checked released before every blocking host call.
  * @param live Set while the thread runs.
- * @param gil_entries Incremented by every gil_entry on the thread.
+ * @param gil_entries Incremented by every outermost gil_entry on the thread.
  * @param removals Run by the thread as it stops, before it releases its thread state.
  */
 auto python_thread_hooks(

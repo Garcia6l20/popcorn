@@ -75,93 +75,89 @@ auto read_reply_of(std::optional<nb::object> const& result) -> periph::i2c_read_
   return {.byte = byte, .error = static_cast<periph::i2c_error>(error), .stretch_ps = stretch};
 }
 
-void append(std::optional<nb::object> const& result, std::vector<std::byte>& out)
+/**
+ * @brief The periph::i2c_target calls of a Python I2C target, each taking the GIL and calling
+ *        `Self::invoke`, the hook lookup of the trampoline or of one attachment.
+ */
+template <typename Self> class i2c_target_calls : public periph::i2c_target
 {
-  if(not result)
+public:
+  [[nodiscard]] auto address() const -> std::uint8_t override
   {
-    return;
+    gil_entry const gil;
+    return or_value<std::uint8_t>(self().invoke("_address"), no_address);
   }
-  auto const bytes = nb::cast<nb::bytes>(*result);
-  auto const data  = static_cast<std::byte const*>(bytes.data());
-  out.insert(out.end(), data, data + bytes.size());
-}
+
+  [[nodiscard]] auto start(bool read, vtime at) -> periph::i2c_reply override
+  {
+    gil_entry const gil;
+    return reply_of(self().invoke("_start", read, at.ps));
+  }
+
+  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> periph::i2c_reply override
+  {
+    gil_entry const gil;
+    return reply_of(self().invoke("_write", byte, at.ps));
+  }
+
+  [[nodiscard]] auto read(vtime at) -> periph::i2c_read_reply override
+  {
+    gil_entry const gil;
+    return read_reply_of(self().invoke("_read", at.ps));
+  }
+
+  void stop(vtime at) override
+  {
+    gil_entry const gil;
+    self().invoke("_stop", at.ps);
+  }
+
+  void reset(reset_kind kind) override
+  {
+    gil_entry const gil;
+    self().invoke("_reset", kind);
+  }
+
+  void save(std::vector<std::byte>& out) const override
+  {
+    gil_entry const gil;
+    append(self().invoke("_save"), out);
+  }
+
+  void load(std::span<std::byte const> in) override
+  {
+    gil_entry const gil;
+    self().invoke("_load", nb::bytes(in.data(), in.size()));
+  }
+
+private:
+  [[nodiscard]] auto self() const -> Self const&
+  {
+    return static_cast<Self const&>(*this);
+  }
+};
 
 /**
  * @brief nanobind trampoline letting a Python class implement periph::i2c_target through the
  *        private methods `_address`, `_start`, `_write`, `_read`, `_stop`, `_reset`, `_save` and
  *        `_load` that `popcorn.board.I2CTarget` defines, which check the values returned:
  *        `_start` and `_write` return (ack, error, stretch_ps), `_read` (byte, error,
- *        stretch_ps), error an i2c_error value. Every call takes the GIL. Times cross as
- *        picoseconds since power-on. Once its machine's Python side is collected no method is
- *        called: the run is asked to stop, the address matches nothing, `_start` and `_write`
- *        NACK, a read returns 0.
+ *        stretch_ps), error an i2c_error value. Times cross as picoseconds since power-on. The
+ *        engine calls it only through an attachment.
  */
-class python_i2c_target final : public periph::i2c_target
+class python_i2c_target final : public i2c_target_calls<python_i2c_target>
 {
 public:
-  NB_TRAMPOLINE(periph::i2c_target, 8);
-
-  [[nodiscard]] auto address() const -> std::uint8_t override
-  {
-    gil_entry const gil;
-    return or_value<std::uint8_t>(call(nb_trampoline, cell, "_address"), no_address);
-  }
-
-  [[nodiscard]] auto start(bool read, vtime at) -> periph::i2c_reply override
-  {
-    gil_entry const gil;
-    return reply_of(call(nb_trampoline, cell, "_start", read, at.ps));
-  }
-
-  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> periph::i2c_reply override
-  {
-    gil_entry const gil;
-    return reply_of(call(nb_trampoline, cell, "_write", byte, at.ps));
-  }
-
-  [[nodiscard]] auto read(vtime at) -> periph::i2c_read_reply override
-  {
-    gil_entry const gil;
-    return read_reply_of(call(nb_trampoline, cell, "_read", at.ps));
-  }
-
-  void stop(vtime at) override
-  {
-    gil_entry const gil;
-    call(nb_trampoline, cell, "_stop", at.ps);
-  }
-
-  void reset(reset_kind kind) override
-  {
-    gil_entry const gil;
-    call(nb_trampoline, cell, "_reset", kind);
-  }
-
-  void save(std::vector<std::byte>& out) const override
-  {
-    gil_entry const gil;
-    append(call(nb_trampoline, cell, "_save"), out);
-  }
-
-  void load(std::span<std::byte const> in) override
-  {
-    gil_entry const gil;
-    call(nb_trampoline, cell, "_load", nb::bytes(in.data(), in.size()));
-  }
+  NB_TRAMPOLINE(i2c_target_calls<python_i2c_target>, 8);
 
   /**
-   * @brief Calls the Python method @p name in @p through, the cell of one attachment.
-   * @return Its result, empty when the cell refused the call.
+   * @brief Calls nothing: the engine reaches the device only through an attachment, see adopt().
+   * @return Empty.
    */
-  template <typename... Args>
-  auto via(callback_cell const& through, char const* name, Args&&... args) const
-      -> std::optional<nb::object>
+  template <typename... Args> auto invoke(char const*, Args&&...) const -> std::optional<nb::object>
   {
-    return call(nb_trampoline, through, name, std::forward<Args>(args)...);
+    return std::nullopt;
   }
-
-  /** @brief The cell its calls run in. */
-  callback_cell cell;
 };
 
 auto spi_mode_of(nb::handle mode) -> std::optional<std::uint8_t>
@@ -174,17 +170,61 @@ auto spi_mode_of(nb::handle mode) -> std::optional<std::uint8_t>
 }
 
 /**
- * @brief nanobind trampoline letting a Python class implement periph::spi_target through the
- *        private methods `_select`, `_exchange`, `_reset`, `_save` and `_load` that
- *        `popcorn.board.SpiTarget` defines, which check the values returned. Every call takes
- *        the GIL, except mode(), the SPI mode given at construction. Times cross as picoseconds
- *        since power-on. Once its machine's Python side is collected no method is called: the
- *        run is asked to stop, an exchange returns 0.
+ * @brief The periph::spi_target calls of a Python SPI device, each taking the GIL and calling
+ *        `Self::invoke`, the hook lookup of the trampoline or of one attachment.
  */
-class python_spi_target final : public periph::spi_target
+template <typename Self> class spi_target_calls : public periph::spi_target
 {
 public:
-  NB_TRAMPOLINE(periph::spi_target, 5);
+  void select(bool selected, vtime at) override
+  {
+    gil_entry const gil;
+    self().invoke("_select", selected, at.ps);
+  }
+
+  [[nodiscard]] auto exchange(std::uint32_t out, std::uint8_t bits, vtime at)
+      -> std::uint32_t override
+  {
+    gil_entry const gil;
+    return or_value<std::uint32_t>(self().invoke("_exchange", out, bits, at.ps), 0);
+  }
+
+  void reset(reset_kind kind) override
+  {
+    gil_entry const gil;
+    self().invoke("_reset", kind);
+  }
+
+  void save(std::vector<std::byte>& out) const override
+  {
+    gil_entry const gil;
+    append(self().invoke("_save"), out);
+  }
+
+  void load(std::span<std::byte const> in) override
+  {
+    gil_entry const gil;
+    self().invoke("_load", nb::bytes(in.data(), in.size()));
+  }
+
+private:
+  [[nodiscard]] auto self() const -> Self const&
+  {
+    return static_cast<Self const&>(*this);
+  }
+};
+
+/**
+ * @brief nanobind trampoline letting a Python class implement periph::spi_target through the
+ *        private methods `_select`, `_exchange`, `_reset`, `_save` and `_load` that
+ *        `popcorn.board.SpiTarget` defines, which check the values returned. mode() is the
+ *        SPI mode given at construction. Times cross as picoseconds since power-on. The engine
+ *        calls it only through an attachment.
+ */
+class python_spi_target final : public spi_target_calls<python_spi_target>
+{
+public:
+  NB_TRAMPOLINE(spi_target_calls<python_spi_target>, 5);
 
   /** @brief A device declaring no SPI mode. */
   python_spi_target() = default;
@@ -201,66 +241,49 @@ public:
     return declared_;
   }
 
-  void select(bool selected, vtime at) override
-  {
-    gil_entry const gil;
-    call(nb_trampoline, cell, "_select", selected, at.ps);
-  }
-
-  [[nodiscard]] auto exchange(std::uint32_t out, std::uint8_t bits, vtime at)
-      -> std::uint32_t override
-  {
-    gil_entry const gil;
-    return or_value<std::uint32_t>(call(nb_trampoline, cell, "_exchange", out, bits, at.ps), 0);
-  }
-
-  void reset(reset_kind kind) override
-  {
-    gil_entry const gil;
-    call(nb_trampoline, cell, "_reset", kind);
-  }
-
-  void save(std::vector<std::byte>& out) const override
-  {
-    gil_entry const gil;
-    append(call(nb_trampoline, cell, "_save"), out);
-  }
-
-  void load(std::span<std::byte const> in) override
-  {
-    gil_entry const gil;
-    call(nb_trampoline, cell, "_load", nb::bytes(in.data(), in.size()));
-  }
-
   /**
-   * @brief Calls the Python method @p name in @p through, the cell of one attachment.
-   * @return Its result, empty when the cell refused the call.
+   * @brief Calls nothing: the engine reaches the device only through an attachment, see adopt().
+   * @return Empty.
    */
-  template <typename... Args>
-  auto via(callback_cell const& through, char const* name, Args&&... args) const
-      -> std::optional<nb::object>
+  template <typename... Args> auto invoke(char const*, Args&&...) const -> std::optional<nb::object>
   {
-    return call(nb_trampoline, through, name, std::forward<Args>(args)...);
+    return std::nullopt;
   }
-
-  /** @brief The cell its calls run in. */
-  callback_cell cell;
 
 private:
   std::optional<std::uint8_t> declared_;
 };
 
 /**
- * @brief nanobind trampoline letting a Python class implement periph::spi_controller_sink through
- *        the private method `_frame` that `popcorn.board.SpiController` defines. Every call takes
- *        the GIL, one per frame, except mode(), the SPI mode given at construction. Times
- *        cross as picoseconds since reset. Once its machine's Python side is collected no method
- *        is called: the run is asked to stop.
+ * @brief The periph::spi_controller_sink call of a Python SPI controller, taking the GIL and
+ *        calling `Self::invoke`, the hook lookup of the trampoline or of one attachment.
  */
-class python_spi_controller final : public periph::spi_controller_sink
+template <typename Self> class spi_controller_calls : public periph::spi_controller_sink
 {
 public:
-  NB_TRAMPOLINE(periph::spi_controller_sink, 1);
+  void frame(std::uint32_t sent, std::uint32_t received, vtime at) override
+  {
+    gil_entry const gil;
+    self().invoke("_frame", sent, received, at.ps);
+  }
+
+private:
+  [[nodiscard]] auto self() const -> Self const&
+  {
+    return static_cast<Self const&>(*this);
+  }
+};
+
+/**
+ * @brief nanobind trampoline letting a Python class implement periph::spi_controller_sink through
+ *        the private method `_frame` that `popcorn.board.SpiController` defines, called once per
+ *        frame. mode() is the SPI mode given at construction. Times cross as picoseconds since
+ *        reset. The engine calls it only through an attachment.
+ */
+class python_spi_controller final : public spi_controller_calls<python_spi_controller>
+{
+public:
+  NB_TRAMPOLINE(spi_controller_calls<python_spi_controller>, 1);
 
   /** @brief A controller declaring no SPI mode. */
   python_spi_controller() = default;
@@ -277,261 +300,153 @@ public:
     return declared_;
   }
 
-  void frame(std::uint32_t sent, std::uint32_t received, vtime at) override
-  {
-    gil_entry const gil;
-    call(nb_trampoline, cell, "_frame", sent, received, at.ps);
-  }
-
   /**
-   * @brief Calls the Python method @p name in @p through, the cell of one attachment.
-   * @return Its result, empty when the cell refused the call.
+   * @brief Calls nothing: the engine reaches the device only through an attachment, see adopt().
+   * @return Empty.
    */
-  template <typename... Args>
-  auto via(callback_cell const& through, char const* name, Args&&... args) const
-      -> std::optional<nb::object>
+  template <typename... Args> auto invoke(char const*, Args&&...) const -> std::optional<nb::object>
   {
-    return call(nb_trampoline, through, name, std::forward<Args>(args)...);
+    return std::nullopt;
   }
-
-  /** @brief The cell its calls run in. */
-  callback_cell cell;
 
 private:
   std::optional<std::uint8_t> declared_;
 };
 
 /**
- * @brief The phase answer `_answered` takes, the undriven one for a dropped phase: NACK for an
- *        address or a written byte, 0xFF with ack false for a read byte.
+ * @brief The periph::i2c_controller_sink calls of a Python I2C controller: both call
+ *        `_answered` through `Self::invoke`, the hook lookup of the trampoline or of one
+ *        attachment, the GIL taken.
  */
-template <typename Trampoline>
-void answer(
-    Trampoline const&    self,
-    callback_cell const& through,
-    std::uint64_t        unit,
-    periph::i2c_phase    phase,
-    periph::i2c_answer   reply,
-    vtime                at)
+template <typename Self> class i2c_controller_calls : public periph::i2c_controller_sink
 {
-  gil_entry const gil;
-  call(
-      self, through, "_answered", unit, static_cast<std::uint8_t>(phase), reply.ack, reply.byte,
-      static_cast<std::uint8_t>(reply.error), at.ps);
-}
+public:
+  void answered(std::uint64_t unit, periph::i2c_phase phase, periph::i2c_answer reply, vtime at)
+      override
+  {
+    answer(unit, phase, reply, at);
+  }
+
+  void dropped(std::uint64_t unit, periph::i2c_phase phase, vtime at) override
+  {
+    answer(unit, phase, {}, at);
+  }
+
+private:
+  /**
+   * @brief The phase answer `_answered` takes, the undriven one for a dropped phase: NACK for an
+   *        address or a written byte, 0xFF with ack false for a read byte.
+   */
+  void answer(std::uint64_t unit, periph::i2c_phase phase, periph::i2c_answer reply, vtime at) const
+  {
+    gil_entry const gil;
+    self().invoke(
+        "_answered", unit, static_cast<std::uint8_t>(phase), reply.ack, reply.byte,
+        static_cast<std::uint8_t>(reply.error), at.ps);
+  }
+
+  [[nodiscard]] auto self() const -> Self const&
+  {
+    return static_cast<Self const&>(*this);
+  }
+};
 
 /**
  * @brief nanobind trampoline letting a Python class implement periph::i2c_controller_sink
  *        through the private method `_answered` that `popcorn.board.I2CController` defines. One
  *        hook name, so one trampoline slot: dropped() calls `_answered` with the undriven answer
- *        at its report time. Every call takes the GIL, one per phase. Times cross as
- *        picoseconds since reset. Once its machine's Python side is collected no method is
- *        called: the run is asked to stop.
+ *        at its report time, one call per phase. Times cross as picoseconds since reset.
+ *        The engine calls it only through an attachment.
  */
-class python_i2c_controller final : public periph::i2c_controller_sink
+class python_i2c_controller final : public i2c_controller_calls<python_i2c_controller>
 {
 public:
-  NB_TRAMPOLINE(periph::i2c_controller_sink, 1);
+  NB_TRAMPOLINE(i2c_controller_calls<python_i2c_controller>, 1);
 
-  void answered(std::uint64_t unit, periph::i2c_phase phase, periph::i2c_answer reply, vtime at)
-      override
+  /**
+   * @brief Calls nothing: the engine reaches the device only through an attachment, see adopt().
+   * @return Empty.
+   */
+  template <typename... Args> auto invoke(char const*, Args&&...) const -> std::optional<nb::object>
   {
-    answer(nb_trampoline, cell, unit, phase, reply, at);
+    return std::nullopt;
   }
-
-  void dropped(std::uint64_t unit, periph::i2c_phase phase, vtime at) override
-  {
-    answer(nb_trampoline, cell, unit, phase, {}, at);
-  }
-
-  /** @brief Calls `_answered` in @p through, the cell of one attachment. */
-  void answer_via(
-      callback_cell const& through,
-      std::uint64_t        unit,
-      periph::i2c_phase    phase,
-      periph::i2c_answer   reply,
-      vtime                at) const
-  {
-    answer(nb_trampoline, through, unit, phase, reply, at);
-  }
-
-  /** @brief The cell its calls run in. */
-  callback_cell cell;
 };
 
 /**
- * @brief One machine's attachment of a Python I2C target: the machine's engine calls it, and
- *        it calls the device in its own cell. A device reattached to another machine gets a
- *        new attachment, so an old engine still running never calls it in the new machine's
- *        context, and is refused once its own machine is gone.
+ * @brief One machine's attachment of a Python device: the machine's engine calls it, and it
+ *        calls the device in its own cell. A device reattached to another machine gets a new
+ *        attachment, so an old engine still running never calls it in the new machine's
+ *        context, and is refused once its own machine is gone. Every hook call takes the GIL,
+ *        mode() takes none. Once its machine's Python side is collected no hook is called and
+ *        the run is asked to stop: an I2C target's address matches nothing, `_start` and
+ *        `_write` NACK, a read returns 0, an SPI exchange returns 0.
  */
-class attached_i2c_target final : public periph::i2c_target
+template <typename Device> class attachment
 {
 public:
   /** @brief Attaches @p device. */
-  explicit attached_i2c_target(std::shared_ptr<python_i2c_target> device) noexcept
-      : device_{std::move(device)}
+  explicit attachment(std::shared_ptr<Device> device) noexcept : device_{std::move(device)}
   {}
 
-  [[nodiscard]] auto address() const -> std::uint8_t override
+  /**
+   * @brief Calls the device's Python method @p name in the cell of this attachment.
+   * @return Its result, empty when the cell refused the call.
+   */
+  template <typename... Args>
+  auto invoke(char const* name, Args&&... args) const -> std::optional<nb::object>
   {
-    gil_entry const gil;
-    return or_value<std::uint8_t>(device_->via(cell, "_address"), no_address);
-  }
-
-  [[nodiscard]] auto start(bool read, vtime at) -> periph::i2c_reply override
-  {
-    gil_entry const gil;
-    return reply_of(device_->via(cell, "_start", read, at.ps));
-  }
-
-  [[nodiscard]] auto write(std::uint8_t byte, vtime at) -> periph::i2c_reply override
-  {
-    gil_entry const gil;
-    return reply_of(device_->via(cell, "_write", byte, at.ps));
-  }
-
-  [[nodiscard]] auto read(vtime at) -> periph::i2c_read_reply override
-  {
-    gil_entry const gil;
-    return read_reply_of(device_->via(cell, "_read", at.ps));
-  }
-
-  void stop(vtime at) override
-  {
-    gil_entry const gil;
-    device_->via(cell, "_stop", at.ps);
-  }
-
-  void reset(reset_kind kind) override
-  {
-    gil_entry const gil;
-    device_->via(cell, "_reset", kind);
-  }
-
-  void save(std::vector<std::byte>& out) const override
-  {
-    gil_entry const gil;
-    append(device_->via(cell, "_save"), out);
-  }
-
-  void load(std::span<std::byte const> in) override
-  {
-    gil_entry const gil;
-    device_->via(cell, "_load", nb::bytes(in.data(), in.size()));
+    return call(device_->nb_trampoline, cell, name, std::forward<Args>(args)...);
   }
 
   /** @brief The cell of this attachment. */
   callback_cell cell;
 
-private:
-  std::shared_ptr<python_i2c_target> device_;
+protected:
+  /** @brief The device attached. */
+  std::shared_ptr<Device> device_;
 };
 
-/** @brief One machine's attachment of a Python SPI target, as attached_i2c_target. */
-class attached_spi_target final : public periph::spi_target
+/** @brief One machine's attachment of a Python I2C target. */
+class attached_i2c_target final : public i2c_target_calls<attached_i2c_target>,
+                                  public attachment<python_i2c_target>
 {
 public:
-  /** @brief Attaches @p device. */
-  explicit attached_spi_target(std::shared_ptr<python_spi_target> device) noexcept
-      : device_{std::move(device)}
-  {}
+  using attachment::attachment;
+};
 
-  void select(bool selected, vtime at) override
-  {
-    gil_entry const gil;
-    device_->via(cell, "_select", selected, at.ps);
-  }
-
-  [[nodiscard]] auto exchange(std::uint32_t out, std::uint8_t bits, vtime at)
-      -> std::uint32_t override
-  {
-    gil_entry const gil;
-    return or_value<std::uint32_t>(device_->via(cell, "_exchange", out, bits, at.ps), 0);
-  }
+/** @brief One machine's attachment of a Python SPI target. */
+class attached_spi_target final : public spi_target_calls<attached_spi_target>,
+                                  public attachment<python_spi_target>
+{
+public:
+  using attachment::attachment;
 
   [[nodiscard]] auto mode() const -> std::optional<std::uint8_t> override
   {
     return device_->mode();
   }
-
-  void reset(reset_kind kind) override
-  {
-    gil_entry const gil;
-    device_->via(cell, "_reset", kind);
-  }
-
-  void save(std::vector<std::byte>& out) const override
-  {
-    gil_entry const gil;
-    append(device_->via(cell, "_save"), out);
-  }
-
-  void load(std::span<std::byte const> in) override
-  {
-    gil_entry const gil;
-    device_->via(cell, "_load", nb::bytes(in.data(), in.size()));
-  }
-
-  /** @brief The cell of this attachment. */
-  callback_cell cell;
-
-private:
-  std::shared_ptr<python_spi_target> device_;
 };
 
-/** @brief One machine's attachment of a Python SPI controller, as attached_i2c_target. */
-class attached_spi_controller final : public periph::spi_controller_sink
+/** @brief One machine's attachment of a Python SPI controller. */
+class attached_spi_controller final : public spi_controller_calls<attached_spi_controller>,
+                                      public attachment<python_spi_controller>
 {
 public:
-  /** @brief Attaches @p device. */
-  explicit attached_spi_controller(std::shared_ptr<python_spi_controller> device) noexcept
-      : device_{std::move(device)}
-  {}
-
-  void frame(std::uint32_t sent, std::uint32_t received, vtime at) override
-  {
-    gil_entry const gil;
-    device_->via(cell, "_frame", sent, received, at.ps);
-  }
+  using attachment::attachment;
 
   [[nodiscard]] auto mode() const -> std::optional<std::uint8_t> override
   {
     return device_->mode();
   }
-
-  /** @brief The cell of this attachment. */
-  callback_cell cell;
-
-private:
-  std::shared_ptr<python_spi_controller> device_;
 };
 
-/** @brief One machine's attachment of a Python I2C controller, as attached_i2c_target. */
-class attached_i2c_controller final : public periph::i2c_controller_sink
+/** @brief One machine's attachment of a Python I2C controller. */
+class attached_i2c_controller final : public i2c_controller_calls<attached_i2c_controller>,
+                                      public attachment<python_i2c_controller>
 {
 public:
-  /** @brief Attaches @p device. */
-  explicit attached_i2c_controller(std::shared_ptr<python_i2c_controller> device) noexcept
-      : device_{std::move(device)}
-  {}
-
-  void answered(std::uint64_t unit, periph::i2c_phase phase, periph::i2c_answer reply, vtime at)
-      override
-  {
-    device_->answer_via(cell, unit, phase, reply, at);
-  }
-
-  void dropped(std::uint64_t unit, periph::i2c_phase phase, vtime at) override
-  {
-    device_->answer_via(cell, unit, phase, {}, at);
-  }
-
-  /** @brief The cell of this attachment. */
-  callback_cell cell;
-
-private:
-  std::shared_ptr<python_i2c_controller> device_;
+  using attachment::attachment;
 };
 
 auto refused(std::string const& peripheral, std::string expected) -> config_error

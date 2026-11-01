@@ -127,7 +127,6 @@ private:
   [[nodiscard]] auto output() const -> std::uint32_t;
   void               feed(std::uint32_t data, unsigned width);
   void               set_crc(std::uint32_t value);
-  void unmodelled(bool& logged, std::string_view name, std::uint32_t offset, std::string message);
   [[nodiscard]] auto name_at(std::uint32_t offset) const -> std::string_view;
   [[nodiscard]] auto polynomial() const -> std::uint32_t;
   [[nodiscard]] auto initial() const -> std::uint32_t;
@@ -211,7 +210,7 @@ auto crc::on_write(
   {
     if(variant_.word_input and size != 4)
     {
-      unmodelled(
+      warn_once_or_refuse(
           misaligned_logged_, "DR", offset,
           std::format(
               "{}-bit CRC_DR write at offset {:#x} fed as the word its byte lanes repeat, only "
@@ -223,7 +222,7 @@ auto crc::on_write(
     }
     if(offset % 4 != 0)
     {
-      unmodelled(
+      warn_once_or_refuse(
           misaligned_logged_, "DR", offset,
           std::format(
               "{}-bit CRC_DR write at offset {:#x} ignored, not right-aligned, {}", 8 * size,
@@ -233,7 +232,7 @@ auto crc::on_write(
     auto const width = 8u * size;
     if(variant_.programmable and (regs_.peek(poly_.offset) & 1u) == 0)
     {
-      unmodelled(
+      warn_once_or_refuse(
           even_logged_, "POL", poly_.offset,
           "even polynomial, which RM0456 24.3.3 does not support, computed anyway");
     }
@@ -242,7 +241,7 @@ auto crc::on_write(
   }
   if(auto const name = name_at(offset); size != 4 and not name.empty() and not served_narrow(name))
   {
-    unmodelled(
+    warn_once_or_refuse(
         narrow_write_logged_, name, offset,
         std::format(
             "{}-bit write to CRC_{} ignored, only 32-bit accesses are allowed, {}", 8 * size, name,
@@ -261,7 +260,7 @@ auto crc::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, 
      and not served_narrow(name)
      and (variant_.word_input or (offset & ~3u) != data_.offset))
   {
-    unmodelled(
+    warn_once_or_refuse(
         narrow_read_logged_, name, offset,
         std::format(
             "{}-bit read of CRC_{}, only 32-bit accesses are allowed, {}", 8 * size, name,
@@ -352,18 +351,6 @@ void crc::feed(std::uint32_t data, unsigned width)
 void crc::set_crc(std::uint32_t value)
 {
   regs_.poke(data_.offset, value & crc_mask());
-}
-
-void crc::unmodelled(bool& logged, std::string_view name, std::uint32_t offset, std::string message)
-{
-  if(not std::exchange(logged, true))
-  {
-    warn(name, std::move(message));
-  }
-  if(ctx_.strict_peripherals)
-  {
-    throw model_error(desc_.name, std::string{name}, offset);
-  }
 }
 
 auto crc::name_at(std::uint32_t offset) const -> std::string_view

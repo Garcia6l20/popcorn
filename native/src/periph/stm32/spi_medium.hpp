@@ -1,5 +1,6 @@
 #pragma once
 
+#include "medium_tap_queue.hpp"
 #include "spi_link_port.hpp"
 
 #include <popcorn/core/member_link.hpp>
@@ -7,9 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -47,27 +46,7 @@ struct spi_tap_frame
  *        the oldest dropped and counted. A frame enters when the master's drain takes its reply,
  *        in drain order.
  */
-class POPCORN_API spi_tap_queue
-{
-public:
-  /** @param capacity Frames kept, above 0. */
-  explicit spi_tap_queue(std::size_t capacity) pre(capacity > 0);
-
-  /** @brief Appends @p frame, dropping the oldest when full. */
-  void push(spi_tap_frame const& frame);
-
-  /** @brief Takes every frame held, oldest first. */
-  auto take() -> std::vector<spi_tap_frame>;
-
-  /** @brief Frames dropped so far because the queue was full. */
-  [[nodiscard]] auto dropped() const -> std::uint64_t;
-
-private:
-  mutable std::mutex        mutex_;
-  std::deque<spi_tap_frame> frames_;
-  std::size_t               capacity_;
-  std::uint64_t             dropped_{};
-};
+using spi_tap_queue = medium_tap_queue<spi_tap_frame>;
 
 /** @brief A slave of an SPI medium: its member, its SPI and how the master selects it. */
 struct spi_slave_end

@@ -2,6 +2,7 @@
 #include "family_names.hpp"
 #include "gtzc.hpp"
 #include "model_base.hpp"
+#include "secure_config.hpp"
 #include "voltage_range.hpp"
 
 #include <reflex/enum.hpp>
@@ -142,7 +143,7 @@ struct regulator_switch
 };
 
 /** @brief What differs between the PWR blocks one model serves. */
-struct pwr_family
+struct pwr_variant
 {
   /** @brief Register and field of every role, an empty name for a role the family lacks. */
   std::span<named_field<pwr_role> const> fields;
@@ -241,7 +242,7 @@ class pwr final : public dispatch_model<pwr, pwr_state>,
 public:
   pwr(model_context&         ctx,
       peripheral_desc const& desc,
-      pwr_family const&      family,
+      pwr_variant const&     variant,
       pwr_options const&     options);
 
   void               reset(register_file& regs, reset_kind kind) override;
@@ -265,7 +266,7 @@ private:
 
   pwr_options                options_;
   register_file&             regs_;
-  pwr_family const&          family_;
+  pwr_variant const&         variant_;
   field_table<pwr_role>      names_;
   bool                       low_power_logged_{};
   bool                       reserved_select_logged_{};
@@ -462,7 +463,7 @@ constexpr auto l1_peripheral_reset_kept = std::to_array<field_name>({
     {"CR", "ULP"},
 });
 
-constexpr pwr_family l1_pwr{
+constexpr pwr_variant l1_pwr{
     .fields                = l1_names,
     .modes                 = l1_modes_by_pdds,
     .vos_levels            = l1_vos_levels,
@@ -479,7 +480,7 @@ constexpr pwr_family l1_pwr{
     .peripheral_reset_kept = l1_peripheral_reset_kept,
 };
 
-constexpr pwr_family h5_pwr{
+constexpr pwr_variant h5_pwr{
     .fields           = h5_names,
     .modes            = h5_modes_by_lpms,
     .vos_levels       = h5_vos_levels,
@@ -499,7 +500,7 @@ constexpr pwr_family h5_pwr{
     .peripheral_reset_kept = {                                         },
 };
 
-constexpr pwr_family u5_pwr{
+constexpr pwr_variant u5_pwr{
     .fields                = u5_names,
     .modes                 = modes_by_lpms,
     .vos_levels            = u5_vos_levels,
@@ -524,10 +525,10 @@ constexpr regulator_switch u5_regulator_switch{
                   std::chrono::microseconds{14}, std::chrono::microseconds{14}},
 };
 
-constexpr pwr_family u5_smps_pwr = [] {
-  auto family = u5_pwr;
-  family.smps = u5_regulator_switch;
-  return family;
+constexpr pwr_variant u5_smps_pwr = [] {
+  auto variant = u5_pwr;
+  variant.smps = u5_regulator_switch;
+  return variant;
 }();
 
 static_assert(names_every_role(u5_names));
@@ -537,12 +538,12 @@ static_assert(names_every_role(l1_names));
 pwr::pwr(
     model_context&         ctx,
     peripheral_desc const& desc,
-    pwr_family const&      family,
+    pwr_variant const&     variant,
     pwr_options const&     options)
-    : dispatch_model{ctx, desc, "PWR", family.writes, family.trustzone_writes}, options_{options},
-      regs_{ctx.regs}, family_{family},
+    : dispatch_model{ctx, desc, "PWR", variant.writes, variant.trustzone_writes}, options_{options},
+      regs_{ctx.regs}, variant_{variant},
       names_{
-          family.fields,
+          variant.fields,
           [this](std::string_view reg_name, std::string_view name) {
             return field(reg_name, name);
           },
@@ -551,11 +552,11 @@ pwr::pwr(
           }},
       unit_{unit_named(ctx.part, desc.name)}
 {
-  if(not family.secure_register.empty())
+  if(not variant.secure_register.empty())
   {
-    secure_ = reg(family.secure_register);
+    secure_ = reg(variant.secure_register);
   }
-  for(auto const& kept : family.peripheral_reset_kept)
+  for(auto const& kept : variant.peripheral_reset_kept)
   {
     peripheral_kept_.push_back(field(kept.reg, kept.field));
   }
@@ -574,7 +575,7 @@ void pwr::add_rules()
     auto const at = reg(name);
     return field_ref{.offset = at.offset, .lsb = at.lsb, .width = at.width};
   };
-  for(auto const& secured : family_.secured)
+  for(auto const& secured : variant_.secured)
   {
     auto const bits =
         secured.field.empty() ? whole(secured.reg) : field(secured.reg, secured.field);
@@ -589,7 +590,7 @@ void pwr::add_rules()
   {
     auto const n   = std::to_string(x);
     auto const bit = field("PWR_SECCFGR", "WUP" + n + "SEC");
-    for(auto const& wakeup : family_.wakeup_fields)
+    for(auto const& wakeup : variant_.wakeup_fields)
     {
       auto const f = field(wakeup.reg, std::string{wakeup.prefix} + n);
       rules_.push_back(
@@ -600,7 +601,7 @@ void pwr::add_rules()
            .own    = bit});
     }
   }
-  for(auto const& name : family_.system_clock_fields)
+  for(auto const& name : variant_.system_clock_fields)
   {
     if(name.optional and not has_field(name.reg, name.field))
     {
@@ -693,43 +694,23 @@ auto pwr::secure_function() const -> bool
 
 auto pwr::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
 {
-  auto const all = ~std::uint32_t{};
   if(write)
   {
     writer_ = ctx.by;
   }
-  if(secure_ and word == secure_->offset)
+  if(auto const head = config_word_guard(
+         secure_, privilege_, secure_privileged_, regs_, ctx_.trustzone, word, ctx, write, [&] {
+           if(unit_)
+           {
+             illegal_.raise(ctx_.peers, *unit_, ctx.by);
+           }
+         }))
   {
-    if(not ctx_.trustzone)
-    {
-      return bus_guard::both(all);
-    }
-    if(not ctx.secure)
-    {
-      if(write and unit_)
-      {
-        illegal_.raise(ctx_.peers, *unit_, ctx.by);
-      }
-      return {.wi = all};
-    }
-    auto const spriv = secure_privileged_.of(regs_.peek(privilege_.offset)) != 0;
-    return {.wi = not ctx.privileged and spriv ? all : 0};
-  }
-  if(not ctx_.trustzone)
-  {
-    return {};
+    return *head;
   }
   auto const privilege = regs_.peek(privilege_.offset);
-  if(word == privilege_.offset)
-  {
-    if(not ctx.privileged)
-    {
-      return {.wi = all};
-    }
-    return {.wi = ctx.secure ? 0 : secure_privileged_.mask()};
-  }
-  auto const spriv  = secure_privileged_.of(privilege) != 0;
-  auto const nspriv = nonsecure_privileged_.of(privilege) != 0;
+  auto const spriv     = secure_privileged_.of(privilege) != 0;
+  auto const nspriv    = nonsecure_privileged_.of(privilege) != 0;
   bus_guard  out;
   for(auto const& rule : rules_)
   {
@@ -763,15 +744,15 @@ void pwr::reset(register_file& regs, reset_kind kind)
   {
     regs.poke(bits.offset, bits.with(regs.peek(bits.offset), value));
   }
-  state_.settled_level = family_.vos_levels[get(regs, names_[pwr_role::active_vos])];
+  state_.settled_level = variant_.vos_levels[get(regs, names_[pwr_role::active_vos])];
 }
 
 void pwr::vosr_written(std::uint32_t old, std::uint32_t now)
 {
   auto const level = names_[pwr_role::vos];
-  if(family_.vos_levels[level.of(now)] == vos_forbidden)
+  if(variant_.vos_levels[level.of(now)] == vos_forbidden)
   {
-    auto const reg = family_.fields[std::to_underlying(pwr_role::vos)].name.reg;
+    auto const reg = variant_.fields[std::to_underlying(pwr_role::vos)].name.reg;
     regs_.poke(level.offset, level.with(regs_.peek(level.offset), level.of(old)));
     if(writer_ == initiator::debugger)
     {
@@ -791,15 +772,15 @@ void pwr::vosr_written(std::uint32_t old, std::uint32_t now)
   }
   if(level.of(now) != level.of(old))
   {
-    if(family_.vos_levels[level.of(now)] < family_.vos_levels[level.of(old)])
+    if(variant_.vos_levels[level.of(now)] < variant_.vos_levels[level.of(old)])
     {
-      update(regs_, names_[pwr_role::vos_ready], family_.vos_ready_set ? 0 : 1);
+      update(regs_, names_[pwr_role::vos_ready], variant_.vos_ready_set ? 0 : 1);
     }
-    update(regs_, names_[pwr_role::active_vos_ready], family_.active_ready_set ? 0 : 1);
+    update(regs_, names_[pwr_role::active_vos_ready], variant_.active_ready_set ? 0 : 1);
     auto const generation = ++state_.generation[voltage_ready];
-    if(family_.stepping)
+    if(variant_.stepping)
     {
-      step_active(*family_.stepping, generation);
+      step_active(*variant_.stepping, generation);
     }
     else
     {
@@ -825,11 +806,11 @@ void pwr::cr1_written(std::uint32_t, std::uint32_t now)
     return;
   }
   warn(
-      family_.fields[std::to_underlying(pwr_role::mode)].name.reg,
+      variant_.fields[std::to_underlying(pwr_role::mode)].name.reg,
       std::format(
           "{} selects {}, not modelled: a deep-sleep WFI idles as a plain WFI",
-          family_.fields[std::to_underlying(pwr_role::mode)].name.field,
-          reflex::enum_value_name(family_.modes[names_[pwr_role::mode].of(now)])));
+          variant_.fields[std::to_underlying(pwr_role::mode)].name.field,
+          reflex::enum_value_name(variant_.modes[names_[pwr_role::mode].of(now)])));
 }
 
 void pwr::control_written(std::uint32_t old, std::uint32_t now)
@@ -844,9 +825,9 @@ void pwr::control_written(std::uint32_t old, std::uint32_t now)
 void pwr::cr3_written(std::uint32_t old, std::uint32_t now)
 {
   auto const select = names_[pwr_role::regulator_select];
-  if(not family_.smps)
+  if(not variant_.smps)
   {
-    auto const reg = family_.fields[std::to_underlying(pwr_role::regulator_select)].name.reg;
+    auto const reg = variant_.fields[std::to_underlying(pwr_role::regulator_select)].name.reg;
     if(select.of(old) != 0 or select.of(now) == 0 or writer_ == initiator::debugger)
     {
       return;
@@ -866,7 +847,7 @@ void pwr::cr3_written(std::uint32_t old, std::uint32_t now)
   {
     return;
   }
-  auto const& times = select.of(now) != 0 ? family_.smps->to_smps : family_.smps->to_ldo;
+  auto const& times = select.of(now) != 0 ? variant_.smps->to_smps : variant_.smps->to_ldo;
   schedule_in(
       times[get(regs_, names_[pwr_role::active_vos])], regulator_ready,
       ++state_.regulator_generation);
@@ -893,7 +874,7 @@ void pwr::step_active(vos_stepping const& stepping, std::uint64_t generation)
 
 auto pwr::active_ready() const -> bool
 {
-  return get(regs_, names_[pwr_role::active_vos_ready]) == (family_.active_ready_set ? 1u : 0u);
+  return get(regs_, names_[pwr_role::active_vos_ready]) == (variant_.active_ready_set ? 1u : 0u);
 }
 
 auto pwr::active_level() const -> std::uint32_t
@@ -902,7 +883,7 @@ auto pwr::active_level() const -> std::uint32_t
   {
     return state_.settled_level;
   }
-  return family_.vos_levels[get(regs_, names_[pwr_role::active_vos])];
+  return variant_.vos_levels[get(regs_, names_[pwr_role::active_vos])];
 }
 
 void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
@@ -919,9 +900,9 @@ void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
   }
   if(kind == voltage_step)
   {
-    if(family_.stepping and payload == state_.generation[voltage_ready])
+    if(variant_.stepping and payload == state_.generation[voltage_ready])
     {
-      step_active(*family_.stepping, payload);
+      step_active(*variant_.stepping, payload);
     }
     return;
   }
@@ -931,10 +912,10 @@ void pwr::on_event(std::uint32_t kind, std::uint64_t payload)
   }
   if(kind == voltage_ready)
   {
-    update(regs_, names_[pwr_role::vos_ready], family_.vos_ready_set ? 1 : 0);
+    update(regs_, names_[pwr_role::vos_ready], variant_.vos_ready_set ? 1 : 0);
     update(regs_, names_[pwr_role::active_vos], get(regs_, names_[pwr_role::vos]));
-    update(regs_, names_[pwr_role::active_vos_ready], family_.active_ready_set ? 1 : 0);
-    state_.settled_level = family_.vos_levels[get(regs_, names_[pwr_role::active_vos])];
+    update(regs_, names_[pwr_role::active_vos_ready], variant_.active_ready_set ? 1 : 0);
+    state_.settled_level = variant_.vos_levels[get(regs_, names_[pwr_role::active_vos])];
     for(auto* const peer : ctx_.peers.all())
     {
       if(auto* const listener = dynamic_cast<voltage_range_listener*>(peer))

@@ -63,8 +63,10 @@ template <typename Queue, typename Body> auto link_locked(Queue const& queue, Bo
 
 /**
  * @brief The Python thread state of a host thread, created by its first gil_entry and kept for
- *        the thread's life, and the counter of its handle that every gil_entry on the thread
- *        increments.
+ *        the thread's life, the counter of its handle that every outermost gil_entry on the
+ *        thread increments, and the depth of the entries open on it. Only the outermost entry on
+ *        the thread counts: a nested one, such as a destructor run by a gc pass inside a
+ *        callback, belongs to it.
  */
 struct host_python
 {
@@ -76,6 +78,8 @@ struct host_python
   PyThreadState* saved = nullptr;
   /** @brief GIL entries of the machine whose thread this is, null off host threads. */
   std::atomic<std::uint64_t>* counter = nullptr;
+  /** @brief gil_entry objects alive on the thread. */
+  std::uint32_t depth = 0;
 };
 
 /** @brief The host_python of the calling thread. */
@@ -108,10 +112,12 @@ public:
       return;
     }
     auto& state = this_host_python();
-    if(state.counter != nullptr)
+    if(state.counter != nullptr and state.depth == 0)
     {
       state.counter->fetch_add(1, std::memory_order_relaxed);
     }
+    ++state.depth;
+    on_host_ = true;
     if(state.created)
     {
       held_.emplace();
@@ -141,6 +147,10 @@ public:
   /** @brief Releases the GIL, saving a thread state its entry created. */
   ~gil_entry()
   {
+    if(on_host_)
+    {
+      --this_host_python().depth;
+    }
     if(first_)
     {
       this_host_python().saved = PyEval_SaveThread();
@@ -164,7 +174,8 @@ public:
   }
 
 private:
-  bool                                              first_ = false;
+  bool                                              first_   = false;
+  bool                                              on_host_ = false;
   std::optional<PyGILState_STATE>                   nested_;
   std::optional<reflex::py::nb::gil_scoped_acquire> held_;
 };

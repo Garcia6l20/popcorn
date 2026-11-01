@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "factories.hpp"
@@ -22,6 +23,7 @@
 #include <expected>
 #include <map>
 #include <memory>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -186,7 +188,7 @@ auto expected_log() -> std::vector<std::uint32_t>
   return out;
 }
 
-class counting_firewall final : public periph::model, public periph::bus_firewall
+class counting_firewall final : public popcorn::testing::inert_model, public periph::bus_firewall
 {
 public:
   explicit counting_firewall(periph::model_context& ctx)
@@ -194,33 +196,6 @@ public:
     ctx.install_firewall(*this);
   }
 
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
   auto check_peripheral(std::size_t, bus_attrs, memory_op) -> periph::bus_verdict override
   {
     return periph::bus_verdict::allow;
@@ -601,11 +576,11 @@ TEST_CASE("the DMA2 model refuses a description with channel 6 registers or chan
   CHECK_THROWS_AS(stm32_fixture(desc, firmware), popcorn::config_error);
 }
 
-TEST_CASE("the DMA model refuses traits past its request slots or naming a channel it lacks")
+TEST_CASE("the DMA model refuses a variant past its request slots or naming a channel it lacks")
 {
-  auto const refused = [](stm32::dma_classic_traits const& traits) {
+  auto const refused = [](stm32::dma_classic_variant const& variant) {
     auto options = popcorn::testing::stm32_options();
-    options.models.insert_or_assign("DMA1", stm32::dma_classic_factory(traits));
+    options.models.insert_or_assign("DMA1", stm32::dma_classic_factory(variant));
     CHECK_THROWS_AS(parked(l152re(), firmware, std::move(options)), popcorn::config_error);
   };
   std::array<stm32::dma_classic_request, 49> many{};
@@ -623,7 +598,7 @@ TEST_CASE("the DMA model refuses traits past its request slots or naming a chann
 
 namespace
 {
-class requester final : public periph::model, public stm32::dma_requester
+class requester final : public popcorn::testing::inert_model, public stm32::dma_requester
 {
 public:
   requester(
@@ -735,12 +710,6 @@ public:
     writes.push_back({.offset = offset, .size = size, .value = value});
     return {};
   }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 
 private:
   auto signal(std::string_view name) -> stm32::dma_signal&
@@ -834,11 +803,11 @@ auto peer(stm32_fixture const& f, std::string_view unit) -> requester&
 constexpr std::uint32_t word_sizes = psize_word | msize_word;
 }
 
-TEST_CASE("RM0038 Tables 55 and 56: the DMA1 and DMA2 traits hold every request on its channel")
+TEST_CASE("RM0038 Tables 55 and 56: the DMA1 and DMA2 variants hold every request on its channel")
 {
-  auto const listed = [](stm32::dma_classic_traits const& traits, std::string_view instance) {
+  auto const listed = [](stm32::dma_classic_variant const& variant, std::string_view instance) {
     std::vector<std::pair<std::string_view, std::uint32_t>> out;
-    for(auto const& request : traits.requests)
+    for(auto const& request : variant.requests)
     {
       CAPTURE(request.signal);
       out.emplace_back(request.signal, request.channel);
@@ -976,6 +945,54 @@ TEST_CASE(
   CHECK(copied(f, 2) == std::vector<std::uint32_t>{source_word(0), source_word(1)});
   CHECK(usart.last_but_ones.size() == 1);
   CHECK(spi.last_but_ones.size() == 1);
+}
+
+TEST_CASE("RM0038 11.3.7: every requester among the last 40 peers is told")
+{
+  std::set<std::string, std::less<>> const core_units{
+      "DMA1", "DMA2", "EXTI", "RCC", "PWR", "SYSCFG", "RI", "DBGMCU", "USB", "USB_SRAM", "FLASH"};
+  names_by_unit by_unit;
+  for(auto const& unit : std::span{l152re().peripherals}.last(40))
+  {
+    if(not core_units.contains(unit.name))
+    {
+      by_unit[unit.name] = {"usart1_tx_dma"};
+    }
+  }
+  auto const f = parked(l152re(), firmware, with_requesters(l152re(), by_unit));
+  fill(f, 2);
+  program(f, dma1, 4, word_sizes | minc | pinc | en, from, to, 2);
+  std::vector<requester*> probes;
+  for(auto const& unit : std::span{l152re().peripherals}.last(40))
+  {
+    if(auto* const found = f.model_of<requester>(unit.name))
+    {
+      found->set("usart1_tx_dma", true);
+      probes.push_back(found);
+    }
+  }
+  REQUIRE(probes.size() > 1);
+  idle_to(f, now_ps(f) + 3 * latency_ps);
+  for(auto* const found : probes)
+  {
+    CHECK(found->acks == std::vector<std::string>{"usart1_tx_dma"});
+  }
+}
+
+TEST_CASE("RM0038 11.3.7: a requester in the first peer slot is told")
+{
+  auto const& first = l152re().peripherals.front().name;
+  REQUIRE(first != "DMA1");
+  REQUIRE(first != "DMA2");
+  names_by_unit by_unit;
+  by_unit[first] = {"usart1_tx_dma"};
+  auto const f   = parked(l152re(), firmware, with_requesters(l152re(), by_unit));
+  fill(f, 2);
+  program(f, dma1, 4, word_sizes | minc | pinc | en, from, to, 2);
+  auto& probe = peer(f, first);
+  probe.set("usart1_tx_dma", true);
+  idle_to(f, now_ps(f) + 3 * latency_ps);
+  CHECK(probe.acks == std::vector<std::string>{"usart1_tx_dma"});
 }
 
 TEST_CASE(

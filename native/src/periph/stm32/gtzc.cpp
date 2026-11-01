@@ -619,21 +619,7 @@ public:
     auto const* const window = window_at(at);
     if(window == nullptr)
     {
-      std::uint64_t first = 0;
-      std::uint64_t last  = ~address{};
-      for(auto const& w : windows_)
-      {
-        auto const end = std::uint64_t{w.start} + w.size;
-        if(end <= at)
-        {
-          first = std::max(first, end);
-        }
-        else if(w.start > at)
-        {
-          last = std::min<std::uint64_t>(last, w.start - 1u);
-        }
-      }
-      return {.first = static_cast<address>(first), .last = static_cast<address>(last)};
+      return gap_extent(windows_, at);
     }
     auto const window_last = static_cast<address>(window->start + (window->size - 1u));
     if(window->kind == memory_kind::flash

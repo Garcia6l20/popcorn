@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "dma.hpp"
 #include "factories.hpp"
 #include "i2c_link_port.hpp"
@@ -299,7 +300,7 @@ auto eeprom_options() -> devices::eeprom_24xx_options
       .address = 0x50, .size = 4096, .address_bytes = 2, .page_size = 16, .image = eeprom_image()};
 }
 
-class request_probe final : public popcorn::periph::model, public stm32::dma_controller
+class request_probe final : public popcorn::testing::inert_model, public stm32::dma_controller
 {
 public:
   std::map<std::uint32_t, bool> levels;
@@ -326,37 +327,6 @@ public:
     }
     return std::nullopt;
   }
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 struct rig
@@ -3553,6 +3523,73 @@ TEST_CASE("a STOP queued during a byte stretch runs at the release, after the by
     CHECK(r.get("ISR", "BERR") == 0);
     CHECK(r.get("ISR", "BUSY") == 0);
     CHECK(b.receive() == 0x22);
+  }
+}
+
+auto last_port_due(stm32_fixture const& f) -> std::uint64_t
+{
+  auto const events = port_due(f);
+  REQUIRE(not events.empty());
+  return std::ranges::max(events, {}, &core::event::seq).due_ps;
+}
+
+TEST_CASE("a phase posted in the past behind an ending, held or released phase starts at its end")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    {
+      target_rig r{part};
+      r.listen();
+      auto const base = r.now() + us;
+      r.start(own, false, base, 1);
+      r.run_until(base + target_ps / 2);
+      r.write(0x11, base, 2);
+      CHECK(last_port_due(*r.f) == base + target_ps);
+      r.run_until(base + 2 * target_ps + us);
+      CHECK(
+          r.sink->answers
+          == std::vector<heard>{
+              {1, on_address, true, 0xFF, base + target_ps    },
+              {2, on_write,   true, 0xFF, base + 2 * target_ps}
+      });
+    }
+    for(bool const released : {false, true})
+    {
+      CAPTURE(released);
+      target_rig r{part};
+      auto const b = r.b();
+      r.listen();
+      auto const base = r.now() + us;
+      r.start(own, false, base, 1);
+      r.write(0x11, base, 2);
+      r.write(0x22, base, 3);
+      r.run_until(base + 3 * target_ps + 20 * us);
+      REQUIRE(r.sink->answers.size() == 2);
+      auto const read_at = r.now();
+      if(released)
+      {
+        CHECK(b.receive() == 0x11);
+      }
+      r.write(0x33, base, 4);
+      CHECK(last_port_due(*r.f) == (released ? read_at : base + 3 * target_ps));
+    }
+  }
+}
+
+TEST_CASE("a phase posted after an RCC reset that ended before it is due at the reset")
+{
+  for(auto const& part : target_parts)
+  {
+    CAPTURE(part.name);
+    target_rig r{part};
+    r.listen();
+    auto const t = r.now() + us;
+    r.run_until(t + 3 * target_ps);
+    auto const reset_ps = r.now();
+    r.rcc_pulse();
+    r.start(own, false, t, 1);
+    CHECK(last_port_due(*r.f) == reset_ps);
   }
 }
 

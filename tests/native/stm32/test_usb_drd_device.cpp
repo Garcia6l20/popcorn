@@ -101,7 +101,10 @@ TEST_CASE("an EP0 IN of 18 bytes NAKs until STATTX is VALID, then sends DATA1 an
   rig const r;
   r.enumerate();
   REQUIRE(r.port().setup(0, get_device, r.now()) == usb::handshake::ack);
-  CHECK(r.port().in(0, 0, r.now()).hs == usb::handshake::nak);
+  auto const refusal = r.port().in(0, 0, r.now());
+  CHECK(refusal.hs == usb::handshake::nak);
+  CHECK(refusal.pid == usb::data_pid::data0);
+  CHECK(refusal.data.empty());
   r.clear_flags(0);
   auto const reply = sequence(18, 1);
   r.put_bytes(0x40, reply);
@@ -176,7 +179,10 @@ TEST_CASE("a STALLed endpoint answers STALL both ways")
   rig const r;
   r.enumerate();
   r.endpoint(1, {.address = 1, .type = bulk, .stat_tx = stall, .stat_rx = stall});
-  CHECK(r.port().in(0, 1, r.now()).hs == usb::handshake::stall);
+  auto const refusal = r.port().in(0, 1, r.now());
+  CHECK(refusal.hs == usb::handshake::stall);
+  CHECK(refusal.pid == usb::data_pid::data0);
+  CHECK(refusal.data.empty());
   CHECK(r.port().out(0, 1, {}, usb::data_pid::data0, r.now()) == usb::handshake::stall);
 }
 

@@ -10,11 +10,11 @@ from typing import cast
 
 import popcorn
 import pytest
+from derived_data import model_json
 
-from .helpers import CALLEE_ELF, DRIVER_ELF, M33_JSON, PREBUILT, ROOT
+from .helpers import CALLEE_ELF, DRIVER_ELF, M33_JSON, PREBUILT
 
 HOOKS_ELF = PREBUILT / "hooks.elf"
-MODEL_JSON = ROOT / "tests" / "data" / "api" / "model.json"
 MODEL_ELF = PREBUILT / "model.elf"
 
 
@@ -47,7 +47,7 @@ def hooked() -> popcorn.Machine:
 def model_project() -> popcorn.MachineDescription:
     base = popcorn.MachineDescription(
         part="POPCORN-M33-TEST",
-        description=MODEL_JSON,
+        description=model_json(),
         images=[popcorn.Elf(MODEL_ELF)],
         boot=popcorn.Boot(until="ready", budget=10_000),
         strict=False,

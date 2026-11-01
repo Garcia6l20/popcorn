@@ -2328,3 +2328,28 @@ def test_an_acc_rule_refuses_a_second_patch_and_a_drop_rename_or_add(
     tmp_path: Path, rules: tuple[str, ...], key: str
 ) -> None:
     assert _drop_error(tmp_path, *rules).key == key
+
+
+_TWO_FAULT_RULES = {"patch": _PATCH_EN, "drop": _DROP_EN, "rename": _RENAME_EN, "add": _ADD_X}
+_NOT_ALIAS = ("fields[0].instances", "a peripheral that is not an alias, not SEC_D")
+_NO_REGISTER = ("fields[0].registers", "a register named NOPE in D")
+
+
+@pytest.mark.parametrize("kind", list(_TWO_FAULT_RULES))
+@pytest.mark.parametrize(
+    ("instances", "bad_register", "raised"),
+    [
+        ('["D", "SEC_D"]', True, _NO_REGISTER),
+        ('["SEC_D", "D"]', True, _NOT_ALIAS),
+        ('["D", "SEC_D"]', False, _NOT_ALIAS),
+    ],
+    ids=["bad-then-alias", "alias-then-bad", "good-then-alias"],
+)
+def test_a_rule_with_two_faults_raises_the_first_target_s_error(
+    tmp_path: Path, kind: str, instances: str, bad_register: bool, raised: tuple[str, str]
+) -> None:
+    rule = _TWO_FAULT_RULES[kind].replace('instances = ["D"]', f"instances = {instances}")
+    if bad_register:
+        rule = rule.replace('["CR"]', '["NOPE"]')
+    error = _drop_error(tmp_path, rule)
+    assert (error.key, error.expected) == raised

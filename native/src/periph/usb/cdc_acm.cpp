@@ -1,5 +1,7 @@
 #include <popcorn/periph/usb_cdc_acm.hpp>
 
+#include "descriptors.hpp"
+
 #include <reflex/enum.hpp>
 #include <reflex/serde/bson.hpp>
 
@@ -46,19 +48,15 @@ auto bulk_pair(interface_info const& setting) -> bool
 auto union_members(interface_info const& comm) -> std::vector<std::uint8_t>
 {
   std::span<std::uint8_t const> const extra = comm.extra;
-  for(std::size_t at = 0; at + 2 <= extra.size();)
+  for(auto const descriptor : descriptors(extra))
   {
-    auto const length = std::size_t{extra[at]};
-    if(length < 2 or at + length > extra.size())
+    if(descriptor[1] == cs_interface
+       and descriptor.size() > union_head + 1
+       and descriptor[2] == union_subtype)
     {
-      break;
-    }
-    if(extra[at + 1] == cs_interface and length > union_head + 1 and extra[at + 2] == union_subtype)
-    {
-      auto const members = extra.subspan(at + union_head, length - union_head);
+      auto const members = descriptor.subspan(union_head);
       return {members.begin(), members.end()};
     }
-    at += length;
   }
   return {};
 }
@@ -506,11 +504,6 @@ void cdc_channel::discard()
   results.clear();
 }
 
-auto cdc_hub::channel(core::link_guard const&, std::size_t function) -> cdc_channel&
-{
-  return channels_[function];
-}
-
 namespace
 {
 struct pending_out
@@ -529,7 +522,7 @@ void cdc_hub::save(std::vector<std::byte>& out) const
 {
   auto const held = lock();
   hub_state  saved;
-  for(auto const& [function, channel] : channels_)
+  for(auto const& [function, channel] : channels(held))
   {
     if(not channel.comm_interface and not channel.out.empty())
     {
@@ -546,7 +539,7 @@ void cdc_hub::save(std::vector<std::byte>& out) const
 void cdc_hub::load(std::span<std::byte const> in)
 {
   auto const held = lock();
-  for(auto& channel : channels_ | std::views::values)
+  for(auto& channel : channels(held) | std::views::values)
   {
     channel.out.clear();
   }
@@ -561,15 +554,6 @@ void cdc_hub::load(std::span<std::byte const> in)
         .out.assign_range(pending.bytes | std::views::transform([](std::byte b) {
                             return std::to_integer<std::uint8_t>(b);
                           }));
-  }
-}
-
-void cdc_hub::discard()
-{
-  auto const held = lock();
-  for(auto& channel : channels_ | std::views::values)
-  {
-    channel.discard();
   }
 }
 

@@ -14,6 +14,7 @@ from typing import cast
 from popcorn import _core
 from popcorn._enums import I2CError, I2CPhase, ResetKind
 from popcorn._errors import ConfigError, ModelError
+from popcorn._limits import MAX_PS
 from popcorn._state import StateReader, declared_fields, encode
 from popcorn.units import VirtualDuration, VirtualTime
 
@@ -24,7 +25,6 @@ if typing.TYPE_CHECKING:
 _CS = re.compile(r"P([A-Z])(\d{1,2})")
 _MAX_STRETCH_PS = 10**12
 _STATES: weakref.WeakKeyDictionary[type, tuple[tuple[str, type], ...]] = weakref.WeakKeyDictionary()
-_MAX_PS = (1 << 64) - 1
 _MAX_SCK_HZ = 100_000_000
 _MAX_FRAMES = 4096
 _MAX_PHASES = 4096
@@ -75,6 +75,24 @@ def _saved(device: object, data: object) -> bytes:
     if not isinstance(data, bytes | bytearray | memoryview):
         raise ModelError(f"{device!r}: snapshot() returned a {type(data).__name__}, not bytes")
     return bytes(typing.cast("bytes | bytearray | memoryview[int]", data))
+
+
+class _Stateful(typing.Protocol):
+    def reset(self, kind: ResetKind) -> None: ...
+    def snapshot(self) -> bytes: ...
+    def restore(self, data: bytes) -> None: ...
+
+
+def _reset_trampoline(self: _Stateful, kind: _core.ResetKind) -> None:
+    self.reset(ResetKind(kind.value))
+
+
+def _save_trampoline(self: _Stateful) -> bytes:
+    return _saved(self, typing.cast(object, self.snapshot()))
+
+
+def _load_trampoline(self: _Stateful, data: bytes) -> None:
+    self.restore(data)
 
 
 def _word(device: object, method: str, value: object, bits: int) -> int:
@@ -378,9 +396,9 @@ class I2CTarget(_core.I2CTargetBase):
             raise TypeError(f"hold_bus() takes at as a VirtualTime or None, not {at!r}")
         if for_.ps <= 0:
             raise ValueError(f"a bus hold lasts more than 0 ps, not {for_}")
-        if for_.ps > _MAX_PS:
+        if for_.ps > MAX_PS:
             raise ValueError(f"a bus hold of {for_} leaves the 64-bit picosecond range")
-        if at is not None and not 0 <= at.ps <= _MAX_PS - for_.ps:
+        if at is not None and not 0 <= at.ps <= MAX_PS - for_.ps:
             raise ValueError(f"a bus hold from {at} for {for_} leaves the 64-bit picosecond range")
         held = _ATTACHED.get(id(self))
         hold = None if held is None else held[2]()
@@ -433,14 +451,9 @@ class I2CTarget(_core.I2CTargetBase):
     def _stop(self, at: int) -> None:
         self.on_stop(VirtualTime(at))
 
-    def _reset(self, kind: _core.ResetKind) -> None:
-        self.reset(ResetKind(kind.value))
-
-    def _save(self) -> bytes:
-        return _saved(self, typing.cast(object, self.snapshot()))
-
-    def _load(self, data: bytes) -> None:
-        self.restore(data)
+    _reset = _reset_trampoline
+    _save = _save_trampoline
+    _load = _load_trampoline
 
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} at {self._bus_address:#04x}>"
@@ -531,14 +544,9 @@ class SpiTarget(_core.SpiTargetBase):
     def _exchange(self, out: int, bits: int, at: int) -> int:
         return _word(self, "on_exchange", self.on_exchange(out, bits, VirtualTime(at)), bits)
 
-    def _reset(self, kind: _core.ResetKind) -> None:
-        self.reset(ResetKind(kind.value))
-
-    def _save(self) -> bytes:
-        return _saved(self, typing.cast(object, self.snapshot()))
-
-    def _load(self, data: bytes) -> None:
-        self.restore(data)
+    _reset = _reset_trampoline
+    _save = _save_trampoline
+    _load = _load_trampoline
 
     def __repr__(self) -> str:
         return f"<{type(self).__qualname__} on {self._cs or 'SS'}>"
@@ -655,7 +663,7 @@ class SpiController(_core.SpiControllerBase):
             if not 0 <= frame < 1 << self._bits:
                 raise ValueError(f"a {self._bits}-bit SPI frame is 0 to {(1 << self._bits) - 1}")
             checked.append(frame)
-        if at is not None and not 0 <= at.ps <= _MAX_PS:
+        if at is not None and not 0 <= at.ps <= MAX_PS:
             raise ValueError(f"an SPI transfer at {at} leaves the 64-bit picosecond range")
         held = _ATTACHED.get(id(self))
         post = None if held is None else held[3]()

@@ -11,9 +11,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <limits>
-#include <mutex>
-#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -48,21 +45,9 @@ struct queued_pdm_sample
  *        modulator 0, silence, and counts the bits as idle. The model clocks it on the machine
  *        thread, the binding writes and reads it, each under its link lock.
  */
-class pdm_queue_source final : public periph::stm32::pdm_source
+class pdm_queue_source final : public periph::stm32::pdm_source, public link_lockable
 {
 public:
-  /** @brief Takes the link lock, blocking. */
-  [[nodiscard]] auto lock() const -> core::link_guard
-  {
-    return core::link_guard{mutex_};
-  }
-
-  /** @brief Takes the link lock if it is free. */
-  [[nodiscard]] auto try_lock() const -> core::link_guard
-  {
-    return core::link_guard{mutex_, std::try_to_lock};
-  }
-
   void clock(std::span<std::uint8_t> out, periph::stm32::bit_rate rate) override
   {
     auto const held = lock();
@@ -227,7 +212,6 @@ private:
     return bit;
   }
 
-  mutable std::mutex             mutex_;
   std::deque<segment>            segments_;
   periph::stm32::modulator_state modulator_{};
   std::uint64_t                  samples_{};
@@ -240,7 +224,7 @@ private:
  *        queue drops its oldest sample and counts it. The model fills it on the machine thread,
  *        the binding drains it, each under its link lock.
  */
-class pdm_queue_tap final : public periph::stm32::pdm_tap
+class pdm_queue_tap final : public periph::stm32::pdm_tap, public tagged_queue<queued_pdm_sample>
 {
 public:
   /**
@@ -248,112 +232,21 @@ public:
    * @param resets The machine's reset count, which tags each sample: a sample from before the
    *        last reset is taken whatever the time bound of take().
    */
-  explicit pdm_queue_tap(core::reset_counter resets = {}) : resets_{std::move(resets)}
+  explicit pdm_queue_tap(core::reset_counter resets = {})
+      : tagged_queue{std::move(resets), pdm_sample_limit}
   {}
-
-  /** @brief The machine's reset count now, the tag a sample queued next takes. */
-  [[nodiscard]] auto resets() const noexcept -> std::uint64_t
-  {
-    return resets_.load();
-  }
-
-  /** @brief Takes the link lock, blocking. */
-  [[nodiscard]] auto lock() const -> core::link_guard
-  {
-    return core::link_guard{mutex_};
-  }
-
-  /** @brief Takes the link lock if it is free. */
-  [[nodiscard]] auto try_lock() const -> core::link_guard
-  {
-    return core::link_guard{mutex_, std::try_to_lock};
-  }
 
   void wrote(std::int32_t pcm, vtime at, bool dropped, bool captured) override
   {
     auto const held = lock();
-    trim(held, limit_ - 1);
-    samples_.push_back(
-        {.pcm      = pcm,
-         .overrun  = dropped,
-         .captured = captured,
-         .at_ps    = at.ps,
-         .resets   = resets_.load()});
-  }
-
-  /** @brief Samples kept and not taken yet. */
-  [[nodiscard]] auto available(core::link_guard const& held) const noexcept -> std::uint64_t
-      pre(held.guards(mutex_))
-  {
-    return samples_.size();
-  }
-
-  /** @brief Samples dropped because the queue was full. */
-  [[nodiscard]] auto dropped(core::link_guard const& held) const noexcept -> std::uint64_t
-      pre(held.guards(mutex_))
-  {
-    return dropped_;
-  }
-
-  /**
-   * @brief Takes the oldest samples, up to the first past_bound() leaves queued.
-   * @param held The queue's lock.
-   * @param count Most samples taken.
-   * @param until_ps Latest write time taken, in picoseconds since the reset @p resets names.
-   * @param resets The reset count @p until_ps belongs to, the count now when none.
-   * @return The samples, oldest first.
-   */
-  auto take(
-      core::link_guard const&      held,
-      std::uint64_t                count,
-      std::uint64_t                until_ps = std::numeric_limits<std::uint64_t>::max(),
-      std::optional<std::uint64_t> resets   = std::nullopt)
-      -> std::vector<queued_pdm_sample> pre(held.guards(mutex_))
-  {
-    auto const first = samples_.begin();
-    auto const last  = std::find_if(
-        first, first + static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(count, samples_.size())),
-        [until_ps, bound = resets.value_or(resets_.load())](queued_pdm_sample const& sample) {
-          return past_bound(sample.resets, sample.at_ps, until_ps, bound);
-        });
-    std::vector<queued_pdm_sample> out(first, last);
-    samples_.erase(first, last);
-    return out;
+    push(held, {.pcm = pcm, .overrun = dropped, .captured = captured, .at_ps = at.ps});
   }
 
   /** @brief Drops the kept samples and clears the drop count. */
   void discard(core::link_guard const& held) pre(held.guards(mutex_))
   {
-    samples_.clear();
+    items_.clear();
     dropped_ = 0;
   }
-
-  /**
-   * @brief Sets the most samples kept, dropping the oldest beyond it.
-   * @param held The queue's lock.
-   * @param limit Samples, at least 1.
-   */
-  void set_limit(core::link_guard const& held, std::uint64_t limit) pre(held.guards(mutex_))
-      pre(limit != 0)
-  {
-    limit_ = limit;
-    trim(held, limit);
-  }
-
-private:
-  void trim(core::link_guard const&, std::uint64_t kept)
-  {
-    while(samples_.size() > kept)
-    {
-      samples_.pop_front();
-      ++dropped_;
-    }
-  }
-
-  mutable std::mutex            mutex_;
-  core::reset_counter           resets_;
-  std::deque<queued_pdm_sample> samples_;
-  std::uint64_t                 limit_ = pdm_sample_limit;
-  std::uint64_t                 dropped_{};
 };
 }

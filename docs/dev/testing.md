@@ -34,6 +34,11 @@ such as `native.plugin-loader`. `--list` shows the names.
   `popcorn/plugin/bindings.hpp` is excluded because it needs nanobind.
 - The `tests/native/support` folder holds the shared fixtures for machines and firmware, and a
   smoke Python module.
+- `tests/data/core/m33_variants.py` derives the descriptors `m33_code_alias`, `m33_shared_page`
+  and `model` from `tests/data/core/m33.json`. A build rule writes them into
+  `build/test-data/m33` for the native tests. For the Python tests,
+  `tests/python/derived_data.py` writes them at first use, once per content hash, into
+  `popcorn-test-data-<uid>` under the temp directory. Edit the generator to change a variant.
 
 ## Firmware tests
 

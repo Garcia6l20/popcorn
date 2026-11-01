@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "gtzc.hpp"
 #include "stm32_fixture.hpp"
 
@@ -44,18 +45,10 @@ constexpr bus_attrs secure_unpriv{.by = initiator::cpu, .secure = true, .privile
 constexpr bus_attrs nonsecure_priv{.by = initiator::cpu, .secure = false, .privileged = true};
 constexpr bus_attrs nonsecure_unpriv{.by = initiator::cpu, .secure = false, .privileged = false};
 
-class probe final : public periph::model
+class probe final : public popcorn::testing::inert_model
 {
 public:
   explicit probe(periph::model_context& ctx) : ctx_{ctx}
-  {}
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-
-  void reset(periph::register_file&, popcorn::reset_kind) override
   {}
 
   auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
@@ -63,26 +56,6 @@ public:
   {
     return 0;
   }
-
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-
-  void save(std::vector<std::byte>&) const override
-  {}
-
-  void load(std::span<std::byte const>) override
-  {}
 
   [[nodiscard]] auto services() const -> core::machine_services&
   {
@@ -665,6 +638,58 @@ TEST_CASE("RM0456 10.8.1, P1: PWR_SECCFGR is RAZ/WI under TZEN=0")
   CHECK(r.peek("PWR", "SECCFGR") == 0);
   r.write("PWR", "CR2", 0x1, nonsecure_unpriv);
   CHECK(r.peek("PWR", "CR2") == 0x1);
+}
+
+TEST_CASE("RM0456 10.8.2: PWR_PRIVCFGR needs a privileged access and its SPRIV bit a Secure one")
+{
+  rig const r{true};
+  r.write("PWR", "PRIVCFGR", 0x3, nonsecure_unpriv);
+  CHECK(r.peek("PWR", "PRIVCFGR") == 0);
+  r.write("PWR", "PRIVCFGR", 0x3, nonsecure_priv);
+  CHECK(r.peek("PWR", "PRIVCFGR") == 0x2);
+  r.write("PWR", "PRIVCFGR", 0x3, secure_priv);
+  CHECK(r.peek("PWR", "PRIVCFGR") == 0x3);
+}
+
+TEST_CASE("RM0456 10.8.1: PWR_SECCFGR is privileged with SPRIV, a Non-secure read raises no event")
+{
+  rig const  r{true};
+  auto const lpm   = bit("PWR", "SECCFGR", "LPMSEC");
+  auto const event = bit("GTZC2_TZIC", "SR2", "PWRF");
+  CHECK(r.read("PWR", "SECCFGR", nonsecure_priv) == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == 0);
+  r.write("PWR", "SECCFGR", lpm, secure_unpriv);
+  CHECK(r.peek("PWR", "SECCFGR") == lpm);
+  r.write("PWR", "SECCFGR", 0, secure_unpriv);
+  r.write("PWR", "PRIVCFGR", 0x1, secure_priv);
+  r.write("PWR", "SECCFGR", lpm, secure_unpriv);
+  CHECK(r.peek("PWR", "SECCFGR") == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == 0);
+  r.write("PWR", "SECCFGR", lpm, nonsecure_priv);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == event);
+}
+
+TEST_CASE("RM0456 11.5.1: RCC_SECCFGR raises the RCC event on a Non-secure write only")
+{
+  rig const  r{true};
+  auto const pll1  = bit("RCC", "SECCFGR", "PLL1SEC");
+  auto const event = bit("GTZC2_TZIC", "SR2", "RCCF");
+  CHECK(r.read("RCC", "SECCFGR", nonsecure_priv) == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == 0);
+  r.write("RCC", "SECCFGR", pll1, nonsecure_priv);
+  CHECK(r.peek("RCC", "SECCFGR") == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == event);
+}
+
+TEST_CASE(
+    "RM0456 10.8 and 11.5, P1: an unprivileged write reaches word 0 of PWR and RCC under TZEN=0")
+{
+  rig const  r{false};
+  auto const hsion = r.bit("RCC", "CR", "HSION");
+  r.write("PWR", "CR1", 0x1, nonsecure_unpriv);
+  CHECK(r.peek("PWR", "CR1") == 0x1);
+  r.write("RCC", "CR", hsion, nonsecure_unpriv);
+  CHECK((r.peek("RCC", "CR") & hsion) == hsion);
 }
 
 TEST_CASE(
@@ -1651,4 +1676,23 @@ TEST_CASE_TEMPLATE(
   std::array<std::byte, 4> const in{};
   REQUIRE(r.bus->services().write_block(sram1_secure_block, in, filtered).has_value());
   CHECK(words_at(r, sram1_secure_block, 1) == std::vector<std::uint32_t>{secret});
+}
+
+TEST_CASE_TEMPLATE(
+    "a Secure memory view moves unaligned block bytes in little-endian order",
+    P,
+    on_u575,
+    on_h573)
+{
+  rig const                      r{P{}, true};
+  auto                           view = r.target->mem(true);
+  std::array<std::byte, 7> const in{std::byte{0x11}, std::byte{0x22}, std::byte{0x33},
+                                    std::byte{0x44}, std::byte{0x55}, std::byte{0x66},
+                                    std::byte{0x77}};
+  REQUIRE(view.write_block(sram1_secure_block + 1, in).has_value());
+  CHECK(r.target->mem().read(sram1_secure_block, 4) == 0x3322'1100u);
+  CHECK(r.target->mem().read(sram1_secure_block + 4, 4) == 0x7766'5544u);
+  std::array<std::byte, 7> out{};
+  REQUIRE(view.read_block(sram1_secure_block + 1, out).has_value());
+  CHECK(out == in);
 }

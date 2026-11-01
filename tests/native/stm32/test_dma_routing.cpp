@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "stm32_fixture.hpp"
@@ -34,7 +35,7 @@ constexpr popcorn::address source      = 0x2001'0000;
 constexpr popcorn::address destination = 0x2001'1000;
 constexpr std::uint32_t    length      = 16;
 
-class requester final : public periph::model, public stm32::dma_requester
+class requester final : public popcorn::testing::inert_model, public stm32::dma_requester
 {
 public:
   explicit requester(periph::model_context& ctx)
@@ -54,36 +55,11 @@ public:
     }
   }
 
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
   void reset(periph::register_file&, popcorn::reset_kind) override
   {
     tx.resolve();
     unknown_signal.resolve();
   }
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 auto machine() -> stm32_fixture
@@ -173,7 +149,7 @@ auto copied(stm32_fixture const& f) -> bool
 
 using request_log = std::vector<std::pair<std::string, std::pair<std::uint32_t, bool>>>;
 
-class fake_controller final : public periph::model, public stm32::dma_controller
+class fake_controller final : public popcorn::testing::inert_model, public stm32::dma_controller
 {
 public:
   fake_controller(
@@ -183,33 +159,6 @@ public:
       : name_{std::move(name)}, tx_{tx}, log_{std::move(log)}
   {}
 
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
   void on_request(std::uint32_t request, bool level) override
   {
     log_->emplace_back(name_, std::pair{request, level});

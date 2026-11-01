@@ -10,6 +10,7 @@
 #include "rcc_l1.hpp"
 #include "rcc_resets.hpp"
 #include "rcc_u5.hpp"
+#include "secure_config.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
@@ -19,7 +20,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -37,14 +37,6 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-auto lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(
-      out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return out;
-}
-
 template <typename Traits>
 inline constexpr std::size_t source_count = role_count<typename Traits::source>;
 
@@ -53,8 +45,6 @@ inline constexpr std::size_t signal_count = role_count<typename Traits::signal>;
 
 template <typename Traits>
 inline constexpr std::size_t event_count = source_count<Traits> + (Traits::hsi_divider ? 1 : 0);
-
-inline constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 
 struct unit_bits
 {
@@ -1307,7 +1297,7 @@ template <typename Traits> void rcc_model<Traits>::reset(register_file& regs, re
     }
     csr |= kept_flags;
   }
-  for(auto const name : Traits::reset_flags_of(kind))
+  for(auto const name : reset_flags_in(Traits::reset_flag_rows, kind))
   {
     if(not name.empty())
     {
@@ -1470,36 +1460,17 @@ template <typename Traits>
 auto rcc_model<Traits>::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
 {
   auto const all = ~std::uint32_t{};
-  if(secure_ and word == secure_->offset)
+  if(auto const head = config_word_guard(
+         secure_, privilege_, secure_privileged_, regs_, ctx_.trustzone, word, ctx, write, [&] {
+           if(unit_)
+           {
+             illegal_.raise(ctx_.peers, *unit_, ctx.by);
+           }
+         }))
   {
-    if(not ctx_.trustzone)
-    {
-      return bus_guard::both(all);
-    }
-    if(not ctx.secure)
-    {
-      if(write and unit_)
-      {
-        illegal_.raise(ctx_.peers, *unit_, ctx.by);
-      }
-      return {.wi = all};
-    }
-    auto const spriv = secure_privileged_.of(regs_.peek(privilege_.offset)) != 0;
-    return {.wi = not ctx.privileged and spriv ? all : 0};
-  }
-  if(not ctx_.trustzone)
-  {
-    return {};
+    return *head;
   }
   auto const privilege = regs_.peek(privilege_.offset);
-  if(word == privilege_.offset)
-  {
-    if(not ctx.privileged)
-    {
-      return {.wi = all};
-    }
-    return {.wi = ctx.secure ? 0 : secure_privileged_.mask()};
-  }
   resolve_units();
   auto const    seccfgr = secure_word();
   std::uint32_t secured = 0;

@@ -1321,3 +1321,155 @@ TEST_CASE("load_elf clears the Thumb bit of debug functions and drops one past t
           {.low = 0x0800'0000, .high = 0x0800'0008, .file = 0, .line = 3}
   });
 }
+
+namespace
+{
+auto wrap_unit(std::uint16_t version, std::uint8_t unit_type, byte_writer const& die)
+    -> std::vector<std::byte>
+{
+  byte_writer body;
+  body.u16(version);
+  if(version >= 5)
+  {
+    body.u8(unit_type);
+    body.u8(4);
+    body.u32(0);
+  }
+  else
+  {
+    body.u32(0);
+    body.u8(4);
+  }
+  body.bytes.insert(body.bytes.end(), die.bytes.begin(), die.bytes.end());
+  byte_writer info;
+  info.u32(static_cast<std::uint32_t>(body.size()));
+  info.bytes.insert(info.bytes.end(), body.bytes.begin(), body.bytes.end());
+  return info.bytes;
+}
+
+auto unit_header_abbrevs() -> byte_writer
+{
+  constexpr std::uint64_t stmt_list = 0x10, low_pc = 0x11, high_pc = 0x12;
+  constexpr std::uint64_t sec_offset = 0x17, data4 = 0x06, data1 = 0x0b, addr = 0x01;
+  constexpr std::uint64_t decl_file = 0x3a, decl_line = 0x3b;
+  byte_writer             abbrev;
+  abbreviation(
+      abbrev, 1, 0x11, true,
+      {
+          {stmt_list, sec_offset}
+  });
+  abbreviation(
+      abbrev, 5, dw_tag_subprogram_test, false,
+      {
+          {decl_file, data1},
+          {decl_line, data1},
+          {low_pc,    addr },
+          {high_pc,   data4}
+  });
+  abbrev.uleb(0);
+  return abbrev;
+}
+
+auto cu_die(std::uint32_t line_offset) -> byte_writer
+{
+  byte_writer die;
+  die.uleb(1);
+  die.u32(line_offset);
+  return die;
+}
+
+auto function_die(std::uint32_t low, std::uint32_t size) -> byte_writer
+{
+  byte_writer die;
+  die.uleb(5);
+  die.u8(1);
+  die.u8(5);
+  die.u32(low);
+  die.u32(size);
+  return die;
+}
+
+auto concat(std::vector<std::vector<std::byte>> const& parts) -> std::vector<std::byte>
+{
+  std::vector<std::byte> out;
+  for(auto const& part : parts)
+  {
+    out.insert(out.end(), part.begin(), part.end());
+  }
+  return out;
+}
+
+auto sections_of(std::vector<std::byte> const& info, byte_writer const& abbrev) -> debug_sections
+{
+  return debug_sections{
+      .info        = info,
+      .abbrev      = abbrev.bytes,
+      .line        = {},
+      .str         = {},
+      .line_str    = {},
+      .str_offsets = {}};
+}
+}
+
+TEST_CASE("both unit walks step over a v5 unit that is neither compile nor partial")
+{
+  auto const abbrev = unit_header_abbrevs();
+  auto       cu     = cu_die(7);
+  auto const code   = function_die(0x1000, 0x10);
+  cu.bytes.insert(cu.bytes.end(), code.bytes.begin(), code.bytes.end());
+  for(std::uint8_t const skipped :
+      {std::uint8_t{2}, std::uint8_t{4}, std::uint8_t{5}, std::uint8_t{6}})
+  {
+    CAPTURE(int{skipped});
+    auto const info     = concat({
+        wrap_unit(5, skipped, cu_die(99)),
+        wrap_unit(5, skipped, function_die(0xdead'0000, 4)),
+        wrap_unit(5, 1, cu),
+    });
+    auto const sections = sections_of(info, abbrev);
+    auto const units    = compile_units(sections);
+    REQUIRE(units.size() == 1);
+    CHECK(units[0].line_offset == 7);
+    auto const found = scan_functions(sections);
+    REQUIRE(found.size() == 1);
+    CHECK(found[0].low == 0x1000);
+    CHECK(found[0].high == 0x1010);
+    CHECK(found[0].line_offset == 7);
+    CHECK(found[0].file == 1);
+    CHECK(found[0].line == 5);
+  }
+}
+
+TEST_CASE("scan_functions reads the functions of a v5 partial unit")
+{
+  auto const abbrev   = unit_header_abbrevs();
+  auto const info     = concat({wrap_unit(5, 3, function_die(0x2000, 0x20))});
+  auto const sections = sections_of(info, abbrev);
+  auto const found    = scan_functions(sections);
+  REQUIRE(found.size() == 1);
+  CHECK(found[0].low == 0x2000);
+  CHECK(found[0].high == 0x2020);
+}
+
+TEST_CASE("both unit walks accept DWARF versions 2 to 5 and refuse the others")
+{
+  auto const abbrev = unit_header_abbrevs();
+  for(std::uint16_t const version : {2, 3, 4, 5})
+  {
+    CAPTURE(version);
+    auto const info     = concat({wrap_unit(version, 1, cu_die(7))});
+    auto const sections = sections_of(info, abbrev);
+    auto const units    = compile_units(sections);
+    REQUIRE(units.size() == 1);
+    CHECK(units[0].line_offset == 7);
+    CHECK(scan_functions(sections).empty());
+  }
+  for(std::uint16_t const version : {0, 1, 6, 0x100})
+  {
+    CAPTURE(version);
+    auto const info     = concat({wrap_unit(version, 1, cu_die(7))});
+    auto const sections = sections_of(info, abbrev);
+    CHECK_THROWS_AS(std::ignore = compile_units(sections), popcorn::image_error);
+    CHECK_THROWS_AS(std::ignore = scan_functions(sections), popcorn::image_error);
+  }
+}

@@ -9,6 +9,8 @@
 
 #include <doctest/doctest.h>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -107,6 +109,25 @@ TEST_CASE("a DMA access through services hits a watch as dma")
   CHECK(hits[1].addr == counter);
   CHECK(hits[1].size == 4);
   CHECK(hits[1].value == 9);
+}
+
+TEST_CASE("a block through a watched word moves its bytes in little-endian order")
+{
+  auto                         f       = booted();
+  auto const                   counter = fn("counter");
+  std::vector<core::watch_hit> hits;
+  auto const watch    = f.target->add_watch(counter, 4, core::watch_kind::access, recorder(hits));
+  auto&      services = f.module->attached_services();
+  std::array<std::byte, 7> const in{std::byte{0x11}, std::byte{0x22}, std::byte{0x33},
+                                    std::byte{0x44}, std::byte{0x55}, std::byte{0x66},
+                                    std::byte{0x77}};
+  REQUIRE(services.write_block(counter - 1, in, initiator::dma));
+  CHECK(f.target->mem().read(counter, 4) == 0x5544'3322u);
+  CHECK((f.target->mem().read(counter + 4, 4).value() & 0xffffu) == 0x7766u);
+  std::array<std::byte, 7> out{};
+  REQUIRE(services.read_block(counter - 1, out, initiator::dma));
+  CHECK(out == in);
+  CHECK_FALSE(hits.empty());
 }
 
 TEST_CASE("a watch on a peripheral register fires from firmware with an exact pc")

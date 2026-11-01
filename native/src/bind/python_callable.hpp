@@ -11,6 +11,7 @@
 #include <nanobind/nanobind.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <ranges>
@@ -247,6 +248,22 @@ private:
   alive_flag              collected_ = nullptr;
   core::machine_services* services_  = nullptr;
 };
+
+/**
+ * @brief Appends the bytes a `_save` hook returned to @p out, nothing when the call was refused.
+ * @param result What callback_cell::call() returned, a bytes object when not empty.
+ * @param out The snapshot bytes, the GIL held.
+ */
+inline void append(std::optional<reflex::py::nb::object> const& result, std::vector<std::byte>& out)
+{
+  if(not result)
+  {
+    return;
+  }
+  auto const bytes = reflex::py::nb::cast<reflex::py::nb::bytes>(*result);
+  auto const data  = static_cast<std::byte const*>(bytes.data());
+  out.insert(out.end(), data, data + bytes.size());
+}
 
 /**
  * @brief A Python callable native code keeps, with the context it runs in, both released under

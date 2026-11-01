@@ -256,7 +256,7 @@ struct l1_rcc
   static constexpr std::string_view backup_register      = "CSR";
   static constexpr std::string_view reset_flags_register = "CSR";
   /** @brief Fields of RCC_CSR outside the RTC domain, which a system reset resets: LSION and
-   *         LSIRDY, RM0038 6.3.14, and RMVF. The reset flags follow reset_flags_of(). */
+   *         LSIRDY, RM0038 6.3.14, and RMVF. The reset flags follow reset_flag_rows. */
   static constexpr std::string_view backup_excluded = "LSION LSIRDY RMVF";
   static constexpr std::uint32_t    sw_mask         = 0b11;
 
@@ -272,35 +272,23 @@ struct l1_rcc
   }
 
   /**
-   * @brief Flags of `RCC_CSR` a reset of @p kind sets, RM0038 6.3.14: PORRSTF and PINRSTF for a
-   *        power reset, the power-on reset value 0x0C00 0000, then PINRSTF, SFTRSTF, IWDGRSTF,
-   *        WWDGRSTF, LPWRRSTF and OBLRSTF.
-   * @param kind Kind of the reset.
+   * @brief Flags of `RCC_CSR` each kind of reset sets, one row per `reset_kind`, RM0038 6.3.14:
+   * PORRSTF and PINRSTF for a power reset, the power-on reset value 0x0C00 0000, then PINRSTF,
+   * SFTRSTF, IWDGRSTF, WWDGRSTF, LPWRRSTF and OBLRSTF.
    */
-  static constexpr auto reset_flags_of(reset_kind kind) noexcept -> std::array<std::string_view, 2>
-  {
-    switch(kind)
-    {
-      case reset_kind::power_on:
-      case reset_kind::brown_out:
-        return {"PORRSTF", "PINRSTF"};
-      case reset_kind::pin:
-        return {"PINRSTF", {}};
-      case reset_kind::software:
-        return {"SFTRSTF", {}};
-      case reset_kind::watchdog:
-        return {"IWDGRSTF", {}};
-      case reset_kind::window_watchdog:
-        return {"WWDGRSTF", {}};
-      case reset_kind::low_power:
-        return {"LPWRRSTF", {}};
-      case reset_kind::option_load:
-        return {"OBLRSTF", {}};
-      case reset_kind::peripheral:
-        return {};
-    }
-    return {};
-  }
+  static constexpr auto reset_flag_rows = std::to_array<reset_flag_row>({
+      {reset_kind::power_on,        {"PORRSTF", "PINRSTF"}},
+      {reset_kind::brown_out,       {"PORRSTF", "PINRSTF"}},
+      {reset_kind::pin,             {"PINRSTF", {}}       },
+      {reset_kind::software,        {"SFTRSTF", {}}       },
+      {reset_kind::watchdog,        {"IWDGRSTF", {}}      },
+      {reset_kind::window_watchdog, {"WWDGRSTF", {}}      },
+      {reset_kind::low_power,       {"LPWRRSTF", {}}      },
+      {reset_kind::option_load,     {"OBLRSTF", {}}       },
+      {reset_kind::peripheral,      {}                    },
+  });
+
+  static_assert(covers_every_reset_kind(reset_flag_rows));
 };
 }
 }

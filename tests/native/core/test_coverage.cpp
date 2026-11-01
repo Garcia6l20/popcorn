@@ -7,6 +7,7 @@
 #include <popcorn/periph/model.hpp>
 
 #include "../../../native/src/core/machine_impl.hpp"
+#include "../support/inert_model.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 
@@ -314,39 +315,13 @@ constexpr address raz        = 0x4004'0000;
 constexpr address data_reg   = 0x58;
 constexpr address ctrl_reg   = 0x5c;
 
-class storage_model final : public popcorn::periph::model
+class storage_model final : public popcorn::testing::inert_model
 {
 public:
   [[nodiscard]] auto claims() const -> std::vector<std::string> override
   {
     return {"DATA", "CTRL"};
   }
-  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
   [[nodiscard]] auto storage_only(std::uint32_t offset) const -> bool override
   {
     return offset == ctrl_reg;

@@ -863,6 +863,35 @@ TEST_CASE("functions of one name in one file add their entries")
   CHECK(starting(text, "FNDA:") == std::vector<std::string>{"FNDA:5,f"});
 }
 
+TEST_CASE("only function symbols inside an executable segment get FN records")
+{
+  auto made = synthetic(
+      nops(8),
+      {
+          {0x100, 3},
+          {0x108, 5},
+          {0x110, 0},
+          {0x204, 9},
+          {0x208, 0}
+  },
+      8);
+  made.symbols.push_back(
+      {.name = "data", .value = 0x108, .size = 8, .kind = image::symbol_kind::object});
+  made.symbols.push_back(
+      {.name = "other", .value = 0x108, .size = 4, .kind = image::symbol_kind::other});
+  made.symbols.push_back(
+      {.name = "outside", .value = 0x204, .size = 4, .kind = image::symbol_kind::function});
+  auto const text = lcov_of(
+      made, {
+                group_of({{.start = 0x100, .size = 4, .hits = 1}},
+                {                                     },
+                0x110)
+  });
+  CHECK(starting(text, "FN:") == std::vector<std::string>{"FN:3,3,f"});
+  CHECK(starting(text, "FNDA:") == std::vector<std::string>{"FNDA:1,f"});
+  CHECK(starting(text, "FNF:") == std::vector<std::string>{"FNF:1"});
+}
+
 TEST_CASE("every file record starts with its TN record")
 {
   auto made = synthetic(

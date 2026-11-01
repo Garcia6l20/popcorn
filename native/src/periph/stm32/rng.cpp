@@ -24,7 +24,6 @@ namespace
 {
 using wide = unsigned __int128;
 
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 constexpr std::uint32_t work_done     = 0;
 constexpr std::uint32_t condrst_done  = 1;
 constexpr std::uint32_t auto_reset    = 2;

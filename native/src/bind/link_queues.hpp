@@ -38,6 +38,127 @@ namespace popcorn::bind::detail
   return tag > resets or (tag == resets and at_ps > until_ps);
 }
 
+/** @brief The link lock of an endpoint: the engine and the binding touch it only under the lock. */
+class link_lockable
+{
+public:
+  /** @brief Takes the link lock, blocking. */
+  [[nodiscard]] auto lock() const -> core::link_guard
+  {
+    return core::link_guard{mutex_};
+  }
+
+  /** @brief Takes the link lock if it is free. */
+  [[nodiscard]] auto try_lock() const -> core::link_guard
+  {
+    return core::link_guard{mutex_, std::try_to_lock};
+  }
+
+protected:
+  link_lockable()  = default;
+  ~link_lockable() = default;
+
+  mutable std::mutex mutex_;
+};
+
+/**
+ * @brief Records an endpoint keeps for Python under its link lock, each tagged with the
+ *        machine's reset count, at most `limit` of them: a full queue drops its oldest record
+ *        and counts it.
+ * @tparam Item The record, with an `at_ps` time and a `resets` tag.
+ */
+template <typename Item> class tagged_queue : public link_lockable
+{
+public:
+  /** @brief The machine's reset count now, the tag a record queued next takes. */
+  [[nodiscard]] auto resets() const noexcept -> std::uint64_t
+  {
+    return resets_.load();
+  }
+
+  /** @brief Records not taken yet. */
+  [[nodiscard]] auto available(core::link_guard const& held) const noexcept -> std::uint64_t
+      pre(held.guards(mutex_))
+  {
+    return items_.size();
+  }
+
+  /** @brief Records dropped because the queue was full. */
+  [[nodiscard]] auto dropped(core::link_guard const& held) const noexcept -> std::uint64_t
+      pre(held.guards(mutex_))
+  {
+    return dropped_;
+  }
+
+  /**
+   * @brief Takes the oldest records, up to the first past_bound() leaves queued.
+   * @param held The queue's lock.
+   * @param count Most records taken.
+   * @param until_ps Latest record time taken, in picoseconds since the reset @p resets names.
+   * @param resets The reset count @p until_ps belongs to, the count now when none.
+   * @return The records, oldest first.
+   */
+  auto take(
+      core::link_guard const&      held,
+      std::uint64_t                count,
+      std::uint64_t                until_ps = std::numeric_limits<std::uint64_t>::max(),
+      std::optional<std::uint64_t> resets   = std::nullopt)
+      -> std::vector<Item> pre(held.guards(mutex_))
+  {
+    auto const first = items_.begin();
+    auto const last  = std::find_if(
+        first, first + static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(count, items_.size())),
+        [until_ps, bound = resets.value_or(resets_.load())](Item const& item) {
+          return past_bound(item.resets, item.at_ps, until_ps, bound);
+        });
+    std::vector<Item> out(first, last);
+    items_.erase(first, last);
+    return out;
+  }
+
+  /**
+   * @brief Sets the most records kept, dropping the oldest beyond it.
+   * @param held The queue's lock.
+   * @param limit Records, at least 1.
+   */
+  void set_limit(core::link_guard const& held, std::uint64_t limit) pre(held.guards(mutex_))
+      pre(limit != 0)
+  {
+    limit_ = limit;
+    trim(held, limit);
+  }
+
+protected:
+  tagged_queue(core::reset_counter resets, std::uint64_t limit)
+      : resets_{std::move(resets)}, limit_{limit}
+  {}
+
+  ~tagged_queue() = default;
+
+  void push(core::link_guard const& held, Item item)
+  {
+    trim(held, limit_ - 1);
+    item.resets = resets_.load();
+    items_.push_back(std::move(item));
+  }
+
+  std::deque<Item> items_;
+  std::uint64_t    dropped_{};
+
+private:
+  void trim(core::link_guard const&, std::uint64_t kept)
+  {
+    while(items_.size() > kept)
+    {
+      items_.pop_front();
+      ++dropped_;
+    }
+  }
+
+  core::reset_counter resets_;
+  std::uint64_t       limit_;
+};
+
 /** @brief Transmitted frames a UART link keeps before dropping the oldest, about 16 MiB. */
 inline constexpr std::uint64_t uart_frame_limit = std::uint64_t{1} << 20;
 
@@ -59,7 +180,7 @@ struct queued_uart_frame
  *        of them: a full queue drops its oldest frame and counts it. The engine fills it, the
  *        binding drains it, each under the queue's link lock.
  */
-class queue_endpoint final : public periph::uart_endpoint
+class queue_endpoint final : public periph::uart_endpoint, public tagged_queue<queued_uart_frame>
 {
 public:
   /**
@@ -67,71 +188,14 @@ public:
    * @param resets The machine's reset count, which tags each frame: a frame from before the
    *        last reset is taken whatever the time bound of take().
    */
-  explicit queue_endpoint(core::reset_counter resets = {}) : resets_{std::move(resets)}
+  explicit queue_endpoint(core::reset_counter resets = {})
+      : tagged_queue{std::move(resets), uart_frame_limit}
   {}
-
-  /** @brief The machine's reset count now, the tag a frame queued next takes. */
-  [[nodiscard]] auto resets() const noexcept -> std::uint64_t
-  {
-    return resets_.load();
-  }
-
-  /** @brief Takes the link lock, blocking. */
-  [[nodiscard]] auto lock() const -> core::link_guard
-  {
-    return core::link_guard{mutex_};
-  }
-
-  /** @brief Takes the link lock if it is free. */
-  [[nodiscard]] auto try_lock() const -> core::link_guard
-  {
-    return core::link_guard{mutex_, std::try_to_lock};
-  }
 
   void transmitted(std::uint16_t data, vtime at, bool brk) override
   {
     auto const held = lock();
-    trim(held, limit_ - 1);
-    frames_.push_back({.data = data, .at_ps = at.ps, .brk = brk, .resets = resets_.load()});
-  }
-
-  /** @brief Frames not drained yet. */
-  [[nodiscard]] auto available(core::link_guard const& held) const noexcept -> std::uint64_t
-      pre(held.guards(mutex_))
-  {
-    return frames_.size();
-  }
-
-  /**
-   * @brief Takes the oldest frames, up to the first past_bound() leaves queued.
-   * @param count Most frames taken.
-   * @param until_ps Latest stop bit end taken, in picoseconds since the reset @p resets names.
-   * @param resets The reset count @p until_ps belongs to, the count now when none.
-   * @return The frames, oldest first.
-   */
-  auto take(
-      core::link_guard const&      held,
-      std::uint64_t                count,
-      std::uint64_t                until_ps = std::numeric_limits<std::uint64_t>::max(),
-      std::optional<std::uint64_t> resets   = std::nullopt)
-      -> std::vector<queued_uart_frame> pre(held.guards(mutex_))
-  {
-    auto const first = frames_.begin();
-    auto const last  = std::find_if(
-        first, first + static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(count, frames_.size())),
-        [until_ps, bound = resets.value_or(resets_.load())](queued_uart_frame const& frame) {
-          return past_bound(frame.resets, frame.at_ps, until_ps, bound);
-        });
-    std::vector<queued_uart_frame> out(first, last);
-    frames_.erase(first, last);
-    return out;
-  }
-
-  /** @brief Frames dropped because the queue was full. */
-  [[nodiscard]] auto dropped(core::link_guard const& held) const noexcept -> std::uint64_t
-      pre(held.guards(mutex_))
-  {
-    return dropped_;
+    push(held, {.data = data, .at_ps = at.ps, .brk = brk});
   }
 
   /**
@@ -146,43 +210,16 @@ public:
       peek(core::link_guard const& held, std::uint64_t start, std::uint64_t count) const
       -> std::vector<std::uint8_t> pre(held.guards(mutex_))
   {
-    auto const                first = std::min<std::uint64_t>(start, frames_.size());
-    auto const                last = first + std::min<std::uint64_t>(count, frames_.size() - first);
+    auto const                first = std::min<std::uint64_t>(start, items_.size());
+    auto const                last  = first + std::min<std::uint64_t>(count, items_.size() - first);
     std::vector<std::uint8_t> out;
     out.reserve(last - first);
     for(auto index = first; index < last; ++index)
     {
-      out.push_back(static_cast<std::uint8_t>(frames_[index].data & 0xFFu));
+      out.push_back(static_cast<std::uint8_t>(items_[index].data & 0xFFu));
     }
     return out;
   }
-
-  /**
-   * @brief Sets the most frames kept, dropping the oldest beyond it.
-   * @param held The queue's lock.
-   * @param limit Frames, at least 1.
-   */
-  void set_limit(core::link_guard const& held, std::uint64_t limit) pre(held.guards(mutex_))
-  {
-    limit_ = limit;
-    trim(held, limit);
-  }
-
-private:
-  void trim(core::link_guard const&, std::uint64_t kept)
-  {
-    while(frames_.size() > kept)
-    {
-      frames_.pop_front();
-      ++dropped_;
-    }
-  }
-
-  mutable std::mutex            mutex_;
-  core::reset_counter           resets_;
-  std::deque<queued_uart_frame> frames_;
-  std::uint64_t                 limit_ = uart_frame_limit;
-  std::uint64_t                 dropped_{};
 };
 
 /**
@@ -221,7 +258,7 @@ struct queued_audio_frame
  *        layout of the frame the block took last. The engine and the binding touch it under its
  *        link lock.
  */
-class audio_queue_endpoint final : public periph::stm32::audio_endpoint
+class audio_queue_endpoint final : public periph::stm32::audio_endpoint, public link_lockable
 {
 public:
   /**
@@ -236,18 +273,6 @@ public:
   [[nodiscard]] auto resets() const noexcept -> std::uint64_t
   {
     return resets_.load();
-  }
-
-  /** @brief Takes the link lock, blocking. */
-  [[nodiscard]] auto lock() const -> core::link_guard
-  {
-    return core::link_guard{mutex_};
-  }
-
-  /** @brief Takes the link lock if it is free. */
-  [[nodiscard]] auto try_lock() const -> core::link_guard
-  {
-    return core::link_guard{mutex_, std::try_to_lock};
   }
 
   void transmitted(
@@ -409,7 +434,6 @@ private:
     }
   }
 
-  mutable std::mutex                mutex_;
   core::reset_counter               resets_;
   std::deque<std::uint32_t>         words_;
   std::deque<std::uint64_t>         starts_;

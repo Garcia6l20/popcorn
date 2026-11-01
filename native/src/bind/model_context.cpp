@@ -36,10 +36,7 @@ model_context_view::model_context_view(
 
 auto model_context_view::context() const -> periph::model_context&
 {
-  if(not detail::is_alive(alive_))
-  {
-    throw config_error("model", 0, "machine", "a model whose machine still exists");
-  }
+  detail::require_alive(alive_, "model", "a model whose machine still exists");
   return *ctx_;
 }
 

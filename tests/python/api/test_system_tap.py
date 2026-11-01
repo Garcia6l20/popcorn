@@ -12,7 +12,7 @@ from typing import cast
 
 import popcorn
 import pytest
-from popcorn import Call, EmulationError, Return, System, TapFrame, UartTap, _core
+from popcorn import Call, EmulationError, Return, System, TapFrame, UartTap, _core, _system
 from popcorn._refs import Pending
 from popcorn.units import VirtualDuration, VirtualTime, ms, us
 
@@ -581,3 +581,21 @@ def test_a_uart_whose_cts_is_held_or_pending_is_refused_a_link(
 
 async def settle(pending: Pending[VirtualTime]) -> VirtualTime:
     return await pending
+
+
+def test_a_merged_tap_buffer_keeps_the_newest_up_to_its_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from collections import deque
+
+    monkeypatch.setattr(_system, "_TAP_KEEP", 3)
+
+    merged_of = vars(_system)["_merged"]
+
+    def order(item: int) -> tuple[int, int]:
+        return item, 0
+
+    merged = merged_of(deque([1, 4, 5], maxlen=3), [2, 3], order)
+    assert (list(merged), merged.maxlen) == ([3, 4, 5], 3)
+    appended = merged_of(deque([1, 2], maxlen=3), [3, 4], order)
+    assert (list(appended), appended.maxlen) == ([2, 3, 4], 3)

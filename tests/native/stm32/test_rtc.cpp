@@ -739,6 +739,35 @@ TEST_CASE("a wake-up held back at a barrier when the core is held fires at the h
   CHECK(flag(f, 2) == 1);
 }
 
+TEST_CASE("an alarm B held back at a barrier when the core is held fires at the hold")
+{
+  auto const arm = [](stm32_fixture const& f) {
+    unlock(f);
+    write(f, "RTC", "ALRMBR", (1u << 31) | (1u << 23) | (1u << 15) | (1u << 7));
+    write(f, "RTC", "CR", read(f, "RTC", "CR") | (1u << 9));
+  };
+  auto probe = frozen_rtc();
+  arm(probe);
+  auto const enabled = probe.target->virtual_clock().time().ps;
+  auto const sync    = (read(probe, "RTC", "SSR") & 0xFFFFu) + 1;
+  auto const top     = (read(probe, "RTC", "PRER") & 0x7FFFu) + 1;
+  auto       due     = enabled + sync * second / top - 4 * rtc_cycle;
+  run_until(probe, due);
+  while(flag(probe, 1) == 0)
+  {
+    due += instruction;
+    run_until(probe, due);
+  }
+
+  auto f = frozen_rtc();
+  arm(f);
+  REQUIRE(f.target->virtual_clock().time().ps == enabled);
+  REQUIRE(run_sliced(f, vtime{due}, true).reason == stop_reason::time);
+  CHECK(flag(f, 1) == 0);
+  f.target->hold_core(true);
+  CHECK(flag(f, 1) == 1);
+}
+
 TEST_CASE("a wake-up timer enabled during a frozen hold starts at the release")
 {
   auto f = frozen_rtc();
@@ -790,6 +819,57 @@ TEST_CASE("a brown-out of a held core clears DBG_RTC_STOP and the RTC runs on fr
   held_later(twin, 1'500 * ms);
   CHECK(read(f, "RTC", "TR") == read(twin, "RTC", "TR"));
   CHECK(read(f, "RTC", "SSR") == read(twin, "RTC", "SSR"));
+}
+
+TEST_CASE("a reset of a held core after DBG_RTC_STOP is cleared releases the RTC")
+{
+  auto f = frozen_rtc();
+  held_later(f, 300 * ms);
+  f.target->hold_core(true);
+  held_later(f, second);
+  auto const frozen_at = read(f, "RTC", "SSR");
+  popcorn::testing::set_debug_freeze(f, "DBG_RTC_STOP", false);
+  f.target->reset(popcorn::reset_kind::software);
+  held_later(f, 1'500 * ms);
+  CHECK(read(f, "RTC", "SSR") != frozen_at);
+}
+
+TEST_CASE("an alarm B armed before a frozen hold still fires after the release")
+{
+  auto f = frozen_rtc();
+  unlock(f);
+  write(f, "RTC", "ALRMBR", (1u << 31) | (1u << 23) | (1u << 15) | (1u << 7));
+  write(f, "RTC", "CR", read(f, "RTC", "CR") | (1u << 9));
+  f.target->hold_core(true);
+  write(f, "RTC", "SCR", 1u << 1);
+  held_later(f, 3 * second);
+  CHECK(flag(f, 1) == 0);
+  f.target->hold_core(false);
+  held_later(f, second + 50 * ms);
+  CHECK(flag(f, 1) == 1);
+}
+
+TEST_CASE("a key write leaves the stored WPR word at zero")
+{
+  auto f = entered("clock_only");
+  CHECK(finish(f) == std::vector<std::uint32_t>{0});
+  f.set("pc", sym("rtc_ll", "idle"));
+  write(f, "RTC", "WPR", 0xCA);
+  auto&      regs  = f.target->peripheral("RTC");
+  auto const found = popcorn::find_register(regs.description(), "WPR");
+  REQUIRE(found != nullptr);
+  CHECK(regs.peek(found->offset) == 0);
+}
+
+TEST_CASE("a first key alone leaves the registers locked")
+{
+  auto f = entered("clock_only");
+  CHECK(finish(f) == std::vector<std::uint32_t>{0});
+  f.set("pc", sym("rtc_ll", "idle"));
+  write(f, "RTC", "WPR", 0xCA);
+  write(f, "RTC", "ICSR", 1u << 7);
+  run_until(f, f.target->virtual_clock().time().ps + ms);
+  CHECK((read(f, "RTC", "ICSR") >> 6 & 1u) == 0);
 }
 
 TEST_CASE("a backup domain reset of a frozen RTC leaves it frozen until the release")

@@ -184,7 +184,7 @@ def _check_bounds(value: object, *, file: str, key: str) -> None:
             _check_bounds(item, file=file, key=f"{key}.{item_key}" if key else str(item_key))
 
 
-_SCHEMA_VERSION = next(
+SCHEMA_VERSION = next(
     f.default for f in dataclasses.fields(PartDescription) if f.name == "schema_version"
 )
 
@@ -193,7 +193,7 @@ def dump_json(description: PartDescription, *, indent: int | None = None) -> str
     """Compact JSON of @p description, schema_version always the current format constant."""
     mapping = to_mapping(description)
     assert isinstance(mapping, dict)
-    mapping["schema_version"] = _SCHEMA_VERSION
+    mapping["schema_version"] = SCHEMA_VERSION
     if indent is None:
         return json.dumps(mapping, separators=(",", ":"), ensure_ascii=True)
     return json.dumps(mapping, indent=indent, ensure_ascii=True)

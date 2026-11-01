@@ -12,7 +12,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstdint>
 #include <expected>
 #include <format>
@@ -43,7 +42,6 @@ constexpr std::uint32_t cts_due       = 4;
 constexpr std::uint32_t hold_due      = 5;
 constexpr std::uint32_t release_due   = 6;
 constexpr std::size_t   fifo_depth    = 8;
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 
 constexpr std::array<std::uint32_t, 12> prescalers{1, 2, 4, 6, 8, 10, 12, 16, 32, 64, 128, 256};
 constexpr std::array<std::uint8_t, 4>   half_stop_codes{2, 1, 4, 3};
@@ -584,14 +582,6 @@ auto usart_writes(usart_variant const& variant) -> std::span<write_entry<usart> 
 auto line_name(peripheral_desc const& desc, usart_variant const& variant) -> std::string
 {
   return variant.irq_name.empty() ? desc.name + "_IRQn" : std::string{variant.irq_name};
-}
-
-auto lower(std::string_view name) -> std::string
-{
-  std::string out{name};
-  std::ranges::transform(
-      out, out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return out;
 }
 
 auto kernel_name(peripheral_desc const& desc, usart_variant const& variant) -> std::string
