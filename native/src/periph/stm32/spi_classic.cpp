@@ -31,9 +31,8 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
-constexpr std::uint32_t frame_done    = 0;
-constexpr std::uint32_t host_edge     = 1;
+constexpr std::uint32_t frame_done = 0;
+constexpr std::uint32_t host_edge  = 1;
 
 struct spi_classic_state
 {

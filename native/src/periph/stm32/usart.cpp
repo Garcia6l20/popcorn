@@ -43,7 +43,6 @@ constexpr std::uint32_t cts_due       = 4;
 constexpr std::uint32_t hold_due      = 5;
 constexpr std::uint32_t release_due   = 6;
 constexpr std::size_t   fifo_depth    = 8;
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 
 constexpr std::array<std::uint32_t, 12> prescalers{1, 2, 4, 6, 8, 10, 12, 16, 32, 64, 128, 256};
 constexpr std::array<std::uint8_t, 4>   half_stop_codes{2, 1, 4, 3};

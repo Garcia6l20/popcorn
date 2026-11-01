@@ -237,10 +237,10 @@ private:
 
   [[nodiscard]] auto time_at(icount count) const -> vtime
   {
-    constexpr unsigned __int128 ps_per_second = 1'000'000'000'000ull;
     return vtime{
         state_.epoch_time.ps
-        + instruction_div_.quotient(ps_per_second * (count.value - state_.epoch_icount.value))};
+        + instruction_div_.quotient(
+            ps_per_second_wide * (count.value - state_.epoch_icount.value))};
   }
 
   void release_passed_hold()

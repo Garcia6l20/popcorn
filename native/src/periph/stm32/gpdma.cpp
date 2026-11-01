@@ -27,10 +27,9 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::size_t   max_channels  = 16;
-constexpr std::size_t   requests      = 256;
-constexpr std::uint32_t burst_done    = 0;
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
+constexpr std::size_t   max_channels = 16;
+constexpr std::size_t   requests     = 256;
+constexpr std::uint32_t burst_done   = 0;
 
 struct channel_state
 {

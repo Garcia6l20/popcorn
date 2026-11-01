@@ -16,8 +16,6 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
-
 auto half_bits(std::uint32_t word, std::uint32_t half_stops) -> std::uint64_t
 {
   return 2 * (1 + std::uint64_t{word}) + half_stops;

@@ -26,15 +26,15 @@ namespace
 namespace core = popcorn::core;
 using popcorn::address;
 using popcorn::icount;
+using popcorn::ps_per_second;
 using popcorn::stop_reason;
 using popcorn::vtime;
 using popcorn::testing::m33;
 using popcorn::testing::sym;
-using fixture                         = popcorn::testing::machine_fixture<>;
-using logged                          = popcorn::testing::test_arch::logged_event;
-constexpr auto          long_wall     = std::chrono::seconds{60};
-constexpr address       boots         = 0x2008'0000;
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
+using fixture               = popcorn::testing::machine_fixture<>;
+using logged                = popcorn::testing::test_arch::logged_event;
+constexpr auto    long_wall = std::chrono::seconds{60};
+constexpr address boots     = 0x2008'0000;
 
 auto booted(std::string_view firmware, core::machine_options options = {}) -> fixture
 {

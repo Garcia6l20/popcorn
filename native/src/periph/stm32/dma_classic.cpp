@@ -28,7 +28,6 @@ namespace
 constexpr std::size_t   max_channels   = 7;
 constexpr std::size_t   max_requests   = 48;
 constexpr std::uint32_t transfer_due   = 0;
-constexpr std::uint64_t ps_per_second  = 1'000'000'000'000;
 constexpr std::uint64_t latency_cycles = 4;
 
 struct dma_classic_channel

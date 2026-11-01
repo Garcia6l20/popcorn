@@ -30,7 +30,6 @@ namespace
 {
 using wide = unsigned __int128;
 
-constexpr std::uint64_t ps_per_second        = 1'000'000'000'000;
 constexpr std::uint32_t tick_due             = 0;
 constexpr std::size_t   max_channels         = 4;
 constexpr std::uint32_t master_reset         = 0;

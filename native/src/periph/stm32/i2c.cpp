@@ -37,7 +37,6 @@ i2c_bus::~i2c_bus() = default;
 
 namespace
 {
-constexpr std::uint64_t ps_per_second  = 1'000'000'000'000;
 constexpr std::uint32_t phase_done     = 0;
 constexpr std::uint32_t hold_begin     = 1;
 constexpr std::uint32_t hold_end       = 2;

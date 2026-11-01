@@ -30,10 +30,9 @@ audio_source_endpoint::~audio_source_endpoint()   = default;
 
 namespace
 {
-constexpr std::size_t   blocks        = 2;
-constexpr std::size_t   fifo_depth    = 8;
-constexpr std::int8_t   no_slot       = -1;
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
+constexpr std::size_t blocks     = 2;
+constexpr std::size_t fifo_depth = 8;
+constexpr std::int8_t no_slot    = -1;
 
 using wide = unsigned __int128;
 

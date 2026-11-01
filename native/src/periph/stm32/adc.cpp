@@ -31,7 +31,6 @@ namespace
 {
 constexpr std::size_t   channels           = 20;
 constexpr std::size_t   offsets            = 4;
-constexpr std::uint64_t ps_per_second      = 1'000'000'000'000;
 constexpr std::uint32_t conversion_end     = 0;
 constexpr std::uint32_t sampling_end       = 1;
 constexpr std::uint32_t ready_end          = 2;

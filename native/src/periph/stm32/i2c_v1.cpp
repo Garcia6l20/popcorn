@@ -35,12 +35,11 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
-constexpr std::uint64_t hz_per_mhz    = 1'000'000;
-constexpr std::uint32_t phase_done    = 0;
-constexpr std::uint32_t port_due      = 1;
-constexpr std::uint32_t byte_periods  = 9;
-constexpr std::uint32_t data_periods  = 8;
+constexpr std::uint64_t hz_per_mhz   = 1'000'000;
+constexpr std::uint32_t phase_done   = 0;
+constexpr std::uint32_t port_due     = 1;
+constexpr std::uint32_t byte_periods = 9;
+constexpr std::uint32_t data_periods = 8;
 
 enum class wire : std::uint8_t
 {

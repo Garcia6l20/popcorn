@@ -29,7 +29,6 @@ constexpr std::size_t   max_ranks       = 28;
 constexpr std::uint32_t sensor_channel  = 16;
 constexpr std::uint32_t vrefint_channel = 17;
 constexpr std::uint32_t vcomp_channel   = 26;
-constexpr std::uint64_t ps_per_second   = 1'000'000'000'000;
 constexpr std::uint64_t power_up_ps     = 3'500'000;
 constexpr std::uint32_t factory_vdda_mv = 3000;
 constexpr std::uint32_t conversion_end  = 0;

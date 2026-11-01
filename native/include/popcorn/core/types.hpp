@@ -41,6 +41,12 @@ struct vtime
   friend auto operator<=>(vtime const&, vtime const&) = default;
 };
 
+/** @brief Picoseconds in one second of virtual time. */
+inline constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
+
+/** @brief ps_per_second in 128 bits, for products that would overflow 64 bits. */
+inline constexpr unsigned __int128 ps_per_second_wide = ps_per_second;
+
 /**
  * @brief Converts an instruction count run at a fixed clock into virtual time.
  * @param instructions Instructions executed.
@@ -52,8 +58,7 @@ struct vtime
 constexpr auto vtime_from_instructions(std::uint64_t instructions, std::uint64_t clock_hz) -> vtime
     pre(clock_hz != 0)
 {
-  constexpr unsigned __int128 ps_per_second = 1'000'000'000'000ull;
-  unsigned __int128 const     ps            = ps_per_second * instructions / clock_hz;
+  unsigned __int128 const ps = ps_per_second_wide * instructions / clock_hz;
   return vtime{static_cast<std::uint64_t>(ps)};
 }
 
@@ -68,9 +73,8 @@ constexpr auto vtime_from_instructions(std::uint64_t instructions, std::uint64_t
  */
 constexpr auto icount_from_vtime(vtime elapsed, std::uint64_t clock_hz) -> icount pre(clock_hz != 0)
 {
-  constexpr unsigned __int128 ps_per_second = 1'000'000'000'000ull;
-  unsigned __int128 const     scaled        = static_cast<unsigned __int128>(elapsed.ps) * clock_hz;
-  return icount{static_cast<std::uint64_t>((scaled + ps_per_second - 1) / ps_per_second)};
+  unsigned __int128 const scaled = static_cast<unsigned __int128>(elapsed.ps) * clock_hz;
+  return icount{static_cast<std::uint64_t>((scaled + ps_per_second_wide - 1) / ps_per_second_wide)};
 }
 
 /** @brief Why a run stopped. */

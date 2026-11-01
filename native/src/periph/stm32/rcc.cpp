@@ -54,8 +54,6 @@ inline constexpr std::size_t signal_count = role_count<typename Traits::signal>;
 template <typename Traits>
 inline constexpr std::size_t event_count = source_count<Traits> + (Traits::hsi_divider ? 1 : 0);
 
-inline constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
-
 struct unit_bits
 {
   std::uint32_t          offset{};

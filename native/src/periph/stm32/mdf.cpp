@@ -31,12 +31,11 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::size_t   max_filters   = 6;
-constexpr std::uint32_t ckab_event    = 1;
-constexpr std::uint32_t sample_event  = 2;
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
-constexpr std::size_t   fifo_depth    = 4;
-constexpr std::uint64_t chunk_edges   = 1u << 16;
+constexpr std::size_t   max_filters  = 6;
+constexpr std::uint32_t ckab_event   = 1;
+constexpr std::uint32_t sample_event = 2;
+constexpr std::size_t   fifo_depth   = 4;
+constexpr std::uint64_t chunk_edges  = 1u << 16;
 
 /**
  * @brief What the description gives one MDF or ADF instance, RM0456 39.3 and 40.3: the

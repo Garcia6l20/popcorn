@@ -27,7 +27,6 @@ constexpr std::uint32_t busy_done     = 0;
 constexpr std::uint32_t digest_done   = 1;
 constexpr std::uint32_t block_shown   = 2;
 constexpr std::uint32_t block_ready   = 3;
-constexpr std::uint64_t ps_per_second = 1'000'000'000'000;
 constexpr std::size_t   block_words   = 16;
 constexpr std::size_t   max_block     = 42;
 constexpr std::size_t   inner_words   = 16;
