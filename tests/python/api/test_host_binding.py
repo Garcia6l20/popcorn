@@ -1577,6 +1577,22 @@ def test_a_device_of_a_collected_machine_is_not_called_and_stops_the_run(
     assert stop.detail == COLLECTED
 
 
+def test_an_spi_device_of_a_collected_machine_is_not_called_and_stops_the_run(
+    u575: popcorn.PartDescription,
+) -> None:
+    from .devices_example import JedecDevice
+    from .test_devices import SPI_ELF, enter
+
+    device = JedecDevice("PA4", (0x1F, 0x87, 0x01))
+    m = popcorn.Machine(u575, image=popcorn.Image.elf(SPI_ELF), devices={"SPI1": [device]})
+    enter(m, "poll")
+    del m._model_context  # pyright: ignore[reportPrivateUsage]
+    stop = asyncio.run(m.run(budget=100_000_000))
+    assert device.selects == []
+    assert stop.reason is popcorn.StopReason.USER
+    assert stop.detail == COLLECTED
+
+
 FREE_RUN = """
 import asyncio
 import contextvars
