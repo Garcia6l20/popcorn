@@ -8,10 +8,11 @@ them.
 
 from __future__ import annotations
 
-import re
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+
+from popcorn_build.sdk import INCLUDE
 
 AREA_LIBRARY: dict[str, str] = {
     "core": "core",
@@ -50,8 +51,6 @@ FRAMEWORK_HEADERS = {
 }
 
 UNCHECKED = {"bind", "tools"}
-
-_INCLUDE = re.compile(r'^\s*#\s*include\s*([<"])([^>"]+)[>"]')
 
 
 def area_of(path: Path, native: Path) -> str | None:
@@ -106,7 +105,7 @@ def include_violations(native: Path) -> list[str]:
             continue
         library = AREA_LIBRARY[area]
         for number, line in enumerate(source.read_text().splitlines(), start=1):
-            match = _INCLUDE.match(line)
+            match = INCLUDE.match(line)
             if match is None:
                 continue
             kind, name = match.groups()

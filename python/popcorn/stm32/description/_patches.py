@@ -9,7 +9,7 @@ import fnmatch
 import functools
 import re
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -585,6 +585,33 @@ def _apply_ip_versions(
             report.ip_versions_set += 1
 
 
+def _peripheral(
+    name: str, peripherals: dict[str, PeripheralDesc], *, file: str, key: str
+) -> PeripheralDesc:
+    peripheral = peripherals.get(name)
+    if peripheral is None or peripheral.alias_of is not None:
+        raise DescriptionError(
+            file, 0, f"{key}.peripheral", "a peripheral of the description that is not an alias"
+        )
+    return peripheral
+
+
+def _direct_targets(
+    instances: list[str] | None, targets: list[PeripheralDesc], *, file: str, key: str
+) -> Iterator[PeripheralDesc]:
+    if instances is None:
+        targets = [target for target in targets if target.alias_of is None]
+    for peripheral in targets:
+        if peripheral.alias_of is not None:
+            raise DescriptionError(
+                file,
+                0,
+                f"{key}.instances",
+                f"a peripheral that is not an alias, not {peripheral.name}",
+            )
+        yield peripheral
+
+
 def _apply_register_drops(
     rule: RegisterDrop,
     peripherals: dict[str, PeripheralDesc],
@@ -593,11 +620,7 @@ def _apply_register_drops(
     file: str,
     key: str,
 ) -> None:
-    peripheral = peripherals.get(rule.peripheral)
-    if peripheral is None or peripheral.alias_of is not None:
-        raise DescriptionError(
-            file, 0, f"{key}.peripheral", "a peripheral of the description that is not an alias"
-        )
+    peripheral = _peripheral(rule.peripheral, peripherals, file=file, key=key)
     if not rule.names:
         raise DescriptionError(file, 0, f"{key}.names", "at least one register name")
     present = {r.name for r in peripheral.registers}
@@ -705,11 +728,7 @@ def _apply_peripheral_size(
     file: str,
     key: str,
 ) -> None:
-    peripheral = peripherals.get(rule.peripheral)
-    if peripheral is None or peripheral.alias_of is not None:
-        raise DescriptionError(
-            file, 0, f"{key}.peripheral", "a peripheral of the description that is not an alias"
-        )
+    peripheral = _peripheral(rule.peripheral, peripherals, file=file, key=key)
     if rule.size < peripheral.size:
         raise DescriptionError(file, 0, f"{key}.size", f"a size of at least {peripheral.size:#x}")
     for target in peripherals.values():
@@ -726,11 +745,7 @@ def _apply_reset(
     file: str,
     key: str,
 ) -> None:
-    peripheral = peripherals.get(rule.peripheral)
-    if peripheral is None or peripheral.alias_of is not None:
-        raise DescriptionError(
-            file, 0, f"{key}.peripheral", "a peripheral of the description that is not an alias"
-        )
+    peripheral = _peripheral(rule.peripheral, peripherals, file=file, key=key)
     register = next((r for r in peripheral.registers if r.name == rule.register), None)
     if register is None:
         raise DescriptionError(file, 0, f"{key}.register", f"a register of {peripheral.name}")
@@ -753,11 +768,7 @@ def _apply_register_add(
     file: str,
     key: str,
 ) -> None:
-    peripheral = peripherals.get(rule.peripheral)
-    if peripheral is None or peripheral.alias_of is not None:
-        raise DescriptionError(
-            file, 0, f"{key}.peripheral", "a peripheral of the description that is not an alias"
-        )
+    peripheral = _peripheral(rule.peripheral, peripherals, file=file, key=key)
     if rule.width not in (8, 16, 32):
         raise DescriptionError(file, 0, f"{key}.width", "8, 16 or 32")
     size = rule.width // 8
@@ -840,16 +851,7 @@ def _apply_fields(
     if rule.drop:
         _drop_fields(rule, targets, peripherals, suffixes, touched, report, file=file, key=key)
         return
-    if rule.instances is None:
-        targets = [target for target in targets if target.alias_of is None]
-    for peripheral in targets:
-        if peripheral.alias_of is not None:
-            raise DescriptionError(
-                file,
-                0,
-                f"{key}.instances",
-                f"a peripheral that is not an alias, not {peripheral.name}",
-            )
+    for peripheral in _direct_targets(rule.instances, targets, file=file, key=key):
         for register_template in rule.registers:
             for suffix in suffixes:
                 register_name = register_template.replace("{n}", suffix)
@@ -902,16 +904,7 @@ def _drop_fields(
         )
     if not rule.source:
         raise DescriptionError(file, 0, f"{key}.source", "a non-empty source")
-    if rule.instances is None:
-        targets = [target for target in targets if target.alias_of is None]
-    for peripheral in targets:
-        if peripheral.alias_of is not None:
-            raise DescriptionError(
-                file,
-                0,
-                f"{key}.instances",
-                f"a peripheral that is not an alias, not {peripheral.name}",
-            )
+    for peripheral in _direct_targets(rule.instances, targets, file=file, key=key):
         for register_template in rule.registers:
             for suffix in suffixes:
                 register_name = register_template.replace("{n}", suffix)
@@ -966,17 +959,8 @@ def _add_field(
         raise DescriptionError(file, 0, f"{key}.source", "a non-empty source")
     if added.reset >> added.width:
         raise DescriptionError(file, 0, f"{key}.add.reset", f"a value of {added.width} bits")
-    if rule.instances is None:
-        targets = [target for target in targets if target.alias_of is None]
     bits = ((1 << added.width) - 1) << added.lsb
-    for peripheral in targets:
-        if peripheral.alias_of is not None:
-            raise DescriptionError(
-                file,
-                0,
-                f"{key}.instances",
-                f"a peripheral that is not an alias, not {peripheral.name}",
-            )
+    for peripheral in _direct_targets(rule.instances, targets, file=file, key=key):
         for register_template in rule.registers:
             for suffix in suffixes:
                 register_name = register_template.replace("{n}", suffix)
@@ -1056,16 +1040,7 @@ def _rename_fields(
         raise DescriptionError(file, 0, f"{key}.source", "a non-empty source")
     if not rule.rename:
         raise DescriptionError(file, 0, f"{key}.rename", "at least one field to rename")
-    if rule.instances is None:
-        targets = [target for target in targets if target.alias_of is None]
-    for peripheral in targets:
-        if peripheral.alias_of is not None:
-            raise DescriptionError(
-                file,
-                0,
-                f"{key}.instances",
-                f"a peripheral that is not an alias, not {peripheral.name}",
-            )
+    for peripheral in _direct_targets(rule.instances, targets, file=file, key=key):
         for register_template in rule.registers:
             for suffix in suffixes:
                 register_name = register_template.replace("{n}", suffix)
