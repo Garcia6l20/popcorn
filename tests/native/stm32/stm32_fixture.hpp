@@ -150,6 +150,35 @@ struct stm32_fixture
     return *result.stopped;
   }
 
+  /** @brief Virtual time of the machine. */
+  [[nodiscard]] auto now() const -> vtime
+  {
+    return target->virtual_clock().time();
+  }
+
+  /**
+   * @brief Runs for @p ps of virtual time and requires the run to stop on the time limit.
+   * @param ps Duration in picoseconds.
+   * @param budget Instruction cap of the slice.
+   */
+  void run_for(std::uint64_t ps, icount budget = icount{1'000'000'000}) const
+  {
+    REQUIRE(
+        run_to_stop({.max_instructions = budget, .until_time = vtime{now().ps + ps}}).reason
+        == stop_reason::time);
+  }
+
+  /**
+   * @brief Whether an interrupt is pending in the NVIC.
+   * @param irq External interrupt number.
+   */
+  [[nodiscard]] auto pending(std::uint32_t irq) const -> bool
+  {
+    auto const word = target->mem().read(0xe000'e200u + 4 * (irq / 32), 4);
+    REQUIRE(word.has_value());
+    return ((*word >> (irq % 32)) & 1u) != 0;
+  }
+
   /** @brief The firmware's `log_buf` words up to `log_len`. */
   [[nodiscard]] auto log() const -> std::vector<std::uint32_t>
   {

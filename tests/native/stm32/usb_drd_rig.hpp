@@ -258,23 +258,17 @@ struct rig
 
   [[nodiscard]] auto now() const -> vtime
   {
-    return f->target->virtual_clock().time();
+    return f->now();
   }
 
   void run_for(std::uint64_t ps) const
   {
-    REQUIRE(
-        f->run_to_stop(
-             {.max_instructions = icount{1'000'000'000}, .until_time = vtime{now().ps + ps}})
-            .reason
-        == stop_reason::time);
+    f->run_for(ps);
   }
 
   [[nodiscard]] auto pending() const -> bool
   {
-    auto const word = f->target->mem().read(0xe000'e200u + 4 * (irq / 32), 4);
-    REQUIRE(word.has_value());
-    return ((*word >> (irq % 32)) & 1u) != 0;
+    return f->pending(irq);
   }
 
   void power_up() const
