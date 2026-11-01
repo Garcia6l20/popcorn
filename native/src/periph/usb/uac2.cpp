@@ -1739,16 +1739,11 @@ void uac2_channel::discard()
   results.clear();
 }
 
-auto uac2_hub::channel(core::link_guard const&, std::size_t function) -> uac2_channel&
-{
-  return channels_[function];
-}
-
 void uac2_hub::save(std::vector<std::byte>& out) const
 {
   auto const held = lock();
   hub_state  saved;
-  for(auto const& [function, channel] : channels_)
+  for(auto const& [function, channel] : channels(held))
   {
     if(not channel.interface and not channel.speaker.out.empty())
     {
@@ -1762,7 +1757,7 @@ void uac2_hub::save(std::vector<std::byte>& out) const
 void uac2_hub::load(std::span<std::byte const> in)
 {
   auto const held = lock();
-  for(auto& channel : channels_ | std::views::values)
+  for(auto& channel : channels(held) | std::views::values)
   {
     channel.speaker.out.clear();
   }
@@ -1775,15 +1770,6 @@ void uac2_hub::load(std::span<std::byte const> in)
   {
     channel(held, static_cast<std::size_t>(pending.function)).speaker.out =
         bytes_to_samples(pending.samples);
-  }
-}
-
-void uac2_hub::discard()
-{
-  auto const held = lock();
-  for(auto& channel : channels_ | std::views::values)
-  {
-    channel.discard();
   }
 }
 

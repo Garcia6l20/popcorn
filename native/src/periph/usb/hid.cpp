@@ -455,16 +455,11 @@ void hid_channel::discard()
   results.clear();
 }
 
-auto hid_hub::channel(core::link_guard const&, std::size_t function) -> hid_channel&
-{
-  return channels_[function];
-}
-
 void hid_hub::save(std::vector<std::byte>& out) const
 {
   auto const held = lock();
   hub_state  saved;
-  for(auto const& [function, channel] : channels_)
+  for(auto const& [function, channel] : channels(held))
   {
     if(not channel.interface and (not channel.out.empty() or not channel.report_descriptor.empty()))
     {
@@ -480,7 +475,7 @@ void hid_hub::save(std::vector<std::byte>& out) const
 void hid_hub::load(std::span<std::byte const> in)
 {
   auto const held = lock();
-  for(auto& channel : channels_ | std::views::values)
+  for(auto& channel : channels(held) | std::views::values)
   {
     channel.out.clear();
     channel.report_descriptor.clear();
@@ -495,15 +490,6 @@ void hid_hub::load(std::span<std::byte const> in)
     auto& restored = channel(held, static_cast<std::size_t>(pending.function));
     restore_writes(restored, pending.writes);
     restored.report_descriptor = as_octets(pending.descriptor);
-  }
-}
-
-void hid_hub::discard()
-{
-  auto const held = lock();
-  for(auto& channel : channels_ | std::views::values)
-  {
-    channel.discard();
   }
 }
 

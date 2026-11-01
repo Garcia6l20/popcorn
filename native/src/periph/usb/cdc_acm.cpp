@@ -506,11 +506,6 @@ void cdc_channel::discard()
   results.clear();
 }
 
-auto cdc_hub::channel(core::link_guard const&, std::size_t function) -> cdc_channel&
-{
-  return channels_[function];
-}
-
 namespace
 {
 struct pending_out
@@ -529,7 +524,7 @@ void cdc_hub::save(std::vector<std::byte>& out) const
 {
   auto const held = lock();
   hub_state  saved;
-  for(auto const& [function, channel] : channels_)
+  for(auto const& [function, channel] : channels(held))
   {
     if(not channel.comm_interface and not channel.out.empty())
     {
@@ -546,7 +541,7 @@ void cdc_hub::save(std::vector<std::byte>& out) const
 void cdc_hub::load(std::span<std::byte const> in)
 {
   auto const held = lock();
-  for(auto& channel : channels_ | std::views::values)
+  for(auto& channel : channels(held) | std::views::values)
   {
     channel.out.clear();
   }
@@ -561,15 +556,6 @@ void cdc_hub::load(std::span<std::byte const> in)
         .out.assign_range(pending.bytes | std::views::transform([](std::byte b) {
                             return std::to_integer<std::uint8_t>(b);
                           }));
-  }
-}
-
-void cdc_hub::discard()
-{
-  auto const held = lock();
-  for(auto& channel : channels_ | std::views::values)
-  {
-    channel.discard();
   }
 }
 
