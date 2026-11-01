@@ -36,7 +36,8 @@ strict and TrustZone flags.
 it takes the factory from the machine options by instance name first. If there is none it asks
 the registry, `periph::find_model`, which matches the peripheral's IP name and a glob of its IP
 version. The newest registration that matches wins. A plugin cannot call `register_model`
-itself, the registry refuses it, and a plugin registers through its entry point instead.
+itself, the registry refuses it, and a plugin registers through its entry point instead. [How a part loads](part_loading.md)
+follows the built-in STM32 rows from the description to the model.
 
 After the factory returns, the machine checks that every claimed register exists in the
 description, that every served range is word aligned with its first offset at most its last, fits
