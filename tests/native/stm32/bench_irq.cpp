@@ -1,4 +1,6 @@
 #include "../../../native/src/core/machine_impl.hpp"
+#include "../support/bench.hpp"
+#include "bench_common.hpp"
 
 #include <popcorn/arch/armv8m/armv8m.hpp>
 #include <popcorn/core/description.hpp>
@@ -45,21 +47,16 @@ namespace periph = popcorn::periph;
 namespace stm32  = popcorn::periph::stm32;
 using popcorn::icount;
 using popcorn::vtime;
+using popcorn::testing::bench::fnv;
+using popcorn::testing::bench::median;
+using popcorn::testing::bench::u575;
 using clock_type = std::chrono::steady_clock;
 
 constexpr std::int64_t  ms_ps          = 1'000'000'000;
-constexpr std::uint64_t fnv_basis      = 0xcbf2'9ce4'8422'2325u;
-constexpr std::uint64_t fnv_prime      = 0x100'0000'01b3u;
 constexpr std::uint32_t core_hz        = 160'000'000;
 constexpr std::size_t   irq_array_size = 32;
 constexpr std::size_t   uart_words     = 2 * 3;
 constexpr std::uint32_t tim_cnt        = 0x24;
-
-auto u575() -> popcorn::part_description const&
-{
-  static auto const desc = popcorn::load_description(POPCORN_U575_DESC);
-  return desc;
-}
 
 auto firmware() -> popcorn::image::image const&
 {
@@ -71,19 +68,6 @@ auto symbol(std::string_view name) -> popcorn::address
 {
   return firmware().lookup(name).value;
 }
-
-struct fnv
-{
-  std::uint64_t value = fnv_basis;
-
-  void mix(std::uint64_t word) noexcept
-  {
-    for(int shift = 0; shift < 64; shift += 8)
-    {
-      value = (value ^ ((word >> shift) & 0xffu)) * fnv_prime;
-    }
-  }
-};
 
 class hashing_endpoint final : public periph::uart_endpoint
 {
@@ -560,13 +544,6 @@ auto parse(std::vector<std::string_view> const& args) -> options
     }
   }
   return out;
-}
-
-auto median(std::vector<double> values) -> double
-{
-  std::ranges::sort(values);
-  auto const n = values.size();
-  return n % 2 != 0 ? values[n / 2] : (values[n / 2 - 1] + values[n / 2]) / 2;
 }
 
 auto first_line(std::string const& path) -> std::string

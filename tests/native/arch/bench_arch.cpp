@@ -1,4 +1,5 @@
 #include "../../../native/src/core/machine_impl.hpp"
+#include "../support/bench.hpp"
 #include "cortex_m.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -30,6 +31,8 @@ using popcorn::address;
 using popcorn::icount;
 using popcorn::stop_reason;
 using popcorn::vtime;
+using popcorn::testing::bench::option;
+using popcorn::testing::bench::percentile;
 using clock_type = std::chrono::steady_clock;
 
 constexpr std::uint32_t alu_loops  = 10'000'000;
@@ -188,25 +191,6 @@ auto rtos_run(std::string_view entry, std::uint64_t virtual_ms) -> measured
   auto const until = vtime{target->virtual_clock().time().ps + virtual_ms * ps_per_ms};
   return timed(
       *target, {.max_instructions = icount{4'000'000'000}, .until_time = until}, stop_reason::time);
-}
-
-auto percentile(std::vector<double> samples, double fraction) -> double
-{
-  std::ranges::sort(samples);
-  auto const index = static_cast<std::size_t>(fraction * static_cast<double>(samples.size() - 1));
-  return samples[index];
-}
-
-auto option(std::span<char*> args, std::string_view name) -> std::optional<std::string_view>
-{
-  for(std::size_t i = 1; i + 1 < args.size(); ++i)
-  {
-    if(std::string_view{args[i]} == name)
-    {
-      return std::string_view{args[i + 1]};
-    }
-  }
-  return std::nullopt;
 }
 
 auto reps_from(std::span<char*> args) -> int

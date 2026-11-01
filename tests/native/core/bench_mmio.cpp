@@ -1,3 +1,5 @@
+#include "../support/bench.hpp"
+
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/services.hpp>
@@ -31,6 +33,8 @@ namespace
 namespace core = popcorn::core;
 using popcorn::address;
 using popcorn::icount;
+using popcorn::testing::bench::option;
+using popcorn::testing::bench::percentile;
 using clock_type = std::chrono::steady_clock;
 
 constexpr std::uint32_t                loops        = 1'000'000;
@@ -331,23 +335,6 @@ auto spaced_ranges(std::uint32_t count) -> measured
   return flash_loads(watched, 2, 4);
 }
 
-auto percentile(std::vector<double> samples, double fraction) -> double
-{
-  std::ranges::sort(samples);
-  return samples[static_cast<std::size_t>(fraction * static_cast<double>(samples.size() - 1))];
-}
-
-auto option(std::span<char*> args, std::string_view name) -> std::optional<std::string_view>
-{
-  for(std::size_t i = 1; i + 1 < args.size(); ++i)
-  {
-    if(std::string_view{args[i]} == name)
-    {
-      return std::string_view{args[i + 1]};
-    }
-  }
-  return std::nullopt;
-}
 }
 
 auto main(int argc, char** argv) -> int

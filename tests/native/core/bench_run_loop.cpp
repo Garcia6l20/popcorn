@@ -1,3 +1,5 @@
+#include "../support/bench.hpp"
+
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/image/image.hpp>
@@ -27,6 +29,8 @@ namespace
 namespace core = popcorn::core;
 using popcorn::address;
 using popcorn::icount;
+using popcorn::testing::bench::option;
+using popcorn::testing::bench::percentile;
 using clock_type = std::chrono::steady_clock;
 
 constexpr std::uint32_t alu_loops   = 20'000'000;
@@ -363,25 +367,6 @@ auto step_one() -> measured
     total += target->run_slice({.exact_instructions = icount{1}}).executed.value;
   }
   return {elapsed_ms(start) / steps, total};
-}
-
-auto percentile(std::vector<double> samples, double fraction) -> double
-{
-  std::ranges::sort(samples);
-  auto const index = static_cast<std::size_t>(fraction * static_cast<double>(samples.size() - 1));
-  return samples[index];
-}
-
-auto option(std::span<char*> args, std::string_view name) -> std::optional<std::string_view>
-{
-  for(std::size_t i = 1; i + 1 < args.size(); ++i)
-  {
-    if(std::string_view{args[i]} == name)
-    {
-      return std::string_view{args[i + 1]};
-    }
-  }
-  return std::nullopt;
 }
 
 auto reps_from(std::span<char*> args) -> int
