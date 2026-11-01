@@ -2325,4 +2325,42 @@ TEST_CASE("the GTZC memory windows leave out a bit_band region, the target SRAM 
   CHECK(r.bus->services().read(0x2200'0000, 4, nonsecure_priv) == 0u);
   CHECK(r.bus->services().read(0x2200'0000, 4, secure_priv) == 1u);
 }
+
+TEST_CASE("gap_extent spans from the nearest window below to the byte before the nearest above")
+{
+  struct window
+  {
+    address       start;
+    std::uint32_t size;
+  };
+  auto const ascending = std::array<window, 2>{
+      window{0x1000, 0x1000},
+      window{0x4000, 0x1000}
+  };
+  auto const descending = std::array<window, 2>{
+      window{0x4000, 0x1000},
+      window{0x1000, 0x1000}
+  };
+  for(auto const& windows : {ascending, descending})
+  {
+    auto const between = stm32::gap_extent(windows, 0x3000);
+    CHECK(between.first == 0x2000);
+    CHECK(between.last == 0x3fff);
+    auto const at_end = stm32::gap_extent(windows, 0x2000);
+    CHECK(at_end.first == 0x2000);
+    CHECK(at_end.last == 0x3fff);
+    auto const before = stm32::gap_extent(windows, 0x100);
+    CHECK(before.first == 0);
+    CHECK(before.last == 0xfff);
+    auto const after = stm32::gap_extent(windows, 0x9000);
+    CHECK(after.first == 0x5000);
+    CHECK(after.last == 0xffff'ffff);
+  }
+  auto const top = std::array<window, 1>{
+      window{0xffff'0000, 0x1'0000}
+  };
+  auto const below = stm32::gap_extent(top, 0x1000);
+  CHECK(below.first == 0);
+  CHECK(below.last == 0xfffe'ffff);
+}
 }

@@ -4,12 +4,15 @@
 
 #include <popcorn/core/description.hpp>
 #include <popcorn/core/types.hpp>
+#include <popcorn/periph/firewall.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -310,4 +313,31 @@ private:
   illegal_access_controller* tzic_{};
   illegal_source             source_{};
 };
+
+/**
+ * @brief Extent of the gap around an address that no window covers.
+ * @param windows Windows with `start` and `size` members.
+ * @param at Address inside no window.
+ * @return From the end of the nearest window below to the byte before the nearest one above,
+ *         from 0 when no window lies below and to 0xffffffff when none lies above.
+ */
+template <std::ranges::input_range Windows>
+[[nodiscard]] auto gap_extent(Windows const& windows, address at) -> memory_extent
+{
+  std::uint64_t first = 0;
+  std::uint64_t last  = ~address{};
+  for(auto const& w : windows)
+  {
+    auto const end = std::uint64_t{w.start} + w.size;
+    if(end <= at)
+    {
+      first = std::max(first, end);
+    }
+    else if(w.start > at)
+    {
+      last = std::min<std::uint64_t>(last, w.start - 1u);
+    }
+  }
+  return {.first = static_cast<address>(first), .last = static_cast<address>(last)};
+}
 }

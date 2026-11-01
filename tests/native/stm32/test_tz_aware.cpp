@@ -667,6 +667,58 @@ TEST_CASE("RM0456 10.8.1, P1: PWR_SECCFGR is RAZ/WI under TZEN=0")
   CHECK(r.peek("PWR", "CR2") == 0x1);
 }
 
+TEST_CASE("RM0456 10.8.2: PWR_PRIVCFGR needs a privileged access and its SPRIV bit a Secure one")
+{
+  rig const r{true};
+  r.write("PWR", "PRIVCFGR", 0x3, nonsecure_unpriv);
+  CHECK(r.peek("PWR", "PRIVCFGR") == 0);
+  r.write("PWR", "PRIVCFGR", 0x3, nonsecure_priv);
+  CHECK(r.peek("PWR", "PRIVCFGR") == 0x2);
+  r.write("PWR", "PRIVCFGR", 0x3, secure_priv);
+  CHECK(r.peek("PWR", "PRIVCFGR") == 0x3);
+}
+
+TEST_CASE("RM0456 10.8.1: PWR_SECCFGR is privileged with SPRIV, a Non-secure read raises no event")
+{
+  rig const  r{true};
+  auto const lpm   = bit("PWR", "SECCFGR", "LPMSEC");
+  auto const event = bit("GTZC2_TZIC", "SR2", "PWRF");
+  CHECK(r.read("PWR", "SECCFGR", nonsecure_priv) == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == 0);
+  r.write("PWR", "SECCFGR", lpm, secure_unpriv);
+  CHECK(r.peek("PWR", "SECCFGR") == lpm);
+  r.write("PWR", "SECCFGR", 0, secure_unpriv);
+  r.write("PWR", "PRIVCFGR", 0x1, secure_priv);
+  r.write("PWR", "SECCFGR", lpm, secure_unpriv);
+  CHECK(r.peek("PWR", "SECCFGR") == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == 0);
+  r.write("PWR", "SECCFGR", lpm, nonsecure_priv);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == event);
+}
+
+TEST_CASE("RM0456 11.5.1: RCC_SECCFGR raises the RCC event on a Non-secure write only")
+{
+  rig const  r{true};
+  auto const pll1  = bit("RCC", "SECCFGR", "PLL1SEC");
+  auto const event = bit("GTZC2_TZIC", "SR2", "RCCF");
+  CHECK(r.read("RCC", "SECCFGR", nonsecure_priv) == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == 0);
+  r.write("RCC", "SECCFGR", pll1, nonsecure_priv);
+  CHECK(r.peek("RCC", "SECCFGR") == 0);
+  CHECK(r.peek("GTZC2_TZIC", "SR2") == event);
+}
+
+TEST_CASE(
+    "RM0456 10.8 and 11.5, P1: an unprivileged write reaches word 0 of PWR and RCC under TZEN=0")
+{
+  rig const  r{false};
+  auto const hsion = r.bit("RCC", "CR", "HSION");
+  r.write("PWR", "CR1", 0x1, nonsecure_unpriv);
+  CHECK(r.peek("PWR", "CR1") == 0x1);
+  r.write("RCC", "CR", hsion, nonsecure_unpriv);
+  CHECK((r.peek("RCC", "CR") & hsion) == hsion);
+}
+
 TEST_CASE(
     "RM0456 11.5.1: a Secure SYSCFG or GPDMA1 reset clears SECCFGR, a Non-secure one is ignored")
 {

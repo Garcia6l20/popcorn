@@ -1179,6 +1179,45 @@ TEST_CASE(
   }
 }
 
+TEST_CASE("RM0481: RCC_PRIVCFGR needs a privileged access and its SPRIV bit a Secure one")
+{
+  popcorn::testing::h573_secure_rig const r;
+  using popcorn::bus_attrs;
+  using popcorn::initiator;
+  constexpr bus_attrs secure_priv{.by = initiator::cpu, .secure = true, .privileged = true};
+  constexpr bus_attrs nonsecure_priv{.by = initiator::cpu, .secure = false, .privileged = true};
+  constexpr bus_attrs nonsecure_unpriv{.by = initiator::cpu, .secure = false, .privileged = false};
+  r.write_as("RCC", "RCC_PRIVCFGR", 0x3, nonsecure_unpriv);
+  CHECK(r.peek("RCC", "RCC_PRIVCFGR") == 0);
+  r.write_as("RCC", "RCC_PRIVCFGR", 0x3, nonsecure_priv);
+  CHECK(r.peek("RCC", "RCC_PRIVCFGR") == 0x2);
+  r.write_as("RCC", "RCC_PRIVCFGR", 0x3, secure_priv);
+  CHECK(r.peek("RCC", "RCC_PRIVCFGR") == 0x3);
+}
+
+TEST_CASE("RM0481: RCC_SECCFGR is privileged with SPRIV, a Non-secure write raises RCCF")
+{
+  popcorn::testing::h573_secure_rig const r;
+  using popcorn::bus_attrs;
+  using popcorn::initiator;
+  constexpr bus_attrs secure_priv{.by = initiator::cpu, .secure = true, .privileged = true};
+  constexpr bus_attrs secure_unpriv{.by = initiator::cpu, .secure = true, .privileged = false};
+  constexpr bus_attrs nonsecure_priv{.by = initiator::cpu, .secure = false, .privileged = true};
+  auto const          bits = std::uint32_t{1};
+  CHECK(r.read_as("RCC", "RCC_SECCFGR", nonsecure_priv) == 0);
+  CHECK_FALSE(r.illegal_flag("RCCF"));
+  r.write_as("RCC", "RCC_SECCFGR", bits, secure_unpriv);
+  CHECK(r.peek("RCC", "RCC_SECCFGR") == bits);
+  r.write_as("RCC", "RCC_SECCFGR", 0, secure_unpriv);
+  r.write_as("RCC", "RCC_PRIVCFGR", 0x1, secure_priv);
+  r.write_as("RCC", "RCC_SECCFGR", bits, secure_unpriv);
+  CHECK(r.peek("RCC", "RCC_SECCFGR") == 0);
+  CHECK_FALSE(r.illegal_flag("RCCF"));
+  r.write_as("RCC", "RCC_SECCFGR", bits, nonsecure_priv);
+  CHECK(r.peek("RCC", "RCC_SECCFGR") == 0);
+  CHECK(r.illegal_flag("RCCF"));
+}
+
 TEST_CASE("an H573 description without RCC_CR.HSEEXT builds at TZEN=0 and throws at TZEN=1")
 {
   auto desc = h573();

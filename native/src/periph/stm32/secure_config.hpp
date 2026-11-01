@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -206,4 +207,65 @@ struct storage_notes
     }
   }
 };
+
+/**
+ * @brief Guard of the security and privilege configuration words, `SECCFGR` and `PRIVCFGR`, of a
+ *        TrustZone-aware model. Without TrustZone the security word is storage and every other
+ *        word is unguarded. The security word is Secure, and privileged when SPRIV is set. The
+ *        privilege word is privileged, and its SPRIV bit is Secure.
+ * @param secure Security word, empty when the part has none.
+ * @param privilege Privilege word.
+ * @param secure_privileged SPRIV of the privilege word.
+ * @param regs Register file holding the privilege word.
+ * @param trustzone Whether the part has TrustZone.
+ * @param word Byte offset of the accessed word.
+ * @param ctx Attributes of the transaction.
+ * @param write Whether the access is a write.
+ * @param raise_illegal Raises the illegal access event, called for a Non-secure write to the
+ *        security word.
+ * @return The guard of the word, empty for any other word under TrustZone.
+ */
+[[nodiscard]] inline auto config_word_guard(
+    std::optional<reg_ref> const& secure,
+    reg_ref                       privilege,
+    field_ref                     secure_privileged,
+    register_file const&          regs,
+    bool                          trustzone,
+    std::uint32_t                 word,
+    access_ctx const&             ctx,
+    bool                          write,
+    std::function_ref<void()>     raise_illegal) -> std::optional<bus_guard>
+{
+  auto const all = ~std::uint32_t{};
+  if(secure and word == secure->offset)
+  {
+    if(not trustzone)
+    {
+      return bus_guard::both(all);
+    }
+    if(not ctx.secure)
+    {
+      if(write)
+      {
+        raise_illegal();
+      }
+      return bus_guard{.wi = all};
+    }
+    auto const spriv = secure_privileged.of(regs.peek(privilege.offset)) != 0;
+    return bus_guard{.wi = not ctx.privileged and spriv ? all : 0};
+  }
+  if(not trustzone)
+  {
+    return bus_guard{};
+  }
+  if(word == privilege.offset)
+  {
+    if(not ctx.privileged)
+    {
+      return bus_guard{.wi = all};
+    }
+    return bus_guard{.wi = ctx.secure ? 0 : secure_privileged.mask()};
+  }
+  return std::nullopt;
+}
 }

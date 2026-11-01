@@ -10,6 +10,7 @@
 #include "rcc_l1.hpp"
 #include "rcc_resets.hpp"
 #include "rcc_u5.hpp"
+#include "secure_config.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/scheduler.hpp>
@@ -1459,36 +1460,17 @@ template <typename Traits>
 auto rcc_model<Traits>::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_guard
 {
   auto const all = ~std::uint32_t{};
-  if(secure_ and word == secure_->offset)
+  if(auto const head = config_word_guard(
+         secure_, privilege_, secure_privileged_, regs_, ctx_.trustzone, word, ctx, write, [&] {
+           if(unit_)
+           {
+             illegal_.raise(ctx_.peers, *unit_, ctx.by);
+           }
+         }))
   {
-    if(not ctx_.trustzone)
-    {
-      return bus_guard::both(all);
-    }
-    if(not ctx.secure)
-    {
-      if(write and unit_)
-      {
-        illegal_.raise(ctx_.peers, *unit_, ctx.by);
-      }
-      return {.wi = all};
-    }
-    auto const spriv = secure_privileged_.of(regs_.peek(privilege_.offset)) != 0;
-    return {.wi = not ctx.privileged and spriv ? all : 0};
-  }
-  if(not ctx_.trustzone)
-  {
-    return {};
+    return *head;
   }
   auto const privilege = regs_.peek(privilege_.offset);
-  if(word == privilege_.offset)
-  {
-    if(not ctx.privileged)
-    {
-      return {.wi = all};
-    }
-    return {.wi = ctx.secure ? 0 : secure_privileged_.mask()};
-  }
   resolve_units();
   auto const    seccfgr = secure_word();
   std::uint32_t secured = 0;
