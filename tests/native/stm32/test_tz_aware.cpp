@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "gtzc.hpp"
 #include "stm32_fixture.hpp"
 
@@ -44,18 +45,10 @@ constexpr bus_attrs secure_unpriv{.by = initiator::cpu, .secure = true, .privile
 constexpr bus_attrs nonsecure_priv{.by = initiator::cpu, .secure = false, .privileged = true};
 constexpr bus_attrs nonsecure_unpriv{.by = initiator::cpu, .secure = false, .privileged = false};
 
-class probe final : public periph::model
+class probe final : public popcorn::testing::inert_model
 {
 public:
   explicit probe(periph::model_context& ctx) : ctx_{ctx}
-  {}
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-
-  void reset(periph::register_file&, popcorn::reset_kind) override
   {}
 
   auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
@@ -63,26 +56,6 @@ public:
   {
     return 0;
   }
-
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-
-  void save(std::vector<std::byte>&) const override
-  {}
-
-  void load(std::span<std::byte const>) override
-  {}
 
   [[nodiscard]] auto services() const -> core::machine_services&
   {

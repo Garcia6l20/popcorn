@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "h573_secure_rig.hpp"
 #include "kernel_gate.hpp"
 #include "model_base.hpp"
@@ -41,7 +42,7 @@ using popcorn::testing::stm32_fixture;
 
 constexpr std::uint64_t mhz = 1'000'000;
 
-class listener final : public periph::model
+class listener final : public popcorn::testing::inert_model
 {
 public:
   explicit listener(periph::model_context& ctx) : context{ctx}
@@ -53,36 +54,9 @@ public:
   {
     return context.clock.hz(context.clock.domain(name));
   }
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
-class reset_counter final : public periph::model, public periph::bus_reset_listener
+class reset_counter final : public popcorn::testing::inert_model, public periph::bus_reset_listener
 {
 public:
   int resets{};
@@ -91,33 +65,6 @@ public:
   {
     ++resets;
   }
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 auto with_listener(core::machine_options options = popcorn::testing::stm32_options())

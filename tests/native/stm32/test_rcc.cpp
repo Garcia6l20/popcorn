@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "kernel_gate.hpp"
 #include "model_base.hpp"
 #include "rcc_resets.hpp"
@@ -44,7 +45,7 @@ auto fixed_board() -> stm32::board const&
   return board;
 }
 
-class listener final : public periph::model, public stm32::clock_listener
+class listener final : public popcorn::testing::inert_model, public stm32::clock_listener
 {
 public:
   explicit listener(periph::model_context& ctx) : context{ctx}
@@ -62,36 +63,9 @@ public:
   {
     ++changes;
   }
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
-class reset_counter final : public periph::model, public periph::bus_reset_listener
+class reset_counter final : public popcorn::testing::inert_model, public periph::bus_reset_listener
 {
 public:
   int resets{};
@@ -100,36 +74,9 @@ public:
   {
     ++resets;
   }
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
-class write_counter final : public periph::model, public periph::bus_reset_listener
+class write_counter final : public popcorn::testing::inert_model, public periph::bus_reset_listener
 {
 public:
   int resets{};
@@ -148,13 +95,6 @@ public:
   {
     return {"POL"};
   }
-  void reset(periph::register_file&, reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
   auto on_write(
       periph::register_file&,
       std::uint32_t,
@@ -166,15 +106,9 @@ public:
     ++writes;
     return {};
   }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
-class kind_recorder final : public periph::model
+class kind_recorder final : public popcorn::testing::inert_model
 {
 public:
   std::vector<reset_kind> kinds;
@@ -188,11 +122,6 @@ public:
   {
     kinds.push_back(kind);
   }
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
   auto on_write(
       periph::register_file&,
       std::uint32_t,
@@ -204,12 +133,6 @@ public:
     ++writes;
     return {};
   }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 struct reset_target

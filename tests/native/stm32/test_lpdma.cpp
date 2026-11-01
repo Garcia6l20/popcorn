@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "dma.hpp"
 #include "dma_signal.hpp"
 #include "stm32_fixture.hpp"
@@ -54,7 +55,7 @@ struct call
   friend auto operator==(call const&, call const&) -> bool = default;
 };
 
-class lpuart final : public periph::model, public stm32::dma_requester
+class lpuart final : public popcorn::testing::inert_model, public stm32::dma_requester
 {
 public:
   explicit lpuart(periph::model_context& ctx) : tx{ctx.peers, "lpuart1_tx_dma"}
@@ -74,35 +75,10 @@ public:
     acknowledges.push_back({.by = &by, .request = request, .carried = tx.carries(by, request)});
   }
 
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
   void reset(periph::register_file&, popcorn::reset_kind) override
   {
     tx.resolve();
   }
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 auto pattern(std::uint32_t index) -> std::uint32_t

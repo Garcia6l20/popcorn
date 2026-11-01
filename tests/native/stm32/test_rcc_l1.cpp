@@ -1,3 +1,4 @@
+#include "../support/inert_model.hpp"
 #include "rcc_resets.hpp"
 #include "stm32_fixture.hpp"
 
@@ -38,7 +39,7 @@ constexpr std::uint64_t hse_hz   = 8 * mhz;
 constexpr std::uint64_t hsi_hz   = 16 * mhz;
 constexpr auto          firmware = std::string_view{"l152xe_l1_rcc_ll"};
 
-class listener final : public periph::model
+class listener final : public popcorn::testing::inert_model
 {
 public:
   explicit listener(periph::model_context& ctx) : context{ctx}
@@ -50,33 +51,6 @@ public:
   {
     return context.clock.hz(context.clock.domain(name));
   }
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 };
 
 auto with_listener() -> core::machine_options
