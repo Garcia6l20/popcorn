@@ -1,5 +1,6 @@
 #include "arch_fixture.hpp"
 
+#include "../support/inert_model.hpp"
 #include "cortex_m.hpp"
 #include "state.hpp"
 
@@ -124,7 +125,7 @@ struct probe_case
   bool             fp;
 };
 
-class line_model final : public periph::model
+class line_model final : public popcorn::testing::inert_model
 {
 public:
   static constexpr std::uint32_t data_offset = 0x58;
@@ -137,9 +138,6 @@ public:
   {
     return {"DATA", "CTRL"};
   }
-
-  void reset(periph::register_file&, popcorn::reset_kind) override
-  {}
 
   auto on_read(periph::register_file&, std::uint32_t offset, std::uint8_t, periph::access_ctx)
       -> std::expected<std::uint32_t, popcorn::bus_error> override
@@ -176,15 +174,6 @@ public:
     return {};
   }
 
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-
-  void save(std::vector<std::byte>&) const override
-  {}
-
-  void load(std::span<std::byte const>) override
-  {}
-
   [[nodiscard]] auto line() const -> periph::irq_line&
   {
     return nmi ? context_.nmi : context_.irqs.front();
@@ -215,44 +204,10 @@ auto saved_special(arch_fixture const& f) -> armv8m::special_registers
   return reflex::serde::bson::deserializer{bytes}.load<armv8m::state>().special;
 }
 
-class nmi_holder final : public periph::model
+class nmi_holder final : public popcorn::testing::inert_model
 {
 public:
   explicit nmi_holder(periph::model_context& ctx) noexcept : context_{ctx}
-  {}
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-
-  void reset(periph::register_file&, popcorn::reset_kind) override
-  {}
-
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-
-  void save(std::vector<std::byte>&) const override
-  {}
-
-  void load(std::span<std::byte const>) override
   {}
 
   [[nodiscard]] auto line() const -> periph::irq_line&

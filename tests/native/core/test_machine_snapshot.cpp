@@ -5,6 +5,7 @@
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/snapshot_listener.hpp>
 
+#include "../support/inert_model.hpp"
 #include "../support/machine_fixture.hpp"
 #include "../support/test_arch.hpp"
 #include "../support/test_model.hpp"
@@ -484,40 +485,9 @@ TEST_CASE("a serialized snapshot with a foreign event owner or clock domain is r
 
 namespace
 {
-class storage_model final : public popcorn::periph::model
+class storage_model final : public popcorn::testing::inert_model
 {
 public:
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-
-  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
-  {}
-
-  auto on_read(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0;
-  }
-
-  auto on_write(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-
   void save(std::vector<std::byte>&) const override
   {
     ++saves;
@@ -605,42 +575,11 @@ TEST_CASE("a save with no bytes for a model with state is refused")
 
 namespace
 {
-class settling_model final : public popcorn::periph::model,
+class settling_model final : public popcorn::testing::inert_model,
                              public popcorn::periph::snapshot_listener
 {
 public:
   explicit settling_model(popcorn::periph::model_context& ctx) noexcept : context{ctx}
-  {}
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-
-  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
-  {}
-
-  auto on_read(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0;
-  }
-
-  auto on_write(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-
-  void on_event(std::uint32_t, std::uint64_t) override
   {}
 
   void before_snapshot() override

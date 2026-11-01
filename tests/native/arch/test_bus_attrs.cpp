@@ -1,6 +1,7 @@
 #include "arch_fixture.hpp"
 
 #include "../../../native/src/core/machine_impl.hpp"
+#include "../support/inert_model.hpp"
 #include "../support/test_model.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -77,7 +78,7 @@ constexpr address       hfsr             = 0xE000'ED2C;
 constexpr address       shcsr            = 0xE000'ED24;
 constexpr std::uint32_t hfsr_forced      = 1u << 30;
 
-class probe_firewall final : public periph::model, public periph::bus_firewall
+class probe_firewall final : public popcorn::testing::inert_model, public periph::bus_firewall
 {
 public:
   struct call
@@ -91,34 +92,6 @@ public:
   {
     ctx.install_firewall(*this);
   }
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(periph::register_file&, std::uint32_t, std::uint8_t, periph::access_ctx)
-      -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 
   auto check_peripheral(std::size_t unit, bus_attrs attrs, memory_op op) -> bus_verdict override
   {

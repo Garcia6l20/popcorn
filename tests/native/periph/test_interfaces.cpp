@@ -7,6 +7,7 @@
 #include <popcorn/core/services.hpp>
 
 #include "../fake_services.hpp"
+#include "../support/inert_model.hpp"
 
 #include <doctest/doctest.h>
 #include <reflex/serde/bson.hpp>
@@ -210,6 +211,27 @@ TEST_CASE("the context forwards a stop request to the machine services")
   REQUIRE(services.stop.has_value());
   CHECK(services.stop->first == popcorn::stop_reason::user);
   CHECK(services.stop->second == "tx done");
+}
+
+TEST_CASE("an inert model claims nothing, reads zero and takes writes")
+{
+  struct child final : popcorn::testing::inert_model
+  {};
+
+  auto const                     uart = uart_of_toy();
+  popcorn::periph::register_file regs{uart};
+  child                          model;
+  popcorn::periph::access_ctx    ctx{.pc = 0x0800'0100, .now = {10}};
+
+  CHECK(model.claims().empty());
+  CHECK(model.on_read(regs, 0, 4, ctx) == 0u);
+  CHECK(model.on_write(regs, 0, 4, 0, 0xffff'ffff, ctx).has_value());
+  model.reset(regs, popcorn::reset_kind::power_on);
+  model.on_event(1, 2);
+  std::vector<std::byte> snapshot;
+  model.save(snapshot);
+  CHECK(snapshot.empty());
+  model.load(snapshot);
 }
 
 static_assert(not std::is_copy_constructible_v<popcorn::periph::model>);

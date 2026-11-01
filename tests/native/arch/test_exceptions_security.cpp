@@ -1,6 +1,7 @@
 #include "arch_fixture.hpp"
 
 #include "../../../native/src/core/machine_impl.hpp"
+#include "../support/inert_model.hpp"
 #include "cortex_m.hpp"
 #include "exceptions.hpp"
 #include "frame.hpp"
@@ -1865,44 +1866,13 @@ namespace
 constexpr address       sram_end     = 0x200C'0000;
 constexpr std::uint32_t secure_fpscr = 0x0340'0000;
 
-class read_denied final : public popcorn::periph::model, public popcorn::periph::bus_firewall
+class read_denied final : public popcorn::testing::inert_model, public popcorn::periph::bus_firewall
 {
 public:
   read_denied(popcorn::periph::model_context& ctx, address denied) : denied_{denied}
   {
     ctx.install_firewall(*this);
   }
-
-  [[nodiscard]] auto claims() const -> std::vector<std::string> override
-  {
-    return {};
-  }
-  void reset(popcorn::periph::register_file&, popcorn::reset_kind) override
-  {}
-  auto on_read(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      popcorn::periph::access_ctx) -> std::expected<std::uint32_t, popcorn::bus_error> override
-  {
-    return 0u;
-  }
-  auto on_write(
-      popcorn::periph::register_file&,
-      std::uint32_t,
-      std::uint8_t,
-      std::uint32_t,
-      std::uint32_t,
-      popcorn::periph::access_ctx) -> std::expected<void, popcorn::bus_error> override
-  {
-    return {};
-  }
-  void on_event(std::uint32_t, std::uint64_t) override
-  {}
-  void save(std::vector<std::byte>&) const override
-  {}
-  void load(std::span<std::byte const>) override
-  {}
 
   auto check_peripheral(std::size_t, popcorn::bus_attrs, popcorn::arch::memory_op)
       -> popcorn::periph::bus_verdict override
