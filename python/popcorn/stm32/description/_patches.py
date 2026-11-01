@@ -6,9 +6,9 @@ schema type."""
 
 import copy
 import fnmatch
+import functools
 import re
 import tomllib
-from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -334,25 +334,20 @@ class _ParsedFile:
     facts: list[PartFact] | None = None
 
 
-_PARSED_MEMO_SIZE = 256
-parsed_patch_memo: OrderedDict[Path, _ParsedFile] = OrderedDict()
+@functools.lru_cache(maxsize=256)
+def parsed_patch(key: Path, content: bytes) -> _ParsedFile:
+    """The TOML of the patch file at the resolved path @p key holding @p content, cached on both,
+    256 files, least recently used dropped first. tomllib.TOMLDecodeError for bytes that are not
+    TOML, raised again at every call."""
+    text = content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return _ParsedFile(content=content, data=tomllib.loads(text))
 
 
 def _parsed(path: Path) -> _ParsedFile:
-    content = path.read_bytes()
-    key = path.resolve()
-    entry = parsed_patch_memo.pop(key, None)
-    if entry is None or entry.content != content:
-        text = content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-        try:
-            data = tomllib.loads(text)
-        except tomllib.TOMLDecodeError as exc:
-            raise DescriptionError(str(path), exc.lineno or 0, "<root>", "valid TOML") from exc
-        entry = _ParsedFile(content=content, data=data)
-    parsed_patch_memo[key] = entry
-    if len(parsed_patch_memo) > _PARSED_MEMO_SIZE:
-        parsed_patch_memo.popitem(last=False)
-    return entry
+    try:
+        return parsed_patch(path.resolve(), path.read_bytes())
+    except tomllib.TOMLDecodeError as exc:
+        raise DescriptionError(str(path), exc.lineno or 0, "<root>", "valid TOML") from exc
 
 
 def _patch_of(path: Path, entry: _ParsedFile) -> Patch:
@@ -364,8 +359,8 @@ def _patch_of(path: Path, entry: _ParsedFile) -> Patch:
 def read_patch(path: Path) -> Patch:
     """The patch in the file @p path, parsed once per process: an entry is keyed on the resolved
     path and reused while the file's bytes equal the bytes it was parsed from, so an edited file
-    is parsed again at its next read. At most 256 files are kept, least recently read dropped
-    first. DescriptionError for a file that is not TOML or not a patch."""
+    is parsed again at its next read. At most 256 files are kept, see parsed_patch.
+    DescriptionError for a file that is not TOML or not a patch."""
     return _patch_of(path, _parsed(path))
 
 

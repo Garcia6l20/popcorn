@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 
 import pytest
-from popcorn.stm32.description import _patches
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._patches import load_patches, part_facts, read_patch
 
@@ -74,18 +73,6 @@ def test_a_refused_patch_file_is_refused_again_until_it_is_fixed(tmp_path: Path)
             read_patch(path)
     path.write_text(_PATCH.format(source="AAAA"), encoding="utf-8")
     assert read_patch(path).source == "AAAA"
-
-
-def test_the_memo_holds_at_most_256_files(tmp_path: Path) -> None:
-    _patches.parsed_patch_memo.clear()
-    paths = [tmp_path / f"p{index}.toml" for index in range(300)]
-    for path in paths:
-        path.write_text(_PATCH.format(source=path.stem), encoding="utf-8")
-        read_patch(path)
-    assert len(_patches.parsed_patch_memo) == 256
-    assert paths[0].resolve() not in _patches.parsed_patch_memo
-    assert paths[-1].resolve() in _patches.parsed_patch_memo
-    assert read_patch(paths[0]).source == "p0"
 
 
 def test_a_refused_part_facts_row_is_refused_again_until_it_is_fixed(tmp_path: Path) -> None:

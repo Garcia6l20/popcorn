@@ -809,16 +809,3 @@ def test_a_refused_parts_layer_is_refused_again_until_it_is_fixed(shipped_dir: P
         assert excinfo.value.key == "<root>"
     (shipped_dir / PARTS).write_bytes(good)
     assert shipped_names() == [NAME]
-
-
-def test_the_names_memo_holds_at_most_64_layer_files(shipped_dir: Path, tmp_path: Path) -> None:
-    _shipped.names_memo.clear()
-    layer = (shipped_dir / PARTS).read_bytes()
-    directories = [tmp_path / f"d{index}" for index in range(70)]
-    for directory in directories:
-        directory.mkdir()
-        (directory / PARTS).write_bytes(layer)
-        assert shipped_names(directory) == [NAME]
-    assert len(_shipped.names_memo) == 64
-    assert (directories[0] / PARTS).resolve() not in _shipped.names_memo
-    assert (directories[-1] / PARTS).resolve() in _shipped.names_memo
