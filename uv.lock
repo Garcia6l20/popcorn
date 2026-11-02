@@ -504,16 +504,16 @@ wheels = [
 
 [[package]]
 name = "pcons"
-version = "0.31.0"
+version = "0.32.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "tomli-w" },
     { name = "watchfiles", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ce/36/0bc2fe6266e494316dbed18eb0bde0b2ba0a535f4c9592cbe88103830c92/pcons-0.31.0.tar.gz", hash = "sha256:8d08e7059bb6832cefba68bbd48385318d70e18d69156c5f29edf977955ce03c", size = 4246076, upload-time = "2026-10-21T23:00:24.112Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3a/09/2cf2953a6798e4ef4b2907f05802910aa075fc7e9602da9fe793ca940c6c/pcons-0.32.0.tar.gz", hash = "sha256:4c08c23f754aab706cbf1bcf8d7661507a9018ae91a95f1229f8f029903c383e", size = 4500403, upload-time = "2026-11-01T23:14:50.982Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d4/d1/e710d39a043392621144aa348392f919c6f9fc6c44b6406585e39e43678a/pcons-0.31.0-py3-none-any.whl", hash = "sha256:b71b7830c147db90cc0a5f006906e025aa456747520fd6c08247dee5b1e3eb8f", size = 793765, upload-time = "2026-10-21T23:00:22.029Z" },
+    { url = "https://files.pythonhosted.org/packages/47/12/ca285230df738b7699d94c256a104ac52cbaa690708488dc10e73bbdaa23/pcons-0.32.0-py3-none-any.whl", hash = "sha256:752a9fec9ce22daace615335f5f5846e1adb1971001c30bb7ff356b180e2345e", size = 805294, upload-time = "2026-11-01T23:14:49.58Z" },
 ]
 
 [[package]]
@@ -573,7 +573,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "ninja", marker = "extra == 'plugin'" },
-    { name = "pcons", marker = "extra == 'plugin'", specifier = "==0.31.0" },
+    { name = "pcons", marker = "extra == 'plugin'", specifier = "==0.32.0" },
     { name = "pyelftools" },
     { name = "pytest", marker = "extra == 'pytest'", specifier = ">=9.1" },
 ]

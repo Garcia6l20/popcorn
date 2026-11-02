@@ -1,5 +1,5 @@
 [build-system]
-requires = ["pcons==0.31.0", "setuptools-scm==10.3.4", "vcs-versioning==2.6.0"]
+requires = ["pcons==0.32.0", "setuptools-scm==10.3.4", "vcs-versioning==2.6.0"]
 build-backend = "popcorn_build.backend"
 backend-path = ["."]
 
@@ -18,7 +18,7 @@ pytest = [
     "pytest>=9.1",
 ]
 plugin = [
-    "pcons==0.31.0",
+    "pcons==0.32.0",
     "ninja",
 ]
 
