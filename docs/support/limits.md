@@ -490,6 +490,30 @@ On the STM32L1, RM0038 section 3:
   halfword store of 0 to the Cat.1 data EEPROM programs nothing and logs one `model_warning`,
   `ModelError` under `strict`.
 
+On the STM32L47x/L48x, RM0351 section 3:
+
+- One register set, FLASH_KEYR, FLASH_CR and FLASH_SR, and no TrustZone. KEY1 then KEY2 clear
+  LOCK, any other key write is a bus error and keeps FLASH_CR locked until the next reset.
+  FLASH_OPTKEYR clears OPTLOCK with LOCK clear. A wrong option key is a bus error that keeps
+  OPTLOCK set until the next reset, inferred from the U5 rule: RM0351 3.7.6 states the lock only.
+- A double word programs when its second word is stored, BSY set for
+  `flash_options.quad_word_program`, 81.69 us by default, the DS10198 Table 63 tprog. A double
+  word that does not read 0xFFFFFFFF sets PROGERR, except when the data is zero: zeros program
+  over any double word. A page erase holds BSY for 22.02 ms, a bank or two-bank mass erase for
+  22.13 ms, the DS10198 typical values. A PNB at or above the pages of a bank, 64 on a 256-Kbyte
+  part, erases nothing and logs one warning, a `model_error` under `strict_peripherals`.
+- A read of the bank under program or erase returns its stored data at once, with no bus stall.
+- `PRFTEN`, `ICEN`, `DCEN`, `ICRST`, `DCRST`, `RUN_PD` and `SLEEP_PD` are storage, the flash
+  reads at once, and `FLASH_PDKEYR` gates no write.
+- `LATENCY` is checked against RM0351 Table 11 for HCLK in the voltage range PWR applies: a lower
+  value, or an HCLK above 80 MHz in range 1 or 26 MHz in range 2, logs one warning per HCLK, range
+  and value, a `model_error` under `strict_peripherals`. `LATENCY` 5 to 7 counts as that many wait
+  states.
+- `OPTSTRT` clears at once with no BSY and programs nothing, `OBL_LAUNCH` requests an option byte
+  loader reset. `FLASH_OPTR`, the PCROP and the WRP registers are storage. `FSTPG` is storage, a
+  store with `FSTPG` set and `PG` clear sets PGSERR. `MISERR`, `FASTERR`, `RDERR` and `OPTVERR`
+  stay 0. `FLASH_ECCR` records a double error on a double word a power cut tore, with the NMI.
+
 ## DMA
 
 Source: [dma_classic.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/dma_classic.cpp)

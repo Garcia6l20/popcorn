@@ -261,6 +261,7 @@ for _, target in l4_firmwares.values():
 for program, source in (
     ("stm32-rcc-l4", "test_rcc_l4.cpp"),
     ("stm32-power-l4", "test_power_l4.cpp"),
+    ("stm32-flash-l4", "test_flash_l4.cpp"),
 ):
     l4_test = add_doctest(
         program,

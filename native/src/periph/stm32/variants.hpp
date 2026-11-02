@@ -427,6 +427,9 @@ inline constexpr flash_variant flash_5bit{.watermark_bits = 5, .encode_options =
 inline constexpr flash_variant flash_8bit{.watermark_bits = 8, .encode_options = u5_encode_options};
 /** @brief STM32H5. */
 inline constexpr flash_variant flash_h5{.encode_options = h5_encode_options};
+
+/** @brief The STM32L47x/L48x FLASH row: no option byte encoder. */
+inline constexpr flash_variant flash_l4{};
 /** @brief STM32L1 Cat.1. */
 inline constexpr flash_variant flash_l1_cat1{.encode_options = l1_encode_options_of<l1_flash_cat1>};
 /** @brief STM32L1 Cat.2. */

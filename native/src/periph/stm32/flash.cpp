@@ -635,8 +635,12 @@ struct u5_flash
   static constexpr bool hide_without_trustzone = false;
   /** @brief Clearing ECCD also clears the address and bank it recorded. */
   static constexpr bool ecc_record_clears = false;
+  /** @brief A program over a line that reads all zeros sets PROGERR, RM0456 7.3.9. */
+  static constexpr bool zeroed_line_refused = true;
   /** @brief Control field the out-of-range page warning names. */
   static constexpr std::string_view page_field = "PNB";
+  /** @brief Register of the option key sequence, RM0456 7.9.4. */
+  static constexpr std::string_view option_key_register = "FLASH_OPTKEYR";
   /** @brief Datasheet times of an empty flash_options field. */
   static constexpr flash_timing timing = u5_flash_timing;
   /** @brief Error flags with their own interrupt enable. */
@@ -929,24 +933,6 @@ static_assert(flag_matches_roles(
     {set_role::protection_irq, set_role::sequence_irq, set_role::strobe_irq,
      set_role::inconsistency_irq}));
 
-/** @brief The STM32U5 FLASH with the Non-secure register set alone and no block registers: the
- *         template with one register set, as a family without TrustZone has it. */
-struct u5_single_set_flash : u5_flash
-{
-  /** @brief The Non-secure register set. */
-  static constexpr std::array<set_names, 1> set_registers{
-      {
-       {"FLASH_NSKEYR", "FLASH_NSCR", "FLASH_NSSR"},
-       }
-  };
-  /** @brief No block-based security registers. */
-  static constexpr std::array<std::string_view, 0> secure_block_registers{};
-  /** @brief No block-based privilege registers. */
-  static constexpr std::array<std::string_view, 0> privileged_block_registers{};
-  /** @brief No block registers in a bank. */
-  static constexpr std::size_t block_registers_per_bank = 0;
-};
-
 constexpr std::array<std::array<std::uint64_t, 6>, 4> vos_read_max_mhz{
     {
      {42, 84, 126, 168, 210, 250},
@@ -1002,8 +988,12 @@ struct h5_flash
   static constexpr bool hide_without_trustzone = true;
   /** @brief Clearing ECCD clears FLASH_ECCDETR, RM0481 7.9.10. */
   static constexpr bool ecc_record_clears = true;
+  /** @brief A flash word is written byte by byte with no PROGERR, RM0481 7.3.5. */
+  static constexpr bool zeroed_line_refused = false;
   /** @brief Control field the out-of-range sector warning names. */
   static constexpr std::string_view page_field = "SNB";
+  /** @brief Register of the option key sequence, RM0481 7.11.4. */
+  static constexpr std::string_view option_key_register = "FLASH_OPTKEYR";
   /** @brief Datasheet times of an empty flash_options field. */
   static constexpr flash_timing timing = h5_flash_timing;
   /** @brief Error flags with their own interrupt enable, RM0481 7.11.11 bits 17 to 20. */
@@ -1268,6 +1258,292 @@ static_assert(flag_matches_roles(
     {set_role::protection_irq, set_role::sequence_irq, set_role::strobe_irq,
      set_role::inconsistency_irq}));
 
+constexpr std::array<named_field<set_role>, 31> l4_set_fields{
+    {
+     {set_role::lock, {"CR", "LOCK"}},
+     {set_role::program, {"CR", "PG"}},
+     {set_role::start, {"CR", "STRT"}},
+     {set_role::end, {"SR", "EOP"}},
+     {set_role::end_irq, {"CR", "EOPIE"}},
+     {set_role::busy, {"SR", "BSY"}},
+     {set_role::buffer_open, {}},
+     {set_role::page_erase, {"CR", "PER"}},
+     {set_role::page, {"CR", "PNB"}},
+     {set_role::bank_select, {"CR", "BKER"}},
+     {set_role::bank1_erase, {"CR", "MER1"}},
+     {set_role::bank2_erase, {"CR", "MER2"}},
+     {set_role::burst, {}},
+     {set_role::sector_erase, {}},
+     {set_role::sector, {}},
+     {set_role::bank_erase, {}},
+     {set_role::mass_erase, {}},
+     {set_role::force_write, {}},
+     {set_role::error_irq, {"CR", "ERRIE"}},
+     {set_role::operation_error, {"SR", "OPERR"}},
+     {set_role::program_error, {"SR", "PROGERR"}},
+     {set_role::protection_error, {"SR", "WRPERR"}},
+     {set_role::alignment_error, {"SR", "PGAERR"}},
+     {set_role::size_error, {"SR", "SIZERR"}},
+     {set_role::sequence_error, {"SR", "PGSERR"}},
+     {set_role::strobe_error, {}},
+     {set_role::inconsistency_error, {}},
+     {set_role::protection_irq, {}},
+     {set_role::sequence_irq, {}},
+     {set_role::strobe_irq, {}},
+     {set_role::inconsistency_irq, {}},
+     }
+};
+
+constexpr std::array<named_field<unit_role>, 18> l4_unit_fields{
+    {
+     {unit_role::latency, {"ACR", "LATENCY"}},
+     {unit_role::programming_delay, {}},
+     {unit_role::low_power_read, {}},
+     {unit_role::ecc_detect, {"ECCR", "ECCD"}},
+     {unit_role::ecc_correct, {"ECCR", "ECCC"}},
+     {unit_role::ecc_bank, {"ECCR", "BK_ECC"}},
+     {unit_role::ecc_address, {"ECCR", "ADDR_ECC"}},
+     {unit_role::invert, {}},
+     {unit_role::hide_bank1, {}},
+     {unit_role::hide_bank2, {}},
+     {unit_role::hide_extension1, {}},
+     {unit_role::hide_extension2, {}},
+     {unit_role::option_lock, {"CR", "OPTLOCK"}},
+     {unit_role::option_start, {"CR", "OPTSTRT"}},
+     {unit_role::option_load, {"CR", "OBL_LAUNCH"}},
+     {unit_role::option_error, {}},
+     {unit_role::option_error_irq, {}},
+     {unit_role::option_swap, {}},
+     }
+};
+
+/** @brief Highest HCLK of each LATENCY in voltage range 1 and range 2, RM0351 3.3.3 Table 11. */
+constexpr std::array<std::array<std::uint64_t, 5>, 2> l4_read_max_mhz{
+    {
+     {16, 32, 48, 64, 80},
+     {6, 12, 18, 26, 26},
+     }
+};
+
+/** @brief Typical STM32L476 times, DS10198 Rev 11 Table 63: tprog of a double word, tERASE of a
+ *         2-Kbyte page, tME for one or two banks. */
+constexpr flash_timing l4_flash_timing{
+    .quad_word_program = std::chrono::nanoseconds{81'690},
+    .burst_program     = {},
+    .page_erase        = std::chrono::nanoseconds{22'020'000},
+    .bank_erase        = std::chrono::nanoseconds{22'130'000},
+    .mass_erase        = std::chrono::nanoseconds{22'130'000},
+};
+
+/** @brief STM32L47x/L48x FLASH traits, RM0351 section 3: one register set, no TrustZone, no
+ *         block registers. */
+struct l4_flash
+{
+  /** @brief No burst programming, RM0351 3.3.7. */
+  static constexpr bool burst_write = false;
+  /** @brief A double word launches on its second word, no force write. */
+  static constexpr bool force_write = false;
+  /** @brief PER, PNB, BKER, MER1 and MER2 select the erase, RM0351 3.3.6. */
+  static constexpr bool erase_by_page = true;
+  /** @brief OPERR with ERRIE summarizes every error, RM0351 3.7.5. */
+  static constexpr bool summary_error = true;
+  /** @brief OBL_LAUNCH forces the option byte loading, RM0351 3.7.6. */
+  static constexpr bool option_load = true;
+  /** @brief ERRIE raises the interrupt through OPERR, no per-error enable. */
+  static constexpr bool per_error_irq = false;
+  /** @brief EOP sets only with EOPIE, RM0351 3.7.5. */
+  static constexpr bool end_flag_always = false;
+  /** @brief PG and STRT enable HSI16, RM0351 3.3.6 and 3.3.7. */
+  static constexpr bool holds_hsi16 = true;
+  /** @brief The option key sequence needs FLASH_CR.LOCK clear, RM0351 3.4.2. */
+  static constexpr bool option_key_needs_unlock = true;
+  /** @brief OPTSTRT programs, OBL_LAUNCH loads. */
+  static constexpr bool option_reload_on_start = false;
+  /** @brief No hide protection area. */
+  static constexpr bool hide_without_trustzone = false;
+  /** @brief FLASH_ECCR keeps the address and bank of the first error, RM0351 3.3.2. */
+  static constexpr bool ecc_record_clears = false;
+  /** @brief Zeros program over any line, RM0351 3.7.5 PROGERR. */
+  static constexpr bool zeroed_line_refused = false;
+  /** @brief Control field the out-of-range page warning names. */
+  static constexpr std::string_view page_field = "PNB";
+  /** @brief Register of the option key sequence, RM0351 3.7.4. */
+  static constexpr std::string_view option_key_register = "OPTKEYR";
+  /** @brief Datasheet times of an empty flash_options field. */
+  static constexpr flash_timing timing = l4_flash_timing;
+  /** @brief No per-error interrupt enable. */
+  static constexpr std::span<error_enable const> error_enables{};
+  /** @brief Bytes of one program, a double word, RM0351 3.3.7. */
+  static constexpr std::uint32_t program_bytes = 8;
+  /** @brief Bytes of the write buffer, one double word. */
+  static constexpr std::uint32_t buffer_bytes = program_bytes;
+  /** @brief Bytes of an erase page, RM0351 3.3.1. */
+  static constexpr std::uint32_t page_bytes = 2 * 1024;
+  /** @brief Section the latency warnings cite. */
+  static constexpr std::string_view latency_section = "RM0351 3.3.3 Table 11";
+  /** @brief The register set. */
+  static constexpr std::array<set_names, 1> set_registers{
+      {
+       {"KEYR", "CR", "SR"},
+       }
+  };
+  /** @brief Role names of the register set. */
+  static constexpr std::span<named_field<set_role> const> set_fields = l4_set_fields;
+  /** @brief Role names of the fields outside the register set. */
+  static constexpr std::span<named_field<unit_role> const> unit_fields = l4_unit_fields;
+  /** @brief No TrustZone privilege fields. */
+  static constexpr std::span<named_field<privilege_role> const> privilege_fields{};
+  /** @brief No option register loaded from flash_options::option_bytes. */
+  static constexpr std::array<std::string_view, 0> option_registers{};
+  /** @brief No Secure option register. */
+  static constexpr std::array<std::string_view, 0> secure_option_registers{};
+  /** @brief No staging register. */
+  static constexpr std::array<std::string_view, 0> option_staging_registers{};
+  /** @brief No write protection register OPTSTRT programs. */
+  static constexpr std::array<wrp_names, 0> wrp_registers{};
+  /** @brief Registers the dropped-option warning names. */
+  static constexpr std::string_view wrp_text = "WRPxyR";
+  /** @brief No block-based security register. */
+  static constexpr std::array<std::string_view, 0> secure_block_registers{};
+  /** @brief No block-based privilege register. */
+  static constexpr std::array<std::string_view, 0> privileged_block_registers{};
+  /** @brief No block register in a bank. */
+  static constexpr std::size_t block_registers_per_bank = 0;
+  /** @brief No watermark word. */
+  static constexpr std::array<std::size_t, 0> watermark_words{};
+  /** @brief No hide word. */
+  static constexpr std::array<std::size_t, 0> hide_words{};
+
+  /** @brief No hide protection area. */
+  [[nodiscard]] static constexpr auto hidden(hide_inputs const&) -> bool
+  {
+    return false;
+  }
+
+  /** @brief No watermark field. */
+  [[nodiscard]] static constexpr auto watermark_top(flash_variant) -> std::uint32_t
+  {
+    return 0;
+  }
+
+  /** @brief Bits of an option register a firmware write is compared on: all of them. */
+  [[nodiscard]] static constexpr auto option_mask(std::string_view, flash_variant) -> std::uint32_t
+  {
+    return ~0u;
+  }
+
+  /** @brief No write protection register. */
+  [[nodiscard]] static constexpr auto wrp_production(flash_variant) -> std::uint32_t
+  {
+    return ~0u;
+  }
+
+  /** @brief No write protection register. */
+  [[nodiscard]] static constexpr auto wrp_normal(std::uint32_t word, flash_variant) -> std::uint32_t
+  {
+    return word;
+  }
+
+  /** @brief No write protection register. */
+  [[nodiscard]] static constexpr auto wrp_refused(std::uint32_t, std::uint32_t) -> bool
+  {
+    return false;
+  }
+
+  /** @brief No write protection register covers a page. */
+  [[nodiscard]] static auto
+      wrp_covers(std::span<std::uint32_t const>, std::uint32_t, std::uint32_t, flash_variant)
+          -> bool
+  {
+    return false;
+  }
+
+  /**
+   * @brief Least LATENCY RM0351 3.3.3 Table 11 asks for.
+   * @param hclk HCLK in Hz.
+   * @param range Voltage range, 1 or 2.
+   * @return The least LATENCY, empty when HCLK is above the maximum of the range.
+   */
+  [[nodiscard]] static auto wait_states(std::uint64_t hclk, std::uint32_t range, bool)
+      -> std::optional<std::uint32_t>
+  {
+    return first_wait_states(l4_read_max_mhz[range - 1], hclk);
+  }
+
+  /** @brief No programming delay field. */
+  [[nodiscard]] static auto programming_delay(std::uint64_t, std::uint32_t)
+      -> std::optional<std::uint32_t>
+  {
+    return std::nullopt;
+  }
+
+  /**
+   * @brief FLASH_ECCR.ADDR_ECC of a failing double word, its byte offset in its bank, RM0351
+   *        3.3.2.
+   * @param line Physical address of the double word.
+   * @param bank_base Physical address of its bank.
+   */
+  [[nodiscard]] static constexpr auto ecc_address(std::uint32_t line, std::uint32_t bank_base)
+      -> std::uint32_t
+  {
+    return line - bank_base;
+  }
+
+  /** @brief The U5 rule: PER, MER1 or MER2 selects an erase, RM0351 3.3.6. */
+  template <typename Field> [[nodiscard]] static auto erase_selected(Field const& field) -> bool
+  {
+    return u5_flash::erase_selected(field);
+  }
+
+  /** @brief The U5 rule: PER with MER1 or MER2 conflicts. */
+  template <typename Field> [[nodiscard]] static auto erase_conflict(Field const& field) -> bool
+  {
+    return u5_flash::erase_conflict(field);
+  }
+
+  /** @brief The U5 decode: PER with PNB and BKER, MER1 or MER2 a bank, both the two banks. */
+  template <typename Field>
+  [[nodiscard]] static auto decode_erase(Field const& field) -> erase_command
+  {
+    return u5_flash::decode_erase(field);
+  }
+
+  /** @brief Refuses every option byte set, the row has no encoder. */
+  [[nodiscard]] static auto encode_options(flash_variant, std::uint32_t, option_bytes const&)
+      -> std::expected<option_words<option_registers.size()>, option_refusal>
+  {
+    return std::unexpected{
+        option_refusal{.key = "option_bytes", .expected = "no option bytes on the STM32L4"}
+    };
+  }
+};
+
+static_assert(names_every_role(l4_set_fields));
+static_assert(names_every_role(l4_unit_fields));
+static_assert(flag_matches_roles(l4_set_fields, l4_flash::burst_write, {set_role::burst}));
+static_assert(flag_matches_roles(
+    l4_set_fields,
+    l4_flash::force_write,
+    {set_role::force_write, set_role::strobe_error, set_role::inconsistency_error}));
+static_assert(flag_matches_roles(
+    l4_set_fields,
+    not l4_flash::force_write,
+    {set_role::size_error, set_role::alignment_error, set_role::program_error}));
+static_assert(flag_matches_roles(
+    l4_set_fields,
+    l4_flash::erase_by_page,
+    {set_role::page_erase, set_role::page, set_role::bank1_erase, set_role::bank2_erase}));
+static_assert(flag_matches_roles(
+    l4_set_fields,
+    l4_flash::summary_error,
+    {set_role::operation_error, set_role::error_irq}));
+static_assert(flag_matches_roles(l4_unit_fields, l4_flash::option_load, {unit_role::option_load}));
+static_assert(flag_matches_roles(
+    l4_set_fields,
+    l4_flash::per_error_irq,
+    {set_role::protection_irq, set_role::sequence_irq, set_role::strobe_irq,
+     set_role::inconsistency_irq}));
+
 /**
  * @brief FLASH interface of the STM32U5, RM0456 section 7, and of the STM32H5, RM0481 section 7:
  *        the Non-secure register set, and under TrustZone the Secure register set, page
@@ -1499,6 +1775,25 @@ static_assert(flag_matches_roles(
  *   model_warning per HCLK, range and value since the last restore, model_error under
  *   strict_peripherals.
  * - Timings default to DS14121 Rev 5 Table 52, h5_flash_timing.
+ *
+ * The STM32L47x/L48x, RM0351 section 3, through l4_flash: one register set, FLASH_KEYR, FLASH_CR
+ * and FLASH_SR, no TrustZone and no block registers.
+ * - Unlock, 3.3.5 and 3.4.2: as the U5, FLASH_OPTKEYR with LOCK clear. A wrong option key is a
+ *   bus error and keeps OPTLOCK set until reset, inferred from the U5 rule, RM0351 3.7.6 states
+ *   the lock only.
+ * - Program, 3.3.7: with PG set, the second 32-bit store of a double word launches it for
+ *   flash_options::quad_word_program, a double word that does not read 0xFFFFFFFF sets PROGERR
+ *   unless the data is zero, which programs over any double word. No burst, no WDW.
+ * - Erase, 3.3.6: PER with PNB and BKER, 2-Kbyte pages, MER1 and MER2. A PNB at or above the
+ *   pages of a bank erases nothing as on the U5.
+ * - Errors, 3.7.5: PROGERR, WRPERR, PGAERR, SIZERR and PGSERR as on the U5, OPERR with ERRIE.
+ *   MISERR, FASTERR, RDERR and OPTVERR stay 0.
+ * - FLASH_ACR, 3.7.1: LATENCY against Table 11 for HCLK and the PWR voltage range. PRFTEN, ICEN,
+ *   DCEN, ICRST, DCRST, RUN_PD and SLEEP_PD are storage, and FLASH_PDKEYR gates no write.
+ * - Options: OPTSTRT clears at once and programs nothing, OBL_LAUNCH requests an option byte
+ *   loader reset. FLASH_OPTR, the PCROP and the WRP registers are storage, and the row encodes
+ *   no option bytes.
+ * - Timings default to DS10198 Rev 11 Table 63, l4_flash_timing.
  */
 template <typename Traits>
 class flash_model final : public dispatch_model<flash_model<Traits>, flash_state>,
@@ -1513,6 +1808,10 @@ class flash_model final : public dispatch_model<flash_model<Traits>, flash_state
   static_assert(Traits::buffer_bytes / 4 <= buffer_words);
   static_assert(Traits::buffer_bytes % Traits::program_bytes == 0);
   static_assert(names_control_or_status(Traits::set_fields));
+  static_assert(Traits::secure_block_registers.size() == 2 * Traits::block_registers_per_bank);
+  static_assert(Traits::privileged_block_registers.size() == 2 * Traits::block_registers_per_bank);
+  static constexpr std::string_view access_register =
+      register_of(Traits::unit_fields, unit_role::latency);
   using base::claims;
   using base::ctx_;
   using base::desc_;
@@ -1718,12 +2017,12 @@ auto flash_table(peripheral_desc const& desc, flash_options const& options, bool
   constexpr auto option_register  = register_of(Traits::unit_fields, unit_role::option_lock);
   auto const&    nonsecure        = Traits::set_registers[0];
   std::vector<write_entry<model>> table{
-      {access_register,   &model::access_written    },
-      {nonsecure.key,     &model::key_written       },
-      {"FLASH_OPTKEYR",   &model::option_key_written},
-      {nonsecure.control, &model::control_written   },
-      {nonsecure.status,  &model::status_written    },
-      {ecc_register,      &model::ecc_written       },
+      {access_register,             &model::access_written    },
+      {nonsecure.key,               &model::key_written       },
+      {Traits::option_key_register, &model::option_key_written},
+      {nonsecure.control,           &model::control_written   },
+      {nonsecure.status,            &model::status_written    },
+      {ecc_register,                &model::ecc_written       },
   };
   if constexpr(correct_register != ecc_register)
   {
@@ -2454,7 +2753,7 @@ template <typename Traits> void flash_model<Traits>::load_options()
 
 template <typename Traits> void flash_model<Traits>::program_options()
 {
-  if(flag(false, set_role::sequence_error) or get(regs_, unit_[unit_role::option_error]) != 0)
+  if(flag(false, set_role::sequence_error) or unit_value(unit_role::option_error) != 0)
   {
     load_options();
     return;
@@ -2471,7 +2770,10 @@ template <typename Traits> void flash_model<Traits>::program_options()
   if(violation)
   {
     load_options();
-    fail(false, unit_[unit_role::option_error]);
+    if(auto const option_error = unit_.find(unit_role::option_error))
+    {
+      fail(false, *option_error);
+    }
     return;
   }
   state_.wrp = std::move(requested);
@@ -2552,7 +2854,8 @@ auto flash_model<Traits>::refused(
   {
     auto const old       = target.subspan(line, Traits::program_bytes);
     auto const zero_data = all_of_byte(data.subspan(line, Traits::program_bytes), std::byte{0});
-    if(all_of_byte(old, std::byte{0}) or (not all_of_byte(old, std::byte{0xff}) and not zero_data))
+    if((Traits::zeroed_line_refused and all_of_byte(old, std::byte{0}))
+       or (not all_of_byte(old, std::byte{0xff}) and not zero_data))
     {
       return true;
     }
@@ -2705,7 +3008,7 @@ template <typename Traits> auto flash_model<Traits>::rule_of(std::uint32_t at) c
     policy = {
         .secure = block_bit(secure_blocks_, at), .privileged = block_bit(privileged_blocks_, at)};
   }
-  if(option_words_.size() != Traits::option_registers.size())
+  if(Traits::option_registers.empty() or option_words_.size() != Traits::option_registers.size())
   {
     return policy;
   }
@@ -2851,17 +3154,23 @@ template <typename Traits> void flash_model<Traits>::set_busy(bool on)
 
 template <typename Traits> void flash_model<Traits>::set_waiting(bool on)
 {
-  update(regs_, field_of(false, set_role::buffer_open), on ? 1 : 0);
-  if(ctx_.trustzone)
+  for(auto const secure : {false, true})
   {
-    update(regs_, field_of(true, set_role::buffer_open), on ? 1 : 0);
+    if(secure and not ctx_.trustzone)
+    {
+      continue;
+    }
+    if(auto const open = sets_[set_index(secure)].fields.find(set_role::buffer_open))
+    {
+      update(regs_, *open, on ? 1 : 0);
+    }
   }
 }
 
 template <typename Traits> auto flash_model<Traits>::errors_pending(bool secure) const -> bool
 {
   return std::ranges::any_of(error_roles, [&](set_role role) { return flag(secure, role); })
-      or (not secure and get(regs_, unit_[unit_role::option_error]) != 0);
+      or (not secure and unit_value(unit_role::option_error) != 0);
 }
 
 template <typename Traits> void flash_model<Traits>::interrupt()
@@ -3141,7 +3450,7 @@ void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
       state_.buffer_addr + 4 * static_cast<std::uint32_t>(std::popcount(state_.filled));
   if(state_.filled == 0)
   {
-    state_.burst = field_of(secure, set_role::burst).of(control) != 0;
+    state_.burst = value_of(secure, set_role::burst, control) != 0;
     if(addr % (state_.burst ? Traits::buffer_bytes : Traits::program_bytes) != 0)
     {
       fail(secure, set_role::alignment_error);
@@ -3412,14 +3721,14 @@ void flash_model<Traits>::check_programming_delay(std::string_view trigger)
   if(delay_logged_.emplace(hclk, range, delay).second or ctx_.strict_peripherals)
   {
     warn(
-        "FLASH_ACR", std::format(
-                         "{}: WRHIGHFREQ {} is below the {} {} asks for HCLK {} Hz in voltage "
-                         "range {}, silicon would program out of timing",
-                         trigger, delay, *required, Traits::latency_section, hclk, range));
+        access_register, std::format(
+                             "{}: WRHIGHFREQ {} is below the {} {} asks for HCLK {} Hz in voltage "
+                             "range {}, silicon would program out of timing",
+                             trigger, delay, *required, Traits::latency_section, hclk, range));
   }
   if(ctx_.strict_peripherals)
   {
-    throw model_error(desc_.name, "FLASH_ACR", reg("FLASH_ACR").offset);
+    throw model_error(desc_.name, std::string{access_register}, reg(access_register).offset);
   }
 }
 
@@ -3441,7 +3750,7 @@ template <typename Traits> void flash_model<Traits>::check_latency(std::string_v
   if(latency_logged_.emplace(hclk, range, latency).second or ctx_.strict_peripherals)
   {
     warn(
-        "FLASH_ACR",
+        access_register,
         required ? std::format(
                        "{}: LATENCY {} is below the {} wait states {} asks for HCLK {} Hz in "
                        "voltage range {}, silicon would read wrong data",
@@ -3452,7 +3761,7 @@ template <typename Traits> void flash_model<Traits>::check_latency(std::string_v
   }
   if(ctx_.strict_peripherals)
   {
-    throw model_error(desc_.name, "FLASH_ACR", reg("FLASH_ACR").offset);
+    throw model_error(desc_.name, std::string{access_register}, reg(access_register).offset);
   }
 }
 
@@ -3502,7 +3811,7 @@ template <typename Traits> void flash_model<Traits>::on_voltage_range_change()
 
 template <typename Traits> void flash_model<Traits>::access_written(std::uint32_t, std::uint32_t)
 {
-  check_latency("on a FLASH_ACR write");
+  check_latency(std::format("on a {} write", access_register));
 }
 
 template <typename Traits> void flash_model<Traits>::key_written(std::uint32_t, std::uint32_t now)
@@ -3541,7 +3850,7 @@ template <typename Traits> void flash_model<Traits>::key_written(bool secure, st
 template <typename Traits>
 void flash_model<Traits>::option_key_written(std::uint32_t, std::uint32_t now)
 {
-  regs_.poke(reg("FLASH_OPTKEYR").offset, 0);
+  regs_.poke(reg(Traits::option_key_register).offset, 0);
   auto const armed = option_locked()
                  and not(Traits::option_key_needs_unlock and flag(false, set_role::lock))
                  and not state_.option_locked_up;
@@ -3959,10 +4268,10 @@ auto flash_factory(flash_options options) -> model_factory
   };
 }
 
-auto flash_single_set_factory(flash_options options) -> model_factory
+auto flash_l4_factory(flash_options options) -> model_factory
 {
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
-    return std::make_shared<flash_model<u5_single_set_flash>>(ctx, desc, options);
+    return std::make_shared<flash_model<l4_flash>>(ctx, desc, options);
   };
 }
 

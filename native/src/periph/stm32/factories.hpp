@@ -95,11 +95,10 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto flash_h5_factory(flash_options options) -> model_factory;
 
 /**
- * @brief Factory of the FLASH model on the STM32U5 Non-secure register set alone, with no block
- *        registers: the template with one register set, as a family without TrustZone uses it.
+ * @brief Factory of the STM32L47x/L48x FLASH model, RM0351 section 3.
  * @param options Board configuration, copied into every model made.
  */
-[[nodiscard]] auto flash_single_set_factory(flash_options options) -> model_factory;
+[[nodiscard]] auto flash_l4_factory(flash_options options) -> model_factory;
 
 /**
  * @brief Factory of the STM32L1 FLASH and data EEPROM model, RM0038 section 3.

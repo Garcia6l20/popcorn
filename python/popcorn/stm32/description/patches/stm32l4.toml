@@ -634,3 +634,9 @@ registers = ["PDCRB"]
 fields = ["PD4"]
 drop = true
 source = "RM0351 Rev 11, 5.4.11 PWR_PDCRB: bit 4 is reserved, PB4 has no Standby pull-down. The four SVDs give PD4"
+
+[[fields]]
+instances = ["FLASH"]
+registers = ["CR"]
+rename = { START = "STRT" }
+source = "RM0351 Rev 11, 3.7.6 FLASH_CR: bit 16 is STRT, start of an erase, CMSIS FLASH_CR_STRT. The four SVDs spell it START"
