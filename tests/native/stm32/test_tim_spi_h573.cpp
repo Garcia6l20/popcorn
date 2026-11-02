@@ -1229,3 +1229,32 @@ TEST_CASE("SPI1 on the H573 keeps the whole SPI_CFG1 while SPE is set, TXDMAEN i
   s.run_until(s.now() + 1'000'000);
   CHECK(s.warnings() == 1);
 }
+
+TEST_CASE("RM0481 44.4.20: UIFREMAP gives UIF in CNT bit 31 over the count on TIM2 and TIM5")
+{
+  constexpr std::uint32_t uifremap = 1u << 11;
+  for(auto const* const unit : {"TIM2", "TIM5"})
+  {
+    CAPTURE(unit);
+    timers t;
+    t.base(unit, 9);
+    t.write(unit, "CR1", uifremap | 1u);
+    t.at_tick(15);
+    CHECK(t.read(unit, "CNT") == 0x8000'0005u);
+    t.write(unit, "SR", 0);
+    CHECK(t.read(unit, "CNT") == 5);
+    t.write(unit, "CR1", 0);
+    t.base(unit, 0xffff'ffff);
+    t.write(unit, "CNT", 0x8000'0000);
+    t.write(unit, "CR1", uifremap | 1u);
+    t.at_tick(30);
+    CHECK(t.read(unit, "CNT") == 0x0000'000fu);
+    t.write(unit, "CR1", 1u);
+    CHECK(t.read(unit, "CNT") == 0x8000'000fu);
+    t.write(unit, "CR1", uifremap | 1u);
+    t.write(unit, "CNT", 0x0020, 2);
+    CHECK(t.read(unit, "CNT") == 0x0000'0020u);
+    t.write(unit, "CR1", 1u);
+    CHECK(t.read(unit, "CNT") == 0x8000'0020u);
+  }
+}

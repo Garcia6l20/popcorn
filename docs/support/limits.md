@@ -1464,12 +1464,14 @@ A debugger write raises none of the `strict` errors of this model.
 A slave mode reset, trigger start or gate opening at a timer edge counts from the edge's exact
 instant, which can lie between two ps, on any pair of master and slave clocks.
 
+While UIFREMAP is 1 a CNT read gives UIF in `CNT.UIFCPY`, and in bit 31 of a 32-bit count with
+no UIFCPY field, the STM32U5 TIM2 to TIM5 and the STM32H5 TIM2 and TIM5, RM0456 55.4.20 and
+RM0481 44.4.20. A byte or halfword write of the low half keeps the count's bit 31.
+
 Differs from RM0456:
 
 - An ARR written below the count lets the counter run to its maximum and wrap with no update.
   A count written above ARR in center-aligned mode does the same.
-- UIFREMAP puts UIFCPY in bit 31 only where the description names a UIFCPY field, not on the
-  STM32U5 and STM32H5 32-bit TIM2 to TIM5, where RM0456 and RM0481 overwrite bit 31 on a read.
 
 Capture/compare event outputs, the ADC triggers:
 

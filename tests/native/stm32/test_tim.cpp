@@ -4164,3 +4164,32 @@ TEST_CASE("a U575 timer whose MMS has 3 bits or none throws when the description
     CHECK_NOTHROW(stm32_fixture(u575(), "tim_ll"));
   }
 }
+
+TEST_CASE("RM0456 55.4.20: UIFREMAP gives UIF in CNT bit 31 over the count on TIM2 to TIM5")
+{
+  constexpr std::uint32_t uifremap = 1u << 11;
+  for(auto const* const tim : {"TIM2", "TIM3", "TIM4", "TIM5"})
+  {
+    CAPTURE(tim);
+    slaves t;
+    t.base(tim, 0, 9);
+    t.write(tim, "CR1", uifremap | 1u);
+    t.at(15);
+    CHECK(t.count(tim) == 0x8000'0005u);
+    t.write(tim, "SR", 0);
+    CHECK(t.count(tim) == 5);
+    t.write(tim, "CR1", 0);
+    t.base(tim, 0, 0xffff'ffff);
+    t.write(tim, "CNT", 0x8000'0000);
+    t.write(tim, "CR1", uifremap | 1u);
+    t.at(30);
+    CHECK(t.count(tim) == 0x0000'000fu);
+    t.write(tim, "CR1", 1u);
+    CHECK(t.count(tim) == 0x8000'000fu);
+    t.write(tim, "CR1", uifremap | 1u);
+    REQUIRE(t.f.target->mem().write(t.b.at(tim, "CNT"), 2, 0x0020).has_value());
+    CHECK(t.count(tim) == 0x0000'0020u);
+    t.write(tim, "CR1", 1u);
+    CHECK(t.count(tim) == 0x8000'0020u);
+  }
+}

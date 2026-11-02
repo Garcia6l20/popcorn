@@ -994,8 +994,8 @@ struct tim_variant
    *         Otherwise neither field exists. */
   bool uif_remap = true;
   /** @brief While CR1.UIFREMAP is 1, a read of a 32-bit CNT with no `UIFCPY` field gives UIF in
-   *         bit 31 in place of the count's bit 31, RM0351 31.3.16. Unset, bit 31 holds the
-   *         count. */
+   *         bit 31 in place of the count's bit 31, RM0351 31.3.16, RM0456 55.4.20 and RM0481
+   *         44.4.20. Unset, bit 31 holds the count. */
   bool uif_overwrites_count = false;
   /** @brief Instances whose tim_etr_in is a pin signal, with no ETRSEL field. The other timers
    *         have ETR only through `AF1.ETRSEL`. */
@@ -1028,7 +1028,11 @@ inline constexpr auto u5_triggers = std::to_array<trigger_entry>({
 /** @brief RM0456 56.8.2: TIM16 and TIM17 have no master mode. */
 inline constexpr auto u5_no_master = std::to_array<std::string_view>({"TIM16", "TIM17"});
 /** @brief STM32U5 timers. */
-inline constexpr tim_variant u5_tim{u5_triggers, wide_master_timers, u5_no_master};
+inline constexpr tim_variant u5_tim{
+    .triggers             = u5_triggers,
+    .wide_master          = wide_master_timers,
+    .no_master            = u5_no_master,
+    .uif_overwrites_count = true};
 
 /**
  * @brief TS 0 to 3 are ITR0 to ITR3, 8 to 15 are ITR4 to ITR11 and 16 is ITR12, RM0481 43.6.3
@@ -1056,7 +1060,11 @@ inline constexpr auto h5_triggers = std::to_array<trigger_entry>({
 inline constexpr auto h5_no_master =
     std::to_array<std::string_view>({"TIM13", "TIM14", "TIM16", "TIM17"});
 /** @brief STM32H5 timers. */
-inline constexpr tim_variant h5_tim{h5_triggers, wide_master_timers, h5_no_master};
+inline constexpr tim_variant h5_tim{
+    .triggers             = h5_triggers,
+    .wide_master          = wide_master_timers,
+    .no_master            = h5_no_master,
+    .uif_overwrites_count = true};
 
 /**
  * @brief RM0038 Table 80, TIMx internal trigger connection, on Cat.1 and Cat.2: ITR0 to ITR3 by

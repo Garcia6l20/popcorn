@@ -336,20 +336,19 @@ struct interrupt_source
  *        switch, and on the STM32L1 at a forced to PWM switch. Every OC1 edge reaches the slave
  *        whatever its pulse width, where RM0481 asks for at least two destination timer clocks. An
  *        ARR written below the count lets the counter run to its maximum and wrap with no update, a
- *        count written above ARR in center-aligned mode does the same, UIFREMAP puts UIFCPY in bit
- *        31 only where the description names a UIFCPY field. On the STM32U5 and STM32H5 32-bit TIM2
- *        to TIM5 bit 31 keeps the count, where RM0456 and RM0481 give UIFCPY there on a read. A
- *        trigger cycle between timers drops the edge that would re-enter a timer still reacting to
- *        its own event, logged once per timer, where hardware would oscillate with a few clocks of
- *        resynchronisation delay per hop. Input capture, RM0456 55.4 "Input capture mode": a
- *        channel with CCxS 01 or 10 and CCxE set captures the counter, as it stands at the edge's
- *        time, into CCRx at every 1, 2, 4 or 8 active edges of its tim_tix, ICxPSC counted from the
- *        last CCxE clear, the active edge by CCxP and CCxNP, setting CCxIF, CCxOF on a capture
- *        while CCxIF is set, and its DMA request. A CPU or DMA read of CCRx clears CCxIF, a
- *        debugger read does not. The ICxF and ETF filters: a transition passes when its input stays
- *        at the new level for N sampling periods of fCK_INT or fDTS, fDTS from CKD, and takes
- *        effect N periods after the edge, so a shorter pulse vanishes. The sampling phase is
- *        ignored, an approximation within one sampling period, and the filter settings and timer
+ *        count written above ARR in center-aligned mode does the same. A trigger cycle between
+ *        timers drops the edge that would re-enter a timer still reacting to its own event, logged
+ *        once per timer, where hardware would oscillate with a few clocks of resynchronisation
+ *        delay per hop. While UIFREMAP is 1 a CNT read gives UIF in UIFCPY, and in bit 31 of a
+ *        32-bit count with no UIFCPY field, RM0456 55.4.20. Input capture, RM0456 55.4 "Input
+ *        capture mode": a channel with CCxS 01 or 10 and CCxE set captures the counter, as it
+ *        stands at the edge's time, into CCRx at every 1, 2, 4 or 8 active edges of its tim_tix,
+ *        ICxPSC counted from the last CCxE clear, the active edge by CCxP and CCxNP, setting CCxIF,
+ *        CCxOF on a capture while CCxIF is set, and its DMA request. A CPU or DMA read of CCRx
+ *        clears CCxIF, a debugger read does not. The ICxF and ETF filters: a transition passes when
+ *        its input stays at the new level for N sampling periods of fCK_INT or fDTS, fDTS from CKD,
+ *        and takes effect N periods after the edge, so a shorter pulse vanishes. The sampling phase
+ *        is ignored, an approximation within one sampling period, and the filter settings and timer
  *        clock in force at the edge set its delay, a change before it matures keeping that delay. A
  *        transition maturing while the timer is frozen by a debug hold applies at the hold, the
  *        filter itself counting on through it as tim_ker_ck does. Not modelled, logged once when
