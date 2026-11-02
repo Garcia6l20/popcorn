@@ -953,6 +953,15 @@ struct etr_pin
   std::string_view signal;
 };
 
+/** @brief A timer whose one IRQ has a name other than `<instance>_IRQn`. */
+struct tim_irq
+{
+  /** @brief Instance, such as `TIM6`. */
+  std::string_view instance;
+  /** @brief IRQ name as the description spells it, such as `TIM6_DAC_IRQn`. */
+  std::string_view irq;
+};
+
 /** @brief The input_remap channel of a field that selects tim_etr_in. */
 inline constexpr std::uint8_t tim_etr_input = 4;
 
@@ -1007,6 +1016,10 @@ struct tim_variant
   /** @brief Option register fields that select a timer input's source. A value the entry's
    *         `pin_values` lacks gives an internal source. */
   std::span<input_remap const> input_remaps{};
+  /** @brief Instances whose IRQ shares its line with another peripheral and carries its name.
+   *         The other timers raise `<instance>_IRQn`, or the `_UP`, `_CC`, `_BRK` and
+   *         `_TRG_COM` group lines. */
+  std::span<tim_irq const> irq_names{};
 };
 
 /** @brief RM0456 54.6.2 and 55.5.2, RM0481 43.6.2 and 44.5.2: MMS[3:0] on TIM1, TIM8 and TIM2 to
@@ -1247,6 +1260,10 @@ inline constexpr auto l4_etr_pins = std::to_array<etr_pin>({
     {.instance = "TIM4", .signal = "tim4_etr"},
     {.instance = "TIM5", .signal = "tim5_etr"},
 });
+/** @brief RM0351 Table 61: TIM6 shares NVIC line 54 with the DAC1 underrun, `TIM6_DAC_IRQn`. */
+inline constexpr auto l4_tim_irqs = std::to_array<tim_irq>({
+    {.instance = "TIM6", .irq = "TIM6_DAC_IRQn"},
+});
 /** @brief RM0351 33.3 and 33.4.1: TIM6 and TIM7 count up only. */
 inline constexpr auto l4_up_only = std::to_array<std::string_view>({"TIM6", "TIM7"});
 /**
@@ -1265,8 +1282,9 @@ inline constexpr auto l4_input_remaps = std::to_array<input_remap>({
     {.slave = "TIM3", .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
 });
 /**
- * @brief STM32L4 TIM2 to TIM5, RM0351 31.4: CR2.MMS[2:0], SMCR.SMS[3:0] with bit 3 in `SMS_1`,
- *        SMCR.TS[2:0], UIFREMAP, ETR pins, the TIM2 and TIM3 OR1 and OR2 remaps.
+ * @brief STM32L4 TIM2 to TIM7, RM0351 31.4 and 33.4: CR2.MMS[2:0], SMCR.SMS[3:0] with bit 3 in
+ *        `SMS_1`, SMCR.TS[2:0], UIFREMAP, ETR pins, the TIM2 and TIM3 OR1 and OR2 remaps. TIM6
+ *        and TIM7 count up only and have no SMCR.
  */
 inline constexpr tim_variant l4_tim{
     .triggers             = l4_triggers,
@@ -1278,7 +1296,8 @@ inline constexpr tim_variant l4_tim{
     .uif_overwrites_count = true,
     .etr_pins             = l4_etr_pins,
     .up_only              = l4_up_only,
-    .input_remaps         = l4_input_remaps};
+    .input_remaps         = l4_input_remaps,
+    .irq_names            = l4_tim_irqs};
 
 /** @brief Differences between the SPI peripherals the model rows serve. */
 struct spi_variant

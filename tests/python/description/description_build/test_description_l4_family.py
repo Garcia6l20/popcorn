@@ -972,3 +972,35 @@ def test_tim2_to_tim5_carry_uifremap_sms_3_and_occs_and_no_comde(name: str) -> N
         assert fields["CR1"]["UIFREMAP"] == (11, 1)
         assert (fields["SMCR"]["SMS_1"], fields["SMCR"]["OCCS"]) == ((16, 1), (3, 1))
         assert "TS_1" not in fields["SMCR"] and "COMDE" not in fields["DIER"]
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", TIM_PARTS)
+def test_tim6_and_tim7_take_the_rm0351_33_4_registers(name: str) -> None:
+    description = _description(name)
+    for unit in ("TIM6", "TIM7"):
+        registers = _registers(description, unit)
+        held = {
+            n: [(f, lsb, width) for f, lsb, width, _ in _layout(r)] for n, r in registers.items()
+        }
+        assert held == {
+            "CR1": sorted(
+                [
+                    ("UIFREMAP", 11, 1),
+                    ("ARPE", 7, 1),
+                    ("OPM", 3, 1),
+                    ("URS", 2, 1),
+                    ("UDIS", 1, 1),
+                    ("CEN", 0, 1),
+                ]
+            ),
+            "CR2": [("MMS", 4, 3)],
+            "DIER": sorted([("UDE", 8, 1), ("UIE", 0, 1)]),
+            "SR": [("UIF", 0, 1)],
+            "EGR": [("UG", 0, 1)],
+            "CNT": sorted([("CNT", 0, 16), ("UIFCPY", 31, 1)]),
+            "PSC": [("PSC", 0, 16)],
+            "ARR": [("ARR", 0, 16)],
+        }
+        assert {f.name: f.acc for f in registers["CNT"].fields}["UIFCPY"] == Access.READ_ONLY
+        assert registers["ARR"].reset == 0xFFFF

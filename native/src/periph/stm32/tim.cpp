@@ -1009,9 +1009,12 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
   auto const multiline =
       std::ranges::contains(ctx.part.irqs, std::format("{}_UP_IRQn", desc.name), &irq_desc::name);
   std::vector<std::string> groups;
-  auto const               line_of = [&](std::string_view base) -> std::size_t {
+  auto const               named =
+      std::ranges::find(variant.irq_names, std::string_view{desc.name}, &tim_irq::instance);
+  auto const line_of = [&](std::string_view base) -> std::size_t {
     auto const irq_name = multiline ? std::format("{}_{}_IRQn", desc.name, multiline_group(base))
-                                    : std::format("{}_IRQn", desc.name);
+                        : named != variant.irq_names.end() ? std::string{named->irq}
+                                                           : std::format("{}_IRQn", desc.name);
     auto const at       = std::ranges::find(groups, irq_name);
     if(at != groups.end())
     {

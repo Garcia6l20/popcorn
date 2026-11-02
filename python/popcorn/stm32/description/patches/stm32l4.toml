@@ -626,6 +626,18 @@ add = { name = "UIFCPY", lsb = 31, width = 1, acc = "read_only", reset = 0 }
 source = "RM0351 Rev 11, 31.4.13 TIMx_CNT [alternate] (x = 2 to 5): bit 31 UIFCPY, a read-only copy of UIF while CR1.UIFREMAP is 1. On TIM3 and TIM4 the bit holds no count"
 
 [[fields]]
+instances = ["TIM6", "TIM7"]
+registers = ["CR1"]
+add = { name = "UIFREMAP", lsb = 11, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 33.4.1 TIMx_CR1 (x = 6 to 7): bit 11 UIFREMAP, rw. The four SVDs leave it out"
+
+[[fields]]
+instances = ["TIM6", "TIM7"]
+registers = ["CNT"]
+add = { name = "UIFCPY", lsb = 31, width = 1, acc = "read_only", reset = 0 }
+source = "RM0351 Rev 11, 33.4.6 TIMx_CNT (x = 6 to 7): bit 31 UIFCPY, a read-only copy of UIF while CR1.UIFREMAP is 1, read as 0 otherwise. The four SVDs leave it out"
+
+[[fields]]
 instances = ["RCC"]
 registers = ["CR"]
 fields = ["CSSON", "MSIRGSEL"]

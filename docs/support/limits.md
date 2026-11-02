@@ -1539,6 +1539,13 @@ STM32L4 TIM2 to TIM5, RM0351 section 31:
   the low half keeps it.
 - SMCR.OCCS is storage: the OCREF clear input is not modelled.
 
+STM32L4 TIM6 and TIM7, RM0351 section 33:
+
+- TIM6 and TIM7 count up only and have no slave mode controller. UIFREMAP puts UIFCPY in CNT
+  bit 31, RM0351 33.4.6.
+- CR2.MMS 000 to 010 drives `tim6_trgo` and `tim7_trgo`, RM0351 33.4.2, the DAC1 and ADC trigger
+  sources. No timer takes them as an ITR, RM0351 Table 207.
+
 ## USART, UART and LPUART
 
 Source: [usart.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/usart.cpp)
