@@ -9,6 +9,7 @@
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/model.hpp>
 #include <popcorn/periph/stm32/board.hpp>
+#include <popcorn/periph/stm32/gpio.hpp>
 
 #include <doctest/doctest.h>
 
@@ -18,9 +19,11 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -37,9 +40,12 @@ using popcorn::testing::sym;
 
 constexpr std::string_view firmware      = "l476_l4_rcc_ll";
 constexpr std::uint64_t    ps_per_tick   = 250'000;
+constexpr std::uint64_t    us            = 1'000'000;
 constexpr std::uint32_t    sms_trigger   = 6;
+constexpr std::uint32_t    sms_external  = 7;
 constexpr std::uint32_t    sms_reset_trg = 1u << 16;
 constexpr std::uint32_t    master_update = 2;
+constexpr std::uint32_t    ece           = 1u << 14;
 constexpr std::uint32_t    uifremap      = 1u << 11;
 constexpr std::uint32_t    dir_down      = 1u << 4;
 
@@ -190,6 +196,19 @@ struct rig
   void enable(std::string_view unit) const
   {
     write(unit, "CR1", read(unit, "CR1") | 1u);
+  }
+
+  [[nodiscard]] auto port(std::string_view name, std::uint8_t pin, std::uint32_t af) const
+      -> stm32::gpio_port&
+  {
+    set("RCC", "AHB2ENR", std::string{name} + "EN", 1);
+    auto* const found = f->model_of<stm32::gpio_port>(name);
+    REQUIRE(found != nullptr);
+    found->drive(pin, false);
+    auto const n = std::to_string(pin);
+    set(name, "MODER", "MODER" + n, 2);
+    set(name, pin < 8 ? "AFRL" : "AFRH", (pin < 8 ? "AFRL" : "AFRH") + n, af);
+    return *found;
   }
 };
 
@@ -448,6 +467,191 @@ TEST_CASE("RM0351 31.3.2: TIM2 to TIM5 count down with DIR 1, the update at the 
   }
 }
 
+TEST_CASE("RM0351 31.4.22: TIM2 TI4_RMP 00 captures PA3 edges on CH4, 01 to 11 read low and log")
+{
+  for(std::uint32_t const remap : {0u, 1u, 2u, 3u})
+  {
+    CAPTURE(remap);
+    rig         r;
+    auto&       porta = r.port("GPIOA", 3, 1);
+    auto const& unit  = "TIM2";
+    r.base(unit, 0xffff);
+    r.set(unit, "OR1", "TI4_RMP", remap);
+    r.set(unit, "CCMR2_Input", "CC4S", 1);
+    r.set(unit, "CCER", "CC4E", 1);
+    r.enable(unit);
+    porta.drive_at(3, true, vtime{r.start + 40 * ps_per_tick});
+    r.at_tick(60);
+    CHECK(r.get(unit, "SR", "CC4IF") == (remap == 0 ? 1u : 0u));
+    CHECK(r.read(unit, "CCR4") == (remap == 0 ? 40u : 0u));
+    CHECK(r.warnings() == (remap == 0 ? 0u : 1u));
+  }
+}
+
+TEST_CASE("an OR1 write of TI4_RMP or TI1_RMP 00 over a held-high pin captures at the write")
+{
+  struct leg
+  {
+    std::string_view unit;
+    std::string_view field;
+    std::uint8_t     pin;
+    std::uint32_t    af;
+    std::string_view ccmr;
+    std::string_view channel;
+  };
+  for(auto const& [unit, field, pin, af, ccmr, channel] : {
+          leg{"TIM2", "TI4_RMP", 3, 1, "CCMR2_Input", "4"},
+          leg{"TIM3", "TI1_RMP", 6, 2, "CCMR1_Input", "1"},
+  })
+  {
+    CAPTURE(unit);
+    rig   r;
+    auto& porta = r.port("GPIOA", pin, af);
+    porta.drive(pin, true);
+    r.base(unit, 0xffff);
+    r.set(unit, "OR1", field, 1);
+    r.set(unit, ccmr, std::format("CC{}S", channel), 1);
+    r.set(unit, "CCER", std::format("CC{}E", channel), 1);
+    r.enable(unit);
+    r.at_tick(40);
+    CHECK(r.get(unit, "SR", std::format("CC{}IF", channel)) == 0);
+    r.set(unit, "OR1", field, 0);
+    r.at_tick(60);
+    CHECK(r.get(unit, "SR", std::format("CC{}IF", channel)) == 1);
+    CHECK(r.read(unit, std::format("CCR{}", channel)) == 40);
+  }
+}
+
+TEST_CASE("RM0351 31.4.23: TIM3 TI1_RMP 00 captures PA6 edges on CH1, 01 to 11 read low and log")
+{
+  for(std::uint32_t const remap : {0u, 2u})
+  {
+    CAPTURE(remap);
+    rig         r;
+    auto&       porta = r.port("GPIOA", 6, 2);
+    auto const& unit  = "TIM3";
+    r.base(unit, 0xffff);
+    r.set(unit, "OR1", "TI1_RMP", remap);
+    r.set(unit, "CCMR1_Input", "CC1S", 1);
+    r.set(unit, "CCER", "CC1E", 1);
+    r.enable(unit);
+    porta.drive_at(6, true, vtime{r.start + 40 * ps_per_tick});
+    r.at_tick(60);
+    CHECK(r.get(unit, "SR", "CC1IF") == (remap == 0 ? 1u : 0u));
+    CHECK(r.warnings() == (remap == 0 ? 0u : 1u));
+  }
+}
+
+TEST_CASE("RM0351 31.4.22, 31.4.24: TIM2 counts PA0 TIM2_ETR edges with ETR_RMP 0 and ETRSEL 000")
+{
+  struct leg
+  {
+    std::string_view reg;
+    std::string_view field;
+    std::uint32_t    value;
+  };
+  for(auto const& [reg, field, value] : {
+          leg{"OR1", "ETR_RMP", 0},
+          leg{"OR1", "ETR_RMP", 1},
+          leg{"OR2", "ETRSEL",  1},
+          leg{"OR2", "ETRSEL",  2},
+          leg{"OR2", "ETRSEL",  5}
+  })
+  {
+    CAPTURE(field);
+    CAPTURE(value);
+    rig   r;
+    auto& porta = r.port("GPIOA", 0, 14);
+    r.base("TIM2", 0xffff);
+    r.set("TIM2", reg, field, value);
+    r.write("TIM2", "SMCR", ece);
+    r.enable("TIM2");
+    auto const t0 = r.now();
+    for(std::uint64_t edge = 0; edge < 5; ++edge)
+    {
+      porta.drive_at(0, true, vtime{t0 + (20 * edge + 10) * us});
+      porta.drive_at(0, false, vtime{t0 + (20 * edge + 20) * us});
+    }
+    r.run_until(t0 + 95 * us);
+    CHECK(r.read("TIM2", "CNT") == (value == 0 ? 5u : 0u));
+    CHECK(r.warnings() == (value == 0 ? 0u : 1u));
+  }
+}
+
+TEST_CASE("RM0351 31.4.25: TIM3 counts PD2 TIM3_ETR edges with ETRSEL 000, COMP1 reads low")
+{
+  for(std::uint32_t const select : {0u, 1u})
+  {
+    CAPTURE(select);
+    rig   r;
+    auto& portd = r.port("GPIOD", 2, 2);
+    r.base("TIM3", 0xffff);
+    r.set("TIM3", "OR2", "ETRSEL", select);
+    r.write("TIM3", "SMCR", ece);
+    r.enable("TIM3");
+    auto const t0 = r.now();
+    for(std::uint64_t edge = 0; edge < 3; ++edge)
+    {
+      portd.drive_at(2, true, vtime{t0 + (20 * edge + 10) * us});
+      portd.drive_at(2, false, vtime{t0 + (20 * edge + 20) * us});
+    }
+    r.run_until(t0 + 75 * us);
+    CHECK(r.read("TIM3", "CNT") == (select == 0 ? 3u : 0u));
+    CHECK(r.warnings() == select);
+  }
+}
+
+TEST_CASE("an OR1 or OR2 write that gives a held-high ETR pin back to TIM2 is a rising ETR edge")
+{
+  for(auto const* field : {"ETR_RMP", "ETRSEL"})
+  {
+    CAPTURE(field);
+    auto const* reg = std::string_view{field} == "ETR_RMP" ? "OR1" : "OR2";
+    rig         r;
+    auto&       porta = r.port("GPIOA", 0, 14);
+    porta.drive(0, true);
+    r.base("TIM2", 0xffff);
+    r.write("TIM2", "SMCR", ece);
+    r.enable("TIM2");
+    r.at_tick(10);
+    auto const before = r.read("TIM2", "CNT");
+    r.set("TIM2", reg, field, 1);
+    r.at_tick(20);
+    CHECK(r.read("TIM2", "CNT") == before);
+    r.set("TIM2", reg, field, 0);
+    r.at_tick(30);
+    CHECK(r.read("TIM2", "CNT") == before + 1);
+  }
+}
+
+TEST_CASE("under strict a firmware OR1 or OR2 write that selects an internal input throws")
+{
+  struct leg
+  {
+    std::string_view unit;
+    std::string_view reg;
+    std::uint32_t    value;
+  };
+  for(auto const& [unit, reg, value] : {
+          leg{"TIM2", "OR1", 1u << 1 },
+          leg{"TIM2", "OR1", 1u << 2 },
+          leg{"TIM2", "OR2", 1u << 14},
+          leg{"TIM3", "OR1", 1u      },
+          leg{"TIM3", "OR2", 1u << 14}
+  })
+  {
+    CAPTURE(unit);
+    CAPTURE(reg);
+    rig r{true};
+    r.clock(unit);
+    CHECK_THROWS_AS(r.cpu_write(unit, reg, value), popcorn::model_error);
+    CHECK(r.read(unit, reg) == 0);
+    r.write(unit, reg, value);
+    CHECK(r.read(unit, reg) == value);
+    CHECK(r.warnings() == 1);
+  }
+}
+
 TEST_CASE("an L4 timer description against the l4_tim variant throws at construction")
 {
   struct leg
@@ -465,6 +669,10 @@ TEST_CASE("an L4 timer description against the l4_tim variant throws at construc
           leg{"TIM5", "CR1",  "UIFREMAP", 11, false},
           leg{"TIM2", "CR1",  "DIR",      4,  false},
           leg{"TIM2", "OR1",  "ITR1_RMP", 0,  false},
+          leg{"TIM2", "OR1",  "TI4_RMP",  2,  false},
+          leg{"TIM2", "OR2",  "ETRSEL",   14, false},
+          leg{"TIM3", "OR1",  "TI1_RMP",  0,  false},
+          leg{"TIM5", "SMCR", "ETP",      15, false},
   })
   {
     CAPTURE(unit);
@@ -485,4 +693,21 @@ TEST_CASE("an L4 timer description against the l4_tim variant throws at construc
     }
     constructs_throw(desc);
   }
+}
+
+TEST_CASE("an ETR input_remaps row on a timer with no ETR pin throws at construction")
+{
+  static constexpr auto remaps  = std::to_array<stm32::input_remap>({
+      {.slave      = "TIM4",
+       .channel    = stm32::tim_etr_input,
+       .reg        = "SMCR",
+       .field      = "ETF",
+       .pin_values = 0b1},
+  });
+  auto                  variant = stm32::l4_tim;
+  variant.input_remaps          = remaps;
+  variant.etr_pins              = {};
+  auto opts                     = options(l476rc(), false);
+  opts.models.insert_or_assign("TIM4", stm32::tim_factory(variant));
+  CHECK_THROWS_AS(stm32_fixture(l476rc(), firmware, std::move(opts)), popcorn::config_error);
 }

@@ -953,13 +953,17 @@ struct etr_pin
   std::string_view signal;
 };
 
+/** @brief The input_remap channel of a field that selects tim_etr_in. */
+inline constexpr std::uint8_t tim_etr_input = 4;
+
 /** @brief An option register field that connects a timer input to its pin or to an internal
  *         source. */
 struct input_remap
 {
   /** @brief Instance that has the field. */
   std::string_view slave;
-  /** @brief Input the field selects for, 0 for tim_ti1. */
+  /** @brief Input the field selects for, 0 to 3 for tim_ti1 to tim_ti4, `tim_etr_input` for
+   *         tim_etr_in on a timer the tim_variant lists in `etr_pins`. */
   std::uint8_t channel;
   /** @brief Register of the field, such as `OR`. */
   std::string_view reg;
@@ -1225,10 +1229,36 @@ inline constexpr auto l4_triggers = std::to_array<trigger_entry>({
     {.select = 2, .source = "tim4", .slave = "TIM5"},
     {.select = 3, .source = "tim8", .slave = "TIM5"},
 });
-inline constexpr auto l4_up_only  = std::to_array<std::string_view>({"TIM6", "TIM7"});
+/**
+ * @brief RM0351 31.3.3 and DS10198 Tables 17 and 18: TIM2 to TIM5 take ETR from a TIMx_ETR pin
+ *        alternate of its own, such as TIM2_ETR on PA0 at AF14.
+ */
+inline constexpr auto l4_etr_pins = std::to_array<etr_pin>({
+    {.instance = "TIM2", .signal = "tim2_etr"},
+    {.instance = "TIM3", .signal = "tim3_etr"},
+    {.instance = "TIM4", .signal = "tim4_etr"},
+    {.instance = "TIM5", .signal = "tim5_etr"},
+});
+/** @brief RM0351 33.3 and 33.4.1: TIM6 and TIM7 count up only. */
+inline constexpr auto l4_up_only = std::to_array<std::string_view>({"TIM6", "TIM7"});
+/**
+ * @brief RM0351 31.4.22 TIM2_OR1: TI4_RMP 00 keeps tim_ti4 on its pin, 01 to 11 give COMP1,
+ *        COMP2 or their OR, ETR_RMP 0 keeps tim_etr_in on the TIM2_ETR pin, 1 gives the LSE.
+ *        31.4.24 TIM2_OR2: ETRSEL 000 leaves tim_etr_in to ETR_RMP, 001 and 010 give COMP1 and
+ *        COMP2, the others are reserved. 31.4.23 TIM3_OR1: TI1_RMP 00 keeps tim_ti1 on its pin,
+ *        01 to 11 give COMP1, COMP2 or their OR. 31.4.25 TIM3_OR2: ETRSEL 000 keeps tim_etr_in on
+ *        the TIM3_ETR pin, 001 gives COMP1, the others are reserved.
+ */
+inline constexpr auto l4_input_remaps = std::to_array<input_remap>({
+    {.slave = "TIM2", .channel = 3,             .reg = "OR1", .field = "TI4_RMP", .pin_values = 0b0001},
+    {.slave = "TIM2", .channel = tim_etr_input, .reg = "OR1", .field = "ETR_RMP", .pin_values = 1     },
+    {.slave = "TIM2", .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
+    {.slave = "TIM3", .channel = 0,             .reg = "OR1", .field = "TI1_RMP", .pin_values = 0b0001},
+    {.slave = "TIM3", .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
+});
 /**
  * @brief STM32L4 TIM2 to TIM5, RM0351 31.4: CR2.MMS[2:0], SMCR.SMS[3:0] with bit 3 in `SMS_1`,
- *        SMCR.TS[2:0], UIFREMAP, the TIM2_OR1 trigger remap.
+ *        SMCR.TS[2:0], UIFREMAP, ETR pins, the TIM2 and TIM3 OR1 and OR2 remaps.
  */
 inline constexpr tim_variant l4_tim{
     .triggers             = l4_triggers,
@@ -1238,7 +1268,9 @@ inline constexpr tim_variant l4_tim{
     .select_high          = false,
     .uif_remap            = true,
     .uif_overwrites_count = true,
-    .up_only              = l4_up_only};
+    .etr_pins             = l4_etr_pins,
+    .up_only              = l4_up_only,
+    .input_remaps         = l4_input_remaps};
 
 /** @brief Differences between the SPI peripherals the model rows serve. */
 struct spi_variant

@@ -1522,10 +1522,13 @@ STM32L4 TIM2 to TIM5, RM0351 section 31:
   SMCR or TIM2_OR1 write that selects it raises `ModelError` before the store.
 - TIM2_OR1.ITR1_RMP is a field on every line. RM0351 31.4.22 marks the bit reserved on the
   STM32L471, which has no OTG_FS. Its value 1 reaches nothing there as on the other lines.
-- The TIM2_OR1 and TIM3_OR1 input remaps, the TIM2 and TIM3 `OR2.ETRSEL` and the TIMx_ETR pins
-  are storage: tim_ti1 to tim_ti4 come from the pins whatever TI1_RMP and TI4_RMP. External
-  clock mode 2 counts nothing, and the SMCR write that sets ECE logs once and raises `ModelError`
-  under `strict` before the store.
+- The comparator outputs that TIM2_OR1.TI4_RMP, TIM3_OR1.TI1_RMP and the TIM2 and TIM3
+  `OR2.ETRSEL` select, and the LSE of TIM2_OR1.ETR_RMP 1, have no model: the input reads low and
+  the OR write logs once. Reserved ETRSEL values read low the same way. Under `strict` each
+  write raises `ModelError` before the store.
+- TIM2_ETR is PA0 at AF14, PA5 or PA15 at AF2, TIM3_ETR is PD2 or PE2 at AF2, DS10198 Tables 17
+  and 18. PE2, TIM4_ETR on PE0 and TIM5_ETR on PF6 are pads the shipped 64-pin package lacks, so
+  TIM4 and TIM5 tim_etr_in stays low.
 - TIM3 and TIM4 `ARR` bits 31:16 read 1, their reset value in the RM0351 31.4.26 register map,
   and keep it after a write, inferred. RM0351 states no write rule for the reserved half.
 - UIFREMAP puts UIFCPY in bit 31 of TIM3 and TIM4. On the 32-bit TIM2 and TIM5, while UIFREMAP

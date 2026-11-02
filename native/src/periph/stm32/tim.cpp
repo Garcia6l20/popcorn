@@ -47,6 +47,8 @@ constexpr std::size_t   etr_input            = 4;
 constexpr std::size_t   inputs_count         = 5;
 constexpr std::uint32_t input_due            = 1;
 
+static_assert(tim_etr_input >= max_channels);
+
 struct input_filter
 {
   std::uint8_t dts_divider;
@@ -310,32 +312,35 @@ struct interrupt_source
  *        Table 549, its TIM1/TIM8 copy, gives, since mode 0001 counts tim_ti1 edges only. The
  *        encoder index, ECR.IE, and the transition and index error flags are not modelled, IE logs
  *        once. tim_etr_in is, on a timer the tim_variant lists in `etr_pins`, the pin signal it
- *        names, `tim2_ch1` for the STM32L1 TIM2, and on the others the `<instance>_etr` signal
- *        while AF1.ETRSEL is 0, other values read low and log once: ETP inverts it, ETPS divides it
- *        by 1, 2, 4 or 8: tim_etrp rises at every 2^ETPS-th rising edge and falls 2^(ETPS-1) rising
- *        edges later, then the ETF filter gives tim_etrf. External clock mode 2, ECE 1, counts each
- *        tim_etrf rising edge through the prescaler while a gated slave mode's gate is open, and
- *        with ECE set external clock mode 1 counts tim_etrf only, whatever TS, its trigger edges
- *        setting TIF alone. TS 00100 tim_ti1f_ed gives a rising edge at every tim_ti1 transition,
- *        TS 00101 tim_ti1fp1 and 00110 tim_ti2fp2 their active edge by CCxP and CCxNP, both edges
- *        with both set, and their level to gated mode, TS 00111 tim_etrf: each drives the slave
- *        mode controller as an ITR edge does. Gated mode on tim_ti1f_ed holds and logs once, TS
- *        00111 on a timer without ETR reaches nothing and logs once. A CCxP or ETP write that flips
- *        the polarised level is an edge of it, and so is a CCxNP write that moves the level TS
- *        00101 or 00110 gives the slave mode controller, as the polarity mux output moves on
- *        silicon: it counts in an encoder mode, triggers the slave mode controller and is a
- *        capture's active edge when the new level is high. Deviations: OC1M 0000 holds OC1REF low,
- *        where silicon keeps the level it had, and the PWM modes take the comparison at the OC1M
- *        write from every mode, where RM0038 takes it from frozen only and RM0481 from frozen and
- *        the forced modes, so the level differs at a PWM 1 to PWM 2 switch, and on the STM32L1 at
- *        a forced to PWM switch. Every OC1 edge reaches the slave whatever its pulse width, where
- *        RM0481 asks for at least two destination timer clocks. An ARR written below the
- *        count lets the counter run to its maximum and wrap with no update, a count written above
- *        ARR in center-aligned mode does the same, UIFREMAP puts UIFCPY in bit 31 only where the
- *        description names a UIFCPY field. On the STM32U5 and STM32H5 32-bit TIM2 to TIM5 bit 31
- *        keeps the count, where RM0456 and RM0481 give UIFCPY there on a read. A trigger cycle
- *        between timers drops the edge that would re-enter a timer still reacting to its own event,
- *        logged once per timer, where hardware would oscillate with a few clocks of
+ *        names, `tim2_ch1` for the STM32L1 TIM2, `tim2_etr` to `tim5_etr` for the STM32L4 TIM2 to
+ *        TIM5, while each option register field its `input_remaps` rows give tim_etr_in keeps the
+ *        pin: TIM2_OR1.ETR_RMP 0 and TIM2_OR2.ETRSEL 000, TIM3_OR2.ETRSEL 000. Their other values,
+ *        the LSE and the comparators, read low and log once. On the others it is the
+ *        `<instance>_etr` signal while AF1.ETRSEL is 0, other values read low and log once: ETP
+ *        inverts it, ETPS divides it by 1, 2, 4 or 8: tim_etrp rises at every 2^ETPS-th rising edge
+ *        and falls 2^(ETPS-1) rising edges later, then the ETF filter gives tim_etrf. External
+ *        clock mode 2, ECE 1, counts each tim_etrf rising edge through the prescaler while a gated
+ *        slave mode's gate is open, and with ECE set external clock mode 1 counts tim_etrf only,
+ *        whatever TS, its trigger edges setting TIF alone. TS 00100 tim_ti1f_ed gives a rising edge
+ *        at every tim_ti1 transition, TS 00101 tim_ti1fp1 and 00110 tim_ti2fp2 their active edge by
+ *        CCxP and CCxNP, both edges with both set, and their level to gated mode, TS 00111
+ *        tim_etrf: each drives the slave mode controller as an ITR edge does. Gated mode on
+ *        tim_ti1f_ed holds and logs once, TS 00111 on a timer without ETR reaches nothing and logs
+ *        once. A CCxP or ETP write that flips the polarised level is an edge of it, and so is a
+ *        CCxNP write that moves the level TS 00101 or 00110 gives the slave mode controller, as the
+ *        polarity mux output moves on silicon: it counts in an encoder mode, triggers the slave
+ *        mode controller and is a capture's active edge when the new level is high. Deviations:
+ *        OC1M 0000 holds OC1REF low, where silicon keeps the level it had, and the PWM modes take
+ *        the comparison at the OC1M write from every mode, where RM0038 takes it from frozen only
+ *        and RM0481 from frozen and the forced modes, so the level differs at a PWM 1 to PWM 2
+ *        switch, and on the STM32L1 at a forced to PWM switch. Every OC1 edge reaches the slave
+ *        whatever its pulse width, where RM0481 asks for at least two destination timer clocks. An
+ *        ARR written below the count lets the counter run to its maximum and wrap with no update, a
+ *        count written above ARR in center-aligned mode does the same, UIFREMAP puts UIFCPY in bit
+ *        31 only where the description names a UIFCPY field. On the STM32U5 and STM32H5 32-bit TIM2
+ *        to TIM5 bit 31 keeps the count, where RM0456 and RM0481 give UIFCPY there on a read. A
+ *        trigger cycle between timers drops the edge that would re-enter a timer still reacting to
+ *        its own event, logged once per timer, where hardware would oscillate with a few clocks of
  *        resynchronisation delay per hop. Input capture, RM0456 55.4 "Input capture mode": a
  *        channel with CCxS 01 or 10 and CCxE set captures the counter, as it stands at the edge's
  *        time, into CCRx at every 1, 2, 4 or 8 active edges of its tim_tix, ICxPSC counted from the
@@ -541,6 +546,7 @@ private:
   [[nodiscard]] auto input_signal(std::string_view signal) const -> bool;
   [[nodiscard]] auto pin_level(std::string_view signal) const -> bool;
   [[nodiscard]] auto raw_input(std::size_t ch) const -> bool;
+  [[nodiscard]] auto remapped(std::size_t input) const -> bool;
   [[nodiscard]] auto effective_input(std::size_t ch) const -> bool;
   [[nodiscard]] auto filtered(std::size_t ch) const -> bool;
   [[nodiscard]] auto polarised(std::size_t ch) const -> bool;
@@ -1117,7 +1123,13 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
   {
     if(entry.slave == desc.name)
     {
-      if(entry.channel >= channels_.size())
+      if(entry.channel == tim_etr_input and not etr_)
+      {
+        throw config_error(
+            ctx.part.part, 0, std::format("peripherals.{}.registers.{}", desc.name, entry.reg),
+            std::format("an ETR input for the {} remap", entry.field));
+      }
+      if(entry.channel != tim_etr_input and entry.channel >= channels_.size())
       {
         missing(std::format("{}.CCR{}", desc.name, entry.channel + 1));
       }
@@ -2242,14 +2254,14 @@ auto tim::raw_input(std::size_t ch) const -> bool
   {
     return false;
   }
-  for(auto const& remap : input_remaps_)
-  {
-    if(remap.channel == ch and ((remap.pin_values >> get(regs_, remap.field)) & 1u) == 0)
-    {
-      return false;
-    }
-  }
-  return pin_level(input_signals_[ch]);
+  return not remapped(ch) and pin_level(input_signals_[ch]);
+}
+
+auto tim::remapped(std::size_t input) const -> bool
+{
+  return std::ranges::any_of(input_remaps_, [&](input_route const& remap) {
+    return remap.channel == input and ((remap.pin_values >> get(regs_, remap.field)) & 1u) == 0;
+  });
 }
 
 auto tim::effective_input(std::size_t ch) const -> bool
@@ -2305,9 +2317,10 @@ void tim::inputs_changed(std::uint64_t at, bool clocked)
   }
   if(etr_)
   {
-    auto const level =
-        ((not etr_select_ or get(regs_, *etr_select_) == 0) and pin_level(etr_signal_))
-        != (etr_polarity_ and get(regs_, *etr_polarity_) != 0);
+    auto const level = ((not etr_select_ or get(regs_, *etr_select_) == 0)
+                        and not remapped(tim_etr_input)
+                        and pin_level(etr_signal_))
+                    != (etr_polarity_ and get(regs_, *etr_polarity_) != 0);
     if(((state_.inputs_seen & etr_bit) != 0) != level)
     {
       state_.inputs_seen ^= etr_bit;
@@ -2685,11 +2698,14 @@ void tim::refuse_unmodelled(std::uint32_t word, std::uint32_t merged, access_ctx
     auto const value = remap.field.of(merged);
     if(remap.field.offset == word and ((remap.pin_values >> value) & 1u) == 0)
     {
+      auto const input = remap.channel == tim_etr_input
+                           ? std::string{"tim_etr_in"}
+                           : std::format("tim_ti{}", remap.channel + 1);
       unmodelled(
           remap.reg, word, remap_logged_,
           std::format(
-              "{} {}: the internal tim_ti{} source is not modelled, tim_ti{} reads low", remap.name,
-              value, remap.channel + 1, remap.channel + 1),
+              "{} {}: the internal {} source is not modelled, {} reads low", remap.name, value,
+              input, input),
           access);
     }
   }
