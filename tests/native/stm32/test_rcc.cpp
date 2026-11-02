@@ -833,6 +833,22 @@ TEST_CASE("RTCSEL locks once set and BDRST clears the backup domain until releas
   CHECK(f.field("RCC", "RCC_BDCR", "RTCSEL") == 2);
 }
 
+TEST_CASE("RM0456 11.8.49: BDRST resets RCC_BDCR but LSCOSEL and LSCOEN, a power-on reset all")
+{
+  auto       f    = idle_fixture();
+  auto const lsco = bit_of("RCC_BDCR", "LSCOSEL") | bit_of("RCC_BDCR", "LSCOEN");
+  write(f, "RCC_BDCR", bit_of("RCC_BDCR", "LSEON") | lsco);
+  f.target->reset(reset_kind::software);
+  CHECK((peek(f, "RCC_BDCR") & lsco) == lsco);
+  CHECK((peek(f, "RCC_BDCR") & bit_of("RCC_BDCR", "LSEON")) != 0);
+  write(f, "RCC_BDCR", peek(f, "RCC_BDCR") | bit_of("RCC_BDCR", "BDRST"));
+  CHECK(peek(f, "RCC_BDCR") == (bit_of("RCC_BDCR", "BDRST") | lsco));
+  write(f, "RCC_BDCR", lsco);
+  CHECK(peek(f, "RCC_BDCR") == lsco);
+  f.target->reset(reset_kind::power_on);
+  CHECK((peek(f, "RCC_BDCR") & lsco) == 0);
+}
+
 TEST_CASE("a ready delay pending across a core clock change ends at its virtual time")
 {
   auto f = idle_fixture();

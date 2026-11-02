@@ -440,7 +440,9 @@ struct u5_rcc
   static constexpr std::string_view                  enable_register  = "RCC_CIER";
   static constexpr std::string_view                  backup_register  = "RCC_BDCR";
   /** @brief Every field of RCC_BDCR keeps its value through a system reset. */
-  static constexpr std::string_view backup_excluded      = "";
+  static constexpr std::string_view backup_excluded = "";
+  /** @brief Fields of RCC_BDCR that BDRST keeps, RM0456 11.8.49. */
+  static constexpr std::string_view backup_reset_kept    = "LSCOSEL LSCOEN";
   static constexpr std::string_view reset_flags_register = "RCC_CSR";
   static constexpr std::uint32_t    sw_mask              = 0b11;
 

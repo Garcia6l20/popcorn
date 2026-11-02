@@ -268,7 +268,7 @@ template <typename Signal> struct timer
  *        protection and the LSE lock of MSIPLLEN, RM0351 6.4.1. The three PLLs share the PLLSRC and
  *        PLLM of RCC_PLLCFGR, which keep their value while any PLL that reads them is on or
  *        ready. The trait `backup_reset_kept` names the RCC_BDCR fields BDRST keeps, LSCOSEL
- *        and LSCOEN, RM0351 6.4.29.
+ *        and LSCOEN, RM0351 6.4.29, and on the U5 RM0456 11.8.49.
  * @tparam Traits Family clock tree, u5_rcc, h5_rcc, l1_rcc or l4_rcc: the sources and signals,
  *         the oscillator, mux, timer and enable tables, the source maps of the PLLs, SYSCLK and
  *         RTC, the names of the single fields, and the TrustZone tables.
