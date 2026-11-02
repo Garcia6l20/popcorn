@@ -1,5 +1,6 @@
 #include "../../../native/src/core/machine_impl.hpp"
 #include "../support/inert_model.hpp"
+#include "factories.hpp"
 #include "flash_unit.hpp"
 #include "gtzc.hpp"
 #include "stm32_fixture.hpp"
@@ -204,9 +205,14 @@ auto rig_options(
     popcorn::part_description const& desc,
     periph::stm32::board const&      board,
     bool                             strict,
-    std::shared_ptr<services_probe>* probe) -> core::machine_options
+    std::shared_ptr<services_probe>* probe,
+    periph::model_factory            flash) -> core::machine_options
 {
   auto options = board_options(board, strict, probe);
+  if(flash)
+  {
+    options.models.insert_or_assign("FLASH", std::move(flash));
+  }
   if(desc.part != u575().part)
   {
     for(auto const& unit : desc.peripherals)
@@ -229,9 +235,10 @@ auto rig_fixture(
     popcorn::part_description        desc,
     periph::stm32::board const&      board,
     bool                             strict,
-    std::shared_ptr<services_probe>* probe) -> stm32_fixture
+    std::shared_ptr<services_probe>* probe,
+    periph::model_factory            flash) -> stm32_fixture
 {
-  auto options = rig_options(desc, board, strict, probe);
+  auto options = rig_options(desc, board, strict, probe, std::move(flash));
   return stm32_fixture{std::move(desc), "flash_ll", std::move(options)};
 }
 
@@ -248,8 +255,12 @@ struct flash_rig
       : flash_rig{u575(), board, strict}
   {}
 
-  flash_rig(popcorn::part_description desc, periph::stm32::board const& board, bool strict = false)
-      : f{rig_fixture(std::move(desc), board, strict, &probe)},
+  flash_rig(
+      popcorn::part_description   desc,
+      periph::stm32::board const& board,
+      bool                        strict = false,
+      periph::model_factory       flash  = {})
+      : f{rig_fixture(std::move(desc), board, strict, &probe, std::move(flash))},
         secure_set{board.flash.option_bytes and board.flash.option_bytes->tzen}
   {
     sink = f.target->add_log_sink(
@@ -637,6 +648,33 @@ auto burst_data(std::uint32_t seed) -> std::vector<std::uint32_t>
   }
   return out;
 }
+}
+
+TEST_CASE("the template on one register set and no block registers runs the Non-secure lock chain")
+{
+  flash_rig rig{u575(), {}, false, periph::stm32::flash_single_set_factory({})};
+  REQUIRE(rig.f.target->model("FLASH") != nullptr);
+  CHECK(rig.field("FLASH_NSCR", "LOCK") == 0);
+  rig.program(last_page, {1, 2, 3, 4});
+  rig.control(0);
+  CHECK(rig.words(last_page, 4) == std::vector<std::uint32_t>{1, 2, 3, 4});
+  rig.control(per | bker | pnb(63) | strt);
+  CHECK(rig.status("BSY") == 1);
+  rig.wait_idle();
+  CHECK(rig.words(last_page, 4) == erased(4));
+  rig.control(0);
+  CHECK((rig.read("FLASH_NSSR") & all_errors) == 0);
+  rig.control(lock_bit);
+  CHECK(rig.field("FLASH_NSCR", "LOCK") == 1);
+  CHECK_FALSE(rig.try_write("FLASH_NSKEYR", 0xcdef'89abu));
+  CHECK(rig.try_write("FLASH_NSKEYR", 0x4567'0123u) == false);
+  CHECK(rig.field("FLASH_NSCR", "LOCK") == 1);
+  rig.f.target->reset(popcorn::reset_kind::software);
+  rig.unlock();
+  rig.write("FLASH_SECCR", pg);
+  CHECK(rig.read("FLASH_SECCR") == pg);
+  rig.write("FLASH_SEC1BBR1", 0x5a5a'5a5au);
+  CHECK(rig.read("FLASH_SEC1BBR1") == 0x5a5a'5a5au);
 }
 
 TEST_CASE("a page erase holds BSY for its time, then the page reads erased, EOP only with EOPIE")

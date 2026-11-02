@@ -929,6 +929,24 @@ static_assert(flag_matches_roles(
     {set_role::protection_irq, set_role::sequence_irq, set_role::strobe_irq,
      set_role::inconsistency_irq}));
 
+/** @brief The STM32U5 FLASH with the Non-secure register set alone and no block registers: the
+ *         template with one register set, as a family without TrustZone has it. */
+struct u5_single_set_flash : u5_flash
+{
+  /** @brief The Non-secure register set. */
+  static constexpr std::array<set_names, 1> set_registers{
+      {
+       {"FLASH_NSKEYR", "FLASH_NSCR", "FLASH_NSSR"},
+       }
+  };
+  /** @brief No block-based security registers. */
+  static constexpr std::array<std::string_view, 0> secure_block_registers{};
+  /** @brief No block-based privilege registers. */
+  static constexpr std::array<std::string_view, 0> privileged_block_registers{};
+  /** @brief No block registers in a bank. */
+  static constexpr std::size_t block_registers_per_bank = 0;
+};
+
 constexpr std::array<std::array<std::uint64_t, 6>, 4> vos_read_max_mhz{
     {
      {42, 84, 126, 168, 210, 250},
@@ -1577,6 +1595,10 @@ private:
     std::vector<cross_ref> clears{};
   };
 
+  [[nodiscard]] static constexpr auto set_index(bool secure) -> std::size_t
+  {
+    return Traits::set_registers.size() > 1 and secure ? 1 : 0;
+  }
   [[nodiscard]] auto make_set(std::size_t index) const -> register_set;
   template <typename Role>
   [[nodiscard]] auto make_table(std::span<named_field<Role> const> names) const
@@ -1856,24 +1878,27 @@ flash_model<Traits>::flash_model(
   });
   if(own != ctx.part.regions.end())
   {
-    storage_          = &*own;
-    auto const needed = (banks().size / Traits::page_bytes + pages_per_block_register - 1)
-                      / pages_per_block_register;
-    if(needed > Traits::block_registers_per_bank)
+    storage_ = &*own;
+    if constexpr(Traits::block_registers_per_bank > 0)
     {
-      throw config_error(
-          desc.name, 0, std::string{Traits::secure_block_registers.front()},
-          std::format(
-              "{} block registers per bank, the traits hold {}", needed,
-              Traits::block_registers_per_bank));
-    }
-    for(std::size_t bank = 0; bank < 2; ++bank)
-    {
-      for(std::size_t index = 0; index < needed; ++index)
+      auto const needed = (banks().size / Traits::page_bytes + pages_per_block_register - 1)
+                        / pages_per_block_register;
+      if(needed > Traits::block_registers_per_bank)
       {
-        auto const at = bank * Traits::block_registers_per_bank + index;
-        this->expect_register(Traits::secure_block_registers[at], true);
-        this->expect_register(Traits::privileged_block_registers[at], true);
+        throw config_error(
+            desc.name, 0, std::string{Traits::secure_block_registers.front()},
+            std::format(
+                "{} block registers per bank, the traits hold {}", needed,
+                Traits::block_registers_per_bank));
+      }
+      for(std::size_t bank = 0; bank < 2; ++bank)
+      {
+        for(std::size_t index = 0; index < needed; ++index)
+        {
+          auto const at = bank * Traits::block_registers_per_bank + index;
+          this->expect_register(Traits::secure_block_registers[at], true);
+          this->expect_register(Traits::privileged_block_registers[at], true);
+        }
       }
     }
   }
@@ -2791,14 +2816,14 @@ template <typename Traits> auto flash_model<Traits>::busy() const -> bool
 template <typename Traits>
 auto flash_model<Traits>::field_of(bool secure, set_role role) const -> field_ref
 {
-  return sets_[secure ? 1 : 0].fields[role];
+  return sets_[set_index(secure)].fields[role];
 }
 
 template <typename Traits>
 auto flash_model<Traits>::value_of(bool secure, set_role role, std::uint32_t word) const
     -> std::uint32_t
 {
-  auto const found = sets_[secure ? 1 : 0].fields.find(role);
+  auto const found = sets_[set_index(secure)].fields.find(role);
   return found ? found->of(word) : 0;
 }
 
@@ -2811,7 +2836,7 @@ auto flash_model<Traits>::unit_value(unit_role role) const -> std::uint32_t
 
 template <typename Traits> auto flash_model<Traits>::flag(bool secure, set_role role) const -> bool
 {
-  auto const found = sets_[secure ? 1 : 0].fields.find(role);
+  auto const found = sets_[set_index(secure)].fields.find(role);
   return found and get(regs_, *found) != 0;
 }
 
@@ -3044,7 +3069,7 @@ auto flash_model<Traits>::on_memory_write(
       .addr    = physical(region, addr),
       .size    = size,
       .value   = value,
-      .control = regs_.peek(sets_[secure ? 1 : 0].control.offset),
+      .control = regs_.peek(sets_[set_index(secure)].control.offset),
       .dma     = ctx.by == initiator::dma};
   auto const attrs = static_cast<std::uint8_t>(
       (secure ? held_secure : 0u) | (ctx.privileged ? held_privileged : 0u));
@@ -3081,7 +3106,7 @@ void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
     fail(secure, set_role::protection_error);
     return;
   }
-  auto const control = dma ? regs_.peek(sets_[secure ? 1 : 0].control.offset) : written;
+  auto const control = dma ? regs_.peek(sets_[set_index(secure)].control.offset) : written;
   if(field_of(secure, set_role::program).of(control) == 0)
   {
     fail(secure, set_role::sequence_error);
@@ -3229,7 +3254,7 @@ void flash_model<Traits>::start(
 
 template <typename Traits> void flash_model<Traits>::start_erase(bool secure, std::uint32_t control)
 {
-  auto const register_name = Traits::set_registers[secure ? 1 : 0].control;
+  auto const register_name = Traits::set_registers[set_index(secure)].control;
   check_programming_delay("on an erase START");
   if(storage_ == nullptr)
   {
@@ -3495,7 +3520,7 @@ template <typename Traits> void flash_model<Traits>::key_written(bool secure, st
 {
   auto& first_key = secure ? secure_.first_key : state_.first_key;
   auto& locked_up = secure ? secure_.locked_up : state_.locked_up;
-  regs_.poke(sets_[secure ? 1 : 0].key.offset, 0);
+  regs_.poke(sets_[set_index(secure)].key.offset, 0);
   auto const locked = flag(secure, set_role::lock);
   if(not locked_up and locked and not first_key and now == key1)
   {
@@ -3557,7 +3582,7 @@ void flash_model<Traits>::control_written(bool secure, std::uint32_t old, std::u
   auto const in = [&](std::uint32_t word) {
     return [&, word](set_role role) { return value_of(secure, role, word); };
   };
-  auto const control = sets_[secure ? 1 : 0].control.offset;
+  auto const control = sets_[set_index(secure)].control.offset;
   if(of(set_role::lock, old))
   {
     regs_.poke(control, old);
@@ -3625,7 +3650,7 @@ void flash_model<Traits>::control_written(bool secure, std::uint32_t old, std::u
   now              = start.with(now, start.of(old));
   auto launch      = false;
   auto forced      = false;
-  if(auto const fw = sets_[secure ? 1 : 0].fields.find(set_role::force_write))
+  if(auto const fw = sets_[set_index(secure)].fields.find(set_role::force_write))
   {
     forced = fw->of(now) != 0;
     now    = fw->with(now, 0);
@@ -3695,7 +3720,7 @@ void flash_model<Traits>::secure_status_written(std::uint32_t old, std::uint32_t
 
 template <typename Traits> void flash_model<Traits>::status_written(bool secure, std::uint32_t old)
 {
-  auto const& set = sets_[secure ? 1 : 0];
+  auto const& set = sets_[set_index(secure)];
   regs_.poke(set.status.offset, old & ~(written_ & set.clearable));
   interrupt();
 }
@@ -3931,6 +3956,13 @@ auto flash_factory(flash_options options) -> model_factory
 {
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<flash_model<u5_flash>>(ctx, desc, options);
+  };
+}
+
+auto flash_single_set_factory(flash_options options) -> model_factory
+{
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<flash_model<u5_single_set_flash>>(ctx, desc, options);
   };
 }
 
