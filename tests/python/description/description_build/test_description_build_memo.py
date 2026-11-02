@@ -9,10 +9,11 @@ from typing import Any, cast
 
 import build_memo
 import pytest
-from popcorn.stm32.description import _sources
+from popcorn.stm32.description import _sources, _svd
 from popcorn.stm32.description._model import PartDescription
 from popcorn.stm32.description._patches import PatchReport
 from popcorn.stm32.description._sources import Sources
+from popcorn.stm32.description._svd import SvdDevice
 
 _LOG = logging.getLogger("popcorn")
 
@@ -357,3 +358,129 @@ def test_a_stored_entry_is_smaller_than_its_pickle(tmp_path: Path) -> None:
     assert other(sources) == first
     assert other.loads == 1
     assert other(sources) == first
+
+
+class _Expansions:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, data: bytes, *, file: str) -> SvdDevice:
+        self.calls += 1
+        if data == b"bad":
+            raise ValueError(file)
+        result: Any = {"data": data, "file": file, "rows": [self.calls]}
+        return cast(SvdDevice, result)
+
+
+def _expander() -> tuple[build_memo.BuildMemo, _Expansions]:
+    expansions = _Expansions()
+    return build_memo.BuildMemo(_Builds(), expansions), expansions
+
+
+def test_the_same_svd_bytes_are_expanded_once() -> None:
+    memo, expansions = _expander()
+    first = memo.expand_svd(b"svd", file="a.svd")
+    second = memo.expand_svd(b"svd", file="a.svd")
+    assert expansions.calls == 1
+    assert (memo.misses, memo.hits) == (1, 1)
+    assert first == second
+
+
+def test_each_expansion_owns_its_result() -> None:
+    memo, _ = _expander()
+    memo.expand_svd(b"svd", file="a.svd")
+    first = cast(dict[str, Any], memo.expand_svd(b"svd", file="a.svd"))
+    first["rows"].append(99)
+    again = cast(dict[str, Any], memo.expand_svd(b"svd", file="a.svd"))
+    assert again["rows"] == [1]
+    assert again is not first
+
+
+def test_other_svd_bytes_or_another_file_are_expanded_again() -> None:
+    memo, expansions = _expander()
+    memo.expand_svd(b"svd", file="a.svd")
+    memo.expand_svd(b"svd edited", file="a.svd")
+    memo.expand_svd(b"svd", file="b.svd")
+    assert expansions.calls == 3
+
+
+def test_a_failed_expansion_is_raised_again_and_keeps_nothing() -> None:
+    memo, expansions = _expander()
+    for _ in range(2):
+        with pytest.raises(ValueError, match=r"a\.svd"):
+            memo.expand_svd(b"bad", file="a.svd")
+    assert (expansions.calls, len(memo.entries)) == (2, 0)
+
+
+def test_a_patched_svd_module_bypasses_the_expansion_memo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memo, expansions = _expander()
+    memo.expand_svd(b"svd", file="a.svd")
+
+    def to_snake(value: str) -> str:
+        return value
+
+    monkeypatch.setattr(_svd, "_to_snake", to_snake)
+    memo.expand_svd(b"svd", file="a.svd")
+    memo.expand_svd(b"svd", file="a.svd")
+    assert expansions.calls == 3
+    monkeypatch.undo()
+    memo.expand_svd(b"svd", file="a.svd")
+    assert expansions.calls == 3
+
+
+def test_bypassed_expands_each_call_and_keeps_nothing() -> None:
+    memo, expansions = _expander()
+    with memo.bypassed():
+        memo.expand_svd(b"svd", file="a.svd")
+        memo.expand_svd(b"svd", file="a.svd")
+    assert (expansions.calls, len(memo.entries), memo.bypasses) == (2, 0, 2)
+
+
+def test_memos_sharing_a_directory_expand_an_svd_once(tmp_path: Path) -> None:
+    expansions = _Expansions()
+    first = build_memo.BuildMemo(_Builds(), expansions)
+    second = build_memo.BuildMemo(_Builds(), expansions)
+    first.share(tmp_path)
+    second.share(tmp_path)
+    one = first.expand_svd(b"svd", file="a.svd")
+    two = second.expand_svd(b"svd", file="a.svd")
+    assert expansions.calls == 1
+    assert (second.loads, one) == (1, two)
+
+
+def test_the_suite_expander_is_the_memo() -> None:
+    from popcorn.stm32.description import _builder
+
+    assert isinstance(_builder.build_description_with_report, build_memo.BuildMemo)
+    assert _builder.expand_svd.__wrapped__ is _svd.expand_svd  # pyright: ignore
+
+
+_SVD = b"""<device>
+  <name>DEV</name><version>1</version>
+  <cpu><name>CM33</name><revision>r0p4</revision><endian>little</endian><mpuPresent>true</mpuPresent>
+    <fpuPresent>true</fpuPresent><nvicPrioBits>4</nvicPrioBits><vendorSystickConfig>false</vendorSystickConfig>
+  </cpu>
+  <peripherals>
+    <peripheral><name>TIM1</name><baseAddress>0x40000000</baseAddress>
+      <registers>
+        <register><name>CR1</name><addressOffset>0</addressOffset><size>32</size><access>read-write</access>
+          <fields><field><name>EN</name><bitOffset>0</bitOffset><bitWidth>1</bitWidth></field></fields>
+        </register>
+      </registers>
+    </peripheral>
+    <peripheral derivedFrom="TIM1"><name>TIM2</name>
+      <baseAddress>0x40000400</baseAddress></peripheral>
+  </peripherals>
+</device>"""
+
+
+def test_a_real_expansion_equals_the_unmemoised_one_on_a_miss_and_on_a_hit() -> None:
+    expected = _svd.expand_svd(_SVD, file="a.svd")
+    assert [p.name for p in expected.peripherals] == ["TIM1", "TIM2"]
+    assert expected.peripherals[1].registers
+    memo = build_memo.BuildMemo(_Builds(), _svd.expand_svd)
+    assert memo.expand_svd(_SVD, file="a.svd") == expected
+    assert memo.expand_svd(_SVD, file="a.svd") == expected
+    assert (memo.misses, memo.hits) == (1, 1)

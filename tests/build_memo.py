@@ -1,4 +1,4 @@
-"""Memo of `build_description_with_report` for the test session.
+"""Memo of `build_description_with_report` and `_svd.expand_svd` for the test session.
 
 A build is keyed by the part name and the path and bytes digest of every file its `Sources` names
 and of the package patches, so a test that edits a source gets its own build. The value is a zlib
@@ -6,6 +6,10 @@ level 1 pickle and the warnings the build logged, replayed to the `popcorn` logg
 caller always owns its result and still sees the build's warnings. The memo stands down for a call
 while any module of the description package, `Path.read_bytes` or `Path.read_text` is monkeypatched,
 or while the `popcorn` logger drops warnings.
+
+`expand_svd` is memoised by the same machinery, keyed by the digest of the SVD bytes and the `file`
+argument. Every shipped part of a family reads one SVD, so the expansion runs once per SVD and not
+once per part, and each build still runs its own patches, rzone and compare.
 
 `BuildMemo.share` adds a directory shared by the workers of one run. A worker missing in memory
 takes the file lock of the key, loads the entry another worker wrote or builds and writes it, so
@@ -32,6 +36,7 @@ from popcorn.stm32.description import _builder, _sources
 from popcorn.stm32.description._model import PartDescription
 from popcorn.stm32.description._patches import PatchReport
 from popcorn.stm32.description._sources import Sources
+from popcorn.stm32.description._svd import SvdDevice
 
 _PACKAGE = "popcorn.stm32.description"
 _LOGGER = logging.getLogger("popcorn")
@@ -39,6 +44,7 @@ _MAX_BYTES = 256 * 1024 * 1024
 _MISSING = object()
 
 _Build = Callable[[Sources], tuple[PartDescription, PatchReport]]
+_Expand = Callable[..., SvdDevice]
 _Entry = tuple[bytes, list[logging.LogRecord]]
 
 
@@ -55,8 +61,9 @@ class _Capture(logging.Handler):
 
 
 class BuildMemo:
-    def __init__(self, build: _Build) -> None:
+    def __init__(self, build: _Build, expand: _Expand | None = None) -> None:
         self._build = build
+        self._expand = expand
         self.entries: OrderedDict[tuple[object, ...], _Entry] = OrderedDict()
         self._size = 0
         self._pristine: dict[str, dict[str, object]] = {}
@@ -155,11 +162,11 @@ class BuildMemo:
             _, (dropped, _) = self.entries.popitem(last=False)
             self._size -= len(dropped)
 
-    def _capture(self, sources: Sources) -> _Entry:
+    def _capture(self, build: Callable[[], object]) -> _Entry:
         capture = _Capture()
         _LOGGER.addHandler(capture)
         try:
-            result = self._build(sources)
+            result = build()
         finally:
             _LOGGER.removeHandler(capture)
         return (
@@ -167,7 +174,7 @@ class BuildMemo:
             capture.records,
         )
 
-    def _shared_entry(self, key: tuple[object, ...], sources: Sources) -> _Entry:
+    def _shared_entry(self, key: tuple[object, ...], build: Callable[[], object]) -> _Entry:
         assert self.shared is not None
         stem = self.shared / hashlib.sha256(repr(key).encode()).hexdigest()
         with open(stem.with_suffix(".lock"), "a") as lock:
@@ -178,17 +185,16 @@ class BuildMemo:
                 loaded: _Entry = pickle.loads(entry_path.read_bytes())
                 self._replay(loaded[1])
                 return loaded
-            entry = self._capture(sources)
+            entry = self._capture(build)
             partial = stem.with_suffix(f".{os.getpid()}.tmp")
             partial.write_bytes(pickle.dumps(entry, protocol=pickle.HIGHEST_PROTOCOL))
             partial.replace(entry_path)
             return entry
 
-    def __call__(self, sources: Sources) -> tuple[PartDescription, PatchReport]:
-        key = None if self._bypassing or self._patched() else self._key(sources)
+    def _cached(self, key: tuple[object, ...] | None, build: Callable[[], Any]) -> Any:
         if key is None or not _LOGGER.isEnabledFor(logging.WARNING):
             self.bypasses += 1
-            return self._build(sources)
+            return build()
         entry = self.entries.get(key)
         if entry is not None:
             self.entries.move_to_end(key)
@@ -196,19 +202,43 @@ class BuildMemo:
             self._replay(entry[1])
             return pickle.loads(zlib.decompress(entry[0]))
         self.misses += 1
-        entry = self._shared_entry(key, sources) if self.shared else self._capture(sources)
+        entry = self._shared_entry(key, build) if self.shared else self._capture(build)
         self._remember(key, entry)
         return pickle.loads(zlib.decompress(entry[0]))
 
+    def __call__(self, sources: Sources) -> tuple[PartDescription, PatchReport]:
+        key = None if self._bypassing or self._patched() else self._key(sources)
+        return self._cached(key, lambda: self._build(sources))
+
+    def expand_svd(self, data: bytes, *, file: str) -> SvdDevice:
+        """`_svd.expand_svd` of @p data and @p file, run once per distinct pair. Each caller
+        receives its own copy. A call that raises keeps nothing."""
+        assert self._expand is not None
+        expand = self._expand
+        key = (
+            None
+            if self._bypassing or self._patched()
+            else ("svd", hashlib.blake2b(data, digest_size=16).digest(), file)
+        )
+        return self._cached(key, lambda: expand(data, file=file))
+
 
 def install() -> BuildMemo:
-    """Replace `_builder.build_description_with_report` by a memo of it, once per process.
-    @return The memo, its `hits`, `misses` and `bypasses` count the calls."""
+    """Replace `_builder.build_description_with_report` and `_builder.expand_svd` by memos of
+    them, once per process.
+    @return The memo, its `hits`, `misses` and `bypasses` count the calls of both."""
     current: Any = _builder.build_description_with_report
     if isinstance(current, BuildMemo):
         return current
-    memo = BuildMemo(current)
+    expand: Any = _builder.expand_svd  # pyright: ignore[reportPrivateImportUsage]
+    memo = BuildMemo(current, expand)
     wraps(current)(memo)
     _builder.build_description_with_report = memo
+
+    @wraps(expand)
+    def expand_svd(data: bytes, *, file: str) -> SvdDevice:
+        return memo.expand_svd(data, file=file)
+
+    _builder.expand_svd = expand_svd  # pyright: ignore[reportPrivateImportUsage]
     memo.snapshot()
     return memo

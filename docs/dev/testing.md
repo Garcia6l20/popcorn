@@ -76,6 +76,16 @@ on any other call of the build, such as `open` or a parser, and asserts the call
 marker covers the test and its function-scoped fixtures, a module or session fixture that builds
 uses `bypassed()`.
 
+The same memo holds `_svd.expand_svd`, keyed by the digest of the SVD bytes and the `file` argument.
+The 226 shipped parts read 9 SVD files, so an SVD is expanded once per run and not once per part,
+and each build still applies its own patches, rzone facts and bonding. A call that raises keeps
+nothing. The two memos share the bypasses: a monkeypatched module of the description package, a
+patched `Path.read_bytes` or `Path.read_text`, the marker and `bypassed()` give the real
+`expand_svd` too, and a test that patches `_builder.expand_svd` itself gets its own function. The
+bypass sees the attributes of the description package and `Path` reads. A test that patches
+anything else on the build path, such as `copy.deepcopy` or `ET.fromstring`, carries the marker or
+runs inside `bypassed()`.
+
 `tests/python/description` is split so that each directory runs under 120 s at `-n 6`:
 
 | Directory | What it holds |
