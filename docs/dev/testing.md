@@ -63,6 +63,19 @@ Runs of the suites under `tests/` with `-n` use the xdist `worksteal` scheduler,
 description tests do not pile up on one worker. An explicit `--dist` or `-d`, from the command line,
 `PYTEST_ADDOPTS` or the ini file, chooses another scheduler.
 
+The description builder is memoised for the test session by `tests/build_memo.py`, installed from
+`tests/conftest.py`: `build_description_with_report` runs once per distinct input in a `-n` run,
+whichever worker asks first. The key is the part name and, for each file a `Sources` names and for
+the package patch files, its path and bytes digest, so a test that edits a source or a patch in
+`tmp_path` gets its own build. Each caller receives its own copy of the result, and the warnings the
+build logged to the `popcorn` logger reach the caller's log capture again on a hit. The memo builds
+through the builder itself while a module of the description package, `Path.read_bytes` or
+`Path.read_text` is monkeypatched, and while the `popcorn` logger drops warnings. A test that spies
+on any other call of the build, such as `open` or a parser, and asserts the call happens, carries
+`@pytest.mark.no_build_memo` or runs the build inside `with build_memo.install().bypassed():`. The
+marker covers the test and its function-scoped fixtures, a module or session fixture that builds
+uses `bypassed()`.
+
 `tests/python/description` is split so that each directory runs under 120 s at `-n 6`:
 
 | Directory | What it holds |
