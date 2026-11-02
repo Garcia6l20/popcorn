@@ -503,8 +503,14 @@ On the STM32L47x/L48x, RM0351 section 3:
   22.13 ms, the DS10198 typical values. A PNB at or above the pages of a bank, 64 on a 256-Kbyte
   part, erases nothing and logs one warning, a `model_error` under `strict_peripherals`.
 - A read of the bank under program or erase returns its stored data at once, with no bus stall.
-- `PRFTEN`, `ICEN`, `DCEN`, `ICRST`, `DCRST`, `RUN_PD` and `SLEEP_PD` are storage, the flash
-  reads at once, and `FLASH_PDKEYR` gates no write.
+  With `FLASH_ACR.DCEN` set such a read returns the stored data too, a popcorn rule for ES0250
+  2.2.14.
+- `PRFTEN`, `ICEN`, `DCEN`, `ICRST`, `DCRST` and `SLEEP_PD` are storage, the flash reads at once.
+  `RUN_PD` takes a write only after PDKEY1 then PDKEY2 in `FLASH_PDKEYR`, RM0351 3.7.1. Inferred:
+  the pair unlocks only the next `FLASH_ACR` write, and any other `FLASH_PDKEYR` value restarts
+  the sequence. A CPU or DMA write after the pair that sets `RUN_PD` logs one warning per machine
+  life and stores it, and under `strict_peripherals` it is a `model_error` with `FLASH_ACR` kept.
+  The flash stays readable, so ES0250 2.2.15 does not arise.
 - `LATENCY` is checked against RM0351 Table 11 for HCLK in the voltage range PWR applies: a lower
   value, or an HCLK above 80 MHz in range 1 or 26 MHz in range 2, logs one warning per HCLK, range
   and value, a `model_error` under `strict_peripherals`. `LATENCY` 5 to 7 counts as that many wait

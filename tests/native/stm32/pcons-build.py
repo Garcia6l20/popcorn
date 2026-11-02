@@ -101,7 +101,8 @@ l1_env = {
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in l1_firmwares.items()},
 }
 l4_firmwares = {
-    name: firmware("periph", name) for name in ("l476_l4_smoke", "l476_l4_rcc_ll", "l476_l4_pwr_ll")
+    name: firmware("periph", name)
+    for name in ("l476_l4_smoke", "l476_l4_rcc_ll", "l476_l4_pwr_ll", "l476_l4_flash_ll")
 }
 l4_env = {
     "POPCORN_L476RC_DESC": str(l476rc),

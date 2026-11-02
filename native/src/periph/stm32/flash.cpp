@@ -35,12 +35,14 @@ namespace popcorn::periph::stm32
 {
 namespace
 {
-constexpr std::uint32_t key1          = 0x4567'0123;
-constexpr std::uint32_t key2          = 0xcdef'89ab;
-constexpr std::uint32_t option_key1   = 0x0819'2a3b;
-constexpr std::uint32_t option_key2   = 0x4c5d'6e7f;
-constexpr std::uint32_t buffer_words  = 32;
-constexpr std::uint32_t operation_end = 0;
+constexpr std::uint32_t key1            = 0x4567'0123;
+constexpr std::uint32_t key2            = 0xcdef'89ab;
+constexpr std::uint32_t option_key1     = 0x0819'2a3b;
+constexpr std::uint32_t option_key2     = 0x4c5d'6e7f;
+constexpr std::uint32_t power_down_key1 = 0x0415'2637;
+constexpr std::uint32_t power_down_key2 = 0xfafb'fcfd;
+constexpr std::uint32_t buffer_words    = 32;
+constexpr std::uint32_t operation_end   = 0;
 
 enum class operation : std::uint8_t
 {
@@ -105,6 +107,24 @@ struct trustzone_flash_state
   secure_flash_state secure{};
 
   friend auto operator==(trustzone_flash_state const&, trustzone_flash_state const&)
+      -> bool = default;
+};
+
+struct extension_flash_state
+{
+  bool power_down_first_key{};
+  bool power_down_unlocked{};
+
+  friend auto operator==(extension_flash_state const&, extension_flash_state const&)
+      -> bool = default;
+};
+
+struct extended_flash_state
+{
+  flash_state           flash{};
+  extension_flash_state extension{};
+
+  friend auto operator==(extended_flash_state const&, extended_flash_state const&)
       -> bool = default;
 };
 
@@ -235,9 +255,10 @@ enum class unit_role : std::uint8_t
   option_error,
   option_error_irq,
   option_swap,
+  power_down,
 };
 
-constexpr std::array<named_field<unit_role>, 18> u5_unit_fields{
+constexpr std::array<named_field<unit_role>, 19> u5_unit_fields{
     {
      {unit_role::latency, {"FLASH_ACR", "LATENCY"}},
      {unit_role::programming_delay, {}},
@@ -257,10 +278,11 @@ constexpr std::array<named_field<unit_role>, 18> u5_unit_fields{
      {unit_role::option_error, {"FLASH_NSSR", "OPTWERR"}},
      {unit_role::option_error_irq, {}},
      {unit_role::option_swap, {}},
+     {unit_role::power_down, {}},
      }
 };
 
-constexpr std::array<named_field<unit_role>, 18> h5_unit_fields{
+constexpr std::array<named_field<unit_role>, 19> h5_unit_fields{
     {
      {unit_role::latency, {"FLASH_ACR", "LATENCY"}},
      {unit_role::programming_delay, {"FLASH_ACR", "WRHIGHFREQ"}},
@@ -280,6 +302,7 @@ constexpr std::array<named_field<unit_role>, 18> h5_unit_fields{
      {unit_role::option_error, {"FLASH_NSSR", "OPTCHANGEERR"}},
      {unit_role::option_error_irq, {"FLASH_NSCR", "OPTCHANGEERRIE"}},
      {unit_role::option_swap, {"FLASH_OPTCR", "SWAP_BANK"}},
+     {unit_role::power_down, {}},
      }
 };
 
@@ -641,6 +664,8 @@ struct u5_flash
   static constexpr std::string_view page_field = "PNB";
   /** @brief Register of the option key sequence, RM0456 7.9.4. */
   static constexpr std::string_view option_key_register = "FLASH_OPTKEYR";
+  /** @brief No power-down key register. */
+  static constexpr std::string_view power_down_key_register{};
   /** @brief Datasheet times of an empty flash_options field. */
   static constexpr flash_timing timing = u5_flash_timing;
   /** @brief Error flags with their own interrupt enable. */
@@ -994,6 +1019,8 @@ struct h5_flash
   static constexpr std::string_view page_field = "SNB";
   /** @brief Register of the option key sequence, RM0481 7.11.4. */
   static constexpr std::string_view option_key_register = "FLASH_OPTKEYR";
+  /** @brief No power-down key register. */
+  static constexpr std::string_view power_down_key_register{};
   /** @brief Datasheet times of an empty flash_options field. */
   static constexpr flash_timing timing = h5_flash_timing;
   /** @brief Error flags with their own interrupt enable, RM0481 7.11.11 bits 17 to 20. */
@@ -1294,7 +1321,7 @@ constexpr std::array<named_field<set_role>, 31> l4_set_fields{
      }
 };
 
-constexpr std::array<named_field<unit_role>, 18> l4_unit_fields{
+constexpr std::array<named_field<unit_role>, 19> l4_unit_fields{
     {
      {unit_role::latency, {"ACR", "LATENCY"}},
      {unit_role::programming_delay, {}},
@@ -1314,6 +1341,7 @@ constexpr std::array<named_field<unit_role>, 18> l4_unit_fields{
      {unit_role::option_error, {}},
      {unit_role::option_error_irq, {}},
      {unit_role::option_swap, {}},
+     {unit_role::power_down, {"ACR", "RUN_PD"}},
      }
 };
 
@@ -1369,6 +1397,8 @@ struct l4_flash
   static constexpr std::string_view page_field = "PNB";
   /** @brief Register of the option key sequence, RM0351 3.7.4. */
   static constexpr std::string_view option_key_register = "OPTKEYR";
+  /** @brief Register of the RUN_PD key sequence, RM0351 3.7.2. */
+  static constexpr std::string_view power_down_key_register = "PDKEYR";
   /** @brief Datasheet times of an empty flash_options field. */
   static constexpr flash_timing timing = l4_flash_timing;
   /** @brief No per-error interrupt enable. */
@@ -1788,8 +1818,12 @@ static_assert(flag_matches_roles(
  *   pages of a bank erases nothing as on the U5.
  * - Errors, 3.7.5: PROGERR, WRPERR, PGAERR, SIZERR and PGSERR as on the U5, OPERR with ERRIE.
  *   MISERR, FASTERR, RDERR and OPTVERR stay 0.
- * - FLASH_ACR, 3.7.1: LATENCY against Table 11 for HCLK and the PWR voltage range. PRFTEN, ICEN,
- *   DCEN, ICRST, DCRST, RUN_PD and SLEEP_PD are storage, and FLASH_PDKEYR gates no write.
+ * - FLASH_ACR, 3.7.1: LATENCY against Table 11 for HCLK and the PWR voltage range. RUN_PD takes
+ *   a write only after PDKEY1 then PDKEY2 in FLASH_PDKEYR, 3.7.2. The pair unlocks the next
+ *   FLASH_ACR write only and any other key restarts the sequence, both inferred. A CPU or DMA
+ *   write after the pair that sets RUN_PD logs one warning per machine life, model_error under
+ *   strict_peripherals with FLASH_ACR kept. PRFTEN, ICEN, DCEN, ICRST, DCRST and SLEEP_PD are
+ *   storage.
  * - Options: OPTSTRT clears at once and programs nothing, OBL_LAUNCH requests an option byte
  *   loader reset. FLASH_OPTR, the PCROP and the WRP registers are storage, and the row encodes
  *   no option bytes.
@@ -1812,6 +1846,7 @@ class flash_model final : public dispatch_model<flash_model<Traits>, flash_state
   static_assert(Traits::privileged_block_registers.size() == 2 * Traits::block_registers_per_bank);
   static constexpr std::string_view access_register =
       register_of(Traits::unit_fields, unit_role::latency);
+  static constexpr bool extended = not Traits::power_down_key_register.empty();
   using base::claims;
   using base::ctx_;
   using base::desc_;
@@ -1861,6 +1896,7 @@ public:
   void               key_written(std::uint32_t old, std::uint32_t now);
   void               secure_key_written(std::uint32_t old, std::uint32_t now);
   void               option_key_written(std::uint32_t old, std::uint32_t now);
+  void               power_down_key_written(std::uint32_t old, std::uint32_t now);
   void               control_written(std::uint32_t old, std::uint32_t now);
   void               secure_control_written(std::uint32_t old, std::uint32_t now);
   void               status_written(std::uint32_t old, std::uint32_t now);
@@ -1986,6 +2022,7 @@ private:
   bool                                                              rejected_{};
   bool                                                              page_logged_{};
   bool                                                              option_logged_{};
+  bool                                                              power_down_logged_{};
   std::vector<std::uint32_t>                                        option_changed_;
   std::vector<std::pair<std::uint32_t, std::uint32_t>>              option_words_;
   std::vector<std::uint32_t>                                        option_offsets_;
@@ -1998,6 +2035,7 @@ private:
   std::optional<field_table<privilege_role>>                        privilege_;
   std::optional<std::uint32_t>                                      privilege_word_;
   secure_flash_state                                                secure_;
+  extension_flash_state                                             extension_;
   illegal_access_controller*                                        events_{};
   bool                                                              events_linked_{};
   mutable temporal_isolation const*                                 isolation_{};
@@ -2027,6 +2065,10 @@ auto flash_table(peripheral_desc const& desc, flash_options const& options, bool
   if constexpr(correct_register != ecc_register)
   {
     table.push_back({correct_register, &model::ecc_written});
+  }
+  if constexpr(not Traits::power_down_key_register.empty())
+  {
+    table.push_back({Traits::power_down_key_register, &model::power_down_key_written});
   }
   if constexpr(option_register != Traits::set_registers[0].control)
   {
@@ -2556,7 +2598,8 @@ template <typename Traits> void flash_model<Traits>::reset(register_file& regs, 
   state_.wrp            = std::move(wrp);
   state_.wrp_active     = loads_options(kind) ? state_.wrp : std::move(wrp_active);
   option_changed_.clear();
-  secure_ = {};
+  secure_    = {};
+  extension_ = {};
   for(auto const [offset, value] : option_words_)
   {
     regs.poke(offset, value);
@@ -3773,6 +3816,12 @@ template <typename Traits> void flash_model<Traits>::save(std::vector<std::byte>
         trustzone_flash_state{.flash = state_, .secure = secure_});
     return;
   }
+  if constexpr(extended)
+  {
+    reflex::serde::bson::serializer{out}.dump(
+        extended_flash_state{.flash = state_, .extension = extension_});
+    return;
+  }
   base::save(out);
 }
 
@@ -3784,6 +3833,12 @@ template <typename Traits> void flash_model<Traits>::load(std::span<std::byte co
     state_      = std::move(loaded.flash);
     secure_     = std::move(loaded.secure);
     ctx_.services.memory_policy_changed();
+  }
+  else if constexpr(extended)
+  {
+    auto loaded = reflex::serde::bson::deserializer{in}.load<extended_flash_state>();
+    state_      = std::move(loaded.flash);
+    extension_  = loaded.extension;
   }
   else
   {
@@ -3809,8 +3864,36 @@ template <typename Traits> void flash_model<Traits>::on_voltage_range_change()
   check_latency("after a voltage range change");
 }
 
-template <typename Traits> void flash_model<Traits>::access_written(std::uint32_t, std::uint32_t)
+template <typename Traits>
+void flash_model<Traits>::access_written(std::uint32_t old, std::uint32_t now)
 {
+  auto const down = unit_.find(unit_role::power_down);
+  if constexpr(extended)
+  {
+    if(down
+       and not std::exchange(extension_.power_down_unlocked, false)
+       and down->of(old) != down->of(now))
+    {
+      update(regs_, *down, down->of(old));
+      now = regs_.peek(written_word_);
+    }
+  }
+  if(down and down->of(old) == 0 and down->of(now) != 0 and access_.by != initiator::debugger)
+  {
+    if(ctx_.strict_peripherals)
+    {
+      regs_.poke(written_word_, old);
+    }
+    constexpr auto name =
+        std::ranges::find(Traits::unit_fields, unit_role::power_down, &named_field<unit_role>::role)
+            ->name.field;
+    this->warn_once_or_refuse(
+        power_down_logged_, access_register, written_word_,
+        std::format(
+            "{} puts the flash in power-down, which the model does not run: the flash stays "
+            "readable",
+            name));
+  }
   check_latency(std::format("on a {} write", access_register));
 }
 
@@ -3868,6 +3951,20 @@ void flash_model<Traits>::option_key_written(std::uint32_t, std::uint32_t now)
   state_.option_first_key = false;
   state_.option_locked_up = true;
   rejected_               = true;
+}
+
+template <typename Traits>
+void flash_model<Traits>::power_down_key_written(std::uint32_t, std::uint32_t now)
+{
+  regs_.poke(reg(Traits::power_down_key_register).offset, 0);
+  auto& keys = extension_;
+  if(not keys.power_down_first_key and now == power_down_key1)
+  {
+    keys.power_down_first_key = true;
+    return;
+  }
+  keys.power_down_unlocked  = keys.power_down_first_key and now == power_down_key2;
+  keys.power_down_first_key = false;
 }
 
 template <typename Traits>
