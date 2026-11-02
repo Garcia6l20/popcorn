@@ -13,7 +13,7 @@
 !docker/licenses
 !docker/constraints.txt
 !docker/version-requirements.txt
-!.git/modules/third_party/unicorn
-.git/modules/third_party/unicorn/modules
+!third_party/unicorn
+third_party/unicorn/.git
 **/__pycache__
 **/CLAUDE.md

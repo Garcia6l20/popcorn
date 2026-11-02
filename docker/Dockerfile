@@ -9,23 +9,14 @@ COPY docker/version-requirements.txt /tmp/version-requirements.txt
 RUN uv pip install --no-cache --python /opt/build/bin/python --require-hashes \
     -r /tmp/version-requirements.txt
 
-FROM toolchain AS unicorn
-RUN --mount=type=bind,source=.git/modules/third_party/unicorn,target=/raw,rw \
-    git config --file /raw/config --unset core.worktree \
-    && git init -q /src/third_party/unicorn \
-    && git -C /src/third_party/unicorn fetch -q --depth 1 --no-tags /raw "$(git --git-dir=/raw rev-parse HEAD)" \
-    && git -C /src/third_party/unicorn checkout -q --detach FETCH_HEAD \
-    && git -C /src/third_party/unicorn repack -q -a -d -f --threads=1 \
-    && rm -r /src/third_party/unicorn/.git/index /src/third_party/unicorn/.git/logs \
-       /src/third_party/unicorn/.git/FETCH_HEAD
-
 FROM toolchain AS deps
 WORKDIR /src
 COPY pyproject.toml deps.toml ./
 COPY popcorn_build popcorn_build
-COPY --from=unicorn /src/third_party/unicorn third_party/unicorn
-RUN git -C third_party/unicorn read-tree HEAD \
-    && test -z "$(git -C third_party/unicorn status --porcelain)" \
+COPY third_party/unicorn third_party/unicorn
+ARG UNICORN_COMMIT
+ENV POPCORN_UNICORN_COMMIT=${UNICORN_COMMIT}
+RUN test -n "${POPCORN_UNICORN_COMMIT}" \
     && mkdir -p third_party/reflex/core/include \
     && SETUPTOOLS_SCM_PRETEND_VERSION=0 CMAKE_BUILD_PARALLEL_LEVEL=4 PCONS_BUILD_DIR=/src/build/wheel PCONS_VARIANT=release \
        PCONS_VARS='{"POPCORN_BUILD_TESTS":"OFF","POPCORN_BUILD_EXAMPLES":"OFF"}' \

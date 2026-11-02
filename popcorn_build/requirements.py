@@ -2,6 +2,7 @@ import functools
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -102,8 +103,9 @@ def _build_cmake_package(
 
 def _submodule_cmake_package(name: str, options: dict[str, str], library: str) -> tuple[Path, str]:
     source = _submodule(name, "CMakeLists.txt")
-    commit = _git(source, "rev-parse", "HEAD")
-    dirty = _git(source, "status", "--porcelain") != ""
+    pinned = os.environ.get(f"POPCORN_{name.upper()}_COMMIT")
+    commit = pinned or _git(source, "rev-parse", "HEAD")
+    dirty = not pinned and _git(source, "status", "--porcelain") != ""
     digest = hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest()[:12]
     key = f"{commit}+{digest}"
     label = f"{commit[:12]}-dirty" if dirty else commit[:12]

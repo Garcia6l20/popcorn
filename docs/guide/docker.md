@@ -88,13 +88,14 @@ USER popcorn
 ## Build the image locally
 
 Build from a fresh clone with its submodules. The build context takes whole source directories,
-so the untracked files of a working checkout would reach the image, and a git worktree lacks the
-submodule metadata the build reads.
+so the untracked files of a working checkout would reach the image. `UNICORN_COMMIT` names the
+commit of the `third_party/unicorn` submodule.
 
 ```sh
 git clone --recurse-submodules https://github.com/Garcia6l20/popcorn popcorn-image
 cd popcorn-image
-docker buildx build -f docker/Dockerfile --build-arg JOBS="$(nproc)" -t popcorn:local --load .
+docker buildx build -f docker/Dockerfile --build-arg JOBS="$(nproc)" \
+    --build-arg UNICORN_COMMIT="$(git rev-parse HEAD:third_party/unicorn)" -t popcorn:local --load .
 ```
 
 ## Licences and source

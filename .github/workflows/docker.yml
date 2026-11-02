@@ -45,6 +45,7 @@ jobs:
       digest: ${{ steps.build.outputs.digest }}
       version: ${{ steps.version.outputs.version }}
       jobs: ${{ steps.version.outputs.jobs }}
+      unicorn: ${{ steps.version.outputs.unicorn }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,6 +61,7 @@ jobs:
           version=$("$RUNNER_TEMP/version/bin/python" -m popcorn_build.version)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "jobs=$(nproc)" >> "$GITHUB_OUTPUT"
+          echo "unicorn=$(git rev-parse HEAD:third_party/unicorn)" >> "$GITHUB_OUTPUT"
           echo "version $version"
 
       - name: Check that the tag names the version
@@ -102,6 +104,7 @@ jobs:
             JOBS=${{ steps.version.outputs.jobs }}
             POPCORN_REVISION=${{ github.sha }}
             POPCORN_VERSION=${{ steps.version.outputs.version }}
+            UNICORN_COMMIT=${{ steps.version.outputs.unicorn }}
           cache-from: type=gha
           cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
 
@@ -171,6 +174,7 @@ jobs:
             JOBS=${{ needs.image.outputs.jobs }}
             POPCORN_REVISION=${{ github.sha }}
             POPCORN_VERSION=${{ needs.image.outputs.version }}
+            UNICORN_COMMIT=${{ needs.image.outputs.unicorn }}
           cache-from: type=gha
 
       - name: Check that the pushed image is the smoke-tested one
