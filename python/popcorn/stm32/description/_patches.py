@@ -689,6 +689,10 @@ def _apply_register_renames(
         if peripheral.name in names or peripheral.alias_of in names:
             for register in peripheral.registers:
                 register.name = rule.renames.get(register.name, register.name)
+                if register.alternate_of is not None:
+                    register.alternate_of = rule.renames.get(
+                        register.alternate_of, register.alternate_of
+                    )
     report.registers_renamed += len(rule.renames) * len(targets)
 
 

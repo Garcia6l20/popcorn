@@ -201,7 +201,9 @@ source = "RM0038 7.4.3: the register is GPIOx_OSPEEDR, the SVD spells it OSPEEDE
 ```
 
 An old name an instance lacks and a new name it already has are errors keyed
-`register_renames[<n>].renames.<old>`, and a later rule names the new spelling.
+`register_renames[<n>].renames.<old>`, and a later rule names the new spelling. A register that
+is an alternate view of a renamed one, such as a host-mode view sharing its offset, names the new
+spelling as the register it is an alternate of.
 
 ## Alternate function drops
 

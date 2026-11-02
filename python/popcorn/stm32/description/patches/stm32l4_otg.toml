@@ -1,0 +1,644 @@
+format = 1
+source = "RM0351 Rev 11, 47 USB on-the-go full-speed against ST's STM32L475, L476 and L486 SVDs: one OTG_FS block with the RM0351 47.15 register content on the lines that carry the OTG, STM32L475, L476, L485 and L486. STM32L471 has no OTG. The rules name the SVD register names, most with an FS_ prefix the builder strips after the patches"
+
+[match]
+parts = ["STM32L475*", "STM32L476*", "STM32L485*", "STM32L486*"]
+
+[peripherals]
+renames = { OTG_FS_GLOBAL = "OTG_FS" }
+source = "RM0351 Rev 11, 2.2.2 Table 1 and 47.15.57 Table 333: one OTG_FS peripheral at 0x5000 0000. The SVDs name its global register block OTG_FS_GLOBAL"
+
+[[peripheral_merges]]
+into = "OTG_FS"
+peripherals = ["OTG_FS_HOST", "OTG_FS_DEVICE", "OTG_FS_PWRCLK"]
+size = 0x20000
+source = "RM0351 Rev 11, 47.15.57 Table 333: one OTG_FS register map from 0x000, the host registers from 0x400, the device registers from 0x800, OTG_PCGCCTL at 0xE00, and 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1). 2.2.2 Table 1 gives OTG_FS 0x5000 0000 to 0x5003 FFFF. The SVDs split it into OTG_FS_GLOBAL, OTG_FS_HOST, OTG_FS_DEVICE and OTG_FS_PWRCLK of 0x400 bytes each. The 0x20000 direct FIFO access window is left out"
+
+[ip]
+renames = { USB_OTG_FS = ["OTG_FS"] }
+source = "The CubeMX db names the instance USB_OTG_FS, the SVDs give no OTG_FS block, RM0351 Rev 11 2.2.2 Table 1 names it OTG_FS"
+
+[[register_drops]]
+peripheral = "OTG_FS"
+names = ["FS_GNPTXFSIZ_Host"]
+source = "RM0351 Rev 11, 47.15.13 OTG_HNPTXFSIZ/OTG_DIEPTXF0 at 0x028: one register, NPTXFD[15:0] and NPTXFSA[15:0] in host mode, the same bits TX0FD and TX0FSA in device mode, Table 326 note 1. The SVDs give the two views as two registers, the host view an alternate of the device view. The device view stays, named and spelled as the host view below"
+
+[[register_renames]]
+peripherals = ["OTG_FS"]
+renames = { FS_GRXSTSR_Device = "GRXSTSR_DEVICE", FS_GRXSTSR_Host = "GRXSTSR_HOST", FS_GNPTXFSIZ_Device = "HNPTXFSIZ", FS_GNPTXSTS = "HNPTXSTS" }
+source = "RM0351 Rev 11, 47.15.8 and 47.15.9 OTG_GRXSTSR in device and host mode, 47.15.13 OTG_HNPTXFSIZ, 47.15.14 OTG_HNPTXSTS. The SVDs spell them GRXSTSR_Device, GRXSTSR_Host, GNPTXFSIZ_Device and GNPTXSTS. The device and host views of GRXSTSR take the suffixes of the U5 OTG_FS description, the one register at 0x028 its host-mode name HNPTXFSIZ"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GSNPSID"
+offset = 0x40
+width = 32
+reset = 0x4F54310A
+acc = "read_only"
+fields = []
+source = "CMSIS cmsis-device-l4 v1.7.5 stm32l476xx.h USB_OTG_GlobalTypeDef places GSNPSID at 0x040, HAL stm32l4xx-hal-driver v1.13.6 stm32l4xx_ll_usb.h:292-293 defines USB_OTG_CORE_ID_300A and USB_OTG_CORE_ID_310A. TinyUSB src/portable/synopsys/dwc2/dwc2_info.py row ST L476 FS reads 0x4F54310A, inferred, TinyUSB register dump of an L476. RM0351 Rev 11 47.15 documents no register at 0x040 and the SVDs omit it. Drivers read GSNPSID to pick the core revision, TinyUSB's dwc2 refuses a core whose ID is not 0x4F54xxxx"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GHWCFG1"
+offset = 0x44
+width = 32
+reset = 0x00000000
+acc = "read_only"
+fields = []
+source = "Inferred, TinyUSB register dump of an L476: TinyUSB src/portable/synopsys/dwc2/dwc2_info.py row ST L476 FS: GHWCFG1 0, no endpoint direction configuration. CMSIS cmsis-device-l4 v1.7.5 stm32l476xx.h USB_OTG_GlobalTypeDef places GHWCFG1 to GHWCFG3 at 0x044 to 0x04C. RM0351 Rev 11 47.15 documents no register there"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GHWCFG2"
+offset = 0x48
+width = 32
+reset = 0x229ED520
+acc = "read_only"
+fields = []
+source = "Inferred, TinyUSB register dump of an L476: TinyUSB src/portable/synopsys/dwc2/dwc2_info.py row ST L476 FS. Decoded with the dwc2_ghwcfg2_t layout: op_mode 0, arch 0 (slave), single_point 1, hs_phy_type 0, fs_phy_type 1 (dedicated), num_dev_ep 5 (six endpoints with EP0), num_host_ch 11 (twelve channels), enable_dynamic_fifo 1, as RM0351 Rev 11 47.3 Table 322 gives 6 endpoints and 12 channels for STM32L47x/L48x. CMSIS stm32l476xx.h places GHWCFG2 at 0x048"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GHWCFG3"
+offset = 0x4C
+width = 32
+reset = 0x0200D1E8
+acc = "read_only"
+fields = []
+source = "Inferred, TinyUSB register dump of an L476: TinyUSB src/portable/synopsys/dwc2/dwc2_info.py row ST L476 FS. CMSIS cmsis-device-l4 v1.7.5 stm32l476xx.h places GHWCFG3 at 0x04C"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GHWCFG4"
+offset = 0x50
+width = 32
+reset = 0x17F08030
+acc = "read_only"
+fields = []
+source = "Inferred, TinyUSB register dump of an L476: TinyUSB src/portable/synopsys/dwc2/dwc2_info.py row ST L476 FS. CMSIS cmsis-device-l4 v1.7.5 stm32l476xx.h USB_OTG_GlobalTypeDef leaves 0x050 reserved, TinyUSB dwc2_type.h places ghwcfg4 there"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GDFIFOCFG"
+offset = 0x5C
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "TinyUSB dfifo_device_init in dcd_dwc2.c writes GDFIFOCFG on every bus reset. CMSIS cmsis-device-l4 v1.7.5 stm32l476xx.h USB_OTG_GlobalTypeDef places GDFIFOCFG at 0x05C, RM0351 Rev 11 47.15 documents no register there and the SVDs omit it. Plain storage with reset 0, inferred, TinyUSB register dump of an L476"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DFIFO0"
+offset = 0x1000
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DFIFO1"
+offset = 0x2000
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DFIFO2"
+offset = 0x3000
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DFIFO3"
+offset = 0x4000
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DFIFO4"
+offset = 0x5000
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DFIFO5"
+offset = 0x6000
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = []
+source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "FS_GOTGCTL"
+reset = 0x00010000
+source = "RM0351 Rev 11, 47.15.1 OTG_GOTGCTL: reset 0b0000 0XXX XX00 X001 0000 0000 XX00 0000, CIDSTS set. The SVDs give 0x800"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "FS_GUSBCFG"
+reset = 0x00001440
+source = "RM0351 Rev 11, 47.15.4 OTG_GUSBCFG: reset 0b0X00 0000 0000 0000 0001 0100 0100 0000, TRDT 0x5 and PHYSEL set. The SVDs give 0xA00"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "FS_GRSTCTL"
+reset = 0x80000000
+source = "RM0351 Rev 11, 47.15.5 OTG_GRSTCTL: reset 0x8000 0000, AHBIDL set. The SVDs give 0x20000000"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "HNPTXFSIZ"
+reset = 0x02000200
+source = "RM0351 Rev 11, 47.15.13 OTG_HNPTXFSIZ: reset 0x0200 0200. The SVDs give 0x200"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "FS_CID"
+reset = 0x00002000
+source = "RM0351 Rev 11, 47.15.16 OTG_CID: reset 0x0000 2000, as TinyUSB dwc2_info.py row ST L476 FS reads GUID. The SVDs give 0x1000"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "FS_HPTXFSIZ"
+reset = 0x02000400
+source = "RM0351 Rev 11, 47.15.20 OTG_HPTXFSIZ: reset 0x0200 0400. The SVDs give 0x2000600"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "FS_DIEPTXF2"
+reset = 0x02000600
+source = "RM0351 Rev 11, 47.15.21 OTG_DIEPTXFx: reset value block 2 0x0200 0600. The SVDs give 0x2000400"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "FS_DIEPTXF3"
+reset = 0x02000800
+source = "RM0351 Rev 11, 47.15.21 OTG_DIEPTXFx: reset value block 3 0x0200 0800. The SVDs give 0x2000400"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "FS_DCTL"
+reset = 0x00000002
+source = "RM0351 Rev 11, 47.15.36 OTG_DCTL: reset 0x0000 0002, SDIS set. The SVDs give 0"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "DTXFSTS0"
+reset = 0x00000200
+source = "RM0351 Rev 11, 47.15.49 OTG_DTXFSTSx: reset 0x0000 0200. The SVDs give 0"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "DTXFSTS1"
+reset = 0x00000200
+source = "RM0351 Rev 11, 47.15.49 OTG_DTXFSTSx: reset 0x0000 0200. The SVDs give 0"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "DTXFSTS2"
+reset = 0x00000200
+source = "RM0351 Rev 11, 47.15.49 OTG_DTXFSTSx: reset 0x0000 0200. The SVDs give 0"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "DTXFSTS3"
+reset = 0x00000200
+source = "RM0351 Rev 11, 47.15.49 OTG_DTXFSTSx: reset 0x0000 0200. The SVDs give 0"
+
+[[resets]]
+peripheral = "OTG_FS"
+register = "FS_PCGCCTL"
+reset = 0x200B8000
+source = "RM0351 Rev 11, 47.15.56 OTG_PCGCCTL: reset 0x200B 8000. The SVDs give 0"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GOTGCTL"]
+add = { name = "OTGVER", lsb = 20, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.1 OTG_GOTGCTL: bit 20 OTGVER, OTG version, rw. 47.3 Table 322 gives CURMOD absent on STM32L47x/L48x, so bit 21 stays reserved. The SVDs leave OTGVER out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GOTGCTL"]
+add = { name = "EHEN", lsb = 12, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.1 OTG_GOTGCTL: bit 12 EHEN, embedded host enable, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GOTGCTL"]
+add = { name = "BVALOVAL", lsb = 7, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.1 OTG_GOTGCTL: bit 7 BVALOVAL, B-peripheral session valid override value, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GOTGCTL"]
+add = { name = "BVALOEN", lsb = 6, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.1 OTG_GOTGCTL: bit 6 BVALOEN, B-peripheral session valid override enable, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GOTGCTL"]
+add = { name = "AVALOVAL", lsb = 5, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.1 OTG_GOTGCTL: bit 5 AVALOVAL, A-peripheral session valid override value, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GOTGCTL"]
+add = { name = "AVALOEN", lsb = 4, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.1 OTG_GOTGCTL: bit 4 AVALOEN, A-peripheral session valid override enable, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GOTGCTL"]
+add = { name = "VBVALOVAL", lsb = 3, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.1 OTG_GOTGCTL: bit 3 VBVALOVAL, VBUS valid override value, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GOTGCTL"]
+add = { name = "VBVALOEN", lsb = 2, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.1 OTG_GOTGCTL: bit 2 VBVALOEN, VBUS valid override enable, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GAHBCFG"]
+rename = { GINT = "GINTMSK" }
+source = "RM0351 Rev 11, 47.15.3 OTG_GAHBCFG: bit 0 is GINTMSK, global interrupt mask. The SVDs spell it GINT"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GUSBCFG"]
+fields = ["CTXPKT"]
+drop = true
+source = "RM0351 Rev 11, 47.15.4 OTG_GUSBCFG: bit 31 is reserved. The SVDs give it a field CTXPKT"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GUSBCFG"]
+fields = ["PHYSEL"]
+acc = "read_only"
+source = "RM0351 Rev 11, 47.15.4 OTG_GUSBCFG: bit 6 PHYSEL is always 1 with read-only access. The SVDs mark it write-only"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GRSTCTL"]
+fields = ["HSRST"]
+drop = true
+source = "RM0351 Rev 11, 47.15.5 OTG_GRSTCTL draws bit 1 PSRST, and 47.3 Table 322 gives PSRST absent on STM32L47x/L48x, so bit 1 is reserved there. Table 322 is the device-specific statement. The SVDs give bit 1 a field HSRST"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GINTSTS"]
+rename = { GOUTNAKEFF = "GONAKEFF", IPXFR_INCOMPISOOUT = "IPXFR" }
+source = "RM0351 Rev 11, 47.15.6 OTG_GINTSTS: bit 7 GONAKEFF, global OUT NAK effective, bit 21 IPXFR, incomplete periodic transfer. The SVDs spell them GOUTNAKEFF and IPXFR_INCOMPISOOUT"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GINTSTS"]
+add = { name = "LPMINT", lsb = 27, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.6 OTG_GINTSTS: bit 27 LPMINT, LPM interrupt, rc_w1. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GINTSTS"]
+add = { name = "RSTDET", lsb = 23, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.6 OTG_GINTSTS: bit 23 RSTDET, reset detected interrupt, rc_w1. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GINTMSK"]
+rename = { IPXFRM_IISOOXFRM = "IPXFRM" }
+source = "RM0351 Rev 11, 47.15.7 OTG_GINTMSK: bit 21 IPXFRM, incomplete periodic transfer mask. The SVDs spell it IPXFRM_IISOOXFRM"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GINTMSK"]
+fields = ["EPMISM"]
+drop = true
+source = "RM0351 Rev 11, 47.15.7 OTG_GINTMSK: bit 17 is reserved. The SVDs give it a field EPMISM"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GINTMSK"]
+fields = ["PRTIM"]
+acc = "read_write"
+source = "RM0351 Rev 11, 47.15.7 OTG_GINTMSK: bit 24 PRTIM, host port interrupt mask, rw. The SVDs mark it read-only"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GINTMSK"]
+add = { name = "LPMINTM", lsb = 27, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.7 OTG_GINTMSK: bit 27 LPMINTM, LPM interrupt mask, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GINTMSK"]
+add = { name = "RSTDETM", lsb = 23, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.7 OTG_GINTMSK: bit 23 RSTDETM, reset detected interrupt mask, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["GRXSTSR_HOST"]
+fields = ["FRMNUM"]
+drop = true
+source = "RM0351 Rev 11, 47.15.9 OTG_GRXSTSR in host mode: bits 31:21 are reserved. The SVDs copy the device-mode FRMNUM into the host view"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["GRXSTSR_HOST"]
+rename = { EPNUM = "CHNUM" }
+source = "RM0351 Rev 11, 47.15.9 OTG_GRXSTSR in host mode: bits 3:0 CHNUM, channel number. The SVDs copy the device-mode EPNUM into the host view"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["HNPTXFSIZ"]
+rename = { TX0FD = "NPTXFD", TX0FSA = "NPTXFSA" }
+source = "RM0351 Rev 11, 47.15.13 OTG_HNPTXFSIZ: bits 31:16 NPTXFD, bits 15:0 NPTXFSA, the host-mode names the OTG model reads. The SVDs spell the device view TX0FD and TX0FSA"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GCCFG"]
+fields = ["VBUSASEN", "VBUSBSEN", "SOFOUTEN"]
+drop = true
+source = "RM0351 Rev 11, 47.15.15 OTG_GCCFG: bits 20:17 are SDEN, PDEN, DCDEN and BCDEN, bit 21 VBDEN. The SVDs give bits 20:18 the fields SOFOUTEN, VBUSBSEN and VBUSASEN of an older core"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GCCFG"]
+add = { name = "VBDEN", lsb = 21, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.15 OTG_GCCFG: bit 21 VBDEN, USB VBUS detection enable, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GCCFG"]
+add = { name = "SDEN", lsb = 20, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.15 OTG_GCCFG: bit 20 SDEN, secondary detection mode enable, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GCCFG"]
+add = { name = "PDEN", lsb = 19, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.15 OTG_GCCFG: bit 19 PDEN, primary detection mode enable, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GCCFG"]
+add = { name = "DCDEN", lsb = 18, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.15 OTG_GCCFG: bit 18 DCDEN, data contact detection mode enable, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GCCFG"]
+add = { name = "BCDEN", lsb = 17, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.15 OTG_GCCFG: bit 17 BCDEN, battery charging detector enable, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GCCFG"]
+add = { name = "PS2DET", lsb = 3, width = 1, acc = "read_only", reset = 0 }
+source = "RM0351 Rev 11, 47.15.15 OTG_GCCFG: bit 3 PS2DET, DM pull-up detection status, r. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GCCFG"]
+add = { name = "SDET", lsb = 2, width = 1, acc = "read_only", reset = 0 }
+source = "RM0351 Rev 11, 47.15.15 OTG_GCCFG: bit 2 SDET, secondary detection status, r. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GCCFG"]
+add = { name = "PDET", lsb = 1, width = 1, acc = "read_only", reset = 0 }
+source = "RM0351 Rev 11, 47.15.15 OTG_GCCFG: bit 1 PDET, primary detection status, r. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_GCCFG"]
+add = { name = "DCDET", lsb = 0, width = 1, acc = "read_only", reset = 0 }
+source = "RM0351 Rev 11, 47.15.15 OTG_GCCFG: bit 0 DCDET, data contact detection status, r. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["HFIR"]
+add = { name = "RLDCTRL", lsb = 16, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.24 OTG_HFIR: bit 16 RLDCTRL, reload control, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_HPTXSTS"]
+fields = ["PTXFSAVL"]
+acc = "read_only"
+source = "RM0351 Rev 11, 47.15.26 OTG_HPTXSTS is a read-only register, PTXFSAVL[15:0] r. The SVDs mark PTXFSAVL read-write"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_HCINTMSK{n}"]
+each = { n = [0, 7] }
+fields = ["NYET"]
+drop = true
+source = "RM0351 Rev 11, 47.15.32 OTG_HCINTMSKx: bit 6 is reserved. The SVDs give it a field NYET"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_HCTSIZ{n}"]
+each = { n = [0, 7] }
+add = { name = "DOPNG", lsb = 31, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.33 OTG_HCTSIZx: bit 31 DOPNG, do ping, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_DCTL"]
+add = { name = "DSBESLRJCT", lsb = 18, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.36 OTG_DCTL: bit 18 DSBESLRJCT, deep sleep BESL reject, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_DCTL"]
+fields = ["SGINAK", "CGINAK", "SGONAK", "CGONAK"]
+acc = "write_only"
+source = "RM0351 Rev 11, 47.15.36 OTG_DCTL: SGINAK, CGINAK, SGONAK and CGONAK in bits 10:7 are w. The SVDs mark them read-write"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_DSTS"]
+add = { name = "DEVLNSTS", lsb = 22, width = 2, acc = "read_only", reset = 0 }
+source = "RM0351 Rev 11, 47.15.37 OTG_DSTS: bits 23:22 DEVLNSTS, device line status, r. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_DIEPMSK"]
+add = { name = "NAKM", lsb = 13, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.38 OTG_DIEPMSK: bit 13 NAKM, NAK interrupt mask, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_DOEPMSK"]
+add = { name = "NAKMSK", lsb = 13, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.39 OTG_DOEPMSK: bit 13 NAKMSK, NAK interrupt mask, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_DOEPMSK"]
+add = { name = "BERRM", lsb = 12, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.39 OTG_DOEPMSK: bit 12 BERRM, babble error interrupt mask, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_DOEPMSK"]
+add = { name = "OUTPKTERRM", lsb = 8, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.39 OTG_DOEPMSK: bit 8 OUTPKTERRM, OUT packet error mask, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_DOEPMSK"]
+add = { name = "STSPHSRXM", lsb = 5, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.39 OTG_DOEPMSK: bit 5 STSPHSRXM, status phase received for control write mask, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_DAINTMSK"]
+rename = { OEPINT = "OEPM" }
+source = "RM0351 Rev 11, 47.15.41 OTG_DAINTMSK: bits 31:16 OEPM, OUT endpoint interrupt mask bits. The SVDs spell it OEPINT"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DVBUSPULSE"]
+fields = ["DVBUSP"]
+width = 16
+source = "RM0351 Rev 11, 47.15.43 OTG_DVBUSPULSE: bits 15:0 DVBUSP[15:0]. The SVDs give 12 bits"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_DIEPCTL0"]
+fields = ["EPENA", "EPDIS"]
+acc = "read_write"
+source = "RM0351 Rev 11, 47.15.45 OTG_DIEPCTL0: bits 31 EPENA and 30 EPDIS are rs, set by software. The SVDs mark them read-only"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DIEPCTL1"]
+rename = { SODDFRM_SD1PID = "SODDFRM" }
+source = "RM0351 Rev 11, 47.15.46 OTG_DIEPCTLx: bit 29 SODDFRM, set odd frame, as the SVDs spell it on DIEPCTL2 and DIEPCTL3 and the U5 OTG_FS description on every IN endpoint. The SVDs spell it SODDFRM_SD1PID on DIEPCTL1"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DIEPCTL{n}"]
+each = { n = [1, 3] }
+rename = { Stall = "STALL", EONUM_DPID = "EONUM_DPIP" }
+source = "RM0351 Rev 11, 47.15.46 OTG_DIEPCTLx: bit 21 STALL, bit 16 EONUM/DPID, even/odd frame or endpoint data PID. The SVDs spell them Stall and EONUM_DPID, bit 16 takes the EONUM_DPIP spelling of the U5 OTG_FS description"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DIEPINT{n}"]
+each = { n = [0, 3] }
+add = { name = "NAK", lsb = 13, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.47 OTG_DIEPINTx: bit 13 NAK, NAK input, rc_w1. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DIEPINT{n}"]
+each = { n = [0, 3] }
+add = { name = "PKTDRPSTS", lsb = 11, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.47 OTG_DIEPINTx: bit 11 PKTDRPSTS, packet dropped status, rc_w1. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DIEPINT{n}"]
+each = { n = [0, 3] }
+add = { name = "INEPNM", lsb = 5, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.47 OTG_DIEPINTx: bit 5 INEPNM, IN token received with EP mismatch, rc_w1. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DOEPCTL{n}"]
+each = { n = [0, 3] }
+rename = { Stall = "STALL" }
+source = "RM0351 Rev 11, 47.15.51 OTG_DOEPCTL0 and 47.15.54 OTG_DOEPCTLx: bit 21 STALL. The SVDs spell it Stall"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DOEPCTL{n}"]
+each = { n = [1, 3] }
+rename = { SODDFRM = "SD1PID_SODDFRM", EONUM_DPID = "EONUM_DPIP" }
+source = "RM0351 Rev 11, 47.15.54 OTG_DOEPCTLx: bit 29 SD1PID/SODDFRM, set DATA1 PID or odd frame, bit 16 EONUM/DPID. The SVDs spell them SODDFRM and EONUM_DPID, both take the spellings of the U5 OTG_FS description"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DOEPINT{n}"]
+each = { n = [0, 3] }
+fields = ["B2BSTUP"]
+drop = true
+source = "RM0351 Rev 11, 47.15.52 OTG_DOEPINTx: bit 6 is reserved. The SVDs give it a field B2BSTUP"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DOEPINT{n}"]
+each = { n = [0, 3] }
+add = { name = "NAK", lsb = 13, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.52 OTG_DOEPINTx: bit 13 NAK, NAK input, rc_w1. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DOEPINT{n}"]
+each = { n = [0, 3] }
+add = { name = "BERR", lsb = 12, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.52 OTG_DOEPINTx: bit 12 BERR, babble error interrupt, rc_w1. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DOEPINT{n}"]
+each = { n = [0, 3] }
+add = { name = "STSPHSRX", lsb = 5, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.52 OTG_DOEPINTx: bit 5 STSPHSRX, status phase received for control write, rc_w1. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DOEPTSIZ{n}"]
+each = { n = [1, 3] }
+rename = { RXDPID_STUPCNT = "RXDPID" }
+source = "RM0351 Rev 11, 47.15.55 OTG_DOEPTSIZx: bits 30:29 RXDPID, received data PID. The SVDs spell it RXDPID_STUPCNT"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_PCGCCTL"]
+fields = ["PHYSUSP"]
+acc = "read_only"
+source = "RM0351 Rev 11, 47.15.56 OTG_PCGCCTL: bit 4 PHYSUSP, PHY suspended, r. The SVDs mark it read-write"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_PCGCCTL"]
+add = { name = "SUSP", lsb = 7, width = 1, acc = "read_only", reset = 0 }
+source = "RM0351 Rev 11, 47.15.56 OTG_PCGCCTL: bit 7 SUSP, deep sleep, r. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_PCGCCTL"]
+add = { name = "PHYSLEEP", lsb = 6, width = 1, acc = "read_only", reset = 0 }
+source = "RM0351 Rev 11, 47.15.56 OTG_PCGCCTL: bit 6 PHYSLEEP, PHY in sleep, r. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["FS_PCGCCTL"]
+add = { name = "ENL1GTG", lsb = 5, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 47.15.56 OTG_PCGCCTL: bit 5 ENL1GTG, enable sleep clock gating, rw. The SVDs leave it out"

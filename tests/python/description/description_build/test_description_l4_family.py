@@ -4,12 +4,19 @@ import tomllib
 from functools import cache
 from pathlib import Path
 
+import popcorn
 import pytest
 from popcorn.stm32.description import _cubemx
+from popcorn.stm32.description._binder import dump_json
 from popcorn.stm32.description._builder import build_description
 from popcorn.stm32.description._cubemx import expand_refname, read_rzone_facts
 from popcorn.stm32.description._errors import MissingSource
-from popcorn.stm32.description._model import PartDescription, PeripheralDesc, RegionDesc
+from popcorn.stm32.description._model import (
+    PartDescription,
+    PeripheralDesc,
+    RegionDesc,
+    RegisterDesc,
+)
 from popcorn.stm32.description._sources import facts_path, find_sources, read_db_part
 
 from ..conftest import require_pin_data
@@ -302,3 +309,203 @@ def test_the_dac_is_dac1_with_its_cubemx_identity(name: str) -> None:
     assert "DAC" not in {p.name for p in description.peripherals}
     dac = _peripheral(description, "DAC1")
     assert (dac.ip, dac.ip_version) == ("DAC", "dacif_v2_0_Cube")
+
+
+OTG_PARTS = ["STM32L475VGTx", "STM32L476RCTx", "STM32L486RGTx"]
+OTG_SPLIT = ["OTG_FS_GLOBAL", "OTG_FS_HOST", "OTG_FS_DEVICE", "OTG_FS_PWRCLK"]
+OTG_OFFSETS = {
+    "GOTGCTL": 0x000,
+    "GRXSTSR_DEVICE": 0x01C,
+    "GRXSTSR_HOST": 0x01C,
+    "HNPTXFSIZ": 0x028,
+    "HNPTXSTS": 0x02C,
+    "GSNPSID": 0x040,
+    "GHWCFG1": 0x044,
+    "GHWCFG2": 0x048,
+    "GHWCFG3": 0x04C,
+    "GHWCFG4": 0x050,
+    "GDFIFOCFG": 0x05C,
+    "HCFG": 0x400,
+    "HCTSIZ7": 0x5F0,
+    "DCFG": 0x800,
+    "DOEPTSIZ3": 0xB70,
+    "PCGCCTL": 0xE00,
+    **{f"DFIFO{n}": 0x1000 * (n + 1) for n in range(6)},
+}
+"""Registers of each of the four SVD blocks and of the adds, at their RM0351 47.15.57 offsets."""
+OTG_FIELDS: dict[str, dict[str, tuple[int, int]]] = {
+    "GOTGCTL": {
+        "OTGVER": (20, 1),
+        "EHEN": (12, 1),
+        "BVALOVAL": (7, 1),
+        "BVALOEN": (6, 1),
+        "AVALOVAL": (5, 1),
+        "AVALOEN": (4, 1),
+        "VBVALOVAL": (3, 1),
+        "VBVALOEN": (2, 1),
+    },
+    "GAHBCFG": {"GINTMSK": (0, 1)},
+    "GINTSTS": {"LPMINT": (27, 1), "RSTDET": (23, 1), "IPXFR": (21, 1), "GONAKEFF": (7, 1)},
+    "GINTMSK": {"LPMINTM": (27, 1), "RSTDETM": (23, 1), "IPXFRM": (21, 1)},
+    "GRXSTSR_HOST": {"PKTSTS": (17, 4), "DPID": (15, 2), "BCNT": (4, 11), "CHNUM": (0, 4)},
+    "HNPTXFSIZ": {"NPTXFD": (16, 16), "NPTXFSA": (0, 16)},
+    "GCCFG": {
+        "VBDEN": (21, 1),
+        "SDEN": (20, 1),
+        "PDEN": (19, 1),
+        "DCDEN": (18, 1),
+        "BCDEN": (17, 1),
+        "PWRDWN": (16, 1),
+        "PS2DET": (3, 1),
+        "SDET": (2, 1),
+        "PDET": (1, 1),
+        "DCDET": (0, 1),
+    },
+    "HFIR": {"RLDCTRL": (16, 1)},
+    **{f"HCTSIZ{n}": {"DOPNG": (31, 1)} for n in range(8)},
+    "DCTL": {"DSBESLRJCT": (18, 1)},
+    "DSTS": {"DEVLNSTS": (22, 2)},
+    "DIEPMSK": {"NAKM": (13, 1)},
+    "DOEPMSK": {"NAKMSK": (13, 1), "BERRM": (12, 1), "OUTPKTERRM": (8, 1), "STSPHSRXM": (5, 1)},
+    "DAINTMSK": {"OEPM": (16, 16)},
+    "DVBUSPULSE": {"DVBUSP": (0, 16)},
+    **{
+        f"DIEPCTL{n}": {
+            "SODDFRM": (29, 1),
+            "SD0PID_SEVNFRM": (28, 1),
+            "STALL": (21, 1),
+            "EONUM_DPIP": (16, 1),
+        }
+        for n in range(1, 4)
+    },
+    **{f"DIEPINT{n}": {"NAK": (13, 1), "PKTDRPSTS": (11, 1), "INEPNM": (5, 1)} for n in range(4)},
+    "DOEPCTL0": {"STALL": (21, 1)},
+    **{
+        f"DOEPCTL{n}": {
+            "SD1PID_SODDFRM": (29, 1),
+            "SD0PID_SEVNFRM": (28, 1),
+            "STALL": (21, 1),
+            "EONUM_DPIP": (16, 1),
+        }
+        for n in range(1, 4)
+    },
+    **{f"DOEPINT{n}": {"NAK": (13, 1), "BERR": (12, 1), "STSPHSRX": (5, 1)} for n in range(4)},
+    **{f"DOEPTSIZ{n}": {"RXDPID": (29, 2)} for n in range(1, 4)},
+    "PCGCCTL": {"SUSP": (7, 1), "PHYSLEEP": (6, 1), "ENL1GTG": (5, 1)},
+}
+"""The fields 03a3a corrects to RM0351 47.15, spelled as the OTG model reads them."""
+OTG_ABSENT: dict[str, set[str]] = {
+    "GOTGCTL": {"CURMOD"},
+    "GUSBCFG": {"CTXPKT"},
+    "GRSTCTL": {"HSRST", "PSRST"},
+    "GINTMSK": {"EPMISM"},
+    "GRXSTSR_HOST": {"EPNUM", "FRMNUM"},
+    "GCCFG": {"VBUSASEN", "VBUSBSEN", "SOFOUTEN"},
+    **{f"HCINTMSK{n}": {"NYET"} for n in range(8)},
+    **{f"DOEPINT{n}": {"B2BSTUP"} for n in range(4)},
+}
+"""Fields RM0351 47.15 and Table 322 leave reserved on STM32L47x/L48x."""
+OTG_ACCESS: dict[tuple[str, str], str] = {
+    ("GUSBCFG", "PHYSEL"): "read_only",
+    ("GINTMSK", "PRTIM"): "read_write",
+    ("HPTXSTS", "PTXFSAVL"): "read_only",
+    **{("DCTL", f): "write_only" for f in ("SGINAK", "CGINAK", "SGONAK", "CGONAK")},
+    ("DIEPCTL0", "EPENA"): "read_write",
+    ("DIEPCTL0", "EPDIS"): "read_write",
+    ("PCGCCTL", "PHYSUSP"): "read_only",
+}
+OTG_RESETS: dict[str, int] = {
+    "GOTGCTL": 0x0001_0000,
+    "GUSBCFG": 0x0000_1440,
+    "GRSTCTL": 0x8000_0000,
+    "HNPTXFSIZ": 0x0200_0200,
+    "CID": 0x0000_2000,
+    "GSNPSID": 0x4F54_310A,
+    "GHWCFG1": 0,
+    "GHWCFG2": 0x229E_D520,
+    "GHWCFG3": 0x0200_D1E8,
+    "GHWCFG4": 0x17F0_8030,
+    "GDFIFOCFG": 0,
+    "HPTXFSIZ": 0x0200_0400,
+    "DIEPTXF1": 0x0200_0400,
+    "DIEPTXF2": 0x0200_0600,
+    "DIEPTXF3": 0x0200_0800,
+    "DCTL": 0x0000_0002,
+    **{f"DTXFSTS{n}": 0x0000_0200 for n in range(4)},
+    "PCGCCTL": 0x200B_8000,
+}
+"""Every OTG register reset 03a3a corrects or adds, with its RM0351 47.15 value or the TinyUSB
+ST L476 FS core identity."""
+
+
+def _registers(description: PartDescription, peripheral: str) -> dict[str, RegisterDesc]:
+    return {r.name: r for r in _peripheral(description, peripheral).registers}
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", OTG_PARTS)
+def test_the_otg_is_one_block_on_a_1_kb_page_with_its_irq_and_identity(name: str) -> None:
+    description = _description(name)
+    names = {p.name for p in description.peripherals}
+    assert not set(OTG_SPLIT) & names
+    otg = _peripheral(description, "OTG_FS")
+    assert (otg.base, otg.size, otg.base % 1024) == (0x5000_0000, 0x20000, 0)
+    assert otg.irqs == [67]
+    assert (otg.ip, otg.ip_version) == ("USB_OTG_FS", "otgfs1_v2_0_Cube")
+    offsets = {r.name: r.offset for r in otg.registers}
+    assert {k: offsets.get(k) for k in OTG_OFFSETS} == OTG_OFFSETS
+    assert [r.name for r in otg.registers if r.offset == 0x028] == ["HNPTXFSIZ"]
+
+
+@pytest.mark.timeout(60)
+def test_the_otg_patch_leaves_the_l471_unmerged() -> None:
+    names = {p.name for p in _description("STM32L471ZGTx").peripherals}
+    assert "OTG_FS" not in names
+    assert set(OTG_SPLIT) <= names
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", OTG_PARTS)
+def test_the_otg_fields_follow_rm0351_in_the_spelling_the_model_reads(name: str) -> None:
+    registers = _registers(_description(name), "OTG_FS")
+    got = {
+        register: {f.name: (f.lsb, f.width) for f in registers[register].fields if f.name in want}
+        for register, want in OTG_FIELDS.items()
+    }
+    assert got == OTG_FIELDS
+    present = {
+        register: {f.name for f in registers[register].fields} & absent
+        for register, absent in OTG_ABSENT.items()
+    }
+    assert present == {register: set() for register in OTG_ABSENT}
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", OTG_PARTS)
+def test_the_otg_field_access_follows_rm0351(name: str) -> None:
+    registers = _registers(_description(name), "OTG_FS")
+    got = {
+        (register, field): next(f for f in registers[register].fields if f.name == field).acc.value
+        for register, field in OTG_ACCESS
+    }
+    assert got == OTG_ACCESS
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", OTG_PARTS)
+def test_every_corrected_otg_reset_holds_its_rm0351_value(name: str) -> None:
+    registers = _registers(_description(name), "OTG_FS")
+    assert {register: registers[register].reset for register in OTG_RESETS} == OTG_RESETS
+
+
+@pytest.mark.timeout(120)
+def test_an_stm32l476rctx_machine_attaches_and_serves_the_merged_otg() -> None:
+    description = _description("STM32L476RCTx")
+    machine = popcorn.Machine(popcorn.parse_description(dump_json(description), "STM32L476RCTx"))
+    machine.reset()
+    otg = machine.periph.OTG_FS
+    assert (otg.GSNPSID.value, otg.DCFG.value, otg.PCGCCTL.value) == (
+        0x4F54_310A,
+        0x0220_0000,
+        0x200B_8000,
+    )

@@ -467,6 +467,19 @@ def test_register_renames_rename_the_register_of_every_matching_peripheral(tmp_p
     assert report.registers_renamed == 1 * 2
 
 
+def test_register_renames_carry_the_alternate_views_of_a_renamed_register(tmp_path: Path) -> None:
+    target = _target()
+    peripheral = target_peripheral(target, "A")
+    base = next(r for r in peripheral.registers if r.name == "SR2")
+    other = next(r for r in peripheral.registers if r.name != "SR2")
+    peripheral.registers.append(replace(base, name="SR2_HOST", alternate_of="SR2"))
+    peripheral.registers.append(replace(other, name="OTHER_HOST", alternate_of=other.name))
+    _apply(target, _rename_patch(tmp_path, 'peripherals = ["A"]\nrenames = { SR2 = "SRX" }'))
+    renamed = target_peripheral(target, "A").registers
+    alternates = {r.name: r.alternate_of for r in renamed if r.alternate_of}
+    assert alternates == {"SR2_HOST": "SRX", "OTHER_HOST": other.name}
+
+
 def test_register_renames_glob_matches_several_peripherals(tmp_path: Path) -> None:
     target = _target()
     _apply(target, _rename_patch(tmp_path, 'peripherals = ["*D"]\nrenames = { CR = "CTL" }'))
