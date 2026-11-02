@@ -257,7 +257,10 @@ struct interrupt_source
  *        Table 80 gives TIM2, TIM3 and TIM4 each its own ITR0 to ITR3 among TIM2 to TIM4, TIM9 and
  *        the OC1 outputs of TIM10 and TIM11. On Cat.3 and up TIM2_OR.ITR1_RMP and TIM3_OR.ITR2_RMP
  *        select TIM5 TRGO for TIM2 ITR1 and TIM3 ITR2, from the OR write on. TIM5 has no Table 80
- *        row, so its every TS reaches nothing, inferred. A modelled slave mode on an input with no
+ *        row, so its every TS reaches nothing, inferred. The STM32L4 of RM0351 Table 207 gives TIM2
+ *        to TIM5 each its own ITR0 to ITR3 among TIM1 to TIM5, TIM8 and TIM15, and
+ *        TIM2_OR1.ITR1_RMP selects TIM8 TRGO or OTG_FS_SOF, which has no model, for TIM2 ITR1.
+ *        A modelled slave mode on an input with no
  *        model holds the timer and logs once, and under strict_peripherals the SMCR or OR write
  *        that selects it raises model_error. RM0038 Table 83 gives TIM9 ITR0 TIM2, ITR1 TIM3, or
  *        the touch sensing I/O with TIM9_OR.ITR1_RMP set on Cat.3 and up, ITR2 and ITR3 the OC1
@@ -329,7 +332,8 @@ struct interrupt_source
  *        RM0481 asks for at least two destination timer clocks. An ARR written below the
  *        count lets the counter run to its maximum and wrap with no update, a count written above
  *        ARR in center-aligned mode does the same, UIFREMAP puts UIFCPY in bit 31 only where the
- *        description names a UIFCPY field, not on the 32-bit TIM2 to TIM5, and a trigger cycle
+ *        description names a UIFCPY field. On the STM32U5 and STM32H5 32-bit TIM2 to TIM5 bit 31
+ *        keeps the count, where RM0456 and RM0481 give UIFCPY there on a read. A trigger cycle
  *        between timers drops the edge that would re-enter a timer still reacting to its own event,
  *        logged once per timer, where hardware would oscillate with a few clocks of
  *        resynchronisation delay per hop. Input capture, RM0456 55.4 "Input capture mode": a
@@ -572,6 +576,7 @@ private:
   reg_ref                                      events_;
   reg_ref                                      counter_;
   std::optional<field_ref>                     copy_;
+  bool                                         copy_overwrites_{};
   field_ref                                    prescaler_;
   mutable core::divisor                        hz_divisor_;
   mutable core::divisor                        unit_divisor_;
@@ -864,8 +869,8 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
   }
   if(select_)
   {
-    expect_field(name("SMCR"), "TS_1", variant.slave_high);
-    if(variant.slave_high)
+    expect_field(name("SMCR"), "TS_1", variant.select_high);
+    if(variant.select_high)
     {
       select_high_ = field(name("SMCR"), "TS_1");
     }
@@ -894,7 +899,12 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
   {
     missing(std::format("{}.CNT", name("CNT")));
   }
-  mask_                = top >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << top) - 1u;
+  mask_ = top >= 32 ? ~std::uint32_t{} : (std::uint32_t{1} << top) - 1u;
+  if(variant.uif_overwrites_count and remap_ and not copy_ and top >= 32)
+  {
+    copy_            = field_ref{.offset = counter_.offset, .lsb = 31, .width = 1};
+    copy_overwrites_ = true;
+  }
   auto const& instance = instance_;
   if(update_dma_)
   {
@@ -2101,9 +2111,13 @@ void tim::transfer_completed(dma_controller const& by, std::uint32_t request)
 [[gnu::hot]] void tim::settle()
 {
   auto counter = (regs_.peek(counter_.offset) & ~mask_) | state_.count;
-  if(copy_)
+  if(copy_ and get(regs_, *remap_) != 0)
   {
-    counter = copy_->with(counter, get(regs_, *remap_) != 0 ? get(regs_, update_flag_) : 0);
+    counter = copy_->with(counter, get(regs_, update_flag_));
+  }
+  else if(copy_ and not copy_overwrites_)
+  {
+    counter = copy_->with(counter, 0);
   }
   regs_.poke(counter_.offset, counter);
   if(center() and direction_)
@@ -2969,6 +2983,10 @@ auto tim::on_write(
                                 ? pin_trigger_level(trigger_select_of(regs.peek(slave_->offset)))
                                 : std::nullopt;
   auto       result         = std::expected<void, bus_error>{};
+  if(copy_overwrites_ and (offset & ~3u) == counter_.offset)
+  {
+    regs.poke(counter_.offset, state_.count);
+  }
   {
     reacting_scope const reacting{reacting_};
     result = dispatch_model::on_write(regs, offset, size, old, value, access);

@@ -1469,7 +1469,7 @@ Differs from RM0456:
 - An ARR written below the count lets the counter run to its maximum and wrap with no update.
   A count written above ARR in center-aligned mode does the same.
 - UIFREMAP puts UIFCPY in bit 31 only where the description names a UIFCPY field, not on the
-  32-bit TIM2 to TIM5.
+  STM32U5 and STM32H5 32-bit TIM2 to TIM5, where RM0456 and RM0481 overwrite bit 31 on a read.
 
 Capture/compare event outputs, the ADC triggers:
 
@@ -1514,6 +1514,25 @@ STM32L1 TIM2 to TIM7 and TIM9 to TIM11:
 - TIM2_ETR is the TIM2_CH1 pad at AF1, PA0, PA5 or PA15, which also carries TI1. TIM3_ETR is PD2.
   TIM4_ETR and TIM5_ETR are on PE0 and PE9, pads the shipped 64-pin packages lack, so their
   tim_etr_in stays low.
+
+STM32L4 TIM2 to TIM5, RM0351 section 31:
+
+- TIM1, TIM8, TIM15 and OTG_FS_SOF, the RM0351 Table 207 sources other than TIM2 to TIM5, have
+  no model here. A TS value that selects one reaches nothing and logs once. Under `strict` the
+  SMCR or TIM2_OR1 write that selects it raises `ModelError` before the store.
+- TIM2_OR1.ITR1_RMP is a field on every line. RM0351 31.4.22 marks the bit reserved on the
+  STM32L471, which has no OTG_FS. Its value 1 reaches nothing there as on the other lines.
+- The TIM2_OR1 and TIM3_OR1 input remaps, the TIM2 and TIM3 `OR2.ETRSEL` and the TIMx_ETR pins
+  are storage: tim_ti1 to tim_ti4 come from the pins whatever TI1_RMP and TI4_RMP. External
+  clock mode 2 counts nothing, and the SMCR write that sets ECE logs once and raises `ModelError`
+  under `strict` before the store.
+- TIM3 and TIM4 `ARR` bits 31:16 read 1, their reset value in the RM0351 31.4.26 register map,
+  and keep it after a write, inferred. RM0351 states no write rule for the reserved half.
+- UIFREMAP puts UIFCPY in bit 31 of TIM3 and TIM4. On the 32-bit TIM2 and TIM5, while UIFREMAP
+  is 1, a read gives UIF in bit 31 in place of the count's bit 31, RM0351 31.3.16. A write
+  reaches the count's bit 31 only through the byte that holds it, so a byte or halfword write of
+  the low half keeps it.
+- SMCR.OCCS is storage: the OCREF clear input is not modelled.
 
 ## USART, UART and LPUART
 

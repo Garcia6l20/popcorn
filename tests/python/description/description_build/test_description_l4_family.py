@@ -915,3 +915,60 @@ def test_the_flash_option_registers_reset_to_the_st_production_values(name: str)
     optr = {f.name: (f.lsb, f.width) for f in registers["OPTR"].fields}
     assert optr["IWDG_SW"] == (16, 1)
     assert not {"IDWG_SW", "nSWBOOT0", "nBOOT0"} & set(optr)
+
+
+TIM_PARTS = RCC_PARTS
+TIM_OPTIONS = {
+    "TIM2": {
+        "OR1": (0x50, [("ETR_RMP", 1, 1), ("ITR1_RMP", 0, 1), ("TI4_RMP", 2, 2)]),
+        "OR2": (0x60, [("ETRSEL", 14, 3)]),
+    },
+    "TIM3": {"OR1": (0x50, [("TI1_RMP", 0, 2)]), "OR2": (0x60, [("ETRSEL", 14, 3)])},
+    "TIM4": {},
+    "TIM5": {},
+}
+"""RM0351 31.4.22 to 31.4.25 and the 31.4.26 register map: the option registers of TIM2 to TIM5."""
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", TIM_PARTS)
+def test_tim2_to_tim5_take_the_rm0351_option_registers(name: str) -> None:
+    description = _description(name)
+    for unit, options in TIM_OPTIONS.items():
+        registers = _registers(description, unit)
+        held = {n: (r.offset, _layout(r)) for n, r in registers.items() if n.startswith("OR")}
+        assert held == {
+            n: (offset, sorted((f, lsb, width, "read_write") for f, lsb, width in fields))
+            for n, (offset, fields) in options.items()
+        }
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", TIM_PARTS)
+def test_tim2_and_tim5_count_on_32_bits_and_tim3_and_tim4_on_16(name: str) -> None:
+    description = _description(name)
+    for unit in ("TIM2", "TIM3", "TIM4", "TIM5"):
+        wide = unit in ("TIM2", "TIM5")
+        registers = _registers(description, unit)
+        for register in ("CNT", "ARR", "CCR1", "CCR2", "CCR3", "CCR4"):
+            layout = [(f, lsb, width) for f, lsb, width, _ in _layout(registers[register])]
+            low = [(register, 0, 32 if wide else 16)]
+            high = {"CNT": [("UIFCPY", 31, 1)], "ARR": [("ARR_H", 16, 16)]}.get(register, [])
+            assert layout == sorted(low if wide else [*low, *high])
+        assert registers["ARR"].reset == 0xFFFF_FFFF
+        if not wide:
+            access = {f.name: f.acc for f in registers["ARR"].fields}
+            assert access["ARR_H"] == Access.READ_ONLY
+            assert {f.name: f.acc for f in registers["CNT"].fields}["UIFCPY"] == Access.READ_ONLY
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", TIM_PARTS)
+def test_tim2_to_tim5_carry_uifremap_sms_3_and_occs_and_no_comde(name: str) -> None:
+    description = _description(name)
+    for unit in ("TIM2", "TIM3", "TIM4", "TIM5"):
+        registers = _registers(description, unit)
+        fields = {r: {f.name: (f.lsb, f.width) for f in registers[r].fields} for r in registers}
+        assert fields["CR1"]["UIFREMAP"] == (11, 1)
+        assert (fields["SMCR"]["SMS_1"], fields["SMCR"]["OCCS"]) == ((16, 1), (3, 1))
+        assert "TS_1" not in fields["SMCR"] and "COMDE" not in fields["DIER"]

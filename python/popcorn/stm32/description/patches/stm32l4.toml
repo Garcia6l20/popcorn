@@ -406,6 +406,225 @@ fields = ["REP"]
 width = 16
 source = "RM0351 Rev 11, 30.4.15 TIMx_RCR (x = 1, 8): REP[15:0], 16 bits. The four SVDs give 8 bits"
 
+[[register_drops]]
+peripheral = "TIM2"
+names = ["OR"]
+source = "RM0351 Rev 11, 31.4.22 and 31.4.24: TIM2 has TIM2_OR1 at 0x50 and TIM2_OR2 at 0x60. The four SVDs give one OR at 0x50 with ETR_RMP[2:0] at bit 0 and TI4_RMP[1:0] at bit 3, a layout RM0351 has for no timer"
+
+[[register_drops]]
+peripheral = "TIM3"
+names = ["OR"]
+source = "RM0351 Rev 11, 31.4.23 and 31.4.25: TIM3 has TIM3_OR1 at 0x50 and TIM3_OR2 at 0x60. The four SVDs give TIM3 the TIM2 OR"
+
+[[register_drops]]
+peripheral = "TIM4"
+names = ["OR"]
+source = "RM0351 Rev 11, 31.4 and the register map of 31.4.26: TIM4 has no option register. The four SVDs give it the TIM2 OR at 0x50"
+
+[[register_drops]]
+peripheral = "TIM5"
+names = ["OR"]
+source = "RM0351 Rev 11, 31.4 and the register map of 31.4.26: TIM5 has no option register. The four SVDs give it the TIM2 OR at 0x50"
+
+[[registers]]
+peripheral = "TIM2"
+name = "OR1"
+offset = 0x50
+width = 32
+reset = 0
+acc = "read_write"
+fields = [{ name = "ITR1_RMP", lsb = 0, width = 1 }, { name = "ETR_RMP", lsb = 1, width = 1 }, { name = "TI4_RMP", lsb = 2, width = 2 }]
+source = "RM0351 Rev 11, 31.4.22 TIM2_OR1: offset 0x50, reset 0, ITR1_RMP in bit 0 selects TIM8 TRGO (0) or OTG_FS_SOF (1) for ITR1, ETR_RMP in bit 1 the TIM2_ETR pin (0) or the LSE (1), TI4_RMP[1:0] in bits 3:2 the TIM2_CH4 pin (00) or COMP1, COMP2 or their OR"
+
+[[registers]]
+peripheral = "TIM2"
+name = "OR2"
+offset = 0x60
+width = 32
+reset = 0
+acc = "read_write"
+fields = [{ name = "ETRSEL", lsb = 14, width = 3 }]
+source = "RM0351 Rev 11, 31.4.24 TIM2_OR2: offset 0x60, reset 0, ETRSEL[2:0] in bits 16:14, 000 the ETR_RMP selection, 001 COMP1, 010 COMP2, others reserved"
+
+[[registers]]
+peripheral = "TIM3"
+name = "OR1"
+offset = 0x50
+width = 32
+reset = 0
+acc = "read_write"
+fields = [{ name = "TI1_RMP", lsb = 0, width = 2 }]
+source = "RM0351 Rev 11, 31.4.23 TIM3_OR1: offset 0x50, reset 0, TI1_RMP[1:0] in bits 1:0 selects the TIM3_CH1 pin (00) or COMP1, COMP2 or their OR"
+
+[[registers]]
+peripheral = "TIM3"
+name = "OR2"
+offset = 0x60
+width = 32
+reset = 0
+acc = "read_write"
+fields = [{ name = "ETRSEL", lsb = 14, width = 3 }]
+source = "RM0351 Rev 11, 31.4.25 TIM3_OR2: offset 0x60, reset 0, ETRSEL[2:0] in bits 16:14, 000 the TIM3_ETR pin, 001 COMP1, others reserved"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM5"]
+registers = ["CR1"]
+add = { name = "UIFREMAP", lsb = 11, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.1 TIMx_CR1 (x = 2 to 5): bit 11 UIFREMAP, rw. The four SVDs leave it out"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM5"]
+registers = ["SMCR"]
+add = { name = "SMS_1", lsb = 16, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.3 TIMx_SMCR (x = 2 to 5): bit 16 SMS[3], rw, in the SMS_1 spelling of the model. The four SVDs leave it out"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM5"]
+registers = ["SMCR"]
+add = { name = "OCCS", lsb = 3, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.3 TIMx_SMCR (x = 2 to 5): bit 3 OCCS, rw. The four SVDs leave it out"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM5"]
+registers = ["DIER"]
+fields = ["COMDE"]
+drop = true
+source = "RM0351 Rev 11, 31.4.4 TIMx_DIER (x = 2 to 5): bit 13 is reserved. The four SVDs give it a field COMDE"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM5"]
+registers = ["CNT"]
+fields = ["CNT_H", "CNT_L"]
+drop = true
+source = "RM0351 Rev 11, 31.4.12 TIMx_CNT (x = 2 to 5): one field CNT, bits 31:16 on TIM2 and TIM5 only. The four SVDs split it into CNT_H and CNT_L on every timer"
+
+[[fields]]
+instances = ["TIM2", "TIM5"]
+registers = ["CNT"]
+add = { name = "CNT", lsb = 0, width = 32, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.12 TIMx_CNT (x = 2 to 5): CNT[31:0] on TIM2 and TIM5, rw"
+
+[[fields]]
+instances = ["TIM3", "TIM4"]
+registers = ["CNT"]
+add = { name = "CNT", lsb = 0, width = 16, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.12 TIMx_CNT (x = 2 to 5): CNT[15:0] on TIM3 and TIM4, the high half names TIM2 and TIM5 only"
+
+[[fields]]
+instances = ["TIM2", "TIM5"]
+registers = ["ARR"]
+fields = ["ARR_H", "ARR_L"]
+drop = true
+source = "RM0351 Rev 11, 31.4.15 TIMx_ARR (x = 2 to 5): one field ARR, bits 31:16 on TIM2 and TIM5 only. The four SVDs split it into ARR_H and ARR_L"
+
+[[fields]]
+instances = ["TIM3", "TIM4"]
+registers = ["ARR"]
+fields = ["ARR_L"]
+drop = true
+source = "RM0351 Rev 11, 31.4.15 TIMx_ARR (x = 2 to 5): ARR[15:0] is one field. The four SVDs name it ARR_L"
+
+[[fields]]
+instances = ["TIM3", "TIM4"]
+registers = ["ARR"]
+fields = ["ARR_H"]
+acc = "read_only"
+source = "RM0351 Rev 11, 31.4.26 register map: TIMx_ARR bits 31:16 reserved on TIM3 and TIM4 with reset value ones, 31.4.15 reset 0xFFFF FFFF. Read-only here, so they keep the ones after a write, inferred: RM0351 states no write rule for them. The revision history entry of Rev 3 reads \"Updated reset value to 0xFFFF in Section 31.4.15\", the other reading: bits 31:16 unimplemented, reading 0, reset 0x0000 FFFF"
+
+[[fields]]
+instances = ["TIM2", "TIM5"]
+registers = ["ARR"]
+add = { name = "ARR", lsb = 0, width = 32, acc = "read_write", reset = 0xFFFFFFFF }
+source = "RM0351 Rev 11, 31.4.15 TIMx_ARR (x = 2 to 5): ARR[31:0] on TIM2 and TIM5, rw"
+
+[[fields]]
+instances = ["TIM3", "TIM4"]
+registers = ["ARR"]
+add = { name = "ARR", lsb = 0, width = 16, acc = "read_write", reset = 0xFFFF }
+source = "RM0351 Rev 11, 31.4.15 TIMx_ARR (x = 2 to 5): ARR[15:0] on TIM3 and TIM4, the high half names TIM2 and TIM5 only"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM5"]
+registers = ["CCR1"]
+fields = ["CCR1_H", "CCR1_L"]
+drop = true
+source = "RM0351 Rev 11, 31.4.16 TIMx_CCR1 (x = 2 to 5): one field CCR1, bits 31:16 on TIM2 and TIM5 only. The four SVDs split it into CCR1_H and CCR1_L on every timer"
+
+[[fields]]
+instances = ["TIM2", "TIM5"]
+registers = ["CCR1"]
+add = { name = "CCR1", lsb = 0, width = 32, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.16 TIMx_CCR1 (x = 2 to 5): CCR1[31:0] on TIM2 and TIM5, rw"
+
+[[fields]]
+instances = ["TIM3", "TIM4"]
+registers = ["CCR1"]
+add = { name = "CCR1", lsb = 0, width = 16, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.16 TIMx_CCR1 (x = 2 to 5): CCR1[15:0] on TIM3 and TIM4, the high half names TIM2 and TIM5 only"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM5"]
+registers = ["CCR2"]
+fields = ["CCR2_H", "CCR2_L"]
+drop = true
+source = "RM0351 Rev 11, 31.4.17 TIMx_CCR2 (x = 2 to 5): one field CCR2, bits 31:16 on TIM2 and TIM5 only. The four SVDs split it into CCR2_H and CCR2_L on every timer"
+
+[[fields]]
+instances = ["TIM2", "TIM5"]
+registers = ["CCR2"]
+add = { name = "CCR2", lsb = 0, width = 32, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.17 TIMx_CCR2 (x = 2 to 5): CCR2[31:0] on TIM2 and TIM5, rw"
+
+[[fields]]
+instances = ["TIM3", "TIM4"]
+registers = ["CCR2"]
+add = { name = "CCR2", lsb = 0, width = 16, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.17 TIMx_CCR2 (x = 2 to 5): CCR2[15:0] on TIM3 and TIM4, the high half names TIM2 and TIM5 only"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM5"]
+registers = ["CCR3"]
+fields = ["CCR3_H", "CCR3_L"]
+drop = true
+source = "RM0351 Rev 11, 31.4.18 TIMx_CCR3 (x = 2 to 5): one field CCR3, bits 31:16 on TIM2 and TIM5 only. The four SVDs split it into CCR3_H and CCR3_L on every timer"
+
+[[fields]]
+instances = ["TIM2", "TIM5"]
+registers = ["CCR3"]
+add = { name = "CCR3", lsb = 0, width = 32, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.18 TIMx_CCR3 (x = 2 to 5): CCR3[31:0] on TIM2 and TIM5, rw"
+
+[[fields]]
+instances = ["TIM3", "TIM4"]
+registers = ["CCR3"]
+add = { name = "CCR3", lsb = 0, width = 16, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.18 TIMx_CCR3 (x = 2 to 5): CCR3[15:0] on TIM3 and TIM4, the high half names TIM2 and TIM5 only"
+
+[[fields]]
+instances = ["TIM2", "TIM3", "TIM4", "TIM5"]
+registers = ["CCR4"]
+fields = ["CCR4_H", "CCR4_L"]
+drop = true
+source = "RM0351 Rev 11, 31.4.19 TIMx_CCR4 (x = 2 to 5): one field CCR4, bits 31:16 on TIM2 and TIM5 only. The four SVDs split it into CCR4_H and CCR4_L on every timer"
+
+[[fields]]
+instances = ["TIM2", "TIM5"]
+registers = ["CCR4"]
+add = { name = "CCR4", lsb = 0, width = 32, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.19 TIMx_CCR4 (x = 2 to 5): CCR4[31:0] on TIM2 and TIM5, rw"
+
+[[fields]]
+instances = ["TIM3", "TIM4"]
+registers = ["CCR4"]
+add = { name = "CCR4", lsb = 0, width = 16, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 31.4.19 TIMx_CCR4 (x = 2 to 5): CCR4[15:0] on TIM3 and TIM4, the high half names TIM2 and TIM5 only"
+
+[[fields]]
+instances = ["TIM3", "TIM4"]
+registers = ["CNT"]
+add = { name = "UIFCPY", lsb = 31, width = 1, acc = "read_only", reset = 0 }
+source = "RM0351 Rev 11, 31.4.13 TIMx_CNT [alternate] (x = 2 to 5): bit 31 UIFCPY, a read-only copy of UIF while CR1.UIFREMAP is 1. On TIM3 and TIM4 the bit holds no count"
+
 [[fields]]
 instances = ["RCC"]
 registers = ["CR"]
