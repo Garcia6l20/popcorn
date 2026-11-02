@@ -307,6 +307,20 @@ python/popcorn/stm32/data/STM32L1xx.blocks.json.xz and STM32L152xx.*.json.xz:
     7d1f1514ed5583ec5007ad91236b4e1d377295b1
     License: BSD-3-Clause, see LICENSES/STM32_open_pin_data-LICENSE.
 
+python/popcorn/stm32/data/STM32L4xx.blocks.json.xz and STM32L476xx.*.json.xz:
+  STM32L476.svd, version 1.8, Copyright (c) 2024 STMicroelectronics, from
+  STM32CubeCLT 1.20.0
+    License: Apache-2.0, see LICENSES/Apache-2.0.txt.
+  stm32l476xx.h, cmsis-device-l4 v1.7.5, Copyright (c) 2017
+  STMicroelectronics
+    https://github.com/STMicroelectronics/cmsis-device-l4
+    License: Apache-2.0, see LICENSES/Apache-2.0.txt.
+  mcu/STM32L476R(C-E-G)Tx.xml and mcu/IP/GPIO-STM32L47x_gpio_v1_0_Modes.xml,
+  Copyright (c) 2021, 2023 STMicroelectronics
+    https://github.com/STMicroelectronics/STM32_open_pin_data, commit
+    7d1f1514ed5583ec5007ad91236b4e1d377295b1
+    License: BSD-3-Clause, see LICENSES/STM32_open_pin_data-LICENSE.
+
 Firmware-only packages. Fetched only when arm-none-eabi-gcc is found, compiled
 into the STM32 test and example firmware only, never linked into popcorn, its
 extension or its native test programs.

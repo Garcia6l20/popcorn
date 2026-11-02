@@ -35,6 +35,7 @@ def test_the_repository_manifest_marks_the_firmware_packages_firmware_only() -> 
         "cmsis-device-h5",
         "stm32l1-hal-driver",
         "cmsis-device-l1",
+        "cmsis-device-l4",
         "cmsis-core",
         "freertos-kernel",
         "tinyusb",

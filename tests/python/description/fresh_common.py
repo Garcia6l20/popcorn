@@ -1,7 +1,7 @@
-"""The freshness check shared by `fresh_u5`, `fresh_h5` and `fresh_l1`: each shipped part against a
-fresh ship build, when STM32_open_pin_data is installed. A builder, patch or facts change that
-changes a shipped part's content fails there until `python -m popcorn.stm32.description ship`
-reruns."""
+"""The freshness check shared by `fresh_u5`, `fresh_h5`, `fresh_l1` and `fresh_l4`: each shipped
+part against a fresh ship build, when STM32_open_pin_data is installed. A builder, patch or facts
+change that changes a shipped part's content fails there until
+`python -m popcorn.stm32.description ship` reruns."""
 
 import json
 from typing import cast
@@ -18,6 +18,7 @@ from .conftest import require_pin_data
 U5_PREFIX = "STM32U5"
 H5_PREFIX = "STM32H5"
 L1_PREFIX = "STM32L1"
+L4_PREFIX = "STM32L4"
 
 EXTERNAL_SOURCES = ("svd", "mcu_db", "cmsis_header", "gpio_modes")
 """Source digests of files popcorn does not own. A difference there means another ST install,

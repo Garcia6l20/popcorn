@@ -547,7 +547,7 @@ def test_every_alias_of_a_shipped_description_equals_its_base_register_by_regist
     peripherals = cast(list[dict[str, object]], data["peripherals"])
     by_name = {cast(str, p["name"]): p for p in peripherals}
     aliases = [p for p in peripherals if p.get("alias_of")]
-    assert bool(aliases) == (not name.startswith("STM32L1"))
+    assert bool(aliases) == (not name.startswith(("STM32L1", "STM32L4")))
     for alias in aliases:
         base = by_name[cast(str, alias["alias_of"])]
         assert alias["registers"] == base["registers"], alias["name"]

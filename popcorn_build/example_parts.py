@@ -3,10 +3,11 @@
 The gate runs every example on its `conftest.py` part, then once more on each extra part of
 `EXAMPLE_PARTS` through `--popcorn-part`. Together the runs put every class of the shipped U5 and
 H5 parts, and of the STM32L1 parts of `L1_GROUP_A`, under at least one example. The other shipped
-STM32L1 names, every order code of the line, carry attach and reach evidence only. An extra run
-moves every machine of the example onto its part, so each of the example's ELFs fits each extra
-part. `python -m popcorn_build.example_parts --list` prints one `examples/<chip>/<name> <part>`
-line per extra run.
+STM32L1 names, every order code of the line, carry attach and reach evidence only, the shipped
+STM32L4 parts attach evidence only. An extra run moves every machine of the example onto its
+part, so each of the example's ELFs fits each extra part.
+`python -m popcorn_build.example_parts --list` prints one `examples/<chip>/<name> <part>` line per
+extra run.
 """
 
 from __future__ import annotations
@@ -48,7 +49,8 @@ class PartClass(NamedTuple):
     """What a firmware example can tell parts of one die apart by.
 
     Attributes:
-        die: `U575/U585`, `H56x/H573`, or the DEV_ID of an STM32L1 part such as `DIE437`.
+        die: `U575/U585`, `H56x/H573`, or the DEV_ID of an STM32L1 or STM32L4 part such as
+            `DIE437`.
         flash_kib: The flash size, such as 1024 or 2048.
         package: The package name, such as `LQFP64`.
         smps: Whether the part has the SMPS supply, a trailing `Q` in its ordering code.
@@ -68,7 +70,7 @@ _DIES: Final = {
     "H573": "H56x/H573",
 }
 _FLASH_KIB: Final = {"G": 1024, "I": 2048}
-_DESCRIBED_FAMILY: Final = "L1"
+_DESCRIBED_FAMILIES: Final = ("L1", "L4")
 _DESCRIBED_SUFFIXES: Final = ("x", "xA", "xX")
 FLASH_REGIONS: Final = ("Flash", "Flash_Bank2")
 DEV_ID_MASK: Final = 0xFFF
@@ -111,18 +113,18 @@ def part_class(part: str) -> PartClass:
 
     The pin-count letter and the package letter are read together: `R` with `T` is LQFP64 and
     `R` with `V` is VFQFPN68, `M` with `Y` is WLCSP80 and `O` with `Y` is WLCSP90. On the U5 and
-    H5 the die and flash size come from the name letters. On the STM32L1 the die is the DEV_ID of
-    the shipped description's DBGMCU_IDCODE reset value and the flash size its `Flash` and
-    `Flash_Bank2` regions, since one die carries several flash letters and categories. The
-    decoding only groups parts, no model reads it.
+    H5 the die and flash size come from the name letters. On the STM32L1 and the STM32L4 the die
+    is the DEV_ID of the shipped description's DBGMCU_IDCODE reset value and the flash size its
+    `Flash` and `Flash_Bank2` regions, since one STM32L1 die carries several flash letters and
+    categories. The decoding only groups parts, no model reads it.
 
     Raises:
-        ValueError: `part` is not an ordering code of the shipped lines. An STM32L1 name raises
-            what `popcorn.stm32.mcu` raises for it.
+        ValueError: `part` is not an ordering code of the shipped lines. An STM32L1 or STM32L4
+            name raises what `popcorn.stm32.mcu` raises for it.
     """
     line, pins, flash, package = part[5:9], part[9:10], part[10:11], part[11:12]
     name = _PACKAGES.get((pins, package))
-    described = line.startswith(_DESCRIBED_FAMILY) and part[12:] in _DESCRIBED_SUFFIXES
+    described = line.startswith(_DESCRIBED_FAMILIES) and part[12:] in _DESCRIBED_SUFFIXES
     if described and part.startswith("STM32") and name is not None:
         return _described_class(part, name)
     die = _DIES.get(line)

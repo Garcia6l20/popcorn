@@ -90,24 +90,26 @@ runs inside `bypassed()`.
 
 | Directory | What it holds |
 |---|---|
-| `fresh_u5` | each shipped U5 part against a fresh build from pin data, and the case that the U5, H5 and L1 lists together hold every shipped part |
+| `fresh_u5` | each shipped U5 part against a fresh build from pin data, and the case that the U5, H5, L1 and L4 lists together hold every shipped part |
 | `fresh_h5` | each shipped H5 part against a fresh build from pin data, `ship --check` and `build_each` |
 | `fresh_l1` | each shipped L1 part against a fresh build from pin data |
+| `fresh_l4` | each shipped L4 part against a fresh build from pin data |
 | `golden` | each committed golden against a build from ST's files |
 | `shipped` | the shipped layers, their lookup, the cache, `bonded` and the aliases |
 | `description_build` | description builds, die identity, facts and the H5 family |
 | `patches` | patches, the binder, the SVD reader, the svd-parser oracle, IRQ names and the schema |
 
 Set `POPCORN_STM32_PIN_DATA` to a STM32_open_pin_data checkout, or the freshness and
-`ship --check` cases of `fresh_u5`, `fresh_h5` and `fresh_l1` skip. The `golden` cases need CubeMX
-and ST's SVDs.
+`ship --check` cases of `fresh_u5`, `fresh_h5`, `fresh_l1` and `fresh_l4` skip. The `golden` cases
+need CubeMX and ST's SVDs.
 
 The CMSIS device headers come from the checkout. `tests/python/description/conftest.py` puts the
 `build/deps/src/cmsis-device-*/Include` directories the configure fetched first in
 `POPCORN_CMSIS_DEVICE_DIRS` and keeps the entries already set. The configure fetches them only when
 it finds `arm-none-eabi-gcc`. With `arm-none-eabi-gcc` on PATH and a pack missing, the run stops
-with a usage error that asks for the configure. Without the cross compiler the L1 header, golden and
-freshness cases skip, and the H5 cases skip unless the variable names another `stm32h573xx.h`.
+with a usage error that asks for the configure. Without the cross compiler the L1 and L4 header,
+golden and freshness cases skip, and the H5 cases skip unless the variable names another
+`stm32h573xx.h`.
 
 Every test runs under a 15 s pytest-timeout limit, set in `pyproject.toml`. A test that needs
 longer carries `@pytest.mark.timeout(seconds)`, above every wall bound it waits on. The limit uses

@@ -45,7 +45,7 @@ def description(part: str) -> popcorn.PartDescription:
 
 def example_scope() -> list[str]:
     """The shipped parts the examples cover: every U5 and H5 part and the STM32L1 group A."""
-    return [p for p in shipped_parts() if not p.startswith("STM32L1") or p in L1_GROUP_A]
+    return [p for p in shipped_parts() if p.startswith(("STM32U5", "STM32H5")) or p in L1_GROUP_A]
 
 
 def classes() -> dict[PartClass, list[str]]:

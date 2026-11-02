@@ -58,6 +58,13 @@ version = "2.3.4"
 build = "none"
 firmware = true
 
+[packages.cmsis-device-l4]
+url = "https://github.com/STMicroelectronics/cmsis-device-l4/archive/refs/tags/v1.7.5.tar.gz"
+sha256 = "cc98c0cd067a08df6b827e92613167ac8bd847764603bb4bc77bc96103a11946"
+version = "1.7.5"
+build = "none"
+firmware = true
+
 [packages.cmsis-core]
 url = "https://github.com/ARM-software/CMSIS_5/archive/refs/tags/5.9.0.tar.gz"
 sha256 = "9ce693dd15c41f02506adda79323c077912b3211303ca0d9b28b8ebe735a7031"

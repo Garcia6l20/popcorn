@@ -136,6 +136,7 @@ def test_the_h573_page_lists_its_gtzc_as_trustzone_only() -> None:
 
 
 L1_NAMES = [name for name in popcorn.stm32.shipped_parts() if name.startswith("STM32L1")]
+L4_NAMES = [name for name in popcorn.stm32.shipped_parts() if name.startswith("STM32L4")]
 L1_CLASS = 11
 L1_ATTACHES = 116
 STATES = ("tested", "examples", "class", "attaches")
@@ -180,7 +181,7 @@ def test_every_shipped_part_has_exactly_one_state_row(generated: Path) -> None:
     assert by_state["examples"] == EXTRA_PARTS
     assert by_state["class"] | by_state["attaches"] == set(rows) - EXTRA_PARTS - TESTED_PARTS
     in_family = {
-        state: {n for n in names if not n.startswith("STM32L1")}
+        state: {n for n in names if n.startswith(("STM32U5", "STM32H5"))}
         for state, names in by_state.items()
     }
     assert len(in_family["examples"]) == 49
@@ -189,7 +190,8 @@ def test_every_shipped_part_has_exactly_one_state_row(generated: Path) -> None:
     assert by_state["tested"] & set(L1_NAMES) == {"STM32L152RETx", "STM32L152RBTx"}
     assert len(by_state["examples"] & set(L1_NAMES)) == 3
     assert len(by_state["class"] & set(L1_NAMES)) == L1_CLASS
-    assert len(by_state["attaches"]) == L1_ATTACHES
+    assert len(by_state["attaches"] & set(L1_NAMES)) == L1_ATTACHES
+    assert by_state["attaches"] & set(L4_NAMES) == set(L4_NAMES)
 
 
 @pytest.mark.timeout(60)
@@ -351,7 +353,9 @@ def test_the_parts_page_lists_every_l1_name_with_its_family_and_state(generated:
     assert len(L1_NAMES) == 132
     assert [name for name in cells if name.startswith("STM32L1")] == L1_NAMES
     assert {cells[name][1] for name in L1_NAMES} == {"STM32L1"}
-    assert {cells[name][1] for name in cells if name not in L1_NAMES} == {"STM32U5", "STM32H5"}
+    families = {cells[name][1] for name in cells if name not in L1_NAMES}
+    assert families == {"STM32U5", "STM32H5", "STM32L4"}
+    assert [cells[name][8] for name in L4_NAMES] == ["attaches"] * len(L4_NAMES)
     assert cells["STM32L152RETx"][8] == "tested"
     assert cells["STM32L152RCTxA"][8].startswith("examples: ")
 
