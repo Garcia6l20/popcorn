@@ -19,6 +19,8 @@ add_ll_firmware(
         "store_byte",
         "wait_idle",
         "read_word",
+        "nmi_eccr",
+        "nmi_count",
     ],
     chipset=STM32L476XX,
 )

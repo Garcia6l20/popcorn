@@ -452,6 +452,17 @@ constexpr address       hfsr            = 0xE000'ED2C;
 constexpr std::uint32_t impreciserr     = 1u << 10;
 constexpr std::uint32_t forced          = 1u << 30;
 constexpr std::uint32_t hardfault_n     = 3;
+constexpr std::uint32_t fstpg           = 1u << 18;
+constexpr std::uint32_t miserr          = 1u << 8;
+constexpr std::uint32_t fasterr         = 1u << 9;
+constexpr std::uint32_t pgaerr          = 1u << 5;
+constexpr std::uint32_t sizerr          = 1u << 6;
+constexpr std::uint32_t pgserr          = 1u << 7;
+constexpr std::uint32_t eccd            = 1u << 31;
+constexpr std::uint32_t eccie           = 1u << 24;
+constexpr std::uint32_t bk_ecc          = 1u << 19;
+constexpr std::uint64_t row_ps          = 1'910'000'000;
+constexpr std::uint64_t double_word_ps  = row_ps / 32;
 constexpr std::uint32_t run_pd          = 1u << 13;
 constexpr std::uint64_t mhz             = 1'000'000;
 
@@ -583,6 +594,64 @@ struct rig
   {
     write("PDKEYR", power_down_key1);
     write("PDKEYR", power_down_key2);
+  }
+
+  void erase_bank2() const
+  {
+    control(mer2 | strt);
+    wait_idle();
+    control(0);
+    REQUIRE((read("SR") & all_errors & ~1u) == 0);
+  }
+
+  void hclk_16mhz() const
+  {
+    write("CR", (read("CR", "RCC") & ~0xf0u) | 0x80u | 1u << 3, "RCC");
+    REQUIRE(f.target->virtual_clock().core_hz() == 16 * mhz);
+  }
+
+  void tear(address line) const
+  {
+    control(pg);
+    store_words(line, {0x1u, 0x2u});
+    idle_for_ps(40'000'000);
+    REQUIRE(status("BSY") == 1);
+    f.target->power_cycle();
+    unlock();
+  }
+
+  struct loaded
+  {
+    std::uint32_t value{};
+    std::uint32_t nmi_count{};
+    std::uint32_t nmi_eccr{};
+
+    friend auto operator==(loaded const&, loaded const&) -> bool = default;
+  };
+
+  [[nodiscard]] auto load(address from) const -> loaded
+  {
+    REQUIRE(f.target->mem().write(sym(firmware, "nmi_count"), 4, 0).has_value());
+    REQUIRE(f.target->mem().write(sym(firmware, "nmi_eccr"), 4, 0).has_value());
+    call("read_word", {static_cast<std::uint32_t>(from)});
+    auto const log = f.log();
+    REQUIRE(log.size() >= 2);
+    REQUIRE(log.back() == 0);
+    return {
+        .value     = log[log.size() - 2],
+        .nmi_count = word(sym(firmware, "nmi_count")),
+        .nmi_eccr  = word(sym(firmware, "nmi_eccr"))};
+  }
+
+  [[nodiscard]] static auto row(std::uint32_t seed, std::size_t count = 64)
+      -> std::vector<std::uint32_t>
+  {
+    std::vector<std::uint32_t> out;
+    for(std::size_t i = 0; i < count; ++i)
+    {
+      out.push_back(seed + static_cast<std::uint32_t>(i));
+    }
+    return out;
   }
 
   void program(address to, std::vector<std::uint32_t> const& values, std::uint32_t extra = 0) const
@@ -804,5 +873,354 @@ TEST_CASE(
   CHECK(log.back() == 1);
   r.wait_idle();
   CHECK(r.words(bank2_last, 2) == std::vector<std::uint32_t>{0x5, 0x6});
+}
+
+TEST_CASE(
+    "RM0351 3.3.7: FSTPG programs a row of 32 double words with BSY set for the DS10198 Table 63 "
+    "row time and EOP at its end")
+{
+  rig r;
+  r.hclk_16mhz();
+  r.erase_bank2();
+  auto const data    = rig::row(0x100);
+  auto const elapsed = r.elapsed_ps([&] {
+    r.control(fstpg | eopie);
+    r.store_words(bank2, data);
+    REQUIRE(r.status("BSY") == 1);
+    r.idle_for_ps(row_ps / 2);
+    auto const saved = r.f.target->snapshot();
+    r.f.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+    r.idle_for_ps(row_ps / 2 - double_word_ps);
+    CHECK(r.status("BSY") == 1);
+    CHECK(r.status("EOP") == 0);
+    CHECK(r.words(bank2, 64) != data);
+    r.wait_idle();
+  });
+  CHECK(elapsed >= row_ps);
+  CHECK(elapsed < row_ps + double_word_ps);
+  CHECK(r.words(bank2, 64) == data);
+  CHECK(r.status("EOP") == 1);
+  CHECK((r.read("SR") & all_errors & ~1u) == 0);
+  CHECK(r.pending());
+  CHECK(r.warnings("CR") == 0);
+  r.clear_errors();
+  r.store_words(bank2 + 256, rig::row(0x200));
+  r.wait_idle();
+  CHECK(r.words(bank2 + 256, 64) == rig::row(0x200));
+  CHECK((r.read("SR") & all_errors & ~1u) == 0);
+}
+
+TEST_CASE(
+    "RM0351 3.3.7: a row whose next double word is missing when one ends sets MISERR and "
+    "FASTERR, the double words before it stay programmed")
+{
+  rig r;
+  r.hclk_16mhz();
+  r.erase_bank2();
+  r.control(fstpg | eopie);
+  auto const elapsed = r.elapsed_ps([&] {
+    r.store_words(bank2, rig::row(0x10, 5));
+    r.wait_idle();
+  });
+  CHECK(elapsed >= 2 * double_word_ps);
+  CHECK(elapsed < 3 * double_word_ps);
+  CHECK((r.read("SR") & all_errors) == (miserr | fasterr));
+  CHECK(r.status("EOP") == 0);
+  CHECK(r.words(bank2, 6) == std::vector<std::uint32_t>{0x10, 0x11, 0x12, 0x13, ~0u, ~0u});
+  r.store_words(bank2 + 16, {0x20, 0x21});
+  CHECK((r.read("SR") & pgserr) != 0);
+  CHECK(r.words(bank2 + 16, 2) == std::vector<std::uint32_t>{~0u, ~0u});
+  r.clear_errors();
+  r.store_words(bank2 + 256, rig::row(0x30, 2));
+  r.idle_for_ps(2 * double_word_ps);
+  r.store_words(bank2 + 264, rig::row(0x40, 2));
+  CHECK((r.read("SR") & all_errors) == (miserr | fasterr | pgserr));
+  CHECK(r.words(bank2 + 256, 4) == std::vector<std::uint32_t>{0x30, 0x31, ~0u, ~0u});
+}
+
+TEST_CASE(
+    "RM0351 3.3.7: PGAERR and FASTERR for a double word outside the row or not above the last, "
+    "PGSERR for its second word, SIZERR and FASTERR for a half-word")
+{
+  rig r;
+  r.hclk_16mhz();
+  r.erase_bank2();
+  r.control(fstpg);
+  r.store_words(bank2, rig::row(0x50, 4));
+  r.store_words(bank2 + 256, {0x60, 0x61});
+  r.wait_idle();
+  CHECK((r.read("SR") & all_errors) == (pgaerr | fasterr | pgserr));
+  CHECK(r.words(bank2, 4) == rig::row(0x50, 4));
+  CHECK(r.words(bank2 + 256, 2) == std::vector<std::uint32_t>{~0u, ~0u});
+  r.clear_errors();
+  r.store_words(bank2 + 512 + 16, {0x70, 0x71});
+  r.store_words(bank2 + 512 + 8, {0x72, 0x73});
+  r.wait_idle();
+  CHECK((r.read("SR") & all_errors) == (pgaerr | fasterr | pgserr));
+  CHECK(r.words(bank2 + 512 + 8, 4) == std::vector<std::uint32_t>{~0u, ~0u, 0x70, 0x71});
+  r.clear_errors();
+  r.call("store_half", {static_cast<std::uint32_t>(bank2 + 1024), 0x1234});
+  CHECK((r.read("SR") & all_errors) == (sizerr | fasterr));
+  r.clear_errors();
+  r.control(pg);
+  r.call("store_half", {static_cast<std::uint32_t>(bank2 + 1024), 0x1234});
+  CHECK((r.read("SR") & all_errors) == sizerr);
+}
+
+TEST_CASE(
+    "RM0351 3.3.7, inferred: a fast row over programmed bits clears only the bits it programs, "
+    "with no PROGERR")
+{
+  rig r;
+  r.hclk_16mhz();
+  r.erase_bank2();
+  r.program(bank2 + 8, {0x0f0f'0f0fu, 0xffff'0000u});
+  r.control(fstpg);
+  std::vector<std::uint32_t> const data(64, 0xff00'ff00u);
+  r.store_words(bank2, data);
+  r.wait_idle();
+  CHECK((r.read("SR") & all_errors) == 0);
+  CHECK(
+      r.words(bank2, 4)
+      == std::vector<std::uint32_t>{0xff00'ff00u, 0xff00'ff00u, 0x0f00'0f00u, 0xff00'0000u});
+}
+
+TEST_CASE("RM0351 3.3.7: FSTPG with HCLK below 8 MHz warns once, under strict_peripherals raises")
+{
+  rig r;
+  REQUIRE(r.f.target->virtual_clock().core_hz() == 4 * mhz);
+  r.erase_bank2();
+  r.control(fstpg);
+  r.store_words(bank2, rig::row(0x80));
+  r.wait_idle();
+  CHECK(r.words(bank2, 64) == rig::row(0x80));
+  REQUIRE(r.warnings("CR") == 1);
+  CHECK(r.logged.back().message.contains("below the 8000000 Hz"));
+  r.store_words(bank2 + 256, rig::row(0x90));
+  r.wait_idle();
+  CHECK(r.warnings("CR") == 1);
+  rig strict{strict_options()};
+  strict.control(fstpg);
+  strict.f.set("r0", bank2);
+  strict.f.set("r1", sym(firmware, "pattern"));
+  strict.f.set("r2", 2);
+  strict.f.set("pc", sym(firmware, "copy_words"));
+  CHECK_THROWS_AS(
+      (void)strict.f.run_to_stop({.max_instructions = icount{1'000}}), popcorn::model_error);
+  CHECK(strict.word(bank2) == ~0u);
+  CHECK(strict.status("BSY") == 0);
+}
+
+TEST_CASE("a power cut in the third double word of a fast row leaves two programmed and one torn")
+{
+  rig r;
+  r.hclk_16mhz();
+  r.erase_bank2();
+  r.control(fstpg);
+  auto const start = r.f.target->virtual_clock().time().ps;
+  r.store_words(bank2, rig::row(0xa0));
+  r.idle_for_ps(
+      start + 2 * double_word_ps + double_word_ps / 2 - r.f.target->virtual_clock().time().ps);
+  REQUIRE(r.status("BSY") == 1);
+  r.f.target->power_cycle();
+  r.unlock();
+  CHECK(
+      r.words(bank2, 8) == std::vector<std::uint32_t>{0xa0, 0xa1, 0xa2, 0xa3, 0xa4, ~0u, ~0u, ~0u});
+  CHECK(r.load(bank2 + 16) == rig::loaded{0xa4, 1, eccd | bk_ecc | 16u});
+}
+
+TEST_CASE(
+    "RM0351 3.3.2: a CPU load of a torn double word sets ECCD, BK_ECC and ADDR_ECC "
+    "and takes the NMI")
+{
+  for(address const line : {bank2_last, bank1_last})
+  {
+    CAPTURE(line);
+    rig r;
+    r.tear(line);
+    CHECK(r.words(line, 2) == std::vector<std::uint32_t>{0x1, ~0u});
+    REQUIRE(r.read("ECCR") == 0);
+    auto const reported = eccd | (line >= bank2 ? bk_ecc : 0u) | 0x1'f800u;
+    CHECK(r.load(line + 4) == rig::loaded{~0u, 1, reported});
+    CHECK(r.read("ECCR") == (reported & ~eccd));
+    CHECK(r.load(line - 8) == rig::loaded{~0u, 0, 0});
+    CHECK(r.load(line) == rig::loaded{0x1, 1, reported});
+  }
+}
+
+TEST_CASE(
+    "RM0351 3.7.7: FLASH_ECCR stores ECCIE and keeps its read-only fields, a reset clears it, "
+    "the torn double word stays until a page erase")
+{
+  rig r;
+  r.tear(bank2_last);
+  r.write("ECCR", eccie);
+  CHECK(r.read("ECCR") == eccie);
+  auto const record = bk_ecc | eccie | 0x1'f800u;
+  CHECK(r.load(bank2_last) == rig::loaded{0x1, 1, eccd | record});
+  CHECK(r.read("ECCR") == record);
+  r.write("ECCR", ~0u);
+  CHECK(r.read("ECCR") == record);
+  CHECK_FALSE(r.pending());
+  r.f.target->reset(popcorn::reset_kind::software);
+  CHECK(r.read("ECCR") == 0);
+  r.unlock();
+  r.program(bank2_last, {0, 0});
+  CHECK(r.status("PROGERR") == 1);
+  r.clear_errors();
+  r.control(per | bker | ((bank2_last - bank2) / page_bytes) << 3 | strt);
+  r.wait_idle();
+  r.control(0);
+  r.program(bank2_last, {0x5, 0x6});
+  CHECK((r.read("SR") & all_errors) == 0);
+  CHECK(r.load(bank2_last) == rig::loaded{0x5, 0, 0});
+}
+
+TEST_CASE("RM0351 3.3.7: FSTPG set for 7 ms sets FASTERR, a store after it sets PGSERR, inferred")
+{
+  rig r;
+  r.hclk_16mhz();
+  r.erase_bank2();
+  r.control(fstpg);
+  r.idle_for_ps(6'990'000'000);
+  CHECK((r.read("SR") & all_errors) == 0);
+  r.idle_for_ps(20'000'000);
+  CHECK((r.read("SR") & all_errors) == fasterr);
+  r.store_words(bank2, {0x1, 0x2});
+  r.wait_idle();
+  CHECK((r.read("SR") & all_errors) == (fasterr | pgserr));
+  CHECK(r.words(bank2, 2) == std::vector<std::uint32_t>{~0u, ~0u});
+}
+
+TEST_CASE("RM0351 3.3.7: four rows with FSTPG never cleared set FASTERR inside the fourth")
+{
+  rig r;
+  r.hclk_16mhz();
+  r.erase_bank2();
+  auto const start = r.f.target->virtual_clock().time().ps;
+  r.control(fstpg);
+  for(std::uint32_t row = 0; row < 3; ++row)
+  {
+    r.store_words(bank2 + 256 * row, rig::row(0x1000 * row));
+    r.wait_idle();
+    REQUIRE((r.read("SR") & all_errors) == 0);
+  }
+  r.store_words(bank2 + 768, rig::row(0x3000));
+  r.wait_idle();
+  CHECK(r.f.target->virtual_clock().time().ps - start >= 7'000'000'000);
+  CHECK(r.f.target->virtual_clock().time().ps - start < 7'000'000'000 + double_word_ps);
+  CHECK((r.read("SR") & all_errors) == fasterr);
+  CHECK(r.status("BSY") == 0);
+  for(std::uint32_t row = 0; row < 3; ++row)
+  {
+    CHECK(r.words(bank2 + 256 * row, 64) == rig::row(0x1000 * row));
+  }
+  CHECK(r.words(bank2 + 768, 2) == rig::row(0x3000, 2));
+  CHECK(r.words(bank2 + 768 + 248, 2) == std::vector<std::uint32_t>{~0u, ~0u});
+}
+
+TEST_CASE("RM0351 3.3.7: clearing FSTPG and setting it again restarts the 7 ms count")
+{
+  rig r;
+  r.control(fstpg);
+  r.idle_for_ps(5'000'000'000);
+  r.control(0);
+  r.control(fstpg);
+  r.idle_for_ps(5'000'000'000);
+  CHECK((r.read("SR") & all_errors) == 0);
+  r.idle_for_ps(2'100'000'000);
+  CHECK((r.read("SR") & all_errors) == fasterr);
+  r.clear_errors();
+  r.control(0);
+  r.idle_for_ps(8'000'000'000);
+  CHECK((r.read("SR") & all_errors) == 0);
+}
+
+TEST_CASE(
+    "RM0351 3.3.7: a load of the bank under a fast row aborts it with no flag, inferred, a load "
+    "of the other bank does not")
+{
+  for(auto const other : {false, true})
+  {
+    CAPTURE(other);
+    rig r;
+    r.hclk_16mhz();
+    r.erase_bank2();
+    r.control(fstpg | eopie);
+    auto const start = r.f.target->virtual_clock().time().ps;
+    r.store_words(bank2, rig::row(0xc0));
+    r.idle_for_ps(
+        start + 3 * double_word_ps + double_word_ps / 2 - r.f.target->virtual_clock().time().ps);
+    REQUIRE(r.status("BSY") == 1);
+    auto const from = other ? static_cast<address>(sym(firmware, "pattern")) : bank2 + 1024;
+    r.call("read_word", {static_cast<std::uint32_t>(from)});
+    r.wait_idle();
+    if(other)
+    {
+      CHECK(r.words(bank2, 64) == rig::row(0xc0));
+      CHECK(r.status("EOP") == 1);
+      CHECK(r.warnings("CR") == 0);
+    }
+    else
+    {
+      CHECK(
+          r.words(bank2, 8)
+          == std::vector<std::uint32_t>{0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, ~0u, ~0u});
+      CHECK(r.words(bank2 + 248, 2) == std::vector<std::uint32_t>{~0u, ~0u});
+      CHECK(r.status("EOP") == 0);
+      REQUIRE(r.warnings("CR") == 1);
+      CHECK(r.logged.back().message.contains("aborts the row"));
+    }
+    CHECK((r.read("SR") & all_errors & ~1u) == 0);
+  }
+  rig strict{strict_options()};
+  strict.hclk_16mhz();
+  strict.erase_bank2();
+  strict.control(fstpg);
+  strict.store_words(bank2, rig::row(0xd0));
+  strict.f.set("r0", bank2 + 1024);
+  strict.f.set("pc", sym(firmware, "read_word"));
+  CHECK_THROWS_AS(
+      (void)strict.f.run_to_stop({.max_instructions = icount{1'000}}), popcorn::model_error);
+}
+
+TEST_CASE(
+    "RM0351 3.3.7: a row on a bank with no mass erase since the last reset warns once, "
+    "strict raises, a page erase does not count")
+{
+  rig r;
+  r.hclk_16mhz();
+  r.control(per | bker | strt);
+  r.wait_idle();
+  r.control(fstpg);
+  r.store_words(bank2, rig::row(0xe0));
+  r.wait_idle();
+  CHECK(r.words(bank2, 64) == rig::row(0xe0));
+  REQUIRE(r.warnings("CR") == 1);
+  CHECK(r.logged.back().message.contains("no mass erase since the last reset"));
+  rig strict{strict_options()};
+  strict.hclk_16mhz();
+  strict.erase_bank2();
+  strict.control(fstpg);
+  strict.store_words(bank2, rig::row(0xf0));
+  strict.wait_idle();
+  CHECK(strict.words(bank2, 64) == rig::row(0xf0));
+  strict.f.set("r0", bank1_last);
+  strict.f.set("r1", sym(firmware, "pattern"));
+  strict.f.set("r2", 2);
+  strict.f.set("pc", sym(firmware, "copy_words"));
+  CHECK_THROWS_AS(
+      (void)strict.f.run_to_stop({.max_instructions = icount{1'000}}), popcorn::model_error);
+  CHECK(strict.words(bank1_last, 2) == std::vector<std::uint32_t>{~0u, ~0u});
+  strict.f.target->reset(popcorn::reset_kind::software);
+  strict.unlock();
+  strict.hclk_16mhz();
+  strict.control(fstpg);
+  strict.f.set("r0", bank2 + 256);
+  strict.f.set("r1", sym(firmware, "pattern"));
+  strict.f.set("r2", 2);
+  strict.f.set("pc", sym(firmware, "copy_words"));
+  CHECK_THROWS_AS(
+      (void)strict.f.run_to_stop({.max_instructions = icount{1'000}}), popcorn::model_error);
 }
 }

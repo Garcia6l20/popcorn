@@ -13,6 +13,7 @@ static uint32_t locked(void)
 void idle(void);
 void wrong_key(void);
 void HardFault_Handler(void);
+void NMI_Handler(void);
 
 void idle(void)
 {
@@ -29,6 +30,16 @@ void HardFault_Handler(void)
   FLASH->KEYR = KEY2;
   LOG(locked());
   DONE();
+}
+
+uint32_t volatile nmi_eccr;
+uint32_t volatile nmi_count;
+
+void NMI_Handler(void)
+{
+  nmi_eccr = FLASH->ECCR;
+  ++nmi_count;
+  SET_BIT(FLASH->ECCR, FLASH_ECCR_ECCD);
 }
 
 void wrong_key(void)
@@ -54,7 +65,7 @@ int main(void)
   DONE();
 }
 
-uint32_t       words[32];
+uint32_t       words[64];
 uint32_t const pattern[4] = {0x01234567u, 0x89abcdefu, 0x5a5aa5a5u, 0x0f0ff0f0u};
 
 void copy_words(uint32_t volatile* dst, uint32_t const* src, uint32_t count);

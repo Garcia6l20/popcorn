@@ -43,6 +43,7 @@ constexpr std::uint32_t power_down_key1 = 0x0415'2637;
 constexpr std::uint32_t power_down_key2 = 0xfafb'fcfd;
 constexpr std::uint32_t buffer_words    = 32;
 constexpr std::uint32_t operation_end   = 0;
+constexpr std::uint32_t row_timeout     = 1;
 
 enum class operation : std::uint8_t
 {
@@ -112,8 +113,14 @@ struct trustzone_flash_state
 
 struct extension_flash_state
 {
-  bool power_down_first_key{};
-  bool power_down_unlocked{};
+  bool          power_down_first_key{};
+  bool          power_down_unlocked{};
+  bool          row_open{};
+  std::uint32_t row_base{};
+  std::uint32_t row_last{};
+  std::uint32_t row_done{};
+  std::uint32_t fast_generation{};
+  std::uint32_t banks_erased{};
 
   friend auto operator==(extension_flash_state const&, extension_flash_state const&)
       -> bool = default;
@@ -161,9 +168,12 @@ enum class set_role : std::uint8_t
   sequence_irq,
   strobe_irq,
   inconsistency_irq,
+  fast_program,
+  miss_error,
+  fast_error,
 };
 
-constexpr std::array<named_field<set_role>, 31> u5_set_fields{
+constexpr std::array<named_field<set_role>, 34> u5_set_fields{
     {
      {set_role::lock, {"CR", "LOCK"}},
      {set_role::program, {"CR", "PG"}},
@@ -196,10 +206,13 @@ constexpr std::array<named_field<set_role>, 31> u5_set_fields{
      {set_role::sequence_irq, {}},
      {set_role::strobe_irq, {}},
      {set_role::inconsistency_irq, {}},
+     {set_role::fast_program, {}},
+     {set_role::miss_error, {}},
+     {set_role::fast_error, {}},
      }
 };
 
-constexpr std::array<named_field<set_role>, 31> h5_set_fields{
+constexpr std::array<named_field<set_role>, 34> h5_set_fields{
     {
      {set_role::lock, {"CR", "LOCK"}},
      {set_role::program, {"CR", "PG"}},
@@ -232,6 +245,9 @@ constexpr std::array<named_field<set_role>, 31> h5_set_fields{
      {set_role::sequence_irq, {"CR", "PGSERRIE"}},
      {set_role::strobe_irq, {"CR", "STRBERRIE"}},
      {set_role::inconsistency_irq, {"CR", "INCERRIE"}},
+     {set_role::fast_program, {}},
+     {set_role::miss_error, {}},
+     {set_role::fast_error, {}},
      }
 };
 
@@ -319,10 +335,10 @@ constexpr std::array<named_field<privilege_role>, 2> u5_privilege_fields{
      }
 };
 
-constexpr std::array<set_role, 7> error_roles{
+constexpr std::array<set_role, 9> error_roles{
     set_role::program_error,       set_role::size_error,     set_role::alignment_error,
     set_role::protection_error,    set_role::sequence_error, set_role::strobe_error,
-    set_role::inconsistency_error,
+    set_role::inconsistency_error, set_role::miss_error,     set_role::fast_error,
 };
 
 /** @brief An error flag and the enable that raises the FLASH interrupt while it is set. */
@@ -660,6 +676,10 @@ struct u5_flash
   static constexpr bool ecc_record_clears = false;
   /** @brief A program over a line that reads all zeros sets PROGERR, RM0456 7.3.9. */
   static constexpr bool zeroed_line_refused = true;
+  /** @brief No fast programming row. */
+  static constexpr std::uint32_t row_bytes = 0;
+  /** @brief No fast programming row. */
+  static constexpr std::chrono::nanoseconds row_program{};
   /** @brief Control field the out-of-range page warning names. */
   static constexpr std::string_view page_field = "PNB";
   /** @brief Register of the option key sequence, RM0456 7.9.4. */
@@ -933,6 +953,10 @@ static_assert(names_every_role(u5_privilege_fields));
 static_assert(flag_matches_roles(u5_set_fields, u5_flash::burst_write, {set_role::burst}));
 static_assert(flag_matches_roles(
     u5_set_fields,
+    u5_flash::row_bytes != 0,
+    {set_role::fast_program, set_role::miss_error, set_role::fast_error}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
     u5_flash::force_write,
     {set_role::force_write, set_role::strobe_error, set_role::inconsistency_error}));
 static_assert(flag_matches_roles(
@@ -1015,6 +1039,10 @@ struct h5_flash
   static constexpr bool ecc_record_clears = true;
   /** @brief A flash word is written byte by byte with no PROGERR, RM0481 7.3.5. */
   static constexpr bool zeroed_line_refused = false;
+  /** @brief No fast programming row. */
+  static constexpr std::uint32_t row_bytes = 0;
+  /** @brief No fast programming row. */
+  static constexpr std::chrono::nanoseconds row_program{};
   /** @brief Control field the out-of-range sector warning names. */
   static constexpr std::string_view page_field = "SNB";
   /** @brief Register of the option key sequence, RM0481 7.11.4. */
@@ -1260,6 +1288,10 @@ static_assert(names_every_role(h5_unit_fields));
 static_assert(flag_matches_roles(h5_set_fields, h5_flash::burst_write, {set_role::burst}));
 static_assert(flag_matches_roles(
     h5_set_fields,
+    h5_flash::row_bytes != 0,
+    {set_role::fast_program, set_role::miss_error, set_role::fast_error}));
+static_assert(flag_matches_roles(
+    h5_set_fields,
     h5_flash::force_write,
     {set_role::force_write, set_role::strobe_error, set_role::inconsistency_error}));
 static_assert(flag_matches_roles(
@@ -1285,7 +1317,7 @@ static_assert(flag_matches_roles(
     {set_role::protection_irq, set_role::sequence_irq, set_role::strobe_irq,
      set_role::inconsistency_irq}));
 
-constexpr std::array<named_field<set_role>, 31> l4_set_fields{
+constexpr std::array<named_field<set_role>, 34> l4_set_fields{
     {
      {set_role::lock, {"CR", "LOCK"}},
      {set_role::program, {"CR", "PG"}},
@@ -1318,6 +1350,9 @@ constexpr std::array<named_field<set_role>, 31> l4_set_fields{
      {set_role::sequence_irq, {}},
      {set_role::strobe_irq, {}},
      {set_role::inconsistency_irq, {}},
+     {set_role::fast_program, {"CR", "FSTPG"}},
+     {set_role::miss_error, {"SR", "MISERR"}},
+     {set_role::fast_error, {"SR", "FASTERR"}},
      }
 };
 
@@ -1393,6 +1428,14 @@ struct l4_flash
   static constexpr bool ecc_record_clears = false;
   /** @brief Zeros program over any line, RM0351 3.7.5 PROGERR. */
   static constexpr bool zeroed_line_refused = false;
+  /** @brief Bytes of a fast programming row, 32 double words, RM0351 3.3.7. */
+  static constexpr std::uint32_t row_bytes = 32 * 8;
+  /** @brief Typical tprog of a row in fast programming, DS10198 Rev 11 Table 63. */
+  static constexpr std::chrono::nanoseconds row_program = std::chrono::microseconds{1910};
+  /** @brief Least HCLK of fast programming, RM0351 3.3.7. */
+  static constexpr std::uint64_t row_min_hclk = 8'000'000;
+  /** @brief Time FSTPG stays set before FASTERR, RM0351 3.3.7. */
+  static constexpr std::chrono::nanoseconds row_timeout = std::chrono::milliseconds{7};
   /** @brief Control field the out-of-range page warning names. */
   static constexpr std::string_view page_field = "PNB";
   /** @brief Register of the option key sequence, RM0351 3.7.4. */
@@ -1551,6 +1594,10 @@ struct l4_flash
 static_assert(names_every_role(l4_set_fields));
 static_assert(names_every_role(l4_unit_fields));
 static_assert(flag_matches_roles(l4_set_fields, l4_flash::burst_write, {set_role::burst}));
+static_assert(flag_matches_roles(
+    l4_set_fields,
+    l4_flash::row_bytes != 0,
+    {set_role::fast_program, set_role::miss_error, set_role::fast_error}));
 static_assert(flag_matches_roles(
     l4_set_fields,
     l4_flash::force_write,
@@ -1816,8 +1863,29 @@ static_assert(flag_matches_roles(
  *   unless the data is zero, which programs over any double word. No burst, no WDW.
  * - Erase, 3.3.6: PER with PNB and BKER, 2-Kbyte pages, MER1 and MER2. A PNB at or above the
  *   pages of a bank erases nothing as on the U5.
+ * - Fast programming, 3.3.7: with FSTPG set, with or without PG, each double word programs for
+ *   l4_flash::row_program / 32, 59.69 us from the DS10198 Table 63 row time, where RM0351 3.3.7
+ *   gives about 20 us between double words. BSY stays set from the first double word to the
+ *   32nd, and EOP sets only after the 32nd. A double word stored while one programs waits for
+ *   it. A double word outside the row of the first or not above the last is PGAERR, a byte or
+ *   half-word SIZERR, a protected one WRPERR, each with FASTERR, inferred for the first store
+ *   of a row. A double word that is not complete when the one before it ends sets MISERR and
+ *   FASTERR. FSTPG set for 7 ms sets FASTERR, the count restarting at each FSTPG 0 to 1, and a
+ *   store after it sets PGSERR, inferred. An error ends the row, the double words before it
+ *   stay programmed. A CPU or DMA load of the bank under a row ends the row with no flag, the
+ *   double word in flight and the rest not programmed, inferred, and logs one warning per
+ *   machine life, model_error under strict_peripherals. Inferred: a fast double word clears the
+ *   bits it programs over any content, with no PROGERR.
+ * - Fast programming prerequisites, 3.3.7: a row started on a bank with no MER1, MER2 or mass
+ *   erase since the last reset, or with HCLK below 8 MHz, programs, and logs one warning per
+ *   machine life for each rule, model_error under strict_peripherals. RM0351 sets PGSERR
+ *   without the mass erase. The tracking from the last reset is inferred.
  * - Errors, 3.7.5: PROGERR, WRPERR, PGAERR, SIZERR and PGSERR as on the U5, OPERR with ERRIE.
- *   MISERR, FASTERR, RDERR and OPTVERR stay 0.
+ *   RDERR and OPTVERR stay 0.
+ * - Power cut and ECC, 3.3.2 and 3.7.7: the U5 rules above per double word. A cut tears the
+ *   double word in flight, its first 4 data bytes ANDed into the old bytes and its last 4 kept.
+ *   ADDR_ECC is its byte offset in its bank, BK_ECC its bank. FLASH_ECCR keeps ADDR_ECC and
+ *   BK_ECC when ECCD is cleared. SYSF_ECC stays 0.
  * - FLASH_ACR, 3.7.1: LATENCY against Table 11 for HCLK and the PWR voltage range. RUN_PD takes
  *   a write only after PDKEY1 then PDKEY2 in FLASH_PDKEYR, 3.7.2. The pair unlocks the next
  *   FLASH_ACR write only and any other key restarts the sequence, both inferred. A CPU or DMA
@@ -1846,7 +1914,8 @@ class flash_model final : public dispatch_model<flash_model<Traits>, flash_state
   static_assert(Traits::privileged_block_registers.size() == 2 * Traits::block_registers_per_bank);
   static constexpr std::string_view access_register =
       register_of(Traits::unit_fields, unit_role::latency);
-  static constexpr bool extended = not Traits::power_down_key_register.empty();
+  static constexpr bool extended =
+      not Traits::power_down_key_register.empty() or Traits::row_bytes != 0;
   using base::claims;
   using base::ctx_;
   using base::desc_;
@@ -1972,6 +2041,10 @@ private:
   void               forget_torn(std::uint32_t from, std::uint32_t length);
   void               sync_watches();
   void               report_double_error(std::uint32_t line);
+  void               open_row(std::uint32_t at);
+  void               close_row();
+  void               watch_row();
+  void               abort_row();
   [[nodiscard]] auto banks() const -> bank_geometry;
   [[nodiscard]] auto bank_of(std::uint32_t at) const -> std::uint32_t;
   [[nodiscard]] auto bank_base(std::uint32_t at) const -> std::uint32_t;
@@ -2001,6 +2074,8 @@ private:
   void                      load_options();
   void                      program_options();
   void                      check_latency(std::string_view trigger);
+  void                      check_row_clock();
+  void                      check_row_erased(std::uint32_t at);
   void                      check_programming_delay(std::string_view trigger);
   [[nodiscard]] auto        active_range() const -> std::uint32_t;
 
@@ -2023,6 +2098,10 @@ private:
   bool                                                              page_logged_{};
   bool                                                              option_logged_{};
   bool                                                              power_down_logged_{};
+  bool                                                              row_clock_logged_{};
+  bool                                                              row_erase_logged_{};
+  bool                                                              row_read_logged_{};
+  std::optional<std::pair<std::uint32_t, std::uint32_t>>            row_watch_;
   std::vector<std::uint32_t>                                        option_changed_;
   std::vector<std::pair<std::uint32_t, std::uint32_t>>              option_words_;
   std::vector<std::uint32_t>                                        option_offsets_;
@@ -2326,7 +2405,8 @@ auto flash_model<Traits>::make_set(std::size_t index) const -> register_set
   for(auto const role :
       {set_role::end, set_role::operation_error, set_role::program_error,
        set_role::protection_error, set_role::alignment_error, set_role::size_error,
-       set_role::sequence_error, set_role::strobe_error, set_role::inconsistency_error})
+       set_role::sequence_error, set_role::strobe_error, set_role::inconsistency_error,
+       set_role::miss_error, set_role::fast_error})
   {
     if(auto const found = fields.find(role))
     {
@@ -2598,8 +2678,9 @@ template <typename Traits> void flash_model<Traits>::reset(register_file& regs, 
   state_.wrp            = std::move(wrp);
   state_.wrp_active     = loads_options(kind) ? state_.wrp : std::move(wrp_active);
   option_changed_.clear();
-  secure_    = {};
-  extension_ = {};
+  secure_ = {};
+  close_row();
+  extension_ = {.fast_generation = extension_.fast_generation + 1};
   for(auto const [offset, value] : option_words_)
   {
     regs.poke(offset, value);
@@ -2869,6 +2950,13 @@ auto flash_model<Traits>::duration_of(operation which, std::uint32_t length) con
   switch(which)
   {
     case operation::program:
+      if constexpr(Traits::row_bytes != 0)
+      {
+        if(extension_.row_open and length == Traits::program_bytes)
+        {
+          return Traits::row_program / (Traits::row_bytes / Traits::program_bytes);
+        }
+      }
       return length == Traits::program_bytes
                ? options_.quad_word_program.value_or(timing.quad_word_program)
                : options_.burst_program.value_or(timing.burst_program);
@@ -3129,7 +3217,14 @@ void flash_model<Traits>::on_memory_read(
     std::uint8_t       size,
     access_ctx)
 {
-  auto const at    = physical(region, addr);
+  auto const at = physical(region, addr);
+  if constexpr(Traits::row_bytes != 0)
+  {
+    if(extension_.row_open and row_watch_ and at - row_watch_->first < row_watch_->second)
+    {
+      abort_row();
+    }
+  }
   auto const first = at & ~(Traits::program_bytes - 1);
   auto const last  = (at + size - 1) & ~(Traits::program_bytes - 1);
   for(auto line = first; line <= last; line += Traits::program_bytes)
@@ -3246,6 +3341,7 @@ template <typename Traits> void flash_model<Traits>::fail(bool secure, set_role 
 template <typename Traits> void flash_model<Traits>::fail(bool secure, field_ref flagged)
 {
   update(regs_, flagged, 1);
+  close_row();
   if(flag(secure, set_role::error_irq))
   {
     update(regs_, field_of(secure, set_role::operation_error), 1);
@@ -3377,6 +3473,17 @@ auto flash_model<Traits>::writable(
 template <typename Traits>
 void flash_model<Traits>::on_event(std::uint32_t kind, std::uint64_t payload)
 {
+  if constexpr(Traits::row_bytes != 0)
+  {
+    if(kind == row_timeout)
+    {
+      if(payload == extension_.fast_generation and flag(false, set_role::fast_program))
+      {
+        fail(false, set_role::fast_error);
+      }
+      return;
+    }
+  }
   if(kind != operation_end or payload != state_.generation or not busy())
   {
     return;
@@ -3452,14 +3559,30 @@ void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
 {
   auto const [addr, size, value, written, dma] = one;
   auto const secure                            = (attrs & held_secure) != 0;
+  auto const control = dma ? regs_.peek(sets_[set_index(secure)].control.offset) : written;
+  auto const fast    = value_of(secure, set_role::fast_program, control) != 0;
+  auto const fault   = [&](set_role role) {
+    fail(secure, role);
+    if(fast)
+    {
+      fail(secure, set_role::fast_error);
+    }
+  };
+  if constexpr(Traits::row_bytes != 0)
+  {
+    if(fast and not extension_.row_open and state_.filled == 0)
+    {
+      check_row_clock();
+      check_row_erased(addr);
+    }
+  }
   if((pages_ruled() and not writable(addr, 1, secure, (attrs & held_privileged) != 0))
      or wrp_protected(addr, 1))
   {
-    fail(secure, set_role::protection_error);
+    fault(set_role::protection_error);
     return;
   }
-  auto const control = dma ? regs_.peek(sets_[set_index(secure)].control.offset) : written;
-  if(field_of(secure, set_role::program).of(control) == 0)
+  if(not fast and field_of(secure, set_role::program).of(control) == 0)
   {
     fail(secure, set_role::sequence_error);
     return;
@@ -3486,7 +3609,7 @@ void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
   }
   if(size != 4)
   {
-    fail(secure, set_role::size_error);
+    fault(set_role::size_error);
     return;
   }
   auto const next =
@@ -3496,8 +3619,18 @@ void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
     state_.burst = value_of(secure, set_role::burst, control) != 0;
     if(addr % (state_.burst ? Traits::buffer_bytes : Traits::program_bytes) != 0)
     {
-      fail(secure, set_role::alignment_error);
+      fault(set_role::alignment_error);
       return;
+    }
+    if constexpr(Traits::row_bytes != 0)
+    {
+      if(fast and extension_.row_open
+         and (addr / Traits::row_bytes != extension_.row_base / Traits::row_bytes
+              or addr <= extension_.row_last))
+      {
+        fault(set_role::alignment_error);
+        return;
+      }
     }
     state_.buffer_addr    = addr;
     secure_.buffer_secure = secure;
@@ -3508,7 +3641,7 @@ void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
           ? addr != next
           : addr < state_.buffer_addr or addr >= state_.buffer_addr + Traits::program_bytes)
   {
-    fail(secure, set_role::alignment_error);
+    fault(set_role::alignment_error);
     return;
   }
   auto const length   = state_.burst ? Traits::buffer_bytes : Traits::program_bytes;
@@ -3520,6 +3653,17 @@ void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
     return;
   }
   set_waiting(false);
+  if constexpr(Traits::row_bytes != 0)
+  {
+    if(fast)
+    {
+      if(not extension_.row_open)
+      {
+        open_row(state_.buffer_addr);
+      }
+      extension_.row_last = state_.buffer_addr;
+    }
+  }
   start(operation::program, state_.buffer_addr, length, secure);
 }
 
@@ -3663,8 +3807,19 @@ template <typename Traits> void flash_model<Traits>::program(bool secure)
   auto const                                  data_bytes = buffered();
   auto const                                  data = std::span{data_bytes}.first(state_.length);
   state_.filled                                    = 0;
-  if(not ctx_.services.read_block(state_.target, target, initiator::debugger)
-     or refused(state_.target, target, data))
+  auto const read = ctx_.services.read_block(state_.target, target, initiator::debugger);
+  if constexpr(Traits::row_bytes != 0)
+  {
+    if(read and extension_.row_open)
+    {
+      std::array<std::byte, Traits::buffer_bytes> anded{};
+      std::ranges::transform(target, data, anded.begin(), std::bit_and{});
+      static_cast<void>(ctx_.services.write_block(
+          state_.target, std::span{anded}.first(state_.length), initiator::debugger));
+      return;
+    }
+  }
+  if(not read or refused(state_.target, target, data))
   {
     fail(secure, set_role::program_error);
     return;
@@ -3690,11 +3845,33 @@ template <typename Traits> void flash_model<Traits>::finish()
     forget_torn(state_.target, state_.length);
     sync_watches();
     update(regs_, field_of(secure, set_role::start), 0);
+    if(which == operation::mass_erase)
+    {
+      extension_.banks_erased = 3;
+    }
+    else if(which == operation::bank_erase)
+    {
+      extension_.banks_erased |= 1u << bank_of(state_.target);
+    }
   }
+  auto row_end = false;
+  if constexpr(Traits::row_bytes != 0)
+  {
+    if(which == operation::program and extension_.row_open)
+    {
+      row_end = ++extension_.row_done == Traits::row_bytes / Traits::program_bytes;
+    }
+  }
+  auto const row_running = extension_.row_open and not row_end;
   if(errors_pending(secure) == errors
+     and not row_running
      and (Traits::end_flag_always or flag(secure, set_role::end_irq)))
   {
     update(regs_, field_of(secure, set_role::end), 1);
+  }
+  if(row_end)
+  {
+    close_row();
   }
   interrupt();
   auto held  = std::exchange(state_.held, {});
@@ -3710,6 +3887,14 @@ template <typename Traits> void flash_model<Traits>::finish()
     }
     store(one, attr);
   }
+  if constexpr(Traits::row_bytes != 0)
+  {
+    if(extension_.row_open and not busy())
+    {
+      fail(secure, set_role::miss_error);
+      fail(secure, set_role::fast_error);
+    }
+  }
   if(not busy() and not hsi16_held())
   {
     hold_hsi16(false);
@@ -3724,7 +3909,9 @@ template <typename Traits> auto flash_model<Traits>::hsi16_held() const -> bool
   }
   return busy() or std::ranges::any_of(std::array{false, true}, [this](bool secure) {
            return (secure ? ctx_.trustzone : true)
-              and (flag(secure, set_role::program) or flag(secure, set_role::start));
+              and (flag(secure, set_role::program)
+                   or flag(secure, set_role::fast_program)
+                   or flag(secure, set_role::start));
          });
 }
 
@@ -3772,6 +3959,95 @@ void flash_model<Traits>::check_programming_delay(std::string_view trigger)
   if(ctx_.strict_peripherals)
   {
     throw model_error(desc_.name, std::string{access_register}, reg(access_register).offset);
+  }
+}
+
+template <typename Traits> void flash_model<Traits>::check_row_clock()
+{
+  if constexpr(Traits::row_bytes != 0)
+  {
+    auto const hclk = ctx_.clock.hz(hclk_);
+    if(hclk == 0 or hclk >= Traits::row_min_hclk)
+    {
+      return;
+    }
+    auto const control = Traits::set_registers[0].control;
+    this->warn_once_or_refuse(
+        row_clock_logged_, control, reg(control).offset,
+        std::format(
+            "FSTPG with HCLK {} Hz, below the {} Hz fast programming asks for: the model programs "
+            "the row",
+            hclk, Traits::row_min_hclk));
+  }
+}
+
+template <typename Traits> void flash_model<Traits>::check_row_erased(std::uint32_t at)
+{
+  if constexpr(Traits::row_bytes != 0)
+  {
+    if(storage_ == nullptr or (extension_.banks_erased >> bank_of(at) & 1u) != 0)
+    {
+      return;
+    }
+    auto const control = Traits::set_registers[0].control;
+    this->warn_once_or_refuse(
+        row_erase_logged_, control, reg(control).offset,
+        std::format(
+            "FSTPG row at {:#010x} in a bank with no mass erase since the last reset, which "
+            "RM0351 3.3.7 asks for: the model programs the row",
+            at));
+  }
+}
+
+template <typename Traits> void flash_model<Traits>::open_row(std::uint32_t at)
+{
+  extension_.row_open = true;
+  extension_.row_base = at & ~(Traits::row_bytes - 1);
+  extension_.row_done = 0;
+  watch_row();
+}
+
+template <typename Traits> void flash_model<Traits>::watch_row()
+{
+  if(storage_ == nullptr)
+  {
+    return;
+  }
+  auto const [base, size] = banks();
+  auto const at           = extension_.row_base;
+  if(at - base < 2 * size)
+  {
+    auto const start = bank_start(bank_of(at));
+    row_watch_       = std::pair{start, size};
+    ctx_.services.watch_reads(start, size, true);
+  }
+}
+
+template <typename Traits> void flash_model<Traits>::close_row()
+{
+  extension_.row_open = false;
+  if(auto const watch = std::exchange(row_watch_, std::nullopt))
+  {
+    ctx_.services.watch_reads(watch->first, watch->second, false);
+  }
+}
+
+template <typename Traits> void flash_model<Traits>::abort_row()
+{
+  auto const control = Traits::set_registers[0].control;
+  this->warn_once_or_refuse(
+      row_read_logged_, control, reg(control).offset,
+      "a load of the bank under a fast row aborts the row, RM0351 3.3.7: the double word in "
+      "flight and the rest of the row are not programmed, no flag is set");
+  close_row();
+  state_.running = static_cast<std::uint8_t>(operation::none);
+  state_.filled  = 0;
+  state_.held.clear();
+  set_waiting(false);
+  set_busy(false);
+  if(not hsi16_held())
+  {
+    hold_hsi16(false);
   }
 }
 
@@ -3838,7 +4114,12 @@ template <typename Traits> void flash_model<Traits>::load(std::span<std::byte co
   {
     auto loaded = reflex::serde::bson::deserializer{in}.load<extended_flash_state>();
     state_      = std::move(loaded.flash);
-    extension_  = loaded.extension;
+    close_row();
+    extension_ = loaded.extension;
+    if(extension_.row_open)
+    {
+      watch_row();
+    }
   }
   else
   {
@@ -4000,8 +4281,11 @@ void flash_model<Traits>::control_written(bool secure, std::uint32_t old, std::u
   auto const erase_select = [&](std::uint32_t word) { return Traits::erase_selected(in(word)); };
   auto const other_held =
       ctx_.trustzone and (flag(not secure, set_role::program) or flag(not secure, set_role::start));
-  auto const hsi16_before = of(set_role::program, old) or of(set_role::start, old) or other_held;
-  auto const program_set  = of(set_role::program, now) and not of(set_role::program, old);
+  auto const programs = [&](std::uint32_t word) {
+    return of(set_role::program, word) or of(set_role::fast_program, word);
+  };
+  auto const hsi16_before = programs(old) or of(set_role::start, old) or other_held;
+  auto const program_set  = programs(now) and not programs(old);
   auto const start_set    = of(set_role::start, now) and not of(set_role::start, old);
   auto const unlocked     = option_lock and option_lock->of(old) == 0;
   auto const option_start = unlocked and option_start_bit and option_start_bit->of(now) != 0;
@@ -4014,8 +4298,7 @@ void flash_model<Traits>::control_written(bool secure, std::uint32_t old, std::u
       sequence = true;
     }
   }
-  else if(
-      of(set_role::program, now) and erase_select(now) and (program_set or not erase_select(old)))
+  else if(programs(now) and erase_select(now) and (program_set or not erase_select(old)))
   {
     sequence = true;
   }
@@ -4079,6 +4362,17 @@ void flash_model<Traits>::control_written(bool secure, std::uint32_t old, std::u
     now = option_load_field->with(now, 0);
   }
   regs_.poke(control, now);
+  if constexpr(Traits::row_bytes != 0)
+  {
+    if(of(set_role::fast_program, now) != of(set_role::fast_program, old))
+    {
+      ++extension_.fast_generation;
+      if(of(set_role::fast_program, now))
+      {
+        schedule_in(Traits::row_timeout, row_timeout, extension_.fast_generation);
+      }
+    }
+  }
   if(option_start and not sequence and not busy())
   {
     program_options();

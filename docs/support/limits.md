@@ -515,10 +515,33 @@ On the STM32L47x/L48x, RM0351 section 3:
   value, or an HCLK above 80 MHz in range 1 or 26 MHz in range 2, logs one warning per HCLK, range
   and value, a `model_error` under `strict_peripherals`. `LATENCY` 5 to 7 counts as that many wait
   states.
+- Fast programming, RM0351 3.3.7: with `FSTPG` set each double word of a row of 32 programs for
+  1/32 of the DS10198 Table 63 fast row time, 1.91 ms, so 59.69 us, where RM0351 3.3.7 gives about
+  20 us between double words. BSY is set from the first double word to the 32nd and EOP after the
+  32nd. `flash_options` sets no fast row time. A double word not complete when the one before it
+  ends sets MISERR and FASTERR. PGAERR, SIZERR and WRPERR of a store with `FSTPG` set come with
+  FASTERR, inferred for the first store of a row. `FSTPG` set for 7 ms sets FASTERR, counted
+  from each `FSTPG` 0 to 1, and a store after it sets PGSERR, inferred.
+- A CPU or DMA load of the bank under a fast row ends the row with no flag: the double word in
+  flight and the rest of the row stay unprogrammed, inferred, and one warning per machine life
+  is logged, a `model_error` under `strict_peripherals`. Code fetched from that bank runs and the
+  row goes on, where RM0351 3.3.7 aborts it.
+- A fast row on a bank with no `MER1`, `MER2` or two-bank mass erase since the last reset, or
+  with HCLK below 8 MHz, logs one warning per machine life for each rule, a `model_error` under
+  `strict_peripherals`, and programs. RM0351 3.3.7 sets PGSERR without the mass erase, which the
+  model does not set. Counting the mass erase from the last reset is inferred.
+- A fast row programs over any content, clearing only the bits it programs, with no PROGERR,
+  inferred.
 - `OPTSTRT` clears at once with no BSY and programs nothing, `OBL_LAUNCH` requests an option byte
-  loader reset. `FLASH_OPTR`, the PCROP and the WRP registers are storage. `FSTPG` is storage, a
-  store with `FSTPG` set and `PG` clear sets PGSERR. `MISERR`, `FASTERR`, `RDERR` and `OPTVERR`
-  stay 0. `FLASH_ECCR` records a double error on a double word a power cut tore, with the NMI.
+  loader reset. `FLASH_OPTR`, the PCROP and the WRP registers are storage. `RDERR` and `OPTVERR`
+  stay 0.
+- ECC, RM0351 3.3.2: a power cut tears the double word in flight, its first 4 data bytes ANDed
+  into the old ones and its last 4 kept. A CPU or DMA load of it sets `ECCD`, `BK_ECC` and
+  `ADDR_ECC`, the offset in its bank, and takes the NMI. Clearing `ECCD` keeps `ADDR_ECC` and
+  `BK_ECC`. `ECCC` and `SYSF_ECC` stay 0, and `ECCIE` is storage. A reset clears `FLASH_ECCR`.
+- ES0250 2.2.9: on silicon a read of a location a reset or power-down hit during its program or
+  erase may corrupt `FLASH_ECCR`. The model records that read's `ECCD`, `BK_ECC` and `ADDR_ECC`
+  exactly, and only a power cut tears a location: a reset of another kind drops the operation.
 
 ## DMA
 
