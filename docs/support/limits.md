@@ -1018,6 +1018,10 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   on HSE and on LSE and `LSEDRV` are storage, `CSSF`, `LSECSSF` and `LSECSSD` stay 0. `RCC_BDCR`
   takes writes whatever `PWR_CR1.DBP` holds. PLLSAI1 and PLLSAI2 are storage. The main PLL VCO
   ranges of RM0351 6.4.4 are not checked.
+- STM32L47x/L48x: `ADCRST` holds ADC1, ADC2, ADC3 and ADC_Common in reset together, RM0351
+  6.4.11. The enable bits gate the timer clocks, the other enables are storage. `MCOSEL` and
+  `MCOPRE` are storage, no clock reaches the MCO pin. The sleep and stop enables of
+  `RCC_xxxSMENR` are storage.
 - STM32L47x/L48x clock errata, ES0250 2.2: `MSIRDY` clears whenever the MSI stops, 2.2.1. The MSI
   runs at its range rate from the first cycle after a wakeup, 2.2.3 and 2.2.24. The LSI runs at
   32 kHz with a 50 % duty, 2.2.8. The HSE is ready after the board's `ready_delay` at any VDD,

@@ -10,3 +10,45 @@ source = "DS10741 Rev 3, Table 2: STM32L471 has no USB OTG FS and no LCD. The Cu
 
 [irqs]
 drop = ["OTG_FS", "LCD"]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB2RSTR"]
+fields = ["OTGFSRST"]
+drop = true
+source = "RM0351 Rev 11, 6.4.11 RCC_AHB2RSTR: OTGFSRST is reserved for STM32L471 devices. The STM32L471 SVD lists it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB2ENR"]
+fields = ["OTGFSEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.17 RCC_AHB2ENR: OTGFSEN is reserved for STM32L471 devices. The STM32L471 SVD lists it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB2SMENR"]
+fields = ["OTGFSSMEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.23 RCC_AHB2SMENR: OTGFSSMEN is reserved for STM32L471 devices. The STM32L471 SVD lists it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR1"]
+fields = ["LCDRST"]
+drop = true
+source = "RM0351 Rev 11, 6.4.13 RCC_APB1RSTR1: LCDRST is reserved for STM32L471/L4x5 devices. The STM32L471 SVD lists it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR1"]
+fields = ["LCDEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.19 RCC_APB1ENR1: LCDEN is reserved for STM32L471/L4x5 devices. The STM32L471 SVD lists it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1SMENR1"]
+fields = ["LCDSMEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.25 RCC_APB1SMENR1: LCDSMEN is reserved for STM32L471/L4x5 devices. The STM32L471 SVD lists it"

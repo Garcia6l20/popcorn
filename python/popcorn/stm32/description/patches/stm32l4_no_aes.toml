@@ -7,3 +7,24 @@ parts = ["STM32L471*", "STM32L475*", "STM32L476*"]
 [peripherals]
 drop = ["AES"]
 source = "RM0351 Rev 11, 2.2.2 Table 1: AES at 0x5006 0000 on STM32L48x only. DS10741 Rev 3, DS10969 Rev 5 and DS10198 Rev 11 Table 2 give no AES for STM32L471, L475 and L476, the CubeMX db lists no AES instance and CMSIS stm32l471xx.h, stm32l475xx.h and stm32l476xx.h define no AES. ST's STM32L471, L475 and L476 SVDs list it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB2RSTR"]
+fields = ["AESRST"]
+drop = true
+source = "RM0351 Rev 11, 6.4.11 RCC_AHB2RSTR: AESRST is reserved on STM32L47x devices. The STM32L471, L475 and L476 SVDs list it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB2ENR"]
+fields = ["AESEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.17 RCC_AHB2ENR: AESEN is reserved on STM32L47x devices. The STM32L471, L475 and L476 SVDs list it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB2SMENR"]
+fields = ["AESSMEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.23 RCC_AHB2SMENR: AESSMEN is reserved on STM32L47x devices. The STM32L471, L475 and L476 SVDs list it"

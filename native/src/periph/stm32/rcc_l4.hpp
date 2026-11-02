@@ -89,7 +89,21 @@ constexpr auto pll_even_divider(std::uint32_t code) -> std::uint64_t
 
 constexpr std::array<mux<signal>, 0> muxes{};
 
-constexpr std::array<timer_names<signal>, 0> timers{};
+constexpr std::array<timer_names<signal>, 11> timers{
+    {
+     {"TIM1", "TIM1EN", pclk2},
+     {"TIM2", "TIM2EN", pclk1},
+     {"TIM3", "TIM3EN", pclk1},
+     {"TIM4", "TIM4EN", pclk1},
+     {"TIM5", "TIM5EN", pclk1},
+     {"TIM6", "TIM6EN", pclk1},
+     {"TIM7", "TIM7EN", pclk1},
+     {"TIM8", "TIM8EN", pclk2},
+     {"TIM15", "TIM15EN", pclk2},
+     {"TIM16", "TIM16EN", pclk2},
+     {"TIM17", "TIM17EN", pclk2},
+     }
+};
 
 constexpr std::array<std::string_view, 6> enable_registers{"AHB1ENR",  "AHB2ENR",  "AHB3ENR",
                                                            "APB1ENR1", "APB1ENR2", "APB2ENR"};

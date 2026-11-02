@@ -881,10 +881,16 @@ TEST_CASE("every U575 instance with an RCC reset bit resolves it, the renamed on
     });
   };
   auto renamed = std::size_t{};
-  for(auto const& [instance, field] : stm32::reset_bit_names)
+  for(auto const& row : stm32::reset_bit_names)
   {
+    auto const& [instance, field] = row;
     CAPTURE(instance);
-    CHECK(stm32::reset_bit_name(instance) == field);
+    if(auto const first = std::ranges::find(
+           stm32::reset_bit_names, instance, &std::pair<std::string_view, std::string_view>::first);
+       &*first == &row)
+    {
+      CHECK(stm32::reset_bit_candidates(instance).front() == field);
+    }
     if(not described(field))
     {
       continue;
@@ -1110,6 +1116,14 @@ TEST_CASE("a part whose RCC lacks ADC12RST is a config_error naming that bit")
       (stm32_fixture{description, "rcc_ll"}),
       doctest::Contains("peripherals.RCC.registers.RCC_xxxRSTR.fields.ADC12RST"),
       popcorn::config_error);
+}
+
+TEST_CASE("the missing reset bit message names every reset bit name an instance may take")
+{
+  CHECK(stm32::reset_bit_choices("ADC1") == "ADC12RST or ADCRST or ADC1RST");
+  CHECK(stm32::reset_bit_choices("ADC") == "ADC1RST or ADCRST");
+  CHECK(stm32::reset_bit_choices("RNG") == "RNGRST");
+  CHECK(stm32::reset_bit_choices("ADC12") == "ADC12RST");
 }
 
 TEST_CASE("LPTIM1RST resets an unmodelled peripheral's storage and holds its writes")

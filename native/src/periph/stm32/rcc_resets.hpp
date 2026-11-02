@@ -6,9 +6,11 @@
 #include <array>
 #include <cstddef>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace popcorn::periph::stm32
 {
@@ -19,10 +21,12 @@ inline constexpr std::array<std::string_view, 8> reset_registers{
     "RCC_APB1RSTR1", "RCC_APB1RSTR2", "RCC_APB2RSTR",  "RCC_APB3RSTR"};
 
 /** @brief Instances whose reset bit is not named `<instance>RST` in at least one family, the
- *         STM32U5 RM0456 11.8.21 to 11.8.28, the STM32H5 RM0481 11.8.19 to 11.8.25 and the
- *         STM32L1 RM0038 6.3.6. A name found in no reset register of a part falls back to
- *         `<instance>RST`. */
-inline constexpr std::array<std::pair<std::string_view, std::string_view>, 19> reset_bit_names{
+ *         STM32U5 RM0456 11.8.21 to 11.8.28, the STM32H5 RM0481 11.8.19 to 11.8.25, the
+ *         STM32L1 RM0038 6.3.6 and the STM32L47x/L48x RM0351 6.4.10 to 6.4.15, where ADCRST
+ *         resets ADC1 to ADC3 and their common registers. An instance may have several rows,
+ *         one per family spelling, searched in order. A name found in no reset register of a
+ *         part falls back to `<instance>RST`. */
+inline constexpr std::array<std::pair<std::string_view, std::string_view>, 25> reset_bit_names{
     {
      {"ADC", "ADC1RST"},         {"ADC1", "ADC12RST"},     {"ADC12", "ADC12RST"},
      {"ADC2", "ADC12RST"},       {"ADCC", "ADC12RST"},     {"OTG_FS", "OTGRST"},
@@ -30,7 +34,9 @@ inline constexpr std::array<std::pair<std::string_view, std::string_view>, 19> r
      {"VREFBUF", "VREFRST"},     {"FMC", "FSMCRST"},       {"LPUART", "LPUART1RST"},
      {"DAC", "DAC12RST"},        {"FDCAN1", "FDCAN12RST"}, {"FDCAN2", "FDCAN12RST"},
      {"OCTOSPI", "OCTOSPI1RST"}, {"UCPD1", "UCPDRST"},     {"I3C", "I3C1RST"},
-     {"FLASH", "FLITFRST"},
+     {"FLASH", "FLITFRST"},      {"ADC1", "ADCRST"},       {"ADC2", "ADCRST"},
+     {"ADC3", "ADCRST"},         {"ADC_Common", "ADCRST"}, {"OTG_FS", "OTGFSRST"},
+     {"QUADSPI", "QSPIRST"},
      }
 };
 
@@ -44,24 +50,41 @@ struct reset_bit
 };
 
 /**
- * @brief Field name of the RCC reset bit of @p instance.
+ * @brief Every field name the RCC reset bit of @p instance may take, in search order: the names
+ *        of reset_bit_names in table order, then `<instance>RST` unless a row gives it.
  * @param instance Instance name as the description spells it.
- * @return `<instance>RST`, or the name reset_bit_names gives.
  */
-[[nodiscard]] inline auto reset_bit_name(std::string_view instance) -> std::string
+[[nodiscard]] inline auto reset_bit_candidates(std::string_view instance)
+    -> std::vector<std::string>
 {
-  auto const renamed = std::ranges::find(
-      reset_bit_names, instance, &std::pair<std::string_view, std::string_view>::first);
-  return renamed != reset_bit_names.end() ? std::string{renamed->second}
-                                          : std::string{instance} + "RST";
+  auto names = reset_bit_names
+             | std::views::filter([instance](auto const& row) { return row.first == instance; })
+             | std::views::transform([](auto const& row) { return std::string{row.second}; })
+             | std::ranges::to<std::vector>();
+  if(auto fallback = std::string{instance} + "RST"; not std::ranges::contains(names, fallback))
+  {
+    names.push_back(std::move(fallback));
+  }
+  return names;
+}
+
+/**
+ * @brief The names of reset_bit_candidates() joined by ` or `, for messages.
+ * @param instance Instance name as the description spells it.
+ */
+[[nodiscard]] inline auto reset_bit_choices(std::string_view instance) -> std::string
+{
+  return reset_bit_candidates(instance)
+       | std::views::join_with(std::string_view{" or "})
+       | std::ranges::to<std::string>();
 }
 
 /**
  * @brief The RCC reset bit of @p instance, searched in every register of @p rcc whose name
  *        holds `RSTR`, so a family with other reset register names, such as the STM32H5
- *        RCC_APB1LRSTR, resolves too. The name of reset_bit_names is searched first, then
- *        `<instance>RST`, so an instance renamed in one family keeps its own bit in the other,
- *        such as the STM32U5 UCPD1RST against the STM32H5 UCPDRST.
+ *        RCC_APB1LRSTR, resolves too. The names of reset_bit_names are searched first, in
+ *        table order, then `<instance>RST`, so an instance renamed in one family keeps its own
+ *        bit in the other, such as the STM32U5 UCPD1RST against the STM32H5 UCPDRST.
  * @param rcc Description of the RCC peripheral.
  * @param instance Instance name as the description spells it.
  * @return The register name and field, nullopt when no reset register of @p rcc has it.
@@ -69,7 +92,7 @@ struct reset_bit
 [[nodiscard]] inline auto reset_bit_of(peripheral_desc const& rcc, std::string_view instance)
     -> std::optional<reset_bit>
 {
-  for(auto const& name : {reset_bit_name(instance), std::string{instance} + "RST"})
+  for(auto const& name : reset_bit_candidates(instance))
   {
     for(auto const& reg : rcc.registers)
     {

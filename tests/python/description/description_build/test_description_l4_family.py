@@ -18,6 +18,7 @@ from popcorn.stm32.description._model import (
     PeripheralDesc,
     RegionDesc,
     RegisterDesc,
+    WriteEffect,
 )
 from popcorn.stm32.description._sources import facts_path, find_sources, read_db_part
 
@@ -803,3 +804,52 @@ def test_each_rcc_cicr_bit_clears_its_rcc_cifr_flag(name: str) -> None:
         r.field: r.target_field for r in rules if (r.reg, r.target_reg) == ("CICR", "CIFR")
     } == RCC_READY_CLEARS
     assert {r.effect for r in rules} == {CrossEffect.CLEAR}
+
+
+RCC_L49X_BITS = ["DMA2D", "GPIOI", "DCMI", "HASH1", "CAN2", "CRS", "I2C4", "RTCAPB"]
+RCC_RENAMED = {
+    "SPI3EN",
+    "SPI3SMEN",
+    "DFSDM1RST",
+    "DFSDM1EN",
+    "DFSDM1SMEN",
+    "SDMMC1RST",
+    "SDMMC1EN",
+    "SDMMC1SMEN",
+    "FWEN",
+}
+RCC_LINE_BITS = {
+    "STM32L471ZGTx": {"AES": False, "OTGFS": False, "LCD": False},
+    "STM32L475VGTx": {"AES": False, "OTGFS": True, "LCD": False},
+    "STM32L476RCTx": {"AES": False, "OTGFS": True, "LCD": True},
+    "STM32L486RGTx": {"AES": True, "OTGFS": True, "LCD": True},
+    "STM32L485JCYx": {"AES": True, "OTGFS": True, "LCD": False},
+}
+"""RM0351 6.4.11, 6.4.13, 6.4.17 and 6.4.19: whether each line keeps its AES, OTG FS and LCD
+reset, enable and sleep enable bits."""
+
+
+def _rcc_unit_bits(name: str) -> set[str]:
+    registers = _registers(_description(name), "RCC").values()
+    return {f.name for r in registers if "RSTR" in r.name or "ENR" in r.name for f in r.fields}
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", RCC_PARTS)
+def test_the_rcc_unit_bits_take_the_rm0351_names_and_the_lines_drop_theirs(name: str) -> None:
+    bits = _rcc_unit_bits(name)
+    assert bits >= RCC_RENAMED
+    assert "ADCSMEN" in bits and "ADCFSSMEN" not in bits
+    assert not [b for b in bits if any(b.startswith(unit) for unit in RCC_L49X_BITS)]
+    for unit, kept in RCC_LINE_BITS[name].items():
+        trio = {f"{unit}RST", f"{unit}EN", f"{unit}SMEN"}
+        assert trio <= bits if kept else not trio & bits
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", RCC_PARTS)
+def test_fwen_is_set_only_and_mcopre_takes_writes(name: str) -> None:
+    registers = _registers(_description(name), "RCC")
+    fwen = {f.name: f for f in registers["APB2ENR"].fields}["FWEN"]
+    assert fwen.on_write == WriteEffect.ONE_TO_SET
+    assert {f.name: f.acc for f in registers["CFGR"].fields}["MCOPRE"] == Access.READ_WRITE

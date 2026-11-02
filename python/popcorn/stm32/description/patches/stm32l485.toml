@@ -13,3 +13,24 @@ source = "CMSIS cmsis-device-l4 v1.7.5 stm32l485xx.h defines no LCD and no LCD_I
 
 [irqs]
 drop = ["LCD"]
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR1"]
+fields = ["LCDRST"]
+drop = true
+source = "RM0351 Rev 11, 6.4.13 RCC_APB1RSTR1: LCDRST is reserved for STM32L471/L4x5 devices. The STM32L486 SVD lists it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR1"]
+fields = ["LCDEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.19 RCC_APB1ENR1: LCDEN is reserved for STM32L471/L4x5 devices. The STM32L486 SVD lists it"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1SMENR1"]
+fields = ["LCDSMEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.25 RCC_APB1SMENR1: LCDSMEN is reserved for STM32L471/L4x5 devices. The STM32L486 SVD lists it"

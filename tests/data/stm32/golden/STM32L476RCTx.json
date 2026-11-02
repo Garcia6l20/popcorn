@@ -3,9 +3,9 @@
     "aliases": 0,
     "alternates": 335,
     "cross_rules": 10,
-    "fields": 9681,
+    "fields": 9656,
     "irqs": 81,
-    "patched_fields": 46,
+    "patched_fields": 48,
     "peripherals": 66,
     "regions": 9,
     "registers": 1256
@@ -15,10 +15,10 @@
   "tables": {
     "alternates": "1f0f6503080dd841bc440b6ba801e9a22573ac634a7190ca763879c54146ad03",
     "core": "cb8a4a9d4900b8cc47b22966bfb654e190e9d5156686276f0fd540a9dfdd28d4",
-    "fields": "60b5f501e38b09f928b3de351a55bd82900122f1d8b478370fd61b2e75ec88c0",
+    "fields": "fa1a5b47fab306d55c73f05a19374f79af4fb7ed2570dee19279755a74650277",
     "irqs": "9d2f2912def07b5d7aafbde9c057b65b4276072514ce17d10f6d2eb367fcf282",
     "peripherals": "59951b7bb326981dbe891ceb1b9a9157fa1bcd0bf1256c3ee06739d3efd9e28a",
     "regions": "61c5276aaeb9a23d8e18902ed9896dc40cba04a50e7175252f2c2054bcf8abce",
-    "registers": "54a196690b63eb49e446cffcf1665d97c9b22f912c0088691b7703bf051a70f8"
+    "registers": "e995ec1c90e75cf166a26fb32e7ff563ee9d5d0ced97adf7566e595249c3caa0"
   }
 }

@@ -440,3 +440,137 @@ target_reg = "CIFR"
 effect = "clear"
 pairs = { LSIRDYC = "LSIRDYF", LSERDYC = "LSERDYF", MSIRDYC = "MSIRDYF", HSIRDYC = "HSIRDYF", HSERDYC = "HSERDYF", PLLRDYC = "PLLRDYF", PLLSAI1RDYC = "PLLSAI1RDYF", PLLSAI2RDYC = "PLLSAI2RDYF", CSSC = "CSSF", LSECSSC = "LSECSSF" }
 source = "RM0351 Rev 11, 6.4.8 RCC_CIFR and 6.4.9 RCC_CICR: a write of 1 to xxxRDYC clears xxxRDYF, CSSC clears CSSF and LSECSSC clears LSECSSF"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB1RSTR"]
+fields = ["DMA2DRST"]
+drop = true
+source = "RM0351 Rev 11, 6.4.10 RCC_AHB1RSTR: DMA2DRST reserved for STM32L47x/L48x devices, the bits of DMA2D, GPIOI, DCMI, HASH, CAN2, CRS, I2C4 and the RTC APB clock of the STM32L49x/L4Ax. The four SVDs list them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB1ENR"]
+fields = ["DMA2DEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.16 RCC_AHB1ENR: DMA2DEN reserved for STM32L47x/L48x devices, the bits of DMA2D, GPIOI, DCMI, HASH, CAN2, CRS, I2C4 and the RTC APB clock of the STM32L49x/L4Ax. The four SVDs list them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB1SMENR"]
+fields = ["DMA2DSMEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.22 RCC_AHB1SMENR (RM0351 prints the title RCC_BDCR over this register): DMA2DSMEN reserved for STM32L47x/L48x devices, the bits of DMA2D, GPIOI, DCMI, HASH, CAN2, CRS, I2C4 and the RTC APB clock of the STM32L49x/L4Ax. The four SVDs list them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB2RSTR"]
+fields = ["GPIOIRST", "DCMIRST", "HASH1RST"]
+drop = true
+source = "RM0351 Rev 11, 6.4.11 RCC_AHB2RSTR: GPIOIRST, DCMIRST, HASH1RST reserved for STM32L47x/L48x devices, the bits of DMA2D, GPIOI, DCMI, HASH, CAN2, CRS, I2C4 and the RTC APB clock of the STM32L49x/L4Ax. The four SVDs list them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB2ENR"]
+fields = ["GPIOIEN", "DCMIEN", "HASH1EN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.17 RCC_AHB2ENR: GPIOIEN, DCMIEN, HASH1EN reserved for STM32L47x/L48x devices, the bits of DMA2D, GPIOI, DCMI, HASH, CAN2, CRS, I2C4 and the RTC APB clock of the STM32L49x/L4Ax. The four SVDs list them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB2SMENR"]
+fields = ["GPIOISMEN", "DCMISMEN", "HASH1SMEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.23 RCC_AHB2SMENR: GPIOISMEN, DCMISMEN, HASH1SMEN reserved for STM32L47x/L48x devices, the bits of DMA2D, GPIOI, DCMI, HASH, CAN2, CRS, I2C4 and the RTC APB clock of the STM32L49x/L4Ax. The four SVDs list them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR1"]
+fields = ["CAN2RST", "CRSRST"]
+drop = true
+source = "RM0351 Rev 11, 6.4.13 RCC_APB1RSTR1: CAN2RST, CRSRST reserved for STM32L47x/L48x devices, the bits of DMA2D, GPIOI, DCMI, HASH, CAN2, CRS, I2C4 and the RTC APB clock of the STM32L49x/L4Ax. The four SVDs list them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR1"]
+fields = ["CAN2EN", "CRSEN", "RTCAPBEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.19 RCC_APB1ENR1: CAN2EN, CRSEN, RTCAPBEN reserved for STM32L47x/L48x devices, the bits of DMA2D, GPIOI, DCMI, HASH, CAN2, CRS, I2C4 and the RTC APB clock of the STM32L49x/L4Ax. The four SVDs list them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1SMENR1"]
+fields = ["CAN2SMEN", "RTCAPBSMEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.25 RCC_APB1SMENR1: CAN2SMEN, RTCAPBSMEN reserved for STM32L47x/L48x devices, the bits of DMA2D, GPIOI, DCMI, HASH, CAN2, CRS, I2C4 and the RTC APB clock of the STM32L49x/L4Ax. The four SVDs list them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1RSTR2"]
+fields = ["I2C4RST"]
+drop = true
+source = "RM0351 Rev 11, 6.4.14 RCC_APB1RSTR2: I2C4RST reserved for STM32L47x/L48x devices, the bits of DMA2D, GPIOI, DCMI, HASH, CAN2, CRS, I2C4 and the RTC APB clock of the STM32L49x/L4Ax. The four SVDs list them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR2"]
+fields = ["I2C4EN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.20 RCC_APB1ENR2: I2C4EN reserved for STM32L47x/L48x devices, the bits of DMA2D, GPIOI, DCMI, HASH, CAN2, CRS, I2C4 and the RTC APB clock of the STM32L49x/L4Ax. The four SVDs list them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1SMENR2"]
+fields = ["I2C4SMEN"]
+drop = true
+source = "RM0351 Rev 11, 6.4.26 RCC_APB1SMENR2: I2C4SMEN reserved for STM32L47x/L48x devices, the bits of DMA2D, GPIOI, DCMI, HASH, CAN2, CRS, I2C4 and the RTC APB clock of the STM32L49x/L4Ax. The four SVDs list them"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1ENR1"]
+rename = { SP3EN = "SPI3EN" }
+source = "RM0351 Rev 11, 6.4.19 RCC_APB1ENR1: SPI3EN where the SVDs spell SP3EN"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB1SMENR1"]
+rename = { SP3SMEN = "SPI3SMEN" }
+source = "RM0351 Rev 11, 6.4.25 RCC_APB1SMENR1: SPI3SMEN where the SVDs spell SP3SMEN"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2RSTR"]
+rename = { DFSDMRST = "DFSDM1RST", SDMMCRST = "SDMMC1RST" }
+source = "RM0351 Rev 11, 6.4.15 RCC_APB2RSTR: DFSDM1RST where the SVDs spell DFSDMRST, SDMMC1RST where the SVDs spell SDMMCRST"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2ENR"]
+rename = { DFSDMEN = "DFSDM1EN", SDMMCEN = "SDMMC1EN", FIREWALLEN = "FWEN" }
+source = "RM0351 Rev 11, 6.4.21 RCC_APB2ENR: DFSDM1EN where the SVDs spell DFSDMEN, SDMMC1EN where the SVDs spell SDMMCEN, FWEN where the SVDs spell FIREWALLEN"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2SMENR"]
+rename = { DFSDMSMEN = "DFSDM1SMEN", SDMMCSMEN = "SDMMC1SMEN" }
+source = "RM0351 Rev 11, 6.4.27 RCC_APB2SMENR: DFSDM1SMEN where the SVDs spell DFSDMSMEN, SDMMC1SMEN where the SVDs spell SDMMCSMEN"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["AHB2SMENR"]
+rename = { ADCFSSMEN = "ADCSMEN" }
+source = "RM0351 Rev 11, 6.4.23 RCC_AHB2SMENR: ADCSMEN where the SVDs spell ADCFSSMEN"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["APB2ENR"]
+fields = ["FWEN"]
+on_write = "one_to_set"
+source = "RM0351 Rev 11, 6.4.21 RCC_APB2ENR: FWEN is set by software and reset by hardware, software can only write 1, a write of 0 has no effect"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CFGR"]
+fields = ["MCOPRE"]
+acc = "read_write"
+source = "RM0351 Rev 11, 6.4.3 RCC_CFGR: MCOPRE[2:0] read-write, set and cleared by software. The four SVDs give read-only"

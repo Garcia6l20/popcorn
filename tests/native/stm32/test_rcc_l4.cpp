@@ -1,4 +1,5 @@
 #include "../support/inert_model.hpp"
+#include "rcc_resets.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/clock.hpp>
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 namespace
 {
@@ -340,6 +342,20 @@ TEST_CASE("RM0351 6.4.3: HPRE divides SYSCLK into HCLK and the core clock, PPRE1
   CHECK(r.hz("pclk2") == mhz / 8);
 }
 
+TEST_CASE("RM0351 6.2.15: a timer runs at its APB clock, twice it when the APB divides")
+{
+  rig const r;
+  r.set("APB1ENR1", "TIM2EN", 1);
+  r.set("APB2ENR", "TIM1EN", 1);
+  CHECK(r.hz("tim2") == 4 * mhz);
+  CHECK(r.hz("tim1") == 4 * mhz);
+  CHECK(r.hz("tim3") == 0);
+  r.set("CFGR", "PPRE1", 5);
+  r.set("CFGR", "PPRE2", 7);
+  CHECK(r.hz("tim2") == 2 * mhz);
+  CHECK(r.hz("tim1") == mhz / 2);
+}
+
 TEST_CASE(
     "RM0351 6.4.8 and 6.4.9: a ready flag sets in RCC_CIFR under its RCC_CIER enable and its "
     "RCC_CICR bit clears it")
@@ -368,4 +384,65 @@ TEST_CASE("RM0351 6.4.1: MSIPLLEN takes a 1 only while the LSE is ready and clea
   CHECK(r.hz("msi") == 4 * mhz);
   r.set("BDCR", "LSEON", 0);
   CHECK(r.field("CR", "MSIPLLEN") == 0);
+}
+
+TEST_CASE(
+    "RM0351 6.4: the LL sequence runs the MSI at 4 and 48 MHz, then HSI16 and HSE as SYSCLK, and "
+    "SystemCoreClock equals HCLK at each step")
+{
+  stm32_fixture f{l476rc(), "l476_l4_rcc_ll", options()};
+  REQUIRE(f.run_to_stop({.max_instructions = icount{1'000'000}}).reason == stop_reason::user);
+  auto const log = f.log();
+  REQUIRE(log.size() == 19);
+  CHECK(log[0] == 0x0C00'0000u);
+  CHECK(log[1] == 0);
+  CHECK(log[2] == 4 * mhz);
+  CHECK(log[3] == 48 * mhz);
+  CHECK(log[6] == 16 * mhz);
+  CHECK(log[9] == hse_hz / 2);
+  CHECK(
+      std::vector<std::uint32_t>{log.begin() + 10, log.begin() + 14}
+      == std::vector<std::uint32_t>{8 * mhz, 4 * mhz, 1 * mhz, 4 * mhz});
+  CHECK(f.target->virtual_clock().core_hz() == hse_hz / 2);
+  CHECK(log[14] == 0x0000'2002);
+  CHECK(log[15] == 0x0000'8000);
+  CHECK(log[16] == 0x0100'0400);
+  CHECK(log[17] == 0x0000'5555);
+  CHECK(log[18] == 0xFFFF'FEBF);
+}
+
+TEST_CASE(
+    "RM0351 6.4.10 to 6.4.15: every RCC reset bit of the L476RC names an instance "
+    "and holds it in reset")
+{
+  auto const& part = l476rc();
+  for(auto const& reg : rcc_desc().registers)
+  {
+    if(not reg.name.contains("RSTR"))
+    {
+      continue;
+    }
+    for(auto const& bits : reg.fields)
+    {
+      CAPTURE(bits.name);
+      CHECK(std::ranges::any_of(part.peripherals, [&](auto const& peripheral) {
+        auto const found = stm32::reset_bit_of(rcc_desc(), peripheral.name);
+        return found and found->field == bits.name;
+      }));
+    }
+  }
+  rig const r;
+  r.set("AHB2RSTR", "ADCRST", 1);
+  r.set("AHB3RSTR", "QSPIRST", 1);
+  r.set("APB1RSTR1", "SPI3RST", 1);
+  r.set("APB2RSTR", "SDMMC1RST", 1);
+  r.set("AHB2RSTR", "OTGFSRST", 1);
+  for(auto const name :
+      {"ADC1", "ADC2", "ADC3", "ADC_Common", "QUADSPI", "SPI3", "SDMMC1", "OTG_FS"})
+  {
+    CAPTURE(name);
+    CHECK(r.f.target->held_in_reset(name));
+  }
+  r.set("AHB2RSTR", "ADCRST", 0);
+  CHECK_FALSE(r.f.target->held_in_reset("ADC1"));
 }
