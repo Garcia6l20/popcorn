@@ -116,7 +116,6 @@ constexpr auto l4_storage_rows = std::to_array<l4_storage>({
     {.name = "UART4",   .ip = "UART",   .version = "sci2_v2_1_Cube", .base = 0x4000'4C00},
     {.name = "LPUART1", .ip = "LPUART", .version = "sci3_v1_1_Cube", .base = 0x4000'8000},
     {.name = "DBGMCU",  .ip = "DBGMCU", .version = "",               .base = 0xE004'2000},
-    {.name = "CRS",     .ip = "CRS",    .version = "",               .base = 0x4000'6000},
 });
 
 auto toy_l4(std::span<l4_storage const> rows) -> part_description
@@ -254,9 +253,12 @@ TEST_CASE("an STM32L4 DBGMCU of no IP version attaches as storage")
   CHECK(machine_of(toy_l4(storage_row("DBGMCU"))).model("DBGMCU") == nullptr);
 }
 
-TEST_CASE("an STM32L4 CRS of no IP version attaches as storage")
+TEST_CASE("an STM32L4 CRS is refused, the L4 descriptions carry none")
 {
-  CHECK(machine_of(toy_l4(storage_row("CRS"))).model("CRS") == nullptr);
+  constexpr auto crs = std::to_array<l4_storage>({
+      {.name = "CRS", .ip = "CRS", .version = "", .base = 0x4000'6000}
+  });
+  CHECK_THROWS_AS((void)machine_of(toy_l4(crs)), config_error);
 }
 
 TEST_CASE("factories() of an STM32L4 part holds none of the storage instances")

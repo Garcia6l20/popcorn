@@ -1,0 +1,13 @@
+format = 1
+source = "ST's STM32L471, L475 and L476 SVDs against RM0351 Rev 11: blocks the SVDs list that no STM32L47x carries"
+
+[match]
+parts = ["STM32L47*"]
+svd = ["STM32L47[156].svd"]
+
+[peripherals]
+drop = ["CRS", "DCMI"]
+source = "RM0351 Rev 11, 2.2.2 Table 1: 0x4000 6000 is reserved and no DCMI is at 0x5005 0000 on STM32L47x/L48x, the CRS and DCMI are STM32L49x/L4Ax blocks. The CubeMX db lists neither and CMSIS stm32l471xx.h, stm32l475xx.h and stm32l476xx.h define neither, nor IRQ 82. The SVDs list both blocks and give IRQ 82 to CRS"
+
+[irqs]
+drop = ["CRS"]

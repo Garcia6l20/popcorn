@@ -1,0 +1,12 @@
+format = 1
+source = "STM32L471 line content: no USB OTG and no LCD, DS10741 Rev 3 Table 2"
+
+[match]
+parts = ["STM32L471*"]
+
+[peripherals]
+drop = ["OTG_FS_GLOBAL", "OTG_FS_HOST", "OTG_FS_DEVICE", "OTG_FS_PWRCLK", "LCD"]
+source = "DS10741 Rev 3, Table 2: STM32L471 has no USB OTG FS and no LCD. The CubeMX db lists neither and CMSIS stm32l471xx.h defines no OTG_FS_IRQn 67 and no LCD_IRQn 78. ST's STM32L471 SVD lists the four OTG blocks and the LCD with their IRQs"
+
+[irqs]
+drop = ["OTG_FS", "LCD"]

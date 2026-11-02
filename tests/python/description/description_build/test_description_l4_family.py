@@ -458,10 +458,9 @@ def test_the_otg_is_one_block_on_a_1_kb_page_with_its_irq_and_identity(name: str
 
 
 @pytest.mark.timeout(60)
-def test_the_otg_patch_leaves_the_l471_unmerged() -> None:
+def test_the_l471_carries_no_otg_block() -> None:
     names = {p.name for p in _description("STM32L471ZGTx").peripherals}
-    assert "OTG_FS" not in names
-    assert set(OTG_SPLIT) <= names
+    assert not {"OTG_FS", *OTG_SPLIT} & names
 
 
 @pytest.mark.timeout(60)
@@ -691,3 +690,88 @@ def test_the_added_otg_registers_follow_rm0351(name: str) -> None:
         for r, f in OTG_ADDED_ACCESS
     }
     assert access == OTG_ADDED_ACCESS
+
+
+CONTENT_PARTS: dict[str, set[int]] = {
+    "STM32L471ZGTx": {67, 78, 79},
+    "STM32L475VGTx": {78, 79},
+    "STM32L476RCTx": {79},
+    "STM32L485JEYx": {78},
+    "STM32L486ZGTx": set(),
+}
+"""One part per line and the IRQ numbers below 82 its CMSIS IRQn_Type leaves out, cmsis-device-l4
+v1.7.5 stm32l47Nxx.h and stm32l48Nxx.h, FPU_IRQn = 81 the last on every line."""
+IP_LESS = {"ADC_Common", "DBGMCU", "EXTI", "FIREWALL", "FLASH", "PWR", "VREFBUF"}
+"""The SVD blocks the CubeMX db gives no IP instance, kept on every line."""
+LINE_DROPS = {
+    "STM32L471": {"AES", "CRS", "DCMI", "LCD", *OTG_SPLIT},
+    "STM32L475": {"AES", "CRS", "DCMI", "LCD"},
+    "STM32L476": {"AES", "CRS", "DCMI"},
+    "STM32L485": {"CAN2", "CRS", "DCMI", "DMA2D", "GPIOI", "HASH", "I2C4", "LCD"},
+    "STM32L486": {"CAN2", "CRS", "DCMI", "DMA2D", "GPIOI", "HASH", "I2C4"},
+}
+LINE_PATCHES = {
+    "stm32l4_no_aes.toml": {"STM32L471", "STM32L475", "STM32L476"},
+    "stm32l4_l47_svd.toml": {"STM32L471", "STM32L475", "STM32L476"},
+    "stm32l471.toml": {"STM32L471"},
+    "stm32l475.toml": {"STM32L475"},
+    "stm32l48_svd.toml": {"STM32L485", "STM32L486"},
+    "stm32l485.toml": {"STM32L485"},
+    "stm32l4_otg.toml": {"STM32L475", "STM32L476", "STM32L485", "STM32L486"},
+}
+"""Each line patch and the lines whose parts load it."""
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", sorted(CONTENT_PARTS))
+def test_each_line_carries_its_cubemx_instances_and_its_cmsis_irqs(name: str) -> None:
+    description = _description(name)
+    names = {p.name for p in description.peripherals}
+    assert {p.name for p in description.peripherals if not p.ip_version} == IP_LESS
+    assert not LINE_DROPS[name[:9]] & names
+    assert {i.number for i in description.irqs} == set(range(82)) - CONTENT_PARTS[name]
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", ["STM32L485JEYx", "STM32L486ZGTx"])
+def test_the_l48x_lines_take_the_l486_svd_and_the_aes_irq(name: str) -> None:
+    require_pin_data()
+    assert find_sources(name).svd.name == "STM32L486.svd"
+    description = _description(name)
+    assert _peripheral(description, "AES").irqs == [79]
+    fmc = _peripheral(description, "FMC")
+    assert (fmc.ip, fmc.ip_version) == ("FMC", "nornand_fmc_v1_1")
+
+
+@pytest.mark.timeout(60)
+def test_the_l485_drops_the_lcd_the_l486_keeps() -> None:
+    assert "LCD" not in {p.name for p in _description("STM32L485JEYx").peripherals}
+    lcd = _peripheral(_description("STM32L486ZGTx"), "LCD")
+    assert (lcd.ip, lcd.ip_version) == ("LCD", "lcdc1_v1_2_Cube")
+
+
+@pytest.mark.timeout(120)
+def test_each_line_patch_loads_on_exactly_the_parts_of_its_lines() -> None:
+    pin_data = require_pin_data()
+    loaded: dict[str, set[str]] = {patch: set() for patch in LINE_PATCHES}
+    count = 0
+    for path in sorted((pin_data / "mcu").glob("STM32L4[78]*.xml")):
+        for name, _ in expand_refname(path.stem):
+            if read_db_part(path, name).die != "DIE415":
+                continue
+            count += 1
+            for patch in find_sources(name).patches:
+                if patch.name in loaded:
+                    loaded[patch.name].add(name)
+    assert count == 42
+    lines = {patch: {name[:9] for name in names} for patch, names in loaded.items()}
+    assert lines == LINE_PATCHES
+    assert {patch: len(names) for patch, names in loaded.items()} == {
+        "stm32l4_no_aes.toml": 35,
+        "stm32l4_l47_svd.toml": 35,
+        "stm32l471.toml": 10,
+        "stm32l475.toml": 6,
+        "stm32l48_svd.toml": 7,
+        "stm32l485.toml": 2,
+        "stm32l4_otg.toml": 32,
+    }

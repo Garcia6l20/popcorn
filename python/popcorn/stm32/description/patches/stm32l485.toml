@@ -1,0 +1,15 @@
+format = 1
+source = "STM32L485 line content: the STM32L486 register set without LCD. No STM32L485 SVD or datasheet exists. CubeMX STM32L485J(C-E)Yx and CMSIS stm32l485xx.h give the content"
+
+[match]
+parts = ["STM32L485*"]
+
+[svd]
+name = "STM32L486"
+
+[peripherals]
+drop = ["LCD"]
+source = "CMSIS cmsis-device-l4 v1.7.5 stm32l485xx.h defines no LCD and no LCD_IRQn 78, the CubeMX db lists no LCD instance for STM32L485J(C-E)Yx. Every other block equals stm32l486xx.h. The STM32L486 SVD lists the LCD with its IRQ"
+
+[irqs]
+drop = ["LCD"]

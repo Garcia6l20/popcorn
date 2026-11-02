@@ -398,10 +398,6 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "",
      .make            = [](board const&) { return crs_factory(); },
      .part_globs      = u5_h5_parts},
-    {.ip              = "CRS",
-     .ip_version_glob = "",
-     .make            = [](board const&) { return model_factory{}; },
-     .part_globs      = l4_parts},
 });
 
 auto any_glob(std::span<std::string_view const> globs, std::string_view text) -> bool

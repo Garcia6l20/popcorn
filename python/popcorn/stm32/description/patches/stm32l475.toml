@@ -1,0 +1,12 @@
+format = 1
+source = "STM32L475 line content: no LCD, DS10969 Rev 5 Table 2"
+
+[match]
+parts = ["STM32L475*"]
+
+[peripherals]
+drop = ["LCD"]
+source = "DS10969 Rev 5, Table 2: STM32L475 has no LCD. The CubeMX db lists none and CMSIS stm32l475xx.h defines no LCD_IRQn 78. ST's STM32L475 SVD lists the LCD with its IRQ"
+
+[irqs]
+drop = ["LCD"]
