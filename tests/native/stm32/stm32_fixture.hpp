@@ -59,6 +59,14 @@ inline auto l152rc() -> part_description const&
   return desc;
 }
 
+/** @brief The shipped STM32L476RCTx description, `POPCORN_L476RC_DESC`, read once: DIE415, 256 KB
+ *         flash, SRAM1 96 KB, SRAM2 32 KB. */
+inline auto l476rc() -> part_description const&
+{
+  static auto const desc = description_from("POPCORN_L476RC_DESC");
+  return desc;
+}
+
 /** @brief Whether the configure built the unshipped STM32L152RDTx description, Cat.4: its
  *         `POPCORN_L152RD_DESC` path is set and not `None`. */
 inline auto has_l152rd() -> bool

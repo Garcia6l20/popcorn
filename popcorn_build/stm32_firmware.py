@@ -11,6 +11,7 @@ from popcorn_build.firmware import (
     add_firmware,
     add_trustzone_firmware,
     cortex_m3,
+    cortex_m4f,
     cortex_m33,
     firmware_env,
 )
@@ -172,6 +173,21 @@ STM32L152XC = Chipset(
     usb_device_sources=STM32L152XE.usb_device_sources,
     prebuilt_dir="l152xc",
     preset=cortex_m3,
+)
+
+STM32L476XX = Chipset(
+    name="stm32l476xx",
+    define="STM32L476xx",
+    family="l4",
+    hal_package="stm32l4-hal-driver",
+    device_package="cmsis-device-l4",
+    startup="startup_stm32l476xx.s",
+    system="system_stm32l4xx.c",
+    test_linker="tests/firmware/common/stm32l476xx.ld",
+    example_linker="examples/stm32l476/STM32L476XX_FLASH.ld",
+    usb_device_sources=STM32U575.usb_device_sources,
+    prebuilt_dir="l476",
+    preset=cortex_m4f,
 )
 
 

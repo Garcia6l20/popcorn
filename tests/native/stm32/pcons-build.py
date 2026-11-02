@@ -26,6 +26,7 @@ l152rc = cached_st_description("STM32L152RCTx", "POPCORN_L152RC_DESC")
 l152rba = cached_st_description("STM32L152RBTxA", "POPCORN_L152RBA_DESC")
 l152rca = cached_st_description("STM32L152RCTxA", "POPCORN_L152RCA_DESC")
 l152rd = cached_st_description("STM32L152RDTx", "POPCORN_L152RD_DESC")
+l476rc = cached_st_description("STM32L476RCTx", "POPCORN_L476RC_DESC")
 u575_2m = cached_st_description("STM32U575ZITxQ", "POPCORN_U575_2M_DESC")
 h5_1m = cached_st_description("STM32H563ZGTx", "POPCORN_H5_1M_DESC")
 firmwares = {
@@ -98,6 +99,11 @@ l1_env = {
     "POPCORN_L152RCA_DESC": str(l152rca),
     "POPCORN_L152RD_DESC": str(l152rd),
     **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in l1_firmwares.items()},
+}
+l4_firmwares = {name: firmware("periph", name) for name in ("l476_l4_smoke",)}
+l4_env = {
+    "POPCORN_L476RC_DESC": str(l476rc),
+    **{f"POPCORN_FW_{name.upper()}": str(elf) for name, (elf, _) in l4_firmwares.items()},
 }
 u575_env = {
     "POPCORN_U575_DESC": str(u575),
@@ -237,6 +243,18 @@ smoke_l1.private.include_dirs.append(private_dir)
 for _, target in l1_firmwares.values():
     if target is not None:
         smoke_l1.depends(target)
+
+smoke_l4 = add_doctest(
+    "stm32-smoke-l4",
+    [here / "test_smoke_l4.cpp"],
+    static,
+    env=l4_env,
+    register=l476rc is not None,
+)
+smoke_l4.private.include_dirs.append(private_dir)
+for _, target in l4_firmwares.values():
+    if target is not None:
+        smoke_l4.depends(target)
 
 for program, source in (
     ("stm32-rcc-l1", "test_rcc_l1.cpp"),

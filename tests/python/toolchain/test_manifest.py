@@ -35,6 +35,7 @@ def test_the_repository_manifest_marks_the_firmware_packages_firmware_only() -> 
         "cmsis-device-h5",
         "stm32l1-hal-driver",
         "cmsis-device-l1",
+        "stm32l4-hal-driver",
         "cmsis-device-l4",
         "cmsis-core",
         "freertos-kernel",
@@ -51,9 +52,9 @@ def test_docs_only_packages_are_never_fetched_by_a_configure() -> None:
     assert not is_docs_only({"docs": "yes"})
 
 
-def test_the_l1_packages_pin_the_tag_their_version_names() -> None:
+def test_the_l1_and_l4_packages_pin_the_tag_their_version_names() -> None:
     manifest = tomllib.loads((Path(__file__).parents[3] / "deps.toml").read_text())["packages"]
-    for name in ("stm32l1-hal-driver", "cmsis-device-l1"):
+    for name in ("stm32l1-hal-driver", "cmsis-device-l1", "stm32l4-hal-driver", "cmsis-device-l4"):
         entry = manifest[name]
         assert entry["url"].endswith(f"/archive/refs/tags/v{entry['version']}.tar.gz")
         assert len(entry["sha256"]) == 64

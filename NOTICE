@@ -355,6 +355,16 @@ CMSIS device STM32L1, v2.3.4, Copyright STMicroelectronics
   License: Apache-2.0, see LICENSES/Apache-2.0.txt. The device headers and the
   STM32L152xB and STM32L152xE startup files and system file are used.
 
+STM32L4 HAL and LL drivers, v1.13.6, Copyright 2017 STMicroelectronics
+  https://github.com/STMicroelectronics/stm32l4xx-hal-driver
+  License: BSD-3-Clause, see LICENSES/stm32l4xx-hal-driver-LICENSE.md. The LL
+  driver headers are used.
+
+CMSIS device STM32L4, v1.7.5, Copyright STMicroelectronics
+  https://github.com/STMicroelectronics/cmsis-device-l4
+  License: Apache-2.0, see LICENSES/Apache-2.0.txt. The device headers and the
+  STM32L476xx startup file and system file are used.
+
 CMSIS 5, v5.9.0, Copyright Arm Limited
   https://github.com/ARM-software/CMSIS_5
   License: Apache-2.0, see LICENSES/Apache-2.0.txt. Only the core headers

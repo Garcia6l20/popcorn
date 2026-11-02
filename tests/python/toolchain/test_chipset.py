@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from elftools.elf.elffile import ELFFile
 
 from popcorn_build import examples, firmware, stm32_firmware
 from popcorn_build.config import build_dir
@@ -14,6 +15,7 @@ from popcorn_build.stm32_firmware import (
     STM32L152XB,
     STM32L152XC,
     STM32L152XE,
+    STM32L476XX,
     STM32U575,
     Chipset,
     add_ll_firmware,
@@ -341,3 +343,85 @@ def test_the_l1_smoke_firmware_links_the_cortex_m3_libgcc(chipset: Chipset) -> N
     loaded = [line for line in map_file.read_text().splitlines() if "libgcc.a" in line]
     assert loaded
     assert all(line.endswith("thumb/v7-m/nofp/libgcc.a") for line in loaded), loaded
+
+
+L4_SMOKE = PREBUILT / "l476" / "l4_smoke.elf"
+
+
+def test_the_l476_chipset_builds_on_the_cortex_m4f_with_the_l4_packages() -> None:
+    chipset = STM32L476XX
+    assert chipset.name == "stm32l476xx"
+    assert chipset.family == "l4"
+    assert chipset.preset is firmware.cortex_m4f
+    assert chipset.startup == "startup_stm32l476xx.s"
+    assert chipset.system == "system_stm32l4xx.c"
+    assert chipset.hal_package == "stm32l4-hal-driver"
+    assert chipset.device_package == "cmsis-device-l4"
+    assert chipset.linker is None
+    assert chipset.test_linker == "tests/firmware/common/stm32l476xx.ld"
+    assert chipset.prebuilt_dir == "l476"
+    assert chipset.usb_device_sources == STM32U575.usb_device_sources
+    assert chipset.defines == ("STM32L476xx", "USE_FULL_LL_DRIVER")
+    with pytest.raises(SystemExit, match="stm32l476xx has no TrustZone firmware files"):
+        chipset.require_trustzone()
+
+
+def test_the_l476_linker_script_is_sized_for_the_l476rc_with_sram2_apart() -> None:
+    text = (Path(__file__).parents[3] / STM32L476XX.test_linker).read_text()
+    assert "FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 256K" in text
+    assert "SRAM  (rwx) : ORIGIN = 0x20000000, LENGTH = 96K" in text
+    assert "SRAM2 (rwx) : ORIGIN = 0x10000000, LENGTH = 32K" in text
+    assert "_estack = ORIGIN(SRAM) + LENGTH(SRAM);" in text
+    lines = {line.split(":")[0].strip(): line for line in text.splitlines() if ":" in line}
+    assert "*(.RamFunc) *(.RamFunc*)" in lines[".data"]
+    assert lines[".data"].endswith("> SRAM AT > FLASH")
+    assert lines[".sram2 (NOLOAD)"].endswith("> SRAM2")
+
+
+def test_the_l476_example_links_the_project_script_with_sram2_apart() -> None:
+    root = Path(__file__).parents[3]
+    assert STM32L476XX.example_linker == "examples/stm32l476/STM32L476XX_FLASH.ld"
+    script = examples.st_linker_script(STM32L476XX, Path("device"), "x", 0)
+    assert script == root / STM32L476XX.example_linker
+    text = script.read_text()
+    assert "RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = 96K" in text
+    assert "RAM2  (xrw) : ORIGIN = 0x10000000, LENGTH = 32K" in text
+    assert "FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 256K" in text
+    assert "_estack = ORIGIN(RAM) + LENGTH(RAM);" in text
+    data = text[text.index("  .data :") : text.index("} >RAM AT> FLASH")]
+    assert "*(.RamFunc)" in data
+    assert "} >RAM2" in text[text.index("  .sram2 (NOLOAD) :") :]
+    derived = examples.offset_linker_script(text, 0x4000)
+    assert "FLASH (rx)  : ORIGIN = 0x08004000, LENGTH = " in derived
+
+
+def test_without_the_cross_toolchain_the_l476_smoke_uses_the_committed_elf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(firmware, "toolchain_found", False)
+    monkeypatch.setattr(firmware, "_envs", {})
+    monkeypatch.setattr(firmware, "_declared", {})
+    elf, target = add_ll_firmware("l4_smoke", [], chipset=STM32L476XX)
+    assert target is None
+    assert elf == L4_SMOKE
+    assert elf.is_file()
+    assert firmware.firmware("periph", "l476_l4_smoke") == (elf, None)
+
+
+def test_the_l476_smoke_vector_table_holds_16_plus_82_entries() -> None:
+    with L4_SMOKE.open("rb") as stream:
+        section = ELFFile(stream).get_section_by_name(".isr_vector")
+        assert section is not None
+        assert section["sh_addr"] == 0x08000000
+        assert section["sh_size"] == (16 + 82) * 4
+
+
+@pytest.mark.skipif(not firmware.toolchain_found, reason="no arm-none-eabi-gcc")
+def test_the_l476_smoke_firmware_links_the_cortex_m4f_libgcc() -> None:
+    map_file = build_dir / "firmware-m4f" / "tests" / "firmware" / "periph" / "l4_smoke"
+    map_file = map_file / "l476_l4_smoke.map"
+    if not map_file.is_file():
+        pytest.skip("the smoke firmware is not built")
+    loaded = [line for line in map_file.read_text().splitlines() if "libgcc.a" in line]
+    assert loaded
+    assert all(line.endswith("thumb/v7e-m+fp/hard/libgcc.a") for line in loaded), loaded
