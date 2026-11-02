@@ -1,0 +1,53 @@
+format = 1
+source = "RM0351 Rev 11 and the STM32L4 DIE415 CubeMX db against ST's STM32L471, L475, L476 and L486 SVDs: the core, memory, signature and IP identity of the STM32L47x/L48x lines. Line rules live in the line patches"
+
+[match]
+parts = ["STM32L47*", "STM32L48*"]
+
+[ip]
+renames_if_present = { GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPIOF", "GPIOG", "GPIOH"], DMA = ["DMA1", "DMA2"], SYS = ["SYSCFG"], COMP1 = ["COMP"], COMP2 = ["COMP"], OPAMP1 = ["OPAMP"], OPAMP2 = ["OPAMP"] }
+source = "The CubeMX db names one GPIO, DMA and SYS instance and COMP1, COMP2, OPAMP1, OPAMP2, the SVDs give the ports GPIOA to GPIOH, DMA1 and DMA2, SYSCFG and one COMP and one OPAMP block. RM0351 Rev 11, 2.2.2 Table 1 lists GPIOA to GPIOH, DMA1, DMA2, SYSCFG, COMP and OPAMP at the SVD bases"
+
+[irqs]
+drop = ["TAMP_STAMP", "RTC_WKUP", "RTC_ALARM", "COMP"]
+add = [
+  { number = 2, name = "TAMP_STAMP", peripheral = "EXTI" },
+  { number = 3, name = "RTC_WKUP", peripheral = "EXTI" },
+  { number = 41, name = "RTC_Alarm", peripheral = "EXTI" },
+  { number = 64, name = "COMP", peripheral = "EXTI" },
+]
+
+[core]
+reset_clock_hz = 4_000_000
+source = "RM0351 Rev 11, 6.2: the MSI is the system clock after reset, configured at 4 MHz, and 6.4.1 RCC_CR: MSIRANGE resets to 0110, range 6 around 4 MHz"
+
+[[resets]]
+peripheral = "DBGMCU"
+register = "IDCODE"
+reset = 0x10076415
+source = "RM0351 Rev 11, 48.6.1 DBGMCU_IDCODE: DEV_ID 0x415 for STM32L47x/L48x devices, REV_ID 0x1007 for revision 4, the latest RM0351 lists. The modelled revision is a choice, inferred. The SVDs give 0"
+
+[memory]
+source = "RM0351 Rev 11, 2.3 and DDI0439B 3.7: the Cortex-M4 bit-band alias of the SRAM1 at 0x2200 0000 onto 0x2000 0000 and of the peripherals at 0x4200 0000 onto 0x4000 0000, 32 MB each, for Cortex-M4 accesses only. SRAM2 at 0x1000 0000 lies outside the bit-band region. RM0351 Rev 11, 3.3.1 Tables 8 to 10: the system memory of bank 1 at 0x1FFF 0000 to 0x1FFF 6FFF and of bank 2 at 0x1FFF 8000 to 0x1FFF EFFF, 28 Kbytes each, the OTP area at 0x1FFF 7000 to 0x1FFF 73FF and the option bytes of bank 1 at 0x1FFF 7800 to 0x1FFF 780F, of bank 2 at 0x1FFF F800 to 0x1FFF F80F. 49.1 to 49.3: the device signature at 0x1FFF 7500 to 0x1FFF 75FF. The engine maps 1 KB pages, so the information block of each bank is one 4 KB read-only region: INFO from 0x1FFF 7000 with the OTP area, the signature and the bank 1 option bytes, OPTION2 from 0x1FFF F000 with the bank 2 option bytes. 3.3.6 and 3.3.7: the flash interface erases and programs the main memory, 3.3.1: it programs the OTP area, which cannot be erased, and 3.4.2: it programs the option bytes, so FLASH controls Flash, INFO and OPTION2. The system memory holds the ST bootloader, which popcorn does not carry: it reads as erased flash"
+controller = { Flash = "FLASH", INFO = "FLASH", OPTION2 = "FLASH" }
+add = [
+  { name = "SYSTEM", start = 0x1FFF0000, size = 0x7000, kind = "rom", acc = { read = true, write = false, execute = true }, secure = false },
+  { name = "INFO", start = 0x1FFF7000, size = 0x1000, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },
+  { name = "SYSTEM2", start = 0x1FFF8000, size = 0x7000, kind = "rom", acc = { read = true, write = false, execute = true }, secure = false },
+  { name = "OPTION2", start = 0x1FFFF000, size = 0x1000, kind = "rom", acc = { read = true, write = false, execute = false }, secure = false },
+  { name = "BB_SRAM1", start = 0x22000000, size = 0x02000000, kind = "bit_band", acc = { read = true, write = true, execute = false }, secure = false, physical = 0x20000000 },
+  { name = "BB_PERIPH", start = 0x42000000, size = 0x02000000, kind = "bit_band", acc = { read = true, write = true, execute = false }, secure = false, physical = 0x40000000 },
+]
+
+[signature]
+source = "RM0351 Rev 11, chapter 49 device electronic signature, in the INFO region from 0x1FFF 7000: 49.3 package data register at 0x1FFF 7500, PKG[4:0] by package, 00000 LQFP64, 00010 LQFP100, 00011 UFBGA132, 00100 LQFP144, UFBGA144, WLCSP72, WLCSP81 and WLCSP99. 49.1 unique device ID at 0x1FFF 7590, three contiguous words, here a fixed value: wafer coordinates 0x00320014, wafer 1, lot POPCORN in ASCII. 49.2 flash size data register at 0x1FFF 75E0, the flash size in Kbytes from the CubeMX part. DS10198 Rev 11, 3.15.1 Table 8 and 3.15.2 Table 9: factory calibration words, 12-bit ADC codes at VDDA = VREF+ = 3.0 V, here the datasheet typical values as V / 3.0 V x 4095, rounded: TS_CAL1 at 0x1FFF 75A8 = 1037 at 30 C from V30 0.76 V (Table 87), TS_CAL2 at 0x1FFF 75CA = 1310 at 110 C from V30 + 80 x Avg_Slope 2.5 mV/C = 0.96 V (Table 87), derived from two typicals, VREFINT at 0x1FFF 75AA = 1654 from VREFINT 1.212 V (Table 26). Typical values stand for factory-measured ones, inferred"
+region = "INFO"
+uid = 0x590
+flash_size = 0x5E0
+uid_words = [0x0032_0014, 0x4F52_4E01, 0x504F_5043]
+package = 0x500
+packages = { "LQFP64" = 0x00, "LQFP100" = 0x02, "UFBGA132" = 0x03, "LQFP144" = 0x04, "UFBGA144" = 0x04, "WLCSP72" = 0x04, "WLCSP81" = 0x04, "WLCSP99" = 0x04 }
+content = [
+  { offset = 0x5A8, data = [0x0D, 0x04, 0x76, 0x06] },
+  { offset = 0x5CA, data = [0x1E, 0x05] },
+]

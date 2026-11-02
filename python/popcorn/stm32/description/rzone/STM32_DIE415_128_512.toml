@@ -1,0 +1,39 @@
+format = 1
+rzone = "STM32_DIE415_128_512.xml"
+
+[core]
+fpu_double = false
+dsp = true
+trustzone = false
+mpu_regions = 8
+mpu_regions_secure = 0
+sau_regions = 0
+num_interrupts = 82
+source = "Cortex-M4 with FPU: RM0351 Rev 11, 1.1 and DS10198 Rev 11 3.1, the CMSIS device header sets __FPU_PRESENT 1. DDI0439B 1.5.3: the FPU is FPv4-SP, single precision, so no double precision. DDI0439B 3.3 Table 3-2: the Cortex-M4 implements the DSP instructions. ARMv7-M has no security extension, so no TrustZone and no SAU. mpu_regions 8: DDI0439B 2.1 gives an MPU of eight memory regions, the SVD says mpuPresent true. RM0351 Rev 11, 13.3 Table 61: FPU at position 81, the positions from 82 are STM32L49x/L4Ax lines, and stm32l476xx.h ends at FPU_IRQn = 81, so 82 lines on STM32L47x/L48x"
+
+[[regions]]
+name = "Flash"
+start = 0x08000000
+size = 0x00080000
+kind = "rom"
+acc = { read = true, write = false, execute = true }
+secure = false
+source = "RM0351 Rev 11, 3.3.1 Table 9: 512 Kbytes of main memory in two banks of 256 Kbytes, contiguous from 0x0800 0000. One region across both banks, the bank split is FLASH geometry. The flash interface writes it, the region is read-only to a plain store"
+
+[[regions]]
+name = "SRAM2"
+start = 0x10000000
+size = 0x00008000
+kind = "ram"
+acc = { read = true, write = true, execute = true }
+secure = false
+source = "RM0351 Rev 11, 2.4: 32 Kbytes SRAM2 on STM32L47x/L48x, Table 5 (memory mapping versus boot mode): SRAM2 at 0x1000 0000 to 0x1000 7FFF. 2.4: code executes from SRAM2 through the ICode bus without remap. The alias at 0x2004 0000 exists on STM32L49x/L4Ax only"
+
+[[regions]]
+name = "SRAM1"
+start = 0x20000000
+size = 0x00018000
+kind = "ram"
+acc = { read = true, write = true, execute = true }
+secure = false
+source = "RM0351 Rev 11, 2.4: 96 Kbytes SRAM1 on STM32L47x/L48x, Table 5 (memory mapping versus boot mode): SRAM1 at 0x2000 0000 to 0x2001 7FFF. ARMv7-M ARM B3.1: the SRAM region 0x2000 0000 to 0x3FFF FFFF is executable. The CubeMX Ram element gives 128, SRAM1 and SRAM2 together"

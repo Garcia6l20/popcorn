@@ -45,7 +45,9 @@ def _ram_flash(stem: str) -> tuple[int, int]:
 
 
 def test_the_l1_facts_files_are_the_eighteen_pairs_of_the_plan() -> None:
-    present = sorted(path.stem for path in FACTS_DIR.glob("STM32_DIE4[1-3]*.toml"))
+    present = sorted(
+        path.stem for path in FACTS_DIR.glob("STM32_DIE4*.toml") if _die(path.stem) in PAIRS
+    )
     assert present == sorted(STEMS)
     assert len(STEMS) == 18
 
