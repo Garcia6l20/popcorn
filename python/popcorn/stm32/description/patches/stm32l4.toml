@@ -6,7 +6,8 @@ parts = ["STM32L47*", "STM32L48*"]
 
 [ip]
 renames_if_present = { GPIO = ["GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE", "GPIOF", "GPIOG", "GPIOH"], DMA = ["DMA1", "DMA2"], SYS = ["SYSCFG"], COMP1 = ["COMP"], COMP2 = ["COMP"], OPAMP1 = ["OPAMP"], OPAMP2 = ["OPAMP"] }
-source = "The CubeMX db names one GPIO, DMA and SYS instance and COMP1, COMP2, OPAMP1, OPAMP2, the SVDs give the ports GPIOA to GPIOH, DMA1 and DMA2, SYSCFG and one COMP and one OPAMP block. RM0351 Rev 11, 2.2.2 Table 1 lists GPIOA to GPIOH, DMA1, DMA2, SYSCFG, COMP and OPAMP at the SVD bases"
+renames = { DAC1 = ["DAC1"] }
+source = "The CubeMX db names one GPIO, DMA and SYS instance and COMP1, COMP2, OPAMP1, OPAMP2, the SVDs give the ports GPIOA to GPIOH, DMA1 and DMA2, SYSCFG and one COMP and one OPAMP block. RM0351 Rev 11, 2.2.2 Table 1 lists GPIOA to GPIOH, DMA1, DMA2, SYSCFG, COMP and OPAMP at the SVD bases. The db instance DAC1 joins no SVD name, the SVD block DAC is renamed DAC1 by [peripherals], so DAC1 takes the identity of the db DAC1 by name"
 
 [irqs]
 drop = ["TAMP_STAMP", "RTC_WKUP", "RTC_ALARM", "COMP"]
@@ -51,3 +52,355 @@ content = [
   { offset = 0x5A8, data = [0x0D, 0x04, 0x76, 0x06] },
   { offset = 0x5CA, data = [0x1E, 0x05] },
 ]
+
+[peripherals]
+renames = { DAC = "DAC1" }
+source = "RM0351 Rev 11, 19 and 2.2.2 Table 1: the digital-to-analog converter is DAC1, its registers DAC_xxx. The four SVDs name the peripheral DAC"
+
+[[fields]]
+instances = ["USART1", "USART2", "USART3", "UART4", "UART5"]
+registers = ["BRR"]
+fields = ["DIV_Mantissa", "DIV_Fraction"]
+drop = true
+source = "RM0351 Rev 11, 40.8.4 USART_BRR: one field BRR[15:0], bits 15:4 BRR[15:4] = USARTDIV[15:4], bits 3:0 BRR[3:0]. The STM32L471, L475, L476 and L486 SVDs split it as DIV_Mantissa[15:4] and DIV_Fraction[3:0]"
+
+[[fields]]
+instances = ["USART1", "USART2", "USART3", "UART4", "UART5"]
+registers = ["BRR"]
+add = { name = "BRR", lsb = 0, width = 16, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 40.8.4 USART_BRR: BRR[15:0] read-write, reset 0x0000 0000, bits 31:16 reserved"
+
+[[fields]]
+instances = ["USART1", "USART2", "USART3", "UART4", "UART5", "LPUART1"]
+registers = ["CR1"]
+fields = ["DEAT0", "DEAT1", "DEAT2", "DEAT3", "DEAT4", "DEDT0", "DEDT1", "DEDT2", "DEDT3", "DEDT4"]
+drop = true
+source = "RM0351 Rev 11, 40.8.1 USART_CR1 and 41.7.1 LPUART_CR1: DEAT[4:0] in bits 25:21 and DEDT[4:0] in bits 20:16, one field each. The four SVDs split them into DEAT0 to DEAT4 and DEDT0 to DEDT4"
+
+[[fields]]
+instances = ["USART1", "USART2", "USART3", "UART4", "UART5", "LPUART1"]
+registers = ["CR1"]
+add = { name = "DEAT", lsb = 21, width = 5, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 40.8.1 USART_CR1 and 41.7.1 LPUART_CR1: DEAT[4:0], driver enable assertion time, bits 25:21, reset 0"
+
+[[fields]]
+instances = ["USART1", "USART2", "USART3", "UART4", "UART5", "LPUART1"]
+registers = ["CR1"]
+add = { name = "DEDT", lsb = 16, width = 5, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 40.8.1 USART_CR1 and 41.7.1 LPUART_CR1: DEDT[4:0], driver enable deassertion time, bits 20:16, reset 0"
+
+[[fields]]
+instances = ["USART1", "USART2", "USART3", "UART4", "UART5", "LPUART1"]
+registers = ["CR2"]
+fields = ["ADD0_3", "ADD4_7"]
+drop = true
+source = "RM0351 Rev 11, 40.8.2 USART_CR2 and 41.7.2 LPUART_CR2: ADD[7:0] in bits 31:24, one field. The four SVDs split it into ADD0_3 and ADD4_7"
+
+[[fields]]
+instances = ["USART1", "USART2", "USART3", "UART4", "UART5", "LPUART1"]
+registers = ["CR2"]
+add = { name = "ADD", lsb = 24, width = 8, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 40.8.2 USART_CR2 and 41.7.2 LPUART_CR2: ADD[7:0], address of the USART node, bits 31:24, reset 0"
+
+[[fields]]
+instances = ["USART1", "USART2", "USART3", "UART4", "UART5", "LPUART1"]
+registers = ["CR2"]
+rename = { TAINV = "DATAINV" }
+source = "RM0351 Rev 11, 40.8.2 USART_CR2 and 41.7.2 LPUART_CR2: bit 18 is DATAINV, binary data inversion. The four SVDs spell it TAINV"
+
+[[fields]]
+instances = ["USART1", "USART2", "USART3", "UART4", "UART5"]
+registers = ["CR2"]
+fields = ["ABRMOD0", "ABRMOD1"]
+drop = true
+source = "RM0351 Rev 11, 40.8.2 USART_CR2: ABRMOD[1:0] in bits 22:21, one field. The four SVDs split it into ABRMOD0 and ABRMOD1"
+
+[[fields]]
+instances = ["USART1", "USART2", "USART3", "UART4", "UART5"]
+registers = ["CR2"]
+add = { name = "ABRMOD", lsb = 21, width = 2, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 40.8.2 USART_CR2: ABRMOD[1:0], auto baud rate mode, bits 22:21, reset 0"
+
+[[fields]]
+instances = ["LPUART1"]
+registers = ["CR2"]
+fields = ["CLKEN"]
+drop = true
+source = "RM0351 Rev 11, 41.7.2 LPUART_CR2: bit 11 is reserved, the LPUART has no synchronous clock output. The four SVDs give it CLKEN"
+
+[[fields]]
+instances = ["USART1", "LPUART1"]
+registers = ["CR3"]
+rename = { UCESM_ = "UCESM" }
+source = "RM0351 Rev 11, 40.8.3 USART_CR3 and 41.7.3 LPUART_CR3: bit 23 is UCESM, clock enable in Stop mode. The four SVDs spell it UCESM_ on USART1 and LPUART1"
+
+[[fields]]
+instances = ["UART4", "UART5"]
+registers = ["CR3"]
+add = { name = "UCESM", lsb = 23, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 40.8.3 USART_CR3: bit 23 UCESM, USART clock enable in Stop mode, read-write, reset 0, on every USART and UART instance. The four SVDs leave it out of UART4 and UART5"
+
+[[resets]]
+peripheral = "LPUART1"
+register = "ISR"
+reset = 0x000000C0
+source = "RM0351 Rev 11, 41.7.6 LPUART_ISR: reset value 0x0000 00C0, TXE and TC. The four SVDs give 0x020000C0"
+
+[[fields]]
+instances = ["DBGMCU"]
+registers = ["APB1_FZR1"]
+rename = { DBG_TIMER2_STOP = "DBG_TIM2_STOP", DBG_TIMER6_STOP = "DBG_TIM6_STOP", DBG_LPTIMER_STOP = "DBG_LPTIM1_STOP", DBG_CAN_STOP = "DBG_CAN1_STOP" }
+source = "RM0351 Rev 11, 48.16.4 DBGMCU_APB1FZR1: bit 0 DBG_TIM2_STOP, bit 4 DBG_TIM6_STOP, bit 25 DBG_CAN1_STOP, bit 31 DBG_LPTIM1_STOP. The four SVDs spell them DBG_TIMER2_STOP, DBG_TIMER6_STOP, DBG_CAN_STOP and DBG_LPTIMER_STOP"
+
+[[resets]]
+peripheral = "EXTI"
+register = "IMR2"
+reset = 0x00000087
+source = "RM0351 Rev 11, 14.5.7 EXTI_IMR2: reset value 0x0000 0087 for STM32L47x/L48x devices, lines 32 to 34 and 39 unmasked. The four SVDs give 0xFFFFFF87"
+
+[[resets]]
+peripheral = "GPIOA"
+register = "MODER"
+reset = 0xABFFFFFF
+source = "RM0351 Rev 11, 8.5.1 GPIOx_MODER: reset value 0xABFF FFFF (for port A). The four SVDs give 0xA8000000"
+
+[[resets]]
+peripheral = "GPIOB"
+register = "MODER"
+reset = 0xFFFFFEBF
+source = "RM0351 Rev 11, 8.5.1 GPIOx_MODER: reset value 0xFFFF FEBF (for port B). The four SVDs give 0x00000280"
+
+[[resets]]
+peripheral = "GPIOC"
+register = "MODER"
+reset = 0xFFFFFFFF
+source = "RM0351 Rev 11, 8.5.1 GPIOx_MODER: reset value on STM32L47x/L48x 0xFFFF FFFF (for ports C..G). The four SVDs give 0"
+
+[[resets]]
+peripheral = "GPIOD"
+register = "MODER"
+reset = 0xFFFFFFFF
+source = "RM0351 Rev 11, 8.5.1 GPIOx_MODER: reset value on STM32L47x/L48x 0xFFFF FFFF (for ports C..G). The four SVDs give 0"
+
+[[resets]]
+peripheral = "GPIOE"
+register = "MODER"
+reset = 0xFFFFFFFF
+source = "RM0351 Rev 11, 8.5.1 GPIOx_MODER: reset value on STM32L47x/L48x 0xFFFF FFFF (for ports C..G). The four SVDs give 0"
+
+[[resets]]
+peripheral = "GPIOF"
+register = "MODER"
+reset = 0xFFFFFFFF
+source = "RM0351 Rev 11, 8.5.1 GPIOx_MODER: reset value on STM32L47x/L48x 0xFFFF FFFF (for ports C..G). The four SVDs give 0"
+
+[[resets]]
+peripheral = "GPIOG"
+register = "MODER"
+reset = 0xFFFFFFFF
+source = "RM0351 Rev 11, 8.5.1 GPIOx_MODER: reset value on STM32L47x/L48x 0xFFFF FFFF (for ports C..G). The four SVDs give 0"
+
+[[resets]]
+peripheral = "GPIOH"
+register = "MODER"
+reset = 0x0000000F
+source = "RM0351 Rev 11, 8.5.1 GPIOx_MODER: reset value on STM32L47x/L48x 0x0000 000F (for port H). Table 42 prints all ones for x = C..I, against the device-specific 8.5.1 statement, which wins, inferred, board check. The four SVDs give 0"
+
+[[resets]]
+peripheral = "GPIOA"
+register = "OSPEEDR"
+reset = 0x0C000000
+source = "RM0351 Rev 11, 8.5.3 GPIOx_OSPEEDR: reset value 0x0C00 0000 for port A. The four SVDs give 0"
+
+[[resets]]
+peripheral = "GPIOB"
+register = "OSPEEDR"
+reset = 0x00000000
+source = "RM0351 Rev 11, 8.5.3 GPIOx_OSPEEDR: reset value 0x0000 0000 for the ports other than A. The four SVDs give 0x000000C0 on port B"
+
+[[resets]]
+peripheral = "TIM1"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0351 Rev 11, 30.4.14 TIMx_ARR (x = 1, 8): reset value 0xFFFF. The four SVDs give 0"
+
+[[resets]]
+peripheral = "TIM8"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0351 Rev 11, 30.4.14 TIMx_ARR (x = 1, 8): reset value 0xFFFF. The four SVDs give 0"
+
+[[resets]]
+peripheral = "TIM6"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0351 Rev 11, 33.4.8 TIMx_ARR (x = 6 to 7): reset value 0xFFFF. The four SVDs give 0"
+
+[[resets]]
+peripheral = "TIM7"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0351 Rev 11, 33.4.8 TIMx_ARR (x = 6 to 7): reset value 0xFFFF. The four SVDs give 0"
+
+[[resets]]
+peripheral = "TIM15"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0351 Rev 11, 32.6.12 TIM15_ARR: reset value 0xFFFF. The four SVDs give 0"
+
+[[resets]]
+peripheral = "TIM16"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0351 Rev 11, 32.7.11 TIMx_ARR (x = 16 to 17): reset value 0xFFFF. The four SVDs give 0"
+
+[[resets]]
+peripheral = "TIM17"
+register = "ARR"
+reset = 0xFFFF
+source = "RM0351 Rev 11, 32.7.11 TIMx_ARR (x = 16 to 17): reset value 0xFFFF. The four SVDs give 0"
+
+[[resets]]
+peripheral = "TIM2"
+register = "ARR"
+reset = 0xFFFFFFFF
+source = "RM0351 Rev 11, 31.4.15 TIMx_ARR (x = 2 to 5): reset value 0xFFFF FFFF. The four SVDs give 0"
+
+[[resets]]
+peripheral = "TIM3"
+register = "ARR"
+reset = 0xFFFFFFFF
+source = "RM0351 Rev 11, 31.4.15 TIMx_ARR (x = 2 to 5): reset value 0xFFFF FFFF, bits 31:16 reserved on TIM3 and TIM4, as the register map of 31.4.26 prints ones for them. The four SVDs give 0"
+
+[[resets]]
+peripheral = "TIM4"
+register = "ARR"
+reset = 0xFFFFFFFF
+source = "RM0351 Rev 11, 31.4.15 TIMx_ARR (x = 2 to 5): reset value 0xFFFF FFFF, bits 31:16 reserved on TIM3 and TIM4, as the register map of 31.4.26 prints ones for them. The four SVDs give 0"
+
+[[resets]]
+peripheral = "TIM5"
+register = "ARR"
+reset = 0xFFFFFFFF
+source = "RM0351 Rev 11, 31.4.15 TIMx_ARR (x = 2 to 5): reset value 0xFFFF FFFF. The four SVDs give 0"
+
+[[resets]]
+peripheral = "TIM16"
+register = "OR2"
+reset = 0x00000001
+source = "RM0351 Rev 11, 32.7.18 TIM16_OR2: reset value 0x0000 0001. The four SVDs give 0"
+
+[[resets]]
+peripheral = "TIM17"
+register = "OR2"
+reset = 0x00000001
+source = "RM0351 Rev 11, 32.7.20 TIM17_OR2: reset value 0x0000 0001. The four SVDs give 0"
+
+[[resets]]
+peripheral = "ADC1"
+register = "CR"
+reset = 0x20000000
+source = "RM0351 Rev 11, 18.7.3 ADC_CR: reset value 0x2000 0000, DEEPPWD set. The four SVDs give 0"
+
+[[resets]]
+peripheral = "ADC1"
+register = "CFGR"
+reset = 0x80000000
+source = "RM0351 Rev 11, 18.7.4 ADC_CFGR: reset value 0x8000 0000, JQDIS set. The four SVDs give 0"
+
+[[resets]]
+peripheral = "ADC1"
+register = "TR2"
+reset = 0x00FF0000
+source = "RM0351 Rev 11, 18.7.9 ADC_TR2: reset value 0x00FF 0000. The four SVDs give 0x0FFF0000"
+
+[[resets]]
+peripheral = "ADC1"
+register = "TR3"
+reset = 0x00FF0000
+source = "RM0351 Rev 11, 18.7.10 ADC_TR3: reset value 0x00FF 0000. The four SVDs give 0x0FFF0000"
+
+[[resets]]
+peripheral = "ADC2"
+register = "CR"
+reset = 0x20000000
+source = "RM0351 Rev 11, 18.7.3 ADC_CR: reset value 0x2000 0000, DEEPPWD set. The four SVDs give 0"
+
+[[resets]]
+peripheral = "ADC2"
+register = "CFGR"
+reset = 0x80000000
+source = "RM0351 Rev 11, 18.7.4 ADC_CFGR: reset value 0x8000 0000, JQDIS set. The four SVDs give 0"
+
+[[resets]]
+peripheral = "ADC2"
+register = "TR2"
+reset = 0x00FF0000
+source = "RM0351 Rev 11, 18.7.9 ADC_TR2: reset value 0x00FF 0000. The four SVDs give 0x0FFF0000"
+
+[[resets]]
+peripheral = "ADC2"
+register = "TR3"
+reset = 0x00FF0000
+source = "RM0351 Rev 11, 18.7.10 ADC_TR3: reset value 0x00FF 0000. The four SVDs give 0x0FFF0000"
+
+[[resets]]
+peripheral = "ADC3"
+register = "CR"
+reset = 0x20000000
+source = "RM0351 Rev 11, 18.7.3 ADC_CR: reset value 0x2000 0000, DEEPPWD set. The four SVDs give 0"
+
+[[resets]]
+peripheral = "ADC3"
+register = "CFGR"
+reset = 0x80000000
+source = "RM0351 Rev 11, 18.7.4 ADC_CFGR: reset value 0x8000 0000, JQDIS set. The four SVDs give 0"
+
+[[resets]]
+peripheral = "ADC3"
+register = "TR2"
+reset = 0x00FF0000
+source = "RM0351 Rev 11, 18.7.9 ADC_TR2: reset value 0x00FF 0000. The four SVDs give 0x0FFF0000"
+
+[[resets]]
+peripheral = "ADC3"
+register = "TR3"
+reset = 0x00FF0000
+source = "RM0351 Rev 11, 18.7.10 ADC_TR3: reset value 0x00FF 0000. The four SVDs give 0x0FFF0000"
+
+[[resets]]
+peripheral = "SAI1"
+register = "ASR"
+reset = 0x00000008
+source = "RM0351 Rev 11, 43.5.7 SAI_ASR: reset value 0x0000 0008, FREQ set. The four SVDs give 0"
+
+[[resets]]
+peripheral = "SAI1"
+register = "BSR"
+reset = 0x00000008
+source = "RM0351 Rev 11, 43.5.15 SAI_BSR: reset value 0x0000 0008, FREQ set. The four SVDs give 0"
+
+[[resets]]
+peripheral = "SAI2"
+register = "ASR"
+reset = 0x00000008
+source = "RM0351 Rev 11, 43.5.7 SAI_ASR: reset value 0x0000 0008, FREQ set. The four SVDs give 0"
+
+[[resets]]
+peripheral = "SAI2"
+register = "BSR"
+reset = 0x00000008
+source = "RM0351 Rev 11, 43.5.15 SAI_BSR: reset value 0x0000 0008, FREQ set. The four SVDs give 0"
+
+[[resets]]
+peripheral = "DAC1"
+register = "SHRR"
+reset = 0x00010001
+source = "RM0351 Rev 11, 19.7.20 DAC_SHRR: reset value 0x0001 0001, TREFRESH1 and TREFRESH2 at 1. The four SVDs give 0x00000001"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["RCR"]
+fields = ["REP"]
+width = 16
+source = "RM0351 Rev 11, 30.4.15 TIMx_RCR (x = 1, 8): REP[15:0], 16 bits. The four SVDs give 8 bits"

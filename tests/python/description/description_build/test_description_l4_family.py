@@ -197,3 +197,108 @@ def test_the_calibration_words_are_the_datasheet_typicals() -> None:
         for offset in (0x5A8, 0x5AA, 0x5CA)
     }
     assert words == {0x5A8: 1037, 0x5AA: 1654, 0x5CA: 1310}
+
+
+USARTS = ["USART1", "USART2", "USART3", "UART4", "UART5"]
+RESETS: dict[tuple[str, str], int] = {
+    ("EXTI", "IMR2"): 0x0000_0087,
+    ("GPIOA", "MODER"): 0xABFF_FFFF,
+    ("GPIOB", "MODER"): 0xFFFF_FEBF,
+    **{(f"GPIO{port}", "MODER"): 0xFFFF_FFFF for port in "CDEFG"},
+    ("GPIOH", "MODER"): 0x0000_000F,
+    ("GPIOA", "OSPEEDR"): 0x0C00_0000,
+    ("GPIOB", "OSPEEDR"): 0,
+    ("LPUART1", "ISR"): 0x0000_00C0,
+    **{(tim, "ARR"): 0xFFFF for tim in ("TIM1", "TIM6", "TIM7", "TIM8", "TIM15", "TIM16", "TIM17")},
+    **{(tim, "ARR"): 0xFFFF_FFFF for tim in ("TIM2", "TIM3", "TIM4", "TIM5")},
+    ("TIM16", "OR2"): 1,
+    ("TIM17", "OR2"): 1,
+    **{(adc, "CR"): 0x2000_0000 for adc in ("ADC1", "ADC2", "ADC3")},
+    **{(adc, "CFGR"): 0x8000_0000 for adc in ("ADC1", "ADC2", "ADC3")},
+    **{(adc, "TR2"): 0x00FF_0000 for adc in ("ADC1", "ADC2", "ADC3")},
+    **{(adc, "TR3"): 0x00FF_0000 for adc in ("ADC1", "ADC2", "ADC3")},
+    **{(sai, reg): 8 for sai in ("SAI1", "SAI2") for reg in ("ASR", "BSR")},
+    ("DAC1", "SHRR"): 0x0001_0001,
+}
+"""Every register reset 03a2 corrects, with its RM0351 value."""
+
+
+def _fields(
+    description: PartDescription, peripheral: str, register: str
+) -> dict[str, tuple[int, int]]:
+    reg = next(r for r in _peripheral(description, peripheral).registers if r.name == register)
+    return {f.name: (f.lsb, f.width) for f in reg.fields}
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", LINE_PARTS)
+def test_the_usart_brr_is_one_field_and_the_lpuart_brr_keeps_twenty_bits(name: str) -> None:
+    description = _description(name)
+    for usart in USARTS:
+        assert _fields(description, usart, "BRR") == {"BRR": (0, 16)}, usart
+    assert _fields(description, "LPUART1", "BRR") == {"BRR": (0, 20)}
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", LINE_PARTS)
+def test_the_usart_control_fields_take_the_rm0351_names(name: str) -> None:
+    description = _description(name)
+    for usart in [*USARTS, "LPUART1"]:
+        cr1 = _fields(description, usart, "CR1")
+        cr2 = _fields(description, usart, "CR2")
+        cr3 = _fields(description, usart, "CR3")
+        assert (cr1["DEAT"], cr1["DEDT"]) == ((21, 5), (16, 5)), usart
+        assert not {f"DEAT{i}" for i in range(5)} & set(cr1), usart
+        assert (cr2["ADD"], cr2["DATAINV"]) == ((24, 8), (18, 1)), usart
+        assert not {"ADD0_3", "ADD4_7", "TAINV"} & set(cr2), usart
+        assert cr3["UCESM"] == (23, 1), usart
+        assert "UCESM_" not in cr3, usart
+        if usart == "LPUART1":
+            assert not {"ABRMOD", "CLKEN"} & set(cr2)
+        else:
+            assert (cr2["ABRMOD"], cr2["CLKEN"]) == ((21, 2), (11, 1)), usart
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", LINE_PARTS)
+def test_the_dbgmcu_freeze_bits_take_the_rm0351_names(name: str) -> None:
+    fzr1 = _fields(_description(name), "DBGMCU", "APB1_FZR1")
+    assert {
+        k: fzr1[k] for k in ("DBG_TIM2_STOP", "DBG_TIM6_STOP", "DBG_CAN1_STOP", "DBG_LPTIM1_STOP")
+    } == {
+        "DBG_TIM2_STOP": (0, 1),
+        "DBG_TIM6_STOP": (4, 1),
+        "DBG_CAN1_STOP": (25, 1),
+        "DBG_LPTIM1_STOP": (31, 1),
+    }
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", LINE_PARTS)
+def test_every_corrected_reset_holds_its_rm0351_value(name: str) -> None:
+    description = _description(name)
+    got = {
+        (peripheral, register): next(
+            r for r in _peripheral(description, peripheral).registers if r.name == register
+        ).reset
+        for peripheral, register in RESETS
+    }
+    assert got == RESETS
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", LINE_PARTS)
+def test_the_advanced_timer_repetition_counter_has_sixteen_bits(name: str) -> None:
+    description = _description(name)
+    assert _fields(description, "TIM1", "RCR")["REP"] == (0, 16)
+    assert _fields(description, "TIM8", "RCR")["REP"] == (0, 16)
+    assert _fields(description, "TIM15", "RCR")["REP"] == (0, 8)
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", LINE_PARTS)
+def test_the_dac_is_dac1_with_its_cubemx_identity(name: str) -> None:
+    description = _description(name)
+    assert "DAC" not in {p.name for p in description.peripherals}
+    dac = _peripheral(description, "DAC1")
+    assert (dac.ip, dac.ip_version) == ("DAC", "dacif_v2_0_Cube")
