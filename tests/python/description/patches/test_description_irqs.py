@@ -127,6 +127,37 @@ def test_drop_then_add_of_one_number_leaves_only_the_added_owner() -> None:
     assert table.by_peripheral["B"] == [5]
 
 
+def test_a_dropped_peripheral_whose_irq_stays_in_the_table_is_refused() -> None:
+    device = _device([_peripheral("A", [(5, "FOO")]), _peripheral("B", [(6, "BAR")])])
+    with pytest.raises(DescriptionError) as excinfo:
+        build_irq_table(device, None, [], rzone_num=None, owners={"A": None})
+    assert excinfo.value.key == "peripherals.drop.A"
+    assert excinfo.value.expected == "its IRQ FOO 5 dropped by [irqs] drop"
+
+
+def test_a_dropped_peripheral_with_its_irq_dropped_is_accepted() -> None:
+    device = _device([_peripheral("A", [(5, "FOO")]), _peripheral("B", [(6, "BAR")])])
+    table = build_irq_table(
+        device, None, [PatchIrqs(drop=["FOO"])], rzone_num=None, owners={"A": None}
+    )
+    assert {irq.number for irq in table.irqs} == {6}
+    assert table.by_peripheral == {"B": [6]}
+
+
+def test_a_dropped_peripheral_sharing_its_irq_with_a_kept_one_is_accepted() -> None:
+    device = _device([_peripheral("A", [(5, "FOO")]), _peripheral("B", [(5, "FOO")])])
+    table = build_irq_table(device, None, [], rzone_num=None, owners={"A": None})
+    assert {irq.number for irq in table.irqs} == {5}
+    assert table.by_peripheral == {"B": [5]}
+
+
+def test_a_dropped_peripheral_whose_irq_an_add_moves_is_accepted() -> None:
+    device = _device([_peripheral("A", [(5, "FOO")]), _peripheral("B", [])])
+    patch = PatchIrqs(drop=["FOO"], add=[IrqAdd(number=5, name="FOO", peripheral="B")])
+    table = build_irq_table(device, None, [patch], rzone_num=None, owners={"A": None})
+    assert table.by_peripheral == {"B": [5]}
+
+
 def test_add_appends_a_new_irq_and_peripheral_entry() -> None:
     device = _device([_peripheral("A", [(5, "FOO")]), _peripheral("B", [])])
     add = IrqAdd(number=9, name="NEWIRQ", peripheral="B")

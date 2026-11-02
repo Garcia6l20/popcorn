@@ -339,7 +339,8 @@ def test_a_chained_merge_moves_the_first_merge_to_the_last_into(tmp_path: Path) 
 def test_the_irq_table_keys_merged_and_dropped_irqs_by_their_owner(tmp_path: Path) -> None:
     drop = '[peripherals]\ndrop = ["TIM2"]\nsource = "toy"\n'
     loaded = load_patches([_write(tmp_path, drop + _merge())], part="TOY1", svd_name="toy.svd")
-    table = build_irq_table(_device(), None, [], None, owners=peripheral_owners(loaded))
+    irqs = [PatchIrqs(drop=["TIM2"])]
+    table = build_irq_table(_device(), None, irqs, None, owners=peripheral_owners(loaded))
     assert table.by_peripheral == {"OTG_FS_GLOBAL": [67, 68]}
 
 

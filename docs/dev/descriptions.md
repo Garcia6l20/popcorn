@@ -72,7 +72,9 @@ the `[aliases]` rule pairs a renamed `SEC_<name>` with the peripheral `<name>` a
 rule names the new name. A renamed peripheral must exist and not be dropped, each name is
 renamed once across the files, and the new name must be free, otherwise the build raises
 `DescriptionError` keyed `peripherals.renames.<name>`. The patch report counts them in
-`peripherals_dropped` and `peripherals_renamed`.
+`peripherals_dropped` and `peripherals_renamed`. A dropped peripheral's SVD interrupts that no kept
+peripheral lists are dropped by an `[irqs]` rule too, or the build raises `DescriptionError` keyed
+`peripherals.drop.<name>`.
 
 A `[[peripheral_merges]]` rule folds SVD peripherals that split one register block back into
 one peripheral:
