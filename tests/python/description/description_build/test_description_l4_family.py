@@ -877,3 +877,14 @@ def test_the_three_plls_carry_no_pdiv_divider(name: str) -> None:
     registers = _registers(_description(name), "RCC")
     for register, fields in RCC_PLL_FIELDS.items():
         assert {f.name for f in registers[register].fields} == fields
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", RCC_PARTS)
+def test_ccipr_and_csr_take_the_rm0351_names(name: str) -> None:
+    registers = _registers(_description(name), "RCC")
+    ccipr = {f.name for f in registers["CCIPR"].fields}
+    csr = {f.name for f in registers["CSR"].fields}
+    assert "DFSDM1SEL" in ccipr and "DFSDMSEL" not in ccipr
+    assert {"LPWRRSTF", "FWRSTF"} <= csr
+    assert not {"LPWRSTF", "FIREWALLRSTF"} & csr

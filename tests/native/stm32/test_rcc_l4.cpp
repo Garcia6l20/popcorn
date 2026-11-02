@@ -598,3 +598,205 @@ TEST_CASE(
   CHECK(r.field("PLLCFGR", "PLLSRC") == pll_hse);
   CHECK(r.field("PLLCFGR", "PLLM") == 0);
 }
+
+TEST_CASE(
+    "RM0351 6.4.28: the USART, UART, LPUART, I2C and LPTIM kernel clocks follow their RCC_CCIPR "
+    "selection and their enable bit")
+{
+  rig const r;
+  r.start("HSION");
+  r.set("CSR", "LSION", 1);
+  r.set("BDCR", "LSEON", 1);
+  r.idle();
+  r.set("CFGR", "PPRE1", 4);
+  r.set("APB2ENR", "USART1EN", 1);
+  r.set("APB1ENR1", "USART2EN", 1);
+  r.set("APB1ENR2", "LPUART1EN", 1);
+  r.set("APB1ENR1", "I2C1EN", 1);
+  r.set("APB1ENR1", "LPTIM1EN", 1);
+  CHECK(r.hz("usart1") == 4 * mhz);
+  CHECK(r.hz("usart2") == 2 * mhz);
+  CHECK(r.hz("usart3") == 0);
+  CHECK(r.hz("lpuart1") == 2 * mhz);
+  CHECK(r.hz("i2c1") == 2 * mhz);
+  CHECK(r.hz("lptim1") == 2 * mhz);
+  r.write("CCIPR", 1u << 0 | 2u << 2 | 3u << 10 | 3u << 12 | 1u << 18);
+  CHECK(r.hz("usart1") == 4 * mhz);
+  CHECK(r.hz("usart2") == 16 * mhz);
+  CHECK(r.hz("lpuart1") == 32'768);
+  CHECK(r.hz("i2c1") == 0);
+  CHECK(r.hz("lptim1") == 32'000);
+  r.write("CCIPR", 3u << 0 | 1u << 2 | 2u << 12 | 3u << 18);
+  CHECK(r.hz("usart1") == 32'768);
+  CHECK(r.hz("usart2") == 4 * mhz);
+  CHECK(r.hz("i2c1") == 16 * mhz);
+  CHECK(r.hz("lptim1") == 32'768);
+  r.set("APB2ENR", "USART1EN", 0);
+  CHECK(r.hz("usart1") == 0);
+}
+
+TEST_CASE(
+    "RM0351 6.4.28: SAI1, SAI2, the 48 MHz clock, the ADCs, SWPMI1 and DFSDM1 follow their "
+    "RCC_CCIPR selection")
+{
+  rig const r;
+  r.start("HSION");
+  r.write("PLLCFGR", pll_hsi | 1u << 4 | 20u << 8 | p_en | q_en | 1u << 21 | r_en);
+  r.write("PLLSAI1CFGR", 24u << 8 | p_en | q_en | 1u << 21 | r_en | 1u << 25);
+  r.start("PLLON");
+  r.start("PLLSAI1ON");
+  REQUIRE(r.field("CR", "PLLSAI1RDY") == 1);
+  r.set("CFGR", "SW", 1);
+  r.set("CFGR", "PPRE1", 5);
+  r.set("CFGR", "PPRE2", 4);
+  r.set("APB2ENR", "SAI1EN", 1);
+  r.set("APB2ENR", "SAI2EN", 1);
+  r.set("AHB2ENR", "OTGFSEN", 1);
+  r.set("AHB2ENR", "RNGEN", 1);
+  r.set("APB2ENR", "SDMMC1EN", 1);
+  r.set("AHB2ENR", "ADCEN", 1);
+  r.set("APB1ENR2", "SWPMI1EN", 1);
+  r.set("APB2ENR", "DFSDM1EN", 1);
+  CHECK(r.hz("sai1") == 192 * mhz / 7);
+  CHECK(r.hz("otg_fs") == 0);
+  CHECK(r.hz("adc1") == 0);
+  CHECK(r.hz("swpmi1") == 4 * mhz);
+  CHECK(r.hz("dfsdm1") == 8 * mhz);
+  r.write("CCIPR", 3u << 22 | 2u << 24 | 1u << 26 | 1u << 28 | 1u << 30 | 1u << 31);
+  CHECK(r.hz("sai1") == 0);
+  CHECK(r.hz("sai2") == 160 * mhz / 7);
+  for(auto const name : {"otg_fs", "rng", "sdmmc1"})
+  {
+    CAPTURE(name);
+    CHECK(r.hz(name) == 48 * mhz);
+  }
+  for(auto const name : {"adc1", "adc2", "adc3"})
+  {
+    CAPTURE(name);
+    CHECK(r.hz(name) == 48 * mhz);
+  }
+  CHECK(r.hz("swpmi1") == 16 * mhz);
+  CHECK(r.hz("dfsdm1") == 16 * mhz);
+  r.write("CCIPR", 2u << 26 | 3u << 28);
+  CHECK(r.hz("rng") == 40 * mhz);
+  CHECK(r.hz("adc2") == 16 * mhz);
+  r.write("CCIPR", 3u << 26);
+  CHECK(r.hz("sdmmc1") == 4 * mhz);
+  r.set("AHB2ENR", "ADCEN", 0);
+  CHECK(r.hz("adc3") == 0);
+}
+
+TEST_CASE(
+    "RM0351 6.4.29: RTCSEL keeps its first selection until BDRST, which resets RCC_BDCR but "
+    "LSCOSEL and LSCOEN")
+{
+  rig const r;
+  r.set("BDCR", "LSEON", 1);
+  r.idle();
+  r.write("BDCR", 1u << 0 | 1u << 8 | 1u << 15 | 1u << 24 | 1u << 25);
+  CHECK(r.hz("rtc") == 32'768);
+  r.set("BDCR", "RTCSEL", 2);
+  CHECK(r.field("BDCR", "RTCSEL") == 1);
+  r.reset(reset_kind::software);
+  CHECK(r.peek("BDCR") == (1u << 0 | 1u << 1 | 1u << 8 | 1u << 15 | 1u << 24 | 1u << 25));
+  r.set("BDCR", "BDRST", 1);
+  CHECK(r.peek("BDCR") == (1u << 16 | 1u << 24 | 1u << 25));
+  CHECK(r.hz("rtc") == 0);
+  CHECK(r.hz("lse") == 0);
+  r.set("BDCR", "BDRST", 0);
+  r.set("BDCR", "RTCSEL", 2);
+  CHECK(r.field("BDCR", "RTCSEL") == 2);
+  r.reset(reset_kind::power_on);
+  CHECK(r.peek("BDCR") == 0);
+}
+
+TEST_CASE("RM0351 6.4.30: each kind of reset sets its RCC_CSR flag and RMVF clears them all")
+{
+  struct expected
+  {
+    reset_kind    kind;
+    std::uint32_t flags;
+  };
+  constexpr std::uint32_t pin = 1u << 26;
+  for(auto const [kind, flags] : std::to_array<expected>({
+          {reset_kind::power_on,        1u << 27 | pin},
+          {reset_kind::brown_out,       1u << 27 | pin},
+          {reset_kind::pin,             pin           },
+          {reset_kind::software,        1u << 28      },
+          {reset_kind::watchdog,        1u << 29      },
+          {reset_kind::window_watchdog, 1u << 30      },
+          {reset_kind::low_power,       1u << 31      },
+          {reset_kind::option_load,     1u << 25      },
+  }))
+  {
+    CAPTURE(static_cast<int>(kind));
+    rig const r;
+    r.set("CSR", "RMVF", 1);
+    CHECK((r.peek("CSR") & 0xFF00'0000u) == 0);
+    r.reset(kind);
+    CHECK((r.peek("CSR") & 0xFF00'0000u) == flags);
+  }
+}
+
+TEST_CASE(
+    "RM0351 6.4.28: each RCC_CCIPR selection field moves its own kernel clock and leaves every "
+    "other one at its reset selection")
+{
+  struct row
+  {
+    std::string_view domain;
+    std::string_view enable_reg;
+    std::string_view enable;
+    std::uint32_t    shift;
+    std::uint32_t    code;
+    std::uint64_t    hz;
+    std::uint64_t    reset_hz;
+  };
+  constexpr std::uint64_t pclk   = 2 * mhz;
+  constexpr std::uint64_t sai1_p = 192 * mhz / 7;
+  auto const              rows   = std::to_array<row>({
+      {"usart1",  "APB2ENR",  "USART1EN",  0,  2, 16 * mhz,       pclk  },
+      {"usart2",  "APB1ENR1", "USART2EN",  2,  2, 16 * mhz,       pclk  },
+      {"usart3",  "APB1ENR1", "USART3EN",  4,  2, 16 * mhz,       pclk  },
+      {"uart4",   "APB1ENR1", "UART4EN",   6,  2, 16 * mhz,       pclk  },
+      {"uart5",   "APB1ENR1", "UART5EN",   8,  2, 16 * mhz,       pclk  },
+      {"lpuart1", "APB1ENR2", "LPUART1EN", 10, 2, 16 * mhz,       pclk  },
+      {"i2c1",    "APB1ENR1", "I2C1EN",    12, 2, 16 * mhz,       pclk  },
+      {"i2c2",    "APB1ENR1", "I2C2EN",    14, 2, 16 * mhz,       pclk  },
+      {"i2c3",    "APB1ENR1", "I2C3EN",    16, 2, 16 * mhz,       pclk  },
+      {"lptim1",  "APB1ENR1", "LPTIM1EN",  18, 3, 32'768,         pclk  },
+      {"lptim2",  "APB1ENR2", "LPTIM2EN",  20, 3, 32'768,         pclk  },
+      {"sai1",    "APB2ENR",  "SAI1EN",    22, 1, 344 * mhz / 17, sai1_p},
+      {"sai2",    "APB2ENR",  "SAI2EN",    24, 1, 344 * mhz / 17, sai1_p},
+      {"otg_fs",  "AHB2ENR",  "OTGFSEN",   26, 1, 48 * mhz,       0     },
+      {"adc1",    "AHB2ENR",  "ADCEN",     28, 2, 43 * mhz,       0     },
+      {"swpmi1",  "APB1ENR2", "SWPMI1EN",  30, 1, 16 * mhz,       pclk  },
+      {"dfsdm1",  "APB2ENR",  "DFSDM1EN",  31, 1, 4 * mhz,        pclk  },
+  });
+  rig const               r;
+  r.start("HSION");
+  r.set("BDCR", "LSEON", 1);
+  r.set("CFGR", "PPRE1", 4);
+  r.set("CFGR", "PPRE2", 4);
+  r.write("PLLCFGR", pll_hsi | 1u << 4);
+  r.write("PLLSAI1CFGR", 24u << 8 | p_en | q_en | 1u << 21);
+  r.write("PLLSAI2CFGR", 43u << 8 | p_en | 1u << 17 | r_en | 3u << 25);
+  r.set("CR", "PLLSAI1ON", 1);
+  r.start("PLLSAI2ON");
+  REQUIRE(r.field("CR", "PLLSAI1RDY") == 1);
+  REQUIRE(r.field("CR", "PLLSAI2RDY") == 1);
+  for(auto const& entry : rows)
+  {
+    r.set(entry.enable_reg, entry.enable, 1);
+  }
+  for(auto const& moved : rows)
+  {
+    CAPTURE(moved.domain);
+    r.write("CCIPR", moved.code << moved.shift);
+    for(auto const& entry : rows)
+    {
+      CAPTURE(entry.domain);
+      CHECK(r.hz(entry.domain) == (&entry == &moved ? entry.hz : entry.reset_hz));
+    }
+  }
+}

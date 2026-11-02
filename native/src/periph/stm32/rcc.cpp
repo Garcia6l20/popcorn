@@ -267,7 +267,8 @@ template <typename Signal> struct timer
  *        The traits `writable_msi_ranges` and `lse_locked_controls` add the MSIRANGE write
  *        protection and the LSE lock of MSIPLLEN, RM0351 6.4.1. The three PLLs share the PLLSRC and
  *        PLLM of RCC_PLLCFGR, which keep their value while any PLL that reads them is on or
- *        ready.
+ *        ready. The trait `backup_reset_kept` names the RCC_BDCR fields BDRST keeps, LSCOSEL
+ *        and LSCOEN, RM0351 6.4.29.
  * @tparam Traits Family clock tree, u5_rcc, h5_rcc, l1_rcc or l4_rcc: the sources and signals,
  *         the oscillator, mux, timer and enable tables, the source maps of the PLLs, SYSCLK and
  *         RTC, the names of the single fields, and the TrustZone tables.
@@ -399,6 +400,7 @@ private:
   reg_ref                                              control_;
   reg_ref                                              bdcr_;
   std::uint32_t                                        backup_mask_{};
+  std::uint32_t                                        backup_reset_mask_{};
   reg_ref                                              csr_;
   std::vector<std::pair<std::uint32_t, std::uint32_t>> kept_;
   std::vector<std::pair<field_ref, source>>            held_;
@@ -559,10 +561,11 @@ template <> struct rcc_tables<l4_rcc>
 {
   using model = rcc_model<l4_rcc>;
 
-  static constexpr std::array<write_entry<model>, 14> writes{
+  static constexpr std::array<write_entry<model>, 15> writes{
       {
        {"CR", &model::cr_written},
        {"CFGR", &model::tree_written},
+       {"CCIPR", &model::tree_written},
        {"PLLCFGR", &model::pll_config_written<0>},
        {"PLLSAI1CFGR", &model::pll_dividers_written<1>},
        {"PLLSAI2CFGR", &model::pll_dividers_written<2>},
@@ -743,6 +746,14 @@ rcc_model<Traits>::rcc_model(
     if(flags_[index].offset == bdcr_.offset)
     {
       backup_mask_ &= ~flags_[index].mask();
+    }
+  }
+  backup_reset_mask_ = backup_mask_;
+  if constexpr(requires { Traits::backup_reset_kept; })
+  {
+    for(auto const name : std::views::split(Traits::backup_reset_kept, ' '))
+    {
+      backup_reset_mask_ &= ~field(Traits::backup_register, std::string_view{name}).mask();
     }
   }
   auto& clock = ctx.clock;
@@ -1139,7 +1150,7 @@ void rcc_model<Traits>::bdcr_written(std::uint32_t old, std::uint32_t now)
   }
   if(names_[rcc_role::backup_reset].of(now) != 0)
   {
-    now = names_[rcc_role::backup_reset].with(now & ~backup_mask_, 1);
+    now = names_[rcc_role::backup_reset].with(now & ~backup_reset_mask_, 1);
   }
   else if(names_[rcc_role::rtc_select].of(old) != 0)
   {

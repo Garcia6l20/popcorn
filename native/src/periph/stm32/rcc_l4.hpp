@@ -96,7 +96,38 @@ constexpr auto pll_even_divider(std::uint32_t code) -> std::uint64_t
   return (std::uint64_t{code} + 1) * 2;
 }
 
-constexpr std::array<mux<signal>, 0> muxes{};
+constexpr std::array<signal, 8> uart_inputs{pclk1, sysclk, hsi16, lse};
+constexpr std::array<signal, 8> i2c_inputs{pclk1, sysclk, hsi16, none};
+constexpr std::array<signal, 8> lptim_inputs{pclk1, lsi, hsi16, lse};
+constexpr std::array<signal, 8> sai_inputs{pllsai1_p, pllsai2_p, pll1_p, none};
+
+constexpr std::array<mux<signal>, 17> muxes{
+    {
+     {"CCIPR", "USART1SEL", {pclk2, sysclk, hsi16, lse}, {{{"USART1", "USART1EN"}}}},
+     {"CCIPR", "USART2SEL", uart_inputs, {{{"USART2", "USART2EN"}}}},
+     {"CCIPR", "USART3SEL", uart_inputs, {{{"USART3", "USART3EN"}}}},
+     {"CCIPR", "UART4SEL", uart_inputs, {{{"UART4", "UART4EN"}}}},
+     {"CCIPR", "UART5SEL", uart_inputs, {{{"UART5", "UART5EN"}}}},
+     {"CCIPR", "LPUART1SEL", uart_inputs, {{{"LPUART1", "LPUART1EN"}}}},
+     {"CCIPR", "I2C1SEL", i2c_inputs, {{{"I2C1", "I2C1EN"}}}},
+     {"CCIPR", "I2C2SEL", i2c_inputs, {{{"I2C2", "I2C2EN"}}}},
+     {"CCIPR", "I2C3SEL", i2c_inputs, {{{"I2C3", "I2C3EN"}}}},
+     {"CCIPR", "LPTIM1SEL", lptim_inputs, {{{"LPTIM1", "LPTIM1EN"}}}},
+     {"CCIPR", "LPTIM2SEL", lptim_inputs, {{{"LPTIM2", "LPTIM2EN"}}}},
+     {"CCIPR", "SAI1SEL", sai_inputs, {{{"SAI1", "SAI1EN"}}}},
+     {"CCIPR", "SAI2SEL", sai_inputs, {{{"SAI2", "SAI2EN"}}}},
+     {"CCIPR",
+         "CLK48SEL",
+         {none, pllsai1_q, pll1_q, msi},
+         {{{"OTG_FS", "OTGFSEN"}, {"RNG", "RNGEN"}, {"SDMMC1", "SDMMC1EN"}}}},
+     {"CCIPR",
+         "ADCSEL",
+         {none, pllsai1_r, pllsai2_r, sysclk},
+         {{{"ADC1", "ADCEN"}, {"ADC2", "ADCEN"}, {"ADC3", "ADCEN"}}}},
+     {"CCIPR", "SWPMI1SEL", {pclk1, hsi16}, {{{"SWPMI1", "SWPMI1EN"}}}},
+     {"CCIPR", "DFSDM1SEL", {pclk2, sysclk}, {{{"DFSDM1", "DFSDM1EN"}}}},
+     }
+};
 
 constexpr std::array<timer_names<signal>, 11> timers{
     {
@@ -231,8 +262,8 @@ constexpr std::array<pll_node<signal>, 3> pll_nodes{
      }
 };
 
-constexpr std::array<std::string_view, 8> reset_flags{
-    "LPWRSTF", "WWDGRSTF", "IWDGRSTF", "SFTRSTF", "BORRSTF", "PINRSTF", "OBLRSTF", "FIREWALLRSTF"};
+constexpr std::array<std::string_view, 8> reset_flags{"LPWRRSTF", "WWDGRSTF", "IWDGRSTF", "SFTRSTF",
+                                                      "BORRSTF",  "PINRSTF",  "OBLRSTF",  "FWRSTF"};
 
 constexpr std::array<secured_group, 0> rcc_secured{};
 
@@ -273,6 +304,10 @@ constexpr auto held_while_on = std::to_array<held_field<source>>({
  *        PLLSRC and PLLM keep their value while any of the three PLLs is on or ready, the N and
  *        output dividers of a PLL while that PLL is, RM0351 6.4.4 to 6.4.6. A PLLN, PLLSAI1N or
  *        PLLSAI2N code outside 8 to 86 runs the outputs of its PLL at 0 Hz.
+ *        RCC_CCIPR selects the kernel clock of each USART, UART, LPUART, I2C, LPTIM, SAI, ADC,
+ *        SWPMI1 and DFSDM1, and the 48 MHz clock of OTG_FS, RNG and SDMMC1, RM0351 6.4.28, 0 Hz
+ *        while the instance's enable bit is 0. CLK48SEL 00, SAIxSEL 11 for SAIx_EXTCLK, ADCSEL 00
+ *        and I2CxSEL 11 run at 0 Hz. BDRST resets RCC_BDCR but LSCOSEL and LSCOEN, 6.4.29.
  */
 struct l4_rcc
 {
@@ -323,7 +358,9 @@ struct l4_rcc
   static constexpr std::string_view reset_flags_register = "CSR";
   /** @brief Every field of RCC_BDCR keeps its value through a system reset. */
   static constexpr std::string_view backup_excluded = "";
-  static constexpr std::uint32_t    sw_mask         = 0b11;
+  /** @brief Fields of RCC_BDCR that BDRST keeps, RM0351 6.4.29. */
+  static constexpr std::string_view backup_reset_kept = "LSCOSEL LSCOEN";
+  static constexpr std::uint32_t    sw_mask           = 0b11;
 
   /**
    * @brief Timer kernel clock over its APB clock, RM0351 6.2.15: 1 when the APB prescaler
@@ -339,7 +376,7 @@ struct l4_rcc
   /**
    * @brief Flags of `RCC_CSR` each kind of reset sets, one row per `reset_kind`, RM0351 6.4.30:
    *        BORRSTF and PINRSTF for a power reset, the reset value 0x0C00 0600, then PINRSTF,
-   *        SFTRSTF, IWDGRSTF, WWDGRSTF, LPWRSTF and OBLRSTF.
+   *        SFTRSTF, IWDGRSTF, WWDGRSTF, LPWRRSTF and OBLRSTF.
    */
   static constexpr auto reset_flag_rows = std::to_array<reset_flag_row>({
       {reset_kind::power_on,        {"BORRSTF", "PINRSTF"}},
@@ -348,7 +385,7 @@ struct l4_rcc
       {reset_kind::software,        {"SFTRSTF", {}}       },
       {reset_kind::watchdog,        {"IWDGRSTF", {}}      },
       {reset_kind::window_watchdog, {"WWDGRSTF", {}}      },
-      {reset_kind::low_power,       {"LPWRSTF", {}}       },
+      {reset_kind::low_power,       {"LPWRRSTF", {}}      },
       {reset_kind::option_load,     {"OBLRSTF", {}}       },
       {reset_kind::peripheral,      {}                    },
   });

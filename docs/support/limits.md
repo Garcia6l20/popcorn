@@ -1023,14 +1023,17 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   keep. A PLL is ready after the board's `ready_delay`. The PLLSAI1 and PLLSAI2 outputs reach
   no kernel clock until the `RCC_CCIPR` muxes select them.
 - STM32L47x/L48x: `ADCRST` holds ADC1, ADC2, ADC3 and ADC_Common in reset together, RM0351
-  6.4.11. The enable bits gate the timer clocks, the other enables are storage. `MCOSEL` and
-  `MCOPRE` are storage, no clock reaches the MCO pin. The sleep and stop enables of
-  `RCC_xxxSMENR` are storage.
+  6.4.11. The enable bits gate the timer clocks and the kernel clocks `RCC_CCIPR` selects, the
+  other enables are storage. `MCOSEL` and `MCOPRE` are storage, no clock reaches the MCO pin.
+  The sleep and stop enables of `RCC_xxxSMENR` are storage.
+- STM32L47x/L48x: `SAIxSEL` 11 selects `SAIx_EXTCLK`, which runs the SAI kernel clock at 0 Hz.
+  `LSCOSEL` and `LSCOEN` are storage, no clock reaches the LSCO pin, and keep their value
+  through `BDRST`, RM0351 6.4.29. `FWRSTF` stays 0, the firewall raises no reset.
 - STM32L47x/L48x clock errata, ES0250 2.2: `MSIRDY` clears whenever the MSI stops, 2.2.1. The MSI
   runs at its range rate from the first cycle after a wakeup, 2.2.3 and 2.2.24. The LSI runs at
   32 kHz with a 50 % duty, 2.2.8. The HSE is ready after the board's `ready_delay` at any VDD,
   2.2.10. The HSI16 user trim is storage, 2.2.22. A PLL locks at any VCO rate and temperature,
-  2.2.25.
+  2.2.25. The LSE runs at the board rate whatever PC13 does, 2.2.11.
 
 ## RNG
 

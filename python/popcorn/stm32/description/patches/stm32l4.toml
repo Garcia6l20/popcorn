@@ -454,6 +454,18 @@ fields = ["PLLSAI2PDIV"]
 drop = true
 source = "RM0351 Rev 11, 6.4.6 RCC_PLLSAI2CFGR: PLLSAI2PDIV[4:0] only on STM32L49x/L4Ax devices"
 
+[[fields]]
+instances = ["RCC"]
+registers = ["CCIPR"]
+rename = { DFSDMSEL = "DFSDM1SEL" }
+source = "RM0351 Rev 11, 6.4.28 RCC_CCIPR: DFSDM1SEL where the SVDs spell DFSDMSEL"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CSR"]
+rename = { LPWRSTF = "LPWRRSTF", FIREWALLRSTF = "FWRSTF" }
+source = "RM0351 Rev 11, 6.4.30 RCC_CSR: LPWRRSTF and FWRSTF where the SVDs spell LPWRSTF and FIREWALLRSTF"
+
 [[cross]]
 instances = ["RCC"]
 reg = "CICR"
