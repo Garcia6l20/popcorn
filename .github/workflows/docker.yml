@@ -121,6 +121,7 @@ jobs:
         with:
           submodules: true
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Decide whether the tag is the newest final release
         id: ref
