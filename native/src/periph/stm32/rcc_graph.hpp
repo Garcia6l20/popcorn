@@ -150,6 +150,8 @@ template <typename Signal> struct pll_node
   std::array<field_decode, max_pll_outputs>     output_decode;
   /** @brief Whether the output enables keep their value while the PLL is on or ready. */
   bool outputs_held_while_on{};
+  /** @brief Register of the output enables, `config` when empty. */
+  std::string_view enables{};
 };
 
 constexpr auto plus_one(std::uint32_t code) -> std::uint64_t

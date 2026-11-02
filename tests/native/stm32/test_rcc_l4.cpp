@@ -34,6 +34,11 @@ constexpr popcorn::address              stub     = 0x2000'8000;
 constexpr std::uint32_t                 msi_on   = 1u << 0;
 constexpr std::uint32_t                 msi_sel  = 1u << 3;
 constexpr std::uint32_t                 msi_pll  = 1u << 2;
+constexpr std::uint32_t                 pll_hse  = 3;
+constexpr std::uint32_t                 pll_hsi  = 2;
+constexpr std::uint32_t                 p_en     = 1u << 16;
+constexpr std::uint32_t                 q_en     = 1u << 20;
+constexpr std::uint32_t                 r_en     = 1u << 24;
 constexpr std::array<std::uint64_t, 12> msi_ranges{100'000,    200'000,    400'000,    800'000,
                                                    1'000'000,  2'000'000,  4'000'000,  8'000'000,
                                                    16'000'000, 24'000'000, 32'000'000, 48'000'000};
@@ -143,6 +148,20 @@ struct rig
   void idle() const
   {
     f.run_for(150'000'000, icount{1'000'000});
+  }
+
+  void start(std::string_view on) const
+  {
+    set("CR", on, 1);
+    idle();
+  }
+
+  void pll(std::uint32_t src, std::uint32_t m, std::uint32_t n, std::uint32_t outputs) const
+  {
+    set("CR", "PLLON", 0);
+    write("PLLCFGR", src | m << 4 | n << 8 | outputs);
+    start("PLLON");
+    REQUIRE(field("CR", "PLLRDY") == 1);
   }
 
   void reset(reset_kind kind) const
@@ -387,13 +406,13 @@ TEST_CASE("RM0351 6.4.1: MSIPLLEN takes a 1 only while the LSE is ready and clea
 }
 
 TEST_CASE(
-    "RM0351 6.4: the LL sequence runs the MSI at 4 and 48 MHz, then HSI16 and HSE as SYSCLK, and "
-    "SystemCoreClock equals HCLK at each step")
+    "RM0351 6.4: the LL sequence runs the MSI at 4 and 48 MHz, HSI16 and HSE as SYSCLK, the PLL at "
+    "80 MHz from HSE and from MSI, and SystemCoreClock equals HCLK at each step")
 {
   stm32_fixture f{l476rc(), "l476_l4_rcc_ll", options()};
   REQUIRE(f.run_to_stop({.max_instructions = icount{1'000'000}}).reason == stop_reason::user);
   auto const log = f.log();
-  REQUIRE(log.size() == 19);
+  REQUIRE(log.size() == 29);
   CHECK(log[0] == 0x0C00'0000u);
   CHECK(log[1] == 0);
   CHECK(log[2] == 4 * mhz);
@@ -403,12 +422,18 @@ TEST_CASE(
   CHECK(
       std::vector<std::uint32_t>{log.begin() + 10, log.begin() + 14}
       == std::vector<std::uint32_t>{8 * mhz, 4 * mhz, 1 * mhz, 4 * mhz});
-  CHECK(f.target->virtual_clock().core_hz() == hse_hz / 2);
   CHECK(log[14] == 0x0000'2002);
   CHECK(log[15] == 0x0000'8000);
   CHECK(log[16] == 0x0100'0400);
   CHECK(log[17] == 0x0000'5555);
   CHECK(log[18] == 0xFFFF'FEBF);
+  CHECK(log[21] == 80 * mhz);
+  CHECK(log[26] == 80 * mhz);
+  CHECK(log[28] == 0x0030'1800);
+  CHECK(f.target->virtual_clock().core_hz() == 80 * mhz);
+  CHECK(f.field("RCC", "PLLCFGR", "PLLM") == 5);
+  CHECK(f.field("RCC", "PLLCFGR", "PLLSRC") == 1);
+  CHECK(f.field("RCC", "CR", "PLLSAI1RDY") == 1);
 }
 
 TEST_CASE(
@@ -445,4 +470,131 @@ TEST_CASE(
   }
   r.set("AHB2RSTR", "ADCRST", 0);
   CHECK_FALSE(r.f.target->held_in_reset("ADC1"));
+}
+
+TEST_CASE(
+    "RM0351 6.4.4: the main PLL from HSE runs PLLCLK, PLL48M1CLK and PLLSAI3CLK at the VCO over R, "
+    "Q and P, and SW 11 runs SYSCLK from PLLCLK")
+{
+  rig const r;
+  r.start("HSEON");
+  r.write("PLLCFGR", pll_hse | 20u << 8 | p_en | q_en | 1u << 21 | r_en);
+  r.set("CR", "PLLON", 1);
+  CHECK(r.field("CR", "PLLRDY") == 0);
+  r.idle();
+  REQUIRE(r.field("CR", "PLLRDY") == 1);
+  CHECK(r.hz("pll1_r") == 80 * mhz);
+  CHECK(r.hz("pll1_q") == 40 * mhz);
+  CHECK(r.hz("pll1_p") == 160 * mhz / 7);
+  r.set("CFGR", "SW", 3);
+  CHECK(r.field("CFGR", "SWS") == 3);
+  CHECK(r.hz("sysclk") == 80 * mhz);
+  CHECK(r.core_hz() == 80 * mhz);
+  r.set("PLLCFGR", "PLLREN", 0);
+  CHECK(r.field("PLLCFGR", "PLLREN") == 1);
+  r.set("PLLCFGR", "PLLQEN", 0);
+  CHECK(r.hz("pll1_q") == 0);
+}
+
+TEST_CASE(
+    "RM0351 6.4.4: PLLM divides by 1 to 8, PLLN multiplies by 8 to 86, PLLP divides by 7 or 17 and "
+    "PLLQ and PLLR by 2, 4, 6 or 8")
+{
+  rig const r;
+  r.start("HSION");
+  for(std::uint32_t m = 0; m < 8; ++m)
+  {
+    CAPTURE(m);
+    r.pll(pll_hsi, m, 16, r_en);
+    CHECK(r.hz("pll1_r") == 16 * mhz * 16 / (m + 1) / 2);
+  }
+  for(std::uint32_t const n : {8u, 86u})
+  {
+    CAPTURE(n);
+    r.pll(pll_hsi, 3, n, r_en);
+    CHECK(r.hz("pll1_r") == 4 * mhz * n / 2);
+  }
+  for(std::uint32_t const n : {7u, 87u})
+  {
+    CAPTURE(n);
+    r.pll(pll_hsi, 3, n, r_en);
+    CHECK(r.hz("pll1_r") == 0);
+  }
+  for(std::uint32_t code = 0; code < 4; ++code)
+  {
+    CAPTURE(code);
+    r.pll(pll_hsi, 3, 42, p_en | code % 2 << 17 | q_en | code << 21 | r_en | code << 25);
+    CHECK(r.hz("pll1_p") == 168 * mhz / (code % 2 == 0 ? 7 : 17));
+    CHECK(r.hz("pll1_q") == 168 * mhz / ((code + 1) * 2));
+    CHECK(r.hz("pll1_r") == 168 * mhz / ((code + 1) * 2));
+  }
+}
+
+TEST_CASE(
+    "RM0351 6.4.5 and 6.4.6: PLLSAI1 and PLLSAI2 run on PLLSRC and PLLM with their own N, P, Q and "
+    "R and output enables")
+{
+  rig const r;
+  r.start("HSION");
+  r.write("PLLCFGR", pll_hsi | 1u << 4);
+  r.write("PLLSAI1CFGR", 24u << 8 | p_en | q_en | 1u << 21 | r_en | 1u << 25);
+  r.write("PLLSAI2CFGR", 43u << 8 | p_en | 1u << 17 | r_en | 3u << 25);
+  r.set("CR", "PLLSAI1ON", 1);
+  CHECK(r.field("CR", "PLLSAI1RDY") == 0);
+  r.idle();
+  REQUIRE(r.field("CR", "PLLSAI1RDY") == 1);
+  CHECK(r.field("CR", "PLLSAI2RDY") == 0);
+  r.start("PLLSAI2ON");
+  REQUIRE(r.field("CR", "PLLSAI2RDY") == 1);
+  CHECK(r.field("CR", "PLLRDY") == 0);
+  CHECK(r.hz("pll1_r") == 0);
+  CHECK(r.hz("pllsai1_p") == 192 * mhz / 7);
+  CHECK(r.hz("pllsai1_q") == 48 * mhz);
+  CHECK(r.hz("pllsai1_r") == 48 * mhz);
+  CHECK(r.hz("pllsai2_p") == 344 * mhz / 17);
+  CHECK(r.hz("pllsai2_r") == 43 * mhz);
+  r.set("PLLSAI1CFGR", "PLLSAI1QEN", 0);
+  r.set("PLLSAI2CFGR", "PLLSAI2PEN", 0);
+  CHECK(r.hz("pllsai1_q") == 0);
+  CHECK(r.hz("pllsai1_p") == 192 * mhz / 7);
+  CHECK(r.hz("pllsai2_p") == 0);
+  CHECK(r.hz("pllsai2_r") == 43 * mhz);
+}
+
+TEST_CASE(
+    "RM0351 6.4.4 to 6.4.6: PLLSRC and PLLM hold while any PLL is on or ready, N and the dividers "
+    "of a PLL while that PLL is")
+{
+  rig const r;
+  r.start("HSION");
+  r.write("PLLCFGR", pll_hsi | 1u << 4 | 20u << 8 | r_en);
+  r.write("PLLSAI1CFGR", 24u << 8 | r_en);
+  r.start("PLLON");
+  r.write("PLLCFGR", pll_hse | 30u << 8 | q_en | 1u << 25 | r_en);
+  CHECK(r.field("PLLCFGR", "PLLSRC") == pll_hsi);
+  CHECK(r.field("PLLCFGR", "PLLM") == 1);
+  CHECK(r.field("PLLCFGR", "PLLN") == 20);
+  CHECK(r.field("PLLCFGR", "PLLR") == 0);
+  CHECK(r.field("PLLCFGR", "PLLQEN") == 1);
+  r.set("PLLSAI1CFGR", "PLLSAI1N", 30);
+  CHECK(r.field("PLLSAI1CFGR", "PLLSAI1N") == 30);
+  r.set("CR", "PLLON", 0);
+  r.start("PLLSAI1ON");
+  r.write("PLLCFGR", pll_hse | 30u << 8 | r_en);
+  CHECK(r.field("PLLCFGR", "PLLSRC") == pll_hsi);
+  CHECK(r.field("PLLCFGR", "PLLM") == 1);
+  CHECK(r.field("PLLCFGR", "PLLN") == 30);
+  r.set("PLLSAI1CFGR", "PLLSAI1N", 40);
+  CHECK(r.field("PLLSAI1CFGR", "PLLSAI1N") == 30);
+  CHECK(r.hz("pllsai1_r") == 8 * mhz * 30 / 2);
+  r.set("CR", "PLLSAI1ON", 0);
+  r.start("PLLSAI2ON");
+  REQUIRE(r.field("CR", "PLLSAI2RDY") == 1);
+  r.write("PLLCFGR", pll_hse | 30u << 8 | r_en);
+  CHECK(r.field("PLLCFGR", "PLLSRC") == pll_hsi);
+  CHECK(r.field("PLLCFGR", "PLLM") == 1);
+  r.set("CR", "PLLSAI2ON", 0);
+  r.write("PLLCFGR", pll_hse | 30u << 8 | r_en);
+  CHECK(r.field("PLLCFGR", "PLLSRC") == pll_hse);
+  CHECK(r.field("PLLCFGR", "PLLM") == 0);
 }

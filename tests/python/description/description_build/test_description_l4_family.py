@@ -853,3 +853,27 @@ def test_fwen_is_set_only_and_mcopre_takes_writes(name: str) -> None:
     fwen = {f.name: f for f in registers["APB2ENR"].fields}["FWEN"]
     assert fwen.on_write == WriteEffect.ONE_TO_SET
     assert {f.name: f.acc for f in registers["CFGR"].fields}["MCOPRE"] == Access.READ_WRITE
+
+
+RCC_PLL_FIELDS = {
+    "PLLCFGR": {"PLLSRC", "PLLM", "PLLN", "PLLPEN", "PLLP", "PLLQEN", "PLLQ", "PLLREN", "PLLR"},
+    "PLLSAI1CFGR": {
+        "PLLSAI1N",
+        "PLLSAI1PEN",
+        "PLLSAI1P",
+        "PLLSAI1QEN",
+        "PLLSAI1Q",
+        "PLLSAI1REN",
+        "PLLSAI1R",
+    },
+    "PLLSAI2CFGR": {"PLLSAI2N", "PLLSAI2PEN", "PLLSAI2P", "PLLSAI2REN", "PLLSAI2R"},
+}
+"""RM0351 6.4.4 to 6.4.6: the PLL fields of the STM32L47x/L48x, without the L49x/L4Ax PDIV."""
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", RCC_PARTS)
+def test_the_three_plls_carry_no_pdiv_divider(name: str) -> None:
+    registers = _registers(_description(name), "RCC")
+    for register, fields in RCC_PLL_FIELDS.items():
+        assert {f.name for f in registers[register].fields} == fields

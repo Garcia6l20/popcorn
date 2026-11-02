@@ -433,6 +433,27 @@ fields = ["HSI48RDYC"]
 drop = true
 source = "RM0351 Rev 11, 6.4.9 RCC_CICR: HSI48RDYC in bit 10 only on STM32L49x/L4Ax devices"
 
+[[fields]]
+instances = ["RCC"]
+registers = ["PLLCFGR"]
+fields = ["PLLPDIV"]
+drop = true
+source = "RM0351 Rev 11, 6.4.4 RCC_PLLCFGR: PLLPDIV[4:0] only for STM32L49x/L4Ax devices, PLLP divides PLLSAI3CLK on the STM32L47x/L48x"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["PLLSAI1CFGR"]
+fields = ["PLLSAI1PDIV"]
+drop = true
+source = "RM0351 Rev 11, 6.4.5 RCC_PLLSAI1CFGR: PLLSAI1PDIV[4:0] only on STM32L49x/L4Ax devices"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["PLLSAI2CFGR"]
+fields = ["PLLSAI2PDIV"]
+drop = true
+source = "RM0351 Rev 11, 6.4.6 RCC_PLLSAI2CFGR: PLLSAI2PDIV[4:0] only on STM32L49x/L4Ax devices"
+
 [[cross]]
 instances = ["RCC"]
 reg = "CICR"

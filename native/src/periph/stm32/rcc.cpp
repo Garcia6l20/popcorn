@@ -265,7 +265,9 @@ template <typename Signal> struct timer
  *
  *        STM32L47x/L48x, RM0351 section 6, through `l4_rcc`, whose class doc lists its rules.
  *        The traits `writable_msi_ranges` and `lse_locked_controls` add the MSIRANGE write
- *        protection and the LSE lock of MSIPLLEN, RM0351 6.4.1.
+ *        protection and the LSE lock of MSIPLLEN, RM0351 6.4.1. The three PLLs share the PLLSRC and
+ *        PLLM of RCC_PLLCFGR, which keep their value while any PLL that reads them is on or
+ *        ready.
  * @tparam Traits Family clock tree, u5_rcc, h5_rcc, l1_rcc or l4_rcc: the sources and signals,
  *         the oscillator, mux, timer and enable tables, the source maps of the PLLs, SYSCLK and
  *         RTC, the names of the single fields, and the TrustZone tables.
@@ -366,6 +368,7 @@ private:
   [[nodiscard]] auto system_source(std::uint32_t code) const -> std::optional<source>;
   [[nodiscard]] auto in_use() const -> std::uint32_t;
   [[nodiscard]] auto locked(std::size_t pll) const -> bool;
+  [[nodiscard]] auto input_locked(std::size_t pll) const -> bool;
   [[nodiscard]] auto rates() const -> std::array<std::uint64_t, signal_count>;
   [[nodiscard]] auto enable_field(std::string_view name) const -> field_ref;
   [[nodiscard]] auto read(rcc_role role) const -> std::uint32_t;
@@ -556,11 +559,13 @@ template <> struct rcc_tables<l4_rcc>
 {
   using model = rcc_model<l4_rcc>;
 
-  static constexpr std::array<write_entry<model>, 12> writes{
+  static constexpr std::array<write_entry<model>, 14> writes{
       {
        {"CR", &model::cr_written},
        {"CFGR", &model::tree_written},
        {"PLLCFGR", &model::pll_config_written<0>},
+       {"PLLSAI1CFGR", &model::pll_dividers_written<1>},
+       {"PLLSAI2CFGR", &model::pll_dividers_written<2>},
        {"CSR", &model::csr_written},
        {"CIER", nullptr},
        {"AHB1ENR", &model::tree_written},
@@ -728,7 +733,8 @@ rcc_model<Traits>::rcc_model(
     }
     for(std::size_t output = 0; output < node.outputs; ++output)
     {
-      fields.output_enable[output] = named(node.config, node.output_enable[output]);
+      fields.output_enable[output] =
+          named(node.enables.empty() ? node.config : node.enables, node.output_enable[output]);
     }
   }
   for(auto const& [index, name] : std::views::enumerate(Traits::reset_flags))
@@ -1032,7 +1038,7 @@ template <std::size_t Pll>
 void rcc_model<Traits>::pll_config_written(std::uint32_t old, std::uint32_t now)
 {
   auto const& fields = pll_[Pll];
-  if(locked(Pll))
+  if(input_locked(Pll))
   {
     for(auto const& kept : {std::optional{fields.src}, fields.range, fields.m})
     {
@@ -1041,6 +1047,9 @@ void rcc_model<Traits>::pll_config_written(std::uint32_t old, std::uint32_t now)
         now = kept->with(now, kept->of(old));
       }
     }
+  }
+  if(locked(Pll))
+  {
     if constexpr(Traits::pll_nodes[Pll].config == Traits::pll_nodes[Pll].dividers)
     {
       now = fields.n.with(now, fields.n.of(old));
@@ -1108,6 +1117,16 @@ template <typename Traits> auto rcc_model<Traits>::locked(std::size_t pll) const
 {
   auto const which = static_cast<source>(std::to_underlying(source::pll1) + pll);
   return is_on(which) or is_ready(which);
+}
+
+template <typename Traits> auto rcc_model<Traits>::input_locked(std::size_t pll) const -> bool
+{
+  auto const& src = pll_[pll].src;
+  return std::ranges::any_of(std::views::iota(std::size_t{0}, pll_.size()), [&](std::size_t other) {
+    return pll_[other].src.offset == src.offset
+       and pll_[other].src.mask() == src.mask()
+       and locked(other);
+  });
 }
 
 template <typename Traits>

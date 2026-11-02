@@ -23,6 +23,8 @@ enum class source : std::uint8_t
   lsi,
   lse,
   pll1,
+  pllsai1,
+  pllsai2,
 };
 
 enum class signal : std::uint8_t
@@ -40,6 +42,11 @@ enum class signal : std::uint8_t
   pll1_p,
   pll1_q,
   pll1_r,
+  pllsai1_p,
+  pllsai1_q,
+  pllsai1_r,
+  pllsai2_p,
+  pllsai2_r,
   rtc,
 };
 
@@ -69,19 +76,21 @@ auto msi_rate(rate_inputs const& in) -> std::uint64_t
   return range >= 4 and range <= 7 ? msi_hz[range] : 0;
 }
 
-/** @brief PLLN of RCC_PLLCFGR, RM0351 6.4.4: 8 to 86, 0 for a code outside that range. */
+/** @brief PLLN, PLLSAI1N and PLLSAI2N, RM0351 6.4.4 to 6.4.6: 8 to 86, 0 for a code outside
+ *         that range. */
 constexpr auto pll_multiplier(std::uint32_t code) -> std::uint64_t
 {
   return code >= 8 and code <= 86 ? code : 0;
 }
 
-/** @brief PLLP of RCC_PLLCFGR, RM0351 6.4.4: 0 divides by 7, 1 by 17. */
+/** @brief PLLP, PLLSAI1P and PLLSAI2P, RM0351 6.4.4 to 6.4.6: 0 divides by 7, 1 by 17. */
 constexpr auto pll_p_divider(std::uint32_t code) -> std::uint64_t
 {
   return code == 0 ? 7 : 17;
 }
 
-/** @brief PLLQ and PLLR of RCC_PLLCFGR, RM0351 6.4.4: 00 to 11 divide by 2, 4, 6 and 8. */
+/** @brief The Q and R dividers of the three PLLs, RM0351 6.4.4 to 6.4.6: 00 to 11 divide by 2,
+ *         4, 6 and 8. */
 constexpr auto pll_even_divider(std::uint32_t code) -> std::uint64_t
 {
   return (std::uint64_t{code} + 1) * 2;
@@ -108,7 +117,7 @@ constexpr std::array<timer_names<signal>, 11> timers{
 constexpr std::array<std::string_view, 6> enable_registers{"AHB1ENR",  "AHB2ENR",  "AHB3ENR",
                                                            "APB1ENR1", "APB1ENR2", "APB2ENR"};
 
-constexpr std::array<oscillator_names<signal>, 6> oscillators{
+constexpr std::array<oscillator_names<signal>, 8> oscillators{
     {
      {"CR", "MSION", "MSIRDY", "MSIRDYF", "MSIRDYIE", msi, &msi_rate},
      {"CR", "HSION", "HSIRDY", "HSIRDYF", "HSIRDYIE", hsi16, &fixed_rate<hsi16_hz>},
@@ -116,6 +125,8 @@ constexpr std::array<oscillator_names<signal>, 6> oscillators{
      {"CSR", "LSION", "LSIRDY", "LSIRDYF", "LSIRDYIE", lsi, &fixed_rate<lsi_hz>},
      {"BDCR", "LSEON", "LSERDY", "LSERDYF", "LSERDYIE", lse, &lse_rate},
      {"CR", "PLLON", "PLLRDY", "PLLRDYF", "PLLRDYIE"},
+     {"CR", "PLLSAI1ON", "PLLSAI1RDY", "PLLSAI1RDYF", "PLLSAI1RDYIE"},
+     {"CR", "PLLSAI2ON", "PLLSAI2RDY", "PLLSAI2RDYF", "PLLSAI2RDYIE"},
      }
 };
 
@@ -165,7 +176,7 @@ constexpr std::array<bus_node<signal>, 2> buses{
     {{pclk1, rcc_role::ppre1}, {pclk2, rcc_role::ppre2}}
 };
 
-constexpr std::array<pll_node<signal>, 1> pll_nodes{
+constexpr std::array<pll_node<signal>, 3> pll_nodes{
     {
      {.config        = "PLLCFGR",
          .dividers      = "PLLCFGR",
@@ -183,6 +194,40 @@ constexpr std::array<pll_node<signal>, 1> pll_nodes{
          .m_decode      = &plus_one,
          .n_decode      = &pll_multiplier,
          .output_decode = {&pll_p_divider, &pll_even_divider, &pll_even_divider}},
+     {.config        = "PLLCFGR",
+         .dividers      = "PLLSAI1CFGR",
+         .fraction      = {},
+         .src           = "PLLSRC",
+         .range         = {},
+         .m             = "PLLM",
+         .fracen        = {},
+         .n             = "PLLSAI1N",
+         .frac          = {},
+         .divider       = {"PLLSAI1P", "PLLSAI1Q", "PLLSAI1R"},
+         .output_enable = {"PLLSAI1PEN", "PLLSAI1QEN", "PLLSAI1REN"},
+         .out           = {pllsai1_p, pllsai1_q, pllsai1_r},
+         .outputs       = 3,
+         .m_decode      = &plus_one,
+         .n_decode      = &pll_multiplier,
+         .output_decode = {&pll_p_divider, &pll_even_divider, &pll_even_divider},
+         .enables       = "PLLSAI1CFGR"},
+     {.config        = "PLLCFGR",
+         .dividers      = "PLLSAI2CFGR",
+         .fraction      = {},
+         .src           = "PLLSRC",
+         .range         = {},
+         .m             = "PLLM",
+         .fracen        = {},
+         .n             = "PLLSAI2N",
+         .frac          = {},
+         .divider       = {"PLLSAI2P", "PLLSAI2R"},
+         .output_enable = {"PLLSAI2PEN", "PLLSAI2REN"},
+         .out           = {pllsai2_p, pllsai2_r},
+         .outputs       = 2,
+         .m_decode      = &plus_one,
+         .n_decode      = &pll_multiplier,
+         .output_decode = {&pll_p_divider, &pll_even_divider},
+         .enables       = "PLLSAI2CFGR"},
      }
 };
 
@@ -214,9 +259,10 @@ constexpr auto held_while_on = std::to_array<held_field<source>>({
  * @brief Clock tree of the STM32L47x/L48x RCC, `STM32L4_rcc_v1_0` on DIE415, RM0351 section 6:
  *        MSI with the twelve ranges of MSIRANGE in RCC_CR once MSIRGSEL is 1, else the range of
  *        MSISRANGE in RCC_CSR, HSI16, HSE, LSI 32 kHz in RCC_CSR and LSE in RCC_BDCR, the main
- *        PLL in RCC_PLLCFGR fed by MSI, HSI16 or HSE, SYSCLK from MSI, HSI16, HSE or the PLLCLK
- *        output, the AHB and two APB prescalers, and the RTC clock of RCC_BDCR with the HSE
- *        divided by 32. The ready flags and enables share RCC_CIFR and RCC_CIER. No TrustZone.
+ *        PLL in RCC_PLLCFGR fed by MSI, HSI16 or HSE, PLLSAI1 and PLLSAI2 on its PLLSRC and
+ *        PLLM, SYSCLK from MSI, HSI16, HSE or the PLLCLK output, the AHB and two APB
+ *        prescalers, and the RTC clock of RCC_BDCR with the HSE divided by 32. The ready flags
+ *        and enables share RCC_CIFR and RCC_CIER. No TrustZone.
  *        MSIRGSEL is set only, a write of 0 keeps it, and an MSIRANGE code above 11 keeps the
  *        old range, RM0351 6.4.1. MSISRANGE takes a write only while MSIRGSEL is 1, 6.4.30.
  *        CSSON is set only. HSEBYP keeps its value on a write while HSEON is 1 and through every
@@ -224,6 +270,9 @@ constexpr auto held_while_on = std::to_array<held_field<source>>({
  *        keeps its value through a system reset, 6.4.29. MSIPLLEN takes a write of 1 only while
  *        LSERDY is 1 and clears when the LSE stops, 6.4.1, and the MSI runs at its range rate
  *        with or without it.
+ *        PLLSRC and PLLM keep their value while any of the three PLLs is on or ready, the N and
+ *        output dividers of a PLL while that PLL is, RM0351 6.4.4 to 6.4.6. A PLLN, PLLSAI1N or
+ *        PLLSAI2N code outside 8 to 86 runs the outputs of its PLL at 0 Hz.
  */
 struct l4_rcc
 {
