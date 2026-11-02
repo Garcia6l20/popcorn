@@ -1539,6 +1539,22 @@ STM32L4 TIM2 to TIM5, RM0351 section 31:
   the low half keeps it.
 - SMCR.OCCS is storage: the OCREF clear input is not modelled.
 
+STM32L4 TIM1 and TIM8, RM0351 section 30:
+
+- TIM1 and TIM8 run the counter, the repetition counter, channels 1 to 4, the slave mode
+  controller and TRGO as TIM2 to TIM5 do. Their ITR0 to ITR3 follow RM0351 Table 202. TIM15, the
+  TIM1 ITR0 source, has no model here: TS 000 on TIM1 reaches nothing and logs once.
+- No timer drives an output pin. BDTR, the complementary outputs CCxNE and CCxNP, the dead time,
+  CCR5, CCR6, CCMR3 and the OR2 and OR3 break sources are registers only. EGR.BG and B2G set BIF
+  and B2IF and raise the break interrupt. BDTR.MOE keeps its value, where RM0351 30.4.6 clears it.
+- TIM1_ETR is PA12 at AF1 and TIM8_ETR is PA0 at AF3, DS10198 Tables 17 and 18. ETRSEL 001 and
+  010, COMP1 and COMP2, read low. ETR_ADC1_RMP, ETR_ADC2_RMP and ETR_ADC3_RMP 01 to 11 OR an
+  ADC analog watchdog into the ETR: the watchdog has no model, tim_etr_in follows the pin. Each
+  such write logs once, and under `strict` raises `ModelError` before the store.
+- TIM1_OR1.TI1_RMP 1 and TIM8_OR1.TI1_RMP 1, COMP1 and COMP2 into tim_ti1, read low, log once and
+  raise under `strict`.
+- TIM1 raises the NVIC lines it shares with TIM15, TIM16 and TIM17, RM0351 Table 61.
+
 STM32L4 TIM6 and TIM7, RM0351 section 33:
 
 - TIM6 and TIM7 count up only and have no slave mode controller. UIFREMAP puts UIFCPY in CNT

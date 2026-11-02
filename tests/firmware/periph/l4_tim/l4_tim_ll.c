@@ -21,6 +21,7 @@ void tim2_pwm(void);
 void tim3_capture(void);
 void tim6_trgo(void);
 void tim7_update(void);
+void tim1_pwm(void);
 void on_update(void);
 void on_compare(void);
 void on_started(void);
@@ -28,6 +29,8 @@ void TIM2_IRQHandler(void);
 void TIM3_IRQHandler(void);
 void TIM6_DAC_IRQHandler(void);
 void TIM7_IRQHandler(void);
+void TIM1_CC_IRQHandler(void);
+void TIM1_UP_TIM16_IRQHandler(void);
 
 void idle(void)
 {
@@ -223,6 +226,56 @@ void tim7_update(void)
   LL_TIM_GenerateEvent_UPDATE(TIM7);
   LOG(updates);
   LOG(TIM7->CNT);
+  DONE();
+}
+
+void TIM1_CC_IRQHandler(void)
+{
+  if(LL_TIM_IsActiveFlag_CC1(TIM1))
+  {
+    LL_TIM_ClearFlag_CC1(TIM1);
+    on_compare();
+    ++compares;
+  }
+}
+
+void TIM1_UP_TIM16_IRQHandler(void)
+{
+  if(LL_TIM_IsActiveFlag_UPDATE(TIM1))
+  {
+    LL_TIM_ClearFlag_UPDATE(TIM1);
+    on_update();
+    ++updates;
+  }
+}
+
+void tim1_pwm(void)
+{
+  hsi_16mhz();
+  LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOA);
+  LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_8, LL_GPIO_MODE_ALTERNATE);
+  LL_GPIO_SetAFPin_8_15(GPIOA, LL_GPIO_PIN_8, LL_GPIO_AF_1);
+  LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_7, LL_GPIO_MODE_ALTERNATE);
+  LL_GPIO_SetAFPin_0_7(GPIOA, LL_GPIO_PIN_7, LL_GPIO_AF_1);
+  LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_TIM1);
+  time_base(TIM1, 15, 999);
+  LL_TIM_OC_SetMode(TIM1, LL_TIM_CHANNEL_CH1, LL_TIM_OCMODE_PWM1);
+  LL_TIM_OC_SetCompareCH1(TIM1, 250);
+  LL_TIM_OC_EnablePreload(TIM1, LL_TIM_CHANNEL_CH1);
+  LL_TIM_CC_EnableChannel(TIM1, LL_TIM_CHANNEL_CH1 | LL_TIM_CHANNEL_CH1N);
+  LL_TIM_OC_SetDeadTime(TIM1, 0x40);
+  LL_TIM_EnableAllOutputs(TIM1);
+  LL_TIM_EnableIT_CC1(TIM1);
+  LL_TIM_EnableIT_UPDATE(TIM1);
+  NVIC_EnableIRQ(TIM1_CC_IRQn);
+  NVIC_EnableIRQ(TIM1_UP_TIM16_IRQn);
+  LL_TIM_EnableCounter(TIM1);
+  on_started();
+  wait_for(&updates, PWM_PERIODS);
+  LL_TIM_DisableCounter(TIM1);
+  LOG(compares);
+  LOG(TIM1->CCER);
+  LOG(TIM1->BDTR);
   DONE();
 }
 

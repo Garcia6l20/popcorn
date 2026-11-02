@@ -960,6 +960,9 @@ struct tim_irq
   std::string_view instance;
   /** @brief IRQ name as the description spells it, such as `TIM6_DAC_IRQn`. */
   std::string_view irq;
+  /** @brief Group line the name replaces, `UP`, `CC`, `BRK` or `TRG_COM`, empty for the one line
+   *         of a single-line timer. */
+  std::string_view group{};
 };
 
 /** @brief The input_remap channel of a field that selects tim_etr_in. */
@@ -978,8 +981,12 @@ struct input_remap
   std::string_view reg;
   /** @brief Field name, such as `TI1_RMP`. */
   std::string_view field;
-  /** @brief Bit v set when field value v keeps the input on its pin. */
-  std::uint32_t pin_values;
+  /** @brief Bit v set when field value v keeps the input on its pin, value 0 alone by
+   *         default. */
+  std::uint32_t pin_values = 1;
+  /** @brief The internal source a value outside `pin_values` selects is ORed with the pin, so
+   *         the input keeps following its pin. Unset, the internal source replaces it. */
+  bool ored = false;
 };
 
 /** @brief Differences between the timer peripherals the model rows serve. */
@@ -1221,9 +1228,9 @@ inline constexpr tim_variant l1_cat3_tim{
     .input_remaps = l1_cat3_input_remaps};
 
 /**
- * @brief RM0351 Table 207, TIMx internal trigger connection: ITR0 to ITR3 by TS 000 to 011 per
- *        slave timer. TIM2_OR1.ITR1_RMP selects TIM8 TRGO (0) or OTG_FS_SOF (1) for TIM2 ITR1,
- *        RM0351 31.4.22. OTG_FS_SOF has no model.
+ * @brief RM0351 Tables 207 and 202, TIMx internal trigger connection: ITR0 to ITR3 by TS 000 to
+ *        011 per slave timer, TIM2 to TIM5, then TIM1 and TIM8. TIM2_OR1.ITR1_RMP selects TIM8
+ *        TRGO (0) or OTG_FS_SOF (1) for TIM2 ITR1, RM0351 31.4.22. OTG_FS_SOF has no model.
  */
 inline constexpr auto l4_triggers = std::to_array<trigger_entry>({
     {.select = 0, .source = "tim1", .slave = "TIM2"},
@@ -1249,20 +1256,36 @@ inline constexpr auto l4_triggers = std::to_array<trigger_entry>({
     {.select = 1, .source = "tim3", .slave = "TIM5"},
     {.select = 2, .source = "tim4", .slave = "TIM5"},
     {.select = 3, .source = "tim8", .slave = "TIM5"},
+    {.select = 0, .source = "tim15", .slave = "TIM1"},
+    {.select = 1, .source = "tim2", .slave = "TIM1"},
+    {.select = 2, .source = "tim3", .slave = "TIM1"},
+    {.select = 3, .source = "tim4", .slave = "TIM1"},
+    {.select = 0, .source = "tim1", .slave = "TIM8"},
+    {.select = 1, .source = "tim2", .slave = "TIM8"},
+    {.select = 2, .source = "tim4", .slave = "TIM8"},
+    {.select = 3, .source = "tim5", .slave = "TIM8"},
 });
 /**
- * @brief RM0351 31.3.3 and DS10198 Tables 17 and 18: TIM2 to TIM5 take ETR from a TIMx_ETR pin
- *        alternate of its own, such as TIM2_ETR on PA0 at AF14.
+ * @brief RM0351 30.3.4, 31.3.3 and DS10198 Tables 17 and 18: TIM1, TIM2 to TIM5 and TIM8 take ETR
+ *        from a TIMx_ETR pin alternate of its own, such as TIM2_ETR on PA0 at AF14.
  */
 inline constexpr auto l4_etr_pins = std::to_array<etr_pin>({
     {.instance = "TIM2", .signal = "tim2_etr"},
     {.instance = "TIM3", .signal = "tim3_etr"},
     {.instance = "TIM4", .signal = "tim4_etr"},
     {.instance = "TIM5", .signal = "tim5_etr"},
+    {.instance = "TIM1", .signal = "tim1_etr"},
+    {.instance = "TIM8", .signal = "tim8_etr"},
 });
-/** @brief RM0351 Table 61: TIM6 shares NVIC line 54 with the DAC1 underrun, `TIM6_DAC_IRQn`. */
+/**
+ * @brief RM0351 Table 61: TIM6 shares NVIC line 54 with the DAC1 underrun, `TIM6_DAC_IRQn`, and
+ *        the TIM1 break, update and trigger lines are shared with TIM15, TIM16 and TIM17.
+ */
 inline constexpr auto l4_tim_irqs = std::to_array<tim_irq>({
     {.instance = "TIM6", .irq = "TIM6_DAC_IRQn"},
+    {.instance = "TIM1", .irq = "TIM1_BRK_TIM15_IRQn", .group = "BRK"},
+    {.instance = "TIM1", .irq = "TIM1_UP_TIM16_IRQn", .group = "UP"},
+    {.instance = "TIM1", .irq = "TIM1_TRG_COM_TIM17_IRQn", .group = "TRG_COM"},
 });
 /** @brief RM0351 33.3 and 33.4.1: TIM6 and TIM7 count up only. */
 inline constexpr auto l4_up_only = std::to_array<std::string_view>({"TIM6", "TIM7"});
@@ -1272,19 +1295,47 @@ inline constexpr auto l4_up_only = std::to_array<std::string_view>({"TIM6", "TIM
  *        31.4.24 TIM2_OR2: ETRSEL 000 leaves tim_etr_in to ETR_RMP, 001 and 010 give COMP1 and
  *        COMP2, the others are reserved. 31.4.23 TIM3_OR1: TI1_RMP 00 keeps tim_ti1 on its pin,
  *        01 to 11 give COMP1, COMP2 or their OR. 31.4.25 TIM3_OR2: ETRSEL 000 keeps tim_etr_in on
- *        the TIM3_ETR pin, 001 gives COMP1, the others are reserved.
+ *        the TIM3_ETR pin, 001 gives COMP1, the others are reserved. 30.4.23 and 30.4.24
+ *        TIM1_OR1 and TIM8_OR1: TI1_RMP 0 keeps tim_ti1 on its pin, 1 gives COMP1 on TIM1 and
+ *        COMP2 on TIM8, and ETR_ADCx_RMP 01 to 11 OR an ADC analog watchdog into tim_etr_in.
+ *        30.4.28 and 30.4.30 TIM1_OR2 and TIM8_OR2: ETRSEL 000 keeps tim_etr_in on the pin and
+ *        the ADC watchdogs, 001 and 010 give COMP1 and COMP2, the others are reserved.
  */
 inline constexpr auto l4_input_remaps = std::to_array<input_remap>({
-    {.slave = "TIM2", .channel = 3,             .reg = "OR1", .field = "TI4_RMP", .pin_values = 0b0001},
-    {.slave = "TIM2", .channel = tim_etr_input, .reg = "OR1", .field = "ETR_RMP", .pin_values = 1     },
-    {.slave = "TIM2", .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
-    {.slave = "TIM3", .channel = 0,             .reg = "OR1", .field = "TI1_RMP", .pin_values = 0b0001},
-    {.slave = "TIM3", .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
+    {.slave = "TIM2",   .channel = 3,             .reg = "OR1", .field = "TI4_RMP", .pin_values = 0b0001},
+    {.slave = "TIM2",   .channel = tim_etr_input, .reg = "OR1", .field = "ETR_RMP", .pin_values = 1     },
+    {.slave = "TIM2",   .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
+    {.slave = "TIM3",   .channel = 0,             .reg = "OR1", .field = "TI1_RMP", .pin_values = 0b0001},
+    {.slave = "TIM3",   .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
+    {.slave = "TIM1",   .channel = 0,             .reg = "OR1", .field = "TI1_RMP", .pin_values = 0b01  },
+    {.slave = "TIM1",   .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
+    {.slave   = "TIM1",
+     .channel = tim_etr_input,
+     .reg     = "OR1",
+     .field   = "ETR_ADC1_RMP",
+     .ored    = true                                                                                    },
+    {.slave   = "TIM1",
+     .channel = tim_etr_input,
+     .reg     = "OR1",
+     .field   = "ETR_ADC3_RMP",
+     .ored    = true                                                                                    },
+    {.slave = "TIM8",   .channel = 0,             .reg = "OR1", .field = "TI1_RMP", .pin_values = 0b01  },
+    {.slave = "TIM8",   .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
+    {.slave   = "TIM8",
+     .channel = tim_etr_input,
+     .reg     = "OR1",
+     .field   = "ETR_ADC2_RMP",
+     .ored    = true                                                                                    },
+    {.slave   = "TIM8",
+     .channel = tim_etr_input,
+     .reg     = "OR1",
+     .field   = "ETR_ADC3_RMP",
+     .ored    = true                                                                                    },
 });
 /**
- * @brief STM32L4 TIM2 to TIM7, RM0351 31.4 and 33.4: CR2.MMS[2:0], SMCR.SMS[3:0] with bit 3 in
- *        `SMS_1`, SMCR.TS[2:0], UIFREMAP, ETR pins, the TIM2 and TIM3 OR1 and OR2 remaps. TIM6
- *        and TIM7 count up only and have no SMCR.
+ * @brief STM32L4 TIM1 to TIM8, RM0351 30.4, 31.4 and 33.4: CR2.MMS[2:0], SMCR.SMS[3:0] with bit
+ *        3 in `SMS_1`, SMCR.TS[2:0], UIFREMAP, ETR pins, the TIM1, TIM2, TIM3 and TIM8 OR1 and
+ *        OR2 remaps. TIM6 and TIM7 count up only and have no SMCR.
  */
 inline constexpr tim_variant l4_tim{
     .triggers             = l4_triggers,

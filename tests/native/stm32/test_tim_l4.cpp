@@ -194,7 +194,15 @@ struct rig
 
   void clock(std::string_view unit) const
   {
-    set("RCC", "APB1ENR1", std::string{unit} + "EN", 1);
+    auto const apb2 = unit == "TIM1" or unit == "TIM8";
+    set("RCC", apb2 ? "APB2ENR" : "APB1ENR1", std::string{unit} + "EN", 1);
+  }
+
+  [[nodiscard]] auto pending(std::uint32_t irq) const -> bool
+  {
+    auto const word = f->target->mem().read(0xe000'e200u + 4 * (irq / 32), 4);
+    REQUIRE(word.has_value());
+    return (*word >> (irq % 32) & 1u) != 0;
   }
 
   void base(std::string_view unit, std::uint32_t reload) const
@@ -311,16 +319,15 @@ void constructs_throw(part_description const& desc)
 }
 }
 
-TEST_CASE(
-    "RM0351 31.1 and 33.1: TIM2 to TIM7 have a model on STM32L476RCTx, the others stay storage")
+TEST_CASE("RM0351 30.1, 31.1, 33.1: TIM1 to TIM8 have a model on STM32L476RCTx, TIM15 to 17 not")
 {
   rig const r;
-  for(auto const* unit : {"TIM2", "TIM3", "TIM4", "TIM5", "TIM6", "TIM7"})
+  for(auto const* unit : {"TIM1", "TIM2", "TIM3", "TIM4", "TIM5", "TIM6", "TIM7", "TIM8"})
   {
     CAPTURE(unit);
     CHECK(r.f->target->model(unit) != nullptr);
   }
-  for(auto const* unit : {"TIM1", "TIM8", "TIM15", "TIM16", "TIM17"})
+  for(auto const* unit : {"TIM15", "TIM16", "TIM17"})
   {
     CAPTURE(unit);
     CHECK(r.f->target->model(unit) == nullptr);
@@ -371,7 +378,7 @@ TEST_CASE("TIM3 and TIM4 ARR bits 31:16 keep their reset ones after a write, inf
   CHECK(r.read("TIM2", "ARR") == 0x0001'2345u);
 }
 
-TEST_CASE("every entry of RM0351 Table 207 reaches its own source and no other")
+TEST_CASE("every entry of RM0351 Tables 207 and 202 reaches its own source and no other")
 {
   struct row
   {
@@ -380,26 +387,18 @@ TEST_CASE("every entry of RM0351 Table 207 reaches its own source and no other")
     std::uint32_t    remap;
     std::string_view source;
   };
-  constexpr std::array<row, 17> table{
-      {{"TIM2", 0, 0, "TIM1"},
-       {"TIM2", 1, 0, "TIM8"},
-       {"TIM2", 1, 1, "OTG_FS"},
-       {"TIM2", 2, 0, "TIM3"},
-       {"TIM2", 3, 0, "TIM4"},
-       {"TIM3", 0, 0, "TIM1"},
-       {"TIM3", 1, 0, "TIM2"},
-       {"TIM3", 2, 0, "TIM15"},
-       {"TIM3", 3, 0, "TIM4"},
-       {"TIM4", 0, 0, "TIM1"},
-       {"TIM4", 1, 0, "TIM2"},
-       {"TIM4", 2, 0, "TIM3"},
-       {"TIM4", 3, 0, "TIM8"},
-       {"TIM5", 0, 0, "TIM2"},
-       {"TIM5", 1, 0, "TIM3"},
-       {"TIM5", 2, 0, "TIM4"},
-       {"TIM5", 3, 0, "TIM8"}}
+  constexpr std::array<row, 25> table{
+      {{"TIM2", 0, 0, "TIM1"}, {"TIM2", 1, 0, "TIM8"},  {"TIM2", 1, 1, "OTG_FS"},
+       {"TIM2", 2, 0, "TIM3"}, {"TIM2", 3, 0, "TIM4"},  {"TIM3", 0, 0, "TIM1"},
+       {"TIM3", 1, 0, "TIM2"}, {"TIM3", 2, 0, "TIM15"}, {"TIM3", 3, 0, "TIM4"},
+       {"TIM4", 0, 0, "TIM1"}, {"TIM4", 1, 0, "TIM2"},  {"TIM4", 2, 0, "TIM3"},
+       {"TIM4", 3, 0, "TIM8"}, {"TIM5", 0, 0, "TIM2"},  {"TIM5", 1, 0, "TIM3"},
+       {"TIM5", 2, 0, "TIM4"}, {"TIM5", 3, 0, "TIM8"},  {"TIM1", 0, 0, "TIM15"},
+       {"TIM1", 1, 0, "TIM2"}, {"TIM1", 2, 0, "TIM3"},  {"TIM1", 3, 0, "TIM4"},
+       {"TIM8", 0, 0, "TIM1"}, {"TIM8", 1, 0, "TIM2"},  {"TIM8", 2, 0, "TIM4"},
+       {"TIM8", 3, 0, "TIM5"}}
   };
-  constexpr std::array<std::string_view, 4> masters{"TIM2", "TIM3", "TIM4", "TIM5"};
+  constexpr std::array<std::string_view, 6> masters{"TIM1", "TIM2", "TIM3", "TIM4", "TIM5", "TIM8"};
   for(auto const& [slave, select, remap, source] : table)
   {
     CAPTURE(slave);
@@ -715,17 +714,27 @@ TEST_CASE("under strict a firmware OR1 or OR2 write that selects an internal inp
           leg{"TIM2", "OR1", 1u << 2 },
           leg{"TIM2", "OR2", 1u << 14},
           leg{"TIM3", "OR1", 1u      },
-          leg{"TIM3", "OR2", 1u << 14}
+          leg{"TIM3", "OR2", 1u << 14},
+          leg{"TIM1", "OR1", 1u << 4 },
+          leg{"TIM1", "OR1", 1u      },
+          leg{"TIM1", "OR1", 1u << 2 },
+          leg{"TIM1", "OR2", 1u << 15},
+          leg{"TIM8", "OR1", 1u << 4 },
+          leg{"TIM8", "OR1", 1u << 1 },
+          leg{"TIM8", "OR1", 3u << 2 },
+          leg{"TIM8", "OR2", 1u << 14}
   })
   {
     CAPTURE(unit);
     CAPTURE(reg);
-    rig r{true};
+    CAPTURE(value);
+    rig        r{true};
+    auto const reset = r.read(unit, reg);
     r.clock(unit);
-    CHECK_THROWS_AS(r.cpu_write(unit, reg, value), popcorn::model_error);
-    CHECK(r.read(unit, reg) == 0);
-    r.write(unit, reg, value);
-    CHECK(r.read(unit, reg) == value);
+    CHECK_THROWS_AS(r.cpu_write(unit, reg, reset | value), popcorn::model_error);
+    CHECK(r.read(unit, reg) == reset);
+    r.write(unit, reg, reset | value);
+    CHECK(r.read(unit, reg) == (reset | value));
     CHECK(r.warnings() == 1);
   }
 }
@@ -960,4 +969,193 @@ TEST_CASE("RM0351 33.4.1: a TIM6 or TIM7 description with CR1.DIR or CMS throws 
       constructs_throw(desc);
     }
   }
+}
+
+TEST_CASE("RM0351 Table 61: TIM1 raises 24 to 27 by group, TIM8 43 to 46, through the shared names")
+{
+  struct leg
+  {
+    std::string_view unit;
+    std::string_view enable;
+    std::string_view generate;
+    std::uint32_t    irq;
+  };
+  for(auto const& [unit, enable, generate, irq] : {
+          leg{"TIM1", "BIE",   "BG",   24},
+          leg{"TIM1", "BIE",   "B2G",  24},
+          leg{"TIM1", "UIE",   "UG",   25},
+          leg{"TIM1", "TIE",   "TG",   26},
+          leg{"TIM1", "COMIE", "COMG", 26},
+          leg{"TIM1", "CC1IE", "CC1G", 27},
+          leg{"TIM8", "BIE",   "BG",   43},
+          leg{"TIM8", "UIE",   "UG",   44},
+          leg{"TIM8", "TIE",   "TG",   45},
+          leg{"TIM8", "CC4IE", "CC4G", 46},
+  })
+  {
+    CAPTURE(unit);
+    CAPTURE(generate);
+    rig r;
+    r.clock(unit);
+    r.set(unit, "DIER", enable, 1);
+    r.set(unit, "EGR", generate, 1);
+    for(std::uint32_t line = 24; line <= 46; ++line)
+    {
+      if((line >= 24 and line <= 27) or line >= 43)
+      {
+        CAPTURE(line);
+        CHECK(r.pending(line) == (line == irq));
+      }
+    }
+  }
+}
+
+TEST_CASE("RM0351 30.4.15: a TIM1 and TIM8 REP of 256 gives one update per 257 overflows")
+{
+  rig r;
+  for(auto const* unit : {"TIM1", "TIM8"})
+  {
+    CAPTURE(unit);
+    r.base(unit, 1);
+    r.write(unit, "RCR", 256);
+    r.write(unit, "EGR", 1);
+    r.write(unit, "SR", 0);
+    r.enable(unit);
+  }
+  r.at_tick(2 * 257 - 1);
+  for(auto const* unit : {"TIM1", "TIM8"})
+  {
+    CAPTURE(unit);
+    CHECK(r.get(unit, "SR", "UIF") == 0);
+  }
+  r.at_tick(2 * 257);
+  for(auto const* unit : {"TIM1", "TIM8"})
+  {
+    CAPTURE(unit);
+    CHECK(r.get(unit, "SR", "UIF") == 1);
+    CHECK(r.read(unit, "RCR") == 256);
+  }
+}
+
+TEST_CASE(
+    "RM0351 30.4.23, 30.4.24: TI1_RMP 0 captures the TIM1 PA8 and TIM8 PC6 edges, 1 reads low")
+{
+  struct leg
+  {
+    std::string_view unit;
+    std::string_view port;
+    std::uint8_t     pin;
+    std::uint32_t    af;
+  };
+  for(auto const& [unit, port, pin, af] : {
+          leg{"TIM1", "GPIOA", 8, 1},
+          leg{"TIM8", "GPIOC", 6, 3},
+  })
+  {
+    for(std::uint32_t const remap : {0u, 1u})
+    {
+      CAPTURE(unit);
+      CAPTURE(remap);
+      rig   r;
+      auto& gpio = r.port(port, pin, af);
+      r.base(unit, 0xffff);
+      r.set(unit, "OR1", "TI1_RMP", remap);
+      r.set(unit, "CCMR1_Input", "CC1S", 1);
+      r.set(unit, "CCER", "CC1E", 1);
+      r.enable(unit);
+      gpio.drive_at(pin, true, vtime{r.start + 40 * ps_per_tick});
+      r.at_tick(60);
+      CHECK(r.get(unit, "SR", "CC1IF") == (remap == 0 ? 1u : 0u));
+      CHECK(r.read(unit, "CCR1") == (remap == 0 ? 40u : 0u));
+      CHECK(r.warnings() == remap);
+    }
+  }
+}
+
+TEST_CASE("RM0351 30.4.23, 30.4.28: TIM1 counts PA12 ETR edges, the ADC watchdog OR keeps the pin")
+{
+  struct leg
+  {
+    std::string_view unit;
+    std::uint8_t     pin;
+    std::uint32_t    af;
+    std::string_view reg;
+    std::string_view field;
+    std::uint32_t    value;
+    std::uint32_t    counted;
+  };
+  for(auto const& [unit, pin, af, reg, field, value, counted] : {
+          leg{"TIM1", 12, 1, "OR1", "ETR_ADC1_RMP", 0, 5},
+          leg{"TIM1", 12, 1, "OR1", "ETR_ADC1_RMP", 2, 5},
+          leg{"TIM1", 12, 1, "OR1", "ETR_ADC3_RMP", 3, 5},
+          leg{"TIM1", 12, 1, "OR2", "ETRSEL",       1, 0},
+          leg{"TIM8", 0,  3, "OR1", "ETR_ADC2_RMP", 1, 5},
+          leg{"TIM8", 0,  3, "OR1", "ETR_ADC3_RMP", 0, 5},
+          leg{"TIM8", 0,  3, "OR2", "ETRSEL",       2, 0},
+  })
+  {
+    CAPTURE(unit);
+    CAPTURE(field);
+    CAPTURE(value);
+    rig   r;
+    auto& porta = r.port("GPIOA", pin, af);
+    r.base(unit, 0xffff);
+    r.set(unit, reg, field, value);
+    r.write(unit, "SMCR", ece);
+    r.enable(unit);
+    auto const t0 = r.now();
+    for(std::uint64_t edge = 0; edge < 5; ++edge)
+    {
+      porta.drive_at(pin, true, vtime{t0 + (20 * edge + 10) * us});
+      porta.drive_at(pin, false, vtime{t0 + (20 * edge + 20) * us});
+    }
+    r.run_until(t0 + 95 * us);
+    CHECK(r.read(unit, "CNT") == counted);
+    CHECK(r.warnings() == (value == 0 ? 0u : 1u));
+  }
+}
+
+TEST_CASE(
+    "BDTR, CCxNE, CCR5, CCR6 and OR2, OR3 break sources are storage, BG leaves MOE, a deviation")
+{
+  rig r;
+  for(auto const* unit : {"TIM1", "TIM8"})
+  {
+    CAPTURE(unit);
+    r.clock(unit);
+    CHECK(r.read(unit, "OR2") == 1);
+    CHECK(r.read(unit, "OR3") == 1);
+    r.write(unit, "BDTR", 0x03ff'ff40u);
+    r.write(unit, "CCER", 0x0033'bfffu);
+    r.write(unit, "OR2", 0x0000'0f07u);
+    r.write(unit, "OR3", 0x0000'0f07u);
+    r.write(unit, "CCR5", 0xe000'1234u);
+    r.write(unit, "CCR6", 0x5678u);
+    CHECK(r.read(unit, "BDTR") == 0x03ff'ff40u);
+    CHECK(r.read(unit, "CCER") == 0x0033'bfffu);
+    CHECK(r.read(unit, "OR2") == 0x0000'0f07u);
+    CHECK(r.read(unit, "OR3") == 0x0000'0f07u);
+    CHECK(r.read(unit, "CCR5") == 0xe000'1234u);
+    CHECK(r.read(unit, "CCR6") == 0x5678u);
+    r.write(unit, "EGR", 1u << 7);
+    CHECK(r.get(unit, "SR", "BIF") == 1);
+    CHECK(r.get(unit, "BDTR", "MOE") == 1);
+  }
+  CHECK(r.warnings() == 0);
+}
+
+TEST_CASE("TIM1 complementary PWM on CH1 and CH1N with dead time flags CC1 250 us in, firmware")
+{
+  firmware_run run{"tim1_pwm"};
+  auto const   started = run.started();
+  auto const   logged  = run.finish();
+  REQUIRE(logged.size() == 3);
+  CHECK(logged[0] == run.compares.size());
+  CHECK(logged[1] == 0x0005);
+  CHECK(logged[2] == 0x8040);
+  REQUIRE(run.updates.size() == 10);
+  REQUIRE(run.compares.size() >= 10);
+  CHECK(run.compares.front() - started > 250 * us);
+  CHECK(run.compares.front() - started < 252 * us);
+  CHECK(std::ranges::all_of(gaps(run.compares), [](std::uint64_t gap) { return gap == ms; }));
 }

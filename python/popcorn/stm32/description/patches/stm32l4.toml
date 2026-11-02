@@ -638,6 +638,163 @@ add = { name = "UIFCPY", lsb = 31, width = 1, acc = "read_only", reset = 0 }
 source = "RM0351 Rev 11, 33.4.6 TIMx_CNT (x = 6 to 7): bit 31 UIFCPY, a read-only copy of UIF while CR1.UIFREMAP is 1, read as 0 otherwise. The four SVDs leave it out"
 
 [[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["CR1"]
+add = { name = "UIFREMAP", lsb = 11, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.1 TIMx_CR1 (x = 1, 8): bit 11 UIFREMAP, rw. The four SVDs leave it out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["CR2"]
+add = { name = "MMS2", lsb = 20, width = 4, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.2 TIMx_CR2 (x = 1, 8): MMS2[3:0] at bits 23:20, OIS6 at bit 18, OIS5 at bit 16, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["CR2"]
+add = { name = "OIS6", lsb = 18, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.2 TIMx_CR2 (x = 1, 8): MMS2[3:0] at bits 23:20, OIS6 at bit 18, OIS5 at bit 16, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["CR2"]
+add = { name = "OIS5", lsb = 16, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.2 TIMx_CR2 (x = 1, 8): MMS2[3:0] at bits 23:20, OIS6 at bit 18, OIS5 at bit 16, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["SMCR"]
+add = { name = "SMS_1", lsb = 16, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.3 TIMx_SMCR (x = 1, 8): bit 16 SMS[3], in the SMS_1 spelling of the model, and bit 3 OCCS, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["SMCR"]
+add = { name = "OCCS", lsb = 3, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.3 TIMx_SMCR (x = 1, 8): bit 16 SMS[3], in the SMS_1 spelling of the model, and bit 3 OCCS, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["SR"]
+add = { name = "CC6IF", lsb = 17, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.5 TIMx_SR (x = 1, 8): CC6IF bit 17, CC5IF bit 16, SBIF bit 13, B2IF bit 8, rc_w0. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["SR"]
+add = { name = "CC5IF", lsb = 16, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.5 TIMx_SR (x = 1, 8): CC6IF bit 17, CC5IF bit 16, SBIF bit 13, B2IF bit 8, rc_w0. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["SR"]
+add = { name = "SBIF", lsb = 13, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.5 TIMx_SR (x = 1, 8): CC6IF bit 17, CC5IF bit 16, SBIF bit 13, B2IF bit 8, rc_w0. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["SR"]
+add = { name = "B2IF", lsb = 8, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.5 TIMx_SR (x = 1, 8): CC6IF bit 17, CC5IF bit 16, SBIF bit 13, B2IF bit 8, rc_w0. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["EGR"]
+add = { name = "B2G", lsb = 8, width = 1, acc = "write_only", reset = 0 }
+source = "RM0351 Rev 11, 30.4.6 TIMx_EGR (x = 1, 8): bit 8 B2G, w. The four SVDs leave it out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["CCER"]
+add = { name = "CC6P", lsb = 21, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.11 TIMx_CCER (x = 1, 8): CC6P bit 21, CC6E bit 20, CC5P bit 17, CC5E bit 16, CC4NP bit 15, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["CCER"]
+add = { name = "CC6E", lsb = 20, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.11 TIMx_CCER (x = 1, 8): CC6P bit 21, CC6E bit 20, CC5P bit 17, CC5E bit 16, CC4NP bit 15, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["CCER"]
+add = { name = "CC5P", lsb = 17, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.11 TIMx_CCER (x = 1, 8): CC6P bit 21, CC6E bit 20, CC5P bit 17, CC5E bit 16, CC4NP bit 15, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["CCER"]
+add = { name = "CC5E", lsb = 16, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.11 TIMx_CCER (x = 1, 8): CC6P bit 21, CC6E bit 20, CC5P bit 17, CC5E bit 16, CC4NP bit 15, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["CCER"]
+add = { name = "CC4NP", lsb = 15, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.11 TIMx_CCER (x = 1, 8): CC6P bit 21, CC6E bit 20, CC5P bit 17, CC5E bit 16, CC4NP bit 15, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["CNT"]
+add = { name = "UIFCPY", lsb = 31, width = 1, acc = "read_only", reset = 0 }
+source = "RM0351 Rev 11, 30.4.12 TIMx_CNT (x = 1, 8): bit 31 UIFCPY, a read-only copy of UIF while CR1.UIFREMAP is 1, read as 0 otherwise. The four SVDs leave it out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["BDTR"]
+add = { name = "BK2P", lsb = 25, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.20 TIMx_BDTR (x = 1, 8): BK2P bit 25, BK2E bit 24, BK2F[3:0] bits 23:20, BKF[3:0] bits 19:16, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["BDTR"]
+add = { name = "BK2E", lsb = 24, width = 1, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.20 TIMx_BDTR (x = 1, 8): BK2P bit 25, BK2E bit 24, BK2F[3:0] bits 23:20, BKF[3:0] bits 19:16, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["BDTR"]
+add = { name = "BK2F", lsb = 20, width = 4, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.20 TIMx_BDTR (x = 1, 8): BK2P bit 25, BK2E bit 24, BK2F[3:0] bits 23:20, BKF[3:0] bits 19:16, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["BDTR"]
+add = { name = "BKF", lsb = 16, width = 4, acc = "read_write", reset = 0 }
+source = "RM0351 Rev 11, 30.4.20 TIMx_BDTR (x = 1, 8): BK2P bit 25, BK2E bit 24, BK2F[3:0] bits 23:20, BKF[3:0] bits 19:16, rw. The four SVDs leave them out"
+
+[[fields]]
+instances = ["TIM1", "TIM8"]
+registers = ["CCMR3_Output"]
+fields = ["OC5M_bit3"]
+width = 1
+source = "RM0351 Rev 11, 30.4.25 TIMx_CCMR3 (x = 1, 8): OC5M[3] is bit 16 alone, bits 23:17 reserved. The four SVDs give OC5M_bit3 3 bits"
+
+[[fields]]
+instances = ["TIM1"]
+registers = ["OR2"]
+rename = { BKDFBK0E = "BKDF1BK0E" }
+source = "RM0351 Rev 11, 30.4.28 TIM1_OR2: bit 8 BKDF1BK0E, dfsdm1_break[0] for BRK. The four SVDs spell it BKDFBK0E"
+
+[[fields]]
+instances = ["TIM1"]
+registers = ["OR3"]
+rename = { BK2DFBK0E = "BK2DF1BK1E" }
+source = "RM0351 Rev 11, 30.4.29 TIM1_OR3: bit 8 BK2DF1BK1E, dfsdm1_break[1] for BRK2. The four SVDs spell it BK2DFBK0E"
+
+[[fields]]
+instances = ["TIM8"]
+registers = ["OR2"]
+rename = { BKDFBK2E = "BKDF1BK2E" }
+source = "RM0351 Rev 11, 30.4.30 TIM8_OR2: bit 8 BKDF1BK2E, dfsdm1_break[2] for BRK. The four SVDs spell it BKDFBK2E"
+
+[[fields]]
+instances = ["TIM8"]
+registers = ["OR3"]
+rename = { BK2DFBK3E = "BK2DF1BK3E" }
+source = "RM0351 Rev 11, 30.4.31 TIM8_OR3: bit 8 BK2DF1BK3E, dfsdm1_break[3] for BRK2. The four SVDs spell it BK2DFBK3E"
+
+[[fields]]
 instances = ["RCC"]
 registers = ["CR"]
 fields = ["CSSON", "MSIRGSEL"]

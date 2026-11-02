@@ -46,7 +46,8 @@ constexpr auto l1_tim_instances =
 constexpr auto l1_cat3_tim_instances =
     std::to_array<std::string_view>({"TIM2", "TIM3", "TIM4", "TIM5", "TIM9", "TIM10", "TIM11"});
 constexpr auto l1_basic_tim_instances = std::to_array<std::string_view>({"TIM6", "TIM7"});
-constexpr auto l4_tim_instances = std::to_array<std::string_view>({"TIM2", "TIM3", "TIM4", "TIM5"});
+constexpr auto l4_tim_instances =
+    std::to_array<std::string_view>({"TIM1", "TIM2", "TIM3", "TIM4", "TIM5", "TIM8"});
 
 struct builtin
 {

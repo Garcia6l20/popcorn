@@ -14,6 +14,7 @@ add_ll_firmware(
         "tim3_capture",
         "tim6_trgo",
         "tim7_update",
+        "tim1_pwm",
         "on_update",
         "on_compare",
         "on_started",

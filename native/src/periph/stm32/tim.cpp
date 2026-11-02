@@ -207,6 +207,7 @@ struct input_route
   std::string      reg;
   std::string_view name;
   std::uint32_t    pin_values;
+  bool             ored;
 };
 
 struct interrupt_source
@@ -259,9 +260,9 @@ struct interrupt_source
  *        Table 80 gives TIM2, TIM3 and TIM4 each its own ITR0 to ITR3 among TIM2 to TIM4, TIM9 and
  *        the OC1 outputs of TIM10 and TIM11. On Cat.3 and up TIM2_OR.ITR1_RMP and TIM3_OR.ITR2_RMP
  *        select TIM5 TRGO for TIM2 ITR1 and TIM3 ITR2, from the OR write on. TIM5 has no Table 80
- *        row, so its every TS reaches nothing, inferred. The STM32L4 of RM0351 Table 207 gives TIM2
- *        to TIM5 each its own ITR0 to ITR3 among TIM1 to TIM5, TIM8 and TIM15, and
- *        TIM2_OR1.ITR1_RMP selects TIM8 TRGO or OTG_FS_SOF, which has no model, for TIM2 ITR1.
+ *        row, so its every TS reaches nothing, inferred. The STM32L4 of RM0351 Tables 207 and 202
+ *        gives TIM1 to TIM5 and TIM8 each its own ITR0 to ITR3 among TIM1 to TIM5, TIM8 and TIM15,
+ *        and TIM2_OR1.ITR1_RMP selects TIM8 TRGO or OTG_FS_SOF, which has no model, for TIM2 ITR1.
  *        A modelled slave mode on an input with no
  *        model holds the timer and logs once, and under strict_peripherals the SMCR or OR write
  *        that selects it raises model_error. RM0038 Table 83 gives TIM9 ITR0 TIM2, ITR1 TIM3, or
@@ -1006,15 +1007,21 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
     oc1_clear_ = optional_field(view, "OC1CE");
     oc1_.emplace(ctx.peers, instance + "_oc1_trgo");
   }
+  auto const own_names = [&](tim_irq const& row) { return row.instance == desc.name; };
   auto const multiline =
-      std::ranges::contains(ctx.part.irqs, std::format("{}_UP_IRQn", desc.name), &irq_desc::name);
+      std::ranges::contains(ctx.part.irqs, std::format("{}_UP_IRQn", desc.name), &irq_desc::name)
+      or std::ranges::any_of(variant.irq_names, [&](tim_irq const& row) {
+           return own_names(row) and not row.group.empty();
+         });
   std::vector<std::string> groups;
-  auto const               named =
-      std::ranges::find(variant.irq_names, std::string_view{desc.name}, &tim_irq::instance);
-  auto const line_of = [&](std::string_view base) -> std::size_t {
-    auto const irq_name = multiline ? std::format("{}_{}_IRQn", desc.name, multiline_group(base))
-                        : named != variant.irq_names.end() ? std::string{named->irq}
-                                                           : std::format("{}_IRQn", desc.name);
+  auto const               line_of = [&](std::string_view base) -> std::size_t {
+    auto const group    = multiline ? multiline_group(base) : std::string_view{};
+    auto const named    = std::ranges::find_if(variant.irq_names, [&](tim_irq const& row) {
+      return own_names(row) and row.group == group;
+    });
+    auto const irq_name = named != variant.irq_names.end() ? std::string{named->irq}
+                        : multiline ? std::format("{}_{}_IRQn", desc.name, group)
+                                    : std::format("{}_IRQn", desc.name);
     auto const at       = std::ranges::find(groups, irq_name);
     if(at != groups.end())
     {
@@ -1140,7 +1147,8 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
            .field      = field(name(entry.reg), entry.field),
            .reg        = name(entry.reg),
            .name       = entry.field,
-           .pin_values = entry.pin_values});
+           .pin_values = entry.pin_values,
+           .ored       = entry.ored});
     }
   }
   for(auto const& claimed : claims())
@@ -2262,7 +2270,9 @@ auto tim::raw_input(std::size_t ch) const -> bool
 auto tim::remapped(std::size_t input) const -> bool
 {
   return std::ranges::any_of(input_remaps_, [&](input_route const& remap) {
-    return remap.channel == input and ((remap.pin_values >> get(regs_, remap.field)) & 1u) == 0;
+    return remap.channel == input
+       and not remap.ored
+       and ((remap.pin_values >> get(regs_, remap.field)) & 1u) == 0;
   });
 }
 
@@ -2705,9 +2715,13 @@ void tim::refuse_unmodelled(std::uint32_t word, std::uint32_t merged, access_ctx
                            : std::format("tim_ti{}", remap.channel + 1);
       unmodelled(
           remap.reg, word, remap_logged_,
-          std::format(
-              "{} {}: the internal {} source is not modelled, {} reads low", remap.name, value,
-              input, input),
+          remap.ored ? std::format(
+                           "{} {}: the internal source ORed into {} is not modelled, {} follows "
+                           "its pin",
+                           remap.name, value, input, input)
+                     : std::format(
+                           "{} {}: the internal {} source is not modelled, {} reads low",
+                           remap.name, value, input, input),
           access);
     }
   }

@@ -1004,3 +1004,41 @@ def test_tim6_and_tim7_take_the_rm0351_33_4_registers(name: str) -> None:
         }
         assert {f.name: f.acc for f in registers["CNT"].fields}["UIFCPY"] == Access.READ_ONLY
         assert registers["ARR"].reset == 0xFFFF
+
+
+TIM18_ADDED = {
+    "CR1": [("UIFREMAP", 11, 1)],
+    "CR2": [("MMS2", 20, 4), ("OIS6", 18, 1), ("OIS5", 16, 1)],
+    "SMCR": [("SMS_1", 16, 1), ("OCCS", 3, 1)],
+    "SR": [("CC6IF", 17, 1), ("CC5IF", 16, 1), ("SBIF", 13, 1), ("B2IF", 8, 1)],
+    "EGR": [("B2G", 8, 1)],
+    "CCER": [("CC6P", 21, 1), ("CC6E", 20, 1), ("CC5P", 17, 1), ("CC5E", 16, 1), ("CC4NP", 15, 1)],
+    "CNT": [("UIFCPY", 31, 1)],
+    "BDTR": [("BK2P", 25, 1), ("BK2E", 24, 1), ("BK2F", 20, 4), ("BKF", 16, 4)],
+    "CCMR3_Output": [("OC5M_bit3", 16, 1)],
+}
+"""RM0351 30.4.1 to 30.4.25: the TIM1 and TIM8 fields the four SVDs leave out or misplace."""
+TIM18_BREAK_DFSDM = {
+    "TIM1": {"OR2": "BKDF1BK0E", "OR3": "BK2DF1BK1E"},
+    "TIM8": {"OR2": "BKDF1BK2E", "OR3": "BK2DF1BK3E"},
+}
+"""RM0351 30.4.28 to 30.4.31: the dfsdm1_break enables at bit 8 of OR2 and OR3."""
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", TIM_PARTS)
+def test_tim1_and_tim8_take_the_rm0351_30_4_fields(name: str) -> None:
+    description = _description(name)
+    for unit, dfsdm in TIM18_BREAK_DFSDM.items():
+        registers = _registers(description, unit)
+        for register, added in TIM18_ADDED.items():
+            layout = {f: (lsb, width) for f, lsb, width, _ in _layout(registers[register])}
+            for field, lsb, width in added:
+                assert layout[field] == (lsb, width), (unit, register, field)
+        assert "CC4NE" not in {f.name for f in registers["CCER"].fields}
+        acc = {f.name: f.acc for f in registers["CNT"].fields}
+        assert acc["UIFCPY"] == Access.READ_ONLY
+        for register, field in dfsdm.items():
+            bits = {f.name: (f.lsb, f.width) for f in registers[register].fields}
+            assert bits[field] == (8, 1)
+            assert registers[register].reset == 1
