@@ -9,6 +9,7 @@
 #define NS_PERIPH_END   0x4FFFFFE0u
 #define SRAM1_WORDS     12u
 #define NSACR_CP10_CP11 (SCB_NSACR_CP10_Msk | SCB_NSACR_CP11_Msk)
+#define CPACR_CP10_CP11 (0xFu << 20)
 
 extern uint32_t _estack;
 extern uint32_t __sgstubs_start;
@@ -53,6 +54,8 @@ __attribute__((noipa)) int main(void)
   GTZC_TZSC1_S->SECCFGR1 = GTZC_CFGR1_TIM3_Msk;
   GTZC_TZIC1_S->IER1     = GTZC_CFGR1_TIM3_Msk;
   SCB->NSACR |= NSACR_CP10_CP11;
+  SCB->CPACR |= CPACR_CP10_CP11;
+  SCB_NS->CPACR |= CPACR_CP10_CP11;
   SCB_NS->VTOR = NS_VECTORS;
   __DSB();
   __ISB();

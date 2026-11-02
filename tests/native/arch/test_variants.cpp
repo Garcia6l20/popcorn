@@ -19,6 +19,7 @@
 #include <bit>
 #include <chrono>
 #include <cstdint>
+#include <initializer_list>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -470,6 +471,190 @@ TEST_CASE("ID registers, MVFR, CPACR and the M7 cache bits follow the profile")
     auto f = booted("exceptions", cm4);
     REQUIRE(f.target->mem().write(0xE000'ED88, 4, 0x00F0'0000));
     CHECK(f.target->mem().read(0xE000'ED88, 4) == 0x00F0'0000u);
+  }
+}
+
+namespace
+{
+constexpr address       fp_code_at  = 0x2008'0000;
+constexpr address       fp_cpacr_at = 0xE000'ED88;
+constexpr std::uint32_t fp_full     = 0x00F0'0000;
+constexpr std::uint32_t fp_one      = 0x3F80'0000;
+
+auto fp_booted(std::string_view variant) -> arch_fixture
+{
+  if(variant == "CM4")
+  {
+    return booted("faults", cm4);
+  }
+  arch_fixture booted_m33{m33(), "faults", {}};
+  REQUIRE(booted_m33.run_to_stop().reason == stop_reason::user);
+  return booted_m33;
+}
+
+void put_halves(arch_fixture const& f, std::initializer_list<std::uint16_t> halves)
+{
+  auto at = fp_code_at;
+  for(auto const half : halves)
+  {
+    REQUIRE(f.target->mem().write(at, 2, half));
+    at += 2;
+  }
+}
+
+auto run_vmov(arch_fixture const& f) -> popcorn::stop
+{
+  put_halves(f, {0xee00, 0x2a10, 0xbe01});
+  f.set("r2", fp_one);
+  f.set("s0", 0);
+  f.set("pc", fp_code_at | 1u);
+  return f.run_to_stop({.max_instructions = icount{2}});
+}
+}
+
+TEST_CASE("a VMOV with CPACR CP10 and CP11 at 0 is a UsageFault NOCP on CM4 and CM33, B3.2.20")
+{
+  constexpr address       cfsr_at   = 0xE000'ED28;
+  constexpr std::uint32_t ufsr_nocp = 1u << 19;
+  for(auto const* const variant : {"CM33", "CM4"})
+  {
+    for(auto const cpacr : {0u, fp_full})
+    {
+      std::string const core{variant};
+      CAPTURE(core);
+      CAPTURE(cpacr);
+      auto f = fp_booted(variant);
+      REQUIRE(f.target->mem().write(fp_cpacr_at, 4, cpacr));
+      REQUIRE(f.word(fp_cpacr_at) == cpacr);
+      REQUIRE(f.target->mem().write(cfsr_at, 4, 0xFFFF'FFFF));
+      auto const stopped = run_vmov(f);
+      if(cpacr == 0)
+      {
+        REQUIRE(stopped.reason == stop_reason::fault);
+        REQUIRE(stopped.fault.has_value());
+        CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+        CHECK(stopped.fault->fault_address == fp_code_at);
+        CHECK(stopped.fault->status == ufsr_nocp);
+        CHECK(f.word(cfsr_at) == ufsr_nocp);
+        CHECK(f.reg("s0") == 0);
+      }
+      else
+      {
+        CHECK(stopped.reason == stop_reason::user);
+        CHECK(f.word(cfsr_at) == 0);
+        CHECK(f.reg("s0") == fp_one);
+      }
+    }
+  }
+}
+
+TEST_CASE(
+    "an IRQ over FP code and the return to its extended frame stop with UsageFault NOCP when CPACR "
+    "denies CP10, on CM4 and CM33, DDI0403E PushStack, PopStack and CheckVFPEnabled")
+{
+  constexpr address       cfsr_at   = 0xE000'ED28;
+  constexpr address       ispr0     = 0xE000'E200;
+  constexpr std::uint32_t ufsr_nocp = 1u << 19;
+  constexpr std::uint32_t fill      = 0xA5A5'A5A5;
+  for(auto const* const variant : {"CM4", "CM33"})
+  {
+    for(auto const on_return : {false, true})
+    {
+      std::string const core{variant};
+      CAPTURE(core);
+      CAPTURE(on_return);
+      auto const   cm4_core = core == "CM4";
+      auto const   firmware = cm4_core ? name_of("exceptions", cm4) : std::string{"exceptions"};
+      arch_fixture f{
+          cm4_core ? description(cm4)
+                   : m33_with([](popcorn::part_description& d) { d.core.num_irqs = 20; }),
+          firmware,
+          {}};
+      REQUIRE(f.run_to_stop().reason == stop_reason::user);
+      REQUIRE(run_to(f, sym(firmware, "probe_setup")).reason == stop_reason::user);
+      REQUIRE(run_to(f, sym(firmware, "regs_thread_msp_fp")).reason == stop_reason::user);
+      REQUIRE((f.reg("control") & 4u) != 0);
+      auto const msp = saved_special(f).msp;
+      for(address at = msp - 0x68; at < msp; at += 4)
+      {
+        REQUIRE(f.target->mem().write(at, 4, fill));
+      }
+      REQUIRE(f.target->mem().write(cfsr_at, 4, 0xFFFF'FFFF));
+      REQUIRE(f.target->mem().write(ispr0, 4, 1u << 11));
+      if(on_return)
+      {
+        REQUIRE(f.run_to_stop().reason == stop_reason::user);
+        REQUIRE(saved_special(f).ipsr == 16 + 11);
+        REQUIRE((f.reg("lr") & (1u << 4)) == 0);
+        put_halves(f, {0x4770});
+        f.set("pc", fp_code_at | 1u);
+      }
+      REQUIRE(f.target->mem().write(fp_cpacr_at, 4, 0));
+      auto const at_stop = saved_special(f);
+      auto const stopped = f.run_to_stop();
+      REQUIRE(stopped.reason == stop_reason::fault);
+      REQUIRE(stopped.fault.has_value());
+      CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+      CHECK(stopped.fault->status == ufsr_nocp);
+      CHECK(f.word(cfsr_at) == ufsr_nocp);
+      auto const after = saved_special(f);
+      CHECK(after.ipsr == at_stop.ipsr);
+      CHECK(after.msp == at_stop.msp);
+      if(not on_return)
+      {
+        CHECK(after.ipsr == 0);
+        CHECK(after.msp == msp);
+        auto const area = words_at(*f.target, msp - 0x68, 0x68 / 4);
+        CHECK(std::ranges::all_of(area, [](std::uint32_t word) { return word == fill; }));
+      }
+    }
+  }
+}
+
+TEST_CASE("a firmware CPACR store grants CP10 and CP11 to the next instruction of its block")
+{
+  for(auto const* const variant : {"CM33", "CM4"})
+  {
+    std::string const core{variant};
+    CAPTURE(core);
+    auto f = fp_booted(variant);
+    REQUIRE(f.target->mem().write(fp_cpacr_at, 4, 0));
+    put_halves(f, {0x6001, 0xee00, 0x2a10, 0xbe01});
+    f.set("r0", fp_cpacr_at);
+    f.set("r1", fp_full);
+    f.set("r2", fp_one);
+    f.set("s0", 0);
+    f.set("pc", fp_code_at | 1u);
+    CHECK(f.run_to_stop({.max_instructions = icount{3}}).reason == stop_reason::user);
+    CHECK(f.reg("s0") == fp_one);
+  }
+}
+
+TEST_CASE("a snapshot restore, a decoded snapshot and a reset give the engine their CPACR")
+{
+  for(auto const* const variant : {"CM33", "CM4"})
+  {
+    std::string const core{variant};
+    CAPTURE(core);
+    auto f = fp_booted(variant);
+    REQUIRE(f.target->mem().write(fp_cpacr_at, 4, 0));
+    auto const denied = f.target->snapshot();
+    REQUIRE(f.target->mem().write(fp_cpacr_at, 4, fp_full));
+    auto const granted = f.target->snapshot();
+    f.target->restore(denied);
+    CHECK(f.word(fp_cpacr_at) == 0);
+    CHECK(run_vmov(f).reason == stop_reason::fault);
+    f.target->restore(granted);
+    CHECK(f.word(fp_cpacr_at) == fp_full);
+    CHECK(run_vmov(f).reason == stop_reason::user);
+    CHECK(f.reg("s0") == fp_one);
+    f.target->reset();
+    CHECK(f.word(fp_cpacr_at) == 0);
+    CHECK(run_vmov(f).reason == stop_reason::fault);
+    f.target->restore(granted);
+    f.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(denied.data()))});
+    CHECK(f.word(fp_cpacr_at) == 0);
+    CHECK(run_vmov(f).reason == stop_reason::fault);
   }
 }
 

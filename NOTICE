@@ -214,6 +214,15 @@ Unicorn CPU emulator, popcorn fork, submodule third_party/unicorn
     split pages.
   - tests/unit/test_arm.c: test_arm_exit_after_insn_other_arch runs its
     X86 and ARM64 legs only when those architectures are built.
+  2026-11-02, Sylvain Garcia <garcia.6l20@gmail.com>:
+  - qemu/target/arm/helper.c: an M-profile FP instruction takes a NOCP
+    UsageFault when the CPACR of the current security state denies CP10,
+    before the NSACR check.
+  - qemu/target/arm/unicorn_arm.c, include/unicorn/arm.h: CPACR_NS is
+    readable and writable on an M-profile core with the FPU and without the
+    Security Extension, and a CPACR write rebuilds the hflags.
+  - tests/unit/test_arm.c: added test_arm_m_cpacr_gates_fp, and the FP
+    context and NSACR tests grant CPACR.
   License: GPL-2.0-only, see LICENSES/unicorn-COPYING. Parts derived from GLib
   are under LGPL-2.1-or-later, see LICENSES/unicorn-COPYING_GLIB. Built with the ARM
   target only and linked statically into the extension with hidden symbols.

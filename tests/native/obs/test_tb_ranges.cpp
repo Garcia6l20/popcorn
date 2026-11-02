@@ -264,6 +264,7 @@ struct tb_run
 
 void run_tb(tb_run& run, bool hooked)
 {
+  REQUIRE(run.f.target->mem().write(0xE000'ED88, 4, 0x00F0'0000));
   run.ranges = tb_ranges(run.f);
   run.f.target->enable_coverage(run.ranges);
   auto const sink = run.f.target->add_trace_sink({core::trace_kind::block}, run.seen.sink());

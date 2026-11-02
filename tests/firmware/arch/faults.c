@@ -10,6 +10,7 @@
 #define SCB_CFSR        0xE000ED28u
 #define SCB_HFSR        0xE000ED2Cu
 #define SCB_BFAR        0xE000ED38u
+#define SCB_CPACR       0xE000ED88u
 #define TESTDEV_RW      0x40010008u
 #define TESTDEV_DATA    0x40010058u
 #define UNMODELLED_STAT 0x40020004u
@@ -76,13 +77,14 @@ __attribute__((noipa)) void faults_setup(void)
   {
     ram_vector[number] = (uint32_t)(number < 24 ? vectors[number] : vectors[2]);
   }
-  ram_vector[3]     = (uint32_t)hardfault_entry;
-  ram_vector[4]     = (uint32_t)memmanage_entry;
-  ram_vector[5]     = (uint32_t)busfault_entry;
-  ram_vector[6]     = (uint32_t)usagefault_entry;
-  ram_vector[16]    = (uint32_t)bad_return_irq;
-  ram_vector[17]    = (uint32_t)bad_return_v8_irq;
-  REG32(SCB_VTOR)   = (uint32_t)ram_vector;
+  ram_vector[3]   = (uint32_t)hardfault_entry;
+  ram_vector[4]   = (uint32_t)memmanage_entry;
+  ram_vector[5]   = (uint32_t)busfault_entry;
+  ram_vector[6]   = (uint32_t)usagefault_entry;
+  ram_vector[16]  = (uint32_t)bad_return_irq;
+  ram_vector[17]  = (uint32_t)bad_return_v8_irq;
+  REG32(SCB_VTOR) = (uint32_t)ram_vector;
+  REG32(SCB_CPACR) |= 0xFu << 20;
   REG8(NVIC_IPR(0)) = 0x80;
   REG8(NVIC_IPR(1)) = 0x80;
   REG32(NVIC_ISER0) = 3u;

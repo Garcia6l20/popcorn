@@ -89,6 +89,8 @@ constexpr std::uint32_t control_spsel   = 1u << 1;
 constexpr std::uint32_t control_fpca    = 1u << 2;
 constexpr std::uint32_t control_sfpa    = 1u << 3;
 constexpr std::uint32_t fill            = 0xA5A5'A5A5;
+constexpr std::uint32_t cpacr_cp10_cp11 = 0x00F0'0000;
+constexpr std::uint32_t cpacr_cp10_priv = 0x0050'0000;
 constexpr address       shpr1           = 0xE000'ED18;
 constexpr address       ipr0            = 0xE000'E400;
 constexpr std::uint32_t sfsr_invis      = 1u << 1;
@@ -713,6 +715,7 @@ TEST_CASE(
     poke(f, iser0, 1);
     if(fp)
     {
+      poke(f, cpacr, cpacr_cp10_cp11);
       engine_write(f, UC_ARM_REG_CONTROL_S, engine_read(f, UC_ARM_REG_CONTROL_S) | control_fpca);
     }
     set_registers(f);
@@ -1365,7 +1368,6 @@ namespace
 constexpr std::uint32_t fpccr_ts        = 1u << 26;
 constexpr std::uint32_t fpccr_s         = 1u << 2;
 constexpr std::uint32_t fpccr_lspact    = 1u << 0;
-constexpr std::uint32_t cpacr_cp10_cp11 = 0x00F0'0000;
 constexpr address       nsacr           = 0xE000'ED8C;
 constexpr std::uint32_t nsacr_cp10_cp11 = 0x0C00;
 constexpr std::uint32_t sfsr_lserr      = 1u << 7;
@@ -1490,6 +1492,7 @@ TEST_CASE(
     open_nonsecure_region(f);
     poke(f, cpacr, cpacr_cp10_cp11);
     poke(f, nsacr, nsacr_cp10_cp11);
+    poke(f, cpacr + scs_ns, cpacr_cp10_cp11);
     if(ts)
     {
       poke(f, fpccr, f.word(fpccr) | fpccr_ts);
@@ -1545,6 +1548,7 @@ TEST_CASE(
   open_nonsecure_region(f);
   poke(f, cpacr, cpacr_cp10_cp11);
   poke(f, nsacr, nsacr_cp10_cp11);
+  poke(f, cpacr + scs_ns, cpacr_cp10_cp11);
   put_clobber(f, ns_code);
   fill_below(f, ns_stack, 0x100);
   engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
@@ -1578,21 +1582,34 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "a VLSTM with CPACR_S CP10 0 is a Secure UsageFault NOCP, frame untouched, the Secure FP "
-    "instruction before it not faulting, a deviation from C2.4.368 line 6 and B3.36")
+    "with CPACR_S CP10 0 a Secure VMOV and a VLSTM each take a Secure UsageFault NOCP at their pc "
+    "and leave the frame untouched, IsCPEnabled() and C2.4.368 line 6")
 {
-  auto       f  = booted(fault_policy::stop);
-  auto const sp = engine_read(f, UC_ARM_REG_MSP_S);
-  fill_below(f, sp, 0x88);
-  put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, sub_sp_0x88, vlstm_sp, vlxxm_tail, bkpt});
-  auto const stopped = run_secure(f, secure_code, 4);
-  REQUIRE(stopped.reason == stop_reason::fault);
-  CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
-  CHECK(f.reg("pc") == secure_code + 6);
-  CHECK((f.word(cfsr) & ufsr_nocp) != 0);
-  CHECK((f.word(cfsr + scs_ns) & ufsr_nocp) == 0);
-  auto const area = popcorn::testing::words_at(*f.target, sp - 0x88, 0x88 / 4);
-  CHECK(std::ranges::all_of(area, [](std::uint32_t word) { return word == fill; }));
+  for(auto const vmov_granted : {false, true})
+  {
+    CAPTURE(vmov_granted);
+    auto       f  = booted(fault_policy::stop);
+    auto const sp = engine_read(f, UC_ARM_REG_MSP_S);
+    fill_below(f, sp, 0x88);
+    put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, bkpt, sub_sp_0x88, vlstm_sp, vlxxm_tail, bkpt});
+    poke(f, cpacr, vmov_granted ? cpacr_cp10_cp11 : 0u);
+    auto entry = secure_code;
+    if(vmov_granted)
+    {
+      REQUIRE(run_secure(f, secure_code, 4).reason == stop_reason::user);
+      REQUIRE((engine_read(f, UC_ARM_REG_CONTROL_S) & control_fpca) != 0);
+      poke(f, cpacr, 0);
+      entry = secure_code + 6;
+    }
+    auto const stopped = run_secure(f, entry, 4);
+    REQUIRE(stopped.reason == stop_reason::fault);
+    CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+    CHECK(f.reg("pc") == (vmov_granted ? secure_code + 8 : secure_code));
+    CHECK((f.word(cfsr) & ufsr_nocp) != 0);
+    CHECK((f.word(cfsr + scs_ns) & ufsr_nocp) == 0);
+    auto const area = popcorn::testing::words_at(*f.target, sp - 0x88, 0x88 / 4);
+    CHECK(std::ranges::all_of(area, [](std::uint32_t word) { return word == fill; }));
+  }
 }
 
 TEST_CASE(
@@ -1606,6 +1623,7 @@ TEST_CASE(
   put(f, secure_code, {bkpt});
   poke(f, itns0, 1);
   poke(f, iser0, 1);
+  poke(f, cpacr, cpacr_cp10_cp11);
   poke(f, fpccr, f.word(fpccr) | fpccr_ts);
   engine_write(f, UC_ARM_REG_CONTROL_S, engine_read(f, UC_ARM_REG_CONTROL_S) | control_fpca);
   load_s_registers(f);
@@ -1676,6 +1694,7 @@ TEST_CASE(
   {
     CAPTURE(policy == fault_policy::stop);
     auto f = booted(policy);
+    poke(f, cpacr, cpacr_cp10_cp11);
     open_nonsecure_region(f);
     tables(f, 16);
     tables(f, armv8m::exc_usagefault);
@@ -1731,6 +1750,7 @@ TEST_CASE(
   {
     CAPTURE(in_handler);
     auto f = booted();
+    poke(f, cpacr, cpacr_cp10_cp11);
     open_nonsecure_region(f);
     tables(f, 16);
     tables(f, armv8m::exc_usagefault);
@@ -1738,6 +1758,8 @@ TEST_CASE(
     poke(f, shcsr, usagefault_ena);
     poke(f, shpr1, 0x0080'0000u);
     poke(f, cpacr + scs_ns, cpacr_cp10_cp11);
+    REQUIRE(f.word(nsacr) == 0);
+    CHECK(f.word(cpacr + scs_ns) == cpacr_cp10_cp11);
     put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, blxns_r3, bkpt});
     if(in_handler)
     {
@@ -1768,6 +1790,251 @@ TEST_CASE(
     CHECK((f.word(cfsr + scs_ns) & ufsr_nocp) == 0);
     CHECK(f.reg("r0") != secret);
     CHECK(f.module->is_active(16) == in_handler);
+  }
+}
+
+TEST_CASE(
+    "a Non-secure VMOV that CPACR_NS denies takes UsageFault_NS NOCP whatever NSACR holds, and "
+    "one that only NSACR denies takes UsageFault_S, IsCPEnabled() lines 9-32 and "
+    "CheckCPEnabled() lines 5-11")
+{
+  constexpr std::uint32_t one = 0x3F80'0000;
+  enum class outcome : std::uint8_t
+  {
+    runs,
+    nonsecure,
+    secure
+  };
+  struct leg
+  {
+    std::uint32_t cpacr_ns;
+    std::uint32_t nsacr_value;
+    bool          unprivileged;
+    outcome       expected;
+  };
+  for(auto const& one_leg : {
+          leg{0,               0x0C00, false, outcome::nonsecure},
+          leg{0,               0,      false, outcome::nonsecure},
+          leg{cpacr_cp10_priv, 0x0C00, true,  outcome::nonsecure},
+          leg{cpacr_cp10_priv, 0,      true,  outcome::nonsecure},
+          leg{cpacr_cp10_priv, 0,      false, outcome::secure   },
+          leg{cpacr_cp10_cp11, 0,      false, outcome::secure   },
+          leg{cpacr_cp10_priv, 0x0C00, false, outcome::runs     },
+  })
+  {
+    CAPTURE(one_leg.cpacr_ns);
+    CAPTURE(one_leg.nsacr_value);
+    CAPTURE(one_leg.unprivileged);
+    auto f = booted();
+    poke(f, cpacr, cpacr_cp10_cp11);
+    open_nonsecure_region(f);
+    tables(f, armv8m::exc_usagefault);
+    poke(f, shcsr, usagefault_ena);
+    poke(f, shcsr + scs_ns, usagefault_ena);
+    poke(f, cpacr + scs_ns, one_leg.cpacr_ns);
+    poke(f, nsacr, one_leg.nsacr_value);
+    REQUIRE(f.word(cpacr + scs_ns) == one_leg.cpacr_ns);
+    put(f, ns_code, {vmov_s0_r2, vmov_s0_r2b, bkpt});
+    engine_write(f, UC_ARM_REG_CONTROL_NS, one_leg.unprivileged ? 1u : 0u);
+    f.set("r2", one);
+    f.set("s0", 0);
+    REQUIRE(run_nonsecure(f, ns_code, 2).reason == stop_reason::user);
+    if(one_leg.expected == outcome::runs)
+    {
+      CHECK(ipsr(f) == 0);
+      CHECK(f.reg("pc") == ns_code + 6);
+      CHECK(f.reg("s0") == one);
+      CHECK((f.word(cfsr) & ufsr_nocp) == 0);
+      CHECK((f.word(cfsr + scs_ns) & ufsr_nocp) == 0);
+      continue;
+    }
+    auto const to_secure = one_leg.expected == outcome::secure;
+    CHECK(ipsr(f) == armv8m::exc_usagefault);
+    CHECK(secure_now(f) == to_secure);
+    CHECK(((f.word(cfsr) & ufsr_nocp) != 0) == to_secure);
+    CHECK(((f.word(cfsr + scs_ns) & ufsr_nocp) != 0) != to_secure);
+    CHECK((f.word(hfsr) & hfsr_forced) == 0);
+    CHECK(f.reg("s0") == 0);
+  }
+}
+
+TEST_CASE(
+    "a Secure write to CPACR_NS with NSACR.CP10 0 is stored, reads back from both states and "
+    "grants Non-secure FP once NSACR is set, D1.2.14 CPACR and D1.2.181 NSACR")
+{
+  constexpr std::uint32_t one = 0x3F80'0000;
+  auto                    f   = booted();
+  open_nonsecure_region(f);
+  REQUIRE(f.word(nsacr) == 0);
+  poke(f, cpacr + scs_ns, cpacr_cp10_cp11);
+  CHECK(f.word(cpacr + scs_ns) == cpacr_cp10_cp11);
+  poke(f, nsacr, nsacr_cp10_cp11);
+  put(f, ns_code, {ldr_r1_r0, vmov_s0_r2, vmov_s0_r2b, bkpt});
+  f.set("r0", cpacr);
+  f.set("r1", 0);
+  f.set("r2", one);
+  f.set("s0", 0);
+  REQUIRE(run_nonsecure(f, ns_code, 3).reason == stop_reason::user);
+  CHECK(ipsr(f) == 0);
+  CHECK(f.reg("pc") == ns_code + 8);
+  CHECK(f.reg("r1") == cpacr_cp10_cp11);
+  CHECK(f.reg("s0") == one);
+}
+
+TEST_CASE(
+    "an IRQ over FP code whose CPACR denies CP10 allocates the extended frame, stacks and clears "
+    "no FP register and takes the derived UsageFault NOCP of the background state, or stops "
+    "under fault_policy::stop, PushStack lines 9-16 and 55-80")
+{
+  constexpr std::uint32_t secret = 0x5EC0'0001;
+  struct leg
+  {
+    security     background;
+    fault_policy policy;
+    bool         unprivileged;
+  };
+  for(auto const& one_leg : {
+          leg{security::nonsecure, fault_policy::enter_handler, false},
+          leg{security::secure,    fault_policy::enter_handler, false},
+          leg{security::nonsecure, fault_policy::stop,          false},
+          leg{security::nonsecure, fault_policy::enter_handler, true },
+  })
+  {
+    auto const nonsecure = one_leg.background == security::nonsecure;
+    auto const stops     = one_leg.policy == fault_policy::stop;
+    CAPTURE(nonsecure);
+    CAPTURE(stops);
+    CAPTURE(one_leg.unprivileged);
+    auto f = booted(one_leg.policy);
+    poke(f, cpacr, cpacr_cp10_cp11);
+    poke(f, cpacr + scs_ns, cpacr_cp10_cp11);
+    poke(f, nsacr, nsacr_cp10_cp11);
+    open_nonsecure_region(f);
+    tables(f, 16);
+    tables(f, armv8m::exc_usagefault);
+    poke(f, shcsr, usagefault_ena);
+    poke(f, shcsr + scs_ns, usagefault_ena);
+    if(not nonsecure)
+    {
+      poke(f, fpccr, f.word(fpccr) | fpccr_ts);
+    }
+    put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, nonsecure ? blxns_r3 : bkpt, bkpt});
+    put(f, ns_code, {bkpt, 0xe7fe});
+    engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
+    poke(f, itns0, 1);
+    poke(f, iser0, 1);
+    f.set("r2", secret);
+    f.set("r3", ns_code);
+    REQUIRE(run_secure(f, secure_code, 4).reason == stop_reason::user);
+    REQUIRE(secure_now(f) != nonsecure);
+    REQUIRE((f.reg("control") & control_fpca) != 0);
+    load_s_registers(f);
+    if(one_leg.unprivileged)
+    {
+      engine_write(f, UC_ARM_REG_CONTROL_NS, 1);
+    }
+    auto const sp_id = nonsecure ? UC_ARM_REG_MSP_NS : UC_ARM_REG_MSP_S;
+    auto const top   = engine_read(f, sp_id);
+    fill_below(f, top, 0x100);
+    poke(f, nonsecure ? cpacr + scs_ns : cpacr, one_leg.unprivileged ? cpacr_cp10_priv : 0u);
+    poke(f, ispr0, 1);
+    auto const stopped = resume(f, 2);
+    CHECK(((f.word(cfsr + scs_ns) & ufsr_nocp) != 0) == nonsecure);
+    CHECK(((f.word(cfsr) & ufsr_nocp) != 0) != nonsecure);
+    for(int n = 0; n < 32; ++n)
+    {
+      CAPTURE(n);
+      CHECK(f.reg(std::format("s{}", n)) == pattern(n));
+    }
+    if(stops)
+    {
+      REQUIRE(stopped.reason == stop_reason::fault);
+      CHECK(stopped.fault->kind == popcorn::fault_kind::usage);
+      CHECK(engine_read(f, sp_id) == top);
+      auto const area = popcorn::testing::words_at(*f.target, top - 0x100, 0x100 / 4);
+      CHECK(std::ranges::all_of(area, [](std::uint32_t word) { return word == fill; }));
+      continue;
+    }
+    REQUIRE(stopped.reason == stop_reason::user);
+    CHECK(ipsr(f) == armv8m::exc_usagefault);
+    CHECK(secure_now(f) != nonsecure);
+    CHECK(f.module->is_pending(16));
+    auto const size     = nonsecure ? 0x68u : 0xA8u;
+    auto const frame_at = top - size;
+    CHECK(engine_read(f, sp_id) == (nonsecure ? frame_at : frame_at - 0x28));
+    CHECK((f.reg("lr") & (1u << 4)) == 0);
+    auto const frame = popcorn::testing::words_at(*f.target, frame_at, size / 4);
+    CHECK(frame[6] == (nonsecure ? ns_code + 2 : secure_code + 6));
+    CHECK(std::ranges::all_of(std::span{frame}.subspan(8), [](std::uint32_t word) {
+      return word == fill;
+    }));
+  }
+}
+
+TEST_CASE(
+    "an exception return to an extended frame whose returning state's CPACR denies CP10 takes "
+    "that state's UsageFault NOCP on the frame left in place, before the NSACR check, PopStack "
+    "lines 109-112 and IsCPEnabled() lines 9-24")
+{
+  struct leg
+  {
+    security background;
+    bool     clear_nsacr;
+    bool     unprivileged;
+  };
+  for(auto const& one_leg : {
+          leg{security::nonsecure, false, false},
+          leg{security::nonsecure, true,  false},
+          leg{security::secure,    false, false},
+          leg{security::nonsecure, false, true },
+  })
+  {
+    auto const nonsecure = one_leg.background == security::nonsecure;
+    CAPTURE(nonsecure);
+    CAPTURE(one_leg.clear_nsacr);
+    CAPTURE(one_leg.unprivileged);
+    auto f = booted();
+    poke(f, cpacr, cpacr_cp10_cp11);
+    poke(f, cpacr + scs_ns, cpacr_cp10_cp11);
+    poke(f, nsacr, nsacr_cp10_cp11);
+    open_nonsecure_region(f);
+    tables(f, 16);
+    tables(f, armv8m::exc_usagefault);
+    poke(f, shcsr, usagefault_ena);
+    poke(f, shcsr + scs_ns, usagefault_ena);
+    put(f, secure_code, {vmov_s0_r2, vmov_s0_r2b, nonsecure ? blxns_r3 : bkpt, bkpt});
+    put(f, ns_code, {bkpt, 0xe7fe});
+    put(f, ns_handler, {bkpt, bx_lr});
+    put(f, secure_handler, {bkpt, bx_lr});
+    engine_write(f, UC_ARM_REG_MSP_NS, ns_stack);
+    poke(f, itns0, nonsecure ? 1u : 0u);
+    poke(f, iser0, 1);
+    f.set("r3", ns_code);
+    REQUIRE(run_secure(f, secure_code, 4).reason == stop_reason::user);
+    REQUIRE(secure_now(f) != nonsecure);
+    if(one_leg.unprivileged)
+    {
+      engine_write(f, UC_ARM_REG_CONTROL_NS, 1);
+    }
+    poke(f, ispr0, 1);
+    REQUIRE(resume(f, 2).reason == stop_reason::user);
+    REQUIRE(ipsr(f) == 16);
+    REQUIRE((f.reg("lr") & 1u << 4) == 0);
+    auto const sp_id = nonsecure ? UC_ARM_REG_MSP_NS : UC_ARM_REG_MSP_S;
+    auto const frame = engine_read(f, sp_id);
+    poke(f, nonsecure ? cpacr + scs_ns : cpacr, one_leg.unprivileged ? cpacr_cp10_priv : 0u);
+    if(one_leg.clear_nsacr)
+    {
+      poke(f, nsacr, 0);
+    }
+    REQUIRE(resume(f, 2).reason == stop_reason::user);
+    CHECK(ipsr(f) == armv8m::exc_usagefault);
+    CHECK(secure_now(f) != nonsecure);
+    CHECK(((f.word(cfsr + scs_ns) & ufsr_nocp) != 0) == nonsecure);
+    CHECK(((f.word(cfsr) & ufsr_nocp) != 0) != nonsecure);
+    CHECK((f.word(hfsr) & hfsr_forced) == 0);
+    CHECK_FALSE(f.module->is_active(16));
+    CHECK(engine_read(f, sp_id) == frame);
   }
 }
 
@@ -1912,6 +2179,7 @@ auto booted_denying(address denied) -> arch_fixture
 
 void secure_fp_background(arch_fixture const& f)
 {
+  poke(f, cpacr, cpacr_cp10_cp11);
   poke(f, nsacr, nsacr_cp10_cp11);
   poke(f, fpccr, f.word(fpccr) | fpccr_ts);
   engine_write(
@@ -2047,6 +2315,7 @@ TEST_CASE(
   constexpr std::uint32_t secret = 0x5EC0'0001;
   constexpr address       stack  = ns_stack - 0x100;
   auto                    f      = booted();
+  poke(f, cpacr, cpacr_cp10_cp11);
   open_nonsecure_region(f);
   tables(f, 16);
   tables(f, armv8m::exc_usagefault);
@@ -2093,6 +2362,7 @@ TEST_CASE(
   {
     CAPTURE(enabled);
     auto f = booted();
+    poke(f, cpacr, cpacr_cp10_cp11);
     open_nonsecure_region(f);
     tables(f, 16);
     tables(f, armv8m::exc_usagefault);
@@ -2184,6 +2454,7 @@ TEST_CASE(
   {
     CAPTURE(static_cast<int>(kind));
     auto f = booted();
+    poke(f, cpacr, cpacr_cp10_cp11);
     open_nonsecure_region(f);
     poke(f, sau_rn, 1);
     poke(f, sau_rb, unmapped);

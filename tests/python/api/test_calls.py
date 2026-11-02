@@ -11,7 +11,7 @@ import popcorn
 import pytest
 from popcorn.trace import Irq
 
-from .conftest import CALLEE_ELF, M33_JSON, run_bounded
+from .conftest import CALLEE_ELF, M33_JSON, grant_fp, run_bounded
 
 
 def call(
@@ -54,6 +54,7 @@ def call(
 def test_signatures_from_dwarf_return_the_c_value(
     callee: popcorn.Machine, fn: str, args: tuple[object, ...], value: float
 ) -> None:
+    grant_fp(callee)
     result = call(callee, fn, *args, budget=100_000)
     assert result.stop.reason is popcorn.StopReason.RETURNED
     assert result.value == value
@@ -72,6 +73,7 @@ def test_without_dwarf_kinds_come_from_python_types(m33: popcorn.PartDescription
     image = popcorn.Image.elf(CALLEE_ELF)
     stripped = popcorn.Machine(m33, image=image)
     stripped.reset()
+    grant_fp(stripped)
     add = image.lookup("add").value
     assert asyncio.run(stripped.call(add, 20, 22)).value == 42
     twice = image.lookup("twice64").value

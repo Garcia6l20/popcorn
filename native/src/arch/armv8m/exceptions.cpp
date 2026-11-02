@@ -602,6 +602,10 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
                 and fp
                 and background == security::nonsecure
                 and (state_.scs.nsacr & nsacr_cp10) == 0;
+  auto const cp_denied =
+      fp
+      and not nocp
+      and not cp10_granted(background, not thread or (special.control & control_npriv) == 0);
   auto const size  = fp and not nocp ? extended_frame_size + (fp_callee ? fp_callee_frame_size : 0u)
                                      : basic_frame_size;
   auto const sp    = use_psp ? special.psp : special.msp;
@@ -611,6 +615,7 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
                         ? callee_frame_size
                         : 0u;
   auto const lowest = frame_at - callee;
+  auto const stored = callee + (cp_denied ? basic_frame_size : size);
   auto&      cfsr =
       extension and background == security::nonsecure ? state_.scs.nonsecure.cfsr : state_.scs.cfsr;
   auto const original = [&] { return pending_exception{.number = number, .state = state}; };
@@ -661,7 +666,7 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   {
     if(background == security::nonsecure)
     {
-      if(auto const denied = first_secure_word(lowest, frame_at + size))
+      if(auto const denied = first_secure_word(lowest, lowest + stored))
       {
         note_nocp();
         return derived_entry(
@@ -684,6 +689,15 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
       }
     }
   }
+  if(cp_denied and (not extension or context_->faults == fault_policy::stop))
+  {
+    cfsr |= cfsr::nocp;
+    return trap_result::fault(
+        {.kind          = fault_kind::usage,
+         .fault_address = pc(),
+         .status        = cfsr,
+         .detail        = state_.scs.hfsr});
+  }
   std::inplace_vector<std::uint32_t, max_frame_words> words((callee + size) / 4, 0);
   auto const                                          frame = std::span{words}.subspan(callee / 4);
   read_batch(engine, frame_ids, frame.first(frame_ids.size()));
@@ -694,13 +708,13 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   {
     frame[7] |= stacked_sfpa_bit;
   }
-  if(fp and not nocp)
+  if(fp and not nocp and not cp_denied)
   {
     read_batch(engine, fp_frame_ids, frame.subspan(8, fp_frame_ids.size()));
   }
   if constexpr(extension)
   {
-    if(fp_callee)
+    if(fp_callee and not cp_denied)
     {
       read_batch(
           engine, fp_callee_ids, frame.subspan(extended_frame_size / 4, fp_callee_ids.size()));
@@ -716,11 +730,11 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
       .secure     = background == security::secure,
       .privileged = not thread or (special.control & control_npriv) == 0,
   };
-  if(not services.write_block(lowest, std::as_bytes(std::span{words}), stacking))
+  if(not services.write_block(lowest, std::as_bytes(std::span{words}.first(stored / 4)), stacking))
   {
     if constexpr(extension)
     {
-      if(fp_callee)
+      if(fp_callee and not cp_denied)
       {
         invalidate_fp();
       }
@@ -743,9 +757,20 @@ auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
   }
   if constexpr(extension)
   {
-    if(fp_callee)
+    if(fp_callee and not cp_denied)
     {
       invalidate_fp();
+    }
+    if(cp_denied)
+    {
+      return derived_entry(
+          original(),
+          {.kind      = fault_kind::usage,
+           .target    = exc_usagefault,
+           .cfsr_bits = cfsr::nocp,
+           .reported  = pc(),
+           .origin    = background},
+          partial(), sp_id(), lowest);
     }
     if(nocp)
     {
@@ -977,6 +1002,18 @@ auto cortex_m::exception_return() -> trap_result
   {
     return invalid();
   }
+  if(core_.fpu
+     and not returning.basic_frame
+     and not cp10_granted(
+         security::secure, not returning.thread or (special.control & control_npriv) == 0))
+  {
+    state_.scs.cfsr |= cfsr::nocp;
+    return trap_result::fault(
+        {.kind          = fault_kind::usage,
+         .fault_address = value,
+         .status        = state_.scs.cfsr,
+         .detail        = state_.scs.hfsr});
+  }
   if(trustzone() and not decode_exc_security(value).secure_exception and banked(number))
   {
     state_.exceptions.nonsecure_active &= ~(1u << number);
@@ -1134,6 +1171,16 @@ auto cortex_m::exception_return() -> trap_result
         {.kind      = fault_kind::usage,
          .target    = exc_usagefault,
          .cfsr_bits = cfsr::invpc,
+         .reported  = value});
+  }
+  if(not returning.basic_frame
+     and not cp10_granted(back, not returning.thread or (bank.control & control_npriv) == 0))
+  {
+    return return_fault(
+        value, number, exception, back,
+        {.kind      = fault_kind::usage,
+         .target    = exc_usagefault,
+         .cfsr_bits = cfsr::nocp,
          .reported  = value});
   }
   if(back == security::nonsecure

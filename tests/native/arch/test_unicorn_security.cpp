@@ -210,6 +210,7 @@ TEST_CASE("BXNS to an even address clears CONTROL_S.SFPA, RFVTL")
 {
   engine e;
   e.load(code_base, {0xee00, 0x2a10, 0x470c});
+  e.set(UC_ARM_REG_CPACR_S, cpacr_cp10_cp11);
   e.set(UC_ARM_REG_R1, static_cast<std::uint32_t>(code_base + 0x100));
   e.set(UC_ARM_REG_R2, 0x3f80'0000);
   auto const trapped = e.run(code_base, code_base + 6);
@@ -253,6 +254,7 @@ TEST_CASE("BLXNS stacks CONTROL_S.SFPA in RETPSR bit 20, B3.16 RGVBB")
 {
   engine e;
   e.load(code_base + 0x10, {0xee00, 0x2a10, 0x478c});
+  e.set(UC_ARM_REG_CPACR_S, cpacr_cp10_cp11);
   e.set(UC_ARM_REG_IPSR, 3);
   e.set(UC_ARM_REG_R1, static_cast<std::uint32_t>(code_base + 0x200));
   auto const trapped = e.run(code_base + 0x10, code_base + 0x16);
@@ -352,6 +354,7 @@ TEST_CASE("an FP instruction in Secure state sets CONTROL.FPCA and CONTROL_S.SFP
 {
   engine e;
   e.load(code_base, {0xee00, 0x2a10});
+  e.set(UC_ARM_REG_CPACR_S, cpacr_cp10_cp11);
   e.set(UC_ARM_REG_R2, 0x3f80'0000);
   REQUIRE(e.get(UC_ARM_REG_CONTROL) == 0);
   CHECK_FALSE(e.run(code_base, code_base + 4).has_value());

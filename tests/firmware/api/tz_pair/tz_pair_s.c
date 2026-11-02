@@ -3,7 +3,9 @@
 
 #define REG32(address) (*(volatile uint32_t*)(address))
 
+#define SCB_CPACR       0xE000ED88u
 #define SCB_NSACR       0xE000ED8Cu
+#define SCB_NS_CPACR    0xE002ED88u
 #define SAU_CTRL        0xE000EDD0u
 #define SAU_RNR         0xE000EDD8u
 #define SAU_RBAR        0xE000EDDCu
@@ -18,6 +20,7 @@
 #define REGION_ENABLE   1u
 #define REGION_NSC      2u
 #define NSACR_CP10_CP11 (3u << 10)
+#define CPACR_CP10_CP11 (0xFu << 20)
 
 extern uint32_t _estack;
 extern uint32_t __sgstubs_start;
@@ -56,6 +59,8 @@ __attribute__((noipa)) int main(void)
     REG32(MPCBB1_SECCFGR0 + 4u * word) = 0;
   }
   REG32(SCB_NSACR) |= NSACR_CP10_CP11;
+  REG32(SCB_CPACR) |= CPACR_CP10_CP11;
+  REG32(SCB_NS_CPACR) |= CPACR_CP10_CP11;
   REG32(SCB_NS_VTOR) = NS_VECTORS;
   __asm volatile("dsb\n isb" ::: "memory");
   uint32_t const stack = REG32(NS_VECTORS);

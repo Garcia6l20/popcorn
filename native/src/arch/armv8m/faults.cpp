@@ -346,6 +346,7 @@ auto cortex_m::nonsecure_fp_denied() const -> bool
 {
   return trustzone()
      and current_security() == security::nonsecure
+     and cp10_granted(security::nonsecure, privileged())
      and (state_.scs.nsacr & nsacr_cp10) == 0;
 }
 

@@ -198,14 +198,19 @@ Bus filter:
 
 Floating point:
 
-- A plain FP instruction never raises NOCP from CPACR, whatever CPACR_S or CPACR_NS says. Only
-  VLSTM and VLLDM check CPACR, through CPACR_S. `arch/test_unicorn_security.cpp` "an FP
-  instruction in Secure state sets CONTROL.FPCA" and `arch/test_exceptions_security.cpp` "a
-  VLSTM with CPACR_S CP10 0 is a Secure UsageFault NOCP".
-- A Non-secure FP instruction with NSACR.CP10 0 raises UsageFault_S NOCP. With CPACR_NS.CP10 0
-  too it still targets UsageFault_S, where the architecture checks CPACR_NS first and targets
-  UsageFault_NS. `arch/test_exceptions_security.cpp` "a Non-secure FP read of S0 with
-  CPACR_NS.CP10 granted".
+- Every FP instruction checks CPACR of the current Security state and takes a NOCP UsageFault when
+  it denies CP10. `arch/test_variants.cpp` "a VMOV with CPACR CP10 and CP11 at 0" and
+  `arch/test_exceptions_security.cpp` "with CPACR_S CP10 0 a Secure VMOV and a VLSTM".
+- A Non-secure FP instruction checks CPACR_NS, then NSACR.CP10. A CPACR_NS denial raises
+  UsageFault_NS NOCP, an NSACR denial UsageFault_S NOCP. `arch/test_exceptions_security.cpp` "a
+  Non-secure VMOV that CPACR_NS denies".
+- CPACR_NS holds what the Secure image writes, whatever NSACR holds, so SystemInit writes it
+  before `main` sets NSACR. `arch/test_exceptions_security.cpp` "a Secure write to CPACR_NS with
+  NSACR.CP10 0 is stored".
+- Exception entry over an FP context and the return to an extended frame check the same CPACR,
+  and take NOCP in the background or returning state. `arch/test_exceptions_security.cpp` "an IRQ
+  over FP code whose CPACR denies CP10" and "an exception return to an extended frame whose
+  returning state's CPACR denies CP10".
 - No lazy FP preservation. The engine forces FPCCR.LSPEN to 0, so every VLSTM and every
   exception entry saves the FP context at once. FPCCR.LSPEN reads back what firmware wrote,
   FPCAR is storage only. The fork case `test_arm_v8m_fp_context` and

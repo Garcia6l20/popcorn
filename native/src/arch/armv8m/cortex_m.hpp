@@ -174,7 +174,7 @@ private:
   [[nodiscard]] auto view_of(window which) const noexcept -> std::optional<security>;
   [[nodiscard]] auto mpu_of(security view) noexcept -> mpu_bank;
   [[nodiscard]] auto mpu_regions_of(security view) const noexcept -> std::uint8_t;
-  [[nodiscard]] auto nonsecure_cpacr_mask() const noexcept -> std::uint32_t;
+  [[nodiscard]] auto cp10_granted(security state, bool privileged) const noexcept -> bool;
   void               attach_security();
   void               apply_security(bool restored);
   void               mirror_sau();
@@ -185,6 +185,7 @@ private:
   [[nodiscard]] auto read_fpccr(security view) const -> std::uint32_t;
   void               write_fpccr(std::uint32_t value, std::uint32_t mask, security view);
   void               sau_changed();
+  void               cpacr_changed();
   void               set_nonsecure_pending(std::uint32_t number, bool value) noexcept;
   [[nodiscard]] auto priority_config() const noexcept -> security_config;
   [[nodiscard]] auto current_security() const -> security;

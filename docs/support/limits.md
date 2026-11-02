@@ -62,7 +62,8 @@ Under `faults="handler"`, a fault enters the firmware's handler as the core does
 exceptions. They stop the run with a FAULT stop instead:
 
 - Lockup, and an INVSTATE fault.
-- Without TrustZone: INVPC, UNSTKERR, STKERR, a STKOF on exception entry, and VECTTBL.
+- Without TrustZone: INVPC, UNSTKERR, STKERR, a STKOF on exception entry, VECTTBL, and the NOCP
+  of an exception entry over an FP context or of a return to an extended frame.
 - With TrustZone: a STKOF of the additional state context alone, and a fault while taking a
   derived exception.
 

@@ -599,6 +599,10 @@ void cortex_m::load(std::span<std::byte const> in)
   {
     apply_security(restored);
   }
+  else if(core_.fpu)
+  {
+    mirror_cpacr();
+  }
   refresh_pending();
 }
 

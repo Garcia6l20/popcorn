@@ -138,6 +138,13 @@ The call runs with interrupts masked unless you pass `interrupts=True`. `reset=T
 `reset=snapshot` restores a state first. `budget=` bounds the call. An exception
 a handler or a model raises during the call ends it and restores the context the same way.
 
+A function that uses the FPU needs CP10 and CP11 granted in CPACR, as on silicon. CPACR is 0
+after a reset, so call such a function after the firmware's `SystemInit`, or write
+`machine.mem.u32[0xE000_ED88] = 0x00F0_0000` first. Otherwise its first FP instruction takes a
+UsageFault NOCP. On a TrustZone core that write grants the Secure state. A call into Non-secure FP
+code also needs CP10 and CP11 in NSACR, `machine.mem.u32[0xE000_ED8C] = 0x0C00`, and in CPACR_NS,
+`machine.mem.u32[0xE002_ED88] = 0x00F0_0000`.
+
 ## Which one to use
 
 | Need | Use |

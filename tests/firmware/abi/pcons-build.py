@@ -53,12 +53,14 @@ ENTRIES = (
 
 _, target = add_firmware("abi", "abi", [arch / "startup.c", here / "abi.c"])
 if target is not None:
+    target.private.defines.append("ARCH_TEST_ENABLE_FPU")
     target.private.link_flags.append(SECTION_BOUNDS)
     target.private.link_flags.extend(f"-Wl,--undefined={entry}" for entry in ENTRIES)
     target.private.link_libs.append("gcc")
 
 _, m4 = add_firmware("abi", "abi_m4", [arch / "startup.c", here / "abi.c"])
 if m4 is not None:
+    m4.private.defines.append("ARCH_TEST_ENABLE_FPU")
     m4.private.compile_flags.extend(["-mcpu=cortex-m4", "-mfpu=fpv4-sp-d16"])
     m4.private.link_flags.extend(["-mcpu=cortex-m4", "-mfpu=fpv4-sp-d16", SECTION_BOUNDS])
     m4.private.link_flags.extend(f"-Wl,--undefined={entry}" for entry in ENTRIES)

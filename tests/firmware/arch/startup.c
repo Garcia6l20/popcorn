@@ -13,6 +13,9 @@ uint32_t log_len;
 [[noreturn]] void Reset_Handler(void)
 {
   BOOTS = BOOTS + 1u;
+#if defined(ARCH_TEST_ENABLE_FPU)
+  REG32(0xE000ED88u) |= 0xFu << 20;
+#endif
   for(uint32_t *from = _sidata, *to = _sdata; to < _edata;)
   {
     *to++ = *from++;

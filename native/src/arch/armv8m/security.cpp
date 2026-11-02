@@ -41,10 +41,10 @@ constexpr std::uint32_t fpccr_banked    = fpccr_lspact
                                         | fpccr_ufrdy
                                         | fpccr_aspen;
 constexpr std::uint32_t demcr_sdme      = 1u << 20;
-constexpr std::uint32_t nsacr_cp10      = 1u << 10;
-constexpr std::uint32_t nsacr_cp11      = 1u << 11;
 constexpr std::uint32_t cpacr_cp10      = 0x0030'0000;
-constexpr std::uint32_t cpacr_cp11      = 0x00c0'0000;
+constexpr std::uint32_t cp10_shift      = 20;
+constexpr std::uint32_t cp10_privileged = 1;
+constexpr std::uint32_t cp10_full       = 3;
 constexpr std::uint32_t sg_halfword     = 0xe97f;
 constexpr std::uint32_t xpsr_thumb      = 1u << 24;
 constexpr std::uint32_t control_sfpa    = 1u << 3;
@@ -242,11 +242,19 @@ auto cortex_m::mpu_regions_of(security view) const noexcept -> std::uint8_t
   return trustzone() and view == security::secure ? core_.mpu_regions_secure : core_.mpu_regions;
 }
 
-auto cortex_m::nonsecure_cpacr_mask() const noexcept -> std::uint32_t
+auto cortex_m::cp10_granted(security state, bool privileged) const noexcept -> bool
 {
-  auto const nsacr = state_.scs.nsacr;
-  return ((nsacr & nsacr_cp10) != 0 ? cpacr_cp10 : 0u)
-       | ((nsacr & nsacr_cp11) != 0 ? cpacr_cp11 : 0u);
+  auto const cpacr =
+      trustzone() and state == security::nonsecure ? state_.scs.nonsecure.cpacr : state_.scs.cpacr;
+  switch((cpacr & cpacr_cp10) >> cp10_shift)
+  {
+    case cp10_privileged:
+      return privileged;
+    case cp10_full:
+      return true;
+    default:
+      return false;
+  }
 }
 
 void cortex_m::attach_security()
@@ -298,7 +306,13 @@ void cortex_m::mirror_sau()
 
 void cortex_m::mirror_cpacr() const
 {
+  if(not trustzone())
+  {
+    write(profile_.secure_engine ? UC_ARM_REG_CPACR_S : UC_ARM_REG_CPACR_NS, state_.scs.cpacr);
+    return;
+  }
   write(UC_ARM_REG_CPACR_S, state_.scs.cpacr);
+  write(UC_ARM_REG_CPACR_NS, state_.scs.nonsecure.cpacr);
 }
 
 void cortex_m::mirror_nsacr() const
@@ -367,6 +381,12 @@ void cortex_m::write_fpccr(std::uint32_t value, std::uint32_t mask, security vie
 
 void cortex_m::sau_changed()
 {
+  context_->services.end_after_instruction();
+}
+
+void cortex_m::cpacr_changed()
+{
+  mirror_cpacr();
   context_->services.end_after_instruction();
 }
 

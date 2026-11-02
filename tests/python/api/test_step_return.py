@@ -12,7 +12,7 @@ import pytest
 from popcorn import FrameReturn, StopReason
 from popcorn.units import us
 
-from .conftest import CALLEE_ELF
+from .conftest import CALLEE_ELF, grant_fp
 
 BUDGET = 1_000_000
 
@@ -97,6 +97,7 @@ def test_slicing_does_not_move_a_frame_return(m33: popcorn.PartDescription) -> N
     def step_out(stop_when: bool) -> tuple[int, int, int]:
         m = popcorn.Machine(m33, image=popcorn.Image.elf(CALLEE_ELF))
         m.reset()
+        grant_fp(m)
         at(m, "halved", "half")
         stop = asyncio.run(
             m.run(
@@ -171,6 +172,7 @@ def test_step_return_gives_the_dwarf_typed_value(callee: popcorn.Machine) -> Non
 
 
 def test_step_return_gives_floats_and_doubles(callee: popcorn.Machine) -> None:
+    grant_fp(callee)
     callee.reg.pc = callee.sym("scaled") & ~1
     callee.reg.s0 = word(1.5, "f")
     assert asyncio.run(callee.run(until="mulf")).reason is StopReason.ADDRESS
@@ -217,6 +219,7 @@ def test_small_slices_give_the_same_step_out(m33: popcorn.PartDescription) -> No
             m33, image=popcorn.Image.elf(CALLEE_ELF), slice_instructions=slice_instructions
         )
         m.reset()
+        grant_fp(m)
         at(m, "halved", "__aeabi_dadd")
         value = asyncio.run(m.step_return())
         stop = m.last_stop

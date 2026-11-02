@@ -541,7 +541,7 @@ auto system_space::read_scs(std::uint32_t offset, security view) const -> std::u
       {
         return 0;
       }
-      return nonsecure ? ns.cpacr & core_.nonsecure_cpacr_mask() : scs.cpacr;
+      return nonsecure ? ns.cpacr : scs.cpacr;
     case 0xd8c:
       return secure_tz ? scs.nsacr : 0;
     case 0xd90:
@@ -968,14 +968,13 @@ void system_space::write_scs(
       }
       if(nonsecure)
       {
-        ns.cpacr = merge(ns.cpacr, value, mask & core_.nonsecure_cpacr_mask());
-        return;
+        ns.cpacr = merge(ns.cpacr, value, mask & cpacr_writable);
       }
-      scs.cpacr = merge(scs.cpacr, value, mask & cpacr_writable);
-      if(secure_tz)
+      else
       {
-        core_.mirror_cpacr();
+        scs.cpacr = merge(scs.cpacr, value, mask & cpacr_writable);
       }
+      core_.cpacr_changed();
       return;
     case 0xd8c:
       if(secure_tz)

@@ -31,6 +31,13 @@ ABI_ELF = ROOT / "tests" / "firmware" / "abi" / "prebuilt" / "abi.elf"
 CALLEE_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "callee.elf"
 VIEWS_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "views.elf"
 ISR_ELF = ROOT / "tests" / "firmware" / "api" / "prebuilt" / "isr.elf"
+CPACR = 0xE000_ED88
+CPACR_CP10_CP11 = 0x00F0_0000
+
+
+def grant_fp(m: popcorn.Machine) -> None:
+    """Grants CP10 and CP11 in CPACR, as a firmware's SystemInit does, so FP code runs."""
+    m.mem.u32[CPACR] = CPACR_CP10_CP11
 
 
 def run_bounded[T](coroutine: Coroutine[object, object, T], seconds: float = 2) -> T:

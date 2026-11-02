@@ -7,7 +7,7 @@ import asyncio
 import popcorn
 import pytest
 
-from .conftest import ABI_ELF
+from .conftest import ABI_ELF, grant_fp
 
 
 @pytest.fixture
@@ -20,6 +20,7 @@ def abi(m33: popcorn.PartDescription) -> popcorn.Machine:
 
 
 def test_an_intercept_reads_vfp_arguments_and_returns_a_double(abi: popcorn.Machine) -> None:
+    grant_fp(abi)
     seen: list[tuple[int | float, ...]] = []
     floats: list[float] = []
 

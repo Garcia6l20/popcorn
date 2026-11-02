@@ -84,24 +84,26 @@ namespace popcorn::arch::armv8m
  *   the exception pending, where hardware stacks down to the limit and takes the UsageFault.
  * - Lockup and the INVSTATE fault stop the run under every fault policy. Without TrustZone, or
  *   under fault_policy::stop, the INVPC, UNSTKERR, STKERR, STKOF on entry and VECTTBL faults stop
- *   it too.
+ *   it too, and so does the NOCP of an exception entry over a floating-point context or of a
+ *   return to an extended frame when CPACR denies CP10.
  * - With TrustZone and fault_policy::enter_handler, the integrity faults of an exception return,
- *   SFSR.INVER, SFSR.INVIS, UFSR.INVPC, SFSR.AUVIOL and BFSR.UNSTKERR on the frame, and the
- *   UFSR_S.NOCP of a return to Non-secure with EXC_RETURN.FType 0 and NSACR.CP10 0, are taken as
- *   exceptions on the frame left in place, the returning exception deactivated first. The entry
- *   faults SFSR.AUVIOL and UFSR.STKOF of the stacked frame set the stack pointer to the frame or to
- *   the limit, store nothing, and are taken as derived exceptions, the higher of the derived and
- *   the original exception first, the other pended. BFSR.STKERR and the UFSR_S.NOCP of a Non-secure
- *   entry with NSACR.CP10 0 are derived the same way, NOCP after a basic frame with no floating-
- *   point registers. A NOCP entry whose frame also takes AUVIOL, STKERR or STKOF sets UFSR_S.NOCP
- *   and takes the frame's fault. A Non-secure floating-point instruction with NSACR.CP10 0
- *   raises UFSR_S.NOCP, UsageFault_S. CPACR does not gate floating-point instructions, so a
- *   Non-secure one with CPACR_NS.CP10 0 and NSACR.CP10 0 targets UsageFault_S, where silicon
- *   targets UsageFault_NS. A failed vector fetch takes HFSR.VECTTBL HardFault on the stacked
- *   frame, Secure for a Non-secure slot in Secure memory, else in the state of the exception
- *   being fetched. Lockup, a STKOF of the additional state context alone and a fault while
- *   taking the derived exception still stop. The registers keep their values from before the
- *   faulting return.
+ *   SFSR.INVER, SFSR.INVIS, UFSR.INVPC, SFSR.AUVIOL and BFSR.UNSTKERR on the frame, and the NOCP of
+ *   a return with EXC_RETURN.FType 0, in the returning state when its CPACR denies CP10, else
+ *   UFSR_S.NOCP for a return to Non-secure with NSACR.CP10 0, are taken as exceptions on the frame
+ *   left in place, the returning exception deactivated first. The entry faults SFSR.AUVIOL and
+ *   UFSR.STKOF of the stacked frame set the stack pointer to the frame or to the limit, store
+ *   nothing, and are taken as derived exceptions, the higher of the derived and the original
+ *   exception first, the other pended. BFSR.STKERR and the UFSR_S.NOCP of a Non-secure entry with
+ *   NSACR.CP10 0 are derived the same way, NOCP after a basic frame with no floating-point
+ *   registers. A NOCP entry whose frame also takes AUVIOL, STKERR or STKOF sets UFSR_S.NOCP and
+ *   takes the frame's fault. An entry over a floating-point context whose background CPACR denies
+ *   CP10 allocates the extended frame, stores and clears no floating-point register, and takes the
+ *   NOCP of the background state as a derived exception. A Non-secure floating-point instruction
+ *   that CPACR_NS denies raises UFSR_NS.NOCP, one that CPACR_NS allows and NSACR.CP10 denies raises
+ *   UFSR_S.NOCP. A failed vector fetch takes HFSR.VECTTBL HardFault on the stacked frame, Secure
+ *   for a Non-secure slot in Secure memory, else in the state of the exception being fetched.
+ *   Lockup, a STKOF of the additional state context alone and a fault while taking the derived
+ *   exception still stop. The registers keep their values from before the faulting return.
  * - The floating-point context is stacked at exception entry, never lazily: FPCCR and FPCAR are
  *   storage. FPDSCR is storage too, the engine builds new floating-point contexts from its own
  *   defaults.
