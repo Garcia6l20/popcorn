@@ -669,6 +669,8 @@ struct u5_flash
   static constexpr bool option_key_needs_unlock = true;
   /** @brief A completed OPTSTRT loads the programmed protection at once. */
   static constexpr bool option_reload_on_start = false;
+  /** @brief No option byte area in memory holds the wrp_registers words. */
+  static constexpr std::array<std::uint32_t, 0> option_area{};
   /** @brief The Secure hide protection area lies in a Secure watermark area, RM0456 7.5.3, so
    *         only a TrustZone machine closes it. */
   static constexpr bool hide_without_trustzone = false;
@@ -686,6 +688,10 @@ struct u5_flash
   static constexpr std::string_view option_key_register = "FLASH_OPTKEYR";
   /** @brief No power-down key register. */
   static constexpr std::string_view power_down_key_register{};
+  /** @brief No clock rule at OBL_LAUNCH. */
+  static constexpr std::string_view option_load_clock{};
+  /** @brief No clock rule at OBL_LAUNCH. */
+  static constexpr std::uint64_t option_load_clock_max = 0;
   /** @brief Datasheet times of an empty flash_options field. */
   static constexpr flash_timing timing = u5_flash_timing;
   /** @brief Error flags with their own interrupt enable. */
@@ -810,7 +816,7 @@ struct u5_flash
    * @brief Production value of a write protection register: PSTRT at the field maximum, PEND 0.
    * @param variant Field widths of the part.
    */
-  [[nodiscard]] static auto wrp_production(flash_variant variant) -> std::uint32_t
+  [[nodiscard]] static auto wrp_production(flash_variant variant, std::size_t) -> std::uint32_t
   {
     return ~(watermark_top(variant) << 16);
   }
@@ -820,7 +826,8 @@ struct u5_flash
    * @param word Written word.
    * @param variant Field widths of the part.
    */
-  [[nodiscard]] static auto wrp_normal(std::uint32_t word, flash_variant variant) -> std::uint32_t
+  [[nodiscard]] static auto wrp_normal(std::uint32_t word, flash_variant variant, std::size_t)
+      -> std::uint32_t
   {
     auto const top    = watermark_top(variant);
     auto const fields = wrp_unlock | top << 16 | top;
@@ -1032,6 +1039,8 @@ struct h5_flash
   static constexpr bool option_key_needs_unlock = false;
   /** @brief A completed OPTSTRT reloads the _CUR registers, RM0481 7.4.3. */
   static constexpr bool option_reload_on_start = true;
+  /** @brief No option byte area in memory holds the wrp_registers words. */
+  static constexpr std::array<std::uint32_t, 0> option_area{};
   /** @brief HDPL closes the HDP areas with TZ_STATE 0xC3 too, RM0481 7.6.2 and Table 63, and
    *         Table 72 note 1. */
   static constexpr bool hide_without_trustzone = true;
@@ -1049,6 +1058,10 @@ struct h5_flash
   static constexpr std::string_view option_key_register = "FLASH_OPTKEYR";
   /** @brief No power-down key register. */
   static constexpr std::string_view power_down_key_register{};
+  /** @brief No clock rule at OBL_LAUNCH. */
+  static constexpr std::string_view option_load_clock{};
+  /** @brief No clock rule at OBL_LAUNCH. */
+  static constexpr std::uint64_t option_load_clock_max = 0;
   /** @brief Datasheet times of an empty flash_options field. */
   static constexpr flash_timing timing = h5_flash_timing;
   /** @brief Error flags with their own interrupt enable, RM0481 7.11.11 bits 17 to 20. */
@@ -1155,13 +1168,14 @@ struct h5_flash
   }
 
   /** @brief Delivery value of a WRPSG register, no group protected, RM0481 Table 55. */
-  [[nodiscard]] static constexpr auto wrp_production(flash_variant) -> std::uint32_t
+  [[nodiscard]] static constexpr auto wrp_production(flash_variant, std::size_t) -> std::uint32_t
   {
     return ~0u;
   }
 
   /** @brief A written WRPSG word, all 32 bits stored. */
-  [[nodiscard]] static constexpr auto wrp_normal(std::uint32_t word, flash_variant) -> std::uint32_t
+  [[nodiscard]] static constexpr auto wrp_normal(std::uint32_t word, flash_variant, std::size_t)
+      -> std::uint32_t
   {
     return word;
   }
@@ -1422,6 +1436,12 @@ struct l4_flash
   static constexpr bool option_key_needs_unlock = true;
   /** @brief OPTSTRT programs, OBL_LAUNCH loads. */
   static constexpr bool option_reload_on_start = false;
+  /** @brief Address of the double word that holds each wrp_registers word and its complement in
+   *         the information block, RM0351 3.4.1 Table 13. */
+  static constexpr std::array<std::uint32_t, 9> option_area{
+      0x1fff'7800, 0x1fff'7808, 0x1fff'7810, 0x1fff'7818, 0x1fff'7820,
+      0x1fff'f808, 0x1fff'f810, 0x1fff'f818, 0x1fff'f820,
+  };
   /** @brief No hide protection area. */
   static constexpr bool hide_without_trustzone = false;
   /** @brief FLASH_ECCR keeps the address and bank of the first error, RM0351 3.3.2. */
@@ -1472,10 +1492,32 @@ struct l4_flash
   static constexpr std::array<std::string_view, 0> secure_option_registers{};
   /** @brief No staging register. */
   static constexpr std::array<std::string_view, 0> option_staging_registers{};
-  /** @brief No write protection register OPTSTRT programs. */
-  static constexpr std::array<wrp_names, 0> wrp_registers{};
+  /** @brief Option registers OPTSTRT programs and the option byte loader loads, RM0351 3.4.2:
+   *         FLASH_OPTR, then per bank PCROPxSR, PCROPxER, WRPxAR and WRPxBR. */
+  static constexpr std::array<wrp_names, 9> wrp_registers{
+      {
+       {"OPTR", "OPTR"},
+       {"PCROP1SR", "PCROP1SR"},
+       {"PCROP1ER", "PCROP1ER"},
+       {"WRP1AR", "WRP1AR"},
+       {"WRP1BR", "WRP1BR"},
+       {"PCROP2SR", "PCROP2SR"},
+       {"PCROP2ER", "PCROP2ER"},
+       {"WRP2AR", "WRP2AR"},
+       {"WRP2BR", "WRP2BR"},
+       }
+  };
+  /** @brief ST production values of wrp_registers, RM0351 3.4.1. */
+  static constexpr std::array<std::uint32_t, 9> wrp_productions{
+      0xffef'f8aa, 0xffff'ffff, 0xffff'0000, 0xff00'ffff, 0xff00'ffff,
+      0xffff'ffff, 0xffff'0000, 0xff00'ffff, 0xff00'ffff,
+  };
   /** @brief Registers the dropped-option warning names. */
-  static constexpr std::string_view wrp_text = "WRPxyR";
+  static constexpr std::string_view wrp_text = "option";
+  /** @brief Clock domain ES0250 2.2.23 reads at OBL_LAUNCH. */
+  static constexpr std::string_view option_load_clock = "msi";
+  /** @brief MSI rate from which ES0250 2.2.23 says the option byte loading can fail. */
+  static constexpr std::uint64_t option_load_clock_max = 8'000'000;
   /** @brief No block-based security register. */
   static constexpr std::array<std::string_view, 0> secure_block_registers{};
   /** @brief No block-based privilege register. */
@@ -1505,30 +1547,42 @@ struct l4_flash
     return ~0u;
   }
 
-  /** @brief No write protection register. */
-  [[nodiscard]] static constexpr auto wrp_production(flash_variant) -> std::uint32_t
+  /** @brief ST production value of an option register, RM0351 3.4.1. */
+  [[nodiscard]] static constexpr auto wrp_production(flash_variant, std::size_t index)
+      -> std::uint32_t
   {
-    return ~0u;
+    return wrp_productions[index];
   }
 
-  /** @brief No write protection register. */
-  [[nodiscard]] static constexpr auto wrp_normal(std::uint32_t word, flash_variant) -> std::uint32_t
+  /** @brief A written option word as the description's fields store it. */
+  [[nodiscard]] static constexpr auto wrp_normal(std::uint32_t word, flash_variant, std::size_t)
+      -> std::uint32_t
   {
     return word;
   }
 
-  /** @brief No write protection register. */
+  /** @brief Every option change programs. */
   [[nodiscard]] static constexpr auto wrp_refused(std::uint32_t, std::uint32_t) -> bool
   {
     return false;
   }
 
-  /** @brief No write protection register covers a page. */
-  [[nodiscard]] static auto
-      wrp_covers(std::span<std::uint32_t const>, std::uint32_t, std::uint32_t, flash_variant)
-          -> bool
+  /**
+   * @brief Whether the loaded WRP areas cover a page, RM0351 3.5.3: WRPxy_STRT <= page <=
+   *        WRPxy_END of area A or B of the bank.
+   * @param words Loaded words, wrp_registers order.
+   * @param bank Bank of the page, 0 or 1.
+   * @param page Page in its bank.
+   */
+  [[nodiscard]] static auto wrp_covers(
+      std::span<std::uint32_t const> words,
+      std::uint32_t                  bank,
+      std::uint32_t                  page,
+      flash_variant) -> bool
   {
-    return false;
+    return std::ranges::any_of(words.subspan(3 + bank * 4, 2), [&](std::uint32_t word) {
+      return (word & 0xffu) <= page and page <= (word >> 16 & 0xffu);
+    });
   }
 
   /**
@@ -1892,9 +1946,22 @@ static_assert(flag_matches_roles(
  *   write after the pair that sets RUN_PD logs one warning per machine life, model_error under
  *   strict_peripherals with FLASH_ACR kept. PRFTEN, ICEN, DCEN, ICRST, DCRST and SLEEP_PD are
  *   storage.
- * - Options: OPTSTRT clears at once and programs nothing, OBL_LAUNCH requests an option byte
- *   loader reset. FLASH_OPTR, the PCROP and the WRP registers are storage, and the row encodes
- *   no option bytes.
+ * - Option bytes, 3.4: FLASH_OPTR, FLASH_PCROP1SR, FLASH_PCROP1ER, FLASH_WRP1AR,
+ *   FLASH_WRP1BR and their bank 2 registers are the U5 WRP registers above, without UNLOCK.
+ *   Writes are stored while OPTLOCK is clear, reserved bits keep their production value, and
+ *   writes while OPTLOCK is set are ignored, inferred. OPTSTRT, with OPTLOCK clear and no error
+ *   pending, programs all nine at once with no BSY. A power-on, brown-out or option byte loader
+ *   reset loads them, every other reset puts the loaded words back in the registers, 3.4.2.
+ *   The production values of 3.4.1 hold at construction: FLASH_OPTR 0xFFEFF8AA, RDP level 0.
+ *   The construction and every OPTSTRT write the programmed words into the option byte area
+ *   of Table 13, bank 1 from 0x1FFF7800 and bank 2 from 0x1FFFF808, each double word the word
+ *   and its complement. The Unused fields hold the register's reserved bits and their
+ *   complement, and the double word at 0x1FFFF800 stays erased, both inferred.
+ *   WRPxy_STRT to WRPxy_END of the loaded words protect their pages of bank x, 3.5.3: a store,
+ *   page erase or bank erase that reaches one sets WRPERR. OPTR, PCROP and RDP have no other
+ *   effect. OBL_LAUNCH with MSI at 8 MHz or more logs one warning per machine life,
+ *   model_error under strict_peripherals with FLASH_CR kept, ES0250 2.2.23, and loads the
+ *   option bytes. The row encodes no host option bytes.
  * - Timings default to DS10198 Rev 11 Table 63, l4_flash_timing.
  */
 template <typename Traits>
@@ -2073,9 +2140,11 @@ private:
   void                      poke_wrp();
   void                      load_options();
   void                      program_options();
+  void                      write_option_area();
   void                      check_latency(std::string_view trigger);
   void                      check_row_clock();
   void                      check_row_erased(std::uint32_t at);
+  void                      check_option_load_clock(std::uint32_t control, std::uint32_t old);
   void                      check_programming_delay(std::string_view trigger);
   [[nodiscard]] auto        active_range() const -> std::uint32_t;
 
@@ -2101,6 +2170,8 @@ private:
   bool                                                              row_clock_logged_{};
   bool                                                              row_erase_logged_{};
   bool                                                              row_read_logged_{};
+  bool                                                              option_clock_logged_{};
+  std::optional<core::clock_domain>                                 option_clock_;
   std::optional<std::pair<std::uint32_t, std::uint32_t>>            row_watch_;
   std::vector<std::uint32_t>                                        option_changed_;
   std::vector<std::pair<std::uint32_t, std::uint32_t>>              option_words_;
@@ -2240,6 +2311,10 @@ flash_model<Traits>::flash_model(
       }(std::make_index_sequence<Traits::set_registers.size()>{})},
       line_{irq("FLASH_IRQn")}, hclk_{ctx.clock.domain("hclk")}
 {
+  if constexpr(not Traits::option_load_clock.empty())
+  {
+    option_clock_ = ctx.clock.domain(Traits::option_load_clock);
+  }
   if(ctx.trustzone)
   {
     secure_line_    = &irq("FLASH_S_IRQn");
@@ -2282,8 +2357,13 @@ flash_model<Traits>::flash_model(
         option_offsets_.push_back(reg(names.active).offset);
       }
     }
-    state_.wrp.assign(wrp_offsets_.size(), Traits::wrp_production(variant_));
+    state_.wrp.clear();
+    for(std::size_t index = 0; index < wrp_offsets_.size(); ++index)
+    {
+      state_.wrp.push_back(Traits::wrp_production(variant_, index));
+    }
     state_.wrp_active = state_.wrp;
+    write_option_area();
   }
   for(auto const name : Traits::secure_block_registers)
   {
@@ -2747,7 +2827,9 @@ void flash_model<Traits>::option_written(std::uint32_t old, std::uint32_t now)
 template <typename Traits>
 void flash_model<Traits>::wrp_written(std::uint32_t old, std::uint32_t now)
 {
-  regs_.poke(written_word_, option_locked() ? old : Traits::wrp_normal(now, variant_));
+  auto const index = static_cast<std::size_t>(
+      std::ranges::find(wrp_offsets_, written_word_) - wrp_offsets_.begin());
+  regs_.poke(written_word_, option_locked() ? old : Traits::wrp_normal(now, variant_, index));
 }
 
 template <typename Traits>
@@ -2887,7 +2969,8 @@ template <typename Traits> void flash_model<Traits>::program_options()
   for(auto const [index, offset] : std::views::enumerate(wrp_offsets_))
   {
     auto const programmed = wrp_programmed(static_cast<std::size_t>(index));
-    auto const word       = Traits::wrp_normal(regs_.peek(offset), variant_);
+    auto const word =
+        Traits::wrp_normal(regs_.peek(offset), variant_, static_cast<std::size_t>(index));
     requested.push_back(word);
     violation = violation or Traits::wrp_refused(programmed, word);
   }
@@ -2901,10 +2984,24 @@ template <typename Traits> void flash_model<Traits>::program_options()
     return;
   }
   state_.wrp = std::move(requested);
+  write_option_area();
   if constexpr(Traits::option_reload_on_start)
   {
     state_.wrp_active = state_.wrp;
     poke_wrp();
+  }
+}
+
+template <typename Traits> void flash_model<Traits>::write_option_area()
+{
+  if constexpr(not Traits::option_area.empty())
+  {
+    for(auto const [at, word] : std::views::zip(Traits::option_area, state_.wrp))
+    {
+      auto const bytes =
+          std::bit_cast<std::array<std::byte, 8>>(std::uint64_t{word} | std::uint64_t{~word} << 32);
+      static_cast<void>(ctx_.services.write_block(at, bytes, initiator::debugger));
+    }
   }
 }
 
@@ -3999,6 +4096,27 @@ template <typename Traits> void flash_model<Traits>::check_row_erased(std::uint3
   }
 }
 
+template <typename Traits>
+void flash_model<Traits>::check_option_load_clock(std::uint32_t control, std::uint32_t old)
+{
+  auto const hz = ctx_.clock.hz(*option_clock_);
+  if(hz < Traits::option_load_clock_max)
+  {
+    return;
+  }
+  if(ctx_.strict_peripherals)
+  {
+    regs_.poke(control, old);
+  }
+  auto const name = Traits::set_registers[0].control;
+  this->warn_once_or_refuse(
+      option_clock_logged_, name, control,
+      std::format(
+          "OBL_LAUNCH with {} at {} Hz, where ES0250 2.2.23 says the option byte loading can "
+          "fail from {} Hz: the model loads the option bytes",
+          Traits::option_load_clock, hz, Traits::option_load_clock_max));
+}
+
 template <typename Traits> void flash_model<Traits>::open_row(std::uint32_t at)
 {
   extension_.row_open = true;
@@ -4357,6 +4475,10 @@ void flash_model<Traits>::control_written(bool secure, std::uint32_t old, std::u
     }
   }
   auto const load = unlocked and option_load_field and option_load_field->of(now) != 0;
+  if(load and option_clock_)
+  {
+    check_option_load_clock(control, old);
+  }
   if(load)
   {
     now = option_load_field->with(now, 0);

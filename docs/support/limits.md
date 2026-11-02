@@ -532,9 +532,20 @@ On the STM32L47x/L48x, RM0351 section 3:
   model does not set. Counting the mass erase from the last reset is inferred.
 - A fast row programs over any content, clearing only the bits it programs, with no PROGERR,
   inferred.
-- `OPTSTRT` clears at once with no BSY and programs nothing, `OBL_LAUNCH` requests an option byte
-  loader reset. `FLASH_OPTR`, the PCROP and the WRP registers are storage. `RDERR` and `OPTVERR`
-  stay 0.
+- Option bytes, RM0351 3.4: `FLASH_OPTR`, `FLASH_PCROPxSR`, `FLASH_PCROPxER`, `FLASH_WRPxAR`
+  and `FLASH_WRPxBR` read their ST production values, `FLASH_OPTR` 0xFFEFF8AA. Writes are stored
+  while `OPTLOCK` is clear and ignored while it is set, inferred, and reserved bits keep their
+  production value. `OPTSTRT` programs the nine registers at once, with no BSY. A power-on,
+  brown-out or option byte loader reset loads them, `OBL_LAUNCH` requests the last, and every
+  other reset puts the loaded words back. The construction and every `OPTSTRT` write the programmed
+  words into the option byte area of RM0351 3.4.1 Table 13, bank 1 from 0x1FFF7800, bank 2 from
+  0x1FFFF808, each double word the word in its low half and its complement in its high half. The
+  Unused fields hold the register's reserved bits and their complement, and the double word at
+  0x1FFFF800 stays erased, inferred. The loaded `WRPxy_STRT` to `WRPxy_END` pages of bank x refuse a store,
+  a page erase and a bank erase with WRPERR. The other option fields and the PCROP words take no
+  effect. `RDERR` and `OPTVERR` stay 0.
+- ES0250 2.2.23: `OBL_LAUNCH` with MSI at 8 MHz or more logs one warning per machine life, a
+  `model_error` under `strict_peripherals` with `FLASH_CR` kept, and loads the option bytes.
 - ECC, RM0351 3.3.2: a power cut tears the double word in flight, its first 4 data bytes ANDed
   into the old ones and its last 4 kept. A CPU or DMA load of it sets `ECCD`, `BK_ECC` and
   `ADDR_ECC`, the offset in its bank, and takes the NMI. Clearing `ECCD` keeps `ADDR_ECC` and

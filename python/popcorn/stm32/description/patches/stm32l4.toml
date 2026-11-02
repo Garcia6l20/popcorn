@@ -640,3 +640,64 @@ instances = ["FLASH"]
 registers = ["CR"]
 rename = { START = "STRT" }
 source = "RM0351 Rev 11, 3.7.6 FLASH_CR: bit 16 is STRT, start of an erase, CMSIS FLASH_CR_STRT. The four SVDs spell it START"
+
+[[fields]]
+instances = ["FLASH"]
+registers = ["OPTR"]
+rename = { IDWG_SW = "IWDG_SW" }
+source = "RM0351 Rev 11, 3.7.8 FLASH_OPTR: bit 16 is the independent watchdog selection, CMSIS FLASH_OPTR_IWDG_SW. The four SVDs spell it IDWG_SW"
+
+[[fields]]
+instances = ["FLASH"]
+registers = ["OPTR"]
+fields = ["nSWBOOT0", "nBOOT0"]
+drop = true
+source = "RM0351 Rev 11, 3.7.8 FLASH_OPTR: bits 26 nSWBOOT0 and 27 nBOOT0 are reserved for STM32L47x/L48x devices. The four SVDs give both"
+
+[[resets]]
+peripheral = "FLASH"
+register = "OPTR"
+reset = 0xFFEFF8AA
+source = "RM0351 Rev 11, 3.4.1 user and read protection option bytes: ST production value 0xFFEF F8AA, RDP level 0. 3.7.8 FLASH_OPTR is loaded from them at OBL. The four SVDs give 0xF0000000"
+
+[[resets]]
+peripheral = "FLASH"
+register = "PCROP1SR"
+reset = 0xFFFFFFFF
+source = "RM0351 Rev 11, 3.4.1 bank 1 PCROP start address option bytes: ST production value 0xFFFF FFFF. 3.7.9 FLASH_PCROP1SR is loaded from them at OBL. The four SVDs give 0xFFFF0000"
+
+[[resets]]
+peripheral = "FLASH"
+register = "PCROP1ER"
+reset = 0xFFFF0000
+source = "RM0351 Rev 11, 3.4.1 bank 1 PCROP end address option bytes: ST production value 0xFFFF 0000. 3.7.10 FLASH_PCROP1ER is loaded from them at OBL. The four SVDs give 0x0FFF0000"
+
+[[resets]]
+peripheral = "FLASH"
+register = "WRP1AR"
+reset = 0xFF00FFFF
+source = "RM0351 Rev 11, 3.4.1 bank 1 WRP area A option bytes: ST production value 0xFF00 FFFF, no protection. 3.7.11 FLASH_WRP1AR is loaded from them at OBL. The four SVDs give 0xFF00FF00"
+
+[[resets]]
+peripheral = "FLASH"
+register = "WRP1BR"
+reset = 0xFF00FFFF
+source = "RM0351 Rev 11, 3.4.1 bank 1 WRP area B option bytes: ST production value 0xFF00 FFFF, no protection. 3.7.12 FLASH_WRP1BR is loaded from them at OBL. The four SVDs give 0xFF00FF00"
+
+[[resets]]
+peripheral = "FLASH"
+register = "PCROP2SR"
+reset = 0xFFFFFFFF
+source = "RM0351 Rev 11, 3.4.1 bank 2 PCROP start address option bytes: ST production value 0xFFFF FFFF. 3.7.13 FLASH_PCROP2SR is loaded from them at OBL. The four SVDs give 0xFFFF0000"
+
+[[resets]]
+peripheral = "FLASH"
+register = "WRP2AR"
+reset = 0xFF00FFFF
+source = "RM0351 Rev 11, 3.4.1 bank 2 WRP area A option bytes: ST production value 0xFF00FFFF, no protection. 3.7.15 FLASH_WRP2AR is loaded from them at OBL. The four SVDs give 0xFF00FF00"
+
+[[resets]]
+peripheral = "FLASH"
+register = "WRP2BR"
+reset = 0xFF00FFFF
+source = "RM0351 Rev 11, 3.4.1 bank 2 WRP area B option bytes: ST production value 0xFF00FFFF, no protection. 3.7.16 FLASH_WRP2BR is loaded from them at OBL. The four SVDs give 0xFF00FF00"

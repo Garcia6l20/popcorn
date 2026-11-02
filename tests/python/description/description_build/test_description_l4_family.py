@@ -888,3 +888,26 @@ def test_ccipr_and_csr_take_the_rm0351_names(name: str) -> None:
     assert "DFSDM1SEL" in ccipr and "DFSDMSEL" not in ccipr
     assert {"LPWRRSTF", "FWRSTF"} <= csr
     assert not {"LPWRSTF", "FIREWALLRSTF"} & csr
+
+
+FLASH_OPTION_RESETS = {
+    "OPTR": 0xFFEF_F8AA,
+    "PCROP1SR": 0xFFFF_FFFF,
+    "PCROP1ER": 0xFFFF_0000,
+    "WRP1AR": 0xFF00_FFFF,
+    "WRP1BR": 0xFF00_FFFF,
+    "PCROP2SR": 0xFFFF_FFFF,
+    "PCROP2ER": 0xFFFF_0000,
+    "WRP2AR": 0xFF00_FFFF,
+    "WRP2BR": 0xFF00_FFFF,
+}
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", LINE_PARTS)
+def test_the_flash_option_registers_reset_to_the_st_production_values(name: str) -> None:
+    registers = _registers(_description(name), "FLASH")
+    assert {n: registers[n].reset for n in FLASH_OPTION_RESETS} == FLASH_OPTION_RESETS
+    optr = {f.name: (f.lsb, f.width) for f in registers["OPTR"].fields}
+    assert optr["IWDG_SW"] == (16, 1)
+    assert not {"IDWG_SW", "nSWBOOT0", "nBOOT0"} & set(optr)

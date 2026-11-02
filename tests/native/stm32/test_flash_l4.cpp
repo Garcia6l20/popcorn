@@ -463,6 +463,11 @@ constexpr std::uint32_t eccie           = 1u << 24;
 constexpr std::uint32_t bk_ecc          = 1u << 19;
 constexpr std::uint64_t row_ps          = 1'910'000'000;
 constexpr std::uint64_t double_word_ps  = row_ps / 32;
+constexpr std::uint32_t optstrt         = 1u << 17;
+constexpr std::uint32_t obl_launch      = 1u << 27;
+constexpr std::uint32_t wrperr          = 1u << 4;
+constexpr std::uint32_t optr_production = 0xffef'f8aa;
+constexpr std::uint32_t wrp_production  = 0xff00'ffff;
 constexpr std::uint32_t run_pd          = 1u << 13;
 constexpr std::uint64_t mhz             = 1'000'000;
 
@@ -594,6 +599,38 @@ struct rig
   {
     write("PDKEYR", power_down_key1);
     write("PDKEYR", power_down_key2);
+  }
+
+  void unlock_options() const
+  {
+    write("OPTKEYR", option_key1);
+    write("OPTKEYR", option_key2);
+    REQUIRE(f.field("FLASH", "CR", "OPTLOCK") == 0);
+  }
+
+  void program_options() const
+  {
+    control(optstrt);
+    REQUIRE(f.field("FLASH", "CR", "OPTSTRT") == 0);
+  }
+
+  void load_options() const
+  {
+    f.target->reset(popcorn::reset_kind::option_load);
+    unlock();
+  }
+
+  [[nodiscard]] auto requested_reset() const -> bool
+  {
+    f.set("pc", sym(firmware, "idle"));
+    auto const stopped = f.run_to_stop({.max_instructions = icount{1'000}});
+    return stopped.reason == stop_reason::reset_request and stopped.detail == "option_load";
+  }
+
+  void msi_hz(std::uint32_t range, std::uint64_t hz) const
+  {
+    write("CR", (read("CR", "RCC") & ~0xf0u) | range << 4 | 1u << 3, "RCC");
+    REQUIRE(f.target->virtual_clock().core_hz() == hz);
   }
 
   void erase_bank2() const
@@ -1222,5 +1259,207 @@ TEST_CASE(
   strict.f.set("pc", sym(firmware, "copy_words"));
   CHECK_THROWS_AS(
       (void)strict.f.run_to_stop({.max_instructions = icount{1'000}}), popcorn::model_error);
+}
+
+TEST_CASE("RM0351 3.4.1: FLASH_OPTR and the option registers read their ST production values")
+{
+  rig        r;
+  auto const check = [&] {
+    CHECK(r.read("OPTR") == optr_production);
+    CHECK(r.f.field("FLASH", "OPTR", "RDP") == 0xaa);
+    CHECK(r.f.field("FLASH", "OPTR", "IWDG_SW") == 1);
+    CHECK(r.f.field("FLASH", "OPTR", "DUALBANK") == 1);
+    CHECK(r.f.field("FLASH", "OPTR", "BFB2") == 0);
+    for(auto const name : {"PCROP1SR", "PCROP2SR"})
+    {
+      CHECK(r.read(name) == 0xffff'ffffu);
+    }
+    for(auto const name : {"PCROP1ER", "PCROP2ER"})
+    {
+      CHECK(r.read(name) == 0xffff'0000u);
+    }
+    for(auto const name : {"WRP1AR", "WRP1BR", "WRP2AR", "WRP2BR"})
+    {
+      CHECK(r.read(name) == wrp_production);
+    }
+  };
+  check();
+  r.f.target->power_cycle();
+  check();
+}
+
+TEST_CASE(
+    "RM0351 3.4.2: OPTSTRT programs the option registers, a system reset restores the loaded "
+    "words, an option byte load the programmed ones")
+{
+  rig r;
+  r.unlock_options();
+  r.write("OPTR", 0);
+  CHECK(r.read("OPTR") == 0xfc40'8800u);
+  r.write("WRP2AR", 0xffff'ffffu);
+  CHECK(r.read("WRP2AR") == 0xffff'ffffu);
+  r.write("PCROP1ER", 0x7fff'1234u);
+  CHECK(r.read("PCROP1ER") == 0x7fff'1234u);
+  r.f.target->reset(popcorn::reset_kind::software);
+  CHECK(r.read("OPTR") == optr_production);
+  CHECK(r.read("WRP2AR") == wrp_production);
+  r.unlock();
+  r.unlock_options();
+  r.write("OPTR", optr_production & ~(1u << 16));
+  r.write("WRP2AR", 0xff03'ff02u);
+  r.program_options();
+  CHECK(r.status("BSY") == 0);
+  CHECK((r.read("SR") & all_errors) == 0);
+  r.f.target->reset(popcorn::reset_kind::software);
+  CHECK(r.read("OPTR") == optr_production);
+  CHECK(r.read("WRP2AR") == wrp_production);
+  r.load_options();
+  CHECK(r.read("OPTR") == (optr_production & ~(1u << 16)));
+  CHECK(r.f.field("FLASH", "OPTR", "IWDG_SW") == 0);
+  CHECK(r.read("WRP2AR") == 0xff03'ff02u);
+  auto const saved = r.f.target->snapshot();
+  r.f.target->restore(core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  r.f.target->power_cycle();
+  CHECK(r.read("WRP2AR") == 0xff03'ff02u);
+  CHECK(r.read("OPTR") == (optr_production & ~(1u << 16)));
+}
+
+TEST_CASE(
+    "RM0351 3.4.1 Table 13: the option byte area holds the production words and their "
+    "complements, Unused fields inferred")
+{
+  rig        r;
+  auto const check = [&] {
+    CHECK(
+        r.words(0x1fff'7800, 10)
+        == std::vector<std::uint32_t>{
+            optr_production, 0x0010'0755u, 0xffff'ffffu, 0u, 0xffff'0000u, 0x0000'ffffu,
+            wrp_production, 0x00ff'0000u, wrp_production, 0x00ff'0000u});
+    CHECK(
+        r.words(0x1fff'f800, 10)
+        == std::vector<std::uint32_t>{
+            ~0u, ~0u, 0xffff'ffffu, 0u, 0xffff'0000u, 0x0000'ffffu, wrp_production, 0x00ff'0000u,
+            wrp_production, 0x00ff'0000u});
+  };
+  check();
+  r.f.target->power_cycle();
+  check();
+}
+
+TEST_CASE(
+    "RM0351 3.4.1 and 3.4.2: OPTSTRT writes the programmed words and their complements into the "
+    "option byte area before the option byte load, a snapshot keeps the area")
+{
+  rig        r;
+  auto const saved = r.f.target->snapshot();
+  r.unlock_options();
+  r.write("OPTR", optr_production & ~(1u << 16));
+  r.write("WRP1AR", 0xff10'ff10u);
+  r.write("PCROP2ER", 0xffff'0123u);
+  CHECK(r.words(0x1fff'7800, 2) == std::vector<std::uint32_t>{optr_production, 0x0010'0755u});
+  r.program_options();
+  CHECK(r.words(0x1fff'7800, 2) == std::vector<std::uint32_t>{0xffee'f8aau, 0x0011'0755u});
+  CHECK(r.words(0x1fff'7818, 2) == std::vector<std::uint32_t>{0xff10'ff10u, 0x00ef'00efu});
+  CHECK(r.words(0x1fff'f810, 2) == std::vector<std::uint32_t>{0xffff'0123u, 0x0000'fedcu});
+  CHECK(r.words(0x1fff'f800, 2) == std::vector<std::uint32_t>{~0u, ~0u});
+  r.f.target->reset(popcorn::reset_kind::software);
+  CHECK(r.read("OPTR") == optr_production);
+  CHECK(r.words(0x1fff'7800, 2) == std::vector<std::uint32_t>{0xffee'f8aau, 0x0011'0755u});
+  r.load_options();
+  CHECK(r.read("OPTR") == 0xffee'f8aau);
+  r.f.target->restore(saved);
+  CHECK(r.words(0x1fff'7800, 2) == std::vector<std::uint32_t>{optr_production, 0x0010'0755u});
+  CHECK(r.words(0x1fff'7818, 2) == std::vector<std::uint32_t>{wrp_production, 0x00ff'0000u});
+}
+
+TEST_CASE("RM0351 3.4.2, inferred: option register writes while OPTLOCK is set are ignored")
+{
+  rig r;
+  REQUIRE(r.f.field("FLASH", "CR", "OPTLOCK") == 1);
+  r.write("OPTR", 0);
+  r.write("WRP1AR", 0);
+  CHECK(r.read("OPTR") == optr_production);
+  CHECK(r.read("WRP1AR") == wrp_production);
+  r.control(optstrt);
+  r.load_options();
+  CHECK(r.read("WRP1AR") == wrp_production);
+}
+
+TEST_CASE(
+    "RM0351 3.5.3: loaded WRP areas refuse program, page erase and bank erase with WRPERR, "
+    "programmed ones protect nothing before the option byte load")
+{
+  rig r;
+  r.unlock_options();
+  r.write("WRP2AR", 0xff03'ff02u);
+  r.write("WRP1BR", 0xff3f'ff3fu);
+  r.program_options();
+  r.program(bank2 + 2 * page_bytes, {0x1, 0x2});
+  CHECK((r.read("SR") & all_errors) == 0);
+  CHECK(r.words(bank2 + 2 * page_bytes, 2) == std::vector<std::uint32_t>{0x1, 0x2});
+  r.load_options();
+  r.program(bank2 + 3 * page_bytes, {0x3, 0x4});
+  CHECK((r.read("SR") & all_errors) == wrperr);
+  CHECK(r.words(bank2 + 3 * page_bytes, 2) == std::vector<std::uint32_t>{~0u, ~0u});
+  r.clear_errors();
+  r.program(bank2 + 4 * page_bytes, {0x5, 0x6});
+  CHECK((r.read("SR") & all_errors) == 0);
+  r.program(bank2 + page_bytes, {0x7, 0x8});
+  CHECK((r.read("SR") & all_errors) == 0);
+  r.program(bank1_last, {0x9, 0xa});
+  CHECK((r.read("SR") & all_errors) == wrperr);
+  r.clear_errors();
+  r.control(per | bker | 2u << 3 | strt);
+  r.wait_idle();
+  CHECK((r.read("SR") & all_errors) == wrperr);
+  CHECK(r.words(bank2 + 2 * page_bytes, 2) == std::vector<std::uint32_t>{0x1, 0x2});
+  r.clear_errors();
+  r.control(mer2 | strt);
+  r.wait_idle();
+  CHECK((r.read("SR") & all_errors) == wrperr);
+  CHECK(r.words(bank2 + 4 * page_bytes, 2) == std::vector<std::uint32_t>{0x5, 0x6});
+  r.clear_errors();
+  r.control(per | bker | 1u << 3 | strt);
+  r.wait_idle();
+  CHECK((r.read("SR") & all_errors) == 0);
+  CHECK(r.words(bank2 + page_bytes, 2) == std::vector<std::uint32_t>{~0u, ~0u});
+}
+
+TEST_CASE("RM0351 3.7.6: OBL_LAUNCH requests an option byte loader reset that loads the options")
+{
+  rig r;
+  r.unlock_options();
+  r.write("WRP1AR", 0xff10'ff10u);
+  r.program_options();
+  r.control(obl_launch);
+  CHECK(r.f.field("FLASH", "CR", "OBL_LAUNCH") == 0);
+  REQUIRE(r.requested_reset());
+  REQUIRE(r.f.target->apply_reset_request());
+  CHECK(r.read("WRP1AR") == 0xff10'ff10u);
+  CHECK(r.f.field("FLASH", "CR", "OPTLOCK") == 1);
+  CHECK(r.warnings("CR") == 0);
+}
+
+TEST_CASE(
+    "ES0250 2.2.23: OBL_LAUNCH with MSI at 8 MHz or more warns once and loads, under "
+    "strict_peripherals raises with FLASH_CR kept")
+{
+  rig r;
+  r.unlock_options();
+  r.msi_hz(7, 8 * mhz);
+  r.control(obl_launch);
+  REQUIRE(r.warnings("CR") == 1);
+  CHECK(r.logged.back().message.contains("ES0250 2.2.23"));
+  CHECK(r.requested_reset());
+  rig strict{strict_options()};
+  strict.unlock_options();
+  strict.msi_hz(7, 8 * mhz);
+  auto const before = strict.read("CR");
+  CHECK_THROWS_AS((void)strict.try_write("CR", before | obl_launch), popcorn::model_error);
+  CHECK(strict.read("CR") == before);
+  CHECK_FALSE(strict.requested_reset());
+  strict.msi_hz(6, 4 * mhz);
+  REQUIRE(strict.try_write("CR", before | obl_launch));
+  CHECK(strict.requested_reset());
 }
 }
