@@ -48,6 +48,11 @@ constexpr std::array<low_power_mode, 2> h5_modes_by_lpms{
 constexpr std::array<low_power_mode, 2> l1_modes_by_pdds{
     low_power_mode::stop, low_power_mode::standby};
 
+constexpr std::array<low_power_mode, 8> l4_modes_by_lpms{
+    low_power_mode::stop0,    low_power_mode::stop1,    low_power_mode::stop2,
+    low_power_mode::standby,  low_power_mode::shutdown, low_power_mode::shutdown,
+    low_power_mode::shutdown, low_power_mode::shutdown};
+
 /** @brief A `vos_levels` entry for a VOS value the manual forbids. */
 constexpr std::uint8_t vos_forbidden = 0xFF;
 
@@ -87,6 +92,14 @@ struct pwr_rule
   std::string                peer{};
   std::uint8_t               pin{};
   std::optional<std::size_t> unit{};
+};
+
+struct pwr_function
+{
+  field_ref        bits;
+  std::string_view reg;
+  std::string_view name;
+  bool             logged{};
 };
 
 struct pwr_state
@@ -182,6 +195,10 @@ struct pwr_variant
   std::span<field_name const> system_clock_fields;
   /** @brief Fields a peripheral reset of the unit, RCC PWRRST, leaves at their value. */
   std::span<field_name const> peripheral_reset_kept;
+  /** @brief Enables of functions the model does not run. A firmware write that sets one from 0
+   *         logs one warning per field per machine life and stores it. Under strict_peripherals
+   *         it raises model_error and the register keeps its value before the write. */
+  std::span<field_name const> unmodelled{};
 };
 
 /**
@@ -234,6 +251,19 @@ struct pwr_variant
  *        raises model_error under strict_peripherals. The first PDDS change logs the low-power
  *        mode warning. DBP, LPSDSR, LPRUN, ULP, FWU, PVD and the wakeup flags are storage. A
  *        peripheral reset through RCC PWRRST keeps FWU and ULP.
+ *
+ *        The STM32L47x/L48x follows RM0351 5.1.8 and 5.4: a VOS write to the other range sets
+ *        PWR_SR2.VOSF until the board's ready delay ends, then the FLASH model is told. VOSF sets
+ *        in both directions, DS10198 Table 53 giving tVOST, 20 us typical and 40 us maximum, from
+ *        Range 2 to Range 1 and from Range 1 to Range 2. VOS 00 and 11 cannot be written: a
+ *        firmware write of either keeps the range, logs one warning per machine life and raises
+ *        model_error under strict_peripherals. The first LPMS change logs the low-power mode
+ *        warning, LPMS 000 to 011 Stop 0, Stop 1, Stop 2 and Standby, 1xx Shutdown. A firmware
+ *        write that sets LPR, PVDE, a PVMEx, an EWUPx or APC from 0 logs one warning per field
+ *        per machine life, and under strict_peripherals raises model_error with the register
+ *        kept at its value before the write. DBP, USV, IOSV, PLS, RRS, EIWUL, PWR_CR4, PWR_SCR,
+ *        PWR_PUCRx and PWR_PDCRx are storage. REGLPS, REGLPF, PVDO, the PVMOx flags and the
+ *        wakeup and Standby flags stay 0.
  */
 class pwr final : public dispatch_model<pwr, pwr_state>,
                   public voltage_range_source,
@@ -253,6 +283,7 @@ public:
   void cr1_written(std::uint32_t old, std::uint32_t now);
   void control_written(std::uint32_t old, std::uint32_t now);
   void cr3_written(std::uint32_t old, std::uint32_t now);
+  void functions_written(std::uint32_t old, std::uint32_t now);
 
   [[nodiscard]] auto secure_function() const -> bool override;
   [[nodiscard]] auto secure_word() const -> std::uint32_t override;
@@ -272,6 +303,8 @@ private:
   bool                       reserved_select_logged_{};
   bool                       forbidden_vos_logged_{};
   initiator                  writer_{initiator::cpu};
+  std::uint32_t              written_{};
+  std::vector<pwr_function>  functions_;
   std::optional<reg_ref>     secure_;
   reg_ref                    privilege_;
   field_ref                  secure_privileged_;
@@ -480,6 +513,68 @@ constexpr pwr_variant l1_pwr{
     .peripheral_reset_kept = l1_peripheral_reset_kept,
 };
 
+/** @brief STM32L47x/L48x PWR, RM0351 5.4: VOS of PWR_CR1 01 Range 1, 10 Range 2, 00 and 11
+ *         forbidden, PWR_SR2.VOSF 1 while the regulator changes, the low-power mode by LPMS.
+ *         The family has no ACTVOS: the applied range is VOS once VOSF clears, so the active
+ *         roles name VOS and VOSF. No booster, no SMPS regulator select, no TrustZone. */
+constexpr std::array<named_field<pwr_role>, role_count<pwr_role>> l4_names{
+    {
+     {pwr_role::vos, {"CR1", "VOS"}},
+     {pwr_role::vos_ready, {"SR2", "VOSF"}},
+     {pwr_role::active_vos, {"CR1", "VOS"}},
+     {pwr_role::active_vos_ready, {"SR2", "VOSF"}},
+     {pwr_role::mode, {"CR1", "LPMS"}},
+     {pwr_role::booster, {"", ""}},
+     {pwr_role::booster_ready, {"", ""}},
+     {pwr_role::regulator_select, {"", ""}},
+     {pwr_role::regulator_status, {"", ""}},
+     }
+};
+
+constexpr std::array<std::uint8_t, 4> l4_vos_levels{vos_forbidden, 0, 1, vos_forbidden};
+
+constexpr std::array<write_entry<pwr>, 4> l4_writes{
+    {
+     {"CR1", &pwr::control_written},
+     {"CR2", &pwr::functions_written},
+     {"CR3", &pwr::functions_written},
+     {"SR2", nullptr},
+     }
+};
+
+constexpr auto l4_unmodelled = std::to_array<field_name>({
+    {"CR1", "LPR"  },
+    {"CR2", "PVDE" },
+    {"CR2", "PVME1"},
+    {"CR2", "PVME2"},
+    {"CR2", "PVME3"},
+    {"CR2", "PVME4"},
+    {"CR3", "EWUP1"},
+    {"CR3", "EWUP2"},
+    {"CR3", "EWUP3"},
+    {"CR3", "EWUP4"},
+    {"CR3", "EWUP5"},
+    {"CR3", "APC"  },
+});
+
+constexpr pwr_variant l4_pwr{
+    .fields                = l4_names,
+    .modes                 = l4_modes_by_lpms,
+    .vos_levels            = l4_vos_levels,
+    .vos_ready_set         = false,
+    .active_ready_set      = false,
+    .stepping              = std::nullopt,
+    .smps                  = std::nullopt,
+    .secure_register       = {},
+    .writes                = l4_writes,
+    .trustzone_writes      = {},
+    .secured               = {},
+    .wakeup_fields         = {},
+    .system_clock_fields   = {},
+    .peripheral_reset_kept = {},
+    .unmodelled            = l4_unmodelled,
+};
+
 constexpr pwr_variant h5_pwr{
     .fields           = h5_names,
     .modes            = h5_modes_by_lpms,
@@ -534,6 +629,7 @@ constexpr pwr_variant u5_smps_pwr = [] {
 static_assert(names_every_role(u5_names));
 static_assert(names_every_role(h5_names));
 static_assert(names_every_role(l1_names));
+static_assert(names_every_role(l4_names));
 
 pwr::pwr(
     model_context&         ctx,
@@ -559,6 +655,11 @@ pwr::pwr(
   for(auto const& kept : variant.peripheral_reset_kept)
   {
     peripheral_kept_.push_back(field(kept.reg, kept.field));
+  }
+  for(auto const& function : variant.unmodelled)
+  {
+    functions_.push_back(
+        {.bits = field(function.reg, function.field), .reg = function.reg, .name = function.field});
   }
   if(ctx.trustzone)
   {
@@ -696,7 +797,8 @@ auto pwr::guard(std::uint32_t word, access_ctx const& ctx, bool write) -> bus_gu
 {
   if(write)
   {
-    writer_ = ctx.by;
+    writer_  = ctx.by;
+    written_ = word;
   }
   if(auto const head = config_word_guard(
          secure_, privilege_, secure_privileged_, regs_, ctx_.trustzone, word, ctx, write, [&] {
@@ -813,8 +915,31 @@ void pwr::cr1_written(std::uint32_t, std::uint32_t now)
           reflex::enum_value_name(variant_.modes[names_[pwr_role::mode].of(now)])));
 }
 
+void pwr::functions_written(std::uint32_t old, std::uint32_t now)
+{
+  if(writer_ == initiator::debugger)
+  {
+    return;
+  }
+  for(auto& function : functions_)
+  {
+    if(function.bits.offset != written_ or function.bits.of(old) != 0 or function.bits.of(now) == 0)
+    {
+      continue;
+    }
+    if(ctx_.strict_peripherals)
+    {
+      regs_.poke(written_, old);
+    }
+    warn_once_or_refuse(
+        function.logged, function.reg, written_,
+        std::format("{} enables a function the model does not run", function.name));
+  }
+}
+
 void pwr::control_written(std::uint32_t old, std::uint32_t now)
 {
+  functions_written(old, now);
   vosr_written(old, now);
   if(names_[pwr_role::mode].of(now) != names_[pwr_role::mode].of(old))
   {
@@ -950,6 +1075,13 @@ auto pwr_l1_factory(pwr_options options) -> model_factory
 {
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<pwr>(ctx, desc, l1_pwr, options);
+  };
+}
+
+auto pwr_l4_factory(pwr_options options) -> model_factory
+{
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<pwr>(ctx, desc, l4_pwr, options);
   };
 }
 

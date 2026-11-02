@@ -607,3 +607,30 @@ registers = ["CFGR"]
 fields = ["MCOPRE"]
 acc = "read_write"
 source = "RM0351 Rev 11, 6.4.3 RCC_CFGR: MCOPRE[2:0] read-write, set and cleared by software. The four SVDs give read-only"
+
+[[fields]]
+instances = ["PWR"]
+registers = ["CR3"]
+rename = { EWF = "EIWUL" }
+source = "RM0351 Rev 11, 5.4.3 PWR_CR3: bit 15 is EIWUL, enable internal wakeup line, reset 1. The four SVDs spell it EWF"
+
+[[fields]]
+instances = ["PWR"]
+registers = ["PUCRA"]
+fields = ["PU14"]
+drop = true
+source = "RM0351 Rev 11, 5.4.8 PWR_PUCRA: bit 14 is reserved, PA14 has no Standby pull-up. The four SVDs give PU14"
+
+[[fields]]
+instances = ["PWR"]
+registers = ["PDCRA"]
+fields = ["PD13", "PD15"]
+drop = true
+source = "RM0351 Rev 11, 5.4.9 PWR_PDCRA: bits 13 and 15 are reserved, PA13 and PA15 have no Standby pull-down. The four SVDs give PD13 and PD15"
+
+[[fields]]
+instances = ["PWR"]
+registers = ["PDCRB"]
+fields = ["PD4"]
+drop = true
+source = "RM0351 Rev 11, 5.4.11 PWR_PDCRB: bit 4 is reserved, PB4 has no Standby pull-down. The four SVDs give PD4"

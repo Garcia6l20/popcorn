@@ -909,6 +909,24 @@ Source: [pwr.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   one warning. `DBP` does not gate the RTC domain bits of `RCC_CSR` or the RTC registers. LPSDSR,
   LPRUN, ULP, FWU, the PVD and the wakeup flags are storage. A peripheral reset through
   `RCC_APB1RSTR.PWRRST` keeps FWU and ULP, RM0038 5.4.1.
+- STM32L47x/L48x: a VOS write to the other range sets `PWR_SR2.VOSF` for the board's
+  `ready_delay`, 50 us by default, in either direction, and the new range applies when VOSF
+  clears, RM0351 5.1.8 and 5.4.6. DS10198 Table 53 gives tVOST 20 us typical and 40 us maximum,
+  the board option sets the delay. A write of VOS 00 or 11 keeps the range, RM0351 5.4.1. A
+  firmware write of either also logs one warning per machine life and is a `model_error` under
+  `strict_peripherals`.
+- STM32L47x/L48x: the low-power modes `PWR_CR1.LPMS` selects are not modelled, the first LPMS
+  change logs one warning naming the mode, and a deep-sleep WFI idles as a plain WFI. A firmware
+  write that sets `LPR`, `PVDE`, `PVME1` to `PVME4`, `EWUP1` to `EWUP5` or `APC` from 0 logs one
+  warning per field per machine life and stores the bit. Under `strict_peripherals` it is a
+  `model_error` and the register keeps its value before the write. `REGLPS`, `REGLPF`, `PVDO`,
+  the `PVMOx` flags and the wakeup and Standby flags stay 0.
+- STM32L47x/L48x: `RCC_BDCR` and the RTC registers take writes whatever `DBP` holds. `USV`, `IOSV`, `PLS`,
+  `RRS`, `EIWUL`, `PWR_CR4`, `PWR_SCR` and `PWR_PUCRx` and `PWR_PDCRx` are storage. A peripheral
+  reset through `RCC_APB1RSTR1.PWRRST` resets every PWR register.
+- STM32L47x/L48x PWR errata, ES0250 2.2: a `PWR_CR4` write takes effect whatever low-power entry
+  follows it, 2.2.21. The PWR model raises no reset, so a short run sequence gives no brown-out
+  reset, 2.2.5.
 
 ## RCC
 
