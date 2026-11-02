@@ -68,11 +68,16 @@ def build_irq_table(
     cmsis: Mapping[int, str] | None,
     patches: Sequence[PatchIrqs],
     rzone_num: int | None,
+    *,
+    owners: Mapping[str, str | None] | None = None,
 ) -> IrqTable:
     """IrqTable of @p svd, reconciled against @p cmsis (None when no header was found) and
     @p patches (drop by SVD name, then add), DescriptionError on a duplicate SVD number, an
     unknown drop name, an add on a number already in use, or a CMSIS number no SVD interrupt or
-    patch add covers. A dropped number loses its SVD owner, only an add gives it one."""
+    patch add covers. A dropped number loses its SVD owner, only an add gives it one.
+    `by_peripheral` keys an SVD peripheral's numbers by its name in @p owners, the map of
+    `peripheral_owners`, or by its SVD name when @p owners lacks it, and leaves out a peripheral
+    @p owners maps to None. An add keys its number by the peripheral it names."""
     numbers: dict[int, str] = {}
     for peripheral in svd.peripherals:
         for number, name in peripheral.interrupts:
@@ -124,11 +129,16 @@ def build_irq_table(
     if rzone_num is not None and rzone_num != num_irqs:
         notes.append(f"rzone DnumInterrupts={rzone_num} differs from num_irqs={num_irqs}")
 
-    by_peripheral: dict[str, list[int]] = {p.name: [] for p in svd.peripherals}
+    owners = owners or {}
+    by_peripheral: dict[str, list[int]] = {}
     for peripheral in svd.peripherals:
+        owner = owners.get(peripheral.name, peripheral.name)
+        if owner is None:
+            continue
+        held = by_peripheral.setdefault(owner, [])
         for number, _ in peripheral.interrupts:
             if number in numbers and number not in dropped:
-                by_peripheral[peripheral.name].append(number)
+                held.append(number)
     for patch in patches:
         for add in patch.add or []:
             by_peripheral.setdefault(add.peripheral, []).append(add.number)

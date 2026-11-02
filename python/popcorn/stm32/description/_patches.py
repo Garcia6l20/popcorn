@@ -1,5 +1,5 @@
-"""Patch file format, loader and application: peripheral drops and renames, fields, cross rules,
-aliases, IP renames, IRQ add/drop, GPIO alternate function drops, core overrides, peripheral
+"""Patch file format, loader and application: peripheral drops, renames and merges, fields, cross
+rules, aliases, IP renames, IRQ add/drop, GPIO alternate function drops, core overrides, peripheral
 sizes, added registers, added memory regions, region controllers, the device signature. popcorn's
 own TOML format, so these dataclasses are the format definition, not a mirror of any C++ or
 schema type."""
@@ -89,6 +89,14 @@ class PatchPeripherals:
     source: str
     drop: list[str] | None = None
     renames: dict[str, str] | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class PeripheralMerge:
+    into: str
+    peripherals: list[str]
+    size: int = field(metadata={"minimum": 1, "maximum": 4294967295})
+    source: str = field(metadata={"min_length": 1})
 
 
 @dataclass(slots=True, kw_only=True)
@@ -250,6 +258,7 @@ class Patch:
     aliases: PatchAliases | None = None
     ip: PatchIp | None = None
     peripherals: PatchPeripherals | None = None
+    peripheral_merges: list[PeripheralMerge] | None = None
     irqs: PatchIrqs | None = None
     alternates: PatchAlternates | None = None
     svd: PatchSvd | None = None
@@ -280,6 +289,7 @@ class PatchTarget:
 class PatchReport:
     peripherals_dropped: int = 0
     peripherals_renamed: int = 0
+    peripherals_merged: int = 0
     ip_renamed: int = 0
     ip_renames_skipped: int = 0
     ip_versions_set: int = 0
@@ -1225,6 +1235,99 @@ def _apply_drops(
     report.peripherals_renamed += len(renamed)
 
 
+def _end(register: RegisterDesc) -> int:
+    return register.offset + max(register.width // 8, 1)
+
+
+def _overlap(first: RegisterDesc, second: RegisterDesc) -> bool:
+    return first.offset < _end(second) and second.offset < _end(first)
+
+
+def _apply_peripheral_merge(
+    rule: PeripheralMerge,
+    peripherals: list[PeripheralDesc],
+    report: PatchReport,
+    *,
+    file: str,
+    key: str,
+) -> None:
+    by_name = {p.name: p for p in peripherals}
+    into = by_name.get(rule.into)
+    if into is None:
+        raise DescriptionError(file, 0, f"{key}.into", "a peripheral of the description")
+    if not rule.peripherals:
+        raise DescriptionError(file, 0, f"{key}.peripherals", "at least one peripheral to merge")
+    if rule.size < into.size:
+        raise DescriptionError(file, 0, f"{key}.size", f"a size of at least {into.size:#x}")
+    groups: list[list[RegisterDesc]] = [into.registers]
+    irqs = list(into.irqs)
+    merged: set[str] = set()
+    for name in rule.peripherals:
+        part_key = f"{key}.peripherals.{name}"
+        source = by_name.get(name)
+        if source is None:
+            raise DescriptionError(file, 0, part_key, "a peripheral of the description")
+        if source is into or name in merged:
+            raise DescriptionError(
+                file, 0, part_key, f"each peripheral once, other than {into.name}"
+            )
+        if source.base < into.base:
+            raise DescriptionError(file, 0, part_key, f"a base at or above {into.base:#x}")
+        delta = source.base - into.base
+        moved = [replace(copy.deepcopy(r), offset=r.offset + delta) for r in source.registers]
+        groups.append(moved)
+        merged.add(name)
+        irqs.extend(number for number in source.irqs if number not in irqs)
+    names = {r.name for r in into.registers}
+    for index, group in enumerate(groups[1:], start=1):
+        for register in group:
+            part_key = f"{key}.peripherals.{rule.peripherals[index - 1]}"
+            if register.name in names:
+                raise DescriptionError(
+                    file, 0, part_key, f"register names not in use, not {register.name}"
+                )
+            names.add(register.name)
+            if _end(register) > rule.size:
+                raise DescriptionError(
+                    file,
+                    0,
+                    f"{key}.size",
+                    f"a size covering {register.name} at {register.offset:#x}",
+                )
+            for other in (r for earlier in groups[:index] for r in earlier):
+                if _overlap(register, other):
+                    raise DescriptionError(
+                        file, 0, part_key, f"{register.name} clear of {other.name}"
+                    )
+    into.registers = sorted([r for group in groups for r in group], key=lambda r: r.offset)
+    into.irqs = irqs
+    into.size = rule.size
+    peripherals[:] = [p for p in peripherals if p.name not in merged]
+    report.peripherals_merged += len(merged)
+
+
+def peripheral_owners(patches: Sequence[LoadedPatch]) -> dict[str, str | None]:
+    """Maps each SVD peripheral name that a `[peripherals]` drop or rename or a
+    `[[peripheral_merges]]` rule of @p patches touches to the name of the peripheral holding it
+    once they apply, None for a dropped one. A name the map lacks keeps its own name. Assumes
+    @p patches applied without error."""
+    owners: dict[str, str | None] = {}
+    for loaded in patches:
+        rule = loaded.patch.peripherals
+        if rule is not None:
+            owners.update(dict.fromkeys(rule.drop or []))
+            owners.update(rule.renames or {})
+    renamed = set(owners.values())
+    for loaded in patches:
+        for merge in loaded.patch.peripheral_merges or []:
+            for name in merge.peripherals:
+                held = [svd_name for svd_name, owner in owners.items() if owner == name]
+                if name not in owners and name not in renamed:
+                    held.append(name)
+                owners.update(dict.fromkeys(held, merge.into))
+    return owners
+
+
 def _apply_core(
     rule: PatchCore, core: CoreDesc, touched: set[str], report: PatchReport, *, file: str
 ) -> None:
@@ -1486,7 +1589,11 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
     fails as naming an unknown one. An `[ip] versions` glob matches the instance names after every
     `[peripherals] renames`, and a glob matching nothing is an error. A peripheral rename lands
     before the aliases, so the alias rule pairs the new name with its base, and a later rule names
-    the new name. A peripheral size, an added register and a register reset land in the named
+    the new name. Peripheral merges run next, in file order. A merge names its `into` and merged
+    peripherals as the drops and renames leave them, moves the registers of each merged peripheral
+    into `into` at their offset plus the distance between the two bases, moves their IRQs, removes
+    them and sets the size of `into`, so a later rule names `into` only.
+    A peripheral size, an added register and a register reset land in the named
     peripheral and in each of its aliases, so fields and cross rules may name the register. A fields
     rule with `drop` removes its fields from the named peripheral and its aliases, and a later rule
     naming them fails. A fields rule with `rename` renames fields in the named peripheral and its
@@ -1512,6 +1619,12 @@ def apply_patches(patches: Sequence[LoadedPatch], target: PatchTarget) -> PatchR
         peripherals,
         report,
     )
+
+    for loaded in patches:
+        for j, rule in enumerate(loaded.patch.peripheral_merges or []):
+            _apply_peripheral_merge(
+                rule, peripherals, report, file=str(loaded.path), key=f"peripheral_merges[{j}]"
+            )
 
     by_name = {p.name: p for p in peripherals}
 

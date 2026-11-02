@@ -42,10 +42,10 @@ The modules are in `python/popcorn/stm32/description`:
   pure function of the file bytes.
 - `_cubemx.py` reads the part lookup, the memory regions and processor facts, the IP instance
   join and the GPIO alternate functions.
-- `_patches.py` applies popcorn's own TOML patches: peripheral drops, fields, field drops, cross
-  rules, aliases, IP renames and versions, register drops, IRQ changes, GPIO alternate function
-  drops, core overrides, added registers and regions, and the device signature. The patches are in
-  the `patches` directory.
+- `_patches.py` applies popcorn's own TOML patches: peripheral drops and merges, fields, field
+  drops, cross rules, aliases, IP renames and versions, register drops, IRQ changes, GPIO
+  alternate function drops, core overrides, added registers and regions, and the device
+  signature. The patches are in the `patches` directory.
 - `_builder.py` assembles the description: expand the SVD, read the db and rzone, apply every
   patch, strip the peripheral prefix of register names, build the IRQ table, then assemble the
   core, regions and peripherals.
@@ -56,7 +56,7 @@ The built description is cached as JSON under `$XDG_CACHE_HOME/popcorn/mcu`, key
 the core, the schema version, the generator string and the digests of the resolved sources
 in `_cache.py`.
 
-## Peripheral drops and renames
+## Peripheral drops, renames and merges
 
 A `[peripherals]` table removes SVD peripherals or gives them another name:
 
@@ -73,6 +73,30 @@ rule names the new name. A renamed peripheral must exist and not be dropped, eac
 renamed once across the files, and the new name must be free, otherwise the build raises
 `DescriptionError` keyed `peripherals.renames.<name>`. The patch report counts them in
 `peripherals_dropped` and `peripherals_renamed`.
+
+A `[[peripheral_merges]]` rule folds SVD peripherals that split one register block back into
+one peripheral:
+
+```toml
+[[peripheral_merges]]
+into = "OTG_FS"
+peripherals = ["OTG_FS_HOST", "OTG_FS_DEVICE", "OTG_FS_PWRCLK"]
+size = 0x20000
+source = "RM0351 47.15.57 Table 333: one OTG_FS register map from 0x000"
+```
+
+Merges run after the drops and renames, in file order, so `into` and `peripherals` name the
+peripherals as the drops and renames leave them. Each register of a merged peripheral moves into
+`into` at its offset plus the distance between the two bases, keeping its name and fields. The
+IRQs of the merged peripherals move to `into`, the merged peripherals are removed and `size`
+becomes the size of `into`. Every later rule names `into`. The build raises `DescriptionError`
+keyed `peripheral_merges[<n>]` when `into` or a merged peripheral is not a peripheral at that
+point, a merged peripheral is `into` or named twice, its base lies below the base of `into`,
+`size` is below the size of `into`, a moved register takes a name `into` already has, overlaps a
+register of `into` or of another merged peripheral, or ends past `size`. The patch report counts
+merged peripherals in `peripherals_merged`. A merge belongs in a patch whose `[match]` covers only
+the parts that carry the block: a part that drops the split peripherals refuses a merge naming
+them.
 
 An `[irqs]` rule drops an interrupt by SVD name, then adds one by number to a peripheral. A dropped
 number loses its SVD owner, so a number dropped and added back belongs to the added peripheral only.
@@ -128,8 +152,8 @@ categories, `cat13` and `cat46` for the GPIO version and `GPIOx_BRR`, `cat123_l1
 and `cat36_l15x` for rules that exclude the STM32L100 SVD. `l100`, `l100_cat3`, `l151`, `noaes` and
 `cat4_rd` drop peripherals by SVD or part name, and `l100` and `l100_cat3` give the interrupt
 lines the L100 SVD lists under another peripheral to their owner, by the `[irqs]` rule of
-"Peripheral drops and renames". A name is dropped once across the files that select it, so a drop
-sits in the one file that covers exactly the parts needing it.
+"Peripheral drops, renames and merges". A name is dropped once across the files that select it,
+so a drop sits in the one file that covers exactly the parts needing it.
 
 ## IP renames, versions and register drops
 

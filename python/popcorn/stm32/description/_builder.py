@@ -31,6 +31,7 @@ from popcorn.stm32.description._patches import (
     apply_alternate_drops,
     apply_patches,
     load_patches,
+    peripheral_owners,
 )
 from popcorn.stm32.description._sources import (
     Sources,
@@ -254,7 +255,13 @@ def build_description_with_report(sources: Sources) -> tuple[PartDescription, Pa
         bare_register_names(peripheral, _ancestors(peripheral.name, derived_from))
 
     patch_irqs = [loaded.patch.irqs for loaded in loaded_patches if loaded.patch.irqs is not None]
-    irq_table = build_irq_table(svd, cmsis, patch_irqs, rzone.processor.num_interrupts)
+    irq_table = build_irq_table(
+        svd,
+        cmsis,
+        patch_irqs,
+        rzone.processor.num_interrupts,
+        owners=peripheral_owners(loaded_patches),
+    )
 
     by_name = {p.name: p for p in target.peripherals}
     for name, numbers in irq_table.by_peripheral.items():
