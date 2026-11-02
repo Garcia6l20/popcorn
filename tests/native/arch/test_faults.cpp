@@ -2,12 +2,16 @@
 
 #include "../support/test_model.hpp"
 #include "cortex_m.hpp"
+#include "exceptions.hpp"
+#include "state.hpp"
 
 #include <popcorn/core/machine.hpp>
 
 #include <doctest/doctest.h>
+#include <reflex/serde/bson.hpp>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <format>
 #include <memory>
@@ -24,6 +28,9 @@ using popcorn::stop_reason;
 using popcorn::arch::fault_policy;
 using popcorn::testing::arch_fixture;
 using popcorn::testing::m33;
+using popcorn::testing::m33_trustzone;
+using popcorn::testing::trustzone_options;
+namespace armv8m = popcorn::arch::armv8m;
 using popcorn::testing::sym;
 using popcorn::testing::words_at;
 
@@ -70,9 +77,35 @@ auto booted(fault_policy policy, core::machine_options extra = {}) -> machine_un
   return out;
 }
 
+auto booted_trustzone(fault_policy policy) -> machine_under
+{
+  machine_under out;
+  auto          options = options_for(policy, out.model);
+  auto const    secure  = trustzone_options();
+  options.trustzone     = secure.trustzone;
+  options.idau          = secure.idau;
+  out.f = std::make_unique<arch_fixture>(m33_trustzone(), "faults", std::move(options));
+  REQUIRE(out.f->run_to_stop().reason == stop_reason::user);
+  out.f->set("pc", fn("faults_setup"));
+  REQUIRE(out.f->run_to_stop().reason == stop_reason::user);
+  return out;
+}
+
+auto deferred_of(machine_under const& m) -> std::optional<armv8m::deferred_fault>
+{
+  std::vector<std::byte> bytes;
+  m.f->module->save(bytes);
+  return reflex::serde::bson::deserializer{bytes}.load<armv8m::state>().deferred;
+}
+
+void set_bfhfnmins(machine_under const& m)
+{
+  REQUIRE(m.f->target->mem().write(0xE000'ED0C, 4, 0x05FA'0000u | (1u << 13)));
+}
+
 auto run_entry(machine_under& m, std::string_view entry) -> popcorn::stop
 {
-  if(entry == "model_bus_error")
+  if(entry == "model_bus_error" or entry.starts_with("masked_bus_error"))
   {
     m.model->fail_writes = true;
   }
@@ -221,6 +254,17 @@ TEST_CASE("under the stop policy a fault reports its class, address and CFSR, an
     CHECK(m.f->target->mem().read(0xE000'ED28, 4) == 0x00008200u);
     CHECK(m.f->target->mem().read(0xE000'ED38, 4) == 0x30000000u);
   }
+  {
+    auto       m       = booted(fault_policy::stop);
+    auto const stopped = run_entry(m, "model_bus_error");
+    REQUIRE(stopped.reason == stop_reason::fault);
+    CHECK(stopped.fault->kind == popcorn::fault_kind::bus);
+    CHECK(stopped.fault->fault_address == 0x40010058);
+    CHECK(stopped.fault->status == 0x00000400);
+    CHECK(stopped.fault->detail == 0);
+    CHECK(stopped.where.pc == (fn("model_bus_error_next") & ~address{1}));
+    CHECK_FALSE(m.f->module->pending());
+  }
 }
 
 TEST_CASE("a UDF polled in a loop with a UsageFault handler reading a register is a spin")
@@ -310,4 +354,182 @@ TEST_CASE("exception entry stacking below the pushed stack's limit stops with ST
       CHECK_FALSE(m.f->module->is_active(one.pending));
     }
   }
+}
+
+TEST_CASE("an imprecise BusFault under FAULTMASK cleared through SHCSR is never taken")
+{
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  {
+    CAPTURE(policy);
+    auto m = booted(policy);
+    REQUIRE(run_entry(m, "masked_bus_error_cleared").reason == stop_reason::user);
+    auto const log = log_of(*m.f);
+    REQUIRE(log.size() == 4);
+    CHECK(log[0] == 0x00000400);
+    CHECK((log[1] & 0x00024000) == 0x00024000);
+    CHECK(log[2] == 0);
+    CHECK((log[3] & 0x00024000) == 0);
+    CHECK_FALSE(m.f->module->pending());
+    CHECK((m.f->reg("xpsr") & 0x1ff) == 0);
+    REQUIRE(m.f->target->mem().write(0xE000'ED24, 4, 0x00024000));
+    m.f->set("pc", fn("deep_stack_run"));
+    REQUIRE(m.f->run_to_stop().reason == stop_reason::user);
+    CHECK((m.f->reg("xpsr") & 0x1ff) == 5);
+    auto const handled = log_of(*m.f);
+    REQUIRE(handled.size() == 9);
+    CHECK(handled[4] == 0xC30);
+  }
+}
+
+TEST_CASE("an imprecise BusFault pended under FAULTMASK stops at its entry under the stop policy")
+{
+  struct released_case
+  {
+    std::string_view entry;
+    std::string_view release_at;
+    std::uint32_t    hfsr;
+  };
+  std::vector<released_case> const cases{
+      {"masked_bus_error_released", "masked_release_at", 0         },
+      {"masked_bus_error_forced",   "masked_forced_at",  0x40000000},
+  };
+  for(auto const& one : cases)
+  {
+    CAPTURE(one.entry);
+    auto m = booted(fault_policy::stop);
+    REQUIRE(run_entry(m, one.entry).reason == stop_reason::user);
+    CHECK(m.f->module->pending());
+    CHECK(((log_of(*m.f)[1] >> 14) & 1u) == (one.hfsr == 0 ? 1u : 0u));
+    auto const taken = m.f->target->snapshot();
+    for(int round = 0; round < 2; ++round)
+    {
+      CAPTURE(round);
+      if(round == 1)
+      {
+        m.f->target->restore(taken);
+      }
+      auto const stopped = m.f->run_to_stop();
+      REQUIRE(stopped.reason == stop_reason::fault);
+      REQUIRE(stopped.fault.has_value());
+      CHECK(stopped.fault->kind == popcorn::fault_kind::bus);
+      CHECK(stopped.fault->fault_address == 0x40010058);
+      CHECK(stopped.fault->status == 0x00000400);
+      CHECK(stopped.fault->detail == one.hfsr);
+      CHECK(stopped.where.pc == (fn(one.release_at) & ~address{1}));
+      CHECK((m.f->reg("xpsr") & 0x1ff) == 0);
+      CHECK_FALSE(m.f->module->pending());
+      CHECK(log_of(*m.f).size() == 2);
+      auto const again = m.f->run_to_stop();
+      CHECK(again.reason == stop_reason::user);
+      CHECK(log_of(*m.f).size() == 2);
+    }
+  }
+}
+
+TEST_CASE("an imprecise BusFault pended under FAULTMASK enters its handler at the release")
+{
+  struct released_case
+  {
+    std::string_view entry;
+    std::string_view release_at;
+    std::uint32_t    code;
+    std::uint32_t    ipsr;
+    std::uint32_t    hfsr;
+  };
+  std::vector<released_case> const cases{
+      {"masked_bus_error_released", "masked_release_at", 0xC30, 5, 0         },
+      {"masked_bus_error_forced",   "masked_forced_at",  0xC10, 3, 0x40000000},
+  };
+  for(auto const& one : cases)
+  {
+    CAPTURE(one.entry);
+    auto m = booted(fault_policy::enter_handler);
+    REQUIRE(run_entry(m, one.entry).reason == stop_reason::user);
+    REQUIRE(m.f->run_to_stop().reason == stop_reason::user);
+    CHECK((m.f->reg("xpsr") & 0x1ff) == one.ipsr);
+    auto const log = log_of(*m.f);
+    REQUIRE(log.size() == 7);
+    CHECK(log[0] == 0x00000400);
+    CHECK(log[2] == one.code);
+    CHECK(log[3] == 0x00000400);
+    CHECK(log[5] == one.hfsr);
+    CHECK(log[6] == (fn(one.release_at) & ~address{1}));
+  }
+}
+
+TEST_CASE("a second masked imprecise BusFault for another exception stops at its raise")
+{
+  auto       m       = booted(fault_policy::stop);
+  auto const stopped = run_entry(m, "masked_bus_error_twice");
+  REQUIRE(stopped.reason == stop_reason::fault);
+  REQUIRE(stopped.fault.has_value());
+  CHECK(stopped.fault->kind == popcorn::fault_kind::bus);
+  CHECK(stopped.fault->fault_address == 0x40010058);
+  CHECK(stopped.fault->status == 0x00000400);
+  CHECK(stopped.fault->detail == 0x40000000);
+  CHECK(m.f->module->is_pending(armv8m::exc_busfault));
+  CHECK_FALSE(m.f->module->is_pending(armv8m::exc_hardfault));
+}
+
+TEST_CASE("a Secure lock-until-reset sequence under TrustZone runs to its end and a release stops")
+{
+  for(auto const policy : {fault_policy::enter_handler, fault_policy::stop})
+  {
+    CAPTURE(policy);
+    auto m = booted_trustzone(policy);
+    REQUIRE(run_entry(m, "masked_bus_error_cleared").reason == stop_reason::user);
+    auto const log = log_of(*m.f);
+    REQUIRE(log.size() == 4);
+    CHECK(log[0] == 0x00000400);
+    CHECK((log[1] & 0x00024000) == 0x00024000);
+    CHECK(log[2] == 0);
+    CHECK((log[3] & 0x00024000) == 0);
+    CHECK_FALSE(m.f->module->pending());
+    CHECK_FALSE(deferred_of(m).has_value());
+  }
+  auto m = booted_trustzone(fault_policy::stop);
+  REQUIRE(run_entry(m, "masked_bus_error_released").reason == stop_reason::user);
+  CHECK(
+      deferred_of(m)
+      == armv8m::deferred_fault{
+          .kind     = popcorn::fault_kind::bus,
+          .reported = 0x40010058,
+          .number   = armv8m::exc_busfault,
+          .state    = armv8m::security::secure});
+  auto const stopped = m.f->run_to_stop();
+  REQUIRE(stopped.reason == stop_reason::fault);
+  CHECK(stopped.fault->kind == popcorn::fault_kind::bus);
+  CHECK(stopped.fault->fault_address == 0x40010058);
+  CHECK(stopped.fault->status == 0x00000400);
+  CHECK(stopped.where.pc == (fn("masked_release_at") & ~address{1}));
+  CHECK_FALSE(deferred_of(m).has_value());
+}
+
+TEST_CASE("a Non-secure HardFault record under AIRCR.BFHFNMINS drops with its NS pended bit")
+{
+  auto m = booted_trustzone(fault_policy::stop);
+  set_bfhfnmins(m);
+  REQUIRE(run_entry(m, "masked_bus_error_forced").reason == stop_reason::user);
+  auto const recorded = deferred_of(m);
+  REQUIRE(recorded.has_value());
+  CHECK(recorded->number == armv8m::exc_hardfault);
+  CHECK(recorded->state == armv8m::security::nonsecure);
+  CHECK(m.f->module->pending());
+  REQUIRE(m.f->target->mem().write(0xE002'ED24, 4, 0));
+  CHECK_FALSE(deferred_of(m).has_value());
+  CHECK_FALSE(m.f->module->pending());
+  CHECK(m.f->run_to_stop().reason == stop_reason::user);
+}
+
+TEST_CASE("a recorded BusFault that AIRCR.BFHFNMINS moves to Non-secure still stops at entry")
+{
+  auto m = booted_trustzone(fault_policy::stop);
+  REQUIRE(run_entry(m, "masked_bus_error_released").reason == stop_reason::user);
+  set_bfhfnmins(m);
+  auto const stopped = m.f->run_to_stop();
+  REQUIRE(stopped.reason == stop_reason::fault);
+  REQUIRE(stopped.fault.has_value());
+  CHECK(stopped.fault->kind == popcorn::fault_kind::bus);
+  CHECK(stopped.fault->fault_address == 0x40010058);
+  CHECK(stopped.where.pc == (fn("masked_release_at") & ~address{1}));
 }

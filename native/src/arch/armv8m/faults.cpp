@@ -33,6 +33,11 @@ auto enable_bit(std::uint32_t target) noexcept -> std::uint32_t
 {
   return 1u << (16 + target - exc_memmanage);
 }
+
+auto names(deferred_fault const& deferred, std::uint32_t number, security state) noexcept -> bool
+{
+  return deferred.number == number and (not banked(number) or deferred.state == state);
+}
 }
 
 auto cortex_m::create_exception(fault_cause const& cause)
@@ -89,6 +94,17 @@ auto cortex_m::create_exception(fault_cause const& cause)
   }
   if(context_->faults == fault_policy::stop)
   {
+    if(not cause.synchronous
+       and not preempts(target, bank)
+       and (not state_.deferred or names(*state_.deferred, target, bank)))
+    {
+      if(not state_.deferred)
+      {
+        state_.deferred = deferred_fault{
+            .kind = cause.kind, .reported = cause.reported, .number = target, .state = bank};
+      }
+      return pending_exception{.number = target, .state = bank};
+    }
     return std::unexpected{trap_result::fault(
         {.kind = cause.kind, .fault_address = cause.reported, .status = cfsr, .detail = scs.hfsr})};
   }
@@ -104,6 +120,37 @@ auto cortex_m::raise_fault(fault_cause const& cause) -> trap_result
   }
   pend(raised->number, raised->state);
   return trap_result::resume();
+}
+
+auto cortex_m::deferred_stop(pending_exception taken) -> std::optional<trap_result>
+{
+  auto const& deferred = state_.deferred;
+  if(not deferred or not names(*deferred, taken.number, taken.state))
+  {
+    return std::nullopt;
+  }
+  auto const stopped = trap_result::fault(
+      {.kind          = deferred->kind,
+       .fault_address = deferred->reported,
+       .status        = state_.scs.cfsr,
+       .detail        = state_.scs.hfsr});
+  if(taken.state == security::nonsecure and banked(taken.number))
+  {
+    set_nonsecure_pending(taken.number, false);
+  }
+  else
+  {
+    set_exception_pending(taken.number, false);
+  }
+  return stopped;
+}
+
+void cortex_m::drop_deferred(std::uint32_t number, security state) noexcept
+{
+  if(state_.deferred and names(*state_.deferred, number, state))
+  {
+    state_.deferred.reset();
+  }
 }
 
 auto cortex_m::on_invalid_insn() -> trap_result

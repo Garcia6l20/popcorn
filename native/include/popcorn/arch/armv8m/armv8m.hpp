@@ -68,6 +68,10 @@ namespace popcorn::arch::armv8m
  *   BusFault.
  * - A bus error from a peripheral model, on a read or a write, is reported as IMPRECISERR with no
  *   BFAR, where hardware reports a failed read as a precise error.
+ * - Under fault_policy::stop, an IMPRECISERR that cannot preempt is pended, and its BusFault or
+ *   HardFault escalation stops the run at entry with the fault's class and address and the CFSR
+ *   and HFSR at entry. Clearing the pending exception first drops the stop. A second such
+ *   fault that pends another exception while the first is pending stops the run at once.
  * - MSPLIM and PSPLIM survive a register-list restore and a call, only `reset()` clears them.
  *   Exception entry stacking below the limit of the stack it pushes to, MSPLIM in Handler mode or
  *   Thread mode on MSP, PSPLIM in Thread mode on PSP, stops with a UsageFault STKOF and leaves

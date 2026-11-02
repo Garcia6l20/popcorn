@@ -35,6 +35,11 @@ Fault classes and addresses:
   address. A Non-secure load from a Secure peripheral, such as GTZC TZSC, is one.
 - A bus error a peripheral model raises is an imprecise BusFault with no BFAR. A Python model
   raises one by returning `None` from an `on_read` handler.
+- An imprecise BusFault that cannot preempt, such as one raised under FAULTMASK, pends as on
+  silicon. The run stops when the BusFault, or the HardFault it escalates to, is entered, with
+  the fault's kind and address and the CFSR and HFSR at entry. Clearing SHCSR.BUSFAULTPENDED
+  first drops it, and the run goes on. A second such fault that pends another exception, such as
+  the HardFault of a BusFault disabled in between, stops the run at once.
 
 A failing test's report decodes the fault registers and shows the call stack.
 

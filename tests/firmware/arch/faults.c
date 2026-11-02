@@ -5,6 +5,7 @@
 #define NVIC_IPR(n)     (0xE000E400u + (n))
 #define SCB_CPUID       0xE000ED00u
 #define SCB_VTOR        0xE000ED08u
+#define SCB_CCR         0xE000ED14u
 #define SCB_SHCSR       0xE000ED24u
 #define SCB_CFSR        0xE000ED28u
 #define SCB_HFSR        0xE000ED2Cu
@@ -28,6 +29,8 @@ void bad_return_v8_irq(void);
 
 __attribute__((aligned(512))) uint32_t ram_vector[VECTORS];
 uint32_t                               unpriv_read;
+static uint32_t                        saved_ccr;
+static uint32_t                        saved_shcsr;
 
 void fault_log(uint32_t const* frame, uint32_t code)
 {
@@ -304,4 +307,57 @@ __attribute__((noipa)) void stkof_handler(void)
   __asm__ volatile("dsb\nisb\nmsr psp, %0\nmovs r0, #2\nmsr control, r0\nisb\nsvc #0\nb ." ::"r"(
                        &stkof_process[64])
                    : "r0", "memory");
+}
+
+static void bus_error_under_faultmask(uint32_t enabled)
+{
+  saved_ccr   = REG32(SCB_CCR);
+  saved_shcsr = REG32(SCB_SHCSR);
+  __asm__ volatile("cpsid f" ::: "memory");
+  REG32(SCB_SHCSR) = enabled != 0 ? saved_shcsr | 0x20000u : saved_shcsr & ~0x70000u;
+  REG32(SCB_CCR)   = saved_ccr | 0x100u;
+  __asm__ volatile("dsb\nisb" ::: "memory");
+  REG32(TESTDEV_DATA) = 1u;
+  __asm__ volatile("dsb\nisb" ::: "memory");
+  LOG(REG32(SCB_CFSR));
+  LOG(REG32(SCB_SHCSR));
+}
+
+__attribute__((noipa)) void masked_bus_error_cleared(void)
+{
+  bus_error_under_faultmask(1);
+  REG32(SCB_CFSR)  = 0xFF00u;
+  REG32(SCB_SHCSR) = (REG32(SCB_SHCSR) & ~(0x4000u | 0x20000u)) | (saved_shcsr & 0x20000u);
+  REG32(SCB_CCR)   = saved_ccr;
+  __asm__ volatile("dsb\nisb\ncpsie f\nisb" ::: "memory");
+  LOG(REG32(SCB_CFSR));
+  LOG(REG32(SCB_SHCSR));
+  __asm__ volatile("bkpt #1" ::: "memory");
+}
+
+__attribute__((noipa)) void masked_bus_error_released(void)
+{
+  bus_error_under_faultmask(1);
+  __asm__ volatile("bkpt #3\ncpsie f\n"
+                   ".global masked_release_at\n.type masked_release_at, %%function\n"
+                   "masked_release_at:\nisb\nbkpt #2" ::
+                       : "memory");
+}
+
+__attribute__((noipa)) void masked_bus_error_forced(void)
+{
+  bus_error_under_faultmask(0);
+  __asm__ volatile("bkpt #3\ncpsie f\n"
+                   ".global masked_forced_at\n.type masked_forced_at, %%function\n"
+                   "masked_forced_at:\nisb\nbkpt #2" ::
+                       : "memory");
+}
+
+__attribute__((noipa)) void masked_bus_error_twice(void)
+{
+  bus_error_under_faultmask(1);
+  REG32(SCB_SHCSR) &= ~0x20000u;
+  __asm__ volatile("dsb\nisb" ::: "memory");
+  REG32(TESTDEV_DATA) = 2u;
+  __asm__ volatile("dsb\nisb\nbkpt #3\ncpsie f\nisb\nbkpt #2" ::: "memory");
 }

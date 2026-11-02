@@ -585,6 +585,10 @@ auto outranks(
 template <bool extension>
 auto cortex_m::enter_as(std::uint32_t number, security state) -> trap_result
 {
+  if(auto const stopped = deferred_stop({.number = number, .state = state}))
+  {
+    return *stopped;
+  }
   auto* const engine     = engine_handle();
   auto&       services   = context_->services;
   auto const  background = extension ? read_security(engine) : security::secure;
