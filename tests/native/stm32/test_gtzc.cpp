@@ -961,9 +961,9 @@ TEST_CASE(
   auto h5 = u575();
   h5.part = "STM32H573IIKx";
   CHECK(stm32::raz_wi_map(h5) == stm32::raz_wi_map(u575()));
-  auto l4 = u575();
-  l4.part = "STM32L476RGTx";
-  CHECK(stm32::raz_wi_map(l4).empty());
+  auto g4 = u575();
+  g4.part = "STM32G474RETx";
+  CHECK(stm32::raz_wi_map(g4).empty());
 }
 
 TEST_CASE_TEMPLATE(

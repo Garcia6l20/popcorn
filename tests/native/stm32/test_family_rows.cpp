@@ -8,8 +8,12 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <initializer_list>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -97,6 +101,62 @@ auto machine_of(part_description desc) -> core::machine
   return core::machine{
       std::move(desc), popcorn::arch::armv8m::factory(), popcorn::testing::stm32_options()};
 }
+
+struct l4_storage
+{
+  std::string_view name;
+  std::string_view ip;
+  std::string_view version;
+  std::uint32_t    base;
+};
+
+constexpr auto l4_storage_rows = std::to_array<l4_storage>({
+    {.name = "PWR",     .ip = "PWR",    .version = "",               .base = 0x4000'7000},
+    {.name = "EXTI",    .ip = "EXTI",   .version = "",               .base = 0x4001'0400},
+    {.name = "UART4",   .ip = "UART",   .version = "sci2_v2_1_Cube", .base = 0x4000'4C00},
+    {.name = "LPUART1", .ip = "LPUART", .version = "sci3_v1_1_Cube", .base = 0x4000'8000},
+    {.name = "DBGMCU",  .ip = "DBGMCU", .version = "",               .base = 0xE004'2000},
+    {.name = "CRS",     .ip = "CRS",    .version = "",               .base = 0x4000'6000},
+});
+
+auto toy_l4(std::span<l4_storage const> rows) -> part_description
+{
+  auto desc                = popcorn::testing::m33();
+  desc.part                = "STM32L476RCTx";
+  desc.core.cpu            = "CM4";
+  desc.core.revision       = "r0p1";
+  desc.core.trustzone      = false;
+  desc.core.nvic_prio_bits = 4;
+  desc.core.num_irqs       = 82;
+  desc.peripherals.clear();
+  for(auto const& row : rows)
+  {
+    desc.peripherals.push_back(
+        block(std::string{row.name}, std::string{row.ip}, std::string{row.version}, row.base, 4));
+  }
+  return desc;
+}
+
+auto storage_row(std::string_view name) -> std::span<l4_storage const>
+{
+  auto const found = std::ranges::find(l4_storage_rows, name, &l4_storage::name);
+  REQUIRE(found != l4_storage_rows.end());
+  return {found, 1};
+}
+
+auto cpu_load(core::machine& target, std::uint32_t at) -> std::optional<std::uint64_t>
+{
+  REQUIRE(target.mem().write(code_at, 2, 0x6802).has_value());
+  target.reset();
+  target.regs().write(*target.regs().find("r0"), at);
+  target.regs().write(*target.regs().find("r2"), 0xDEAD'BEEFu);
+  target.regs().write(*target.regs().find("pc"), code_at | 1u);
+  if(target.run_slice({.max_instructions = popcorn::icount{1}}).stopped.has_value())
+  {
+    return std::nullopt;
+  }
+  return target.regs().read(*target.regs().find("r2"));
+}
 }
 
 TEST_CASE("a Machine over an STM32L1 part attaches the L1 DBGMCU model")
@@ -167,4 +227,77 @@ TEST_CASE("the shipped U5 and H5 parts attach the scoped models")
   attached(
       popcorn::testing::description_from("POPCORN_H573_DESC"),
       {"EXTI", "DBGMCU", "CRS", "ADCC", "UART4"});
+}
+
+TEST_CASE("an STM32L4 PWR of no IP version attaches as storage")
+{
+  CHECK(machine_of(toy_l4(storage_row("PWR"))).model("PWR") == nullptr);
+}
+
+TEST_CASE("an STM32L4 EXTI of no IP version attaches as storage")
+{
+  CHECK(machine_of(toy_l4(storage_row("EXTI"))).model("EXTI") == nullptr);
+}
+
+TEST_CASE("an STM32L4 UART4 of sci2_v2_1_Cube attaches as storage")
+{
+  CHECK(machine_of(toy_l4(storage_row("UART4"))).model("UART4") == nullptr);
+}
+
+TEST_CASE("an STM32L4 LPUART1 of sci3_v1_1_Cube attaches as storage")
+{
+  CHECK(machine_of(toy_l4(storage_row("LPUART1"))).model("LPUART1") == nullptr);
+}
+
+TEST_CASE("an STM32L4 DBGMCU of no IP version attaches as storage")
+{
+  CHECK(machine_of(toy_l4(storage_row("DBGMCU"))).model("DBGMCU") == nullptr);
+}
+
+TEST_CASE("an STM32L4 CRS of no IP version attaches as storage")
+{
+  CHECK(machine_of(toy_l4(storage_row("CRS"))).model("CRS") == nullptr);
+}
+
+TEST_CASE("factories() of an STM32L4 part holds none of the storage instances")
+{
+  stm32::register_builtin_models();
+  auto const all = stm32::factories(stm32::board{}, toy_l4(l4_storage_rows));
+  for(auto const& row : l4_storage_rows)
+  {
+    CAPTURE(row.name);
+    CHECK_FALSE(all.contains(std::string{row.name}));
+  }
+}
+
+TEST_CASE("RM0351 48.6.4, 48.15.3 and 48.17.9: the L4 TPIU, ETM and ROM table are RAZ/WI")
+{
+  auto const desc   = toy_l4(storage_row("DBGMCU"));
+  auto const blocks = stm32::raz_wi_map(desc);
+  REQUIRE(blocks.size() == 3);
+  CHECK(blocks[0].start == 0xE004'0000u);
+  CHECK(blocks[1].start == 0xE004'1000u);
+  CHECK(blocks[2].start == 0xE00F'F000u);
+  auto options   = popcorn::testing::stm32_options();
+  options.raz_wi = blocks;
+  stm32::register_builtin_models();
+  core::machine target{desc, popcorn::arch::armv8m::factory(), std::move(options)};
+  CHECK(cpu_load(target, 0xE004'0004u) == 0u);
+  CHECK(cpu_load(target, 0xE004'1000u) == 0u);
+  CHECK(cpu_load(target, 0xE00F'FFD0u) == 0u);
+}
+
+TEST_CASE("without the L4 RAZ/WI map a CPU load of the L4 TPIU faults")
+{
+  auto target = machine_of(toy_l4(storage_row("DBGMCU")));
+  CHECK_FALSE(cpu_load(target, 0xE004'0004u).has_value());
+}
+
+TEST_CASE("option_bytes.tzen on an STM32L4 part is refused")
+{
+  auto       options = popcorn::testing::stm32_options();
+  auto const refused =
+      stm32::configure_option_bytes(toy_l4(l4_storage_rows), {.tzen = true}, options);
+  REQUIRE_FALSE(refused.has_value());
+  CHECK(refused.error().key == "option_bytes.tzen");
 }

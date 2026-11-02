@@ -26,6 +26,7 @@ constexpr auto every       = std::to_array<std::string_view>({"*"});
 constexpr auto u5_parts    = std::to_array<std::string_view>({"STM32U5*"});
 constexpr auto h5_parts    = std::to_array<std::string_view>({"STM32H5*"});
 constexpr auto l1_parts    = std::to_array<std::string_view>({"STM32L1*"});
+constexpr auto l4_parts    = std::to_array<std::string_view>({"STM32L4*"});
 constexpr auto u5_h5_parts = std::to_array<std::string_view>({"STM32U5*", "STM32H5*"});
 constexpr auto u5_h5_l1_parts =
     std::to_array<std::string_view>({"STM32U5*", "STM32H5*", "STM32L1*"});
@@ -75,6 +76,10 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "",
      .make            = [](board const& b) { return pwr_l1_factory(b.pwr); },
      .part_globs      = l1_parts},
+    {.ip              = "PWR",
+     .ip_version_glob = "",
+     .make            = [](board const&) { return model_factory{}; },
+     .part_globs      = l4_parts},
     {.ip              = "flash",
      .ip_version_glob = "v1.0.0_U5_Cube",
      .make            = [](board const& b) { return flash_factory(b.flash); },
@@ -158,6 +163,10 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "STM32L1_exti_23",
      .make            = [](board const&) { return exti_classic_factory(l1_exti_23); },
      .part_globs      = l1_parts},
+    {.ip              = "EXTI",
+     .ip_version_glob = "",
+     .make            = [](board const&) { return model_factory{}; },
+     .part_globs      = l4_parts},
     {.ip              = "SYSCFG",
      .ip_version_glob = "",
      .make            = [](board const&) { return syscfg_classic_factory(l1_syscfg); },
@@ -195,6 +204,10 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "sci2_*",
      .make            = [](board const& b) { return usart_factory(b, l1_uart); },
      .part_globs      = l1_parts},
+    {.ip              = "UART",
+     .ip_version_glob = "sci2_*",
+     .make            = [](board const&) { return model_factory{}; },
+     .part_globs      = l4_parts},
     {.ip              = "LPUART",
      .ip_version_glob = "sci3_v1*",
      .make            = [](board const& b) { return usart_factory(b, u5_lpuart); },
@@ -203,6 +216,10 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "sci3_v1*",
      .make            = [](board const& b) { return usart_factory(b, h5_lpuart); },
      .part_globs      = h5_parts},
+    {.ip              = "LPUART",
+     .ip_version_glob = "sci3_v1*",
+     .make            = [](board const&) { return model_factory{}; },
+     .part_globs      = l4_parts},
     {.ip              = "TIM1_8U5",
      .ip_version_glob = "gptimer2_v4_x*",
      .make            = [](board const&) { return tim_factory(u5_tim); },
@@ -344,6 +361,10 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "",
      .make            = [](board const&) { return dbgmcu_factory(); },
      .part_globs      = u5_h5_l1_parts},
+    {.ip              = "DBGMCU",
+     .ip_version_glob = "",
+     .make            = [](board const&) { return model_factory{}; },
+     .part_globs      = l4_parts},
     {.ip              = "DBG",
      .ip_version_glob = "",
      .make            = [](board const&) { return dbgmcu_factory(); },
@@ -377,6 +398,10 @@ constexpr auto builtins = std::to_array<builtin>({
      .ip_version_glob = "",
      .make            = [](board const&) { return crs_factory(); },
      .part_globs      = u5_h5_parts},
+    {.ip              = "CRS",
+     .ip_version_glob = "",
+     .make            = [](board const&) { return model_factory{}; },
+     .part_globs      = l4_parts},
 });
 
 auto any_glob(std::span<std::string_view const> globs, std::string_view text) -> bool
@@ -441,10 +466,11 @@ constexpr auto u5_debug_blocks = std::to_array<debug_block>({
     {.name = "CPU_ROM_TABLE", .start = 0xe00f'f000, .size = 0x1000},
 });
 
-/** @brief External PPB blocks of the STM32L1 without a model, 4 KB each: the TPIU at 0xE0040000,
- *         RM0038 30.17.9, the ETM at 0xE0041000, RM0038 30.15, and the Cortex-M3 ROM table at
- *         0xE00FF000, RM0038 30.6. DBGMCU at 0xE0042000 has its own model. */
-constexpr auto l1_debug_blocks = std::to_array<debug_block>({
+/** @brief External PPB blocks of the Cortex-M3 and Cortex-M4 parts without a model, 4 KB each:
+ *         the TPIU at 0xE0040000, the ETM at 0xE0041000 and the ROM table at 0xE00FF000. STM32L1:
+ *         RM0038 30.17.9, 30.15 and 30.6. STM32L4: RM0351 48.17.9 Table 349, 48.15.3 Table 345
+ *         and 48.6.4. DBGMCU at 0xE0042000 has its own row. */
+constexpr auto cm_debug_blocks = std::to_array<debug_block>({
     {.name = "TPIU",      .start = 0xe004'0000, .size = 0x1000},
     {.name = "ETM",       .start = 0xe004'1000, .size = 0x1000},
     {.name = "ROM_TABLE", .start = 0xe00f'f000, .size = 0x1000},
@@ -458,11 +484,12 @@ struct debug_family
 
 // The H5 has the same blocks at the same addresses, RM0481 66.5 Tables 870 and 871. Its DBGMCU
 // sits at 0xE00E4000 for the debugger and 0x44024000 for the CPU, outside these ranges.
-constexpr std::array<debug_family, 3> debug_maps{
+constexpr std::array<debug_family, 4> debug_maps{
     {
      {"STM32U5*", u5_debug_blocks},
      {"STM32H5*", u5_debug_blocks},
-     {"STM32L1*", l1_debug_blocks},
+     {"STM32L1*", cm_debug_blocks},
+     {"STM32L4*", cm_debug_blocks},
      }
 };
 
