@@ -289,6 +289,25 @@ struct sleep_state
   friend auto operator==(sleep_state const&, sleep_state const&) -> bool = default;
 };
 
+/**
+ * @brief An asynchronous fault pended under fault_policy::stop because it could not preempt:
+ *        entering its exception stops the run with this record instead of running the handler.
+ */
+struct deferred_fault
+{
+  /** @brief Class the stop reports. */
+  fault_kind kind{};
+  /** @brief Address the stop reports. */
+  address reported{};
+  /** @brief Exception pended for the fault, the fault's own or its HardFault escalation. */
+  std::uint32_t number{};
+  /** @brief Security state the exception targets. */
+  security state{security::secure};
+
+  /** @brief Member-wise equality. */
+  friend auto operator==(deferred_fault const&, deferred_fault const&) -> bool = default;
+};
+
 /** @brief Saved state of the module. */
 struct state
 {
@@ -318,6 +337,8 @@ struct state
   /** @brief Instruction count at which the core was held, set while it is: SysTick and CYCCNT
    * read the clock as this count. */
   std::optional<std::uint64_t> held_at{};
+  /** @brief Fault whose exception entry stops the run, set while that exception is pending. */
+  std::optional<deferred_fault> deferred{};
 
   /** @brief Member-wise equality. */
   friend auto operator==(state const&, state const&) -> bool = default;

@@ -381,6 +381,10 @@ void cortex_m::set_nonsecure_pending(std::uint32_t number, bool value) noexcept
   {
     state_.event_register = true;
   }
+  if(not value)
+  {
+    drop_deferred(number, security::nonsecure);
+  }
   bits = value ? bits | 1u << number : bits & ~(1u << number);
   refresh_pending();
 }

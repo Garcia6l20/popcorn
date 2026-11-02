@@ -226,7 +226,12 @@ private:
   auto               raise_fault(fault_cause const& cause) -> trap_result;
   [[nodiscard]] auto nonsecure_fp_denied() const -> bool;
   auto create_exception(fault_cause const& cause) -> std::expected<pending_exception, trap_result>;
-  auto derived_entry(
+  auto deferred_stop(pending_exception taken) -> std::optional<trap_result>;
+  void drop_deferred(std::uint32_t number, security state) noexcept;
+  [[nodiscard]] auto requested_priority_negative() const -> bool;
+  auto               ignored_bus_error(address accessed) -> bool;
+  void               skip_instruction();
+  auto               derived_entry(
       pending_exception  original,
       fault_cause const& cause,
       std::uint32_t      exc_return,

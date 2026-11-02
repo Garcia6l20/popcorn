@@ -39,6 +39,8 @@ inline constexpr std::uint32_t scr_sleeponexit = 1u << 1;
 /** @brief SCR.SEVONPEND. */
 inline constexpr std::uint32_t scr_sevonpend = 1u << 4;
 
+/** @brief CCR.BFHFNMIGN, precise data BusFaults ignored at a negative requested priority. */
+inline constexpr std::uint32_t ccr_bfhfnmign = 1u << 8;
 /** @brief CCR.STKALIGN, 8-byte aligned exception frames. */
 inline constexpr std::uint32_t ccr_stkalign = 1u << 9;
 

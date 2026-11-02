@@ -648,6 +648,10 @@ void cortex_m::set_exception_pending(std::uint32_t number, bool value)
   {
     note_pending(number);
   }
+  else
+  {
+    drop_deferred(number, security::secure);
+  }
   put_bit(state_.exceptions.pending, number, value);
   refresh_pending();
 }
