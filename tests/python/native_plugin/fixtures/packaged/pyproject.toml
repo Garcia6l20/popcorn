@@ -1,5 +1,5 @@
 [build-system]
-requires = ["pcons==0.31.0"]
+requires = ["pcons==0.32.0"]
 build-backend = "pcons.pyproject"
 
 [project]

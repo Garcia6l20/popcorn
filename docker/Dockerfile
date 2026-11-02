@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends cmake ninja-bui
 COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /usr/local/bin/uv
 ENV UV_PYTHON_INSTALL_DIR=/opt/python
 RUN uv python install 3.14.8 && uv venv /opt/build --python 3.14.8 \
-    && uv pip install --no-cache --python /opt/build/bin/python pcons==0.31.0
+    && uv pip install --no-cache --python /opt/build/bin/python pcons==0.32.0
 COPY docker/version-requirements.txt /tmp/version-requirements.txt
 RUN uv pip install --no-cache --python /opt/build/bin/python --require-hashes \
     -r /tmp/version-requirements.txt
