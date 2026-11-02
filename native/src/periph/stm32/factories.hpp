@@ -34,6 +34,12 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto rcc_l1_factory(rcc_options options) -> model_factory;
 
 /**
+ * @brief Factory of the STM32L47x/L48x RCC model, RM0351 section 6.
+ * @param options Board configuration, copied into every model made.
+ */
+[[nodiscard]] auto rcc_l4_factory(rcc_options options) -> model_factory;
+
+/**
  * @brief Factory of the ICACHE model, RM0456 section 8.
  * @param options Board configuration, copied into every model made.
  */

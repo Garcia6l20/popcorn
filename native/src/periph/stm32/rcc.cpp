@@ -8,6 +8,7 @@
 #include "model_base.hpp"
 #include "rcc_h5.hpp"
 #include "rcc_l1.hpp"
+#include "rcc_l4.hpp"
 #include "rcc_resets.hpp"
 #include "rcc_u5.hpp"
 #include "secure_config.hpp"
@@ -261,9 +262,13 @@ template <typename Signal> struct timer
  *        and RTCPRE and HSEBYP of RCC_CR, a power on reset and a BOR reset them, RM0038 6.1.2 and
  *        6.1.3. RTCRST holds the RTC domain bits of RCC_CSR at 0 and keeps LSION, LSIRDY and the
  *        reset flags. A PLLMUL, PLLDIV or MSIRANGE code RM0038 does not allow runs at 0 Hz.
- * @tparam Traits Family clock tree, u5_rcc, h5_rcc or l1_rcc: the sources and signals, the
- *         oscillator, mux, timer and enable tables, the source maps of the PLLs, SYSCLK and RTC,
- *         the names of the single fields, and the TrustZone tables.
+ *
+ *        STM32L47x/L48x, RM0351 section 6, through `l4_rcc`, whose class doc lists its rules.
+ *        The traits `writable_msi_ranges` and `lse_locked_controls` add the MSIRANGE write
+ *        protection and the LSE lock of MSIPLLEN, RM0351 6.4.1.
+ * @tparam Traits Family clock tree, u5_rcc, h5_rcc, l1_rcc or l4_rcc: the sources and signals,
+ *         the oscillator, mux, timer and enable tables, the source maps of the PLLs, SYSCLK and
+ *         RTC, the names of the single fields, and the TrustZone tables.
  */
 template <typename Traits>
 class rcc_model final : public dispatch_model<rcc_model<Traits>, rcc_state<Traits>>,
@@ -388,11 +393,13 @@ private:
   field_table<rcc_role>                                names_;
   std::array<field_ref, Traits::signal_muxes.size()>   selects_{};
   std::array<field_ref, Traits::reset_flags.size()>    flags_{};
+  reg_ref                                              control_;
   reg_ref                                              bdcr_;
   std::uint32_t                                        backup_mask_{};
   reg_ref                                              csr_;
   std::vector<std::pair<std::uint32_t, std::uint32_t>> kept_;
   std::vector<std::pair<field_ref, source>>            held_;
+  std::vector<field_ref>                               lse_locked_;
   std::vector<std::pair<core::clock_domain, signal>>   signals_;
   std::vector<kernel<signal>>                          kernels_;
   std::vector<reset_entry>                             resets_;
@@ -545,6 +552,30 @@ template <> struct rcc_tables<l1_rcc>
   static constexpr std::array<write_entry<model>, 0> trustzone_writes{};
 };
 
+template <> struct rcc_tables<l4_rcc>
+{
+  using model = rcc_model<l4_rcc>;
+
+  static constexpr std::array<write_entry<model>, 12> writes{
+      {
+       {"CR", &model::cr_written},
+       {"CFGR", &model::tree_written},
+       {"PLLCFGR", &model::pll_config_written<0>},
+       {"CSR", &model::csr_written},
+       {"CIER", nullptr},
+       {"AHB1ENR", &model::tree_written},
+       {"AHB2ENR", &model::tree_written},
+       {"AHB3ENR", &model::tree_written},
+       {"APB1ENR1", &model::tree_written},
+       {"APB1ENR2", &model::tree_written},
+       {"APB2ENR", &model::tree_written},
+       {"BDCR", &model::bdcr_written},
+       }
+  };
+
+  static constexpr std::array<write_entry<model>, 0> trustzone_writes{};
+};
+
 constexpr std::size_t max_reset_registers = 16;
 
 template <typename Model, std::size_t... Reg>
@@ -569,8 +600,8 @@ rcc_model<Traits>::rcc_model(
           [this](std::string_view reg_name, std::string_view name) {
             return has_field(reg_name, name);
           }},
-      bdcr_{reg(Traits::backup_register)}, csr_{reg(Traits::reset_flags_register)},
-      unit_{unit_named(ctx.part, desc.name)}
+      control_{reg(Traits::control_register)}, bdcr_{reg(Traits::backup_register)},
+      csr_{reg(Traits::reset_flags_register)}, unit_{unit_named(ctx.part, desc.name)}
 {
   for(auto const& [index, entry] : std::views::enumerate(Traits::signal_muxes))
   {
@@ -653,6 +684,22 @@ rcc_model<Traits>::rcc_model(
         .ready  = field(names.reg, names.ready),
         .flag   = field(Traits::flag_register, names.flag),
         .enable = field(Traits::enable_register, names.enable)};
+  }
+  if constexpr(requires { Traits::lse_locked_controls; })
+  {
+    for(auto const name : Traits::lse_locked_controls)
+    {
+      lse_locked_.push_back(field(Traits::control_register, name));
+    }
+  }
+  if constexpr(requires { Traits::writable_msi_ranges; })
+  {
+    if(names_[rcc_role::msis_range].offset != control_.offset)
+    {
+      throw config_error(
+          ctx.part.part, 0, "peripherals.RCC.registers",
+          "a write-protected MSI range in the control register");
+    }
   }
   for(auto const& [bits, which] : held_)
   {
@@ -826,6 +873,13 @@ template <typename Traits> void rcc_model<Traits>::stop(source which)
   auto const index = std::to_underlying(which);
   update(regs_, osc_[index].ready, 0);
   cancel(index);
+  if(which == source::lse)
+  {
+    for(auto const& bits : lse_locked_)
+    {
+      update(regs_, bits, 0);
+    }
+  }
 }
 
 template <typename Traits>
@@ -900,16 +954,36 @@ auto rcc_model<Traits>::held(std::uint32_t word, std::uint32_t old, std::uint32_
 
 template <typename Traits> void rcc_model<Traits>::cr_written(std::uint32_t old, std::uint32_t now)
 {
-  now = held(names_[rcc_role::css_on].offset, old, now);
+  if(not is_ready(source::lse))
+  {
+    for(auto const& bits : lse_locked_)
+    {
+      now = bits.with(now, 0);
+    }
+  }
+  now = held(control_.offset, old, now);
   if constexpr(Traits::css_held)
   {
     now |= old & names_[rcc_role::css_on].mask();
+  }
+  if(auto const select = names_.find(rcc_role::msi_select);
+     select and select->offset == control_.offset)
+  {
+    now |= old & select->mask();
+  }
+  if constexpr(requires { Traits::writable_msi_ranges; })
+  {
+    if(auto const range = names_[rcc_role::msis_range];
+       range.of(now) >= Traits::writable_msi_ranges)
+    {
+      now = range.with(now, range.of(old));
+    }
   }
   if constexpr(Traits::hsi_divider)
   {
     now = divider_written(old, now);
   }
-  oscillators_written(Traits::control_register, names_[rcc_role::css_on].offset, old, now);
+  oscillators_written(Traits::control_register, control_.offset, old, now);
 }
 
 template <typename Traits>
@@ -1067,7 +1141,17 @@ void rcc_model<Traits>::bdcr_written(std::uint32_t old, std::uint32_t now)
 
 template <typename Traits> void rcc_model<Traits>::csr_written(std::uint32_t old, std::uint32_t now)
 {
-  regs_.poke(csr_.offset, flags_written(old, now));
+  now = flags_written(old, now);
+  if constexpr(
+      std::ranges::contains(
+          Traits::oscillators, Traits::reset_flags_register, &oscillator_names<signal>::reg))
+  {
+    oscillators_written(Traits::reset_flags_register, csr_.offset, old, now);
+  }
+  else
+  {
+    regs_.poke(csr_.offset, now);
+  }
 }
 
 template <typename Traits>
@@ -1079,7 +1163,10 @@ auto rcc_model<Traits>::flags_written(std::uint32_t old, std::uint32_t now) cons
     {
       for(auto const role : {rcc_role::msis_standby_range, rcc_role::msik_standby_range})
       {
-        now = names_[role].with(now, names_[role].of(old));
+        if(auto const range = names_.find(role))
+        {
+          now = range->with(now, range->of(old));
+        }
       }
     }
   }
@@ -1589,6 +1676,13 @@ auto rcc_l1_factory(rcc_options options) -> model_factory
 {
   return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
     return std::make_shared<rcc_model<l1_rcc>>(ctx, desc, options);
+  };
+}
+
+auto rcc_l4_factory(rcc_options options) -> model_factory
+{
+  return [options](model_context& ctx, peripheral_desc const& desc) -> std::shared_ptr<model> {
+    return std::make_shared<rcc_model<l4_rcc>>(ctx, desc, options);
   };
 }
 }

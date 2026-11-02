@@ -404,3 +404,39 @@ registers = ["RCR"]
 fields = ["REP"]
 width = 16
 source = "RM0351 Rev 11, 30.4.15 TIMx_RCR (x = 1, 8): REP[15:0], 16 bits. The four SVDs give 8 bits"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CR"]
+fields = ["CSSON", "MSIRGSEL"]
+acc = "read_write"
+source = "RM0351 Rev 11, 6.4.1 RCC_CR: CSSON and MSIRGSEL are rs, read and set by software. The four SVDs give write-only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CIER"]
+fields = ["HSI48RDYIE"]
+drop = true
+source = "RM0351 Rev 11, 6.4.7 RCC_CIER: HSI48RDYIE in bit 10 only on STM32L49x/L4Ax devices, 6.2.4: the HSI48 is valid for STM32L49x/L4Ax devices only"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CIFR"]
+fields = ["HSI48RDYF"]
+drop = true
+source = "RM0351 Rev 11, 6.4.8 RCC_CIFR: HSI48RDYF in bit 10 only on STM32L49x/L4Ax devices"
+
+[[fields]]
+instances = ["RCC"]
+registers = ["CICR"]
+fields = ["HSI48RDYC"]
+drop = true
+source = "RM0351 Rev 11, 6.4.9 RCC_CICR: HSI48RDYC in bit 10 only on STM32L49x/L4Ax devices"
+
+[[cross]]
+instances = ["RCC"]
+reg = "CICR"
+target_reg = "CIFR"
+effect = "clear"
+pairs = { LSIRDYC = "LSIRDYF", LSERDYC = "LSERDYF", MSIRDYC = "MSIRDYF", HSIRDYC = "HSIRDYF", HSERDYC = "HSERDYF", PLLRDYC = "PLLRDYF", PLLSAI1RDYC = "PLLSAI1RDYF", PLLSAI2RDYC = "PLLSAI2RDYF", CSSC = "CSSF", LSECSSC = "LSECSSF" }
+source = "RM0351 Rev 11, 6.4.8 RCC_CIFR and 6.4.9 RCC_CICR: a write of 1 to xxxRDYC clears xxxRDYF, CSSC clears CSSF and LSECSSC clears LSECSSF"

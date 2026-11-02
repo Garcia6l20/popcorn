@@ -12,6 +12,8 @@ from popcorn.stm32.description._builder import build_description
 from popcorn.stm32.description._cubemx import expand_refname, read_rzone_facts
 from popcorn.stm32.description._errors import MissingSource
 from popcorn.stm32.description._model import (
+    Access,
+    CrossEffect,
     PartDescription,
     PeripheralDesc,
     RegionDesc,
@@ -775,3 +777,29 @@ def test_each_line_patch_loads_on_exactly_the_parts_of_its_lines() -> None:
         "stm32l485.toml": 2,
         "stm32l4_otg.toml": 32,
     }
+
+
+RCC_PARTS = [*LINE_PARTS, "STM32L485JCYx"]
+RCC_READY = ["LSIRDY", "LSERDY", "MSIRDY", "HSIRDY", "HSERDY", "PLLRDY", "PLLSAI1RDY"]
+RCC_READY_CLEARS = {f"{n}C": f"{n}F" for n in [*RCC_READY, "PLLSAI2RDY", "CSS", "LSECSS"]}
+"""RM0351 6.4.9: each RCC_CICR bit and the RCC_CIFR flag it clears."""
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", RCC_PARTS)
+def test_the_rcc_csson_and_msirgsel_read_back_and_the_hsi48_bits_are_absent(name: str) -> None:
+    registers = _registers(_description(name), "RCC")
+    control = {f.name: f.acc for f in registers["CR"].fields}
+    assert (control["CSSON"], control["MSIRGSEL"]) == (Access.READ_WRITE, Access.READ_WRITE)
+    for register in ("CIER", "CIFR", "CICR"):
+        assert not [f.name for f in registers[register].fields if f.name.startswith("HSI48")]
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", RCC_PARTS)
+def test_each_rcc_cicr_bit_clears_its_rcc_cifr_flag(name: str) -> None:
+    rules = _peripheral(_description(name), "RCC").cross_rules
+    assert {
+        r.field: r.target_field for r in rules if (r.reg, r.target_reg) == ("CICR", "CIFR")
+    } == RCC_READY_CLEARS
+    assert {r.effect for r in rules} == {CrossEffect.CLEAR}

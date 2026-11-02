@@ -77,6 +77,18 @@ exceptions. They stop the run with a FAULT stop instead:
 - A reset a store requests applies after the instructions that follow the store up to the next
   branch, as for AIRCR.SYSRESETREQ.
 
+## STM32L4 core
+
+The Cortex-M4 of the STM32L47x/L48x runs as ARMv7-M specifies, without the core errata of
+ES0250:
+
+- ES0250 2.1.1: a single-word load to SP interrupted in its data phase completes once, the base
+  register updated once.
+- ES0250 2.1.2: a VDIV or VSQRT running when an interrupt is taken completes before the handler's
+  first instruction, with or without lazy FP context save.
+- ES0250 2.1.3: an exception return that overlaps a buffered store vectors to the interrupt the
+  NVIC acknowledged.
+
 ## STM32L1 description
 
 Source: [patches](https://github.com/Garcia6l20/popcorn/blob/main/python/popcorn/stm32/description/patches)
@@ -995,6 +1007,21 @@ Source: [rcc.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   their output at 0 Hz, an inferred rule. The PLL VCO and SYSCLK limits of each voltage range are
   not checked. The CSS on HSE and on LSE is storage, and `LSECSSON` can be cleared by firmware.
   The USB and SDIO 48 MHz clock, PLLVCO / 2, is not a clock domain.
+- STM32L47x/L48x: one clock tree, RM0351 section 6. The RCC sets the `RCC_CIFR` ready flags
+  that `RCC_CIER` enables, a `RCC_CICR` write clears them, and no ready interrupt is raised. Each
+  MSI range runs at its nominal rate, with or without `MSIPLLEN`, and HSI16 at 16 MHz: the
+  `RCC_ICSCR` trim fields are storage. A ready flag clears in the write that clears its ON bit,
+  where RM0351 6.4.1 and 6.4.30 give 6 oscillator cycles, 3 for the LSI.
+- STM32L47x/L48x: a write of `MSIRANGE` while `MSION` is 1 and `MSIRDY` is 0, which RM0351 6.4.1
+  forbids, takes the new range. `LSEBYP` takes every write, RM0351 6.4.29 states no rule for it.
+  `HSIKERON`, `HSIASFS` and `STOPWUCK` are storage, they act on Stop mode entry and exit. The CSS
+  on HSE and on LSE and `LSEDRV` are storage, `CSSF`, `LSECSSF` and `LSECSSD` stay 0. `RCC_BDCR`
+  takes writes whatever `PWR_CR1.DBP` holds. PLLSAI1 and PLLSAI2 are storage. The main PLL VCO
+  ranges of RM0351 6.4.4 are not checked.
+- STM32L47x/L48x clock errata, ES0250 2.2: `MSIRDY` clears whenever the MSI stops, 2.2.1. The MSI
+  runs at its range rate from the first cycle after a wakeup, 2.2.3 and 2.2.24. The LSI runs at
+  32 kHz with a 50 % duty, 2.2.8. The HSE is ready after the board's `ready_delay` at any VDD,
+  2.2.10. The HSI16 user trim is storage, 2.2.22.
 
 ## RNG
 

@@ -256,6 +256,19 @@ for _, target in l4_firmwares.values():
     if target is not None:
         smoke_l4.depends(target)
 
+for program, source in (("stm32-rcc-l4", "test_rcc_l4.cpp"),):
+    l4_test = add_doctest(
+        program,
+        [here / source],
+        static,
+        env=l4_env,
+        register=l476rc is not None,
+    )
+    l4_test.private.include_dirs.append(private_dir)
+    for _, target in l4_firmwares.values():
+        if target is not None:
+            l4_test.depends(target)
+
 for program, source in (
     ("stm32-rcc-l1", "test_rcc_l1.cpp"),
     ("stm32-power-l1", "test_power_l1.cpp"),
