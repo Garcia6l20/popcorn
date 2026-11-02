@@ -509,3 +509,185 @@ def test_an_stm32l476rctx_machine_attaches_and_serves_the_merged_otg() -> None:
         0x0220_0000,
         0x200B_8000,
     )
+
+
+OTG_MODEL_FIELDS: dict[str, set[str]] = {
+    "GOTGCTL": {"BVALOEN", "BVALOVAL", "BSVLD", "SRQ", "HNPRQ"},
+    "GOTGINT": {"SEDET"},
+    "GAHBCFG": {"GINTMSK", "TXFELVL"},
+    "GUSBCFG": {"FHMOD"},
+    "GRSTCTL": {"CSRST", "RXFFLSH", "TXFFLSH", "TXFNUM"},
+    "GINTSTS": set(
+        str.split(
+            "USBRST ENUMDNE SOF EOPF ESUSP USBSUSP WKUPINT IISOIXFR IPXFR OTGINT RXFLVL NPTXFE "
+            "GINAKEFF GONAKEFF IEPINT OEPINT MMIS ISOODRP RSTDET LPMINT CIDSCHG DISCINT SRQINT"
+        )
+    ),
+    "GINTMSK": set(),
+    "GRXSTSR_DEVICE": set(),
+    "GRXSTSP_DEVICE": set(),
+    "GRXFSIZ": {"RXFD"},
+    "HNPTXFSIZ": {"NPTXFD"},
+    "GCCFG": {"PWRDWN", "VBDEN", "BCDEN"},
+    **{f"DIEPTXF{n}": {"INEPTXFD"} for n in range(1, 6)},
+    "DCFG": {"DAD", "PFIVL"},
+    "DCTL": {"SDIS", "GINSTS", "GONSTS", "SGINAK", "CGINAK", "SGONAK", "CGONAK", "TCTL"},
+    "DSTS": {"SUSPSTS", "ENUMSPD", "FNSOF"},
+    "DIEPMSK": set(),
+    "DOEPMSK": set(),
+    "DAINT": set(),
+    "DAINTMSK": set(),
+    "DIEPEMPMSK": {"INEPTXFEM"},
+    **{
+        f"DIEPCTL{n}": {"EPTYP", "MPSIZ", "USBAEP", "NAKSTS", "STALL", "TXFNUM", "CNAK", "SNAK"}
+        | ({"SD0PID_SEVNFRM", "SODDFRM", "EONUM_DPIP"} if n else set())
+        | {"EPDIS", "EPENA"}
+        for n in range(6)
+    },
+    **{f"DIEPINT{n}": {"XFRC", "EPDISD", "INEPNE", "TXFE"} for n in range(6)},
+    **{f"DIEPTSIZ{n}": {"XFRSIZ", "PKTCNT"} for n in range(6)},
+    **{f"DTXFSTS{n}": {"INEPTFSAV"} for n in range(6)},
+    **{
+        f"DOEPCTL{n}": {"EPTYP", "USBAEP", "MPSIZ", "NAKSTS", "STALL", "CNAK", "SNAK"}
+        | ({"SD0PID_SEVNFRM", "SD1PID_SODDFRM", "EONUM_DPIP"} if n else set())
+        | {"EPDIS", "EPENA"}
+        for n in range(6)
+    },
+    **{f"DOEPINT{n}": {"XFRC", "EPDISD", "STUP"} for n in range(6)},
+    **{f"DOEPTSIZ{n}": {"XFRSIZ", "PKTCNT"} | ({"STUPCNT"} if n == 0 else set()) for n in range(6)},
+    **{f"DFIFO{n}": set() for n in range(6)},
+}
+"""Every register and field `otg_fs.cpp` looks up, except PSRST and FSRST, which the L4 OTG
+variant of step 17 names or declares absent."""
+OTG_ADDS: dict[str, int] = {
+    "GRXSTSP_DEVICE": 0x020,
+    "GLPMCFG": 0x054,
+    "GPWRDN": 0x058,
+    "GADPCTL": 0x060,
+    "DIEPTXF4": 0x110,
+    "DIEPTXF5": 0x114,
+    **{
+        f"{reg}{x}": 0x500 + delta + 0x20 * x
+        for x in range(8, 12)
+        for reg, delta in (("HCCHAR", 0), ("HCINT", 8), ("HCINTMSK", 0xC), ("HCTSIZ", 0x10))
+    },
+    **{
+        f"{reg}{x}": 0x900 + delta + 0x20 * x
+        for x in (4, 5)
+        for reg, delta in (("DIEPCTL", 0), ("DIEPINT", 8), ("DIEPTSIZ", 0x10), ("DTXFSTS", 0x18))
+    },
+    **{
+        f"{reg}{x}": 0xB00 + delta + 0x20 * x
+        for x in (4, 5)
+        for reg, delta in (("DOEPCTL", 0), ("DOEPINT", 8), ("DOEPTSIZ", 0x10))
+    },
+}
+"""The 36 registers 03a3b adds, at their RM0351 47.15 offsets."""
+OTG_ADDED_FIELDS: dict[str, dict[str, tuple[int, int]]] = {
+    "GLPMCFG": {
+        "ENBESL": (28, 1),
+        "LPMRCNTSTS": (25, 3),
+        "SNDLPM": (24, 1),
+        "LPMRCNT": (21, 3),
+        "LPMCHIDX": (17, 4),
+        "L1RSMOK": (16, 1),
+        "SLPSTS": (15, 1),
+        "LPMRSP": (13, 2),
+        "L1DSEN": (12, 1),
+        "BESLTHRS": (8, 4),
+        "L1SSEN": (7, 1),
+        "REMWAKE": (6, 1),
+        "BESL": (2, 4),
+        "LPMACK": (1, 1),
+        "LPMEN": (0, 1),
+    },
+    "GPWRDN": {"ADPIF": (23, 1), "ADPMEN": (0, 1)},
+    "GADPCTL": {
+        "AR": (27, 2),
+        "ADPTOIM": (26, 1),
+        "ADPSNSIM": (25, 1),
+        "ADPPRBIM": (24, 1),
+        "ADPTOIF": (23, 1),
+        "ADPSNSIF": (22, 1),
+        "ADPPRBIF": (21, 1),
+        "ADPEN": (20, 1),
+        "ADPRST": (19, 1),
+        "ENASNS": (18, 1),
+        "ENAPRB": (17, 1),
+        "RTIM": (6, 11),
+        "PRBPER": (4, 2),
+        "PRBDELTA": (2, 2),
+        "PRBDSCHG": (0, 2),
+    },
+}
+"""RM0351 47.15.17 to 47.15.19."""
+OTG_ADDED_FROM: dict[str, str] = {
+    "GRXSTSP_DEVICE": "GRXSTSR_DEVICE",
+    "DIEPTXF4": "DIEPTXF3",
+    "DIEPTXF5": "DIEPTXF3",
+    **{
+        f"{reg}{x}": f"{reg}7"
+        for x in range(8, 12)
+        for reg in ("HCCHAR", "HCINT", "HCINTMSK", "HCTSIZ")
+    },
+    **{
+        f"{reg}{x}": f"{reg}3"
+        for x in (4, 5)
+        for reg in ("DIEPCTL", "DIEPINT", "DIEPTSIZ", "DTXFSTS")
+    },
+    **{f"{reg}{x}": f"{reg}3" for x in (4, 5) for reg in ("DOEPCTL", "DOEPINT", "DOEPTSIZ")},
+}
+"""Each added endpoint, channel and FIFO register and the register whose RM0351 layout it shares."""
+OTG_ADDED_RESETS = {"DIEPTXF4": 0x0200_0A00, "DIEPTXF5": 0x0200_0C00, "GPWRDN": 0x0000_0010}
+OTG_ADDED_ACCESS = {
+    **{("GLPMCFG", f): "read_only" for f in ("LPMRCNTSTS", "L1RSMOK", "SLPSTS", "LPMRSP")},
+    ("GLPMCFG", "LPMEN"): "read_write",
+    ("GADPCTL", "RTIM"): "read_only",
+    ("GADPCTL", "AR"): "read_write",
+}
+
+
+def _layout(register: RegisterDesc) -> list[tuple[str, int, int, str]]:
+    return sorted((f.name, f.lsb, f.width, f.acc.value) for f in register.fields)
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", OTG_PARTS)
+def test_every_register_and_field_the_otg_model_reads_is_present(name: str) -> None:
+    registers = _registers(_description(name), "OTG_FS")
+    missing = {
+        register: wanted - {f.name for f in registers[register].fields}
+        for register, wanted in OTG_MODEL_FIELDS.items()
+        if register in registers
+    }
+    assert set(OTG_MODEL_FIELDS) <= set(registers)
+    assert missing == {register: set() for register in OTG_MODEL_FIELDS}
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", OTG_PARTS)
+def test_the_added_otg_registers_follow_rm0351(name: str) -> None:
+    registers = _registers(_description(name), "OTG_FS")
+    assert {r: registers[r].offset for r in OTG_ADDS if r in registers} == OTG_ADDS
+    got_fields = {
+        r: {f.name: (f.lsb, f.width) for f in registers[r].fields} for r in OTG_ADDED_FIELDS
+    }
+    assert got_fields == OTG_ADDED_FIELDS
+    shared = {
+        added: (_layout(registers[added]), registers[added].acc, registers[added].width)
+        for added in OTG_ADDED_FROM
+    }
+    assert shared == {
+        added: (_layout(registers[ref]), registers[ref].acc, registers[ref].width)
+        for added, ref in OTG_ADDED_FROM.items()
+    }
+    resets = {r: registers[r].reset for r in OTG_ADDED_FROM if r not in OTG_ADDED_RESETS}
+    assert resets == {
+        r: registers[OTG_ADDED_FROM[r]].reset for r in OTG_ADDED_FROM if r not in OTG_ADDED_RESETS
+    }
+    assert {r: registers[r].reset for r in OTG_ADDED_RESETS} == OTG_ADDED_RESETS
+    access = {
+        (r, f): next(x for x in registers[r].fields if x.name == f).acc.value
+        for r, f in OTG_ADDED_ACCESS
+    }
+    assert access == OTG_ADDED_ACCESS

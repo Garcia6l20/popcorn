@@ -148,6 +148,669 @@ acc = "read_write"
 fields = []
 source = "RM0351 Rev 11, 47.14.1 Table 329: the data FIFO push and pop windows at 0x1000 * (n + 1) from the OTG_FS base, one 4 KB window per endpoint or channel. DFIFO0 to DFIFO5 describe word 0 of the windows of endpoints and channels 0 to 5, which is what TinyUSB (dwc2->fifo[ep][0]) and the HAL USBx_DFIFO(i) access. A firmware addressing another word of the window is not served"
 
+[[registers]]
+peripheral = "OTG_FS"
+name = "GRXSTSP_DEVICE"
+offset = 0x020
+width = 32
+reset = 0x00000000
+acc = "read_only"
+fields = [
+  { name = "FRMNUM", lsb = 21, width = 4 },
+  { name = "PKTSTS", lsb = 17, width = 4 },
+  { name = "DPID", lsb = 15, width = 2 },
+  { name = "BCNT", lsb = 4, width = 11 },
+  { name = "EPNUM", lsb = 0, width = 4 },
+]
+source = "RM0351 Rev 11, 47.15.10 OTG_GRXSTSP in device mode: offset 0x020, reset 0, read and pop of the top of the receive FIFO, EPNUM[3:0], BCNT[10:0], DPID[1:0], PKTSTS[3:0], FRMNUM[3:0], r. 47.3 Table 322 gives STSPHST absent on STM32L47x/L48x. The SVDs omit the register. The host-mode view of 47.15.11 shares the offset and is left out, a register add takes no alternate view"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GLPMCFG"
+offset = 0x054
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "ENBESL", lsb = 28, width = 1 },
+  { name = "LPMRCNTSTS", lsb = 25, width = 3 },
+  { name = "SNDLPM", lsb = 24, width = 1 },
+  { name = "LPMRCNT", lsb = 21, width = 3 },
+  { name = "LPMCHIDX", lsb = 17, width = 4 },
+  { name = "L1RSMOK", lsb = 16, width = 1 },
+  { name = "SLPSTS", lsb = 15, width = 1 },
+  { name = "LPMRSP", lsb = 13, width = 2 },
+  { name = "L1DSEN", lsb = 12, width = 1 },
+  { name = "BESLTHRS", lsb = 8, width = 4 },
+  { name = "L1SSEN", lsb = 7, width = 1 },
+  { name = "REMWAKE", lsb = 6, width = 1 },
+  { name = "BESL", lsb = 2, width = 4 },
+  { name = "LPMACK", lsb = 1, width = 1 },
+  { name = "LPMEN", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.17 OTG_GLPMCFG: offset 0x54, reset 0, ENBESL, LPMRCNTSTS, SNDLPM, LPMRCNT, LPMCHIDX, L1RSMOK, SLPSTS, LPMRSP, L1DSEN, BESLTHRS, L1SSEN, REMWAKE, BESL, LPMACK, LPMEN. 47.3 Table 322 gives LPM supported on STM32L47x/L48x. The SVDs omit the register"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GPWRDN"
+offset = 0x058
+width = 32
+reset = 0x00000010
+acc = "read_write"
+fields = [
+  { name = "ADPIF", lsb = 23, width = 1 },
+  { name = "ADPMEN", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.18 OTG_GPWRDN: offset 0x058, reset 0x0000 0010, ADPIF rc_w1, ADPMEN rw. 47.3 Table 322 gives ADP supported on STM32L47x/L48x. The SVDs omit the register"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "GADPCTL"
+offset = 0x060
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "AR", lsb = 27, width = 2 },
+  { name = "ADPTOIM", lsb = 26, width = 1 },
+  { name = "ADPSNSIM", lsb = 25, width = 1 },
+  { name = "ADPPRBIM", lsb = 24, width = 1 },
+  { name = "ADPTOIF", lsb = 23, width = 1 },
+  { name = "ADPSNSIF", lsb = 22, width = 1 },
+  { name = "ADPPRBIF", lsb = 21, width = 1 },
+  { name = "ADPEN", lsb = 20, width = 1 },
+  { name = "ADPRST", lsb = 19, width = 1 },
+  { name = "ENASNS", lsb = 18, width = 1 },
+  { name = "ENAPRB", lsb = 17, width = 1 },
+  { name = "RTIM", lsb = 6, width = 11 },
+  { name = "PRBPER", lsb = 4, width = 2 },
+  { name = "PRBDELTA", lsb = 2, width = 2 },
+  { name = "PRBDSCHG", lsb = 0, width = 2 },
+]
+source = "RM0351 Rev 11, 47.15.19 OTG_GADPCTL: offset 0x060, reset 0, AR, ADPTOIM, ADPSNSIM, ADPPRBIM, ADPTOIF, ADPSNSIF, ADPPRBIF, ADPEN, ADPRST, ENASNS, ENAPRB, RTIM, PRBPER, PRBDELTA, PRBDSCHG. 47.3 Table 322 gives ADP supported on STM32L47x/L48x. The SVDs omit the register"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DIEPTXF4"
+offset = 0x110
+width = 32
+reset = 0x02000A00
+acc = "read_write"
+fields = [
+  { name = "INEPTXFD", lsb = 16, width = 16 },
+  { name = "INEPTXSA", lsb = 0, width = 16 },
+]
+source = "RM0351 Rev 11, 47.15.21 OTG_DIEPTXFx: offset 0x104 + 0x04 * (x - 1), reset value block 4 0x0200 0A00, INEPTXFD[15:0], INEPTXSA[15:0]. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at DIEPTXF3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DIEPTXF5"
+offset = 0x114
+width = 32
+reset = 0x02000C00
+acc = "read_write"
+fields = [
+  { name = "INEPTXFD", lsb = 16, width = 16 },
+  { name = "INEPTXSA", lsb = 0, width = 16 },
+]
+source = "RM0351 Rev 11, 47.15.21 OTG_DIEPTXFx: offset 0x104 + 0x04 * (x - 1), reset value block 5 0x0200 0C00, INEPTXFD[15:0], INEPTXSA[15:0]. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at DIEPTXF3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCCHAR8"
+offset = 0x600
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "CHENA", lsb = 31, width = 1 },
+  { name = "CHDIS", lsb = 30, width = 1 },
+  { name = "ODDFRM", lsb = 29, width = 1 },
+  { name = "DAD", lsb = 22, width = 7 },
+  { name = "MCNT", lsb = 20, width = 2 },
+  { name = "EPTYP", lsb = 18, width = 2 },
+  { name = "LSDEV", lsb = 17, width = 1 },
+  { name = "EPDIR", lsb = 15, width = 1 },
+  { name = "EPNUM", lsb = 11, width = 4 },
+  { name = "MPSIZ", lsb = 0, width = 11 },
+]
+source = "RM0351 Rev 11, 47.15.30 OTG_HCCHARx: offset 0x500 + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCINT8"
+offset = 0x608
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "DTERR", lsb = 10, width = 1 },
+  { name = "FRMOR", lsb = 9, width = 1 },
+  { name = "BBERR", lsb = 8, width = 1 },
+  { name = "TXERR", lsb = 7, width = 1 },
+  { name = "ACK", lsb = 5, width = 1 },
+  { name = "NAK", lsb = 4, width = 1 },
+  { name = "STALL", lsb = 3, width = 1 },
+  { name = "CHH", lsb = 1, width = 1 },
+  { name = "XFRC", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.31 OTG_HCINTx: offset 0x508 + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCINTMSK8"
+offset = 0x60C
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "DTERRM", lsb = 10, width = 1 },
+  { name = "FRMORM", lsb = 9, width = 1 },
+  { name = "BBERRM", lsb = 8, width = 1 },
+  { name = "TXERRM", lsb = 7, width = 1 },
+  { name = "ACKM", lsb = 5, width = 1 },
+  { name = "NAKM", lsb = 4, width = 1 },
+  { name = "STALLM", lsb = 3, width = 1 },
+  { name = "CHHM", lsb = 1, width = 1 },
+  { name = "XFRCM", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.32 OTG_HCINTMSKx: offset 0x50C + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCTSIZ8"
+offset = 0x610
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "DOPNG", lsb = 31, width = 1 },
+  { name = "DPID", lsb = 29, width = 2 },
+  { name = "PKTCNT", lsb = 19, width = 10 },
+  { name = "XFRSIZ", lsb = 0, width = 19 },
+]
+source = "RM0351 Rev 11, 47.15.33 OTG_HCTSIZx: offset 0x510 + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCCHAR9"
+offset = 0x620
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "CHENA", lsb = 31, width = 1 },
+  { name = "CHDIS", lsb = 30, width = 1 },
+  { name = "ODDFRM", lsb = 29, width = 1 },
+  { name = "DAD", lsb = 22, width = 7 },
+  { name = "MCNT", lsb = 20, width = 2 },
+  { name = "EPTYP", lsb = 18, width = 2 },
+  { name = "LSDEV", lsb = 17, width = 1 },
+  { name = "EPDIR", lsb = 15, width = 1 },
+  { name = "EPNUM", lsb = 11, width = 4 },
+  { name = "MPSIZ", lsb = 0, width = 11 },
+]
+source = "RM0351 Rev 11, 47.15.30 OTG_HCCHARx: offset 0x500 + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCINT9"
+offset = 0x628
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "DTERR", lsb = 10, width = 1 },
+  { name = "FRMOR", lsb = 9, width = 1 },
+  { name = "BBERR", lsb = 8, width = 1 },
+  { name = "TXERR", lsb = 7, width = 1 },
+  { name = "ACK", lsb = 5, width = 1 },
+  { name = "NAK", lsb = 4, width = 1 },
+  { name = "STALL", lsb = 3, width = 1 },
+  { name = "CHH", lsb = 1, width = 1 },
+  { name = "XFRC", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.31 OTG_HCINTx: offset 0x508 + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCINTMSK9"
+offset = 0x62C
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "DTERRM", lsb = 10, width = 1 },
+  { name = "FRMORM", lsb = 9, width = 1 },
+  { name = "BBERRM", lsb = 8, width = 1 },
+  { name = "TXERRM", lsb = 7, width = 1 },
+  { name = "ACKM", lsb = 5, width = 1 },
+  { name = "NAKM", lsb = 4, width = 1 },
+  { name = "STALLM", lsb = 3, width = 1 },
+  { name = "CHHM", lsb = 1, width = 1 },
+  { name = "XFRCM", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.32 OTG_HCINTMSKx: offset 0x50C + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCTSIZ9"
+offset = 0x630
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "DOPNG", lsb = 31, width = 1 },
+  { name = "DPID", lsb = 29, width = 2 },
+  { name = "PKTCNT", lsb = 19, width = 10 },
+  { name = "XFRSIZ", lsb = 0, width = 19 },
+]
+source = "RM0351 Rev 11, 47.15.33 OTG_HCTSIZx: offset 0x510 + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCCHAR10"
+offset = 0x640
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "CHENA", lsb = 31, width = 1 },
+  { name = "CHDIS", lsb = 30, width = 1 },
+  { name = "ODDFRM", lsb = 29, width = 1 },
+  { name = "DAD", lsb = 22, width = 7 },
+  { name = "MCNT", lsb = 20, width = 2 },
+  { name = "EPTYP", lsb = 18, width = 2 },
+  { name = "LSDEV", lsb = 17, width = 1 },
+  { name = "EPDIR", lsb = 15, width = 1 },
+  { name = "EPNUM", lsb = 11, width = 4 },
+  { name = "MPSIZ", lsb = 0, width = 11 },
+]
+source = "RM0351 Rev 11, 47.15.30 OTG_HCCHARx: offset 0x500 + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCINT10"
+offset = 0x648
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "DTERR", lsb = 10, width = 1 },
+  { name = "FRMOR", lsb = 9, width = 1 },
+  { name = "BBERR", lsb = 8, width = 1 },
+  { name = "TXERR", lsb = 7, width = 1 },
+  { name = "ACK", lsb = 5, width = 1 },
+  { name = "NAK", lsb = 4, width = 1 },
+  { name = "STALL", lsb = 3, width = 1 },
+  { name = "CHH", lsb = 1, width = 1 },
+  { name = "XFRC", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.31 OTG_HCINTx: offset 0x508 + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCINTMSK10"
+offset = 0x64C
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "DTERRM", lsb = 10, width = 1 },
+  { name = "FRMORM", lsb = 9, width = 1 },
+  { name = "BBERRM", lsb = 8, width = 1 },
+  { name = "TXERRM", lsb = 7, width = 1 },
+  { name = "ACKM", lsb = 5, width = 1 },
+  { name = "NAKM", lsb = 4, width = 1 },
+  { name = "STALLM", lsb = 3, width = 1 },
+  { name = "CHHM", lsb = 1, width = 1 },
+  { name = "XFRCM", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.32 OTG_HCINTMSKx: offset 0x50C + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCTSIZ10"
+offset = 0x650
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "DOPNG", lsb = 31, width = 1 },
+  { name = "DPID", lsb = 29, width = 2 },
+  { name = "PKTCNT", lsb = 19, width = 10 },
+  { name = "XFRSIZ", lsb = 0, width = 19 },
+]
+source = "RM0351 Rev 11, 47.15.33 OTG_HCTSIZx: offset 0x510 + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCCHAR11"
+offset = 0x660
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "CHENA", lsb = 31, width = 1 },
+  { name = "CHDIS", lsb = 30, width = 1 },
+  { name = "ODDFRM", lsb = 29, width = 1 },
+  { name = "DAD", lsb = 22, width = 7 },
+  { name = "MCNT", lsb = 20, width = 2 },
+  { name = "EPTYP", lsb = 18, width = 2 },
+  { name = "LSDEV", lsb = 17, width = 1 },
+  { name = "EPDIR", lsb = 15, width = 1 },
+  { name = "EPNUM", lsb = 11, width = 4 },
+  { name = "MPSIZ", lsb = 0, width = 11 },
+]
+source = "RM0351 Rev 11, 47.15.30 OTG_HCCHARx: offset 0x500 + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCINT11"
+offset = 0x668
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "DTERR", lsb = 10, width = 1 },
+  { name = "FRMOR", lsb = 9, width = 1 },
+  { name = "BBERR", lsb = 8, width = 1 },
+  { name = "TXERR", lsb = 7, width = 1 },
+  { name = "ACK", lsb = 5, width = 1 },
+  { name = "NAK", lsb = 4, width = 1 },
+  { name = "STALL", lsb = 3, width = 1 },
+  { name = "CHH", lsb = 1, width = 1 },
+  { name = "XFRC", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.31 OTG_HCINTx: offset 0x508 + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCINTMSK11"
+offset = 0x66C
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "DTERRM", lsb = 10, width = 1 },
+  { name = "FRMORM", lsb = 9, width = 1 },
+  { name = "BBERRM", lsb = 8, width = 1 },
+  { name = "TXERRM", lsb = 7, width = 1 },
+  { name = "ACKM", lsb = 5, width = 1 },
+  { name = "NAKM", lsb = 4, width = 1 },
+  { name = "STALLM", lsb = 3, width = 1 },
+  { name = "CHHM", lsb = 1, width = 1 },
+  { name = "XFRCM", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.32 OTG_HCINTMSKx: offset 0x50C + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "HCTSIZ11"
+offset = 0x670
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "DOPNG", lsb = 31, width = 1 },
+  { name = "DPID", lsb = 29, width = 2 },
+  { name = "PKTCNT", lsb = 19, width = 10 },
+  { name = "XFRSIZ", lsb = 0, width = 19 },
+]
+source = "RM0351 Rev 11, 47.15.33 OTG_HCTSIZx: offset 0x510 + 0x20 * x, x = 0 to 11, the fields of channels 0 to 7. 47.3 Table 322 gives 12 host channels on STM32L47x/L48x. The SVDs stop at channel 7"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DIEPCTL4"
+offset = 0x980
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "EPENA", lsb = 31, width = 1 },
+  { name = "EPDIS", lsb = 30, width = 1 },
+  { name = "SODDFRM", lsb = 29, width = 1 },
+  { name = "SD0PID_SEVNFRM", lsb = 28, width = 1 },
+  { name = "SNAK", lsb = 27, width = 1 },
+  { name = "CNAK", lsb = 26, width = 1 },
+  { name = "TXFNUM", lsb = 22, width = 4 },
+  { name = "STALL", lsb = 21, width = 1 },
+  { name = "EPTYP", lsb = 18, width = 2 },
+  { name = "NAKSTS", lsb = 17, width = 1 },
+  { name = "EONUM_DPIP", lsb = 16, width = 1 },
+  { name = "USBAEP", lsb = 15, width = 1 },
+  { name = "MPSIZ", lsb = 0, width = 11 },
+]
+source = "RM0351 Rev 11, 47.15.46 OTG_DIEPCTLx: offset 0x900 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DIEPINT4"
+offset = 0x988
+width = 32
+reset = 0x00000080
+acc = "read_write"
+fields = [
+  { name = "NAK", lsb = 13, width = 1 },
+  { name = "PKTDRPSTS", lsb = 11, width = 1 },
+  { name = "TXFE", lsb = 7, width = 1 },
+  { name = "INEPNE", lsb = 6, width = 1 },
+  { name = "INEPNM", lsb = 5, width = 1 },
+  { name = "ITTXFE", lsb = 4, width = 1 },
+  { name = "TOC", lsb = 3, width = 1 },
+  { name = "EPDISD", lsb = 1, width = 1 },
+  { name = "XFRC", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.47 OTG_DIEPINTx: offset 0x908 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DIEPTSIZ4"
+offset = 0x990
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "MCNT", lsb = 29, width = 2 },
+  { name = "PKTCNT", lsb = 19, width = 10 },
+  { name = "XFRSIZ", lsb = 0, width = 19 },
+]
+source = "RM0351 Rev 11, 47.15.50 OTG_DIEPTSIZx: offset 0x910 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DTXFSTS4"
+offset = 0x998
+width = 32
+reset = 0x00000200
+acc = "read_only"
+fields = [
+  { name = "INEPTFSAV", lsb = 0, width = 16 },
+]
+source = "RM0351 Rev 11, 47.15.49 OTG_DTXFSTSx: offset 0x918 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DIEPCTL5"
+offset = 0x9A0
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "EPENA", lsb = 31, width = 1 },
+  { name = "EPDIS", lsb = 30, width = 1 },
+  { name = "SODDFRM", lsb = 29, width = 1 },
+  { name = "SD0PID_SEVNFRM", lsb = 28, width = 1 },
+  { name = "SNAK", lsb = 27, width = 1 },
+  { name = "CNAK", lsb = 26, width = 1 },
+  { name = "TXFNUM", lsb = 22, width = 4 },
+  { name = "STALL", lsb = 21, width = 1 },
+  { name = "EPTYP", lsb = 18, width = 2 },
+  { name = "NAKSTS", lsb = 17, width = 1 },
+  { name = "EONUM_DPIP", lsb = 16, width = 1 },
+  { name = "USBAEP", lsb = 15, width = 1 },
+  { name = "MPSIZ", lsb = 0, width = 11 },
+]
+source = "RM0351 Rev 11, 47.15.46 OTG_DIEPCTLx: offset 0x900 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DIEPINT5"
+offset = 0x9A8
+width = 32
+reset = 0x00000080
+acc = "read_write"
+fields = [
+  { name = "NAK", lsb = 13, width = 1 },
+  { name = "PKTDRPSTS", lsb = 11, width = 1 },
+  { name = "TXFE", lsb = 7, width = 1 },
+  { name = "INEPNE", lsb = 6, width = 1 },
+  { name = "INEPNM", lsb = 5, width = 1 },
+  { name = "ITTXFE", lsb = 4, width = 1 },
+  { name = "TOC", lsb = 3, width = 1 },
+  { name = "EPDISD", lsb = 1, width = 1 },
+  { name = "XFRC", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.47 OTG_DIEPINTx: offset 0x908 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DIEPTSIZ5"
+offset = 0x9B0
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "MCNT", lsb = 29, width = 2 },
+  { name = "PKTCNT", lsb = 19, width = 10 },
+  { name = "XFRSIZ", lsb = 0, width = 19 },
+]
+source = "RM0351 Rev 11, 47.15.50 OTG_DIEPTSIZx: offset 0x910 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DTXFSTS5"
+offset = 0x9B8
+width = 32
+reset = 0x00000200
+acc = "read_only"
+fields = [
+  { name = "INEPTFSAV", lsb = 0, width = 16 },
+]
+source = "RM0351 Rev 11, 47.15.49 OTG_DTXFSTSx: offset 0x918 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DOEPCTL4"
+offset = 0xB80
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "EPENA", lsb = 31, width = 1 },
+  { name = "EPDIS", lsb = 30, width = 1 },
+  { name = "SD1PID_SODDFRM", lsb = 29, width = 1 },
+  { name = "SD0PID_SEVNFRM", lsb = 28, width = 1 },
+  { name = "SNAK", lsb = 27, width = 1 },
+  { name = "CNAK", lsb = 26, width = 1 },
+  { name = "STALL", lsb = 21, width = 1 },
+  { name = "SNPM", lsb = 20, width = 1 },
+  { name = "EPTYP", lsb = 18, width = 2 },
+  { name = "NAKSTS", lsb = 17, width = 1 },
+  { name = "EONUM_DPIP", lsb = 16, width = 1 },
+  { name = "USBAEP", lsb = 15, width = 1 },
+  { name = "MPSIZ", lsb = 0, width = 11 },
+]
+source = "RM0351 Rev 11, 47.15.54 OTG_DOEPCTLx: offset 0xB00 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DOEPINT4"
+offset = 0xB88
+width = 32
+reset = 0x00000080
+acc = "read_write"
+fields = [
+  { name = "NAK", lsb = 13, width = 1 },
+  { name = "BERR", lsb = 12, width = 1 },
+  { name = "STSPHSRX", lsb = 5, width = 1 },
+  { name = "OTEPDIS", lsb = 4, width = 1 },
+  { name = "STUP", lsb = 3, width = 1 },
+  { name = "EPDISD", lsb = 1, width = 1 },
+  { name = "XFRC", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.52 OTG_DOEPINTx: offset 0xB08 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DOEPTSIZ4"
+offset = 0xB90
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "RXDPID", lsb = 29, width = 2 },
+  { name = "PKTCNT", lsb = 19, width = 10 },
+  { name = "XFRSIZ", lsb = 0, width = 19 },
+]
+source = "RM0351 Rev 11, 47.15.55 OTG_DOEPTSIZx: offset 0xB10 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DOEPCTL5"
+offset = 0xBA0
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "EPENA", lsb = 31, width = 1 },
+  { name = "EPDIS", lsb = 30, width = 1 },
+  { name = "SD1PID_SODDFRM", lsb = 29, width = 1 },
+  { name = "SD0PID_SEVNFRM", lsb = 28, width = 1 },
+  { name = "SNAK", lsb = 27, width = 1 },
+  { name = "CNAK", lsb = 26, width = 1 },
+  { name = "STALL", lsb = 21, width = 1 },
+  { name = "SNPM", lsb = 20, width = 1 },
+  { name = "EPTYP", lsb = 18, width = 2 },
+  { name = "NAKSTS", lsb = 17, width = 1 },
+  { name = "EONUM_DPIP", lsb = 16, width = 1 },
+  { name = "USBAEP", lsb = 15, width = 1 },
+  { name = "MPSIZ", lsb = 0, width = 11 },
+]
+source = "RM0351 Rev 11, 47.15.54 OTG_DOEPCTLx: offset 0xB00 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DOEPINT5"
+offset = 0xBA8
+width = 32
+reset = 0x00000080
+acc = "read_write"
+fields = [
+  { name = "NAK", lsb = 13, width = 1 },
+  { name = "BERR", lsb = 12, width = 1 },
+  { name = "STSPHSRX", lsb = 5, width = 1 },
+  { name = "OTEPDIS", lsb = 4, width = 1 },
+  { name = "STUP", lsb = 3, width = 1 },
+  { name = "EPDISD", lsb = 1, width = 1 },
+  { name = "XFRC", lsb = 0, width = 1 },
+]
+source = "RM0351 Rev 11, 47.15.52 OTG_DOEPINTx: offset 0xB08 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
+[[registers]]
+peripheral = "OTG_FS"
+name = "DOEPTSIZ5"
+offset = 0xBB0
+width = 32
+reset = 0x00000000
+acc = "read_write"
+fields = [
+  { name = "RXDPID", lsb = 29, width = 2 },
+  { name = "PKTCNT", lsb = 19, width = 10 },
+  { name = "XFRSIZ", lsb = 0, width = 19 },
+]
+source = "RM0351 Rev 11, 47.15.55 OTG_DOEPTSIZx: offset 0xB10 + 0x20 * x, the fields of endpoints 1 to 3. 47.3 Table 322 gives 6 endpoints on STM32L47x/L48x. The SVDs stop at endpoint 3"
+
 [[resets]]
 peripheral = "OTG_FS"
 register = "FS_GOTGCTL"
@@ -642,3 +1305,57 @@ instances = ["OTG_FS"]
 registers = ["FS_PCGCCTL"]
 add = { name = "ENL1GTG", lsb = 5, width = 1, acc = "read_write", reset = 0 }
 source = "RM0351 Rev 11, 47.15.56 OTG_PCGCCTL: bit 5 ENL1GTG, enable sleep clock gating, rw. The SVDs leave it out"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["GLPMCFG"]
+fields = ["LPMRCNTSTS", "L1RSMOK", "SLPSTS", "LPMRSP"]
+acc = "read_only"
+source = "RM0351 Rev 11, 47.15.17 OTG_GLPMCFG: LPMRCNTSTS, L1RSMOK, SLPSTS and LPMRSP are r"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["GADPCTL"]
+fields = ["RTIM"]
+acc = "read_only"
+source = "RM0351 Rev 11, 47.15.19 OTG_GADPCTL: RTIM[10:0] is r"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DIEPCTL{n}"]
+each = { n = [4, 5] }
+fields = ["NAKSTS", "EONUM_DPIP"]
+acc = "read_only"
+source = "RM0351 Rev 11, 47.15.46 OTG_DIEPCTLx: NAKSTS, EONUM_DPIP are r, as on endpoints 1 to 3"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DIEPCTL{n}"]
+each = { n = [4, 5] }
+fields = ["SODDFRM", "SD0PID_SEVNFRM", "SNAK", "CNAK"]
+acc = "write_only"
+source = "RM0351 Rev 11, 47.15.46 OTG_DIEPCTLx: SODDFRM, SD0PID_SEVNFRM, SNAK, CNAK are w, as on endpoints 1 to 3"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DIEPINT{n}"]
+each = { n = [4, 5] }
+fields = ["TXFE"]
+acc = "read_only"
+source = "RM0351 Rev 11, 47.15.47 OTG_DIEPINTx: TXFE are r, as on endpoints 1 to 3"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DOEPCTL{n}"]
+each = { n = [4, 5] }
+fields = ["NAKSTS", "EONUM_DPIP"]
+acc = "read_only"
+source = "RM0351 Rev 11, 47.15.54 OTG_DOEPCTLx: NAKSTS, EONUM_DPIP are r, as on endpoints 1 to 3"
+
+[[fields]]
+instances = ["OTG_FS"]
+registers = ["DOEPCTL{n}"]
+each = { n = [4, 5] }
+fields = ["SD1PID_SODDFRM", "SD0PID_SEVNFRM", "SNAK", "CNAK"]
+acc = "write_only"
+source = "RM0351 Rev 11, 47.15.54 OTG_DOEPCTLx: SD1PID_SODDFRM, SD0PID_SEVNFRM, SNAK, CNAK are w, as on endpoints 1 to 3"
