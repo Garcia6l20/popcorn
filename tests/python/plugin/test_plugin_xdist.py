@@ -38,6 +38,7 @@ def covered(
     return (pytester.path / f"{name}.info").read_bytes(), outcomes(pytester.path / f"{name}.xml")
 
 
+@pytest.mark.timeout(30)
 def test_workers_give_the_same_outcomes_and_lcov(pytester: pytest.Pytester) -> None:
     write_suite(pytester)
     serial, serial_outcomes = covered(pytester, "n0", "-n", "0")

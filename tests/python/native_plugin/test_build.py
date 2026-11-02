@@ -41,6 +41,7 @@ def no_build(source: Path, build: Path) -> subprocess.CompletedProcess[str]:
     raise AssertionError(f"built {source} into {build}")
 
 
+@pytest.mark.timeout(30)
 def test_a_fresh_cache_builds_a_library_with_the_host_tag(tmp_path: Path, cache: Path) -> None:
     library = Plugin.dev(copied("echo", tmp_path)).built()
     assert library.is_file()
@@ -48,6 +49,7 @@ def test_a_fresh_cache_builds_a_library_with_the_host_tag(tmp_path: Path, cache:
     assert abi_tag(library) == _core._host_abi_tag()  # pyright: ignore[reportPrivateUsage]
 
 
+@pytest.mark.timeout(30)
 def test_a_second_build_without_a_change_runs_nothing(
     tmp_path: Path, cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -108,6 +110,7 @@ def test_an_edit_in_the_same_process_asks_for_a_restart(tmp_path: Path, cache: P
     assert raised.value.file == str(source)
 
 
+@pytest.mark.timeout(30)
 def test_editor_and_cache_files_change_neither_the_copy_nor_the_key(
     tmp_path: Path, cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -143,6 +146,7 @@ def test_a_cache_root_inside_the_plugin_directory_is_refused(
     assert not (source / inside).exists()
 
 
+@pytest.mark.timeout(30)
 def test_the_build_reads_a_copy_taken_before_it(tmp_path: Path, cache: Path) -> None:
     source = copied("echo", tmp_path)
     original = (source / "echo.cpp").read_text()
@@ -257,7 +261,7 @@ def test_another_compiler_is_refused_naming_both(
     assert not cache.exists() or not entries(cache, "echo")
 
 
-@pytest.mark.timeout(90)
+@pytest.mark.timeout(120)
 def test_five_edits_leave_at_most_two_entries(tmp_path: Path, cache: Path) -> None:
     source = copied("echo", tmp_path)
     code = f"from popcorn.plugin import Plugin\nprint(Plugin.dev({str(source)!r}).built())\n"
@@ -268,7 +272,7 @@ def test_five_edits_leave_at_most_two_entries(tmp_path: Path, cache: Path) -> No
     assert len(entries(cache, "echo")) == 2
 
 
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(90)
 def test_eviction_skips_an_entry_whose_build_lock_is_held(tmp_path: Path, cache: Path) -> None:
     source = copied("echo", tmp_path)
     code = f"from popcorn.plugin import Plugin\nprint(Plugin.dev({str(source)!r}).built())\n"

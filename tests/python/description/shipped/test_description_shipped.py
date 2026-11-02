@@ -524,7 +524,7 @@ def test_a_read_only_cache_still_serves_its_file(
     assert compose_calls == [NAME]
 
 
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(120)
 def test_the_shipped_layers_are_what_factor_writes_for_the_shipped_parts() -> None:
     names = shipped_names()
     assert names

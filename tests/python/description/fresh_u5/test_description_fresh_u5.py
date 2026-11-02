@@ -6,6 +6,7 @@ from popcorn.stm32.description._shipped import shipped_names
 from ..fresh_common import H5_PREFIX, L1_PREFIX, U5_PREFIX, check_fresh, names_of
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("name", names_of(U5_PREFIX))
 def test_the_shipped_description_matches_a_fresh_ship_build(name: str) -> None:
     check_fresh(name)

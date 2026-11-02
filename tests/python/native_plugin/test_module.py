@@ -44,6 +44,7 @@ def test_the_module_derives_from_core_and_is_imported_once(tmp_path: Path) -> No
     assert ran.stdout.strip() == "ok"
 
 
+@pytest.mark.timeout(30)
 def test_a_mismatched_tag_is_refused_before_its_constructors_run(tmp_path: Path) -> None:
     source = copied("mismatch", tmp_path)
     marker = tmp_path / "constructed"
@@ -69,6 +70,7 @@ def test_a_mismatched_tag_is_refused_before_its_constructors_run(tmp_path: Path)
     assert not marker.exists()
 
 
+@pytest.mark.timeout(30)
 def test_a_name_other_than_the_entry_points_is_refused_naming_both(tmp_path: Path) -> None:
     source = copied("echo", tmp_path)
     ran = run_python(

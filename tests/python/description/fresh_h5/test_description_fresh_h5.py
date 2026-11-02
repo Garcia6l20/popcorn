@@ -15,11 +15,13 @@ from ..fresh_common import H5_PREFIX, check_fresh, names_of
 from ..shipped.test_description_shipped_u575 import REFERENCES
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("name", names_of(H5_PREFIX))
 def test_the_shipped_description_matches_a_fresh_ship_build(name: str) -> None:
     check_fresh(name)
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("name", sorted(REFERENCES.values()))
 def test_ship_check_passes_on_the_shipped_layers(
     name: str, capsys: pytest.CaptureFixture[str]

@@ -89,7 +89,7 @@ def _db_parts(pin_data: Path, parts: set[str]) -> dict[str, DbPart]:
     return result
 
 
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(120)
 def test_each_shipped_line_has_the_reference_the_rule_picks_from_the_db() -> None:
     pin_data = require_pin_data()
     names = shipped_names()

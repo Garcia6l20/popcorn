@@ -388,6 +388,7 @@ def test_the_patch_file_applies_only_to_its_parts(h573_sources: Sources, tmp_pat
         build_description(replace(h573_sources, patches=patches))
 
 
+@pytest.mark.timeout(45)
 def test_a_machine_builds_on_the_description_with_and_without_the_cmsis_header(
     h573_sources: Sources,
 ) -> None:
@@ -396,6 +397,7 @@ def test_a_machine_builds_on_the_description_with_and_without_the_cmsis_header(
         assert popcorn.Machine(description).mem.read(0x08FFF80C, 2) == (2048).to_bytes(2, "little")
 
 
+@pytest.mark.timeout(45)
 def test_an_alternates_rule_drops_the_entry_from_the_built_port(
     h573_sources: Sources, tmp_path: Path
 ) -> None:

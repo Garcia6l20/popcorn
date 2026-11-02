@@ -163,6 +163,7 @@ def test_a_part_built_from_its_facts_has_the_content_of_the_local_build(part: st
     _assert_facts_build_has_the_local_content(sources, FACTS_PARTS[part])
 
 
+@pytest.mark.timeout(30)
 def test_a_local_build_reads_the_rzone_and_never_the_facts(
     u575_sources: Sources, monkeypatch: pytest.MonkeyPatch
 ) -> None:

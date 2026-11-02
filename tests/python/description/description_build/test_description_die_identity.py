@@ -79,6 +79,7 @@ def test_a_part_listing_every_instance_of_its_reference_has_no_donor(part: str) 
     assert pin_data_sources(part, pin_data=_pin_data()).die_ip == {}
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize(
     ("part", "reference", "instances"),
     [

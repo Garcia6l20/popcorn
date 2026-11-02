@@ -44,6 +44,7 @@ def test_every_gpio_port_of_a_shipped_part_carries_bonded(name: str) -> None:
     assert [port for port, mask in ports.items() if mask is None] == []
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("name", PIN_DATA_PARTS)
 def test_every_gpio_port_of_a_pin_data_build_carries_bonded(name: str) -> None:
     root = require_pin_data()
@@ -75,6 +76,7 @@ def test_every_adc_of_a_shipped_part_carries_bonded_channels(name: str) -> None:
     assert [adc for adc, mask in adcs.items() if mask is None] == []
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("name", PIN_DATA_PARTS)
 def test_every_adc_of_a_pin_data_build_carries_bonded_channels(name: str) -> None:
     root = require_pin_data()

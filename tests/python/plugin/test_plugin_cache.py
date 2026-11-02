@@ -202,6 +202,7 @@ def test_cold_workers_boot_once(pytester: pytest.Pytester) -> None:
     assert summary(result) == "popcorn: 1 key(s), 1 boot(s), 3 from cache"
 
 
+@pytest.mark.timeout(30)
 def test_cached_boots_give_the_same_lcov(pytester: pytest.Pytester) -> None:
     pytest.importorskip("xdist")
     write_suite(pytester)
@@ -428,6 +429,7 @@ BOOTED = "popcorn: 1 key(s), 1 boot(s), 0 from cache"
 CACHED = "popcorn: 1 key(s), 0 boot(s), 1 from cache"
 
 
+@pytest.mark.timeout(30)
 def test_a_registration_serving_the_machine_is_keyed(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:

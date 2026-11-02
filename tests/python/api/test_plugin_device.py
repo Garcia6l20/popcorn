@@ -42,6 +42,7 @@ def echo_on(echo_module: types.ModuleType, cs: str | None) -> _core.SpiTargetBas
     return Echo()
 
 
+@pytest.mark.timeout(30)
 def test_a_plugin_device_exchanges_frames_with_the_firmware(
     u575: popcorn.PartDescription, echo_module: types.ModuleType
 ) -> None:
@@ -73,6 +74,7 @@ def test_chip_select_is_public() -> None:
     assert "chip_select" in popcorn.devices.__all__
 
 
+@pytest.mark.timeout(30)
 def test_clocked_by_finds_a_plugin_device_by_its_chip_select(
     u575: popcorn.PartDescription, echo_module: types.ModuleType
 ) -> None:

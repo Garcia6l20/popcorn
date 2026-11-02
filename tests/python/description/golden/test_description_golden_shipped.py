@@ -8,6 +8,7 @@ from popcorn.stm32.description._golden import compute_golden, load_golden
 from popcorn.stm32.description._sources import find_sources
 
 
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("name", cli.golden_names())
 def test_every_committed_golden_matches_a_build_from_st_files(name: str) -> None:
     part, _, core = name.partition("-")

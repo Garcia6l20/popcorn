@@ -522,6 +522,7 @@ def board_machine(kit: Plugin) -> popcorn.Machine:
     return m
 
 
+@pytest.mark.timeout(30)
 def test_the_plugin_model_reads_alike_parked_and_running(kit: Plugin) -> None:
     parked = board_machine(kit)
     running = board_machine(kit)
