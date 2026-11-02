@@ -379,6 +379,32 @@ def test_register_drops_remove_the_registers_from_the_peripheral_and_its_aliases
     assert report.registers_dropped == 1
 
 
+def _with_alternate(target: PatchTarget) -> None:
+    peripheral = target_peripheral(target, "A")
+    base = next(r for r in peripheral.registers if r.name == "SR2")
+    peripheral.registers.append(replace(base, name="SR2_HOST", alternate_of="SR2"))
+
+
+def test_a_register_drop_refuses_a_register_whose_alternate_stays(tmp_path: Path) -> None:
+    target = _target()
+    _with_alternate(target)
+    before = copy.deepcopy(target)
+    with pytest.raises(DescriptionError) as excinfo:
+        _apply(target, _drop_patch(tmp_path, 'peripheral = "A"\nnames = ["SR2"]'))
+    assert excinfo.value.key == "register_drops[0].names"
+    assert excinfo.value.expected == "SR2 dropped with its alternate SR2_HOST"
+    assert target == before
+
+
+def test_a_register_drop_takes_a_register_with_its_alternate(tmp_path: Path) -> None:
+    target = _target()
+    _with_alternate(target)
+    _apply(target, _drop_patch(tmp_path, 'peripheral = "A"\nnames = ["SR2", "SR2_HOST"]'))
+    names = {r.name for r in target_peripheral(target, "A").registers}
+    assert not {"SR2", "SR2_HOST"} & names
+    assert names
+
+
 def test_register_drops_keep_the_other_registers(tmp_path: Path) -> None:
     path = _drop_patch(tmp_path, 'peripheral = "A"\nnames = ["SR2"]')
     target = _target()

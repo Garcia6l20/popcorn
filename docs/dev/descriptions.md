@@ -187,7 +187,9 @@ source = "RM0038 25.6: Cat.1 has 20 backup registers"
 ```
 
 A name the peripheral lacks is an error keyed `register_drops[<n>].names`, and a later rule
-naming a dropped register fails as naming an unknown one.
+naming a dropped register fails as naming an unknown one. A rule that drops a register drops
+every alternate view of it too, such as a host-mode view sharing its offset, or it is an error
+keyed `register_drops[<n>].names`.
 
 `[[register_renames]]` renames registers of the peripherals that match its `peripherals` globs and
 of their aliases, each glob matching at least one peripheral that is not an alias, left after the

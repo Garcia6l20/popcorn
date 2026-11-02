@@ -643,6 +643,14 @@ def _apply_register_drops(
         if name in seen:
             raise DescriptionError(file, 0, f"{key}.names", "each name once")
         seen.add(name)
+    for register in peripheral.registers:
+        if register.alternate_of in seen and register.name not in seen:
+            raise DescriptionError(
+                file,
+                0,
+                f"{key}.names",
+                f"{register.alternate_of} dropped with its alternate {register.name}",
+            )
     for target in peripherals.values():
         if target is peripheral or target.alias_of == peripheral.name:
             target.registers = [r for r in target.registers if r.name not in seen]
