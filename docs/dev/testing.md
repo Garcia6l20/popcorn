@@ -58,6 +58,11 @@ restores a snapshot per test. The suites in `tests/python/api` cover the public 
 run the machine must not depend on host load: a result may depend on the emulated input only,
 never on wall time or on whether the machine was parked or running.
 
+Runs of the suites under `tests/` with `-n` use the xdist `worksteal` scheduler, set in
+`tests/conftest.py`: a worker that runs out of tests takes half the queue of a busy one, so the long
+description tests do not pile up on one worker. An explicit `--dist` or `-d`, from the command line,
+`PYTEST_ADDOPTS` or the ini file, chooses another scheduler.
+
 `tests/python/description` is split so that each directory runs under 120 s at `-n 6`:
 
 | Directory | What it holds |

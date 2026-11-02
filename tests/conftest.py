@@ -1,4 +1,8 @@
-"""Turn a pytest-timeout kill of an xdist worker into a timeout failure naming the test."""
+"""Turn a pytest-timeout kill of an xdist worker into a timeout failure naming the test.
+
+Also schedule `-n` runs with xdist `worksteal` unless a `--dist` or `-d` comes from the command
+line, `PYTEST_ADDOPTS` or the ini file.
+"""
 
 import hashlib
 import shutil
@@ -41,6 +45,17 @@ def _expire(item: pytest.Item, settings: Any, directory: Path) -> None:
             f" worker\n{_stacks()}"
         )
     timeout_timer(item, settings)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_cmdline_main(config: pytest.Config) -> None:
+    option = config.option
+    if (
+        getattr(option, "numprocesses", None)
+        and getattr(option, "dist", None) == "no"
+        and not getattr(option, "distload", False)
+    ):
+        option.dist = "worksteal"
 
 
 def pytest_unconfigure() -> None:
