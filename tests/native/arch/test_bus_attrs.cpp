@@ -3,12 +3,15 @@
 #include "../../../native/src/core/machine_impl.hpp"
 #include "../support/inert_model.hpp"
 #include "../support/test_model.hpp"
+#include "exceptions.hpp"
+#include "state.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/periph/firewall.hpp>
 
 #include <doctest/doctest.h>
+#include <reflex/serde/bson.hpp>
 
 #include <unicorn/unicorn.h>
 
@@ -172,6 +175,7 @@ struct cpu_access
   std::uint32_t value{};
   bool          nonsecure{};
   bool          unprivileged{};
+  std::uint64_t budget{2};
 };
 
 auto run_cpu(rig const& r, cpu_access const& access) -> popcorn::stop
@@ -187,7 +191,7 @@ auto run_cpu(rig const& r, cpu_access const& access) -> popcorn::stop
   r.f->set("r0", access.at);
   r.f->set("r1", access.value);
   r.f->set("pc", code_at | 1u);
-  auto const stopped = r.f->run_to_stop({.max_instructions = icount{2}});
+  auto const stopped = r.f->run_to_stop({.max_instructions = icount{access.budget}});
   r.f->set("control", 0);
   if(access.nonsecure)
   {
@@ -666,5 +670,351 @@ TEST_CASE("a factory that installs a firewall and returns no model is refused at
   catch(popcorn::model_error const& error)
   {
     CHECK(error.peripheral() == "UNMODELLED");
+  }
+}
+
+namespace
+{
+constexpr address       ccr           = 0xE000'ED14;
+constexpr std::uint32_t ccr_bfhfnmign = 1u << 8;
+constexpr address       unmapped      = 0x3000'0000;
+
+auto run_code(rig const& r, std::initializer_list<std::uint16_t> code) -> popcorn::stop
+{
+  auto at = code_at;
+  for(auto const insn : code)
+  {
+    REQUIRE(r.f->target->mem().write(at, 2, insn));
+    at += 2;
+  }
+  r.f->set("pc", code_at | 1u);
+  return r.f->run_to_stop({.max_instructions = icount{code.size() + 1}});
+}
+
+void set_bfhfnmign(rig const& r, bool value)
+{
+  auto const word = r.f->word(ccr);
+  REQUIRE(r.f->target->mem().write(ccr, 4, value ? word | ccr_bfhfnmign : word & ~ccr_bfhfnmign));
+}
+}
+
+TEST_CASE("a precise data BusFault under FAULTMASK with CCR.BFHFNMIGN set is ignored per E2.1.294")
+{
+  for(auto const policy :
+      {popcorn::arch::fault_policy::stop, popcorn::arch::fault_policy::enter_handler})
+  {
+    for(auto const target : {testdev + data, unmapped})
+    {
+      for(auto const insn : {load, store})
+      {
+        CAPTURE(policy);
+        CAPTURE(target);
+        CAPTURE(insn);
+        auto r = booted(false, true, policy);
+        REQUIRE(r.f->target->mem().write(testdev + data, 4, 0x1234));
+        r.firewall->verdict = bus_verdict::bus_error;
+        REQUIRE(r.f->target->mem().write(shcsr, 4, 0x0002'0000));
+        set_bfhfnmign(r, true);
+        r.f->set("faultmask", 1);
+        r.f->set("r0", target);
+        r.f->set("r1", 0x77);
+        auto const before  = r.model->accesses.size();
+        auto const stopped = run_code(r, {insn, bkpt});
+        REQUIRE(stopped.reason == stop_reason::user);
+        CHECK(r.f->reg("pc") == code_at + 4);
+        CHECK((r.f->reg("xpsr") & 0x1ff) == 0);
+        CHECK(r.f->word(cfsr) == (cfsr_preciserr | cfsr_bfarvalid));
+        CHECK(r.f->word(bfar) == target);
+        CHECK(r.f->word(hfsr) == 0);
+        CHECK_FALSE(r.f->module->pending());
+        CHECK(r.f->reg("r1") == 0x77);
+        CHECK(r.model->accesses.size() == before);
+        r.firewall->verdict = bus_verdict::allow;
+        CHECK(r.f->word(testdev + data) == 0x1234);
+      }
+    }
+  }
+}
+
+TEST_CASE("a precise data BusFault is taken without FAULTMASK or without CCR.BFHFNMIGN")
+{
+  struct leg
+  {
+    bool                faultmask;
+    bool                bfhfnmign;
+    popcorn::fault_kind kind;
+  };
+  for(auto const one : {
+          leg{true,  false, popcorn::fault_kind::hard},
+          leg{false, true,  popcorn::fault_kind::bus }
+  })
+  {
+    for(auto const target : {testdev + data, unmapped})
+    {
+      CAPTURE(one.faultmask);
+      CAPTURE(target);
+      auto r              = booted(false, true);
+      r.firewall->verdict = bus_verdict::bus_error;
+      REQUIRE(r.f->target->mem().write(shcsr, 4, 0x0002'0000));
+      set_bfhfnmign(r, one.bfhfnmign);
+      r.f->set("faultmask", one.faultmask ? 1 : 0);
+      r.f->set("r0", target);
+      auto const stopped = run_code(r, {load, bkpt});
+      REQUIRE(stopped.reason == stop_reason::fault);
+      REQUIRE(stopped.fault.has_value());
+      CHECK(stopped.fault->kind == one.kind);
+      CHECK(r.f->reg("pc") == code_at);
+    }
+  }
+}
+
+TEST_CASE("an ignored precise BusFault in an IT block advances ITSTATE past the skipped load")
+{
+  constexpr std::uint16_t cmp_r1_r1 = 0x4289;
+  constexpr std::uint16_t ite_eq    = 0xbf0c;
+  constexpr std::uint16_t mov_r2_5  = 0x2205;
+  auto                    r         = booted(false, true);
+  r.firewall->verdict               = bus_verdict::bus_error;
+  set_bfhfnmign(r, true);
+  r.f->set("faultmask", 1);
+  r.f->set("r0", testdev + data);
+  r.f->set("r1", 0x77);
+  r.f->set("r2", 0);
+  auto const stopped = run_code(r, {cmp_r1_r1, ite_eq, load, mov_r2_5, bkpt});
+  REQUIRE(stopped.reason == stop_reason::user);
+  CHECK(r.f->reg("pc") == code_at + 10);
+  CHECK(r.f->reg("r1") == 0x77);
+  CHECK(r.f->reg("r2") == 0);
+  CHECK(r.f->word(cfsr) == (cfsr_preciserr | cfsr_bfarvalid));
+}
+
+TEST_CASE("an ignored precise BusFault of a 32-bit LDR.W resumes after its second halfword")
+{
+  constexpr std::uint16_t ldr_w_first  = 0xf8d0;
+  constexpr std::uint16_t ldr_w_second = 0x1000;
+  auto                    r            = booted(false, true);
+  r.firewall->verdict                  = bus_verdict::bus_error;
+  set_bfhfnmign(r, true);
+  r.f->set("faultmask", 1);
+  r.f->set("r0", testdev + data);
+  r.f->set("r1", 0x77);
+  r.f->set("r2", 0);
+  auto const stopped = run_code(r, {ldr_w_first, ldr_w_second, bkpt});
+  REQUIRE(stopped.reason == stop_reason::user);
+  CHECK(r.f->reg("pc") == code_at + 6);
+  CHECK(r.f->reg("r0") == testdev + data);
+  CHECK(r.f->reg("r1") == 0x77);
+  CHECK(r.f->word(bfar) == testdev + data);
+}
+
+TEST_CASE("an ignored precise BusFault keeps the base register write-back of its instruction")
+{
+  struct row
+  {
+    std::string_view           name;
+    std::vector<std::uint16_t> code;
+    std::string_view           base;
+    address                    from;
+    address                    to;
+  };
+  constexpr address      at = testdev + data;
+  std::vector<row> const rows{
+      {"STR.W post-indexed",    {0xf840, 0x1b04}, "r0",  at,     at + 4},
+      {"LDR.W pre-indexed",     {0xf850, 0x1d08}, "r0",  at + 8, at    },
+      {"STR.W offset",          {0xf8c0, 0x1000}, "r0",  at,     at    },
+      {"STR.W negative offset", {0xf840, 0x1c04}, "r0",  at + 4, at + 4},
+      {"STMIA T1",              {0xc006},         "r0",  at,     at + 8},
+      {"LDMIA T1 base in list", {0xc803},         "r0",  at,     at    },
+      {"LDMIA T1",              {0xc802},         "r0",  at,     at + 4},
+      {"PUSH",                  {0xb402},         "msp", at + 4, at    },
+      {"POP",                   {0xbc02},         "msp", at,     at + 4},
+      {"LDMIA.W",               {0xe8b0, 0x0006}, "r0",  at,     at + 8},
+      {"STMDB",                 {0xe920, 0x0006}, "r0",  at + 8, at    },
+      {"LDRD post-indexed",     {0xe8f0, 0x1202}, "r0",  at,     at + 8},
+      {"VSTMIA",                {0xeca0, 0x0a01}, "r0",  at,     at + 4},
+  };
+  for(auto const& one : rows)
+  {
+    CAPTURE(one.name);
+    auto r              = booted(false, true);
+    r.firewall->verdict = bus_verdict::bus_error;
+    REQUIRE(r.f->target->mem().write(0xE000'ED88, 4, 0x00F0'0000));
+    set_bfhfnmign(r, true);
+    r.f->set("faultmask", 1);
+    r.f->set("r0", 0);
+    r.f->set(one.base, one.from);
+    auto at_code = code_at;
+    for(auto const insn : one.code)
+    {
+      REQUIRE(r.f->target->mem().write(at_code, 2, insn));
+      at_code += 2;
+    }
+    REQUIRE(r.f->target->mem().write(at_code, 2, bkpt));
+    r.f->set("pc", code_at | 1u);
+    auto const msp     = r.f->reg("msp");
+    auto const stopped = r.f->run_to_stop({.max_instructions = icount{3}});
+    REQUIRE(stopped.reason == stop_reason::user);
+    CHECK(r.f->reg("pc") == at_code + 2);
+    CHECK(r.f->reg(one.base) == one.to);
+    CHECK(
+        (r.f->word(cfsr) & (cfsr_preciserr | cfsr_bfarvalid)) == (cfsr_preciserr | cfsr_bfarvalid));
+    if(one.base != "msp")
+    {
+      CHECK(r.f->reg("msp") == msp);
+    }
+  }
+}
+
+TEST_CASE("a precise BusFault in the HardFault or NMI handler is ignored only with BFHFNMIGN set")
+{
+  constexpr address       handler      = code_at + 0x100;
+  constexpr address       vector_table = code_at + 0x800;
+  constexpr std::uint16_t udf          = 0xde00;
+  struct leg
+  {
+    std::string_view            name;
+    std::uint32_t               ipsr;
+    bool                        bfhfnmign;
+    popcorn::arch::fault_policy policy;
+  };
+  for(auto const& one : {
+          leg{"HardFault ignores",  3, true,  popcorn::arch::fault_policy::enter_handler},
+          leg{"HardFault locks up", 3, false, popcorn::arch::fault_policy::enter_handler},
+          leg{"NMI ignores",        2, true,  popcorn::arch::fault_policy::enter_handler},
+          leg{"NMI ignores, stop",  2, true,  popcorn::arch::fault_policy::stop         },
+          leg{"NMI locks up",       2, false, popcorn::arch::fault_policy::enter_handler},
+          leg{"NMI locks up, stop", 2, false, popcorn::arch::fault_policy::stop         },
+  })
+  {
+    CAPTURE(one.name);
+    auto r              = booted(false, true, one.policy);
+    r.firewall->verdict = bus_verdict::bus_error;
+    REQUIRE(r.f->target->mem().write(shcsr, 4, 0));
+    REQUIRE(r.f->target->mem().write(vector_table + 4 * one.ipsr, 4, handler | 1u));
+    REQUIRE(r.f->target->mem().write(0xE000'ED08, 4, vector_table));
+    REQUIRE(r.f->target->mem().write(handler, 2, load));
+    REQUIRE(r.f->target->mem().write(handler + 2, 2, bkpt));
+    set_bfhfnmign(r, one.bfhfnmign);
+    r.f->set("faultmask", 0);
+    r.f->set("r0", testdev + data);
+    r.f->set("r1", 0x77);
+    if(one.ipsr == 3)
+    {
+      REQUIRE(r.f->target->mem().write(code_at, 2, udf));
+    }
+    else
+    {
+      REQUIRE(r.f->target->mem().write(code_at, 2, bkpt));
+      REQUIRE(r.f->target->mem().write(0xE000'ED04, 4, 0x8000'0000));
+    }
+    r.f->set("pc", code_at | 1u);
+    auto const stopped = r.f->run_to_stop({.max_instructions = icount{4}});
+    CHECK((r.f->reg("xpsr") & 0x1ff) == one.ipsr);
+    if(not one.bfhfnmign)
+    {
+      REQUIRE(stopped.reason == stop_reason::fault);
+      CHECK(stopped.fault->kind == popcorn::fault_kind::hard);
+      CHECK(r.f->reg("pc") == handler);
+      continue;
+    }
+    REQUIRE(stopped.reason == stop_reason::user);
+    CHECK(r.f->reg("pc") == handler + 4);
+    CHECK(r.f->reg("r1") == 0x77);
+    CHECK(
+        (r.f->word(cfsr) & (cfsr_preciserr | cfsr_bfarvalid)) == (cfsr_preciserr | cfsr_bfarvalid));
+    CHECK(r.f->word(bfar) == testdev + data);
+  }
+}
+
+TEST_CASE("under TrustZone the requested priority of the access's own state decides BFHFNMIGN")
+{
+  namespace armv8m = popcorn::arch::armv8m;
+  enum class active : std::uint8_t
+  {
+    none,
+    hardfault_secure,
+    hardfault_nonsecure,
+    nmi,
+  };
+  struct leg
+  {
+    std::string_view name;
+    bool             nonsecure;
+    active           running;
+    bool             faultmask_secure;
+    bool             faultmask_nonsecure;
+    bool             bfhfnmins;
+    bool             ccr_nonsecure_alias;
+    bool             ignored;
+  };
+  std::vector<leg> const legs{
+      {"S FAULTMASK_S",                   false, active::none,                true,  false, false, false, true },
+      {"S FAULTMASK_NS",                  false, active::none,                false, true,  false, false, false},
+      {"S HardFault_S",                   false, active::hardfault_secure,    false, false, false, false, true },
+      {"S HardFault_NS",                  false, active::hardfault_nonsecure, false, false, true,  false, false},
+      {"S NMI to Secure",                 false, active::nmi,                 false, false, false, false, true },
+      {"S NMI to Non-secure",             false, active::nmi,                 false, false, true,  false, false},
+      {"NS FAULTMASK_NS",                 true,  active::none,                false, true,  false, false, true },
+      {"NS FAULTMASK_S",                  true,  active::none,                true,  false, false, false, false},
+      {"NS HardFault_NS",                 true,  active::hardfault_nonsecure, false, false, true,  false, true },
+      {"NS HardFault_S",                  true,  active::hardfault_secure,    false, false, false, false, false},
+      {"NS NMI to Non-secure",            true,  active::nmi,                 false, false, true,  false, true },
+      {"NS NMI to Secure",                true,  active::nmi,                 false, false, false, false, false},
+      {"NS alias CCR write, BFHFNMINS 0", true,  active::none,                false, true,  false, true,  false},
+      {"NS alias CCR write, BFHFNMINS 1", true,  active::none,                false, true,  true,  true,  true },
+  };
+  for(auto const& one : legs)
+  {
+    CAPTURE(one.name);
+    auto r              = booted(true, true);
+    r.firewall->verdict = bus_verdict::bus_error;
+    std::vector<std::byte> bytes;
+    r.f->module->save(bytes);
+    auto state                = reflex::serde::bson::deserializer{bytes}.load<armv8m::state>();
+    state.scs.aircr_bfhfnmins = one.bfhfnmins;
+    if(one.running == active::hardfault_secure)
+    {
+      armv8m::put_bit(state.exceptions.active, armv8m::exc_hardfault, true);
+    }
+    if(one.running == active::hardfault_nonsecure)
+    {
+      state.exceptions.nonsecure_active |= 1u << armv8m::exc_hardfault;
+    }
+    if(one.running == active::nmi)
+    {
+      armv8m::put_bit(state.exceptions.active, armv8m::exc_nmi, true);
+    }
+    std::vector<std::byte> edited;
+    reflex::serde::bson::serializer{edited}.dump(state);
+    r.f->module->load(edited);
+    REQUIRE(r.f->target->mem().write(
+        one.ccr_nonsecure_alias ? 0xE002'ED14 : ccr, 4, r.f->word(ccr) | ccr_bfhfnmign));
+    auto* const engine = core::machine_internals::engine(*r.f->target);
+    auto const  write  = [&](int id, std::uint32_t value) {
+      REQUIRE(uc_reg_write(engine, id, &value) == UC_ERR_OK);
+    };
+    write(UC_ARM_REG_FAULTMASK_S, one.faultmask_secure ? 1 : 0);
+    write(UC_ARM_REG_FAULTMASK_NS, one.faultmask_nonsecure ? 1 : 0);
+    auto const stopped = run_cpu(
+        r, {.insn      = load,
+            .at        = testdev + data,
+            .value     = 0x77,
+            .nonsecure = one.nonsecure,
+            .budget    = 3});
+    if(one.ignored)
+    {
+      REQUIRE(stopped.reason == stop_reason::user);
+      CHECK(r.f->reg("pc") == code_at + 4);
+      CHECK(r.f->reg("r1") == 0x77);
+      CHECK(
+          (r.f->word(cfsr) & (cfsr_preciserr | cfsr_bfarvalid))
+          == (cfsr_preciserr | cfsr_bfarvalid));
+      CHECK(r.f->word(bfar) == testdev + data);
+    }
+    else
+    {
+      REQUIRE(stopped.reason == stop_reason::fault);
+      CHECK(r.f->reg("pc") == code_at);
+    }
   }
 }

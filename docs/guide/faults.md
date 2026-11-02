@@ -40,6 +40,12 @@ Fault classes and addresses:
   the fault's kind and address and the CFSR and HFSR at entry. Clearing SHCSR.BUSFAULTPENDED
   first drops it, and the run goes on. A second such fault that pends another exception, such as
   the HardFault of a BusFault disabled in between, stops the run at once.
+- With CCR.BFHFNMIGN set, a precise BusFault of a load or store made under FAULTMASK, or in the
+  HardFault or NMI handler, sets PRECISERR, BFARVALID and BFAR, and the run goes on at the next
+  instruction under both policies. The instruction's base register write-back applies, as on
+  silicon. A load leaves the registers from the faulting access on unchanged, which the
+  architecture leaves UNKNOWN, and a store writes nothing from the faulting access on. A load or
+  store multiple ends at the faulting access, where silicon makes the remaining ones.
 
 A failing test's report decodes the fault registers and shows the call stack.
 

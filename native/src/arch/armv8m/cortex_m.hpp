@@ -228,7 +228,10 @@ private:
   auto create_exception(fault_cause const& cause) -> std::expected<pending_exception, trap_result>;
   auto deferred_stop(pending_exception taken) -> std::optional<trap_result>;
   void drop_deferred(std::uint32_t number, security state) noexcept;
-  auto derived_entry(
+  [[nodiscard]] auto requested_priority_negative() const -> bool;
+  auto               ignored_bus_error(address accessed) -> bool;
+  void               skip_instruction();
+  auto               derived_entry(
       pending_exception  original,
       fault_cause const& cause,
       std::uint32_t      exc_return,

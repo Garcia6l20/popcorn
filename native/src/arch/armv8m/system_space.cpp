@@ -35,7 +35,6 @@ constexpr std::uint32_t aircr_sysresetreqs      = 1u << 3;
 constexpr std::uint32_t scr_sleepdeep           = 1u << 2;
 constexpr std::uint32_t scr_sleepdeeps          = 1u << 3;
 constexpr std::uint32_t scr_banked              = (1u << 1) | (1u << 4);
-constexpr std::uint32_t ccr_bfhfnmign           = 1u << 8;
 constexpr std::uint32_t shcsr_memfaultena       = 1u << 16;
 constexpr std::uint32_t shcsr_busfaultena       = 1u << 17;
 constexpr std::uint32_t shcsr_usgfaultena       = 1u << 18;
