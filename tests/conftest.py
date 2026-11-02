@@ -1,4 +1,10 @@
-"""Turn a pytest-timeout kill of an xdist worker into a timeout failure naming the test."""
+"""Turn a pytest-timeout kill of an xdist worker into a timeout failure naming the test.
+
+Also schedule `-n` runs with xdist `worksteal` unless a `--dist` or `-d` comes from the command
+line, `PYTEST_ADDOPTS` or the ini file.
+
+Also memoise the description builder, see `build_memo`.
+"""
 
 import hashlib
 import shutil
@@ -6,14 +12,18 @@ import sys
 import tempfile
 import threading
 import traceback
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import build_memo
 import pytest
 from pytest_timeout import (  # pyright: ignore[reportMissingTypeStubs]
     is_debugging,  # pyright: ignore[reportUnknownVariableType]
     timeout_timer,  # pyright: ignore[reportUnknownVariableType]
 )
+
+build_memo.install()
 
 _DIR_KEY = "popcorn_timeout_dir"
 _controller_dir: Path | None = None
@@ -43,9 +53,29 @@ def _expire(item: pytest.Item, settings: Any, directory: Path) -> None:
     timeout_timer(item, settings)
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_cmdline_main(config: pytest.Config) -> None:
+    option = config.option
+    if (
+        getattr(option, "numprocesses", None)
+        and getattr(option, "dist", None) == "no"
+        and not getattr(option, "distload", False)
+    ):
+        option.dist = "worksteal"
+
+
 def pytest_unconfigure() -> None:
     if _controller_dir is not None:
         shutil.rmtree(_controller_dir, ignore_errors=True)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers", "no_build_memo: build every description in the test through the builder itself"
+    )
+    workerinput = getattr(config, "workerinput", None)
+    if workerinput is not None and _DIR_KEY in workerinput:
+        build_memo.install().share(Path(workerinput[_DIR_KEY]) / "builds")
 
 
 @pytest.hookimpl(optionalhook=True)
@@ -82,3 +112,12 @@ def pytest_handlecrashitem(crashitem: str, report: pytest.TestReport) -> None:
     path = _report_path(_controller_dir, crashitem)
     if path.exists():
         report.longrepr = path.read_text()
+
+
+@pytest.fixture(autouse=True)
+def _unmemoised_build(request: pytest.FixtureRequest) -> Iterator[None]:
+    if "no_build_memo" not in request.keywords:
+        yield
+        return
+    with build_memo.install().bypassed():
+        yield
