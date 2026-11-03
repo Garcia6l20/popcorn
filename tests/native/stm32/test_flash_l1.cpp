@@ -2401,3 +2401,26 @@ TEST_CASE("RM0038 3.4.3 note 2: a half page started mid-copy fails the next DMA 
   CHECK(dma_copied(f, 1, 1) == 0x1001u);
   CHECK(dma_copied(f, 1, 2) == 0xDEAD'BEEFu);
 }
+
+TEST_CASE(
+    "RM0038 3.4.3: every CPU store to the non-executable option region reaches the FLASH model, "
+    "which sets WRPERR for each with PELOCK set")
+{
+  stm32_fixture const f{l152re(), firmware};
+  REQUIRE((read(f, pecr) & pelock) != 0);
+  constexpr address code = 0x2000'8000;
+  write(f, code, 0xbe01'6001u);
+  for(auto const at :
+      {address{options + 0x100}, address{options + 0x104}, address{options + 0x108}})
+  {
+    CAPTURE(at);
+    auto const before = read(f, at);
+    f.set("r0", at);
+    f.set("r1", 0x33);
+    f.set("pc", code | 1u);
+    REQUIRE(f.run_to_stop({.max_instructions = icount{4}}).reason == stop_reason::user);
+    CHECK((read(f, sr) & wrperr) == wrperr);
+    CHECK(read(f, at) == before);
+    write(f, sr, wrperr);
+  }
+}

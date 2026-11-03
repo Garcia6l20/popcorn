@@ -1378,6 +1378,41 @@ TEST_CASE(
   CHECK(r.words(0x1fff'7818, 2) == std::vector<std::uint32_t>{wrp_production, 0x00ff'0000u});
 }
 
+TEST_CASE(
+    "every CPU store to the non-executable information block reaches the FLASH model, a store "
+    "to a non-executable rom with no controller faults every time")
+{
+  rig r;
+  for(auto const at : {address{0x1fff'7400}, address{0x1fff'7404}, address{0x1fff'7408}})
+  {
+    CAPTURE(at);
+    r.store_words(at, {0x33});
+    CHECK((r.read("SR") & all_errors) != 0);
+    CHECK(r.word(at) == ~0u);
+    r.clear_errors();
+  }
+  auto desc = l476rc();
+  auto plain =
+      std::ranges::find(desc.regions, std::string_view{"OPTION2"}, &popcorn::region_desc::name);
+  REQUIRE(plain != desc.regions.end());
+  plain->controller.reset();
+  stm32_fixture     f{std::move(desc), firmware};
+  constexpr address code = 0x2000'8000;
+  REQUIRE(f.target->mem().write(code, 4, 0xbe01'6001u).has_value());
+  for(auto const at : {address{0x1fff'f400}, address{0x1fff'f404}, address{0x1fff'f408}})
+  {
+    CAPTURE(at);
+    f.set("r0", at);
+    f.set("r1", 0x44);
+    f.set("pc", code | 1u);
+    auto const stop = f.run_to_stop({.max_instructions = icount{4}});
+    CHECK(stop.reason == stop_reason::fault);
+    REQUIRE(stop.fault.has_value());
+    CHECK(stop.fault->fault_address == at);
+    CHECK(f.target->mem().read(at, 4) == 0xffff'ffffu);
+  }
+}
+
 TEST_CASE("RM0351 3.4.2, inferred: option register writes while OPTLOCK is set are ignored")
 {
   rig r;
