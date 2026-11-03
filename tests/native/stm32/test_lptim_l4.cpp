@@ -1,6 +1,7 @@
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
 #include <popcorn/periph/model.hpp>
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <tuple>
 #include <utility>
@@ -50,6 +52,7 @@ constexpr std::uint32_t    arrm       = 1u << 1;
 constexpr std::uint32_t    cmpok      = 1u << 3;
 constexpr std::uint32_t    arrok      = 1u << 4;
 constexpr std::uint32_t    enable     = 1u << 0;
+constexpr std::uint32_t    sngstrt    = 1u << 1;
 constexpr std::uint32_t    cntstrt    = 1u << 2;
 constexpr std::uint32_t    lptim1_irq = 1u << (65 - 64);
 constexpr std::uint64_t    cycle      = 250'000;
@@ -62,6 +65,8 @@ constexpr auto presc(std::uint32_t value) -> std::uint32_t
 struct rig
 {
   std::unique_ptr<stm32_fixture> f;
+  std::vector<core::log_record>  logged;
+  core::hook_handle              sink;
 
   rig(rig const&)                    = delete;
   auto operator=(rig const&) -> rig& = delete;
@@ -73,6 +78,8 @@ struct rig
     options.strict_peripherals = strict;
     f = std::make_unique<stm32_fixture>(desc, firmware, std::move(options));
     f->set("pc", sym(firmware, "idle"));
+    sink = f->target->add_log_sink(
+        [this](core::log_record const& record) { logged.push_back(record); });
     write(apb1enr1, 1u << 31);
     write(apb1enr2, 1u << 5);
   }
@@ -111,6 +118,13 @@ struct rig
     auto const event  = std::ranges::find_if(
         events, [&](auto const& one) { return one.id.owner == owner and one.id.kind == 0; });
     return event == events.end() ? std::nullopt : std::optional{event->due_ps};
+  }
+
+  [[nodiscard]] auto warnings(std::string_view text) const -> std::ptrdiff_t
+  {
+    return std::ranges::count_if(logged, [&](core::log_record const& record) {
+      return record.message.find(text) != std::string::npos;
+    });
   }
 
   [[nodiscard]] auto saved() const -> std::vector<std::byte>
@@ -172,6 +186,16 @@ TEST_CASE("RM0351 34.4.6 note: CNT reads 0 until 3 kernel clocks after CNTSTRT, 
   CHECK(r.read(lptim1 + cnt) == 1);
   r.idle_to(t + 13 * cycle);
   CHECK(r.read(lptim1 + cnt) == 10);
+}
+
+TEST_CASE("RM0351 34.4.12: the start waits two prescaled clocks after ENABLE, inferred")
+{
+  rig r;
+  r.write(lptim1 + cfgr, presc(2));
+  r.write(lptim1 + cr, enable);
+  auto const t = r.now_ps();
+  r.write(lptim1 + cr, enable | cntstrt);
+  CHECK(r.pending() == t + 8 * cycle + cycle);
 }
 
 TEST_CASE("RM0351 34.4.10: CMPOK sets 3 kernel clocks after the CMP write, inferred")
@@ -283,6 +307,69 @@ TEST_CASE("RM0351 34.6 note: an IER bit set after its flag raises no IRQ")
   CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
 }
 
+TEST_CASE(
+    "checklist 53 policy: IER, CFGR and OR writes with ENABLE 1 are kept out, logged once, "
+    "RM0351 34.4.12")
+{
+  for(auto const at : {ier, cfgr, option})
+  {
+    CAPTURE(at);
+    rig r;
+    r.write(lptim1 + cr, enable);
+    r.write(lptim1 + at, 1);
+    r.write(lptim1 + at, 2);
+    CHECK(r.read(lptim1 + at) == 0);
+    CHECK(r.warnings("with CR.ENABLE 1: the register keeps its value") == 1);
+    rig strict{true};
+    strict.write(lptim1 + cr, enable);
+    CHECK_THROWS_AS(
+        static_cast<void>(strict.f->target->mem().write(lptim1 + at, 4, 1)), popcorn::model_error);
+    CHECK(strict.read(lptim1 + at) == 0);
+    strict.write(lptim1 + cr, 0);
+    strict.write(lptim1 + at, 1);
+    CHECK(strict.read(lptim1 + at) == 1);
+  }
+}
+
+TEST_CASE(
+    "checklist 53 policy: CMP and ARR writes with ENABLE 0 are kept out, logged once, "
+    "RM0351 34.7.6 and 34.7.7")
+{
+  for(auto const at : {cmp, arr})
+  {
+    CAPTURE(at);
+    rig        r;
+    auto const reset = r.read(lptim1 + at);
+    r.write(lptim1 + at, 7);
+    r.write(lptim1 + at, 8);
+    CHECK(r.read(lptim1 + at) == reset);
+    CHECK(r.warnings("write with CR.ENABLE 0: the register keeps its value") == 1);
+    rig strict{true};
+    CHECK_THROWS_AS(
+        static_cast<void>(strict.f->target->mem().write(lptim1 + at, 4, 7)), popcorn::model_error);
+    CHECK(strict.read(lptim1 + at) == reset);
+  }
+}
+
+TEST_CASE(
+    "checklist 53 policy: a second CMP write before CMPOK replaces the value, logged once, "
+    "inferred, RM0351 34.4.10")
+{
+  rig r;
+  r.write(lptim1 + cr, enable);
+  r.write(lptim1 + cmp, 4);
+  r.write(lptim1 + cmp, 5);
+  CHECK(r.warnings("before its OK flag") == 1);
+  r.idle_to(r.now_ps() + 4 * cycle);
+  CHECK(r.read(lptim1 + cmp) == 5);
+  rig strict{true};
+  strict.write(lptim1 + cr, enable);
+  strict.write(lptim1 + cmp, 4);
+  CHECK_THROWS_AS(
+      static_cast<void>(strict.f->target->mem().write(lptim1 + cmp, 4, 5)), popcorn::model_error);
+  CHECK(strict.read(lptim1 + cmp) == 4);
+}
+
 TEST_CASE("checklist 27: an ICR write at the CMPM due time leaves CMPM 0 until the next match")
 {
   rig        r;
@@ -296,6 +383,56 @@ TEST_CASE("checklist 27: an ICR write at the CMPM due time leaves CMPM 0 until t
   CHECK((r.read(lptim1 + isr) & cmpm) == 0);
   r.idle_to(due + 11 * cycle);
   CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+}
+
+TEST_CASE("RM0351 34.4.7: SNGSTRT counts once to ARR, sets ARRM once and stops at 0")
+{
+  rig        r;
+  auto const t = r.started(2, 5, sngstrt, presc(1));
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + 11 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrm) == arrm);
+  CHECK(r.pending() == a + 12 * cycle);
+  r.write(lptim1 + icr, cmpm | arrm);
+  r.idle_to(a + 80 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  CHECK((r.read(lptim1 + isr) & (cmpm | arrm)) == 0);
+  CHECK(r.pending() == std::nullopt);
+  auto const again = r.now_ps();
+  r.write(lptim1 + cr, enable | sngstrt);
+  r.idle_to(again + 7 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 2);
+}
+
+TEST_CASE("inferred: an OK on the ARR tick or the wrap of a one-shot run keeps ARRM and the stop")
+{
+  for(auto const& [written, value, from] : {
+          std::tuple{cmp, 2u, 2u},
+          std::tuple{cmp, 2u, 3u},
+          std::tuple{arr, 7u, 3u},
+          std::tuple{cmp, 4u, 3u},
+  })
+  {
+    CAPTURE(written);
+    CAPTURE(from);
+    rig        r;
+    auto const t = r.started(2, 5, sngstrt);
+    auto const a = t + 3 * cycle;
+    r.idle_to(a + from * cycle);
+    if(value == 4)
+    {
+      r.write(lptim1 + icr, cmpm);
+    }
+    r.write(lptim1 + written, value);
+    r.idle_to(a + 6 * cycle);
+    CHECK((r.read(lptim1 + isr) & arrm) == arrm);
+    CHECK((r.read(lptim1 + isr) & cmpm) == (value == 4 ? 0 : cmpm));
+    r.write(lptim1 + icr, cmpm | arrm);
+    r.idle_to(a + 30 * cycle);
+    CHECK(r.read(lptim1 + cnt) == 0);
+    CHECK((r.read(lptim1 + isr) & (cmpm | arrm)) == 0);
+    CHECK(r.pending() == std::nullopt);
+  }
 }
 
 TEST_CASE("RM0351 34.3 Table 216: LPTIM2 has no CFGR.ENC, bit 24 reads 0, LPTIM1 keeps it")
@@ -364,4 +501,53 @@ TEST_CASE("a machine reset gives ARR 1, the counter then wraps at 1")
   CHECK(r.read(lptim1 + cnt) == 0);
 }
 
+TEST_CASE("checklist 53: each CFGR and OR function the model lacks logs once, raises under strict")
+{
+  for(auto const& [at, bits] : std::vector<std::pair<address, std::uint32_t>>{
+          {cfgr,   1u << 17},
+          {cfgr,   1u << 0 },
+          {cfgr,   1u << 23},
+          {cfgr,   1u << 19},
+          {cfgr,   1u << 20},
+          {cfgr,   1u << 22},
+          {cfgr,   1u << 24},
+          {option, 1u << 0 }
+  })
+  {
+    CAPTURE(at);
+    CAPTURE(bits);
+    rig r;
+    r.write(lptim1 + at, bits);
+    r.write(lptim1 + cr, enable);
+    r.write(lptim1 + cr, enable | cntstrt);
+    r.write(lptim1 + cr, enable);
+    r.write(lptim1 + cr, 0);
+    r.write(lptim1 + cr, enable);
+    r.write(lptim1 + cr, enable | cntstrt);
+    CHECK(r.warnings("at a counter start: not modelled") == 1);
+    rig strict{true};
+    strict.write(lptim1 + at, bits);
+    strict.write(lptim1 + cr, enable);
+    CHECK_THROWS_AS(
+        static_cast<void>(strict.f->target->mem().write(lptim1 + cr, 4, enable | cntstrt)),
+        popcorn::model_error);
+    CHECK(strict.pending() == std::nullopt);
+  }
+}
+
+TEST_CASE("checklist 53: CNTSTRT while the counter runs logs once, raises under strict")
+{
+  rig        r;
+  auto const t = r.started(6, 10);
+  r.write(lptim1 + cr, enable | sngstrt);
+  r.write(lptim1 + cr, enable | sngstrt);
+  CHECK(r.warnings("while the counter runs") == 1);
+  r.idle_to(t + 30 * cycle);
+  CHECK(r.read(lptim1 + cnt) != 0);
+  rig strict{true};
+  static_cast<void>(strict.started(6, 10));
+  CHECK_THROWS_AS(
+      static_cast<void>(strict.f->target->mem().write(lptim1 + cr, 4, enable | sngstrt)),
+      popcorn::model_error);
+}
 }

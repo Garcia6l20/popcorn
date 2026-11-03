@@ -911,24 +911,28 @@ Source: [lptim.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/p
 STM32L4 LPTIM1 and LPTIM2, RM0351 section 34, count the kernel clock of RCC_CCIPR LPTIM1SEL or
 LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
 
-- The counter starts 3 kernel clocks after the CNTSTRT or SNGSTRT write, RM0351 34.4.6, and runs
-  in continuous mode for both bits. A start write made with ENABLE 0 is discarded, also when the
-  same write sets ENABLE, inferred. CNTSTRT and SNGSTRT read 0 at once, inferred. A start while
-  the counter runs changes nothing.
+- The counter starts at the later of the CNTSTRT or SNGSTRT write plus 3 kernel clocks, RM0351
+  34.4.6, and the ENABLE write plus two prescaled clocks, inferred from RM0351 34.4.12. A start
+  write made with ENABLE 0 is discarded, also when the same write sets ENABLE, inferred.
+  CNTSTRT and SNGSTRT read 0 at once, inferred.
 - CMPM and ARRM set one kernel clock after the counter reaches CMP or ARR, ES0250 2.18.3, also
   with PRESC above 0, inferred. CMP above ARR never matches, and a counter above a lowered ARR
   counts to 0xFFFF before it wraps, inferred.
 - CMPOK and ARROK set 3 kernel clocks after the CMP or ARR write, and the value applies then,
-  inferred: RM0351 34.4.10 states a latency with no number. A second write before the OK flag
-  replaces the pending value, inferred: RM0351 34.4.10 calls it unpredictable. Counter ticks up
-  to the OK compare with the old values, and a match of such a tick still sets its flag at its
-  due after the OK, inferred. Terms due at the same time apply in the order CMPOK, ARROK, CMPM,
-  ARRM, inferred.
+  inferred: RM0351 34.4.10 states a latency with no number. Counter ticks up to the OK compare
+  with the old values, and a match of such a tick still sets its flag at its due after the OK,
+  inferred. An OK at the one-shot wrap keeps the stop at the wrap, inferred. Terms due at the
+  same time apply in the order CMPOK, ARROK, CMPM, ARRM, wrap, inferred.
 - ENABLE written to 0 stops the counter at 0 and keeps the flags and a pending CMP or ARR write,
   inferred.
-- The counter counts the kernel clock whatever CFGR selects besides PRESC: the external trigger,
-  the external clock, the input count, the timeout, the waveform, PRELOAD 1 and the encoder are
-  outside the model, as are the OR inputs. IER, CFGR, OR, CMP and ARR take every write.
+- An IER, CFGR or OR write with ENABLE 1, a CMP or ARR write with ENABLE 0, and a second CMP or
+  ARR write before its OK flag log one `model_warning` each and raise `ModelError` under
+  `strict`. The register keeps its value, except the second write, whose value replaces the
+  pending one, inferred.
+- A start with TRIGEN not 00, CKSEL 1, COUNTMODE 1, TIMOUT 1, WAVE 1, PRELOAD 1, ENC 1, or OR_0
+  or OR_1 set, and CNTSTRT or SNGSTRT while the counter runs, log one `model_warning` each and
+  raise `ModelError` under `strict`. The counter then counts the kernel clock in its current
+  mode and applies CMP and ARR at their OK flags.
 - CNT reads the exact count, so the double read of RM0351 34.7.8 always agrees.
 - The kernel rate is read at ENABLE and at each start. The LPTIM keeps its registers and state
   across its RCC reset bit.
