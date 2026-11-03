@@ -5,6 +5,7 @@
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
+#include <popcorn/periph/stm32/board.hpp>
 
 #include <doctest/doctest.h>
 
@@ -14,6 +15,7 @@
 #include <format>
 #include <initializer_list>
 #include <memory>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1936,5 +1938,186 @@ TEST_CASE(
   strict.store_words(bank2, rig::row(0xd0));
   REQUIRE(strict.status("BSY") == 1);
   CHECK_THROWS_AS((void)strict.f.target->mem(true).read(bank2 + 1024, 4), popcorn::model_error);
+}
+
+namespace
+{
+namespace stm32 = popcorn::periph::stm32;
+
+constexpr std::uint32_t bfb2         = 1u << 20;
+constexpr std::uint32_t dualbank_bit = 1u << 21;
+
+auto refusal_key(popcorn::part_description const& desc, stm32::option_bytes const& wanted)
+    -> std::string
+{
+  auto const result = stm32::check_option_bytes(desc, wanted);
+  REQUIRE_FALSE(result.has_value());
+  return result.error().key;
+}
+
+auto resized(std::uint32_t size) -> popcorn::part_description
+{
+  auto part = l476rc();
+  auto region =
+      std::ranges::find(part.regions, std::string_view{"Flash"}, &popcorn::region_desc::name);
+  REQUIRE(region != part.regions.end());
+  region->size = size;
+  return part;
+}
+
+auto configured(stm32::option_bytes const& wanted) -> core::machine_options
+{
+  auto       options = popcorn::testing::stm32_options();
+  auto const done    = stm32::configure_option_bytes(l476rc(), wanted, options);
+  REQUIRE(done.has_value());
+  return options;
+}
+}
+
+TEST_CASE(
+    "RM0351 3.7.8: L4 option bytes boot from the flash base, popcorn rule: swap_bank from the "
+    "bank 2 base, dualbank false on 512 KB or less, every other field refused")
+{
+  CHECK(stm32::check_option_bytes(l476rc(), {}) == address{0x0800'0000});
+  CHECK(stm32::check_option_bytes(l476rc(), {.swap_bank = true}) == address{0x0802'0000});
+  CHECK(stm32::check_option_bytes(l476rc(), {.dualbank = true}) == address{0x0800'0000});
+  CHECK(stm32::check_option_bytes(l476rc(), {.dualbank = false}) == address{0x0800'0000});
+  CHECK(stm32::check_option_bytes(resized(0x8'0000), {.swap_bank = true}) == address{0x0804'0000});
+  CHECK(stm32::check_option_bytes(resized(0x8'0000), {.dualbank = false}) == address{0x0800'0000});
+  CHECK(stm32::check_option_bytes(resized(0x10'0000), {.swap_bank = true}) == address{0x0808'0000});
+  CHECK(refusal_key(resized(0x10'0000), {.dualbank = false}) == "option_bytes.dualbank");
+  CHECK(refusal_key(l476rc(), {.swap_bank = true, .dualbank = false}) == "option_bytes.swap_bank");
+  CHECK(refusal_key(l476rc(), {.tzen = true}) == "option_bytes.tzen");
+  CHECK(refusal_key(l476rc(), {.secwm1 = stm32::no_area{}}) == "option_bytes.secwm1");
+  CHECK(
+      refusal_key(
+          l476rc(),
+          {
+              .secwm2 = stm32::page_range{.first = 0, .last = 1}
+  })
+      == "option_bytes.secwm2");
+  CHECK(refusal_key(l476rc(), {.hdp1 = stm32::page_range{}}) == "option_bytes.hdp1");
+  CHECK(refusal_key(l476rc(), {.hdp2 = stm32::page_range{}}) == "option_bytes.hdp2");
+  CHECK(refusal_key(l476rc(), {.secboot = 0x0800'0000}) == "option_bytes.secboot");
+  CHECK(refusal_key(l476rc(), {.nsboot = 0x0800'0000}) == "option_bytes.nsboot");
+  auto       options = popcorn::testing::stm32_options();
+  auto const refused = stm32::configure_option_bytes(l476rc(), {.tzen = true}, options);
+  REQUIRE_FALSE(refused.has_value());
+  CHECK(refused.error().key == "option_bytes.tzen");
+  CHECK(options.models.empty());
+}
+
+TEST_CASE("the L4 FLASH factory refuses host option bytes its encoder refuses")
+{
+  stm32::register_builtin_models();
+  auto const refused = [](stm32::option_bytes const& wanted) {
+    stm32::board board;
+    board.flash.option_bytes = wanted;
+    auto options             = popcorn::testing::stm32_options();
+    options.models           = stm32::factories(board, l476rc());
+    try
+    {
+      core::machine target{l476rc(), popcorn::arch::armv8m::factory(), std::move(options)};
+    }
+    catch(popcorn::config_error const& error)
+    {
+      return std::string{error.key()};
+    }
+    return std::string{};
+  };
+  CHECK(refused({.swap_bank = true, .dualbank = false}) == "option_bytes.swap_bank");
+  CHECK(refused({.secwm1 = stm32::no_area{}}) == "option_bytes.secwm1");
+  CHECK(refused({.nsboot = 0x0800'0000}) == "option_bytes.nsboot");
+  CHECK(refused({.swap_bank = true}).empty());
+}
+
+TEST_CASE(
+    "RM0351 3.4.1 and 3.7.8: host option bytes program and load FLASH_OPTR BFB2 and DUALBANK "
+    "from a first software reset on, the option byte area holds them, every reset keeps them, "
+    "popcorn rule: swap_bank boots the bank 2 base at its address")
+{
+  struct leg
+  {
+    stm32::option_bytes wanted;
+    std::uint32_t       optr;
+  };
+  for(auto const& [wanted, optr] : {
+          leg{{},                  optr_production                },
+          leg{{.swap_bank = true}, optr_production | bfb2         },
+          leg{{.dualbank = false}, optr_production & ~dualbank_bit},
+  })
+  {
+    CAPTURE(optr);
+    auto options = configured(wanted);
+    CHECK(options.vector_table == address{wanted.swap_bank ? bank2 : 0x0800'0000u});
+    stm32::register_builtin_models();
+    core::machine target{l476rc(), popcorn::arch::armv8m::factory(), std::move(options)};
+    target.load(popcorn::testing::elf(firmware));
+    auto const word = [&target](address at) {
+      auto const value = target.mem().read(at, 4);
+      REQUIRE(value.has_value());
+      return static_cast<std::uint32_t>(*value);
+    };
+    auto const handler = word(0x0800'0004);
+    REQUIRE(target.mem().write(bank2, 4, 0x2000'4000).has_value());
+    REQUIRE(target.mem().write(bank2 + 4, 4, handler).has_value());
+    auto const reg = [&target](std::string_view name) {
+      return static_cast<std::uint32_t>(target.regs().read(*target.regs().find(name)));
+    };
+    for(auto const kind :
+        {popcorn::reset_kind::software, popcorn::reset_kind::power_on,
+         popcorn::reset_kind::option_load, popcorn::reset_kind::software})
+    {
+      CAPTURE(kind);
+      target.reset(kind);
+      CHECK(reg("pc") == (handler & ~1u));
+      CHECK(reg("sp") == (wanted.swap_bank ? 0x2000'4000u : word(0x0800'0000)));
+      CHECK(word(0x4002'2020) == optr);
+      CHECK(word(option1) == optr);
+      CHECK(word(option1 + 4) == ~optr);
+      CHECK(word(option1 + 8) == 0xffff'ffffu);
+    }
+  }
+}
+
+TEST_CASE(
+    "RM0351 3.7.8: host dualbank false makes the 256 KB flash one bank, PNB 100 erases page 100")
+{
+  for(auto const dual : {true, false})
+  {
+    CAPTURE(dual);
+    rig r{configured({.dualbank = dual})};
+    REQUIRE(r.f.target->mem().write(bank1_low + 100 * page_bytes, 4, 5).has_value());
+    r.control(per | pnb(100) | strt);
+    r.wait_idle();
+    CHECK((r.read("SR") & all_errors) == 0);
+    CHECK(r.word(bank1_low + 100 * page_bytes) == (dual ? 5u : ~0u));
+    CHECK(r.warnings("CR") == (dual ? 1 : 0));
+  }
+}
+
+TEST_CASE("host option bytes on an L4 description without FLASH_PCROP2SR throw config_error")
+{
+  stm32::register_builtin_models();
+  auto part  = l476rc();
+  auto flash = std::ranges::find(
+      part.peripherals, std::string_view{"FLASH"}, &popcorn::peripheral_desc::name);
+  REQUIRE(flash != part.peripherals.end());
+  auto const removed = std::erase_if(
+      flash->registers, [](popcorn::register_desc const& r) { return r.name == "PCROP2SR"; });
+  REQUIRE(removed == 1);
+  stm32::board board;
+  board.flash.option_bytes = stm32::option_bytes{};
+  auto options             = popcorn::testing::stm32_options();
+  options.models           = stm32::factories(board, part);
+  try
+  {
+    core::machine target{part, popcorn::arch::armv8m::factory(), std::move(options)};
+    FAIL("the machine was built");
+  }
+  catch(popcorn::config_error const& error)
+  {
+    CHECK(error.key() == "option_bytes");
+  }
 }
 }

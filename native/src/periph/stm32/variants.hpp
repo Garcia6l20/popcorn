@@ -396,6 +396,22 @@ struct flash_variant
     option_bytes const&  wanted) -> std::expected<address, option_refusal>;
 
 /**
+ * @brief The STM32L47x/L48x FLASH encoder, BFB2 and DUALBANK of RM0351 3.7.8: the flash base,
+ *        or with `swap_bank` the bank 2 base, a popcorn rule: the banks keep their addresses,
+ *        where the RM0351 2.6.1 boot loader swaps them. On a flash of 512 KB or less `dualbank`
+ *        false gives one bank. Every other field refused when it is not its default, as
+ *        `option_bytes.<field>`.
+ * @param variant Row of the unit.
+ * @param program FLASH unit and its program memory regions, sized by the first.
+ * @param wanted Option bytes the machine boots with.
+ * @return The boot address, or the refusal.
+ */
+[[nodiscard]] auto l4_encode_options(
+    flash_variant const& variant,
+    flash_program const& program,
+    option_bytes const&  wanted) -> std::expected<address, option_refusal>;
+
+/**
  * @brief The STM32L1 FLASH encoder, RM0038 3.3.2 and Table 19: the flash base, or with
  *        `swap_bank` the bank 2 base, as the nBFB2 option byte at 0 selects on a part with two
  *        banks. Every other field refused when it is not its default, as `option_bytes.<field>`.
@@ -428,8 +444,8 @@ inline constexpr flash_variant flash_8bit{.watermark_bits = 8, .encode_options =
 /** @brief STM32H5. */
 inline constexpr flash_variant flash_h5{.encode_options = h5_encode_options};
 
-/** @brief The STM32L47x/L48x FLASH row: no option byte encoder. */
-inline constexpr flash_variant flash_l4{};
+/** @brief The STM32L47x/L48x FLASH row. */
+inline constexpr flash_variant flash_l4{.encode_options = l4_encode_options};
 /** @brief STM32L1 Cat.1. */
 inline constexpr flash_variant flash_l1_cat1{.encode_options = l1_encode_options_of<l1_flash_cat1>};
 /** @brief STM32L1 Cat.2. */

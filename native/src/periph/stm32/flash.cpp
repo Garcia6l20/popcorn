@@ -638,13 +638,18 @@ struct bank_geometry
   std::uint32_t size{};
 };
 
-/** @brief Encoded option registers, in the order of the traits' option_registers. */
-template <std::size_t N> struct option_words
+/** @brief Encoded option registers, in the order of the traits' option_registers, and the
+ *         programmed words of @p W wrp_registers. */
+template <std::size_t N, std::size_t W = 0> struct option_words
 {
   /** @brief One word per option register. */
   std::array<std::uint32_t, N> words{};
+  /** @brief Programmed and loaded word of each wrp_registers entry, when @p W is not 0. */
+  std::array<std::uint32_t, W> wrp{};
   /** @brief Boot address the option bytes select. */
   address boot{};
+  /** @brief Bank 1 and bank 2 addresses swapped. */
+  bool swapped{};
 };
 
 /** @brief A write protection register firmware programs and the register that reads it back. */
@@ -1807,14 +1812,20 @@ struct l4_flash
     return u5_flash::decode_erase(field);
   }
 
-  /** @brief Refuses every option byte set, the row has no encoder. */
-  [[nodiscard]] static auto encode_options(flash_variant, std::uint32_t, option_bytes const&)
-      -> std::expected<option_words<option_registers.size()>, option_refusal>
-  {
-    return std::unexpected{
-        option_refusal{.key = "option_bytes", .expected = "no option bytes on the STM32L4"}
-    };
-  }
+  /**
+   * @brief Encodes host option bytes into the programmed FLASH_OPTR, RM0351 3.7.8, the other
+   *        wrp_registers at their production values: `swap_bank` sets BFB2 and boots from the
+   *        bank 2 base, `dualbank` false clears DUALBANK on a flash of 512 KB or less. Every
+   *        other field refused when it is not its default, as `option_bytes.<field>`.
+   * @param flash_size Bytes of the main memory.
+   * @param wanted Option bytes the machine boots with.
+   * @return The words and the boot address, or the refusal.
+   */
+  [[nodiscard]] static auto encode_options(
+      flash_variant,
+      std::uint32_t       flash_size,
+      option_bytes const& wanted)
+      -> std::expected<option_words<option_registers.size(), wrp_registers.size()>, option_refusal>;
 };
 
 static_assert(names_every_role(l4_set_fields));
@@ -2145,7 +2156,14 @@ static_assert(flag_matches_roles(
  *   page erase or bank erase that reaches one sets WRPERR. OPTR, PCROP and RDP have no other
  *   effect. OBL_LAUNCH with MSI at 8 MHz or more logs one warning per machine life,
  *   model_error under strict_peripherals with FLASH_CR kept, ES0250 2.2.23, and loads the
- *   option bytes. The row encodes no host option bytes.
+ *   option bytes.
+ * - Host option bytes, l4_encode_options(): flash_options::option_bytes replace the programmed
+ *   and loaded FLASH_OPTR at construction, the option byte area with it. `swap_bank` sets BFB2
+ *   and the core boots from the bank 2 base at that address whatever bank 2 holds, the banks
+ *   keep their addresses, a popcorn rule where the AN2606 Figure 102 boot loader checks the
+ *   first word of each bank and swaps them. `dualbank` false clears DUALBANK on a flash of
+ *   512 KB or less. RDP and the other user option bits keep their production values, firmware
+ *   programs them with OPTSTRT.
  * - Read protection, 3.5.1: the loaded RDP gives level 0 for 0xAA, 2 for 0xCC, 1 otherwise, from
  *   FLASH_OPTR alone. read_protection_filter makes a DAP access, a filtered debugger access, to
  *   the main memory, the OTP area or SRAM2 a bus error at level 1, inferred for the OTP area
@@ -2672,7 +2690,20 @@ flash_model<Traits>::flash_model(
   {
     option_words_.emplace_back(reg(name).offset, value);
   }
-  swapped_ = options_.option_bytes->swap_bank;
+  if constexpr(std::tuple_size_v<decltype(words->wrp)> > 0)
+  {
+    if(state_.wrp.size() != words->wrp.size())
+    {
+      throw config_error(
+          desc.name, 0, "option_bytes",
+          "a FLASH description with every option register OPTSTRT programs");
+    }
+    state_.wrp.assign(words->wrp.begin(), words->wrp.end());
+    state_.wrp_active = state_.wrp;
+    update_pcrop();
+    write_option_area();
+  }
+  swapped_ = words->swapped;
   if(Traits::hide_without_trustzone and not ctx.trustzone)
   {
     hide_filter_ =
@@ -2876,7 +2907,8 @@ auto u5_flash::encode_options(
           {optr, *nsboot | nsboot_reserved, nsbootadd1_production,
                   secure_word(*secboot | secboot_reserved), secure_word(first_word(*secure1)),
                   secure_word(*hidden1), secure_word(first_word(*secure2)), secure_word(*hidden2)},
-      .boot = wanted.tzen ? *secboot : *nsboot,
+      .boot    = wanted.tzen ? *secboot : *nsboot,
+      .swapped = wanted.swap_bank,
   };
 }
 
@@ -2973,8 +3005,76 @@ auto h5_flash::encode_options(flash_variant, std::uint32_t flash_size, option_by
                   optsr2_production | (wanted.tzen ? tzen_enabled : tzen_disabled) << 24,
                   *nsboot | boot_unlocked, *secboot | boot_unlocked, *secure1, *secure2, *hidden1,
                   *hidden2},
-      .boot = wanted.tzen ? *secboot : *nsboot,
+      .boot    = wanted.tzen ? *secboot : *nsboot,
+      .swapped = wanted.swap_bank,
   };
+}
+
+auto l4_flash::encode_options(flash_variant, std::uint32_t flash_size, option_bytes const& wanted)
+    -> std::expected<option_words<option_registers.size(), wrp_registers.size()>, option_refusal>
+{
+  constexpr std::uint32_t bfb2       = 1u << 20;
+  constexpr address       flash_base = 0x0800'0000;
+  auto const              refuse     = [](std::string_view field, std::string expected) {
+    return std::unexpected{
+        option_refusal{
+                       .key = std::format("option_bytes.{}", field), .expected = std::move(expected)}
+    };
+  };
+  auto const unset = [](std::string_view what) {
+    return std::format("unset on an STM32L4, RM0351 has no {}", what);
+  };
+  if(wanted.tzen)
+  {
+    return refuse("tzen", unset("TrustZone"));
+  }
+  if(not std::holds_alternative<whole_bank>(wanted.secwm1))
+  {
+    return refuse("secwm1", unset("secure watermark"));
+  }
+  if(not std::holds_alternative<whole_bank>(wanted.secwm2))
+  {
+    return refuse("secwm2", unset("secure watermark"));
+  }
+  if(wanted.hdp1)
+  {
+    return refuse("hdp1", unset("hide protection"));
+  }
+  if(wanted.hdp2)
+  {
+    return refuse("hdp2", unset("hide protection"));
+  }
+  if(wanted.secboot)
+  {
+    return refuse("secboot", unset("boot address option byte"));
+  }
+  if(wanted.nsboot)
+  {
+    return refuse("nsboot", unset("boot address option byte"));
+  }
+  auto const dual = wanted.dualbank.value_or(true);
+  if(not dual and flash_size > single_bank_max)
+  {
+    return refuse(
+        "dualbank", std::format(
+                        "true or unset on a flash of {} KB, DUALBANK selects the organization of "
+                        "256 KB and 512 KB parts only, RM0351 3.7.8",
+                        flash_size / 1024));
+  }
+  if(wanted.swap_bank and not dual)
+  {
+    return refuse(
+        "swap_bank", "false with dualbank false, a single-bank flash has no bank 2 to boot from, "
+                     "RM0351 3.7.8");
+  }
+  option_words<option_registers.size(), wrp_registers.size()> encoded{
+      .wrp  = wrp_productions,
+      .boot = flash_base + (wanted.swap_bank ? flash_size / 2 : 0),
+  };
+  encoded.wrp[0] = (encoded.wrp[0] & ~(dual_bank_bit | bfb2))
+                 | (dual ? dual_bank_bit : 0)
+                 | (wanted.swap_bank ? bfb2 : 0);
+  return encoded;
 }
 
 template <typename Traits> void flash_model<Traits>::reset(register_file& regs, reset_kind kind)
@@ -5175,6 +5275,15 @@ auto h5_encode_options(
     option_bytes const&  wanted) -> std::expected<address, option_refusal>
 {
   return h5_flash::encode_options(variant, program.regions.front()->size, wanted)
+      .transform([](auto const& words) { return words.boot; });
+}
+
+auto l4_encode_options(
+    flash_variant const& variant,
+    flash_program const& program,
+    option_bytes const&  wanted) -> std::expected<address, option_refusal>
+{
+  return l4_flash::encode_options(variant, program.regions.front()->size, wanted)
       .transform([](auto const& words) { return words.boot; });
 }
 

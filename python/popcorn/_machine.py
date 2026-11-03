@@ -757,7 +757,9 @@ class Machine:
                 from the secure boot address and the machine has TrustZone, without it from the
                 non-secure one. On an STM32L1 the core boots from the flash base, or from the
                 bank 2 base with `swap_bank`, and FLASH_OBR.nBFB2 loads as the inverse of
-                `swap_bank`. `vector_table` wins over both.
+                `swap_bank`. On an STM32L4 the core boots from the flash base, or from the
+                bank 2 base at its own address with `swap_bank`, and FLASH_OPTR loads BFB2 as
+                `swap_bank` and DUALBANK as `dualbank`. `vector_table` wins over all of them.
             rng: Word source of the built-in RNG model, None for its default, seed 0. It puts
                 the built-in model on RNG, over a class registered with
                 `popcorn.model.register`.
@@ -787,8 +789,10 @@ class Machine:
                 bytes or has a Python or plugin model, as `option_bytes`, a value the family
                 refuses, as `option_bytes.<field>`: a page past the bank, an HDP area that does
                 not start at its secure area's first page or ends past its last, a boot address
-                not aligned to 128 bytes, `dualbank=False`, on an STM32L1 any field but
-                `swap_bank` away from its default and `swap_bank` on a part with one bank.
+                not aligned to 128 bytes, `dualbank=False` except on an STM32L4 of 512 KB or less,
+                on an STM32L1 any field but `swap_bank` away from its default and `swap_bank`
+                on a part with one bank, on an STM32L4 any field but `swap_bank` and
+                `dualbank` away from its default and `swap_bank` with `dualbank=False`.
                 With `rng`, before anything is
                 built: an RNG with a Python or plugin model, as `rng`.
             ImageError: An image does not fit the memory map.

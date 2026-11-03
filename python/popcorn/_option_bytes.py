@@ -14,7 +14,9 @@ class OptionBytes:
     their bank, first and last both included. `MachineDescription.machine` and `Machine` refuse
     what the part's family does not allow, such as a page past the bank, with a ConfigError keyed
     `option_bytes.<field>`. The STM32L1 takes `swap_bank` on a part with two banks, the nBFB2
-    option byte at 0, and every other field at its default.
+    option byte at 0, and every other field at its default. The STM32L4 takes `swap_bank`, the
+    BFB2 option bit, and `dualbank`, the DUALBANK option bit, and every other field at its
+    default.
 
     Attributes:
         tzen: Global TrustZone enable. The core then boots Secure from `secboot`.
@@ -26,9 +28,10 @@ class OptionBytes:
         hdp2: Hide-protection area of bank 2, as `hdp1` inside `secwm2`.
         secboot: Secure boot address, None for the family default, 0x0C000000 on the STM32U5.
         nsboot: Non-secure boot address, None for the family default, 0x08000000 on the STM32U5.
-        swap_bank: Bank 1 and bank 2 addresses swapped. On the STM32L1, boot from the bank 2
-            base.
-        dualbank: Dual-bank organization, None for the family default.
+        swap_bank: Bank 1 and bank 2 addresses swapped. On the STM32L1 and the STM32L4, boot
+            from the bank 2 base, the banks keeping their addresses.
+        dualbank: Dual-bank organization, None for the family default. On the STM32L4, False
+            makes a flash of 512 KB or less one bank.
 
     Raises:
         ValueError: A field has the wrong type, a page pair is not two pages from 0 to

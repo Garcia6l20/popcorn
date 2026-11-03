@@ -580,6 +580,18 @@ On the STM32L47x/L48x, RM0351 section 3:
   nothing, log one warning per machine life and raise `model_error` under
   `strict_peripherals`, inferred. The bank 2 WRP and PCROP words protect nothing then. On a 1 MB
   part the flash is always two banks.
+- `Machine(option_bytes=)` programs and loads `FLASH_OPTR` at construction, the option byte area
+  with it: `swap_bank` sets `BFB2`, `dualbank=False` clears `DUALBANK` on a 256 KB or 512 KB part.
+  A BFB2 boot runs bank 2 code at its own address: the core boots from the bank 2 base, 0x08020000
+  on a 256 KB part, and the banks keep their addresses. An
+  image linked at 0x08000000 for a bank-swap boot runs only from bank 1. The core boots the
+  bank 2 base whatever bank 2 holds. On silicon, AN2606 Rev 71 79.1.2 Figure 102 and 79.2.2
+  Figure 104, the system bootloader boots bank 2 only when its first word is an internal SRAM
+  address, else bank 1 when bank 1's first word is one, else bank 1 at RDP level 2, else it
+  runs its own command loop. `RDP` and the other user
+  option bits keep their production values, firmware programs them with `OPTSTRT`. A `BFB2`
+  that firmware programs is loaded only. Any other field away from its default, `dualbank=False`
+  on a 1 MB part and `swap_bank` with `dualbank=False` are refused as `option_bytes.<field>`.
 - ES0250 2.2.2: a PCROP area within one page is kept with its page at the regression, as
   RM0351 3.5.1 states, where the erratum leaves the bank unerased and the area unprotected.
 - ES0250 2.2.23: `OBL_LAUNCH` with MSI at 8 MHz or more logs one warning per machine life, a
