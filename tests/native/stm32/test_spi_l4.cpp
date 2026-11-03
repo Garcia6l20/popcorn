@@ -45,12 +45,21 @@ constexpr address          cr1       = 0x00;
 constexpr address          cr2       = 0x04;
 constexpr address          sr        = 0x08;
 constexpr address          dr        = 0x0C;
+constexpr address          crcpr     = 0x10;
+constexpr address          rxcrcr    = 0x14;
 constexpr address          txcrcr    = 0x18;
 constexpr std::uint32_t    mstr      = 1u << 2;
 constexpr std::uint32_t    spe       = 1u << 6;
 constexpr std::uint32_t    ssi       = 1u << 8;
 constexpr std::uint32_t    ssm       = 1u << 9;
 constexpr std::uint32_t    rxonly    = 1u << 10;
+constexpr std::uint32_t    crcl      = 1u << 11;
+constexpr std::uint32_t    cpha      = 1u << 0;
+constexpr std::uint32_t    lsbfirst  = 1u << 7;
+constexpr std::uint32_t    nssp      = 1u << 3;
+constexpr std::uint32_t    ldma_rx   = 1u << 13;
+constexpr std::uint32_t    ldma_tx   = 1u << 14;
+constexpr std::uint32_t    crcerr    = 1u << 4;
 constexpr std::uint32_t    crcnext   = 1u << 12;
 constexpr std::uint32_t    crcen     = 1u << 13;
 constexpr std::uint32_t    bidimode  = 1u << 15;
@@ -103,12 +112,15 @@ public:
     std::uint64_t at;
   };
 
-  std::vector<frame>         frames;
-  std::vector<std::uint32_t> outs;
-  std::vector<std::uint32_t> replies;
+  std::vector<frame>                          frames;
+  std::vector<std::uint32_t>                  outs;
+  std::vector<std::uint32_t>                  replies;
+  std::vector<std::pair<bool, std::uint64_t>> selects;
 
-  void select(bool, vtime) override
-  {}
+  void select(bool selected, vtime at) override
+  {
+    selects.emplace_back(selected, at.ps);
+  }
 
   auto exchange(std::uint32_t out, std::uint8_t bits, vtime at) -> std::uint32_t override
   {
@@ -133,6 +145,13 @@ public:
   {}
 
   void load(std::span<std::byte const>) override
+  {}
+};
+
+class controller_probe final : public periph::spi_controller_sink
+{
+public:
+  void frame(std::uint32_t, std::uint32_t, vtime) override
   {}
 };
 
@@ -171,10 +190,20 @@ struct rig
   std::vector<core::log_record>  logged;
   core::hook_handle              sink;
 
-  explicit rig(bool strict = false, part_description const& desc = l476rc())
+  rig(rig const&)                    = delete;
+  auto operator=(rig const&) -> rig& = delete;
+
+  explicit rig(bool strict = false, part_description const& desc = l476rc(), bool target = false)
   {
     stm32::board board{};
-    board.spi["SPI1"].push_back({.device = device});
+    if(target)
+    {
+      board.spi_controllers["SPI1"] = std::make_shared<controller_probe>();
+    }
+    else
+    {
+      board.spi["SPI1"].push_back({.device = device});
+    }
     auto options               = popcorn::testing::stm32_options();
     options.models             = stm32::factories(board, desc);
     options.strict_peripherals = strict;
@@ -222,6 +251,20 @@ struct rig
   void cpu_write(address at, std::uint32_t value, std::uint8_t size = 4) const
   {
     REQUIRE(services().write(at, size, value, popcorn::initiator::cpu).has_value());
+  }
+
+  [[nodiscard]] auto port() const -> periph::spi_controller_port&
+  {
+    auto* const found = dynamic_cast<periph::spi_controller_port*>(f->target->model("SPI1"));
+    REQUIRE(found != nullptr);
+    return *found;
+  }
+
+  void last_but_one(std::uint32_t request) const
+  {
+    auto* const found = dynamic_cast<stm32::dma_requester*>(f->target->model("SPI1"));
+    REQUIRE(found != nullptr);
+    found->last_but_one(dma(), request);
   }
 
   [[nodiscard]] auto dma() const -> request_probe&
@@ -277,6 +320,50 @@ auto without(std::string_view reg, std::string_view field) -> part_description
   REQUIRE(erased == 1);
   return desc;
 }
+
+auto crc_block(
+    rig const&                        r,
+    std::vector<std::uint32_t> const& words,
+    std::uint32_t                     control,
+    std::uint32_t                     bits,
+    std::uint32_t                     crc_frames) -> std::vector<std::uint32_t>
+{
+  auto const size = static_cast<std::uint8_t>(bits > 8 ? 2 : 1);
+  auto       got  = std::vector<std::uint32_t>{};
+  for(std::size_t index = 0; index < words.size(); ++index)
+  {
+    r.cpu_write(spi1 + dr, words[index], size);
+    if(index + 1 == words.size())
+    {
+      r.write(spi1 + cr1, control | crcnext | spe);
+    }
+    r.idle_to(r.now_ps() + frame_ps(bits));
+    got.push_back(r.cpu_read(spi1 + dr, size));
+  }
+  for(std::uint32_t index = 0; index < crc_frames; ++index)
+  {
+    r.idle_to(r.now_ps() + frame_ps(bits));
+    got.push_back(r.cpu_read(spi1 + dr, size));
+  }
+  return got;
+}
+
+void crc_setup(rig const& r, std::uint32_t cr2_value, std::uint32_t control, std::uint32_t poly)
+{
+  r.write(spi1 + cr2, cr2_value | ssoe | frxth);
+  r.write(spi1 + crcpr, poly);
+  r.write(spi1 + cr1, control);
+  r.write(spi1 + cr1, control | spe);
+}
+
+constexpr auto digits = [](std::size_t count) {
+  auto out = std::vector<std::uint32_t>{};
+  for(std::size_t index = 0; index < count; ++index)
+  {
+    out.push_back(0x31 + index);
+  }
+  return out;
+};
 
 TEST_CASE("RM0351 Table 270: CR2 0x0700, SR 0x0002, CRCPR 0x0007, CR1 0 on SPI1 to SPI3")
 {
@@ -785,4 +872,389 @@ TEST_CASE("a snapshot whose TXFIFO or RXFIFO level is above 4 is refused at load
         popcorn::config_error);
   }
 }
+}
+
+TEST_CASE("RM0351 42.4.14: CRC-8 over DS 8 frames of 123456789 is 0xF4, a bad frame sets CRCERR")
+{
+  for(auto const corrupt : {false, true})
+  {
+    CAPTURE(corrupt);
+    rig r;
+    crc_setup(r, ds(8), master | crcen, 7);
+    if(corrupt)
+    {
+      r.device->replies = {0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x00, 0xF4};
+    }
+    auto const got = crc_block(r, digits(9), master | crcen, 8, 1);
+    CHECK(r.device->outs.back() == 0xF4);
+    CHECK(got.back() == 0xF4);
+    CHECK(r.read(spi1 + txcrcr) == 0xF4);
+    CHECK((r.read(spi1 + sr) & crcerr) == (corrupt ? crcerr : 0));
+    CHECK((r.read(spi1 + cr1) & crcnext) == 0);
+  }
+}
+
+TEST_CASE("RM0351 42.4.14: CRC-16 over DS 8 frames takes two CRC frames, high byte first inferred")
+{
+  rig r;
+  crc_setup(r, ds(8), master | crcen | crcl, 0x1021);
+  auto const got = crc_block(r, digits(9), master | crcen | crcl, 8, 2);
+  CHECK(r.read(spi1 + txcrcr) == 0x31C3);
+  CHECK(
+      std::vector(r.device->outs.end() - 2, r.device->outs.end())
+      == std::vector<std::uint32_t>{0x31, 0xC3});
+  CHECK(std::vector(got.end() - 2, got.end()) == std::vector<std::uint32_t>{0x31, 0xC3});
+  CHECK((r.read(spi1 + sr) & crcerr) == 0);
+  CHECK(r.device->frames.back().at == r.device->frames[8].at + 2 * frame_ps(8));
+}
+
+TEST_CASE(
+    "RM0351 42.4.14: DS 16 frames take a CRC-16 frame, with CRCL 0 a 16-bit frame holding the "
+    "CRC-8 and CRCERR on its low 8 bits, inferred")
+{
+  auto const words = std::vector<std::uint32_t>{0x3132, 0x3334, 0x3536, 0x3738};
+  for(auto const& [length, poly, expected] : {
+          std::tuple{crcl, 0x1021u, 0x9015u},
+          std::tuple{0u,   7u,      0xC7u  }
+  })
+  {
+    CAPTURE(expected);
+    rig r;
+    crc_setup(r, ds(16), master | crcen | length, poly);
+    if(length == 0)
+    {
+      r.device->replies = {0x3132, 0x3334, 0x3536, 0x3738, 0xAB00 | expected};
+    }
+    static_cast<void>(crc_block(r, words, master | crcen | length, 16, 1));
+    CHECK(r.device->outs.size() == 5);
+    CHECK(r.device->outs.back() == expected);
+    CHECK(r.device->frames.back().bits == 16);
+    CHECK((r.read(spi1 + sr) & crcerr) == 0);
+  }
+}
+
+TEST_CASE("RM0351 42.4.14: with LSBFIRST 1 the CRC-16 phase of DS 8 frames sends [7:0] first")
+{
+  rig r;
+  crc_setup(r, ds(8), master | crcen | crcl | lsbfirst, 0x1021);
+  static_cast<void>(crc_block(r, digits(9), master | crcen | crcl | lsbfirst, 8, 2));
+  auto const crc      = r.read(spi1 + txcrcr);
+  auto const reversed = [](std::uint32_t byte) {
+    auto out = std::uint32_t{};
+    for(std::uint32_t bit = 0; bit < 8; ++bit)
+    {
+      out |= (byte >> bit & 1u) << (7 - bit);
+    }
+    return out;
+  };
+  REQUIRE((crc & 0xFF) != crc >> 8);
+  CHECK(
+      std::vector(r.device->outs.end() - 2, r.device->outs.end())
+      == std::vector<std::uint32_t>{reversed(crc & 0xFF), reversed(crc >> 8)});
+  CHECK((r.read(spi1 + sr) & crcerr) == 0);
+}
+
+TEST_CASE("RM0351 42.4.14: SPE 0 in a CRC-16 phase, then CRCEN 0 and 1 give the next block two")
+{
+  rig        r;
+  auto const control = master | crcen | crcl;
+  crc_setup(r, ds(8), control, 0x1021);
+  for(auto const word : digits(9))
+  {
+    r.cpu_write(spi1 + dr, word, 1);
+    if(word == 0x39)
+    {
+      r.write(spi1 + cr1, control | crcnext | spe);
+    }
+    r.idle_to(r.now_ps() + frame_ps(8));
+    static_cast<void>(r.cpu_read(spi1 + dr, 1));
+  }
+  r.idle_to(r.now_ps() + frame_ps(8) / 2);
+  r.write(spi1 + cr1, control);
+  r.idle_to(r.now_ps() + 2 * frame_ps(8));
+  REQUIRE(r.device->outs.size() == 10);
+  r.write(spi1 + cr1, master | crcl);
+  r.write(spi1 + cr1, control);
+  r.write(spi1 + cr1, control | spe);
+  while((r.read(spi1 + sr) & rxne) != 0)
+  {
+    static_cast<void>(r.cpu_read(spi1 + dr, 1));
+  }
+  static_cast<void>(crc_block(r, digits(9), control, 8, 2));
+  CHECK(r.device->outs.size() == 21);
+  CHECK(
+      std::vector(r.device->outs.end() - 2, r.device->outs.end())
+      == std::vector<std::uint32_t>{0x31, 0xC3});
+  CHECK((r.read(spi1 + sr) & crcerr) == 0);
+}
+
+TEST_CASE("RM0351 42.4.14: a mode fault in the second CRC-16 frame leaves the next block two")
+{
+  rig        r;
+  auto const control = master | crcen | crcl;
+  crc_setup(r, ds(8), control, 0x1021);
+  static_cast<void>(crc_block(r, digits(9), control, 8, 0));
+  r.idle_to(r.now_ps() + frame_ps(8) + frame_ps(8) / 2);
+  REQUIRE(r.device->outs.size() == 10);
+  r.write(spi1 + cr1, (control | spe) & ~ssi);
+  r.idle_to(r.now_ps() + 2 * frame_ps(8));
+  REQUIRE(r.device->outs.size() == 10);
+  static_cast<void>(r.cpu_read(spi1 + sr));
+  r.write(spi1 + cr1, control);
+  r.write(spi1 + cr1, control | spe);
+  while((r.read(spi1 + sr) & rxne) != 0)
+  {
+    static_cast<void>(r.cpu_read(spi1 + dr, 1));
+  }
+  static_cast<void>(crc_block(r, digits(9), control, 8, 2));
+  CHECK(r.device->outs.size() == 21);
+}
+
+TEST_CASE("RM0351 42.4.14: the data frame after a CRC phase clears TXCRCR and RXCRCR first")
+{
+  rig r;
+  crc_setup(r, ds(8), master | crcen, 7);
+  static_cast<void>(crc_block(r, digits(9), master | crcen, 8, 1));
+  CHECK(r.read(spi1 + rxcrcr) == 0xF4);
+  static_cast<void>(crc_block(r, digits(9), master | crcen, 8, 1));
+  CHECK(r.device->outs.size() == 20);
+  CHECK(r.device->outs.back() == 0xF4);
+  CHECK((r.read(spi1 + sr) & crcerr) == 0);
+}
+
+TEST_CASE("checklist 53: CRCEN with DS 12 logs once, model_error under strict at the frame start")
+{
+  {
+    rig r;
+    crc_setup(r, ds(12), master | crcen, 7);
+    r.cpu_write(spi1 + dr, 0x0ABC, 2);
+    r.cpu_write(spi1 + dr, 0x0123, 2);
+    r.idle_to(r.now_ps() + 3 * frame_ps(12));
+    CHECK(r.device->outs == std::vector<std::uint32_t>{0xABC, 0x123});
+    CHECK(r.warnings("CRCEN 1 with a CR2.DS other than 8 or 16") == 1);
+  }
+  rig strict{true};
+  strict.write(spi1 + cr2, ds(12) | ssoe);
+  strict.write(spi1 + cr1, master | crcen | spe);
+  CHECK_THROWS_AS(
+      static_cast<void>(strict.services().write(spi1 + dr, 2, 0x0ABC, popcorn::initiator::cpu)),
+      popcorn::model_error);
+}
+
+TEST_CASE("checklist 53: the frame-start raise after a DS change keeps the landed frame's RXNE")
+{
+  rig r{true};
+  r.write(spi1 + cr2, ds(8) | ssoe | frxth);
+  r.write(spi1 + cr1, master | crcen | spe);
+  r.cpu_write(spi1 + dr, 0x0201, 2);
+  r.cpu_write(spi1 + dr, 0x0403, 2);
+  r.write(spi1 + cr2, ds(12) | ssoe | frxth);
+  CHECK_THROWS_AS(
+      static_cast<void>(r.f->run_to_stop(
+          {.max_instructions = icount{1'000'000}, .until_time = vtime{r.now_ps() + frame_ps(8)}})),
+      popcorn::model_error);
+  CHECK((r.read(spi1 + sr) & rxne) == rxne);
+}
+
+TEST_CASE("checklist 53: a target's frame-start raise after a DS change keeps RXNE, clears BSY")
+{
+  rig r{true, l476rc(), true};
+  r.write(spi1 + cr2, ds(8) | frxth);
+  r.write(spi1 + cr1, ssm | crcen | spe);
+  std::vector<std::uint32_t> const frames{0x01, 0x02, 0x03};
+  auto const start = r.port().transfer(vtime{r.now_ps() + 1'000'000}, frame_ps(8), 8, frames);
+  r.idle_to(start.ps + frame_ps(8) / 2);
+  REQUIRE((r.read(spi1 + sr) & bsy) == bsy);
+  r.write(spi1 + cr2, ds(12) | frxth);
+  CHECK_THROWS_AS(
+      static_cast<void>(r.f->run_to_stop(
+          {.max_instructions = icount{1'000'000},
+           .until_time       = vtime{start.ps + 2 * frame_ps(8)}})),
+      popcorn::model_error);
+  CHECK((r.read(spi1 + sr) & (rxne | bsy)) == rxne);
+}
+
+TEST_CASE("RM0351 42.4.9: receive-only with CRCEN holds one frame, FRLVL reads 00")
+{
+  rig r;
+  r.write(spi1 + cr1, master | rxonly | crcen);
+  r.write(spi1 + cr1, master | rxonly | crcen | spe);
+  auto const t0 = r.now_ps();
+  r.idle_to(t0 + frame_ps(8) + frame_ps(8) / 2);
+  CHECK((r.read(spi1 + sr) & (rxne | ovr)) == rxne);
+  CHECK(frlvl(r.read(spi1 + sr)) == 0);
+  r.idle_to(t0 + 2 * frame_ps(8) + frame_ps(8) / 2);
+  CHECK((r.read(spi1 + sr) & ovr) == ovr);
+  r.write(spi1 + cr1, master | rxonly | crcen);
+  CHECK(r.cpu_read(spi1 + dr, 1) == 0xFF);
+  CHECK((r.read(spi1 + sr) & rxne) == 0);
+}
+
+TEST_CASE("RM0351 42.4.9 Packing with DMA: LDMA_TX sends 7 frames from 4 half-word writes")
+{
+  for(auto const last : {0u, ldma_tx})
+  {
+    CAPTURE(last);
+    rig r;
+    r.write(spi1 + cr2, ds(8) | ssoe | frxth | txdmaen | last);
+    r.write(spi1 + cr1, master | spe);
+    for(std::uint32_t half : {0x0201u, 0x0403u, 0x0605u, 0x0807u})
+    {
+      if(half == 0x0807)
+      {
+        r.last_but_one(tx_signal);
+      }
+      r.cpu_write(spi1 + dr, half, 2);
+      r.idle_to(r.now_ps() + 2 * frame_ps(8));
+      static_cast<void>(r.cpu_read(spi1 + dr, 2));
+    }
+    auto expected = std::vector<std::uint32_t>{1, 2, 3, 4, 5, 6, 7, 8};
+    expected.resize(last != 0 ? 7 : 8);
+    CHECK(r.device->outs == expected);
+  }
+}
+
+TEST_CASE(
+    "RM0351 42.4.9 Packing with DMA: LDMA_RX raises RXNE at one byte and pops it, 0 above inferred")
+{
+  for(auto const last : {0u, ldma_rx})
+  {
+    CAPTURE(last);
+    rig r;
+    r.write(spi1 + cr2, ds(8) | ssoe | rxdmaen | last);
+    r.write(spi1 + cr1, master | spe);
+    for(std::uint32_t half : {0x0201u, 0x0403u, 0x0605u})
+    {
+      r.cpu_write(spi1 + dr, half, 2);
+      r.idle_to(r.now_ps() + 2 * frame_ps(8));
+      CHECK(r.cpu_read(spi1 + dr, 2) == half);
+    }
+    r.last_but_one(rx_signal);
+    r.cpu_write(spi1 + dr, 0x0807, 2);
+    auto const t0 = r.now_ps();
+    r.idle_to(t0 + frame_ps(8) + 1);
+    CHECK((r.read(spi1 + sr) & rxne) == (last != 0 ? rxne : 0));
+    CHECK(r.dma().level[rx_signal] == (last != 0));
+    r.idle_to(t0 + 2 * frame_ps(8) + 1);
+    CHECK(r.cpu_read(spi1 + dr, 2) == (last != 0 ? 0x07u : 0x0807u));
+    CHECK(frlvl(r.read(spi1 + sr)) == (last != 0 ? 1u : 0u));
+    CHECK((r.read(spi1 + sr) & ovr) == 0);
+  }
+}
+
+TEST_CASE("inferred: an LDMA_TX flag lasts one DR write, needs DS 8 or less, SPE 0 clears it")
+{
+  for(auto const leg : {0, 1, 2})
+  {
+    CAPTURE(leg);
+    rig r;
+    r.write(spi1 + cr2, (leg == 0 ? ds(16) : ds(8)) | ssoe | frxth | txdmaen | ldma_tx);
+    r.write(spi1 + cr1, master | spe);
+    r.last_but_one(tx_signal);
+    if(leg == 1)
+    {
+      r.cpu_write(spi1 + dr, 0x01, 1);
+      r.idle_to(r.now_ps() + frame_ps(8));
+      static_cast<void>(r.cpu_read(spi1 + dr, 1));
+    }
+    else if(leg == 0)
+    {
+      r.write(spi1 + cr2, ds(8) | ssoe | frxth | txdmaen | ldma_tx);
+    }
+    else
+    {
+      r.write(spi1 + cr1, master);
+      r.write(spi1 + cr1, master | spe);
+    }
+    auto const before = r.device->outs.size();
+    r.cpu_write(spi1 + dr, 0x0302, 2);
+    r.idle_to(r.now_ps() + 3 * frame_ps(8));
+    CHECK(r.device->outs.size() == before + 2);
+  }
+}
+
+TEST_CASE("inferred: an LDMA_RX flag lasts one DR read, needs DS 8 or less, SPE 0 clears it")
+{
+  for(auto const leg : {0, 1, 2})
+  {
+    CAPTURE(leg);
+    rig r;
+    r.write(spi1 + cr2, (leg == 0 ? ds(16) : ds(8)) | ssoe | rxdmaen | ldma_rx);
+    r.write(spi1 + cr1, master | spe);
+    r.last_but_one(rx_signal);
+    if(leg == 1)
+    {
+      r.cpu_write(spi1 + dr, 0x01, 1);
+      r.idle_to(r.now_ps() + 2 * frame_ps(8));
+      static_cast<void>(r.cpu_read(spi1 + dr, 1));
+    }
+    else if(leg == 0)
+    {
+      r.write(spi1 + cr2, ds(8) | ssoe | rxdmaen | ldma_rx);
+    }
+    else
+    {
+      r.write(spi1 + cr1, master);
+      r.write(spi1 + cr1, master | spe);
+    }
+    r.cpu_write(spi1 + dr, 0x0302, 2);
+    r.idle_to(r.now_ps() + 3 * frame_ps(8));
+    CHECK(r.cpu_read(spi1 + dr, 2) == 0x0302);
+  }
+}
+
+TEST_CASE("RM0351 42.4.12: NSSP pulses NSS high one SCK period between frames, inferred")
+{
+  rig r;
+  r.write(spi1 + cr2, ds(8) | ssoe | frxth | nssp);
+  r.write(spi1 + cr1, master | spe);
+  auto const t0  = r.now_ps();
+  auto const sck = frame_ps(8) / 8;
+  r.cpu_write(spi1 + dr, 0x2211, 2);
+  r.idle_to(t0 + frame_ps(8) + 1);
+  CHECK(r.frame_due() == t0 + 2 * frame_ps(8) + sck);
+  r.idle_to(t0 + 3 * frame_ps(8));
+  auto const offset = r.device->frames.front().at - (t0 + frame_ps(8));
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0x11, 0x22});
+  CHECK(r.device->frames[1].at == t0 + 2 * frame_ps(8) + sck + offset);
+  CHECK(
+      r.device->selects
+      == std::vector<std::pair<bool, std::uint64_t>>{
+          {true,  t0 + offset                        },
+          {false, t0 + frame_ps(8) + offset          },
+          {true,  t0 + frame_ps(8) + sck + offset    },
+          {false, t0 + 2 * frame_ps(8) + sck + offset}
+  });
+  CHECK((r.read(spi1 + cr1) & spe) == spe);
+}
+
+TEST_CASE("RM0351 42.6.2 NSSP: with CPHA 1 frames run back to back and NSS stays low")
+{
+  rig r;
+  r.write(spi1 + cr2, ds(8) | ssoe | frxth | nssp);
+  r.write(spi1 + cr1, master | cpha | spe);
+  auto const t0 = r.now_ps();
+  r.cpu_write(spi1 + dr, 0x2211, 2);
+  r.idle_to(t0 + 3 * frame_ps(8));
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0x11, 0x22});
+  CHECK(r.device->frames[1].at - r.device->frames[0].at == frame_ps(8));
+  CHECK(r.device->selects.size() == 1);
+}
+
+TEST_CASE(
+    "a target lands controller frames in the RXFIFO masked to DS, logged once, OVR at the "
+    "fifth DS 8 frame")
+{
+  rig r{false, l476rc(), true};
+  r.write(spi1 + cr2, ds(8) | frxth);
+  r.write(spi1 + cr1, ssm | spe);
+  r.cpu_write(spi1 + dr, 0xA5, 1);
+  std::vector<std::uint32_t> const frames{0x1201, 0x1202, 0x1203, 0x1204, 0x1205};
+  auto const start = r.port().transfer(vtime{r.now_ps() + 1'000'000}, frame_ps(16), 16, frames);
+  r.idle_to(start.ps + 6 * frame_ps(16));
+  CHECK(r.warnings("16-bit frames to a 8-bit DS") == 1);
+  CHECK((r.read(spi1 + sr) & ovr) == ovr);
+  CHECK(frlvl(r.read(spi1 + sr)) == 3);
+  CHECK(r.cpu_read(spi1 + dr, 2) == 0x0201);
+  CHECK(r.cpu_read(spi1 + dr, 2) == 0x0403);
 }

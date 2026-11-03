@@ -1328,6 +1328,8 @@ Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   never clears it. With DMA, the completed transmit transfer arms the CRC frame after the last
   data. In receive-only mode, controller or target, the completed receive transfer makes the
   frame in flight the CRC frame, inferred, or the next frame when none is in flight.
+- TXCRCR and RXCRCR run on across a CRC phase: no data frame after it clears them, inferred,
+  RM0038 28.3.6 clears them only on the CRCEN write.
 - While OVR is set, every frame received is lost, also after the DR read of the clear sequence
   and up to its SR read, RM0038 28.3.10.
 - RXCRCR takes every frame received, also those lost while OVR is set, inferred from RM0038
@@ -1368,6 +1370,18 @@ RXFIFO and frames of CR2.DS + 1 bits:
 - A DR read of an empty RXFIFO slot returns 0 and pops nothing, inferred.
 - FRLVL reads 11 with 3 bytes in the RXFIFO, as with 4, inferred.
 - The TXFIFO keeps its bytes across SPE 0 and sends them once SPE and MSTR are 1, inferred.
+- The CRC phase of DS 8 frames with CRCL 1 sends TXCRCR[15:8] first with LSBFIRST 0 and
+  TXCRCR[7:0] first with LSBFIRST 1, inferred. DS 16 frames with CRCL 0 carry the CRC-8 in one
+  16-bit frame and CRCERR compares its low 8 bits, inferred.
+- CRCEN with DS other than 8 or 16 runs the CRC over the DS bits, with one `model_warning` and
+  `model_error` under `strict_peripherals` at the frame start.
+- The last 16-bit DR read of an LDMA_RX transfer returns its one byte in [7:0] and 0 above,
+  inferred.
+- The end of a DMA transfer arms LDMA_TX or LDMA_RX only with DS 8 or less. The next DR access of
+  that side takes the armed flag whatever its width, and SPE written to 0 clears it, inferred:
+  RM0351 42.4.9 and 42.6.4 give LDMA meaning only for packed transfers and state no clear.
+- The NSS pulse of NSSP 1 lasts exactly one SCK period, inferred: RM0351 42.4.12 gives at least
+  one.
 - ES0250 2.23.1, BSY staying high once the SPI is disabled, ES0250 2.23.2, BSY staying high at
   the end of a target transfer, and ES0250 2.23.3, CRC corruption when another peripheral's DMA
   transfer completes, are not modelled: BSY follows RM0351 42.4.10 and the CRC RM0351 42.4.14.

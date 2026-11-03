@@ -537,6 +537,21 @@ TEST_CASE(
   }
 }
 
+TEST_CASE("RM0038 28.3.6 inferred: the CRC runs on across a CRC phase, no data frame clears it")
+{
+  rig r{"parked"};
+  r.write(spi1 + cr1, master | crcen);
+  r.write(spi1 + cr1, master | crcen | spe);
+  r.cpu_write(spi1 + dr, 0x31);
+  r.write(spi1 + cr1, master | crcen | crcnext | spe);
+  r.idle_to(r.now_ps() + 3 * frame8);
+  REQUIRE(r.device->outs() == std::vector<std::uint32_t>{0x31, 0x97});
+  r.cpu_write(spi1 + dr, 0x31);
+  r.idle_to(r.now_ps() + 2 * frame8);
+  CHECK(r.read(spi1 + txcrcr) == 0x7B);
+  CHECK(r.read(spi1 + rxcrcr) == 0x7B);
+}
+
 TEST_CASE("RM0038 28.3.6: LSBFIRST 1 runs the CRC on the wire bits, 0x01 gives 0x89")
 {
   rig r{"parked"};
