@@ -211,7 +211,19 @@ private:
   [[nodiscard]] auto frame_ps() -> std::uint64_t;
   [[nodiscard]] auto power_on_offset() const -> std::uint64_t;
   [[nodiscard]] auto bus_mode() const -> std::uint8_t;
-  [[nodiscard]] auto crc_step(std::uint32_t crc, std::uint32_t frame) const -> std::uint32_t;
+  [[nodiscard]] auto crc_step(
+      std::uint32_t crc,
+      std::uint32_t frame,
+      std::uint32_t frame_bits,
+      std::uint32_t crc_bits) const -> std::uint32_t;
+  [[nodiscard]] auto tx_ready() const -> bool;
+  [[nodiscard]] auto tx_empty() const -> bool;
+  [[nodiscard]] auto tx_holding() const -> bool;
+  [[nodiscard]] auto rx_ready() const -> bool;
+  [[nodiscard]] auto take_tx() -> std::uint32_t;
+  void               queue_tx(std::uint32_t offset, std::uint8_t size, std::uint32_t value);
+  void               store_rx(std::uint32_t received);
+  void               read_rx(std::uint32_t offset, std::uint8_t size);
   void               rethrow_refused();
   [[noreturn]] void  refuse_unit(std::string_view primitive) const;
   void               hardware_select(bool selected);
@@ -357,21 +369,73 @@ auto spi_classic::bus_mode() const -> std::uint8_t
   return static_cast<std::uint8_t>(get(regs_, polarity_) << 1 | get(regs_, phase_));
 }
 
-auto spi_classic::crc_step(std::uint32_t crc, std::uint32_t frame) const -> std::uint32_t
+auto spi_classic::crc_step(
+    std::uint32_t crc,
+    std::uint32_t frame,
+    std::uint32_t frame_bits,
+    std::uint32_t crc_bits) const -> std::uint32_t
 {
-  auto const bits = frame_bits();
-  auto const top  = std::uint32_t{1} << (bits - 1);
-  auto const poly = get(regs_, polynomial_) & spi_mask(bits);
-  for(std::uint32_t bit = bits; bit-- > 0;)
+  auto const top  = std::uint32_t{1} << (crc_bits - 1);
+  auto const poly = get(regs_, polynomial_) & spi_mask(crc_bits);
+  for(std::uint32_t bit = frame_bits; bit-- > 0;)
   {
     auto const feedback = ((crc & top) != 0) != ((frame >> bit & 1u) != 0);
-    crc                 = (crc << 1) & spi_mask(bits);
+    crc                 = (crc << 1) & spi_mask(crc_bits);
     if(feedback)
     {
       crc ^= poly;
     }
   }
   return crc;
+}
+
+auto spi_classic::tx_ready() const -> bool
+{
+  return state_.tx_full != 0;
+}
+
+auto spi_classic::tx_empty() const -> bool
+{
+  return state_.tx_full == 0;
+}
+
+auto spi_classic::tx_holding() const -> bool
+{
+  return state_.tx_full != 0;
+}
+
+auto spi_classic::rx_ready() const -> bool
+{
+  return state_.rx_full != 0;
+}
+
+auto spi_classic::take_tx() -> std::uint32_t
+{
+  state_.tx_full = 0;
+  return state_.tx;
+}
+
+void spi_classic::queue_tx(std::uint32_t offset, std::uint8_t size, std::uint32_t value)
+{
+  auto const merged = merge_write(regs_.peek(data_.offset), offset, size, value);
+  state_.tx         = merged & spi_mask(frame_bits());
+  state_.tx_full    = 1;
+}
+
+void spi_classic::store_rx(std::uint32_t received)
+{
+  if(state_.rx_full != 0 or get(regs_, overrun_) != 0)
+  {
+    update(regs_, overrun_, 1);
+    return;
+  }
+  state_.rx      = received;
+  state_.rx_full = 1;
+}
+
+void spi_classic::read_rx(std::uint32_t, std::uint8_t)
+{
+  state_.rx_full = 0;
 }
 
 void spi_classic::rethrow_refused()
@@ -516,7 +580,7 @@ void spi_classic::start_frame(std::uint64_t from_ps)
     return;
   }
   auto const crc = state_.crc_pending != 0;
-  if(not crc and not receive_only() and state_.tx_full == 0)
+  if(not crc and not receive_only() and not tx_ready())
   {
     return;
   }
@@ -537,8 +601,7 @@ void spi_classic::start_frame(std::uint64_t from_ps)
   }
   else
   {
-    state_.shift   = state_.tx;
-    state_.tx_full = 0;
+    state_.shift = take_tx();
   }
   if(state_.selecting == 0)
   {
@@ -598,14 +661,17 @@ void spi_classic::land(std::uint32_t received)
   {
     if(not receive_only())
     {
-      regs_.poke(tx_crc_.offset, crc_step(regs_.peek(tx_crc_.offset), wire_frame(state_.shift)));
+      regs_.poke(
+          tx_crc_.offset,
+          crc_step(regs_.peek(tx_crc_.offset), wire_frame(state_.shift), bits, bits));
     }
     if(receiving())
     {
-      regs_.poke(rx_crc_.offset, crc_step(regs_.peek(rx_crc_.offset), wire_frame(received)));
+      regs_.poke(
+          rx_crc_.offset, crc_step(regs_.peek(rx_crc_.offset), wire_frame(received), bits, bits));
     }
     auto const armed = get(regs_, crc_next_) != 0 or state_.crc_armed != 0;
-    if(armed and (receive_only() or state_.tx_full == 0))
+    if(armed and (receive_only() or not tx_holding()))
     {
       state_.crc_pending = 1;
     }
@@ -615,13 +681,7 @@ void spi_classic::land(std::uint32_t received)
   {
     return;
   }
-  if(state_.rx_full != 0 or get(regs_, overrun_) != 0)
-  {
-    update(regs_, overrun_, 1);
-    return;
-  }
-  state_.rx      = received;
-  state_.rx_full = 1;
+  store_rx(received);
 }
 
 void spi_classic::mode_fault()
@@ -643,19 +703,19 @@ void spi_classic::flags()
   auto const up         = get(regs_, enable_) != 0;
   auto const controller = up and get(regs_, master_) != 0;
   auto const shifting   = state_.busy != 0 or (state_.host_busy != 0 and state_.host_taking != 0);
-  auto       busy       = shifting or (up and state_.tx_full != 0);
+  auto       busy       = shifting or (up and tx_holding());
   if(controller and receive_only())
   {
     busy = get(regs_, bidi_) == 0;
   }
-  update(regs_, tx_flag_, state_.tx_full == 0 ? 1 : 0);
-  update(regs_, rx_flag_, state_.rx_full);
+  update(regs_, tx_flag_, tx_empty() ? 1 : 0);
+  update(regs_, rx_flag_, rx_ready() ? 1 : 0);
   update(regs_, busy_, busy ? 1 : 0);
   regs_.poke(data_.offset, state_.rx & spi_mask(frame_bits()));
   auto const errors =
       get(regs_, overrun_) != 0 or get(regs_, fault_) != 0 or get(regs_, crc_error_) != 0;
-  auto const level = (get(regs_, tx_ie_) != 0 and state_.tx_full == 0)
-                  or (get(regs_, rx_ie_) != 0 and state_.rx_full != 0)
+  auto const level = (get(regs_, tx_ie_) != 0 and tx_empty())
+                  or (get(regs_, rx_ie_) != 0 and rx_ready())
                   or (get(regs_, error_ie_) != 0 and errors);
   if(level)
   {
@@ -665,8 +725,8 @@ void spi_classic::flags()
   {
     line_.lower();
   }
-  tx_dma_.set(get(regs_, tx_dma_enable_) != 0 and state_.tx_full == 0);
-  rx_dma_.set(get(regs_, rx_dma_enable_) != 0 and state_.rx_full != 0);
+  tx_dma_.set(get(regs_, tx_dma_enable_) != 0 and tx_empty());
+  rx_dma_.set(get(regs_, rx_dma_enable_) != 0 and rx_ready());
 }
 
 void spi_classic::control_written(std::uint32_t old, std::uint32_t now)
@@ -768,7 +828,7 @@ auto spi_classic::on_read(
   else
   {
     state_.overrun_read = get(regs_, overrun_) != 0 ? 1 : 0;
-    state_.rx_full      = 0;
+    read_rx(offset, size);
   }
   flags();
   return value;
@@ -788,9 +848,7 @@ auto spi_classic::on_write(
     {
       return {};
     }
-    auto const merged = merge_write(regs_.peek(data_.offset), offset, size, value);
-    state_.tx         = merged & spi_mask(frame_bits());
-    state_.tx_full    = 1;
+    queue_tx(offset, size, value);
     start_frame(ctx_.clock.time().ps);
     flags();
     return {};
@@ -935,10 +993,9 @@ void spi_classic::begin_host_frame()
   {
     return;
   }
-  if(state_.crc_frame == 0 and state_.tx_full != 0)
+  if(state_.crc_frame == 0 and tx_ready())
   {
-    state_.shift   = state_.tx;
-    state_.tx_full = 0;
+    state_.shift = take_tx();
   }
   else if(state_.crc_frame == 0)
   {
@@ -956,7 +1013,9 @@ void spi_classic::end_host_frame()
     if(get(regs_, crc_enable_) != 0 and get(regs_, master_) == 0 and receiving())
     {
       regs_.poke(
-          rx_crc_.offset, crc_step(regs_.peek(rx_crc_.offset), now.frames[state_.host_next]));
+          rx_crc_.offset, crc_step(
+                              regs_.peek(rx_crc_.offset), now.frames[state_.host_next],
+                              frame_bits(), frame_bits()));
     }
     return;
   }
