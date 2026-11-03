@@ -2,6 +2,7 @@
 #include "trigger_probe.hpp"
 
 #include <popcorn/core/errors.hpp>
+#include <popcorn/core/intercept.hpp>
 #include <popcorn/core/log.hpp>
 #include <popcorn/core/machine.hpp>
 #include <popcorn/core/snapshot.hpp>
@@ -35,6 +36,7 @@ using popcorn::testing::sym;
 using popcorn::testing::trigger_probe;
 
 constexpr std::string_view firmware   = "l476_l4_rcc_ll";
+constexpr std::string_view lptim_ll   = "l476_l4_lptim_ll";
 constexpr address          lptim1     = 0x4000'7C00;
 constexpr address          lptim2     = 0x4000'9400;
 constexpr address          isr        = 0x00;
@@ -64,6 +66,8 @@ constexpr std::uint32_t    wavpol     = 1u << 21;
 constexpr std::uint32_t    wave       = 1u << 20;
 constexpr std::uint32_t    lptim1_irq = 1u << (65 - 64);
 constexpr std::uint64_t    cycle      = 250'000;
+constexpr std::uint64_t    lsi_tick   = 31'250'000;
+constexpr std::uint64_t    us         = 1'000'000;
 
 constexpr auto presc(std::uint32_t value) -> std::uint32_t
 {
@@ -192,6 +196,61 @@ struct rig
     return at;
   }
 };
+
+struct firmware_run
+{
+  std::unique_ptr<stm32_fixture>      f;
+  std::vector<std::uint64_t>          compares;
+  std::vector<std::uint64_t>          reloads;
+  std::vector<core::intercept_handle> hooks;
+
+  explicit firmware_run(std::string_view entry)
+  {
+    f = std::make_unique<stm32_fixture>(l476rc(), lptim_ll, popcorn::testing::stm32_options());
+    REQUIRE(
+        f->run_to_stop({.max_instructions = icount{1'000'000}, .until = sym(lptim_ll, "main")})
+            .reason
+        == stop_reason::address);
+    f->set("pc", sym(lptim_ll, entry));
+    record("on_compare", compares);
+    record("on_reload", reloads);
+  }
+
+  void record(std::string_view symbol, std::vector<std::uint64_t>& into)
+  {
+    hooks.push_back(
+        f->target->add_intercept(sym(lptim_ll, symbol), [&into](core::intercept_call const& c) {
+          into.push_back(c.target().virtual_clock().time().ps);
+          return core::intercept_result::proceed();
+        }));
+  }
+
+  [[nodiscard]] auto started() const -> std::uint64_t
+  {
+    auto const stopped = f->run_to_stop(
+        {.max_instructions = icount{1'000'000}, .until = sym(lptim_ll, "on_started")});
+    REQUIRE(stopped.reason == stop_reason::address);
+    return f->target->virtual_clock().time().ps;
+  }
+
+  [[nodiscard]] auto finish() const -> std::vector<std::uint32_t>
+  {
+    auto const stopped = f->run_to_stop({.max_instructions = icount{1'000'000}});
+    CAPTURE(stopped.detail);
+    REQUIRE(stopped.reason == stop_reason::user);
+    return f->log();
+  }
+};
+
+auto gaps(std::vector<std::uint64_t> const& at) -> std::vector<std::uint64_t>
+{
+  auto out = std::vector<std::uint64_t>{};
+  for(std::size_t index = 1; index < at.size(); ++index)
+  {
+    out.push_back(at[index] - at[index - 1]);
+  }
+  return out;
+}
 
 TEST_CASE("ES0250 2.18.3: CMPM is due one kernel clock after CNT reaches CMP, CMP 6 ARR 10")
 {
@@ -1249,5 +1308,31 @@ TEST_CASE("inferred: CMP equal to ARR keeps lptim1_out inactive")
   CHECK((r.read(lptim1 + isr) & (cmpm | arrm)) == (cmpm | arrm));
   CHECK(r.probe->pulses.empty());
   CHECK(r.out_level() == false);
+}
+
+TEST_CASE("RM0351 34.4.6 note: LL firmware on LSI, CMPM 19 ticks after CNTSTRT, then every 32")
+{
+  firmware_run run{"lptim1_continuous"};
+  auto const   started = run.started();
+  CHECK(run.finish() == std::vector<std::uint32_t>{10, 10});
+  REQUIRE(run.compares.size() == 10);
+  REQUIRE(run.reloads.size() == 10);
+  CHECK(run.compares.front() - started > 19 * lsi_tick - us);
+  CHECK(run.compares.front() - started < 19 * lsi_tick + us);
+  CHECK(gaps(run.compares) == std::vector<std::uint64_t>(9, 32 * lsi_tick));
+  CHECK(gaps(run.reloads) == std::vector<std::uint64_t>(9, 32 * lsi_tick));
+  CHECK(run.reloads.front() - run.compares.front() >= 16 * lsi_tick);
+  CHECK(run.reloads.front() - run.compares.front() < 16 * lsi_tick + us);
+}
+
+TEST_CASE("RM0351 34.4.7: LL firmware SNGSTRT gives one CMPM and one ARRM, then CNT 0")
+{
+  firmware_run run{"lptim1_one_shot"};
+  auto const   started = run.started();
+  CHECK(run.finish() == std::vector<std::uint32_t>{1, 1, 0});
+  REQUIRE(run.reloads.size() == 1);
+  REQUIRE(run.compares.size() == 1);
+  CHECK(run.reloads.front() - started > 35 * lsi_tick - us);
+  CHECK(run.reloads.front() - started < 35 * lsi_tick + us);
 }
 }
