@@ -933,12 +933,28 @@ struct sai_variant
 {
   /** @brief Name of the block enable field of `xCR1`. */
   std::string_view enable = "SAIAEN";
+  /** @brief Whether `xCR1` has OSR, the master clock oversampling ratio. */
+  bool oversampling = true;
+  /** @brief Whether the SAI has PDMCR and PDMDLY, the PDM interface. */
+  bool pdm = true;
+  /**
+   * @brief Whether MCKDIV above 0 divides the kernel clock by 2 x MCKDIV and NODIV 1 bypasses
+   *        it, RM0351 43.3.8. Otherwise MCKDIV divides by MCKDIV, 0 counting as 1, in both
+   *        NODIV settings.
+   */
+  bool doubled_divider = false;
 };
 
 /** @brief STM32U5 SAI, RM0456 69.6.2. */
 inline constexpr sai_variant u5_sai{};
 /** @brief STM32H5 SAI, RM0481 59.6.2. */
 inline constexpr sai_variant h5_sai{.enable = "SAIEN"};
+/** @brief STM32L4 SAI, RM0351 43.5: GCR to BDR, SAIEN enables a block, MCKDIV doubled. */
+inline constexpr sai_variant l4_sai{
+    .enable          = "SAIEN",
+    .oversampling    = false,
+    .pdm             = false,
+    .doubled_divider = true};
 
 /** @brief The option register field value under which a trigger_entry holds. */
 struct trigger_remap

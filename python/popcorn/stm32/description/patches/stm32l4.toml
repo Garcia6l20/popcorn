@@ -398,6 +398,42 @@ register = "BSR"
 reset = 0x00000008
 source = "RM0351 Rev 11, 43.5.15 SAI_BSR: reset value 0x0000 0008, FREQ set. The four SVDs give 0"
 
+[[fields]]
+instances = ["SAI1", "SAI2"]
+registers = ["ACR1"]
+rename = { SAIAEN = "SAIEN", OutDri = "OUTDRIV" }
+source = "RM0351 Rev 11, 43.5.2 SAI_ACR1: bit 16 SAIEN, bit 13 OUTDRIV. The four SVDs spell them SAIAEN and OutDri"
+
+[[fields]]
+instances = ["SAI1", "SAI2"]
+registers = ["BCR1"]
+rename = { SAIBEN = "SAIEN", OutDri = "OUTDRIV" }
+source = "RM0351 Rev 11, 43.5.10 SAI_BCR1: bit 16 SAIEN, bit 13 OUTDRIV. The four SVDs spell them SAIBEN and OutDri"
+
+[[fields]]
+instances = ["SAI1", "SAI2"]
+registers = ["ACR2", "BCR2"]
+rename = { FFLUS = "FFLUSH", MUTECN = "MUTECNT" }
+source = "RM0351 Rev 11, 43.5.3 SAI_ACR2 and 43.5.11 SAI_BCR2: bit 3 FFLUSH, bits 12:7 MUTECNT[5:0]. The four SVDs spell them FFLUS and MUTECN"
+
+[[fields]]
+instances = ["SAI1", "SAI2"]
+registers = ["AIM"]
+rename = { LFSDET = "LFSDETIE", MUTEDET = "MUTEDETIE", WCKCFG = "WCKCFGIE" }
+source = "RM0351 Rev 11, 43.5.6 SAI_AIM: bit 6 LFSDETIE, bit 2 WCKCFGIE, bit 1 MUTEDETIE. The four SVDs spell them LFSDET, WCKCFG and MUTEDET"
+
+[[fields]]
+instances = ["SAI1", "SAI2"]
+registers = ["BIM"]
+rename = { MUTEDET = "MUTEDETIE", WCKCFG = "WCKCFGIE" }
+source = "RM0351 Rev 11, 43.5.14 SAI_BIM: bit 2 WCKCFGIE, bit 1 MUTEDETIE. The four SVDs spell them WCKCFG and MUTEDET"
+
+[[fields]]
+instances = ["SAI1", "SAI2"]
+registers = ["ACLRFR", "BCLRFR"]
+rename = { LFSDET = "CLFSDET", CNRDY = "CCNRDY", WCKCFG = "CWCKCFG", MUTEDET = "CMUTEDET", OVRUDR = "COVRUDR" }
+source = "RM0351 Rev 11, 43.5.8 SAI_ACLRFR and 43.5.16 SAI_BCLRFR: bits 6, 4, 2, 1, 0 CLFSDET, CCNRDY, CWCKCFG, CMUTEDET, COVRUDR. The four SVDs spell them without the leading C"
+
 [[resets]]
 peripheral = "DAC1"
 register = "SHRR"

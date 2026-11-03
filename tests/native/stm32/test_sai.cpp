@@ -985,6 +985,57 @@ TEST_CASE("a snapshot keeps the phase of a running external clock no block uses 
   CHECK(since(other.a->frames, t) == std::vector<std::int64_t>{2 * slave_frame});
 }
 
+TEST_CASE("RM0456 69.4.8: with NODIV = 0 a master frame lasts MCKDIV x (OSR + 1) x 256 cycles")
+{
+  for(std::uint32_t const oversampling : {0u, 1u})
+  {
+    CAPTURE(oversampling);
+    rig r{"idle"};
+    bus b{*r.f};
+    b.clocks();
+    b.stereo16("A", 64, false);
+    b.put(
+        "ACR1", {
+                    {"DS",     4           },
+                    {"MCKDIV", 1           },
+                    {"OSR",    oversampling}
+    });
+    for(std::uint32_t index = 0; index < 6; ++index)
+    {
+      b.push('A', ramp(index));
+    }
+    b.set("ACR1", "SAIAEN", 1);
+    auto const start = b.now();
+    b.run_until(start + 70 * us);
+    REQUIRE(r.a->frames.size() >= 2);
+    CHECK(r.a->frames[1].at.ps - r.a->frames[0].at.ps == (oversampling + 1) * 16 * us);
+  }
+}
+
+TEST_CASE("PDMCR.PDMEN logs the PDM interface as not modelled, once")
+{
+  rig                           r{"idle"};
+  bus                           b{*r.f};
+  std::vector<core::log_record> logged;
+  auto const                    sink =
+      r.f->target->add_log_sink([&](core::log_record const& record) { logged.push_back(record); });
+  b.put(
+      "PDMCR", {
+                   {"PDMEN", 1}
+  });
+  b.put(
+      "PDMCR", {
+                   {"PDMEN", 1}
+  });
+  CHECK(
+      std::ranges::count_if(
+          logged,
+          [](core::log_record const& record) {
+            return record.message.find("PDM") != std::string::npos;
+          })
+      == 1);
+}
+
 TEST_CASE("frame sync errors never rise on an external clock, their enables log nothing")
 {
   rig                           r{"idle", {}, {.external_frame_hz = 16'000}};

@@ -144,7 +144,7 @@ auto requests_of(peer_directory const& peers, std::string_view instance)
 
 class sai;
 
-auto sai_writes() -> std::span<write_entry<sai> const>;
+auto sai_writes(bool pdm) -> std::span<write_entry<sai> const>;
 
 /**
  * @brief SAI1 and SAI2 of the STM32U5, RM0456 section 69 "Serial audio interface (SAI)", audio
@@ -192,6 +192,11 @@ auto sai_writes() -> std::span<write_entry<sai> const>;
  *        phase, which fixes it. The external clock is defined by its frame rate and always matches
  *        the block's frame, so AFSDET and LFSDET never rise, as with a correctly wired codec, and
  *        their interrupt enables log nothing.
+ *
+ *        The STM32L4 SAI1 and SAI2, RM0351 section 43, run the same model on the registers GCR to
+ *        BDR of section 43.5, OSR read as 0. MCKDIV above 0 divides the kernel clock by 2 x MCKDIV
+ *        and MCKDIV 0 by 1, so a master frame lasts 256 such divided clocks with NODIV = 0, and FRL
+ *        + 1 kernel clocks with NODIV = 1, which bypasses MCKDIV, section 43.3.8.
  */
 class sai final : public dispatch_model<sai, sai_state>,
                   public audio_port,
@@ -229,7 +234,7 @@ public:
 
 private:
   void               restore_reset_values(std::optional<reset_kind> kind);
-  [[nodiscard]] auto fields_of(char prefix, std::string_view enable) const -> block_fields;
+  [[nodiscard]] auto fields_of(char prefix, sai_variant const& variant) const -> block_fields;
   [[nodiscard]] auto on(field_ref field) const -> bool;
   [[nodiscard]] auto enabled(std::size_t b) const -> bool;
   [[nodiscard]] auto receiver(std::size_t b) const -> bool;
@@ -279,6 +284,7 @@ private:
   void flags();
   void warn_unsupported(std::size_t b);
 
+  sai_variant                          variant_;
   register_file&                       regs_;
   std::array<audio_attachment, blocks> wired_;
   std::array<block_fields, blocks>     block_;
@@ -293,7 +299,7 @@ private:
   bool                                 slot_rules_logged_{};
 };
 
-auto sai_writes() -> std::span<write_entry<sai> const>
+auto sai_writes(bool pdm) -> std::span<write_entry<sai> const>
 {
   static constexpr std::array<write_entry<sai>, 19> table{
       {
@@ -309,7 +315,7 @@ auto sai_writes() -> std::span<write_entry<sai> const>
        {"PDMDLY", &sai::plain_written},
        }
   };
-  return table;
+  return std::span{table}.first(pdm ? table.size() : table.size() - 2);
 }
 
 sai::sai(
@@ -317,10 +323,11 @@ sai::sai(
     peripheral_desc const&               desc,
     std::array<audio_attachment, blocks> wired,
     sai_variant const&                   variant)
-    : dispatch_model{ctx, desc, "SAI", sai_writes()}, regs_{ctx.regs}, wired_{std::move(wired)},
-      block_{fields_of('A', variant.enable), fields_of('B', variant.enable)},
-      pdm_enable_{field("PDMCR", "PDMEN")}, kernel_{ctx.clock.domain(lower(desc.name))},
-      line_{irq(desc.name + "_IRQn")}, requests_{requests_of(ctx.peers, desc.name)}
+    : dispatch_model{ctx, desc, "SAI", sai_writes(variant.pdm)}, variant_{variant}, regs_{ctx.regs},
+      wired_{std::move(wired)}, block_{fields_of('A', variant), fields_of('B', variant)},
+      pdm_enable_{variant.pdm ? field("PDMCR", "PDMEN") : field_ref{}},
+      kernel_{ctx.clock.domain(lower(desc.name))}, line_{irq(desc.name + "_IRQn")},
+      requests_{requests_of(ctx.peers, desc.name)}
 {
   for(std::size_t b = 0; b < blocks; ++b)
   {
@@ -328,7 +335,7 @@ sai::sai(
   }
 }
 
-auto sai::fields_of(char prefix, std::string_view enable) const -> block_fields
+auto sai::fields_of(char prefix, sai_variant const& variant) const -> block_fields
 {
   auto const name = [prefix](std::string_view reg) { return std::format("{}{}", prefix, reg); };
   auto const cr1  = name("CR1");
@@ -344,10 +351,10 @@ auto sai::fields_of(char prefix, std::string_view enable) const -> block_fields
       .sync             = field(cr1, "SYNCEN"),
       .mono             = field(cr1, "MONO"),
       .dma              = field(cr1, "DMAEN"),
-      .enable           = field(cr1, enable),
+      .enable           = field(cr1, variant.enable),
       .no_divider       = field(cr1, "NODIV"),
       .divider          = field(cr1, "MCKDIV"),
-      .oversampling     = field(cr1, "OSR"),
+      .oversampling     = variant.oversampling ? field(cr1, "OSR") : field_ref{},
       .threshold        = field(cr2, "FTH"),
       .flush            = field(cr2, "FFLUSH"),
       .mute             = field(cr2, "MUTE"),
@@ -490,10 +497,12 @@ auto sai::frame_rate(std::size_t b) const -> rate
     return clock_rate(b);
   }
   auto const decimation = std::uint64_t{std::max<std::uint32_t>(wired_[b].decimation, 1)};
-  auto const divider    = std::uint64_t{std::max<std::uint32_t>(get(regs_, block_[b].divider), 1)};
+  auto const mckdiv     = std::uint64_t{get(regs_, block_[b].divider)};
   auto const bits       = std::uint64_t{get(regs_, block_[b].frame_length)} + 1u;
+  auto const divider    = variant_.doubled_divider ? (mckdiv == 0 ? 1u : 2u * mckdiv)
+                                                   : std::max<std::uint64_t>(mckdiv, 1u);
   auto const cycles = on(block_[b].no_divider)
-                        ? divider * bits
+                        ? (variant_.doubled_divider ? 1u : divider) * bits
                         : divider * (std::uint64_t{get(regs_, block_[b].oversampling)} + 1u) * 256u;
   return {.hz = ctx_.clock.hz(kernel_), .cycles = cycles * decimation};
 }
