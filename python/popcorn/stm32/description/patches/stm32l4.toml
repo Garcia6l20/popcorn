@@ -1289,3 +1289,27 @@ peripheral = "FLASH"
 register = "WRP2BR"
 reset = 0xFF00FFFF
 source = "RM0351 Rev 11, 3.4.1 bank 2 WRP area B option bytes: ST production value 0xFF00FFFF, no protection. 3.7.16 FLASH_WRP2BR is loaded from them at OBL. The four SVDs give 0xFF00FF00"
+
+[[fields]]
+instances = ["SPI1", "SPI2", "SPI3"]
+registers = ["CR1"]
+rename = { DFF = "CRCL" }
+source = "RM0351 Rev 11, 42.6.1 SPIx_CR1: bit 11 is CRCL, the CRC length. The four SVDs name it DFF"
+
+[[resets]]
+peripheral = "SPI1"
+register = "CR2"
+reset = 0x00000700
+source = "RM0351 Rev 11, 42.6.2 SPIx_CR2: reset value 0x0700, DS 0111 for 8-bit frames. The four SVDs give 0"
+
+[[resets]]
+peripheral = "SPI2"
+register = "CR2"
+reset = 0x00000700
+source = "RM0351 Rev 11, 42.6.2 SPIx_CR2: reset value 0x0700, DS 0111 for 8-bit frames. The four SVDs give 0"
+
+[[resets]]
+peripheral = "SPI3"
+register = "CR2"
+reset = 0x00000700
+source = "RM0351 Rev 11, 42.6.2 SPIx_CR2: reset value 0x0700, DS 0111 for 8-bit frames. The four SVDs give 0"

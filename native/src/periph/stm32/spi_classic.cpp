@@ -34,6 +34,55 @@ namespace
 constexpr std::uint32_t frame_done = 0;
 constexpr std::uint32_t host_edge  = 1;
 
+struct spi_fifo_state
+{
+  std::array<std::uint8_t, 4> rx{};
+  std::array<std::uint8_t, 4> tx{};
+  std::uint8_t                rx_level{};
+  std::uint8_t                tx_level{};
+
+  friend auto operator==(spi_fifo_state const&, spi_fifo_state const&) -> bool = default;
+};
+
+struct spi_fifo_fields
+{
+  field_ref threshold;
+  field_ref rx_level;
+  field_ref tx_level;
+};
+
+auto fifo_pop(std::array<std::uint8_t, 4>& queue, std::uint8_t& level, std::uint8_t count)
+    -> std::uint32_t
+{
+  auto const taken = std::min(count, level);
+  auto       value = std::uint32_t{};
+  for(std::uint8_t index = 0; index < taken; ++index)
+  {
+    value |= std::uint32_t{queue[index]} << (8u * index);
+  }
+  std::shift_left(queue.begin(), queue.end(), taken);
+  std::fill(queue.end() - taken, queue.end(), std::uint8_t{});
+  level = static_cast<std::uint8_t>(level - taken);
+  return value;
+}
+
+auto fifo_push(
+    std::array<std::uint8_t, 4>& queue,
+    std::uint8_t&                level,
+    std::uint32_t                value,
+    std::uint8_t                 count) -> bool
+{
+  for(std::uint8_t index = 0; index < count; ++index)
+  {
+    if(level == queue.size())
+    {
+      return false;
+    }
+    queue[level++] = static_cast<std::uint8_t>(value >> (8u * index));
+  }
+  return true;
+}
+
 struct spi_classic_state
 {
   std::uint32_t                       generation{};
@@ -62,6 +111,7 @@ struct spi_classic_state
   std::uint8_t                        host_taking{};
   std::uint8_t                        host_selected{};
   std::uint8_t                        host_mode_checked{};
+  spi_fifo_state                      fifo{};
 
   friend auto operator==(spi_classic_state const&, spi_classic_state const&) -> bool = default;
 };
@@ -78,9 +128,10 @@ auto kernel_name(peripheral_desc const& desc, spi_classic_variant const& variant
 }
 
 /**
- * @brief SPI1 to SPI3 of the STM32L1, RM0038 section 28 "Serial peripheral interface (SPI)", in
- *        SPI mode, controller and target. One transmit buffer, one receive buffer and one shift
- *        register, frames of 8 bits with CR1.DFF 0 and 16 bits with DFF 1, RM0038 28.3.1.
+ * @brief SPI1 to SPI3 of the STM32L1, RM0038 section 28 "Serial peripheral interface (SPI)", and
+ *        of the STM32L4, in SPI mode, controller and target. One transmit buffer, one receive
+ *        buffer and one shift register, frames of 8 bits with CR1.DFF 0 and 16 bits with DFF 1,
+ *        RM0038 28.3.1.
  *
  *        Controller mode, MSTR 1 and SPE 1: a frame starts when DR is written and the shifter is
  *        free, TXE rising as the word moves to the shifter, and lasts DFF bits of the APB clock
@@ -143,6 +194,23 @@ auto kernel_name(peripheral_desc const& desc, spi_classic_variant const& variant
  *        devices, the controller queue and both buffers are saved with the model, a reset drops
  *        the queue.
  *
+ *        STM32L4 SPI1 to SPI3, RM0351 section 42, the fifo spi_classic_variant: the same rules
+ *        with a 4-byte TXFIFO and RXFIFO in place of the buffers, RM0351 42.4.9. A frame has
+ *        CR2.DS + 1 bits, one byte up to 8 bits, two bytes low byte first above, and a CR2
+ *        write of DS 0000 to 0010 stores 0111, RM0351 42.6.2. A DR write pushes one byte at 8
+ *        bits and two bytes at 16 or 32 bits, a DR read pops as many, the 32-bit access as the
+ *        16-bit one, inferred. Bytes that do not fit are dropped and logged once, inferred. A
+ *        frame starts once the TXFIFO holds its bytes, so with DS above 8 a byte write waits for
+ *        the next one, inferred. A DR read returns the oldest two bytes, 0 in an empty slot, and
+ *        pops no more than the RXFIFO holds, inferred. Byte accesses to DR + 1 to DR + 3 move
+ *        no FIFO byte, inferred. TXE is 1 while the TXFIFO holds 2 bytes or less, RXNE while
+ *        the RXFIFO holds 1 byte with CR2.FRXTH 1 or 2 bytes with FRXTH 0, RM0351 42.4.10.
+ *        FTLVL and FRLVL give the level up to 3, 11 at 3 bytes and at 4, inferred for FRLVL. A
+ *        frame lands with OVR set or too little room is lost and sets OVR, RM0351 42.4.10. BSY
+ *        is 1 in controller receive-only mode and in controller bidirectional receive, RM0351
+ *        42.4.10 note. Both FIFOs keep their bytes across SPE 0, RM0351 42.4.9 for the RXFIFO,
+ *        inferred for the TXFIFO. An RCC reset of the instance empties them.
+ *
  *        Devices and controller, the STM32L1 SPI on the generic interfaces: each frame is
  *        exchanged through spi_target::exchange_deferred() at its end, the frame's generation as
  *        ticket. The model offers no spi_target_port and calls neither spi_target::attached()
@@ -204,6 +272,7 @@ public:
 private:
   void               restore_reset_values(std::optional<reset_kind> kind);
   [[nodiscard]] auto frame_bits() const -> std::uint32_t;
+  [[nodiscard]] auto frame_bytes() const -> std::uint8_t;
   [[nodiscard]] auto wire_frame(std::uint32_t value) const -> std::uint32_t;
   [[nodiscard]] auto receive_only() const -> bool;
   [[nodiscard]] auto receiving() const -> bool;
@@ -255,7 +324,7 @@ private:
   field_ref                            select_input_;
   field_ref                            software_select_;
   field_ref                            rx_only_;
-  field_ref                            wide_;
+  field_ref                            size_;
   field_ref                            crc_next_;
   field_ref                            crc_enable_;
   field_ref                            bidi_output_;
@@ -267,6 +336,7 @@ private:
   field_ref                            rx_ie_;
   field_ref                            tx_ie_;
   std::optional<field_ref>             ti_format_;
+  std::optional<spi_fifo_fields>       fifo_;
   field_ref                            rx_flag_;
   field_ref                            tx_flag_;
   field_ref                            crc_error_;
@@ -283,6 +353,7 @@ private:
   bool                                 ti_logged_{};
   bool                                 no_clock_logged_{};
   bool                                 size_logged_{};
+  bool                                 dropped_logged_{};
 };
 
 constexpr std::array<write_entry<spi_classic>, 7> spi_classic_writes{
@@ -310,13 +381,19 @@ spi_classic::spi_classic(
       master_{field("CR1", "MSTR")}, baud_{field("CR1", "BR")}, enable_{field("CR1", "SPE")},
       lsb_first_{field("CR1", "LSBFIRST")}, select_input_{field("CR1", "SSI")},
       software_select_{field("CR1", "SSM")}, rx_only_{field("CR1", "RXONLY")},
-      wide_{field("CR1", "DFF")}, crc_next_{field("CR1", "CRCNEXT")},
-      crc_enable_{field("CR1", "CRCEN")}, bidi_output_{field("CR1", "BIDIOE")},
-      bidi_{field("CR1", "BIDIMODE")}, rx_dma_enable_{field("CR2", "RXDMAEN")},
-      tx_dma_enable_{field("CR2", "TXDMAEN")}, ss_output_{field("CR2", "SSOE")},
-      error_ie_{field("CR2", "ERRIE")}, rx_ie_{field("CR2", "RXNEIE")},
-      tx_ie_{field("CR2", "TXEIE")},
+      size_{variant.fifo ? field("CR2", "DS") : field("CR1", "DFF")},
+      crc_next_{field("CR1", "CRCNEXT")}, crc_enable_{field("CR1", "CRCEN")},
+      bidi_output_{field("CR1", "BIDIOE")}, bidi_{field("CR1", "BIDIMODE")},
+      rx_dma_enable_{field("CR2", "RXDMAEN")}, tx_dma_enable_{field("CR2", "TXDMAEN")},
+      ss_output_{field("CR2", "SSOE")}, error_ie_{field("CR2", "ERRIE")},
+      rx_ie_{field("CR2", "RXNEIE")}, tx_ie_{field("CR2", "TXEIE")},
       ti_format_{variant.ti_mode ? std::optional{field("CR2", "FRF")} : std::nullopt},
+      fifo_{
+          variant.fifo ? std::optional{spi_fifo_fields{
+                             .threshold = field("CR2", "FRXTH"),
+                             .rx_level  = field("SR", "FRLVL"),
+                             .tx_level  = field("SR", "FTLVL")}}
+                       : std::nullopt},
       rx_flag_{field("SR", "RXNE")}, tx_flag_{field("SR", "TXE")},
       crc_error_{field("SR", "CRCERR")}, fault_{field("SR", "MODF")}, overrun_{field("SR", "OVR")},
       busy_{field("SR", "BSY")}, polynomial_{field("CRCPR", "CRCPOLY")},
@@ -324,7 +401,10 @@ spi_classic::spi_classic(
       tx_dma_{ctx.peers, lower(desc.name) + "_tx_dma"},
       rx_dma_{ctx.peers, lower(desc.name) + "_rx_dma"}
 {
-  expect_field("CR2", "FRXTH", false);
+  if(not fifo_)
+  {
+    expect_field("CR2", "FRXTH", false);
+  }
   if(controller_ and not attachments_.empty())
   {
     throw config_error(
@@ -335,7 +415,16 @@ spi_classic::spi_classic(
 
 auto spi_classic::frame_bits() const -> std::uint32_t
 {
-  return get(regs_, wide_) != 0 ? 16 : 8;
+  if(fifo_)
+  {
+    return get(regs_, size_) + 1;
+  }
+  return get(regs_, size_) != 0 ? 16 : 8;
+}
+
+auto spi_classic::frame_bytes() const -> std::uint8_t
+{
+  return frame_bits() > 8 ? 2 : 1;
 }
 
 auto spi_classic::wire_frame(std::uint32_t value) const -> std::uint32_t
@@ -391,32 +480,67 @@ auto spi_classic::crc_step(
 
 auto spi_classic::tx_ready() const -> bool
 {
+  if(fifo_)
+  {
+    return state_.fifo.tx_level >= frame_bytes();
+  }
   return state_.tx_full != 0;
 }
 
 auto spi_classic::tx_empty() const -> bool
 {
+  if(fifo_)
+  {
+    return state_.fifo.tx_level <= 2;
+  }
   return state_.tx_full == 0;
 }
 
 auto spi_classic::tx_holding() const -> bool
 {
+  if(fifo_)
+  {
+    return state_.fifo.tx_level != 0;
+  }
   return state_.tx_full != 0;
 }
 
 auto spi_classic::rx_ready() const -> bool
 {
+  if(fifo_)
+  {
+    return state_.fifo.rx_level >= (get(regs_, fifo_->threshold) != 0 ? 1 : 2);
+  }
   return state_.rx_full != 0;
 }
 
 auto spi_classic::take_tx() -> std::uint32_t
 {
+  if(fifo_)
+  {
+    return fifo_pop(state_.fifo.tx, state_.fifo.tx_level, frame_bytes()) & spi_mask(frame_bits());
+  }
   state_.tx_full = 0;
   return state_.tx;
 }
 
 void spi_classic::queue_tx(std::uint32_t offset, std::uint8_t size, std::uint32_t value)
 {
+  if(fifo_)
+  {
+    if(offset != data_.offset)
+    {
+      return;
+    }
+    auto const count = static_cast<std::uint8_t>(size == 1 ? 1 : 2);
+    if(not fifo_push(state_.fifo.tx, state_.fifo.tx_level, value, count)
+       and not std::exchange(dropped_logged_, true))
+    {
+      warn(
+          "DR", "a DR write past the 4 bytes of the TXFIFO: the bytes that do not fit are dropped");
+    }
+    return;
+  }
   auto const merged = merge_write(regs_.peek(data_.offset), offset, size, value);
   state_.tx         = merged & spi_mask(frame_bits());
   state_.tx_full    = 1;
@@ -424,6 +548,17 @@ void spi_classic::queue_tx(std::uint32_t offset, std::uint8_t size, std::uint32_
 
 void spi_classic::store_rx(std::uint32_t received)
 {
+  if(fifo_)
+  {
+    auto const room = state_.fifo.rx.size() - state_.fifo.rx_level;
+    if(get(regs_, overrun_) != 0 or room < frame_bytes())
+    {
+      update(regs_, overrun_, 1);
+      return;
+    }
+    fifo_push(state_.fifo.rx, state_.fifo.rx_level, received, frame_bytes());
+    return;
+  }
   if(state_.rx_full != 0 or get(regs_, overrun_) != 0)
   {
     update(regs_, overrun_, 1);
@@ -433,8 +568,16 @@ void spi_classic::store_rx(std::uint32_t received)
   state_.rx_full = 1;
 }
 
-void spi_classic::read_rx(std::uint32_t, std::uint8_t)
+void spi_classic::read_rx(std::uint32_t offset, std::uint8_t size)
 {
+  if(fifo_)
+  {
+    if(offset == data_.offset)
+    {
+      fifo_pop(state_.fifo.rx, state_.fifo.rx_level, static_cast<std::uint8_t>(size == 1 ? 1 : 2));
+    }
+    return;
+  }
   state_.rx_full = 0;
 }
 
@@ -706,12 +849,22 @@ void spi_classic::flags()
   auto       busy       = shifting or (up and tx_holding());
   if(controller and receive_only())
   {
-    busy = get(regs_, bidi_) == 0;
+    busy = fifo_ or get(regs_, bidi_) == 0;
   }
   update(regs_, tx_flag_, tx_empty() ? 1 : 0);
   update(regs_, rx_flag_, rx_ready() ? 1 : 0);
   update(regs_, busy_, busy ? 1 : 0);
-  regs_.poke(data_.offset, state_.rx & spi_mask(frame_bits()));
+  if(fifo_)
+  {
+    auto const& fifo = state_.fifo;
+    update(regs_, fifo_->rx_level, std::min<std::uint32_t>(fifo.rx_level, 3));
+    update(regs_, fifo_->tx_level, std::min<std::uint32_t>(fifo.tx_level, 3));
+    regs_.poke(data_.offset, std::uint32_t{fifo.rx[0]} | std::uint32_t{fifo.rx[1]} << 8);
+  }
+  else
+  {
+    regs_.poke(data_.offset, state_.rx & spi_mask(frame_bits()));
+  }
   auto const errors =
       get(regs_, overrun_) != 0 or get(regs_, fault_) != 0 or get(regs_, crc_error_) != 0;
   auto const level = (get(regs_, tx_ie_) != 0 and tx_empty())
@@ -783,6 +936,10 @@ void spi_classic::plain_written(std::uint32_t, std::uint32_t)
 
 void spi_classic::control2_written(std::uint32_t, std::uint32_t)
 {
+  if(fifo_ and get(regs_, size_) < 3)
+  {
+    update(regs_, size_, 7);
+  }
   warn_ti();
 }
 

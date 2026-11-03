@@ -1352,6 +1352,21 @@ Source: [spi.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/per
   reply pending drives all ones in that frame, and the frame's end fails the run with
   `config_error`.
 
+STM32L4 SPI1 to SPI3, RM0351 section 42, follow the STM32L1 rules above with a 4-byte TXFIFO and
+RXFIFO and frames of CR2.DS + 1 bits:
+
+- A DR write pushes one byte at 8 bits and two bytes at 16 or 32 bits, a DR read pops as many,
+  the 32-bit access as the 16-bit one, inferred. Byte accesses to DR + 1 to DR + 3 move no FIFO
+  byte, and bytes past the 4 the TXFIFO holds are dropped with one `model_warning`, inferred.
+- With DS above 8 a frame takes two bytes, so a byte write waits for the next byte before the
+  frame starts, inferred.
+- A DR read of an empty RXFIFO slot returns 0 and pops nothing, inferred.
+- FRLVL reads 11 with 3 bytes in the RXFIFO, as with 4, inferred.
+- The TXFIFO keeps its bytes across SPE 0 and sends them once SPE and MSTR are 1, inferred.
+- ES0250 2.23.1, BSY staying high once the SPI is disabled, ES0250 2.23.2, BSY staying high at
+  the end of a target transfer, and ES0250 2.23.3, CRC corruption when another peripheral's DMA
+  transfer completes, are not modelled: BSY follows RM0351 42.4.10 and the CRC RM0351 42.4.14.
+
 ## SBS
 
 Source: [sbs.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/sbs.cpp), [secure_config.hpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/secure_config.hpp)

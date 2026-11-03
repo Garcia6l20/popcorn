@@ -233,8 +233,9 @@ RESETS: dict[tuple[str, str], int] = {
     **{(adc, "TR3"): 0x00FF_0000 for adc in ("ADC1", "ADC2", "ADC3")},
     **{(sai, reg): 8 for sai in ("SAI1", "SAI2") for reg in ("ASR", "BSR")},
     ("DAC1", "SHRR"): 0x0001_0001,
+    **{(spi, "CR2"): 0x0700 for spi in ("SPI1", "SPI2", "SPI3")},
 }
-"""Every register reset 03a2 corrects, with its RM0351 value."""
+"""Every register reset the family patch corrects, with its RM0351 value."""
 
 
 def _fields(
@@ -1109,3 +1110,13 @@ def test_tim15_to_tim17_take_the_rm0351_32_6_and_32_7_layouts(name: str) -> None
         assert {f.name: f.width for f in registers["OR1"].fields} == {"TI1_RMP": 2}
         assert "SMCR" not in registers
     assert _peripheral(description, "TIM1").irqs == [24, 25, 26, 27]
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", LINE_PARTS)
+def test_spi_cr1_bit_11_is_crcl(name: str) -> None:
+    description = _description(name)
+    for unit in ("SPI1", "SPI2", "SPI3"):
+        registers = _registers(description, unit)
+        cr1 = {f.name: (f.lsb, f.width) for f in registers["CR1"].fields}
+        assert cr1["CRCL"] == (11, 1) and "DFF" not in cr1

@@ -1405,6 +1405,11 @@ struct spi_classic_variant
 {
   /** @brief The peripheral has the TI frame format, `CR2.FRF`. Without it the bit is storage. */
   bool ti_mode;
+  /**
+   * @brief The peripheral has the 32-bit transmit and receive FIFOs, frames of `CR2.DS` + 1 bits
+   *        and `CR2.FRXTH`, RM0351 42.4.9. Without it, one buffer each way and `CR1.DFF`.
+   */
+  bool fifo = false;
   /** @brief Buses whose clock is the clock of an instance in their window. */
   std::span<bus_window const> kernel_buses;
 };
@@ -1413,6 +1418,11 @@ struct spi_classic_variant
 inline constexpr spi_classic_variant l1_spi_ti{.ti_mode = true, .kernel_buses = l1_apb_windows};
 /** @brief STM32L1 SPI of Cat.1 and Cat.2, RM0038 28.2.1 and 28.5.2 FRF: no TI mode. */
 inline constexpr spi_classic_variant l1_spi{.ti_mode = false, .kernel_buses = l1_apb_windows};
+/** @brief STM32L4 SPI1 to SPI3, RM0351 42.3 Table 268: the TI mode and the FIFOs. */
+inline constexpr spi_classic_variant l4_spi{
+    .ti_mode      = true,
+    .fifo         = true,
+    .kernel_buses = l4_apb_windows};
 
 /** @brief A TZSC `<STEM>SEC` or TZIC `<STEM>IE` stem whose peripheral has another name. */
 struct gtzc_rename
