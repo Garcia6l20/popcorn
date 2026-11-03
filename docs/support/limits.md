@@ -580,9 +580,6 @@ On the STM32L47x/L48x, RM0351 section 3:
   nothing, log one warning per machine life and raise `model_error` under
   `strict_peripherals`, inferred. The bank 2 WRP and PCROP words protect nothing then. On a 1 MB
   part the flash is always two banks.
-- A debug port load of the bank under a fast row lets the row finish, and one of a torn double
-  word reads it with no `ECCD` and no NMI. The model sees CPU and DMA loads only, where RM0351
-  3.3.7 and 3.3.2 apply to every D-bus read.
 - ES0250 2.2.2: a PCROP area within one page is kept with its page at the regression, as
   RM0351 3.5.1 states, where the erratum leaves the bank unerased and the area unprotected.
 - ES0250 2.2.23: `OBL_LAUNCH` with MSI at 8 MHz or more logs one warning per machine life, a

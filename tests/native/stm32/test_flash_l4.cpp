@@ -1887,28 +1887,54 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "popcorn deviation, services.hpp: a DAP load of the bank under a fast row lets the row "
-    "finish, a DAP load of a torn double word takes no NMI")
+    "RM0351 3.3.7 and 3.3.2: a DAP load of the bank under a fast row aborts the row, a DAP load "
+    "of a torn double word sets ECCD and takes the NMI, m.mem loads neither")
 {
-  rig r;
-  r.hclk_16mhz();
-  r.erase_bank2();
-  r.control(fstpg | eopie);
-  auto const start = r.f.target->virtual_clock().time().ps;
-  r.store_words(bank2, rig::row(0xc0));
-  r.idle_for_ps(
-      start + 3 * double_word_ps + double_word_ps / 2 - r.f.target->virtual_clock().time().ps);
-  REQUIRE(r.status("BSY") == 1);
-  CHECK(r.f.target->mem(true).read(bank2 + 1024, 4) == ~0u);
-  r.wait_idle();
-  CHECK(r.words(bank2, 64) == rig::row(0xc0));
-  CHECK(r.status("EOP") == 1);
-  CHECK(r.warnings("CR") == 0);
-  r.control(0);
-  constexpr address line = bank2 + 0x800;
-  r.tear(line);
-  CHECK(r.f.target->mem(true).read(line, 4).has_value());
-  CHECK(r.read("ECCR") == 0);
-  CHECK(r.load(line).nmi_count == 1);
+  for(auto const dap : {false, true})
+  {
+    CAPTURE(dap);
+    rig        r;
+    auto const view = [&] { return dap ? r.f.target->mem(true) : r.f.target->mem(); };
+    r.hclk_16mhz();
+    r.erase_bank2();
+    r.control(fstpg | eopie);
+    auto const start = r.f.target->virtual_clock().time().ps;
+    r.store_words(bank2, rig::row(0xc0));
+    r.idle_for_ps(
+        start + 3 * double_word_ps + double_word_ps / 2 - r.f.target->virtual_clock().time().ps);
+    REQUIRE(r.status("BSY") == 1);
+    CHECK(view().read(bank2 + 1024, 4) == ~0u);
+    r.wait_idle();
+    if(dap)
+    {
+      CHECK(
+          r.words(bank2, 8)
+          == std::vector<std::uint32_t>{0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, ~0u, ~0u});
+      CHECK(r.status("EOP") == 0);
+      REQUIRE(r.warnings("CR") == 1);
+      CHECK(r.logged.back().message.contains("aborts the row"));
+    }
+    else
+    {
+      CHECK(r.words(bank2, 64) == rig::row(0xc0));
+      CHECK(r.status("EOP") == 1);
+      CHECK(r.warnings("CR") == 0);
+    }
+    r.control(0);
+    constexpr address line = bank2 + 0x800;
+    r.tear(line);
+    REQUIRE(r.f.target->mem().write(sym(firmware, "nmi_count"), 4, 0).has_value());
+    CHECK(view().read(line, 4).has_value());
+    CHECK(r.read("ECCR") == (dap ? eccd | bk_ecc | 0x800u : 0u));
+    r.idle_for_ps(1'000'000);
+    CHECK(r.word(sym(firmware, "nmi_count")) == (dap ? 1u : 0u));
+  }
+  rig strict{strict_options()};
+  strict.hclk_16mhz();
+  strict.erase_bank2();
+  strict.control(fstpg);
+  strict.store_words(bank2, rig::row(0xd0));
+  REQUIRE(strict.status("BSY") == 1);
+  CHECK_THROWS_AS((void)strict.f.target->mem(true).read(bank2 + 1024, 4), popcorn::model_error);
 }
 }

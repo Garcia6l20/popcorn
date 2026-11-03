@@ -408,10 +408,12 @@ public:
   }
 
   /**
-   * @brief Starts or stops reporting CPU and DMA loads of [@p at, @p at + @p size) to the
-   *        controller model of the region holding it, through periph::model::on_memory_read.
-   *        Covers every alias of the bytes. Idempotent per range. Host and debugger reads are
-   *        never reported, nor are instruction fetches, vector reads and exception stacking.
+   * @brief Starts or stops reporting CPU, DMA and debug port loads of [@p at, @p at + @p size)
+   *        to the controller model of the region holding it, through
+   *        periph::model::on_memory_read. A debug port load is a filtered debugger access, a
+   *        filtered core::memory_view. Covers every alias of the bytes. Idempotent per range.
+   *        Unfiltered debugger reads, the models' own reads, instruction fetches, vector reads
+   *        and exception stacking are never reported.
    *        Unlike the other requests it is not deferred: it takes effect at once, and is safe
    *        from model events and memory hooks, an on_memory_read call included. Each range
    *        spans from 7 bytes before it to its end. Every engine page a span touches gets one

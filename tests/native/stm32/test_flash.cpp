@@ -1775,6 +1775,21 @@ TEST_CASE("a CPU load of a torn quad-word sets ECCD, BK_ECC and ADDR_ECC and tak
   CHECK(reported(0x0807'e030) == (eccd | 0x7'e030u));
 }
 
+TEST_CASE(
+    "RM0456 7.3.2: a DAP block read of a torn quad-word without TrustZone sets ECCD and raises the "
+    "NMI, an m.mem block read does not")
+{
+  flash_rig rig;
+  rig.tear(torn_line);
+  std::array<std::byte, 16> bytes{};
+  REQUIRE(rig.f.target->mem().read_block(torn_line, bytes).has_value());
+  CHECK(rig.eccr() == 0);
+  CHECK_FALSE(rig.nmi_level());
+  REQUIRE(rig.f.target->mem(false).read_block(torn_line, bytes).has_value());
+  CHECK(rig.eccr() == reported(torn_line));
+  CHECK(rig.nmi_level());
+}
+
 TEST_CASE("loads of the quad-words around a torn one report nothing")
 {
   flash_rig rig;

@@ -16,6 +16,11 @@ constexpr auto engine_attrs(bus_attrs attrs) noexcept -> uc_mem_attrs
   return {.secure = attrs.secure, .privileged = attrs.privileged};
 }
 
+constexpr auto reports_reads(bus_attrs attrs) noexcept -> bool
+{
+  return attrs.by == initiator::dma or (attrs.by == initiator::debugger and attrs.filtered);
+}
+
 auto writable_by(region_desc const& region, initiator by) noexcept -> bool
 {
   return by == initiator::debugger or (region.acc.write and region.kind != region_kind::rom);
@@ -28,7 +33,7 @@ auto writable_by(region_desc const& region, initiator by) noexcept -> bool
     std::uint8_t         size,
     bus_attrs            attrs) -> std::uint32_t
 {
-  if(attrs.by == initiator::dma and not run_->controller_runs.empty())
+  if(reports_reads(attrs) and not run_->controller_runs.empty())
   {
     run_->note_controller_read(region, addr, size, attrs);
   }

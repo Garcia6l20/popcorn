@@ -203,11 +203,13 @@ public:
   }
 
   /**
-   * @brief A CPU or DMA load overlapped a range the model watches through
+   * @brief A CPU, DMA or debug port load overlapped a range the model watches through
    *        core::machine_services::watch_reads. Called once per load, also when the call
-   *        changes the model's watches, before the load reads its bytes, on the machine thread
-   *        with the engine running and the GIL released. An interrupt the call makes
-   *        deliverable is taken before the next instruction. The default does nothing.
+   *        changes the model's watches, before the load reads its bytes, with the GIL released:
+   *        on the machine thread with the engine running for a CPU or DMA load, from the
+   *        filtered core::memory_view call while the machine is parked for a debug port load.
+   *        An interrupt the call makes deliverable is taken before the next instruction. The
+   *        default does nothing.
    * @param region Region the load hit, an alias included.
    * @param addr Address loaded, as the instruction or channel spelled it.
    * @param size Load size in bytes, 8 for a 64-bit load.
