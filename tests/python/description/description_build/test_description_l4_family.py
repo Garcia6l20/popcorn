@@ -1042,3 +1042,70 @@ def test_tim1_and_tim8_take_the_rm0351_30_4_fields(name: str) -> None:
             bits = {f.name: (f.lsb, f.width) for f in registers[register].fields}
             assert bits[field] == (8, 1)
             assert registers[register].reset == 1
+
+
+TIM15_LAYOUT = {
+    "CR2": [("OIS2", 10, 1), ("TI1S", 7, 1), ("MMS", 4, 3)],
+    "SMCR": [("SMS_1", 16, 1), ("MSM", 7, 1), ("TS", 4, 3), ("SMS", 0, 3)],
+    "DIER": [("CC2IE", 2, 1)],
+    "SR": [("CC2OF", 10, 1), ("CC2IF", 2, 1)],
+    "EGR": [("CC2G", 2, 1)],
+    "CCMR1_Output": [
+        ("OC2M_bit3", 24, 1),
+        ("OC2M", 12, 3),
+        ("OC2PE", 11, 1),
+        ("OC2FE", 10, 1),
+        ("CC2S", 8, 2),
+    ],
+    "CCMR1_Input": [("IC2F", 12, 4), ("IC2PSC", 10, 2), ("CC2S", 8, 2)],
+    "CCER": [("CC2NP", 7, 1), ("CC2P", 5, 1), ("CC2E", 4, 1)],
+    "CCR2": [("CCR2", 0, 16)],
+    "OR1": [("ENCODER_MODE", 1, 2), ("TI1_RMP", 0, 1)],
+    "OR2": [
+        ("BKCMP2P", 11, 1),
+        ("BKCMP1P", 10, 1),
+        ("BKINP", 9, 1),
+        ("BKDF1BK0E", 8, 1),
+        ("BKCMP2E", 2, 1),
+        ("BKCMP1E", 1, 1),
+        ("BKINE", 0, 1),
+    ],
+}
+"""RM0351 32.6.2 to 32.6.20: the TIM15 fields the four SVDs leave out, the SVD giving TIM15 the
+TIM16 layout."""
+TIM16_17_DROPPED = {"DIER": {"TDE", "COMDE", "TIE"}, "SR": {"TIF"}, "EGR": {"TG"}}
+"""RM0351 32.7.3 to 32.7.5 and Table 214: bits the four SVDs give TIM16 and TIM17."""
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("name", TIM_PARTS)
+def test_tim15_to_tim17_take_the_rm0351_32_6_and_32_7_layouts(name: str) -> None:
+    description = _description(name)
+    tim15 = _registers(description, "TIM15")
+    for register, added in TIM15_LAYOUT.items():
+        layout = {f: (lsb, width) for f, lsb, width, _ in _layout(tim15[register])}
+        for field, lsb, width in added:
+            assert layout[field] == (lsb, width), (register, field)
+    assert {n: tim15[n].offset for n in ("SMCR", "CCR2", "OR1", "OR2")} == {
+        "SMCR": 0x08,
+        "CCR2": 0x38,
+        "OR1": 0x50,
+        "OR2": 0x60,
+    }
+    assert tim15["OR2"].reset == 1
+    assert "TS_1" not in {f.name for f in tim15["SMCR"].fields}
+    for unit, dfsdm in (("TIM15", "BKDF1BK0E"), ("TIM16", "BKDF1BK1E"), ("TIM17", "BKDF1BK2E")):
+        registers = _registers(description, unit)
+        assert "BKF" not in {f.name for f in registers["BDTR"].fields}
+        ccmr = {f.name: (f.lsb, f.width) for f in registers["CCMR1_Output"].fields}
+        assert ccmr["OC1M_bit3"] == (16, 1) and "OC1M_2" not in ccmr
+        assert {f.name: (f.lsb, f.width) for f in registers["OR2"].fields}[dfsdm] == (8, 1)
+        irqs = _peripheral(description, unit).irqs
+        assert irqs == [{"TIM15": 24, "TIM16": 25, "TIM17": 26}[unit]]
+    for unit in ("TIM16", "TIM17"):
+        registers = _registers(description, unit)
+        for register, dropped in TIM16_17_DROPPED.items():
+            assert not dropped & {f.name for f in registers[register].fields}, (unit, register)
+        assert {f.name: f.width for f in registers["OR1"].fields} == {"TI1_RMP": 2}
+        assert "SMCR" not in registers
+    assert _peripheral(description, "TIM1").irqs == [24, 25, 26, 27]

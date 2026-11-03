@@ -2,8 +2,7 @@
 
 The CCMR1 and CCMR2 words have an input and an output view at one offset, and some SVDs give a
 bit in one view only, such as IC1F bit 3 on the H573 TIM13. The oracle is the description: the
-union of the read-write fields over every view at the word. The STM32L4 timers are storage, so
-their parts are left out.
+union of the read-write fields over every view at the word.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ import pytest
 from popcorn._core import Access, PeripheralDesc
 from popcorn.stm32 import shipped_parts
 
-PARTS = [part for part in shipped_parts() if not part.startswith("STM32L4")]
+PARTS = shipped_parts()
 
 
 def ccmr_words(peripheral: PeripheralDesc) -> dict[int, int]:

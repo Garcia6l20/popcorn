@@ -52,6 +52,8 @@ constexpr std::uint32_t    master_update = 2;
 constexpr std::uint32_t    ece           = 1u << 14;
 constexpr std::uint32_t    uifremap      = 1u << 11;
 constexpr std::uint32_t    dir_down      = 1u << 4;
+constexpr std::uint32_t    pwm1          = 6u << 4;
+constexpr std::uint32_t    sms_reset     = 4;
 
 class bus_probe final : public popcorn::testing::inert_model
 {
@@ -194,7 +196,8 @@ struct rig
 
   void clock(std::string_view unit) const
   {
-    auto const apb2 = unit == "TIM1" or unit == "TIM8";
+    auto const apb2 = std::ranges::contains(
+        std::array<std::string_view, 5>{"TIM1", "TIM8", "TIM15", "TIM16", "TIM17"}, unit);
     set("RCC", apb2 ? "APB2ENR" : "APB1ENR1", std::string{unit} + "EN", 1);
   }
 
@@ -319,18 +322,14 @@ void constructs_throw(part_description const& desc)
 }
 }
 
-TEST_CASE("RM0351 30.1, 31.1, 33.1: TIM1 to TIM8 have a model on STM32L476RCTx, TIM15 to 17 not")
+TEST_CASE("RM0351 30.1 to 33.1: TIM1 to TIM8 and TIM15 to TIM17 have a model on STM32L476RCTx")
 {
   rig const r;
-  for(auto const* unit : {"TIM1", "TIM2", "TIM3", "TIM4", "TIM5", "TIM6", "TIM7", "TIM8"})
+  for(auto const* unit :
+      {"TIM1", "TIM2", "TIM3", "TIM4", "TIM5", "TIM6", "TIM7", "TIM8", "TIM15", "TIM16", "TIM17"})
   {
     CAPTURE(unit);
     CHECK(r.f->target->model(unit) != nullptr);
-  }
-  for(auto const* unit : {"TIM15", "TIM16", "TIM17"})
-  {
-    CAPTURE(unit);
-    CHECK(r.f->target->model(unit) == nullptr);
   }
 }
 
@@ -378,7 +377,7 @@ TEST_CASE("TIM3 and TIM4 ARR bits 31:16 keep their reset ones after a write, inf
   CHECK(r.read("TIM2", "ARR") == 0x0001'2345u);
 }
 
-TEST_CASE("every entry of RM0351 Tables 207 and 202 reaches its own source and no other")
+TEST_CASE("every entry of RM0351 Tables 207, 202 and 210 reaches its own source and no other")
 {
   struct row
   {
@@ -387,25 +386,28 @@ TEST_CASE("every entry of RM0351 Tables 207 and 202 reaches its own source and n
     std::uint32_t    remap;
     std::string_view source;
   };
-  constexpr std::array<row, 25> table{
-      {{"TIM2", 0, 0, "TIM1"}, {"TIM2", 1, 0, "TIM8"},  {"TIM2", 1, 1, "OTG_FS"},
-       {"TIM2", 2, 0, "TIM3"}, {"TIM2", 3, 0, "TIM4"},  {"TIM3", 0, 0, "TIM1"},
-       {"TIM3", 1, 0, "TIM2"}, {"TIM3", 2, 0, "TIM15"}, {"TIM3", 3, 0, "TIM4"},
-       {"TIM4", 0, 0, "TIM1"}, {"TIM4", 1, 0, "TIM2"},  {"TIM4", 2, 0, "TIM3"},
-       {"TIM4", 3, 0, "TIM8"}, {"TIM5", 0, 0, "TIM2"},  {"TIM5", 1, 0, "TIM3"},
-       {"TIM5", 2, 0, "TIM4"}, {"TIM5", 3, 0, "TIM8"},  {"TIM1", 0, 0, "TIM15"},
-       {"TIM1", 1, 0, "TIM2"}, {"TIM1", 2, 0, "TIM3"},  {"TIM1", 3, 0, "TIM4"},
-       {"TIM8", 0, 0, "TIM1"}, {"TIM8", 1, 0, "TIM2"},  {"TIM8", 2, 0, "TIM4"},
-       {"TIM8", 3, 0, "TIM5"}}
+  constexpr std::array<row, 29> table{
+      {{"TIM2", 0, 0, "TIM1"},       {"TIM2", 1, 0, "TIM8"},      {"TIM2", 1, 1, "OTG_FS"},
+       {"TIM2", 2, 0, "TIM3"},       {"TIM2", 3, 0, "TIM4"},      {"TIM3", 0, 0, "TIM1"},
+       {"TIM3", 1, 0, "TIM2"},       {"TIM3", 2, 0, "TIM15"},     {"TIM3", 3, 0, "TIM4"},
+       {"TIM4", 0, 0, "TIM1"},       {"TIM4", 1, 0, "TIM2"},      {"TIM4", 2, 0, "TIM3"},
+       {"TIM4", 3, 0, "TIM8"},       {"TIM5", 0, 0, "TIM2"},      {"TIM5", 1, 0, "TIM3"},
+       {"TIM5", 2, 0, "TIM4"},       {"TIM5", 3, 0, "TIM8"},      {"TIM1", 0, 0, "TIM15"},
+       {"TIM1", 1, 0, "TIM2"},       {"TIM1", 2, 0, "TIM3"},      {"TIM1", 3, 0, "TIM4"},
+       {"TIM8", 0, 0, "TIM1"},       {"TIM8", 1, 0, "TIM2"},      {"TIM8", 2, 0, "TIM4"},
+       {"TIM8", 3, 0, "TIM5"},       {"TIM15", 0, 0, "TIM1"},     {"TIM15", 1, 0, "TIM3"},
+       {"TIM15", 2, 0, "TIM16_OC1"}, {"TIM15", 3, 0, "TIM17_OC1"}}
   };
-  constexpr std::array<std::string_view, 6> masters{"TIM1", "TIM2", "TIM3", "TIM4", "TIM5", "TIM8"};
+  constexpr std::array<std::string_view, 7> masters{"TIM1", "TIM2", "TIM3", "TIM4",
+                                                    "TIM5", "TIM8", "TIM15"};
   for(auto const& [slave, select, remap, source] : table)
   {
     CAPTURE(slave);
     CAPTURE(select);
     CAPTURE(remap);
     rig              r;
-    auto const       has_source = std::ranges::contains(masters, source);
+    auto const       oc1        = source.ends_with("_OC1");
+    auto const       has_source = oc1 or std::ranges::contains(masters, source);
     std::string_view bystander{};
     for(auto const unit : masters)
     {
@@ -416,7 +418,15 @@ TEST_CASE("every entry of RM0351 Tables 207 and 202 reaches its own source and n
     }
     r.base(bystander, 99);
     r.write(bystander, "CR2", master_update << 4);
-    if(has_source)
+    auto const unit = oc1 ? source.substr(0, 5) : source;
+    if(oc1)
+    {
+      r.base(unit, 199);
+      r.write(unit, "CCR1", 100);
+      r.write(unit, "CCMR1_Output", pwm1);
+      r.set(unit, "CCER", "CC1E", 1);
+    }
+    else if(has_source)
     {
       r.base(source, 199);
       r.write(source, "CR2", master_update << 4);
@@ -430,7 +440,7 @@ TEST_CASE("every entry of RM0351 Tables 207 and 202 reaches its own source and n
     r.enable(bystander);
     if(has_source)
     {
-      r.enable(source);
+      r.enable(unit);
     }
     r.at_tick(250);
     if(has_source)
@@ -710,19 +720,23 @@ TEST_CASE("under strict a firmware OR1 or OR2 write that selects an internal inp
     std::uint32_t    value;
   };
   for(auto const& [unit, reg, value] : {
-          leg{"TIM2", "OR1", 1u << 1 },
-          leg{"TIM2", "OR1", 1u << 2 },
-          leg{"TIM2", "OR2", 1u << 14},
-          leg{"TIM3", "OR1", 1u      },
-          leg{"TIM3", "OR2", 1u << 14},
-          leg{"TIM1", "OR1", 1u << 4 },
-          leg{"TIM1", "OR1", 1u      },
-          leg{"TIM1", "OR1", 1u << 2 },
-          leg{"TIM1", "OR2", 1u << 15},
-          leg{"TIM8", "OR1", 1u << 4 },
-          leg{"TIM8", "OR1", 1u << 1 },
-          leg{"TIM8", "OR1", 3u << 2 },
-          leg{"TIM8", "OR2", 1u << 14}
+          leg{"TIM2",  "OR1", 1u << 1 },
+          leg{"TIM2",  "OR1", 1u << 2 },
+          leg{"TIM2",  "OR2", 1u << 14},
+          leg{"TIM3",  "OR1", 1u      },
+          leg{"TIM3",  "OR2", 1u << 14},
+          leg{"TIM1",  "OR1", 1u << 4 },
+          leg{"TIM1",  "OR1", 1u      },
+          leg{"TIM1",  "OR1", 1u << 2 },
+          leg{"TIM1",  "OR2", 1u << 15},
+          leg{"TIM8",  "OR1", 1u << 4 },
+          leg{"TIM8",  "OR1", 1u << 1 },
+          leg{"TIM8",  "OR1", 3u << 2 },
+          leg{"TIM8",  "OR2", 1u << 14},
+          leg{"TIM15", "OR1", 1u      },
+          leg{"TIM15", "OR1", 1u << 1 },
+          leg{"TIM16", "OR1", 3u      },
+          leg{"TIM17", "OR1", 2u      }
   })
   {
     CAPTURE(unit);
@@ -750,16 +764,20 @@ TEST_CASE("an L4 timer description against the l4_tim variant throws at construc
     bool             add;
   };
   for(auto const& [unit, reg, field, lsb, add] : {
-          leg{"TIM3", "SMCR", "TS_1",     20, true },
-          leg{"TIM3", "CR2",  "MMS_1",    25, true },
-          leg{"TIM4", "SMCR", "SMS_1",    16, false},
-          leg{"TIM5", "CR1",  "UIFREMAP", 11, false},
-          leg{"TIM2", "CR1",  "DIR",      4,  false},
-          leg{"TIM2", "OR1",  "ITR1_RMP", 0,  false},
-          leg{"TIM2", "OR1",  "TI4_RMP",  2,  false},
-          leg{"TIM2", "OR2",  "ETRSEL",   14, false},
-          leg{"TIM3", "OR1",  "TI1_RMP",  0,  false},
-          leg{"TIM5", "SMCR", "ETP",      15, false},
+          leg{"TIM3",  "SMCR", "TS_1",         20, true },
+          leg{"TIM3",  "CR2",  "MMS_1",        25, true },
+          leg{"TIM4",  "SMCR", "SMS_1",        16, false},
+          leg{"TIM5",  "CR1",  "UIFREMAP",     11, false},
+          leg{"TIM2",  "CR1",  "DIR",          4,  false},
+          leg{"TIM2",  "OR1",  "ITR1_RMP",     0,  false},
+          leg{"TIM2",  "OR1",  "TI4_RMP",      2,  false},
+          leg{"TIM2",  "OR2",  "ETRSEL",       14, false},
+          leg{"TIM3",  "OR1",  "TI1_RMP",      0,  false},
+          leg{"TIM5",  "SMCR", "ETP",          15, false},
+          leg{"TIM15", "SMCR", "SMS_1",        16, false},
+          leg{"TIM15", "OR1",  "ENCODER_MODE", 1,  false},
+          leg{"TIM16", "CR2",  "MMS",          4,  true },
+          leg{"TIM17", "OR1",  "TI1_RMP",      0,  false},
   })
   {
     CAPTURE(unit);
@@ -942,7 +960,8 @@ TEST_CASE("RM0351 33.4.1 and 33.4.6: TIM6 and TIM7 UIFREMAP copies UIF into CNT 
   }
 }
 
-TEST_CASE("RM0351 33.4.1: a TIM6 or TIM7 description with CR1.DIR or CMS throws at construction")
+TEST_CASE(
+    "RM0351 33.4.1, 32.5.1: a TIM6, TIM7, TIM15 to TIM17 CR1.DIR or CMS throws at construction")
 {
   struct leg
   {
@@ -950,7 +969,7 @@ TEST_CASE("RM0351 33.4.1: a TIM6 or TIM7 description with CR1.DIR or CMS throws 
     std::uint8_t     lsb;
     std::uint8_t     width;
   };
-  for(auto const* unit : {"TIM6", "TIM7"})
+  for(auto const* unit : {"TIM6", "TIM7", "TIM15", "TIM16", "TIM17"})
   {
     for(auto const& [field, lsb, width] : {
             leg{"DIR", 4, 1},
@@ -971,7 +990,7 @@ TEST_CASE("RM0351 33.4.1: a TIM6 or TIM7 description with CR1.DIR or CMS throws 
   }
 }
 
-TEST_CASE("RM0351 Table 61: TIM1 raises 24 to 27 by group, TIM8 43 to 46, through the shared names")
+TEST_CASE("RM0351 Table 61: TIM1 raises 24 to 27 by group, TIM8 43 to 46, TIM15 to TIM17 24 to 26")
 {
   struct leg
   {
@@ -981,16 +1000,23 @@ TEST_CASE("RM0351 Table 61: TIM1 raises 24 to 27 by group, TIM8 43 to 46, throug
     std::uint32_t    irq;
   };
   for(auto const& [unit, enable, generate, irq] : {
-          leg{"TIM1", "BIE",   "BG",   24},
-          leg{"TIM1", "BIE",   "B2G",  24},
-          leg{"TIM1", "UIE",   "UG",   25},
-          leg{"TIM1", "TIE",   "TG",   26},
-          leg{"TIM1", "COMIE", "COMG", 26},
-          leg{"TIM1", "CC1IE", "CC1G", 27},
-          leg{"TIM8", "BIE",   "BG",   43},
-          leg{"TIM8", "UIE",   "UG",   44},
-          leg{"TIM8", "TIE",   "TG",   45},
-          leg{"TIM8", "CC4IE", "CC4G", 46},
+          leg{"TIM1",  "BIE",   "BG",   24},
+          leg{"TIM1",  "BIE",   "B2G",  24},
+          leg{"TIM1",  "UIE",   "UG",   25},
+          leg{"TIM1",  "TIE",   "TG",   26},
+          leg{"TIM1",  "COMIE", "COMG", 26},
+          leg{"TIM1",  "CC1IE", "CC1G", 27},
+          leg{"TIM8",  "BIE",   "BG",   43},
+          leg{"TIM8",  "UIE",   "UG",   44},
+          leg{"TIM8",  "TIE",   "TG",   45},
+          leg{"TIM8",  "CC4IE", "CC4G", 46},
+          leg{"TIM15", "UIE",   "UG",   24},
+          leg{"TIM15", "CC2IE", "CC2G", 24},
+          leg{"TIM15", "TIE",   "TG",   24},
+          leg{"TIM16", "UIE",   "UG",   25},
+          leg{"TIM16", "BIE",   "BG",   25},
+          leg{"TIM17", "CC1IE", "CC1G", 26},
+          leg{"TIM17", "COMIE", "COMG", 26},
   })
   {
     CAPTURE(unit);
@@ -1158,4 +1184,118 @@ TEST_CASE("TIM1 complementary PWM on CH1 and CH1N with dead time flags CC1 250 u
   CHECK(run.compares.front() - started > 250 * us);
   CHECK(run.compares.front() - started < 252 * us);
   CHECK(std::ranges::all_of(gaps(run.compares), [](std::uint64_t gap) { return gap == ms; }));
+}
+
+TEST_CASE("RM0351 32.6.3: TIM15 SMS 0100 resets at each TIM3 update on ITR1, CCR2 flags CC2IF")
+{
+  rig r;
+  r.base("TIM3", 99);
+  r.write("TIM3", "CR2", master_update << 4);
+  r.base("TIM15", 0xffff);
+  r.write("TIM15", "CCR2", 70);
+  r.write("TIM15", "SMCR", sms_reset | (1u << 4));
+  r.enable("TIM15");
+  r.enable("TIM3");
+  r.at_tick(150);
+  CHECK(r.read("TIM15", "CNT") == 50);
+  CHECK(r.get("TIM15", "SR", "TIF") == 1);
+  CHECK(r.get("TIM15", "SR", "CC2IF") == 1);
+  r.write("TIM15", "SR", 0);
+  r.at_tick(165);
+  CHECK(r.read("TIM15", "CNT") == 65);
+  CHECK(r.get("TIM15", "SR", "CC2IF") == 0);
+  r.at_tick(175);
+  CHECK(r.get("TIM15", "SR", "CC2IF") == 1);
+  CHECK(r.warnings() == 0);
+}
+
+TEST_CASE("RM0351 32.6.19, 32.7.17, 32.7.19: OR1 TI1_RMP and ENCODER_MODE 0 capture the pin")
+{
+  struct leg
+  {
+    std::string_view unit;
+    std::string_view field;
+    std::uint32_t    value;
+    std::uint8_t     pin;
+    std::string_view channel;
+  };
+  for(auto const& [unit, field, value, pin, channel] : {
+          leg{"TIM15", "TI1_RMP",      0, 2, "1"},
+          leg{"TIM15", "TI1_RMP",      1, 2, "1"},
+          leg{"TIM15", "ENCODER_MODE", 1, 2, "1"},
+          leg{"TIM15", "ENCODER_MODE", 0, 3, "2"},
+          leg{"TIM15", "ENCODER_MODE", 3, 3, "2"},
+          leg{"TIM16", "TI1_RMP",      0, 6, "1"},
+          leg{"TIM16", "TI1_RMP",      1, 6, "1"},
+          leg{"TIM16", "TI1_RMP",      3, 6, "1"},
+          leg{"TIM17", "TI1_RMP",      0, 7, "1"},
+          leg{"TIM17", "TI1_RMP",      2, 7, "1"},
+  })
+  {
+    CAPTURE(unit);
+    CAPTURE(field);
+    CAPTURE(value);
+    rig   r;
+    auto& porta = r.port("GPIOA", pin, 14);
+    r.base(unit, 0xffff);
+    r.set(unit, "OR1", field, value);
+    r.set(unit, "CCMR1_Input", std::format("CC{}S", channel), 1);
+    r.set(unit, "CCER", std::format("CC{}E", channel), 1);
+    r.enable(unit);
+    porta.drive_at(pin, true, vtime{r.start + 40 * ps_per_tick});
+    r.at_tick(60);
+    CHECK(r.get(unit, "SR", std::format("CC{}IF", channel)) == (value == 0 ? 1u : 0u));
+    CHECK(r.read(unit, std::format("CCR{}", channel)) == (value == 0 ? 40u : 0u));
+    CHECK(r.warnings() == (value == 0 ? 0u : 1u));
+  }
+}
+
+TEST_CASE("RM0351 32.7.7: TIM16 OC1M_bit3 1 holds tim16_oc1 low and logs, its clear is an edge")
+{
+  rig r;
+  r.base("TIM16", 199);
+  r.write("TIM16", "CCR1", 100);
+  r.write("TIM16", "CCMR1_Output", pwm1 | (1u << 16));
+  r.set("TIM16", "CCER", "CC1E", 1);
+  r.base("TIM15", 0xffff);
+  r.write("TIM15", "SMCR", sms_trigger | (2u << 4));
+  r.enable("TIM16");
+  r.at_tick(450);
+  CHECK(r.get("TIM15", "CR1", "CEN") == 0);
+  CHECK(r.warnings() == 1);
+  r.write("TIM16", "CCMR1_Output", pwm1);
+  r.at_tick(650);
+  CHECK(r.get("TIM15", "CR1", "CEN") == 1);
+  CHECK(r.read("TIM15", "CNT") == 200);
+}
+
+TEST_CASE("a TIM16 CCMR1_Output with OC1M and a bit 16 field other than OC1M_bit3 throws")
+{
+  auto  desc = l476rc();
+  auto& view = register_of(timer_of(desc, "TIM16"), "CCMR1_Output");
+  auto found = std::ranges::find(view.fields, std::string{"OC1M_bit3"}, &popcorn::field_desc::name);
+  REQUIRE(found != view.fields.end());
+  found->name = "OC1M_3";
+  constructs_throw(desc);
+}
+
+TEST_CASE("TIM15 to TIM17 BDTR has no BKF, OR2 break sources and CCxNE are storage")
+{
+  rig r;
+  for(auto const* unit : {"TIM15", "TIM16", "TIM17"})
+  {
+    CAPTURE(unit);
+    r.clock(unit);
+    CHECK(r.read(unit, "OR2") == 1);
+    CHECK_FALSE(
+        std::ranges::contains(
+            r.reg(unit, "BDTR").fields, std::string{"BKF"}, &popcorn::field_desc::name));
+    r.write(unit, "BDTR", 0x0000'ff40u);
+    r.write(unit, "OR2", 0x0000'0f07u);
+    r.set(unit, "CCER", "CC1NE", 1);
+    CHECK(r.read(unit, "BDTR") == 0x0000'ff40u);
+    CHECK(r.read(unit, "OR2") == 0x0000'0f07u);
+    CHECK(r.get(unit, "CCER", "CC1NE") == 1);
+  }
+  CHECK(r.warnings() == 0);
 }

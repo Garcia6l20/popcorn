@@ -4,7 +4,7 @@ import pytest
 from popcorn.stm32.description._cubemx import read_part, read_rzone, rzone_file_name
 from popcorn.stm32.description._errors import DescriptionError
 from popcorn.stm32.description._irqs import build_irq_table, read_cmsis_irqs
-from popcorn.stm32.description._patches import IrqAdd, PatchIrqs, load_patches
+from popcorn.stm32.description._patches import IrqAdd, IrqShare, PatchIrqs, load_patches
 from popcorn.stm32.description._svd import SvdCpu, SvdDevice, SvdPeripheral, expand_svd
 
 DATA_DIR = Path(__file__).parents[4] / "tests" / "data" / "stm32"
@@ -166,6 +166,45 @@ def test_add_appends_a_new_irq_and_peripheral_entry() -> None:
     new_irq = next(irq for irq in table.irqs if irq.number == 9)
     assert new_irq.name == "NEWIRQ_IRQn"
     assert table.by_peripheral["B"] == [9]
+
+
+def test_share_gives_a_second_peripheral_the_number_of_an_irq() -> None:
+    device = _device([_peripheral("A", [(5, "FOO")]), _peripheral("B", [])])
+    share = IrqShare(name="FOO", peripheral="B")
+    table = build_irq_table(device, None, [PatchIrqs(share=[share])], rzone_num=None)
+    assert [irq.number for irq in table.irqs] == [5]
+    assert table.by_peripheral["A"] == [5]
+    assert table.by_peripheral["B"] == [5]
+
+
+def test_share_of_an_unknown_irq_name_is_an_error() -> None:
+    device = _device([_peripheral("A", [(5, "FOO")]), _peripheral("B", [])])
+    share = IrqShare(name="BAR", peripheral="B")
+    with pytest.raises(DescriptionError) as excinfo:
+        build_irq_table(device, None, [PatchIrqs(share=[share])], rzone_num=None)
+    assert excinfo.value.key == "share.BAR"
+
+
+@pytest.mark.parametrize(
+    "shares",
+    [
+        [IrqShare(name="FOO", peripheral="A")],
+        [IrqShare(name="FOO", peripheral="B"), IrqShare(name="FOO", peripheral="B")],
+    ],
+)
+def test_share_of_a_number_the_peripheral_holds_is_an_error(shares: list[IrqShare]) -> None:
+    device = _device([_peripheral("A", [(5, "FOO")]), _peripheral("B", [])])
+    with pytest.raises(DescriptionError) as excinfo:
+        build_irq_table(device, None, [PatchIrqs(share=shares)], rzone_num=None)
+    assert excinfo.value.expected == "a peripheral that does not hold 5"
+
+
+def test_share_to_an_unknown_peripheral_is_an_error() -> None:
+    device = _device([_peripheral("A", [(5, "FOO")])])
+    share = IrqShare(name="FOO", peripheral="B")
+    with pytest.raises(DescriptionError) as excinfo:
+        build_irq_table(device, None, [PatchIrqs(share=[share])], rzone_num=None)
+    assert excinfo.value.expected == "a peripheral named B"
 
 
 def test_add_takes_the_cmsis_name_when_the_header_has_the_number() -> None:

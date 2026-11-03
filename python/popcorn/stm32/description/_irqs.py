@@ -72,12 +72,14 @@ def build_irq_table(
     owners: Mapping[str, str | None] | None = None,
 ) -> IrqTable:
     """IrqTable of @p svd, reconciled against @p cmsis (None when no header was found) and
-    @p patches (drop by SVD name, then add), DescriptionError on a duplicate SVD number, an
-    unknown drop name, an add on a number already in use, or a CMSIS number no SVD interrupt or
-    patch add covers. A dropped number loses its SVD owner, only an add gives it one.
-    `by_peripheral` keys an SVD peripheral's numbers by its name in @p owners, the map of
-    `peripheral_owners`, or by its SVD name when @p owners lacks it, and leaves out a peripheral
-    @p owners maps to None. An add keys its number by the peripheral it names. A number of a
+    @p patches (drop by SVD name, then add, then share), DescriptionError on a duplicate SVD
+    number, an unknown drop or share name, a share to an unknown peripheral or to one that holds
+    the number, an add on a number already in use, or a CMSIS number no SVD interrupt or patch
+    add covers. A dropped number loses its SVD owner, only an add gives it one. `by_peripheral`
+    keys an SVD peripheral's numbers by its name in @p owners, the map of `peripheral_owners`,
+    or by its SVD name when @p owners lacks it, and leaves out a peripheral @p owners maps to
+    None. An add keys its number by the peripheral it names, and a share keys the number of the
+    IRQ it names by its peripheral too, so two peripherals raise one line. A number of a
     peripheral @p owners maps to None that no kept peripheral or add owns raises
     DescriptionError keyed `peripherals.drop.<svd name>`: the patch drops it by `[irqs] drop`."""
     numbers: dict[int, str] = {}
@@ -144,6 +146,25 @@ def build_irq_table(
     for patch in patches:
         for add in patch.add or []:
             by_peripheral.setdefault(add.peripheral, []).append(add.number)
+    for patch in patches:
+        for share in patch.share or []:
+            shared = [number for number, name in numbers.items() if name == share.name]
+            if not shared:
+                raise DescriptionError("irqs", 0, f"share.{share.name}", "a known IRQ name")
+            if share.peripheral not in by_peripheral:
+                raise DescriptionError(
+                    "irqs", 0, f"share.{share.name}", f"a peripheral named {share.peripheral}"
+                )
+            held = by_peripheral[share.peripheral]
+            for number in shared:
+                if number in held:
+                    raise DescriptionError(
+                        "irqs",
+                        0,
+                        f"share.{share.name}",
+                        f"a peripheral that does not hold {number}",
+                    )
+                held.append(number)
     owned = {number for held in by_peripheral.values() for number in held}
     for peripheral in svd.peripherals:
         if owners.get(peripheral.name, peripheral.name) is not None:

@@ -1228,9 +1228,10 @@ inline constexpr tim_variant l1_cat3_tim{
     .input_remaps = l1_cat3_input_remaps};
 
 /**
- * @brief RM0351 Tables 207 and 202, TIMx internal trigger connection: ITR0 to ITR3 by TS 000 to
- *        011 per slave timer, TIM2 to TIM5, then TIM1 and TIM8. TIM2_OR1.ITR1_RMP selects TIM8
- *        TRGO (0) or OTG_FS_SOF (1) for TIM2 ITR1, RM0351 31.4.22. OTG_FS_SOF has no model.
+ * @brief RM0351 Tables 207, 202 and 210, TIMx internal trigger connection: ITR0 to ITR3 by TS
+ *        000 to 011 per slave timer, TIM2 to TIM5, then TIM1 and TIM8, then TIM15.
+ *        TIM2_OR1.ITR1_RMP selects TIM8 TRGO (0) or OTG_FS_SOF (1) for TIM2 ITR1, RM0351
+ *        31.4.22. OTG_FS_SOF has no model.
  */
 inline constexpr auto l4_triggers = std::to_array<trigger_entry>({
     {.select = 0, .source = "tim1", .slave = "TIM2"},
@@ -1264,6 +1265,10 @@ inline constexpr auto l4_triggers = std::to_array<trigger_entry>({
     {.select = 1, .source = "tim2", .slave = "TIM8"},
     {.select = 2, .source = "tim4", .slave = "TIM8"},
     {.select = 3, .source = "tim5", .slave = "TIM8"},
+    {.select = 0, .source = "tim1", .slave = "TIM15"},
+    {.select = 1, .source = "tim3", .slave = "TIM15"},
+    {.select = 2, .source = "tim16_oc1", .slave = "TIM15"},
+    {.select = 3, .source = "tim17_oc1", .slave = "TIM15"},
 });
 /**
  * @brief RM0351 30.3.4, 31.3.3 and DS10198 Tables 17 and 18: TIM1, TIM2 to TIM5 and TIM8 take ETR
@@ -1286,9 +1291,15 @@ inline constexpr auto l4_tim_irqs = std::to_array<tim_irq>({
     {.instance = "TIM1", .irq = "TIM1_BRK_TIM15_IRQn", .group = "BRK"},
     {.instance = "TIM1", .irq = "TIM1_UP_TIM16_IRQn", .group = "UP"},
     {.instance = "TIM1", .irq = "TIM1_TRG_COM_TIM17_IRQn", .group = "TRG_COM"},
+    {.instance = "TIM15", .irq = "TIM1_BRK_TIM15_IRQn"},
+    {.instance = "TIM16", .irq = "TIM1_UP_TIM16_IRQn"},
+    {.instance = "TIM17", .irq = "TIM1_TRG_COM_TIM17_IRQn"},
 });
-/** @brief RM0351 33.3 and 33.4.1: TIM6 and TIM7 count up only. */
-inline constexpr auto l4_up_only = std::to_array<std::string_view>({"TIM6", "TIM7"});
+/** @brief RM0351 33.3, 33.4.1 and 32.5.1: TIM6, TIM7 and TIM15 to TIM17 count up only. */
+inline constexpr auto l4_up_only =
+    std::to_array<std::string_view>({"TIM6", "TIM7", "TIM15", "TIM16", "TIM17"});
+/** @brief RM0351 32.7.1 and 32.7.2: TIM16 and TIM17 have no master mode. */
+inline constexpr auto l4_no_master = std::to_array<std::string_view>({"TIM16", "TIM17"});
 /**
  * @brief RM0351 31.4.22 TIM2_OR1: TI4_RMP 00 keeps tim_ti4 on its pin, 01 to 11 give COMP1,
  *        COMP2 or their OR, ETR_RMP 0 keeps tim_etr_in on the TIM2_ETR pin, 1 gives the LSE.
@@ -1300,47 +1311,57 @@ inline constexpr auto l4_up_only = std::to_array<std::string_view>({"TIM6", "TIM
  *        COMP2 on TIM8, and ETR_ADCx_RMP 01 to 11 OR an ADC analog watchdog into tim_etr_in.
  *        30.4.28 and 30.4.30 TIM1_OR2 and TIM8_OR2: ETRSEL 000 keeps tim_etr_in on the pin and
  *        the ADC watchdogs, 001 and 010 give COMP1 and COMP2, the others are reserved.
+ *        32.6.19 TIM15_OR1: TI1_RMP 0 keeps tim_ti1 on its pin, 1 gives the LSE, ENCODER_MODE
+ *        01 to 11 give tim_ti1 and tim_ti2 the TIM2, TIM3 or TIM4 IC1 and IC2. 32.7.17 and
+ *        32.7.19 TIM16_OR1 and TIM17_OR1: TI1_RMP 00 keeps tim_ti1 on its pin, 01 to 11 give
+ *        the LSI, LSE or RTC wakeup on TIM16, the MSI, HSE/32 or MCO on TIM17.
  */
 inline constexpr auto l4_input_remaps = std::to_array<input_remap>({
-    {.slave = "TIM2",   .channel = 3,             .reg = "OR1", .field = "TI4_RMP", .pin_values = 0b0001},
-    {.slave = "TIM2",   .channel = tim_etr_input, .reg = "OR1", .field = "ETR_RMP", .pin_values = 1     },
-    {.slave = "TIM2",   .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
-    {.slave = "TIM3",   .channel = 0,             .reg = "OR1", .field = "TI1_RMP", .pin_values = 0b0001},
-    {.slave = "TIM3",   .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
-    {.slave = "TIM1",   .channel = 0,             .reg = "OR1", .field = "TI1_RMP", .pin_values = 0b01  },
-    {.slave = "TIM1",   .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
+    {.slave = "TIM2",   .channel = 3,             .reg = "OR1", .field = "TI4_RMP",      .pin_values = 0b0001},
+    {.slave = "TIM2",   .channel = tim_etr_input, .reg = "OR1", .field = "ETR_RMP",      .pin_values = 1     },
+    {.slave = "TIM2",   .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",       .pin_values = 1     },
+    {.slave = "TIM3",   .channel = 0,             .reg = "OR1", .field = "TI1_RMP",      .pin_values = 0b0001},
+    {.slave = "TIM3",   .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",       .pin_values = 1     },
+    {.slave = "TIM1",   .channel = 0,             .reg = "OR1", .field = "TI1_RMP",      .pin_values = 0b01  },
+    {.slave = "TIM1",   .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",       .pin_values = 1     },
     {.slave   = "TIM1",
      .channel = tim_etr_input,
      .reg     = "OR1",
      .field   = "ETR_ADC1_RMP",
-     .ored    = true                                                                                    },
+     .ored    = true                                                                                         },
     {.slave   = "TIM1",
      .channel = tim_etr_input,
      .reg     = "OR1",
      .field   = "ETR_ADC3_RMP",
-     .ored    = true                                                                                    },
-    {.slave = "TIM8",   .channel = 0,             .reg = "OR1", .field = "TI1_RMP", .pin_values = 0b01  },
-    {.slave = "TIM8",   .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",  .pin_values = 1     },
+     .ored    = true                                                                                         },
+    {.slave = "TIM8",   .channel = 0,             .reg = "OR1", .field = "TI1_RMP",      .pin_values = 0b01  },
+    {.slave = "TIM8",   .channel = tim_etr_input, .reg = "OR2", .field = "ETRSEL",       .pin_values = 1     },
     {.slave   = "TIM8",
      .channel = tim_etr_input,
      .reg     = "OR1",
      .field   = "ETR_ADC2_RMP",
-     .ored    = true                                                                                    },
+     .ored    = true                                                                                         },
     {.slave   = "TIM8",
      .channel = tim_etr_input,
      .reg     = "OR1",
      .field   = "ETR_ADC3_RMP",
-     .ored    = true                                                                                    },
+     .ored    = true                                                                                         },
+    {.slave = "TIM15",  .channel = 0,             .reg = "OR1", .field = "TI1_RMP",      .pin_values = 0b01  },
+    {.slave = "TIM15",  .channel = 0,             .reg = "OR1", .field = "ENCODER_MODE", .pin_values = 0b0001},
+    {.slave = "TIM15",  .channel = 1,             .reg = "OR1", .field = "ENCODER_MODE", .pin_values = 0b0001},
+    {.slave = "TIM16",  .channel = 0,             .reg = "OR1", .field = "TI1_RMP",      .pin_values = 0b0001},
+    {.slave = "TIM17",  .channel = 0,             .reg = "OR1", .field = "TI1_RMP",      .pin_values = 0b0001},
 });
 /**
- * @brief STM32L4 TIM1 to TIM8, RM0351 30.4, 31.4 and 33.4: CR2.MMS[2:0], SMCR.SMS[3:0] with bit
- *        3 in `SMS_1`, SMCR.TS[2:0], UIFREMAP, ETR pins, the TIM1, TIM2, TIM3 and TIM8 OR1 and
- *        OR2 remaps. TIM6 and TIM7 count up only and have no SMCR.
+ * @brief STM32L4 TIM1 to TIM8 and TIM15 to TIM17, RM0351 30.4, 31.4, 32.6, 32.7 and 33.4:
+ *        CR2.MMS[2:0], SMCR.SMS[3:0] with bit 3 in `SMS_1`, SMCR.TS[2:0], UIFREMAP, ETR pins,
+ *        the OR1 and OR2 remaps. TIM6, TIM7 and TIM15 to TIM17 count up only, TIM6, TIM7, TIM16
+ *        and TIM17 have no SMCR.
  */
 inline constexpr tim_variant l4_tim{
     .triggers             = l4_triggers,
     .wide_master          = {},
-    .no_master            = {},
+    .no_master            = l4_no_master,
     .slave_high           = true,
     .select_high          = false,
     .uif_remap            = true,

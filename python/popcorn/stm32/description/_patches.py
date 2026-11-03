@@ -150,9 +150,16 @@ class IrqAdd:
 
 
 @dataclass(slots=True, kw_only=True)
+class IrqShare:
+    name: str
+    peripheral: str
+
+
+@dataclass(slots=True, kw_only=True)
 class PatchIrqs:
     drop: list[str] | None = None
     add: list[IrqAdd] | None = None
+    share: list[IrqShare] | None = None
 
 
 @dataclass(slots=True, kw_only=True)

@@ -1517,11 +1517,16 @@ STM32L1 TIM2 to TIM7 and TIM9 to TIM11:
   TIM4_ETR and TIM5_ETR are on PE0 and PE9, pads the shipped 64-pin packages lack, so their
   tim_etr_in stays low.
 
+Every STM32L4 timer, RM0351 sections 30 to 33, follows RM0351 where ES0250 2.17.1, 2.17.2 and
+2.17.3 give the silicon behaviour. SMCR.MSM is storage, so a trigger at CNT = ARR starts the
+one-pulse in combined reset + trigger mode. Every compare match sets CCxIF, also the second of
+two matches on consecutive counts after a CCR change. The OCREF clear input has no model.
+
 STM32L4 TIM2 to TIM5, RM0351 section 31:
 
-- TIM1, TIM8, TIM15 and OTG_FS_SOF, the RM0351 Table 207 sources other than TIM2 to TIM5, have
-  no model here. A TS value that selects one reaches nothing and logs once. Under `strict` the
-  SMCR or TIM2_OR1 write that selects it raises `ModelError` before the store.
+- OTG_FS_SOF, the RM0351 Table 207 source of TIM2 ITR1 at TIM2_OR1.ITR1_RMP 1, has no model.
+  TS 001 on TIM2 then reaches nothing and logs once. Under `strict` the SMCR or TIM2_OR1 write
+  that selects it raises `ModelError` before the store.
 - TIM2_OR1.ITR1_RMP is a field on every line. RM0351 31.4.22 marks the bit reserved on the
   STM32L471, which has no OTG_FS. Its value 1 reaches nothing there as on the other lines.
 - The comparator outputs that TIM2_OR1.TI4_RMP, TIM3_OR1.TI1_RMP and the TIM2 and TIM3
@@ -1542,8 +1547,7 @@ STM32L4 TIM2 to TIM5, RM0351 section 31:
 STM32L4 TIM1 and TIM8, RM0351 section 30:
 
 - TIM1 and TIM8 run the counter, the repetition counter, channels 1 to 4, the slave mode
-  controller and TRGO as TIM2 to TIM5 do. Their ITR0 to ITR3 follow RM0351 Table 202. TIM15, the
-  TIM1 ITR0 source, has no model here: TS 000 on TIM1 reaches nothing and logs once.
+  controller and TRGO as TIM2 to TIM5 do. Their ITR0 to ITR3 follow RM0351 Table 202.
 - No timer drives an output pin. BDTR, the complementary outputs CCxNE and CCxNP, the dead time,
   CCR5, CCR6, CCMR3 and the OR2 and OR3 break sources are registers only. EGR.BG and B2G set BIF
   and B2IF and raise the break interrupt. BDTR.MOE keeps its value, where RM0351 30.4.6 clears it.
@@ -1554,6 +1558,22 @@ STM32L4 TIM1 and TIM8, RM0351 section 30:
 - TIM1_OR1.TI1_RMP 1 and TIM8_OR1.TI1_RMP 1, COMP1 and COMP2 into tim_ti1, read low, log once and
   raise under `strict`.
 - TIM1 raises the NVIC lines it shares with TIM15, TIM16 and TIM17, RM0351 Table 61.
+
+STM32L4 TIM15, TIM16 and TIM17, RM0351 section 32:
+
+- TIM15 counts up with channels 1 and 2, the slave mode controller and TRGO from MMS 000 to 011.
+  Its ITR0 to ITR3 follow RM0351 Table 210: TIM1, TIM3 and the OC1 outputs of TIM16 and TIM17.
+  TIM16 and TIM17 count up with one channel, no slave mode and no master mode.
+- TIM15, TIM16 and TIM17 raise NVIC lines 24, 25 and 26, the lines they share with TIM1, RM0351
+  Table 61.
+- No timer drives an output pin. BDTR, the complementary outputs, the dead time and the OR2
+  break sources are registers only, as on TIM1. BDTR has no BKF field, RM0351 32.6.16 and
+  32.7.14.
+- TIM15_OR1.TI1_RMP 1, the LSE, and ENCODER_MODE 01 to 11, the TIM2, TIM3 or TIM4 inputs, read
+  low on tim_ti1 and tim_ti2. TIM16_OR1.TI1_RMP 01 to 11, the LSI, LSE and RTC wakeup, and
+  TIM17_OR1.TI1_RMP 01 to 11, the MSI, HSE/32 and MCO, read low on tim_ti1. Each such write logs
+  once, and under `strict` raises `ModelError` before the store. TIM16_OR1.TI1_RMP has two bits,
+  RM0351 32.4: the extended remap is absent from the STM32L47x and STM32L48x.
 
 STM32L4 TIM6 and TIM7, RM0351 section 33:
 

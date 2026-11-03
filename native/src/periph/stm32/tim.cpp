@@ -263,6 +263,7 @@ struct interrupt_source
  *        row, so its every TS reaches nothing, inferred. The STM32L4 of RM0351 Tables 207 and 202
  *        gives TIM1 to TIM5 and TIM8 each its own ITR0 to ITR3 among TIM1 to TIM5, TIM8 and TIM15,
  *        and TIM2_OR1.ITR1_RMP selects TIM8 TRGO or OTG_FS_SOF, which has no model, for TIM2 ITR1.
+ *        Its Table 210 gives TIM15 ITR0 TIM1, ITR1 TIM3 and the OC1 outputs of TIM16 and TIM17.
  *        A modelled slave mode on an input with no
  *        model holds the timer and logs once, and under strict_peripherals the SMCR or OR write
  *        that selects it raises model_error. RM0038 Table 83 gives TIM9 ITR0 TIM2, ITR1 TIM3, or
@@ -279,7 +280,8 @@ struct interrupt_source
  *        TIMx_CCMR1: OC1REF with OC1M 0000 and 0100 low, 0101 high, 0110 and 0111 the PWM
  *        comparison of an up counter with CCR1, CC1P inverting it, whatever CC1E, MOE and OSSI,
  *        inferred, and CC1S other than 00 low, inferred. A producer with CR1.DIR or CMS, or with
- *        OC1M and a CCMR1_Output field at bit 16, throws config_error at construction. Each change
+ *        OC1M and a CCMR1_Output field at bit 16 other than OC1M_bit3, throws config_error at
+ *        construction. OC1M_bit3 holds OC1M[3] beside OC1M, RM0351 32.7.7. Each change
  *        of level is an edge at its own time, at a match, at the counter's wrap, or at the register
  *        write that moves it, and gated mode takes the level. While a slave listens every match and
  *        wrap is scheduled at its own time. The other OC1M values and OC1CE 1 are not modelled and
@@ -993,15 +995,16 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
     }
     else
     {
-      oc1_mode_ = field(view, "OC1M");
-      if(std::ranges::any_of(fields, [](field_desc const& bits) {
+      oc1_mode_      = field(view, "OC1M");
+      oc1_mode_high_ = optional_field(view, "OC1M_bit3");
+      if(not oc1_mode_high_ and std::ranges::any_of(fields, [](field_desc const& bits) {
            return bits.lsb <= 16 and bits.lsb + bits.width > 16;
          }))
       {
         throw config_error(
             ctx.part.part, 0, std::format("peripherals.{}.registers.{}", desc.name, view),
             "a CCMR1_Output with OC1M and a field at bit 16, which the OC1 output reads only as "
-            "OC1M2");
+            "OC1M2 or OC1M_bit3");
       }
     }
     oc1_clear_ = optional_field(view, "OC1CE");
