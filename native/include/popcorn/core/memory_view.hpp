@@ -37,15 +37,17 @@ concept guest_scalar =
  * views' peek and poke do.
  *
  * A filtered view, `machine::mem(bool)`, makes each access a privileged DAP access of one
- * security state, DDI0553B.z B13.3.4 RWMRR, on a machine with TrustZone enabled. The core's SAU
+ * security state, DDI0553B.z B13.3.4 RWMRR. On a machine with TrustZone enabled the core's SAU
  * and IDAU attribute it first, `arch::debug_attrs`: a Non-secure access to a Secure or
  * Non-secure callable address fails with bus_error::denied, a Secure access to a Non-secure
  * address goes out Non-secure, and an exempt address keeps the requested state. The bus firewall
  * then decides it as a CPU access with those attributes: a read it refuses reads 0, a write it
  * refuses is dropped, a bus_error verdict fails. A write to flash follows the rule of a read
  * there. No illegal access event is raised. Block accesses are split into the accesses of
- * `machine_services::read_block`, each attributed on its own. On a machine without TrustZone a
- * filtered view acts as the unfiltered one.
+ * `machine_services::read_block`, each attributed on its own. On a machine without TrustZone
+ * the access keeps the requested security state and the bus firewall a model installs decides
+ * it as above. With no firewall installed a filtered view reads and writes as the unfiltered
+ * one.
  *
  * Valid while its machine lives. Every function throws machine_running while a slice runs,
  * except from a handler of that slice: handlers run while the core is paused at an instruction

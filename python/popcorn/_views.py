@@ -171,7 +171,10 @@ class Memory:
         the TrustZone-aware peripherals: a refused read reads 0, a refused write is dropped. A
         write to flash follows the rule of a read there. No illegal access event is raised,
         the TZIC flags and GTZC_IRQn stay as they are. Unmodelled data raises ModelError as
-        through `m.mem`. On a machine without TrustZone enabled it acts as `m.mem`.
+        through `m.mem`. On a machine without TrustZone enabled each access is a DAP access of
+        the Secure state, decided by the bus firewall: the STM32H5 FLASH HDP areas and the
+        STM32L1 PCROP sectors read 0 through it. With no firewall it reads and writes as
+        `m.mem`.
         """
         return self._views()[0]
 
@@ -184,7 +187,7 @@ class Memory:
         error of RWMRR.
         Every other access goes through the bus firewall as `secure` describes, so Secure
         data never reads through this view. On a machine without TrustZone enabled it acts as
-        `m.mem`.
+        `secure` does there.
         """
         return self._views()[1]
 

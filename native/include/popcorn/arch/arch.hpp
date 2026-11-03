@@ -572,8 +572,8 @@ public:
   /**
    * @brief Bus attributes of a privileged debugger access that requests security @p secure
    *        at @p at, after the core's security attribution, DDI0553B.z B13.3.4 RWMRR and
-   *        B10.2 RXSPQ. Called by a filtered core::memory_view on a machine with TrustZone
-   *        enabled. The default, for a core without the security extension, keeps @p secure.
+   *        B10.2 RXSPQ. Called by a filtered core::memory_view for each access. The default,
+   *        for a core without the security extension, keeps @p secure.
    * @param at Address of the access.
    * @param secure Whether the access requests the Secure state.
    * @return Attributes with initiator::debugger and `filtered` set, or empty when the core

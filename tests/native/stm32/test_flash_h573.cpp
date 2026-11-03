@@ -2130,8 +2130,9 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0481 7.6.2, Table 63 and Table 64: without TrustZone HDPL 2 closes the HDP area, a load of "
-    "it reads zero, a fetch from it is a BusFault, a program, a sector erase or a bank erase of it "
+    "RM0481 7.6.2, Table 63 and Table 64: without TrustZone HDPL 2 closes the HDP area, a load or "
+    "a DAP access of it reads zero, a fetch from it is a BusFault, a program, a sector erase or a "
+    "bank erase of it "
     "sets WRPERR, the next sector stays open with its SECWM1 range ignored, and a restore of an "
     "HDPL 2 snapshot closes it again")
 {
@@ -2174,6 +2175,15 @@ TEST_CASE(
   CHECK(load(closed) == 0);
   CHECK(load(closed + sector_bytes) == 0);
   CHECK(load(open) == 0x9abc'def0);
+  for(auto const secure : {true, false})
+  {
+    CAPTURE(secure);
+    CHECK(f.target->mem(secure).read(closed, 4) == 0u);
+    REQUIRE(f.target->mem(secure).write(closed + 4, 4, 0).has_value());
+    CHECK(f.target->mem(secure).read(open, 4) == 0x9abc'def0u);
+  }
+  CHECK(f.target->mem().read(closed, 4) == 0x1234'5678u);
+  CHECK(f.target->mem().read(closed + 4, 4) == 0xffff'ffffu);
   f.set("pc", (closed + 0x100) | 1u);
   CHECK(f.run_to_stop({.max_instructions = icount{4}}).reason == stop_reason::fault);
   CHECK((f.target->mem().read(cfsr, 4).value_or(0) & ibuserr) != 0);

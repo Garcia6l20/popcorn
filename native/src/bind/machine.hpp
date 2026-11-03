@@ -191,8 +191,8 @@ struct[[= py::rename{"CallOutcome"}]] call_outcome
 
 /**
  * @brief Which memory view an access goes through: the unfiltered debugger view, or a DAP
- *        access of one security state filtered by the SAU, the IDAU and the bus firewall, see
- *        core::memory_view.
+ *        access of one security state, attributed by the SAU and the IDAU under TrustZone and
+ *        filtered by the bus firewall, see core::memory_view.
  */
 enum class[[= py::rename{"MemorySpace"}]] memory_space : std::uint8_t
 {

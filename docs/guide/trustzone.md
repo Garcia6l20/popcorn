@@ -64,7 +64,9 @@ are a privileged debug access of that state, DDI0553B.z B13.3.4:
 - Both views are privileged. popcorn has no unprivileged view.
 - A write of several bytes goes out one access at a time. When one raises BusAccessError, the
   bytes before it are written and the rest are not.
-- Without TrustZone both views act as `m.mem`.
+- Without TrustZone both views are DAP accesses of the requested security state, decided by
+  the bus firewall: the STM32H5 FLASH HDP areas and the STM32L1 PCROP sectors read 0 through
+  them. With no firewall they read and write as `m.mem`.
 - `BusAccessError` is an EmulationError with `address` and `denied`. `denied` is False when
   nothing is mapped there.
 

@@ -2144,6 +2144,26 @@ TEST_CASE("RM0038 3.7.4: a data read of a PCROP sector reads 0 and sets RDERR, a
 }
 
 TEST_CASE(
+    "RM0038 3.7.4: a DAP read of a PCROP sector through m.mem.secure or m.mem.nonsecure reads 0 "
+    "and sets RDERR, the unfiltered debugger view reads the data")
+{
+  auto const f    = pcrop_rc();
+  auto const data = f.target->mem().read(pcrop_read, 4);
+  REQUIRE(data.has_value());
+  CHECK(*data != 0);
+  CHECK((read(f, sr) & rderr) == 0);
+  for(auto const secure : {true, false})
+  {
+    CAPTURE(secure);
+    CHECK(f.target->mem(secure).read(pcrop_read, 4) == 0u);
+    CHECK((read(f, sr) & rderr) == rderr);
+    write(f, sr, rderr);
+    CHECK(f.target->mem(secure).read(open_page, 4) == f.target->mem().read(open_page, 4));
+    CHECK((read(f, sr) & rderr) == 0);
+  }
+}
+
+TEST_CASE(
     "RM0038 3.7.4: an option store keeps SPRMOD and PCROP sectors, an RDP 1 to 0 store "
     "with SPRMOD 0 clears them")
 {

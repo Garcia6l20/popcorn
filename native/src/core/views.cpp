@@ -22,7 +22,7 @@ void machine::require_view_access() const
 
 auto memory_view::filtered() const noexcept -> bool
 {
-  return secure_.has_value() and machine_->options_.trustzone;
+  return secure_.has_value();
 }
 
 auto memory_view::filtered_attrs(address addr) const -> std::optional<bus_attrs>
