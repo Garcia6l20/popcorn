@@ -1,3 +1,4 @@
+#include "../../../native/src/core/machine_impl.hpp"
 #include "../support/inert_model.hpp"
 #include "read_protection.hpp"
 #include "stm32_fixture.hpp"
@@ -2120,4 +2121,30 @@ TEST_CASE("host option bytes on an L4 description without FLASH_PCROP2SR throw c
     CHECK(error.key() == "option_bytes");
   }
 }
+}
+
+TEST_CASE("an L476 SysTick entry under the RDP firewall drops translated code once per entry")
+{
+  constexpr address       vectors = 0x2000'9000;
+  constexpr address       handler = 0x2000'8020;
+  constexpr std::uint64_t ms_ps   = 1'000'000'000;
+  stm32_fixture           f{l476rc(), firmware, popcorn::testing::stm32_options()};
+  auto                    mem = f.target->mem();
+  REQUIRE(mem.write(spin, 2, 0xe7feu).has_value());
+  REQUIRE(mem.write(handler, 2, 0x4770u).has_value());
+  REQUIRE(mem.write(vectors + 15 * 4, 4, handler | 1u).has_value());
+  REQUIRE(mem.write(0xe000'ed08, 4, vectors).has_value());
+  REQUIRE(mem.write(0xe000'e014, 4, 1599u).has_value());
+  REQUIRE(mem.write(0xe000'e018, 4, 0u).has_value());
+  REQUIRE(mem.write(0xe000'e010, 4, 7u).has_value());
+  f.set("sp", 0x2000'a000);
+  f.set("pc", spin | 1u);
+  f.run_for(2 * ms_ps);
+  auto const before = core::machine_internals::counters(*f.target);
+  f.run_for(10 * ms_ps);
+  auto const after   = core::machine_internals::counters(*f.target);
+  auto const entries = after.entries - before.entries;
+  CHECK(entries == 25);
+  CHECK(after.removes_direct - before.removes_direct == entries);
+  CHECK(after.remove_calls_direct - before.remove_calls_direct == entries);
 }

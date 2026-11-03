@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace popcorn::core
 {
@@ -264,6 +265,46 @@ auto machine::do_write_block(address addr, std::span<std::byte const> in, bus_at
       std::memcpy(region->host(at), in.data() + done, run);
       region->host_wrote(*run_, at, run);
       done += run;
+      continue;
+    }
+    if(region != nullptr and run_->watches.empty() and writable_by(*region->desc, by))
+    {
+      auto const  end   = done + std::min(in.size() - done, region->remaining(at));
+      auto        first = at;
+      std::size_t dirty = 0;
+      auto const  flush = [&] { region->host_wrote(*run_, first, std::exchange(dirty, 0)); };
+      try
+      {
+        while(done < end)
+        {
+          auto const piece = static_cast<address>(addr + done);
+          auto const size  = block_access_size(piece, end - done);
+          switch(run_->check_memory(piece, size, attrs, arch::memory_op::write))
+          {
+            case periph::bus_verdict::allow:
+              if(dirty == 0)
+              {
+                first = piece;
+              }
+              std::memcpy(region->host(piece), in.data() + done, size);
+              dirty += size;
+              break;
+            case periph::bus_verdict::read_zero_write_ignore:
+              flush();
+              break;
+            case periph::bus_verdict::bus_error:
+              flush();
+              return std::unexpected(block_error{.error = bus_error::denied, .at = piece});
+          }
+          done += size;
+        }
+      }
+      catch(...)
+      {
+        flush();
+        throw;
+      }
+      flush();
       continue;
     }
     auto const size       = block_access_size(at, in.size() - done);
