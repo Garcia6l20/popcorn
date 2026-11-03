@@ -1141,8 +1141,7 @@ TEST_CASE("RM0351 30.4.23, 30.4.28: TIM1 counts PA12 ETR edges, the ADC watchdog
   }
 }
 
-TEST_CASE(
-    "BDTR, CCxNE, CCR5, CCR6 and OR2, OR3 break sources are storage, BG leaves MOE, a deviation")
+TEST_CASE("BDTR, CCxNE, CCR5, CCR6 and OR2, OR3 break sources are storage, BG clears MOE")
 {
   rig r;
   for(auto const* unit : {"TIM1", "TIM8"})
@@ -1165,9 +1164,82 @@ TEST_CASE(
     CHECK(r.read(unit, "CCR6") == 0x5678u);
     r.write(unit, "EGR", 1u << 7);
     CHECK(r.get(unit, "SR", "BIF") == 1);
-    CHECK(r.get(unit, "BDTR", "MOE") == 1);
+    CHECK(r.get(unit, "BDTR", "MOE") == 0);
   }
   CHECK(r.warnings() == 0);
+}
+
+TEST_CASE("RM0351 30.4.6, 30.4.20: BG and B2G clear MOE, AOE 1 sets it at the next update event")
+{
+  for(auto const* unit : {"TIM1", "TIM8"})
+  {
+    CAPTURE(unit);
+    rig r;
+    r.base(unit, 9);
+    for(auto const& [generate, flag] : {
+            std::pair{1u << 7, "BIF" },
+            std::pair{1u << 8, "B2IF"}
+    })
+    {
+      CAPTURE(flag);
+      r.write(unit, "SR", 0);
+      r.write(unit, "BDTR", 1u << 15);
+      r.write(unit, "EGR", generate);
+      CHECK(r.get(unit, "BDTR", "MOE") == 0);
+      CHECK(r.get(unit, "SR", flag) == 1);
+    }
+    r.write(unit, "EGR", 1);
+    CHECK(r.get(unit, "BDTR", "MOE") == 0);
+    r.write(unit, "BDTR", 1u << 14);
+    r.write(unit, "SR", 0);
+    r.enable(unit);
+    r.at_tick(5);
+    CHECK(r.get(unit, "BDTR", "MOE") == 0);
+    r.at_tick(15);
+    CHECK(r.get(unit, "SR", "UIF") == 1);
+    CHECK(r.get(unit, "BDTR", "MOE") == 1);
+  }
+}
+
+TEST_CASE("RM0351 30.4.20: a BDTR read alone sees AOE set MOE at a wrap, a MOE 0 write holds")
+{
+  for(auto const* unit : {"TIM1", "TIM8"})
+  {
+    CAPTURE(unit);
+    rig r;
+    r.base(unit, 9);
+    r.write(unit, "BDTR", (1u << 15) | (1u << 14));
+    r.write(unit, "EGR", 0x1fu);
+    r.write(unit, "EGR", 1u << 7);
+    REQUIRE((r.read(unit, "SR") & 0x1fu) == 0x1fu);
+    REQUIRE(r.get(unit, "BDTR", "MOE") == 0);
+    r.enable(unit);
+    r.at_tick(15);
+    CHECK(r.get(unit, "BDTR", "MOE") == 1);
+    r.at_tick(25);
+    r.write(unit, "BDTR", 1u << 14);
+    r.at_tick(28);
+    CHECK(r.get(unit, "SR", "UIF") == 1);
+    CHECK(r.get(unit, "BDTR", "MOE") == 0);
+    r.at_tick(35);
+    CHECK(r.get(unit, "BDTR", "MOE") == 1);
+  }
+}
+
+TEST_CASE("RM0351 32.6.6, 32.7.5: TIM15 to TIM17 BG clears MOE, AOE 1 sets it at the update")
+{
+  rig r;
+  for(auto const* unit : {"TIM15", "TIM16", "TIM17"})
+  {
+    CAPTURE(unit);
+    r.clock(unit);
+    r.write(unit, "BDTR", 1u << 15);
+    r.write(unit, "EGR", 1u << 7);
+    CHECK(r.get(unit, "BDTR", "MOE") == 0);
+    r.write(unit, "BDTR", 1u << 14);
+    r.write(unit, "EGR", 1);
+    CHECK(r.get(unit, "BDTR", "MOE") == 1);
+  }
 }
 
 TEST_CASE("TIM1 complementary PWM on CH1 and CH1N with dead time flags CC1 250 us in, firmware")

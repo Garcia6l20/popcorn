@@ -1468,6 +1468,13 @@ While UIFREMAP is 1 a CNT read gives UIF in `CNT.UIFCPY`, and in bit 31 of a 32-
 no UIFCPY field, the STM32U5 TIM2 to TIM5 and the STM32H5 TIM2 and TIM5, RM0456 55.4.20 and
 RM0481 44.4.20. A byte or halfword write of the low half keeps the count's bit 31.
 
+On every timer with `BDTR.MOE`, `EGR.BG` and `B2G` clear MOE, and with `BDTR.AOE` 1 each update
+event sets it again, RM0351 30.4.6 and 30.4.20, RM0456 and RM0481 TIMx_EGR and TIMx_BDTR. The
+break inputs have no model, so no break input holds MOE at 0. MOE drives no pin. A BDTR read or
+write first brings the counter up to the access, so an update that sets MOE shows in a BDTR read
+alone and a MOE 0 write holds until the next update. The other BDTR fields read back as written,
+with no warning under strict_peripherals, and the coverage report counts BDTR as served.
+
 Differs from RM0456:
 
 - An ARR written below the count lets the counter run to its maximum and wrap with no update.
@@ -1550,8 +1557,10 @@ STM32L4 TIM1 and TIM8, RM0351 section 30:
   controller and TRGO as TIM2 to TIM5 do. Their ITR0 to ITR3 follow RM0351 Table 202.
 - No timer drives an output pin. BDTR, the complementary outputs CCxNE and CCxNP, the dead time,
   CCR5, CCR6, CCMR3 and the OR2 and OR3 break sources are registers only. EGR.BG and B2G set BIF
-  and B2IF and raise the break interrupt. BDTR.MOE keeps its value, where RM0351 30.4.6 clears it.
-- TIM1_ETR is PA12 at AF1 and TIM8_ETR is PA0 at AF3, DS10198 Tables 17 and 18. ETRSEL 001 and
+  and B2IF, raise the break interrupt and clear BDTR.MOE, which AOE 1 sets again at the next
+  update event.
+- TIM1_ETR is PA12 or PE7 at AF1 and TIM8_ETR is PA0 at AF3, DS10198 Tables 17 and 18. PE7 is a
+  pad the shipped 64-pin package lacks. ETRSEL 001 and
   010, COMP1 and COMP2, read low. ETR_ADC1_RMP, ETR_ADC2_RMP and ETR_ADC3_RMP 01 to 11 OR an
   ADC analog watchdog into the ETR: the watchdog has no model, tim_etr_in follows the pin. Each
   such write logs once, and under `strict` raises `ModelError` before the store.

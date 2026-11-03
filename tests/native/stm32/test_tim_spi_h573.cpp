@@ -1258,3 +1258,46 @@ TEST_CASE("RM0481 44.4.20: UIFREMAP gives UIF in CNT bit 31 over the count on TI
     CHECK(t.read(unit, "CNT") == 0x8000'0020u);
   }
 }
+
+TEST_CASE("RM0481 TIMx_EGR and TIMx_BDTR: TIM1 BG and B2G clear MOE, AOE 1 sets it at the update")
+{
+  timers t;
+  for(auto const& [generate, flag] : {
+          std::pair{1u << 7, "BIF" },
+          std::pair{1u << 8, "B2IF"}
+  })
+  {
+    CAPTURE(flag);
+    t.write("TIM1", "SR", 0);
+    t.write("TIM1", "BDTR", 1u << 15);
+    t.write("TIM1", "EGR", generate);
+    CHECK(t.get("TIM1", "BDTR", "MOE") == 0);
+    CHECK(t.get("TIM1", "SR", flag) == 1);
+  }
+  t.write("TIM1", "EGR", 1);
+  CHECK(t.get("TIM1", "BDTR", "MOE") == 0);
+  t.write("TIM1", "BDTR", 1u << 14);
+  t.write("TIM1", "EGR", 1);
+  CHECK(t.get("TIM1", "BDTR", "MOE") == 1);
+}
+
+TEST_CASE("RM0481 TIMx_BDTR: a BDTR read alone sees AOE set MOE at a wrap, a MOE 0 write holds")
+{
+  timers t;
+  t.base("TIM1", 9);
+  t.write("TIM1", "BDTR", (1u << 15) | (1u << 14));
+  t.write("TIM1", "EGR", 0x1fu);
+  t.write("TIM1", "EGR", 1u << 7);
+  REQUIRE((t.read("TIM1", "SR") & 0x1fu) == 0x1fu);
+  REQUIRE(t.get("TIM1", "BDTR", "MOE") == 0);
+  t.enable("TIM1");
+  t.at_tick(15);
+  CHECK(t.get("TIM1", "BDTR", "MOE") == 1);
+  t.at_tick(25);
+  t.write("TIM1", "BDTR", 1u << 14);
+  t.at_tick(28);
+  CHECK(t.get("TIM1", "SR", "UIF") == 1);
+  CHECK(t.get("TIM1", "BDTR", "MOE") == 0);
+  t.at_tick(35);
+  CHECK(t.get("TIM1", "BDTR", "MOE") == 1);
+}

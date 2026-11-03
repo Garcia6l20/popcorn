@@ -225,7 +225,9 @@ struct interrupt_source
  *        the time-base unit on the instance's timer clock. The counter is derived from the virtual
  *        time of its last anchor, never ticked: up, down and the three center-aligned modes, the
  *        prescaler, auto-reload and compare preloads loaded at the update event, the repetition
- *        counter, UDIS, URS, one-pulse mode, EGR event generation. Output compare channels 1 to 4
+ *        counter, UDIS, URS, one-pulse mode, EGR event generation. EGR.BG and B2G clear BDTR.MOE,
+ *        and with BDTR.AOE 1 each update event sets it again, the break inputs having no model,
+ *        RM0351 30.4.6 and 30.4.20. Output compare channels 1 to 4
  *        set their flags when the counter matches, output pins are not driven. The counter width is
  *        the sum of the description's CNT fields. With UDE or CCxDE the `<instance>_upd_dma` and
  *        `<instance>_ccx_dma` requests rise with their event. Each request drops when the GPDMA
@@ -595,6 +597,9 @@ private:
   std::vector<irq_line*>                       lines_;
   std::vector<interrupt_source>                sources_;
   std::vector<std::pair<field_ref, field_ref>> generated_;
+  std::vector<field_ref>                       break_generates_;
+  std::optional<field_ref>                     main_output_;
+  std::optional<field_ref>                     auto_output_;
   std::vector<field_ref>                       unsupported_;
   std::optional<field_ref>                     dma_select_;
   core::clock_domain                           domain_;
@@ -689,7 +694,7 @@ auto compare_entries(std::string_view prefix, std::index_sequence<Ch...>)
 auto tim_writes(peripheral_desc const& desc, tim_variant const& variant)
     -> std::vector<write_entry<tim>>
 {
-  static constexpr std::array<write_entry<tim>, 16> plain{
+  static constexpr std::array<write_entry<tim>, 17> plain{
       {
        {"CR1", &tim::control_written},
        {"CR2", &tim::master_written},
@@ -707,9 +712,10 @@ auto tim_writes(peripheral_desc const& desc, tim_variant const& variant)
        {"ECR", &tim::plain_written},
        {"AF1", &tim::plain_written},
        {"CCER", &tim::plain_written},
+       {"BDTR", &tim::plain_written},
        }
   };
-  static constexpr std::array<write_entry<tim>, 16> prefixed{
+  static constexpr std::array<write_entry<tim>, 17> prefixed{
       {
        {"TIM1_CR1", &tim::control_written},
        {"TIM1_CR2", &tim::master_written},
@@ -727,6 +733,7 @@ auto tim_writes(peripheral_desc const& desc, tim_variant const& variant)
        {"TIM1_ECR", &tim::plain_written},
        {"TIM1_AF1", &tim::plain_written},
        {"TIM1_CCER", &tim::plain_written},
+       {"TIM1_BDTR", &tim::plain_written},
        }
   };
   auto const has    = [&](std::string_view reg) { return find_register(desc, reg) != nullptr; };
@@ -742,7 +749,8 @@ auto tim_writes(peripheral_desc const& desc, tim_variant const& variant)
                        or entry.reg.ends_with("TISEL")
                        or entry.reg.ends_with("ECR")
                        or entry.reg.ends_with("AF1")
-                       or entry.reg.ends_with("CCER");
+                       or entry.reg.ends_with("CCER")
+                       or entry.reg.ends_with("BDTR");
     if(has(entry.reg) or not optional)
     {
       out.push_back(entry);
@@ -1069,7 +1077,13 @@ tim::tim(model_context& ctx, peripheral_desc const& desc, tim_variant variant)
     {
       generated_.emplace_back(field(name("EGR"), generate_name), field(name("SR"), flag_name));
     }
+    if(generate_name == "BG" or generate_name == "B2G")
+    {
+      break_generates_.push_back(field(name("EGR"), generate_name));
+    }
   }
+  main_output_ = optional_field(name("BDTR"), "MOE");
+  auto_output_ = optional_field(name("BDTR"), "AOE");
   for(auto const& [reg_name, bits] : std::array<std::pair<std::string_view, std::string_view>, 2>{
           {
            {"SMCR", "SMSPE"},
@@ -2016,6 +2030,10 @@ void tim::update_event(bool software, trigger_time at)
 {
   state_.prescaler = get(regs_, prescaler_);
   state_.reload    = regs_.peek(reload_.offset) & mask_;
+  if(main_output_ and auto_output_ and get(regs_, *auto_output_) != 0)
+  {
+    update(regs_, *main_output_, 1);
+  }
   for(std::size_t ch = 0; ch < channels_.size(); ++ch)
   {
     state_.compare[ch] = regs_.peek(channels_[ch].ccr.offset) & mask_;
@@ -3403,6 +3421,12 @@ void tim::event_written(std::uint32_t, std::uint32_t now)
     {
       update(regs_, flag, 1);
     }
+  }
+  if(main_output_ and std::ranges::any_of(break_generates_, [&](field_ref const& generate) {
+       return generate.of(now) != 0;
+     }))
+  {
+    update(regs_, *main_output_, 0);
   }
   for(std::size_t ch = 0; ch < channels_.size(); ++ch)
   {
