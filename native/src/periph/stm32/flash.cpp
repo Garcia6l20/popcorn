@@ -3,6 +3,7 @@
 #include "gtzc.hpp"
 #include "hsi16_source.hpp"
 #include "model_base.hpp"
+#include "read_protection.hpp"
 #include "temporal_isolation.hpp"
 #include "voltage_range.hpp"
 
@@ -18,6 +19,7 @@
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -508,6 +510,59 @@ private:
   std::vector<window>           windows_;
 };
 
+/**
+ * @brief The debug lock of the STM32L4 read protection, installed by its FLASH model, RM0351
+ *        3.5.1 and Table 15. At level 1 a DAP access, a filtered debugger access, to the flash
+ *        main memory, the OTP area or a read protected region such as SRAM2 is a bus error. At
+ *        level 2 the debug port is off and every DAP access is a bus error. CPU, DMA and
+ *        unfiltered debugger accesses pass.
+ */
+class read_protection_filter final : public bus_firewall
+{
+public:
+  read_protection_filter(
+      std::vector<memory_extent>                     windows,
+      std::move_only_function<std::uint32_t() const> level)
+      : windows_{std::move(windows)}, level_{std::move(level)}
+  {}
+
+  [[nodiscard]] auto check_peripheral(std::size_t, bus_attrs attrs, arch::memory_op)
+      -> bus_verdict override
+  {
+    return dap(attrs) and level_() == 2 ? bus_verdict::bus_error : bus_verdict::allow;
+  }
+
+  [[nodiscard]] auto filters_memory() const -> bool override
+  {
+    return true;
+  }
+
+  [[nodiscard]] auto check_memory(address at, std::uint8_t, bus_attrs attrs, arch::memory_op)
+      -> bus_verdict override
+  {
+    if(not dap(attrs))
+    {
+      return bus_verdict::allow;
+    }
+    auto const level = level_();
+    auto const locked =
+        level == 2
+        or (level == 1 and std::ranges::any_of(windows_, [at](memory_extent const& window) {
+              return at >= window.first and at <= window.last;
+            }));
+    return locked ? bus_verdict::bus_error : bus_verdict::allow;
+  }
+
+private:
+  [[nodiscard]] static auto dap(bus_attrs attrs) -> bool
+  {
+    return attrs.by == initiator::debugger and attrs.filtered;
+  }
+
+  std::vector<memory_extent>                     windows_;
+  std::move_only_function<std::uint32_t() const> level_;
+};
+
 void drive(irq_line& line, bool level)
 {
   if(level)
@@ -671,6 +726,8 @@ struct u5_flash
   static constexpr bool option_reload_on_start = false;
   /** @brief No option byte area in memory holds the wrp_registers words. */
   static constexpr std::array<std::uint32_t, 0> option_area{};
+  /** @brief No RDP debug lock and no regression erase. */
+  static constexpr bool read_protection = false;
   /** @brief The Secure hide protection area lies in a Secure watermark area, RM0456 7.5.3, so
    *         only a TrustZone machine closes it. */
   static constexpr bool hide_without_trustzone = false;
@@ -1041,6 +1098,8 @@ struct h5_flash
   static constexpr bool option_reload_on_start = true;
   /** @brief No option byte area in memory holds the wrp_registers words. */
   static constexpr std::array<std::uint32_t, 0> option_area{};
+  /** @brief No RDP debug lock and no regression erase. */
+  static constexpr bool read_protection = false;
   /** @brief HDPL closes the HDP areas with TZ_STATE 0xC3 too, RM0481 7.6.2 and Table 63, and
    *         Table 72 note 1. */
   static constexpr bool hide_without_trustzone = true;
@@ -1442,6 +1501,55 @@ struct l4_flash
       0x1fff'7800, 0x1fff'7808, 0x1fff'7810, 0x1fff'7818, 0x1fff'7820,
       0x1fff'f808, 0x1fff'f810, 0x1fff'f818, 0x1fff'f820,
   };
+  /** @brief RDP locks DAP accesses and its level 1 to level 0 regression erases, RM0351 3.5.1. */
+  static constexpr bool read_protection = true;
+  /** @brief The OTP area, RM0351 3.3.1 Table 10. */
+  static constexpr memory_extent otp_area{.first = 0x1fff'7000, .last = 0x1fff'73ff};
+  /** @brief Regions RDP level 1 locks besides the flash main memory and the OTP area, RM0351
+   *         3.5.1. */
+  static constexpr std::array<std::string_view, 1> read_protected_regions{"SRAM2"};
+  /** @brief wrp_registers indices of PCROP1SR, PCROP1ER, PCROP2SR and PCROP2ER. */
+  static constexpr std::array<std::size_t, 4> pcrop_words{1, 2, 5, 6};
+
+  /**
+   * @brief Read protection level of an FLASH_OPTR word, RM0351 3.5.1 Table 14: RDP 0xAA level
+   *        0, 0xCC level 2, any other value level 1.
+   */
+  [[nodiscard]] static constexpr auto protection_level(std::uint32_t optr) -> std::uint32_t
+  {
+    auto const rdp = optr & 0xffu;
+    return rdp == 0xaa ? 0 : rdp == 0xcc ? 2 : 1;
+  }
+
+  /**
+   * @brief Whether a level 1 to level 0 regression keeps the PCROP areas: PCROP_RDP,
+   *        FLASH_PCROP1ER bit 31, clear, RM0351 3.5.1 and 3.7.10.
+   * @param words Loaded words, wrp_registers order.
+   */
+  [[nodiscard]] static constexpr auto pcrop_kept(std::span<std::uint32_t const> words) -> bool
+  {
+    return (words[2] >> 31) == 0;
+  }
+
+  /**
+   * @brief PCROP area of a bank, RM0351 3.5.2: from PCROPx_STRT x 8 to (PCROPx_END + 1) x 8
+   *        excluded, offsets in the bank. An END below STRT defines no area, inferred.
+   * @param words Loaded words, wrp_registers order.
+   * @param bank Bank, 0 or 1.
+   * @return First and last byte offset, empty for no area.
+   */
+  [[nodiscard]] static constexpr auto
+      pcrop_area(std::span<std::uint32_t const> words, std::uint32_t bank)
+          -> std::optional<std::pair<std::uint32_t, std::uint32_t>>
+  {
+    auto const start = words[1 + bank * 4] & 0xffffu;
+    auto const end   = words[2 + bank * 4] & 0xffffu;
+    if(end < start)
+    {
+      return std::nullopt;
+    }
+    return std::pair{start * 8, (end + 1) * 8 - 1};
+  }
   /** @brief No hide protection area. */
   static constexpr bool hide_without_trustzone = false;
   /** @brief FLASH_ECCR keeps the address and bank of the first error, RM0351 3.3.2. */
@@ -1962,6 +2070,18 @@ static_assert(flag_matches_roles(
  *   effect. OBL_LAUNCH with MSI at 8 MHz or more logs one warning per machine life,
  *   model_error under strict_peripherals with FLASH_CR kept, ES0250 2.2.23, and loads the
  *   option bytes. The row encodes no host option bytes.
+ * - Read protection, 3.5.1: the loaded RDP gives level 0 for 0xAA, 2 for 0xCC, 1 otherwise, from
+ *   FLASH_OPTR alone. read_protection_filter makes a DAP access, a filtered debugger access, to
+ *   the main memory, the OTP area or SRAM2 a bus error at level 1, inferred for the OTP area
+ *   and SRAM2 from Table 15, and every DAP access a bus error at level 2. CPU, DMA and
+ *   unfiltered debugger accesses run at every level, the boot from flash user mode. At level 2
+ *   OPTSTRT sets WRPERR and puts the programmed words back, inferred. OPTSTRT from level 1 with
+ *   RDP 0xAA erases the flash at once, inferred: both banks with PCROP_RDP set, the PCROP words
+ *   programmed to their production values, or with PCROP_RDP clear every page of a bank but
+ *   those holding part of its PCROP area, an END below STRT defining none (inferred), a bank
+ *   with no area erased whole (inferred), the PCROP words kept. It then calls every
+ *   read_protection_listener peer for the SRAM2 and backup register erase. The new level loads
+ *   at the next option byte load.
  * - Timings default to DS10198 Rev 11 Table 63, l4_flash_timing.
  */
 template <typename Traits>
@@ -2141,6 +2261,8 @@ private:
   void                      load_options();
   void                      program_options();
   void                      write_option_area();
+  [[nodiscard]] auto        protection_level() const -> std::uint32_t;
+  void                      regress(std::vector<std::uint32_t>& requested);
   void                      check_latency(std::string_view trigger);
   void                      check_row_clock();
   void                      check_row_erased(std::uint32_t at);
@@ -2191,6 +2313,7 @@ private:
   mutable temporal_isolation const*                                 isolation_{};
   mutable bool                                                      isolation_resolved_{};
   std::unique_ptr<hide_filter>                                      hide_filter_;
+  std::unique_ptr<read_protection_filter>                           protection_filter_;
 };
 
 template <typename Traits>
@@ -2405,6 +2528,23 @@ flash_model<Traits>::flash_model(
   for(auto const name : Traits::secure_option_registers)
   {
     secure_words_.push_back(reg(name).offset);
+  }
+  if constexpr(Traits::read_protection)
+  {
+    std::vector<memory_extent> windows{Traits::otp_area};
+    for(auto const& region : ctx.part.regions)
+    {
+      if(not region.physical
+         and (&region == storage_ or std::ranges::contains(Traits::read_protected_regions, region.name)))
+      {
+        windows.push_back(
+            {.first = region.start,
+             .last  = static_cast<address>(region.start + (region.size - 1u))});
+      }
+    }
+    protection_filter_ = std::make_unique<read_protection_filter>(
+        std::move(windows), [this] { return protection_level(); });
+    ctx.install_firewall(*protection_filter_);
   }
   if(not options_.option_bytes)
   {
@@ -2964,6 +3104,12 @@ template <typename Traits> void flash_model<Traits>::program_options()
     load_options();
     return;
   }
+  if(protection_level() == 2)
+  {
+    load_options();
+    fail(false, set_role::protection_error);
+    return;
+  }
   std::vector<std::uint32_t> requested;
   auto                       violation = false;
   for(auto const [index, offset] : std::views::enumerate(wrp_offsets_))
@@ -2983,12 +3129,70 @@ template <typename Traits> void flash_model<Traits>::program_options()
     }
     return;
   }
+  if constexpr(Traits::read_protection)
+  {
+    if(protection_level() == 1 and Traits::protection_level(requested.front()) == 0)
+    {
+      regress(requested);
+    }
+  }
   state_.wrp = std::move(requested);
   write_option_area();
   if constexpr(Traits::option_reload_on_start)
   {
     state_.wrp_active = state_.wrp;
     poke_wrp();
+  }
+}
+
+template <typename Traits> auto flash_model<Traits>::protection_level() const -> std::uint32_t
+{
+  if constexpr(Traits::read_protection)
+  {
+    return state_.wrp_active.empty() ? 0 : Traits::protection_level(state_.wrp_active.front());
+  }
+  return 0;
+}
+
+template <typename Traits> void flash_model<Traits>::regress(std::vector<std::uint32_t>& requested)
+{
+  if constexpr(Traits::read_protection)
+  {
+    auto const& loaded = state_.wrp_active;
+    auto const  kept   = Traits::pcrop_kept(loaded);
+    auto const  size   = banks().size;
+    for(std::uint32_t bank = 0; bank < 2; ++bank)
+    {
+      auto const base = bank_start(bank);
+      auto const area = kept ? Traits::pcrop_area(loaded, bank) : std::nullopt;
+      for(std::uint32_t page = 0; page < size / Traits::page_bytes; ++page)
+      {
+        auto const first = page * Traits::page_bytes;
+        if(area and first <= area->second and area->first < first + Traits::page_bytes)
+        {
+          continue;
+        }
+        std::vector<std::byte> const erased(Traits::page_bytes, std::byte{0xff});
+        static_cast<void>(ctx_.services.write_block(base + first, erased, initiator::debugger));
+        forget_torn(base + first, Traits::page_bytes);
+      }
+      if(not area)
+      {
+        extension_.banks_erased |= 1u << bank;
+      }
+    }
+    sync_watches();
+    for(auto const index : Traits::pcrop_words)
+    {
+      requested[index] = kept ? state_.wrp[index] : Traits::wrp_production(variant_, index);
+    }
+    for(auto* const peer : ctx_.peers.all())
+    {
+      if(auto* const listener = dynamic_cast<read_protection_listener*>(peer))
+      {
+        listener->on_read_protection_regression();
+      }
+    }
   }
 }
 

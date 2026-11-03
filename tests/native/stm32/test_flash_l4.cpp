@@ -1,3 +1,5 @@
+#include "../support/inert_model.hpp"
+#include "read_protection.hpp"
 #include "stm32_fixture.hpp"
 
 #include <popcorn/core/errors.hpp>
@@ -11,6 +13,7 @@
 #include <cstdint>
 #include <format>
 #include <initializer_list>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1367,6 +1370,9 @@ TEST_CASE(
   CHECK(r.words(0x1fff'7800, 2) == std::vector<std::uint32_t>{0xffee'f8aau, 0x0011'0755u});
   r.load_options();
   CHECK(r.read("OPTR") == 0xffee'f8aau);
+  r.f.target->power_cycle();
+  CHECK(r.words(0x1fff'7818, 2) == std::vector<std::uint32_t>{0xff10'ff10u, 0x00ef'00efu});
+  CHECK(r.read("WRP1AR") == 0xff10'ff10u);
   r.f.target->restore(saved);
   CHECK(r.words(0x1fff'7800, 2) == std::vector<std::uint32_t>{optr_production, 0x0010'0755u});
   CHECK(r.words(0x1fff'7818, 2) == std::vector<std::uint32_t>{wrp_production, 0x00ff'0000u});
@@ -1461,5 +1467,198 @@ TEST_CASE(
   strict.msi_hz(6, 4 * mhz);
   REQUIRE(strict.try_write("CR", before | obl_launch));
   CHECK(strict.requested_reset());
+}
+
+constexpr address sram1     = 0x2000'0000;
+constexpr address sram2     = 0x1000'0000;
+constexpr address otp       = 0x1fff'7000;
+constexpr address option1   = 0x1fff'7800;
+constexpr address system1   = 0x1fff'0000;
+constexpr address bank1_low = 0x0800'0000;
+
+class regression_counter final : public popcorn::testing::inert_model,
+                                 public popcorn::periph::stm32::read_protection_listener
+{
+public:
+  explicit regression_counter(int& count) : count_{count}
+  {}
+
+  void on_read_protection_regression() override
+  {
+    ++count_;
+  }
+
+private:
+  int& count_;
+};
+
+auto counted_options(int& count) -> core::machine_options
+{
+  auto options = popcorn::testing::stm32_options();
+  options.models["SYSCFG"] =
+      [&count](popcorn::periph::model_context&, popcorn::peripheral_desc const&) {
+        return std::make_shared<regression_counter>(count);
+      };
+  return options;
+}
+
+void program_rdp(rig const& r, std::uint32_t rdp)
+{
+  r.unlock_options();
+  r.write("OPTR", (optr_production & ~0xffu) | rdp);
+  r.program_options();
+  REQUIRE((r.read("SR") & all_errors) == 0);
+  r.load_options();
+  REQUIRE(r.f.field("FLASH", "OPTR", "RDP") == rdp);
+}
+
+auto dap_refused(rig const& r, bool secure, address at) -> bool
+{
+  auto const read = r.f.target->mem(secure).read(at, 4);
+  return not read.has_value() and read.error() == popcorn::bus_error::denied;
+}
+
+TEST_CASE(
+    "RM0351 3.5.1 Table 15: at RDP level 1 a DAP read or write of the flash, the OTP area or SRAM2 "
+    "is a bus error, the host view, the option bytes, the system memory, SRAM1 and the "
+    "peripherals stay open")
+{
+  rig r;
+  REQUIRE(r.f.target->mem().write(bank2, 4, 0x2222'2222u).has_value());
+  REQUIRE(r.f.target->mem().write(sram2, 4, 0x1111'1111u).has_value());
+  CHECK(r.f.target->mem(true).read(bank2, 4) == 0x2222'2222u);
+  CHECK(r.f.target->mem(false).read(sram2, 4) == 0x1111'1111u);
+  program_rdp(r, 0xbb);
+  for(auto const secure : {true, false})
+  {
+    CAPTURE(secure);
+    for(auto const at : {bank1_low, bank2, bank2_last, otp, otp + 0x3fc, sram2, sram2 + 0x7ffc})
+    {
+      CAPTURE(at);
+      CHECK(dap_refused(r, secure, at));
+    }
+    CHECK_FALSE(r.f.target->mem(secure).write(sram2 + 4, 4, 1).has_value());
+    CHECK_FALSE(r.f.target->mem(secure).write(bank2 + 4, 4, 1).has_value());
+    CHECK(r.f.target->mem(secure).read(option1, 4) == 0xffef'f8bbu);
+    CHECK(r.f.target->mem(secure).read(otp + 0x400, 4).has_value());
+    CHECK(r.f.target->mem(secure).read(system1, 4).has_value());
+    CHECK(r.f.target->mem(secure).read(sram1, 4).has_value());
+    CHECK(r.f.target->mem(secure).read(r.at("SR"), 4).has_value());
+    CHECK_FALSE(r.f.target->mem(secure).read(0, 4).has_value());
+  }
+  CHECK(r.f.target->mem().read(bank2, 4) == 0x2222'2222u);
+  CHECK(r.f.target->mem().read(sram2, 4) == 0x1111'1111u);
+  CHECK(r.f.target->mem().read(sram2 + 4, 4) == 0u);
+  program_rdp(r, 0xbc);
+  CHECK(r.f.target->mem().read(bank2, 4) == 0x2222'2222u);
+  CHECK(dap_refused(r, true, bank2));
+}
+
+TEST_CASE(
+    "RM0351 3.5.1: at RDP level 2 every DAP access is a bus error, OPTSTRT sets WRPERR and "
+    "programs nothing")
+{
+  rig r;
+  program_rdp(r, 0xcc);
+  for(auto const secure : {true, false})
+  {
+    CAPTURE(secure);
+    for(auto const at : {sram1, option1, system1, r.at("SR")})
+    {
+      CAPTURE(at);
+      CHECK(dap_refused(r, secure, at));
+    }
+    CHECK_FALSE(r.f.target->mem(secure).write(sram1, 4, 1).has_value());
+  }
+  CHECK(r.f.target->mem().read(sram1, 4).has_value());
+  r.unlock_options();
+  r.write("OPTR", optr_production);
+  r.write("WRP1AR", 0xff05'ff05u);
+  r.program_options();
+  CHECK(r.status("WRPERR") == 1);
+  CHECK(r.read("OPTR") == 0xffef'f8ccu);
+  CHECK(r.read("WRP1AR") == wrp_production);
+  CHECK(r.word(option1) == 0xffef'f8ccu);
+  CHECK(r.word(option1 + 0x18) == wrp_production);
+  r.f.target->power_cycle();
+  CHECK(r.f.field("FLASH", "OPTR", "RDP") == 0xcc);
+  CHECK(dap_refused(r, true, sram1));
+}
+
+TEST_CASE(
+    "RM0351 3.5.1: OPTSTRT from level 1 to RDP 0xAA with PCROP_RDP set erases both banks, "
+    "keeps the OTP area, disables PCROP, programs the other options, calls the hook once")
+{
+  int count = 0;
+  rig r{counted_options(count)};
+  r.unlock_options();
+  r.write("PCROP1SR", 0xffff'0004u);
+  r.write("PCROP1ER", 0xffff'0008u);
+  r.program_options();
+  r.load_options();
+  for(auto const at : {bank1_low + 0x5000, bank2 + 0x1800, otp, sram1 + 0x1'0000})
+  {
+    REQUIRE(r.f.target->mem().write(at, 4, 0x1234'5678u).has_value());
+  }
+  program_rdp(r, 0xbb);
+  CHECK(r.f.target->mem().read(bank2 + 0x1800, 4) == 0x1234'5678u);
+  CHECK(count == 0);
+  r.unlock_options();
+  r.write("OPTR", optr_production & ~(1u << 16));
+  r.write("WRP1AR", 0xff05'ff05u);
+  r.program_options();
+  CHECK((r.read("SR") & all_errors) == 0);
+  CHECK(count == 1);
+  CHECK(r.word(bank1_low + 0x5000) == ~0u);
+  CHECK(r.word(bank2 + 0x1800) == ~0u);
+  CHECK(r.word(otp) == 0x1234'5678u);
+  CHECK(r.word(sram1 + 0x1'0000) == 0x1234'5678u);
+  CHECK(r.words(option1, 2) == std::vector<std::uint32_t>{0xffee'f8aau, 0x0011'0755u});
+  CHECK(r.word(option1 + 0x08) == 0xffff'ffffu);
+  CHECK(r.word(option1 + 0x10) == 0xffff'0000u);
+  CHECK(r.word(option1 + 0x18) == 0xff05'ff05u);
+  CHECK(r.f.field("FLASH", "OPTR", "RDP") == 0xaa);
+  CHECK(dap_refused(r, true, bank2));
+  r.load_options();
+  CHECK(r.f.field("FLASH", "OPTR", "RDP") == 0xaa);
+  CHECK(r.f.field("FLASH", "OPTR", "IWDG_SW") == 0);
+  CHECK(r.read("PCROP1SR") == 0xffff'ffffu);
+  CHECK(r.f.target->mem(true).read(bank2 + 0x1800, 4) == 0xffff'ffffu);
+  program_rdp(r, 0xaa);
+  CHECK(count == 1);
+}
+
+TEST_CASE(
+    "RM0351 3.5.1 and 3.5.2: with PCROP_RDP clear the level 1 to level 0 regression keeps the "
+    "pages of the bank 1 PCROP area and its PCROP words, and erases the rest of both banks")
+{
+  int count = 0;
+  rig r{counted_options(count)};
+  r.unlock_options();
+  r.write("PCROP1SR", 0xffff'0200u);
+  r.write("PCROP1ER", 0x7fff'037fu);
+  r.program_options();
+  r.load_options();
+  REQUIRE(r.read("PCROP1ER") == 0x7fff'037fu);
+  for(auto const page : {1u, 2u, 3u, 4u})
+  {
+    REQUIRE(r.f.target->mem().write(bank1_low + page * page_bytes + 8, 4, page).has_value());
+  }
+  REQUIRE(r.f.target->mem().write(bank2 + 2 * page_bytes, 4, 7).has_value());
+  program_rdp(r, 0xbb);
+  r.unlock_options();
+  r.write("OPTR", optr_production);
+  r.program_options();
+  CHECK(count == 1);
+  CHECK(r.word(bank1_low + page_bytes + 8) == ~0u);
+  CHECK(r.word(bank1_low + 2 * page_bytes + 8) == 2u);
+  CHECK(r.word(bank1_low + 3 * page_bytes + 8) == 3u);
+  CHECK(r.word(bank1_low + 4 * page_bytes + 8) == ~0u);
+  CHECK(r.word(bank2 + 2 * page_bytes) == ~0u);
+  CHECK(r.word(option1 + 0x08) == 0xffff'0200u);
+  CHECK(r.word(option1 + 0x10) == 0x7fff'037fu);
+  r.load_options();
+  CHECK(r.read("PCROP1ER") == 0x7fff'037fu);
+  CHECK(r.f.field("FLASH", "OPTR", "RDP") == 0xaa);
 }
 }

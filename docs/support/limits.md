@@ -542,8 +542,28 @@ On the STM32L47x/L48x, RM0351 section 3:
   0x1FFFF808, each double word the word in its low half and its complement in its high half. The
   Unused fields hold the register's reserved bits and their complement, and the double word at
   0x1FFFF800 stays erased, inferred. The loaded `WRPxy_STRT` to `WRPxy_END` pages of bank x refuse a store,
-  a page erase and a bank erase with WRPERR. The other option fields and the PCROP words take no
-  effect. `RDERR` and `OPTVERR` stay 0.
+  a page erase and a bank erase with WRPERR. `RDP` sets the read protection below. The other option fields
+  and the PCROP words take no effect outside it. `RDERR` and `OPTVERR` stay 0.
+- Read protection, RM0351 3.5.1: the loaded `RDP` gives level 0 for 0xAA, level 2 for 0xCC and
+  level 1 for any other value, from `FLASH_OPTR` alone, whatever the complement in the option byte
+  area holds. A debug
+  port access is an access through `m.mem.secure` or `m.mem.nonsecure`. At level 1 such an
+  access to the flash main memory, the OTP area or SRAM2 is a bus error, a `BusAccessError` in
+  Python, inferred for the OTP area and SRAM2 from RM0351 Table 15. The option bytes, the system memory, the other memory and the peripherals stay open.
+  At level 2 every such access is a bus error. `m.mem` and the CPU keep every access at every
+  level: the model runs the boot from flash user mode. The RTC backup registers stay open to the
+  debug port at level 1.
+- At level 2 `OPTSTRT` sets `WRPERR`, programs nothing and puts the programmed words back in the
+  option registers, inferred.
+- `OPTSTRT` with the loaded level 1 and `RDP` 0xAA in `FLASH_OPTR` erases the flash at once, with
+  no BSY time, inferred. With `PCROP_RDP` set both banks are erased and the PCROP words program
+  their production values. With `PCROP_RDP` clear, a bank with a PCROP area, `PCROPx_END` not
+  below `PCROPx_STRT` (inferred), keeps the pages that hold part of the area and the PCROP words
+  keep their programmed values. The other bank is erased, inferred. The OTP area and the system memory
+  are kept. The other option words program as written. SRAM2 and the RTC backup registers
+  keep their content. The new level takes effect at the next option byte load.
+- ES0250 2.2.2: a PCROP area within one page is kept with its page at the regression, as
+  RM0351 3.5.1 states, where the erratum leaves the bank unerased and the area unprotected.
 - ES0250 2.2.23: `OBL_LAUNCH` with MSI at 8 MHz or more logs one warning per machine life, a
   `model_error` under `strict_peripherals` with `FLASH_CR` kept, and loads the option bytes.
 - ECC, RM0351 3.3.2: a power cut tears the double word in flight, its first 4 data bytes ANDed
