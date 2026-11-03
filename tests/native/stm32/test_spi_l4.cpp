@@ -73,9 +73,20 @@ constexpr std::uint32_t    master    = mstr | (1u << 3) | ssm | ssi;
 constexpr std::uint32_t    rx_signal = 1;
 constexpr std::uint32_t    tx_signal = 2;
 
-constexpr auto ds    = [](std::uint32_t bits) { return (bits - 1) << 8; };
-constexpr auto frlvl = [](std::uint32_t status) { return status >> 9 & 3u; };
-constexpr auto ftlvl = [](std::uint32_t status) { return status >> 11 & 3u; };
+constexpr auto ds(std::uint32_t bits) -> std::uint32_t
+{
+  return (bits - 1) << 8;
+}
+
+constexpr auto frlvl(std::uint32_t status) -> std::uint32_t
+{
+  return status >> 9 & 3u;
+}
+
+constexpr auto ftlvl(std::uint32_t status) -> std::uint32_t
+{
+  return status >> 11 & 3u;
+}
 
 constexpr auto frame_ps(std::uint64_t bits, std::uint32_t br = 1) -> std::uint64_t
 {
@@ -326,9 +337,7 @@ TEST_CASE("RM0351 42.4.10: with FRXTH 1 each frame sets RXNE, an 8-bit read pops
   CHECK((r.read(spi1 + sr) & rxne) == 0);
 }
 
-TEST_CASE(
-    "RM0351 Figure 466: a 16-bit write sends two DS 8 frames, FRXTH 0 reads both at once, "
-    "both FIFOs keep their bytes across SPE 0, RM0351 42.4.9, inferred for the TXFIFO")
+TEST_CASE("RM0351 Figure 466: a 16-bit write sends two DS 8 frames, FRXTH 0 reads both at once")
 {
   rig r;
   r.write(spi1 + cr1, master | spe);
@@ -339,21 +348,47 @@ TEST_CASE(
   r.idle_to(t0 + 3 * frame_ps(8));
   CHECK(r.device->outs == std::vector<std::uint32_t>{0x11, 0x22});
   CHECK((r.read(spi1 + sr) & rxne) == rxne);
-  r.write(spi1 + cr1, master);
-  r.cpu_write(spi1 + dr, 0x33, 1);
-  CHECK(frlvl(r.read(spi1 + sr)) == 2);
-  CHECK(ftlvl(r.read(spi1 + sr)) == 1);
   CHECK(r.cpu_read(spi1 + dr, 2) == 0x2211);
   CHECK(frlvl(r.read(spi1 + sr)) == 0);
-  r.write(spi1 + cr1, master | spe);
-  r.cpu_write(spi1 + dr, 0x4433'2211);
-  r.idle_to(r.now_ps() + 4 * frame_ps(8));
-  CHECK(r.device->outs == std::vector<std::uint32_t>{0x11, 0x22, 0x33, 0x11, 0x22});
-  CHECK(r.cpu_read(spi1 + dr, 1) == 0x33);
-  CHECK(r.cpu_read(spi1 + dr) == 0x2211);
 }
 
-TEST_CASE("RM0351 42.4.9 note: an odd frame count ends with FRXTH 1 at FRLVL 01")
+TEST_CASE("inferred: a 32-bit DR write and read pack two DS 8 frames as the 16-bit access does")
+{
+  rig r;
+  r.write(spi1 + cr1, master | spe);
+  r.cpu_write(spi1 + dr, 0x4433'2211);
+  r.idle_to(r.now_ps() + 3 * frame_ps(8));
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0x11, 0x22});
+  CHECK(r.cpu_read(spi1 + dr) == 0x2211);
+  CHECK(frlvl(r.read(spi1 + sr)) == 0);
+}
+
+TEST_CASE("RM0351 42.4.9: the RXFIFO keeps its bytes across SPE 0, the TXFIFO too, inferred")
+{
+  rig r;
+  r.write(spi1 + cr2, ds(8) | ssoe | frxth);
+  r.write(spi1 + cr1, master | spe);
+  auto const t0 = r.now_ps();
+  for(auto const byte : {0x11u, 0x22u, 0x33u})
+  {
+    r.cpu_write(spi1 + dr, byte, 1);
+  }
+  r.idle_to(t0 + frame_ps(8) + frame_ps(8) / 2);
+  r.write(spi1 + cr1, master);
+  r.idle_to(t0 + 4 * frame_ps(8));
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0x11, 0x22});
+  CHECK(ftlvl(r.read(spi1 + sr)) == 1);
+  CHECK(frlvl(r.read(spi1 + sr)) == 2);
+  r.write(spi1 + cr1, master | spe);
+  r.idle_to(r.now_ps() + 3 * frame_ps(8));
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0x11, 0x22, 0x33});
+  CHECK(r.cpu_read(spi1 + dr, 1) == 0x11);
+  CHECK(r.cpu_read(spi1 + dr, 2) == 0x3322);
+}
+
+TEST_CASE(
+    "RM0351 42.4.9 note: an odd frame count ends with FRXTH 1 at FRLVL 01, FRLVL 11 at 3 "
+    "bytes inferred")
 {
   rig r;
   r.write(spi1 + cr1, master | spe);
@@ -370,9 +405,7 @@ TEST_CASE("RM0351 42.4.9 note: an odd frame count ends with FRXTH 1 at FRLVL 01"
   CHECK(r.cpu_read(spi1 + dr, 1) == 0x33);
 }
 
-TEST_CASE(
-    "RM0351 42.4.10: TXE is 1 up to 2 bytes queued, FTLVL counts up to 11, bytes past 4 "
-    "are dropped and logged once, inferred")
+TEST_CASE("RM0351 42.4.10: TXE is 1 up to 2 bytes queued, FTLVL reads 11 at 3 and 4 bytes")
 {
   rig r;
   r.write(spi1 + cr1, master);
@@ -383,9 +416,17 @@ TEST_CASE(
     CHECK((r.read(spi1 + sr) & txe) == (index < 2 ? txe : 0));
     CHECK(ftlvl(r.read(spi1 + sr)) == std::min(index + 1, 3u));
   }
-  r.cpu_write(spi1 + dr, 0x14, 1);
-  r.cpu_write(spi1 + dr, 0x1615, 2);
-  CHECK(r.warnings("dropped") == 1);
+}
+
+TEST_CASE("inferred: a byte write to a full TXFIFO is dropped, logged once")
+{
+  rig r;
+  r.write(spi1 + cr1, master);
+  for(std::uint32_t index = 0; index < 6; ++index)
+  {
+    r.cpu_write(spi1 + dr, 0x10 + index, 1);
+  }
+  CHECK(r.warnings("does not fit the 4-byte TXFIFO") == 1);
   r.write(spi1 + cr1, master | spe);
   r.idle_to(r.now_ps() + 5 * frame_ps(8));
   CHECK(r.device->outs == std::vector<std::uint32_t>{0x10, 0x11, 0x12, 0x13});
@@ -393,8 +434,58 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RM0351 42.4.10: a DS 16 frame takes two bytes of each FIFO, a byte write waits for "
-    "the second byte, inferred")
+    "inferred, RM0351 42.4.9: a 16-bit write over three DS 8 bytes is dropped whole, the "
+    "stored frames are sent")
+{
+  rig r;
+  r.write(spi1 + cr1, master);
+  for(auto const byte : {0x01u, 0x02u, 0x03u})
+  {
+    r.cpu_write(spi1 + dr, byte, 1);
+  }
+  r.cpu_write(spi1 + dr, 0x0504, 2);
+  CHECK(ftlvl(r.read(spi1 + sr)) == 3);
+  CHECK(r.warnings("does not fit the 4-byte TXFIFO") == 1);
+  r.write(spi1 + cr1, master | spe);
+  r.idle_to(r.now_ps() + 4 * frame_ps(8));
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0x01, 0x02, 0x03});
+}
+
+TEST_CASE(
+    "inferred, RM0351 42.4.9: a DS 16 write with one byte of room is dropped whole, the "
+    "frames stay aligned")
+{
+  rig r;
+  r.write(spi1 + cr2, ds(16) | ssoe);
+  r.write(spi1 + cr1, master);
+  r.cpu_write(spi1 + dr, 0xBEEF, 2);
+  r.cpu_write(spi1 + dr, 0xAD, 1);
+  r.cpu_write(spi1 + dr, 0x1234, 2);
+  CHECK(ftlvl(r.read(spi1 + sr)) == 3);
+  r.write(spi1 + cr1, master | spe);
+  r.idle_to(r.now_ps() + 2 * frame_ps(16));
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0xBEEF});
+  CHECK(ftlvl(r.read(spi1 + sr)) == 1);
+  r.cpu_write(spi1 + dr, 0xDE, 1);
+  r.idle_to(r.now_ps() + frame_ps(16) + 1);
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0xBEEF, 0xDEAD});
+}
+
+TEST_CASE("checklist 53 policy: under strict_peripherals a DR write that does not fit raises")
+{
+  rig strict{true};
+  strict.write(spi1 + cr1, master);
+  for(auto const byte : {0x01u, 0x02u, 0x03u})
+  {
+    strict.cpu_write(spi1 + dr, byte, 1);
+  }
+  CHECK_THROWS_AS(
+      static_cast<void>(strict.services().write(spi1 + dr, 2, 0x0504, popcorn::initiator::cpu)),
+      popcorn::model_error);
+  CHECK(ftlvl(strict.read(spi1 + sr)) == 3);
+}
+
+TEST_CASE("RM0351 42.4.10: a DS 16 frame takes two bytes of each FIFO")
 {
   rig r;
   r.write(spi1 + cr2, ds(16) | ssoe);
@@ -408,45 +499,83 @@ TEST_CASE(
   auto const t0 = r.now_ps();
   r.idle_to(t0 + 2 * frame_ps(16) + 1);
   CHECK(r.device->outs == std::vector<std::uint32_t>{0xBEEF, 0xCAFE});
+  CHECK(r.device->frames[1].bits == 16);
   CHECK(r.device->frames[1].at == t0 + 2 * frame_ps(16));
   CHECK(frlvl(r.read(spi1 + sr)) == 3);
   CHECK(r.cpu_read(spi1 + dr, 2) == 0xBEEF);
   CHECK(frlvl(r.read(spi1 + sr)) == 2);
-  r.cpu_write(spi1 + dr, 0xAD, 1);
-  CHECK_FALSE(r.frame_due().has_value());
-  CHECK((r.read(spi1 + sr) & bsy) == bsy);
-  r.cpu_write(spi1 + dr, 0xDE, 1);
-  r.idle_to(r.now_ps() + frame_ps(16) + 1);
-  CHECK(r.device->outs.back() == 0xDEAD);
 }
 
-TEST_CASE("RM0351 42.4.10: OVR at the fifth DS 8 frame and a DS 16 frame with one byte of room")
+TEST_CASE(
+    "RM0351 42.4.10: with DS 16 a byte write waits for the second byte, inferred, BSY "
+    "stays 0 until the frame is whole")
 {
-  for(auto const bits : {8u, 16u})
+  rig r;
+  r.write(spi1 + cr2, ds(16) | ssoe);
+  r.write(spi1 + cr1, master | spe);
+  r.cpu_write(spi1 + dr, 0xAD, 1);
+  CHECK_FALSE(r.frame_due().has_value());
+  CHECK((r.read(spi1 + sr) & bsy) == 0);
+  r.cpu_write(spi1 + dr, 0xDE, 1);
+  CHECK((r.read(spi1 + sr) & bsy) == bsy);
+  r.idle_to(r.now_ps() + frame_ps(16) + 1);
+  CHECK(r.device->outs == std::vector<std::uint32_t>{0xDEAD});
+  CHECK((r.read(spi1 + sr) & bsy) == 0);
+}
+
+TEST_CASE("RM0351 42.4.10: OVR at the fifth DS 8 frame, the RXFIFO keeps the first four")
+{
+  rig r;
+  r.write(spi1 + cr1, master | spe);
+  auto const t0 = r.now_ps();
+  for(std::uint32_t index = 0; index < 5; ++index)
   {
-    CAPTURE(bits);
-    rig r;
-    r.write(spi1 + cr2, ds(bits) | ssoe);
-    r.write(spi1 + cr1, master | spe);
-    auto const frames = bits == 8 ? 5u : 3u;
-    auto const t0     = r.now_ps();
-    for(std::uint32_t index = 0; index < frames; ++index)
-    {
-      r.cpu_write(spi1 + dr, (bits == 8 ? 0x01 : 0x0101) * (index + 1), bits == 8 ? 1 : 2);
-      r.idle_to(t0 + (index + 1) * frame_ps(bits) - frame_ps(bits) / 2);
-      CHECK((r.read(spi1 + sr) & ovr) == 0);
-      if(bits == 16 and index == 2)
-      {
-        CHECK(r.cpu_read(spi1 + dr, 1) == 0x01);
-      }
-    }
-    r.idle_to(t0 + (frames + 1) * frame_ps(bits));
-    CHECK((r.read(spi1 + sr) & ovr) == ovr);
-    CHECK(r.cpu_read(spi1 + dr, 2) == 0x0201u);
-    CHECK(r.cpu_read(spi1 + dr, 2) == (bits == 8 ? 0x0403u : 0x0002u));
-    CHECK(r.cpu_read(spi1 + sr) == (txe | ovr));
+    r.cpu_write(spi1 + dr, index + 1, 1);
+    r.idle_to(t0 + index * frame_ps(8) + frame_ps(8) / 2);
     CHECK((r.read(spi1 + sr) & ovr) == 0);
   }
+  r.idle_to(t0 + 6 * frame_ps(8));
+  CHECK((r.read(spi1 + sr) & ovr) == ovr);
+  CHECK(r.cpu_read(spi1 + dr, 2) == 0x0201);
+  CHECK(r.cpu_read(spi1 + dr, 2) == 0x0403);
+}
+
+TEST_CASE("RM0351 42.4.11: a DR read, then an SR read clears OVR")
+{
+  rig r;
+  r.write(spi1 + cr1, master | spe);
+  auto const t0 = r.now_ps();
+  for(std::uint32_t index = 0; index < 5; ++index)
+  {
+    r.cpu_write(spi1 + dr, index + 1, 1);
+    r.idle_to(t0 + (index + 1) * frame_ps(8) + 1);
+  }
+  CHECK(r.cpu_read(spi1 + sr) == (rxne | txe | ovr | 3u << 9));
+  CHECK((r.read(spi1 + sr) & ovr) == ovr);
+  CHECK(r.cpu_read(spi1 + dr, 1) == 0x01);
+  CHECK(r.cpu_read(spi1 + sr) == (rxne | txe | ovr | 3u << 9));
+  CHECK((r.read(spi1 + sr) & ovr) == 0);
+}
+
+TEST_CASE("RM0351 42.4.10: a DS 16 frame with one byte of room sets OVR")
+{
+  rig r;
+  r.write(spi1 + cr2, ds(16) | ssoe);
+  r.write(spi1 + cr1, master | spe);
+  auto const t0 = r.now_ps();
+  for(std::uint32_t index = 0; index < 2; ++index)
+  {
+    r.cpu_write(spi1 + dr, 0x0101 * (index + 1), 2);
+    r.idle_to(t0 + (index + 1) * frame_ps(16) + 1);
+  }
+  CHECK(r.cpu_read(spi1 + dr, 1) == 0x01);
+  CHECK(frlvl(r.read(spi1 + sr)) == 3);
+  r.cpu_write(spi1 + dr, 0x0303, 2);
+  r.idle_to(r.now_ps() + frame_ps(16) + 1);
+  CHECK((r.read(spi1 + sr) & ovr) == ovr);
+  CHECK(frlvl(r.read(spi1 + sr)) == 3);
+  CHECK(r.cpu_read(spi1 + dr, 2) == 0x0201);
+  CHECK(r.cpu_read(spi1 + dr, 2) == 0x0002);
 }
 
 TEST_CASE("RM0351 42.6.2 DS: DS 4 and DS 12 frames are masked and due after DS + 1 bits")
@@ -615,8 +744,15 @@ TEST_CASE("checklist 39: the FIFO row needs CR2.FRXTH, CR2.DS, SR.FRLVL and SR.F
   }
 }
 
-TEST_CASE("RM0351 42.6.2 FRF: the TI format raises model_error under strict_peripherals")
+TEST_CASE("RM0351 42.6.2 FRF: the TI format logs once, raises model_error under strict")
 {
+  {
+    rig r;
+    r.write(spi1 + cr1, master | spe);
+    r.write(spi1 + cr2, ds(8) | frf);
+    r.write(spi1 + cr2, ds(8) | frf | ssoe);
+    CHECK(r.warnings("TI frame format") == 1);
+  }
   rig strict{true};
   strict.write(spi1 + cr1, master | spe);
   CHECK_THROWS_AS(
@@ -624,5 +760,29 @@ TEST_CASE("RM0351 42.6.2 FRF: the TI format raises model_error under strict_peri
           strict.services().write(spi1 + cr2, 4, ds(8) | frf, popcorn::initiator::cpu)),
       popcorn::model_error);
   CHECK(strict.warnings("TI frame format") == 1);
+}
+
+TEST_CASE("a snapshot whose TXFIFO or RXFIFO level is above 4 is refused at load")
+{
+  for(auto const key : {std::string_view{"tx_level"}, std::string_view{"rx_level"}})
+  {
+    CAPTURE(key);
+    rig        r;
+    auto       data = r.f->target->snapshot().data();
+    auto const owner =
+        std::ranges::find(data.models, std::string_view{"SPI1"}, &core::snapshot_part::owner);
+    REQUIRE(owner != data.models.end());
+    auto const bytes = std::span{owner->data};
+    auto const found = std::ranges::search(
+        bytes, key, [](std::byte one, char other) { return one == static_cast<std::byte>(other); });
+    REQUIRE_FALSE(found.empty());
+    auto const at = static_cast<std::size_t>(found.begin() - bytes.begin()) + key.size() + 1;
+    REQUIRE(at < owner->data.size());
+    owner->data[at] = std::byte{5};
+    rig other;
+    CHECK_THROWS_WITH_AS(
+        other.f->target->restore(core::snapshot{data}), doctest::Contains("snapshot.SPI1.fifo"),
+        popcorn::config_error);
+  }
 }
 }

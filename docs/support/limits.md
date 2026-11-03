@@ -1357,9 +1357,14 @@ RXFIFO and frames of CR2.DS + 1 bits:
 
 - A DR write pushes one byte at 8 bits and two bytes at 16 or 32 bits, a DR read pops as many,
   the 32-bit access as the 16-bit one, inferred. Byte accesses to DR + 1 to DR + 3 move no FIFO
-  byte, and bytes past the 4 the TXFIFO holds are dropped with one `model_warning`, inferred.
+  byte, inferred.
+- A DR write whose bytes do not all fit the TXFIFO is dropped whole and the stored bytes stay,
+  with one `model_warning`, and raises `model_error` under `strict_peripherals`, inferred. RM0351
+  42.4.9 clears TXE above half full to prevent "possible corruption of 3x 8-bit data frames
+  already stored in the TXFIFO when software tries to write more data in 16-bit mode": silicon may
+  corrupt the stored frames, popcorn keeps them.
 - With DS above 8 a frame takes two bytes, so a byte write waits for the next byte before the
-  frame starts, inferred.
+  frame starts, inferred. BSY stays 0 while the TXFIFO holds half a frame, RM0351 42.4.10.
 - A DR read of an empty RXFIFO slot returns 0 and pops nothing, inferred.
 - FRLVL reads 11 with 3 bytes in the RXFIFO, as with 4, inferred.
 - The TXFIFO keeps its bytes across SPE 0 and sends them once SPE and MSTR are 1, inferred.

@@ -72,12 +72,12 @@ auto fifo_push(
     std::uint32_t                value,
     std::uint8_t                 count) -> bool
 {
+  if(std::size_t{level} + count > queue.size())
+  {
+    return false;
+  }
   for(std::uint8_t index = 0; index < count; ++index)
   {
-    if(level == queue.size())
-    {
-      return false;
-    }
     queue[level++] = static_cast<std::uint8_t>(value >> (8u * index));
   }
   return true;
@@ -129,9 +129,9 @@ auto kernel_name(peripheral_desc const& desc, spi_classic_variant const& variant
 
 /**
  * @brief SPI1 to SPI3 of the STM32L1, RM0038 section 28 "Serial peripheral interface (SPI)", and
- *        of the STM32L4, in SPI mode, controller and target. One transmit buffer, one receive
- *        buffer and one shift register, frames of 8 bits with CR1.DFF 0 and 16 bits with DFF 1,
- *        RM0038 28.3.1.
+ *        of the STM32L4, in SPI mode, controller and target. On the STM32L1, one transmit buffer,
+ *        one receive buffer and one shift register, frames of 8 bits with CR1.DFF 0 and 16 bits
+ *        with DFF 1, RM0038 28.3.1.
  *
  *        Controller mode, MSTR 1 and SPE 1: a frame starts when DR is written and the shifter is
  *        free, TXE rising as the word moves to the shifter, and lasts DFF bits of the APB clock
@@ -199,7 +199,11 @@ auto kernel_name(peripheral_desc const& desc, spi_classic_variant const& variant
  *        CR2.DS + 1 bits, one byte up to 8 bits, two bytes low byte first above, and a CR2
  *        write of DS 0000 to 0010 stores 0111, RM0351 42.6.2. A DR write pushes one byte at 8
  *        bits and two bytes at 16 or 32 bits, a DR read pops as many, the 32-bit access as the
- *        16-bit one, inferred. Bytes that do not fit are dropped and logged once, inferred. A
+ *        16-bit one, inferred. A DR write whose bytes do not all fit the TXFIFO is dropped whole
+ *        and the stored bytes stay, logged once, model_error under strict_peripherals at the
+ *        write, inferred: RM0351 42.4.9 clears TXE above half full because a 16-bit write over
+ *        three stored 8-bit frames could cause "possible corruption of 3x 8-bit data frames
+ *        already stored in the TXFIFO", and silicon may corrupt them where popcorn keeps them. A
  *        frame starts once the TXFIFO holds its bytes, so with DS above 8 a byte write waits for
  *        the next one, inferred. A DR read returns the oldest two bytes, 0 in an empty slot, and
  *        pops no more than the RXFIFO holds, inferred. Byte accesses to DR + 1 to DR + 3 move
@@ -207,9 +211,10 @@ auto kernel_name(peripheral_desc const& desc, spi_classic_variant const& variant
  *        the RXFIFO holds 1 byte with CR2.FRXTH 1 or 2 bytes with FRXTH 0, RM0351 42.4.10.
  *        FTLVL and FRLVL give the level up to 3, 11 at 3 bytes and at 4, inferred for FRLVL. A
  *        frame lands with OVR set or too little room is lost and sets OVR, RM0351 42.4.10. BSY
- *        is 1 in controller receive-only mode and in controller bidirectional receive, RM0351
- *        42.4.10 note. Both FIFOs keep their bytes across SPE 0, RM0351 42.4.9 for the RXFIFO,
- *        inferred for the TXFIFO. An RCC reset of the instance empties them.
+ *        is 1 while a frame shifts or, with SPE 1, the TXFIFO holds the bytes of a whole frame,
+ *        RM0351 42.4.10, and 1 in controller receive-only mode and in controller bidirectional
+ *        receive, RM0351 42.4.10 note. Both FIFOs keep their bytes across SPE 0, RM0351 42.4.9
+ *        for the RXFIFO, inferred for the TXFIFO. An RCC reset of the instance empties them.
  *
  *        Devices and controller, the STM32L1 SPI on the generic interfaces: each frame is
  *        exchanged through spi_target::exchange_deferred() at its end, the frame's generation as
@@ -533,11 +538,17 @@ void spi_classic::queue_tx(std::uint32_t offset, std::uint8_t size, std::uint32_
       return;
     }
     auto const count = static_cast<std::uint8_t>(size == 1 ? 1 : 2);
-    if(not fifo_push(state_.fifo.tx, state_.fifo.tx_level, value, count)
-       and not std::exchange(dropped_logged_, true))
+    if(fifo_push(state_.fifo.tx, state_.fifo.tx_level, value, count))
     {
-      warn(
-          "DR", "a DR write past the 4 bytes of the TXFIFO: the bytes that do not fit are dropped");
+      return;
+    }
+    if(not std::exchange(dropped_logged_, true))
+    {
+      warn("DR", "a DR write that does not fit the 4-byte TXFIFO: the write is dropped whole");
+    }
+    if(ctx_.strict_peripherals)
+    {
+      throw model_error(std::string{desc_.name}, "DR", data_.offset);
     }
     return;
   }
@@ -846,7 +857,7 @@ void spi_classic::flags()
   auto const up         = get(regs_, enable_) != 0;
   auto const controller = up and get(regs_, master_) != 0;
   auto const shifting   = state_.busy != 0 or (state_.host_busy != 0 and state_.host_taking != 0);
-  auto       busy       = shifting or (up and tx_holding());
+  auto       busy       = shifting or (up and tx_ready());
   if(controller and receive_only())
   {
     busy = fifo_ or get(regs_, bidi_) == 0;
@@ -1254,7 +1265,15 @@ void spi_classic::save(std::vector<std::byte>& out) const
 
 void spi_classic::load(std::span<std::byte const> in)
 {
-  state_ = reflex::serde::bson::deserializer{in}.template load<spi_classic_state>();
+  auto        loaded = reflex::serde::bson::deserializer{in}.template load<spi_classic_state>();
+  auto const& fifo   = loaded.fifo;
+  if(fifo.rx_level > fifo.rx.size() or fifo.tx_level > fifo.tx.size())
+  {
+    throw config_error(
+        ctx_.part.part, 0, std::format("snapshot.{}.fifo", desc_.name),
+        "a TXFIFO and an RXFIFO level of 4 bytes or less");
+  }
+  state_ = std::move(loaded);
   attachments_.load_devices(ctx_, desc_.name);
 }
 }
