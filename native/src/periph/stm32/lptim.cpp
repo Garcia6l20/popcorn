@@ -9,7 +9,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -26,7 +25,6 @@ constexpr std::uint32_t reload_match    = 1u << 1;
 constexpr std::uint32_t compare_ok      = 1u << 3;
 constexpr std::uint32_t reload_ok       = 1u << 4;
 constexpr std::uint32_t counter_top     = 0xFFFF;
-constexpr std::uint64_t frozen          = std::numeric_limits<std::uint64_t>::max();
 constexpr std::uint32_t enable_bit      = 1u << 0;
 constexpr std::uint32_t single_start    = 1u << 1;
 constexpr std::uint32_t continuous_run  = 1u << 2;
@@ -62,6 +60,7 @@ struct lptim_state
   std::uint64_t wrap_held{};
   std::uint64_t compare_due{};
   std::uint64_t reload_due{};
+  std::uint64_t paused_units{};
   std::uint64_t generation{};
   std::uint64_t queued{};
   std::uint32_t anchor_count{};
@@ -73,6 +72,7 @@ struct lptim_state
   std::uint32_t reload_pending{};
   std::uint8_t  running{};
   std::uint8_t  single{};
+  std::uint8_t  paused_counting{};
 
   friend auto operator==(lptim_state const&, lptim_state const&) -> bool = default;
 };
@@ -127,15 +127,23 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
  *        the external clock, the input count, the timeout, set-once, PRELOAD 1, the encoder and
  *        the COMP inputs, log once each and raise under strict_peripherals: the counter then
  *        keeps its mode, counts the kernel clock and applies CMP and ARR at their OK flags.
- *        Deviations: CNT reads exact, without the double-read rule of RM0351 34.7.8. The kernel
- *        rate is read at ENABLE and at each start.
+ *        A kernel rate change keeps CNT, the kernel clocks already spent in the current tick or
+ *        the start latency, and the kernel clocks left before each pending CMPOK, ARROK, match
+ *        delay and one-shot stop, inferred. A stopped kernel clock freezes all of them until it
+ *        runs again, inferred. LPTIMxRST resets the registers and the state and withdraws the
+ *        pending event.
+ *        Deviation: CNT reads exact, without the double-read rule of RM0351 34.7.8.
  */
-class lptim final : public dispatch_model<lptim, lptim_state>
+class lptim final : public dispatch_model<lptim, lptim_state>,
+                    public clock_listener,
+                    public bus_reset_listener
 {
 public:
   lptim(model_context& ctx, peripheral_desc const& desc, lptim_variant const& variant);
 
   void reset(register_file& regs, reset_kind kind) override;
+  void on_bus_reset() override;
+  void on_clock_change() override;
   void on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
       -> std::expected<std::uint32_t, bus_error> override;
@@ -177,6 +185,8 @@ private:
   void refuse_unmodelled();
   void refresh();
   void reschedule();
+  void rebase(std::uint64_t ps, std::uint64_t hz);
+  void restore_reset_values();
 
   lptim_variant                     variant_;
   register_file&                    regs_;
@@ -232,6 +242,7 @@ lptim::lptim(model_context& ctx, peripheral_desc const& desc, lptim_variant cons
     bind(lptim_option_writes);
   }
   state_.reload = describe("ARR").reset;
+  state_.hz     = ctx.clock.hz(kernel_);
 }
 
 auto lptim::now_ps() const -> std::uint64_t
@@ -336,9 +347,13 @@ auto lptim::match_due(std::uint32_t value, std::uint64_t held) const -> std::opt
 
 auto lptim::next_term() const -> std::optional<due_term>
 {
-  auto best  = std::optional<due_term>{};
+  auto best = std::optional<due_term>{};
+  if(state_.hz == 0)
+  {
+    return best;
+  }
   auto offer = [&](std::optional<std::uint64_t> due, term which) {
-    if(due and *due != 0 and *due != frozen and (not best or *due < best->due))
+    if(due and *due != 0 and (not best or *due < best->due))
     {
       best = due_term{*due, which};
     }
@@ -452,11 +467,10 @@ void lptim::catch_up(std::uint64_t ps)
 
 void lptim::start(std::uint64_t ps, bool single)
 {
-  state_.hz = ctx_.clock.hz(kernel_);
   if(state_.hz == 0)
   {
-    state_.anchor_ps   = ps;
-    state_.anchor_frac = 0;
+    state_.paused_counting = 0;
+    state_.paused_units    = std::uint64_t{variant_.start_cycles} * ps_per_second;
   }
   else
   {
@@ -532,17 +546,104 @@ void lptim::reschedule()
       ctx_.events.schedule_at(vtime{next->due}, tick_event, ++state_.generation, ctx_.clock) + 1;
 }
 
-void lptim::reset(register_file& regs, reset_kind)
+void lptim::reset(register_file&, reset_kind)
+{
+  restore_reset_values();
+}
+
+void lptim::on_bus_reset()
+{
+  if(auto const seq = std::exchange(state_.queued, 0); seq != 0)
+  {
+    ctx_.events.cancel(seq - 1);
+  }
+  restore_reset_values();
+}
+
+void lptim::restore_reset_values()
 {
   for(auto const& name : claims())
   {
-    regs.poke(reg(name).offset, describe(name).reset);
+    regs_.poke(reg(name).offset, describe(name).reset);
   }
   auto const generation = state_.generation + 1;
   state_                = {};
   state_.generation     = generation;
   state_.reload         = describe("ARR").reset;
+  state_.hz             = ctx_.clock.hz(kernel_);
+  state_.settled_ps     = now_ps();
   line_->lower();
+}
+
+void lptim::rebase(std::uint64_t ps, std::uint64_t hz)
+{
+  auto dues = std::array{
+      &state_.compare_due, &state_.reload_due, &state_.compare_held, &state_.reload_held,
+      &state_.wrap_held};
+  auto const old = state_.hz;
+  if(old != 0)
+  {
+    hold_in_flight(ps);
+    auto const at = wide{ps} * old;
+    for(auto* const due : dues)
+    {
+      if(*due != 0)
+      {
+        *due = static_cast<std::uint64_t>(std::max(wide{*due} * old, at) - at);
+      }
+    }
+    state_.paused_counting = 0;
+    state_.paused_units    = 0;
+    if(state_.running != 0 and at >= anchor())
+    {
+      auto const since       = at - anchor();
+      state_.anchor_count    = position(static_cast<std::uint64_t>(since / tick_unit()));
+      state_.paused_counting = 1;
+      state_.paused_units    = static_cast<std::uint64_t>(since % tick_unit());
+    }
+    else if(state_.running != 0)
+    {
+      state_.paused_units = static_cast<std::uint64_t>(anchor() - at);
+    }
+  }
+  state_.hz = hz;
+  if(hz == 0)
+  {
+    return;
+  }
+  auto const at = wide{ps} * hz;
+  for(auto* const due : dues)
+  {
+    if(*due != 0)
+    {
+      *due = std::max<std::uint64_t>(ceil_ps(at + *due), ps + 1);
+    }
+  }
+  if(state_.running != 0)
+  {
+    auto const units = wide{state_.paused_units};
+    set_anchor(state_.paused_counting != 0 ? (at > units ? at - units : 0) : at + units);
+    if(state_.paused_counting != 0)
+    {
+      state_.floor_ps = ps;
+    }
+  }
+  state_.paused_counting = 0;
+  state_.paused_units    = 0;
+}
+
+void lptim::on_clock_change()
+{
+  auto const hz = ctx_.clock.hz(kernel_);
+  if(hz == state_.hz)
+  {
+    return;
+  }
+  auto const t = now_ps();
+  catch_up(t);
+  rebase(t, hz);
+  refresh();
+  reschedule();
 }
 
 void lptim::plain_written(std::uint32_t, std::uint32_t)
@@ -584,7 +685,6 @@ void lptim::control_written(std::uint32_t old, std::uint32_t now)
   if(not was_on and is_on)
   {
     state_.enable_ps = t;
-    state_.hz        = ctx_.clock.hz(kernel_);
   }
   else if(was_on and not is_on)
   {
@@ -635,10 +735,8 @@ template <term Which> void lptim::value_written(std::uint32_t old, std::uint32_t
     regs_.poke(at.offset, now);
   }
   (compare ? state_.compare_pending : state_.reload_pending) = now & counter_top;
-  auto const hz                                              = ctx_.clock.hz(kernel_);
-  due = hz == 0 ? frozen
-                : static_cast<std::uint64_t>(
-                      (wide{t} * hz + wide{variant_.ok_cycles} * ps_per_second + hz - 1) / hz);
+  auto const cycles = wide{variant_.ok_cycles} * ps_per_second;
+  due = state_.hz == 0 ? static_cast<std::uint64_t>(cycles) : ceil_ps(wide{t} * state_.hz + cycles);
   refresh();
   reschedule();
 }

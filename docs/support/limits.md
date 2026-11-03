@@ -934,8 +934,11 @@ LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
   raise `ModelError` under `strict`. The counter then counts the kernel clock in its current
   mode and applies CMP and ARR at their OK flags.
 - CNT reads the exact count, so the double read of RM0351 34.7.8 always agrees.
-- The kernel rate is read at ENABLE and at each start. The LPTIM keeps its registers and state
-  across its RCC reset bit.
+- A kernel rate change, such as an LPTIM1SEL write or a PPRE1 change under PCLK1, keeps CNT,
+  the kernel clocks already spent in the current tick or the start latency, and the kernel
+  clocks left before each pending CMPOK, ARROK, CMPM, ARRM and one-shot stop, inferred. A stopped
+  kernel clock, LPTIMxEN 0 included, freezes all of them until it runs again, inferred.
+- LPTIM1RST and LPTIM2RST reset the registers and the state of their LPTIM.
 - The LPTIM output reaches no pin and no other peripheral. ES0250 2.18.4, LPTIM1 outputs not
   open-drain, is outside the model.
 - EXTI direct lines 32 and 33 stay Stop wake-up gates: the LPTIM raises LPTIM1_IRQn and

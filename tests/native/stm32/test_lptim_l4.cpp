@@ -46,6 +46,9 @@ constexpr address          cnt        = 0x1C;
 constexpr address          option     = 0x20;
 constexpr address          apb1enr1   = 0x4002'1058;
 constexpr address          apb1enr2   = 0x4002'105C;
+constexpr address          apb1rstr1  = 0x4002'1038;
+constexpr address          apb1rstr2  = 0x4002'103C;
+constexpr address          rcc_cfgr   = 0x4002'1008;
 constexpr address          ispr2      = 0xE000'E208;
 constexpr std::uint32_t    cmpm       = 1u << 0;
 constexpr std::uint32_t    arrm       = 1u << 1;
@@ -435,6 +438,176 @@ TEST_CASE("inferred: an OK on the ARR tick or the wrap of a one-shot run keeps A
   }
 }
 
+TEST_CASE("checklist 31: an LPTIM1RST pulse resets the registers and withdraws the pending event")
+{
+  rig        r;
+  auto const t = r.started(6, 10, cntstrt, 0, cmpm);
+  auto const a = t + 3 * cycle;
+  REQUIRE(r.pending() == a + 7 * cycle);
+  r.idle_to(a + 2 * cycle);
+  r.write(apb1rstr1, 1u << 31);
+  r.write(apb1rstr1, 0);
+  CHECK(r.pending() == std::nullopt);
+  CHECK(r.read(lptim1 + cr) == 0);
+  CHECK(r.read(lptim1 + cmp) == 0);
+  CHECK(r.read(lptim1 + arr) == 1);
+  CHECK(r.read(lptim1 + ier) == 0);
+  r.write(lptim1 + cr, enable);
+  r.write(lptim1 + arr, 10);
+  r.write(lptim1 + cmp, 2);
+  r.idle_to(a + 5 * cycle);
+  r.write(lptim1 + icr, cmpok | arrok);
+  auto const s = r.now_ps();
+  r.write(lptim1 + cr, enable | cntstrt);
+  r.idle_to(a + 8 * cycle);
+  CHECK(r.read(lptim1 + isr) == 0);
+  CHECK(r.pending() == s + 6 * cycle);
+  r.idle_to(s + 6 * cycle);
+  CHECK(r.read(lptim1 + isr) == cmpm);
+  CHECK((r.read(ispr2) & lptim1_irq) == 0);
+}
+
+TEST_CASE("RM0351 6.4.13 and 6.4.14: LPTIM1RST and LPTIM2RST each reset only their own LPTIM")
+{
+  for(auto const& [unit, base, reset, bit] : {
+          std::tuple{std::string_view{"LPTIM1"}, lptim1, apb1rstr1, 1u << 31},
+          std::tuple{std::string_view{"LPTIM2"}, lptim2, apb1rstr2, 1u << 5 },
+  })
+  {
+    CAPTURE(unit);
+    rig r;
+    for(auto const at : {lptim1, lptim2})
+    {
+      r.write(at + cr, enable);
+      r.write(at + cmp, 5);
+    }
+    auto const other = base == lptim1 ? lptim2 : lptim1;
+    REQUIRE(r.pending(unit).has_value());
+    r.write(reset, bit);
+    r.write(reset, 0);
+    CHECK(r.pending(unit) == std::nullopt);
+    CHECK(r.read(base + cr) == 0);
+    CHECK(r.read(base + cmp) == 0);
+    CHECK(r.read(other + cr) == enable);
+    CHECK(r.read(other + cmp) == 5);
+    r.idle_to(r.now_ps() + 4 * cycle);
+    CHECK(r.read(base + isr) == 0);
+    CHECK(r.read(other + isr) == cmpok);
+  }
+}
+
+TEST_CASE("inferred: a PCLK1 rate change keeps CNT and the tick's elapsed kernel clocks")
+{
+  rig        r;
+  auto const t = r.started(5, 100, cntstrt, presc(2));
+  auto const x = t + 13 * cycle;
+  r.idle_to(x);
+  REQUIRE(r.read(lptim1 + cnt) == 2);
+  r.write(rcc_cfgr, r.read(rcc_cfgr) | (4u << 8));
+  CHECK(r.pending() == x + 22 * cycle);
+  r.idle_to(x + 3 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 2);
+  r.idle_to(x + 4 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 3);
+  r.idle_to(x + 22 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+}
+
+TEST_CASE("inferred: a CMPM in its delay at a PCLK1 rate change sets one new kernel clock later")
+{
+  rig        r;
+  auto const t = r.started(2, 100, cntstrt, presc(2));
+  auto const x = t + 11 * cycle;
+  r.idle_to(x);
+  REQUIRE(r.read(lptim1 + cnt) == 2);
+  REQUIRE((r.read(lptim1 + isr) & cmpm) == 0);
+  r.write(rcc_cfgr, r.read(rcc_cfgr) | (4u << 8));
+  CHECK(r.pending() == x + 2 * cycle);
+  r.idle_to(x + 2 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+}
+
+auto started_at_half_pclk1(rig const& r, std::uint32_t compare) -> std::uint64_t
+{
+  r.write(rcc_cfgr, r.read(rcc_cfgr) | (4u << 8));
+  r.write(lptim1 + cr, enable);
+  r.idle_to(r.now_ps() + 300 * cycle);
+  r.write(lptim1 + arr, 100);
+  r.write(lptim1 + cmp, compare);
+  r.idle_to(r.now_ps() + 8 * cycle);
+  r.write(lptim1 + icr, cmpok | arrok);
+  auto const t = r.now_ps();
+  r.write(lptim1 + cr, enable | cntstrt);
+  return t;
+}
+
+TEST_CASE("inferred: a rate drop in the start's first tick keeps CMPM of count 0, no stale floor")
+{
+  rig        r;
+  auto const t = started_at_half_pclk1(r, 0);
+  CHECK(r.pending() == t + 8 * cycle);
+  r.idle_to(t + 7 * cycle);
+  r.write(rcc_cfgr, r.read(rcc_cfgr) | (7u << 8));
+  CHECK(r.pending() == t + 15 * cycle);
+  r.idle_to(t + 15 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+}
+
+TEST_CASE("inferred: a rate rise after a CMP applied on its tick keeps CMPM a period later")
+{
+  rig        r;
+  auto const t = started_at_half_pclk1(r, 6);
+  auto const a = t + 6 * cycle;
+  r.idle_to(a + 4 * cycle);
+  r.write(lptim1 + cmp, 5);
+  r.idle_to(a + 11 * cycle);
+  REQUIRE(r.read(lptim1 + cnt) == 5);
+  REQUIRE((r.read(lptim1 + isr) & cmpok) == cmpok);
+  r.write(rcc_cfgr, r.read(rcc_cfgr) & ~(7u << 8));
+  CHECK(r.pending() > a + 100 * cycle);
+  r.idle_to(a + 14 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == 0);
+}
+
+TEST_CASE(
+    "inferred: an OK on the one-shot wrap stops there, a later rate change leaves CNT 0 and "
+    "nothing pending")
+{
+  rig        r;
+  auto const t = r.started(2, 5, sngstrt, presc(2));
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + 21 * cycle);
+  r.write(lptim1 + cmp, 3);
+  r.idle_to(a + 25 * cycle);
+  r.write(rcc_cfgr, r.read(rcc_cfgr) | (4u << 8));
+  CHECK((r.read(lptim1 + isr) & (arrm | cmpok)) == (arrm | cmpok));
+  CHECK(r.read(lptim1 + cnt) == 0);
+  CHECK(r.pending() == std::nullopt);
+  r.idle_to(a + 60 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+}
+
+TEST_CASE("inferred: a stopped kernel clock freezes CNT and a pending CMPOK, both resume")
+{
+  rig        r;
+  auto const t = r.started(30, 100);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + 5 * cycle);
+  r.write(lptim1 + cmp, 40);
+  r.idle_to(a + 6 * cycle);
+  r.write(apb1enr1, 0);
+  r.idle_to(a + 50 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 6);
+  CHECK((r.read(lptim1 + isr) & cmpok) == 0);
+  CHECK(r.pending() == std::nullopt);
+  r.write(apb1enr1, 1u << 31);
+  r.idle_to(a + 51 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 7);
+  CHECK((r.read(lptim1 + isr) & cmpok) == 0);
+  r.idle_to(a + 52 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpok) == cmpok);
+}
+
 TEST_CASE("RM0351 34.3 Table 216: LPTIM2 has no CFGR.ENC, bit 24 reads 0, LPTIM1 keeps it")
 {
   rig r;
@@ -499,6 +672,32 @@ TEST_CASE("a machine reset gives ARR 1, the counter then wraps at 1")
   CHECK(r.read(lptim1 + cnt) == 1);
   r.idle_to(t + 5 * cycle);
   CHECK(r.read(lptim1 + cnt) == 0);
+}
+
+TEST_CASE("a machine reset after PPRE1 /2 takes the reset kernel rate, CMPM on the 4 MHz count")
+{
+  rig r;
+  r.write(rcc_cfgr, r.read(rcc_cfgr) | (4u << 8));
+  static_cast<void>(r.started(6, 10));
+  r.f->target->reset();
+  r.f->set("pc", sym(firmware, "idle"));
+  r.write(lptim1 + cr, enable);
+  r.write(lptim1 + arr, 10);
+  r.write(lptim1 + cmp, 6);
+  CHECK(r.pending() == std::nullopt);
+  r.idle_to(r.now_ps() + 20 * cycle);
+  CHECK(r.read(lptim1 + isr) == 0);
+  auto const e = r.now_ps();
+  r.write(apb1enr1, 1u << 31);
+  CHECK(r.pending() == e + 3 * cycle);
+  r.idle_to(e + 4 * cycle);
+  CHECK(r.read(lptim1 + isr) == (cmpok | arrok));
+  r.write(lptim1 + icr, cmpok | arrok);
+  auto const t = r.now_ps();
+  r.write(lptim1 + cr, enable | cntstrt);
+  CHECK(r.pending() == t + 3 * cycle + 6 * cycle + cycle);
+  r.idle_to(t + 10 * cycle);
+  CHECK(r.read(lptim1 + isr) == cmpm);
 }
 
 TEST_CASE("checklist 53: each CFGR and OR function the model lacks logs once, raises under strict")
