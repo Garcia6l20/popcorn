@@ -29,7 +29,9 @@ constexpr std::uint32_t enable_bit      = 1u << 0;
 constexpr std::uint32_t single_start    = 1u << 1;
 constexpr std::uint32_t continuous_run  = 1u << 2;
 constexpr std::uint32_t tick_event      = 0;
-constexpr std::size_t   unmodelled_uses = 8;
+constexpr std::size_t   unmodelled_uses = 7;
+constexpr std::uint8_t  compare_loaded  = 1u << 0;
+constexpr std::uint8_t  reload_loaded   = 1u << 1;
 
 enum class locked : std::uint8_t
 {
@@ -42,6 +44,7 @@ enum class term : std::uint8_t
 {
   compare_written,
   reload_written,
+  mode_switch,
   compare,
   reload,
   wrap,
@@ -60,6 +63,7 @@ struct lptim_state
   std::uint64_t wrap_held{};
   std::uint64_t compare_due{};
   std::uint64_t reload_due{};
+  std::uint64_t switch_due{};
   std::uint64_t paused_units{};
   std::uint64_t generation{};
   std::uint64_t queued{};
@@ -70,9 +74,13 @@ struct lptim_state
   std::uint32_t reload{1};
   std::uint32_t compare_pending{};
   std::uint32_t reload_pending{};
+  std::uint32_t compare_preload{};
+  std::uint32_t reload_preload{};
   std::uint8_t  running{};
   std::uint8_t  single{};
   std::uint8_t  paused_counting{};
+  std::uint8_t  switch_single{};
+  std::uint8_t  preloaded{};
 
   friend auto operator==(lptim_state const&, lptim_state const&) -> bool = default;
 };
@@ -91,7 +99,6 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
      {"CFGR", "COUNTMODE", "COUNTMODE 1, the count of input 1 edges"},
      {"CFGR", "TIMOUT", "TIMOUT 1, the timeout restart"},
      {"CFGR", "WAVE", "WAVE 1, the set-once mode"},
-     {"CFGR", "PRELOAD", "PRELOAD 1, CMP and ARR applied at the period end"},
      {"CFGR", "ENC", "ENC 1, the encoder mode"},
      {"OR", "", "OR_0 or OR_1, the COMP1 and COMP2 inputs"},
      }
@@ -114,7 +121,8 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
  *        RM0351 34.4.10 states a latency with no number. Counter ticks up to the OK compare with
  *        the old values, and a match of such a tick still sets its flag at its due after the OK,
  *        inferred. An OK at the one-shot wrap keeps the stop at the wrap, inferred. Terms due at
- *        the same time apply in the order CMPOK, ARROK, CMPM, ARRM, wrap, inferred.
+ *        the same time apply in the order CMPOK, ARROK, CMPM, ARRM, wrap, mode switch,
+ *        inferred.
  *        A flag that sets while its IER bit is 1 arms the LPTIM IRQ until ICR clears it, so an
  *        IER bit set after its flag raises nothing, RM0351 34.6. ENABLE written to 0 stops the
  *        counter at 0 and keeps the flags and a pending CMP or ARR write, inferred.
@@ -122,16 +130,27 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
  *        writes only with ENABLE 1, and RM0351 34.4.10 a second CMP or ARR write only after its
  *        OK flag. The model keeps the register for a write outside its rule, the second write
  *        excepted, which replaces the pending value: each logs one model_warning and raises
- *        model_error under strict_peripherals, inferred. CNTSTRT or SNGSTRT while the counter
- *        runs, and a start with a CFGR or OR function the model lacks, the external trigger,
- *        the external clock, the input count, the timeout, set-once, PRELOAD 1, the encoder and
- *        the COMP inputs, log once each and raise under strict_peripherals: the counter then
- *        keeps its mode, counts the kernel clock and applies CMP and ARR at their OK flags.
+ *        model_error under strict_peripherals, inferred. With PRELOAD 1 and the counter
+ *        started, a CMP or ARR value takes effect at the first wrap at or after its OK flag,
+ *        RM0351 34.4.10, the wrap being the tick after ARR, inferred. The counter counts as
+ *        started from the CNTSTRT or SNGSTRT write, its start latency included, inferred. A
+ *        later write waits for its own OK and wrap. ENABLE written to 0 and the one-shot stop
+ *        apply such a value at once, inferred. SNGSTRT written while the counter
+ *        runs in continuous mode makes it stop at a later wrap, and CNTSTRT written in one-shot
+ *        mode makes it go on counting, RM0351 34.4.7. The new mode reaches the counter the
+ *        variant's start cycles after the write, inferred, so a wrap before then keeps the old
+ *        mode, and a CNTSTRT reaching a counter that the one-shot wrap stopped starts it. The
+ *        same mode written again while the counter runs is discarded, inferred. A second
+ *        CNTSTRT or SNGSTRT before the first reaches the counter replaces it, logs one
+ *        model_warning and raises model_error under strict_peripherals, inferred. A start with
+ *        a CFGR or OR function the model lacks, the external trigger, the external clock, the
+ *        input count, the timeout, set-once, the encoder and the COMP inputs, logs once each and
+ *        raises under strict_peripherals: the counter then counts the kernel clock.
  *        A kernel rate change keeps CNT, the kernel clocks already spent in the current tick or
  *        the start latency, and the kernel clocks left before each pending CMPOK, ARROK, match
- *        delay and one-shot stop, inferred. A stopped kernel clock freezes all of them until it
- *        runs again, inferred. LPTIMxRST resets the registers and the state and withdraws the
- *        pending event.
+ *        delay, mode switch and one-shot stop, inferred. A stopped kernel clock freezes all of
+ *        them until it runs again, inferred. LPTIMxRST resets the registers and the state and
+ *        withdraws the pending event.
  *        Deviation: CNT reads exact, without the double-read rule of RM0351 34.7.8.
  */
 class lptim final : public dispatch_model<lptim, lptim_state>,
@@ -175,18 +194,24 @@ private:
       -> std::optional<std::uint64_t>;
   [[nodiscard]] auto next_term() const -> std::optional<due_term>;
 
-  void set_anchor(wide at);
-  void hold_in_flight(std::uint64_t ps);
-  void catch_up(std::uint64_t ps);
-  void apply(due_term const& next);
-  void raise_flag(std::uint32_t flag);
-  void start(std::uint64_t ps, bool single);
-  void stop();
-  void refuse_unmodelled();
-  void refresh();
-  void reschedule();
-  void rebase(std::uint64_t ps, std::uint64_t hz);
-  void restore_reset_values();
+  void               set_anchor(wide at);
+  void               hold_in_flight(std::uint64_t ps);
+  void               reanchor(std::uint64_t ps, std::uint64_t ticks);
+  void               align_wrap(std::uint64_t ps);
+  void               catch_up(std::uint64_t ps);
+  void               apply(due_term const& next);
+  void               raise_flag(std::uint32_t flag);
+  [[nodiscard]] auto preload() const -> bool;
+  void               start(std::uint64_t ps, bool single);
+  void               begin(wide at, std::uint64_t ps, bool single);
+  void               switch_mode(std::uint64_t ps, bool single);
+  void               transfer_preloaded();
+  void               stop();
+  void               refuse_unmodelled();
+  void               refresh();
+  void               reschedule();
+  void               rebase(std::uint64_t ps, std::uint64_t hz);
+  void               restore_reset_values();
 
   lptim_variant                     variant_;
   register_file&                    regs_;
@@ -198,13 +223,14 @@ private:
   reg_ref                           arr_;
   reg_ref                           cnt_;
   field_ref                         prescaler_;
+  field_ref                         preload_;
   core::clock_domain                kernel_;
   irq_line*                         line_ = nullptr;
   std::array<bool, unmodelled_uses> unmodelled_logged_{};
   std::array<bool, 3>               locked_logged_{};
   bool                              value_logged_   = false;
   bool                              pending_logged_ = false;
-  bool                              restart_logged_ = false;
+  bool                              switch_logged_  = false;
 };
 
 constexpr std::array<write_entry<lptim>, 8> lptim_writes{
@@ -227,7 +253,8 @@ lptim::lptim(model_context& ctx, peripheral_desc const& desc, lptim_variant cons
     : dispatch_model{ctx, desc, "LPTIM", lptim_writes}, variant_{variant}, regs_{ctx.regs},
       isr_{reg("ISR")}, ier_{reg("IER")}, cfgr_{reg("CFGR")}, cr_{reg("CR")}, cmp_{reg("CMP")},
       arr_{reg("ARR")}, cnt_{reg("CNT")}, prescaler_{field("CFGR", "PRESC")},
-      kernel_{ctx.clock.domain(lower(desc.name))}, line_{&irq(desc.name + "_IRQn")}
+      preload_{field("CFGR", "PRELOAD")}, kernel_{ctx.clock.domain(lower(desc.name))},
+      line_{&irq(desc.name + "_IRQn")}
 {
   expect_register("OR", variant.option_register);
   expect_field("CFGR", "ENC", variant.encoder);
@@ -368,13 +395,14 @@ auto lptim::next_term() const -> std::optional<due_term>
   {
     offer(match_due(state_.reload, state_.reload_held), term::reload);
   }
-  if(state_.single != 0 and state_.running != 0 and state_.hz != 0)
+  if(state_.running != 0 and (state_.single != 0 or state_.preloaded != 0))
   {
     offer(
         state_.wrap_held != 0 ? state_.wrap_held
                               : ceil_ps(anchor() + wide{first_wrap()} * tick_unit()),
         term::wrap);
   }
+  offer(state_.switch_due, term::mode_switch);
   return best;
 }
 
@@ -422,11 +450,47 @@ void lptim::apply(due_term const& next)
   }
   if(next.which == term::wrap)
   {
-    stop();
+    if(state_.single != 0)
+    {
+      stop();
+      return;
+    }
+    set_anchor(anchor() + wide{first_wrap()} * tick_unit());
+    state_.anchor_count = 0;
+    transfer_preloaded();
+    return;
+  }
+  if(next.which == term::mode_switch)
+  {
+    state_.switch_due = 0;
+    if(state_.running != 0)
+    {
+      if(auto const ticks = ticks_at(next.due))
+      {
+        reanchor(next.due, *ticks);
+      }
+      state_.single = state_.switch_single;
+    }
+    else
+    {
+      begin(wide{next.due} * state_.hz, 0, state_.switch_single != 0);
+    }
     return;
   }
   auto const compare = next.which == term::compare_written;
   raise_flag(compare ? compare_ok : reload_ok);
+  if(state_.running != 0 and preload())
+  {
+    if(state_.preloaded == 0)
+    {
+      align_wrap(next.due);
+    }
+    state_.preloaded |= compare ? compare_loaded : reload_loaded;
+    (compare ? state_.compare_preload : state_.reload_preload) =
+        compare ? state_.compare_pending : state_.reload_pending;
+    (compare ? state_.compare_due : state_.reload_due) = 0;
+    return;
+  }
   if(auto const ticks = ticks_at(next.due); ticks and state_.single != 0 and *ticks >= first_wrap())
   {
     hold_in_flight(next.due);
@@ -435,10 +499,7 @@ void lptim::apply(due_term const& next)
   }
   else if(ticks)
   {
-    hold_in_flight(next.due);
-    state_.anchor_count = position(*ticks);
-    state_.floor_ps     = next.due;
-    set_anchor(anchor() + wide{*ticks} * tick_unit());
+    reanchor(next.due, *ticks);
   }
   if(compare)
   {
@@ -450,6 +511,36 @@ void lptim::apply(due_term const& next)
     state_.reload     = state_.reload_pending;
     state_.reload_due = 0;
   }
+}
+
+void lptim::align_wrap(std::uint64_t ps)
+{
+  auto const ticks = ticks_at(ps);
+  auto const wrap  = first_wrap();
+  if(not ticks or *ticks < wrap)
+  {
+    return;
+  }
+  auto const period = std::uint64_t{state_.reload} + 1u;
+  auto       count  = (*ticks - wrap) / period;
+  if(ceil_ps(anchor() + wide{wrap + count * period} * tick_unit()) < ps)
+  {
+    ++count;
+  }
+  if(count == 0)
+  {
+    return;
+  }
+  set_anchor(anchor() + wide{wrap + (count - 1) * period} * tick_unit());
+  state_.anchor_count = 0;
+}
+
+void lptim::reanchor(std::uint64_t ps, std::uint64_t ticks)
+{
+  hold_in_flight(ps);
+  state_.anchor_count = position(ticks);
+  state_.floor_ps     = ps;
+  set_anchor(anchor() + wide{ticks} * tick_unit());
 }
 
 void lptim::catch_up(std::uint64_t ps)
@@ -465,27 +556,71 @@ void lptim::catch_up(std::uint64_t ps)
   state_.settled_ps = std::max(state_.settled_ps, ps);
 }
 
+auto lptim::preload() const -> bool
+{
+  return get(regs_, preload_) != 0;
+}
+
 void lptim::start(std::uint64_t ps, bool single)
 {
   if(state_.hz == 0)
   {
     state_.paused_counting = 0;
     state_.paused_units    = std::uint64_t{variant_.start_cycles} * ps_per_second;
+    state_.anchor_count    = 0;
+    state_.floor_ps        = ps;
+    state_.running         = 1;
+    state_.single          = single ? 1 : 0;
+    return;
   }
-  else
-  {
-    auto const written = wide{ps} * state_.hz + wide{variant_.start_cycles} * ps_per_second;
-    auto const ready   = wide{state_.enable_ps} * state_.hz + 2 * tick_unit();
-    set_anchor(std::max(written, ready));
-  }
+  begin(wide{ps} * state_.hz + wide{variant_.start_cycles} * ps_per_second, ps, single);
+}
+
+void lptim::begin(wide at, std::uint64_t ps, bool single)
+{
+  auto const ready = wide{state_.enable_ps} * state_.hz + 2 * tick_unit();
+  set_anchor(std::max(at, ready));
   state_.anchor_count = 0;
   state_.floor_ps     = ps;
   state_.running      = 1;
   state_.single       = single ? 1 : 0;
 }
 
+void lptim::switch_mode(std::uint64_t ps, bool single)
+{
+  if(state_.switch_due != 0)
+  {
+    warn_once_or_refuse(
+        switch_logged_, "CR", cr_.offset,
+        "a CNTSTRT or SNGSTRT write before the previous one reaches the counter: the later one "
+        "replaces it");
+  }
+  else if(state_.running != 0 and (state_.single != 0) == single)
+  {
+    return;
+  }
+  auto const cycles = wide{variant_.start_cycles} * ps_per_second;
+  state_.switch_due =
+      state_.hz == 0 ? static_cast<std::uint64_t>(cycles) : ceil_ps(wide{ps} * state_.hz + cycles);
+  state_.switch_single = single ? 1 : 0;
+}
+
+void lptim::transfer_preloaded()
+{
+  if((state_.preloaded & compare_loaded) != 0)
+  {
+    state_.compare = state_.compare_preload;
+  }
+  if((state_.preloaded & reload_loaded) != 0)
+  {
+    state_.reload = state_.reload_preload;
+  }
+  state_.preloaded = 0;
+}
+
 void lptim::stop()
 {
+  transfer_preloaded();
   state_.running      = 0;
   state_.single       = 0;
   state_.anchor_count = 0;
@@ -577,10 +712,9 @@ void lptim::restore_reset_values()
 
 void lptim::rebase(std::uint64_t ps, std::uint64_t hz)
 {
-  auto dues = std::array{
-      &state_.compare_due, &state_.reload_due, &state_.compare_held, &state_.reload_held,
-      &state_.wrap_held};
-  auto const old = state_.hz;
+  auto       dues = std::array{&state_.compare_due, &state_.reload_due, &state_.compare_held,
+                               &state_.reload_held, &state_.wrap_held,  &state_.switch_due};
+  auto const old  = state_.hz;
   if(old != 0)
   {
     hold_in_flight(ps);
@@ -688,22 +822,21 @@ void lptim::control_written(std::uint32_t old, std::uint32_t now)
   }
   else if(was_on and not is_on)
   {
+    state_.switch_due = 0;
     stop();
   }
   auto const starting = now & (single_start | continuous_run);
   if(was_on and is_on and starting != 0)
   {
-    if(state_.running != 0)
+    auto const single = (starting & continuous_run) == 0;
+    if(state_.running != 0 or state_.switch_due != 0)
     {
-      warn_once_or_refuse(
-          restart_logged_, "CR", cr_.offset,
-          "CNTSTRT or SNGSTRT while the counter runs: the mode switch is not modelled, the "
-          "counter keeps its mode");
+      switch_mode(t, single);
     }
     else
     {
       refuse_unmodelled();
-      start(t, (starting & continuous_run) == 0);
+      start(t, single);
     }
   }
   refresh();

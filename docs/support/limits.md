@@ -922,22 +922,34 @@ LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
   inferred: RM0351 34.4.10 states a latency with no number. Counter ticks up to the OK compare
   with the old values, and a match of such a tick still sets its flag at its due after the OK,
   inferred. An OK at the one-shot wrap keeps the stop at the wrap, inferred. Terms due at the
-  same time apply in the order CMPOK, ARROK, CMPM, ARRM, wrap, inferred.
+  same time apply in the order CMPOK, ARROK, CMPM, ARRM, wrap, mode switch, inferred.
+- With PRELOAD 1 and the counter started, a CMP or ARR value takes effect at the first wrap at or
+  after its OK flag, RM0351 34.4.10, the wrap being the tick after ARR, inferred. The counter
+  counts as started from the CNTSTRT or SNGSTRT write, its start latency included, inferred. A
+  later write waits for its own OK and wrap. ENABLE written to 0 and the one-shot stop apply such
+  a value at once, inferred.
+- SNGSTRT written while the counter runs in continuous mode makes it stop at a later wrap, and
+  CNTSTRT written in one-shot mode makes it go on counting, RM0351 34.4.7. The new mode reaches
+  the counter 3 kernel clocks after the write, inferred, so a wrap before then keeps the old mode,
+  and a CNTSTRT reaching a counter that the one-shot wrap stopped starts it. The same mode written
+  again while the counter runs is discarded, inferred. A second CNTSTRT or SNGSTRT before the
+  first reaches the counter replaces it, logs one `model_warning` and raises `ModelError` under
+  `strict`, inferred.
 - ENABLE written to 0 stops the counter at 0 and keeps the flags and a pending CMP or ARR write,
   inferred.
 - An IER, CFGR or OR write with ENABLE 1, a CMP or ARR write with ENABLE 0, and a second CMP or
   ARR write before its OK flag log one `model_warning` each and raise `ModelError` under
   `strict`. The register keeps its value, except the second write, whose value replaces the
   pending one, inferred.
-- A start with TRIGEN not 00, CKSEL 1, COUNTMODE 1, TIMOUT 1, WAVE 1, PRELOAD 1, ENC 1, or OR_0
-  or OR_1 set, and CNTSTRT or SNGSTRT while the counter runs, log one `model_warning` each and
-  raise `ModelError` under `strict`. The counter then counts the kernel clock in its current
-  mode and applies CMP and ARR at their OK flags.
+- A start with TRIGEN not 00, CKSEL 1, COUNTMODE 1, TIMOUT 1, WAVE 1, ENC 1, or OR_0 or OR_1
+  set logs one `model_warning` each and raises `ModelError` under `strict`. The counter then
+  counts the kernel clock.
 - CNT reads the exact count, so the double read of RM0351 34.7.8 always agrees.
 - A kernel rate change, such as an LPTIM1SEL write or a PPRE1 change under PCLK1, keeps CNT,
   the kernel clocks already spent in the current tick or the start latency, and the kernel
-  clocks left before each pending CMPOK, ARROK, CMPM, ARRM and one-shot stop, inferred. A stopped
-  kernel clock, LPTIMxEN 0 included, freezes all of them until it runs again, inferred.
+  clocks left before each pending CMPOK, ARROK, CMPM, ARRM, mode switch and one-shot stop,
+  inferred. A stopped kernel clock, LPTIMxEN 0 included, freezes all of them until it runs
+  again, inferred.
 - LPTIM1RST and LPTIM2RST reset the registers and the state of their LPTIM.
 - The LPTIM output reaches no pin and no other peripheral. ES0250 2.18.4, LPTIM1 outputs not
   open-drain, is outside the model.

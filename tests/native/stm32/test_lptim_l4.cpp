@@ -57,6 +57,7 @@ constexpr std::uint32_t    arrok      = 1u << 4;
 constexpr std::uint32_t    enable     = 1u << 0;
 constexpr std::uint32_t    sngstrt    = 1u << 1;
 constexpr std::uint32_t    cntstrt    = 1u << 2;
+constexpr std::uint32_t    preload    = 1u << 22;
 constexpr std::uint32_t    lptim1_irq = 1u << (65 - 64);
 constexpr std::uint64_t    cycle      = 250'000;
 
@@ -708,7 +709,6 @@ TEST_CASE("checklist 53: each CFGR and OR function the model lacks logs once, ra
           {cfgr,   1u << 23},
           {cfgr,   1u << 19},
           {cfgr,   1u << 20},
-          {cfgr,   1u << 22},
           {cfgr,   1u << 24},
           {option, 1u << 0 }
   })
@@ -734,19 +734,325 @@ TEST_CASE("checklist 53: each CFGR and OR function the model lacks logs once, ra
   }
 }
 
-TEST_CASE("checklist 53: CNTSTRT while the counter runs logs once, raises under strict")
+TEST_CASE("RM0351 34.4.10: with PRELOAD 1 a CMP write while counting applies at the next wrap")
 {
   rig        r;
-  auto const t = r.started(6, 10);
+  auto const t = r.started(2, 10, cntstrt, preload);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + cycle);
+  r.write(lptim1 + cmp, 6);
+  r.idle_to(a + 4 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpok) == cmpok);
+  r.write(lptim1 + icr, cmpm | cmpok);
+  CHECK(r.pending() == a + 11 * cycle);
+  r.idle_to(a + 11 * cycle);
+  CHECK(r.pending() == a + 18 * cycle);
+  r.idle_to(a + 17 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == 0);
+  r.idle_to(a + 18 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+}
+
+TEST_CASE("RM0351 34.4.10: with PRELOAD 1 an ARR write while counting applies at the next wrap")
+{
+  rig        r;
+  auto const t = r.started(20, 10, cntstrt, preload);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + 2 * cycle);
+  r.write(lptim1 + arr, 15);
+  r.idle_to(a + 11 * cycle);
+  CHECK((r.read(lptim1 + isr) & (arrm | arrok)) == (arrm | arrok));
+  r.write(lptim1 + icr, arrm | arrok);
+  CHECK(r.pending() == a + 27 * cycle);
+  r.idle_to(a + 26 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 15);
+  CHECK((r.read(lptim1 + isr) & arrm) == 0);
+}
+
+TEST_CASE("RM0351 34.4.10: with PRELOAD 1 a CMP write applies at its OK before the start")
+{
+  rig r;
+  r.write(lptim1 + cfgr, preload);
+  r.write(lptim1 + cr, enable);
+  r.idle_to(r.now_ps() + 300 * cycle);
+  r.settle_values(5, 10);
+  auto const t = r.now_ps();
+  r.write(lptim1 + cr, enable | cntstrt);
+  CHECK(r.pending() == t + 3 * cycle + 5 * cycle + cycle);
+}
+
+TEST_CASE("inferred: with PRELOAD 1 a second CMP write waits for its own OK and wrap")
+{
+  rig        r;
+  auto const t = r.started(2, 10, cntstrt, preload);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + cycle);
+  r.write(lptim1 + cmp, 6);
+  r.idle_to(a + 5 * cycle);
+  r.write(lptim1 + icr, cmpm | cmpok);
+  r.idle_to(a + 9 * cycle);
+  r.write(lptim1 + cmp, 8);
+  r.idle_to(a + 17 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == 0);
+  r.idle_to(a + 18 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+  r.write(lptim1 + icr, cmpm | cmpok);
+  r.idle_to(a + 30 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == 0);
+  r.idle_to(a + 31 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+}
+
+TEST_CASE("inferred: with PRELOAD 1 a second ARR write waits for its own OK and wrap")
+{
+  rig        r;
+  auto const t = r.started(20, 10, cntstrt, preload);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + cycle);
+  r.write(lptim1 + arr, 12);
+  r.idle_to(a + 5 * cycle);
+  r.write(lptim1 + icr, arrok);
+  r.idle_to(a + 9 * cycle);
+  r.write(lptim1 + arr, 15);
+  r.idle_to(a + 12 * cycle);
+  r.write(lptim1 + icr, arrm | arrok);
+  r.idle_to(a + 23 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrm) == 0);
+  r.idle_to(a + 24 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrm) == arrm);
+  r.write(lptim1 + icr, arrm);
+  r.idle_to(a + 39 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrm) == 0);
+  r.idle_to(a + 40 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrm) == arrm);
+}
+
+TEST_CASE("checklist 64: with PRELOAD 1 a CMP write in the third period applies at its next wrap")
+{
+  for(auto const written : {23u, 30u})
+  {
+    CAPTURE(written);
+    rig        r;
+    auto const t = r.started(2, 10, cntstrt, preload);
+    auto const a = t + 3 * cycle;
+    r.idle_to(a + written * cycle);
+    r.write(lptim1 + cmp, 6);
+    r.idle_to(a + (written + 4) * cycle);
+    r.write(lptim1 + icr, cmpm | cmpok);
+    r.idle_to(a + 39 * cycle);
+    CHECK((r.read(lptim1 + isr) & cmpm) == 0);
+    r.idle_to(a + 40 * cycle);
+    CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+  }
+}
+
+TEST_CASE("checklist 64: with PRELOAD 1 an ARR write in the third period applies at its next wrap")
+{
+  rig        r;
+  auto const t = r.started(20, 10, cntstrt, preload);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + 23 * cycle);
+  r.write(lptim1 + arr, 15);
+  r.idle_to(a + 27 * cycle);
+  r.write(lptim1 + icr, arrm | arrok);
+  r.idle_to(a + 33 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrm) == arrm);
+  r.write(lptim1 + icr, arrm);
+  r.idle_to(a + 48 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrm) == 0);
+  r.idle_to(a + 49 * cycle);
+  CHECK((r.read(lptim1 + isr) & arrm) == arrm);
+}
+
+TEST_CASE("inferred: with PRELOAD 1 an OK in the start latency waits for the first wrap")
+{
+  rig r;
+  r.write(lptim1 + cfgr, preload);
+  r.write(lptim1 + cr, enable);
+  r.idle_to(r.now_ps() + 300 * cycle);
+  r.settle_values(0, 10);
+  auto const w = r.now_ps();
+  r.write(lptim1 + cmp, 5);
+  r.idle_to(w + cycle);
+  r.write(lptim1 + cr, enable | cntstrt);
+  r.idle_to(w + 5 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+  r.write(lptim1 + icr, cmpm | cmpok);
+  r.idle_to(w + 20 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == 0);
+  r.idle_to(w + 21 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+}
+
+TEST_CASE("inferred: with PRELOAD 1 and ARR preloaded, a CMP OK on the wrap applies there too")
+{
+  rig        r;
+  auto const t = r.started(2, 10, cntstrt, preload);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + cycle);
+  r.write(lptim1 + arr, 10);
+  r.idle_to(a + 4 * cycle);
+  r.write(lptim1 + icr, cmpm);
+  r.idle_to(a + 8 * cycle);
+  r.write(lptim1 + cmp, 6);
+  r.idle_to(a + 17 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == 0);
+  r.idle_to(a + 18 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+}
+
+TEST_CASE("inferred: a CNTSTRT due on the one-shot wrap restarts with the preloaded CMP")
+{
+  rig        r;
+  auto const t = r.started(2, 5, sngstrt, preload);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + cycle);
+  r.write(lptim1 + cmp, 0);
+  r.idle_to(a + 3 * cycle);
+  r.write(lptim1 + cr, enable | cntstrt);
+  r.idle_to(a + 5 * cycle);
+  r.write(lptim1 + icr, cmpm | cmpok);
+  r.idle_to(a + 6 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == 0);
+  r.idle_to(a + 7 * cycle);
+  CHECK((r.read(lptim1 + isr) & cmpm) == cmpm);
+  r.idle_to(a + 9 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 3);
+}
+
+TEST_CASE("inferred: ENABLE 0 applies a CMP value waiting for the wrap with PRELOAD 1")
+{
+  rig        r;
+  auto const t = r.started(2, 10, cntstrt, preload);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + cycle);
+  r.write(lptim1 + cmp, 6);
+  r.idle_to(a + 5 * cycle);
+  r.write(lptim1 + cr, 0);
+  r.write(lptim1 + icr, cmpm | cmpok);
+  r.write(lptim1 + cr, enable);
+  r.idle_to(r.now_ps() + 4 * cycle);
+  auto const s = r.now_ps();
+  r.write(lptim1 + cr, enable | cntstrt);
+  CHECK(r.pending() == s + 3 * cycle + 6 * cycle + cycle);
+}
+
+TEST_CASE(
+    "RM0351 34.4.7: SNGSTRT while counting continuously stops at the wrap after the switch, its "
+    "latency inferred")
+{
+  for(auto const& [written, stop] : {
+          std::tuple{1u, 6u },
+          std::tuple{4u, 12u},
+  })
+  {
+    CAPTURE(written);
+    rig        r;
+    auto const t = r.started(20, 5);
+    auto const a = t + 3 * cycle;
+    r.idle_to(a + written * cycle);
+    r.write(lptim1 + cr, enable | sngstrt);
+    CHECK(r.pending() == a + std::min(written + 3, 6u) * cycle);
+    r.idle_to(a + (written + 3) * cycle);
+    CHECK(r.pending() == a + stop * cycle);
+    r.idle_to(a + (stop - 1) * cycle);
+    CHECK(r.read(lptim1 + cnt) == 5);
+    r.idle_to(a + (stop + 2) * cycle);
+    CHECK(r.read(lptim1 + cnt) == 0);
+    CHECK(r.pending() == std::nullopt);
+  }
+}
+
+TEST_CASE("RM0351 34.4.7: CNTSTRT in one-shot mode keeps the counter going past the wrap")
+{
+  rig        r;
+  auto const t = r.started(20, 5, sngstrt);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + cycle);
+  r.write(lptim1 + cr, enable | cntstrt);
+  r.idle_to(a + 4 * cycle);
+  CHECK(r.pending() == a + 6 * cycle);
+  r.idle_to(a + 20 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 2);
+}
+
+TEST_CASE("inferred: a CNTSTRT reaching a counter the one-shot wrap stopped starts it")
+{
+  rig        r;
+  auto const t = r.started(20, 5, sngstrt);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + 5 * cycle);
+  r.write(lptim1 + cr, enable | cntstrt);
+  r.idle_to(a + 7 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  CHECK(r.pending() == a + 8 * cycle);
+  r.idle_to(a + 10 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 2);
+  r.idle_to(a + 20 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+}
+
+TEST_CASE("inferred: CNTSTRT while counting continuously is discarded, no restart, no warning")
+{
+  rig        r;
+  auto const t = r.started(20, 5);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + cycle);
+  r.write(lptim1 + cr, enable | cntstrt);
+  CHECK(r.pending() == a + 6 * cycle);
+  r.idle_to(a + 3 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 3);
+  CHECK(r.logged.empty());
+}
+
+TEST_CASE("inferred: a kernel rate change keeps the kernel clocks left before a mode switch")
+{
+  rig        r;
+  auto const t = r.started(20, 100);
+  auto const x = t + 4 * cycle;
+  r.idle_to(x);
   r.write(lptim1 + cr, enable | sngstrt);
+  r.write(rcc_cfgr, r.read(rcc_cfgr) | (4u << 8));
+  CHECK(r.pending() == x + 6 * cycle);
+}
+
+TEST_CASE("inferred: a SNGSTRT written with the kernel clock stopped lands 3 clocks after it runs")
+{
+  rig        r;
+  auto const t = r.started(20, 5);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + cycle);
+  r.write(apb1enr1, 0);
   r.write(lptim1 + cr, enable | sngstrt);
-  CHECK(r.warnings("while the counter runs") == 1);
-  r.idle_to(t + 30 * cycle);
-  CHECK(r.read(lptim1 + cnt) != 0);
-  rig strict{true};
-  static_cast<void>(strict.started(6, 10));
+  r.idle_to(a + 10 * cycle);
+  CHECK(r.pending() == std::nullopt);
+  auto const e = r.now_ps();
+  r.write(apb1enr1, 1u << 31);
+  CHECK(r.pending() == e + 3 * cycle);
+  r.idle_to(e + 6 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  CHECK(r.pending() == std::nullopt);
+}
+
+TEST_CASE(
+    "checklist 53 policy: a second CNTSTRT or SNGSTRT before the switch replaces it, inferred")
+{
+  rig        r;
+  auto const t = r.started(20, 5);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + cycle);
+  r.write(lptim1 + cr, enable | sngstrt);
+  r.write(lptim1 + cr, enable | cntstrt);
+  r.write(lptim1 + cr, enable | cntstrt);
+  CHECK(r.warnings("before the previous one reaches the counter") == 1);
+  r.idle_to(a + 20 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 2);
+  rig        strict{true};
+  auto const s = strict.started(20, 5);
+  strict.idle_to(s + 4 * cycle);
+  strict.write(lptim1 + cr, enable | sngstrt);
   CHECK_THROWS_AS(
-      static_cast<void>(strict.f->target->mem().write(lptim1 + cr, 4, enable | sngstrt)),
+      static_cast<void>(strict.f->target->mem().write(lptim1 + cr, 4, enable | cntstrt)),
       popcorn::model_error);
 }
 }
