@@ -1313,3 +1313,51 @@ peripheral = "SPI3"
 register = "CR2"
 reset = 0x00000700
 source = "RM0351 Rev 11, 42.6.2 SPIx_CR2: reset value 0x0700, DS 0111 for 8-bit frames. The four SVDs give 0"
+
+[[registers]]
+peripheral = "LPTIM1"
+name = "OR"
+offset = 0x20
+width = 32
+reset = 0
+acc = "read_write"
+fields = [{ name = "OR_0", lsb = 0, width = 1 }, { name = "OR_1", lsb = 1, width = 1 }]
+source = "RM0351 Rev 11, 34.7.9 LPTIM1_OR: offset 0x020, reset 0, OR_0 in bit 0 connects input 1 to COMP1_OUT, OR_1 in bit 1 input 2 to COMP2_OUT. The four SVDs leave it out"
+
+[[registers]]
+peripheral = "LPTIM2"
+name = "OR"
+offset = 0x20
+width = 32
+reset = 0
+acc = "read_write"
+fields = [{ name = "OR_0", lsb = 0, width = 1 }, { name = "OR_1", lsb = 1, width = 1 }]
+source = "RM0351 Rev 11, 34.7.10 LPTIM2_OR: offset 0x020, reset 0, OR_0 and OR_1 in bits 1:0 select the input 1 source. The four SVDs leave it out"
+
+[[fields]]
+instances = ["LPTIM2"]
+registers = ["CFGR"]
+fields = ["ENC"]
+drop = true
+source = "RM0351 Rev 11, 34.3 Table 216: LPTIM2 has no encoder mode, so CFGR bit 24 is reserved. The four SVDs give LPTIM2 the LPTIM1 layout"
+
+[[fields]]
+instances = ["LPTIM2"]
+registers = ["ISR"]
+fields = ["UP", "DOWN"]
+drop = true
+source = "RM0351 Rev 11, 34.3 Table 216 and 34.7.1: without the encoder mode ISR bits 6:5 are reserved on LPTIM2. The four SVDs give LPTIM2 the LPTIM1 layout"
+
+[[fields]]
+instances = ["LPTIM2"]
+registers = ["IER"]
+fields = ["UPIE", "DOWNIE"]
+drop = true
+source = "RM0351 Rev 11, 34.3 Table 216 and 34.7.3: without the encoder mode IER bits 6:5 are reserved on LPTIM2. The four SVDs give LPTIM2 the LPTIM1 layout"
+
+[[fields]]
+instances = ["LPTIM2"]
+registers = ["ICR"]
+fields = ["UPCF", "DOWNCF"]
+drop = true
+source = "RM0351 Rev 11, 34.3 Table 216 and 34.7.2: without the encoder mode ICR bits 6:5 are reserved on LPTIM2. The four SVDs give LPTIM2 the LPTIM1 layout"

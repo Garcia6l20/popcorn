@@ -151,8 +151,12 @@ public:
 class controller_probe final : public periph::spi_controller_sink
 {
 public:
-  void frame(std::uint32_t, std::uint32_t, vtime) override
-  {}
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> frames;
+
+  void frame(std::uint32_t sent, std::uint32_t received, vtime) override
+  {
+    frames.emplace_back(sent, received);
+  }
 };
 
 class bus_probe final : public popcorn::testing::inert_model
@@ -185,10 +189,11 @@ public:
 
 struct rig
 {
-  std::shared_ptr<wire_target>   device = std::make_shared<wire_target>();
-  std::unique_ptr<stm32_fixture> f;
-  std::vector<core::log_record>  logged;
-  core::hook_handle              sink;
+  std::shared_ptr<wire_target>      device     = std::make_shared<wire_target>();
+  std::shared_ptr<controller_probe> controller = std::make_shared<controller_probe>();
+  std::unique_ptr<stm32_fixture>    f;
+  std::vector<core::log_record>     logged;
+  core::hook_handle                 sink;
 
   rig(rig const&)                    = delete;
   auto operator=(rig const&) -> rig& = delete;
@@ -198,7 +203,7 @@ struct rig
     stm32::board board{};
     if(target)
     {
-      board.spi_controllers["SPI1"] = std::make_shared<controller_probe>();
+      board.spi_controllers["SPI1"] = controller;
     }
     else
     {
@@ -1072,6 +1077,8 @@ TEST_CASE("checklist 53: a target's frame-start raise after a DS change keeps RX
            .until_time       = vtime{start.ps + 2 * frame_ps(8)}})),
       popcorn::model_error);
   CHECK((r.read(spi1 + sr) & (rxne | bsy)) == rxne);
+  REQUIRE(r.controller->frames.size() == 1);
+  CHECK(r.controller->frames.front().first == 0x01);
 }
 
 TEST_CASE("RM0351 42.4.9: receive-only with CRCEN holds one frame, FRLVL reads 00")

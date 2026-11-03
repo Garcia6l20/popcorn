@@ -46,6 +46,8 @@ constexpr auto l1_tim_instances =
 constexpr auto l1_cat3_tim_instances =
     std::to_array<std::string_view>({"TIM2", "TIM3", "TIM4", "TIM5", "TIM9", "TIM10", "TIM11"});
 constexpr auto l1_basic_tim_instances = std::to_array<std::string_view>({"TIM6", "TIM7"});
+constexpr auto lptim1_instances       = std::to_array<std::string_view>({"LPTIM1"});
+constexpr auto lptim2_instances       = std::to_array<std::string_view>({"LPTIM2"});
 
 struct builtin
 {
@@ -291,6 +293,16 @@ constexpr auto builtins = std::to_array<builtin>({
     {.ip              = "TIM6_7L4",
      .ip_version_glob = "gptimer2_v3_x*",
      .make            = [](board const&) { return tim_factory(l4_tim); },
+     .part_globs      = l4_parts},
+    {.ip              = "LPTIM",
+     .ip_version_glob = "L4_lptimer1_v1*",
+     .make            = [](board const&) { return lptim_factory(l4_lptim1); },
+     .instance_globs  = lptim1_instances,
+     .part_globs      = l4_parts},
+    {.ip              = "LPTIM",
+     .ip_version_glob = "L4_lptimer1_v1*",
+     .make            = [](board const&) { return lptim_factory(l4_lptim2); },
+     .instance_globs  = lptim2_instances,
      .part_globs      = l4_parts},
     {"IWDG", "iwdg1_v3*", [](board const&) { return iwdg_factory(u5_iwdg); }},
     {.ip              = "IWDG",

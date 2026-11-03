@@ -904,6 +904,40 @@ Source: [iwdg.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/pe
 - An update flag falls only while the LSI runs: a PR, RLR, WINR or EWCR write before the LSI
   starts keeps its flag set until the LSI is ready, inferred.
 
+## LPTIM
+
+Source: [lptim.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/lptim.cpp)
+
+STM32L4 LPTIM1 and LPTIM2, RM0351 section 34, count the kernel clock of RCC_CCIPR LPTIM1SEL or
+LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
+
+- The counter starts 3 kernel clocks after the CNTSTRT or SNGSTRT write, RM0351 34.4.6, and runs
+  in continuous mode for both bits. A start write made with ENABLE 0 is discarded, also when the
+  same write sets ENABLE, inferred. CNTSTRT and SNGSTRT read 0 at once, inferred. A start while
+  the counter runs changes nothing.
+- CMPM and ARRM set one kernel clock after the counter reaches CMP or ARR, ES0250 2.18.3, also
+  with PRESC above 0, inferred. CMP above ARR never matches, and a counter above a lowered ARR
+  counts to 0xFFFF before it wraps, inferred.
+- CMPOK and ARROK set 3 kernel clocks after the CMP or ARR write, and the value applies then,
+  inferred: RM0351 34.4.10 states a latency with no number. A second write before the OK flag
+  replaces the pending value, inferred: RM0351 34.4.10 calls it unpredictable. Counter ticks up
+  to the OK compare with the old values, and a match of such a tick still sets its flag at its
+  due after the OK, inferred. Terms due at the same time apply in the order CMPOK, ARROK, CMPM,
+  ARRM, inferred.
+- ENABLE written to 0 stops the counter at 0 and keeps the flags and a pending CMP or ARR write,
+  inferred.
+- The counter counts the kernel clock whatever CFGR selects besides PRESC: the external trigger,
+  the external clock, the input count, the timeout, the waveform, PRELOAD 1 and the encoder are
+  outside the model, as are the OR inputs. IER, CFGR, OR, CMP and ARR take every write.
+- CNT reads the exact count, so the double read of RM0351 34.7.8 always agrees.
+- The kernel rate is read at ENABLE and at each start. The LPTIM keeps its registers and state
+  across its RCC reset bit.
+- The LPTIM output reaches no pin and no other peripheral. ES0250 2.18.4, LPTIM1 outputs not
+  open-drain, is outside the model.
+- EXTI direct lines 32 and 33 stay Stop wake-up gates: the LPTIM raises LPTIM1_IRQn and
+  LPTIM2_IRQn itself, and Stop is not modelled. ES0250 2.18.1 and 2.18.2, an LPTIM interrupt
+  stuck at Stop entry or at a flag clear racing a new event, are outside the model.
+
 ## MDF and ADF
 
 Source: [mdf.cpp](https://github.com/Garcia6l20/popcorn/blob/main/native/src/periph/stm32/mdf.cpp)

@@ -173,6 +173,12 @@ namespace popcorn::periph::stm32
 [[nodiscard]] auto iwdg_factory(iwdg_variant variant) -> model_factory;
 
 /**
+ * @brief Factory of the LPTIM model, RM0351 section 34.
+ * @param variant What differs between the LPTIM instances the row serves.
+ */
+[[nodiscard]] auto lptim_factory(lptim_variant variant) -> model_factory;
+
+/**
  * @brief Factory of the RTC model, RM0456 section 63.
  * @param initial Calendar at power-on, the board's `rtc_initial`, copied.
  * @param variant What differs between the RTC of the family the row serves.

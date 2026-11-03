@@ -3,22 +3,22 @@
     "aliases": 0,
     "alternates": 335,
     "cross_rules": 10,
-    "fields": 9698,
+    "fields": 9695,
     "irqs": 81,
     "patched_fields": 52,
     "peripherals": 66,
     "regions": 10,
-    "registers": 1260
+    "registers": 1262
   },
   "part": "STM32L476RCTx",
   "svd_sha256": "9e35544908b7a561035398d1f60150bb82994f15b5edf9990cb44e7cfc1c9ff5",
   "tables": {
     "alternates": "1f0f6503080dd841bc440b6ba801e9a22573ac634a7190ca763879c54146ad03",
     "core": "cb8a4a9d4900b8cc47b22966bfb654e190e9d5156686276f0fd540a9dfdd28d4",
-    "fields": "df8e0ce4a98d0ead707af1718a3298b96103bc46716636bbe228ec782d9e07b2",
+    "fields": "4b76299abfd7fee132d03e55b6371b6b30bb05b623f653d99a7a306757d16457",
     "irqs": "9d2f2912def07b5d7aafbde9c057b65b4276072514ce17d10f6d2eb367fcf282",
     "peripherals": "59951b7bb326981dbe891ceb1b9a9157fa1bcd0bf1256c3ee06739d3efd9e28a",
     "regions": "7ac014351dd24f0ca3cb54419d712ab9d30822cd605df60cf63356e0618f0e8e",
-    "registers": "cc3d8311a8af838fc47a106fb54f034d198d155177ad931d9fddd43401ac0ede"
+    "registers": "cdd67b630b6b9814194db772e6225e0bfc9d14d4e3d669dc9f9e32cef3488312"
   }
 }

@@ -278,6 +278,7 @@ for program, source in (
     ("stm32-dma-l4", "test_dma_l4.cpp"),
     ("stm32-tim-l4", "test_tim_l4.cpp"),
     ("stm32-spi-l4", "test_spi_l4.cpp"),
+    ("stm32-lptim-l4", "test_lptim_l4.cpp"),
 ):
     l4_test = add_doctest(
         program,
