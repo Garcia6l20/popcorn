@@ -941,8 +941,8 @@ LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
   ARR write before its OK flag log one `model_warning` each and raise `ModelError` under
   `strict`. The register keeps its value, except the second write, whose value replaces the
   pending one, inferred.
-- A start with TRIGEN not 00, CKSEL 1, COUNTMODE 1, TIMOUT 1, WAVE 1, ENC 1, or OR_0 or OR_1
-  set logs one `model_warning` each and raises `ModelError` under `strict`. The counter then
+- A start with TRIGEN not 00, CKSEL 1, COUNTMODE 1, TIMOUT 1, ENC 1, or OR_0 or OR_1 set logs
+  one `model_warning` each and raises `ModelError` under `strict`. The counter then
   counts the kernel clock.
 - CNT reads the exact count, so the double read of RM0351 34.7.8 always agrees.
 - A kernel rate change, such as an LPTIM1SEL write or a PPRE1 change under PCLK1, keeps CNT,
@@ -951,8 +951,17 @@ LPTIM2SEL through the prescaler, started by CNTSTRT or SNGSTRT.
   inferred. A stopped kernel clock, LPTIMxEN 0 included, freezes all of them until it runs
   again, inferred.
 - LPTIM1RST and LPTIM2RST reset the registers and the state of their LPTIM.
-- The LPTIM output reaches no pin and no other peripheral. ES0250 2.18.4, LPTIM1 outputs not
-  open-drain, is outside the model.
+- The output drives the `lptim1_out` and `lptim2_out` trigger signals and no pin, so ES0250
+  2.18.4, LPTIM1 outputs not open-drain, is outside the model. With WAVE 0 it rises one kernel
+  clock after CNT reaches CMP and falls one kernel clock after CNT reaches ARR, as ES0250 2.18.3
+  Figure 3 draws it, with PRESC above 0 inferred, RM0351 34.4.9 reads "exceeds". A one-shot run
+  gives one such pulse, RM0351 34.4.9. With WAVE 1 it rises
+  once and keeps its level until ENABLE is written to 0, and a start after the first one is
+  discarded until then, RM0351 34.4.7, the software start reading inferred. CMP at or above ARR
+  keeps it inactive, inferred. WAVPOL inverts it at the CFGR write, also with ENABLE 0, RM0351
+  34.4.9. ENABLE written to 0 and LPTIMxRST drop it to the inactive level at the write, inferred.
+- The LPTIM counts on while the core is halted, whatever DBG_LPTIM1_STOP and DBG_LPTIM2_STOP
+  hold.
 - EXTI direct lines 32 and 33 stay Stop wake-up gates: the LPTIM raises LPTIM1_IRQn and
   LPTIM2_IRQn itself, and Stop is not modelled. ES0250 2.18.1 and 2.18.2, an LPTIM interrupt
   stuck at Stop entry or at a flag clear racing a new event, are outside the model.

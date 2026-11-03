@@ -1,5 +1,6 @@
 #include "factories.hpp"
 #include "model_base.hpp"
+#include "trigger_signal.hpp"
 
 #include <popcorn/core/clock.hpp>
 #include <popcorn/core/types.hpp>
@@ -11,6 +12,8 @@
 #include <format>
 #include <memory>
 #include <optional>
+#include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -29,7 +32,7 @@ constexpr std::uint32_t enable_bit      = 1u << 0;
 constexpr std::uint32_t single_start    = 1u << 1;
 constexpr std::uint32_t continuous_run  = 1u << 2;
 constexpr std::uint32_t tick_event      = 0;
-constexpr std::size_t   unmodelled_uses = 7;
+constexpr std::size_t   unmodelled_uses = 6;
 constexpr std::uint8_t  compare_loaded  = 1u << 0;
 constexpr std::uint8_t  reload_loaded   = 1u << 1;
 
@@ -48,6 +51,7 @@ enum class term : std::uint8_t
   compare,
   reload,
   wrap,
+  output,
 };
 
 struct lptim_state
@@ -67,6 +71,7 @@ struct lptim_state
   std::uint64_t paused_units{};
   std::uint64_t generation{};
   std::uint64_t queued{};
+  std::uint64_t out_ps{};
   std::uint32_t anchor_count{};
   std::uint32_t isr{};
   std::uint32_t armed{};
@@ -81,6 +86,10 @@ struct lptim_state
   std::uint8_t  paused_counting{};
   std::uint8_t  switch_single{};
   std::uint8_t  preloaded{};
+  std::uint8_t  out{};
+  std::uint8_t  polarity{};
+  std::uint8_t  latched{};
+  std::uint8_t  started_once{};
 
   friend auto operator==(lptim_state const&, lptim_state const&) -> bool = default;
 };
@@ -98,7 +107,6 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
      {"CFGR", "CKSEL", "CKSEL 1, the clock from input 1"},
      {"CFGR", "COUNTMODE", "COUNTMODE 1, the count of input 1 edges"},
      {"CFGR", "TIMOUT", "TIMOUT 1, the timeout restart"},
-     {"CFGR", "WAVE", "WAVE 1, the set-once mode"},
      {"CFGR", "ENC", "ENC 1, the encoder mode"},
      {"OR", "", "OR_0 or OR_1, the COMP1 and COMP2 inputs"},
      }
@@ -144,26 +152,42 @@ constexpr std::array<unmodelled_use, unmodelled_uses> unmodelled_table{
  *        CNTSTRT or SNGSTRT before the first reaches the counter replaces it, logs one
  *        model_warning and raises model_error under strict_peripherals, inferred. A start with
  *        a CFGR or OR function the model lacks, the external trigger, the external clock, the
- *        input count, the timeout, set-once, the encoder and the COMP inputs, logs once each and
- *        raises under strict_peripherals: the counter then counts the kernel clock.
+ *        input count, the timeout, the encoder and the COMP inputs, logs once each and raises
+ *        under strict_peripherals: the counter then counts the kernel clock.
  *        A kernel rate change keeps CNT, the kernel clocks already spent in the current tick or
  *        the start latency, and the kernel clocks left before each pending CMPOK, ARROK, match
  *        delay, mode switch and one-shot stop, inferred. A stopped kernel clock freezes all of
  *        them until it runs again, inferred. LPTIMxRST resets the registers and the state and
  *        withdraws the pending event.
+ *        The output drives the `<instance>_out` trigger signal, `lptim1_out` and `lptim2_out`, and
+ *        no pin. With WAVE 0 it rises one kernel clock after CNT reaches CMP and falls one kernel
+ *        clock after CNT reaches ARR, as ES0250 2.18.3 Figure 3 draws it, with PRESC above 0
+ *        inferred, RM0351 34.4.9 reads "exceeds". A one-shot run gives one such pulse, RM0351
+ *        34.4.9. With WAVE 1 it rises once and keeps its level until ENABLE is written to 0, and a
+ *        start after the first one is discarded until then, RM0351 34.4.7, the software start
+ *        reading inferred. CMP at or above ARR keeps it inactive, inferred. WAVPOL inverts it at
+ *        the CFGR write, also with ENABLE 0, RM0351 34.4.9. ENABLE written to 0 and LPTIMxRST drop
+ *        it to the inactive level at the write, inferred. A sink that starts listening sees the
+ *        edges from then on. After a snapshot restore the output asks the sinks again at its first
+ *        catch-up. The LPTIM counts on while the core is halted.
  *        Deviation: CNT reads exact, without the double-read rule of RM0351 34.7.8.
  */
 class lptim final : public dispatch_model<lptim, lptim_state>,
                     public clock_listener,
-                    public bus_reset_listener
+                    public bus_reset_listener,
+                    public trigger_source
 {
 public:
   lptim(model_context& ctx, peripheral_desc const& desc, lptim_variant const& variant);
 
-  void reset(register_file& regs, reset_kind kind) override;
-  void on_bus_reset() override;
-  void on_clock_change() override;
-  void on_event(std::uint32_t kind, std::uint64_t payload) override;
+  void               reset(register_file& regs, reset_kind kind) override;
+  void               load(std::span<std::byte const> in) override;
+  void               on_bus_reset() override;
+  void               on_clock_change() override;
+  void               interest_changed() override;
+  [[nodiscard]] auto produces(std::string_view signal) const -> bool override;
+  [[nodiscard]] auto level(std::string_view signal) const -> std::optional<bool> override;
+  void               on_event(std::uint32_t kind, std::uint64_t payload) override;
   auto on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
       -> std::expected<std::uint32_t, bus_error> override;
 
@@ -189,7 +213,11 @@ private:
   [[nodiscard]] auto ticks_at(std::uint64_t ps) const -> std::optional<std::uint64_t>;
   [[nodiscard]] auto count_at(std::uint64_t ps) const -> std::uint32_t;
   [[nodiscard]] auto ceil_ps(wide at) const -> std::uint64_t;
+  [[nodiscard]] auto ticks_to(std::uint32_t value) const -> std::uint64_t;
   [[nodiscard]] auto match_at(std::uint32_t value) const -> std::optional<wide>;
+  [[nodiscard]] auto wave() const -> bool;
+  [[nodiscard]] auto raw_at(std::uint64_t ps) const -> bool;
+  [[nodiscard]] auto out_due() const -> std::optional<std::uint64_t>;
   [[nodiscard]] auto match_due(std::uint32_t value, std::uint64_t held) const
       -> std::optional<std::uint64_t>;
   [[nodiscard]] auto next_term() const -> std::optional<due_term>;
@@ -212,6 +240,7 @@ private:
   void               reschedule();
   void               rebase(std::uint64_t ps, std::uint64_t hz);
   void               restore_reset_values();
+  void               sync_out(std::uint64_t ps);
 
   lptim_variant                     variant_;
   register_file&                    regs_;
@@ -224,13 +253,17 @@ private:
   reg_ref                           cnt_;
   field_ref                         prescaler_;
   field_ref                         preload_;
+  field_ref                         wave_;
+  field_ref                         polarity_;
   core::clock_domain                kernel_;
   irq_line*                         line_ = nullptr;
+  trigger_output                    out_;
   std::array<bool, unmodelled_uses> unmodelled_logged_{};
   std::array<bool, 3>               locked_logged_{};
   bool                              value_logged_   = false;
   bool                              pending_logged_ = false;
   bool                              switch_logged_  = false;
+  std::optional<bool>               listened_;
 };
 
 constexpr std::array<write_entry<lptim>, 8> lptim_writes{
@@ -253,8 +286,9 @@ lptim::lptim(model_context& ctx, peripheral_desc const& desc, lptim_variant cons
     : dispatch_model{ctx, desc, "LPTIM", lptim_writes}, variant_{variant}, regs_{ctx.regs},
       isr_{reg("ISR")}, ier_{reg("IER")}, cfgr_{reg("CFGR")}, cr_{reg("CR")}, cmp_{reg("CMP")},
       arr_{reg("ARR")}, cnt_{reg("CNT")}, prescaler_{field("CFGR", "PRESC")},
-      preload_{field("CFGR", "PRELOAD")}, kernel_{ctx.clock.domain(lower(desc.name))},
-      line_{&irq(desc.name + "_IRQn")}
+      preload_{field("CFGR", "PRELOAD")}, wave_{field("CFGR", "WAVE")},
+      polarity_{field("CFGR", "WAVPOL")}, kernel_{ctx.clock.domain(lower(desc.name))},
+      line_{&irq(desc.name + "_IRQn")}, out_{ctx.peers, lower(desc.name) + "_out"}
 {
   expect_register("OR", variant.option_register);
   expect_field("CFGR", "ENC", variant.encoder);
@@ -335,19 +369,24 @@ auto lptim::ceil_ps(wide at) const -> std::uint64_t
   return static_cast<std::uint64_t>((at + state_.hz - 1) / state_.hz);
 }
 
+auto lptim::ticks_to(std::uint32_t value) const -> std::uint64_t
+{
+  auto const from   = state_.anchor_count;
+  auto const period = std::uint64_t{state_.reload} + 1u;
+  return from <= state_.reload ? (value >= from ? value - from : period - from + value)
+                               : first_wrap() + value;
+}
+
 auto lptim::match_at(std::uint32_t value) const -> std::optional<wide>
 {
   if(state_.running == 0 or state_.hz == 0 or value > state_.reload)
   {
     return std::nullopt;
   }
-  auto const from   = state_.anchor_count;
-  auto const period = std::uint64_t{state_.reload} + 1u;
-  auto const first  = from <= state_.reload ? (value >= from ? value - from : period - from + value)
-                                            : first_wrap() + value;
-  auto const step   = wide{period} * tick_unit();
-  auto const floor  = wide{state_.floor_ps} * state_.hz;
-  auto       tick   = anchor() + wide{first} * tick_unit();
+  auto const first = ticks_to(value);
+  auto const step  = wide{std::uint64_t{state_.reload} + 1u} * tick_unit();
+  auto const floor = wide{state_.floor_ps} * state_.hz;
+  auto       tick  = anchor() + wide{first} * tick_unit();
   if(tick <= floor)
   {
     tick += ((floor - tick) / step + 1) * step;
@@ -370,6 +409,84 @@ auto lptim::match_due(std::uint32_t value, std::uint64_t held) const -> std::opt
     return held;
   }
   return due;
+}
+
+auto lptim::wave() const -> bool
+{
+  return get(regs_, wave_) != 0;
+}
+
+auto lptim::raw_at(std::uint64_t ps) const -> bool
+{
+  if(state_.latched != 0)
+  {
+    return true;
+  }
+  if(state_.running == 0)
+  {
+    return false;
+  }
+  if(state_.hz == 0)
+  {
+    return (state_.out ^ state_.polarity) != 0;
+  }
+  auto const at    = wide{ps} * state_.hz;
+  auto const delay = wide{variant_.event_delay_cycles} * ps_per_second;
+  if(at < anchor() + delay and state_.anchor_count == 0)
+  {
+    return false;
+  }
+  auto const count =
+      at < anchor() + delay
+          ? state_.anchor_count - 1
+          : position(static_cast<std::uint64_t>((at - delay - anchor()) / tick_unit()));
+  return state_.compare <= count and count < state_.reload;
+}
+
+auto lptim::out_due() const -> std::optional<std::uint64_t>
+{
+  if(state_.running == 0 or state_.latched != 0 or not(listened_.value_or(false) or wave()))
+  {
+    return std::nullopt;
+  }
+  auto const step  = wide{std::uint64_t{state_.reload} + 1u} * tick_unit();
+  auto const after = wide{state_.out_ps} * state_.hz;
+  auto       best  = std::optional<std::uint64_t>{};
+  for(auto const value : {state_.compare, state_.reload})
+  {
+    if(value > state_.reload)
+    {
+      continue;
+    }
+    auto at = anchor()
+            + wide{ticks_to(value)} * tick_unit()
+            + wide{variant_.event_delay_cycles} * ps_per_second;
+    if(at <= after)
+    {
+      at += ((after - at) / step + 1) * step;
+    }
+    best = std::min(best.value_or(ceil_ps(at)), ceil_ps(at));
+  }
+  return best;
+}
+
+void lptim::sync_out(std::uint64_t ps)
+{
+  auto const raw = raw_at(ps);
+  if(raw and wave() and state_.running != 0)
+  {
+    state_.latched = 1;
+  }
+  auto const level = static_cast<std::uint8_t>((raw ? 1u : 0u) ^ state_.polarity);
+  if(level != state_.out)
+  {
+    state_.out = level;
+    if(listened_.value_or(false))
+    {
+      out_.edge(level != 0 ? trigger_edge::rising : trigger_edge::falling, ps);
+    }
+  }
+  state_.out_ps = std::max(state_.out_ps, ps);
 }
 
 auto lptim::next_term() const -> std::optional<due_term>
@@ -403,6 +520,7 @@ auto lptim::next_term() const -> std::optional<due_term>
         term::wrap);
   }
   offer(state_.switch_due, term::mode_switch);
+  offer(out_due(), term::output);
   return best;
 }
 
@@ -443,6 +561,10 @@ void lptim::hold_in_flight(std::uint64_t ps)
 
 void lptim::apply(due_term const& next)
 {
+  if(next.which == term::output)
+  {
+    return;
+  }
   if(next.which == term::compare or next.which == term::reload)
   {
     raise_flag(next.which == term::compare ? compare_match : reload_match);
@@ -473,7 +595,10 @@ void lptim::apply(due_term const& next)
     }
     else
     {
-      begin(wide{next.due} * state_.hz, 0, state_.switch_single != 0);
+      if(not(wave() and state_.started_once != 0))
+      {
+        begin(wide{next.due} * state_.hz, 0, state_.switch_single != 0);
+      }
     }
     return;
   }
@@ -545,6 +670,8 @@ void lptim::reanchor(std::uint64_t ps, std::uint64_t ticks)
 
 void lptim::catch_up(std::uint64_t ps)
 {
+  auto const wanted = out_.wanted();
+  listened_         = listened_.value_or(wanted) and wanted;
   while(auto const next = next_term())
   {
     if(next->due > ps)
@@ -552,8 +679,11 @@ void lptim::catch_up(std::uint64_t ps)
       break;
     }
     apply(*next);
+    sync_out(next->due);
   }
   state_.settled_ps = std::max(state_.settled_ps, ps);
+  sync_out(ps);
+  listened_ = wanted;
 }
 
 auto lptim::preload() const -> bool
@@ -654,6 +784,7 @@ void lptim::refuse_unmodelled()
 
 void lptim::refresh()
 {
+  sync_out(now_ps());
   regs_.poke(isr_.offset, state_.isr);
   regs_.poke(cnt_.offset, count_at(now_ps()));
   if(state_.armed != 0)
@@ -686,11 +817,21 @@ void lptim::reset(register_file&, reset_kind)
   restore_reset_values();
 }
 
+void lptim::load(std::span<std::byte const> in)
+{
+  dispatch_model::load(in);
+  listened_.reset();
+}
+
 void lptim::on_bus_reset()
 {
   if(auto const seq = std::exchange(state_.queued, 0); seq != 0)
   {
     ctx_.events.cancel(seq - 1);
+  }
+  if(state_.out != 0 and out_.wanted())
+  {
+    out_.edge(trigger_edge::falling, now_ps());
   }
   restore_reset_values();
 }
@@ -780,6 +921,28 @@ void lptim::on_clock_change()
   reschedule();
 }
 
+void lptim::interest_changed()
+{
+  catch_up(now_ps());
+  refresh();
+  listened_ = out_.wanted();
+  reschedule();
+}
+
+auto lptim::produces(std::string_view signal) const -> bool
+{
+  return signal == out_.signal();
+}
+
+auto lptim::level(std::string_view signal) const -> std::optional<bool>
+{
+  if(signal != out_.signal())
+  {
+    return std::nullopt;
+  }
+  return (static_cast<std::uint8_t>(raw_at(now_ps()) ? 1u : 0u) ^ state_.polarity) != 0;
+}
+
 void lptim::plain_written(std::uint32_t, std::uint32_t)
 {}
 
@@ -795,6 +958,14 @@ void lptim::clear_written(std::uint32_t, std::uint32_t now)
 
 template <locked Which> void lptim::locked_written(std::uint32_t old, std::uint32_t now)
 {
+  if(Which == locked::configuration and not enabled())
+  {
+    catch_up(now_ps());
+    state_.polarity = static_cast<std::uint8_t>(get(regs_, polarity_));
+    refresh();
+    reschedule();
+    return;
+  }
   if(not enabled() or old == now)
   {
     return;
@@ -822,7 +993,9 @@ void lptim::control_written(std::uint32_t old, std::uint32_t now)
   }
   else if(was_on and not is_on)
   {
-    state_.switch_due = 0;
+    state_.switch_due   = 0;
+    state_.latched      = 0;
+    state_.started_once = 0;
     stop();
   }
   auto const starting = now & (single_start | continuous_run);
@@ -833,10 +1006,11 @@ void lptim::control_written(std::uint32_t old, std::uint32_t now)
     {
       switch_mode(t, single);
     }
-    else
+    else if(not(wave() and state_.started_once != 0))
     {
       refuse_unmodelled();
       start(t, single);
+      state_.started_once = 1;
     }
   }
   refresh();
@@ -877,8 +1051,13 @@ template <term Which> void lptim::value_written(std::uint32_t old, std::uint32_t
 auto lptim::on_read(register_file& regs, std::uint32_t offset, std::uint8_t size, access_ctx access)
     -> std::expected<std::uint32_t, bus_error>
 {
+  auto const listened = listened_;
   catch_up(now_ps());
   refresh();
+  if(listened_ != listened)
+  {
+    reschedule();
+  }
   return dispatch_model::on_read(regs, offset, size, access);
 }
 

@@ -1,4 +1,5 @@
 #include "stm32_fixture.hpp"
+#include "trigger_probe.hpp"
 
 #include <popcorn/core/errors.hpp>
 #include <popcorn/core/log.hpp>
@@ -31,6 +32,7 @@ using popcorn::vtime;
 using popcorn::testing::l476rc;
 using popcorn::testing::stm32_fixture;
 using popcorn::testing::sym;
+using popcorn::testing::trigger_probe;
 
 constexpr std::string_view firmware   = "l476_l4_rcc_ll";
 constexpr address          lptim1     = 0x4000'7C00;
@@ -58,6 +60,8 @@ constexpr std::uint32_t    enable     = 1u << 0;
 constexpr std::uint32_t    sngstrt    = 1u << 1;
 constexpr std::uint32_t    cntstrt    = 1u << 2;
 constexpr std::uint32_t    preload    = 1u << 22;
+constexpr std::uint32_t    wavpol     = 1u << 21;
+constexpr std::uint32_t    wave       = 1u << 20;
 constexpr std::uint32_t    lptim1_irq = 1u << (65 - 64);
 constexpr std::uint64_t    cycle      = 250'000;
 
@@ -69,18 +73,36 @@ constexpr auto presc(std::uint32_t value) -> std::uint32_t
 struct rig
 {
   std::unique_ptr<stm32_fixture> f;
+  trigger_probe*                 probe{};
   std::vector<core::log_record>  logged;
   core::hook_handle              sink;
 
   rig(rig const&)                    = delete;
   auto operator=(rig const&) -> rig& = delete;
 
-  explicit rig(bool strict = false, popcorn::part_description const& desc = l476rc())
+  explicit rig(
+      bool                             strict = false,
+      popcorn::part_description const& desc   = l476rc(),
+      bool                             listen = false)
   {
     auto options               = popcorn::testing::stm32_options();
     options.models             = stm32::factories(stm32::board{}, desc);
     options.strict_peripherals = strict;
+    if(listen)
+    {
+      options.models.insert_or_assign(
+          "DAC1", [](popcorn::periph::model_context& ctx, popcorn::peripheral_desc const&) {
+            return std::make_shared<trigger_probe>(ctx);
+          });
+    }
     f = std::make_unique<stm32_fixture>(desc, firmware, std::move(options));
+    if(listen)
+    {
+      probe = f->model_of<trigger_probe>("DAC1");
+      REQUIRE(probe != nullptr);
+      probe->watched = "lptim1_out";
+      probe->listen(true);
+    }
     f->set("pc", sym(firmware, "idle"));
     sink = f->target->add_log_sink(
         [this](core::log_record const& record) { logged.push_back(record); });
@@ -129,6 +151,13 @@ struct rig
     return std::ranges::count_if(logged, [&](core::log_record const& record) {
       return record.message.find(text) != std::string::npos;
     });
+  }
+
+  [[nodiscard]] auto out_level() const -> std::optional<bool>
+  {
+    auto* const source = dynamic_cast<stm32::trigger_source*>(f->target->model("LPTIM1"));
+    REQUIRE(source != nullptr);
+    return source->level("lptim1_out");
   }
 
   [[nodiscard]] auto saved() const -> std::vector<std::byte>
@@ -708,7 +737,6 @@ TEST_CASE("checklist 53: each CFGR and OR function the model lacks logs once, ra
           {cfgr,   1u << 0 },
           {cfgr,   1u << 23},
           {cfgr,   1u << 19},
-          {cfgr,   1u << 20},
           {cfgr,   1u << 24},
           {option, 1u << 0 }
   })
@@ -1054,5 +1082,172 @@ TEST_CASE(
   CHECK_THROWS_AS(
       static_cast<void>(strict.f->target->mem().write(lptim1 + cr, 4, enable | cntstrt)),
       popcorn::model_error);
+}
+
+TEST_CASE("ES0250 2.18.3: lptim1_out rises one kernel clock after CMP and falls after ARR")
+{
+  for(auto const scale : {1u, 2u})
+  {
+    CAPTURE(scale);
+    rig        r{false, l476rc(), true};
+    auto const t = r.started(2, 5, cntstrt, presc(scale == 1 ? 0 : 1));
+    auto const a = t + 3 * cycle;
+    auto const k = std::uint64_t{scale} * cycle;
+    r.idle_to(a + 12 * k + 2 * cycle);
+    CHECK(r.probe->pulses == std::vector{a + 2 * k + cycle, a + 8 * k + cycle});
+    CHECK(r.probe->falls == std::vector{a + 5 * k + cycle, a + 11 * k + cycle});
+  }
+}
+
+TEST_CASE("RM0351 34.4.9: WAVPOL inverts lptim1_out at once, also with ENABLE 0")
+{
+  rig        r{false, l476rc(), true};
+  auto const x = r.now_ps();
+  r.write(lptim1 + cfgr, wavpol);
+  CHECK(r.probe->pulses == std::vector{x});
+  CHECK(r.out_level() == true);
+  r.idle_to(x + 2 * cycle);
+  r.write(lptim1 + cfgr, 0);
+  CHECK(r.probe->falls == std::vector{x + 2 * cycle});
+  CHECK(r.out_level() == false);
+  r.probe->pulses.clear();
+  r.probe->falls.clear();
+  auto const t = r.started(2, 5, cntstrt, wavpol);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + 7 * cycle);
+  CHECK(r.probe->falls == std::vector{a + 3 * cycle});
+  CHECK(r.probe->pulses.size() == 2);
+  CHECK(r.probe->pulses.back() == a + 6 * cycle);
+}
+
+TEST_CASE(
+    "RM0351 34.4.9: one-pulse falls at ARR, set-once keeps its level and discards a restart, "
+    "the software restart inferred")
+{
+  for(auto const config : {0u, wave})
+  {
+    CAPTURE(config);
+    rig        r{false, l476rc(), true};
+    auto const t = r.started(2, 5, sngstrt, config);
+    auto const a = t + 3 * cycle;
+    r.idle_to(a + 20 * cycle);
+    CHECK(r.probe->pulses == std::vector{a + 3 * cycle});
+    CHECK(r.probe->falls.size() == (config == wave ? 0u : 1u));
+    CHECK(r.out_level() == (config == wave));
+    CHECK(r.read(lptim1 + cnt) == 0);
+    r.write(lptim1 + cr, enable | sngstrt);
+    r.idle_to(a + 25 * cycle);
+    CHECK(r.read(lptim1 + cnt) == (config == wave ? 0u : 2u));
+    r.idle_to(a + 30 * cycle);
+    CHECK(r.probe->pulses.size() == (config == wave ? 1u : 2u));
+    if(config == wave)
+    {
+      auto const x = r.now_ps();
+      r.write(lptim1 + cr, 0);
+      CHECK(r.probe->falls == std::vector{x});
+    }
+  }
+}
+
+TEST_CASE("inferred: set-once latches lptim1_out with no sink listening and CMPM already set")
+{
+  rig r;
+  static_cast<void>(r.started(2, 5));
+  r.idle_to(r.now_ps() + 20 * cycle);
+  REQUIRE((r.read(lptim1 + isr) & (cmpm | arrm)) == (cmpm | arrm));
+  r.write(lptim1 + cr, 0);
+  r.write(lptim1 + cfgr, wave);
+  r.write(lptim1 + cr, enable);
+  r.idle_to(r.now_ps() + 4 * cycle);
+  auto const t = r.now_ps();
+  r.write(lptim1 + cr, enable | sngstrt);
+  r.idle_to(t + 30 * cycle);
+  CHECK(r.out_level() == true);
+  CHECK(r.read(lptim1 + cnt) == 0);
+}
+
+TEST_CASE("inferred: ENABLE 0 drops lptim1_out at the write")
+{
+  rig        r{false, l476rc(), true};
+  auto const t = r.started(2, 5, cntstrt);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + 4 * cycle);
+  auto const x = r.now_ps();
+  r.write(lptim1 + cr, 0);
+  r.idle_to(x + 5 * cycle);
+  CHECK(r.read(lptim1 + cnt) == 0);
+  CHECK(r.probe->falls == std::vector{x});
+}
+
+TEST_CASE("inferred: an LPTIM1RST pulse drops a high lptim1_out at the write")
+{
+  rig        r{false, l476rc(), true};
+  auto const t = r.started(2, 5, cntstrt);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + 4 * cycle);
+  auto const x = r.now_ps();
+  r.write(apb1rstr1, 1u << 31);
+  r.write(apb1rstr1, 0);
+  CHECK(r.probe->falls == std::vector{x});
+  CHECK(r.out_level() == false);
+}
+
+TEST_CASE("each LPTIM drives its own output signal")
+{
+  rig r;
+  for(auto const& [unit, own, other] : {
+          std::tuple{"LPTIM1", "lptim1_out", "lptim2_out"},
+          std::tuple{"LPTIM2", "lptim2_out", "lptim1_out"},
+  })
+  {
+    CAPTURE(unit);
+    auto* const source = dynamic_cast<stm32::trigger_source*>(r.f->target->model(unit));
+    REQUIRE(source != nullptr);
+    CHECK(source->produces(own));
+    CHECK_FALSE(source->produces(other));
+  }
+}
+
+TEST_CASE("a sink that starts listening after a long span sees edges from then on only")
+{
+  rig r{false, l476rc(), true};
+  r.probe->listen(false);
+  auto const t = r.started(2, 5, cntstrt);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + 6000 * cycle + cycle);
+  r.probe->listening = true;
+  CHECK(r.read(lptim1 + cnt) == 1);
+  CHECK(r.probe->pulses.empty());
+  CHECK(r.probe->falls.empty());
+  r.idle_to(a + 6012 * cycle);
+  CHECK(r.probe->pulses == std::vector{a + 6003 * cycle, a + 6009 * cycle});
+  CHECK(r.probe->falls == std::vector{a + 6006 * cycle, a + 6012 * cycle});
+}
+
+TEST_CASE("a snapshot restored under a listening sink gives it the next lptim1_out edges")
+{
+  rig        r{false, l476rc(), true};
+  auto const t = r.started(2, 5, cntstrt);
+  auto const a = t + 3 * cycle;
+  r.idle_to(a + 4 * cycle);
+  auto const saved = r.f->target->snapshot();
+  rig        other{false, l476rc(), true};
+  other.probe->listen(false);
+  other.f->target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  other.probe->listening = true;
+  other.idle_to(a + 13 * cycle);
+  CHECK(other.probe->pulses == std::vector{a + 9 * cycle});
+  CHECK(other.probe->falls == std::vector{a + 6 * cycle, a + 12 * cycle});
+}
+
+TEST_CASE("inferred: CMP equal to ARR keeps lptim1_out inactive")
+{
+  rig        r{false, l476rc(), true};
+  auto const t = r.started(5, 5, cntstrt);
+  r.idle_to(t + 30 * cycle);
+  CHECK((r.read(lptim1 + isr) & (cmpm | arrm)) == (cmpm | arrm));
+  CHECK(r.probe->pulses.empty());
+  CHECK(r.out_level() == false);
 }
 }
