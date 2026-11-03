@@ -52,7 +52,8 @@ and U585 C packages and SPI4, UART8 and USART10 on the 64-pin STM32H5 parts are 
   store or fetch there stops the run with a bus fault.
 - The ICACHE remap of external memories onto the code region is not modelled. CRR0 to CRR3 store
   what the firmware writes and map nothing.
-- Parts that alias boot memory at address 0, such as the STM32F4 and STM32L4, are not modelled.
+- The STM32L1 and STM32L4 also map nothing at address 0, where silicon aliases the boot memory,
+  and VTOR resets to the flash base, so the core boots from the flash at its own address.
 
 ## Core faults
 
@@ -542,15 +543,15 @@ On the STM32L47x/L48x, RM0351 section 3:
   0x1FFFF808, each double word the word in its low half and its complement in its high half. The
   Unused fields hold the register's reserved bits and their complement, and the double word at
   0x1FFFF800 stays erased, inferred. The loaded `WRPxy_STRT` to `WRPxy_END` pages of bank x refuse a store,
-  a page erase and a bank erase with WRPERR. `RDP` sets the read protection below. The other option fields
-  and the PCROP words take no effect outside it. `RDERR` and `OPTVERR` stay 0.
+  a page erase and a bank erase with WRPERR. `RDP`, the PCROP words and `DUALBANK` act as below. The other option
+  fields take no effect. `OPTVERR` stays 0.
 - Read protection, RM0351 3.5.1: the loaded `RDP` gives level 0 for 0xAA, level 2 for 0xCC and
-  level 1 for any other value, from `FLASH_OPTR` alone, whatever the complement in the option byte
-  area holds. A debug
-  port access is an access through `m.mem.secure` or `m.mem.nonsecure`. At level 1 such an
-  access to the flash main memory, the OTP area or SRAM2 is a bus error, a `BusAccessError` in
-  Python, inferred for the OTP area and SRAM2 from RM0351 Table 15. The option bytes, the system memory, the other memory and the peripherals stay open.
-  At level 2 every such access is a bus error. `m.mem` and the CPU keep every access at every
+  level 1 for any other value, from `FLASH_OPTR` alone, whatever the complement in the option
+  byte area holds. A debug port access is an access through `m.mem.secure` or
+  `m.mem.nonsecure`. At level 1 such an access to the flash main memory, the OTP area or SRAM2
+  is a bus error, a `BusAccessError` in Python, inferred for the OTP area and SRAM2 from RM0351
+  Table 15. The option bytes, the system memory, the other memory and the peripherals stay
+  open. At level 2 every such access is a bus error. `m.mem` and the CPU keep every access at every
   level: the model runs the boot from flash user mode. The RTC backup registers stay open to the
   debug port at level 1.
 - At level 2 `OPTSTRT` sets `WRPERR`, programs nothing and puts the programmed words back in the
@@ -559,9 +560,29 @@ On the STM32L47x/L48x, RM0351 section 3:
   no BSY time, inferred. With `PCROP_RDP` set both banks are erased and the PCROP words program
   their production values. With `PCROP_RDP` clear, a bank with a PCROP area, `PCROPx_END` not
   below `PCROPx_STRT` (inferred), keeps the pages that hold part of the area and the PCROP words
-  keep their programmed values. The other bank is erased, inferred. The OTP area and the system memory
-  are kept. The other option words program as written. SRAM2 and the RTC backup registers
+  keep their programmed values. The other bank is erased, inferred. The OTP area and the
+  system memory are kept. The other option words program as written. SRAM2 and the RTC backup registers
   keep their content. The new level takes effect at the next option byte load.
+- PCROP, RM0351 3.5.2: the loaded `PCROPx_STRT` and `PCROPx_END` of each bank give an area
+  from STRT x 8 to (END + 1) x 8 in the bank. A CPU, DMA or debug port load from it reads 0 and
+  sets `RDERR`, 0 is inferred, and `RDERRIE` raises `FLASH_IRQn`, 3.6 Table 16. A debug port
+  store to it is dropped. A fetch from it runs. `m.mem` reads its content. A program of a
+  double word in it, an erase of a page holding part of it and the erase of its bank or of
+  both banks set `WRPERR`, the bank erase rule inferred. An `OPTSTRT` that clears or shrinks a
+  bank's area keeps that bank's two PCROP words and programs the rest, an `OPTSTRT` that grows
+  it programs it.
+- OTP, RM0351 3.3.1: a double word of 0x1FFF7000 to 0x1FFF73FF programs once with `PG`. A program
+  of a double word with any bit at 0 sets `PROGERR`, also with zeros, inferred flag. A store to
+  the rest of the information block, the option bytes and the signature, and a `FSTPG` store to
+  the OTP area, set `WRPERR`, inferred.
+- `DUALBANK`, RM0351 3.7.8: on a 256 KB or 512 KB part a loaded `DUALBANK` 0 makes the flash one
+  bank, pages 0 up to the flash size, `MER1` erases all of it. `BKER` 1 and `MER2` alone erase
+  nothing, log one warning per machine life and raise `model_error` under
+  `strict_peripherals`, inferred. The bank 2 WRP and PCROP words protect nothing then. On a 1 MB
+  part the flash is always two banks.
+- A debug port load of the bank under a fast row lets the row finish, and one of a torn double
+  word reads it with no `ECCD` and no NMI. The model sees CPU and DMA loads only, where RM0351
+  3.3.7 and 3.3.2 apply to every D-bus read.
 - ES0250 2.2.2: a PCROP area within one page is kept with its page at the regression, as
   RM0351 3.5.1 states, where the erratum leaves the bank unerased and the area unprotected.
 - ES0250 2.2.23: `OBL_LAUNCH` with MSI at 8 MHz or more logs one warning per machine life, a

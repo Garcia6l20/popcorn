@@ -1696,4 +1696,219 @@ TEST_CASE(
   CHECK(r.read("PCROP1ER") == 0x7fff'037fu);
   CHECK(r.f.field("FLASH", "OPTR", "RDP") == 0xaa);
 }
+
+constexpr std::uint32_t rderr    = 1u << 14;
+constexpr std::uint32_t rderrie  = 1u << 26;
+constexpr std::uint32_t progerr  = 1u << 3;
+constexpr address       pcrop_at = bank1_low + 0x1'0000;
+
+void program_pcrop1(rig const& r, std::uint32_t start, std::uint32_t end)
+{
+  r.unlock_options();
+  r.write("PCROP1SR", 0xffff'0000u | start);
+  r.write("PCROP1ER", 0xffff'0000u | end);
+  r.program_options();
+  r.load_options();
+}
+
+TEST_CASE(
+    "RM0351 3.5.2 and 3.6: a CPU or DAP load of a PCROP area reads 0 and sets RDERR, RDERRIE "
+    "raises FLASH_IRQn, a fetch from it runs, m.mem reads the data")
+{
+  rig r;
+  REQUIRE(r.f.target->mem().write(pcrop_at, 4, 0x1234'5678u).has_value());
+  REQUIRE(r.f.target->mem().write(pcrop_at + 0x100, 4, 0xbe01'202au).has_value());
+  REQUIRE(r.f.target->mem().write(pcrop_at + page_bytes, 4, 0xabcdu).has_value());
+  CHECK(r.load(pcrop_at).value == 0x1234'5678u);
+  program_pcrop1(r, 0x2000, 0x20ff);
+  CHECK(r.load(pcrop_at).value == 0u);
+  CHECK(r.status("RDERR") == 1);
+  CHECK(r.status("OPERR") == 0);
+  CHECK_FALSE(r.pending());
+  r.write("SR", rderr);
+  CHECK(r.status("RDERR") == 0);
+  CHECK(r.load(pcrop_at + page_bytes).value == 0xabcdu);
+  CHECK(r.status("RDERR") == 0);
+  r.control(rderrie);
+  CHECK(r.load(pcrop_at + 0x7fc).value == 0u);
+  CHECK(r.pending());
+  r.control(0);
+  r.write("SR", rderr);
+  for(auto const secure : {true, false})
+  {
+    CAPTURE(secure);
+    CHECK(r.f.target->mem(secure).read(pcrop_at, 4) == 0u);
+    CHECK(r.status("RDERR") == 1);
+    r.write("SR", rderr);
+  }
+  REQUIRE(r.f.target->mem(true).write(pcrop_at, 4, 0).has_value());
+  CHECK(r.f.target->mem().read(pcrop_at, 4) == 0x1234'5678u);
+  CHECK(r.status("RDERR") == 0);
+  r.f.set("r0", 0);
+  r.f.set("pc", (pcrop_at + 0x100) | 1u);
+  REQUIRE(r.f.run_to_stop({.max_instructions = icount{4}}).reason == stop_reason::user);
+  CHECK(r.f.target->regs().read(*r.f.target->regs().find("r0")) == 42);
+  CHECK(r.status("RDERR") == 0);
+  auto const saved = r.f.target->snapshot();
+  rig        fresh;
+  CHECK(fresh.load(pcrop_at).value == ~0u);
+  fresh.f.target->restore(
+      core::snapshot{core::decode_snapshot(core::encode_snapshot(saved.data()))});
+  CHECK(fresh.load(pcrop_at).value == 0u);
+}
+
+TEST_CASE(
+    "RM0351 3.5.2: a PCROP area refuses a program and the erase of its pages or bank with "
+    "WRPERR, a shrinking option change keeps it, inferred, a growing one programs")
+{
+  rig r;
+  REQUIRE(r.f.target->mem().write(pcrop_at, 4, 0x1234'5678u).has_value());
+  program_pcrop1(r, 0x2010, 0x20ff);
+  r.program(pcrop_at + 0x10, {1, 2});
+  CHECK((r.read("SR") & all_errors) == 0);
+  r.program(pcrop_at + 0x80, {1, 2});
+  CHECK((r.read("SR") & all_errors) == wrperr);
+  CHECK(r.words(pcrop_at + 0x80, 2) == erased(2));
+  r.clear_errors();
+  for(auto const erase : {per | pnb(32) | strt, mer1 | strt, mer1 | mer2 | strt})
+  {
+    CAPTURE(erase);
+    r.control(erase);
+    r.wait_idle();
+    CHECK((r.read("SR") & all_errors) == wrperr);
+    CHECK(r.word(pcrop_at + 0x10) == 1u);
+    r.clear_errors();
+  }
+  r.control(per | pnb(33) | strt);
+  r.wait_idle();
+  CHECK((r.read("SR") & all_errors) == 0);
+  r.erase_bank2();
+  r.unlock_options();
+  r.write("PCROP1SR", 0xffff'2020u);
+  r.program_options();
+  CHECK(r.word(0x1fff'7808) == 0xffff'2010u);
+  r.write("PCROP1ER", 0xffff'20f0u);
+  r.program_options();
+  CHECK(r.word(0x1fff'7810) == 0xffff'20ffu);
+  r.write("PCROP1SR", 0xffff'2000u);
+  r.write("PCROP1ER", 0xffff'2100u);
+  r.program_options();
+  CHECK(r.word(0x1fff'7808) == 0xffff'2000u);
+  CHECK(r.word(0x1fff'7810) == 0xffff'2100u);
+}
+
+TEST_CASE(
+    "RM0351 3.3.1: an OTP double word programs once, a second program sets PROGERR even with "
+    "zeros, a store to the rest of the information block sets WRPERR, inferred")
+{
+  rig r;
+  r.program(otp + 8, {0x11, 0x22});
+  CHECK((r.read("SR") & all_errors) == 0);
+  CHECK(r.words(otp + 8, 2) == std::vector<std::uint32_t>{0x11, 0x22});
+  r.program(otp + 8, {0, 0});
+  CHECK((r.read("SR") & all_errors) == progerr);
+  CHECK(r.words(otp + 8, 2) == std::vector<std::uint32_t>{0x11, 0x22});
+  r.clear_errors();
+  for(auto const at : {option1, address{0x1fff'7500}, address{otp + 0x400}, address{0x1fff'f808}})
+  {
+    CAPTURE(at);
+    auto const before = r.words(at, 2);
+    r.program(at, {0, 0});
+    CHECK((r.read("SR") & all_errors) == wrperr);
+    CHECK(r.words(at, 2) == before);
+    r.clear_errors();
+  }
+  r.control(fstpg);
+  r.store_words(otp + 0x10, {0x1, 0x2});
+  r.wait_idle();
+  CHECK((r.read("SR") & wrperr) == wrperr);
+  CHECK(r.words(otp + 0x10, 2) == erased(2));
+}
+
+TEST_CASE(
+    "RM0351 3.7.8: FLASH_OPTR.DUALBANK 0 makes the 256 KB flash one bank of 128 pages, a bank 2 "
+    "erase erases nothing, warns once, raises under strict_peripherals, inferred")
+{
+  for(auto const strict : {false, true})
+  {
+    CAPTURE(strict);
+    rig r{strict ? strict_options() : popcorn::testing::stm32_options()};
+    r.unlock_options();
+    r.write("OPTR", optr_production & ~(1u << 21));
+    r.program_options();
+    r.load_options();
+    REQUIRE(r.f.field("FLASH", "OPTR", "DUALBANK") == 0);
+    REQUIRE(r.f.target->mem().write(bank1_low + 100 * page_bytes, 4, 5).has_value());
+    REQUIRE(r.f.target->mem().write(bank2 + page_bytes, 4, 6).has_value());
+    REQUIRE(r.f.target->mem().write(bank2_last, 4, 7).has_value());
+    r.control(per | pnb(100) | strt);
+    r.wait_idle();
+    CHECK((r.read("SR") & all_errors) == 0);
+    CHECK(r.word(bank1_low + 100 * page_bytes) == ~0u);
+    for(auto const erase : {per | bker | pnb(1) | strt, mer2 | strt})
+    {
+      CAPTURE(erase);
+      if(strict)
+      {
+        auto const before = r.read("CR");
+        CHECK_THROWS_AS((void)r.try_write("CR", erase), popcorn::model_error);
+        CHECK(r.read("CR") == before);
+        CHECK(r.status("BSY") == 0);
+        continue;
+      }
+      r.control(erase);
+      r.wait_idle();
+      CHECK(r.word(bank2 + page_bytes) == 6u);
+      CHECK(r.warnings("CR") == 1);
+    }
+    if(strict)
+    {
+      continue;
+    }
+    r.control(per | pnb(127) | strt);
+    r.wait_idle();
+    CHECK(r.word(bank2_last) == ~0u);
+    constexpr address spin_at = 0x2000'8000;
+    REQUIRE(r.f.target->mem().write(spin_at, 2, 0xe7feu).has_value());
+    r.control(mer1 | strt);
+    r.f.set("pc", spin_at | 1u);
+    REQUIRE(
+        r.f.run_to_stop(
+               {.max_instructions = icount{10'000'000},
+                .until_time =
+                    popcorn::vtime{r.f.target->virtual_clock().time().ps + 30'000'000'000}})
+            .reason
+        == stop_reason::time);
+    CHECK(r.status("BSY") == 0);
+    CHECK((r.read("SR") & all_errors) == 0);
+    CHECK(r.word(bank1_low) == ~0u);
+    CHECK(r.word(bank2 + page_bytes) == ~0u);
+  }
+}
+
+TEST_CASE(
+    "popcorn deviation, services.hpp: a DAP load of the bank under a fast row lets the row "
+    "finish, a DAP load of a torn double word takes no NMI")
+{
+  rig r;
+  r.hclk_16mhz();
+  r.erase_bank2();
+  r.control(fstpg | eopie);
+  auto const start = r.f.target->virtual_clock().time().ps;
+  r.store_words(bank2, rig::row(0xc0));
+  r.idle_for_ps(
+      start + 3 * double_word_ps + double_word_ps / 2 - r.f.target->virtual_clock().time().ps);
+  REQUIRE(r.status("BSY") == 1);
+  CHECK(r.f.target->mem(true).read(bank2 + 1024, 4) == ~0u);
+  r.wait_idle();
+  CHECK(r.words(bank2, 64) == rig::row(0xc0));
+  CHECK(r.status("EOP") == 1);
+  CHECK(r.warnings("CR") == 0);
+  r.control(0);
+  constexpr address line = bank2 + 0x800;
+  r.tear(line);
+  CHECK(r.f.target->mem(true).read(line, 4).has_value());
+  CHECK(r.read("ECCR") == 0);
+  CHECK(r.load(line).nmi_count == 1);
+}
 }

@@ -173,9 +173,11 @@ enum class set_role : std::uint8_t
   fast_program,
   miss_error,
   fast_error,
+  read_error,
+  read_irq,
 };
 
-constexpr std::array<named_field<set_role>, 34> u5_set_fields{
+constexpr std::array<named_field<set_role>, 36> u5_set_fields{
     {
      {set_role::lock, {"CR", "LOCK"}},
      {set_role::program, {"CR", "PG"}},
@@ -211,10 +213,12 @@ constexpr std::array<named_field<set_role>, 34> u5_set_fields{
      {set_role::fast_program, {}},
      {set_role::miss_error, {}},
      {set_role::fast_error, {}},
+     {set_role::read_error, {}},
+     {set_role::read_irq, {}},
      }
 };
 
-constexpr std::array<named_field<set_role>, 34> h5_set_fields{
+constexpr std::array<named_field<set_role>, 36> h5_set_fields{
     {
      {set_role::lock, {"CR", "LOCK"}},
      {set_role::program, {"CR", "PG"}},
@@ -250,6 +254,8 @@ constexpr std::array<named_field<set_role>, 34> h5_set_fields{
      {set_role::fast_program, {}},
      {set_role::miss_error, {}},
      {set_role::fast_error, {}},
+     {set_role::read_error, {}},
+     {set_role::read_irq, {}},
      }
 };
 
@@ -511,19 +517,24 @@ private:
 };
 
 /**
- * @brief The debug lock of the STM32L4 read protection, installed by its FLASH model, RM0351
- *        3.5.1 and Table 15. At level 1 a DAP access, a filtered debugger access, to the flash
- *        main memory, the OTP area or a read protected region such as SRAM2 is a bus error. At
- *        level 2 the debug port is off and every DAP access is a bus error. CPU, DMA and
- *        unfiltered debugger accesses pass.
+ * @brief The read protection of the STM32L4 FLASH interface, installed by its model, RM0351
+ *        3.5.1, Table 15 and 3.5.2. At level 1 a DAP access, a filtered debugger access, to the
+ *        flash main memory, the OTP area or a read protected region such as SRAM2 is a bus
+ *        error. At level 2 the debug port is off and every DAP access is a bus error. A CPU,
+ *        DMA or DAP load of a PCROP area reads 0 and calls the read protection hook, a DAP
+ *        store to it is dropped, a fetch from it runs. CPU and DMA stores reach the FLASH
+ *        model, unfiltered debugger accesses pass.
  */
 class read_protection_filter final : public bus_firewall
 {
 public:
   read_protection_filter(
       std::vector<memory_extent>                     windows,
-      std::move_only_function<std::uint32_t() const> level)
-      : windows_{std::move(windows)}, level_{std::move(level)}
+      std::vector<memory_extent> const&              pcrop,
+      std::move_only_function<std::uint32_t() const> level,
+      std::move_only_function<void()>                read_protected)
+      : windows_{std::move(windows)}, pcrop_{pcrop}, level_{std::move(level)},
+        read_protected_{std::move(read_protected)}
   {}
 
   [[nodiscard]] auto check_peripheral(std::size_t, bus_attrs attrs, arch::memory_op)
@@ -537,12 +548,21 @@ public:
     return true;
   }
 
-  [[nodiscard]] auto check_memory(address at, std::uint8_t, bus_attrs attrs, arch::memory_op)
+  [[nodiscard]] auto
+      memory_page(address page, std::uint32_t size, address, bus_attrs, arch::memory_op)
+          -> page_verdict override
+  {
+    return {.filter_data = std::ranges::any_of(pcrop_, [&](memory_extent const& area) {
+              return area.first < std::uint64_t{page} + size and area.last >= page;
+            })};
+  }
+
+  [[nodiscard]] auto check_memory(address at, std::uint8_t, bus_attrs attrs, arch::memory_op op)
       -> bus_verdict override
   {
     if(not dap(attrs))
     {
-      return bus_verdict::allow;
+      return op == arch::memory_op::read ? pcrop_read(at) : bus_verdict::allow;
     }
     auto const level = level_();
     auto const locked =
@@ -550,7 +570,15 @@ public:
         or (level == 1 and std::ranges::any_of(windows_, [at](memory_extent const& window) {
               return at >= window.first and at <= window.last;
             }));
-    return locked ? bus_verdict::bus_error : bus_verdict::allow;
+    if(locked)
+    {
+      return bus_verdict::bus_error;
+    }
+    if(op == arch::memory_op::write)
+    {
+      return in_pcrop(at) ? bus_verdict::read_zero_write_ignore : bus_verdict::allow;
+    }
+    return pcrop_read(at);
   }
 
 private:
@@ -559,8 +587,26 @@ private:
     return attrs.by == initiator::debugger and attrs.filtered;
   }
 
+  [[nodiscard]] auto in_pcrop(address at) const -> bool
+  {
+    return std::ranges::any_of(
+        pcrop_, [at](memory_extent const& area) { return at >= area.first and at <= area.last; });
+  }
+
+  [[nodiscard]] auto pcrop_read(address at) -> bus_verdict
+  {
+    if(not in_pcrop(at))
+    {
+      return bus_verdict::allow;
+    }
+    read_protected_();
+    return bus_verdict::read_zero_write_ignore;
+  }
+
   std::vector<memory_extent>                     windows_;
+  std::vector<memory_extent> const&              pcrop_;
   std::move_only_function<std::uint32_t() const> level_;
+  std::move_only_function<void()>                read_protected_;
 };
 
 void drive(irq_line& line, bool level)
@@ -728,6 +774,10 @@ struct u5_flash
   static constexpr std::array<std::uint32_t, 0> option_area{};
   /** @brief No RDP debug lock and no regression erase. */
   static constexpr bool read_protection = false;
+  /** @brief Two banks on every flash size. */
+  static constexpr std::uint32_t single_bank_max = 0;
+  /** @brief No DUALBANK option bit. */
+  static constexpr std::uint32_t dual_bank_bit = 0;
   /** @brief The Secure hide protection area lies in a Secure watermark area, RM0456 7.5.3, so
    *         only a TrustZone machine closes it. */
   static constexpr bool hide_without_trustzone = false;
@@ -1100,6 +1150,10 @@ struct h5_flash
   static constexpr std::array<std::uint32_t, 0> option_area{};
   /** @brief No RDP debug lock and no regression erase. */
   static constexpr bool read_protection = false;
+  /** @brief Two banks on every flash size. */
+  static constexpr std::uint32_t single_bank_max = 0;
+  /** @brief No DUALBANK option bit. */
+  static constexpr std::uint32_t dual_bank_bit = 0;
   /** @brief HDPL closes the HDP areas with TZ_STATE 0xC3 too, RM0481 7.6.2 and Table 63, and
    *         Table 72 note 1. */
   static constexpr bool hide_without_trustzone = true;
@@ -1390,7 +1444,7 @@ static_assert(flag_matches_roles(
     {set_role::protection_irq, set_role::sequence_irq, set_role::strobe_irq,
      set_role::inconsistency_irq}));
 
-constexpr std::array<named_field<set_role>, 34> l4_set_fields{
+constexpr std::array<named_field<set_role>, 36> l4_set_fields{
     {
      {set_role::lock, {"CR", "LOCK"}},
      {set_role::program, {"CR", "PG"}},
@@ -1426,6 +1480,8 @@ constexpr std::array<named_field<set_role>, 34> l4_set_fields{
      {set_role::fast_program, {"CR", "FSTPG"}},
      {set_role::miss_error, {"SR", "MISERR"}},
      {set_role::fast_error, {"SR", "FASTERR"}},
+     {set_role::read_error, {"SR", "RDERR"}},
+     {set_role::read_irq, {"CR", "RDERRIE"}},
      }
 };
 
@@ -1452,6 +1508,10 @@ constexpr std::array<named_field<unit_role>, 19> l4_unit_fields{
      {unit_role::power_down, {"ACR", "RUN_PD"}},
      }
 };
+
+/** @brief RDERR with RDERRIE raises FLASH_IRQn, RM0351 3.6 Table 16. */
+constexpr std::array<error_enable, 1> l4_error_enables{
+    {{set_role::read_error, set_role::read_irq}}};
 
 /** @brief Highest HCLK of each LATENCY in voltage range 1 and range 2, RM0351 3.3.3 Table 11. */
 constexpr std::array<std::array<std::uint64_t, 5>, 2> l4_read_max_mhz{
@@ -1503,6 +1563,10 @@ struct l4_flash
   };
   /** @brief RDP locks DAP accesses and its level 1 to level 0 regression erases, RM0351 3.5.1. */
   static constexpr bool read_protection = true;
+  /** @brief Largest flash that FLASH_OPTR.DUALBANK 0 makes one bank, RM0351 3.7.8. */
+  static constexpr std::uint32_t single_bank_max = 512 * 1024;
+  /** @brief FLASH_OPTR.DUALBANK, RM0351 3.7.8. */
+  static constexpr std::uint32_t dual_bank_bit = 1u << 21;
   /** @brief The OTP area, RM0351 3.3.1 Table 10. */
   static constexpr memory_extent otp_area{.first = 0x1fff'7000, .last = 0x1fff'73ff};
   /** @brief Regions RDP level 1 locks besides the flash main memory and the OTP area, RM0351
@@ -1572,8 +1636,8 @@ struct l4_flash
   static constexpr std::string_view power_down_key_register = "PDKEYR";
   /** @brief Datasheet times of an empty flash_options field. */
   static constexpr flash_timing timing = l4_flash_timing;
-  /** @brief No per-error interrupt enable. */
-  static constexpr std::span<error_enable const> error_enables{};
+  /** @brief RDERR raises the interrupt with RDERRIE, RM0351 3.6 Table 16. */
+  static constexpr std::span<error_enable const> error_enables = l4_error_enables;
   /** @brief Bytes of one program, a double word, RM0351 3.3.7. */
   static constexpr std::uint32_t program_bytes = 8;
   /** @brief Bytes of the write buffer, one double word. */
@@ -1782,6 +1846,18 @@ static_assert(flag_matches_roles(
     l4_flash::per_error_irq,
     {set_role::protection_irq, set_role::sequence_irq, set_role::strobe_irq,
      set_role::inconsistency_irq}));
+static_assert(flag_matches_roles(
+    u5_set_fields,
+    u5_flash::read_protection,
+    {set_role::read_error, set_role::read_irq}));
+static_assert(flag_matches_roles(
+    h5_set_fields,
+    h5_flash::read_protection,
+    {set_role::read_error, set_role::read_irq}));
+static_assert(flag_matches_roles(
+    l4_set_fields,
+    l4_flash::read_protection,
+    {set_role::read_error, set_role::read_irq}));
 
 /**
  * @brief FLASH interface of the STM32U5, RM0456 section 7, and of the STM32H5, RM0481 section 7:
@@ -2043,7 +2119,7 @@ static_assert(flag_matches_roles(
  *   machine life for each rule, model_error under strict_peripherals. RM0351 sets PGSERR
  *   without the mass erase. The tracking from the last reset is inferred.
  * - Errors, 3.7.5: PROGERR, WRPERR, PGAERR, SIZERR and PGSERR as on the U5, OPERR with ERRIE.
- *   RDERR and OPTVERR stay 0.
+ *   OPTVERR stays 0.
  * - Power cut and ECC, 3.3.2 and 3.7.7: the U5 rules above per double word. A cut tears the
  *   double word in flight, its first 4 data bytes ANDed into the old bytes and its last 4 kept.
  *   ADDR_ECC is its byte offset in its bank, BK_ECC its bank. FLASH_ECCR keeps ADDR_ECC and
@@ -2082,6 +2158,17 @@ static_assert(flag_matches_roles(
  *   with no area erased whole (inferred), the PCROP words kept. It then calls every
  *   read_protection_listener peer for the SRAM2 and backup register erase. The new level loads
  *   at the next option byte load.
+ * - PCROP, 3.5.2: the loaded area of each bank, STRT x 8 to (END + 1) x 8. A CPU, DMA or DAP
+ *   load from it reads 0, inferred, and sets RDERR, which raises FLASH_IRQn with RDERRIE, 3.6.
+ *   A DAP store is dropped, a fetch runs. A program in it, an erase of a page holding part of
+ *   it and the erase of its bank set WRPERR, the bank rule inferred. An OPTSTRT that clears or
+ *   shrinks an area keeps that bank's PCROP words.
+ * - OTP, 3.3.1: a double word of the OTP area programs once, a later program sets PROGERR, also
+ *   with zeros, inferred flag. A store to the rest of the information block, and a FSTPG store
+ *   to the OTP area, set WRPERR, inferred.
+ * - DUALBANK, 3.7.8: on a part of 512 KB or less a loaded DUALBANK 0 makes one bank of the whole
+ *   flash. A bank 2 page erase or MER2 alone erases nothing, warns once and raises under
+ *   strict_peripherals, inferred.
  * - Timings default to DS10198 Rev 11 Table 63, l4_flash_timing.
  */
 template <typename Traits>
@@ -2233,6 +2320,7 @@ private:
   void               watch_row();
   void               abort_row();
   [[nodiscard]] auto banks() const -> bank_geometry;
+  [[nodiscard]] auto bank_count() const -> std::uint32_t;
   [[nodiscard]] auto bank_of(std::uint32_t at) const -> std::uint32_t;
   [[nodiscard]] auto bank_base(std::uint32_t at) const -> std::uint32_t;
   [[nodiscard]] auto bank_start(std::uint32_t bank) const -> std::uint32_t;
@@ -2256,19 +2344,23 @@ private:
   [[nodiscard]] auto option_mask(std::uint32_t offset) const -> std::uint32_t;
   void               warn_dropped_options();
   [[nodiscard]] auto wrp_protected(std::uint32_t from, std::uint32_t length) const -> bool;
+  [[nodiscard]] auto info_refused(std::uint32_t at, bool fast) const -> bool;
   [[nodiscard]] static auto loads_options(reset_kind kind) -> bool;
   void                      poke_wrp();
   void                      load_options();
   void                      program_options();
   void                      write_option_area();
   [[nodiscard]] auto        protection_level() const -> std::uint32_t;
+  void                      update_pcrop();
+  void                      read_protected();
   void                      regress(std::vector<std::uint32_t>& requested);
   void                      check_latency(std::string_view trigger);
   void                      check_row_clock();
   void                      check_row_erased(std::uint32_t at);
   void                      check_option_load_clock(std::uint32_t control, std::uint32_t old);
-  void                      check_programming_delay(std::string_view trigger);
-  [[nodiscard]] auto        active_range() const -> std::uint32_t;
+  void check_erase_bank(bool secure, std::uint32_t control, std::uint32_t old, std::uint32_t now);
+  void check_programming_delay(std::string_view trigger);
+  [[nodiscard]] auto active_range() const -> std::uint32_t;
 
   flash_options                                                     options_;
   flash_variant                                                     variant_;
@@ -2287,6 +2379,7 @@ private:
   access_ctx                                                        access_{};
   bool                                                              rejected_{};
   bool                                                              page_logged_{};
+  bool                                                              bank_logged_{};
   bool                                                              option_logged_{};
   bool                                                              power_down_logged_{};
   bool                                                              row_clock_logged_{};
@@ -2314,6 +2407,7 @@ private:
   mutable bool                                                      isolation_resolved_{};
   std::unique_ptr<hide_filter>                                      hide_filter_;
   std::unique_ptr<read_protection_filter>                           protection_filter_;
+  std::vector<memory_extent>                                        pcrop_extents_;
 };
 
 template <typename Traits>
@@ -2542,8 +2636,10 @@ flash_model<Traits>::flash_model(
              .last  = static_cast<address>(region.start + (region.size - 1u))});
       }
     }
+    update_pcrop();
     protection_filter_ = std::make_unique<read_protection_filter>(
-        std::move(windows), [this] { return protection_level(); });
+        std::move(windows), pcrop_extents_, [this] { return protection_level(); },
+        [this] { read_protected(); });
     ctx.install_firewall(*protection_filter_);
   }
   if(not options_.option_bytes)
@@ -2626,7 +2722,7 @@ auto flash_model<Traits>::make_set(std::size_t index) const -> register_set
       {set_role::end, set_role::operation_error, set_role::program_error,
        set_role::protection_error, set_role::alignment_error, set_role::size_error,
        set_role::sequence_error, set_role::strobe_error, set_role::inconsistency_error,
-       set_role::miss_error, set_role::fast_error})
+       set_role::miss_error, set_role::fast_error, set_role::read_error})
   {
     if(auto const found = fields.find(role))
     {
@@ -2897,6 +2993,7 @@ template <typename Traits> void flash_model<Traits>::reset(register_file& regs, 
   state_.torn           = std::move(torn);
   state_.wrp            = std::move(wrp);
   state_.wrp_active     = loads_options(kind) ? state_.wrp : std::move(wrp_active);
+  update_pcrop();
   option_changed_.clear();
   secure_ = {};
   close_row();
@@ -3058,6 +3155,12 @@ auto flash_model<Traits>::wrp_protected(std::uint32_t from, std::uint32_t length
   {
     return false;
   }
+  if(std::ranges::any_of(pcrop_extents_, [&](memory_extent const& area) {
+       return area.first < std::uint64_t{from} + length and area.last >= from;
+     }))
+  {
+    return true;
+  }
   auto const [base, size] = banks();
   for(auto at = from; at - from < length; at += Traits::page_bytes)
   {
@@ -3135,6 +3238,19 @@ template <typename Traits> void flash_model<Traits>::program_options()
     {
       regress(requested);
     }
+    else
+    {
+      for(std::uint32_t bank = 0; bank < 2; ++bank)
+      {
+        auto const old  = Traits::pcrop_area(state_.wrp, bank);
+        auto const next = Traits::pcrop_area(requested, bank);
+        if(old and (not next or next->first > old->first or next->second < old->second))
+        {
+          requested[1 + bank * 4] = state_.wrp[1 + bank * 4];
+          requested[2 + bank * 4] = state_.wrp[2 + bank * 4];
+        }
+      }
+    }
   }
   state_.wrp = std::move(requested);
   write_option_area();
@@ -3154,6 +3270,52 @@ template <typename Traits> auto flash_model<Traits>::protection_level() const ->
   return 0;
 }
 
+template <typename Traits>
+auto flash_model<Traits>::info_refused(std::uint32_t at, bool fast) const -> bool
+{
+  if constexpr(Traits::read_protection)
+  {
+    auto const main =
+        storage_ != nullptr and at >= storage_->start and at - storage_->start < storage_->size;
+    auto const otp = at >= Traits::otp_area.first and at <= Traits::otp_area.last;
+    return not main and (fast or not otp);
+  }
+  return false;
+}
+
+template <typename Traits> void flash_model<Traits>::update_pcrop()
+{
+  if constexpr(Traits::read_protection)
+  {
+    std::vector<memory_extent> next;
+    if(storage_ != nullptr and not state_.wrp_active.empty())
+    {
+      auto const size = banks().size;
+      for(std::uint32_t bank = 0; bank < bank_count(); ++bank)
+      {
+        auto const area = Traits::pcrop_area(state_.wrp_active, bank);
+        if(area and area->first < size)
+        {
+          auto const base = bank_start(bank);
+          next.push_back(
+              {.first = base + area->first, .last = base + std::min(area->second, size - 1)});
+        }
+      }
+    }
+    if(next != pcrop_extents_)
+    {
+      pcrop_extents_ = std::move(next);
+      ctx_.services.memory_policy_changed();
+    }
+  }
+}
+
+template <typename Traits> void flash_model<Traits>::read_protected()
+{
+  update(regs_, field_of(false, set_role::read_error), 1);
+  interrupt();
+}
+
 template <typename Traits> void flash_model<Traits>::regress(std::vector<std::uint32_t>& requested)
 {
   if constexpr(Traits::read_protection)
@@ -3161,7 +3323,7 @@ template <typename Traits> void flash_model<Traits>::regress(std::vector<std::ui
     auto const& loaded = state_.wrp_active;
     auto const  kept   = Traits::pcrop_kept(loaded);
     auto const  size   = banks().size;
-    for(std::uint32_t bank = 0; bank < 2; ++bank)
+    for(std::uint32_t bank = 0; bank < bank_count(); ++bank)
     {
       auto const base = bank_start(bank);
       auto const area = kept ? Traits::pcrop_area(loaded, bank) : std::nullopt;
@@ -3282,6 +3444,13 @@ auto flash_model<Traits>::refused(
   {
     return false;
   }
+  if constexpr(Traits::read_protection)
+  {
+    if(at >= Traits::otp_area.first and at <= Traits::otp_area.last)
+    {
+      return not all_of_byte(target, std::byte{0xff});
+    }
+  }
   for(std::size_t line = 0; line < data.size(); line += Traits::program_bytes)
   {
     auto const old       = target.subspan(line, Traits::program_bytes);
@@ -3386,7 +3555,23 @@ template <typename Traits> void flash_model<Traits>::sync_watches()
 template <typename Traits> auto flash_model<Traits>::banks() const -> bank_geometry
 {
   contract_assert(storage_ != nullptr);
-  return {.base = static_cast<std::uint32_t>(storage_->start), .size = storage_->size / 2};
+  return {
+      .base = static_cast<std::uint32_t>(storage_->start), .size = storage_->size / bank_count()};
+}
+
+template <typename Traits> auto flash_model<Traits>::bank_count() const -> std::uint32_t
+{
+  if constexpr(Traits::single_bank_max != 0)
+  {
+    if(storage_ != nullptr
+       and storage_->size <= Traits::single_bank_max
+       and not state_.wrp_active.empty()
+       and (state_.wrp_active.front() & Traits::dual_bank_bit) == 0)
+    {
+      return 1;
+    }
+  }
+  return 2;
 }
 
 template <typename Traits>
@@ -3878,7 +4063,8 @@ void flash_model<Traits>::store(held_store const& one, std::uint8_t attrs)
     }
   }
   if((pages_ruled() and not writable(addr, 1, secure, (attrs & held_privileged) != 0))
-     or wrp_protected(addr, 1))
+     or wrp_protected(addr, 1)
+     or info_refused(addr, fast))
   {
     fault(set_role::protection_error);
     return;
@@ -4063,6 +4249,11 @@ template <typename Traits> void flash_model<Traits>::start_erase(bool secure, st
   auto const command           = Traits::decode_erase(field);
   auto       target            = base;
   auto       length            = storage_->size;
+  if(command.op != operation::mass_erase and command.bank >= bank_count())
+  {
+    update(regs_, field_of(secure, set_role::start), 0);
+    return;
+  }
   if(command.op == operation::page_erase)
   {
     auto const pages = bank_size / Traits::page_bytes;
@@ -4321,6 +4512,32 @@ void flash_model<Traits>::check_option_load_clock(std::uint32_t control, std::ui
           Traits::option_load_clock, hz, Traits::option_load_clock_max));
 }
 
+template <typename Traits>
+void flash_model<Traits>::check_erase_bank(
+    bool          secure,
+    std::uint32_t control,
+    std::uint32_t old,
+    std::uint32_t now)
+{
+  if constexpr(Traits::single_bank_max != 0)
+  {
+    auto const command =
+        Traits::decode_erase([&](set_role role) { return value_of(secure, role, now); });
+    if(storage_ == nullptr or command.op == operation::mass_erase or command.bank < bank_count())
+    {
+      return;
+    }
+    if(ctx_.strict_peripherals)
+    {
+      regs_.poke(control, old);
+    }
+    this->warn_once_or_refuse(
+        bank_logged_, Traits::set_registers[set_index(secure)].control, control,
+        "an erase of bank 2 on a flash that FLASH_OPTR.DUALBANK 0 makes one bank: nothing is "
+        "erased");
+  }
+}
+
 template <typename Traits> void flash_model<Traits>::open_row(std::uint32_t at)
 {
   extension_.row_open = true;
@@ -4455,6 +4672,7 @@ template <typename Traits> void flash_model<Traits>::load(std::span<std::byte co
   latency_logged_.clear();
   delay_logged_.clear();
   sync_watches();
+  update_pcrop();
 }
 
 template <typename Traits> void flash_model<Traits>::on_clock_change()
@@ -4677,6 +4895,10 @@ void flash_model<Traits>::control_written(bool secure, std::uint32_t old, std::u
       now    = start.with(now, 1);
       launch = true;
     }
+  }
+  if(launch)
+  {
+    check_erase_bank(secure, control, old, now);
   }
   auto const load = unlocked and option_load_field and option_load_field->of(now) != 0;
   if(load and option_clock_)
